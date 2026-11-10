@@ -1,0 +1,154 @@
+###############################################################################
+# SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
+# SPDX-License-Identifier: MIT
+#
+# See LICENSE for license information.
+###############################################################################
+
+"""Read TraceLens ``analysis.json`` into hot-kernel candidate rows.
+
+TraceLens owns the parse/group/prose/impact/order/cap and writes a typed
+``compute_optimizations[]`` (``candidate_schema.ComputeTask``). This reader
+expands each task's ``members[]`` into one candidate per member, lifts the task
+scalars and TraceLens metrics verbatim (``gpu_pct := pct_e2e``), then resolves
+each device symbol through TraceLens' single ``resolve_kernel_source`` and stamps
+the resolution onto the row; TraceLens also owns the native-vs-Triton routing,
+so importing this module requires TraceLens. Host-only classification
+(patchability, backends, category, shapes) is applied afterwards by
+``tracelens_analysis`` over these rows.
+
+Ordering is TraceLens' already: tasks by descending summed member impact, members
+within a task by descending ``impact_score``. This reader preserves that order and
+does not regroup.
+"""
+
+from __future__ import annotations
+
+import json
+from pathlib import Path
+from typing import Any
+
+from hyperloom.common.tracelens_report import member_kernel_names, member_name, task_operation
+from hyperloom_common.coerce import first_str, to_float
+
+from TraceLens.TraceUtils.kernel_source import ResolveResult, resolve_kernel_source
+
+
+def load_report_tasks(analysis_json: str | Path) -> list[dict[str, Any]]:
+    """Read ``analysis.json`` into ordered hot-kernel candidate rows.
+
+    Expands every ``compute_optimizations[]`` task's ``members[]`` into one
+    candidate per member, carrying the task's operation/prose/impact and the
+    member's TraceLens metrics, then resolves each device symbol to its source
+    via TraceLens' ``resolve_kernel_source``. The returned rows are ready
+    for the host-only finalize pass; order matches TraceLens' emitted order.
+
+    Args:
+        analysis_json: Path to the ``analysis.json`` TraceLens wrote.
+
+    Returns:
+        Candidate rows in TraceLens' task/member order. Empty when the file is
+        absent, unreadable, or carries no ``compute_optimizations[]``.
+    """
+    path = Path(analysis_json)
+    try:
+        report = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return []
+    if not isinstance(report, dict):
+        return []
+    tasks = report.get("compute_optimizations")
+    if not isinstance(tasks, list):
+        return []
+
+    candidates: list[dict[str, Any]] = []
+    for task in tasks:
+        if not isinstance(task, dict):
+            continue
+        for member in task.get("members") or []:
+            if not isinstance(member, dict):
+                continue
+            candidate = _member_to_candidate(task, member)
+            _resolve_member_source(candidate)
+            candidates.append(candidate)
+    return candidates
+
+
+def _member_to_candidate(task: dict[str, Any], member: dict[str, Any]) -> dict[str, Any]:
+    """Build one candidate row from a task's scalars and a member's fields.
+
+    ``gpu_pct := pct_e2e``: the per-kernel %E2E is TraceLens' number, read
+    everywhere but never recomputed here.
+    """
+    kernel_names = member_kernel_names(member)
+    operation = task_operation(task)
+
+    pct_e2e = to_float(member.get("pct_e2e"))
+    time_ms = to_float(member.get("time_ms"))
+
+    candidate: dict[str, Any] = {
+        "name": member_name(task, member),
+        "duration_us": (time_ms or 0.0) * 1000.0,
+        "call_count": int(to_float(member.get("count"), 0.0)),
+        "gpu_pct": pct_e2e,
+        "device_kernel_name": kernel_names[0] if kernel_names else "",
+        "device_kernel_names": kernel_names,
+        "shapes": _shapes_with_dtypes(member.get("args_shapes"), member.get("args_datatypes")),
+        "library": first_str(member.get("library")),
+        "tracelens_category": first_str(member.get("category")),
+        "bound_type": first_str(member.get("bound")),
+        "flops_per_byte": to_float(member.get("flops_per_byte"), 0.0),
+        "efficiency_percent": to_float(member.get("efficiency_percent"), 0.0),
+        "efficiency_peak_value": to_float(member.get("efficiency_peak_value"), 0.0),
+        "efficiency_peak_unit": first_str(member.get("efficiency_peak_unit")),
+        "kernel_launcher_path": first_str(member.get("kernel_launcher_path")),
+        "impact_score": to_float(member.get("impact_score"), 0.0),
+        "tracelens_pitem_rank": int(to_float(task.get("priority"), 0.0)),
+        "tracelens_pitem_title": operation,
+        "identification": first_str(task.get("identification")),
+        "reasoning_for_slowdown": first_str(task.get("reasoning")),
+        "resolution": first_str(task.get("resolution")),
+    }
+    if candidate["shapes"]:
+        candidate["shape_provenance"] = "torch_trace"
+    return candidate
+
+
+def _resolve_member_source(candidate: dict[str, Any]) -> None:
+    """Resolve the candidate's primary device symbol through TraceLens.
+
+    One ``resolve_kernel_source`` call per symbol; the returned ``ResolveResult``
+    fields are read straight onto the candidate. No fallback: an unresolvable
+    symbol comes back with ``method="unresolved"`` and an empty ``source_file``,
+    which the host-only patchability gate then drops to ``skipped_kernels``.
+    """
+    symbol = str(candidate.get("device_kernel_name") or candidate.get("name") or "")
+    result: ResolveResult = resolve_kernel_source(
+        symbol,
+        kernel_file=str(candidate.get("kernel_launcher_path") or ""),
+        op_name=str(candidate.get("name") or ""),
+    )
+    location = result.location
+    candidate["source_file"] = location.source_file if location else ""
+    candidate["source_line"] = location.line if location else None
+    candidate["op_to_source_patchable"] = result.patchable
+    candidate["op_to_source_reason"] = result.reason
+    candidate["kernel_kind"] = result.kind
+    candidate["source_resolution_method"] = result.method
+
+
+def _shapes_with_dtypes(shapes: Any, dtypes: Any) -> list[str]:
+    """Fold ``args_shapes`` and ``args_datatypes`` into ``"(dims) dtype"`` strings.
+
+    TraceLens splits the operand dims and dtype into two parallel lists; the HL
+    pipeline reads the dtype back out of the shape string, so they are rejoined
+    here in the ``"(640,4096) bf16"`` form the shape consumers expect.
+    """
+    shape_list = list(shapes) if isinstance(shapes, list) else []
+    dtype_list = list(dtypes) if isinstance(dtypes, list) else []
+    out: list[str] = []
+    for i, shape in enumerate(shape_list):
+        dtype = str(dtype_list[i]).strip() if i < len(dtype_list) and dtype_list[i] is not None else ""
+        text = str(shape).strip()
+        out.append(f"{text} {dtype}".strip() if dtype else text)
+    return out

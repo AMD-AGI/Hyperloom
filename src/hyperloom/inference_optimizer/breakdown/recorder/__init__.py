@@ -3,9 +3,10 @@
 
 """Breakdown recorder: author-time capture of ``session_breakdown.json`` data.
 
-Producers record facts where they are born (see :func:`get_recorder`); the
-exporter assembles them at finalize (see :func:`assemble_parts`). Each section
-has a single owning producer, so there is no cross-producer write contention.
+Producers record facts where they are born (see :func:`.recorder.get_recorder`);
+the exporter assembles them at finalize (see :func:`assemble_parts`). Each
+section has a single owning producer, so there is no cross-producer write
+contention.
 
 The session is bound once, at startup, so no entry point below takes a path::
 
@@ -15,10 +16,10 @@ The session is bound once, at startup, so no entry point below takes a path::
 
 Write side::
 
-    from hyperloom.inference_optimizer.breakdown.recorder import get_recorder
+    from hyperloom.inference_optimizer.breakdown.recorder.recorder import get_recorder
 
-    rec = get_recorder(producer="sweep")
-    rec.record_singleton("sweep", sweep_payload)          # one final blob
+    rec = get_recorder(producer="coordinator")
+    rec.record_singleton("session", session_row)          # one final blob
 
 Read side::
 
@@ -42,151 +43,14 @@ the fields whose values it changed (see :mod:`.trace`).
 
 from __future__ import annotations
 
-from . import instrument
-from .assembler import (
-    BASELINE_EVENT_SECTIONS,
-    CONC_SWEEP_EVENT_SECTIONS,
-    ENABLEMENT_EVENT_SECTIONS,
-    EVENT_SECTIONS,
-    KERNEL_EVENT_SECTIONS,
-    PHASE_EVENT_SECTIONS,
-    STACK_EVENT_SECTIONS,
-    ROOFLINE_EVENT_SECTIONS,
-    assemble_parts,
-    baseline_event_parts,
-    close_steps,
-    conc_sweep_event_parts,
-    enablement_event_parts,
-    event_parts,
-    has_parts,
-    kernel_event_parts,
-    parts_dir,
-    phase_event_parts,
-    stack_event_parts,
-    roofline_event_parts,
-)
-from .close_out import (
-    record_close_artifacts,
-    record_close_opened,
-    record_close_settled,
-    record_close_step,
-    record_roofline_progress,
-)
-from .event_ids import EVENT_ID_SEPARATOR, EventId, event_id, fragment_key, parse_event_id
+from .assembler import assemble_parts, has_parts
 from .outcome_stage import record_stage_reached
-from .event_rows import (
-    EVENT_ID_FIELD,
-    SCOPE_FIELDS,
-    group_rows,
-    rows_for_event,
-    sort_rows,
-    wire_row,
-    wire_rows,
-)
-from .event_finalize import finalize_events
-from .event_sink import EventSink, RecordSink, make_sink
-from .event_timeline import (
-    EVENT_STATUS_INTERRUPTED,
-    EVENT_STATUS_RUNNING,
-    OPEN_EVENT_STATUSES,
-    RESIDUAL_NO_EVENT,
-    RESIDUAL_RUNNING,
-    TIMELINE_SEQUENCE_FIELD,
-    ResidualEvent,
-    build_envelope,
-    finish_event,
-    open_event,
-    residual_events,
-)
-from .trace import TRACE, TRACE_ENV, enable_trace, trace_enabled
-from .instrument import (
-    record_backend_versions_and_timeline,
-    snapshot_state_sections,
-)
-from .tool_versions import record_tool_version
-from .recorder import (
-    SECTION_SHAPES,
-    Recorder,
-    SectionShape,
-    get_recorder,
-    recorder_for,
-    section_shape,
-)
-from .session_metadata import (
-    record_metadata_identity,
-    record_metadata_langfuse,
-    snapshot_metadata,
-)
+from .session_metadata import record_metadata_identity, record_metadata_langfuse
 
 __all__ = [
-    "BASELINE_EVENT_SECTIONS",
-    "CONC_SWEEP_EVENT_SECTIONS",
-    "ENABLEMENT_EVENT_SECTIONS",
-    "EVENT_ID_FIELD",
-    "EVENT_ID_SEPARATOR",
-    "EVENT_STATUS_INTERRUPTED",
-    "EVENT_STATUS_RUNNING",
-    "EVENT_SECTIONS",
-    "KERNEL_EVENT_SECTIONS",
-    "PHASE_EVENT_SECTIONS",
-    "STACK_EVENT_SECTIONS",
-    "ROOFLINE_EVENT_SECTIONS",
-    "RESIDUAL_NO_EVENT",
-    "RESIDUAL_RUNNING",
-    "OPEN_EVENT_STATUSES",
-    "SCOPE_FIELDS",
-    "SECTION_SHAPES",
-    "TIMELINE_SEQUENCE_FIELD",
-    "EventId",
-    "EventSink",
-    "RecordSink",
-    "Recorder",
-    "ResidualEvent",
-    "SectionShape",
-    "TRACE",
-    "TRACE_ENV",
     "assemble_parts",
-    "baseline_event_parts",
-    "build_envelope",
-    "close_steps",
-    "conc_sweep_event_parts",
-    "enablement_event_parts",
-    "enable_trace",
-    "event_id",
-    "finalize_events",
-    "finish_event",
-    "fragment_key",
-    "get_recorder",
-    "group_rows",
     "has_parts",
-    "instrument",
-    "event_parts",
-    "kernel_event_parts",
-    "roofline_event_parts",
-    "make_sink",
-    "open_event",
-    "parse_event_id",
-    "parts_dir",
-    "phase_event_parts",
-    "stack_event_parts",
-    "record_close_artifacts",
-    "record_close_opened",
-    "record_close_settled",
-    "record_close_step",
-    "record_roofline_progress",
-    "record_stage_reached",
     "record_metadata_identity",
     "record_metadata_langfuse",
-    "record_backend_versions_and_timeline",
-    "record_tool_version",
-    "recorder_for",
-    "residual_events",
-    "rows_for_event",
-    "snapshot_metadata",
-    "snapshot_state_sections",
-    "section_shape",
-    "sort_rows",
-    "trace_enabled",
-    "wire_row",
-    "wire_rows",
+    "record_stage_reached",
 ]

@@ -7,9 +7,12 @@ from __future__ import annotations
 
 import asyncio
 import json
+import os
 import subprocess
 import sys
+import time
 from concurrent.futures import CancelledError
+from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import Mock
 
@@ -20,9 +23,13 @@ import pytest
 from hyperloom.orchestrator.actions.cancel_channel import CancelScope, use_cancel_scope
 from hyperloom.orchestrator.loop.sub_agent_runner import ExecutionCleanupUnconfirmed
 
+from hyperloom.common.agent_isolation import AccountIsolation
+from hyperloom.orchestrator.specialists import launch_env
 from hyperloom.orchestrator.specialists import subprocess_ as ss
+from hyperloom.orchestrator.specialists.launch_env import PreparedLaunch
 from hyperloom.orchestrator.specialists.subprocess_ import (
     SpecialistSubprocessDispatcher,
+    SpecialistSpawn,
 )
 
 
@@ -40,14 +47,15 @@ async def test_pre_cancelled_specialist_never_starts(monkeypatch, tmp_path, back
     monkeypatch.setattr(ss.subprocess, "Popen", local_spawn)
     with use_cancel_scope(scope), pytest.raises(CancelledError, match="session_stopped"):
         await dispatcher.run(
-            task_id="cancelled-specialist",
-            workspace=tmp_path,
-            worktree=None,
-            worktree_base=None,
-            system_prompt="system",
-            user_prompt="user",
-            max_turns=1,
-            gpu_lease=lease,
+            SpecialistSpawn(
+                task_id="cancelled-specialist",
+                workspace=tmp_path,
+                worktree=None,
+                worktree_base=None,
+                system_prompt="system",
+                user_prompt="user",
+                gpu_lease=lease,
+            )
         )
     local_spawn.assert_not_called()
     if lease is not None:
@@ -76,7 +84,7 @@ async def test_specialist_scope_cancel_stops_before_harvest(monkeypatch, tmp_pat
 
         def poll_started():
             entered.set()
-            return None
+            return
 
         lease.poll_started.side_effect = poll_started
         lease.close.return_value = confirmed_dead
@@ -108,14 +116,15 @@ async def test_specialist_scope_cancel_stops_before_harvest(monkeypatch, tmp_pat
         with use_cancel_scope(scope):
             run = asyncio.create_task(
                 dispatcher.run(
-                    task_id="running-specialist",
-                    workspace=tmp_path,
-                    worktree=None,
-                    worktree_base=None,
-                    system_prompt="system",
-                    user_prompt="user",
-                    max_turns=1,
-                    gpu_lease=lease,
+                    SpecialistSpawn(
+                        task_id="running-specialist",
+                        workspace=tmp_path,
+                        worktree=None,
+                        worktree_base=None,
+                        system_prompt="system",
+                        user_prompt="user",
+                        gpu_lease=lease,
+                    )
                 )
             )
         await asyncio.wait_for(entered.wait(), 3)
@@ -145,6 +154,114 @@ async def test_specialist_scope_cancel_stops_before_harvest(monkeypatch, tmp_pat
         if run is not None:
             run.cancel()
             await asyncio.gather(run, return_exceptions=True)
+
+
+class _SameUidRunAs:
+    """A demoted launch whose account is the test's own uid, so no privilege is needed to run it."""
+
+    user = "specialist"
+    uid = os.getuid()
+
+    def command(self, cmd):
+        return list(cmd)
+
+    def popen_kwargs(self):
+        return {}
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="procfs is Linux-only")
+@pytest.mark.skipif(os.getuid() == 0, reason="pid 1 has to belong to another uid")
+def test_demoted_reap_signals_only_pids_the_specialist_account_owns(monkeypatch):
+    """The account can write into the scan's stdout, so a pid it prints is believed only if that account owns it."""
+    from hyperloom.common.proctree import Tree
+
+    own = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(30)"])
+    roots: list[list[int]] = []
+    monkeypatch.setattr(launch_env, "LIST_MARKED_SCRIPT", f"echo 1; echo {own.pid}")
+    monkeypatch.setattr(ss, "collect_tree", lambda pids: roots.append(list(pids)) or Tree((), (), frozenset()))
+    monkeypatch.setattr(ss, "kill_tree", lambda tree: True)
+    try:
+        SpecialistSubprocessDispatcher._reap_marked("mark", PreparedLaunch(AccountIsolation(_SameUidRunAs())))
+    finally:
+        own.kill()
+        own.wait(timeout=5)
+    assert roots == [[own.pid]]
+
+
+@pytest.mark.asyncio
+@pytest.mark.skipif(sys.platform == "win32", reason="procfs is Linux-only")
+@pytest.mark.parametrize("demoted", [False, True], ids=["app_user", "demoted"])
+async def test_natural_exit_reaps_detached_descendant(monkeypatch, tmp_path, demoted):
+    """A heartbeat loop detached before the CLI exits does not outlive the specialist; another run's loop does."""
+    import os
+    import signal
+    import time
+    from hyperloom.common.proctree import running
+
+    pid_path = tmp_path / "heartbeat.pid"
+    child_code = (
+        "import pathlib, subprocess, sys\n"
+        f"pathlib.Path({str(pid_path)!r}).write_text(subprocess.run("
+        "['sh','-c','setsid nohup \"$0\" -c \"$1\" </dev/null >/dev/null 2>&1 & echo $!',"
+        "sys.executable,'import time; time.sleep(300)'],"
+        "capture_output=True,text=True,check=True).stdout.strip())\n"
+    )
+    real_popen = ss.subprocess.Popen
+
+    def spawn(cmd, *args, **kwargs):
+        if cmd != ["unused"]:
+            return real_popen(cmd, *args, **kwargs)
+        child = real_popen(
+            [sys.executable, "-c", child_code],
+            env=kwargs["env"],
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            start_new_session=True,
+        )
+        child.wait(timeout=5)
+        return child
+
+    monkeypatch.setattr(ss.subprocess, "Popen", spawn)
+    if demoted:
+        monkeypatch.setattr(ss, "resolve_launch_isolation", lambda lease: AccountIsolation(_SameUidRunAs()))
+        monkeypatch.setattr(launch_env, "_demote", lambda *args: {})
+        # The app's uid cannot read a demoted child's environ.
+        monkeypatch.setattr(launch_env, "marked_pids", lambda key, value: [])
+    dispatcher = SpecialistSubprocessDispatcher(
+        ss.SpecialistSubprocessConfig(agent_backend="claude", poll_interval_seconds=0.05)
+    )
+    monkeypatch.setattr(dispatcher, "_build_claude_cmd", lambda **kw: ["unused"])
+    monkeypatch.setattr(dispatcher, "_collect_patches", lambda *args, **kwargs: ([], {}))
+    bystander = real_popen(
+        [sys.executable, "-c", "import time; time.sleep(300)"],
+        env={**os.environ, "HYPERLOOM_REAP_MARK": "another-run"},
+        start_new_session=True,
+    )
+    heartbeat_pid = 0
+    try:
+        result = await dispatcher.run(
+            SpecialistSpawn(
+                task_id="detached-heartbeat",
+                workspace=tmp_path,
+                worktree=None,
+                worktree_base=None,
+                system_prompt="system",
+                user_prompt="user",
+            )
+        )
+        deadline = time.monotonic() + 5
+        while not pid_path.exists() and time.monotonic() < deadline:
+            time.sleep(0.05)
+        heartbeat_pid = int(pid_path.read_text())
+        assert result.exit_code == 0
+        assert running(heartbeat_pid) is False
+        assert running(bystander.pid) is True
+    finally:
+        if heartbeat_pid and running(heartbeat_pid):
+            os.kill(heartbeat_pid, signal.SIGKILL)
+        bystander.kill()
+        bystander.wait(timeout=5)
 
 
 def test_kill_exited_root_cannot_confirm_descendants(monkeypatch):
@@ -210,6 +327,39 @@ def test_kill_missing_process_identity_cannot_confirm_tree(monkeypatch):
     kill.assert_not_called()
 
 
+@pytest.mark.asyncio
+@pytest.mark.parametrize("ending", ["deadline", "silence"])
+async def test_reap_loop_kill_left_unconfirmed_raises_the_kills_error_carrying_the_decision(
+    monkeypatch, tmp_path, ending
+):
+    """A caller of the base class sees the kill's own message and group; the loop's decision rides on the raise."""
+
+    def doubt(proc):
+        raise ExecutionCleanupUnconfirmed(f"specialist pid={proc.pid}: tree cleanup unconfirmed", tree_pgid=proc.pid)
+
+    monkeypatch.setattr(SpecialistSubprocessDispatcher, "_kill", staticmethod(doubt))
+    monkeypatch.setattr(ss, "cli_alive", lambda *args, **kwargs: ending == "deadline")
+    dispatcher = SpecialistSubprocessDispatcher(
+        ss.SpecialistSubprocessConfig(
+            poll_interval_seconds=0.01, heartbeat_stale_seconds=0.0 if ending == "silence" else 300.0
+        )
+    )
+    proc = Mock(pid=4242, returncode=None)
+    proc.poll.return_value = None
+    with pytest.raises(ExecutionCleanupUnconfirmed, match=r"^specialist pid=4242: tree cleanup unconfirmed$") as caught:
+        await dispatcher._reap_loop(
+            proc,
+            ss.ReapWatch(workspace=tmp_path, done_files=()),
+            deadline=Deadline.after(0.0 if ending == "deadline" else 600.0),
+            started=time.monotonic(),
+        )
+    assert isinstance(caught.value, ss.ReapKillUnconfirmed)
+    assert caught.value.tree_pgid == 4242
+    outcome = caught.value.outcome
+    assert (outcome["timed_out"], outcome["stale_heartbeat"]) == (ending == "deadline", ending == "silence")
+    assert ("at its deadline" if ending == "deadline" else "heartbeat stale") in outcome["error"]
+
+
 @pytest.mark.parametrize("confirmed_dead", [True, False])
 def test_kill_ray_process_requires_cleanup_ack(confirmed_dead):
     lease = Mock()
@@ -265,6 +415,16 @@ async def test_ray_followup_ack_preserves_reap_outcome(monkeypatch, tmp_path, ph
         clock.now += 31.0
 
     monkeypatch.setattr(ss.asyncio, "sleep", advance)
+    real_create = ss.create_nofollow
+
+    def created_long_ago(base, rel):
+        """The launch's log, made fresh as the dispatcher makes it; this test's wall clock never moves, so it is dated
+        before it, as the empty log of a CLI that never wrote is once its heartbeat window has passed."""
+        handle = real_create(base, rel)
+        os.utime(Path(base, *rel), (0.0, 0.0))
+        return handle
+
+    monkeypatch.setattr(ss, "create_nofollow", created_long_ago)
     lease = Mock()
     lease.poll_started.return_value = 4242
     actor = SimpleNamespace(closed=False, alive=phase != "natural")
@@ -281,15 +441,16 @@ async def test_ray_followup_ack_preserves_reap_outcome(monkeypatch, tmp_path, ph
     filename = "specialist_done.json" if phase in {"done", "natural"} else "specialist_done.partial.json"
     (tmp_path / filename).write_text(json.dumps(payload), encoding="utf-8")
     result = await dispatcher.run(
-        task_id="ray-reap-outcome",
-        workspace=tmp_path,
-        worktree=None,
-        worktree_base=None,
-        system_prompt="system",
-        user_prompt="user",
-        max_turns=1,
-        gpu_lease=lease,
-        deadline=Deadline.after(0 if phase == "timeout" else 600, now=100),
+        SpecialistSpawn(
+            task_id="ray-reap-outcome",
+            workspace=tmp_path,
+            worktree=None,
+            worktree_base=None,
+            system_prompt="system",
+            user_prompt="user",
+            gpu_lease=lease,
+            deadline=Deadline.after(0 if phase == "timeout" else 600, now=100),
+        )
     )
     assert result.timed_out is (phase == "timeout")
     assert result.stale_heartbeat is (phase == "stale")

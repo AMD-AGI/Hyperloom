@@ -7,6 +7,8 @@ from __future__ import annotations
 
 from typing import Any
 
+from hyperloom.inference_optimizer.breakdown.recorder.baseline_event import ARGS_UNAVAILABLE
+
 __all__ = ["render_invocation_block"]
 
 
@@ -17,7 +19,7 @@ _ENVS_MAX_DISPLAY = 12
 #: What a source label means for a reader who wants the flags and did not get
 #: them. Only the labels that report an absence need one.
 _SOURCE_HINTS = {
-    "unknown": "  (extraction failed; try server.log or config yaml)",
+    ARGS_UNAVAILABLE: "  (extraction failed; try server.log or config yaml)",
     "unrecorded": "  (the measurement recorded no launch flags)",
 }
 

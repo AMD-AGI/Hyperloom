@@ -34,6 +34,8 @@ kernelforge gemm-tune run --model-path <M> --framework sglang \
     --precision <p> --output-dir <D> [options]
 kernelforge kernel-rewrite-controller --handoff-dir <H> \
     --budget-minutes <m> --output-dir <D>
+kernelforge roofline-ceiling --workspace <W> [options]
+kernelforge export-runs <LOG_ROOT>... --output <file>
 ```
 
 See {doc}`Experience store </kernelforge/reference/experience-store>` for the exact
@@ -78,8 +80,6 @@ and passing one alongside `--resume` is refused rather than silently ignored.
 | `--resume` | off | Continue the campaign already stored in that exact workspace. |
 | `--kernel <file>` | none | The kernel file to optimize. This is the anchor the loop edits. |
 | `--driver <file>` | none | The validation/bench driver. |
-| `--auto` | off | Pick the kernel here instead of being handed one. Requires `--nomination-input`, refuses `--kernel` and `--resume`, and makes the result carry a `patches` array plus nomination counts. Off by default, so a run without it is unchanged. |
-| `--nomination-input <file>` | `''` | Nomination request JSON: raw trace path, candidate list path, lane budget and target ceiling. Read only under `--auto`. |
 | `--git-branch <name>` | none | Development branch to optimize on, checked out before the campaign config is snapshotted. |
 | `--program-md-file <file>` | none | Optional task context copied into the campaign. |
 | `--invocation-spec-file <file>` | none | Hyperloom invocation-spec JSON used by task preparation. |
@@ -100,7 +100,7 @@ and passing one alongside `--resume` is refused rather than silently ignored.
 |:--|:--|:--|
 | `--max-hours <h>` | `1.0` | Runtime budget in hours; the loop is time-driven. Minimum `1.0`. A round is started only when what remains can finish it, so the run ends before the budget does. Above 2 hours this also enables Analysis profiling and, for single-lane rounds, Plan Critic review. |
 | `--deadline-unix <t>` | `0` | Absolute UNIX deadline shared by task preparation and optimization. |
-| `--session-timeout-sec <s>` | from `--max-hours` | Wall-clock budget for one implementer session. The claude backend cuts the session at this deadline and the session is told about it. |
+| `--session-timeout-sec <s>` | from `--max-hours` | Wall-clock budget for one implementer session. The claude backend cuts the session at this deadline and the session is told about it. Under `--roofline-ceiling on` it also bounds the ceiling analyst session. |
 | `--agent-timeout-sec <s>` | provider default | Timeout for one Agent session. |
 | `--profile-timeout-sec <s>` | `7200` | Ceiling for the single complete Analysis Agent session. Phase and case artifacts are persisted for resume when the deadline is reached. |
 
@@ -108,12 +108,14 @@ and passing one alongside `--resume` is refused rather than silently ignored.
 
 | Option | Default | Meaning |
 |:--|:--|:--|
-| `--gpu-target <arch>` | none | ROCm compilation architecture, e.g. `gfx950`. Also exported to the environment. |
-| `--gpu-type <sku>` | `mi355x` | Hardware SKU used in knowledge-base identities. |
+| `--gpu-target <arch>` | auto-detect | ROCm compilation architecture, e.g. `gfx950`. When omitted it is read from `GPU_TARGET`, then `rocminfo`, and the run refuses to start when neither names exactly one GPU. Also exported to the environment. |
+| `--gpu-type <sku>` | from the arch | Hardware SKU used in knowledge-base identities. When omitted it follows the resolved GPU arch (`gfx950` → `mi355x`, `gfx942` → `mi300x`). |
 | `--nproc-per-node <n>` | `1` | Ranks the driver self-launches via torchrun, for collective tasks such as all-reduce. Above 1, EVERY rank is profiled in its own rocprofv3 session — wrapping the driver would only profile the launcher process, which runs no kernel. |
 | `--bench-repeat <n>` | `1` | How many times each bench repeats its measurement in-process, reporting the per-case median. Above 1 shrinks run-to-run spread and requires a driver that accepts `--repeat`; the flag is omitted entirely when this is 1. |
 | `--aiter-cache-max-gb <g>` | `4.0` | Per-attempt AITER cache soft limit in GiB. LRU pruning targets 75% of the limit; `0` disables in-run pruning. |
 | `--profiling` / `--no-profiling` | on | Allow Analysis hardware profiling and Implementer self-profiling guidance on long-horizon runs (>2 hours). Shorter runs keep Analysis static-only regardless. `--no-profiling` disables collection for every duration. |
+| `--roofline-ceiling <on\|off>` | `off` | Whether the campaign has a per-shape theoretical achievable latency to measure its attainment against. `off` skips it entirely, including any report already sitting in the workspace. `on` estimates one on a fresh campaign once the baseline has fixed the scored case set and its per-case times, which costs a profiler pass and an analyst session, typically tens of minutes; on `--resume` it reuses the ceiling this campaign already estimated, so the target stays fixed for the campaign, and estimates again only when that report can no longer be read or no longer covers every scored case. While the campaign has a ceiling, every iteration logs the incumbent's mean attainment against it; the planner, its specialists and plan critic, and the supervisor receive each case's attainment, the mean, the target and how to read them; and the implementer receives the same standing as a table. Without one, none of it is injected anywhere. Session-scoped: pass it on every `--resume` that should keep the ceiling. |
+| `--roofline-target <fraction>` | `0.0` (off) | Stop the campaign once mean per-case attainment reaches this fraction of the estimated ceiling, e.g. `0.86`. Attainment is `ceiling / measured` per case, averaged with equal weight across scored cases — the same aggregate a KEEP is scored by. The gate fires only when every scored case has a figure: a case whose ceiling sits below its measured latency, or that the ceiling never answered, is excluded from the mean, and a mean over a subset is not the objective it claims to report. Requires a ceiling, and refuses a value above `1.0`. A ceiling is an estimate whose arithmetic nothing checks, so this is off by default — and it never enters the KEEP decision, which stays a measurement against the incumbent. |
 
 ### Rounds and lanes
 
@@ -130,13 +132,13 @@ and passing one alongside `--resume` is refused rather than silently ignored.
 
 | Option | Default | Meaning |
 |:--|:--|:--|
-| `--agent-backend <name>` | provider default | Registered local Agent provider for the Implementer. |
-| `--supervisor-backend <name>` | follows Implementer | Registered provider for the stalled-search (AVO) supervisor. Omit it so one `--agent-backend` controls every local agent. |
+| `--agent-backend <name>` | provider default | Registered local Agent provider; the model-relay primary of a new campaign. A resumed campaign refuses a different provider. |
+| `--supervisor-backend <name>` | follows the active Agent profile | Registered provider for the AVO supervisor, run at a model-relay blockage when no other Agent profile is available. Omit it so one `--agent-backend` controls every local agent. |
 | `--agent-cli <path>` | provider default | Provider executable path or command. |
-| `--model <name>` | provider default | Selected provider model. |
+| `--model <name>` | provider default | Model of the primary Agent profile for this session, on resume as well. |
 | `--agent-reasoning-effort <v>` | provider default | Provider reasoning effort value. |
 | `--agent-sandbox-mode <v>` | provider default | Provider sandbox mode. |
-| `--agent-fallback-provider <name>` | provider default | Fallback provider name, or `none` to refuse a fallback. |
+| `--agent-fallback-provider <name>` | provider default | Fallback provider name, or `none`. Under model relay it is the member a session prefers when the primary cannot run, and `none` refuses to start a session that has no profile to resume on any other member. |
 | `--agent-precheck` / `--no-agent-precheck` | on | Provider preflight and capability probe. |
 | `--agent-options-json <json>` | none | Provider extension options as a JSON object. |
 | `--permission-mode <v>` | provider default | Provider permission mode, where the provider supports one. |
@@ -147,9 +149,8 @@ and passing one alongside `--resume` is refused rather than silently ignored.
 |:--|:--|:--|
 | `--experience-kb` / `--no-experience-kb` | on | Read and publish forge-loop experience KB entries. Internal callers with their own KB lifecycle, such as `forge-rewrite-by-flydsl`, disable this explicitly. |
 | `--kb-warmstart` / `--no-kb-warmstart` | on | Apply the best matching KB solution before iteration 1. Only meaningful with `--experience-kb`. A caller that prepares the workspace itself, such as `forge-fuse`, turns this off to keep publishing while never replaying a stored patch over a tree it already staged. |
-| `--return-after-read-kb` / `--return-after-read-KB` | off | Return before iteration 1 when a KB solution applies cleanly, passes current correctness and improves current performance. |
 | `--producer <name>` | forge-loop's own | System owning the candidate stream these records belong to. A producer has its own index in the KB identity scheme, so a pipeline driving this command as a subprocess keeps its records out of the kernel campaigns' ranking. |
-| `--pr-kb` / `--no-pr-kb` | off | Inject upstream pull-request references from the PR Monitor co-hosted at `${KB_STORE_URL}/pr-monitor/v1`. Falls back to `PR_KB_ENABLE`. |
+| `--pr-kb` / `--no-pr-kb` | off | Inject upstream pull-request references from the PR Monitor co-hosted at `${KB_STORE_URL}/pr-monitor/v1`. Falls back to `PR_KB_ENABLE`. When the repository resolves and the Agent provider supports MCP, the Implementer also gets the `pr_monitor` tools: `pr_find_references`, `pr_get_reference` and `pr_get_file_patch` query the service, and `pr_check_inclusion` answers from local git alone whether a PR is already in a tree: `included` when a commit subject names it, otherwise `unknown`, because local history cannot show that a PR is absent. The check-prior-art contributor skill runs the same probe as `python -m kernelforge.knowledge.pr_knowledge.inclusion`, passing the PR's merge commit sha so that it also matches the PR's commits by sha or patch-id. |
 | `--experience-id <id>` | `''` | Unique KB run identity, independent of the checkpoint experiment ID. |
 
 ### Output
@@ -177,7 +178,7 @@ the same `__FORGE_RESULT__` contract as `forge-loop`.
 |:--|:--|:--|
 | `--source-kernel <file>` | required | The kernel to rewrite (a Triton `.py`, a `.hip`, …). |
 | `--driver <file>` | required | Rewrite measurement driver. A conforming driver is used unchanged. |
-| `--logical-op-name <name>` | required | Stable logical identity of the workload; a namespace or punctuation is allowed. The FlyDSL factory symbol is derived from it and reported in the result — never re-derive it downstream. `--op-name` is a deprecated alias. |
+| `--logical-op-name <name>` | required | Stable logical identity of the workload; a namespace or punctuation is allowed. The FlyDSL factory symbol is derived from it and reported in the result — never re-derive it downstream. |
 | `--workspace <dir>` | required | Git workspace directory. |
 | `--experiments-dir <dir>` | required | Where to write `forge_experiments`. |
 | `--source-entry <fn>` | auto | Host callable in the source that runs the kernel, used as the live oracle and baseline: `ref(x) -> y`. |
@@ -197,6 +198,7 @@ the same `__FORGE_RESULT__` contract as `forge-loop`.
 | `--deadline-unix <t>` | `0` | Absolute UNIX deadline for PORT, OPTIMIZE and apply-back finalization. |
 | `--max-port-attempts <n>` | `3` | Correctness-only port sessions before giving up. |
 | `--profile-timeout-sec <s>` | `3600` | OPTIMIZE: ceiling for the complete Analysis Agent workflow. |
+| `--roofline-ceiling <on\|off>` | `off` | OPTIMIZE: passed unchanged to the nested `forge-loop`, where it means what `forge-loop --roofline-ceiling` means. `on` estimates the kernel's per-shape theoretical achievable latency once the loop's baseline is measured and steers its planner by the attainment against it; the estimate's profiler pass and analyst session are paid out of the OPTIMIZE budget. |
 | `--snr-threshold <dB>` | `30.0` | Correctness gate for the ported kernel. |
 
 ### Apply-back
@@ -212,9 +214,9 @@ the same `__FORGE_RESULT__` contract as `forge-loop`.
 
 | Option | Default | Meaning |
 |:--|:--|:--|
-| `--gpu-target <arch>` | none | ROCm compilation architecture, e.g. `gfx950`. Also exported to the environment. |
-| `--gpu-type <sku>` | `mi355x` | Hardware SKU for rewrite KB identities. |
-| `--model <name>` | provider default | LLM model; overrides `CLAUDE_MODEL`/`CODEX_MODEL`. |
+| `--gpu-target <arch>` | auto-detect | ROCm compilation architecture, e.g. `gfx950`. When omitted it is read from `GPU_TARGET`, then `rocminfo`, and the rewrite refuses to start when neither names exactly one GPU. Also exported to the environment. |
+| `--gpu-type <sku>` | from the arch | Hardware SKU for rewrite KB identities. When omitted it follows the resolved GPU arch (`gfx950` → `mi355x`, `gfx942` → `mi300x`). |
+| `--model <name>` | provider default | LLM model; overrides `CLAUDE_MODEL`/`CODEX_MODEL`/`DSH_MODEL`. |
 | `--permission-mode <v>` | `acceptEdits` | Claude permission mode. |
 | `--supervisor-backend <name>` | `codex` | OPTIMIZE supervisor backend on stall: `codex` or `claude`. |
 | `--rewrite-kb` / `--no-rewrite-kb` | on | Read and publish rewrite recipes. |
@@ -264,11 +266,12 @@ without reaching an agent, so the selection can be checked before anything is sp
 | `--dry-run` | off | Diagnose and locate only; emit a manifest with a recipe skeleton, no authoring or validation. |
 | `--author` / `--no-author` | on | Author the fused kernel via the LLM. Non-dry-run only. |
 | `--fuse-all-confirmed` | off | Author ALL source-confirmed patterns together rather than only the top one, and A/B all their flags. A compile-pass candidate cannot be authored with them, so it is claimed alone and the rest wait for a later round. |
-| `--agent-backend <name>` | `auto` | `auto`, `claude` or `codex`, for discovery and authoring. |
+| `--agent-backend <name>` | `auto` | `auto`, `claude`, `codex` or `deepseek`, for discovery and authoring. `deepseek` is never chosen by `auto`: name it here or with `INFERENCE_OPTIMIZER_AGENT_BACKEND=deepseek`. |
 | `--agent-sandbox-mode <v>` | `workspace-write` | `workspace-write`, `read-only` or `bypass`. Use `bypass` only when an external sandbox already enforces isolation. |
-| `--model <name>` | provider default | Agent model. An explicit value wins; otherwise `$CODEX_MODEL` / `$CLAUDE_MODEL`, then the registered provider default. |
+| `--model <name>` | provider default | Agent model. An explicit value wins; otherwise `$CODEX_MODEL` / `$CLAUDE_MODEL` / `$DSH_MODEL`, then the registered provider default. |
 | `--max-turns <n>` | `100` | Max authoring turns. |
 | `--max-recipes <n>` | `0` | Cap how many ranked recipes to try. `0` means uncapped, so every discovered recipe is considered; Hyperloom passes the count its fusion lane budget pays for. |
+| `--deadline-unix <t>` | `0` | Absolute time the run must finish by. Recipes run one after another, so each recipe's forge-loop is handed its own `--deadline-unix`: an even share of the time left, less a closing reserve for the export and manifest. `0` leaves each loop its default budget; Hyperloom passes the end of its fusion lane budget. |
 | `--gpu <id>` | `0` | HIP device id for authoring and A/B. |
 | `--gpu-target <arch>` | auto-detect | Canonical GPU arch the author writes for, e.g. `gfx950`; detected via `rocminfo` when omitted. |
 
@@ -335,6 +338,7 @@ Shape sources, in descending priority — `--demand` wins, then
 | `--kernel-signature-log <file>` | `''` | Server log for 1-stage ASM detection. |
 | `--tokens <a,b>` | auto | Comma-separated explicit token list, overriding the automatic coverage. |
 | `--conc <n>` | `64` | Target serving concurrency, used for token coverage. |
+| `--m-grid bucket\|exact` | `bucket` | M the aiter dense (fp8/fp4) tuners tune the decode band and `--demand` rows at: aiter's multiple of 16 up to 256 and a power of two above (`bucket`), or the exact batch sizes (`exact`). The decode band takes sglang's graph batch sizes up to 64 and the powers of two above, up to `--conc`. The sglang bf16 tuner buckets its decode band and `--demand` rows the same way and does not read this flag. |
 | `--tp <n>` | `1` | Tensor-parallel degree. |
 
 Search and execution:
@@ -347,9 +351,9 @@ Search and execution:
 | `--iters <n>` | `80` | Benchmark iterations per config. |
 | `--warmup <n>` | `20` | Warmup iterations. |
 | `--min-improvement-pct <p>` | `3.0` | Minimum improvement threshold, in percent. |
-| `--timeout <s>` | `10800` | Per-tuner timeout. The first run includes JIT compilation. |
+| `--timeout <s>` | `10800` | Per-tuner timeout. The first run includes JIT compilation. The aiter dense and sglang bf16 tuners tune in chunks, each sized by the wall time the chunks before it took, until this deadline; a chunk killed at it loses only its own shapes. `FORGE_DEMAND_MAX_SHAPES` caps the shapes instead. |
 | `--global-timeout <s>` | `0` (unlimited) | Timeout for the entire session. |
-| `--mp <n>` | `1` | Number of GPUs for parallel tuning. |
+| `--mp <n>` | `0` | GPUs to tune on in parallel. `0` is every GPU the process can see: `--gpu-ids`, else the device mask (`ROCR_VISIBLE_DEVICES`, `HIP_VISIBLE_DEVICES`, `CUDA_VISIBLE_DEVICES`), else what torch counts. |
 | `--gpu-ids <a,b>` | all | Comma-separated GPU IDs to use. |
 | `--skip-gpu-check` | off | Skip the `rocm-smi` preflight check. |
 | `--kb-current-lib <v>` | `''` | Current backend `lib_version`, recorded as artifact provenance. |
@@ -385,3 +389,180 @@ and `plan` then consume as their highest-priority shape source.
 | `<logs...>` | required | One or more serving logs to read. |
 | `--out <file>` | stdout summary only | Write `demand.json` here. |
 | `--verbose` / `-v` | off | Verbose logging. |
+
+## roofline-ceiling
+
+Estimates the **theoretical achievable latency** of one kernel, for each scored
+test shape, on the accelerator it runs on. The answer is an optimistic lower
+bound under hardware limits and legal algorithm constraints; it does not claim
+an implementation reaching it exists.
+
+The command is self-contained: it collects its own evidence, runs its own
+analyst session, publishes `performance_ceiling.json` plus
+`performance_ceiling_analysis.md`, and shares no state with a campaign. No
+campaign reads what it publishes. Run it when you want the ceiling before
+committing a campaign's budget to the kernel.
+
+A campaign that wants a ceiling estimates its own, with `forge-loop
+--roofline-ceiling on`. That path is the cheaper one: the ceiling is derived
+once the baseline has already fixed the scored case set and measured each case
+over repeated runs, so it needs no discovery pass of its own and its sanity
+reference is the campaign's median rather than a single run.
+
+This command reports no attainment ratio. It has no baseline to divide by
+except a single run of the benchmark; a campaign measures its own attainment
+against its own per-case medians, taken over repeated runs of the kernel it is
+currently keeping. See `--roofline-target` under `forge-loop`.
+
+The estimate is an agent's, composition included, because no table covers MoE
+routing, paged attention, fusion legality or occupancy derating for an arbitrary
+operator, and a fixed composition rule makes the analyst distort its model to
+fit the rule. Each published report carries the analyst's own derivation —
+formulas, figures used and assumptions — because nothing recomputes the
+latencies and that document is the only record of how they were reached.
+
+The hardware figures are the analyst's too. It measures them on the box during
+its session — `rocprof-compute --roof-only` for the peaks and bandwidths, a
+graph-timed probe for the dispatch floor — and records what it established, and
+how, in the derivation. Nothing is cached and no measured figure is written to
+a shipped artifact: the roofs belong to the run that measured them.
+
+Recalled peaks are the fallback when no profiler can be reached, and the
+derivation has to say so. No card sustains its datasheet, and the shortfall is
+not a fixed discount: it differs from one instruction path to the next, so
+cases of different dtypes stop being comparable and attainment reads too low to
+reach a target. That is the safe direction to fail in — a campaign runs longer
+than it needed to rather than stopping with the work half done.
+
+The scored case set comes from the driver's own `case_ms:` lines, not from a
+configuration file, and cases the driver tags `unscored` get no ceiling.
+
+| Option | Default | Meaning |
+|:--|:--|:--|
+| `--workspace <dir>` | required | Kernel workspace to analyse. |
+| `--kernel <file>` | config.yaml `source_file_path` | Source file the analyst models; repeatable. |
+| `--driver <file>` | `''` | Measurement driver, passed to the analyst as context. |
+| `--config <file>` | `<W>/config.yaml` | Task configuration supplying `performance_command` and `source_file_path`. |
+| `--performance-command <cmd>` | config.yaml `performance_command` | Shell command that runs the timed benchmark. |
+| `--output-dir <dir>` | `<W>/forge_experiments/roofline_ceiling` | Where the report, the document and the evidence are published. |
+| `--arch <gfx>` | detected | Target architecture, e.g. `gfx950`. Detected via `rocminfo` when omitted; a marketing name such as `MI355X` is accepted. |
+| `--agent-provider <name>` | auto-selected | Agent provider for the analyst session. |
+| `--agent-model <name>` | provider default | Analyst model. |
+| `--agent-timeout-sec <s>` | `3600` | Wall-clock budget for the analyst session. |
+| `--agent-sandbox-mode <mode>` | `FORGE_AGENT_SANDBOX_MODE` | Provider sandbox mode for the analyst session, as for every other session; `read-only` is widened to `workspace-write` so the analyst can write its answer. |
+| `--run-timeout-sec <s>` | `1800` | Wall-clock budget for each measurement subprocess. |
+
+Two files are published. `performance_ceiling.json` is the answer and nothing
+else: `cases`, mapping each scored case id to its ideal latency in
+milliseconds, and `mean_ideal_ms`, the equal-weight mean across them — equal
+weight because that is how the campaign scores the suite.
+
+`performance_ceiling_analysis.md` beside it carries the derivation: the roofs
+the analyst measured and how, the per-case arithmetic, what bounds each shape,
+and every assumption. Nothing recomputes the latencies and nothing checks their
+arithmetic, so that document is the whole of what a reader has when deciding
+whether to believe them.
+
+Both files are written by the analyst itself, and the framework checks two
+things: that the JSON can be read as an answer — a non-empty `cases` object of
+finite positive latencies — and that the derivation exists and is not empty.
+Either failure is handed back once with the reason. A ceiling still missing a
+readable answer or its derivation after that is not published, so the command
+fails and a campaign runs without a ceiling. A pair that passes is taken as
+given.
+
+The session therefore runs with a shell and a writable sandbox, because
+reaching a profiler on an arbitrary image means installing packages and that is
+open-ended work code cannot enumerate. A pre-tool hook refuses edits outside
+the analyst's two directories, both outside the workspace: a scratch directory
+whose contents are moved under `--output-dir` when the session ends, and a
+tools directory that is deleted. The workspace guard treats the workspace as
+read-only: a change to any tracked file, or to the measurement surface -- the
+kernel sources and driver, and the configuration, harnesses, references and
+tests -- even where it is ignored, is rolled back to what the session found and the session rejected,
+through a shell or otherwise, so the campaign continues on the tree it had. So
+is any new file other than what running the kernel builds into ignored files
+and the profiler's own droppings. The guard snapshots only the protected files,
+so the campaign's JIT cache is neither read into memory nor counted against the
+session.
+
+What the analyst installs goes into a virtual environment in the tools
+directory, and rocprof-compute runs under that environment's interpreter while
+the profiled workload keeps the kernel's own. The role document forbids
+installing into the kernel's interpreter, the system Python or `/opt/rocm`: a
+package added or upgraded there after the baseline changes the environment
+every later measurement runs in, outlives the campaign, and is recorded
+nowhere. Only that instruction prevents it; the guard covers the workspace and
+nothing outside it.
+
+The session runs in the deployment's sandbox (`--agent-sandbox-mode`, or
+`FORGE_AGENT_SANDBOX_MODE`), like every other session, widened from `read-only`
+to `workspace-write` because the analyst writes its answer. A sandbox that hides
+the GPU device nodes leaves the profiler without a device; the derivation then
+says its roofs were recalled, attainment reads low, and a target is slower to
+fire.
+
+The evidence runs -- the case-discovery run on the standalone command and the
+kernel trace -- each run in their own process group, and a run past
+`--run-timeout-sec` is killed with everything it started, so a driver under a
+profiler or a shell cannot outlive its budget and hold the device.
+
+The result dict (`ideal_ms` per case, `mean_ideal_ms`, `report_path`) is
+printed to stdout wrapped in `__FORGE_ROOFLINE_CEILING_RESULT__` sentinels.
+
+## export-runs
+
+Writes the runs found under one or more directories as one JSON document,
+`{"runs": [...], "raw_logs": ["raw-logs-not-collected.log"]}`, for
+`hyperloom-kb-collect --mapping kernelforge-v1` (see
+{doc}`Experience collection </reference/experience-kb-collect>`), and an empty
+`raw-logs-not-collected.log` beside it. A run is a plain `forge-loop` run's
+`forge_experiments/` directory, which holds `campaign_config.json` and
+`run_state.json`. A directory that never wrote those two files is not a run
+this export reports. Each candidate the run archived
+(`candidates/iter_NNN/`) is one entry, so each lane of a fan-out round is an
+entry of its own. A record that exists but is not readable JSON, or a candidate
+whose `meta.json` is missing or malformed, is one entry saying why, which
+collection skips with that reason.
+
+An entry names the candidate's plan, the kernel KernelForge measured, and, when
+the candidate archived one, the diff of every file the commit touched
+(`candidates/iter_NNN/change.diff`). Its reasoning is the whole lesson
+`lessons/iter_NNN.md` or, for a single session that wrote none, the first three
+sentences of the rationale its `meta.json` records. A lane or a merge with
+neither has no reasoning. It holds the text of the `report.md` of the Analysis
+generation the candidate's planning round read, which its
+`orchestration/iter_NNN/context.json` names, and names that generation in its
+metadata. It carries the candidate's whole
+`meta.json` as its metadata, and the run's operator, the kernel name
+KernelForge files its KB records under, its framework, backend, GPU, and the
+benchmark driver's SHA-256 from `campaign_config.json`. The run's
+`forge-loop.log` gives the record KernelForge's own experience KB filed a kept
+candidate under; the log is only read, and no entry names it or records its path.
+
+A kept candidate's record is the one its own session printed. Each session
+prints `Experiment: <id>`, and the run's `events.jsonl` records that
+`experiment_id` on the `iteration_result` of every iteration the session
+measured. The id is new for each session, and `events.jsonl` moves with
+`forge_experiments`, so the record is found after the controller moves the
+archive out of the workspace and when two runs share one kernel file. No path
+is compared. A log whose experiment no exported run recorded, and two logs
+that disagree on one session's record, leave `kb_record` unset. The export
+stops with an error and writes nothing when it cannot list a directory under
+the log roots or read a file it needs, such as a JSON record, a plan, a
+lesson, or a log, naming that path.
+
+The document names the empty file, relative to itself, as the raw log of every
+Experience collected from it, and no run log goes with an Experience: the
+global KB refuses a complete Experience without raw logs, and KernelForge's run
+logs are not collected yet. Keep the file beside the document: collection reads
+that name from the document's directory and skips every candidate when the file
+is missing. The export empties any file of that name already there. A document
+without a top-level `raw_logs`, such as one an earlier `export-runs` wrote,
+gives Experiences the global KB refuses: export its runs again before
+collecting them.
+
+| Argument / option | Default | Meaning |
+|:--|:--|:--|
+| `LOG_ROOT...` | required | One or more directories to read runs from, in the order given. |
+| `--output <file>` / `-o` | required | Where to write the JSON document. The empty `raw-logs-not-collected.log` is written beside it. |

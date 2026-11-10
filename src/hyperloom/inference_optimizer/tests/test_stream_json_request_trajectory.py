@@ -86,7 +86,7 @@ def test_requests_land_on_the_trajectory_untimed_under_the_task(tmp_path):
     log = tmp_path / "process.log"
     _write_log(log, [_assistant("m1", output=4), _assistant("m2", output=6), _result(10)])
     with tt.trajectory_scope(session_dir=tmp_path, component="specialist", task_id="task-1", parent_span_id="task-1"):
-        assert re_.record_stream_json_requests(log) == 2
+        re_.record_stream_json_requests(log)
 
     rows = [r for r in tt.load_events(tmp_path) if r["event_type"] == tt.EVENT_LLM_REQUEST]
     assert [r["attributes"]["message_id"] for r in rows] == ["m1", "m2"]
@@ -99,7 +99,8 @@ def test_requests_land_on_the_trajectory_untimed_under_the_task(tmp_path):
 
 
 def test_recording_is_a_noop_outside_a_session_or_without_a_log(tmp_path):
-    assert re_.record_stream_json_requests(tmp_path / "missing.log") == 0
+    re_.record_stream_json_requests(tmp_path / "missing.log")
     log = tmp_path / "process.log"
     _write_log(log, [_assistant("m1", output=1)])
-    assert re_.record_stream_json_requests(log) == 0
+    re_.record_stream_json_requests(log)
+    assert tt.load_events(tmp_path) == []

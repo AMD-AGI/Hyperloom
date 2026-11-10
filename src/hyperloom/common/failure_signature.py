@@ -10,12 +10,31 @@ from collections.abc import Mapping
 from dataclasses import asdict, dataclass, replace
 from typing import Any, Callable, Pattern
 
+from hyperloom.common.outside_facts import (
+    ARGPARSE_INVALID_CHOICE,
+    ARGPARSE_UNRECOGNIZED_ARGUMENTS_RE,
+    HIP_ERROR_PREFIX,
+    HIP_NO_BINARY_FOR_GPU,
+    HIP_NO_KERNEL_IMAGE,
+    HIP_UNDEFINED_SYMBOL,
+    HSA_STATUS_ERROR,
+    PY_IMPORT_ERROR,
+    PY_MODULE_NOT_FOUND_ERROR,
+    TRANSFORMERS_DOES_NOT_RECOGNIZE,
+    TRANSFORMERS_UNKNOWN_ARCHITECTURE,
+    spaced,
+)
+
 
 # --- Failure kinds ---------------------------------------------------------
 
 MISSING_MODEL_ARCH = "missing_model_arch"
 UNSUPPORTED_DTYPE = "unsupported_dtype"
 HIP_KERNEL_MISSING = "hip_kernel_missing"
+# A HIP or HSA call that failed while the program ran: a kernel faulted on an out-of-bounds address (the ROCr queue abort
+# with an ``HSA_STATUS_ERROR_*`` status), a graph capture was invalidated, a launch failed. The kernel was there and ran, so there is nothing to build; the line the log prints names
+# the fault. Distinct from HIP_KERNEL_MISSING, whose evidence is a binary or a symbol that is absent.
+HIP_RUNTIME_ERROR = "hip_runtime_error"
 IMPORT_ERROR = "import_error"
 SHAPE_MISMATCH = "shape_mismatch"
 MISSING_WEIGHT = "missing_weight"
@@ -37,27 +56,6 @@ ACCURACY_BELOW_FLOOR = "accuracy_below_floor"
 EVAL_GENERATION_PATHOLOGY = "eval_generation_pathology"
 EVAL_RUNTIME_FAILURE = "eval_runtime_failure"
 UNKNOWN = "unknown"
-
-# Ordered most-specific to least-specific.
-FAILURE_KINDS: tuple[str, ...] = (
-    MISSING_MODEL_ARCH,
-    EVAL_GENERATION_PATHOLOGY,
-    ACCURACY_BELOW_FLOOR,
-    KERNEL_RESOURCE_LIMIT,
-    RESOURCE_CONSTRAINT,
-    HIP_KERNEL_MISSING,
-    UNSUPPORTED_DTYPE,
-    SHAPE_MISMATCH,
-    MISSING_WEIGHT,
-    NOT_IMPLEMENTED,
-    CAPABILITY_DISABLED,
-    TOKENIZER_ERROR,
-    SERVE_FLAG,
-    IMPORT_ERROR,
-    EVAL_RUNTIME_FAILURE,
-    UNKNOWN,
-)
-
 
 # --- Result model ----------------------------------------------------------
 
@@ -94,35 +92,6 @@ class FailureSignature:
         return replace(signature, secondary_kinds=tuple(signature.secondary_kinds))
 
 
-# --- CapabilityGap projection -----------------------------------------------
-
-
-@dataclass(frozen=True)
-class CapabilityGap:
-    """Thin overlay on FailureSignature exposing code-acquisition semantics."""
-
-    kind: str
-    bridge_layer: str = ""
-    requires_code_acquisition: bool = True
-
-    @classmethod
-    def from_signature(cls, sig: FailureSignature) -> "CapabilityGap":
-        """Project a :class:`FailureSignature` onto a :class:`CapabilityGap`."""
-        return cls(
-            kind=sig.kind,
-            bridge_layer=sig.bridge_layer,
-            requires_code_acquisition=(sig.kind != RESOURCE_CONSTRAINT),
-        )
-
-    def to_dict(self) -> dict[str, Any]:
-        """Serialize to a plain dict."""
-        return {
-            "kind": self.kind,
-            "bridge_layer": self.bridge_layer,
-            "requires_code_acquisition": self.requires_code_acquisition,
-        }
-
-
 # --- Rule table ------------------------------------------------------------
 
 
@@ -145,6 +114,13 @@ def _grp(match: re.Match[str]) -> str:
     return ""
 
 
+#: A fast path the framework reports switching off; also scanned on successful runs.
+CAPABILITY_DISABLED_PATTERNS: tuple[Pattern[str], ...] = (
+    re.compile(r"([A-Za-z_][A-Za-z0-9_]*_supported)\s*\(\s*\)\s*(?:returned|is|==)?\s*False"),
+    re.compile(r"falling back to (?:the\s+)?(?:naive|slow|reference) (?:path|implementation)"),
+    re.compile(r"disabled on (?:ROCm|HIP|AMD)"),
+)
+
 _RULES: tuple[_Rule, ...] = (
     _Rule(
         kind=MISSING_MODEL_ARCH,
@@ -155,8 +131,10 @@ _RULES: tuple[_Rule, ...] = (
             re.compile(r"[Aa]rchitectures?\s+\[?['\"]([A-Za-z0-9_]+)['\"].*?not\s+(?:yet\s+)?supported"),
             # Transformers/HF: a checkpoint whose ``model_type`` predates the installed transformers (or vLLM's
             # ModelConfig validation wrapping it).
-            re.compile(r"model type\s+[`'\"]?([A-Za-z0-9_]+)[`'\"]?\s+but\s+Transformers\s+does\s+not\s+recognize"),
-            re.compile(r"does\s+not\s+recognize\s+this\s+architecture"),
+            re.compile(
+                r"model type\s+[`'\"]?([A-Za-z0-9_]+)[`'\"]?\s+but\s+" + spaced(TRANSFORMERS_DOES_NOT_RECOGNIZE)
+            ),
+            re.compile(spaced(TRANSFORMERS_UNKNOWN_ARCHITECTURE)),
             re.compile(r"[Tt]he\s+checkpoint\s+.*?model\s+type\s+[`'\"]?([A-Za-z0-9_]+)[`'\"]?"),
         ),
         confidence=0.95,
@@ -182,12 +160,12 @@ _RULES: tuple[_Rule, ...] = (
     ),
     _Rule(
         # A kernel over the device's per-launch budget. Ordered ahead of both
-        # neighbours it would otherwise be swallowed by: the HIP rule matches
+        # neighbours it would otherwise be swallowed by: the HIP rules match
         # any ``hipError`` token, and ``hipErrorLaunchOutOfResources`` carries
         # exactly this text; the resource-constraint rule means the host is too
         # small and marks the gap as needing no code, while this is a launch
         # configuration in the source the enablement is editing. Rules are
-        # evaluated in list order, which ``FAILURE_KINDS`` does not govern.
+        # evaluated in list order.
         kind=KERNEL_RESOURCE_LIMIT,
         bridge_layer="rocm_hip",
         patterns=(
@@ -211,11 +189,24 @@ _RULES: tuple[_Rule, ...] = (
         kind=HIP_KERNEL_MISSING,
         bridge_layer="rocm_hip",
         patterns=(
-            re.compile(r"hipError[A-Za-z]*"),
-            re.compile(r"no kernel image is available"),
-            re.compile(r"hipErrorNoBinaryForGpu"),
-            re.compile(r"undefined symbol:\s*([A-Za-z0-9_:]+)"),
-            re.compile(r"HSA_STATUS_ERROR[A-Za-z_]*"),
+            re.compile(HIP_NO_KERNEL_IMAGE),
+            re.compile(HIP_NO_BINARY_FOR_GPU),
+            re.compile(HIP_UNDEFINED_SYMBOL + r":\s*([A-Za-z0-9_:]+)"),
+        ),
+        confidence=0.85,
+        symbol_from=_grp,
+    ),
+    _Rule(
+        # Every other ``hipError`` token (hipErrorIllegalAddress, hipErrorStreamCaptureInvalidated, ...) reports a call
+        # that failed, not a kernel that is absent. It shares the ``rocm_hip`` bridge layer with ``hip_kernel_missing``,
+        # so the ladder and the enablement rung route both alike. A failed HSA call is the same: the ROCr runtime's queue
+        # abort (``Callback: Queue 0x... aborting with error : HSA_STATUS_ERROR_MEMORY_APERTURE_VIOLATION``) is a GPU
+        # fault while a kernel ran, so the kernel was there.
+        kind=HIP_RUNTIME_ERROR,
+        bridge_layer="rocm_hip",
+        patterns=(
+            re.compile(HIP_ERROR_PREFIX + r"[A-Za-z]*"),
+            re.compile(r"(" + HSA_STATUS_ERROR + r"[A-Z_]*)"),
         ),
         confidence=0.85,
         symbol_from=_grp,
@@ -262,33 +253,24 @@ _RULES: tuple[_Rule, ...] = (
     _Rule(
         kind=NOT_IMPLEMENTED,
         bridge_layer="framework",
-        patterns=(
-            re.compile(r"NotImplementedError:?\s*(.*)"),
-            re.compile(r"raise\s+NotImplementedError"),
-        ),
+        patterns=(re.compile(r"NotImplementedError:?\s*(.*)"),),
         confidence=0.75,
         symbol_from=_grp,
     ),
     _Rule(
         kind=CAPABILITY_DISABLED,
         bridge_layer="framework",
-        patterns=(
-            re.compile(r"([A-Za-z_][A-Za-z0-9_]*_supported)\s*\(\s*\)\s*(?:returned|is|==)?\s*False"),
-            re.compile(r"falling back to (?:the\s+)?(?:naive|slow|reference) (?:path|implementation)"),
-            re.compile(r"disabled on (?:ROCm|HIP|AMD)"),
-        ),
+        patterns=CAPABILITY_DISABLED_PATTERNS,
         confidence=0.6,
         symbol_from=_grp,
     ),
     _Rule(
         # Resource constraints: OOM, insufficient GPU count, TP requirements. bridge_layer="" means no bridge repo is
-        # searched and CapabilityGap marks requires_code_acquisition=False — do not try to patch for these.
+        # searched and the gap needs no code acquisition — do not try to patch for these.
         kind=RESOURCE_CONSTRAINT,
         bridge_layer="",
         patterns=(
             re.compile(r"[Oo]ut\s+of\s+memory"),
-            re.compile(r"[Hh][Ii][Pp]\s+out\s+of\s+memory"),
-            re.compile(r"[Cc][Uu][Dd][Aa]\s+out\s+of\s+memory"),
             re.compile(r"no\s+GPU\s+memory\s+(?:for|left\s+for)\s+the\s+KV\s+[Cc]ache", re.IGNORECASE),
             re.compile(r"[Cc]annot\s+allocate\s+(?:memory|cuda|hip)"),
             re.compile(r"[Oo]ut[Oo]f[Mm]emory[Ee]rror"),
@@ -318,9 +300,9 @@ _RULES: tuple[_Rule, ...] = (
         kind=SERVE_FLAG,
         bridge_layer="framework",
         patterns=(
-            re.compile(r"unrecognized arguments?:\s*(-+[A-Za-z0-9_-]+)"),
+            re.compile(ARGPARSE_UNRECOGNIZED_ARGUMENTS_RE + r":\s*(-+[A-Za-z0-9_-]+)"),
             re.compile(r"error:\s+argument\s+(-+[A-Za-z0-9_-]+)"),
-            re.compile(r"invalid\s+choice.*?for.*?argument\s+(-+[A-Za-z0-9_-]+)"),
+            re.compile(spaced(ARGPARSE_INVALID_CHOICE) + r".*?for.*?argument\s+(-+[A-Za-z0-9_-]+)"),
             re.compile(r"([A-Za-z][A-Za-z0-9_-]+):\s+error:\s+unrecognized"),
         ),
         confidence=0.70,
@@ -330,8 +312,8 @@ _RULES: tuple[_Rule, ...] = (
         kind=IMPORT_ERROR,
         bridge_layer="build",
         patterns=(
-            re.compile(r"ModuleNotFoundError:\s*No module named\s+['\"]([A-Za-z0-9_.]+)['\"]"),
-            re.compile(r"ImportError:\s*(?:cannot import name\s+['\"]?([A-Za-z0-9_]+)['\"]?)?"),
+            re.compile(PY_MODULE_NOT_FOUND_ERROR + r":\s*No module named\s+['\"]([A-Za-z0-9_.]+)['\"]"),
+            re.compile(PY_IMPORT_ERROR + r":\s*(?:cannot import name\s+['\"]?([A-Za-z0-9_]+)['\"]?)?"),
         ),
         confidence=0.7,
         symbol_from=_grp,
@@ -385,11 +367,6 @@ class _RuleHit:
     rule: _Rule
     match: re.Match[str]
 
-    @property
-    def rule_index(self) -> int:
-        """Position of ``rule`` in :data:`_RULES` (lower == more specific)."""
-        return _RULES.index(self.rule)
-
 
 def _collect_hits(text: str) -> list[_RuleHit]:
     """Return the first matching pattern per rule, in :data:`_RULES` order."""
@@ -418,8 +395,8 @@ def classify_failure(log_text: str) -> FailureSignature:
             confidence=0.0,
         )
 
-    primary = min(hits, key=lambda h: (h.rule_index, h.match.start()))
-    secondary = tuple(h.rule.kind for h in sorted(hits, key=lambda h: h.rule_index) if h.rule.kind != primary.rule.kind)
+    primary = hits[0]
+    secondary = tuple(h.rule.kind for h in hits[1:])
 
     symbol = ""
     if primary.rule.symbol_from is not None:
@@ -438,38 +415,29 @@ def classify_failure(log_text: str) -> FailureSignature:
     )
 
 
+# --- Refused command line --------------------------------------------------
+
+#: ``<prog>: error: <message>``, the one shape argparse prints a refused command line in, with the messages argparse
+#: itself defines (``argparse.py``).
+_ARGPARSE_REFUSAL = re.compile(
+    r": error: (?:ambiguous option|" + ARGPARSE_UNRECOGNIZED_ARGUMENTS_RE + r"|the following arguments are required"
+    r"|argument \S+:|expected (?:one|at most one|at least one|\d+) arguments?|"
+    + ARGPARSE_INVALID_CHOICE
+    + r"|invalid \w+ value|ignored explicit argument|one of the arguments)"
+)
+#: A compiler's ``file.c:3:1: error: ...`` shares the ``: error:`` with argparse and names a source location first.
+_COMPILER_DIAGNOSTIC = re.compile(r":\d+(?::\d+)?: error:")
+
+
+def argparse_refusal(text: str) -> str | None:
+    """The last line in which a server's argument parser refused its own command line (an ambiguous or unknown flag)."""
+    for line in reversed(text.splitlines()):
+        if _ARGPARSE_REFUSAL.search(line) and not _COMPILER_DIAGNOSTIC.search(line):
+            return line.strip()
+    return None
+
+
 # --- Request model ---------------------------------------------------------
-
-
-@dataclass(frozen=True)
-class EnablementRequest:
-    """Top-level request describing a non-runnable ``(model, backend)`` combo."""
-
-    framework: str
-    model: str
-    repo_url: str
-    gpu_type: str = ""
-    max_search_candidates: int = 5
-
-    @classmethod
-    def from_dict(cls, raw: dict[str, Any]) -> "EnablementRequest":
-        """Parse a JSON payload into an :class:`EnablementRequest`."""
-        framework = str(raw.get("framework") or "").strip().lower()
-        if not framework:
-            raise ValueError("framework is required")
-        model = str(raw.get("model") or "").strip()
-        if not model:
-            raise ValueError("model is required")
-        repo_url = str(raw.get("repo_url") or "").strip()
-        if not repo_url:
-            raise ValueError("repo_url is required")
-        return cls(
-            framework=framework,
-            model=model,
-            repo_url=repo_url,
-            gpu_type=str(raw.get("gpu_type") or "").strip().lower(),
-            max_search_candidates=int(raw.get("max_search_candidates", 5)),
-        )
 
 
 # --- Runnable gate ---------------------------------------------------------
@@ -505,7 +473,7 @@ def runnable_decision(
 # Evidence that a dtype/capability miss is backed by a *compiled* op rather than pure-Python guard logic: a native
 # symbol, an .so/kernel/op reference, or a named compiled backend.
 _NATIVE_EVIDENCE_RE = re.compile(
-    r"undefined symbol|\.so\b|_C\b|aiter|sgl[_-]?kernel|hip[a-z]*kernel|"
+    HIP_UNDEFINED_SYMBOL + r"|\.so\b|_C\b|aiter|sgl[_-]?kernel|hip[a-z]*kernel|"
     r"\bkernel\b|custom[_ ]?op|torch\.ops|extension module|"
     r"\bfp4\b|\bfp8\b|marlin|cutlass",
     re.IGNORECASE,
@@ -517,8 +485,6 @@ def is_targeted_build_candidate(
     launch_log: str = "",
 ) -> bool:
     """Whether a residual gap is a *compiled* component miss."""
-    if signature is None:
-        return False
     if signature.bridge_layer in ("build", "rocm_hip"):
         return True
     if signature.kind == HIP_KERNEL_MISSING:
@@ -534,8 +500,8 @@ __all__ = [
     "CAPABILITY_DISABLED",
     "EVAL_GENERATION_PATHOLOGY",
     "EVAL_RUNTIME_FAILURE",
-    "FAILURE_KINDS",
     "HIP_KERNEL_MISSING",
+    "HIP_RUNTIME_ERROR",
     "IMPORT_ERROR",
     "MISSING_MODEL_ARCH",
     "MISSING_WEIGHT",
@@ -547,9 +513,8 @@ __all__ = [
     "TOKENIZER_ERROR",
     "UNKNOWN",
     "UNSUPPORTED_DTYPE",
-    "CapabilityGap",
-    "EnablementRequest",
     "FailureSignature",
+    "argparse_refusal",
     "classify_failure",
     "is_targeted_build_candidate",
     "runnable_decision",

@@ -5,17 +5,131 @@
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, Callable, cast
+
+from hyperloom.inference_optimizer.protocol.action_surfaces import ACTION_CATALOGUE
+
+if TYPE_CHECKING:
+    from hyperloom.orchestrator.bus.message_bus import MessageBus
+    from hyperloom.orchestrator.bus.resource_lock import SqliteLeaseBackend
+    from hyperloom.orchestrator.bus.storage.connection import SqliteConnection
+    from hyperloom.orchestrator.bus.gpu_pool import SpecialistGpuPool
+    from hyperloom.orchestrator.loop.sub_agent_runner import SubAgentRunner
+    from hyperloom.orchestrator.policy.gate import PolicyGate
+    from hyperloom.orchestrator.state.round_store import RoundStore
+    from hyperloom.orchestrator.state.shared_state import SharedState
+    from hyperloom.orchestrator.state.task_registry import TaskRegistry
+
+
+class OrchestrationPrompt:
+    """Owns the orchestration system-prompt overrides, rebuild closure, and snapshot writes."""
+
+    def __init__(
+        self,
+        overrides: dict[str, str],
+        *,
+        is_user_supplied: bool = False,
+        rebuild: Callable[..., str] | None = None,
+    ) -> None:
+        self.overrides: dict[str, str] = overrides
+        self.is_user_supplied: bool = is_user_supplied
+        self.rebuild: Callable[..., str] | None = rebuild
+
+    def get(self, agent_name: str) -> str | None:
+        """Return the override for *agent_name*, or None when absent."""
+        return self.overrides.get(agent_name)
+
+    def set(self, agent_name: str, prompt: str) -> None:
+        """Install a new prompt for *agent_name*."""
+        self.overrides[agent_name] = prompt
 
 
 class CoordinatorCollaborator:
-    """Base of every class ``Coordinator`` inherits.
+    """An object that borrows the Coordinator's infrastructure for its own methods."""
 
-    A collaborator's methods run with the Coordinator as ``self`` and use state and methods that
-    ``Coordinator.__init__`` and the other collaborators define. A type checker cannot see those
-    from one collaborator, so it is told that any other attribute exists.
-    """
+    # ``coordinator`` is the Coordinator, left unnamed: every collaborator in the orchestrator
+    # imports this module, so naming its owner's type points the package root back up into
+    # ``loop.coordinator`` and makes the whole ``loop`` package cyclic. The properties below
+    # restate the borrowed types for callers.
+    def __init__(self, coordinator: Any) -> None:
+        self._coord = coordinator
 
-    if TYPE_CHECKING:
+    # ------------------------------------------------------------------ #
+    # Persistent session state and core infrastructure                     #
+    # ------------------------------------------------------------------ #
 
-        def __getattr__(self, name: str) -> Any: ...
+    @property
+    def shared_state(self) -> "SharedState":
+        return cast("SharedState", self._coord.shared_state)
+
+    @property
+    def session_dir(self):
+        return self._coord.session_dir
+
+    @property
+    def tasks(self) -> "TaskRegistry":
+        return cast("TaskRegistry", self._coord.tasks)
+
+    @property
+    def bus(self) -> "MessageBus":
+        return cast("MessageBus", self._coord.bus)
+
+    @property
+    def locks(self) -> "SqliteLeaseBackend":
+        return cast("SqliteLeaseBackend", self._coord.locks)
+
+    @property
+    def db(self) -> "SqliteConnection":
+        return cast("SqliteConnection", self._coord.db)
+
+    @property
+    def sub(self) -> "SubAgentRunner":
+        return cast("SubAgentRunner", self._coord.sub)
+
+    @property
+    def rounds(self) -> "RoundStore":
+        return cast("RoundStore", self._coord.rounds)
+
+    @property
+    def policy(self) -> "PolicyGate":
+        return cast("PolicyGate", self._coord.policy)
+
+    @property
+    def gpu_specialist_pool(self) -> "SpecialistGpuPool":
+        return cast("SpecialistGpuPool", self._coord.gpu_specialist_pool)
+
+    @property
+    def framework_gpu_pool(self) -> "SpecialistGpuPool":
+        return cast("SpecialistGpuPool", self._coord.framework_gpu_pool)
+
+    @property
+    def knowledge_plane(self):
+        return self._coord.knowledge_plane
+
+    @property
+    def backends(self):
+        return self._coord.backends
+
+    @property
+    def state(self):
+        return self._coord.state
+
+    @property
+    def orch_prompt(self) -> "OrchestrationPrompt":
+        return cast("OrchestrationPrompt", self._coord.orch_prompt)
+
+    @property
+    def recipe_kb(self):
+        return self._coord.recipe_kb
+
+    @property
+    def role_registry(self):
+        return self._coord.role_registry
+
+    @property
+    def action_registry(self):
+        return ACTION_CATALOGUE
+
+    @property
+    def cursors(self):
+        return self._coord.cursors

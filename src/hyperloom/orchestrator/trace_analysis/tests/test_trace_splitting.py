@@ -1,0 +1,514 @@
+# SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
+# SPDX-License-Identifier: MIT
+
+"""Test that trace splitting works for both LLM inference and generic (scriptable) traces.
+
+Creates synthetic traces and runs the TraceLens splitter via the extracted
+functions in tracelens_analysis.py, verifying that:
+
+- LLM inference traces (vLLM/SGLang) produce three phase-specific chunks
+  (mixed, decode_only, prefilldecode) when --llm-inference is set.
+- Generic traces (xDiT/custom) produce a single steady_state chunk
+  when --steady-state-mode=generic is used.
+- _build_split_cmd correctly gates LLM-specific flags.
+- _collect_split_chunks correctly handles both LLM and generic chunk layouts.
+"""
+
+from __future__ import annotations
+
+import gzip
+import json
+from pathlib import Path
+from types import SimpleNamespace
+
+import pytest
+
+from hyperloom.orchestrator.trace_analysis import tracelens_analysis as tla
+from hyperloom.orchestrator.trace_analysis import _trace_split as trace_split
+
+
+def _make_vllm_trace(num_steps: int = 10, conc: int = 16) -> dict:
+    """Build a minimal vLLM-style trace with step annotations.
+
+    Each step has a user_annotation root, cpu_op events, and kernel events
+    with correlation IDs linking them.
+    """
+    events = []
+    ts = 1_000_000.0
+    corr_id = 1
+
+    for i in range(num_steps):
+        step_dur = 10_000.0
+        step_ts = ts + i * step_dur
+
+        # User annotation (iteration root)
+        events.append(
+            {
+                "ph": "X",
+                "cat": "user_annotation",
+                "name": f"execute_{conc}_context_0(sq0sk0sqsq0sqsk0)_generation_{conc}(sq{conc}sk{conc * 1000}sqsq{conc}sqsk{conc * 1000})",
+                "ts": step_ts,
+                "dur": step_dur,
+                "pid": 1,
+                "tid": 1,
+            }
+        )
+
+        # CPU ops with correlation IDs
+        for j in range(5):
+            op_ts = step_ts + j * 100
+            events.append(
+                {
+                    "ph": "X",
+                    "cat": "cpu_op",
+                    "name": "aten::mm",
+                    "ts": op_ts,
+                    "dur": 50.0,
+                    "pid": 1,
+                    "tid": 1,
+                    "args": {
+                        "correlation": corr_id,
+                        "Input Dims": [[conc, 4096], [4096, 4096]],
+                    },
+                }
+            )
+            # Corresponding kernel
+            events.append(
+                {
+                    "ph": "X",
+                    "cat": "kernel",
+                    "name": "void rocblas_gemm_kernel",
+                    "ts": op_ts + 10,
+                    "dur": 40.0,
+                    "pid": 1,
+                    "tid": 2,
+                    "args": {"correlation": corr_id},
+                }
+            )
+            corr_id += 1
+
+    return {"traceEvents": events}
+
+
+def _make_xdit_trace(num_steps: int = 6) -> dict:
+    """Build a minimal xDiT-style trace with repeating diffusion iterations.
+
+    No vLLM/SGLang step annotations — uses ProfilerStep markers that the
+    splitter's annotation detector recognises as iteration roots.
+    """
+    events = []
+    ts = 1_000_000.0
+    corr_id = 1
+
+    for i in range(num_steps):
+        step_dur = 50_000.0
+        step_ts = ts + i * step_dur
+
+        # ProfilerStep annotation — the splitter recognises these as roots
+        events.append(
+            {
+                "ph": "X",
+                "cat": "user_annotation",
+                "name": f"ProfilerStep#{i}",
+                "ts": step_ts,
+                "dur": step_dur,
+                "pid": 1,
+                "tid": 1,
+            }
+        )
+
+        # CPU ops + kernels inside each iteration
+        for j in range(8):
+            op_ts = step_ts + 1000 + j * 500
+            events.append(
+                {
+                    "ph": "X",
+                    "cat": "cpu_op",
+                    "name": "aten::mm",
+                    "ts": op_ts,
+                    "dur": 200.0,
+                    "pid": 1,
+                    "tid": 1,
+                    "args": {
+                        "correlation": corr_id,
+                        "Input Dims": [[256, 1024], [1024, 1024]],
+                    },
+                }
+            )
+            events.append(
+                {
+                    "ph": "X",
+                    "cat": "kernel",
+                    "name": "void rocblas_gemm_kernel",
+                    "ts": op_ts + 10,
+                    "dur": 180.0,
+                    "pid": 1,
+                    "tid": 2,
+                    "args": {"correlation": corr_id},
+                }
+            )
+            corr_id += 1
+
+    return {"traceEvents": events}
+
+
+def _write_trace(path: Path, trace: dict) -> None:
+    """Write a trace dict to a gzipped JSON file."""
+    with gzip.open(path, "wt", encoding="utf-8") as f:
+        json.dump(trace, f)
+
+
+class TestCollectSplitChunks:
+    """Verify _collect_split_chunks handles both LLM and generic chunk layouts."""
+
+    def _write_dummy_chunk(self, split_dir: Path, name: str) -> Path:
+        path = split_dir / name
+        with gzip.open(path, "wt") as f:
+            json.dump({"traceEvents": []}, f)
+        return path
+
+    def test_llm_mixed_mode(self, tmp_path):
+        split_dir = tmp_path / "split"
+        split_dir.mkdir()
+        self._write_dummy_chunk(split_dir, "mixed_steady_state_test.json.gz")
+        self._write_dummy_chunk(split_dir, "decode_only_steady_state_test.json.gz")
+        self._write_dummy_chunk(split_dir, "prefilldecode_steady_state_test.json.gz")
+
+        chunk, meta, mode_map = trace_split._collect_split_chunks(
+            split_dir,
+            "mixed",
+            tmp_path / "trace.json.gz",
+            [],
+        )
+        assert chunk.name == "mixed_steady_state_test.json.gz"
+        assert meta["chunks_by_mode"]["mixed"] == 1
+        assert meta["chunks_by_mode"]["decode_only"] == 1
+        assert meta["chunks_by_mode"]["prefilldecode"] == 1
+
+    def test_generic_mode(self, tmp_path):
+        split_dir = tmp_path / "split"
+        split_dir.mkdir()
+        self._write_dummy_chunk(split_dir, "steady_state_test.json.gz")
+
+        chunk, meta, mode_map = trace_split._collect_split_chunks(
+            split_dir,
+            "generic",
+            tmp_path / "trace.json.gz",
+            [],
+        )
+        assert chunk.name == "steady_state_test.json.gz"
+        assert meta["chunks_by_mode"]["generic"] == 1
+
+    def test_no_chunks_raises(self, tmp_path):
+        split_dir = tmp_path / "split"
+        split_dir.mkdir()
+        with pytest.raises(RuntimeError, match="trace_split_no_steady_state"):
+            trace_split._collect_split_chunks(
+                split_dir,
+                "mixed",
+                tmp_path / "trace.json.gz",
+                [],
+            )
+
+    def test_missing_mode_raises(self, tmp_path):
+        split_dir = tmp_path / "split"
+        split_dir.mkdir()
+        self._write_dummy_chunk(split_dir, "decode_only_steady_state_test.json.gz")
+
+        with pytest.raises(RuntimeError, match="steady_state_chunk_missing"):
+            trace_split._collect_split_chunks(
+                split_dir,
+                "mixed",
+                tmp_path / "trace.json.gz",
+                [],
+            )
+
+
+_UNKNOWN_FAMILY_MANIFEST = {
+    "status": 0,
+    "method": "family:unknown_only",
+    "phase_confidence": "unknown",
+    "n_roots": 40,
+    "root_family": "execute_context_<n>",
+    "root_family_known": False,
+}
+_KNOWN_ANNOTATION_MANIFEST = {
+    "status": 0,
+    "method": "annotation:tier",
+    "phase_confidence": "high",
+    "n_roots": 40,
+    "root_family": "execute_context_<n>",
+    "root_family_known": True,
+}
+
+
+class TestSplitManifest:
+    """Verify _run_trace_split reads the splitter's split_manifest.json."""
+
+    @staticmethod
+    def _split(tmp_path, monkeypatch, *, manifest, llm_inference, chunk_name):
+        split_dir = tmp_path / "split"
+        split_dir.mkdir()
+        with gzip.open(split_dir / chunk_name, "wt") as f:
+            json.dump({"traceEvents": []}, f)
+        if manifest is not None:
+            (split_dir / "split_manifest.json").write_text(json.dumps(manifest), encoding="utf-8")
+        monkeypatch.setattr(trace_split, "run_command", lambda *_a, **_kw: 0)
+        monkeypatch.setattr(trace_split, "_check_chunk_quality", lambda **_kw: None)
+        args = SimpleNamespace(
+            split_conc="",
+            split_osl="",
+            split_r="",
+            split_llm_inference=llm_inference,
+            split_num_steps=8,
+            steady_state_mode="mixed" if llm_inference else "generic",
+            budget_minutes=1,
+        )
+        warnings: list[dict] = []
+        _chunk, meta = trace_split._run_trace_split(
+            args, trace_split.TraceSplitJob(tmp_path / "trace.json.gz", split_dir, tmp_path), tmp_path / "log", warnings
+        )
+        return split_dir, meta, warnings
+
+    def test_llm_split_with_unconfirmed_phases_warns(self, tmp_path, monkeypatch):
+        split_dir, meta, warnings = self._split(
+            tmp_path,
+            monkeypatch,
+            manifest=_UNKNOWN_FAMILY_MANIFEST,
+            llm_inference=True,
+            chunk_name="mixed_steady_state_0.json.gz",
+        )
+
+        assert warnings == [
+            {
+                "code": "trace_split_phase_unconfirmed",
+                "severity": "warning",
+                "phase_confidence": "unknown",
+                "method": "family:unknown_only",
+                "root_family": "execute_context_<n>",
+                "split_dir": str(split_dir),
+                "message": (
+                    "TraceLens splitter rated its phase labels 'unknown' (method family:unknown_only); "
+                    "the phase chunks may not hold the phases they are named for."
+                ),
+            }
+        ]
+        assert {key: meta[key] for key in trace_split._SPLIT_MANIFEST_KEYS} == {
+            "status": 0,
+            "method": "family:unknown_only",
+            "phase_confidence": "unknown",
+            "root_family": "execute_context_<n>",
+            "root_family_known": False,
+        }
+
+    def test_llm_split_with_confirmed_phases_does_not_warn(self, tmp_path, monkeypatch):
+        _split_dir, meta, warnings = self._split(
+            tmp_path,
+            monkeypatch,
+            manifest=_KNOWN_ANNOTATION_MANIFEST,
+            llm_inference=True,
+            chunk_name="mixed_steady_state_0.json.gz",
+        )
+
+        assert (warnings, meta["phase_confidence"]) == ([], "high")
+
+    def test_generic_split_never_has_phases_to_confirm(self, tmp_path, monkeypatch):
+        _split_dir, meta, warnings = self._split(
+            tmp_path,
+            monkeypatch,
+            manifest=_UNKNOWN_FAMILY_MANIFEST,
+            llm_inference=False,
+            chunk_name="steady_state_0.json.gz",
+        )
+
+        assert (warnings, meta["phase_confidence"]) == ([], "unknown")
+
+    def test_chunks_without_a_manifest_warn(self, tmp_path, monkeypatch):
+        split_dir, _meta, warnings = self._split(
+            tmp_path,
+            monkeypatch,
+            manifest=None,
+            llm_inference=True,
+            chunk_name="mixed_steady_state_0.json.gz",
+        )
+
+        assert warnings == [
+            {
+                "code": "trace_split_manifest_missing",
+                "severity": "warning",
+                "split_dir": str(split_dir),
+                "message": "TraceLens splitter wrote no readable split_manifest.json; the split's quality is unrecorded.",
+            }
+        ]
+
+
+def _tracelens_importable() -> bool:
+    """Check if TraceLens splitter is importable."""
+    try:
+        import TraceLens.TraceUtils.split_trace.main  # noqa: F401
+
+        return True
+    except ImportError:
+        return False
+
+
+@pytest.mark.skipif(
+    not _tracelens_importable(),
+    reason="TraceLens not installed",
+)
+class TestSplitterE2E:
+    """Run _run_trace_split on synthetic traces to verify end-to-end splitting.
+
+    Calls _run_trace_split() directly — the same function main() uses — with
+    synthetic traces and the same args the orchestrator would set. This tests
+    the full chain: argparse flags -> _build_split_cmd -> TraceLens splitter
+    subprocess -> _collect_split_chunks -> _validate_selected_chunk.
+    """
+
+    @staticmethod
+    def _make_args(**overrides):
+        defaults = {
+            "split_conc": "",
+            "split_osl": "",
+            "split_r": "",
+            "split_llm_inference": False,
+            "split_num_steps": 8,
+            "steady_state_mode": "mixed",
+            "budget_minutes": 5,
+        }
+        defaults.update(overrides)
+        return SimpleNamespace(**defaults)
+
+    def test_vllm_trace_produces_three_chunks(self, tmp_path):
+        """A vLLM trace with split_llm_inference should produce mixed/decode/prefilldecode chunks."""
+        trace_path = tmp_path / "vllm_trace.json.gz"
+        split_dir = tmp_path / "split"
+        log_path = tmp_path / "log"
+        log_path.touch()
+        _write_trace(trace_path, _make_vllm_trace(num_steps=32, conc=16))
+
+        args = self._make_args(
+            split_llm_inference=True,
+            split_conc="16",
+            split_osl="512",
+            split_r="1",
+            steady_state_mode="mixed",
+        )
+        tl_root = Path(tla.__file__).resolve().parent.parent.parent.parent.parent
+
+        chunk, meta = trace_split._run_trace_split(
+            args,
+            trace_split.TraceSplitJob(trace_path, split_dir, tl_root),
+            log_path,
+            [],
+        )
+        assert meta["chunks_by_mode"]["mixed"] >= 1
+        assert chunk.exists()
+        assert chunk.stat().st_size > 0
+
+    def test_xdit_trace_produces_generic_chunk(self, tmp_path):
+        """An xDiT trace with steady_state_mode=generic should produce a generic chunk."""
+        trace_path = tmp_path / "xdit_trace.json.gz"
+        split_dir = tmp_path / "split"
+        log_path = tmp_path / "log"
+        log_path.touch()
+        _write_trace(trace_path, _make_xdit_trace(num_steps=6))
+
+        args = self._make_args(
+            split_llm_inference=False,
+            split_num_steps=4,
+            steady_state_mode="generic",
+        )
+        tl_root = Path(tla.__file__).resolve().parent.parent.parent.parent.parent
+
+        chunk, meta = trace_split._run_trace_split(
+            args,
+            trace_split.TraceSplitJob(trace_path, split_dir, tl_root),
+            log_path,
+            [],
+        )
+        assert meta["chunks_by_mode"]["generic"] >= 1
+        assert chunk.exists()
+        assert chunk.stat().st_size > 0
+
+
+def _request_handlers_importable() -> bool:
+    try:
+        import importlib.util
+
+        return importlib.util.find_spec("hyperloom.orchestrator.actions.executors.trace_analyze") is not None
+    except ImportError:
+        return False
+
+
+@pytest.mark.skipif(
+    not _request_handlers_importable(),
+    reason="hyperloom orchestrator not importable",
+)
+class TestBuildTraceAnalyzeCmd:
+    """Verify trace_analyze._build_trace_analyze_cmd sets flags correctly."""
+
+    def _run(self, *, scriptable: bool, framework: str, **payload_kw):
+        from hyperloom.orchestrator.actions.executors.trace_analyze import (
+            _AnalysisRun,
+            _build_trace_analyze_cmd,
+        )
+        from hyperloom.orchestrator.trace_analysis.analysis_route import AnalysisRoute
+
+        cmd, mode = _build_trace_analyze_cmd(
+            payload_kw,
+            _AnalysisRun(
+                trace_input="/tmp/trace",
+                workspace_path="/tmp/test",
+                tracelens_root=Path("/tmp/tl"),
+                route=AnalysisRoute.AGENT,
+                scriptable=scriptable,
+                model_name="test",
+                framework=framework,
+                target_platform="MI300X",
+            ),
+            session_dir=Path("/tmp/test"),
+            workload={},
+        )
+        return cmd, mode
+
+    def test_serving_gets_llm_inference(self):
+        cmd, _ = self._run(scriptable=False, framework="vllm")
+        assert "--split-llm-inference" in cmd
+
+    def test_scriptable_gets_generic_mode(self):
+        cmd, mode = self._run(scriptable=True, framework="xdit")
+        assert "--split-llm-inference" not in cmd
+        assert cmd.count("--steady-state-mode") == 1
+        idx = cmd.index("--steady-state-mode")
+        assert cmd[idx + 1] == "generic"
+        assert mode == "generic"
+
+    def test_scriptable_payload_override_cannot_shadow_generic(self):
+        cmd, mode = self._run(scriptable=True, framework="xdit", steady_state_mode="mixed")
+        assert cmd.count("--steady-state-mode") == 1
+        idx = cmd.index("--steady-state-mode")
+        assert cmd[idx + 1] == "generic"
+        assert mode == "generic"
+
+    def test_serving_forwards_conc_osl_r(self):
+        cmd, _ = self._run(
+            scriptable=False,
+            framework="sglang",
+            split_conc="64",
+            split_osl="1024",
+            split_r="1",
+        )
+        assert "--split-conc" in cmd
+        assert "--split-osl" in cmd
+        assert "--split-r" in cmd
+
+    def test_scriptable_no_conc_osl_r(self):
+        cmd, _ = self._run(
+            scriptable=True,
+            framework="xdit",
+            split_conc="64",
+            split_osl="1024",
+        )
+        assert "--split-conc" not in cmd
+        assert "--split-osl" not in cmd

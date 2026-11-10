@@ -5,6 +5,7 @@
 
 from __future__ import annotations
 
+import json
 import logging
 import os
 import socket
@@ -23,6 +24,9 @@ DEFAULT_ROOT = Path("/")
 _CPU_ROOT = "sys/devices/system/cpu"
 _NODE_ROOT = "sys/devices/system/node"
 _AMDGPU_DRIVER_ROOT = "sys/bus/pci/drivers/amdgpu"
+
+#: The GPU power settings the session recorded at launch (JSON), published by the CLI.
+GPU_POWER_SETTINGS_ENV = "HYPERLOOM_GPU_POWER_SETTINGS"
 
 
 def read_kernel_file(path: Path | str, *, root: Path = DEFAULT_ROOT) -> str:
@@ -170,9 +174,16 @@ def platform_fingerprint(
         partition = published_shape()
         if partition:
             record["gpu"]["compute_partition"] = partition
+        # The power cap and perf level the session recorded, when it read them.
+        try:
+            power = json.loads(os.environ.get(GPU_POWER_SETTINGS_ENV) or "{}")
+        except ValueError:
+            power = {}
+        if power:
+            record["gpu"]["power_settings"] = power
         record["stack"] = detect_stack_fingerprint(os.environ)
         return record
-    except Exception as exc:
+    except (OSError, ValueError) as exc:
         # Warning, not debug: this record is provenance, and a silent hole in it is only discovered when someone needs
         # it and it is too late to re-run.
         log.warning("platform fingerprint failed: %s", exc, exc_info=True)

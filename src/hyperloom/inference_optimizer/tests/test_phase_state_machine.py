@@ -6,21 +6,25 @@
 from __future__ import annotations
 
 from copy import deepcopy
+from datetime import datetime, timedelta, timezone
 
 from pathlib import Path
-from types import SimpleNamespace
 from typing import Any
 
 import pytest
 
 from hyperloom.orchestrator.phases import machine_state as phase_state
+from hyperloom.orchestrator.actions.stop_reason_explanations import STOP_REASON_EXPLANATIONS
 from hyperloom.inference_optimizer.breakdown.stop_reasons import is_valid_stop_reason
 from hyperloom.inference_optimizer.protocol.intent import Intent, IntentType
 from hyperloom.orchestrator.policy.gate import (
     PolicyGate,
 )
+from hyperloom.orchestrator.state._shared_state.enablement_round import EnablementRound
 from hyperloom.orchestrator.state.shared_state import SharedState
 from hyperloom.inference_optimizer.session.paths import make_session_dir
+
+from ._geak_helpers import stop_geak_before_launch
 
 
 def _no_controller_run(**kwargs: Any) -> dict[str, Any]:
@@ -29,18 +33,10 @@ def _no_controller_run(**kwargs: Any) -> dict[str, Any]:
 
 @pytest.fixture
 def session_dir(tmp_path, monkeypatch) -> Path:
-    from hyperloom.orchestrator.actions.executors import _kernel_agent_tool
     from hyperloom.orchestrator.kernel import controller_submit
 
-    real_tool_path = _kernel_agent_tool._kernel_agent_tool_path
-
-    def _tool_path_without_geak_runner(tool_name: str) -> Path:
-        if tool_name == "backends/geak_runner.py":
-            raise FileNotFoundError(tool_name)
-        return real_tool_path(tool_name)
-
     monkeypatch.setenv("USER_DATA_PATH", str(tmp_path))
-    monkeypatch.setattr(_kernel_agent_tool, "_kernel_agent_tool_path", _tool_path_without_geak_runner)
+    stop_geak_before_launch(monkeypatch)
     monkeypatch.setattr(controller_submit, "run_controller_subprocess", _no_controller_run)
     return make_session_dir()
 
@@ -116,27 +112,47 @@ def test_normalize_budget_pct_falls_back_to_defaults():
     assert "BOGUS" not in out
 
 
-def test_exit_normal_prelude_triggers_on_baseline_tput():
-    state = SimpleNamespace(baseline_tput=0.0)
-    assert phase_state.exit_normal_prelude(state) is None
+def test_prelude_exits_on_baseline_tput():
+    state = SharedState(baseline_tput=0.0, phase="PRELUDE", phase_budget_pct={}, phase_started_unix=0.0, max_minutes=0)
+    assert phase_state.compute_next_phase(state) is None
     state.baseline_tput = 1234.5
-    out = phase_state.exit_normal_prelude(state)
+    out = phase_state.compute_next_phase(state)
     assert out is not None
-    reason, evidence = out
+    _next_phase, reason, evidence = out
     assert reason == "prelude_done"
-    assert evidence["baseline_tput"] == 1234.5
+    assert evidence["predicate_inputs"]["baseline"]["tput"] == 1234.5
 
 
-def test_exit_normal_prelude_blocked_while_warm_replay_in_flight():
+def test_prelude_blocked_while_warm_replay_in_flight():
     """PRELUDE must not advance to FRAMEWORK until warm-replay settles."""
-    state = SimpleNamespace(
+    state = SharedState(
+        phase="PRELUDE",
+        phase_budget_pct={},
+        phase_started_unix=0.0,
+        max_minutes=0,
         baseline_tput=1234.5,
         warm_replay_outcome={"status": "in_flight", "replay_task_id": "abc"},
     )
-    assert phase_state.exit_normal_prelude(state) is None
+    assert phase_state.compute_next_phase(state) is None
     state.warm_replay_outcome = {"status": "failed"}
-    out = phase_state.exit_normal_prelude(state)
-    assert out is not None and out[0] == "prelude_done"
+    out = phase_state.compute_next_phase(state)
+    assert out is not None and out[1] == "prelude_done"
+
+
+def test_prelude_waits_for_the_initial_analysis():
+    """Leaving before the initial roofline is booked hands that analysis to the next phase instead of seeding this one."""
+    state = SharedState(
+        phase="PRELUDE",
+        phase_budget_pct={},
+        phase_started_unix=0.0,
+        max_minutes=0,
+        baseline_tput=1234.5,
+        auto_roofline_pending_task_id="rl-1",
+    )
+    assert phase_state.compute_next_phase(state) is None
+    state.auto_roofline_pending_task_id = ""
+    out = phase_state.compute_next_phase(state)
+    assert out is not None and out[1] == "prelude_done"
 
 
 def _prelude_state(
@@ -148,23 +164,38 @@ def _prelude_state(
     baseline_runtime_sec: float = 0.0,
     baseline_post_ready_runtime_sec: float = 0.0,
     baseline_warm_runtime_sec: float = 0.0,
+    baseline_eval_runtime_sec: float = 0.0,
     baseline_measure_round_dropped: bool = False,
-    baseline_double_run: bool = False,
-) -> SimpleNamespace:
-    """A PRELUDE-phase state with an explicit clock, as the budget policy reads it."""
-    return SimpleNamespace(
+    baseline_failure_streak: int = 0,
+    baseline_failures_this_leg: int | None = None,
+    auto_roofline_pending_task_id: str = "",
+) -> SharedState:
+    """A PRELUDE-phase state with an explicit clock, as the budget policy reads it.
+
+    The failures belong to the live leg unless ``baseline_failures_this_leg`` says
+    otherwise, which is how a session resumed on an earlier leg's streak is built.
+    """
+    leg_failures = baseline_failure_streak if baseline_failures_this_leg is None else baseline_failures_this_leg
+    state = SharedState(
+        auto_roofline_pending_task_id=auto_roofline_pending_task_id,
         phase="PRELUDE",
         max_minutes=max_minutes,
+        baseline_failure_streak=baseline_failure_streak,
+        baseline_failures_this_leg=leg_failures,
         phase_elapsed_totals={"PRELUDE": spent_sec},
         phase_started_unix=0.0,
+        phase_budget_pct={},
         baseline_tput=baseline_tput,
         baseline_runtime_sec=baseline_runtime_sec,
         baseline_post_ready_runtime_sec=baseline_post_ready_runtime_sec,
         baseline_warm_runtime_sec=baseline_warm_runtime_sec,
+        baseline_eval_runtime_sec=baseline_eval_runtime_sec,
         baseline_measure_round_dropped=baseline_measure_round_dropped,
-        baseline_double_run=baseline_double_run,
-        session_budget_usable_sec=lambda: usable_sec,
+        resumed_ts="",
+        pending_escalate_hint="",
     )
+    state.session_budget_usable_sec = lambda: usable_sec
+    return state
 
 
 def test_prelude_can_afford_an_arm_the_budget_still_covers():
@@ -205,7 +236,7 @@ def test_prelude_budget_policy_is_inert_without_a_clock():
 def test_time_exhausted_during_prelude_finally_has_a_producer():
     """The reason was in the vocabulary and in the report glossary with no code path to it."""
     state = _prelude_state(spent_sec=10_800.0, usable_sec=0.0)
-    out = phase_state.compute_next_phase(state, kernel_enabled=True)
+    out = phase_state.compute_next_phase(state, flags=phase_state.PhaseFlags(kernel_enabled=True))
     assert out is not None
     next_phase, reason, evidence = out
     assert (next_phase, reason) == ("CLOSE", "time_exhausted_during_prelude")
@@ -214,26 +245,186 @@ def test_time_exhausted_during_prelude_finally_has_a_producer():
     assert phase_state.replay_next_phase(evidence["predicate_inputs"]) == out
 
 
+def test_the_prelude_allowance_never_reads_as_a_debt():
+    """Past the reserve the phase can buy nothing; the figure says zero seconds, not minus an hour."""
+    # A 12h session reserves 21600 s for optimization, and 14718.5 s of clock is left.
+    state = _prelude_state(max_minutes=720, usable_sec=14_718.5)
+    affordable, evidence = phase_state.prelude_can_afford(state, expected_cost_sec=300.0)
+    assert affordable is False
+    assert evidence["affordable_sec"] == pytest.approx(0.0)
+
+
+def test_a_prelude_that_can_buy_nothing_closes_instead_of_idling():
+    """The phase that ticked for 4.1h: nothing it may spend, no arm of its own, and a clock that is not zero."""
+    state = _prelude_state(max_minutes=720, spent_sec=25_000.0, usable_sec=14_718.5, baseline_failure_streak=2)
+    out = phase_state.compute_next_phase(state, flags=phase_state.PhaseFlags(kernel_enabled=True))
+    assert out is not None
+    next_phase, reason, evidence = out
+    assert (next_phase, reason) == ("CLOSE", "prelude_budget_exhausted")
+    assert evidence["terminal"] is True
+    assert evidence["prelude_affordable_sec"] == pytest.approx(0.0)
+    assert evidence["session_usable_sec"] == pytest.approx(14_718.5)
+    assert is_valid_stop_reason(reason)
+    assert phase_state.replay_next_phase(evidence["predicate_inputs"]) == out
+
+
+def test_a_prelude_with_budget_of_its_own_keeps_retrying():
+    """The same failed baseline, before the reserve line: the phase still has rounds it can pay for."""
+    state = _prelude_state(max_minutes=720, spent_sec=6_000.0, usable_sec=30_000.0, baseline_failure_streak=2)
+    assert phase_state.compute_next_phase(state, flags=phase_state.PhaseFlags(kernel_enabled=True)) is None
+
+
+def test_a_resumed_leg_owes_its_first_baseline_before_the_reserve_line_bites():
+    """The streak an earlier leg left behind is not this leg's retry: the new budget buys one baseline."""
+    state = _prelude_state(
+        max_minutes=720,
+        spent_sec=25_000.0,
+        usable_sec=14_718.5,
+        baseline_failure_streak=1,
+        baseline_failures_this_leg=0,
+    )
+    refused, _ = phase_state.a_retry_past_the_reserve_line(state)
+    assert refused is False, "the baseline the resumed leg was given budget for must still be admitted"
+    assert phase_state.compute_next_phase(state, flags=phase_state.PhaseFlags(kernel_enabled=True)) is None
+
+    # That one fails too, and from there the leg is spending the reserve on retries.
+    state.baseline_failure_streak += 1
+    state.baseline_failures_this_leg += 1
+    refused, shortfall = phase_state.a_retry_past_the_reserve_line(state)
+    assert refused is True
+    assert shortfall["baseline_failures_this_leg"] == 1
+    out = phase_state.compute_next_phase(state, flags=phase_state.PhaseFlags(kernel_enabled=True))
+    assert out is not None and out[1] == "prelude_budget_exhausted"
+    assert out[2]["baseline_failures_this_leg"] == 1
+    assert out[2]["baseline_failure_streak"] == 2
+
+
+def test_the_remedy_the_glossary_prints_works_at_the_budget_that_stopped_the_run():
+    """``prelude_budget_exhausted`` tells the operator to fix the fault and resume; resuming must buy a baseline."""
+    stopped = _prelude_state(max_minutes=720, spent_sec=25_000.0, usable_sec=14_718.5, baseline_failure_streak=1)
+    out = phase_state.compute_next_phase(stopped, flags=phase_state.PhaseFlags(kernel_enabled=True))
+    assert out is not None and out[1] == "prelude_budget_exhausted"
+
+    # The operator fixes the baseline fault and resumes at the same ``--max-minutes``, which is what the
+    # glossary's remedy asks for: the leg's own failure count starts at zero, so the attempt is granted.
+    resumed = SharedState.from_dict(stopped.to_dict())
+    resumed.begin_leg(now_unix=100_000.0)
+    resumed.session_budget_usable_sec = lambda: 14_718.5
+    assert resumed.baseline_failure_streak == 1
+    refused, _ = phase_state.a_retry_past_the_reserve_line(resumed)
+    assert refused is False
+    assert phase_state.compute_next_phase(resumed, flags=phase_state.PhaseFlags(kernel_enabled=True)) is None
+
+    explanation = STOP_REASON_EXPLANATIONS["prelude_budget_exhausted"]
+    assert "granted one baseline attempt whatever the budget" in explanation
+
+
+def test_a_round_still_in_flight_is_not_an_idle_prelude():
+    """A warm replay that has not landed is work in progress, not a phase waiting on nothing."""
+    state = _prelude_state(max_minutes=720, spent_sec=25_000.0, usable_sec=14_718.5, baseline_failure_streak=2)
+    state.warm_replay_outcome = {"status": "in_flight", "replay_task_id": "abc"}
+    assert phase_state.compute_next_phase(state, flags=phase_state.PhaseFlags(kernel_enabled=True)) is None
+
+
+def test_a_plain_baseline_retry_in_flight_is_not_an_idle_prelude():
+    """A retried ``baseline`` is PRELUDE's own work too: closing on it would cancel the task."""
+    state = _prelude_state(max_minutes=720, spent_sec=25_000.0, usable_sec=14_718.5, baseline_failure_streak=2)
+    flags = phase_state.PhaseFlags(kernel_enabled=True)
+
+    in_flight = phase_state.WorkInFlight(prelude=True)
+
+    assert phase_state.compute_next_phase(state, flags=flags, in_flight=in_flight) is None
+
+    # The fact travels with the decision, so a replay of it refuses the terminal as well.
+    inputs = phase_state.workflow_predicate_inputs(state, flags=flags, in_flight=in_flight)
+    assert inputs["pending_work"] == {"prelude_work_in_flight": True}
+    assert phase_state.replay_next_phase(inputs) is None
+
+    out = phase_state.compute_next_phase(state, flags=flags)
+    assert out is not None and out[1] == "prelude_budget_exhausted"
+
+
+def test_an_unbounded_prelude_never_reaches_the_budget_line():
+    """Without a clock there is no reserve to cross, so a failed baseline keeps its retries."""
+    state = _prelude_state(max_minutes=0, usable_sec=None, baseline_failure_streak=2)
+    assert phase_state.compute_next_phase(state, flags=phase_state.PhaseFlags(kernel_enabled=True)) is None
+
+
 def test_a_landed_baseline_outranks_the_exhausted_clock():
     """With a baseline in hand the run has something to optimize; the later phases judge for themselves."""
     state = _prelude_state(spent_sec=10_800.0, usable_sec=0.0, baseline_tput=1074.7)
-    out = phase_state.compute_next_phase(state, kernel_enabled=True)
+    out = phase_state.compute_next_phase(state, flags=phase_state.PhaseFlags(kernel_enabled=True))
     assert out is not None
     assert out[1] == "prelude_done"
+
+
+def test_prelude_holds_while_the_initial_roofline_is_pending():
+    state = _prelude_state(usable_sec=10_000.0, baseline_tput=1074.7, auto_roofline_pending_task_id="rl-1")
+    assert phase_state.compute_next_phase(state, flags=phase_state.PhaseFlags(kernel_enabled=True)) is None
+    state.auto_roofline_pending_task_id = ""
+    out = phase_state.compute_next_phase(state, flags=phase_state.PhaseFlags(kernel_enabled=True))
+    assert out is not None and out[1] == "prelude_done"
+    assert phase_state.replay_next_phase(out[2]["predicate_inputs"]) == out
+
+
+def test_a_spent_clock_does_not_wait_for_the_initial_roofline():
+    state = _prelude_state(
+        spent_sec=10_800.0, usable_sec=0.0, baseline_tput=1074.7, auto_roofline_pending_task_id="rl-1"
+    )
+    out = phase_state.compute_next_phase(state, flags=phase_state.PhaseFlags(kernel_enabled=True))
+    assert out is not None and out[1] == "prelude_done"
+
+
+def test_the_initial_roofline_wait_stops_at_the_optimization_reserve():
+    # 180 min session reserves 5400 s for optimization; 5000 s usable means PRELUDE's own allowance is spent.
+    state = _prelude_state(usable_sec=5_000.0, baseline_tput=1074.7, auto_roofline_pending_task_id="rl-1")
+    out = phase_state.compute_next_phase(state, flags=phase_state.PhaseFlags(kernel_enabled=True))
+    assert out is not None and out[1] == "prelude_done"
+    assert phase_state.replay_next_phase(out[2]["predicate_inputs"]) == out
+    state.session_budget_usable_sec = lambda: 6_000.0
+    assert phase_state.compute_next_phase(state, flags=phase_state.PhaseFlags(kernel_enabled=True)) is None
+
+
+def test_the_phase_block_shows_the_initial_roofline_hold_exactly_while_it_holds():
+    """A spent phase share under the hold must not read as a spent session."""
+
+    def hold_lines(state: SharedState) -> list[str]:
+        return [line for line in phase_state.phase_status_summary(state).splitlines() if line.startswith("hold")]
+
+    state = _prelude_state(usable_sec=10_000.0, baseline_tput=1074.7, auto_roofline_pending_task_id="rl-1")
+    [hold] = hold_lines(state)
+    assert "rl-1" in hold and "4600" in hold
+    state.session_budget_usable_sec = lambda: 5_000.0
+    assert hold_lines(state) == []
+    state.session_budget_usable_sec = lambda: 10_000.0
+    state.auto_roofline_pending_task_id = ""
+    assert hold_lines(state) == []
 
 
 def test_prelude_exit_states_whether_one_optimization_round_still_fits():
     """The plain statement neither field session ever got: preparation spent the run."""
     state = _prelude_state(baseline_tput=1074.7, baseline_runtime_sec=2705.7, usable_sec=2796.0)
-    out = phase_state.exit_normal_prelude(state)
+    out = phase_state.compute_next_phase(state)
     assert out is not None
-    evidence = out[1]
+    _next, reason, evidence = out
+    assert reason == "prelude_done"
     assert evidence["fits_one_optimization_round"] is True
     assert evidence["affordable_rounds"] == pytest.approx(1.03, abs=0.01)
 
     state.session_budget_usable_sec = lambda: 1200.0
-    evidence = phase_state.exit_normal_prelude(state)[1]
-    assert evidence["fits_one_optimization_round"] is False
+    out2 = phase_state.compute_next_phase(state)
+    assert out2 is not None
+    assert out2[2]["fits_one_optimization_round"] is False
+
+
+def test_an_infinite_baseline_runtime_prices_no_optimization_round():
+    state = _prelude_state(baseline_tput=1074.7, baseline_runtime_sec=float("inf"), usable_sec=2796.0)
+    out = phase_state.compute_next_phase(state)
+    assert out is not None
+    _next, reason, evidence = out
+    assert reason == "prelude_done"
+    assert "fits_one_optimization_round" not in evidence
+    assert evidence["predicate_inputs"]["baseline"]["runtime_sec"] is None
 
 
 # The workload the cold-anchor cases below are priced against: a 900s cold round whose last 550s was the benchmark, so
@@ -243,9 +434,25 @@ _COLD_ANCHOR_WORKLOAD = {
     "baseline_runtime_sec": 900.0,
     "baseline_post_ready_runtime_sec": 550.0,
     "baseline_warm_runtime_sec": 400.0,
-    "baseline_double_run": True,
 }
 _RETRY_COST_SEC = 1300.0 + 750.0
+
+
+@pytest.mark.parametrize(
+    ("warm", "post_ready", "eval_sec", "expected"),
+    [
+        (None, 550.0, 450.0, 100.0),
+        (None, 550.0, 550.0, 550.0),
+        (None, 550.0, 900.0, 550.0),
+        (None, 550.0, None, 550.0),
+        (400.0, 550.0, 450.0, 400.0),
+        (None, None, 450.0, None),
+    ],
+    ids=["enclosed", "equal", "oversized", "no-eval", "warm-measured", "nothing-measured"],
+)
+def test_a_hot_pass_drops_only_an_eval_its_post_ready_time_encloses(warm, post_ready, eval_sec, expected):
+    """The eval and the post-ready interval come from separate clocks, so an eval that cannot fit is not taken off."""
+    assert phase_state.hot_pass_cost_sec(warm, post_ready, eval_sec) == expected
 
 
 class TestAColdAnchorIsNotAFinishedPrelude:
@@ -258,10 +465,10 @@ class TestAColdAnchorIsNotAFinishedPrelude:
             usable_sec=_RETRY_COST_SEC + 60.0,
         )
 
-        assert phase_state.exit_normal_prelude(state) is None
+        assert phase_state.compute_next_phase(state) is None
 
         state.baseline_measure_round_dropped = False
-        assert phase_state.exit_normal_prelude(state)[0] == "prelude_done"
+        assert phase_state.compute_next_phase(state)[1] == "prelude_done"
 
     def test_a_session_that_cannot_afford_another_baseline_closes(self):
         """2050s buys a round and a variant to read against it; 1200s buys neither."""
@@ -271,7 +478,7 @@ class TestAColdAnchorIsNotAFinishedPrelude:
             usable_sec=1200.0,
         )
 
-        out = phase_state.compute_next_phase(state, kernel_enabled=True)
+        out = phase_state.compute_next_phase(state, flags=phase_state.PhaseFlags(kernel_enabled=True))
 
         assert out is not None
         next_phase, reason, evidence = out
@@ -281,6 +488,35 @@ class TestAColdAnchorIsNotAFinishedPrelude:
         assert evidence["retry_round_sec"] == pytest.approx(1300.0)
         assert is_valid_stop_reason(reason)
 
+    def test_the_retry_prices_its_second_pass_without_the_cold_rounds_eval(self):
+        """No hot pass measured: the retry is 900 + (550 - 450) = 1000s, and a 900s variant follows it."""
+        workload = {**_COLD_ANCHOR_WORKLOAD, "baseline_warm_runtime_sec": 0.0, "baseline_eval_runtime_sec": 450.0}
+        flags = phase_state.PhaseFlags(kernel_enabled=True)
+
+        fits = _prelude_state(**workload, baseline_measure_round_dropped=True, usable_sec=1950.0)
+        assert phase_state.compute_next_phase(fits, flags=flags) is None
+
+        short = _prelude_state(**workload, baseline_measure_round_dropped=True, usable_sec=1800.0)
+        _, reason, evidence = phase_state.compute_next_phase(short, flags=flags)
+        assert reason == "prelude_cold_anchor_low_budget"
+        assert evidence["retry_round_sec"] == pytest.approx(1000.0)
+
+    def test_a_retry_already_in_flight_is_waited_for(self):
+        """The marker stays up until a round lands, so the shortfall must not cancel the round itself."""
+        state = _prelude_state(
+            **_COLD_ANCHOR_WORKLOAD,
+            baseline_measure_round_dropped=True,
+            usable_sec=1200.0,
+        )
+        flags = phase_state.PhaseFlags(kernel_enabled=True)
+
+        in_flight = phase_state.WorkInFlight(prelude=True)
+
+        assert phase_state.compute_next_phase(state, flags=flags, in_flight=in_flight) is None
+
+        out = phase_state.compute_next_phase(state, flags=flags)
+        assert out is not None and out[1] == "prelude_cold_anchor_low_budget"
+
     def test_a_session_resumed_with_a_fresh_clock_measures_another_baseline(self):
         """The marker outlives the shortfall, so it must not decide on its own."""
         state = _prelude_state(
@@ -289,8 +525,7 @@ class TestAColdAnchorIsNotAFinishedPrelude:
             usable_sec=_RETRY_COST_SEC + 60.0,
         )
 
-        assert phase_state.exit_cold_anchor_prelude(state) is None
-        assert phase_state.compute_next_phase(state, kernel_enabled=True) is None
+        assert phase_state.compute_next_phase(state, flags=phase_state.PhaseFlags(kernel_enabled=True)) is None
 
     def test_a_single_round_baseline_is_not_mistaken_for_a_dropped_one(self):
         """A cold figure by configuration is consistent with what follows it."""
@@ -301,8 +536,8 @@ class TestAColdAnchorIsNotAFinishedPrelude:
             usable_sec=1200.0,
         )
 
-        assert phase_state.exit_cold_anchor_prelude(state) is None
-        assert phase_state.exit_normal_prelude(state)[0] == "prelude_done"
+        out = phase_state.compute_next_phase(state)
+        assert out is not None and out[1] == "prelude_done"
 
     def test_a_session_with_no_clock_is_not_closed_for_a_budget_it_does_not_have(self):
         """An unbounded run cannot fail an affordability test, so it retries."""
@@ -312,35 +547,107 @@ class TestAColdAnchorIsNotAFinishedPrelude:
             usable_sec=None,
         )
 
-        assert phase_state.exit_cold_anchor_prelude(state) is None
+        assert phase_state.compute_next_phase(state) is None
 
 
-def test_exit_terminal_prelude_after_three_baseline_failures():
-    state = SimpleNamespace(baseline_failure_streak=2)
-    assert phase_state.exit_terminal_prelude(state) is None
+def test_prelude_baseline_failed_after_three_failures():
+    state = SharedState(
+        phase="PRELUDE", phase_budget_pct={}, phase_started_unix=0.0, max_minutes=0, baseline_failure_streak=2
+    )
+    assert phase_state.compute_next_phase(state) is None
     state.baseline_failure_streak = 3
-    out = phase_state.exit_terminal_prelude(state)
-    assert out is not None and out[0] == "prelude_baseline_failed"
+    out = phase_state.compute_next_phase(state)
+    assert out is not None and out[1] == "prelude_baseline_failed"
 
 
-def test_exit_normal_optimize_uses_budget_exhaustion():
+def _framework_state_inside_its_budget() -> SharedState:
+    from hyperloom.orchestrator.phases.machine_state import normalize_budget_pct
+
+    state = SharedState(
+        phase=phase_state.PHASE_FRAMEWORK_AGENT,
+        phase_started_unix=1.0,
+        max_minutes=600,
+        phase_budget_pct=normalize_budget_pct(None),
+        optimization_stack=[{"action": "explore"}],
+        pending_escalate_hint="",
+    )
+    state._now_unix = lambda: 61.0
+    return state
+
+
+def test_a_framework_phase_no_round_fits_is_spent():
+    """A remainder shorter than every round the phase admits never admits another, so the phase is spent."""
+    state = _framework_state_inside_its_budget()
+    assert phase_state.compute_next_phase(state) is None
+
+    out = phase_state.compute_next_phase(state, framework_round_fits=False)
+
+    assert out is not None and out[1] == "optimize_phase_budget_exhausted"
+    evidence = out[2]
+    assert evidence["evidence"] == "no_round_fits" and evidence["remaining_seconds"] > 0
+    assert evidence["entry_elapsed_seconds"] == 60.0
+    assert "cumulative_elapsed_seconds" in evidence
+
+
+def test_a_framework_record_frozen_before_round_fits_replays_as_decided():
+    inputs = phase_state.workflow_predicate_inputs(_framework_state_inside_its_budget(), framework_round_fits=False)
+    del inputs["budget"]["round_fits"]
+
+    assert phase_state.replay_next_phase(inputs) is None
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("queued", "fits", "expected"),
+    [((), set(), False), (("explore",), set(), True), ((), {"specialist"}, True)],
+    ids=["nothing-fits", "queued-work", "one-action-fits"],
+)
+async def test_the_machine_reads_a_round_fits_off_the_queue_and_the_time_gate(queued, fits, expected):
+    from types import SimpleNamespace
+
+    from hyperloom.orchestrator.phases.machine import MachinePhase
+    from hyperloom.orchestrator.policy.denial import PolicyDenied
+
+    async def _queued():
+        return [SimpleNamespace(kind=kind) for kind in queued]
+
+    async def _running():
+        return []
+
+    def _denial(action: str):
+        return None if action in fits else PolicyDenied(f"{action} does not fit", rule="phase_time_budget")
+
+    coord = SimpleNamespace(
+        shared_state=_framework_state_inside_its_budget(),
+        tasks=SimpleNamespace(queued=_queued, running=_running),
+        dispatcher=SimpleNamespace(time_budget_denial_for_action=_denial),
+    )
+
+    assert await MachinePhase(coord)._framework_round_fits() is expected
+
+
+def test_optimize_phase_budget_exhaustion_advances():
     # Elapsed exceeds the phase budget.
-    state = SimpleNamespace(
+    from hyperloom.orchestrator.phases.machine_state import normalize_budget_pct
+
+    state = SharedState(
         phase=phase_state.PHASE_FRAMEWORK_AGENT,
         phase_started_unix=1.0,
         max_minutes=10,  # 600s total; 60% explore budget = 360s
-        phase_budget_pct={},
+        phase_budget_pct=normalize_budget_pct(None),
         params_no_promote_streak=0,
         explore_search={},
         optimization_stack=[{"action": "explore"}],
-        _now_unix=lambda: 1_000_000.0,
+        resumed_ts="",
+        pending_escalate_hint="",
     )
-    out = phase_state.exit_normal_optimize(state)
-    assert out is not None and out[0] == "optimize_phase_budget_exhausted"
+    state._now_unix = lambda: 1_000_000.0
+    out = phase_state.compute_next_phase(state)
+    assert out is not None and out[1] == "optimize_phase_budget_exhausted"
 
 
 def test_compute_next_phase_no_kernel_skips_kernel_phase():
-    state = SimpleNamespace(
+    state = SharedState(
         phase=phase_state.PHASE_FRAMEWORK_AGENT,
         phase_started_unix=0.0,
         max_minutes=0,
@@ -353,17 +660,17 @@ def test_compute_next_phase_no_kernel_skips_kernel_phase():
         specialist_rounds=[{"proposals_total": 1, "proposals_kept": 0}],
         optimization_stack=[{"action": "explore"}],
     )
-    out = phase_state.compute_next_phase(state, kernel_enabled=False)
+    out = phase_state.compute_next_phase(state, flags=phase_state.PhaseFlags(kernel_enabled=False))
     assert out is not None
     next_phase, reason, evidence = out
     assert next_phase == "SWEEP"
-    assert reason == "no_kernel_skipped"
-    assert evidence.get("passed_through_reason") == "optimize_no_more_leverage"
+    assert reason == "optimize_no_more_leverage"
+    assert evidence["kernel_skipped"] is True
 
 
-def test_exit_normal_optimize_skip_to_kernel_requires_a_tested_round():
+def test_skip_to_kernel_requires_a_tested_round():
     """A skip_to_kernel hint must not end EXPLORE with zero validated work."""
-    state = SimpleNamespace(
+    state = SharedState(
         phase=phase_state.PHASE_FRAMEWORK_AGENT,
         phase_started_unix=1_000_000.0,
         max_minutes=0,
@@ -373,34 +680,72 @@ def test_exit_normal_optimize_skip_to_kernel_requires_a_tested_round():
         specialist_rounds=[],
         macro_cycle=0,
         optimization_stack=[{"action": "explore"}],
-        _now_unix=lambda: 1_000_000.0,
+        resumed_ts="",
     )
-    out = phase_state.exit_normal_optimize(state)
+    state._now_unix = lambda: 1_000_000.0
+    out = phase_state.compute_next_phase(state)
     assert out is None
 
 
-def test_exit_normal_optimize_skip_to_kernel_fires_once_a_round_ran():
-    state = SimpleNamespace(
+_ENTERED_UNIX = 1_000_000.0
+
+
+def _framework_state_with_rounds(rounds: list[dict[str, Any]]) -> SharedState:
+    """FRAMEWORK_AGENT entered at ``_ENTERED_UNIX`` in cycle 0, with a skip_to_kernel hint pending."""
+    state = SharedState(
         phase=phase_state.PHASE_FRAMEWORK_AGENT,
-        phase_started_unix=1_000_000.0,
+        phase_started_unix=_ENTERED_UNIX,
         max_minutes=0,
         phase_budget_pct={},
         pending_escalate_hint="skip_to_kernel",
         explore_search={},
-        specialist_rounds=[{"proposals_total": 1, "proposals_kept": 0}],
+        specialist_rounds=rounds,
         macro_cycle=0,
         optimization_stack=[{"action": "explore"}],
-        _now_unix=lambda: 1_000_000.0,
+        resumed_ts="",
     )
-    out = phase_state.exit_normal_optimize(state)
+    state._now_unix = lambda: _ENTERED_UNIX + 600.0
+    return state
+
+
+def _completed(offset_sec: float) -> str:
+    return datetime.fromtimestamp(_ENTERED_UNIX + offset_sec, timezone.utc).isoformat()
+
+
+@pytest.mark.parametrize("source_phase", ["FRAMEWORK_AGENT", "EXPLORE"])
+def test_skip_to_kernel_fires_once_a_round_ran(source_phase):
+    state = _framework_state_with_rounds(
+        [{"proposals_total": 1, "source_phase": source_phase, "cycle": 0, "completed_at": _completed(60.0)}]
+    )
+    out = phase_state.compute_next_phase(state)
     assert out is not None
-    reason, evidence = out
+    _next, reason, evidence = out
     assert reason == "optimize_no_more_leverage"
     assert evidence.get("hint") == "skip_to_kernel"
 
 
+@pytest.mark.parametrize(
+    "round_row",
+    [
+        # PRELUDE's own scout, stamped with the phase it ran in.
+        {"domain": "research_scout_specialist", "source_phase": "PRELUDE"},
+        # A domain specialist delegated during PRELUDE: the router stamps the explore lane, not the live phase.
+        {"domain": "serving_specialist", "source_phase": "EXPLORE"},
+    ],
+)
+def test_skip_to_kernel_ignores_rounds_completed_before_phase_entry(round_row):
+    """PRELUDE shares macro-cycle 0 with FRAMEWORK_AGENT, so only the entry time separates its rounds."""
+    state = _framework_state_with_rounds([{**round_row, "cycle": 0, "completed_at": _completed(-60.0)}])
+    assert phase_state.compute_next_phase(state) is None
+
+
+def test_skip_to_kernel_ignores_a_round_with_no_completion_time():
+    state = _framework_state_with_rounds([{"domain": "serving_specialist", "source_phase": "EXPLORE", "cycle": 0}])
+    assert phase_state.compute_next_phase(state) is None
+
+
 def test_compute_next_phase_terminal_overrides_phase():
-    state = SimpleNamespace(
+    state = SharedState(
         phase=phase_state.PHASE_FRAMEWORK_AGENT,
         phase_started_unix=0.0,
         max_minutes=0,
@@ -410,7 +755,7 @@ def test_compute_next_phase_terminal_overrides_phase():
         explore_search={},
         optimization_stack=[],
     )
-    out = phase_state.compute_next_phase(state, kernel_enabled=True)
+    out = phase_state.compute_next_phase(state, flags=phase_state.PhaseFlags(kernel_enabled=True))
     assert out is not None
     assert out[0] == "CLOSE" and out[1] == "target_reached"
     assert out[2].get("terminal") is True
@@ -419,7 +764,7 @@ def test_compute_next_phase_terminal_overrides_phase():
 class TestAMetTargetDoesNotOutrankTheGuards:
     """The forward jump to SWEEP runs after the terminal checks, never before."""
 
-    def _state(self, phase: str, **kw) -> SimpleNamespace:
+    def _state(self, phase: str, **kw) -> SharedState:
         base = dict(
             phase=phase,
             phase_started_unix=0.0,
@@ -431,14 +776,19 @@ class TestAMetTargetDoesNotOutrankTheGuards:
             params_no_promote_streak=0,
             explore_search={},
             optimization_stack=[],
+            resumed_ts="",
+            pending_escalate_hint="",
+            kernel_optimizer="geak",
+            geak_result={},
+            kernel_rewrite_controller_result={},
         )
         base.update(kw)
-        return SimpleNamespace(**base)
+        return SharedState(**base)
 
     def test_a_coordinator_stop_reason_still_wins(self):
         out = phase_state.compute_next_phase(
             self._state(phase_state.PHASE_KERNEL_AGENT, stop_reason="baseline_failed"),
-            kernel_enabled=True,
+            flags=phase_state.PhaseFlags(kernel_enabled=True),
         )
         assert out is not None
         assert out[0] == phase_state.PHASE_CLOSE and out[1] == "baseline_failed"
@@ -446,18 +796,22 @@ class TestAMetTargetDoesNotOutrankTheGuards:
     def test_the_closing_phase_still_wins(self):
         out = phase_state.compute_next_phase(
             self._state(phase_state.PHASE_KERNEL_AGENT, closing_phase=True),
-            kernel_enabled=True,
+            flags=phase_state.PhaseFlags(kernel_enabled=True),
         )
         assert out is not None
         assert out[0] == phase_state.PHASE_CLOSE and out[1] == "time_exhausted"
 
     def test_prelude_keeps_its_own_guards(self):
         """A baseline PRELUDE has not accepted is not one SWEEP can measure."""
-        out = phase_state.compute_next_phase(self._state(phase_state.PHASE_PRELUDE), kernel_enabled=True)
+        out = phase_state.compute_next_phase(
+            self._state(phase_state.PHASE_PRELUDE), flags=phase_state.PhaseFlags(kernel_enabled=True)
+        )
         assert out is None or out[0] != phase_state.PHASE_SWEEP
 
     def test_a_later_phase_does_jump(self):
-        out = phase_state.compute_next_phase(self._state(phase_state.PHASE_KERNEL_AGENT), kernel_enabled=True)
+        out = phase_state.compute_next_phase(
+            self._state(phase_state.PHASE_KERNEL_AGENT), flags=phase_state.PhaseFlags(kernel_enabled=True)
+        )
         assert out is not None
         assert out[0] == phase_state.PHASE_SWEEP and out[1] == "target_reached"
         assert out[2].get("terminal") is not True
@@ -465,12 +819,14 @@ class TestAMetTargetDoesNotOutrankTheGuards:
 
 def test_a_met_target_renames_a_budget_limited_sweep_exit():
     """``sweep_budget_exhausted`` is outside STOP_REASON_VOCAB, so CLOSE would recover it as ``time_exhausted`` -- a met target reported as a timeout."""
-    state = SimpleNamespace(
+    now = 1_800_000_000.0
+    started = datetime.fromtimestamp(now, tz=timezone.utc) - timedelta(hours=2)
+    state = SharedState(
         phase=phase_state.PHASE_SWEEP,
-        phase_started_unix=1.0,
+        phase_started_unix=started.timestamp(),
+        start_ts=started.isoformat(),
         max_minutes=60,
-        deadline_unix=2.0,
-        phase_budget_pct={phase_state.PHASE_SWEEP: 0.0001},
+        phase_budget_pct={phase_state.PHASE_SWEEP: 0.5},
         stop_reason="",
         closing_phase=False,
         target_reached_at="2026-09-04T00:00:00+00:00",
@@ -483,11 +839,9 @@ def test_a_met_target_renames_a_budget_limited_sweep_exit():
         cumulative_gain_validated=0.0,
         gain_at_cycle_start=0.0,
         no_gain_cycle_streak=0,
+        resumed_ts="",
     )
-    raw = phase_state.exit_normal_sweep(state)
-    assert raw is not None and raw[0] in ("sweep_budget_exhausted", "sweep_budget_cap")
-
-    out = phase_state.compute_next_phase(state, kernel_enabled=True)
+    out = phase_state.compute_next_phase(state, flags=phase_state.PhaseFlags(kernel_enabled=True), now_unix=now)
     assert out is not None
     assert out[0] == phase_state.PHASE_CLOSE and out[1] == "target_reached"
     assert out[2].get("terminal") is True
@@ -497,7 +851,6 @@ def test_shared_state_phase_fields_default_to_empty():
     s = SharedState()
     assert s.phase == ""
     assert s.phase_history == []
-    assert s.phase_started_ts == ""
     assert s.phase_started_unix == 0.0
     assert s.phase_budget_pct == {}
 
@@ -509,11 +862,9 @@ def test_record_phase_transition_writes_row_and_updates_phase():
         to_phase="PRELUDE",
         reason="phase_entered",
         evidence={"trigger": "fresh_session"},
-        ts="2026-05-19T00:00:00+00:00",
-        ts_unix=1747600000.0,
+        at=phase_state.PhaseClock(ts="2026-05-19T00:00:00+00:00", ts_unix=1747600000.0),
     )
     assert s.phase == "PRELUDE"
-    assert s.phase_started_ts == "2026-05-19T00:00:00+00:00"
     assert s.phase_started_unix == 1747600000.0
     assert s.phase_history == [row]
     assert row["from_phase"] == "" and row["to_phase"] == "PRELUDE"
@@ -523,8 +874,7 @@ def test_record_phase_transition_writes_row_and_updates_phase():
         to_phase=phase_state.PHASE_FRAMEWORK_AGENT,
         reason="prelude_done",
         evidence={"baseline_tput": 100.0},
-        ts="2026-05-19T00:01:00+00:00",
-        ts_unix=1747600060.0,
+        at=phase_state.PhaseClock(ts="2026-05-19T00:01:00+00:00", ts_unix=1747600060.0),
     )
     assert s.phase == phase_state.PHASE_FRAMEWORK_AGENT
     assert len(s.phase_history) == 2
@@ -539,16 +889,14 @@ def test_explore_elapsed_accumulates_completed_and_live_segments():
         to_phase=phase_state.PHASE_FRAMEWORK_AGENT,
         reason="phase_entered",
         evidence={},
-        ts="2026-05-19T00:00:00+00:00",
-        ts_unix=100.0,
+        at=phase_state.PhaseClock(ts="2026-05-19T00:00:00+00:00", ts_unix=100.0),
     )
     phase_state.record_phase_transition(
         s,
         to_phase="KERNEL_AGENT",
         reason="optimize_no_more_leverage",
         evidence={},
-        ts="2026-05-19T00:02:00+00:00",
-        ts_unix=220.0,
+        at=phase_state.PhaseClock(ts="2026-05-19T00:02:00+00:00", ts_unix=220.0),
     )
     assert s.phase_elapsed_totals[phase_state.PHASE_FRAMEWORK_AGENT] == 120.0
     assert phase_state.phase_cumulative_seconds(s, phase=phase_state.PHASE_FRAMEWORK_AGENT, now_unix=300.0) == 120.0
@@ -558,8 +906,7 @@ def test_explore_elapsed_accumulates_completed_and_live_segments():
         to_phase=phase_state.PHASE_FRAMEWORK_AGENT,
         reason="sweep_reloop",
         evidence={},
-        ts="2026-05-19T00:03:00+00:00",
-        ts_unix=280.0,
+        at=phase_state.PhaseClock(ts="2026-05-19T00:03:00+00:00", ts_unix=280.0),
     )
     assert phase_state.phase_cumulative_seconds(s, phase=phase_state.PHASE_FRAMEWORK_AGENT, now_unix=310.0) == 150.0
 
@@ -593,8 +940,7 @@ def test_policy_gate_phase_strict_allows_in_phase_action():
         to_phase="PRELUDE",
         reason="phase_entered",
         evidence={},
-        ts="2026-05-19T00:00:00+00:00",
-        ts_unix=1.0,
+        at=phase_state.PhaseClock(ts="2026-05-19T00:00:00+00:00", ts_unix=1.0),
     )
     gate = PolicyGate(
         role_registry=_make_role_registry(),
@@ -647,10 +993,115 @@ def test_a_session_recorded_at_an_unknown_phase_refuses_to_resume(coordinator_wi
     c.shared_state.phase = "EXPLORE"
 
     with pytest.raises(RuntimeError) as excinfo:
-        c._ensure_phase_initialised()
+        c.phase_machine.ensure_phase_initialised(None)
 
     assert "EXPLORE" in str(excinfo.value)
     assert c.shared_state.phase == "EXPLORE"
+
+
+def _fail_phase_init_save(monkeypatch, c, exc: BaseException) -> None:
+    c.shared_state.phase = ""
+    c.shared_state.phase_history = []
+
+    def _save(session_dir=None) -> None:
+        raise exc
+
+    monkeypatch.setattr(c.shared_state, "save", _save)
+
+
+def test_a_failed_save_after_phase_init_is_logged_and_the_phase_stands(coordinator_with_mocks, monkeypatch, caplog):
+    c = coordinator_with_mocks
+    err = OSError("disk full")
+    _fail_phase_init_save(monkeypatch, c, err)
+
+    with caplog.at_level("ERROR", logger="hyperloom.orchestrator.phases.machine"):
+        c.phase_machine.ensure_phase_initialised(None)
+
+    assert c.shared_state.phase == "PRELUDE"
+    assert [r.exc_info[1] for r in caplog.records if r.exc_info] == [err]
+
+
+def test_a_serialization_defect_on_the_phase_init_save_is_not_swallowed(coordinator_with_mocks, monkeypatch):
+    c = coordinator_with_mocks
+    _fail_phase_init_save(monkeypatch, c, TypeError("not JSON serializable"))
+
+    with pytest.raises(TypeError, match="not JSON serializable"):
+        c.phase_machine.ensure_phase_initialised(None)
+
+
+_NO_KERNEL_CYCLE_SEC = 600 * 60.0
+_NO_KERNEL_CLI_BUDGET_PCT = {phase_state.PHASE_FRAMEWORK_AGENT: 0.2}
+
+
+@pytest.fixture
+def no_kernel_coordinator(session_dir):
+    """A real Coordinator on an unbounded ``--no-kernel`` session, so FRAMEWORK owns a flat share of the cycle."""
+    from hyperloom.orchestrator.roles import MockBackend, MockCriticBackend, ScriptedPlan
+    from hyperloom.orchestrator.loop.coordinator import Coordinator, CoordinatorSettings
+
+    SharedState(
+        kernel_enabled=False,
+        max_minutes=0,
+        cycle_minutes=_NO_KERNEL_CYCLE_SEC / 60.0,
+        baseline_tput=100.0,
+    ).save(session_dir)
+    silent = ScriptedPlan(
+        turns=[],
+        default_intent=Intent(type=IntentType.SEND_MESSAGE, payload={"topic": "heartbeat", "body_md": "ok"}),
+    )
+    return Coordinator(
+        session_dir,
+        backends={"orchestration": MockBackend(silent, name="orch"), "critic": MockCriticBackend()},
+        settings=CoordinatorSettings(phase_budget_pct=dict(_NO_KERNEL_CLI_BUDGET_PCT)),
+    )
+
+
+def _enter_framework_for(c, elapsed_sec: float) -> None:
+    import time
+
+    phase_state.record_phase_transition(
+        c.shared_state,
+        to_phase=phase_state.PHASE_FRAMEWORK_AGENT,
+        reason="prelude_done",
+        evidence={},
+        at=phase_state.PhaseClock(ts_unix=time.time() - elapsed_sec),
+    )
+
+
+async def _phase_block(c) -> str:
+    prompt = (await c.conversation.compose_prompt("orchestration")).text
+    return prompt.split("=== Phase ===", 1)[1]
+
+
+@pytest.mark.asyncio
+async def test_no_kernel_framework_share_is_the_same_for_machine_dispatch_and_prompt(no_kernel_coordinator):
+    c = no_kernel_coordinator
+    unredistributed = _NO_KERNEL_CLI_BUDGET_PCT[phase_state.PHASE_FRAMEWORK_AGENT]
+    share = phase_state.redistribute_budget_pct(
+        phase_state.normalize_budget_pct(_NO_KERNEL_CLI_BUDGET_PCT), kernel_enabled=False
+    )[phase_state.PHASE_FRAMEWORK_AGENT]
+    assert share > unredistributed
+    assert c.shared_state.phase_budget_pct[phase_state.PHASE_FRAMEWORK_AGENT] == pytest.approx(share)
+    try:
+        # Past the unredistributed share's allotment, well inside the redistributed one.
+        _enter_framework_for(c, _NO_KERNEL_CYCLE_SEC * (unredistributed + share) / 2)
+        assert c.dispatcher.dispatch_paused_for_phase_budget() is False
+        block = await _phase_block(c)
+        assert f"pct={share:.2f}" in block
+        assert "remaining_sec=0 " not in block
+        await c.phase_machine.advance_phase_if_needed()
+        assert c.shared_state.phase == phase_state.PHASE_FRAMEWORK_AGENT
+
+        _enter_framework_for(c, _NO_KERNEL_CYCLE_SEC * share + 60.0)
+        assert c.dispatcher.dispatch_paused_for_phase_budget() is True
+        assert "remaining_sec=0" in await _phase_block(c)
+        await c.phase_machine.advance_phase_if_needed()
+        framework_exit = c.shared_state.phase_history[-1]
+        assert framework_exit["from_phase"] == phase_state.PHASE_FRAMEWORK_AGENT
+        assert framework_exit["reason"] == "optimize_phase_budget_exhausted"
+        assert framework_exit["evidence"]["kernel_skipped"] is True
+    finally:
+        await c.stop()
 
 
 @pytest.mark.asyncio
@@ -694,25 +1145,101 @@ async def test_coordinator_phase_idempotent_within_same_tick(
         await c.stop()
 
 
+@pytest.mark.asyncio
+async def test_a_queued_or_running_baseline_reads_as_prelude_work(coordinator_with_mocks):
+    """The fact the terminal reads comes off the task store the transition drain cancels from."""
+    from hyperloom.orchestrator.state.task_registry import TaskSpec
+
+    c = coordinator_with_mocks
+    try:
+        assert await c.phase_machine._prelude_work_in_flight() is False
+
+        task, _ = await c.tasks.create_or_return_existing(
+            TaskSpec(kind="baseline", params={}, idempotency_key="prelude-baseline-retry")
+        )
+        assert await c.phase_machine._prelude_work_in_flight() is True
+        await c.tasks.transition(task.task_id, "running")
+        assert await c.phase_machine._prelude_work_in_flight() is True
+
+        await c.tasks.transition(task.task_id, "succeeded", evidence={"result_keys": []})
+        assert await c.phase_machine._prelude_work_in_flight() is False
+    finally:
+        await c.stop()
+
+
+@pytest.mark.asyncio
+async def test_a_first_failure_with_no_allowance_left_closes_the_session(coordinator_with_mocks):
+    """One owner decides whether PRELUDE may still retry: admission refuses it, the terminal records that.
+
+    The tick that books the first baseline failure finds the allowance already at zero, so there is no
+    retry the Orchestration agent could get launched and nothing is lost by closing here. The enablement
+    lane is off, so no other phase takes the failed baseline over and the budget line is the live one.
+    """
+    c = coordinator_with_mocks
+    try:
+        c.shared_state.enablement_mode = "off"
+        c.shared_state.max_minutes = 720
+        c.shared_state.baseline_failure_streak = 1
+        c.shared_state.baseline_failures_this_leg = 1
+        c.shared_state.session_budget_usable_sec = lambda: 14_718.5
+
+        refused, shortfall = phase_state.a_retry_past_the_reserve_line(c.shared_state)
+        assert refused is True, "a retry past the line must be refused before the machine reads the terminal"
+        assert shortfall["affordable_sec"] == 0.0
+
+        await c.phase_machine.advance_phase_if_needed()
+
+        assert c.shared_state.phase == phase_state.PHASE_CLOSE
+        row = c.shared_state.phase_history[-1]
+        assert row["from_phase"] == "PRELUDE"
+        assert row["reason"] == "prelude_budget_exhausted"
+        assert row["evidence"]["baseline_failures_this_leg"] == 1
+        assert row["evidence"]["prelude_affordable_sec"] == 0.0
+        assert phase_state.is_valid_stop_reason(row["reason"])
+    finally:
+        await c.stop()
+
+
+@pytest.mark.asyncio
+async def test_work_no_phase_owns_is_not_prelude_work(coordinator_with_mocks):
+    """Only PRELUDE's own actions hold the phase open; a queued kernel task must not."""
+    from hyperloom.orchestrator.state.task_registry import TaskSpec
+
+    c = coordinator_with_mocks
+    try:
+        await c.tasks.create_or_return_existing(
+            TaskSpec(kind="kernel_agent", params={}, idempotency_key="not-a-prelude-action")
+        )
+        assert await c.phase_machine._prelude_work_in_flight() is False
+    finally:
+        await c.stop()
+
+
 # ENABLEMENT phase predicate tests
 
 
-def _enablement_state(phase, *, tput=0.0, streak=1, validation_pending=False):
+def _enablement_state(phase, *, tput=0.0, streak=1, validation_pending=False, auto_roofline_pending_task_id=""):
     """A state the enablement entry and exit branches read."""
-    return SimpleNamespace(
+    return SharedState(
+        auto_roofline_pending_task_id=auto_roofline_pending_task_id,
         phase=phase,
         stop_reason="",
         closing_phase=False,
         baseline_tput=tput,
         baseline_failure_streak=streak,
-        enablement=SimpleNamespace(validation_pending=validation_pending),
+        enablement=EnablementRound(validation_pending=validation_pending),
+        phase_budget_pct={},
+        phase_started_unix=0.0,
+        max_minutes=0,
+        resumed_ts="",
+        pending_escalate_hint="",
     )
 
 
 def test_prelude_enters_enablement_on_a_baseline_failure_streak():
     """A failed baseline routes PRELUDE to ENABLEMENT when the lane is admitted."""
     state = _enablement_state("PRELUDE")
-    phase, reason, _ = phase_state.compute_next_phase(state, enablement_enabled=True)
+    phase, reason, _ = phase_state.compute_next_phase(state, flags=phase_state.PhaseFlags(enablement_enabled=True))
     assert phase == phase_state.PHASE_ENABLEMENT
     assert reason == "enablement_entered"
 
@@ -720,13 +1247,13 @@ def test_prelude_enters_enablement_on_a_baseline_failure_streak():
 def test_prelude_skips_enablement_when_the_lane_is_not_admitted():
     """An unadmitted lane leaves PRELUDE waiting for a baseline rather than entering the phase."""
     state = _enablement_state("PRELUDE")
-    assert phase_state.compute_next_phase(state, enablement_enabled=False) is None
+    assert phase_state.compute_next_phase(state, flags=phase_state.PhaseFlags(enablement_enabled=False)) is None
 
 
 def test_enablement_exits_once_the_baseline_lands_and_work_drains():
     """All three conjuncts satisfied is the only way out through the normal exit."""
     state = _enablement_state("ENABLEMENT", tput=1000.0)
-    out = phase_state.compute_next_phase(state, enablement_enabled=True)
+    out = phase_state.compute_next_phase(state, flags=phase_state.PhaseFlags(enablement_enabled=True))
     assert out is not None
     phase, reason, evidence = out
     assert phase != phase_state.PHASE_ENABLEMENT
@@ -737,15 +1264,49 @@ def test_enablement_exits_once_the_baseline_lands_and_work_drains():
 def test_enablement_holds_while_work_is_in_flight():
     """A build outliving its round must not let a later phase reopen validation."""
     state = _enablement_state("ENABLEMENT", tput=1000.0)
-    assert phase_state.compute_next_phase(state, enablement_enabled=True, enablement_in_flight=True) is None
-    inputs = phase_state.workflow_predicate_inputs(state, enablement_enabled=True, enablement_in_flight=True)
+    assert (
+        phase_state.compute_next_phase(
+            state,
+            in_flight=phase_state.WorkInFlight(enablement=True),
+            flags=phase_state.PhaseFlags(enablement_enabled=True),
+        )
+        is None
+    )
+    inputs = phase_state.workflow_predicate_inputs(
+        state,
+        in_flight=phase_state.WorkInFlight(enablement=True),
+        flags=phase_state.PhaseFlags(enablement_enabled=True),
+    )
     assert phase_state.replay_next_phase(inputs) is None
+
+
+def test_enablement_waits_for_the_initial_analysis_like_prelude_does():
+    """The first anchor of a session whose baseline failed is promoted here, and that enqueues the roofline."""
+    state = _enablement_state("ENABLEMENT", tput=1000.0, auto_roofline_pending_task_id="rl-1")
+    assert phase_state.compute_next_phase(state, flags=phase_state.PhaseFlags(enablement_enabled=True)) is None
+    state.auto_roofline_pending_task_id = ""
+    out = phase_state.compute_next_phase(state, flags=phase_state.PhaseFlags(enablement_enabled=True))
+    assert out is not None and out[1] == "enablement_done"
+    assert phase_state.replay_next_phase(out[2]["predicate_inputs"]) == out
+
+
+def test_the_enablement_wait_stops_at_the_optimization_reserve():
+    """Unbounded in an unbounded session; bounded by the reserve once the session has a budget."""
+    state = _enablement_state("ENABLEMENT", tput=1000.0, auto_roofline_pending_task_id="rl-1")
+    # 180 min session reserves 5400 s for optimization; 5000 s usable leaves nothing to hold with.
+    state.max_minutes = 180
+    state.session_budget_usable_sec = lambda: 5_000.0
+    out = phase_state.compute_next_phase(state, flags=phase_state.PhaseFlags(enablement_enabled=True))
+    assert out is not None and out[1] == "enablement_done"
+    assert phase_state.replay_next_phase(out[2]["predicate_inputs"]) == out
+    state.session_budget_usable_sec = lambda: 6_000.0
+    assert phase_state.compute_next_phase(state, flags=phase_state.PhaseFlags(enablement_enabled=True)) is None
 
 
 def test_enablement_holds_while_revalidation_is_pending():
     """An eval-origin KEEP owes a genuine baseline before the run counts as enabled."""
     state = _enablement_state("ENABLEMENT", tput=1000.0, validation_pending=True)
-    assert phase_state.compute_next_phase(state, enablement_enabled=True) is None
+    assert phase_state.compute_next_phase(state, flags=phase_state.PhaseFlags(enablement_enabled=True)) is None
 
 
 def test_replay_recomputes_from_primitive_baseline_facts():

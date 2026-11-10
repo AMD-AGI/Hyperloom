@@ -5,15 +5,21 @@
 
 from __future__ import annotations
 
+import ast
 import csv
+import hashlib
+import json
 import logging
 import os
 import re
+import shutil
+import subprocess
 import time
+from collections.abc import Mapping
 from pathlib import Path
 from typing import Any
 
-from hyperloom.common.aiter_jit_cache import (
+from hyperloom_common.aiter_jit_cache import (
     invalidate_jit_cache,
     resolve_jit_build_dir,
     resolve_package_root,
@@ -25,8 +31,6 @@ log = logging.getLogger(__name__)
 
 # < N .so files under aiter jit/ ⇒ COLD start (first-time JIT compile pending).
 COLD_START_KERNEL_THRESHOLD = 20
-# COLD-start benchmark cap, including first-time compilation and graph capture.
-BASELINE_COLD_START_TIMEOUT_SEC = 9000
 
 # Fallback probe paths for aiter's JIT cache dir; first existing wins.
 AITER_JIT_PROBE_PATHS: tuple[str, ...] = (
@@ -64,6 +68,10 @@ COMPILER_PROCESS_NAMES = frozenset(
 _LOCK_NAMES = {"lock", ".ninja_lock"}
 _BATON_WAIT_MARKER = "waiting for baton release at"
 _BATON_LOG_NAMES = {"server.log", "benchmark_stderr.log", "benchmark_stdout.log"}
+# Bounds on the baton-wait scan: newest log files read, and bytes read from the end of each.
+_BATON_SCAN_MAX_FILES = 20
+_BATON_SCAN_TAIL_BYTES = 256 * 1024
+_UTF8 = "utf-8"
 
 
 def probe_aiter_jit_cache() -> dict[str, Any]:
@@ -104,11 +112,40 @@ def probe_aiter_jit_cache() -> dict[str, Any]:
         info["is_cold"] = kernel_count < COLD_START_KERNEL_THRESHOLD
         info["probe_status"] = "found"
         return info
-    except Exception as exc:  # noqa: BLE001
+    except (OSError, RuntimeError) as exc:
         log.warning("aiter_jit: cache probe failed: %s", exc)
         info["probe_status"] = "error"
         info["is_cold"] = None
         return info
+
+
+def _compiler_match(info: dict[str, Any], build_dirs: list[str]) -> bool | None:
+    """Whether one process is a compiler working under ``build_dirs``; ``None`` when it withheld the fields that say.
+
+    An empty ``build_dirs`` asks only whether the process is a compiler at all.
+    """
+    name = (info.get("name") or "").strip()
+    cmdline = info.get("cmdline") or []
+    is_compiler = name in COMPILER_PROCESS_NAMES
+    if cmdline:
+        first = os.path.basename(str(cmdline[0]).strip())
+        if first in COMPILER_PROCESS_NAMES:
+            is_compiler = True
+    if not is_compiler:
+        if info.get("name") is None or info.get("cmdline") is None:
+            return None
+        return False
+    if not build_dirs:
+        return True
+    cwd = str(info.get("cwd") or "")
+    command = "\0".join(str(arg) for arg in cmdline)
+    if any(
+        cwd == build_dir or cwd.startswith(f"{build_dir}{os.sep}") or build_dir in command for build_dir in build_dirs
+    ):
+        return True
+    if info.get("cwd") is None or info.get("cmdline") is None:
+        return None
+    return False
 
 
 def _any_live_compiler(
@@ -127,33 +164,16 @@ def _any_live_compiler(
                 info = proc.info
                 if info.get("status") == psutil.STATUS_ZOMBIE:
                     continue
-                name = (info.get("name") or "").strip()
-                cmdline = info.get("cmdline") or []
-                is_compiler = name in COMPILER_PROCESS_NAMES
-                if cmdline:
-                    first = os.path.basename(str(cmdline[0]).strip())
-                    if first in COMPILER_PROCESS_NAMES:
-                        is_compiler = True
-                if not is_compiler:
-                    if info.get("name") is None or info.get("cmdline") is None:
-                        unknown = True
-                    continue
-                if not normalized_dirs:
+                match = _compiler_match(info, normalized_dirs)
+                if match:
                     return True
-                cwd = str(info.get("cwd") or "")
-                command = "\0".join(str(arg) for arg in cmdline)
-                if any(
-                    cwd == build_dir or cwd.startswith(f"{build_dir}{os.sep}") or build_dir in command
-                    for build_dir in normalized_dirs
-                ):
-                    return True
-                if info.get("cwd") is None or info.get("cmdline") is None:
+                if match is None:
                     unknown = True
             except psutil.AccessDenied:
                 unknown = True
             except (psutil.NoSuchProcess, psutil.ZombieProcess):
                 continue
-    except Exception as exc:  # noqa: BLE001 — enumeration failed entirely
+    except (psutil.Error, OSError, RuntimeError) as exc:
         log.warning("aiter_jit: compiler-liveness scan failed: %s", exc)
         return None
     return None if unknown else False
@@ -235,19 +255,6 @@ def _resolve_lock_sweep_dirs(aiter_jit_dir: Path | None, unreadable: list[str] |
     return _dedupe_existing_dirs(candidates, unreadable)
 
 
-def _resolve_lock_sweep_dir(aiter_jit_dir: Path | None) -> Path | None:
-    """Compatibility wrapper returning the first resolved build tree."""
-    if aiter_jit_dir is None:
-        override = os.environ.get("INFERENCE_OPTIMIZER_AITER_JIT_DIR", "").strip()
-        if override:
-            override_path = Path(override)
-            preferred = _dedupe_existing_dirs([override_path / "build", override_path])
-            if preferred:
-                return preferred[0]
-    resolved = _resolve_lock_sweep_dirs(aiter_jit_dir)
-    return resolved[0] if resolved else None
-
-
 def clean_stale_aiter_locks(
     aiter_jit_dir: Path | None = None,
     stale_minutes: int = AITER_LOCK_STALE_MINUTES,
@@ -269,38 +276,42 @@ def clean_stale_aiter_locks(
     if not resolved_dirs:
         return stats
 
-    primary = _resolve_lock_sweep_dir(None) if aiter_jit_dir is None else resolved_dirs[0]
-    stats["dir"] = str(primary or resolved_dirs[0])
+    stats["dir"] = str(resolved_dirs[0])
     stats["dirs"] = [str(path) for path in resolved_dirs]
 
     threshold_seconds = float(stale_minutes) * 60.0
     now = time.time()
     for resolved in resolved_dirs:
-        try:
-            walker = os.walk(str(resolved))
-            for root, _dirs, files in walker:
-                for fname in files:
-                    if not (fname in _LOCK_NAMES or fname.startswith("lock_")):
-                        continue
-                    stats["scanned"] += 1
-                    fpath = Path(root) / fname
-                    try:
-                        age = now - fpath.stat().st_mtime
-                    except OSError:
-                        stats["errors"] += 1
-                        continue
-                    if age < threshold_seconds:
-                        stats["skipped_fresh"] += 1
-                        continue
-                    try:
-                        fpath.unlink()
-                        stats["deleted"] += 1
-                    except OSError:
-                        stats["errors"] += 1
-        except OSError:
-            stats["errors"] += 1
+        _sweep_lock_tree(resolved, now, threshold_seconds, stats)
 
     return stats
+
+
+def _sweep_lock_tree(resolved: Path, now: float, threshold_seconds: float, stats: dict[str, Any]) -> None:
+    """Delete the lock files under ``resolved`` older than ``threshold_seconds``, counting outcomes in ``stats``."""
+    try:
+        walker = os.walk(str(resolved))
+        for root, _dirs, files in walker:
+            for fname in files:
+                if not (fname in _LOCK_NAMES or fname.startswith("lock_")):
+                    continue
+                stats["scanned"] += 1
+                fpath = Path(root) / fname
+                try:
+                    age = now - fpath.stat().st_mtime
+                except OSError:
+                    stats["errors"] += 1
+                    continue
+                if age < threshold_seconds:
+                    stats["skipped_fresh"] += 1
+                    continue
+                try:
+                    fpath.unlink()
+                    stats["deleted"] += 1
+                except OSError:
+                    stats["errors"] += 1
+    except OSError:
+        stats["errors"] += 1
 
 
 def sweep_stale_aiter_locks_if_dead(
@@ -331,13 +342,7 @@ def sweep_stale_aiter_locks_if_dead(
     return stats
 
 
-def find_aiter_baton_wait(
-    search_root: Path,
-    *,
-    since_unix: float | None = None,
-    max_files: int = 20,
-    tail_bytes: int = 256 * 1024,
-) -> dict[str, str] | None:
+def find_aiter_baton_wait(search_root: Path, *, since_unix: float | None = None) -> dict[str, str] | None:
     """Find bounded log evidence of an aiter process blocked on a FileBaton."""
     try:
         candidates = [path for path in search_root.rglob("*") if path.is_file() and path.name in _BATON_LOG_NAMES]
@@ -354,12 +359,12 @@ def find_aiter_baton_wait(
     if since_unix is not None:
         candidates = [path for path in candidates if _mtime(path) >= since_unix]
     marker_lower = _BATON_WAIT_MARKER.lower()
-    for path in candidates[:max_files]:
+    for path in candidates[:_BATON_SCAN_MAX_FILES]:
         try:
             with path.open("rb") as handle:
                 handle.seek(0, os.SEEK_END)
                 size = handle.tell()
-                handle.seek(max(0, size - tail_bytes))
+                handle.seek(max(0, size - _BATON_SCAN_TAIL_BYTES))
                 text = handle.read().decode(errors="replace")
         except OSError:
             continue
@@ -380,14 +385,17 @@ COMPILED_REGISTRY_MARKER = "not present in the compiled registry"
 # kernelName values with these libtypes are not linked into serving ``module_*.so``.
 NON_JIT_SO_LIBTYPES = frozenset({"asm", "triton", "gluon", "opus", "flydsl"})
 
-# Longest prefix first: a bpreshuffle CSV may carry ``libtype=cktile`` rows whose
-# kernelName is ``a8w8_blockscale_cktile_*`` (no bpreshuffle infix).
+_BLOCKSCALE_CKTILE = "module_gemm_a8w8_blockscale_cktile"
+_BLOCKSCALE_BPRESHUFFLE_CKTILE = "module_gemm_a8w8_blockscale_bpreshuffle_cktile"
+
+# Longest prefix first. The prefix names a kernel's family, not always its module: see
+# serving_module_for_kernel's ``table_modules``.
 _KERNEL_PREFIX_TO_MODULE: tuple[tuple[str, dict[str, str]], ...] = (
     (
         "a8w8_blockscale_bpreshuffle",
         {
             "ck": "module_gemm_a8w8_blockscale_bpreshuffle",
-            "cktile": "module_gemm_a8w8_blockscale_bpreshuffle_cktile",
+            "cktile": _BLOCKSCALE_BPRESHUFFLE_CKTILE,
             "asm": "module_gemm_a8w8_blockscale_bpreshuffle_asm",
         },
     ),
@@ -395,7 +403,7 @@ _KERNEL_PREFIX_TO_MODULE: tuple[tuple[str, dict[str, str]], ...] = (
         "a8w8_blockscale",
         {
             "ck": "module_gemm_a8w8_blockscale",
-            "cktile": "module_gemm_a8w8_blockscale_cktile",
+            "cktile": _BLOCKSCALE_CKTILE,
             "asm": "module_gemm_a8w8_blockscale_asm",
         },
     ),
@@ -411,16 +419,28 @@ _KERNEL_PREFIX_TO_MODULE: tuple[tuple[str, dict[str, str]], ...] = (
     ("a4w4", {"ck": "module_gemm_a4w4_blockscale"}),
 )
 
+#: Each module's libtype, the key a table's row picks its module by.
+_MODULE_LIBTYPE: dict[str, str] = {
+    module: lib for _, by_lib in _KERNEL_PREFIX_TO_MODULE for lib, module in by_lib.items()
+}
+
+#: Modules one kernel name can live in. Both blockscale tables generate their cktile rows with
+#: ``ck_gemm_a8w8_blockscale/gen_instances_cktile.py``, so a bpreshuffle table's cktile rows are named
+#: ``a8w8_blockscale_cktile_*`` too, and the shared ``.cu`` raises the same registry error for either.
+_MODULES_SHARING_NAMES: dict[str, tuple[str, ...]] = {
+    _BLOCKSCALE_CKTILE: (_BLOCKSCALE_CKTILE, _BLOCKSCALE_BPRESHUFFLE_CKTILE),
+}
+
 # Serving modules whose codegen reads the matching AITER_CONFIG_* tune file.
 AITER_ENV_TO_SERVING_MODULES: dict[str, tuple[str, ...]] = {
     "AITER_CONFIG_GEMM_A8W8_BLOCKSCALE_BPRESHUFFLE": (
         "module_gemm_a8w8_blockscale_bpreshuffle",
-        "module_gemm_a8w8_blockscale_bpreshuffle_cktile",
+        _BLOCKSCALE_BPRESHUFFLE_CKTILE,
         "module_gemm_a8w8_blockscale_bpreshuffle_asm",
     ),
     "AITER_CONFIG_GEMM_A8W8_BLOCKSCALE": (
         "module_gemm_a8w8_blockscale",
-        "module_gemm_a8w8_blockscale_cktile",
+        _BLOCKSCALE_CKTILE,
         "module_gemm_a8w8_blockscale_asm",
     ),
     "AITER_CONFIG_GEMM_A8W8_BPRESHUFFLE": (
@@ -440,6 +460,108 @@ AITER_ENV_TO_TUNED_FILE: dict[str, str] = {
     "AITER_CONFIG_GEMM_A8W8": "a8w8_tuned_gemm",
     "AITER_CONFIG_GEMM_A4W4": "a4w4_blockscale_tuned_gemm",
 }
+
+#: The ``(gfx, cu_num)`` pairs aiter compiles a tuned table's rows for. Its module generators keep only the rows of these
+#: targets (``build_tune_dict`` over ``build_targets.filter_tune_df``, ``aiter/jit/utils``), so a row tuned for another
+#: GPU is in no module built for this one, and its absence says nothing about the module.
+BuildTargets = frozenset[tuple[str, int]]
+_BUILD_TARGETS_FILE = ("jit", "utils", "build_targets.py")
+_DEFAULT_CU_NUMS = "GFX_CU_NUM_MAP"
+_ROCMINFO_FALLBACK = "/opt/rocm/bin/rocminfo"
+_ROCMINFO_TIMEOUT_SEC = 60
+_AGENT_HEADER = re.compile(r"Agent\s*\d+")
+_GPU_AGENT = re.compile(r"Device Type:\s*GPU")
+_AGENT_GFX = re.compile(r"^\s*Name:\s*(gfx[0-9a-z]+)\s*$", re.MULTILINE)
+_AGENT_CUS = re.compile(r"Compute Unit\s*:\s*(\d+)")
+
+
+def aiter_build_targets(package_root: Path, environ: Mapping[str, str]) -> BuildTargets | None:
+    """The targets a server's aiter compiles the tuned tables' rows for, as its ``get_build_targets`` resolves them.
+
+    That is each architecture ``GPU_ARCHS`` names, with ``CU_NUM`` or the CU count the image's
+    ``build_targets.GFX_CU_NUM_MAP`` gives it; or, when ``GPU_ARCHS`` is unset or ``native``, the card's architecture and
+    CU count as ``rocminfo`` reports them (aiter reads the same tool), ``CU_NUM`` overriding the count. ``None`` when
+    that cannot be told -- a named architecture with no count, no ``rocminfo``, cards that differ -- and every row counts.
+    """
+    archs = str(environ.get("GPU_ARCHS") or "").strip()
+    cu_num = _positive_int(environ.get("CU_NUM"))
+    if archs and archs.lower() != "native":
+        defaults = _default_cu_nums(package_root)
+        targets: set[tuple[str, int]] = set()
+        for gfx in [part.strip().lower() for part in archs.split(";") if part.strip()]:
+            count = cu_num or defaults.get(gfx)
+            if count is None:
+                return None
+            targets.add((gfx, count))
+        return frozenset(targets) or None
+    card = card_target()
+    return None if card is None else frozenset({(card[0], cu_num or card[1])})
+
+
+def _positive_int(value: object) -> int | None:
+    try:
+        number = int(str(value).strip())
+    except ValueError:
+        return None
+    return number if number > 0 else None
+
+
+def _default_cu_nums(package_root: Path) -> dict[str, int]:
+    """The image's ``GFX_CU_NUM_MAP``, read as a literal and never imported; empty when it cannot be read."""
+    try:
+        tree = ast.parse(package_root.joinpath(*_BUILD_TARGETS_FILE).read_text(encoding=_UTF8))
+    except (OSError, SyntaxError, UnicodeDecodeError, ValueError):
+        return {}
+    for node in tree.body:
+        if isinstance(node, ast.Assign) and any(
+            isinstance(t, ast.Name) and t.id == _DEFAULT_CU_NUMS for t in node.targets
+        ):
+            try:
+                value = ast.literal_eval(node.value)
+                return {str(k).lower(): int(v) for k, v in value.items()} if isinstance(value, dict) else {}
+            except (ValueError, TypeError, SyntaxError):
+                return {}
+    return {}
+
+
+#: The card :func:`card_target` read, once it was read: a card does not change under a process, a failure to read it can.
+_CARD: list[tuple[str, int]] = []
+
+
+def card_target() -> tuple[str, int] | None:
+    """This card's ``(gfx, compute units)`` as ``rocminfo`` reports them, what a server's aiter builds for when neither
+    ``GPU_ARCHS`` nor ``CU_NUM`` names another target; ``None`` when it cannot be read (and read again next time)."""
+    if not _CARD:
+        card = _read_card()
+        if card is None:
+            return None
+        _CARD.append(card)
+    return _CARD[0]
+
+
+def _read_card() -> tuple[str, int] | None:
+    """The ``(gfx, compute units)`` every GPU agent ``rocminfo`` lists shares; ``None`` when they differ or none is read."""
+    tool = shutil.which("rocminfo") or (_ROCMINFO_FALLBACK if os.path.exists(_ROCMINFO_FALLBACK) else None)
+    if tool is None:
+        return None
+    try:
+        text = subprocess.run([tool], capture_output=True, text=True, timeout=_ROCMINFO_TIMEOUT_SEC, check=False).stdout
+    except (OSError, subprocess.SubprocessError):
+        return None
+    found: set[tuple[str, int]] = set()
+    for block in _AGENT_HEADER.split(text or ""):
+        if not _GPU_AGENT.search(block):
+            continue
+        gfx, cus = _AGENT_GFX.search(block), _AGENT_CUS.search(block)
+        if gfx is None or cus is None:
+            return None
+        found.add((gfx.group(1).lower(), int(cus.group(1))))
+    return next(iter(found)) if len(found) == 1 else None
+
+
+def target_names(targets: BuildTargets | None) -> list[str]:
+    """``targets`` as ``<gfx>/<cu_num>`` words, sorted; empty when they are not known."""
+    return sorted(f"{gfx}/{cu_num}" for gfx, cu_num in targets or ())
 
 
 def is_aiter_jit_registry_mismatch(*texts: str) -> bool:
@@ -475,30 +597,67 @@ def registry_mismatch_modules(*texts: str) -> tuple[str, ...]:
         # cktile kernel carries it in its own name.
         resolved = serving_module_for_kernel(kernel, "cktile" if "cktile" in kernel else "ck")
         if resolved:
-            modules.append(resolved)
+            modules.extend(_MODULES_SHARING_NAMES.get(resolved, (resolved,)))
     return tuple(dict.fromkeys(modules))
 
 
-def serving_module_for_kernel(kernel_name: str, libtype: str) -> str | None:
-    """Serving ``module_*.so`` that should contain this JIT kernel name."""
+def serving_module_for_kernel(kernel_name: str, libtype: str, table_modules: tuple[str, ...] = ()) -> str | None:
+    """Serving ``module_*.so`` that should contain this JIT kernel name.
+
+    Args:
+        kernel_name: The row's ``kernelName``.
+        libtype: The row's ``libtype``; empty means ``ck``.
+        table_modules: The modules the row's table generates, when the caller knows the table. aiter
+            builds a table's rows into that table's module for their libtype whatever the name says:
+            a bpreshuffle table's ``a8w8_blockscale_cktile_*`` rows live in its own cktile module.
+    """
     lib = str(libtype or "").strip().lower() or "ck"
+    for module in table_modules:
+        if _MODULE_LIBTYPE.get(module) == lib:
+            return module
     for prefix, by_lib in _KERNEL_PREFIX_TO_MODULE:
         if kernel_name.startswith(prefix):
             return by_lib.get(lib)
     return None
 
 
-def csv_jit_kernel_rows(csv_path: Path) -> list[tuple[str, str]]:
-    """``(kernelName, libtype)`` rows that are linked into a serving ``module_*.so``.
+def _compiled_for(row: dict[str, Any], targets: BuildTargets | None) -> bool:
+    """Whether aiter compiles a table row's kernel for ``targets``. A row that names no gfx or no CU count is kept (aiter
+    fills them in from each other or from the card), as is every row when the targets are not known."""
+    gfx, cu_num = (str(row.get(column) or "").strip() for column in ("gfx", "cu_num"))
+    if targets is None or not gfx or not cu_num:
+        return True
+    try:
+        return (gfx.lower(), int(float(cu_num))) in targets
+    except ValueError:
+        return True
+
+
+#: The columns aiter keys a tuned row's dispatch entry by (``build_tune_dict`` / ``build_tune_dict_batched``,
+#: ``aiter/jit/utils/chip_info.py``); a later row of the same key replaces an earlier one, whose kernel is never built.
+_DISPATCH_KEY_COLUMNS = ("gfx", "cu_num", "B", "M", "N", "K")
+
+
+def _dispatch_key(row: dict[str, Any], libtype: str, index: int) -> tuple[str, ...]:
+    """The entry a row lands in within its libtype's dispatch dict; a row with no shape is its own entry."""
+    key = tuple(str(row.get(column) or "").strip() for column in _DISPATCH_KEY_COLUMNS)
+    if not any(key[3:]):
+        return (str(index),)
+    return (libtype, *key)
+
+
+def csv_jit_kernel_rows(csv_path: Path, targets: BuildTargets | None = None) -> list[tuple[str, str]]:
+    """Each ``(kernelName, libtype)`` pair linked into a serving ``module_*.so``, once, in first-seen order; only the
+    rows aiter compiles for ``targets`` when they are given, and of the rows sharing a dispatch key only the last.
 
     The tables this reads ship with aiter, so their encoding and field sizes are not
     ours to assume: a BOM raises ``UnicodeDecodeError`` and an overlong field raises
     ``csv.Error``, and either escaping here would skip the whole coverage check.
     """
-    rows: list[tuple[str, str]] = []
+    by_key: dict[tuple[str, ...], tuple[str, str]] = {}
     try:
-        with csv_path.open(newline="", encoding="utf-8") as handle:
-            for row in csv.DictReader(handle):
+        with csv_path.open(newline="", encoding=_UTF8) as handle:
+            for index, row in enumerate(csv.DictReader(handle)):
                 name = str(row.get("kernelName") or "").strip()
                 if not name:
                     continue
@@ -507,22 +666,24 @@ def csv_jit_kernel_rows(csv_path: Path) -> list[tuple[str, str]]:
                     continue
                 if not libtype and name.startswith("_ZN"):
                     continue
-                rows.append((name, libtype))
+                if _compiled_for(row, targets):
+                    by_key[_dispatch_key(row, libtype, index)] = (name, libtype)
     except (OSError, UnicodeDecodeError, csv.Error) as exc:
         log.warning("aiter_jit: cannot read tuned CSV %s (%s); treating it as covered", csv_path, exc)
         return []
-    return rows
+    return list(dict.fromkeys(by_key.values()))
 
 
-def serving_modules_cover_csv(jit_dir: Path, modules: tuple[str, ...], csv_path: Path) -> bool:
-    """True when every JIT ``kernelName`` in the CSV appears in its serving .so.
+def serving_modules_cover_rows(jit_dir: Path, modules: tuple[str, ...], rows: list[tuple[str, str]]) -> bool:
+    """True when every JIT ``kernelName`` in ``rows`` appears in its serving .so.
 
     ``libtype=asm`` (and other non-JIT backends) names are not linked into
-    ``module_*.so``. A name is looked up in the module implied by its prefix and
-    ``libtype``, falling back to ``modules``. Missing .so files mean the next start
-    will compile from the current CSV, so that case is treated as covered.
+    ``module_*.so``, and a row tuned for another GPU than the targets ``rows`` were read for is in no module built for
+    these (:func:`csv_jit_kernel_rows` with :func:`aiter_build_targets`; every row counts when they are ``None``). A
+    name is looked up in the module of ``modules`` its ``libtype`` names, then in the one its prefix implies, falling
+    back to ``modules``. Missing .so files mean the next start will compile from the current CSV, so that case is
+    treated as covered.
     """
-    rows = csv_jit_kernel_rows(csv_path)
     if not rows:
         return True
     blobs: dict[str, bytes | None] = {}
@@ -540,9 +701,9 @@ def serving_modules_cover_csv(jit_dir: Path, modules: tuple[str, ...], csv_path:
         return blobs[module]
 
     for name, libtype in rows:
-        resolved = serving_module_for_kernel(name, libtype)
+        resolved = serving_module_for_kernel(name, libtype, modules)
         search = (resolved,) if resolved else modules
-        encoded = name.encode("utf-8")
+        encoded = name.encode(_UTF8)
         saw_so = False
         found = False
         for module in dict.fromkeys(search):
@@ -556,6 +717,127 @@ def serving_modules_cover_csv(jit_dir: Path, modules: tuple[str, ...], csv_path:
         if saw_so and not found:
             return False
     return True
+
+
+#: What hyperloom's prewarm writes beside the modules it built from the image's own tree and tables
+#: (``hyperloom.measure.runner.native.prewarm``): ``{"schema", "modules": [{"name", "sha256", "tables_sha256", ...}]}``.
+#: This module owns the format; the prewarm writes it and the measure runner reads it with these names.
+AITER_PREWARM_MANIFEST = "hyperloom-prewarm.json"
+AITER_PREWARM_SCHEMA = "hyperloom.aiter_prewarm/1"
+_MODULE_CONFIG = "optCompilerConfig.json"
+_HASH_CHUNK_BYTES = 1024 * 1024
+
+
+def _file_sha256(path: Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as handle:
+        while chunk := handle.read(_HASH_CHUNK_BYTES):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+def tuned_tables_sha256(configs_dir: Path) -> str:
+    """The prewarm's digest of aiter's tuned tables: a line ``<relative path>\\t<sha256>\\n`` per file, by path."""
+    files = sorted((p.relative_to(configs_dir).as_posix(), p) for p in configs_dir.rglob("*") if p.is_file())
+    digest = hashlib.sha256()
+    for relative, path in files:
+        digest.update(f"{relative}\t{_file_sha256(path)}\n".encode())
+    return digest.hexdigest()
+
+
+def read_prewarm_manifest(jit_dir: Path) -> dict[str, dict[str, Any]]:
+    """The modules :data:`AITER_PREWARM_MANIFEST` in ``jit_dir`` lists, by name; empty when there is none or it is not
+    one."""
+    try:
+        document = json.loads((Path(jit_dir) / AITER_PREWARM_MANIFEST).read_bytes())
+    except (OSError, ValueError):
+        return {}
+    if not isinstance(document, dict) or document.get("schema") != AITER_PREWARM_SCHEMA:
+        return {}
+    entries = document.get("modules")
+    if not isinstance(entries, list):
+        return {}
+    return {str(entry["name"]): entry for entry in entries if isinstance(entry, dict) and "name" in entry}
+
+
+def image_own_modules(
+    jit_dir: Path, configs_dir: Path, envs: dict[str, str] | None, targets: BuildTargets | None
+) -> frozenset[str]:
+    """Serving modules the prewarm built from the image's own tree and tables that are still what it installed.
+
+    A module counts when the prewarm manifest lists it with the sha256 its ``.so`` has now, with the
+    tables ``configs_dir`` holds now and with the ``gfx`` and ``cu_num`` of the one target the servers build
+    for (``targets``, :func:`aiter_build_targets`), and this round leaves its ``AITER_CONFIG_*`` unset: it is
+    then the module aiter would build at the first call, so moving it aside only makes the next start compile
+    it again, past sglang's watchdog. A module of a variable the round sets reads another table and is not
+    the image's own for this round; one built for another card or CU count holds another card's rows, and
+    none counts when the target is not known.
+    """
+    entries = read_prewarm_manifest(jit_dir)
+    if not entries:
+        return frozenset()
+    overridden = {
+        m
+        for key, value in (envs or {}).items()
+        if str(value).strip()
+        for m in AITER_ENV_TO_SERVING_MODULES.get(key, ())
+    }
+    tables: str | None = None
+    own: set[str] = set()
+    for entry in entries.values():
+        name = _installed_for(entry, jit_dir, overridden, targets)
+        if name is None:
+            continue
+        try:
+            tables = tuned_tables_sha256(configs_dir) if tables is None else tables
+        except OSError:
+            continue
+        if entry.get("tables_sha256") == tables:
+            own.add(name)
+    return frozenset(own)
+
+
+def _installed_for(entry: object, jit_dir: Path, overridden: set[str], targets: BuildTargets | None) -> str | None:
+    """The module a manifest entry lists, when its ``.so`` is still what the prewarm installed for the one target
+    ``targets`` names and the round leaves its table unset; ``None`` otherwise."""
+    name = str(entry.get("name") or "") if isinstance(entry, dict) else ""
+    so_path = jit_dir / f"{name}.so"
+    if not name or name in overridden or not so_path.is_file() or not _built_for(entry, targets):
+        return None
+    try:
+        return name if _file_sha256(so_path) == entry.get("sha256") else None
+    except OSError:
+        return None
+
+
+def _built_for(entry: Mapping[str, Any], targets: BuildTargets | None) -> bool:
+    """Whether a manifest entry's module was built for the one target ``targets`` names."""
+    try:
+        return targets == frozenset({(str(entry.get("gfx")).lower(), int(entry.get("cu_num")))})
+    except (TypeError, ValueError):
+        return False
+
+
+def _module_config(package_root: Path) -> dict[str, Any]:
+    """aiter's module config (``jit/optCompilerConfig.json``) of the package; empty when it cannot be read."""
+    try:
+        document = json.loads((package_root / "jit" / _MODULE_CONFIG).read_text(encoding=_UTF8))
+    except (OSError, ValueError):
+        return {}
+    return document if isinstance(document, dict) else {}
+
+
+def _generated_from(config: Mapping[str, Any], env_var: str, modules: tuple[str, ...]) -> tuple[str, ...]:
+    """The ``modules`` of ``env_var`` that aiter generates from its table: those whose entry's code generator reads
+    ``AITER_CONFIGS.<env_var>_FILE``, and those the module config does not describe. Rebuilding one of the others (an
+    ``_asm`` module, built from the ``hsa`` kernel lists of the card's architecture or from fixed sources) adds no row of
+    the table to it."""
+    reads = f"AITER_CONFIGS.{env_var}_FILE"
+    return tuple(
+        module
+        for module in modules
+        if not isinstance(config.get(module), Mapping) or reads in str(config[module].get("blob_gen_cmd") or "")
+    )
 
 
 def _invalidate_jit_build(jit_build: Path, backup_dir: Path, modules: tuple[str, ...]) -> dict[str, Any]:
@@ -610,6 +892,7 @@ def prepare_serving_so_for_csvs(
     envs: dict[str, str],
     *,
     backup_dir: Path | None = None,
+    environ: Mapping[str, str] | None = None,
 ) -> dict[str, Any]:
     """Skip when serving .so already covers the CSVs this boot loads; otherwise re-JIT.
 
@@ -617,9 +900,13 @@ def prepare_serving_so_for_csvs(
         envs: The round's ``AITER_CONFIG_*`` values; a variable it does not name is
             checked on aiter's unset branch, which is where the model overlays come in.
         backup_dir: Where to back up selected modules and ``jit/build`` for invalidation.
+        environ: The servers' environment, whose ``GPU_ARCHS`` and ``CU_NUM`` (or else the card) decide which rows
+            aiter compiles (:func:`aiter_build_targets`); this process's when ``None``.
 
     Returns:
-        A status dict with ``action`` of ``skip``, ``invalidate``, or ``noop``.
+        A status dict with ``action`` of ``skip``, ``invalidate``, or ``noop``; ``skip`` and ``invalidate`` name the
+        ``targets`` the rows were read for, and ``invalidate`` the ``variables`` whose tables outran the modules, the
+        aiter ``package`` and the ``backup`` directory the modules went to.
     """
     context = resolve_serving_context(
         os.environ.get("INFERENCE_OPTIMIZER_AITER_JIT_DIR"), jit_probe_paths=AITER_JIT_PROBE_PATHS
@@ -629,24 +916,41 @@ def prepare_serving_so_for_csvs(
     package_root, jit_build = context
     jit_dir = jit_build.parent
     configs_dir = package_root / "configs"
-    modules_needed: list[str] = []
+    targets = aiter_build_targets(package_root, os.environ if environ is None else environ)
+    config = _module_config(package_root)
+    tables: list[tuple[str, tuple[str, ...], list[tuple[str, str]]]] = []
     for env_var, modules in AITER_ENV_TO_SERVING_MODULES.items():
         tuned_file_name = AITER_ENV_TO_TUNED_FILE.get(env_var, "")
         if not tuned_file_name:
             continue
         for csv_path in csvs_aiter_will_load(configs_dir, tuned_file_name, str(envs.get(env_var) or "")):
-            if not csv_path.is_file():
-                continue
-            if serving_modules_cover_csv(jit_dir, modules, csv_path):
-                continue
-            modules_needed.extend(modules)
-            for name, libtype in csv_jit_kernel_rows(csv_path):
-                resolved = serving_module_for_kernel(name, libtype)
-                if resolved:
-                    modules_needed.append(resolved)
-    modules_needed_t = tuple(dict.fromkeys(modules_needed))
+            if csv_path.is_file():
+                tables.append((env_var, modules, csv_jit_kernel_rows(csv_path, targets)))
+    log.info(
+        "aiter_jit: checking %d tuned table(s), %d kernel(s), against the serving .so in %s",
+        len(tables),
+        sum(len(rows) for _, _, rows in tables),
+        jit_dir,
+    )
+    modules_needed: list[str] = []
+    variables: list[str] = []
+    for env_var, modules, rows in tables:
+        if serving_modules_cover_rows(jit_dir, modules, rows):
+            continue
+        variables.append(env_var)
+        modules_needed.extend(_generated_from(config, env_var, modules))
+        for name, libtype in rows:
+            resolved = serving_module_for_kernel(name, libtype, modules)
+            if resolved:
+                modules_needed.append(resolved)
+    own = image_own_modules(jit_dir, configs_dir, envs, targets) if modules_needed else frozenset()
+    modules_needed_t = tuple(m for m in dict.fromkeys(modules_needed) if m not in own)
+    read_for = {"jit_dir": str(jit_dir), "targets": target_names(targets)}
     if not modules_needed_t:
-        return {"action": "skip", "jit_dir": str(jit_dir)}
+        skipped: dict[str, Any] = {"action": "skip", **read_for}
+        if own:
+            skipped["kept_image_own"] = sorted(own)
+        return skipped
     dest = backup_dir or (jit_dir / "hyperloom_jit_backup")
     invalidation = _invalidate_jit_build(jit_build, dest, modules_needed_t)
     removed = [str(Path(invalidation["src"]).parent / name) for name in invalidation["module_names"]]
@@ -657,9 +961,12 @@ def prepare_serving_so_for_csvs(
     )
     return {
         "action": "invalidate",
-        "jit_dir": str(jit_dir),
+        **read_for,
         "removed": removed,
         "jit_build": invalidation,
+        "variables": list(dict.fromkeys(variables)),
+        "package": str(package_root),
+        "backup": str(dest),
     }
 
 
@@ -683,9 +990,12 @@ def drop_serving_so_for_envs(
     )
     if context is None:
         return {"action": "noop", "reason": "aiter jit dir not found"}
-    _, jit_build = context
+    package_root, jit_build = context
     jit_dir = jit_build.parent
-    modules = tuple(dict.fromkeys((*_modules_for_envs(envs), *also_modules)))
+    # A module a registry mismatch named is dropped even when it is the image's own: its tables changed under it.
+    targets = aiter_build_targets(package_root, os.environ)
+    own = image_own_modules(jit_dir, package_root / "configs", envs, targets) - set(also_modules)
+    modules = tuple(m for m in dict.fromkeys((*_modules_for_envs(envs), *also_modules)) if m not in own)
     dest = backup_dir or (jit_dir / "hyperloom_jit_backup")
     invalidation = _invalidate_jit_build(jit_build, dest, modules)
     removed = [str(Path(invalidation["src"]).parent / name) for name in invalidation["module_names"]]
@@ -712,24 +1022,32 @@ __all__ = [
     "AITER_ENV_TO_TUNED_FILE",
     "AITER_JIT_PROBE_PATHS",
     "AITER_LOCK_STALE_MINUTES",
-    "BASELINE_COLD_START_TIMEOUT_SEC",
+    "AITER_PREWARM_MANIFEST",
+    "AITER_PREWARM_SCHEMA",
+    "BuildTargets",
     "COLD_START_KERNEL_THRESHOLD",
     "COMPILER_PROCESS_NAMES",
     "COMPILED_REGISTRY_MARKER",
     "NON_JIT_SO_LIBTYPES",
+    "aiter_build_targets",
+    "card_target",
     "clean_stale_aiter_locks",
     "csv_jit_kernel_rows",
     "csvs_aiter_will_load",
     "drop_serving_so_for_envs",
     "find_aiter_baton_wait",
+    "image_own_modules",
     "is_aiter_jit_registry_mismatch",
     "prepare_serving_so_for_csvs",
     "probe_aiter_jit_cache",
+    "read_prewarm_manifest",
     "registry_mismatch_modules",
     "result_is_aiter_jit_registry_mismatch",
     "serving_module_for_kernel",
-    "serving_modules_cover_csv",
+    "serving_modules_cover_rows",
     "sweep_stale_aiter_locks_if_dead",
+    "target_names",
+    "tuned_tables_sha256",
     "_any_live_compiler",
     "_resolve_lock_sweep_dirs",
 ]

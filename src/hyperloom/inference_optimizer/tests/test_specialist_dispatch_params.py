@@ -8,9 +8,9 @@ from __future__ import annotations
 import pytest
 
 from hyperloom.orchestrator.roles.agent_role import default_role_registry
+from hyperloom.orchestrator.policy.denial import PolicyDenied
 from hyperloom.orchestrator.policy.gate import (
     KNOWLEDGE_DOMAIN_TAG_SET,
-    PolicyDenied,
     PolicyGate,
     SPECIALIST_FREEFORM_TASK_DESC_MAX_CHARS,
     SPECIALIST_FREEFORM_WAVE_MAX,
@@ -25,7 +25,6 @@ from hyperloom.orchestrator.specialists.profile import (
     SCOPE_DOMAIN,
     SCOPE_FREEFORM,
     SpecialistProfile,
-    holds_serving_slot,
     requires_gpu,
     resolve_specialist_profile,
     specialist_lanes,
@@ -97,12 +96,13 @@ def test_bench_falsy_values(falsy):
     assert prof.reserves_benchmark_lane is False
 
 
-def test_holds_serving_slot_only_for_bench_capable():
+def test_reserves_benchmark_lane_only_for_bench_capable():
     """Only bench-capable patch specialists hold the whole-machine serving_slot."""
-    assert holds_serving_slot({"mode": "patch", "bench": True}) is True
-    assert holds_serving_slot({"framework_agent_authoring": True, "domain": "serving_specialist"}) is False
-    assert holds_serving_slot({"mode": "research"}) is False
-    assert holds_serving_slot(None) is False
+    assert resolve_specialist_profile({"mode": "patch", "bench": True}).reserves_benchmark_lane is True
+    authoring = {"framework_agent_authoring": True, "domain": "serving_specialist"}
+    assert resolve_specialist_profile(authoring).reserves_benchmark_lane is False
+    assert resolve_specialist_profile({"mode": "research"}).reserves_benchmark_lane is False
+    assert resolve_specialist_profile(None).reserves_benchmark_lane is False
 
 
 def test_bench_is_meaningless_for_research_mode():
@@ -240,6 +240,24 @@ def test_freeform_description_too_long_rejected(gate, orchestration_role):
             _dispatch({"scope": "freeform", "task_description": huge}),
         )
     assert exc.value.rule == "specialist_freeform_description_too_long"
+
+
+@pytest.mark.parametrize("framework", ["tensorrt", "", None])
+def test_unregistered_framework_param_rejected(gate, orchestration_role, framework):
+    """A specialist resolves its source tree from params.framework, so the name must be one the registry knows."""
+    with pytest.raises(PolicyDenied) as exc:
+        gate._validate_specialist_dispatch(
+            orchestration_role,
+            _dispatch({"scope": "freeform", "task_description": "A short mandate.", "framework": framework}),
+        )
+    assert exc.value.rule == "specialist_framework_unregistered"
+
+
+def test_registered_framework_param_admitted(gate, orchestration_role):
+    gate._validate_specialist_dispatch(
+        orchestration_role,
+        _dispatch({"scope": "freeform", "task_description": "A short mandate.", "framework": "vllm"}),
+    )
 
 
 @pytest.mark.parametrize(
@@ -780,6 +798,20 @@ def test_specialist_emit_hint_lists_every_llm_selectable_domain():
         assert key in hint, key
     for key in (d.key for d in SPECIALIST_DOMAINS if not d.llm_selectable):
         assert key not in hint, key
+
+
+def test_gate_denies_orchestration_naming_a_coordinator_dispatched_domain(gate):
+    """A domain only the Coordinator dispatches is refused to Orchestration, with the authoring domain to use instead."""
+    from hyperloom.inference_optimizer.protocol.intent import Intent, IntentType
+
+    intent = Intent(
+        type=IntentType.DELEGATE,
+        payload=_dispatch({"domain": "enablement_specialist", "gap_canonical_id": "gap.x", "framework": "sglang"}),
+    )
+    with pytest.raises(PolicyDenied) as exc:
+        gate.validate_intent("orchestration", intent)
+    assert exc.value.rule == "specialist_domain_coordinator_dispatched"
+    assert "serving_specialist" in exc.value.hint
 
 
 # --------------------------------------------------------------------------- # gate gpu_count default aligned with

@@ -15,36 +15,16 @@ from __future__ import annotations
 import logging
 from collections.abc import Mapping, Sequence
 from pathlib import Path
-from typing import Any, Protocol
+from typing import Any
 
+from ...session.session_binding import bound_session_or_none
 from .event_ids import fragment_key, parse_event_id
 from .event_rows import EVENT_ID_FIELD
 from .recorder_warnings import RECORDING_ERRORS, note_failure
 
-__all__ = ["EventSink", "RecordSink", "make_sink"]
+__all__ = ["EventSink", "bound_sink"]
 
 log = logging.getLogger(__name__)
-
-
-class RecordSink(Protocol):
-    """What an executor needs of the thing its rows are written through."""
-
-    @property
-    def event_id(self) -> str:
-        """str: The event the rows written through this sink belong to."""
-
-    def record(
-        self,
-        section: str,
-        payload: Mapping[str, Any],
-        *,
-        row_type: str = "",
-        natural_ids: str | Sequence[str] = (),
-    ) -> Path | None:
-        """Record one row into ``section``."""
-
-    def append(self, section: str, payload: Mapping[str, Any]) -> Path | None:
-        """Append one row to ``section``, with no identity of its own."""
 
 
 class EventSink:
@@ -60,11 +40,6 @@ class EventSink:
     def event_id(self) -> str:
         """str: The event the rows written through this sink belong to."""
         return self._event_id
-
-    @property
-    def producer(self) -> str:
-        """str: The producer label the fragments are written under."""
-        return self._producer
 
     def record(
         self,
@@ -183,14 +158,13 @@ class EventSink:
             return None
 
 
-def make_sink(event: str, *, producer: str) -> EventSink:
-    """Build the sink for one event.
+def bound_sink(event: str, *, producer: str) -> EventSink | None:
+    """The sink for ``event``, or ``None`` when no session is bound.
 
-    The standalone and inline wrappers of a shared executor both call this;
-    they differ only in the event id they pass, which is the whole of the
-    difference between the two modes.
-
-    Raises:
-        ValueError: If ``event`` is not a well-formed event id.
+    The rows themselves are written best-effort by the sink, so a caller need
+    not guard its own writes: a spool that cannot be written drops the row
+    there and the caller carries on.
     """
+    if bound_session_or_none() is None:
+        return None
     return EventSink(event, producer=producer)

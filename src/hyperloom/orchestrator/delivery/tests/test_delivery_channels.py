@@ -11,17 +11,14 @@ from pathlib import Path
 
 import pytest
 
-from hyperloom.inference_optimizer.reference_script import render_reference_script
 from hyperloom.orchestrator.actions.executors._nogit_patch import (
     _apply_patch_no_git,
     _reverse_applies_cleanly,
 )
-from hyperloom.orchestrator.bringup.trees import VCS_GIT, VCS_NONE
 from hyperloom.orchestrator.delivery import file_digest, ledger
-from hyperloom.orchestrator.specialists.subprocess_ import (
-    SpecialistSubprocessDispatcher,
-    _declared_targets,
-)
+from hyperloom.orchestrator.delivery.deliverable import declared_targets
+from hyperloom.orchestrator.specialists.subprocess_ import SpecialistSubprocessDispatcher
+from hyperloom_common.git_safety import recorded_admin_dir
 
 
 def _git(cwd: Path, *args: str) -> None:
@@ -40,19 +37,24 @@ def test_declared_targets_scope_the_harvest_pathspec() -> None:
 
 
 def test_the_round_declaration_scopes_the_harvest() -> None:
-    assert _declared_targets({"deliverable": {"tree_id": "t", "targets": ["pkg/wide.py"]}}) == ("pkg/wide.py",)
-    assert _declared_targets({}) == ()
+    assert declared_targets({"deliverable": {"tree_id": "t", "targets": ["pkg/wide.py"]}}) == ("pkg/wide.py",)
+    assert declared_targets({"targets": ["pkg/a.py", " pkg/a.py ", "", "pkg/b.py"]}) == ("pkg/a.py", "pkg/b.py")
+    assert declared_targets({"deliverable": {}, "targets": ["pkg/flat.py"]}) == ()
+    assert declared_targets({}) == ()
+    assert declared_targets(None) == ()
 
 
 def test_an_uncommitted_worktree_edit_is_still_harvested(tmp_path: Path) -> None:
-    worktree = tmp_path / "wt"
-    (worktree / "pkg").mkdir(parents=True)
-    (worktree / "pkg" / "mod.py").write_text("base\n", encoding="utf-8")
-    _git(worktree, "init", "-q")
-    _git(worktree, "config", "user.email", "t@example.invalid")
-    _git(worktree, "config", "user.name", "t")
-    _git(worktree, "add", "-A")
-    _git(worktree, "commit", "-qm", "base")
+    repo = tmp_path / "repo"
+    worktree = tmp_path / "wt"  # a linked worktree, as the dispatcher makes it
+    (repo / "pkg").mkdir(parents=True)
+    (repo / "pkg" / "mod.py").write_text("base\n", encoding="utf-8")
+    _git(repo, "init", "-q")
+    _git(repo, "config", "user.email", "t@example.invalid")
+    _git(repo, "config", "user.name", "t")
+    _git(repo, "add", "-A")
+    _git(repo, "commit", "-qm", "base")
+    _git(repo, "worktree", "add", "-q", "-b", "sp", str(worktree))
     base = subprocess.run(
         ["git", "-C", str(worktree), "rev-parse", "HEAD"], capture_output=True, text=True, check=True
     ).stdout.strip()
@@ -64,7 +66,9 @@ def test_an_uncommitted_worktree_edit_is_still_harvested(tmp_path: Path) -> None
     (worktree / "patches").mkdir()
     (worktree / "patches" / "copy_of_mod.py").write_text("base\n", encoding="utf-8")
 
-    diff = SpecialistSubprocessDispatcher._harvest_worktree_diff(worktree, base=base)
+    diff = SpecialistSubprocessDispatcher._harvest_worktree_diff(
+        worktree, admin=recorded_admin_dir(repo, worktree), base=base
+    )
     assert "pkg/mod.py" in diff
     assert "pkg/added.py" in diff
     assert "copy_of_mod.py" not in diff
@@ -84,8 +88,8 @@ def test_the_non_git_channel_records_every_backup_before_it_mutates(tmp_path: Pa
     )
     backup_root = tmp_path / "backups"
 
-    ok, err, backups, _ = _apply_patch_no_git(root, patch, backup_root)
-    assert ok, err
+    result = _apply_patch_no_git(root, patch, backup_root)
+    assert result.ok, result.error
     assert target.read_text(encoding="utf-8") == "two\n"
 
     # The record is on disk, not only in the list the caller happens to hold.
@@ -119,30 +123,8 @@ def test_a_near_miss_is_not_accepted_as_already_applied(tmp_path: Path) -> None:
     assert not _reverse_applies_cleanly(root, patch), "an offset-only match is not the post-image"
 
 
-@pytest.mark.skipif(shutil.which("patch") is None, reason="POSIX patch is not installed")
-def test_the_replay_script_matches_the_tree_kind() -> None:
-    rounds = [{"patches": ["patches/001_fix.patch"], "artifacts": []}]
-    common = {
-        "framework": "sglang",
-        "server_args": "",
-        "framework_root": "/opt/sglang",
-        "rounds": rounds,
-    }
-
-    git_script = render_reference_script(**common, framework_root_vcs=VCS_GIT)
-    assert 'git -C "$FRAMEWORK_ROOT" apply' in git_script
-    assert "patch -p" not in git_script
-
-    nogit_script = render_reference_script(**common, framework_root_vcs=VCS_NONE)
-    # Under ``set -e`` a git ladder against a wheel aborts before the launch line.
-    assert "set -euo pipefail" in nogit_script
-    assert "git -C" not in nogit_script
-    assert 'patch -p"$lvl" --fuzz=0 -d "$FRAMEWORK_ROOT"' in nogit_script
-    assert nogit_script.rstrip().endswith("python3 -m sglang.launch_server --model-path=$MODEL")
-
-
 def test_a_revert_that_leaves_a_patched_file_behind_is_named(tmp_path: Path) -> None:
-    from hyperloom.orchestrator.actions.executors.integrate_patch import restore_pending_integrate
+    from hyperloom.orchestrator.actions.executors._patch_git import restore_pending_integrate
 
     root = tmp_path / "wheel"
     root.mkdir()
@@ -158,8 +140,7 @@ def test_a_revert_that_leaves_a_patched_file_behind_is_named(tmp_path: Path) -> 
         {
             "target": str(target),
             "existed": True,
-            "backup_path": str(backup),
-            "revert_action": "restore",
+            "backup": str(backup),
             "pre_image_sha256": file_digest(target),
         },
     )

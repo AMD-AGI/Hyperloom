@@ -8,7 +8,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
 
-from hyperloom.common.env import is_truthy
+from hyperloom_common.env import is_truthy
 
 if TYPE_CHECKING:
     from .domains import SpecialistDomain
@@ -30,6 +30,9 @@ MODE_VALUES: frozenset[str] = frozenset({MODE_RESEARCH, MODE_PATCH})
 DEFAULT_SCOPE = SCOPE_DOMAIN
 DEFAULT_MODE = MODE_PATCH
 DEFAULT_BENCH = False
+
+# Param marking a dispatch no Orchestration turn will extend: it runs to the wall-budget cap, not its mode's base.
+NO_LEASE_EXTENSION = "no_lease_extension"
 
 
 @dataclass(frozen=True)
@@ -107,21 +110,20 @@ def uses_whole_machine_gpu_lane(params: dict[str, Any] | None) -> bool:
     return bool(p.get("enablement")) or resolve_specialist_profile(p).reserves_benchmark_lane
 
 
-def holds_serving_slot(params: dict[str, Any] | None) -> bool:
-    """True when a GPU specialist must hold the whole-machine ``serving_slot`` Ray resource (mutually exclusive with production serving)."""
-    return resolve_specialist_profile(params or {}).reserves_benchmark_lane
-
-
 def resolve_specialist_profile(
     params: dict[str, Any] | None,
     domain: "SpecialistDomain | None" = None,
 ) -> SpecialistProfile:
-    """Resolve scope/mode/bench from dispatch params, falling back to safe defaults."""
+    """Resolve scope/mode/bench from dispatch params, falling back to safe defaults.
+
+    The scope is re-inferred from the tags when it is unknown, or ``domains`` over fewer than two tags.
+    """
     p = params or {}
 
     scope = str(p.get("scope") or "").strip().lower()
-    if scope not in SCOPE_VALUES:
-        scope = _infer_scope(p)
+    inferred = _infer_scope(p)
+    if scope not in SCOPE_VALUES or (scope == SCOPE_DOMAINS and inferred != SCOPE_DOMAINS):
+        scope = inferred
 
     mode = str(p.get("mode") or "").strip().lower()
     if mode not in MODE_VALUES:
@@ -145,12 +147,12 @@ __all__ = [
     "MODE_PATCH",
     "MODE_RESEARCH",
     "MODE_VALUES",
+    "NO_LEASE_EXTENSION",
     "SCOPE_DOMAIN",
     "SCOPE_DOMAINS",
     "SCOPE_FREEFORM",
     "SCOPE_VALUES",
     "SpecialistProfile",
-    "holds_serving_slot",
     "is_authoring_specialist",
     "requires_gpu",
     "resolve_specialist_profile",

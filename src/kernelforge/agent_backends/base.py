@@ -5,13 +5,17 @@
 
 from __future__ import annotations
 
-from collections.abc import Iterator, Mapping
+from collections.abc import Callable, Iterator, Mapping
 from contextlib import contextmanager
 from contextvars import ContextVar
 from dataclasses import dataclass, field, replace
-from typing import Any, Protocol
+from typing import TYPE_CHECKING, Any, Protocol
 
-from hyperloom.common.reasoning_effort import DEFAULT_REASONING_EFFORT, REASONING_EFFORT_RANK
+from hyperloom_common.llm.reasoning_effort import DEFAULT_REASONING_EFFORT, REASONING_EFFORT_RANK
+from kernelforge.utils.protected_paths import ProtectedPathRules
+
+if TYPE_CHECKING:
+    from pydantic import BaseModel
 
 
 #: Environment overlay applied to every session started inside the current
@@ -24,6 +28,10 @@ _session_environment: ContextVar[Mapping[str, str]] = ContextVar(
     "forge_agent_session_environment",
     default={},
 )
+
+#: Under every session's overlay: imports would write byte-code beside protected
+#: ``benchmark/`` or ``test/`` modules, which the workspace guard rejects.
+_SESSION_BASE_ENVIRONMENT: Mapping[str, str] = {"PYTHONDONTWRITEBYTECODE": "1"}
 
 
 @contextmanager
@@ -88,6 +96,15 @@ class AgentCapabilities:
     requires_workspace_cwd: bool = False
     # Whether the provider applies ``AgentRunSpec.env`` over the environment it spawns the session with.
     session_env: bool = False
+    # Whether ``AgentRunSpec.shared_prompt_prefix`` becomes a cache entry of its own that a later session sending the
+    # same prefix reads, and whether the provider reports ``on_response_started``.
+    shared_prompt_cache: bool = False
+
+
+#: How long a launch probe waits for its one-word reply. It asks under the campaign's own model and effort, which a
+#: busy gateway can take most of a minute to answer, and a probe that times out sends the whole campaign to the
+#: fallback provider -- so this bounds a hung route, not a slow one.
+_PROBE_TIMEOUT_SEC = 300
 
 
 @dataclass(frozen=True)
@@ -112,6 +129,24 @@ class AgentRuntimeConfig:
             raise ValueError("model must not be empty")
         if self.timeout_sec <= 0:
             raise ValueError("timeout_sec must be greater than zero")
+
+    @property
+    def probe_timeout_sec(self) -> int:
+        """How long a launch probe waits for its reply; never longer than one session may run."""
+        return min(_PROBE_TIMEOUT_SEC, self.timeout_sec)
+
+
+@dataclass(frozen=True)
+class AgentRuntimeSettings:
+    """The runtime settings a provider's session runs with; blank strings resolve to the defaults."""
+
+    executable: str = ""
+    timeout_sec: int = 1800
+    reasoning_effort: str = DEFAULT_REASONING_EFFORT
+    sandbox_mode: str = "bypass"
+    precheck: bool = True
+    fallback_provider: str = ""
+    options: Mapping[str, Any] | None = None
 
 
 def with_writable_sandbox(runtime: AgentRuntimeConfig) -> AgentRuntimeConfig:
@@ -222,11 +257,11 @@ class AgentRunSpec:
     # deployment's effort is the one that runs, and a call site that thinks it
     # knows better is exactly what ``resolved`` stopped honouring.
     #
-    # It exists for the calls that are structurally not reasoning work -- the
-    # width repair below restates a decision that was already made, with no
-    # tools and two turns -- where the deployment's ``high`` (or ``max``) buys
-    # nothing and is billed anyway. A ceiling only ever lowers: an operator who
-    # runs the campaign at ``low`` still gets ``low`` here.
+    # It exists for the calls that are not the deepest reasoning work -- the
+    # round partition divides ground the analyses already name -- where the
+    # deployment's ``max`` buys nothing and is billed anyway. A ceiling only
+    # ever lowers: an operator who runs the campaign at ``low`` still gets
+    # ``low`` here.
     # Appended, like the field above, to keep the positional contract.
     max_reasoning_effort: str = ""
     # What this session is for, in a name a human reading the campaign summary
@@ -239,6 +274,32 @@ class AgentRunSpec:
     role: str = ""
     # Campaign source globs use KEEP matching and remain visible to integrity/export.
     commit_new_paths: list[str] = field(default_factory=list)
+    # False for a session that may write and run things in the workspace but must leave every tracked file as it
+    # found it: any tracked change is then a violation, rolled back and rejected like a change to the measurement
+    # surface. Unlike ``protected_globs=["*"]`` it reaches no ignored file, so a build the session runs is neither
+    # snapshotted nor counted. Appended for the same reason as the fields above.
+    allow_tracked_changes: bool = True
+    # The caller's rules for which workspace paths this session must leave as they are; ``protected_paths`` and
+    # ``protected_globs`` add to them per session. A session that can write is refused without them, so a caller that
+    # forgets them cannot run with nothing protected. Appended for the same reason as the fields above.
+    protected_path_rules: ProtectedPathRules | None = None
+    # The tools a provider describes to the model, when they must differ from the ones ``tool_policy`` lets this
+    # session use. A resumed follow-up keeps the definitions of the conversation it continues, because they open the
+    # cached prefix every earlier turn was billed against. The provider refuses every described tool ``tool_policy``
+    # does not allow, whatever its permission mode or settings would approve.
+    # Appended for the same reason as the fields above.
+    declared_tool_policy: AgentToolPolicy | None = None
+    # A leading part of ``user_prompt`` that sibling sessions send verbatim. ``user_prompt`` stays the whole prompt;
+    # a provider with ``shared_prompt_cache`` caches this part on its own, so a sibling started after the first reads
+    # it instead of writing it again. Appended for the same reason as the fields above.
+    shared_prompt_prefix: str = ""
+    # Called once, when the model starts answering this session's first request: from then on a prefix that request
+    # wrote can be read by another session. A provider without ``shared_prompt_cache`` never calls it.
+    on_response_started: Callable[[], None] | None = None
+    # The shape the session's final answer must take. A provider that can constrain its answer to a JSON Schema is
+    # given this model's; one that cannot is told the schema in its prompt. Read the answer back with
+    # ``structured_answer``. Appended for the same reason as the fields above.
+    output_schema: type[BaseModel] | None = None
 
     def resolved(self, runtime: AgentRuntimeConfig) -> AgentRunSpec:
         """Settle this session's model, effort and environment.
@@ -267,7 +328,7 @@ class AgentRunSpec:
                 runtime.reasoning_effort.strip() or self.reasoning_effort.strip(),
                 self.max_reasoning_effort,
             ),
-            env={**_session_environment.get(), **self.env},
+            env={**_SESSION_BASE_ENVIRONMENT, **_session_environment.get(), **self.env},
         )
 
 
@@ -301,6 +362,9 @@ class AgentRunResult:
     # Set when the session's workspace could not be cleared of leftover processes: one of ours survived SIGKILL, or
     # one that is not ours to kill is holding a device node.
     workspace_contention: str = ""
+    # The answer a provider constrained to ``AgentRunSpec.output_schema`` itself, as the JSON value it returned; None
+    # when the provider returned the answer as text.
+    structured_output: Any = None
 
 
 class AgentBackend(Protocol):

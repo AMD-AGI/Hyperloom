@@ -1,0 +1,131 @@
+"""Deterministic search-mode policy for forge-loop planning."""
+
+from __future__ import annotations
+
+import math
+from dataclasses import dataclass
+
+
+SEARCH_MODE_EXPLOIT = "EXPLOIT"
+SEARCH_MODE_DIVERSIFY = "DIVERSIFY"
+SEARCH_MODES = frozenset({SEARCH_MODE_EXPLOIT, SEARCH_MODE_DIVERSIFY})
+
+OBJECTIVE_IMMEDIATE_CANONICAL_GAIN = "IMMEDIATE_CANONICAL_GAIN"
+OBJECTIVE_DISCOVER_NEW_MECHANISM = "DISCOVER_NEW_MECHANISM"
+
+# One empty diff can be a session that honestly found nothing worth changing.
+NO_CHANGES_ESCALATION_THRESHOLD = 2
+
+# How many recent iteration outcomes are scanned for that streak.
+NO_CHANGES_STREAK_WINDOW = 16
+
+# The smallest total gain a run of exploit iterations can produce and still be worth another one.
+MARGINAL_GAIN_FLOOR = 0.05
+
+# How many measured steps that window spans, counted in outcomes rather than iterations so the ones that measured
+# nothing do not shorten it.
+MARGINAL_GAIN_WINDOW = 6
+
+# How many recent outcomes are scanned to fill that window.
+MARGINAL_GAIN_SCAN_WINDOW = 16
+
+
+@dataclass(frozen=True)
+class SearchPolicyDecision:
+    """One auditable search-mode decision."""
+
+    mode: str
+    reason_codes: tuple[str, ...]
+    objective_kind: str
+    residence_iterations_remaining: int = 0
+
+    def __post_init__(self) -> None:
+        if self.mode not in SEARCH_MODES:
+            raise ValueError(f"unsupported search mode: {self.mode}")
+        if not self.reason_codes:
+            raise ValueError("search policy reason_codes must not be empty")
+
+
+@dataclass(frozen=True)
+class SearchState:
+    """Where the search stands: the best's source, the stall streak, the current mode, its residence and cycle."""
+
+    best_source: str
+    no_improvement_iters: int
+    current_mode: str = SEARCH_MODE_EXPLOIT
+    residence_iterations_remaining: int = 0
+    diversification_cycle_completed: bool = False
+
+
+@dataclass(frozen=True)
+class RecentProgress:
+    """What the recent iterations showed: the empty-diff streak and the gain ratio over the exploit window."""
+
+    consecutive_no_changes: int = 0
+    window_gain_ratio: float | None = None
+
+
+class SearchPolicyEngine:
+    """Choose EXPLOIT or DIVERSIFY from durable, measured state."""
+
+    def decide(
+        self,
+        state: SearchState,
+        *,
+        stall_threshold: int,
+        recent: RecentProgress = RecentProgress(),
+    ) -> SearchPolicyDecision:
+        """Return a deterministic mode with stable reason codes."""
+        threshold = max(1, int(stall_threshold))
+        residence = max(0, int(state.residence_iterations_remaining))
+        empty_diffs = max(0, int(recent.consecutive_no_changes))
+        window_gain_ratio = recent.window_gain_ratio
+        window_gain = None if window_gain_ratio is None else float(window_gain_ratio)
+        if window_gain is not None and not math.isfinite(window_gain):
+            raise ValueError(f"window_gain_ratio must be finite: {window_gain_ratio!r}")
+
+        # Outranks every other signal, mode residence included: those weigh how promising the current direction is,
+        # while repeated empty diffs are evidence it cannot be turned into a candidate at all, so staying in EXPLOIT
+        # spends another session on a direction that produces no edit.
+        if empty_diffs >= NO_CHANGES_ESCALATION_THRESHOLD:
+            mode = SEARCH_MODE_DIVERSIFY
+            reason = "REPEATED_NO_CHANGES"
+        elif state.current_mode == SEARCH_MODE_EXPLOIT and residence > 0:
+            mode = SEARCH_MODE_EXPLOIT
+            reason = "MODE_RESIDENCE"
+        elif state.diversification_cycle_completed:
+            mode = SEARCH_MODE_EXPLOIT
+            reason = "DIVERSIFY_PLAN_CREATED"
+        elif state.no_improvement_iters >= threshold:
+            mode = SEARCH_MODE_DIVERSIFY
+            reason = "NO_IMPROVEMENT_STALL"
+        elif window_gain is not None and window_gain < MARGINAL_GAIN_FLOOR:
+            mode = SEARCH_MODE_DIVERSIFY
+            reason = "DIMINISHING_RETURNS"
+        elif (state.best_source or "").strip().lower() == "warm_start":
+            mode = SEARCH_MODE_EXPLOIT
+            reason = "KB_WARM_START_EXPLOIT"
+        else:
+            mode = SEARCH_MODE_EXPLOIT
+            reason = "CANONICAL_GAIN_AVAILABLE"
+
+        if mode == SEARCH_MODE_DIVERSIFY:
+            return SearchPolicyDecision(
+                mode=mode,
+                reason_codes=(reason,),
+                objective_kind=OBJECTIVE_DISCOVER_NEW_MECHANISM,
+                residence_iterations_remaining=0,
+            )
+
+        if reason == "DIVERSIFY_PLAN_CREATED":
+            next_residence = max(0, threshold - 1)
+        elif reason == "MODE_RESIDENCE":
+            next_residence = residence - 1
+        else:
+            next_residence = 0
+        return SearchPolicyDecision(
+            mode=mode,
+            reason_codes=(reason,),
+            objective_kind=OBJECTIVE_IMMEDIATE_CANONICAL_GAIN,
+            residence_iterations_remaining=next_residence,
+        )

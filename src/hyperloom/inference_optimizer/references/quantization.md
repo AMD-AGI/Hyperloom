@@ -7,7 +7,7 @@ AMD Quark PTQ prelude, then rewrites `--model` to the exported quantized model
 so the optimization loop runs on it.
 
 ```bash
-python3 -m hyperloom.inference_optimizer.cli optimize \
+python3 -m hyperloom optimize \
   --model "$MODEL_PATH" \
   --framework vllm \
   --max-hours 2 \
@@ -25,9 +25,11 @@ Rules:
   the sandbox to control quantization without relying on agent judgement.
 - The `--quantize` text is the request only: scheme, kv-cache, excluded layers,
   acceptable eval gap. Do not repeat the model path or export dir.
-- The adapter folds `--model` and
-  `<workspace_root>/quantization/<model>/quantized` into the prompt
-  automatically.
+- The adapter folds `--model` and the export dir into the prompt
+  automatically. Each run quantizes in its own directory,
+  `<workspace_root>/quantization/<model>/runs/<run_id>/`, and exports to
+  `quantized/` inside it, so a rerun never overwrites a model an earlier
+  session is serving.
 - `--quantize-scheme` is the structured alternative: `none`, `fp8`,
   `ptpc_fp8`, `mxfp4`, `mxfp4_fp8`. Free-text `--quantize` wins when both are
   given.
@@ -35,7 +37,7 @@ Rules:
 - Keep `--precision` consistent with quantization, for example
   `--quantize-scheme fp8` with `--precision fp8`.
 - Quantization is one-shot and never runs on a resume.
-- Failed or unusable quantization hard-stops with `SystemExit(3)`; it never
+- Failed or unusable quantization hard-stops with `SystemExit(4)`; it never
   silently optimizes the source model.
 - A scheme/GPU mismatch via `--quantize-scheme` is skipped, emits
   `QUANTIZATION_SKIPPED:`, and sets `$HYPERLOOM_QUANTIZATION_SKIPPED`.

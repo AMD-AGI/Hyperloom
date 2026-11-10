@@ -10,6 +10,47 @@ from typing import Any
 from ..base import Decision, RenderedSection, md_kv_list, register_renderer, session_of, stop_reason_of
 
 
+def _elapsed_facts(session: dict[str, Any]) -> list[str]:
+    """The run leg's and the whole session's wall-clock time, each under its own name."""
+    leg = session.get("elapsed_minutes")
+    total = session.get("total_elapsed_minutes")
+    facts: list[str] = []
+    if leg is not None:
+        facts.append(f"Wall-clock elapsed{' (this leg)' if total is not None else ''}: {float(leg):.1f} minutes.")
+    if total is not None:
+        facts.append(f"Total elapsed across all legs: {float(total):.1f} minutes.")
+    return facts
+
+
+def _configured_image(session: dict[str, Any]) -> str | None:
+    """The session's container image, or ``None`` when it is missing or blank."""
+    image = session.get("image")
+    return image if isinstance(image, str) and image.strip() else None
+
+
+def _session_markdown(session: dict[str, Any], sid: str, host: str, code: str, stop_reason: str) -> str:
+    """The session section's key/value bullet list."""
+    return md_kv_list(
+        [
+            ("session_id", sid),
+            ("claw_session_id", session.get("claw_session_id")),
+            ("sandbox_user_id", session.get("sandbox_user_id")),
+            ("stop_reason", stop_reason),
+            ("elapsed_minutes", session.get("elapsed_minutes")),
+            ("total_elapsed_minutes", session.get("total_elapsed_minutes")),
+            ("tick_count", session.get("tick_count")),
+            ("host", host),
+            # Always emit the image row so a missing image is visible.
+            ("image", _configured_image(session) or "(not configured)"),
+            ("code_revision", code),
+            ("created_at_utc", session.get("created_at_utc")),
+            ("ended_at_utc", session.get("ended_at_utc")),
+            ("max_minutes", session.get("max_minutes")),
+            ("session_dir", session.get("session_dir")),
+        ]
+    )
+
+
 @register_renderer("session")
 def render(breakdown: dict[str, Any]) -> RenderedSection:
     """Render the session-identification + lifecycle section.
@@ -27,19 +68,26 @@ def render(breakdown: dict[str, Any]) -> RenderedSection:
     s = session_of(breakdown)
     facts: list[str] = []
     warnings: list[str] = []
+    decisions: list[Decision] = []
 
     sid = str(s.get("session_id") or "")
     claw = s.get("claw_session_id")
     sandbox = s.get("sandbox_user_id")
     stop_reason = stop_reason_of(breakdown)
-    elapsed = s.get("elapsed_minutes")
     host = str(s.get("host") or "")
-    image = s.get("image")
+    image = _configured_image(s)
     code = str(s.get("code_revision") or "")
     tick = s.get("tick_count")
 
     if sid:
         facts.append(f"Hyperloom session_id=`{sid}`")
+        decisions.append(
+            Decision(
+                kind="attempted" if stop_reason else "not_attempted",
+                subject=f"session:{sid}",
+                rationale=f"stop_reason={stop_reason or 'unset'}",
+            )
+        )
     if claw:
         facts.append(f"Joined to Primus-Claw session `{claw}`")
     else:
@@ -48,8 +96,7 @@ def render(breakdown: dict[str, Any]) -> RenderedSection:
         facts.append(f"Sandbox user `{sandbox}`")
     if stop_reason:
         facts.append(f"Run ended with stop_reason=`{stop_reason}`.")
-    if elapsed is not None:
-        facts.append(f"Wall-clock elapsed: {float(elapsed):.1f} minutes.")
+    facts.extend(_elapsed_facts(s))
     if tick and int(tick) > 0:
         facts.append(f"Coordinator advanced through {int(tick)} ticks.")
     elif tick == 0:
@@ -59,47 +106,16 @@ def render(breakdown: dict[str, Any]) -> RenderedSection:
         )
     if host:
         facts.append(f"Ran on host `{host}`.")
-    if isinstance(image, str) and image.strip():
+    if image:
         facts.append(f"Container image `{image}`.")
     if code:
         facts.append(f"Hyperloom code revision `{code}`.")
-
-    md = md_kv_list(
-        [
-            ("session_id", sid),
-            ("claw_session_id", claw),
-            ("sandbox_user_id", sandbox),
-            ("stop_reason", stop_reason or None),
-            ("elapsed_minutes", elapsed),
-            ("tick_count", tick),
-            ("host", host or None),
-            # Always emit the image row so a missing image is visible.
-            ("image", image if (isinstance(image, str) and image.strip()) else "(not configured)"),
-            ("code_revision", code or None),
-            ("created_at_utc", s.get("created_at_utc")),
-            ("ended_at_utc", s.get("ended_at_utc")),
-            ("max_minutes", s.get("max_minutes")),
-            ("session_dir", s.get("session_dir")),
-        ]
-    )
-
-    decisions = (
-        [
-            Decision(
-                kind="attempted" if stop_reason else "not_attempted",
-                subject=f"session:{sid or 'unknown'}",
-                rationale=f"stop_reason={stop_reason or 'unset'}",
-            )
-        ]
-        if sid
-        else []
-    )
 
     return RenderedSection(
         section_id="session",
         title="Session",
         key_facts=facts,
-        markdown_block=md,
+        markdown_block=_session_markdown(s, sid, host, code, stop_reason),
         decisions=decisions,
         warnings=warnings,
         skipped=not (sid or host),

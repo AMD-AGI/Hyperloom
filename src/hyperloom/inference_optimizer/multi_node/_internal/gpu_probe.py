@@ -6,14 +6,16 @@
 from __future__ import annotations
 
 import logging
-import re
 import shutil
+import subprocess
 import tempfile
 import time
 from pathlib import Path
 from typing import Any
 
-from ...gpu_types import _AMD_GPU_TYPES, _GFX_TO_RUNNER, _PRODUCT_TAGS
+import httpx
+
+from ...gpu_types import parse_gpu_type
 from . import ray_dashboard, ssh_client, ssh_known_hosts
 from .external_state import build_external_state_from_env, external_service_url
 
@@ -32,38 +34,11 @@ _PROBE_CMD = (
 _TERMINAL_STATUSES = {"SUCCEEDED", "FAILED", "STOPPED"}
 
 
-def _parse_gpu_type(text: str) -> str | None:
-    """Map rocm-smi / gcnArchName output to a known AMD runner type.
-
-    Args:
-        text: Combined stdout/stderr from the remote probe command.
-
-    Returns:
-        str | None: A known AMD GPU SKU when a product tag or unambiguous gfx
-        arch is recognized, else ``None``.
-    """
-    upper = re.sub(r"[^A-Z0-9]", "", (text or "").upper())
-    for tag in _PRODUCT_TAGS:
-        if tag in upper:
-            candidate = tag.lower()
-            if candidate in _AMD_GPU_TYPES:
-                return candidate
-    lower = (text or "").lower()
-    for gfx, runner in _GFX_TO_RUNNER.items():
-        if gfx in lower:
-            return runner
-    return None
-
-
 def remote_autodetect_gpu_type(*, timeout_s: int = 60) -> str | None:
     """Detect the inference GPU type from the handed-over cluster."""
     if not external_service_url():
         return None
-    try:
-        state = build_external_state_from_env()
-    except Exception as exc:  # noqa: BLE001 - best-effort probe
-        log.warning("remote GPU probe: could not build external state: %s", exc)
-        return None
+    state = build_external_state_from_env()
     backend = str(state.get("backend") or "").lower()
     try:
         if backend == "rayjob":
@@ -71,7 +46,7 @@ def remote_autodetect_gpu_type(*, timeout_s: int = 60) -> str | None:
         if backend == "infera":
             return _probe_via_infera_ssh(state, timeout_s=timeout_s)
         log.warning("remote GPU probe: unsupported backend %r", backend)
-    except Exception as exc:  # noqa: BLE001 - best-effort probe
+    except (httpx.HTTPError, OSError, RuntimeError, subprocess.TimeoutExpired) as exc:
         log.warning("remote GPU probe (%s) failed: %s", backend, exc)
     return None
 
@@ -96,7 +71,7 @@ def _probe_via_ray_head(state: dict[str, Any], *, timeout_s: int) -> str | None:
             # logs are parsed either way and an unparsable result already degrades to None.
             log.warning("remote GPU probe: ray job %s ended %r", sub_id, status or "no terminal status")
         logs = ray.get_job_logs(sub_id)
-    return _parse_gpu_type(logs)
+    return parse_gpu_type(logs)
 
 
 def _first_gpu_pod(state: dict[str, Any]) -> dict[str, Any] | None:
@@ -130,11 +105,8 @@ def _probe_via_infera_ssh(state: dict[str, Any], *, timeout_s: int) -> str | Non
 
     try:
         cp = ssh_client.ssh_run(
-            host,
+            ssh_client.SshTarget(host=host, key_path=key_path, known_hosts=known_hosts, port=port),
             _PROBE_CMD,
-            key_path=key_path,
-            known_hosts=known_hosts,
-            port=port,
             timeout=max(1, timeout_s),
         )
     finally:
@@ -144,4 +116,4 @@ def _probe_via_infera_ssh(state: dict[str, Any], *, timeout_s: int) -> str | Non
         # Logged, not fatal: _PROBE_CMD's `||` fallback can print a usable name and still exit non-zero, so the output
         # is parsed either way and an unparsable result already degrades to None.
         log.warning("remote GPU probe: ssh to %s exited %s", host, cp.returncode)
-    return _parse_gpu_type(f"{cp.stdout or ''}\n{cp.stderr or ''}")
+    return parse_gpu_type(f"{cp.stdout or ''}\n{cp.stderr or ''}")

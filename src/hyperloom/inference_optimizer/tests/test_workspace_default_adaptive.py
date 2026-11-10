@@ -5,54 +5,33 @@
 
 from __future__ import annotations
 
+import logging
 import os
 from pathlib import Path
 
-import pytest
-
-from hyperloom.agents.framework import kb
-from hyperloom.agents.kernel.tools import _paths as tool_paths
 from hyperloom.inference_optimizer.session import paths as session_paths
 
-_RESOLVERS = (
-    ("session.paths", lambda: str(session_paths.default_workspace_root())),
-    ("tools._paths", tool_paths.default_workspace_root),
-    ("framework.kb", kb._default_workspace_root),
-)
 
-
-@pytest.mark.parametrize("name,resolve", _RESOLVERS, ids=[n for n, _ in _RESOLVERS])
-def test_falls_back_to_the_caller_directory_without_a_writable_workspace(name, resolve, tmp_path, monkeypatch):
+def test_falls_back_to_the_caller_directory_without_a_writable_workspace(tmp_path, monkeypatch):
     monkeypatch.setattr(os, "access", lambda _path, _mode: False)
     monkeypatch.chdir(tmp_path)
 
-    assert Path(resolve()) == tmp_path / "session"
+    assert session_paths.default_workspace_root() == tmp_path / "session"
 
 
-@pytest.mark.parametrize("name,resolve", _RESOLVERS, ids=[n for n, _ in _RESOLVERS])
-def test_keeps_the_pod_local_path_when_workspace_is_writable(name, resolve, monkeypatch):
+def test_keeps_the_pod_local_path_when_workspace_is_writable(monkeypatch):
     """Container behaviour must not change: the image provides /workspace."""
     monkeypatch.setattr(os, "access", lambda _path, _mode: True)
 
-    assert Path(resolve()) == Path("/workspace/hyperloom")
+    assert session_paths.default_workspace_root() == Path("/workspace/hyperloom")
 
 
-@pytest.mark.parametrize("name,resolve", _RESOLVERS, ids=[n for n, _ in _RESOLVERS])
-def test_a_creatable_workspace_is_still_used(name, resolve, monkeypatch):
+def test_a_creatable_workspace_is_still_used(monkeypatch):
     """``/workspace`` absent but creatable must not divert the run."""
-    monkeypatch.setattr(os.path, "exists", lambda p: str(p) == "/")
     monkeypatch.setattr(Path, "exists", lambda self: str(self) == "/")
     monkeypatch.setattr(os, "access", lambda path, _mode: str(path) == "/")
 
-    assert Path(resolve()) == Path("/workspace/hyperloom")
-
-
-def test_the_three_mirrors_agree(monkeypatch, tmp_path):
-    monkeypatch.chdir(tmp_path)
-    for writable in (True, False):
-        monkeypatch.setattr(os, "access", lambda _path, _mode, _w=writable: _w)
-        resolved = {str(Path(resolve())) for _name, resolve in _RESOLVERS}
-        assert len(resolved) == 1, f"writable={writable}: mirrors disagree: {resolved}"
+    assert session_paths.default_workspace_root() == Path("/workspace/hyperloom")
 
 
 def test_an_explicit_user_data_path_still_wins(monkeypatch, tmp_path):
@@ -62,4 +41,16 @@ def test_an_explicit_user_data_path_still_wins(monkeypatch, tmp_path):
     monkeypatch.setattr(os, "access", lambda _path, _mode: False)
 
     assert session_paths.workspace_root() == chosen
-    assert tool_paths.workspace_root() == str(chosen)
+
+
+def test_workspace_root_warns_once_when_unset(monkeypatch, caplog):
+    monkeypatch.delenv("USER_DATA_PATH", raising=False)
+    monkeypatch.setattr(session_paths, "_WARNED_NO_USER_DATA", False)
+    expected = session_paths.default_workspace_root()
+
+    with caplog.at_level(logging.WARNING, logger=session_paths.log.name):
+        assert session_paths.workspace_root() == expected
+        assert session_paths.workspace_root() == expected
+
+    warnings = [r for r in caplog.records if "USER_DATA_PATH" in r.message]
+    assert len(warnings) == 1

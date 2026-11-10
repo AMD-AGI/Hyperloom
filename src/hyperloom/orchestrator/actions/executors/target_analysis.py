@@ -9,12 +9,12 @@ import logging
 from pathlib import Path
 from typing import Any
 
-from hyperloom.common.env import env_int, env_str
+from hyperloom_common.env import env_int, env_str
 from hyperloom.inference_optimizer.baseline_comparison.target_analyzer import (
     analyze,
     clear_competitor_target,
 )
-from hyperloom.inference_optimizer.baseline_comparison.types import BenchmarkMode
+from hyperloom.inference_optimizer.baseline_comparison.types import BenchmarkMode, TargetAnalysisRequest
 from ...loop.sub_agent_runner import RunnerContext
 
 
@@ -24,77 +24,23 @@ log = logging.getLogger(__name__)
 class TargetAnalysisExecutor:
     """ActionRunner for the ``target_analysis`` action kind."""
 
-    def __init__(
-        self,
-        *,
-        compare_against_gpu: str,
-        session_dir: Path | str | None = None,
-    ):
+    def __init__(self, *, compare_against_gpu: str):
         """Initialize the executor with the pinned comparison reference."""
         self.compare_against_gpu = (compare_against_gpu or "").strip()
-        if session_dir is not None:
-            self.session_dir: Path | None = Path(session_dir)
-        else:
-            self.session_dir = None
-
-    def _resolve_session_dir(self, ctx: RunnerContext) -> Path | None:
-        """Resolve session_dir: ``ctx.extra["session_dir"]`` > ``task.params["session_dir"]`` > constructor arg > ``paths.session_dir()``; ``None`` when nothing resolves."""
-        extra = getattr(ctx, "extra", None) or {}
-        cand = extra.get("session_dir")
-        if cand:
-            return Path(cand)
-        params = ctx.task.params or {}
-        cand = params.get("session_dir")
-        if cand:
-            return Path(cand)
-        if self.session_dir is not None:
-            return self.session_dir
-        try:
-            from hyperloom.inference_optimizer.session.paths import session_dir as _sd
-
-            sd = _sd()
-            return sd if sd.exists() else None
-        except Exception:  # noqa: BLE001
-            return None
-
-    def _resolve_session_dir_for_cleanup(self, ctx: RunnerContext) -> Path | None:
-        """Best-effort session root for stale artefact cleanup when analyze cannot run."""
-        resolved = self._resolve_session_dir(ctx)
-        if resolved is not None:
-            return resolved
-        try:
-            from hyperloom.inference_optimizer.session.paths import session_dir as _sd
-
-            return _sd()
-        except Exception:  # noqa: BLE001
-            return None
 
     async def __call__(self, ctx: RunnerContext) -> dict[str, Any]:
         """Run the external-baseline comparison and persist report artefacts."""
         params = dict(ctx.task.params or {})
 
-        from ._workload_envs import agentx_active
+        from hyperloom.common.perf_metric import agentx_active
 
         state = (getattr(ctx, "extra", None) or {}).get("shared_state")
-        benchmark_mode: BenchmarkMode = "agentx" if agentx_active(state) else "synthetic"
+        benchmark_mode: BenchmarkMode = (
+            "agentx" if agentx_active(benchmark_mode=getattr(state, "benchmark_mode", "")) else "synthetic"
+        )
         model_path = str(params.get("model_path") or getattr(state, "model_path", "") or env_str("MODEL_PATH"))
 
-        session_dir = self._resolve_session_dir(ctx)
-        if session_dir is None:
-            cleanup_dir = self._resolve_session_dir_for_cleanup(ctx)
-            if cleanup_dir is not None:
-                clear_competitor_target(cleanup_dir)
-            log.warning(
-                "target_analysis_executor: could not resolve session_dir; skipping (no artefacts will be written)",
-            )
-            return {
-                "status": "succeeded",
-                "kind": ctx.task.kind,
-                "note": "skipped: no session_dir",
-                "baseline_status": "skipped",
-                "reason": "no_session_dir",
-            }
-
+        session_dir = Path(ctx.extra["session_dir"])
         compare_against_gpu = str(params.get("compare_against_gpu") or self.compare_against_gpu or "").strip()
         framework = str(params.get("framework") or getattr(state, "framework", "") or env_str("FRAMEWORK"))
         precision = str(params.get("precision") or env_str("PRECISION") or getattr(state, "precision", ""))
@@ -104,24 +50,19 @@ class TargetAnalysisExecutor:
         try:
             summary = analyze(
                 session_dir=session_dir,
-                model_path=model_path,
-                compare_against_gpu=compare_against_gpu,
-                framework=framework,
-                precision=precision,
-                isl=isl,
-                osl=osl,
-                benchmark_mode=benchmark_mode,
+                request=TargetAnalysisRequest(
+                    model_path=model_path,
+                    compare_against_gpu=compare_against_gpu,
+                    framework=framework,
+                    precision=precision,
+                    isl=isl,
+                    osl=osl,
+                    benchmark_mode=benchmark_mode,
+                ),
             )
-        except Exception as exc:
-            log.exception("target_analysis_executor: analyze() raised: %s", exc)
+        except Exception:
             clear_competitor_target(session_dir)
-            return {
-                "status": "succeeded",
-                "kind": ctx.task.kind,
-                "note": f"analyzer crashed: {exc}",
-                "baseline_status": "fetch_error",
-                "reason": "analyzer_crash",
-            }
+            raise
         return self._format_result(ctx, summary, session_dir)
 
     def _format_result(

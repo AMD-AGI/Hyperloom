@@ -19,11 +19,6 @@ def repo_slug(repo_url: str) -> str:
     path: str
     if raw.startswith("git@github.com:"):
         path = raw.split(":", 1)[1]
-    elif raw.startswith("ssh://git@github.com/"):
-        parsed = urlparse(raw)
-        if (parsed.hostname or "").lower() != _GITHUB_HOST:
-            raise ValueError(f"cannot derive GitHub repo from repo_url={repo_url!r}")
-        path = parsed.path
     else:
         candidate = raw if "://" in raw else f"https://{raw}"
         parsed = urlparse(candidate)

@@ -17,9 +17,14 @@ Orchestration emits a `request{target_agent: "kernel_agent", kind: "<kind>"}` in
 `IntentRouter._handle_request` (`orchestrator/loop/intent_router.py`) intercepts it
 before any agent backend runs:
 
-1. `_sequence_denial_for_request` checks the baseline prerequisite — if
-   `baseline_tput == 0` and the kind is not `trace_analyze`, the request is
-   policy-denied immediately (no bus record).
+1. `admission_denial_for_request` checks the baseline prerequisite and the
+   time budget, and a request that fails either is policy-denied immediately
+   (no bus record): any registered kind but `trace_analyze` while
+   `baseline_tput == 0`, or an `integrate` / `apply_patch` whose expected
+   cost — the `integrate` action's estimate, or one measured baseline round
+   when longer — does not fit the time left in the session
+   (`rule=time_budget`) or, in FRAMEWORK_AGENT and KERNEL_AGENT, in the phase
+   (`rule=phase_time_budget`).
 2. Records the request on the message bus (`source: "orchestration"`).
 3. Checks `shared_state.kernel_enabled`; auto-rejects with `agent_disabled` when
    `False` (that is, `--no-kernel`).
@@ -39,7 +44,6 @@ No PolicyGate path runs for the RESPONSE because it's written directly through
 | Request kind | Handler | Entry point |
 |---|---|---|
 | `trace_analyze` | `trace_analyze_handler` | TraceLens `tracelens_analysis.py` |
-| `run_optimization` | `run_optimization_handler` | GEAK or Forge per-kernel |
 | `integrate` | `integrate_handler` | patch → re-baseline → KEEP/REVERT |
 | `apply_patch` | `integrate_handler` (alias) | same as `integrate` |
 
@@ -53,7 +57,7 @@ and PolicyGate rejects an orchestration-issued REQUEST for either
 `inference_optimizer/protocol/action_surfaces.py`, raised as
 `rule="phase_incompatible"`) because they run once at phase entry from a lane
 budget. PolicyGate validates the REQUEST payload from orchestration
-(path-sandbox, phase-action gate) but never sees the RESPONSE.
+(path-sandbox) but never sees the RESPONSE.
 
 A request whose kind maps to a catalogued action runs under that action's
 lanes: `integrate` takes `server_lifecycle`, `workspace_mutation` and
@@ -62,11 +66,11 @@ typically the `kernel_agent` task, has them.
 
 ## KERNEL phase entry: Coordinator-direct calls
 
-When the Coordinator enters the KERNEL phase (`phases/kernel.py::_on_enter_kernel`, dispatched by `phases/machine.py::_on_phase_entered`),
+When the Coordinator enters the KERNEL phase (`phases/kernel.py::on_enter_kernel`, dispatched by `phases/machine.py::_on_phase_entered`),
 it opens the kernel timeline and enqueues one `kernel_agent` task. The
 dispatcher admits it under `server_lifecycle`, `workspace_mutation` and
 `benchmark_lane` without joining it, so ticks keep running while it works. Its
-executor, `_run_kernel_agent`, calls the handlers directly in Python — not
+executor, `run_agent`, calls the handlers directly in Python — not
 through the REQUEST bus — and every step it runs (reprofile, GEMM tuning,
 fusion, the rewrite controller, GEAK and its revalidation) is covered by those
 lanes. Which calls it makes depends on the backend:
@@ -74,7 +78,7 @@ lanes. Which calls it makes depends on the backend:
 ```python
 # 1. GEAK branch — the SGLang/vLLM default. One whole-pipeline e2e run, then
 #    the phase winds down to SWEEP. Nothing below this line executes.
-if geak_enabled:                      # geak_selected(): order is not exactly `forge`
+if geak_enabled:                      # KernelPhase.geak_enabled(): kernel_optimizer == "geak"
     await self._run_geak_kernel_phase(from_phase=from_phase)
     return
 
@@ -102,7 +106,7 @@ async def _finish_kernel_entry(self) -> None:
 **The rewrite controller is not downstream of GEMM tuning.** Tuning GEMM shape
 tables and rewriting kernel source are unrelated jobs, so each stage in the
 shared tail consults only its own switch and each skip is a return inside its
-own helper rather than out of `_run_kernel_agent`.
+own helper rather than out of `run_agent`.
 `INFERENCE_OPTIMIZER_SKIP_GEMM_TUNING=1` therefore leaves the rewrite controller
 alone.
 
@@ -126,7 +130,7 @@ The fusion lane (`_maybe_run_forge_fusion_before_kernel_opt` →
 framework in `{sglang, vllm, vllm-aiter}`, a `last_profile_trace` to discover
 from, and no `last_fusion` whose status is already `ok` / `complete` / `kept`
 (idempotent re-entry). It is forge-only — under the default `geak` backend
-`_run_kernel_agent` returns before the lane is reached.
+`run_agent` returns before the lane is reached.
 
 A fusion result is written to the `last_fusion` SharedState field and posted as
 a `run_fusion_done` response with `source="kernel_entry_auto"`. A result that is
@@ -143,10 +147,10 @@ The seven rules from the retired `kernel_agent.md` live in executable Python:
 |---|---|
 | IR-1 submit all candidates in parallel | None in Hyperloom: #1408 moved kernel selection into KernelForge |
 | IR-2 never modify source before GEAK submission | `_is_runtime_generated_kernel` gate in `request_handlers.py` |
-| IR-3 integration is mandatory after every KEEP | `phases/kernel_stack.py::KernelStackPhase._auto_enqueue_pending_integrations` (called by `intent_router.py`) |
+| IR-3 integration is mandatory after every KEEP | `phases/kernel_stack.py::KernelStackPhase.drain_pending_keep_integrates` (called by `intent_router.py`) |
 | IR-4 kill stale servers before restart | `_multi_node_server_lifecycle.py::restart_server_for_round` |
 | IR-5 safe process management | `orchestrator/actions/executors/_subprocess_kill.py` |
-| IR-6 use apply_kernel_patch.py --target-file | `actions/executors/_kernel_agent_tool.py::_maybe_apply_kernel_patch` → `agents/kernel/tools/apply_kernel_patch.py::apply_kernel_patch` |
+| IR-6 apply patches through `apply_kernel_patch()` | `actions/executors/_kernel_agent_tool.py::_maybe_apply_kernel_patch` → `orchestrator/kernel/apply_kernel_patch.py::apply_kernel_patch` |
 | IR-7 never modify GEAK config | GEAK invocation wrappers in `request_handlers.py` / `geak_runner.py` |
 
 ## Backend selection
@@ -155,10 +159,14 @@ GEAK owns the KERNEL phase by default for every framework, ATOM included, and
 decides kernel strategy internally:
 
 - **Framework default**: an unset or blank `KERNEL_OPT_BACKEND_ORDER` resolves
-  through `_DEFAULT_KERNEL_PHASE_BACKEND_ORDER` in
-  `orchestrator/kernel/request_handlers.py`, which is `geak`. No framework
-  overrides it at CLI launch; ATOM's former `forge` fill-in is gone, because
-  GEAK extracts candidates from ATOM's own `prefill`/`decode` annotation spans.
+  to `geak`. No framework overrides it at CLI launch; ATOM's former `forge`
+  fill-in is gone, because GEAK extracts candidates from ATOM's own
+  `prefill`/`decode` annotation spans.
+- **Read once per session**: a fresh launch reads the variable once and records
+  the backend as `kernel_optimizer` in the session state
+  (`cli/bootstrap.py`). Every later decision, including a resumed run, reads
+  that record, so a resume keeps the backend the session started on whatever
+  the variable says in the new process.
 - **Bare-metal setup**: preserves nonempty choices with process env > `.env`
   precedence, but does not fill or persist a backend default. Existing `.env`
   assignments, including `KERNEL_OPT_BACKEND_ORDER=geak`, are not automatically
@@ -171,13 +179,11 @@ decides kernel strategy internally:
   `--backends` CLI flags and payload `backends` hints do not override this
   choice.
 
-`run_gemm_tuning_handler` also defaults to GEAK unless the effective
-`KERNEL_OPT_BACKEND_ORDER` is `forge`, whether selected explicitly or by the
-ATOM CLI default. That default applies to an LLM-issued `run_gemm_tuning`
-REQUEST, which is dispatched inline whatever the backend. The KERNEL-**entry**
-GEMM tuning is a different matter: under `geak` it never fires at all, because
-`_run_kernel_agent` hands the phase to `_run_geak_kernel_phase` and returns
-before reaching it.
+`run_gemm_tuning_handler` runs the Forge GEMM tuner only, and only `KernelPhase`
+calls it. Under `geak` the KERNEL-entry GEMM tuning never fires, because
+`run_agent` hands the phase to `_run_geak_kernel_phase` and returns before
+reaching it. An orchestration-issued `run_gemm_tuning` REQUEST is rejected, as
+described above.
 
 FlyDSL kernels (`source_type=flydsl`) are handled by Forge when it is enabled.
 
@@ -201,16 +207,16 @@ across ranks before reporting.
 Shell paths in this section follow the recommended `pip install --target .` layout.
 In a source checkout, replace the `hyperloom/` prefix with `src/hyperloom/`.
 
-The kernel tool scripts live under `hyperloom/agents/kernel/tools/` and are
-resolved at runtime through the `HYPERLOOM_KERNEL_AGENT_ROOT` env var (set to
-`<repo>/hyperloom/agents/kernel` by the CLI bootstrap). Install everything using:
+The kernel tools are modules of the `hyperloom.orchestrator.trace_analysis` and
+`hyperloom.orchestrator.kernel` packages; the ones that run as subprocesses are
+started with `python -m <module>`. Install everything using:
 
 ```bash
 export REPO_ROOT="$(pwd -P)"    # workspace holding the hyperloom package
 # Pin the artifact root so the env file below has a known path. Left unset, the
 # CLI picks /workspace/hyperloom when writable and session/ under $PWD otherwise.
 export USER_DATA_PATH="${USER_DATA_PATH:-$REPO_ROOT/session}"
-bash "$REPO_ROOT/hyperloom/agents/kernel/scripts/install.sh"
+bash "$REPO_ROOT/hyperloom/inference_optimizer/assets/install.sh"
 ```
 
 `install.sh` is idempotent. It sets up TraceLens, GEAK, Ray, and writes the
@@ -224,7 +230,8 @@ Required env vars:
 |---|---|---|
 | `ANTHROPIC_API_KEY` | operator | Anthropic-side key; GEAK runs Claude Code, and TraceLens runs Claude unless only the OpenAI side is configured |
 | `ANTHROPIC_BASE_URL` | operator | Anthropic-side endpoint (point it at your gateway) |
-| `OPENAI_API_KEY`, `OPENAI_BASE_URL` | operator | OpenAI-side key and endpoint; with only this side configured, TraceLens and Forge run on Codex and GEAK cannot start |
+| `OPENAI_API_KEY`, `OPENAI_BASE_URL` | operator | OpenAI-side key and endpoint; with only this side configured, TraceLens and Forge run on Codex and GEAK cannot start. The DeepSeek Harness (`INFERENCE_OPTIMIZER_AGENT_BACKEND=deepseek`) authenticates on this side too |
+| `INFERENCE_OPTIMIZER_AGENT_BACKEND` | operator | `claude`, `codex` or `deepseek`: the agent CLI orchestration, specialists, TraceLens and Forge run on, instead of the credential-ranked choice. Quantization honours only `deepseek`. With `deepseek`, specialists run on the `dsh` CLI with `DSH_PERMISSION_MODE=danger-full-access` |
 | `TRACELENS_ROOT` | `install.sh` (operator can override) | TraceLens checkout; installer clones to `.cache/TraceLens` by default |
 | `KERNEL_OPT_BACKEND_ORDER` | Unset/blank resolves to `geak` for every framework, ATOM included; the CLI fills in nothing. Bare-metal setup only persists nonempty choices; Slurm launchers still export `${KERNEL_OPT_BACKEND_ORDER:-geak}` | Exact, case-insensitive `forge` enables per-kernel Forge; existing `.env` choices are retained |
 
@@ -245,8 +252,8 @@ Fusion lane:
 | Variable | Purpose |
 |---|---|
 | `HYPERLOOM_SKIP_FUSION` | Truthy disables the fusion lane before any other gate is evaluated |
-| `FORGE_FUSION_TIMEOUT` | Wrapper timeout in seconds (default 7200 = 2h); a payload `timeout` / `timeout_sec` wins over it |
-| `FORGE_FUSION_MAX_TURNS` | Agent turn cap for one fusion run (default 100); a payload `max_turns` wins over it |
+| `FORGE_FUSION_TIMEOUT` | Wrapper timeout in seconds; unset, the fusion lane's share of the phase, else 7200 (2h) |
+| `FORGE_FUSION_MAX_TURNS` | Agent turn cap for one fusion run (default 100) |
 
 Collective candidate extraction:
 
@@ -261,7 +268,6 @@ All kernel tool output lands under
 
 ```
 runs/<session_id>/
-  session_state.json
   kernel_candidates.json
   tracelens/
     analysis.md                 # TraceLens canonical report (not copied by Hyperloom)
@@ -298,12 +304,14 @@ transparently.
 When `--nodes >= 2`, the optimization sandbox has no GPU. Handlers adapt:
 
 - **Applying patches**: `apply_kernel_patch.py` detects multi-node and fans the
-  patch to every pod using `python3 -m hyperloom.inference_optimizer.multi_node apply-patch`.
+  patch to every pod using `python3 -m hyperloom multi-node apply-patch`.
   Revert uses `manifest.multinode.host_backup_map` to hit the same pods.
-- **Compiling/benchmarking**: Forge/GEAK backends use
-  `python3 -m hyperloom.inference_optimizer.multi_node kernel-bench` instead of
-  local `hipcc`.
 - **Integration**: `integrate_handler` forces a full server restart after a
   successful apply so the re-baseline measures the patched modules.
-- **RayJob recreate**: `_replay_kernel_patches_for_multi_node` replays all
-  applied kernel patches when a new RayJob pod starts.
+- **Resuming a run**: once the resume pass has put the kept source layers back
+  on the sandbox's tree, `restore_kept_patches_on_pods` sends every file a kept
+  (finalized) kernel patch changed, as the sandbox holds it, to every pod,
+  before the first measurement; the resume halts with
+  `patch_recovery_incomplete` if a file cannot be restored. A cluster without
+  server control (benchmark-only) is left as it is, since no restart would
+  load the files. Pods recreated mid-run are not re-patched.

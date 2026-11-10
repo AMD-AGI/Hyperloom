@@ -14,13 +14,13 @@ from typing import Any
 
 import pytest
 
+from hyperloom.orchestrator.bringup.trees import head_commit
+from hyperloom_common.git_safety import recorded_admin_dir
+
 from hyperloom.orchestrator.specialists import patch_safety as ps
 from hyperloom.orchestrator.specialists import subprocess_ as ss
-from hyperloom.orchestrator.specialists.subprocess_ import (
-    SpecialistSubprocessConfig,
-    SpecialistSubprocessDispatcher,
-    _setup_worktree,
-)
+from hyperloom.orchestrator.specialists.subprocess_ import SpecialistSubprocessConfig, SpecialistSubprocessDispatcher
+from hyperloom.orchestrator.specialists.worktrees import PinnedGit, _setup_worktree
 from hyperloom.orchestrator.specialists.tree_snapshot import snapshot_tree
 
 
@@ -74,7 +74,6 @@ def test_build_claude_cmd_full(tmp_path: Path) -> None:
         model="claude-opus-4-7",
         mcp_config_path="/cfg/mcp.json",
         framework_source_roots=(str(fw),),
-        extra_claude_args=("--foo", "bar"),
     )
     wt = tmp_path / "wt"
     wt.mkdir()
@@ -99,7 +98,6 @@ def test_build_claude_cmd_full(tmp_path: Path) -> None:
     # --add-dir grants writes; integrate_patch is the only writer of source.
     assert str(wt) in cmd and str(ws) in cmd
     assert str(fw) not in cmd
-    assert cmd[-2:] == ["--foo", "bar"]
 
 
 def test_build_claude_cmd_minimal_no_model_no_mcp(tmp_path: Path) -> None:
@@ -148,14 +146,14 @@ def test_collect_patches(tmp_path: Path) -> None:
     (wt / "patches" / "b.diff").write_text("d", encoding="utf-8")
     (wt / "patches" / "ignore.txt").write_text("x", encoding="utf-8")
     ws = tmp_path / "ws"
-    out, roots = SpecialistSubprocessDispatcher._collect_patches(wt, ws)
+    out, roots = SpecialistSubprocessDispatcher._collect_patches(wt, ws, pinned=None)
     names = sorted(Path(p).name for p in out)
     assert names == ["a.patch", "b.diff"]
     assert roots == {}
 
 
 def test_collect_patches_none_worktree(tmp_path: Path) -> None:
-    assert SpecialistSubprocessDispatcher._collect_patches(None, tmp_path) == ([], {})
+    assert SpecialistSubprocessDispatcher._collect_patches(None, tmp_path, pinned=None) == ([], {})
 
 
 def _make_harvest_worktree(tmp_path: Path, *, with_source: bool = True) -> tuple[Path, Path]:
@@ -210,14 +208,16 @@ def test_collect_patches_excludes_work_artifacts_from_mixed_source_harvest(tmp_p
         target.parent.mkdir(parents=True, exist_ok=True)
         target.write_text(content, encoding="utf-8")
 
-    patches, roots = SpecialistSubprocessDispatcher._collect_patches(wt, tmp_path / "ws", worktree_base=base)
+    patches, roots = SpecialistSubprocessDispatcher._collect_patches(
+        wt, tmp_path / "ws", worktree_base=base, pinned=PinnedGit(recorded_admin_dir(base, wt))
+    )
 
     assert len(patches) == 1
     patch_text = Path(patches[0]).read_text(encoding="utf-8")
     assert roots == {patches[0]: str(base)}
     assert set(ps.parse_patch_targets(patch_text).all) == set(installable)
     assert "__pycache__/" not in patch_text
-    assert ps.ground_patch_text(patch_text, base_checkout=base, explicit_root=base).verdict == ps.GROUND_APPLIES
+    assert ps._git_apply_check(base, patch_text) is True
     for rel, content in artifacts.items():
         assert (wt / rel).read_bytes() == content
 
@@ -226,7 +226,9 @@ def test_collect_patches_work_artifacts_only_produces_no_delivery(tmp_path: Path
     base, wt = _make_harvest_worktree(tmp_path, with_source=False)
     artifacts = _write_harvest_work_artifacts(wt)
 
-    assert SpecialistSubprocessDispatcher._collect_patches(wt, tmp_path / "ws", worktree_base=base) == ([], {})
+    assert SpecialistSubprocessDispatcher._collect_patches(
+        wt, tmp_path / "ws", worktree_base=base, pinned=PinnedGit(recorded_admin_dir(base, wt))
+    ) == ([], {})
     assert not (wt / "patches" / "_worktree_diff.patch").exists()
     for rel, content in artifacts.items():
         assert (wt / rel).read_bytes() == content
@@ -238,7 +240,9 @@ def test_collect_patches_heartbeat_in_worktree_produces_no_delivery(tmp_path: Pa
     heartbeat = wt / "heartbeat.json"
     heartbeat.write_text('{"ts": "2026-09-28T19:12:00Z", "status": "running"}\n', encoding="utf-8")
 
-    assert SpecialistSubprocessDispatcher._collect_patches(wt, tmp_path / "ws", worktree_base=base) == ([], {})
+    assert SpecialistSubprocessDispatcher._collect_patches(
+        wt, tmp_path / "ws", worktree_base=base, pinned=PinnedGit(recorded_admin_dir(base, wt))
+    ) == ([], {})
     assert not (wt / "patches" / "_worktree_diff.patch").exists()
     subprocess.run(["git", "-C", str(wt), "add", "-N", "heartbeat.json"], check=True)
     diff = subprocess.run(["git", "-C", str(wt), "diff", "HEAD"], check=True, capture_output=True, text=True).stdout
@@ -249,7 +253,9 @@ def test_collect_patches_annotation_only_produces_no_delivery(tmp_path: Path) ->
     base, wt = _make_harvest_worktree(tmp_path)
     (wt / "runtime.py").write_text("# Runtime selection, unchanged.\nBLOCK_SIZE = 64\n", encoding="utf-8")
 
-    assert SpecialistSubprocessDispatcher._collect_patches(wt, tmp_path / "ws", worktree_base=base) == ([], {})
+    assert SpecialistSubprocessDispatcher._collect_patches(
+        wt, tmp_path / "ws", worktree_base=base, pinned=PinnedGit(recorded_admin_dir(base, wt))
+    ) == ([], {})
     assert not (wt / "patches" / "_worktree_diff.patch").exists()
 
 
@@ -263,9 +269,11 @@ def test_collect_patches_fallback_cannot_deliver_work_artifact_patch(tmp_path: P
     manual = wt / "patches" / "probe.patch"
     manual.parent.mkdir()
     manual.write_text(diff, encoding="utf-8")
-    assert ps.ground_patch_text(diff, base_checkout=base, explicit_root=base).verdict == ps.GROUND_APPLIES
+    assert ps._git_apply_check(base, diff) is True
 
-    patches, roots = SpecialistSubprocessDispatcher._collect_patches(wt, tmp_path / "ws", worktree_base=base)
+    patches, roots = SpecialistSubprocessDispatcher._collect_patches(
+        wt, tmp_path / "ws", worktree_base=base, pinned=PinnedGit(recorded_admin_dir(base, wt))
+    )
     kept, _dropped, _grounding, _spans_roots = ps.vet_patches(patches, base_checkout=base, explicit_root=base)
 
     assert kept == []
@@ -301,14 +309,17 @@ def test_harvest_off_an_installed_package_snapshot_applies_to_the_package(tmp_pa
     (wt / "model_executor" / "models" / "qwen3.py").write_text("BLOCK = 128\n", encoding="utf-8")
     (wt / "envs.py").write_text("VLLM_USE_X = 1\n", encoding="utf-8")
     patches, roots = SpecialistSubprocessDispatcher._collect_patches(
-        wt, tmp_path / "ws", worktree_base=package, worktree_base_commit=ss.head_commit(wt)
+        wt,
+        tmp_path / "ws",
+        worktree_base=package,
+        pinned=PinnedGit(recorded_admin_dir(repo, wt), head_commit(wt)),
     )
 
     assert len(patches) == 1
     assert roots == {patches[0]: str(package)}
     patch_text = Path(patches[0]).read_text(encoding="utf-8")
     assert set(ps.parse_patch_targets(patch_text).all) == {"envs.py", "model_executor/models/qwen3.py"}
-    assert ps.ground_patch_text(patch_text, base_checkout=None, explicit_root=package).verdict == ps.GROUND_APPLIES
+    assert ps._git_apply_check(package, patch_text) is True
     assert not (package / ".git").exists()
     assert (package / "model_executor" / "models" / "qwen3.py").read_text(encoding="utf-8") == "BLOCK = 64\n"
 
@@ -318,15 +329,15 @@ def test_snapshot_refresh_follows_the_package_and_a_held_snapshot_does_not(tmp_p
     package = _installed_package(tmp_path)
     repo = tmp_path / "session" / "tree_snapshots" / "vllm.git"
     snapshot_tree(package, repo, refresh=True)
-    first = ss.head_commit(repo)
+    first = head_commit(repo)
 
     (package / "envs.py").write_text("VLLM_USE_X = 2\n", encoding="utf-8")
     held, err = snapshot_tree(package, repo, refresh=False)
     assert err == "" and held == repo
-    assert ss.head_commit(repo) == first
+    assert head_commit(repo) == first
 
     snapshot_tree(package, repo, refresh=True)
-    assert ss.head_commit(repo) != first
+    assert head_commit(repo) != first
     wt, _ = _setup_worktree(repo, tmp_path / "ws" / "worktree", "specialist-t2")
     assert wt is not None and (wt / "envs.py").read_text(encoding="utf-8") == "VLLM_USE_X = 2\n"
 
@@ -342,13 +353,17 @@ def test_collect_patches_does_not_rediscover_an_obsolete_harvest(tmp_path: Path)
     base, wt = _make_harvest_worktree(tmp_path)
     before = (wt / "runtime.py").read_text(encoding="utf-8")
     (wt / "runtime.py").write_text("BLOCK_SIZE = 128\n", encoding="utf-8")
-    patches, _roots = SpecialistSubprocessDispatcher._collect_patches(wt, tmp_path / "ws", worktree_base=base)
+    patches, _roots = SpecialistSubprocessDispatcher._collect_patches(
+        wt, tmp_path / "ws", worktree_base=base, pinned=PinnedGit(recorded_admin_dir(base, wt))
+    )
     assert len(patches) == 1
     harvested = Path(patches[0])
     evidence = harvested.read_bytes()
     (wt / "runtime.py").write_text(before, encoding="utf-8")
 
-    assert SpecialistSubprocessDispatcher._collect_patches(wt, tmp_path / "ws", worktree_base=base) == ([], {})
+    assert SpecialistSubprocessDispatcher._collect_patches(
+        wt, tmp_path / "ws", worktree_base=base, pinned=PinnedGit(recorded_admin_dir(base, wt))
+    ) == ([], {})
     assert harvested.read_bytes() == evidence
 
 
@@ -368,7 +383,9 @@ def test_collect_patches_keeps_create_only_runtime_changes(tmp_path: Path, targe
     created.parent.mkdir(parents=True, exist_ok=True)
     created.write_text(content, encoding="utf-8")
 
-    patches, roots = SpecialistSubprocessDispatcher._collect_patches(wt, tmp_path / "ws", worktree_base=base)
+    patches, roots = SpecialistSubprocessDispatcher._collect_patches(
+        wt, tmp_path / "ws", worktree_base=base, pinned=PinnedGit(recorded_admin_dir(base, wt))
+    )
 
     assert len(patches) == 1
     patch_text = Path(patches[0]).read_text(encoding="utf-8")
@@ -376,7 +393,7 @@ def test_collect_patches_keeps_create_only_runtime_changes(tmp_path: Path, targe
     assert targets.existing == ()
     assert targets.created == (target,)
     assert roots == {patches[0]: str(base)}
-    assert ps.ground_patch_text(patch_text, base_checkout=base, explicit_root=base).verdict == ps.GROUND_APPLIES
+    assert ps._git_apply_check(base, patch_text) is True
     kept, dropped, grounding, _spans_roots = ps.vet_patches(patches, base_checkout=base, explicit_root=base)
     assert kept == patches
     assert dropped == []
@@ -391,6 +408,12 @@ def test_read_done_missing(tmp_path: Path) -> None:
 def test_read_done_bad_json(tmp_path: Path) -> None:
     p = tmp_path / "done.json"
     p.write_text("{bad", encoding="utf-8")
+    assert SpecialistSubprocessDispatcher._read_done(p) is None
+
+
+def test_read_done_not_utf8(tmp_path: Path) -> None:
+    p = tmp_path / "done.json"
+    p.write_bytes(b'{"summary": "\xff"}')
     assert SpecialistSubprocessDispatcher._read_done(p) is None
 
 
@@ -422,3 +445,14 @@ def test_read_done_unwraps_intent_envelope(tmp_path: Path) -> None:
     assert out["domain"] == "kernel_switch_specialist"
     assert out["proposal_set"] == [{"name": "v1"}]
     assert "intent_type" not in out and "payload" not in out
+
+
+def test_a_claude_specialist_loads_none_of_the_operators_settings(tmp_path: Path) -> None:
+    cmd = _dispatcher()._build_claude_cmd(
+        system_prompt_file=tmp_path / "system_prompt.md",
+        system_prompt="SYS",
+        workspace=tmp_path,
+        worktree=None,
+        disallowed_tools=frozenset(),
+    )
+    assert "--setting-sources=" in cmd

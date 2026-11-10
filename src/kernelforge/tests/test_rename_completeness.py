@@ -15,12 +15,12 @@ import pytest
 _PATTERN = re.compile(r"kernel_agents|kernel-agents|KERNEL_AGENTS")
 
 # The second move: the two sibling top-level packages became subpackages, so ``forge_llm`` -> ``kernelforge.llm``,
-# ``forge_llm.agent_backends`` -> ``kernelforge.agent_backends``, ``forge_gemm_tune`` -> ``kernelforge.gemm_tune``.
+# ``forge_llm.agent_backends`` -> ``kernelforge.agent_backends``, ``forge_gemm_tune`` -> ``kernelforge.workflows.gemm_tune``.
 _COLLAPSE_PATTERN = re.compile(r"\bforge_llm\b|\bforge_gemm_tune\b")
 
 _COLLAPSE_ALLOWED: tuple[tuple[str, str, str], ...] = (
     (
-        "src/kernelforge/gemm_tune/tune_robustness.py",
+        "src/kernelforge/workflows/gemm_tune/tune_robustness.py",
         r"~/\.forge_gemm_tune/",
         "A user-home cache directory, not a module path. Renaming it would orphan "
         "every faulted-shape blocklist an operator has already accumulated.",
@@ -35,29 +35,12 @@ _COLLAPSE_ALLOWED: tuple[tuple[str, str, str], ...] = (
 # Occurrences that are deliberate. Each entry is (path glob, line regex, why).
 _ALLOWED: tuple[tuple[str, str, str], ...] = (
     (
-        "*",
-        r"KERNEL_AGENTS_MAX_TURNS",
-        "Removed environment variable. The literal exists only so Config.from_env "
-        "can warn the operator that it is ignored; renaming it silences the warning.",
-    ),
-    (
-        "src/kernelforge/agent_backends/registry.py",
-        r"kernel_agents\.agent_providers",
-        "Pre-rename entry-point group, still read so third-party provider plugins "
-        "keep loading (with a DeprecationWarning).",
-    ),
-    (
         "src/kernelforge/tests/test_rename_completeness.py",
         r".",
         "This file names the old spellings in order to forbid them.",
     ),
     (
-        "src/kernelforge/tests/test_provider_registry.py",
-        r"kernel_agents",
-        "Coverage for the deprecated entry-point group's dual-read; the test has to name the group it is asserting on.",
-    ),
-    (
-        "src/kernelforge/tests/test_agent_env_contract.py",
+        "src/kernelforge/tests/agent_backends/test_agent_env_contract.py",
         r"KERNEL_AGENTS_MODEL",
         "The test that asserts the alias is no longer read has to name it.",
     ),
@@ -66,6 +49,12 @@ _ALLOWED: tuple[tuple[str, str, str], ...] = (
         r"kernel-agents",
         "Release notes naming the retired console script, so an operator whose script "
         "still invokes it recognises the spelling that now fails.",
+    ),
+    (
+        "docs/release-notes.md",
+        r"kernel_agents\.agent_providers|KERNEL_AGENTS_MAX_TURNS",
+        "Release notes naming the retired entry-point group and env var, so a plugin "
+        "author or operator still using them recognises what is no longer read.",
     ),
 )
 
@@ -77,13 +66,13 @@ _FELLOW_PATTERN = re.compile(r"fellow", re.IGNORECASE)
 # so nothing outside a historical record may name it.
 _FELLOW_ALLOWED: tuple[tuple[str, str, str], ...] = (
     (
-        "src/kernelforge/data/*.md",
+        "src/kernelforge/knowledge/local_wiki/resources/*.md",
         r"(?i)fellow",
         "Knowledge-base records of campaigns that really did run under the old "
         "vocabulary. The P2 rule stands: paths and commands may be renamed, the "
         "narrative may not, because rewriting it falsifies the record. Scoped to "
-        "*.md for the same reason its kernel_agents sibling is: a data/* glob also "
-        "swallowed examples/*/run_example.sh, seven of which kept passing a "
+        "*.md so runnable examples are not included; seven run_example.sh files "
+        "kept passing a "
         "--fellow flag the CLI no longer declares. forge-loop tolerated unknown "
         "options at the time, so those runs did not fail -- they silently ran an "
         "inferred backend instead of the intended one. That tolerance is gone: an "
@@ -99,6 +88,25 @@ _FELLOW_ALLOWED: tuple[tuple[str, str, str], ...] = (
         r"FORGE_DISABLE_COMPILED_FELLOWS",
         "The retired environment-variable spelling, named so a migrating operator can "
         "find it; it is forwarded then ignored, and silently re-enables the backends.",
+    ),
+)
+
+
+# The fourth move: ``kernelforge.llm`` dissolved into the packages that own each of its modules -- the gateway into
+# ``kernelforge.agent_backends``, git and process reaping into ``kernelforge.utils``, the edit policy into
+# ``kernelforge.config``.
+_LLM_PATTERN = re.compile(r"\bkernelforge[./]llm\b")
+
+_LLM_ALLOWED: tuple[tuple[str, str, str], ...] = (
+    (
+        ".claude/skills/review-pr/rules.md",
+        r"src/kernelforge/llm/gateway\.py",
+        "A review rule's record of what an earlier PR added, cited at the path it had then.",
+    ),
+    (
+        "src/kernelforge/tests/test_rename_completeness.py",
+        r".",
+        "This file names the old spelling in order to forbid it.",
     ),
 )
 
@@ -144,6 +152,7 @@ def test_every_allowlist_entry_still_exempts_something() -> None:
         ("_ALLOWED", _ALLOWED, _PATTERN),
         ("_COLLAPSE_ALLOWED", _COLLAPSE_ALLOWED, _COLLAPSE_PATTERN),
         ("_FELLOW_ALLOWED", _FELLOW_ALLOWED, _FELLOW_PATTERN),
+        ("_LLM_ALLOWED", _LLM_ALLOWED, _LLM_PATTERN),
     ):
         hits = _tracked_hits(root, pattern)
         for glob, line_re, _why in allowed:
@@ -198,6 +207,22 @@ def test_no_stray_fellow_references() -> None:
     )
 
 
+def test_no_stray_llm_package_references() -> None:
+    """Nothing may still import from, or point at, the dissolved ``kernelforge.llm`` package."""
+    root = _repo_root()
+    if root is None:
+        pytest.skip("not a source checkout")
+    stray = [
+        f"{rel}:{lineno}: {line}"
+        for rel, lineno, line in _tracked_hits(root, _LLM_PATTERN)
+        if not _is_allowed(rel, line, _LLM_ALLOWED)
+    ]
+    assert not stray, (
+        "references to kernelforge.llm, whose modules now live in kernelforge.agent_backends, "
+        "kernelforge.utils and kernelforge.config:\n  " + "\n  ".join(stray[:40])
+    )
+
+
 def test_the_rename_did_not_space_out_an_unrelated_identifier() -> None:
     """``kernel_backend`` must never appear quoted with a space instead."""
     root = _repo_root()
@@ -210,14 +235,3 @@ def test_the_rename_did_not_space_out_an_unrelated_identifier() -> None:
         "a quoted two-word spelling of kernel_backend: the identifier lost its "
         "underscore to the rename and must get it back:\n  " + "\n  ".join(stray[:40])
     )
-
-
-def test_kernel_backend_prompt_modules_are_importable() -> None:
-    """The dotted prompt-module registry is strings; only an import proves it."""
-    import importlib
-
-    from kernelforge.kernel_backends.constants import KERNEL_BACKEND_PROMPT_MODULES
-
-    for backend, module in KERNEL_BACKEND_PROMPT_MODULES.items():
-        assert module.startswith("kernelforge."), backend
-        importlib.import_module(module)

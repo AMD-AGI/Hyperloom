@@ -62,11 +62,3 @@ class TestParamSearchRenderer:
         assert any("Best measured variant gain: +12.50%" in fact for fact in out.key_facts)
         body = out.markdown_block
         assert body.index("big") < body.index("small")
-
-    def test_a_withheld_winner_is_reported_apart_from_a_plain_revert(self):
-        """``KEEP_UNSTABLE`` is a variant that won and did not reproduce, which
-        is a different fact from one that lost on measurement."""
-        out = _render(_attempt("flaky", "KEEP_UNSTABLE", 5.0))
-
-        assert any("withheld" in fact for fact in out.key_facts)
-        assert out.key_facts[0].endswith("0 kept.")

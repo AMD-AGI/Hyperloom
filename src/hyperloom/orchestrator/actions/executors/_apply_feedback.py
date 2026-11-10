@@ -1,18 +1,28 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""Structured apply-failure feedback for patch reauthoring."""
+"""Per-patch apply results, and the structured failure feedback used for reauthoring."""
 
 from __future__ import annotations
 
 import logging
 from dataclasses import dataclass, field
+from enum import Enum
 from pathlib import Path
 from typing import Any
 
 from ...specialists.patch_safety import patch_file_targets
 
 log = logging.getLogger(__name__)
+
+
+class PresenceCheck(Enum):
+    """How a change was found already in the tree, so applying it would change nothing."""
+
+    #: ``git apply -R --check`` passes: every hunk's post-image is in the checkout.
+    GIT_REVERSE_APPLY = "git_reverse_apply_check"
+    #: ``patch -R --fuzz=0 --dry-run`` passes with no offset: the same proof without git.
+    PATCH_REVERSE_DRY_RUN = "patch_reverse_dry_run"
 
 
 @dataclass
@@ -62,6 +72,20 @@ class ApplyFeedback:
         if self.source_context:
             parts.append(f"\n### Source context\n```\n{self.source_context.strip()}\n```")
         return "\n".join(parts)
+
+
+@dataclass(frozen=True)
+class PatchApplyResult:
+    """What applying one patch did: changed the tree, found it already there, or failed."""
+
+    ok: bool
+    error: str = ""
+    #: Backup records the plain-``patch`` channel wrote before changing files; a git apply keeps none.
+    backups: list[dict[str, Any]] = field(default_factory=list)
+    #: Reauthoring feedback for a failure.
+    feedback: ApplyFeedback | None = None
+    #: The check that found every hunk already in the tree, when the apply changed nothing.
+    present_by: PresenceCheck | None = None
 
 
 def read_patch_source_context(
@@ -169,7 +193,6 @@ def build_apply_feedback(
     channel: str,
     tried_levels: "list[int] | None" = None,
     stderr: str = "",
-    rejected_hunks: str = "",
     framework_root: "Path | None" = None,
 ) -> ApplyFeedback:
     """Build an :class:`ApplyFeedback` record with optional source context."""
@@ -187,13 +210,14 @@ def build_apply_feedback(
         channel=channel,
         tried_levels=tried_levels or [],
         stderr=stderr,
-        rejected_hunks=rejected_hunks,
         source_context=source_ctx,
     )
 
 
 __all__ = [
     "ApplyFeedback",
+    "PatchApplyResult",
+    "PresenceCheck",
     "build_apply_feedback",
     "read_patch_source_context",
     "source_context_for_file",

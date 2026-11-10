@@ -9,32 +9,32 @@ Two halves of the enablement flow that both build on a
 * **Discovery** — given a failure signature, decide which repos to scout for an
   enabling PR (the serving framework plus the ROCm / HIP / aiter bridge repos)
   and rank candidate PR titles by enablement intent ("enable / support / add /
-  fix / port to ROCm"). See :func:`build_search_plan`, :func:`rank_titles`,
+  fix / port to ROCm"). See :func:`build_search_plan` and
   :func:`score_enablement_title`.
-* **Authoring** — turn a request + ranked candidates into the
-  :class:`EnablementMandate` (source roots + task description + patch
-  invariants) handed to the patch-authoring specialist. See
-  :func:`build_mandate`.
+* **Authoring** — turn a framework/model + ranked candidates into the task
+  text (source roots + failure + ladder + patch invariants) handed to the
+  patch-authoring specialist. See :func:`build_mandate`.
 
 Pure-Python and GPU-free: no network or LLM access. :func:`build_mandate` reads
-the local filesystem (source-root probe + installed package version) unless
-``source_root_hints`` is passed explicitly.
+the local filesystem (source-root probe + installed package version).
 """
 
 from __future__ import annotations
 
+import importlib.metadata
 import re
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from pathlib import PurePath
 from typing import Sequence
 
-from hyperloom.common.failure_signature import EnablementRequest, FailureSignature
+from hyperloom.common.failure_signature import FailureSignature
 from hyperloom.agents.framework.keywords import extract_keywords, score_title_with_anti_signal
 from hyperloom.agents.framework.repo_map import bridge_repo_urls, upstream_repo_urls
 from hyperloom.inference_optimizer.framework_paths import (
     resolve_kernel_search_roots,
     summarise_framework_root_discovery,
 )
+from hyperloom.inference_optimizer.framework_registry import python_package
 
 
 # ---------------------------------------------------------------------------
@@ -64,12 +64,16 @@ ENABLEMENT_INTENT_TERMS: frozenset[str] = frozenset(
     }
 )
 
+# The seeds of both HIP kinds: a kernel that is absent and a HIP call that failed are searched for alike.
+_HIP_SEED_KEYWORDS: tuple[str, ...] = ("rocm", "hip", "aiter", "kernel")
+
 # Per-kind seed keywords appended to the auto-extracted set. Keys are failure
 # ``kind`` ids.
 _KIND_SEED_KEYWORDS: dict[str, tuple[str, ...]] = {
     "missing_model_arch": ("model", "architecture", "support", "add"),
     "unsupported_dtype": ("dtype", "fp8", "quant", "support"),
-    "hip_kernel_missing": ("rocm", "hip", "aiter", "kernel"),
+    "hip_kernel_missing": _HIP_SEED_KEYWORDS,
+    "hip_runtime_error": _HIP_SEED_KEYWORDS,
     "import_error": ("build", "import", "compile"),
     "shape_mismatch": ("shape", "reshape", "layout"),
     "not_implemented": ("implement", "support", "rocm"),
@@ -155,8 +159,6 @@ def build_search_plan(
 def score_enablement_title(
     title: str,
     plan: EnablementSearchPlan,
-    *,
-    intent_weight: float = 1.0,
 ) -> float:
     """Rank a candidate PR title for enablement relevance.
 
@@ -167,7 +169,6 @@ def score_enablement_title(
     Args:
         title: The PR title.
         plan: The search plan carrying ranking keywords.
-        intent_weight: Weight per enablement-intent token hit.
 
     Returns:
         float: The combined score (>= 0.0); callers may drop ``0.0``.
@@ -177,25 +178,7 @@ def score_enablement_title(
     base = score_title_with_anti_signal(title, plan.keywords)
     title_tokens = set(re.findall(r"[a-z][a-z0-9_]+", title.lower()))
     intent = len(title_tokens & ENABLEMENT_INTENT_TERMS)
-    return base + intent_weight * float(intent)
-
-
-def rank_titles(
-    titles: Sequence[str],
-    plan: EnablementSearchPlan,
-) -> list[tuple[str, float]]:
-    """Score and sort candidate titles by enablement relevance, descending.
-
-    Args:
-        titles: Candidate PR titles.
-        plan: The search plan carrying ranking keywords.
-
-    Returns:
-        list[tuple[str, float]]: ``(title, score)`` pairs, highest first;
-        ties keep input order (stable sort).
-    """
-    scored = [(t, score_enablement_title(t, plan)) for t in titles]
-    return sorted(scored, key=lambda pair: pair[1], reverse=True)
+    return base + float(intent)
 
 
 # ---------------------------------------------------------------------------
@@ -209,12 +192,10 @@ _ROCM_HIP_ROOT_HINT = "the ROCm / HIP / aiter source tree (/opt/rocm, aiter)"
 
 
 def _resolve_package_version(package: str) -> str:
-    """Return the installed version of *package*, or empty string on failure."""
+    """Return the installed version of *package*, or empty string when it is not installed."""
     try:
-        import importlib.metadata as _m
-
-        return _m.version(package)
-    except Exception:  # noqa: BLE001
+        return importlib.metadata.version(package)
+    except importlib.metadata.PackageNotFoundError:
         return ""
 
 
@@ -228,9 +209,8 @@ def _resolve_actual_root_hints(framework: str) -> list[str]:
     if roots:
         hints: list[str] = list(roots)
         hints.append(f"(discovery summary: {summarise_framework_root_discovery(':'.join(roots))})")
-        pkg_map = {"sglang": "sglang", "vllm": "vllm", "xdit": "xfuser", "atom": "atom"}
-        pkg_name = pkg_map.get(framework, framework)
-        ver = _resolve_package_version(pkg_name)
+        pkg_name = python_package(framework)
+        ver = _resolve_package_version(pkg_name) if pkg_name else ""
         if ver:
             hints.append(f"({pkg_name} installed version: {ver})")
         # Always include the ROCm/HIP root hint (authoring sub-agent always
@@ -281,8 +261,16 @@ ENABLEMENT_SETUP_GUIDANCE: tuple[str, ...] = (
     "your patch and booting, so an install you depended on is reproduced rather "
     "than lost after your session ends. An unrecorded install will NOT persist.",
     "Keep setup commands minimal and deterministic (pin versions), non-"
-    "interactive (`-y` / `--yes`), and limited to package/tool installation — "
-    "they are validated against an install-only allowlist on replay.",
+    "interactive (`-y` / `--yes`), and limited to package/tool installation. "
+    "Replay validates every one against an install-only allowlist BEFORE "
+    "running any of them, and a single command that is not an install fails "
+    "the whole round — carry anything else in a patch instead.",
+    "Setup commands change the SHARED environment. Never install, upgrade or "
+    "reinstall torch / torchvision / torchaudio / triton / vllm / sgl-kernel / "
+    "amd-aiter there, and do not `-U` a package that depends on them: PyPI "
+    "serves CUDA builds of all of them, and replacing the image's ROCm build "
+    "breaks every later round. A different framework version belongs in a "
+    "``needs_runtime`` request instead.",
     "If NO environment setup is needed (a pure source fix), leave `setup_commands` empty.",
 )
 
@@ -323,7 +311,7 @@ ENABLEMENT_PROGRESS_GUIDANCE: tuple[str, ...] = (
 # genuinely-new architecture dead-ends at the arch-registry alias.
 # This contract lets the specialist REQUEST an off-loop targeted build; the
 # Coordinator enqueues it on the isolated, ROCm-safe build lane (isolated venv +
-# pinned ROCm torch constraints), gated by the runnable-decision probe.
+# pinned ROCm constraints), gated by the runnable-decision probe.
 ENABLEMENT_BUILD_REQUEST_GUIDANCE: tuple[str, ...] = (
     "REQUESTING A COMPILED / FROM-SOURCE BUILD. If clearing this gap needs a "
     "*compiled* component (a new AITER FP4/MLA/NSA op, sgl-kernel) or a "
@@ -346,6 +334,53 @@ ENABLEMENT_BUILD_REQUEST_GUIDANCE: tuple[str, ...] = (
     "request a build for the compiled/from-source piece the patch cannot cover. "
     "Setting ``needs_targeted_build`` counts as a real deliverable — do NOT "
     "return an empty ``proposal_set`` when you emit one.",
+)
+
+# Rung 3 contract: the specialist names the version that carries the fix, and
+# integrate_patch provisions it into a per-attempt venv pinned to the image's
+# ROCm stack. Nothing else selects or enables the runtime.
+ENABLEMENT_RUNTIME_REQUEST_GUIDANCE: tuple[str, ...] = (
+    "REQUESTING AN ATTEMPT RUNTIME. When the fix already exists in another "
+    "version — a newer framework release, an upstream PR, or a newer pure-Python "
+    "dependency such as transformers — find it yourself (WebSearch / "
+    "mcp__pr_monitor__* / the repo history) and emit a ``needs_runtime`` object "
+    "in your final ``specialist_done``. integrate_patch installs it into a fresh "
+    "venv layered over the installed stack and boots this round on it; the "
+    "shared environment is untouched. Nothing else enables it — no operator "
+    "setting, no failure-kind gate.",
+    "``needs_runtime`` schema: ``{ref, repo_url, packages, index_url, "
+    "capability, reason}``, with at least one of ``ref`` / ``packages``. ``ref`` "
+    "is framework source to check out and install editable: a GitHub PR URL, "
+    "``PR:1234``, a tag, a branch, or a FULL commit sha (a shallow fetch cannot "
+    "resolve a short one). ``repo_url`` defaults to the framework's upstream "
+    "repo. ``packages`` are pip requirement strings installed beside the "
+    'checkout, or alone without a ref (e.g. ``["transformers==4.57.1"]``) — pin '
+    "exact versions. ``index_url`` is an extra pip index. vLLM accepts "
+    "``packages`` only: a vLLM checkout compiles, so ask for it via "
+    "``needs_targeted_build``.",
+    "TORCH / ROCm RISK — check before you pick a version. The attempt venv pins "
+    "the image's ROCm builds: torch, torchvision, torchaudio, triton, and every "
+    "package whose version carries a ROCm label (``+rocm...``). A ref or package "
+    "that needs a different torch / triton fails provision with a pip conflict "
+    "instead of swapping the GPU stack. PyPI serves only CUDA builds of torch, "
+    "triton, sgl-kernel and vllm — never request those from PyPI.",
+    "Compiled ROCm packages WITHOUT a ROCm label — sglang-kernel (sgl-kernel) "
+    "and amd-aiter — are NOT pinned. A framework ref far ahead of the installed "
+    "one usually requires a newer sglang-kernel / aiter the image does not have: "
+    "the runtime installs, then fails at import or at its first kernel call. "
+    "Prefer the ref closest to the installed version that carries the fix (a "
+    "backport PR, or the release just after it), compare its dependency pins "
+    "(``python/pyproject.toml``) with the installed versions first.",
+    "A round carries ``needs_runtime`` or ``needs_targeted_build``, not both: "
+    "a round that requests a build runs only the build, and its "
+    "``needs_runtime`` is ignored. Request the runtime and a compiled piece it "
+    "needs in separate rounds.",
+    "Patches you write in the same round apply to the provisioned checkout, not "
+    "the installed tree — author them against the ref you request. A runtime "
+    "the round KEEPs is re-provisioned for every later round and a new "
+    "``needs_runtime`` is then ignored, so request the version you want to "
+    "build on. Without a ``needs_targeted_build``, ``needs_runtime`` is a real "
+    "deliverable: the round boots on it even with an empty ``proposal_set``.",
 )
 
 
@@ -374,13 +409,14 @@ _LADDER_RUNGS: tuple[str, ...] = (
     "Rung 2 - In-tree source patch: a unified diff against the INSTALLED source tree "
     "— register the arch, a small forward/config/tokenizer bridge, or backport a "
     "merged PR. Pure Python, no compile.",
-    "Rung 3 - Attempt-scoped runtime: the capability lives in a DIFFERENT version — "
-    "acquire a wheel / editable checkout / ref into an isolated per-attempt venv. No "
-    "compile, no shared-venv mutation (record it in setup_commands).",
+    "Rung 3 - Attempt-scoped runtime: the capability lives in a DIFFERENT version of "
+    "the framework or of a pure-Python dependency — request that ref / those "
+    "packages via needs_runtime (see below) and it is installed into an isolated "
+    "per-attempt venv. No compile, no shared-venv mutation.",
     "Rung 4 - Source localization: localize a merged-PR / vendored closure into the "
     "source root; changes touching compiled or build-backend files defer to Rung 5.",
     "Rung 5 - Off-loop compiled build: AITER / sgl-kernel / vLLM-from-source, built "
-    "in an isolated venv with pinned ROCm torch constraints on the off-loop build "
+    "in an isolated venv with the same ROCm pins as Rung 3 on the off-loop build "
     "lane. Request it via needs_targeted_build (see below); do not compile inline.",
 )
 
@@ -389,7 +425,7 @@ _LADDER_KIND_TO_RUNG: tuple[str, ...] = (
     "missing_model_arch (pure registration) / capability_disabled -> Rung 2",
     "missing_model_arch / missing_weight (absent here, present in another version) -> Rung 3",
     "import_error / merged-PR closure -> Rung 4",
-    "hip_kernel_missing / native unsupported_dtype / missing compiled symbol -> Rung 5",
+    "hip_kernel_missing / hip_runtime_error / native unsupported_dtype / missing compiled symbol -> Rung 5",
     "resource_constraint (OOM / GPU count) -> NOT a code gap; cannot be patched",
     "accuracy_below_floor / eval_generation_pathology / eval_runtime_failure -> "
     "re-diagnose against the failing eval contract (answer quality, or generation "
@@ -428,7 +464,7 @@ def build_enablement_ladder_book(signature: FailureSignature | None = None) -> s
 
     Prose only: the two axes (diagnose once / climb as needed), the Rung 0-5
     ladder, an advisory ``kind -> recommended entry rung`` table, and the folded
-    environment-setup / incremental-progress / targeted-build guidance. When a
+    environment-setup / incremental-progress / attempt-runtime / targeted-build guidance. When a
     ``signature`` is given, a one-line entry-rung hint is added; it never routes
     deterministically.
     """
@@ -455,6 +491,10 @@ def build_enablement_ladder_book(signature: FailureSignature | None = None) -> s
     for g in ENABLEMENT_PROGRESS_GUIDANCE:
         lines.append(f"  - {g}")
     lines.append("")
+    lines.append("ATTEMPT RUNTIME (request another framework / dependency version that already has the fix):")
+    for g in ENABLEMENT_RUNTIME_REQUEST_GUIDANCE:
+        lines.append(f"  - {g}")
+    lines.append("")
     lines.append("TARGETED BUILD (request a compiled / from-source component when a patch cannot deliver it):")
     for g in ENABLEMENT_BUILD_REQUEST_GUIDANCE:
         lines.append(f"  - {g}")
@@ -465,43 +505,22 @@ def build_enablement_ladder_book(signature: FailureSignature | None = None) -> s
     return "\n".join(lines)
 
 
-@dataclass(frozen=True)
-class EnablementMandate:
-    """A fully-specified authoring task for the enablement specialist.
-
-    Attributes:
-        framework: Target serving framework.
-        model: Model id/path that must become runnable.
-        signature: The classified failure driving the fix.
-        source_root_hints: Human-readable source-root families to search.
-        candidate_refs: Ranked bridging PR/ref hints (best first).
-        task_description: The rendered specialist mandate (prompt body).
-        invariants: The patch invariants (see :data:`ENABLEMENT_PATCH_INVARIANTS`).
-    """
-
-    framework: str
-    model: str
-    signature: FailureSignature
-    source_root_hints: tuple[str, ...]
-    candidate_refs: tuple[str, ...] = ()
-    task_description: str = ""
-    invariants: tuple[str, ...] = field(default_factory=lambda: ENABLEMENT_PATCH_INVARIANTS)
-
-
-def _render_task_description(
-    req: EnablementRequest,
-    sig: FailureSignature,
-    candidate_refs: Sequence[str],
-    source_root_hints: Sequence[str],
+def build_mandate(
+    framework: str,
+    model: str,
+    signature: FailureSignature,
+    *,
+    candidate_refs: Sequence[str] = (),
     source_context: str = "",
 ) -> str:
-    """Render the specialist mandate text for an enablement failure.
+    """Render the authoring task handed to the enablement specialist.
 
     Args:
-        req: The enablement request (framework/model/opt-in).
-        sig: The classified failure signature.
-        candidate_refs: Ranked bridging refs (best first).
-        source_root_hints: Source-root families to search.
+        framework: Target serving framework.
+        model: Model id/path that must become runnable.
+        signature: The verdict the round was dispatched on. The caller owns it;
+            the mandate never re-derives a signature from prompt text.
+        candidate_refs: Ranked bridging refs to suggest (best first).
         source_context: Optional snippet of source lines near the offending
             site, injected verbatim to ground the authoring sub-agent. Empty
             omits the block.
@@ -509,21 +528,22 @@ def _render_task_description(
     Returns:
         str: A multi-line prompt body for the authoring sub-agent.
     """
+    refs = [r for r in candidate_refs if r]
     lines: list[str] = []
     lines.append(
-        f"GOAL: make model `{req.model}` run correctly under the `{req.framework}` backend. "
+        f"GOAL: make model `{model}` run correctly under the `{framework}` backend. "
         "It currently fails to start, or it starts but fails its accuracy eval."
     )
     lines.append("")
-    lines.append(f"FAILURE CLASS: {sig.kind} (confidence {sig.confidence:.2f}).")
-    if sig.secondary_kinds:
-        lines.append(f"SECONDARY FAILURE CLASSES (also matched): {', '.join(sig.secondary_kinds)}")
-    if sig.offending_file:
-        lines.append(f"OFFENDING FILE (best guess): {sig.offending_file}")
-    if sig.offending_symbol:
-        lines.append(f"OFFENDING SYMBOL: {sig.offending_symbol}")
-    if sig.raw_excerpt:
-        lines.append(f"ERROR EXCERPT: {sig.raw_excerpt}")
+    lines.append(f"FAILURE CLASS: {signature.kind} (confidence {signature.confidence:.2f}).")
+    if signature.secondary_kinds:
+        lines.append(f"SECONDARY FAILURE CLASSES (also matched): {', '.join(signature.secondary_kinds)}")
+    if signature.offending_file:
+        lines.append(f"OFFENDING FILE (best guess): {signature.offending_file}")
+    if signature.offending_symbol:
+        lines.append(f"OFFENDING SYMBOL: {signature.offending_symbol}")
+    if signature.raw_excerpt:
+        lines.append(f"ERROR EXCERPT: {signature.raw_excerpt}")
     if source_context.strip():
         lines.append("")
         lines.append("SOURCE CONTEXT (near offending site):")
@@ -531,61 +551,21 @@ def _render_task_description(
         lines.append(source_context.rstrip("\n"))
         lines.append("```")
     lines.append("")
-    if candidate_refs:
+    if refs:
         lines.append("CANDIDATE BRIDGING PRs / REFS (most relevant first):")
-        for ref in candidate_refs:
+        for ref in refs:
             lines.append(f"  - {ref}")
         lines.append("")
     lines.append("SOURCE ROOTS TO SEARCH (advisory — where this session's code lives):")
-    for hint in source_root_hints:
+    for hint in _resolve_actual_root_hints(framework):
         lines.append(f"  - {hint}")
     lines.append("")
-    lines.append(build_enablement_ladder_book(sig))
+    lines.append(build_enablement_ladder_book(signature))
     lines.append("")
     lines.append("INVARIANTS:")
     for inv in ENABLEMENT_PATCH_INVARIANTS:
         lines.append(f"  - {inv}")
     return "\n".join(lines)
-
-
-def build_mandate(
-    req: EnablementRequest,
-    signature: FailureSignature,
-    *,
-    candidate_refs: Sequence[str] = (),
-    source_context: str = "",
-    source_root_hints: Sequence[str] | None = None,
-) -> EnablementMandate:
-    """Build an :class:`EnablementMandate` from a request + candidates.
-
-    Args:
-        req: The enablement request.
-        signature: The verdict the round was dispatched on. The caller owns it;
-            the mandate never re-derives a signature from prompt text.
-        candidate_refs: Ranked bridging refs to suggest (best first).
-        source_context: Optional source snippet near the offending site to
-            ground the authoring sub-agent (best-effort; empty omits it).
-        source_root_hints: Explicit source-root hints; when ``None`` (default)
-            they are resolved via :func:`_resolve_actual_root_hints`.
-
-    Returns:
-        EnablementMandate: The authoring contract, ready to hand to the
-        specialist runner.
-    """
-    if source_root_hints is not None:
-        hints: list[str] = list(source_root_hints) or [_FRAMEWORK_ROOT_HINT, _ROCM_HIP_ROOT_HINT]
-    else:
-        hints = _resolve_actual_root_hints(req.framework)
-    refs = tuple(r for r in candidate_refs if r)
-    task = _render_task_description(req, signature, refs, hints, source_context)
-    return EnablementMandate(
-        framework=req.framework,
-        model=req.model,
-        signature=signature,
-        source_root_hints=tuple(hints),
-        candidate_refs=refs,
-        task_description=task,
-    )
 
 
 __all__ = [
@@ -594,12 +574,11 @@ __all__ = [
     "ENABLEMENT_INTENT_TERMS",
     "ENABLEMENT_PATCH_INVARIANTS",
     "ENABLEMENT_PROGRESS_GUIDANCE",
+    "ENABLEMENT_RUNTIME_REQUEST_GUIDANCE",
     "ENABLEMENT_SETUP_GUIDANCE",
-    "EnablementMandate",
     "EnablementSearchPlan",
     "build_enablement_ladder_book",
     "build_mandate",
     "build_search_plan",
-    "rank_titles",
     "score_enablement_title",
 ]

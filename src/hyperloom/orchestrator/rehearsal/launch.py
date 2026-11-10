@@ -10,10 +10,11 @@ import subprocess
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Callable
+from typing import Any, Callable, NamedTuple
 
 from hyperloom.orchestrator.actions.executors._subprocess_kill import (
     SESSION_TIME_EXHAUSTED_RETURNCODE,
+    RoundWatch,
     stamp_server_ready,
 )
 from hyperloom.orchestrator.rehearsal.clock import VirtualClock
@@ -44,26 +45,24 @@ class RecordedLaunch:
     """One launch as it was requested, kept for assertions.
 
     Attributes:
-        attempt: The scenario attempt that answered it.
-        cmd: The command the caller passed.
-        cwd: The working directory the caller passed, if any.
         server_log_path: Where the caller expected the server's log, if named.
         session_deadline_sec: The session budget instant in force, if any.
         timeout: The hard timeout in force, if any.
-        started_at: Clock elapsed when the launch began.
-        finished_at: Clock elapsed when it returned.
         returncode: What the caller was told; ``-1`` for a reaped hang.
     """
 
-    attempt: LaunchAttempt
-    cmd: tuple[str, ...]
-    cwd: str | None
     server_log_path: str | None
     session_deadline_sec: float | None
     timeout: float | None
-    started_at: float
-    finished_at: float
     returncode: int
+
+
+class _LaunchRequest(NamedTuple):
+    """The parts of a launch call a recorded launch keeps."""
+
+    server_log_path: str | None
+    timeout: int | float | None
+    session_deadline_sec: float | None
 
 
 @dataclass
@@ -95,9 +94,7 @@ class ScriptedLaunchBackend:
         cmd: Sequence[str],
         *,
         cwd: str | None = None,
-        server_log_path: str | None = None,
-        timeout: int | float | None = None,
-        session_deadline_sec: float | None = None,
+        watch: RoundWatch = RoundWatch(),
         on_output: Callable[[], None] | None = None,
         **_ignored: Any,
     ) -> subprocess.CompletedProcess:
@@ -106,11 +103,9 @@ class ScriptedLaunchBackend:
         Args:
             cmd: The command the caller would have run.
             cwd: Working directory; the round slot when no server log is named.
-            server_log_path: Where the attempt writes the server's own log. Its
-                parent is the round slot the artifacts are materialised into.
-            timeout: Hard timeout; a hanging attempt is reaped on it.
-            session_deadline_sec: Absolute instant the session budget expires,
-                read off ``time.monotonic()``.
+            watch: The round's gates. ``server_log_path`` is where the attempt writes the server's own log, its
+                parent the round slot; a hanging attempt is reaped on ``timeout``; ``session_deadline_sec`` is
+                the absolute instant the session budget expires, read off ``time.monotonic()``.
             on_output: Liveness callback, driven across the attempt's duration.
             **_ignored: The rest of the launch surface, which a scripted attempt
                 has no process to apply.
@@ -127,9 +122,11 @@ class ScriptedLaunchBackend:
             subprocess.TimeoutExpired: When a hanging attempt hits ``timeout``
                 with budget to spare.
         """
-        budget_left = self._budget_left(session_deadline_sec)
+        server_log_path = watch.server_log_path
+        timeout = watch.timeout
+        request = _LaunchRequest(server_log_path, timeout, watch.session_deadline_sec)
+        budget_left = self._budget_left(watch.session_deadline_sec)
         attempt = self._next_attempt()
-        started = self.clock.elapsed
         if server_log_path:
             slot: Path | None = Path(server_log_path).parent
         else:
@@ -147,10 +144,7 @@ class ScriptedLaunchBackend:
             returncode = SESSION_TIME_EXHAUSTED_RETURNCODE
         elif reap_at is not None:
             self._spend(reap_at, on_output)
-            self.clock.mark(f"launch:{_label(attempt)}:reaped")
-            self.calls.append(
-                self._record(attempt, cmd, cwd, server_log_path, session_deadline_sec, timeout, started, -1)
-            )
+            self.calls.append(self._record(request, -1))
             raise subprocess.TimeoutExpired(cmd=list(cmd), timeout=reap_at)
         else:
             self._spend(spend, on_output)
@@ -159,10 +153,7 @@ class ScriptedLaunchBackend:
         if attempt.outcome == READY and server_log_path and returncode == 0:
             stamp_server_ready(server_log_path, attempt.duration_sec)
 
-        self.clock.mark(f"launch:{_label(attempt)}:rc={returncode}")
-        self.calls.append(
-            self._record(attempt, cmd, cwd, server_log_path, session_deadline_sec, timeout, started, returncode)
-        )
+        self.calls.append(self._record(request, returncode))
         return subprocess.CompletedProcess(
             args=list(cmd),
             returncode=returncode,
@@ -240,27 +231,13 @@ class ScriptedLaunchBackend:
             else:
                 path.write_text(str(content), encoding="utf-8")
 
-    def _record(
-        self,
-        attempt: LaunchAttempt,
-        cmd: Sequence[str],
-        cwd: str | None,
-        server_log_path: str | None,
-        session_deadline_sec: float | None,
-        timeout: int | float | None,
-        started: float,
-        returncode: int,
-    ) -> RecordedLaunch:
+    @staticmethod
+    def _record(request: _LaunchRequest, returncode: int) -> RecordedLaunch:
         """Build the :class:`RecordedLaunch` kept for this launch."""
         return RecordedLaunch(
-            attempt=attempt,
-            cmd=tuple(str(c) for c in cmd),
-            cwd=cwd,
-            server_log_path=server_log_path,
-            session_deadline_sec=session_deadline_sec,
-            timeout=None if timeout is None else float(timeout),
-            started_at=started,
-            finished_at=self.clock.elapsed,
+            server_log_path=request.server_log_path,
+            session_deadline_sec=request.session_deadline_sec,
+            timeout=None if request.timeout is None else float(request.timeout),
             returncode=returncode,
         )
 

@@ -1,7 +1,7 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""Per-session optimization journal — structured JSON record of every KEEP / REVERT / no_promote / skipped decision."""
+"""Per-session optimization journal — structured JSON record of every settled action's decision."""
 
 from __future__ import annotations
 
@@ -9,12 +9,16 @@ import dataclasses
 import json
 import logging
 from dataclasses import dataclass, field
+from enum import Enum
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
 
-from hyperloom.common.io import atomic_write_text
-from hyperloom.common.jsonio import read_json
-from hyperloom.common.timeutil import now_iso
+from hyperloom_common.coerce import optional_positive_float, to_int
+from hyperloom.common.session_files import shared_options
+from hyperloom_common.io import atomic_write_text
+from hyperloom_common.shared_storage import make_shared_dirs, ownership
+from hyperloom_common.jsonio import read_json
+from hyperloom_common.timeutil import now_iso
 
 
 log = logging.getLogger(__name__)
@@ -29,22 +33,37 @@ OUTCOME_REVERT: str = "REVERT"
 OUTCOME_NO_PROMOTE: str = "no_promote"
 # A step that declined to run.
 OUTCOME_SKIP: str = "skipped"
+# A step with nothing to adopt (analysis, specialist, report): recorded, never a KEEP and never a dead end.
+OUTCOME_RECORDED: str = "recorded"
 
-# Task kinds whose result carries an authoritative per-status verdict the journal outcome must follow rather than the
-# coarse dispatcher ``promotable`` flag (a ``reverted`` patch is promotable yet was rolled back).
-_STATUS_DRIVEN_JOURNAL_KINDS: frozenset[str] = frozenset({"integrate_patch"})
 
-# Task kinds whose result can legitimately declare ``was_skipped``.
-_SKIPPABLE_JOURNAL_KINDS: frozenset[str] = frozenset({"conc_sweep"})
+class Verdict(str, Enum):
+    """What settling one action result did to the adopted configuration.
 
-# The only status meaning the change was adopted into current_best.
-_JOURNAL_KEEP_STATUSES: frozenset[str] = frozenset({"kept"})
+    Decided once, by the owner of the result, and read by every downstream
+    ledger: the journal, the phase-action settle row, KB lessons, the
+    intervention mix and framework progress.
+    """
 
-# Stamped on the result when the anchor gate refused an executor-granted KEEP.
-PROMOTION_REFUSED_KEY: str = "promotion_refused"
+    #: Changed current_best, the optimization stack or the baseline anchor.
+    ADOPTED = "adopted"
+    #: The executor ruled KEEP but the adoption rule refused it.
+    REFUSED = "refused"
+    #: Measured, and did not win.
+    REVERTED = "reverted"
+    #: Produced nothing that could be judged.
+    FAILED = "failed"
+    #: No adoption semantics.
+    RECORDED = "recorded"
 
-# Statuses meaning a real change was tested/applied then rolled back or rejected on measured grounds → REVERT.
-_JOURNAL_REVERT_STATUSES: frozenset[str] = frozenset({"reverted", "accuracy_unavailable_reject", "regression"})
+
+_JOURNAL_OUTCOME_BY_VERDICT: dict[Verdict, str] = {
+    Verdict.ADOPTED: OUTCOME_KEEP,
+    Verdict.REFUSED: OUTCOME_NO_PROMOTE,
+    Verdict.REVERTED: OUTCOME_REVERT,
+    Verdict.FAILED: OUTCOME_NO_PROMOTE,
+    Verdict.RECORDED: OUTCOME_RECORDED,
+}
 
 # Change-kind vocabulary for coarse dashboard grouping.
 KIND_BACKEND: str = "backend"  # --attention-backend, kv_cache_dtype, ...
@@ -58,32 +77,9 @@ KIND_GEMM_TUNING: str = "gemm_tuning"  # adopted GEMM-tuning run (GEAK / forge)
 KIND_OTHER: str = "other"
 
 
-def _optional_int(value: Any) -> int | None:
-    """Coerce a value to int, or ``None`` on absence / bad type."""
-    if value is None:
-        return None
-    try:
-        return int(value)
-    except (TypeError, ValueError):
-        return None
-
-
-def _measured_float(value: Any) -> float | None:
-    """Coerce a measurement to float, or ``None`` when nothing was measured.
-
-    A non-positive throughput is the sentinel of an unanchored run, so it reads
-    as absent rather than as a reading a consumer can divide by.
-    """
-    try:
-        measured = float(value)
-    except (TypeError, ValueError):
-        return None
-    return measured if measured > 0 else None
-
-
 @dataclass
 class JournalEntry:
-    """One KEEP / REVERT / no_promote / skipped decision (``None`` distinguishes "not measured" from "measured zero")."""
+    """One settled decision row (``None`` distinguishes "not measured" from "measured zero")."""
 
     phase: str
     iter: int
@@ -139,7 +135,7 @@ class JournalEntry:
             scope=str(d.get("scope", "")),
             fingerprint=str(d.get("fingerprint", "")),
             metrics=dict(d.get("metrics") or {}),
-            tick=_optional_int(d.get("tick")),
+            tick=to_int(d.get("tick")),
             lever_kind=str(d.get("lever_kind", "")),
         )
 
@@ -154,6 +150,10 @@ class JournalEntry:
             self.variant_name,
             self.task_id,
         )
+
+
+class JournalNotReadable(PermissionError):
+    """The journal of a session is there and this account cannot read it: it is never replaced by a fresh one."""
 
 
 @dataclass
@@ -174,48 +174,38 @@ class Journal:
 
     # Construction
     @classmethod
-    def load_or_create(
-        cls,
-        session_dir: Path,
-        *,
-        session_id: str,
-        model: str,
-        hardware: str,
-        framework: str = "",
-        baseline_throughput: float | None = None,
-    ) -> Journal:
-        """Return the existing journal if on disk, else mint a new one (on-disk header fields win only when the caller leaves them empty)."""
-        path = cls._journal_path(session_dir)
-        blob: dict[str, Any] = {}
-        if path.exists():
+    def load_or_create(cls, session_dir: Path, fresh: Journal) -> Journal:
+        """Return the existing journal if on disk, else ``fresh`` (on-disk header fields win only where ``fresh`` leaves them empty).
 
-            def _warn(exc: BaseException) -> None:
-                log.warning("optimization_journal: failed to parse %s (%s); recreating fresh", path, exc)
+        Raises:
+            JournalNotReadable: When the file is there and cannot be read, as another account of the group meets one that
+                holds a credential: a fresh journal would replace it, so the resume is refused instead.
+        """
+        path = journal_path(session_dir)
+        make_shared_dirs(path.parent)
 
-            blob = read_json(path, default={}, require_dict=True, on_error=_warn)
+        def _warn(exc: BaseException) -> None:
+            if isinstance(exc, OSError):
+                raise JournalNotReadable(
+                    f"{path}{ownership(path)} is there but cannot be read ({exc.strerror}): a fresh journal would "
+                    "replace it and lose its history. A journal that holds a credential in a recorded decision is "
+                    "owner-only: resume the session as the account that made it, or start a new session."
+                ) from exc
+            log.warning("optimization_journal: failed to parse %s (%s); recreating fresh", path, exc)
 
-        entries_raw = blob.get("entries") or []
-        entries = [JournalEntry.from_dict(e) for e in entries_raw if isinstance(e, dict)]
-        journal = cls(
-            session_id=str(blob.get("session_id") or session_id),
-            model=str(blob.get("model") or model),
-            hardware=str(blob.get("hardware") or hardware),
-            framework=str(blob.get("framework") or framework),
-            baseline_throughput=_measured_float(blob.get("baseline_throughput"))
-            or _measured_float(baseline_throughput),
+        blob = _read_blob(path, _warn)
+        return cls(
+            session_id=str(blob.get("session_id") or fresh.session_id),
+            model=str(blob.get("model") or fresh.model),
+            hardware=str(blob.get("hardware") or fresh.hardware),
+            framework=str(blob.get("framework") or fresh.framework),
+            baseline_throughput=optional_positive_float(blob.get("baseline_throughput"))
+            or optional_positive_float(fresh.baseline_throughput),
             final_throughput=blob.get("final_throughput"),
             total_gain_pct=blob.get("total_gain_pct"),
-            entries=entries,
+            entries=_entries_of(blob),
             path=path,
         )
-        return journal
-
-    @staticmethod
-    def _journal_path(session_dir: Path) -> Path:
-        """Resolve (and create) the journal file path under a session dir."""
-        reports = Path(session_dir) / "reports"
-        reports.mkdir(parents=True, exist_ok=True)
-        return reports / JOURNAL_FILENAME
 
     # Mutation
     def append_entry(self, entry: JournalEntry) -> bool:
@@ -245,7 +235,7 @@ class Journal:
 
     def update_baseline(self, baseline_throughput: float | None) -> None:
         """Late-binding setter for the baseline measurement (no-op when nothing was measured, so an unanchored run cannot erase a real value)."""
-        measured = _measured_float(baseline_throughput)
+        measured = optional_positive_float(baseline_throughput)
         if measured is not None:
             self.baseline_throughput = measured
             self._flush()
@@ -253,11 +243,10 @@ class Journal:
     # Persistence
     def _flush(self) -> None:
         """Atomic write (tmp + os.replace); best-effort — IOError logged and swallowed (forensic aid, not a correctness invariant)."""
+        document = self.to_dict()
         try:
             atomic_write_text(
-                self.path,
-                json.dumps(self.to_dict(), indent=2, sort_keys=False) + "\n",
-                make_parents=True,
+                self.path, json.dumps(document, indent=2, sort_keys=False) + "\n", options=shared_options(document)
             )
         except OSError as exc:
             log.warning("optimization_journal flush failed (%s): %s", self.path, exc)
@@ -278,32 +267,48 @@ class Journal:
 
 
 # helpers
+def journal_path(session_dir: Path) -> Path:
+    """The journal file under a session dir."""
+    return Path(session_dir) / "reports" / JOURNAL_FILENAME
+
+
+def _read_blob(path: Path, on_error: Callable[[BaseException], None] | None) -> dict[str, Any]:
+    """The journal file's top-level object, ``{}`` when absent or unparseable (and reported to ``on_error``, as one that
+    is there and cannot be read is)."""
+    try:
+        path.stat()
+    except (FileNotFoundError, NotADirectoryError):
+        return {}
+    except OSError as exc:
+        if on_error is not None:
+            on_error(exc)
+        return {}
+    return read_json(path, default={}, require_dict=True, on_error=on_error)
+
+
+def _entries_of(blob: dict[str, Any]) -> list[JournalEntry]:
+    """Decision rows of a parsed journal blob."""
+    return [JournalEntry.from_dict(e) for e in blob.get("entries") or [] if isinstance(e, dict)]
+
+
+def read_journal_entries(
+    session_dir: Path,
+    on_error: Callable[[BaseException], None] | None = None,
+) -> list[JournalEntry]:
+    """The session's settled decision rows, creating nothing; ``[]`` when there is no journal."""
+    return _entries_of(_read_blob(journal_path(session_dir), on_error))
+
+
 def _variant_args(variant: dict[str, Any]) -> str:
     """Read a variant's canonical server-arg string."""
     return str(variant.get("extra_server_args") or "")
 
 
-def derive_journal_outcome(
-    task_kind: str,
-    result_dict: dict[str, Any] | None,
-    *,
-    promotable: bool,
-) -> str:
-    """Derive the journal ``outcome`` for a settled per-task result."""
-    result = result_dict or {}
-    kind = (task_kind or "").lower()
-    if kind in _SKIPPABLE_JOURNAL_KINDS and result.get("was_skipped"):
+def derive_journal_outcome(verdict: Verdict, result_dict: dict[str, Any]) -> str:
+    """Derive the journal ``outcome`` for a settled per-task result from its verdict."""
+    if verdict is Verdict.RECORDED and result_dict.get("was_skipped"):
         return OUTCOME_SKIP
-    if kind in _STATUS_DRIVEN_JOURNAL_KINDS:
-        status = str(result.get("status") or "").strip().lower()
-        if status in _JOURNAL_KEEP_STATUSES:
-            if result.get(PROMOTION_REFUSED_KEY):
-                return OUTCOME_NO_PROMOTE
-            return OUTCOME_KEEP
-        if status in _JOURNAL_REVERT_STATUSES:
-            return OUTCOME_REVERT
-        return OUTCOME_NO_PROMOTE
-    return OUTCOME_KEEP if promotable else OUTCOME_REVERT
+    return _JOURNAL_OUTCOME_BY_VERDICT[verdict]
 
 
 def classify_change_kind(task_kind: str, variant: dict[str, Any] | None = None) -> str:
@@ -390,6 +395,7 @@ __all__ = [
     "JOURNAL_FILENAME",
     "Journal",
     "JournalEntry",
+    "JournalNotReadable",
     "KIND_BACKEND",
     "KIND_BASELINE",
     "KIND_ENV",
@@ -401,10 +407,13 @@ __all__ = [
     "KIND_PROFILE",
     "OUTCOME_KEEP",
     "OUTCOME_NO_PROMOTE",
+    "OUTCOME_RECORDED",
     "OUTCOME_REVERT",
     "OUTCOME_SKIP",
-    "PROMOTION_REFUSED_KEY",
+    "Verdict",
     "classify_change_kind",
     "derive_journal_outcome",
+    "journal_path",
+    "read_journal_entries",
     "summarize_change",
 ]

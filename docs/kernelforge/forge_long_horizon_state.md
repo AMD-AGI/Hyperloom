@@ -38,24 +38,11 @@ forge_experiments/
   best/
 ```
 
-`run_state.json` uses schema v19. The loader validates the current field set
-strictly and migrates older checkpoints forward without discarding control
-state: v13 gains an empty Analysis refresh anchor, which causes one safe refresh
-instead of guessing which score historical profiling measured; v14 gains an
-empty Plan Critic ruling, which is what a campaign that never recorded a verdict
-actually knows; v15 gains an empty round cost history, which the round admission
-guard treats exactly as it treats a campaign's first round; v16's recorded
-rounds gain a zero measurement cost, which is read as no observation rather than
-as a free validate-and-benchmark cycle; v17 gains a campaign wall-clock for its
-cumulative planning to be a share of, seeded from what its rounds cost, since
-that is the longest span such a checkpoint can honestly claim to have run and it
-already covers the planning inside it; v18 gains a separate unresolved-stall
-counter, seeded from its no-improvement streak, which is a lower bound on the
-real stall because every past intervention had already reset that streak, and a
-lower bound is the fail-safe direction here. Other malformed, incomplete,
-unknown, or differently versioned checkpoints are rejected. The loader also rejects a
-campaign wall-clock shorter than the planning charged to it, so the share cannot
-exceed 100 by way of a hand-edited or future-written checkpoint.
+The loader accepts exactly the field set the current code writes: a checkpoint
+with a missing or unknown field, top-level or nested, is rejected rather than
+filled in. The loader also rejects a campaign wall-clock shorter than the
+planning charged to it, so the share cannot exceed 100 by way of a hand-edited
+checkpoint.
 
 The state contains:
 
@@ -111,8 +98,8 @@ iteration event that was durably appended before the corresponding state save.
 
 Resume is fail-closed. It requires:
 
-- A valid current or explicitly migratable `campaign_config.json` and
-  `run_state.json`.
+- A `campaign_config.json` and `run_state.json` written by the current code.
+  Files from a different field set are rejected, never migrated.
 - Matching task fingerprint, driver digest, Git branch, and canonical HEAD.
 - Complete pristine per-case baseline and current best score.
 - No unexplained tracked working-tree changes.
@@ -120,7 +107,8 @@ Resume is fail-closed. It requires:
 `pending_keep.json` is the crash journal for the narrow interval between
 canonical validation, Git commit, state publication, and archive publication.
 Resume reconciles this journal before admitting another Implementer session.
-The journal uses schema v2.
+A journal whose key set differs from the one the current code writes is
+rejected.
 
 Every process-local resume creates a new experiment segment while retaining the
 campaign identity and cumulative state.
@@ -137,22 +125,26 @@ Each iteration runs:
    review. `REVISE`/`REPLACE` permits one Orchestration revision without
    rerunning specialists. The revision resumes the original synthesis session
    when its backend exposes a session handle, otherwise it uses one fresh
-   revision session. Both calls have a 100-turn ceiling, and incomplete output
+   revision session. A resumed revision keeps the synthesis session's system
+   prompt and carries the revision instructions in its message, so the cached
+   synthesis conversation is read rather than rewritten, and backends that
+   apply a system prompt only when a session starts still receive the
+   instructions. Both calls have a 100-turn ceiling, and incomplete output
    is rejected. The revision has a 10-minute runtime ceiling; the Critic's is
    10 minutes per plan it reads, bounded by the Orchestration session timeout,
    because a round of several plans is several times the reading. Sized for one
    plan it was not enough: a measured two-lane review ran about eleven minutes,
    timed out, and lost a verdict that had found a lane not worth its session.
-   Critic failure uses the draft and records the verdict `NOT_REVIEWED`;
+   Critic failure -- an outage, or an answer that is not in the shape the
+   review is held to -- uses the draft and records the verdict `NOT_REVIEWED`;
    revision failure publishes a non-executable framework fallback. Diagnostics
-   retain phase duration and whether the Critic verdict was explicit or
-   inferred. Shorter sessions skip this step.
+   retain phase duration. Shorter sessions skip this step.
 5. Publication of the final `optimization_plan.md`.
 6. Implementer execution of that plan.
 7. Canonical validation, benchmark, and KEEP/REVERT.
 
 `optimization_plan.md` is the Implementer's planning source of truth for that
-iteration. Handoff schema v2 records its path together with the canonical
+iteration. The iteration handoff records its path together with the canonical
 verdict, the latest Supervisor Ruling path, and audit pointers. Handoffs do not
 restore control state. When Critic review runs, `draft_plan.md` and
 `critic_review.md` are immutable audit artifacts for that planning cycle.
@@ -196,7 +188,24 @@ out mid-round, not only a crash -- would otherwise throw away finished
 Implementer sessions whose lane workspaces are already deleted. `lane_queue.json`
 holds what is still owed a measurement, is rewritten as each candidate is taken,
 and is read before the first iteration of the next process, which measures those
-candidates before it plans a new round.
+candidates before it plans a new round. Each entry carries the lesson the lane
+recorded in its round, or in `lesson_reason` why it has none.
+
+A queued candidate whose diff no longer applies to the canonical tree, even
+three-way, because a sibling's KEEP edited the same code, is never measured.
+It is filed under `unmeasured_lanes/round_NNN_lane_K/`: its `change.diff`
+against the commit its round was built on, its `plan.md`, the `lesson.md` its
+session recorded, and a `meta.json` naming that base commit, the iteration that
+dropped it and the canonical commit it no longer applied to.
+`unmeasured_lanes/index.jsonl` lists them, and each drop is logged as a
+`lane_candidate_unmeasured` event. Every later planning context cites the index
+as `unmeasured_lane_candidates`, and the Implementer's retrieval map names the
+directory, so a later round can take an idea up again from the session that
+already built it. The store is kept apart from the candidate archive: merge
+stacking, the history digest, export and the knowledge base read that
+archive's entries as measured ones, and these were not. A candidate rejected for
+changing the measurement surface or the driver is not filed; it is logged as a
+`lane_candidate_rejected` event.
 
 A fan-out round that ends with no candidate to measure -- because planning was
 unavailable, because only one plan came back, because the lane workspaces could
@@ -210,7 +219,18 @@ The same `max_hours > 2` long-horizon gate enables both the Plan Critic and
 hardware profiling. Shorter sessions keep Analysis static-only and do not
 inject self-profiling guidance into the Implementer.
 
-The Plan Critic reviews every round a synthesis produced, at any width. A wide
+The Plan Critic reviews the first round a synthesis produced, at any width, and
+a later one only when the previous round kept no candidate of its own, the
+search is in DIVERSIFY mode, or the last critic asked for a challenger lane. A
+round that continues, in EXPLOIT mode, a route its predecessor kept a candidate
+on publishes its drafts unreviewed and records
+`plan_critic.status = "skipped_not_requested"`; every round logs its decision as
+a `plan_review` event naming the rule. A KEEP of two stacked archived gains is
+not a candidate any round planned, so it does not count as the previous round's.
+Every planning happens in an admitted round, including the one an iteration
+buys when the queued lane candidate it held no longer applies, and admission
+prices a round's planning without the review time observed rounds spent, since
+that round may skip it. A wide
 round is reviewed once, with its division in view: whether any lane's ground is
 worth an Implementer session, whether two lanes are one change described twice,
 whether a lane would have to edit code another lane owns, and whether the round
@@ -220,34 +240,27 @@ synthesis session. A lane whose revision fails keeps its draft and is named in
 `plan_revision.unrevised_lanes`; a single-lane round that cannot be revised
 still publishes the non-executable fallback, because nothing else is left in it.
 
-How wide the round runs is answered per lane rather than by the verdict, and it
-is the one part of the review a machine reads. The review stays prose — a person
-reads it and the revision is fed it — and ends with one JSON object carrying the
-width decision:
+How wide the round runs is answered per lane rather than by the verdict. The
+review is one structured answer: `verdict`, the prose `review` a person reads and
+the revision is fed, and `lane_narrowing`, the lanes the review judges not worth
+an Implementer session of its own, each with its reason:
 
 ```json
-{"lane_narrowing": [{"lane_id": 2, "reason": "it is lane 1's change in different words"}]}
+{"verdict": "REVISE", "review": "...", "lane_narrowing": [{"lane_id": 2, "reason": "it is lane 1's change in different words"}]}
 ```
 
+A provider that can hold a session to a JSON Schema is given this answer's; one
+that cannot is shown the schema in its prompt. An answer that is not in that
+shape -- a review in prose only, a verdict outside the three, a drop with no
+reason -- is no review: the round fails open to its drafts as for an outage.
+
 A named lane is not published, so the round spends fewer Implementer sessions
-than it planned. A round the review wants whole ends with the same block and an
-empty list, because an empty list and a missing block are different answers and
-only the first means "run every lane". The finding is older than the outlet:
-across sixty-eight measured rounds, six reviews said a specific lane was not
-worth its session and every one of those rounds ran it, because a round-wide
+than it planned; an empty list runs every lane. The finding is older than the
+outlet: across sixty-eight measured rounds, six reviews said a specific lane was
+not worth its session and every one of those rounds ran it, because a round-wide
 verdict cannot single a lane out. Narrowing is applied before the revision, so no
 revision turn is spent on a lane that will not run, and `lanes.published` records
 what the round actually handed to Implementer sessions beside what it planned.
-
-The block is read with the same extractor the round partition uses, searched
-from the end of the review and anchored on its own key, because the prose before
-it is free to quote an autotune config and the first JSON object in a review is
-not necessarily its ruling. A review that ends with no readable block is asked
-once more — no tools, two turns, two minutes — to restate the decision it
-already made in its own words. That is the round's only conditional call, and it
-is spent only when the alternative is running a lane the review said was not
-worth its session. A block that *was* read and named a lane the round does not
-have is never repaired: correcting it would mean inventing the decision.
 
 Three decisions can move a round's width, and they are ordered so they cannot
 contradict each other. The partition decides how wide the round is planned and
@@ -261,24 +274,14 @@ to a survivor the review never ranked. A lane the partition widened to joint
 ground is no exception: the review is given that lane's `joint` flag and its
 fallback and rules on the lane with them in view, so a drop naming it is
 carried out like any other, and the round records under `dropped_joint` that
-it spent wider ground than a region and measured none of it. Every drop, every
-refusal, and everything the round could not read is recorded under `lane_narrowing` in
-`structured_output.json` with the reason: `status` says what happened to the
-ruling and `block` (`answered`, `repaired`, `absent`, `malformed`, `not_asked`)
-says where it came from. So a round that published fewer lanes than it planned
-can be audited afterwards, and "the review wanted every lane" never arrives
-looking the same as "nobody could read what it wanted".
-
-The record is split so it cannot disagree with itself. A note under `notes`
-says what was seen while the block was being read — the review ended with no
-block, an entry named no lane — and never what became of it, because it is
-written before the repair pass and the round have answered; `status` and
-`dropped` are what say how the round ended. The one note added afterwards is
-the joint-lane cost, which is not how the ruling ended but what carrying it out
-spent, and has nowhere else to be read. The logs follow the same line: the
-round warns that a narrowing was not applied where that is the outcome, and a
-review whose block one repair pass recovered and the round then acted on is
-reported as the narrowing it was.
+it spent wider ground than a region and measured none of it. Every drop and
+every refusal is recorded under `lane_narrowing` in `structured_output.json`
+with the reason, and `status` says what happened to the ruling, so a round that
+published fewer lanes than it planned can be audited afterwards. A note under
+`notes` says why a drop was not carried out -- a lane the round does not have --
+or what carrying it out spent, as the joint-lane cost; `status` and `dropped`
+are what say how the round ended, and the round warns that a narrowing was not
+applied only where that is the outcome.
 
 `structured_output.json` also records `phase_durations_sec`: what dispatch, the
 specialists, the partition, the synthesis, the Critic review and the revision

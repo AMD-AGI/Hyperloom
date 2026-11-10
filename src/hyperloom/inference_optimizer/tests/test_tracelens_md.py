@@ -21,6 +21,15 @@ def test_strip_base64_data_urls_passes_through_plain_text():
     assert strip_base64_data_urls(md) == md
 
 
+def test_strip_base64_data_urls_replaces_each_image_and_keeps_the_markdown_around_it():
+    md = "# H1\n![a](data:image/png;base64,AAA)\n| col |\n![](data:image/svg+xml;base64,BBB)\n![ok](https://x/y.png)\n"
+    out = strip_base64_data_urls(md)
+    assert "AAA" not in out and "BBB" not in out
+    assert "<<stripped: base64 image — a>>" in out
+    assert "<<stripped: base64 image — image>>" in out
+    assert "# H1" in out and "| col |" in out and "![ok](https://x/y.png)" in out
+
+
 def test_strip_base64_data_urls_handles_empty():
     assert strip_base64_data_urls("") == ""
     assert strip_base64_data_urls(None) == ""

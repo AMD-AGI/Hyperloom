@@ -11,6 +11,13 @@ ARGV_INVALID = "server_argv_invalid"
 #: The host cannot run the combo (a bring-up environment-fault terminal).
 ENV_FAULT = "environment_fault"
 
+#: The benchmark harness refused to launch a baseline because the host has fewer
+#: idle GPUs than the round needs: another workload holds them, or they are not
+#: there. Also the error class of that round. No retry or framework patch changes
+#: what else runs on the host, so the run halts on the FIRST occurrence and the
+#: operator frees the GPUs the failure names before resuming.
+HOST_GPUS_UNAVAILABLE: str = "host_gpus_unavailable"
+
 # Historical reports retain these terminal reasons after the producer is retired.
 DIED_STOP_REASON = "supervisor_coordinator_died"
 WEDGED_STOP_REASON = "supervisor_tick_stalled"
@@ -32,6 +39,12 @@ AGENTX_PREFLIGHT_STOP_REASON: str = "agentx_client_unavailable"
 #: the same thing about a tree whose members are no longer identifiable.
 PATCH_RECOVERY_INCOMPLETE_STOP_REASON: str = "patch_recovery_incomplete"
 
+#: A reactor agent's LLM backend kept failing for an hour without one
+#: successful turn, or kept answering without ever emitting an intent.
+#: Without the Orchestration agent nothing is decided, and without the critic
+#: every proposal times out denied, so the rest of the budget would buy nothing.
+BACKEND_UNHEALTHY_STOP_REASON: str = "backend_unhealthy"
+
 #: Terminals that mean the run optimized and closed normally.
 SUCCESS_STOP_REASONS: frozenset[str] = frozenset(
     {
@@ -40,11 +53,6 @@ SUCCESS_STOP_REASONS: frozenset[str] = frozenset(
         "time_exhausted",
         "max_ticks",
         "sweep_done",
-        # The model asking to close early. A run whose infrastructure actually
-        # failed carries baseline_failed or signal instead, so this value marks
-        # a normal closeout; the close collector keeps the escalation flag
-        # either way.
-        "robustness_escalated",
     }
 )
 
@@ -52,10 +60,19 @@ SUCCESS_STOP_REASONS: frozenset[str] = frozenset(
 ABORTED_STOP_REASONS: frozenset[str] = frozenset({"signal"})
 
 #: Terminals about the machine or the harness rather than the model: a host
-#: that cannot run the combo, an argv the installed parser refuses, a bring-up
-#: round that expired unreaped, or a supervisor that found the coordinator dead
-#: or its tick wedged.
-INFRASTRUCTURE_STOP_REASONS: frozenset[str] = frozenset({ENV_FAULT, ARGV_INVALID, DIED_STOP_REASON, WEDGED_STOP_REASON})
+#: that cannot run the combo or lacks the idle GPUs it needs, an argv the
+#: installed parser refuses, a supervisor that found the coordinator dead or its
+#: tick wedged, or an agent's LLM backend that stopped answering.
+INFRASTRUCTURE_STOP_REASONS: frozenset[str] = frozenset(
+    {
+        ENV_FAULT,
+        HOST_GPUS_UNAVAILABLE,
+        ARGV_INVALID,
+        DIED_STOP_REASON,
+        WEDGED_STOP_REASON,
+        BACKEND_UNHEALTHY_STOP_REASON,
+    }
+)
 
 #: Terminals the model gate reached before the loop started. Verdicts about the
 #: model, so absent from :data:`INFRASTRUCTURE_STOP_REASONS`.
@@ -83,16 +100,20 @@ STOP_REASON_VOCAB: frozenset[str] = frozenset(
         "signal",
         "unknown",
         "custom",
-        "robustness_escalated",
         "prelude_baseline_failed",
         # The baseline is over ``--max-latency-ms``, or reported no end-to-end latency: every candidate is graded
         # against it, so there is no configuration the run could reach that would satisfy the constraint.
         "baseline_over_latency_budget",
+        # The same for ``--max-power-w``: the baseline's per-GPU mean power is over it, or was not reported.
+        "baseline_over_power_budget",
         "prelude_cold_anchor_low_budget",
+        # Preparation spent everything outside the optimization reserve without anchoring a
+        # baseline, and the machine has no arm of its own left to dispatch: the phase closes
+        # on the budget line instead of idling on the reserve it may not spend.
+        "prelude_budget_exhausted",
         "time_exhausted_during_prelude",
         "warm_replay_rollback_failed",
         "active_inferencex_checkout_missing",
-        "no_kernel_skipped",
         "sweep_done",
         "sweep_failed",
         "framework_agent_phase_done",
@@ -105,7 +126,7 @@ STOP_REASON_VOCAB: frozenset[str] = frozenset(
         # Pre-run model-config compatibility preflight: config.json is corrupt or declares RoPE scaling without a
         # max-position field (both crash at load).
         "model_config_incompatible",
-        # Baseline arg-validation fast-exit: >=2 consecutive baseline attempts exited <30s on a bad CLI arg.
+        # Two baseline attempts failed argument or configuration validation.
         "baseline_arg_error",
         # Enablement attempt cap: too many consecutive rounds bought no ground.
         # A bring-up that is still advancing is bounded by the run's wall clock.
@@ -120,9 +141,8 @@ STOP_REASON_VOCAB: frozenset[str] = frozenset(
         # composed an argument the installed parser does not have. Classified as
         # infrastructure by ``INFRASTRUCTURE_STOP_REASONS``.
         ENV_FAULT,
+        HOST_GPUS_UNAVAILABLE,
         ARGV_INVALID,
-        # A bring-up round expired with nothing confirming its holder dead, so
-        # it keeps excluding the machine.
         # The out-of-band supervisor found the coordinator's process gone; it
         # reaches a report through the terminal artifact the supervisor writes.
         DIED_STOP_REASON,
@@ -137,6 +157,7 @@ STOP_REASON_VOCAB: frozenset[str] = frozenset(
         # INFRASTRUCTURE_STOP_REASONS -- the host is healthy and a person has to
         # settle the tree, which reads as a failure rather than an abort.
         PATCH_RECOVERY_INCOMPLETE_STOP_REASON,
+        BACKEND_UNHEALTHY_STOP_REASON,
     }
 )
 
@@ -171,8 +192,10 @@ __all__ = [
     "ABORTED_STOP_REASONS",
     "AGENTX_PREFLIGHT_STOP_REASON",
     "ARGV_INVALID",
+    "BACKEND_UNHEALTHY_STOP_REASON",
     "DIED_STOP_REASON",
     "ENV_FAULT",
+    "HOST_GPUS_UNAVAILABLE",
     "INFRASTRUCTURE_STOP_REASONS",
     "MODEL_GATE_STOP_REASONS",
     "PATCH_RECOVERY_INCOMPLETE_STOP_REASON",

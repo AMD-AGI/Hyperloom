@@ -8,25 +8,13 @@ from __future__ import annotations
 import os
 
 
-# Backend ladder infra failures can be transient; require two failed ladders before retiring the kernel.
-_DEFAULT_KERNEL_OPT_MAX_FAILURES = 2
-
-
-def resolve_kernel_opt_max_failures() -> int:
-    """Resolve the infra-failure retry budget (>=1)."""
-    env_f = os.environ.get("INFERENCE_OPTIMIZER_KERNEL_OPT_MAX_FAILURES")
-    if env_f:
-        try:
-            return max(1, int(env_f))
-        except (TypeError, ValueError):
-            pass
-    return _DEFAULT_KERNEL_OPT_MAX_FAILURES
-
-
 # Independent bounded budget for integration-fault *attempts* (separate from the REVERT ``max_attempts`` quota).
 _MAX_INTEGRATE_FAULT_ATTEMPTS = 2
 
-# Minimum GPU share for a reusable hot kernel to still owe a kernel_opt attempt.
+# Bounded quota of non-fault gate verdicts before a patch without a KEEP is rejected.
+_MAX_INTEGRATE_E2E_ATTEMPTS = 3
+
+# Minimum GPU share for a reusable hot kernel to stay owed work until a backend produces a patch for it.
 _DEFAULT_HOT_KERNEL_MIN_GPU_PCT = 5.0
 
 

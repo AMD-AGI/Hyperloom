@@ -17,44 +17,38 @@ from hyperloom.agents.quantization.driver.eval import (
 
 
 def test_resolve_threshold_default_when_nothing_provided(tmp_path):
-    t, src = resolve_threshold(tmp_path, acceptable_eval_gap=None)
+    t = resolve_threshold(tmp_path, acceptable_eval_gap=None)
     assert t == DEFAULT_ACCEPTABLE_GAP
-    assert src == "default"
 
 
 def test_resolve_threshold_arg_wins_over_file(tmp_path):
     (tmp_path / "eval_gap_threshold.txt").write_text("0.10", encoding="utf-8")
-    t, src = resolve_threshold(tmp_path, acceptable_eval_gap=0.05)
+    t = resolve_threshold(tmp_path, acceptable_eval_gap=0.05)
     assert t == 0.05
-    assert src == "arg"
 
 
 def test_resolve_threshold_file_used_when_no_arg(tmp_path):
     (tmp_path / "eval_gap_threshold.txt").write_text("0.07\n", encoding="utf-8")
-    t, src = resolve_threshold(tmp_path, acceptable_eval_gap=None)
+    t = resolve_threshold(tmp_path, acceptable_eval_gap=None)
     assert t == 0.07
-    assert src == "file"
 
 
 def test_resolve_threshold_malformed_file_falls_to_default(tmp_path):
     (tmp_path / "eval_gap_threshold.txt").write_text("not-a-float", encoding="utf-8")
-    t, src = resolve_threshold(tmp_path, acceptable_eval_gap=None)
+    t = resolve_threshold(tmp_path, acceptable_eval_gap=None)
     assert t == DEFAULT_ACCEPTABLE_GAP
-    assert src == "default"
 
 
 def test_resolve_threshold_empty_file_falls_to_default(tmp_path):
     (tmp_path / "eval_gap_threshold.txt").write_text("   \n", encoding="utf-8")
-    t, src = resolve_threshold(tmp_path, acceptable_eval_gap=None)
+    t = resolve_threshold(tmp_path, acceptable_eval_gap=None)
     assert t == DEFAULT_ACCEPTABLE_GAP
-    assert src == "default"
 
 
 def test_resolve_threshold_arg_zero_is_respected(tmp_path):
     # 0.0 is a valid threshold; arg path must not collapse to None.
-    t, src = resolve_threshold(tmp_path, acceptable_eval_gap=0.0)
+    t = resolve_threshold(tmp_path, acceptable_eval_gap=0.0)
     assert t == 0.0
-    assert src == "arg"
 
 
 # ───────────────────────────────────────────────────────────────────────────── decide — gap acceptance
@@ -76,8 +70,6 @@ def test_decide_within_threshold(tmp_path):
     d = decide(_report(0.02), workspace=tmp_path, acceptable_eval_gap=0.03)
     assert d.status == "within"
     assert d.relative_gap == 0.02
-    assert d.threshold == 0.03
-    assert d.threshold_source == "arg"
 
 
 def test_decide_exactly_at_threshold_is_within(tmp_path):
@@ -95,7 +87,6 @@ def test_decide_missing_when_report_is_none(tmp_path):
     d = decide(None, workspace=tmp_path, acceptable_eval_gap=None)
     assert d.status == "missing"
     assert d.relative_gap is None
-    assert d.threshold == DEFAULT_ACCEPTABLE_GAP
 
 
 def test_decide_missing_when_required_key_absent(tmp_path):
@@ -115,15 +106,11 @@ def test_decide_uses_file_threshold_when_no_arg(tmp_path):
     (tmp_path / "eval_gap_threshold.txt").write_text("0.05", encoding="utf-8")
     d = decide(_report(0.04), workspace=tmp_path, acceptable_eval_gap=None)
     assert d.status == "within"
-    assert d.threshold == 0.05
-    assert d.threshold_source == "file"
 
 
 def test_decide_uses_default_threshold_when_nothing_set(tmp_path):
     d = decide(_report(0.029), workspace=tmp_path, acceptable_eval_gap=None)
     assert d.status == "within"
-    assert d.threshold == DEFAULT_ACCEPTABLE_GAP
-    assert d.threshold_source == "default"
 
 
 def test_decide_negative_gap_is_within(tmp_path):
@@ -134,6 +121,6 @@ def test_decide_negative_gap_is_within(tmp_path):
 
 
 def test_eval_decision_is_frozen():
-    d = EvalDecision(status="within", relative_gap=0.0, threshold=0.03, threshold_source="default")
+    d = EvalDecision(status="within", relative_gap=0.0)
     with pytest.raises(Exception):
         d.status = "exceeded"  # type: ignore[misc]

@@ -9,7 +9,8 @@ from typing import Any
 
 import pytest
 
-from hyperloom.common.env_safety import GPU_MASK_ENV_NAMES
+from hyperloom.common.env_safety import BLOCKED_EXTERNAL_ENV_NAMES
+from hyperloom.common.visible_devices import GPU_MASK_ENV_NAMES
 from hyperloom.orchestrator.actions.executors import _framework_switch_manifest as manifest
 
 
@@ -67,7 +68,7 @@ def test_an_invalid_env_name_is_dropped():
     assert any("valid environment variable" in p for p in problems)
 
 
-@pytest.mark.parametrize("reserved", sorted(manifest.FORBIDDEN_SWITCHES)[:6])
+@pytest.mark.parametrize("reserved", sorted(BLOCKED_EXTERNAL_ENV_NAMES)[:6])
 def test_a_reserved_benchmark_variable_is_dropped(reserved):
     """Claiming e.g. PATH or TP would retarget the benchmark, not toggle a path."""
     switches, problems = manifest.parse_manifest([_entry(reserved)])
@@ -83,11 +84,35 @@ def test_a_gpu_mask_switch_is_dropped(mask):
     assert any("reserved benchmark variable" in p for p in problems)
 
 
-def test_a_credential_shaped_switch_is_dropped():
-    """A manifest is held to the same boundary as a reference recipe."""
-    switches, problems = manifest.parse_manifest([_entry("MY_TOKEN")])
+def test_a_credential_shaped_switch_carrying_a_string_value_is_dropped():
+    """A manifest is held to the same boundary as a reference recipe: no secret is persisted under a switch."""
+    switches, problems = manifest.parse_manifest([_entry("MY_TOKEN", value="sk-live-4f9a")])
     assert switches == []
-    assert any("credential-shaped name" in p for p in problems)
+    assert problems == ["dropped 'MY_TOKEN': credential-shaped name, not a rewrite switch"]
+
+
+def test_a_token_cache_switch_set_to_a_flag_or_a_count_is_kept():
+    """A TOKEN-named switch set to a flag or a count can hold no secret, so it is kept."""
+    switches, problems = manifest.parse_manifest(
+        [
+            _entry("SGLANG_CHAT_SEGMENT_TOKEN_CACHE"),
+            _entry("SGLANG_CHAT_SEGMENT_TOKEN_CACHE_MAX_TOKENS", value=65536),
+            _entry("SGLANG_TOKEN_REUSE", value="off"),
+        ]
+    )
+    assert [(s["switch"], s["value"]) for s in switches] == [
+        ("SGLANG_CHAT_SEGMENT_TOKEN_CACHE", "1"),
+        ("SGLANG_CHAT_SEGMENT_TOKEN_CACHE_MAX_TOKENS", "65536"),
+        ("SGLANG_TOKEN_REUSE", "off"),
+    ]
+    assert problems == []
+
+
+def test_a_zero_value_is_kept_as_zero():
+    """An integer 0 is a declared value, not a missing one."""
+    switches, problems = manifest.parse_manifest([_entry("HL_SPLIT_K", value=0)])
+    assert problems == []
+    assert switches[0]["value"] == "0"
 
 
 def test_a_switch_colliding_with_benchmark_config_is_dropped():
@@ -150,7 +175,7 @@ def test_a_dependency_cycle_is_broken_and_reported():
     )
     assert any("cyclic dependency" in p for p in problems)
     for entry in switches:
-        assert manifest.dependency_closure(entry["switch"], switches) <= {"HL_A", "HL_B"}
+        assert manifest.transitive_closure(entry["switch"], switches, "depends_on") <= {"HL_A", "HL_B"}
 
 
 def test_a_switch_with_dependents_is_flagged_as_an_enabler():
@@ -198,19 +223,19 @@ def test_switch_env_can_be_restricted():
 
 def test_dependency_closure_is_transitive():
     """A rewrite two links down the chain needs both links above it."""
-    assert manifest.dependency_closure("HL_DERIVED", _chain()) == {"HL_DERIVED", "HL_CACHE", "HL_HOIST"}
-    assert manifest.dependency_closure("HL_STANDALONE", _chain()) == {"HL_STANDALONE"}
+    assert manifest.transitive_closure("HL_DERIVED", _chain(), "depends_on") == {"HL_DERIVED", "HL_CACHE", "HL_HOIST"}
+    assert manifest.transitive_closure("HL_STANDALONE", _chain(), "depends_on") == {"HL_STANDALONE"}
 
 
 def test_dependents_closure_is_transitive():
     """Turning an enabler off has to turn off everything below it."""
-    assert manifest.dependents_closure("HL_HOIST", _chain()) == {"HL_HOIST", "HL_CACHE", "HL_DERIVED"}
-    assert manifest.dependents_closure("HL_DERIVED", _chain()) == {"HL_DERIVED"}
+    assert manifest.transitive_closure("HL_HOIST", _chain(), "enables") == {"HL_HOIST", "HL_CACHE", "HL_DERIVED"}
+    assert manifest.transitive_closure("HL_DERIVED", _chain(), "enables") == {"HL_DERIVED"}
 
 
 def test_closure_of_an_unknown_switch_is_itself():
     """Callers never have to special-case a name the manifest does not carry."""
-    assert manifest.dependency_closure("HL_ABSENT", _chain()) == {"HL_ABSENT"}
+    assert manifest.transitive_closure("HL_ABSENT", _chain(), "depends_on") == {"HL_ABSENT"}
 
 
 # additive variants
@@ -313,6 +338,149 @@ def test_summary_lists_switches_and_problems():
     assert "! dropped HL_B" in text
 
 
+# unarmed switch gates
+
+
+def _diff(*added: str, context: tuple[str, ...] = (), removed: tuple[str, ...] = ()) -> str:
+    """Build a one-file diff with the given added, context and removed lines."""
+    body = [f" {line}" for line in context] + [f"-{line}" for line in removed] + [f"+{line}" for line in added]
+    header = "diff --git a/src.py b/src.py\n--- a/src.py\n+++ b/src.py\n@@ -1,1 +1,2 @@\n"
+    return header + "\n".join(body) + "\n"
+
+
+def test_a_name_the_patch_adds_a_read_of_and_nothing_sets_is_listed():
+    """The lead the next mandate carries: the patch reads it, the bench had no value for it."""
+    patch = _diff('    if os.environ.get("HL_FUSE_RMSNORM") == "1":')
+    assert manifest.unarmed_env_reads([patch], armed=set()) == ["HL_FUSE_RMSNORM"]
+
+
+def test_every_read_form_is_seen():
+    """A kernel-side rewrite reads its env from C just as the Python side does."""
+    patch = _diff(
+        '    a = os.getenv("HL_A")',
+        '    b = os.environ["HL_B"]',
+        '    const char* c = std::getenv("HL_C");',
+    )
+    assert manifest.unarmed_env_reads([patch]) == ["HL_A", "HL_B", "HL_C"]
+
+
+def test_a_name_something_sets_is_not_listed():
+    """The manifest switches and the proposal's extra_envs both set names for the bench."""
+    patch = _diff('    if os.environ.get("HL_FUSE") == "1":')
+    assert manifest.unarmed_env_reads([patch], armed={"HL_FUSE"}) == []
+
+
+def test_a_read_the_file_already_had_is_not_this_rounds_lead():
+    """The patch moved an existing read, so it says nothing about what this round changed."""
+    patch = _diff(
+        '    flag = os.environ.get("HL_OLD")',
+        context=('    if os.environ.get("HL_OLD") == "1":',),
+    )
+    assert manifest.unarmed_env_reads([patch]) == []
+
+
+def test_a_read_the_patch_rewrites_in_place_is_not_new():
+    """Replacing the line that reads a name does not make it this round's doing."""
+    patch = _diff(
+        '    flag = os.environ.get("HL_OLD", "0")',
+        removed=('    flag = os.environ.get("HL_OLD")',),
+    )
+    assert manifest.unarmed_env_reads([patch]) == []
+
+
+def test_a_secret_shaped_name_is_not_listed():
+    """A credential the patch reads is never a switch of the round's own."""
+    patch = _diff('    key = os.environ.get("HF_TOKEN")')
+    assert manifest.unarmed_env_reads([patch]) == []
+
+
+def test_the_patch_set_is_read_as_one_change():
+    """One patch adding a read of what another patch's file already reads is not new either."""
+    adds = _diff('    flag = os.environ.get("HL_SHARED")')
+    reads_already = _diff("    pass", context=('    if os.environ.get("HL_SHARED") == "1":',))
+    assert manifest.unarmed_env_reads([adds, reads_already]) == []
+
+
+def test_a_falsy_default_is_listed():
+    """Unset and "0" reach the same branch, so setting the name is still worth checking."""
+    patch = _diff('    if os.environ.get("HL_FUSE", "0") == "1":')
+    assert manifest.unarmed_env_reads([patch]) == ["HL_FUSE"]
+
+
+def test_a_read_with_a_non_falsy_default_is_not_listed():
+    """Set or unset, the line runs the same way, so it explains no inert bench."""
+    patch = _diff('    if os.environ.get("SGLANG_USE_NEW_PATH", "1") == "1":')
+    assert manifest.unarmed_env_reads([patch], armed={"PATH", "HOME"}) == []
+
+
+def test_a_tuning_default_is_not_listed():
+    """A read that falls back to a usable value leaves nothing to check."""
+    patch = _diff(
+        '    root = os.getenv("ROCM_PATH", "/opt/rocm")',
+        '    streams = int(os.environ.get("HL_STREAMS", "4"))',
+    )
+    assert manifest.unarmed_env_reads([patch], armed={"PATH", "HOME"}) == []
+
+
+def test_a_launcher_provided_name_is_not_listed():
+    """Rank and world topology come from the launch per process; no round sets them."""
+    patch = _diff(
+        '    rank = int(os.environ.get("LOCAL_RANK", "0"))',
+        '    size = os.environ["WORLD_SIZE"]',
+        '    node = os.getenv("SLURM_PROCID")',
+    )
+    assert manifest.unarmed_env_reads([patch], armed={"PATH", "HOME"}) == []
+
+
+def test_a_benchmark_owned_name_is_not_listed():
+    """A manifest may not claim it either, so a round could not have set it."""
+    patch = _diff('    out = os.environ["RESULT_DIR"]')
+    assert manifest.unarmed_env_reads([patch]) == []
+
+
+def test_a_default_that_is_not_a_literal_is_not_listed():
+    """Nothing readable here says an unset name changes what the line does."""
+    patch = _diff('    mode = os.environ.get("HL_MODE", _DEFAULT_MODE)')
+    assert manifest.unarmed_env_reads([patch]) == []
+
+
+def test_the_unset_name_is_listed_next_to_reads_that_are_set_elsewhere():
+    """A patch that reads its rank and a name of its own leaves one name to check."""
+    patch = _diff(
+        '    rank = int(os.environ.get("LOCAL_RANK", "0"))',
+        '    if os.environ.get("HL_FUSE_RMSNORM") == "1":',
+    )
+    assert manifest.unarmed_env_reads([patch]) == ["HL_FUSE_RMSNORM"]
+
+
+def test_a_read_the_scan_cannot_read_as_a_switch_is_listed_all_the_same():
+    """What the list is and is not.
+
+    An opt-out switch runs the change precisely while the name is unset, a
+    write sets the name rather than reading it, and a value read gates
+    nothing at all — on the line, all three look like the switch above. The
+    scan reports them, which is why nothing refuses a round over this list:
+    it is read next to a bench that already came out inert, where it is a
+    place to look.
+    """
+    opt_out = _diff(
+        '    if not os.environ.get("HL_DISABLE_NEW"):',
+        '    if (!std::getenv("HL_DISABLE_FAST_PATH")) {',
+        '    use_new = os.environ.get("HL_LEGACY_PATH") is None',
+        '    off = bool(int(os.getenv("VLLM_ROCM_DISABLE_NEW_PATH", "0")))',
+    )
+    writes = _diff('    os.environ["SGLANG_ENABLE_X"] = "1"', '    del os.environ["SGLANG_OLD"]')
+    values = _diff('    cache = os.environ.get("TRITON_CACHE_DIR") or default_dir', '    hip = os.getenv("HIP_PATH")')
+    assert manifest.unarmed_env_reads([opt_out]) == [
+        "HL_DISABLE_FAST_PATH",
+        "HL_DISABLE_NEW",
+        "HL_LEGACY_PATH",
+        "VLLM_ROCM_DISABLE_NEW_PATH",
+    ]
+    assert manifest.unarmed_env_reads([writes]) == ["SGLANG_ENABLE_X", "SGLANG_OLD"]
+    assert manifest.unarmed_env_reads([values]) == ["HIP_PATH", "TRITON_CACHE_DIR"]
+
+
 # SharedState lever ledger
 
 
@@ -327,18 +495,10 @@ def test_levers_are_registered_with_their_state():
     """A registered lever records whether it is currently on."""
     state = _state()
     switches = _chain()
-    assert state.record_authored_framework_levers(
-        switches,
-        default_on=False,
-        specialist_task_id="t-1",
-        stack_delta_pct=-0.4,
-    )
+    assert state.record_authored_framework_levers(switches, default_on=False)
     rows = state.authored_framework_levers
     assert [r["switch"] for r in rows] == ["HL_HOIST", "HL_CACHE", "HL_DERIVED", "HL_STANDALONE"]
     assert all(r["default_on"] is False for r in rows)
-    assert rows[0]["specialist_task_id"] == "t-1"
-    assert rows[0]["stack_delta_pct"] == pytest.approx(-0.4)
-    assert rows[0]["enabler"] is True
     assert rows[0]["attributed_gain_pct"] is None
 
 
@@ -355,11 +515,10 @@ def test_re_registering_preserves_a_measured_attribution():
     """A measurement outranks a re-registration; losing it would re-bench the lever."""
     state = _state()
     state.record_authored_framework_levers(_chain(), default_on=False)
-    state.record_framework_lever_attribution("HL_CACHE", gain_pct=7.5, source="additive")
+    state.record_framework_lever_attribution("HL_CACHE", gain_pct=7.5)
     state.record_authored_framework_levers(_chain(), default_on=True)
     row = next(r for r in state.authored_framework_levers if r["switch"] == "HL_CACHE")
     assert row["attributed_gain_pct"] == pytest.approx(7.5)
-    assert row["attribution_source"] == "additive"
 
 
 def test_registering_nothing_is_a_noop():
@@ -372,7 +531,7 @@ def test_registering_nothing_is_a_noop():
 def test_attribution_of_an_unknown_switch_is_ignored():
     """A stale attribution cannot invent a lever row."""
     state = _state()
-    assert state.record_framework_lever_attribution("HL_GHOST", gain_pct=1.0, source="additive") is False
+    assert state.record_framework_lever_attribution("HL_GHOST", gain_pct=1.0) is False
 
 
 def _entry_parsed(switch: str) -> dict[str, Any]:
@@ -415,8 +574,60 @@ def test_already_attributed_levers_are_not_re_benched():
     state = _state()
     state.record_authored_framework_levers(_chain(), default_on=False)
     for row in state.authored_framework_levers:
-        state.record_framework_lever_attribution(row["switch"], gain_pct=1.0, source="additive")
+        state.record_framework_lever_attribution(row["switch"], gain_pct=1.0)
     assert framework_lever_grid(state) == []
+
+
+def test_an_attributed_enabler_still_turns_on_for_its_dependents():
+    """Attribution decides which arms are left to run, never which envs a bundle sets."""
+    from hyperloom.orchestrator.actions.executors.explore import framework_lever_grid
+
+    switches, _ = manifest.parse_manifest([_entry("HL_X", enables=["HL_Y"]), _entry("HL_Y")])
+    state = _state()
+    state.record_authored_framework_levers(switches, default_on=False)
+    state.record_framework_lever_attribution("HL_X", gain_pct=0.3)
+
+    payload = framework_lever_grid(state)
+
+    assert [(v["name"], v["framework_lever_bundle"], v["extra_envs"]) for v in payload] == [
+        ("fwlever_hl_y", ["HL_X", "HL_Y"], {"HL_X": "1", "HL_Y": "1"})
+    ]
+
+
+def test_the_combination_arm_runs_until_every_one_of_its_levers_is_attributed():
+    """The full stack is offered while any dormant lever is pending, and always switches every dormant lever on."""
+    from hyperloom.orchestrator.actions.executors.explore import framework_lever_grid
+
+    switches, _ = manifest.parse_manifest([_entry("HL_A"), _entry("HL_B")])
+    state = _state()
+    state.record_authored_framework_levers(switches, default_on=False)
+    state.record_framework_lever_attribution("HL_A", gain_pct=0.3)
+
+    payload = framework_lever_grid(state)
+
+    assert [(v["name"], v["extra_envs"]) for v in payload] == [
+        ("fwlever_hl_b", {"HL_B": "1"}),
+        ("fwlever_all", {"HL_A": "1", "HL_B": "1"}),
+    ]
+    state.record_framework_lever_attribution("HL_B", gain_pct=0.1)
+    assert framework_lever_grid(state) == []
+
+
+def test_an_attributed_lever_still_counts_toward_the_stack_a_drop_leaves():
+    """Dropping X and the Y it enables still leaves Z on, so the arm attributes X rather than restating the base."""
+    from hyperloom.orchestrator.actions.executors.explore import framework_lever_grid
+
+    switches, _ = manifest.parse_manifest([_entry("HL_X", enables=["HL_Y"]), _entry("HL_Y"), _entry("HL_Z")])
+    state = _state()
+    state.record_authored_framework_levers(switches, default_on=True)
+    state.record_framework_lever_attribution("HL_Y", gain_pct=1.0)
+
+    payload = framework_lever_grid(state)
+
+    assert [(v["framework_lever"], v["unset_envs"]) for v in payload] == [
+        ("HL_Z", ["HL_Z"]),
+        ("HL_X", ["HL_X", "HL_Y"]),
+    ]
 
 
 def test_no_levers_means_no_seeding():
@@ -591,7 +802,7 @@ async def _run_rewrite_integrate(
     benched_envs: dict[str, str] = {}
     legs: list[dict[str, Any]] = []
 
-    async def _fake_bench(**kwargs):
+    async def _fake_bench(bench, **kwargs):
         legs.append(dict(kwargs))
         is_parity = bool(kwargs.get("unset_envs"))
         if is_parity:
@@ -610,7 +821,7 @@ async def _run_rewrite_integrate(
             {"accuracy_pass": accuracy_pass, "timed_out": False},
         )
 
-    async def _noop_kb(**_kwargs):
+    async def _noop_kb(*_args, **_kwargs):
         return None
 
     monkeypatch.setattr(executor, "_bench_patch", _fake_bench)
@@ -644,6 +855,24 @@ async def test_a_rewrite_patch_is_benched_with_its_switches_on(tmp_path, monkeyp
 
 
 @pytest.mark.asyncio
+async def test_an_int_cast_flag_without_a_value_is_benched_on(tmp_path, monkeypatch):
+    """``bool(int(os.getenv(X, "0")))`` is the usual on/off idiom, so a cast says nothing about needing a value."""
+    patch = _REWRITE_PATCH.replace(
+        "+    return 2\n", '+    fused = bool(int(os.getenv("HL_FUSED", "0")))\n+    return 2\n'
+    ).replace("@@ -1,2 +1,2 @@", "@@ -1,2 +1,3 @@")
+    result, _, benched_envs, _ = await _run_rewrite_integrate(
+        tmp_path,
+        monkeypatch,
+        delta_pct=8.0,
+        patch_body=patch,
+        switches=[{"switch": "HL_HOIST"}, {"switch": "HL_FUSED"}],
+    )
+    assert result["status"] == "kept"
+    assert benched_envs == {"HL_HOIST": "1", "HL_FUSED": "1"}
+    assert [row["switch"] for row in result["framework_levers"]] == ["HL_HOIST", "HL_FUSED"]
+
+
+@pytest.mark.asyncio
 async def test_a_winning_bundle_keeps_and_registers_levers_as_on(tmp_path, monkeypatch):
     """Clearing the gate puts the switches in the running config, ready for removal tests."""
     result, repo, _, _ = await _run_rewrite_integrate(tmp_path, monkeypatch, delta_pct=8.0)
@@ -667,6 +896,34 @@ async def test_an_unprofitable_bundle_is_kept_inert_with_levers_registered(tmp_p
     # The code is still on disk, just dormant.
     assert (repo / "src.py").read_text().endswith("return 2\n")
     assert "enabler" in result["reason"]
+
+
+@pytest.mark.asyncio
+async def test_an_inert_keep_is_committed_so_the_next_revert_keeps_it(tmp_path, monkeypatch):
+    """Revert is a reset to HEAD; uncommitted inert code would be stashed as user changes."""
+    import subprocess
+
+    result, repo, _, _ = await _run_rewrite_integrate(tmp_path, monkeypatch, delta_pct=0.2)
+    assert result["status"] == "kept_inert"
+    status = subprocess.run(["git", "-C", str(repo), "status", "--porcelain"], capture_output=True, text=True)
+    assert status.stdout.strip() == ""
+    head_src = subprocess.run(["git", "-C", str(repo), "show", "HEAD:src.py"], capture_output=True, text=True)
+    assert head_src.stdout.endswith("return 2\n")
+
+
+@pytest.mark.asyncio
+async def test_without_a_base_an_unprofitable_bundle_reverts_instead_of_keeping_inert(tmp_path, monkeypatch):
+    """Before anything boots there is no base, so inertness cannot be shown and the code must not stay."""
+    result, repo, _, legs = await _run_rewrite_integrate(
+        tmp_path,
+        monkeypatch,
+        delta_pct=0.2,
+        extra_params={"base_tput": 0.0},
+    )
+    assert result["status"] == "reverted"
+    assert result["error_class"] == "switch_off_parity_inconclusive"
+    assert not [leg for leg in legs if leg.get("unset_envs")]
+    assert (repo / "src.py").read_text().endswith("return 1\n")
 
 
 @pytest.mark.asyncio
@@ -702,25 +959,75 @@ async def test_a_patch_without_a_manifest_still_reverts_on_a_miss(tmp_path, monk
 @pytest.mark.asyncio
 async def test_inert_keep_flows_into_the_lever_ledger(tmp_path, monkeypatch):
     """The writeback registers inert levers without lifting current_best."""
-    from hyperloom.orchestrator.loop.writeback import WritebackCollaborator
+    from hyperloom.inference_optimizer.session.optimization_journal import Verdict
+    from hyperloom.orchestrator.loop._promote_outcome import _PromoteOutcome
+
+    from .conftest import make_coordinator
 
     result, _, _, _ = await _run_rewrite_integrate(tmp_path, monkeypatch, delta_pct=0.2)
     state = _state()
     state.baseline_tput = 100.0
-    collaborator = WritebackCollaborator.__new__(WritebackCollaborator)
-    collaborator.shared_state = state
+    state.save(tmp_path)
+    coord = make_coordinator(tmp_path)
+    state = coord.shared_state
 
-    class _Outcome:
-        changed = False
-        audit_decision = None
-        audit_extras: dict[str, Any] = {}
-
-    outcome = _Outcome()
-    await collaborator._promote_integrate_patch(result, None, outcome)
-    assert outcome.audit_decision == "kept_inert"
+    outcome = _PromoteOutcome(verdict=Verdict.RECORDED)
+    await coord.writeback._promote_integrate_patch(result, None, outcome)
+    assert outcome.verdict is Verdict.RECORDED
     assert [row["switch"] for row in state.authored_framework_levers] == ["HL_HOIST", "HL_CACHE"]
     assert all(row["default_on"] is False for row in state.authored_framework_levers)
     assert not state.current_best
+
+
+@pytest.mark.asyncio
+async def test_a_dormant_patch_is_reinstalled_on_a_fresh_tree_at_resume(tmp_path, monkeypatch):
+    """A resumed session on a fresh tree reinstalls its dormant patches before their switches are benched."""
+    import subprocess
+
+    from hyperloom.inference_optimizer.session.optimization_journal import Verdict
+    from hyperloom.orchestrator.loop._promote_outcome import _PromoteOutcome
+    from hyperloom.orchestrator.loop.resume_source_layers import install_kept_source_layers
+
+    from .conftest import make_coordinator
+
+    result, repo, _, _ = await _run_rewrite_integrate(tmp_path, monkeypatch, delta_pct=0.2)
+    assert result["status"] == "kept_inert"
+    state = _state()
+    state.baseline_tput = 100.0
+    state.save(tmp_path)
+    coord = make_coordinator(tmp_path)
+    await coord.writeback._promote_integrate_patch(result, None, _PromoteOutcome(verdict=Verdict.RECORDED))
+    subprocess.run(["git", "-C", str(repo), "reset", "-q", "--hard", "HEAD~1"], check=True)
+    assert (repo / "src.py").read_text() == "def f():\n    return 1\n"
+
+    report: dict[str, Any] = {"warnings": [], "fixes": []}
+    assert install_kept_source_layers(coord.shared_state, tmp_path, report) is None
+
+    assert (repo / "src.py").read_text() == "def f():\n    return 2\n"
+
+
+def test_dormant_layers_install_where_they_were_committed_among_the_kept_ones():
+    """A dormant layer goes after the stack entries that preceded its commit and before the ones that followed."""
+    from hyperloom.orchestrator.loop.resume_source_layers import layers_in_commit_order
+
+    state = _state()
+    state.optimization_stack = [{"name": "keep-0"}, {"name": "keep-1"}]
+    state.authored_framework_levers = [
+        {"switch": "HL_LATE", "source_layer": {"name": "dormant-late", "stack_position": 2, "source_snapshot": "b"}},
+        {"switch": "HL_EARLY", "source_layer": {"name": "dormant-early", "stack_position": 1, "source_snapshot": "a"}},
+        {
+            "switch": "HL_EARLY_2",
+            "source_layer": {"name": "dormant-early", "stack_position": 1, "source_snapshot": "a"},
+        },
+        {"switch": "HL_NONE"},
+    ]
+
+    assert [layer["name"] for layer in layers_in_commit_order(state)] == [
+        "keep-0",
+        "dormant-early",
+        "keep-1",
+        "dormant-late",
+    ]
 
 
 # switch-off parity
@@ -951,20 +1258,17 @@ async def test_a_patch_without_switches_spends_no_parity_leg(tmp_path, monkeypat
 @pytest.mark.asyncio
 async def test_a_raising_parity_leg_does_not_read_as_a_pass(tmp_path, monkeypatch):
     """A probe that cannot run has proved nothing, so it must not wave the patch through."""
+    from hyperloom.orchestrator.actions.executors._integrate_results import _PatchBench
     from hyperloom.orchestrator.actions.executors.integrate_patch import IntegratePatchExecutor
 
     executor = IntegratePatchExecutor(session_dir=tmp_path)
 
-    async def _raising_bench(**_kwargs):
-        raise RuntimeError("bench harness exploded")
+    async def _raising_bench(*_args, **_kwargs):
+        raise OSError("bench harness exploded")
 
     monkeypatch.setattr(executor, "_bench_patch", _raising_bench)
     verdict = await executor._switch_off_parity(
-        params={},
-        output_root=tmp_path,
-        specialist_task_id="t",
-        switch_manifest=_chain(),
-        base_tput=100.0,
+        _PatchBench(params={}, output_root=tmp_path, specialist_task_id="t"), switch_manifest=_chain(), base_tput=100.0
     )
     assert verdict["ran"] is True
     assert verdict["ok"] is False
@@ -974,14 +1278,11 @@ async def test_a_raising_parity_leg_does_not_read_as_a_pass(tmp_path, monkeypatc
 @pytest.mark.asyncio
 async def test_parity_without_a_base_is_reported_as_not_run(tmp_path):
     """No base to compare against means the check was skipped, not that it passed."""
+    from hyperloom.orchestrator.actions.executors._integrate_results import _PatchBench
     from hyperloom.orchestrator.actions.executors.integrate_patch import IntegratePatchExecutor
 
     verdict = await IntegratePatchExecutor(session_dir=tmp_path)._switch_off_parity(
-        params={},
-        output_root=tmp_path,
-        specialist_task_id="t",
-        switch_manifest=_chain(),
-        base_tput=0.0,
+        _PatchBench(params={}, output_root=tmp_path, specialist_task_id="t"), switch_manifest=_chain(), base_tput=0.0
     )
     assert verdict["ran"] is False
     assert "no positive base throughput" in verdict["reason"]
@@ -990,12 +1291,11 @@ async def test_parity_without_a_base_is_reported_as_not_run(tmp_path):
 @pytest.mark.asyncio
 async def test_parity_can_be_switched_off_explicitly(tmp_path):
     """An operator debugging the harness can take the extra leg out."""
+    from hyperloom.orchestrator.actions.executors._integrate_results import _PatchBench
     from hyperloom.orchestrator.actions.executors.integrate_patch import IntegratePatchExecutor
 
     verdict = await IntegratePatchExecutor(session_dir=tmp_path)._switch_off_parity(
-        params={"enable_switch_off_parity": False},
-        output_root=tmp_path,
-        specialist_task_id="t",
+        _PatchBench(params={"enable_switch_off_parity": False}, output_root=tmp_path, specialist_task_id="t"),
         switch_manifest=_chain(),
         base_tput=100.0,
     )

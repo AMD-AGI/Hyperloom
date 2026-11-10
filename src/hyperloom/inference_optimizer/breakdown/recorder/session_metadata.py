@@ -19,8 +19,9 @@ import time
 from pathlib import Path
 from typing import Any, Mapping
 
-from hyperloom.common.coerce import to_unix
-from hyperloom.common.timeutil import iso_z
+from hyperloom_common.coerce import to_unix
+from hyperloom.common.env_safety import redact_secret_env_values
+from hyperloom_common.timeutil import iso_z
 
 from ..session_facts import architecture_block, grading_block, recovery_block, workload_signature
 from .recorder import Recorder, recorder_for
@@ -41,7 +42,7 @@ def _image_id(image: str) -> str:
     return image.split("/")[-1] if image else ""
 
 
-def _write(session_dir: Path | str | None, payload: Mapping[str, Any], *, producer: str) -> None:
+def _write(session_dir: Path | str | None, payload: Mapping[str, Any]) -> None:
     """Deep-merge ``payload`` into the ``metadata`` singleton.
 
     Spool failures are parked by :class:`Recorder`. Projection bugs raise.
@@ -49,18 +50,10 @@ def _write(session_dir: Path | str | None, payload: Mapping[str, Any], *, produc
     if not session_dir:
         trace_skip(reason="no session_dir", section=SECTION)
         return
-    if not payload:
-        trace_skip(reason="empty payload", section=SECTION)
-        return
-    recorder_for(session_dir, producer=producer).record_upsert_singleton(SECTION, dict(payload))
+    recorder_for(session_dir, producer=PRODUCER_COORDINATOR).record_upsert_singleton(SECTION, dict(payload))
 
 
-def record_metadata_identity(
-    session_dir: Path | str | None,
-    manifest: Mapping[str, Any],
-    *,
-    producer: str = PRODUCER_COORDINATOR,
-) -> None:
+def record_metadata_identity(session_dir: Path | str | None, manifest: Mapping[str, Any]) -> None:
     """Record session identity and the container image from a fresh manifest.
 
     Called where the manifest is stamped, which is the only point that knows
@@ -93,6 +86,8 @@ def record_metadata_identity(
         "framework_version": _text(manifest.get("framework_version")),
         "gpu_type": _text(manifest.get("gpu_type")),
         "tp": manifest.get("tp"),
+        "ep": manifest.get("ep"),
+        "compute_partition": dict(manifest.get("compute_partition") or {}),
         "conc": workload.get("conc"),
         "isl": workload.get("isl"),
         "osl": workload.get("osl"),
@@ -106,23 +101,13 @@ def record_metadata_identity(
     payload: dict[str, Any] = {"session": session, "task_config": task_config}
     workflow_flags = manifest.get("workflow_flags")
     if isinstance(workflow_flags, Mapping):
-        from ..workflow_contract import WORKFLOW_CONTRACT_V1, workflow_metadata
+        from ..workflow_contract import workflow_metadata
 
-        version = str(manifest.get("workflow_contract_version") or WORKFLOW_CONTRACT_V1)
-        workflow = workflow_metadata(workflow_flags, version=version)
-        authored_digest = manifest.get("workflow_contract_digest")
-        if manifest.get("workflow_contract_version") and authored_digest != workflow["contract_digest"]:
-            raise ValueError("manifest workflow contract identity does not match the published contract")
-        payload["workflow"] = workflow
-    _write(session_dir, payload, producer=producer)
+        payload["workflow"] = workflow_metadata(workflow_flags)
+    _write(session_dir, payload)
 
 
-def record_metadata_langfuse(
-    session_dir: Path | str | None,
-    receipt: Mapping[str, Any],
-    *,
-    producer: str = PRODUCER_COORDINATOR,
-) -> None:
+def record_metadata_langfuse(session_dir: Path | str | None, receipt: Mapping[str, Any]) -> None:
     """Record the Langfuse entrypoint and push counts from an emitter receipt.
 
     Called both when the emitter decides whether it is enabled and after the
@@ -132,7 +117,7 @@ def record_metadata_langfuse(
     if not isinstance(receipt, Mapping) or not receipt:
         trace_skip(reason="empty payload", section=SECTION)
         return
-    _write(session_dir, {"langfuse": _langfuse(receipt)}, producer=producer)
+    _write(session_dir, {"langfuse": _langfuse(receipt)})
 
 
 def snapshot_metadata(rec: Recorder, state: Any) -> None:
@@ -178,20 +163,21 @@ def snapshot_metadata(rec: Recorder, state: Any) -> None:
 
 def _launch_config(state: Any) -> dict[str, Any]:
     """Workload shape and operator-supplied launch overrides from live state."""
-    server_args = getattr(state, "operator_server_args", "") or getattr(state, "server_args", "")
     config: dict[str, Any] = {
         "model_name": _text(getattr(state, "model_name", "")),
         "model_path": _text(getattr(state, "model_path", "")),
         "framework_name": _text(getattr(state, "framework", "")),
         "gpu_type": _text(getattr(state, "gpu_type", "")),
         "tp": getattr(state, "tp", None),
+        "ep": getattr(state, "ep", None),
+        "compute_partition": dict(getattr(state, "compute_partition", None) or {}),
         "conc": getattr(state, "conc", None),
         "isl": getattr(state, "isl", None),
         "osl": getattr(state, "osl", None),
         "precision": _text(getattr(state, "precision", "")),
         "max_model_len": getattr(state, "max_model_len", None),
-        "launch_env": dict(getattr(state, "operator_extra_env", None) or {}),
-        "launch_server_args": _text(server_args),
+        "launch_env": redact_secret_env_values(getattr(state, "operator_extra_env", None)),
+        "launch_server_args": _text(getattr(state, "operator_server_args", "")),
     }
     # The singleton merges leaf-by-leaf with no notion of an empty value, so
     # the version detected at launch has to be left alone rather than

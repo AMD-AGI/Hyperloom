@@ -6,10 +6,14 @@
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import json
+import logging
 import os
-import stat
+import signal
+import sqlite3
 import subprocess
+import sys
 import time
 from pathlib import Path
 from typing import Any
@@ -17,22 +21,38 @@ from typing import Any
 import pytest
 
 from hyperloom.common.deadline import Deadline
+from hyperloom_common.git_safety import recorded_admin_dir, trusted_admin_dir, worktree_head
+from hyperloom.common.env_safety import specialist_run_as
 
-from .conftest import init_git_repo
+from .conftest import init_git_repo, make_fake_claude
+from hyperloom.orchestrator.specialists.tests._agent_fixtures import FORGES_ITS_GIT
 
 from hyperloom.common.visible_devices import GPU_MASK_ENV_NAMES
+
+from hyperloom.orchestrator.actions.executors._ray_serving import RayInfeasibleError
 
 from hyperloom.orchestrator.specialists.runner import (
     SPECIALIST_TOOL_DENYLIST,
     SpecialistRunner,
 )
-from hyperloom.orchestrator.specialists import subprocess_
+from hyperloom.orchestrator.specialists import subprocess_, wall_budget
+from hyperloom.orchestrator.specialists import launch_env
+from hyperloom.common import agent_isolation
+from hyperloom_common.bwrap import BwrapProbe
+from hyperloom.common.agent_isolation import AccountIsolation, BwrapIsolation, NoIsolation
+from hyperloom.common.env_safety import RunAs
+from hyperloom.common.proctree import REAP_MARK_ENV
+from hyperloom.orchestrator.specialists.launch_env import LaunchPlace, prepare_launch
+from hyperloom.orchestrator.specialists.agent_cli_config import _build_specialist_env
+from hyperloom.orchestrator.specialists.leaf import build_leaf_agents_json
 from hyperloom.orchestrator.specialists.subprocess_ import (
     SpecialistSubprocessConfig,
     SpecialistSubprocessDispatcher,
-    _build_specialist_env,
-    _setup_worktree,
+    ReapWatch,
+    SpecialistSpawn,
 )
+from hyperloom.orchestrator.specialists import worktrees
+from hyperloom.orchestrator.specialists.worktrees import HeldWorktree, PinnedGit, _setup_worktree
 from hyperloom.orchestrator.loop.sub_agent_runner import RunnerContext
 from hyperloom.orchestrator.state.task_registry import Task
 
@@ -56,6 +76,21 @@ def test_build_specialist_env_inherits_provider_secrets_by_default(monkeypatch):
     assert "KB_SERVICE_TOKEN" not in env
     assert "INFERENCE_OPTIMIZER_CURRENT_SESSION_DIR" not in env
     assert "LD_PRELOAD" not in env
+
+
+def test_build_specialist_env_forwards_hub_settings_but_not_the_hub_token(monkeypatch):
+    hub = {
+        "HF_ENDPOINT": "https://hf-mirror.example",
+        "HF_HOME": "/shared/hf",
+        "HF_HUB_CACHE": "/shared/hf/hub",
+        "HF_HUB_OFFLINE": "1",
+    }
+    for name, value in hub.items():
+        monkeypatch.setenv(name, value)
+    monkeypatch.setenv("HF_TOKEN", "hf-token-value")
+    env = _build_specialist_env()
+    assert {name: env.get(name) for name in hub} == hub
+    assert "HF_TOKEN" not in env
 
 
 def test_build_specialist_env_forwards_the_claude_config_dir(monkeypatch):
@@ -93,193 +128,6 @@ def test_build_specialist_env_secret_inheritance_can_be_disabled(monkeypatch):
     assert "GITHUB_TOKEN" not in env
 
 
-def _make_fake_claude(
-    bin_dir: Path,
-    *,
-    behavior: str,
-    payload: dict[str, Any] | None = None,
-) -> Path:
-    """Write a fake ``claude`` executable simulating one of: done_only / done_with_patch / done_with_env / crash."""
-    bin_dir.mkdir(parents=True, exist_ok=True)
-    script_path = bin_dir / "claude"
-    payload_json = json.dumps(
-        payload
-        or {
-            "gap_canonical_id": "gap.test.example",
-            "domain": "serving_specialist",
-            "proposal_set": [
-                {
-                    "name": "fake_variant",
-                    "extra_args": "--fake",
-                    "extra_envs": {},
-                    "reason": "fake",
-                }
-            ],
-            "patches_written": [],
-            "summary": "fake claude subprocess output",
-            "confidence": 0.5,
-        }
-    )
-    body = """#!/usr/bin/env bash
-set -e
-# Parse --add-dir paths (first is worktree, second is workspace).
-ADD_DIRS=()
-while [[ $# -gt 0 ]]; do
-  case "$1" in
-    --add-dir) ADD_DIRS+=("$2"); shift 2 ;;
-    *) shift ;;
-  esac
-done
-WORKTREE="${ADD_DIRS[0]:-}"
-WORKSPACE="${ADD_DIRS[1]:-}"
-if [[ -n "$WORKTREE" && -f "$WORKTREE/prompt.md" ]]; then
-  WORKSPACE="$WORKTREE"
-fi
-"""
-    if behavior == "done_only":
-        body += f"""
-cat > "$WORKSPACE/specialist_done.json" <<'EOF'
-{payload_json}
-EOF
-exit 0
-"""
-    elif behavior == "done_with_patch":
-        patch_payload = json.dumps(
-            {
-                **(payload or {}),
-                "gap_canonical_id": "gap.test.example",
-                "domain": "serving_specialist",
-                "proposal_set": [
-                    {
-                        "name": "patched_variant",
-                        "extra_args": "",
-                        "extra_envs": {},
-                        "reason": "see patch",
-                    }
-                ],
-                "patches_written": ["patches/001_test.patch"],
-                "summary": "fake patch-authoring specialist",
-                "confidence": 0.7,
-            }
-        )
-        body += f"""
-mkdir -p "$WORKTREE/patches"
-cat > "$WORKTREE/patches/001_test.patch" <<'EOF'
-diff --git a/dummy.txt b/dummy.txt
-new file mode 100644
---- /dev/null
-+++ b/dummy.txt
-@@ -0,0 +1 @@
-+pr-a2 patch
-EOF
-cat > "$WORKSPACE/specialist_done.json" <<'EOF'
-{patch_payload}
-EOF
-exit 0
-"""
-    elif behavior == "done_with_env":
-        body += """
-cat > "$WORKSPACE/specialist_done.json" <<EOF
-{
-  "gap_canonical_id": "gap.test.example",
-  "domain": "serving_specialist",
-  "proposal_set": [],
-  "patches_written": [],
-  "summary": "env echo",
-  "confidence": 0.0,
-  "hip_visible": "$HIP_VISIBLE_DEVICES",
-  "cuda_visible": "$CUDA_VISIBLE_DEVICES",
-  "rocr_visible": "$ROCR_VISIBLE_DEVICES"
-}
-EOF
-exit 0
-"""
-    elif behavior == "done_with_llm_env":
-        # Echo the LLM-transport stability env for the dispatcher assertion.
-        body += """
-cat > "$WORKSPACE/specialist_done.json" <<EOF
-{
-  "gap_canonical_id": "gap.test.example",
-  "domain": "serving_specialist",
-  "proposal_set": [],
-  "patches_written": [],
-  "summary": "llm env echo",
-  "confidence": 0.0,
-  "api_timeout_ms": "$API_TIMEOUT_MS",
-  "disable_autoupdater": "$DISABLE_AUTOUPDATER",
-  "disable_nonessential": "$CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC"
-}
-EOF
-exit 0
-"""
-    elif behavior == "done_with_stream_json":
-        # Zeroed per-message usage with the real counts only on the result row, as a GLM gateway streams it.
-        zeroed = {"input_tokens": 0, "output_tokens": 0, "cache_creation_input_tokens": 0, "cache_read_input_tokens": 0}
-        stream = [
-            {"type": "system", "subtype": "init", "model": "glm-5-3"},
-            {
-                "type": "assistant",
-                "message": {
-                    "id": "m1",
-                    "model": "glm-5-3",
-                    "usage": zeroed,
-                    "content": [{"type": "tool_use", "id": "tu1", "name": "Bash", "input": {"command": "ls"}}],
-                },
-            },
-            {"type": "user", "message": {"content": [{"type": "tool_result", "tool_use_id": "tu1", "content": "ok"}]}},
-            {"type": "assistant", "message": {"id": "m2", "model": "glm-5-3", "usage": zeroed, "content": []}},
-            {
-                "type": "result",
-                "usage": {
-                    "input_tokens": 50632,
-                    "cache_read_input_tokens": 291392,
-                    "cache_creation_input_tokens": 0,
-                    "output_tokens": 7542,
-                },
-            },
-        ]
-        stream_lines = "\n".join(json.dumps(row) for row in stream)
-        body += f"""
-cat <<'EOF'
-{stream_lines}
-EOF
-cat > "$WORKSPACE/specialist_done.json" <<'EOF'
-{payload_json}
-EOF
-exit 0
-"""
-    elif behavior == "crash":
-        body += "exit 3\n"
-    elif behavior == "partial_then_crash":
-        # Write only the partial checkpoint, then die before the final done.json.
-        body += f"""
-cat > "$WORKSPACE/specialist_done.partial.json" <<'EOF'
-{payload_json}
-EOF
-exit 3
-"""
-    elif behavior == "partial_then_done":
-        # Checkpoint first, wait for the reaper to see it, then exit normally.
-        body += f"""
-cat > "$WORKSPACE/specialist_done.partial.json" <<'EOF'
-{payload_json}
-EOF
-sleep 1
-cat > "$WORKSPACE/specialist_done.json" <<'EOF'
-{payload_json}
-EOF
-exit 0
-"""
-    elif behavior == "hang":
-        # Sleep past any wall budget without writing done.json.
-        body += "sleep 600\n"
-    else:
-        raise ValueError(f"unknown behavior {behavior!r}")
-    script_path.write_text(body, encoding="utf-8")
-    script_path.chmod(script_path.stat().st_mode | stat.S_IEXEC | stat.S_IXGRP | stat.S_IXOTH)
-    return script_path
-
-
 @pytest.fixture
 def fake_framework_repo(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     """The checkout the session optimises, named the way a session names it."""
@@ -296,9 +144,9 @@ def _make_runner_ctx(task_id: str = "t-spec-1") -> RunnerContext:
         state="queued",
         params={
             "domain": "serving_specialist",
+            "framework": "sglang",
             "gap_canonical_id": "gap.test.example",
             "max_turns": 2,
-            "framework": "sglang",
         },
         idempotency_key=task_id,
         requires_lanes=tuple(),
@@ -306,22 +154,56 @@ def _make_runner_ctx(task_id: str = "t-spec-1") -> RunnerContext:
     return RunnerContext(task=task, lease=None, extra={})
 
 
-def test_runner_requires_exactly_one_dispatch_mode():
-    with pytest.raises(ValueError, match="exactly one"):
-        SpecialistRunner()
-    with pytest.raises(ValueError, match="mutually exclusive"):
-        SpecialistRunner(
-            backend_factory=lambda d: None,
-            subprocess_config=SpecialistSubprocessConfig(),
-        )
-
-
 def test_runner_accepts_subprocess_config_only():
     runner = SpecialistRunner(
         subprocess_config=SpecialistSubprocessConfig(),
     )
     assert runner.subprocess_dispatcher is not None
-    assert runner.backend_factory is None
+
+
+@pytest.mark.parametrize("local", [True, False])
+async def test_the_runner_hands_the_dispatcher_the_tasks_model_to_read(tmp_path, local):
+    model = tmp_path / "models" / "llama"
+    model.mkdir(parents=True)
+    session_dir = tmp_path / "session"
+    session_dir.mkdir()
+    runner = SpecialistRunner(subprocess_config=SpecialistSubprocessConfig(), session_dir=session_dir)
+    spawns: list[SpecialistSpawn] = []
+
+    async def run(spawn: SpecialistSpawn) -> subprocess_.SpecialistSubprocessResult:
+        spawns.append(spawn)
+        return subprocess_.SpecialistSubprocessResult(exit_code=0)
+
+    runner.subprocess_dispatcher.run = run
+    ctx = _make_runner_ctx("t-model")
+    ctx.task.params["model_path"] = str(model) if local else "org/hub-model"
+
+    await runner.run(ctx)
+
+    [spawn] = spawns
+    assert (model in spawn.readable) is local
+    assert all(not path.is_absolute() for path in spawn.readable) is not local
+
+
+async def test_the_runner_hands_the_dispatcher_the_admin_dir_the_repository_records_for_the_worktree(tmp_path):
+    framework = tmp_path / "framework"
+    init_git_repo(framework, seed_file="mod.py", seed_text="old = 1\n")
+    runner = SpecialistRunner(subprocess_config=SpecialistSubprocessConfig(), session_dir=tmp_path / "session")
+    spawns: list[SpecialistSpawn] = []
+
+    async def run(spawn: SpecialistSpawn) -> subprocess_.SpecialistSubprocessResult:
+        spawns.append(spawn)
+        return subprocess_.SpecialistSubprocessResult(exit_code=0)
+
+    runner.subprocess_dispatcher.run = run
+    ctx = _make_runner_ctx("t-admin")
+    ctx.task.params["session_framework_tree"] = f"{framework}/"
+
+    await runner.run(ctx)
+
+    [spawn] = spawns
+    assert spawn.worktree is not None
+    assert spawn.worktree_admin == recorded_admin_dir(framework, spawn.worktree)
 
 
 def test_denylist_blocks_dangerous_process_tools():
@@ -360,17 +242,45 @@ async def test_worktree_of_a_pip_installed_framework_is_its_snapshot_not_another
     workspace = session_dir / "runs" / "specialist" / "t-spec-pip"
     workspace.mkdir(parents=True)
 
-    worktree, source, err = runner._maybe_setup_worktree(ctx, workspace=workspace)
+    worktree, source, err, admin = runner._maybe_setup_worktree(ctx, workspace=workspace)
 
     assert err == ""
     assert source is not None and source.root == package and not source.checkout
     assert worktree is not None and (worktree / "envs.py").read_text(encoding="utf-8") == "VLLM_USE_X = 0\n"
+    assert admin is not None and (session_dir / "tree_snapshots") in admin.parents
+    assert Path((admin / "gitdir").read_text(encoding="utf-8").strip()) == worktree.resolve() / ".git"
     assert not (worktree / "benchmark_lib.sh").exists()
     assert not (package / ".git").exists()
     listed = subprocess.run(
         ["git", "-C", str(harness), "worktree", "list"], capture_output=True, text=True, check=True
     ).stdout
     assert str(worktree) not in listed
+
+
+def test_a_reused_worktree_keeps_the_admin_dir_its_repository_records(tmp_path: Path):
+    """A retry reuses the worktree an earlier specialist wrote, its ``.git`` included: the admin dir never comes from
+    there, and a directory the repository does not record is not used as a worktree at all."""
+    framework = tmp_path / "framework"
+    init_git_repo(framework, seed_file="mod.py", seed_text="old = 1\n")
+    runner = SpecialistRunner(subprocess_config=SpecialistSubprocessConfig(), session_dir=tmp_path / "session")
+    ctx = _make_runner_ctx("t-spec-reuse")
+    ctx.task.params["session_framework_tree"] = f"{framework}/"
+    workspace = tmp_path / "ws"
+    workspace.mkdir()
+
+    worktree, _source, err, admin = runner._maybe_setup_worktree(ctx, workspace=workspace)
+    assert err == "" and worktree is not None and admin is not None
+    elsewhere = tmp_path / "elsewhere" / "worktrees" / "w"
+    elsewhere.mkdir(parents=True)
+    (elsewhere / "gitdir").write_text(f"{worktree / '.git'}\n", encoding="utf-8")
+    (worktree / ".git").write_text(f"gitdir: {elsewhere}\n", encoding="utf-8")
+
+    assert runner._maybe_setup_worktree(ctx, workspace=workspace)[2:] == ("", admin)
+
+    left = tmp_path / "left"
+    (left / "worktree").mkdir(parents=True)
+    worktree, _source, err, admin = runner._maybe_setup_worktree(ctx, workspace=left)
+    assert (worktree, admin) == (None, None) and "is not a worktree" in err
 
 
 def test_an_integrate_in_flight_holds_the_snapshot(tmp_path: Path):
@@ -416,7 +326,7 @@ async def test_subprocess_path_harvests_done_file(
 ):
     """The fake ``claude`` writes specialist_done.json; the runner reads it and returns status=succeeded."""
     bin_dir = tmp_path / "bin"
-    fake_claude = _make_fake_claude(bin_dir, behavior="done_only")
+    fake_claude = make_fake_claude(bin_dir, behavior="done_only")
     session_dir = tmp_path / "session"
     session_dir.mkdir()
 
@@ -453,7 +363,7 @@ async def test_subprocess_run_is_one_specialist_llm_call_on_the_trajectory(
     from hyperloom.inference_optimizer.session.session_paths import llm_calls_path
     from hyperloom.inference_optimizer.trace import trajectory_trace as tt
 
-    fake_claude = _make_fake_claude(tmp_path / "bin", behavior="done_with_stream_json")
+    fake_claude = make_fake_claude(tmp_path / "bin", behavior="done_with_stream_json")
     session_dir = tmp_path / "session"
     session_dir.mkdir()
     runner = SpecialistRunner(
@@ -508,7 +418,7 @@ async def test_local_specialist_spawn_uses_file_stdin(
 ):
     """The local specialist path feeds the user prompt via stdin."""
     bin_dir = tmp_path / "bin"
-    fake_claude = _make_fake_claude(bin_dir, behavior="done_only")
+    fake_claude = make_fake_claude(bin_dir, behavior="done_only")
     session_dir = tmp_path / "session"
     session_dir.mkdir()
     seen_stdin: list[Any] = []
@@ -544,7 +454,7 @@ async def test_subprocess_path_injects_allocated_gpu_env(
     fake_framework_repo: Path,
 ):
     bin_dir = tmp_path / "bin"
-    fake_claude = _make_fake_claude(bin_dir, behavior="done_with_env")
+    fake_claude = make_fake_claude(bin_dir, behavior="done_with_env")
     session_dir = tmp_path / "session"
     session_dir.mkdir()
 
@@ -587,7 +497,7 @@ async def test_subprocess_path_injects_llm_stability_env(
         monkeypatch.delenv(var, raising=False)
 
     bin_dir = tmp_path / "bin"
-    fake_claude = _make_fake_claude(bin_dir, behavior="done_with_llm_env")
+    fake_claude = make_fake_claude(bin_dir, behavior="done_with_llm_env")
     session_dir = tmp_path / "session"
     session_dir.mkdir()
 
@@ -618,7 +528,7 @@ async def test_readonly_research_scout_skips_worktree(
     fake_framework_repo: Path,
 ):
     bin_dir = tmp_path / "bin"
-    fake_claude = _make_fake_claude(bin_dir, behavior="done_only")
+    fake_claude = make_fake_claude(bin_dir, behavior="done_only")
     session_dir = tmp_path / "session"
     session_dir.mkdir()
 
@@ -657,7 +567,7 @@ async def test_subprocess_path_collects_patches(
 ):
     """A done file + worktree patch threads the patch path into specialist_done['patches_written']."""
     bin_dir = tmp_path / "bin"
-    fake_claude = _make_fake_claude(bin_dir, behavior="done_with_patch")
+    fake_claude = make_fake_claude(bin_dir, behavior="done_with_patch")
     session_dir = tmp_path / "session"
     session_dir.mkdir()
 
@@ -691,7 +601,7 @@ async def test_subprocess_crash_falls_back_to_empty_synthesised(
 ):
     """A crash with no done.json synthesises an empty specialist_done and a stale-like status."""
     bin_dir = tmp_path / "bin"
-    fake_claude = _make_fake_claude(bin_dir, behavior="crash")
+    fake_claude = make_fake_claude(bin_dir, behavior="crash")
     session_dir = tmp_path / "session"
     session_dir.mkdir()
 
@@ -721,7 +631,7 @@ async def test_subprocess_path_isolates_writes_to_worktree(
 ):
     """Worktree patches must NOT appear in the base repo's working tree until ``integrate_patch`` applies them."""
     bin_dir = tmp_path / "bin"
-    fake_claude = _make_fake_claude(bin_dir, behavior="done_with_patch")
+    fake_claude = make_fake_claude(bin_dir, behavior="done_with_patch")
     session_dir = tmp_path / "session"
     session_dir.mkdir()
 
@@ -754,7 +664,7 @@ async def test_subprocess_recovers_partial_when_no_final(
 ):
     """A specialist that wrote only the partial (then died before the final done.json) surfaces the partial as a non-empty result."""
     bin_dir = tmp_path / "bin"
-    fake_claude = _make_fake_claude(bin_dir, behavior="partial_then_crash")
+    fake_claude = make_fake_claude(bin_dir, behavior="partial_then_crash")
     session_dir = tmp_path / "session"
     session_dir.mkdir()
 
@@ -787,7 +697,7 @@ async def test_the_dispatch_deadline_kills_a_hung_specialist(
 ):
     """A small Coordinator-injected ``wall_budget_sec`` must kill a hung specialist well before the legacy ``max_turns × per_turn`` ceiling (here 2 × 15 = 30s)."""
     bin_dir = tmp_path / "bin"
-    fake_claude = _make_fake_claude(bin_dir, behavior="hang")
+    fake_claude = make_fake_claude(bin_dir, behavior="hang")
     session_dir = tmp_path / "session"
     session_dir.mkdir()
 
@@ -838,7 +748,6 @@ async def test_reap_loop_process_log_activity_prevents_stale_kill(
     workspace.mkdir()
     process_log = workspace / "process.log"
     process_log.write_text("start\n", encoding="utf-8")
-    heartbeat_file = workspace / "heartbeat.json"  # never written
 
     cfg = SpecialistSubprocessConfig(
         heartbeat_stale_seconds=1.0,
@@ -856,10 +765,8 @@ async def test_reap_loop_process_log_activity_prevents_stale_kill(
 
     writer = asyncio.create_task(_keep_streaming())
     outcome = await disp._reap_loop(
-        proc=proc,
-        workspace=workspace,
-        done_files=(),
-        heartbeat_file=heartbeat_file,
+        proc,
+        ReapWatch(workspace=workspace, done_files=()),
         deadline=Deadline.after(60.0),
         started=time.monotonic(),
     )
@@ -879,7 +786,6 @@ async def test_reap_loop_kills_when_no_activity_at_all(
     workspace = tmp_path / "ws"
     workspace.mkdir()
     # No process.log, no heartbeat.json — total silence.
-    heartbeat_file = workspace / "heartbeat.json"
 
     cfg = SpecialistSubprocessConfig(
         heartbeat_stale_seconds=0.5,
@@ -902,15 +808,101 @@ async def test_reap_loop_kills_when_no_activity_at_all(
     )
 
     outcome = await disp._reap_loop(
-        proc=proc,
-        workspace=workspace,
-        done_files=(),
-        heartbeat_file=heartbeat_file,
+        proc,
+        ReapWatch(workspace=workspace, done_files=()),
         deadline=Deadline.after(60.0),
         started=time.monotonic(),
     )
     assert outcome["stale_heartbeat"] is True, outcome
     assert killed["v"] is True
+
+
+def _silent_log(workspace: Path, *, age_sec: float) -> Path:
+    """A ``process.log`` whose last write was ``age_sec`` ago."""
+    workspace.mkdir()
+    log = workspace / "process.log"
+    log.write_text("event\n", encoding="utf-8")
+    then = time.time() - age_sec
+    os.utime(log, (then, then))
+    return log
+
+
+def _cli(code: str) -> subprocess.Popen:
+    """An agent CLI stand-in in its own session, as the dispatcher launches one."""
+    return subprocess.Popen([sys.executable, "-c", code], start_new_session=True)
+
+
+def _end(proc: subprocess.Popen) -> None:
+    with contextlib.suppress(ProcessLookupError):
+        os.killpg(proc.pid, signal.SIGKILL)
+    proc.wait(timeout=5)
+
+
+async def _reap(proc: subprocess.Popen, workspace: Path, *, deadline_sec: float) -> dict[str, Any]:
+    disp = SpecialistSubprocessDispatcher(
+        config=SpecialistSubprocessConfig(heartbeat_stale_seconds=1.0, poll_interval_seconds=0.1)
+    )
+    return await disp._reap_loop(
+        proc,
+        ReapWatch(workspace=workspace, done_files=()),
+        deadline=Deadline.after(deadline_sec),
+        started=time.monotonic(),
+    )
+
+
+@pytest.mark.asyncio
+async def test_reap_loop_keeps_a_cli_waiting_on_a_tool_it_started_after_its_last_output(tmp_path: Path):
+    """A long tool call leaves process.log silent; the tool the CLI started after that output keeps it alive."""
+    workspace = tmp_path / "ws"
+    _silent_log(workspace, age_sec=60.0)
+    proc = _cli("import subprocess; subprocess.run(['sleep', '30'])")
+    try:
+        outcome = await _reap(proc, workspace, deadline_sec=3.0)
+    finally:
+        _end(proc)
+    assert (outcome["stale_heartbeat"], outcome["timed_out"]) == (False, True)
+
+
+@pytest.mark.asyncio
+async def test_reap_loop_reaps_a_silent_cli_whose_children_predate_its_last_output(tmp_path: Path):
+    """A child older than the CLI's last output is not a tool call in flight, so silence still reaps the CLI."""
+    from hyperloom.common.proctree import descendants
+
+    workspace = tmp_path / "ws"
+    proc = _cli("import subprocess; subprocess.run(['sleep', '30'])")
+    try:
+        deadline = time.monotonic() + 5.0
+        while not descendants(proc.pid) and time.monotonic() < deadline:
+            time.sleep(0.05)
+        time.sleep(1.0)
+        _silent_log(workspace, age_sec=0.0)
+        outcome = await _reap(proc, workspace, deadline_sec=10.0)
+    finally:
+        _end(proc)
+    assert (outcome["stale_heartbeat"], outcome["timed_out"]) == (True, False)
+
+
+@pytest.mark.asyncio
+async def test_reap_loop_reaps_a_hung_cli_while_something_refreshes_heartbeat_json(tmp_path: Path):
+    """heartbeat.json is writable by the agent, so a loop refreshing it does not keep a hung CLI alive."""
+    workspace = tmp_path / "ws"
+    _silent_log(workspace, age_sec=60.0)
+    heartbeat = workspace / "heartbeat.json"
+    proc = _cli("import time; time.sleep(30)")
+
+    async def _refresh() -> None:
+        while True:
+            heartbeat.write_text('{"status": "running"}\n', encoding="utf-8")
+            await asyncio.sleep(0.1)
+
+    writer = asyncio.create_task(_refresh())
+    try:
+        outcome = await _reap(proc, workspace, deadline_sec=3.0)
+    finally:
+        writer.cancel()
+        await asyncio.gather(writer, return_exceptions=True)
+        _end(proc)
+    assert (outcome["stale_heartbeat"], outcome["timed_out"]) == (True, False)
 
 
 # ── extend_lease moves the live wall-clock deadline ──────────────────────────
@@ -940,17 +932,14 @@ def _live_reaper(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
 async def test_reap_loop_times_out_at_base_budget_without_extension(_live_reaper):
     """Baseline: with no extension the run dies at its original cap."""
     disp, proc, workspace = _live_reaper
-    subprocess_.clear_wall_budget_extension("task-base")
+    wall_budget.clear_wall_budget_extension("task-base")
 
     started = time.monotonic()
     outcome = await disp._reap_loop(
-        proc=proc,
-        workspace=workspace,
-        done_files=(),
-        heartbeat_file=workspace / "heartbeat.json",
+        proc,
+        ReapWatch(workspace=workspace, done_files=(), task_id="task-base"),
         deadline=Deadline.after(0.3),
         started=time.monotonic(),
-        task_id="task-base",
     )
     elapsed = time.monotonic() - started
 
@@ -963,26 +952,23 @@ async def test_reap_loop_times_out_at_base_budget_without_extension(_live_reaper
 async def test_reap_loop_deadline_moves_when_extension_granted_mid_run(_live_reaper):
     """The regression this fix exists for."""
     disp, proc, workspace = _live_reaper
-    subprocess_.clear_wall_budget_extension("task-live")
+    wall_budget.clear_wall_budget_extension("task-live")
 
     started = time.monotonic()
     loop = asyncio.create_task(
         disp._reap_loop(
-            proc=proc,
-            workspace=workspace,
-            done_files=(),
-            heartbeat_file=workspace / "heartbeat.json",
+            proc,
+            ReapWatch(workspace=workspace, done_files=(), task_id="task-live"),
             deadline=Deadline.after(0.3),
             started=time.monotonic(),
-            task_id="task-live",
         )
     )
     # Grant the extension while the run is still in flight, before the original 0.3s cap would have fired.
     await asyncio.sleep(0.15)
-    subprocess_.grant_wall_budget_extension("task-live", 0.6)
+    wall_budget.grant_wall_budget_extension("task-live", 0.6)
     # The reaper recomputes `max_seconds + wall_budget_extension(task_id)` every poll, so this is the deadline it now
     # enforces.
-    assert subprocess_.wall_budget_extension("task-live") == 0.6
+    assert wall_budget.wall_budget_extension("task-live") == 0.6
     outcome = await loop
     elapsed = time.monotonic() - started
 
@@ -990,25 +976,22 @@ async def test_reap_loop_deadline_moves_when_extension_granted_mid_run(_live_rea
     # Survived past the base cap — the load-independent half of the proof (a slow box only ever pushes this later,
     # never earlier).
     assert elapsed > 0.7, elapsed
-    subprocess_.clear_wall_budget_extension("task-live")
+    wall_budget.clear_wall_budget_extension("task-live")
 
 
 @pytest.mark.asyncio
 async def test_reap_loop_ignores_extension_for_a_different_task(_live_reaper):
     """Extensions are per-task; another task's grant must not leak across."""
     disp, proc, workspace = _live_reaper
-    subprocess_.clear_wall_budget_extension("task-mine")
-    subprocess_.grant_wall_budget_extension("task-other", 600)
+    wall_budget.clear_wall_budget_extension("task-mine")
+    wall_budget.grant_wall_budget_extension("task-other", 600)
 
     started = time.monotonic()
     outcome = await disp._reap_loop(
-        proc=proc,
-        workspace=workspace,
-        done_files=(),
-        heartbeat_file=workspace / "heartbeat.json",
+        proc,
+        ReapWatch(workspace=workspace, done_files=(), task_id="task-mine"),
         deadline=Deadline.after(0.3),
         started=time.monotonic(),
-        task_id="task-mine",
     )
     elapsed = time.monotonic() - started
 
@@ -1016,27 +999,43 @@ async def test_reap_loop_ignores_extension_for_a_different_task(_live_reaper):
     # The other task's 600s grant would have kept this alive far past any plausible scheduling delay, so a bound this
     # loose still proves isolation.
     assert elapsed < 30.0, elapsed
-    subprocess_.clear_wall_budget_extension("task-other")
+    wall_budget.clear_wall_budget_extension("task-other")
 
 
 def test_wall_budget_extension_registry_guards():
     """Blank ids and non-positive grants are no-ops, not stored entries."""
-    subprocess_.clear_wall_budget_extension("guard-task")
+    wall_budget.clear_wall_budget_extension("guard-task")
     # Non-positive extra_sec must not create an entry.
-    assert subprocess_.grant_wall_budget_extension("guard-task", 0) == 0.0
-    assert subprocess_.grant_wall_budget_extension("guard-task", -30) == 0.0
-    assert subprocess_.wall_budget_extension("guard-task") == 0.0
+    assert wall_budget.grant_wall_budget_extension("guard-task", 0) == 0.0
+    assert wall_budget.grant_wall_budget_extension("guard-task", -30) == 0.0
+    assert wall_budget.wall_budget_extension("guard-task") == 0.0
     # Blank / whitespace task ids are ignored rather than keyed on "".
-    assert subprocess_.grant_wall_budget_extension("", 600) == 0.0
-    assert subprocess_.grant_wall_budget_extension("   ", 600) == 0.0
-    assert subprocess_.wall_budget_extension("") == 0.0
+    assert wall_budget.grant_wall_budget_extension("", 600) == 0.0
+    assert wall_budget.grant_wall_budget_extension("   ", 600) == 0.0
+    assert wall_budget.wall_budget_extension("") == 0.0
     # Lookups are whitespace-insensitive so a padded id still finds its grant.
-    subprocess_.grant_wall_budget_extension("  guard-task  ", 120)
-    assert subprocess_.wall_budget_extension("guard-task") == 120.0
+    wall_budget.grant_wall_budget_extension("  guard-task  ", 120)
+    assert wall_budget.wall_budget_extension("guard-task") == 120.0
     # Clearing an unknown id is a no-op, not a KeyError.
-    subprocess_.clear_wall_budget_extension("never-seen")
-    subprocess_.clear_wall_budget_extension("guard-task")
-    assert subprocess_.wall_budget_extension("guard-task") == 0.0
+    wall_budget.clear_wall_budget_extension("never-seen")
+    wall_budget.clear_wall_budget_extension("guard-task")
+    assert wall_budget.wall_budget_extension("guard-task") == 0.0
+
+
+def test_wall_budget_extension_stops_at_the_room_its_dispatch_left():
+    """However much ``extend_lease`` asks for, the kill instant moves no further than its dispatch allowed."""
+    wall_budget.limit_wall_budget_extension("capped-task", 300)
+    try:
+        assert wall_budget.grant_wall_budget_extension("capped-task", 200) == 200.0
+        assert wall_budget.grant_wall_budget_extension("capped-task", 600) == 300.0
+        assert wall_budget.wall_budget_extension("capped-task") == 300.0
+        # A dispatch that already reaches the phase end leaves no room at all.
+        wall_budget.clear_wall_budget_extension("capped-task")
+        wall_budget.limit_wall_budget_extension("capped-task", -5)
+        assert wall_budget.grant_wall_budget_extension("capped-task", 600) == 0.0
+    finally:
+        wall_budget.limit_wall_budget_extension("capped-task", None)
+        wall_budget.clear_wall_budget_extension("capped-task")
 
 
 # ── P2/T4: needs_gpu specialist runs inside a GpuSpecialistLease actor ────────
@@ -1050,27 +1049,17 @@ class _FakeGpuSpecialistLease:
         self.alive = True
         self.stopped = False
 
-    def start_async(
-        self,
-        cmd,
-        *,
-        env=None,
-        cwd=None,
-        log_path=None,
-        env_mode="merge",
-        stdin_path=None,
-    ) -> None:
+    def start_async(self, launch) -> None:
         # §3.3 non-blocking start: record + stage the done file, mark the pid ready so poll_started() returns
         # immediately on the next tick.
         self.started = {
-            "cmd": cmd,
-            "cwd": cwd,
-            "log_path": log_path,
-            "env_mode": env_mode,
-            "stdin_path": stdin_path,
+            "cmd": launch.cmd,
+            "cwd": launch.cwd,
+            "log_path": launch.log_path,
+            "stdin_path": launch.stdin_path,
         }
-        self.env = dict(env or {})
-        Path(log_path).write_text("stream-json log line\n", encoding="utf-8")
+        self.env = dict(launch.env or {})
+        Path(launch.log_path).write_text("stream-json log line\n", encoding="utf-8")
         # Graceful done — the reaper harvests this and exits.
         (self._workspace / "specialist_done.json").write_text(json.dumps({"proposal_set": []}), encoding="utf-8")
         self.alive = False
@@ -1122,17 +1111,18 @@ async def test_run_routes_through_gpu_lease_and_strips_devices(
     cfg = SpecialistSubprocessConfig(poll_interval_seconds=0.05)
     disp = SpecialistSubprocessDispatcher(config=cfg)
     result = await disp.run(
-        task_id="t-gpu",
-        workspace=workspace,
-        worktree=None,
-        worktree_base=None,
-        system_prompt="sys",
-        user_prompt="usr",
-        disallowed_tools=frozenset(),
-        max_turns=1,
-        gpu_ids=(0, 1),
-        deadline=Deadline.after(60.0),
-        gpu_lease=lease,
+        SpecialistSpawn(
+            task_id="t-gpu",
+            workspace=workspace,
+            worktree=None,
+            worktree_base=None,
+            system_prompt="sys",
+            user_prompt="usr",
+            disallowed_tools=frozenset(),
+            gpu_ids=(0, 1),
+            deadline=Deadline.after(60.0),
+            gpu_lease=lease,
+        )
     )
 
     assert lease.started is not None, "the subprocess must run inside the lease actor"
@@ -1143,6 +1133,83 @@ async def test_run_routes_through_gpu_lease_and_strips_devices(
     assert lease.env.get("INFERENCE_OPTIMIZER_SPECIALIST_GPU_IDS") == "0,1"
     assert result.done_payload is not None
     assert result.exit_code == 0
+
+
+class _RayActorError(Exception):
+    """Stand-in for ``ray.exceptions.RayActorError``; ray is not a test dependency."""
+
+
+class _InfeasibleGpuLease(_FakeGpuSpecialistLease):
+    def start_async(self, launch) -> None:
+        self.fault = RayInfeasibleError("ray_cluster_infeasible: cluster has 0 GPU(s), 1 requested")
+        raise self.fault
+
+
+class _DeadActorGpuLease(_FakeGpuSpecialistLease):
+    def start_async(self, launch) -> None:
+        self.started = {"cmd": launch.cmd}
+
+    def poll_started(self) -> int | None:
+        self.fault = _RayActorError("The actor died unexpectedly before finishing this task.")
+        raise self.fault
+
+
+@pytest.mark.parametrize(
+    ("lease_cls", "message", "error"),
+    [
+        (
+            _InfeasibleGpuLease,
+            "specialist GPU actor submit failed: ",
+            "failed to submit specialist GPU actor: "
+            "RayInfeasibleError('ray_cluster_infeasible: cluster has 0 GPU(s), 1 requested')",
+        ),
+        (
+            _DeadActorGpuLease,
+            "specialist GPU actor start failed: ",
+            "specialist GPU actor start failed: "
+            "_RayActorError('The actor died unexpectedly before finishing this task.')",
+        ),
+    ],
+)
+@pytest.mark.asyncio
+async def test_a_gpu_actor_that_cannot_launch_fails_the_specialist_with_its_stack(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+    lease_cls,
+    message,
+    error,
+):
+    workspace = tmp_path / "ws"
+    lease = lease_cls(workspace)
+    monkeypatch.setattr(
+        subprocess_.subprocess,
+        "Popen",
+        lambda *_a, **_k: pytest.fail("gpu_lease path must not spawn locally"),
+    )
+
+    with caplog.at_level(logging.WARNING, logger=subprocess_.log.name):
+        result = await SpecialistSubprocessDispatcher(
+            config=SpecialistSubprocessConfig(poll_interval_seconds=0.05)
+        ).run(
+            SpecialistSpawn(
+                task_id="t-gpu-fail",
+                workspace=workspace,
+                worktree=None,
+                worktree_base=None,
+                system_prompt="sys",
+                user_prompt="usr",
+                disallowed_tools=frozenset(),
+                deadline=Deadline.after(60.0),
+                gpu_lease=lease,
+            )
+        )
+
+    assert (result.done_payload, result.exit_code, result.elapsed_seconds) == (None, None, 0.0)
+    assert result.process_log_path == str(workspace / "process.log")
+    assert result.error == error
+    (record,) = [r for r in caplog.records if r.getMessage().startswith(message)]
+    assert record.exc_info[1] is lease.fault
 
 
 @pytest.mark.asyncio
@@ -1160,27 +1227,28 @@ async def test_run_clears_stale_wall_budget_extension(
     )
 
     # A grant left over from a prior dispatch of the same task id.
-    subprocess_.grant_wall_budget_extension("t-reused", 9999)
-    assert subprocess_.wall_budget_extension("t-reused") == 9999.0
+    wall_budget.grant_wall_budget_extension("t-reused", 9999)
+    assert wall_budget.wall_budget_extension("t-reused") == 9999.0
 
     cfg = SpecialistSubprocessConfig(poll_interval_seconds=0.05)
     disp = SpecialistSubprocessDispatcher(config=cfg)
     result = await disp.run(
-        task_id="t-reused",
-        workspace=workspace,
-        worktree=None,
-        worktree_base=None,
-        system_prompt="sys",
-        user_prompt="usr",
-        disallowed_tools=frozenset(),
-        max_turns=1,
-        deadline=Deadline.after(60.0),
-        gpu_lease=lease,
+        SpecialistSpawn(
+            task_id="t-reused",
+            workspace=workspace,
+            worktree=None,
+            worktree_base=None,
+            system_prompt="sys",
+            user_prompt="usr",
+            disallowed_tools=frozenset(),
+            deadline=Deadline.after(60.0),
+            gpu_lease=lease,
+        )
     )
 
     assert result.exit_code == 0
     # Cleared on entry and again when the run finished.
-    assert subprocess_.wall_budget_extension("t-reused") == 0.0
+    assert wall_budget.wall_budget_extension("t-reused") == 0.0
 
 
 def test_kill_on_ray_lease_process_delegates_to_actor():
@@ -1239,8 +1307,6 @@ def test_build_claude_cmd_includes_optional_flags_and_filters_emit_intent(tmp_pa
         model="claude-test",
         mcp_config_path="/tmp/mcp.json",
         framework_source_roots=(str(framework), str(framework)),
-        extra_claude_args=("--debug",),
-        leaf_agents_json='{"researcher": {"description": "test"}}',
     )
     cmd = SpecialistSubprocessDispatcher(cfg)._build_claude_cmd(
         system_prompt_file=system_prompt_file,
@@ -1259,9 +1325,8 @@ def test_build_claude_cmd_includes_optional_flags_and_filters_emit_intent(tmp_pa
     denied = set(cmd[deny_idx].split(","))
     assert "KillShell" in denied
     assert "SlashCommand" in denied
-    assert cmd[cmd.index("--agents") + 1] == cfg.leaf_agents_json
+    assert cmd[cmd.index("--agents") + 1] == build_leaf_agents_json()
     assert cmd[cmd.index("--mcp-config") + 1] == "/tmp/mcp.json"
-    assert cmd[-1] == "--debug"
     add_dirs = [cmd[i + 1] for i, value in enumerate(cmd[:-1]) if value == "--add-dir"]
     # Worktree first, workspace second, then each distinct framework root.
     # integrate_patch is the only writer of source; the specialist gets neither.
@@ -1292,7 +1357,7 @@ async def test_partial_progress_skips_invalid_payload_and_swallow_callback_error
     valid.write_text('{"summary": "still working"}', encoding="utf-8")
 
     async def _callback_fails(*_args):
-        raise RuntimeError("telemetry sink unavailable")
+        raise sqlite3.OperationalError("database is locked")
 
     newest = await disp._publish_partial_progress(
         partial_files=(valid,),
@@ -1304,13 +1369,56 @@ async def test_partial_progress_skips_invalid_payload_and_swallow_callback_error
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("swap", ["link", "directory"])
+async def test_a_partial_checkpoint_is_read_only_through_the_worktree_the_specialist_was_given(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture, swap: str
+):
+    """While the agent runs it can move its worktree aside and leave a link to a host directory, or a directory of its
+    own, in its place: no checkpoint is read there, and one read after the check is still read through the
+    directory recorded, so a swap that lands between the two is refused too."""
+    workspace = tmp_path / "ws"
+    worktree = workspace / "worktree"
+    worktree.mkdir(parents=True)
+    held = HeldWorktree.before_launch(worktree)
+    partials = (worktree / "specialist_done.partial.json", workspace / "specialist_done.partial.json")
+    published: list[dict] = []
+
+    async def publish(payload, _elapsed):
+        published.append(payload)
+
+    async def poll() -> float:
+        return await SpecialistSubprocessDispatcher(SpecialistSubprocessConfig())._publish_partial_progress(
+            partial_files=partials, since_mtime=0.0, elapsed=1.0, progress_cb=publish, held=held
+        )
+
+    partials[0].write_text('{"summary": "mine"}', encoding="utf-8")
+    assert await poll() > 0.0 and published == [{"summary": "mine"}]
+    published.clear()
+    host = tmp_path / "host"
+    host.mkdir()
+    (host / partials[0].name).write_text('{"summary": "CANARY"}', encoding="utf-8")
+    worktree.rename(workspace / "worktree.orig")
+    if swap == "link":
+        worktree.symlink_to(host)
+    else:
+        worktree.mkdir()
+        (worktree / partials[0].name).write_text('{"summary": "CANARY"}', encoding="utf-8")
+
+    with caplog.at_level(logging.WARNING):
+        assert await poll() == 0.0 and published == []
+    assert caplog.records == []  # skipped, not tried and refused on every poll
+    monkeypatch.setattr(HeldWorktree, "intact", lambda _self: True)  # the swap lands after the check
+    assert await poll() == 0.0 and published == []
+
+
+@pytest.mark.asyncio
 async def test_partial_checkpoint_published_while_alive(
     tmp_path: Path,
     fake_framework_repo: Path,
 ):
     """A checkpoint written mid-run reaches the progress callback before exit."""
     bin_dir = tmp_path / "bin"
-    fake_claude = _make_fake_claude(bin_dir, behavior="partial_then_done")
+    fake_claude = make_fake_claude(bin_dir, behavior="partial_then_done")
     session_dir = tmp_path / "session"
     session_dir.mkdir()
 
@@ -1362,7 +1470,9 @@ def _make_git_worktree_pair(tmp_path: Path) -> tuple[Path, Path]:
 def test_collect_patches_harvests_git_diff_when_worktree_modified(tmp_path: Path):
     base, wt = _make_git_worktree_pair(tmp_path)
     (wt / "mod.py").write_text("new = 2\n", encoding="utf-8")
-    patches, roots = SpecialistSubprocessDispatcher._collect_patches(wt, tmp_path / "ws", worktree_base=base)
+    patches, roots = SpecialistSubprocessDispatcher._collect_patches(
+        wt, tmp_path / "ws", worktree_base=base, pinned=PinnedGit(recorded_admin_dir(base, wt))
+    )
     assert len(patches) == 1
     patch_text = Path(patches[0]).read_text(encoding="utf-8")
     assert "mod.py" in patch_text
@@ -1375,7 +1485,9 @@ def test_collect_patches_harvests_a_file_the_specialist_created(tmp_path: Path):
     (wt / "mod.py").write_text("new = 2\n", encoding="utf-8")
     (wt / "added.py").write_text("fresh = 3\n", encoding="utf-8")
 
-    patches, _roots = SpecialistSubprocessDispatcher._collect_patches(wt, tmp_path / "ws", worktree_base=base)
+    patches, _roots = SpecialistSubprocessDispatcher._collect_patches(
+        wt, tmp_path / "ws", worktree_base=base, pinned=PinnedGit(recorded_admin_dir(base, wt))
+    )
 
     patch_text = Path(patches[0]).read_text(encoding="utf-8")
     assert "mod.py" in patch_text
@@ -1389,7 +1501,9 @@ def test_collect_patches_keeps_its_own_output_out_of_the_harvest(tmp_path: Path)
     (wt / "patches").mkdir()
     (wt / "patches" / "stray.patch").write_text("--- a/z\n+++ b/z\n", encoding="utf-8")
 
-    patches, _roots = SpecialistSubprocessDispatcher._collect_patches(wt, tmp_path / "ws", worktree_base=base)
+    patches, _roots = SpecialistSubprocessDispatcher._collect_patches(
+        wt, tmp_path / "ws", worktree_base=base, pinned=PinnedGit(recorded_admin_dir(base, wt))
+    )
 
     assert "stray.patch" not in Path(patches[0]).read_text(encoding="utf-8")
 
@@ -1399,6 +1513,7 @@ def test_collect_patches_falls_back_to_disk_scan_when_git_is_unusable(tmp_path: 
     import subprocess as _sp
 
     base, wt = _make_git_worktree_pair(tmp_path)
+    admin = recorded_admin_dir(base, wt)
     (wt / "mod.py").write_text("new = 2\n", encoding="utf-8")
     (wt / "patches").mkdir()
     (wt / "patches" / "manual.patch").write_text("--- a/foo.py\n+++ b/foo.py\n", encoding="utf-8")
@@ -1408,7 +1523,9 @@ def test_collect_patches_falls_back_to_disk_scan_when_git_is_unusable(tmp_path: 
 
     monkeypatch.setattr(_sp, "run", _boom)
 
-    patches, roots = SpecialistSubprocessDispatcher._collect_patches(wt, tmp_path / "ws", worktree_base=base)
+    patches, roots = SpecialistSubprocessDispatcher._collect_patches(
+        wt, tmp_path / "ws", worktree_base=base, pinned=PinnedGit(admin)
+    )
 
     assert any("manual.patch" in patch for patch in patches)
     assert roots == {}
@@ -1420,7 +1537,9 @@ def test_collect_patches_falls_back_to_disk_scan_when_no_changes(tmp_path: Path)
     ws.mkdir()
     (ws / "patches").mkdir()
     (ws / "patches" / "manual.patch").write_text("--- a/foo.py\n+++ b/foo.py\n@@ -1 +1 @@\n-a\n+b\n", encoding="utf-8")
-    patches, roots = SpecialistSubprocessDispatcher._collect_patches(wt, ws, worktree_base=base)
+    patches, roots = SpecialistSubprocessDispatcher._collect_patches(
+        wt, ws, worktree_base=base, pinned=PinnedGit(recorded_admin_dir(base, wt))
+    )
     assert any("manual.patch" in p for p in patches)
     assert all(p not in roots for p in patches)
 
@@ -1430,7 +1549,7 @@ def test_collect_patches_no_worktree_falls_back_to_disk_scan(tmp_path: Path):
     ws.mkdir()
     (ws / "patches").mkdir()
     (ws / "patches" / "p.patch").write_text("--- a/x\n+++ b/x\n@@ -1 +1 @@\n-a\n+b\n", encoding="utf-8")
-    patches, roots = SpecialistSubprocessDispatcher._collect_patches(None, ws)
+    patches, roots = SpecialistSubprocessDispatcher._collect_patches(None, ws, pinned=None)
     assert len(patches) == 1
     assert roots == {}
 
@@ -1466,16 +1585,17 @@ async def _spawn_env(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, gpu_ids: t
     monkeypatch.setenv("ROCR_VISIBLE_DEVICES", "0,1,2,3")
     disp = SpecialistSubprocessDispatcher(config=SpecialistSubprocessConfig(poll_interval_seconds=0.01))
     result = await disp.run(
-        task_id="t-env",
-        workspace=tmp_path / "ws",
-        worktree=None,
-        worktree_base=None,
-        system_prompt="sys",
-        user_prompt="usr",
-        disallowed_tools=frozenset(),
-        max_turns=1,
-        gpu_ids=gpu_ids,
-        deadline=Deadline.after(5.0),
+        SpecialistSpawn(
+            task_id="t-env",
+            workspace=tmp_path / "ws",
+            worktree=None,
+            worktree_base=None,
+            system_prompt="sys",
+            user_prompt="usr",
+            disallowed_tools=frozenset(),
+            gpu_ids=gpu_ids,
+            deadline=Deadline.after(5.0),
+        )
     )
     assert "spawn refused by test" in (result.error or "")
     return captured
@@ -1493,3 +1613,1004 @@ async def test_gpu_specialist_env_keeps_its_cards_and_shared_caches(tmp_path, mo
     env = await _spawn_env(tmp_path, monkeypatch, gpu_ids=(0, 1))
     assert env["HIP_VISIBLE_DEVICES"] == env["ROCR_VISIBLE_DEVICES"] == "0,1"
     assert "TRITON_CACHE_DIR" not in env and "AITER_JIT_DIR" not in env
+
+
+async def _run_spawn(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, **spawn_kwargs: Any) -> tuple[Any, list[dict]]:
+    """Run one local spawn against a ``Popen`` that records its kwargs and refuses to start."""
+    popen_kwargs: list[dict] = []
+
+    def _popen(_cmd, **kwargs):
+        popen_kwargs.append(kwargs)
+        raise OSError("spawn refused by test")
+
+    monkeypatch.setattr(subprocess_.subprocess, "Popen", _popen)
+    monkeypatch.setattr(agent_isolation, "missing_launch_capabilities", list)
+    disp = SpecialistSubprocessDispatcher(config=SpecialistSubprocessConfig(poll_interval_seconds=0.01))
+    spawn = SpecialistSpawn(
+        task_id="t-user",
+        workspace=tmp_path / "ws",
+        worktree=None,
+        worktree_base=None,
+        system_prompt="sys",
+        user_prompt="usr",
+        disallowed_tools=frozenset(),
+        deadline=Deadline.after(5.0),
+        **spawn_kwargs,
+    )
+    return await disp.run(spawn), popen_kwargs
+
+
+def _tier(name: str) -> Any:
+    gid = os.getgid()
+    run_as = RunAs(user="specialist", uid=os.getuid() + 1, gid=gid, groups=(gid,), home="/home/specialist")
+    tiers = {
+        "none": NoIsolation(("no tier here",)),
+        "account": AccountIsolation(run_as),
+        "bwrap": BwrapIsolation(BwrapProbe("/opt/fake/bwrap", (0, 13, 1), ())),
+    }
+    return tiers[name]
+
+
+@pytest.mark.parametrize("tier", ["none", "account", "bwrap"])
+async def test_each_tier_spawns_the_specialist_its_own_way(tmp_path, monkeypatch, tier):
+    monkeypatch.setenv("CLAUDE_CODE_OAUTH_TOKEN", "tok")
+    monkeypatch.setattr(subprocess_, "resolve_launch_isolation", lambda lease: _tier(tier))
+    argvs: list[list[str]] = []
+    real_local = launch_env.PreparedLaunch.local
+    monkeypatch.setattr(
+        launch_env.PreparedLaunch, "local", lambda self, cmd, env: argvs.append(list(cmd)) or real_local(self, cmd, env)
+    )
+    model = tmp_path / "model"
+    model.mkdir()
+
+    result, popen_kwargs = await _run_spawn(tmp_path, monkeypatch, readable=(model,), gpu_ids=(0,))
+
+    assert "spawn refused by test" in (result.error or "")
+    # Patching Popen reaches every subprocess here: the specialist's spawn is the one in a session of its own.
+    [kwargs] = [kwargs for kwargs in popen_kwargs if kwargs.get("start_new_session")]
+    [cli] = argvs
+    assert cli[0] == "claude" and "--print" in cli
+    if tier == "bwrap":
+        assert set(kwargs) >= {"pass_fds"} and not {"user", "group"} & kwargs.keys()
+        assert REAP_MARK_ENV not in kwargs["env"]
+        assert kwargs["env"]["HOME"] == str(tmp_path / "ws" / ".home")
+    elif tier == "account":
+        assert {"user", "group", "extra_groups", "umask"} <= kwargs.keys() and "pass_fds" not in kwargs
+        assert kwargs["env"]["HOME"] == "/home/specialist" and kwargs["env"][REAP_MARK_ENV]
+    else:
+        assert not {"user", "group", "pass_fds"} & kwargs.keys() and kwargs["env"][REAP_MARK_ENV]
+    assert kwargs["env"]["HIP_VISIBLE_DEVICES"] == "0"
+
+
+async def test_a_sandbox_shows_the_model_and_gives_a_gpu_task_its_devices(tmp_path, monkeypatch):
+    monkeypatch.setenv("CLAUDE_CODE_OAUTH_TOKEN", "tok")
+    monkeypatch.setattr(subprocess_, "resolve_launch_isolation", lambda lease: _tier("bwrap"))
+    kfd = tmp_path / "kfd"
+    kfd.touch()
+    monkeypatch.setattr(launch_env, "GPU_DEVICES", (kfd,))
+    seen: list[launch_env.PreparedLaunch] = []
+    real = launch_env.prepare_launch
+    monkeypatch.setattr(subprocess_, "prepare_launch", lambda *args: seen.append(real(*args)) or seen[-1])
+    model = tmp_path / "model"
+    model.mkdir()
+
+    await _run_spawn(tmp_path, monkeypatch, readable=(model, tmp_path / "ws" / "inside"), gpu_ids=(0,))
+
+    [prepared] = seen
+    assert str(model) in prepared.policy.read_only and prepared.policy.devices == (str(kfd),)
+    assert prepared.scratch is None  # released once the launch ended
+
+
+@pytest.mark.parametrize("required", [False, True])
+async def test_a_claude_without_a_login_a_sandbox_can_show_runs_unconfined_unless_it_must_be_isolated(
+    tmp_path, monkeypatch, required
+):
+    for name in ("CLAUDE_CODE_OAUTH_TOKEN", "ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN", "CLAUDE_CODE_USE_BEDROCK"):
+        monkeypatch.delenv(name, raising=False)
+    monkeypatch.setattr(subprocess_, "resolve_launch_isolation", lambda lease: _tier("bwrap"))
+    monkeypatch.setattr(agent_isolation, "_STATE", agent_isolation._Process(hosted=required))
+    launched: list[tuple[object, list[str]]] = []
+    real_local = launch_env.PreparedLaunch.local
+    monkeypatch.setattr(
+        launch_env.PreparedLaunch,
+        "local",
+        lambda self, cmd, env: launched.append((self.isolation, list(cmd))) or real_local(self, cmd, env),
+    )
+
+    result, popen_kwargs = await _run_spawn(tmp_path, monkeypatch)
+
+    if required:
+        assert popen_kwargs == [] and launched == []
+        assert (
+            result.error == f"specialist agent runtime unavailable (backend=claude): {launch_env.CLAUDE_LOGIN_REFUSAL}"
+        )
+        return
+    [(isolation, cli)] = launched
+    assert isolation == NoIsolation((launch_env.CLAUDE_LOGIN_UNCONFINED,)) and cli[0] == "claude"
+    assert "spawn refused by test" in (result.error or "")
+    assert agent_isolation.session_isolation_lines() == (
+        f"agent isolation: 1 agent launch ran unconfined: {launch_env.CLAUDE_LOGIN_UNCONFINED}",
+    )
+
+
+async def test_specialist_user_unset_spawns_exactly_as_before(tmp_path, monkeypatch):
+    monkeypatch.delenv("HYPERLOOM_SPECIALIST_USER", raising=False)
+    result, popen_kwargs = await _run_spawn(tmp_path, monkeypatch)
+    assert "spawn refused by test" in (result.error or "")
+    assert len(popen_kwargs) == 1
+    assert not {"user", "group", "extra_groups", "umask"} & popen_kwargs[0].keys()
+
+
+@pytest.mark.parametrize(
+    ("user", "needle"),
+    [("no-such-user-d16", "no such user"), ("root", "uid 0")],
+)
+async def test_specialist_user_that_cannot_be_used_fails_the_task_without_spawning(tmp_path, monkeypatch, user, needle):
+    monkeypatch.setenv("HYPERLOOM_SPECIALIST_USER", user)
+    result, popen_kwargs = await _run_spawn(tmp_path, monkeypatch)
+    assert popen_kwargs == []
+    assert "specialist isolation refused" in (result.error or "")
+    assert needle in (result.error or "")
+
+
+async def test_specialist_user_is_refused_on_the_ray_gpu_actor_path(tmp_path, monkeypatch, restore_umask):
+    monkeypatch.setenv("HYPERLOOM_SPECIALIST_USER", "nobody")
+    result, popen_kwargs = await _run_spawn(tmp_path, monkeypatch, gpu_lease=object())
+    assert popen_kwargs == []
+    assert "Ray GPU actor" in (result.error or "")
+
+
+_DEMOTE_USER = "nobody"
+
+
+def prepare_demote(run_as, workspace, worktree, env, private_files):
+    """The account tier's share of one launch, as the dispatcher prepares it; returns its ``Popen`` kwargs."""
+    place = LaunchPlace(workspace, worktree, tuple(private_files))
+    return prepare_launch(AccountIsolation(run_as), place, ["specialist"], env).popen_kwargs
+
+
+@pytest.fixture
+def restore_umask():
+    """Naming a specialist user sets the app's umask; do not leak that into other tests."""
+    saved = os.umask(0o022)
+    yield
+    os.umask(saved)
+
+
+def _account_exists(name: str) -> bool:
+    import pwd
+
+    try:
+        pwd.getpwnam(name)
+    except KeyError:
+        return False
+    return True
+
+
+_demote_skip = pytest.mark.skipif(
+    os.geteuid() != 0 or not _account_exists(_DEMOTE_USER),
+    reason=f"demoting needs root and an existing {_DEMOTE_USER!r} account; the test creates no users",
+)
+
+_DEMOTED_ROLE = """#!/bin/sh
+id -u > proof_uid.txt
+echo "$HOME" > proof_home.txt
+echo edited >> src.py
+cat {secret} > proof_secret.txt 2> proof_secret.err; echo $? > proof_secret.rc
+git status --porcelain > proof_git.txt 2> proof_git.err; echo $? > proof_git.rc
+echo '{{"gap_canonical_id": "gap.test.example", "domain": "serving_specialist", "proposal_set": [],
+"patches_written": [], "summary": "demoted", "confidence": 0.5}}' > specialist_done.json
+"""
+
+
+@_demote_skip
+async def test_demoted_specialist_writes_its_worktree_and_cannot_read_the_apps_files(monkeypatch, restore_umask):
+    import pwd
+    import shutil
+    import tempfile
+
+    entry = pwd.getpwnam(_DEMOTE_USER)
+    base = Path(tempfile.mkdtemp(prefix="d16."))
+    try:
+        base.chmod(0o755)  # the demoted account must be able to traverse to the fake CLI and the checkout
+        repo = base / "framework"
+        init_git_repo(repo)
+        monkeypatch.setenv("FRAMEWORK_REPO_PATH", str(repo))
+        monkeypatch.setenv("HYPERLOOM_SPECIALIST_USER", _DEMOTE_USER)
+        private_file = base / "app_private"
+        private_file.write_text("private-marker", encoding="utf-8")
+        private_file.chmod(0o600)
+        role = base / "bin" / "claude"
+        role.parent.mkdir()
+        role.write_text(_DEMOTED_ROLE.format(secret=private_file), encoding="utf-8")
+        role.chmod(0o755)
+        session_dir = base / "session"
+        session_dir.mkdir()
+        session_dir.chmod(0o755)
+        runner = SpecialistRunner(
+            subprocess_config=SpecialistSubprocessConfig(
+                claude_executable=str(role),
+                model="",
+                framework_source_roots=(str(repo),),
+                poll_interval_seconds=0.2,
+            ),
+            session_dir=session_dir,
+            default_max_turns=2,
+        )
+
+        result = await runner.run(_make_runner_ctx("t-demoted"))
+
+        workspace = session_dir / "runs" / "specialist" / "t-demoted"
+        worktree = workspace / "worktree"
+        proof = {p.name: p.read_text(encoding="utf-8").strip() for p in worktree.glob("proof_*")}
+        assert result.status == "succeeded", result.error
+        assert proof["proof_uid.txt"] == str(entry.pw_uid)
+        assert proof["proof_home.txt"] == entry.pw_dir
+        assert "private-marker" not in proof["proof_secret.txt"]
+        assert proof["proof_secret.rc"] != "0"
+        assert "Permission denied" in proof["proof_secret.err"]
+        # It edited its own worktree and git there still answers (no "dubious ownership").
+        assert (worktree / "src.py").read_text(encoding="utf-8").endswith("edited\n")
+        assert proof["proof_git.rc"] == "0", proof["proof_git.err"]
+        # The app's prompt and log stay private to it.
+        assert (workspace / "prompt.md").stat().st_mode & 0o077 == 0
+        assert (workspace / "process.log").stat().st_mode & 0o077 == 0
+    finally:
+        shutil.rmtree(base, ignore_errors=True)
+
+
+@_demote_skip
+def test_demote_shares_a_worktree_that_lives_outside_the_workspace(tmp_path, monkeypatch, restore_umask):
+    monkeypatch.setenv("HYPERLOOM_SPECIALIST_USER", _DEMOTE_USER)
+    request = SpecialistSpawn(
+        task_id="t-outside",
+        workspace=tmp_path / "ws",
+        worktree=tmp_path / "elsewhere",
+        worktree_base=None,
+        system_prompt="sys",
+        user_prompt="usr",
+        disallowed_tools=frozenset(),
+        deadline=Deadline.after(5.0),
+    )
+    request.workspace.mkdir()
+    request.worktree.mkdir()
+    (request.workspace / "prompt.md").write_text("p", encoding="utf-8")
+    run_as = specialist_run_as()
+
+    kwargs = prepare_demote(run_as, request.workspace, request.worktree, {}, (request.workspace / "prompt.md",))
+
+    assert request.worktree.stat().st_gid == kwargs["group"]
+    assert request.worktree.stat().st_mode & 0o2070 == 0o2070
+    assert (request.workspace / "prompt.md").stat().st_mode & 0o077 == 0
+
+
+@pytest.mark.skipif(not _account_exists(_DEMOTE_USER), reason=f"no {_DEMOTE_USER!r} account")
+async def test_a_launch_the_ray_path_refuses_leaves_the_apps_umask_alone(tmp_path, monkeypatch, restore_umask):
+    monkeypatch.setenv("HYPERLOOM_SPECIALIST_USER", _DEMOTE_USER)
+    await _run_spawn(tmp_path, monkeypatch, gpu_lease=object())
+    assert os.umask(0o022) == 0o022
+
+
+@pytest.mark.skipif(not _account_exists(_DEMOTE_USER), reason=f"no {_DEMOTE_USER!r} account")
+async def test_a_launch_that_names_a_user_leaves_the_apps_umask_alone(tmp_path, monkeypatch, restore_umask):
+    monkeypatch.setenv("HYPERLOOM_SPECIALIST_USER", _DEMOTE_USER)
+    await _run_spawn(tmp_path, monkeypatch)
+    assert os.umask(0o022) == 0o022
+
+
+async def test_a_launch_with_no_user_leaves_the_apps_umask_alone(tmp_path, monkeypatch, restore_umask):
+    monkeypatch.delenv("HYPERLOOM_SPECIALIST_USER", raising=False)
+    await _run_spawn(tmp_path, monkeypatch)
+    assert os.umask(0o022) == 0o022
+
+
+# ---- review fixes: the app never follows a link the child planted ------------------------------
+def test_harvest_through_a_symlinked_patches_dir_writes_nothing_outside(tmp_path: Path):
+    base, wt = _make_git_worktree_pair(tmp_path)
+    (wt / "mod.py").write_text("new = 2\n", encoding="utf-8")
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    (wt / "patches").symlink_to(outside)
+    patches, _roots = SpecialistSubprocessDispatcher._collect_patches(
+        wt, tmp_path / "ws", worktree_base=base, pinned=PinnedGit(recorded_admin_dir(base, wt))
+    )
+    assert patches == []
+    assert list(outside.iterdir()) == []
+
+
+def test_harvest_over_a_symlinked_patch_name_does_not_truncate_its_target(tmp_path: Path):
+    base, wt = _make_git_worktree_pair(tmp_path)
+    (wt / "mod.py").write_text("new = 2\n", encoding="utf-8")
+    victim = tmp_path / "app_state.json"
+    victim.write_text("precious", encoding="utf-8")
+    (wt / "patches").mkdir()
+    (wt / "patches" / "_worktree_diff.patch").symlink_to(victim)
+    patches, _roots = SpecialistSubprocessDispatcher._collect_patches(
+        wt, tmp_path / "ws", worktree_base=base, pinned=PinnedGit(recorded_admin_dir(base, wt))
+    )
+    assert victim.read_text(encoding="utf-8") == "precious"
+    assert len(patches) == 1 and "mod.py" in Path(patches[0]).read_text(encoding="utf-8")
+
+
+def test_a_symlinked_patch_file_is_not_collected(tmp_path: Path):
+    ws = tmp_path / "ws"
+    (ws / "patches").mkdir(parents=True)
+    target = tmp_path / "secret.patch"
+    target.write_text("--- a/x\n+++ b/x\n", encoding="utf-8")
+    (ws / "patches" / "good.patch").write_text("--- a/y\n+++ b/y\n", encoding="utf-8")
+    (ws / "patches" / "link.patch").symlink_to(target)
+    patches, _roots = SpecialistSubprocessDispatcher._collect_patches(None, ws, pinned=None)
+    assert [Path(p).name for p in patches] == ["good.patch"]
+
+
+def test_a_symlinked_done_file_is_not_read(tmp_path: Path):
+    app_only = tmp_path / "app_only.json"
+    app_only.write_text('{"app_secret": "value"}', encoding="utf-8")
+    done = tmp_path / "specialist_done.json"
+    done.symlink_to(app_only)
+    assert SpecialistSubprocessDispatcher._read_done(done) is None
+    done.unlink()
+    done.write_text('{"summary": "ok"}', encoding="utf-8")
+    assert SpecialistSubprocessDispatcher._read_done(done) == {"summary": "ok"}
+
+
+def test_the_codex_config_is_not_written_through_a_planted_link(tmp_path: Path):
+    from hyperloom.orchestrator.specialists.agent_cli_config import _write_private_codex_config
+
+    home = tmp_path / ".codex"
+    home.mkdir()
+    victim = tmp_path / "victim"
+    victim.write_text("keep", encoding="utf-8")
+    (home / "config.toml.tmp").symlink_to(victim)
+    _write_private_codex_config(codex_home=home, developer_instructions="d", mcp_lines=[])
+    assert victim.read_text(encoding="utf-8") == "keep"
+    assert "developer_instructions" in (home / "config.toml").read_text(encoding="utf-8")
+    elsewhere = tmp_path / "elsewhere"
+    elsewhere.mkdir()
+    linked = tmp_path / "linked"
+    linked.symlink_to(elsewhere)
+    with pytest.raises(OSError):
+        _write_private_codex_config(codex_home=linked, developer_instructions="d", mcp_lines=[])
+
+
+# ---- review fixes: a demoted child needs the capability to be stopped, its MCP config and its git ----------
+async def test_a_launch_without_the_capability_to_stop_the_child_is_refused(tmp_path, monkeypatch, restore_umask):
+    monkeypatch.setenv("HYPERLOOM_SPECIALIST_USER", _DEMOTE_USER)
+    monkeypatch.setattr(agent_isolation, "missing_launch_capabilities", lambda: ["CAP_KILL"])
+    disp = SpecialistSubprocessDispatcher(config=SpecialistSubprocessConfig(poll_interval_seconds=0.01))
+    spawn = SpecialistSpawn(
+        task_id="t-nocap",
+        workspace=tmp_path / "ws2",
+        worktree=None,
+        worktree_base=None,
+        system_prompt="sys",
+        user_prompt="usr",
+        disallowed_tools=frozenset(),
+        deadline=Deadline.after(5.0),
+    )
+    refused = await disp.run(spawn)
+    assert "specialist isolation refused" in (refused.error or "")
+    assert "CAP_KILL" in (refused.error or "")
+    assert os.umask(0o022) == 0o022
+
+
+def test_the_capability_mask_names_what_is_missing():
+    from hyperloom.common.env_safety import missing_capabilities
+
+    assert missing_capabilities(0xFFFFFFFFFF) == []
+    assert missing_capabilities(0xFFFFFFFFFF & ~(1 << 5)) == ["CAP_KILL"]
+    assert missing_capabilities(0) == ["CAP_KILL", "CAP_SETGID", "CAP_SETUID"]
+
+
+def test_the_mcp_config_is_staged_in_the_workspace_for_a_demoted_child(tmp_path: Path):
+    from hyperloom.common.env_safety import RunAs
+
+    run_as = RunAs(user="u", uid=1, gid=1, groups=(1,), home="/h")
+    source = tmp_path / "runtime" / "specialist_mcp.json"
+    source.parent.mkdir()
+    source.write_text('{"mcpServers": {}}', encoding="utf-8")
+    source.chmod(0o600)
+    workspace = tmp_path / "ws"
+    workspace.mkdir()
+    cmd = ["claude", "--mcp-config", str(source), "--print"]
+    launch_env.stage_mcp_config(AccountIsolation(run_as), workspace, cmd)
+    staged = workspace / "specialist_mcp.json"
+    assert cmd == ["claude", "--mcp-config", str(staged), "--print"]
+    assert staged.read_text(encoding="utf-8") == '{"mcpServers": {}}'
+    untouched = ["claude", "--mcp-config", str(source)]
+    launch_env.stage_mcp_config(NoIsolation(()), workspace, untouched)
+    launch_env.stage_mcp_config(AccountIsolation(run_as), workspace, ["claude"])
+    assert untouched == ["claude", "--mcp-config", str(source)]
+    with pytest.raises(subprocess_.SpecialistAgentUnavailableError):
+        launch_env.stage_mcp_config(
+            AccountIsolation(run_as), workspace, ["claude", "--mcp-config", str(tmp_path / "missing.json")]
+        )
+
+
+def test_a_forged_gitfile_is_refused_not_shared(tmp_path: Path):
+    from hyperloom.common.env_safety import RunAs
+
+    run_as = RunAs(user="u", uid=1, gid=1, groups=(1,), home="/h")
+    target = tmp_path / "private"
+    target.mkdir()
+    wt = tmp_path / "wt"
+    wt.mkdir()
+    (wt / ".git").write_text(f"gitdir: {target}\n", encoding="utf-8")
+    with pytest.raises(OSError):
+        run_as.share_worktree_git(wt)
+    (target / "gitdir").write_text(str(wt / ".git"), encoding="utf-8")  # points back, but is not under worktrees/
+    with pytest.raises(OSError):
+        run_as.share_worktree_git(wt)
+
+
+_TWO_TASK_ROLE = """#!/bin/sh
+id -u > proof_uid.txt
+while [ $# -gt 0 ]; do
+  if [ "$1" = --mcp-config ]; then cat "$2" > proof_mcp.txt 2> proof_mcp.err; echo $? > proof_mcp.rc; fi
+  shift
+done
+echo edited >> src.py
+git status --porcelain > proof_git_status.txt 2> proof_git_status.err; echo $? > proof_git_status.rc
+git diff > proof_git_diff.txt 2> proof_git_diff.err; echo $? > proof_git_diff.rc
+git log --oneline -1 > proof_git_log.txt 2> proof_git_log.err; echo $? > proof_git_log.rc
+echo '{"gap_canonical_id": "gap.test.example", "domain": "serving_specialist", "proposal_set": [],
+"patches_written": [], "summary": "demoted", "confidence": 0.5}' > specialist_done.json
+"""
+
+
+@_demote_skip
+async def test_every_demoted_specialist_gets_git_and_its_mcp_config_with_the_app_umask_007(monkeypatch, restore_umask):
+    import shutil
+    import tempfile
+
+    base = Path(tempfile.mkdtemp(prefix="d16b."))
+    try:
+        base.chmod(0o755)
+        repo = base / "framework"
+        init_git_repo(repo)
+        os.umask(0o007)  # what the first launch leaves behind: every later worktree is made under it
+        monkeypatch.setenv("FRAMEWORK_REPO_PATH", str(repo))
+        monkeypatch.setenv("HYPERLOOM_SPECIALIST_USER", _DEMOTE_USER)
+        monkeypatch.setattr(agent_isolation, "missing_launch_capabilities", list)
+        role = base / "bin" / "claude"
+        role.parent.mkdir()
+        role.parent.chmod(0o755)
+        role.write_text(_TWO_TASK_ROLE, encoding="utf-8")
+        role.chmod(0o755)
+        session_dir = base / "session"
+        (session_dir / "runtime").mkdir(parents=True)
+        for parent in (session_dir, session_dir / "runs", session_dir / "runs" / "specialist"):
+            parent.mkdir(exist_ok=True)
+            parent.chmod(0o755)  # the account traverses these; the app never changes their modes
+        mcp = session_dir / "runtime" / "specialist_mcp.json"
+        mcp.write_text('{"mcpServers": {"pr_monitor": {"type": "http", "url": "http://x"}}}', encoding="utf-8")
+        mcp.chmod(0o600)
+        runner = SpecialistRunner(
+            subprocess_config=SpecialistSubprocessConfig(
+                claude_executable=str(role),
+                model="",
+                framework_source_roots=(str(repo),),
+                poll_interval_seconds=0.2,
+                mcp_config_path=str(mcp),
+            ),
+            session_dir=session_dir,
+            default_max_turns=2,
+        )
+        for task_id in ("t-one", "t-two"):
+            result = await runner.run(_make_runner_ctx(task_id))
+            worktree = session_dir / "runs" / "specialist" / task_id / "worktree"
+            proof = {p.name: p.read_text(encoding="utf-8").strip() for p in worktree.glob("proof_*")}
+            assert result.status == "succeeded", result.error
+            for tool in ("status", "diff", "log"):
+                assert proof[f"proof_git_{tool}.rc"] == "0", (task_id, tool, proof[f"proof_git_{tool}.err"])
+            assert proof["proof_mcp.rc"] == "0", (task_id, proof["proof_mcp.err"])
+            assert "pr_monitor" in proof["proof_mcp.txt"]
+        assert mcp.stat().st_mode & 0o077 == 0  # the original stays the app's
+    finally:
+        shutil.rmtree(base, ignore_errors=True)
+
+
+@_demote_skip
+def test_a_worktree_made_under_umask_007_is_readable_to_git_once_prepared(tmp_path, monkeypatch, restore_umask):
+    import shutil
+    import tempfile
+
+    base = Path(tempfile.mkdtemp(prefix="d16c."))
+    try:
+        base.chmod(0o755)
+        repo = base / "framework"
+        init_git_repo(repo)
+        os.umask(0o007)
+        worktree = base / "ws" / "worktree"
+        worktree.parent.mkdir(parents=True)
+        worktree.parent.chmod(0o755)
+        # The shape the review reproduced: the app's own git, under its own umask, makes the worktree.
+        subprocess.run(["git", "-C", str(repo), "worktree", "add", "-q", "-b", "sp", str(worktree)], check=True)
+        assert (worktree / ".git").stat().st_mode & 0o004 == 0
+        monkeypatch.setenv("HYPERLOOM_SPECIALIST_USER", _DEMOTE_USER)
+        run_as = specialist_run_as()
+        kwargs = prepare_demote(run_as, worktree.parent, worktree, {}, ())
+        for args in (["status", "--porcelain"], ["diff"]):
+            done = subprocess.run(
+                ["git", *args],
+                cwd=worktree,
+                capture_output=True,
+                text=True,
+                check=False,
+                env={
+                    "PATH": os.environ["PATH"],
+                    "HOME": run_as.home,
+                    "GIT_CONFIG_COUNT": "1",
+                    "GIT_CONFIG_KEY_0": "safe.directory",
+                    "GIT_CONFIG_VALUE_0": str(worktree),
+                },
+                **kwargs,
+            )
+            assert done.returncode == 0, (args, done.stderr)
+        # Read-only: the child cannot write the admin dir it was shown.
+        admin = Path((worktree / ".git").read_text(encoding="utf-8").split(":", 1)[1].strip())
+        # ... nor rename or add siblings in the directory above it.
+        for move in (f"mv {admin} {admin}.moved", f"touch {admin.parent}/planted"):
+            blocked = subprocess.run(["/bin/sh", "-c", move], capture_output=True, check=False, **kwargs)
+            assert blocked.returncode != 0, move
+        for victim in (admin / "planted", admin / "HEAD"):
+            blocked = subprocess.run(
+                ["/bin/sh", "-c", f"echo x >> {victim}"], capture_output=True, check=False, **kwargs
+            )
+            assert blocked.returncode != 0, victim
+    finally:
+        shutil.rmtree(base, ignore_errors=True)
+
+
+def test_the_done_file_the_integrator_reads_is_not_followed_through_a_link(tmp_path: Path):
+    from hyperloom.orchestrator.actions.executors._patch_sources import _read_done_payload
+
+    app_only = tmp_path / "app_only.json"
+    app_only.write_text('{"app_secret": 1}', encoding="utf-8")
+    (tmp_path / "specialist_done.json").symlink_to(app_only)
+    assert _read_done_payload(tmp_path) is None
+
+
+def test_the_round_archive_does_not_copy_a_file_a_child_linked_to(tmp_path: Path):
+    from hyperloom.orchestrator.enablement.artifacts import _archive_copy
+
+    class _Archive:
+        recorded: list = []
+
+        def record(self, role, dest):
+            self.recorded.append((role, dest))
+
+    secret = tmp_path / "secret"
+    secret.write_text("s", encoding="utf-8")
+    (tmp_path / "specialist_done.json").symlink_to(secret)
+    dest = tmp_path / "out" / "specialist_done.json"
+    _archive_copy(_Archive(), "r", tmp_path / "specialist_done.json", dest, child_written=True)
+    assert not dest.exists() and _Archive.recorded == []
+
+
+def test_a_claimed_patch_path_through_a_planted_directory_link_is_not_accepted(tmp_path: Path):
+    from hyperloom.orchestrator.specialists.runner import _resolve_claimed_patch
+
+    wt = tmp_path / "wt"
+    (wt / "real").mkdir(parents=True)
+    (wt / "real" / "a.patch").write_text("--- a/x\n+++ b/x\n", encoding="utf-8")
+    (wt / "patches").symlink_to(wt / "real")
+    assert _resolve_claimed_patch("real/a.patch", [wt]) == str(wt / "real" / "a.patch")
+    assert _resolve_claimed_patch("patches/a.patch", [wt]) is None
+    assert _resolve_claimed_patch(str(wt / "patches" / "a.patch"), [wt]) is None
+
+
+def test_the_archive_does_not_copy_an_applied_patch_the_child_replaced_with_a_link(tmp_path: Path):
+    from hyperloom.orchestrator.enablement.artifacts import snapshot_round
+
+    secret = tmp_path / "app_secret"
+    secret.write_text("secret", encoding="utf-8")
+    patch = tmp_path / "001_fix.patch"
+    patch.symlink_to(secret)
+    archive = snapshot_round(
+        tmp_path, {"specialist_task_id": "t1", "patches_applied": [str(patch)], "enablement_round": 1}
+    )
+    leaked = [
+        p
+        for p in tmp_path.rglob("*")
+        if p.is_file() and not p.is_symlink() and p != secret and p.read_text(encoding="utf-8") == "secret"
+    ]
+    assert leaked == []
+    assert archive is not None
+
+
+# ---- review r2: the snapshot's objects stay readable, and no app write follows a child's link -------------
+@_demote_skip
+def test_a_snapshot_refreshed_between_two_demoted_tasks_stays_readable_to_git(monkeypatch, restore_umask):
+    import shutil
+    import tempfile
+
+    from hyperloom.orchestrator.specialists.tree_snapshot import snapshot_tree
+
+    base = Path(tempfile.mkdtemp(prefix="d16s."))
+    try:
+        base.chmod(0o755)
+        tree = base / "installed"
+        tree.mkdir()
+        (tree / "mod.py").write_text("x = 1\n", encoding="utf-8")
+        repo = base / "snap.git"
+        os.umask(0o077)  # an app that runs under a strict umask must not hide the objects it commits
+        monkeypatch.setenv("HYPERLOOM_SPECIALIST_USER", _DEMOTE_USER)
+        run_as = specialist_run_as()
+        git_env = {
+            "PATH": os.environ["PATH"],
+            "HOME": run_as.home,
+            "GIT_CONFIG_COUNT": "1",
+            "GIT_CONFIG_KEY_0": "safe.directory",
+        }
+        for number in (1, 2):
+            if number == 2:
+                (tree / "mod.py").write_text("x = 2\n", encoding="utf-8")  # a kept integrate changed the tree
+            assert snapshot_tree(tree, repo, refresh=True) == (repo, "")
+            workspace = base / f"ws{number}"
+            worktree, err = worktrees._setup_worktree(repo, workspace / "worktree", f"task-{number}")
+            assert worktree is not None, err
+            kwargs = prepare_demote(run_as, workspace, worktree, {}, ())
+            for args in (["status", "--porcelain"], ["log", "--oneline", "-1"], ["diff"]):
+                done = subprocess.run(
+                    ["git", *args],
+                    cwd=worktree,
+                    capture_output=True,
+                    text=True,
+                    check=False,
+                    env={**git_env, "GIT_CONFIG_VALUE_0": str(worktree)},
+                    **kwargs,
+                )
+                assert done.returncode == 0, (number, args, done.stderr)
+    finally:
+        shutil.rmtree(base, ignore_errors=True)
+
+
+async def test_the_dispatcher_does_not_write_the_prompt_or_log_through_a_planted_link(tmp_path, monkeypatch):
+    victim = tmp_path / "victim"
+    victim.write_text("app only", encoding="utf-8")
+    workspace = tmp_path / "ws"
+    workspace.mkdir()
+    for name in ("prompt.md", "process.log", "process.log.redacting"):
+        (workspace / name).symlink_to(victim)
+    monkeypatch.delenv("HYPERLOOM_SPECIALIST_USER", raising=False)
+    await _run_spawn(tmp_path, monkeypatch)
+    assert victim.read_text(encoding="utf-8") == "app only"
+    assert not (workspace / "prompt.md").is_symlink()
+
+
+def test_the_dsh_home_is_not_written_through_a_link_the_account_left(tmp_path):
+    from hyperloom.orchestrator.specialists import dsh_launch
+
+    victim_dir = tmp_path / "elsewhere"
+    victim_dir.mkdir()
+    victim_dir.chmod(0o755)
+    (victim_dir / "AGENTS.md").write_text("app only", encoding="utf-8")
+    home = tmp_path / "ws" / ".dsh"
+    home.parent.mkdir()
+    home.symlink_to(victim_dir)
+    with pytest.raises(subprocess_.SpecialistAgentUnavailableError):
+        dsh_launch._prepare_home(home, instructions="i", patch="p")
+    assert (victim_dir / "AGENTS.md").read_text(encoding="utf-8") == "app only"
+    assert victim_dir.stat().st_mode & 0o777 == 0o755
+    real = tmp_path / "ws2" / ".dsh"
+    real.mkdir(parents=True)
+    (real / "AGENTS.md").symlink_to(victim_dir / "AGENTS.md")
+    dsh_launch._prepare_home(real, instructions="i", patch="p")
+    assert (victim_dir / "AGENTS.md").read_text(encoding="utf-8") == "app only"
+    assert (real / "AGENTS.md").read_text(encoding="utf-8") == "i"
+
+
+def test_dsh_profiles_are_not_removed_through_a_linked_home(tmp_path):
+    from hyperloom.orchestrator.specialists import dsh_launch
+
+    victim_dir = tmp_path / "elsewhere"
+    (victim_dir / "profiles").mkdir(parents=True)
+    (tmp_path / "ws").mkdir()
+    (tmp_path / "ws" / ".dsh").symlink_to(victim_dir)
+    dsh_launch.remove_dsh_profiles(tmp_path / "ws")
+    assert (victim_dir / "profiles").is_dir()
+
+
+def test_the_dsh_trace_does_not_read_a_session_log_through_a_link(tmp_path):
+    from hyperloom.inference_optimizer.trace.parse_dsh_session import parse_dsh_session_trace
+
+    outside = tmp_path / "outside"
+    (outside / "x").mkdir(parents=True)
+    (outside / "x" / "session.v3.jsonl").write_text('{"type": "session"}\n', encoding="utf-8")
+    home = tmp_path / ".dsh"
+    (home / "sessions").mkdir(parents=True)
+    (home / "sessions" / "a").symlink_to(outside)
+    trace = parse_dsh_session_trace(home)
+    assert "no session log" in trace.error
+
+
+# ---- review r2: the app's own git never runs what a child planted in the worktree ----------------
+_FSMONITOR_HOOK = "#!/bin/sh\necho ran > {marker}\nprintf ''\n"
+
+
+def _plant_hostile_repo(where: Path, marker: Path) -> None:
+    """Make ``where`` a repository whose config starts a program on every index read."""
+    hook = where.parent / "hook.sh"
+    hook.write_text(_FSMONITOR_HOOK.format(marker=marker), encoding="utf-8")
+    hook.chmod(0o755)
+    subprocess.run(["git", "init", "-q", str(where)], check=True)
+    subprocess.run(["git", "-C", str(where), "config", "core.fsmonitor", str(hook)], check=True)
+    subprocess.run(["git", "-C", str(where), "config", "core.hooksPath", str(where.parent)], check=True)
+
+
+def test_the_harvest_does_not_run_a_program_a_child_planted_in_a_replaced_dot_git(tmp_path: Path):
+    base, wt = _make_git_worktree_pair(tmp_path)
+    admin = recorded_admin_dir(base, wt)
+    head = worktree_head(wt, admin=admin)
+    marker = tmp_path / "executed"
+    (wt / "mod.py").write_text("new = 2\n", encoding="utf-8")
+    (wt / ".git").unlink()
+    _plant_hostile_repo(wt, marker)  # `.git` becomes a directory with its own config
+    subprocess.run(["git", "-C", str(wt), "add", "-A"], check=True, capture_output=True)
+    marker.unlink(missing_ok=True)
+    # Through the admin dir the repository records, what `.git` became is never read.
+    assert "+new = 2" in SpecialistSubprocessDispatcher._harvest_worktree_diff(wt, admin=admin)
+    assert worktree_head(wt, admin=admin) == head and len(head) == 40
+    assert worktree_head(wt) == ""
+    assert not marker.exists()
+
+
+@_demote_skip
+def test_a_demoted_child_cannot_make_the_apps_git_run_its_fsmonitor(monkeypatch):
+    import shutil
+    import tempfile
+
+    base = Path(tempfile.mkdtemp(prefix="d16g."))
+    try:
+        base.chmod(0o755)
+        repo = base / "framework"
+        init_git_repo(repo)
+        workspace = base / "ws"
+        worktree, err = worktrees._setup_worktree(repo, workspace / "worktree", "task-g")
+        assert worktree is not None, err
+        admin = recorded_admin_dir(repo, worktree)
+        monkeypatch.setenv("HYPERLOOM_SPECIALIST_USER", _DEMOTE_USER)
+        run_as = specialist_run_as()
+        kwargs = prepare_demote(run_as, workspace, worktree, {}, ())
+        marker = base / "executed"
+        marker.write_text("", encoding="utf-8")
+        marker.unlink()
+        hook = workspace / "hook.sh"
+        hook.write_text(_FSMONITOR_HOOK.format(marker=marker), encoding="utf-8")
+        hook.chmod(0o770)
+        planted = f"""set -e
+cd {worktree}
+rm -f .git
+git init -q .
+git config core.fsmonitor {hook}
+echo '* filter=evil diff=evil' > .gitattributes
+echo changed >> mod.py
+"""
+        done = subprocess.run(
+            ["/bin/sh", "-c", planted],
+            capture_output=True,
+            text=True,
+            check=False,
+            env={
+                "PATH": os.environ["PATH"],
+                "HOME": run_as.home,
+                "GIT_CONFIG_COUNT": "1",
+                "GIT_CONFIG_KEY_0": "safe.directory",
+                "GIT_CONFIG_VALUE_0": "*",
+            },
+            **kwargs,
+        )
+        assert done.returncode == 0, done.stderr
+        assert "+changed" in SpecialistSubprocessDispatcher._harvest_worktree_diff(worktree, admin=admin)
+        assert worktree_head(worktree) == ""
+        assert not marker.exists()
+        # The second shape: a gitfile that names an admin dir the child made itself, with a matching back pointer.
+        forged = f"""set -e
+cd {worktree}
+rm -rf .git
+mkdir -p {workspace}/fake/.git/worktrees/w
+cd {workspace}/fake && git init -q . && git config core.fsmonitor {hook}
+cd {worktree}
+echo "{worktree}/.git" > {workspace}/fake/.git/worktrees/w/gitdir
+echo "gitdir: {workspace}/fake/.git/worktrees/w" > .git
+"""
+        done = subprocess.run(
+            ["/bin/sh", "-c", forged],
+            capture_output=True,
+            text=True,
+            check=False,
+            env={
+                "PATH": os.environ["PATH"],
+                "HOME": run_as.home,
+                "GIT_CONFIG_COUNT": "1",
+                "GIT_CONFIG_KEY_0": "safe.directory",
+                "GIT_CONFIG_VALUE_0": "*",
+            },
+            **kwargs,
+        )
+        assert done.returncode == 0, done.stderr
+        assert "+changed" in SpecialistSubprocessDispatcher._harvest_worktree_diff(worktree, admin=admin)
+        assert worktree_head(worktree) == ""
+        assert not marker.exists()
+    finally:
+        shutil.rmtree(base, ignore_errors=True)
+
+
+def test_the_harvest_still_works_on_an_untouched_worktree(tmp_path: Path):
+    base, wt = _make_git_worktree_pair(tmp_path)
+    admin = recorded_admin_dir(base, wt)
+    (wt / "mod.py").write_text("new = 2\n", encoding="utf-8")
+    assert "+new = 2" in SpecialistSubprocessDispatcher._harvest_worktree_diff(wt, admin=admin)
+    assert len(worktree_head(wt)) == 40
+    assert worktree_head(wt, admin=admin) == worktree_head(wt)
+
+
+async def test_the_harvest_never_takes_the_git_dir_an_agent_of_the_apps_uid_points_its_worktree_at(tmp_path: Path):
+    """The agent runs as the app's uid (unconfined here; the same in a bubblewrap sandbox), so the admin dir it makes
+    passes every ownership check: the pre-image and the harvest go through the one the repository records."""
+    base, wt = _make_git_worktree_pair(tmp_path)
+    admin = recorded_admin_dir(base, wt)
+    workspace = tmp_path / "ws"
+    cli = tmp_path / "bin" / "claude"
+    cli.parent.mkdir()
+    cli.write_text(
+        FORGES_ITS_GIT.format(
+            workspace=workspace, worktree=wt, objects=base / ".git" / "objects", head=worktree_head(wt, admin=admin)
+        ),
+        encoding="utf-8",
+    )
+    cli.chmod(0o755)
+    disp = SpecialistSubprocessDispatcher(
+        SpecialistSubprocessConfig(agent_backend="claude", claude_executable=str(cli), poll_interval_seconds=0.05)
+    )
+    spawn = SpecialistSpawn(
+        task_id="t-forge",
+        workspace=workspace,
+        worktree=wt,
+        worktree_base=base,
+        system_prompt="sys",
+        user_prompt="usr",
+        deadline=Deadline.after(60.0),
+        worktree_admin=admin,
+    )
+
+    result = await disp.run(spawn)
+
+    forged = workspace / "forged.git" / "worktrees" / "w"
+    assert trusted_admin_dir(wt) == forged  # the premise: what .git names now passes every ownership check
+    assert result.error == "" and result.done_payload["summary"] == "forged"
+    assert len(result.patches) == 1 and result.patch_roots == {result.patches[0]: str(base)}
+    patch = Path(result.patches[0]).read_text(encoding="utf-8")
+    assert "--- a/mod.py\n+++ b/mod.py\n" in patch and "+new = 2" in patch
+
+
+def _forge_a_pre_image(worktree: Path, workspace: Path, objects: Path) -> str:
+    """What an earlier run in a reused worktree can leave: ``.git`` naming an admin dir in a repository it made, whose
+    HEAD is a commit of its own in which ``mod.py`` already reads as the edit, so a diff from it would show nothing."""
+    forged = workspace / "forged.git"
+    identity = {**os.environ, "GIT_AUTHOR_NAME": "t", "GIT_AUTHOR_EMAIL": "t@t"}
+    identity.update(GIT_COMMITTER_NAME="t", GIT_COMMITTER_EMAIL="t@t")
+
+    def git(*args: str, stdin: str = "") -> str:
+        done = subprocess.run(
+            ["git", "--git-dir", str(forged), *args], input=stdin, capture_output=True, text=True, env=identity
+        )
+        assert done.returncode == 0, done.stderr
+        return done.stdout.strip()
+
+    subprocess.run(["git", "init", "-q", "--bare", str(forged)], check=True)
+    (forged / "objects" / "info" / "alternates").write_text(f"{objects}\n", encoding="utf-8")
+    blob = git("hash-object", "-w", "--stdin", stdin="new = 2\n")
+    commit = git("commit-tree", git("mktree", stdin=f"100644 blob {blob}\tmod.py\n"), "-m", "forged")
+    admin = forged / "worktrees" / "w"
+    admin.mkdir(parents=True)
+    (admin / "gitdir").write_text(f"{worktree / '.git'}\n", encoding="utf-8")
+    (admin / "commondir").write_text("../..\n", encoding="utf-8")
+    (admin / "HEAD").write_text(f"{commit}\n", encoding="utf-8")
+    (worktree / ".git").write_text(f"gitdir: {admin}\n", encoding="utf-8")
+    return commit
+
+
+async def test_a_retry_in_a_reused_worktree_reads_its_pre_image_through_the_recorded_admin_dir(tmp_path: Path):
+    base, wt = _make_git_worktree_pair(tmp_path)
+    admin = recorded_admin_dir(base, wt)
+    head = worktree_head(wt, admin=admin)
+    workspace = tmp_path / "ws"
+    workspace.mkdir()
+    forged = _forge_a_pre_image(wt, workspace, base / ".git" / "objects")
+    assert worktree_head(wt) == forged  # the worktree's .git would hand the app the earlier run's pre-image
+    (wt / "mod.py").write_text("new = 2\n", encoding="utf-8")
+    cli = make_fake_claude(tmp_path / "bin", behavior="done_only")
+    disp = SpecialistSubprocessDispatcher(
+        SpecialistSubprocessConfig(agent_backend="claude", claude_executable=str(cli), poll_interval_seconds=0.05)
+    )
+    spawn = SpecialistSpawn(
+        task_id="t-retry",
+        workspace=workspace,
+        worktree=wt,
+        worktree_base=base,
+        system_prompt="sys",
+        user_prompt="usr",
+        deadline=Deadline.after(60.0),
+        worktree_admin=admin,
+    )
+
+    result = await disp.run(spawn)
+
+    assert len(result.patches) == 1 and worktree_head(wt, admin=admin) == head
+    patch = Path(result.patches[0]).read_text(encoding="utf-8")
+    assert "-old = 1\n+new = 2\n" in patch
+
+
+async def test_a_worktree_without_a_recorded_admin_dir_is_not_harvested_by_git(tmp_path: Path):
+    base, wt = _make_git_worktree_pair(tmp_path)
+    workspace = tmp_path / "ws"
+    cli = make_fake_claude(tmp_path / "bin", behavior="done_only")
+    (wt / "mod.py").write_text("new = 2\n", encoding="utf-8")
+    disp = SpecialistSubprocessDispatcher(
+        SpecialistSubprocessConfig(agent_backend="claude", claude_executable=str(cli), poll_interval_seconds=0.05)
+    )
+    spawn = SpecialistSpawn(
+        task_id="t-no-admin",
+        workspace=workspace,
+        worktree=wt,
+        worktree_base=base,
+        system_prompt="sys",
+        user_prompt="usr",
+        deadline=Deadline.after(60.0),
+    )
+
+    result = await disp.run(spawn)
+
+    assert result.done_payload is not None
+    assert result.patches == [] and result.patch_roots == {}
+    assert not (wt / "patches" / "_worktree_diff.patch").exists()
+
+
+def test_the_harvest_does_not_run_git_in_a_repository_a_child_nested_in_the_worktree(tmp_path: Path):
+    """The child's ``.gitmodules`` asks for the nested repository to be checked; its filter must still not run."""
+    base, wt = _make_git_worktree_pair(tmp_path)
+    marker = tmp_path / "executed"
+    nested = wt / "vendored"
+    nested.mkdir()
+    (nested / "f.txt").write_text("a\n", encoding="utf-8")
+    planted = f"""set -e
+cd {nested}
+git init -q . && git add -A && git -c user.email=a@b -c user.name=t commit -qm nested
+git config filter.inner.clean "sh -c 'touch {marker}; cat'"
+echo '* filter=inner' > .gitattributes
+echo b > f.txt
+printf '[submodule "vendored"]\\n\\tpath = vendored\\n\\turl = ./vendored\\n\\tignore = none\\n' > {wt}/.gitmodules
+"""
+    subprocess.run(["/bin/sh", "-c", planted], check=True, capture_output=True)
+    (wt / "mod.py").write_text("new = 2\n", encoding="utf-8")
+
+    diff = SpecialistSubprocessDispatcher._harvest_worktree_diff(wt, admin=recorded_admin_dir(base, wt))
+
+    assert not marker.exists()
+    assert "+new = 2" in diff
+
+
+def test_the_harvest_does_not_run_git_in_a_repository_the_worktree_tracks(tmp_path: Path):
+    """A submodule of the base is a gitlink; an ``add -A`` over it runs ``git status`` in whatever repository is there."""
+    base, wt = _make_git_worktree_pair(tmp_path)
+    marker = tmp_path / "executed"
+    nested = wt / "third_party"
+    identity = ("-c", "user.email=a@b", "-c", "user.name=t")
+    subprocess.run(["git", "init", "-q", str(nested)], check=True)
+    (nested / "f.txt").write_text("a\n", encoding="utf-8")
+    for repo in (nested, wt):
+        subprocess.run(["git", "-C", str(repo), "add", "-A"], check=True, capture_output=True)
+        subprocess.run(["git", "-C", str(repo), *identity, "commit", "-qm", "c"], check=True)
+    subprocess.run(
+        ["git", "-C", str(nested), "config", "filter.inner.clean", f"sh -c 'touch {marker}; cat'"], check=True
+    )
+    (nested / ".gitattributes").write_text("* filter=inner\n", encoding="utf-8")
+    (nested / "f.txt").write_text("b\n", encoding="utf-8")
+    (wt / "mod.py").write_text("new = 2\n", encoding="utf-8")
+
+    diff = SpecialistSubprocessDispatcher._harvest_worktree_diff(wt, admin=recorded_admin_dir(base, wt))
+
+    assert not marker.exists()
+    assert "+new = 2" in diff

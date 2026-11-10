@@ -17,6 +17,7 @@ from hyperloom.orchestrator.rehearsal import boot_log_for
 from hyperloom.orchestrator.loop.sub_agent_runner import RunnerContext
 from hyperloom.orchestrator.state.shared_state import SharedState
 from hyperloom.orchestrator.state.task_registry import Task
+from hyperloom.orchestrator.tests._helpers import integrate_extra
 
 
 def _make_ctx(task_id: str, params: dict[str, Any], extra: dict | None = None) -> RunnerContext:
@@ -28,7 +29,7 @@ def _make_ctx(task_id: str, params: dict[str, Any], extra: dict | None = None) -
         idempotency_key=task_id,
         requires_lanes=tuple(),
     )
-    return RunnerContext(task=task, lease=None, extra=extra or {})
+    return RunnerContext(task=task, lease=None, extra=integrate_extra(params) if extra is None else extra)
 
 
 def _runtime_override() -> dict[str, Any]:
@@ -100,6 +101,7 @@ async def test_launch_only_skips_critic_gate(tmp_path, monkeypatch):
 
     monkeypatch.setenv("HYPERLOOM_LANGFUSE_ENABLE", "0")
     state = SharedState.load_or_init(session)
+    state.phase = "ENABLEMENT"
 
     bench_result = {
         "output_throughput": 50.0,
@@ -343,8 +345,8 @@ async def test_launch_only_runtime_override_passed_to_bench(tmp_path):
 
     captured: list[dict] = []
 
-    async def _capture_bench(self_inner=None, **kwargs):
-        captured.append(dict(kwargs.get("params", {})))
+    async def _capture_bench(self_inner, bench, **kwargs):
+        captured.append(dict(bench.params))
         return {"output_throughput": 50.0, "completed_requests": 12, "status": "succeeded"}, {
             "enablement_accuracy": None,
             "timed_out": False,
@@ -375,6 +377,7 @@ async def test_launch_only_runtime_override_passed_to_bench(tmp_path):
 def _established_state(session: Path, cfg: dict[str, Any]) -> SharedState:
     """Persist established enablement config on the state the executor owns."""
     state = SharedState.load_or_init(session)
+    state.phase = "ENABLEMENT"
     state.enablement.accepted_config = dict(cfg)
     state.save(session)
     return state
@@ -384,13 +387,13 @@ async def _capture_launch(ex, params, ctx_extra):
     """Run the executor and return what it handed the bench."""
     captured: dict[str, Any] = {}
 
-    async def _spy(**kwargs):
+    async def _spy(bench, **kwargs):
         captured.update(kwargs)
         return (
             {
                 "output_throughput": 100.0,
                 "status": "succeeded",
-                "boot_observation_path": kwargs["params"].get("_obs_path", ""),
+                "boot_observation_path": bench.params.get("_obs_path", ""),
             },
             {"enablement_accuracy": None, "timed_out": False},
         )
@@ -428,8 +431,7 @@ async def test_launch_probe_inherits_the_flag_earlier_rounds_established(tmp_pat
 
 
 @pytest.mark.asyncio
-async def test_launch_probe_with_no_state_inherits_nothing(tmp_path):
-    """The defensive read: a context carrying no SharedState must not abort the round."""
+async def test_launch_probe_with_nothing_established_inherits_nothing(tmp_path):
     session = tmp_path / "s"
     session.mkdir()
     _write_minimal_config(session / "bench.yaml")
@@ -437,7 +439,7 @@ async def test_launch_probe_with_no_state_inherits_nothing(tmp_path):
     params = _params_base(session)
     params["_obs_path"] = _booted_observation(session)
 
-    _res, captured = await _capture_launch(ex, params, {})
+    _res, captured = await _capture_launch(ex, params, {"shared_state": SharedState(phase="ENABLEMENT")})
     assert captured["extra_server_args_applied"] == ""
     assert captured["extra_envs_applied"] == {}
 

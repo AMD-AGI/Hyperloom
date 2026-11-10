@@ -225,7 +225,7 @@ def test_pod_source_patch_transacts_top_level_modules(tmp_path, monkeypatch, cap
     candidate.write_bytes(b"candidate new")
     build.mkdir()
     (build / "candidate.o").write_bytes(b"candidate build")
-    args = argparse.Namespace(records_json=json.dumps([record]), target_path="", backup_path="")
+    args = argparse.Namespace(records_json=json.dumps([record]))
 
     if action == "revert":
         assert pod._do_revert(args) == 0
@@ -343,7 +343,7 @@ def test_pod_rejects_disabled_runtime_jit_override(tmp_path, monkeypatch):
         safety.invalidate_aiter_jit_build(build, tmp_path / "backups", "kernel")
 
 
-def test_pod_core_invalidation_failure_prevents_source_write(tmp_path, monkeypatch):
+def test_pod_core_invalidation_failure_prevents_source_write(tmp_path, monkeypatch, capsys):
     pod = _load_pod_ops(monkeypatch)
     aiter, build = _make_aiter_jit(tmp_path)
     invalid_module = build.parent / "module_gemm.so"
@@ -352,17 +352,18 @@ def test_pod_core_invalidation_failure_prevents_source_write(tmp_path, monkeypat
     target.write_text("value = 1\n", encoding="utf-8")
     monkeypatch.setenv("HYPERLOOM_MN_KERNEL_BACKUP_DIR", str(tmp_path / "backups"))
 
-    with pytest.raises(OSError, match="serving modules"):
-        pod._do_apply(
-            argparse.Namespace(
-                target_path=str(target),
-                patch_b64=base64.b64encode(b"value = 2\n").decode(),
-                backup_dir=str(tmp_path / "backups"),
-                kernel_id="gemm",
-                jit_build_dir=str(build),
-            )
+    rc = pod._do_apply(
+        argparse.Namespace(
+            target_path=str(target),
+            patch_b64=base64.b64encode(b"value = 2\n").decode(),
+            backup_dir=str(tmp_path / "backups"),
+            kernel_id="gemm",
+            jit_build_dir=str(build),
         )
+    )
 
+    assert rc == 1
+    assert "serving modules" in json.loads(capsys.readouterr().out)["error"]
     assert target.read_text(encoding="utf-8") == "value = 1\n"
     assert invalid_module.is_dir()
     assert build.is_dir()

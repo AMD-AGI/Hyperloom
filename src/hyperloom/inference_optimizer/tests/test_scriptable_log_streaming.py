@@ -22,11 +22,13 @@ def _run(tmp_path: Path, monkeypatch, body: str, *, timeout_s: float) -> tuple[i
     monkeypatch.delenv("MAGPIE_PATH", raising=False)
     workspace = tmp_path / "ws"
     rc, error = bs.run_scriptable(
-        framework="xdit",
-        runner_type="mi300x",
-        inferencex_root=str(tmp_path / "InferenceX"),
-        bench={"model": "/models/flux"},
-        workspace=workspace,
+        bs.ScriptableBenchmark(
+            framework="xdit",
+            runner_type="mi300x",
+            inferencex_root=str(tmp_path / "InferenceX"),
+            bench={"model": "/models/flux"},
+        ),
+        workspace,
         timeout_s=timeout_s,
     )
     assert error is None

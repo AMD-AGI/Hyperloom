@@ -10,9 +10,10 @@ import logging
 import os
 import re
 import shlex
+from dataclasses import dataclass
 from typing import Any
 
-from hyperloom.common.coerce import optional_positive_int, to_str_list
+from hyperloom_common.coerce import optional_positive_int, to_str_list
 from hyperloom.inference_optimizer.framework_registry import server_args_env_name
 
 
@@ -88,6 +89,65 @@ def _split_args_preserving_json(text: str) -> list[str] | None:
     return [_unwrap_shell_quotes(tok) for tok in tokens]
 
 
+def _parse_removal_specs(remove_args: Any) -> list[tuple[str, str | None]]:
+    """Parse removal specs into ``(flag, value)`` pairs, in the order they are written.
+
+    One entry may name several options (``"--a --b"``), and a removal may be scoped to a value
+    (``"--a 8"``, ``"--a=8"``); a bare flag parses as ``(flag, None)`` and drops every copy of it.
+    """
+    parsed: list[tuple[str, str | None]] = []
+    for spec in to_str_list(remove_args):
+        spec_tokens = _split_args_preserving_json(spec)
+        if spec_tokens is None:
+            spec_tokens = spec.split()
+        i = 0
+        while i < len(spec_tokens):
+            tok = spec_tokens[i]
+            if not tok.startswith("--"):
+                i += 1
+                continue
+            if "=" in tok:
+                flag, _, value = tok.partition("=")
+                parsed.append((flag, value))
+                i += 1
+            elif i + 1 < len(spec_tokens) and not spec_tokens[i + 1].startswith("--"):
+                parsed.append((tok, spec_tokens[i + 1]))
+                i += 2
+            else:
+                parsed.append((tok, None))
+                i += 1
+    return parsed
+
+
+def removal_option_names(remove_args: Any) -> list[str]:
+    """The bare long option names a removal spec names, in order, each one once.
+
+    Only for a consumer whose contract is option names, such as Magpie's ``launch_overrides.remove_args``:
+    the value a spec is scoped to is dropped here, so this must not stand in for a removal composed against
+    args we build ourselves -- ``remove_server_args`` keeps the scope there.
+    """
+    names: list[str] = []
+    for flag, _value in _parse_removal_specs(remove_args):
+        if flag not in names:
+            names.append(flag)
+    return names
+
+
+def _removed_token_count(tokens: list[str], index: int, removals: set[tuple[str, str | None]]) -> int:
+    """Count the tokens at *index* that *removals* deletes; 0 when the token survives."""
+    tok = tokens[index]
+    if not tok.startswith("--"):
+        return 0
+    flag, sep, value = tok.partition("=")
+    drops_flag = (flag, None) in removals
+    if sep and (drops_flag or (flag, value) in removals):
+        return 1
+    if index + 1 < len(tokens) and not tokens[index + 1].startswith("--"):
+        if drops_flag or (flag, tokens[index + 1]) in removals:
+            return 2
+    return 1 if drops_flag else 0
+
+
 def remove_server_args(server_args: str | None, remove_args: Any) -> str:
     """Remove flag specs from a server-arg string."""
     # Normalized up front as well as inside the tokenizer, so the nothing-to-remove early return below hands back the
@@ -105,61 +165,60 @@ def remove_server_args(server_args: str | None, remove_args: Any) -> str:
     if tokens is None:
         return args
 
-    remove_flags: set[str] = set()
-    remove_pairs: set[tuple[str, str | None]] = set()
-    for spec in removes:
-        spec_tokens = _split_args_preserving_json(spec)
-        if spec_tokens is None:
-            spec_tokens = spec.split()
-        i = 0
-        while i < len(spec_tokens):
-            tok = spec_tokens[i]
-            if not tok.startswith("--"):
-                i += 1
-                continue
-            if "=" in tok:
-                flag, _, value = tok.partition("=")
-                remove_pairs.add((flag, value))
-                i += 1
-            elif i + 1 < len(spec_tokens) and not spec_tokens[i + 1].startswith("--"):
-                remove_pairs.add((tok, spec_tokens[i + 1]))
-                i += 2
-            else:
-                remove_flags.add(tok)
-                i += 1
+    removals: set[tuple[str, str | None]] = set(_parse_removal_specs(removes))
 
     out: list[str] = []
     i = 0
     while i < len(tokens):
-        tok = tokens[i]
-        flag = tok.split("=", 1)[0] if tok.startswith("--") else ""
-        if flag and "=" in tok:
-            _flag, _, value = tok.partition("=")
-            if _flag in remove_flags or (_flag, value) in remove_pairs:
-                i += 1
-                continue
-        if flag and i + 1 < len(tokens) and not tokens[i + 1].startswith("--"):
-            value = tokens[i + 1]
-            if flag in remove_flags or (flag, value) in remove_pairs:
-                i += 2
-                continue
-        if flag and flag in remove_flags:
-            i += 1
+        dropped = _removed_token_count(tokens, i, removals)
+        if dropped:
+            i += dropped
             continue
-        out.append(tok)
+        out.append(tokens[i])
         i += 1
     # No re-serialisation on the way out: the tokens are already JSON-compacted and the non-POSIX split kept each one
     # byte-for-byte, so re-joining the survivors cannot corrupt a sibling flag.
     return " ".join(out)
 
 
-# Serving-ineligible harness flags.
+def removals_absent_from_args(server_args: str | None, remove_args: Any) -> list[str]:
+    """The removal specs that delete nothing from ``server_args``, one spec per entry, in the order they are written.
+
+    A removal that still matches a composed snapshot is not a delta against it: a consumer that applies it to that
+    snapshot deletes an option the snapshot asserts. What is left here removes nothing from ``server_args`` and so
+    keeps suppressing, in whatever base a consumer applies it to, only the options that base carries.
+    """
+    args = normalize_server_args(server_args)
+    kept: list[str] = []
+    # Per parsed spec rather than per written entry: one entry may name several options ("--a --b"), and an entry is
+    # dropped only for the options that collide.
+    for flag, value in _parse_removal_specs(remove_args):
+        spec = flag if value is None else f"{flag} {value}"
+        if spec not in kept and remove_server_args(args, [spec]) == args:
+            kept.append(spec)
+    return kept
+
+
+# Serving-ineligible harness flags: legal to benchmark with, wrong to hand back as a serving recipe. Stripped where a
+# recipe is persisted, never on the launch path: the baseline keeps the operator's flags, so a variant must too.
 _BENCHMARK_HARNESS_FLAG_DENYLIST: tuple[str, ...] = ("--no-enable-prefix-caching",)
 
 
 def strip_benchmark_harness_flags(server_args: str | None) -> str:
     """Drop every :data:`_BENCHMARK_HARNESS_FLAG_DENYLIST` entry from ``server_args``."""
     return remove_server_args(server_args, _BENCHMARK_HARNESS_FLAG_DENYLIST)
+
+
+def normalize_server_args(server_args: str | None) -> str:
+    """Compact JSON values and drop one layer of shell wrappers, removing nothing.
+
+    Magpie expands ``EXTRA_*_ARGS`` unquoted, so a ``--quantization 'fp8'`` wrapper would reach argv literally.
+    """
+    args = _reserialize_json_blobs(str(server_args or "").strip())
+    if not args:
+        return ""
+    tokens = _split_args_preserving_json(args)
+    return args if tokens is None else " ".join(tokens)
 
 
 def compose_server_args(
@@ -186,7 +245,7 @@ def compose_server_args(
         raw = merge_server_args(combined_base, variant_extra_args)
         pruned = remove_server_args(combined_base, remove_args)
         composed = merge_server_args(pruned, variant_extra_args)
-    result = strip_benchmark_harness_flags(composed)
+    result = normalize_server_args(composed)
     # Compare against the RAW inputs, not against ``composed``.
     _warn_on_damaged_json_values(raw, result)
     return result
@@ -233,8 +292,9 @@ def _parses_as_json(value: str) -> bool:
 
 
 # A JSON "bareword": an identifier-like token that appears where a double-quoted JSON key or string value should be
-# (letters/digits/underscore plus the ``.``, ``/``, ``-`` common in model ids and paths).
-_JSON_BAREWORD = r"[+-]?[A-Za-z_][A-Za-z0-9_./-]*"
+# (letters/digits/underscore plus the ``.``, ``/``, ``-`` common in model ids and paths). It may start with ``/`` so an
+# absolute path value (a spec-decode draft ``model``) is quoted too; a bare number never matches and stays numeric.
+_JSON_BAREWORD = r"[+-]?[A-Za-z_/][A-Za-z0-9_./-]*"
 _UNQUOTED_KEY_RE = re.compile(r"([{,]\s*)(" + _JSON_BAREWORD + r")(\s*:)")
 _UNQUOTED_VALUE_RE = re.compile(r"([:\[,]\s*)(" + _JSON_BAREWORD + r")")
 
@@ -257,15 +317,40 @@ def _repair_unquoted_json(blob: str) -> str | None:
         return None
 
 
-def compact_json_server_args(
-    server_args: str | None,
-    framework: str | None,
-) -> str:
+def compact_json_server_args(server_args: str | None) -> str:
     """Normalize JSON-valued server args for unquoted Magpie expansion."""
     args = str(server_args or "").strip()
     if not args or ("{" not in args and "[" not in args):
         return args
     return _reserialize_json_blobs(args)
+
+
+def _json_blob_end(args: str, start: int) -> int:
+    """Offset just past the close balancing the bracket at *start*, or ``len(args)`` when it never balances."""
+    depth = 0
+    in_str = False
+    esc = False
+    j = start
+    n = len(args)
+    while j < n:
+        c = args[j]
+        if in_str:
+            if esc:
+                esc = False
+            elif c == "\\":
+                esc = True
+            elif c == '"':
+                in_str = False
+        elif c == '"':
+            in_str = True
+        elif c in "{[":
+            depth += 1
+        elif c in "}]":
+            depth -= 1
+            if depth == 0:
+                return j + 1
+        j += 1
+    return n
 
 
 def _reserialize_json_blobs(args: str) -> str:
@@ -276,55 +361,31 @@ def _reserialize_json_blobs(args: str) -> str:
     i = 0
     n = len(args)
     while i < n:
-        ch = args[i]
-        if ch in "{[":
-            # A prior shlex.join can wrap a JSON token in shell single quotes.
-            single_quote_wrapped = i > 0 and args[i - 1] == "'" and out and out[-1] == "'"
-            # Walk to the balanced close, honouring quoted strings.
-            depth = 0
-            in_str = False
-            esc = False
-            j = i
-            while j < n:
-                c = args[j]
-                if in_str:
-                    if esc:
-                        esc = False
-                    elif c == "\\":
-                        esc = True
-                    elif c == '"':
-                        in_str = False
-                elif c == '"':
-                    in_str = True
-                elif c in "{[":
-                    depth += 1
-                elif c in "}]":
-                    depth -= 1
-                    if depth == 0:
-                        j += 1
-                        break
-                j += 1
-            single_quote_wrapped = bool(single_quote_wrapped and j < n and args[j] == "'")
-            blob = args[i:j]
-            rendered: str | None = None
-            try:
-                rendered = json.dumps(json.loads(blob), separators=(",", ":"))
-            except ValueError:
-                # A prior shlex round-trip can strip the JSON double quotes, leaving an unquoted-bareword object
-                # (``{"m":"ngram"}`` -> ``{m:ngram}``) that vLLM's json.loads rejects at boot.
-                rendered = _repair_unquoted_json(blob)
-            if rendered is None:
-                # Keep both wrappers when the content is not valid/repairable.
-                out.append(blob)
-                i = j
-            else:
-                if single_quote_wrapped:
-                    out.pop()
-                out.append(rendered)
-                i = j + 1 if single_quote_wrapped else j
-        else:
-            out.append(ch)
+        if args[i] not in "{[":
+            out.append(args[i])
             i += 1
+            continue
+        j = _json_blob_end(args, i)
+        # A prior shlex.join can wrap a JSON token in shell single quotes.
+        single_quote_wrapped = bool(
+            i > 0 and args[i - 1] == "'" and out and out[-1] == "'" and j < n and args[j] == "'"
+        )
+        blob = args[i:j]
+        try:
+            rendered: str | None = json.dumps(json.loads(blob), separators=(",", ":"))
+        except ValueError:
+            # A prior shlex round-trip can strip the JSON double quotes, leaving an unquoted-bareword object
+            # (``{"m":"ngram"}`` -> ``{m:ngram}``) that vLLM's json.loads rejects at boot.
+            rendered = _repair_unquoted_json(blob)
+        if rendered is None:
+            # Keep both wrappers when the content is not valid/repairable.
+            out.append(blob)
+            i = j
+            continue
+        if single_quote_wrapped:
+            out.pop()
+        out.append(rendered)
+        i = j + 1 if single_quote_wrapped else j
     return "".join(out)
 
 
@@ -340,13 +401,19 @@ SPACE_VALUE_FLAGS = (
     "--hf-overrides",
     "--kv-transfer-config",
 )
-# Compatibility export used by ``_grid_runner`` and out-of-tree tests.
-_SPACE_VALUE_FLAGS = SPACE_VALUE_FLAGS
 
 _MULTI_VALUE_FLAGS = (
     "--cuda-graph-bs",
     "--cuda-graph-max-bs",
 )
+
+# Canonical flag names (as ``flag_occurrences`` spells them) for the launch settings read in more than one place.
+SPECULATIVE_CONFIG_FLAG = "speculative-config"
+SPECULATIVE_CONFIG_KEY_PREFIX = f"{SPECULATIVE_CONFIG_FLAG}."
+# One argparse destination the engines spell three ways, so the last of them is the tensor parallel size they run.
+TENSOR_PARALLEL_FLAGS = frozenset({"tensor-parallel-size", "tp", "tp-size"})
+# The model being served: vLLM takes ``--model``, SGLang ``--model-path``.
+SERVED_MODEL_FLAGS = frozenset({"model", "model-path"})
 
 # vLLM / atom argparse-style single-value options safe to collapse last-wins. vLLM hard-errors on a duplicate /
 # conflicting flag (e.g. ``--attention-backend``); collapsing to last-wins keeps the variant override.
@@ -366,6 +433,20 @@ _VLLM_SINGLE_VALUE_FLAGS = frozenset(
         "--pipeline-parallel-size",
     }
 )
+
+
+def server_arg_value(args: str | None, flag: str) -> str:
+    """Value of the last ``flag`` occurrence (space or ``=`` form), else ``""``.
+
+    Whitespace-split, so a quoted or malformed token elsewhere in ``args`` does not void the lookup the way it voids
+    :func:`tokenize_server_args_preserving_json`.
+    """
+    toks = str(args or "").replace("=", " ").split()
+    value = ""
+    for i, tok in enumerate(toks):
+        if tok == flag and i + 1 < len(toks):
+            value = toks[i + 1]
+    return value
 
 
 def tokenize_server_args_preserving_json(
@@ -407,6 +488,59 @@ def tokenize_server_args_preserving_json(
         if token.startswith(("'", '"')) or token.endswith(("'", '"')):
             return None
     return normalized, tokens
+
+
+def _is_flag(token: str) -> bool:
+    """``token`` names a flag rather than carrying a value (``-tp`` does, ``-1`` does not)."""
+    return token.startswith("-") and not token[1:2].isdigit() and token.strip("-") != ""
+
+
+def flag_occurrences(server_args: str | None) -> list[tuple[str, str]]:
+    """Every flag a composed launch spells, in order, as ``(name, value)``; ``""`` for a bare flag.
+
+    Names come back canonical -- no leading dashes, lowercase, underscores as dashes -- so the spellings the engines
+    accept for one argparse destination meet in one key.
+    """
+    split = tokenize_server_args_preserving_json(server_args)
+    tokens = split[1] if split is not None else str(server_args or "").split()
+    occurrences: list[tuple[str, str]] = []
+    for index, token in enumerate(tokens):
+        if not _is_flag(token):
+            continue
+        name, assigned, value = token.partition("=")
+        if not assigned and index + 1 < len(tokens) and not _is_flag(tokens[index + 1]):
+            value = tokens[index + 1]
+        occurrences.append((name.lstrip("-").lower().replace("_", "-"), value))
+    return occurrences
+
+
+def last_alias_value(occurrences: list[tuple[str, str]], aliases: frozenset[str]) -> str | None:
+    """The value of the last flag spelling one argparse destination -- the one the engine keeps."""
+    return next((value for name, value in reversed(occurrences) if name in aliases), None)
+
+
+def json_object(text: str) -> dict[str, Any]:
+    """``text`` read as a JSON object, or ``{}`` when it is neither."""
+    try:
+        parsed = json.loads(text)
+    except ValueError:
+        return {}
+    return parsed if isinstance(parsed, dict) else {}
+
+
+def speculative_config(occurrences: list[tuple[str, str]]) -> dict[str, Any]:
+    """The speculative config a launch spells, both spellings merged the way vLLM merges them.
+
+    It arrives as a JSON object under ``--speculative-config`` and as ``--speculative-config.<key>`` flags, and the
+    per-key flags win over the object.
+    """
+    config: dict[str, Any] = {}
+    for flag, value in dict(occurrences).items():
+        if flag == SPECULATIVE_CONFIG_FLAG:
+            config = {**json_object(value), **config}
+        elif flag.startswith(SPECULATIVE_CONFIG_KEY_PREFIX):
+            config[flag.removeprefix(SPECULATIVE_CONFIG_KEY_PREFIX).replace("-", "_")] = value
+    return config
 
 
 def dedup_vllm_server_args(
@@ -456,49 +590,6 @@ def dedup_vllm_server_args(
         return normalized
     kept = [tok for idx, tok in enumerate(tokens) if idx not in drop]
     return " ".join(kept)
-
-
-def _shell_safe_dedupe(args: str) -> str:
-    """Last-wins dedupe for single-token-valued flags only."""
-    if not args.strip():
-        return ""
-    if any(f in args for f in _MULTI_VALUE_FLAGS):
-        return args
-    parsed = tokenize_server_args_preserving_json(args)
-    if parsed is None:
-        return args
-    normalized, tokens = parsed
-    pairs: dict[str, list[str]] = {}
-    order: list[str] = []
-    i = 0
-    while i < len(tokens):
-        t = tokens[i]
-        if t.startswith("--"):
-            if "=" in t:  # Normalize so it dedupes against ``--flag value``.
-                flag, _, val = t.partition("=")
-                pair = [flag, val]
-                i += 1
-            else:
-                flag = t
-                i += 1
-                if i < len(tokens) and not tokens[i].startswith("--"):
-                    pair = [flag, tokens[i]]
-                    i += 1
-                else:
-                    pair = [flag]
-            if flag not in pairs:
-                order.append(flag)
-            pairs[flag] = pair
-        else:
-            key = f"__pos_{len(order)}__"
-            order.append(key)
-            pairs[key] = [t]
-            i += 1
-    out: list[str] = []
-    for k in order:
-        out.extend(pairs[k])
-    rendered = " ".join(out)
-    return rendered if rendered != normalized else normalized
 
 
 # sglang scheduler watchdog timeout injection: the first request's JIT compile can exceed sglang's default watchdog,
@@ -568,6 +659,11 @@ _SGLANG_CONTEXT_LENGTH_FLAG = "--context-length"
 # Matches space- or equals-separated form without false-matching a longer flag.
 _SGLANG_CONTEXT_LENGTH_RE = re.compile(r"--context-length(?:[=\s]|$)")
 
+#: The flags the launch guards add when a recipe leaves them out (``inject_sglang_context_length`` and
+#: ``inject_sglang_watchdog_timeout``), sized for the run they launch; a recipe that keeps them carries that run's
+#: settings into every later one.
+INJECTED_LAUNCH_FLAGS = (_SGLANG_CONTEXT_LENGTH_FLAG, _SGLANG_WATCHDOG_FLAG)
+
 _SGLANG_ATTN_BACKEND_FLAG = "--attention-backend"
 
 _SGLANG_ATTN_BACKEND_RE = re.compile(r"--attention-backend(?:[=\s]|$)")
@@ -620,14 +716,14 @@ def validate_warm_replay_context_length(
     isl: int,
     osl: int,
     max_model_len: int | str | None = None,
-) -> tuple[str, dict[str, Any]]:
-    """Validate a replayed SGLang context window without changing its config."""
+) -> dict[str, Any]:
+    """Validate a replayed SGLang context window and return its compatibility evidence."""
     args = str(server_args or "")
     if server_args_env_name(framework) != "EXTRA_SGLANG_ARGS":
-        return args, {"status": "not_sglang"}
+        return {"status": "not_sglang"}
     required = max(0, int(isl or 0)) + max(0, int(osl or 0))
     if required <= 0:
-        return args, {"status": "target_shape_unknown"}
+        return {"status": "target_shape_unknown"}
     max_len = optional_positive_int(max_model_len)
     if max_len is not None and max_len < required:
         raise ValueError(f"target workload exceeds MAX_MODEL_LEN: isl+osl={required} > max_model_len={max_len}")
@@ -658,13 +754,13 @@ def validate_warm_replay_context_length(
             raise ValueError("--context-length must be positive")
         values.append(value)
     if not values:
-        return args, {
+        return {
             "status": "context_length_absent",
             "required_context_length": required,
         }
     effective = values[-1]
     if effective >= required:
-        return args, {
+        return {
             "status": "compatible",
             "effective_context_length": effective,
             "required_context_length": required,
@@ -675,13 +771,20 @@ def validate_warm_replay_context_length(
     )
 
 
+@dataclass(frozen=True)
+class WorkloadTokenWindow:
+    """Tokens a workload needs from the server: ISL, OSL and the run's MAX_MODEL_LEN cap."""
+
+    isl: int
+    osl: int
+    max_model_len: int | str | None = None
+
+
 def inject_sglang_context_length(
     server_args: str | None,
     framework: str | None,
     model_path: str | None,
-    isl: int,
-    osl: int,
-    max_model_len: int | str | None = None,
+    window: WorkloadTokenWindow,
 ) -> str:
     """Append ``--context-length <N>`` to ``server_args`` for sglang runs."""
     args = str(server_args or "").strip()
@@ -702,8 +805,8 @@ def inject_sglang_context_length(
     if agentx_enabled():
         context_length = int(max_pos)
     else:
-        context_length = min(int(max_pos), resolve_sglang_context_cap(isl, osl))
-    max_model_len_int = optional_positive_int(max_model_len)
+        context_length = min(int(max_pos), resolve_sglang_context_cap(window.isl, window.osl))
+    max_model_len_int = optional_positive_int(window.max_model_len)
     if max_model_len_int is not None:
         context_length = min(context_length, max_model_len_int)
     return merge_server_args(
@@ -712,19 +815,10 @@ def inject_sglang_context_length(
     )
 
 
-def _resolve_dual_chunk_backend(gpu_type: str | None = None) -> str:
-    """Pick the dual-chunk attention backend for the current hardware."""
-    override = os.environ.get("HYPERLOOM_DUAL_CHUNK_BACKEND", "").strip()
-    if override:
-        return override
-    return _SGLANG_DUAL_CHUNK_BACKEND
-
-
 def inject_sglang_attention_backend(
     server_args: str | None,
     framework: str | None,
     model_path: str | None,
-    gpu_type: str | None = None,
 ) -> str:
     """Append an ``--attention-backend`` for dual-chunk sglang models."""
     args = str(server_args or "").strip()
@@ -736,12 +830,9 @@ def inject_sglang_attention_backend(
 
     if not _model_has_dual_chunk_attention(str(model_path or "")):
         return args
-    backend = _resolve_dual_chunk_backend(gpu_type)
+    backend = os.environ.get("HYPERLOOM_DUAL_CHUNK_BACKEND", "").strip() or _SGLANG_DUAL_CHUNK_BACKEND
     if backend != _SGLANG_DUAL_CHUNK_BACKEND:
-        log.info(
-            "dual-chunk model on AMD/ROCm: injecting --attention-backend %s (dual_chunk_flash_attn needs sm90+).",
-            backend,
-        )
+        log.info("dual-chunk model: injecting --attention-backend %s from HYPERLOOM_DUAL_CHUNK_BACKEND.", backend)
     return merge_server_args(
         args,
         f"{_SGLANG_ATTN_BACKEND_FLAG} {backend}",
@@ -749,7 +840,7 @@ def inject_sglang_attention_backend(
 
 
 # sglang MoE runner backend: Hyperloom pins none for the baseline or grid
-# variants, the fmoe_ck tuner's validation bench aside (``phases/kernel.py``
+# variants, the fmoe_ck tuner's validation bench aside (``phases/kernel_gemm_tuning.py``
 # serves it with ``--moe-runner-backend aiter``). sglang's own
 # ``--moe-runner-backend auto`` follows ``SGLANG_USE_AITER`` (aiter when the
 # harness pre-shuffles MoE weights for it, triton otherwise) on current
@@ -757,10 +848,21 @@ def inject_sglang_attention_backend(
 # ``moe_runner_requires_aiter`` below strips an *inherited*
 # ``--moe-runner-backend`` that would crash an aiter-only quant scheme (grid
 # variants, baseline retries).
-_SGLANG_MOE_RUNNER_BACKEND_FLAG = "--moe-runner-backend"
-
+#
 # Matches space- or equals-separated form without false-matching a longer flag.
-_SGLANG_MOE_RUNNER_BACKEND_RE = re.compile(r"--moe-runner-backend(?:[=\s]|$)")
+SGLANG_MOE_RUNNER_BACKEND_RE = re.compile(r"--moe-runner-backend(?:[=\s]|$)")
+
+# Same flag with the value that follows it, so a removal takes the pair and not just the name.
+# The value is optional so a bare, value-less flag (an operator typo, or a flag left dangling at
+# end-of-string) is stripped too rather than surviving into a retry that is supposed to launch
+# without it.
+_SGLANG_MOE_RUNNER_BACKEND_PAIR_RE = re.compile(r"(?:^|\s)--moe-runner-backend(?:(?:[=\s]+)(?!--)\S+)?")
+
+
+def remove_moe_runner_backend_arg(args: str) -> str:
+    """Remove any existing SGLang MoE runner backend flag from an args string."""
+    return " ".join(_SGLANG_MOE_RUNNER_BACKEND_PAIR_RE.sub(" ", str(args or "")).split())
+
 
 # sglang MoE schemes whose ``create_moe_runner`` only builds a runner for the aiter backend (the others fall through
 # to a bare ``pass``, so the first forward pass dies on a missing ``runner``).
@@ -796,3 +898,173 @@ def moe_runner_requires_aiter(server_args: str | None, model_path: str | None) -
         str(server_args or ""),
         path,
     )
+
+
+def _flag_pair_at(tokens: list[str], i: int) -> tuple[list[str], int]:
+    """Return the flag at ``tokens[i]`` followed by its values, and the index past them."""
+    t = tokens[i]
+    if "=" in t:
+        flag, _, value = t.partition("=")
+        return [flag, value] if value else [flag], i + 1
+    i += 1
+    pair = [t]
+    if t in _MULTI_VALUE_FLAGS:
+        while i < len(tokens) and not tokens[i].startswith("--"):
+            pair.append(tokens[i])
+            i += 1
+    elif i < len(tokens) and not tokens[i].startswith("--"):
+        pair.append(tokens[i])
+        i += 1
+    return pair, i
+
+
+def dedupe_extra_server_args(args_str: str) -> str:
+    """Collapse repeated ``--flag value`` pairs into a unique launch string."""
+    if not args_str:
+        return ""
+    parsed = tokenize_server_args_preserving_json(args_str)
+    if parsed is None:
+        return args_str
+    normalized, tokens = parsed
+    pair_by_flag: dict[str, list[str]] = {}
+    order: list[str] = []
+    i = 0
+    while i < len(tokens):
+        t = tokens[i]
+        if t.startswith("--"):
+            pair, i = _flag_pair_at(tokens, i)
+            flag = pair[0]
+            if flag not in pair_by_flag:
+                order.append(flag)
+            pair_by_flag[flag] = pair
+        else:
+            # Stray positional token; preserve as-is.
+            key = f"__positional_{len(order)}__"
+            order.append(key)
+            pair_by_flag[key] = [t]
+            i += 1
+    out: list[str] = []
+    for k in order:
+        out.extend(pair_by_flag[k])
+    rendered = " ".join(out)
+    return rendered if rendered != normalized else normalized
+
+
+def merge_cumulative_extra_server_args(
+    base_args: str,
+    candidate_args: str,
+    full_args: str,
+) -> str:
+    """Build cumulative launch args for a KEEP without double-stacking."""
+    base = str(base_args or "").strip()
+    candidate = str(candidate_args or "").strip()
+    full = str(full_args or "").strip()
+    if full and full != candidate:
+        merged = full
+    elif candidate and base:
+        if candidate == base or candidate.startswith(f"{base} ") or base in candidate.split():
+            merged = candidate
+        else:
+            merged = f"{base} {candidate}".strip()
+    else:
+        merged = candidate or full or base
+    return dedupe_extra_server_args(merged)
+
+
+def _json_with_field_set(blob: str, field: str, value: str) -> str | None:
+    """``blob`` with ``field`` set to ``value``, compact; ``None`` when it is not a JSON object."""
+    try:
+        config = json.loads(blob)
+    except json.JSONDecodeError:
+        repaired = _repair_unquoted_json(blob)
+        config = json.loads(repaired) if repaired is not None else None
+    if not isinstance(config, dict):
+        return None
+    if config.get(field) == value:
+        return blob
+    config[field] = value
+    return json.dumps(config, separators=(",", ":"))
+
+
+def _with_dotted_config_merged(args: str, flag: str) -> str:
+    """``args`` with vLLM's cudagraph mode forced off, keeping every other configured field.
+
+    vLLM collects every dotted ``--compilation-config.<field>`` into one dict and appends that
+    dict to argv LAST, so a dotted arg replaces a JSON-form ``--compilation-config`` outright --
+    every field, in either order, with no warning. Appending is therefore only correct when
+    there is no JSON form to lose; otherwise the field is merged into the existing object here.
+    """
+    option, off_value = flag.split()
+    config_option, field = option.split(".", 1)
+    tokens = _split_args_preserving_json(args)
+    if tokens is None:
+        # Unsplittable args hold no object we could identify to merge into.
+        return f"{args} {flag}".strip()
+    if "--enforce-eager" in tokens:
+        return args
+
+    def _value_of(idx: int) -> tuple[str, int | None]:
+        """The option's value and the index holding it (``None`` for the ``--flag=value`` form)."""
+        token = tokens[idx]
+        if "=" in token:
+            return token.split("=", 1)[1], None
+        return (tokens[idx + 1], idx + 1) if idx + 1 < len(tokens) else ("", None)
+
+    dotted_mode_idx: int | None = None
+    json_idx: int | None = None
+    has_other_dotted = False
+    for idx, token in enumerate(tokens):
+        name = token.split("=", 1)[0]
+        if name == option:
+            dotted_mode_idx = idx
+        elif name.startswith(f"{config_option}."):
+            has_other_dotted = True
+        elif name == config_option:
+            json_idx = idx
+
+    if dotted_mode_idx is not None:
+        value, value_idx = _value_of(dotted_mode_idx)
+        if value == off_value:
+            return args
+        if value_idx is None:
+            tokens[dotted_mode_idx] = f"{option}={off_value}"
+        else:
+            tokens[value_idx] = off_value
+        return " ".join(tokens)
+    if json_idx is None or has_other_dotted:
+        # Dotted fields merge with each other, and the operator's own dotted arg is already
+        # costing them any JSON form, so appending loses nothing that was not lost already.
+        return f"{args} {flag}".strip()
+
+    value, value_idx = _value_of(json_idx)
+    merged = _json_with_field_set(value, field, off_value)
+    if merged is None:
+        log.warning(
+            "%s does not hold a JSON object, so capture is disabled by appending %s; "
+            "vLLM resolves the pair by discarding the existing value",
+            config_option,
+            flag,
+        )
+        return f"{args} {flag}".strip()
+    if merged == value:
+        return args
+    if value_idx is None:
+        tokens[json_idx] = f"{config_option}={merged}"
+    else:
+        tokens[value_idx] = merged
+    return " ".join(tokens)
+
+
+def with_capture_disabled(args: str, flag: str) -> str:
+    """``args`` with ``flag`` applied once (idempotent).
+
+    A dotted option (``--config.field value``) is merged into any existing ``--config`` rather
+    than appended, because the server resolves the pair by discarding that one; see
+    :func:`_with_dotted_config_merged`. A plain flag is appended unless already present, by
+    whole token so ``--disable-cuda-graph-extra`` is not mistaken for ``--disable-cuda-graph``.
+    """
+    if "." in flag.split()[0]:
+        return _with_dotted_config_merged(args or "", flag)
+    if flag in (args or "").split():
+        return args or ""
+    return f"{args} {flag}".strip()

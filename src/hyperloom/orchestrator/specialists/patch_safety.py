@@ -15,7 +15,7 @@ freeform). It provides:
 * the cross-domain Critic rule descriptors, surfaced when ``scope == 'domains'``.
 
 Pure / dependency-light: imports only stdlib, git via subprocess, and the
-stdlib-only ``hyperloom.common.unified_diff`` so it can be imported from the
+stdlib-only ``hyperloom_common.unified_diff`` so it can be imported from the
 runner, the Critic backend, and tests without cycles.
 """
 
@@ -31,7 +31,10 @@ from dataclasses import dataclass, field
 from pathlib import Path, PurePosixPath
 from typing import Any
 
-from hyperloom.common.unified_diff import strip_diff_path, strip_path_components
+from hyperloom_common.fs_utils import read_bytes_nofollow
+from hyperloom_common.git_safety import repo_root, safe_directory_args
+from hyperloom.common.env_safety import ungrounded_env_file_reason
+from hyperloom_common.unified_diff import strip_diff_path, strip_path_components
 
 
 # Quantitative / priority fields rejected outright on any patch proposal:
@@ -80,17 +83,13 @@ _UNIFIED_DIFF_HUNK_RE: re.Pattern[str] = re.compile(
     re.M,
 )
 
-#: The one absolute header a legitimate diff carries: the missing side of an
-#: add or delete. Never treated as an escape.
-_DEV_NULL_PATHS: frozenset[str] = frozenset({"/dev/null", "dev/null"})
-
-
 # Candidate ``-p`` strip levels for resolving a diff header path to a real file.
 # Specialists author patches with heterogeneous path prefixes, so target
 # existence is probed across levels rather than assuming ``-p1``.
 _P_STRIP_LEVELS: tuple[int, ...] = (1, 0, 2, 3, 4, 5, 6, 7, 8)
 
-# Sentinel the post-/pre-image path takes for a created/deleted file.
+# Sentinel the post-/pre-image path takes for a created/deleted file: the one
+# absolute header a legitimate diff carries, never treated as an escape.
 _DEV_NULL = "/dev/null"
 
 
@@ -112,7 +111,7 @@ class PatchRootResolution:
 
     Attributes:
         root: The resolved checkout, or ``None`` when the set fails closed.
-        reason: Why resolution failed; one of :data:`PATCH_ROOT_FAIL_REASONS`.
+        reason: Why resolution failed; a reason code returned by :func:`resolve_patch_apply_root`.
             Empty on success.
         matches: Every candidate that held the whole set. Populated only for
             ``ambiguous_root``, where naming the collision is the diagnosis.
@@ -122,20 +121,6 @@ class PatchRootResolution:
     reason: str = ""
     matches: tuple[Path, ...] = ()
 
-
-#: Why :func:`resolve_patch_apply_root` refused to name a root. Callers map
-#: these onto their own vocabulary (warm replay rewrites two of them into
-#: allowlist-flavoured reasons) and persist them, so they are a wire contract.
-PATCH_ROOT_FAIL_REASONS: tuple[str, ...] = (
-    "explicit_root_invalid",  # declared root is unreadable or not a directory
-    "explicit_root_target_mismatch",  # declared root lacks a pre-image target
-    "patch_targets_invalid",  # a diff names no safe target path
-    "patch_content_missing",  # no readable diff text to match a root against
-    "no_candidate_roots",  # no tree offered at all -- says nothing about the patch
-    "pure_create_requires_explicit_root",  # no pre-image can identify a root
-    "no_matching_root",  # no candidate holds every pre-image
-    "ambiguous_root",  # more than one candidate holds every pre-image
-)
 
 # Reasons that report an absent tree rather than a fact about the patch: with no
 # pre-image, or nothing to match it against, there is no hallucinated target to
@@ -183,8 +168,6 @@ def parse_patch_targets(patch_text: str) -> ParsedPatchTargets:
             existing.append(old)
         if new and new != _DEV_NULL and new != old and new not in created:
             created.append(new)
-        elif old == _DEV_NULL and new and new not in created:
-            created.append(new)
     if not existing and not created:
         raise ValueError("patch declares no safe target files")
     return ParsedPatchTargets(tuple(existing), tuple(created))
@@ -217,6 +200,28 @@ def patch_file_targets(patch_text: str) -> list[tuple[str, str]]:
     return pairs
 
 
+def path_resolves_at(root: Path, path: str, level: int) -> bool:
+    """True when the diff path ``path``, stripped as ``-p<level>`` would strip it, names an entry under ``root``.
+
+    Args:
+        root: The tree to resolve it in.
+        path: A raw ``---``/``+++`` path token.
+        level: The ``-p`` strip level.
+
+    Returns:
+        Whether the stripped path exists under ``root``.
+    """
+    stripped = strip_path_components(path, level)
+    # A bare filename matches any root holding that name, so deep
+    # strips of a nested path would implicate unrelated repos.
+    if "/" not in stripped and level > 1:
+        return False
+    try:
+        return (root / stripped).exists()
+    except OSError:
+        return False
+
+
 def patch_targets_missing(
     patch_text: str,
     root: Path,
@@ -247,24 +252,7 @@ def patch_targets_missing(
             existing = list(parse_patch_targets(patch_text).existing)
         except ValueError:
             return ["<invalid>"]
-    missing: list[str] = []
-    for old in existing:
-        found = False
-        for lvl in strip_levels:
-            try:
-                stripped = strip_path_components(old, lvl)
-                # A bare filename matches any root holding that name, so deep
-                # strips of a nested path would implicate unrelated repos.
-                if "/" not in stripped and lvl > 1:
-                    continue
-                if (root / stripped).exists():
-                    found = True
-                    break
-            except OSError:
-                continue
-        if not found:
-            missing.append(old)
-    return missing
+    return [old for old in existing if not any(path_resolves_at(root, old, lvl) for lvl in strip_levels)]
 
 
 def _collapse_nested_roots(roots: tuple[Path, ...]) -> tuple[Path, ...]:
@@ -289,6 +277,61 @@ def _collapse_nested_roots(roots: tuple[Path, ...]) -> tuple[Path, ...]:
     )
 
 
+def _settle_tie(matches: tuple[Path, ...], default_root: Path | None, texts: Sequence[str]) -> tuple[Path, ...]:
+    """Narrow several matching checkouts: the caller's own tree when every patch applies to it, else the outermost.
+
+    Runs ``git apply --check`` once per patch against ``default_root``, so an
+    async caller reaches it through ``asyncio.to_thread``.
+    """
+    if default_root in matches and all(_git_apply_check(default_root, text) for text in texts):
+        return (default_root,)
+    return _collapse_nested_roots(matches)
+
+
+def _resolved_dir(path: Path) -> Path | None:
+    """``path`` resolved, or ``None`` when it cannot be resolved or is not a directory."""
+    try:
+        resolved = Path(path).resolve()
+    except (OSError, RuntimeError):
+        return None
+    return resolved if resolved.is_dir() else None
+
+
+def _repo_unusable(root: Path) -> bool:
+    """True when ``root`` sits in a git repository that git cannot open (e.g. a worktree whose parent is gone)."""
+    if repo_root(root) is None:
+        return False
+    try:
+        proc = subprocess.run(
+            ["git", *safe_directory_args(["-C", str(root), "rev-parse", "--git-dir"])],
+            capture_output=True,
+            text=True,
+            timeout=30.0,
+            check=False,
+        )
+    except (FileNotFoundError, subprocess.TimeoutExpired):
+        return True
+    return proc.returncode != 0
+
+
+def _git_apply_check(root: Path, patch_text: str) -> bool | None:
+    """Whether ``patch_text`` applies cleanly in ``root``; ``None`` when git cannot run or cannot open the repo."""
+    try:
+        proc = subprocess.run(
+            ["git", "-C", str(root), "apply", "--check", "-"],
+            input=patch_text if patch_text.endswith("\n") else patch_text + "\n",
+            capture_output=True,
+            text=True,
+            timeout=30.0,
+            check=False,
+        )
+    except (FileNotFoundError, subprocess.TimeoutExpired):
+        return None
+    if proc.returncode == 0:
+        return True
+    return None if _repo_unusable(root) else False
+
+
 def resolve_patch_apply_root(
     patch_texts: Sequence[str],
     *,
@@ -307,7 +350,13 @@ def resolve_patch_apply_root(
     A create-only set carries no pre-image, so no candidate can be matched and
     only a root the caller already knows will do -- an explicit one, or the
     ``default_root`` a caller supplies when it has independent grounds for it,
-    such as the checkout a specialist's worktree was cut from.
+    such as the checkout a specialist's worktree was cut from. The same grounds
+    settle a tie: when several candidates hold every pre-image, ``default_root``
+    is one of them and every patch applies to it cleanly, it is the one. Copies
+    of a tree meet this on a host that patches a writable copy of an installed
+    package, and the copy the session runs is the tree the patch was written
+    against. A ``default_root`` the patches no longer apply to leaves the tie
+    unresolved.
 
     When pre-images do exist but no candidate was offered, the answer is
     ``no_candidate_roots`` rather than a miss, because absence of a tree is not
@@ -319,69 +368,49 @@ def resolve_patch_apply_root(
         explicit_root: The checkout the caller declared, if any.
         candidate_roots: Checkouts to match the pre-images against when no
             explicit root is declared.
-        default_root: The checkout to use for a create-only set. Never
-            consulted while a pre-image can pick a candidate.
+        default_root: The checkout to use for a create-only set, and the
+            candidate that wins when several hold every pre-image and the
+            patches apply to it. Not consulted while the pre-images single out
+            one candidate.
 
     Returns:
-        A :class:`PatchRootResolution` naming the checkout, or carrying one of
-        :data:`PATCH_ROOT_FAIL_REASONS`.
+        A :class:`PatchRootResolution` naming the checkout, or carrying the
+        reason code it refused with.
     """
-    texts = tuple(str(text or "") for text in patch_texts if str(text or "").strip())
+    texts = tuple(text for text in patch_texts if text.strip())
     resolved_explicit: Path | None = None
     if explicit_root is not None:
-        try:
-            resolved_explicit = Path(explicit_root).resolve()
-        except (OSError, RuntimeError):
-            return PatchRootResolution(None, "explicit_root_invalid")
-        if not resolved_explicit.is_dir():
+        resolved_explicit = _resolved_dir(explicit_root)
+        if resolved_explicit is None:
             return PatchRootResolution(None, "explicit_root_invalid")
         if not texts:
             return PatchRootResolution(resolved_explicit)
-
-    parsed: list[ParsedPatchTargets] = []
+    if not texts:
+        return PatchRootResolution(None, "patch_content_missing")
     try:
         parsed = [parse_patch_targets(text) for text in texts]
     except ValueError:
         return PatchRootResolution(None, "patch_targets_invalid")
-    if not parsed:
-        return PatchRootResolution(None, "patch_content_missing")
-
-    has_existing = any(targets.existing for targets in parsed)
     if resolved_explicit is not None:
         if any(patch_targets_missing(text, resolved_explicit) for text in texts):
             return PatchRootResolution(None, "explicit_root_target_mismatch")
         return PatchRootResolution(resolved_explicit)
-    roots: list[Path] = []
-    seen: set[Path] = set()
-    for candidate in candidate_roots:
-        try:
-            root = Path(candidate).resolve()
-        except (OSError, RuntimeError):
-            continue
-        if root in seen or not root.is_dir():
-            continue
-        seen.add(root)
-        roots.append(root)
+    return _match_candidate_root(texts, parsed, candidate_roots, default_root)
 
-    resolved_default: Path | None = None
-    if default_root is not None:
-        try:
-            candidate_default = Path(default_root).resolve()
-        except (OSError, RuntimeError):
-            candidate_default = None
-        if candidate_default is not None and candidate_default.is_dir():
-            resolved_default = candidate_default
 
-    # Settled before the candidates are considered at all: a create-only set has
-    # no pre-image, so whether any candidate exists says nothing about it.
-    if not has_existing:
+def _match_candidate_root(
+    texts: tuple[str, ...],
+    parsed: list[ParsedPatchTargets],
+    candidate_roots: Sequence[Path],
+    default_root: Path | None,
+) -> PatchRootResolution:
+    """Single out the candidate checkout holding every pre-image, or ``default_root`` for a create-only set."""
+    roots = tuple(dict.fromkeys(root for root in map(_resolved_dir, candidate_roots) if root is not None))
+    resolved_default = _resolved_dir(default_root) if default_root is not None else None
+    if not any(targets.existing for targets in parsed):
         if resolved_default is None:
             return PatchRootResolution(None, "pure_create_requires_explicit_root")
         return PatchRootResolution(resolved_default)
-
-    # Nothing to match the pre-images against is not evidence against the patch.
-    # Say so separately so a vetting caller can decline to judge while an
-    # applying caller still refuses to write into a tree it cannot name.
     if not roots:
         return PatchRootResolution(None, "no_candidate_roots")
 
@@ -389,15 +418,11 @@ def resolve_patch_apply_root(
     if not matches:
         return PatchRootResolution(None, "no_matching_root")
     if len(matches) > 1:
-        matches = _collapse_nested_roots(matches)
+        matches = _settle_tie(matches, resolved_default, texts)
     if len(matches) > 1:
         return PatchRootResolution(None, "ambiguous_root", matches)
     return PatchRootResolution(matches[0], matches=matches)
 
-
-# Scope literal that triggers the cross-domain Critic rules. Duplicated from
-# specialists.profile.SCOPE_DOMAINS to keep this module dependency-light.
-SCOPE_DOMAINS_LITERAL: str = "domains"
 
 # The verdict a rule declares when its violation is advisory: the proposal still
 # reaches the Coordinator, carrying the reason code as a note. Spelled once so a
@@ -604,7 +629,7 @@ def patch_escapes_tree(patch_text: str) -> str | None:
     for old, new in patch_file_targets(patch_text):
         for raw in (old, new):
             cand = strip_diff_path(raw)
-            if not cand or cand in _DEV_NULL_PATHS:
+            if not cand or cand == _DEV_NULL:
                 continue
             if cand.startswith("/") or ".." in PurePosixPath(cand).parts:
                 return cand
@@ -618,118 +643,25 @@ GROUND_NOT_DIFF = "not_diff"  # not a unified diff (no hunk header)
 GROUND_PATH_ESCAPE = "path_escape"  # patch path escapes the tree
 GROUND_MISSING_TARGET = "missing_target"  # modify/delete target absent from base
 GROUND_AMBIGUOUS_ROOT = "ambiguous_root"  # patch targets match more than one disjoint tree
-GROUND_UNCHECKED = "unchecked"  # no base available / git unavailable
+GROUND_UNCHECKED = "unchecked"  # no base available / git or the repo unavailable
 
-
-@dataclass(frozen=True)
-class PatchGroundingResult:
-    """Outcome of grounding one patch file against a clean checkout."""
-
-    verdict: str
-    detail: str = ""
-
-    @property
-    def is_garbage(self) -> bool:
-        """True when the file is not a usable patch at all.
-
-        Only structural verdicts drop: a file with no hunk header is not a diff,
-        and one whose paths escape the tree applies nowhere. An unresolved or
-        ambiguous root is a verdict about the root set, not the patch.
-
-        Returns:
-            True for structural-failure verdicts that should drop the patch.
-        """
-        return self.verdict in (GROUND_NOT_DIFF, GROUND_PATH_ESCAPE)
-
-
-def ground_patch_text(
-    patch_text: str,
-    *,
-    base_checkout: Path | None,
-    candidate_roots: tuple[Path, ...] = (),
-    explicit_root: Path | None = None,
-    git_timeout_sec: float = 30.0,
-) -> PatchGroundingResult:
-    """Validate + git-ground one patch.
-
-    Structural checks (unified diff, no path escape) always run. The
-    ``git apply --check`` grounding runs against ``base_checkout`` first, then
-    against each entry of ``candidate_roots`` whose tree holds the patch's
-    targets. A specialist handed an aiter worktree still writes sglang patches,
-    so grounding only against the worktree base drops them as ``missing_target``
-    when the sglang checkout would have accepted them.
-
-    Args:
-        patch_text: The unified-diff text to validate and ground.
-        base_checkout: Primary clean git checkout to ground against, or
-            ``None`` to skip the ``git apply --check`` step.
-        candidate_roots: Further checkouts to try when ``base_checkout`` does
-            not hold the patch's targets.
-        explicit_root: Authoritative target checkout. Required for create-only
-            patches because no pre-image can identify a candidate.
-        git_timeout_sec: Timeout for each ``git apply --check`` subprocess.
-
-    Returns:
-        The :class:`PatchGroundingResult` with the verdict and detail.
-    """
-    if not is_unified_diff(patch_text):
-        return PatchGroundingResult(GROUND_NOT_DIFF, "no unified-diff hunk header")
-    escape = patch_escapes_tree(patch_text)
-    if escape is not None:
-        return PatchGroundingResult(GROUND_PATH_ESCAPE, f"path={escape!r}")
-    candidates = tuple(
-        root
-        for root in ((base_checkout,) if base_checkout is not None else ()) + tuple(candidate_roots)
-        if Path(root).is_dir()
-    )
-    if explicit_root is None and not candidates:
-        return PatchGroundingResult(GROUND_UNCHECKED, "no base checkout")
-    resolution = resolve_patch_apply_root(
-        (patch_text,),
-        explicit_root=explicit_root,
-        candidate_roots=candidates,
-        default_root=base_checkout,
-    )
-    if resolution.root is None:
-        detail = resolution.reason
-        if resolution.matches:
-            detail += ": " + ", ".join(str(root) for root in resolution.matches)
-        if resolution.reason == "ambiguous_root":
-            return PatchGroundingResult(GROUND_AMBIGUOUS_ROOT, detail)
-        return PatchGroundingResult(GROUND_MISSING_TARGET, detail)
-    root = resolution.root
-    try:
-        proc = subprocess.run(
-            ["git", "-C", str(root), "apply", "--check", "-"],
-            input=patch_text if patch_text.endswith("\n") else patch_text + "\n",
-            capture_output=True,
-            text=True,
-            timeout=git_timeout_sec,
-            check=False,
-        )
-    except (FileNotFoundError, subprocess.TimeoutExpired) as exc:
-        return PatchGroundingResult(GROUND_UNCHECKED, f"git unavailable: {exc!r}")
-    if proc.returncode == 0:
-        return PatchGroundingResult(GROUND_APPLIES)
-    return PatchGroundingResult(
-        GROUND_STALE,
-        (proc.stderr or "").strip()[:240],
-    )
+# Verdict for each ``git apply --check`` outcome; ``None`` is git failing to run or to open the repo.
+_APPLY_CHECK_VERDICTS: dict[bool | None, str] = {True: GROUND_APPLIES, False: GROUND_STALE, None: GROUND_UNCHECKED}
 
 
 @dataclass
 class PatchSafetyReport:
     """Aggregate patch-safety findings for one specialist_done payload.
 
-    ``ungrounded`` holds every patch that failed vetting; a structural reject is
-    also absent from ``kept_patches``, an unresolved root appears in both.
+    ``ungrounded`` holds every patch that failed vetting, whether vetting
+    dropped it or kept it with an unresolved root.
     """
 
-    kept_patches: list[str] = field(default_factory=list)
     ungrounded: list[dict[str, str]] = field(default_factory=list)
     grounding: dict[str, str] = field(default_factory=dict)
     numeric_warnings: list[str] = field(default_factory=list)
     forbidden_fields: list[str] = field(default_factory=list)
+    env_ungrounded: list[str] = field(default_factory=list)
 
     def notes(self) -> list[str]:
         """Render audit notes for SpecialistRunResult / session_breakdown.
@@ -767,6 +699,8 @@ class PatchSafetyReport:
             out.append("patch_safety_numeric:" + ",".join(self.numeric_warnings[:8]))
         if self.forbidden_fields:
             out.append("patch_safety_forbidden_fields:" + ",".join(self.forbidden_fields[:8]))
+        if self.env_ungrounded:
+            out.append("proposal_env_file_missing:" + "; ".join(self.env_ungrounded[:4]))
         return out
 
 
@@ -936,6 +870,55 @@ def patch_is_annotation_only(patch_text: str, source_root: Path, *, reverse: boo
         return False
 
 
+@dataclass(frozen=True)
+class _StructuralScreen:
+    """The patches that survived structural screening, and the verdicts of the ones that did not."""
+
+    readable: list[tuple[str, str]]
+    ungrounded: list[dict[str, str]]
+    grounding: dict[str, str]
+
+
+def _screen_patch_structure(patch_paths: list[str]) -> _StructuralScreen:
+    """Read each patch and drop the unreadable, non-diff, tree-escaping and work-artifact ones."""
+    ungrounded: list[dict[str, str]] = []
+    grounding: dict[str, str] = {}
+    readable: list[tuple[str, str]] = []
+    for path in patch_paths:
+        try:
+            text = read_bytes_nofollow(path).decode("utf-8", errors="replace")
+        except OSError as exc:
+            ungrounded.append({"path": path, "verdict": "unreadable", "detail": repr(exc)})
+            continue
+        if not is_unified_diff(text):
+            ungrounded.append(
+                {
+                    "path": path,
+                    "verdict": GROUND_NOT_DIFF,
+                    "detail": "no unified-diff hunk header",
+                }
+            )
+            grounding[path] = GROUND_NOT_DIFF
+            continue
+        escape = patch_escapes_tree(text)
+        if escape is not None:
+            ungrounded.append(
+                {
+                    "path": path,
+                    "verdict": GROUND_PATH_ESCAPE,
+                    "detail": f"path={escape!r}",
+                }
+            )
+            grounding[path] = GROUND_PATH_ESCAPE
+            continue
+        work_artifacts = patch_work_artifact_targets(text)
+        if work_artifacts:
+            ungrounded.append({"path": path, "verdict": "work_artifact", "detail": ", ".join(work_artifacts)})
+            continue
+        readable.append((path, text))
+    return _StructuralScreen(readable=readable, ungrounded=ungrounded, grounding=grounding)
+
+
 def vet_patches(
     patch_paths: list[str],
     *,
@@ -966,41 +949,8 @@ def vet_patches(
         resolved to more than one distinct checkout.
     """
     kept: list[str] = []
-    ungrounded: list[dict[str, str]] = []
-    grounding: dict[str, str] = {}
-    readable: list[tuple[str, str]] = []
-    for path in patch_paths:
-        try:
-            text = Path(path).read_text(encoding="utf-8", errors="replace")
-        except OSError as exc:
-            ungrounded.append({"path": path, "verdict": "unreadable", "detail": repr(exc)})
-            continue
-        if not is_unified_diff(text):
-            ungrounded.append(
-                {
-                    "path": path,
-                    "verdict": GROUND_NOT_DIFF,
-                    "detail": "no unified-diff hunk header",
-                }
-            )
-            grounding[path] = GROUND_NOT_DIFF
-            continue
-        escape = patch_escapes_tree(text)
-        if escape is not None:
-            ungrounded.append(
-                {
-                    "path": path,
-                    "verdict": GROUND_PATH_ESCAPE,
-                    "detail": f"path={escape!r}",
-                }
-            )
-            grounding[path] = GROUND_PATH_ESCAPE
-            continue
-        work_artifacts = patch_work_artifact_targets(text)
-        if work_artifacts:
-            ungrounded.append({"path": path, "verdict": "work_artifact", "detail": ", ".join(work_artifacts)})
-            continue
-        readable.append((path, text))
+    screen = _screen_patch_structure(patch_paths)
+    ungrounded, grounding, readable = screen.ungrounded, screen.grounding, screen.readable
 
     if not readable:
         return kept, ungrounded, grounding, False
@@ -1032,17 +982,78 @@ def vet_patches(
             ungrounded.append({"path": path, "verdict": verdict, "detail": detail})
             kept.append(path)
             continue
-        res = ground_patch_text(text, base_checkout=None, explicit_root=resolution.root)
-        grounding[path] = res.verdict
-        if res.is_garbage:
-            ungrounded.append({"path": path, "verdict": res.verdict, "detail": res.detail})
-            continue
-        if res.verdict == GROUND_APPLIES and patch_is_annotation_only(text, resolution.root):
+        applies = _git_apply_check(resolution.root, text)
+        grounding[path] = _APPLY_CHECK_VERDICTS[applies]
+        if applies and patch_is_annotation_only(text, resolution.root):
             ungrounded.append({"path": path, "verdict": "annotation_only", "detail": "only Python comments changed"})
             continue
         resolved_roots.add(resolution.root)
         kept.append(path)
     return kept, ungrounded, grounding, len(resolved_roots) > 1
+
+
+def drop_env_ungrounded_proposals(payload: dict[str, Any]) -> list[str]:
+    """Remove the ``proposal_set`` entries whose ``extra_envs`` name a config file that is not on disk; why, per entry.
+
+    The patch gate grounds what a proposal changes; this grounds the files its envs make the server read. A proposal
+    premised on an artifact some later step would write ("author the CSV, then point the env at it") is refused here,
+    where the orchestrator hears why, rather than benched as a config arm whose result stands for a table nothing
+    wrote. Every element of a ``:``-joined list must be on disk, including the ones listed beside a table that is:
+    an agent asking for one table it has not authored is asking for the same unwritten artifact (#1982).
+
+    ``run_grid``'s preflight asks the same question of the same values (``ungrounded_env_file_reason`` again), as
+    the backstop for values no proposal carried. A replayed recipe's refs are not an exception to it: warm replay
+    re-grounds them onto this run's downloaded files, dropping what it cannot read, before the grid sees them.
+    """
+    proposals = payload.get("proposal_set")
+    if not isinstance(proposals, list):
+        return []
+    kept: list[Any] = []
+    dropped: list[str] = []
+    for proposal in proposals:
+        reason = ungrounded_env_file_reason(proposal.get("extra_envs")) if isinstance(proposal, dict) else None
+        if reason is None:
+            kept.append(proposal)
+            continue
+        dropped.append(f"proposal {str(proposal.get('name') or '').strip() or '<unnamed>'!r}: {reason}")
+    if dropped:
+        payload["proposal_set"] = kept
+    return dropped
+
+
+def admit_payload(
+    payload: dict[str, Any],
+    vetted: tuple[list[str], list[dict[str, str]], dict[str, str], bool],
+    patch_roots: dict[str, str],
+) -> PatchSafetyReport:
+    """Apply the patch-safety gate to a specialist_done ``payload`` in place; the report of what it found.
+
+    It books what :func:`vet_patches` kept, scans the numeric claims, strips the forbidden fields and drops the
+    proposals whose env files are missing.
+    """
+    kept, ungrounded, grounding, spans_roots = vetted
+    numeric_warnings = scan_numeric_claims(payload)
+    # Strip, do not forward: the Critic is instructed to reject the whole
+    # proposal_set over these fields, which costs the round every idea the
+    # specialist produced. The audit note records what the strip took.
+    forbidden_fields = strip_forbidden_proposal_fields(payload)
+    env_ungrounded = drop_env_ungrounded_proposals(payload)
+    payload["patches_written"] = kept
+    if patch_roots:
+        payload["patch_roots"] = {p: r for p, r in patch_roots.items() if p in kept}
+    if ungrounded:
+        payload["patches_ungrounded"] = [d["detail"] for d in ungrounded[:8]]
+    if env_ungrounded:
+        payload["proposals_env_ungrounded"] = env_ungrounded[:8]
+    if spans_roots:
+        payload["patches_span_multiple_roots"] = True
+    return PatchSafetyReport(
+        ungrounded=ungrounded,
+        grounding=grounding,
+        numeric_warnings=numeric_warnings,
+        forbidden_fields=forbidden_fields,
+        env_ungrounded=env_ungrounded,
+    )
 
 
 __all__ = [
@@ -1059,17 +1070,15 @@ __all__ = [
     "GROUND_PATH_ESCAPE",
     "GROUND_STALE",
     "GROUND_UNCHECKED",
-    "PATCH_ROOT_FAIL_REASONS",
-    "PatchGroundingResult",
     "PatchRootResolution",
     "PatchSafetyReport",
     "QUANTITATIVE_CLAIM_REASON_CODE",
-    "SCOPE_DOMAINS_LITERAL",
     "SPECIALIST_WORK_ARTIFACT_PATHSPECS",
+    "admit_payload",
     "advisory_only_reason_codes",
     "advisory_rules_govern",
     "cross_domain_rule_descriptors",
-    "ground_patch_text",
+    "drop_env_ungrounded_proposals",
     "is_unified_diff",
     "numeric_claims",
     "patch_escapes_tree",
@@ -1077,6 +1086,7 @@ __all__ = [
     "patch_is_annotation_only",
     "patch_targets_missing",
     "patch_work_artifact_targets",
+    "path_resolves_at",
     "quantitative_claim_rule_descriptor",
     "resolve_patch_apply_root",
     "scan_numeric_claims",

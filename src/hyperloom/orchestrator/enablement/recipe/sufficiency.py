@@ -11,10 +11,13 @@ produced by an older writer cannot be mistaken for one this contract judged.
 
 from __future__ import annotations
 
+import json
 from pathlib import PurePosixPath
-import shlex
-from typing import Any, Iterable, Mapping, Sequence
+import re
+from typing import Any, Iterable, Mapping, NamedTuple, Sequence
 
+from .launch_flags import PARALLELISM_AXES as _PARALLELISM_AXES
+from .launch_flags import requested_flags as _requested_flags
 from .steps import BUILD_KIND, PATCH_KIND, SETUP_KIND, command_digest, select_linked_build
 
 SCHEMA_VERSION = 1
@@ -72,15 +75,6 @@ _RUN_LOCAL_REQUESTED_FLAGS: frozenset[str] = frozenset(
     }
 )
 
-#: The requested spellings of each parallelism axis ``observed_model_binding``
-#: reports, so the requested side is compared against the binding rather than
-#: against a launch line the extractor strips these from.
-_PARALLELISM_AXES: tuple[tuple[str, frozenset[str]], ...] = (
-    ("tp", frozenset({"tensor_parallel_size", "tp_size", "tp"})),
-    ("dp", frozenset({"data_parallel_size", "dp_size"})),
-    ("pp", frozenset({"pipeline_parallel_size", "pp_size"})),
-)
-
 #: Compared through ``observed_model_binding.model_digest`` instead.
 _MODEL_IDENTITY_FLAGS: frozenset[str] = frozenset(
     {"model", "model_path", "tokenizer", "tokenizer_path", "served_model_name"}
@@ -102,8 +96,6 @@ _BUILTIN_REQUIRED_INPUTS: tuple[str, ...] = (
     "resolved_sha",
     "gpu_arch",
     "max_jobs",
-    "torch_constraint_mode",
-    "env_digest",
     "ambient_digest",
 )
 
@@ -112,50 +104,9 @@ def _reason(code: str, scope: str = "") -> dict[str, Any]:
     return {"code": code, "blocks": REASON_BLOCKS[code], "scope": scope}
 
 
-def read_status(section: Mapping[str, Any] | None) -> dict[str, Any]:
-    """Return the decision a consumer must read off ``section``.
-
-    An absent key is the one absence that carries meaning: the producer predates
-    this contract, so nothing was judged. An unrecognized code is likewise
-    insufficient -- the vocabulary is closed.
-    """
-    decision = (section or {}).get("replay_sufficiency")
-    if not isinstance(decision, Mapping):
-        return {"schema_version": SCHEMA_VERSION, "status": "insufficient", "reasons": [_reason("not_evaluated")]}
-    reasons = [r for r in decision.get("reasons") or [] if isinstance(r, Mapping)]
-    if any(str(r.get("code")) not in REASON_BLOCKS for r in reasons):
-        return {**dict(decision), "status": "insufficient"}
-    return dict(decision)
-
-
-def _normalize_flag(name: str) -> str:
-    return str(name or "").lstrip("-").replace("-", "_")
-
-
-def _requested_flags(argv: str) -> dict[str, str]:
-    """Parse an argv string into ``{normalized_flag: value}``."""
-    try:
-        tokens = shlex.split(str(argv or ""))
-    except ValueError:
-        return {}
-    flags: dict[str, str] = {}
-    index = 0
-    while index < len(tokens):
-        token = tokens[index]
-        if not token.startswith("-"):
-            index += 1
-            continue
-        if "=" in token:
-            name, _, value = token.partition("=")
-            flags[_normalize_flag(name)] = value
-        else:
-            value = ""
-            if index + 1 < len(tokens) and not tokens[index + 1].startswith("-"):
-                value = tokens[index + 1]
-                index += 1
-            flags[_normalize_flag(token)] = value
-        index += 1
-    return flags
+def not_evaluated() -> dict[str, Any]:
+    """Return the decision a recipe carries when nothing judged it."""
+    return {"schema_version": SCHEMA_VERSION, "status": "insufficient", "reasons": [_reason("not_evaluated")]}
 
 
 def _activation_reasons(section: Mapping[str, Any]) -> list[dict[str, Any]]:
@@ -220,15 +171,80 @@ def _requested_vs_observed_reasons(evidence: Mapping[str, Any]) -> list[dict[str
         if flag in _RUN_LOCAL_REQUESTED_FLAGS or flag in _MODEL_AND_PARALLELISM_FLAGS:
             continue
         if flag in observed:
-            value = observed[flag]
+            value: Any = observed[flag]
         elif flag in identity:
-            value = str(identity[flag])
+            value = identity[flag]
+        elif flag.startswith("no_") and not requested and isinstance(identity.get(flag[3:]), bool):
+            # ``--no-X`` is argparse's negation of ``--X``: the engine records
+            # it as ``X: False``, under the name without the prefix.
+            value, requested = identity[flag[3:]], "false"
         else:
             reasons.append(_reason("activation_incomplete", f"requested:{flag}"))
             continue
-        if requested and str(value).strip().lower() != requested.strip().lower():
+        if not _setting_matches(requested, value):
             reasons.append(_reason("launch_evidence_mismatch", f"requested:{flag}"))
     return reasons
+
+
+def _setting_matches(requested: str, observed: Any) -> bool:
+    """Whether an observed setting is the one a requested flag asked for.
+
+    A bare flag asks for presence, and for ``True`` where the engine records a
+    boolean. A JSON operand is compared as structure: the engine records the
+    parsed object, which prints differently from the JSON that was passed and
+    carries the defaults it filled in besides, so each requested key must hold
+    its requested value and the rest are the engine's own. Strings inside it
+    compare exactly -- an architecture name is case-sensitive -- while a plain
+    operand keeps the case-insensitive comparison it always had.
+    """
+    if not requested:
+        return observed is True or not isinstance(observed, bool)
+    structured = _as_structure(requested)
+    return _value_matches(structured, _as_structure(observed), fold=not isinstance(structured, (Mapping, list)))
+
+
+def _as_structure(value: Any) -> Any:
+    if isinstance(value, str) and value.lstrip().startswith(("{", "[")):
+        try:
+            return json.loads(value)
+        except ValueError:
+            return value
+    return value
+
+
+def _value_matches(requested: Any, observed: Any, *, fold: bool = False) -> bool:
+    if isinstance(requested, Mapping):
+        return isinstance(observed, Mapping) and all(
+            key in observed and _value_matches(item, observed[key]) for key, item in requested.items()
+        )
+    if isinstance(requested, list):
+        return (
+            isinstance(observed, (list, tuple))
+            and len(observed) == len(requested)
+            and all(_value_matches(r, o) for r, o in zip(requested, observed))
+        )
+    want = _scalar_text(requested, fold=fold)
+    if isinstance(observed, str):
+        enum = _ENUM_REPR_RE.fullmatch(observed.strip())
+        if enum:
+            # ``<CUDAGraphMode.FULL: 2>`` is what ``"FULL"`` and ``2`` both select.
+            members = (enum.group("name"), enum.group("value").strip().strip("'\""))
+            return want in {_scalar_text(member, fold=fold) for member in members}
+    return want == _scalar_text(observed, fold=fold)
+
+
+def _scalar_text(value: Any, *, fold: bool) -> str:
+    if isinstance(value, str):
+        text = value.strip()
+    elif isinstance(value, (bool, type(None))):
+        text = json.dumps(value)
+    else:
+        text = str(value).strip()
+    return text.lower() if fold or not isinstance(value, str) else text
+
+
+#: An enum member as the engine's record prints it, kept verbatim by the reader.
+_ENUM_REPR_RE = re.compile(r"<[A-Za-z_][\w.]*\.(?P<name>[A-Za-z_]\w*): (?P<value>.*)>", re.DOTALL)
 
 
 def _acquisition_is_pinned(acquisition: Mapping[str, Any]) -> bool:
@@ -297,6 +313,18 @@ def _root_reasons(section: Mapping[str, Any], steps: Sequence[Mapping[str, Any]]
         record = roots.get(str(artifact.get("root_id") or ""))
         if record is None or not record.get("contributions"):
             reasons.append(_reason("root_unidentified", f"artifact[{index}]"))
+    reasons.extend(_root_record_reasons(roots))
+    return reasons
+
+
+def _root_record_reasons(roots: Mapping[str, Mapping[str, Any]]) -> list[dict[str, Any]]:
+    """Judge each root record against what a consumer needs to resolve it.
+
+    A root needs a commit a checkout can reach and a replay anchor no other
+    root claims: two roots mapping to one anchor overlay the same directory,
+    so the stack a replay assembles is not the one that was captured.
+    """
+    reasons: list[dict[str, Any]] = []
     for root_id, record in roots.items():
         # A read that failed leaves is_git standing over no commit, which names
         # no tree a consumer can check out.
@@ -577,49 +605,35 @@ def _executed_build_ids(enablement: Mapping[str, Any]) -> list[str]:
     return out
 
 
-def _carried_extension_reasons(section: Mapping[str, Any]) -> list[dict[str, Any]]:
-    """Name the build's compiled extensions the framework root never received.
+def _tristate_name_reasons(
+    section: Mapping[str, Any],
+    key: str,
+    unverified_code: str,
+    item_code: str,
+) -> list[dict[str, Any]]:
+    """Name each entry of a tri-state name list the section carries under ``key``.
 
-    A build installs nothing by itself; its outputs reach the framework root
-    only as artifacts a specialist declares, one file at a time. Declaring some
-    of them still boots, benchmarks and keeps -- the ones left behind surface
-    much later as an op the loaded extension does not export, on whichever code
-    path first needs it, and a replay of that recipe reproduces the gap exactly.
+    ``build_extensions_not_carried`` names the build's compiled extensions the
+    framework root never received: a build installs nothing by itself, its
+    outputs reach the root only as artifacts a specialist declares, and the ones
+    left behind surface much later as an op the loaded extension does not
+    export. ``levers_without_readers`` names accepted env levers the framework
+    tree has no reader for: setting one on a replay reproduces nothing.
+
+    An absent key predates the observation and yields nothing. ``None`` means
+    the observation could not be read; silence there would be
+    indistinguishable from a clean scan, which is the certification this exists
+    to withhold. Only string names become reasons: one invented from a number or
+    a mapping would refuse a replay over junk.
     """
-    if "build_extensions_not_carried" not in section:
+    if key not in section:
         return []
-    missing = section["build_extensions_not_carried"]
-    if missing is None:
-        # A linked build whose outputs could not be read. Silence here would be
-        # indistinguishable from a scan that found everything carried, which is
-        # the certification this exists to withhold.
-        return [_reason("build_carry_unverified", "build_extensions_not_carried")]
-    if not isinstance(missing, (list, tuple)):
+    names = section[key]
+    if names is None:
+        return [_reason(unverified_code, key)]
+    if not isinstance(names, (list, tuple)):
         return []
-    # Only names: a reason invented from a number or a mapping would refuse a
-    # replay over junk, which is the opposite of what a closed shape is for.
-    return [
-        _reason("build_extensions_not_carried", name.strip())
-        for name in missing
-        if isinstance(name, str) and name.strip()
-    ]
-
-
-def _lever_reasons(section: Mapping[str, Any]) -> list[dict[str, Any]]:
-    """Name accepted env levers the framework tree has no reader for.
-
-    Setting one on a replay reproduces nothing: the patch that introduced the
-    knob is not among the ones being replayed, so the recipe carries an
-    instruction with no effect and says nothing about it.
-    """
-    if "levers_without_readers" not in section:
-        return []
-    unread = section["levers_without_readers"]
-    if unread is None:
-        return [_reason("levers_unverified", "levers_without_readers")]
-    if not isinstance(unread, (list, tuple)):
-        return []
-    return [_reason("lever_has_no_reader", name.strip()) for name in unread if isinstance(name, str) and name.strip()]
+    return [_reason(item_code, name.strip()) for name in names if isinstance(name, str) and name.strip()]
 
 
 def _closure_reasons(section: Mapping[str, Any]) -> list[dict[str, Any]]:
@@ -645,12 +659,7 @@ def _credential_reasons(
             reasons.append(_reason("credential_required", f"step[{index}]"))
         if step.get("kind") == BUILD_KIND:
             inputs = step.get("build_inputs") or {}
-            command = inputs.get("build_command") or {}
-            if (
-                inputs.get("credential_class")
-                or inputs.get("credential_channels")
-                or (isinstance(command, Mapping) and command.get("credential_class"))
-            ):
+            if inputs.get("credential_class") or inputs.get("credential_channels"):
                 reasons.append(_reason("credential_required", f"step[{index}]"))
     for row in enablement.get("setup_executions") or []:
         if isinstance(row, Mapping) and row.get("credential_channels"):
@@ -664,19 +673,22 @@ def _credential_reasons(
     return reasons
 
 
-def _payload_references(
-    section: Mapping[str, Any],
-    steps: Sequence[Mapping[str, Any]],
-) -> list[tuple[str, str, str, str]]:
-    """Return ``(code, scope, path, sha256)`` for every byte a replay is handed.
+class _PayloadReference(NamedTuple):
+    """A byte payload the recipe names, with the refusal its absence earns.
 
-    The recipe carries manifests, digests and class names; these name the bytes
-    behind them, each with the refusal its absence earns and, where its recorder
-    took one, the digest the delivered bytes must still hash to. A patch step is
-    not among them: its own ``path`` names the authoring workspace no bundle
-    ships, while the content it produced is its root's snapshot payload.
+    ``sha256`` is ``""`` where the recorder took no digest; where it took one,
+    a delivery carrying different bytes is not carrying this payload.
     """
-    refs: list[tuple[str, str, str, str]] = []
+
+    code: str
+    scope: str
+    path: str
+    sha256: str
+
+
+def _snapshot_payload_references(section: Mapping[str, Any]) -> list[_PayloadReference]:
+    """Return the captured files each source snapshot promises a replay."""
+    refs: list[_PayloadReference] = []
     for snapshot in section.get("source_snapshots") or []:
         if not isinstance(snapshot, Mapping):
             continue
@@ -687,36 +699,32 @@ def _payload_references(
         # reference at all has nowhere for one to be.
         payloads = [str(row.get("rel") or "").strip("/") for row in rows if str(row.get("op") or "") != "delete"]
         if not ref:
-            refs.append(("source_snapshot_missing", root_id, "", ""))
+            refs.append(_PayloadReference("source_snapshot_missing", root_id, "", ""))
             continue
-        refs.extend(("source_snapshot_missing", root_id, f"{ref}/files/{rel}", "") for rel in payloads if rel)
-    accepted_config = section.get("accepted_config") or {}
-    config_path = str(accepted_config.get("config_path") or "").strip("/")
-    if config_path:
-        # PORT NOTE: no producer records ``config_digest`` today, so this degrades to a
-        # presence check. The read stays so the reference re-binds to bytes the moment a
-        # recorder writes the digest again.
-        digest = str(accepted_config.get("config_digest") or "")
-        refs.append(("artifact_not_self_contained", "config_path", config_path, digest))
-    for index, step in enumerate(steps):
-        # A digest names the bytes an install consumed; only the delivery makes
-        # them obtainable.
-        # PORT NOTE: ``input_identity`` is not recorded on any step today, so this loop is
-        # inert. It is the enforcement point for install payloads and must be here when the
-        # setup ledger records identities again.
-        for identity in step.get("input_identity") or ():
-            if not isinstance(identity, Mapping):
-                continue
-            rel = str(identity.get("rel") or "").strip("/")
-            if rel:
-                refs.append(("artifact_not_self_contained", f"step[{index}]", rel, str(identity.get("sha256") or "")))
+        refs.extend(
+            _PayloadReference("source_snapshot_missing", root_id, f"{ref}/files/{rel}", "") for rel in payloads if rel
+        )
     return refs
 
 
-def referenced_payloads(
-    section: Mapping[str, Any],
-    steps: Sequence[Mapping[str, Any]],
-) -> set[tuple[str, str]]:
+def _payload_references(section: Mapping[str, Any]) -> list[_PayloadReference]:
+    """Return a reference to every byte a replay is handed.
+
+    The recipe carries manifests, digests and class names; these name the bytes
+    behind them, each with the refusal its absence earns and, where its recorder
+    took one, the digest the delivered bytes must still hash to. A patch step is
+    not among them: its own ``path`` names the authoring workspace no bundle
+    ships, while the content it produced is its root's snapshot payload.
+    """
+    refs = _snapshot_payload_references(section)
+    accepted_config = section.get("accepted_config") or {}
+    config_path = str(accepted_config.get("config_path") or "").strip("/")
+    if config_path:
+        refs.append(_PayloadReference("artifact_not_self_contained", "config_path", config_path, ""))
+    return refs
+
+
+def referenced_payloads(section: Mapping[str, Any]) -> set[tuple[str, str]]:
     """Return the ``(path, sha256)`` payloads a delivery must be asked about.
 
     The digest is ``""`` where the recipe recorded none; where it recorded one,
@@ -724,14 +732,10 @@ def referenced_payloads(
     referenced under two digests yields two entries: two occurrences consumed
     different bytes there, and a delivery holding one is not holding the other.
     """
-    return {(path, digest) for _code, _scope, path, digest in _payload_references(section, steps) if path}
+    return {(ref.path, ref.sha256) for ref in _payload_references(section) if ref.path}
 
 
-def _delivery_reasons(
-    section: Mapping[str, Any],
-    steps: Sequence[Mapping[str, Any]],
-    delivered: Iterable[tuple[str, str]],
-) -> list[dict[str, Any]]:
+def _delivery_reasons(section: Mapping[str, Any], delivered: Iterable[tuple[str, str]]) -> list[dict[str, Any]]:
     """Refuse a bundle whose referenced bytes it does not actually carry.
 
     A reference the delivery omits is not a thinner recipe -- it is one an
@@ -743,9 +747,9 @@ def _delivery_reasons(
     """
     packaged = {(str(path).strip("/"), str(digest or "")) for path, digest in delivered}
     reasons: list[dict[str, Any]] = []
-    for code, scope, path, digest in _payload_references(section, steps):
-        if (path, digest) not in packaged:
-            reasons.append(_reason(code, scope))
+    for ref in _payload_references(section):
+        if (ref.path, ref.sha256) not in packaged:
+            reasons.append(_reason(ref.code, ref.scope))
     return reasons
 
 
@@ -787,12 +791,18 @@ def evaluate_replay_sufficiency(
     reasons.extend(_artifact_reasons(section))
     reasons.extend(_setup_reasons(enablement))
     reasons.extend(_build_reasons(enablement, steps))
-    reasons.extend(_carried_extension_reasons(section))
-    reasons.extend(_lever_reasons(section))
+    reasons.extend(
+        _tristate_name_reasons(
+            section, "build_extensions_not_carried", "build_carry_unverified", "build_extensions_not_carried"
+        )
+    )
+    reasons.extend(
+        _tristate_name_reasons(section, "levers_without_readers", "levers_unverified", "lever_has_no_reader")
+    )
     reasons.extend(_closure_reasons(section))
     reasons.extend(_credential_reasons(enablement, section, steps))
     if delivered_payloads is not None:
-        reasons.extend(_delivery_reasons(section, steps, delivered_payloads))
+        reasons.extend(_delivery_reasons(section, delivered_payloads))
     deduped: list[dict[str, Any]] = []
     for reason in reasons:
         if reason not in deduped:

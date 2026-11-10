@@ -5,6 +5,8 @@
 
 from __future__ import annotations
 
+import importlib.util
+import logging
 import json
 import sys
 import types
@@ -12,6 +14,9 @@ from pathlib import Path
 
 import pytest
 
+from hyperloom.inference_optimizer.session.optimization_journal import Journal, JournalEntry
+from hyperloom.inference_optimizer.session.session_paths import decision_trace_path
+from hyperloom.inference_optimizer.trace.decision_trace import write_session_decision_trace
 from hyperloom.inference_optimizer.trace import langfuse_mapping as lfmap
 from hyperloom.inference_optimizer.trace import langfuse_emitter as lfe
 
@@ -24,6 +29,7 @@ class _FakeObservation:
         self.kind = kind
         self.kwargs = kwargs
         self.ended = False
+        self.end_calls = 0
         self.end_time = None
         self.trace_update: dict | None = None
         self.observation_scores: list[dict] = []
@@ -40,6 +46,7 @@ class _FakeObservation:
         self._sink.observation_scores.append(kwargs)
 
     def end(self, **kwargs):
+        self.end_calls += 1
         self.ended = True
         self.end_time = kwargs.get("end_time")
 
@@ -181,6 +188,36 @@ def test_enabled_but_sdk_missing_is_noop(tmp_path, monkeypatch):
     assert em.enabled is False
 
 
+def test_sdk_import_error_other_than_missing_module_propagates(tmp_path, monkeypatch):
+    _enable_env(monkeypatch)
+    broken = types.ModuleType("langfuse")
+
+    def _explode(name):
+        raise RuntimeError("sdk is broken")
+
+    broken.__getattr__ = _explode
+    monkeypatch.setitem(sys.modules, "langfuse", broken)
+    with pytest.raises(RuntimeError, match="sdk is broken"):
+        lfe.LangfuseEmitter(tmp_path)
+
+
+def test_sdk_availability_is_false_for_a_module_without_a_spec(monkeypatch):
+    def _no_spec(_name):
+        raise ValueError("langfuse.__spec__ is None")
+
+    monkeypatch.setattr(importlib.util, "find_spec", _no_spec)
+    assert lfe._sdk_available() is False
+
+
+def test_sdk_availability_lets_an_unexpected_error_propagate(monkeypatch):
+    def _explode(_name):
+        raise RuntimeError("finder is broken")
+
+    monkeypatch.setattr(importlib.util, "find_spec", _explode)
+    with pytest.raises(RuntimeError, match="finder is broken"):
+        lfe._sdk_available()
+
+
 def test_all_gates_pass_enables(tmp_path, monkeypatch):
     _enable_env(monkeypatch)
     client = _FakeClient()
@@ -318,6 +355,44 @@ def test_redact_env_redacts_custom_headers_and_value_shaped_secrets():
     assert "anothersecretvalue" not in snap["GATEWAY_HDR"]
 
 
+def test_session_start_masks_extra_env_pins_the_cli_exported(monkeypatch):
+    # The CLI serializes --extra-env into one JSON var whose name carries no marker; each pin is masked by its own name.
+    import os
+
+    from hyperloom.inference_optimizer.cli import launch_shape
+
+    monkeypatch.delenv("INFERENCE_OPTIMIZER_EXTRA_ENV", raising=False)
+    launch_shape._export_operator_launch_shape(
+        server_args="",
+        extra_env={
+            "HF_TOKEN": "hf_plaintextvalue",
+            "OTEL_EXPORTER_OTLP_HEADERS": "Authorization=plaintextvalue",
+            "VLLM_MAX_NUM_BATCHED_TOKENS": "8192",
+            "SGLANG_USE_AITER_FP8_PER_TOKEN": "1",
+        },
+    )
+    try:
+        payload = lfmap.session_start_payload({}, env=os.environ)
+    finally:
+        os.environ.pop("INFERENCE_OPTIMIZER_EXTRA_ENV", None)
+
+    raw = payload["env"]["INFERENCE_OPTIMIZER_EXTRA_ENV"]
+    assert "plaintextvalue" not in raw
+    assert json.loads(raw) == {
+        "HF_TOKEN": "[REDACTED]",
+        "OTEL_EXPORTER_OTLP_HEADERS": "[REDACTED]",
+        "VLLM_MAX_NUM_BATCHED_TOKENS": "8192",
+        "SGLANG_USE_AITER_FP8_PER_TOKEN": "1",
+    }
+
+
+@pytest.mark.parametrize("raw", ['{"HF_TOKEN": "hf_plaintextvalue"', '["HF_TOKEN=hf_plaintextvalue"]'])
+def test_extra_env_snapshot_that_is_not_a_json_object_is_masked_whole(raw):
+    snap = lfmap.redact_env({"INFERENCE_OPTIMIZER_EXTRA_ENV": raw})
+
+    assert snap == {"INFERENCE_OPTIMIZER_EXTRA_ENV": "***redacted***"}
+
+
 def test_session_start_is_idempotent(tmp_path, monkeypatch):
     _enable_env(monkeypatch)
     client = _FakeClient()
@@ -391,6 +466,20 @@ def test_token_and_conversation_pair_into_one_generation(tmp_path, monkeypatch):
         "cache_read_input": 7,
     }
     assert g.ended is True
+
+
+def test_record_llm_call_propagates_buffer_failure(tmp_path, monkeypatch):
+    _enable_env(monkeypatch)
+    _install_fake_sdk(monkeypatch, _FakeClient())
+    em = lfe.LangfuseEmitter(tmp_path)
+
+    def buffer_fails(*_args, **_kwargs):
+        raise RuntimeError("buffer bug")
+
+    monkeypatch.setattr(em, "_buffer", buffer_fails)
+
+    with pytest.raises(RuntimeError):
+        em.record_llm_call(_llm_row())
 
 
 def test_failed_call_emits_immediately_with_error_level(tmp_path, monkeypatch):
@@ -530,8 +619,8 @@ def test_reasoning_tokens_reach_usage_details(tmp_path, monkeypatch):
     assert usage["output"] == 40
 
 
-def test_flush_retries_only_the_step_that_failed(tmp_path, monkeypatch):
-    """A partial reconcile is not marked flushed; the retry re-runs only what failed."""
+def test_a_failed_step_is_retried_without_re_emitting_what_landed(tmp_path, monkeypatch):
+    """A partial reconcile is not final; the retry re-sends nothing that already landed."""
     _enable_env(monkeypatch)
     client = _FakeClient()
     _install_fake_sdk(monkeypatch, client)
@@ -550,13 +639,12 @@ def test_flush_retries_only_the_step_that_failed(tmp_path, monkeypatch):
 
     em.flush_session()
     assert em._flushed is False
-    assert "decision_scores" not in em._flush_steps_done
+    assert lfe.read_receipt(sd)["counts_final"] is False
     assert len(client.generations) == 1
 
     em.flush_session()
     assert calls["scores"] == 2
     assert em._flushed is True
-    # The step that already succeeded did not re-emit its generation.
     assert len(client.generations) == 1
 
 
@@ -582,7 +670,6 @@ def test_flush_is_not_final_until_client_flush_succeeds(tmp_path, monkeypatch):
 
     em.flush_session()
     assert em._flushed is False
-    assert "client_flush" not in em._flush_steps_done
     assert lfe.read_receipt(sd)["counts_final"] is False
 
     em.flush_session()
@@ -612,9 +699,8 @@ def test_failed_generation_is_kept_for_a_later_retry(tmp_path, monkeypatch):
     monkeypatch.setattr(em, "_emit_generation", _flaky_emit)
 
     em.flush_session()
-    # The step reported itself unfinished and the row is still buffered.
+    # The flush reported itself unfinished and the row is still buffered.
     assert em._flushed is False
-    assert "pending_halves" not in em._flush_steps_done
     assert client.generations == []
 
     monkeypatch.setattr(em, "_emit_generation", real_emit)
@@ -623,72 +709,157 @@ def test_failed_generation_is_kept_for_a_later_retry(tmp_path, monkeypatch):
     assert em._flushed is True
 
 
-def test_ext_shard_send_failure_is_retried_without_duplicates(tmp_path, monkeypatch):
-    """A failed shard row is resumed, and the rows that landed are not re-sent."""
-    _enable_env(monkeypatch)
-    client = _FakeClient()
-    _install_fake_sdk(monkeypatch, client)
-    sd = _seed_trace_dir(tmp_path)
-    shard = sd / "reports" / "trace" / "ext" / "forge-7.jsonl"
-    shard.write_text(
-        "\n".join(json.dumps(_llm_row(component="forge", role=None, call_id=f"ext-{i}")) for i in range(2)) + "\n",
-        encoding="utf-8",
+def _append_jsonl(path: Path, *rows: dict) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with path.open("a", encoding="utf-8") as fh:
+        for row in rows:
+            fh.write(json.dumps(row) + "\n")
+
+
+def _forge_iteration(iteration: int) -> dict:
+    return {"ts": "2026-06-09T15:14:54Z", "kind": "iteration", "kernel_id": "k1", "iteration": iteration}
+
+
+def _kernel_decision(task_id: str, ts: str = "2026-06-09T16:00:00Z") -> dict:
+    return {
+        "decision_id": task_id,
+        "decision": {
+            "component": "kernel_agent",
+            "operation_kind": "kernel_opt",
+            "outcome": "KEEP",
+            "task_id": task_id,
+        },
+        "phase": "KERNEL",
+        "ts": ts,
+    }
+
+
+def _journal_decision(sd: Path, task_id: str, ts: str) -> None:
+    Journal.load_or_create(sd, Journal(session_id="SID", model="m", hardware="h")).append_entry(
+        JournalEntry(phase="KERNEL", iter=1, kind="kernel", change=task_id, outcome="KEEP", task_id=task_id, ts=ts)
     )
-    em = lfe.LangfuseEmitter(sd)
-
-    real_emit = em._emit_generation
-    attempts = {"n": 0}
-
-    def _flaky_emit(**kwargs):
-        attempts["n"] += 1
-        if attempts["n"] == 2:  # the second shard row
-            return False
-        return real_emit(**kwargs)
-
-    monkeypatch.setattr(em, "_emit_generation", _flaky_emit)
-    em.flush_session()
-    assert "ext_shards" not in em._flush_steps_done
-    assert len(client.generations) == 1
-
-    monkeypatch.setattr(em, "_emit_generation", real_emit)
-    em.flush_session()
-    assert "ext_shards" in em._flush_steps_done
-    # The row that already landed was not emitted twice.
-    assert len(client.generations) == 2
-    assert em._counts["ext_shards_read"] == 1
 
 
-def test_new_emitter_resumes_the_ext_shard_cursor(tmp_path, monkeypatch):
-    """Across processes the durable unit is the row, not the step."""
+def _decision_task_ids(client: _FakeClient) -> list[str]:
+    scores = client.scores + client.observation_scores
+    return [s["metadata"]["task_id"] for s in scores if s["name"] == "decision_outcome"]
+
+
+def test_a_decision_the_writer_sorts_before_sent_ones_is_pushed_once(tmp_path, monkeypatch):
+    """Each export rewrites decision_trace.jsonl ts-sorted with fresh joins, so rows are matched by their id."""
     _enable_env(monkeypatch)
     sd = _seed_trace_dir(tmp_path)
-    shard = sd / "reports" / "trace" / "ext" / "forge-1.jsonl"
-    shard.write_text(
-        json.dumps(_llm_row(component="forge", role=None, call_id="row-0")) + "\n",
-        encoding="utf-8",
-    )
+    _journal_decision(sd, "late", "2026-06-09T17:00:00Z")
+    write_session_decision_trace(sd)
 
     first = _FakeClient()
     _install_fake_sdk(monkeypatch, first)
     lfe.LangfuseEmitter(sd).flush_session()
-    assert len(first.generations) == 1
-    assert lfe.read_receipt(sd)["ext_rows_sent"] == {"forge-1.jsonl": 1}
+    assert _decision_task_ids(first) == ["late"]
 
-    # The resumed process appends one more row to the same shard.
-    with shard.open("a", encoding="utf-8") as fh:
-        fh.write(json.dumps(_llm_row(component="forge", role=None, call_id="row-1", output_tokens=777)) + "\n")
+    _journal_decision(sd, "early", "2026-06-09T15:00:00Z")
+    _append_jsonl(sd / "reports" / "trace" / "llm_calls.jsonl", _llm_row(task_id="late"))
+    write_session_decision_trace(sd)
+    rows = [json.loads(line) for line in decision_trace_path(sd).read_text(encoding="utf-8").splitlines()]
+    assert [(r["decision"]["task_id"], r["tokens"]["calls"]) for r in rows] == [("early", 0), ("late", 1)]
 
     second = _FakeClient()
     _install_fake_sdk(monkeypatch, second)
     lfe._REGISTRY.clear()
-    em2 = lfe.LangfuseEmitter(sd)
-    assert em2._ext_rows_sent == {"forge-1.jsonl": 1}
-    em2.flush_session()
+    lfe.LangfuseEmitter(sd).flush_session()
+    assert _decision_task_ids(second) == ["early"]
 
-    # Only the new row was pushed; the first was not duplicated.
-    assert len(second.generations) == 1
-    assert second.generations[0].kwargs["usage_details"]["output"] == 777
-    assert lfe.read_receipt(sd)["ext_rows_sent"] == {"forge-1.jsonl": 2}
+
+def test_new_emitter_resumes_the_backfill_and_decision_cursors(tmp_path, monkeypatch):
+    """A resumed leg flushes into the same trace, so it must push only the rows the last leg did not."""
+    from hyperloom.inference_optimizer.session.session_paths import forge_steps_path
+
+    _enable_env(monkeypatch)
+    sd = _seed_trace_dir(tmp_path)
+    steps = forge_steps_path(sd)
+    decisions = sd / "reports" / "trace" / "decision_trace.jsonl"
+    _append_jsonl(steps, _forge_iteration(1))
+    _append_jsonl(decisions, _kernel_decision("k1"))
+
+    first = _FakeClient()
+    _install_fake_sdk(monkeypatch, first)
+    lfe.LangfuseEmitter(sd).flush_session()
+    assert first.span_named("forge:iter:1") is not None
+    assert first.span_named("optimization_step:kernel_opt") is not None
+
+    _append_jsonl(steps, _forge_iteration(2))
+    _append_jsonl(decisions, _kernel_decision("k2"))
+
+    second = _FakeClient()
+    _install_fake_sdk(monkeypatch, second)
+    lfe._REGISTRY.clear()
+    lfe.LangfuseEmitter(sd).flush_session()
+
+    forge_spans = [s.kwargs["name"] for s in second.spans if s.kwargs["name"].startswith("forge:iter:")]
+    decision_spans = [s for s in second.spans if s.kwargs["name"] == "optimization_step:kernel_opt"]
+    assert forge_spans == ["forge:iter:2"]
+    assert [s.kwargs["metadata"]["task_id"] for s in decision_spans] == ["k2"]
+
+
+def test_a_decision_step_that_raised_resumes_at_the_row_it_did_not_send(tmp_path, monkeypatch):
+    """A step that raised must not have its rows marked delivered."""
+    _enable_env(monkeypatch)
+    sd = _seed_trace_dir(tmp_path)
+    _append_jsonl(sd / "reports" / "trace" / "decision_trace.jsonl", _kernel_decision("k1"), _kernel_decision("k2"))
+
+    client = _FakeClient()
+    _install_fake_sdk(monkeypatch, client)
+    em = lfe.LangfuseEmitter(sd)
+    em.record_llm_call(_llm_row(phase="KERNEL_AGENT", component="kernel_agent", role="kernel_agent"))
+    real = em._open_decision_span
+    calls = {"n": 0}
+
+    def _second_row_fails(*args, **kwargs):
+        calls["n"] += 1
+        if calls["n"] == 2:
+            raise RuntimeError("sdk hiccup")
+        return real(*args, **kwargs)
+
+    monkeypatch.setattr(em, "_open_decision_span", _second_row_fails)
+    em.flush_session()
+    assert em._flushed is False
+    flushes_before_retry = client.flushed
+    em.flush_session()
+
+    assert em._flushed is True
+    assert client.flushed == flushes_before_retry + 1
+    steps = [
+        s.kwargs["metadata"]["task_id"] for s in client.spans if s.kwargs["name"] == "optimization_step:kernel_opt"
+    ]
+    assert steps == ["k1", "k2"]
+    assert len(lfe.read_receipt(sd)["decisions_sent"]) == 2
+
+
+def test_a_kb_row_whose_send_failed_is_left_for_the_next_leg(tmp_path, monkeypatch):
+    """A swallowed send is not a delivered row."""
+    from hyperloom.inference_optimizer.session.session_paths import forge_steps_path
+
+    _enable_env(monkeypatch)
+    sd = _seed_trace_dir(tmp_path)
+    _append_jsonl(forge_steps_path(sd), _forge_iteration(1))
+    _install_fake_sdk(monkeypatch, _FakeClient())
+    real_start = lfe._start_obs
+
+    def _forge_spans_fail(parent, **kwargs):
+        if str(kwargs.get("name", "")).startswith("forge:iter"):
+            raise RuntimeError("sdk hiccup")
+        return real_start(parent, **kwargs)
+
+    monkeypatch.setattr(lfe, "_start_obs", _forge_spans_fail)
+    lfe.LangfuseEmitter(sd).flush_session()
+    assert forge_steps_path(sd).relative_to(sd).as_posix() not in lfe.read_receipt(sd)["rows_sent"]
+
+    monkeypatch.setattr(lfe, "_start_obs", real_start)
+    lfe._REGISTRY.clear()
+    second = _FakeClient()
+    _install_fake_sdk(monkeypatch, second)
+    lfe.LangfuseEmitter(sd).flush_session()
+    assert second.span_named("forge:iter:1") is not None
 
 
 def test_one_shot_push_is_claimed_across_processes(tmp_path, monkeypatch):
@@ -891,7 +1062,7 @@ def test_module_record_session_breakdown_reads_file(tmp_path, monkeypatch):
 
 def _seed_trace_dir(tmp_path: Path) -> Path:
     sd = tmp_path / "SID"
-    (sd / "reports" / "trace" / "ext").mkdir(parents=True)
+    (sd / "reports" / "trace").mkdir(parents=True)
     _write_manifest(sd)
     return sd
 
@@ -910,34 +1081,12 @@ def test_flush_emits_unpaired_token_only_generation(tmp_path, monkeypatch):
     assert client.flushed == 1
 
 
-def test_flush_backfills_ext_shards(tmp_path, monkeypatch):
-    _enable_env(monkeypatch)
-    client = _FakeClient()
-    _install_fake_sdk(monkeypatch, client)
-    sd = _seed_trace_dir(tmp_path)
-    shard = sd / "reports" / "trace" / "ext" / "forge-123.jsonl"
-    shard.write_text(
-        json.dumps(_llm_row(component="forge", role=None, input_tokens=500, output_tokens=60)) + "\n",
-        encoding="utf-8",
-    )
-    em = lfe.LangfuseEmitter(sd)
-    em.flush_session()
-    geak_gens = [g for g in client.generations if g.kwargs["metadata"]["component"] == "forge"]
-    assert len(geak_gens) == 1
-    assert geak_gens[0].kwargs["usage_details"]["input"] == 500
-    assert geak_gens[0].kwargs["metadata"]["has_text"] is False
-
-
 def test_flush_session_is_idempotent_no_duplicate_reemit(tmp_path, monkeypatch):
-    """A second flush_session() must NOT re-scan leftovers / decision_trace and re-emit (would duplicate Generations/Scores)."""
+    """A second flush_session() must not re-emit what the first sent (would duplicate Generations/Scores)."""
     _enable_env(monkeypatch)
     client = _FakeClient()
     _install_fake_sdk(monkeypatch, client)
     sd = _seed_trace_dir(tmp_path)
-    (sd / "reports" / "trace" / "ext" / "forge-1.jsonl").write_text(
-        json.dumps(_llm_row(component="forge", role=None, input_tokens=500, output_tokens=60)) + "\n",
-        encoding="utf-8",
-    )
     em = lfe.LangfuseEmitter(sd)
     em.record_llm_call(_llm_row())  # unpaired token half
 
@@ -950,6 +1099,32 @@ def test_flush_session_is_idempotent_no_duplicate_reemit(tmp_path, monkeypatch):
     assert len(client.generations) == gens_after_first
 
 
+def test_a_later_flush_ships_what_was_recorded_after_the_close_flush(tmp_path, monkeypatch):
+    """CLOSE flushes from inside the run, so the shutdown flush must push every row recorded after it."""
+    from hyperloom.inference_optimizer.session.session_paths import forge_steps_path
+
+    _enable_env(monkeypatch)
+    client = _FakeClient()
+    _install_fake_sdk(monkeypatch, client)
+    sd = _seed_trace_dir(tmp_path)
+    em = lfe.LangfuseEmitter(sd)
+    em.record_llm_call(_llm_row(phase="KERNEL_AGENT", component="kernel_agent", role="kernel_agent"))
+    em.flush_session()
+    assert em._flushed is True
+
+    em.record_llm_call(_llm_row(phase="CLOSE", call_id="late"))
+    _append_jsonl(forge_steps_path(sd), _forge_iteration(1))
+    _append_jsonl(sd / "reports" / "trace" / "decision_trace.jsonl", _kernel_decision("k1"))
+    em.flush_session()
+
+    assert [g.kwargs["metadata"]["phase"] for g in client.generations] == ["KERNEL_AGENT", "CLOSE"]
+    assert client.span_named("forge:iter:1") is not None
+    assert _decision_task_ids(client) == ["k1"]
+    # The SDK warns on ending a span twice, so a repeat flush ends only the spans opened since the last one.
+    assert [s.end_calls for s in client.spans] == [1] * len(client.spans)
+    assert em._flushed is True
+
+
 def test_flush_creates_decision_scores(tmp_path, monkeypatch):
     _enable_env(monkeypatch)
     client = _FakeClient()
@@ -959,6 +1134,7 @@ def test_flush_creates_decision_scores(tmp_path, monkeypatch):
     dtrace.write_text(
         json.dumps(
             {
+                "decision_id": "d2",
                 "decision": {
                     "change": "tp_sweep",
                     "component": "kernel_agent",
@@ -975,6 +1151,7 @@ def test_flush_creates_decision_scores(tmp_path, monkeypatch):
         + "\n"
         + json.dumps(
             {
+                "decision_id": "d3",
                 "decision": {
                     "change": "radix",
                     "component": "grid",
@@ -1024,6 +1201,7 @@ def test_flush_emits_proposal_score_calibration(tmp_path, monkeypatch):
     dtrace.write_text(
         json.dumps(
             {
+                "decision_id": "d4",
                 "decision": {
                     "change": "tp_sweep",
                     "component": "specialist:perf",
@@ -1067,6 +1245,7 @@ def test_flush_emits_predicted_gain_calibration(tmp_path, monkeypatch):
     dtrace.write_text(
         json.dumps(
             {
+                "decision_id": "d5",
                 "decision": {
                     "change": "tp_sweep",
                     "component": "specialist:perf",
@@ -1561,14 +1740,11 @@ def test_flush_writes_receipt_file_with_final_counts(tmp_path, monkeypatch):
     client = _FakeClient()
     _install_fake_sdk(monkeypatch, client)
     sd = _seed_trace_dir(tmp_path)
-    # one ext shard + one unpaired token half + one decision so flush counts move.
-    (sd / "reports" / "trace" / "ext" / "forge-1.jsonl").write_text(
-        json.dumps(_llm_row(component="forge", role=None)) + "\n",
-        encoding="utf-8",
-    )
+    # one unpaired token half + one decision so flush counts move.
     (sd / "reports" / "trace" / "decision_trace.jsonl").write_text(
         json.dumps(
             {
+                "decision_id": "d6",
                 "decision": {
                     "change": "x",
                     "component": "kernel_agent",
@@ -1618,7 +1794,6 @@ def test_pair_key_distinguishes_same_second_burst():
         "tick": 3,
         "role": "assistant",
         "task_id": "t1",
-        "dyn_id": "d1",
         "ts": "2026-06-11T10:00:00.100Z",
     }
     turn_a = {**base, "turn": 1}
@@ -1636,7 +1811,6 @@ def test_pair_key_matches_token_and_text_halves_of_one_call():
         "role": "assistant",
         "turn": 2,
         "task_id": "tk",
-        "dyn_id": "dy",
         "ts": "2026-06-11T10:00:01.020Z",
     }
     text = {**token, "ts": "2026-06-11T10:00:01.450Z"}
@@ -1650,7 +1824,6 @@ def test_pair_key_distinguishes_concurrent_models_same_second():
         "tick": None,
         "role": "proposal_scorer",
         "task_id": None,
-        "dyn_id": None,
         "turn": None,
         "ts": "2026-06-11T10:00:00.300Z",
     }
@@ -1672,7 +1845,7 @@ def test_pair_key_scorer_token_and_text_pair_when_roles_match():
 
 
 def test_pair_key_degrades_when_turn_absent():
-    """Rows without turn/task_id/dyn_id still produce a stable key rather than raising."""
+    """Rows without turn/task_id still produce a stable key rather than raising."""
     row = {"component": "forge", "tick": 1, "role": None, "ts": "2026-06-11T10:00:00Z"}
     k = lfmap.pair_key(row)
     assert lfmap.pair_key(dict(row)) == k
@@ -1793,3 +1966,35 @@ def test_record_status_send_failure_is_swallowed(tmp_path, monkeypatch):
     em.record_status(_status())  # must not raise
     assert em._counts["errors"] >= 1
     assert em._counts["status_updates_sent"] == 0
+
+
+def test_a_failed_span_end_is_counted_as_an_error(tmp_path):
+    em = lfe.LangfuseEmitter(tmp_path / "SID")
+
+    class _UnendableSpan:
+        def end(self):
+            raise RuntimeError("span already exported")
+
+    em._unended_spans.append(_UnendableSpan())
+    em._close_spans()
+
+    assert em._counts["errors"] == 1
+    assert em._unended_spans == []
+
+
+def test_a_score_the_sdk_refused_is_logged_at_warning_with_its_traceback(tmp_path, monkeypatch, caplog):
+    _enable_env(monkeypatch)
+    sd = _seed_trace_dir(tmp_path)
+    _append_jsonl(sd / "reports" / "trace" / "decision_trace.jsonl", _kernel_decision("k1"))
+    _install_fake_sdk(monkeypatch, _FakeClient())
+
+    def _refuse(self, **kwargs):
+        raise RuntimeError("score refused")
+
+    monkeypatch.setattr(_FakeObservation, "score", _refuse)
+    monkeypatch.setattr(_FakeClient, "create_score", _refuse)
+    caplog.set_level(logging.WARNING, logger=lfe.__name__)
+    lfe.LangfuseEmitter(sd).flush_session()
+
+    failed = [r for r in caplog.records if r.getMessage() == "langfuse: create_score failed for decision_outcome"]
+    assert [(r.levelno, repr(r.exc_info[1])) for r in failed] == [(logging.WARNING, "RuntimeError('score refused')")]

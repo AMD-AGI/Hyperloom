@@ -39,13 +39,13 @@ def test_shared_state_keeps_params_no_promote_streak_as_fact():
     assert "params_no_promote_streak" in s.to_prompt_summary()
 
 
-def test_shared_state_keeps_tick_and_target_gap_pct():
-    """``tick`` (counter) and ``target_gap_pct`` (fact) both stay."""
+def test_shared_state_keeps_tick():
+    """``tick`` (counter) stays; the objective gap is derived on read, not stored."""
     s = SharedState()
     s.increment_tick()
     s.increment_tick()
     assert s.tick == 2
-    assert s.target_gap_pct == 0.0
+    assert not hasattr(s, "target_gap_pct")
 
 
 def test_shared_state_all_top_actions_policy_locked_removed():
@@ -143,33 +143,38 @@ def test_coordinator_source_has_no_scoreboard_callers():
 
 def test_pruned_family_advisory_observation_has_no_scoreboard_vocab():
     """The pruned-family advisory string must not mention "Action scores"."""
-    from hyperloom.orchestrator.loop import intent_router as _c
+    import asyncio
+    from types import SimpleNamespace
 
-    src = Path(_c.__file__).read_text(encoding="utf-8")
-    advisory_idx = src.find('"delegate_pruned_advisory"')
-    assert advisory_idx >= 0
-    window = src[advisory_idx : advisory_idx + 800]
-    assert "Action scores" not in window
-    assert "phase-allowed action" in window
+    from hyperloom.orchestrator.loop.intent_router import IntentRouter
+
+    observed: list[dict] = []
+
+    async def _record(_source, _type, payload):
+        observed.append(payload)
+
+    router = SimpleNamespace(bus=SimpleNamespace(record_observation=_record))
+    asyncio.run(IntentRouter._note_pruned_advisory(router, "orchestration", "explore", "delegate_pruned_advisory"))
+
+    (payload,) = observed
+    assert payload["kind"] == "delegate_pruned_advisory"
+    assert "Action scores" not in payload["hint"]
+    assert "phase-allowed action" in payload["hint"]
 
 
 def test_orchestration_prompt_has_no_scoreboard_block():
     """DECISION FRAMEWORK must not steer toward live scoring vocab."""
     from hyperloom.orchestrator.prompts.prompt_builder import (
-        FULL_ENABLED_ACTIONS,
         build_orchestration_prompt,
+        SessionContext,
     )
-    from hyperloom.inference_optimizer.protocol.action_surfaces import ACTION_CATALOGUE
+    from hyperloom.inference_optimizer.protocol.action_surfaces import ACTION_CATALOGUE, FULL_ENABLED_ACTIONS
 
     reg = ACTION_CATALOGUE
     prompt = build_orchestration_prompt(
         action_registry=reg,
         enabled_actions=FULL_ENABLED_ACTIONS,
-        framework="sglang",
-        kernel_enabled=True,
-        objective_kind="gain_pct",
-        objective_value=10.0,
-        max_minutes=120,
+        session=SessionContext(framework="sglang", objective_kind="gain_pct", objective_value=10.0, max_minutes=120),
     )
     forbidden = (
         "eff_score=",
@@ -222,8 +227,7 @@ def test_kernel_opt_body_references_v08_decision_signals():
     for signal in (
         "state.gaps[]",
         "last_action_failures",
-        "last_kernel_opt",
-        "KERNEL_AGENT plateau",
+        "pending_keep_kernels",
         "rejected_kernel_ids",
     ):
         assert signal in body, (

@@ -8,8 +8,8 @@ from __future__ import annotations
 import pytest
 
 from hyperloom.common.failure_signature import classify_failure
+from hyperloom.orchestrator.specialists.prompt_inputs import SpecialistPromptInputs
 from hyperloom.orchestrator.prompts.specialist_prompt_builder import (
-    SpecialistPromptInputs,
     build_specialist_prompts,
     _render_measured_impact,
     _format_version_note,
@@ -32,13 +32,10 @@ def test_build_for_each_domain_and_framework(domain_key, framework):
     assert domain is not None
     sys_p, user_p = build_specialist_prompts(
         SpecialistPromptInputs(
-            task_id="t1",
             domain=domain,
             framework=framework,
             gpu_type="MI300X",
             tp=2,
-            hbm_gb=192.0,
-            peak_tflops=1300.0,
             precision="fp8",
             conc=64,
             isl=1024,
@@ -60,15 +57,12 @@ def test_build_for_each_domain_and_framework(domain_key, framework):
 
 def _rich_inputs(**overrides):
     base = dict(
-        task_id="t1",
         domain=get_domain("serving_specialist"),
         framework="vllm",
         framework_version="0.6.2",
         gpu_type="MI300X",
         allocated_gpu_ids=(0, 1),
         tp=2,
-        hbm_gb=192.0,
-        peak_tflops=1300.0,
         precision="fp8",
         conc=64,
         isl=1024,
@@ -80,7 +74,6 @@ def _rich_inputs(**overrides):
         gap_layer="kernel_agent",
         gap_symptom="slow decode",
         gap_evidence={"step": 1},
-        kb_subgraph={"nodes": [1, 2]},
         roofline_evidence={
             "roofline_snapshot_id": 7,
             "executive_summary": {
@@ -89,20 +82,6 @@ def _rich_inputs(**overrides):
                 "comm_pct": 3.0,
                 "top_bottleneck": "MoE",
             },
-            "kernel_roofline_top15": [
-                {
-                    "kernel_id": "k1",
-                    "name": "gemm",
-                    "gpu_pct": 30.0,
-                    "bound_type": "compute",
-                    "arithmetic_intensity": 12.3,
-                    "efficiency_percent": 55.0,
-                    "compute_utilization_pct": 60.0,
-                    "bandwidth_utilization_pct": 40.0,
-                    "recommended_actions": ["fuse"],
-                },
-                "skip-non-dict",
-            ],
             "hot_kernels_top15": [
                 {"kernel_id": "h1", "name": "attn", "gpu_pct": 20.0, "bottleneck": "memory", "source_file": "attn.py"},
             ],
@@ -147,7 +126,6 @@ def test_build_rich_user_prompt_sections():
     sys_p, user_p = build_specialist_prompts(_rich_inputs())
     assert "TraceLens snapshot #7" in user_p
     assert "Executive Summary" in user_p
-    assert "`k1`" in user_p
     assert "`h1`" in user_p
     assert "find-recipe result" in user_p
     assert "enable cudagraph" in user_p
@@ -161,7 +139,6 @@ def test_build_rich_user_prompt_sections():
 
 def test_cold_start_directive():
     inp = SpecialistPromptInputs(
-        task_id="t",
         domain=get_domain("serving_specialist"),
     )
     _, user_p = build_specialist_prompts(inp)
@@ -171,7 +148,6 @@ def test_cold_start_directive():
 def test_cold_start_does_not_ask_for_a_field_the_safety_gate_forbids():
     """It used to direct the fallback proposals to carry ``confidence: low`` -- a field in FORBIDDEN_PROPOSAL_FIELDS -- so a compliant specialist tripped the guard on exactly the round where it was the only source of ideas."""
     inp = SpecialistPromptInputs(
-        task_id="t",
         domain=get_domain("serving_specialist"),
     )
     _, user_p = build_specialist_prompts(inp)
@@ -183,7 +159,6 @@ def test_cold_start_does_not_ask_for_a_field_the_safety_gate_forbids():
 
 def test_research_hints_fallback():
     inp = SpecialistPromptInputs(
-        task_id="t",
         domain=get_domain("serving_specialist"),
         research_hints="prior: enable aiter",
     )
@@ -193,7 +168,6 @@ def test_research_hints_fallback():
 
 def test_pr_monitor_unavailable():
     inp = SpecialistPromptInputs(
-        task_id="t",
         domain=get_domain("serving_specialist"),
         pr_monitor_available=False,
     )
@@ -218,12 +192,26 @@ def test_scope_freeform():
 
 
 def test_gpu_autonomy_block_and_auto_retry():
-    inp = _rich_inputs(bench=True, mode="patch", auto_retry_reason="timeout on prior attempt")
+    inp = _rich_inputs(mode="patch", auto_retry_reason="timeout on prior attempt")
     sys_p, _ = build_specialist_prompts(inp)
     assert "On-GPU autonomy" in sys_p
     assert "specialists.rebench" in sys_p
     assert "Auto-retry notice" in sys_p
     assert "port 8888" not in sys_p
+
+
+def test_output_protocol_leaves_liveness_to_the_runner():
+    """The runner decides liveness from the CLI's own output, so the prompt asks for no heartbeat."""
+    sys_p, _ = build_specialist_prompts(_rich_inputs())
+    assert "- ``residual_questions`` carries to the next specialist round.\n\nHard cap: at most" in sys_p
+
+
+def test_auto_retry_notice_asks_only_for_scoped_work():
+    sys_p, _ = build_specialist_prompts(_rich_inputs(auto_retry_reason="timeout on prior attempt"))
+    assert (
+        "Scope your investigation so you reach a single ``specialist_done`` within ``max_turns`` this time: prefer "
+        "fewer, higher-confidence probes, and avoid long-running shell that risks the same timeout."
+    ) in sys_p
 
 
 def test_no_gpu_iron_rule_retains_serving_port_boundary():
@@ -242,7 +230,6 @@ def test_render_measured_impact_variants():
 
 def test_format_version_note_empty_when_same_or_unknown():
     inp = SpecialistPromptInputs(
-        task_id="t",
         domain=get_domain("serving_specialist"),
         framework="vllm",
         framework_version="1.0",

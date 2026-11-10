@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import logging
 from collections.abc import Iterable, Mapping
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, NamedTuple
 
@@ -22,6 +23,7 @@ __all__ = [
     "RESIDUAL_NO_EVENT",
     "RESIDUAL_RUNNING",
     "TIMELINE_SEQUENCE_FIELD",
+    "EventHeader",
     "ResidualEvent",
     "build_envelope",
     "finish_event",
@@ -58,6 +60,16 @@ RESIDUAL_RUNNING = "running"
 RESIDUAL_NO_EVENT = "no_event"
 
 
+@dataclass(frozen=True)
+class EventHeader:
+    """Which timeline event a write is about, and when it started."""
+
+    event_type: str
+    event: str
+    kind: str = ""
+    start_time: str = ""
+
+
 class ResidualEvent(NamedTuple):
     """One event a killed session left behind."""
 
@@ -67,112 +79,88 @@ class ResidualEvent(NamedTuple):
 
 
 def build_envelope(
+    header: EventHeader,
     *,
-    event_type: str,
-    event: str,
     status: str,
-    kind: str = "",
-    start_time: str = "",
     end_time: str = "",
     ext: Mapping[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Build the envelope every event type shares."""
     from ..workflow_contract import event_semantics
 
-    parse_event_id(event)
+    parse_event_id(header.event)
     envelope: dict[str, Any] = {
-        "type": str(event_type),
-        "id": str(event),
+        "type": str(header.event_type),
+        "id": str(header.event),
         "status": str(status),
     }
-    if kind:
-        envelope["kind"] = str(kind)
-    if start_time:
-        envelope["start_time"] = str(start_time)
+    if header.kind:
+        envelope["kind"] = str(header.kind)
+    if header.start_time:
+        envelope["start_time"] = str(header.start_time)
     if end_time:
         envelope["end_time"] = str(end_time)
     envelope["ext"] = dict(ext or {})
-    envelope.update(event_semantics(event_type, status, envelope["ext"]))
+    envelope.update(event_semantics(header.event_type, status, envelope["ext"]))
     return envelope
 
 
 def open_event(
+    header: EventHeader,
     *,
-    event_type: str,
-    event: str,
     event_section: str,
     producer: str,
-    kind: str = "",
-    start_time: str = "",
     ext: Mapping[str, Any] | None = None,
 ) -> int | None:
     """Write the event shell and store its sequence on the event-level fragment."""
     from ...session.sbd_v6 import record_write_warning, timeline_sequence, write_timeline_event
 
-    already = _opened_sequence(event, event_section=event_section)
+    already = _opened_sequence(header.event, event_section=event_section)
     if already is not None:
         return already
 
-    envelope = build_envelope(
-        event_type=event_type,
-        event=event,
-        status=EVENT_STATUS_RUNNING,
-        kind=kind,
-        start_time=start_time,
-        ext=ext,
-    )
+    envelope = build_envelope(header, status=EVENT_STATUS_RUNNING, ext=ext)
     try:
         write_timeline_event(envelope)
     except RECORDING_ERRORS as exc:
-        log.debug("timeline: failed to open %s event %s", event_type, event, exc_info=True)
-        _park(record_write_warning, component=f"timeline.{event_type}.open", exc=exc)
+        log.debug("timeline: failed to open %s event %s", header.event_type, header.event, exc_info=True)
+        _park(record_write_warning, component=f"timeline.{header.event_type}.open", exc=exc)
         return None
 
     sequence = timeline_sequence(envelope)
-    sink = EventSink(event, producer=producer)
+    sink = EventSink(header.event, producer=producer)
     payload: dict[str, Any] = {TIMELINE_SEQUENCE_FIELD: sequence}
-    if start_time:
-        payload["start_time"] = str(start_time)
+    if header.start_time:
+        payload["start_time"] = str(header.start_time)
     sink.record(event_section, payload)
     from .outcome_stage import EVENT_STAGES, record_stage_reached
 
-    if event_type in EVENT_STAGES:
+    if header.event_type in EVENT_STAGES:
         from ...session.session_binding import bound_session
 
-        record_stage_reached(bound_session(), event_type)
+        record_stage_reached(bound_session(), header.event_type)
     return sequence
 
 
 def finish_event(
+    header: EventHeader,
     *,
-    event_type: str,
-    event: str,
     sequence: int | None,
     status: str,
     ext: Mapping[str, Any],
-    kind: str = "",
-    start_time: str = "",
     end_time: str = "",
 ) -> Path | None:
     """Update the event in place with its assembled ``ext`` and final status."""
     from ...session.sbd_v6 import record_write_warning, set_timeline_sequence, write_timeline_event
 
-    envelope = build_envelope(
-        event_type=event_type,
-        event=event,
-        status=status,
-        kind=kind,
-        start_time=start_time,
-        end_time=end_time,
-        ext=ext,
-    )
+    envelope = build_envelope(header, status=status, end_time=end_time, ext=ext)
     if sequence is not None:
         set_timeline_sequence(envelope, sequence)
     try:
         return write_timeline_event(envelope)
     except RECORDING_ERRORS as exc:
-        log.debug("timeline: failed to close %s event %s", event_type, event, exc_info=True)
-        _park(record_write_warning, component=f"timeline.{event_type}.finish", exc=exc)
+        log.debug("timeline: failed to close %s event %s", header.event_type, header.event, exc_info=True)
+        _park(record_write_warning, component=f"timeline.{header.event_type}.finish", exc=exc)
         return None
 
 

@@ -17,7 +17,9 @@ from typing import Any, Mapping
 
 from hyperloom.common.env_safety import is_secret_shaped_env_name
 
-from .credentials import classify_credential_value, strip_url_userinfo
+from .credentials import classify_credential_value
+from hyperloom.common.url_userinfo import strip_url_userinfo
+from .launch_flags import requested_setting_names
 
 #: ``accepted_config`` keys Hyperloom's own revalidation applies. Two of the five
 #: are subtractive, so a projection that drops them replays a *superset* of the
@@ -50,8 +52,9 @@ _LAUNCH_EVIDENCE_KEYS: tuple[str, ...] = (
 #: differently walks straight through a filter that looks correct; both
 #: spellings belong here or the published recipe carries the operator's private
 #: model path.
+#: ``model_tag`` is vLLM's positional ``serve <model>`` operand.
 _IDENTITY_PATH_FIELDS: frozenset[str] = frozenset(
-    {"model_path", "tokenizer_path", "served_model_name", "model", "tokenizer"}
+    {"model_path", "tokenizer_path", "served_model_name", "model", "tokenizer", "model_tag"}
 )
 
 _BUILD_INPUT_KEYS: tuple[str, ...] = (
@@ -61,10 +64,7 @@ _BUILD_INPUT_KEYS: tuple[str, ...] = (
     "resolved_sha",
     "gpu_arch",
     "max_jobs",
-    "torch_constraint_mode",
     "build_command",
-    "env_keys",
-    "env_digest",
     "ambient_keys",
     "ambient_digest",
     "credential_class",
@@ -105,7 +105,7 @@ def project_accepted_config(accepted_config: Mapping[str, Any] | None) -> dict[s
 
 def _is_filesystem_path(value: str) -> bool:
     text = str(value or "")
-    return text.startswith("/") or text.startswith("~/")
+    return text.startswith(("/", "~/"))
 
 
 def _is_attempt_row(entry: Any) -> bool:
@@ -208,28 +208,55 @@ def project_runtime_provenance(enablement: Mapping[str, Any]) -> dict[str, Any] 
     }
 
 
+def _acquisition_credential_class(action: Mapping[str, Any]) -> str | None:
+    """The credential class carried by the acquisition's URLs and package specs.
+
+    The first class any of them carries, there being one operator secret to
+    supply either way; ``None`` when none of them names a channel.
+    """
+    found = classify_credential_value(str(action.get("repo_url") or "")) or classify_credential_value(
+        str(action.get("index_url") or ""), option="--index-url"
+    )
+    for package in action.get("packages") or []:
+        found = found or classify_credential_value(str(package))
+    return found
+
+
 def _project_acquisition(action: Any) -> dict[str, Any] | None:
     """Reduce the kept stack action to the inputs that re-create its venv."""
     if not isinstance(action, dict) or not action:
         return None
-    credential_class = classify_credential_value(str(action.get("repo_url") or "")) or classify_credential_value(
-        str(action.get("index_url") or ""), option="--index-url"
-    )
-    packages = [str(p) for p in (action.get("packages") or [])]
-    for package in packages:
-        credential_class = credential_class or classify_credential_value(package)
     resolved = action.get("resolved_packages")
     return {
         "acquisition_method": str(action.get("acquisition_method") or ""),
         "repo_url": strip_url_userinfo(str(action.get("repo_url") or "")),
         "ref": str(action.get("ref") or ""),
         "index_url": strip_url_userinfo(str(action.get("index_url") or "")),
-        "packages": [strip_url_userinfo(p) for p in packages],
+        "packages": [strip_url_userinfo(str(p)) for p in (action.get("packages") or [])],
         "resolved_ref": str(action.get("resolved_ref") or "") or None,
         "resolved_packages": dict(resolved) if isinstance(resolved, dict) and resolved else None,
-        "credential_class": credential_class,
+        "credential_class": _acquisition_credential_class(action),
         "credential_channels": [str(c) for c in (action.get("credential_channels") or [])],
     }
+
+
+def _project_observed_identity(evidence: Mapping[str, Any], identity: Mapping[str, Any]) -> Any:
+    """Project the engine's observed identity onto what the recipe may publish.
+
+    vLLM's identity is its whole record, which can carry any setting the engine
+    resolved. Only the settings the launch asked for are published: they are
+    what the verdict confirms, and they disclose no more than the requested
+    argv itself.
+    """
+    from ...knowledge.remote_recipe.sanitize import HOST_ORIGIN_KEY, sanitize_shared_knowledge
+
+    fields = {str(k): v for k, v in identity.items() if str(k) not in _IDENTITY_PATH_FIELDS}
+    if str(evidence.get("framework") or "").strip().lower() == "vllm":
+        asked = requested_setting_names(str(evidence.get("requested_server_args") or ""))
+        fields = {k: v for k, v in fields.items() if k in asked}
+    # The sanitizer exempts a ``host_origin`` subtree from path removal;
+    # nothing in an engine's record is that, so it is dropped first.
+    return sanitize_shared_knowledge(_without_key(fields, HOST_ORIGIN_KEY))
 
 
 def project_launch_evidence(evidence: Mapping[str, Any] | None) -> tuple[dict[str, Any] | None, bool]:
@@ -260,7 +287,7 @@ def project_launch_evidence(evidence: Mapping[str, Any] | None) -> tuple[dict[st
             except ValueError:
                 argv_refused = True
         elif key == "observed_server_identity" and isinstance(value, Mapping):
-            out[key] = {str(k): v for k, v in value.items() if str(k) not in _IDENTITY_PATH_FIELDS}
+            out[key] = _project_observed_identity(evidence, value)
         else:
             out[key] = dict(value) if isinstance(value, Mapping) else value
     requested_env = evidence.get("requested_server_env")
@@ -273,6 +300,15 @@ def project_launch_evidence(evidence: Mapping[str, Any] | None) -> tuple[dict[st
             "provenance": str(warm.get("provenance") or ""),
         }
     return out, argv_refused
+
+
+def _without_key(value: Any, name: str) -> Any:
+    """``value`` with every mapping entry keyed ``name`` removed, at any depth."""
+    if isinstance(value, Mapping):
+        return {k: _without_key(v, name) for k, v in value.items() if str(k) != name}
+    if isinstance(value, (list, tuple)):
+        return [_without_key(v, name) for v in value]
+    return value
 
 
 def project_roots(roots: Any) -> list[dict[str, Any]]:
@@ -334,16 +370,13 @@ def project_build_inputs(row: Mapping[str, Any] | None) -> dict[str, Any] | None
     """Project an attempt row's recorded build inputs onto the emitted set.
 
     Every URL is emitted with its userinfo stripped and the class it carried
-    recorded instead; the build command travels as an identity, never as text.
+    recorded instead.
     """
     inputs = (row or {}).get("build_inputs")
     if not isinstance(inputs, Mapping) or not inputs:
         return None
     out: dict[str, Any] = {key: inputs.get(key) for key in _BUILD_INPUT_KEYS}
     out["repo_url"] = strip_url_userinfo(str(inputs.get("repo_url") or "")) or None
-    command = inputs.get("build_command")
-    out["build_command"] = dict(command) if isinstance(command, Mapping) and command else None
-    out["env_keys"] = [str(k) for k in (inputs.get("env_keys") or [])]
     out["ambient_keys"] = [str(k) for k in (inputs.get("ambient_keys") or [])]
     out["credential_channels"] = [str(c) for c in (inputs.get("credential_channels") or [])]
     return out

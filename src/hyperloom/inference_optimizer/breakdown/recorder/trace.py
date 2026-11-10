@@ -8,10 +8,11 @@ from __future__ import annotations
 import logging
 import os
 import sys
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Mapping
 
-from hyperloom.common.env import env_bool
+from hyperloom_common.env import env_bool
 from hyperloom.common.env_safety import redact_secret_values
 
 #: Below ``DEBUG`` because every recorder write emits an event.
@@ -32,21 +33,9 @@ log = logging.getLogger(__name__)
 #: to, and a root at ``NOTSET`` enables everything.
 _enabled = False
 
-#: Fields that carry a v4 entity's stable identity, most specific first, so a
+#: Fields that carry an entity's stable identity, most specific first, so a
 #: nested entity is named by its own id rather than its parent's.
-_ID_FIELDS = (
-    "measurement_id",
-    "adoption_id",
-    "operation_id",
-    "subject_id",
-    "artifact_id",
-    "attempt_id",
-    "substep_id",
-    "gate_id",
-    "decision_id",
-    "relation_id",
-    "kernel_id",
-)
+_ID_FIELDS = ("attempt_id", "gate_id", "decision_id", "kernel_id")
 
 #: Frames inside this directory are the SDK itself, not the caller of it.
 _SDK_DIR = str(Path(__file__).resolve().parent)
@@ -146,49 +135,54 @@ def _call_site() -> str:
     return f"via={via or '?'} from=?"
 
 
-def _emit(section: str, fields: list[str]) -> None:
+def _emit(fields: list[str]) -> None:
     """Mask one assembled trace line and log it."""
     log.log(TRACE, "breakdown %s", redact_secret_values(" ".join(fields)))
 
 
-def trace_write(
-    *,
-    section: str,
-    kind: str,
-    operation: str,
-    target: Path,
-    payload: Mapping[str, Any],
-    producer: str,
-    seq: int,
-    ts: str,
-    size: int,
-    existed: bool,
-    previous: Mapping[str, Any] | None = None,
-    error: BaseException | None = None,
-) -> None:
+@dataclass(frozen=True)
+class WriteTrace:
+    """One fragment write, or the failure of one, as the trace reports it."""
+
+    section: str
+    kind: str
+    operation: str
+    target: Path
+    payload: Mapping[str, Any]
+    producer: str
+    seq: int
+    ts: str
+    size: int
+    existed: bool
+    previous: Mapping[str, Any] | None = None
+    error: BaseException | None = None
+
+
+def trace_write(write: WriteTrace) -> None:
     """Log one fragment write, or the failure of one."""
     if not trace_enabled():
         return
+    section = write.section
     try:
         fields = [
             f"section={section}",
-            f"kind={kind}",
-            f"op={operation}",
-            "outcome=" + ("failed" if error is not None else "replaced" if existed else "created"),
-            _entity(payload),
-            f"producer={producer}",
-            f"seq={seq}",
-            f"ts={ts}",
-            f"bytes={size}",
-            f"file={target.name}",
+            f"kind={write.kind}",
+            f"op={write.operation}",
+            "outcome=" + ("failed" if write.error is not None else "replaced" if write.existed else "created"),
+            _entity(write.payload),
+            f"producer={write.producer}",
+            f"seq={write.seq}",
+            f"ts={write.ts}",
+            f"bytes={write.size}",
+            f"file={write.target.name}",
         ]
-        if previous is not None:
-            fields.append(_changed(previous, payload))
+        if write.previous is not None:
+            fields.append(_changed(write.previous, write.payload))
         fields.append(_call_site())
-        if error is not None:
-            fields.append(f"error={type(error).__name__}:{_short(error)}")
-        _emit(section, fields)
-    except Exception:
+        if write.error is not None:
+            fields.append(f"error={type(write.error).__name__}:{_short(write.error)}")
+        _emit(fields)
+    except (TypeError, ValueError):
         log.log(TRACE, "breakdown trace failed for section=%s", section, exc_info=True)
 
 
@@ -216,8 +210,8 @@ def trace_skip(
         fields.append(_call_site())
         if error is not None:
             fields.append(f"error={type(error).__name__}:{_short(error)}")
-        _emit(section, fields)
-    except Exception:
+        _emit(fields)
+    except (TypeError, ValueError):
         log.log(TRACE, "breakdown trace failed for section=%s", section, exc_info=True)
 
 
@@ -228,6 +222,7 @@ if env_bool(TRACE_ENV):
 __all__ = [
     "TRACE",
     "TRACE_ENV",
+    "WriteTrace",
     "enable_trace",
     "trace_enabled",
     "trace_skip",

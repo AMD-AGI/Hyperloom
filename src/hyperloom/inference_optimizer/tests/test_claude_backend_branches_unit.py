@@ -8,14 +8,15 @@ mode), timeout handling, the conversational session capture, and SDK-stream erro
 from __future__ import annotations
 
 import asyncio
+import logging
 from dataclasses import dataclass, field
+from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
 
 from hyperloom.orchestrator.roles import claude as cl
 from hyperloom.orchestrator.roles.base import BackendError
-from hyperloom.inference_optimizer.protocol.intent import NoIntentEmitted
 
 
 # ---- SDK fakes ------------------------------------------------------------
@@ -57,7 +58,6 @@ def _backend(messages=None, **over):
     kwargs = dict(
         sdk_query_factory=_query(messages or []),
         sdk_options_cls=_FakeOptions,
-        api_key_env="UNSET_KEY_ENV_FOR_TEST",
     )
     kwargs.update(over)
     return cl.ClaudeBackend(**kwargs)
@@ -99,17 +99,15 @@ def test_post_init_imports_sdk(monkeypatch):
     fake_q = _query([])
     fake = SimpleNamespace(query=fake_q, ClaudeAgentOptions=_FakeOptions)
     monkeypatch.setattr(cl, "_import_sdk", lambda: (fake_q, _FakeOptions, fake))
-    b = cl.ClaudeBackend(api_key_env="UNSET_KEY_ENV_FOR_TEST")
+    b = cl.ClaudeBackend()
     assert b.sdk_options_cls is _FakeOptions
     assert b.sdk_module is fake
 
 
-def test_post_init_emit_intent_setup_failure(monkeypatch):
+def test_post_init_emit_intent_setup_failure_fails_construction(monkeypatch):
     monkeypatch.setattr(cl, "build_emit_intent_server", lambda **k: (_ for _ in ()).throw(RuntimeError("boom")))
-    b = _backend()
-    assert b.mcp_server_config is None
-    assert b.mcp_tool_name is None
-    assert any("emit_intent MCP setup failed" in c.get("warn", "") for c in b.calls)
+    with pytest.raises(RuntimeError, match="^boom$"):
+        _backend()
 
 
 # ---- set_context_provider -------------------------------------------------
@@ -120,12 +118,12 @@ def test_set_context_provider_success(monkeypatch):
     assert b._context_server_config is not None
 
 
-def test_set_context_provider_failure(monkeypatch):
+def test_set_context_provider_failure_raises(monkeypatch):
     monkeypatch.setattr(cl, "build_context_tools_server", lambda provider, **k: (_ for _ in ()).throw(ValueError("x")))
     b = _backend()
-    b.set_context_provider(SimpleNamespace())
+    with pytest.raises(ValueError, match="^x$"):
+        b.set_context_provider(SimpleNamespace())
     assert b._context_server_config is None
-    assert any("context tools MCP setup failed" in c.get("warn", "") for c in b.calls)
 
 
 # ---- _build_options -------------------------------------------------------
@@ -133,15 +131,8 @@ def test_build_options_model_and_system_prompt():
     b = _backend(model="claude-x")
     opts = b._build_options(tools=["Read"], max_turns=5, system_prompt="sys")
     assert opts.kwargs["model"] == "claude-x"
-    assert opts.kwargs["system_prompt"] == "sys"
+    assert Path(opts.kwargs["system_prompt"]["path"]).read_text(encoding="utf-8") == "sys"
     assert "resume" not in opts.kwargs
-
-
-def test_build_options_raw_completion():
-    b = _backend(raw_completion=True)
-    opts = b._build_options(tools=["Read"], max_turns=8, system_prompt=None)
-    assert opts.kwargs["allowed_tools"] == []
-    assert "Bash" in opts.kwargs["disallowed_tools"]
 
 
 def test_build_options_with_context_tools(monkeypatch):
@@ -177,11 +168,12 @@ def test_instantiate_options_typeerror_propagates():
 
 
 # ---- _stderr_sink ---------------------------------------------------------
-def test_stderr_sink():
+def test_stderr_sink_logs_non_blank_lines_at_debug(caplog):
     b = _backend()
-    b._stderr_sink("  error line  ")
-    b._stderr_sink("   ")  # blank dropped
-    assert any(c.get("stderr") == "error line" for c in b.calls)
+    with caplog.at_level(logging.DEBUG, logger=cl.log.name):
+        b._stderr_sink("  error line  ")
+        b._stderr_sink("   ")
+    assert [(r.levelno, r.getMessage()) for r in caplog.records] == [(logging.DEBUG, "claude CLI stderr: error line")]
 
 
 # ---- run(): timeout -------------------------------------------------------
@@ -217,25 +209,14 @@ async def test_run_idle_timeout_allows_slow_but_live_stream():
     assert len(res.intents) == 4
 
 
-# ---- run(): no-intent raises ----------------------------------------------
-async def test_run_no_intent_raises():
-    msg = _Msg(content=[TextBlock("just text")], result="hi")
-    b = _backend(capture_turn_diagnostics=True)
-    b.sdk_query_factory = _query([msg])
-    with pytest.raises(NoIntentEmitted):
-        await b.run("hi")
-    diag = b.get_turn_diagnostic()
-    assert diag["outcome"] == "no_intent"
-    assert diag["raw_text"] == "hi"
-    assert diag["messages"] == [{"type": "_Msg", "result": "hi"}]
-
-
-async def test_run_skips_diagnostics_when_not_requested():
+# ---- run(): no intents ----------------------------------------------------
+async def test_run_without_intents_returns_an_empty_result():
     msg = _Msg(content=[TextBlock("just text")], result="hi")
     b = _backend()
     b.sdk_query_factory = _query([msg])
-    await b.run("hi", allow_no_intent=True)
-    assert b.get_turn_diagnostic() == {}
+    result = await b.run("hi")
+    assert result.intents == []
+    assert result.raw_text == "hi"
 
 
 # ---- gateway endpoint identifier -----------------------------------------
@@ -256,7 +237,7 @@ async def test_invoke_error_result_success_with_intents():
     msg = _Msg(content=[_emit_tool_block()])
     b = _backend()
     b.sdk_query_factory = _query([msg], raise_exc=Exception("error result: success"))
-    res = await b.run("hi", allow_no_intent=True)
+    res = await b.run("hi")
     assert len(res.intents) == 1
 
 
@@ -264,7 +245,7 @@ async def test_invoke_error_result_success_no_intents():
     msg = _Msg(content=[TextBlock("hello")])
     b = _backend()
     b.sdk_query_factory = _query([msg], raise_exc=Exception("error result: success"))
-    res = await b.run("hi", allow_no_intent=True)
+    res = await b.run("hi")
     assert res.intents == []
 
 
@@ -272,17 +253,7 @@ async def test_invoke_other_exception_reraises():
     b = _backend()
     b.sdk_query_factory = _query([], raise_exc=RuntimeError("real failure"))
     with pytest.raises(RuntimeError, match="real failure"):
-        await b.run("hi", allow_no_intent=True)
-
-
-async def test_run_raw_completion_headroom():
-    msg = _Msg(content=[TextBlock("the answer")], result="the answer")
-    b = _backend(raw_completion=True)
-    b.sdk_query_factory = _query([msg])
-    res = await b.run("hi", max_turns=1)
-    # raw mode bumps max_turns to >= 8 and returns text without an intent
-    assert res.raw_text == "the answer"
-    assert b.calls[-1]["max_turns"] >= 8
+        await b.run("hi")
 
 
 # ---- per-request context water level -------------------------------------
@@ -308,7 +279,7 @@ async def test_context_peak_prefers_the_largest_single_request():
     ]
     b = _backend()
     b.sdk_query_factory = _query(stream)
-    res = await b.run("hi", allow_no_intent=True)
+    res = await b.run("hi")
     assert res.metadata["context_tokens_peak"] == 175
     # The cumulative counters are still reported verbatim for cost accounting.
     assert res.metadata["cache_read_input_tokens"] == 250
@@ -325,14 +296,14 @@ async def test_context_peak_falls_back_to_a_per_turn_estimate():
     ]
     b = _backend()
     b.sdk_query_factory = _query(stream)
-    res = await b.run("hi", allow_no_intent=True)
+    res = await b.run("hi")
     assert res.metadata["context_tokens_peak"] == 100_000
 
 
 async def test_context_peak_is_zero_without_any_usage():
     b = _backend()
     b.sdk_query_factory = _query([_Msg(content=[TextBlock("hi")], result="hi")])
-    res = await b.run("hi", allow_no_intent=True)
+    res = await b.run("hi")
     assert res.metadata["context_tokens_peak"] == 0
 
 
@@ -347,14 +318,14 @@ async def test_stop_reason_reaches_metadata():
     stream = [_StopMsg(content=[TextBlock("half a rep")], result="half a rep", stop_reason="max_tokens")]
     b = _backend()
     b.sdk_query_factory = _query(stream)
-    res = await b.run("hi", allow_no_intent=True)
+    res = await b.run("hi")
     assert res.metadata["stop_reason"] == "max_tokens"
 
 
 async def test_stop_reason_is_none_when_the_sdk_omits_it():
     b = _backend()
     b.sdk_query_factory = _query([_Msg(content=[TextBlock("hi")], result="hi")])
-    res = await b.run("hi", allow_no_intent=True)
+    res = await b.run("hi")
     assert res.metadata["stop_reason"] is None
 
 
@@ -366,7 +337,7 @@ async def test_last_reported_stop_reason_wins():
     ]
     b = _backend()
     b.sdk_query_factory = _query(stream)
-    res = await b.run("hi", allow_no_intent=True)
+    res = await b.run("hi")
     assert res.metadata["stop_reason"] == "end_turn"
 
 
@@ -405,8 +376,8 @@ def test_validate_emit_intent_input_missing_top_level_key_raises():
 
 
 def test_validate_emit_intent_input_missing_required_payload_field_raises():
-    # send_message requires 'topic'; omit it.
-    with pytest.raises(IntentValidationError, match="missing required fields"):
+    # send_message requires 'topic'; omit it. The message names the field, which is what tells the agent what to fix.
+    with pytest.raises(IntentValidationError, match="topic"):
         mei.validate_emit_intent_input({"intent_type": "send_message", "payload": {}})
 
 

@@ -1,4 +1,3 @@
-#!/usr/bin/env python3
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
@@ -18,20 +17,20 @@ Examples
 
     # Live session in this sandbox ($INFERENCE_OPTIMIZER_CURRENT_SESSION_DIR,
     # else $USER_DATA_PATH / /workspace/hyperloom)
-    python -m hyperloom.inference_optimizer.tools.dump_session_breakdown
+    hyperloom session breakdown
 
     # Historical session on a shared filesystem
-    python -m hyperloom.inference_optimizer.tools.dump_session_breakdown \\
+    hyperloom session breakdown \\
         --session-dir /shared/hyperloom-sessions/<user>/<sid>
 
     # Override output path (don't touch session_dir)
-    python -m hyperloom.inference_optimizer.tools.dump_session_breakdown \\
+    hyperloom session breakdown \\
         --session-dir <SD> --output /tmp/breakdown-<sid>.json
 
     # Bulk historical
     for d in /shared/hyperloom-sessions/*/*; do
         [ -d "$d" ] || continue
-        python -m hyperloom.inference_optimizer.tools.dump_session_breakdown \\
+        hyperloom session breakdown \\
             --session-dir "$d" > /dev/null
     done
 """
@@ -59,7 +58,7 @@ def _build_parser() -> argparse.ArgumentParser:
         and ``--verbose`` options.
     """
     parser = argparse.ArgumentParser(
-        prog="dump_session_breakdown",
+        prog="hyperloom session breakdown",
         description=__doc__,
         formatter_class=argparse.RawDescriptionHelpFormatter,
     )
@@ -125,15 +124,13 @@ def _summary_line(breakdown: dict) -> str:
         str: Single-line summary with session id, stop reason, validated gain,
         the shape of the session's record, and how it closed.
     """
-    sess = (breakdown.get("metadata") or {}).get("session") or {}
-    outcome = breakdown.get("outcome") or {}
+    metadata = breakdown["metadata"]
+    sess = metadata.get("session") or {}
+    outcome = breakdown["outcome"]
     final = outcome.get("final") or {}
     validation = outcome.get("validation") or {}
     by_source = (validation.get("attribution") or {}).get("by_source") or {}
     geak_n = int((((by_source.get("kernel") or {}).get("by_backend") or {}).get("geak") or {}).get("keep_count") or 0)
-    timeline = breakdown.get("timeline") or []
-    close = breakdown.get("close") or {}
-    warnings = (breakdown.get("metadata") or {}).get("warnings") or []
     gain = final.get("gain_pct")
     gain_text = f"{gain:.2f}%" if isinstance(gain, (int, float)) and not math.isnan(gain) else "n/a"
     return (
@@ -143,9 +140,9 @@ def _summary_line(breakdown: dict) -> str:
         f"gain_validated={gain_text}  "
         f"geak={geak_n}  "
         f"adopted={int(validation.get('adoption_count') or 0)}  "
-        f"events={len(timeline)}  "
-        f"close={close.get('status') or '?'}  "
-        f"warnings={len(warnings)}"
+        f"events={len(breakdown['timeline'])}  "
+        f"close={breakdown['close'].get('status') or '?'}  "
+        f"warnings={len(metadata['warnings'])}"
     )
 
 
@@ -184,7 +181,3 @@ def main(argv: list[str] | None = None) -> int:
     if args.print_json:
         print(json.dumps(breakdown, indent=2, sort_keys=True))
     return 0
-
-
-if __name__ == "__main__":
-    sys.exit(main())

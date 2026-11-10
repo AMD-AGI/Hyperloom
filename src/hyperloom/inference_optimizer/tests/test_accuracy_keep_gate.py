@@ -5,6 +5,7 @@
 
 from __future__ import annotations
 
+from hyperloom.orchestrator.state.shared_state import SharedState
 from hyperloom.orchestrator.actions.executors._accuracy_gate import (
     BASELINE_ACCURACY_STOP_REASON,
     accuracy_keep_block,
@@ -50,29 +51,7 @@ def test_none_required_with_non_numeric_baseline_degrades():
     assert degraded is True
 
 
-class _StopRecorder:
-    """Minimal SharedState stub capturing ``set_stop_reason`` calls."""
-
-    def __init__(self) -> None:
-        self.stop_reason = ""
-
-    def set_stop_reason(self, value, **_kwargs):
-        self.stop_reason = value
-        return value
-
-
 def test_request_baseline_accuracy_stop_records_reason():
-    ss = _StopRecorder()
-    assert request_baseline_accuracy_stop(ss, context="unit") is True
+    ss = SharedState()
+    request_baseline_accuracy_stop(ss, context="unit")
     assert ss.stop_reason == BASELINE_ACCURACY_STOP_REASON
-
-
-def test_request_baseline_accuracy_stop_none_shared_state():
-    assert request_baseline_accuracy_stop(None, context="unit") is False
-
-
-def test_request_baseline_accuracy_stop_without_setter():
-    class _NoSetter:
-        pass
-
-    assert request_baseline_accuracy_stop(_NoSetter(), context="unit") is False

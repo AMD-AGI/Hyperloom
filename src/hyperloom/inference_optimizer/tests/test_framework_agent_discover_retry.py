@@ -12,40 +12,30 @@ from typing import Any
 
 
 from hyperloom.inference_optimizer.protocol.action_surfaces import ACTION_CATALOGUE
-from hyperloom.orchestrator.phases import framework as _phase_framework
+from hyperloom.orchestrator.phases import framework_discovery
 from hyperloom.orchestrator.loop.dispatcher import DispatcherCollaborator
 from hyperloom.orchestrator.phases.framework import FrameworkPhase
+from hyperloom.orchestrator.state.shared_state import SharedState
 
 
 _ACTION_REGISTRY = ACTION_CATALOGUE
 
 
-class _StateStub:
-    """SharedState minimal stub for discover retry tests."""
+class _StateStub(SharedState):
+    """SharedState that counts saves instead of writing them."""
 
     def __init__(self) -> None:
-        self.phase = "FRAMEWORK"
-        self.framework_agent_phase_done = False
-        self.framework_agent_discover_failures = 0
-        self.framework_agent_batches: list[dict[str, Any]] = []
-        self.framework_agent_phase_progress: list[dict[str, Any]] = []
-        self.phase_history: list[dict[str, Any]] = []
-        self.gaps: list[dict[str, Any]] = []
-        self.model = "test-model"
-        self.framework = "sglang"
-        self.gpu_type = "MI300X"
-        self.model_class = "dense"
-        self.precision = "fp8"
-        self.last_profile_kernel_breakdown = None
+        super().__init__(
+            phase="FRAMEWORK",
+            framework="sglang",
+            gpu_type="MI300X",
+            model_class="dense",
+            precision="fp8",
+        )
         self._saves = 0
 
     def save(self, _session_dir: Path) -> None:
         self._saves += 1
-
-    def append_phase_history_event(self, **kwargs: Any) -> dict[str, Any]:
-        from hyperloom.orchestrator.phases import machine_state as _ms
-
-        return _ms.append_phase_history_event(self, **kwargs)
 
 
 def _event_name(row: dict[str, Any]) -> str:
@@ -66,18 +56,36 @@ def _phase_history_event_rows(history: list[dict[str, Any]], event: str) -> list
 
 
 class _CoordinatorStub:
-    """The Coordinator surface the FrameworkPhase discover methods read."""
+    """Minimal stub to bind the FrameworkPhase discover methods to."""
 
-    # Reverse-lookup called on every repo; here it resolves to the session framework, so nothing is tagged
-    # (same-framework path).
-    _registry_lanes_ttl = DispatcherCollaborator._registry_lanes_ttl
+    _unprocessed_framework_agent_candidates = FrameworkPhase._unprocessed_framework_agent_candidates
+    _framework_candidate_key = staticmethod(FrameworkPhase._framework_candidate_key)
+    _framework_processed_candidate_keys = FrameworkPhase._framework_processed_candidate_keys
+    _stamp_framework_progress = FrameworkPhase._stamp_framework_progress
+    _framework_known_candidate_ids = FrameworkPhase._framework_known_candidate_ids
+    _framework_timeline_recorder = FrameworkPhase._framework_timeline_recorder
 
     def __init__(self, tmp_path: Path) -> None:
         self.session_dir = tmp_path
         self.shared_state = _StateStub()
         self.action_registry = _ACTION_REGISTRY
         self.framework_agent_discover_timeout_sec = 0.0
-        self.phase_framework = FrameworkPhase(self)
+        # Build a minimal _coord so methods that go through self._coord work.
+        outer_self = self
+
+        class _DispatcherStub:
+            @property
+            def action_registry(self):
+                return outer_self.action_registry
+
+            @property
+            def shared_state(self):
+                return outer_self.shared_state
+
+            registry_lanes_ttl = DispatcherCollaborator.registry_lanes_ttl
+
+        dispatcher_stub = _DispatcherStub()
+        self._coord = type("_FakeCoord", (), {"dispatcher": dispatcher_stub, "shared_state": self.shared_state})()  # type: ignore[attr-defined]
 
 
 class _TasksStub:
@@ -87,15 +95,15 @@ class _TasksStub:
         self._fail = fail
         self.calls: list[dict[str, Any]] = []
 
-    async def create_or_return_existing(self, **kwargs: Any) -> Any:
-        self.calls.append(kwargs)
+    async def create_or_return_existing(self, spec) -> Any:
+        self.calls.append(vars(spec))
         if self._fail:
             raise RuntimeError("simulated registry failure")
         return SimpleNamespace(task_id="t-ok")
 
 
 async def _call_enqueue(stub: _CoordinatorStub, cand: dict[str, Any]) -> None:
-    await stub.phase_framework._enqueue_framework_agent_task(cand)
+    await FrameworkPhase._enqueue_framework_agent_task(stub, cand)  # type: ignore[arg-type]
 
 
 def test_enqueue_failure_appends_progress_row(tmp_path: Path):
@@ -133,7 +141,7 @@ def test_enqueue_failed_candidate_skipped_by_selector(tmp_path: Path):
 
     asyncio.run(_call_enqueue(stub, cand_bad))
 
-    nxt = stub.phase_framework._select_next_framework_agent_candidate()
+    nxt = FrameworkPhase._select_next_framework_agent_candidate(stub)  # type: ignore[arg-type]
     assert nxt is not None
     assert nxt["candidate_id"] == "pr-good"
 
@@ -174,7 +182,8 @@ def test_record_framework_agent_phase_done_appends_history_row(tmp_path: Path):
         {"batch_id": "b2", "candidates": []},
     ]
 
-    stub.phase_framework._record_framework_agent_phase_done(
+    FrameworkPhase._record_framework_agent_phase_done(  # type: ignore[arg-type]
+        stub,
         reason="discover_retries_exhausted",
         failure_count=3,
     )
@@ -183,7 +192,7 @@ def test_record_framework_agent_phase_done_appends_history_row(tmp_path: Path):
     assert len(rows) == 1
     assert rows[0]["reason"] == "discover_retries_exhausted"
     assert rows[0]["evidence"]["failure_count"] == 3
-    assert rows[0]["evidence"]["retry_limit"] == _phase_framework.DISCOVER_FAILURE_RETRY_LIMIT
+    assert rows[0]["evidence"]["retry_limit"] == framework_discovery.DISCOVER_FAILURE_RETRY_LIMIT
     assert rows[0]["evidence"]["batches_discovered"] == 2
     assert "ts" in rows[0]
     assert rows[0]["ts_unix"] > 0

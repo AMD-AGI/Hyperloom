@@ -13,45 +13,31 @@ from typing import Any
 
 import pytest
 
+from hyperloom.inference_optimizer.breakdown.stop_reasons import BACKEND_UNHEALTHY_STOP_REASON
 from hyperloom.inference_optimizer.protocol.action_surfaces import (
     ACTION_CATALOGUE,
     COORDINATOR_INTERNAL_ACTIONS,
 )
 from hyperloom.orchestrator.actions.cancel_channel import cancel_scope_listener
 from hyperloom.orchestrator.phases import machine_state as ps
-from hyperloom.orchestrator.state.shared_state import ESCALATE_HINT_SKIP_TO_SWEEP, SharedState
-from hyperloom.orchestrator.state.task_registry import Task
+from hyperloom.orchestrator.state.shared_state import SharedState
+from hyperloom.orchestrator.state.task_registry import Task, TaskSpec
+from .conftest import make_mock_critic_coordinator
 from ._dispatch_helpers import pump_until_settled
 
 _KERNEL_AGENT_LANES = ("server_lifecycle", "workspace_mutation", "benchmark_lane")
 
 
 @pytest.fixture
-def coord(tmp_path, monkeypatch):
-    monkeypatch.setenv("USER_DATA_PATH", str(tmp_path))
-    from hyperloom.inference_optimizer.session.paths import make_session_dir as _msd
-    from hyperloom.orchestrator.loop.coordinator import Coordinator
-    from hyperloom.orchestrator.roles import (
-        MockBackend,
-        MockCriticBackend,
-        ScriptedPlan,
-    )
-    from .conftest import seed_target_analysis_marker
-
-    sd = _msd()
-    seed_target_analysis_marker(sd)
-    backends = {
-        "orchestration": MockBackend(ScriptedPlan(turns=[]), name="orchestration"),
-        "critic": MockCriticBackend(),
-    }
-    c = Coordinator(sd, backends=backends)
+def coord(session_dir):
+    c = make_mock_critic_coordinator(session_dir)
 
     async def _noop(*_args, **_kwargs):
         return None
 
-    c._maybe_enqueue_explore_research_scout = _noop  # type: ignore[method-assign]
-    c._maybe_force_stalled_domain_specialist = _noop  # type: ignore[method-assign]
-    c._maybe_enqueue_trajectory_reviewer = _noop  # type: ignore[method-assign]
+    c.phase_internal.maybe_enqueue_explore_research_scout = _noop  # type: ignore[method-assign]
+    c.specialist_dispatch.maybe_force_stalled_domain_specialist = _noop  # type: ignore[method-assign]
+    c.phase_internal.maybe_enqueue_trajectory_reviewer = _noop  # type: ignore[method-assign]
     c.shared_state.kernel_enabled = True
     yield c
 
@@ -60,25 +46,27 @@ def _arm_kernel_phase(st):
     """Park the session mid-KERNEL with plenty of phase and session time left."""
     now = datetime.now(timezone.utc)
     st.phase = ps.PHASE_KERNEL_AGENT
-    st.phase_started_ts = (now - timedelta(minutes=20)).isoformat()
     st.phase_started_unix = (now - timedelta(minutes=20)).timestamp()
     st.start_ts = (now - timedelta(minutes=30)).isoformat()
     st.max_minutes = 96 * 60
+    if not st.phase_budget_pct:
+        st.phase_budget_pct = dict(ps.DEFAULT_PHASE_BUDGET_PCT)
 
 
 def _spend_the_phase_budget(st):
-    spent = datetime.now(timezone.utc) - timedelta(hours=30)
-    st.phase_started_ts = spent.isoformat()
+    spent = datetime.now(timezone.utc) - timedelta(hours=100)
     st.phase_started_unix = spent.timestamp()
 
 
 async def _create_kernel_agent(c, *, key: str = "kernel_agent_c0"):
     task, _ = await c.tasks.create_or_return_existing(
-        kind="kernel_agent",
-        params={"from_phase": ps.PHASE_FRAMEWORK_AGENT},
-        idempotency_key=key,
-        requires_lanes=list(_KERNEL_AGENT_LANES),
-        lease_ttl_sec=3600,
+        TaskSpec(
+            kind="kernel_agent",
+            params={"from_phase": ps.PHASE_FRAMEWORK_AGENT},
+            idempotency_key=key,
+            requires_lanes=list(_KERNEL_AGENT_LANES),
+            lease_ttl_sec=3600,
+        ),
     )
     return task
 
@@ -97,11 +85,11 @@ def _skip_phase_entry_effects(c, monkeypatch) -> None:
     async def _noop(**_kwargs):
         return None
 
-    monkeypatch.setattr(c, "_on_phase_entered", _noop)
+    monkeypatch.setattr(c.phase_machine, "_on_phase_entered", _noop)
 
 
 async def _settle(c, task_id: str) -> None:
-    entry = c._inflight_actions.get(task_id)
+    entry = c.dispatcher._inflight_actions.get(task_id)
     if entry is not None:
         await asyncio.wait_for(entry.atask, timeout=5.0)
 
@@ -113,6 +101,15 @@ def test_kernel_agent_is_catalogued_as_a_coordinator_internal_lane_holder():
     assert "kernel_agent" in ps.PHASE_ALLOWED_ACTIONS[ps.PHASE_KERNEL_AGENT]
     # Allowed in the phase so it survives the transition sweep, never proposable by a model.
     assert "kernel_agent" not in ps.allowed_actions_for(ps.PHASE_KERNEL_AGENT)
+
+
+@pytest.mark.parametrize(("recorded", "env", "expected"), [("geak", "forge", True), ("forge", "", False)])
+def test_the_recorded_backend_routes_kernel_whatever_the_environment_says(coord, monkeypatch, recorded, env, expected):
+    """A resumed process may carry a different environment; the session keeps the backend it started on."""
+    monkeypatch.setenv("KERNEL_OPT_BACKEND_ORDER", env)
+    coord.shared_state.kernel_optimizer = recorded
+
+    assert coord.phase_kernel.geak_enabled() is expected
 
 
 @pytest.mark.asyncio
@@ -137,7 +134,7 @@ async def test_entering_kernel_enqueues_one_lane_holding_task_and_returns(coord,
         lambda *_args, **_kwargs: (ps.PHASE_KERNEL_AGENT, "test_enter_kernel", {"source": "test"}),
     )
 
-    await asyncio.wait_for(c._advance_phase_if_needed(), timeout=2.0)
+    await asyncio.wait_for(c.phase_machine.advance_phase_if_needed(), timeout=2.0)
 
     assert st.phase == ps.PHASE_KERNEL_AGENT
     assert ran == []
@@ -146,29 +143,111 @@ async def test_entering_kernel_enqueues_one_lane_holding_task_and_returns(coord,
     task = queued[0]
     assert tuple(task.requires_lanes) == _KERNEL_AGENT_LANES
     assert task.params["from_phase"] == ps.PHASE_FRAMEWORK_AGENT
-    remaining = ps.phase_budget_remaining_seconds(st, budget_pct=c._phase_budget_pct)
+    remaining = ps.phase_budget_remaining_seconds(st)
     assert task.lease_ttl_sec == pytest.approx(remaining, abs=5.0)
 
 
 @pytest.mark.asyncio
 async def test_resumed_entry_reuses_a_live_task_and_replaces_a_settled_one(coord):
+    from hyperloom.orchestrator.phases.machine import Transition
+
     c = coord
     st = c.shared_state
     _arm_kernel_phase(st)
 
-    await c._on_enter_kernel(from_phase=ps.PHASE_FRAMEWORK_AGENT)
+    await c.phase_kernel.on_enter_kernel(
+        Transition(
+            from_phase=ps.PHASE_FRAMEWORK_AGENT,
+            to_phase=ps.PHASE_KERNEL_AGENT,
+            reason="test",
+            evidence={},
+        )
+    )
     first = [t for t in await c.tasks.queued() if t.kind == "kernel_agent"]
-    await c._on_enter_kernel(from_phase="resume")
+    await c.phase_kernel.on_enter_kernel(
+        Transition(from_phase="resume", to_phase=ps.PHASE_KERNEL_AGENT, reason="test", evidence={})
+    )
     assert [t.task_id for t in await c.tasks.queued() if t.kind == "kernel_agent"] == [first[0].task_id]
 
     await c.tasks.transition(first[0].task_id, "running")
     await c.tasks.transition(first[0].task_id, "failed", evidence={"reason": "dead_holder"})
-    await c._on_enter_kernel(from_phase="resume")
+    await c.phase_kernel.on_enter_kernel(
+        Transition(from_phase="resume", to_phase=ps.PHASE_KERNEL_AGENT, reason="test", evidence={})
+    )
 
     requeued = [t for t in await c.tasks.queued() if t.kind == "kernel_agent"]
     assert len(requeued) == 1
     assert requeued[0].task_id != first[0].task_id
     assert requeued[0].params["from_phase"] == "resume"
+
+
+async def _next_leg(coord):
+    """Stop ``coord`` and reopen its session the way a restarted run does."""
+    from hyperloom.orchestrator.loop.coordinator import Coordinator
+    from hyperloom.orchestrator.roles import MockBackend, MockCriticBackend, ScriptedPlan
+
+    coord.shared_state.save(coord.session_dir)
+    await coord.stop()
+    leg = Coordinator(
+        coord.session_dir,
+        backends={
+            "orchestration": MockBackend(ScriptedPlan(turns=[]), name="orchestration"),
+            "critic": MockCriticBackend(),
+        },
+    )
+
+    async def _noop(*_args, **_kwargs):
+        return None
+
+    leg.phase_internal.maybe_enqueue_explore_research_scout = _noop  # type: ignore[method-assign]
+    leg.specialist_dispatch.maybe_force_stalled_domain_specialist = _noop  # type: ignore[method-assign]
+    leg.phase_internal.maybe_enqueue_trajectory_reviewer = _noop  # type: ignore[method-assign]
+    return leg
+
+
+@pytest.mark.asyncio
+async def test_a_leg_resumed_mid_forge_round_requeues_the_kernel_agent_and_stays_in_kernel(coord):
+    _arm_kernel_phase(coord.shared_state)
+    coord.shared_state.kernel_optimizer = "forge"
+    leg = await _next_leg(coord)
+    try:
+        assert leg.writeback.resumed_from["is_resume"] is True
+        await leg.writeback.replay_resume_if_needed()
+        assert [t.kind for t in await leg.tasks.queued() if t.kind == "kernel_agent"] == ["kernel_agent"]
+        await leg.phase_machine.advance_phase_if_needed()
+        assert leg.shared_state.phase == ps.PHASE_KERNEL_AGENT
+    finally:
+        await leg.stop()
+
+
+@pytest.mark.asyncio
+async def test_a_leg_resumed_while_its_kernel_agent_ran_replaces_the_dead_legs_task(coord, monkeypatch):
+    """The stopped leg's kernel_agent row still reads running when the next leg starts; it is not a live round."""
+    from hyperloom.orchestrator.bus import resource_lock
+
+    _arm_kernel_phase(coord.shared_state)
+    coord.shared_state.kernel_optimizer = "forge"
+    dead_legs = await _create_kernel_agent(coord, key=f"kernel_agent_c{int(coord.shared_state.macro_cycle or 0)}")
+    await coord.tasks.transition(dead_legs.task_id, "running")
+    await coord.locks.acquire_many(
+        list(_KERNEL_AGENT_LANES),
+        holder_id=dead_legs.task_id,
+        task_id=dead_legs.task_id,
+        action="kernel_agent",
+        ttl_sec=3600,
+    )
+    leg = await _next_leg(coord)
+    monkeypatch.setattr(resource_lock.SqliteLeaseBackend, "_pid_alive", staticmethod(lambda _pid: False))
+    try:
+        await leg.writeback.replay_resume_if_needed()
+
+        assert (await leg.tasks.get(dead_legs.task_id)).state == "failed"
+        replacement = [t for t in await leg.tasks.queued() if t.kind == "kernel_agent"]
+        assert len(replacement) == 1 and replacement[0].task_id != dead_legs.task_id
+        await leg.phase_machine.advance_phase_if_needed()
+        assert leg.shared_state.phase == ps.PHASE_KERNEL_AGENT
+    finally:
+        await leg.stop()
 
 
 @pytest.mark.asyncio
@@ -180,7 +259,7 @@ async def test_the_pump_returns_while_the_kernel_agent_task_runs(coord):
     c.sub.register_executor("kernel_agent", _blocking_executor(release, started))
     task = await _create_kernel_agent(c)
 
-    await asyncio.wait_for(c._pump_dispatcher_once(), timeout=2.0)
+    await asyncio.wait_for(c.dispatcher.pump_dispatcher_once(), timeout=2.0)
     await asyncio.wait_for(started.wait(), timeout=2.0)
 
     assert (await c.tasks.get(task.task_id)).state == "running"
@@ -196,6 +275,7 @@ async def test_kernel_agent_dispatch_keeps_authoring_phase_and_validates_contrac
     from hyperloom.inference_optimizer.breakdown.exporter import build
     from hyperloom.inference_optimizer.breakdown.workflow_contract import workflow_schema
     from hyperloom.inference_optimizer.session.manifest import write_manifest
+    from hyperloom.orchestrator.phases.machine import Transition
 
     c = coord
     _arm_kernel_phase(c.shared_state)
@@ -204,13 +284,20 @@ async def test_kernel_agent_dispatch_keeps_authoring_phase_and_validates_contrac
     c.sub.register_executor("kernel_agent", lambda _ctx: asyncio.sleep(0, result={"status": "ok"}))
     write_manifest(c.session_dir, session_id="kernel-dispatch-contract")
 
-    await c._on_enter_kernel(from_phase=ps.PHASE_FRAMEWORK_AGENT)
+    await c.phase_kernel.on_enter_kernel(
+        Transition(
+            from_phase=ps.PHASE_FRAMEWORK_AGENT,
+            to_phase=ps.PHASE_KERNEL_AGENT,
+            reason="test",
+            evidence={},
+        )
+    )
     task = next(task for task in await c.tasks.queued() if task.kind == "kernel_agent")
     c.shared_state.phase = ps.PHASE_SWEEP
     c.shared_state.macro_cycle = 4
     c.shared_state.tick = 99
 
-    await c._pump_dispatcher_once()
+    await c.dispatcher.pump_dispatcher_once()
     await _settle(c, task.task_id)
 
     fixture = build(c.session_dir)
@@ -246,15 +333,10 @@ async def test_kernel_agent_dispatch_keeps_authoring_phase_and_validates_contrac
             "kernel_controller_done",
         ),
         (
-            "skip_to_sweep hint",
-            lambda st: st.set_pending_escalate_hint(ESCALATE_HINT_SKIP_TO_SWEEP),
-            "kernel_no_more_leverage",
-        ),
-        (
             "idle streak",
             lambda st: (
-                setattr(st, "kernel_idle_ticks", ps.KERNEL_IDLE_MAX_TICKS),
-                setattr(st, "kernel_idle_since_unix", time.time() - ps.KERNEL_IDLE_MIN_SECONDS - 1.0),
+                setattr(st, "kernel_idle_ticks", ps._kernel_idle_max_ticks()),
+                setattr(st, "kernel_idle_since_unix", time.time() - ps._kernel_idle_min_seconds() - 1.0),
             ),
             "kernel_no_more_leverage",
         ),
@@ -265,13 +347,13 @@ def test_kernel_agent_in_flight_blocks_every_leverage_exit(label, arm, reason):
     _arm_kernel_phase(st)
     arm(st)
 
-    exit_now = ps.exit_normal_kernel(st)
-    assert exit_now is not None and exit_now[0] == reason, label
-    assert ps.exit_normal_kernel(st, kernel_work_in_flight=True) is None, label
+    # Without in-flight flag: the leverage exit fires.
+    out_without_flag = ps.compute_next_phase(st)
+    assert out_without_flag is not None and out_without_flag[1] == reason, label
 
-    inputs = ps.workflow_predicate_inputs(st, kernel_work_in_flight=True)
+    inputs = ps.workflow_predicate_inputs(st, in_flight=ps.WorkInFlight(kernel=True))
     assert inputs["pending_work"]["kernel_agent_in_flight"] is True
-    assert ps.compute_next_phase(st, kernel_work_in_flight=True) is None, label
+    assert ps.compute_next_phase(st, in_flight=ps.WorkInFlight(kernel=True)) is None, label
     assert ps.replay_next_phase(inputs) is None, label
 
 
@@ -279,38 +361,33 @@ def test_kernel_agent_in_flight_never_blocks_a_budget_exit():
     st = SharedState(session_id="s")
     _arm_kernel_phase(st)
     _spend_the_phase_budget(st)
-    st.set_pending_escalate_hint(ESCALATE_HINT_SKIP_TO_SWEEP)
 
-    exit_now = ps.exit_normal_kernel(st, kernel_work_in_flight=True)
-    transition = ps.compute_next_phase(st, kernel_work_in_flight=True)
+    transition = ps.compute_next_phase(st, in_flight=ps.WorkInFlight(kernel=True))
 
-    assert exit_now is not None
-    assert exit_now[0] in {"kernel_phase_budget_exhausted", "kernel_budget_cap"}
     assert transition is not None
-    assert transition[1] == exit_now[0]
+    assert transition[1] == "kernel_phase_budget_exhausted"
     assert ps.replay_next_phase(transition[2]["predicate_inputs"]) == transition
 
 
 @pytest.mark.asyncio
 async def test_kernel_holds_while_its_task_is_in_flight_and_leaves_once_it_settles(coord, monkeypatch):
-    """The idle guard must not hand the GPUs to SWEEP while the kernel_agent task still holds them."""
+    """The exit rule must not hand the GPUs to SWEEP while the kernel_agent task still holds them."""
     c = coord
     _skip_phase_entry_effects(c, monkeypatch)
     st = c.shared_state
     _arm_kernel_phase(st)
-    st.set_pending_escalate_hint(ESCALATE_HINT_SKIP_TO_SWEEP)
     task = await _create_kernel_agent(c)
     await c.tasks.transition(task.task_id, "running")
 
-    for _ in range(ps.KERNEL_IDLE_MAX_TICKS * 5):
-        await c._advance_phase_if_needed()
-        st.kernel_idle_since_unix = datetime.now(timezone.utc).timestamp() - ps.KERNEL_IDLE_MIN_SECONDS * 10
+    for _ in range(ps._kernel_idle_max_ticks() * 5):
+        await c.phase_machine.advance_phase_if_needed()
+        st.kernel_idle_since_unix = datetime.now(timezone.utc).timestamp() - ps._kernel_idle_min_seconds() * 10
 
     assert st.phase == ps.PHASE_KERNEL_AGENT
     assert st.kernel_idle_ticks == 0
 
     await c.tasks.transition(task.task_id, "succeeded", evidence={"result_keys": []})
-    await c._advance_phase_if_needed()
+    await c.phase_machine.advance_phase_if_needed()
 
     assert st.phase == ps.PHASE_SWEEP
     assert st.phase_history[-1]["reason"] == "kernel_no_more_leverage"
@@ -328,8 +405,56 @@ def _listening_executor(started: asyncio.Event):
 
 
 @pytest.mark.asyncio
-async def test_a_spent_phase_budget_stops_the_kernel_agent_and_leaves_kernel(coord, monkeypatch):
-    """The transition barrier stops the running pipeline and frees its lanes before SWEEP starts."""
+async def test_a_spent_phase_budget_lets_the_running_kernel_agent_finish_before_leaving_kernel(coord, monkeypatch):
+    """The transition barrier waits for the running pipeline instead of throwing its work away."""
+    c = coord
+    _skip_phase_entry_effects(c, monkeypatch)
+    st = c.shared_state
+    _arm_kernel_phase(st)
+    release, started = asyncio.Event(), asyncio.Event()
+    c.sub.register_executor("kernel_agent", _blocking_executor(release, started))
+    task = await _create_kernel_agent(c)
+    await asyncio.wait_for(c.dispatcher.pump_dispatcher_once(), timeout=2.0)
+    await asyncio.wait_for(started.wait(), timeout=2.0)
+    _spend_the_phase_budget(st)
+
+    await asyncio.wait_for(c.phase_machine.advance_phase_if_needed(), timeout=30.0)
+
+    assert st.phase == ps.PHASE_KERNEL_AGENT
+    assert (await c.tasks.get(task.task_id)).state == "running"
+    assert c.dispatcher.admission_frozen
+
+    release.set()
+    await _settle(c, task.task_id)
+    await asyncio.wait_for(c.phase_machine.advance_phase_if_needed(), timeout=30.0)
+
+    assert st.phase == ps.PHASE_SWEEP
+    assert (await c.tasks.get(task.task_id)).state == "succeeded"
+    assert not any((await c.locks.lane_holders()).values())
+
+
+@pytest.mark.asyncio
+async def test_a_spent_session_budget_still_stops_the_running_kernel_agent(coord):
+    """Only the phase boundary waits; once the session's own budget is gone the work is cancelled."""
+    c = coord
+    st = c.shared_state
+    _arm_kernel_phase(st)
+    started = asyncio.Event()
+    c.sub.register_executor("kernel_agent", _listening_executor(started))
+    task = await _create_kernel_agent(c)
+    await asyncio.wait_for(c.dispatcher.pump_dispatcher_once(), timeout=2.0)
+    await asyncio.wait_for(started.wait(), timeout=2.0)
+    st.max_minutes = 1
+
+    await asyncio.wait_for(c.dispatcher.pump_dispatcher_once(), timeout=30.0)
+    await _settle(c, task.task_id)
+
+    assert (await c.tasks.get(task.task_id)).state == "cancelled"
+
+
+@pytest.mark.asyncio
+async def test_a_terminal_stop_cancels_the_running_kernel_agent_on_the_way_to_close(coord, monkeypatch):
+    """A run that is already over has nothing to settle; the barrier stops its work instead of waiting for it."""
     c = coord
     _skip_phase_entry_effects(c, monkeypatch)
     st = c.shared_state
@@ -337,15 +462,17 @@ async def test_a_spent_phase_budget_stops_the_kernel_agent_and_leaves_kernel(coo
     started = asyncio.Event()
     c.sub.register_executor("kernel_agent", _listening_executor(started))
     task = await _create_kernel_agent(c)
-    await asyncio.wait_for(c._pump_dispatcher_once(), timeout=2.0)
+    await asyncio.wait_for(c.dispatcher.pump_dispatcher_once(), timeout=2.0)
     await asyncio.wait_for(started.wait(), timeout=2.0)
-    _spend_the_phase_budget(st)
+    st.set_stop_reason(BACKEND_UNHEALTHY_STOP_REASON)
 
-    await asyncio.wait_for(c._advance_phase_if_needed(), timeout=30.0)
+    await asyncio.wait_for(c.phase_machine.advance_phase_if_needed(), timeout=30.0)
+    await _settle(c, task.task_id)
+    await asyncio.wait_for(c.phase_machine.advance_phase_if_needed(), timeout=30.0)
 
-    assert st.phase == ps.PHASE_SWEEP
-    assert st.phase_history[-1]["reason"] in {"kernel_phase_budget_exhausted", "kernel_budget_cap"}
     assert (await c.tasks.get(task.task_id)).state == "cancelled"
+    assert st.phase == ps.PHASE_CLOSE
+    assert st.phase_history[-1]["reason"] == BACKEND_UNHEALTHY_STOP_REASON
     assert not any((await c.locks.lane_holders()).values())
 
 
@@ -364,25 +491,27 @@ async def test_a_running_kernel_agent_keeps_roofline_queued_until_it_returns(coo
 
     c.sub.register_executor("roofline", _roofline)
     agent = await _create_kernel_agent(c)
-    await asyncio.wait_for(c._pump_dispatcher_once(), timeout=2.0)
+    await asyncio.wait_for(c.dispatcher.pump_dispatcher_once(), timeout=2.0)
     await asyncio.wait_for(started.wait(), timeout=2.0)
 
-    lanes, ttl = c._registry_lanes_ttl("roofline")
+    lanes, ttl = c.dispatcher.registry_lanes_ttl("roofline")
     roofline, _ = await c.tasks.create_or_return_existing(
-        kind="roofline",
-        params={"source": "coordinator_internal", "reason": "test"},
-        idempotency_key="roofline-under-kernel-agent",
-        requires_lanes=lanes,
-        lease_ttl_sec=ttl,
+        TaskSpec(
+            kind="roofline",
+            params={"source": "coordinator_internal", "reason": "test"},
+            idempotency_key="roofline-under-kernel-agent",
+            requires_lanes=lanes,
+            lease_ttl_sec=ttl,
+        ),
     )
-    await asyncio.wait_for(c._pump_dispatcher_once(), timeout=2.0)
+    await asyncio.wait_for(c.dispatcher.pump_dispatcher_once(), timeout=2.0)
 
     assert rooflines == []
     assert (await c.tasks.get(roofline.task_id)).state == "queued"
 
     release.set()
     await _settle(c, agent.task_id)
-    await pump_until_settled(c)
+    await pump_until_settled(c.dispatcher)
 
     assert rooflines == [roofline.task_id]
     assert (await c.tasks.get(roofline.task_id)).state == "succeeded"
@@ -396,13 +525,13 @@ async def test_a_spent_session_cancels_the_running_kernel_agent(coord):
     started = asyncio.Event()
     c.sub.register_executor("kernel_agent", _listening_executor(started))
     task = await _create_kernel_agent(c)
-    await asyncio.wait_for(c._pump_dispatcher_once(), timeout=2.0)
+    await asyncio.wait_for(c.dispatcher.pump_dispatcher_once(), timeout=2.0)
     await asyncio.wait_for(started.wait(), timeout=2.0)
 
     st.max_minutes = 60
     st.elapsed_minutes = lambda **_kw: 60.0  # type: ignore[method-assign]
     assert st.session_budget_usable_sec() == 0.0
-    await asyncio.wait_for(c._cancel_inflight_that_outlived_the_session(), timeout=30.0)
+    await asyncio.wait_for(c.dispatcher._cancel_inflight_that_outlived_the_session(), timeout=30.0)
     await _settle(c, task.task_id)
 
     assert (await c.tasks.get(task.task_id)).state == "cancelled"
@@ -416,11 +545,11 @@ def test_the_time_budget_gate_admits_kernel_agent_while_one_baseline_round_fits(
     st.max_minutes = 120
     # 120-minute session: 120 s closing reserve, so 100 min spent leaves 18 usable minutes.
     st.elapsed_minutes = lambda **_kw: 100.0  # type: ignore[method-assign]
-    assert c._time_budget_denial_for_action("kernel_agent") is None
+    assert c.dispatcher.time_budget_denial_for_action("kernel_agent") is None
 
     # 112 min spent leaves 6 usable minutes: not even the 10-minute baseline round fits.
     st.elapsed_minutes = lambda **_kw: 112.0  # type: ignore[method-assign]
-    denied = c._time_budget_denial_for_action("kernel_agent")
+    denied = c.dispatcher.time_budget_denial_for_action("kernel_agent")
     assert denied is not None and denied.rule == "time_budget"
 
 
@@ -439,7 +568,7 @@ async def test_a_covered_step_runs_inside_the_lanes_its_caller_holds(coord):
     """A reprofile under the kernel_agent lease needs no profile_lane and leaves no row for the pump."""
     c = coord
     agent = await _create_kernel_agent(c)
-    lease = await c.locks.try_acquire_many(
+    lease = await c.locks.acquire_many(
         list(_KERNEL_AGENT_LANES),
         holder_id=agent.task_id,
         task_id=agent.task_id,
@@ -483,15 +612,14 @@ async def test_phase_transition_waits_until_no_task_is_running(coord, monkeypatc
     _skip_phase_entry_effects(c, monkeypatch)
     st = c.shared_state
     _arm_kernel_phase(st)
-    st.set_pending_escalate_hint(ESCALATE_HINT_SKIP_TO_SWEEP)
     task = await _create_kernel_agent(c)
     await c.tasks.transition(task.task_id, "running")
 
-    await c._advance_phase_if_needed()
+    await c.phase_machine.advance_phase_if_needed()
     assert st.phase == ps.PHASE_KERNEL_AGENT
 
     await c.tasks.transition(task.task_id, "succeeded", evidence={"result_keys": []})
-    await c._advance_phase_if_needed()
+    await c.phase_machine.advance_phase_if_needed()
     assert st.phase == ps.PHASE_SWEEP
     assert await c.tasks.running() == []
 
@@ -502,10 +630,11 @@ async def test_phase_transition_drops_queued_work_the_next_phase_does_not_allow(
     _skip_phase_entry_effects(c, monkeypatch)
     st = c.shared_state
     _arm_kernel_phase(st)
-    st.set_pending_escalate_hint(ESCALATE_HINT_SKIP_TO_SWEEP)
-    roofline = await c.tasks.create(kind="roofline", params={}, idempotency_key="left-behind-roofline")
+    roofline, _ = await c.tasks.create_or_return_existing(
+        TaskSpec(kind="roofline", params={}, idempotency_key="left-behind-roofline")
+    )
 
-    await c._advance_phase_if_needed()
+    await c.phase_machine.advance_phase_if_needed()
 
     assert st.phase == ps.PHASE_SWEEP
     assert (await c.tasks.get(roofline.task_id)).state == "cancelled"
@@ -515,3 +644,57 @@ async def test_phase_transition_drops_queued_work_the_next_phase_does_not_allow(
 def test_specialist_is_allowed_in_enablement_but_not_in_kernel():
     assert "specialist" in ps.PHASE_ALLOWED_ACTIONS[ps.PHASE_ENABLEMENT]
     assert "specialist" not in ps.PHASE_ALLOWED_ACTIONS[ps.PHASE_KERNEL_AGENT]
+
+
+@pytest.mark.parametrize(
+    ("phase", "fingerprint", "idle_sec", "turn_succeeded", "expected"),
+    [
+        (ps.PHASE_KERNEL_AGENT, "fp-a", 10.0, True, False),
+        (ps.PHASE_KERNEL_AGENT, "fp-a", 10.0, False, True),
+        (ps.PHASE_KERNEL_AGENT, "fp-b", 10.0, True, True),
+        (ps.PHASE_KERNEL_AGENT, "fp-a", 901.0, True, True),
+        (ps.PHASE_SWEEP, "fp-a", 10.0, True, True),
+    ],
+)
+def test_orchestration_turn_in_kernel_needs_kernel_progress_or_the_heartbeat(
+    coord, phase, fingerprint, idle_sec, turn_succeeded, expected
+):
+    st = coord.shared_state
+    st.phase = phase
+    st.kernel_progress_fingerprint = "fp-a"
+    now = time.time()
+    st.agent_last_active["orchestration"] = now if turn_succeeded else now - 60.0
+    assert coord.conversation.admit_turn("orchestration", now)
+
+    st.kernel_progress_fingerprint = fingerprint
+
+    assert coord.conversation.admit_turn("orchestration", now + idle_sec) is expected
+
+
+async def test_kernel_ticks_run_orchestration_only_on_admitted_turns(coord, monkeypatch):
+    c = coord
+    st = c.shared_state
+    st.phase = ps.PHASE_KERNEL_AGENT
+    st.kernel_progress_fingerprint = "fp-a"
+    turns: list[str] = []
+
+    async def _noop(*_args, **_kwargs):
+        return None
+
+    async def _turn(name, **_kwargs):
+        turns.append(name)
+        st.agent_last_active[name] = time.time()
+
+    monkeypatch.setattr(c, "reactor_pass", _turn)
+    monkeypatch.setattr(c.reconciler, "run", _noop)
+    monkeypatch.setattr(c.phase_machine, "advance_phase_if_needed", _noop)
+    monkeypatch.setattr(c.dispatcher, "pump_dispatcher_once", _noop)
+    monkeypatch.setattr(c.enablement_lane, "pump_enablement_safely", _noop)
+    c.phase_machine.pump_table = {ps.PHASE_KERNEL_AGENT: _noop}
+    c._last_maintenance_ts = time.monotonic()
+
+    await c.tick(2)
+    st.kernel_progress_fingerprint = "fp-b"
+    await c.tick(1)
+
+    assert turns == ["orchestration", "critic", "critic", "orchestration", "critic"]

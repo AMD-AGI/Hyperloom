@@ -6,20 +6,24 @@
 from __future__ import annotations
 
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
 from hyperloom.inference_optimizer.protocol.intent import Intent, IntentType
 from hyperloom.inference_optimizer.session import paths
-from hyperloom.orchestrator.bus.resource_lock import ResourceLockManager, SqliteLeaseBackend
+from hyperloom.orchestrator.bus.resource_lock import SqliteLeaseBackend
 from hyperloom.orchestrator.bus.storage.connection import SqliteConnection
+from hyperloom.orchestrator.loop.coordinator import Coordinator
 from hyperloom.orchestrator.loop.dispatcher import DispatcherCollaborator
 from hyperloom.orchestrator.loop.sub_agent_runner import SubAgentRunner
-from hyperloom.orchestrator.policy.gate import PolicyDenied, PolicyGate
+from hyperloom.orchestrator.policy.denial import PolicyDenied
+from hyperloom.orchestrator.policy.gate import PolicyGate
 from hyperloom.orchestrator.policy.projection import ResourceFacts
+from hyperloom.orchestrator.roles import MockBackend, ScriptedPlan
 from hyperloom.orchestrator.roles.agent_role import default_role_registry
 from hyperloom.orchestrator.state.shared_state import SharedState
-from hyperloom.orchestrator.state.task_registry import TaskRegistry
+from hyperloom.orchestrator.state.task_registry import TaskRegistry, TaskSpec
 
 
 def _warm_replay_dispatch_params(
@@ -72,7 +76,6 @@ def _gate(tmp_path: Path, monkeypatch) -> tuple[PolicyGate, Path]:
         role_registry=default_role_registry(),
         session_dir=sd,
         shared_state=state,
-        strict_paths=True,
         resources=ResourceFacts(),
     )
     return gate, sd
@@ -91,32 +94,31 @@ def _project(gate: PolicyGate, **fields) -> None:
         setattr(gate.resources, name, value)
 
 
+_ORIGIN = {"phase": "EXPLORE", "macro_cycle": 0, "tick": 0}
+
+
 def _runner_with_policy(tmp_path: Path, monkeypatch, *, shared_state: object | None = None) -> SubAgentRunner:
     monkeypatch.setenv(paths.ENV_USER_DATA_PATH, str(tmp_path))
     sd = paths.make_session_dir()
     db = SqliteConnection(tmp_path / "coord.db")
-    locks = ResourceLockManager(SqliteLeaseBackend(db))
-    tasks = TaskRegistry(db)
+    locks = SqliteLeaseBackend(db)
+    tasks = TaskRegistry(db, dispatch_origin_provider=lambda: _ORIGIN)
     state = shared_state if shared_state is not None else SharedState.load_or_init(sd)
     gate = PolicyGate(
         role_registry=default_role_registry(),
         session_dir=sd,
         shared_state=state,
-        strict_paths=True,
         resources=ResourceFacts(),
     )
-    return SubAgentRunner(
-        locks,
-        tasks,
-        session_dir=sd,
-        shared_state=state,
-        policy=gate,
-    )
+    sub = SubAgentRunner(locks, tasks, session_dir=sd)
+    sub.shared_state = state
+    sub.policy = gate
+    return sub
 
 
 @pytest.mark.asyncio
-async def test_dispatched_integrate_patch_without_critic_verdict_fails(tmp_path, monkeypatch):
-    """Forged queued integrate_patch rows must fail dispatch policy replay."""
+async def test_dispatched_integrate_patch_without_critic_verdict_is_cancelled(tmp_path, monkeypatch):
+    """Forged queued integrate_patch rows are cancelled by dispatch policy replay, never run."""
     sub = _runner_with_policy(tmp_path, monkeypatch)
     executed = {"ran": False}
 
@@ -125,20 +127,56 @@ async def test_dispatched_integrate_patch_without_critic_verdict_fails(tmp_path,
         return {"status": "ok"}
 
     sub.register_executor("integrate_patch", _stub)
-    task = await sub.tasks.create(
-        kind="integrate_patch",
-        params={
-            "specialist_task_id": "evil0",
-            "apply_only": True,
-        },
-        idempotency_key="forged-integrate",
+    task, _ = await sub.tasks.create_or_return_existing(
+        TaskSpec(
+            kind="integrate_patch",
+            params={
+                "specialist_task_id": "evil0",
+                "apply_only": True,
+            },
+            idempotency_key="forged-integrate",
+        ),
     )
     res = await sub.run_task(task)
-    assert res.state == "failed"
+    assert res.state == "cancelled"
+    assert res.error_class == "policy_integrate_patch_requires_critic_verdict"
     assert "no Critic verdict on record" in (res.error or "")
     assert executed["ran"] is False
     updated = await sub.tasks.get(task.task_id)
     assert updated.state == "cancelled"
+    terminal = updated.history[-1]["evidence"]
+    assert terminal["rule"] == "integrate_patch_requires_critic_verdict"
+    assert terminal["outcome"]["error_class"] == "policy_integrate_patch_requires_critic_verdict"
+
+
+@pytest.mark.asyncio
+async def test_dispatch_denied_baseline_is_not_charged_to_baseline_failures(session_dir, monkeypatch):
+    """A baseline refused at dispatch measured nothing, so repeated refusals cannot stop the run as baseline_failed."""
+    silent = ScriptedPlan(
+        turns=[], default_intent=Intent(type=IntentType.SEND_MESSAGE, payload={"topic": "heartbeat", "body_md": "ok"})
+    )
+    coord = Coordinator(session_dir, backends={n: MockBackend(silent, name=n) for n in ("orchestration", "critic")})
+    coord.shared_state.phase = "PRELUDE"
+
+    def _deny(kind, params, *, task_id=""):
+        raise PolicyDenied("bring-up round holds the machine", rule="enablement_round_in_flight")
+
+    monkeypatch.setattr(coord.policy, "validate_dispatched_task", _deny)
+    for i in range(3):
+        task, _ = await coord.tasks.create_or_return_existing(
+            TaskSpec(kind="baseline", params={}, idempotency_key=f"denied-baseline-{i}")
+        )
+        result = await coord.sub.run_task(task)
+        await coord.dispatcher.reap_dispatched_task(task, result)
+        assert result.state == "cancelled"
+        assert result.error_class == "policy_enablement_round_in_flight"
+        assert (await coord.tasks.get(task.task_id)).state == "cancelled"
+
+    state = coord.shared_state
+    assert state.baseline_failure_streak == 0
+    assert state.baseline_total_failures == 0
+    assert state.stop_reason == ""
+    assert not state.last_action_failures
 
 
 @pytest.mark.asyncio
@@ -152,10 +190,12 @@ async def test_dispatched_internal_roofline_passes_delegate_gates(tmp_path, monk
         return {"status": "ok"}
 
     sub.register_executor("roofline", _stub)
-    task = await sub.tasks.create(
-        kind="roofline",
-        params={"reason": "prelude_bootstrap"},
-        idempotency_key="internal-roofline",
+    task, _ = await sub.tasks.create_or_return_existing(
+        TaskSpec(
+            kind="roofline",
+            params={"reason": "prelude_bootstrap"},
+            idempotency_key="internal-roofline",
+        ),
     )
     res = await sub.run_task(task)
     assert res.state == "succeeded"
@@ -182,10 +222,12 @@ async def test_dispatched_internal_conc_sweep_passes_auto_enqueue_singleton(tmp_
         return {"status": "ok"}
 
     sub.register_executor("conc_sweep", _stub)
-    task = await sub.tasks.create(
-        kind="conc_sweep",
-        params={"reason": "phase_entry"},
-        idempotency_key="internal-conc-sweep",
+    task, _ = await sub.tasks.create_or_return_existing(
+        TaskSpec(
+            kind="conc_sweep",
+            params={"reason": "phase_entry"},
+            idempotency_key="internal-conc-sweep",
+        ),
     )
     res = await sub.run_task(task)
     assert res.state == "succeeded"
@@ -203,10 +245,12 @@ async def test_dispatched_recover_executes_when_queued(tmp_path, monkeypatch):
         return {"status": "ok"}
 
     sub.register_executor("recover", _stub)
-    task = await sub.tasks.create(
-        kind="recover",
-        params={"reason": "gpu_memory_leaked", "evidence": {"per_gpu": [{"gpu_id": 0, "free_mb": 0.0}]}},
-        idempotency_key="queued-recover",
+    task, _ = await sub.tasks.create_or_return_existing(
+        TaskSpec(
+            kind="recover",
+            params={"reason": "gpu_memory_leaked", "evidence": {"per_gpu": [{"gpu_id": 0, "free_mb": 0.0}]}},
+            idempotency_key="queued-recover",
+        ),
     )
     res = await sub.run_task(task)
     assert res.state == "succeeded"
@@ -434,10 +478,12 @@ async def test_dispatched_revalidation_holding_its_own_round_runs(tmp_path, monk
         return {"status": "ok"}
 
     sub.register_executor("baseline", _stub)
-    task = await sub.tasks.create(
-        kind="baseline",
-        params={"reason": "enablement_eval_revalidation"},
-        idempotency_key="enablement-revalidation",
+    task, _ = await sub.tasks.create_or_return_existing(
+        TaskSpec(
+            kind="baseline",
+            params={"reason": "enablement_eval_revalidation"},
+            idempotency_key="enablement-revalidation",
+        ),
     )
     _project(sub.policy, excluding_round_id="revalidation-1", excluding_round_holder=task.task_id)
 
@@ -460,10 +506,12 @@ async def test_dispatched_integrate_patch_with_verdict_passes(tmp_path, monkeypa
         return {"status": "ok"}
 
     sub.register_executor("integrate_patch", _stub)
-    task = await sub.tasks.create(
-        kind="integrate_patch",
-        params={"specialist_task_id": "spec-ok", "apply_only": True},
-        idempotency_key="legit-integrate",
+    task, _ = await sub.tasks.create_or_return_existing(
+        TaskSpec(
+            kind="integrate_patch",
+            params={"specialist_task_id": "spec-ok", "apply_only": True},
+            idempotency_key="legit-integrate",
+        ),
     )
     res = await sub.run_task(task)
     assert res.state == "succeeded"
@@ -483,10 +531,12 @@ async def test_dispatched_integrate_patch_resume_with_persisted_verdict_passes(t
 
     db = SqliteConnection(db_path)
     tasks = TaskRegistry(db)
-    task = await tasks.create(
-        kind="integrate_patch",
-        params={"specialist_task_id": "spec-resume", "apply_only": True},
-        idempotency_key="resume-integrate",
+    task, _ = await tasks.create_or_return_existing(
+        TaskSpec(
+            kind="integrate_patch",
+            params={"specialist_task_id": "spec-resume", "apply_only": True},
+            idempotency_key="resume-integrate",
+        ),
     )
     assert task.state == "queued"
     task_id = task.task_id
@@ -495,21 +545,16 @@ async def test_dispatched_integrate_patch_resume_with_persisted_verdict_passes(t
     assert resumed_state.get_specialist_patch_verdict("spec-resume") == "approve"
 
     db2 = SqliteConnection(db_path)
-    locks2 = ResourceLockManager(SqliteLeaseBackend(db2))
+    locks2 = SqliteLeaseBackend(db2)
     tasks2 = TaskRegistry(db2)
     gate = PolicyGate(
         role_registry=default_role_registry(),
         session_dir=sd,
         shared_state=resumed_state,
-        strict_paths=True,
     )
-    sub = SubAgentRunner(
-        locks2,
-        tasks2,
-        session_dir=sd,
-        shared_state=resumed_state,
-        policy=gate,
-    )
+    sub = SubAgentRunner(locks2, tasks2, session_dir=sd)
+    sub.shared_state = resumed_state
+    sub.policy = gate
     executed = {"ran": False}
 
     async def _stub(_ctx) -> dict:
@@ -527,26 +572,24 @@ async def test_dispatched_integrate_patch_resume_with_persisted_verdict_passes(t
     assert updated.state == "succeeded"
 
 
-class _ReconcileCoordStub(DispatcherCollaborator):
-    """Minimal coordinator shell for DispatcherCollaborator reconcile tests."""
-
-    def __init__(self, *, sub: SubAgentRunner, tasks: TaskRegistry, shared_state: SharedState) -> None:
-        self.sub = sub
-        self.tasks = tasks
-        self.shared_state = shared_state
+def _reconcile_dispatcher(*, sub: SubAgentRunner, tasks: TaskRegistry, shared_state: SharedState):
+    """A dispatcher over the minimum coordinator surface its reconcile pass reads."""
+    return DispatcherCollaborator(SimpleNamespace(sub=sub, tasks=tasks, shared_state=shared_state))
 
 
 @pytest.mark.asyncio
 async def test_reconcile_cancelled_integrate_patch_when_verdict_restored(tmp_path, monkeypatch):
     """Dispatch-time policy cancel is re-queued once Critic verdicts are restored."""
     sub = _runner_with_policy(tmp_path, monkeypatch)
-    task = await sub.tasks.create(
-        kind="integrate_patch",
-        params={"specialist_task_id": "spec-reconcile", "apply_only": True},
-        idempotency_key="approved-prop-reconcile",
+    task, _ = await sub.tasks.create_or_return_existing(
+        TaskSpec(
+            kind="integrate_patch",
+            params={"specialist_task_id": "spec-reconcile", "apply_only": True},
+            idempotency_key="approved-prop-reconcile",
+        ),
     )
     res = await sub.run_task(task)
-    assert res.state == "failed"
+    assert res.state == "cancelled"
     cancelled = await sub.tasks.get(task.task_id)
     assert cancelled.state == "cancelled"
 
@@ -556,7 +599,7 @@ async def test_reconcile_cancelled_integrate_patch_when_verdict_restored(tmp_pat
     assert sub.policy is not None
     sub.policy.shared_state = state
 
-    disp = _ReconcileCoordStub(sub=sub, tasks=sub.tasks, shared_state=state)
+    disp = _reconcile_dispatcher(sub=sub, tasks=sub.tasks, shared_state=state)
     created = await disp._reconcile_cancelled_policy_denied_integrate_tasks()
     assert len(created) == 1
     queued = await sub.tasks.queued()
@@ -569,10 +612,12 @@ async def test_reconcile_cancelled_integrate_patch_when_verdict_restored(tmp_pat
 async def test_reconcile_does_not_spawn_second_child_after_first_succeeds(tmp_path, monkeypatch):
     """A succeeded reconcile child must not trigger reconcile2 on later pump passes."""
     sub = _runner_with_policy(tmp_path, monkeypatch)
-    task = await sub.tasks.create(
-        kind="integrate_patch",
-        params={"specialist_task_id": "spec-once", "apply_only": True},
-        idempotency_key="approved-prop-once",
+    task, _ = await sub.tasks.create_or_return_existing(
+        TaskSpec(
+            kind="integrate_patch",
+            params={"specialist_task_id": "spec-once", "apply_only": True},
+            idempotency_key="approved-prop-once",
+        ),
     )
     await sub.run_task(task)
 
@@ -582,7 +627,7 @@ async def test_reconcile_does_not_spawn_second_child_after_first_succeeds(tmp_pa
     assert sub.policy is not None
     sub.policy.shared_state = state
 
-    disp = _ReconcileCoordStub(sub=sub, tasks=sub.tasks, shared_state=state)
+    disp = _reconcile_dispatcher(sub=sub, tasks=sub.tasks, shared_state=state)
     created = await disp._reconcile_cancelled_policy_denied_integrate_tasks()
     assert len(created) == 1
     child = await sub.tasks.get(created[0])
@@ -603,10 +648,12 @@ async def test_reconcile_does_not_spawn_second_child_after_first_succeeds(tmp_pa
 async def test_reconcile_does_not_spawn_second_child_while_first_is_live(tmp_path, monkeypatch, child_state):
     """A queued or running reconcile child must not trigger reconcile2 on the next pump pass."""
     sub = _runner_with_policy(tmp_path, monkeypatch)
-    task = await sub.tasks.create(
-        kind="integrate_patch",
-        params={"specialist_task_id": "spec-live", "apply_only": True},
-        idempotency_key="approved-prop-live",
+    task, _ = await sub.tasks.create_or_return_existing(
+        TaskSpec(
+            kind="integrate_patch",
+            params={"specialist_task_id": "spec-live", "apply_only": True},
+            idempotency_key="approved-prop-live",
+        ),
     )
     await sub.run_task(task)
 
@@ -616,7 +663,7 @@ async def test_reconcile_does_not_spawn_second_child_while_first_is_live(tmp_pat
     assert sub.policy is not None
     sub.policy.shared_state = state
 
-    disp = _ReconcileCoordStub(sub=sub, tasks=sub.tasks, shared_state=state)
+    disp = _reconcile_dispatcher(sub=sub, tasks=sub.tasks, shared_state=state)
     (child_id,) = await disp._reconcile_cancelled_policy_denied_integrate_tasks()
     if child_state == "running":
         await sub.tasks.transition(child_id, "running")
@@ -628,13 +675,15 @@ async def test_reconcile_does_not_spawn_second_child_while_first_is_live(tmp_pat
 @pytest.mark.asyncio
 async def test_reconcile_skips_when_verdict_still_missing(tmp_path, monkeypatch):
     sub = _runner_with_policy(tmp_path, monkeypatch)
-    task = await sub.tasks.create(
-        kind="integrate_patch",
-        params={"specialist_task_id": "spec-no-verdict", "apply_only": True},
-        idempotency_key="approved-prop-no-verdict",
+    task, _ = await sub.tasks.create_or_return_existing(
+        TaskSpec(
+            kind="integrate_patch",
+            params={"specialist_task_id": "spec-no-verdict", "apply_only": True},
+            idempotency_key="approved-prop-no-verdict",
+        ),
     )
     await sub.run_task(task)
-    disp = _ReconcileCoordStub(
+    disp = _reconcile_dispatcher(
         sub=sub,
         tasks=sub.tasks,
         shared_state=sub.shared_state,
@@ -649,17 +698,19 @@ async def test_reconcile_skips_non_critic_policy_denials(tmp_path, monkeypatch):
     state = sub.shared_state
     assert isinstance(state, SharedState)
     state.record_specialist_patch_verdict("spec-root", "approve")
-    task = await sub.tasks.create(
-        kind="integrate_patch",
-        params={
-            "specialist_task_id": "spec-root",
-            "framework_source_root": "/root",
-            "apply_only": True,
-        },
-        idempotency_key="approved-prop-bad-root",
+    task, _ = await sub.tasks.create_or_return_existing(
+        TaskSpec(
+            kind="integrate_patch",
+            params={
+                "specialist_task_id": "spec-root",
+                "framework_source_root": "/root",
+                "apply_only": True,
+            },
+            idempotency_key="approved-prop-bad-root",
+        ),
     )
     await sub.run_task(task)
-    disp = _ReconcileCoordStub(sub=sub, tasks=sub.tasks, shared_state=state)
+    disp = _reconcile_dispatcher(sub=sub, tasks=sub.tasks, shared_state=state)
     assert await disp._reconcile_cancelled_policy_denied_integrate_tasks() == []
 
 
@@ -673,10 +724,12 @@ async def test_dispatched_internal_framework_agent_passes(tmp_path, monkeypatch)
         return {"status": "ok"}
 
     sub.register_executor("framework_agent", _stub)
-    task = await sub.tasks.create(
-        kind="framework_agent",
-        params={"candidate": {"repo": "x/y", "pr_number": 1}},
-        idempotency_key="internal-framework-agent",
+    task, _ = await sub.tasks.create_or_return_existing(
+        TaskSpec(
+            kind="framework_agent",
+            params={"candidate": {"repo": "x/y", "pr_number": 1}},
+            idempotency_key="internal-framework-agent",
+        ),
     )
     res = await sub.run_task(task)
     assert res.state == "succeeded"
@@ -689,9 +742,9 @@ async def test_runner_without_policy_skips_dispatch_validation(tmp_path, monkeyp
     monkeypatch.setenv(paths.ENV_USER_DATA_PATH, str(tmp_path))
     sd = paths.make_session_dir()
     db = SqliteConnection(tmp_path / "coord.db")
-    locks = ResourceLockManager(SqliteLeaseBackend(db))
+    locks = SqliteLeaseBackend(db)
     tasks = TaskRegistry(db)
-    sub = SubAgentRunner(locks, tasks, session_dir=sd, policy=None)
+    sub = SubAgentRunner(locks, tasks, session_dir=sd)
     executed = {"ran": False}
 
     async def _stub(_ctx) -> dict:
@@ -699,10 +752,12 @@ async def test_runner_without_policy_skips_dispatch_validation(tmp_path, monkeyp
         return {"status": "ok"}
 
     sub.register_executor("integrate_patch", _stub)
-    task = await sub.tasks.create(
-        kind="integrate_patch",
-        params={"specialist_task_id": "no-gate", "apply_only": True},
-        idempotency_key="no-policy-gate",
+    task, _ = await sub.tasks.create_or_return_existing(
+        TaskSpec(
+            kind="integrate_patch",
+            params={"specialist_task_id": "no-gate", "apply_only": True},
+            idempotency_key="no-policy-gate",
+        ),
     )
     res = await sub.run_task(task)
     assert res.state == "succeeded"
@@ -713,10 +768,12 @@ async def test_runner_without_policy_skips_dispatch_validation(tmp_path, monkeyp
 async def test_killed_running_task_keeps_its_result(tmp_path, monkeypatch):
     """A task cancelled mid-flight still returns its executor result."""
     sub = _runner_with_policy(tmp_path, monkeypatch)
-    task = await sub.tasks.create(
-        kind="report",
-        params={},
-        idempotency_key="k-kill-midflight",
+    task, _ = await sub.tasks.create_or_return_existing(
+        TaskSpec(
+            kind="report",
+            params={},
+            idempotency_key="k-kill-midflight",
+        ),
     )
 
     async def _stub(ctx):

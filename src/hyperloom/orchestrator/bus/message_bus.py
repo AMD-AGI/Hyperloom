@@ -10,7 +10,7 @@ import uuid
 from dataclasses import dataclass, field
 from typing import Any
 
-from hyperloom.common.timeutil import now_iso
+from hyperloom_common.timeutil import now_iso
 
 from .db_maintenance import DEFAULT_EVENTS_KEEP_RECENT
 from .storage.connection import SqliteConnection
@@ -24,7 +24,6 @@ TOPIC_ALLOWLIST = frozenset(
         "decision",
         "alert",
         "delegated_result",
-        "lease_expired",
         "request",
         "response",
         "review_verdict",
@@ -46,7 +45,6 @@ ROLE_SUBSCRIPTIONS: dict[str, frozenset[str]] = {
             "advice",
             "strategy_change",
             "response",
-            "lease_expired",
             "proposal",
         }
     ),
@@ -133,6 +131,8 @@ class MessageBus:
         """Append one message and return its assigned sequence id."""
         if msg.topic not in TOPIC_ALLOWLIST:
             raise ValueError(f"unknown topic: {msg.topic!r}")
+        if not isinstance(msg.to_agent, str):
+            raise ValueError(f"to_agent must be a string, got {type(msg.to_agent).__name__}")
         async with self.db.transaction() as cur:
             cur.execute(
                 "INSERT INTO events (msg_id, from_agent, to_agent, topic, "
@@ -142,24 +142,28 @@ class MessageBus:
             msg.seq = int(cur.lastrowid)
         return msg.seq
 
+    async def record_observation(self, source: str, topic: str, payload: dict) -> None:
+        """Broadcast one ``source`` message under ``topic`` to every agent."""
+        await self.append_and_seq(Message.new(source, "*", topic, payload))
+
     async def tail(
         self,
         n: int = 200,
         *,
-        after_seq: int = 0,
         to_agent: str | None = None,
         topic: str | None = None,
     ) -> list[Message]:
         """Return the most recent messages matching the given filters."""
-        clauses = ["seq > ?"]
-        params: list[Any] = [after_seq]
+        clauses: list[str] = []
+        params: list[Any] = []
         if to_agent is not None:
             clauses.append("(to_agent = ? OR to_agent = '*')")
             params.append(to_agent)
         if topic is not None:
             clauses.append("topic = ?")
             params.append(topic)
-        sql = f"SELECT * FROM events WHERE {' AND '.join(clauses)} ORDER BY seq DESC LIMIT ?"  # nosec B608 - clauses are selected from fixed templates.
+        where = f" WHERE {' AND '.join(clauses)}" if clauses else ""
+        sql = f"SELECT * FROM events{where} ORDER BY seq DESC LIMIT ?"  # nosec B608 - clauses are selected from fixed templates.
         params.append(n)
         rows = await self.db.fetchall(sql, params)
         return [Message.from_row(r) for r in rows]

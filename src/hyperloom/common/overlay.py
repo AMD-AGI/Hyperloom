@@ -9,6 +9,16 @@ import json
 from pathlib import Path
 
 
+def is_safe_path_entry(entry: str) -> bool:
+    """A single path entry is safe iff it has no ``:``, no ``..``, no control chars."""
+    return (
+        bool(entry)
+        and ":" not in entry
+        and ".." not in Path(entry).parts
+        and not any(c in entry for c in ("\n", "\r", "\x00"))
+    )
+
+
 def overlay_is_loadable(overlay: str) -> bool:
     """Whether a startup overlay can install an authored kernel."""
     if not overlay:
@@ -29,8 +39,7 @@ def validate_overlay_pythonpath(value: str) -> str:
     """Return one loadable directory, rejecting lists and ambiguous paths."""
     if not value:
         return ""
-    path = Path(value)
-    if ":" in value or ".." in path.parts or any(char in value for char in "\n\r\0"):
+    if not is_safe_path_entry(value):
         raise ValueError("overlay_pythonpath must name one literal directory")
     if not overlay_is_loadable(value):
         raise ValueError(f"overlay_pythonpath is not loadable: {value!r}")

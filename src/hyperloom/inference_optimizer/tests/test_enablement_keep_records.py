@@ -10,7 +10,7 @@ import os
 import shutil
 import subprocess
 import sys
-from dataclasses import asdict
+from dataclasses import asdict, replace
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
@@ -21,25 +21,31 @@ import yaml
 from hyperloom.orchestrator.enablement.recipe.section import collect_enablement
 from hyperloom.orchestrator.actions.executors._patch_snapshot import (
     _git_commit_kept,
-    patch_declared_ops,
     replayed_stack_ops,
 )
 from hyperloom.orchestrator.actions.executors._git import _git_head_sha
+from hyperloom.orchestrator.actions.executors._server_argv import ConfigUnreadable
 from hyperloom.orchestrator.actions.executors._integrate_attempt import IntegrateAttempt
 from hyperloom.orchestrator.actions.executors.integrate_patch import IntegratePatchExecutor
 from hyperloom.orchestrator.enablement.lane import _rearm_on_kept
+from hyperloom.orchestrator.enablement.recipe import keep_probe
 from hyperloom.orchestrator.enablement.recipe.keep_records import (
     accepted_stack_artifacts,
+    build_extensions_not_carried,
     build_root_records,
     capture_root_snapshots,
     classify_root,
     collect_contributions,
     declared_targets,
+    levers_without_readers,
 )
 from hyperloom.orchestrator.enablement.recipe.keep_probe import (
-    keep_probe_env,
+    KeepEvidence,
+    graded_framework,
+    graded_launch_env,
     keep_assertion_packages,
     probe_environment_closure,
+    probe_keep_environment,
     resolve_keep_interpreter,
 )
 from hyperloom.orchestrator.state._shared_state.enablement_round import EnablementRound
@@ -206,7 +212,7 @@ def test_artifact_only_contributions_do_not_fabricate_a_patch_binding():
 
 def test_keep_records_project_launch_evidence_before_returning_it(repo: Path, tmp_path: Path, monkeypatch):
     executor = IntegratePatchExecutor(session_dir=tmp_path / "session")
-    monkeypatch.setattr(executor, "_probe_keep_environment", lambda *_args, **_kwargs: ({}, {}))
+    monkeypatch.setattr(keep_probe, "probe_keep_environment", lambda *_args, **_kwargs: ({}, {}))
     evidence = {
         "framework": "sglang",
         "requested_server_args": "--tp 2",
@@ -215,14 +221,14 @@ def test_keep_records_project_launch_evidence_before_returning_it(repo: Path, tm
         "actual_server_log_path": "/host/session/server.log",
     }
     out = executor._enablement_keep_records(
-        IntegrateAttempt(task_id=PROBE_TASK, base_sha_by_root={}, shared_state=SimpleNamespace(enablement=None)),
+        IntegrateAttempt(
+            task_id=PROBE_TASK,
+            base_sha_by_root={},
+            shared_state=SimpleNamespace(enablement=EnablementRound()),
+            specialist_task_id=PROBE_TASK,
+            framework_root=repo,
+        ),
         params={},
-        specialist_task_id=PROBE_TASK,
-        framework_root=repo,
-        applied=[],
-        applied_artifacts=[],
-        done_payload={},
-        provision_result=None,
         bench_result={"launch_evidence": evidence},
     )
     durable = out["enablement_launch_evidence"]
@@ -238,7 +244,7 @@ def test_keep_sanitizer_refusal_reaches_activation_verdict_and_resets(
     repo: Path, tmp_path: Path, monkeypatch, argv_key
 ):
     executor = IntegratePatchExecutor(session_dir=tmp_path / "session")
-    monkeypatch.setattr(executor, "_probe_keep_environment", lambda *_args, **_kwargs: ({}, {}))
+    monkeypatch.setattr(keep_probe, "probe_keep_environment", lambda *_args, **_kwargs: ({}, {}))
     state = SimpleNamespace(enablement=EnablementRound(origin="eval"))
     for argv, refused in (("--flag 'unterminated", True), ("", False)):
         evidence = {
@@ -250,21 +256,21 @@ def test_keep_sanitizer_refusal_reaches_activation_verdict_and_resets(
             argv_key: argv,
         }
         result = executor._enablement_keep_records(
-            IntegrateAttempt(task_id=PROBE_TASK, base_sha_by_root={}, shared_state=state),
+            IntegrateAttempt(
+                task_id=PROBE_TASK,
+                base_sha_by_root={},
+                shared_state=state,
+                specialist_task_id=PROBE_TASK,
+                framework_root=repo,
+            ),
             params={},
-            specialist_task_id=PROBE_TASK,
-            framework_root=repo,
-            applied=[],
-            applied_artifacts=[],
-            done_payload={},
-            provision_result=None,
             bench_result={"launch_evidence": evidence},
         )
         if refused:
             assert argv_key not in result["enablement_launch_evidence"]
         _rearm_on_kept(state, result)
         state.enablement = EnablementRound.from_dict(asdict(state.enablement))
-        collected = collect_enablement(executor.session_dir, {"enablement": asdict(state.enablement)}, [])
+        collected = collect_enablement(executor.session_dir, {"enablement": asdict(state.enablement)})
         decision = collected["replay_sufficiency"]
         activation_reasons = [reason for reason in decision["reasons"] if reason["code"] == "activation_incomplete"]
         expected = {"code": "activation_incomplete", "scope": "observed_server_launch_flags", "blocks": "both"}
@@ -273,14 +279,12 @@ def test_keep_sanitizer_refusal_reaches_activation_verdict_and_resets(
             assert decision["status"] == "insufficient"
 
 
-def test_declared_targets_separate_upserts_from_deletions():
+def test_declared_targets_place_each_artifact_under_its_root():
     targets = declared_targets(
         framework_root="/fr",
-        upserted=["srt/a.py"],
-        deleted=["srt/gone.py"],
-        artifacts=[{"rel_target": "srt/art.py", "root": "/fr"}],
+        artifacts=[{"rel_target": "srt/art.py", "root": "/other"}, {"rel_target": "srt/own.py"}, {"root": "/x"}],
     )
-    assert targets["/fr"] == {"srt/a.py": "upsert", "srt/gone.py": "delete", "srt/art.py": "upsert"}
+    assert targets == {"/other": {"srt/art.py": "upsert"}, "/fr": {"srt/own.py": "upsert"}}
 
 
 def test_snapshot_capture_is_portable_and_records_declared_ops(repo: Path, tmp_path: Path):
@@ -382,7 +386,7 @@ def test_the_captured_stack_is_the_accepted_one_not_this_rounds_installs():
     inherited = [{"target": "/fr/srt/base.py", "rel_target": "srt/base.py", "root": "/fr"}]
     applied = [{"target": "/fr/srt/new.py", "rel_target": "srt/new.py", "root": "/fr"}]
     stack = accepted_stack_artifacts(inherited=inherited, applied=applied)
-    assert declared_targets(framework_root="/fr", upserted=[], deleted=[], artifacts=stack)["/fr"] == {
+    assert declared_targets(framework_root="/fr", artifacts=stack)["/fr"] == {
         "srt/base.py": "upsert",
         "srt/new.py": "upsert",
     }
@@ -413,20 +417,16 @@ def test_undeclared_absent_target_is_recorded_missing_and_incomplete(repo: Path,
 
 
 def test_keep_interpreter_prefers_the_override_then_the_backend():
-    assert (
-        resolve_keep_interpreter({"runtime_python_exe": "/a/py", "framework_python": "/b/py"}, backend_name="bypass")
-        == "/a/py"
-    )
-    assert resolve_keep_interpreter({"framework_python": "/b/py"}, backend_name="magpie") == "/b/py"
-    assert resolve_keep_interpreter({}, backend_name="bypass", backend_interpreter="/c/py") == "/c/py"
+    assert resolve_keep_interpreter({"runtime_python_exe": "/a/py", "framework_python": "/b/py"}) == "/a/py"
+    assert resolve_keep_interpreter({"framework_python": "/b/py"}) == "/b/py"
     # An override naming no interpreter leaves the backend's own as the one that
     # launched the server, on every backend. Restricting this to bypass left an
     # in-place enablement -- which provisions no runtime at all -- with its
     # closure permanently unobserved.
-    assert resolve_keep_interpreter({}, backend_name="magpie", backend_interpreter="/c/py") == "/c/py"
+    assert resolve_keep_interpreter({}, backend_interpreter="/c/py") == "/c/py"
     # A backend that names no interpreter still resolves to nothing rather than
     # to a guess.
-    assert resolve_keep_interpreter({}, backend_name="magpie", backend_interpreter="") == ""
+    assert resolve_keep_interpreter({}, backend_interpreter="") == ""
 
 
 def _installed_dist(root: Path, name: str, version: str) -> str:
@@ -458,10 +458,10 @@ def test_the_graded_override_decides_what_the_probe_observes(tmp_path: Path):
     """
     override = {"pythonpath_prefixes": [_installed_dist(tmp_path, "overlaid", "3.1")]}
     closure, assertions = probe_environment_closure(
-        sys.executable, env=keep_probe_env(override), packages=("overlaid",)
+        sys.executable, env=graded_launch_env(override, ""), packages=("overlaid",)
     )
     bare_closure, bare_assertions = probe_environment_closure(
-        sys.executable, env=keep_probe_env(None), packages=("overlaid",)
+        sys.executable, env=graded_launch_env(None, ""), packages=("overlaid",)
     )
     assert closure["distributions"]["overlaid"] == "3.1" and assertions == {"overlaid": "3.1"}
     assert "overlaid" not in bare_closure["distributions"] and bare_assertions == {}
@@ -520,19 +520,18 @@ def test_a_build_without_provisioning_observes_versions_at_the_keep(tmp_path: Pa
     which reads as never observed. The recorded version is the one the probe
     finds, so a build-time map carried forward is visible as a stale value.
     """
-    executor = IntegratePatchExecutor(session_dir=tmp_path / "session")
-    attempt = IntegrateAttempt(
-        task_id=PROBE_TASK,
-        shared_state=SimpleNamespace(enablement=SimpleNamespace(build_manifest=_build_manifest({"demo": "1.0"}))),
-    )
     params = {
         "runtime_override": {
             "runtime_python_exe": sys.executable,
             "pythonpath_prefixes": [_installed_dist(tmp_path, "demo", "2.0")],
         }
     }
-    closure, assertions = executor._probe_keep_environment(
-        attempt, params, specialist_task_id=PROBE_TASK, provision_result=None
+    closure, assertions = probe_keep_environment(
+        params,
+        KeepEvidence(
+            build_manifest=_build_manifest({"demo": "1.0"}), specialist_task_id=PROBE_TASK, provision_result=None
+        ),
+        framework="vllm",
     )
     assert assertions == {"demo": "2.0"}
     assert closure["distributions"]["demo"] == "2.0"
@@ -540,19 +539,20 @@ def test_a_build_without_provisioning_observes_versions_at_the_keep(tmp_path: Pa
 
 def test_a_keep_whose_build_is_another_rounds_observes_nothing(tmp_path: Path):
     """Fail closed: no provisioning and no linked build is no version source."""
-    executor = IntegratePatchExecutor(session_dir=tmp_path / "session")
-    attempt = IntegrateAttempt(
-        task_id=PROBE_TASK,
-        shared_state=SimpleNamespace(enablement=SimpleNamespace(build_manifest=_build_manifest({"demo": "1.0"}))),
-    )
     params = {
         "runtime_override": {
             "runtime_python_exe": sys.executable,
             "pythonpath_prefixes": [_installed_dist(tmp_path, "demo", "2.0")],
         }
     }
-    _closure, assertions = executor._probe_keep_environment(
-        attempt, params, specialist_task_id="some-other-round", provision_result=None
+    _closure, assertions = probe_keep_environment(
+        params,
+        KeepEvidence(
+            build_manifest=_build_manifest({"demo": "1.0"}),
+            specialist_task_id="some-other-round",
+            provision_result=None,
+        ),
+        framework="vllm",
     )
     assert assertions == {}
 
@@ -575,14 +575,13 @@ def test_an_override_naming_no_interpreter_observes_under_the_backend(
     monkeypatch.setattr(
         _benchmark_interpreter, "_resolve_probe_python", lambda _framework="vllm", *, env=None: sys.executable
     )
-    executor = IntegratePatchExecutor(session_dir=tmp_path / "session")
-    attempt = IntegrateAttempt(
-        task_id=PROBE_TASK,
-        shared_state=SimpleNamespace(enablement=SimpleNamespace(build_manifest=_build_manifest({"demo": "1.0"}))),
-    )
     params = {"runtime_override": {"pythonpath_prefixes": [_installed_dist(tmp_path, "demo", "2.0")]}}
-    closure, assertions = executor._probe_keep_environment(
-        attempt, params, specialist_task_id=PROBE_TASK, provision_result=None
+    closure, assertions = probe_keep_environment(
+        params,
+        KeepEvidence(
+            build_manifest=_build_manifest({"demo": "1.0"}), specialist_task_id=PROBE_TASK, provision_result=None
+        ),
+        framework="vllm",
     )
     assert assertions == {"demo": "2.0"} and closure["distributions"]["demo"] == "2.0"
 
@@ -602,13 +601,12 @@ def test_an_in_place_enablement_with_no_override_still_observes(tmp_path: Path, 
     monkeypatch.setattr(
         _benchmark_interpreter, "_resolve_probe_python", lambda _framework="vllm", *, env=None: sys.executable
     )
-    executor = IntegratePatchExecutor(session_dir=tmp_path / "session")
-    attempt = IntegrateAttempt(
-        task_id=PROBE_TASK,
-        shared_state=SimpleNamespace(enablement=SimpleNamespace(build_manifest=_build_manifest({"pytest": ""}))),
-    )
-    closure, assertions = executor._probe_keep_environment(
-        attempt, {}, specialist_task_id=PROBE_TASK, provision_result=None
+    closure, assertions = probe_keep_environment(
+        {},
+        KeepEvidence(
+            build_manifest=_build_manifest({"pytest": ""}), specialist_task_id=PROBE_TASK, provision_result=None
+        ),
+        framework="vllm",
     )
     assert closure["distributions"], "the ambient interpreter has a non-empty closure"
     assert assertions.get("pytest"), "a named package is asserted at its observed version"
@@ -620,14 +618,13 @@ def test_the_same_override_under_the_bypass_backend_does_observe(tmp_path: Path,
 
     monkeypatch.setattr(benchmark_backend, "resolve_backend_name", lambda: "bypass")
     monkeypatch.setattr(benchmark_backend, "resolve_benchmark_interpreter", lambda: sys.executable)
-    executor = IntegratePatchExecutor(session_dir=tmp_path / "session")
-    attempt = IntegrateAttempt(
-        task_id=PROBE_TASK,
-        shared_state=SimpleNamespace(enablement=SimpleNamespace(build_manifest=_build_manifest({"demo": "1.0"}))),
-    )
     params = {"runtime_override": {"pythonpath_prefixes": [_installed_dist(tmp_path, "demo", "2.0")]}}
-    closure, assertions = executor._probe_keep_environment(
-        attempt, params, specialist_task_id=PROBE_TASK, provision_result=None
+    closure, assertions = probe_keep_environment(
+        params,
+        KeepEvidence(
+            build_manifest=_build_manifest({"demo": "1.0"}), specialist_task_id=PROBE_TASK, provision_result=None
+        ),
+        framework="vllm",
     )
     assert assertions == {"demo": "2.0"} and closure["distributions"]["demo"] == "2.0"
 
@@ -651,13 +648,12 @@ def test_the_closure_follows_the_framework_interpreter_not_magpies(tmp_path: Pat
     monkeypatch.setattr(
         _benchmark_interpreter, "_resolve_probe_python", lambda _framework="vllm", *, env=None: sys.executable
     )
-    executor = IntegratePatchExecutor(session_dir=tmp_path / "session")
-    attempt = IntegrateAttempt(
-        task_id=PROBE_TASK,
-        shared_state=SimpleNamespace(enablement=SimpleNamespace(build_manifest=_build_manifest({"pytest": ""}))),
-    )
-    closure, assertions = executor._probe_keep_environment(
-        attempt, {}, specialist_task_id=PROBE_TASK, provision_result=None
+    closure, assertions = probe_keep_environment(
+        {},
+        KeepEvidence(
+            build_manifest=_build_manifest({"pytest": ""}), specialist_task_id=PROBE_TASK, provision_result=None
+        ),
+        framework="vllm",
     )
     # The framework resolver named this interpreter, so its closure is the one
     # on record; reaching the backend's resolver at all fails the test above.
@@ -670,7 +666,7 @@ def test_an_override_rewriting_path_selects_that_pythons_closure(tmp_path: Path,
 
     Resolving the fallback against the ambient PATH names the interpreter the
     launch did *not* use, and records its closure against the KEEP. The resolver
-    therefore runs under the environment ``keep_probe_env`` builds.
+    therefore runs under the environment ``graded_launch_env`` builds.
     """
     from hyperloom.orchestrator.actions.executors import _benchmark_interpreter, benchmark_backend
 
@@ -699,12 +695,10 @@ def test_an_override_rewriting_path_selects_that_pythons_closure(tmp_path: Path,
         return resolved
 
     monkeypatch.setattr(_benchmark_interpreter, "_resolve_probe_python", _record)
-    executor = IntegratePatchExecutor(session_dir=tmp_path / "session")
-    attempt = IntegrateAttempt(
-        task_id=PROBE_TASK, shared_state=SimpleNamespace(enablement=SimpleNamespace(build_manifest=[]))
-    )
     params = {"runtime_override": {"path_prefix": str(graded_bin)}, "framework": "vllm"}
-    executor._probe_keep_environment(attempt, params, specialist_task_id=PROBE_TASK, provision_result=None)
+    probe_keep_environment(
+        params, KeepEvidence(build_manifest=[], specialist_task_id=PROBE_TASK, provision_result=None), framework="vllm"
+    )
     assert seen["resolved"] == str(graded_bin / "python"), "the override's PATH, not the ambient one"
 
 
@@ -748,15 +742,10 @@ def test_the_materialized_configs_envs_decide_the_probed_interpreter(tmp_path: P
         return seen["resolved"]
 
     monkeypatch.setattr(_benchmark_interpreter, "_resolve_probe_python", _record)
-    executor = IntegratePatchExecutor(session_dir=tmp_path / "session")
-    attempt = IntegrateAttempt(
-        task_id=PROBE_TASK, shared_state=SimpleNamespace(enablement=SimpleNamespace(build_manifest=[]))
-    )
-    executor._probe_keep_environment(
-        attempt,
+    probe_keep_environment(
         {},
-        specialist_task_id=PROBE_TASK,
-        provision_result=None,
+        KeepEvidence(build_manifest=[], specialist_task_id=PROBE_TASK, provision_result=None),
+        framework=graded_framework({}, str(config)),
         materialized_config=str(config),
     )
     assert seen["framework"] == "vllm", "the config's framework outranks $FRAMEWORK"
@@ -780,16 +769,12 @@ def test_a_dist_reachable_only_through_the_configs_pythonpath_is_in_the_closure(
     )
     monkeypatch.setattr(benchmark_backend, "resolve_backend_name", lambda: "bypass")
     monkeypatch.setattr(benchmark_backend, "resolve_benchmark_interpreter", lambda: sys.executable)
-    executor = IntegratePatchExecutor(session_dir=tmp_path / "session")
-    attempt = IntegrateAttempt(
-        task_id=PROBE_TASK,
-        shared_state=SimpleNamespace(enablement=SimpleNamespace(build_manifest=_build_manifest({"configonly": ""}))),
-    )
-    closure, assertions = executor._probe_keep_environment(
-        attempt,
+    closure, assertions = probe_keep_environment(
         {},
-        specialist_task_id=PROBE_TASK,
-        provision_result=None,
+        KeepEvidence(
+            build_manifest=_build_manifest({"configonly": ""}), specialist_task_id=PROBE_TASK, provision_result=None
+        ),
+        framework="vllm",
         materialized_config=str(config),
     )
     assert closure["distributions"].get("configonly") == "3.1"
@@ -804,11 +789,9 @@ def test_a_keep_with_no_usable_runtime_observes_nothing(tmp_path: Path, monkeypa
 
     monkeypatch.setattr(benchmark_backend, "resolve_backend_name", lambda: "magpie")
     monkeypatch.setattr(_benchmark_interpreter, "_resolve_probe_python", lambda _framework="vllm", *, env=None: "")
-    executor = IntegratePatchExecutor(session_dir=tmp_path / "session")
-    attempt = IntegrateAttempt(
-        task_id=PROBE_TASK, shared_state=SimpleNamespace(enablement=SimpleNamespace(build_manifest=[]))
-    )
-    assert executor._probe_keep_environment(attempt, {}, specialist_task_id=PROBE_TASK, provision_result=None) == (
+    assert probe_keep_environment(
+        {}, KeepEvidence(build_manifest=[], specialist_task_id=PROBE_TASK, provision_result=None), framework="vllm"
+    ) == (
         {},
         {},
     )
@@ -829,19 +812,18 @@ def test_a_round_spanning_two_roots_names_each_tree_on_its_own_terms(repo: Path,
     attempt = IntegrateAttempt(
         task_id=PROBE_TASK,
         base_sha_by_root={str(repo): _git_head_sha(repo), str(second): _git_head_sha(second)},
-        shared_state=SimpleNamespace(enablement=None),
+        shared_state=SimpleNamespace(enablement=EnablementRound()),
     )
     out = executor._enablement_keep_records(
-        attempt,
+        replace(
+            attempt,
+            specialist_task_id=PROBE_TASK,
+            framework_root=repo,
+            applied=[Path("/p/1.patch")],
+            applied_artifacts=[{"target": str(second / "lib/a.so"), "rel_target": "lib/a.so", "root": str(second)}],
+            done_payload={"patch_roots": {"/p/1.patch": str(repo)}},
+        ),
         params={},
-        specialist_task_id=PROBE_TASK,
-        framework_root=repo,
-        # In the accepted stack, not merely recorded beside it: a root binding
-        # is admitted for the patches this integration took.
-        applied=[Path("/p/1.patch")],
-        applied_artifacts=[{"target": str(second / "lib/a.so"), "rel_target": "lib/a.so", "root": str(second)}],
-        done_payload={"patch_roots": {"/p/1.patch": str(repo)}},
-        provision_result=None,
         bench_result={},
     )
     records = {r["path"]: r for r in out["enablement_roots"]}
@@ -876,14 +858,13 @@ def test_an_inherited_artifact_is_captured_by_the_keep_that_launched_it(repo: Pa
         ),
     )
     out = executor._enablement_keep_records(
-        attempt,
+        replace(
+            attempt,
+            specialist_task_id=PROBE_TASK,
+            framework_root=repo,
+            applied_artifacts=[{"target": str(repo / TARGET), "rel_target": TARGET, "root": str(repo)}],
+        ),
         params={},
-        specialist_task_id=PROBE_TASK,
-        framework_root=repo,
-        applied=[],
-        applied_artifacts=[{"target": str(repo / TARGET), "rel_target": TARGET, "root": str(repo)}],
-        done_payload={},
-        provision_result=None,
         bench_result={},
     )
     root_id = out["enablement_roots"][0]["id"]
@@ -894,22 +875,24 @@ def test_an_inherited_artifact_is_captured_by_the_keep_that_launched_it(repo: Pa
     assert (overlay / inherited_rel).read_text(encoding="utf-8") == "value = 7\n"
 
 
-def test_a_standalone_keep_without_shared_state_captures_its_own_targets(repo: Path, tmp_path: Path, monkeypatch):
+def test_a_first_keep_captures_its_own_targets(repo: Path, tmp_path: Path, monkeypatch):
     executor = IntegratePatchExecutor(session_dir=tmp_path / "session")
-    monkeypatch.setattr(executor, "_probe_keep_environment", lambda *_args, **_kwargs: ({}, {}))
-    attempt = IntegrateAttempt(task_id=PROBE_TASK, base_sha_by_root={str(repo): _git_head_sha(repo)})
+    monkeypatch.setattr(keep_probe, "probe_keep_environment", lambda *_args, **_kwargs: ({}, {}))
+    attempt = IntegrateAttempt(
+        task_id=PROBE_TASK,
+        base_sha_by_root={str(repo): _git_head_sha(repo)},
+        shared_state=SimpleNamespace(enablement=EnablementRound()),
+    )
     result = executor._enablement_keep_records(
-        attempt,
+        replace(
+            attempt,
+            specialist_task_id=PROBE_TASK,
+            framework_root=repo,
+            applied_artifacts=[{"target": str(repo / TARGET), "rel_target": TARGET, "root": str(repo)}],
+        ),
         params={},
-        specialist_task_id=PROBE_TASK,
-        framework_root=repo,
-        applied=[],
-        applied_artifacts=[{"target": str(repo / TARGET), "rel_target": TARGET, "root": str(repo)}],
-        done_payload={},
-        provision_result=None,
         bench_result={},
     )
-    assert attempt.shared_state is None
     assert list(result["enablement_accepted_stack_targets"].values()) == [{TARGET: "upsert"}]
 
 
@@ -922,17 +905,18 @@ def test_a_non_git_contributing_root_carries_no_base_commit(repo: Path, tmp_path
     attempt = IntegrateAttempt(
         task_id=PROBE_TASK,
         base_sha_by_root={str(repo): _git_head_sha(repo)},
-        shared_state=SimpleNamespace(enablement=None),
+        shared_state=SimpleNamespace(enablement=EnablementRound()),
     )
     out = executor._enablement_keep_records(
-        attempt,
+        replace(
+            attempt,
+            specialist_task_id=PROBE_TASK,
+            framework_root=repo,
+            applied=[Path("/p/1.patch")],
+            applied_artifacts=[{"target": str(plain / "lib/a.so"), "rel_target": "lib/a.so", "root": str(plain)}],
+            done_payload={"patch_roots": {"/p/1.patch": str(repo)}},
+        ),
         params={},
-        specialist_task_id=PROBE_TASK,
-        framework_root=repo,
-        applied=[Path("/p/1.patch")],
-        applied_artifacts=[{"target": str(plain / "lib/a.so"), "rel_target": "lib/a.so", "root": str(plain)}],
-        done_payload={"patch_roots": {"/p/1.patch": str(repo)}},
-        provision_result=None,
         bench_result={},
     )
     record = next(r for r in out["enablement_roots"] if r["path"] == str(plain))
@@ -941,11 +925,6 @@ def test_a_non_git_contributing_root_carries_no_base_commit(repo: Path, tmp_path
 
 def test_a_provisioned_keep_that_installed_nothing_observes_nothing(tmp_path: Path):
     """The caller must distinguish an absent provisioning result from an empty one."""
-    executor = IntegratePatchExecutor(session_dir=tmp_path / "session")
-    attempt = IntegrateAttempt(
-        task_id=PROBE_TASK,
-        shared_state=SimpleNamespace(enablement=SimpleNamespace(build_manifest=_build_manifest({"demo": "1.0"}))),
-    )
     override = {
         "runtime_python_exe": sys.executable,
         "pythonpath_prefixes": [_installed_dist(tmp_path, "demo", "2.0")],
@@ -955,8 +934,12 @@ def test_a_provisioned_keep_that_installed_nothing_observes_nothing(tmp_path: Pa
         installed_versions={},
         runtime=SimpleNamespace(to_runtime_override=lambda: dict(override)),
     )
-    closure, assertions = executor._probe_keep_environment(
-        attempt, {}, specialist_task_id=PROBE_TASK, provision_result=provisioned
+    closure, assertions = probe_keep_environment(
+        {},
+        KeepEvidence(
+            build_manifest=_build_manifest({"demo": "1.0"}), specialist_task_id=PROBE_TASK, provision_result=provisioned
+        ),
+        framework="vllm",
     )
     assert assertions == {}
     assert closure["distributions"]["demo"] == "2.0"
@@ -968,10 +951,6 @@ def test_a_provisioned_keep_reports_the_version_the_setup_replay_left(tmp_path: 
     The provisioning stage runs before the setup replay, so carrying its map
     forward would report the version a later install had already replaced.
     """
-    executor = IntegratePatchExecutor(session_dir=tmp_path / "session")
-    attempt = IntegrateAttempt(
-        task_id=PROBE_TASK, shared_state=SimpleNamespace(enablement=SimpleNamespace(build_manifest=[]))
-    )
     override = {
         "runtime_python_exe": sys.executable,
         "pythonpath_prefixes": [_installed_dist(tmp_path, "demo", "2.0")],
@@ -981,8 +960,10 @@ def test_a_provisioned_keep_reports_the_version_the_setup_replay_left(tmp_path: 
         installed_versions={"demo": "1.0"},
         runtime=SimpleNamespace(to_runtime_override=lambda: dict(override)),
     )
-    _closure, assertions = executor._probe_keep_environment(
-        attempt, {}, specialist_task_id=PROBE_TASK, provision_result=provisioned
+    _closure, assertions = probe_keep_environment(
+        {},
+        KeepEvidence(build_manifest=[], specialist_task_id=PROBE_TASK, provision_result=provisioned),
+        framework="vllm",
     )
     assert assertions == {"demo": "2.0"}
 
@@ -991,21 +972,23 @@ def test_the_probe_environment_carries_the_prefixes_and_the_runtime_env(tmp_path
     """An AITER runtime names no interpreter: a prefix list and a runtime_env
     are the whole of what makes its build importable."""
     prefix = _installed_dist(tmp_path, "overlaid", "3.1")
-    env = keep_probe_env({"pythonpath_prefixes": [prefix], "runtime_env": {"AITER_REBUILD": "1"}})
+    env = graded_launch_env({"pythonpath_prefixes": [prefix], "runtime_env": {"AITER_REBUILD": "1"}}, "")
     assert env["PYTHONPATH"].split(":")[0] == prefix
     assert env["AITER_REBUILD"] == "1"
 
 
 def test_an_interpreter_the_probe_cannot_run_observes_nothing(tmp_path: Path):
     """Fail closed on the invocation too, not only on an unresolved interpreter."""
-    assert probe_environment_closure(str(tmp_path / "absent-python"), env=keep_probe_env(None), packages=("demo",)) == (
+    assert probe_environment_closure(
+        str(tmp_path / "absent-python"), env=graded_launch_env(None, ""), packages=("demo",)
+    ) == (
         {},
         {},
     )
     silent = tmp_path / "silent-python"
     silent.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
     silent.chmod(0o755)
-    assert probe_environment_closure(str(silent), env=keep_probe_env(None), packages=("demo",)) == ({}, {})
+    assert probe_environment_closure(str(silent), env=graded_launch_env(None, ""), packages=("demo",)) == ({}, {})
 
 
 # --------------------------------------------------------------------------
@@ -1017,52 +1000,6 @@ def _patch(tmp_path: Path, name: str, body: str) -> Path:
     path = tmp_path / name
     path.write_text(body, encoding="utf-8")
     return path
-
-
-def test_a_deletion_is_declared_by_its_dev_null_post_image(repo: Path, tmp_path: Path):
-    patch = _patch(
-        tmp_path,
-        "del.patch",
-        f"--- a/{TARGET}\n+++ /dev/null\n@@ -1 +0,0 @@\n-{BASE_TEXT}",
-    )
-    assert patch_declared_ops(repo, [patch]) == {TARGET: "delete"}
-
-
-def test_a_creation_is_an_upsert_even_when_the_tree_does_not_hold_it(repo: Path, tmp_path: Path):
-    """The stripped-inputs case, stated as a unit.
-
-    A KEEP reached without its mutation inputs boots against the base tree, so
-    the created file is absent at capture time. A tree probe reads that absence
-    as a deletion and declares a target the snapshot then satisfies trivially;
-    the diff says the file must exist, and that is what a replay must produce.
-    """
-    rel = "srt/created.py"
-    assert not (repo / rel).exists()
-    patch = _patch(tmp_path, "new.patch", f"--- /dev/null\n+++ b/{rel}\n@@ -0,0 +1 @@\n+x = 1\n")
-    assert patch_declared_ops(repo, [patch]) == {rel: "upsert"}
-
-
-def test_a_later_patch_recreating_a_deleted_file_wins(repo: Path, tmp_path: Path):
-    """Order, not set-merge: the accumulated upsert/delete lists put every
-    deletion last, so the recreation loses and the replay removes a file the
-    accepted stack requires."""
-    first = _patch(tmp_path, "1.patch", f"--- a/{TARGET}\n+++ /dev/null\n@@ -1 +0,0 @@\n-{BASE_TEXT}")
-    second = _patch(tmp_path, "2.patch", f"--- /dev/null\n+++ b/{TARGET}\n@@ -0,0 +1 @@\n+{PATCHED_TEXT}")
-    assert patch_declared_ops(repo, [first, second]) == {TARGET: "upsert"}
-    # ...and the other way round, so this is an ordering rule and not a
-    # preference for one operation.
-    assert patch_declared_ops(repo, [second, first]) == {TARGET: "delete"}
-
-
-def test_a_rename_declares_both_ends(repo: Path, tmp_path: Path):
-    moved = "srt/moved.py"
-    patch = _patch(tmp_path, "mv.patch", f"--- a/{TARGET}\n+++ b/{moved}\n@@ -1 +1 @@\n-{BASE_TEXT}+{BASE_TEXT}")
-    assert patch_declared_ops(repo, [patch]) == {TARGET: "delete", moved: "upsert"}
-
-
-def test_a_plain_modify_declares_no_deletion_of_the_file_it_writes(repo: Path, tmp_path: Path):
-    patch = _patch(tmp_path, "mod.patch", f"--- a/{TARGET}\n+++ b/{TARGET}\n@@ -1 +1 @@\n-{BASE_TEXT}+{PATCHED_TEXT}")
-    assert patch_declared_ops(repo, [patch]) == {TARGET: "upsert"}
 
 
 def test_the_keep_records_what_each_kept_patch_declares(repo: Path, tmp_path: Path):
@@ -1093,14 +1030,14 @@ def test_the_keep_records_what_each_kept_patch_declares(repo: Path, tmp_path: Pa
         ),
     )
     out = executor._enablement_keep_records(
-        attempt,
+        replace(
+            attempt,
+            specialist_task_id=PROBE_TASK,
+            framework_root=repo,
+            applied=[second],
+            done_payload={"patch_roots": {str(second): str(repo)}},
+        ),
         params={},
-        specialist_task_id=PROBE_TASK,
-        framework_root=repo,
-        applied=[second],
-        applied_artifacts=[],
-        done_payload={"patch_roots": {str(second): str(repo)}},
-        provision_result=None,
         bench_result={},
     )
     assert out["enablement_patch_targets"] == {
@@ -1131,14 +1068,13 @@ def test_the_base_sha_reported_is_this_roots_own(repo: Path, tmp_path: Path):
         ),
     )
     out = executor._enablement_keep_records(
-        attempt,
+        replace(
+            attempt,
+            specialist_task_id=PROBE_TASK,
+            framework_root=repo,
+            applied_artifacts=[{"target": str(repo / TARGET), "rel_target": TARGET, "root": str(repo)}],
+        ),
         params={},
-        specialist_task_id=PROBE_TASK,
-        framework_root=repo,
-        applied=[],
-        applied_artifacts=[{"target": str(repo / TARGET), "rel_target": TARGET, "root": str(repo)}],
-        done_payload={},
-        provision_result=None,
         bench_result={},
     )
     assert out["enablement_base_sha"] == _git_head_sha(repo)
@@ -1153,12 +1089,9 @@ def test_a_recorded_root_for_a_patch_outside_the_stack_is_ignored(repo: Path, tm
     and a declared-target set for a tree no round wrote, and the capture is then
     judged against files that were never part of the stack.
     """
-    from hyperloom.orchestrator.actions.executors.integrate_patch import _accepted_patch_roots
-
     unrelated = tmp_path / "aiter"
     applied = tmp_path / "2.patch"
-    roots = _accepted_patch_roots(
-        EnablementRound(),
+    roots = EnablementRound().accepted_patch_roots(
         done_payload={
             "patch_roots": {
                 str(applied): str(repo),
@@ -1188,7 +1121,7 @@ def test_an_advanced_round_carries_its_base_to_the_keep_that_follows(repo: Path,
     Pins the durable ``base_sha_by_root`` write: drop it from
     ``_note_pre_mutation_head`` and this goes red.
     """
-    from hyperloom.orchestrator.actions.executors.integrate_patch import _note_pre_mutation_head
+    from hyperloom.orchestrator.actions.executors._patch_sources import _note_pre_mutation_head
 
     true_base = _git_head_sha(repo)
     state = SimpleNamespace(enablement=EnablementRound(framework_root=str(repo)))
@@ -1215,14 +1148,13 @@ def executor_keep_records(tmp_path: Path, attempt, repo: Path):
     """Run the KEEP capture for a round that installed one artifact."""
     executor = IntegratePatchExecutor(session_dir=tmp_path / "session")
     return executor._enablement_keep_records(
-        attempt,
+        replace(
+            attempt,
+            specialist_task_id=PROBE_TASK,
+            framework_root=repo,
+            applied_artifacts=[{"target": str(repo / TARGET), "rel_target": TARGET, "root": str(repo)}],
+        ),
         params={},
-        specialist_task_id=PROBE_TASK,
-        framework_root=repo,
-        applied=[],
-        applied_artifacts=[{"target": str(repo / TARGET), "rel_target": TARGET, "root": str(repo)}],
-        done_payload={},
-        provision_result=None,
         bench_result={},
     )
 
@@ -1230,7 +1162,7 @@ def executor_keep_records(tmp_path: Path, attempt, repo: Path):
 def test_an_ordinary_patch_round_does_not_seed_the_enablement_base(repo: Path):
     """The head before an unrelated patch is not the tree the enablement stack
     applies to, so a non-enablement round must not claim the base."""
-    from hyperloom.orchestrator.actions.executors.integrate_patch import _note_pre_mutation_head
+    from hyperloom.orchestrator.actions.executors._patch_sources import _note_pre_mutation_head
 
     state = SimpleNamespace(enablement=EnablementRound())
     _note_pre_mutation_head(IntegrateAttempt(task_id=PROBE_TASK, shared_state=state), repo, enablement=False)
@@ -1238,7 +1170,7 @@ def test_an_ordinary_patch_round_does_not_seed_the_enablement_base(repo: Path):
 
 
 def test_the_recorded_base_is_never_replaced_by_a_later_reading(repo: Path):
-    from hyperloom.orchestrator.actions.executors.integrate_patch import _note_pre_mutation_head
+    from hyperloom.orchestrator.actions.executors._patch_sources import _note_pre_mutation_head
 
     state = SimpleNamespace(enablement=EnablementRound())
     _note_pre_mutation_head(IntegrateAttempt(task_id=PROBE_TASK, shared_state=state), repo, enablement=True)
@@ -1272,9 +1204,7 @@ def test_a_modification_that_was_never_applied_declares_nothing(repo: Path, tmp_
     """
     base_sha = _git_head_sha(repo)
     patch = _patch(tmp_path, "mod.patch", f"--- a/{TARGET}\n+++ b/{TARGET}\n@@ -1 +1 @@\n-{BASE_TEXT}+{PATCHED_TEXT}")
-    # The headers still say what the patch WOULD do...
-    assert patch_declared_ops(repo, [patch]) == {TARGET: "upsert"}
-    # ...but the replay produces bytes the captured tree does not have.
+    # The replay produces bytes the captured tree does not have.
     assert replayed_stack_ops(repo, [patch], base_sha=base_sha) is None
     assert (repo / TARGET).read_text(encoding="utf-8") == BASE_TEXT
 
@@ -1406,9 +1336,7 @@ def test_a_mixed_diff_declares_its_metadata_only_block_too(repo: Path, tmp_path:
     )
     _git(repo, "apply", str(mixed))
     _commit_all(repo, "mixed applied")
-    # The header parse still sees only the text half...
-    assert patch_declared_ops(repo, [mixed]) == {TARGET: "upsert"}
-    # ...while git reports both entries the apply actually touched.
+    # git reports both entries the apply actually touched.
     assert replayed_stack_ops(repo, [mixed], base_sha=base_sha) == {
         str(mixed): {TARGET: "upsert", "srt/exec.sh": "upsert"}
     }
@@ -1426,9 +1354,6 @@ def test_a_p0_deletion_is_not_recorded_against_a_path_that_never_existed(repo: P
     _git(repo, "apply", "-p0", str(patch))
     _commit_all(repo, "deleted")
 
-    # The header-only reader falls back to -p1 and names a path that was never
-    # in the tree.
-    assert patch_declared_ops(repo, [patch]) == {"gone.py": "delete"}
     assert replayed_stack_ops(repo, [patch], base_sha=base_sha) == {str(patch): {"srt/gone.py": "delete"}}
 
 
@@ -1443,14 +1368,14 @@ def test_a_patch_that_cannot_be_verified_leaves_the_recipe_refused(repo: Path, t
     state = SimpleNamespace(enablement=EnablementRound(framework_root=str(repo)))
     attempt = IntegrateAttempt(task_id=PROBE_TASK, base_sha_by_root={str(repo): base_sha}, shared_state=state)
     out = executor._enablement_keep_records(
-        attempt,
+        replace(
+            attempt,
+            specialist_task_id=PROBE_TASK,
+            framework_root=repo,
+            applied=[patch],
+            done_payload={"patch_roots": {str(patch): str(repo)}},
+        ),
         params={},
-        specialist_task_id=PROBE_TASK,
-        framework_root=repo,
-        applied=[patch],
-        applied_artifacts=[],
-        done_payload={"patch_roots": {str(patch): str(repo)}},
-        provision_result=None,
         bench_result={},
     )
     assert out["enablement_patch_targets"] == {}
@@ -1458,7 +1383,7 @@ def test_a_patch_that_cannot_be_verified_leaves_the_recipe_refused(repo: Path, t
     state.enablement.patch_roots = {str(patch): str(repo)}
     for key, value in out.items():
         setattr(state.enablement, key.removeprefix("enablement_"), value)
-    section = collect_enablement(executor.session_dir, {"enablement": asdict(state.enablement)}, [])
+    section = collect_enablement(executor.session_dir, {"enablement": asdict(state.enablement)})
     codes = [r["code"] for r in section["replay_sufficiency"]["reasons"]]
     assert section["replay_sufficiency"]["status"] == "insufficient"
     assert "patch_targets_unknown" in codes
@@ -1506,7 +1431,7 @@ def test_the_base_reading_is_saved_before_the_mutation_that_invalidates_it(repo:
     next thing that happens. Left for the rearm, a round that commits its patch
     and then dies resumes with the entry absent and HEAD already moved -- the
     exact state this map exists to prevent."""
-    from hyperloom.orchestrator.actions.executors.integrate_patch import _note_pre_mutation_head
+    from hyperloom.orchestrator.actions.executors._patch_sources import _note_pre_mutation_head
 
     saved: list[Path] = []
     state = SimpleNamespace(
@@ -1524,7 +1449,7 @@ def test_the_base_reading_is_saved_before_the_mutation_that_invalidates_it(repo:
 def test_a_failing_save_does_not_stop_the_round(repo: Path, tmp_path: Path):
     """A record that cannot be written is still on the in-memory state, and the
     rearm saves again; a failed write must not cost the round."""
-    from hyperloom.orchestrator.actions.executors.integrate_patch import _note_pre_mutation_head
+    from hyperloom.orchestrator.actions.executors._patch_sources import _note_pre_mutation_head
 
     def _boom(*_a, **_k):
         raise OSError("disk full")
@@ -1628,14 +1553,16 @@ def test_a_patch_on_a_root_with_no_base_commit_declares_its_overlay(tmp_path: Pa
     executor = IntegratePatchExecutor(session_dir=tmp_path / "session")
     state = SimpleNamespace(enablement=EnablementRound(framework_root=str(plain)))
     out = executor._enablement_keep_records(
-        IntegrateAttempt(task_id=PROBE_TASK, base_sha_by_root={}, shared_state=state),
+        IntegrateAttempt(
+            task_id=PROBE_TASK,
+            base_sha_by_root={},
+            shared_state=state,
+            specialist_task_id=PROBE_TASK,
+            framework_root=plain,
+            applied=[patch],
+            done_payload={"patch_roots": {str(patch): str(plain)}},
+        ),
         params={},
-        specialist_task_id=PROBE_TASK,
-        framework_root=plain,
-        applied=[patch],
-        applied_artifacts=[],
-        done_payload={"patch_roots": {str(patch): str(plain)}},
-        provision_result=None,
         bench_result={},
     )
     assert out["enablement_patch_targets"] == {str(patch): {"mod.py": "upsert"}}
@@ -1788,14 +1715,15 @@ def test_an_artifact_on_a_root_with_no_base_commit_is_unaffected(tmp_path: Path)
     executor = IntegratePatchExecutor(session_dir=tmp_path / "session")
     state = SimpleNamespace(enablement=EnablementRound())
     out = executor._enablement_keep_records(
-        IntegrateAttempt(task_id=PROBE_TASK, base_sha_by_root={}, shared_state=state),
+        IntegrateAttempt(
+            task_id=PROBE_TASK,
+            base_sha_by_root={},
+            shared_state=state,
+            specialist_task_id=PROBE_TASK,
+            framework_root=plain,
+            applied_artifacts=[{"target": str(plain / "lib/a.so"), "rel_target": "lib/a.so", "root": str(plain)}],
+        ),
         params={},
-        specialist_task_id=PROBE_TASK,
-        framework_root=plain,
-        applied=[],
-        applied_artifacts=[{"target": str(plain / "lib/a.so"), "rel_target": "lib/a.so", "root": str(plain)}],
-        done_payload={},
-        provision_result=None,
         bench_result={},
     )
     record = next(r for r in out["enablement_roots"] if r["path"] == str(plain))
@@ -2292,6 +2220,7 @@ def _built_attempt(tmp_path: Path, *, package: str, files: dict[str, bytes]) -> 
     pkg = root / "candidates" / "00_pr" / "worktree" / package
     pkg.mkdir(parents=True)
     for name, blob in files.items():
+        (pkg / name).parent.mkdir(parents=True, exist_ok=True)
         (pkg / name).write_bytes(blob)
     other = root / "_repos" / "somedep" / "somedep"
     other.mkdir(parents=True)
@@ -2331,7 +2260,7 @@ def test_extensions_the_build_made_and_the_framework_root_lacks_are_reported(tmp
         kept_rounds=[{"task_id": "round-1"}],
     )
 
-    missing = IntegratePatchExecutor._build_extensions_not_carried(enablement, root)
+    missing = build_extensions_not_carried(enablement, root)
 
     assert missing == ["_moe_C.abi3.so", "_rocm_C.abi3.so"]
     assert "_unrelated.abi3.so" not in missing, "another repo's extensions are not this package's to carry"
@@ -2351,7 +2280,7 @@ def test_a_build_whose_extensions_all_match_reports_none(tmp_path: Path):
         kept_rounds=[{"task_id": "round-1"}],
     )
 
-    assert IntegratePatchExecutor._build_extensions_not_carried(enablement, root) == []
+    assert build_extensions_not_carried(enablement, root) == []
 
 
 def test_no_linked_build_scans_nothing(tmp_path: Path, monkeypatch):
@@ -2369,8 +2298,8 @@ def test_no_linked_build_scans_nothing(tmp_path: Path, monkeypatch):
     root.mkdir(parents=True)
     enablement = SimpleNamespace(build_manifest=[], last_specialist_task_id="", kept_rounds=[])
 
-    assert IntegratePatchExecutor._build_extensions_not_carried(enablement, root) == []
-    assert IntegratePatchExecutor._build_extensions_not_carried(enablement, None) == []
+    assert build_extensions_not_carried(enablement, root) == []
+    assert build_extensions_not_carried(enablement, None) == []
 
 
 def test_a_linked_sentinel_with_no_attempt_row_scans_nothing(tmp_path: Path, monkeypatch):
@@ -2387,7 +2316,7 @@ def test_a_linked_sentinel_with_no_attempt_row_scans_nothing(tmp_path: Path, mon
         kept_rounds=[{"task_id": "round-1"}],
     )
 
-    assert IntegratePatchExecutor._build_extensions_not_carried(enablement, root) == []
+    assert build_extensions_not_carried(enablement, root) == []
 
 
 def test_the_round_being_captured_links_before_it_is_kept(tmp_path: Path):
@@ -2415,8 +2344,8 @@ def test_the_round_being_captured_links_before_it_is_kept(tmp_path: Path):
         kept_rounds=[],  # this round is not kept yet
     )
 
-    without = IntegratePatchExecutor._build_extensions_not_carried(enablement, root)
-    withit = IntegratePatchExecutor._build_extensions_not_carried(enablement, root, specialist_task_id=PROBE_TASK)
+    without = build_extensions_not_carried(enablement, root)
+    withit = build_extensions_not_carried(enablement, root, specialist_task_id=PROBE_TASK)
 
     assert without == [], "the pre-fix shape: nothing links, nothing is reported"
     assert withit == ["_moe_C.abi3.so"], "told which round it is capturing, the gap is named"
@@ -2436,9 +2365,7 @@ def test_the_current_round_is_not_double_counted(tmp_path: Path):
         kept_rounds=[{"task_id": PROBE_TASK}],
     )
 
-    assert IntegratePatchExecutor._build_extensions_not_carried(enablement, root, specialist_task_id=PROBE_TASK) == [
-        "_moe_C.abi3.so"
-    ]
+    assert build_extensions_not_carried(enablement, root, specialist_task_id=PROBE_TASK) == ["_moe_C.abi3.so"]
 
 
 def _linked(attempt: Path) -> SimpleNamespace:
@@ -2466,9 +2393,7 @@ def test_an_extension_without_the_abi3_tag_is_still_judged(tmp_path: Path):
     root = tmp_path / "site-packages" / "vllm"
     root.mkdir(parents=True)
 
-    missing = IntegratePatchExecutor._build_extensions_not_carried(
-        _linked(attempt), root, specialist_task_id=PROBE_TASK
-    )
+    missing = build_extensions_not_carried(_linked(attempt), root, specialist_task_id=PROBE_TASK)
 
     assert missing == ["_C.cpython-312-x86_64-linux-gnu.so"]
 
@@ -2481,7 +2406,7 @@ def test_a_linked_build_whose_root_is_gone_reports_unverified(tmp_path: Path):
     # build; only the directory itself is gone.
     enablement = _linked(tmp_path / "builds" / "bA")
 
-    assert IntegratePatchExecutor._build_extensions_not_carried(enablement, root, specialist_task_id=PROBE_TASK) is None
+    assert build_extensions_not_carried(enablement, root, specialist_task_id=PROBE_TASK) is None
 
 
 def test_an_extension_in_a_subpackage_is_judged_at_its_own_path(tmp_path: Path):
@@ -2491,33 +2416,28 @@ def test_an_extension_in_a_subpackage_is_judged_at_its_own_path(tmp_path: Path):
     comparing by basename would have matched it against an unrelated file of the
     same name at the top.
     """
-    root_dir = tmp_path / "builds" / "bA" / "candidates" / "00_pr" / "worktree" / "vllm"
-    (root_dir / "attention").mkdir(parents=True)
-    (root_dir / "_C.abi3.so").write_bytes(b"carried")
-    (root_dir / "attention" / "_ops.cpython-312-x86_64-linux-gnu.so").write_bytes(b"nested, left behind")
+    attempt = _built_attempt(
+        tmp_path,
+        package="vllm",
+        files={"_C.abi3.so": b"carried", "attention/_ops.cpython-312-x86_64-linux-gnu.so": b"nested, left behind"},
+    )
     root = tmp_path / "site-packages" / "vllm"
     (root / "attention").mkdir(parents=True)
     (root / "_C.abi3.so").write_bytes(b"carried")
 
-    missing = IntegratePatchExecutor._build_extensions_not_carried(
-        _linked(tmp_path / "builds" / "bA"), root, specialist_task_id=PROBE_TASK
-    )
+    missing = build_extensions_not_carried(_linked(attempt), root, specialist_task_id=PROBE_TASK)
 
     assert missing == [str(Path("attention") / "_ops.cpython-312-x86_64-linux-gnu.so")]
 
 
 def test_a_same_named_file_at_the_top_does_not_satisfy_a_nested_one(tmp_path: Path):
     """The comparison is by relative path, not by basename."""
-    root_dir = tmp_path / "builds" / "bA" / "candidates" / "00_pr" / "worktree" / "vllm"
-    (root_dir / "attention").mkdir(parents=True)
-    (root_dir / "attention" / "_ops.abi3.so").write_bytes(b"the nested one")
+    attempt = _built_attempt(tmp_path, package="vllm", files={"attention/_ops.abi3.so": b"the nested one"})
     root = tmp_path / "site-packages" / "vllm"
     root.mkdir(parents=True)
     (root / "_ops.abi3.so").write_bytes(b"the nested one")  # right bytes, wrong place
 
-    missing = IntegratePatchExecutor._build_extensions_not_carried(
-        _linked(tmp_path / "builds" / "bA"), root, specialist_task_id=PROBE_TASK
-    )
+    missing = build_extensions_not_carried(_linked(attempt), root, specialist_task_id=PROBE_TASK)
 
     assert missing == [str(Path("attention") / "_ops.abi3.so")]
 
@@ -2534,25 +2454,33 @@ def test_a_venv_copy_of_the_same_package_is_not_the_builds_output(tmp_path: Path
     root.mkdir(parents=True)
     (root / "_C.abi3.so").write_bytes(b"carried")
 
-    missing = IntegratePatchExecutor._build_extensions_not_carried(
-        _linked(attempt), root, specialist_task_id=PROBE_TASK
-    )
+    missing = build_extensions_not_carried(_linked(attempt), root, specialist_task_id=PROBE_TASK)
 
     assert missing == [], "only the build's own output tree is the recipe's to carry"
 
 
-def test_without_a_readable_result_the_candidate_worktrees_are_scanned(tmp_path: Path):
-    """Fallback stays narrower than the attempt root: still no venv, no deps."""
-    attempt = _built_attempt(tmp_path, package="vllm", files={"_moe_C.abi3.so": b"left behind"})
-    (attempt / "result.json").write_text("not json at all", encoding="utf-8")
+@pytest.mark.parametrize(
+    "result_text",
+    [None, "not json at all", "{}", '{"runtime": {"pythonpath_prefixes": []}}'],
+    ids=["absent", "corrupt", "no-runtime", "no-prefixes"],
+)
+def test_a_build_that_names_no_output_tree_is_unverified(tmp_path: Path, result_text: str | None):
+    """A candidate worktree is where a build may have written, not where it says it did.
+
+    Every extension the worktree holds matches the framework root here, so a
+    scan of it would certify the build as carried without the build ever
+    naming that tree as its output.
+    """
+    attempt = _built_attempt(tmp_path, package="vllm", files={"_C.abi3.so": b"same"})
+    if result_text is None:
+        (attempt / "result.json").unlink()
+    else:
+        (attempt / "result.json").write_text(result_text, encoding="utf-8")
     root = tmp_path / "site-packages" / "vllm"
     root.mkdir(parents=True)
+    (root / "_C.abi3.so").write_bytes(b"same")
 
-    missing = IntegratePatchExecutor._build_extensions_not_carried(
-        _linked(attempt), root, specialist_task_id=PROBE_TASK
-    )
-
-    assert missing == ["_moe_C.abi3.so"]
+    assert build_extensions_not_carried(_linked(attempt), root, specialist_task_id=PROBE_TASK) is None
 
 
 def test_a_named_output_tree_that_is_gone_is_unverified(tmp_path: Path):
@@ -2566,24 +2494,7 @@ def test_a_named_output_tree_that_is_gone_is_unverified(tmp_path: Path):
     root = tmp_path / "site-packages" / "vllm"
     root.mkdir(parents=True)
 
-    assert (
-        IntegratePatchExecutor._build_extensions_not_carried(_linked(attempt), root, specialist_task_id=PROBE_TASK)
-        is None
-    )
-
-
-def test_an_empty_fallback_is_unverified(tmp_path: Path):
-    """No readable result and no candidate worktrees left to fall back to."""
-    attempt = _built_attempt(tmp_path, package="vllm", files={"_C.abi3.so": b"carried"})
-    (attempt / "result.json").write_text("not json at all", encoding="utf-8")
-    shutil.rmtree(attempt / "candidates")
-    root = tmp_path / "site-packages" / "vllm"
-    root.mkdir(parents=True)
-
-    assert (
-        IntegratePatchExecutor._build_extensions_not_carried(_linked(attempt), root, specialist_task_id=PROBE_TASK)
-        is None
-    )
+    assert build_extensions_not_carried(_linked(attempt), root, specialist_task_id=PROBE_TASK) is None
 
 
 def _lever_state(**envs):
@@ -2601,9 +2512,7 @@ def test_a_lever_no_framework_file_reads_is_named(tmp_path: Path):
     (root / "envs.py").write_text('VLLM_ROCM_USE_AITER = os.getenv("VLLM_ROCM_USE_AITER")', encoding="utf-8")
     state = _lever_state(VLLM_ROCM_USE_AITER="1", VLLM_HL_MQA_LOGITS_HEAD_CHUNK="1")
 
-    assert IntegratePatchExecutor._levers_without_readers(state, root, framework="vllm") == [
-        "VLLM_HL_MQA_LOGITS_HEAD_CHUNK"
-    ]
+    assert levers_without_readers(state, root, framework="vllm") == ["VLLM_HL_MQA_LOGITS_HEAD_CHUNK"]
 
 
 def test_levers_outside_the_frameworks_namespace_are_not_judged(tmp_path: Path):
@@ -2617,7 +2526,7 @@ def test_levers_outside_the_frameworks_namespace_are_not_judged(tmp_path: Path):
     (root / "envs.py").write_text("nothing here", encoding="utf-8")
     state = _lever_state(AMD_SERIALIZE_KERNEL="3", NCCL_IB_HCA="mlx5", HIP_FORCE_DEV_KERNARG="1")
 
-    assert IntegratePatchExecutor._levers_without_readers(state, root, framework="vllm") == []
+    assert levers_without_readers(state, root, framework="vllm") == []
 
 
 def test_a_reader_anywhere_in_the_tree_counts(tmp_path: Path):
@@ -2627,7 +2536,7 @@ def test_a_reader_anywhere_in_the_tree_counts(tmp_path: Path):
     (deep / "sparse.py").write_text('os.environ.get("VLLM_HL_CHUNK")', encoding="utf-8")
     state = _lever_state(VLLM_HL_CHUNK="4")
 
-    assert IntegratePatchExecutor._levers_without_readers(state, tmp_path / "vllm", framework="vllm") == []
+    assert levers_without_readers(state, tmp_path / "vllm", framework="vllm") == []
 
 
 def test_an_extensionless_or_unanticipated_reader_counts(tmp_path: Path):
@@ -2653,7 +2562,7 @@ def test_an_extensionless_or_unanticipated_reader_counts(tmp_path: Path):
         VLLM_HL_NOBODY="1",
     )
 
-    assert IntegratePatchExecutor._levers_without_readers(state, root, framework="vllm") == ["VLLM_HL_NOBODY"]
+    assert levers_without_readers(state, root, framework="vllm") == ["VLLM_HL_NOBODY"]
 
 
 def test_a_native_or_script_reader_counts_too(tmp_path: Path):
@@ -2670,21 +2579,21 @@ def test_a_native_or_script_reader_counts_too(tmp_path: Path):
     (root / "envs.py").write_text("nothing", encoding="utf-8")
     state = _lever_state(VLLM_HL_KERNEL="1", VLLM_HL_LAUNCH="2", VLLM_HL_NOBODY="3")
 
-    assert IntegratePatchExecutor._levers_without_readers(state, root, framework="vllm") == ["VLLM_HL_NOBODY"]
+    assert levers_without_readers(state, root, framework="vllm") == ["VLLM_HL_NOBODY"]
 
 
 def test_an_unreadable_tree_is_unverified(tmp_path: Path):
     state = _lever_state(VLLM_HL_CHUNK="4")
 
-    assert IntegratePatchExecutor._levers_without_readers(state, tmp_path / "gone", framework="vllm") is None
+    assert levers_without_readers(state, tmp_path / "gone", framework="vllm") is None
 
 
 def test_no_framework_named_judges_nothing(tmp_path: Path):
     root = tmp_path / "vllm"
     root.mkdir(parents=True)
 
-    assert IntegratePatchExecutor._levers_without_readers(_lever_state(VLLM_X="1"), root, framework="") == []
-    assert IntegratePatchExecutor._levers_without_readers(_lever_state(VLLM_X="1"), None, framework="vllm") == []
+    assert levers_without_readers(_lever_state(VLLM_X="1"), root, framework="") == []
+    assert levers_without_readers(_lever_state(VLLM_X="1"), None, framework="vllm") is None
 
 
 def test_a_lever_this_keep_introduced_is_scanned(tmp_path: Path):
@@ -2701,8 +2610,8 @@ def test_a_lever_this_keep_introduced_is_scanned(tmp_path: Path):
     state = _lever_state(VLLM_HL_OLD="1")
     effective = {"extra_envs": {"VLLM_HL_NEW": "2"}}
 
-    without = IntegratePatchExecutor._levers_without_readers(state, root, framework="vllm")
-    withit = IntegratePatchExecutor._levers_without_readers(state, root, framework="vllm", effective_config=effective)
+    without = levers_without_readers(state, root, framework="vllm")
+    withit = levers_without_readers(state, root, framework="vllm", effective_config=effective)
 
     assert without == [], "the pre-fix shape: this round's lever is invisible"
     assert withit == ["VLLM_HL_NEW"]
@@ -2714,21 +2623,46 @@ def test_the_two_env_sources_are_merged_not_replaced(tmp_path: Path):
     (root / "envs.py").write_text("nothing reads anything", encoding="utf-8")
     state = _lever_state(VLLM_HL_OLD="1")
 
-    assert IntegratePatchExecutor._levers_without_readers(
+    assert levers_without_readers(
         state, root, framework="vllm", effective_config={"extra_envs": {"VLLM_HL_NEW": "2"}}
     ) == ["VLLM_HL_NEW", "VLLM_HL_OLD"]
 
 
-def test_a_malformed_effective_config_is_ignored(tmp_path: Path):
-    root = tmp_path / "vllm"
-    root.mkdir(parents=True)
-    (root / "envs.py").write_text("nothing", encoding="utf-8")
-    state = _lever_state(VLLM_HL_OLD="1")
+def test_levers_with_no_framework_tree_are_unverified_not_clean():
+    enablement = SimpleNamespace(accepted_config={"extra_envs": {"VLLM_HL_X": "1"}})
 
-    for junk in (None, 7, "x", {"extra_envs": 5}):
-        assert IntegratePatchExecutor._levers_without_readers(state, root, framework="vllm", effective_config=junk) == [
-            "VLLM_HL_OLD"
-        ], junk
+    assert levers_without_readers(enablement, None, framework="vllm") is None
+
+
+def test_a_linked_build_with_no_framework_tree_is_unverified_not_carried(tmp_path: Path):
+    attempt_root = tmp_path / "builds" / "tb-1"
+    (attempt_root / "candidates" / "c1" / "worktree" / "vllm").mkdir(parents=True)
+    (attempt_root / "candidates" / "c1" / "worktree" / "vllm" / "_C.abi3.so").write_bytes(b"\x00built")
+    enablement = SimpleNamespace(
+        build_manifest=[{"ok": True, "task_id": "tb-1", "probe_task_id": "p-1", "attempt_root": str(attempt_root)}],
+        last_specialist_task_id="p-1",
+        kept_rounds=[],
+    )
+
+    assert build_extensions_not_carried(enablement, None) is None
+
+
+def test_no_levers_and_no_linked_build_stay_clean_without_a_tree():
+    """Nothing to verify is still ``[]``: only a skipped scan becomes ``None``."""
+    assert levers_without_readers(_lever_state(), None, framework="vllm") == []
+    empty = SimpleNamespace(build_manifest=[], last_specialist_task_id="", kept_rounds=[])
+    assert build_extensions_not_carried(empty, None) == []
+
+
+def test_an_unreadable_materialized_config_is_not_replaced_by_the_ambient_env(tmp_path: Path):
+    with pytest.raises(ConfigUnreadable):
+        graded_launch_env({}, str(tmp_path / "gone.yaml"))
+
+
+def test_an_unreadable_materialized_config_does_not_guess_the_framework(tmp_path: Path, monkeypatch):
+    monkeypatch.setenv("FRAMEWORK", "sglang")
+    with pytest.raises(ConfigUnreadable):
+        graded_framework({"framework": "sglang"}, str(tmp_path / "gone.yaml"))
 
 
 def test_a_switch_set_to_off_is_not_a_credential_channel(tmp_path):
@@ -2769,3 +2703,19 @@ def test_an_empty_drop_in_directory_is_not_a_credential_store(tmp_path):
     (drop_in / "private.conf").write_text("machine repo login u password p\n", encoding="utf-8")
 
     assert detect_credential_channels({}, fs_root=str(tmp_path)) == ["apt_auth"]
+
+
+def test_an_in_place_patch_asserts_the_serving_framework_at_the_keep(tmp_path: Path):
+    """A KEEP that only patches the framework tree provisions and builds nothing,
+    so it named no package and the assertion set was empty -- while its patches
+    hold only against the framework version that was graded."""
+    params = {
+        "runtime_override": {
+            "runtime_python_exe": sys.executable,
+            "pythonpath_prefixes": [_installed_dist(tmp_path, "vllm", "0.30.0")],
+        }
+    }
+    _closure, assertions = probe_keep_environment(
+        params, KeepEvidence(build_manifest=[], specialist_task_id=PROBE_TASK, provision_result=None), framework="vllm"
+    )
+    assert assertions == {"vllm": "0.30.0"}

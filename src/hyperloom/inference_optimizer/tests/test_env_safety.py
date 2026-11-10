@@ -46,7 +46,6 @@ def test_filter_forward_env_drops_bad_keys():
             "LD_PRELOAD": "/evil.so",
             "X Y": "nope",
         },
-        warn_on_drop=False,
     )
     assert out == {"MORI_FOO": "1"}
 
@@ -117,6 +116,9 @@ def test_scrub_benchmark_process_env_removes_control_plane_credentials():
         "LLM_PROXY_API_KEY": "proxy-secret",
         "OPENAI_API_KEY": "openai-secret",
         "SAFE_API_KEY": "safe-secret",
+        "KB_STORE_TOKEN": "kb-secret",
+        "INFERENCE_OPTIMIZER_EXTRA_ENV": '{"KB_STORE_TOKEN": "kb-secret", "VLLM_ROCM_USE_AITER": "1"}',
+        "VLLM_ROCM_USE_AITER": "1",
         "HF_TOKEN": "model-download-token",
         "PATH": "/bin",
         "RUN_EVAL": "true",
@@ -124,9 +126,114 @@ def test_scrub_benchmark_process_env_removes_control_plane_credentials():
 
     assert common_env_safety.scrub_benchmark_process_env(env) is env
     assert env == {
+        "VLLM_ROCM_USE_AITER": "1",
         "HF_TOKEN": "model-download-token",
         "PATH": "/bin",
         "RUN_EVAL": "true",
+    }
+
+
+_HOSTED_CREDENTIALS = (
+    "HYPERLOOM_MCP_TOKEN",
+    "HYPERLOOM_SANDBOX_KEY_DEV",
+    "HYPERLOOM_SANDBOX_KEY_MEASUREMENT",
+    "HYPERLOOM_SANDBOX_KEY_SUBRUN",
+    "HYPERLOOM_SIGNING_KEY_FILE",
+)
+
+
+@pytest.mark.parametrize("name", _HOSTED_CREDENTIALS)
+def test_a_hosted_measurement_credential_never_reaches_a_child_a_variant_or_a_record(name):
+    env = {name: "credential", "PATH": "/bin", "HYPERLOOM_RUN_MODE": "hosted"}
+
+    assert common_env_safety.scrub_benchmark_process_env(env) == {"PATH": "/bin", "HYPERLOOM_RUN_MODE": "hosted"}
+    assert not common_env_safety.is_allowed_variant_env_key(name)
+    assert not common_env_safety.is_allowed_external_env_key(name)
+    assert common_env_safety.redact_secret_env_values({name: "credential"}) == {name: "[REDACTED]"}
+
+
+def test_redact_secret_env_values_masks_credentials_and_keeps_knobs():
+    env = {
+        "OPENAI_API_KEY": "plaintext",
+        "ANTHROPIC_AUTH_TOKEN": "plaintext",
+        # Allowed into a benchmark subprocess, but still a credential once the record leaves the process.
+        "HF_TOKEN": "plaintext",
+        # Listed by name only: neither carries a credential-shaped fragment.
+        "AWS_ACCESS_KEY_ID": "plaintext",
+        "ANTHROPIC_CUSTOM_HEADERS": "plaintext",
+        "TOKENIZERS_PARALLELISM": "false",
+        "DURATION": "3600",
+    }
+
+    assert common_env_safety.redact_secret_env_values(env) == {
+        "OPENAI_API_KEY": "[REDACTED]",
+        "ANTHROPIC_AUTH_TOKEN": "[REDACTED]",
+        "HF_TOKEN": "[REDACTED]",
+        "AWS_ACCESS_KEY_ID": "[REDACTED]",
+        "ANTHROPIC_CUSTOM_HEADERS": "[REDACTED]",
+        "TOKENIZERS_PARALLELISM": "false",
+        "DURATION": "3600",
+    }
+    assert env["OPENAI_API_KEY"] == "plaintext"
+    assert common_env_safety.redact_secret_env_values(None) == {}
+
+
+def test_redact_secret_env_values_keeps_token_count_knobs_visible():
+    # TOKEN is a credential only as a whole name segment, and never as PER_TOKEN.
+    knobs = {
+        "SGLANG_USE_AITER_FP8_PER_TOKEN": "1",
+        "AITER_PER_TOKEN_2": "1",
+        "MAX_NUM_BATCHED_TOKENS": "8192",
+        "VLLM_MAX_NUM_BATCHED_TOKENS": "8192",
+        "SGLANG_MAX_PREFILL_TOKENS": "16384",
+        "SGLANG_USE_AITER_PER_TOKEN_GROUP_QUANT": "1",
+        "TOKENIZERS_PARALLELISM": "false",
+        "TOKENIZER_MODE": "auto",
+    }
+
+    assert common_env_safety.redact_secret_env_values(knobs) == knobs
+
+
+def test_redact_secret_env_values_masks_every_langfuse_marker_and_scrubs_kept_values():
+    env = {
+        "HF_TOKEN": "plaintext",
+        "GITHUB_TOKEN": "plaintext",
+        "HUGGING_FACE_HUB_TOKEN": "plaintext",
+        "SERVICE_TOKEN_2": "plaintext",
+        "HF_TOKEN_BACKUP": "plaintext",
+        "PER_TOKEN_SCALE_TOKEN": "plaintext",
+        "TOKEN": "plaintext",
+        "TOKENIZER_API_KEY": "plaintext",
+        "MY_SERVICE_API_KEY": "plaintext",
+        "OTEL_EXPORTER_OTLP_HEADERS": "Authorization=plaintext",
+        "SGLANG_CUSTOM_HEADERS": "plaintext",
+        "SSH_PRIVATE_KEY": "plaintext",
+        "MINIO_ACCESS_KEY": "plaintext",
+        "AWS_SECRET_KEY": "plaintext",
+        "BASIC_AUTH": "plaintext",
+        "REQUEST_SIGNATURE": "plaintext",
+        "GPG_PASSPHRASE": "plaintext",
+        "DB_PASSWD": "plaintext",
+        # Kept by name, but a recognizable credential inside the value is still masked.
+        "EXTRA_ARGS": "--header Bearer abcdefghijklmnop",
+        "WORKERS": 4,
+    }
+
+    redacted = common_env_safety.redact_secret_env_values(env)
+
+    for name in env:
+        if name not in {"EXTRA_ARGS", "WORKERS"}:
+            assert redacted[name] == "[REDACTED]", name
+    assert redacted["EXTRA_ARGS"] == "--header Bearer [REDACTED]"
+    assert redacted["WORKERS"] == 4
+
+
+def test_langfuse_redact_env_markers_are_the_shared_list():
+    from hyperloom.inference_optimizer.trace import langfuse_mapping
+
+    # The Langfuse snapshot keeps its wider substring match.
+    assert langfuse_mapping.redact_env({"MAX_NUM_BATCHED_TOKENS": "8192"}) == {
+        "MAX_NUM_BATCHED_TOKENS": "***redacted***"
     }
 
 
@@ -205,6 +312,12 @@ def test_redact_secret_values_preserves_json_around_authorization():
     out = common_env_safety.redact_secret_values(text)
 
     assert json.loads(out) == {"header": "Authorization: Basic [REDACTED]", "ok": True}
+
+
+def test_redact_secret_values_masks_custom_header_subscription_key():
+    out = common_env_safety.redact_secret_values("ANTHROPIC_CUSTOM_HEADERS=Ocp-Apim-Subscription-Key: deadbeefsecret")
+    assert "deadbeefsecret" not in out
+    assert "[REDACTED]" in out
 
 
 def test_redact_secret_values_spares_unauthorized_status_text():
@@ -317,3 +430,94 @@ def test_redact_secret_values_preserves_json_around_ocp_header():
     out = common_env_safety.redact_secret_values(text)
 
     assert json.loads(out) == {"h": "Ocp-Apim-Subscription-Key: [REDACTED]", "ok": True}
+
+
+def test_any_custom_headers_name_is_secret_shaped():
+    """A generic ``*_CUSTOM_HEADERS`` name carries header credentials, like the text-redaction pattern assumes."""
+    assert common_env_safety.is_secret_shaped_env_name("SERVICE_CUSTOM_HEADERS")
+    assert common_env_safety.is_secret_shaped_env_name("service_custom_headers")
+    assert not common_env_safety.is_secret_shaped_env_name("TOKENIZERS_PARALLELISM")
+
+
+def test_launch_provided_names_cover_the_rank_topology_and_the_schedulers():
+    """Names the launch assigns per process, by name and by the prefixes a scheduler exports."""
+    assert common_env_safety.is_launch_provided_env_name("LOCAL_RANK")
+    assert common_env_safety.is_launch_provided_env_name("world_size")
+    assert common_env_safety.is_launch_provided_env_name("SLURM_PROCID")
+    assert common_env_safety.is_launch_provided_env_name("TORCHELASTIC_RUN_ID")
+    assert not common_env_safety.is_launch_provided_env_name("HL_FUSE_RMSNORM")
+    assert not common_env_safety.is_launch_provided_env_name("")
+
+
+@pytest.mark.parametrize(
+    "document",
+    [
+        {},
+        {"operator_extra_env": None, "operator_server_args": None},
+        {
+            "operator_extra_env": {
+                "SGLANG_USE_AITER": "1",
+                "MAX_NUM_BATCHED_TOKENS": "8192",
+                "TOKENIZERS_PARALLELISM": "x",
+            }
+        },
+        {"operator_server_args": "--tp 8 --max-total-tokens=120000 --tokenizer-path /models/m --max-prefill-tokens 5"},
+        {"rows": [{"tput": 1.5, "note": "-1", "key": ""}], "ok": True},
+        {"env": {"HF_TOKEN": ""}},
+        {"authored_framework_levers": ["a"], "baseline_last_failure_signature": "x", "reauthor_attempts": 3},
+        {"HF_TOKEN": "a field of the document, not an environment"},
+        {"operator_extra_env": {"HF_ENDPOINT": "https://hf-mirror.example/models?revision=main"}},
+        {"note": "write to ops@example.com, or see user@host without a scheme"},
+    ],
+    ids=[
+        "empty",
+        "none",
+        "env-knobs",
+        "server-arg-knobs",
+        "numbers",
+        "credential-name-without-a-value",
+        "field-names-that-contain-auth-or-signature",
+        "credential-name-outside-an-env-mapping",
+        "url-without-userinfo",
+        "an-at-sign-outside-a-url",
+    ],
+)
+def test_holds_credentials_is_false_for_knobs_and_numbers(document):
+    assert common_env_safety.holds_credentials(document) is False
+
+
+@pytest.mark.parametrize(
+    "document",
+    [
+        {"env": {"HF_TOKEN": "hf_live_value_123"}},
+        {"nested": [{"extra_envs": {"MY_SERVICE_API_KEY": "plaintext"}}]},
+        {"operator_extra_env": {"HF_TOKEN": "hf_live_value_123"}},
+        {"operator_server_args": "--tp 8 --api-key not-a-pattern"},
+        {"operator_server_args": "--tp 8 --admin-api-key=not-a-pattern"},
+        {"operator_server_args": "--hf-token abc"},
+        {"note": "Authorization: Bearer abcdefghijklmnop"},
+        ["--header", "sk-abcdefghijkl"],
+        ("ghp_abcdef",),
+        {"operator_extra_env": {"HF_ENDPOINT": "https://alice:s3cret-tok3n@hf-mirror"}},
+        {"operator_extra_env": {"HF_ENDPOINT": "https://tok3n@hf-mirror/models"}},
+        {"operator_server_args": "--tp 8 --model-url http://user:pw@host:8000/m"},
+        {"dependencies": {"remote": "git+https://user:pw@example.com/org/repo.git"}},
+    ],
+    ids=[
+        "name",
+        "nested-name",
+        "pins",
+        "flag",
+        "flag-equals",
+        "flag-token",
+        "bearer",
+        "list-of-strings",
+        "tuple",
+        "url-user-and-password",
+        "url-token-as-user",
+        "url-in-server-args",
+        "vcs-url",
+    ],
+)
+def test_holds_credentials_is_true_for_a_credential_by_name_flag_value_or_url_userinfo(document):
+    assert common_env_safety.holds_credentials(document) is True

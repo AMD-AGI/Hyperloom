@@ -5,11 +5,41 @@
 
 from __future__ import annotations
 
-from hyperloom.common.visible_devices import GPU_MASK_ENV_NAMES as _GPU_MASK_ENV_NAMES
-
+import grp
 import os
+import pwd
+import shutil
+import stat
+from dataclasses import dataclass
+from pathlib import Path
+from typing import Any, Iterable, MutableMapping, Sequence
+from hyperloom_common.env import env_str
+from hyperloom_common.git_safety import trusted_admin_dir
+from hyperloom_common.fs_utils import rewrite_lines_nofollow
+
+from hyperloom.common.id_map import unmapped_ids
+from hyperloom.common.outside_facts import (
+    ENV_CONC,
+    ENV_EP,
+    ENV_ISL,
+    ENV_MAX_MODEL_LEN,
+    ENV_NUM_PROMPTS,
+    ENV_NUM_WARMUPS,
+    ENV_OSL,
+    ENV_RANDOM_RANGE_RATIO,
+    ENV_RUN_EVAL,
+    ENV_TP,
+)
+from hyperloom.common.url_userinfo import CREDENTIALED_URL_RE
+from hyperloom.common.visible_devices import GPU_MASK_ENV_NAMES
+
+import json
+import logging
 import re
 from collections.abc import Mapping
+from types import MappingProxyType
+
+log = logging.getLogger(__name__)
 
 _ENV_KEY_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
 
@@ -17,6 +47,9 @@ _PYTHON_PACKAGE_ROOT_BASENAMES: frozenset[str] = frozenset({"site-packages", "di
 
 BLOCKED_UNTRUSTED_ENV_NAMES: frozenset[str] = frozenset(
     {
+        # Names a second variable for the agentic client to export, so it reaches a shell indirection the way the
+        # loader vars below do: whoever sets it chooses which variable gets written, not merely a value.
+        "AGENTX_KEEP_ALIVE_ENV",
         "BASH_ENV",
         "CDPATH",
         "ENV",
@@ -63,11 +96,19 @@ BENCHMARK_SECRET_ENV_NAMES: frozenset[str] = frozenset(
         "CLAW_API_KEY",
         "DEEPSEEK_API_KEY",
         "GEAK_API_KEY",
+        "KB_STORE_TOKEN",
         "LLM_API_KEY",
         "LLM_GATEWAY_KEY",
         "LLM_PROXY_API_KEY",
         "OPENAI_API_KEY",
         "OPENAI_CUSTOM_HEADERS",
+        # Hosted measurement: a sandbox API key per role, the application's MCP token and the path of a sealed
+        # runner's signing key. Only a name listed here is removed from a child process's environment.
+        "HYPERLOOM_MCP_TOKEN",
+        "HYPERLOOM_SANDBOX_KEY_DEV",
+        "HYPERLOOM_SANDBOX_KEY_MEASUREMENT",
+        "HYPERLOOM_SANDBOX_KEY_SUBRUN",
+        "HYPERLOOM_SIGNING_KEY_FILE",
         "AWS_ACCESS_KEY_ID",
         "AWS_SECRET_ACCESS_KEY",
         "AWS_SESSION_TOKEN",
@@ -127,6 +168,12 @@ _SECRET_REDACTION_PATTERNS: tuple[tuple[re.Pattern[str], str], ...] = (
     ),
 )
 
+# Route this account's traffic: allowed from a private .env, never from an untrusted source or a shared .env.
+_PROXY_ENV_NAMES: tuple[str, ...] = ("HTTP_PROXY", "HTTPS_PROXY", "NO_PROXY")
+# Where this account's runtime dir and kernel-agent env file are: read from a private .env and the kernel-agent env
+# file, never from a shared .env.
+_RUNTIME_PATH_ENV_NAMES: tuple[str, ...] = ("HYPERLOOM_RUNTIME_DIR", "KERNEL_AGENT_ENV")
+
 DOTENV_EXACT_ALLOWLIST: frozenset[str] = frozenset(
     {
         "ANTHROPIC_API_KEY",
@@ -140,10 +187,11 @@ DOTENV_EXACT_ALLOWLIST: frozenset[str] = frozenset(
         "CLAUDE_MODEL",
         "CODEX_MODEL",
         # Retired provider variables, still readable so a pre-migration .env can be normalized by
-        # hyperloom.common.llm_config.deepseek_compat_env.
+        # hyperloom_common.llm.llm_config.deepseek_compat_env.
         "DEEPSEEK_API_KEY",
         "DEEPSEEK_BASE_URL",
         "DEEPSEEK_MODEL",
+        "DSH_MODEL",
         "FRAMEWORK",
         "GEAK_CLAUDE_MODEL",
         "HIP_PATH",
@@ -152,25 +200,19 @@ DOTENV_EXACT_ALLOWLIST: frozenset[str] = frozenset(
         "HF_HUB_CACHE",
         "HF_HUB_OFFLINE",
         "HF_TOKEN",
-        "HTTP_PROXY",
-        "HTTPS_PROXY",
         "HYPERLOOM_BENCHMARK_BACKEND",
         "HYPERLOOM_DOCKER_TARGET_HOST",
         "HYPERLOOM_FRAMEWORK_ENV",
         "HYPERLOOM_LLM_MODE",
         "HYPERLOOM_RUN_MODE",
-        "HYPERLOOM_RUNTIME_DIR",
         "HYPERLOOM_SKILL_PATH",
         "HYPERLOOM_WHEEL_REPO",
         "HYPERLOOM_WHEEL_TAG",
         "INFERENCE_OPTIMIZER_FORCE_PYTHON",
-        "KERNEL_AGENT_ENV",
-        "KERNEL_AGENT_ROOT",
         "KERNEL_OPT_BACKEND_ORDER",
         "OPENAI_API_KEY",
         "OPENAI_BASE_URL",
         "OPENAI_CUSTOM_HEADERS",
-        "NO_PROXY",
         "ROCM_PATH",
         "SGLANG_ROCM_EXTRA",
         "SGLANG_ROCM_INDEX_URL",
@@ -179,6 +221,8 @@ DOTENV_EXACT_ALLOWLIST: frozenset[str] = frozenset(
         "VIRTUAL_ENV",
         "VLLM_PYTHON",
         "VLLM_VENV_ROOT",
+        *_PROXY_ENV_NAMES,
+        *_RUNTIME_PATH_ENV_NAMES,
     }
 )
 
@@ -195,6 +239,26 @@ DOTENV_PREFIX_ALLOWLIST: tuple[str, ...] = (
     "KERNEL_OPT_",
     "SGLANG_",
     "VLLM_",
+)
+
+# What a ``.env`` another account can write (a checkout on shared storage) lends: each name with the values it may carry,
+# choices among what this account ships, none naming a program, package, path, host, model or credential. Every other
+# allowed name picks what an install fetches or runs (GEAK_REPO, VLLM_ROCM_INDEX, *_ROOT), where this account's traffic
+# or key goes (the proxies, OPENAI_BASE_URL, GEAK_BASE_URL) or is written unquoted into a file this account sources
+# (model names), so only a private ``.env`` lends it. A listed name with an unlisted value is refused too (FRAMEWORK
+# names a script path); each value is compared whole. The shell's copy is RUNTIME_ENV_DOTENV_NOT_PRIVATE_LENT in
+# assets/runtime_env.sh; test_dotenv_allow_list.py holds the two equal and FRAMEWORK's values to the registry.
+DOTENV_NOT_PRIVATE_LENT_VALUES: Mapping[str, frozenset[str]] = MappingProxyType(
+    {
+        "FRAMEWORK": frozenset({"atom", "custom", "sglang", "vllm", "xdit"}),
+        "HF_DATASETS_OFFLINE": frozenset({"0", "1"}),
+        "HF_HUB_OFFLINE": frozenset({"0", "1"}),
+        "HYPERLOOM_BENCHMARK_BACKEND": frozenset({"bypass", "magpie"}),
+        "HYPERLOOM_DOTENV_CREDENTIALS": frozenset({"kernel-agent-env"}),
+        "HYPERLOOM_FRAMEWORK_ENV": frozenset({"isolated", "shared"}),
+        "HYPERLOOM_LLM_MODE": frozenset({"anthropic", "deepseek", "openai"}),
+        "HYPERLOOM_RUN_MODE": frozenset({"baremetal", "docker"}),
+    }
 )
 
 KERNEL_AGENT_ENV_EXACT_ALLOWLIST: frozenset[str] = frozenset(
@@ -214,15 +278,11 @@ KERNEL_AGENT_ENV_EXACT_ALLOWLIST: frozenset[str] = frozenset(
         "GEAK_RUN_MODE",
         "GEAK_SCORE_TARGET",
         "GEAK_SKIP_PROFILE",
-        "HYPERLOOM_KERNEL_AGENT_ROOT",
         "HYPERLOOM_ROOT",
-        "HYPERLOOM_RUNTIME_DIR",
         "HYPERLOOM_SPECIALIST_INHERIT_SECRET_ENV",
         "INFERENCE_OPTIMIZER_FRAMEWORK_SOURCE_ROOTS",
         "INFERENCEX_PATH",
-        "KERNEL_AGENT_ENV",
         "KERNEL_AGENT_LOG_LEVEL",
-        "KERNEL_AGENT_ROOT",
         # KernelForge's writable-state root.
         "KERNELFORGE_PROJECT_ROOT",
         "KERNEL_OPT_BACKEND_ORDER",
@@ -236,12 +296,9 @@ KERNEL_AGENT_ENV_EXACT_ALLOWLIST: frozenset[str] = frozenset(
         "TRACELENS_INTERNAL_ROOT",
         "TRACELENS_ROOT",
         "USER_DATA_PATH",
+        *_RUNTIME_PATH_ENV_NAMES,
     }
 )
-
-# GPU visibility masks: setting one selects the hardware rather than tuning it.
-# Single definition in ``hyperloom.common.visible_devices``.
-GPU_MASK_ENV_NAMES = _GPU_MASK_ENV_NAMES
 
 # Env names an untrusted external source (reference recipe, framework-switch manifest) may never set: shell-unsafe
 # vars plus the workload/benchmark keys the optimizer's CLI flags own — setting one retargets the benchmark instead of
@@ -255,27 +312,25 @@ BLOCKED_EXTERNAL_ENV_NAMES: frozenset[str] = (
             "HOME",
             "MODEL",
             "MODEL_PATH",
-            "TP",
-            "EP",
-            "CONC",
-            "ISL",
-            "OSL",
-            "MAX_MODEL_LEN",
+            ENV_TP,
+            ENV_EP,
+            ENV_CONC,
+            ENV_ISL,
+            ENV_OSL,
+            ENV_MAX_MODEL_LEN,
             "PRECISION",
             "PORT",
-            "NUM_PROMPTS",
-            "NUM_WARMUPS",
-            "RANDOM_RANGE_RATIO",
-            "RUN_EVAL",
+            ENV_NUM_PROMPTS,
+            ENV_NUM_WARMUPS,
+            ENV_RANDOM_RANGE_RATIO,
+            ENV_RUN_EVAL,
             "PROFILE",
             "RESULT_DIR",
             "RESULT_FILENAME",
             # Reroute traffic, model downloads or TLS trust.
             "CURL_CA_BUNDLE",
             "HF_ENDPOINT",
-            "HTTP_PROXY",
-            "HTTPS_PROXY",
-            "NO_PROXY",
+            *_PROXY_ENV_NAMES,
             "REQUESTS_CA_BUNDLE",
             "SSL_CERT_DIR",
             "SSL_CERT_FILE",
@@ -284,8 +339,43 @@ BLOCKED_EXTERNAL_ENV_NAMES: frozenset[str] = (
     )
 )
 
+# Env names the launcher or the server process puts in the environment itself: rank/world topology a distributed
+# launch assigns per process. Nothing a round declares can own one — the launch overwrites it per rank — so a patch
+# reading one is reading the launch's own state, not arming a switch.
+LAUNCH_PROVIDED_ENV_NAMES: frozenset[str] = frozenset(
+    {
+        "GROUP_RANK",
+        "LOCAL_RANK",
+        "LOCAL_WORLD_SIZE",
+        "MASTER_ADDR",
+        "MASTER_PORT",
+        "NODE_RANK",
+        "RANK",
+        "ROLE_RANK",
+        "WORLD_SIZE",
+    }
+)
+
+# Prefixes of the same kind: everything a job scheduler or an elastic launch exports around the process it starts.
+LAUNCH_PROVIDED_ENV_PREFIXES: tuple[str, ...] = (
+    "OMPI_",
+    "PMIX_",
+    "PMI_",
+    "SLURM_",
+    "TORCHELASTIC_",
+)
+
 # Env names a per-variant override may never set.
 BLOCKED_VARIANT_ENV_NAMES: frozenset[str] = BLOCKED_UNTRUSTED_ENV_NAMES | BENCHMARK_SECRET_ENV_NAMES
+
+
+def is_launch_provided_env_name(key: object) -> bool:
+    """True when the launch or the server process supplies this name, so no round can arm it."""
+    upper = str(key or "").strip().upper()
+    if upper in LAUNCH_PROVIDED_ENV_NAMES:
+        return True
+    return upper.startswith(LAUNCH_PROVIDED_ENV_PREFIXES)
+
 
 # Credential-shaped name fragments, so an unlisted secret cannot be persisted into a session YAML by name alone.
 _SECRET_NAME_FRAGMENTS: tuple[str, ...] = ("APIKEY", "API_KEY", "TOKEN", "SECRET", "PASSWORD", "CREDENTIAL")
@@ -300,7 +390,91 @@ def is_secret_shaped_env_name(key: object) -> bool:
     upper = str(key or "").strip().upper()
     for exempt in _SECRET_FRAGMENT_EXEMPTIONS:
         upper = upper.replace(exempt, "")
+    # Header strings carry Authorization values, matching the ``*CUSTOM_HEADERS`` text-redaction pattern above.
+    if upper.endswith("CUSTOM_HEADERS"):
+        return True
     return any(fragment in upper for fragment in _SECRET_NAME_FRAGMENTS)
+
+
+# Env-var name fragments whose value is masked before an env snapshot leaves this process. Shared with the Langfuse
+# session_start snapshot, which matches every marker as a substring.
+SENSITIVE_ENV_NAME_MARKERS: tuple[str, ...] = (
+    "SECRET",
+    "TOKEN",
+    "PASSWORD",
+    "PASSWD",
+    "PASSPHRASE",
+    "CREDENTIAL",
+    "PRIVATE_KEY",
+    "PRIVATEKEY",
+    "API_KEY",
+    "APIKEY",
+    "ACCESS_KEY",
+    "SECRET_KEY",
+    "AUTH",
+    "SIGNATURE",
+    "HEADERS",
+    "CUSTOM_HEADERS",
+)
+
+# As a substring TOKEN also hits tuning knobs (``MAX_NUM_BATCHED_TOKENS``, ``TOKENIZERS_PARALLELISM``), so a record of
+# launch knobs treats it as a credential only as a whole name segment (``HF_TOKEN``, ``HF_TOKEN_2``,
+# ``GITHUB_TOKEN_BACKUP``), and never in ``PER_TOKEN`` (``SGLANG_USE_AITER_FP8_PER_TOKEN``).
+_SUBSTRING_MARKERS_EXCEPT_TOKEN: tuple[str, ...] = tuple(m for m in SENSITIVE_ENV_NAME_MARKERS if m != "TOKEN")
+_TOKEN_SEGMENT_RE = re.compile(r"(?:^|_)TOKEN(?=_|$)")
+_PER_TOKEN_SEGMENT_RE = re.compile(r"(?:^|_)PER_TOKEN(?=_|$)")
+
+
+def _is_credential_env_name(key: object) -> bool:
+    upper = str(key or "").strip().upper()
+    if upper in BENCHMARK_SECRET_ENV_NAMES:
+        return True
+    if any(marker in upper for marker in _SUBSTRING_MARKERS_EXCEPT_TOKEN):
+        return True
+    return bool(_TOKEN_SEGMENT_RE.search(_PER_TOKEN_SEGMENT_RE.sub("", upper)))
+
+
+def redact_secret_env_values(env: Mapping[str, object] | None) -> dict[str, object]:
+    """Copy ``env`` with every credential's value masked, for a record that leaves this process.
+
+    A credential-shaped name is masked whole; any other string value is still scrubbed of recognizable credentials.
+    """
+    return {
+        key: "[REDACTED]"
+        if _is_credential_env_name(key)
+        else (redact_secret_values(value) if isinstance(value, str) and value else value)
+        for key, value in (env or {}).items()
+    }
+
+
+def _is_env_field(key: object) -> bool:
+    """Whether a document field named ``key`` holds environment variables (``env``, ``extra_envs``, ``launch_env``)."""
+    name = str(key).lower()
+    return name in ("environment", "environ") or name.rstrip("s").endswith("env")
+
+
+def holds_credentials(value: object, *, in_env: bool = False) -> bool:
+    """Whether a JSON-shaped ``value`` carries a credential: a string :func:`redact_secret_values` would change, with a
+    URL that has userinfo (``https://user:token@host``) or with a ``--flag`` named like one, or a value under a credential-shaped name in an environment mapping (a field named
+    ``env``, ``extra_envs``, ...: any other key is a field of the document, and ``authored`` is not a secret)."""
+    if isinstance(value, str):
+        flags = (
+            token.lstrip("-").partition("=")[0].replace("-", "_") for token in value.split() if token.startswith("-")
+        )
+        return (
+            redact_secret_values(value) != value
+            or CREDENTIALED_URL_RE.search(value) is not None
+            or any(_is_credential_env_name(flag) for flag in flags)
+        )
+    if isinstance(value, Mapping):
+        return any(
+            (in_env and _is_credential_env_name(key) and bool(item))
+            or holds_credentials(item, in_env=_is_env_field(key))
+            for key, item in value.items()
+        )
+    if isinstance(value, (list, tuple)):
+        return any(holds_credentials(item, in_env=in_env) for item in value)
+    return False
 
 
 def is_allowed_external_env_key(key: object) -> bool:
@@ -331,10 +505,26 @@ def valid_env_key(key: object) -> bool:
 
 def is_allowed_dotenv_key(key: object) -> bool:
     name = str(key or "").strip()
+    # Held to ASCII before folding: str.upper() turns a long s into S, and the name is written back as given.
+    if not valid_env_key(name):
+        return False
     upper = name.upper()
-    if not valid_env_key(upper) or upper in BLOCKED_UNTRUSTED_ENV_NAMES:
+    if upper in BLOCKED_UNTRUSTED_ENV_NAMES:
         return False
     return upper in DOTENV_EXACT_ALLOWLIST or any(upper.startswith(prefix) for prefix in DOTENV_PREFIX_ALLOWLIST)
+
+
+def is_allowed_not_private_dotenv_key(key: object) -> bool:
+    """True when a ``.env`` another account can write may lend ``key``, with one of the values
+    DOTENV_NOT_PRIVATE_LENT_VALUES gives it (is_lent_not_private_dotenv_assignment)."""
+    name = str(key or "").strip()
+    return is_allowed_dotenv_key(name) and name.upper() in DOTENV_NOT_PRIVATE_LENT_VALUES
+
+
+def is_lent_not_private_dotenv_assignment(key: object, value: object) -> bool:
+    """True when a ``.env`` another account can write lends ``key=value``: the name and that value are both listed."""
+    name = str(key or "").strip()
+    return is_allowed_not_private_dotenv_key(name) and str(value) in DOTENV_NOT_PRIVATE_LENT_VALUES[name.upper()]
 
 
 def is_allowed_kernel_agent_env_key(key: object) -> bool:
@@ -364,6 +554,96 @@ def filter_untrusted_env_mapping(
     return allowed, dropped
 
 
+# Env vars whose value names the config files the serving stack reads unconditionally: aiter's tuned-GEMM loader
+# skips its merge default and reads exactly the AITER_CONFIG_* list when one is set, so a value with nothing loadable
+# in it kills the server at config load instead of falling back to the default table. Values that are not file paths
+# (e.g. geak's JSON-payload AITER_CONFIG) do not carry the trailing underscore and stay untouched.
+FILE_REFERENCING_ENV_PREFIXES: tuple[str, ...] = ("AITER_CONFIG_",)
+
+# A set value holds one or more config files, joined the way aiter splits them again (``os.pathsep``).
+ENV_FILE_LIST_SEP = ":"
+
+
+def is_file_referencing_env_name(name: object) -> bool:
+    """Whether this env var's value names config files the serving stack reads (a ``:``-joined list of paths)."""
+    return str(name or "").strip().upper().startswith(FILE_REFERENCING_ENV_PREFIXES)
+
+
+def env_file_list_elements(value: object) -> list[str]:
+    """The non-empty paths of a file-referencing env value, in the order aiter merges them."""
+    return [part for part in (raw.strip() for raw in str(value or "").split(ENV_FILE_LIST_SEP)) if part]
+
+
+def _is_file(path: str) -> bool:
+    # Path.is_file() raises for an unreadable parent or an overlong name (before Python 3.14); such a path is not a
+    # file the server can read either, and one proposal must not crash what checks it.
+    try:
+        return Path(path).is_file()
+    except OSError:
+        return False
+
+
+def ungrounded_env_file_reason(envs: Mapping[str, object] | None) -> str | None:
+    """Return why ``envs`` names a config file that is not on disk, else ``None`` -- the one grounding rule.
+
+    Grounds file-like env values the way patch targets are grounded: a proposal may point a config env at an
+    artifact only a later (possibly rejected) authoring step would create, so the arm would be benched, and its
+    result recorded, against a table nothing ever wrote. The check is existence-only; anything already on disk (a
+    promoted, durable artifact) passes. A set value is a ``:``-joined list of paths (see ``csvs_aiter_will_load``),
+    and every non-empty element must exist, not only one of them: an element no stage has authored is ungrounded
+    whatever its neighbours are (#1982).
+
+    The same rule holds wherever a value is judged -- proposal admission and ``run_grid``'s preflight both ask this
+    question -- so an arm never runs against a table that is only partly there. It is deliberately stricter than
+    what the serving stack survives, where aiter merges a list element by element and dies only when no element
+    loads; a value that carries refs, such as a replayed warm recipe's, is re-grounded onto this run's downloaded
+    files before the grid sees it (``_reground_env_values``), so what reaches here names real local files.
+    """
+    for raw_key, raw_value in (envs or {}).items():
+        key = str(raw_key or "").strip().upper()
+        value = str(raw_value or "").strip()
+        if not is_file_referencing_env_name(key) or not value:
+            continue
+        missing = [p for p in env_file_list_elements(value) if not _is_file(p)]
+        if missing:
+            joined = ENV_FILE_LIST_SEP.join(missing)
+            return (
+                f"{key} points at {value}, whose element(s) {joined} do not exist; a config env may only name "
+                "tables that are on disk now. Point it at a file a stage wrote (the gemm_tuning action writes "
+                "tuned-GEMM CSVs) or leave it unset to use the default config table."
+            )
+    return None
+
+
+OPERATOR_EXTRA_ENV_VAR = "INFERENCE_OPTIMIZER_EXTRA_ENV"
+
+
+def operator_extra_env(raw: str | None = None) -> dict[str, str]:
+    """Return the operator's ``--extra-env`` pins from the CLI handoff blob.
+
+    The pins are also exported under their own names; this blob is what survives a state roundtrip and what a
+    resume reads to tell which names the previous launch set.
+
+    Args:
+        raw: The serialized blob, or ``None`` to read it from the environment.
+
+    Returns:
+        The pins; empty when unset or unparseable, because a malformed pin must not take the run down with it.
+    """
+    blob = (os.environ.get(OPERATOR_EXTRA_ENV_VAR, "") if raw is None else raw).strip()
+    if not blob:
+        return {}
+    try:
+        parsed = json.loads(blob)
+    except (TypeError, ValueError):
+        log.warning("ignoring unparseable %s; the operator's pins are not in effect", OPERATOR_EXTRA_ENV_VAR)
+        return {}
+    if not isinstance(parsed, dict):
+        log.warning("ignoring non-object %s; the operator's pins are not in effect", OPERATOR_EXTRA_ENV_VAR)
+        return {}
+    return {str(key).strip(): str(value) for key, value in parsed.items() if str(key).strip()}
+
+
 def scrub_child_process_env(env: dict[str, str]) -> dict[str, str]:
     """Remove startup/preload hooks from a child-process environment in place."""
     for name in BLOCKED_CHILD_ENV_NAMES:
@@ -376,6 +656,8 @@ def scrub_benchmark_process_env(env: dict[str, str]) -> dict[str, str]:
     scrub_child_process_env(env)
     for name in BENCHMARK_SECRET_ENV_NAMES:
         env.pop(name, None)
+    # The --extra-env blob repeats every pin's value, credentials included; each pin is also exported by name.
+    env.pop(OPERATOR_EXTRA_ENV_VAR, None)
     return env
 
 
@@ -396,32 +678,247 @@ def redact_secret_values(text: str) -> str:
 
 
 def redact_file_in_place(path: os.PathLike[str] | str, *, mode: int = 0o600) -> None:
-    """Stream-redact ``path`` with :func:`redact_secret_values` and restrict mode."""
-    from pathlib import Path
+    """Stream-redact ``path`` with :func:`redact_secret_values` and restrict mode.
 
-    target = Path(path)
-    tmp = target.with_name(target.name + ".redacting")
-    changed = False
+    The file sits in a directory a less-privileged account may write, so the
+    redacted copy is staged and moved without following any link there
+    (:func:`hyperloom_common.fs_utils.rewrite_lines_nofollow`). A failure
+    leaves the file as it was.
+    """
     try:
-        with target.open("r", encoding="utf-8", errors="replace") as source:
-            with tmp.open("w", encoding="utf-8") as destination:
-                for line in source:
-                    redacted = redact_secret_values(line)
-                    changed = changed or redacted != line
-                    destination.write(redacted)
-        if changed:
-            tmp.chmod(mode)
-            tmp.replace(target)
-        else:
-            tmp.unlink()
-        target.chmod(mode)
+        rewrite_lines_nofollow(path, redact_secret_values, mode=mode)
     except OSError:
-        try:
-            tmp.unlink(missing_ok=True)
-        except OSError:
-            # The temp file is already gone or unreachable; nothing left to clean.
-            pass
         return
+
+
+SPECIALIST_USER_ENV = "HYPERLOOM_SPECIALIST_USER"
+_GIT_NAME = ".git"
+
+# New files made by the child are group-writable, so the app (a member of the
+# specialist's group, or root) can still read and rewrite them.
+_CHILD_UMASK = 0o007
+_GROUP_RW = stat.S_IRGRP | stat.S_IWGRP
+_GROUP_RWX_SETGID = _GROUP_RW | stat.S_IXGRP | stat.S_ISGID
+_GROUP_R = stat.S_IRGRP
+_GROUP_RX_SETGID = _GROUP_R | stat.S_IXGRP | stat.S_ISGID
+_DROP_TOOL = "setpriv"
+# What the demoted command runs under: no inheritable or ambient capability and no way to gain one by exec.
+_DROP_ARGS = ("--no-new-privs", "--inh-caps=-all", "--ambient-caps=-all", "--")
+
+
+class RunAsError(ValueError):
+    """The requested specialist user cannot be used; the launch must not proceed."""
+
+
+@dataclass(frozen=True)
+class RunAs:
+    """What a launcher needs to start a child as one named user."""
+
+    user: str
+    uid: int
+    gid: int
+    groups: tuple[int, ...]
+    home: str
+    drop_tool: str = ""
+
+    def command(self, cmd: Sequence[str]) -> list[str]:
+        """``cmd`` prefixed so that the demoted child holds no capability and can gain none.
+
+        Run as the child's first program, after the uid switch and before ``cmd``:
+        it clears the inheritable and ambient capability sets (which a non-root
+        app's CAP_SETUID/SETGID/KILL would otherwise pass on) and sets
+        ``no_new_privs``. Without a ``drop_tool`` the command is returned as it
+        is; :func:`resolve_run_as` always sets one.
+        """
+        if not self.drop_tool:
+            return list(cmd)
+        return [self.drop_tool, *_DROP_ARGS, *cmd]
+
+    def popen_kwargs(self) -> dict[str, Any]:
+        """Keyword arguments for ``subprocess.Popen`` that start the child as this user."""
+        return {
+            "user": self.uid,
+            "group": self.gid,
+            "extra_groups": list(self.groups),
+            "umask": _CHILD_UMASK,
+        }
+
+    def apply_env(self, env: MutableMapping[str, str], *, safe_dirs: Iterable[Path] = ()) -> None:
+        """Point the identity variables at this user, in place.
+
+        The app's ``HOME`` is not readable by this user. ``safe_dirs`` are
+        marked ``safe.directory`` for git (command-line scope, the only scope
+        git honours for it), because the child is not the owner of a tree the
+        app created.
+        """
+        env["HOME"] = self.home
+        env["USER"] = env["LOGNAME"] = self.user
+        if "USERNAME" in env:
+            env["USERNAME"] = self.user
+        safe = [str(p) for p in safe_dirs]
+        env["GIT_CONFIG_COUNT"] = str(len(safe))
+        for i, path in enumerate(safe):
+            env[f"GIT_CONFIG_KEY_{i}"] = "safe.directory"
+            env[f"GIT_CONFIG_VALUE_{i}"] = path
+
+    def share_worktree_git(self, worktree: Path) -> None:
+        """Let this user read the git metadata of a linked worktree, and nothing more.
+
+        ``git worktree add`` creates the ``<worktree>/.git`` gitfile and its
+        ``<repo>/.git/worktrees/<name>`` admin dir under the app's group and,
+        under a restrictive app umask, without other-read, so the child's git
+        would fail. Both are shared read-only, as is search (not write) on the
+        ``worktrees`` directory above the admin dir. A worktree with no gitfile (a snapshot)
+        needs nothing.
+
+        The gitfile sits in a tree the child can rewrite, so its ``gitdir:``
+        line is believed only when the admin dir it names points back at this
+        worktree's gitfile (the admin dir is the app's); a gitfile that lies is
+        refused with ``OSError`` rather than shared.
+        """
+        gitfile = worktree / _GIT_NAME
+        if not gitfile.is_file() or gitfile.is_symlink():
+            return
+        try:
+            admin = trusted_admin_dir(worktree)
+        except OSError as exc:
+            raise OSError(f"refusing to share the git metadata of {worktree}: {exc}") from exc
+        self.share_tree(gitfile, write=False)
+        self.share_tree(admin, write=False)
+        parent = admin.parent
+        os.chown(parent, -1, self.gid)
+        # Search, not write: a group that could rename entries here could break every other task's git.
+        parent.chmod((stat.S_IMODE(parent.stat().st_mode) | stat.S_IRGRP | stat.S_IXGRP) & ~stat.S_IWGRP)
+
+    def share_tree(self, root: Path, *, sticky: bool = False, write: bool = True) -> None:
+        """Give this user's group read-write access to everything under ``root``.
+
+        The tree stays owned by the app. Its group becomes this user's group,
+        directories get the setgid bit (new entries keep the group) and every
+        entry gets group read and write (``write=False``: group read only,
+        plus search on directories, for a tree the child only reads, such as
+        a worktree's git metadata). ``sticky`` additionally stops the child
+        deleting the app's own files in the top directory. Symlinks are
+        not followed, and a ``root`` that is itself a symlink is refused.
+        ``.git`` is left alone: the child does no git writes. Needs root or
+        membership in the group; raises ``OSError``
+        otherwise, so a launcher cannot start a child that cannot write.
+        """
+        if root.is_symlink():
+            raise OSError(f"refusing to share {root}: it is a symlink")
+        for path in _walk(root):
+            self._share_entry(path, write=write, sticky=sticky and path == root)
+
+    def _share_entry(self, path: Path, *, write: bool, sticky: bool) -> None:
+        """Give one entry the account's group and the share modes, never through a link.
+
+        The entry is pinned with ``O_PATH | O_NOFOLLOW`` and changed through
+        that descriptor, so a name the account swaps for a link after the walk
+        listed it is left alone instead of followed.
+        """
+        fd = os.open(path, os.O_PATH | os.O_NOFOLLOW | os.O_CLOEXEC)
+        try:
+            st = os.fstat(fd)
+            if stat.S_ISLNK(st.st_mode):
+                return
+            proc = f"/proc/self/fd/{fd}"
+            if st.st_gid != self.gid:
+                os.chown(proc, -1, self.gid)
+            if stat.S_ISDIR(st.st_mode):
+                add = _GROUP_RWX_SETGID if write else _GROUP_RX_SETGID
+            else:
+                add = _GROUP_RW if write else _GROUP_R
+            if sticky:
+                add |= stat.S_ISVTX
+            mode = stat.S_IMODE(st.st_mode) | add
+            if not write:
+                mode &= ~stat.S_IWGRP  # read-only means the group cannot write what an earlier umask let it
+            if mode != stat.S_IMODE(st.st_mode):
+                os.chmod(proc, mode)
+        finally:
+            os.close(fd)
+
+
+def _walk(root: Path) -> Iterable[Path]:
+    """``root`` and everything below it, never following a link and never entering or touching ``.git``."""
+    yield root
+    for dirpath, dirnames, filenames in os.walk(root, followlinks=False):
+        dirnames[:] = [d for d in dirnames if d != _GIT_NAME]
+        base = Path(dirpath)
+        for name in (*dirnames, *(f for f in filenames if f != _GIT_NAME)):
+            yield base / name
+
+
+def resolve_run_as(user: str | None) -> RunAs | None:
+    """Look ``user`` up now and return how to run a child as it; ``None`` for no demote.
+
+    Raises:
+        RunAsError: The user does not exist, is uid 0, is the app's own user,
+            belongs to group 0, or has an id this process's user namespace does
+            not map (its uid, its group or a supplementary group): there a
+            switch to it fails with EINVAL, or under a fakeroot preload seems to
+            succeed while the child stays root.
+    """
+    name = (user or "").strip()
+    if not name:
+        return None
+    try:
+        entry = pwd.getpwnam(name)
+    except KeyError:
+        raise RunAsError(f"{SPECIALIST_USER_ENV}={name!r}: no such user") from None
+    if entry.pw_uid == 0:
+        raise RunAsError(f"{SPECIALIST_USER_ENV}={name!r} is uid 0; specialists must not run as root")
+    if entry.pw_uid == os.geteuid():
+        raise RunAsError(f"{SPECIALIST_USER_ENV}={name!r} is the app's own user; no boundary would exist")
+    groups = tuple(os.getgrouplist(entry.pw_name, entry.pw_gid))
+    if 0 in groups:
+        root_group = grp.getgrgid(0).gr_name
+        raise RunAsError(f"{SPECIALIST_USER_ENV}={name!r} is in group {root_group!r} (gid 0)")
+    unmapped = unmapped_ids((entry.pw_uid,), (entry.pw_gid, *groups))
+    if unmapped is not None:
+        raise RunAsError(
+            f"{SPECIALIST_USER_ENV}={name!r}: {unmapped}; a switch to an id the namespace does not map fails with "
+            "EINVAL, or under a fakeroot preload seems to succeed while the child stays root, so the specialist would "
+            "not be isolated"
+        )
+    drop_tool = shutil.which(_DROP_TOOL)
+    if drop_tool is None:
+        raise RunAsError(
+            f"{SPECIALIST_USER_ENV}={name!r}: {_DROP_TOOL} (util-linux) is needed to drop the child's capabilities"
+        )
+    return RunAs(
+        user=entry.pw_name, uid=entry.pw_uid, gid=entry.pw_gid, groups=groups, home=entry.pw_dir, drop_tool=drop_tool
+    )
+
+
+def specialist_run_as() -> RunAs | None:
+    """Resolve ``HYPERLOOM_SPECIALIST_USER``; ``None`` (today's behaviour) when unset or blank. No side effects."""
+    return resolve_run_as(env_str(SPECIALIST_USER_ENV))
+
+
+_CAPABILITIES = {"CAP_KILL": 5, "CAP_SETGID": 6, "CAP_SETUID": 7}
+
+
+def missing_capabilities(effective: int) -> list[str]:
+    """The launch capabilities absent from the effective capability bitmask ``effective``."""
+    return [name for name, bit in _CAPABILITIES.items() if not effective >> bit & 1]
+
+
+def missing_launch_capabilities() -> list[str]:
+    """Capabilities the app lacks to start, and later stop, a child that runs as another user.
+
+    ``setuid``/``setgid`` start it; ``kill`` is what lets the reap paths (deadline,
+    stale heartbeat, done file, cancel) signal a process of another uid, and
+    without it every reap ends unconfirmed. Root has all three unless they were
+    dropped, so the effective set is read, not inferred from the uid. When it
+    cannot be read, root is assumed to have them and anyone else to have none.
+    """
+    try:
+        status = Path("/proc/self/status").read_text(encoding="utf-8")
+        effective = next(int(line.split()[1], 16) for line in status.splitlines() if line.startswith("CapEff:"))
+    except (OSError, StopIteration, ValueError, IndexError):
+        return [] if os.geteuid() == 0 else list(_CAPABILITIES)
+    return missing_capabilities(effective)
 
 
 __all__ = [
@@ -430,18 +927,30 @@ __all__ = [
     "BLOCKED_EXTERNAL_ENV_NAMES",
     "BLOCKED_UNTRUSTED_ENV_NAMES",
     "BLOCKED_VARIANT_ENV_NAMES",
-    "GPU_MASK_ENV_NAMES",
+    "ENV_FILE_LIST_SEP",
+    "FILE_REFERENCING_ENV_PREFIXES",
+    "LAUNCH_PROVIDED_ENV_NAMES",
+    "LAUNCH_PROVIDED_ENV_PREFIXES",
+    "OPERATOR_EXTRA_ENV_VAR",
+    "SENSITIVE_ENV_NAME_MARKERS",
     "build_benchmark_env",
+    "env_file_list_elements",
     "filter_untrusted_env_mapping",
+    "holds_credentials",
     "is_allowed_dotenv_key",
     "is_allowed_external_env_key",
     "is_allowed_kernel_agent_env_key",
     "is_allowed_variant_env_key",
+    "is_file_referencing_env_name",
+    "is_launch_provided_env_name",
     "is_python_package_root",
     "is_secret_shaped_env_name",
+    "operator_extra_env",
     "redact_file_in_place",
+    "redact_secret_env_values",
     "redact_secret_values",
     "scrub_benchmark_process_env",
     "scrub_child_process_env",
+    "ungrounded_env_file_reason",
     "valid_env_key",
 ]

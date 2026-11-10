@@ -53,20 +53,19 @@ def observe_bringup(
         selected.
     """
     from hyperloom.common.failure_signature import classify_failure
-
     from hyperloom.orchestrator.bringup.ladder import (
         SERVER_LOG,
         WRAPPER_STDERR,
         WRAPPER_STDOUT,
+        BootStreams,
         classify,
+        failure_region,
     )
     from hyperloom.orchestrator.bringup.trees import read_trees
 
     observation = classify(
-        server_log=server_log,
+        BootStreams(server_log, wrapper_stderr, wrapper_stdout),
         server_elapsed_sec=server_elapsed_sec,
-        wrapper_stderr=wrapper_stderr,
-        wrapper_stdout=wrapper_stdout,
         trees=read_trees(session_dir) if session_dir is not None else (),
         session_root=str(session_dir) if session_dir is not None else "",
     )
@@ -78,7 +77,7 @@ def observe_bringup(
     # An unset ``evidence_ref`` means no stream carried anything; any other
     # value names one of the slots above.
     evidence = streams[observation.evidence_ref] if observation.evidence_ref else ""
-    return BringupVerdict(observation=observation, signature=classify_failure(evidence))
+    return BringupVerdict(observation=observation, signature=classify_failure(failure_region(evidence)))
 
 
 def verdict_of(observation: "BootObservation") -> BringupVerdict:
@@ -147,12 +146,32 @@ def round_advanced(before: BootObservation | None, after: BootObservation | None
     return bool(digest) and digest != digest_of(before)
 
 
+def round_outcome_unchanged(before: BootObservation | None, after: BootObservation | None) -> bool:
+    """Whether the boot after a patch ended exactly where the one before it did.
+
+    Args:
+        before: The observation the previous round recorded.
+        after: The observation this round recorded.
+
+    Returns:
+        bool: ``True`` only when both rounds were observed, stopped at the same
+        stage and carried the same failure digest -- the one outcome that shows
+        the patch moved the boot nowhere. Anything less observed (a missing
+        half, a boot that hit no wall) is not that outcome and answers ``False``.
+    """
+    if before is None or after is None:
+        return False
+    digest = digest_of(after)
+    return bool(digest) and stage_of(after) == stage_of(before) and digest == digest_of(before)
+
+
 __all__ = [
     "BringupVerdict",
     "digest_of",
     "observe_bringup",
     "recorded_verdict",
     "round_advanced",
+    "round_outcome_unchanged",
     "session_root",
     "stage_of",
     "verdict_of",

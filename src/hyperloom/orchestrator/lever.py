@@ -82,13 +82,60 @@ def patch_owner_phase(evidence: Mapping[str, Any] | None) -> str:
     return ""
 
 
+# Upstream-PR KEEPs are stacked under the ``framework`` attribution family
+# label rather than under their task kind, because that label is what
+# ``phase_breakdown`` and the action-family table publish.
+FRAMEWORK_STACK_ACTION = "framework"
+
+#: Task kind -> the lever it moves, for winners whose params carried no stamp.
+#: ``integrate_patch`` is absent: it lands every lever, so its stamp is the only
+#: evidence and a missing one is a real gap rather than something to guess at.
+#: ``geak_e2e`` is absent for the same reason: it promotes on a proven kernel
+#: overlay OR on a config/env-only win, and only the promoting site knows which.
+#: It stamps ``lever_kind`` on the winner from the same overlay proof
+#: ``_geak_stack_entry_extra`` uses, so guessing ``kernel`` here would let the
+#: lever buckets contradict ``_geak_contribution`` for the very same row.
+_LEVER_BY_TASK_KIND = {
+    "explore": LEVER_CONFIG,
+    "conc_sweep": LEVER_CONFIG,
+    "gemm_tuning": LEVER_KERNEL,
+    "fusion": LEVER_KERNEL,
+    "integrate": LEVER_KERNEL,
+    # Reachable when a session recorded before the action was retired is
+    # resumed and its orphaned KEEPs are reconciled against the stack.
+    "framework_agent": LEVER_UPSTREAM_PR,
+    FRAMEWORK_STACK_ACTION: LEVER_UPSTREAM_PR,
+}
+
+
+def lever_kind_for_task(task_kind: str, bv: Any) -> str:
+    """Resolve the lever a winner moved.
+
+    Args:
+        task_kind: The action kind that produced the winner.
+        bv: The winning variant dict, read for a ``lever_kind`` stamp.
+
+    Returns:
+        One of :data:`LEVER_KINDS`, or ``""`` when nothing named a lever --
+        which the caller logs rather than papering over.
+    """
+    # The kind decides where it can only move one lever; ``integrate_patch``
+    # lands every lever, so there the producer's stamp is the only evidence.
+    by_kind = _LEVER_BY_TASK_KIND.get(str(task_kind or "").strip(), "")
+    if by_kind:
+        return by_kind
+    return patch_lever_kind(bv if isinstance(bv, dict) else None)
+
+
 __all__ = [
+    "FRAMEWORK_STACK_ACTION",
     "LEVER_CONFIG",
     "LEVER_ENABLEMENT",
     "LEVER_KERNEL",
     "LEVER_KINDS",
     "LEVER_SOURCE_PATCH",
     "LEVER_UPSTREAM_PR",
+    "lever_kind_for_task",
     "patch_lever_kind",
     "patch_owner_phase",
 ]

@@ -13,8 +13,10 @@ import pytest
 from pathlib import Path
 from types import SimpleNamespace
 
-from hyperloom.common.env_safety import GPU_MASK_ENV_NAMES
+from hyperloom.common.visible_devices import GPU_MASK_ENV_NAMES
 from hyperloom.inference_optimizer.reference_script import (
+    LaunchSettings,
+    ServingTarget,
     parse_reference_script,
     render_reference_script,
 )
@@ -246,14 +248,36 @@ def test_parse_sglang_entrypoint(tmp_path):
     assert r.envs.get("SGLANG_USE_AITER") == "1"
 
 
+def test_parse_sglang_serve_entrypoint_as_the_cookbook_writes_it(tmp_path):
+    text = (
+        "export SGLANG_OPT_USE_TOPK_V2=1\n"
+        "sglang serve \\\n"
+        "  --trust-remote-code \\\n"
+        "  --model-path amd/GLM-5.2-MXFP4 \\\n"
+        "  --tp 4 \\\n"
+        "  --kv-cache-dtype fp8_e4m3 \\\n"
+        "  --host 0.0.0.0 \\\n"
+        "  --port 30000\n"
+    )
+    r = parse_reference_script(_write(tmp_path, text), framework="sglang")
+    assert r.server_args == "--trust-remote-code --tp 4 --kv-cache-dtype fp8_e4m3"
+    assert r.model == "GLM-5.2-MXFP4"
+    assert r.envs == {"SGLANG_OPT_USE_TOPK_V2": "1"}
+
+
+def test_parse_serve_entrypoint_does_not_take_the_cli_name_for_the_model(tmp_path):
+    r = parse_reference_script(_write(tmp_path, "sglang serve --model-path=$MODEL --tp 8\n"), framework="sglang")
+    assert r.server_args == "--tp 8"
+    assert r.model is None
+
+
 def test_render_round_trip(tmp_path):
     src = _write(tmp_path, _M3_RECIPE)
     r = parse_reference_script(src, framework="vllm")
     text = render_reference_script(
         framework="vllm",
-        server_args=r.server_args,
-        envs=r.envs,
-        model=r.model,
+        launch=LaunchSettings(server_args=r.server_args, envs=r.envs),
+        target=ServingTarget(model=r.model),
     )
     rt_src = _write(tmp_path, text, "rt.sh")
     r2 = parse_reference_script(rt_src, framework="vllm")
@@ -265,13 +289,15 @@ def test_render_carries_validated_rocm_envs():
     # Regression: validated KEEP envs must survive into current_setting.sh.
     text = render_reference_script(
         framework="vllm",
-        server_args="--kv-cache-dtype fp8",
-        envs={
-            "VLLM_ROCM_USE_AITER_MHA": "1",
-            "HIP_FORCE_DEV_KERNARG": "1",
-            "VLLM_ROCM_QUICK_REDUCE_QUANTIZATION": "INT6",
-            "NCCL_MIN_NCHANNELS": "112",
-        },
+        launch=LaunchSettings(
+            server_args="--kv-cache-dtype fp8",
+            envs={
+                "VLLM_ROCM_USE_AITER_MHA": "1",
+                "HIP_FORCE_DEV_KERNARG": "1",
+                "VLLM_ROCM_QUICK_REDUCE_QUANTIZATION": "INT6",
+                "NCCL_MIN_NCHANNELS": "112",
+            },
+        ),
     )
     assert "export VLLM_ROCM_USE_AITER_MHA=1" in text
     assert "export HIP_FORCE_DEV_KERNARG=1" in text
@@ -280,13 +306,17 @@ def test_render_carries_validated_rocm_envs():
 
 
 def test_render_model_path_is_exported():
-    text = render_reference_script(framework="sglang", server_args="", model="/models/M")
+    text = render_reference_script(
+        framework="sglang", launch=LaunchSettings(server_args=""), target=ServingTarget(model="/models/M")
+    )
     assert "export MODEL=/models/M" in text
 
 
 def test_render_bare_model_name_stays_a_comment():
     """parse_reference_script records a basename; exporting it would break --model-path."""
-    text = render_reference_script(framework="sglang", server_args="", model="minimaxm3")
+    text = render_reference_script(
+        framework="sglang", launch=LaunchSettings(server_args=""), target=ServingTarget(model="minimaxm3")
+    )
     assert "export MODEL=" not in text
     assert "# model: minimaxm3" in text
 
@@ -294,9 +324,8 @@ def test_render_bare_model_name_stays_a_comment():
 def test_render_quotes_env_values():
     text = render_reference_script(
         framework="sglang",
-        server_args="",
-        envs={"HL_OPTS": "a b; rm -rf /"},
-        gpu_type="mi300x",
+        launch=LaunchSettings(server_args="", envs={"HL_OPTS": "a b; rm -rf /"}),
+        target=ServingTarget(gpu_type="mi300x"),
     )
     assert "export HL_OPTS='a b; rm -rf /'" in text
 
@@ -313,7 +342,7 @@ def test_render_quotes_env_values():
 )
 def test_literal_environment_survives_export_child_and_reference_import(tmp_path, value):
     name = "AITER_CONFIG_GEMM_BF16"
-    text = render_reference_script(framework="sglang", server_args="", envs={name: value})
+    text = render_reference_script(framework="sglang", launch=LaunchSettings(server_args="", envs={name: value}))
     recipe = _write(tmp_path, text)
     assert parse_reference_script(recipe, framework="sglang").envs[name] == value
     observer = tmp_path / "observe.py"
@@ -345,8 +374,7 @@ def test_render_redacts_secret_shaped_envs():
     """The script is archived and uploaded, so credentials are named but not written."""
     text = render_reference_script(
         framework="sglang",
-        server_args="",
-        envs={"HF_TOKEN": "hf_realsecret", "VLLM_ROCM_USE_AITER": "1"},
+        launch=LaunchSettings(server_args="", envs={"HF_TOKEN": "hf_realsecret", "VLLM_ROCM_USE_AITER": "1"}),
     )
     assert "hf_realsecret" not in text
     assert "# export HF_TOKEN=<redacted; supply manually>" in text
@@ -354,42 +382,24 @@ def test_render_redacts_secret_shaped_envs():
 
 
 def test_render_no_model_no_export():
-    text = render_reference_script(framework="sglang", server_args="")
+    text = render_reference_script(framework="sglang", launch=LaunchSettings(server_args=""))
     assert "export MODEL=" not in text
 
 
-def test_render_enablement_has_strict_mode():
+def test_render_enablement_runs_its_setup_script_under_strict_mode():
     text = render_reference_script(
-        framework="sglang",
-        server_args="",
-        setup_commands=["pip install vllm==0.24"],
+        framework="sglang", launch=LaunchSettings(server_args=""), setup_script="enablement_setup.sh"
     )
     assert "set -euo pipefail" in text
-    assert "pip install vllm==0.24" in text
-
-
-def test_render_patches_emit_apply_function():
-    text = render_reference_script(
-        framework="sglang",
-        server_args="",
-        rounds=[{"patches": ["patches/001_fix.patch"], "artifacts": []}],
-        framework_root="/sgl-workspace/sglang",
-    )
-    assert "export FRAMEWORK_ROOT=/sgl-workspace/sglang" in text
-    assert "apply_patch patches/001_fix.patch" in text
-    assert "for lvl in 1 0 2" in text
+    assert 'bash "$SCRIPT_DIR"/enablement_setup.sh' in text
 
 
 def test_render_enablement_script_is_valid_bash(tmp_path):
     text = render_reference_script(
         framework="sglang",
-        server_args="--tp 8",
-        envs={"VLLM_ROCM_USE_AITER": "1"},
-        model="/models/M",
-        setup_commands=["pip install aiter==0.1.4"],
-        rounds=[{"patches": ["patches/001.patch"], "artifacts": []}],
-        framework_root="/sgl-workspace/sglang",
-        runtime="/session/enablement/stacks/sglang/s1/venv",
+        launch=LaunchSettings(server_args="--tp 8", envs={"VLLM_ROCM_USE_AITER": "1"}),
+        target=ServingTarget(model="/models/M"),
+        setup_script="enablement_setup.sh",
     )
     sh = tmp_path / "enablement_setting.sh"
     sh.write_text(text, encoding="utf-8")
@@ -397,42 +407,27 @@ def test_render_enablement_script_is_valid_bash(tmp_path):
     assert proc.returncode == 0, proc.stderr
 
 
-def test_render_runtime_note_emitted():
-    text = render_reference_script(
-        framework="vllm",
-        server_args="",
-        runtime="/session/enablement/stacks/vllm/spec-1/venv",
-    )
-    assert "isolated attempt venv" in text
-    assert "/session/enablement/stacks/vllm/spec-1/venv" in text
-
-
 def test_render_base_params_unchanged_without_enablement():
     """No setup_commands/patches/framework_root → output identical to original."""
     text = render_reference_script(
         framework="vllm",
-        server_args="--block-size 128",
-        envs={"VLLM_ROCM_USE_AITER": "1"},
-        tp=8,
-        gpu_type="mi300x",
+        launch=LaunchSettings(server_args="--block-size 128", envs={"VLLM_ROCM_USE_AITER": "1"}),
+        target=ServingTarget(tp=8, gpu_type="mi300x"),
     )
     assert "set -euo pipefail" not in text
-    assert "apply_patch" not in text
+    assert "enablement_setup.sh" not in text
     assert "export TP=8" in text
     assert "vllm serve $MODEL" in text
     assert "VLLM_ROCM_USE_AITER" in text
 
 
 def test_render_round_trip_with_enablement_params(tmp_path):
-    """Inserting setup/patch lines does not confuse parse_reference_script."""
+    """The setup call does not confuse parse_reference_script, so the script still re-feeds."""
     text = render_reference_script(
         framework="sglang",
-        server_args="--tp 8",
-        envs={"VLLM_ROCM_USE_AITER": "1"},
-        model="/models/M",
-        setup_commands=["pip install vllm==0.24"],
-        rounds=[{"patches": ["patches/fix.patch"], "artifacts": []}],
-        framework_root="/sgl-workspace/sglang",
+        launch=LaunchSettings(server_args="--tp 8", envs={"VLLM_ROCM_USE_AITER": "1"}),
+        target=ServingTarget(model="/models/M"),
+        setup_script="enablement_setup.sh",
     )
     sh = tmp_path / "enablement_setting.sh"
     sh.write_text(text, encoding="utf-8")
@@ -444,38 +439,33 @@ def test_render_round_trip_with_enablement_params(tmp_path):
 # --- bootstrap._resolve_reference_recipe tests ---
 
 
-def test_resolve_no_flag_returns_empty(monkeypatch):
+def test_resolve_no_flag_returns_empty():
     """No --reference-script → empty tuple, nothing attempted."""
-    monkeypatch.setenv("FRAMEWORK", "vllm")
     args = SimpleNamespace(reference_script=None)
-    assert _resolve_reference_recipe(args) == ("", {}, "", "", {})
+    assert _resolve_reference_recipe(args, "vllm") == ("", {}, "", {})
 
 
-def test_resolve_valid_flag_is_used(tmp_path, monkeypatch):
-    monkeypatch.setenv("FRAMEWORK", "vllm")
+def test_resolve_valid_flag_is_used(tmp_path):
     src = _write(tmp_path, _M3_RECIPE, "explicit.sh")
     args = SimpleNamespace(reference_script=src)
-    server_args, envs, model, source, controls = _resolve_reference_recipe(args)
+    server_args, envs, model, controls = _resolve_reference_recipe(args, "vllm")
     assert "--block-size 128" in server_args
-    assert source == src
 
 
-def test_resolve_unreadable_flag_raises_system_exit(monkeypatch):
+def test_resolve_unreadable_flag_raises_system_exit():
     """Given but unreadable path → SystemExit(2)."""
-    monkeypatch.setenv("FRAMEWORK", "vllm")
     args = SimpleNamespace(reference_script="/no/such/recipe.sh")
     with pytest.raises(SystemExit) as exc_info:
-        _resolve_reference_recipe(args)
+        _resolve_reference_recipe(args, "vllm")
     assert exc_info.value.code == 2
 
 
-def test_resolve_script_with_no_flags_raises_system_exit(tmp_path, monkeypatch):
+def test_resolve_script_with_no_flags_raises_system_exit(tmp_path):
     """A readable script that yields no server flags and no envs → SystemExit(2)."""
-    monkeypatch.setenv("FRAMEWORK", "vllm")
     empty = _write(tmp_path, "#!/usr/bin/env bash\necho hello\n")
     args = SimpleNamespace(reference_script=empty)
     with pytest.raises(SystemExit) as exc_info:
-        _resolve_reference_recipe(args)
+        _resolve_reference_recipe(args, "vllm")
     assert exc_info.value.code == 2
 
 
@@ -491,7 +481,7 @@ def test_export_and_reimport_reject_unloadable_overlay(tmp_path, invalid):
         (overlay / "_overlay_manifest.json").write_text("invalid")
     value = str(overlay) + (":/another" if invalid == "path_list" else "")
     with pytest.raises(ValueError, match="overlay_pythonpath"):
-        render_reference_script(framework="sglang", server_args="", overlay_pythonpath=value)
+        render_reference_script(framework="sglang", launch=LaunchSettings(server_args="", overlay_pythonpath=value))
     source = _write(tmp_path, "# hyperloom-launch-controls: " + json.dumps({"overlay_pythonpath": value}))
     with pytest.raises(ValueError, match="overlay_pythonpath"):
         parse_reference_script(source, framework="sglang")
@@ -502,7 +492,9 @@ def test_untrusted_reference_cannot_enable_loadable_overlay(tmp_path, monkeypatc
     overlay = tmp_path / "overlay"
     overlay.mkdir()
     (overlay / "sitecustomize.py").write_text("raise RuntimeError('must not be imported')")
-    text = render_reference_script(framework="sglang", server_args="--tp 8", overlay_pythonpath=str(overlay))
+    text = render_reference_script(
+        framework="sglang", launch=LaunchSettings(server_args="--tp 8", overlay_pythonpath=str(overlay))
+    )
     if remote:
         source = "https://example.invalid/recipe.sh"
         monkeypatch.setattr(
@@ -517,7 +509,7 @@ def test_untrusted_reference_cannot_enable_loadable_overlay(tmp_path, monkeypatc
 
 def test_nonexecutable_launch_controls_roundtrip(tmp_path):
     controls = {"unset_envs": ["SGLANG_USE_AITER"], "remove_args": ["--disable-cuda-graph"], "args_mode": "replace"}
-    text = render_reference_script(framework="sglang", server_args="--tp 8", **controls)
+    text = render_reference_script(framework="sglang", launch=LaunchSettings(server_args="--tp 8", **controls))
     recipe = parse_reference_script(_write(tmp_path, text), framework="sglang")
     assert recipe.launch_controls == controls
     assert recipe.server_args == "--tp 8"

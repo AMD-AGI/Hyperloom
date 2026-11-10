@@ -8,10 +8,7 @@ from __future__ import annotations
 import subprocess
 from pathlib import Path
 
-from hyperloom.orchestrator.actions.executors.integrate_patch import (
-    _git_restore_stash_if_needed,
-    _git_stash_if_dirty,
-)
+from hyperloom.orchestrator.actions.executors._patch_git import _git_restore_stash_if_needed, _git_stash_if_dirty
 
 from hyperloom.orchestrator.tests._helpers import git_commit_all, init_git_repo
 

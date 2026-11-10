@@ -14,4 +14,4 @@ PYTHON="${KERNELFORGE_PYTHON:-python3}"
 # Hyperloom keeps them in explicit extras so ordinary installs stay lightweight.
 "$PYTHON" -m pip install --quiet -e "${ROOT}[forge,forge-profiling]"
 
-exec bash "${ROOT}/src/kernelforge/data/examples/triton-softmax-forge-loop/run_example.sh" "$@"
+exec bash "${ROOT}/src/kernelforge/examples/triton-softmax-forge-loop/run_example.sh" "$@"

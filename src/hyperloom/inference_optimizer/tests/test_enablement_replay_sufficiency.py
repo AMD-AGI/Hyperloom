@@ -10,36 +10,32 @@ import json
 import pytest
 from pathlib import Path
 
-from hyperloom.orchestrator.enablement.recipe.attempts import build_attempt_summary as _build_attempt_summary
-from hyperloom.orchestrator.enablement.recipe import (
-    build_recipe_steps,
+from hyperloom.orchestrator.enablement.recipe.build_inputs import ambient_closure, build_input_record
+from hyperloom.orchestrator.enablement.recipe.credentials import (
     classify_credential_class,
     classify_credential_value,
     detect_credential_channels,
-    evaluate_replay_sufficiency,
-    read_status,
     sanitize_command_text,
+    url_userinfo,
 )
-from hyperloom.orchestrator.enablement.recipe.build_inputs import (
-    ambient_closure,
-    build_driver_for,
-    build_input_record,
-)
-from hyperloom.orchestrator.enablement.recipe.credentials import strip_url_userinfo, url_userinfo
+from hyperloom.common.url_userinfo import strip_url_userinfo
 from hyperloom.orchestrator.enablement.recipe.projections import (
     project_accepted_config,
     project_launch_evidence,
     project_roots,
     project_runtime_provenance,
 )
-from hyperloom.orchestrator.enablement.recipe.steps import command_digest
-from hyperloom.orchestrator.enablement.recipe.sufficiency import REASON_BLOCKS, _BUILTIN_REQUIRED_INPUTS
-from hyperloom.orchestrator.enablement.recipe.setup_ledger import (
-    build_execution_row,
-    mark_round_disposition,
+from hyperloom.orchestrator.enablement.recipe.steps import build_recipe_steps, command_digest
+from hyperloom.orchestrator.enablement.recipe.sufficiency import (
+    REASON_BLOCKS,
+    _BUILTIN_REQUIRED_INPUTS,
+    evaluate_replay_sufficiency,
+    not_evaluated,
 )
+from hyperloom.orchestrator.enablement.recipe.setup_ledger import SetupExecution, build_execution_row
 from hyperloom.orchestrator.enablement.runtime import targeted_build
 from hyperloom.orchestrator.enablement.runtime.build_actions import TargetedBuildAction
+from hyperloom.orchestrator.state.shared_state import EnablementRound
 
 NO_FS = "/nonexistent-probe-root"
 
@@ -50,7 +46,7 @@ def _codes(decision):
 
 def _decide(enablement=None, section=None, delivered=None):
     enablement = dict(enablement or {})
-    steps = build_recipe_steps(enablement, attempt_summary=_build_attempt_summary)
+    steps = build_recipe_steps(enablement)
     return evaluate_replay_sufficiency(
         enablement,
         steps=steps,
@@ -61,19 +57,20 @@ def _decide(enablement=None, section=None, delivered=None):
 
 def _row(cmd="pip install foo", *, seq=1, outcome="applied", task="r1", env=None):
     return build_execution_row(
-        seq=seq,
-        round_task_id=task,
-        cmd_index=0,
-        cmd=cmd,
-        source="proposed",
-        outcome=outcome,
+        SetupExecution(seq=seq, round_task_id=task, cmd_index=0, cmd=cmd, source="proposed", outcome=outcome),
         env=env,
         fs_root=NO_FS,
     )
 
 
+def _marked(rows, *, round_task_id, disposition, accepted):
+    rnd = EnablementRound(setup_executions=list(rows))
+    rnd.mark_setup_round(round_task_id, disposition, accepted=accepted)
+    return rnd.setup_executions
+
+
 def _accepted(rows, task="r1"):
-    return mark_round_disposition(rows, round_task_id=task, disposition="kept", accepted=True)
+    return _marked(rows, round_task_id=task, disposition="kept", accepted=True)
 
 
 def test_an_outcome_outside_the_recorded_vocabulary_is_refused():
@@ -86,14 +83,14 @@ def test_one_string_executed_twice_yields_two_steps_with_ordinals():
     cmd = "pip install foo"
     rows = _accepted([_row(cmd, seq=1, task="r1"), _row(cmd, seq=2, task="r2")], task="r2")
     state = {"setup_commands": [cmd], "setup_executions": rows}
-    steps = build_recipe_steps(state, attempt_summary=_build_attempt_summary)
+    steps = build_recipe_steps(state)
     assert [s["occurrence"] for s in steps] == [1, 2]
     assert state["setup_commands"] == [cmd]
 
 
 def test_absent_ledger_falls_back_to_the_r1a_step_set():
     state = {"setup_commands": ["pip install a", "pip install b"]}
-    steps = build_recipe_steps(state, attempt_summary=_build_attempt_summary)
+    steps = build_recipe_steps(state)
     assert [s["occurrence"] for s in steps] == [None, None]
     assert "setup_occurrences_unknown" in _codes(_decide(state))
 
@@ -103,15 +100,11 @@ def test_empty_ledger_and_no_commands_raises_nothing_for_setup():
 
 
 def test_only_applied_executions_project_a_step():
-    rows = [
-        _row("pip install a", seq=1),
-        _row("pip install b", seq=2, outcome="failed"),
-        _row("pip install c", seq=3, outcome="skipped"),
-    ]
-    state = {"setup_commands": ["pip install a", "pip install b", "pip install c"], "setup_executions": rows}
-    steps = build_recipe_steps(state, attempt_summary=_build_attempt_summary)
+    rows = [_row("pip install a", seq=1), _row("pip install b", seq=2, outcome="failed")]
+    state = {"setup_commands": ["pip install a", "pip install b"], "setup_executions": rows}
+    steps = build_recipe_steps(state)
     assert [s["cmd"] for s in steps] == ["pip install a"]
-    assert len(state["setup_executions"]) == 3
+    assert len(state["setup_executions"]) == 2
 
 
 def test_command_reapplied_by_the_accepted_round_is_present_at_final_launch():
@@ -130,7 +123,7 @@ def test_a_later_keep_takes_presence_from_the_earlier_one():
     first = _accepted([_row(cmd, seq=1, task="t1")], task="t1")
     assert first[0]["present_at_final_launch"] is True
 
-    second = mark_round_disposition(
+    second = _marked(
         [*first, _row("pip install bar", seq=2, task="t2")],
         round_task_id="t2",
         disposition="kept",
@@ -144,7 +137,7 @@ def test_a_later_keep_takes_presence_from_the_earlier_one():
 def test_a_command_only_the_earlier_keep_ran_is_capped_out_of_the_final_one():
     """The stale flag used to answer for it, so truncation could never fire."""
     first = _accepted([_row("pip install foo", seq=1, task="t1")], task="t1")
-    rows = mark_round_disposition(
+    rows = _marked(
         [*first, _row("pip install bar", seq=2, task="t2")],
         round_task_id="t2",
         disposition="kept",
@@ -156,7 +149,7 @@ def test_a_command_only_the_earlier_keep_ran_is_capped_out_of_the_final_one():
 
 @pytest.mark.parametrize("disposition", ["apply_failed", "no_patches", "reverted"])
 def test_command_from_a_discarded_round_raises_effect_outside_verified_launch(disposition):
-    rows = mark_round_disposition(
+    rows = _marked(
         [_row("pip install stranded", seq=1, task="r1")],
         round_task_id="r1",
         disposition=disposition,
@@ -233,11 +226,6 @@ def test_a_failed_non_python_installer_scopes_nothing_of_its_own():
     assert "setup_effect_outside_verified_launch" in codes
 
 
-def test_a_skipped_non_python_installer_scopes_nothing():
-    rows = _accepted([_row("apt-get install -y libfoo", seq=1, outcome="skipped", task="kept")], task="kept")
-    assert "closure_scope_incomplete" not in _codes(_decide({"setup_executions": rows}))
-
-
 @pytest.mark.parametrize(
     "cmd",
     [
@@ -250,7 +238,7 @@ def test_credentialed_command_is_sanitized_without_losing_its_digest(cmd):
     """Sanitization is of the recorded text only: the digest that counts
     occurrences is over the verbatim string, so the three spellings the
     allowlist admits equally still collapse onto one command."""
-    rows = [_row(cmd, seq=i, outcome=outcome) for i, outcome in enumerate(("applied", "failed", "skipped"), start=1)]
+    rows = [_row(cmd, seq=i, outcome=outcome) for i, outcome in enumerate(("applied", "failed"), start=1)]
     for row in rows:
         assert "user:token" not in row["cmd_sanitized"] and "host" not in row["cmd_sanitized"]
         assert row["cmd_digest"] == command_digest(cmd)
@@ -272,11 +260,8 @@ def _attempt(task_id, **kw):
             "resolved_sha": "s" * 40,
             "gpu_arch": "gfx950",
             "max_jobs": 8,
-            "torch_constraint_mode": "constraint_file",
-            "env_digest": "sha256:e",
             "ambient_digest": "sha256:a",
             "ambient_keys": ["HOME", "PATH", "ROCM_PATH"],
-            "build_command": None,
             "credential_class": None,
             "credential_channels": [],
         },
@@ -291,7 +276,7 @@ def _build_state(manifest):
 
 def test_build_binds_by_identity_not_by_position():
     state = _build_state([_attempt("bA"), _attempt("bB"), {"task_id": "bA", "probe_task_id": "probe"}])
-    steps = build_recipe_steps(state, attempt_summary=_build_attempt_summary)
+    steps = build_recipe_steps(state)
     assert steps[0]["build_task_id"] == "bA"
     assert "build_attempt_unjoined" not in _codes(_decide(state))
 
@@ -303,7 +288,7 @@ def test_routing_merged_into_the_attempt_row_still_joins():
     so every executed build projected as unjoined.
     """
     state = _build_state([_attempt("bA", probe_task_id="probe")])
-    steps = build_recipe_steps(state, attempt_summary=_build_attempt_summary)
+    steps = build_recipe_steps(state)
     assert steps[0]["build_task_id"] == "bA" and steps[0]["build_driver"] == "builtin_plan"
     assert "build_attempt_unjoined" not in _codes(_decide(state))
 
@@ -329,42 +314,19 @@ def test_each_missing_builtin_member_raises_build_inputs_incomplete(member):
     assert "build_inputs_incomplete" in _codes(_decide(state))
 
 
-def test_custom_command_build_is_incomplete_with_every_member_present():
-    row = _attempt("bA", build_driver="custom_command")
-    row["build_inputs"]["build_command"] = {"argv0": "bash", "digest": "sha256:d", "credential_class": None}
+def test_a_row_naming_no_builtin_plan_driver_is_incomplete_with_every_member_present():
+    row = _attempt("bA")
+    row.pop("build_driver")
     state = _build_state([row, {"task_id": "bA", "probe_task_id": "probe"}])
     assert "build_inputs_incomplete" in _codes(_decide(state))
-
-
-def test_env_value_change_alone_changes_the_digest_and_emits_no_value():
-    class _Action:
-        component = "aiter"
-        repo_url = ""
-        ref = "v1"
-        gpu_arch = "gfx950"
-        max_jobs = 0
-        torch_constraint_mode = "constraint_file"
-        build_command = ()
-
-        def __init__(self, envs):
-            self.envs = envs
-
-    one = build_input_record(_Action({"K": "1"}), installed_versions={}, ambient_env={}, fs_root=NO_FS)
-    two = build_input_record(_Action({"K": "2"}), installed_versions={}, ambient_env={}, fs_root=NO_FS)
-    assert one["env_digest"] != two["env_digest"]
-    assert one["env_keys"] == two["env_keys"] == ["K"]
-    # The digest separates them while neither value travels.
-    assert '"1"' not in json.dumps(one) and '"2"' not in json.dumps(two)
-    # The driver's resolved value stands in where the action carried a blank.
-    assert one["repo_url"] == "https://github.com/ROCm/aiter" and one["max_jobs"] == 8
 
 
 @pytest.mark.parametrize(
     ("component", "default_prefix", "default_jobs"),
     [("aiter", "_AITER", 3), ("framework_ext", "_AITER", 3), ("sgl_kernel", "_SGLANG", 5), ("vllm_source", "_VLLM", 7)],
 )
-@pytest.mark.parametrize(("repo_url", "max_jobs"), [("", 0), ("   ", 0), ("https://example.com/override", 11)])
-def test_build_inputs_follow_driver_defaults(monkeypatch, component, default_prefix, default_jobs, repo_url, max_jobs):
+@pytest.mark.parametrize("repo_url", ["", "   ", "https://example.com/override"])
+def test_build_inputs_follow_driver_defaults(monkeypatch, component, default_prefix, default_jobs, repo_url):
     default_repo = f"https://example.com/{component}"
     monkeypatch.setattr(targeted_build, f"{default_prefix}_DEFAULT_REPO", default_repo)
     monkeypatch.setattr(targeted_build, f"{default_prefix}_DEFAULT_MAX_JOBS", default_jobs)
@@ -374,13 +336,12 @@ def test_build_inputs_follow_driver_defaults(monkeypatch, component, default_pre
         component=component,
         capability="build",
         repo_url=repo_url,
-        max_jobs=max_jobs,
     )
 
     record = build_input_record(action, installed_versions={}, ambient_env={}, fs_root=NO_FS)
 
     assert record["repo_url"] == (repo_url.strip() or default_repo)
-    assert record["max_jobs"] == (max_jobs or default_jobs)
+    assert record["max_jobs"] == default_jobs
 
 
 def test_unknown_build_component_has_no_defaults_and_is_incomplete():
@@ -417,6 +378,16 @@ def test_driver_overwritten_names_are_per_driver():
     assert "HOME" in ambient_closure(env, component="aiter")
 
 
+@pytest.mark.parametrize("component", ["vllm_source", "framework_ext"])
+def test_driver_overwritten_names_follow_the_dispatched_driver(component):
+    """framework_ext runs the AITER driver and vllm_source the vLLM driver; both overwrite these."""
+    env = {"PYTORCH_ROCM_ARCH": "gfx942", "MAX_JOBS": "64", "HOME": "/root"}
+    closure = ambient_closure(env, component=component)
+    assert "PYTORCH_ROCM_ARCH" not in closure
+    assert "MAX_JOBS" not in closure
+    assert "HOME" in closure
+
+
 def test_a_build_spawned_with_a_credentialed_index_env_classifies_it():
     """The build inherits the whole environment, so the channel is its input too."""
 
@@ -425,10 +396,6 @@ def test_a_build_spawned_with_a_credentialed_index_env_classifies_it():
         repo_url = "https://github.com/ROCm/aiter"
         ref = "v1"
         gpu_arch = "gfx950"
-        max_jobs = 8
-        torch_constraint_mode = "constraint_file"
-        build_command = ()
-        envs: dict = {}
 
     record = build_input_record(
         _Action(),
@@ -447,34 +414,12 @@ def test_credentialed_repo_url_is_stripped_and_classified(host):
         repo_url = f"https://user:token@{host}/org/repo"
         ref = "v1"
         gpu_arch = "gfx950"
-        max_jobs = 8
-        torch_constraint_mode = "constraint_file"
-        build_command = ()
-        envs: dict = {}
 
     record = build_input_record(_Action(), installed_versions={}, ambient_env={}, fs_root=NO_FS)
     assert record["repo_url"] == f"https://{host}/org/repo"
     # A repository URL is under no index option, so it takes the closed
     # vocabulary's catch-all rather than borrowing a flag's class.
     assert record["credential_class"] == "opaque_credential"
-    assert build_driver_for(_Action()) == "builtin_plan"
-
-
-def test_build_command_travels_as_an_identity_never_as_text():
-    class _Action:
-        component = "aiter"
-        repo_url = ""
-        ref = "v1"
-        gpu_arch = "gfx950"
-        max_jobs = 8
-        torch_constraint_mode = "constraint_file"
-        build_command = ("bash", "-c", "pip install --index-url https://u:t@h/s pkg")
-        envs: dict = {}
-
-    record = build_input_record(_Action(), installed_versions={}, ambient_env={}, fs_root=NO_FS)
-    identity = record["build_command"]
-    assert identity["argv0"] == "bash" and identity["credential_class"] == "index_url"
-    assert "u:t@h" not in str(identity)
 
 
 def test_an_ambient_closure_narrower_than_the_inherited_environment_is_incomplete():
@@ -517,10 +462,6 @@ def test_a_credentialed_repo_url_recorded_by_the_builder_blocks_replay(host):
         repo_url = f"https://user:token@{host}/org/repo"
         ref = "v1"
         gpu_arch = "gfx950"
-        max_jobs = 8
-        torch_constraint_mode = "constraint_file"
-        build_command = ()
-        envs: dict = {}
 
     row = _attempt("bA")
     row["build_inputs"] = {
@@ -530,17 +471,7 @@ def test_a_credentialed_repo_url_recorded_by_the_builder_blocks_replay(host):
     state = _build_state([row, {"task_id": "bA", "probe_task_id": "probe"}])
     codes = _codes(_decide(state))
     assert "credential_required" in codes
-    assert "user:token" not in str(build_recipe_steps(state, attempt_summary=_build_attempt_summary))
-
-
-def test_a_credentialed_build_command_blocks_replay():
-    row = _attempt("bA", build_driver="custom_command")
-    row["build_inputs"] = {
-        **row["build_inputs"],
-        "build_command": {"argv0": "bash", "digest": "sha256:d", "credential_class": "index_url"},
-    }
-    state = _build_state([row, {"task_id": "bA", "probe_task_id": "probe"}])
-    assert "credential_required" in _codes(_decide(state))
+    assert "user:token" not in str(build_recipe_steps(state))
 
 
 def _evidence(**kw):
@@ -903,6 +834,8 @@ def test_credential_classes_over_the_admitted_grammar():
         ("pip install -ihttps://user:token@host/simple foo", "index_url"),
         ("pip install -fhttps://user:token@host/links foo", "find_links"),
         ("conda install -chttps://user:token@host/channel foo", "channel"),
+        ("pip install -ihttps://user:token@host/simple?k=v foo", "index_url"),
+        ("conda install -chttps://user:token@host/channel?k=v foo", "channel"),
     ],
 )
 def test_compact_short_options_are_classified_and_sanitized(command, credential_class):
@@ -910,6 +843,25 @@ def test_compact_short_options_are_classified_and_sanitized(command, credential_
     assert row["credential_class"] == credential_class
     assert "user:token" not in row["cmd_sanitized"]
     assert "host" not in row["cmd_sanitized"]
+
+
+@pytest.mark.parametrize(
+    ("command", "sanitized"),
+    [
+        ("rm -rf /tmp/x", "rm -rf /tmp/x"),
+        (
+            "pip install -rrequirements.txt -c constraints.txt foo",
+            "pip install -rrequirements.txt -c constraints.txt foo",
+        ),
+        ("pip install -ihttps://user:token@host/simple foo", "pip install -i<index_url> foo"),
+        ("pip install -ihttps://user:token@host/simple?k=v foo", "pip install -i<index_url> foo"),
+        ("pip install -i=https://user:token@host/simple?k=v foo", "pip install -i=<index_url> foo"),
+        ("pip install --index-url=https://user:token@host/simple foo", "pip install --index-url=<index_url> foo"),
+        ("pip install --index-url https://user:token@host/simple foo", "pip install --index-url <index_url> foo"),
+    ],
+)
+def test_sanitizing_keeps_each_option_as_written(command, sanitized):
+    assert sanitize_command_text(command) == sanitized
 
 
 def test_an_inline_index_assignment_classifies_and_sanitizes_as_the_flag_does():
@@ -1354,14 +1306,9 @@ def test_every_reason_carries_a_blocks_and_a_value_free_scope():
         assert "/" not in reason["scope"] or reason["scope"].startswith("step[")
 
 
-def test_absent_decision_reads_as_insufficient():
-    assert read_status({})["status"] == "insufficient"
-    assert read_status({})["reasons"][0]["code"] == "not_evaluated"
-
-
-def test_unrecognized_code_is_itself_insufficient():
-    forged = {"replay_sufficiency": {"status": "sufficient", "reasons": [{"code": "invented", "blocks": "replay"}]}}
-    assert read_status(forged)["status"] == "insufficient"
+def test_an_unjudged_recipe_reads_as_insufficient():
+    assert not_evaluated()["status"] == "insufficient"
+    assert not_evaluated()["reasons"][0]["code"] == "not_evaluated"
 
 
 def test_reason_code_vocabulary_matches_the_closed_contract():
@@ -1395,29 +1342,22 @@ def test_reason_code_vocabulary_matches_the_closed_contract():
     }
 
 
-def test_a_recorded_decision_reads_back_as_the_producer_wrote_it():
-    """Only an absent key and an unrecognized code are overridden; a decision
-    over the closed vocabulary is the one the consumer acts on."""
-    recorded = _decide(_sufficient_state(), _sufficient_section())
-    assert read_status({"replay_sufficiency": recorded}) == recorded
-
-
-def test_new_keys_do_not_change_the_r1a_projections():
+def test_kept_patches_and_setup_reach_the_recipe_steps():
     from hyperloom.orchestrator.enablement.recipe.section import collect_enablement as collect
 
     out = collect(
         Path("/tmp/sess"),
         {
-            "enablement_attempts": 1,
-            "enablement_kept_patches": ["/tmp/sess/patches/001.patch"],
-            "enablement_setup_commands": ["pip install -e ."],
-            "enablement_framework_root": "/sgl-workspace/sglang",
+            "enablement": {
+                "kept_patches": ["/tmp/sess/patches/001.patch"],
+                "setup_commands": ["pip install -e ."],
+                "framework_root": "/sgl-workspace/sglang",
+            }
         },
-        [],
     )
-    assert out["kept_patches"] == ["patches/001.patch"]
-    assert out["setup_commands"] == ["pip install -e ."]
-    assert out["framework_root"] == "/sgl-workspace/sglang"
+    steps = {st["kind"]: st for st in out["recipe_steps"]}
+    assert steps["patch"]["path"] == "patches/001.patch"
+    assert steps["setup"]["cmd"] == "pip install -e ."
     assert out["replay_sufficiency"]["status"] == "insufficient"
 
 
@@ -1459,15 +1399,14 @@ def test_framework_outside_the_marker_table_has_no_observable_binding(tmp_path):
 
 
 def test_evidence_builder_carries_the_binding_and_the_requested_digest(tmp_path):
-    from hyperloom.orchestrator.actions.executors._launch_evidence import build_launch_evidence
+    from hyperloom.orchestrator.actions.executors._launch_evidence import RequestedLaunch, build_launch_evidence
 
     config = tmp_path / "materialized.yaml"
     config.write_text("benchmark:\n  framework: vllm\n  model: /models/b\n", encoding="utf-8")
     log = _log(tmp_path, "server.log", "INFO vllm serve /models/b --tensor-parallel-size 4\n")
     evidence = build_launch_evidence(
-        config_path=config,
+        RequestedLaunch(config, "vllm"),
         actual_server_log=log,
-        framework="vllm",
         slot=tmp_path,
     )
     assert evidence["observed_model_binding"]["model_digest"] == evidence["requested_model_digest"]
@@ -1512,7 +1451,7 @@ def test_resolved_packages_reports_version_and_record_digest():
 def _collect(state):
     from hyperloom.orchestrator.enablement.recipe.section import collect_enablement
 
-    return collect_enablement(Path("/tmp/sess"), {"enablement": {"attempts": 1, **state}}, [])
+    return collect_enablement(Path("/tmp/sess"), {"enablement": {"last_specialist_task_id": "spec-1", **state}})
 
 
 def test_closure_status_is_unverified_while_a_closure_reason_stands():
@@ -1655,7 +1594,7 @@ def test_build_inputs_reach_the_emitted_step_stripped_of_credential_material():
     row = _attempt("bA")
     row["build_inputs"]["repo_url"] = "https://user:token@github.com/org/repo"
     state = _build_state([row, {"task_id": "bA", "probe_task_id": "probe"}])
-    steps = build_recipe_steps(state, attempt_summary=_build_attempt_summary)
+    steps = build_recipe_steps(state)
     inputs = steps[0]["build_inputs"]
     assert inputs["repo_url"] == "https://github.com/org/repo"
     assert inputs["resolved_sha"] == "s" * 40
@@ -1664,7 +1603,7 @@ def test_build_inputs_reach_the_emitted_step_stripped_of_credential_material():
 def test_a_round_with_no_task_id_claims_no_ledger_rows():
     """Rows a lane never identified stay unreported, never silently accepted."""
     rows = [_row("pip install x", seq=1, task="r1")]
-    unchanged = mark_round_disposition(rows, round_task_id="", disposition="kept", accepted=True)
+    unchanged = _marked(rows, round_task_id="", disposition="kept", accepted=True)
     assert unchanged[0]["round_disposition"] == "unreported"
     assert unchanged[0]["present_at_final_launch"] is False
 
@@ -1941,21 +1880,6 @@ def test_no_delivery_assembled_leaves_the_contract_unapplied():
     assert _decide(_sufficient_state(), _delivery_section())["status"] == "sufficient"
 
 
-def test_a_configuration_digest_binds_the_delivered_config_to_its_bytes():
-    """A recorded digest makes the path alone an insufficient answer."""
-    section = _delivery_section()
-    section["accepted_config"]["config_digest"] = "d" * 64
-    undigested = _decide(_sufficient_state(), section, delivered=_delivered_everything())
-    assert "artifact_not_self_contained" in _codes(undigested)
-
-    bound = _decide(
-        _sufficient_state(),
-        section,
-        delivered=[(CONFIG_PAYLOAD, "d" * 64), (SNAPSHOT_PAYLOAD, "")],
-    )
-    assert "artifact_not_self_contained" not in _codes(bound)
-
-
 def _session_bundle(tmp_path, *, config=True, snapshot_bytes=b"x"):
     """A session root shaped like the one the packager bundles."""
     session = tmp_path / "session"
@@ -1975,8 +1899,7 @@ def _bundle_decision(session, state=None):
 
     section = _delivery_section()
     state = _sufficient_state() if state is None else state
-    steps = build_recipe_steps(state, attempt_summary=_build_attempt_summary)
-    referenced = referenced_payloads(section, steps)
+    referenced = referenced_payloads(section)
     return _decide(state, section, delivered=deliverable(session, referenced))
 
 
@@ -2094,7 +2017,7 @@ def test_a_build_links_through_a_kept_round_when_the_marker_is_gone():
         "last_specialist_task_id": "",
         "kept_rounds": [{"task_id": "round-1"}, {"task_id": "round-2"}, {"task_id": "round-3"}],
     }
-    steps = build_recipe_steps(state, attempt_summary=_build_attempt_summary)
+    steps = build_recipe_steps(state)
 
     assert [s["kind"] for s in steps if s["kind"] == "build"] == ["build"]
     assert "build_not_replayed" not in _codes(_decide(state))
@@ -2112,7 +2035,7 @@ def test_the_marker_still_wins_while_it_is_set():
         "last_specialist_task_id": "marker-round",
         "kept_rounds": [{"task_id": "kept-round"}],
     }
-    steps = build_recipe_steps(state, attempt_summary=_build_attempt_summary)
+    steps = build_recipe_steps(state)
 
     assert [s for s in steps if s["kind"] == "build"][0]["build_task_id"] == "bMarker"
 
@@ -2128,7 +2051,7 @@ def test_the_latest_kept_round_is_tried_first():
         "last_specialist_task_id": "",
         "kept_rounds": [{"task_id": "round-1"}, {"task_id": "round-2"}],
     }
-    steps = build_recipe_steps(state, attempt_summary=_build_attempt_summary)
+    steps = build_recipe_steps(state)
 
     assert [s for s in steps if s["kind"] == "build"][0]["build_task_id"] == "bLate"
 
@@ -2140,7 +2063,7 @@ def test_a_build_no_kept_round_asked_for_stays_unlinked():
         "last_specialist_task_id": "",
         "kept_rounds": [{"task_id": "round-1"}],
     }
-    steps = build_recipe_steps(state, attempt_summary=_build_attempt_summary)
+    steps = build_recipe_steps(state)
 
     assert not [s for s in steps if s["kind"] == "build"]
     assert "build_not_replayed" in _codes(_decide(state))
@@ -2198,31 +2121,10 @@ def test_a_session_that_never_recorded_the_check_names_nothing():
 
 
 def _persisted(result_value, *, present=True):
-    """Push a KEEP result through the lane's persistence and read it back."""
-    from types import SimpleNamespace
-
-    from hyperloom.orchestrator.enablement.lane import _stack_keep_recipe_records
-
-    enablement = SimpleNamespace(
-        build_extensions_not_carried=[],
-        launch_argv_refused=False,
-        **{
-            name: {}
-            for name in (
-                "accepted_stack_targets",
-                "patch_targets",
-                "launch_evidence",
-                "environment_closure",
-                "installed_versions_at_keep",
-                "roots",
-                "patch_roots",
-                "base_sha",
-                "source_snapshots",
-            )
-        },
-    )
+    """Push a KEEP result through the round's persistence and read it back."""
+    enablement = EnablementRound()
     res = {"enablement_build_extensions_not_carried": result_value} if present else {}
-    _stack_keep_recipe_records(SimpleNamespace(enablement=enablement), res)
+    enablement.record_keep(res)
     return enablement.build_extensions_not_carried
 
 
@@ -2268,6 +2170,20 @@ def test_levers_with_no_reader_block_the_replay():
 
 def test_an_unscannable_tree_leaves_the_levers_unverified():
     assert "levers_unverified" in _codes(_decide({}, section={"levers_without_readers": None}))
+
+
+@pytest.mark.parametrize(
+    ("field", "code"),
+    [("levers_without_readers", "levers_unverified"), ("build_extensions_not_carried", "build_carry_unverified")],
+)
+def test_a_skipped_scan_alone_refuses_an_otherwise_sufficient_replay(field, code):
+    """``None`` is a scan that did not run, not one that found nothing."""
+    clean = _decide(_sufficient_state(), {**_sufficient_section(), field: []})
+    skipped = _decide(_sufficient_state(), {**_sufficient_section(), field: None})
+
+    assert clean["status"] == "sufficient", clean["reasons"]
+    assert skipped["reasons"] == [{"code": code, "blocks": "replay", "scope": field}]
+    assert skipped["status"] == "insufficient"
 
 
 def test_levers_all_read_name_nothing():

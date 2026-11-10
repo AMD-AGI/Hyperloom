@@ -14,7 +14,7 @@ from kernelforge.kernel_backends.constants import (
     KERNEL_BACKEND_PROMPT_MODULES,
     resolve_language_dirs,
 )
-from kernelforge.loop.scoring import canonical_gate_prompt
+from kernelforge.evaluation.scoring import canonical_gate_prompt
 
 log = logging.getLogger(__name__)
 
@@ -43,7 +43,7 @@ def build_single_kernel_backend_prompt(
     and development discipline plus a knowledge block it can Read on demand,
     assembled in layers from the curated ``local_knowledge/`` tree (see
     ``build_forge_knowledge``). Under ``Config.defer_knowledge_maps``
-    (experimental, off) every level is a one-line pointer instead of an inlined
+    (on by default) every level is a one-line pointer instead of an inlined
     map. Returns the prompt text, or "" for an unknown kernel_backend.
     """
     backend = (kernel_backend_name or "").strip()

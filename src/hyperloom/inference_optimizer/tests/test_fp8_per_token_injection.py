@@ -16,7 +16,11 @@ from hyperloom.inference_optimizer import gpu_types
 from hyperloom.inference_optimizer.model_config_utils import _fp8_is_per_channel_per_token
 from hyperloom.orchestrator.actions.executors._workload_envs import (
     materialize_config_with_envs,
+    BenchmarkTarget,
+    LaunchLayer,
 )
+
+from .conftest import write_benchmark_yaml
 
 _AMD = "mi300x"
 _ENV = "SGLANG_USE_AITER_FP8_PER_TOKEN"
@@ -181,27 +185,6 @@ def test_detect_false_for_missing_config(tmp_path):
 
 
 # ── materialize_config_with_envs (production choke point) ───────────────────
-def _write_yaml(path: Path, *, model: str, framework: str, precision: str) -> None:
-    cfg = {
-        "benchmark": {
-            "framework": framework,
-            "model": model,
-            "precision": precision,
-            "run_mode": "local",
-            "envs": {"TP": 1, "CONC": 8, "ISL": 256, "OSL": 256},
-            "timeout_seconds": 600,
-            "profiler": {
-                "torch_profiler": {"enabled": False},
-                "system_profiler": {"enabled": False},
-                "tracelens": {"enabled": False},
-            },
-            "gpu_selection": {"auto": False},
-        }
-    }
-    with path.open("w") as f:
-        yaml.safe_dump(cfg, f)
-
-
 def _materialize_envs(
     tmp_path: Path,
     *,
@@ -212,15 +195,14 @@ def _materialize_envs(
     extra_envs: dict | None = None,
 ) -> dict:
     base = tmp_path / "base.yaml"
-    _write_yaml(base, model=model, framework=framework, precision=precision)
+    write_benchmark_yaml(base, model=model, framework=framework, precision=precision, benchmark_script=None)
     out = tmp_path / "out"
     out.mkdir()
     materialized = materialize_config_with_envs(
         base,
         out,
-        model_path=model,
-        gpu_type=gpu_type,
-        extra_envs=extra_envs,
+        launch=LaunchLayer(extra_envs=extra_envs),
+        target=BenchmarkTarget(model_path=model, gpu_type=gpu_type),
     )
     return yaml.safe_load(materialized.read_text())["benchmark"]["envs"]
 

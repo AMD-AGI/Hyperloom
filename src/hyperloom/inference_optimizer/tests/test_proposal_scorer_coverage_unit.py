@@ -10,42 +10,14 @@ import sys
 
 import pytest
 
-from hyperloom.orchestrator.scoring import proposal_scorer as proposal_scorer_module
 from hyperloom.orchestrator.scoring.proposal_scorer import (
     ProposalScorer,
     _ScoringProposal,
     _clip,
     _coerce_score,
-    _extract_scores_json,
     _normalise_model_scores,
     _prepare_scoring_proposals,
 )
-
-
-# ---- _extract_scores_json edges ----
-def test_extract_scores_json_empty():
-    assert _extract_scores_json("") is None
-
-
-def test_extract_scores_json_bare_with_trailing():
-    # bare object with trailing prose -> shrink loop trims to valid JSON.
-    text = 'here are scores {"scores": {"proposal_0": {"score": 1, "reason": "x"}}} thanks'
-    out = _extract_scores_json(text)
-    assert out["scores"]["proposal_0"]["score"] == 1
-
-
-def test_extract_scores_json_prefers_last_envelope():
-    text = (
-        'draft {"scores": {"proposal_0": {"score": 1, "reason": "old"}}} '
-        'final {"scores": {"proposal_0": {"score": 8, "reason": "new"}}}'
-    )
-    out = _extract_scores_json(text)
-    assert out["scores"]["proposal_0"]["score"] == 8
-
-
-def test_extract_scores_json_wrong_shape():
-    # parses but no "scores" key -> None
-    assert _extract_scores_json('{"foo": 1, "scores_x": 2}') is None
 
 
 # ---- _coerce_score / _clip ----
@@ -162,20 +134,6 @@ def test_ensure_client_works_in_an_anthropic_only_deployment(monkeypatch):
     assert scorer._ensure_client() is not None
     assert captured["api_key"] == "anthropic-token"
     assert captured["base_url"] == "https://llm-api.amd.com/Unified/v1"
-
-
-def test_ensure_client_comes_from_the_shared_llm_gateway(monkeypatch):
-    """The scorer owns no credentials: it forwards its env-var contract to llm_config."""
-    captured: dict = {}
-    sentinel = object()
-    monkeypatch.setattr(
-        proposal_scorer_module,
-        "get_async_openai_client",
-        lambda **kwargs: captured.update(kwargs) or sentinel,
-    )
-    scorer = ProposalScorer(models=("m",), api_key_env="SCORER_KEY", base_url_env="SCORER_URL")
-    assert scorer._ensure_client() is sentinel
-    assert captured == {"api_key_env": "SCORER_KEY", "base_url_env": "SCORER_URL"}
 
 
 def test_ensure_client_without_openai_sdk_raises(monkeypatch):

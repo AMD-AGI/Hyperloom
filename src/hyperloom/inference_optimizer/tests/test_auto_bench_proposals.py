@@ -20,9 +20,9 @@ class _Tasks:
     async def running(self):
         return self._running
 
-    async def create_or_return_existing(self, **kwargs):
-        existing = any(c["idempotency_key"] == kwargs["idempotency_key"] for c in self.created)
-        self.created.append(kwargs)
+    async def create_or_return_existing(self, spec):
+        existing = any(c["idempotency_key"] == spec.idempotency_key for c in self.created)
+        self.created.append(vars(spec))
         return SimpleNamespace(task_id=f"t-{len(self.created)}"), existing
 
 
@@ -44,16 +44,16 @@ def _phase(*, phase="FRAMEWORK_AGENT", rounds=(), queued=(), running=(), frozen=
     state.phase = phase
     state.baseline_tput = 100.0
     state.baseline_config_path = "/cfg.yaml"
-    state.last_baseline = {"benchmark_script": "bench.sh"}
+    state.baseline_benchmark_script = "bench.sh"
     state.specialist_rounds = list(rounds)
-    coord = SimpleNamespace(
-        shared_state=state,
-        tasks=_Tasks(queued, running),
+    dispatcher = SimpleNamespace(
         admission_frozen=frozen,
-        _dispatch_paused_for_phase_budget=lambda: paused,
-        _registry_lanes_ttl=lambda kind: (["benchmark_lane"], 1800),
+        dispatch_paused_for_phase_budget=lambda: paused,
+        registry_lanes_ttl=lambda kind: (["benchmark_lane"], 1800),
     )
-    return FrameworkPhase(coord)
+    coord = SimpleNamespace(shared_state=state, tasks=_Tasks(queued, running), dispatcher=dispatcher)
+    coord.phase_framework = FrameworkPhase(coord)
+    return coord.phase_framework
 
 
 def _explores(fp) -> list[dict[str, Any]]:

@@ -70,10 +70,25 @@ def git_commit_all(path: Path, message: str) -> None:
     )
 
 
+def git_repo_tracking(checkout: Path, *files: str) -> Path:
+    """Make ``checkout`` a git repository with one commit tracking ``files``, and return it."""
+    subprocess.run(["git", "init", "-q", str(checkout)], check=True)
+    for rel in files:
+        target = checkout / rel
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_text("x = 1\n", encoding="utf-8")
+    subprocess.run(["git", "-C", str(checkout), "add", "-A"], check=True)
+    subprocess.run(
+        ["git", "-C", str(checkout), "-c", "user.email=t@t", "-c", "user.name=t", "commit", "-qm", "base"],
+        check=True,
+    )
+    return checkout
+
+
 def patch_integrate_patch_roots(monkeypatch: Any, tmp_path: Path) -> None:
     """Register common tmp_path framework repos as integrate_patch search roots."""
-    from hyperloom.orchestrator.actions.executors import integrate_patch as ip
     from hyperloom.inference_optimizer import framework_paths as fp
+    from hyperloom.orchestrator.actions.executors import _patch_artifacts, _patch_sources
 
     real = fp.resolve_kernel_search_roots
 
@@ -88,7 +103,23 @@ def patch_integrate_patch_roots(monkeypatch: Any, tmp_path: Path) -> None:
                 merged.append(root)
         return tuple(merged)
 
-    monkeypatch.setattr(ip, "resolve_kernel_search_roots", _merged)
+    for module in (_patch_sources, _patch_artifacts):
+        monkeypatch.setattr(module, "resolve_kernel_search_roots", _merged)
+
+
+def integrate_extra(params: dict[str, Any]) -> dict[str, Any]:
+    """The ``ctx.extra`` an integrate_patch task gets from the coordinator, for ``params``.
+
+    An enablement round reads its stack from the SharedState the coordinator
+    always threads in, and passes the Critic gate on a recorded approval.
+    """
+    from hyperloom.orchestrator.state.shared_state import SharedState
+
+    if not params.get("enablement"):
+        return {}
+    state = SharedState(phase="ENABLEMENT")
+    state.record_specialist_patch_verdict(str(params.get("specialist_task_id") or ""), "approve")
+    return {"shared_state": state}
 
 
 def variant_result(**overrides: Any) -> Any:

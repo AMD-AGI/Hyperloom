@@ -13,7 +13,7 @@ from hyperloom.orchestrator.kernel import lane_budget as lb
 
 
 def test_remaining_time_becomes_a_phase_budget_less_the_reserve() -> None:
-    assert lb.phase_budget_sec(100.0, reserve_sec=300) == 100 * 60 - 300
+    assert lb.phase_budget_sec(100.0) == 100 * 60 - lb.PHASE_RESERVE_SEC
 
 
 def test_an_unbounded_session_yields_no_allocation() -> None:
@@ -22,7 +22,7 @@ def test_an_unbounded_session_yields_no_allocation() -> None:
 
 
 def test_a_phase_shorter_than_the_reserve_yields_zero_not_a_negative() -> None:
-    assert lb.phase_budget_sec(1.0, reserve_sec=300) == 0
+    assert lb.phase_budget_sec(1.0) == 0
 
 
 @pytest.mark.parametrize("value", [True, "20", object()])
@@ -43,34 +43,8 @@ def test_the_split_never_exceeds_the_whole() -> None:
     assert sum(shares.values()) <= 10_000
 
 
-def test_the_split_follows_the_weights() -> None:
-    shares = lb.split_lanes(1000, weights={lb.LANE_FUSION: 3.0, lb.LANE_GEMM: 1.0})
-    assert shares == {lb.LANE_FUSION: 750, lb.LANE_GEMM: 250}
-
-
-def test_weights_need_not_sum_to_one() -> None:
-    shares = lb.split_lanes(100, weights={lb.LANE_FUSION: 30.0, lb.LANE_GEMM: 10.0})
-    assert shares == {lb.LANE_FUSION: 75, lb.LANE_GEMM: 25}
-
-
 def test_a_zero_phase_budget_splits_into_zeros() -> None:
     assert set(lb.split_lanes(0).values()) == {0}
-
-
-def test_an_unknown_lane_is_refused() -> None:
-    with pytest.raises(lb.LaneBudgetError, match="unknown lane"):
-        lb.split_lanes(100, weights={"collective": 1.0})
-
-
-@pytest.mark.parametrize("weight", [0.0, -1.0, float("inf"), True, "1"])
-def test_an_unusable_weight_is_refused(weight: Any) -> None:
-    with pytest.raises(lb.LaneBudgetError):
-        lb.split_lanes(100, weights={lb.LANE_GEMM: weight})
-
-
-def test_no_weights_at_all_is_refused() -> None:
-    with pytest.raises(lb.LaneBudgetError, match="at least one lane weight"):
-        lb.split_lanes(100, weights={})
 
 
 def test_gemm_consumes_router_estimates_in_order() -> None:
@@ -106,22 +80,10 @@ def test_fusion_with_no_budget_funds_nothing() -> None:
     assert lb.max_targets(lb.LANE_FUSION, 0) == 0
 
 
-@pytest.mark.parametrize("budget", [-1, True, 1.5, "100"])
-def test_an_unusable_lane_budget_is_refused(budget: Any) -> None:
-    with pytest.raises(lb.LaneBudgetError, match="non-negative int"):
-        lb.max_targets(lb.LANE_GEMM, budget)
-
-
-def test_max_targets_refuses_an_unknown_lane() -> None:
-    with pytest.raises(lb.LaneBudgetError, match="unknown lane"):
-        lb.max_targets("collective", 100)
-
-
 def test_allocate_covers_every_lane_in_one_pass() -> None:
     allocations = lb.allocate(180.0)
     assert set(allocations) == set(lb.DEFAULT_LANE_WEIGHTS)
-    for lane, allocation in allocations.items():
-        assert allocation.lane == lane
+    for allocation in allocations.values():
         assert allocation.budget_sec > 0
 
 
@@ -141,7 +103,7 @@ def test_allocate_on_an_unbounded_session_funds_nothing() -> None:
 
 
 def test_allocate_passes_router_estimates_to_gemm() -> None:
-    allocations = lb.allocate(180.0, weights={lb.LANE_GEMM: 1.0}, gemm_target_costs_sec=(900, 900))
+    allocations = lb.allocate(180.0, gemm_target_costs_sec=(900, 900))
     assert allocations[lb.LANE_GEMM].max_targets == 2
 
 

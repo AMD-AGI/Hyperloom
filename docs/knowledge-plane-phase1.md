@@ -42,34 +42,10 @@ default. IR-3 disables PR Monitor when that endpoint is unreachable while
 leaving local Recipe storage enabled; remote Recipe mode never defaults write
 configuration.
 
-The older `--local-kb-root` and `HYPERLOOM_LOCAL_KB_ROOT` inputs remain a
-deprecated compatibility path when `KNOWLEDGE_LOCAL_ROOT` is absent.
-
-## One-time local Recipe migration
-
-The default local root is always `$USER_DATA_PATH/knowledge`, or
-`~/.cache/hyperloom/knowledge` when `USER_DATA_PATH` is unset. It never
-permanently falls back to the old `$USER_DATA_PATH/kb` or
-`/workspace/hyperloom/kb` roots.
-
-On local Recipe KB startup only, when `KNOWLEDGE_LOCAL_ROOT`,
-`--local-kb-root`, and `HYPERLOOM_LOCAL_KB_ROOT` are all unset, Hyperloom checks
-the corresponding legacy root. If the new destination has neither Recipe data
-nor the durable migration marker, complete Recipe directories (live
-`recipe.json`, history, attempts, and safe metadata) are copied into the new
-root. Lock and temporary files are excluded. Existing graph or KernelForge
-data in the new root is retained. Existing destination Recipes or a completed
-marker make the operation a no-op; explicit legacy roots continue in place and
-are not migrated.
-
-Migration failure while legacy Recipes exist aborts startup with a clear error
-instead of silently cold-starting. Stop old writers and back up the legacy root
-before upgrading; see [Upgrade Hyperloom version](reference/upgrade.md).
-
 ## Recipe backend behavior
 
 Local mode uses `LocalRecipeStore`, including T0 warm replay, runtime
-lesson/pitfall amendment, atomic JSON live rows, history, attempt logs, and
+lesson/pitfall amendment, atomic JSON live rows, history, and
 per-canonical-id file locks. Ambient KB Store credentials never trigger a
 remote write.
 
@@ -78,29 +54,13 @@ Recipe View, performs bounded seven-tuple identity search when an exact record
 is unavailable, and downloads the selected session's verified file manifest.
 PRELUDE replays the Config column, the ordered Patch column overlays, and the
 Kernel column in one validation task. Runtime legacy amendments are no-ops,
-and CLOSE calls the KB Store final-session writer once. No local `recipe.json`,
-history, or attempt data is created. A KB Store transport failure is logged and
+and CLOSE calls the KB Store final-session writer once. No local `recipe.json`
+or history is created. A KB Store transport failure is logged and
 remains non-fatal; invalid or missing startup configuration fails before the
 optimization run starts.
-
-## KernelForge bridge
-
-Hyperloom's `KernelExperienceBridge` only:
-
-1. validates and forwards the shared mode/root;
-2. forwards validated KB Store credentials in Recipe remote mode and strips
-   the bearer token in local mode;
-3. forwards the KB Service URL for PR Monitor in either mode, using the global
-   default when local mode has no explicit URL and IR-3 can reach it;
-4. never forwards GBrain credentials to KernelForge children; and
-5. collects bounded capability/result provenance returned by KernelForge.
-
-KernelForge continues to own local knowledge. Hyperloom does not implement
-kernel-experience CRUD or ranking.
 
 ## Audit and secrets
 
 Recipe read/write audit events include `mode`, `backend`, resolution, compact
-result metadata, and failure class. Kernel experience passthrough records the
-same mode/backend fields and bounded provenance. Tokens, credentials, complete
-patches, and full KernelForge payloads are excluded.
+result metadata, and failure class. Tokens, credentials, and complete patches
+are excluded.

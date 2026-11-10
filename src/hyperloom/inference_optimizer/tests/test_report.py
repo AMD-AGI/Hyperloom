@@ -139,6 +139,17 @@ def test_degraded_mode_section_empty():
     assert rp._format_degraded_mode_section({}) == []
 
 
+_OUTPUT_COMPARISON = {
+    "objective": GRADED_OUTPUT,
+    "reference": 100.0,
+    "candidate": 136.146,
+    "gain_pct": 36.146,
+    "comparable": True,
+    "degrade_reason": "",
+    "verdict": VERDICT_KEEP,
+}
+
+
 def test_format_md_shows_validated_gain_when_timestamp_missing():
     md = rp._format_md(
         {
@@ -158,6 +169,7 @@ def test_format_md_shows_validated_gain_when_timestamp_missing():
             "pruned_families": [],
             "event_counts_by_topic": {},
             "highlights": [],
+            "performance_comparison": _OUTPUT_COMPARISON,
         }
     )
 
@@ -316,6 +328,41 @@ def test_report_performance_without_validation_stamp_is_diagnostic_only(report_p
     assert summary["cumulative_validation_status"] == "unavailable"
     assert summary["cumulative_gain_validated"] == 0.0
     assert "never validated" in rp._format_md(summary)
+
+
+STAR_LINK = "a star on https://github.com/AMD-AGI/Hyperloom"
+
+
+@pytest.mark.parametrize(
+    "stack_len,stored_gain,status,asks",
+    [
+        pytest.param(1, 20.0, "current", 1, id="current"),
+        pytest.param(2, 50.0, "stale", 0, id="stale"),
+        pytest.param(1, 50.0, "inconsistent", 0, id="inconsistent"),
+    ],
+)
+def test_report_asks_for_a_star_only_while_the_validated_gain_holds(
+    report_performance_state, stack_len, stored_gain, status, asks
+):
+    state = report_performance_state
+    state.optimization_stack = [{"action": "integrate"}] * stack_len
+    state.cumulative_gain_validated = stored_gain
+    summary = rp._build_summary_dict(state, {}, [])
+
+    assert summary["cumulative_validation_status"] == status
+    assert rp._format_md(summary).count(STAR_LINK) == asks
+    assert STAR_LINK not in json.dumps(summary)
+
+
+def test_report_without_a_validated_gain_does_not_ask_for_a_star(report_performance_state):
+    state = report_performance_state
+    state.cumulative_gain_validated = 0.0
+    state.cumulative_gain_validated_ts = ""
+    state.cumulative_gain_validated_stack_len = 0
+    summary = rp._build_summary_dict(state, {}, [])
+
+    assert summary["cumulative_validation_status"] == "unavailable"
+    assert STAR_LINK not in rp._format_md(summary)
 
 
 @pytest.mark.parametrize(
@@ -511,12 +558,6 @@ def test_build_summary_keeps_explicit_stop_reason_over_closing_fallback():
 
 
 # ---- _explain_stop_reason ----
-def test_explain_stop_reason_robustness_escalated():
-    msg = rp._explain_stop_reason("robustness_escalated")
-    assert msg
-    assert "robustness" in msg.lower()
-
-
 def test_explain_stop_reason_target_reached():
     assert "target" in rp._explain_stop_reason("target_reached").lower()
 
@@ -586,8 +627,8 @@ def test_format_md_renders_stop_explanation():
             "session_id": "s",
             "model_name": "m",
             "model_path": "/m",
-            "stop_reason": "robustness_escalated",
-            "stop_reason_explanation": "Robustness escalated: stopped early to protect validated gains.",
+            "stop_reason": "target_reached",
+            "stop_reason_explanation": "Target reached: the run stopped once the goal was met.",
             "max_minutes": 60,
             "report_generated_at": "t0",
             "framework": "sglang",
@@ -600,10 +641,11 @@ def test_format_md_renders_stop_explanation():
             "pruned_families": [],
             "event_counts_by_topic": {},
             "highlights": [],
+            "performance_comparison": _OUTPUT_COMPARISON,
         }
     )
     assert "Why it stopped" in md
-    assert "Robustness escalated" in md
+    assert "Target reached" in md
 
 
 # ---- stop_reason explanation vocabulary coverage ----
@@ -616,7 +658,7 @@ def test_every_stop_reason_vocab_member_has_explanation():
 
 def test_classify_root_cause_prefers_kv_cache_oom_over_generic_oom():
     assert (
-        rp._classify_root_cause_type(
+        rp.classify_root_cause_type(
             "kv_cache_oom",
             "CUDA out of memory; no GPU memory for the KV cache",
         )
@@ -627,9 +669,7 @@ def test_classify_root_cause_prefers_kv_cache_oom_over_generic_oom():
 @pytest.mark.parametrize("objective", [GRADED_INTVTY_P50, GRADED_INTVTY])
 def test_composite_section_names_the_interactivity_mode_for_either_percentile(objective):
     """The renderer reads the family: the graded axis is the median, the session marker still names the tail."""
-    lines: list[str] = []
-    rp._append_composite_perf_section(
-        lines,
+    lines = rp._format_composite_perf_section(
         {
             "performance_comparison": {
                 "objective": objective,
@@ -642,7 +682,7 @@ def test_composite_section_names_the_interactivity_mode_for_either_percentile(ob
                 "tput_reference": 1000.0,
                 "tput_candidate": 1200.0,
             }
-        },
+        }
     )
     body = "\n".join(lines)
     assert "- grading mode        : `intvty_v1`" in body

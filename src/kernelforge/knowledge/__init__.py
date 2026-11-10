@@ -1,20 +1,19 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""Knowledge base loader for injecting domain knowledge into agent prompts."""
+"""Public access to KernelForge local knowledge and durable KB records."""
 
-from kernelforge.knowledge.local_index import build_forge_knowledge
-from kernelforge.knowledge.experience_sink import write_run_experience
-from kernelforge.knowledge.experience_reader import read_best_solution
-from kernelforge.knowledge.experience_store import (
-    KnowledgeConfig,
-    KnowledgeStoreMode,
-)
+from kernelforge.knowledge.local_wiki.index import build_forge_knowledge
+from kernelforge.knowledge.kb_store.writer import write_run_experience
+from kernelforge.knowledge.kb_store.reader import read_best_solution
+from kernelforge.knowledge.kb_store.identity.implementation import canonical_framework_version, normalize_operator_name
+from kernelforge.knowledge.kb_store.identity.kernel_recipe import KERNEL_RECIPE_PRODUCERS
 
 __all__ = [
     "build_forge_knowledge",
     "write_run_experience",
     "read_best_solution",
-    "KnowledgeConfig",
-    "KnowledgeStoreMode",
+    "KERNEL_RECIPE_PRODUCERS",
+    "canonical_framework_version",
+    "normalize_operator_name",
 ]

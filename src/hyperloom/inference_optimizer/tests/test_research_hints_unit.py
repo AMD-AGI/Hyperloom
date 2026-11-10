@@ -168,11 +168,11 @@ def _target():
 
 
 def test_gap_analysis_none():
-    assert rh.gap_analysis(None, our_tput_per_gpu=1, our_tpot_ms=1) is None
+    assert rh.gap_analysis(None, rh.AcceptedMetrics(tput_per_gpu=1, tpot_ms=1)) is None
 
 
 def test_gap_analysis_throughput():
-    gap = rh.gap_analysis(_target(), our_tput_per_gpu=50.0, our_tpot_ms=10.0, conc=8)
+    gap = rh.gap_analysis(_target(), rh.AcceptedMetrics(tput_per_gpu=50.0, tpot_ms=10.0), conc=8)
     assert gap["throughput_gap_pct"] == 50.0
     assert gap["tpot_ratio"] == 1.0
     assert gap["primary_gap"] == "throughput"
@@ -180,17 +180,17 @@ def test_gap_analysis_throughput():
 
 
 def test_gap_analysis_latency_primary():
-    gap = rh.gap_analysis(_target(), our_tput_per_gpu=95.0, our_tpot_ms=40.0, conc=8)
+    gap = rh.gap_analysis(_target(), rh.AcceptedMetrics(tput_per_gpu=95.0, tpot_ms=40.0), conc=8)
     assert gap["primary_gap"] == "latency"
 
 
 def test_match_target_row_nearest():
-    gap = rh.gap_analysis(_target(), our_tput_per_gpu=100.0, our_tpot_ms=10.0, conc=10)
+    gap = rh.gap_analysis(_target(), rh.AcceptedMetrics(tput_per_gpu=100.0, tpot_ms=10.0), conc=10)
     assert gap["target_conc"] == 8.0
 
 
 def test_match_target_row_no_conc():
-    gap = rh.gap_analysis(_target(), our_tput_per_gpu=100.0, our_tpot_ms=10.0)
+    gap = rh.gap_analysis(_target(), rh.AcceptedMetrics(tput_per_gpu=100.0, tpot_ms=10.0))
     assert gap["target_conc"] == 16.0
 
 
@@ -268,6 +268,15 @@ def test_priors_match_summary_rows():
     assert "v1" in out
 
 
+def test_priors_match_summary_lists_the_closest_hints_per_variant():
+    hints = [{"what": f"vllm tweak {i}"} for i in range(10)] + [{"what": "vllm cudagraph decode capture"}]
+    variants = [{"name": "v1", "description": "vllm cudagraph decode capture sizes"}]
+    out = rh.priors_match_summary(variants, hints)
+    assert out.count("hint:") == 3
+    assert "hint:vllm cudagraph decode capture" in out
+    assert "+8 more" in out
+
+
 def test_summarise_for_prompt(tmp_path):
     rh.append_hints(
         tmp_path,
@@ -282,12 +291,6 @@ def test_summarise_for_prompt(tmp_path):
 
 def test_summarise_for_prompt_empty(tmp_path):
     assert rh.summarise_for_prompt(tmp_path) == ""
-
-
-def test_to_num():
-    assert rh._to_num("1.5") == 1.5
-    assert rh._to_num(None) is None
-    assert rh._to_num("x") is None
 
 
 def test_tokens():
@@ -384,14 +387,7 @@ def test_load_competitor_target_per_conc_not_list(tmp_path):
 
 
 def test_gap_analysis_empty_per_conc():
-    assert (
-        rh.gap_analysis(
-            {"per_conc": []},
-            our_tput_per_gpu=1.0,
-            our_tpot_ms=1.0,
-        )
-        is None
-    )
+    assert rh.gap_analysis({"per_conc": []}, rh.AcceptedMetrics(tput_per_gpu=1.0, tpot_ms=1.0)) is None
 
 
 def test_match_target_row_no_rows_direct():
@@ -405,7 +401,7 @@ def test_gap_analysis_latency_via_elif():
             {"conc": 8, "tpot_ms": 10.0, "source": "v"},
         ],
     }
-    gap = rh.gap_analysis(target, our_tput_per_gpu=None, our_tpot_ms=20.0, conc=8)
+    gap = rh.gap_analysis(target, rh.AcceptedMetrics(tput_per_gpu=None, tpot_ms=20.0), conc=8)
     assert gap["throughput_gap_pct"] is None
     assert gap["tpot_ratio"] == 2.0
     assert gap["primary_gap"] == "latency"
@@ -417,7 +413,7 @@ def test_gap_analysis_latency_elif_ratio_not_over_one():
             {"conc": 8, "tpot_ms": 20.0, "source": "v"},
         ],
     }
-    gap = rh.gap_analysis(target, our_tput_per_gpu=None, our_tpot_ms=10.0, conc=8)
+    gap = rh.gap_analysis(target, rh.AcceptedMetrics(tput_per_gpu=None, tpot_ms=10.0), conc=8)
     assert gap["tpot_ratio"] == 0.5
     assert gap["primary_gap"] == "throughput"
 
@@ -441,8 +437,8 @@ def test_match_variants_skips_bad_hints_and_variants():
 def test_summarise_for_prompt_extra_more(tmp_path):
     incoming = [{"what": f"hint {i}", "source": f"s{i}"} for i in range(10)]
     rh.append_hints(tmp_path, incoming)
-    out = rh.summarise_for_prompt(tmp_path, max_entries=3)
-    assert "... and 7 more in research_hints.md." in out
+    out = rh.summarise_for_prompt(tmp_path)
+    assert "... and 2 more in research_hints.md." in out
 
 
 def _agentx_target():
@@ -532,10 +528,12 @@ def test_state_gap_keeps_available_axis(state, throughput_gap, interactivity_gap
 def test_agentx_missing_axis_preserves_the_other(value, axis):
     gap = rh.gap_analysis(
         _agentx_target(),
+        rh.AcceptedMetrics(
+            tput_per_gpu=value if axis == "throughput" else 400.0,
+            tpot_ms=999.0,
+            e2e_norm_intvty_p90=value if axis == "interactivity" else 5.0,
+        ),
         benchmark_mode="agentx",
-        our_tput_per_gpu=value if axis == "throughput" else 400.0,
-        our_tpot_ms=999.0,
-        our_e2e_norm_intvty_p90=value if axis == "interactivity" else 5.0,
         conc=4,
     )
     assert gap["throughput_gap_pct"] == (None if axis == "throughput" else 50.0)
@@ -605,5 +603,5 @@ def test_synthetic_state_gap_keeps_output_and_mean_tpot_contract(monkeypatch):
     state = SimpleNamespace(
         benchmark_mode="synthetic", current_best={"tput": 200.0, "tpot_mean_ms": 40.0}, tp=2, conc=8
     )
-    expected = rh.gap_analysis(_target(), our_tput_per_gpu=100.0, our_tpot_ms=40.0, conc=8)
+    expected = rh.gap_analysis(_target(), rh.AcceptedMetrics(tput_per_gpu=100.0, tpot_ms=40.0), conc=8)
     assert rh.gap_for_state(_target(), state) == expected

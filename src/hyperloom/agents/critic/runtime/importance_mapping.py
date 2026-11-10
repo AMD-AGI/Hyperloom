@@ -13,9 +13,6 @@ _MEDIUM_VERDICT = 0.5
 _DEFAULT_VERDICT = 0.4
 _LOW_VERDICT = 0.4
 
-_DRAFT_DEFAULT = 0.5
-_DRAFT_HIGH_CONFIDENCE = 0.6
-
 
 def importance_for_verdict(
     *,
@@ -35,15 +32,6 @@ def importance_for_verdict(
     return _MEDIUM_VERDICT if has_measurement else _DEFAULT_VERDICT
 
 
-def importance_for_kb_draft(*, confidence: float | None) -> float:
-    """Choose KB ``importance`` for a Critic kb_draft entry."""
-    if confidence is None:
-        return _DRAFT_DEFAULT
-    if confidence >= 0.8:
-        return _DRAFT_HIGH_CONFIDENCE
-    return _DRAFT_DEFAULT
-
-
 def cap_importance(value: float) -> float:
     """Clamp ``value`` to Critic's allowed write range."""
     return min(max(0.0, float(value)), CRITIC_IMPORTANCE_CEILING)
@@ -52,6 +40,5 @@ def cap_importance(value: float) -> float:
 __all__ = [
     "CRITIC_IMPORTANCE_CEILING",
     "cap_importance",
-    "importance_for_kb_draft",
     "importance_for_verdict",
 ]

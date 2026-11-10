@@ -12,10 +12,10 @@ import pytest
 
 from hyperloom.orchestrator.actions.executors._subprocess_kill import (
     DETOKENIZER_STALL_RETURNCODE,
+    RoundWatch,
     clear_server_ready_stamp,
     post_ready_runtime_sec,
     run_with_session_kill,
-    server_ready_unix,
 )
 
 
@@ -35,9 +35,7 @@ def test_from_ready_excludes_pre_ready_phase(tmp_path):
     start = time.monotonic()
     cp = run_with_session_kill(
         [sys.executable, "-c", script, str(log_path)],
-        timeout=30,
-        silence_timeout_sec=2.0,
-        server_log_path=str(log_path),
+        watch=RoundWatch(timeout=30, server_log_path=str(log_path), silence_timeout_sec=2.0),
     )
     elapsed = time.monotonic() - start
     # Post-ready (~1s) < 2.0s deadline -> not killed despite ~4s wall-clock.
@@ -59,9 +57,7 @@ def test_from_ready_fires_after_ready(tmp_path):
     start = time.monotonic()
     cp = run_with_session_kill(
         [sys.executable, "-c", script, str(log_path)],
-        timeout=60,
-        silence_timeout_sec=1.0,
-        server_log_path=str(log_path),
+        watch=RoundWatch(timeout=60, server_log_path=str(log_path), silence_timeout_sec=1.0),
     )
     elapsed = time.monotonic() - start
     assert cp.returncode == DETOKENIZER_STALL_RETURNCODE
@@ -72,8 +68,7 @@ def test_from_ready_fires_after_ready(tmp_path):
 def test_scriptable_silence_is_disarmed():
     cp = run_with_session_kill(
         [sys.executable, "-c", "import time; time.sleep(.3)"],
-        timeout=5,
-        silence_timeout_sec=0.1,
+        watch=RoundWatch(timeout=5, silence_timeout_sec=0.1),
     )
     assert cp.returncode == 0
 
@@ -82,22 +77,26 @@ class TestARoundIsPricedByItsTwoParts:
     """What a round spent booting and what it spent benchmarking, told apart."""
 
     def test_the_boot_is_not_charged_to_the_benchmark(self, tmp_path):
-        """A round that boots for 3s and benchmarks for 1s reports 1s, not 4s."""
+        """A round that boots for 3s and then benchmarks for 1s has the 3s priced as boot and the 1s as benchmark."""
         log_path = tmp_path / "server.log"
+        # The benchmark's second starts once the watchdog has stamped the ready marker, so it lands after the stamp
+        # however late a loaded host runs the watchdog's poll.
         script = (
-            "import sys, time\n"
+            "import os, sys, time\n"
             "f = open(sys.argv[1], 'w')\n"
             "f.write('INFO loading weights\\n'); f.flush()\n"
             "time.sleep(3)\n"
             "f.write('Application startup complete\\n'); f.flush()\n"
+            "deadline = time.monotonic() + 20\n"
+            "while not os.path.exists(sys.argv[2]) and time.monotonic() < deadline:\n"
+            "    time.sleep(0.05)\n"
             "time.sleep(1)\n"
             "raise SystemExit(0)\n"
         )
         started_unix = time.time()
         cp = run_with_session_kill(
-            [sys.executable, "-c", script, str(log_path)],
-            timeout=30,
-            server_log_path=str(log_path),
+            [sys.executable, "-c", script, str(log_path), str(tmp_path / "server_ready_at")],
+            watch=RoundWatch(timeout=30, server_log_path=str(log_path)),
         )
         runtime_sec = time.time() - started_unix
         assert cp.returncode == 0
@@ -108,10 +107,12 @@ class TestARoundIsPricedByItsTwoParts:
             runtime_sec=runtime_sec,
         )
         assert post_ready is not None, "the round reported ready but nothing recorded when"
-        # The benchmark's own second, found without the three the boot took.
-        assert 0.5 <= post_ready <= 2.5, f"benchmark share read as {post_ready:.2f}s, expected ~1s"
+        # Floors only. A ceiling on either share would time the host -- when the watchdog's poll ran, and how long the
+        # round took to wind down after its child exited -- rather than the split.
         boot_sec = runtime_sec - post_ready
-        assert 2.5 <= boot_sec <= 4.5, f"boot share read as {boot_sec:.2f}s, expected ~3s"
+        assert boot_sec >= 3.0, f"boot share read as {boot_sec:.2f}s for a round that slept 3s before it was ready"
+        # Less the millisecond the stamp rounds the boot to.
+        assert post_ready >= 0.99, f"benchmark share read as {post_ready:.2f}s for a round that ran 1s after its stamp"
 
     def test_a_previous_attempts_log_does_not_time_this_rounds_boot(self, tmp_path):
         """Only bytes this round writes may say when its server came up."""
@@ -132,8 +133,7 @@ class TestARoundIsPricedByItsTwoParts:
         started_unix = time.time()
         cp = run_with_session_kill(
             [sys.executable, "-c", script, str(log_path)],
-            timeout=30,
-            server_log_path=str(log_path),
+            watch=RoundWatch(timeout=30, server_log_path=str(log_path)),
         )
         runtime_sec = time.time() - started_unix
         assert cp.returncode == 0
@@ -163,12 +163,10 @@ class TestARoundIsPricedByItsTwoParts:
         )
         cp = run_with_session_kill(
             [sys.executable, "-c", script, str(log_path)],
-            timeout=30,
-            server_log_path=str(log_path),
-            session_deadline_sec=time.monotonic() + 30.0,
+            watch=RoundWatch(timeout=30, server_log_path=str(log_path), session_deadline_sec=time.monotonic() + 30.0),
         )
         assert cp.returncode == 0
-        assert server_ready_unix(str(log_path)) is not None, (
+        assert post_ready_runtime_sec(str(log_path), started_unix=0.0, runtime_sec=1.0) is not None, (
             "the boot/benchmark split was withdrawn along with the stall watchdog"
         )
 
@@ -187,8 +185,7 @@ class TestARoundIsPricedByItsTwoParts:
         started_unix = time.time()
         cp = run_with_session_kill(
             [sys.executable, "-c", script, str(log_path)],
-            timeout=30,
-            server_log_path=str(log_path),
+            watch=RoundWatch(timeout=30, server_log_path=str(log_path)),
         )
         runtime_sec = time.time() - started_unix
         assert cp.returncode == 0
@@ -220,10 +217,9 @@ class TestARoundIsPricedByItsTwoParts:
         started_unix = time.time()
         run_with_session_kill(
             [sys.executable, "-c", script, str(log_path)],
-            timeout=30,
-            server_log_path=str(log_path),
+            watch=RoundWatch(timeout=30, server_log_path=str(log_path)),
         )
-        assert server_ready_unix(str(log_path)) is None
+        assert post_ready_runtime_sec(str(log_path), started_unix=0.0, runtime_sec=1.0) is None
         assert (
             post_ready_runtime_sec(
                 str(log_path),
@@ -254,12 +250,12 @@ class TestARoundIsPricedByItsTwoParts:
         log_path = tmp_path / "server.log"
         stamp = tmp_path / "server_ready_at"
         stamp.write_text(f"{time.time():.3f} 30.000\n", encoding="utf-8")
-        assert server_ready_unix(str(log_path)) is not None
+        assert post_ready_runtime_sec(str(log_path), started_unix=0.0, runtime_sec=1.0) is not None
 
         clear_server_ready_stamp(str(log_path))
 
         assert not stamp.exists()
-        assert server_ready_unix(str(log_path)) is None
+        assert post_ready_runtime_sec(str(log_path), started_unix=0.0, runtime_sec=1.0) is None
         # Idempotent: a round whose dir never had one must not fail to start.
         clear_server_ready_stamp(str(log_path))
 

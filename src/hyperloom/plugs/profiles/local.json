@@ -1,0 +1,7 @@
+{
+  "schema": "hyperloom.plugs/v1",
+  "profile": "local",
+  "sockets": {
+    "events": {"impl": "local"}
+  }
+}

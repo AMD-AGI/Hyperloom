@@ -5,7 +5,7 @@
 
 from __future__ import annotations
 
-from hyperloom.inference_optimizer.canonical_fingerprint import canonical_fingerprint
+from hyperloom.inference_optimizer.canonical_fingerprint import canonical_fingerprint, workload_signature
 
 
 def test_fingerprint_args_order_independent() -> None:
@@ -131,3 +131,25 @@ def test_fingerprint_negative_number_is_value_not_flag() -> None:
     fp_flag = canonical_fingerprint("-k -1", {})
     fp_val = canonical_fingerprint("-1 -k", {})
     assert fp_flag != fp_val
+
+
+def _signature_under(monkeypatch, *, agentx_env: str | None, benchmark_config: str | None) -> str:
+    for name, value in (("HYPERLOOM_AGENTX", agentx_env), ("HYPERLOOM_BENCHMARK_CONFIG", benchmark_config)):
+        if value is None:
+            monkeypatch.delenv(name, raising=False)
+        else:
+            monkeypatch.setenv(name, value)
+    return workload_signature(conc=8, isl=1024, osl=1024, precision="bf16", tp=8)
+
+
+def test_workload_signature_agentx_env_zero_is_synthetic(monkeypatch) -> None:
+    """HYPERLOOM_AGENTX=0 disables AgentX, so the digest matches a synthetic session."""
+    synthetic = _signature_under(monkeypatch, agentx_env=None, benchmark_config=None)
+    assert _signature_under(monkeypatch, agentx_env="0", benchmark_config=None) == synthetic
+    assert _signature_under(monkeypatch, agentx_env="1", benchmark_config=None) != synthetic
+
+
+def test_workload_signature_bound_agentx_yaml_is_agentx(monkeypatch, native_benchmark) -> None:
+    """AgentX selected only by the bound benchmark YAML yields the AgentX digest."""
+    agentx = _signature_under(monkeypatch, agentx_env="1", benchmark_config=None)
+    assert _signature_under(monkeypatch, agentx_env=None, benchmark_config=str(native_benchmark)) == agentx

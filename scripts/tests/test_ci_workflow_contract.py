@@ -273,7 +273,7 @@ def test_summary_and_gate_reuse_one_report():
     summary = step("coverage", "Coverage summary")
     gate = step("coverage", "Enforce coverage fail_under (strict mode)")
     assert summary["id"] == "coverage_report"
-    assert summary["if"] == "always()"
+    assert summary["if"] == "always() && needs.changes.outputs.code == 'true'"
     assert "scripts/ci_coverage_report.py" in summary["run"]
     assert "scripts/ci_coverage_report.py gate" in gate["run"]
     assert gate["env"]["REPORT_EXIT_CODE"] == "${{ steps.coverage_report.outputs.report_exit_code }}"

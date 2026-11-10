@@ -4,8 +4,10 @@
 from __future__ import annotations
 
 import ast
+import json
 import logging
 import sys
+import time
 import types
 from pathlib import Path
 from typing import Any
@@ -13,18 +15,15 @@ from typing import Any
 import pytest
 
 import hyperloom
-from hyperloom.common import llm_config
-from hyperloom.common.llm_config import (
+from hyperloom_common.llm import llm_config
+from hyperloom_common.llm.llm_config import (
     ANTHROPIC_CREDENTIAL_ENV_ORDER,
     DEFAULT_ANTHROPIC_BASE_URL,
     DEFAULT_ANTHROPIC_VERSION,
     LLMConfigError,
-    aanthropic_messages,
     achat_completion,
     chat_completion,
-    anthropic_messages,
     apply_reasoning_effort,
-    aresponse,
     build_http_timeout,
     claude_sdk_env_options,
     deepseek_compat_env,
@@ -37,13 +36,14 @@ from hyperloom.common.llm_config import (
     get_async_anthropic_client,
     get_async_openai_client,
     get_openai_client,
-    openai_client_kwargs,
     DEFAULT_CLAUDE_MODEL,
     DEFAULT_CODEX_MODEL,
+    DEFAULT_DEEPSEEK_HARNESS_MODEL,
     provider_model_defaults,
     resolve_forge_llm_model,
+    resolve_openai_client_config,
 )
-from hyperloom.common.llm_headers import parse_custom_headers
+from hyperloom_common.llm.llm_headers import parse_custom_headers
 
 _LEGACY_KEY = "_".join(("DEEPSEEK", "API", "KEY"))
 _OPENAI_KEY = "_".join(("OPENAI", "API", "KEY"))
@@ -116,19 +116,19 @@ def test_derive_openai_base_url_is_case_insensitive():
 
 def test_openai_kwargs_reads_openai_custom_headers():
     """The OpenAI/Codex client applies OPENAI_CUSTOM_HEADERS verbatim."""
-    kwargs = openai_client_kwargs(
+    kwargs = resolve_openai_client_config(
         env={
             "_".join(("OPENAI", "API", "KEY")): "openai-token",
             "OPENAI_BASE_URL": "https://llm.example.invalid/Unified/v1",
             "OPENAI_CUSTOM_HEADERS": "Ocp-Apim-Subscription-Key: ak-header",
         }
-    )
+    ).as_kwargs()
     assert kwargs["default_headers"] == {"Ocp-Apim-Subscription-Key": "ak-header"}
 
 
 def test_openai_kwargs_ignores_anthropic_custom_headers():
     """The OpenAI/Codex client never reads ANTHROPIC_CUSTOM_HEADERS, and explicit OpenAI-side config wins over the Anthropic host."""
-    kwargs = openai_client_kwargs(
+    kwargs = resolve_openai_client_config(
         env={
             "_".join(("OPENAI", "API", "KEY")): "openai-token",
             "OPENAI_BASE_URL": "https://api.openai.com/v1",
@@ -136,7 +136,7 @@ def test_openai_kwargs_ignores_anthropic_custom_headers():
             "ANTHROPIC_BASE_URL": "https://llm.example.invalid/anthropic",
             "ANTHROPIC_CUSTOM_HEADERS": "Ocp-Apim-Subscription-Key: ak-header",
         }
-    )
+    ).as_kwargs()
     assert kwargs["api_key"] == "openai-token"
     assert kwargs["base_url"] == "https://api.openai.com/v1"
     # Empty headers are omitted from kwargs entirely.
@@ -160,7 +160,7 @@ _CODEX_ONLY_ENV = {
 
 def test_anthropic_only_deployment_resolves_through_derivation():
     """No OpenAI-side config at all: derive the base URL, auth with the gateway token."""
-    kwargs = openai_client_kwargs(env=dict(_ANTHROPIC_ONLY_ENV))
+    kwargs = resolve_openai_client_config(env=dict(_ANTHROPIC_ONLY_ENV)).as_kwargs()
     assert kwargs["base_url"] == "https://llm-api.amd.com/Unified/v1"
     assert kwargs["api_key"] == "gateway-token"
 
@@ -169,12 +169,12 @@ def test_anthropic_only_deployment_falls_back_to_anthropic_api_key():
     """ANTHROPIC_AUTH_TOKEN is preferred, but ANTHROPIC_API_KEY alone also authenticates."""
     env = dict(_ANTHROPIC_ONLY_ENV)
     del env["_".join(("ANTHROPIC", "AUTH", "TOKEN"))]
-    assert openai_client_kwargs(env=env)["api_key"] == "ak-anthropic"
+    assert resolve_openai_client_config(env=env).as_kwargs()["api_key"] == "ak-anthropic"
 
 
 def test_codex_only_deployment_is_unchanged():
     """No Anthropic side present: resolution is exactly the explicit OpenAI config."""
-    assert openai_client_kwargs(env=dict(_CODEX_ONLY_ENV)) == {
+    assert resolve_openai_client_config(env=dict(_CODEX_ONLY_ENV)).as_kwargs() == {
         "api_key": "openai-token",
         "base_url": "https://llm-api.amd.com/Unified/v1",
     }
@@ -182,7 +182,7 @@ def test_codex_only_deployment_is_unchanged():
 
 def test_both_configured_prefers_the_explicit_openai_side():
     """With both shapes present the Anthropic fallback must never be consulted."""
-    kwargs = openai_client_kwargs(env={**_ANTHROPIC_ONLY_ENV, **_CODEX_ONLY_ENV})
+    kwargs = resolve_openai_client_config(env={**_ANTHROPIC_ONLY_ENV, **_CODEX_ONLY_ENV}).as_kwargs()
     assert kwargs == {
         "api_key": "openai-token",
         "base_url": "https://llm-api.amd.com/Unified/v1",
@@ -191,13 +191,15 @@ def test_both_configured_prefers_the_explicit_openai_side():
 
 def test_explicit_openai_side_wins_key_and_url_independently():
     """A half-configured OpenAI side takes what it has and derives only the rest."""
-    key_only = openai_client_kwargs(env={**_ANTHROPIC_ONLY_ENV, "_".join(("OPENAI", "API", "KEY")): "openai-token"})
+    key_only = resolve_openai_client_config(
+        env={**_ANTHROPIC_ONLY_ENV, "_".join(("OPENAI", "API", "KEY")): "openai-token"}
+    ).as_kwargs()
     assert key_only["api_key"] == "openai-token"
     assert key_only["base_url"] == "https://llm-api.amd.com/Unified/v1"
 
-    url_only = openai_client_kwargs(
+    url_only = resolve_openai_client_config(
         env={**_ANTHROPIC_ONLY_ENV, "OPENAI_BASE_URL": "https://explicit.example.invalid/v1"}
-    )
+    ).as_kwargs()
     assert url_only["api_key"] == "gateway-token"
     assert url_only["base_url"] == "https://explicit.example.invalid/v1"
 
@@ -205,7 +207,7 @@ def test_explicit_openai_side_wins_key_and_url_independently():
 def test_retired_gateway_key_loses_to_the_anthropic_fallback():
     """``LLM_GATEWAY_KEY`` is no longer a credential, so the Anthropic side answers instead."""
     env = {**_ANTHROPIC_ONLY_ENV, "LLM_GATEWAY_KEY": "gw-key"}
-    assert openai_client_kwargs(env=env)["api_key"] == "gateway-token"
+    assert resolve_openai_client_config(env=env).as_kwargs()["api_key"] == "gateway-token"
 
 
 _SUBSCRIPTION_HEADER = "Ocp-Apim-Subscription-Key"
@@ -309,44 +311,46 @@ def test_preferred_agent_backend_ranks_credentials_then_sdk(
 
 def test_derived_base_url_carries_the_anthropic_gateway_headers():
     """An anthropic-only deployment must still send the gateway's subscription key."""
-    kwargs = openai_client_kwargs(env=dict(_ANTHROPIC_ONLY_ENV))
+    kwargs = resolve_openai_client_config(env=dict(_ANTHROPIC_ONLY_ENV)).as_kwargs()
     assert kwargs["base_url"] == "https://llm-api.amd.com/Unified/v1"
     assert kwargs["default_headers"] == {_SUBSCRIPTION_HEADER: "ak-anthropic"}
 
 
 def test_explicit_openai_base_url_does_not_borrow_anthropic_headers():
     """An explicit OpenAI URL may be a different host, whose headers we cannot guess."""
-    kwargs = openai_client_kwargs(env={**_ANTHROPIC_ONLY_ENV, "OPENAI_BASE_URL": "https://other-host.example/v1"})
+    kwargs = resolve_openai_client_config(
+        env={**_ANTHROPIC_ONLY_ENV, "OPENAI_BASE_URL": "https://other-host.example/v1"}
+    ).as_kwargs()
     assert kwargs["base_url"] == "https://other-host.example/v1"
     assert "default_headers" not in kwargs
 
 
 def test_openai_custom_headers_win_over_the_derived_gateway_headers():
     """An operator who set the OpenAI side explicitly keeps that exact header set."""
-    kwargs = openai_client_kwargs(
+    kwargs = resolve_openai_client_config(
         env={**_ANTHROPIC_ONLY_ENV, "OPENAI_CUSTOM_HEADERS": f"{_SUBSCRIPTION_HEADER}: openai-sub"}
-    )
+    ).as_kwargs()
     assert kwargs["default_headers"] == {_SUBSCRIPTION_HEADER: "openai-sub"}
 
 
 def test_openai_kwargs_error_names_every_searched_key():
     """The message has to list what was actually searched, Anthropic side included."""
     with pytest.raises(LLMConfigError) as excinfo:
-        openai_client_kwargs(env={"ANTHROPIC_BASE_URL": "https://llm.example.invalid/anthropic"})
+        resolve_openai_client_config(env={"ANTHROPIC_BASE_URL": "https://llm.example.invalid/anthropic"}).as_kwargs()
     message = str(excinfo.value)
     for name in ("OPENAI_API_KEY", "ANTHROPIC_AUTH_TOKEN", "ANTHROPIC_API_KEY"):
         assert name in message
 
 
 def test_openai_kwargs_preserves_explicit_openai_config():
-    kwargs = openai_client_kwargs(
+    kwargs = resolve_openai_client_config(
         env={
             "_".join(("OPENAI", "API", "KEY")): "openai-token",
             "OPENAI_BASE_URL": "https://api.openai.com/v1",
             "_".join(("ANTHROPIC", "API", "KEY")): "ak-anthropic",
             "ANTHROPIC_BASE_URL": "https://llm.example.invalid/anthropic",
         }
-    )
+    ).as_kwargs()
     assert kwargs == {
         "api_key": "openai-token",
         "base_url": "https://api.openai.com/v1",
@@ -355,7 +359,7 @@ def test_openai_kwargs_preserves_explicit_openai_config():
 
 def test_openai_kwargs_requires_a_key():
     with pytest.raises(LLMConfigError):
-        openai_client_kwargs(env={"ANTHROPIC_BASE_URL": "https://llm.example.invalid/anthropic"})
+        resolve_openai_client_config(env={"ANTHROPIC_BASE_URL": "https://llm.example.invalid/anthropic"}).as_kwargs()
 
 
 def test_deepseek_compat_env_is_empty_without_legacy_vars():
@@ -541,6 +545,14 @@ def test_resolve_forge_llm_model_ignores_the_removed_forge_env():
     assert resolve_forge_llm_model("codex", env=env) == "gpt-orchestration"
 
 
+def test_the_harness_model_comes_from_dsh_model_alone():
+    """One knob: the retired provider variable no longer names the harness's model."""
+    assert resolve_forge_llm_model("deepseek", env={"DSH_MODEL": "deepseek-v4-pro"}) == "deepseek-v4-pro"
+    assert resolve_forge_llm_model("deepseek", env={"DEEPSEEK_MODEL": "deepseek-v4-pro"}) == (
+        DEFAULT_DEEPSEEK_HARNESS_MODEL
+    )
+
+
 def test_resolve_forge_llm_model_falls_back_to_orchestration_and_default():
     assert resolve_forge_llm_model("claude", env={"CLAUDE_MODEL": "claude-orch"}) == "claude-orch"
     assert resolve_forge_llm_model("codex", env={}) == DEFAULT_CODEX_MODEL
@@ -703,18 +715,6 @@ def test_get_openai_client_resolves_credentials_and_headers(monkeypatch):
     }
 
 
-def test_get_async_openai_client_honours_custom_env_var_names(monkeypatch):
-    _install_fake_openai_sdk(monkeypatch)
-    client = get_async_openai_client(
-        api_key_env="SCORER_KEY",
-        base_url_env="SCORER_URL",
-        env={"SCORER_KEY": "scorer-token", "SCORER_URL": "https://scorer.example.invalid/v1"},
-    )
-    assert client.kind == "AsyncOpenAI"
-    assert client.kwargs["api_key"] == "scorer-token"
-    assert client.kwargs["base_url"] == "https://scorer.example.invalid/v1"
-
-
 def test_get_client_omits_timeout_when_unset(monkeypatch):
     """No ``timeout`` kwarg at all, so the SDK applies its own default."""
     _install_fake_openai_sdk(monkeypatch)
@@ -856,49 +856,8 @@ def test_get_anthropic_client_raises_clearly_without_httpx(monkeypatch):
         get_async_anthropic_client(env={_ANTHROPIC_KEY: "k"})
 
 
-# ---- anthropic_messages / aanthropic_messages ----
-class _FakeAnthropicResponse:
-    """One canned reply; ``error`` makes ``json()`` fail as a non-JSON body would."""
-
-    def __init__(
-        self,
-        *,
-        status_code: int = 200,
-        body: Any = None,
-        text: str = "",
-        error: BaseException | None = None,
-    ) -> None:
-        self.status_code = status_code
-        self._body = {} if body is None else body
-        self._error = error
-        self.text = text
-
-    def json(self) -> Any:
-        if self._error is not None:
-            raise self._error
-        return self._body
-
-
-class _FakeAnthropicTransport:
-    """Records ``/v1/messages`` POSTs; the async twin awaits the same recorder."""
-
-    def __init__(self, response: Any = None, *, error: BaseException | None = None) -> None:
-        self._response = response
-        self._error = error
-        self.calls: list[dict[str, Any]] = []
-
-    def post(self, path: str, *, json: Any) -> Any:
-        self.calls.append({"path": path, "json": json})
-        if self._error is not None:
-            raise self._error
-        return self._response
-
-
-class _FakeAsyncAnthropicTransport(_FakeAnthropicTransport):
-    async def post(self, path: str, *, json: Any) -> Any:  # type: ignore[override]
-        return _FakeAnthropicTransport.post(self, path, json=json)
-
-
+# ---- anthropic_completion / aanthropic_completion over the HTTP transport ----
+# The streamed reply itself is read in src/hyperloom_common/llm/tests/test_anthropic_messages.py.
 _MESSAGE_BODY = {
     "content": [
         {"type": "text", "text": "hello "},
@@ -910,67 +869,126 @@ _MESSAGE_BODY = {
 }
 
 
-def test_anthropic_messages_posts_to_the_messages_path_and_flattens():
-    client = _FakeAnthropicTransport(_FakeAnthropicResponse(body=_MESSAGE_BODY))
-    result = anthropic_messages(client, model="claude", messages=[{"role": "user", "content": "hi"}], max_tokens=8)
-    assert result.text == "hello world"
-    assert result.stop_reason == "end_turn"
-    assert result.usage == {"input_tokens": 21, "output_tokens": 7}
-    assert client.calls[0]["path"] == "/v1/messages"
-    assert client.calls[0]["json"] == {
-        "model": "claude",
-        "messages": [{"role": "user", "content": "hi"}],
-        "max_tokens": 8,
-    }
+def _events(body: dict[str, Any]) -> bytes:
+    """``body``, a whole Messages reply, as the server-sent events that stream it."""
+    events: list[dict[str, Any]] = [{"type": "message_start", "message": {"content": [], "usage": {}}}]
+    for index, block in enumerate(body["content"]):
+        text = block["type"] == "text"
+        events.append(
+            {"type": "content_block_start", "index": index, "content_block": {**block, "text": ""} if text else block}
+        )
+        if text:
+            delta = {"type": "text_delta", "text": block["text"]}
+            events.append({"type": "content_block_delta", "index": index, "delta": delta})
+    events.append({"type": "message_delta", "delta": {"stop_reason": body["stop_reason"]}, "usage": body["usage"]})
+    events.append({"type": "message_stop"})
+    return b"".join(b"data: " + json.dumps(event).encode() + b"\n\n" for event in events)
+
+
+class _FakeAnthropicResponse:
+    """One canned reply, streamed as the events of ``body``; a failed ``status_code`` carries ``text`` instead."""
+
+    def __init__(self, *, status_code: int = 200, body: Any = None, text: str = "") -> None:
+        self.status_code = status_code
+        self._content = text.encode() if status_code >= 400 else _events(body)
+
+    def read(self) -> bytes:
+        return self._content
+
+    async def aread(self) -> bytes:
+        return self._content
+
+    def iter_bytes(self) -> Any:
+        yield self._content
+
+    async def aiter_bytes(self) -> Any:
+        yield self._content
+
+    def __enter__(self) -> "_FakeAnthropicResponse":
+        return self
+
+    def __exit__(self, *_exc: object) -> None:
+        return None
+
+    async def __aenter__(self) -> "_FakeAnthropicResponse":
+        return self
+
+    async def __aexit__(self, *_exc: object) -> None:
+        return None
+
+
+class _FakeAnthropicTransport:
+    """Records ``/v1/messages`` streams; the reply serves ``with`` and ``async with`` alike."""
+
+    def __init__(self, response: Any = None) -> None:
+        self._response = response
+        self.calls: list[dict[str, Any]] = []
+
+    def stream(self, method: str, path: str, *, json: Any, **_kw: Any) -> Any:
+        self.calls.append({"method": method, "path": path, "json": json})
+        return self._response
+
+
+class _FakeClosingTransport(_FakeAnthropicTransport):
+    def __enter__(self) -> Any:
+        return self
+
+    def __exit__(self, *exc: object) -> None:
+        return None
+
+
+class _FakeAsyncClosingTransport(_FakeAnthropicTransport):
+    async def __aenter__(self) -> Any:
+        return self
+
+    async def __aexit__(self, *exc: object) -> None:
+        return None
+
+
+def _record_anthropic_client_timeouts(monkeypatch: pytest.MonkeyPatch) -> list[object]:
+    seen: list[object] = []
+
+    def builder(transport: type[_FakeAnthropicTransport]) -> Any:
+        def build(*, env: Any = None, timeout: object | None = None) -> Any:
+            seen.append(timeout)
+            return transport(_FakeAnthropicResponse(body=_MESSAGE_BODY))
+
+        return build
+
+    monkeypatch.setattr(llm_config, "get_anthropic_client", builder(_FakeClosingTransport))
+    monkeypatch.setattr(llm_config, "get_async_anthropic_client", builder(_FakeAsyncClosingTransport))
+    return seen
+
+
+def test_a_one_shot_http_completion_waits_the_callers_timeout_s(monkeypatch):
+    seen = _record_anthropic_client_timeouts(monkeypatch)
+    llm_config.anthropic_completion(
+        request=llm_config.AnthropicCompletionRequest(model="m", messages=[], max_tokens=16, timeout_s=60.0),
+        env={_ANTHROPIC_KEY: "k"},
+    )
+    assert seen == [60.0]
 
 
 @pytest.mark.asyncio
-async def test_aanthropic_messages_flattens_the_same_way():
-    client = _FakeAsyncAnthropicTransport(_FakeAnthropicResponse(body=_MESSAGE_BODY))
-    result = await aanthropic_messages(client, model="claude", system="sys")
-    assert (result.text, result.stop_reason) == ("hello world", "end_turn")
-    assert client.calls[0]["json"] == {"model": "claude", "system": "sys"}
+async def test_an_async_one_shot_http_completion_waits_the_callers_timeout_s(monkeypatch):
+    seen = _record_anthropic_client_timeouts(monkeypatch)
+    await llm_config.aanthropic_completion(
+        request=llm_config.AnthropicCompletionRequest(model="m", messages=[], max_tokens=16, timeout_s=60.0),
+        env={_ANTHROPIC_KEY: "k"},
+    )
+    assert seen == [60.0]
 
 
-@pytest.mark.asyncio
-async def test_aanthropic_messages_raises_on_non_2xx_with_status_and_body():
-    client = _FakeAsyncAnthropicTransport(_FakeAnthropicResponse(status_code=401, body={}, text="unauthorized"))
-    with pytest.raises(RuntimeError, match="status=401") as excinfo:
-        await aanthropic_messages(client, model="claude")
-    assert "unauthorized" in str(excinfo.value)
-
-
-@pytest.mark.asyncio
-async def test_aanthropic_messages_raises_on_non_json_body():
-    client = _FakeAsyncAnthropicTransport(_FakeAnthropicResponse(error=ValueError("not json")))
-    with pytest.raises(RuntimeError, match="non-JSON body"):
-        await aanthropic_messages(client, model="claude")
-
-
-@pytest.mark.asyncio
-async def test_aanthropic_messages_propagates_transport_errors():
-    client = _FakeAsyncAnthropicTransport(error=RuntimeError("gateway down"))
-    with pytest.raises(RuntimeError, match="gateway down"):
-        await aanthropic_messages(client, model="claude")
-
-
-@pytest.mark.asyncio
-@pytest.mark.parametrize("body", [{}, {"content": "nope"}])
-async def test_aanthropic_messages_tolerates_unreadable_reply_shapes(body):
-    """An unreadable reply (dict with missing/wrong-typed fields) yields empty text."""
-    client = _FakeAsyncAnthropicTransport(_FakeAnthropicResponse(body=body))
-    result = await aanthropic_messages(client, model="claude")
-    assert result.text == ""
-    assert result.stop_reason is None
-    assert result.usage is None
-
-
-@pytest.mark.asyncio
-async def test_aanthropic_messages_raises_on_non_dict_body():
-    """A JSON response whose top-level type is not dict raises RuntimeError."""
-    client = _FakeAsyncAnthropicTransport(_FakeAnthropicResponse(body=["not", "a", "dict"]))
-    with pytest.raises(RuntimeError, match="non-object"):
-        await aanthropic_messages(client, model="claude")
+def test_an_explicit_http_timeout_outranks_timeout_s(monkeypatch):
+    seen = _record_anthropic_client_timeouts(monkeypatch)
+    sentinel = object()
+    llm_config.anthropic_completion(
+        request=llm_config.AnthropicCompletionRequest(
+            model="m", messages=[], max_tokens=16, timeout=sentinel, timeout_s=60.0
+        ),
+        env={_ANTHROPIC_KEY: "k"},
+    )
+    assert seen == [sentinel]
 
 
 def test_anthropic_version_is_defined_once_in_llm_config():
@@ -978,6 +996,123 @@ def test_anthropic_version_is_defined_once_in_llm_config():
     source = Path(llm_config.__file__).read_text(encoding="utf-8")
     assert source.count('"2023-06-01"') == 1
     assert DEFAULT_ANTHROPIC_VERSION == "2023-06-01"
+
+
+# ---- re-dialling a connection that never came up ----
+_PROXY_ENVS = ("HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY", "NO_PROXY")
+
+
+def _proxy_env(monkeypatch: pytest.MonkeyPatch, proxy: str | None) -> None:
+    """Leave exactly ``proxy`` in the environment, so the client's route is the one the test names."""
+    for name in _PROXY_ENVS:
+        monkeypatch.delenv(name, raising=False)
+        monkeypatch.delenv(name.lower(), raising=False)
+    if proxy is not None:
+        monkeypatch.setenv("HTTPS_PROXY", proxy)
+
+
+def _record_dials(
+    monkeypatch: pytest.MonkeyPatch,
+    httpx: Any,
+    *,
+    failures: int,
+    failure: type[BaseException] | None = None,
+) -> list[Any]:
+    """Fail the first ``failures`` dials of a real transport, then answer; returns the requests as they arrive."""
+    dials: list[Any] = []
+    error = failure or httpx.ConnectError
+
+    def handle_request(self: Any, request: Any) -> Any:
+        dials.append(request)
+        if len(dials) <= failures:
+            raise error("connection refused", request=request)
+        return httpx.Response(200, content=_events(_MESSAGE_BODY))
+
+    async def handle_async_request(self: Any, request: Any) -> Any:
+        return handle_request(self, request)
+
+    monkeypatch.setattr(httpx.HTTPTransport, "handle_request", handle_request)
+    monkeypatch.setattr(httpx.AsyncHTTPTransport, "handle_async_request", handle_async_request)
+    monkeypatch.setattr(llm_config, "_ANTHROPIC_CONNECT_BACKOFF_S", 0.0)
+    return dials
+
+
+_GATEWAY_ENV = {_ANTHROPIC_KEY: "k", "ANTHROPIC_BASE_URL": "https://gw.invalid"}
+# A whole-call budget short enough that one connect timeout spends it, as a real one does when ``timeout`` is unset.
+_BUDGET_S = 0.05
+
+
+@pytest.mark.parametrize("proxy", [None, "http://proxy.invalid:8080"])
+def test_anthropic_messages_redials_a_connection_that_never_came_up(monkeypatch, proxy):
+    """``httpx`` re-dials only on its unproxied branch, so the re-dial sits here, above the route."""
+    httpx = pytest.importorskip("httpx")
+    _proxy_env(monkeypatch, proxy)
+    dials = _record_dials(monkeypatch, httpx, failures=llm_config.ANTHROPIC_CONNECT_RETRIES)
+    client = get_anthropic_client(env=_GATEWAY_ENV)
+    # The proxied client routes through its env-configured mount; the direct one has none.
+    assert bool(client._mounts) is (proxy is not None)
+    result = llm_config.anthropic_messages(client, model="claude")
+    assert result.text == "hello world"
+    assert len(dials) == llm_config.ANTHROPIC_CONNECT_RETRIES + 1
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("proxy", [None, "http://proxy.invalid:8080"])
+async def test_aanthropic_messages_redials_the_same_way(monkeypatch, proxy):
+    httpx = pytest.importorskip("httpx")
+    _proxy_env(monkeypatch, proxy)
+    dials = _record_dials(monkeypatch, httpx, failures=llm_config.ANTHROPIC_CONNECT_RETRIES)
+    client = get_async_anthropic_client(env=_GATEWAY_ENV)
+    assert bool(client._mounts) is (proxy is not None)
+    result = await llm_config.aanthropic_messages(client, model="claude")
+    assert result.text == "hello world"
+    assert len(dials) == llm_config.ANTHROPIC_CONNECT_RETRIES + 1
+
+
+def test_anthropic_messages_lets_the_last_connect_failure_through(monkeypatch):
+    httpx = pytest.importorskip("httpx")
+    _proxy_env(monkeypatch, None)
+    dials = _record_dials(monkeypatch, httpx, failures=llm_config.ANTHROPIC_CONNECT_RETRIES + 1)
+    with pytest.raises(httpx.ConnectError):
+        llm_config.anthropic_messages(get_anthropic_client(env=_GATEWAY_ENV), model="claude")
+    assert len(dials) == llm_config.ANTHROPIC_CONNECT_RETRIES + 1
+
+
+def test_anthropic_messages_never_redials_a_request_that_was_sent(monkeypatch):
+    """A read timeout may have reached the model; replaying it would bill and run a second completion."""
+    httpx = pytest.importorskip("httpx")
+    _proxy_env(monkeypatch, None)
+    dials = _record_dials(monkeypatch, httpx, failures=1, failure=httpx.ReadTimeout)
+    with pytest.raises(httpx.ReadTimeout):
+        llm_config.anthropic_messages(get_anthropic_client(env=_GATEWAY_ENV), model="claude")
+    assert len(dials) == 1
+
+
+def test_anthropic_messages_stops_redialling_at_its_deadline(monkeypatch):
+    """``timeout_s`` bounds the whole call: with ``timeout`` unset one connect timeout spends the budget, and a POST
+    sent after it would bill a completion the reader is already bound to drop."""
+    httpx = pytest.importorskip("httpx")
+    _proxy_env(monkeypatch, None)
+    dials: list[Any] = []
+
+    def handle_request(self: Any, request: Any) -> Any:
+        dials.append(request)
+        time.sleep(_BUDGET_S)
+        raise httpx.ConnectTimeout("connect timed out", request=request)
+
+    monkeypatch.setattr(httpx.HTTPTransport, "handle_request", handle_request)
+    started = time.monotonic()
+    with pytest.raises(httpx.ConnectTimeout):
+        llm_config.anthropic_completion(
+            request=llm_config.AnthropicCompletionRequest(
+                model="claude", messages=[], max_tokens=16, timeout_s=_BUDGET_S
+            ),
+            env=_GATEWAY_ENV,
+        )
+    # The connect failure reaches the caller instead of a late dial, so no second POST goes out and the backoff
+    # never runs.
+    assert len(dials) == 1
+    assert time.monotonic() - started < llm_config._ANTHROPIC_CONNECT_BACKOFF_S
 
 
 # ---- build_http_timeout ----
@@ -993,7 +1128,7 @@ def test_build_http_timeout_takes_explicit_write_and_pool():
 
 def test_build_http_timeout_without_httpx_degrades_to_sdk_defaults(monkeypatch, caplog):
     monkeypatch.setitem(sys.modules, "httpx", None)
-    with caplog.at_level(logging.WARNING, logger="hyperloom.common.llm_config"):
+    with caplog.at_level(logging.WARNING, logger="hyperloom_common.llm.llm_config"):
         assert build_http_timeout(connect=1.0, read=2.0) is None
     assert "httpx unavailable" in caplog.text
 
@@ -1097,119 +1232,6 @@ def test_chat_completion_does_not_request_a_stream():
     assert "stream" not in client.completions.calls[0]
 
 
-# ---- aresponse ----
-class _StubResponses:
-    def __init__(self, outcome: Any) -> None:
-        self._outcome = outcome
-        self.calls: list[dict[str, Any]] = []
-
-    async def create(self, **params: Any) -> Any:
-        self.calls.append(params)
-        if isinstance(self._outcome, BaseException):
-            raise self._outcome
-        return self._outcome
-
-
-class _StubResponsesClient:
-    def __init__(self, outcome: Any) -> None:
-        self.responses = _StubResponses(outcome)
-
-
-def _message_item(text: str, *, citations: list[str] | None = None) -> dict[str, Any]:
-    annotations = [{"type": "url_citation", "url": u} for u in (citations or [])]
-    return {
-        "type": "message",
-        "content": [{"type": "output_text", "text": text, "annotations": annotations}],
-    }
-
-
-@pytest.mark.asyncio
-async def test_aresponse_flattens_text_citations_status_and_tokens():
-    resp = {
-        "output": [
-            {"type": "reasoning", "content": []},
-            {"type": "web_search_call", "action": {"query": "x"}},
-            _message_item("the answer", citations=["https://a.example", "https://b.example"]),
-        ],
-        "status": "completed",
-        "usage": {"input_tokens": 11, "output_tokens": 7},
-    }
-    client = _StubResponsesClient(resp)
-    result = await aresponse(client, model="m", input="prompt")
-    assert result.text == "the answer"
-    assert result.citations == ["https://a.example", "https://b.example"]
-    assert result.status == "completed"
-    assert (result.input_tokens, result.output_tokens) == (11, 7)
-    assert client.responses.calls == [{"model": "m", "input": "prompt"}]
-
-
-@pytest.mark.asyncio
-async def test_aresponse_joins_multiple_message_items_with_newlines():
-    resp = {"output": [_message_item("first"), _message_item("second")]}
-    result = await aresponse(_StubResponsesClient(resp), model="m")
-    assert result.text == "first\nsecond"
-
-
-@pytest.mark.asyncio
-async def test_aresponse_skips_non_output_text_content_blocks():
-    resp = {
-        "output": [
-            {
-                "type": "message",
-                "content": [
-                    {"type": "refusal", "text": "ignored"},
-                    {"type": "output_text", "text": "kept", "annotations": []},
-                ],
-            }
-        ]
-    }
-    result = await aresponse(_StubResponsesClient(resp), model="m")
-    assert (result.text, result.citations) == ("kept", [])
-
-
-@pytest.mark.asyncio
-@pytest.mark.parametrize("resp", [{"output": []}, {}])
-async def test_aresponse_tolerates_empty_output_and_missing_usage(resp):
-    result = await aresponse(_StubResponsesClient(resp), model="m")
-    assert result.text == ""
-    assert result.citations == []
-    assert result.status is None
-    assert (result.input_tokens, result.output_tokens) == (0, 0)
-
-
-@pytest.mark.asyncio
-async def test_aresponse_reads_attribute_carrying_sdk_objects():
-    """The real SDK returns pydantic models, not dicts."""
-    block = types.SimpleNamespace(
-        type="output_text",
-        text="from sdk",
-        annotations=[types.SimpleNamespace(type="url_citation", url="https://sdk.example")],
-    )
-    resp = types.SimpleNamespace(
-        output=[types.SimpleNamespace(type="message", content=[block])],
-        status="incomplete",
-        usage=types.SimpleNamespace(input_tokens=3, output_tokens=4),
-    )
-    result = await aresponse(_StubResponsesClient(resp), model="m")
-    assert result.text == "from sdk"
-    assert result.citations == ["https://sdk.example"]
-    assert result.status == "incomplete"
-    assert (result.input_tokens, result.output_tokens) == (3, 4)
-
-
-@pytest.mark.asyncio
-async def test_aresponse_treats_unusable_token_counts_as_zero():
-    resp = {"output": [], "usage": {"input_tokens": "abc", "output_tokens": None}}
-    result = await aresponse(_StubResponsesClient(resp), model="m")
-    assert (result.input_tokens, result.output_tokens) == (0, 0)
-
-
-@pytest.mark.asyncio
-async def test_aresponse_propagates_transport_errors():
-    with pytest.raises(RuntimeError, match="gateway down"):
-        await aresponse(_StubResponsesClient(RuntimeError("gateway down")), model="m")
-
-
 # ---- client-ownership guard ----
 _MIGRATED_CALL_SITES = (
     "orchestrator/roles/codex.py",
@@ -1270,8 +1292,8 @@ _OAUTH_VALUE = "sk-ant-oat01-fake"
 class _ClosingAnthropicTransport(_FakeAnthropicTransport):
     """Sync transport that records whether the caller closed it."""
 
-    def __init__(self, response: Any = None, *, error: BaseException | None = None) -> None:
-        super().__init__(response, error=error)
+    def __init__(self, response: Any = None) -> None:
+        super().__init__(response)
         self.closed = False
 
     def __enter__(self) -> "_ClosingAnthropicTransport":
@@ -1283,9 +1305,6 @@ class _ClosingAnthropicTransport(_FakeAnthropicTransport):
 
 
 class _ClosingAsyncAnthropicTransport(_ClosingAnthropicTransport):
-    async def post(self, path: str, *, json: Any) -> Any:  # type: ignore[override]
-        return _FakeAnthropicTransport.post(self, path, json=json)
-
     async def __aenter__(self) -> "_ClosingAsyncAnthropicTransport":
         return self
 
@@ -1328,7 +1347,7 @@ class _FakeOneShotClient:
 @pytest.fixture
 def fake_one_shot(monkeypatch: pytest.MonkeyPatch) -> type[_FakeOneShotClient]:
     """Replace the Claude CLI client where ``_one_shot_client`` imports it."""
-    from hyperloom.common import claude_oneshot
+    from hyperloom_common.llm import claude_oneshot
 
     _FakeOneShotClient.instances = []
     monkeypatch.setattr(claude_oneshot, "ClaudeOneShotClient", _FakeOneShotClient)
@@ -1358,7 +1377,7 @@ def test_anthropic_transport_ready_is_false_without_a_credential():
 
 def test_anthropic_transport_ready_skips_the_sdk_probe_on_the_http_transport(monkeypatch):
     """An API key needs no Claude CLI, so an absent SDK must not disable it."""
-    from hyperloom.common import claude_oneshot
+    from hyperloom_common.llm import claude_oneshot
 
     def _missing() -> None:
         raise RuntimeError("claude_agent_sdk not installed")
@@ -1369,7 +1388,7 @@ def test_anthropic_transport_ready_skips_the_sdk_probe_on_the_http_transport(mon
 
 def test_ensure_available_rejects_a_missing_cli_binary(monkeypatch):
     """The SDK only spawns `claude`; an importable package with no reachable binary still cannot serve a call, and failing here beats failing at the first review."""
-    from hyperloom.common import claude_oneshot
+    from hyperloom_common.llm import claude_oneshot
 
     monkeypatch.setattr(claude_oneshot, "_load_sdk", lambda: types.SimpleNamespace(__file__=None))
     monkeypatch.setattr(claude_oneshot.shutil, "which", lambda _name: None)
@@ -1379,7 +1398,7 @@ def test_ensure_available_rejects_a_missing_cli_binary(monkeypatch):
 
 
 def test_ensure_available_accepts_a_cli_on_path(monkeypatch):
-    from hyperloom.common import claude_oneshot
+    from hyperloom_common.llm import claude_oneshot
 
     monkeypatch.setattr(claude_oneshot, "_load_sdk", lambda: types.SimpleNamespace(__file__=None))
     monkeypatch.setattr(claude_oneshot.shutil, "which", lambda _name: "/usr/bin/claude")
@@ -1390,7 +1409,7 @@ def test_ensure_available_accepts_a_cli_on_path(monkeypatch):
 @pytest.mark.parametrize("binary_name", ["claude", "claude.exe"])
 def test_ensure_available_accepts_either_bundled_binary_name(monkeypatch, tmp_path, binary_name):
     """The SDK ships the binary under a platform-dependent name."""
-    from hyperloom.common import claude_oneshot
+    from hyperloom_common.llm import claude_oneshot
 
     bundled = tmp_path / "_bundled"
     bundled.mkdir()
@@ -1406,7 +1425,7 @@ def test_ensure_available_accepts_either_bundled_binary_name(monkeypatch, tmp_pa
 
 def test_ensure_available_ignores_non_binary_bundled_entries(monkeypatch, tmp_path):
     """A bundle carrying only its .gitignore is not a usable transport."""
-    from hyperloom.common import claude_oneshot
+    from hyperloom_common.llm import claude_oneshot
 
     bundled = tmp_path / "_bundled"
     bundled.mkdir()
@@ -1425,7 +1444,7 @@ def test_ensure_available_ignores_non_binary_bundled_entries(monkeypatch, tmp_pa
     [(None, True), (RuntimeError("claude_agent_sdk not installed"), False)],
 )
 def test_anthropic_transport_ready_probes_the_sdk_for_a_subscription_token(monkeypatch, sdk_error, expected):
-    from hyperloom.common import claude_oneshot
+    from hyperloom_common.llm import claude_oneshot
 
     def _probe() -> None:
         if sdk_error is not None:
@@ -1440,10 +1459,9 @@ def test_anthropic_completion_posts_to_the_messages_api_when_a_key_is_configured
     monkeypatch.setattr(llm_config, "get_anthropic_client", lambda **_kw: client)
 
     result = llm_config.anthropic_completion(
-        model="claude-opus-5",
-        messages=[{"role": "user", "content": "hi"}],
-        max_tokens=64,
-        system="sys",
+        request=llm_config.AnthropicCompletionRequest(
+            model="claude-opus-5", messages=[{"role": "user", "content": "hi"}], max_tokens=64, system="sys"
+        ),
         env={_ANTHROPIC_KEY: "sk-ant-key"},
     )
 
@@ -1454,52 +1472,9 @@ def test_anthropic_completion_posts_to_the_messages_api_when_a_key_is_configured
         "messages": [{"role": "user", "content": "hi"}],
         "max_tokens": 64,
         "system": "sys",
+        "stream": True,
     }
     assert client.closed, "the HTTP client must be closed once the completion returns"
-
-
-def test_anthropic_completion_sends_temperature_on_the_http_path(monkeypatch):
-    """The Messages API accepts it, and callers that ask for a low temperature to pin an output shape must keep getting one."""
-    client = _ClosingAnthropicTransport(_FakeAnthropicResponse(body=_MESSAGE_BODY))
-    monkeypatch.setattr(llm_config, "get_anthropic_client", lambda **_kw: client)
-
-    llm_config.anthropic_completion(
-        model="claude-opus-5",
-        messages=[{"role": "user", "content": "hi"}],
-        max_tokens=8,
-        temperature=0.2,
-        env={_ANTHROPIC_KEY: "sk-ant-key"},
-    )
-
-    assert client.calls[0]["json"]["temperature"] == 0.2
-
-
-def test_anthropic_completion_omits_temperature_when_unset(monkeypatch):
-    """Absent means absent: sending an explicit default would change the sampling behaviour of every caller that never asked for one."""
-    client = _ClosingAnthropicTransport(_FakeAnthropicResponse(body=_MESSAGE_BODY))
-    monkeypatch.setattr(llm_config, "get_anthropic_client", lambda **_kw: client)
-
-    llm_config.anthropic_completion(
-        model="claude-opus-5",
-        messages=[{"role": "user", "content": "hi"}],
-        max_tokens=8,
-        env={_ANTHROPIC_KEY: "sk-ant-key"},
-    )
-
-    assert "temperature" not in client.calls[0]["json"]
-
-
-def test_anthropic_completion_drops_temperature_on_the_cli_path(fake_one_shot):
-    """The CLI has no temperature knob, so the argument is accepted and ignored rather than raising -- one entry point, two transports, same signature."""
-    llm_config.anthropic_completion(
-        model="claude-opus-5",
-        messages=[{"role": "user", "content": "hi"}],
-        max_tokens=8,
-        temperature=0.2,
-        env={_OAUTH_ENV: _OAUTH_VALUE},
-    )
-
-    assert "temperature" not in fake_one_shot.instances[0].calls[0]
 
 
 def test_anthropic_completion_omits_an_absent_system_prompt(monkeypatch):
@@ -1507,9 +1482,9 @@ def test_anthropic_completion_omits_an_absent_system_prompt(monkeypatch):
     monkeypatch.setattr(llm_config, "get_anthropic_client", lambda **_kw: client)
 
     llm_config.anthropic_completion(
-        model="claude-opus-5",
-        messages=[{"role": "user", "content": "hi"}],
-        max_tokens=8,
+        request=llm_config.AnthropicCompletionRequest(
+            model="claude-opus-5", messages=[{"role": "user", "content": "hi"}], max_tokens=8
+        ),
         env={_ANTHROPIC_KEY: "sk-ant-key"},
     )
 
@@ -1523,12 +1498,14 @@ def test_anthropic_completion_drives_the_claude_cli_for_a_subscription_token(mon
     monkeypatch.setattr(llm_config, "get_anthropic_client", _refuse)
 
     result = llm_config.anthropic_completion(
-        model="claude-opus-5",
-        messages=[{"role": "user", "content": "hi"}],
-        max_tokens=64,
-        system="sys",
+        request=llm_config.AnthropicCompletionRequest(
+            model="claude-opus-5",
+            messages=[{"role": "user", "content": "hi"}],
+            max_tokens=64,
+            system="sys",
+            timeout_s=12.0,
+        ),
         env={_OAUTH_ENV: _OAUTH_VALUE},
-        timeout_s=12.0,
     )
 
     assert result.text == "cli reply"
@@ -1548,9 +1525,9 @@ def test_anthropic_completion_hands_the_cli_the_caller_env(fake_one_shot):
     caller_env = {_OAUTH_ENV: _OAUTH_VALUE, "ANTHROPIC_BASE_URL": "https://gw.example"}
 
     llm_config.anthropic_completion(
-        model="claude-opus-5",
-        messages=[{"role": "user", "content": "hi"}],
-        max_tokens=8,
+        request=llm_config.AnthropicCompletionRequest(
+            model="claude-opus-5", messages=[{"role": "user", "content": "hi"}], max_tokens=8
+        ),
         env=caller_env,
     )
 
@@ -1562,9 +1539,9 @@ async def test_aanthropic_completion_hands_the_cli_the_caller_env(fake_one_shot)
     caller_env = {_OAUTH_ENV: _OAUTH_VALUE}
 
     await llm_config.aanthropic_completion(
-        model="claude-opus-5",
-        messages=[{"role": "user", "content": "hi"}],
-        max_tokens=8,
+        request=llm_config.AnthropicCompletionRequest(
+            model="claude-opus-5", messages=[{"role": "user", "content": "hi"}], max_tokens=8
+        ),
         env=caller_env,
     )
 
@@ -1573,9 +1550,9 @@ async def test_aanthropic_completion_hands_the_cli_the_caller_env(fake_one_shot)
 
 def test_anthropic_completion_keeps_the_cli_default_budget_when_unset(fake_one_shot):
     llm_config.anthropic_completion(
-        model="claude-opus-5",
-        messages=[{"role": "user", "content": "hi"}],
-        max_tokens=8,
+        request=llm_config.AnthropicCompletionRequest(
+            model="claude-opus-5", messages=[{"role": "user", "content": "hi"}], max_tokens=8
+        ),
         env={_OAUTH_ENV: _OAUTH_VALUE},
     )
     assert fake_one_shot.instances[0].timeout_s == 60.0
@@ -1584,9 +1561,9 @@ def test_anthropic_completion_keeps_the_cli_default_budget_when_unset(fake_one_s
 def test_anthropic_completion_raises_when_no_credential_is_configured():
     with pytest.raises(LLMConfigError) as excinfo:
         llm_config.anthropic_completion(
-            model="claude-opus-5",
-            messages=[{"role": "user", "content": "hi"}],
-            max_tokens=8,
+            request=llm_config.AnthropicCompletionRequest(
+                model="claude-opus-5", messages=[{"role": "user", "content": "hi"}], max_tokens=8
+            ),
             env={},
         )
     message = str(excinfo.value)
@@ -1600,9 +1577,9 @@ async def test_aanthropic_completion_posts_to_the_messages_api_and_closes(monkey
     monkeypatch.setattr(llm_config, "get_async_anthropic_client", lambda **_kw: client)
 
     result = await llm_config.aanthropic_completion(
-        model="claude-opus-5",
-        messages=[{"role": "user", "content": "hi"}],
-        max_tokens=64,
+        request=llm_config.AnthropicCompletionRequest(
+            model="claude-opus-5", messages=[{"role": "user", "content": "hi"}], max_tokens=64
+        ),
         env={_ANTHROPIC_KEY: "sk-ant-key"},
     )
 
@@ -1619,9 +1596,9 @@ async def test_aanthropic_completion_drives_the_claude_cli_for_a_subscription_to
     monkeypatch.setattr(llm_config, "get_async_anthropic_client", _refuse)
 
     result = await llm_config.aanthropic_completion(
-        model="claude-opus-5",
-        messages=[{"role": "user", "content": "hi"}],
-        max_tokens=64,
+        request=llm_config.AnthropicCompletionRequest(
+            model="claude-opus-5", messages=[{"role": "user", "content": "hi"}], max_tokens=64
+        ),
         env={_OAUTH_ENV: _OAUTH_VALUE},
     )
 
@@ -1633,9 +1610,9 @@ async def test_aanthropic_completion_drives_the_claude_cli_for_a_subscription_to
 async def test_aanthropic_completion_raises_when_no_credential_is_configured():
     with pytest.raises(LLMConfigError):
         await llm_config.aanthropic_completion(
-            model="claude-opus-5",
-            messages=[{"role": "user", "content": "hi"}],
-            max_tokens=8,
+            request=llm_config.AnthropicCompletionRequest(
+                model="claude-opus-5", messages=[{"role": "user", "content": "hi"}], max_tokens=8
+            ),
             env={},
         )
 
@@ -1646,9 +1623,9 @@ def test_anthropic_completion_reads_the_ambient_environment_by_default(monkeypat
     monkeypatch.setenv(_OAUTH_ENV, _OAUTH_VALUE)
 
     result = llm_config.anthropic_completion(
-        model="claude-opus-5",
-        messages=[{"role": "user", "content": "hi"}],
-        max_tokens=8,
+        request=llm_config.AnthropicCompletionRequest(
+            model="claude-opus-5", messages=[{"role": "user", "content": "hi"}], max_tokens=8
+        )
     )
 
     assert result.text == "cli reply"

@@ -11,10 +11,8 @@ from collections.abc import Mapping
 from pathlib import Path
 from typing import Any
 
-from ._vendor.kb_store_client import KnowledgeSections, SectionContent
+from ._vendor.kb_store_client import KBStoreError, KnowledgeSections
 from .client import (
-    KBStoreClient,
-    KBStoreError,
     RemoteRecipeClient,
     RemoteRecipeConfigurationError,
     _deactivate_destination,
@@ -36,38 +34,14 @@ from .values import (
 log = logging.getLogger(__name__)
 
 
-def read_remote_recipe(
-    canonical_id: str,
-    destination: str | Path,
-    *,
-    scope: RecipeScope,
-    client: RemoteRecipeClient | None = None,
-) -> dict[str, Any] | None:
-    """Download the exact record and validate it against the current Recipe View."""
-    resolved = client or RemoteRecipeClient.from_env_optional()
-    if resolved is None:
-        return None
-    document = resolved.read(canonical_id, destination, scope=scope)
-    if document is not None:
-        try:
-            knowledge_to_warm_recipe(document)
-        except Exception:
-            _deactivate_destination(Path(destination))
-            raise
-    return document
-
-
 def write_final_remote_recipe(
     state: Any,
     canonical_id: str,
     session_id: str,
     *,
-    client: RemoteRecipeClient | None = None,
+    client: RemoteRecipeClient,
 ) -> RemoteWriteResult:
     """Build and conditionally write one final E2E/CLOSE session record."""
-    resolved = client or RemoteRecipeClient.from_env_optional()
-    if resolved is None:
-        return RemoteWriteResult("disabled", "KB_STORE_URL/TOKEN not configured")
     if not has_new_keep(state):
         return RemoteWriteResult("skipped", "no_new_keep_or_pure_warm_replay", canonical_id, session_id)
     try:
@@ -89,119 +63,21 @@ def write_final_remote_recipe(
             state,
             files_dir,
             sections=KnowledgeSections.from_env(),
-            metrics=profile.metrics,
+            profile=profile,
+            session_id=session_id,
         )
-        return resolved.write_if_better(
+        return client.write_if_better(
             canonical_id,
             session_id,
             bundle,
-            scope=profile.scope,
-            primary_metric=profile.primary_metric,
-            primary_value=profile.primary_value,
-            objective_schema=profile.objective_schema,
+            profile,
             files_dir=files_dir,
-        )
-
-
-class HyperloomRemoteKB:
-    """Public facade for remote Hyperloom Recipe knowledge."""
-
-    def __init__(self, client: RemoteRecipeClient) -> None:
-        self._client = client
-
-    @classmethod
-    def from_env(cls) -> "HyperloomRemoteKB":
-        """Build a configured facade, requiring both KB Store variables."""
-        client = RemoteRecipeClient.from_env_optional()
-        if client is None:
-            raise RemoteRecipeConfigurationError("KB_STORE_URL and KB_STORE_TOKEN are required for HyperloomRemoteKB")
-        return cls(client)
-
-    def read(
-        self,
-        identity: str,
-        destination: str | Path,
-        scope: RecipeScope,
-    ) -> dict[str, Any] | None:
-        """Download the selected Recipe View for a Recipe identity."""
-        return read_remote_recipe(
-            identity,
-            destination,
-            scope=scope,
-            client=self._client,
-        )
-
-    def get_view(
-        self,
-        identity: str,
-        scope: RecipeScope,
-    ) -> dict[str, Any] | None:
-        """Read normalized metadata without downloading its artifact bundle."""
-        return self._client.get_view(identity, scope)
-
-    def materialize_view(
-        self,
-        identity: str,
-        destination: str | Path,
-        envelope: dict[str, Any],
-        scope: RecipeScope,
-    ) -> dict[str, Any] | None:
-        """Download and activate the exact previously selected View."""
-        return self._client.read(
-            identity,
-            destination,
-            scope=scope,
-            envelope=envelope,
-        )
-
-    def search_identities(
-        self,
-        *,
-        scheme: str,
-        match: dict[str, str],
-        hardware_in: list[str] | None = None,
-        offset: int = 0,
-        limit: int = 50,
-    ) -> dict[str, Any]:
-        """Discover exact identities through the KB Store search endpoint."""
-        return self._client.search_identities(
-            scheme=scheme,
-            match=match,
-            hardware_in=hardware_in,
-            offset=offset,
-            limit=limit,
-        )
-
-    def write(
-        self,
-        identity: str,
-        state: Any,
-        session_id: str | None = None,
-    ) -> RemoteWriteResult:
-        """Write final E2E knowledge, resolving the session id from state."""
-        resolved_session_id = session_id
-        if resolved_session_id is None:
-            resolved_session_id = (
-                str(getattr(state, "recipe_kb_session_id", "") or "").strip()
-                or str(getattr(state, "session_id", "") or "").strip()
-            )
-        resolved_session_id = str(resolved_session_id or "").strip()
-        if not resolved_session_id:
-            raise RemoteRecipeValidationError(
-                "session_id is required; set state.recipe_kb_session_id or state.session_id"
-            )
-        return write_final_remote_recipe(
-            state,
-            identity,
-            resolved_session_id,
-            client=self._client,
         )
 
 
 class RemoteWarmRecipeAdapter:
     """Read-only adapter that gives T0 current-record metadata and advisories."""
 
-    enabled = True
     mode = "remote"
     backend_name = "kb-store"
     search_candidate_cap = 200
@@ -209,49 +85,30 @@ class RemoteWarmRecipeAdapter:
 
     def __init__(
         self,
-        remote_kb: HyperloomRemoteKB,
+        client: RemoteRecipeClient,
         destination: str | Path,
         scope: RecipeScope,
     ) -> None:
-        self._remote_kb = remote_kb
+        self._client = client
         self._destination = Path(destination)
         self._scope = scope
         self._cache: dict[str, dict[str, Any] | None] = {}
         self._candidate_views: dict[str, dict[str, Any]] = {}
         self._candidate_rows: dict[str, dict[str, Any]] = {}
         self._scanned_candidate_ids: set[str] = set()
-        self._deactivate_path(self._destination.parent / f".{self._destination.name}-candidates")
-        self._deactivate_path(self._destination.with_name(f".{self._destination.name}.selected"))
-
-    @staticmethod
-    def _deactivate_path(path: Path) -> None:
-        """Remove a path without following a symlink."""
-        _deactivate_destination(path)
 
     def _read(self, canonical_id: str) -> dict[str, Any] | None:
         if canonical_id not in self._cache:
             try:
-                document = self._remote_kb.read(
-                    canonical_id,
-                    self._destination,
-                    self._scope,
-                )
+                document = self._client.read(canonical_id, self._destination, scope=self._scope)
+                row = None if document is None else knowledge_to_warm_recipe(document)
             except Exception:
-                self._deactivate_path(self._destination)
+                _deactivate_destination(self._destination)
                 raise
-            if document is None:
-                self._deactivate_path(self._destination)
+            if row is None:
+                _deactivate_destination(self._destination)
                 self._cache[canonical_id] = None
             else:
-                try:
-                    row = knowledge_to_warm_recipe(document)
-                except (
-                    RemoteRecipeValidationError,
-                    TypeError,
-                    ValueError,
-                ):
-                    self._deactivate_path(self._destination)
-                    raise
                 try:
                     replay_material = row.get(
                         "replay_material_available"
@@ -267,31 +124,14 @@ class RemoteWarmRecipeAdapter:
                         canonical_id,
                         exc,
                     )
-                    self._deactivate_path(self._destination)
+                    _deactivate_destination(self._destination)
                     replay_material = False
                 row["replay_material_available"] = replay_material
                 self._cache[canonical_id] = row
         return self._cache[canonical_id]
 
-    def get_authoritative_recipe(
-        self,
-        *,
-        canonical_id: str,
-        version: int | None = None,
-    ) -> dict[str, Any] | None:
-        """Return the exact record projected into the current Recipe contract."""
-        del version
-        return self._read(canonical_id)
-
-    def get_recipe(
-        self,
-        *,
-        canonical_id: str,
-        version: int | None = None,
-        prefer: dict[str, Any] | None = None,
-    ) -> dict[str, Any] | None:
+    def get_recipe(self, *, canonical_id: str) -> dict[str, Any] | None:
         """Return the exact record; degraded tiers are ranked by T0 via ``search``."""
-        del version, prefer
         return self._read(canonical_id)
 
     @staticmethod
@@ -324,83 +164,34 @@ class RemoteWarmRecipeAdapter:
         label_match: dict[str, Any] | None = None,
         hardware_in: list[str] | None = None,
         limit: int = 10,
-        **_kwargs: Any,
     ) -> list[dict[str, Any]]:
         """Scan bounded candidate metadata while leaving ranking to T0."""
         translated: dict[str, str] = {}
-        aliases = {
-            "hardware": "hardware",
-            "framework": "framework_name",
-        }
         for raw_key, raw_value in (label_match or {}).items():
             value = str(raw_value or "").strip()
             if not value:
                 continue
-            key = aliases.get(str(raw_key), str(raw_key))
-            translated[key] = value
+            translated[str(raw_key)] = value
 
         page_size = min(100, max(1, int(limit or 10)))
+        if len(self._scanned_candidate_ids) >= self.search_candidate_cap:
+            return []
         offset = 0
-        pages_scanned = 0
-        has_more = False
         rows: list[dict[str, Any]] = []
-        while len(self._scanned_candidate_ids) < self.search_candidate_cap and pages_scanned < self.search_page_cap:
-            has_more = False
-            result = self._remote_kb.search_identities(
+        for _ in range(self.search_page_cap):
+            result = self._client.search_identities(
                 scheme=self._scope.identity_scheme,
                 match=translated,
                 hardware_in=hardware_in,
                 offset=offset,
                 limit=page_size,
             )
-            pages_scanned += 1
             items = result.get("items")
             if not isinstance(items, list):
                 raise RemoteRecipeValidationError("KB Store identity search items must be a list")
             if not items:
                 break
-            for item in items:
-                if not isinstance(item, dict):
-                    continue
-                canonical_id = str(item.get("canonical_id") or "").strip()
-                if not canonical_id.startswith(f"{self._scope.identity_scheme}:"):
-                    continue
-                cached = self._candidate_rows.get(canonical_id)
-                if cached is not None:
-                    rows.append(dict(cached))
-                    continue
-                if len(self._scanned_candidate_ids) >= self.search_candidate_cap:
-                    break
-                self._scanned_candidate_ids.add(canonical_id)
-                try:
-                    envelope = self._remote_kb.get_view(
-                        canonical_id,
-                        self._scope,
-                    )
-                    if envelope is None:
-                        continue
-                    row = knowledge_to_warm_recipe(envelope)
-                except (
-                    KBStoreError,
-                    OSError,
-                    RemoteRecipeValidationError,
-                    ValueError,
-                ) as exc:
-                    log.warning(
-                        "remote Recipe candidate rejected %s: %s",
-                        canonical_id,
-                        exc,
-                    )
-                    continue
-                dimensions = item.get("dimensions")
-                if isinstance(dimensions, dict):
-                    for key, value in dimensions.items():
-                        row[str(key)] = str(value)
-                row["updated_at"] = str(item.get("updated_at") or "")
-                row["identity_source"] = str(item.get("source") or "")
-                self._candidate_views[canonical_id] = envelope
-                self._candidate_rows[canonical_id] = dict(row)
-                rows.append(dict(row))
+            rows.extend(self._page_rows(items))
             if len(self._scanned_candidate_ids) >= self.search_candidate_cap:
                 break
             next_offset = result.get("next_offset")
@@ -415,12 +206,58 @@ class RemoteWarmRecipeAdapter:
             if resolved_offset <= offset:
                 raise RemoteRecipeValidationError("KB Store identity search pagination did not advance")
             offset = resolved_offset
-            has_more = True
-        if pages_scanned >= self.search_page_cap and has_more:
+        else:
             log.warning(
                 "remote Recipe candidate search stopped after %d pages",
                 self.search_page_cap,
             )
+        return rows
+
+    def _page_rows(self, items: list[Any]) -> list[dict[str, Any]]:
+        """Project one page of identity hits onto warm rows, fetching each new candidate's view until the scan cap."""
+        rows: list[dict[str, Any]] = []
+        for item in items:
+            if not isinstance(item, dict):
+                continue
+            canonical_id = str(item.get("canonical_id") or "").strip()
+            if not canonical_id.startswith(f"{self._scope.identity_scheme}:"):
+                continue
+            cached = self._candidate_rows.get(canonical_id)
+            if cached is not None:
+                rows.append(dict(cached))
+                continue
+            if len(self._scanned_candidate_ids) >= self.search_candidate_cap:
+                break
+            self._scanned_candidate_ids.add(canonical_id)
+            try:
+                envelope = self._client.get_view(
+                    canonical_id,
+                    self._scope,
+                )
+                if envelope is None:
+                    continue
+                row = knowledge_to_warm_recipe(envelope)
+            except (
+                KBStoreError,
+                OSError,
+                RemoteRecipeValidationError,
+                ValueError,
+            ) as exc:
+                log.warning(
+                    "remote Recipe candidate rejected %s: %s",
+                    canonical_id,
+                    exc,
+                )
+                continue
+            dimensions = item.get("dimensions")
+            if isinstance(dimensions, dict):
+                for key, value in dimensions.items():
+                    row[str(key)] = str(value)
+            row["updated_at"] = str(item.get("updated_at") or "")
+            row["identity_source"] = str(item.get("source") or "")
+            self._candidate_views[canonical_id] = envelope
+            self._candidate_rows[canonical_id] = dict(row)
+            rows.append(dict(row))
         return rows
 
     def select_candidate(self, row: Mapping[str, Any]) -> bool:
@@ -429,22 +266,22 @@ class RemoteWarmRecipeAdapter:
         envelope = self._candidate_views.get(canonical_id)
         if not canonical_id or row.get("replayable") is not True or envelope is None:
             return False
-        document = self._remote_kb.materialize_view(
+        document = self._client.read(
             canonical_id,
             self._destination,
-            envelope,
-            self._scope,
+            scope=self._scope,
+            envelope=envelope,
         )
         if document is None:
-            self._deactivate_path(self._destination)
+            _deactivate_destination(self._destination)
             return False
         try:
             if not self._candidate_has_replay_material(self._destination):
-                self._deactivate_path(self._destination)
+                _deactivate_destination(self._destination)
                 return False
             selected = knowledge_to_warm_recipe(document)
         except Exception:
-            self._deactivate_path(self._destination)
+            _deactivate_destination(self._destination)
             raise
         selected.update(
             {
@@ -467,25 +304,18 @@ class RemoteWarmRecipeAdapter:
         self._cache[canonical_id] = selected
         return True
 
-    def close(self) -> None:
-        """The wrapped blocking client has no explicit lifecycle."""
-
 
 __all__ = [
     "CURRENT_KNOWLEDGE_SCHEMA_VERSION",
     "RECORD_KIND_HYPERLOOM_RECIPE",
-    "HyperloomRemoteKB",
-    "KBStoreClient",
     "KBStoreError",
     "KnowledgeSections",
     "RemoteRecipeClient",
     "RemoteRecipeConfigurationError",
     "RecipeScope",
     "RemoteWarmRecipeAdapter",
-    "SectionContent",
     "build_remote_knowledge",
     "knowledge_to_warm_recipe",
     "has_new_keep",
-    "read_remote_recipe",
     "write_final_remote_recipe",
 ]

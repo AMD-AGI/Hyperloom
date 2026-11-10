@@ -10,7 +10,14 @@ from types import SimpleNamespace
 
 import pytest
 
+from hyperloom.common.gain_math import (
+    AGENTX_ERROR_RATE_THRESHOLD_PCT,
+    DEFAULT_ENABLEMENT_ACCURACY_FLOOR,
+    accuracy_meets_floor,
+    accuracy_passed,
+)
 from hyperloom.orchestrator.actions.executors import _accuracy_gate as ag
+from hyperloom.orchestrator.kernel import integrate_accuracy as integrate_accuracy
 
 
 class TestParseEvalResults:
@@ -36,6 +43,18 @@ class TestParseEvalResults:
         assert out["task"] == "gsm8k"
         assert out["metric"] == "exact_match,strict-match"
         assert out["source_file"].endswith("results.json")
+
+    @pytest.mark.parametrize(("recorded", "expected"), [("7043.486084267031", 7043.486084267031), (None, None)])
+    def test_reports_lm_evals_own_runtime(self, tmp_path, recorded, expected):
+        eval_dir = tmp_path / "eval_001"
+        eval_dir.mkdir()
+        results = {"results": {"gsm8k": {"exact_match,strict-match": 0.845}}}
+        if recorded is not None:
+            results["total_evaluation_time_seconds"] = recorded
+        (eval_dir / "results.json").write_text(json.dumps(results))
+        out = ag.parse_eval_results(tmp_path)
+        assert out["accuracy"] == pytest.approx(0.845)
+        assert out["eval_runtime_sec"] == (pytest.approx(expected) if expected is not None else None)
 
     def test_falls_back_to_secondary_metric(self, tmp_path):
         eval_dir = tmp_path / "eval_002"
@@ -75,18 +94,18 @@ class TestParseEvalResults:
 
 class TestAccuracyPassed:
     def test_baseline_zero_skips_gate(self):
-        assert ag.accuracy_passed(0.0, 0.42) is True
-        assert ag.accuracy_passed(-0.1, 0.0) is True
+        assert accuracy_passed(0.0, 0.42) is True
+        assert accuracy_passed(-0.1, 0.0) is True
 
     def test_within_default_threshold(self):
-        assert ag.accuracy_passed(0.80, 0.76) is True
+        assert accuracy_passed(0.80, 0.76) is True
 
     def test_outside_default_threshold(self):
-        assert ag.accuracy_passed(0.80, 0.70) is False
+        assert accuracy_passed(0.80, 0.70) is False
 
     def test_custom_threshold(self):
-        assert ag.accuracy_passed(0.80, 0.70, threshold=0.11) is True
-        assert ag.accuracy_passed(0.80, 0.68, threshold=0.10) is False
+        assert accuracy_passed(0.80, 0.70, threshold=0.11) is True
+        assert accuracy_passed(0.80, 0.68, threshold=0.10) is False
 
 
 class TestRequireKernelAccuracyDefault:
@@ -105,15 +124,8 @@ class TestGradeIntegrateAccuracy:
 
     @staticmethod
     def _grade(monkeypatch, tmp_path, *, bench: dict, baseline: float):
-        from hyperloom.orchestrator.kernel import request_handlers as krh
-        from hyperloom.orchestrator.state import shared_state as ss
 
-        monkeypatch.setattr(
-            ss.SharedState,
-            "load_or_init",
-            classmethod(lambda cls, _dir: ss.SharedState(baseline_accuracy=baseline)),
-        )
-        return krh._grade_integrate_accuracy(bench, session_dir=tmp_path, workspace=tmp_path)
+        return integrate_accuracy.grade_integrate_accuracy(bench, baseline_accuracy=baseline, workspace=tmp_path)
 
     def test_accuracy_within_tolerance_does_not_block(self, monkeypatch, tmp_path):
         out = self._grade(monkeypatch, tmp_path, bench={"accuracy": 0.78}, baseline=0.80)
@@ -174,8 +186,8 @@ class TestGradeIntegrateAccuracy:
 class TestEnablementReaders:
     def test_floor_default_rejects_a_collapsed_model(self):
         """The default must be strong enough to be the only correctness authority."""
-        assert ag.DEFAULT_ENABLEMENT_ACCURACY_FLOOR > 0.0
-        assert not ag.accuracy_meets_floor(0.00076, ag.DEFAULT_ENABLEMENT_ACCURACY_FLOOR)
+        assert DEFAULT_ENABLEMENT_ACCURACY_FLOOR > 0.0
+        assert not accuracy_meets_floor(0.00076, DEFAULT_ENABLEMENT_ACCURACY_FLOOR)
 
     def test_missing_mode_is_fail_closed(self):
         """A caller that cannot supply the field has not opted in."""
@@ -202,12 +214,6 @@ class TestEnablementReaders:
         assert ag.launch_enablement_allowed(state) is launch
         assert ag.eval_enablement_allowed(state) is eval_
 
-    @pytest.mark.parametrize("mode", ["eval", "all"])
-    def test_no_eval_closes_the_eval_lane_but_not_launch(self, mode):
-        state = SimpleNamespace(enablement_mode=mode, eval_disabled=True)
-        assert ag.eval_enablement_allowed(state) is False
-        assert ag.launch_enablement_allowed(state) is (mode == "all")
-
 
 class TestAccuracyValidator:
     @pytest.mark.parametrize(
@@ -226,7 +232,7 @@ class TestAccuracyValidator:
         ],
     )
     def test_meets_floor(self, score, floor, expected):
-        assert ag.accuracy_meets_floor(score, floor) is expected
+        assert accuracy_meets_floor(score, floor) is expected
 
     def test_classify(self):
         assert ag.classify_accuracy_failure(0.5, 0.2) is None
@@ -266,23 +272,6 @@ class TestEvalContractFingerprint:
         a = ag.eval_contract_fingerprint(config_path=cfg)
         b = ag.eval_contract_fingerprint(config_path=cfg)
         assert a == b and len(a) == 16
-
-    def test_task_metric_do_not_affect_fingerprint(self, tmp_path):
-        """Result-level task/metric do not change the fingerprint."""
-        cfg = tmp_path / "c.yaml"
-        _write_minimal_bench_yaml(cfg)
-        fp_no_task = ag.eval_contract_fingerprint(config_path=cfg)
-        fp_with_task = ag.eval_contract_fingerprint(config_path=cfg, task="gsm8k", metric="exact_match")
-        fp_other_task = ag.eval_contract_fingerprint(config_path=cfg, task="mmlu", metric="acc")
-        assert fp_no_task == fp_with_task == fp_other_task
-
-    def test_crash_and_success_produce_same_fingerprint(self, tmp_path):
-        """eval crash (no task/metric) and successful eval produce identical fingerprint."""
-        cfg = tmp_path / "c.yaml"
-        _write_minimal_bench_yaml(cfg)
-        fp_crash = ag.eval_contract_fingerprint(config_path=cfg, task=None, metric=None)
-        fp_success = ag.eval_contract_fingerprint(config_path=cfg, task="gsm8k", metric="exact_match,strict-match")
-        assert fp_crash == fp_success
 
     def test_workload_change_changes_fingerprint(self, tmp_path):
         """A change to workload shape (ISL) changes the fingerprint."""
@@ -350,7 +339,7 @@ class TestTheAgentXValidityGate:
 
     def test_the_threshold_is_inclusive(self, tmp_path):
         """Upstream rejects above the threshold, so exactly at it still passes."""
-        ws = self._result(tmp_path, request_error_rate=ag.AGENTX_ERROR_RATE_THRESHOLD_PCT)
+        ws = self._result(tmp_path, request_error_rate=AGENTX_ERROR_RATE_THRESHOLD_PCT)
         assert ag.parse_eval_results(ws, framework="vllm", benchmark_mode="agentx")["accuracy"] == 1.0
 
     def test_a_rate_past_the_threshold_fails(self, tmp_path):
@@ -390,19 +379,23 @@ class TestTheAgentXValidityGate:
         assert out["accuracy"] == 1.0
 
 
-@pytest.mark.parametrize("errors,summary,expected", [(None, [], 1.0), (25, None, 0.0), (None, None, 0.0)])
-def test_mapped_profiling_result_reaches_agentx_gate(tmp_path, errors, summary, expected):
-    from hyperloom.inference_optimizer.agentx.mapping import map_aiperf
-
-    export = {"request_count": {"avg": 75}, "error_summary": summary}
-    if errors is not None:
-        export["error_request_count"] = {"avg": errors}
-    mapped = map_aiperf(export)
-    (tmp_path / "inferencex_result.json").write_text(json.dumps(mapped), encoding="utf-8")
+@pytest.mark.parametrize("rate,expected", [(0.0, 1.0), (0.25, 0.0)])
+def test_public_agentx_report_reaches_correctness_gate(tmp_path, rate, expected):
+    report = {
+        "scenario": "agentx",
+        "success": True,
+        "benchmark_valid": True,
+        "publishable": True,
+        "agentx_metrics": {
+            "execution_owner": "magpie",
+            "server_launch": {"owner": "magpie"},
+            "requests": {"error_rate": rate},
+        },
+    }
+    (tmp_path / "benchmark_report.json").write_text(json.dumps(report))
     result = ag.parse_eval_results(tmp_path, framework="vllm", benchmark_mode="agentx")
     assert result["accuracy"] == expected
-    assert result["task"] == "agentx_error_rate"
-    assert result["error_rate"] == mapped["request_error_rate"]
+    assert result["error_rate"] == rate * 100
 
 
 class TestParseAgentXErrorRate:
@@ -417,15 +410,9 @@ class TestParseAgentXErrorRate:
         (tmp_path / "inferencex_result.json").write_text(json.dumps({"request_error_rate": "n/a"}), encoding="utf-8")
         assert ag.parse_agentx_error_rate(tmp_path) is None
 
-    def test_a_mapped_result_missing_the_metric_reports_none(self, tmp_path):
-        """aiperf omits the metric when nothing completed. Coalescing that to
-        0.0 would report a perfect error rate for a run that measured nothing,
-        which is the fail-closed path this gate depends on."""
-        from hyperloom.inference_optimizer.agentx.mapping import map_aiperf
-
-        mapped = map_aiperf({"output_token_throughput": {"avg": 300.0}})
-        assert mapped["request_error_rate"] is None
-        (tmp_path / "inferencex_result.json").write_text(json.dumps(mapped), encoding="utf-8")
+    def test_an_invalid_public_report_cannot_be_salvaged(self, tmp_path):
+        (tmp_path / "benchmark_report.json").write_text(json.dumps({"scenario": "agentx", "benchmark_valid": False}))
+        (tmp_path / "inferencex_result.json").write_text(json.dumps({"request_error_rate": 0.0}))
         assert ag.parse_agentx_error_rate(tmp_path) is None
 
     def test_an_unreadable_result_reports_none_and_warns(self, tmp_path, caplog):

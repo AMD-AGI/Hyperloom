@@ -52,12 +52,7 @@ class IntentEnvelopeValidationError(RuntimeAdapterError):
     """The intent envelope produced for the Coordinator is invalid."""
 
 
-class InboxParseError(RuntimeAdapterError):
-    """The Coordinator-style inbox prompt could not be parsed."""
-
-
 __all__ = [
-    "InboxParseError",
     "IntentEnvelopeValidationError",
     "KBConflictError",
     "KBError",

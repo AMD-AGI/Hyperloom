@@ -175,8 +175,6 @@ def test_platform_fingerprint_unavailable_when_probe_returns_none(monkeypatch):
 
 
 def test_platform_fingerprint_outer_failure_is_status_error(monkeypatch):
-    # Use a non-RuntimeError to pin the broad `except Exception` net; narrowing it to `except RuntimeError` would let
-    # OSError/AttributeError escape.
     def _boom():
         raise OSError("probe exploded")
 

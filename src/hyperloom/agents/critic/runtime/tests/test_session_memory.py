@@ -46,8 +46,6 @@ def test_merge_context_explicit_wins_and_persists(tmp_session_root):
     assert isinstance(res, MergeResult)
     assert res.merged["framework"] == "sglang"
     assert res.merged["model"] == "Qwen3-14B"
-    assert "framework" in res.explicit_keys
-    assert "model" in res.from_memory_keys
     assert sm.load_context("sess_1")["framework"] == "sglang"
 
 
@@ -56,7 +54,6 @@ def test_merge_context_unknown_treated_as_missing(tmp_session_root):
     sm.save_context("sess_1", {"model": "Qwen3-14B"})
     res = sm.merge_context("sess_1", {"model": "unknown", "precision": ""})
     assert res.merged["model"] == "Qwen3-14B"
-    assert "model" in res.from_memory_keys
     assert "precision" in res.missing_keys
 
 

@@ -7,7 +7,7 @@
 # mlperf_agentic_client.sh — AgentX client that keeps Magpie server lifecycle
 # and drives MLPerf ``utility/run_agentic.sh`` against localhost:30000.
 #
-# MAGPIE_RUN_PHASE=server / client matches aiperf_client.sh. The AgentX switch
+# MAGPIE_RUN_PHASE=server / client selects the delegated MLPerf lifecycle. Hyperloom
 # settles PORT, the served model, the flow, the trajectory count and the
 # concurrency; preflight checks the harness, dataset and tokenizer. This script
 # checks only what it alone can see: who owns the port, and what is served.
@@ -112,6 +112,24 @@ else
     vllm) export VLLM_HTTP_TIMEOUT_KEEP_ALIVE="${VLLM_HTTP_TIMEOUT_KEEP_ALIVE:-$_KEEPALIVE_S}" ;;
     sglang) export SGLANG_TIMEOUT_KEEP_ALIVE="${SGLANG_TIMEOUT_KEEP_ALIVE:-$_KEEPALIVE_S}" ;;
   esac
+  # A framework whose keep-alive variable this script does not know -- atom's is not published -- takes it by name
+  # here rather than by a guess hard-coded above. An agentic turn can idle for minutes between tool results, so a
+  # server defaulting to a short keep-alive will drop the connection mid-trajectory.
+  #
+  # The name is untrusted: it arrives through ``benchmark.envs`` like any variant env. It is read by indirect
+  # expansion rather than eval, and refused unless it is a shell identifier -- eval on a crafted name would run
+  # commands in this shell. ``env_safety`` also blocks it from variant and external sources; this is the second
+  # layer, since a legitimate operator export reaches here without passing through that filter.
+  if [ -n "${AGENTX_KEEP_ALIVE_ENV:-}" ]; then
+    case "$AGENTX_KEEP_ALIVE_ENV" in
+      [!A-Za-z_]* | *[!A-Za-z0-9_]*)
+        log "ERROR: AGENTX_KEEP_ALIVE_ENV=${AGENTX_KEEP_ALIVE_ENV} is not a variable name"
+        exit 2
+        ;;
+    esac
+    export "${AGENTX_KEEP_ALIVE_ENV}=${!AGENTX_KEEP_ALIVE_ENV:-$_KEEPALIVE_S}"
+    log "keep-alive: ${AGENTX_KEEP_ALIVE_ENV}=${!AGENTX_KEEP_ALIVE_ENV}"
+  fi
 
   log "delegating server boot -> ${BUILTIN} (PROFILE=${PROFILE:-0}) PORT=${PORT}"
   MAGPIE_RUN_PHASE=server MAGPIE_SERVER_PID_FILE="$PIDFILE" \

@@ -1,7 +1,7 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""Baseline accuracy-eval handling: ``disable_run_eval`` wiring + the eval-failure fallback that salvages the throughput baseline."""
+"""Baseline accuracy-eval handling: eval-rooted failure classification, enablement routing and the accuracy stop."""
 
 from __future__ import annotations
 
@@ -16,12 +16,15 @@ from unittest.mock import patch
 import pytest
 import yaml
 
-from hyperloom.common.env import is_truthy
+from hyperloom.orchestrator.state.shared_state import SharedState
+from hyperloom_common.env import is_truthy
 from hyperloom.orchestrator.actions.executors.baseline import (
     BaselineExecutor,
 )
 
-_BASELINE_LOGGER = "hyperloom.orchestrator.actions.executors.baseline"
+from hyperloom.inference_optimizer.tests._baseline_fakes import fake_workspace, run_baseline, write_sglang_yaml
+
+_ACCURACY_LOGGER = "hyperloom.orchestrator.actions.executors.benchmark_run.accuracy"
 
 
 @pytest.fixture(autouse=True)
@@ -30,78 +33,16 @@ def _isolate_leak_root(tmp_path_factory, monkeypatch):
     monkeypatch.setenv("INFERENCE_OPTIMIZER_LEAK_ROOTS", str(sandbox))
 
 
-class _StopRecorder:
-    """Minimal SharedState stub capturing ``set_stop_reason`` calls."""
-
-    def __init__(self, enablement_mode: str = "off") -> None:
-        self.stop_reason = ""
-        self.baseline_accuracy = 0.0
-        self.enablement_mode = enablement_mode
-        # Mirrors the SharedState default so ctx-backed runs keep the cold+hot pair.
-        self.baseline_double_run = True
-
-    def set_stop_reason(self, value, **_kwargs):
-        self.stop_reason = value
-        return value
-
-
-def _write_yaml(path: Path) -> None:
-    cfg = {
-        "benchmark": {
-            "framework": "sglang",
-            "model": "/path/models/Qwen-Qwen3-8B",
-            "precision": "bf16",
-            "run_mode": "local",
-            "envs": {"TP": 1, "CONC": 8, "ISL": 256, "OSL": 256},
-            "timeout_seconds": 600,
-            "profiler": {
-                "torch_profiler": {"enabled": False},
-                "system_profiler": {"enabled": False},
-                "tracelens": {"enabled": False},
-            },
-            "gpu_selection": {"auto": False},
-        }
-    }
-    with path.open("w") as f:
-        yaml.safe_dump(cfg, f)
-
-
-def _fake_workspace(slot: Path, *, tput: float = 1500.0) -> Path:
-    ws = slot / "benchmark_sglang_20260513_010101"
-    ws.mkdir(parents=True)
-    (ws / "benchmark_report.json").write_text(
-        json.dumps(
-            {
-                "success": True,
-                "framework": "sglang",
-                "model": "/path/models/Qwen-Qwen3-8B",
-                "throughput": {
-                    "request_throughput": tput / 256,
-                    "output_throughput": tput,
-                    "total_token_throughput": tput * 2,
-                    "completed_requests": 64,
-                    "duration_seconds": 25.0,
-                },
-                "latency": {
-                    "ttft": {"mean_ms": 100.0, "p99_ms": 120.0},
-                    "e2el": {"mean_ms": 2000.0, "p99_ms": 2300.0},
-                },
-            }
-        )
-    )
-    return ws
-
-
 def _make_ctx(params: dict, *, enablement_mode: str = "off") -> SimpleNamespace:
     task = SimpleNamespace(task_id="t-eval-1", params=params)
-    return SimpleNamespace(task=task, extra={"shared_state": _StopRecorder(enablement_mode)})
+    return SimpleNamespace(task=task, extra={"shared_state": SharedState(enablement_mode=enablement_mode)})
 
 
 def _run(coro):
     return asyncio.run(coro)
 
 
-# --- is_truthy (baseline's disable_run_eval param interpretation) ----------
+# --- is_truthy ------------------------------------------------------------
 @pytest.mark.parametrize(
     "value,expected",
     [
@@ -164,144 +105,12 @@ def test_eval_rooted_failure_climbs_from_round_subdir(tmp_path: Path):
     assert BaselineExecutor._is_eval_rooted_failure(result) is True
 
 
-# --- disable_run_eval -> RUN_EVAL=false ------------------------------------
-def test_disable_run_eval_param_forces_run_eval_false(tmp_path):
-    base = tmp_path / "base.yaml"
-    _write_yaml(base)
-    captured: dict = {}
-
-    def fake_run(cmd, *args, **kwargs):
-        cfg_idx = cmd.index("--benchmark-config")
-        out_idx = cmd.index("--output-dir")
-        captured["cfg"] = yaml.safe_load(Path(cmd[cfg_idx + 1]).read_text())
-        _fake_workspace(Path(cmd[out_idx + 1]))
-        return subprocess.CompletedProcess(cmd, 0, "ok", "")
-
-    executor = BaselineExecutor(
-        magpie_python="/opt/venv/bin/python",
-        default_config_path=base,
-        session_dir=tmp_path,
-    )
-    ctx = _make_ctx(
-        {
-            "output_dir": str(tmp_path / "ws"),
-            "timeout_sec": 10,
-            "model_path": "/path/models/Qwen-Qwen3-8B",
-            "gpu_type": "mi300x",
-            "disable_run_eval": True,
-        }
-    )
-    with patch(
-        "hyperloom.orchestrator.actions.executors.baseline.run_with_session_kill",
-        side_effect=fake_run,
-    ):
-        result = _run(executor(ctx))
-
-    assert result["status"] == "succeeded"
-    assert str(captured["cfg"]["benchmark"]["envs"]["RUN_EVAL"]).lower() == "false"
-
-
-def test_no_eval_forces_run_eval_false(tmp_path):
-    base = tmp_path / "base.yaml"
-    _write_yaml(base)
-    captured: dict = {}
-
-    def fake_run(cmd, *args, **kwargs):
-        cfg_idx = cmd.index("--benchmark-config")
-        out_idx = cmd.index("--output-dir")
-        captured["cfg"] = yaml.safe_load(Path(cmd[cfg_idx + 1]).read_text())
-        _fake_workspace(Path(cmd[out_idx + 1]))
-        return subprocess.CompletedProcess(cmd, 0, "ok", "")
-
-    executor = BaselineExecutor(
-        magpie_python="/opt/venv/bin/python",
-        default_config_path=base,
-        session_dir=tmp_path,
-    )
-    ctx = _make_ctx(
-        {
-            "output_dir": str(tmp_path / "ws"),
-            "timeout_sec": 10,
-            "model_path": "/path/models/Qwen-Qwen3-8B",
-            "gpu_type": "mi300x",
-        }
-    )
-    ctx.extra["shared_state"].eval_disabled = True
-    with patch(
-        "hyperloom.orchestrator.actions.executors.baseline.run_with_session_kill",
-        side_effect=fake_run,
-    ):
-        result = _run(executor(ctx))
-
-    assert result["status"] == "succeeded"
-    assert str(captured["cfg"]["benchmark"]["envs"]["RUN_EVAL"]).lower() == "false"
-    assert ctx.extra["shared_state"].stop_reason == ""
-
-
-def test_eval_disabled_resolves_without_a_ctx_shared_state(tmp_path):
-    # The kernel integrate lane builds the executor with no shared_state= and a RunnerContext with no extra, so the
-    # flag has to come off the session dir.
-    from hyperloom.orchestrator.state.shared_state import SharedState
-
-    state = SharedState(session_id="s1")
-    state.eval_disabled = True
-    state.save(tmp_path)
-
-    executor = BaselineExecutor(session_dir=tmp_path)
-    ctx = SimpleNamespace(task=SimpleNamespace(task_id="t", kind="baseline", params={}), extra=None)
-    assert executor._eval_disabled(ctx) is True
-
-
 # --- eval-failure fallback end-to-end --------------------------------------
-def test_eval_failure_triggers_run_eval_false_retry(tmp_path):
-    base = tmp_path / "base.yaml"
-    _write_yaml(base)
-    calls: list[dict] = []
-
-    def fake_run(cmd, *args, **kwargs):
-        cfg_idx = cmd.index("--benchmark-config")
-        out_idx = cmd.index("--output-dir")
-        cfg = yaml.safe_load(Path(cmd[cfg_idx + 1]).read_text())
-        slot = Path(cmd[out_idx + 1])
-        run_eval = str(cfg["benchmark"]["envs"].get("RUN_EVAL", "true")).lower()
-        calls.append({"run_eval": run_eval})
-        if run_eval != "false":
-            # Simulate a broken eval that aborts the script: no valid workspace, marker in stderr.
-            return subprocess.CompletedProcess(cmd, 1, "", "ERROR: run_eval failed with exit code 1\n")
-        _fake_workspace(slot)
-        return subprocess.CompletedProcess(cmd, 0, "ok", "")
-
-    executor = BaselineExecutor(
-        magpie_python="/opt/venv/bin/python",
-        default_config_path=base,
-        session_dir=tmp_path,
-    )
-    ctx = _make_ctx(
-        {
-            "output_dir": str(tmp_path / "ws"),
-            "timeout_sec": 10,
-            "model_path": "/path/models/Qwen-Qwen3-8B",
-            "gpu_type": "mi300x",
-        }
-    )
-    with patch(
-        "hyperloom.orchestrator.actions.executors.baseline.run_with_session_kill",
-        side_effect=fake_run,
-    ):
-        result = _run(executor(ctx))
-
-    # Warmup tries eval=true, falls back to eval=false, then the measured baseline reuses the eval-disabled config.
-    assert [c["run_eval"] for c in calls] == ["true", "false", "false"]
-    assert result["status"] == "succeeded"
-    assert result.get("accuracy_source") == "eval_unavailable"
-    assert "eval_failed_fallback_no_accuracy" in result.get("nonfatal_warnings", [])
-
-
 def test_eval_crash_routes_to_enablement_no_salvage(tmp_path, monkeypatch):
     """flag on + single-node: an eval crash is stamped as an eval-failure contract with no RUN_EVAL=false salvage retry."""
     monkeypatch.delenv("INFERENCE_OPTIMIZER_NODES", raising=False)
     base = tmp_path / "base.yaml"
-    _write_yaml(base)
+    write_sglang_yaml(base)
     calls: list[dict] = []
 
     def fake_run(cmd, *args, **kwargs):
@@ -352,7 +161,7 @@ def test_eval_failure_from_an_unreachable_server_is_not_an_enablement_gap(tmp_pa
     """
     monkeypatch.delenv("INFERENCE_OPTIMIZER_NODES", raising=False)
     base = tmp_path / "base.yaml"
-    _write_yaml(base)
+    write_sglang_yaml(base)
 
     def fake_run(cmd, *args, **kwargs):
         # Verbatim shape of the real failure: the server was torn down mid-eval, so the client's next request is
@@ -397,7 +206,7 @@ def test_eval_failure_from_an_unreachable_server_is_not_an_enablement_gap(tmp_pa
 
 def test_non_eval_failure_does_not_retry(tmp_path):
     base = tmp_path / "base.yaml"
-    _write_yaml(base)
+    write_sglang_yaml(base)
     calls: list[str] = []
 
     def fake_run(cmd, *args, **kwargs):
@@ -441,11 +250,11 @@ def test_baseline_missing_accuracy_stops_run(tmp_path):
     from hyperloom.orchestrator.state.shared_state import SharedState
 
     base = tmp_path / "base.yaml"
-    _write_yaml(base)
+    write_sglang_yaml(base)
 
     def fake_run(cmd, *args, **kwargs):
         out_idx = cmd.index("--output-dir")
-        _fake_workspace(Path(cmd[out_idx + 1]))  # throughput only, no GSM8K
+        fake_workspace(Path(cmd[out_idx + 1]))  # throughput only, no GSM8K
         return subprocess.CompletedProcess(cmd, 0, "ok", "")
 
     executor = BaselineExecutor(
@@ -474,42 +283,19 @@ def test_baseline_missing_accuracy_stops_run(tmp_path):
     assert state.stop_reason == "baseline_accuracy_failed"
 
 
-def test_baseline_operator_disabled_eval_still_stops(tmp_path):
-    """Disabling the serving eval on a genuine baseline is not an opt-out."""
-    from hyperloom.orchestrator.state.shared_state import SharedState
-
-    base = tmp_path / "base.yaml"
-    _write_yaml(base)
+def _eval_failing_run(run_evals: list[str]):
+    """A Magpie run that records each round's RUN_EVAL and fails every round that runs the eval."""
 
     def fake_run(cmd, *args, **kwargs):
-        out_idx = cmd.index("--output-dir")
-        _fake_workspace(Path(cmd[out_idx + 1]))
+        cfg = yaml.safe_load(Path(cmd[cmd.index("--benchmark-config") + 1]).read_text())
+        run_eval = str(cfg["benchmark"]["envs"].get("RUN_EVAL", "true")).lower()
+        run_evals.append(run_eval)
+        if run_eval != "false":
+            return subprocess.CompletedProcess(cmd, 1, "", "ERROR: run_eval failed with exit code 1\n")
+        fake_workspace(Path(cmd[cmd.index("--output-dir") + 1]))
         return subprocess.CompletedProcess(cmd, 0, "ok", "")
 
-    executor = BaselineExecutor(
-        magpie_python="/opt/venv/bin/python",
-        default_config_path=base,
-        session_dir=tmp_path,
-    )
-    state = SharedState(enablement_mode="off")
-    ctx = _make_baseline_ctx(
-        {
-            "output_dir": str(tmp_path / "ws"),
-            "timeout_sec": 10,
-            "model_path": "/wekafs/models/Qwen-Qwen3-8B",
-            "gpu_type": "mi300x",
-            "disable_run_eval": True,
-        },
-        state,
-    )
-    with patch(
-        "hyperloom.orchestrator.actions.executors.baseline.run_with_session_kill",
-        side_effect=fake_run,
-    ):
-        result = _run(executor(ctx))
-
-    assert result["status"] == "succeeded"
-    assert state.stop_reason == "baseline_accuracy_failed"
+    return fake_run
 
 
 def test_baseline_eval_failure_stops_run_without_burning_a_retry(tmp_path):
@@ -517,26 +303,8 @@ def test_baseline_eval_failure_stops_run_without_burning_a_retry(tmp_path):
     from hyperloom.orchestrator.state.shared_state import SharedState
 
     base = tmp_path / "base.yaml"
-    _write_yaml(base)
+    write_sglang_yaml(base)
     run_evals: list[str] = []
-
-    def fake_run(cmd, *args, **kwargs):
-        cfg_idx = cmd.index("--benchmark-config")
-        out_idx = cmd.index("--output-dir")
-        cfg = yaml.safe_load(Path(cmd[cfg_idx + 1]).read_text())
-        slot = Path(cmd[out_idx + 1])
-        run_eval = str(cfg["benchmark"]["envs"].get("RUN_EVAL", "true")).lower()
-        run_evals.append(run_eval)
-        if run_eval != "false":
-            return subprocess.CompletedProcess(cmd, 1, "", "ERROR: run_eval failed with exit code 1\n")
-        _fake_workspace(slot)
-        return subprocess.CompletedProcess(cmd, 0, "ok", "")
-
-    executor = BaselineExecutor(
-        magpie_python="/opt/venv/bin/python",
-        default_config_path=base,
-        session_dir=tmp_path,
-    )
     state = SharedState(enablement_mode="off")
     ctx = _make_baseline_ctx(
         {
@@ -547,11 +315,7 @@ def test_baseline_eval_failure_stops_run_without_burning_a_retry(tmp_path):
         },
         state,
     )
-    with patch(
-        "hyperloom.orchestrator.actions.executors.baseline.run_with_session_kill",
-        side_effect=fake_run,
-    ):
-        result = _run(executor(ctx))
+    result = run_baseline(base, tmp_path, ctx, _eval_failing_run(run_evals))
 
     # No RUN_EVAL=false salvage round was launched -- the wasted budget is gone.
     assert "false" not in run_evals
@@ -562,31 +326,13 @@ def test_baseline_eval_failure_stops_run_without_burning_a_retry(tmp_path):
     assert state.stop_reason == "baseline_accuracy_failed"
 
 
-def test_non_baseline_kind_still_gets_the_throughput_salvage_retry(tmp_path):
-    """The fail-fast rule is scoped to genuine baselines."""
+def test_non_baseline_kind_eval_failure_fails_without_retry_or_stop(tmp_path):
+    """A non-genuine baseline's eval failure fails the round: no throughput-only retry, no session stop."""
     from hyperloom.orchestrator.state.shared_state import SharedState
 
     base = tmp_path / "base.yaml"
-    _write_yaml(base)
+    write_sglang_yaml(base)
     run_evals: list[str] = []
-
-    def fake_run(cmd, *args, **kwargs):
-        cfg_idx = cmd.index("--benchmark-config")
-        out_idx = cmd.index("--output-dir")
-        cfg = yaml.safe_load(Path(cmd[cfg_idx + 1]).read_text())
-        slot = Path(cmd[out_idx + 1])
-        run_eval = str(cfg["benchmark"]["envs"].get("RUN_EVAL", "true")).lower()
-        run_evals.append(run_eval)
-        if run_eval != "false":
-            return subprocess.CompletedProcess(cmd, 1, "", "ERROR: run_eval failed with exit code 1\n")
-        _fake_workspace(slot)
-        return subprocess.CompletedProcess(cmd, 0, "ok", "")
-
-    executor = BaselineExecutor(
-        magpie_python="/opt/venv/bin/python",
-        default_config_path=base,
-        session_dir=tmp_path,
-    )
     state = SharedState()
     task = SimpleNamespace(
         task_id="t-warm",
@@ -599,16 +345,11 @@ def test_non_baseline_kind_still_gets_the_throughput_salvage_retry(tmp_path):
         },
     )
     ctx = SimpleNamespace(task=task, extra={"shared_state": state})
-    with patch(
-        "hyperloom.orchestrator.actions.executors.baseline.run_with_session_kill",
-        side_effect=fake_run,
-    ):
-        result = _run(executor(ctx))
+    result = run_baseline(base, tmp_path, ctx, _eval_failing_run(run_evals))
 
-    assert "false" in run_evals  # salvage retry ran
-    assert result["status"] == "succeeded"
+    assert "false" not in run_evals
+    assert result["status"] == "failed"
     assert result.get("accuracy_source") == "eval_unavailable"
-    assert "eval_failed_fallback_no_accuracy" in result.get("nonfatal_warnings", [])
     # Not a genuine baseline -> the accuracy stop gate does not fire.
     assert state.stop_reason == ""
 
@@ -627,12 +368,10 @@ def _stopped(
     result: dict,
     *,
     params: dict | None = None,
-    eval_disabled: bool = False,
 ) -> str:
     """Run ``_maybe_stop_on_missing_baseline_accuracy`` and return the reason."""
     executor = BaselineExecutor()
-    rec = _StopRecorder()
-    rec.eval_disabled = eval_disabled
+    rec = SharedState(enablement_mode="off")
     executor._maybe_stop_on_missing_baseline_accuracy(_stop_ctx(framework, rec, params), result)
     return rec.stop_reason
 
@@ -673,16 +412,6 @@ def test_stop_serving_operator_disabled_via_config():
     assert reason == "baseline_accuracy_failed"
 
 
-def test_no_stop_when_eval_is_disabled():
-    # --no-eval never asked for a reference, so the baseline anchors on throughput instead of halting.
-    reason = _stopped(
-        "sglang",
-        {"status": "succeeded", "run_eval_disabled": True},
-        eval_disabled=True,
-    )
-    assert reason == ""
-
-
 def test_no_stop_when_quality_ref_exempt():
     # Synthetic kernel-lane re-baselines (kind="baseline" + quality_ref_exempt) are throughput-only A/B probes: no
     # accuracy, no stop.
@@ -717,7 +446,7 @@ def test_no_stop_valid_accuracy():
 
 def test_no_stop_when_not_genuine_baseline():
     executor = BaselineExecutor()
-    rec = _StopRecorder()
+    rec = SharedState(enablement_mode="off")
     task = SimpleNamespace(task_id="t", kind="replay_warm_recipe", params={"framework": "sglang"})
     ctx = SimpleNamespace(task=task, extra={"shared_state": rec})
     executor._maybe_stop_on_missing_baseline_accuracy(ctx, {"status": "succeeded", "run_eval_disabled": False})
@@ -843,7 +572,7 @@ def test_salvage_sibling_attempt_accuracy_prevents_stop(tmp_path):
     deciding.mkdir(parents=True, exist_ok=True)
 
     executor = BaselineExecutor()
-    rec = _StopRecorder()
+    rec = SharedState(enablement_mode="off")
     result = {
         "status": "succeeded",
         "run_eval_disabled": False,
@@ -873,7 +602,7 @@ def test_an_unreachable_server_does_not_discard_a_salvaged_under_floor_accuracy(
     deciding.mkdir(parents=True, exist_ok=True)
 
     executor = BaselineExecutor()
-    rec = _StopRecorder("eval")
+    rec = SharedState(enablement_mode="eval")
     result = {
         "status": "failed",
         "run_eval_disabled": False,
@@ -913,9 +642,9 @@ def test_the_double_run_handoff_is_not_reported_as_a_recovery(tmp_path, caplog):
     deciding.mkdir(parents=True, exist_ok=True)
 
     executor = BaselineExecutor()
-    rec = _StopRecorder()
+    rec = SharedState(enablement_mode="off")
     result = {"status": "succeeded", "run_eval_disabled": False, "output_dir": str(deciding)}
-    with caplog.at_level(logging.INFO, logger=_BASELINE_LOGGER):
+    with caplog.at_level(logging.INFO, logger=_ACCURACY_LOGGER):
         executor._maybe_stop_on_missing_baseline_accuracy(_stop_ctx("vllm", rec), result)
 
     assert rec.stop_reason == ""
@@ -933,9 +662,9 @@ def test_an_unexpected_gap_is_still_reported_as_a_salvage(tmp_path, caplog):
     deciding.mkdir(parents=True, exist_ok=True)
 
     executor = BaselineExecutor()
-    rec = _StopRecorder()
+    rec = SharedState(enablement_mode="off")
     result = {"status": "succeeded", "run_eval_disabled": False, "output_dir": str(deciding)}
-    with caplog.at_level(logging.INFO, logger=_BASELINE_LOGGER):
+    with caplog.at_level(logging.INFO, logger=_ACCURACY_LOGGER):
         executor._maybe_stop_on_missing_baseline_accuracy(_stop_ctx("vllm", rec), result)
 
     assert any(r.levelno == logging.WARNING and "salvaged" in r.getMessage() for r in caplog.records)
@@ -956,44 +685,10 @@ def test_salvage_prefers_a_measured_round_over_a_warmup(tmp_path):
     assert parsed["accuracy"] == pytest.approx(0.90)
 
 
-def test_eval_already_off_does_not_retry(tmp_path):
-    base = tmp_path / "base.yaml"
-    _write_yaml(base)
-    calls: list[str] = []
-
-    def fake_run(cmd, *args, **kwargs):
-        calls.append("x")
-        # Even with an eval marker, an explicit opt-out must not double-run.
-        return subprocess.CompletedProcess(cmd, 1, "", "ERROR: run_eval failed with exit code 1\n")
-
-    executor = BaselineExecutor(
-        magpie_python="/opt/venv/bin/python",
-        default_config_path=base,
-        session_dir=tmp_path,
-    )
-    ctx = _make_ctx(
-        {
-            "output_dir": str(tmp_path / "ws"),
-            "timeout_sec": 10,
-            "model_path": "/path/models/Qwen-Qwen3-8B",
-            "gpu_type": "mi300x",
-            "disable_run_eval": True,
-        }
-    )
-    with patch(
-        "hyperloom.orchestrator.actions.executors.baseline.run_with_session_kill",
-        side_effect=fake_run,
-    ):
-        result = _run(executor(ctx))
-
-    assert len(calls) == 1  # already off, no fallback
-    assert result["status"] == "failed"
-
-
 # --- eval-origin enablement routing (flag on) ------------------------------
+from hyperloom.common.gain_math import DEFAULT_ENABLEMENT_ACCURACY_FLOOR
 from hyperloom.orchestrator.actions.executors._accuracy_gate import (
     BASELINE_EVAL_ACCURACY_FLOOR_KEY,
-    DEFAULT_ENABLEMENT_ACCURACY_FLOOR,
     BASELINE_EVAL_CONTRACT_FINGERPRINT_KEY,
     BASELINE_EVAL_EVIDENCE_KEY,
     BASELINE_EVAL_FAILED_KEY,
@@ -1027,7 +722,7 @@ def _route(monkeypatch, framework, result, *, nodes=None, tmp_path=None):
     if tmp_path is not None and "materialized_config" not in result:
         result["materialized_config"] = str(_write_minimal_route_yaml(tmp_path, framework))
     executor = BaselineExecutor()
-    rec = _StopRecorder("eval")
+    rec = SharedState(enablement_mode="eval")
     executor._maybe_stop_on_missing_baseline_accuracy(_stop_ctx(framework, rec), result)
     return rec.stop_reason
 
@@ -1116,7 +811,7 @@ def test_eval_enablement_quality_ref_exempt_not_routed(monkeypatch):
     """Synthetic kernel-lane re-baselines are neither routed nor stopped."""
     result = {"status": "succeeded", "run_eval_disabled": True}
     executor = BaselineExecutor()
-    rec = _StopRecorder("eval")
+    rec = SharedState(enablement_mode="eval")
     monkeypatch.delenv("INFERENCE_OPTIMIZER_NODES", raising=False)
     executor._maybe_stop_on_missing_baseline_accuracy(_stop_ctx("sglang", rec, {"quality_ref_exempt": True}), result)
     assert rec.stop_reason == ""
@@ -1145,6 +840,7 @@ def test_after_materialize_applies_eval_concurrency_compat(tmp_path):
     """The compat patch is re-asserted against the exact checkout that runs."""
     ix = tmp_path / "ix"
     (ix / "benchmarks").mkdir(parents=True)
+    (ix / "benchmarks" / "benchmark_lib.sh").write_text("#!/usr/bin/env bash\n", encoding="utf-8")
     cfg = _materialized_cfg(tmp_path, run_eval="true", inferencex_path=str(ix))
     seen: list[str | None] = []
 
@@ -1153,9 +849,12 @@ def test_after_materialize_applies_eval_concurrency_compat(tmp_path):
         return True
 
     executor = BaselineExecutor()
-    with patch(
-        "hyperloom.orchestrator.actions.executors.baseline.ensure_eval_concurrency_compat",
-        side_effect=fake_compat,
+    with (
+        patch("hyperloom.orchestrator.actions.executors.baseline.failed_patch_anchors_in", return_value=[]),
+        patch(
+            "hyperloom.orchestrator.actions.executors.baseline.ensure_eval_concurrency_compat",
+            side_effect=fake_compat,
+        ),
     ):
         assert executor._after_materialize_config(cfg, tmp_path) is None
 
@@ -1166,6 +865,7 @@ def test_after_materialize_fails_loudly_when_flag_unpatchable(tmp_path):
     """Fail LOUDLY, never warn-and-continue: an unstrippable flag guarantees the benchmark aborts in run_lm_eval, so short-circuit before the server boots."""
     ix = tmp_path / "ix"
     (ix / "benchmarks").mkdir(parents=True)
+    (ix / "benchmarks" / "benchmark_lib.sh").write_text("#!/usr/bin/env bash\n", encoding="utf-8")
     cfg = _materialized_cfg(tmp_path, run_eval="true", inferencex_path=str(ix))
 
     executor = BaselineExecutor()
@@ -1190,6 +890,7 @@ def test_after_materialize_skips_compat_gate_when_eval_disabled(tmp_path):
     """
     ix = tmp_path / "ix"
     (ix / "benchmarks").mkdir(parents=True)
+    (ix / "benchmarks" / "benchmark_lib.sh").write_text("#!/usr/bin/env bash\n", encoding="utf-8")
     cfg = _materialized_cfg(tmp_path, run_eval="false", inferencex_path=str(ix))
     calls: list[int] = []
 
@@ -1211,6 +912,7 @@ def test_after_materialize_compat_exception_is_not_swallowed(tmp_path):
     """An exception from the patcher must surface as the same loud failure, not as a silent 'best-effort skip'."""
     ix = tmp_path / "ix"
     (ix / "benchmarks").mkdir(parents=True)
+    (ix / "benchmarks" / "benchmark_lib.sh").write_text("#!/usr/bin/env bash\n", encoding="utf-8")
     cfg = _materialized_cfg(tmp_path, run_eval="true", inferencex_path=str(ix))
 
     executor = BaselineExecutor()
@@ -1307,11 +1009,11 @@ def test_an_mlperf_baseline_without_a_clean_inline_score_stops_the_session(tmp_p
     monkeypatch.setenv("HYPERLOOM_AGENTX", "1")
     monkeypatch.setenv("HYPERLOOM_AGENTIC_BACKEND", "mlperf")
     base = tmp_path / "base.yaml"
-    _write_yaml(base)
+    write_sglang_yaml(base)
 
     def fake_run(cmd, *args, **kwargs):
         slot = Path(cmd[cmd.index("--output-dir") + 1])
-        ws = _fake_workspace(slot)
+        ws = fake_workspace(slot)
         (ws / "inferencex_result.json").write_text(
             json.dumps({"output_throughput": 1500.0, "request_error_rate": 0.0, "submission_valid": True, **inline}),
             encoding="utf-8",

@@ -3,27 +3,28 @@
 from __future__ import annotations
 
 import logging
-import os
 import time
 from typing import Any
+
+from hyperloom_common.env import env_int
 
 from .external_state import reachable_service_url
 
 log = logging.getLogger(__name__)
 
-# Mirror the orchestrator's post-restart probe so a resume and the wait that follows it agree on what "serving" means.
-_PROBE_TOKENS_ENV = "HYPERLOOM_MN_COMPLETION_PROBE_TOKENS"
-_PROBE_MIN_TOKENS_ENV = "HYPERLOOM_MN_COMPLETION_PROBE_MIN_TOKENS"
-_DEFAULT_PROBE_TOKENS = 8
-_DEFAULT_PROBE_MIN_TOKENS = 2
+
+def completion_probe_tokens() -> int:
+    """``max_tokens`` a ``/v1/completions`` readiness probe requests.
+
+    Shared with the orchestrator's post-restart wait so a resume and the wait that follows it agree on what
+    "serving" means.
+    """
+    return env_int("HYPERLOOM_MN_COMPLETION_PROBE_TOKENS", 8)
 
 
-def _int_env(name: str, default: int) -> int:
-    """Read a positive int from the environment, falling back on junk."""
-    try:
-        return int(os.environ.get(name, "") or default)
-    except ValueError:
-        return default
+def completion_probe_min_tokens() -> int:
+    """Fewest generated tokens that count a ``/v1/completions`` readiness probe as served."""
+    return env_int("HYPERLOOM_MN_COMPLETION_PROBE_MIN_TOKENS", 2)
 
 
 def generated_tokens(data: object) -> int:
@@ -57,16 +58,18 @@ def _serving_legs(state: dict[str, Any], pd_mode: str) -> list[str]:
 
 
 def cluster_is_serving(state: dict[str, Any], *, pd_mode: str, timeout_s: int) -> bool:
-    """Whether every leg is up AND the model answers with real tokens, right now."""
+    """Whether every leg is up AND the model answers with real tokens, right now.
+
+    Raises:
+        EnvValueError: A completion-probe token setting is set but is not an integer.
+    """
+    wanted = completion_probe_tokens()
+    floor = completion_probe_min_tokens()
     legs = _serving_legs(state, pd_mode)
     front = reachable_service_url(state)
     if not legs or not front:
         return False
-    try:
-        import httpx
-    except ImportError:  # pragma: no cover - httpx is backfilled by preflight
-        log.info("serving probe: httpx unavailable")
-        return False
+    import httpx
 
     deadline = time.monotonic() + timeout_s
 
@@ -104,7 +107,6 @@ def cluster_is_serving(state: dict[str, Any], *, pd_mode: str, timeout_s: int) -
 
             # ignore_eos plus several tokens forces the request through the decode leg; prefill alone can answer the
             # first token.
-            wanted = _int_env(_PROBE_TOKENS_ENV, _DEFAULT_PROBE_TOKENS)
             if _left() <= 0:
                 log.info("serving probe: %ds budget spent before /v1/completions was attempted", timeout_s)
                 return False
@@ -124,11 +126,10 @@ def cluster_is_serving(state: dict[str, Any], *, pd_mode: str, timeout_s: int) -
                 log.info("serving probe: /v1/completions returned %s", completion.status_code)
                 return False
             produced = generated_tokens(completion.json())
-            floor = _int_env(_PROBE_MIN_TOKENS_ENV, _DEFAULT_PROBE_MIN_TOKENS)
             if produced < floor:
                 log.info("serving probe: /v1/completions generated %d tokens (need %d)", produced, floor)
                 return False
-    except Exception as exc:  # noqa: BLE001
+    except (httpx.HTTPError, ValueError) as exc:
         log.info("serving probe: %r", exc)
         return False
     return True

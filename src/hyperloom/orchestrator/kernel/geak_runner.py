@@ -1,0 +1,129 @@
+#!/usr/bin/env python3
+# SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
+# SPDX-License-Identifier: MIT
+
+"""GEAK e2e optimizer submission (whole-pipeline; GEAK@GEAK main)."""
+
+from __future__ import annotations
+
+import json
+import os
+import signal
+import subprocess
+import sys
+import tempfile
+import time
+from pathlib import Path
+from typing import IO
+
+from hyperloom.common.env_safety import redact_secret_values
+from hyperloom.common.geak_checkout import resolve_e2e_runner
+from hyperloom.common.proctree import signal_group
+
+_TAIL_CHARS = 4000
+
+
+def _tail(stream: IO[bytes]) -> str:
+    """The last :data:`_TAIL_CHARS` characters written to ``stream``."""
+    stream.seek(0, os.SEEK_END)
+    stream.seek(max(0, stream.tell() - 4 * _TAIL_CHARS))
+    return stream.read().decode("utf-8", "replace")[-_TAIL_CHARS:]
+
+
+def call_geak(handoff: dict, output_dir: Path, *, timeout_s: int) -> dict:
+    """Run GEAK e2e once and return the parsed result.json (+ run metadata)."""
+    output_dir = Path(output_dir)
+    output_dir.mkdir(parents=True, exist_ok=True)
+    handoff_path = output_dir / "handoff.json"
+    result_path = output_dir / "result.json"
+    handoff_path.write_text(json.dumps(handoff, indent=2), encoding="utf-8")
+
+    runner = resolve_e2e_runner()
+    cmd = [sys.executable, runner, str(handoff_path), str(result_path)]
+
+    env = dict(os.environ)
+    # ``timeout_s`` is authoritative: run_e2e.py reads GEAK_E2E_TIMEOUT_S to self-stop before the outer subprocess
+    # kill.
+    grace_raw = os.environ.get("GEAK_FLUSH_GRACE_S", "").strip()
+    flush_grace = int(grace_raw) if grace_raw.isdigit() and int(grace_raw) > 0 else 180
+    inner_timeout = max(60, timeout_s - flush_grace)
+    env["GEAK_E2E_TIMEOUT_S"] = str(inner_timeout)  # run_e2e's anyio budget
+
+    started = time.time()
+    # Files, not pipes: a process run_e2e leaves behind still holds its stdio, and must not keep this wait open.
+    with tempfile.TemporaryFile() as stdout, tempfile.TemporaryFile() as stderr:
+        # start_new_session=True -> run_e2e + its vllm/node children share a process group we can signal as a unit.
+        proc = subprocess.Popen(cmd, stdout=stdout, stderr=stderr, env=env, start_new_session=True)
+
+        try:
+            returncode = proc.wait(timeout=timeout_s)
+        except subprocess.TimeoutExpired:
+            # SIGTERM lets run_e2e flush result.json, then escalate to SIGKILL.
+            signal_group(proc.pid, signal.SIGTERM, what="geak")
+            try:
+                returncode = proc.wait(timeout=flush_grace)
+            except subprocess.TimeoutExpired:
+                signal_group(proc.pid, signal.SIGKILL, what="geak")
+                proc.wait()
+                returncode = -1
+        stdout_tail = _tail(stdout)
+        stderr_tail = _tail(stderr)
+
+    result: dict = {}
+    if result_path.is_file():
+        try:
+            _parsed = json.loads(result_path.read_text(encoding="utf-8"))
+            if isinstance(_parsed, dict):
+                result = _parsed
+        except json.JSONDecodeError:
+            pass
+    if not result:
+        result = {
+            "status": "error",
+            "error": f"no parseable result.json (rc={returncode})",
+        }
+    result.update(
+        {
+            "returncode": returncode,
+            "stdout_tail": stdout_tail,
+            "stderr_tail": stderr_tail,
+            "elapsed_s": round(time.time() - started, 2),
+            "handoff_path": str(handoff_path),
+            "result_path": str(result_path),
+        }
+    )
+    return result
+
+
+def main(argv: list[str]) -> int:
+    """CLI: ``python -m hyperloom.orchestrator.kernel.geak_runner <handoff.json> <output_dir> --timeout-s N``."""
+    import argparse
+
+    ap = argparse.ArgumentParser(description="Run GEAK e2e once.")
+    ap.add_argument("handoff_json")
+    ap.add_argument("output_dir")
+    ap.add_argument("--timeout-s", type=int, required=True)
+    args = ap.parse_args(argv)
+
+    handoff = json.loads(Path(args.handoff_json).read_text(encoding="utf-8"))
+    out = call_geak(handoff, Path(args.output_dir), timeout_s=args.timeout_s)
+    print(
+        json.dumps(
+            {
+                "status": out.get("status"),
+                "speedup": out.get("throughput_speedup"),
+                "result_path": out.get("result_path"),
+            }
+        )
+    )
+    if out.get("status") not in ("error", "timeout", None):
+        return 0
+    # The caller logs only the tail of this stream, so the error goes last. Both fields can carry subprocess stderr.
+    for text in (out.get("stderr_tail"), out.get("error")):
+        if text:
+            print(redact_secret_values(str(text).rstrip()), file=sys.stderr)
+    return 1
+
+
+if __name__ == "__main__":
+    raise SystemExit(main(sys.argv[1:]))

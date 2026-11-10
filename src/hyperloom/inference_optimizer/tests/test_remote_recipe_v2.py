@@ -5,9 +5,11 @@ from __future__ import annotations
 
 import hashlib
 import inspect
+from io import BytesIO
 import json
 from pathlib import Path
 from types import SimpleNamespace
+from urllib.error import HTTPError, URLError
 
 import pytest
 
@@ -18,8 +20,6 @@ from hyperloom.orchestrator.knowledge.agent_kb import (
 from hyperloom.orchestrator.knowledge.remote_recipe import (
     CURRENT_KNOWLEDGE_SCHEMA_VERSION,
     RECORD_KIND_HYPERLOOM_RECIPE,
-    HyperloomRemoteKB,
-    KBStoreClient,
     KBStoreError,
     KnowledgeSections,
     RemoteRecipeClient,
@@ -28,15 +28,12 @@ from hyperloom.orchestrator.knowledge.remote_recipe import (
     build_remote_knowledge,
     has_new_keep,
     knowledge_to_warm_recipe,
-    read_remote_recipe as _read_remote_recipe,
     write_final_remote_recipe,
 )
-from hyperloom.orchestrator.knowledge.remote_recipe.values import _Files, merge_staged_sections
 from hyperloom.orchestrator.knowledge.remote_recipe._vendor import kb_store_client
 from hyperloom.orchestrator.knowledge.remote_recipe.client import (
     _champion,
     _validate_download_listing,
-    _validate_session_envelope,
     _verify_downloaded_files,
 )
 from hyperloom.orchestrator.knowledge.remote_recipe.models import (
@@ -47,6 +44,7 @@ from hyperloom.orchestrator.knowledge.remote_recipe.models import (
     KnowledgeBundle,
     RecipeScope,
     RemoteRecipeValidationError,
+    extract_knowledge_artifact_refs,
 )
 from hyperloom.orchestrator.knowledge.remote_recipe.sanitize import (
     sanitize_publish_env_mapping,
@@ -54,21 +52,17 @@ from hyperloom.orchestrator.knowledge.remote_recipe.sanitize import (
     sanitize_shared_knowledge,
 )
 from hyperloom.orchestrator.knowledge.remote_recipe.values import (
-    _Files,
     build_publishable_recipe_config,
     has_replay_material,
 )
-from hyperloom.orchestrator.loop.writeback import WritebackCollaborator, _remote_result_type
+from hyperloom.orchestrator.knowledge.recipe_journal import RecipeJournalCollaborator, _remote_result_type
+from hyperloom.orchestrator.loop.writeback import WritebackCollaborator
+from hyperloom.orchestrator.state.shared_state import SharedState
 from hyperloom.inference_optimizer.breakdown.recorder import close_out as _close_out
 
 _DOWNLOAD_BYTES = b"verified artifact"
 _DOWNLOAD_SHA256 = hashlib.sha256(_DOWNLOAD_BYTES).hexdigest()
 _SCOPE = RecipeScope("forge", 8, 64, 1024, 256)
-
-
-def read_remote_recipe(*args, **kwargs):
-    kwargs.setdefault("scope", _SCOPE)
-    return _read_remote_recipe(*args, **kwargs)
 
 
 class RemoteWarmRecipeAdapter(_RemoteWarmRecipeAdapter):
@@ -93,7 +87,8 @@ def _build(state, files_dir, *, sections=None):
         state,
         files_dir,
         sections=sections,
-        metrics=KBSelectionProfile.from_state(state).metrics,
+        profile=KBSelectionProfile.from_state(state, scope=RecipeScope.from_state(state)),
+        session_id=str(getattr(state, "recipe_kb_session_id", "") or getattr(state, "session_id", "")),
     )
 
 
@@ -211,15 +206,15 @@ def _state(tmp_path: Path) -> SimpleNamespace:
             "kernel_speedup": 1.2,
         },
         last_fusion_integrate={"decision": "KEEP", "new_tput": 130.0, "patch_path": str(fusion)},
-        kernel_opt_task_attempts={
-            "rmsnorm": {
-                "last_decision": "KEEP",
+        pending_kernel_integrations={
+            "integration-rmsnorm-1": {
+                "integration_id": "integration-rmsnorm-1",
                 "task_group_key": "group-rmsnorm",
-                "current_kernel_id": "rmsnorm",
-                "kernel_name": "rmsnorm",
-                "last_micro_speedup": 1.5,
-                "last_artifact_path": str(rewrite),
-                "last_source_file": str(source),
+                "kernel_id": "rmsnorm",
+                "micro_speedup": 1.5,
+                "artifact_path": str(rewrite),
+                "source_file": str(source),
+                "status": "integrated",
             }
         },
         last_action_failures=[{"action": "explore", "reason": "OOM"}],
@@ -473,6 +468,15 @@ def test_kernel_items_record_the_checkout_they_were_applied_into(tmp_path: Path)
     assert all(root == str(tmp_path) for root in roots)
 
 
+def test_a_rewrite_records_the_checkout_its_queued_keep_was_deployed_into(tmp_path: Path) -> None:
+    state = _state(tmp_path)
+    state.pending_kernel_integrations["integration-rmsnorm-1"]["deploy_repo_root"] = "/opt/kernels"
+
+    rewrite = _build(state, tmp_path / "files-deploy-root").knowledge["value"]["kernel"]["rewrite"]["items"][0]
+
+    assert rewrite["host_origin"]["apply_root"] == "/opt/kernels"
+
+
 def test_kernel_fusion_that_cannot_name_its_checkout_is_dropped(tmp_path: Path) -> None:
     """An item that cannot name its checkout degrades to a drop, not an abort."""
     state = _state(tmp_path)
@@ -578,6 +582,15 @@ def test_publish_sanitizer_allows_only_safe_replay_envs_and_args() -> None:
         )
         == "--page-size 32 --attention-backend ROCM_AITER"
     )
+
+
+def test_a_shared_recipe_drops_the_flags_the_launch_guards_add_for_their_run() -> None:
+    args = "--context-length 6144 --watchdog-timeout=1800 --kv-cache-dtype fp8_e4m3 --fp8-gemm-backend aiter"
+
+    assert sanitize_publish_server_args(args) == "--kv-cache-dtype fp8_e4m3 --fp8-gemm-backend aiter"
+    assert sanitize_shared_knowledge({"value": {"config": {"extra_server_args": args}}})["value"]["config"] == {
+        "extra_server_args": "--kv-cache-dtype fp8_e4m3 --fp8-gemm-backend aiter"
+    }
 
 
 def test_shared_knowledge_sanitizer_scrubs_nested_columns_and_paths() -> None:
@@ -746,7 +759,6 @@ def test_prior_kernel_adoption_requires_successful_kernel_replay(
     state.last_gemm_tuning = {}
     state.last_fusion = {}
     state.last_fusion_integrate = {}
-    state.kernel_opt_task_attempts = {}
     state.warm_replay_outcome = warm_replay_outcome
     state.warm_kernel_kb_plan = [
         {
@@ -828,6 +840,76 @@ def test_prior_kernel_artifact_conflict_is_renamed_and_remapped(
     assert set(refs).issubset({artifact.path for artifact in bundle.artifacts})
 
 
+def test_kernel_gemm_config_env_paths_are_published_as_refs(tmp_path: Path) -> None:
+    """A config-file env names the tables the champion ran with, so it must travel as refs, not donor paths."""
+    bf16 = tmp_path / "gemm_bf16.csv"
+    bf16.write_text("M,N,K\n16,512,7168\n", encoding="utf-8")
+    fp8 = tmp_path / "gemm_fp8.csv"
+    fp8.write_text("M,N,K\n32,512,7168\n", encoding="utf-8")
+    state = _state(tmp_path)
+    for row in state.optimization_stack:
+        if row["action"] == "gemm_tuning":
+            row["candidate_extra_envs"] = {"AITER_CONFIG_GEMM_BF16": f"{bf16}:{fp8}"}
+            row["extra_envs"] = {"AITER_CONFIG_GEMM_BF16": f"{bf16}:{fp8}"}
+
+    bundle = _build(state, tmp_path / "files-gemm-env")
+
+    row = bundle.knowledge["value"]["kernel"]["gemm"]["optimizations"][0]
+    refs = row["candidate_extra_envs"]["AITER_CONFIG_GEMM_BF16"].split(":")
+    assert [Path(ref).name for ref in refs] == ["gemm_bf16.csv", "gemm_fp8.csv"]
+    assert all(ref.startswith("kernel/gemm/artifacts/") for ref in refs)
+    assert row["extra_envs"]["AITER_CONFIG_GEMM_BF16"] == ":".join(refs)
+    staged = {artifact.path: artifact.source for artifact in bundle.artifacts}
+    assert set(refs) <= set(staged)
+    assert staged[refs[1]].read_text(encoding="utf-8") == fp8.read_text(encoding="utf-8")
+    # Every element counts as a ref, so the bundle is neither short a file nor carrying an orphan.
+    bundle.validate()
+    assert set(refs) <= extract_knowledge_artifact_refs(bundle.knowledge, list(staged))
+
+
+def test_adopted_config_env_refs_follow_the_renamed_artifact(tmp_path: Path) -> None:
+    prior_root = tmp_path / "prior-env"
+    prior_ref = "kernel/gemm/artifacts/tuned.csv"
+    bf16_ref = "kernel/gemm/artifacts/gemm_bf16.csv"
+    (prior_root / "files" / "kernel" / "gemm" / "artifacts").mkdir(parents=True)
+    (prior_root / "files" / prior_ref).write_text("prior\n", encoding="utf-8")
+    (prior_root / "files" / bf16_ref).write_text("prior bf16\n", encoding="utf-8")
+    prior_row = {
+        "id": "prior-gemm",
+        "tuned_file": prior_ref,
+        "extra_envs": {"AITER_CONFIG_GEMM_BF16": f"{prior_ref}:{bf16_ref}"},
+    }
+    (prior_root / "recipe.json").write_text(
+        json.dumps(
+            {
+                "value": {
+                    "kernel": {
+                        "gemm": {"optimizations": [prior_row]},
+                        "fusion": {"items": []},
+                        "rewrite": {"items": []},
+                    }
+                }
+            }
+        ),
+        encoding="utf-8",
+    )
+    state = _state(tmp_path)
+    state.warm_replay_outcome = {"status": "reproduced", "kernel": {"status": "kept", "kept": 1}}
+    state.warm_kernel_kb_plan = [{"column": "gemm", "decision": "KEEP", "recipe_row": prior_row}]
+    sections = KnowledgeSections(tmp_path / "draft-env", warm_start_dir=prior_root)
+
+    bundle = _build(state, tmp_path / "files-prior-env", sections=sections)
+
+    optimizations = bundle.knowledge["value"]["kernel"]["gemm"]["optimizations"]
+    adopted = next(row for row in optimizations if row.get("id") == "prior-gemm")
+    elements = adopted["extra_envs"]["AITER_CONFIG_GEMM_BF16"].split(":")
+    # This session staged its own tuned.csv, so the prior table was renamed; the env value must name the new ref.
+    assert adopted["tuned_file"] != prior_ref
+    assert elements == [adopted["tuned_file"], bf16_ref]
+    assert set(elements) <= {artifact.path for artifact in bundle.artifacts}
+    bundle.validate()
+
+
 def test_micro_keep_with_e2e_revert_but_no_integrate_stack_is_not_written(
     tmp_path: Path,
 ) -> None:
@@ -849,8 +931,8 @@ def test_integrate_stack_is_authoritative_for_rewrite_patch(tmp_path: Path) -> N
     state = _state(tmp_path)
     unintegrated_patch = tmp_path / "micro-only.cu"
     unintegrated_patch.write_text("// micro only", encoding="utf-8")
-    attempt = state.kernel_opt_task_attempts["rmsnorm"]
-    attempt["last_artifact_path"] = str(unintegrated_patch)
+    queued = state.pending_kernel_integrations["integration-rmsnorm-1"]
+    queued["artifact_path"] = str(unintegrated_patch)
     bundle = _build(state, tmp_path / "files-integrated")
     rewrite = bundle.knowledge["value"]["kernel"]["rewrite"]["items"][0]
     assert rewrite["patch"].endswith("/rewrite.cu")
@@ -862,7 +944,7 @@ def test_integrated_rewrite_missing_artifact_fails_closed(tmp_path: Path) -> Non
     state = _state(tmp_path)
     integrate = next(row for row in state.optimization_stack if row.get("action") == "integrate")
     integrate["patch_path"] = str(tmp_path / "missing-rewrite.cu")
-    state.kernel_opt_task_attempts["rmsnorm"]["last_artifact_path"] = ""
+    state.pending_kernel_integrations["integration-rmsnorm-1"]["artifact_path"] = ""
     with pytest.raises(RemoteRecipeValidationError, match="kernel/rewrite"):
         _build(state, tmp_path / "files-missing-rewrite")
 
@@ -904,8 +986,7 @@ def test_mixed_slash_free_text_is_not_treated_as_an_artifact_ref(
 ) -> None:
     source = tmp_path / "accepted.patch"
     source.write_text("diff", encoding="utf-8")
-    files = _Files(tmp_path / "bundle-files")
-    ref = files.add(source, category="patch", kind="patches")
+    ref = "patch/patches/accepted.patch"
     knowledge = {
         "value": {
             "patch": {
@@ -915,14 +996,13 @@ def test_mixed_slash_free_text_is_not_treated_as_an_artifact_ref(
         }
     }
 
-    files.prune_superseded(knowledge)
-    assert [artifact.path for artifact in files.artifacts] == [ref]
-    KnowledgeBundle(knowledge, files.artifacts).validate()
+    assert extract_knowledge_artifact_refs(knowledge, [ref]) == {ref}
+    KnowledgeBundle(knowledge, [Artifact(ref, source)]).validate()
 
 
 def test_remote_client_internal_validation_error_paths(tmp_path: Path) -> None:
-    assert _champion(None) == ("", 0.0, {})
-    assert _champion({"sessions": [], "champion": None}) == ("", 0.0, {})
+    assert _champion(None, expected_metric="optimized_throughput") == 0.0
+    assert _champion({"sessions": [], "champion": None}, expected_metric="optimized_throughput") == 0.0
     valid = {
         "champion": {
             "session_id": "best",
@@ -930,11 +1010,11 @@ def test_remote_client_internal_validation_error_paths(tmp_path: Path) -> None:
             "value": 12.0,
         }
     }
-    assert _champion(valid, validate_metric=True)[1] == 12.0
+    assert _champion(valid, expected_metric="optimized_throughput") == 12.0
     with pytest.raises(RemoteRecipeValidationError, match="missing champion"):
-        _champion({})
+        _champion({}, expected_metric="optimized_throughput")
     with pytest.raises(RemoteRecipeValidationError, match="sessions but no champion"):
-        _champion({"sessions": [{"session_id": "candidate"}], "champion": None})
+        _champion({"sessions": [{"session_id": "candidate"}], "champion": None}, expected_metric="optimized_throughput")
     with pytest.raises(RemoteRecipeValidationError, match="must be numeric"):
         _champion(
             {
@@ -944,7 +1024,7 @@ def test_remote_client_internal_validation_error_paths(tmp_path: Path) -> None:
                     "value": "not-a-number",
                 }
             },
-            validate_metric=True,
+            expected_metric="optimized_throughput",
         )
     with pytest.raises(RemoteRecipeValidationError, match="finite"):
         _champion(
@@ -955,7 +1035,7 @@ def test_remote_client_internal_validation_error_paths(tmp_path: Path) -> None:
                     "value": float("inf"),
                 }
             },
-            validate_metric=True,
+            expected_metric="optimized_throughput",
         )
 
     with pytest.raises(RemoteRecipeValidationError, match="listing must be"):
@@ -981,20 +1061,6 @@ def test_remote_client_internal_validation_error_paths(tmp_path: Path) -> None:
     symlink.symlink_to(target, target_is_directory=True)
     with pytest.raises(RemoteRecipeValidationError, match="symlink"):
         _verify_downloaded_files(symlink, {})
-
-    with pytest.raises(RemoteRecipeValidationError, match="requested session"):
-        _validate_session_envelope(
-            {
-                "schema_version": 2,
-                "canonical_id": "inference:m:h:f:mt:a:v:p",
-                "session_id": "actual-session",
-                "record_id": "record",
-                "revision": 1,
-                "knowledge": {},
-            },
-            canonical_id="inference:m:h:f:mt:a:v:p",
-            session_id="expected-session",
-        )
 
     class _ReadStore:
         def __init__(self, envelope=None) -> None:
@@ -1053,7 +1119,6 @@ def test_warm_replay_and_non_keep_actions_do_not_enable_write(tmp_path: Path) ->
         {"action": "roofline"},
         {"action": "conc_sweep"},
     ]
-    state.kernel_opt_task_attempts = {}
     assert has_new_keep(state) is False
 
 
@@ -1065,7 +1130,7 @@ def test_warm_replay_and_non_keep_actions_do_not_enable_write(tmp_path: Path) ->
         ("", "token", "KB_STORE_URL"),
     ],
 )
-def test_facade_from_env_requires_complete_configuration(
+def test_client_from_env_requires_complete_configuration(
     monkeypatch,
     url: str,
     token: str,
@@ -1074,105 +1139,28 @@ def test_facade_from_env_requires_complete_configuration(
     monkeypatch.setenv("KB_STORE_URL", url)
     monkeypatch.setenv("KB_STORE_TOKEN", token)
     with pytest.raises(RemoteRecipeConfigurationError, match=match):
-        HyperloomRemoteKB.from_env()
+        RemoteRecipeClient.from_env()
 
 
-def test_facade_from_env_returns_configured_facade(monkeypatch) -> None:
+def test_client_from_env_returns_configured_client(monkeypatch) -> None:
     monkeypatch.setenv("KB_STORE_URL", "https://kb.example")
     monkeypatch.setenv("KB_STORE_TOKEN", "token")
-    remote = HyperloomRemoteKB.from_env()
-    assert isinstance(remote, HyperloomRemoteKB)
-    assert isinstance(remote._client, RemoteRecipeClient)
-
-
-@pytest.mark.parametrize(
-    ("recipe_session_id", "state_session_id", "expected"),
-    [
-        ("recipe-session", "state-session", "recipe-session"),
-        ("", "state-session", "state-session"),
-        ("  ", "state-session", "state-session"),
-    ],
-)
-def test_facade_delegates_read_and_write_with_session_fallback(
-    tmp_path: Path,
-    monkeypatch,
-    recipe_session_id: str,
-    state_session_id: str,
-    expected: str,
-) -> None:
-    from hyperloom.orchestrator.knowledge import remote_recipe
-
-    client = object()
-    facade = HyperloomRemoteKB(client)  # type: ignore[arg-type]
-    state = SimpleNamespace(
-        recipe_kb_session_id=recipe_session_id,
-        session_id=state_session_id,
-        kernel_optimizer="native",
-        tp=8,
-        conc=64,
-        isl=1024,
-        osl=256,
-    )
-    read_result = {"canonical_id": "inference:m:h:f:mt:a:v:p"}
-    write_result = SimpleNamespace(status="written", session_id=expected)
-    calls: list[tuple] = []
-
-    def _read(identity, destination, *, scope, client):
-        calls.append(("read", identity, destination, scope, client))
-        return read_result
-
-    def _write(state_arg, identity, session_id, *, client):
-        calls.append(("write", state_arg, identity, session_id, client))
-        return write_result
-
-    monkeypatch.setattr(remote_recipe, "read_remote_recipe", _read)
-    monkeypatch.setattr(remote_recipe, "write_final_remote_recipe", _write)
-
-    identity = "inference:m:h:f:mt:a:v:p"
-    destination = tmp_path / "download"
-    actual_read_result = facade.read(identity, destination, _SCOPE)
-    actual_write_result = facade.write(identity, state)
-    assert actual_read_result is read_result
-    assert actual_write_result is write_result
-    assert calls == [
-        ("read", identity, destination, _SCOPE, client),
-        ("write", state, identity, expected, client),
-    ]
-
-
-def test_facade_write_explicit_session_overrides_state(monkeypatch) -> None:
-    from hyperloom.orchestrator.knowledge import remote_recipe
-
-    facade = HyperloomRemoteKB(object())  # type: ignore[arg-type]
-    state = SimpleNamespace(
-        recipe_kb_session_id="recipe-session",
-        session_id="state-session",
-    )
-    seen: list[str] = []
-    expected_result = SimpleNamespace(status="written")
-
-    def _write(_state, _identity, session_id, *, client):
-        seen.append(session_id)
-        return expected_result
-
-    monkeypatch.setattr(remote_recipe, "write_final_remote_recipe", _write)
-    actual_result = facade.write(
-        "inference:m:h:f:mt:a:v:p",
-        state,
-        "explicit-session",
-    )
-    assert actual_result is expected_result
-    assert seen == ["explicit-session"]
+    assert isinstance(RemoteRecipeClient.from_env(), RemoteRecipeClient)
 
 
 def test_degraded_kb_skips_remote_close_writer(
     tmp_path: Path,
     monkeypatch,
 ) -> None:
-    coordinator = WritebackCollaborator()
-    vars(coordinator).update(
-        shared_state=SimpleNamespace(current_best={"tput": 10.0}),
+    class _Journal:
+        def finalize(self, **kwargs) -> None:
+            pass
+
+    _ss = SharedState()
+    _ss.current_best = {"tput": 10.0}
+    coordinator = SimpleNamespace(
         session_dir=tmp_path,
+        shared_state=SharedState(),
         recipe_kb=None,
         knowledge_plane=SimpleNamespace(kb_disabled=True),
     )
@@ -1180,12 +1168,14 @@ def test_degraded_kb_skips_remote_close_writer(
 
     monkeypatch.setenv("KNOWLEDGE_STORE_MODE", "remote")
     monkeypatch.setattr(
-        remote_recipe.HyperloomRemoteKB,
+        remote_recipe.RemoteRecipeClient,
         "from_env",
-        classmethod(lambda cls: (_ for _ in ()).throw(AssertionError("degraded CLOSE constructed HyperloomRemoteKB"))),
+        classmethod(lambda cls: (_ for _ in ()).throw(AssertionError("degraded CLOSE built the remote Recipe client"))),
     )
 
-    outcome = coordinator.finalize_recipe_and_journal()
+    journal = RecipeJournalCollaborator(coordinator)
+    journal.ensure_journal = lambda: _Journal()
+    outcome = journal.finalize_recipe_and_journal()
     assert outcome == {
         "status": "skipped",
         "reason": "degraded_kb",
@@ -1198,13 +1188,16 @@ def test_local_close_ignores_ambient_kb_store(
     tmp_path: Path,
     monkeypatch,
 ) -> None:
-    coordinator = WritebackCollaborator()
-    vars(coordinator).update(
-        shared_state=SimpleNamespace(current_best={}),
+    class _Journal:
+        def finalize(self, **kwargs) -> None:
+            pass
+
+    _ss = SharedState()
+    coordinator = SimpleNamespace(
         session_dir=tmp_path,
+        shared_state=SharedState(),
         recipe_kb=None,
         knowledge_plane=None,
-        _workload_canonical_id=lambda: "inference:m:h:f:mt:a:v:p",
     )
     calls: list[tuple] = []
     from hyperloom.orchestrator.knowledge import remote_recipe
@@ -1213,11 +1206,14 @@ def test_local_close_ignores_ambient_kb_store(
     monkeypatch.setenv("KB_STORE_URL", "https://kb.example")
     monkeypatch.setenv("KB_STORE_TOKEN", "ambient-token")
     monkeypatch.setattr(
-        remote_recipe.HyperloomRemoteKB,
+        remote_recipe.RemoteRecipeClient,
         "from_env",
-        classmethod(lambda cls: (_ for _ in ()).throw(AssertionError("local CLOSE constructed HyperloomRemoteKB"))),
+        classmethod(lambda cls: (_ for _ in ()).throw(AssertionError("local CLOSE built the remote Recipe client"))),
     )
-    outcome = coordinator.finalize_recipe_and_journal()
+    journal = RecipeJournalCollaborator(coordinator)
+    journal.ensure_journal = lambda: _Journal()
+    journal.workload_canonical_id = lambda: "inference:m:h:f:mt:a:v:p"
+    outcome = journal.finalize_recipe_and_journal()
     assert outcome == {
         "status": "skipped",
         "reason": "no_recipe_backend",
@@ -1231,22 +1227,21 @@ def test_remote_close_writes_new_kb_once_and_skips_legacy_finalize(
     tmp_path: Path,
     monkeypatch,
 ) -> None:
+    class _Journal:
+        def finalize(self, **kwargs) -> None:
+            pass
+
     class _LegacyRecipe:
         def get_authoritative_recipe(self, **kwargs):
             raise AssertionError("remote CLOSE read legacy RecipeKB")
 
-        def put_recipe(self, **kwargs):
+        def put_recipe(self, upsert):
             raise AssertionError("remote CLOSE wrote legacy RecipeKB")
 
-    coordinator = WritebackCollaborator()
-    vars(coordinator).update(
-        shared_state=SimpleNamespace(
-            current_best={"tput": 10.0},
-        ),
+    coordinator = SimpleNamespace(
         session_dir=tmp_path,
-        recipe_kb=_LegacyRecipe(),
-        knowledge_plane=None,
-        _workload_canonical_id=lambda: "inference:m:h:f:mt:a:v:p",
+        shared_state=SharedState(current_best={"tput": 10.0}),
+        knowledge_plane=SimpleNamespace(recipe_kb=_LegacyRecipe()),
     )
     calls: list[tuple] = []
     from hyperloom.orchestrator.knowledge import remote_recipe
@@ -1255,23 +1250,24 @@ def test_remote_close_writes_new_kb_once_and_skips_legacy_finalize(
     monkeypatch.setenv("KB_STORE_URL", "https://kb.example")
     monkeypatch.setenv("KB_STORE_TOKEN", "token")
 
-    class _Facade:
-        def write(self, identity, state, session_id=None):
-            calls.append((identity, state, session_id))
-            return SimpleNamespace(
-                status="written",
-                reason="",
-                session_id=session_id,
-                primary_metric="optimized_throughput",
-                primary_value=10.0,
-            )
+    remote_client = object()
 
-    monkeypatch.setattr(
-        remote_recipe.HyperloomRemoteKB,
-        "from_env",
-        classmethod(lambda cls: _Facade()),
-    )
-    outcome = coordinator.finalize_recipe_and_journal()
+    def _write(state, canonical_id, session_id, *, client):
+        calls.append((canonical_id, state, session_id, client))
+        return SimpleNamespace(
+            status="written",
+            reason="",
+            session_id=session_id,
+            primary_metric="optimized_throughput",
+            primary_value=10.0,
+        )
+
+    monkeypatch.setattr(remote_recipe.RemoteRecipeClient, "from_env", classmethod(lambda cls: remote_client))
+    monkeypatch.setattr(remote_recipe, "write_final_remote_recipe", _write)
+    journal = RecipeJournalCollaborator(coordinator)
+    journal.ensure_journal = lambda: _Journal()
+    journal.workload_canonical_id = lambda: "inference:m:h:f:mt:a:v:p"
+    outcome = journal.finalize_recipe_and_journal()
     assert outcome == {
         "status": "written",
         "reason": "",
@@ -1285,6 +1281,7 @@ def test_remote_close_writes_new_kb_once_and_skips_legacy_finalize(
             "inference:m:h:f:mt:a:v:p",
             coordinator.shared_state,
             tmp_path.name,
+            remote_client,
         )
     ]
     from hyperloom.inference_optimizer.session.session_paths import (
@@ -1302,40 +1299,87 @@ def test_remote_close_writes_new_kb_once_and_skips_legacy_finalize(
     assert audit_rows[-1]["result"]["best_throughput"] == 10.0
 
 
+@pytest.mark.parametrize(
+    "cause, expected_error",
+    [
+        (None, {"type": "OSError"}),
+        (
+            HTTPError("https://private.invalid/secret", 403, "private body", {}, None),
+            {"type": "KBStoreError", "cause_type": "HTTPError", "http_status": 403},
+        ),
+        (
+            URLError(ConnectionRefusedError(111, "private host")),
+            {"type": "KBStoreError", "cause_type": "URLError", "reason_type": "ConnectionRefusedError", "errno": 111},
+        ),
+        (
+            b"private non-JSON response",
+            {"type": "KBStoreError", "cause_type": "JSONDecodeError"},
+        ),
+        (KBStoreError("private error"), {"type": "KBStoreError"}),
+    ],
+)
 def test_remote_close_transport_failure_is_nonfatal(
     tmp_path: Path,
     monkeypatch,
+    cause,
+    expected_error,
 ) -> None:
-    coordinator = WritebackCollaborator()
-    vars(coordinator).update(
-        shared_state=SimpleNamespace(current_best={"tput": 10.0}),
+    class _Journal:
+        def finalize(self, **kwargs) -> None:
+            pass
+
+    coordinator = SimpleNamespace(
         session_dir=tmp_path,
+        shared_state=SharedState(
+            current_best={"tput": 130.0, "extra_server_args": "--page-size 32"},
+            cumulative_gain_validated=30.0,
+            optimization_stack=[
+                {
+                    "action": "explore",
+                    "candidate_extra_server_args": "--page-size 32",
+                    "recipe_delta": {"extra_server_args": "--page-size 32", "args_mode": "append"},
+                }
+            ],
+            cumulative_gain_validated_stack_len=1,
+            kernel_optimizer="native",
+            tp=8,
+            conc=64,
+            isl=1024,
+            osl=256,
+        ),
         recipe_kb=None,
         knowledge_plane=None,
-        _workload_canonical_id=lambda: "inference:m:h:f:mt:a:v:p",
     )
     from hyperloom.orchestrator.knowledge import remote_recipe
 
     monkeypatch.setenv("KNOWLEDGE_STORE_MODE", "remote")
     monkeypatch.setenv("KB_STORE_URL", "https://kb.example")
     monkeypatch.setenv("KB_STORE_TOKEN", "token")
-    monkeypatch.setattr(
-        remote_recipe.HyperloomRemoteKB,
-        "from_env",
-        classmethod(lambda cls: (_ for _ in ()).throw(OSError("transport down"))),
-    )
-    outcome = coordinator.finalize_recipe_and_journal()
+
+    def respond(request, **kwargs):
+        if isinstance(cause, bytes):
+            return BytesIO(cause)
+        raise cause
+
+    monkeypatch.setattr(kb_store_client.urllib.request, "urlopen", respond)
+    if cause is None or isinstance(cause, KBStoreError):
+
+        def fail_publish(cls):
+            raise cause if cause is not None else OSError("transport down")
+
+        monkeypatch.setattr(remote_recipe.RemoteRecipeClient, "from_env", classmethod(fail_publish))
+    journal = RecipeJournalCollaborator(coordinator)
+    journal.ensure_journal = lambda: _Journal()
+    journal.workload_canonical_id = lambda: "inference:m:h:f:mt:a:v:p"
+    outcome = journal.finalize_recipe_and_journal()
     assert outcome == {
         "status": "error",
-        "reason": "OSError",
+        "reason": expected_error["type"],
         "backend": "kb-store",
         "canonical_id": "inference:m:h:f:mt:a:v:p",
         "session_id": tmp_path.name,
-        # The publisher reports the failure as a bare exception class name, so
-        # the class is carried in a field of its own rather than left for a
-        # reader to recover from ``reason``.
         "result_type": "transport_failed",
-        "error_class": "OSError",
+        "error_class": expected_error["type"],
     }
     from hyperloom.inference_optimizer.session.session_paths import (
         recipe_snapshot_audit_jsonl,
@@ -1343,7 +1387,65 @@ def test_remote_close_transport_failure_is_nonfatal(
 
     row = json.loads(recipe_snapshot_audit_jsonl(tmp_path).read_text(encoding="utf-8"))
     assert row["status"] == "error"
-    assert row["error"]["type"] == "OSError"
+    assert row["error"] == expected_error
+    assert "private" not in json.dumps(row)
+
+
+def _remote_journal_failing_with(tmp_path: Path, monkeypatch, failure: Exception) -> RecipeJournalCollaborator:
+    from hyperloom.orchestrator.knowledge import remote_recipe
+
+    coordinator = SimpleNamespace(
+        session_dir=tmp_path,
+        shared_state=SharedState(current_best={"tput": 130.0}, cumulative_gain_validated=30.0),
+        recipe_kb=None,
+        knowledge_plane=None,
+    )
+    monkeypatch.setenv("KNOWLEDGE_STORE_MODE", "remote")
+    monkeypatch.setenv("KB_STORE_URL", "https://kb.example")
+    monkeypatch.setenv("KB_STORE_TOKEN", "token")
+
+    def fail_publish(cls):
+        raise failure
+
+    monkeypatch.setattr(remote_recipe.RemoteRecipeClient, "from_env", classmethod(fail_publish))
+    journal = RecipeJournalCollaborator(coordinator)
+    journal.ensure_journal = lambda: SimpleNamespace(finalize=lambda **_kwargs: None)
+    journal.workload_canonical_id = lambda: "inference:m:h:f:mt:a:v:p"
+    return journal
+
+
+@pytest.mark.parametrize(
+    ("failure", "result_type"),
+    [
+        (ValueError("extra_server_args contains a whitespace-bearing value"), "transport_failed"),
+        (RemoteRecipeValidationError("staged section is invalid"), "bundle_build_failed"),
+        (PermissionError("cannot read accepted patch"), "transport_failed"),
+    ],
+    ids=["publish-sanitizer", "bundle-validation", "oserror"],
+)
+def test_remote_close_records_a_publish_failure_it_expects(
+    tmp_path: Path, monkeypatch, failure: Exception, result_type: str
+) -> None:
+    journal = _remote_journal_failing_with(tmp_path, monkeypatch, failure)
+
+    outcome = journal.finalize_recipe_and_journal()
+
+    assert outcome == {
+        "status": "error",
+        "reason": type(failure).__name__,
+        "backend": "kb-store",
+        "canonical_id": "inference:m:h:f:mt:a:v:p",
+        "session_id": tmp_path.name,
+        "result_type": result_type,
+        "error_class": type(failure).__name__,
+    }
+
+
+def test_remote_close_propagates_an_unexpected_publish_failure(tmp_path: Path, monkeypatch) -> None:
+    journal = _remote_journal_failing_with(tmp_path, monkeypatch, TypeError("bundle is not a mapping"))
+
+    with pytest.raises(TypeError, match="bundle is not a mapping"):
+        journal.finalize_recipe_and_journal()
 
 
 def test_remote_close_never_sends_an_unvalidated_working_recipe(tmp_path: Path, monkeypatch) -> None:
@@ -1358,25 +1460,25 @@ def test_remote_close_never_sends_an_unvalidated_working_recipe(tmp_path: Path, 
         working_recipe_generation=2,
         validated_recipe_generation=1,
     )
-    coordinator = WritebackCollaborator()
-    vars(coordinator).update(
-        shared_state=state,
+    coordinator = SimpleNamespace(
         session_dir=tmp_path,
+        shared_state=state,
         recipe_kb=None,
         knowledge_plane=None,
-        _ensure_journal=lambda: (_ for _ in ()).throw(AssertionError("journal must not be finalized")),
-        _workload_canonical_id=lambda: "inference:m:h:f:mt:a:v:p",
     )
     monkeypatch.setenv("KNOWLEDGE_STORE_MODE", "remote")
     monkeypatch.setenv("KB_STORE_URL", "https://kb.example")
     monkeypatch.setenv("KB_STORE_TOKEN", "token")
     monkeypatch.setattr(
-        remote_recipe.HyperloomRemoteKB,
+        remote_recipe.RemoteRecipeClient,
         "from_env",
         classmethod(lambda cls: (_ for _ in ()).throw(AssertionError("remote writer must not be reached"))),
     )
 
-    outcome = coordinator.finalize_recipe_and_journal()
+    journal = RecipeJournalCollaborator(coordinator)
+    journal.ensure_journal = lambda: (_ for _ in ()).throw(AssertionError("journal must not be finalized"))
+    journal.workload_canonical_id = lambda: "inference:m:h:f:mt:a:v:p"
+    outcome = journal.finalize_recipe_and_journal()
 
     assert outcome["reason"] == "unvalidated_recipe_stack"
     assert outcome["result_type"] == "unvalidated_recipe"
@@ -1384,22 +1486,23 @@ def test_remote_close_never_sends_an_unvalidated_working_recipe(tmp_path: Path, 
 
 def test_unvalidated_write_back_audit_omits_mismatched_metrics(tmp_path: Path, monkeypatch) -> None:
     captured: dict = {}
-    collaborator = WritebackCollaborator()
-    vars(collaborator).update(
-        shared_state=SimpleNamespace(
-            current_best={"tput": 2200.0},
-            cumulative_gain_validated=20.0,
-            kernel_optimizer="forge",
-            tp=8,
-            conc=64,
-            isl=1024,
-            osl=256,
-        ),
-        session_dir=tmp_path,
+    collaborator = RecipeJournalCollaborator(
+        SimpleNamespace(
+            shared_state=SimpleNamespace(
+                current_best={"tput": 2200.0},
+                cumulative_gain_validated=20.0,
+                kernel_optimizer="forge",
+                tp=8,
+                conc=64,
+                isl=1024,
+                osl=256,
+            ),
+            session_dir=tmp_path,
+        )
     )
     monkeypatch.setattr(
-        "hyperloom.orchestrator.loop.writeback._close_out.record_write_back_settled",
-        lambda *args, **kwargs: captured.update(kwargs),
+        "hyperloom.orchestrator.knowledge.recipe_journal._close_out.record_write_back_settled",
+        lambda _session_dir, settlement: captured.update(vars(settlement)),
     )
 
     collaborator._record_write_back_settled(
@@ -1641,13 +1744,13 @@ def test_write_boundary_sanitizes_directly_constructed_bundle(tmp_path: Path) ->
         }
     )
 
-    result = RemoteRecipeClient(store).write_if_better(  # type: ignore[arg-type]
+    result = RemoteRecipeClient(store).write_if_better(
         "inference:m:h:f:mt:a:v:p",
         "session-1",
         bundle,
-        scope=_SCOPE,
-        primary_metric="optimized_throughput",
-        primary_value=130.0,
+        KBSelectionProfile(
+            scope=_SCOPE, primary_metric="optimized_throughput", primary_value=130.0, objective_schema="", metrics={}
+        ),
         files_dir=tmp_path,
     )
 
@@ -1687,13 +1790,13 @@ def test_empty_replay_material_skips_even_when_throughput_beats_champion(
             },
         }
     )
-    result = RemoteRecipeClient(store).write_if_better(  # type: ignore[arg-type]
+    result = RemoteRecipeClient(store).write_if_better(
         "inference:m:h:f:mt:a:v:p",
         "session-1",
         bundle,
-        scope=_SCOPE,
-        primary_metric="optimized_throughput",
-        primary_value=200.0,
+        KBSelectionProfile(
+            scope=_SCOPE, primary_metric="optimized_throughput", primary_value=200.0, objective_schema="", metrics={}
+        ),
         files_dir=tmp_path,
     )
     assert result.status == "skipped"
@@ -1759,7 +1862,7 @@ def test_absent_rollup_is_treated_as_first_write(tmp_path: Path) -> None:
     class _FirstWriteStore(_FakeStore):
         def get_rollup(self, canonical_id, *, scope=None):
             self.calls.append(("get_rollup", canonical_id, scope))
-            return None
+            return
 
     store = _FirstWriteStore()
     result = write_final_remote_recipe(
@@ -1860,7 +1963,7 @@ def test_agentx_selection_rejects_incomplete_baseline_axes(tmp_path: Path) -> No
     )
 
     with pytest.raises(RemoteRecipeValidationError, match="baseline_axes_missing"):
-        KBSelectionProfile.from_state(state)
+        KBSelectionProfile.from_state(state, scope=RecipeScope.from_state(state))
 
     store = _FakeStore(metric="interactivity_gain_pct")
     result = write_final_remote_recipe(
@@ -1908,6 +2011,7 @@ def test_vendored_scope_query_serializes_only_supplied_dimensions() -> None:
 
 def test_recipe_canonical_id_changes_only_the_agentx_scheme() -> None:
     from hyperloom.inference_optimizer.recipe_snapshot_constants import (
+        RecipeIdentity,
         recipe_canonical_id,
     )
 
@@ -1920,8 +2024,8 @@ def test_recipe_canonical_id_changes_only_the_agentx_scheme() -> None:
         "framework_version": "v",
         "precision": "p",
     }
-    inference = recipe_canonical_id(**kwargs)
-    agentx = recipe_canonical_id(**kwargs, scheme="agentx")
+    inference = recipe_canonical_id(RecipeIdentity(**kwargs))
+    agentx = recipe_canonical_id(RecipeIdentity(**kwargs), scheme="agentx")
     assert inference == "inference:m:h:f:mt:a:v:p"
     assert agentx == "agentx:m:h:f:mt:a:v:p"
     assert inference.split(":", 1)[1] == agentx.split(":", 1)[1]
@@ -1974,10 +2078,10 @@ def test_read_sequence_writes_flat_recipe_and_files_only(tmp_path: Path) -> None
     stale_dir = destination / "old-top-level"
     stale_dir.mkdir()
     (stale_dir / "old").write_text("stale", encoding="utf-8")
-    row = read_remote_recipe(
+    row = RemoteRecipeClient(store).read(
         "inference:m:h:f:mt:a:v:p",
         destination,
-        client=RemoteRecipeClient(store),  # type: ignore[arg-type]
+        scope=_SCOPE,
     )
     assert [call[0] for call in store.calls] == [
         "get_hyperloom_recipe_view",
@@ -2023,10 +2127,10 @@ def test_history_only_view_verifies_empty_listing_without_download(
     store.files_listing = {"files": []}
     store.envelope["knowledge"]["what_worked"] = [{"description": "old win"}]
 
-    row = read_remote_recipe(
+    row = RemoteRecipeClient(store).read(
         "inference:m:h:f:mt:a:v:p",
         tmp_path / "history-only",
-        client=RemoteRecipeClient(store),  # type: ignore[arg-type]
+        scope=_SCOPE,
     )
 
     assert row["view"]["replayable"] is False
@@ -2054,10 +2158,10 @@ def test_kernel_reads_same_downloaded_inference_recipe_without_second_get(
         }
     }
     destination = tmp_path / "shared-recipe"
-    document = read_remote_recipe(
+    document = RemoteRecipeClient(store).read(
         "inference:m:h:f:mt:a:v:p",
         destination,
-        client=RemoteRecipeClient(store),  # type: ignore[arg-type]
+        scope=_SCOPE,
     )
     assert document is not None
     monkeypatch.setenv("KB_DRAFT_DIR", str(tmp_path / "draft"))
@@ -2093,10 +2197,10 @@ def test_read_pins_manifest_against_download_relisting(tmp_path: Path) -> None:
             )
 
     store = _RelistingStore()
-    row = read_remote_recipe(
+    row = RemoteRecipeClient(store).read(
         "inference:m:h:f:mt:a:v:p",
         tmp_path / "pinned-manifest",
-        client=RemoteRecipeClient(store),  # type: ignore[arg-type]
+        scope=_SCOPE,
     )
 
     assert row is not None
@@ -2116,10 +2220,10 @@ def test_view_manifest_mismatch_deactivates_without_download(
         RemoteRecipeValidationError,
         match="does not match the selected",
     ):
-        read_remote_recipe(
+        RemoteRecipeClient(store).read(
             "inference:m:h:f:mt:a:v:p",
             destination,
-            client=RemoteRecipeClient(store),  # type: ignore[arg-type]
+            scope=_SCOPE,
         )
 
     assert not destination.exists()
@@ -2137,10 +2241,10 @@ def test_read_rejects_non_json_knowledge_and_deactivates_destination(
     sentinel.write_text("unchanged", encoding="utf-8")
 
     with pytest.raises(RemoteRecipeValidationError, match="strict JSON"):
-        read_remote_recipe(
+        RemoteRecipeClient(store).read(
             "inference:m:h:f:mt:a:v:p",
             destination,
-            client=RemoteRecipeClient(store),  # type: ignore[arg-type]
+            scope=_SCOPE,
         )
 
     assert not destination.exists()
@@ -2154,10 +2258,10 @@ def test_read_replaces_existing_files_symlink_without_following(tmp_path: Path) 
     target.mkdir()
     destination.mkdir()
     (destination / "files").symlink_to(target, target_is_directory=True)
-    read_remote_recipe(
+    RemoteRecipeClient(store).read(
         "inference:m:h:f:mt:a:v:p",
         destination,
-        client=RemoteRecipeClient(store),  # type: ignore[arg-type]
+        scope=_SCOPE,
     )
     assert (destination / "files").is_dir()
     assert not (destination / "files").is_symlink()
@@ -2170,30 +2274,22 @@ def test_read_replaces_destination_symlink_without_following(tmp_path: Path) -> 
     target.mkdir()
     destination = tmp_path / "destination-link"
     destination.symlink_to(target, target_is_directory=True)
-    read_remote_recipe(
+    RemoteRecipeClient(store).read(
         "inference:m:h:f:mt:a:v:p",
         destination,
-        client=RemoteRecipeClient(store),  # type: ignore[arg-type]
+        scope=_SCOPE,
     )
     assert destination.is_dir()
     assert not destination.is_symlink()
     assert list(target.iterdir()) == []
 
 
-def test_shared_store_reuses_one_rlock() -> None:
-    store = _FakeStore()
-    first = RemoteRecipeClient(store)  # type: ignore[arg-type]
-    second = RemoteRecipeClient(store)  # type: ignore[arg-type]
-    assert first._store_lock is second._store_lock
-    assert first._store_lock is store._hyperloom_remote_recipe_lock
-
-
 def test_read_does_not_consult_rollup_champion_metric(tmp_path: Path) -> None:
     store = _FakeStore(champion=125.0, metric="latency_ms")
-    row = read_remote_recipe(
+    row = RemoteRecipeClient(store).read(
         "inference:m:h:f:mt:a:v:p",
         tmp_path / "direct-best-record",
-        client=RemoteRecipeClient(store),  # type: ignore[arg-type]
+        scope=_SCOPE,
     )
     assert row is not None
     assert [call[0] for call in store.calls] == [
@@ -2211,10 +2307,10 @@ def test_read_passes_through_the_services_selection_reason(tmp_path: Path) -> No
         "value": 125.0,
         "promoted_at": "2026-08-08T00:00:00Z",
     }
-    row = read_remote_recipe(
+    row = RemoteRecipeClient(store).read(
         "inference:m:h:f:mt:a:v:p",
         tmp_path / "direct-best-record",
-        client=RemoteRecipeClient(store),  # type: ignore[arg-type]
+        scope=_SCOPE,
     )
     assert row is not None
     assert row["selected_by"] == store.envelope["selected_by"]
@@ -2236,32 +2332,6 @@ def test_a_staged_file_is_published_under_its_own_section(tmp_path: Path) -> Non
     published = {artifact.path for artifact in bundle.artifacts}
     assert refs[0] in published
     assert (tmp_path / "files" / refs[0]).is_file()
-
-
-def test_merge_staged_sections_unions_and_dedups_prior_refs(tmp_path: Path) -> None:
-    """Replay refs already on the section must union with newly staged refs, without duplicates."""
-    patch_a = tmp_path / "authored_a.patch"
-    patch_b = tmp_path / "authored_b.patch"
-    patch_a.write_text("authored_a", encoding="utf-8")
-    patch_b.write_text("authored_b", encoding="utf-8")
-    sections = _sections(tmp_path)
-    staged_refs = PatchKB(sections).stage_patches([patch_a, patch_b], stack_index=2)
-    staged_ref_a, staged_ref_b = staged_refs[0], staged_refs[1]
-    prior_patch = "patch/overlays/000000/00-replayed.patch"
-    prior_artifact = "patch/artifacts/prior.bin"
-    # before = [prior, staged_ref_a]; after = [staged_ref_a, staged_ref_b].
-    after_patches = list(sections.staged("patch").knowledge.get("patches") or [])
-    assert after_patches == [staged_ref_a, staged_ref_b]
-    value = {
-        "patch": {
-            "patches": [prior_patch, staged_ref_a],
-            "artifacts": [prior_artifact],
-        }
-    }
-    merged = merge_staged_sections(value, sections, _Files(tmp_path / "files"))
-    assert merged == ["patch"]
-    assert value["patch"]["patches"] == [prior_patch, staged_ref_a, staged_ref_b]
-    assert value["patch"]["artifacts"] == [prior_artifact]
 
 
 def test_non_overlay_owner_patch_ref_fails_before_publish(
@@ -2322,10 +2392,10 @@ def test_orphaned_required_staged_file_fails_close(tmp_path: Path) -> None:
 
 def test_a_record_without_a_selection_reason_still_reads(tmp_path: Path) -> None:
     store = _FakeStore()
-    row = read_remote_recipe(
+    row = RemoteRecipeClient(store).read(
         "inference:m:h:f:mt:a:v:p",
         tmp_path / "direct-best-record",
-        client=RemoteRecipeClient(store),  # type: ignore[arg-type]
+        scope=_SCOPE,
     )
     assert row is not None
     assert row["selected_by"] == {}
@@ -2362,10 +2432,10 @@ def test_read_verifies_downloaded_manifest_before_recipe(
     destination.mkdir()
     (destination / "recipe.json").write_text("stale", encoding="utf-8")
     with pytest.raises(RemoteRecipeValidationError, match=match):
-        read_remote_recipe(
+        RemoteRecipeClient(store).read(
             "inference:m:h:f:mt:a:v:p",
             destination,
-            client=RemoteRecipeClient(store),  # type: ignore[arg-type]
+            scope=_SCOPE,
         )
     assert not destination.exists()
 
@@ -2383,10 +2453,10 @@ def test_read_rejects_listing_without_required_size(tmp_path: Path) -> None:
         ]
     }
     with pytest.raises(RemoteRecipeValidationError, match="size is required"):
-        read_remote_recipe(
+        RemoteRecipeClient(store).read(
             "inference:m:h:f:mt:a:v:p",
             tmp_path / "missing-size",
-            client=RemoteRecipeClient(store),  # type: ignore[arg-type]
+            scope=_SCOPE,
         )
 
 
@@ -2444,10 +2514,10 @@ def test_read_validates_listing_before_cleanup(
     stale = destination / "recipe.json"
     stale.write_text("preserve-on-validation-failure", encoding="utf-8")
     with pytest.raises(RemoteRecipeValidationError, match=match):
-        read_remote_recipe(
+        RemoteRecipeClient(store).read(
             "inference:m:h:f:mt:a:v:p",
             destination,
-            client=RemoteRecipeClient(store),  # type: ignore[arg-type]
+            scope=_SCOPE,
         )
     assert not destination.exists()
     assert not any(call[0] == "download_session" for call in store.calls)
@@ -2490,10 +2560,10 @@ def test_bad_envelope_deactivates_destination(
     sentinel = destination / "keep-me"
     sentinel.write_text("unchanged", encoding="utf-8")
     with pytest.raises(RemoteRecipeValidationError, match=match):
-        read_remote_recipe(
+        RemoteRecipeClient(store).read(
             "inference:m:h:f:mt:a:v:p",
             destination,
-            client=RemoteRecipeClient(store),  # type: ignore[arg-type]
+            scope=_SCOPE,
         )
     assert not destination.exists()
     assert not any(call[0] == "list_session_files" for call in store.calls)
@@ -2534,7 +2604,7 @@ def test_nonfinite_selection_metrics_are_rejected(tmp_path: Path) -> None:
     state.current_best["tput"] = float("nan")
     state.cumulative_gain_validated = float("inf")
     with pytest.raises(RemoteRecipeValidationError, match="optimized_throughput"):
-        KBSelectionProfile.from_state(state)
+        KBSelectionProfile.from_state(state, scope=RecipeScope.from_state(state))
 
 
 def _current_knowledge(*, timeline: list[str] | None = None) -> dict:
@@ -2622,7 +2692,7 @@ def test_current_warm_adapter_keeps_replay_payload_out_of_t0(tmp_path: Path) -> 
     second_ref = "patch/overlays/000003/00-followup.patch"
 
     class _Remote:
-        def read(self, identity: str, destination: Path, scope: RecipeScope):
+        def read(self, identity: str, destination: Path, *, scope: RecipeScope, envelope=None):
             for item, content in (
                 (ref, "diff --git a/a b/a\n"),
                 (second_ref, "diff --git a/b b/b\n"),
@@ -2651,7 +2721,7 @@ def test_current_warm_adapter_keeps_replay_payload_out_of_t0(tmp_path: Path) -> 
         _Remote(),
         tmp_path / "remote-recipe",
     )
-    row = adapter.get_authoritative_recipe(canonical_id="inference:m:h:f:mt:a:v:p")
+    row = adapter.get_recipe(canonical_id="inference:m:h:f:mt:a:v:p")
 
     assert "patch_timeline" not in row
     assert "best_config" not in row
@@ -2751,20 +2821,9 @@ def test_remote_adapter_pages_history_then_materializes_l2_donor(
             )
             return document
 
-        def read(self, identity: str, destination: Path, scope: RecipeScope):
-            return self._write(
-                identity,
-                destination,
-                self._document(identity),
-            )
-
-        def materialize_view(
-            self,
-            identity: str,
-            destination: Path,
-            envelope: dict,
-            scope: RecipeScope,
-        ):
+        def read(self, identity: str, destination: Path, *, scope: RecipeScope, envelope=None):
+            if envelope is None:
+                return self._write(identity, destination, self._document(identity))
             self.materialized.append(identity)
             return self._write(identity, destination, envelope)
 
@@ -2775,14 +2834,16 @@ def test_remote_adapter_pages_history_then_materializes_l2_donor(
     row, tier, confidence = _cascade_warm_start_search(
         adapter,  # type: ignore[arg-type]
         cid=exact,
-        hw="mi300x",
-        framework="sglang",
-        model_type_val="qwen",
-        architectures_val=["QwenArch"],
-        arch_slug="qwenarch",
-        fw_version="1.0",
-        precision="fp8",
-        warm_prefer=None,
+        identity={
+            "canonical_id": exact,
+            "hardware": "mi300x",
+            "framework_name": "sglang",
+            "model_type": "qwen",
+            "architectures": "qwenarch",
+            "framework_version": "1.0",
+            "precision": "fp8",
+        },
+        shape={},
     )
 
     assert row["canonical_id"] == donor
@@ -2811,8 +2872,6 @@ def test_remote_adapter_pages_history_then_materializes_l2_donor(
     assert (main / "files" / patch_ref).read_text(encoding="utf-8") == "donor patch"
     patch_kb = PatchKB(KnowledgeSections(tmp_path / "draft", warm_start_dir=main))
     assert patch_kb.read_patches() == [patch_ref]
-    candidates = main.parent / f".{main.name}-candidates"
-    assert not candidates.exists()
 
 
 def test_remote_adapter_forwards_hardware_in(tmp_path: Path) -> None:
@@ -2832,7 +2891,7 @@ def test_remote_adapter_forwards_hardware_in(tmp_path: Path) -> None:
 
     assert (
         adapter.search(
-            label_match={"framework": "sglang"},
+            label_match={"framework_name": "sglang"},
             hardware_in=["mi300x", "mi325x"],
         )
         == []
@@ -2857,7 +2916,7 @@ def test_remote_adapter_searches_agentx_identity_scheme(tmp_path: Path) -> None:
         tmp_path / "unused",
         scope=RecipeScope("forge", 8, 64),
     )
-    assert adapter.search(label_match={"framework": "sglang"}) == []
+    assert adapter.search(label_match={"framework_name": "sglang"}) == []
     assert remote.kwargs["scheme"] == "agentx"
 
 
@@ -2917,17 +2976,13 @@ def test_remote_adapter_caps_metadata_scan_without_downloading(
 
     remote = _Remote()
     destination = tmp_path / "warm"
-    stale_candidates = tmp_path / ".warm-candidates"
-    stale_candidates.mkdir()
-    (stale_candidates / "stale").write_text("old", encoding="utf-8")
     adapter = RemoteWarmRecipeAdapter(remote, destination)  # type: ignore[arg-type]
     adapter.search_candidate_cap = 3
 
-    rows = adapter.search(label_match={"framework": "sglang"}, limit=100)
+    rows = adapter.search(label_match={"framework_name": "sglang"}, limit=100)
 
     assert len(rows) == 3
     assert remote.view_calls == identities[:3]
-    assert not stale_candidates.exists()
     assert not destination.exists()
 
 
@@ -2980,7 +3035,7 @@ def test_current_warm_adapter_rejects_unsafe_timeline_refs(
     ref: str,
 ) -> None:
     class _Remote:
-        def read(self, identity: str, destination: Path, scope: RecipeScope):
+        def read(self, identity: str, destination: Path, *, scope: RecipeScope, envelope=None):
             return {
                 "canonical_id": identity,
                 **_current_knowledge(timeline=[ref]),
@@ -2992,7 +3047,26 @@ def test_current_warm_adapter_rejects_unsafe_timeline_refs(
     )
 
     with pytest.raises(RemoteRecipeValidationError):
-        adapter.get_authoritative_recipe(canonical_id="inference:test")
+        adapter.get_recipe(canonical_id="inference:test")
+
+
+def test_current_warm_adapter_projection_failure_deactivates_destination(tmp_path: Path) -> None:
+    destination = tmp_path / "overflow"
+
+    class _Remote:
+        def read(self, identity: str, destination: Path, *, scope: RecipeScope, envelope=None):
+            knowledge = _current_knowledge()
+            knowledge["optimized_throughput"] = 10**400
+            document = {"schema_version": 2, "canonical_id": identity, "session_id": "s", **knowledge}
+            destination.mkdir(parents=True)
+            (destination / "recipe.json").write_text(json.dumps(document), encoding="utf-8")
+            return document
+
+    adapter = RemoteWarmRecipeAdapter(_Remote(), destination)  # type: ignore[arg-type]
+
+    with pytest.raises(OverflowError):
+        adapter.get_recipe(canonical_id="inference:test")
+    assert not destination.exists()
 
 
 def test_owner_sdk_rejects_symlink_timeline_ref(
@@ -3018,10 +3092,9 @@ def test_remote_read_is_wired_into_cli_t0_and_close_write_remains() -> None:
             fromlist=["_bootstrap_recipe_kb"],
         )._bootstrap_recipe_kb
     )
-    close_source = inspect.getsource(WritebackCollaborator.finalize_recipe_and_journal)
+    close_source = inspect.getsource(RecipeJournalCollaborator._publish_remote_recipe)
     assert "RemoteWarmRecipeAdapter" in bootstrap_source
-    assert "HyperloomRemoteKB.from_env().write" in close_source
-    assert "write_final_remote_recipe" not in close_source
+    assert "write_final_remote_recipe(" in close_source
 
 
 def test_obsolete_remote_contract_exports_are_removed() -> None:
@@ -3040,8 +3113,8 @@ def test_obsolete_remote_contract_exports_are_removed() -> None:
 
 
 def test_vendored_sdk_exposes_view_and_identity_search() -> None:
-    assert callable(KBStoreClient.get_hyperloom_recipe_view)
-    assert callable(KBStoreClient.search_identities)
+    assert callable(kb_store_client.KBStoreClient.get_hyperloom_recipe_view)
+    assert callable(kb_store_client.KBStoreClient.search_identities)
     view_source = inspect.getsource(RemoteRecipeClient.get_view)
     assert "get_hyperloom_recipe_view" in view_source
     assert "get_best_record" not in view_source
@@ -3055,7 +3128,7 @@ def test_vendored_sdk_matches_upstream_git_blob() -> None:
 
 
 def test_vendored_sdk_uses_new_view_and_search_routes() -> None:
-    client = KBStoreClient.__new__(KBStoreClient)
+    client = kb_store_client.KBStoreClient.__new__(kb_store_client.KBStoreClient)
     calls = []
 
     def _request(method, path, payload=None):

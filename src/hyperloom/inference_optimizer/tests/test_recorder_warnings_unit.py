@@ -20,10 +20,8 @@ from hyperloom.inference_optimizer.session.session_binding import session_scope
 
 
 @pytest.fixture(autouse=True)
-def _forget_earlier_notes():
-    rw.reset_for_tests()
-    yield
-    rw.reset_for_tests()
+def _forget_earlier_notes(monkeypatch):
+    monkeypatch.setattr(rw, "_seen", set())
 
 
 def test_a_lost_write_is_parked_where_the_export_reads_it(tmp_path):
@@ -69,15 +67,16 @@ def test_a_session_that_is_not_bound_still_logs_the_loss(caplog):
     assert any("close" in r.message for r in caplog.records)
 
 
-def test_noting_a_failure_never_raises(tmp_path, monkeypatch):
+def test_noting_a_failure_never_raises(tmp_path, caplog):
     """It runs inside the handler for a failure, so it cannot add one."""
+    blocker = tmp_path / "not-a-dir"
+    blocker.write_text("x", encoding="utf-8")
 
-    def _boom(*args, **kwargs):
-        raise RuntimeError("the sidecar is gone too")
-
-    monkeypatch.setattr(sbd_v6, "record_write_warning", _boom)
-    with session_scope(tmp_path):
+    with session_scope(blocker), caplog.at_level(logging.DEBUG, logger=rw.__name__):
         rw.note_failure(section="phase_event", error=OSError("disk full"))
+
+    debug = [r.getMessage() for r in caplog.records if r.name == rw.__name__ and r.levelno == logging.DEBUG]
+    assert debug == ["recorder: could not park the failure note for phase_event"]
 
 
 def test_recording_errors_are_the_spool_and_binding_failures_only():
@@ -91,7 +90,6 @@ def test_recorder_parks_a_spool_failure(tmp_path, caplog):
     from hyperloom.inference_optimizer.breakdown.recorder.recorder import Recorder
 
     rec = Recorder(tmp_path / "parts", producer="test")
-    rec.parts_dir.mkdir(parents=True, exist_ok=True)
 
     def _boom(*_args, **_kwargs):
         raise OSError("disk full")
@@ -109,7 +107,6 @@ def test_a_projection_bug_in_record_raises(tmp_path):
     from hyperloom.inference_optimizer.breakdown.recorder.recorder import Recorder
 
     rec = Recorder(tmp_path / "parts", producer="test")
-    rec.parts_dir.mkdir(parents=True, exist_ok=True)
 
     def _boom(*_args, **_kwargs):
         raise TypeError("shape changed")
@@ -117,3 +114,10 @@ def test_a_projection_bug_in_record_raises(tmp_path):
     rec._write = _boom  # type: ignore[method-assign]
     with pytest.raises(TypeError, match="shape changed"):
         rec.record_singleton("session", {"session_id": "x"})
+
+
+def test_a_write_warning_that_cannot_be_persisted_reports_false(tmp_path):
+    blocker = tmp_path / "not-a-dir"
+    blocker.write_text("x", encoding="utf-8")
+
+    assert sbd_v6.record_write_warning(blocker, component="timeline.install", exc=OSError("disk full")) is False

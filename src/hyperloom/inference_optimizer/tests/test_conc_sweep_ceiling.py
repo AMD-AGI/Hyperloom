@@ -12,7 +12,7 @@ import pytest
 
 # kernel.conc_sweep and actions.executors.conc_sweep import each other; this resolves only once executors is already
 # in sys.modules.
-from hyperloom.orchestrator.kernel.conc_sweep import _build_roofline_ceiling
+from hyperloom.orchestrator.kernel.conc_sweep import _ArmCurves, _build_roofline_ceiling
 from hyperloom.inference_optimizer.roofline_ceiling import ModelMeta
 from hyperloom.orchestrator.state.shared_state import SharedState
 
@@ -85,12 +85,7 @@ def test_happy_path_moe_qwen3_30b_a3b_mi355x(stub_meta: ModelMeta) -> None:
     optimized_points = [{"conc": c, "output_throughput": float(c) * 120.0} for c in concs]
 
     block = _build_roofline_ceiling(
-        state,
-        concs=concs,
-        isl=1024,
-        osl=1024,
-        baseline_points=baseline_points,
-        optimized_points=optimized_points,
+        state, _ArmCurves(baseline=baseline_points, optimized=optimized_points), concs=concs, isl=1024, osl=1024
     )
     assert block is not None
     assert block["schema_version"] == 1
@@ -134,12 +129,7 @@ def test_mbu_matches_measured_over_t_peak(stub_meta: ModelMeta) -> None:
         {"conc": 8, "output_throughput": 1800.0},
     ]
     block = _build_roofline_ceiling(
-        state,
-        concs=concs,
-        isl=1024,
-        osl=1024,
-        baseline_points=baseline_points,
-        optimized_points=optimized_points,
+        state, _ArmCurves(baseline=baseline_points, optimized=optimized_points), concs=concs, isl=1024, osl=1024
     )
     assert block is not None
     for row, base, opt in zip(block["rows"], [800.0, 1500.0], [950.0, 1800.0]):
@@ -168,12 +158,7 @@ def test_mbu_none_on_failed_or_missing_measurement(
         {"conc": 2, "output_throughput": 400.0},
     ]
     block = _build_roofline_ceiling(
-        state,
-        concs=concs,
-        isl=1024,
-        osl=1024,
-        baseline_points=baseline_points,
-        optimized_points=optimized_points,
+        state, _ArmCurves(baseline=baseline_points, optimized=optimized_points), concs=concs, isl=1024, osl=1024
     )
     assert block is not None
     rows = {r["conc"]: r for r in block["rows"]}
@@ -200,12 +185,7 @@ def test_dense_fallback_no_moe_fields() -> None:
     state = _make_state()
     with patch(_LOAD_META_PATH, return_value=dense_meta):
         block = _build_roofline_ceiling(
-            state,
-            concs=[1, 8, 128],
-            isl=1024,
-            osl=1024,
-            baseline_points=[],
-            optimized_points=[],
+            state, _ArmCurves(baseline=[], optimized=[]), concs=[1, 8, 128], isl=1024, osl=1024
         )
     assert block is not None
     rows = block["rows"]
@@ -220,38 +200,17 @@ def test_dense_fallback_no_moe_fields() -> None:
 def test_returns_none_when_meta_unavailable() -> None:
     state = _make_state()
     with patch(_LOAD_META_PATH, return_value=None):
-        block = _build_roofline_ceiling(
-            state,
-            concs=[1, 8],
-            isl=1024,
-            osl=1024,
-            baseline_points=[],
-            optimized_points=[],
-        )
+        block = _build_roofline_ceiling(state, _ArmCurves(baseline=[], optimized=[]), concs=[1, 8], isl=1024, osl=1024)
     assert block is None
 
 
 def test_returns_none_when_gpu_type_missing(stub_meta: ModelMeta) -> None:
     state = _make_state(gpu_type="")
-    block = _build_roofline_ceiling(
-        state,
-        concs=[1],
-        isl=1024,
-        osl=1024,
-        baseline_points=[],
-        optimized_points=[],
-    )
+    block = _build_roofline_ceiling(state, _ArmCurves(baseline=[], optimized=[]), concs=[1], isl=1024, osl=1024)
     assert block is None
 
 
 def test_returns_none_when_tp_zero(stub_meta: ModelMeta) -> None:
     state = _make_state(tp=0)
-    block = _build_roofline_ceiling(
-        state,
-        concs=[1],
-        isl=1024,
-        osl=1024,
-        baseline_points=[],
-        optimized_points=[],
-    )
+    block = _build_roofline_ceiling(state, _ArmCurves(baseline=[], optimized=[]), concs=[1], isl=1024, osl=1024)
     assert block is None

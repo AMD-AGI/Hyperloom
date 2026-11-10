@@ -7,11 +7,7 @@ from __future__ import annotations
 
 import sqlite3
 
-# Recorded for provenance, not migration gating: ensure_schema inspects columns
-# so databases sharing a version but differing in layout migrate correctly.
-# Legacy ownership stays unknown; retired NOT NULL columns without defaults
-# must be dropped before new writers can insert rows.
-SCHEMA_VERSION = 6
+from hyperloom.inference_optimizer.session.coordinator_db import SCHEMA_VERSION, refuse_older_schema
 
 
 # Default lane capacities; ``--research-lane-capacity`` overrides research_lane at boot.
@@ -27,7 +23,7 @@ DEFAULT_LANE_CAPACITIES: dict[str, int] = {
 
 
 _DDL = [
-    # leases — Resource Lock Manager. Composite PK (lane, holder_id).
+    # leases — lane ownership. Composite PK (lane, holder_id).
     """
     CREATE TABLE IF NOT EXISTS leases (
         lane          TEXT    NOT NULL,
@@ -38,12 +34,9 @@ _DDL = [
         owner_scope   TEXT    NOT NULL DEFAULT '',
         acquired_at   TEXT    NOT NULL,
         expires_at    TEXT    NOT NULL,
-        heartbeat_at  TEXT    NOT NULL,
         PRIMARY KEY (lane, holder_id)
     )
     """,
-    "CREATE INDEX IF NOT EXISTS idx_leases_expires ON leases(expires_at)",
-    "CREATE INDEX IF NOT EXISTS idx_leases_lane ON leases(lane)",
     # lane_capacity — per-lane concurrency cap
     """
     CREATE TABLE IF NOT EXISTS lane_capacity (
@@ -69,10 +62,8 @@ _DDL = [
     # cursors — idempotent message processing
     """
     CREATE TABLE IF NOT EXISTS cursors (
-        agent                 TEXT PRIMARY KEY,
-        last_processed_seq    INTEGER NOT NULL,
-        last_processed_msg_id TEXT    NOT NULL,
-        processed_at          TEXT    NOT NULL
+        agent              TEXT PRIMARY KEY,
+        last_processed_seq INTEGER NOT NULL
     )
     """,
     # tasks — DelegatedTask state machine
@@ -86,7 +77,6 @@ _DDL = [
         params           TEXT NOT NULL,
         idempotency_key  TEXT NOT NULL UNIQUE,
         requires_lanes   TEXT NOT NULL DEFAULT '[]',
-        side_effects     TEXT NOT NULL DEFAULT '[]',
         lease_ttl_sec    INTEGER NOT NULL DEFAULT 0,
         history          TEXT NOT NULL DEFAULT '[]',
         created_at       TEXT NOT NULL,
@@ -94,19 +84,14 @@ _DDL = [
     )
     """,
     "CREATE INDEX IF NOT EXISTS idx_tasks_state ON tasks(state, updated_at)",
-    "CREATE INDEX IF NOT EXISTS idx_tasks_idem ON tasks(idempotency_key)",
     # gpu_leases — specialist GPU pool (separate from serving lanes)
     """
     CREATE TABLE IF NOT EXISTS gpu_leases (
-        gpu_id       INTEGER PRIMARY KEY,
-        holder_id    TEXT    NOT NULL,
-        task_id      TEXT    NOT NULL,
-        acquired_at  TEXT    NOT NULL,
-        expires_at   TEXT    NOT NULL,
-        heartbeat_at TEXT    NOT NULL
+        gpu_id    INTEGER PRIMARY KEY,
+        holder_id TEXT    NOT NULL,
+        task_id   TEXT    NOT NULL
     )
     """,
-    "CREATE INDEX IF NOT EXISTS idx_gpu_leases_expires ON gpu_leases(expires_at)",
     # bringup_rounds — the durable mutex deciding whether another round may
     # start. Only explicit settlement ends exclusion; timestamps describe budgets.
     """
@@ -151,38 +136,6 @@ _DDL = [
 ]
 
 
-_MANAGED_TABLES = (
-    "leases",
-    "lane_capacity",
-    "gpu_leases",
-    "events",
-    "cursors",
-    "tasks",
-    "bringup_rounds",
-    "round_events",
-    "schema_version",
-)
-
-
-#: SQLite gained ``ALTER TABLE ... DROP COLUMN`` here.
-_DROP_COLUMN_MIN_SQLITE = (3, 35, 0)
-
-
-def _drop_legacy_priority_column(cur: sqlite3.Cursor) -> None:
-    """Take ``events.priority`` off a database written before the column was retired."""
-    cur.execute("PRAGMA table_info(events)")
-    if "priority" not in {row[1] for row in cur.fetchall()}:
-        return
-    if sqlite3.sqlite_version_info < _DROP_COLUMN_MIN_SQLITE:
-        floor = ".".join(str(part) for part in _DROP_COLUMN_MIN_SQLITE)
-        raise RuntimeError(
-            "this coordinator.db still carries the retired events.priority column, and SQLite "
-            f"{sqlite3.sqlite_version} cannot drop it ({floor} is the floor). Finish or discard "
-            "the session under the build that started it."
-        )
-    cur.execute("ALTER TABLE events DROP COLUMN priority")
-
-
 def _seed_default_lane_capacity(cur: sqlite3.Cursor) -> None:
     """Idempotently insert default capacity rows; existing rows are left alone so a resume preserves the operator's choice."""
     for lane, capacity in DEFAULT_LANE_CAPACITIES.items():
@@ -214,57 +167,22 @@ def set_lane_capacity(
         cur.close()
 
 
-def get_lane_capacity(conn: sqlite3.Connection, lane: str) -> int:
-    """Return capacity for ``lane``, falling back to defaults."""
-    cur = conn.cursor()
-    try:
-        cur.execute(
-            "SELECT capacity FROM lane_capacity WHERE lane = ?",
-            (str(lane),),
-        )
-        row = cur.fetchone()
-        if row is not None:
-            return int(row[0])
-    finally:
-        cur.close()
-    return int(DEFAULT_LANE_CAPACITIES.get(lane, 1))
-
-
-def ensure_schema(conn: sqlite3.Connection) -> int:
+def ensure_schema(conn: sqlite3.Connection) -> None:
     """Idempotently create all tables, seed lane_capacity defaults, and record the schema version."""
     cur = conn.cursor()
     try:
         cur.execute("BEGIN IMMEDIATE")
+        refuse_older_schema(cur)
         for stmt in _DDL:
             cur.execute(stmt)
-        cur.execute("PRAGMA table_info(leases)")
-        if "owner_scope" not in {row[1] for row in cur.fetchall()}:
-            cur.execute("ALTER TABLE leases ADD COLUMN owner_scope TEXT NOT NULL DEFAULT ''")
-        _drop_legacy_priority_column(cur)
         _seed_default_lane_capacity(cur)
         cur.execute(
             "INSERT OR IGNORE INTO schema_version(version, applied_at) VALUES (?, datetime('now'))",
             (SCHEMA_VERSION,),
         )
-        cur.execute("SELECT MAX(version) FROM schema_version")
-        (current,) = cur.fetchone()
         conn.commit()
-        return int(current or 0)
     except Exception:
         conn.rollback()
         raise
     finally:
         cur.close()
-
-
-def reset_schema(conn: sqlite3.Connection) -> None:
-    """Drop and recreate every managed table. Test-only convenience."""
-    cur = conn.cursor()
-    try:
-        cur.execute("BEGIN IMMEDIATE")
-        for table in _MANAGED_TABLES:
-            cur.execute(f"DROP TABLE IF EXISTS {table}")
-        conn.commit()
-    finally:
-        cur.close()
-    ensure_schema(conn)

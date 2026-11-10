@@ -67,7 +67,7 @@ def test_means_are_weighted_by_sample_count():
     """A 35-sample block must not pull the round's mean as hard as a 126-sample one."""
     out = gpu_metrics_from_report({"gpu_monitor": [MAGPIE_BLOCK, MAGPIE_BLOCK_2]})
 
-    # (476.5*35 + 471.6*126) / 161
+    # Weighted mean: (476.5*35 + 471.6*126) / 161
     assert out["avg_power_w"] == 472.67
     assert out["avg_temp_c"] == 58.76
     assert out["max_power_w"] == 943.0
@@ -241,7 +241,7 @@ def test_a_failed_write_is_reported_not_swallowed(tmp_path, monkeypatch, caplog)
     The bug this artifact exists to fix went unnoticed for 101 sessions because
     nothing said anything; a silent writer would repeat exactly that.
     """
-    from hyperloom.common import io as common_io
+    from hyperloom_common import io as common_io
 
     def explode(*_a, **_k):
         raise OSError("read-only workspace")

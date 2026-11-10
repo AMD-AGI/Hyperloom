@@ -12,7 +12,7 @@ import torch
 import triton
 
 from kernel import N, VectorAdd, _vector_add
-from kernelforge.loop.numerical import emit_evidence, measure_outputs
+from kernelforge.evaluation.correctness.numerical import emit_evidence, measure_outputs
 
 CASES = [("random", 42, 0.1), ("unit", 19, 1.0), ("near_zero", 29, 1e-5), ("zero", 31, 0.0)]
 

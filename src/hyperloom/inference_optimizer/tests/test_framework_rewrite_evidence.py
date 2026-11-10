@@ -10,6 +10,7 @@ import json
 import os
 import subprocess
 import sys
+import threading
 from pathlib import Path
 from typing import Any
 
@@ -214,6 +215,39 @@ def test_fingerprint_summarises_a_wide_container(probe_module, tmp_path):
     assert probe._fingerprint(wide, strict=True) == ("list", 64)
 
 
+class _TensorShapedScalar:
+    """Like a NumPy scalar: tensor-shaped attributes, no weak reference, no ``data_ptr``."""
+
+    __slots__ = ("value",)
+    shape = ()
+    dtype = "int64"
+    device = "cpu"
+
+    def __init__(self, value):
+        self.value = value
+
+
+def test_a_deep_probe_failure_never_reaches_the_profiled_call(probe_module, tmp_path):
+    framework_root = tmp_path / "fake_framework"
+    framework_root.mkdir()
+    module_path = framework_root / "step.py"
+    module_path.write_text("def step(scalar):\n    return scalar.value + 1\n", encoding="utf-8")
+    spec = importlib.util.spec_from_file_location("fake_framework_step", module_path)
+    assert spec is not None and spec.loader is not None
+    target = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(target)
+
+    probe = probe_module.HostProbe(out_dir=str(tmp_path / "out"), roots=(str(framework_root) + "/",), deep=True)
+    probe._install_tier2()
+    try:
+        result = target.step(_TensorShapedScalar(3))
+    finally:
+        sys.setprofile(None)
+        threading.setprofile(None)  # type: ignore[arg-type]
+
+    assert result == 4
+
+
 def test_deep_probe_counts_calls_and_argument_repeats(probe_module, tmp_path):
     """The tier-2 hook attributes calls to framework roots and rates arg repeats."""
     framework_root = tmp_path / "fake_framework"
@@ -248,7 +282,8 @@ def test_deep_probe_counts_calls_and_argument_repeats(probe_module, tmp_path):
     try:
         target.run(50)
     finally:
-        probe.uninstall()
+        sys.setprofile(None)
+        threading.setprofile(None)  # type: ignore[arg-type]
 
     report = probe.report()
     by_name = {row["function"].rsplit(":", 1)[-1]: row for row in report["framework_calls"]}
@@ -258,7 +293,6 @@ def test_deep_probe_counts_calls_and_argument_repeats(probe_module, tmp_path):
     assert by_name["invariant"]["strict_repeat_rate"] > 0.9
     # Loop counter: every call is distinct, so neither rate fires.
     assert by_name["varying"]["strict_repeat_rate"] == 0.0
-    assert report["tier2_enabled"] is True
     # Tier 2 timestamps its rows so the aggregator can tell a constructor that runs during model construction from a
     # function that runs every step.
     for row in report["framework_calls"]:
@@ -302,7 +336,8 @@ def test_deep_probe_timestamps_the_first_outermost_call(probe_module, tmp_path):
     try:
         target.run(8)
     finally:
-        probe.uninstall()
+        sys.setprofile(None)
+        threading.setprofile(None)  # type: ignore[arg-type]
 
     written = probe.write_report()
     assert written
@@ -451,13 +486,9 @@ def _report(**overrides: Any) -> dict[str, Any]:
     base: dict[str, Any] = {
         "schema": "hyperloom.host_probe/1",
         "rank": 0,
-        "world_size": 1,
-        "pid": 1,
         "wall_seconds": 100.0,
         "roots": ["/src/hyvideo/"],
         "roots_unset": False,
-        "tier1_enabled": True,
-        "tier2_enabled": False,
         "host_calls": [],
         "framework_calls": [],
         "truncated": {"host_calls": False, "framework_calls": False},
@@ -1386,18 +1417,64 @@ def test_probe_injection_is_idempotent(tmp_path, monkeypatch):
     assert entries.count(str(evidence.probe_asset_dir())) == 1
 
 
+def _injected_pythonpath(tmp_path: Path, envs: dict[str, Any]) -> str:
+    """Arm the start-up shim on a fresh config carrying ``envs`` and return the resulting PYTHONPATH."""
+    import yaml
+
+    from hyperloom.orchestrator.actions.executors.profile import ProfileExecutor
+
+    config = tmp_path / "profile.yaml"
+    _write_profile_config(config, envs)
+    ProfileExecutor()._inject_host_probe(config, tmp_path / "ws")
+    return yaml.safe_load(config.read_text(encoding="utf-8"))["benchmark"]["envs"]["PYTHONPATH"]
+
+
+def test_probe_injection_keeps_the_inherited_pythonpath(tmp_path, monkeypatch):
+    """Magpie replaces the launch PYTHONPATH with the config's, so a config without one carries the inherited one."""
+    monkeypatch.setenv("PYTHONPATH", os.pathsep.join(["/a", "/b"]))
+    shim = str(evidence.probe_asset_dir())
+    assert _injected_pythonpath(tmp_path, {"TP": 8}) == os.pathsep.join([shim, "/a", "/b"])
+
+
+def test_probe_injection_does_not_append_the_inherited_pythonpath_to_the_config_one(tmp_path, monkeypatch):
+    """A config that carries PYTHONPATH is authoritative over the inherited value."""
+    monkeypatch.setenv("PYTHONPATH", os.pathsep.join(["/a", "/b"]))
+    shim = str(evidence.probe_asset_dir())
+    assert _injected_pythonpath(tmp_path, {"PYTHONPATH": "/c"}) == os.pathsep.join([shim, "/c"])
+
+
+def test_probe_injection_moves_a_present_shim_to_the_front(tmp_path, monkeypatch):
+    """Python imports only the first sitecustomize, so a shim already on the path but not first is moved up."""
+    import yaml
+
+    from hyperloom.orchestrator.actions.executors.profile import ProfileExecutor
+
+    monkeypatch.delenv("PYTHONPATH", raising=False)
+    shim = str(evidence.probe_asset_dir())
+    config = tmp_path / "profile.yaml"
+    _write_profile_config(config, {"PYTHONPATH": os.pathsep.join(["/c", shim, "", "/d"])})
+    executor = ProfileExecutor()
+    executor._inject_host_probe(config, tmp_path / "ws")
+    first = yaml.safe_load(config.read_text(encoding="utf-8"))["benchmark"]["envs"]["PYTHONPATH"]
+    assert first == os.pathsep.join([shim, "/c", "/d"])
+    executor._inject_host_probe(config, tmp_path / "ws")
+    assert yaml.safe_load(config.read_text(encoding="utf-8"))["benchmark"]["envs"]["PYTHONPATH"] == first
+
+
 def test_probe_injection_respects_the_off_switch(tmp_path, monkeypatch):
-    """With the probe switched off the config is left untouched."""
+    """With the probe switched off only the start-up shim goes in, without the probe's environment."""
     import yaml
 
     from hyperloom.orchestrator.actions.executors.profile import ProfileExecutor
 
     monkeypatch.setenv(evidence.ENABLE_ENV, "0")
+    monkeypatch.delenv("PYTHONPATH", raising=False)
     config = tmp_path / "profile.yaml"
     _write_profile_config(config, {"TP": 8})
     assert ProfileExecutor()._inject_host_probe(config, tmp_path / "ws") == ""
     envs = yaml.safe_load(config.read_text(encoding="utf-8"))["benchmark"]["envs"]
-    assert envs == {"TP": 8}
+    assert envs == {"TP": 8, "PYTHONPATH": str(evidence.probe_asset_dir())}
+    assert not (tmp_path / "ws").exists()
 
 
 def test_evidence_collection_annotates_the_profile_result(tmp_path, monkeypatch):
@@ -1462,7 +1539,7 @@ def test_evidence_collection_reports_an_aggregation_failure(tmp_path, monkeypatc
     from hyperloom.orchestrator.actions.executors.profile import ProfileExecutor
 
     def _boom(*_args, **_kwargs):
-        raise RuntimeError("truncated report")
+        raise ValueError("truncated report")
 
     monkeypatch.setattr(_ev, "aggregate_probe_dir", _boom)
     executor = ProfileExecutor()

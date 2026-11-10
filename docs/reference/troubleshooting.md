@@ -43,9 +43,9 @@ configured upstream gateway.
 2. Re-run preflight (idempotent — rewrites `~/.claude/config.json`
    `customApiUrl` and `primaryApiKey` and re-derives all alias keys):
    ```bash
-   bash "$REPO_ROOT/hyperloom/agents/kernel/scripts/install.sh" --check-only
+   bash "$REPO_ROOT/hyperloom/inference_optimizer/assets/install.sh" --check-only
    # If check-only reports issues, re-run without --check-only:
-   bash "$REPO_ROOT/hyperloom/agents/kernel/scripts/install.sh"
+   bash "$REPO_ROOT/hyperloom/inference_optimizer/assets/install.sh"
    ```
 3. Inspect `~/.claude/config.json` — `customApiUrl` must point at the
    upstream gateway (for example, `https://<your-gateway-host>/api/v1/llm-proxy/v1`).
@@ -61,7 +61,7 @@ credentials. `tr '\0' '\n' < /proc/<pid>/environ | grep ANTHROPIC_API_KEY` on th
 running optimizer shows the previous key.
 
 **Cause**: `install.sh` snapshots credentials into
-`$USER_DATA_PATH/runtime/kernel-agent.env.sh`. Optimizer preflight loads the
+`$KERNEL_AGENT_ENV` (`kernel-agent.env.sh`, on the container's own disk). Optimizer preflight loads the
 workspace settings before this fallback, preserving caller exports. An old key
 still exported by the launching shell therefore wins over a rotated `.env` value.
 
@@ -80,6 +80,9 @@ still exported by the launching shell therefore wins over a rotated `.env` value
    ```bash
    bash "$REPO_ROOT/hyperloom/inference_optimizer/assets/install.sh"
    ```
+   On a checkout another account can write, `.env` holds no credentials, so a key
+   written there is not one `install.sh` keeps: export the new key in the shell that
+   runs it instead (see [A checkout another account can write](authentication.md#a-checkout-another-account-can-write)).
 
 ---
 
@@ -115,15 +118,17 @@ internal CA, or on self-hosted gateways with private certificates.
 ## Ray `--num-gpus` rejected
 
 **Symptom**: `ray start --head ... --num-gpus=N` fails with
-`Error: no such option: --num-gpus` or similar Click errors.
+`Error: no such option: --num-gpus`, or preflight reports
+`ray start does not accept --head --port=6379 ...`.
 
-**Cause**: Click ≥ 8.3 is incompatible with the Ray 2.44 CLI shipped
-by Hyperloom's installer.
+**Cause**: The installed Ray's CLI does not parse the `ray start` argv
+Hyperloom passes — an option that release dropped, a value it narrowed, or a
+`click` release that breaks the CLI on import.
 
-**Fix**:
+**Fix**: reinstall the Ray Hyperloom pins and let preflight certify it again:
 
 ```bash
-pip install --quiet 'click<8.3.0' 'ray[default]==2.44.1'
+pip install --quiet 'ray[default]==2.44.1'
 ray --version
 ```
 
@@ -131,14 +136,21 @@ The same fix applies when `ray --version` itself fails after a pod or
 venv rebuild.
 
 On an interpreter with no 2.44.1 wheel (cp314 postdates that release), install
-the lowest published version above it instead and leave the `click` ceiling off
-— it guards 2.44.1's CLI alone, and forcing it onto a newer Ray downgrades a
-`click` that works:
+the lowest published version above it instead:
 
 ```bash
 pip install --quiet 'ray[default]>=2.44.1'
 ray --version
 ```
+
+Hyperloom changes `click` in one case only: Ray 2.44.1 (the default pin) fails to
+import its CLI under `click` 8.3+ with `ValueError: ... is not a valid Sentinel`
+(a fresh `pip install ray[default]==2.44.1` on Python 3.10 resolves `click` 8.5).
+Preflight and the kernel-tools installer then install `click<8.3` once and certify
+the CLI again. Every other failure (a rejected `ray start` argv, a version
+mismatch, another import error, any Ray set through `RAY_VERSION`) leaves
+`click` alone and ends the install; for a `click` that breaks another Ray, set
+`RAY_VERSION` to a release built against it. There is no setting for the hold.
 
 ---
 
@@ -159,14 +171,25 @@ ray stop --force || true
 # issue #433: raise the soft open-files limit before `ray start` so the
 # raylet stays up (see "Ray raylet unstable / zombie" below).
 ulimit -Sn "${RAY_MIN_NOFILE:-65536}" 2>/dev/null || true
-ray start --head --disable-usage-stats --num-gpus="$RAY_NUM_GPUS" --include-dashboard=false
+ray start --head --disable-usage-stats --num-gpus="$RAY_NUM_GPUS" --include-dashboard=false \
+  --resources='{"serving_slot":1}'
 ray status
 ```
 
+The `--resources='{"serving_slot":1}'` argument is required: Hyperloom
+serializes serving work on that resource, and a head without it cannot run a
+baseline. Prefer letting Hyperloom start the head (or re-running the installer)
+over starting one by hand.
+
 > **Note**: current Hyperloom startup paths can auto-start or reuse a local Ray
-> head. If `ray_current_cluster` points at a stale or incompatible cluster, stop
-> Ray first so Hyperloom can create a fresh head with the required GPU and
-> custom-resource configuration.
+> head. A local head that lacks `serving_slot` is restarted with it
+> automatically only when it is the only Ray head on the host and has no work on
+> it (no held resources, live actors or other drivers); any other cluster
+> without it (an explicit `RAY_ADDRESS`, a multi-node cluster, a busy head, or a
+> host with a second head) fails with `existing Ray head has no serving_slot
+> resource` and the reason it was not restarted. If `ray_current_cluster`
+> points at a stale or incompatible cluster, stop Ray first so Hyperloom can
+> create a fresh head with the required GPU and custom-resource configuration.
 
 ---
 
@@ -197,12 +220,42 @@ docker run --ulimit nofile=1048576 ...   # minimum: --ulimit nofile=65536
 
 The runtime also runs an fd-limit preflight that raises this process's
 *soft* limit (up to the hard cap) before every `ray start`
-(`hyperloom/agents/kernel/scripts/install.sh` `ensure_fd_limit_for_ray` and
-`hyperloom/agents/kernel/tools/backends/ray_runtime.py` `ensure_fd_limit`), so a
+(`hyperloom/inference_optimizer/assets/install_kernel_tools.sh` `ensure_fd_limit_for_ray` and
+`hyperloom/orchestrator/actions/executors/_ray_runtime.py` `ensure_fd_limit`), so a
 high hard cap is enough; you do not need to set the soft limit yourself.
 Override the target with `RAY_MIN_NOFILE` if needed. If the preflight
 warns that the **hard** cap is below the target, the container was not
 launched with `--ulimit nofile=...` — fix the launch command.
+
+---
+
+## Ray head does not answer a driver
+
+**Symptom**: the log says `Ray head at address 'auto' did not answer a driver`, and
+serving rounds and GPU specialists run on the local subprocess path instead of Ray.
+
+**Cause**: a Ray head is running (`ray status` answers), but its raylet never replies
+to a driver's registration. Connecting in-process would freeze the whole process: Ray
+2.44 waits for that reply with the GIL held and no timeout, so no thread, timer or
+event loop runs again. Hyperloom therefore tries the connect in a child process first,
+bounded by `HYPERLOOM_RAY_CONNECT_PROBE_TIMEOUT_SEC` (60 s), and keeps the answer until
+it connects in-process again. A head can stop answering after it was probed (a raylet
+reaped after an OOM, say), so the head is probed again before every in-process
+reconnect: after a Ray actor dies, after this process starts or restarts a local head
+(the `serving_slot` repair), and before the retry that follows a Ray version mismatch.
+The round that was reconnecting fails with `ray_ensure_error`; later work runs locally.
+If the process is interrupted while it waits (Ctrl-C, or a SIGTERM its handler turns
+into an exit), the probe's whole process group is killed; a probe whose parent dies
+outright is killed by the kernel.
+
+The installer asks a running head whether it declares `serving_slot` through the same
+kind of connect, under the same bound. A head that does not answer in time is reported
+(`ray head did not answer a driver within 60s`) and replaced like a head without
+`serving_slot`: `ray stop --force` and a fresh `ray start --head`.
+
+**Fix**: run `ray stop --force` before the next session so it starts a fresh head, or
+`export INFERENCE_OPTIMIZER_RAY_EXEC=0` to run without Ray and without the probe. To
+check a head by hand: `timeout 60 python -c "import ray; ray.init(address='auto')"`.
 
 ---
 
@@ -251,9 +304,9 @@ hiccup and the installer continued.
 **Fix**:
 
 ```bash
-bash "$REPO_ROOT/hyperloom/agents/kernel/scripts/install.sh" --check-only
+bash "$REPO_ROOT/hyperloom/inference_optimizer/assets/install.sh" --check-only
 # If --check-only reports missing packages, re-run without --check-only:
-bash "$REPO_ROOT/hyperloom/agents/kernel/scripts/install.sh"
+bash "$REPO_ROOT/hyperloom/inference_optimizer/assets/install.sh"
 ```
 
 The installer is idempotent and re-installs only what's missing.
@@ -335,10 +388,10 @@ See [Environment variables](environment-variables.md) for
 
 **Symptom.** `trace_analyze` returns `TraceLens root not found`,
 `incomplete (not a git checkout)`, or
-`TraceLens_generate_perf_report_pytorch_inference: command not found`.
+`TraceLens_generate_perf_report_from_config: command not found`.
 
-**Cause**: `TraceLens-internal` isn't installed, or the legacy
-training-mode CLI is being looked for (no longer accepted as of v0.4).
+**Cause**: `TraceLens-internal` isn't installed, or the pinned TraceLens
+(which provides the config-driven report CLI) isn't the installed one.
 
 **Fix**:
 
@@ -346,7 +399,7 @@ training-mode CLI is being looked for (no longer accepted as of v0.4).
    open-source checkout root, pins it to a fixed SHA, runs `pip install -e`,
    and smokes the CLI):
    ```bash
-   bash "$REPO_ROOT/hyperloom/agents/kernel/scripts/install.sh"
+   bash "$REPO_ROOT/hyperloom/inference_optimizer/assets/install.sh"
    ```
 2. If `install.sh` succeeds but the CLI still isn't on PATH, install
    manually. By default use the installer-managed clone; only point
@@ -357,7 +410,7 @@ training-mode CLI is being looked for (no longer accepted as of v0.4).
    export TRACELENS_ROOT="${TRACELENS_ROOT:-${HYPERLOOM_CACHE_DIR:-$REPO_ROOT/.cache}/TraceLens}"
    cd "$TRACELENS_ROOT"
    pip install -e .
-   TraceLens_generate_perf_report_pytorch_inference --help
+   TraceLens_generate_perf_report_from_config --help
    ```
 3. The optional internal extension is enabled only when
    `TRACELENS_INTERNAL_ROOT` is set to your own existing checkout
@@ -386,7 +439,7 @@ that path is missing or reaped.
    default is re-resolved to the cache root, then reinstall:
    ```bash
    unset TRACELENS_ROOT   # remove any hard-coded old path from env or .env first
-   bash "$REPO_ROOT/hyperloom/agents/kernel/scripts/install.sh"
+   bash "$REPO_ROOT/hyperloom/inference_optimizer/assets/install.sh"
    ```
    The installer rewrites `kernel-agent.env.sh` with the
    `${HYPERLOOM_CACHE_DIR:-$REPO_ROOT/.cache}/TraceLens@<sha>` default and
@@ -396,7 +449,7 @@ that path is missing or reaped.
    ```bash
    export HYPERLOOM_CACHE_DIR="$USER_DATA_PATH/.hyperloom-cache"
    unset TRACELENS_ROOT
-   bash "$REPO_ROOT/hyperloom/agents/kernel/scripts/install.sh"
+   bash "$REPO_ROOT/hyperloom/inference_optimizer/assets/install.sh"
    ```
 3. **Keep an operator checkout** only if you deliberately maintain one —
    set `TRACELENS_ROOT` to that path. It is adopted as-is (no clone, no
@@ -407,7 +460,7 @@ that path is missing or reaped.
 
 ## Resume fails: "manifest.json not found"
 
-**Symptom.** `python -m hyperloom.inference_optimizer.cli optimize --resume-from` exits with
+**Symptom.** `python -m hyperloom optimize --resume-from` exits with
 `manifest.json not found under <dir>` or `state.json missing`.
 
 **Cause**: `USER_DATA_PATH` points at a different directory than the
@@ -425,7 +478,7 @@ original session, or the session never reached the point of writing
    ```
 2. Pass the actual session directory:
    ```bash
-   python3 -m hyperloom.inference_optimizer.cli optimize --resume-from "$SESSION_DIR"
+   python3 -m hyperloom optimize --resume-from "$SESSION_DIR"
    ```
 3. If `manifest.json` truly never existed, resume is not possible —
    restart with a fresh `--model …` launch.
@@ -445,7 +498,7 @@ KB Store backend is unreachable.
 
 1. Resolve and test the local KB root:
    ```bash
-   KB_ROOT="${KNOWLEDGE_LOCAL_ROOT:-${HYPERLOOM_LOCAL_KB_ROOT:-${USER_DATA_PATH:-$HOME/.cache/hyperloom}/knowledge}}"
+   KB_ROOT="${KNOWLEDGE_LOCAL_ROOT:-${USER_DATA_PATH:-$HOME/.cache/hyperloom}/knowledge}"
    echo "$KB_ROOT"
    mkdir -p "$KB_ROOT"
    touch "$KB_ROOT/.write-test" && rm "$KB_ROOT/.write-test"
@@ -478,7 +531,7 @@ action no longer derives this automatically.
 **Fix**: Add the flag at launch:
 
 ```bash
-python3 -m hyperloom.inference_optimizer.cli optimize ... --compare-against-gpu B200
+python3 -m hyperloom optimize ... --compare-against-gpu B200
 ```
 
 The marker is informational, not a failure — the optimisation still
@@ -489,7 +542,7 @@ runs against your local baseline.
 ## `result.json` written outside the session dir
 
 **Symptom**: A benchmark "succeeds" but the breakdown shows
-`baseline.throughput_tok_s_per_gpu = null`; logs reference a
+`baseline.output_throughput = null`; logs reference a
 `result.json` written to `--result-dir /tmp/...` outside
 `$USER_DATA_PATH`.
 
@@ -519,17 +572,22 @@ Three commands give you a fast situation report:
 SD="${INFERENCE_OPTIMIZER_CURRENT_SESSION_DIR:-$SESSION_DIR}"
 
 # 1. Are events landing?
-python -m hyperloom.inference_optimizer.tools.event_counts "$SD"
+python -m hyperloom session events "$SD"
 
 # 2. What was the last action's outcome?
 jq '.optimization_stack | last' "$SD/state.json"
 
 # 3. What phase, lifecycle events, and stop reason are persisted?
-python -m hyperloom.inference_optimizer.tools.read_optimizer_state "$SD"
+python -m hyperloom session state "$SD"
 ```
 
 See [Hyperloom operator scripts](operator-scripts.md) for the full set of
 inspection tools.
+
+If the `hyperloom optimize` process itself looks frozen (no new log lines, no new
+events), `kill -USR1 <pid>` writes every thread's Python stack to its stderr without
+stopping it. It works while the process is stuck in native code that holds the GIL,
+where `py-spy` may be missing and nothing in Python runs.
 
 ---
 

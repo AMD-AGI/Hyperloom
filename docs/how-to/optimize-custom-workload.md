@@ -28,7 +28,7 @@ frameworks, see [Run a Hyperloom optimization](optimize.md) instead.
 
 ```bash
 export HYPERLOOM_BENCHMARK_BACKEND=bypass
-python3 -m hyperloom.inference_optimizer.cli -v optimize \
+python3 -m hyperloom optimize -v \
   --framework custom \
   --framework-path /path/to/my-checkout \
   --benchmark-scripts-dir /path/to/my-scripts \
@@ -121,8 +121,9 @@ margin, then require later legs to stay inside it) is the pattern that holds up.
 
 ## Pinning knobs with `--extra-env`
 
-`--extra-env` carries the knobs your script reads. Hyperloom interprets none of
-them, but their semantics matter:
+`--extra-env` carries the knobs your script reads. A pin becomes a real
+environment variable for the session, so it also sets a Hyperloom control
+variable of the same name. Their semantics matter:
 
 > Whatever you pin becomes part of the **measurement contract**. A variant can
 > add keys but must not overwrite a pinned one, because the baseline number was
@@ -135,11 +136,63 @@ and asks the search for an increment on existing work; pinning none of them
 makes the baseline the stock path, so every switch the search finds is its own
 discovery.
 
-The CLI persists these pins in `state.json` and serializes them into
-`INFERENCE_OPTIMIZER_EXTRA_ENV` as a JSON object for the executors.
+The CLI exports each pin under its own name, persists them in `state.json`, and
+also serializes them into `INFERENCE_OPTIMIZER_EXTRA_ENV` as a JSON object so a
+resume can tell which names the previous launch set.
+
+On a fresh launch a pin and an `export` of the same name are equivalent: no name
+is withheld. For a knob Hyperloom resolves itself — `ISL`, `OSL`, `CONC`, `TP`,
+`EP`, `PRECISION`, `MAX_MODEL_LEN`, `FRAMEWORK` — the environment is one rung of
+that knob's ladder: **an explicit flag wins, then the environment (where your
+pin lands), then the default**. So `--extra-env ISL=4096` sets the ISL, and
+`--isl 2048 --extra-env ISL=4096` runs at 2048. On a resume the two stop being
+equivalent for `ISL`, `OSL`, `CONC`, `TP`, `EP` and — when the session recorded
+one — `MAX_MODEL_LEN`: the pin is still honoured, but a bare `export` is
+overwritten by the session's recorded value, so the ladder reads **flag, then the
+pins in effect for this resume (its own `--extra-env`, or the launch's persisted
+pins when it passes none), then the recorded value, then the environment, then
+the default**. `PRECISION` keeps the fresh-launch ladder on a resume too, with
+the recorded value and the checkpoint's dtype below the environment. `FRAMEWORK`
+belongs to the session: a resume re-exports the recorded framework and reads
+`$FRAMEWORK` only when the session recorded none, so neither a pin nor a flag
+changes it.
+Everything else a pin names is set directly and is not interpreted.
 **Forward every pin as its own `--extra-env` flag** — a dropped pin is lost
 silently. On `--resume` the persisted pins are re-exported, so they only need
 re-passing when you want to change them.
+
+## Declaring the levers to explore
+
+"Leave the rest for exploration" needs somewhere for the search to start. An LLM
+framework has source the model can read to infer its knobs; a `custom` workload
+does not, so its seed grid is empty and EXPLORE has nothing to sweep until the
+model guesses.
+
+Declare the knob space instead, in `levers.json` beside your benchmark script
+(inside `--benchmark-scripts-dir`):
+
+```json
+[
+  {"name": "workers_1", "extra_envs": {"GPU_CHAIN_WORKERS": "1"}},
+  {"name": "workers_2", "extra_envs": {"GPU_CHAIN_WORKERS": "2"}},
+  {"name": "threads_4",  "extra_envs": {"OMP_NUM_THREADS": "4"}}
+]
+```
+
+Each entry is an explore variant: a `name` plus at least one thing a restart can
+apply (`extra_envs` as an **object**, `extra_args`, `remove_args`, `unset_envs`,
+or `args_mode: "replace"`). Each entry is judged by the same rule the executor
+applies when it builds the grid, so a shape that normalizes away — `extra_envs`
+given as a string or a list, say — is rejected at launch rather than quietly
+benchmarking the baseline again under a new name. The declarations are seeded ahead of the model's own
+proposals, so the sweep runs even when the model proposes nothing; a variant the
+model proposes under the same name wins, and a declaration whose name already
+appears in the explore ledger's `tested` rows is not re-seeded on later rounds.
+
+The file is optional — but if it exists and is malformed, the launch fails with
+exit code 2 rather than starting a run whose grid silently comes back empty. It
+lives in the scripts dir because that directory is already persisted and
+re-exported on `--resume`.
 
 ## The FRAMEWORK_AGENT phase
 
@@ -202,7 +255,8 @@ the bundle rather than the lever.
 
 ## Other requirements
 
-**GPU type.** `--gpu-type` accepts `mi300x`, `mi308x`, `mi325x` and `mi355x`.
+**GPU type.** `--gpu-type` accepts `mi300x`, `mi308x`, `mi325x`, `mi355x`,
+`r9700`, `r9600d` and `radeon8060s` (Strix Halo).
 Note that **`mi308x` and `mi325x` map to `runner_type=mi300x`** with a warning,
 since those GPUs share the MI300X runner family. Without the flag, Hyperloom
 auto-detects through `rocm-smi --showproductname`.

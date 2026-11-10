@@ -55,7 +55,6 @@ def _http(
     *,
     body: Optional[dict] = None,
     insecure: bool = False,
-    timeout: float = 30.0,
 ) -> Tuple[int, Any]:
     """Perform a JSON HTTP request; return ``(status_code, parsed_body_or_text)``."""
     data = json.dumps(body).encode("utf-8") if body is not None else None
@@ -70,7 +69,7 @@ def _http(
         ctx.check_hostname = False
         ctx.verify_mode = ssl.CERT_NONE
     try:
-        with urllib.request.urlopen(req, timeout=timeout, context=ctx) as resp:
+        with urllib.request.urlopen(req, timeout=30.0, context=ctx) as resp:
             raw = resp.read().decode("utf-8", "replace")
             return resp.status, _maybe_json(raw)
     except urllib.error.HTTPError as exc:

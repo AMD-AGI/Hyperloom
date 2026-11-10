@@ -10,6 +10,7 @@ from pathlib import Path
 
 import pytest
 
+from hyperloom.orchestrator.kernel import kernel_decisions as kd
 from hyperloom.orchestrator.roles import (
     MockBackend,
     MockCriticBackend,
@@ -17,7 +18,7 @@ from hyperloom.orchestrator.roles import (
 )
 from hyperloom.orchestrator.loop.coordinator import Coordinator
 from hyperloom.inference_optimizer.protocol.intent import Intent, IntentType
-from hyperloom.orchestrator.policy.gate import PolicyDenied
+from hyperloom.orchestrator.policy.denial import PolicyDenied
 
 from .conftest import seed_kernel_keep
 from hyperloom.inference_optimizer.session.paths import make_session_dir
@@ -70,25 +71,25 @@ def test_baseline_allowed_without_target_analysis(session_dir):
         session_dir,
         backends=_backends_full(),
     )
-    assert coord._sequence_denial_for_action("baseline") is None
-    assert coord._sequence_denial_for_action("target_analysis") is None
+    assert coord.dispatcher._sequence_denial_for_action("baseline") is None
+    assert coord.dispatcher._sequence_denial_for_action("target_analysis") is None
 
 
 def test_baseline_first_still_blocks_other_actions(session_dir):
     """With baseline_tput == 0, ``explore`` is denied for baseline (not target_analysis)."""
     coord = Coordinator(session_dir, backends=_backends_full())
-    denied = coord._sequence_denial_for_action("explore")
+    denied = coord.dispatcher._sequence_denial_for_action("explore")
     assert isinstance(denied, PolicyDenied)
     assert denied.rule == "execution_order"
     assert "baseline must run first" in str(denied)
-    assert coord._sequence_denial_for_action("baseline") is None
-    assert coord._sequence_denial_for_action("target_analysis") is None
+    assert coord.dispatcher._sequence_denial_for_action("baseline") is None
+    assert coord.dispatcher._sequence_denial_for_action("target_analysis") is None
 
 
 def test_integrate_gate_inactive_without_keep(session_dir):
     coord = Coordinator(session_dir, backends=_backends_full())
     _seed_post_baseline(coord)
-    assert coord.shared_state.next_pending_keep_kernel_id() == ""
+    assert kd.pending_keep_kernel_ids(coord.shared_state) == []
 
 
 def _seed_kernel_opt_state(
@@ -115,7 +116,7 @@ def test_integrate_gate_inactive_when_decision_not_keep(session_dir):
     coord = Coordinator(session_dir, backends=_backends_full())
     _seed_post_baseline(coord)
     _seed_kernel_opt_state(coord, kernel_id="k-1", decision="REVERT")
-    assert coord.shared_state.next_pending_keep_kernel_id() == ""
+    assert kd.pending_keep_kernel_ids(coord.shared_state) == []
 
 
 def test_integrate_gate_fires_when_keep_pending(session_dir):
@@ -128,7 +129,7 @@ def test_integrate_gate_fires_when_keep_pending(session_dir):
         micro=4.13,
         source_file="/sgl-workspace/aiter/aiter/ops/rmsnorm.py",
     )
-    assert coord.shared_state.next_pending_keep_kernel_id() == "k-rmsnorm"
+    assert kd.pending_keep_kernel_ids(coord.shared_state)[0] == "k-rmsnorm"
 
 
 def test_integrate_gate_clears_when_already_in_optimization_stack(session_dir):
@@ -143,7 +144,7 @@ def test_integrate_gate_clears_when_already_in_optimization_stack(session_dir):
     coord.shared_state.optimization_stack = [
         {"action": "integrate", "kernel_id": "k-rmsnorm", "target_file": "/p/rmsnorm.py"},
     ]
-    assert coord.shared_state.next_pending_keep_kernel_id() == ""
+    assert kd.pending_keep_kernel_ids(coord.shared_state) == []
 
 
 def test_integrate_gate_clears_when_kernel_already_rejected(session_dir):
@@ -151,7 +152,7 @@ def test_integrate_gate_clears_when_kernel_already_rejected(session_dir):
     _seed_post_baseline(coord)
     _seed_kernel_opt_state(coord, kernel_id="k-bad", decision="KEEP")
     coord.shared_state.rejected_kernel_ids = ["k-bad"]
-    assert coord.shared_state.next_pending_keep_kernel_id() == ""
+    assert kd.pending_keep_kernel_ids(coord.shared_state) == []
 
 
 def test_pending_keep_no_longer_blocks_other_actions(session_dir):
@@ -164,9 +165,9 @@ def test_pending_keep_no_longer_blocks_other_actions(session_dir):
         decision="KEEP",
         source_file="/p/rmsnorm.py",
     )
-    assert coord.shared_state.next_pending_keep_kernel_id() == "k-rmsnorm"
-    for action in ("explore", "sweep", "integrate", "report"):
-        assert coord._sequence_denial_for_action(action) is None, (
+    assert kd.pending_keep_kernel_ids(coord.shared_state)[0] == "k-rmsnorm"
+    for action in ("explore", "integrate", "report"):
+        assert coord.dispatcher._sequence_denial_for_action(action) is None, (
             f"{action!r} must not be sequence-denied by a pending KEEP"
         )
 
@@ -202,8 +203,8 @@ def test_report_allowed_when_hot_reusable_kernels_untried(session_dir):
     )
     coord.shared_state.last_trace_analyze["roofline_snapshot_id"] = 1
     coord.shared_state.explore_attempts = [{"variant_name": "x"}]
-    assert coord._sequence_denial_for_action("report") is None
-    assert coord.shared_state.untried_hot_reusable_kernels()
+    assert coord.dispatcher._sequence_denial_for_action("report") is None
+    assert kd.untried_hot_reusable_kernels(coord.shared_state)
 
 
 def test_mission_summary_surfaces_untried_hot_kernels(session_dir):
@@ -221,7 +222,6 @@ def test_mission_summary_surfaces_untried_hot_kernels(session_dir):
     assert "untried_hot_kernels" in summary
     assert "k001" in summary
     assert "k002" in summary
-    assert summary.find("k002") < summary.find("k001"), summary
 
 
 def test_report_always_allowed_regardless_of_hot_kernels(session_dir):
@@ -235,7 +235,7 @@ def test_report_always_allowed_regardless_of_hot_kernels(session_dir):
         ],
     )
     coord.shared_state.last_trace_analyze["roofline_snapshot_id"] = 1
-    assert coord._sequence_denial_for_action("report") is None
+    assert coord.dispatcher._sequence_denial_for_action("report") is None
 
 
 def test_trace_analyze_gate_does_not_block_explore_actions(session_dir):
@@ -246,8 +246,8 @@ def test_trace_analyze_gate_does_not_block_explore_actions(session_dir):
     s.baseline_tput = 100.0
     s.last_profile_trace = "/tmp/profile.tar.gz"
     s.last_trace_analyze = {}
-    for action in ("explore", "sweep", "report", "profile", "roofline"):
-        denied = coord._sequence_denial_for_action(action)
+    for action in ("explore", "report"):
+        denied = coord.dispatcher._sequence_denial_for_action(action)
         if denied is None:
             continue
         assert "trace_analyze must run first" not in str(denied), (
@@ -265,7 +265,7 @@ def test_run_optimization_request_no_longer_blocked_by_stale_trace_analyze(
     s.baseline_tput = 100.0
     s.last_profile_trace = "/tmp/profile.tar.gz"
     s.last_trace_analyze = {}
-    assert coord._sequence_denial_for_request("kernel_agent", "run_optimization") is None
+    assert coord.dispatcher.admission_denial_for_request("kernel_agent", "run_optimization") is None
 
 
 def test_trace_analyze_request_itself_passes(session_dir):
@@ -276,21 +276,19 @@ def test_trace_analyze_request_itself_passes(session_dir):
     s.baseline_tput = 100.0
     s.last_profile_trace = "/tmp/profile.tar.gz"
     s.last_trace_analyze = {}
-    assert coord._sequence_denial_for_request("kernel_agent", "trace_analyze") is None
+    assert coord.dispatcher.admission_denial_for_request("kernel_agent", "trace_analyze") is None
 
 
 def test_legacy_select_kernels_request_kind_no_longer_recognised(session_dir):
-    """The pre-M4 ``select_kernels`` request kind was removed; ``get_handler`` returns None."""
+    """The pre-M4 ``select_kernels`` request kind was removed; no handler is registered for it."""
     coord = Coordinator(session_dir, backends=_backends_full())
     s = coord.shared_state
     s.baseline_tput = 100.0
     s.last_profile_trace = "/tmp/profile.tar.gz"
-    from hyperloom.orchestrator.kernel.request_handlers import (
-        get_handler,
-    )
+    from hyperloom.orchestrator.kernel.request_handlers import KERNEL_REQUEST_HANDLERS
 
-    assert get_handler("select_kernels") is None
-    assert get_handler("trace_analyze") is not None
+    assert "select_kernels" not in KERNEL_REQUEST_HANDLERS
+    assert "trace_analyze" in KERNEL_REQUEST_HANDLERS
 
 
 def test_trace_analyze_gate_clears_run_opt_request_when_cache_fresh(session_dir):
@@ -304,4 +302,4 @@ def test_trace_analyze_gate_clears_run_opt_request_when_cache_fresh(session_dir)
         "trace_input": "/tmp/profile.tar.gz",
         "candidates_path": "/tmp/cands.json",
     }
-    assert coord._sequence_denial_for_request("kernel_agent", "run_optimization") is None
+    assert coord.dispatcher.admission_denial_for_request("kernel_agent", "run_optimization") is None

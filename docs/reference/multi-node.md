@@ -35,6 +35,22 @@ round.
 
 Without a hand-off, a `--nodes >= 2` run exits immediately with code 2.
 
+If the platform wrote a TopologyHandoff v1 file, it sets `TOPOLOGY_HANDOFF_FILE` to
+its path and Hyperloom reads that file instead of the variables below: `backend`,
+`nodes`, `gpus_per_node`, `service_url`, plus the `ray` block (`head_ip`,
+`dashboard_token_file`) for rayjob or the `infera` block (`ssh_key_file`,
+`ssh_port_base`, `known_hosts_file`, `prefill_ips`, `decode_ips`, `worker_ips`)
+for infera. A file that cannot be used (unreadable, not JSON, unsupported schema
+major, missing or malformed field) stops the run with an error naming the file;
+there is no silent fallback to the variables. If both are present the file wins
+and a warning names the fields that differ. The launch flags win over the file:
+`--mn-backend` over its `backend`, `--gpus-per-node` over its `gpus_per_node`, and
+`--nodes` over its `nodes`. Without `--mn-backend` the file's `backend` is the
+launch backend, and without `--gpus-per-node` its `gpus_per_node` is used (else 8);
+`--nodes` defaults to 1, so the file's `nodes` never turns a single-node launch
+into a multi-node one. With `TOPOLOGY_HANDOFF_FILE` unset,
+the variables below apply unchanged.
+
 The following table lists all hand-off variables.
 
 | Variable | Backend | Required | Meaning |
@@ -83,16 +99,19 @@ RDMA, where `:22` collides with the node's own sshd.
 ### rayjob
 
 The image must have Ray installed and on `PATH` at the version the KubeRay
-cluster expects. KubeRay runs `ray start` in the head and worker containers. Pin
-Ray's CLI dependency explicitly:
+cluster expects. KubeRay runs `ray start` in the head and worker containers:
 
 ```bash
-python -m pip install "ray[default]==2.44.1" "click==8.1.8"
+python -m pip install "ray[default]==2.44.1"
 ```
 
-Keep `click` below 8.2 regardless of what Ray's declared dependency allows — Ray
-2.44.1 accepts `click>=7.0`, but click 8.2 changed `Sentinel` and breaks Ray's
-CLI on import, preventing `ray start` from running.
+Pin no `click` version. What the image owes is a Ray whose `ray start` parses
+the argv Hyperloom passes; preflight and the kernel-tools installer certify
+exactly that, by handing a representative argv to Ray's own parser. A `click`
+release that leaves the CLI parsing is no reason to downgrade it. The one
+exception is Ray 2.44.1 failing to import its CLI under `click` 8.3+ (`is not a
+valid Sentinel`): there Hyperloom holds `click<8.3` once. Any other failure calls
+for a Ray release built against your `click`, through `RAY_VERSION`.
 
 The cluster idles through the RayJob submitter: the platform sets its entrypoint
 to `tail -f /dev/null` so the cluster stays up between rounds.
@@ -136,7 +155,7 @@ The pinned workload skill at
 [`docs/how-to/multi-node/hyperloom-remote-mn-qwen3-30b/SKILL.md`](https://github.com/AMD-AGI/Hyperloom/blob/main/docs/how-to/multi-node/hyperloom-remote-mn-qwen3-30b/SKILL.md)
 contains two ready-to-run blocks — **Workload A (infera + PD)** and **Workload B
 (rayjob)** — each a `FLAGS` list and an `Environment` block. The agent runs
-`inference_optimizer optimize` with those blocks and monitors `state.json` until a
+`hyperloom optimize` with those blocks and monitors `state.json` until a
 terminal `stop_reason`.
 
 ### `optimize` flags
@@ -151,13 +170,14 @@ The following flags are used in multi-node workload skill blocks.
 | `--gpus-per-node` | GPUs per pod (default 8); feeds the TP feasibility check |
 | `--tp` | Tensor parallelism degree |
 | `--ep` | Expert parallelism degree (MoE; often `ep == tp`) |
-| `--isl`, `--osl`, `--conc` | Benchmark input length, output length, and concurrency. These must be flags — the corresponding env vars are ignored and overwritten |
-| `--gpu-type`, `--precision` | Target GPU (for example `mi325x`) and dtype (`bf16`). Flags are authoritative; env vars are not |
+| `--isl`, `--osl`, `--conc` | Benchmark input length, output length, and concurrency. The flag wins; on a fresh launch the corresponding env var is next, then the default. On a resume it is the pins in effect for this resume (its own `--extra-env`, or the launch's persisted pins when it passes none), then the session's recorded value, then the env var, then the default |
+| `--gpu-type`, `--precision` | Target GPU (for example `mi325x`) and dtype (`bf16`). `--precision` has its own ladder on both branches: the flag, then `$PRECISION`, then the session's recorded value, then the checkpoint's dtype, then the default. `--gpu-type` is a hint: on a fresh launch the hardware probe wins and a disagreeing flag only warns; a resume takes the GPU type from the session and ignores the flag |
 | `--framework` | `sglang` |
 | `--target-gain`, `--max-hours` | Optimization goal and time budget |
-| `--pd-mode disaggregated` | Enable PD disaggregation (infera only) |
-| `--pd-prefill-nodes`, `--pd-prefill-tp`, `--pd-prefill-ep`, `--pd-prefill-extra-args` | Prefill topology (infera PD) |
-| `--pd-decode-nodes`, `--pd-decode-tp`, `--pd-decode-ep`, `--pd-decode-extra-args` | Decode topology (infera PD) |
+| `--pd-mode disaggregated` | Enable PD disaggregation (infera and rayjob) |
+| `--pd-prefill-nodes`, `--pd-prefill-tp` | Prefill topology |
+| `--pd-decode-nodes`, `--pd-decode-tp` | Decode topology |
+| `--pd-prefill-ep`, `--pd-prefill-extra-args`, `--pd-decode-ep`, `--pd-decode-extra-args` | Per-role EP and server args (infera only; rayjob rejects them) |
 | `--pd-transfer-backend` | KV transfer plane for PD. Use `mooncake`; `nixl` can produce 0 output tokens |
 | `--server-args "..."` | Extra sglang args applied on every server restart |
 | `--no-framework-agent` | Skip the framework-tuning agent phase |
@@ -188,7 +208,7 @@ The following example shows an infera + PD disaggregated launch after the
 platform has handed a cluster over:
 
 ```bash
-inference_optimizer optimize \
+hyperloom optimize \
   --model ${NFS_SHARED_ROOT}/models/Qwen3-30B-A3B \
   --nodes 2 --mn-backend infera \
   --pd-mode disaggregated \
@@ -198,8 +218,8 @@ inference_optimizer optimize \
 ```
 
 For rayjob, replace `--mn-backend infera` with `--mn-backend rayjob` and omit
-the `--pd-*` flags. The platform supplies `HYPERLOOM_MN_EXT_HEAD_IP` instead of
-the SSH and IP variables.
+the per-role `--pd-*-ep` / `--pd-*-extra-args` flags. The platform supplies
+`HYPERLOOM_MN_EXT_HEAD_IP` instead of the SSH and IP variables.
 
 ## Troubleshooting
 
@@ -228,15 +248,18 @@ tokens on some configurations.
 ### Ray `--num-gpus` rejected (rayjob)
 
 **Symptom**: `ray start --head --num-gpus=N` fails with `Error: no such option:
---num-gpus` or Click-related import errors.
+--num-gpus`, or preflight reports `ray start does not accept ...`.
 
-**Cause**: Click ≥ 8.2 is incompatible with Ray 2.44. The rayjob image was built
-with a newer Click version.
+**Cause**: The image's Ray CLI does not parse the argv Hyperloom passes — an
+option it dropped, a value it narrowed, or a `click` release that breaks the
+CLI on import.
 
-**Fix**:
+**Fix**: reinstall Ray at the version Hyperloom pins; Hyperloom itself holds
+`click<8.3` only when 2.44.1's CLI fails with `is not a valid Sentinel`. For any
+other `click` conflict, set `RAY_VERSION` to a Ray release built against it.
 
 ```bash
-pip install --quiet 'click<8.3.0' 'ray[default]==2.44.1'
+pip install --quiet 'ray[default]==2.44.1'
 ray --version
 ```
 
@@ -310,7 +333,7 @@ failed before writing `manifest.json`.
 find "$USER_DATA_PATH" -name manifest.json
 
 # Resume with the exact session directory
-python3 -m hyperloom.inference_optimizer.cli optimize \
+python3 -m hyperloom optimize \
   --resume-from /path/to/session
 ```
 

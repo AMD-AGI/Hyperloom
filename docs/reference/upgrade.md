@@ -43,6 +43,137 @@ host the CLI defaults to `session/` under the current directory instead. Prefer
 
 ---
 
+## Upgrading from 1.1.x
+
+### Required: launch through `hyperloom <command>`
+
+Every command now runs under one entry point, `hyperloom <command>`, or
+`python -m hyperloom <command>` where no console script is installed. Update
+launchers, skills and scripts:
+
+| Before | After |
+|---|---|
+| `python -m hyperloom.inference_optimizer.cli --verbose optimize ...` | `python -m hyperloom optimize --verbose ...` |
+| `inference_optimizer optimize ...` | `hyperloom optimize ...` |
+| `... recover-session --session-dir S` | `hyperloom recover --session-dir S` |
+| `python -m hyperloom.inference_optimizer.setup ...` / `hyperloom --check-only` | `hyperloom setup ...` / `hyperloom setup --check-only` |
+| `quantization-agent ...` | `hyperloom quantize ...` |
+| `python -m hyperloom.inference_optimizer.multi_node SUB ...` | `hyperloom multi-node SUB ...` |
+| `python -m hyperloom.inference_optimizer.tools.dump_session_breakdown` | `hyperloom session breakdown` |
+| `python -m hyperloom.inference_optimizer.tools.dump_session_report` | `hyperloom session report` |
+| `python -m hyperloom.inference_optimizer.tools.backfill_langfuse` | `hyperloom session backfill` |
+| `.../tools/event_counts.py` | `hyperloom session events` |
+| `.../tools/read_optimizer_state.py` | `hyperloom session state` |
+| `.../tools/preflight_optimizer.py MODEL_PATH` | `hyperloom check MODEL_PATH` |
+
+`--verbose` now follows the command name. `hyperloom` without a command prints
+its usage and exits 2 instead of running setup.
+
+### Required: removed flags
+
+These flags are rejected with `unrecognized arguments`:
+
+* `--kernel-codex`, `--kernel-claude`, `--kernel-prompt` (no-ops since the
+  kernel LLM role was retired): drop them.
+* `--max-minutes-{prelude,framework,explore,kernel,sweep,close}-pct` and
+  `--phase-budget-explore-pct`: use `--phase-budget-<phase>-pct`
+  (`--phase-budget-framework-pct` covers what the explore spelling set).
+* `recover --backfill-trace`: run `hyperloom session backfill --session-dir S`.
+* On the rayjob backend, `--pd-prefill-ep`, `--pd-decode-ep` and
+  `--pd-*-extra-args` now fail the server restart instead of being ignored;
+  they are supported on infera only.
+* `--pr-feed-window-days` and `--local-kb-root` (no reader left): drop them;
+  select the knowledge root with `KNOWLEDGE_LOCAL_ROOT`.
+* `kernelforge forge-loop --return-after-read-kb`, and the TraceLens kernel tool's
+  `--skip-split` / `--source-root` (with `TRACELENS_SOURCE_ROOT`): drop them.
+* `hyperloom multi-node kernel-bench` is removed; nothing in the optimizer calls it.
+* The TraceLens kernel tool's `--use-llm-orchestrator` / `--no-llm-orchestrator`:
+  use `--route {agent,non-llm}`. Its `--num-denoise-steps`, `--model-path` and
+  `--precision` fed the removed diffusion latency roofline: drop them.
+* `python -m hyperloom.orchestrator.trace_analysis.bypass_trace_analysis` is
+  removed and fails with `No module named`; use `tracelens_analysis --route non-llm`.
+
+### Required: the `bypass` trace-analysis route is replaced by `non-llm`
+
+`HYPERLOOM_TRACE_ANALYSIS_ROUTE=bypass`, or `analysis_route: bypass` in a
+`trace_analyze` request, now fails the request with `invalid_analysis_route`.
+Set `non-llm` instead; it needs a TraceLens checkout and writes `analysis.json`
+rather than `analysis.md`.
+
+These are no longer read and are silently ignored, so drop them:
+
+* `HYPERLOOM_BYPASS_STEADY_STATE`, `HYPERLOOM_BYPASS_CORR_WARN_PCT`,
+  `HYPERLOOM_BYPASS_OTHERS_WARN_PCT`, `HYPERLOOM_TRACE_SHAPE_MANIFEST` and
+  `HYPERLOOM_TRACE_SHAPE_MANIFEST_MAX_CAPTURES` (the bypass route).
+* `HYPERLOOM_NUM_DENOISE_STEPS` and the `trace_analyze` keys `num_denoise_steps`,
+  `model_path`, `precision` and `analysis_mode`.
+* `KERNEL_AGENT_USE_LLM_ORCHESTRATOR`; the agent route always runs unless
+  `--route non-llm` is given.
+
+### Required: sessions created before this release do not resume
+
+Every session's `storage/coordinator.db` now records schema version 8, and
+there are no in-place migrations. `optimize --resume-from` on a session whose
+database records an older version, which is every session started by 1.1.4 or
+earlier, exits 2 at resume admission, before `state.json` or the database is
+touched:
+
+```text
+ERROR: --resume-from coordinator.db is at schema version 6, older than this build's 8:
+sessions created before this release cannot be resumed. Finish the session under the
+build that started it, or start a new session.
+```
+
+Opening such a database through the coordinator storage raises the same
+message without writing to it. The legacy shapes the old migrations handled
+(`events.priority`, a `leases` table without `owner_scope`, `state.json`
+without `elapsed_charged_sec` or `phase_elapsed_totals`, manifests without
+`workflow_contract_version`) are no longer read. Finish in-flight sessions
+before upgrading.
+
+### Required: `session_breakdown.json` drops `robustness`
+
+The top-level `robustness` key, `close.robustness` and the
+`robustness_escalated` stop reason are gone; they were always empty since the
+robustness agent was retired. Consumers that read them should stop.
+
+### Required: `session_breakdown.json` drops the latency roofline and `bypass` keys
+
+The schema stays `v6.1` but drops the keys only the diffusion latency roofline
+or the `bypass` route produced; read `ceiling_available` instead of
+`close.roofline_progress.ceiling_kind`. Each key and its disposition is under
+Versioning in [`session_breakdown.json` integration in Hyperloom](session-breakdown.md).
+The trace certificate's `production_*` keys go with them; read `selected_role`.
+
+### Required: quantization failure exits 4
+
+A failed `--quantize` prelude now exits 4 instead of 3; exit 3 means only
+that another optimizer holds the session lock. Launchers that branch on the
+exit code should treat 4 as a non-retryable failure. See also
+[operations.md](operations.md) for the full exit-code table.
+
+### Recommended: commands that stay outside `hyperloom.cli`
+
+`hyperloom <command>` covers setup, check, optimize, recover, quantize,
+multi-node, and `session {breakdown,report,backfill,events,state}`. These
+entry points are **intentionally separate** (same as before the unification,
+only the optimizer-family commands moved under `hyperloom`):
+
+| Entry | Typical use |
+|---|---|
+| `kernelforge` / `python -m kernelforge.cli` | KernelForge campaigns (orchestrator dispatches `-m kernelforge.cli`) |
+| `hyperloom-kb-serve`, `hyperloom-kb-collect`, `python -m hyperloom_kb` | Experience KB service and collect CLI |
+| `hyperloom-kb` / `python -m hyperloom_kb.cli` | Operate an Experience KB service: health, labels, restore, exclusions, list, export |
+| `python -m hyperloom.inference_optimizer.experience_kb_service {init-env,ensure,...}` | Per-workspace Experience KB sidecar, with every `hyperloom-kb` command (setup skill, optimizer SKILL) |
+| `python -m hyperloom.agents.critic.runtime.cli {prepare-review,commit-review,replay-dead-letter}` | Critic backend subprocess (not operator-facing) |
+| Kernel agent tool modules (`tracelens_analysis`, …) | Orchestrator subprocess scripts with their own `__main__` |
+| `multi_node/scripts/*.py` on remote pods | Payload scripts SSH'd by `hyperloom multi-node`, not local `-m` entry points |
+
+There is no `hyperloom kb` subcommand in 1.1.x; keep using
+`experience_kb_service`, `hyperloom-kb`, or the `hyperloom-kb-*` console scripts above.
+
+---
+
 ## Upgrading from 0.5.x → 0.6.0
 
 Apply the following changes in order. Required steps must be completed before running; recommended and optional steps improve behavior or unlock new features.
@@ -52,9 +183,9 @@ Apply the following changes in order. Required steps must be completed before ru
 The `optimize` CLI multi-node image and per-node GPU flags were renamed
 and the legacy names are no longer accepted (no alias). Any launcher that
 passes the old flags will fail with `unrecognized arguments`. The image
-and per-node GPU count are now set purely through flags; the previous
-`INFERENCE_OPTIMIZER_RAYJOB_IMAGE` env is no longer read, so move its value
-onto `--mn-image`.
+is platform-owned and `--mn-image` is accepted but ignored; the per-node GPU
+count is set through `--gpus-per-node`. The previous
+`INFERENCE_OPTIMIZER_RAYJOB_IMAGE` env is no longer read.
 
 ```diff
 # run launchers, k8s ConfigMaps, .env
@@ -63,7 +194,6 @@ onto `--mn-image`.
 - --rayjob-gpus-per-node 8
 + --gpus-per-node 8
 - INFERENCE_OPTIMIZER_RAYJOB_IMAGE=harbor/...
-+ --mn-image harbor/...
 ```
 
 The new flags cover both multi-node backends (`rayjob` head+workers and
@@ -78,7 +208,7 @@ when possible, but launchers that know the class should pass it explicitly to
 avoid a generic fallback:
 
 ```diff
-python3 -m hyperloom.inference_optimizer.cli optimize \
+python3 -m hyperloom optimize \
     --model /path/to/GLM-5-FP8 \
     --framework sglang \
     --gpu-type mi355x \
@@ -111,15 +241,15 @@ the "vs B200" comparison number).
 
 Earlier launchers might have waited for the Coordinator to emit a
 `setup` action. Move all setup work to **before** the
-`python -m hyperloom.inference_optimizer.cli optimize` call:
+`python -m hyperloom optimize` call:
 
 ```diff
 # launcher.sh
 - python3 -m hyperloom.inference_optimizer.cli optimize ... # expects setup as first action
 + bash "$REPO_ROOT/hyperloom/inference_optimizer/assets/install.sh"
-+ . "${KERNEL_AGENT_ENV:-${USER_DATA_PATH:-/workspace/hyperloom}/runtime/kernel-agent.env.sh}"
-+ ray stop --force; ulimit -Sn "${RAY_MIN_NOFILE:-65536}" 2>/dev/null || true; ray start --head --num-gpus="$RAY_NUM_GPUS" --include-dashboard=false
-+ python3 -m hyperloom.inference_optimizer.cli optimize ...
++ kernel_agent_env_file="$(. "$REPO_ROOT/hyperloom/inference_optimizer/assets/runtime_env.sh"; runtime_env_kernel_agent_env_path)" && . "$kernel_agent_env_file"
++ ray stop --force; ulimit -Sn "${RAY_MIN_NOFILE:-65536}" 2>/dev/null || true; ray start --head --num-gpus="$RAY_NUM_GPUS" --include-dashboard=false --resources='{"serving_slot":1}'
++ python3 -m hyperloom optimize ...
 ```
 
 ### Recommended: review the `KERNEL_OPT_BACKEND_ORDER` default
@@ -158,8 +288,28 @@ controlled by the CLI flag `--enable-roofline`, which defaults **on**. Pass
 
 ### Schema compatibility
 
-`session_breakdown.json` emits `hyperloom.session_breakdown.v6.0`. V6 is a
-breaking cutover for the timeline: each action records its own event as it
+`session_breakdown.json` emits `hyperloom.session_breakdown.v6.1`. 6.1 changes
+three things inside the 6 major, a declared exception to the major-bump rule: it
+renames `throughput_tok_s_per_gpu` in `outcome.baseline`, `outcome.final` and
+the `baseline` event's `measurement` to `output_throughput` (the old key is no
+longer written), removes keys no producer populated, that only carried a
+constant or whose producer was removed, and reports two unmeasured figures as null. Archived 6.0 documents and documents exported by 1.1.x keep
+the old key, so readers must accept both keys or migrate.
+Re-exporting a 6.0 session directory emits a null
+`outcome.baseline.output_throughput` and the `contract_digest` recorded at
+session creation, and the default output overwrites the archived
+`<session_dir>/session_breakdown.json`. The removed keys (disposition: removed
+in 6.1, never populated) are `policy.force_exit_budget_pct`,
+`policy.variant_timeout_sec`, `policy.overtime_kill_ratio`,
+`trace_validate_ref`, `critic_review.iteration`, `geak.product.cfg_hash`,
+`geak.product.final_overlay_digest`, `entry.budget_remaining_sec` and the
+roofline rows' `rocprof_roofline`; the roofline rows' `roofline_measured` and the
+baseline action's `convergence` (disposition: removed in 6.1, constant) are
+removed as well.
+`attributed_gain_pct`, `unattributed_gain_pct` and run `empty` are null when
+unmeasured or not provided.
+
+V6 was the preceding cutover, for the timeline: each action records its own event as it
 runs, so an event's `start_time` is when the work started rather than when its
 artefacts were written, and the KERNEL and BASELINE projections are no longer
 emitted. Ordering that relied on the old collapsed windows changes as a result.
@@ -204,23 +354,9 @@ Without the explicit mode, local/default ignores both credentials. Set
 
 The implicit local root changed from `$USER_DATA_PATH/kb` (or
 `/workspace/hyperloom/kb`) to `$USER_DATA_PATH/knowledge` (or
-`~/.cache/hyperloom/knowledge`). Upgrade local deployments in this order:
-
-1. Stop every old Hyperloom process that can write the legacy Recipe KB.
-2. Back up the legacy root, including `recipe.json`, `history/`, and
-   `attempts.ndjson`.
-3. Install the new revision while leaving `KNOWLEDGE_LOCAL_ROOT`,
-   `--local-kb-root`, and `HYPERLOOM_LOCAL_KB_ROOT` unset for the first start.
-4. Start one new local-mode process. It migrates the Recipe corpus once,
-   excludes live lock/temp files, preserves unrelated data already under the
-   new knowledge root, and writes a durable marker only after success.
-5. Verify warm-start data, then roll out the remaining new processes.
-
-If the destination already contains Recipes or the completion marker,
-migration is intentionally skipped. A migration error while legacy Recipes
-exist fails startup; restore from the backup or correct permissions and retry.
-Deployments that explicitly keep `--local-kb-root` or
-`HYPERLOOM_LOCAL_KB_ROOT` continue using that path and are not migrated.
+`~/.cache/hyperloom/knowledge`). Data under the old root is neither read nor
+migrated; `--local-kb-root` and `HYPERLOOM_LOCAL_KB_ROOT` are removed, so use
+`KNOWLEDGE_LOCAL_ROOT` to select a root.
 
 ---
 
@@ -232,17 +368,19 @@ For any minor or patch upgrade:
 2. Re-run `bash "$REPO_ROOT/hyperloom/inference_optimizer/assets/install.sh"`. The
    installer is idempotent: it picks up new GEAK / TraceLens versions,
    refreshes generated LLM gateway aliases, and regenerates `kernel-agent.env.sh`.
-3. Re-source the env file:
+3. Re-source the env file. `runtime_env.sh` prints it only when `install.sh` wrote it in this
+   container and no other account could have changed it; otherwise it says why and nothing is sourced:
    ```bash
-   . "${KERNEL_AGENT_ENV:-${USER_DATA_PATH:-/workspace/hyperloom}/runtime/kernel-agent.env.sh}"
+   kernel_agent_env_file="$(. "$REPO_ROOT/hyperloom/inference_optimizer/assets/runtime_env.sh"; runtime_env_kernel_agent_env_path)" && . "$kernel_agent_env_file"
    ```
-4. If you have ongoing sessions you want to resume across the upgrade,
-   verify `manifest.json` and `state.json` are intact, then run
-   `python -m hyperloom.inference_optimizer.cli optimize --resume-from "$SESSION_DIR"`.
+4. To resume an ongoing session across the upgrade, first check the target
+   release's upgrade section: a release that raises the `coordinator.db`
+   schema version (1.1.x → this release does) refuses sessions started before
+   it, so finish those under the build that started them. Otherwise verify
+   `manifest.json`, `state.json` and `storage/coordinator.db` are intact, then run
+   `python -m hyperloom optimize --resume-from "$SESSION_DIR"`.
 
-Upgrades do not rewrite explicit `HYPERLOOM_LOCAL_KB_ROOT` paths or historical
-sessions. The one-time implicit Recipe-root migration described above is the
-only automatic storage move.
+Upgrades do not move storage or rewrite historical sessions.
 
 ---
 

@@ -3,8 +3,10 @@
 
 name: Lint
 
-# Static analysis on push and pull_request for all branches. Skips when every
-# changed file matches paths-ignore (same list as ``tests-coverage.yml``).
+# Static analysis on push and pull_request for all branches, every time: ``ruff``
+# is required on main, so it must report even for a documentation-only change,
+# and it runs on every event. The other jobs run only when the ``changes`` job
+# (code-changes.yml) finds a changed file outside the documentation-only list.
 #
 # Ruff reads ``[tool.ruff]`` / ``[tool.ruff.lint]`` in ``pyproject.toml``. Ruff
 # check and format are hard gates. Bandit and Pylint remain advisory until their
@@ -17,6 +19,10 @@ name: Lint
 # single editable install below covers all of them (no more per-agent
 # editable installs / separate PYTHONPATH entries / bare ``runtime`` module).
 #
+# import-linter enforces the architecture contracts in ``.importlinter``
+# (layer direction, package boundaries, no new import cycles). It is a hard
+# gate; two contracts carry an exact baseline that can only shrink.
+#
 # Bandit scans production Python code only (tests excluded) for medium+ security
 # findings. It remains advisory while the security baseline is being ratcheted.
 on:
@@ -24,21 +30,7 @@ on:
   # PR does not double-trigger (one run per event class).
   push:
     branches: [main]
-    paths-ignore:
-      - "**/*.md"
-      - "docs/**"
-      - "LICENSE*"
-      - "COPYRIGHT"
-      - "**/CODEOWNERS"
-      - ".gitattributes"
   pull_request:
-    paths-ignore:
-      - "**/*.md"
-      - "docs/**"
-      - "LICENSE*"
-      - "COPYRIGHT"
-      - "**/CODEOWNERS"
-      - ".gitattributes"
 
 permissions:
   contents: read
@@ -49,6 +41,9 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
+  changes:
+    uses: ./.github/workflows/code-changes.yml
+
   ruff:
     name: ruff
     runs-on: ubuntu-latest
@@ -86,8 +81,38 @@ jobs:
         id: broad_suppress
         run: python scripts/check_broad_suppress.py src scripts
 
+  import-linter:
+    name: import-linter (architecture contracts)
+    needs: changes
+    if: needs.changes.outputs.code == 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/setup-python@v7
+        with:
+          python-version: "3.11"
+
+      - name: Install import-linter
+        # Pinned exactly for the same reason as ruff above: the acyclic
+        # contract's baseline is the set of cycle breakers this version
+        # nominates, and a release that changes the nomination would red main
+        # with no code change. Bump it together with a re-check of
+        # ``.importlinter``. The project itself is not installed: the import
+        # graph is built statically from ``src/``.
+        run: |
+          pip install --upgrade pip
+          pip install "import-linter==2.15"
+
+      - name: Check architecture contracts
+        env:
+          PYTHONPATH: src
+        run: lint-imports --no-cache
+
   compile:
     name: byte-compile (syntax check)
+    needs: changes
+    if: needs.changes.outputs.code == 'true'
     runs-on: ubuntu-latest
     # Seconds long, and it catches the failure mode ruff cannot: ruff parses
     # with its own frontend, so a construct CPython rejects can lint clean.
@@ -103,10 +128,12 @@ jobs:
           python-version: "3.11"
 
       - name: Byte-compile package sources
-        run: python -m compileall -q src/kernelforge src/hyperloom
+        run: python -m compileall -q src/hyperloom_common src/kernelforge src/hyperloom
 
   bandit:
     name: bandit (medium+, production code)
+    needs: changes
+    if: needs.changes.outputs.code == 'true'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
@@ -143,7 +170,7 @@ jobs:
           # kernelforge/data out of the scan) is inert unless the config is
           # passed. B101 in the same table is already below --severity-level
           # medium, so the config changes nothing for the existing scan.
-          bandit -c pyproject.toml -r src/hyperloom src/kernelforge scripts \
+          bandit -c pyproject.toml -r src/hyperloom_common src/hyperloom src/kernelforge scripts \
             -x "*/tests/*" -q --severity-level medium
 
       - name: Advisory notice when Bandit failed
@@ -153,6 +180,8 @@ jobs:
 
   pylint:
     name: pylint (errors-only, multi-package)
+    needs: changes
+    if: needs.changes.outputs.code == 'true'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
@@ -169,13 +198,6 @@ jobs:
 
       - name: Pylint (errors only)
         continue-on-error: true
-        env:
-          # ``quantization_agent`` and ``ci`` are still flat repo-root
-          # packages (tree-reform.MD P2.6 promotes ``ci``; quantization_agent
-          # itself was promoted into hyperloom.agents but the bare-name
-          # dotted-path below is kept for the pylint invocation).
-          PYTHONPATH: >-
-            ${{ github.workspace }}
         run: |
           # src/kernelforge is deliberately NOT in this list, and the omission
           # is measured rather than inherited: adding it yields ~58 findings,
@@ -195,6 +217,8 @@ jobs:
 
   mypy:
     name: mypy (advisory)
+    needs: changes
+    if: needs.changes.outputs.code == 'true'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
@@ -212,7 +236,7 @@ jobs:
       - name: Mypy
         id: mypy
         continue-on-error: true
-        run: mypy src/hyperloom
+        run: mypy src/hyperloom_common src/hyperloom
 
       - name: Advisory notice when Mypy failed
         if: always() && steps.mypy.outcome == 'failure'

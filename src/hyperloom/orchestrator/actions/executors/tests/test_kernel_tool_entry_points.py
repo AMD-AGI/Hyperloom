@@ -1,0 +1,25 @@
+# SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
+# SPDX-License-Identifier: MIT
+
+"""Every kernel tool the orchestrator starts with ``python -m`` is an importable module with a ``main``."""
+
+from __future__ import annotations
+
+import importlib
+import importlib.util
+
+import pytest
+
+from hyperloom.orchestrator.actions.executors import trace_analyze
+from hyperloom.orchestrator.phases import kernel_geak_dispatch
+
+_TOOL_MODULES = (
+    trace_analyze._TRACELENS_ANALYSIS_MODULE,
+    kernel_geak_dispatch._GEAK_RUNNER_MODULE,
+)
+
+
+@pytest.mark.parametrize("module_name", _TOOL_MODULES)
+def test_tool_module_resolves_to_a_callable_main(module_name: str) -> None:
+    assert importlib.util.find_spec(module_name) is not None
+    assert callable(importlib.import_module(module_name).main)

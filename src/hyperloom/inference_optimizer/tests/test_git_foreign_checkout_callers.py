@@ -81,7 +81,7 @@ _BLOCKED_VERBS = ("rev-parse", "status", "tag", "show", "clean", "ls-files", "ch
 _GUARDED_MODULES = (
     "orchestrator/actions/executors/_kernel_agent_tool.py",
     "orchestrator/enablement/runtime/targeted_build.py",
-    "orchestrator/actions/executors/baseline.py",
+    "orchestrator/actions/executors/benchmark_run/warm_patches.py",
 )
 
 

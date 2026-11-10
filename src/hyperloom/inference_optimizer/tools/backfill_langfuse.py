@@ -1,4 +1,3 @@
-#!/usr/bin/env python3
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
@@ -9,10 +8,10 @@ Sibling of the *live* emitter
 path mirrors calls into Langfuse while a run is in flight, this CLI replays
 one finished session's ``reports/trace/`` after the fact. Both share the same
 projection (:mod:`hyperloom.inference_optimizer.trace.langfuse_mapping`), so the spans
-this CLI does emit are shaped like the live ones. Not replayed here: ext token
-shards (``reports/trace/ext/*.jsonl``), specialist-intel, forge-step,
-GEMM-tuning and trajectory (``reports/trace/trajectory/*.jsonl``) spans, which
-only the live emitter's ``flush_session`` backfills.
+this CLI does emit are shaped like the live ones. Not replayed here:
+specialist-intel, forge-step, GEMM-tuning and trajectory
+(``reports/trace/trajectory/*.jsonl``) spans, which only the live emitter's
+``flush_session`` backfills.
 
 Mapping (trace -> phase span -> agent span -> generation)::
 
@@ -51,14 +50,14 @@ Usage
 ::
 
     # Dry run: parse + print the plan, no SDK / no network needed.
-    python -m hyperloom.inference_optimizer.tools.backfill_langfuse \\
+    hyperloom session backfill \\
         --session-dir <SD> --dry-run
 
     # Real backfill (needs the langfuse SDK + env keys).
     export LANGFUSE_HOST=https://langfuse.<your-domain>
     export LANGFUSE_PUBLIC_KEY=pk-...
     export LANGFUSE_SECRET_KEY=sk-...
-    python -m hyperloom.inference_optimizer.tools.backfill_langfuse --session-dir <SD>
+    hyperloom session backfill --session-dir <SD>
 
 Notes
 -----
@@ -81,10 +80,11 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any
 
-from hyperloom.common.jsonio import read_json, read_jsonl
+from hyperloom_common.jsonio import read_json, read_jsonl
 from hyperloom.inference_optimizer.session.optimization_journal import (
     OUTCOME_KEEP,
     OUTCOME_NO_PROMOTE,
+    OUTCOME_RECORDED,
     OUTCOME_REVERT,
     OUTCOME_SKIP,
 )
@@ -94,28 +94,25 @@ from hyperloom.inference_optimizer.trace.langfuse_emitter import (
     _set_trace_attrs,
     _start_obs,
 )
-from hyperloom.inference_optimizer.session.session_paths import recipe_snapshot_audit_jsonl
+from hyperloom.inference_optimizer.session.session_paths import (
+    conversations_path,
+    decision_trace_path,
+    llm_calls_path,
+    manifest_path,
+    recipe_snapshot_audit_jsonl,
+)
 
 log = logging.getLogger("backfill_langfuse")
-
-TRACE_SUBDIR = "reports/trace"
-LLM_CALLS = "llm_calls.jsonl"
-CONVERSATIONS = "conversations.jsonl"
-DECISION_TRACE = "decision_trace.jsonl"
-MANIFEST = "manifest.json"
-
-UNPHASED = lfmap.UNPHASED
 
 
 # Plan building (pure -- no SDK, dry-run friendly)
 def build_plan(session_dir: Path) -> dict[str, Any]:
     """Parse the trace files into a Langfuse-shaped plan dict (pure)."""
-    tdir = session_dir / TRACE_SUBDIR
-    llm = read_jsonl(tdir / LLM_CALLS, require_dict=True, skip_malformed=True)
-    conv = read_jsonl(tdir / CONVERSATIONS, require_dict=True, skip_malformed=True)
-    decisions = read_jsonl(tdir / DECISION_TRACE, require_dict=True, skip_malformed=True)
-    recipe_audit = read_jsonl(recipe_snapshot_audit_jsonl(session_dir), require_dict=True, skip_malformed=True)
-    manifest = read_json(session_dir / MANIFEST, default={}, require_dict=True)
+    llm = read_jsonl(llm_calls_path(session_dir))
+    conv = read_jsonl(conversations_path(session_dir))
+    decisions = read_jsonl(decision_trace_path(session_dir))
+    recipe_audit = read_jsonl(recipe_snapshot_audit_jsonl(session_dir))
+    manifest = read_json(manifest_path(session_dir), default={}, require_dict=True)
 
     conv_by_key: dict[tuple, dict[str, Any]] = {}
     for c in conv:
@@ -124,7 +121,6 @@ def build_plan(session_dir: Path) -> dict[str, Any]:
     internal_id = str(manifest.get("session_id") or (llm[0].get("session_id") if llm else "") or session_dir.name)
     # Correlate on claw_session_id so backfill and the live emitter land on one Langfuse trace.
     seed = lfmap.correlation_seed(manifest, internal_id)
-    session_label = lfmap.langfuse_session_id(manifest, internal_id)
 
     # phase -> agent -> [generation parts]; mirrors the live emitter's trace -> phase span -> agent span -> generation
     # hierarchy.
@@ -150,10 +146,10 @@ def build_plan(session_dir: Path) -> dict[str, Any]:
 
     return {
         "trace_id_seed": seed,
-        "session_id": session_label,
+        "session_id": seed,
         "internal_session_id": internal_id,
         "claw_session_id": manifest.get("claw_session_id"),
-        "name": manifest.get("model_name") or session_label,
+        "name": manifest.get("model_name") or seed,
         "metadata": lfmap.trace_metadata(manifest),
         "created_at": manifest.get("created_at_utc"),
         "phases": phases,
@@ -170,9 +166,9 @@ def build_plan(session_dir: Path) -> dict[str, Any]:
     }
 
 
-def _time_bounds(gens: list[dict]) -> tuple[datetime | None, datetime | None]:
-    """Return the earliest and latest timestamps across generations."""
-    times = [lfmap.parse_ts(g["ts"]) for g in gens]
+def _time_bounds(rows: list[dict]) -> tuple[datetime | None, datetime | None]:
+    """Return the earliest and latest ``ts`` across ``rows`` (both ``None`` when none parses)."""
+    times = [lfmap.parse_ts(r.get("ts")) for r in rows]
     times = [t for t in times if t is not None]
     if not times:
         return (None, None)
@@ -185,6 +181,67 @@ def _phase_time_bounds(
     """Return the time bounds across all agents in a phase."""
     flat = [g for gens in agents.values() for g in gens]
     return _time_bounds(flat)
+
+
+def _emit_agent(phase_span: Any, phase: str, agent: str, gens: list[dict], fallback_start: datetime | None) -> Any:
+    """Emit one agent's span and its generations under ``phase_span``; return the agent span."""
+    a_lo, a_hi = _time_bounds(gens)
+    agent_span = _start_obs(
+        phase_span,
+        name=f"agent:{agent}",
+        as_type="span",
+        start_time=a_lo or fallback_start,
+        metadata={"phase": phase, "agent": agent, "generation_count": len(gens)},
+    )
+    for g in gens:
+        g_start = lfmap.parse_ts(g["ts"])
+        row = g["row"]
+        gen = _start_obs(
+            agent_span,
+            name=lfmap.generation_name(row),
+            as_type="generation",
+            start_time=g_start,
+            model=row.get("model"),
+            input=g.get("input"),
+            output=g.get("output"),
+            metadata=lfmap.generation_metadata(row, phase=phase, has_text=g["has_text"]),
+            usage_details=lfmap.usage_details(row),
+        )
+        _end_obs(gen, g_start)
+    _end_obs(agent_span, a_hi or fallback_start)
+    return agent_span
+
+
+def _emit_recipe_audit(
+    root: Any, recipe_audit: list[dict], last_end: datetime | None, trace_start: datetime | None
+) -> None:
+    """Emit the recipe-KB reads and writes as spans under one ``agent:recipe_kb`` span."""
+    ra_lo, ra_hi = _time_bounds(recipe_audit)
+    write_count = sum(1 for r in recipe_audit if lfmap.recipe_audit_is_write(r))
+    ra_span = _start_obs(
+        root,
+        name="agent:recipe_kb",
+        as_type="span",
+        start_time=ra_lo or last_end,
+        metadata={
+            "phase": lfmap.UNPHASED,
+            "agent": "recipe_kb",
+            "read_count": len(recipe_audit) - write_count,
+            "write_count": write_count,
+        },
+    )
+    for r in recipe_audit:
+        r_start = lfmap.parse_ts(r.get("ts"))
+        # Rows predating the write-audit event carry no ``op`` -> read.
+        if lfmap.recipe_audit_is_write(r):
+            name, metadata = lfmap.recipe_write_span(r)
+        else:
+            name, metadata = lfmap.recipe_read_span(r)
+        obs = _start_obs(
+            ra_span, name=name, as_type="span", start_time=r_start, input=None, output=r, metadata=metadata
+        )
+        _end_obs(obs, r_start)
+    _end_obs(ra_span, ra_hi or trace_start)
 
 
 # Dry-run printer
@@ -218,10 +275,11 @@ def print_plan(plan: dict[str, Any]) -> None:
     rev = outcomes.count(OUTCOME_REVERT)
     nop = outcomes.count(OUTCOME_NO_PROMOTE)
     skipped = outcomes.count(OUTCOME_SKIP)
+    recorded = outcomes.count(OUTCOME_RECORDED)
     gainful = sum(1 for d in plan["decisions"] if (d.get("decision") or {}).get("gain_pct") is not None)
     print(
         f"  Scores: {len(plan['decisions'])} decisions "
-        f"(KEEP={keep} REVERT={rev} no_promote={nop} skipped={skipped}; gain_pct set={gainful})"
+        f"(KEEP={keep} REVERT={rev} no_promote={nop} skipped={skipped} recorded={recorded}; gain_pct set={gainful})"
     )
     recipe_rows = plan.get("recipe_audit") or []
     recipe_writes = sum(1 for r in recipe_rows if lfmap.recipe_audit_is_write(r))
@@ -229,11 +287,31 @@ def print_plan(plan: dict[str, Any]) -> None:
 
 
 # Real ingest (needs the langfuse SDK)
+def _upload_decision_scores(
+    client: Any, trace_id: str, decisions: list[dict[str, Any]], agent_spans: dict[tuple[str, str], Any]
+) -> int:
+    """Attach each decision's scores to its producer's agent span (or the trace); return how many failed."""
+    failed_scores = 0
+    for i, drow in enumerate(decisions):
+        for score in lfmap.decision_to_scores(drow):
+            meta = score["metadata"]
+            span = agent_spans.get((lfmap.phase_of(meta), lfmap.span_agent_for(str(meta.get("component") or ""))))
+            try:
+                if hasattr(span, "score"):
+                    span.score(**score)
+                else:
+                    client.create_score(trace_id=trace_id, **score)
+            except Exception:  # isolation boundary: one decision Score upload
+                log.exception("create_score failed for decision %d", i)
+                failed_scores += 1
+    return failed_scores
+
+
 def ingest(plan: dict[str, Any]) -> int:
     """Emit a backfill plan to Langfuse as a full trace tree."""
     try:
-        from langfuse import get_client  # type: ignore
-    except Exception as exc:  # noqa: BLE001
+        from langfuse import get_client  # type: ignore[import-not-found]
+    except ImportError as exc:
         print(
             "ERROR: langfuse SDK not importable. Install it first:\n"
             "  pip install 'hyperloom-inference_optimizer[trace]'\n"
@@ -267,115 +345,30 @@ def ingest(plan: dict[str, Any]) -> int:
     last_end = trace_start
     for phase, agents in plan["phases"].items():
         p_lo, p_hi = _phase_time_bounds(agents)
+        phase_start = p_lo or trace_start
         phase_span = _start_obs(
             root,
             name=f"phase:{phase}",
             as_type="span",
-            start_time=p_lo or trace_start,
+            start_time=phase_start,
             metadata={"phase": phase, "agent_count": len(agents)},
         )
         for agent, gens in agents.items():
-            a_lo, a_hi = _time_bounds(gens)
-            agent_span = _start_obs(
-                phase_span,
-                name=f"agent:{agent}",
-                as_type="span",
-                start_time=a_lo or p_lo or trace_start,
-                metadata={"phase": phase, "agent": agent, "generation_count": len(gens)},
-            )
-            agent_spans[(phase, agent)] = agent_span
-            for g in gens:
-                g_start = lfmap.parse_ts(g["ts"])
-                row = g["row"]
-                gen = _start_obs(
-                    agent_span,
-                    name=lfmap.generation_name(row),
-                    as_type="generation",
-                    start_time=g_start,
-                    model=row.get("model"),
-                    input=g.get("input"),
-                    output=g.get("output"),
-                    metadata=lfmap.generation_metadata(
-                        row,
-                        phase=phase,
-                        has_text=g["has_text"],
-                    ),
-                    usage_details=lfmap.usage_details(row),
-                )
-                _end_obs(gen, g_start)
-            _end_obs(agent_span, a_hi or a_lo or p_lo or trace_start)
-        _end_obs(phase_span, p_hi or p_lo or trace_start)
-        if p_hi is not None:
-            last_end = p_hi
+            agent_spans[(phase, agent)] = _emit_agent(phase_span, phase, agent, gens, phase_start)
+        _end_obs(phase_span, p_hi or phase_start)
+        last_end = p_hi or last_end
 
-    # Recipe-KB reads + writes -> spans under a recipe_kb agent.
-    recipe_audit = plan.get("recipe_audit") or []
-    if recipe_audit:
-        ra_times = [lfmap.parse_ts(r.get("ts")) for r in recipe_audit]
-        ra_times = [t for t in ra_times if t is not None]
-        ra_lo = min(ra_times) if ra_times else last_end
-        write_count = sum(1 for r in recipe_audit if lfmap.recipe_audit_is_write(r))
-        ra_span = _start_obs(
-            root,
-            name="agent:recipe_kb",
-            as_type="span",
-            start_time=ra_lo or trace_start,
-            metadata={
-                "phase": UNPHASED,
-                "agent": "recipe_kb",
-                "read_count": len(recipe_audit) - write_count,
-                "write_count": write_count,
-            },
-        )
-        for r in recipe_audit:
-            r_start = lfmap.parse_ts(r.get("ts"))
-            # Rows predating the write-audit event carry no ``op`` -> read.
-            if lfmap.recipe_audit_is_write(r):
-                name, metadata = lfmap.recipe_write_span(r)
-            else:
-                name, metadata = lfmap.recipe_read_span(r)
-            obs = _start_obs(
-                ra_span,
-                name=name,
-                as_type="span",
-                start_time=r_start,
-                input=None,
-                output=r,
-                metadata=metadata,
-            )
-            _end_obs(obs, r_start)
-        _end_obs(ra_span, (max(ra_times) if ra_times else None) or trace_start)
+    if plan["recipe_audit"]:
+        _emit_recipe_audit(root, plan["recipe_audit"], last_end, trace_start)
 
-    for i, drow in enumerate(plan["decisions"]):
-        for score in lfmap.decision_to_scores(drow):
-            meta = score.get("metadata") or {}
-            phase = str(meta.get("phase") or lfmap.UNPHASED)
-            agent = lfmap.span_agent_for(str(meta.get("component") or ""))
-            span = agent_spans.get((phase, agent))
-            try:
-                if span is not None and hasattr(span, "score"):
-                    span.score(
-                        name=score["name"],
-                        value=score["value"],
-                        data_type=score["data_type"],
-                        comment=score.get("comment") or "",
-                        metadata=meta,
-                    )
-                else:
-                    client.create_score(
-                        name=score["name"],
-                        value=score["value"],
-                        trace_id=trace_id,
-                        data_type=score["data_type"],
-                        comment=score.get("comment") or "",
-                        metadata=meta,
-                    )
-            except Exception:
-                log.exception("create_score failed for decision %d", i)
+    failed_scores = _upload_decision_scores(client, trace_id, plan["decisions"], agent_spans)
 
     _end_obs(root, last_end)
     client.flush()
     print(f"Backfilled trace_id={trace_id} session_id={plan['session_id']}")
+    if failed_scores:
+        print(f"ERROR: {failed_scores} decision score(s) failed to upload", file=sys.stderr)
+        return 1
     return 0
 
 
@@ -383,7 +376,7 @@ def ingest(plan: dict[str, Any]) -> int:
 def _build_parser() -> argparse.ArgumentParser:
     """Build the CLI argument parser."""
     p = argparse.ArgumentParser(
-        prog="backfill_langfuse",
+        prog="hyperloom session backfill",
         description=__doc__,
         formatter_class=argparse.RawDescriptionHelpFormatter,
     )
@@ -403,8 +396,9 @@ def main(argv: list[str] | None = None) -> int:
         format="%(asctime)s %(levelname)s %(name)s: %(message)s",
     )
     sd = args.session_dir.resolve()
-    if not (sd / TRACE_SUBDIR / LLM_CALLS).exists():
-        print(f"ERROR: no {TRACE_SUBDIR}/{LLM_CALLS} under {sd}", file=sys.stderr)
+    llm_calls = llm_calls_path(sd)
+    if not llm_calls.exists():
+        print(f"ERROR: no {llm_calls.relative_to(sd)} under {sd}", file=sys.stderr)
         return 2
 
     plan = build_plan(sd)
@@ -412,7 +406,3 @@ def main(argv: list[str] | None = None) -> int:
         print_plan(plan)
         return 0
     return ingest(plan)
-
-
-if __name__ == "__main__":
-    sys.exit(main())

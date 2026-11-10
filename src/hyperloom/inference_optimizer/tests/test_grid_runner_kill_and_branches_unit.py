@@ -10,13 +10,16 @@ import subprocess
 from pathlib import Path
 
 import pytest
-import yaml
 
 from hyperloom.orchestrator.actions.executors import _grid_runner as gr
 from hyperloom.orchestrator.actions.executors._grid_runner import (
     GridVariant,
     run_grid,
+    GridRecipe,
+    GridStop,
 )
+
+from .conftest import write_benchmark_yaml
 
 
 @pytest.fixture(autouse=True)
@@ -25,28 +28,6 @@ def _single_node(monkeypatch):
     from hyperloom.orchestrator.actions.executors import _multi_node_env
 
     monkeypatch.setattr(_multi_node_env, "is_multi_node", lambda: False)
-
-
-def _write_base_yaml(path: Path) -> None:
-    cfg = {
-        "benchmark": {
-            "framework": "sglang",
-            "model": "/path/models/Qwen-Qwen3-8B",
-            "precision": "bf16",
-            "run_mode": "local",
-            "envs": {"TP": 1, "CONC": 8, "ISL": 256, "OSL": 256},
-            "benchmark_script": "sglang_mi300x.sh",
-            "timeout_seconds": 600,
-            "profiler": {
-                "torch_profiler": {"enabled": False},
-                "system_profiler": {"enabled": False},
-                "tracelens": {"enabled": False},
-            },
-            "gpu_selection": {"auto": False},
-        },
-    }
-    with path.open("w") as f:
-        yaml.safe_dump(cfg, f)
 
 
 @pytest.fixture(autouse=True)
@@ -58,17 +39,16 @@ def _isolate_leak_root(tmp_path_factory, monkeypatch):
 @pytest.mark.asyncio
 async def test_run_grid_yaml_build_error_branch(tmp_path, monkeypatch):
     base = tmp_path / "base.yaml"
-    _write_base_yaml(base)
+    write_benchmark_yaml(base)
 
     def _boom(*_a, **_k):
         raise ValueError("bad yaml render")
 
     monkeypatch.setattr(gr, "_build_variant_yaml", _boom)
     results = await run_grid(
-        base_yaml_path=base,
-        base_extra_args="",
         grid=[GridVariant("vA")],
         output_root=tmp_path / "out",
+        recipe=GridRecipe(base_yaml_path=base),
     )
     assert len(results) == 1
     assert results[0].status == "failed"
@@ -76,59 +56,67 @@ async def test_run_grid_yaml_build_error_branch(tmp_path, monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_run_grid_unreadable_workload_pin_fails_only_its_own_variant(tmp_path, monkeypatch):
+    """Sizing a rung's grant reads its composed env, and one rung's unreadable pin is its own failure.
+
+    ``HYPERLOOM_AGENTX='maybe'`` is no boolean, so the reader that sizes the cap refuses
+    it. Raising out of the variant would end the grid and throw away every rung already
+    measured, for a config only this rung launches.
+    """
+    base = tmp_path / "base.yaml"
+    write_benchmark_yaml(base)
+    launched: list[str] = []
+
+    def _no_ws(*_a, **_k):
+        launched.append("magpie")
+        return 1, "stdout", "boom stderr"
+
+    monkeypatch.setattr(gr, "_run_magpie", _no_ws)
+    results = await run_grid(
+        grid=[GridVariant("vA", extra_envs={"HYPERLOOM_AGENTX": "maybe", "CONC": "20"}), GridVariant("vB")],
+        output_root=tmp_path / "out",
+        recipe=GridRecipe(base_yaml_path=base),
+        stop=GridStop(keep_going_on_failure=True),
+    )
+    assert [r.status for r in results] == ["failed", "failed"]
+    assert results[0].error_class == "benchmark_cap_error"
+    assert "HYPERLOOM_AGENTX" in (results[0].error or ""), "the row has to name the pin that could not be read"
+    assert results[0].granted_cap_sec is None, "no round of it ran, so it was granted no time"
+    assert launched == ["magpie"], "the next variant has to be benchmarked all the same"
+
+
+@pytest.mark.asyncio
 async def test_run_grid_magpie_timeout_branch(tmp_path, monkeypatch):
     base = tmp_path / "base.yaml"
-    _write_base_yaml(base)
+    write_benchmark_yaml(base)
 
     def _timeout(*_a, **_k):
         raise subprocess.TimeoutExpired(cmd="magpie", timeout=5)
 
     monkeypatch.setattr(gr, "_run_magpie", _timeout)
     results = await run_grid(
-        base_yaml_path=base,
-        base_extra_args="",
         grid=[GridVariant("vA")],
         output_root=tmp_path / "out",
+        recipe=GridRecipe(base_yaml_path=base),
     )
     assert results[0].status == "failed"
     assert results[0].error_class == "magpie_timeout"
 
 
 @pytest.mark.asyncio
-async def test_run_grid_server_dead_branch(tmp_path, monkeypatch):
-    base = tmp_path / "base.yaml"
-    _write_base_yaml(base)
-
-    def _dead(*_a, **_k):
-        return gr.SERVER_DEAD_RETURNCODE, "", "engine crashed"
-
-    monkeypatch.setattr(gr, "_run_magpie", _dead)
-    results = await run_grid(
-        base_yaml_path=base,
-        base_extra_args="",
-        grid=[GridVariant("vA")],
-        output_root=tmp_path / "out",
-    )
-    assert results[0].status == "failed"
-    assert results[0].error_class == "server_init_dead"
-    assert results[0].returncode == gr.SERVER_DEAD_RETURNCODE
-
-
-@pytest.mark.asyncio
 async def test_run_grid_no_workspace_branch_stops_on_failure(tmp_path, monkeypatch):
     base = tmp_path / "base.yaml"
-    _write_base_yaml(base)
+    write_benchmark_yaml(base)
 
     def _no_ws(*_a, **_k):
         return 1, "stdout", "boom stderr"  # nonzero, no benchmark_* dir
 
     monkeypatch.setattr(gr, "_run_magpie", _no_ws)
     results = await run_grid(
-        base_yaml_path=base,
-        base_extra_args="",
         grid=[GridVariant("vA"), GridVariant("vB")],
         output_root=tmp_path / "out",
-        keep_going_on_failure=False,
+        recipe=GridRecipe(base_yaml_path=base),
+        stop=GridStop(keep_going_on_failure=False),
     )
     assert len(results) == 1
     assert results[0].error_class == "no_benchmark_workspace"
@@ -143,16 +131,15 @@ async def test_agentx_preflight_abort_keeps_its_own_error_class(tmp_path, monkey
     )
 
     base = tmp_path / "base.yaml"
-    _write_base_yaml(base)
+    write_benchmark_yaml(base)
     diagnosis = "AgentX preflight failed: HYPERLOOM_AGENTX is on but aiperf was not found."
 
     monkeypatch.setattr(gr, "_run_magpie", lambda *_a, **_k: (AGENTX_PREFLIGHT_RETURNCODE, "", diagnosis))
     results = await run_grid(
-        base_yaml_path=base,
-        base_extra_args="",
         grid=[GridVariant("vA")],
         output_root=tmp_path / "out",
-        keep_going_on_failure=False,
+        recipe=GridRecipe(base_yaml_path=base),
+        stop=GridStop(keep_going_on_failure=False),
     )
     assert len(results) == 1
     assert results[0].error_class == AGENTX_PREFLIGHT_ERROR_CLASS
@@ -168,14 +155,13 @@ async def test_agentx_preflight_abort_abandons_the_rest_of_the_grid(tmp_path, mo
     )
 
     base = tmp_path / "base.yaml"
-    _write_base_yaml(base)
+    write_benchmark_yaml(base)
     monkeypatch.setattr(gr, "_run_magpie", lambda *_a, **_k: (AGENTX_PREFLIGHT_RETURNCODE, "", "aiperf was not found"))
     results = await run_grid(
-        base_yaml_path=base,
-        base_extra_args="",
         grid=[GridVariant("vA"), GridVariant("vB"), GridVariant("vC")],
         output_root=tmp_path / "out",
-        keep_going_on_failure=True,  # would otherwise walk every point
+        recipe=GridRecipe(base_yaml_path=base),
+        stop=GridStop(keep_going_on_failure=True),
     )
     assert [r.status for r in results] == ["failed", "skipped", "skipped"], (
         "the grid either kept benchmarking after an environment abort, or dropped "
@@ -193,14 +179,13 @@ async def test_agentx_preflight_abort_never_reports_an_empty_error(tmp_path, mon
     )
 
     base = tmp_path / "base.yaml"
-    _write_base_yaml(base)
+    write_benchmark_yaml(base)
     monkeypatch.setattr(gr, "_run_magpie", lambda *_a, **_k: (AGENTX_PREFLIGHT_RETURNCODE, "", "   "))
     results = await run_grid(
-        base_yaml_path=base,
-        base_extra_args="",
         grid=[GridVariant("vA")],
         output_root=tmp_path / "out",
-        keep_going_on_failure=False,
+        recipe=GridRecipe(base_yaml_path=base),
+        stop=GridStop(keep_going_on_failure=False),
     )
     assert (results[0].error or "").strip(), "an empty diagnosis reached the result"
 
@@ -209,10 +194,10 @@ async def test_agentx_preflight_abort_never_reports_an_empty_error(tmp_path, mon
 async def test_run_grid_invalid_measurement_branch(tmp_path, monkeypatch):
     monkeypatch.setattr(gr, "REPORT_SETTLE_SECONDS", 0.0)
     base = tmp_path / "base.yaml"
-    _write_base_yaml(base)
+    write_benchmark_yaml(base)
 
-    def _empty_report(magpie_python, config_path, output_dir, **_k):
-        ws = Path(output_dir) / "benchmark_sglang_20260101_000000"
+    def _empty_report(bench_round, **_k):
+        ws = Path(bench_round.output_dir) / "benchmark_sglang_20260101_000000"
         ws.mkdir(parents=True, exist_ok=True)
         (ws / "benchmark_report.json").write_text(
             '{"success": false, "framework": "sglang"}',
@@ -221,10 +206,9 @@ async def test_run_grid_invalid_measurement_branch(tmp_path, monkeypatch):
 
     monkeypatch.setattr(gr, "_run_magpie", _empty_report)
     results = await run_grid(
-        base_yaml_path=base,
-        base_extra_args="",
         grid=[GridVariant("vA")],
         output_root=tmp_path / "out",
+        recipe=GridRecipe(base_yaml_path=base),
     )
     assert results[0].status == "failed"
     assert results[0].error_class in {
@@ -237,10 +221,10 @@ async def test_run_grid_invalid_measurement_branch(tmp_path, monkeypatch):
 async def test_run_grid_nonzero_rc_with_valid_measurement_fails(tmp_path, monkeypatch):
     """A parseable measurement must not launder a non-zero exit code into success."""
     base = tmp_path / "base.yaml"
-    _write_base_yaml(base)
+    write_benchmark_yaml(base)
 
-    def _nonzero_but_valid(magpie_python, config_path, output_dir, **_k):
-        ws = Path(output_dir) / "benchmark_sglang_20260101_000000"
+    def _nonzero_but_valid(bench_round, **_k):
+        ws = Path(bench_round.output_dir) / "benchmark_sglang_20260101_000000"
         ws.mkdir(parents=True, exist_ok=True)
         (ws / "benchmark_report.json").write_text(
             json.dumps(
@@ -260,10 +244,9 @@ async def test_run_grid_nonzero_rc_with_valid_measurement_fails(tmp_path, monkey
 
     monkeypatch.setattr(gr, "_run_magpie", _nonzero_but_valid)
     results = await run_grid(
-        base_yaml_path=base,
-        base_extra_args="",
         grid=[GridVariant("vA")],
         output_root=tmp_path / "out",
+        recipe=GridRecipe(base_yaml_path=base),
     )
     r = results[0]
     assert r.status == "failed"
@@ -294,8 +277,8 @@ def _valid_report_body(completed: int, requested: int) -> str:
 def _magpie_writing(completed: int, requested: int, rc: int, stderr: str):
     """A fake ``_run_magpie`` that writes one report and exits ``rc``."""
 
-    def _run(magpie_python, config_path, output_dir, **_k):
-        ws = Path(output_dir) / "benchmark_sglang_20260101_000000"
+    def _run(bench_round, **_k):
+        ws = Path(bench_round.output_dir) / "benchmark_sglang_20260101_000000"
         ws.mkdir(parents=True, exist_ok=True)
         (ws / "benchmark_report.json").write_text(_valid_report_body(completed, requested))
         return rc, "", stderr
@@ -319,14 +302,13 @@ async def test_run_grid_keeps_a_measurement_that_served_every_request(tmp_path, 
     result, not off the variant's env layer.
     """
     base = tmp_path / "base.yaml"
-    _write_base_yaml(base)
+    write_benchmark_yaml(base)
     monkeypatch.setattr(gr, "_run_magpie", _magpie_writing(192, 192, 2, _STALE_HANDLE))
 
     results = await run_grid(
-        base_yaml_path=base,
-        base_extra_args="",
         grid=[GridVariant("vA", extra_server_args="--foo")],
         output_root=tmp_path / "out",
+        recipe=GridRecipe(base_yaml_path=base),
     )
     r = results[0]
     assert r.status == "succeeded"
@@ -348,14 +330,13 @@ async def test_run_grid_fails_a_measurement_that_served_short(tmp_path, monkeypa
     served than were asked for, so the throughput is not the protocol's.
     """
     base = tmp_path / "base.yaml"
-    _write_base_yaml(base)
+    write_benchmark_yaml(base)
     monkeypatch.setattr(gr, "_run_magpie", _magpie_writing(120, 192, 1, "server exited 1"))
 
     results = await run_grid(
-        base_yaml_path=base,
-        base_extra_args="",
         grid=[GridVariant("vA", extra_server_args="--foo")],
         output_root=tmp_path / "out",
+        recipe=GridRecipe(base_yaml_path=base),
     )
     r = results[0]
     assert r.status == "failed"
@@ -372,10 +353,10 @@ async def test_run_grid_fails_when_the_run_recorded_no_request_count(tmp_path, m
     record no requested count at all. That is not evidence of a whole protocol.
     """
     base = tmp_path / "base.yaml"
-    _write_base_yaml(base)
+    write_benchmark_yaml(base)
 
-    def _no_request_count(magpie_python, config_path, output_dir, **_k):
-        ws = Path(output_dir) / "benchmark_sglang_20260101_000000"
+    def _no_request_count(bench_round, **_k):
+        ws = Path(bench_round.output_dir) / "benchmark_sglang_20260101_000000"
         ws.mkdir(parents=True, exist_ok=True)
         (ws / "benchmark_report.json").write_text(
             json.dumps(
@@ -394,10 +375,9 @@ async def test_run_grid_fails_when_the_run_recorded_no_request_count(tmp_path, m
 
     monkeypatch.setattr(gr, "_run_magpie", _no_request_count)
     results = await run_grid(
-        base_yaml_path=base,
-        base_extra_args="",
         grid=[GridVariant("vA", extra_server_args="--foo")],
         output_root=tmp_path / "out",
+        recipe=GridRecipe(base_yaml_path=base),
     )
     assert results[0].status == "failed"
     assert results[0].error_class == "magpie_nonzero_after_valid_measurement"
@@ -407,11 +387,11 @@ async def test_run_grid_fails_when_the_run_recorded_no_request_count(tmp_path, m
 async def test_server_dead_surfaces_log_excerpt(tmp_path, monkeypatch):
     """server_log_death_excerpt is used when a seeded server.log exists."""
     base = tmp_path / "base.yaml"
-    _write_base_yaml(base)
+    write_benchmark_yaml(base)
     out_root = tmp_path / "out"
 
-    def _dead(magpie_python, config_path, output_dir, **_k):
-        slog = Path(output_dir) / "server.log"
+    def _dead(bench_round, **_k):
+        slog = Path(bench_round.output_dir) / "server.log"
         slog.parent.mkdir(parents=True, exist_ok=True)
         slog.write_text(
             "Worker init started\n"
@@ -419,18 +399,54 @@ async def test_server_dead_surfaces_log_excerpt(tmp_path, monkeypatch):
             "Engine core initialization failed.\n"
             "Traceback follows\n"
         )
-        return gr.SERVER_DEAD_RETURNCODE, "", ""
+        return 1, "", ""
 
     monkeypatch.setattr(gr, "_run_magpie", _dead)
     results = await run_grid(
-        base_yaml_path=base,
-        base_extra_args="",
         grid=[GridVariant("fp8_kv")],
         output_root=out_root,
+        recipe=GridRecipe(base_yaml_path=base),
     )
     r = results[0]
     assert r.status == "failed"
-    assert r.error_class == "server_init_dead"
+    assert r.error_class == "no_benchmark_workspace"
     assert "mla_gluon" in (r.error or ""), "excerpt should mention mla_gluon"
+    assert r.server_log_path is not None
+    assert r.server_log_path.endswith("server.log")
+
+
+@pytest.mark.asyncio
+async def test_server_dead_cause_read_from_the_harvested_log(tmp_path, monkeypatch):
+    """The cause is summarised from the server.log the leak salvage brings into the slot.
+
+    The dying server writes its log where Magpie leaks it, not into the slot, so a
+    summary taken before ``harvest_leaked_artifacts`` runs names no cause at all.
+    """
+    base = tmp_path / "base.yaml"
+    write_benchmark_yaml(base)
+    leak_root = tmp_path / "leaked"
+    leak_root.mkdir()
+    monkeypatch.setenv("INFERENCE_OPTIMIZER_LEAK_ROOTS", str(leak_root))
+
+    def _dead(bench_round, **_k):
+        Path(bench_round.output_dir).mkdir(parents=True, exist_ok=True)
+        (leak_root / "server.log").write_text(
+            "Worker init started\n"
+            "mori_ep_dispatch supports at most 128 experts, got 256\n"
+            "Engine core initialization failed.\n"
+            "Traceback follows\n"
+        )
+        return 1, "", ""
+
+    monkeypatch.setattr(gr, "_run_magpie", _dead)
+    results = await run_grid(
+        grid=[GridVariant("ep256")],
+        output_root=tmp_path / "out",
+        recipe=GridRecipe(base_yaml_path=base),
+    )
+    r = results[0]
+    assert r.status == "failed"
+    assert r.error_class == "no_benchmark_workspace"
+    assert "mori_ep_dispatch" in (r.error or ""), "the cause must be read after the log is harvested"
     assert r.server_log_path is not None
     assert r.server_log_path.endswith("server.log")

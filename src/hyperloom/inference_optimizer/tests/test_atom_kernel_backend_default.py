@@ -6,9 +6,8 @@
 atom used to be filled in with ``forge`` when the operator named no backend, on
 the grounds that GEAK could not resolve a rewrite seam there. GEAK reaches atom
 now, so the framework carries no backend rule of its own: an unset
-``KERNEL_OPT_BACKEND_ORDER`` resolves through
-``_DEFAULT_KERNEL_PHASE_BACKEND_ORDER`` like sglang and vllm, and forge is the
-exact-match opt-in it is everywhere else.
+``KERNEL_OPT_BACKEND_ORDER`` resolves to GEAK like sglang and vllm, and forge
+is the exact-match opt-in it is everywhere else.
 
 What survives from the retired default is the atom-only shape around it: the
 ``--nodes>=2`` fail-fast guard (IR-8), and the requirement that every call site
@@ -64,17 +63,6 @@ def test_a_named_backend_survives_verbatim(monkeypatch, value):
     _apply_atom_auto_tighten(_args())
 
     assert os.environ[_KEY] == value
-
-
-def test_the_shared_default_puts_atom_on_geak(monkeypatch):
-    """The observable end of removing the special case, read off the shared resolver."""
-    from hyperloom.orchestrator.kernel.request_handlers import _raw_kernel_backend_order
-
-    monkeypatch.delenv(_KEY, raising=False)
-
-    _apply_atom_auto_tighten(_args())
-
-    assert _raw_kernel_backend_order() == ["geak"]
 
 
 def test_multi_node_still_fails_fast(monkeypatch):
@@ -153,25 +141,13 @@ def test_resume_reaches_the_guard_too():
     ``--resume-from`` is the documented crash-recovery path, and it re-reads the
     CLI arguments in a fresh process. A resume that skips this function would let
     a ``--nodes>=2`` atom session start the very configuration the launch refused.
+
+    The two ways a session opens are the two functions below; whether either
+    reaches the guard directly or through a helper is their business.
     """
-    ast, tree = _cli_source_tree()
+    from .conftest import cli_call_sequence
 
-    resume_ifs = [
-        node
-        for node in ast.walk(tree)
-        if isinstance(node, ast.If)
-        and any(isinstance(sub, ast.Attribute) and sub.attr == "resume_from" for sub in ast.walk(node.test))
-        and (node.body or node.orelse)
-    ]
-    assert resume_ifs, "no `if args.resume_from:` branch found; this test needs updating"
-
-    reached = [
-        node
-        for node in resume_ifs
-        if any(_calls_auto_tighten(ast, stmt) for stmt in node.body)
-        and any(_calls_auto_tighten(ast, stmt) for stmt in node.orelse)
-    ]
-    assert reached, (
-        "_apply_atom_auto_tighten is applied on only one side of `if args.resume_from:`; "
-        "a resumed atom session would skip the IR-8 multi-node guard"
-    )
+    for opener in ("_resume_session", "_seed_fresh_session"):
+        assert "_apply_atom_auto_tighten" in cli_call_sequence(opener), (
+            f"{opener} does not reach _apply_atom_auto_tighten; that session would skip the IR-8 multi-node guard"
+        )

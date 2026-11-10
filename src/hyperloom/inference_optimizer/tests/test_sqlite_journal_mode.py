@@ -37,7 +37,6 @@ def test_the_requested_mode_is_verified_after_the_database_is_open(tmp_path):
     """Verification reads the mode back rather than trusting the pragma."""
     db = SqliteConnection(tmp_path / "delete.db", journal_mode="DELETE")
     try:
-        assert db.journal_mode == "DELETE"
         assert str(db.fetchone_sync("PRAGMA journal_mode")[0]).upper() == "DELETE"
     finally:
         db.close()

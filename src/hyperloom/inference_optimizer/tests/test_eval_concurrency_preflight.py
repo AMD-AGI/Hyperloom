@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import pytest
+
 import hyperloom.inference_optimizer.cli.preflight as preflight_mod
 import hyperloom.orchestrator.actions.executors._magpie_patcher as patcher_mod
 
@@ -46,16 +48,13 @@ def test_unpatchable_script_warns_and_reports_failure(monkeypatch, capsys):
     assert "EVAL_CONCURRENT_REQUESTS" in out
 
 
-def test_patcher_explosion_never_aborts_preflight(monkeypatch, capsys):
-    """Preflight must survive a broken patcher: it is a compat pass, not a gate."""
-
+def test_patcher_explosion_propagates(monkeypatch, capsys):
     def boom(*_args):
         raise RuntimeError("patcher exploded")
 
     monkeypatch.setattr(patcher_mod, "ensure_eval_concurrency_compat", boom)
 
-    assert preflight_mod._ensure_eval_concurrency_compat("/m", "/ix") is False
+    with pytest.raises(RuntimeError):
+        preflight_mod._ensure_eval_concurrency_compat("/m", "/ix")
 
-    out = capsys.readouterr().out
-    assert "WARNING" in out
-    assert "patcher exploded" in out
+    assert capsys.readouterr().out == ""

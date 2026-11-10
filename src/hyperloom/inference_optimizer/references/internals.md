@@ -19,7 +19,10 @@ already ordered and routed (`direct_framework` -> apply the diff,
 `author_via_specialist` -> rewrite it against live source). The pump takes that
 order as given. When discovery comes back empty its full retry budget, the
 local-exploration arm authors against profile evidence instead; when that is
-off too, the source arm reports itself dry.
+off too, the source arm reports itself dry. An authoring round that comes back
+empty, or whose specialist never runs, counts against the source arm's no-KEEP
+streak like a reverted patch; once that streak marks the arm dry, the
+local-exploration arm stops dispatching for the cycle.
 
 `integrate_patch` lands every diff, config-only or source, with
 `patch_source` naming where it came from. KEEP commits to the live tree (the
@@ -50,13 +53,12 @@ These govern the optimizer, not the launcher; the full contract lives in
   (any port that is not the production serving port 8888), profile, autotune,
   and run real benchmark loops. The one invariant is that they must not touch
   the production serving process, its cards, or port 8888.
-- **Plateau advisory**: both arms' signals and KERNEL_AGENT's are computed every
-  tick and rendered as advisory in the orchestration prompt. One arm dry is not
-  a plateau; the prompt says so. They do NOT drive phase advance — the LLM may
-  emit
-  `escalate_strategy_change{hint='skip_to_kernel'/'skip_to_sweep'/'skip_to_close'}`
-  when it judges further effort unproductive. The per-phase budget and the
-  absolute cap remain the only hard advance gates.
+- **Plateau advisory**: both arms' signals are computed every tick and rendered
+  as advisory in the orchestration prompt. One arm dry is not a plateau; the
+  prompt says so. They do NOT drive phase advance — the LLM may emit
+  `escalate_strategy_change{hint='skip_to_kernel'/'skip_to_sweep'}`
+  when it judges further effort unproductive. The per-phase budget remains
+  the only hard advance gate.
 
 ## Retired modules and rules (do not re-introduce)
 
@@ -112,8 +114,8 @@ The optimizer should:
    last_roofline_tput >= 1.10`; compound). Default is `roofline` (profile +
    trace_analyze + analysis.md); `--no-enable-roofline` switches to plain
    `profile`. The LLM cannot propose either — both names are Coordinator-managed
-   and absent from `PHASE_LLM_PROPOSABLE_ACTIONS`, so PolicyGate R1 returns
-   `rule='phase_incompatible'`. Concurrent GPU work is serialised by the lane /
+   and a proposal for either is denied with `rule="coordinator_managed_action"`. Concurrent GPU work
+   is serialised by the lane /
    GPU lease rather than a policy deny, so explore / kernel dispatches keep
    flowing while analysis refreshes. Each analysis also stamps a decode roofline
    ceiling (`inference_optimizer/roofline_ceiling.py`) for the report's

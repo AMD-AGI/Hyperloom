@@ -7,8 +7,8 @@ from kernelforge.kernel_backends.prompt_utils import (
     EDIT_SURFACE_AND_SWEEPS_PROMPT,
     context_sections_block,
 )
-from kernelforge.fusion.harness_contract import harness_contract
-from kernelforge.fusion.validate import (
+from kernelforge.workflows.forge_fusion.harness_contract import harness_contract
+from kernelforge.workflows.forge_fusion.validate import (
     DEFAULT_SNR_THRESHOLD_DB,
     DEFAULT_TARGET_SPEEDUP,
 )
@@ -54,6 +54,30 @@ _PROVEN_PATTERNS = """\
 6. ROCm-native Triton only. Never reuse a framework CUDA-only fused op — e.g.
    `fused_qk_norm_rope` pulls in `cuda_bf16.h` and will not build on ROCm.
 7. If Triton is unavailable, fall back to eager. Never crash."""
+
+
+_STOP_AND_REPORT = f"""\
+## When to Stop
+- Parity holds, the driver's suite passes and speedup >= {DEFAULT_TARGET_SPEEDUP:g}x → STOP, report the
+  measured numbers
+- The chain is already covered by a framework compile pass → say so and stop;
+  claiming the existing pass beats authoring a duplicate
+- Three attempts with no measurable launch reduction → the chain is not the
+  bottleneck; report the boundary you found rather than forcing a fusion
+- Microbench cannot init (hybrid/Mamba on ROCm) → gate on parity alone and say
+  the microbench was skipped; a skipped bench is not a failure
+
+## Reporting Format
+```
+ATTEMPT N:
+  Pattern: {{fusion id}}  Env flag: {{FLAG}}
+  Compiled: yes/no  Triton: yes/no
+  SNR: XX.XX dB [PASS/FAIL]   max_abs_err: X.XXe-XX
+  Eager: XX.XX us   Fused: XX.XX us   Speedup: X.XXx
+  Launches/decode step: eager N -> fused M   (M < N required; see rule 3)
+  CUDA-graph review: {{static grid? preallocated? no host sync?}}
+  Decision: {{what to try next}}
+```"""
 
 
 def build_system_prompt(
@@ -113,27 +137,7 @@ the tolerance.
 
 {canonical_gate}
 
-## When to Stop
-- Parity holds, the driver's suite passes and speedup >= {DEFAULT_TARGET_SPEEDUP:g}x → STOP, report the
-  measured numbers
-- The chain is already covered by a framework compile pass → say so and stop;
-  claiming the existing pass beats authoring a duplicate
-- Three attempts with no measurable launch reduction → the chain is not the
-  bottleneck; report the boundary you found rather than forcing a fusion
-- Microbench cannot init (hybrid/Mamba on ROCm) → gate on parity alone and say
-  the microbench was skipped; a skipped bench is not a failure
-
-## Reporting Format
-```
-ATTEMPT N:
-  Pattern: {{fusion id}}  Env flag: {{FLAG}}
-  Compiled: yes/no  Triton: yes/no
-  SNR: XX.XX dB [PASS/FAIL]   max_abs_err: X.XXe-XX
-  Eager: XX.XX us   Fused: XX.XX us   Speedup: X.XXx
-  Launches/decode step: eager N -> fused M   (M < N required; see rule 3)
-  CUDA-graph review: {{static grid? preallocated? no host sync?}}
-  Decision: {{what to try next}}
-```
+{_STOP_AND_REPORT}
 
 {EDIT_SURFACE_AND_SWEEPS_PROMPT}
 {context_sections_block(knowledge_content=knowledge_content)}

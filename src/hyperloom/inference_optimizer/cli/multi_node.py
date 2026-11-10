@@ -1,29 +1,58 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""Multi-node helpers for the ``optimize`` CLI: cluster adoption, backend resolution, kernel-patch replay."""
+"""Multi-node helpers for the ``optimize`` CLI: cluster adoption and backend resolution."""
 
 from __future__ import annotations
 
 import argparse
-import json
-import logging
 import os
-import subprocess
 import sys
-from pathlib import Path
+from typing import Any
 
-from ..session.paths import (
-    session_dir as _session_dir_resolve,
-)
+from ..multi_node import TopologyHandoffError, topology_file_overlay
 
-log = logging.getLogger(__name__)
+
+def _topology_file_overlay() -> dict[str, str] | None:
+    """The TOPOLOGY_HANDOFF_FILE view of the hand-off, or exit 2 naming the file when it cannot be used."""
+    try:
+        return topology_file_overlay()
+    except TopologyHandoffError as exc:
+        print(f"ERROR: {exc}", file=sys.stderr)
+        raise SystemExit(2) from exc
+
+
+def _hand_off_service_url() -> str:
+    """The handed-over cluster's URL; a named but unusable topology file exits 2 before any state is built."""
+    from ..multi_node._internal.external_state import external_service_url
+
+    try:
+        return external_service_url()
+    except TopologyHandoffError as exc:
+        print(f"ERROR: {exc}", file=sys.stderr)
+        raise SystemExit(2) from exc
+
+
+def _resolve_gpus_per_node(args: argparse.Namespace) -> int:
+    """GPUs per node for this run: --gpus-per-node > $TOPOLOGY_HANDOFF_FILE gpus_per_node > 8.
+
+    The file is consulted only for a multi-node run, the only kind that reads a hand-off.
+    """
+    flag = getattr(args, "gpus_per_node", None)
+    if flag is not None:
+        return int(flag)
+    from_file = ((_topology_file_overlay() if int(args.nodes) >= 2 else None) or {}).get(
+        "INFERENCE_OPTIMIZER_GPUS_PER_NODE", ""
+    )
+    return int(from_file) if from_file else 8
 
 
 def _resolve_mn_backend(args: argparse.Namespace) -> str:
-    """Multi-node backend selector: --mn-backend > $INFERENCE_OPTIMIZER_MN_BACKEND > rayjob."""
+    """Multi-node backend selector: --mn-backend > $TOPOLOGY_HANDOFF_FILE backend > $INFERENCE_OPTIMIZER_MN_BACKEND > rayjob."""
+    from_file = (_topology_file_overlay() or {}).get("INFERENCE_OPTIMIZER_MN_BACKEND", "")
     backend = (
         (getattr(args, "mn_backend", None) or "").strip()
+        or from_file
         or os.environ.get("INFERENCE_OPTIMIZER_MN_BACKEND", "").strip()
         or os.environ.get("MN_BACKEND", "").strip()
         or "rayjob"
@@ -47,12 +76,11 @@ def _prepare_multi_node_state(args: argparse.Namespace) -> None:
         build_external_state_from_env,
         external_has_server_control,
         external_has_ssh_control,
-        external_service_url,
     )
     from ..multi_node.cli import _save_state
     from hyperloom.orchestrator.actions.executors._multi_node_env import export_ray_address_to_os
 
-    if not external_service_url():
+    if not _hand_off_service_url():
         print(
             "ERROR: --nodes >= 2 requires a cluster provisioned by the platform. "
             "Set HYPERLOOM_MN_EXT_SERVICE_URL (plus HYPERLOOM_MN_EXT_SSH_KEY and "
@@ -65,32 +93,7 @@ def _prepare_multi_node_state(args: argparse.Namespace) -> None:
 
     ext_state = build_external_state_from_env()
     ext_state["backend"] = _resolve_mn_backend(args)
-    if ext_state["backend"] == "infera" and not external_has_ssh_control():
-        print(
-            "ERROR: the infera backend requires SSH control. Set "
-            "HYPERLOOM_MN_EXT_SSH_KEY plus HYPERLOOM_MN_EXT_PREFILL_IPS/"
-            "DECODE_IPS (or WORKER_IPS). rayjob uses Ray, not SSH.",
-            file=sys.stderr,
-        )
-        sys.exit(2)
-    # The mirror image. --mn-backend defaults to rayjob, so an infera-shaped hand-off whose operator forgot the flag
-    # arrives here as rayjob and would report server_control=yes -- SSH control is real, it is simply not the control
-    # this backend uses.
-    if ext_state["backend"] == "rayjob" and not ext_state.get("head_pod_ip"):
-        if external_has_ssh_control():
-            print(
-                "ERROR: --mn-backend rayjob (the default) needs "
-                "HYPERLOOM_MN_EXT_HEAD_IP, but this hand-off carries SSH "
-                "credentials and GPU pod IPs instead -- it is an infera "
-                "cluster. Pass --mn-backend infera.",
-                file=sys.stderr,
-            )
-            sys.exit(2)
-        print(
-            "multi-node: rayjob with no HYPERLOOM_MN_EXT_HEAD_IP -- this cluster cannot be "
-            "restarted, so the run is benchmark-only (see the warning below).",
-            file=sys.stderr,
-        )
+    _reject_unusable_backend(ext_state)
     try:
         _save_state(ext_state)
     except OSError as exc:
@@ -129,9 +132,41 @@ def _prepare_multi_node_state(args: argparse.Namespace) -> None:
     )
 
 
+def _reject_unusable_backend(ext_state: dict[str, Any]) -> None:
+    """Exit 2 when the selected backend cannot control this hand-off; flag a benchmark-only rayjob."""
+    from ..multi_node._internal.external_state import external_has_ssh_control
+
+    if ext_state["backend"] == "infera" and not external_has_ssh_control():
+        print(
+            "ERROR: the infera backend requires SSH control. Set "
+            "HYPERLOOM_MN_EXT_SSH_KEY plus HYPERLOOM_MN_EXT_PREFILL_IPS/"
+            "DECODE_IPS (or WORKER_IPS). rayjob uses Ray, not SSH.",
+            file=sys.stderr,
+        )
+        sys.exit(2)
+    # The mirror image. --mn-backend defaults to rayjob, so an infera-shaped hand-off whose operator forgot the flag
+    # arrives here as rayjob and would report server_control=yes -- SSH control is real, it is simply not the control
+    # this backend uses.
+    if ext_state["backend"] == "rayjob" and not ext_state.get("head_pod_ip"):
+        if external_has_ssh_control():
+            print(
+                "ERROR: --mn-backend rayjob (the default) needs "
+                "HYPERLOOM_MN_EXT_HEAD_IP, but this hand-off carries SSH "
+                "credentials and GPU pod IPs instead -- it is an infera "
+                "cluster. Pass --mn-backend infera.",
+                file=sys.stderr,
+            )
+            sys.exit(2)
+        print(
+            "multi-node: rayjob with no HYPERLOOM_MN_EXT_HEAD_IP -- this cluster cannot be "
+            "restarted, so the run is benchmark-only (see the warning below).",
+            file=sys.stderr,
+        )
+
+
 def _prepare_adopted_cluster(args: argparse.Namespace, backend: str, *, head_ip: str) -> None:
     """Make an adopted cluster usable by this session."""
-    from ..multi_node.cli import cmd_bootstrap, install_geak_on_pods_best_effort
+    from ..multi_node.cli import cmd_bootstrap, install_geak_on_pods_best_effort, resolve_poll_timeout_s
 
     if backend == "rayjob":
         if not head_ip:
@@ -148,7 +183,7 @@ def _prepare_adopted_cluster(args: argparse.Namespace, backend: str, *, head_ip:
                 poll_interval=6,
                 # Adoption runs in-process, so it is not bound by the foreground/MCP 120s ceiling; a slow head pod
                 # should not abort the run.
-                poll_timeout=int(os.environ.get("HYPERLOOM_MN_POLL_TIMEOUT_S", "600") or 600),
+                poll_timeout=resolve_poll_timeout_s(600),
             )
             rc_boot = cmd_bootstrap(ns_boot)
             if rc_boot != 0:
@@ -156,88 +191,3 @@ def _prepare_adopted_cluster(args: argparse.Namespace, backend: str, *, head_ip:
 
     if not getattr(args, "no_kernel", False):
         install_geak_on_pods_best_effort()
-
-    _replay_kernel_patches_for_multi_node(args)
-
-
-def _replay_kernel_patches_for_multi_node(args: argparse.Namespace) -> None:
-    """Replay every applied kernel-agent patch (manifest status=applied + multinode block) onto RayJob pods."""
-    nodes = max(1, int(getattr(args, "nodes", 1) or 1))
-    if nodes < 2:
-        return
-    session_dir = _session_dir_resolve()
-    workspace_root = session_dir / "kernel-agent-workspace"
-    if not workspace_root.is_dir():
-        return
-
-    manifests: list[Path] = sorted(workspace_root.rglob("manifest.json"))
-    if not manifests:
-        return
-
-    replayed = 0
-    skipped = 0
-    failed = 0
-    for mpath in manifests:
-        try:
-            data = json.loads(mpath.read_text(encoding="utf-8"))
-        except (OSError, json.JSONDecodeError) as exc:
-            print(
-                f"WARN multi-node patch replay: skipping unreadable manifest {mpath}: {exc}",
-                file=sys.stderr,
-            )
-            skipped += 1
-            continue
-        if str(data.get("status", "")).lower() != "applied":
-            continue
-        mn = data.get("multinode") or {}
-        if not mn:
-            continue
-        target_file = data.get("target_file") or ""
-        patch_path = data.get("patch_path") or ""
-        kernel_id = data.get("kernel_id") or ""
-        backup_dir_on_pod = mn.get("backup_dir_on_pod") or "/var/kernel_patch_backups"
-        if not target_file or not patch_path:
-            skipped += 1
-            continue
-        if not Path(patch_path).is_file():
-            print(
-                f"WARN multi-node patch replay: source patch missing for "
-                f"{target_file} (manifest={mpath} patch_path={patch_path}); "
-                f"skipping",
-                file=sys.stderr,
-            )
-            skipped += 1
-            continue
-        cmd = [
-            sys.executable,
-            "-m",
-            "hyperloom.inference_optimizer.multi_node",
-            "apply-patch",
-            "--patch-file",
-            str(patch_path),
-            "--target-path",
-            str(target_file),
-            "--backup-dir",
-            str(backup_dir_on_pod),
-            "--kernel-id",
-            str(kernel_id),
-        ]
-        print(
-            f"multi-node patch replay: target={target_file} kernel_id={kernel_id!r} (from {mpath})",
-        )
-        proc = subprocess.run(cmd, capture_output=True, text=True, timeout=300)
-        if proc.returncode != 0:
-            failed += 1
-            print(
-                f"WARN multi-node patch replay failed for {target_file} "
-                f"rc={proc.returncode} stderr={(proc.stderr or '')[-1000:]!r}",
-                file=sys.stderr,
-            )
-            continue
-        replayed += 1
-    if replayed or failed or skipped:
-        print(
-            f"multi-node patch replay: applied={replayed} "
-            f"skipped={skipped} failed={failed} "
-            f"(scanned {len(manifests)} manifest(s) under {workspace_root})"
-        )

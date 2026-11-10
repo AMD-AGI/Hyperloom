@@ -8,9 +8,10 @@ from collections.abc import Mapping
 from pathlib import Path
 from typing import Any
 
-from hyperloom.common.io import append_jsonl, atomic_write_json
-from hyperloom.common.jsonio import read_json, read_jsonl
-from hyperloom.common.timeutil import now_iso
+from hyperloom.common.session_files import shared_options
+from hyperloom_common.io import JsonFormat, JsonLineFormat, append_shared_jsonl, atomic_write_json
+from hyperloom_common.jsonio import read_json_strict, read_jsonl
+from hyperloom_common.timeutil import now_iso
 
 from .session_paths import (
     sbd_v6_timeline_dir,
@@ -19,7 +20,8 @@ from .session_paths import (
 )
 
 
-SCHEMA_VERSION_V6 = "hyperloom.session_breakdown.v6.0"
+# Symbol name is historical; the value is the current schema version.
+SCHEMA_VERSION_V6 = "hyperloom.session_breakdown.v6.1"
 _PENDING_INSTALL_ATTR = "_sbd_v6_install_event"
 _STORAGE_SEQUENCE_KEY = "__sbd_v6_timeline_sequence"
 # ``roofline``, ``kernel`` and ``baseline`` all recur within one session -- one
@@ -77,11 +79,8 @@ def _write_event(path: Path, event: dict[str, Any]) -> None:
     atomic_write_json(
         path,
         _public_event(event),
-        indent=2,
-        sort_keys=True,
-        ensure_ascii=False,
-        trailing_newline=True,
-        make_parents=True,
+        fmt=JsonFormat(ensure_ascii=False, trailing_newline=True),
+        options=shared_options(event),
     )
 
 
@@ -108,7 +107,7 @@ def _read_event_file(
     warnings: list[str] | None = None,
 ) -> dict[str, Any] | None:
     try:
-        event = read_json(path, require_dict=True, strict=True)
+        event = read_json_strict(path, require_dict=True)
     except ValueError as exc:
         if warnings is not None:
             warnings.append(f"timeline.{event_type}: failed to parse {path}: {exc!r}")
@@ -169,21 +168,6 @@ def write_timeline_event_at(session_dir: Path | str, event: dict[str, Any]) -> P
     return path
 
 
-def read_timeline_event(
-    session_dir: Path | str,
-    event_type: str,
-) -> dict[str, Any] | None:
-    """Read the latest persisted event of one type."""
-    _validate_event_type(event_type)
-    for _, stored_type, path in reversed(_history_files(session_dir)):
-        if stored_type != event_type:
-            continue
-        event = _read_event_file(path, event_type)
-        if event is not None:
-            return event
-    return None
-
-
 def read_timeline_event_for_update(
     session_dir: Path | str,
     event_type: str,
@@ -226,7 +210,7 @@ def record_write_warning(
 ) -> bool:
     """Best-effort persist a V6 writer failure for the next export."""
     try:
-        append_jsonl(
+        append_shared_jsonl(
             sbd_v6_write_warnings_path(Path(session_dir)),
             {
                 "ts": now_iso(timespec="seconds"),
@@ -234,11 +218,9 @@ def record_write_warning(
                 "error_class": type(exc).__name__,
                 "message": str(exc) or repr(exc),
             },
-            make_parents=True,
-            ensure_ascii=False,
-            sort_keys=True,
+            fmt=JsonLineFormat(ensure_ascii=False, sort_keys=True),
         )
-    except Exception:  # noqa: BLE001 — warning persistence cannot change runtime behavior
+    except (OSError, ValueError):  # warning persistence cannot change runtime behavior
         return False
     return True
 
@@ -254,8 +236,6 @@ def read_write_warnings(
         return []
     rows = read_jsonl(
         path,
-        require_dict=True,
-        skip_malformed=True,
         on_error=(
             (lambda exc: warnings.append(f"timeline.write_warnings: failed to parse {path}: {exc!r}"))
             if warnings is not None
@@ -298,7 +278,6 @@ __all__ = [
     "pending_install_event",
     "persist_pending_install_event",
     "read_write_warnings",
-    "read_timeline_event",
     "read_timeline_event_for_update",
     "read_timeline_events",
     "record_write_warning",

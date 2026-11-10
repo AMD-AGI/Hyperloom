@@ -12,75 +12,127 @@ measurement with a TTFT from another.
 
 from __future__ import annotations
 
+from dataclasses import dataclass
 from typing import Any
+
+from hyperloom_common.coerce import optional_positive_float, to_mapping
+from hyperloom.inference_optimizer.breakdown.recorder.baseline_event import (
+    anchoring_baseline_action,
+    quality_ref_actions,
+)
 
 from ..base import (
     Decision,
     RenderedSection,
-    as_dict,
-    dict_rows,
-    events_of,
     md_kv_list,
     md_table,
     register_renderer,
     session_of,
     task_config_of,
+    timeline_of,
 )
 from ._agentx_metrics import graded_axes_facts, render_graded_axes
 from ._invocation import render_invocation_block
 
-#: Action statuses whose figure the session went on to use. ``degraded`` is a
-#: baseline standing on its cold warmup round because the budget would not hold
-#: the hot pass: knowingly depressed, but it is the number every later gain was
-#: read against. Kept in step with the same set in ``collectors/v6.py``, which
-#: publishes ``outcome.baseline`` off the same actions.
-_ANCHORING_STATUSES = frozenset({"succeeded", "degraded"})
+
+def _attempts(breakdown: dict[str, Any]) -> list[dict[str, Any]]:
+    """Every quality-reference baseline action, oldest first, including the failed ones."""
+    return [row.action for row in quality_ref_actions(timeline_of(breakdown))]
 
 
-def _anchoring_actions(breakdown: dict[str, Any]) -> list[dict[str, Any]]:
-    """Every action that was dispatched as a session baseline, oldest first.
-
-    Three different dispatches reach the baseline executor and each lands an
-    action on a ``baseline`` event: the genuine baseline, ``replay_warm_recipe``
-    and the kernel lane's throughput-only probes. Only the first anchors the
-    session, so the selection reads the action's own
-    ``establishes_quality_ref`` rather than re-deciding from the task kind.
-
-    Args:
-        breakdown (dict[str, Any]): The full ``session_breakdown.json`` dict.
-
-    Returns:
-        list[dict[str, Any]]: The baseline actions, including the ones that
-            failed -- those are the attempts history.
-    """
-    actions: list[tuple[str, dict[str, Any]]] = []
-    for event in events_of(breakdown, "baseline"):
-        for action in dict_rows(as_dict(event.get("ext")).get("actions")):
-            if not as_dict(action.get("request")).get("establishes_quality_ref"):
-                continue
-            actions.append((str(action.get("start_time") or action.get("end_time") or ""), action))
-    actions.sort(key=lambda row: row[0])
-    return [action for _stamp, action in actions]
+def _anchor(breakdown: dict[str, Any]) -> dict[str, Any]:
+    """The action ``outcome.baseline`` is published from, or ``{}`` when none produced a figure."""
+    anchored = anchoring_baseline_action(timeline_of(breakdown))
+    return anchored.action if anchored else {}
 
 
-def _anchor(actions: list[dict[str, Any]]) -> dict[str, Any]:
-    """The measurement the session's gains were read against.
+@dataclass(frozen=True)
+class _BaselineFigures:
+    """The figures the baseline section reads off its anchoring measurement."""
 
-    Args:
-        actions (list[dict[str, Any]]): The baseline actions, oldest first.
+    measurement: dict[str, Any]
+    tput: Any
+    acc: Any
+    ttft: float | None
+    e2el: Any
+    ttft_source: str
+    fail_streak: int
+    perf: Any
 
-    Returns:
-        dict[str, Any]: The latest action that produced a usable figure, or
-            ``{}`` when none did. A baseline re-measured after an enablement
-            fix legitimately re-anchors, so the latest wins; ordered on the
-            actions' own end stamps because a re-measure in a later phase is a
-            separate event.
-    """
-    usable = [action for action in actions if str(action.get("status") or "").strip().lower() in _ANCHORING_STATUSES]
-    if not usable:
-        return {}
-    usable.sort(key=lambda action: str(action.get("end_time") or action.get("start_time") or ""))
-    return usable[-1]
+
+def _read_figures(anchor: dict[str, Any]) -> _BaselineFigures:
+    """Read the throughput, accuracy, latency and failure-streak figures off the anchoring action."""
+    measurement = to_mapping(anchor.get("measurement"))
+    # The streak this measurement was dispatched under, which is the count of
+    # baselines that had failed before it landed. Read off the anchor rather
+    # than recounted here: the session's own counter is advanced by the
+    # write-back, so the action states what it was dispatched into.
+    fail_streak = int(to_mapping(anchor.get("request")).get("failure_streak_before") or 0)
+    return _BaselineFigures(
+        measurement=measurement,
+        tput=measurement.get("output_throughput"),
+        acc=measurement.get("accuracy"),
+        ttft=optional_positive_float(measurement.get("ttft_mean_ms")),
+        e2el=measurement.get("e2el_mean_ms"),
+        ttft_source=str(measurement.get("ttft_e2el_source") or ""),
+        fail_streak=fail_streak,
+        perf=measurement.get("perf"),
+    )
+
+
+def _render_markdown(
+    anchor: dict[str, Any], fig: _BaselineFigures, attempts: list[dict[str, Any]], session: dict[str, Any]
+) -> str:
+    """Render the baseline key-value block, graded axes, attempts table and invocation block."""
+    md_parts: list[str] = []
+    md_parts.append(
+        md_kv_list(
+            [
+                ("output_throughput", fig.tput),
+                ("throughput_unit", fig.measurement.get("throughput_unit") or None),
+                ("accuracy", fig.acc),
+                ("submission_valid", fig.measurement.get("submission_valid")),
+                # Only ever non-empty on a round upstream refused, which is the round whose axes a reader is most
+                # likely to be puzzling over. ``md_kv_list`` drops the empty list, so an accepted round says nothing.
+                ("submission_invalid_reasons", fig.measurement.get("submission_invalid_reasons") or None),
+                ("ttft_mean_ms", fig.ttft),
+                ("e2el_mean_ms", fig.e2el),
+                ("ttft_e2el_source", fig.ttft_source),
+                ("config_path", to_mapping(anchor.get("request")).get("config_path") or None),
+                ("benchmark_report_path", fig.measurement.get("benchmark_report_path") or None),
+                ("failure_streak", fig.fail_streak or None),
+            ]
+        )
+    )
+    graded_md = render_graded_axes(fig.perf)
+    if graded_md:
+        md_parts.append("")
+        md_parts.append("**AgentX graded axes**:")
+        md_parts.append(graded_md)
+    if attempts:
+        rows = [
+            [
+                a.get("end_time") or a.get("start_time"),
+                a.get("status"),
+                a.get("decision"),
+                to_mapping(a.get("measurement")).get("output_throughput"),
+                to_mapping(a.get("failure")).get("error_class"),
+            ]
+            for a in attempts[:10]
+        ]
+        md_parts.append("")
+        md_parts.append("**Baseline attempts** (first 10):")
+        md_parts.append(
+            md_table(
+                ["ts", "status", "decision", "key_metric", "error_class"],
+                rows,
+            )
+        )
+
+    # Kept last: an empty invocation block then leaves only trailing newlines, which the strip below drops.
+    md_parts.append("")
+    md_parts.append(render_invocation_block(anchor.get("invocation"), session.get("image")))
+    return "\n".join(md_parts).strip()
 
 
 @register_renderer("baseline")
@@ -98,20 +150,10 @@ def render(breakdown: dict[str, Any]) -> RenderedSection:
     Returns:
         RenderedSection: The rendered baseline section.
     """
-    attempts = _anchoring_actions(breakdown)
-    anchor = _anchor(attempts)
-    measurement = as_dict(anchor.get("measurement"))
+    attempts = _attempts(breakdown)
+    anchor = _anchor(breakdown)
+    fig = _read_figures(anchor)
     session = session_of(breakdown)
-    tput = measurement.get("throughput_tok_s_per_gpu")
-    acc = measurement.get("accuracy")
-    ttft = measurement.get("ttft_mean_ms")
-    e2el = measurement.get("e2el_mean_ms")
-    ttft_source = str(measurement.get("ttft_e2el_source") or "")
-    # The streak this measurement was dispatched under, which is the count of
-    # baselines that had failed before it landed. Read off the anchor rather
-    # than recounted here: the session's own counter is advanced by the
-    # write-back, so the action states what it was dispatched into.
-    fail_streak = int(as_dict(anchor.get("request")).get("failure_streak_before") or 0)
 
     facts: list[str] = []
     warnings: list[str] = []
@@ -120,14 +162,14 @@ def render(breakdown: dict[str, Any]) -> RenderedSection:
     from .... import framework_registry
 
     fw = task_config_of(breakdown).get("framework_name")
-    if tput:
-        facts.append(f"Baseline: {framework_registry.format_primary_metric(fw, tput, precision=2)}.")
+    if fig.tput:
+        facts.append(f"Baseline: {framework_registry.format_primary_metric(fw, fig.tput, precision=2)}.")
         decisions.append(
             Decision(
                 kind="attempted",
                 subject="baseline",
                 metric_pct=None,
-                rationale=f"baseline_tput={float(tput):.2f}",
+                rationale=f"baseline_tput={float(fig.tput):.2f}",
             )
         )
     else:
@@ -139,82 +181,31 @@ def render(breakdown: dict[str, Any]) -> RenderedSection:
                 rationale="no throughput captured",
             )
         )
-    if acc:
-        facts.append(f"Baseline accuracy: {float(acc):.4g}.")
-    if ttft is not None:
-        facts.append(f"Baseline TTFT mean: {float(ttft):.1f} ms.")
-    else:
+    if fig.acc:
+        facts.append(f"Baseline accuracy: {float(fig.acc):.4g}.")
+    if fig.ttft is not None:
+        facts.append(f"Baseline TTFT mean: {fig.ttft:.1f} ms.")
+    elif fig.measurement.get("ttft_mean_ms") is None:
         warnings.append(
             "ttft_mean_ms is null — the measured round reported no latency, so "
             "the baseline's throughput cannot be read against a per-request cost."
         )
-    if e2el is not None:
-        facts.append(f"Baseline e2el mean: {float(e2el):.1f} ms.")
-    # The axes an AgentX session is actually ranked on. ``throughput_tok_s_per_gpu`` above is the synthetic-workload
+    if fig.e2el is not None:
+        facts.append(f"Baseline e2el mean: {float(fig.e2el):.1f} ms.")
+    # The axes an AgentX session is actually ranked on. ``output_throughput`` above is the synthetic-workload
     # figure, so on an agentic round it is the one number a reader must not read the verdict off.
-    perf = measurement.get("perf")
-    facts.extend(graded_axes_facts(perf, label="Baseline"))
-    if fail_streak:
-        warnings.append(f"baseline_failure_streak={fail_streak} — baseline retried after failure(s).")
+    facts.extend(graded_axes_facts(fig.perf, label="Baseline"))
+    if fig.fail_streak:
+        warnings.append(f"baseline_failure_streak={fig.fail_streak} — baseline retried after failure(s).")
     if attempts:
         facts.append(f"Baseline attempts recorded: {len(attempts)}.")
-
-    md_parts: list[str] = []
-    md_parts.append(
-        md_kv_list(
-            [
-                ("throughput_tok_s_per_gpu", tput),
-                ("throughput_unit", measurement.get("throughput_unit") or None),
-                ("accuracy", acc),
-                ("submission_valid", measurement.get("submission_valid")),
-                # Only ever non-empty on a round upstream refused, which is the round whose axes a reader is most
-                # likely to be puzzling over. ``md_kv_list`` drops the empty list, so an accepted round says nothing.
-                ("submission_invalid_reasons", measurement.get("submission_invalid_reasons") or None),
-                ("ttft_mean_ms", ttft),
-                ("e2el_mean_ms", e2el),
-                ("ttft_e2el_source", ttft_source or None),
-                ("config_path", as_dict(anchor.get("request")).get("config_path") or None),
-                ("benchmark_report_path", measurement.get("benchmark_report_path") or None),
-                ("failure_streak", fail_streak or None),
-            ]
-        )
-    )
-    graded_md = render_graded_axes(perf)
-    if graded_md:
-        md_parts.append("")
-        md_parts.append("**AgentX graded axes**:")
-        md_parts.append(graded_md)
-    if attempts:
-        rows = [
-            [
-                a.get("end_time") or a.get("start_time"),
-                a.get("status"),
-                a.get("decision"),
-                as_dict(a.get("measurement")).get("throughput_tok_s_per_gpu"),
-                as_dict(a.get("failure")).get("error_class"),
-            ]
-            for a in attempts[:10]
-        ]
-        md_parts.append("")
-        md_parts.append("**Baseline attempts** (first 10):")
-        md_parts.append(
-            md_table(
-                ["ts", "status", "decision", "key_metric", "error_class"],
-                rows,
-            )
-        )
-
-    inv_md = render_invocation_block(anchor.get("invocation"), session.get("image"))
-    if inv_md:
-        md_parts.append("")
-        md_parts.append(inv_md)
 
     return RenderedSection(
         section_id="baseline",
         title="Baseline",
         key_facts=facts,
-        markdown_block="\n".join(md_parts).strip(),
+        markdown_block=_render_markdown(anchor, fig, attempts, session),
         decisions=decisions,
         warnings=warnings,
-        skipped=not (tput or attempts),
+        skipped=not (fig.tput or attempts),
     )

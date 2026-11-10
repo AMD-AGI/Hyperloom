@@ -10,12 +10,12 @@ from pathlib import Path
 import pytest
 
 from hyperloom.inference_optimizer.protocol.intent import Intent, IntentType
-from hyperloom.orchestrator.bus.storage import SqliteConnection
-from hyperloom.orchestrator.loop.coordinator import Coordinator
+from hyperloom.orchestrator.bus.storage.connection import SqliteConnection
+from hyperloom.orchestrator.loop.coordinator import Coordinator, RunOptions
 from hyperloom.orchestrator.phases import machine_state
 from hyperloom.orchestrator.roles import MockBackend, MockTurn, ScriptedPlan
 from hyperloom.orchestrator.state.shared_state import SharedState
-from hyperloom.orchestrator.state.task_registry import TaskRegistry
+from hyperloom.orchestrator.state.task_registry import TaskRegistry, TaskSpec
 from hyperloom.inference_optimizer.trace import trajectory_projection as trajmap
 from hyperloom.inference_optimizer.trace import trajectory_trace as tt
 
@@ -42,12 +42,16 @@ async def test_task_rows_follow_the_registry_state_machine(tmp_path):
     registry = TaskRegistry(SqliteConnection(tmp_path / "db.sqlite"))
     try:
         with tt.trajectory_scope(session_dir=tmp_path, parent_span_id="creator"):
-            task = await registry.create(kind="sweep", params={}, idempotency_key="k1", requires_lanes=["a"])
-            again = await registry.create(kind="sweep", params={}, idempotency_key="k1")
+            task, _ = await registry.create_or_return_existing(
+                TaskSpec(kind="sweep", params={}, idempotency_key="k1", requires_lanes=["a"])
+            )
+            again, _ = await registry.create_or_return_existing(TaskSpec(kind="sweep", params={}, idempotency_key="k1"))
             with tt.trajectory_scope(task_id=task.task_id, parent_span_id=task.task_id):
                 await registry.transition(task.task_id, "running")
                 await registry.transition(task.task_id, "failed", evidence={"reason": "oom", "blob": {"x": 1}})
-            other = await registry.create(kind="profile", params={}, idempotency_key="k2")
+            other, _ = await registry.create_or_return_existing(
+                TaskSpec(kind="profile", params={}, idempotency_key="k2")
+            )
             assert await registry.cancel_family(["profile"], reason="prune") == [other.task_id]
     finally:
         registry.db.close()
@@ -78,12 +82,14 @@ async def test_a_queued_task_row_carries_its_dispatch_class(tmp_path):
     registry = TaskRegistry(SqliteConnection(tmp_path / "db.sqlite"))
     try:
         with tt.trajectory_scope(session_dir=tmp_path):
-            task = await registry.create(
-                kind="explore",
-                params={},
-                idempotency_key="k1",
-                dispatch_class="llm",
-                dispatch_origin={"phase": "EXPLORE", "macro_cycle": 0, "tick": 3},
+            task, _ = await registry.create_or_return_existing(
+                TaskSpec(
+                    kind="explore",
+                    params={},
+                    idempotency_key="k1",
+                    dispatch_class="llm",
+                    dispatch_origin={"phase": "EXPLORE", "macro_cycle": 0, "tick": 3},
+                ),
             )
     finally:
         registry.db.close()
@@ -111,12 +117,14 @@ async def test_an_approved_proposal_links_call_intent_proposal_and_task(session_
         with tt.trajectory_scope(session_dir=session_dir, component="coordinator"):
             await c.tick(1)
             proposal_id = next(iter(c.state.pending_proposals))
+            # The verdict pops the proposal from the registry, so hold the row the task id lands on.
+            pending = c.state.pending_proposals[proposal_id]
             verdict = Intent(
                 type=IntentType.REVIEW_VERDICT,
                 payload={"target_proposal_msg_id": proposal_id, "verdict": "approve", "reasoning": "ok"},
             )
-            await c._handle_intent("critic", verdict)
-        task_id = c.state.pending_proposals[proposal_id].task_id
+            await c.router.handle_intent("critic", verdict)
+        task_id = pending.task_id
     finally:
         await c.stop()
 
@@ -160,7 +168,7 @@ async def test_a_rejected_proposal_closes_cancelled_without_a_task(session_dir):
                 type=IntentType.REVIEW_VERDICT,
                 payload={"target_proposal_msg_id": proposal_id, "verdict": "reject", "reasoning": "no"},
             )
-            await c._handle_intent("critic", verdict)
+            await c.router.handle_intent("critic", verdict)
     finally:
         await c.stop()
 
@@ -174,7 +182,7 @@ async def test_a_rejected_proposal_closes_cancelled_without_a_task(session_dir):
 async def test_a_proposal_the_session_ends_without_a_verdict_on_closes_cancelled(session_dir):
     c = Coordinator(session_dir, backends=_backends(ScriptedPlan(turns=[MockTurn(intents=[_propose("baseline")])])))
     try:
-        assert await c.run(max_ticks=1) == "max_ticks"
+        assert await c.run(options=RunOptions(max_ticks=1)) == "max_ticks"
         proposal_id = next(iter(c.state.pending_proposals))
         # A resumed leg ending over the same proposal must not close it twice.
         with tt.trajectory_scope(session_dir=session_dir, component="coordinator"):
@@ -251,7 +259,7 @@ async def test_an_auto_retry_hangs_off_the_failed_task(session_dir, monkeypatch)
     c = Coordinator(session_dir, backends=_backends(ScriptedPlan(turns=[], default_intent=_heartbeat())))
     try:
         with tt.trajectory_scope(session_dir=session_dir, component="coordinator"):
-            assert await c._maybe_auto_retry_specialist(failed, result) is True
+            assert await c.specialist_dispatch.maybe_auto_retry_specialist(failed, result) is True
     finally:
         await c.stop()
 
@@ -267,7 +275,7 @@ async def test_a_denied_intent_is_recorded_as_not_admitted(session_dir):
     c = Coordinator(session_dir, backends=_backends(ScriptedPlan(turns=[], default_intent=_heartbeat())))
     try:
         with tt.trajectory_scope(session_dir=session_dir, component="coordinator"):
-            await c._handle_intent("nobody", _propose("baseline"))
+            await c.router.handle_intent("nobody", _propose("baseline"))
     finally:
         await c.stop()
 

@@ -16,13 +16,16 @@ from pathlib import Path
 import pytest
 import yaml
 
-from hyperloom.orchestrator.actions.executors import BaselineExecutor, ExploreExecutor
+from hyperloom.orchestrator.actions.executors.baseline import BaselineExecutor
+from hyperloom.orchestrator.actions.executors.explore import ExploreExecutor
 from hyperloom.orchestrator.actions.executors._accuracy_gate import ENABLEMENT_REVALIDATION_REASON
-from hyperloom.orchestrator.actions.executors._grid_runner import _build_variant_yaml
+from hyperloom.orchestrator.actions.executors._grid_runner import _build_variant_yaml, GridRecipe, VariantResult
 from hyperloom.orchestrator.loop.coordinator import Coordinator
 from hyperloom.orchestrator.loop.sub_agent_runner import RunnerContext
 from hyperloom.orchestrator.roles import MockBackend, ScriptedPlan
 from hyperloom.orchestrator.state.shared_state import SharedState
+from hyperloom.orchestrator.state.task_registry import TaskSpec
+from hyperloom.orchestrator.actions.executors._workload_envs import BenchmarkTarget, LaunchLayer
 
 
 @pytest.fixture
@@ -135,7 +138,6 @@ async def test_revalidation_script_matches_measured_anchor_after_resume(
     state.baseline_tput = 100.0
     state.baseline_accuracy = 0.94
     state.baseline_config_path = str(config)
-    state.baseline_double_run = False
     state.baseline_benchmark_script = None if script_source == "legacy" else "sglang_custom.sh"
     if script_source == "generic":
         state.baseline_benchmark_script = ""
@@ -154,14 +156,16 @@ async def test_revalidation_script_matches_measured_anchor_after_resume(
 
     if script_source == "queued_without_override":
         # A persisted task created by an older producer may still lack the override.
-        task = await coordinator.tasks.create(
-            kind="baseline",
-            params={"reason": ENABLEMENT_REVALIDATION_REASON, "config_path": str(config)},
-            idempotency_key="old-producer-revalidation",
+        task, _ = await coordinator.tasks.create_or_return_existing(
+            TaskSpec(
+                kind="baseline",
+                params={"reason": ENABLEMENT_REVALIDATION_REASON, "config_path": str(config)},
+                idempotency_key="old-producer-revalidation",
+            ),
         )
         state.enablement.revalidation_task_id = task.task_id
     else:
-        task_id = await coordinator._maybe_enqueue_enablement_baseline_revalidation()
+        task_id = await coordinator.enablement_revalidation.maybe_enqueue_enablement_baseline_revalidation()
         assert task_id
         task = await coordinator.tasks.get(task_id)
 
@@ -170,7 +174,7 @@ async def test_revalidation_script_matches_measured_anchor_after_resume(
     monkeypatch.setattr("hyperloom.orchestrator.actions.executors.baseline.build_benchmark_command", cpu_benchmark)
     executor = BaselineExecutor(magpie_python=sys.executable, session_dir=coordinator.session_dir, shared_state=state)
     monkeypatch.setattr(executor, "_after_materialize_config", lambda *_args: None)
-    monkeypatch.setattr(executor, "_preflight_server_argv", lambda **_kwargs: None)
+    monkeypatch.setattr(executor, "_preflight_server_argv", lambda *_args: None)
     result = await executor(
         RunnerContext(task=task, lease=None, extra={"session_dir": coordinator.session_dir, "shared_state": state})
     )
@@ -182,7 +186,7 @@ async def test_revalidation_script_matches_measured_anchor_after_resume(
     assert result["output_throughput"] == baseline_receipt["report"]["throughput"]["output_throughput"] == expected_tput
     assert result["accuracy"] == 0.95
 
-    await coordinator._promote_to_shared_state("baseline", result, task=task)
+    await coordinator.writeback.promote_to_shared_state("baseline", result, task=task)
     state.save(coordinator.session_dir)
     coordinator.shared_state = state = SharedState.load_or_init(coordinator.session_dir)
     assert state.baseline_tput == expected_tput
@@ -193,7 +197,7 @@ async def test_revalidation_script_matches_measured_anchor_after_resume(
     assert not state.enablement.validation_pending
 
     state.current_best["extra_server_args"] = "--mem-fraction-static 0.9"
-    enqueued = await coordinator._enqueue_internal_stack_rebench(reason="revalidated_anchor")
+    enqueued = await coordinator.writeback.enqueue_internal_stack_rebench(reason="revalidated_anchor")
     rebench = await coordinator.tasks.get(enqueued["task_id"])
     child_receipts = []
 
@@ -201,12 +205,16 @@ async def test_revalidation_script_matches_measured_anchor_after_resume(
         output = tmp_path / "resumed_rebench"
         output.mkdir()
         variant = _build_variant_yaml(
-            kwargs["base_yaml_path"],
-            kwargs["base_extra_args"],
+            GridRecipe(
+                base_yaml_path=kwargs["recipe"].base_yaml_path,
+                base=LaunchLayer(extra_server_args=kwargs["recipe"].base.extra_server_args),
+                target=BenchmarkTarget(
+                    gpu_type=kwargs["recipe"].target.gpu_type,
+                    benchmark_script=kwargs["recipe"].target.benchmark_script,
+                ),
+            ),
             kwargs["grid"][0],
             output_subdir=output,
-            gpu_type=kwargs["gpu_type"],
-            benchmark_script=kwargs["benchmark_script"],
         )
         subprocess.run(
             cpu_benchmark(python_exe=sys.executable, config_path=variant, output_dir=output),
@@ -217,7 +225,8 @@ async def test_revalidation_script_matches_measured_anchor_after_resume(
             timeout=10,
         )
         child_receipts.append(json.loads((output / "child_receipt.json").read_text()))
-        return []
+        variant_row = kwargs["grid"][0]
+        return [VariantResult(variant_row.name, variant_row.extra_server_args, dict(variant_row.extra_envs), "failed")]
 
     monkeypatch.setattr("hyperloom.orchestrator.actions.executors.explore.run_grid", launch_grid)
     monkeypatch.setattr("hyperloom.orchestrator.actions.executors.explore.maybe_serving_lease", lambda **_kwargs: None)

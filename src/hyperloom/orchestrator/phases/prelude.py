@@ -4,13 +4,16 @@
 """PRELUDE phase handler for section-based Recipe replay and initial analysis."""
 
 from __future__ import annotations
+
 import logging as _logging
-import math
+import sqlite3
+from dataclasses import dataclass
 from pathlib import Path
 from collections.abc import Mapping, Sequence
 from typing import Any
-from hyperloom.common.perf_metric import graded_axes_of
-from hyperloom.common.timeutil import now_iso
+from hyperloom_common.coerce import to_float, to_int
+from hyperloom.common.perf_metric import VERDICT_KEEP, GradingAnchor, constraint_fields, graded_axes_of
+from hyperloom_common.timeutil import now_iso
 from hyperloom.inference_optimizer.breakdown.recorder.warm_replay_event import (
     GATE_ACCURACY,
     GATE_KEEP_THRESHOLD,
@@ -23,30 +26,48 @@ from hyperloom.inference_optimizer.breakdown.recorder.warm_replay_event import (
     SKIP_DISABLED_BY_FLAG,
     SKIP_ENQUEUE_FAILED,
     SKIP_FRAMEWORK_ROOT_MISSING,
-    SKIP_KERNEL_PREPARATION_FAILED,
     SKIP_KERNEL_ROOT_MISSING,
     SKIP_NO_WARM_START_RECIPE,
     SKIP_RECIPE_NOT_REPLAYABLE,
     SKIP_RECIPE_READ_FAILED,
+    SKIP_RESTATES_BASELINE,
     SKIP_WORKLOAD_CONFIG_INCOMPATIBLE,
+    WarmReplayApplyItem,
+    WarmReplayMeasurement,
+    WarmReplayRequest,
 )
 
 from . import machine_state as _phase_state
+from hyperloom.inference_optimizer.grid_server_args import compose_server_args, merge_cumulative_extra_server_args
+from hyperloom.inference_optimizer.inferencex_checkout import pick_tree
+from hyperloom.inference_optimizer.roofline_ceiling import read_baseline_server_args
 from hyperloom.inference_optimizer.session.optimization_journal import (
+    KIND_OTHER,
+    derive_journal_outcome,
     JournalEntry,
+    Verdict,
 )
-from ..actions.executors.baseline import _revert_warm_patch_state, revert_warm_kernel_patches
-from ..state.shared_state import inject_stack_base_params
-from ..state.task_registry import Task
-from ..loop.coordinator_helpers import (
+from ..actions.executors.benchmark_run.warm_patches import revert_warm_kernel_patches
+from ..actions.executors.explore import restates_the_baseline_launch
+from ..state.analysis_failures import RECIPE_PARAM, repeated_roofline_failure, roofline_recipe
+from ..state.shared_state import inject_stack_base_params, resolve_graded_comparison
+from ..state.task_registry import Task, TaskSpec, create_on_free_key
+from ..loop.time_budget import (
     expected_action_cost_minutes,
     measured_baseline_runtime_sec,
 )
 from ..collaborator import CoordinatorCollaborator
-from ..knowledge.remote_recipe.sanitize import HOST_ORIGIN_KEY
-
-# Default min TRANSFER confidence a warm-replay champion must clear to be enqueued.
-_DEFAULT_WARM_REPLAY_MIN_CONFIDENCE: float = 0.7
+from ..knowledge.remote_recipe import KBStoreError
+from .warm_replay_stack import (
+    commit_warm_replay_overlays,
+    committing_overlays,
+    replayed_patch_refs as _replayed_patch_refs,
+    restore_recipe_trees,
+    warm_patch_trees as _warm_patch_trees,
+    warm_replay_source_layer,
+)
+from .prelude_warm_kernel import _WarmKernelPrepMixin, _merge_named_current_recipe_configs
+from .prelude_warm_launch import suppress_recipe_config, warm_replay_task_spec
 
 log = _logging.getLogger(__name__)
 
@@ -77,61 +98,20 @@ _WARM_REPLAY_DONOR_FIELDS = (
 )
 
 
-def _merge_named_current_recipe_configs(
-    owners: list[tuple[str, Mapping[str, Any]]],
-) -> tuple[str, dict[str, str]]:
-    """Merge named config snapshots with exact duplicate conflict checks."""
-    from hyperloom.inference_optimizer.grid_server_args import (
-        tokenize_server_args_preserving_json,
-    )
+def _gain_pct(after: float, before: float) -> float:
+    return (after / before - 1.0) * 100.0
 
-    pairs: dict[str, tuple[str, ...]] = {}
-    order: list[str] = []
-    positional = 0
-    for owner, config in owners:
-        raw = str(config.get("extra_server_args") or "").strip()
-        if not raw:
-            continue
-        parsed = tokenize_server_args_preserving_json(raw)
-        if parsed is None:
-            raise ValueError(f"{owner} extra_server_args cannot be tokenized safely")
-        _normalized, tokens = parsed
-        index = 0
-        while index < len(tokens):
-            token = tokens[index]
-            if token.startswith("--"):
-                key, has_equals, inline = token.partition("=")
-                values: list[str] = [inline] if has_equals else []
-                index += 1
-                while not has_equals and index < len(tokens) and not tokens[index].startswith("--"):
-                    values.append(tokens[index])
-                    index += 1
-                rendered = (key, *values)
-                prior = pairs.get(key)
-                if prior is not None and prior != rendered:
-                    raise ValueError(f"current Recipe config conflict for {key}: {prior!r} != {rendered!r}")
-                if prior is None:
-                    pairs[key] = rendered
-                    order.append(key)
-                continue
-            synthetic = f"__positional_{positional}"
-            positional += 1
-            pairs[synthetic] = (token,)
-            order.append(synthetic)
-            index += 1
 
-    envs: dict[str, str] = {}
-    for owner, config in owners:
-        raw_envs = config.get("extra_envs")
-        if not isinstance(raw_envs, Mapping):
-            continue
-        for raw_key, raw_value in raw_envs.items():
-            key = str(raw_key)
-            value = str(raw_value)
-            if key in envs and envs[key] != value:
-                raise ValueError(f"current Recipe env conflict for {key}: {envs[key]!r} != {value!r} ({owner})")
-            envs[key] = value
-    return " ".join(token for key in order for token in pairs[key]), envs
+def _warm_recipe_history_rows(warm: Any, key: str) -> list[Any]:
+    if not isinstance(warm, dict):
+        return []
+    recipe = warm.get("recipe") or {}
+    attrs = (recipe.get("attrs") or recipe) if isinstance(recipe, dict) else {}
+    exact_history = attrs.get("exact_history")
+    if isinstance(exact_history, dict):
+        attrs = exact_history
+    rows = attrs.get(key)
+    return rows if isinstance(rows, list) else []
 
 
 def _recorded_apply_roots(provenance: Any) -> dict[str, str]:
@@ -172,23 +152,36 @@ def _overlay_provenance_summary(sdk_replay: Mapping[str, Any]) -> dict[str, Any]
     }
 
 
-class PreludePhase(CoordinatorCollaborator):
-    """Coordinator mixin; its methods run with the Coordinator as ``self``."""
+@dataclass(frozen=True)
+class _ReplayEval:
+    """A replay's accuracy as read back from its eval output."""
 
-    def _internal_analysis_kind(self) -> str:
+    accuracy: float | None
+    ran: bool
+    error: str
+
+
+def _warm_donor_metadata(replay: Mapping[str, Any]) -> dict[str, Any]:
+    """The donor fields a warm replay's record carries, dropping the ones the recipe left empty."""
+    return {field: replay.get(field) for field in _WARM_REPLAY_DONOR_FIELDS if replay.get(field) not in (None, "", [])}
+
+
+class PreludePhase(_WarmKernelPrepMixin, CoordinatorCollaborator):
+    """PRELUDE phase handler: session boot, target analysis, and phase seeding."""
+
+    def internal_analysis_kind(self) -> str:
         """Pick the kind for the next Coordinator-internal analysis task: roofline when enable_roofline else profile."""
         return (
             "roofline"
             if bool(
-                getattr(self.shared_state, "enable_roofline", True),
+                self.shared_state.enable_roofline,
             )
             else "profile"
         )
 
     def _measured_analysis_cost_sec(self) -> float:
         """Expected cost of the initial roofline/profile arm, in seconds."""
-        registry = getattr(self, "action_registry", None)
-        meta = registry.get(self._internal_analysis_kind()) if registry is not None else None
+        meta = self.action_registry.get(self.internal_analysis_kind())
         return (
             expected_action_cost_minutes(
                 meta,
@@ -212,25 +205,13 @@ class PreludePhase(CoordinatorCollaborator):
         )
         try:
             self.shared_state.save(self.session_dir)
-        except Exception:
+        except OSError:
             log.exception("PRELUDE: failed to persist the dropped-arm record for %r", arm)
 
-    def _warm_recipe_proven_items(self) -> list[dict[str, str]]:
+    def warm_recipe_proven_items(self) -> list[dict[str, str]]:
         """Summarise warm-start ``what_worked`` items the scout can skip ({name, source}); fail-soft."""
-        state = self.shared_state
-        warm = getattr(state, "warm_start_recipe", None) or {}
-        if not isinstance(warm, dict) or not warm:
-            return []
-        recipe = warm.get("recipe") or {}
-        recipe_attrs = (recipe.get("attrs") or recipe) if isinstance(recipe, dict) else {}
-        exact_history = recipe_attrs.get("exact_history")
-        if isinstance(exact_history, dict):
-            recipe_attrs = exact_history
-        what_worked = recipe_attrs.get("what_worked") or []
-        if not isinstance(what_worked, list):
-            return []
         out: list[dict[str, str]] = []
-        for row in what_worked:
+        for row in _warm_recipe_history_rows(self.shared_state.warm_start_recipe, "what_worked"):
             if not isinstance(row, dict):
                 continue
             name = str(row.get("name") or "").strip()
@@ -239,42 +220,30 @@ class PreludePhase(CoordinatorCollaborator):
             out.append({"name": name, "source": str(row.get("source") or "").strip()})
         return out
 
-    def _inject_warm_recipe_history_into_ledger(self) -> int:
+    def inject_warm_recipe_history_into_ledger(self) -> int:
         """Pre-fill ``explore_search.rejected`` with the warm recipe's ``what_failed`` rows (fingerprinted so the dedup gate denies re-tests). Idempotent via warm_history_injected; returns rows added."""
         state = self.shared_state
-        if getattr(state, "warm_history_injected", False):
+        if state.warm_history_injected:
             return 0
-        warm = state.warm_start_recipe or {}
-        if not isinstance(warm, dict) or not warm:
-            state.warm_history_injected = True
-            return 0
-        recipe = warm.get("recipe") or {}
-        # what_failed may be top-level or nested under attrs; fall back to the recipe.
-        recipe_attrs = (recipe.get("attrs") or recipe) if isinstance(recipe, dict) else {}
-        exact_history = recipe_attrs.get("exact_history")
-        if isinstance(exact_history, dict):
-            recipe_attrs = exact_history
-        what_failed = recipe_attrs.get("what_failed") or []
-        if not isinstance(what_failed, list) or not what_failed:
+        warm = state.warm_start_recipe
+        what_failed = _warm_recipe_history_rows(warm, "what_failed")
+        if not what_failed:
             state.warm_history_injected = True
             return 0
 
-        from hyperloom.inference_optimizer.canonical_fingerprint import (
-            canonical_fingerprint,
-        )
+        from hyperloom.inference_optimizer.canonical_fingerprint import canonical_fingerprint
 
-        es_raw = getattr(state, "explore_search", None) or {}
-        es = dict(es_raw) if isinstance(es_raw, dict) else {}
+        es = dict(state.explore_search or {})
         rejected = list(es.get("rejected") or [])
         existing_fps = {str(r.get("fingerprint") or "") for r in rejected if isinstance(r, dict)}
         existing_fps.discard("")
         added = 0
-        tier = str((warm or {}).get("tier") or "")
+        tier = str(warm.get("tier") or "")
         for row in what_failed:
             if not isinstance(row, dict):
                 continue
             args = str(row.get("extra_server_args") or "").strip()
-            envs = row.get("extra_envs") or {}
+            envs = row.get("extra_envs")
             if not isinstance(envs, dict):
                 envs = {}
             if not args and not envs:
@@ -303,668 +272,10 @@ class PreludePhase(CoordinatorCollaborator):
             es["rejected"] = rejected
             state.explore_search = es
             log.info(
-                "warm-recipe history: injected %d what_failed rows into explore_search.rejected (tier=%s)",
-                added,
-                tier,
+                "warm-recipe history: injected %d what_failed rows into explore_search.rejected (tier=%s)", added, tier
             )
         state.warm_history_injected = True
         return added
-
-    def _collect_warm_kernel_plan(self, kb: Any) -> list[dict[str, Any]]:
-        """Resolve the prior-champion kernel columns into a local apply plan."""
-        readers = (
-            ("gemm", kb.read_gemm, "optimizations"),
-            ("fusion", kb.read_fusion, "items"),
-            ("rewrite", kb.read_rewrite, "items"),
-        )
-        plan: list[dict[str, Any]] = []
-        for column, reader, list_key in readers:
-            data = reader() or {}
-            rows = data.get(list_key) if isinstance(data, dict) else None
-            if not isinstance(rows, list):
-                continue
-            for row in rows:
-                if not isinstance(row, dict):
-                    continue
-                meta = {
-                    k: v
-                    for k, v in row.items()
-                    if k
-                    not in (
-                        "patch",
-                        "source_file",
-                        "source_files",
-                        "target_file",
-                        "target_files",
-                        "target_path",
-                        "tuned_file",
-                        "files",
-                    )
-                }
-                entry: dict[str, Any] = {"column": column, "meta": meta}
-                # Preserve the exact Recipe row so CLOSE can carry the validated kernel content and its refs forward
-                # on the same inference page.
-                entry["recipe_row"] = {
-                    key: value
-                    for key, value in row.items()
-                    if key
-                    not in {
-                        "source_file",
-                        "source_files",
-                        "target_file",
-                        "target_files",
-                        "target_path",
-                    }
-                }
-                # The checkout this item was applied into.
-                host_origin = row.get(HOST_ORIGIN_KEY)
-                if isinstance(host_origin, Mapping):
-                    entry["apply_root"] = str(host_origin.get("apply_root") or "").strip()
-                patch_ref = str(row.get("patch") or "").strip()
-                if patch_ref:
-                    patch_local = kb.prior_file(patch_ref)
-                    if patch_local is not None:
-                        entry["patch_path"] = str(patch_local)
-                tuned_ref = str(row.get("tuned_file") or "").strip()
-                if column == "gemm" and tuned_ref:
-                    tuned_local = kb.prior_file(tuned_ref)
-                    if tuned_local is not None:
-                        entry["source_paths"] = [str(tuned_local)]
-                if entry.get("patch_path") or (column == "gemm" and entry.get("source_paths")):
-                    plan.append(entry)
-        return plan
-
-    @staticmethod
-    def _parse_diff_targets(patch_path: str | None) -> list[str]:
-        """Extract every safe repo-relative target from a unified diff."""
-        raw = str(patch_path or "").strip()
-        if not raw:
-            return []
-        try:
-            text = Path(raw).read_text(errors="replace")
-            from ..specialists.patch_safety import parse_patch_targets
-
-            return list(parse_patch_targets(text).all)
-        except (OSError, ValueError):
-            return []
-
-    @classmethod
-    def _parse_diff_target(cls, patch_path: str | None) -> str:
-        """Return the shared parser's first safe repo-relative Patch target."""
-        targets = cls._parse_diff_targets(patch_path)
-        return targets[0] if targets else ""
-
-    def _resolve_kernel_target_path(self, entry: dict[str, Any]) -> str:
-        """Locate the first Patch target under this Session's active root."""
-        targets = self._resolve_kernel_target_paths(entry)
-        return targets[0] if targets else ""
-
-    def _resolve_kernel_target_paths(self, entry: dict[str, Any]) -> list[str]:
-        """Resolve every declared Patch target under the Session active root."""
-
-        def reject(reason: str, *, code: str = "") -> list[str]:
-            entry["resolution_error"] = reason
-            if code:
-                entry["resolution_reason"] = code
-            log.warning("Kernel Patch replay rejected: %s", reason)
-            return []
-
-        patch_path = Path(str(entry.get("patch_path") or "").strip())
-        try:
-            from ..specialists.patch_safety import parse_patch_targets
-
-            parsed = parse_patch_targets(patch_path.read_text(errors="replace"))
-        except (OSError, ValueError) as exc:
-            return reject(f"invalid patch targets: {type(exc).__name__}: {exc}")
-        # The recorded root is the only answer.
-        root_value = str(entry.get("apply_root") or "").strip().rstrip("/")
-        if not root_value:
-            return reject(
-                "kernel item records no apply root",
-                code="kernel_apply_root_missing",
-            )
-        try:
-            root = Path(root_value).resolve(strict=False)
-            root_is_dir = root.is_dir()
-        except (OSError, RuntimeError) as exc:
-            return reject(f"recorded kernel apply root cannot be resolved: {type(exc).__name__}: {exc}")
-        if not root_is_dir:
-            return reject(
-                f"recorded kernel apply root is not present on this host: {root}",
-                code="kernel_apply_root_absent",
-            )
-
-        resolved: list[str] = []
-        for target in parsed.all:
-            candidate = (root / target).resolve(strict=False)
-            try:
-                candidate.relative_to(root)
-            except ValueError:
-                return reject(f"target escapes active root: {target}")
-            if target in parsed.existing and not candidate.is_file():
-                return reject(f"existing target is missing: {candidate}")
-            if target in parsed.created and candidate.exists():
-                return reject(f"create target already exists: {candidate}")
-            resolved.append(str(candidate))
-        entry.pop("resolution_error", None)
-        entry.pop("resolution_reason", None)
-        return resolved
-
-    @staticmethod
-    def _warm_kernel_extra_envs(entry: dict[str, Any]) -> dict[str, str]:
-        """Rebuild a champion's env bundle against this run's downloaded files."""
-        meta = entry.get("meta") or {}
-        local = [str(p) for p in (entry.get("source_paths") or []) if p]
-        envs: dict[str, str] = {}
-
-        def _merge(source: Any) -> None:
-            if isinstance(source, dict):
-                for raw_key, raw_value in source.items():
-                    key = str(raw_key).strip()
-                    if not key:
-                        continue
-                    value = str(raw_value)
-                    if key in envs and envs[key] != value:
-                        raise ValueError(f"current Recipe kernel env conflict for {key}: {envs[key]!r} != {value!r}")
-                    envs[key] = value
-
-        for key in ("extra_envs", "env_flags", "recommended_env"):
-            _merge(meta.get(key))
-        e2e = meta.get("e2e")
-        if isinstance(e2e, dict):
-            _merge(e2e.get("extra_envs"))
-        by_name = {Path(path).name: path for path in local}
-        results = meta.get("e2e_results")
-        kept = (results.get("kept") or []) if isinstance(results, dict) else []
-        for tuner in kept:
-            if not isinstance(tuner, dict):
-                continue
-            _merge(tuner.get("envs"))
-            env_var = str(tuner.get("env_var") or "").strip()
-            if not env_var:
-                continue
-            # Each accepted tuner owns its own table, so match by the recorded value's filename.
-            recorded = str(tuner.get("env_value") or envs.get(env_var) or "").strip()
-            local_copy = by_name.get(Path(recorded).name) if recorded else None
-            if local_copy is None and len(local) == 1:
-                local_copy = local[0]
-            if local_copy:
-                envs[env_var] = local_copy
-        # Re-point any other var that still names a file we downloaded.
-        for name, value in list(envs.items()):
-            if not value or "/" not in value:
-                continue
-            replacement = by_name.get(Path(value).name)
-            if replacement and replacement != value:
-                envs[name] = replacement
-        return envs
-
-    def _apply_warm_kernel_patch(self, entry: dict[str, Any], target: str) -> dict[str, Any]:
-        """Land one champion's file on disk without measuring it."""
-        from ..actions.executors._kernel_agent_tool import (
-            _maybe_apply_kernel_patch,
-            materialize_unified_patch_snapshot,
-        )
-
-        replacement = entry.get("patch_path")
-        if not replacement:
-            return {
-                "status": "failed",
-                "error": "warm replay kernel source mutation is missing its Patch",
-            }
-        kernel_id = str((entry.get("meta") or {}).get("kernel_name") or "warm_kernel")
-        payload: dict[str, Any] = {
-            "patch_path": replacement,
-            "target_file": target,
-            "source_file": target,
-            "kernel_id": kernel_id,
-        }
-
-        patch_path = Path(str(replacement or ""))
-        try:
-            patch_text = patch_path.read_text(encoding="utf-8", errors="replace") if patch_path.is_file() else ""
-        except OSError:
-            patch_text = ""
-        from ..specialists.patch_safety import is_unified_diff
-
-        if patch_text and is_unified_diff(patch_text):
-            relative_target = self._parse_diff_target(str(patch_path))
-            target_path = Path(target).resolve()
-            relative_path = Path(relative_target)
-            if not relative_target or relative_path.is_absolute() or ".." in relative_path.parts:
-                return {
-                    "status": "failed",
-                    "error": (f"warm replay unified diff has no safe target path: {patch_path}"),
-                }
-            repo_root = target_path.parents[len(relative_path.parts) - 1]
-            try:
-                resolved_from_patch = (repo_root / relative_path).resolve()
-            except (OSError, RuntimeError):
-                resolved_from_patch = Path()
-            if resolved_from_patch != target_path:
-                return {
-                    "status": "failed",
-                    "error": (
-                        "warm replay diff target does not resolve to target_file: "
-                        f"diff={relative_target!r} target={target!r}"
-                    ),
-                }
-            safe_kernel_id = (
-                "".join(ch if ch.isalnum() or ch in "._-" else "_" for ch in kernel_id)[:96] or "warm_kernel"
-            )
-            snapshot_dir = Path(self.session_dir) / "runtime" / "warm_kernel_materialized" / safe_kernel_id
-            try:
-                materialized = materialize_unified_patch_snapshot(
-                    patch_path=patch_path,
-                    repo_root=repo_root,
-                    snapshot_dir=snapshot_dir,
-                )
-            except Exception as exc:  # noqa: BLE001
-                return {
-                    "status": "failed",
-                    "error": (f"warm replay unified diff materialization failed: {type(exc).__name__}: {exc}"),
-                }
-            payload["snapshot_dir"] = materialized
-            payload["kernel_repo"] = str(repo_root)
-
-        return _maybe_apply_kernel_patch(
-            payload,
-            session_dir=self.session_dir,
-            kernel_id=kernel_id,
-        )
-
-    def _snapshot_warm_kernel_target(
-        self,
-        target: str,
-        index: int,
-    ) -> dict[str, Any]:
-        """Capture one target before its mutation."""
-        path = Path(target)
-        if path.is_symlink():
-            raise ValueError(f"kernel target must not be a symlink: {path}")
-        root = Path(self.session_dir) / "runtime" / "warm_kernel_snapshots"
-        root.mkdir(parents=True, exist_ok=True)
-        backup = root / f"{index:04d}.bin"
-        existed = path.is_file() and not path.is_symlink()
-        if existed:
-            backup.write_bytes(path.read_bytes())
-        return {
-            "target": str(path),
-            "existed": existed,
-            "backup": str(backup) if existed else "",
-            "mode": path.stat().st_mode & 0o7777 if existed else None,
-        }
-
-    def _warm_kernel_gate_reason(self) -> str:
-        """Why this run must not replay kernel champions, or '' when allowed."""
-        if not getattr(self, "_warm_replay_enabled", True):
-            return "warm_replay_disabled"
-        if bool(getattr(getattr(self, "knowledge_plane", None), "kb_disabled", False)):
-            return "kb_degraded"
-        from ..knowledge.config import KnowledgeConfig, KnowledgeStoreMode
-
-        config = getattr(getattr(self, "knowledge_plane", None), "config", None) or KnowledgeConfig.from_env()
-        if config.mode is not KnowledgeStoreMode.REMOTE:
-            return "local_knowledge_mode"
-        return ""
-
-    @staticmethod
-    def _open_warm_kernel_section() -> Any:
-        """Open ``value.kernel`` from the inference Recipe already downloaded."""
-        from ..knowledge.agent_kb import KernelAgentKB
-
-        return KernelAgentKB.open()
-
-    @staticmethod
-    def _warm_replay_root_skip_outcome(
-        *,
-        reason: str,
-        root_kind: str,
-        roots: Sequence[str] = (),
-        rollback: dict[str, Any] | None = None,
-    ) -> dict[str, Any]:
-        """Record why warm replay stopped, naming the roots the record asked for."""
-        outcome: dict[str, Any] = {
-            "status": ("skipped" if rollback is None or rollback.get("ok") else "rollback_failed"),
-            "reason": reason,
-            f"{root_kind}_patch_root_source": "recorded",
-            f"{root_kind}_patch_recorded_roots": list(roots),
-        }
-        if rollback is not None:
-            outcome["rollback"] = rollback
-        return outcome
-
-    def _warm_replay_kernel_root_block_reason(
-        self,
-        state: Any,
-    ) -> dict[str, Any] | None:
-        """Skip combined warm replay when a kernel item's recorded root is unusable."""
-        for entry in getattr(state, "warm_kernel_kb_plan", []) or []:
-            if not isinstance(entry, dict):
-                continue
-            # gemm is parameter-shaped: it re-points env vars at downloaded files and never patches a checkout, so it
-            # has no root to resolve.
-            if entry.get("column") == "gemm":
-                continue
-            if not str(entry.get("patch_path") or "").strip():
-                continue
-            root = str(entry.get("apply_root") or "").strip()
-            if not root:
-                return self._warm_replay_root_skip_outcome(
-                    reason="kernel_apply_root_missing",
-                    root_kind="kernel",
-                )
-            if not Path(root).is_dir():
-                return self._warm_replay_root_skip_outcome(
-                    reason="kernel_apply_root_absent",
-                    root_kind="kernel",
-                    roots=[root],
-                )
-        return None
-
-    def _set_warm_kernel_outcome(
-        self,
-        kernel_outcome: dict[str, Any],
-    ) -> dict[str, Any]:
-        """Store kernel diagnostics inside the combined warm replay outcome."""
-        combined = dict(getattr(self.shared_state, "warm_replay_outcome", {}) or {})
-        combined["kernel"] = dict(kernel_outcome)
-        self.shared_state.warm_replay_outcome = combined
-        return kernel_outcome
-
-    def _preview_current_kernel_config(self, kb: Any) -> dict[str, Any]:
-        """Resolve the kernel launch overlay without mutating target files."""
-        configs: list[tuple[str, Mapping[str, Any]]] = []
-        for index, entry in enumerate(self._collect_warm_kernel_plan(kb)):
-            envs = self._warm_kernel_extra_envs(entry)
-            if entry.get("column") == "gemm":
-                if not envs:
-                    continue
-            else:
-                targets = self._resolve_kernel_target_paths(entry)
-                if not any(targets):
-                    continue
-            configs.append(
-                (
-                    f"kernel[{index}]",
-                    {
-                        "extra_server_args": str((entry.get("meta") or {}).get("extra_server_args") or "").strip(),
-                        "extra_envs": envs,
-                    },
-                )
-            )
-        args, envs = _merge_named_current_recipe_configs(configs)
-        return {"extra_server_args": args, "extra_envs": envs}
-
-    async def _prepare_warm_kernel_kb(self, kb: Any = None) -> dict[str, Any]:
-        """Prepare the Recipe's kernel section for the combined replay benchmark."""
-        state = self.shared_state
-        if getattr(state, "warm_kernel_kb_attempted", False):
-            return {"status": "skipped", "reason": "already_attempted"}
-        gated = self._warm_kernel_gate_reason()
-        if gated:
-            return self._set_warm_kernel_outcome({"status": "skipped", "reason": gated})
-        state.warm_kernel_kb_attempted = True
-        # Persist the one-shot flag now: a crash mid-replay must not re-run the whole (potentially hour-long) set on
-        # resume.
-        try:
-            state.save(self.session_dir)
-        except Exception as exc:
-            log.warning(
-                "warm-kernel KB: one-shot state save failed",
-                exc_info=True,
-            )
-            return self._set_warm_kernel_outcome(
-                {
-                    "status": "error",
-                    "reason": (f"kernel_attempt_state_persist_failed:{type(exc).__name__}"),
-                }
-            )
-        if kb is None:
-            try:
-                kb = self._open_warm_kernel_section()
-            except Exception as exc:
-                log.warning("warm-kernel KB: opening Recipe section failed", exc_info=True)
-                return self._set_warm_kernel_outcome(
-                    {
-                        "status": "skipped",
-                        "reason": f"recipe_section_unavailable:{type(exc).__name__}",
-                    }
-                )
-        if kb is None or not kb.active:
-            return self._set_warm_kernel_outcome({"status": "skipped", "reason": "no_kernel_section"})
-        plan = self._collect_warm_kernel_plan(kb)
-        state.warm_kernel_kb_plan = plan
-        if not plan:
-            state.warm_replay_pending = {}
-            outcome = self._set_warm_kernel_outcome({"status": "empty"})
-            try:
-                state.save(self.session_dir)
-            except Exception:
-                log.debug(
-                    "warm-kernel KB: empty-state save failed",
-                    exc_info=True,
-                )
-            return outcome
-        deferred = 0
-        errors = 0
-        applied: list[dict[str, Any]] = []
-        kernel_snapshots: list[dict[str, Any]] = []
-        prepared_envs: dict[int, dict[str, str]] = {}
-        prepared_targets: dict[int, list[str]] = {}
-        kernel_configs: list[tuple[str, Mapping[str, Any]]] = []
-        for index, entry in enumerate(plan):
-            envs = self._warm_kernel_extra_envs(entry)
-            if entry.get("column") == "gemm":
-                if not envs:
-                    continue
-            else:
-                targets = self._resolve_kernel_target_paths(entry)
-                if not targets:
-                    continue
-                prepared_targets[index] = targets
-            prepared_envs[index] = envs
-            kernel_configs.append(
-                (
-                    f"kernel[{index}]",
-                    {
-                        "extra_server_args": str((entry.get("meta") or {}).get("extra_server_args") or "").strip(),
-                        "extra_envs": envs,
-                    },
-                )
-            )
-        kernel_args, merged_envs = _merge_named_current_recipe_configs(kernel_configs)
-        state.warm_replay_pending = {
-            **dict(getattr(state, "warm_replay_pending", {}) or {}),
-            "status": "preparing_kernel",
-            "kernel_apply_results": [],
-            "kernel_snapshots": [],
-        }
-        try:
-            state.save(self.session_dir)
-        except Exception as exc:  # noqa: BLE001
-            outcome = {
-                "status": "error",
-                "reason": f"kernel_pending_state_persist_failed:{type(exc).__name__}",
-            }
-            return self._set_warm_kernel_outcome(outcome)
-        for index, entry in enumerate(plan):
-            if not (entry.get("source_paths") or entry.get("patch_path")):
-                entry["decision"] = "DEFERRED"
-                deferred += 1
-                continue
-            # Every column carries its env bundle: a fusion needs its switches to activate the patched path, and a
-            # GEMM is nothing but its bundle.
-            envs = prepared_envs.get(index, {})
-            if envs:
-                entry["extra_envs"] = envs
-            # GEMM is parameter-shaped: its env bundle is the whole deliverable, so there is nothing to stage on disk.
-            if entry.get("column") == "gemm":
-                if not envs:
-                    entry["decision"] = "DEFERRED"
-                    deferred += 1
-                    continue
-                entry["decision"] = "PENDING"
-                continue
-            targets = prepared_targets.get(index, [])
-            if not targets:
-                entry["decision"] = "DEFERRED"
-                if entry.get("resolution_error"):
-                    entry["apply_result"] = {
-                        "status": "skipped",
-                        "reason": str(entry["resolution_error"])[:300],
-                    }
-                deferred += 1
-                continue
-            anchor_target = targets[0]
-            entry["resolved_patch_targets"] = list(targets)
-            try:
-                for target_path in targets:
-                    snapshot = self._snapshot_warm_kernel_target(
-                        target_path,
-                        len(kernel_snapshots),
-                    )
-                    kernel_snapshots.append(snapshot)
-                state.warm_replay_pending = {
-                    **dict(state.warm_replay_pending or {}),
-                    "status": "preparing_kernel",
-                    "kernel_snapshots": list(kernel_snapshots),
-                    "kernel_apply_results": list(applied),
-                }
-                state.save(self.session_dir)
-            except Exception as exc:
-                log.warning(
-                    "warm-kernel KB: pre-mutation snapshot persist failed for %s",
-                    targets,
-                    exc_info=True,
-                )
-                entry["decision"] = "ERROR"
-                entry["apply_result"] = {"exception": f"{type(exc).__name__}: {exc}"[:300]}
-                errors += 1
-                break
-            try:
-                apply_result = self._apply_warm_kernel_patch(entry, anchor_target)
-            except Exception as exc:
-                log.warning(
-                    "warm-kernel KB: apply failed for %s",
-                    anchor_target,
-                    exc_info=True,
-                )
-                entry["decision"] = "ERROR"
-                entry["apply_result"] = {"exception": f"{type(exc).__name__}: {exc}"[:300]}
-                errors += 1
-                break
-            entry["apply_result"] = {
-                k: apply_result.get(k) for k in ("status", "reason", "error", "manifest_path") if k in apply_result
-            }
-            if apply_result.get("status") != "ok":
-                entry["decision"] = "ERROR"
-                errors += 1
-                break
-            applied.append(apply_result)
-            state.warm_replay_pending = {
-                **dict(state.warm_replay_pending or {}),
-                "kernel_snapshots": list(kernel_snapshots),
-                "kernel_apply_results": list(applied),
-            }
-            entry["decision"] = "PENDING"
-
-        pending = [entry for entry in plan if entry.get("decision") == "PENDING"]
-        columns = sorted({str(e.get("column")) for e in plan})
-        if errors:
-            rollback = revert_warm_kernel_patches(
-                applied,
-                kernel_snapshots,
-            )
-            for entry in pending:
-                entry["decision"] = "ROLLED_BACK"
-            if rollback.get("ok"):
-                applied = []
-                pending = []
-                state.warm_replay_pending = {}
-            else:
-                state.warm_replay_pending = {
-                    **dict(state.warm_replay_pending or {}),
-                    "status": "rollback_failed",
-                    "rollback_errors": list(rollback.get("errors") or []),
-                }
-        status = (
-            "rollback_failed"
-            if errors and not rollback.get("ok")
-            else "error"
-            if errors
-            else "prepared"
-            if pending
-            else "loaded"
-        )
-        outcome = {
-            "status": status,
-            "columns": columns,
-            "total": len(plan),
-            "deferred": deferred,
-            "errors": errors,
-            "pending": pending,
-            "applied": applied,
-            "snapshots": kernel_snapshots,
-            "rollback": rollback if errors else {"ok": True, "errors": []},
-            "dirty": bool(errors and not rollback.get("ok")),
-            "extra_envs": merged_envs if pending else {},
-            "extra_server_args": (kernel_args if pending else ""),
-        }
-        if status == "loaded" and not applied and not kernel_snapshots:
-            state.warm_replay_pending = {}
-        self._set_warm_kernel_outcome(outcome)
-        log.info(
-            "PRELUDE warm-kernel KB prepared: columns=%s total=%d pending=%d deferred=%d errors=%d",
-            columns,
-            len(plan),
-            len(pending),
-            deferred,
-            errors,
-        )
-        try:
-            state.save(self.session_dir)
-        except Exception as exc:
-            log.warning(
-                "warm-kernel KB: prepared state save failed",
-                exc_info=True,
-            )
-            persist_rollback = revert_warm_kernel_patches(
-                applied,
-                kernel_snapshots,
-            )
-            for entry in pending:
-                entry["decision"] = "ROLLED_BACK"
-            if persist_rollback.get("ok"):
-                state.warm_replay_pending = {}
-                failed_status = "error"
-            else:
-                state.warm_replay_pending = {
-                    **dict(state.warm_replay_pending or {}),
-                    "status": "rollback_failed",
-                    "rollback_errors": list(persist_rollback.get("errors") or []),
-                }
-                failed_status = "rollback_failed"
-            outcome = {
-                **outcome,
-                "status": failed_status,
-                "reason": (f"kernel_prepared_state_persist_failed:{type(exc).__name__}"),
-                "pending": [],
-                "applied": [] if persist_rollback.get("ok") else applied,
-                "rollback": persist_rollback,
-                "dirty": not bool(persist_rollback.get("ok")),
-                "extra_envs": {},
-                "extra_server_args": "",
-            }
-            self._set_warm_kernel_outcome(outcome)
-            try:
-                state.save(self.session_dir)
-            except Exception:
-                log.warning(
-                    "warm-kernel KB: rollback state save failed",
-                    exc_info=True,
-                )
-        return outcome
 
     @staticmethod
     def _is_current_remote_recipe(warm: Any) -> bool:
@@ -986,7 +297,8 @@ class PreludePhase(CoordinatorCollaborator):
         config = config_kb.read()
         args = str(config.get("extra_server_args") or "")
         envs = dict(config.get("extra_envs") or {})
-        kernel_config = self._preview_current_kernel_config(kernel)
+        kernel_overlay = self._kernel_launch_overlay(self._collect_warm_kernel_plan(kernel))
+        kernel_config = {"extra_server_args": kernel_overlay.extra_server_args, "extra_envs": kernel_overlay.extra_envs}
         combined_args, combined_envs = _merge_named_current_recipe_configs(
             [
                 ("config", config),
@@ -1029,128 +341,38 @@ class PreludePhase(CoordinatorCollaborator):
             "provenance": provenance,
         }
 
-    async def _maybe_enqueue_warm_replay(
-        self,
-        *,
-        baseline_tput: float,
-    ) -> "Task | None":
+    async def maybe_enqueue_warm_replay(self, *, baseline_tput: float) -> "Task | None":
         """Enqueue a one-shot ``replay_warm_recipe`` task for a high-confidence T0 prior."""
         state = self.shared_state
-        if not getattr(self, "_warm_replay_enabled", True):
+        if not state.warm_replay_enabled:
             # The guard is flipped even on a disabled-skip so a resume without
             # --no-warm-replay cannot retroactively trigger a replay against
             # the operator's original intent.
             self._skip_warm_replay(
-                code=SKIP_DISABLED_BY_FLAG,
-                outcome={"status": "skipped", "reason": "disabled_by_flag"},
+                code=SKIP_DISABLED_BY_FLAG, outcome={"status": "skipped", "reason": "disabled_by_flag"}
             )
             return None
         if state.warm_replay_attempted:
             # Resume safety: a previous boot already enqueued/ran the replay.
             return None
-        warm = state.warm_start_recipe or {}
-        if not isinstance(warm, dict):
-            warm = {}
+        warm = state.warm_start_recipe
         current_remote = self._is_current_remote_recipe(warm)
         sdk_replay: dict[str, Any] = {}
         if current_remote:
-            recipe_metadata = warm.get("recipe") or {}
-            if isinstance(recipe_metadata, Mapping) and recipe_metadata.get("replayable") is False:
-                self._skip_warm_replay(
-                    code=SKIP_RECIPE_NOT_REPLAYABLE,
-                    outcome={
-                        "status": "skipped",
-                        "reason": str(
-                            recipe_metadata.get("replay_disabled_reason") or "remote_recipe_view_not_replayable"
-                        ),
-                        "view_source": str(recipe_metadata.get("view_source") or ""),
-                    },
-                    details={"view_source": str(recipe_metadata.get("view_source") or "")},
-                )
+            read = self._read_replayable_current_recipe(warm)
+            if read is None:
                 return None
-            try:
-                sdk_replay = self._read_current_recipe_replay()
-            except Exception as exc:  # noqa: BLE001 — current replay fails closed
-                self._skip_warm_replay(
-                    code=SKIP_RECIPE_READ_FAILED,
-                    outcome={
-                        "status": "skipped",
-                        "reason": (f"current_recipe_sdk_read_failed:{type(exc).__name__}:{exc}")[:500],
-                    },
-                    details={"error_class": type(exc).__name__},
-                )
-                return None
-            if patch_entries := list(sdk_replay.get("patches") or []):
-                # Every overlay names the checkout it was measured on.
-                recorded = [str((entry or {}).get("framework_root") or "").strip() for entry in patch_entries]
-                if not all(recorded):
-                    known = [root for root in recorded if root]
-                    self._skip_warm_replay(
-                        code=SKIP_FRAMEWORK_ROOT_MISSING,
-                        outcome=self._warm_replay_root_skip_outcome(
-                            reason="framework_apply_root_missing",
-                            root_kind="framework",
-                            roots=known,
-                        ),
-                        details={"root_kind": "framework", "recorded_roots": known},
-                    )
-                    return None
-                if absent := [root for root in dict.fromkeys(recorded) if not Path(root).is_dir()]:
-                    self._skip_warm_replay(
-                        code=SKIP_FRAMEWORK_ROOT_MISSING,
-                        outcome=self._warm_replay_root_skip_outcome(
-                            reason="framework_apply_root_absent",
-                            root_kind="framework",
-                            roots=absent,
-                        ),
-                        details={"root_kind": "framework", "recorded_roots": list(absent)},
-                    )
-                    return None
+            sdk_replay = read
         try:
             kernel = (
                 await self._prepare_warm_kernel_kb(sdk_replay.get("kernel_kb"))
                 if current_remote
                 else await self._prepare_warm_kernel_kb()
             )
-        except Exception as exc:
+        except (KBStoreError, OSError, ValueError) as exc:
             log.warning("PRELUDE: warm-kernel preparation failed", exc_info=True)
-            kernel = {
-                "status": "error",
-                "errors": 1,
-                "reason": f"{type(exc).__name__}: {exc}"[:300],
-            }
-        preparation_pending = dict(getattr(state, "warm_replay_pending", {}) or {})
-        preparation_dirty = bool(
-            kernel.get("dirty")
-            or preparation_pending.get("kernel_snapshots")
-            or preparation_pending.get("kernel_apply_results")
-        )
-        if str(kernel.get("status") or "") in {"error", "rollback_failed"} and preparation_dirty:
-            rollback = dict(kernel.get("rollback") or {}) if isinstance(kernel.get("rollback"), dict) else {}
-            if not rollback:
-                rollback = revert_warm_kernel_patches(
-                    list(preparation_pending.get("kernel_apply_results") or []),
-                    list(preparation_pending.get("kernel_snapshots") or []),
-                )
-            if rollback.get("ok"):
-                state.warm_replay_pending = {}
-            else:
-                state.warm_replay_pending = {
-                    **preparation_pending,
-                    "status": "rollback_failed",
-                    "rollback_errors": list(rollback.get("errors") or []),
-                }
-                if hasattr(state, "set_stop_reason"):
-                    state.set_stop_reason("warm_replay_rollback_failed")
-            self._skip_warm_replay(
-                code=SKIP_KERNEL_PREPARATION_FAILED,
-                outcome={
-                    "status": ("kernel_preparation_failed" if rollback.get("ok") else "rollback_failed"),
-                    "reason": str(kernel.get("reason") or "kernel preparation left mutable state"),
-                    "rollback": rollback,
-                },
-                details={"kernel_status": str(kernel.get("status") or "")},
-            )
+            kernel = {"status": "error", "errors": 1, "reason": f"{type(exc).__name__}: {exc}"[:300]}
+        if self._refused_dirty_warm_kernel(kernel):
             return None
         kernel_root_block = self._warm_replay_kernel_root_block_reason(state)
         if kernel_root_block is not None:
@@ -1163,254 +385,241 @@ class PreludePhase(CoordinatorCollaborator):
                 },
             )
             return None
-        kernel_pending = list(kernel.get("pending") or []) if kernel.get("status") == "prepared" else []
-        kernel_applied = list(kernel.get("applied") or []) if kernel_pending else []
-        kernel_snapshots = list(kernel.get("snapshots") or []) if kernel_pending else []
-        if current_remote and kernel_pending:
-            kernel_config = sdk_replay.get("kernel_config") or {}
-            kernel_envs = dict(kernel_config.get("extra_envs") or {})
-            kernel_args = str(kernel_config.get("extra_server_args") or "")
-        else:
-            kernel_envs = dict(kernel.get("extra_envs") or {}) if kernel_pending else {}
-            kernel_args = str(kernel.get("extra_server_args") or "") if kernel_pending else ""
-
-        if not warm and not kernel_pending:
+        overlay = self._warm_kernel_overlay(kernel, sdk_replay, current_remote)
+        if not warm and not overlay["pending"]:
             if str(kernel.get("status") or "") in {"empty", "loaded"}:
                 state.warm_replay_pending = {}
             self._skip_warm_replay(
-                code=SKIP_NO_WARM_START_RECIPE,
-                outcome={"status": "skipped", "reason": "no_warm_start_recipe"},
+                code=SKIP_NO_WARM_START_RECIPE, outcome={"status": "skipped", "reason": "no_warm_start_recipe"}
             )
             return None
-        # tier/conf stamped at T0.
-        tier = str(warm.get("tier") or "").strip()
+        return await self._enqueue_warm_replay(warm, sdk_replay, overlay, baseline_tput)
+
+    def _read_replayable_current_recipe(self, warm: Mapping[str, Any]) -> dict[str, Any] | None:
+        recipe_metadata = warm.get("recipe") or {}
+        if isinstance(recipe_metadata, Mapping) and recipe_metadata.get("replayable") is False:
+            view_source = str(recipe_metadata.get("view_source") or "")
+            self._skip_warm_replay(
+                code=SKIP_RECIPE_NOT_REPLAYABLE,
+                outcome={
+                    "status": "skipped",
+                    "reason": str(recipe_metadata.get("replay_disabled_reason") or "remote_recipe_view_not_replayable"),
+                    "view_source": view_source,
+                },
+                details={"view_source": view_source},
+            )
+            return None
         try:
-            conf = float(warm.get("confidence") or 0.0)
-        except (TypeError, ValueError):
-            conf = 0.0
-        min_conf = float(
-            getattr(self, "_warm_replay_min_confidence", _DEFAULT_WARM_REPLAY_MIN_CONFIDENCE)
-            or _DEFAULT_WARM_REPLAY_MIN_CONFIDENCE
+            sdk_replay = self._read_current_recipe_replay()
+        except (OSError, ValueError, RuntimeError, AttributeError, TypeError) as exc:  # current replay fails closed
+            self._skip_warm_replay(
+                code=SKIP_RECIPE_READ_FAILED,
+                outcome={
+                    "status": "skipped",
+                    "reason": (f"current_recipe_sdk_read_failed:{type(exc).__name__}:{exc}")[:500],
+                },
+                details={"error_class": type(exc).__name__},
+            )
+            return None
+        # Every overlay names the checkout it was measured on.
+        recorded = [str((entry or {}).get("framework_root") or "").strip() for entry in sdk_replay.get("patches") or []]
+        absent = [root for root in dict.fromkeys(recorded) if root and not Path(root).is_dir()]
+        if not all(recorded):
+            self._refuse_framework_roots("framework_apply_root_missing", [root for root in recorded if root])
+            return None
+        if absent:
+            self._refuse_framework_roots("framework_apply_root_absent", absent)
+            return None
+        return sdk_replay
+
+    def _refuse_framework_roots(self, reason: str, roots: list[str], rollback: dict[str, Any] | None = None) -> None:
+        self._skip_warm_replay(
+            code=SKIP_FRAMEWORK_ROOT_MISSING,
+            outcome=self._warm_replay_root_skip_outcome(
+                reason=reason, root_kind="framework", roots=roots, rollback=rollback
+            ),
+            details={"root_kind": "framework", "recorded_roots": list(roots)},
         )
+
+    def _warm_replay_launch_config(
+        self, warm: Mapping[str, Any], sdk_replay: Mapping[str, Any], current_remote: bool
+    ) -> dict[str, Any]:
         recipe = warm.get("recipe") or {}
         if not isinstance(recipe, dict):
             recipe = {}
         # best_config/sessions may be top-level or nested under attrs.
         recipe_attrs = recipe.get("attrs") or recipe
-        wsc = getattr(state, "warm_start_context", None) or {}
-        replay = wsc.get("recommended_replay") if not current_remote and isinstance(wsc, dict) else {}
+        replay = self.shared_state.warm_start_context.get("recommended_replay") if not current_remote else None
         replay = replay if isinstance(replay, dict) else {}
         rep_args = str(replay.get("extra_server_args") or "").strip()
         rep_envs = replay.get("extra_envs") if isinstance(replay.get("extra_envs"), dict) else {}
+        conf = to_float(warm.get("confidence"), 0.0)
+        config: dict[str, Any] = {
+            "recipe_attrs": recipe_attrs,
+            "replay": replay,
+            "confidence": conf,
+            "replay_confidence": conf,
+            "config_tier": "self",
+            "config_source": str(recipe.get("canonical_id") or ""),
+            "donor_expected_gain": 0.0,
+        }
         if current_remote:
-            bc_args = str(sdk_replay.get("extra_server_args") or "").strip()
-            bc_envs = dict(sdk_replay.get("extra_envs") or {})
-            replay_conf = float(conf or 0.0)
-            config_source = str(recipe.get("canonical_id") or "")
-            config_tier = "self"
-            donor_expected_gain = float(recipe.get("validated_gain_pct") or 0.0)
+            config["extra_server_args"] = str(sdk_replay.get("extra_server_args") or "").strip()
+            config["extra_envs"] = dict(sdk_replay.get("extra_envs") or {})
+            config["donor_expected_gain"] = to_float(recipe.get("validated_gain_pct"), 0.0)
         elif rep_args or rep_envs:
-            bc_args = rep_args
-            bc_envs = dict(rep_envs)
-            raw_replay_conf = replay.get("config_confidence")
-            replay_conf = float(conf if raw_replay_conf is None else raw_replay_conf)
-            config_source = str(replay.get("config_source") or "")
-            config_tier = str(replay.get("config_tier") or "self")
-            donor_expected_gain = float(replay.get("expected_gain_pct") or 0.0)
+            config["extra_server_args"] = rep_args
+            config["extra_envs"] = dict(rep_envs)
+            config["replay_confidence"] = to_float(replay.get("config_confidence"), conf)
+            config["config_source"] = str(replay.get("config_source") or "")
+            config["config_tier"] = str(replay.get("config_tier") or "self")
+            config["donor_expected_gain"] = to_float(replay.get("expected_gain_pct"), 0.0)
         else:
-            best_config = recipe_attrs.get("best_config") or {}
+            best_config = recipe_attrs.get("best_config")
             if not isinstance(best_config, dict):
                 best_config = {}
-            bc_args = str(best_config.get("extra_server_args") or "").strip()
-            bc_envs = best_config.get("extra_envs") or {}
-            if not isinstance(bc_envs, dict):
-                bc_envs = {}
-            replay_conf = float(conf or 0.0)
-            config_source = str(recipe.get("canonical_id") or "")
-            config_tier = "self"
-            donor_expected_gain = 0.0
-        donor_metadata = {
-            field: replay.get(field)
-            for field in (
-                "donor_canonical_id",
-                "donor_model",
-                "donor_session_id",
-                "donor_family_tags",
-                "donor_gain_pct",
-                "donor_breakdown_link",
+            bc_envs = best_config.get("extra_envs")
+            config["extra_server_args"] = str(best_config.get("extra_server_args") or "").strip()
+            config["extra_envs"] = bc_envs if isinstance(bc_envs, dict) else {}
+        return config
+
+    def _warm_expected_gain(self, recipe_attrs: Mapping[str, Any], donor_expected_gain: float) -> float:
+        gain = donor_expected_gain
+        sessions_field = recipe_attrs.get("sessions")
+        if gain <= 0 and isinstance(sessions_field, list):
+            session_gains = [to_float(row.get("gain_pct"), 0.0) for row in sessions_field if isinstance(row, dict)]
+            if session_gains:
+                gain = max(session_gains)
+        # Last-chance fallback for offline-ingested seed rows.
+        if gain <= 0:
+            fallback = to_float(recipe_attrs.get("gain_pct"), 0.0)
+            if fallback > 0:
+                gain = fallback
+        return gain
+
+    def _replayable_patch_plan(
+        self, config: Mapping[str, Any], sdk_replay: Mapping[str, Any], overlay: Mapping[str, Any], current_remote: bool
+    ) -> list[Any] | None:
+        patches = list((sdk_replay if current_remote else config["replay"]).get("patches") or [])
+        if not patches:
+            return patches
+        # Re-checked here because a persisted plan may be resumed under a different image, and because the kernel
+        # half is already applied by now: a root that has since gone means unwinding that too.
+        recorded_roots = [str((entry or {}).get("framework_root") or "").strip() for entry in patches]
+        unusable = [root for root in dict.fromkeys(recorded_roots) if root and not Path(root).is_dir()]
+        if all(recorded_roots) and not unusable:
+            return patches
+        rollback = self._unwind_warm_kernel_half(overlay)
+        self._refuse_framework_roots(
+            "framework_apply_root_absent" if unusable else "framework_apply_root_missing",
+            unusable or [root for root in recorded_roots if root],
+            rollback=rollback,
+        )
+        return None
+
+    def _combined_warm_launch(
+        self,
+        config: Mapping[str, Any],
+        overlay: Mapping[str, Any],
+        sdk_replay: Mapping[str, Any],
+        current_remote: bool,
+        recipe_suppressed: bool,
+    ) -> tuple[str, dict[str, str]]:
+        if current_remote and recipe_suppressed:
+            return overlay["extra_server_args"], dict(overlay["extra_envs"])
+        if current_remote:
+            return (
+                str(sdk_replay.get("combined_extra_server_args") or ""),
+                dict(sdk_replay.get("combined_extra_envs") or {}),
             )
-            if replay.get(field) not in (None, "", [])
-        }
-        recipe_suppressed = False
+        combined_envs = dict(config["extra_envs"])
+        combined_envs.update(overlay["extra_envs"])
+        return (
+            merge_cumulative_extra_server_args(config["extra_server_args"], overlay["extra_server_args"], ""),
+            combined_envs,
+        )
+
+    async def _enqueue_warm_replay(
+        self, warm: Mapping[str, Any], sdk_replay: dict[str, Any], overlay: dict[str, Any], baseline_tput: float
+    ) -> "Task | None":
+        state = self.shared_state
+        current_remote = self._is_current_remote_recipe(warm)
+        config = self._warm_replay_launch_config(warm, sdk_replay, current_remote)
+        # tier/conf stamped at T0.
+        tier = str(warm.get("tier") or "").strip()
+        conf = config["confidence"]
+        donor_metadata = _warm_donor_metadata(config["replay"])
+        identity = {"warm_recipe_tier": tier, "warm_recipe_conf": conf, **donor_metadata}
+        min_conf = float(state.warm_replay_min_confidence)
+        replay_conf = config["replay_confidence"]
         # Low-confidence config/patch content is suppressed, but the kernel section from the same Recipe can still
         # receive a combined check.
-        if replay_conf < min_conf:
-            if kernel_pending:
-                recipe_suppressed = True
-                bc_args = ""
-                bc_envs = {}
-                config_source = ""
-                config_tier = "suppressed_low_confidence"
-                donor_expected_gain = 0.0
-            else:
-                self._skip_warm_replay(
-                    code=SKIP_CONFIDENCE_BELOW_THRESHOLD,
-                    outcome={
-                        "status": "skipped",
-                        "reason": f"confidence_below_threshold ({replay_conf:.2f} < {min_conf:.2f})",
-                        "warm_recipe_tier": tier,
-                        "warm_recipe_conf": conf,
-                        "config_donor_tier": config_tier,
-                        "config_source": config_source,
-                        **donor_metadata,
-                    },
-                    details={"observed": replay_conf, "threshold": min_conf},
-                )
-                return None
-        # Current records derive fail-closed mode from their exact SDK timeline.
-        wsc_patches = (
-            list(sdk_replay.get("patches") or [])
-            if current_remote
-            else (wsc.get("recommended_replay") or {}).get("patches") or []
-            if isinstance(wsc, dict)
-            else []
-        )
-        required_patch_timeline = bool(
-            current_remote
-            and sdk_replay.get("timeline")
-            or (not current_remote and recipe_attrs.get("required_patch_timeline"))
-        )
-        if recipe_suppressed:
-            wsc_patches = []
-            required_patch_timeline = False
-        if wsc_patches:
-            # Re-checked here because a persisted plan may be resumed under a different image, and because the kernel
-            # half is already applied by now: a root that has since gone means unwinding that too.
-            recorded_roots = [str((entry or {}).get("framework_root") or "").strip() for entry in wsc_patches]
-            unusable = [root for root in dict.fromkeys(recorded_roots) if root and not Path(root).is_dir()]
-            if not all(recorded_roots) or unusable:
-                rollback = (
-                    revert_warm_kernel_patches(
-                        kernel_applied,
-                        kernel_snapshots,
-                    )
-                    if kernel_applied or kernel_snapshots
-                    else {"ok": True, "errors": []}
-                )
-                if rollback.get("ok"):
-                    state.warm_replay_pending = {}
-                else:
-                    state.warm_replay_pending = {
-                        **dict(getattr(state, "warm_replay_pending", {}) or {}),
-                        "status": "rollback_failed",
-                        "rollback_errors": list(rollback.get("errors") or []),
-                    }
-                    if hasattr(state, "set_stop_reason"):
-                        state.set_stop_reason("warm_replay_rollback_failed")
-                blocking_roots = unusable or [root for root in recorded_roots if root]
-                self._skip_warm_replay(
-                    code=SKIP_FRAMEWORK_ROOT_MISSING,
-                    outcome=self._warm_replay_root_skip_outcome(
-                        reason=("framework_apply_root_absent" if unusable else "framework_apply_root_missing"),
-                        root_kind="framework",
-                        roots=blocking_roots,
-                        rollback=rollback,
-                    ),
-                    details={"root_kind": "framework", "recorded_roots": list(blocking_roots)},
-                )
-                return None
-        if not bc_args and not bc_envs and not wsc_patches and not kernel_pending:
+        recipe_suppressed = replay_conf < min_conf
+        if recipe_suppressed and not overlay["pending"]:
             self._skip_warm_replay(
-                code=SKIP_BEST_CONFIG_EMPTY,
+                code=SKIP_CONFIDENCE_BELOW_THRESHOLD,
                 outcome={
                     "status": "skipped",
-                    "reason": "best_config_empty",
-                    "warm_recipe_tier": tier,
-                    "warm_recipe_conf": conf,
-                    **donor_metadata,
+                    "reason": f"confidence_below_threshold ({replay_conf:.2f} < {min_conf:.2f})",
+                    "config_donor_tier": config["config_tier"],
+                    "config_source": config["config_source"],
+                    **identity,
                 },
+                details={"observed": replay_conf, "threshold": min_conf},
             )
             return None
-        # Historical gain anchor: donor's expected gain, else MAX gain across attrs.sessions[], else the flat
-        # gain_pct.
-        expected_gain = donor_expected_gain
-        sessions_field = recipe_attrs.get("sessions")
-        if expected_gain <= 0 and isinstance(sessions_field, list):
-            session_gains: list[float] = []
-            for s in sessions_field:
-                if not isinstance(s, dict):
-                    continue
-                try:
-                    g = float(s.get("gain_pct") or 0.0)
-                except (TypeError, ValueError):
-                    continue
-                session_gains.append(g)
-            if session_gains:
-                expected_gain = max(session_gains)
-        # Last-chance fallback for offline-ingested seed rows.
-        if expected_gain <= 0:
-            try:
-                fallback = float(recipe_attrs.get("gain_pct") or 0.0)
-            except (TypeError, ValueError):
-                fallback = 0.0
-            if fallback > 0:
-                expected_gain = fallback
-        if current_remote:
-            if recipe_suppressed:
-                combined_args = kernel_args
-                combined_envs = dict(kernel_envs)
-            else:
-                combined_args = str(sdk_replay.get("combined_extra_server_args") or "")
-                combined_envs = dict(sdk_replay.get("combined_extra_envs") or {})
+        if recipe_suppressed:
+            suppress_recipe_config(config)
+            patches: list[Any] = []
+            # Current records derive fail-closed mode from their exact SDK timeline.
+            required_timeline = False
         else:
-            from ..loop.coordinator_helpers import (
-                _merge_cumulative_extra_server_args,
+            plan = self._replayable_patch_plan(config, sdk_replay, overlay, current_remote)
+            if plan is None:
+                return None
+            patches = plan
+            required_timeline = bool(
+                sdk_replay.get("timeline") if current_remote else config["recipe_attrs"].get("required_patch_timeline")
             )
+        if not config["extra_server_args"] and not config["extra_envs"] and not patches and not overlay["pending"]:
+            self._skip_warm_replay(
+                code=SKIP_BEST_CONFIG_EMPTY, outcome={"status": "skipped", "reason": "best_config_empty", **identity}
+            )
+            return None
+        combined_args, combined_envs = self._combined_warm_launch(
+            config, overlay, sdk_replay, current_remote, recipe_suppressed
+        )
+        if self._skip_restated_replay(combined_args, combined_envs, [*patches, *overlay["pending"]], identity):
+            return None
+        workload = self._workload_compatible_launch(combined_args, overlay)
+        if workload is None:
+            return None
+        params = {
+            **self._warm_replay_task_params(config, overlay, patches, baseline_tput, required_timeline),
+            "extra_server_args": combined_args,
+            "extra_envs": combined_envs,
+            # Historical-gain anchor for the promote path's reproduce ratio.
+            "warm_expected_gain_pct": self._warm_expected_gain(config["recipe_attrs"], config["donor_expected_gain"]),
+            "warm_recipe_tier": tier,
+            "warm_recipe_conf": conf,
+            "workload_compatibility": workload,
+        }
+        return await self._open_warm_replay_task(params, overlay, sdk_replay, recipe_suppressed, donor_metadata)
 
-            combined_args = _merge_cumulative_extra_server_args(
-                bc_args,
-                kernel_args,
-                "",
-            )
-            combined_envs = dict(bc_envs)
-            combined_envs.update(kernel_envs)
+    def _workload_compatible_launch(self, combined_args: str, overlay: dict[str, Any]) -> dict[str, Any] | None:
+        state = self.shared_state
         try:
-            from hyperloom.inference_optimizer.grid_server_args import (
-                validate_warm_replay_context_length,
-            )
+            from hyperloom.inference_optimizer.grid_server_args import validate_warm_replay_context_length
 
-            validated_args, workload_compatibility = validate_warm_replay_context_length(
-                combined_args,
-                getattr(state, "framework", ""),
-                int(getattr(state, "isl", 0) or 0),
-                int(getattr(state, "osl", 0) or 0),
-                getattr(state, "max_model_len", None),
+            workload_compatibility = validate_warm_replay_context_length(
+                combined_args, state.framework, int(state.isl or 0), int(state.osl or 0), state.max_model_len or None
             )
-            if validated_args != combined_args:
-                raise RuntimeError("warm replay context preflight must not mutate config")
-        except (ValueError, RuntimeError) as exc:
-            rollback = (
-                revert_warm_kernel_patches(
-                    kernel_applied,
-                    kernel_snapshots,
-                )
-                if kernel_applied or kernel_snapshots
-                else {"ok": True, "errors": []}
-            )
-            if rollback.get("ok"):
-                state.warm_replay_pending = {}
-            else:
-                state.warm_replay_pending = {
-                    **dict(getattr(state, "warm_replay_pending", {}) or {}),
-                    "status": "rollback_failed",
-                    "rollback_errors": list(rollback.get("errors") or []),
-                }
-                if hasattr(state, "set_stop_reason"):
-                    state.set_stop_reason("warm_replay_rollback_failed")
+        except ValueError as exc:
+            rollback = self._unwind_warm_kernel_half(overlay)
             target_workload_shape = {
-                "conc": int(getattr(state, "conc", 0) or 0),
-                "isl": int(getattr(state, "isl", 0) or 0),
-                "osl": int(getattr(state, "osl", 0) or 0),
+                "conc": int(state.conc or 0),
+                "isl": int(state.isl or 0),
+                "osl": int(state.osl or 0),
             }
             self._skip_warm_replay(
                 code=SKIP_WORKLOAD_CONFIG_INCOMPATIBLE,
@@ -1420,66 +629,56 @@ class PreludePhase(CoordinatorCollaborator):
                     "target_workload_shape": target_workload_shape,
                     "rollback": rollback,
                 },
-                details={
-                    "error_class": type(exc).__name__,
-                    "target_workload_shape": dict(target_workload_shape),
-                },
+                details={"error_class": type(exc).__name__, "target_workload_shape": dict(target_workload_shape)},
             )
             return None
-        params: dict[str, Any] = {
+        return workload_compatibility
+
+    def _warm_replay_task_params(
+        self,
+        config: Mapping[str, Any],
+        overlay: Mapping[str, Any],
+        patches: list[Any],
+        baseline_tput: float,
+        required_timeline: bool,
+    ) -> dict[str, Any]:
+        return {
             "source": "coordinator_internal",
             "reason": "warm_replay_prelude",
-            "extra_server_args": combined_args,
-            "extra_envs": combined_envs,
-            "recipe_extra_server_args": bc_args,
-            "recipe_extra_envs": dict(bc_envs),
-            "kernel_extra_server_args": kernel_args,
-            "kernel_extra_envs": kernel_envs,
+            "recipe_extra_server_args": config["extra_server_args"],
+            "recipe_extra_envs": dict(config["extra_envs"]),
+            "kernel_extra_server_args": overlay["extra_server_args"],
+            "kernel_extra_envs": overlay["extra_envs"],
             # Reuse the baseline's workload contract (else YAML smoke defaults).
-            "config_path": str(state.baseline_config_path or ""),
-            # Historical-gain anchor for the promote path's reproduce ratio.
-            "warm_expected_gain_pct": expected_gain,
-            "warm_recipe_tier": tier,
-            "warm_recipe_conf": conf,
+            "config_path": str(self.shared_state.baseline_config_path or ""),
             # Config provenance ("self" when the identity match owned it).
-            "config_donor_tier": config_tier,
-            "config_source": config_source,
+            "config_donor_tier": config["config_tier"],
+            "config_source": config["config_source"],
             "baseline_tput_anchor": float(baseline_tput),
             # Code patches to apply before server launch.
-            "patches": list(wsc_patches),
-            "required_patch_timeline": required_patch_timeline,
-            "warm_kernel_plan": kernel_pending,
-            "warm_kernel_apply_results": kernel_applied,
-            "warm_kernel_snapshots": kernel_snapshots,
-            "combined_current_contract": bool(current_remote or kernel_pending),
-            "combined_keep_threshold_pct": _phase_state.resolve_keep_threshold(self.shared_state),
-            "workload_compatibility": workload_compatibility,
+            "patches": list(patches),
+            "required_patch_timeline": required_timeline,
+            "warm_kernel_plan": overlay["pending"],
+            "warm_kernel_apply_results": overlay["applied"],
+            "warm_kernel_snapshots": overlay["snapshots"],
         }
+
+    async def _open_warm_replay_task(
+        self,
+        params: dict[str, Any],
+        overlay: dict[str, Any],
+        sdk_replay: Mapping[str, Any],
+        recipe_suppressed: bool,
+        donor_metadata: Mapping[str, Any],
+    ) -> "Task | None":
+        state = self.shared_state
         try:
-            lanes, ttl = self._registry_lanes_ttl("replay_warm_recipe")
+            lanes, ttl = self._coord.dispatcher.registry_lanes_ttl("replay_warm_recipe")
             task, was_existing = await self.tasks.create_or_return_existing(
-                kind="replay_warm_recipe",
-                params=params,
-                idempotency_key="warm-replay-prelude",
-                requires_lanes=lanes,
-                lease_ttl_sec=ttl,
-                dispatch_class="coordinator",
+                warm_replay_task_spec(params, lanes=lanes, ttl=ttl)
             )
         except Exception as exc:
-            rollback = revert_warm_kernel_patches(
-                kernel_applied,
-                kernel_snapshots,
-            )
-            if rollback.get("ok"):
-                state.warm_replay_pending = {}
-            else:
-                state.warm_replay_pending = {
-                    **dict(getattr(state, "warm_replay_pending", {}) or {}),
-                    "status": "rollback_failed",
-                    "rollback_errors": list(rollback.get("errors") or []),
-                }
-                if hasattr(state, "set_stop_reason"):
-                    state.set_stop_reason("warm_replay_rollback_failed")
+            rollback = self._unwind_warm_kernel_half(overlay)
             self._skip_warm_replay(
                 code=SKIP_ENQUEUE_FAILED,
                 outcome={
@@ -1494,38 +693,38 @@ class PreludePhase(CoordinatorCollaborator):
             log.info(
                 "PRELUDE: warm-replay enqueued task=%s (tier=%s conf=%.2f expected_gain=%.2f baseline_tput=%.2f)",
                 task.task_id,
-                tier,
-                conf,
-                expected_gain,
-                baseline_tput,
+                params["warm_recipe_tier"],
+                params["warm_recipe_conf"],
+                params["warm_expected_gain_pct"],
+                params["baseline_tput_anchor"],
             )
         state.warm_replay_attempted = True
         state.warm_replay_outcome = {
             "status": "in_flight",
             # Bounds the replay for the SBD timeline; the terminal write below stamps ``settled_at`` against this.
             "enqueued_at": now_iso(timespec="seconds"),
-            "warm_recipe_tier": tier,
-            "warm_recipe_conf": conf,
-            "config_donor_tier": config_tier,
-            "config_source": config_source,
-            "expected_gain_pct": expected_gain,
+            "warm_recipe_tier": params["warm_recipe_tier"],
+            "warm_recipe_conf": params["warm_recipe_conf"],
+            "config_donor_tier": params["config_donor_tier"],
+            "config_source": params["config_source"],
+            "expected_gain_pct": params["warm_expected_gain_pct"],
             "replay_task_id": task.task_id,
-            "kernel_count": len(kernel_pending),
+            "kernel_count": len(overlay["pending"]),
             "recipe_suppressed": recipe_suppressed,
             **({"overlay_provenance": summary} if (summary := _overlay_provenance_summary(sdk_replay)) else {}),
             **donor_metadata,
         }
         state.warm_replay_pending = {
-            **dict(getattr(state, "warm_replay_pending", {}) or {}),
+            **state.warm_replay_pending,
             "status": "in_flight",
             "task_id": task.task_id,
-            "kernel_apply_results": kernel_applied,
-            "kernel_plan": kernel_pending,
-            "kernel_snapshots": kernel_snapshots,
+            "kernel_apply_results": overlay["applied"],
+            "kernel_plan": overlay["pending"],
+            "kernel_snapshots": overlay["snapshots"],
         }
         try:
             state.save(self.session_dir)
-        except Exception:
+        except OSError:
             log.debug("combined warm replay pending save failed", exc_info=True)
         # Opened after the outcome is persisted so the request block reads the
         # donor identity the outcome just stamped, and a session killed between
@@ -1534,27 +733,15 @@ class PreludePhase(CoordinatorCollaborator):
         return task
 
     def _resolve_promoted_recipe_checkout(
-        self,
-        result: dict[str, Any],
-        task: "Task | None",
+        self, result: dict[str, Any], task: "Task | None"
     ) -> tuple[bool, dict[str, Any]]:
         """Validate every already-patched checkout selected by warm replay."""
-        params = (task.params if task is not None else {}) or {}
+        params = task.params if task is not None else {}
         if not params.get("required_patch_timeline") or not params.get("patches"):
             return True, {"status": "not_required"}
 
-        trees = [tree for tree in (result.get("warm_patch_trees") or []) if isinstance(tree, Mapping)]
-        if not trees:
-            # A round that predates the list reports only its primary tree.
-            trees = [
-                {
-                    "root": result.get("warm_patch_target"),
-                    "pre_sha": result.get("warm_patch_pre_sha"),
-                    "snapshot_manifest": result.get("warm_patch_snapshot_manifest"),
-                }
-            ]
         promoted: list[str] = []
-        for tree in trees:
+        for tree in _warm_patch_trees(result, {}):
             target = str(tree.get("root") or "").strip()
             pre_sha = str(tree.get("pre_sha") or "").strip()
             manifest = tree.get("snapshot_manifest")
@@ -1578,10 +765,7 @@ class PreludePhase(CoordinatorCollaborator):
                     Path(str(manifest.get("repo_path") or "")).resolve(strict=True) if snapshotted else target_path
                 )
             except (OSError, ValueError) as exc:
-                return False, {
-                    "status": "failed",
-                    "failure": f"validated_recipe_checkout_invalid:{type(exc).__name__}",
-                }
+                return False, {"status": "failed", "failure": f"validated_recipe_checkout_invalid:{type(exc).__name__}"}
             if target_path != manifest_target:
                 return False, {
                     "status": "failed",
@@ -1589,74 +773,28 @@ class PreludePhase(CoordinatorCollaborator):
                     "target_repo": str(target_path),
                 }
             promoted.append(str(target_path))
-        return True, {
-            "status": "promoted",
-            "target_repo": promoted[0],
-            "target_repos": promoted,
-        }
+        self.shared_state.warm_replay_pending = committing_overlays(self.shared_state.warm_replay_pending or {})
+        self.shared_state.save(self.session_dir)
+        if failed := commit_warm_replay_overlays(result):
+            failure = "the replayed overlays cannot be committed to the framework tree: " + "; ".join(failed)
+            return False, {"status": "failed", "failure": failure}
+        return True, {"status": "promoted", "target_repo": promoted[0], "target_repos": promoted}
 
-    def _rollback_combined_warm(
-        self,
-        result: dict[str, Any],
-        task: "Task | None",
-    ) -> dict[str, Any]:
+    def rollback_combined_warm(self, result: dict[str, Any], task: "Task | None") -> dict[str, Any]:
         """Restore both Recipe and Kernel halves of a combined replay."""
-        restores: list[dict[str, Any]] = []
-        pending = getattr(self.shared_state, "warm_replay_pending", {}) or {}
-        trees = [
-            tree
-            for tree in (result.get("warm_patch_trees") or pending.get("recipe_patch_trees") or [])
-            if isinstance(tree, Mapping)
-        ]
-        if not trees:
-            trees = [
-                {
-                    "root": result.get("warm_patch_target") or pending.get("recipe_patch_target"),
-                    "pre_sha": result.get("warm_patch_pre_sha") or pending.get("recipe_patch_pre_sha"),
-                    "snapshot_manifest": (
-                        result.get("warm_patch_snapshot_manifest") or pending.get("recipe_patch_snapshot_manifest")
-                    ),
-                }
-            ]
-        for tree in trees:
-            target = str(tree.get("root") or "")
-            if not target:
-                continue
-            recipe_manifest = tree.get("snapshot_manifest")
-            backups = list(tree.get("nogit_backups") or [])
-            if not bool(tree.get("mutated", True)):
-                # An overlay the tree already carried applies as a no-op, writing
-                # nothing and so owing nothing. A record predating the flag reads as
-                # written-to, and still has to answer with a channel below.
-                continue
-            if not recipe_manifest and not backups:
-                restores.append({"ok": False, "errors": [f"recipe:{target}:missing_snapshot_manifest"]})
-                continue
-            restores.append(
-                _revert_warm_patch_state(
-                    target,
-                    pre_sha=str(tree.get("pre_sha") or ""),
-                    snapshot_manifest=recipe_manifest,
-                    nogit_backups=backups,
-                )
+        pending = self.shared_state.warm_replay_pending
+        restores = restore_recipe_trees(result, pending)
+        params = task.params if task is not None else {}
+
+        def _kernel_rows(key: str, pending_key: str) -> list[Any]:
+            return list(result.get(key) or params.get(key) or pending.get(pending_key) or [])
+
+        restores.append(
+            revert_warm_kernel_patches(
+                _kernel_rows("warm_kernel_apply_results", "kernel_apply_results"),
+                _kernel_rows("warm_kernel_snapshots", "kernel_snapshots"),
             )
-        params = (task.params if task is not None else {}) or {}
-        kernel_applied = (
-            result.get("warm_kernel_apply_results")
-            or params.get("warm_kernel_apply_results")
-            or pending.get("kernel_apply_results")
-            or []
         )
-        kernel_restore = revert_warm_kernel_patches(
-            list(kernel_applied),
-            list(
-                result.get("warm_kernel_snapshots")
-                or params.get("warm_kernel_snapshots")
-                or pending.get("kernel_snapshots")
-                or []
-            ),
-        )
-        restores.append(kernel_restore)
         errors = [
             error
             for restore in restores
@@ -1702,13 +840,13 @@ class PreludePhase(CoordinatorCollaborator):
         outcome: dict[str, Any],
         recorder: Any = None,
     ) -> bool:
-        """Rollback or persist a terminal recovery failure without clearing it.
+        """Roll back a rejected replay, settling it as ``rollback_failed`` when a tree did not come back.
 
-        The rollback is recorded here rather than at each of the six branches
-        that unwind a rejected replay: what a reader needs is whether the trees
-        came back. Returns ``True`` when every tree was restored.
+        The rollback is recorded here rather than at each of the branches that
+        unwind a rejected replay: what a reader needs is whether the trees came
+        back. Returns ``True`` when every tree was restored.
         """
-        rollback = self._rollback_combined_warm(result, task)
+        rollback = self.rollback_combined_warm(result, task)
         if recorder is not None:
             recorder.record_rollback(ok=rollback.get("ok"), errors=rollback.get("errors"))
         if rollback.get("ok"):
@@ -1722,16 +860,14 @@ class PreludePhase(CoordinatorCollaborator):
             "errors": list(rollback.get("errors") or []),
         }
         outcome["kernel"] = kernel_outcome
-        self.shared_state.warm_replay_outcome = outcome
-        if hasattr(self.shared_state, "set_stop_reason"):
-            self.shared_state.set_stop_reason("warm_replay_rollback_failed")
-        self.shared_state.save(self.session_dir)
+        self.shared_state.set_stop_reason("warm_replay_rollback_failed")
+        self._conclude_warm_replay(outcome, Verdict.FAILED)
         return False
 
     @staticmethod
     def _replay_eval_search_root(result: dict) -> Path | None:
         """Directory holding every round of this replay task."""
-        from ..actions.executors.baseline import (
+        from ..actions.executors.benchmark_run.records import (
             _MEASURE_ROUND_DIR,
             _WARMUP_ROUND_DIR,
         )
@@ -1748,14 +884,29 @@ class PreludePhase(CoordinatorCollaborator):
             return path
         return None
 
-    def _warm_replay_accuracy_ok(
-        self,
-        result: dict,
-        task: "Task | None",
-        outcome: dict,
-        recorder: Any = None,
-    ) -> bool:
-        """Whether a replayed config may be promoted on accuracy grounds.
+    def _replay_eval_on_disk(self, result: dict) -> _ReplayEval:
+        """Read the replay's accuracy from the eval output its round left on disk."""
+        from ..actions.executors._accuracy_gate import parse_eval_results
+
+        root = self._replay_eval_search_root(result)
+        if root is None:
+            return _ReplayEval(None, False, "replay result names no round directory")
+        try:
+            eval_out = parse_eval_results(root)
+        except (OSError, AttributeError, TypeError, ValueError) as exc:  # an unreadable eval is "no verdict"
+            eval_out = {"error": f"eval parse raised: {type(exc).__name__}"}
+        parsed = eval_out.get("accuracy")
+        if isinstance(parsed, (int, float)):
+            return _ReplayEval(float(parsed), True, "")
+        eval_error = str(eval_out.get("error") or "no accuracy in eval output")
+        # Only a results file the parser reached can say the eval ran; a parser that never got one says
+        # nothing either way.
+        return _ReplayEval(None, eval_error.startswith(_EVAL_RAN_BUT_UNSCORABLE), eval_error)
+
+    def _judge_warm_replay_accuracy(
+        self, result: dict, task: "Task | None", outcome: dict, recorder: Any = None
+    ) -> Verdict | None:
+        """Rule on whether a replayed config may be promoted on accuracy grounds.
 
         Every replay is judged, not just the ones touching a knob known to be
         risky: a KB recipe is evidence from another session, so reproducing its
@@ -1764,115 +915,69 @@ class PreludePhase(CoordinatorCollaborator):
         a score of 0.0 means the model answered nothing, while no score at all
         means no evidence either way.
 
-        Returns ``True`` when promotion may proceed; ``False`` when the caller
-        must stop (the rollback and outcome have already been recorded).
+        Returns ``None`` when promotion may proceed; otherwise the verdict the
+        caller must stop on (the rollback and outcome have already been recorded).
         """
-        from ..actions.executors._accuracy_gate import (
+        from hyperloom.common.gain_math import (
             DEFAULT_ENABLEMENT_ACCURACY_FLOOR,
             accuracy_meets_floor,
             accuracy_passed,
-            parse_eval_results,
         )
 
-        state = self.shared_state
-        try:
-            baseline_accuracy = float(getattr(state, "baseline_accuracy", 0.0) or 0.0)
-        except (TypeError, ValueError):
-            baseline_accuracy = 0.0
+        baseline_accuracy = self.shared_state.baseline_accuracy or 0.0
 
         measured = result.get("accuracy")
         eval_ran = isinstance(measured, (int, float))
         eval_error = ""
         if not eval_ran:
-            measured = None
-            root = self._replay_eval_search_root(result)
-            if root is None:
-                eval_error = "replay result names no round directory"
-            else:
-                try:
-                    eval_out = parse_eval_results(root)
-                except Exception as exc:  # noqa: BLE001 — an unreadable eval is "no verdict"
-                    eval_out = {"error": f"eval parse raised: {type(exc).__name__}"}
-                parsed = eval_out.get("accuracy")
-                if isinstance(parsed, (int, float)):
-                    measured = float(parsed)
-                    eval_ran = True
-                else:
-                    eval_error = str(eval_out.get("error") or "no accuracy in eval output")
-                    # Only a results file the parser reached can say the eval ran; a parser that never got one says
-                    # nothing either way.
-                    eval_ran = eval_error.startswith(_EVAL_RAN_BUT_UNSCORABLE)
+            on_disk = self._replay_eval_on_disk(result)
+            measured, eval_ran, eval_error = on_disk.accuracy, on_disk.ran, on_disk.error
 
         outcome["eval_ran"] = bool(eval_ran)
         outcome["eval_error"] = eval_error or None
         outcome["replay_accuracy"] = float(measured) if measured is not None else None
-        outcome["baseline_accuracy"] = baseline_accuracy if baseline_accuracy > 0 else None
+        reference = baseline_accuracy if baseline_accuracy > 0 else None
+        outcome["baseline_accuracy"] = reference
 
         if measured is None:
             # A measurement that failed is not evidence the config broke the model, so it must not stop the run: the
-            # replay is admitted and the reason it could not be judged is recorded instead.
+            # replay is admitted and the reason it could not be judged is recorded instead. Ran but could not rule is
+            # a verdict of its own: recording a pass here would claim evidence there is none.
             log.warning(
                 "warm-replay admitted without an accuracy verdict (eval_ran=%s, baseline %.4f): %s",
                 eval_ran,
                 baseline_accuracy,
                 eval_error or "no reason recorded",
             )
-            if recorder is not None:
-                # Ran but could not rule, which is a verdict of its own:
-                # recording a pass here would claim evidence there is none.
-                recorder.record_gate(
-                    GATE_ACCURACY,
-                    passed=None,
-                    reason=eval_error or "no accuracy verdict",
-                    threshold=baseline_accuracy if baseline_accuracy > 0 else None,
-                )
-            return True
-        if baseline_accuracy > 0:
-            if accuracy_passed(baseline_accuracy, float(measured)):
-                if recorder is not None:
-                    recorder.record_gate(
-                        GATE_ACCURACY,
-                        passed=True,
-                        reason="no regression against the baseline reference",
-                        observed=measured,
-                        threshold=baseline_accuracy,
-                    )
-                return True
+            passed, threshold = None, reference
+            reason = eval_error or "no accuracy verdict"
+        elif reference is not None:
+            passed, threshold = accuracy_passed(reference, float(measured)), reference
             reason = (
-                f"accuracy regression on the replayed config (baseline {baseline_accuracy:.4f}, replay {measured:.4f})"
+                "no regression against the baseline reference"
+                if passed
+                else f"accuracy regression on the replayed config (baseline {reference:.4f}, replay {measured:.4f})"
             )
-        elif accuracy_meets_floor(measured, DEFAULT_ENABLEMENT_ACCURACY_FLOOR):
-            if recorder is not None:
-                recorder.record_gate(
-                    GATE_ACCURACY,
-                    passed=True,
-                    reason="clears the absolute floor with no baseline to compare against",
-                    observed=measured,
-                    threshold=DEFAULT_ENABLEMENT_ACCURACY_FLOOR,
-                )
-            return True
         else:
+            passed = accuracy_meets_floor(measured, DEFAULT_ENABLEMENT_ACCURACY_FLOOR)
+            threshold = DEFAULT_ENABLEMENT_ACCURACY_FLOOR
             reason = (
-                "accuracy below absolute floor on the replayed config "
+                "clears the absolute floor with no baseline to compare against"
+                if passed
+                else "accuracy below absolute floor on the replayed config "
                 f"(replay {measured:.4f}, "
                 f"floor {DEFAULT_ENABLEMENT_ACCURACY_FLOOR:.2f})"
             )
         if recorder is not None:
-            recorder.record_gate(
-                GATE_ACCURACY,
-                passed=False,
-                reason=reason,
-                observed=measured,
-                threshold=baseline_accuracy if baseline_accuracy > 0 else DEFAULT_ENABLEMENT_ACCURACY_FLOOR,
-            )
+            recorder.record_gate(GATE_ACCURACY, passed=passed, reason=reason, observed=measured, threshold=threshold)
+        if passed is not False:
+            return None
         if not self._require_combined_warm_rollback(result, task, outcome, recorder):
-            return False
+            return Verdict.FAILED
         outcome["status"] = "accuracy_failed"
         outcome["reason"] = reason
-        state.warm_replay_outcome = outcome
-        state.save(self.session_dir)
         log.info("warm-replay REJECTED on accuracy: %s", reason)
-        return False
+        return self._conclude_warm_replay(outcome, Verdict.REVERTED)
 
     # ---- warm-replay timeline recording ----------------------------------
     # The replay spans two ticks: one enqueues the task, a later one harvests it.
@@ -1901,18 +1006,19 @@ class PreludePhase(CoordinatorCollaborator):
 
         recorder = make_warm_replay_recorder(
             phase=_WARM_REPLAY_EVENT_PHASE,
-            macro_cycle=int(getattr(self.shared_state, "macro_cycle", 0) or 0),
-            task_id=str(getattr(task, "task_id", "") or ""),
-            tier=str(params.get("warm_recipe_tier") or ""),
-            config_source=str(params.get("config_source") or ""),
-            config_donor_tier=str(params.get("config_donor_tier") or ""),
-            donor=self._warm_replay_donor(dict(self.shared_state.warm_replay_outcome or {})) or None,
-            expected_gain_pct=params.get("warm_expected_gain_pct"),
-            confidence=params.get("warm_recipe_conf"),
-            min_reproduce_pct=getattr(self, "_warm_replay_min_reproduce_pct", 0.8),
-            session_baseline_tput=session_baseline_tput,
-            kernel_count=len(list(params.get("warm_kernel_plan") or [])),
-            recipe_suppressed=not str(params.get("config_source") or ""),
+            macro_cycle=int(self.shared_state.macro_cycle or 0),
+            request=WarmReplayRequest(
+                task_id=str(getattr(task, "task_id", "") or ""),
+                tier=str(params.get("warm_recipe_tier") or ""),
+                config_source=str(params.get("config_source") or ""),
+                config_donor_tier=str(params.get("config_donor_tier") or ""),
+                donor=self._warm_replay_donor(dict(self.shared_state.warm_replay_outcome or {})) or None,
+                expected_gain_pct=params.get("warm_expected_gain_pct"),
+                confidence=params.get("warm_recipe_conf"),
+                session_baseline_tput=session_baseline_tput,
+                kernel_count=len(list(params.get("warm_kernel_plan") or [])),
+                recipe_suppressed=not str(params.get("config_source") or ""),
+            ),
         )
         if recorder is not None:
             self._record_warm_kernel_apply_items(recorder)
@@ -1931,24 +1037,26 @@ class PreludePhase(CoordinatorCollaborator):
         """
         from hyperloom.inference_optimizer.breakdown.recorder.warm_replay_event import APPLY_KERNEL
 
-        for position, entry in enumerate(getattr(self.shared_state, "warm_kernel_kb_plan", None) or []):
+        for position, entry in enumerate(self.shared_state.warm_kernel_kb_plan or []):
             if not isinstance(entry, Mapping) or not str(entry.get("decision") or ""):
                 continue
             outcome = entry.get("apply_result") if isinstance(entry.get("apply_result"), Mapping) else {}
             sources = entry.get("source_paths") or []
             recorder.record_apply_item(
-                str(entry.get("patch_path") or (sources[0] if sources else "")),
-                kind=APPLY_KERNEL,
-                position=position,
-                applied=str(entry.get("decision") or "") == "PENDING",
-                reason=str(
-                    outcome.get("reason")
-                    or outcome.get("error")
-                    or outcome.get("exception")
-                    or entry.get("resolution_error")
-                    or ""
-                ),
-                target=str(entry.get("apply_root") or ""),
+                WarmReplayApplyItem(
+                    str(entry.get("patch_path") or (sources[0] if sources else "")),
+                    kind=APPLY_KERNEL,
+                    position=position,
+                    applied=str(entry.get("decision") or "") == "PENDING",
+                    reason=str(
+                        outcome.get("reason")
+                        or outcome.get("error")
+                        or outcome.get("exception")
+                        or entry.get("resolution_error")
+                        or ""
+                    ),
+                    target=str(entry.get("apply_root") or ""),
+                )
             )
 
     def _record_warm_patch_apply_items(self, recorder: Any, result: Mapping[str, Any]) -> None:
@@ -1968,12 +1076,14 @@ class PreludePhase(CoordinatorCollaborator):
             if not isinstance(row, Mapping):
                 continue
             recorder.record_apply_item(
-                str(row.get("patch_ref") or ""),
-                kind=APPLY_PATCH,
-                position=row.get("timeline_index", position),
-                applied=str(row.get("status") or "") != "failed",
-                reason=str(row.get("reason") or row.get("detail") or ""),
-                target=str(row.get("target_repo") or ""),
+                WarmReplayApplyItem(
+                    str(row.get("patch_ref") or ""),
+                    kind=APPLY_PATCH,
+                    position=row.get("timeline_index", position),
+                    applied=str(row.get("status") or "") != "failed",
+                    reason=str(row.get("reason") or row.get("detail") or ""),
+                    target=str(row.get("target_repo") or ""),
+                )
             )
 
     def _warm_replay_timeline(self, task: "Task | None" = None):
@@ -1983,28 +1093,56 @@ class PreludePhase(CoordinatorCollaborator):
         measurement the promote seam is here to record.
         """
         params = dict(getattr(task, "params", None) or {})
-        outcome = dict(getattr(self.shared_state, "warm_replay_outcome", None) or {})
+        outcome = dict(self.shared_state.warm_replay_outcome or {})
         from hyperloom.inference_optimizer.breakdown.recorder.warm_replay_event import (
             make_warm_replay_recorder,
         )
 
         return make_warm_replay_recorder(
             phase=_WARM_REPLAY_EVENT_PHASE,
-            macro_cycle=int(getattr(self.shared_state, "macro_cycle", 0) or 0),
-            task_id=str(getattr(task, "task_id", "") or outcome.get("replay_task_id") or ""),
-            tier=str(params.get("warm_recipe_tier") or outcome.get("warm_recipe_tier") or ""),
-            config_source=str(params.get("config_source") or outcome.get("config_source") or ""),
-            config_donor_tier=str(params.get("config_donor_tier") or outcome.get("config_donor_tier") or ""),
-            donor=self._warm_replay_donor(outcome) or None,
-            expected_gain_pct=params.get("warm_expected_gain_pct", outcome.get("expected_gain_pct")),
-            confidence=params.get("warm_recipe_conf", outcome.get("warm_recipe_conf")),
-            min_reproduce_pct=getattr(self, "_warm_replay_min_reproduce_pct", 0.8),
-            session_baseline_tput=getattr(self.shared_state, "baseline_tput", None),
-            kernel_count=len(list(params.get("warm_kernel_plan") or [])),
+            macro_cycle=int(self.shared_state.macro_cycle or 0),
+            request=WarmReplayRequest(
+                task_id=str(getattr(task, "task_id", "") or outcome.get("replay_task_id") or ""),
+                tier=str(params.get("warm_recipe_tier") or outcome.get("warm_recipe_tier") or ""),
+                config_source=str(params.get("config_source") or outcome.get("config_source") or ""),
+                config_donor_tier=str(params.get("config_donor_tier") or outcome.get("config_donor_tier") or ""),
+                donor=self._warm_replay_donor(outcome) or None,
+                expected_gain_pct=params.get("warm_expected_gain_pct", outcome.get("expected_gain_pct")),
+                confidence=params.get("warm_recipe_conf", outcome.get("warm_recipe_conf")),
+                session_baseline_tput=self.shared_state.baseline_tput or None,
+                kernel_count=len(list(params.get("warm_kernel_plan") or [])),
+            ),
             # Rebinding, not opening: the enqueue seam already put this event
             # on the timeline, and opening it twice would restate its start.
             open_event_on_timeline=False,
         )
+
+    def _skip_restated_replay(
+        self,
+        args: str,
+        envs: Mapping[str, Any],
+        code_changes: Sequence[Any],
+        identity: Mapping[str, Any],
+    ) -> bool:
+        """Skip a replay whose launch would be the baseline's own; True when it did.
+
+        Patches and kernel items change the code, which no launch comparison sees,
+        so a replay carrying any of them always runs. So does one under reference
+        launch controls: materialization rebuilds the args from the reference, so
+        the replay's launch is not the baseline config plus the request.
+        """
+        state = self.shared_state
+        if code_changes or state.reference_launch_controls:
+            return False
+        if not restates_the_baseline_launch(state, args, envs):
+            return False
+        log.info("PRELUDE: warm replay skipped: %r %s only restate the baseline launch", args, sorted(envs))
+        self._skip_warm_replay(
+            code=SKIP_RESTATES_BASELINE,
+            outcome={"status": "skipped", "reason": SKIP_RESTATES_BASELINE, **identity},
+            details={"extra_server_args": args, "extra_envs": sorted(envs)},
+        )
+        return True
 
     def _skip_warm_replay(
         self,
@@ -2049,13 +1187,15 @@ class PreludePhase(CoordinatorCollaborator):
 
         recorder = make_warm_replay_recorder(
             phase=_WARM_REPLAY_EVENT_PHASE,
-            macro_cycle=int(getattr(self.shared_state, "macro_cycle", 0) or 0),
-            tier=str(outcome.get("warm_recipe_tier") or ""),
-            config_source=str(outcome.get("config_source") or ""),
-            config_donor_tier=str(outcome.get("config_donor_tier") or ""),
-            donor=self._warm_replay_donor(outcome) or None,
-            expected_gain_pct=outcome.get("expected_gain_pct"),
-            confidence=outcome.get("warm_recipe_conf"),
+            macro_cycle=int(self.shared_state.macro_cycle or 0),
+            request=WarmReplayRequest(
+                tier=str(outcome.get("warm_recipe_tier") or ""),
+                config_source=str(outcome.get("config_source") or ""),
+                config_donor_tier=str(outcome.get("config_donor_tier") or ""),
+                donor=self._warm_replay_donor(outcome) or None,
+                expected_gain_pct=outcome.get("expected_gain_pct"),
+                confidence=outcome.get("warm_recipe_conf"),
+            ),
         )
         if recorder is None:
             return
@@ -2066,36 +1206,43 @@ class PreludePhase(CoordinatorCollaborator):
             recorder.record_rollback(ok=rollback.get("ok"), errors=rollback.get("errors"))
         recorder.finish_skipped(code=code, outcome=outcome, details=details)
 
-    def _promote_warm_replay(
+    def promote_warm_replay(
         self,
         result: dict,
         *,
         task: "Task | None" = None,
-    ) -> None:
+    ) -> Verdict:
         """Interpret a combined Recipe+Kernel ``replay_warm_recipe`` result.
 
         Closes the replay's timeline event on whichever outcome the settling
         below persisted. Done here, around the whole arc, rather than at each
         of the ten branches that can end it: a branch that forgot to close
         would leave a settled replay reading as still in flight.
+
+        Returns:
+            The settlement verdict the settling ruled.
         """
         recorder = self._warm_replay_timeline(task)
         try:
-            self._settle_warm_replay(result, task=task, recorder=recorder)
+            verdict = self._settle_warm_replay(result, task=task, recorder=recorder)
         except BaseException as exc:
             if recorder is not None:
                 recorder.finish_crashed(exc)
             raise
         if recorder is not None:
             recorder.finish(self.shared_state.warm_replay_outcome)
+        return verdict
 
-    def _settle_warm_replay(
-        self,
-        result: dict,
-        *,
-        task: "Task | None",
-        recorder: Any,
-    ) -> None:
+    def _conclude_warm_replay(self, outcome: dict, verdict: Verdict, *, clear_pending: bool = False) -> Verdict:
+        """Persist the settled outcome, the one way every settlement ends."""
+        state = self.shared_state
+        if clear_pending:
+            state.warm_replay_pending = {}
+        state.warm_replay_outcome = outcome
+        state.save(self.session_dir)
+        return verdict
+
+    def _settle_warm_replay(self, result: dict, *, task: "Task | None", recorder: Any) -> Verdict:
         """Settle a combined Recipe+Kernel replay onto an outcome.
 
         Measured uplift promotes the warm config onto ``optimization_stack`` and
@@ -2110,96 +1257,66 @@ class PreludePhase(CoordinatorCollaborator):
         # Stamped once up front so every terminal branch below carries it; each of them re-persists ``outcome`` before
         # returning.
         outcome["settled_at"] = now_iso(timespec="seconds")
-        expected_gain = float(outcome.get("expected_gain_pct") or 0.0)
         if not isinstance(result, dict):
             if not self._require_combined_warm_rollback({}, task, outcome, recorder):
-                return
+                return Verdict.FAILED
             outcome["status"] = "failed"
             outcome["reason"] = "non_dict_result"
-            state.warm_replay_outcome = outcome
-            state.save(self.session_dir)
-            return
+            return self._conclude_warm_replay(outcome, Verdict.FAILED)
         status = str(result.get("status") or "")
         if status != "succeeded":
             if not self._require_combined_warm_rollback(result, task, outcome, recorder):
-                return
+                return Verdict.FAILED
             outcome["status"] = "failed"
             outcome["error_class"] = str(result.get("error_class") or "")
             outcome["reason"] = str(result.get("error") or result.get("reason") or "")[:240]
-            state.warm_replay_outcome = outcome
-            state.save(self.session_dir)
-            log.info(
-                "warm-replay failed (status=%s, error_class=%s)",
-                status,
-                outcome.get("error_class"),
-            )
-            return
-        tput_raw = result.get("output_throughput")
-        try:
-            tput = float(tput_raw) if tput_raw is not None else 0.0
-        except (TypeError, ValueError):
-            tput = 0.0
+            log.info("warm-replay failed (status=%s, error_class=%s)", status, outcome.get("error_class"))
+            return self._conclude_warm_replay(outcome, Verdict.FAILED)
+        return self._grade_warm_replay(result, task, outcome, recorder)
+
+    def _grade_warm_replay(self, result: dict, task: "Task | None", outcome: dict, recorder: Any) -> Verdict:
+        state = self.shared_state
         # ``tput`` (output_throughput) is the HOT measure round and the comparison value; the warmup round is retained
         # for audit only.
-        cold_raw = result.get("warmup_round_tput")
-        try:
-            cold_round_tput = float(cold_raw) if cold_raw is not None else 0.0
-        except (TypeError, ValueError):
-            cold_round_tput = 0.0
-        single_round_tput = tput
-        hot_tput = tput
+        tput = to_float(result.get("output_throughput"), 0.0)
         # Use the baseline_tput captured at enqueue time (fall back to live state).
-        anchor_raw = None
-        if task is not None and isinstance(getattr(task, "params", None), dict):
-            anchor_raw = task.params.get("baseline_tput_anchor")
-        try:
-            baseline_tput = float(anchor_raw) if anchor_raw is not None else 0.0
-        except (TypeError, ValueError):
-            baseline_tput = 0.0
+        anchor = task.params.get("baseline_tput_anchor") if task is not None else None
+        baseline_tput = to_float(anchor, 0.0)
         if baseline_tput <= 0:
-            baseline_tput = float(state.baseline_tput or 0.0)
-        if single_round_tput <= 0 or baseline_tput <= 0:
+            baseline_tput = to_float(state.baseline_tput, 0.0)
+        if tput <= 0 or baseline_tput <= 0:
             if recorder is not None:
                 recorder.record_gate(
                     GATE_TPUT_VALID,
                     passed=False,
-                    reason=f"invalid_tput tput={single_round_tput} baseline={baseline_tput}",
-                    observed=single_round_tput,
+                    reason=f"invalid_tput tput={tput} baseline={baseline_tput}",
+                    observed=tput,
                     threshold=baseline_tput,
                 )
             if not self._require_combined_warm_rollback(result, task, outcome, recorder):
-                return
+                return Verdict.FAILED
             outcome["status"] = "failed"
-            outcome["reason"] = f"invalid_tput tput={single_round_tput} baseline={baseline_tput}"
-            state.warm_replay_outcome = outcome
-            state.save(self.session_dir)
-            return
+            outcome["reason"] = f"invalid_tput tput={tput} baseline={baseline_tput}"
+            return self._conclude_warm_replay(outcome, Verdict.FAILED)
         if recorder is not None:
             recorder.record_gate(
                 GATE_TPUT_VALID,
                 passed=True,
                 reason="the replay and its anchor both measured",
-                observed=single_round_tput,
+                observed=tput,
                 threshold=baseline_tput,
             )
         # Recorded before the gates below, not after the KEEP ruling: a replay
         # rejected on quality or accuracy still produced a real measurement, and
         # reading what it scored is how a gate rejection is told apart from a
         # replay that never got that far.
-        measured_gain = (single_round_tput / baseline_tput - 1.0) * 100.0
-        outcome["actual_gain_pct"] = round(measured_gain, 3)
+        outcome["actual_gain_pct"] = round(_gain_pct(tput, baseline_tput), 3)
         outcome["throughput_after"] = tput
         if recorder is not None:
             # The anchor goes on record here, where it is used: back-solving it
             # from the gain is exact only until a re-baseline moves the number
             # the replay was never judged against.
-            recorder.record_measurement(
-                before_tput=baseline_tput,
-                after_tput=tput,
-                gain_pct=measured_gain,
-                hot_tput=hot_tput,
-                cold_tput=cold_round_tput if cold_round_tput > 0 else None,
-            )
+            self._record_replay_measurement(recorder, result, outcome, baseline_tput)
         # warm_replay is an optimization candidate, so it must clear the
         # image-quality gate against the baseline reference before promotion.
         # ``require=False`` keeps a missing/skipped gate non-blocking.
@@ -2209,19 +1326,15 @@ class PreludePhase(CoordinatorCollaborator):
         if qg is not None and not quality_gate_passed(qg, require=False):
             if recorder is not None:
                 recorder.record_gate(
-                    GATE_QUALITY,
-                    passed=False,
-                    reason="image-quality gate failed vs baseline reference",
+                    GATE_QUALITY, passed=False, reason="image-quality gate failed vs baseline reference"
                 )
             if not self._require_combined_warm_rollback(result, task, outcome, recorder):
-                return
+                return Verdict.FAILED
             outcome["status"] = "quality_failed"
             outcome["reason"] = "image-quality gate failed vs baseline reference"
             outcome["quality_gate"] = qg
-            state.warm_replay_outcome = outcome
-            state.save(self.session_dir)
             log.info("warm-replay REJECTED by quality gate: %s", qg)
-            return
+            return self._conclude_warm_replay(outcome, Verdict.REVERTED)
         # A replayed config lands on ``current_best``, so every later
         # measurement in the session is taken against it. Promoting on
         # throughput alone selects for garbage: breaking the numerics is itself
@@ -2230,326 +1343,298 @@ class PreludePhase(CoordinatorCollaborator):
             # Only recorded when a gate existed to rule, which is how a reader
             # tells "passed quality" from "quality did not apply".
             recorder.record_gate(GATE_QUALITY, passed=True, reason="no quality regression vs baseline reference")
-        if not self._warm_replay_accuracy_ok(result, task, outcome, recorder):
-            return
-        if recorder is not None:
-            # Restated now that the gate has read the scores onto the outcome,
-            # so the score sits beside the reference it was judged against.
-            recorder.record_measurement(
+        if (accuracy_verdict := self._judge_warm_replay_accuracy(result, task, outcome, recorder)) is not None:
+            return accuracy_verdict
+        return self._rule_on_warm_replay_keep(result, task, outcome, recorder, baseline_tput)
+
+    def _record_replay_measurement(self, recorder: Any, result: dict, outcome: dict, baseline_tput: float) -> None:
+        recorder.record_measurement(
+            WarmReplayMeasurement(
                 before_tput=baseline_tput,
-                after_tput=tput,
-                gain_pct=measured_gain,
-                hot_tput=hot_tput,
-                cold_tput=cold_round_tput if cold_round_tput > 0 else None,
+                after_tput=outcome["throughput_after"],
+                gain_pct=_gain_pct(outcome["throughput_after"], baseline_tput),
+                hot_tput=outcome["throughput_after"],
+                cold_tput=to_float(result.get("warmup_round_tput"), 0.0) or None,
                 accuracy=outcome.get("replay_accuracy"),
                 baseline_accuracy=outcome.get("baseline_accuracy"),
                 eval_ran=outcome.get("eval_ran"),
             )
-        result["combined_gain_pct"] = round(measured_gain, 3)
-        decision_params = (task.params if task is not None else {}) or {}
-        combined_current_contract = bool(decision_params.get("combined_current_contract"))
+        )
+
+    def _rule_on_warm_replay_keep(
+        self, result: dict, task: "Task | None", outcome: dict, recorder: Any, baseline_tput: float
+    ) -> Verdict:
+        state = self.shared_state
+        measured_gain = _gain_pct(outcome["throughput_after"], baseline_tput)
+        if recorder is not None:
+            # Restated now that the gate has read the scores onto the outcome,
+            # so the score sits beside the reference it was judged against.
+            self._record_replay_measurement(recorder, result, outcome, baseline_tput)
+        result["combined_gain_pct"] = outcome["actual_gain_pct"]
+        params = task.params if task is not None else {}
         if recorder is not None:
             # Recorded before the keep ruling, so a replay that measured and
             # lost still states what lost.
             recorder.record_applied(
-                extra_server_args=str(decision_params.get("extra_server_args") or ""),
-                extra_envs=dict(decision_params.get("extra_envs") or {}),
+                extra_server_args=str(params.get("extra_server_args") or ""),
+                extra_envs=dict(params.get("extra_envs") or {}),
             )
             self._record_warm_patch_apply_items(recorder, result)
-        keep_threshold = 0.0
-        if combined_current_contract:
-            raw_threshold = decision_params.get("combined_keep_threshold_pct")
-            default_threshold = _phase_state.resolve_keep_threshold(self.shared_state)
-            try:
-                keep_threshold = float(raw_threshold) if raw_threshold is not None else default_threshold
-            except (TypeError, ValueError):
-                keep_threshold = default_threshold
-            if not math.isfinite(keep_threshold):
-                keep_threshold = default_threshold
-        min_reproduce = float(
-            getattr(self, "_warm_replay_min_reproduce_pct", 0.8) or 0.8,
+        keep_threshold = _phase_state.resolve_keep_threshold(state)
+        graded = resolve_graded_comparison(
+            state, result, keep_threshold_pct=keep_threshold, anchor=GradingAnchor(tput=baseline_tput)
         )
-        # Local legacy replay keeps any positive gain.
-        reproduced = measured_gain >= keep_threshold if combined_current_contract else measured_gain > 0
         outcome["keep_threshold_pct"] = keep_threshold
+        if graded.veto_reason:
+            # The grading applies the session's constraints (latency, power), so the drift branch below rolls the
+            # replay back rather than leaving a config a budget refused promoted on disk.
+            outcome["constraint_veto"] = graded.veto_reason
+        reproduced = graded.verdict == VERDICT_KEEP
         if recorder is not None:
             recorder.record_gate(
                 GATE_KEEP_THRESHOLD,
                 passed=reproduced,
-                reason=(
-                    "cleared the approved kernel replay threshold"
-                    if combined_current_contract
-                    else "legacy local replay keeps any positive gain"
-                ),
+                reason=f"graded on {graded.objective}: {graded.refused_by or graded.verdict}",
                 observed=measured_gain,
                 threshold=keep_threshold,
             )
-        if expected_gain > 0:
-            historical_bar = expected_gain * min_reproduce
-            # Advisory, and deliberately not a gate row: falling short never
-            # rejects a replay that cleared the keep threshold, and a
-            # ``passed=False`` row would make ``blocked_by`` name it as the
-            # reason an arc that actually succeeded ended.
-            if measured_gain > 0 and measured_gain < historical_bar:
-                outcome["below_historical_reproduce_pct"] = True
-                outcome["historical_reproduce_bar_pct"] = round(
-                    historical_bar,
-                    3,
-                )
-        # The latency budget vetoes a replay the threshold kept, here rather than at the lift, so the drift branch
-        # rolls the replay back instead of leaving a refused config promoted on disk.
-        from hyperloom.common.perf_metric import latency_veto_reason
-
-        latency_veto = (
-            latency_veto_reason(result.get("e2el_mean_ms"), float(getattr(self.shared_state, "latency_budget_ms", 0.0)))
-            if reproduced
-            else ""
-        )
-        if latency_veto:
-            reproduced = False
-            outcome["latency_veto"] = latency_veto
-        promoted_checkout = ""
         if reproduced:
-            params = (task.params if task is not None else {}) or {}
-            promoted, promotion = self._resolve_promoted_recipe_checkout(
-                result,
-                task,
-            )
-            if not promoted:
-                if recorder is not None:
-                    recorder.record_gate(
-                        GATE_PROMOTION,
-                        passed=False,
-                        reason=str(promotion.get("failure") or "validated Recipe checkout promotion failed"),
-                    )
-                if not self._require_combined_warm_rollback(
-                    result,
-                    task,
-                    outcome,
-                    recorder,
-                ):
-                    return
-                outcome["status"] = "promotion_failed"
-                outcome["reason"] = str(promotion.get("failure") or "validated Recipe checkout promotion failed")
-                outcome["recipe_checkout_promotion"] = promotion
-                kernel_outcome = {
-                    "status": "reverted",
-                    "reason": "recipe_checkout_promotion_failed",
-                    "validation": "combined_recipe_kernel",
-                }
-                outcome["kernel"] = kernel_outcome
-                state.warm_replay_outcome = outcome
-                state.save(self.session_dir)
-                return
-            promoted_checkout = (
-                str(promotion.get("target_repo") or "").strip() if promotion.get("status") == "promoted" else ""
-            )
-            if promoted_checkout:
-                outcome["active_framework_root"] = promoted_checkout
-                # Resume re-points $INFERENCEX_PATH at this checkout, and stops the run when it has since vanished.
-                state.active_inferencex_path = promoted_checkout
-            warm_args = str(params.get("extra_server_args") or "").strip()
-            warm_envs = dict(params.get("extra_envs") or {})
-            replayed_patch_refs = [
-                str(item.get("patch_file") or "")
-                for item in (result.get("warm_patches_applied") or [])
-                if (
-                    isinstance(item, dict)
-                    and (
-                        not params.get("required_patch_timeline")
-                        or item.get("status")
-                        in {
-                            "applied",
-                            "applied_3way",
-                            # What a nogit apply reports when it writes; on a pip-installed
-                            # framework it is the only status an overlay can land under.
-                            "applied_nogit",
-                            "present_in_dirty_worktree",
-                        }
-                    )
-                    and str(item.get("patch_file") or "")
-                )
-            ]
+            return self._adopt_reproduced_warm_replay(result, task, outcome, recorder)
+        return self._reject_warm_replay_as_drift(
+            result,
+            task,
+            outcome,
+            recorder,
+            reason=graded.veto_reason
+            or graded.refused_by
+            or f"measured {measured_gain:+.2f}% below keep threshold {keep_threshold:+.2f}%",
+        )
+
+    def _adopt_reproduced_warm_replay(self, result: dict, task: "Task | None", outcome: dict, recorder: Any) -> Verdict:
+        params = task.params if task is not None else {}
+        promoted, promotion = self._resolve_promoted_recipe_checkout(result, task)
+        if not promoted:
+            failure = str(promotion.get("failure") or "validated Recipe checkout promotion failed")
             if recorder is not None:
-                recorder.record_gate(
-                    GATE_PROMOTION,
-                    passed=True,
-                    reason="every patched checkout the replay measured on was promoted",
-                )
-            has_kernel = bool(params.get("warm_kernel_plan"))
-            if not warm_args and not warm_envs and not replayed_patch_refs and not has_kernel:
-                if recorder is not None:
-                    recorder.record_gate(
-                        GATE_PARAMS_PRESENT,
-                        passed=False,
-                        reason="task params carry no args, no envs, no patch and no kernel plan to replay",
-                    )
-                outcome["status"] = "reproduced_but_no_params"
-                outcome["reason"] = "task.params missing extra_server_args/extra_envs and no warm patch was applied"
-                log.warning(
-                    "warm-replay measured +%.2f%% but cannot push stack (task=%r has no warm args/envs)",
-                    measured_gain,
-                    task,
-                )
-                state.warm_replay_outcome = outcome
-                state.save(self.session_dir)
-                return
+                recorder.record_gate(GATE_PROMOTION, passed=False, reason=failure)
+            if not self._require_combined_warm_rollback(result, task, outcome, recorder):
+                return Verdict.FAILED
+            outcome["status"] = "promotion_failed"
+            outcome["reason"] = failure
+            outcome["recipe_checkout_promotion"] = promotion
+            outcome["kernel"] = {
+                "status": "reverted",
+                "reason": "recipe_checkout_promotion_failed",
+                "validation": "combined_recipe_kernel",
+            }
+            return self._conclude_warm_replay(outcome, Verdict.FAILED)
+        if recorder is not None:
+            recorder.record_gate(
+                GATE_PROMOTION, passed=True, reason="every patched checkout the replay measured on was promoted"
+            )
+        warm_args = str(params.get("extra_server_args") or "").strip()
+        warm_envs = dict(params.get("extra_envs") or {})
+        replayed_patch_refs = _replayed_patch_refs(result, params)
+        if not warm_args and not warm_envs and not replayed_patch_refs and not params.get("warm_kernel_plan"):
             if recorder is not None:
                 recorder.record_gate(
                     GATE_PARAMS_PRESENT,
-                    passed=True,
-                    reason="the replay carries params that can be pushed onto the stack",
+                    passed=False,
+                    reason="task params carry no args, no envs, no patch and no kernel plan to replay",
                 )
-            outcome["status"] = "reproduced"
-            outcome.pop("replayed_patch_refs", None)
-            if replayed_patch_refs:
-                outcome["replayed_patch_refs"] = replayed_patch_refs
-            # Stack-entry-only metadata; the lift keeps current_best pure config.
-            entry_extra: dict[str, Any] = {
-                "gain_pct": round(measured_gain, 3),
-                "hot_tput": float(hot_tput),
-                "cold_tput": float(cold_round_tput) if cold_round_tput > 0 else None,
-                # The score this promotion was judged on, recorded alongside the throughput it was judged with.
-                "accuracy": outcome.get("replay_accuracy"),
-                # source_tier records the warm-recipe tier for breakdown attribution.
-                "source_tier": outcome.get("warm_recipe_tier", ""),
-                "source_confidence": outcome.get("warm_recipe_conf", 0.0),
-            }
-            if promoted_checkout:
-                entry_extra["framework_source_root"] = promoted_checkout
-            kernel_outcome = self._book_combined_kernel_keep(result, task)
-            outcome["kernel"] = dict(kernel_outcome)
-            if recorder is not None:
-                recorder.record_applied(kernel=kernel_outcome)
-            if kernel_outcome.get("kept"):
-                entry_extra["kernel_replay"] = {
-                    "validation": "combined_recipe_kernel",
-                    "count": kernel_outcome["kept"],
-                    "columns": sorted(
-                        {
-                            str(entry.get("column") or "")
-                            for entry in state.warm_kernel_kb_plan
-                            if isinstance(entry, dict)
-                        }
-                    ),
-                }
-            patch_result = result.get("warm_patch_result")
-            if isinstance(patch_result, dict):
-                entry_extra["recipe_patch_statuses"] = list(patch_result.get("patches") or [])
-            if replayed_patch_refs:
-                entry_extra["replayed_patch_refs"] = replayed_patch_refs
-            # Resume safety: do not clobber existing stack entries.
-            state.optimization_stack = list(state.optimization_stack or [])
-            # A prior promote owns the outcome; re-running would re-journal it.
-            already_pushed = any(
-                isinstance(e, dict) and e.get("action") == "replay_warm_recipe" for e in state.optimization_stack
+            outcome["status"] = "reproduced_but_no_params"
+            outcome["reason"] = "task.params missing extra_server_args/extra_envs and no warm patch was applied"
+            log.warning(
+                "warm-replay measured +%.2f%% but cannot push stack (task=%r has no warm args/envs)",
+                outcome["actual_gain_pct"],
+                task,
             )
-            if already_pushed:
-                log.info(
-                    "warm-replay promote: stack already carries the entry; "
-                    "skipping duplicate push (likely resume mid-promote)",
-                )
-                state.warm_replay_pending = {}
-                state.warm_replay_outcome = outcome
-                state.save(self.session_dir)
-                return
-            recipe_args = str(
-                params["recipe_extra_server_args"] if "recipe_extra_server_args" in params else warm_args
-            ).strip()
-            recipe_envs = dict(params["recipe_extra_envs"] if "recipe_extra_envs" in params else warm_envs)
-            self._lift_to_current_best(
-                "replay_warm_recipe",
-                float(single_round_tput),
-                {
-                    "name": "warm_replay",
-                    **graded_axes_of(result),
-                    # The latency budget grades on this and fails closed without it.
-                    "e2el_mean_ms": result.get("e2el_mean_ms"),
-                    "candidate_extra_server_args": warm_args,
-                    "candidate_extra_envs": warm_envs,
-                    "recipe_delta": {
-                        "extra_server_args": recipe_args,
-                        "extra_envs": recipe_envs,
-                        "remove_args": [],
-                        "unset_envs": [],
-                        "args_mode": "replace",
-                    },
-                    "extra_envs": warm_envs,
-                    "source_phase": "PRELUDE",
-                    "task_id": str(getattr(task, "task_id", "") or ""),
-                    "workspace": str(result.get("workspace") or ""),
-                },
-                entry_extra=entry_extra,
+            return self._conclude_warm_replay(outcome, Verdict.REFUSED)
+        if recorder is not None:
+            recorder.record_gate(
+                GATE_PARAMS_PRESENT, passed=True, reason="the replay carries params that can be pushed onto the stack"
             )
-            if recorder is not None:
-                recorder.record_promotion(
-                    promoted_checkout=promoted_checkout,
-                    replayed_patch_refs=replayed_patch_refs,
-                    stack_entry=entry_extra,
-                )
-            # Publish the reproduced verdict now that the stack entry exists but
-            # before the cumulative update (the one step below that can raise and
-            # is swallowed by the caller). Placed after the lift on purpose --
-            # if the lift raises, the outcome stays in_flight and both the stack
-            # and the post-ruling mirror agree there is nothing adopted.
-            state.warm_replay_outcome = outcome
-            if baseline_tput > 0:
-                self._update_cumulative_gain_validated(single_round_tput, result)
-            log.info(
-                "warm-replay REPRODUCED: measured=+%.2f%% (expected=+%.2f%%, "
-                "min_required=+%.2f%%); pushed warm_replay onto stack",
-                measured_gain,
-                expected_gain,
-                expected_gain * min_reproduce if expected_gain > 0 else 0.0,
-            )
-            # Journal warm-replay as a synthetic KEEP; no KB lesson.
-            try:
-                journal = self._ensure_journal()
-                from hyperloom.inference_optimizer.session.optimization_journal import KIND_OTHER, OUTCOME_KEEP
+        return self._push_warm_replay_onto_stack(result, task, outcome, recorder, promotion)
 
-                journal.append_entry(
-                    JournalEntry(
-                        phase=str(getattr(state, "phase", "PRELUDE")).upper() or "PRELUDE",
-                        iter=int(state.tick or 0),
-                        kind=KIND_OTHER,
-                        change=f"warm_replay({outcome.get('warm_recipe_tier', '?')}): {warm_args}",
-                        outcome=OUTCOME_KEEP,
-                        gain_pct=round(measured_gain, 3),
-                        throughput_after=tput,
-                        task_id=str(task.task_id if task is not None else ""),
-                        tick=int(state.tick or 0),
-                    )
-                )
-            except Exception:
-                log.exception("warm-replay journal append failed")
-        else:
-            if not self._require_combined_warm_rollback(result, task, outcome, recorder):
-                return
-            kernel_plan = (task.params or {}).get("warm_kernel_plan") if task is not None else []
-            kernel_outcome = {
-                "status": "reverted",
-                "total": len(kernel_plan or []),
-                "kept": 0,
-                "reverted": len(kernel_plan or []),
+    def _warm_replay_stack_entry(
+        self,
+        result: dict,
+        params: Mapping[str, Any],
+        outcome: dict,
+        promoted_checkout: str,
+        replayed_patch_refs: list[str],
+    ) -> dict[str, Any]:
+        cold_round_tput = to_float(result.get("warmup_round_tput"), 0.0)
+        entry_extra: dict[str, Any] = {
+            "gain_pct": outcome["actual_gain_pct"],
+            "hot_tput": float(outcome["throughput_after"]),
+            "cold_tput": cold_round_tput or None,
+            # The score this promotion was judged on, recorded alongside the throughput it was judged with.
+            "accuracy": outcome.get("replay_accuracy"),
+            # source_tier records the warm-recipe tier for breakdown attribution.
+            "source_tier": outcome.get("warm_recipe_tier", ""),
+            "source_confidence": outcome.get("warm_recipe_conf", 0.0),
+        }
+        if promoted_checkout:
+            entry_extra["framework_source_root"] = promoted_checkout
+        kernel_plan = [entry for entry in (params.get("warm_kernel_plan") or []) if isinstance(entry, dict)]
+        if kernel_plan:
+            entry_extra["kernel_replay"] = {
                 "validation": "combined_recipe_kernel",
+                "count": len(kernel_plan),
+                "columns": sorted({str(entry.get("column") or "") for entry in kernel_plan}),
             }
-            outcome["kernel"] = dict(kernel_outcome)
-            if recorder is not None:
-                recorder.record_applied(kernel=kernel_outcome)
-            outcome["status"] = "drift"
-            outcome["reason"] = (
-                latency_veto or f"measured {measured_gain:+.2f}% below keep threshold {keep_threshold:+.2f}%"
-            )
-            log.info(
-                "warm-replay DRIFT: measured=%+.2f%% threshold=%+.2f%%",
-                measured_gain,
-                keep_threshold,
-            )
-        state.warm_replay_pending = {}
-        state.warm_replay_outcome = outcome
-        state.save(self.session_dir)
+        patch_result = result.get("warm_patch_result")
+        if isinstance(patch_result, dict):
+            entry_extra["recipe_patch_statuses"] = list(patch_result.get("patches") or [])
+        if replayed_patch_refs:
+            entry_extra["replayed_patch_refs"] = replayed_patch_refs
+        return {**entry_extra, **warm_replay_source_layer(result, self.session_dir, self.shared_state.framework)}
 
-    async def _maybe_enqueue_prelude_initial_analysis_after_baseline(
+    def _warm_replay_candidate(self, result: dict, task: "Task | None", params: Mapping[str, Any]) -> dict[str, Any]:
+        warm_args = str(params.get("extra_server_args") or "").strip()
+        warm_envs = dict(params.get("extra_envs") or {})
+        recipe_args = str(
+            params["recipe_extra_server_args"] if "recipe_extra_server_args" in params else warm_args
+        ).strip()
+        return {
+            "name": "warm_replay",
+            **graded_axes_of(result),
+            # The latency and power budgets grade on these and fail closed without them.
+            **constraint_fields(result),
+            "candidate_extra_server_args": warm_args,
+            "candidate_extra_envs": warm_envs,
+            "recipe_delta": {
+                "extra_server_args": recipe_args,
+                "extra_envs": dict(params["recipe_extra_envs"] if "recipe_extra_envs" in params else warm_envs),
+                "remove_args": [],
+                "unset_envs": [],
+                "args_mode": "replace",
+            },
+            "extra_envs": warm_envs,
+            "source_phase": "PRELUDE",
+            "task_id": str(getattr(task, "task_id", "") or ""),
+            "workspace": str(result.get("workspace") or ""),
+        }
+
+    def _push_warm_replay_onto_stack(
+        self, result: dict, task: "Task | None", outcome: dict, recorder: Any, promotion: dict[str, Any]
+    ) -> Verdict:
+        state = self.shared_state
+        params = task.params if task is not None else {}
+        warm_args = str(params.get("extra_server_args") or "").strip()
+        replayed_patch_refs = _replayed_patch_refs(result, params)
+        promoted_checkout = promotion.get("target_repo", "")
+        entry_extra = self._warm_replay_stack_entry(result, params, outcome, promoted_checkout, replayed_patch_refs)
+        # Resume safety: do not clobber existing stack entries.
+        state.optimization_stack = list(state.optimization_stack)
+        # A prior promote owns the outcome; re-running would re-journal it.
+        already_pushed = any(
+            isinstance(e, dict) and e.get("action") == "replay_warm_recipe" for e in state.optimization_stack
+        )
+        if not already_pushed and not self._coord.writeback.lift_to_current_best(
+            "replay_warm_recipe",
+            float(outcome["throughput_after"]),
+            self._warm_replay_candidate(result, task, params),
+            entry_extra=entry_extra,
+        ):
+            # Cleared the keep threshold against the baseline yet did not
+            # beat the adopted configuration on its graded objective.
+            return self._reject_warm_replay_as_drift(
+                result,
+                task,
+                outcome,
+                recorder,
+                reason=f"measured {outcome['actual_gain_pct']:+.2f}% over baseline but current_best refused the lift",
+            )
+        if promoted_checkout:
+            outcome["active_framework_root"] = promoted_checkout
+            state.active_inferencex_path = pick_tree(promotion["target_repos"], state.active_inferencex_path)
+        outcome["status"] = "reproduced"
+        outcome.pop("replayed_patch_refs", None)
+        if replayed_patch_refs:
+            outcome["replayed_patch_refs"] = replayed_patch_refs
+        kernel_outcome = self._book_combined_kernel_keep(result, task)
+        outcome["kernel"] = dict(kernel_outcome)
+        if recorder is not None:
+            recorder.record_applied(kernel=kernel_outcome)
+        if already_pushed:
+            log.info(
+                "warm-replay promote: stack already carries the entry; "
+                "skipping duplicate push (likely resume mid-promote)"
+            )
+            return self._conclude_warm_replay(outcome, Verdict.ADOPTED, clear_pending=True)
+        if recorder is not None:
+            recorder.record_promotion(
+                promoted_checkout=promoted_checkout, replayed_patch_refs=replayed_patch_refs, stack_entry=entry_extra
+            )
+        # Publish the reproduced verdict now that the stack entry exists but
+        # before the cumulative update (the one step below that can raise and
+        # is swallowed by the caller). Placed after the lift on purpose --
+        # if the lift raises, the outcome stays in_flight and both the stack
+        # and the post-ruling mirror agree there is nothing adopted.
+        state.warm_replay_outcome = outcome
+        self._coord.writeback.validate(float(outcome["throughput_after"]), result, source="warm_replay")
+        log.info(
+            "warm-replay REPRODUCED: measured=+%.2f%% (expected=+%.2f%%); pushed warm_replay onto stack",
+            outcome["actual_gain_pct"],
+            to_float(outcome.get("expected_gain_pct"), 0.0),
+        )
+        self._journal_warm_replay(result, task, outcome, warm_args)
+        return self._conclude_warm_replay(outcome, Verdict.ADOPTED, clear_pending=True)
+
+    def _journal_warm_replay(self, result: dict, task: "Task | None", outcome: dict, warm_args: str) -> None:
+        state = self.shared_state
+        try:
+            journal = self._coord.recipe_journal.ensure_journal()
+            journal.append_entry(
+                JournalEntry(
+                    phase=(state.phase or "PRELUDE").upper() or "PRELUDE",
+                    iter=int(state.tick or 0),
+                    kind=KIND_OTHER,
+                    change=f"warm_replay({outcome.get('warm_recipe_tier', '?')}): {warm_args}",
+                    outcome=derive_journal_outcome(Verdict.ADOPTED, result),
+                    gain_pct=outcome["actual_gain_pct"],
+                    throughput_after=outcome["throughput_after"],
+                    task_id=str(task.task_id if task is not None else ""),
+                    tick=int(state.tick or 0),
+                )
+            )
+        except (OSError, TypeError, ValueError):
+            log.exception("warm-replay journal append failed")
+
+    def _reject_warm_replay_as_drift(
+        self,
+        result: dict,
+        task: "Task | None",
+        outcome: dict,
+        recorder: Any,
+        *,
+        reason: str,
+    ) -> Verdict:
+        """Roll back a measured replay that is not adopted and settle it as ``drift``.
+
+        A rollback that failed settles as ``rollback_failed`` instead.
+        """
+        if not self._require_combined_warm_rollback(result, task, outcome, recorder):
+            return Verdict.FAILED
+        kernel_plan = (task.params or {}).get("warm_kernel_plan") if task is not None else []
+        kernel_outcome = {
+            "status": "reverted",
+            "total": len(kernel_plan or []),
+            "kept": 0,
+            "reverted": len(kernel_plan or []),
+            "validation": "combined_recipe_kernel",
+        }
+        outcome["kernel"] = dict(kernel_outcome)
+        if recorder is not None:
+            recorder.record_applied(kernel=kernel_outcome)
+        outcome["status"] = "drift"
+        outcome["reason"] = reason
+        log.info("warm-replay DRIFT: %s", reason)
+        return self._conclude_warm_replay(outcome, Verdict.REVERTED, clear_pending=True)
+
+    async def maybe_enqueue_prelude_initial_analysis_after_baseline(
         self,
         *,
         baseline_tput: float | None = None,
@@ -2559,7 +1644,7 @@ class PreludePhase(CoordinatorCollaborator):
         if _phase_state.warm_replay_in_flight(state):
             log.info(
                 "PRELUDE: deferring initial %s until warm-replay completes",
-                self._internal_analysis_kind(),
+                self.internal_analysis_kind(),
             )
             return
         if baseline_tput is None:
@@ -2580,7 +1665,7 @@ class PreludePhase(CoordinatorCollaborator):
                 "PRELUDE: skipping the initial %s — %.0fs of preparation budget "
                 "left (bound=%s) against an expected %.0fs. The optimization "
                 "phases keep the time instead.",
-                self._internal_analysis_kind(),
+                self.internal_analysis_kind(),
                 evidence.get("affordable_sec", 0.0),
                 evidence.get("bound", ""),
                 evidence.get("expected_cost_sec", 0.0),
@@ -2588,7 +1673,7 @@ class PreludePhase(CoordinatorCollaborator):
             self._record_prelude_arm_dropped("initial_analysis", evidence)
             return
         try:
-            rl_task = await self._enqueue_internal_analysis_task(
+            rl_task = await self.enqueue_internal_analysis_task(
                 reason="prelude_initial",
             )
             if rl_task is None:
@@ -2600,7 +1685,7 @@ class PreludePhase(CoordinatorCollaborator):
                 rl_task.kind,
                 rl_task.task_id,
             )
-        except Exception as exc:
+        except (sqlite3.Error, TypeError, ValueError) as exc:
             log.exception(
                 "PRELUDE: failed to enqueue initial analysis task after baseline: %r",
                 exc,
@@ -2608,37 +1693,37 @@ class PreludePhase(CoordinatorCollaborator):
 
     def _analysis_attempt_suffix(self, kind: str) -> str:
         """Idempotency-key suffix separating a re-armed roofline retry from the attempt that failed."""
-        if kind != "roofline":
-            return ""
-        try:
-            streak = int(getattr(self.shared_state, "roofline_failure_streak", 0) or 0)
-        except (TypeError, ValueError):
-            streak = 0
+        streak = to_int(self.shared_state.roofline_failure_streak, 0) if kind == "roofline" else 0
         return f"-a{streak}" if streak > 0 else ""
 
-    async def _enqueue_internal_analysis_task(
-        self, *, reason: str, inline_event: str = "", idem_scope: str = ""
-    ) -> "Task | None":
-        """Build + enqueue a Coordinator-internal analysis task (roofline or profile). Idempotency key
-        internal-analysis-<reason><idem_scope>; ``idem_scope`` separates repeated triggers that share a reason.
-        Returns None when the stack cannot produce a GPU trace for it to analyze.
+    async def enqueue_internal_analysis_task(self, *, reason: str, idem_scope: str = "") -> "Task | None":
+        """Build + enqueue a Coordinator-internal analysis task (roofline or profile) keyed internal-analysis-<reason>
+        <idem_scope> (``idem_scope`` separates triggers sharing a reason), stepped past cancelled attempts. Returns None
+        when the stack cannot produce a GPU trace for it to analyze, or every retry key holds a cancelled attempt.
         """
-        params = self._internal_analysis_params(reason=reason, inline_event=inline_event)
+        params = self.internal_analysis_params(reason=reason)
         if params is None:
             return None
-        kind = self._internal_analysis_kind()
-        lanes, ttl = self._registry_lanes_ttl(kind)
-        task, was_existing = await self.tasks.create_or_return_existing(
-            kind=kind,
-            params=params,
-            idempotency_key=(
-                f"internal-analysis-{reason}{idem_scope}"
-                f"{self._cycle_idem_suffix()}{self._analysis_attempt_suffix(kind)}"
+        kind = self.internal_analysis_kind()
+        lanes, ttl = self._coord.dispatcher.registry_lanes_ttl(kind)
+        created = await create_on_free_key(
+            self.tasks,
+            TaskSpec(
+                kind=kind,
+                params=params,
+                idempotency_key=(
+                    f"internal-analysis-{reason}{idem_scope}"
+                    f"{self._coord.dispatcher.cycle_idem_suffix()}{self._analysis_attempt_suffix(kind)}"
+                ),
+                requires_lanes=lanes,
+                lease_ttl_sec=ttl,
+                dispatch_class="coordinator",
             ),
-            requires_lanes=lanes,
-            lease_ttl_sec=ttl,
-            dispatch_class="coordinator",
+            spent=lambda existing: existing.state == "cancelled",
         )
+        if created is None:
+            return None
+        task, was_existing = created
         if was_existing:
             log.info(
                 "internal-analysis task already exists (idempotent: kind=%s task_id=%s, state=%s)",
@@ -2648,12 +1733,12 @@ class PreludePhase(CoordinatorCollaborator):
             )
         return task
 
-    def _internal_analysis_params(self, *, reason: str, inline_event: str = "") -> dict[str, Any] | None:
+    def internal_analysis_params(self, *, reason: str, inline_event: str = "") -> dict[str, Any] | None:
         """Params for a Coordinator-internal analysis run, or None when the stack cannot produce a GPU trace."""
         from hyperloom.inference_optimizer.breakdown.recorder.event_ids import INLINE_EVENT_PARAM
 
         state = self.shared_state
-        unsupported = str(getattr(state, "gpu_trace_unsupported_reason", "") or "")
+        unsupported = str(state.gpu_trace_unsupported_reason or "")
         if unsupported:
             log.error(
                 "internal-analysis (%s): not run -- %s; relying on static-source evidence for the rest of the session",
@@ -2665,28 +1750,40 @@ class PreludePhase(CoordinatorCollaborator):
                 {"reason": reason, "gpu_trace_unsupported_reason": unsupported},
             )
             return None
-        params: dict[str, Any] = {
-            "source": "coordinator_internal",
-            "reason": str(reason),
-        }
+        recipe = roofline_recipe(state, reason)
+        repeated = repeated_roofline_failure(state, recipe)
+        if repeated is not None:
+            log.warning(
+                "internal-analysis (%s): not run -- the roofline on %s already failed with %s, which recurs on the "
+                "same input; a KEEP that changes the recipe re-arms it",
+                reason,
+                recipe,
+                repeated.get("failure"),
+            )
+            self._record_prelude_arm_dropped(
+                "internal_analysis",
+                {"reason": reason, "recipe": recipe, "repeated_failure": dict(repeated)},
+            )
+            return None
+        params: dict[str, Any] = {"source": "coordinator_internal", "reason": str(reason), RECIPE_PARAM: recipe}
         if inline_event:
             params[INLINE_EVENT_PARAM] = str(inline_event)
+        bl_args = read_baseline_server_args(state).strip()
         if reason != "prelude_initial":
+            # The profiler boots from the benchmark config, so the stack delta is layered over the baseline's own args.
             inject_stack_base_params(params, state)
+            params["base_extra_args"] = compose_server_args(
+                inherited_args=bl_args,
+                base_extra_args=str(params.get("base_extra_args") or ""),
+                remove_args=params.get("base_remove_args"),
+                args_mode=str(params.get("base_args_mode") or "append"),
+            )
         else:
             # PRELUDE roofline profiles the baseline arm: inject baseline's own server args (never current_best's) so
             # a later warm-replay can't swap in flags that skew the baseline ceiling.
-            try:
-                from hyperloom.inference_optimizer.roofline_ceiling import read_baseline_server_args
-
-                bl_args = read_baseline_server_args(state).strip()
-            except Exception:  # noqa: BLE001 — best-effort; empty falls through
-                bl_args = ""
+            params.update(self._coord.enablement_revalidation.baseline_launch_params())
             if bl_args:
                 params["base_extra_args"] = bl_args
-        last_bl = state.last_baseline or {}
-        if isinstance(last_bl, dict):
-            bs = str(last_bl.get("benchmark_script") or "").strip()
-            if bs:
-                params["benchmark_script"] = bs
+        if benchmark_script := state.accepted_baseline_script():
+            params["benchmark_script"] = benchmark_script
         return params

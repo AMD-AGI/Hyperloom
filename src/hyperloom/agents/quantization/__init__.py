@@ -2,9 +2,10 @@
 
 from __future__ import annotations
 
-from .driver.retry import quantize_via_prompt
+from .driver.retry import QuantSkillRunOptions, quantize_via_prompt
 
 
 __all__ = [
+    "QuantSkillRunOptions",
     "quantize_via_prompt",
 ]

@@ -5,8 +5,8 @@
 
 from __future__ import annotations
 
+from hyperloom.orchestrator.specialists.prompt_inputs import SpecialistPromptInputs
 from hyperloom.orchestrator.prompts.specialist_prompt_builder import (
-    SpecialistPromptInputs,
     _section_roofline_evidence,
     _vendor_substitution_candidates,
 )
@@ -15,7 +15,6 @@ from hyperloom.orchestrator.specialists.domains import get_domain
 
 def _inp(hot_kernels: list[dict]) -> SpecialistPromptInputs:
     return SpecialistPromptInputs(
-        task_id="t-1",
         domain=get_domain("framework_rewrite_specialist"),
         gap_canonical_id="local_explore",
         roofline_evidence={
@@ -108,7 +107,6 @@ def test_section_omits_directive_without_candidates():
 def test_section_still_renders_none_when_no_evidence():
     """Unchanged behaviour when there is no snapshot at all."""
     inp = SpecialistPromptInputs(
-        task_id="t-1",
         domain=get_domain("framework_rewrite_specialist"),
         gap_canonical_id="local_explore",
         roofline_evidence={},

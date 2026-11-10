@@ -3,10 +3,10 @@
 Default configs live in
 `src/hyperloom/inference_optimizer/assets/configs/`, one
 `baseline_<framework>.yaml` + `profile_<framework>.yaml` pair per supported
-framework (`sglang`, `vllm`, `atom`, `xdit`, `custom`). The resolvers are the
-source of truth: `_workload_envs.py` for the baseline map and
-`_default_profile_config()` in
-`src/hyperloom/orchestrator/actions/executors/profile.py` for the profile map.
+framework (`sglang`, `vllm`, `atom`, `xdit`, `custom`). The names come from
+`framework_registry.shipped_config_name()`: a framework registered in
+`src/hyperloom/inference_optimizer/framework_registry.py` must ship both files, and
+an unset `$FRAMEWORK` resolves to the sglang pair.
 
 Two fields in each YAML are **fallback only** — the optimizer overrides them at
 runtime:
@@ -96,7 +96,7 @@ and are recorded in `explore_search`.
 ## Workload-contract reuse (baseline → explore/sweep)
 
 `baseline` materializes its YAML once with the operator's process env (`CONC` /
-`ISL` / `OSL` / `TP` / `MAX_MODEL_LEN` / `PRECISION` / `RUN_EVAL` /
+`ISL` / `OSL` / `TP` / `MAX_MODEL_LEN` / `PRECISION` /
 `ROCR_VISIBLE_DEVICES` + adaptive `NUM_PROMPTS` / `NUM_WARMUPS`), saves it as
 `baseline_config.with_envs.yaml`, and forwards the path as
 `task.params["config_path"]` to every `explore` / `sweep` task — so variants

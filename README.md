@@ -1,20 +1,12 @@
 # ROCm Hyperloom-RX9000series
-This fork adds experimental RX 9070 XT (GFX1201) support. AMD lists the card for Windows 11 in ROCm 7.2.0; Hyperloom's managed serving and optimization workflow remains Linux-oriented and is not yet validated end to end on this GPU. See the [compatibility notes](docs/compatibility.rst#rx-9070-xt).
 
-## RX 9070 XT Update
-
-- Added the `rx9070xt` GPU identity (`gfx1201`, 64 CUs) to the CLI, provenance, shared target/build resolution, Recipe KB, and KernelForge architecture normalization.
-- Normalized local and remote GPU product-name detection, including Windows-style names such as `AMD Radeon RX 9070 XT`; architecture-only `gfx1201` detection does not guess a board SKU.
-- Added regression coverage for GPU discovery, SKU disambiguation, KernelForge routing, and build targets.
-- Updated compatibility and adaptation documentation with AMD's Windows ROCm 7.2.0 availability and the current Hyperloom support boundary.
-
-**Still outstanding:** native Windows orchestration, an RX-specific managed benchmark runner, calibrated roofline data, GFX1201-specific kernel guidance, and end-to-end validation on RX 9070 XT hardware.
+This fork tracks RX 9000-series compatibility work for ROCm Hyperloom, focused on bringing RX 9070 XT (`gfx1201`) into GPU identification and compatibility reporting while retaining the upstream optimization workflow. The card is detected, but managed benchmarks are refused until a matching Magpie serving runner is available. See the [RX 9070 XT compatibility notes](docs/compatibility.rst#rx-9070-xt).
 
 # ROCm Hyperloom
 
 [![Tests](https://github.com/AMD-AGI/Hyperloom/actions/workflows/tests-coverage.yml/badge.svg)](https://github.com/AMD-AGI/Hyperloom/actions/workflows/tests-coverage.yml)
 [![Lint](https://github.com/AMD-AGI/Hyperloom/actions/workflows/lint.yml/badge.svg)](https://github.com/AMD-AGI/Hyperloom/actions/workflows/lint.yml)
-[![Version](https://img.shields.io/badge/version-1.1.3-blue)](https://github.com/AMD-AGI/Hyperloom/blob/main/pyproject.toml)
+[![Version](https://img.shields.io/badge/version-1.1.5-blue)](https://github.com/AMD-AGI/Hyperloom/blob/main/pyproject.toml)
 [![License: MIT](https://img.shields.io/badge/license-MIT-green)](https://github.com/AMD-AGI/Hyperloom/blob/main/LICENSE)
 [![Python](https://img.shields.io/badge/python-3.10%2B-blue)](https://github.com/AMD-AGI/Hyperloom/blob/main/pyproject.toml)
 
@@ -27,6 +19,29 @@ It supports text generation, image generation, and custom pipelines on vLLM,
 SGLang, and xDiT.
 
 <p align="center"><img width="700" alt="Hyperloom architecture" src="https://raw.githubusercontent.com/AMD-AGI/Hyperloom/main/docs/images/Hyperloom_architecture.png" /></p>
+
+## Merged upstream
+
+Hyperloom found each of these in a real optimization session on AMD Instinct GPUs, and vLLM or
+SGLang merged it. The numbers are quoted from the linked PR and were measured on the upstream
+revision it names; the PR also carries the benchmark commands, the accuracy checks, and the
+operating points where the gain does not apply.
+
+| Upstream PR | Merged | Model / workload | GPU | Measured effect |
+|-------|------|-------|------|-------|
+| [sglang#41071](https://github.com/sgl-project/sglang/pull/41071) | 2026-10-10 | Qwen3-32B-FP8, 1024 in / 512 out, concurrency 4 | MI300X | +314 % output tok/s against the untuned Triton default; made the gfx942 default by sglang#43815 |
+| [sglang#43815](https://github.com/sgl-project/sglang/pull/43815) | 2026-10-27 | Qwen3-235B-A22B-Instruct-2507-FP8, 1024 in / 512 out, concurrency 4, TP=4 | MI325X | +118 % output tok/s, and +28 % at concurrency 128 |
+| [vllm#58539](https://github.com/vllm-project/vllm/pull/58539) | 2026-09-30 | DeepSeek-V4.1-Flash, 307 in / 23 out, TP=2 | MI355X | +53.9 % total tok/s, −37.0 % mean TTFT |
+| [sglang#45295](https://github.com/sgl-project/sglang/pull/45295) | 2026-10-29 | Gemma 3 12B it, 12288 in / 2048 out, concurrency 128 | MI325X | +14 % output tok/s, from more KV capacity for the full-attention layers |
+| [vllm#58897](https://github.com/vllm-project/vllm/pull/58897) | 2026-10-14 | gpt-oss-120b, 1033 in / 523 out, concurrency 61 | MI355X | +9.7 % total tok/s, −11.1 % median TPOT |
+| [sglang#46731](https://github.com/sgl-project/sglang/pull/46731) | 2026-10-29 | gemma-4-26B-A4B-it, 8192 in / 1024 out, concurrency 256 | MI355X | +9.0 % total tok/s, −15.9 % mean TTFT |
+| [sglang#46528](https://github.com/sgl-project/sglang/pull/46528) | 2026-10-27 | fp8-KV checkpoints with calibrated KV scales, such as Llama-3.1-8B-Instruct-FP8-KV | MI355X, MI325X | Correctness: the default aiter backend produced garbage with no flag set, GSM8K 0.000; now 0.760 |
+| [vllm#57108](https://github.com/vllm-project/vllm/pull/57108) | 2026-10-10 | Block-FP8 checkpoint missing a weight scale | MI300X, MI325X | Correctness: a checkpoint that had served garbage (GSM8K 0.00) now fails the load and names the parameter |
+
+26 Hyperloom optimizations are merged upstream as of 2026-11-02, 12 for throughput and 14 for
+correctness; the eight with the largest measured effect are above.
+[Upstream optimizations merged into vLLM and SGLang](https://github.com/AMD-AGI/Hyperloom/blob/main/docs/upstream-results.md)
+has the full list, the per-row caveats, and the rule for what enters it.
 
 ## Why Hyperloom
 
@@ -82,7 +97,7 @@ automatic supervision or recovery loop:
 
 | Role | When it runs | How it keeps the run on-goal |
 |------|----------------|------------------------------|
-| **Orchestration** | Every tick | Continuous planner; mission and progress are re-seeded from the state file, not from the transcript |
+| **Orchestration** | Every tick; in KERNEL_AGENT only when kernel progress changes, or after 15 minutes without a turn | Continuous planner; mission and progress are re-seeded from the state file, not from the transcript |
 | **Critic** | Every keep-or-revert | Rules on whether a change served the mission; the learning record is written from that verdict |
 | **Specialist** | Authoring only | Ephemeral. Returns a reviewed diff, not a decision |
 
@@ -127,7 +142,7 @@ the knowledge base are described further in
 | Understand the algorithm | [Optimization loop](https://github.com/AMD-AGI/Hyperloom/blob/main/docs/conceptual/optimization-loop.md) |
 
 ```bash
-python -m hyperloom.inference_optimizer.cli optimize
+python -m hyperloom optimize
 ```
 
 ## Documentation
@@ -157,8 +172,8 @@ feedback through the
 - Runtime package: `src/hyperloom/`
 - Contributor & AI authoring contract: [`AGENTS.md`](https://github.com/AMD-AGI/Hyperloom/blob/main/AGENTS.md)
 - Main agent instructions: [`src/hyperloom/inference_optimizer/SKILL.md`](https://github.com/AMD-AGI/Hyperloom/blob/main/src/hyperloom/inference_optimizer/SKILL.md)
-- CLI entry point: `python -m hyperloom.inference_optimizer.cli optimize`
-- Operator tools: `python -m hyperloom.inference_optimizer.tools.*`
+- CLI entry point: `hyperloom <command>` (or `python -m hyperloom <command>`)
+- Operator tools: `python -m hyperloom session <breakdown|report|backfill|events|state>`
 - Compute-partition sweep: `python3 scripts/partition_mode_sweep.py` — sets each
   AMD partition mode (`SPX`/`DPX`/`QPX`/`CPX`) on one card in turn, runs the same
   benchmark on every partition that mode creates, sums the throughput and restores

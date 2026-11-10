@@ -17,21 +17,31 @@ source roots on disk.
 from __future__ import annotations
 
 import json
-from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Callable
+from typing import Any
 
-from hyperloom.common.perf_metric import is_agentx_mode
+from hyperloom_common.coerce import first_text
 from hyperloom.common.prompt_safety import defang_prompt_structure
-from hyperloom.inference_optimizer.framework_paths import framework_import_name
-from .agentx_context import corpus_lines, grading_lines
-
-from ..specialists.domains import (
-    DEFAULT_SPECIALIST_MAX_TURNS,
-    SpecialistDomain,
-    domain_for_tag,
+from hyperloom.inference_optimizer.framework_registry import python_package
+from .agentx_context import corpus_lines, grading_lines, launch_ownership_lines
+from .proposal_schemas import (
+    EXPLORE_VARIANT_CONTRACT,
+    EXPLORE_VARIANT_EXAMPLE,
+    UPSTREAM_CANDIDATE_CONTRACT,
+    UPSTREAM_CANDIDATE_EXAMPLE,
 )
+from .specialist_focus import _DOMAIN_FOCUS_TEMPLATES, _is_agentx
+from .specialist_prompt_text import (
+    IDENTITY_MANDATE_LINES,
+    ORCHESTRATOR_CHANNEL_LINES,
+    PATCH_FIELD_LINES,
+    PROPOSAL_SET_RULES,
+)
+from ..measurement.runtime_findings import CORRECTNESS_FIX_MAX_DROP_PCT, CORRECTNESS_FIX_RULES
+
+from ..specialists.domains import domain_for_tag
 from ..specialists.profile import MODE_PATCH
+from ..specialists.prompt_inputs import SpecialistPromptInputs
 
 
 _NONE_PLACEHOLDER = "(none)"
@@ -39,18 +49,6 @@ _NONE_PLACEHOLDER = "(none)"
 # equivalence work; keeps per-op glue out of the substitution directive.
 _VENDOR_SUBSTITUTION_MIN_GPU_PCT = 5.0
 
-
-# Curated launch-recipe sites the research scout mines for verified serve
-# flags / envs, keyed by (model x hardware x quant x strategy). Overridable
-# via HYPERLOOM_RECIPE_SITES (comma/space separated); values are advisory
-# templates, not fetched by the Coordinator.
-DEFAULT_RECIPE_SITES: tuple[str, ...] = (
-    "https://recipes.vllm.ai/<org>/<model>?hardware=<gpu>",
-    "https://lmsysorg.mintlify.app/cookbook/autoregressive/<family>/<model>",
-)
-
-# Operator sentinels (via HYPERLOOM_RECIPE_SITES) that disable recipe-site guidance.
-RECIPE_SITES_DISABLED_VALUES: frozenset[str] = frozenset({"none", "off", "disable", "disabled"})
 
 # Per-task-kind brief appended by _section_mandate; only the per-dispatch dynamic
 # context (PR lead, critic feedback, apply errors, residual questions) lives in
@@ -90,902 +88,73 @@ BASH_KILL_SAFETY_PREAMBLE = (
 )
 
 
-# Per-domain focus templates: each injects a "Domain focus" block into
-# Section 1; a missing key falls back to the generic body.
-
-
-def _is_atom(inp: SpecialistPromptInputs) -> bool:
-    """True when ``_focus_*`` blocks should use atom-flavoured hints
-    (empty framework falls back to the canonical sglang/vllm block).
-
-    Args:
-        inp: The specialist prompt inputs.
-
-    Returns:
-        True when the framework is ``atom``.
-    """
-    return (inp.framework or "").strip().lower() == "atom"
-
-
-def _is_agentx(inp: SpecialistPromptInputs) -> bool:
-    """True when the session replays the AgentX agentic trace corpus.
-
-    Args:
-        inp: The specialist prompt inputs.
-
-    Returns:
-        True when ``benchmark_mode`` names the agentic workload.
-    """
-    return is_agentx_mode(inp.benchmark_mode)
-
-
-def _focus_serving_specialist(inp: SpecialistPromptInputs) -> list[str]:
-    """Build the domain-focus block for the serving specialist.
-
-    Selects atom-flavoured or canonical sglang/vllm "what to read / winning
-    techniques / pitfalls" hints based on the active framework.
-
-    Args:
-        inp (SpecialistPromptInputs): The prompt inputs (used to pick the
-            framework flavour).
-
-    Returns:
-        list[str]: Markdown lines for the serving specialist's focus block.
-    """
-    if _is_atom(inp):
-        return [
-            "You target **atom scheduler / cuda_graph / kv_cache** code.",
-            "",
-            "**What to read first**",
-            "- `atom/entrypoints/openai_server.py` (HTTP request routing, " + "`/start_profile`, `/stop_profile`).",
-            "- `atom/model_engine/engine_core.py` (engine main loop, " + "`start_profiler` call sites).",
-            "- `atom/model_engine/llm_engine.py` (engine API surface).",
-            "- `atom/model_engine/model_runner.py` (per-rank forward, " + "profiler hooks, cudagraph capture).",
-            "- `atom/model_engine/arg_utils.py` (CLI flag inventory; "
-            + "ground-truth for `--level`, `--enable_prefix_caching`, "
-            + "`--cudagraph-capture-sizes`, `--kv_cache_dtype`, etc.).",
-            "- `atom/config.py` (engine config shape).",
-            "- KB anchor `framework.*` (cuda_graph / batching / kv_cache).",
-            "",
-            "**Winning techniques to consider**",
-            "- `--level {2,3}` (atom's torch.compile / cudagraph bracket).",
-            "- `--enable_prefix_caching` for shared-prefix workloads.",
-            "- `--cudagraph-capture-sizes` bracketed around the live CONC.",
-            "- `--kv_cache_dtype fp8` on FP8-shipped models (gate accuracy).",
-            "- `--max-num-seqs` / `--max-num-batched-tokens` at concurrency "
-            + "boundaries (same scheduler-side tuning as sglang/vllm).",
-            "",
-            "**Pitfalls (historical REVERTs / atom-specific)**",
-            "- Atom is single-node only. Multi-node distributed proposals "
-            + "are non-actionable — pivot to rank-local optimisations.",
-            "- `--enforce-eager` is a debug fallback; almost never a perf win.",
-            "- Cudagraph capture size lists that don't bracket the live "
-            + "CONC trigger silent recapture on every batch boundary.",
-        ]
-    return [
-        "You target **vLLM / SGLang scheduler / cuda_graph / kv_cache** code.",
-        "",
-        "**What to read first**",
-        "- `vllm/v1/engine/` and `vllm/v1/worker/` (scheduler, model_runner).",
-        "- `sglang/python/sglang/srt/scheduler/` and `sglang/python/sglang/srt/managers/`.",
-        "- KB anchor `framework.*` (cuda_graph / batching / chunked_prefill / kv_cache).",
-        "",
-        "**Config levers (cheap, try first — these are env/flag changes)**",
-        "- `--enable-chunked-prefill` + matched `--max-num-batched-tokens`.",
-        "- `--enforce-eager=false` + cuda graph capture for stable batch sizes.",
-        "- `--kv-cache-dtype fp8_e4m3` when the gap is HBM-bound (gate accuracy!).",
-        "- `--max-num-seqs` tuning at concurrency boundaries.",
-        "- AITER umbrella (`VLLM_ROCM_USE_AITER=1`) is **ALWAYS_ON** on MI300X;",
-        "  `VLLM_ROCM_USE_AITER_RMSNORM=0` / `...PAGED_ATTN=1` are **NEVER_TOUCH**",
-        "  (crash / dead var). Do NOT propose flags in the NEVER_TOUCH set.",
-        "",
-        "**Source-patch playbook (the high-ceiling work — author real code)**",
-        "Config tuning has a low ceiling. When the gap persists after the cheap",
-        "levers (or the orchestrator escalates you for a code patch), modify the",
-        "framework **source** and write a unified diff into your worktree",
-        "`patches/` dir (see the patch protocol section). Map the profile gap to",
-        "the module:",
-        "- **Scheduler / batch composition gap** (low batch occupancy, decode",
-        "  starvation) → `scheduler.py` batch policy: prefill/decode interleave,",
-        "  `max_num_batched_tokens` chunk split, waiting-queue admission order.",
-        "- **KV-cache / block-manager gap** (HBM-bound, fragmentation) →",
-        "  block_manager / paged-cache: block-size policy, eviction, prefix-cache",
-        "  reuse. Keep `block_size >= 16`.",
-        "- **CUDA-graph / capture gap** (host-bound, dispatch overhead) →",
-        "  capture-size set, inductor graph partition, eager-fallback conditions.",
-        "- **Chunked-prefill granularity** → split-size heuristic in the",
-        "  scheduler, not just the flag.",
-        "Keep patches small (target ≤5 files); preserve upstream call-order",
-        "contracts (e.g. vLLM `scheduler.add_seq_group` ordering) or you will",
-        "break chunked-prefill / spec-decode interactions.",
-        "",
-        "**Pitfalls (historical REVERTs)**",
-        "- Raising `--max-num-seqs` past 512 on MI300X → OOM on 671B MoE models.",
-        "- `cuda_graph` + dynamic batch sizes → silent recapture cost > savings.",
-        "- Chunked prefill without `--max-num-batched-tokens` → tail latency",
-        "  regressions invisible to throughput-only benches.",
-        "- `torch.compile` on MLA + FP8 (DeepSeek-R1 NSA path) → incompatible;",
-        "  disable compile on that path.",
-    ]
-
-
-def _focus_kernel_switch_specialist(inp: SpecialistPromptInputs) -> list[str]:
-    """Build the domain-focus block for the kernel-switch specialist.
-
-    Selects atom-flavoured or canonical sglang/vllm kernel (attention / MoE /
-    GEMM) hints based on the active framework.
-
-    Args:
-        inp (SpecialistPromptInputs): The prompt inputs (used to pick the
-            framework flavour).
-
-    Returns:
-        list[str]: Markdown lines for the kernel-switch specialist's focus
-        block.
-    """
-    if _is_atom(inp):
-        return [
-            "You target **aiter / atom kernels / triton** code (attention,",
-            "MoE, GEMM, fused-attention paths).",
-            "",
-            "**What to read first**",
-            "- `aiter/csrc/` and `aiter/aiter/ops/` (CK / hipBLASLt "
-            + "wrappers — **shared with sglang and vllm**, so aiter "
-            + "patches apply transparently across all three).",
-            "- `atom/model_ops/` (atom-specific kernel call sites).",
-            "- `atom/quantization/` (atom's FP8 / weight-quant paths).",
-            "- `atom/models/` (built-in model implementations; cross-",
-            "reference for which kernels each model touches).",
-            "- KB anchor `kernel.*` (CDNA3 tiling / MoE / attention / GEMM).",
-            "",
-            "**Winning techniques to consider**",
-            "- aiter env switches (`VLLM_ROCM_USE_AITER=1` umbrella + "
-            + "per-op overrides) — the shared aiter surface means the "
-            + "same env knobs that work on sglang/vllm carry over to atom.",
-            "- Tile-size / occupancy tuning for short-OSL decode.",
-            "- Fused-attention enable flags for prefill chunks.",
-            "",
-            "**Pitfalls**",
-            "- Searching `sglang/python/sglang/srt/layers/attention/` on "
-            + "an atom box: those paths are empty / absent. Use "
-            + "`atom/model_ops/` + shared `aiter/` instead.",
-            "- Mixing aiter overrides with `--enforce-eager` invalidates " + "atom's cudagraph captures silently.",
-        ]
-    base = [
-        "You target **aiter / SGLang kernels / triton** code (attention,",
-        "MoE, GEMM, fused-attention paths).",
-        "",
-        "**What to read first**",
-        "- `aiter/csrc/` and `aiter/aiter/ops/` (CK / hipBLASLt wrappers).",
-        "- `sglang/python/sglang/srt/layers/attention/` (backend selection).",
-        "- KB anchor `kernel.*` (CDNA3 tiling / MoE / attention / GEMM).",
-        "",
-        "**Winning techniques to consider**",
-        "- Switch `--attention-backend` at the workload's prefill/decode mix.",
-        "  IMPORTANT: valid CLI values differ by framework and image version —",
-        "  do NOT invent names. Use values from `<framework> serve --help`.",
-        "  Example sglang values: `ROCM_AITER_MLA`, `TRITON_MLA`,",
-        "  `ROCM_AITER_TRITON_MLA`. Example vLLM values: `ROCM_ATTN`,",
-        "  `ROCM_AITER_FA`, `ROCM_AITER_UNIFIED_ATTN`, `FLASH_ATTN`.",
-        "- `VLLM_ROCM_USE_AITER=1` umbrella + per-op overrides for MoE / RMSNorm.",
-        "- Tile-size tuning for `M < 256` GEMMs (hipBLASLt vs Triton).",
-        "- Fused-attention enable flags for prefill chunks.",
-        "",
-        "**Pitfalls**",
-        "- Using a backend name that does not exist in the current image",
-        "  (e.g. `ROCM_FLASH`) → immediate ValueError, wasted budget.",
-        "- Forcing AITER MLA on workloads with short OSL — kernel selection",
-        "  cost dominates the saving.",
-        "- Mixing `--attention-backend` with `--enforce-eager=true` invalidates",
-        "  cuda graphs silently.",
-        "- Trying triton fp4 paths on CDNA3 without `AMDGCN_USE_BUFFER_OPS=1`.",
-    ]
-    if _is_agentx(inp):
-        base += [
-            "",
-            "**The short-OSL advice above does not apply to this workload.** See the",
-            "corpus shape in Section 2: outputs run long and the prefill is mostly a",
-            "cache hit, so tile-size shrink and MLA-overhead avoidance target the",
-            "wrong regime. Aim at long-KV decode GEMMs, MoE expert dispatch, and",
-            "attention backends that amortise TTFT over a long output.",
-        ]
-    return base
-
-
-def _focus_comm_specialist(inp: SpecialistPromptInputs) -> list[str]:
-    """Build the domain-focus block for the communication specialist.
-
-    Selects atom-flavoured (single-node, intra-node collectives) or canonical
-    multi-node RCCL/NCCL/QuickReduce hints based on the active framework.
-
-    Args:
-        inp (SpecialistPromptInputs): The prompt inputs (used to pick the
-            framework flavour).
-
-    Returns:
-        list[str]: Markdown lines for the communication specialist's focus
-        block.
-    """
-    if _is_atom(inp):
-        return [
-            "You target **intra-node RCCL / NCCL / QuickReduce / " + "AllReduce** tuning on atom.",
-            "",
-            "**Atom is single-node only.** Multi-node tensor / data / "
-            + "pipeline parallelism is NOT available on atom. Cross-node "
-            + "collectives proposals are non-actionable — focus on "
-            + "intra-node concerns (rank-local optimisations, "
-            + "intra-node NCCL/RCCL config, allreduce algorithm choice "
-            + "for the on-box TP group).",
-            "",
-            "**What to read first**",
-            "- `atom/utils/distributed/utils.py` (single-node "
-            + "`torch.distributed` helper — NOT a multi-node TP "
-            + "orchestration layer).",
-            "- `aiter/csrc/quick_reduce/` and RCCL plugin paths "
-            + "(shared with sglang/vllm; intra-node only on atom).",
-            "- KB anchor `communication.*` (allreduce / QuickReduce / " + "topology).",
-            "",
-            "**Winning techniques to consider (single-node)**",
-            "- `VLLM_ROCM_QUICK_REDUCE_QUANTIZATION=INT4` when " + "intra-node TP allreduce message size > 1MiB.",
-            "- `NCCL_MIN_NCHANNELS` / `NCCL_MAX_NCHANNELS` tuning for " + "the on-box XGMI topology.",
-            "- `--enable-dp-attention` (MLA models) — DP-attention "
-            + "shifts work onto a TP-free per-rank path, reducing the "
-            + "allreduce footprint.",
-            "",
-            "**Pitfalls**",
-            "- Proposing multi-node TP / PP topologies — atom rejects "
-            + "them at startup. The Coordinator collapses `--nodes>1` to "
-            + "single-node mode on atom (IR-8).",
-            "- INT4 QuickReduce at TP=2 — overhead dominates the " + "bandwidth savings on small message sizes.",
-        ]
-    return [
-        "You target **RCCL / NCCL / QuickReduce / AllReduce** code and tuning.",
-        "",
-        "**What to read first**",
-        "- `vllm/distributed/`, `vllm/distributed/parallel_state.py`.",
-        "- `aiter/csrc/quick_reduce/` and RCCL plugin paths.",
-        "- KB anchor `communication.*` (allreduce / QuickReduce / topology).",
-        "",
-        "**Winning techniques to consider**",
-        "- `VLLM_ROCM_QUICK_REDUCE_QUANTIZATION=INT4` when message size > 1MiB.",
-        "- `NCCL_MIN_NCHANNELS` / `NCCL_MAX_NCHANNELS` tuning per topology.",
-        "- TP allreduce vs PP collective trade-offs at high concurrency.",
-        "",
-        "**Pitfalls**",
-        "- INT4 QuickReduce at TP=2 — overhead dominates the bandwidth savings.",
-        "- Tuning NCCL env vars without confirming `rocm-smi --showtopo` shows",
-        "  the expected XGMI / PCIe topology.",
-    ]
-
-
-def _focus_compiler_specialist(inp: SpecialistPromptInputs) -> list[str]:
-    """Build the domain-focus block for the compiler specialist.
-
-    Args:
-        inp (SpecialistPromptInputs): The prompt inputs (unused beyond protocol
-            parity; this block is framework-agnostic).
-
-    Returns:
-        list[str]: Markdown lines covering torch.compile / inductor / triton /
-        AMDGCN codegen hints.
-    """
-    return [
-        "You target **torch.compile / inductor / triton / AMDGCN** codegen",
-        "and register-pressure tuning.",
-        "",
-        "**What to read first**",
-        "- `triton/python/triton/runtime/` and `triton/lib/Conversion/`.",
-        "- `torch/_inductor/codegen/triton.py` and `torch/_inductor/scheduler.py`.",
-        "- KB anchor `compiler.*` (inductor / triton / AMDGCN).",
-        "",
-        "**Winning techniques to consider**",
-        "- `--compilation-config '{\"level\": 3, ...}'` with surgical level=2",
-        "  fallback for kernels that don't quantise cleanly.",
-        "- `torch._inductor.config.triton.unique_kernel_names` + per-kernel",
-        "  autotune cache pinning.",
-        "- VGPR-budget tuning via `num_warps` / `num_stages` in @triton.autotune.",
-        "",
-        "**Pitfalls**",
-        "- Raising level=3 globally — some kernels recompile on every batch",
-        "  size, wiping the gain.",
-        "- VGPR > 256 spills to scratch on CDNA3; profile occupancy first.",
-    ]
-
-
-def _focus_system_specialist(inp: SpecialistPromptInputs) -> list[str]:
-    """Build the domain-focus block for the system specialist.
-
-    Covers KFD driver / ROCm runtime / memory / dispatch-overhead hints.
-
-    Args:
-        inp (SpecialistPromptInputs): The prompt inputs for this dispatch.
-
-    Returns:
-        list[str]: Markdown lines for the system specialist's focus block.
-    """
-    return [
-        "You target **KFD driver / ROCm runtime / memory / dispatch overhead**.",
-        "",
-        "**What to read first**",
-        "- `/sys/class/kfd/kfd/` (read-only probes via Bash).",
-        "- `rocm-smi --showmeminfo VRAM` / `rocm-smi --showtopo`.",
-        "- KB anchor `systems.*` (KFD / dispatch / memory).",
-        "",
-        "**Winning techniques to consider**",
-        "- `HSA_ENABLE_SDMA=0` when host↔device dispatch dominates.",
-        "- `HIP_HIDDEN_FREE_MEM` to expose hidden VRAM headroom for large MoE.",
-        "- `numactl --cpunodebind` pinning at high concurrency.",
-        "",
-        "**Pitfalls**",
-        "- `HSA_ENABLE_SDMA=0` on small-message decode workloads → latency up.",
-        "- Disabling `--gpu-memory-utilization` headroom past 0.95 → OOM on",
-        "  prefill chunks for long-context workloads.",
-    ]
-
-
-def _focus_candidate_discovery_specialist(inp: SpecialistPromptInputs) -> list[str]:
-    """Build the domain-focus block for the candidate-discovery specialist.
-
-    Frames it as the owner of the whole upstream-candidate funnel: find, rank,
-    and judge. It replaced a Coordinator loop that did those three steps with
-    a fixed query, a scoring call and an audit call, so the block has to say
-    that a candidate is only useful once it carries a verdict and a route.
-
-    Args:
-        inp (SpecialistPromptInputs): The prompt inputs for this dispatch.
-
-    Returns:
-        list[str]: Markdown lines for the discovery specialist's focus block.
-    """
-    return [
-        "You own the **upstream candidate funnel**: find what is worth landing,",
-        "rank it, and judge it. This is a first-class lever alongside",
-        "configuration search — not an occasional top-up.",
-        "",
-        "**What to do**",
-        "1. **Find.** Use ``mcp__pr_monitor__*`` + ``WebSearch`` across the",
-        "   allowlisted repos for work that addresses the live bottleneck.",
-        "   Read the gap and the profile evidence first; a PR that does not",
-        "   touch the hot path is not a candidate however good it looks.",
-        "2. **Rank.** Order what you found against the current stack, the",
-        "   already-tried ledger, and the KB priors you were given. Say why",
-        "   the top one is first — the ordering is the deliverable, not a",
-        "   by-product.",
-        "3. **Judge each one.** Exactly one verdict per candidate:",
-        "   - ``already_present`` — the change is already in the installed",
-        "     version. Cite the evidence; a guess here silently skips a real win.",
-        "   - ``not_applicable`` — wrong framework, wrong arch, or it cannot",
-        "     apply to this tree.",
-        "   - ``worth_a_bench`` — plus the route: apply the upstream diff",
-        "     directly, or have a specialist author against it as inspiration.",
-        "     Direct apply needs a git tree and a same-repo candidate; say so",
-        "     when either is missing.",
-        "",
-        "**What to return**",
-        "- ``proposal_set`` entries carrying (repo, number, title, diff_url,",
-        "  head_sha, files touched, verdict, route, and the reason for each).",
-        "  Orchestration reads these and proposes ``integrate_patch`` for the",
-        "  ones it wants benched; you do not apply or benchmark anything.",
-        "",
-        "**Pitfalls**",
-        "- Citing a PR without verifying its target framework matches the",
-        "  current install.",
-        "- An unevidenced ``already_present``: it is the one verdict that",
-        "  discards a candidate without ever measuring it.",
-        "- Returning candidates with no ordering and no verdicts. A bare list",
-        "  puts the work back on the caller that dispatched you.",
-    ]
-
-
-def _recipe_sites_source_lines(inp: SpecialistPromptInputs) -> list[str]:
-    """Render the recipe-site research source; the built-in defaults when unset, nothing when disabled via the sentinel."""
-    configured = tuple(s for s in inp.recipe_sites if s)
-    if configured and all(s.strip().lower() in RECIPE_SITES_DISABLED_VALUES for s in configured):
-        return []
-    sites = configured or DEFAULT_RECIPE_SITES
-    if not sites:
-        return []
-    lines = [
-        "4. **Verified launch-recipe sites** — structured per",
-        "   (model x hardware x quant x strategy) recipe pages carrying",
-        "   validated serve flags, env vars, and benchmark numbers. Use",
-        "   ``WebFetch`` on the page matching THIS model / GPU / precision",
-        "   (fall back to ``WebSearch`` if the exact page 404s). Extract only",
-        "   the serve flags, env vars, and reported throughput/accuracy;",
-        "   emit them as ``proposal_set`` variants with the page URL in",
-        "   ``source``. For a near-miss hardware/quant match, still surface it",
-        "   but note the mismatch in ``accuracy_risk``. Sites:",
-    ]
-    lines.extend(f"   - {site}" for site in sites)
-    lines.append("")
-    return lines
-
-
-def _focus_research_scout_specialist(
-    inp: SpecialistPromptInputs,
-) -> list[str]:
-    """Build the focus section for the research-scout specialist prompt.
-
-    Args:
-        inp: Assembled prompt inputs for the current dispatch.
-
-    Returns:
-        Prompt lines highlighting already-proven priors and steering the
-        scout toward net-new findings.
-    """
-    proven_lines: list[str] = []
-    if inp.already_proven:
-        proven_lines.append("**Already proven (warm-start recipe) — do NOT re-mine these; focus on net-new priors:**")
-        for item in inp.already_proven[:12]:
-            name = str(item.get("name") or "").strip()
-            if not name:
-                continue
-            src = str(item.get("source") or "").strip()
-            proven_lines.append(f"- {name}" + (f" (source={src})" if src else ""))
-        proven_lines.append("")
-    return [
-        "You are the **research scout** — a read-only collector of",
-        "*already-proven* priors. You do NOT benchmark, apply patches, or",
-        "decide KEEP/REVERT. Your single deliverable is a prioritised list",
-        "of source-backed findings and executable variants.",
-        "",
-        *proven_lines,
-        "**Three research sources (cover all that are reachable)**",
-        "1. **Reference launch scripts** — look under",
-        "   ``$INFERENCEX_PATH/benchmarks/single_node/`` for scripts",
-        "   matching this (model, GPU). Extract every validated env/flag",
-        "   and the throughput it reached. ``$INFERENCEX_PATH`` may be",
-        "   unset — skip this source silently if so.",
-        "2. **Model architecture features** — read the model's",
-        "   ``config.json`` (MTP ``num_nextn_predict_layers``, MoE expert",
-        "   count / routing, attention type MLA/GQA, quantization support)",
-        "   and infer optimizations those features unlock.",
-        "3. **Cross-framework / NVIDIA research** — survey PRs, blogs, and",
-        "   MLPerf results across frameworks and NVIDIA/TRT-LLM via",
-        "   ``WebSearch`` / ``mcp__pr_monitor__*`` for proven wins. Avoid",
-        "   re-listing PRs the FRAMEWORK_AGENT phase already covered (the",
-        "   Coordinator dedups by PR id, but skip obvious repeats).",
-        "",
-        *_recipe_sites_source_lines(inp),
-        "**Gap computation** — where you find a reference throughput, use",
-        "the gap versus our current baseline only to prioritise your hints",
-        "(a bigger gap means a higher-priority hint). Do NOT emit competitor",
-        "numbers as a structured target: measured competitor baselines are",
-        "sourced from InferenceX, never authored by this scout.",
-        "",
-        "**Output protocol** — use only the top-level ``specialist_done`` fields:",
-        "- ``proposal_set``: executable variants using the standard explore",
-        "  schema. Put inspected PRs and references in ``pr_evidence`` or",
-        "  ``source_evidence`` on each proposal.",
-        "- ``new_findings``: list of ``{what, expected_impact, accuracy_risk,",
-        "  source, domain_tags[]}``. ``source`` is REQUIRED (PR link / blog /",
-        "  MLPerf row / reference script path).",
-        "- ``residual_questions``: unanswered questions for the next scout round.",
-        "",
-        "**Iron rule** — read-only. Never write a patch, never launch a",
-        "benchmark, never recommend a phase transition. Turn proven priors",
-        "into structured hints and stop.",
-    ]
-
-
-def _focus_static_recon_specialist(
-    inp: SpecialistPromptInputs,
-) -> list[str]:
-    """Build the focus section for the static-recon specialist prompt.
-
-    Steers a read-only sub-agent to grep the framework source tree for
-    un-bridged capability switches (predicates that silently disable a fast
-    path for the current GPU/precision), seeded with a curated checklist, and to
-    emit structured bridge candidates rather than patches.
-
-    Args:
-        inp: Assembled prompt inputs for the current dispatch.
-
-    Returns:
-        Prompt lines describing the recon task, the seed checklist, and the
-        ``recon`` output block schema.
-    """
-    checklist_lines: list[str] = []
-    if inp.static_recon_checklist:
-        checklist_lines = [
-            "**Seed checklist (known un-bridged switches for this "
-            + "(model, GPU, precision)) — verify each against the LIVE source; "
-            + "do not assume it still applies:**",
-            inp.static_recon_checklist,
-            "",
-        ]
-    model_info_line = ""
-    shared_expert_advisory: list[str] = []
-    if inp.model_info:
-        attn = str(inp.model_info.get("attention_type") or "").strip()
-        is_moe = bool(inp.model_info.get("is_moe"))
-        quant = str(inp.model_info.get("quantization") or "").strip()
-        has_shared = bool(inp.model_info.get("has_shared_expert"))
-        num_shared = inp.model_info.get("num_shared_experts")
-        features = f"attention={attn or '?'} moe={is_moe}"
-        if has_shared:
-            n_str = str(int(num_shared)) if num_shared is not None else "?"
-            features += f" shared_expert=True n_shared={n_str}"
-        features += f" quant={quant or '?'}."
-        model_info_line = f"Model features: {features}"
-        if has_shared:
-            shared_expert_advisory = [
-                "**Shared-expert fusion advisory**: this model has always-on shared "
-                + "experts. Confirm whether the shared expert still runs as a separate "
-                + "dense MLP per layer. If yes, investigate folding it into the routed "
-                + "grouped-GEMM path as an always-selected extra expert slot (code-path "
-                + "bridge, not just an env flag). Known caveat: expert parallelism (EP) "
-                + "is unsupported until the expert-map behaviour is explicitly handled.",
-                "",
-            ]
-    return [
-        "You are the **static-recon specialist** — a read-only reconnaissance",
-        "agent. You do NOT benchmark, apply patches, build a worktree, or",
-        "decide KEEP/REVERT. Your single deliverable is a prioritised list of",
-        "**bridge candidates**: fast paths that *should* be enabled for this",
-        f"GPU ({inp.gpu_type or '?'}) + precision ({inp.precision or '?'}) but",
-        "are silently disabled in the LIVE framework source.",
-        "",
-        *([model_info_line, ""] if model_info_line else []),
-        *shared_expert_advisory,
-        *checklist_lines,
-        "**How to hunt (read the LIVE source under the source roots / hint",
-        "directories in Section 7):**",
-        "1. grep for capability predicates — ``*_supported()`` /",
-        "   ``*_enabled()`` / ``is_*()`` guards and feature gates in the",
-        "   quantization, linear, fused_moe and attention dispatch paths.",
-        "2. For each, determine whether it returns False (or routes to a slow",
-        "   fallback) on THIS hardware/precision when a faster path exists",
-        "   (e.g. a CUDA-only ``cutlass_*_supported()`` that is always False on",
-        "   ROCm and so disqualifies an AITER kernel).",
-        "3. Trace the consequence: which GEMM / kernel / backend the code then",
-        "   falls back to, and why that is slower.",
-        "4. Confirm the bridge is plausible (the faster path exists and only",
-        "   the guard / scale-granularity / activation-config blocks it).",
-        "",
-        "**Output protocol** — emit ONE ``specialist_done`` carrying a",
-        "``recon`` block with ``bridge_candidates``: a list of",
-        "``{id, predicate_file, predicate_name, why_disabled_here, consequence,",
-        "bridge_sketch, domain_hint, confidence}``. ``id`` is a short slug",
-        "(reuse the seed checklist id when verifying one), ``predicate_file`` is",
-        "the source path you read, ``why_disabled_here`` explains the False",
-        "branch on this hardware, ``bridge_sketch`` is the proposed fix (a",
-        "sketch — you do NOT write the patch), and ``domain_hint`` is the",
-        "specialist that should author it (``freeform`` keeps the whole",
-        "mandate). A candidate without ``predicate_file`` + ``why_disabled_here``",
-        "is dropped.",
-        "",
-        "**Iron rule** — read-only. Never write a patch, never launch a",
-        "benchmark, never recommend a phase transition. Turn verified source",
-        "findings into structured bridge candidates and stop.",
-    ]
-
-
-def _focus_enablement_specialist(
-    inp: SpecialistPromptInputs,
-) -> list[str]:
-    """Stable enablement-specialist identity blurb.
-
-    The per-task mandate (failure context + the ladder book) is rendered
-    separately into the user prompt by ``_section_enablement_playbook`` so this
-    system-prompt block stays constant across dispatches (cacheable).
-
-    Args:
-        inp: Assembled prompt inputs for the current dispatch (unused; the
-            identity is task-independent).
-
-    Returns:
-        Prompt lines for the enablement-specialist identity.
-    """
-    return [
-        "You are the **enablement specialist** — an AUTHORING sub-agent for a",
-        "(model, backend) combo that is non-runnable OR that boots but fails its",
-        "accuracy eval. The gate is RUNNABILITY (the server boots and passes a",
-        "minimal inference) or, for an eval-origin dispatch, the real model output",
-        "meeting the accuracy floor — not throughput.",
-        "",
-        "Your deliverable is the smallest **runnable delta** that advances the",
-        "boot (or the accuracy) — which may be a serve flag, an in-tree source patch, an",
-        "attempt-scoped runtime, or a ``needs_targeted_build`` request. Do NOT",
-        "stop at a token registration / two-line alias when the diagnosis says the",
-        "architecture is genuinely new: advancing one boot step counts, and a",
-        "compiled or from-source need should be requested, not faked. Follow the",
-        "ENABLEMENT PLAYBOOK in the task context for the tiered methodology.",
-    ]
-
-
-def _focus_framework_rewrite_specialist(
-    inp: SpecialistPromptInputs,
-) -> list[str]:
-    """Build the domain-focus block for framework-level source rewrites.
-
-    Carries the rewrite-pattern taxonomy as a *prior* — the categories, the
-    cache-key recipe, the correctness invariants and the switch-manifest
-    contract — while leaving the landing points to be found from the measured
-    evidence. That split is deliberate: a prior that named specific functions
-    would only ever work on one model, whereas the pattern vocabulary transfers
-    to any iterative pipeline.
-
-    Args:
-        inp: Assembled prompt inputs for the current dispatch (used only for the
-            framework name; the taxonomy itself is workload-independent).
-
-    Returns:
-        Markdown lines for the framework-rewrite specialist's focus block.
-    """
-    framework = (inp.framework or "the framework").strip()
-    return [
-        "You are the **framework rewrite specialist** — an AUTHORING sub-agent",
-        f"for **{framework}**, an iterative model pipeline: the same transformer",
-        "stack runs once per block, per denoising step, per chunk. Nothing about",
-        "request serving applies here (no scheduler, no continuous batching, no",
-        "KV-cache admission policy). The wins are the redundant work the loop",
-        "structure creates.",
-        "",
-        "**Where the wins are**",
-        "A single step's cost is multiplied by (blocks x steps x chunks), so any",
-        "work whose result does not change across that product is dead weight,",
-        "and any host round-trip inside it stalls the whole pipeline. Two classes",
-        "of cost dominate and neither one owns a GPU kernel, so neither appears in",
-        "a kernel breakdown: **redundant recomputation** and **host stalls**.",
-        "",
-        "**Rewrite pattern taxonomy** (the categories the evidence is labelled with)",
-        "- **(a) memoize a step- or block-invariant computation.** A pure function",
-        "  called with arguments it already received. Cache the result.",
-        "- **(b) hoist a loop-invariant computation out of the loop.** The value is",
-        "  logically the same each iteration but rebuilt from scratch, so a cache",
-        "  keyed on tensor identity would never hit. Compute once per outer",
-        "  iteration and pass it in. **This is usually an enabler**: on its own it",
-        "  measures flat, and its value is that it makes (a) start hitting.",
-        "- **(c) eliminate a host round-trip or a device-to-host sync.** An object",
-        "  collective agreeing on a shape the ranks could derive locally; an",
-        "  `.item()` / `.tolist()` / `.cpu()` on the hot path.",
-        "- **(d) fuse adjacent collectives, GEMMs or concatenations.** Several",
-        "  same-shape payloads issued separately; pack them and issue one.",
-        "- **(e) swap an operator implementation for a vendor kernel.** Read this",
-        "  off the GPU kernel breakdown, not the host evidence.",
-        "- **(f) keep a tensor resident on the device.** A table rebuilt on the",
-        "  host and re-uploaded on every use.",
-        "- **(g) drop no-op glue.** A dtype cast to the dtype the tensor already",
-        "  has; an intermediate materialised only to be immediately consumed.",
-        "",
-        "**Cache-key recipe (get this wrong and you ship a correctness bug)**",
-        "- Key on the COMPLETE argument identity: for a tensor,",
-        "  `(data_ptr, shape, dtype, device, _version)`; plus every scalar that",
-        "  changes the result. A key missing one input returns another input's",
-        "  answer.",
-        "- **Key on EVERY value you cache, not just the first one.** Caching a",
-        "  `(k, v)` pair under a key derived from `k` alone returns the wrong `v`",
-        "  the moment two calls share a `k` identity. A previous attempt shipped",
-        "  exactly this and moved the output past the quality band.",
-        "- **Pin the source tensors in the cache entry.** Under a caching",
-        "  allocator a freed tensor's address is handed straight back to the next",
-        "  allocation, so `data_ptr` alone will report a brand-new tensor as a hit.",
-        "  Holding a reference to the keyed tensors prevents that.",
-        "  Pinning means storing the SOURCE objects you keyed on. Storing the",
-        "  computed result is not pinning: the sources are then unreferenced, free",
-        "  to be deallocated, and their addresses recycled under a live key. A",
-        "  previous attempt wrote `# Pin source tensors` above a line that stored",
-        "  only the result — the comment is not the mechanism.",
-        "- Check `_version` so an in-place mutation invalidates the entry.",
-        "- Do NOT hash tensor *contents* to build a key: that forces a",
-        "  device-to-host sync per call and costs more than it saves.",
-        "- Bound the cache (small LRU) and size it for the calling pattern: under",
-        "  classifier-free guidance the positive and negative branches alternate,",
-        "  so a single-entry cache thrashes to a 0% hit rate.",
-        "",
-        "**Deliverable contract — every rewrite is a default-off switch**",
-        "Each rewrite MUST be gated by its own environment switch that defaults",
-        "OFF, so that with no switches set the code path is byte-for-byte the",
-        "original. This is not a style preference; it is what makes each rewrite",
-        "independently measurable and composable, and it is checked:",
-        "- a parity leg runs with every switch unset and must reproduce the",
-        "  baseline within its noise band, so a rewrite that changes behaviour",
-        "  when disabled is rejected;",
-        "- accepted switches become search levers, so the orchestrator measures",
-        "  each one's own contribution and searches combinations rather than",
-        "  taking your bundle as given.",
-        "",
-        "**The manifest is not optional and not documentation — it is what makes",
-        "the guarantees above run.** With a gate the manifest does not declare,",
-        "nothing is turned on for the measurement, no parity leg runs and no lever",
-        "is registered: the patch is benched as an ordinary diff and whatever it",
-        "does when 'off' is never checked. Integration now refuses a deliverable",
-        "whose patch reads an `os.environ` switch the manifest omits, so an",
-        "undeclared gate costs you the whole attempt.",
-        "",
-        "Alongside the patch, emit a `framework_switches` manifest — one entry per",
-        "switch, each with: `switch` (the env var name), `category` (a taxonomy id",
-        "above), `target` (file and symbol), `evidence` (which measured candidate",
-        "it addresses), `depends_on` (switches that must also be on for this one",
-        "to pay), and `enables` (switches that only pay once this one is on).",
-        "",
-        "**Declare `depends_on` / `enables` honestly — this is load-bearing.**",
-        "An enabler measured alone shows no gain. If you do not declare the",
-        "relationship, it is judged on its standalone number, rejected, and every",
-        "rewrite that depended on it is silently devalued along with it. Declared,",
-        "the whole bundle is benchmarked together and survives on its joint gain.",
-        "",
-        "**Always keep a fallback path.** Guard the fast path on the shapes and",
-        "dtypes it actually requires and fall through to the original code",
-        "otherwise, so an unexpected input degrades in speed and not in",
-        "correctness.",
-        "",
-        "**Pitfalls**",
-        "- Graph capture (HIP/CUDA graphs) conflicts with lazily populated",
-        "  caches: the first call allocates inside the capture. Do not combine.",
-        "- Caching across a chunk boundary needs the chunk identity in the key;",
-        "  geometry alone repeats between chunks with different contents.",
-        "- A switch name that collides with an upstream variable will be honoured",
-        "  by upstream code too. Namespace yours.",
-    ]
-
-
-_DOMAIN_FOCUS_TEMPLATES: dict[str, "Callable[[SpecialistPromptInputs], list[str]]"] = {
-    "serving_specialist": _focus_serving_specialist,
-    "framework_rewrite_specialist": _focus_framework_rewrite_specialist,
-    "kernel_switch_specialist": _focus_kernel_switch_specialist,
-    "comm_specialist": _focus_comm_specialist,
-    "compiler_specialist": _focus_compiler_specialist,
-    "system_specialist": _focus_system_specialist,
-    "candidate_discovery_specialist": _focus_candidate_discovery_specialist,
-    "research_scout_specialist": _focus_research_scout_specialist,
-    "static_recon_specialist": _focus_static_recon_specialist,
-    "enablement_specialist": _focus_enablement_specialist,
-}
-
-
-@dataclass(frozen=True)
-class SpecialistPromptInputs:
-    """Typed inputs the Coordinator hands to the prompt builder."""
-
-    # Identity
-    task_id: str
-    domain: SpecialistDomain
-    max_turns: int = DEFAULT_SPECIALIST_MAX_TURNS
-
-    # ``tp`` defaults to 0 (sentinel for "unspecified"), not 1, so
-    # comm_specialist doesn't veto its own TP proposals.
-    gpu_type: str = ""
-    allocated_gpu_ids: tuple[int, ...] = ()
-    tp: int = 0
-    hbm_gb: float = 0.0
-    peak_tflops: float = 0.0
-    arch_notes: str = ""
-    # Advisory competitor target gap block; direction hint only.
-    target_gap_notes: str = ""
-    # Already-proven warm-recipe optimizations the research scout should skip.
-    already_proven: list[dict[str, str]] = field(default_factory=list)
-    # Curated recipe-site URL templates the research scout may mine for
-    # verified serve flags / envs; empty falls back to the built-in defaults.
-    recipe_sites: tuple[str, ...] = ()
-    # Advisory research-hint block; its presence suppresses cold-start fallback.
-    research_hints: str = ""
-    # Workload context mirrored from SharedState; renders in section 2.
-    precision: str = ""
-    conc: int = 0
-    isl: int = 0
-    osl: int = 0
-    max_model_len: int = 0
-    # ``framework`` is the active server framework (``sglang`` / ``vllm`` /
-    # ``atom``); empty falls back to the canonical sglang/vllm hint blocks.
-    # ``framework_version`` is the precise install version (empty => no note).
-    framework: str = ""
-    framework_version: str = ""
-    # ``"agentx"`` for agentic trace replay, else synthetic; selects the
-    # workload and grading blocks. ``agentx_corpus_shape`` supplies their
-    # numbers, mirrored from SharedState so the prompt describes the corpus the
-    # session actually replayed.
-    benchmark_mode: str = ""
-    agentx_corpus_shape: dict[str, Any] = field(default_factory=dict)
-    agentx_grading: dict[str, Any] = field(default_factory=dict)
-    agentx_backend: str = ""
-
-    # Gap statement
-    gap_canonical_id: str = ""
-    gap_symptom: str = ""
-    gap_layer: str = ""
-    gap_evidence: dict[str, Any] = field(default_factory=dict)
-
-    # Optional structured KB context. Empty in the RecipeKB-first path.
-    kb_subgraph: dict[str, Any] = field(default_factory=dict)
-
-    # Roofline / TraceLens evidence from ``SharedState.last_trace_analyze``;
-    # empty dict renders a placeholder.
-    roofline_evidence: dict[str, Any] = field(default_factory=dict)
-
-    # Recipe summary from the T0 warm-start recipe search
-    # (``recipe_kb_t0._cascade_warm_start_search``)
-    warm_start_recipe: dict[str, Any] = field(default_factory=dict)
-    warm_start_pitfalls: list[dict[str, Any]] = field(default_factory=list)
-    # T0 lessons — positive priors from prior KEEPs; rendered in the lessons section.
-    warm_start_lessons: list[dict[str, Any]] = field(default_factory=list)
-    pr_monitor_available: bool = True
-
-    # Generic sub_kind passthrough so ``_focus_*`` helpers can specialise.
-    sub_kind: str = ""
-
-    # Extra knowledge-domain tags; each contributes a focus block to Section 1.
-    extra_focus_tags: tuple[str, ...] = ()
-
-    # Local source navigation hint. ``worktree_base`` is the tree the worktree
-    # stands for -- the checkout it was cut from, or the installed tree it holds
-    # a snapshot of -- and is empty when the specialist has no worktree.
-    session_framework_tree: str = ""
-    framework_source_roots: tuple[str, ...] = ()
-    worktree_base: str = ""
-    source_hint_directories: tuple[str, ...] = ()
-    # Framework package directory relative to the worktree; empty without a worktree.
-    worktree_package_dir: str = ""
-
-    # Structured model architecture features mirrored from SharedState.model_info;
-    # machine-parseable companion to ``arch_notes``. Empty dict => not warmed.
-    model_info: dict[str, Any] = field(default_factory=dict)
-    # Pre-rendered static-recon checklist block (Markdown); only populated for
-    # the static_recon_specialist dispatch.
-    static_recon_checklist: str = ""
-
-    # Enablement dispatch evidence, folded into the §1b mandate. Empty for
-    # every non-enablement domain; the mandate omits whichever is empty.
-    enablement_source_context: str = ""
-    enablement_candidate_refs: tuple[str, ...] = ()
-    # The serialized FailureSignature the round was dispatched on; required for
-    # the enablement domain, empty for every other.
-    enablement_failure_signature: dict[str, Any] = field(default_factory=dict)
-    # Env / server-arg layers prior advanced rounds accepted; the bench for this
-    # round launches with them, so the mandate has to name them.
-    enablement_accepted_config: dict[str, Any] = field(default_factory=dict)
-
-    # Workspace path (for transcript / heartbeat instructions)
-    workspace_path: str = ""
-
-    # Free-form notes from Orchestration (e.g. previous-round resid_qs)
-    notes: str = ""
-
-    # Dispatch profile dials (see orchestrator.specialists.profile) that shape
-    # single-domain / cross-domain / freeform / bench prompting.
-    scope: str = "domain"
-    mode: str = MODE_PATCH
-    bench: bool = False
-    # Free-form task description (only populated when scope == 'freeform').
-    task_description: str = ""
-
-    # Coordinator-injected note for a bounded auto-retry of a prior transient
-    # (timeout / crash / stale-heartbeat) attempt; empty on the first attempt.
-    auto_retry_reason: str = ""
-
-    # Wall-clock budget (seconds) and dispatch start timestamp (ISO-8601 UTC)
-    # so the specialist can self-throttle. 0 / "" => not supplied (the budget
-    # section renders nothing).
-    wall_budget_sec: float = 0.0
-    started_at_iso: str = ""
-
-    # Run-status snapshot for §0 MANDATE; 0/[] = absent (section renders gracefully).
-    baseline_tput: float = 0.0
-    current_tput: float = 0.0
-    cumulative_gain_validated: float = 0.0
-    keep_threshold_pct: float = 0.0
-    applied_stack: list[dict[str, Any]] = field(default_factory=list)
-
-    # Structured mandate payload; routes §0 boilerplate and per-dispatch context.
-    task_kind: str = ""
-    prior_attempts: list[dict[str, Any]] = field(default_factory=list)
-    pr_lead: dict[str, Any] = field(default_factory=dict)
-    # "A" = emit_intent, "B" = file write, "" = render both (render-script path).
-    exit_channel: str = ""
-
-
 # Section 1 — Identity & autonomy
 def _authors_patches(inp: SpecialistPromptInputs) -> bool:
     """Whether this dispatch may author patches; research mode gets no worktree."""
     return inp.mode == MODE_PATCH
 
 
+#: Throughput domains whose focus block offers flags first, so the coda has
+#: something to raise the sights from. ``enablement_specialist`` is absent
+#: because its ladder book says climb only as far as runnability needs;
+#: ``framework_rewrite_specialist`` because it authors source rewrites and
+#: nothing else, and already carries its own "Where the wins are" taxonomy;
+#: ``speculative_decoding_specialist`` because its focus names no flags at all.
+_THROUGHPUT_AUTHORING_DOMAINS = frozenset(
+    {
+        "serving_specialist",
+        "kernel_switch_specialist",
+        "comm_specialist",
+        "compiler_specialist",
+        "system_specialist",
+    }
+)
+
+
+def _source_patch_altitude_block(inp: SpecialistPromptInputs) -> list[str]:
+    """Where the durable wins are, for a throughput dispatch that may author code."""
+    if not (_authors_patches(inp) and inp.domain.key in _THROUGHPUT_AUTHORING_DOMAINS):
+        return []
+    return [
+        "",
+        "### Altitude — where the durable wins are",
+        "",
+        "The flags above are cheap to validate and their ceiling is fixed by",
+        "whoever wired them up; a source change moves that ceiling and keeps",
+        "paying in later rounds. When the cheap levers do not close the gap, stop",
+        "permuting them and read the source for:",
+        "- **An un-bridged capability switch** — a `*_supported()` / `*_enabled()`",
+        "  / `is_*()` predicate that takes this model / GPU / precision off a",
+        "  faster path. Bridging it creates a lever nobody had.",
+        "- **A faster path already present** — reached never, or with arguments",
+        "  that disqualify it.",
+        "- **A real bug** — a wrong bound, a stale cache key, a fallback that",
+        "  fires when it should not. Fixing it is a KEEP like any other.",
+        "- **Component usage this architecture argues against** — the order,",
+        "  granularity or fusion of the pieces, not their settings.",
+        "Deliver a unified diff in your worktree `patches/` dir, small (target ≤5",
+        "files) and grounded: a patch you cannot point at a profile line or a",
+        "source predicate is budget spent for nothing.",
+    ]
+
+
+def _domain_focus_blocks(inp: SpecialistPromptInputs) -> list[str]:
+    """Render the focus block of the active domain, then of each extra tag on a multi-tag dispatch, closing on the altitude coda that spans them."""
+    body: list[str] = []
+    rendered: set[str] = set()
+    for key in (inp.domain.key, *(getattr(domain_for_tag(t), "key", "") for t in inp.extra_focus_tags)):
+        focus = _DOMAIN_FOCUS_TEMPLATES.get(key) if key and key not in rendered else None
+        lines = focus(inp) if focus is not None else []
+        if not lines:
+            continue
+        body.extend(["", f"### Domain focus — {key}", "", *lines])
+        rendered.add(key)
+    body.extend(_source_patch_altitude_block(inp))
+    return body
+
+
 def _section_identity(inp: SpecialistPromptInputs) -> list[str]:
     """Render Section 1 (identity & autonomy) of the specialist prompt.
-
-    Appends the per-domain focus block from :data:`_DOMAIN_FOCUS_TEMPLATES`
-    when one is registered for the active domain.
 
     Args:
         inp (SpecialistPromptInputs): The assembled prompt inputs.
@@ -1028,43 +197,14 @@ def _section_identity(inp: SpecialistPromptInputs) -> list[str]:
         "trees in Section 7 are where to start, not where to stop — search any",
         "public GitHub repo or NVIDIA PR,",
         capability_line,
-        "to be thorough. Be creative. Investigate deeply. One-turn shortcuts",
-        "are discouraged when a real bottleneck is on the table — but stop once",
-        "rounds stop yielding new findings; the wall clock is not the only stop",
-        "signal. Quality over quantity: **2 proposals is the norm, 4 the hard",
-        "cap**. One real beats two padded; an empty ``proposal_set`` with a",
-        "clear ``summary`` beats one padded.",
-        "",
-        "Division of labour: the Coordinator owns the serving GPU, runs the E2E",
-        "benchmark, and decides KEEP/REVERT — you do not have to validate final",
-        "throughput yourself. Your single deliverable is ONE final ``specialist_done``",
+        *IDENTITY_MANDATE_LINES,
         deliverable_line,
         "capability boundary is fixed by Section 9 Iron Rules; everything inside",
         "it is yours.",
         "",
         fanout_line,
     ]
-    rendered_focus_keys: set[str] = set()
-    focus = _DOMAIN_FOCUS_TEMPLATES.get(inp.domain.key)
-    if focus is not None:
-        body.append("")
-        body.append(f"### Domain focus — {inp.domain.key}")
-        body.append("")
-        body.extend(focus(inp))
-        rendered_focus_keys.add(inp.domain.key)
-    # Append each extra tag's focus block (multi-tag dispatch).
-    for tag in inp.extra_focus_tags:
-        tag_domain = domain_for_tag(tag)
-        if tag_domain is None or tag_domain.key in rendered_focus_keys:
-            continue
-        tag_focus = _DOMAIN_FOCUS_TEMPLATES.get(tag_domain.key)
-        if tag_focus is None:
-            continue
-        body.append("")
-        body.append(f"### Domain focus — {tag_domain.key}")
-        body.append("")
-        body.extend(tag_focus(inp))
-        rendered_focus_keys.add(tag_domain.key)
+    body.extend(_domain_focus_blocks(inp))
     if inp.scope == "domains":
         body.extend(_cross_domain_block(inp))
     elif inp.scope == "freeform":
@@ -1100,8 +240,7 @@ def _auto_retry_note_block(inp: SpecialistPromptInputs) -> list[str]:
         + "silent hang), not a rejection of the approach. Scope your "
         + "investigation so you reach a single ``specialist_done`` within "
         + "``max_turns`` this time: prefer fewer, higher-confidence probes, "
-        + "emit heartbeats, and avoid long-running shell that risks the same "
-        + "timeout.",
+        + "and avoid long-running shell that risks the same timeout.",
     ]
 
 
@@ -1160,13 +299,16 @@ def _cpu_selfcheck_block(inp: SpecialistPromptInputs) -> list[str]:
     """Optional ``selfcheck`` helper for a patch specialist with a worktree and no GPU."""
     if inp.allocated_gpu_ids or inp.mode != MODE_PATCH or not inp.worktree_package_dir:
         return []
+    package = python_package(inp.framework)
+    if package is None:
+        return []
     return [
         "",
         "Optional helper: ``selfcheck`` installs your worktree's package into a private venv,",
         "imports it, byte-compiles the files you changed and runs any pytest targets you pass:",
         "    python -m hyperloom.orchestrator.specialists.selfcheck \\",
         f"        --worktree {inp.workspace_path} --package-dir {inp.worktree_package_dir} "
-        f"--package {framework_import_name(inp.framework)} [--pytest <target>]",
+        f"--package {package} [--pytest <target>]",
         "  It prints a JSON result. A framework with compiled extensions (e.g. vLLM) rebuilds",
         "  them on install, which can take well over your wall budget.",
     ]
@@ -1249,18 +391,15 @@ def _cross_domain_block(inp: SpecialistPromptInputs) -> list[str]:
 # Section 0 — Mandate (deliverable contract + run status)
 def _section_mandate(inp: SpecialistPromptInputs) -> list[str]:
     """Render §0: deliverable contract, run status, and task-kind brief."""
-    from hyperloom.inference_optimizer.framework_registry import format_primary_metric
-
     # Deliverable line based on scope × mode.
-    scope = (inp.scope or "domain").lower()
-    if scope == "freeform":
-        anchor = inp.task_description.split("\n")[0].strip()[:120] if inp.task_description else ""
+    if inp.scope == "freeform":
+        anchor = inp.task_description.split("\n")[0].strip()[:120]
         deliverable = "freeform investigation — see task description"
     else:
-        anchor = inp.gap_canonical_id or ""
+        anchor = inp.gap_canonical_id
         if not _authors_patches(inp):
             deliverable = "findings and up to 6 ranked config variants (read-only; no patch)"
-        elif scope == "domains":
+        elif inp.scope == "domains":
             deliverable = "a coupled patch spanning multiple domains + up to 6 ranked config variants"
         else:
             deliverable = "a source patch and/or up to 6 ranked config variants addressing the gap below"
@@ -1272,25 +411,7 @@ def _section_mandate(inp: SpecialistPromptInputs) -> list[str]:
     ]
     if anchor:
         rows.append(f"- anchor: `{anchor}`")
-
-    has_status = inp.baseline_tput > 0 or inp.keep_threshold_pct > 0
-    if has_status:
-        rows.append("")
-        rows.append("Run status (read-only context; do NOT re-state these as your own measurements):")
-        fw = inp.framework or None
-        if inp.baseline_tput > 0:
-            rows.append(f"- baseline: {format_primary_metric(fw, inp.baseline_tput)}")
-        if inp.current_tput > 0:
-            rows.append(f"- current best: {format_primary_metric(fw, inp.current_tput)}")
-        if inp.cumulative_gain_validated != 0:
-            rows.append(f"- validated cumulative gain: {inp.cumulative_gain_validated:+.2f}%")
-        if inp.keep_threshold_pct > 0:
-            rows.append(f"- KEEP threshold this cycle: {inp.keep_threshold_pct:.2f}%")
-        if inp.applied_stack:
-            stack_items = ", ".join(
-                f"{e.get('variant_name', '?')} ({e.get('gain_pct', 0):+.2f}%)" for e in inp.applied_stack[:6]
-            )
-            rows.append(f"- applied stack: {stack_items}")
+    rows.extend(_mandate_run_status(inp))
 
     rows.extend(
         [
@@ -1301,15 +422,14 @@ def _section_mandate(inp: SpecialistPromptInputs) -> list[str]:
         ]
     )
 
-    kind = (inp.task_kind or "").strip()
-    brief = _TASK_KIND_BRIEFS.get(kind, "")
+    brief = _TASK_KIND_BRIEFS.get(inp.task_kind.strip(), "")
     if brief:
         rows.extend(["", brief])
 
     if inp.pr_lead:
-        title = defang_prompt_structure(str(inp.pr_lead.get("title") or "").strip())
-        url = str(inp.pr_lead.get("url") or "").strip()
-        diff_url = str(inp.pr_lead.get("diff_url") or "").strip()
+        title = defang_prompt_structure(first_text(inp.pr_lead.get("title")))
+        url = first_text(inp.pr_lead.get("url"))
+        diff_url = first_text(inp.pr_lead.get("diff_url"))
         rows.append("")
         if title:
             rows.append(f"PR lead: {title}")
@@ -1326,18 +446,41 @@ def _section_mandate(inp: SpecialistPromptInputs) -> list[str]:
             ]
         )
         for att in inp.prior_attempts[:20]:
-            if not isinstance(att, dict):
-                continue
-            ref = str(att.get("ref") or "").strip()
+            ref = first_text(att.get("ref"))
             if not ref:
                 continue
-            status = str(att.get("status") or "?").strip()
+            status = first_text(att.get("status"), "?")
             gain = att.get("gain_pct")
             gain_str = f" gain={float(gain):+.2f}%" if isinstance(gain, (int, float)) else ""
-            why = str(att.get("why") or "").strip()
+            why = first_text(att.get("why"))
             why_str = f" — {why}" if why else ""
             rows.append(f"  - {ref} [{status}]{gain_str}{why_str}")
 
+    return rows
+
+
+def _mandate_run_status(inp: SpecialistPromptInputs) -> list[str]:
+    """Render §0's read-only run status; empty until a baseline or a KEEP threshold exists."""
+    from hyperloom.inference_optimizer.framework_registry import format_primary_metric
+
+    if not (inp.baseline_tput > 0 or inp.keep_threshold_pct > 0):
+        return []
+    rows = ["", "Run status (read-only context; do NOT re-state these as your own measurements):"]
+    if inp.baseline_tput > 0:
+        rows.append(f"- baseline: {format_primary_metric(inp.framework, inp.baseline_tput)}")
+    if inp.current_tput > 0:
+        rows.append(f"- current best: {format_primary_metric(inp.framework, inp.current_tput)}")
+    if inp.current_launch_args:
+        rows.append(f"- current best server args (complete launch, not a delta): {inp.current_launch_args}")
+    if inp.cumulative_gain_validated != 0:
+        rows.append(f"- validated cumulative gain: {inp.cumulative_gain_validated:+.2f}%")
+    if inp.keep_threshold_pct > 0:
+        rows.append(f"- KEEP threshold this cycle: {inp.keep_threshold_pct:.2f}%")
+    if inp.applied_stack:
+        stack_items = ", ".join(
+            f"{e.get('variant_name', '?')} ({e.get('gain_pct', 0):+.2f}%)" for e in inp.applied_stack[:6]
+        )
+        rows.append(f"- applied stack: {stack_items}")
     return rows
 
 
@@ -1365,10 +508,6 @@ def _section_hardware(inp: SpecialistPromptInputs) -> list[str]:
         rows.append(f"- TP: {inp.tp}")
     else:
         rows.append(f"- TP: {_NONE_PLACEHOLDER}")
-    if inp.hbm_gb > 0:
-        rows.append(f"- HBM per GPU: {inp.hbm_gb:.1f} GB")
-    if inp.peak_tflops > 0:
-        rows.append(f"- Peak TFLOPs (declared): {inp.peak_tflops:.1f}")
     # Workload context.
     workload_rows: list[str] = []
     if inp.precision:
@@ -1379,6 +518,7 @@ def _section_hardware(inp: SpecialistPromptInputs) -> list[str]:
         # The corpus fixes the request shape, so ISL/OSL carry no information.
         workload_rows += corpus_lines(inp.agentx_corpus_shape)
         workload_rows += grading_lines(inp.agentx_grading, inp.agentx_backend)
+        workload_rows += launch_ownership_lines(inp.agentx_backend)
     else:
         if inp.isl > 0:
             workload_rows.append(f"- ISL (input seq len): {inp.isl}")
@@ -1483,7 +623,7 @@ def _is_cold_start(inp: SpecialistPromptInputs) -> bool:
         True when every prior KB/PR/research source is empty.
     """
     return (
-        not inp.kb_subgraph
+        not inp.experience_kb_block
         and not inp.warm_start_recipe
         and not inp.warm_start_lessons
         and not inp.warm_start_pitfalls
@@ -1491,82 +631,103 @@ def _is_cold_start(inp: SpecialistPromptInputs) -> bool:
     )
 
 
-def _section_kb_subgraph(inp: SpecialistPromptInputs) -> list[str]:
+# Cold-start directive: fall back to the Section 1 defaults, or exit empty with a rationale.
+_COLD_START_DIRECTIVE = (
+    "**COLD-START MODE — no priors available.**",
+    "",
+    "All prior sources for this gap are empty:",
+    "",
+    "- KB context: ``(none)`` — no RecipeKB warm-start facts or "
+    + "research hints were available for this "
+    + "(model, hardware, domain) tuple.",
+    "- Warm-start recipe: ``(none)`` (Section 5).",
+    "- Use ``mcp__pr_monitor__*`` tools (Section 6) to query PRs on demand.",
+    "",
+    "**Directive — a coin-flip proposal is worse than none.** "
+    + "Treat the *Winning techniques* + *Pitfalls* bullets in "
+    + "Section 1 as your fallback prior and take the **1–2 "
+    + "most conservative, well-attested defaults** that fit "
+    + "the hardware (Section 2) and the gap symptom "
+    + "(Section 3); flag each ``provenance: "
+    + "domain_focus_default`` and call it an unvalidated "
+    + "fallback in the proposal's ``reason``. If none clears "
+    + "that bar, emit ``proposal_set=[]`` and cite in ``summary`` "
+    + "which you considered and why each was rejected — a "
+    + "bare empty exit with no rationale reads as a tool "
+    + "failure. Do NOT add a ``confidence`` field: "
+    + "self-reported confidence / gain fields are stripped "
+    + "before review. Record in ``residual_questions`` what "
+    + "RecipeKB, research, or ``mcp__pr_monitor__*`` query a "
+    + "future round should pursue.",
+)
+
+
+def _section_kb_context(inp: SpecialistPromptInputs) -> list[str]:
     """Build the advisory KB-context section of the specialist prompt.
 
-    Falls back to research hints when the structured KB subgraph is empty.
+    Renders the research hints, the cold-start directive, or the none placeholder.
 
     Args:
         inp: Assembled prompt inputs for the current dispatch.
 
     Returns:
-        Prompt lines rendering the KB subgraph (or hint-based fallback).
+        Prompt lines for the KB-context section.
     """
     rows = ["## 4. KB CONTEXT (optional, advisory)", ""]
-    cold = _is_cold_start(inp)
-    if not inp.kb_subgraph:
-        if inp.research_hints:
-            rows.extend(
-                [
-                    "Structured KB context is empty for this (model, hardware, domain), but "
-                    + "the research scout collected source-backed priors this "
-                    + "session. Treat these as your advisory prior (co-equal with "
-                    + "RecipeKB priors; the Critic still gates the final answer):",
-                    "",
-                    inp.research_hints,
-                    "",
-                    "Anchor proposals on these hints where they fit the gap " + "(Section 3) and hardware (Section 2).",
-                ]
-            )
-            return rows
-        if cold:
-            # Cold-start directive: fall back to the Section 1 defaults, or exit empty with a rationale.
-            rows.extend(
-                [
-                    "**COLD-START MODE — no priors available.**",
-                    "",
-                    "All prior sources for this gap are empty:",
-                    "",
-                    "- KB context: ``(none)`` — no RecipeKB warm-start facts or "
-                    + "research hints were available for this "
-                    + "(model, hardware, domain) tuple.",
-                    "- Warm-start recipe: ``(none)`` (Section 5).",
-                    "- Use ``mcp__pr_monitor__*`` tools (Section 6) to query PRs on demand.",
-                    "",
-                    "**Directive — a coin-flip proposal is worse than none.** "
-                    + "Treat the *Winning techniques* + *Pitfalls* bullets in "
-                    + "Section 1 as your fallback prior and take the **1–2 "
-                    + "most conservative, well-attested defaults** that fit "
-                    + "the hardware (Section 2) and the gap symptom "
-                    + "(Section 3); flag each ``provenance: "
-                    + "domain_focus_default`` and call it an unvalidated "
-                    + "fallback in the proposal's ``reason``. If none clears "
-                    + "that bar, emit ``proposal_set=[]`` and cite in ``summary`` "
-                    + "which you considered and why each was rejected — a "
-                    + "bare empty exit with no rationale reads as a tool "
-                    + "failure. Do NOT add a ``confidence`` field: "
-                    + "self-reported confidence / gain fields are stripped "
-                    + "before review. Record in ``residual_questions`` what "
-                    + "RecipeKB, research, or ``mcp__pr_monitor__*`` query a "
-                    + "future round should pursue.",
-                ]
-            )
-        else:
-            rows.extend(
-                [
-                    _NONE_PLACEHOLDER,
-                    "",
-                    "(No structured KB context supplied. Use Sections 1, 3, 5, "
-                    + "and 6 plus source inspection; record missing RecipeKB / "
-                    + "research / PR questions in ``residual_questions`` so a "
-                    + "future round can warm richer advisory context.)",
-                ]
-            )
+    if inp.research_hints:
+        rows.extend(
+            [
+                "Structured KB context is empty for this (model, hardware, domain), but "
+                + "the research scout collected source-backed priors this "
+                + "session. Treat these as your advisory prior (co-equal with "
+                + "RecipeKB priors; the Critic still gates the final answer):",
+                "",
+                inp.research_hints,
+                "",
+                "Anchor proposals on these hints where they fit the gap " + "(Section 3) and hardware (Section 2).",
+            ]
+        )
         return rows
-    rows.append("```json")
-    rows.append(json.dumps(inp.kb_subgraph, sort_keys=True, separators=(",", ":")))
-    rows.append("```")
+    if _is_cold_start(inp):
+        rows.extend(_COLD_START_DIRECTIVE)
+    else:
+        rows.extend(
+            [
+                _NONE_PLACEHOLDER,
+                "",
+                "(No structured KB context supplied. Use Sections 1, 3, 5, "
+                + "and 6 plus source inspection; record missing RecipeKB / "
+                + "research / PR questions in ``residual_questions`` so a "
+                + "future round can warm richer advisory context.)",
+            ]
+        )
     return rows
+
+
+def _section_experience_kb(inp: SpecialistPromptInputs) -> list[str]:
+    """Render the Experience KB section; omitted when this dispatch rendered no Experience.
+
+    Args:
+        inp: Assembled prompt inputs for the current dispatch.
+
+    Returns:
+        Prompt lines carrying the Experience service block, or ``[]``.
+    """
+    if not inp.experience_kb_block:
+        return []
+    return [
+        "## 4b. EXPERIENCE KB (measured outcomes from earlier sessions)",
+        "",
+        "Compare each Experience's identity and baseline configuration with Sections 2 and 3 "
+        + "before relying on it. When one shaped a proposal, cite it in that proposal's "
+        + "``experience_citations``, or for a patch you wrote in the payload's top-level "
+        + "``experience_citations``: ``{id, stance, claim}`` with ``stance`` one of ``adopt`` "
+        + "(you did its change), ``adapt`` (you did it modified), ``avoid`` (you left it out "
+        + "because of its outcome), or ``contrast`` (you chose a different change designed "
+        + "against it), and ``claim`` one sentence on why. Only ids shown below are kept.",
+        "",
+        inp.experience_kb_block,
+    ]
 
 
 def _vendor_substitution_candidates(hot_kernels: Any) -> list[dict[str, Any]]:
@@ -1635,6 +796,29 @@ def _vendor_substitution_directive(hot_kernels: Any) -> list[str]:
     return rows
 
 
+def _section_runtime_findings(inp: SpecialistPromptInputs) -> list[str]:
+    """Render the scanned runtime findings; omitted when none were injected."""
+    if not inp.runtime_findings:
+        return []
+    return [
+        "## 4c. RUNTIME FINDINGS (current best server.log, already scanned)",
+        "",
+        "Do not re-read the server log for these. A disabled or falling-back hot "
+        "path is restored first; do not optimize the fallback implementation.",
+        "",
+        "```text",
+        inp.runtime_findings,
+        "```",
+    ]
+
+
+_ANALYSIS_MD_READ_GUIDE = (
+    "Use the `Read` tool on this path for the full TraceLens report (~10-20 KB). All section headings are stable: "
+    "`## Executive Summary` / `## Top Operations` / `## Compute Kernel Optimizations` / "
+    "`## Kernel Fusion Opportunities` / `## System-Level Optimizations` / `## Recommendations`."
+)
+
+
 def _section_roofline_evidence(inp: SpecialistPromptInputs) -> list[str]:
     """Render the ROOFLINE EVIDENCE section from ``inp.roofline_evidence``;
     empty evidence renders a heading + ``(none)`` placeholder.
@@ -1646,8 +830,8 @@ def _section_roofline_evidence(inp: SpecialistPromptInputs) -> list[str]:
         The rendered roofline-evidence section lines.
     """
     rows = ["## 4a. ROOFLINE EVIDENCE", ""]
-    ev = inp.roofline_evidence or {}
-    if not isinstance(ev, dict) or not ev:
+    ev = inp.roofline_evidence
+    if not ev:
         rows.append(
             "(none — no fresh roofline snapshot has been recorded yet. "
             "The Coordinator auto-enqueues `roofline` at the end of "
@@ -1661,13 +845,14 @@ def _section_roofline_evidence(inp: SpecialistPromptInputs) -> list[str]:
         rows.append(f"**TraceLens snapshot #{snap_id}**")
         rows.append("")
 
-    summary = ev.get("executive_summary") or {}
-    if isinstance(summary, dict) and summary:
+    summary = ev.get("executive_summary")
+    if summary:
         rows.append("**Executive Summary:**")
         for label, key in (
             ("Compute %", "compute_pct"),
             ("Idle %", "idle_pct"),
             ("Exposed Comm %", "comm_pct"),
+            ("Exposed memcpy %", "memcpy_pct"),
             ("Top bottleneck", "top_bottleneck"),
         ):
             val = summary.get(key)
@@ -1679,53 +864,13 @@ def _section_roofline_evidence(inp: SpecialistPromptInputs) -> list[str]:
                 rows.append(f"- {label}: {val}")
         rows.append("")
 
-    roofline = ev.get("kernel_roofline_top15") or []
-    if isinstance(roofline, list) and roofline:
-        rows.append(
-            "**Kernel roofline "
-            "(kernel_id | name | gpu_pct | bound | AI | eff_pct | "
-            "compute_pct | bandwidth_pct | action):**"
-        )
-        rows.append("")
-        rows.append("| kernel_id | name | gpu_pct | bound | AI | eff_pct | compute_pct | bandwidth_pct | action |")
-        rows.append("|---|---|---:|---|---:|---:|---:|---:|---|")
-        for k in roofline:
-            if not isinstance(k, dict):
-                continue
-            kid = str(k.get("kernel_id") or "")
-            name = str(k.get("name") or "")
-            gpu_pct = k.get("gpu_pct")
-            gpu_pct_str = f"{float(gpu_pct):.2f}%" if isinstance(gpu_pct, (int, float)) else "—"
-            bound = str(k.get("bound_type") or k.get("bottleneck") or "")
-            ai = k.get("arithmetic_intensity")
-            if ai is None:
-                ai = k.get("flops_per_byte")
-            ai_str = f"{float(ai):.3g}" if isinstance(ai, (int, float)) else "—"
-            eff = k.get("efficiency_percent")
-            eff_str = f"{float(eff):.2f}%" if isinstance(eff, (int, float)) else "—"
-            comp = k.get("compute_utilization_pct")
-            comp_str = f"{float(comp):.2f}%" if isinstance(comp, (int, float)) else "—"
-            bw = k.get("bandwidth_utilization_pct")
-            bw_str = f"{float(bw):.2f}%" if isinstance(bw, (int, float)) else "—"
-            actions = k.get("recommended_actions") or []
-            action = str(k.get("suggestion") or "")
-            if not action and isinstance(actions, list) and actions:
-                action = str(actions[0])
-            rows.append(
-                f"| `{kid}` | {name} | {gpu_pct_str} | {bound} | {ai_str} | "
-                f"{eff_str} | {comp_str} | {bw_str} | {action} |"
-            )
-        rows.append("")
-
-    hot = ev.get("hot_kernels_top15") or []
-    if isinstance(hot, list) and hot:
+    hot = ev.get("hot_kernels_top15")
+    if hot:
         rows.append("**Top hot kernels (kernel_id | name | gpu_pct | bottleneck | source_file):**")
         rows.append("")
         rows.append("| kernel_id | name | gpu_pct | bottleneck | source_file |")
         rows.append("|---|---|---:|---|---|")
         for k in hot:
-            if not isinstance(k, dict):
-                continue
             kid = str(k.get("kernel_id") or "")
             name = str(k.get("name") or "")
             gpu_pct = k.get("gpu_pct")
@@ -1740,18 +885,11 @@ def _section_roofline_evidence(inp: SpecialistPromptInputs) -> list[str]:
         rows.extend(directive)
         rows.append("")
 
-    analysis_path = str(ev.get("analysis_md_path") or "")
+    analysis_path = ev.get("analysis_md_path")
     if analysis_path:
-        rows.append(f"**Full analysis.md path:** `{analysis_path}`")
-        rows.append("")
-        rows.append(
-            "Use the `Read` tool on this path for the full TraceLens "
-            "report (~10-20 KB). All section headings are stable: "
-            "`## Executive Summary` / `## Top Operations` / "
-            "`## Compute Kernel Optimizations` / "
-            "`## Kernel Fusion Opportunities` / "
-            "`## System-Level Optimizations` / `## Recommendations`."
-        )
+        is_md = Path(analysis_path).suffix == ".md"
+        guide = _ANALYSIS_MD_READ_GUIDE if is_md else "Use the `Read` tool on this path for the full TraceLens report."
+        rows += [f"**Full {'analysis.md' if is_md else 'TraceLens report'} path:** `{analysis_path}`", "", guide]
     return rows
 
 
@@ -1784,7 +922,7 @@ def _section_lessons(inp: SpecialistPromptInputs) -> list[str]:
     """Render the recipe row's ``lessons`` from prior KEEPs, compactly
     (statement + measured_impact).
 
-    Rows are the flat shape ``Recipe.to_dict`` / ``_normalise_lessons`` write —
+    Rows are the flat shape ``Recipe.to_dict`` writes —
     ``{statement, measured_impact, ...}`` — normalised by ``recipe_kb_t0``
     before they land on ``warm_start_lessons``.
 
@@ -1795,47 +933,71 @@ def _section_lessons(inp: SpecialistPromptInputs) -> list[str]:
         The rendered related-lessons section lines.
     """
     rows = ["## 5b. RELATED LESSONS (prior KEEPs on this model+hw)", ""]
-    if not inp.warm_start_lessons:
-        rows.append(_NONE_PLACEHOLDER)
-        return rows
     for point in inp.warm_start_lessons:
-        # External warm-start data may arrive as a plain string rather than a
-        # dict "point"; render the bare statement to tolerate shape drift.
-        if isinstance(point, str):
-            statement = point.strip()
-            if statement:
-                rows.append(f"- **{statement}**")
+        line = _kb_point_line(inp, point, text_key="statement", count_label="validated")
+        if not line:
             continue
-        if not isinstance(point, dict):
-            continue
-        statement = str(point.get("statement") or "").strip()
-        if not statement:
-            continue
-        impact_str = _render_measured_impact(point.get("measured_impact"))
-        conf = point.get("confidence")
-        meta_bits: list[str] = []
-        if isinstance(conf, (int, float)) and conf > 0:
-            meta_bits.append(f"conf={float(conf):.2f}")
-        # validated_count is the strongest cross-session signal; fall back to source_session_id.
-        vc = point.get("validated_count")
-        if isinstance(vc, int) and vc > 1:
-            meta_bits.append(f"validated={vc}")
-        recent_ids = point.get("source_session_ids")
-        if isinstance(recent_ids, list) and recent_ids:
-            meta_bits.append(f"recent={recent_ids[-1]}")
-        else:
-            src_sid = str(point.get("source_session_id") or "").strip()
-            if src_sid:
-                meta_bits.append(f"src={src_sid}")
-        meta = f" ({', '.join(meta_bits)})" if meta_bits else ""
-        # Version-mismatch annotation; the LLM gets the final call.
-        version_note = _format_version_note(inp, point)
-        rows.append(f"- **{defang_prompt_structure(statement)}**{meta}{version_note}")
+        rows.append(line)
+        impact_str = _render_measured_impact(point.get("measured_impact")) if isinstance(point, dict) else ""
         if impact_str:
             rows.append(f"    impact: {impact_str}")
-    if len(rows) == 2:  # only the header + blank line, all lessons filtered out
+    if len(rows) == 2:  # only the header + blank line: no lessons, or all filtered out
         rows.append(_NONE_PLACEHOLDER)
     return rows
+
+
+def _kb_point_line(
+    inp: SpecialistPromptInputs,
+    point: Any,
+    *,
+    text_key: str,
+    count_label: str,
+    lead_meta_key: str = "",
+) -> str:
+    """Render one RecipeKB lesson / pitfall row as a prompt bullet.
+
+    Args:
+        inp: The specialist prompt inputs (reads the framework version).
+        point: The row: a ``{text_key, confidence, validated_count, ...}``
+            dict, or a bare string.
+        text_key: The dict key holding the row's text.
+        count_label: The label ``validated_count`` renders under.
+        lead_meta_key: A dict key rendered first in the metadata, if any.
+
+    Returns:
+        The bullet line, or "" when the row carries no text.
+    """
+    # External warm-start data may arrive as a plain string rather than a
+    # dict "point"; render the bare text to tolerate shape drift.
+    if isinstance(point, str):
+        text = point.strip()
+        return f"- **{defang_prompt_structure(text)}**" if text else ""
+    if not isinstance(point, dict):
+        return ""
+    text = str(point.get(text_key) or "").strip()
+    if not text:
+        return ""
+    meta_bits: list[str] = []
+    lead = str(point.get(lead_meta_key) or "").strip() if lead_meta_key else ""
+    if lead:
+        meta_bits.append(f"{lead_meta_key}={lead}")
+    conf = point.get("confidence")
+    if isinstance(conf, (int, float)) and conf > 0:
+        meta_bits.append(f"conf={float(conf):.2f}")
+    # validated_count is the strongest cross-session signal; fall back to source_session_id.
+    vc = point.get("validated_count")
+    if isinstance(vc, int) and vc > 1:
+        meta_bits.append(f"{count_label}={vc}")
+    recent_ids = point.get("source_session_ids")
+    if isinstance(recent_ids, list) and recent_ids:
+        meta_bits.append(f"recent={recent_ids[-1]}")
+    else:
+        src_sid = str(point.get("source_session_id") or "").strip()
+        if src_sid:
+            meta_bits.append(f"src={src_sid}")
+    meta = f" ({', '.join(meta_bits)})" if meta_bits else ""
+    # Version-mismatch annotation; the LLM gets the final call.
+    return f"- **{defang_prompt_structure(text)}**{meta}{_format_version_note(inp, point)}"
 
 
 def _format_version_note(
@@ -1901,8 +1063,8 @@ def _section_pitfalls(inp: SpecialistPromptInputs) -> list[str]:
     """Render the recipe row's ``pitfalls`` from prior REVERTs (description +
     severity); framed as forbidden paths, not suggestions.
 
-    Rows are the flat ``{description, severity, ...}`` shape ``Recipe.to_dict`` /
-    ``_normalise_str_dicts`` write, normalised by ``recipe_kb_t0``.
+    Rows are the flat ``{description, severity, ...}`` shape ``Recipe.to_dict``
+    writes, normalised by ``recipe_kb_t0``.
 
     Args:
         inp: The specialist prompt inputs (reads ``warm_start_pitfalls``).
@@ -1911,42 +1073,11 @@ def _section_pitfalls(inp: SpecialistPromptInputs) -> list[str]:
         The rendered known-pitfalls section lines.
     """
     rows = ["## 5c. KNOWN PITFALLS (do NOT repeat — prior REVERTs)", ""]
-    if not inp.warm_start_pitfalls:
-        rows.append(_NONE_PLACEHOLDER)
-        return rows
     for point in inp.warm_start_pitfalls:
-        # Tolerate plain-string pitfalls alongside the structured dict "point".
-        if isinstance(point, str):
-            description = point.strip()
-            if description:
-                rows.append(f"- **{description}**")
-            continue
-        if not isinstance(point, dict):
-            continue
-        description = str(point.get("description") or "").strip()
-        if not description:
-            continue
-        severity = str(point.get("severity") or "").strip()
-        conf = point.get("confidence")
-        meta_bits: list[str] = []
-        if severity:
-            meta_bits.append(f"severity={severity}")
-        if isinstance(conf, (int, float)) and conf > 0:
-            meta_bits.append(f"conf={float(conf):.2f}")
-        vc = point.get("validated_count")
-        if isinstance(vc, int) and vc > 1:
-            meta_bits.append(f"observed={vc}")
-        recent_ids = point.get("source_session_ids")
-        if isinstance(recent_ids, list) and recent_ids:
-            meta_bits.append(f"recent={recent_ids[-1]}")
-        else:
-            src_sid = str(point.get("source_session_id") or "").strip()
-            if src_sid:
-                meta_bits.append(f"src={src_sid}")
-        meta = f" ({', '.join(meta_bits)})" if meta_bits else ""
-        version_note = _format_version_note(inp, point)
-        rows.append(f"- **{description}**{meta}{version_note}")
-    if len(rows) == 2:  # only the header + blank line, all pitfalls filtered out
+        line = _kb_point_line(inp, point, text_key="description", count_label="observed", lead_meta_key="severity")
+        if line:
+            rows.append(line)
+    if len(rows) == 2:  # only the header + blank line: no pitfalls, or all filtered out
         rows.append(_NONE_PLACEHOLDER)
     return rows
 
@@ -2083,53 +1214,51 @@ def _section_source_hint(inp: SpecialistPromptInputs) -> list[str]:
 
 
 # Section 8 — Output protocol
+def _payload_schema_json(inp: SpecialistPromptInputs, proposal_example: dict[str, Any], authors_patches: bool) -> str:
+    """The example ``specialist_done`` payload Section 8 shows, as indented JSON."""
+    return json.dumps(
+        {
+            "intent_type": "specialist_done",
+            "payload": {
+                "gap_canonical_id": inp.gap_canonical_id or "<echo from dispatch>",
+                "domain": inp.domain.key,
+                "proposal_set": [proposal_example],
+                **({"patches_written": [], "experience_citations": []} if authors_patches else {}),
+                "summary": "≤ 500 char overview of what you tried this round",
+                "confidence": 0.6,
+                "new_findings": [],
+                "residual_questions": [],
+            },
+        },
+        sort_keys=True,
+        indent=2,
+    )
+
+
 def _section_output_protocol(inp: SpecialistPromptInputs) -> list[str]:
     """Render Section 8 (output protocol) of the specialist prompt."""
     workspace = inp.workspace_path or "<workspace>"
-    channel = (inp.exit_channel or "").upper().strip()
     authors_patches = _authors_patches(inp)
+    if inp.domain.key == "candidate_discovery_specialist":
+        proposal_example, proposal_contract = UPSTREAM_CANDIDATE_EXAMPLE, UPSTREAM_CANDIDATE_CONTRACT
+    else:
+        proposal_example, proposal_contract = EXPLORE_VARIANT_EXAMPLE, EXPLORE_VARIANT_CONTRACT
 
-    exit_lines: list[str] = []
-    if channel == "A" or channel == "":
-        exit_lines.extend(
-            [
-                "**Exit — ``emit_intent`` tool:** call ``emit_intent`` exactly once",
-                "with intent type ``specialist_done`` and the payload schema below.",
-            ]
-        )
-    if channel == "B" or channel == "":
-        if channel == "":
-            exit_lines.append("")
-        exit_lines.extend(
-            [
-                "**Exit — file write (subprocess runtime):** write the same payload to",
-                f"``{workspace}/specialist_done.json`` as your **absolute last action**.",
-                "The dispatcher polls for that file as the exit signal; stop after writing.",
-            ]
-        )
+    exit_lines = [
+        "**Exit — file write:** write the ``specialist_done`` payload (schema below) to",
+        f"``{workspace}/specialist_done.json`` as your **absolute last action**.",
+        "The dispatcher polls for that file as the exit signal; stop after writing.",
+    ]
 
     if authors_patches:
         patch_fields = [
-            "- ``deliverable`` declares what the round produced and is",
-            "  REQUIRED whenever you changed anything: ``{tree_id, targets,",
-            "  patches, artifacts, envs, server_args, setup_commands}``.",
-            "  ``targets`` lists every file you edited, relative to your",
-            "  worktree — the harvest is scoped to it, so a file you changed",
-            "  and did not declare is not shipped. Do NOT put hashes in it;",
-            "  the harness computes them where your work was validated.",
-            "- ``patches_written`` lists paths (relative to your",
-            "  workspace or worktree) of any unified-diff patch files you",
-            "  authored this round. Empty list = no patches; downstream",
-            "  ``integrate_patch`` action skips when empty.",
-            "- ``artifacts_written`` lists any non-diff tuned artifacts to install",
-            "  (e.g. an autotuned config JSON) as objects ``{source, target, kind,",
-            "  description}``: ``source`` is a path inside your worktree, ``target``",
-            "  is the install path — PREFER a framework-relative path; an absolute",
-            "  path is accepted only if it resolves inside an allowlisted framework",
-            "  root. ``integrate_patch`` backs up the target, installs the artifact,",
-            "  runs the same E2E gate, and restores the backup on REVERT. A non-diff",
-            "  tuned artifact is a FULL result — keep ``proposal_set`` non-empty or",
-            "  list the artifact in ``artifacts_written``.",
+            *PATCH_FIELD_LINES,
+            "- ``resolves_finding`` (optional string ``rule_id:subject``): set it only",
+            f"  when the patch fixes a ``{'`` / ``'.join(sorted(CORRECTNESS_FIX_RULES))}`` entry from section 4c,",
+            "  copied verbatim. The gate then verifies the entry is gone from the new log and",
+            f"  accuracy passes, and may KEEP a drop of up to {CORRECTNESS_FIX_MAX_DROP_PCT:.0f}% on the graded axis",
+            "  (throughput, or p50 interactivity with the other interactivity guards still held)",
+            "  within the latency budget.",
         ]
         no_output = "  AND no ``patches_written``/``artifacts_written``; in that case"
     else:
@@ -2146,119 +1275,24 @@ def _section_output_protocol(inp: SpecialistPromptInputs) -> list[str]:
         "",
         *exit_lines,
         "",
-        "**Messages from the Orchestrator (check this as you work):** read",
-        f"``{workspace}/inbox.json`` whenever you finish a step. It is a JSON",
-        "list of ``{from, ts, body}`` entries, absent until the Orchestrator",
-        "sends one. It is how the Orchestrator answers a question you raised",
-        "or redirects you mid-run — if it tells you the mandate changed,",
-        "follow it rather than finishing the original plan. Never write to",
-        "this file.",
-        "",
-        "**Incremental checkpoint (do this throughout the run):** every time",
-        "you reach a new finding or finish a candidate, rewrite your",
-        "best-so-far payload to",
-        f"``{workspace}/specialist_done.partial.json`` (write to",
-        f"``{workspace}/specialist_done.partial.json.tmp`` first, then rename",
-        "over the partial so a reader never sees a half-written file). This",
-        "partial uses the **same payload schema** as the final file but does",
-        "**NOT** end the run — keep working. There is a wall-clock budget; if",
-        "you are stopped before finishing, whatever is in the partial is",
-        "preserved as your result, so keep it current. The Orchestrator also",
-        "reads each rewrite while you are still running — it is how you report",
-        "direction and raise ``residual_questions`` early enough to get an",
-        "answer back through ``inbox.json``. Write the final",
-        "``specialist_done.json`` (which ends the run) only once, as your",
-        "absolute last action.",
+        *(line.replace("{workspace}", workspace) for line in ORCHESTRATOR_CHANNEL_LINES),
         "",
         "Payload schema (identical for both channels):",
         "",
         "```json",
-        json.dumps(
-            {
-                "intent_type": "specialist_done",
-                "payload": {
-                    "gap_canonical_id": inp.gap_canonical_id or "<echo from dispatch>",
-                    "domain": inp.domain.key,
-                    "proposal_set": [
-                        {
-                            "name": "<unique-in-round>",
-                            "extra_args": "--example-flag value",
-                            "extra_envs": {"EXAMPLE_ENV": "1"},
-                            "remove_args": ["--harmful-base-flag"],
-                            "unset_envs": ["HARMFUL_BASE_ENV"],
-                            "args_mode": "append",
-                            "reason": "why this might help the gap",
-                            "atomic": False,
-                            "kb_evidence": [],
-                            "pr_evidence": [],
-                            "source_evidence": [],
-                        }
-                    ],
-                    **({"patches_written": []} if authors_patches else {}),
-                    "summary": "≤ 500 char overview of what you tried this round",
-                    "confidence": 0.6,
-                    "new_findings": [],
-                    "residual_questions": [],
-                },
-            },
-            sort_keys=True,
-            indent=2,
-        ),
+        _payload_schema_json(inp, proposal_example, authors_patches),
         "```",
         "",
         "Field contract:",
         "",
-        (
-            "- ``proposal_set`` items reuse the explore variant schema: "
-            "``extra_args`` / ``extra_envs`` add or override knobs, "
-            "``remove_args`` removes inherited server flags before appending, "
-            "``unset_envs`` removes inherited env vars before applying "
-            "``extra_envs``, and ``args_mode='replace'`` runs without "
-            "inherited server args. Use removal fields when a user/base "
-            "knob may be harmful; do not simulate deletion by adding an "
-            "unrelated flag."
-        ),
-        (
-            "- ``atomic`` (bool, default false): set ``true`` when this "
-            "proposal's ``extra_args`` / ``extra_envs`` are a **coupled set "
-            "that only works together** and MUST be benched as one variant "
-            "(e.g. enabling MTP/speculative decoding REQUIRES a paired "
-            "``--gpu-memory-utilization`` reduction so the draft model has "
-            "headroom — split them and each half OOMs or shows no gain). "
-            "Orchestration is instructed to dispatch an ``atomic`` proposal "
-            "verbatim, without splitting, dropping, or re-deriving its flags. "
-            "Put every co-required flag in THIS one entry; do not scatter a "
-            "coupling across several proposals."
-        ),
-        (
-            "- ``proposal_set``: **2 entries is the norm, 4 the hard cap.** You "
-            "are a curator, not a brainstormer: rank by expected gain x "
-            "confidence, drop anything contradicting ``kb_subgraph`` / "
-            "``pr_evidence``, and stop at 2. A 3rd or 4th must beat the median "
-            "of the first two. Padding is a failure, not thoroughness: each "
-            "weak entry costs a Critic reject and a slot on the serial "
-            "benchmark queue. One real proposal is a better round than two "
-            "padded ones, and an empty ``proposal_set`` with a clear ``summary`` "
-            "is better than one."
-        ),
-        (
-            "- The Critic reviews each surviving variant against the KB "
-            + "before benchmarking, so a marginal-quality proposal costs you "
-            + "a reject (and a pitfall fact that will warn future sessions "
-            + "off the same dead-end)."
-        ),
+        *proposal_contract,
+        *PROPOSAL_SET_RULES,
         *patch_fields,
         *no_proposal_rule,
         "- ``new_findings`` is a list of learned items. Research scouts must",
         "  emit source-backed ``{what, source, expected_impact, accuracy_risk,",
         "  domain_tags[]}`` records.",
         "- ``residual_questions`` carries to the next specialist round.",
-        "",
-        "**Heartbeat (Channel B only):** When running in subprocess mode,",
-        f"write ``{workspace}/heartbeat.json`` periodically (≤5 min apart)",
-        "via Bash so the dispatcher knows you are still alive. Format:",
-        '``{"ts": "<iso8601>", "status": "running", "note": "<short>"}``.',
-        "Going silent past 5 minutes kills your subprocess.",
         "",
         (f"Hard cap: at most **{inp.max_turns}** LLM turns. Emit specialist_done before the cap."),
     ]
@@ -2349,24 +1383,19 @@ def _section_enablement_playbook(inp: SpecialistPromptInputs) -> list[str]:
     Returns:
         list[str]: The enablement-playbook section lines.
     """
-    from hyperloom.common.failure_signature import EnablementRequest, FailureSignature
+    from hyperloom.common.failure_signature import FailureSignature
     from hyperloom.orchestrator.enablement.mandate import build_mandate
 
     model = str((inp.gap_evidence or {}).get("model") or "").strip()
-    req = EnablementRequest(
-        framework=(inp.framework or "").strip().lower(),
-        model=model or "(target model)",
-        repo_url="",
-        gpu_type=(inp.gpu_type or "").strip().lower(),
-    )
     mandate = build_mandate(
-        req,
+        (inp.framework or "").strip().lower(),
+        model or "(target model)",
         FailureSignature.from_dict(inp.enablement_failure_signature),
         candidate_refs=inp.enablement_candidate_refs,
         source_context=inp.enablement_source_context,
     )
     rows = ["## 1b. ENABLEMENT PLAYBOOK", ""]
-    rows.extend(mandate.task_description.splitlines())
+    rows.extend(mandate.splitlines())
     acc_cfg = inp.enablement_accepted_config or {}
     acc_envs = {str(k): str(v) for k, v in (acc_cfg.get("extra_envs") or {}).items()}
     acc_args = str(acc_cfg.get("extra_server_args") or "").strip()
@@ -2474,6 +1503,19 @@ def build_specialist_prompts(inp: SpecialistPromptInputs) -> tuple[str, str]:
             _section_pr_feed(inp),
             _section_source_hint(inp),
         ]
+    elif inp.domain.key == "custom_specialist":
+        # The operator focus is the mandate; perf context is left to the operator text.
+        # Experience KB stays: the warmup records its block as shown to every FRAMEWORK_AGENT specialist.
+        user_sections = [
+            _section_mandate(inp),
+            _section_hardware(inp),
+            _section_pd_disaggregation(inp),
+            _section_execution_budget(inp),
+            _section_gap(inp),
+            _section_experience_kb(inp),
+        ]
+        if _authors_patches(inp):
+            user_sections.append(_section_source_hint(inp))
     else:
         user_sections = [
             _section_mandate(inp),
@@ -2481,8 +1523,10 @@ def build_specialist_prompts(inp: SpecialistPromptInputs) -> tuple[str, str]:
             _section_pd_disaggregation(inp),  # § 1a (PD-disaggregation; omitted unless disaggregated)
             _section_execution_budget(inp),  # omitted when no budget
             _section_gap(inp),
-            _section_kb_subgraph(inp),
+            _section_kb_context(inp),
             _section_roofline_evidence(inp),
+            _section_experience_kb(inp),
+            _section_runtime_findings(inp),
             _section_recipe(inp),
             _section_lessons(inp),
             _section_pitfalls(inp),
@@ -2523,6 +1567,5 @@ def build_specialist_prompts(inp: SpecialistPromptInputs) -> tuple[str, str]:
 
 
 __all__ = [
-    "SpecialistPromptInputs",
     "build_specialist_prompts",
 ]

@@ -11,7 +11,7 @@ from unittest import mock
 import pytest
 
 from hyperloom.orchestrator.bus.message_bus import Message, MessageBus
-from hyperloom.orchestrator.bus.resource_lock import LaneBusy, SqliteLeaseBackend
+from hyperloom.orchestrator.bus.resource_lock import SqliteLeaseBackend
 from hyperloom.orchestrator.bus.storage.connection import SqliteConnection, open_connection
 
 
@@ -56,15 +56,15 @@ async def test_corrupt_expires_at_does_not_abort_acquire(tmp_path):
         )
         stamp = "2026-01-01T00:00:00+00:00"
         db.raw.execute(
-            "UPDATE leases SET acquired_at=?, expires_at=?, heartbeat_at=? WHERE holder_id=?",
-            (stamp, "NOT_A_DATE", stamp, held.holder_id),
+            "UPDATE leases SET acquired_at=?, expires_at=? WHERE holder_id=?",
+            (stamp, "NOT_A_DATE", held.holder_id),
         )
         db.raw.commit()
         retained = [dict(row) for row in db.fetchall_sync("SELECT * FROM leases ORDER BY lane")]
         assert len(retained) == len(held.lanes)
         assert all(row["expires_at"] == "NOT_A_DATE" for row in retained)
 
-        with pytest.raises(LaneBusy) as exc:
+        assert (
             await backend.acquire_many(
                 lanes=["benchmark_lane"],
                 holder_id="new_holder",
@@ -72,13 +72,12 @@ async def test_corrupt_expires_at_does_not_abort_acquire(tmp_path):
                 action="bench",
                 ttl_sec=60,
             )
+            is None
+        )
 
-        assert exc.value.busy_lanes == list(held.lanes)
         assert [dict(row) for row in db.fetchall_sync("SELECT * FROM leases ORDER BY lane")] == retained
-        released = await backend.release(held)
-        holders = await backend.lane_holders()
-        assert released == len(held.lanes)
-        assert holders == {}
+        await backend.release(held)
+        assert await backend.lane_holders() == {}
 
         lease = await backend.acquire_many(
             lanes=["benchmark_lane"],

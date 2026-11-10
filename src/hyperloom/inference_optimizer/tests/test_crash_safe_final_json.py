@@ -108,13 +108,14 @@ def test_sigkill_cannot_write_final_json(tmp_path):
     assert not final_json.exists(), "SIGKILL bypasses finally; final.json cannot exist"
 
 
-def test_crash_safe_platform_does_not_drag_in_the_orchestrator():
+def test_crash_safe_platform_does_not_drag_in_the_orchestrator(tmp_path):
     """The safety net must not import the subsystems that may have just failed."""
     probe = (
-        "import sys;"
-        "from hyperloom.inference_optimizer.breakdown.exporter import _crash_safe_platform;"
+        "import json, sys;"
+        "from hyperloom.inference_optimizer.breakdown.exporter import write_minimal_final_json;"
         "import hyperloom;"
-        "rec = _crash_safe_platform('mi355x');"
+        f"target = write_minimal_final_json({str(tmp_path)!r});"
+        "rec = json.loads(target.read_text())['platform'];"
         "assert rec.get('status'), rec;"
         "heavy = [m for m in ("
         "  'hyperloom.orchestrator.actions.executors.report',"

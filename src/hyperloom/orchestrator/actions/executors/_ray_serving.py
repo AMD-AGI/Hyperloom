@@ -9,14 +9,20 @@ import math
 import os
 import signal
 import subprocess
+import threading
 import time
-from dataclasses import dataclass, field
-from typing import Any
+import uuid
+from dataclasses import dataclass, field, replace
+from typing import TYPE_CHECKING, Any, NoReturn
 
-from hyperloom.common.env_safety import scrub_benchmark_process_env
+from hyperloom_common.fs_utils import append_nofollow
+from hyperloom.common.proctree import TERM_GRACE_SEC, collect_tree, kill_tree, marked_pids
 from hyperloom.common.visible_devices import COUNTING_VISIBLE_DEVICE_VARS
 
 from ._subprocess_kill import COOPERATIVE_REAP_BUDGET_SEC
+
+if TYPE_CHECKING:
+    from ._ray_backend import SessionKillRound
 
 log = logging.getLogger(__name__)
 
@@ -24,6 +30,10 @@ log = logging.getLogger(__name__)
 # before claiming a new one.
 _ACTOR_TIMEOUT_RC: int = -916
 _RAY_ACTOR_DIED_RC: int = -913
+
+# Marks a lease round for the dead-actor reap alone; the actor's round teardown reaps by REAP_MARK_ENV, which would
+# also kill the server a ``cleanup: false`` round leaves up for the next round.
+_ROUND_MARK_ENV = "HYPERLOOM_RAY_ROUND_MARK"
 
 # Timeout for ray.get probes on specialist actor methods (is_alive/exit_code/stop).
 _LEASE_PROBE_TIMEOUT_SEC: float = 30.0
@@ -70,8 +80,37 @@ _SERVING_ACTOR_CONCURRENCY: int = 2
 _VISIBLE_DEVICE_ENV_KEYS: tuple[str, ...] = COUNTING_VISIBLE_DEVICE_VARS
 
 
+#: Leads every :exc:`RayInfeasibleError` message, so a caller that only sees the
+#: failure as text (a baseline round's stderr tail) can tell that retrying the
+#: same round against the same cluster cannot succeed.
+RAY_INFEASIBLE_MARKER: str = "ray_cluster_infeasible"
+
+
 class RayInfeasibleError(RuntimeError):
     """Raised when the cluster can never satisfy the requested resources."""
+
+
+class RayMissingServingSlotError(RayInfeasibleError):
+    """The connected head does not declare the ``serving_slot`` resource."""
+
+
+#: Held by every lease while it connects, checks feasibility and creates its actor,
+#: and by the missing-``serving_slot`` repair for its whole stop/start/reconnect.
+#: Leases start from pool threads; without it a lease could create its actor on
+#: the head the repair is about to stop, after the repair found the head idle.
+_CLUSTER_STARTUP_LOCK = threading.RLock()
+
+#: Leases in this process that have submitted an actor, under the lock above. Actor
+#: creation is asynchronous, so a submitted actor can be absent from the GCS actor
+#: table and hold nothing yet; the repair refuses while this is non-zero instead of
+#: trusting the cluster's own view to have caught up.
+_LEASE_ACTORS_SUBMITTED = 0
+
+
+def _note_lease_actor_submitted() -> None:
+    """Record that a lease submitted an actor; called with ``_CLUSTER_STARTUP_LOCK`` held."""
+    global _LEASE_ACTORS_SUBMITTED
+    _LEASE_ACTORS_SUBMITTED += 1
 
 
 def _assert_cluster_feasible(*, num_gpus: float, serving_slot: bool) -> None:
@@ -79,16 +118,54 @@ def _assert_cluster_feasible(*, num_gpus: float, serving_slot: bool) -> None:
     import ray
 
     totals = ray.cluster_resources()
+    # The slot first: a head started by hand without it often advertises too few GPUs as well, and the repair
+    # (a fresh head) fixes both, so it must not be hidden behind the GPU error.
+    if serving_slot and "serving_slot" not in totals:
+        raise RayMissingServingSlotError(
+            f"{RAY_INFEASIBLE_MARKER}: existing Ray head has no serving_slot resource; "
+            "restart with --resources='{\"serving_slot\":1}' or set INFERENCE_OPTIMIZER_RAY_EXEC=0"
+        )
     cluster_gpus = float(totals.get("GPU", 0))
     if cluster_gpus < num_gpus:
         raise RayInfeasibleError(
-            f"cluster has {cluster_gpus} GPU(s), {num_gpus} requested; set INFERENCE_OPTIMIZER_RAY_EXEC=0 or add GPUs"
+            f"{RAY_INFEASIBLE_MARKER}: cluster has {cluster_gpus} GPU(s), {num_gpus} requested; "
+            "set INFERENCE_OPTIMIZER_RAY_EXEC=0 or add GPUs"
         )
-    if serving_slot and "serving_slot" not in totals:
-        raise RayInfeasibleError(
-            "existing Ray head has no serving_slot resource; "
-            "restart with --resources='{\"serving_slot\":1}' or set INFERENCE_OPTIMIZER_RAY_EXEC=0"
-        )
+
+
+def _ensure_cluster_feasible(*, num_gpus: float, serving_slot: bool) -> None:
+    """Like :func:`_assert_cluster_feasible`, but repair a lone local head that lacks ``serving_slot``.
+
+    A head that predates this process (one an agent started by hand, say) is reused
+    by ``ensure_ray_cluster`` as long as it answers ``ray status``. When it lacks
+    ``serving_slot`` and is safe to replace, it is restarted with the resource, the
+    way the installer does; any other cluster keeps the error, because stopping it
+    would take down work this process does not own.
+    """
+    try:
+        _assert_cluster_feasible(num_gpus=num_gpus, serving_slot=serving_slot)
+        return
+    except RayMissingServingSlotError as exc:
+        missing = exc
+    from ._ray_backend import get_ray_backend
+    from ._ray_runtime import local_head_restartable
+
+    with _CLUSTER_STARTUP_LOCK:
+        try:
+            # Another lease may have repaired the head while this one waited.
+            _assert_cluster_feasible(num_gpus=num_gpus, serving_slot=serving_slot)
+            return
+        except RayMissingServingSlotError:
+            pass
+        if _LEASE_ACTORS_SUBMITTED:
+            restartable, why = False, f"this process has submitted {_LEASE_ACTORS_SUBMITTED} lease actor(s) to it"
+        else:
+            restartable, why = local_head_restartable()
+        if not restartable:
+            raise RayMissingServingSlotError(f"{missing}; not restarting it automatically: {why}") from missing
+        log.warning("Ray head has no serving_slot resource; restarting the local head with it")
+        get_ray_backend().restart_local_head()
+    _assert_cluster_feasible(num_gpus=num_gpus, serving_slot=serving_slot)
 
 
 def _round_wait_timeout_sec(timeout: int | float | None) -> float:
@@ -143,6 +220,46 @@ def _round_wait_timeout_stderr(waited: float, ceiling: float) -> str:
     )
 
 
+@dataclass(frozen=True)
+class _StopRequest:
+    """Why a round in flight is to be asked to stop, and whether its wall-clock ceiling is what asked."""
+
+    reason: str
+    timed_out: bool
+
+
+def _stop_request(waited: float, wait_ceiling: float, cancel_scope: Any) -> _StopRequest | None:
+    """The stop to ask of a round that has run ``waited`` seconds, or ``None`` while it may keep running."""
+    if wait_ceiling > 0 and waited >= wait_ceiling:
+        # Nobody is going to cancel this scope: a task Ray never schedules stays 'running' forever and
+        # the lease it holds is never released. Go through the cancel path's cooperative step first --
+        # ``ray.kill`` runs neither ``__ray_terminate__`` nor atexit, so killing an actor whose round is
+        # genuinely still running would strand the served process tree on its GPUs.
+        log.warning(
+            "ServingLease: the round has not returned in %.0fs (ceiling %.0fs); asking the actor to "
+            "stop it -- its task was most likely never schedulable",
+            waited,
+            wait_ceiling,
+        )
+        return _StopRequest(f"ray_round_wait_timeout after {waited:.0f}s", timed_out=True)
+    if cancel_scope is not None and cancel_scope.cancelled:
+        reason = cancel_scope.reason or "orchestrator_cancelled"
+        log.warning(
+            "ServingLease: asking the actor to stop the round in flight (%s)",
+            reason,
+        )
+        return _StopRequest(reason, timed_out=False)
+    return None
+
+
+def _reap_marked_round(mark: str) -> int:
+    """Stop every process on this host that inherited ``mark``; return how many were found."""
+    pids = marked_pids(_ROUND_MARK_ENV, mark)
+    if pids:
+        kill_tree(collect_tree(pids))
+    return len(pids)
+
+
 def _pdeathsig_preexec() -> None:
     """Ask the OS to SIGTERM this child if its parent dies (Linux ``PR_SET_PDEATHSIG``).
 
@@ -156,11 +273,20 @@ def _pdeathsig_preexec() -> None:
     try:
         import ctypes
 
-        # PR_SET_PDEATHSIG = 1
+        # PR_SET_PDEATHSIG is option 1
         libc = ctypes.CDLL("libc.so.6", use_errno=True)
         libc.prctl(1, signal.SIGTERM)
-    except Exception:  # noqa: BLE001 — best-effort hardening only
+    except (OSError, AttributeError):
         pass
+
+
+@dataclass(frozen=True)
+class CreatedLog:
+    """A log file the caller created at ``path``, which a process manager only appends to: what is there must be the
+    file ``identity`` (``(st_dev, st_ino)``) names."""
+
+    path: str
+    identity: tuple[int, int]
 
 
 @dataclass
@@ -179,10 +305,11 @@ class ManagedServerProcess:
         *,
         env: dict[str, str] | None = None,
         cwd: str | None = None,
-        log_path: str | None = None,
+        log_path: str | CreatedLog | None = None,
         stdin_path: str | None = None,
     ) -> int:
-        """Launch the subprocess and return its pid."""
+        """Launch the subprocess and return its pid. A :class:`CreatedLog` is appended to, never followed through a
+        link (:func:`~hyperloom_common.fs_utils.append_nofollow`); a path is created or truncated."""
         if self._proc is not None and self._proc.poll() is None:
             raise RuntimeError("ManagedServerProcess already running")
         stdin: Any = subprocess.DEVNULL
@@ -193,7 +320,13 @@ class ManagedServerProcess:
             if stdin_path:
                 stdin_fh = open(stdin_path, "rb")
                 stdin = stdin_fh
-            if log_path:
+            if isinstance(log_path, CreatedLog):
+                stdout_fh = append_nofollow(log_path.path, log_path.identity)
+                # Dated now, as the file this used to create was: the caller made it before Ray placed the actor,
+                # and a reaper reads its age as the CLI's silence.
+                os.utime(stdout_fh.fileno())
+                stdout = stdout_fh
+            elif log_path:
                 os.makedirs(os.path.dirname(log_path) or ".", exist_ok=True)
                 stdout_fh = open(log_path, "w", encoding="utf-8")
                 stdout = stdout_fh
@@ -245,7 +378,7 @@ class ManagedServerProcess:
             return None
         return self._proc.poll()
 
-    def stop(self, *, grace_seconds: float = 5.0) -> bool:
+    def stop(self, *, grace_seconds: float = TERM_GRACE_SEC) -> bool:
         """Confirm teardown of the enumerated live tree before dropping its handle."""
         from hyperloom.common.proctree import collect_tree, kill_tree
         from ._subprocess_kill import kill_my_spawned_server
@@ -270,6 +403,32 @@ class ManagedServerProcess:
         return True
 
 
+@dataclass(frozen=True)
+class ActorLaunch:
+    """A subprocess a ServingActor launches; it runs in ``env`` alone, plus the visible-device keys Ray set.
+    ``log_identity``: the log is the file the caller created at ``log_path``, which the actor only appends to
+    (:meth:`ManagedServerProcess.start`)."""
+
+    cmd: list[str]
+    env: dict[str, str] | None = None
+    cwd: str | None = None
+    log_path: str | None = None
+    stdin_path: str | None = None
+    log_identity: tuple[int, int] | None = None
+
+
+def _child_env_for(launch: ActorLaunch) -> dict[str, str]:
+    """Return the environment the serving subprocess runs in: the launch's own, with Ray's visible-device keys."""
+    child_env = dict(launch.env or {})
+    for key in _VISIBLE_DEVICE_ENV_KEYS:
+        if key in os.environ:
+            child_env[key] = os.environ[key]
+    from ._ray_backend import align_hip_with_ray_rocr
+
+    align_hip_with_ray_rocr(child_env)
+    return child_env
+
+
 def _serving_actor_body() -> Any:
     """Build the ServingActor class (imports ray lazily so import is cheap)."""
     import ray
@@ -283,54 +442,20 @@ def _serving_actor_body() -> Any:
             # The cancel scope of the round currently in flight, if any.
             self._round_scope: Any = None
 
-        def start(
-            self,
-            cmd,
-            *,
-            env=None,
-            cwd=None,
-            log_path=None,
-            scrub_benchmark_env=False,
-            env_mode="merge",
-            stdin_path=None,
-        ) -> int:
+        def start(self, launch: ActorLaunch) -> int:
             """Launch the serving subprocess; Ray has set visible devices."""
-            if env_mode == "merge":
-                child_env = dict(os.environ)
-                for key, value in (env or {}).items():
-                    if key in _VISIBLE_DEVICE_ENV_KEYS:
-                        continue
-                    child_env[key] = value
-            elif env_mode == "replace":
-                child_env = dict(env or {})
-                for key in _VISIBLE_DEVICE_ENV_KEYS:
-                    if key in os.environ:
-                        child_env[key] = os.environ[key]
-            else:
-                raise ValueError(f"unsupported env_mode {env_mode!r}; expected 'merge' or 'replace'")
-            if scrub_benchmark_env:
-                scrub_benchmark_process_env(child_env)
             start_kwargs = {
-                "env": child_env,
-                "cwd": cwd,
-                "log_path": log_path,
+                "env": _child_env_for(launch),
+                "cwd": launch.cwd,
+                "log_path": launch.log_path,
             }
-            if stdin_path is not None:
-                start_kwargs["stdin_path"] = stdin_path
-            return self._mgr.start(cmd, **start_kwargs)
+            if launch.log_path is not None and launch.log_identity is not None:
+                start_kwargs["log_path"] = CreatedLog(launch.log_path, tuple(launch.log_identity))
+            if launch.stdin_path is not None:
+                start_kwargs["stdin_path"] = launch.stdin_path
+            return self._mgr.start(launch.cmd, **start_kwargs)
 
-        def run_blocking(
-            self,
-            cmd,
-            *,
-            env=None,
-            cwd=None,
-            timeout=None,
-            silence_timeout_sec=None,
-            server_log_path=None,
-            server_already_ready=False,
-            session_remaining_sec=None,
-        ):
+        def run_blocking(self, bench_round):
             """Run one benchmark round to completion; return ``(rc, stdout, stderr)``."""
             import subprocess as _sp
 
@@ -341,16 +466,7 @@ def _serving_actor_body() -> Any:
             self._round_scope = scope
             try:
                 with use_cancel_scope(scope):
-                    return _run_subprocess_worker(
-                        cmd=cmd,
-                        env=env,
-                        cwd=cwd,
-                        timeout_s=timeout,
-                        silence_timeout_sec=silence_timeout_sec,
-                        server_log_path=server_log_path,
-                        server_already_ready=server_already_ready,
-                        session_remaining_sec=session_remaining_sec,
-                    )
+                    return _run_subprocess_worker(bench_round)
             except _sp.TimeoutExpired as exc:
                 return _ACTOR_TIMEOUT_RC, "", f"TimeoutExpired: {exc}"
             finally:
@@ -382,30 +498,16 @@ def _serving_actor_body() -> Any:
 
         def __ray_terminate__(self) -> None:  # pragma: no cover - Ray teardown hook
             """Reap the serving process when Ray tears the actor down."""
-            try:
-                self._mgr.stop()
-            except Exception:  # noqa: BLE001
-                pass
+            self._mgr.stop()
 
     return ServingActor
 
 
-def make_serving_actor(num_gpus: float, *, serving_slot: bool = True):
+def make_serving_actor(num_gpus: float, *, serving_slot: bool, max_concurrency: int):
     """Create a ServingActor handle holding ``num_gpus`` (+ optional ``serving_slot``)."""
     actor_cls: Any = _serving_actor_body()
     resources = {"serving_slot": 1} if serving_slot else None
-    return actor_cls.options(
-        num_gpus=num_gpus,
-        resources=resources,
-        max_concurrency=_SERVING_ACTOR_CONCURRENCY,
-    ).remote()
-
-
-def make_gpu_specialist_actor(num_gpus: float, *, serving_slot: bool = False):
-    """Create a ServingActor handle for a GPU specialist, holding ``num_gpus`` (+ optional ``serving_slot``)."""
-    actor_cls: Any = _serving_actor_body()
-    resources = {"serving_slot": 1} if serving_slot else None
-    return actor_cls.options(num_gpus=num_gpus, resources=resources).remote()
+    return actor_cls.options(num_gpus=num_gpus, resources=resources, max_concurrency=max_concurrency).remote()
 
 
 #: Actor handles from quarantined leases, held for the life of this process.
@@ -420,29 +522,11 @@ def make_gpu_specialist_actor(num_gpus: float, *, serving_slot: bool = False):
 _QUARANTINED_ACTORS: list[Any] = []
 
 
-class ServingLeaseQuarantined(RuntimeError):
-    """A lease whose devices are held by an actor that never answered.
-
-    Raised rather than silently reusing the lease: its round timed out, nothing
-    established what became of the served subprocess tree, and the actor is
-    deliberately still alive so the scheduler cannot place anything else on its
-    cards.
-    """
-
-
 class ServingLease:
     """A held Ray GPU lease spanning every round that shares one server."""
 
-    def __init__(
-        self,
-        *,
-        num_gpus: float,
-        serving_slot: bool = True,
-        ensure_log_path: Any = None,
-    ) -> None:
+    def __init__(self, *, num_gpus: float) -> None:
         self._num_gpus = float(num_gpus)
-        self._serving_slot = bool(serving_slot)
-        self._ensure_log_path = ensure_log_path
         self._actor: Any = None
         # Non-empty once a round timed out with the actor unresponsive: the label
         # of that round. The actor is then kept alive on purpose so its GPUs stay
@@ -451,35 +535,20 @@ class ServingLease:
         self._quarantined: str = ""
 
     def ensure(self) -> None:
-        """Ensure the Ray cluster is up and the serving actor is created.
-
-        Raises:
-            RuntimeError: This lease is quarantined. Its devices are held by an
-                actor whose round never answered, so handing the caller a usable
-                lease would place the next round on cards a live server may
-                still map.
-        """
-        self._refuse_if_quarantined("ensure")
+        """Ensure the Ray cluster is up and the serving actor is created."""
         if self._actor is not None:
             return
         from ._ray_backend import get_ray_backend
 
-        get_ray_backend().ensure(log_path=self._ensure_log_path)
-        _assert_cluster_feasible(num_gpus=self._num_gpus, serving_slot=self._serving_slot)
-        self._actor = make_serving_actor(self._num_gpus, serving_slot=self._serving_slot)
+        with _CLUSTER_STARTUP_LOCK:
+            get_ray_backend().ensure()
+            _ensure_cluster_feasible(num_gpus=self._num_gpus, serving_slot=True)
+            self._actor = make_serving_actor(
+                self._num_gpus, serving_slot=True, max_concurrency=_SERVING_ACTOR_CONCURRENCY
+            )
+            _note_lease_actor_submitted()
 
-    def run_session_kill(
-        self,
-        cmd: list[str],
-        *,
-        env: dict[str, str] | None = None,
-        cwd: str | None = None,
-        timeout: int | float | None = None,
-        silence_timeout_sec: float | None = None,
-        server_log_path: str | None = None,
-        server_already_ready: bool = False,
-        session_remaining_sec: float | None = None,
-    ) -> tuple[int, str, str]:
+    def run_session_kill(self, bench_round: SessionKillRound) -> tuple[int, str, str]:
         """Run one benchmark round inside the lease's actor; return ``(rc, stdout, stderr)``."""
         from ..cancel_channel import cancel_scope_listener
 
@@ -499,43 +568,32 @@ class ServingLease:
         except (RayInfeasibleError, RuntimeError) as exc:
             log.warning("ServingLease.run_session_kill: cluster ensure failed: %r", exc)
             return 1, "", f"ray_ensure_error: {exc}"[:2000]
+        # Stamped over the caller's env, so a mark it inherited cannot join this round to another launch.
+        bench_round = replace(bench_round, env={**bench_round.env, _ROUND_MARK_ENV: uuid.uuid4().hex})
         # Registered before the round is submitted, so a cancel that arrives while Ray is still scheduling it is one
         # this call is counted as able to hear -- the same window the local path opens around its spawn.
         with cancel_scope_listener() as cancel_scope:
             acquire_ref = self._actor.pid.remote()
-            ref = self._actor.run_blocking.remote(
-                cmd,
-                env=env,
-                cwd=cwd,
-                timeout=timeout,
-                silence_timeout_sec=silence_timeout_sec,
-                server_log_path=server_log_path,
-                server_already_ready=server_already_ready,
-                session_remaining_sec=session_remaining_sec,
-            )
-            return self._collect_round(
-                ref,
-                acquire_ref=acquire_ref,
-                cmd=cmd,
-                timeout=timeout,
-                cancel_scope=cancel_scope,
-            )
+            ref = self._actor.run_blocking.remote(bench_round)
+            return self._collect_round(ref, acquire_ref=acquire_ref, bench_round=bench_round, cancel_scope=cancel_scope)
 
     def _collect_round(
         self,
         ref: Any,
         *,
         acquire_ref: Any,
-        cmd: list[str],
-        timeout: int | float | None,
+        bench_round: SessionKillRound,
         cancel_scope: Any,
     ) -> tuple[int, str, str]:
         """Wait for a submitted round, forwarding a cancel to the actor if one comes."""
+        cmd, timeout = bench_round.cmd, bench_round.timeout
         import subprocess as _sp
 
         import ray
 
-        _actor_err, _task_err = ray.exceptions.RayActorError, ray.exceptions.RayTaskError
+        # Ray's memory monitor kills an actor with OutOfMemoryError, which is no RayActorError.
+        _actor_err = (ray.exceptions.RayActorError, ray.exceptions.OutOfMemoryError)
+        _task_err = ray.exceptions.RayTaskError
         try:
             # Even an uncancellable round goes through the polling wait: a bare ``ray.get`` has no wall-clock
             # deadline, which is exactly how a never-scheduled task parked a pool thread for an hour.
@@ -549,20 +607,14 @@ class ServingLease:
         except _actor_err as exc:
             # The actor (worker) itself died — e.g. its server OOM-killed the worker, or raylet reaped it. Drop the
             # dead handle so the next round re-creates a fresh actor via ``ensure()`` and this round surfaces as a
-            # benchmark failure instead of cascading. Dropping it also makes ``stop()``/``close()`` no-ops, so nothing
-            # here can still reach the server tree the dead actor spawned; the shutdown pidfile reap frees those GPUs.
-            log.warning(
-                "ServingLease.run_session_kill: ray actor died: %r; its server tree (if any) "
-                "is left to the pidfile reaper",
-                exc,
-            )
+            # benchmark failure instead of cascading. The round sits in its own session and outlives a killed actor,
+            # so it is reaped here by its mark before the GPUs and the port go to the next round.
+            reaped = _reap_marked_round(bench_round.env[_ROUND_MARK_ENV])
+            log.warning("ServingLease.run_session_kill: ray actor died: %r; reaped %d leftover pids", exc, reaped)
             self._actor = None
-            try:
-                from ._ray_backend import mark_ray_backend_unhealthy
+            from ._ray_backend import mark_ray_backend_unhealthy
 
-                mark_ray_backend_unhealthy()
-            except Exception:  # noqa: BLE001 - failure recovery must not raise
-                pass
+            mark_ray_backend_unhealthy()
             return 1, "", f"ray_actor_error: {exc}"[:2000]
         except _task_err as exc:
             # Worker crash / unexpected error: surface as a benchmark failure so the caller's existing rc!=0 handling
@@ -640,39 +692,15 @@ class ServingLease:
                 # session -- which is the failure the ceiling below exists to bound, cancellable or not.
                 continue
             if not acquired and time.monotonic() >= acquire_deadline:
-                # Killing outright is safe here in a way it is not at the ceiling: an actor Ray never placed holds no
-                # resources and has spawned no server, so nothing survives this call still mapping GPUs.
-                log.warning(
-                    "ServingLease: actor did not acquire resources within %.0fs; killing it",
-                    RESOURCE_ACQUIRE_TIMEOUT_SEC,
-                )
-                self._kill_actor()
+                self._kill_unplaced_actor()
                 return 1, "", "resource_acquire_timeout"
             if asked_at is None:
-                waited = time.monotonic() - started_at
-                if wait_ceiling > 0 and waited >= wait_ceiling:
-                    # Nobody is going to cancel this scope: a task Ray never schedules stays 'running' forever and
-                    # the lease it holds is never released. Go through the cancel path's cooperative step first --
-                    # ``ray.kill`` runs neither ``__ray_terminate__`` nor atexit, so killing an actor whose round is
-                    # genuinely still running would strand the served process tree on its GPUs.
-                    timed_out = True
-                    reason = f"ray_round_wait_timeout after {waited:.0f}s"
-                    log.warning(
-                        "ServingLease: the round has not returned in %.0fs (ceiling %.0fs); asking the actor to "
-                        "stop it -- its task was most likely never schedulable",
-                        waited,
-                        wait_ceiling,
-                    )
-                elif cancel_scope is not None and cancel_scope.cancelled:
-                    reason = cancel_scope.reason or "orchestrator_cancelled"
-                    log.warning(
-                        "ServingLease: asking the actor to stop the round in flight (%s)",
-                        reason,
-                    )
-                else:
+                stop = _stop_request(time.monotonic() - started_at, wait_ceiling, cancel_scope)
+                if stop is None:
                     continue
+                timed_out = stop.timed_out
                 asked_at = time.monotonic()
-                if not self._ask_actor_to_cancel(reason):
+                if not self._ask_actor_to_cancel(stop.reason):
                     # The actor never took the round, or cannot be reached to be told about it.
                     asked_at -= CANCEL_ROUND_GRACE_SEC
             elif time.monotonic() - asked_at >= CANCEL_ROUND_GRACE_SEC:
@@ -693,44 +721,7 @@ class ServingLease:
                 # process-tree machinery, not to a timeout path; say plainly what may have been left behind so an
                 # operator can look.
                 if timed_out:
-                    # Deliberately NOT killing the actor. ``ray.kill`` runs
-                    # neither ``__ray_terminate__`` nor atexit, so a round that
-                    # really is still running keeps its server subprocesses --
-                    # but killing the actor hands its GPUs straight back to the
-                    # scheduler, and the next round would be placed on cards a
-                    # live server still maps. That trades a bounded wait for
-                    # concurrent GPU use, which corrupts quietly.
-                    #
-                    # Leaving the actor alive keeps those devices reserved, so
-                    # nothing else can be placed on them. The cost is that they
-                    # stay out of circulation until the session ends or an
-                    # operator intervenes -- the same asymmetry the lane leases
-                    # settle on: a resource stuck is recoverable, a resource
-                    # shared is not.
-                    self._abandon_ref(ref)
-                    # Declared here, honoured by ensure(), run_session_kill() and
-                    # close(). Declaring it without those would be the same
-                    # half-measure a prior revision shipped: the quarantine held
-                    # inside this method while the caller's finally: close() went
-                    # on to kill the actor anyway.
-                    self._quarantined = _round_label(cmd)
-                    # Outlives this lease object on purpose; see _QUARANTINED_ACTORS.
-                    if self._actor is not None and self._actor not in _QUARANTINED_ACTORS:
-                        _QUARANTINED_ACTORS.append(self._actor)
-                    log.warning(
-                        "ServingLease: abandoning round %s after %.0fs without a response, and KEEPING its actor "
-                        "alive on purpose: its subprocess tree cannot be confirmed gone, so its GPUs stay reserved "
-                        "rather than being returned to the scheduler. They will not be reusable until this session "
-                        "ends; if you need them sooner, confirm no server of that round survives and kill the actor "
-                        "by hand",
-                        _round_label(cmd),
-                        time.monotonic() - started_at,
-                    )
-                    raise subprocess.TimeoutExpired(
-                        cmd,
-                        wait_ceiling,
-                        stderr=_round_wait_timeout_stderr(time.monotonic() - started_at, wait_ceiling),
-                    )
+                    self._quarantine_unresponsive_round(ref, cmd, wait_ceiling=wait_ceiling, started_at=started_at)
                 # The cancel path keeps the behaviour it had on main: an operator
                 # or a shutdown asked for this, and the caller is waiting on the
                 # teardown rather than on a round.
@@ -746,19 +737,71 @@ class ServingLease:
                     f"{CANCEL_ROUND_GRACE_SEC:.0f}s without returning the round",
                 )
 
-    def _abandon_ref(self, ref: Any) -> None:
-        """Drop a round this lease will never collect. Never raises."""
-        try:
-            import ray
+    def _kill_unplaced_actor(self) -> None:
+        """Kill an actor Ray never placed before it acquired resources."""
+        # Killing outright is safe here in a way it is not at the ceiling: an actor Ray never placed holds no
+        # resources and has spawned no server, so nothing survives this call still mapping GPUs.
+        log.warning(
+            "ServingLease: actor did not acquire resources within %.0fs; killing it",
+            RESOURCE_ACQUIRE_TIMEOUT_SEC,
+        )
+        self._kill_actor()
 
+    def _quarantine_unresponsive_round(
+        self,
+        ref: Any,
+        cmd: list[str],
+        *,
+        wait_ceiling: float,
+        started_at: float,
+    ) -> NoReturn:
+        """Give up on a round that outlived its ceiling, keeping its actor alive, and raise the caller's timeout.
+
+        Deliberately NOT killing the actor. ``ray.kill`` runs neither ``__ray_terminate__`` nor atexit, so a round
+        that really is still running keeps its server subprocesses -- but killing the actor hands its GPUs straight
+        back to the scheduler, and the next round would be placed on cards a live server still maps. That trades a
+        bounded wait for concurrent GPU use, which corrupts quietly. Leaving the actor alive keeps those devices
+        reserved, so nothing else can be placed on them. The cost is that they stay out of circulation until the
+        session ends or an operator intervenes -- the same asymmetry the lane leases settle on: a resource stuck is
+        recoverable, a resource shared is not.
+
+        Raises:
+            subprocess.TimeoutExpired: Always; the round is the caller's timeout.
+        """
+        self._abandon_ref(ref)
+        # Declared here, honoured by run_session_kill() and close().
+        self._quarantined = _round_label(cmd)
+        # Outlives this lease object on purpose; see _QUARANTINED_ACTORS.
+        if self._actor is not None and self._actor not in _QUARANTINED_ACTORS:
+            _QUARANTINED_ACTORS.append(self._actor)
+        log.warning(
+            "ServingLease: abandoning round %s after %.0fs without a response, and KEEPING its actor "
+            "alive on purpose: its subprocess tree cannot be confirmed gone, so its GPUs stay reserved "
+            "rather than being returned to the scheduler. They will not be reusable until this session "
+            "ends; if you need them sooner, confirm no server of that round survives and kill the actor "
+            "by hand",
+            _round_label(cmd),
+            time.monotonic() - started_at,
+        )
+        raise subprocess.TimeoutExpired(
+            cmd,
+            wait_ceiling,
+            stderr=_round_wait_timeout_stderr(time.monotonic() - started_at, wait_ceiling),
+        )
+
+    def _abandon_ref(self, ref: Any) -> None:
+        """Drop a round this lease will never collect; Ray and OS errors are swallowed."""
+        import ray
+
+        try:
             # Recoverable cancels only: a task still queued for an actor we are about to kill has nothing to
             # interrupt, and ``force=True`` is rejected for actor tasks.
             ray.cancel(ref)
-        except Exception as exc:  # noqa: BLE001 — the actor kill below is what actually frees the resources
+        except (ray.exceptions.RayError, OSError) as exc:  # the actor kill below is what frees the resources
             log.warning("ServingLease: could not cancel the abandoned round: %r", exc)
 
     def _ask_actor_to_cancel(self, reason: str) -> bool:
-        """Tell the actor to stop the round it is running. Never raises."""
+        """Tell the actor to stop the round it is running; Ray and OS errors are swallowed."""
         import ray
 
         actor = self._actor
@@ -766,7 +809,7 @@ class ServingLease:
             return False
         try:
             return bool(ray.get(actor.cancel_round.remote(reason), timeout=_LEASE_PROBE_TIMEOUT_SEC))
-        except Exception as exc:  # noqa: BLE001 — an unreachable actor gets killed instead
+        except (ray.exceptions.RayError, OSError) as exc:  # an unreachable actor gets killed instead
             log.warning("ServingLease: could not reach the actor to cancel its round: %r", exc)
             return False
 
@@ -790,113 +833,57 @@ class ServingLease:
             return
         if self._actor is None:
             return
-        try:
-            import ray
+        import ray
 
+        try:
             ray.get(self._actor.stop.remote(), timeout=CLOSE_STOP_TIMEOUT_SEC)
-        except Exception as exc:  # noqa: BLE001 — the kill below is the backstop
+        except (ray.exceptions.RayError, OSError) as exc:  # the kill below is the backstop
             log.warning("ServingLease.close: the actor did not stop its server: %r", exc)
         self._kill_actor()
 
-    def _refuse_if_quarantined(self, op: str) -> None:
-        """Refuse an operation that would put work back on quarantined devices.
-
-        Args:
-            op: The operation being refused, named in the message.
-
-        Raises:
-            ServingLeaseQuarantined: Always, when this lease is quarantined.
-        """
-        if self._quarantined:
-            raise ServingLeaseQuarantined(
-                f"serving lease is quarantined after round {self._quarantined} timed out with its actor "
-                f"unresponsive; {op} would place work on GPUs its subprocess tree may still hold"
-            )
-
     def _kill_actor(self) -> None:
-        """Kill the actor handle without waiting for it. Idempotent, never raises."""
+        """Kill the actor handle without waiting for it. Idempotent; Ray and OS errors are swallowed."""
         if self._actor is None:
             return
-        try:
-            import ray
+        import ray
 
+        try:
             ray.kill(self._actor)
-        except Exception:  # noqa: BLE001 — teardown must not raise
+        except (ray.exceptions.RayError, OSError):
             pass
         self._actor = None
 
-    def __enter__(self) -> ServingLease:
-        """Ensure the lease on context entry."""
-        self.ensure()
-        return self
 
-    def __exit__(self, *exc: Any) -> bool:
-        """Release the lease on context exit."""
-        self.close()
-        return False
-
-
-def maybe_serving_lease(
-    *,
-    num_gpus: float,
-    serving_slot: bool = True,
-    ensure_log_path: Any = None,
-) -> ServingLease | None:
+def maybe_serving_lease(*, num_gpus: float) -> ServingLease | None:
     """Return a :class:`ServingLease` when single-node Ray execution is active."""
-    from ._multi_node_env import is_multi_node
-    from ._ray_backend import _should_use_ray_backend
+    from ._ray_backend import ray_exec_enabled
 
-    if not _should_use_ray_backend() or is_multi_node():
+    if not ray_exec_enabled():
         return None
-    return ServingLease(
-        num_gpus=num_gpus,
-        serving_slot=serving_slot,
-        ensure_log_path=ensure_log_path,
-    )
+    return ServingLease(num_gpus=num_gpus)
 
 
 class GpuSpecialistLease:
     """A held Ray GPU lease that runs a ``needs_gpu`` specialist subprocess."""
 
-    def __init__(
-        self,
-        *,
-        num_gpus: float,
-        serving_slot: bool = False,
-        ensure_log_path: Any = None,
-    ) -> None:
+    def __init__(self, *, num_gpus: float, serving_slot: bool = False) -> None:
         self._num_gpus = float(num_gpus)
         self._serving_slot = bool(serving_slot)
-        self._ensure_log_path = ensure_log_path
         self._actor: Any = None
         self._pid: int | None = None
         # §3.3 non-blocking start: the pending ObjectRef for the actor's ``start`` remote call.
         self._start_ref: Any = None
 
-    def start_async(
-        self,
-        cmd: list[str],
-        *,
-        env: dict[str, str] | None = None,
-        cwd: str | None = None,
-        log_path: str | None = None,
-        env_mode: str = "merge",
-        stdin_path: str | None = None,
-    ) -> None:
+    def start_async(self, launch: ActorLaunch) -> None:
         """Create the actor and SUBMIT the subprocess launch without blocking."""
         from ._ray_backend import get_ray_backend
 
-        get_ray_backend().ensure(log_path=self._ensure_log_path)
-        _assert_cluster_feasible(num_gpus=self._num_gpus, serving_slot=self._serving_slot)
-        self._actor = make_gpu_specialist_actor(self._num_gpus, serving_slot=self._serving_slot)
-        self._start_ref = self._actor.start.remote(
-            cmd,
-            env=env,
-            cwd=cwd,
-            log_path=log_path,
-            env_mode=env_mode,
-            stdin_path=stdin_path,
-        )
+        with _CLUSTER_STARTUP_LOCK:
+            get_ray_backend().ensure()
+            _ensure_cluster_feasible(num_gpus=self._num_gpus, serving_slot=self._serving_slot)
+            self._actor = make_serving_actor(self._num_gpus, serving_slot=self._serving_slot, max_concurrency=1)
+            _note_lease_actor_submitted()
+        self._start_ref = self._actor.start.remote(launch)
 
     def poll_started(self) -> int | None:
         """Non-blocking poll for the launched pid."""
@@ -913,10 +900,6 @@ class GpuSpecialistLease:
         self._start_ref = None
         return self._pid
 
-    def pid(self) -> int | None:
-        """Return the launched pid, or ``None`` before it has been resolved."""
-        return self._pid
-
     def is_alive(self) -> bool:
         """Return whether the specialist subprocess is still running."""
         if self._actor is None:
@@ -927,7 +910,7 @@ class GpuSpecialistLease:
             return bool(ray.get(self._actor.is_alive.remote(), timeout=_LEASE_PROBE_TIMEOUT_SEC))
         except ray.exceptions.GetTimeoutError:
             return True  # still-alive assumption on timeout (avoid premature kill)
-        except Exception:  # noqa: BLE001 — dead actor reads as not-alive
+        except (ray.exceptions.RayError, OSError):  # a dead actor reads as not alive
             return False
 
     def exit_code(self) -> int | None:
@@ -938,7 +921,7 @@ class GpuSpecialistLease:
 
         try:
             return ray.get(self._actor.exit_code.remote(), timeout=_LEASE_PROBE_TIMEOUT_SEC)
-        except Exception:  # noqa: BLE001
+        except (ray.exceptions.RayError, OSError):
             return None
 
     def stop(self) -> bool:
@@ -971,32 +954,27 @@ class GpuSpecialistLease:
 
 
 def maybe_gpu_specialist_lease(
-    *,
-    num_gpus: float,
-    serving_slot: bool = False,
-    ensure_log_path: Any = None,
+    *, ray_exec: bool, num_gpus: float, serving_slot: bool = False
 ) -> GpuSpecialistLease | None:
-    """Return a :class:`GpuSpecialistLease` when single-node Ray execution is active."""
-    if num_gpus <= 0:
-        return None
-    from ._multi_node_env import is_multi_node
-    from ._ray_backend import _should_use_ray_backend
+    """Return a :class:`GpuSpecialistLease` when the admission was routed to single-node Ray.
 
-    if not _should_use_ray_backend() or is_multi_node():
+    ``ray_exec`` is the admission's one ``ray_exec_enabled()`` answer, which already chose its GPU ids. It is not
+    asked again here: the answer can change in between, when the head's verdict is dropped and re-probed.
+    """
+    if not ray_exec or num_gpus <= 0:
         return None
-    return GpuSpecialistLease(
-        num_gpus=num_gpus,
-        serving_slot=serving_slot,
-        ensure_log_path=ensure_log_path,
-    )
+    return GpuSpecialistLease(num_gpus=num_gpus, serving_slot=serving_slot)
 
 
 __all__ = [
+    "ActorLaunch",
+    "CreatedLog",
     "GpuSpecialistLease",
     "ManagedServerProcess",
+    "RAY_INFEASIBLE_MARKER",
     "RayInfeasibleError",
+    "RayMissingServingSlotError",
     "ServingLease",
-    "make_gpu_specialist_actor",
     "make_serving_actor",
     "maybe_gpu_specialist_lease",
     "maybe_serving_lease",

@@ -13,7 +13,6 @@ from __future__ import annotations
 
 import hashlib
 import json
-import logging
 import os
 import re
 from collections.abc import Iterable
@@ -21,9 +20,9 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
+from .parse_usage import iter_json_events
+from .tool_events import TIMING_NONE
 from .trajectory_trace import EVENT_CONTEXT_COMPACTION, EVENT_PROMPT_SNAPSHOT, record_event
-
-log = logging.getLogger(__name__)
 
 PREAMBLE = "(preamble)"
 # The coarse chars-per-token ratio; the manifest's token counts are estimates, the provider's usage is the truth.
@@ -179,36 +178,20 @@ def compaction_attributes(data: Any) -> dict[str, Any]:
 
 def stream_json_compactions(log_path: str | Path) -> list[dict[str, Any]]:
     """The ``compact_boundary`` rows of a Claude CLI stream-json log, in order."""
-    found: list[dict[str, Any]] = []
-    try:
-        with Path(log_path).open("r", encoding="utf-8") as f:
-            for line in f:
-                if COMPACT_BOUNDARY not in line:
-                    continue
-                try:
-                    obj = json.loads(line)
-                except (json.JSONDecodeError, ValueError):
-                    continue
-                if isinstance(obj, dict) and obj.get("type") == "system" and obj.get("subtype") == COMPACT_BOUNDARY:
-                    found.append(obj)
-    except FileNotFoundError:
-        return []
-    except OSError as exc:
-        log.warning("context_events: failed reading stream-json log %s: %r", log_path, exc)
-        return []
-    return found
+    return [
+        obj
+        for obj in iter_json_events(log_path, "stream-json")
+        if obj.get("type") == "system" and obj.get("subtype") == COMPACT_BOUNDARY
+    ]
 
 
-def record_stream_json_compactions(log_path: str | Path) -> int:
-    """Put every compaction of a finished stream-json log on the trajectory (untimed); returns rows written."""
-    written = 0
+def record_stream_json_compactions(log_path: str | Path) -> None:
+    """Put every compaction of a finished stream-json log on the trajectory (untimed)."""
     for obj in stream_json_compactions(log_path):
-        span_id = record_event(
+        record_event(
             EVENT_CONTEXT_COMPACTION,
-            attributes={**compaction_attributes(obj), "timing_source": "none"},
+            attributes={**compaction_attributes(obj), "timing_source": TIMING_NONE},
         )
-        written += span_id is not None
-    return written
 
 
 __all__ = [
