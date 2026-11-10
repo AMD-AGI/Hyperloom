@@ -72,6 +72,13 @@ _GEMM_KINDS = ("gemm", "grouped_gemm")
 _COMM_KINDS = ("comm",)
 _ITERATION_RE = re.compile(r"Iteration Time:\s*([0-9.,]+)\s*ms")
 _BYTES = {"fp8": 1, "mx8": 1, "fp4": 0.5, "mxfp4": 0.5, "bf16": 2, "fp16": 2, "fp32": 4}
+_MNK = "mnk"
+_PCT = 100.0
+#: Decimal places: milliseconds and shares in reports, totals in task rows.
+_MS_DIGITS, _TOTAL_DIGITS = 3, 4
+_CONFIG, _KERNEL_REPORT, _OUT = "--config", "--kernel-report", "--out"
+_YAML_HELP = "the Primus training YAML to project"
+_REPORT_HELP = "an existing kernel report (no projection run)"
 
 
 # ── running the projection ──────────────────────────────────────────────────
@@ -104,7 +111,6 @@ def project(
     *,
     calibration: str = "",
     speedups: str = "",
-    extra_args: tuple[str, ...] = (),
 ) -> dict[str, Any]:
     """Project ``config`` in simulate mode; its kernel report (``iteration`` holds the projected time)."""
     report_path = report_path.resolve()
@@ -112,12 +118,11 @@ def project(
     report_path.parent.mkdir(parents=True, exist_ok=True)
     cmd = [
         primus.python, "-m", "primus.cli.main", "projection", "performance",
-        "--config", config,
+        _CONFIG, config,
         "--profiling-mode", "simulate",
         "--gpu-arch", primus.gpu_arch,
         "--target-nodes", str(primus.nodes),
-        "--kernel-report", str(report_path),
-        *extra_args,
+        _KERNEL_REPORT, str(report_path),
     ]  # fmt: skip
     if calibration:
         cmd += ["--kernel-calibration", calibration]
@@ -130,17 +135,21 @@ def project(
             timeout=primus.timeout_s, check=False,
         )  # fmt: skip
     if proc.returncode != 0 or not report_path.is_file():
-        tail = log_path.read_text(encoding=_UTF8, errors="replace")[-2000:]
+        tail = _read_text(log_path)[-2000:]
         raise RuntimeError(f"primus projection failed (rc={proc.returncode}): {shlex.join(cmd)}\n{tail}")
     with open(report_path, encoding=_UTF8) as fh:
         report = json.load(fh)
     report.setdefault("iteration", {})
     if not report["iteration"].get("iteration_time_ms"):
-        m = _ITERATION_RE.search(log_path.read_text(encoding=_UTF8, errors="replace"))
+        m = _ITERATION_RE.search(_read_text(log_path))
         if m:
             report["iteration"]["iteration_time_ms"] = float(m.group(1).replace(",", ""))
     report["log"] = str(log_path)
     return report
+
+
+def _read_text(path: Path) -> str:
+    return path.read_text(encoding=_UTF8, errors="replace")
 
 
 def _abs(path: str) -> str:
@@ -165,17 +174,25 @@ def candidate_name(row: dict[str, Any]) -> str:
 
 
 def parse_candidate_name(name: str) -> dict[str, str] | None:
-    parts = str(name or "").split("::")
-    if len(parts) != 4 or parts[0] != NAME_PREFIX or "." not in parts[3]:
+    try:
+        prefix, scope, kind, term = str(name or "").split("::")
+    except ValueError:
         return None
-    op, _, phase = parts[3].rpartition(".")
-    return {"scope": parts[1], "kind": parts[2], "op": op, "phase": phase}
+    if prefix != NAME_PREFIX or "." not in term:
+        return None
+    op, _, phase = term.rpartition(".")
+    return {"scope": scope, "kind": kind, "op": op, "phase": phase}
+
+
+def _is_gemm(kind: str, dims: dict[str, Any]) -> bool:
+    """A GEMM term with all of its ``m``, ``n`` and ``k``."""
+    return kind in _GEMM_KINDS and all(isinstance(dims.get(x), int) for x in _MNK)
 
 
 def _tensors(kind: str, dims: dict[str, Any]) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
     """A term's operands and result as stored, for a GEMM (by layout) or attention; none for analytic terms."""
     dtype = dims.get("dtype") or "bf16"
-    if kind in _GEMM_KINDS and all(isinstance(dims.get(x), int) for x in "mnk"):
+    if _is_gemm(kind, dims):
         m, n, k, layout = dims["m"], dims["n"], dims["k"], dims.get("layout", "NN")
         a = [k, m] if layout.startswith("T") else [m, k]
         b = [n, k] if layout.endswith("T") else [k, n]
@@ -204,7 +221,7 @@ def _tensors(kind: str, dims: dict[str, Any]) -> tuple[list[dict[str, Any]], lis
 
 
 def _flops_bytes(kind: str, dims: dict[str, Any]) -> tuple[float, float]:
-    if kind in _GEMM_KINDS and all(isinstance(dims.get(x), int) for x in "mnk"):
+    if _is_gemm(kind, dims):
         m, n, k, g = dims["m"], dims["n"], dims["k"], dims.get("batch", 1)
         bpe = _BYTES.get(str(dims.get("dtype")), 2)
         return 2.0 * m * n * k * g, g * ((m * k + k * n) * bpe + m * n * 2)
@@ -243,7 +260,7 @@ def _terms(report: dict[str, Any]) -> list[dict[str, Any]]:
             {
                 "scope": scope, "op": op, "phase": phase, "kind": kind, "stage": stage,
                 "est_total_ms": total, "calls": sum(r["calls"] for r in rows),
-                "share_pct": round(100.0 * total / stage_total[stage], 3) if stage_total[stage] else 0.0,
+                "share_pct": round(_PCT * total / stage_total[stage], _MS_DIGITS) if stage_total[stage] else 0.0,
                 "cases": sorted(rows, key=lambda r: -r["est_total_ms"]),
             }
         )  # fmt: skip
@@ -264,7 +281,7 @@ def candidate_from_task(task: dict[str, Any], report: dict[str, Any]) -> dict[st
         "operation": inv["operation"],
         "candidate_source": TOOL,
         "shape_provenance": SHAPE_PROVENANCE,
-        "duration_us": round(1000.0 * task["est_total_ms"], 3),
+        "duration_us": round(1000.0 * task["est_total_ms"], _MS_DIGITS),
         "call_count": int(task["calls"]),
         "gpu_pct": task["share_pct"],
         "shapes": [_shape_text(t) for t in ins],
@@ -276,7 +293,7 @@ def candidate_from_task(task: dict[str, Any], report: dict[str, Any]) -> dict[st
         "invocation_cases": [_invocation(c) for c in task["cases"]],
         "bound_type": "unknown",
         "bottleneck": "unknown",
-        "flops_per_byte": round(flops / nbytes, 3) if nbytes else None,
+        "flops_per_byte": round(flops / nbytes, _MS_DIGITS) if nbytes else None,
         "efficiency_percent": None,
         "is_multigpu": task["kind"] in _COMM_KINDS,
         "num_gpus_recommended": None,
@@ -287,7 +304,7 @@ def candidate_from_task(task: dict[str, Any], report: dict[str, Any]) -> dict[st
             "phase": task["phase"],
             "kind": task["kind"],
             "stage": task["stage"],
-            "est_total_ms": round(task["est_total_ms"], 4),
+            "est_total_ms": round(task["est_total_ms"], _TOTAL_DIGITS),
             "calls": task["calls"],
             "estimate_basis": top.get("src"),
             "cases": [{"dims": c["dims"], "calls": c["calls"], "est_ms": c["est_ms"]} for c in task["cases"]],
@@ -323,7 +340,7 @@ def gemm_shapes(report: dict[str, Any]) -> tuple[list[dict[str, Any]], list[dict
     for task in _terms(report):
         for row in task["cases"]:
             d = row["dims"]
-            if row["kind"] not in _GEMM_KINDS or not all(isinstance(d.get(x), int) for x in "mnk"):
+            if not _is_gemm(row["kind"], d):
                 continue
             g = d.get("batch", 1)
             key = (g, d["m"], d["n"], d["k"], d.get("dtype"), d.get("layout"))
@@ -334,7 +351,7 @@ def gemm_shapes(report: dict[str, Any]) -> tuple[list[dict[str, Any]], list[dict
                  "calls": 0, "est_total_ms": 0.0, "ops": []} | ({"G": g} if g > 1 else {}),
             )  # fmt: skip
             entry["calls"] += row["calls"]
-            entry["est_total_ms"] = round(entry["est_total_ms"] + row["est_total_ms"], 4)
+            entry["est_total_ms"] = round(entry["est_total_ms"] + row["est_total_ms"], _TOTAL_DIGITS)
             label = f"{row['op']}.{row['phase']}"
             if label not in entry["ops"]:
                 entry["ops"].append(label)
@@ -494,28 +511,30 @@ def _target_cluster(primus: Primus, out: Path, hbm_gb: float) -> str:
     return str(path)
 
 
-def tune(
-    primus: Primus,
-    workload: str,
-    out: Path,
-    *,
-    target_cluster: str = "",
-    calibration: str = "",
-    speedups: str = "",
-    seed_budget: int = 12,
-    hbm_gb: float = 288.0,
-) -> dict[str, Any]:
+@dataclasses.dataclass(frozen=True)
+class TuneSpec:
+    """How the tuning agent searches: its cluster (default: from the Primus settings), inputs and budget."""
+
+    target_cluster: str = ""
+    calibration: str = ""
+    speedups: str = ""
+    seed_budget: int = 12
+    hbm_gb: float = 288.0
+
+
+def tune(primus: Primus, workload: str, out: Path, spec: TuneSpec = TuneSpec()) -> dict[str, Any]:
     """The tuning agent's seed search with the calibration; its best trial and that trial's config."""
     out = out.resolve()
     out.mkdir(parents=True, exist_ok=True)
-    cluster = _abs(target_cluster) or _target_cluster(primus, out, hbm_gb)
-    workload, calibration, speedups = _abs(workload), _abs(calibration), _abs(speedups)
+    seed_budget = spec.seed_budget
+    cluster = _abs(spec.target_cluster) or _target_cluster(primus, out, spec.hbm_gb)
+    workload = _abs(workload)
     cmd = [
         primus.python, "-m", "primus.agents.tuning_agent",
         "--workload", workload, "--target-cluster", cluster, "--out-dir", str(out / "tuning"),
         "--seed-only", "--seed-budget", str(seed_budget), "--profiling-mode", "simulate",
     ]  # fmt: skip
-    env = primus.env(PRIMUS_KERNEL_CALIBRATION=calibration, PRIMUS_KERNEL_SPEEDUPS=speedups)
+    env = primus.env(PRIMUS_KERNEL_CALIBRATION=_abs(spec.calibration), PRIMUS_KERNEL_SPEEDUPS=_abs(spec.speedups))
     log_path = out / "tuning.log"
     with open(log_path, "w", encoding=_UTF8) as fh:
         proc = subprocess.run(
@@ -529,11 +548,11 @@ def tune(
         )
     summary_path = out / "tuning" / "summary.json"
     if not summary_path.is_file():
-        tail = log_path.read_text(encoding=_UTF8, errors="replace")[-2000:]
+        tail = _read_text(log_path)[-2000:]
         raise RuntimeError(f"tuning agent wrote no summary (rc={proc.returncode})\n{tail}")
     best = json.loads(summary_path.read_text(encoding=_UTF8)).get("best") or {}
     cmd_run = (best.get("result") or {}).get("cmd") or []
-    winner = cmd_run[cmd_run.index("--config") + 1] if "--config" in cmd_run else ""
+    winner = cmd_run[cmd_run.index(_CONFIG) + 1] if _CONFIG in cmd_run else ""
     return {"best": best, "winner_config": winner, "tuning_log": str(log_path), "summary": str(summary_path)}
 
 
@@ -567,7 +586,7 @@ def validate(report: dict[str, Any], traces: list[str], *, measured_ms: float | 
     if measured_ms and projected:
         out |= {
             "measured_iteration_ms": measured_ms,
-            "error_pct": round(100.0 * (projected - measured_ms) / measured_ms, 2),
+            "error_pct": round(_PCT * (projected - measured_ms) / measured_ms, 2),
         }
     return out
 
@@ -595,9 +614,7 @@ def _add_primus_args(p: argparse.ArgumentParser) -> None:
     p.add_argument("--kernel-speedups", default="", help="a primus.kernel_speedups JSON")
 
 
-def _parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(prog=f"python -m {__name__}", description=__doc__.split("\n\n")[0])
-    sub = parser.add_subparsers(dest="command", required=True)
+def _add_analyze(sub: Any) -> None:
     a = sub.add_parser("analyze", help="kernel targets in TraceLens' run-directory contract")
     a.add_argument("--workspace-path", required=True)
     a.add_argument("--session-id", default="")
@@ -605,19 +622,25 @@ def _parser() -> argparse.ArgumentParser:
     a.add_argument("--framework", default="megatron")
     a.add_argument("--target-platform", default="")
     a.add_argument("--roofline-output-name", default=_ROOFLINE_FILE)
-    a.add_argument("--config", default="", help="the Primus training YAML to project")
-    a.add_argument("--kernel-report", default="", help="an existing kernel report (no projection run)")
+    a.add_argument(_CONFIG, default="", help=_YAML_HELP)
+    a.add_argument(_KERNEL_REPORT, default="", help=_REPORT_HELP)
     a.add_argument("--min-gpu-pct", type=float, default=0.0)
     _add_primus_args(a)
+
+
+def _add_calibrate(sub: Any) -> None:
     c = sub.add_parser("calibrate", help="a kernel calibration from torch traces of one run of the stack")
     c.add_argument("--traces", required=True, help="trace files, globs or directories (comma-separated)")
-    c.add_argument("--config", default="", help="the profiled run's training YAML (projected uncalibrated)")
-    c.add_argument("--kernel-report", default="", help="an uncalibrated kernel report of the profiled run")
-    c.add_argument("--out", required=True)
+    c.add_argument(_CONFIG, default="", help="the profiled run's training YAML (projected uncalibrated)")
+    c.add_argument(_KERNEL_REPORT, default="", help="an uncalibrated kernel report of the profiled run")
+    c.add_argument(_OUT, required=True)
     c.add_argument(
         "--steady-ms", type=float, default=None, help="the run's iteration time unprofiled (scales out profiler cost)"
     )
     _add_primus_args(c)
+
+
+def _add_feedback(sub: Any) -> None:
     f = sub.add_parser("feedback", help="measured results as a Primus kernel speedups file")
     f.add_argument("--gemm-tune", action=_APPEND, default=[], help="a gemm-tune result.json")
     f.add_argument("--summary", action=_APPEND, default=[], help="a kernel_optimization_summary.json")
@@ -631,17 +654,23 @@ def _parser() -> argparse.ArgumentParser:
         default="baseline",
         help="--forge-phases baseline: the task's (Megatron native) or Transformer Engine's, as the run's recipe uses",
     )
-    f.add_argument("--out", required=True)
+    f.add_argument(_OUT, required=True)
+
+
+def _add_forge_task(sub: Any) -> None:
     ft = sub.add_parser("forge-task", help="a KernelForge task for one of the step's kernels, with no trace")
     ft.add_argument("--op", default="cross_entropy")
-    ft.add_argument("--config", default="", help="the Primus training YAML to project")
-    ft.add_argument("--kernel-report", default="", help="an existing kernel report (no projection run)")
+    ft.add_argument(_CONFIG, default="", help=_YAML_HELP)
+    ft.add_argument(_KERNEL_REPORT, default="", help=_REPORT_HELP)
     ft.add_argument("--tokens", type=int, action=_APPEND, default=[], help="a scored case's tokens (repeatable)")
     ft.add_argument("--check-tokens", type=int, action=_APPEND, default=[], help="a checked case's tokens")
     ft.add_argument("--run-dir", required=True)
     _add_primus_args(ft)
+
+
+def _add_project_tune_validate(sub: Any) -> None:
     pr = sub.add_parser("project", help="the iteration-time gain of a speedups file")
-    pr.add_argument("--config", required=True)
+    pr.add_argument(_CONFIG, required=True)
     pr.add_argument("--out-dir", required=True)
     _add_primus_args(pr)
     t = sub.add_parser("tune", help="the tuning agent's seed search, calibrated; then analyze its best config")
@@ -653,12 +682,19 @@ def _parser() -> argparse.ArgumentParser:
     t.add_argument("--session-id", default="")
     _add_primus_args(t)
     v = sub.add_parser("validate", help="a projection against a measured run")
-    v.add_argument("--config", default="")
-    v.add_argument("--kernel-report", default="")
+    v.add_argument(_CONFIG, default="")
+    v.add_argument(_KERNEL_REPORT, default="")
     v.add_argument("--traces", required=True)
     v.add_argument("--measured-ms", type=float, default=None, help="the run's measured iteration time")
-    v.add_argument("--out", default="")
+    v.add_argument(_OUT, default="")
     _add_primus_args(v)
+
+
+def _parser() -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(prog=f"python -m {__name__}", description=__doc__.split("\n\n")[0])
+    sub = parser.add_subparsers(dest="command", required=True)
+    for add in (_add_analyze, _add_calibrate, _add_feedback, _add_forge_task, _add_project_tune_validate):
+        add(sub)
     return parser
 
 
@@ -741,7 +777,6 @@ def _forge_task(args: argparse.Namespace) -> dict[str, Any]:
         tokens=args.tokens or None,
         check_tokens=args.check_tokens or None,
         config=args.config or path,
-        gpu=args.gpu_arch,
     )
     files = primus_forge.write_task(spec, run)
     return {"tool": TOOL, "status": _OK, "share_pct": spec["share_pct"], "cases": spec["cases"], **files}
@@ -760,7 +795,7 @@ def _project(args: argparse.Namespace) -> dict[str, Any]:
         speedups=args.kernel_speedups,
     )
     t0, t1 = base["iteration"].get("iteration_time_ms"), fast["iteration"].get("iteration_time_ms")
-    gain = round(100.0 * (t0 - t1) / t0, 3) if t0 and t1 else None
+    gain = round(_PCT * (t0 - t1) / t0, _MS_DIGITS) if t0 and t1 else None
     return {
         "tool": TOOL,
         "status": _OK,
@@ -779,11 +814,13 @@ def _tune(args: argparse.Namespace) -> dict[str, Any]:
         primus,
         args.workload,
         out,
-        target_cluster=args.target_cluster,
-        calibration=args.kernel_calibration,
-        speedups=args.kernel_speedups,
-        seed_budget=args.seed_budget,
-        hbm_gb=args.hbm_gb,
+        TuneSpec(
+            target_cluster=args.target_cluster,
+            calibration=args.kernel_calibration,
+            speedups=args.kernel_speedups,
+            seed_budget=args.seed_budget,
+            hbm_gb=args.hbm_gb,
+        ),
     )
     if not found["winner_config"]:
         return {"tool": TOOL, "status": "failed", "error": "the tuning agent found no legal configuration", **found}

@@ -38,6 +38,8 @@ REPORT_SCHEMA = "primus.kernel_report"
 ITERATION = "iteration"
 OUTPUT = "output"
 EMBEDDING = "embedding"
+MOE = "moe"
+CROSS_ENTROPY = "cross_entropy"
 FWD, BWD, STEP = "fwd", "bwd", "step"
 #: Pipeline send/recv: mostly waiting on the other stage, which the projection's
 #: pipeline schedule prices itself, so it is neither calibrated nor in the mix.
@@ -60,6 +62,10 @@ _GEMM_NAMES = ("cijk_", "gemm", "kernel_dense", "kernel_grouped", "matmul", "wvs
 _FP8_NAMES = ("quantize", "amax", "transpose_2d", "cast_transpose", "fp8", "scaling")
 _AUTOGRAD = "autograd::engine::evaluate_function"
 _MODULE = "nn.Module: "
+_CPU_OP = "cpu_op"
+_US_PER_MS = 1e3
+#: Decimal places: milliseconds, factors, extras' shares.
+_MS_DIGITS, _FACTOR_DIGITS, _SHARE_DIGITS = 3, 4, 5
 #: Mixes are compared on classes carrying at least this share of either side.
 _MIX_FLOOR = 0.002
 
@@ -100,39 +106,60 @@ def _load_events(path: str | Path) -> list[dict[str, Any]]:
     return doc["traceEvents"] if isinstance(doc, dict) else doc
 
 
-def _host_context(events: list[dict[str, Any]]) -> tuple[dict[Any, list[dict]], dict[int, list[str]]]:
-    """Per launch correlation: the enclosing host frames; per sequence number: the forward op's modules."""
+def _by_thread(events: list[dict[str, Any]]) -> tuple[dict[Any, list[dict]], dict[Any, list[dict]]]:
+    """Per thread: its host frames (Python, CPU ops, annotations), and its kernel launches."""
     frames_by_tid: dict[Any, list[dict]] = defaultdict(list)
     launches_by_tid: dict[Any, list[dict]] = defaultdict(list)
     for e in events:
         if e.get("ph") != "X":
             continue
         cat = e.get("cat")
-        if cat in ("python_function", "cpu_op", "user_annotation"):
+        if cat in ("python_function", _CPU_OP, "user_annotation"):
             frames_by_tid[e["tid"]].append(e)
         elif cat in ("cuda_runtime", "cuda_driver") and "correlation" in (e.get("args") or {}):
             launches_by_tid[e["tid"]].append(e)
+    return frames_by_tid, launches_by_tid
+
+
+def _ends(frame: dict[str, Any]) -> float:
+    return frame["ts"] + frame.get("dur", 0)
+
+
+def _note_forward_op(frame: dict[str, Any], open_frames: list[dict], seq_modules: dict[int, list[str]]) -> None:
+    """A forward CPU op's sequence number, with the modules open around it: its backward kernels' modules."""
+    seq = (frame.get("args") or {}).get("Sequence number")
+    if seq is None or frame.get("cat") != _CPU_OP or frame["name"].startswith(_AUTOGRAD):
+        return
+    seq_modules.setdefault(int(seq), [f["name"][len(_MODULE) :] for f in open_frames if f["name"].startswith(_MODULE)])
+
+
+def _walk_thread(
+    timeline: list[dict], launches: list[dict], stacks: dict[int, list[dict]], seq_modules: dict[int, list[str]]
+) -> None:
+    """One thread's launches in time order, each with the frames still open when it ends."""
+    open_frames: list[dict] = []
+    i = 0
+    for launch in launches:
+        while i < len(timeline) and timeline[i]["ts"] <= launch["ts"]:
+            frame = timeline[i]
+            while open_frames and _ends(open_frames[-1]) < frame["ts"]:
+                open_frames.pop()
+            open_frames.append(frame)
+            _note_forward_op(frame, open_frames, seq_modules)
+            i += 1
+        end = _ends(launch)
+        stacks[launch["args"]["correlation"]] = [f for f in open_frames if _ends(f) >= end]
+
+
+def _host_context(events: list[dict[str, Any]]) -> tuple[dict[Any, list[dict]], dict[int, list[str]]]:
+    """Per launch correlation: the enclosing host frames; per sequence number: the forward op's modules."""
+    frames_by_tid, launches_by_tid = _by_thread(events)
     stacks: dict[int, list[dict]] = {}
     seq_modules: dict[int, list[str]] = {}
     for tid, launches in launches_by_tid.items():
         timeline = sorted(frames_by_tid.get(tid, []), key=lambda e: (e["ts"], -e.get("dur", 0)))
         launches.sort(key=lambda e: e["ts"])
-        open_frames: list[dict] = []
-        i = 0
-        for launch in launches:
-            while i < len(timeline) and timeline[i]["ts"] <= launch["ts"]:
-                frame = timeline[i]
-                while open_frames and open_frames[-1]["ts"] + open_frames[-1].get("dur", 0) < frame["ts"]:
-                    open_frames.pop()
-                open_frames.append(frame)
-                seq = (frame.get("args") or {}).get("Sequence number")
-                if seq is not None and frame.get("cat") == "cpu_op" and not frame["name"].startswith(_AUTOGRAD):
-                    seq_modules.setdefault(
-                        int(seq), [f["name"][len(_MODULE) :] for f in open_frames if f["name"].startswith(_MODULE)]
-                    )
-                i += 1
-            end = launch["ts"] + launch.get("dur", 0)
-            stacks[launch["args"]["correlation"]] = [f for f in open_frames if f["ts"] + f.get("dur", 0) >= end]
+        _walk_thread(timeline, launches, stacks, seq_modules)
     return stacks, seq_modules
 
 
@@ -157,7 +184,7 @@ def read_launches(path: str | Path) -> tuple[list[Launch], dict[str, Any]]:
                     launch.modules.append(name[len(_MODULE) :])
                 else:
                     launch.frames.append(name)
-            elif f.get("cat") == "cpu_op":
+            elif f.get("cat") == _CPU_OP:
                 launch.cpu_ops.append(name)
                 if name.startswith(_AUTOGRAD):
                     seq = (f.get("args") or {}).get("Sequence number")
@@ -171,8 +198,12 @@ def read_launches(path: str | Path) -> tuple[list[Launch], dict[str, Any]]:
     steps = [
         e for e in events if str(e.get("name", "")).startswith("ProfilerStep") and e.get("cat") == "gpu_user_annotation"
     ]
-    span_ms = max((e.get("dur", 0) for e in steps), default=0.0) / 1e3
-    return launches, {"kernel_ms": kernel_us / 1e3, "step_span_ms": span_ms, "steps": len({e["name"] for e in steps})}
+    span_ms = max((e.get("dur", 0) for e in steps), default=0.0) / _US_PER_MS
+    return launches, {
+        "kernel_ms": kernel_us / _US_PER_MS,
+        "step_span_ms": span_ms,
+        "steps": len({e["name"] for e in steps}),
+    }
 
 
 # ── attributing kernels to Primus ops ───────────────────────────────────────
@@ -189,8 +220,8 @@ class Layers:
         for m in reversed(modules):
             if m.startswith(("TransformerLayer_", "MoELayer_")):
                 idx = m.rsplit("_", 1)[-1]
-                if m.startswith("MoELayer_") and "moe" in self.scopes:
-                    return "moe"
+                if m.startswith("MoELayer_") and MOE in self.scopes:
+                    return MOE
                 if idx.isdigit() and int(idx) < len(self.scopes):
                     return self.scopes[int(idx)]
                 return self.default
@@ -214,11 +245,11 @@ def _gemm_op(launch: Launch, scope: str | None) -> tuple[str, str]:
     path = " > ".join(launch.modules)
     last = launch.modules[-1] if launch.modules else ""
     if "grouped" in launch.name.lower() or _has(launch.cpu_ops, "grouped_gemm"):
-        return scope or "moe", "moe_expert"
+        return scope or MOE, "moe_expert"
     if "SharedExpert" in path:
-        return scope or "moe", "moe_shared"
+        return scope or MOE, "moe_shared"
     if "Router" in path:
-        return scope or "moe", "moe_router"
+        return scope or MOE, "moe_router"
     if "Attention" in path:
         return scope or "", "attn_o" if "RowParallel" in last or "linear_proj" in last else "attn_qkv"
     if "MLP" in path:
@@ -228,53 +259,100 @@ def _gemm_op(launch: Launch, scope: str | None) -> tuple[str, str]:
     return scope or "", "gemm_other"
 
 
+@dataclass(frozen=True)
+class _Seen:
+    """One kernel as :func:`attribute` reads it: the launch, its lowered name and CPU ops, scope and direction."""
+
+    launch: Launch
+    name: str
+    ops: list[str]
+    scope: str | None
+    default: str
+    direction: str
+
+    def home(self, fallback: str) -> str:
+        return self.scope or fallback
+
+
+def _iteration_op(launch: Launch, n: str) -> tuple[str, str, str] | None:
+    """The optimizer step and the collectives, which belong to the iteration, not a layer."""
+    frames = launch.frames
+    if _has(launch.annotations, "Optimizer.step") or _has(frames, "/optimizer/", "optimizer.py", "clip_grads.py"):
+        return ITERATION, "optimizer", STEP
+    if "nccl" not in n:
+        return None
+    if _has(frames, "p2p_communication"):
+        return ITERATION, PP_P2P, WAIT
+    anns = " ".join(launch.annotations)
+    if "reduce_scatter" in anns:
+        return ITERATION, "dp_grad_reduce", STEP
+    if "all_gather" in anns:
+        return ITERATION, "dp_param_gather", STEP
+    return ITERATION, "comm_other", STEP
+
+
+def _modelled_op(k: _Seen) -> tuple[str, str] | None:
+    """The terms Primus prices: expert all-to-all, the loss, the embedding, attention and the GEMMs."""
+    n, frames = k.name, k.launch.frames
+    if "deep_ep" in n or _has(frames, "moe_dispatch_combine"):
+        return k.home(MOE), "moe_a2a_exposed"
+    if _has(frames, "fused_cross_entropy", CROSS_ENTROPY) or _has(k.ops, CROSS_ENTROPY):
+        return OUTPUT, CROSS_ENTROPY
+    if _has(k.launch.modules, "LanguageModelEmbedding", "VocabParallelEmbedding"):
+        return EMBEDDING, "embedding"
+    if "flash_attn" in n or "fmha" in n or _has(k.ops, "flashattn", "flash_attn", "attention"):
+        return k.home(k.default), "attn_sdpa"
+    if any(g in n for g in _GEMM_NAMES):
+        s, op = _gemm_op(k.launch, k.scope)
+        return s or k.default, op
+    return None
+
+
+def _moe_engine_op(k: _Seen) -> tuple[str, str] | None:
+    """The MoE's own engine work: token permutes, the router's top-k, and FP8 casts."""
+    n = k.name
+    if "permute" in n or "sort_chunks" in n or _has(k.ops, "permute"):
+        return k.home(MOE), "moe_permute"
+    if "topk" in n or (_has(k.launch.modules, "Router") and "gemm" not in n):
+        return k.home(MOE), "moe_topk"
+    if not (any(f in n for f in _FP8_NAMES) or _has(k.ops, "quantize")):
+        return None
+    if _has(k.launch.modules, "GroupedMLP", "Experts") or _has(k.launch.frames, "grouped_gemm"):
+        return k.home(MOE), "moe_expert_overhead"
+    return k.home(k.default), "fp8_cast"
+
+
+def _elementwise_op(k: _Seen) -> tuple[str, str, str]:
+    """Everything else the engine runs: norms, activations, gradient accumulation, elementwise ops."""
+    n, frames, d = k.name, k.launch.frames, k.direction
+    if "norm" in n or _has(k.ops, "norm") or _has(frames, "rmsnorm", "layernorm"):
+        return k.home(k.default), "norm_residual", d
+    if _has(frames, "swiglu", "act_with_probs", "activation") or "silu" in n or "glu" in n:
+        s = k.home(k.default)
+        return s, "moe_activation" if s.startswith(MOE) else "activation", d
+    if _has(frames, "distributed_data_parallel.py"):
+        return k.default, "grad_accumulate", BWD
+    if "GPTModel" in " ".join(k.launch.modules) and k.scope is None and k.launch.modules:
+        return OUTPUT, "elementwise", d
+    return k.home(k.default), "elementwise", d
+
+
 def attribute(launch: Launch, layers: Layers, main_tid: Any) -> tuple[str, str, str]:
     """``(scope, op class, direction)`` of one kernel: the Primus term that prices it, or the engine work it is."""
     n = launch.name.lower()
-    ops = [o.lower() for o in launch.cpu_ops]
-    frames = launch.frames
-    scope = layers.scope(launch.modules)
-    if _has(launch.annotations, "Optimizer.step") or _has(frames, "/optimizer/", "optimizer.py", "clip_grads.py"):
-        return ITERATION, "optimizer", STEP
-    if "nccl" in n and _has(frames, "p2p_communication"):
-        return ITERATION, PP_P2P, WAIT
-    if "nccl" in n:
-        anns = " ".join(launch.annotations)
-        if "reduce_scatter" in anns:
-            return ITERATION, "dp_grad_reduce", STEP
-        if "all_gather" in anns:
-            return ITERATION, "dp_param_gather", STEP
-        return ITERATION, "comm_other", STEP
-    d = _direction(launch, main_tid)
-    if "deep_ep" in n or _has(frames, "moe_dispatch_combine"):
-        return scope or "moe", "moe_a2a_exposed", d
-    if _has(frames, "fused_cross_entropy", "cross_entropy") or _has(ops, "cross_entropy"):
-        return OUTPUT, "cross_entropy", d
-    if _has(launch.modules, "LanguageModelEmbedding", "VocabParallelEmbedding"):
-        return EMBEDDING, "embedding", d
-    if "flash_attn" in n or "fmha" in n or _has(ops, "flashattn", "flash_attn", "attention"):
-        return scope or layers.default, "attn_sdpa", d
-    if any(g in n for g in _GEMM_NAMES):
-        s, op = _gemm_op(launch, scope)
-        return s or layers.default, op, d
-    if "permute" in n or "sort_chunks" in n or _has(ops, "permute"):
-        return scope or "moe", "moe_permute", d
-    if "topk" in n or (_has(launch.modules, "Router") and "gemm" not in n):
-        return scope or "moe", "moe_topk", d
-    if any(f in n for f in _FP8_NAMES) or _has(ops, "quantize"):
-        if _has(launch.modules, "GroupedMLP", "Experts") or _has(frames, "grouped_gemm"):
-            return scope or "moe", "moe_expert_overhead", d
-        return scope or layers.default, "fp8_cast", d
-    if "norm" in n or _has(ops, "norm") or _has(frames, "rmsnorm", "layernorm"):
-        return scope or layers.default, "norm_residual", d
-    if _has(frames, "swiglu", "act_with_probs", "activation") or "silu" in n or "glu" in n:
-        s = scope or layers.default
-        return s, "moe_activation" if s.startswith("moe") else "activation", d
-    if _has(frames, "distributed_data_parallel.py"):
-        return layers.default, "grad_accumulate", BWD
-    if "GPTModel" in " ".join(launch.modules) and scope is None and launch.modules:
-        return OUTPUT, "elementwise", d
-    return scope or layers.default, "elementwise", d
+    iteration = _iteration_op(launch, n)
+    if iteration:
+        return iteration
+    k = _Seen(
+        launch=launch,
+        name=n,
+        ops=[o.lower() for o in launch.cpu_ops],
+        scope=layers.scope(launch.modules),
+        default=layers.default,
+        direction=_direction(launch, main_tid),
+    )
+    found = _modelled_op(k) or _moe_engine_op(k)
+    return (*found, k.direction) if found else _elementwise_op(k)
 
 
 def _main_tid(launches: list[Launch]) -> Any:
@@ -303,7 +381,7 @@ def classify_trace(path: str | Path, layers: Layers) -> Measured:
     calls: dict[tuple[str, str, str], int] = defaultdict(int)
     for launch in launches:
         key = attribute(launch, layers, main)
-        ms[key] += launch.dur_us / 1e3
+        ms[key] += launch.dur_us / _US_PER_MS
         calls[key] += 1
     return Measured(dict(ms), dict(calls), meta["kernel_ms"], meta["step_span_ms"])
 
@@ -323,7 +401,7 @@ def layers_for_stage(report: dict[str, Any], stage: int) -> Layers:
     dep = report.get("deployment") or {}
     scopes_all = list(dep.get("layer_scopes") or [])
     stage_layers = (dep.get("stage_layers") or [[]])[stage]
-    scopes = tuple(scopes_all[i] for i in stage_layers if i < len(scopes_all)) or ("moe",)
+    scopes = tuple(scopes_all[i] for i in stage_layers if i < len(scopes_all)) or (MOE,)
     default = max(set(scopes), key=scopes.count)
     return Layers(scopes, default)
 
@@ -386,6 +464,80 @@ def _pool(report: dict[str, Any], traces: list[str]) -> tuple[dict, dict, dict[i
     return dict(measured), dict(model), per_stage
 
 
+def _by_class(measured: dict[tuple, float], model: dict[tuple, float]) -> dict[tuple[str, str], list[float]]:
+    """Measured and modelled ms per ``(op class, direction)``, summed over scopes."""
+    by_class: dict[tuple[str, str], list[float]] = defaultdict(lambda: [0.0, 0.0])
+    for (_scope, cls, d), v in measured.items():
+        by_class[(cls, d)][0] += v
+    for (_scope, cls, d), v in model.items():
+        by_class[(cls, d)][1] += v
+    return by_class
+
+
+def _factors(
+    report: dict[str, Any], by_class: dict[tuple[str, str], list[float]]
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+    """A factor per modelled phase of every class the trace measured; the modelled classes it did not."""
+    phases: dict[tuple[str, str], set[tuple[str, str]]] = defaultdict(set)
+    for row in report.get("kernels") or []:
+        phases[(op_class(row["op"]), direction(row["phase"]))].add((row["op"], row["phase"]))
+    factors, unmatched = [], []
+    for (cls, d), (got, want) in sorted(by_class.items()):
+        if want <= 0 or got <= 0:
+            if want > 0:
+                unmatched.append({"op_class": cls, "direction": d, "modelled_ms": round(want, _MS_DIGITS)})
+            continue
+        factors += [
+            {
+                "op": op,
+                "phase": phase,
+                "factor": round(got / want, _FACTOR_DIGITS),
+                "op_class": cls,
+                "measured_ms": round(got, _MS_DIGITS),
+                "modelled_ms": round(want, _MS_DIGITS),
+            }
+            for op, phase in sorted(phases.get((cls, d), ()))
+        ]
+    return factors, unmatched
+
+
+def _extras(
+    measured: dict[tuple, float], model: dict[tuple, float], by_class: dict[tuple[str, str], list[float]]
+) -> list[dict[str, Any]]:
+    """The measured work no modelled class covers, each a share of its scope's modelled time."""
+    scope_total: dict[tuple[str, str], float] = defaultdict(float)
+    for (scope, _cls, d), v in model.items():
+        scope_total[(scope, d)] += v
+    default_scope = max(
+        (k for k in scope_total if k[0] not in (ITERATION, OUTPUT, EMBEDDING)),
+        key=scope_total.get,
+        default=(MOE, BWD),
+    )[0]
+    extras = []
+    for (scope, cls, d), got in sorted(measured.items()):
+        if by_class.get((cls, d), [0, 0])[1] > 0 or got <= 0:
+            continue
+        home = (scope, d) if scope_total.get((scope, d), 0.0) > 0 else (default_scope, d if d != STEP else BWD)
+        share = round(got / scope_total[home], _SHARE_DIGITS) if scope_total.get(home) else 0.0
+        if share > 0:
+            extras.append(
+                {"scope": home[0], "phase": home[1], "op": cls, "share": share, "measured_ms": round(got, _MS_DIGITS)}
+            )
+    return extras
+
+
+def _stage_summary(per_stage: dict[int, Measured]) -> dict[str, dict[str, float]]:
+    return {
+        str(stage): {
+            "kernel_ms": round(m.kernel_ms, _MS_DIGITS),
+            "step_span_ms": round(m.step_span_ms, _MS_DIGITS),
+            "idle_ms": round(max(0.0, m.step_span_ms - m.kernel_ms), _MS_DIGITS),
+            "pp_p2p_ms": round(sum(v for k, v in m.ms.items() if k[2] == WAIT), _MS_DIGITS),
+        }
+        for stage, m in sorted(per_stage.items())
+    }
+
+
 def build_calibration(
     report: dict[str, Any], traces: list[str], *, source: str = "", steady_ms: float | None = None
 ) -> dict[str, Any]:
@@ -401,74 +553,18 @@ def build_calibration(
     span = max((m.step_span_ms for m in per_stage.values()), default=0.0)
     scale = steady_ms / span if steady_ms and span > 0 else 1.0
     measured = {k: v * scale for k, v in measured.items() if k[2] != WAIT}
-    phases: dict[tuple[str, str], set[tuple[str, str]]] = defaultdict(set)
-    for row in report.get("kernels") or []:
-        phases[(op_class(row["op"]), direction(row["phase"]))].add((row["op"], row["phase"]))
-
-    by_class: dict[tuple[str, str], list[float]] = defaultdict(lambda: [0.0, 0.0])
-    for (scope, cls, d), v in measured.items():
-        by_class[(cls, d)][0] += v
-    for (scope, cls, d), v in model.items():
-        by_class[(cls, d)][1] += v
-
-    factors, unmatched = [], []
-    for (cls, d), (got, want) in sorted(by_class.items()):
-        if want <= 0 or got <= 0:
-            if want > 0:
-                unmatched.append({"op_class": cls, "direction": d, "modelled_ms": round(want, 3)})
-            continue
-        for op, phase in sorted(phases.get((cls, d), ())):
-            factors.append(
-                {
-                    "op": op,
-                    "phase": phase,
-                    "factor": round(got / want, 4),
-                    "op_class": cls,
-                    "measured_ms": round(got, 3),
-                    "modelled_ms": round(want, 3),
-                }
-            )
-
-    scope_total: dict[tuple[str, str], float] = defaultdict(float)
-    for (scope, _cls, d), v in model.items():
-        scope_total[(scope, d)] += v
-    default_scope = max(
-        (k for k in scope_total if k[0] not in (ITERATION, OUTPUT, EMBEDDING)),
-        key=scope_total.get,
-        default=("moe", BWD),
-    )[0]
-    extras = []
-    for (scope, cls, d), got in sorted(measured.items()):
-        if by_class.get((cls, d), [0, 0])[1] > 0 or got <= 0:
-            continue
-        home = (scope, d) if scope_total.get((scope, d), 0.0) > 0 else (default_scope, d if d != STEP else BWD)
-        extras.append(
-            {
-                "scope": home[0],
-                "phase": home[1],
-                "op": cls,
-                "share": round(got / scope_total[home], 5) if scope_total.get(home) else 0.0,
-                "measured_ms": round(got, 3),
-            }
-        )
+    by_class = _by_class(measured, model)
+    factors, unmatched = _factors(report, by_class)
     return {
         "schema": CALIBRATION_SCHEMA,
         "version": 1,
         "source": source,
         "deployment": report.get("deployment"),
         "factors": factors,
-        "extras": [e for e in extras if e["share"] > 0],
-        "profiler_scale": round(scale, 4),
+        "extras": _extras(measured, model, by_class),
+        "profiler_scale": round(scale, _FACTOR_DIGITS),
         "unmatched_modelled": unmatched,
-        "measured": {
-            str(stage): {
-                "kernel_ms": round(m.kernel_ms, 3),
-                "step_span_ms": round(m.step_span_ms, 3),
-                "idle_ms": round(max(0.0, m.step_span_ms - m.kernel_ms), 3),
-                "pp_p2p_ms": round(sum(v for k, v in m.ms.items() if k[2] == WAIT), 3),
-            }
-            for stage, m in sorted(per_stage.items())
-        },
+        "measured": _stage_summary(per_stage),
     }
 
 
@@ -507,9 +603,9 @@ def mix_distance(report: dict[str, Any], trace: str, *, stage: int | None = None
     wait = sum(v for k, v in traced.items() if k[2] == WAIT)
     return {
         "stage": stage,
-        "total_variation": round(tv, 4),
-        "measured_ms": round(tg, 3),
-        "projected_ms": round(tw, 3),
-        "pp_p2p_ms": round(wait, 3),
+        "total_variation": round(tv, _FACTOR_DIGITS),
+        "measured_ms": round(tg, _MS_DIGITS),
+        "projected_ms": round(tw, _MS_DIGITS),
+        "pp_p2p_ms": round(wait, _MS_DIGITS),
         "classes": rows,
     }

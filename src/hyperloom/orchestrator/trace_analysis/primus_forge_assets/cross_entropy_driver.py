@@ -1,3 +1,6 @@
+# SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
+# SPDX-License-Identifier: MIT
+
 """KernelForge driver: the LM head's cross-entropy, forward and backward, at a Primus training step's shapes.
 
 * no flags: correctness of ``kernel.py`` against an fp32 reference, one ``allclose:`` line;
@@ -21,6 +24,7 @@ import json
 import math
 import statistics
 import sys
+import traceback
 from pathlib import Path
 
 import torch
@@ -31,6 +35,10 @@ CASES = [(f"T={c['tokens']}", int(c["tokens"]), int(c["vocab"])) for c in TASK["
 CHECK_CASES = [(f"T={c['tokens']}", int(c["tokens"]), int(c["vocab"])) for c in TASK["check_cases"]]
 SEED = 0
 CHUNK = 4096
+DEVICE = "cuda"
+INF, NEG_INF = float("inf"), float("-inf")
+#: Untimed calls before a profiled one: JIT and autotuning settle in the first.
+PROFILE_CALLS = 3
 
 
 def _kernel():
@@ -98,7 +106,7 @@ class _TransformerEngine:
     def available() -> bool:
         try:
             from transformer_engine.pytorch.cross_entropy import parallel_cross_entropy  # noqa: F401
-        except Exception:  # noqa: BLE001
+        except (ImportError, OSError, RuntimeError):
             return False
         return True
 
@@ -118,13 +126,13 @@ class _TransformerEngine:
 
 
 def _inputs(tokens: int, vocab: int):
-    gen = torch.Generator(device="cuda").manual_seed(SEED)
-    logits = (torch.randn(tokens, vocab, device="cuda", generator=gen) * 2.0).to(torch.bfloat16)
+    gen = torch.Generator(device=DEVICE).manual_seed(SEED)
+    logits = (torch.randn(tokens, vocab, device=DEVICE, generator=gen) * 2.0).to(torch.bfloat16)
     # a few rows far from zero and one dominated by its target: the softmax must stay stable
     logits[: min(8, tokens)] += 40.0
-    target = torch.randint(0, vocab, (tokens,), device="cuda", generator=gen)
+    target = torch.randint(0, vocab, (tokens,), device=DEVICE, generator=gen)
     logits[min(8, tokens - 1), target[min(8, tokens - 1)]] = 60.0
-    grad_loss = torch.rand(tokens, device="cuda", generator=gen) + 0.5
+    grad_loss = torch.rand(tokens, device=DEVICE, generator=gen) + 0.5
     return logits, target, grad_loss
 
 
@@ -147,18 +155,14 @@ def _check(module, tokens: int, vocab: int) -> tuple[bool, str]:
         got = loss[start : start + CHUNK].float()
         worst_loss = max(worst_loss, ((got - ref_loss).abs() / (1e-3 + 1e-4 * ref_loss.abs())).max().item())
         ref = torch.exp(x - lse[:, None])
-        ref[torch.arange(ref.size(0), device="cuda"), t] -= 1.0
+        ref[torch.arange(ref.size(0), device=DEVICE), t] -= 1.0
         ref *= grad_loss[start : start + CHUNK, None]
         g = grad[start : start + CHUNK].float()
         err2 += ((g - ref) ** 2).sum().item()
         ref2 += (ref**2).sum().item()
         bad += (~torch.isclose(g, ref, rtol=1.6e-2, atol=1e-6)).sum().item()
-    rel = (err2 / ref2) ** 0.5 if ref2 else float("inf")
-    snr = (
-        10.0 * math.log10(ref2 / err2)
-        if err2 > 0 and math.isfinite(err2)
-        else (float("inf") if err2 == 0 else float("-inf"))
-    )
+    rel = (err2 / ref2) ** 0.5 if ref2 else INF
+    snr = 10.0 * math.log10(ref2 / err2) if err2 > 0 and math.isfinite(err2) else (INF if err2 == 0 else NEG_INF)
     ok = worst_loss <= 1.0 and rel <= 4e-3 and bad == 0
     return ok, snr, f"loss_err/tol={worst_loss:.3f} grad_rel_l2={rel:.2e} grad_out_of_tol={bad} grad_snr_db={snr:.2f}"
 
@@ -171,12 +175,13 @@ def _run_correctness() -> int:
         try:
             ok, snr, detail = _check(module, tokens, vocab)
         except Exception as error:  # noqa: BLE001 -- a candidate that raises is wrong, not a driver failure
-            ok, snr, detail = False, float("-inf"), f"{type(error).__name__}: {error}"
+            traceback.print_exc(file=sys.stderr)
+            ok, snr, detail = False, NEG_INF, f"{type(error).__name__}: {error}"
         print(f"check: {case_id} {'ok' if ok else 'FAIL'} {detail}")
         passed.append(ok)
         snrs.append(snr)
         torch.cuda.empty_cache()
-    worst = min(snrs) if snrs else float("-inf")
+    worst = min(snrs) if snrs else NEG_INF
     # a failed tolerance check must not pass the SNR pre-filter
     print(f"SNR: {worst if all(passed) else min(worst, 0.0):.2f} dB")
     print(f"allclose: {all(passed)}")
@@ -188,9 +193,9 @@ def _snr_db(ref: torch.Tensor, out: torch.Tensor) -> float:
     err = (out.float() - ref).pow(2).sum().item()
     sig = ref.pow(2).sum().item()
     if err == 0.0:
-        return float("inf")
+        return INF
     if not math.isfinite(err):
-        return float("-inf")
+        return NEG_INF
     return 10.0 * math.log10(max(sig, 1e-30) / err)
 
 
@@ -210,18 +215,9 @@ def _ref_grad_rows(master, target, grad_loss, rows: int) -> torch.Tensor:
     return ref * grad_loss[:rows, None]
 
 
-def _time(impl, tokens: int, vocab: int, warmup: int, iters: int) -> tuple[float, float, float]:
-    """Graph-replayed forward and backward: median fwd ms, median bwd ms, median (fwd + bwd) ms.
-
-    The forward and the backward are each captured once into a CUDA/HIP graph (sharing one memory
-    pool, so the forward's ctx feeds the backward's static input). Before each timed iteration the
-    logits are restored from a pristine copy, untimed (the kernel may consume them in place); the
-    events then bracket one forward-graph replay and one backward-graph replay.
-    """
-    master, target, grad_loss = _inputs(tokens, vocab)
-    logits = torch.empty_like(master)
-
-    # Eager warmup on a side stream: torch.compile / Triton JIT / autotune happen here, not in capture.
+def _warmup(impl, inputs, logits, warmup: int) -> None:
+    """Eager calls on a side stream: torch.compile, Triton JIT and autotuning happen here, not in capture."""
+    master, target, grad_loss = inputs
     side = torch.cuda.Stream()
     side.wait_stream(torch.cuda.current_stream())
     with torch.cuda.stream(side):
@@ -234,7 +230,10 @@ def _time(impl, tokens: int, vocab: int, warmup: int, iters: int) -> tuple[float
     torch.cuda.synchronize()
     torch.cuda.empty_cache()
 
-    # Capture forward and backward into two graphs sharing one pool.
+
+def _capture(impl, inputs, logits):
+    """The forward and the backward captured into two graphs sharing one pool, checked to recompute on replay."""
+    master, target, grad_loss = inputs
     logits.copy_(master)
     torch.cuda.synchronize()
     pool = torch.cuda.graph_pool_handle()
@@ -248,7 +247,7 @@ def _time(impl, tokens: int, vocab: int, warmup: int, iters: int) -> tuple[float
 
     # Capture-validity guard: poison the static outputs, replay, and check the replay recomputed them.
     ref_loss = _ref_loss(master, target)
-    rows = min(64, tokens)
+    rows = min(64, master.size(0))
     ref_grad = _ref_grad_rows(master, target, grad_loss, rows)
     loss.fill_(float("nan"))
     grad[:rows].fill_(float("nan"))
@@ -264,17 +263,23 @@ def _time(impl, tokens: int, vocab: int, warmup: int, iters: int) -> tuple[float
             f"graph replay did not recompute a correct result (loss SNR {snr_loss:.1f} dB, "
             f"grad SNR {snr_grad:.1f} dB): the kernel was not captured on the current stream"
         )
-    del ref_loss, ref_grad
+    return g_fwd, g_bwd, (loss, ctx, grad)
 
-    # Replay warmup to steady state.
+
+def _event():
+    return torch.cuda.Event(enable_timing=True)
+
+
+def _replay_times(graphs, master, logits, iters: int) -> tuple[list[float], list[float]]:
+    """Per timed iteration, the forward and the backward graph replays' ms, after two to reach steady state."""
+    g_fwd, g_bwd = graphs
     for _ in range(2):
         logits.copy_(master)
         g_fwd.replay()
         g_bwd.replay()
     torch.cuda.synchronize()
-
-    fwd, bwd, tot = [], [], []
-    start, mid, end = (torch.cuda.Event(enable_timing=True) for _ in range(3))
+    fwd, bwd = [], []
+    start, mid, end = _event(), _event(), _event()
     for _ in range(iters):
         logits.copy_(master)  # untimed restore
         start.record()
@@ -283,14 +288,28 @@ def _time(impl, tokens: int, vocab: int, warmup: int, iters: int) -> tuple[float
         g_bwd.replay()
         end.record()
         torch.cuda.synchronize()
-        f, b = start.elapsed_time(mid), mid.elapsed_time(end)
-        fwd.append(f)
-        bwd.append(b)
-        tot.append(f + b)
-    del g_fwd, g_bwd, loss, ctx, grad, master, logits, target, grad_loss
+        fwd.append(start.elapsed_time(mid))
+        bwd.append(mid.elapsed_time(end))
+    return fwd, bwd
+
+
+def _time(impl, tokens: int, vocab: int, warmup: int, iters: int) -> tuple[float, float, float]:
+    """Graph-replayed forward and backward: median fwd ms, median bwd ms, median (fwd + bwd) ms.
+
+    The forward and the backward are each captured once into a CUDA/HIP graph (sharing one memory
+    pool, so the forward's ctx feeds the backward's static input). Before each timed iteration the
+    logits are restored from a pristine copy, untimed (the kernel may consume them in place); the
+    events then bracket one forward-graph replay and one backward-graph replay.
+    """
+    inputs = _inputs(tokens, vocab)
+    logits = torch.empty_like(inputs[0])
+    _warmup(impl, inputs, logits, warmup)
+    g_fwd, g_bwd, outputs = _capture(impl, inputs, logits)
+    fwd, bwd = _replay_times((g_fwd, g_bwd), inputs[0], logits, iters)
+    del g_fwd, g_bwd, outputs, inputs, logits
     torch.cuda.synchronize()
     torch.cuda.empty_cache()
-    return statistics.median(fwd), statistics.median(bwd), statistics.median(tot)
+    return statistics.median(fwd), statistics.median(bwd), statistics.median([f + b for f, b in zip(fwd, bwd)])
 
 
 def _bench(impl, warmup: int, iters: int, cases=None) -> dict[str, tuple[float, float, float]]:
@@ -354,7 +373,7 @@ def _run_profile() -> int:
     _, tokens, vocab = PROFILE_CASE
     master, target, grad_loss = _inputs(tokens, vocab)
     logits = torch.empty_like(master)
-    for _ in range(3):
+    for _ in range(PROFILE_CALLS):
         logits.copy_(master)
         loss, ctx = module.forward(logits, target)
         grad = module.backward(ctx, grad_loss)
