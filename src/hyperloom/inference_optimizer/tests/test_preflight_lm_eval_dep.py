@@ -46,10 +46,15 @@ class _FakeRun:
         if versions is not None:
             self.versions = dict(versions)
         self.calls: list[list[str]] = []
+        #: What each install's constraints file held while pip ran (preflight removes it afterwards).
+        self.constraints: dict[str, list[str]] = {}
 
     def __call__(self, cmd, **kwargs):
         cmd = list(cmd)
         self.calls.append(cmd)
+        if cmd[1:4] == ["-m", "pip", "install"] and "-c" in cmd:
+            path = cmd[cmd.index("-c") + 1]
+            self.constraints[path] = Path(path).read_text(encoding="utf-8").split()
 
         class _R:
             returncode = 0
@@ -118,10 +123,11 @@ def test_lm_eval_installed_when_missing_and_eval_enabled(monkeypatch):
     assert preflight._LM_EVAL_PINNED_REF in runner.installs[0][-1]
 
 
-def _constraint_lines(install_cmd: list[str]) -> list[str]:
-    """Read back the constraints file a pip invocation was handed."""
+def _constraint_lines(runner: _FakeRun, install: int = 0) -> list[str]:
+    """What the constraints file the ``install``-th pip invocation was handed held while it ran."""
+    install_cmd = runner.installs[install]
     assert "-c" in install_cmd, f"install ran unconstrained: {install_cmd}"
-    return Path(install_cmd[install_cmd.index("-c") + 1]).read_text(encoding="utf-8").split()
+    return runner.constraints[install_cmd[install_cmd.index("-c") + 1]]
 
 
 def test_lm_eval_install_cannot_move_the_packages_install_sh_settled(monkeypatch):
@@ -131,7 +137,7 @@ def test_lm_eval_install_cannot_move_the_packages_install_sh_settled(monkeypatch
 
     preflight._ensure_lm_eval_dep("py", [])
 
-    pins = _constraint_lines(runner.installs[0])
+    pins = _constraint_lines(runner)
     assert "pandas==2.2.3" in pins
     assert "torch==2.6.0" in pins
 
@@ -143,7 +149,28 @@ def test_a_missing_extra_is_installed_under_the_same_constraints(monkeypatch):
 
     preflight._ensure_lm_eval_dep("py", [])
 
-    assert "pandas==2.2.3" in _constraint_lines(runner.installs[0])
+    assert "pandas==2.2.3" in _constraint_lines(runner)
+
+
+@pytest.mark.parametrize(
+    ("missing", "failing"),
+    [(["lm_eval"], False), (["tenacity"], False), (["lm_eval"], True), (["tenacity"], True)],
+)
+def test_the_constraints_file_is_gone_once_the_install_ends_whether_it_succeeded_or_failed(
+    monkeypatch, missing, failing
+):
+    """Each preflight writes one; left behind, they pile up in the host's temporary directory."""
+    monkeypatch.delenv("RUN_EVAL", raising=False)
+    runner = _patch(monkeypatch, _FakeRun(missing, install_rc=1 if failing else 0))
+
+    if failing:
+        with pytest.raises(subprocess.CalledProcessError):
+            preflight._ensure_lm_eval_dep("py", [])
+    else:
+        preflight._ensure_lm_eval_dep("py", [])
+
+    assert runner.constraints, "an install ran under constraints"
+    assert not [path for path in runner.constraints if Path(path).exists()]
 
 
 def test_unreadable_versions_warn_and_install_anyway(monkeypatch, capsys):

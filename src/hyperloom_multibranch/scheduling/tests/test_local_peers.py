@@ -140,6 +140,13 @@ IMAGE_VARS = ("HYPERLOOM_ACTIVE_IMAGE_REF", "HYPERLOOM_ACTIVE_IMAGE_DIGEST")
 DEV_SANDBOX_TOOLS = {f"dev_sandbox_{verb}" for verb in ("lease", "run", "start", "read", "release")}
 
 
+@pytest.fixture(autouse=True)
+def _own_jit_store(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """A local toolbox's compiled-code cache is the host's, below its temporary directory, unless one is named: each
+    test names one of its own."""
+    monkeypatch.setenv(local_hosted.JIT_STORE_ENV, str(tmp_path / "jit-store"))
+
+
 def _call_tool(grant: SpecialistGrant, name: str, arguments: dict[str, str] | None = None) -> dict[str, object]:
     message = {
         "jsonrpc": "2.0",
