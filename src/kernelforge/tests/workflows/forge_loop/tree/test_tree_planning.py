@@ -144,11 +144,11 @@ def test_a_slot_is_told_its_lane_s_approach_and_how_to_time_the_cases_it_aims_at
     slot = _slots(1)[0]
     plan = SlotPlan(slot, "## Plan\nretime", "p", approach="retime the MFMA issue", focus_cases=("m_64", "m_128"))
 
-    prompt = slot_prompt(plan, _start(), lambda text: text)
+    prompt = slot_prompt(plan, _start())
 
     assert "retime the MFMA issue" in prompt
     assert "aimed at these cases: m_64, m_128" in prompt and "--bench-case <case_id>" in prompt
     assert prompt.endswith("## Plan\nretime")
     # A lane aimed at the plan alone is told nothing more than its plan.
-    plain = slot_prompt(SlotPlan(slot, "## Plan\nretime", "p"), _start(), lambda text: text)
+    plain = slot_prompt(SlotPlan(slot, "## Plan\nretime", "p"), _start())
     assert "approach" not in plain and "--bench-case" not in plain

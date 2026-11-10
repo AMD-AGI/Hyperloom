@@ -168,9 +168,11 @@ different attempt.
 Aim a lane at a subset of the cases when the evidence shows different cases
 limited by different things: each case's `bottleneck`, `latency_ms`, profile
 and roofline are in the payload. A lane aimed at some cases still keeps every
-case correct and may leave the others slower. It puts its specialization
-behind a dispatch on the shape, or a configuration entry for its cases, so
-the other cases keep the path they run today.
+case correct and may leave the others slower: when the lanes are done, the
+round merges their candidates so that each case runs on the fastest of them.
+A lane that puts its specialization behind a dispatch on the shape, or a
+configuration entry for its cases, leaves the other cases on the path they
+run today and merges cleanly.
 
 For each lane give `approach`: how it goes about its assignment and how that
 differs from the other lanes; `focus_cases`: the cases it is aimed at, or
@@ -206,9 +208,11 @@ materially different attempt from theirs. You may change any code your plan
 needs, including code another lane changes too.
 
 When your lane has `focus_cases`, plan for those cases: every case stays
-correct, and the other cases may get slower. Put the specialization behind a
-dispatch on the shape, or a configuration entry for those cases, so the other
-cases keep the path they run today.
+correct, and the other cases may get slower, since the round merges its lanes'
+candidates so that each case runs on the fastest of them. Put the
+specialization behind a dispatch on the shape, or a configuration entry for
+those cases, so the other cases keep the path they run today and the merge
+keeps your lane's gain.
 
 When your lane has a `fallback`, plan time-boxed: name what is measured first,
 the point at which the main step is abandoned, and the fallback the session

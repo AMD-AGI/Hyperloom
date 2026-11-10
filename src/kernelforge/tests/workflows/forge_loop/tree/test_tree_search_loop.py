@@ -17,7 +17,8 @@ import pytest
 
 from kernelforge.workflows.forge_loop.campaign.experiment import ExperimentTracker
 from kernelforge.workflows.forge_loop.campaign.experiments_layout import ExperimentsLayout
-from kernelforge.workflows.forge_loop.iteration import attempt_verdict, campaign_runtime, scoring_runtime
+from kernelforge.utils.process_reaping import ReapReport
+from kernelforge.workflows.forge_loop.iteration import attempt_verdict, campaign_runtime, fanout, scoring_runtime
 from kernelforge.workflows.forge_loop.iteration.iteration_types import IterationConfig, LoopAgents
 from kernelforge.workflows.forge_loop.roles.contracts import PublishedLane
 from kernelforge.workflows.forge_loop.roles.slot_selector import SelectorAnswer
@@ -35,17 +36,19 @@ from kernelforge.workflows.forge_loop.tree.search_loop import TreeSearchLoop
 from kernelforge.workflows.forge_loop.tree.store import SearchTreeStore
 from kernelforge.tests.workflows.forge_loop.tree._selection_answers import _selection
 
-_VALUE = re.compile(r"set VALUE = (\d+)")
+_CONSTANT = re.compile(r"^(\w+) = (\d+)$", re.MULTILINE)
+_SET = re.compile(r"set (\w+) = (\d+)")
+_MERGE_ROW = re.compile(r"^\| (\w+) \| ([\d.]+) \| ([\d.]+) \|", re.MULTILINE)
 
 
 def _git(cwd: Path, *args: str) -> str:
     return subprocess.run(["git", *args], cwd=cwd, check=True, capture_output=True, text=True).stdout.strip()
 
 
-def _workspace(tmp_path: Path) -> Path:
+def _workspace(tmp_path: Path, kernel: str = "VALUE = 10\n") -> Path:
     workspace = tmp_path / "workspace"
     workspace.mkdir()
-    (workspace / "kernel.py").write_text("VALUE = 10\n")
+    (workspace / "kernel.py").write_text(kernel)
     (workspace / "driver.py").write_text("pass\n")
     (workspace / ".gitignore").write_text("forge_experiments/\n")
     _git(workspace, "init", "-q", "-b", "opt")
@@ -56,23 +59,30 @@ def _workspace(tmp_path: Path) -> Path:
     return workspace
 
 
-def _value_at(driver_script: str) -> int:
-    """The kernel constant of the checkout whose driver is being run."""
-    text = (Path(driver_script).parent / "kernel.py").read_text()
-    return int(re.search(r"VALUE = (\d+)", text).group(1))
+def _constants(kernel: Path) -> dict[str, int]:
+    return {name: int(value) for name, value in _CONSTANT.findall(kernel.read_text())}
 
 
-def _stub_device(monkeypatch, measured_values: list[int]):
-    """Time a checkout by its kernel constant: VALUE 10 runs the one case in 1.0 ms."""
+def _kernel(values: dict[str, int]) -> str:
+    return "".join(f"{name} = {value}\n" for name, value in values.items())
+
+
+def _stub_device(monkeypatch, measured: list[dict[str, int]]):
+    """Time a checkout by its kernel's constants: each constant is the case of its lowercased name, 10 in 1.0 ms."""
 
     async def bench(run, **_kwargs):
-        wall_ms = _value_at(run.driver_script) / 10.0
-        measured_values.append(_value_at(run.driver_script))
+        values = _constants(Path(run.driver_script).parent / "kernel.py")
+        measured.append(values)
+        case_times = {name.lower(): value / 10.0 for name, value in values.items()}
         runs = [
-            {"success": True, "case_times": {"case": wall_ms * factor}, "unscored_cases": []}
+            {
+                "success": True,
+                "case_times": {case: ms * factor for case, ms in case_times.items()},
+                "unscored_cases": [],
+            }
             for factor in (1.0, 1.001, 0.999)
         ]
-        return {"success": True, "median_ms": wall_ms, "case_times": {"case": wall_ms}, "measurements": runs}
+        return {"success": True, "median_ms": sum(case_times.values()), "case_times": case_times, "measurements": runs}
 
     async def validation(*, driver_script, **_kwargs):
         return SimpleNamespace(
@@ -111,7 +121,7 @@ class _Planning:
                 "- fails if: never faster\n\nset VALUE = 12",
             )
             approaches = (
-                PublishedLane(1, approach="shrink the table", focus_cases=("case",)),
+                PublishedLane(1, approach="shrink the table", focus_cases=("value",)),
                 PublishedLane(2, approach="restructure the loop"),
             )
         elif "DEEPEN direction d002" in brief:
@@ -131,12 +141,21 @@ def _planned(plans: tuple[str, ...], lanes: tuple[PublishedLane, ...] = ()) -> S
 
 def _lane_factory(_lane_dir, _serialized_driver):
     async def session(kernel_path, prompt, session_sink=None):
-        # A PORT plan names no constant: carrying the published route's tuning onto this structure lands at 3.
-        value = "3" if "# Port plan" in prompt else _VALUE.search(prompt).group(1)
-        Path(kernel_path).write_text(f"VALUE = {value}\n")
+        kernel = Path(kernel_path)
+        values = _constants(kernel)
+        if "# Port plan" in prompt:
+            # A PORT plan names no constant: carrying the published route's tuning onto this structure lands at 3.
+            values["VALUE"] = 3
+        elif "# Merge plan" in prompt:
+            # What a merge plan asks for: every case on the faster of the two implementations.
+            for case, here, there in _MERGE_ROW.findall(prompt):
+                values[case.upper()] = round(min(float(here), float(there)) * 10)
+        else:
+            values.update((name, int(value)) for name, value in _SET.findall(prompt))
+        kernel.write_text(_kernel(values))
 
         async def summarize(_prompt):
-            return f"set the constant to {value}"
+            return "set " + ", ".join(f"{name} to {value}" for name, value in values.items())
 
         session_sink["summarize"] = summarize
         return "edited the constant"
@@ -179,11 +198,33 @@ class _Selector:
         return SelectorAnswer(answer=_selection(slots))
 
 
+class _RemeasuringSelector(_Selector):
+    """The same slots, and a re-measure of the root every round."""
+
+    async def select(self, *, workspace, facts, lanes, usage=None):
+        answer = await super().select(workspace=workspace, facts=facts, lanes=lanes, usage=usage)
+        return SelectorAnswer(answer=answer.answer.model_copy(update={"remeasure": [self.loop._tree.root.commit]}))
+
+
 class _SlowerPlanning(_Planning):
     """Every route it plans is slower than the root."""
 
     async def run(self, context, *, usage=None, lanes=1):
         return _planned(("set VALUE = 12", "set VALUE = 15")[:lanes])
+
+
+class _CaseSplitPlanning(_Planning):
+    """Two lanes at the root, each aimed at one case and slower than the root on the other."""
+
+    async def run(self, context, *, usage=None, lanes=1):
+        plans = (
+            "## Direction\n- name: small tiles\n- hypothesis: small M\n- expected ceiling: 2x\n- fails if: no gain\n\n"
+            "set SMALL = 8\nset LARGE = 14",
+            "## Direction\n- name: large tiles\n- hypothesis: large M\n- expected ceiling: 2x\n- fails if: no gain\n\n"
+            "set SMALL = 15\nset LARGE = 8",
+        )
+        focus = (PublishedLane(1, focus_cases=("small",)), PublishedLane(2, focus_cases=("large",)))
+        return _planned(plans[:lanes], focus[:lanes])
 
 
 def _relay_of(agents: LoopAgents) -> LoopAgents:
@@ -222,16 +263,18 @@ def _run_campaign(
     workspace: Path | None = None,
     resume: bool = False,
     planning=_Planning,
+    selector_type=_Selector,
     relay: bool = False,
 ):
     workspace = workspace or _workspace(tmp_path)
-    measured: list[int] = []
+    measured: list[dict[str, int]] = []
     _stub_device(monkeypatch, measured)
+    baseline = {name.lower(): 1.0 for name in _constants(workspace / "kernel.py")}
     config = IterationConfig(
         kernel_file=str(workspace / "kernel.py"),
         driver_script=str(workspace / "driver.py"),
-        baseline_wall_ms=1.0,
-        baseline_case_times={"case": 1.0},
+        baseline_wall_ms=float(len(baseline)),
+        baseline_case_times=baseline,
         max_time_hours=1.0,
         git_branch="opt",
         workspace_dir=str(workspace),
@@ -244,7 +287,7 @@ def _run_campaign(
         resume=resume,
     )
     monkeypatch.setattr(loop, "_time_remaining", lambda: 12 * 3600.0 if len(loop.results) < rounds else 0.0)
-    selector = _Selector()
+    selector = selector_type()
     selector.loop = loop
     agents = LoopAgents(
         agent_factory=_lane_factory,
@@ -263,7 +306,7 @@ def test_a_round_keeps_a_slower_route_and_publishes_the_faster_one(tmp_path, mon
     assert [item.name for item in tree.directions] == ["fast table", "structural route"]
     fast, slow = tree.nodes[1], tree.nodes[2]
     # Each node keeps what set its lane apart, for the selector to read in later rounds.
-    assert (fast.approach, fast.focus_cases, slow.approach) == ("shrink the table", ("case",), "restructure the loop")
+    assert (fast.approach, fast.focus_cases, slow.approach) == ("shrink the table", ("value",), "restructure the loop")
     assert tree.published_best == fast.commit
     assert (workspace / "kernel.py").read_text() == "VALUE = 5\n"
     assert _git(workspace, "rev-parse", "HEAD^{tree}") == _git(workspace, "rev-parse", f"{fast.commit}^{{tree}}")
@@ -275,7 +318,7 @@ def test_a_round_keeps_a_slower_route_and_publishes_the_faster_one(tmp_path, mon
     assert layout.tree_selection(1).is_file()
     # Each slot's Implementer is asked for its record before its lane copy is deleted, as a linear lane is.
     lessons = sorted((layout.tree_round(1) / slot / "lesson.md").read_text() for slot in ("slot_01", "slot_02"))
-    assert lessons == ["set the constant to 12", "set the constant to 5"]
+    assert lessons == ["set VALUE to 12", "set VALUE to 5"]
 
 
 def test_the_next_round_deepens_both_routes_from_their_own_code(tmp_path, monkeypatch):
@@ -289,12 +332,43 @@ def test_the_next_round_deepens_both_routes_from_their_own_code(tmp_path, monkey
     assert tree.published_best == by_value[2.5].commit
     assert (workspace / "kernel.py").read_text() == "VALUE = 4\n"
     # Round 2 measured 11 in the slow route's checkout and 4 in the fast one's, then 4 again on the campaign branch.
-    assert measured[-3:] == [4, 11, 4] or measured[-3:] == [11, 4, 4]
+    assert [item["VALUE"] for item in measured[-3:]] in ([4, 11, 4], [11, 4, 4])
     assert "structural route" in selector.facts[1]
     events = loop.state_store.recent_events(50)
     assert len([event for event in events if event["type"] == "iteration_result"]) == 2
     # Each start's slots decide how it is planned; no campaign-wide search mode is decided or recorded.
     assert not [event for event in events if event["type"] == "search_policy_decision"]
+
+
+def test_two_lanes_aimed_at_different_cases_publish_their_merge(tmp_path, monkeypatch):
+    workspace = _workspace(tmp_path, _kernel({"SMALL": 10, "LARGE": 10}))
+    loop, workspace, _selector, _measured = _run_campaign(
+        tmp_path, monkeypatch, rounds=1, workspace=workspace, planning=_CaseSplitPlanning
+    )
+    tree = SearchTreeStore(ExperimentsLayout.of(workspace).search_tree).load()
+    small, large, merged = tree.nodes[1:]
+
+    # Neither lane alone beats the root; their merge runs each case on the faster of the two.
+    assert small.score < 1.0 and large.score < 1.0 and small.focus_cases == ("small",)
+    assert (merged.source, merged.parent, merged.provenance) == (NodeSource.COMPOSE, small.commit, (large.commit,))
+    assert tree.published_best == merged.commit and loop.run_state.best.commit_hash == tree.published_head
+    assert (workspace / "kernel.py").read_text() == _kernel({"SMALL": 8, "LARGE": 8})
+    plan = (ExperimentsLayout.of(workspace).tree_round(1) / "merge_01" / "plan.md").read_text()
+    assert "| large | 1.4000 | 0.8000 | the other node |" in plan
+
+
+def test_a_round_whose_lanes_left_the_device_held_measures_and_publishes_nothing(tmp_path, monkeypatch):
+    async def held(lane_dir):
+        return ReapReport(directory=str(lane_dir), unkillable=(4242,))
+
+    monkeypatch.setattr(fanout, "_reap_lane_processes", held)
+    loop, workspace, _selector, measured = _run_campaign(
+        tmp_path, monkeypatch, rounds=1, selector_type=_RemeasuringSelector
+    )
+    tree = SearchTreeStore(ExperimentsLayout.of(workspace).search_tree).load()
+
+    assert measured == [] and len(tree.nodes) == 1 and tree.published_best == tree.root.commit
+    assert loop.results[-1].workspace_contention and not loop.results[-1].kept
 
 
 def test_a_port_carries_gains_onto_another_route_and_can_publish_it(tmp_path, monkeypatch):

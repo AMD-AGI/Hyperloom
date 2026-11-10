@@ -4,10 +4,11 @@
 """forge-loop with the tree strategy: each iteration expands several nodes of a search tree at once.
 
 Everything outside one iteration's search -- stop conditions, round pricing, Analysis, publication of a best, resume --
-is the iteration loop's own. A round ends in the loop's ordinary settle path: the best node the round found that
-cleared the published best's KEEP bar is staged in the campaign workspace and measured there once more before it is
-committed on the campaign branch, so the campaign branch is the chain of published bests and each of its commits holds
-exactly the tree of one node.
+is the iteration loop's own. A round's new nodes are merged before it settles (see ``tree.merge``), and the round ends
+in the loop's ordinary settle path: the best node the round found that cleared the published best's KEEP bar, a merge
+included, is staged in the campaign workspace and measured there once more before it is committed on the campaign
+branch, so the campaign branch is the chain of published bests and each of its commits holds exactly the tree of one
+node.
 """
 
 from __future__ import annotations
@@ -32,7 +33,9 @@ from kernelforge.workflows.forge_loop.iteration.runner import IterationLoop
 from kernelforge.workflows.forge_loop.roles.slot_selector import SelectorAnswer
 from kernelforge.workflows.forge_loop.tree.admission import SlotOutcome, TreeAdmissionMixin, measured_correct
 from kernelforge.workflows.forge_loop.tree.facts import FactSources, RoundOutlook, render_facts
+from kernelforge.workflows.forge_loop.tree.merge import TreeMergeMixin
 from kernelforge.workflows.forge_loop.tree.model import (
+    MergeFailure,
     NodeSource,
     Round,
     SearchTree,
@@ -46,7 +49,7 @@ from kernelforge.workflows.forge_loop.tree.store import SearchTreeStore
 from kernelforge.workflows.forge_loop.tree.worktrees import StartWorktrees, untracked_outside
 
 
-class TreeSearchLoop(TreePlanningMixin, TreeAdmissionMixin, IterationLoop):
+class TreeSearchLoop(TreePlanningMixin, TreeMergeMixin, TreeAdmissionMixin, IterationLoop):
     """The iteration loop whose search step expands a tree of measured nodes."""
 
     def __init__(self, *args, **kwargs) -> None:
@@ -55,7 +58,8 @@ class TreeSearchLoop(TreePlanningMixin, TreeAdmissionMixin, IterationLoop):
         self._start_worktrees = StartWorktrees(self.ic.workspace_dir)
         self._tree_store = SearchTreeStore(self._experiments.search_tree)
         self._tree: SearchTree | None = None
-        self._unstacked: tuple[tuple[str, str], ...] = ()
+        # The last round's merges that did not land, which the next round's selector may carry over by PORT.
+        self._merge_failures: tuple[MergeFailure, ...] = ()
 
     async def _begin_locked_run(self, agents: LoopAgents, *, callbacks: LoopCallbacks, usage=None) -> LoopAgents:
         actors = await super()._begin_locked_run(agents, callbacks=callbacks, usage=usage)
@@ -142,12 +146,14 @@ class TreeSearchLoop(TreePlanningMixin, TreeAdmissionMixin, IterationLoop):
             self._close_tree_round(tree, [], plans, "the round could not pay for its sessions")
             return False
         outcomes = await self._expand(tree, turn, plans)
-        composition = await self._compose_onto_published(tree, turn.iteration, [o.node for o in outcomes if o.node])
-        await self._remeasure(tree, turn.iteration, round_.remeasure)
-        self._unstacked = composition.unstacked
+        admitted = [(o.node, o.result) for o in outcomes if o.node is not None]
+        merges = await self._merge_round(tree, turn.iteration, admitted, turn.actors.agent_factory)
+        # Nothing is measured on a device a session of this round left held.
+        if self.device_hazard.live is None:
+            await self._remeasure(tree, turn.iteration, round_.remeasure)
+        self._merge_failures = merges.failures
         self._close_tree_round(tree, outcomes, plans, "")
-        candidates = [(o.node, o.result) for o in outcomes if o.node is not None] + list(composition.nodes)
-        await self._settle_round(turn, candidates, outcomes, callbacks)
+        await self._settle_round(turn, admitted + list(merges.nodes), outcomes, callbacks)
         self._start_worktrees.release([tree.published_best])
         return True
 
@@ -176,7 +182,7 @@ class TreeSearchLoop(TreePlanningMixin, TreeAdmissionMixin, IterationLoop):
                 archive_dir=str(self._experiments.tree_rounds),
                 selections_dir=str(self._experiments.tree_selections),
             ),
-            compose_failures=self._unstacked,
+            merge_failures=self._merge_failures,
         )
         started_at = time.time()
         selector = turn.actors.slot_selector
@@ -250,6 +256,12 @@ class TreeSearchLoop(TreePlanningMixin, TreeAdmissionMixin, IterationLoop):
         frame = _IterationFrame(turn.iteration, {"plan": _round_summary(outcomes)}, _StagedMerge(None, ""))
         # The relay switches profile only between iterations, so every slot of this round ran on the active one.
         self._bind_session_producer(frame.session_sink, self.run_state.agent_relay.active_profile_id)
+        hazard = self.device_hazard.live
+        if hazard is not None:
+            # A session of this round left the device held: nothing after it is measured, the publication included.
+            attempt = _Attempt(_held_device_result(turn.iteration, hazard.describe()), "", "", "", "", None, "", True)
+            await self._settle_locked_attempt(attempt, frame, callbacks=callbacks)
+            return
         if clearing:
             node, _ = max(clearing, key=lambda item: item[0].score)
             await self._publish_node(node, frame, callbacks)
@@ -285,6 +297,20 @@ class TreeSearchLoop(TreePlanningMixin, TreeAdmissionMixin, IterationLoop):
             self._tree.publish(node.commit, head=self.run_state.best.commit_hash)
             self._tree_store.save(self._tree)
             print(f"  [tree] published node {node.commit[:12]} as the new best")
+
+
+def _held_device_result(iteration: int, detail: str) -> IterationResult:
+    return IterationResult(
+        iteration=iteration,
+        duration_sec=0.0,
+        validation_passed=False,
+        validation_summary=(
+            "REVERT (workspace contention): a session of this round left the device held by processes this campaign "
+            f"could not clear, so nothing after it was measured and nothing was published. {detail}"
+        ),
+        kept=False,
+        workspace_contention=detail,
+    )
 
 
 def _round_summary(outcomes: list[SlotOutcome]) -> str:

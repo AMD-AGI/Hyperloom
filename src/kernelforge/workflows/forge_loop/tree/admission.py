@@ -1,21 +1,20 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""Run a tree round's lanes, measure every candidate where it was written, and admit the correct ones as nodes."""
+"""Run a tree round's sessions, measure every candidate where it was written, and admit the correct ones as nodes."""
 
 from __future__ import annotations
 
 import json
-from collections.abc import Sequence
+from collections.abc import Callable, Sequence
 from dataclasses import dataclass, replace
 from pathlib import Path
 
 from hyperloom_common.io import DURABLE, atomic_write_text
-from kernelforge.utils.git import git
 from kernelforge.workflows.forge_loop.iteration.fanout import LanePlan, LaneResult, run_lanes
 from kernelforge.workflows.forge_loop.iteration.iteration_types import IterationResult
 from kernelforge.workflows.forge_loop.iteration.lane_runtime import _lane_prompt
-from kernelforge.workflows.forge_loop.iteration.merge_candidates import case_spreads, cases_beating_reference
+from kernelforge.workflows.forge_loop.iteration.merge_candidates import case_spreads
 from kernelforge.workflows.forge_loop.memory.lessons import SummaryOutcome
 from kernelforge.workflows.forge_loop.tree.model import (
     Attempt,
@@ -28,7 +27,7 @@ from kernelforge.workflows.forge_loop.tree.model import (
     TreeNode,
 )
 from kernelforge.workflows.forge_loop.tree.planning import SlotPlan
-from kernelforge.workflows.forge_loop.tree.refs import is_ancestor, node_holding_tree, pin_node, point_direction_branch
+from kernelforge.workflows.forge_loop.tree.refs import node_holding_tree, pin_node, point_direction_branch
 
 _PLAN_SUMMARY_CHARS = 240
 
@@ -43,11 +42,22 @@ class SlotOutcome:
 
 
 @dataclass(frozen=True)
-class Composition:
-    """The nodes mechanical stacking added, with their measurements, and the pairs whose diff did not apply."""
+class StagedCandidate:
+    """A candidate staged in the worktree of the node it was made on, the plan it came from, and where its records go."""
 
-    nodes: tuple[tuple[TreeNode, IterationResult], ...]
-    unstacked: tuple[tuple[str, str], ...]
+    worktree: Path
+    start: str
+    plan: str
+    records: Path
+
+
+@dataclass(frozen=True)
+class MeasuredCandidate:
+    """What a staged candidate came to: the node that already holds it, or its measurement and the node it made."""
+
+    holder: str = ""
+    result: IterationResult | None = None
+    node: TreeNode | None = None
 
 
 def measured_correct(result: IterationResult | None) -> bool:
@@ -62,14 +72,14 @@ def _summary(text: str) -> str:
     return " ".join(str(text or "").split())[:_PLAN_SUMMARY_CHARS]
 
 
-def slot_prompt(plan: SlotPlan, start: TreeNode, lane_prompt) -> str:
-    """One slot's Implementer prompt: where it starts, what counts, its lane's approach and focus, then its plan."""
+def slot_prompt(plan: SlotPlan, start: TreeNode) -> str:
+    """What one slot's Implementer is asked: where it starts, what counts, its lane's approach and focus, its plan."""
     preamble = (
         f"This session starts from search-tree node {start.commit} at {start.score:.6f}x (equal-weight mean "
         "pristine-relative case speedup). Aim to exceed it. The candidate must be correct; a correct but slower first "
         "step of the planned route is acceptable, is measured, and is kept in the search tree.\n\n"
     )
-    return lane_prompt(preamble + _lane_focus(plan) + plan.text)
+    return preamble + _lane_focus(plan) + plan.text
 
 
 def _lane_focus(plan: SlotPlan) -> str:
@@ -80,15 +90,17 @@ def _lane_focus(plan: SlotPlan) -> str:
     if plan.focus_cases:
         notes.append(
             f"This lane is aimed at these cases: {', '.join(plan.focus_cases)}. Make them faster; every case must "
-            "stay correct, and the other cases may get slower. While you iterate, pass `--bench-case <case_id>` to the "
-            "driver command above to time one of them alone (a driver that does not take the flag times every case), "
-            "and run the whole driver once before you finish."
+            "stay correct, and the other cases may get slower, since the round merges its lanes' candidates so that "
+            "each case runs on the fastest of them. While you iterate, you can time one of your cases alone by adding "
+            "`--bench-case <case_id>` to the driver's bench-mode command (`--warmup <n> --iters <n> --bench-mode`); "
+            "a driver that does not support the flag ignores or rejects it, and then times only its whole suite. Run "
+            "the whole driver once before you finish."
         )
     return "".join(f"{note}\n\n" for note in notes)
 
 
 class TreeAdmissionMixin:
-    """Lanes, measurement and node admission for one tree round.
+    """Sessions, measurement and node admission for one tree round.
 
     The host supplies ``ic``, ``run_one_iteration``, ``_canonical_site``, ``_lane_rejection``, ``_workspace_path``,
     ``_request_lesson``, ``_start_worktrees``, ``_tree_store``, ``_experiments`` and ``device_hazard``.
@@ -98,37 +110,43 @@ class TreeAdmissionMixin:
         self, tree: SearchTree, iteration: int, plans: Sequence[SlotPlan], agent_factory
     ) -> dict[int, LaneResult]:
         """Run one lane per planned slot, each copied from its start's worktree; their results by slot index."""
+        sessions = [
+            (
+                LanePlan(
+                    lane_id=str(plan.slot.index),
+                    plan=plan.text,
+                    source_dir=str(self._start_worktrees.ensure(plan.slot.start)),
+                ),
+                slot_prompt(plan, tree.require_node(plan.slot.start)),
+            )
+            for plan in plans
+        ]
+        results = await self._run_sessions(iteration, sessions, agent_factory)
+        return {int(lane_id): result for lane_id, result in results.items()}
+
+    async def _run_sessions(
+        self, iteration: int, sessions: Sequence[tuple[LanePlan, str]], agent_factory
+    ) -> dict[str, LaneResult]:
+        """Run one Implementer session per lane, each asked its prompt on a copy of its lane's checkout."""
         kernel_relative = self._workspace_path(self.ic.kernel_file)
-        by_lane = {str(plan.slot.index): plan for plan in plans}
+        prompts = {lane.lane_id: prompt for lane, prompt in sessions}
 
         async def _session(lane: LanePlan, lane_dir: Path, serialized_driver: Path) -> SummaryOutcome:
-            plan = by_lane[lane.lane_id]
-            prompt = slot_prompt(
-                plan,
-                tree.require_node(plan.slot.start),
-                lambda text: _lane_prompt(text, serialized_driver=serialized_driver),
-            )
             # The record turn resumes this session now: the round deletes the lane's copy as soon as it returns.
             sink: dict = {}
             call = agent_factory(str(lane_dir), str(serialized_driver))
+            prompt = _lane_prompt(prompts[lane.lane_id], serialized_driver=serialized_driver)
             await call(str(lane_dir / kernel_relative), prompt, session_sink=sink)
             return await self._request_lesson(iteration, sink.get("end_reason", ""), sink.get("summarize"))
 
         results = await run_lanes(
             workspace_dir=self.ic.workspace_dir,
-            lanes=[
-                LanePlan(
-                    lane_id=str(plan.slot.index),
-                    plan=plan.text,
-                    source_dir=str(self._start_worktrees.ensure(plan.slot.start)),
-                )
-                for plan in plans
-            ],
+            lanes=[lane for lane, _ in sessions],
             session=_session,
             parent_dir=str(Path(self.ic.workspace_dir).resolve().parent),
             driver=self._workspace_path(self.ic.driver_script),
         )
-        return {int(item.lane_id): item for item in results}
+        return {item.lane_id: item for item in results}
 
     async def _measure_slots(
         self, tree: SearchTree, iteration: int, plans: Sequence[SlotPlan], lanes: dict[int, LaneResult]
@@ -155,18 +173,37 @@ class TreeAdmissionMixin:
         worktree = self._start_worktrees.ensure(slot.start)
         if not self._start_worktrees.apply(worktree, lane.diff):
             return self._unmeasured(iteration, slot, AttemptOutcome.ERROR, "the lane's diff did not apply to its start")
-        holder = self._node_holding(tree, worktree)
-        if holder:
-            self._start_worktrees.restore(worktree, slot.start)
-            return self._unmeasured(iteration, slot, AttemptOutcome.NO_CHANGES, f"the candidate is node {holder}")
-        result = await self._measure_at(iteration, plan.text, worktree)
-        self._write_slot_record(iteration, slot, "measurement.json", _measurement_record(result))
-        if not measured_correct(result):
-            self._start_worktrees.restore(worktree, slot.start)
-            return SlotOutcome(self._attempt(iteration, slot, AttemptOutcome.INCORRECT, result, ""), None, result)
-        node = self._admit(tree, iteration, plan, result, worktree)
-        self._start_worktrees.restore(worktree, slot.start)
-        return SlotOutcome(self._attempt(iteration, slot, AttemptOutcome.NODE, result, node.commit), node, result)
+        staged = StagedCandidate(worktree, slot.start, plan.text, self._slot_dir(iteration, slot))
+        measured = await self._measure_and_admit(
+            tree, iteration, staged, lambda result: self._admit(tree, iteration, plan, result, worktree)
+        )
+        if measured.holder:
+            return self._unmeasured(
+                iteration, slot, AttemptOutcome.NO_CHANGES, f"the candidate is node {measured.holder}"
+            )
+        node = measured.node
+        outcome = AttemptOutcome.INCORRECT if node is None else AttemptOutcome.NODE
+        attempt = self._attempt(iteration, slot, outcome, measured.result, "" if node is None else node.commit)
+        return SlotOutcome(attempt, node, measured.result)
+
+    async def _measure_and_admit(
+        self, tree: SearchTree, iteration: int, staged: StagedCandidate, admit: Callable[[IterationResult], TreeNode]
+    ) -> MeasuredCandidate:
+        """Measure a staged candidate and ``admit`` it when it is correct; its worktree ends back on its start.
+
+        A candidate some node already holds is not measured: that node is named instead.
+        """
+        try:
+            holder = self._node_holding(tree, staged.worktree)
+            if holder:
+                return MeasuredCandidate(holder=holder)
+            result = await self._measure_at(iteration, staged.plan, staged.worktree)
+            self._write_record(staged.records, "measurement.json", _measurement_record(result))
+            if not measured_correct(result):
+                return MeasuredCandidate(result=result)
+            return MeasuredCandidate(result=result, node=admit(result))
+        finally:
+            self._start_worktrees.restore(staged.worktree, staged.start)
 
     def _node_holding(self, tree: SearchTree, worktree: Path) -> str:
         """The node whose files a worktree's staged candidate already is, or an empty string."""
@@ -174,7 +211,7 @@ class TreeAdmissionMixin:
 
     def _candidate_refusal(self, lane: LaneResult | None) -> str:
         if lane is None:
-            return "the slot's lane never ran"
+            return "the lane never ran"
         if lane.error:
             return f"the lane was lost: {lane.error}"
         if not lane.diff.strip():
@@ -203,14 +240,24 @@ class TreeAdmissionMixin:
         commit = self._start_worktrees.commit(worktree, _commit_message(iteration, slot, direction_id, plan, result))
         pin_node(self.ic.workspace_dir, commit)
         provenance = (slot.source,) if slot.slot_type is SlotType.PORT else ()
-        node = _node_of(
-            result,
-            _Placement(commit, slot.start, direction_id, provenance),
-            slot=slot,
-            plan=plan.title,
+        node = replace(
+            _node_of(result, _Placement(commit, slot.start, direction_id, provenance), slot=slot, plan=plan.title),
             approach=plan.approach,
             focus_cases=plan.focus_cases,
         )
+        self._add_node(tree, node)
+        return node
+
+    def _admit_merge(
+        self, tree: SearchTree, staged: StagedCandidate, result: IterationResult, source: TreeNode
+    ) -> TreeNode:
+        """Commit a correct merge in its base's worktree and add it under the base, on the base's direction."""
+        base = tree.require_node(staged.start)
+        message = f"iter-{result.iteration}-merge: {source.commit[:12]} onto {base.commit[:12]}"
+        commit = self._start_worktrees.commit(staged.worktree, message)
+        pin_node(self.ic.workspace_dir, commit)
+        placement = _Placement(commit, base.commit, base.direction, (source.commit,))
+        node = _node_of(result, placement, slot=None, plan=staged.plan)
         self._add_node(tree, node)
         return node
 
@@ -244,56 +291,6 @@ class TreeAdmissionMixin:
         direction = tree.direction(direction_id)
         if best is not None and direction is not None:
             point_direction_branch(self.ic.workspace_dir, direction.branch, best.commit)
-
-    async def _compose_onto_published(
-        self, tree: SearchTree, iteration: int, new_nodes: Sequence[TreeNode]
-    ) -> Composition:
-        """Stack each new node that wins cases the published best loses onto the published best.
-
-        A node grown from the published best already holds everything the published best has; stacking its change
-        back onto the published best would only reproduce it.
-        """
-        published = tree.require_node(tree.published_best)
-        composed: list[tuple[TreeNode, IterationResult]] = []
-        unstacked: list[tuple[str, str]] = []
-        if published.is_root:
-            return Composition((), ())
-        for node in new_nodes:
-            if is_ancestor(self.ic.workspace_dir, published.commit, node.commit):
-                continue
-            if not _wins_both_ways(node, published):
-                continue
-            outcome = await self._compose(tree, iteration, node, published)
-            if outcome is None:
-                unstacked.append((node.commit, published.commit))
-            elif outcome[0] is not None:
-                composed.append(outcome)
-        return Composition(tuple(composed), tuple(unstacked))
-
-    async def _compose(self, tree: SearchTree, iteration: int, source: TreeNode, target: TreeNode):
-        ancestor = git("merge-base", source.commit, target.commit, cwd=self.ic.workspace_dir).stdout.strip()
-        patch = git("diff", ancestor, source.commit, cwd=self.ic.workspace_dir).stdout
-        worktree = self._start_worktrees.ensure(target.commit)
-        if not self._start_worktrees.apply(worktree, patch):
-            return None
-        holder = self._node_holding(tree, worktree)
-        if holder:
-            print(f"  [tree] stacking {source.commit[:12]} onto {target.commit[:12]} reproduces node {holder[:12]}")
-            self._start_worktrees.restore(worktree, target.commit)
-            return (None, None)
-        plan = f"compose: the change of {source.commit} since {ancestor} onto {target.commit}"
-        result = await self._measure_at(iteration, plan, worktree)
-        if not measured_correct(result):
-            self._start_worktrees.restore(worktree, target.commit)
-            return (None, result)
-        message = f"iter-{iteration}-compose: {source.commit[:12]} onto {target.commit[:12]}"
-        commit = self._start_worktrees.commit(worktree, message)
-        pin_node(self.ic.workspace_dir, commit)
-        placement = _Placement(commit, target.commit, target.direction, (source.commit,))
-        node = _node_of(result, placement, slot=None, plan=plan)
-        self._add_node(tree, node)
-        self._start_worktrees.restore(worktree, target.commit)
-        return (node, result)
 
     async def _remeasure(self, tree: SearchTree, iteration: int, commits: Sequence[str]) -> None:
         """Fold another measurement of each named node into its samples."""
@@ -329,15 +326,11 @@ class TreeAdmissionMixin:
         return self._experiments.tree_round(iteration) / f"slot_{slot.index:02d}"
 
     def _write_slot_record(self, iteration: int, slot: Slot, name: str, content) -> None:
+        self._write_record(self._slot_dir(iteration, slot), name, content)
+
+    def _write_record(self, directory: Path, name: str, content) -> None:
         text = content if isinstance(content, str) else json.dumps(content, indent=2, sort_keys=True, default=str)
-        atomic_write_text(self._slot_dir(iteration, slot) / name, text, options=DURABLE)
-
-
-def _wins_both_ways(node: TreeNode, published: TreeNode) -> bool:
-    """Whether each of two nodes runs some case faster than the other beyond its own noise."""
-    wins = cases_beating_reference(node.case_times, published.case_times, node.case_spreads)
-    losses = cases_beating_reference(published.case_times, node.case_times, published.case_spreads)
-    return bool(wins) and bool(losses)
+        atomic_write_text(directory / name, text, options=DURABLE)
 
 
 @dataclass(frozen=True)
@@ -350,15 +343,7 @@ class _Placement:
     provenance: tuple[str, ...] = ()
 
 
-def _node_of(
-    result: IterationResult,
-    placement: _Placement,
-    *,
-    slot: Slot | None,
-    plan: str,
-    approach: str = "",
-    focus_cases: tuple[str, ...] = (),
-) -> TreeNode:
+def _node_of(result: IterationResult, placement: _Placement, *, slot: Slot | None, plan: str) -> TreeNode:
     detail = result.bench_detail or {}
     return TreeNode(
         commit=placement.commit,
@@ -375,8 +360,6 @@ def _node_of(
         plan=_summary(plan),
         source=_source_of(slot),
         provenance=placement.provenance,
-        approach=approach,
-        focus_cases=focus_cases,
     )
 
 
@@ -415,4 +398,11 @@ def _measurement_record(result: IterationResult) -> dict:
     }
 
 
-__all__ = ["Composition", "SlotOutcome", "TreeAdmissionMixin", "measured_correct", "slot_prompt"]
+__all__ = [
+    "MeasuredCandidate",
+    "SlotOutcome",
+    "StagedCandidate",
+    "TreeAdmissionMixin",
+    "measured_correct",
+    "slot_prompt",
+]
