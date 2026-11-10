@@ -9,6 +9,7 @@ import hashlib
 import json
 import os
 import shlex
+from collections.abc import Mapping
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -81,6 +82,24 @@ def agentx_measurement(report: dict[str, Any]) -> dict[str, Any]:
             value = (latency.get(name) or {}).get(percentile)
             result[f"{name}_{percentile}_ms"] = None if value is None else value * 1000
     return result
+
+
+def server_launch_environment(launch: Mapping[str, Any]) -> tuple[dict[str, str], set[str]]:
+    """The environment a Magpie-verified server launch ran with, and the names its launch cleared.
+
+    ``runtime_environment`` is the server process's own environment, which carries what the launcher injects (an
+    InferenceX recipe's simulated acceptance, say); ``effective_env`` is what the recipe set over it, where ``None``
+    records a name it cleared.
+    """
+    env = {str(name): str(value) for name, value in (launch.get("runtime_environment") or {}).items()}
+    cleared: set[str] = set()
+    for name, value in (launch.get("effective_env") or {}).items():
+        if value is None:
+            env.pop(str(name), None)
+            cleared.add(str(name))
+        else:
+            env[str(name)] = str(value)
+    return env, cleared
 
 
 def native_launch_evidence(
