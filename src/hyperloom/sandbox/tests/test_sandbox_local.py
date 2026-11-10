@@ -1210,6 +1210,15 @@ def test_a_sandbox_that_runs_as_another_account_reads_the_files_the_app_writes_f
     dev.write_file("/in/made/input.txt", b"for the account")
     read = dev.run("id -u; cat $HYPERLOOM_SANDBOX_ROOT/in/made/input.txt")
     assert read.stdout.split("\n", 1) == ["60002", "for the account"], read.stderr
+    made = (dev.fs / "in" / "made" / "input.txt").stat()
+    assert (made.st_uid, stat.S_IMODE(made.st_mode)) == (60002, 0o600), "the account's alone"
+    there = dev.fs / "in" / "app.txt"
+    there.write_bytes(b"the app's")
+    there.chmod(0o600)
+    dev.write_file("/in/app.txt", b"rewritten")
+    assert (there.stat().st_uid, there.read_bytes()) == (os.geteuid(), b"rewritten"), (
+        "a file that was there keeps its owner"
+    )
     dev.kill()
 
 
