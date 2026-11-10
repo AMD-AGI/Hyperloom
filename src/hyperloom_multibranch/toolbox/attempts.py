@@ -7,12 +7,17 @@ An :class:`Executor` runs ONE attempt in a fresh sandbox and returns a ``TestRes
 attempts into the request's single result:
 
 * ``infra`` failure: another sandbox, away from every node tried, up to ``max_infra_retries`` retries, then
-  ``measurement_failed``; the node is reported as an infrastructure failure. An infrastructure failure every sandbox
-  repeats (:data:`UNRETRIED_INFRA_REASONS`) ends as ``measurement_failed`` at once, and its node is not reported; one it
-  likely repeats (:data:`ONCE_RETRIED_INFRA_REASONS`: an aiter build past the watchdog, a sandbox that failed before it
-  ran) is retried once, and its node is not reported either. One that says nothing about the node
-  (:data:`NODE_BLAMELESS_INFRA_REASONS`: a runner that could not start, a runner lost, a Hub download refused for its
-  rate limit) is retried like any other, and its node is not reported.
+  ``measurement_failed``; the node is reported as an infrastructure failure. A retry after a failure that is not the
+  node's (:data:`WAITED_INFRA_REASONS`: cards a process outside the test held, a platform short of sandboxes, a failure
+  never held against its node) waits first, longer each time (:class:`InfraBackoff`), so a minute in which the cards or
+  the platform are busy does not spend every attempt; the wait never runs past the time its branch can still have a
+  test measured (``latest_start``). A retry after any other infrastructure failure goes at once, since the avoid set
+  and the quarantine already move it to another node. An infrastructure
+  failure every sandbox repeats (:data:`UNRETRIED_INFRA_REASONS`) ends as ``measurement_failed`` at once, and its node
+  is not reported; one it likely repeats (:data:`ONCE_RETRIED_INFRA_REASONS`: an aiter build past the watchdog, a
+  sandbox that failed before it ran) is retried once, and its node is not reported either. One that says nothing about
+  the node (:data:`NODE_BLAMELESS_INFRA_REASONS`: a runner that could not start, a runner lost, a Hub download refused
+  for its rate limit) is retried like any other, and its node is not reported.
 * ``candidate`` failure (a known failure signature): ``candidate_failed`` at once.
 * ``unclear`` failure: one rerun away from the first node. A second failure is ``candidate_failed``; a success is the
   result, and the first attempt is re-labelled an infrastructure failure of its node and reported as a failure that
@@ -27,15 +32,20 @@ attempt ``same_node``.
 
 from __future__ import annotations
 
+import asyncio
 import logging
+import time
 from collections.abc import Awaitable, Callable
-from dataclasses import dataclass, replace
+from dataclasses import dataclass, field, replace
 from typing import NamedTuple, Protocol
 
 from hyperloom.measure.failures import (
+    CAPACITY_UNAVAILABLE,
     HF_CACHE_PERMISSION,
+    FOREIGN_PROCESS_ON_CARD,
     HUB_RATE_LIMITED,
     JIT_BUILD_TIMEOUT,
+    RUNNER_START_TIMEOUT,
     SANDBOX_ACQUIRE_TIMEOUT,
     TEST_TIMEOUT_REASON,
 )
@@ -53,6 +63,11 @@ from hyperloom_multibranch.contracts.toolbox import WorkloadKind
 log = logging.getLogger(__name__)
 
 DEFAULT_MAX_INFRA_RETRIES = 3
+#: How long the attempts wait before each infrastructure retry that waits (:data:`WAITED_INFRA_REASONS`), the first, the
+#: second and every later one. Back to back, the four attempts of a test spent about forty seconds, so cards a process
+#: outside the test held for a minute ended it ``measurement_failed``; these spread them over seven minutes. The wait
+#: holds no card or sandbox, but the test stays running in the queue: it keeps its dispatch slot and its branch's K.
+INFRA_BACKOFF_SECONDS: tuple[float, ...] = (60.0, 120.0, 240.0)
 #: Infrastructure failures a fresh sandbox repeats, by the name a reason starts with (before its ``: <detail>``). They are
 #: about how the test was built, not about a node: a patch whose files the server did not import from the farm imports
 #: them from the same place in every sandbox, so a retry only spends GPU time. An attempt that waited the test's whole
@@ -93,6 +108,15 @@ NODE_BLAMELESS_INFRA_REASONS: frozenset[str] = frozenset(
 )
 #: Infrastructure failures whose node is not reported.
 _UNREPORTED_INFRA_REASONS = ONCE_RETRIED_INFRA_REASONS | NODE_BLAMELESS_INFRA_REASONS
+#: Infrastructure failures a retry waits out first (:class:`InfraBackoff`): the ones that are not the node's. Cards a
+#: process outside the test held (:data:`FOREIGN_PROCESS_ON_CARD`) or a platform with no sandbox to give
+#: (:data:`RUNNER_START_TIMEOUT`, :data:`CAPACITY_UNAVAILABLE`) may be free a minute later, and a failure never held
+#: against its node (:data:`NODE_BLAMELESS_INFRA_REASONS`) is not escaped by moving elsewhere. Any other infrastructure
+#: failure is held against its node, and the avoid set and the quarantine already send the retry to another one, so it
+#: goes at once: a wait would only keep the test's dispatch slot and its branch's K idle.
+WAITED_INFRA_REASONS: frozenset[str] = NODE_BLAMELESS_INFRA_REASONS | frozenset(
+    {FOREIGN_PROCESS_ON_CARD, RUNNER_START_TIMEOUT, CAPACITY_UNAVAILABLE}
+)
 #: The kinds whose result holds no measured round: a profile names its traces, a repro its verdict.
 UNMEASURED_KINDS = (TestKind.PROFILE, TestKind.REPRO)
 
@@ -107,6 +131,31 @@ def carries_request_classes(workload: WorkloadKind, request: TestRequest, validi
 
 class MeasurementRefused(Exception):
     """The measurement itself is broken (spec rejected, result failed verification): a program error, never retried."""
+
+
+@dataclass(frozen=True)
+class InfraBackoff:
+    """How long the attempts of a test wait before an infrastructure retry that waits (:data:`WAITED_INFRA_REASONS`):
+    ``seconds[n - 1]`` before the ``n``-th such retry, the last of them before any later one, none when ``seconds`` is
+    empty. The test keeps its dispatch slot and its branch's K while it waits. ``latest_start`` gives the time by which a retry
+    of a request must start for its branch to still have it measured (``None``, or a ``latest_start`` of ``None``: no
+    such time), and a wait never runs past it: a retry that cannot wait goes at once, as before. ``clock`` and ``sleep``
+    are the real ones by default."""
+
+    seconds: tuple[float, ...] = INFRA_BACKOFF_SECONDS
+    latest_start: Callable[[TestRequest], float | None] | None = None
+    clock: Callable[[], float] = field(default=time.time)
+    sleep: Callable[[float], Awaitable[None]] = field(default=asyncio.sleep)
+
+    def before(self, retry: int, request: TestRequest) -> float:
+        """The seconds to wait before the ``retry``-th waiting infrastructure retry of ``request`` (counted from 1)."""
+        if not self.seconds or retry < 1:
+            return 0.0
+        wait = self.seconds[min(retry, len(self.seconds)) - 1]
+        latest = None if self.latest_start is None else self.latest_start(request)
+        if latest is not None:
+            wait = min(wait, latest - self.clock())
+        return max(0.0, wait)
 
 
 @dataclass(frozen=True)
@@ -206,7 +255,7 @@ class _Ending(NamedTuple):
 
 class AttemptRunner:
     """Runs a request's attempts with ``executor``; ``avoid`` supplies the quarantine list, ``on_node_failure`` hears of
-    a node that failed."""
+    a node that failed, ``backoff`` paces the infrastructure retries."""
 
     def __init__(
         self,
@@ -215,11 +264,13 @@ class AttemptRunner:
         avoid: Callable[[], frozenset[str]],
         on_node_failure: NodeFailure,
         max_infra_retries: int = DEFAULT_MAX_INFRA_RETRIES,
+        backoff: InfraBackoff = InfraBackoff(),
     ) -> None:
         self._executor = executor
         self._avoid = avoid
         self._on_node_failure = on_node_failure
         self._max_infra_retries = max_infra_retries
+        self._backoff = backoff
 
     async def run(self, job: TestJob) -> TestResult:
         attempts: list[Attempt] = []
@@ -272,6 +323,24 @@ class AttemptRunner:
                     job, result, attempts, _Ending(Validity.MEASUREMENT_FAILED, FailureClass.INFRA, reason)
                 )
             infra_retries += 1
+            await self._back_off(job.request, attempts)
+
+    async def _back_off(self, request: TestRequest, attempts: list[Attempt]) -> None:
+        """Wait before the next infrastructure retry when the last attempt failed for a reason that is not its node's
+        (:data:`WAITED_INFRA_REASONS`), the ``n``-th such wait of the request for the ``n``-th such failure; after any
+        other failure the retry goes at once, to a node the avoid set has not yet seen fail."""
+        waited = [
+            a
+            for a in attempts
+            if a.failure_class is FailureClass.INFRA and _reason_name(a.failure_reason) in WAITED_INFRA_REASONS
+        ]
+        if not waited or waited[-1] is not attempts[-1]:
+            return
+        retry = len(waited)
+        wait = self._backoff.before(retry, request)
+        if wait > 0:
+            log.info("test %s: infrastructure retry %d waits %.0f s first", request.request_id, retry, wait)
+            await self._backoff.sleep(wait)
 
     async def _succeeded(self, job: TestJob, result: TestResult, attempts: list[Attempt]) -> TestResult:
         first = attempts[0]

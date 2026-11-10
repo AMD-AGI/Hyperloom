@@ -26,9 +26,10 @@ commits fail to merge, whether a profile of the integration head runs, the GPU h
 time any lease holds) and the LLM dollars the specialists and the scheduler itself spent so far, and what is known
 of each running branch's specialist (given up, stopped because its judging failed, its heartbeat lost again and
 again), which explore tests each branch has queued and which native builds its tests wait for, and decides
-what to stop; a judge call that has not answered by the EXPLORE deadline counts as failed,
-and a branch that has not opened by then is withdrawn, so neither eats into FINAL. The integrator merges in a background
-task of its own, in rounds as wide as the integration branch's K. When EXPLORE ends that task is cancelled and the
+what to stop. No judge round starts once less of EXPLORE is left than a branch needs to start, since nothing it
+decided could take effect; a judge call that has not answered by the EXPLORE deadline counts as failed, and a
+branch that has not opened by then is withdrawn, so neither eats into FINAL. The integrator merges in a background task
+of its own, in rounds as wide as the integration branch's K. When EXPLORE ends that task is cancelled and the
 integrator abandons its round, so the integration head the FINAL candidates are read from no longer moves and no merge
 test competes with FINAL's measurements; a profile of the integration head still running is cancelled before that,
 taking its test back. Under ``--max-gpu-hours`` EXPLORE also ends, at a tick, once the session's tests have used the GPU
@@ -125,7 +126,7 @@ def gave_up_reason(status: SpecialistStatus) -> str:
 
 @dataclass(frozen=True)
 class ExploreWindow:
-    """The commit every gain is measured against, the commit the first branches start from, the clock times EXPLORE and the budget end at, the session's whole budget, the GPU seconds the session's tests and
+    """The commit every gain is measured against, the commit the first branches start from, the clock times EXPLORE and the budget end at, the GPU seconds the session's tests and
     leases may use before EXPLORE ends and the dollars the session's recorded LLM calls may cost (``math.inf`` for no
     limit, for either), the directions the user wrote, one user branch each, the agents the user named, one agent branch each, and in the same
     order each agent's share of the session's directions (:func:`~.agent_plans.agent_plans`; ``""`` for none), and
@@ -139,7 +140,6 @@ class ExploreWindow:
     start_commit: str
     explore_end: float
     session_deadline: float
-    budget_seconds: float
     explore_gpu_seconds: float
     max_llm_usd: float
     user_directions: tuple[str, ...]
@@ -283,7 +283,7 @@ class Explorer:
             freed = await self._start_admitted(window.explore_end) or overrun or given_up
             if await self._events.detect() or freed:
                 next_judge = now
-            if now >= next_judge:
+            if now >= next_judge and window.explore_end - now >= SPECIALIST_START_SECONDS:
                 next_judge = now + self._interval
                 decision = await self._ask(window, opening=False)
                 if decision is not None and await self._apply(decision, await self._refill(window)):

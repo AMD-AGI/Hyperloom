@@ -1,8 +1,8 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""What a change between two recipes names, which is what decides whether a not-stackable candidate comes back, and
-which commits a retraction keeps out of the offer."""
+"""What a change between two recipes names, which is what decides whether a not-stackable candidate comes back; which
+commits a retraction keeps out of the offer; the order commits are offered in; and the cap on not-stackable answers."""
 
 from __future__ import annotations
 
@@ -18,11 +18,11 @@ from hyperloom.contracts.recipe import (
 )
 from hyperloom.contracts.measurement import AttachmentRef
 from hyperloom_multibranch.blackboard.tests.factories import intent, judgement, request
-from hyperloom_multibranch.contracts.blackboard.records import CommittedCommit, RetractionRef, TestRecord
-from hyperloom_multibranch.contracts.blackboard.vocab import Conclusion
+from hyperloom_multibranch.contracts.blackboard.records import CommittedCommit, MergeState, RetractionRef, TestRecord
+from hyperloom_multibranch.contracts.blackboard.vocab import Conclusion, MergeOutcome
 from hyperloom_multibranch.contracts.judgement import Verdict
 from hyperloom_multibranch.rulegate.rules import RETRACTION_ID
-from hyperloom_multibranch.scheduling.candidates import Candidates, touched
+from hyperloom_multibranch.scheduling.candidates import NOT_STACKABLE_ANSWERS, Candidates, touched
 
 IMAGE_DIGEST = "sha256:" + "b" * 64
 UPSTREAM_REF = "a" * 40
@@ -140,3 +140,41 @@ async def test_a_commit_whose_record_names_no_retraction_hides_nothing_whatever_
     offered = await Candidates(_Committed(commits, records), None).offered_on("i0")
 
     assert [commit.commit_id for commit in offered] == ["c1", "c2"]
+
+
+def _conflicted(commit_id: str, gain: float, not_stackable: int = 0) -> CommittedCommit:
+    """A commit whose latest merge, on head ``i0``, conflicted, after ``not_stackable`` answers on earlier heads."""
+
+    last = MergeState(MergeOutcome.CONFLICT_SKIPPED, "i0")
+    attempts = not_stackable + 1
+    return replace(
+        _commit(commit_id, "c0"), gain_pct=gain, last_merge=last, merge_attempts=attempts, not_stackable=not_stackable
+    )
+
+
+async def test_commits_never_tried_are_offered_before_those_coming_back_each_in_the_blackboard_s_order() -> None:
+    commits = (
+        _conflicted("back-large", 9.0),
+        replace(_commit("new-large", "c0"), gain_pct=5.0),
+        _conflicted("back-small", 2.0),
+        replace(_commit("new-small", "c0"), gain_pct=1.0),
+    )
+    records = {f"r-{commit.commit_id}": _landed(commit.commit_id, Verdict.IMPROVED) for commit in commits}
+
+    offered = await Candidates(_Committed(commits, records), None).offered_on("i1")
+
+    assert [commit.commit_id for commit in offered] == ["new-large", "new-small", "back-large", "back-small"]
+
+
+async def test_a_commit_not_stackable_on_as_many_heads_as_the_cap_is_not_offered_again_whatever_came_after() -> None:
+    """A conflict on a later head replaces the commit's latest merge, and would bring it back on every head."""
+
+    commits = (
+        _conflicted("capped", 9.0, not_stackable=NOT_STACKABLE_ANSWERS),
+        _conflicted("below", 5.0, not_stackable=NOT_STACKABLE_ANSWERS - 1),
+    )
+    records = {f"r-{commit.commit_id}": _landed(commit.commit_id, Verdict.IMPROVED) for commit in commits}
+
+    offered = await Candidates(_Committed(commits, records), None).offered_on("i1")
+
+    assert [commit.commit_id for commit in offered] == ["below"]

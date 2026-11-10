@@ -93,7 +93,7 @@ from hyperloom.sandbox.templates import LocalTemplate
 from hyperloom_common.fs_utils import is_private_dir
 from hyperloom_multibranch.blackboard import LocalBlackboard
 from hyperloom_multibranch.contracts.blackboard.interfaces import BlackboardError
-from hyperloom_multibranch.toolbox.attempts import DEFAULT_MAX_INFRA_RETRIES
+from hyperloom_multibranch.toolbox.attempts import DEFAULT_MAX_INFRA_RETRIES, INFRA_BACKOFF_SECONDS
 from hyperloom_multibranch.toolbox.branch_leases import BranchLeases, CardDrain
 from hyperloom_multibranch.toolbox.build_preflight import changeable_by_others
 from hyperloom_multibranch.toolbox.hosted_executor import DEFAULT_TEST_TIMEOUT_SEC, HostedExecutor
@@ -344,8 +344,10 @@ class LocalOptions:
     over the same name in the host's ``INFERENCEX_REPO``, which the template carries when set.
     ``archive`` is the result archive, a directory archive below ``session_dir`` when omitted. ``python`` is the interpreter the
     runner runs with. ``timeout_sec`` is the timeout of one attempt, ``max_infra_retries`` the
-    infrastructure retries per test before it ends as ``measurement_failed`` and ``poll_interval_sec`` how often the
-    backend polls a runner for its result. ``tools`` are the asynchronous tools ``start_analysis`` may reach; ``None``
+    infrastructure retries per test before it ends as ``measurement_failed``, ``infra_backoff_seconds`` the wait before
+    each one after a failure that is not the node's (:class:`~.attempts.InfraBackoff`) and ``poll_interval_sec`` how
+    often the backend polls a runner for its result. ``tools`` are the asynchronous tools ``start_analysis``
+    may reach; ``None``
     is the local set: TraceLens, the roofline of a profile test's trace (``non-llm`` analysis, no card and no model), the
     upstream PR search (GitHub is asked from this process, never from a sandbox) and ``kernel_tune`` when the pool can spare a
     card for it without leaving fewer than one test needs (it leases the card from the pool the branches' sandboxes lease
@@ -381,6 +383,7 @@ class LocalOptions:
     python: str = sys.executable
     timeout_sec: int = DEFAULT_TEST_TIMEOUT_SEC
     max_infra_retries: int = DEFAULT_MAX_INFRA_RETRIES
+    infra_backoff_seconds: tuple[float, ...] = INFRA_BACKOFF_SECONDS
     poll_interval_sec: float = _POLL_INTERVAL_SEC
     tools: Sequence[AsyncTool] | None = None
     framework_configs: str | None = None
@@ -788,7 +791,9 @@ def build_local_toolbox(
         _accepting_local_kinds(acceptance),
         tools=session_tools(_local_tools(leases, options), blackboard, directory),
         tuning=ToolboxTuning(
-            policy=capped_policy(options.policy, parallel), max_infra_retries=options.max_infra_retries
+            policy=capped_policy(options.policy, parallel),
+            max_infra_retries=options.max_infra_retries,
+            infra_backoff_seconds=options.infra_backoff_seconds,
         ),
     )
     toolbox.backend, toolbox.provider, toolbox.trace_root = backend, provider, directory

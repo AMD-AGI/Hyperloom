@@ -342,6 +342,12 @@ def test_the_prompt_says_a_free_slot_may_be_opened_without_a_stop() -> None:
     assert "Leaving a free slot unopened needs a reason; opening into it does not." in prose
 
 
+def test_the_prompt_says_unfocused_branches_spread_over_the_largest_ops_in_turn() -> None:
+    prose = " ".join(JUDGE_SYSTEM_PROMPT.split())
+
+    assert "briefed on the largest ops of the integration head's latest profile in turn" in prose
+
+
 def test_a_playbook_session_s_prompt_leaves_a_free_slot_free_while_no_open_area_is_left() -> None:
     prose = " ".join(PLAYBOOK_JUDGE_PROMPT.split())
 
