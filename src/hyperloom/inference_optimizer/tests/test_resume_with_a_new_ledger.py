@@ -4,10 +4,12 @@
 """A session that holds a credential, resumed by the same account in a new container.
 
 The coordinator database of such a session is kept outside the session directory, below the container's ``TMPDIR``,
-so a run resumed after a preemption finds none there: an empty one is made. These tests resume the same session with
-the database kept (the same ``TMPDIR``, or a new ``TMPDIR`` and ``HYPERLOOM_LEDGER_DIR`` on a disk that outlives the
-container) and with a new empty one, and read what the resume recovers: the half-applied integrate window the stopped
-leg left, the KEEP it had recorded on the bus but not yet put on the stack, and the proposals nobody had judged."""
+so a run resumed after a preemption finds none there. These tests resume the same session with the database kept (the
+same ``TMPDIR``, or a new ``TMPDIR`` and ``HYPERLOOM_LEDGER_DIR`` on a disk that outlives the container), and read what
+the resume recovers: the half-applied integrate window the stopped leg left, the KEEP it had recorded on the bus but not
+yet put on the stack, and the proposals nobody had judged. Without the database, and with the session having run, the
+resume is refused, naming ``HYPERLOOM_LEDGER_DIR``: the leases and tasks of the earlier legs cannot be inspected, so
+work they left running would go unseen (fail closed, as the guard did on the shared database)."""
 
 from __future__ import annotations
 
@@ -120,15 +122,6 @@ _KEEP_REPLAYED = {
 }
 
 
-def _said_about_the_ledger(caplog: pytest.LogCaptureFixture) -> list[str]:
-    """The warnings of ``database_target`` that a session that has run before starts an empty ledger."""
-    return [
-        record.getMessage()
-        for record in caplog.records
-        if record.levelno == logging.WARNING and "has no coordinator database for it" in record.getMessage()
-    ]
-
-
 _RECOVERED = {**_KEEP_REPLAYED, "fixes": [*_KEEP_REPLAYED["fixes"], "rolled_back_pending_integrate"]}
 
 
@@ -141,18 +134,15 @@ def _container(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, name: str) -> Pa
 
 
 @pytest.mark.asyncio
-async def test_a_resume_in_the_same_container_recovers_what_the_stopped_leg_left(
-    session_dir, tmp_path, monkeypatch, caplog
-):
+async def test_a_resume_in_the_same_container_recovers_what_the_stopped_leg_left(session_dir, tmp_path, monkeypatch):
     _container(tmp_path, monkeypatch, "container")
     await _lost_with_an_integrate_window_open(session_dir)
     assert await _resumed_leg(session_dir, monkeypatch) == _RECOVERED
-    assert _said_about_the_ledger(caplog) == [], "the ledger is there: nothing to say"
 
 
 @pytest.mark.asyncio
 async def test_a_resume_in_a_new_container_on_the_ledger_directory_an_operator_named_recovers_it_too(
-    session_dir, tmp_path, monkeypatch, caplog
+    session_dir, tmp_path, monkeypatch
 ):
     ledgers = tmp_path / "ledgers"  # a disk that outlives the container, a directory of this account's
     ledgers.mkdir(mode=0o700)
@@ -165,26 +155,29 @@ async def test_a_resume_in_a_new_container_on_the_ledger_directory_an_operator_n
     _container(tmp_path, monkeypatch, "container-2")  # the preempted run starts again on a new pod
     assert db_path_for(session_dir) == database
     assert await _resumed_leg(session_dir, monkeypatch) == _RECOVERED
-    assert _said_about_the_ledger(caplog) == []
 
 
 @pytest.mark.asyncio
-async def test_a_resume_in_a_new_container_without_a_named_ledger_directory_starts_an_empty_ledger_and_says_so(
-    session_dir, tmp_path, monkeypatch, caplog
+async def test_a_resume_in_a_new_container_without_a_ledger_is_refused_naming_the_ledger_directory(
+    session_dir, tmp_path, monkeypatch
 ):
+    """The session holds a credential and has run, this account has no database for it, and none is left in the session
+    directory: the guard refuses (fail closed), and so does the coordinator should it be reached without the guard."""
     monkeypatch.delenv(ENV_LEDGER_DIR, raising=False)
     first = _container(tmp_path, monkeypatch, "container-1")
     await _lost_with_an_integrate_window_open(session_dir)
     assert first in private_db_path_for(session_dir).parents
 
-    _container(tmp_path, monkeypatch, "container-2")
-    assert _said_about_the_ledger(caplog) == [], "nothing is said while the first leg's ledger is there"
-    seen = await _resumed_leg(session_dir, monkeypatch)
-    assert seen["proposals"] == 0 and seen["stack"] == 0, "the KEEP on the bus and the open proposal are gone"
-    assert seen["refused"] is not None and "pending integrate recovery is incomplete" in str(seen["refused"])
-    (said,) = _said_about_the_ledger(caplog)
-    for named in ("HYPERLOOM_LEDGER_DIR", "bus events", "KEEP", "proposals", "lease records", "integrate window"):
-        assert named in said, named
+    second = _container(tmp_path, monkeypatch, "container-2")
+    with pytest.raises(ResumeBlocked) as guard:
+        ensure_resume_safe(session_dir, owner_scope="host:2")
+    with pytest.raises(ResumeBlocked) as coordinator:
+        _coordinator(session_dir)
+    for refusal in (guard.value, coordinator.value):
+        said = str(refusal)
+        assert "HYPERLOOM_LEDGER_DIR" in said and "start a new session" in said, said
+        assert "\n" not in said, "one line"
+    assert list(second.iterdir()) == [], "nothing was made: no empty ledger"
 
 
 @pytest.mark.parametrize("named", ["unsafe-group-writable", "unsafe-wider"])
@@ -211,34 +204,41 @@ async def test_a_named_ledger_directory_that_is_not_safe_is_refused_and_nothing_
 
 
 @pytest.mark.asyncio
-async def test_a_resume_in_a_new_container_loses_a_recorded_keep_and_the_open_proposals_with_the_ledger(
+async def test_a_credential_added_to_a_session_that_ran_without_one_is_resumed_on_an_empty_ledger_with_a_warning(
     session_dir, tmp_path, monkeypatch, caplog
 ):
-    """Without an integrate window to refuse on, the resume goes on, minus what only the ledger held: the KEEP on the bus
-    is not put on the stack (its gain is found again or not at all) and the proposal nobody judged is gone."""
-    monkeypatch.delenv(ENV_LEDGER_DIR, raising=False)
-    _container(tmp_path, monkeypatch, "container-1")
-    (await _stopped_leg(session_dir)).db.raw.close()
-    _container(tmp_path, monkeypatch, "container-2")  # a new container: the ledger of the first is not there
-    assert await _resumed_leg(session_dir, monkeypatch) == {"refused": None, "fixes": [], "proposals": 0, "stack": 0}
-    assert len(_said_about_the_ledger(caplog)) == 1, "and it is not lost in silence"
+    """A database is in the session directory, which the guard inspects: the resume goes on, on a ledger of this
+    account's that starts empty, and a warning says the earlier database is not read."""
+    _container(tmp_path, monkeypatch, "container")
+    first = _coordinator(session_dir)  # no credential: its database is in the session directory
+    first.shared_state.tick = 3
+    first.shared_state.save(session_dir)
+    first.db.raw.close()
+    state = SharedState.load_or_init(session_dir)
+    state.operator_extra_env = {"HF_TOKEN": _SECRET}
+    state.save(session_dir)
+
+    ensure_resume_safe(session_dir, owner_scope="host:1")
+    caplog.set_level(logging.WARNING)
+    resumed = _coordinator(session_dir)
+    assert private_db_path_for(session_dir).exists()
+    resumed.db.raw.close()
+    assert any("is not read" in record.getMessage() for record in caplog.records)
 
 
 @pytest.mark.asyncio
-async def test_a_first_leg_with_a_credential_has_nothing_to_say_about_a_ledger(
-    session_dir, tmp_path, monkeypatch, caplog
-):
+async def test_a_first_leg_with_a_credential_is_not_refused_for_having_no_ledger(session_dir, tmp_path, monkeypatch):
     _container(tmp_path, monkeypatch, "container")
     state = SharedState()
     state.operator_extra_env = {"HF_TOKEN": _SECRET}
     state.save(session_dir)  # nothing ran yet: no tick, no window, no stack
+    ensure_resume_safe(session_dir, owner_scope="host:1")
     _coordinator(session_dir).db.raw.close()
-    assert _said_about_the_ledger(caplog) == []
 
 
 @pytest.mark.asyncio
-async def test_a_session_without_a_credential_resumed_in_a_new_container_keeps_its_database_and_says_nothing(
-    session_dir, tmp_path, monkeypatch, caplog
+async def test_a_session_without_a_credential_resumed_in_a_new_container_keeps_its_database_and_is_not_refused(
+    session_dir, tmp_path, monkeypatch
 ):
     _container(tmp_path, monkeypatch, "container-1")
     first = _coordinator(session_dir)
@@ -246,10 +246,10 @@ async def test_a_session_without_a_credential_resumed_in_a_new_container_keeps_i
     first.shared_state.save(session_dir)
     first.db.raw.close()
     _container(tmp_path, monkeypatch, "container-2")
+    ensure_resume_safe(session_dir, owner_scope="host:2")
     resumed = _coordinator(session_dir)  # its database is in the session directory, where a new container finds it
     assert resumed.db.db_path == shared_db_path_for(session_dir)
     resumed.db.raw.close()
-    assert _said_about_the_ledger(caplog) == []
 
 
 async def _a_leg_whose_worker_exit_was_never_proven(session: Path) -> None:
@@ -261,12 +261,13 @@ async def _a_leg_whose_worker_exit_was_never_proven(session: Path) -> None:
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("named", [True, False], ids=["ledger-directory-named", "default-ledger"])
-async def test_the_resume_guard_reads_the_leases_of_a_kept_ledger_and_has_none_to_read_in_a_new_default_one(
+async def test_the_resume_guard_reads_the_leases_of_a_kept_ledger_and_refuses_when_a_new_default_one_has_none(
     session_dir, tmp_path, monkeypatch, named
 ):
     """Where main's guard read the leases in the shared database and refused while work was live, the guard reads the
-    ledger this account has: kept across containers by ``HYPERLOOM_LEDGER_DIR``, it still refuses; the default one is gone
-    with the container, and the guard has nothing to inspect (the warning of ``database_target`` says so)."""
+    ledger this account has: kept across containers by ``HYPERLOOM_LEDGER_DIR``, it still refuses while work is live; the
+    default one is gone with the container, and the guard refuses the resume, naming the variable, rather than admit it
+    with nothing to inspect."""
     monkeypatch.delenv(ENV_LEDGER_DIR, raising=False)
     if named:
         ledgers = tmp_path / "ledgers"
@@ -279,4 +280,19 @@ async def test_the_resume_guard_reads_the_leases_of_a_kept_ledger_and_has_none_t
         with pytest.raises(ResumeBlocked, match="worker exit is unproven"):
             ensure_resume_safe(session_dir, owner_scope="host:2")
     else:
-        ensure_resume_safe(session_dir, owner_scope="host:2")  # nothing to inspect: admitted
+        with pytest.raises(ResumeBlocked, match="HYPERLOOM_LEDGER_DIR"):  # nothing to inspect: refused, not admitted
+            ensure_resume_safe(session_dir, owner_scope="host:2")
+
+
+def test_a_session_without_a_credential_that_ran_is_not_refused_for_lacking_a_ledger(
+    session_dir, tmp_path, monkeypatch
+):
+    """The refusal is for a credential session, whose database cannot be in the session directory: one that holds none
+    is admitted as before, whatever is left of its database."""
+    monkeypatch.delenv(ENV_LEDGER_DIR, raising=False)
+    _container(tmp_path, monkeypatch, "container")
+    state = SharedState()
+    state.tick = 3
+    state.save(session_dir)
+    assert not shared_db_path_for(session_dir).exists() and not private_db_path_for(session_dir).exists()
+    ensure_resume_safe(session_dir, owner_scope="host:1")

@@ -11,10 +11,31 @@ fails reading it rather than being handed the credential; the directories it is 
 
 from __future__ import annotations
 
-from hyperloom.common.env_safety import holds_credentials
+import os
+from collections.abc import Mapping
+from typing import Any
+
+from hyperloom.common.env_safety import holds_credentials, operator_extra_env
 from hyperloom_common.io import WriteOptions
+
+#: The fields of ``state.json`` that keep the operator's launch pins in plaintext.
+OPERATOR_PINS = ("operator_extra_env", "operator_server_args")
+#: Where a run exports the operator's ``--server-args`` (the pins of ``--extra-env`` are exported by name and as a blob).
+SERVER_ARGS_ENV = "INFERENCE_OPTIMIZER_SERVER_ARGS"
 
 
 def shared_options(document: object) -> WriteOptions:
     """The write options of ``document``: parents ``2775``, and the file ``664`` or ``600`` when it holds a credential."""
     return WriteOptions(make_parents=True, shared=not holds_credentials(document), share_parents=True)
+
+
+def pins_hold_credentials(state: Mapping[str, Any]) -> bool:
+    """Whether the operator's pins hold a credential: those ``state`` records (a mapping with the fields of
+    :data:`OPERATOR_PINS`, as ``state.json`` is) and those this run exports (a resume with ``--reset-state`` records
+    none, and still launches with the ones it exports)."""
+    recorded = {name: state.get(name) for name in OPERATOR_PINS}
+    exported = {
+        "operator_extra_env": operator_extra_env(),
+        "operator_server_args": os.environ.get(SERVER_ARGS_ENV, ""),
+    }
+    return holds_credentials([recorded, exported])

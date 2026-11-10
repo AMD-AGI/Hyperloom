@@ -9,12 +9,14 @@ import json
 import os
 from dataclasses import dataclass, field
 import sqlite3
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
 from contextlib import closing
 from datetime import datetime
 from pathlib import Path
+from typing import Any
 
 from hyperloom.common.owner_scope import process_started_at, same_environment
+from hyperloom.common.session_files import pins_hold_credentials
 from hyperloom_common.shared_storage import open_shared_append, ownership
 from hyperloom_common.timeutil import now_iso
 
@@ -22,7 +24,7 @@ from . import lock as session_lock
 from . import session_paths
 from .coordinator_db import OlderCoordinatorDB, refuse_older_schema
 from .optimization_journal import journal_path
-from .paths import SESSION_FILES, db_path_for
+from .paths import ENV_LEDGER_DIR, SESSION_FILES, db_path_for, private_db_exists, shared_db_path_for
 
 
 class ResumeBlocked(RuntimeError):
@@ -221,6 +223,47 @@ def _require_readable(session_dir: Path) -> None:
             ) from exc
 
 
+def _session_has_run(state: Mapping[str, Any]) -> bool:
+    """Whether the session did anything in an earlier leg: a tick counted, an integrate window left open, or a stack."""
+    return bool(int(state.get("tick") or 0) or state.get("pending_integrate") or state.get("optimization_stack"))
+
+
+def require_own_ledger(session_dir: Path, state: Mapping[str, Any]) -> None:
+    """Refuse the resume of a session that holds a credential and has run before when there is no coordinator database
+    for this account to inspect: not its own ledger (it is below the container's ``TMPDIR`` unless
+    ``HYPERLOOM_LEDGER_DIR`` keeps it, so a new container has none, and another account's is its own) and none in the
+    session directory. The earlier legs' leases and tasks cannot be read, so work they left running (Ray workers, servers
+    on other nodes) would go unseen, which the guard exists to prevent. ``state`` is a mapping with the fields of
+    ``state.json`` (the pins, ``tick``, ``pending_integrate``, ``optimization_stack``).
+
+    Raises:
+        ResumeBlocked: Naming ``HYPERLOOM_LEDGER_DIR``.
+    """
+    if (
+        pins_hold_credentials(state)
+        and _session_has_run(state)
+        and not private_db_exists(session_dir)
+        and not shared_db_path_for(session_dir).exists()
+    ):
+        raise ResumeBlocked(
+            "this session holds a credential and has run before, and this account has no coordinator database for it "
+            "(its database is in the TMPDIR of the container, or the account, that ran it): the leases and tasks of the "
+            "earlier legs cannot be inspected, so work they left running would go unseen. "
+            f"Set {ENV_LEDGER_DIR} to a persistent private directory of this account's that holds that database, or "
+            "give up resuming and start a new session."
+        )
+
+
+def _recorded_state(session_dir: Path) -> Mapping[str, Any]:
+    """The fields of ``state.json`` as recorded; empty when there is none (``_require_readable`` has said so when it
+    exists and cannot be read)."""
+    try:
+        recorded = json.loads((session_dir / "state.json").read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return {}
+    return recorded if isinstance(recorded, dict) else {}
+
+
 def ensure_resume_safe(session_dir: Path, *, owner_scope: str) -> None:
     """Reject unobservable residual work without migrating or repairing the DB.
 
@@ -228,6 +271,7 @@ def ensure_resume_safe(session_dir: Path, *, owner_scope: str) -> None:
     empty ledger does not prove a recorded running or cancelled execution exited.
     """
     _require_readable(session_dir)
+    require_own_ledger(session_dir, _recorded_state(session_dir))
     path = db_path_for(session_dir)
     try:
         if not path.exists():

@@ -608,10 +608,12 @@ _SWAPPER = textwrap.dedent(
     deadline = time.monotonic() + 60
     while not os.path.exists(stop) and time.monotonic() < deadline:
         targets = [root]
-        if os.path.exists(marker):  # where the database is, as its account reports it
+        try:  # where the database is, as its account reports it (not readable for a moment while it is being written)
             below = os.path.dirname(open(marker).read())
-            for part in os.path.relpath(below, root).split(os.sep):
-                targets.append(os.path.join(targets[-1], part))
+        except OSError:
+            below = root
+        for part in [] if below == root else os.path.relpath(below, root).split(os.sep):
+            targets.append(os.path.join(targets[-1], part))
         for target in targets:
             if not os.path.isdir(target):
                 continue
@@ -631,7 +633,10 @@ _SWAPPER = textwrap.dedent(
                 else:
                     refuse(ctypes.get_errno())
                 if old == sibling:
-                    os.rmdir(sibling)
+                    try:
+                        os.rmdir(sibling)
+                    except OSError:
+                        pass
         time.sleep(0.002)
     print(json.dumps({{"attempts": attempts, "swapped": swapped, "refused": refused}}))
     """
