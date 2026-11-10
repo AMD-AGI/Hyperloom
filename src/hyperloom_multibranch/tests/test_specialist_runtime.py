@@ -11,6 +11,7 @@ import pytest
 
 from hyperloom.common.gain_math import ACCURACY_METRICS
 from hyperloom.contracts.measurement import Purpose, TestKind, TestRequest
+from hyperloom.measure.compile import LocalBlobStore
 from hyperloom.contracts.recipe import LaunchConfig, Recipe
 from hyperloom_multibranch.contracts.branch_log import BranchLogEntry, BranchLogType
 from hyperloom_multibranch.contracts.fork import AdmissionStatus, RepairRequest
@@ -138,7 +139,9 @@ class _Session:
         def blackboard_for(branch: str) -> LocalBlackboard:
             return blackboard(self.root, Writer(Role.SPECIALIST_RUNTIME, branch, branch))
 
-        judging = Judging(self.gate, self.toolbox, InferenceXRule(self.reader, 64))
+        judging = Judging(
+            self.gate, self.toolbox, InferenceXRule(self.reader, 64), LocalBlobStore(self.root.parent / "blobs")
+        )
         pacing = RuntimePacing(poll_seconds=0.01, claim_ttl_seconds=claim_ttl, clock=clock)
         return SpecialistRuntime(blackboard_for, judging, runs, pacing=pacing)
 

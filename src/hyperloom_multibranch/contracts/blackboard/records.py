@@ -99,8 +99,23 @@ class Claim:
 
 
 @dataclass(frozen=True)
+class RetractionRef:
+    """What a landed retraction undoes: an autonomous agent's change of its ``iteration``, kept as its keep ``keep``,
+    which its finding ``finding`` found invalid, and the commit ``retracted_commit`` that change landed in."""
+
+    iteration: int
+    keep: int
+    finding: str
+    retracted_commit: str
+
+    def __str__(self) -> str:
+        return f"{self.retracted_commit}, the agent's iteration {self.iteration} (its keep {self.keep}), found invalid by {self.finding}"
+
+
+@dataclass(frozen=True)
 class TestRecord:
-    """Everything known about one test: request, result, judgement, conclusion and commit."""
+    """Everything known about one test: request, result, judgement, conclusion and commit; ``retracts``, what a
+    retraction the gate landed undoes, ``None`` for every other test."""
 
     __test__ = False
 
@@ -114,10 +129,18 @@ class TestRecord:
     judged_at: float | None = None
     withdrawn_at: float | None = None
     withdrawal_reason: str = ""
+    retracts: RetractionRef | None = None
 
     @property
     def request_id(self) -> str:
         return self.request.request_id
+
+    @property
+    def landed_retraction(self) -> bool:
+        """Whether the test is a retraction the gate landed: a commit that undoes a change its own agent found invalid,
+        slower by construction, so no reader may count it as a gain, a worked change or progress."""
+
+        return self.retracts is not None
 
     @property
     def in_flight(self) -> bool:
@@ -1018,6 +1041,7 @@ __all__ = [
     "QuarantineEvent",
     "RecordedValue",
     "RegressionCase",
+    "RetractionRef",
     "SearchHit",
     "SessionProfile",
     "REPLAY_TARGET",

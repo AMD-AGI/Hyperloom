@@ -36,6 +36,8 @@ BASELINE_TESTS = 3
 
 GAIN_BELOW_THRESHOLD = "gain_below_threshold"
 GAIN_NOT_CONFIRMED = "gain_not_confirmed"
+#: The refusals that say only that the candidate is not faster than its parent.
+SPEED_GATES = frozenset({GAIN_BELOW_THRESHOLD, GAIN_NOT_CONFIRMED})
 # A synthetic benchmark a healthy server completes in full: any request it did not complete is a defect, whatever the
 # parent did, since throughput over the requests that did complete is not the work that was asked for.
 DROPPED_REQUESTS = "dropped_requests"
@@ -208,6 +210,7 @@ __all__ = [
     "GAIN_NOT_CONFIRMED",
     "MIN_BASELINES",
     "NOISE_MULTIPLE",
+    "SPEED_GATES",
     "DispersionThreshold",
     "InferenceXBaseline",
     "InferenceXReading",

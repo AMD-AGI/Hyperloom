@@ -374,7 +374,8 @@ def local_peers(host: MeasurementHost, sessions: SpecialistSessions, setup: Peer
     register_blocked_tools(mcp, blocked=BlockedCandidates(gate_blackboard, gate), home=asyncio.get_running_loop())
     register_fix_tools(mcp, attachments=toolbox)
     runner = ReproRunner(toolbox, gate_blackboard, toolbox)
-    judging = Judging(gate, toolbox, rule, FixChecking(runner, setup.critic, setup.blobs, _specialist_role(workload)))
+    fixes = FixChecking(runner, setup.critic, setup.blobs, _specialist_role(workload))
+    judging = Judging(gate, toolbox, rule, setup.blobs, fixes)
     runtime = SpecialistRuntime(
         runtime_blackboard, judging, built.factory, pacing=RuntimePacing(claim_ttl_seconds=CLAIM_TTL_SECONDS)
     )

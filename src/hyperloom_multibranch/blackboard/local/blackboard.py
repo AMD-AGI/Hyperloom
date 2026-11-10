@@ -89,6 +89,7 @@ from hyperloom_multibranch.contracts.blackboard.records import (
     QuarantineEvent,
     RecordedValue,
     RegressionCase,
+    RetractionRef,
     SearchHit,
     SessionProfile,
     StartupBrief,
@@ -654,6 +655,7 @@ class LocalBlackboard(
         conclusion: Conclusion,
         commit_id: str | None = None,
         recipe_digest: str | None = None,
+        retracts: RetractionRef | None = None,
     ) -> TestRecord:
         state = self._state()
         request = state.record(request_id).request
@@ -667,9 +669,11 @@ class LocalBlackboard(
             raise NotRecorded(f"the measurement of {request_id} failed; there is nothing to judge")
         if (conclusion in COMMITTING or conclusion is Conclusion.MERGED) != (commit_id is not None):
             raise ValueError(f"a {conclusion.value} judgement names a commit exactly when it makes one")
+        if retracts is not None and conclusion is not Conclusion.COMMITTED:
+            raise ValueError(f"only a committed retraction names what it retracts, not a {conclusion.value} judgement")
         _check_recipe_digest(state, commit_id, recipe_digest)
         summary = f"{conclusion.value}: {judgement.verdict.value} {judgement.gain_pct:+.2f}% on {request_id}"
-        write = JudgementWrite(request_id, judgement, conclusion, commit_id, recipe_digest)
+        write = JudgementWrite(request_id, judgement, conclusion, commit_id, recipe_digest, retracts)
         self._append(EntryKind.JUDGEMENT, write, branch=request.branch, parent=request.parent_commit, summary=summary)
         return self._state().record(request_id)
 
