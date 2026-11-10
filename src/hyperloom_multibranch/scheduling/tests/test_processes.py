@@ -104,6 +104,12 @@ async def test_a_member_orphaned_by_its_root_is_still_a_leftover_and_killed(
     assert await registry.leftovers() == ()
 
 
+async def _of_branch(registry: ProcessRegistry, branch: str) -> list[int]:
+    """The leftovers of ``branch``: another test's sandbox watch may still be this process's unregistered child."""
+
+    return [record.pid for record in await registry.leftovers() if record.branch == branch]
+
+
 async def test_a_forgotten_process_whose_group_ended_is_never_taken_for_a_group_that_reused_its_id(
     registry: ProcessRegistry, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -116,7 +122,7 @@ async def test_a_forgotten_process_whose_group_ended_is_never_taken_for_a_group_
     monkeypatch.setattr(processes, "collect_tree", lambda roots: signalled.extend(roots) or [])
     monkeypatch.setattr(processes, "kill_tree", lambda tree: True)
 
-    assert await registry.leftovers() == ()
+    assert await _of_branch(registry, "b01") == []
     assert await registry.kill_branch("b01")
     assert signalled == []
 
@@ -126,9 +132,9 @@ async def test_forgetting_a_process_whose_group_still_runs_keeps_it_for_the_kill
     root.wait()
     registry.forget(root.pid)
 
-    assert [record.pid for record in await registry.leftovers()] == [root.pid]
+    assert await _of_branch(registry, "b01") == [root.pid]
     assert await registry.kill_branch("b01")
-    assert await registry.leftovers() == ()
+    assert await _of_branch(registry, "b01") == []
 
 
 async def test_kill_with_nothing_registered_or_alive_succeeds(registry: ProcessRegistry, tmp_path: Path) -> None:
