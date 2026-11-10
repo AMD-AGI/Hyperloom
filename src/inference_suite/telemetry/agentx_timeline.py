@@ -57,6 +57,8 @@ _PHASE_KEY = "benchmark_phase"
 #: the cap the request layer is stride-sampled; the phase, trajectory and turn layers are always complete, and the
 #: in-flight counts folded into the KV rows are computed from every record before any sampling.
 _MAX_REQUEST_EVENTS = 60000
+#: Event stamps are epoch seconds kept to the microsecond.
+_TS_DECIMALS = 6
 
 
 @dataclass(frozen=True)
@@ -201,8 +203,8 @@ def _span_events(
             bounds[1] = max(bounds[1], record.end)
     events: list[dict[str, Any]] = []
     for group, (start, end) in spans.items():
-        events.append({"event": f"{kind}_start", "ts": round(start, 6), **identity[group]})
-        events.append({"event": f"{kind}_end", "ts": round(end, 6), **identity[group]})
+        events.append({"event": f"{kind}_start", "ts": round(start, _TS_DECIMALS), **identity[group]})
+        events.append({"event": f"{kind}_end", "ts": round(end, _TS_DECIMALS), **identity[group]})
     return events
 
 
@@ -216,9 +218,9 @@ def build_events(
     """
     events: list[dict[str, Any]] = []
     for phase, (start, end) in (phase_bounds or {}).items():
-        events.append({"event": "phase_start", "ts": round(start, 6), "phase": phase})
+        events.append({"event": "phase_start", "ts": round(start, _TS_DECIMALS), "phase": phase})
         if end is not None:
-            events.append({"event": "phase_end", "ts": round(end, 6), "phase": phase})
+            events.append({"event": "phase_end", "ts": round(end, _TS_DECIMALS), "phase": phase})
 
     events.extend(
         _span_events(
@@ -248,10 +250,10 @@ def build_events(
             "trajectory_id": record.trajectory_id,
             "turn_index": record.turn_index,
         }
-        events.append({"event": "request_start", "ts": round(record.start, 6), **common})
+        events.append({"event": "request_start", "ts": round(record.start, _TS_DECIMALS), **common})
         if record.first_token is not None:
-            events.append({"event": "first_token", "ts": round(record.first_token, 6), **common})
-        events.append({"event": "request_end", "ts": round(record.end, 6), "ok": record.ok, **common})
+            events.append({"event": "first_token", "ts": round(record.first_token, _TS_DECIMALS), **common})
+        events.append({"event": "request_end", "ts": round(record.end, _TS_DECIMALS), "ok": record.ok, **common})
 
     events.sort(key=lambda e: e["ts"])
     summary = {
