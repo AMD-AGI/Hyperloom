@@ -5,7 +5,7 @@ from __future__ import annotations
 import hashlib
 import json
 import subprocess
-from dataclasses import replace
+from dataclasses import asdict, replace
 
 import pytest
 
@@ -574,6 +574,28 @@ def test_the_relay_mode_is_snapshotted_and_a_campaign_recorded_without_it_hands_
     assert CampaignConfig.from_dict(payload).relay_mode == "split"
     payload["search_strategy"] = "linear"
     with pytest.raises(ValueError, match="tree search strategy"):
+        CampaignConfig.from_dict(payload)
+
+
+def test_a_campaign_whose_relay_is_off_records_no_relay_policy(tmp_path, monkeypatch):
+    workspace, kernel, _helper, driver = _git_workspace(tmp_path)
+    monkeypatch.setenv("GPU_TARGET", "gfx950")
+    monkeypatch.setenv("FORGE_KERNEL_BACKEND", "triton")
+    relay = AgentRelayPolicy(primary_profile_id="claude", profiles=(AgentProfileSpec("claude", "claude"),))
+
+    with pytest.raises(ValueError, match="records no model relay policy"):
+        create_campaign_config(
+            str(workspace), CampaignInputs(kernel=str(kernel), driver=str(driver), relay_mode="off", agent_relay=relay)
+        )
+    config = create_campaign_config(
+        str(workspace), CampaignInputs(kernel=str(kernel), driver=str(driver), relay_mode="off")
+    )
+    payload = config.to_dict()
+
+    assert (config.relay_mode, config.agent_relay) == ("off", None)
+    assert CampaignConfig.from_dict(payload) == config
+    payload["agent_relay"] = asdict(relay)
+    with pytest.raises(ValueError, match="records no model relay policy"):
         CampaignConfig.from_dict(payload)
 
 

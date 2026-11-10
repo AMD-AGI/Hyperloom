@@ -543,15 +543,16 @@ def _run_campaign(inputs: _RunInputs) -> dict:
 
 def _open_campaign(inputs: _RunInputs) -> _OpenedCampaign:
     """Resolve the campaign this run creates or resumes, and the agent overrides its sessions start from."""
-    from kernelforge.workflows.forge_loop.bootstrap.relay import resolve_relay_policy
+    from kernelforge.workflows.forge_loop.bootstrap.relay import campaign_relay_policy
     from kernelforge.workflows.forge_loop.campaign.campaign_config import CampaignConfigStore
 
     request, workspace = inputs.request, inputs.workspace
     campaign_store = CampaignConfigStore(str(workspace))
     _check_workspace_matches_resume(resume=request.resume, campaign_store=campaign_store)
     overrides = agent_runtime_overrides(request.agent)
-    requested_relay_policy = resolve_relay_policy(
-        Config.from_env(workspace=str(workspace), knowledge_config=inputs.knowledge_config, **overrides)
+    requested_relay_policy = campaign_relay_policy(
+        Config.from_env(workspace=str(workspace), knowledge_config=inputs.knowledge_config, **overrides),
+        requested_relay_mode(request.loop_shape),
     )
     return _OpenedCampaign(
         store=campaign_store,

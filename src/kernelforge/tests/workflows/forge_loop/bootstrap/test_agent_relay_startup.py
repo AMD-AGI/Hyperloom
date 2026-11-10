@@ -11,6 +11,7 @@ import kernelforge.agent_backends.registry as registry
 from kernelforge.workflows.forge_loop.bootstrap.relay import (
     SearchActorBuildContext,
     build_search_actor_pool,
+    campaign_relay_policy,
     probe_agent_profiles,
     resolve_relay_policy,
     resolve_session_relay,
@@ -26,7 +27,7 @@ from kernelforge.workflows.forge_loop.search.agent_relay import (
     StartPreference,
     select_start_profile,
 )
-from kernelforge.workflows.forge_loop.campaign.campaign_config import SearchStrategy
+from kernelforge.workflows.forge_loop.campaign.campaign_config import RelayMode, SearchStrategy
 from kernelforge.workflows.forge_loop.search.search_actors import SearchActorBundle
 
 
@@ -179,6 +180,15 @@ def test_a_resumed_session_cannot_change_the_primary_provider(tmp_path):
 
 def test_a_campaign_without_relay_has_no_session_relay(tmp_path):
     assert resolve_session_relay(None, Config(workspace=str(tmp_path), agent_backend="claude")) is None
+
+
+def test_a_campaign_whose_relay_is_off_records_no_relay_policy_and_so_probes_no_other_provider(tmp_path):
+    config = Config(workspace=str(tmp_path), agent_backend="claude", agent_model="claude-opus-5")
+
+    assert campaign_relay_policy(config, RelayMode.OFF) is None
+    assert resolve_session_relay(campaign_relay_policy(config, RelayMode.OFF), config) is None
+    assert campaign_relay_policy(config, RelayMode.HANDOFF) == resolve_relay_policy(config)
+    assert campaign_relay_policy(config, RelayMode.SPLIT) == resolve_relay_policy(config)
 
 
 @dataclass(frozen=True)

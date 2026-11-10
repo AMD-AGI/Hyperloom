@@ -350,8 +350,9 @@ exception summary. Apply decisions remain separate in `reference_reason`.
 
 ## Model relay
 
-Every new campaign relays its search between Agent profiles: one profile per
-auto-selectable provider (`claude` runs Claude Code, `codex` runs Codex), the
+Every new campaign not created with `--relay-mode off` relays its search between
+Agent profiles: one profile per auto-selectable provider (`claude` runs Claude
+Code, `codex` runs Codex), the
 `--agent-backend` provider first as the primary. `deepseek` (the DeepSeek
 Harness) is not auto-selectable: it joins the relay only as the primary, when
 the campaign starts on it through `--agent-backend deepseek`,
@@ -365,6 +366,11 @@ default model.
 `--resume` as well. An `--agent-backend` (or `FORGE_AGENT_BACKEND`) that differs
 from the campaign's primary is refused on resume; leave it unset to keep the
 campaign's primary.
+
+A campaign created with `--relay-mode off` has no relay: it records no relay
+policy, runs the configured provider alone, probes no other provider, and a
+blockage runs the supervisor below. Use it to keep a campaign on one model
+whatever other providers the environment could reach.
 
 Before the first iteration, every profile's exact provider and model is checked
 once, with one minimal model call per profile. Like the rest of the campaign

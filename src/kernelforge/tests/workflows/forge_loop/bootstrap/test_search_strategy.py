@@ -61,6 +61,17 @@ def test_a_tree_search_on_one_lane_is_refused_before_anything_is_set_up():
 def test_a_fresh_campaign_relays_by_handoff_unless_asked():
     assert requested_relay_mode(SHAPE) is RelayMode.HANDOFF
     assert requested_relay_mode(replace(SHAPE, relay_mode="split")) is RelayMode.SPLIT
+    assert requested_relay_mode(replace(SHAPE, relay_mode="off")) is RelayMode.OFF
+
+
+def test_either_search_strategy_may_run_with_its_relay_off():
+    require_relay_mode_for(SearchStrategy.LINEAR, RelayMode.OFF)
+    require_relay_mode_for(SearchStrategy.TREE, RelayMode.OFF)
+    off_tree = CampaignConfig(search_strategy="tree", relay_mode="off")
+
+    assert loop_class_for(replace(SHAPE, search_strategy="tree", relay_mode="off"), off_tree) is TreeSearchLoop
+    with pytest.raises(ForgeLoopUsageError, match="relays with --relay-mode off"):
+        loop_class_for(replace(SHAPE, relay_mode="handoff"), off_tree)
 
 
 def test_a_split_relay_needs_a_tree_search():

@@ -33,7 +33,7 @@ from kernelforge.workflows.forge_loop.search.agent_relay import (
     StartPreference,
     select_start_profile,
 )
-from kernelforge.workflows.forge_loop.campaign.campaign_config import SearchStrategy
+from kernelforge.workflows.forge_loop.campaign.campaign_config import RelayMode, SearchStrategy
 from kernelforge.workflows.forge_loop.search.search_actors import SearchActorBundle, SearchActorPool
 from kernelforge.workflows.forge_loop.roles.agent import ImplementerSetup
 
@@ -158,6 +158,11 @@ def resolve_relay_policy(
         profiles=tuple(AgentProfileSpec(provider, provider) for provider in providers),
         blockage_threshold=blockage_threshold,
     )
+
+
+def campaign_relay_policy(config: Config, mode: RelayMode) -> AgentRelayPolicy | None:
+    """The relay policy a fresh campaign records: none when its relay mode is off."""
+    return None if mode is RelayMode.OFF else resolve_relay_policy(config)
 
 
 def resolve_session_relay(policy: AgentRelayPolicy | None, config: Config) -> AgentRelayConfig | None:
@@ -503,6 +508,7 @@ __all__ = [
     "SearchActorStartup",
     "agent_relay_summary",
     "build_search_actor_pool",
+    "campaign_relay_policy",
     "config_for_profile",
     "probe_agent_profile",
     "probe_agent_profiles",
