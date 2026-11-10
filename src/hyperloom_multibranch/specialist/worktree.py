@@ -335,8 +335,8 @@ class SourceBase:
         Built files stay out of the base and, through ``info/exclude``, out of every worktree's stage.
 
         Raises:
-            UnsupportedComponentError: For a component with meta trees installed without a checkout that holds the
-                commit its version names (aiter from a wheel).
+            UnsupportedComponentError: For a component with meta trees whose upstream commit
+                :func:`installed_upstream` cannot resolve.
         """
         make_shared_dirs(self.path.parent)
         self.path.mkdir(SHARED_DIR_MODE)

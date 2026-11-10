@@ -763,10 +763,10 @@ def _sessions_over_source(
     open_sessions: Callable[..., ModelSessions], source: Path, framework: str, native: tuple[str, ...]
 ) -> ModelSessions:
     """The sessions ``open_sessions`` opens over a source base laid out at ``source`` from ``framework``, aiter and the
-    ``native`` components, or without aiter when the base refuses it: not installed in the image, or installed from a
-    wheel, whose version names only an abbreviated commit. :func:`peers_on` checked the framework, and the toolbox's
-    build preflight the native checkouts, so a refusal is aiter's. The native components come last: one may lie
-    inside the framework's tree."""
+    ``native`` components, or without aiter when the base refuses it: not installed in the image, or installed with an
+    upstream commit :func:`~hyperloom_multibranch.specialist.worktree.installed_upstream` cannot resolve.
+    :func:`peers_on` checked the framework, and the toolbox's build preflight the native checkouts, so a refusal is
+    aiter's. The native components come last: one may lie inside the framework's tree."""
 
     from hyperloom.measure.compile import UnsupportedComponentError
 
