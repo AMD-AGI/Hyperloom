@@ -747,6 +747,40 @@ def test_a_name_that_folds_to_a_lent_one_is_neither_lent_nor_kept_by_the_rewrite
     assert load.stdout == "vllm"
 
 
+def _turkish_env(checkout: Path) -> dict[str, str]:
+    env = {"PATH": os.environ["PATH"], "REPO_ROOT": str(checkout), "LC_ALL": "tr_TR.UTF-8"}
+    if "LOCPATH" in os.environ:
+        env["LOCPATH"] = os.environ["LOCPATH"]
+    return env
+
+
+def test_a_lent_name_with_an_i_is_lent_under_a_turkish_locale(tmp_path):
+    """Under tr_TR ${1^^} folds i to a dotted capital I; the check folds in the C locale, and the caller's is kept."""
+    checkout = tmp_path / "checkout"
+    checkout.mkdir()
+    checkout.chmod(0o777)
+    dotenv = checkout / ".env"
+    dotenv.write_text("FRAMEWORK=vllm\nhf_hub_offline=1\nHf_Datasets_Offline=0\n", encoding="utf-8")
+    env = _turkish_env(checkout)
+    folded = _shell('printf "%s" "${1^^}"', "i", env=env)
+    if folded.stdout != "\u0130":
+        pytest.skip("the tr_TR.UTF-8 locale is not installed, so bash cannot fold i to a dotted capital I here")
+
+    lent = _shell(
+        'for n in "$@"; do runtime_env_dotenv_lent "$n" 1 && printf "%s\\n" "$n"; done; x=i; printf "%s" "${x^^}"',
+        "hf_hub_offline",
+        "HF_DATASETS_OFFLINE",
+        "Hf_Datasets_Offline",
+        env=env,
+    )
+    rewrite = _shell('runtime_env_keep_lent_dotenv_lines "$1"', str(dotenv), env=env)
+
+    assert lent.returncode == 0, lent.stderr
+    assert lent.stdout == "hf_hub_offline\nHF_DATASETS_OFFLINE\nHf_Datasets_Offline\n\u0130"
+    assert rewrite.returncode == 0, rewrite.stderr
+    assert dotenv.read_bytes() == b"FRAMEWORK=vllm\nhf_hub_offline=1\nHf_Datasets_Offline=0\n"
+
+
 def test_preflight_lends_no_name_that_folds_to_a_lent_one(tmp_path):
     checkout = tmp_path / "checkout"
     checkout.mkdir()
