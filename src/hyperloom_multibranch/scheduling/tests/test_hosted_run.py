@@ -56,14 +56,16 @@ ACCOUNT = RunAs(user="hl-specialist", uid=1500, gid=1500, groups=(1500,), home="
 DENIED = "bwrap: setting up uid map: Permission denied"
 
 
-def _spec(measurement: str, image: str = f"registry.example/vllm@{DIGEST}") -> CampaignSpec:
+def _spec(
+    measurement: str, image: str = f"registry.example/vllm@{DIGEST}", hardware: dict[str, int] | None = None
+) -> CampaignSpec:
     return parse_campaign(
         {
             "schema": "hyperloom.campaign-spec/v1",
             "flow": "multibranch",
             "model": {"path": "/models/Llama-3-8B"},
             "framework": {"name": "vllm", "image": image},
-            "hardware": {"gpu_type": "mi355x", "tp": 1},
+            "hardware": {"gpu_type": "mi355x", "tp": 1, **(hardware or {})},
             "workload": {"conc": 16, "isl": 1024, "osl": 512, "precision": "fp8"},
             "budget": {"max_hours": 1},
             "placement": {"profile": "hosted-gpu", "measurement": measurement},
@@ -138,6 +140,12 @@ def test_the_host_reads_a_final_ending_and_the_session_a_restart_finishes(tmp_pa
 @pytest.mark.parametrize("measurement", ["local", "hosted"])
 def test_the_run_command_line_says_where_the_spec_measures(measurement: str) -> None:
     assert f"--measurement={measurement}" in run_argv(_spec(measurement), 1.0, 8)
+
+
+def test_an_inferencex_spec_runs_its_session_at_the_hardware_ep_it_names() -> None:
+    argv = run_argv(_spec("hosted", hardware={"tp": 8, "ep": 8}), 1.0, 1)
+
+    assert {"--workload=inferencex", "--tp=8", "--ep=8"} <= set(argv)
 
 
 @pytest.mark.parametrize(
