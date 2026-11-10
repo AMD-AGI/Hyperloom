@@ -38,6 +38,8 @@ from .baseline import BenchmarkRunExecutor
 
 log = logging.getLogger(__name__)
 
+#: ``error_class`` of a multi-node profile skipped because its trace dir is not shared with the engine pods.
+PROFILE_TRACE_NOT_SHARED = "profile_trace_not_shared"
 
 # Leading bytes of a trace to sample for sentinel substrings.
 _TRACE_INSPECT_BYTES = 2_000_000
@@ -722,6 +724,23 @@ def _graph_capture_profile_settings(config_path: Path) -> tuple[dict[str, str], 
     return env, flag
 
 
+def _unshared_trace_dir_refusal(round_trace_root: str) -> dict[str, Any] | None:
+    """The skip result when the startup probe found the trace dir not shared with the engine pods, else ``None``."""
+    from ._multi_node_env import _read_state
+
+    state = _read_state() or {}
+    if state.get("profile_trace_shared") is not False:
+        return None
+    reason = str(state.get("profile_trace_share_error") or "not shared with the engine pods")
+    log.warning("profile_executor: skipping multi-node profile; trace dir %s: %s", round_trace_root, reason)
+    return {
+        "status": "failed",
+        "error_class": PROFILE_TRACE_NOT_SHARED,
+        "error": f"multi-node profile trace dir {round_trace_root} is not shared with the engine pods: {reason}",
+        "trace_dir": round_trace_root,
+    }
+
+
 # Restarts the multi-node server for this profiling round with graph-capture profiling on; returns the refusal
 # result when it failed.
 async def _restart_round_server(params: dict[str, Any], round_trace_root: str) -> dict[str, Any] | None:
@@ -1281,6 +1300,9 @@ class ProfileExecutor(BenchmarkRunExecutor):
         round_trace_root = _mn_round_trace_root()
         log_mn_banner("profile_executor", log, trace_dir=round_trace_root)
         if round_trace_root:
+            unshared = _unshared_trace_dir_refusal(round_trace_root)
+            if unshared is not None:
+                return unshared
             task_started_unix = _trace_fs_round_start(round_trace_root, task_started_unix)
             refusal = await _restart_round_server(params, round_trace_root)
             if refusal is not None:

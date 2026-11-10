@@ -391,6 +391,32 @@ def test_profiling_round_restart_enables_graph_capture_profiling(monkeypatch: py
     assert eager[0].extra_server_args == "--disable-cuda-graph"
 
 
+@pytest.mark.parametrize(
+    ("state", "skipped"),
+    [
+        ({"profile_trace_shared": False, "profile_trace_share_error": "decode pod 10.0.0.2: ssh failed"}, True),
+        ({"profile_trace_shared": True}, False),
+        ({}, False),
+    ],
+    ids=["not-shared", "shared", "unprobed"],
+)
+def test_profile_is_skipped_when_the_trace_dir_is_not_shared(
+    monkeypatch: pytest.MonkeyPatch, tmp_path, state: dict, skipped: bool
+) -> None:
+    from hyperloom.orchestrator.actions.executors import _multi_node_env, profile
+
+    monkeypatch.setattr(_multi_node_env, "_read_state", lambda: dict(state))
+
+    refusal = profile._unshared_trace_dir_refusal(str(tmp_path))
+
+    if skipped:
+        assert refusal["status"] == "failed"
+        assert refusal["error_class"] == profile.PROFILE_TRACE_NOT_SHARED
+        assert "decode pod 10.0.0.2: ssh failed" in refusal["error"]
+    else:
+        assert refusal is None
+
+
 def test_pd_role_traces_are_kept_when_the_trace_filesystem_clock_lags(
     monkeypatch: pytest.MonkeyPatch, tmp_path
 ) -> None:

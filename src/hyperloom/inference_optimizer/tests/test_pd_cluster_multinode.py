@@ -407,6 +407,61 @@ def test_tracelens_patch_failure_reports_the_pod_error(monkeypatch: pytest.Monke
     assert [failure["error"] for failure in report["failures"]] == [pod_error, pod_error]
 
 
+def _probe_state(tmp_path: Path) -> dict:
+    return {**_PD_STATE, "ssh_key_path": "/key", "profile_trace": str(tmp_path)}
+
+
+def _probe_cli(reply) -> object:
+    from types import SimpleNamespace
+
+    return SimpleNamespace(_infera_ssh_bash_with_env=lambda state, ip, script, *, timeout, port=None: reply(ip, script))
+
+
+def _run_here(_ip: str, script: str) -> subprocess.CompletedProcess:
+    return subprocess.run(["bash", "-c", script], capture_output=True, text=True)
+
+
+def _decode_unreachable(ip: str, script: str) -> subprocess.CompletedProcess:
+    if ip == "10.0.0.2":
+        raise subprocess.TimeoutExpired("ssh", 30)
+    return _run_here(ip, script)
+
+
+def test_profile_dir_probe_passes_when_every_engine_reads_the_sentinel(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    monkeypatch.setattr(pd_cmds, "_cli", lambda: _probe_cli(_run_here))
+    state = _probe_state(tmp_path)
+
+    assert pd_cmds.record_profile_dir_share(state) == ""
+    assert state["profile_trace_shared"] is True
+    assert "profile_trace_share_error" not in state
+    assert list(tmp_path.iterdir()) == []
+
+
+@pytest.mark.parametrize(
+    "reply",
+    [
+        lambda ip, _s: subprocess.CompletedProcess(["ssh"], 1, stdout="", stderr="No such file or directory"),
+        lambda ip, _s: subprocess.CompletedProcess(["ssh"], 0, stdout="other-token\n", stderr=""),
+        _decode_unreachable,
+    ],
+    ids=["missing", "different-file", "ssh-timeout"],
+)
+def test_profile_dir_probe_records_why_the_dir_is_not_shared(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, reply
+) -> None:
+    monkeypatch.setattr(pd_cmds, "_cli", lambda: _probe_cli(reply))
+    state = _probe_state(tmp_path)
+
+    reason = pd_cmds.record_profile_dir_share(state)
+
+    assert reason and "pod 10.0.0." in reason
+    assert state["profile_trace_shared"] is False
+    assert state["profile_trace_share_error"] == reason
+    assert list(tmp_path.iterdir()) == []
+
+
 def test_tracelens_patch_runs_under_the_container_environment(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     import argparse
 

@@ -971,7 +971,7 @@ class RooflineExecutor:
 
         A failed profile is not re-run: the same configuration fails the same way, and the session degrades instead.
         """
-        from .profile import profile_executor
+        from .profile import PROFILE_TRACE_NOT_SHARED, profile_executor
 
         session_dir = Path(ctx.extra["session_dir"])
         run = recorder.begin_profile_run(attempt_reason=PROFILE_ATTEMPT_INITIAL) if recorder is not None else 0
@@ -989,6 +989,8 @@ class RooflineExecutor:
                 recorder, run, session_dir, arm, _ProfileOutcome.of(returned, dict(profile_ctx.task.params or {}))
             )
         log.warning("roofline profile failed (%s): %s", unusable.error_class, unusable.message)
+        if unusable.error_class == PROFILE_TRACE_NOT_SHARED and not self.shared_state.gpu_trace_unsupported_reason:
+            self.shared_state.gpu_trace_unsupported_reason = unusable.message
         await _end_profile_run(recorder, run, session_dir, arm, _RunEnd("failed", unusable.result, unusable.failure))
         captured = await _fail_on_capture(recorder, ctx.task, session_dir, arm, unusable)
         if captured is not None:

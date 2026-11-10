@@ -106,6 +106,15 @@ def _prepare_multi_node_state(args: argparse.Namespace) -> None:
         _settle_pd_baseline_args(ext_state)
         stamp_pd_cluster(ext_state, handoff_lookup())
         os.environ["HYPERLOOM_MN_WORKER_PORT"] = "8000"
+        from ..multi_node.commands.pd_cluster import record_profile_dir_share
+
+        share_error = record_profile_dir_share(ext_state)
+        if share_error:
+            print(
+                f"WARNING: profile trace dir {ext_state.get('profile_trace') or '<unset>'} is not shared with the "
+                f"engine pods ({share_error}); profiling will be skipped for this session.",
+                file=sys.stderr,
+            )
     _reject_unusable_backend(ext_state)
     try:
         _save_state(ext_state)

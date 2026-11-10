@@ -502,3 +502,66 @@ def apply_tracelens_patch(args: argparse.Namespace) -> int:
         )
     )
     return 0 if not failures else 1
+
+
+PROFILE_SHARE_PROBE_TIMEOUT_S = 30
+
+
+def probe_profile_dir_shared(state: dict[str, Any]) -> str:
+    """Check that every prefill and decode pod reads the sandbox's ``profile_trace`` dir; '' when shared, else why not."""
+    root = str(state.get("profile_trace") or "").strip()
+    if not root:
+        return "no profile_trace dir in state"
+    if not state.get("ssh_key_path"):
+        return "no ssh_key_path in state"
+    pods = [
+        pod
+        for pod in list(state.get("prefill_pods") or []) + list(state.get("decode_pods") or [])
+        if isinstance(pod, dict) and pod.get("podIP")
+    ]
+    if not pods:
+        return "no prefill or decode pods in state"
+    token = uuid.uuid4().hex
+    sentinel = Path(root) / f".share_probe-{token}"
+    try:
+        sentinel.write_text(token, encoding="utf-8")
+    except OSError as exc:
+        return f"cannot write {sentinel}: {exc}"
+    try:
+        for pod in pods:
+            reason = _pod_reads_sentinel(state, pod, sentinel, token)
+            if reason:
+                return reason
+    finally:
+        sentinel.unlink(missing_ok=True)
+    return ""
+
+
+def _pod_reads_sentinel(state: dict[str, Any], pod: dict[str, Any], sentinel: Path, token: str) -> str:
+    """'' when ``pod`` reads ``token`` from ``sentinel`` over SSH, else why it does not."""
+    ip = str(pod["podIP"])
+    port = int(pod.get("sshPort") or state.get("ssh_port") or 0) or None
+    where = f"{pod.get('role') or 'engine'} pod {ip}"
+    try:
+        completed = _cli()._infera_ssh_bash_with_env(
+            state, ip, f"cat {shlex.quote(str(sentinel))}", timeout=PROFILE_SHARE_PROBE_TIMEOUT_S, port=port
+        )
+    except (subprocess.TimeoutExpired, OSError) as exc:
+        return f"{where}: ssh failed: {exc}"
+    if completed.returncode != 0:
+        detail = (completed.stderr or "").strip()[-200:]
+        return f"{where}: cannot read {sentinel} (rc={completed.returncode}) {detail}".strip()
+    if (completed.stdout or "").strip() != token:
+        return f"{where}: {sentinel} is a different file there"
+    return ""
+
+
+def record_profile_dir_share(state: dict[str, Any]) -> str:
+    """Store the :func:`probe_profile_dir_shared` verdict on ``state`` and return its reason ('' when shared)."""
+    reason = probe_profile_dir_shared(state)
+    state["profile_trace_shared"] = not reason
+    if reason:
+        state["profile_trace_share_error"] = reason
+    else:
+        state.pop("profile_trace_share_error", None)
+    return reason
