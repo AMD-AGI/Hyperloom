@@ -11,6 +11,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
+from hyperloom.common.deadline import Deadline
 from hyperloom.common.env_safety import filter_untrusted_env_mapping, is_allowed_variant_env_key
 from hyperloom_common.coerce import to_str_list
 from hyperloom_common.timeutil import now_iso
@@ -54,12 +55,13 @@ class _PatchBench:
     session_deadline_sec: float | None = None
     variant_expected_sec: float | None = None
     benchmark_mode: str = ""
+    phase_deadline: Deadline | None = None
     #: The round's non-default ``remove_args`` / ``unset_envs`` / ``args_mode``; the parity leg runs without them.
     launch_controls: dict[str, Any] = field(default_factory=dict)
 
     @classmethod
     def for_attempt(cls, attempt: IntegrateAttempt, params: dict[str, Any]) -> _PatchBench:
-        """The legs' shared inputs, bounded by the session wall-clock as it stands now."""
+        """The legs' shared inputs, bounded by the session wall-clock as it stands now and the phase's end."""
         shared_state = attempt.shared_state
         session_deadline_sec, variant_expected_sec = session_grid_bounds(shared_state)
         return cls(
@@ -70,6 +72,7 @@ class _PatchBench:
             session_deadline_sec=session_deadline_sec,
             variant_expected_sec=variant_expected_sec,
             benchmark_mode=str(getattr(shared_state, "benchmark_mode", "") or ""),
+            phase_deadline=attempt.phase_deadline,
         )
 
 

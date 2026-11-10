@@ -327,15 +327,17 @@ async def test_bench_budget_is_unbounded_without_a_session(tmp_path, monkeypatch
 
 
 @pytest.mark.asyncio
-async def test_bench_patch_forwards_the_session_budget_to_the_grid(tmp_path, monkeypatch):
+async def test_bench_patch_forwards_the_session_and_phase_budgets_to_the_grid(tmp_path, monkeypatch):
     session = tmp_path / "s"
     session.mkdir()
     config_path = tmp_path / "baseline.yaml"
     config_path.write_text("benchmark: {}\n", encoding="utf-8")
 
+    from hyperloom.common.deadline import Deadline
     from hyperloom.orchestrator.actions.executors import _integrate_results as integrate_results
 
     captured: dict[str, Any] = {}
+    phase = Deadline.after(900.0)
 
     async def fake_run_grid(**kwargs):
         captured.update(kwargs)
@@ -351,6 +353,7 @@ async def test_bench_patch_forwards_the_session_budget_to_the_grid(tmp_path, mon
             specialist_task_id="spec",
             session_deadline_sec=4242.0,
             variant_expected_sec=600.0,
+            phase_deadline=phase,
         ),
         extra_server_args_applied="",
         extra_envs_applied={},
@@ -358,6 +361,18 @@ async def test_bench_patch_forwards_the_session_budget_to_the_grid(tmp_path, mon
 
     assert captured["stop"].session_deadline_sec == 4242.0
     assert captured["stop"].variant_expected_sec == 600.0
+    assert captured["stop"].phase_deadline is phase
+
+
+def test_patch_bench_carries_the_phase_deadline_the_attempt_was_dispatched_under(tmp_path):
+    from hyperloom.common.deadline import Deadline
+    from hyperloom.orchestrator.actions.executors import _integrate_results as integrate_results
+    from hyperloom.orchestrator.actions.executors._integrate_attempt import IntegrateAttempt
+
+    phase = Deadline.after(900.0)
+    attempt = IntegrateAttempt(task_id="t", phase_deadline=phase, output_root=tmp_path)
+
+    assert integrate_results._PatchBench.for_attempt(attempt, {}).phase_deadline is phase
 
 
 @pytest.mark.asyncio

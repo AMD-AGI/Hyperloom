@@ -131,6 +131,23 @@ async def test_happy_path_promotes_profile_and_caches_trace_analyze(tmp_path):
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("previous", [0.0, 1500.0])
+async def test_a_finished_roofline_keeps_the_slowest_runtime(tmp_path, previous):
+    """CLOSE sizes its own roofline from this."""
+    state = _state()
+    state.roofline_runtime_sec = previous
+    p1, p2 = _patch_subs(_profile_success("/tmp/trace.gz"), _trace_analyze_success())
+    with p1, p2:
+        result = await RooflineExecutor(shared_state=state)(_ctx(tmp_path))
+
+    assert result["status"] == "succeeded"
+    if previous:
+        assert state.roofline_runtime_sec == previous
+    else:
+        assert 0.0 < state.roofline_runtime_sec < 60.0
+
+
+@pytest.mark.asyncio
 async def test_roofline_passes_resolved_framework_to_trace_analysis(tmp_path, monkeypatch):
     """The trace-analysis payload carries the same framework as the profile."""
     state = _state()
