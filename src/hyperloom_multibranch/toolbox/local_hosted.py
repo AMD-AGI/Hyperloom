@@ -108,6 +108,7 @@ from hyperloom_multibranch.toolbox.leased_toolbox import (
     with_short_prompts,
 )
 from hyperloom_multibranch.toolbox.queue import QueuePolicy
+from hyperloom_multibranch.toolbox.resume_guard import MeasuredOn
 from hyperloom_multibranch.toolbox.long_context import LongContextSetup, staged_long_context
 from hyperloom_multibranch.toolbox.native_builds import native_builds, with_native_plan
 from hyperloom_multibranch.toolbox.short_prompts import ShortPromptSetup, staged_short_prompts
@@ -805,6 +806,7 @@ def build_local_toolbox(
         ),
     )
     toolbox.backend, toolbox.provider, toolbox.trace_root = backend, provider, directory
+    toolbox.measured_on = MeasuredOn(directory, provider.hostname, spec.image_digest, len(cards))
     toolbox.attach_leases(leases)
     toolbox.sandboxes = directory / _SANDBOXES
     toolbox.blobs = spec.blobs
