@@ -87,10 +87,8 @@ jobs:
   # file. No gate here -- a single shard's coverage is intentionally incomplete.
   # ---------------------------------------------------------------------------
   script-harness:
-    # The script workload's harness runs inside the model's own interpreter, so its
-    # tests need torch and skip without it -- which left the largest file in that
-    # feature with no CI at all. Its own job rather than the test matrix: torch would
-    # otherwise be installed once per shard per Python version.
+    # These tests skip without torch. Its own job rather than the test matrix, which
+    # would install torch once per shard per Python version.
     name: script workload harness (torch, CPU)
     runs-on: ubuntu-latest
     steps:
@@ -106,8 +104,7 @@ jobs:
         run: |
           pip install --upgrade pip
           pip install -e ".[test]"
-          # The CPU index explicitly: torch is absent from the project's dependencies
-          # because a bare specifier resolves to the CUDA wheel from PyPI.
+          # The CPU index explicitly: a bare specifier resolves to the CUDA wheel.
           pip install torch --index-url https://download.pytorch.org/whl/cpu
 
       - name: Run harness tests

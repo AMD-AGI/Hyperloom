@@ -227,10 +227,8 @@ def test_bypass_lifecycle_ineligible_when_multi_node(tmp_path, monkeypatch):
 
 
 def test_custom_selects_bypass_only_when_the_backend_is_unset(monkeypatch):
-    # select_bypass_for_custom writes os.environ itself, which monkeypatch cannot undo
-    # unless it already owns the name: delenv records nothing to restore when the
-    # variable was unset to begin with, so the "bypass" this test sets would outlive it
-    # and every later test resolving a backend would read it.
+    # setenv first so monkeypatch owns the name: select_bypass_for_custom writes
+    # os.environ itself, and delenv alone leaves nothing to restore, so it would leak.
     monkeypatch.setenv(bb.BENCHMARK_BACKEND_ENV, "")
     monkeypatch.delenv(bb.BENCHMARK_BACKEND_ENV, raising=False)
     bb.select_bypass_for_custom("sglang")

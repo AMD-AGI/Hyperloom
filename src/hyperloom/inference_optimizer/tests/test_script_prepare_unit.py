@@ -3,10 +3,9 @@
 
 """`hyperloom script prepare` without a model: the parts that need no torch.
 
-The end-to-end tests in ``test_script_workload.py`` skip wherever torch is absent,
-which is every CI runner -- torch is deliberately not a dependency, since a bare
-specifier resolves to the CUDA wheel. Everything here is argument handling, config
-layout and refusals, so it runs anywhere.
+The end-to-end tests in ``test_script_workload.py`` skip without torch, which only
+the ``script-harness`` CI job installs. Everything here is argument handling, config
+layout and refusals, so it runs in the main matrix too.
 """
 
 from __future__ import annotations

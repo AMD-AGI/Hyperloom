@@ -116,11 +116,9 @@ def _use_scorer(directory: Path) -> None:
 def _capture(value, where: str = "output"):
     """One model output, reduced to data the parent can load and compare.
 
-    A scorer's ``capture`` runs first when it defines one: an output whose shape
-    depends on its input -- generated token ids, surviving detections, a transcript
-    -- cannot be compared as a fixed structure, so the operator turns it into
-    whatever their ``score`` reads. ``_plain`` still runs afterwards, so the result
-    must still be tensors and plain containers.
+    A scorer's ``capture`` runs first when it defines one, for an output whose shape
+    follows its input and cannot be compared as a fixed structure. ``_plain`` still
+    runs after, so the result must be tensors and plain containers.
     """
     if _SCORER is not None and hasattr(_SCORER, "capture"):
         value = _SCORER.capture(value)
@@ -130,14 +128,11 @@ def _capture(value, where: str = "output"):
 def _plain(value, where: str = "output"):
     """Plain containers and CPU tensors only, so the parent can load them with weights_only=True.
 
-    A leaf of any other type is refused rather than stringified. ``repr`` looks like
-    a comparable value and is not one: numpy elides any array over 1000 elements, so
-    two different masks render identically and the gate scores them equal. Worse, a
-    stringified leaf is invisible to ``_leaves``, so an output made entirely of them
-    has nothing to compare and scores a perfect zero.
-
-    Recording runs the unmodified model, so an unsupported output is refused there --
-    before a campaign spends its budget measuring against references it cannot judge.
+    Any other leaf is refused rather than stringified. A ``repr`` is invisible to
+    ``_leaves``, so an output made only of them has nothing to compare and scores a
+    perfect zero; numpy also elides arrays over 1000 elements, rendering two
+    different masks identically. Recording runs the unmodified model, so an
+    unsupported output is refused before a campaign spends anything.
     """
     if isinstance(value, torch.Tensor):
         return value.detach().cpu().clone()
@@ -384,10 +379,8 @@ def _timed_passes(entry, calls, held_out, config):
                 _synchronize()
                 elapsed += time.perf_counter() - start
                 if (pass_index, index) in schedule:
-                    # Cloned on the device now, moved to host after the chunk: holding the
-                    # raw tensor would let a module that recycles its output buffer collapse
-                    # every held-out sample in the chunk onto the last pass's value. Outside
-                    # the elapsed accumulation above, so it costs wall time, not latency.
+                    # Cloned here, moved to host after the chunk: a module that recycles its
+                    # output buffer would otherwise collapse the chunk's samples onto the last.
                     kept.append((index, schedule[(pass_index, index)], _snapshot(output)))
             latencies.append(elapsed * MS_PER_S)
         _send_mark("stop")
