@@ -76,7 +76,7 @@ class TreeAdmissionMixin:
     """Lanes, measurement and node admission for one tree round.
 
     The host supplies ``ic``, ``run_one_iteration``, ``_canonical_site``, ``_lane_rejection``, ``_workspace_path``,
-    ``_request_lesson``, ``_start_worktrees``, ``_experiments`` and ``device_hazard``.
+    ``_request_lesson``, ``_start_worktrees``, ``_tree_store``, ``_experiments`` and ``device_hazard``.
     """
 
     async def _run_slot_lanes(
@@ -189,9 +189,16 @@ class TreeAdmissionMixin:
         pin_node(self.ic.workspace_dir, commit)
         provenance = (slot.source,) if slot.slot_type is SlotType.PORT else ()
         node = _node_of(result, _Placement(commit, slot.start, direction_id, provenance), slot=slot, plan=plan.title)
-        tree.add_node(node)
-        self._point_direction(tree, direction_id)
+        self._add_node(tree, node)
         return node
+
+    def _add_node(self, tree: SearchTree, node: TreeNode) -> None:
+        """Add a committed node, move its direction's branch to the direction's best, and save the tree."""
+        tree.add_node(node)
+        self._point_direction(tree, node.direction)
+        # Saved now, not when the round closes: a session killed later in the round would otherwise leave a pinned
+        # commit no record names.
+        self._tree_store.save(tree)
 
     def _direction_for(self, tree: SearchTree, iteration: int, plan: SlotPlan) -> str:
         slot = plan.slot
@@ -262,8 +269,7 @@ class TreeAdmissionMixin:
         pin_node(self.ic.workspace_dir, commit)
         placement = _Placement(commit, target.commit, target.direction, (source.commit,))
         node = _node_of(result, placement, slot=None, plan=plan)
-        tree.add_node(node)
-        self._point_direction(tree, target.direction)
+        self._add_node(tree, node)
         self._start_worktrees.restore(worktree, target.commit)
         return (node, result)
 
@@ -274,6 +280,7 @@ class TreeAdmissionMixin:
             result = await self._measure_at(iteration, f"re-measure {commit}", worktree)
             if measured_correct(result):
                 tree.add_samples(commit, tuple(result.bench_detail["measurement_mean_case_speedups"]))
+                self._tree_store.save(tree)
 
     def _attempt(
         self, iteration: int, slot: Slot, outcome: AttemptOutcome, result: IterationResult | None, node: str
