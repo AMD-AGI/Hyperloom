@@ -37,7 +37,7 @@ def test_the_console_entry_exits_2_with_the_line_and_no_traceback_in_a_real_proc
         [
             sys.executable,
             "-c",
-            "import sys\nfrom hyperloom.cli import main\nsys.exit(hyperloom_cli.main(sys.argv[1:]))",
+            "import sys\nfrom hyperloom.cli import main\nsys.exit(main(sys.argv[1:]))",
             "optimize",
             "--model",
             "/models/m",
