@@ -2089,6 +2089,33 @@ async def test_a_resume_after_a_stop_signal_continues_explore_on_new_branches_an
         await asyncio.to_thread(resumable_run, stage.layout.root)
 
 
+async def test_a_second_resume_after_a_stopped_resume_archives_nothing_again_either(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    archive = tmp_path / "rsi"
+    monkeypatch.setenv(ARCHIVE_ENV, str(archive))
+    stage = _stage(tmp_path)
+    stage.steps = _signalling(stage)
+    await stage.run()
+    [tree] = (archive / "trees").glob("*.json")
+    archived = tree.read_bytes()
+
+    persisted = await asyncio.to_thread(resumable_run, stage.layout.root)
+    resumed = _resumed(stage, persisted.settings)
+    resumed.steps = {"b03": _signalling(resumed)["b01"]}
+    stopped = await resumed.resume(persisted.ended)
+    assert stopped.stop_reason is SessionStopReason.SIGNAL and stopped.final is None
+
+    persisted = await asyncio.to_thread(resumable_run, stage.layout.root)
+    again = _resumed(stage, persisted.settings)
+    outcome = await again.resume(persisted.ended)
+
+    assert outcome.final is not None and outcome.final.chosen is not None
+    knowledge = json.loads(stage.layout.report.read_text())["exports"]["knowledge"]
+    assert {(step["status"], step["reason"]) for step in knowledge.values()} == {(SKIPPED, ARCHIVED_BEFORE)}
+    assert tree.read_bytes() == archived and resumed.author.calls == [] and again.author.calls == []
+
+
 async def test_a_resume_of_a_killed_session_stops_the_branches_it_left_open(tmp_path: Path) -> None:
     stage = _stage(tmp_path)
     stage.steps = _signalling(stage)

@@ -101,13 +101,16 @@ def step_lines(steps: Mapping[str, CloseStep]) -> list[str]:
 
 
 def archived_before(report: Path) -> bool:
-    """Whether the CLOSE report at ``report``, which an earlier CLOSE of the session wrote, says it archived the
-    session's search tree; ``False`` with no report."""
+    """Whether the CLOSE report at ``report``, which an earlier CLOSE of the session wrote, says that CLOSE or one
+    before it archived the session's search tree; ``False`` with no report."""
 
     if not report.is_file():
         return False
     exports = read_json_strict(report, require_dict=True)["exports"]
-    return exports is not None and exports["knowledge"]["archive"]["status"] == ARCHIVED
+    if exports is None:
+        return False
+    archive = exports["knowledge"]["archive"]
+    return archive["status"] == ARCHIVED or archive["reason"] == ARCHIVED_BEFORE
 
 
 def _recovered_by(row: Mapping[str, Any]) -> tuple[str, ...]:
