@@ -176,11 +176,11 @@ class FlyDSLAssembly:
                 )
                 return compiled
 
-        # A cache hit carries no source IR on FlyDSL >= 0.3.4.1, and the source baseline has
-        # already cached this specialization, so compile it fresh in a private cache.
-        with tempfile.TemporaryDirectory(prefix="forge-flydsl-build-") as scratch:
-            with _flydsl_environment({"FLYDSL_RUNTIME_CACHE_DIR": scratch}):
-                compiled = flyc.compile(*args, **kwargs)
+        # A disk-cache hit carries no source IR on FlyDSL >= 0.3.4.1, and the source baseline has
+        # already cached this specialization. FlyDSL < 0.5.0 pins a function's cache directory at
+        # its first compile, but reads the enable flag on every compile.
+        with _flydsl_environment({"FLYDSL_RUNTIME_ENABLE_CACHE": "0"}):
+            compiled = flyc.compile(*args, **kwargs)
         self._check(_fingerprint(compiled))
         return with_assembly(
             compiled,

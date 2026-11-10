@@ -137,27 +137,26 @@ def test_capture_refuses_missing_dump_and_restores_environment(tmp_path, monkeyp
     assert not (tmp_path / "kernel.s").exists()
 
 
-def test_rebuild_compiles_outside_the_shared_frontend_cache(tmp_path, monkeypatch, frontend):
+def test_rebuild_compiles_outside_the_frontend_disk_cache(tmp_path, monkeypatch, frontend):
     # FlyDSL >= 0.3.4.1 drops source IR from its disk cache, so a rebuild served by the
-    # cache the source baseline populated cannot be fingerprinted.
-    shared = tmp_path / "shared-cache"
-    monkeypatch.setenv("FLYDSL_RUNTIME_CACHE_DIR", str(shared))
+    # cache the source baseline populated cannot be fingerprinted. FlyDSL < 0.5.0 also pins
+    # a function's cache directory at its first compile, so only the enable flag, which it
+    # reads on every compile, keeps the rebuild off the disk cache.
+    monkeypatch.setenv("FLYDSL_RUNTIME_ENABLE_CACHE", "1")
     exporter = capture.FlyDSLAssembly(str(tmp_path / "kernel.py"), "kernel.s", "gfx950", export=True)
     exporter("specialization-1")
-    caches = []
+    flags = []
 
     def compile_kernel(identity):
-        cache = os.environ["FLYDSL_RUNTIME_CACHE_DIR"]
-        caches.append(cache)
-        return None if cache == str(shared) else identity
+        flags.append(os.environ["FLYDSL_RUNTIME_ENABLE_CACHE"])
+        return None if flags[-1] != "0" else identity
 
     monkeypatch.setattr(frontend, "compile", compile_kernel)
     monkeypatch.setattr(capture, "with_assembly", lambda compiled, path, **kwargs: "assembly-variant")
     loader = capture.FlyDSLAssembly(str(tmp_path / "kernel.py"), "kernel.s", "gfx950")
     assert loader("specialization-1") == "assembly-variant"
-    assert caches[0] != str(shared)
-    assert not Path(caches[0]).exists()
-    assert os.environ["FLYDSL_RUNTIME_CACHE_DIR"] == str(shared)
+    assert flags == ["0"]
+    assert os.environ["FLYDSL_RUNTIME_ENABLE_CACHE"] == "1"
 
 
 def test_fingerprint_without_source_ir_is_explicit():
