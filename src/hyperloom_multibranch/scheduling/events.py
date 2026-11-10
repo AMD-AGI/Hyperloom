@@ -50,6 +50,7 @@ from hyperloom_multibranch.contracts.blackboard.records import (
 )
 from hyperloom_multibranch.contracts.blackboard.vocab import MergeOutcome
 from hyperloom_multibranch.contracts.toolbox import MeasurementCapacity, RequestRejected, Toolbox
+from hyperloom_multibranch.scheduling.branches import BranchFocus
 from hyperloom_multibranch.scheduling.clock import Clock
 from hyperloom_multibranch.scheduling.decisions import Decision, DecisionKind, DecisionLog
 from hyperloom_multibranch.scheduling.integrator import MergeReport
@@ -455,11 +456,13 @@ class SessionEvents:
 
         self._profile_move(commit)
 
-    async def focus_on(self, commit: str, asked: tuple[str, ...], count: int) -> tuple[str, ...]:
+    async def focus_on(self, commit: str, asked: tuple[str, ...], count: int) -> tuple[BranchFocus, ...]:
         """The focus of each of ``count`` branches opening on ``commit`` (:func:`refill_focus`), the ops the judge
         ``asked`` for taken over the op shares of ``commit`` or of the profile of its recipe."""
 
-        return refill_focus(asked, count, await self._profiler.shares_of(commit))
+        shares = await self._profiler.shares_of(commit)
+        largest = [op for op, _ in shares.largest(count)] if shares is not None else []
+        return refill_focus(asked, count, shares, largest)
 
     def _profile_move(self, head: str) -> None:
         if self._unprofiled_move is not None:

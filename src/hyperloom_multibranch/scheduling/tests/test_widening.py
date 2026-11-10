@@ -13,7 +13,7 @@ import pytest
 from hyperloom_multibranch.contracts.blackboard.records import OpShares
 from hyperloom_multibranch.contracts.toolbox import MeasurementCapacity, QueueState
 from hyperloom_multibranch.blackboard.rsi.frontier import FrontierPolicy
-from hyperloom_multibranch.scheduling.branches import SPECIALIST_START_SECONDS
+from hyperloom_multibranch.scheduling.branches import SPECIALIST_START_SECONDS, BranchFocus
 from hyperloom_multibranch.scheduling.clock import Clock
 from hyperloom_multibranch.scheduling.roster import Roster, RosterCaps
 from hyperloom_multibranch.scheduling.widening import (
@@ -121,15 +121,68 @@ def test_the_cold_start_the_real_toolbox_measured_is_what_the_signals_carry_to_t
 
 
 SHARES = OpShares("c-head", "job-1", "profile-1", {"attention": 22.0, "moe_gemm": 41.5, "allreduce": 9.0})
+LARGEST = ("moe_gemm", "attention", "allreduce")
 
 
-def test_a_refill_takes_the_judges_focus_and_else_the_largest_ops_of_its_start_commit() -> None:
-    assert refill_focus(("attention", ""), 3, SHARES) == ("attention", "moe_gemm", "attention")
+def _texts(focus: tuple[BranchFocus, ...]) -> tuple[str, ...]:
+    return tuple(aim.text for aim in focus)
 
 
-def test_a_refill_the_judge_left_open_spreads_over_the_profile_and_wraps() -> None:
-    assert refill_focus((), 4, SHARES) == ("moe_gemm", "attention", "allreduce", "moe_gemm")
+def test_a_refill_takes_the_judges_focus_and_else_the_ranked_ops() -> None:
+    assert _texts(refill_focus(("attention", ""), 3, SHARES, LARGEST)) == ("attention", "moe_gemm", "attention")
+
+
+def test_a_refill_the_judge_left_open_spreads_over_the_ranked_ops_and_wraps() -> None:
+    focus = refill_focus((), 4, SHARES, LARGEST)
+    assert focus == tuple(BranchFocus(op, op) for op in ("moe_gemm", "attention", "allreduce", "moe_gemm"))
 
 
 def test_a_refill_from_a_commit_never_profiled_has_no_focus_unless_the_judge_names_one() -> None:
-    assert refill_focus(("attention",), 2, None) == ("attention", "")
+    assert refill_focus(("attention",), 2, None, ()) == (BranchFocus("attention", "attention"), BranchFocus("", ""))
+
+
+def test_a_refill_with_no_op_ranked_reads_the_judges_text_as_a_profile_op_and_leaves_the_rest_unfocused() -> None:
+    assert refill_focus(("", "moe_gemm (fused)"), 2, SHARES, ()) == (
+        BranchFocus("", ""),
+        BranchFocus("moe_gemm (fused)", "moe_gemm"),
+    )
+
+
+PROFILED = OpShares(
+    "c-head",
+    "job-1",
+    "profile-1",
+    {
+        "aiter::cross_device_reduce_1stage": 18.6,
+        "_act_mul_and_dynamic_fp8_group_quant_kernel.kd": 3.1,
+        "aiter::add_rmsnorm_quant_kernel": 2.0,
+        "aiter::dynamic_per_token_scaled_quant_kernel": 1.5,
+        "add_rmsnorm": 1.0,
+    },
+)
+
+
+@pytest.mark.parametrize(
+    ("asked", "op"),
+    [
+        ("aiter::cross_device_reduce_1stage (allreduce, 18.6% of GPU time)", "aiter::cross_device_reduce_1stage"),
+        ("_act_mul_and_dynamic_fp8_group_quant_kernel", "_act_mul_and_dynamic_fp8_group_quant_kernel.kd"),
+        (
+            "_act_mul_and_dynamic_fp8_group_quant_kernel.kd (fused act-mul)",
+            "_act_mul_and_dynamic_fp8_group_quant_kernel.kd",
+        ),
+        ("fuse aiter::add_rmsnorm_quant_kernel with the quant", "aiter::add_rmsnorm_quant_kernel"),
+        (
+            "aiter::add_rmsnorm_quant_kernel and aiter::dynamic_per_token_scaled_quant_kernel (norm and quant fusion)",
+            "aiter::add_rmsnorm_quant_kernel",
+        ),
+        (
+            "aiter::add_rmsnorm_quant_kernel (norm): fuse with the following quant step",
+            "aiter::add_rmsnorm_quant_kernel",
+        ),
+        ("gdr_mtp_snapshot_bf16 kernel (8.6% of GPU time)", "gdr_mtp_snapshot_bf16 kernel (8.6% of GPU time)"),
+        ("aiter::cross_device_reduce_1stage_v2", "aiter::cross_device_reduce_1stage_v2"),
+    ],
+)
+def test_a_refill_keeps_the_judges_text_and_reads_its_op_as_the_profile_op_it_names_first(asked: str, op: str) -> None:
+    assert refill_focus((asked,), 1, PROFILED, ()) == (BranchFocus(asked, op),)
