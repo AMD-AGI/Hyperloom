@@ -394,11 +394,14 @@ facts:
   hsa_status_error:
     kind: log_regex
     project: ROCm (ROCr runtime)
-    reason: A failed HSA call is reported with a status name that starts with this prefix.
+    reason: >-
+      A failed HSA call is reported with a status name that starts with this prefix; the HIP runtime aborts a queue with
+      one when a kernel that is running faults, so the status names a GPU fault, not an absent kernel.
     pattern: HSA_STATUS_ERROR
     examples:
       match:
         - "HSA_STATUS_ERROR_EXCEPTION: An HSAIL operation resulted in a hardware exception."
+        - ":0:rocdevice.cpp            :3020: 2245381405 us:  Callback: Queue 0x7f2b44400000 aborting with error : HSA_STATUS_ERROR_MEMORY_APERTURE_VIOLATION: The agent attempted to access memory beyond the largest legal address. code: 0x29"
       no_match:
         - "HSA runtime initialised with status success"
 
