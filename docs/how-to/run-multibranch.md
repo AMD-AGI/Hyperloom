@@ -40,8 +40,9 @@ agent CLI the specialists run must be installed. `--measurement hosted` also nee
 
 `hyperloom-multibranch run --help` has the full text of each option.
 
-- **Workload:** `--model`, `--framework`, `--gpu-type`, `--workload` (`inferencex` or `agentx`), `--tp`, `--conc`,
-  `--precision`; `--isl`/`--osl` for `inferencex` only, `--ep` for `agentx` only; `--kernel-optimizer`.
+- **Workload:** `--model`, `--framework`, `--gpu-type`, `--workload` (`inferencex` or `agentx`), `--tp`, `--ep`
+  (expert-parallel size, default 1), `--conc`, `--precision`; `--isl`/`--osl` for `inferencex` only;
+  `--kernel-optimizer`.
 - **Limits:** `--max-hours` (default 2, 0 for none), `--max-gpu-hours` and `--max-llm-usd` (0 for none),
   `--max-branches` (default 4). A negative or non-finite limit is a usage error.
 - **Concurrency:** `--max-parallel-tests` (default: as many as fit at TP), `--max-k-per-branch` (default 2),

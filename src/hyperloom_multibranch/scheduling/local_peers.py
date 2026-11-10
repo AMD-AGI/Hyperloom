@@ -243,6 +243,7 @@ def workload_environment(workload: Workload) -> Mapping[str, str]:
         "FRAMEWORK": workload.framework,
         "MODEL_PATH": resolve_serving_model_path(workload.model),
         "TP": str(workload.tp),
+        "EP": str(workload.ep),
         **workload_specific,
         "PRECISION": workload.precision,
         "GPU_TYPE": gpu_runner_type(workload.gpu_type),
