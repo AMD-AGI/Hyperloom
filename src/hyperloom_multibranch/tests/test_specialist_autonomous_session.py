@@ -1819,3 +1819,33 @@ async def test_a_later_keep_carries_the_change_of_one_that_measured_nothing_and_
 
     assert len(rig.toolbox.requests) == 2 and "+max_num_seqs = 512" in rig.patch(rig.toolbox.requests[1])
     assert not any("goes once more" in note for note in await rig.notices())
+
+
+async def test_a_requeue_due_while_a_later_keep_waits_gives_way_to_it(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # The first keep's requeue falls due while another test keeps the branch busy and the second keep lands: once the
+    # branch is free, the second keep, which carries the first's change, goes, and the requeue does not take its place.
+    monkeypatch.setattr(keep_requeue, "REQUEUE_SECONDS", 1.0)
+    rig = await _rig(tmp_path, Agent(keeps=(256, 512), gap=3.0, tail=1.0))
+    watch_file = rig.session._place.workspace / autonomous_session.WATCH_FILE
+
+    def watched() -> dict:
+        return json.loads(watch_file.read_text(encoding="utf-8")) if watch_file.exists() else {}
+
+    await rig.session.preflight()
+    running = asyncio.create_task(rig.session.run())
+    await _until(lambda: rig.toolbox.requests, "the first import")
+    await rig.toolbox_blackboard.write_result(_failed("r1", Validity.MEASUREMENT_FAILED))
+    await _until(lambda: watched().get("requeue_at"), "the requeue's time")
+    await rig.toolbox_blackboard.write_request(replace(rig.toolbox.requests[0], request_id="x1"))
+    await _until(lambda: (watched().get("pending") or {}).get("seq") == 2, "the second keep")
+    await _until(lambda: time.time() > watched()["requeue_at"], "the requeue falling due")
+    await rig.toolbox_blackboard.write_result(result("x1"))
+    await _until(lambda: len(rig.toolbox.requests) == 2, "the next import")
+    await rig.toolbox_blackboard.write_result(result("r2"))
+    with pytest.raises(SessionFinished):
+        await asyncio.wait_for(running, 10)
+
+    assert len(rig.toolbox.requests) == 2 and "+max_num_seqs = 512" in rig.patch(rig.toolbox.requests[1])
+    assert not any("goes once more" in note for note in await rig.notices())
