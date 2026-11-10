@@ -22,6 +22,7 @@ from hyperloom.contracts.recipe import ConfigDelta, RecipeDelta
 from hyperloom.measure.boot_watch import HUNG_BEFORE_READY
 from hyperloom.measure import hosted
 from hyperloom.measure.failures import (
+    FOREIGN_PROCESS_ON_CARD,
     HF_CACHE_PERMISSION,
     HUB_RATE_LIMITED,
     INFRA_ERROR_CLASSES,
@@ -31,11 +32,16 @@ from hyperloom.measure.failures import (
 )
 from hyperloom.measure.runner.import_outcome import INERT_PATCH
 from hyperloom_multibranch.toolbox.attempts import (
+    CAPACITY_UNAVAILABLE,
     NODE_BLAMELESS_INFRA_REASONS,
+    RUNNER_START_TIMEOUT,
+    WAITED_INFRA_REASONS,
     RUNNER_LOST,
     RUNNER_START_FAILED,
     SANDBOX_CREATE_FAILED,
+    INFRA_BACKOFF_SECONDS,
     AttemptRunner,
+    InfraBackoff,
     TestJob,
 )
 
@@ -43,22 +49,46 @@ INERT_REASON = f"{INERT_PATCH}: process 1 imported aiter from /sgl-workspace/ait
 PORT_REASON = "port_in_use: [Errno 98] address already in use"
 DISK_FULL_REASON = "disk_full: OSError: [Errno 122] Disk quota exceeded: '/work/.cache/triton/k.json'"
 HUNG_REASON = f"{HUNG_BEFORE_READY}: no output for 600s before the server was ready"
+#: Failures that are not the node's: cards a process outside the test held, no sandbox from the platform in time.
+FOREIGN_REASON = f"{FOREIGN_PROCESS_ON_CARD}: card 3 held by pid 4242 (python)"
+START_TIMEOUT_REASON = RUNNER_START_TIMEOUT
+CAPACITY_REASON = f"{CAPACITY_UNAVAILABLE}: no node with 8 free GPUs"
+
+
+class _FakeTime:
+    """A clock that only a wait moves, and the waits it was asked for."""
+
+    def __init__(self) -> None:
+        self.now = 1000.0
+        self.waits: list[float] = []
+
+    def __call__(self) -> float:
+        return self.now
+
+    async def sleep(self, seconds: float) -> None:
+        self.waits.append(seconds)
+        self.now += seconds
 
 
 class _ScriptedExecutor:
-    """Fails every attempt with ``reason`` as an infrastructure failure, each on its own node."""
+    """Fails every attempt with ``reason`` as an infrastructure failure, each on its own node; ``started`` is the clock
+    at each attempt. A sequence of reasons gives one per attempt, the last for every later one."""
 
-    def __init__(self, reason: str) -> None:
-        self.reason = reason
+    def __init__(self, reason: str | tuple[str, ...], clock: _FakeTime | None = None) -> None:
+        self.reasons = (reason,) if isinstance(reason, str) else reason
+        self.reason = self.reasons[0]
         self.jobs: list[TestJob] = []
+        self.clock = clock or _FakeTime()
+        self.started: list[float] = []
 
     async def run(self, job: TestJob) -> TestResult:
         self.jobs.append(job)
+        self.started.append(self.clock())
         return TestResult(
             request_id="r1",
             validity=Validity.MEASUREMENT_FAILED,
             failure_class=FailureClass.INFRA,
-            failure_reason=self.reason,
+            failure_reason=self.reasons[min(job.attempt, len(self.reasons)) - 1],
             sandbox=SandboxFacts(sandbox_id=f"s{job.attempt}", node_name=f"n{job.attempt}"),
         )
 
@@ -80,15 +110,71 @@ def _job() -> TestJob:
     return TestJob(request=request, attempt=1, avoid_nodes=(), priority=0, sandbox_priority=0)
 
 
-async def _run(reason: str) -> tuple[TestResult, _ScriptedExecutor, list[str]]:
+def _backoff(time: _FakeTime, latest: float | None = None) -> InfraBackoff:
+    return InfraBackoff(INFRA_BACKOFF_SECONDS, lambda _request: latest, clock=time, sleep=time.sleep)
+
+
+async def _run(
+    reason: str | tuple[str, ...], latest: float | None = None
+) -> tuple[TestResult, _ScriptedExecutor, list[str]]:
     executor = _ScriptedExecutor(reason)
     reported: list[str] = []
 
     async def on_node_failure(node: str, _reason: str, _reproduced: bool) -> None:
         reported.append(node)
 
-    runner = AttemptRunner(executor, avoid=frozenset, on_node_failure=on_node_failure, max_infra_retries=3)
+    backoff = _backoff(executor.clock, latest)
+    runner = AttemptRunner(
+        executor, avoid=frozenset, on_node_failure=on_node_failure, max_infra_retries=3, backoff=backoff
+    )
     return await runner.run(_job()), executor, reported
+
+
+@pytest.mark.parametrize(
+    "reason",
+    [FOREIGN_REASON, START_TIMEOUT_REASON, CAPACITY_REASON, f"{RUNNER_LOST}: the sandbox is gone"],
+    ids=["busy_cards", "no_sandbox_in_time", "no_capacity", "node_blameless"],
+)
+async def test_retries_after_a_failure_that_is_not_the_node_s_wait_longer_each_time_before_they_start(reason) -> None:
+    result, executor, _ = await _run(reason)
+    assert len(executor.jobs) == 4 and result.validity is Validity.MEASUREMENT_FAILED
+    assert executor.clock.waits == [60.0, 120.0, 240.0]
+    gaps = [later - earlier for earlier, later in zip(executor.started, executor.started[1:])]
+    assert gaps == [60.0, 120.0, 240.0], "each retry starts only after its wait"
+
+
+@pytest.mark.parametrize(
+    "reason", [PORT_REASON, DISK_FULL_REASON, HUNG_REASON, "pull failed"], ids=["port", "disk", "hung", "unnamed"]
+)
+async def test_a_retry_after_a_failure_held_against_its_node_goes_at_once_elsewhere(reason) -> None:
+    result, executor, reported = await _run(reason)
+    assert len(executor.jobs) == 4 and result.validity is Validity.MEASUREMENT_FAILED
+    assert executor.clock.waits == [], "the avoid set already moves the retry; a wait would only idle its slot"
+    assert executor.started == [1000.0] * 4
+    assert reported == ["n1", "n2", "n3", "n4"], "each node was held to its failure"
+    assert [job.avoid_nodes for job in executor.jobs][1:] == [("n1",), ("n1", "n2"), ("n1", "n2", "n3")]
+
+
+async def test_in_a_mixed_run_only_the_retries_after_a_failure_that_is_not_the_node_s_wait() -> None:
+    result, executor, reported = await _run((FOREIGN_REASON, PORT_REASON, CAPACITY_REASON, PORT_REASON))
+    assert len(executor.jobs) == 4 and result.validity is Validity.MEASUREMENT_FAILED
+    assert executor.clock.waits == [60.0, 120.0], "the waits count the waiting retries only"
+    assert executor.started == [1000.0, 1060.0, 1060.0, 1180.0]
+    assert "n2" in reported and "n4" in reported
+
+
+async def test_an_infrastructure_retry_never_waits_past_the_latest_start_and_goes_at_once_after_it() -> None:
+    result, executor, _ = await _run(FOREIGN_REASON, latest=1000.0 + 100.0)
+    assert len(executor.jobs) == 4, "a retry that cannot wait still goes"
+    assert executor.clock.waits == [60.0, 40.0], "the second wait ends at the latest start, the third is none"
+    assert executor.started == [1000.0, 1060.0, 1100.0, 1100.0]
+
+
+def test_the_default_backoff_is_minutes_and_bounded() -> None:
+    backoff = InfraBackoff()
+    request = _job().request
+    assert [backoff.before(retry, request) for retry in (0, 1, 2, 3, 4)] == [0.0, 60.0, 120.0, 240.0, 240.0]
+    assert InfraBackoff(()).before(1, request) == 0.0
 
 
 async def test_an_inert_patch_is_not_retried_and_stays_an_infrastructure_failure() -> None:
@@ -132,6 +218,21 @@ async def test_a_jit_build_timeout_is_retried_once_and_not_held_against_the_node
     assert result.validity is Validity.MEASUREMENT_FAILED and result.failure_class is FailureClass.INFRA
     assert result.failure_reason == JIT_REASON
     assert reported == [], "the tables, not the node, made the server build past its watchdog"
+
+
+@pytest.mark.parametrize("reason", [INERT_REASON, JIT_REASON], ids=["unretried", "retried_once"])
+async def test_an_unretried_failure_or_a_jit_build_timeout_does_not_wait(reason) -> None:
+    _, executor, _ = await _run(reason)
+    assert executor.clock.waits == []
+
+
+def test_the_waited_names_are_the_blameless_ones_and_the_busy_cards_and_no_sandbox_ones_the_backend_reports() -> None:
+    assert WAITED_INFRA_REASONS == NODE_BLAMELESS_INFRA_REASONS | {
+        "foreign_process_on_card",
+        "runner_start_timeout",
+        "capacity_unavailable",
+    }
+    assert {FOREIGN_PROCESS_ON_CARD, RUNNER_START_TIMEOUT, CAPACITY_UNAVAILABLE} <= INFRA_ERROR_CLASSES
 
 
 #: Reasons a hosted runner can report on a failed start.
@@ -209,6 +310,7 @@ class _TimedOutExecutor(_ScriptedExecutor):
 )
 async def test_a_sweep_that_ran_out_of_time_is_not_rerun(kind, runs, validity) -> None:
     executor = _TimedOutExecutor(TEST_TIMEOUT_REASON)
+    time = _FakeTime()
     reported: list[str] = []
 
     async def on_node_failure(node: str, _reason: str, _reproduced: bool) -> None:
@@ -217,8 +319,10 @@ async def test_a_sweep_that_ran_out_of_time_is_not_rerun(kind, runs, validity) -
     job = _job()
     concs = (4, 8, 16) if kind is TestKind.SWEEP else ()
     job = replace(job, request=replace(job.request, kind=kind, concurrency=concs))
-    result = await AttemptRunner(executor, avoid=frozenset, on_node_failure=on_node_failure).run(job)
+    runner = AttemptRunner(executor, avoid=frozenset, on_node_failure=on_node_failure, backoff=_backoff(time))
+    result = await runner.run(job)
     assert len(executor.jobs) == runs and len(result.attempts) == runs
+    assert time.waits == [], "an unclear rerun does not wait"
     assert result.validity is validity and result.failure_class is FailureClass.UNCLEAR
     assert result.failure_reason == TEST_TIMEOUT_REASON
     assert reported == [], "a timeout is held against neither node"
