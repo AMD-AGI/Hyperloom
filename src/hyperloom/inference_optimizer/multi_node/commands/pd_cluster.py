@@ -201,10 +201,16 @@ def _forward_env() -> dict[str, str]:
 
 
 def _refresh_pods(state: dict[str, Any], spec: LaunchSpec) -> None:
+    """Rebuild pod records for ``spec``; a platform-managed router is re-derived from ``service_url``, never SSH'd."""
     port = state.get("ssh_port")
     port_i = int(port) if port else None
+    platform_ips = {
+        str(pod.get("podIP"))
+        for pod in state.get("router_pods") or []
+        if isinstance(pod, dict) and pod.get("managed_by") == PLATFORM_MANAGED
+    }
     pods = pods_for(
-        [str(ip) for ip in state.get("router_pod_ips") or []],
+        [str(ip) for ip in state.get("router_pod_ips") or [] if str(ip) not in platform_ips],
         [str(ip) for ip in state.get("prefill_pod_ips") or []],
         [str(ip) for ip in state.get("decode_pod_ips") or []],
         port_i,
@@ -213,6 +219,7 @@ def _refresh_pods(state: dict[str, Any], spec: LaunchSpec) -> None:
     )
     state["pods"] = pods
     state["router_pods"] = [pod for pod in pods if pod["role"] == "router"]
+    state["router_pod_ips"] = [str(pod["podIP"]) for pod in state["router_pods"]]
     state["prefill_pods"] = [pod for pod in pods if pod["role"] == "prefill"]
     state["decode_pods"] = [pod for pod in pods if pod["role"] == "decode"]
 

@@ -476,6 +476,7 @@ def stamp_pd_cluster(state: dict[str, Any], get: Lookup) -> None:
     pods = pods_for(router, prefill, decode, port, spec, service_url=str(state.get("service_url") or ""))
     state["pods"] = pods
     state["router_pods"] = [pod for pod in pods if pod["role"] == "router"]
+    state["router_pod_ips"] = [str(pod["podIP"]) for pod in state["router_pods"]]
     state["prefill_pods"] = [pod for pod in pods if pod["role"] == "prefill"]
     state["decode_pods"] = [pod for pod in pods if pod["role"] == "decode"]
     _pin_profile_dir(state)

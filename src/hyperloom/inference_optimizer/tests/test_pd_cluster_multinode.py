@@ -147,6 +147,25 @@ def test_platform_router_is_recorded_from_the_service_url(monkeypatch: pytest.Mo
     assert "managed_by" not in handed_off[0]
 
 
+def test_platform_router_ip_is_listed_and_stays_platform_managed(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(pd_internal.socket, "gethostbyname", lambda host: "192.168.0.5")
+    env = {
+        "HYPERLOOM_MN_EXT_SSH_KEY": "/keys/id",
+        "HYPERLOOM_MN_EXT_SSH_PORT": "29000",
+        "HYPERLOOM_MN_EXT_PREFILL_IPS": "10.0.0.1",
+        "HYPERLOOM_MN_EXT_DECODE_IPS": "10.0.0.2",
+    }
+    state = {"backend": "sglangrouter", "service_url": "http://router-svc.ns:8000"}
+    pd_internal.stamp_pd_cluster(state, lambda name: env.get(name, ""))
+    assert state["router_pod_ips"] == ["192.168.0.5"]
+    assert state["router_pods"][0]["managed_by"] == "platform"
+
+    pd_cmds._refresh_pods(state, _spec(backend="sglangrouter"))
+    assert state["router_pod_ips"] == ["192.168.0.5"]
+    assert [pod.get("managed_by") for pod in state["router_pods"]] == ["platform"]
+    assert [pod["role"] for pod in pd_cmds._ordered_pods(state)] == ["prefill", "decode"]
+
+
 def test_restart_and_stop_skip_the_platform_router() -> None:
     state = {
         "pods": [
