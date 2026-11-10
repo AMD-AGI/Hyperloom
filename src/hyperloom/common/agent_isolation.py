@@ -333,7 +333,9 @@ def require_agent_isolation(*, bwrap: str | None, allow_account: bool = True) ->
     """At a hosted run's start-up: mark this process as one whose agents must be isolated, with the hosting layer's
     bubblewrap at ``bwrap`` (an absolute path; ``None`` or empty when the run has none, which refuses every launch
     bubblewrap would make) and no other, and choose now, so a host where neither tier works refuses before anything
-    runs.
+    runs. Where the account is chosen, bubblewrap is probed as well: the Ray GPU actor path never starts a specialist
+    as an account, so where bubblewrap cannot confine one either, one WARNING says that path refuses its specialists
+    and why, and the run goes on (the account isolates every other specialist).
 
     Raises:
         IsolationRefused: Neither tier works here.
@@ -341,7 +343,16 @@ def require_agent_isolation(*, bwrap: str | None, allow_account: bool = True) ->
     with _STATE.lock:
         _STATE.hosted = True
         _STATE.layer_bwrap = bwrap
-    return choose_agent_isolation(allow_account=allow_account)
+    chosen = choose_agent_isolation(allow_account=allow_account)
+    if isinstance(chosen, AccountIsolation):
+        found = _bwrap()
+        if not found.ok:
+            _log_once(
+                logging.WARNING,
+                f"specialists run as the account {chosen.run_as.user}, but {RAY_ACTOR_PATH} and bubblewrap cannot"
+                f" confine one here, so that path refuses its specialists: {'; '.join(_bwrap_reasons(found))}",
+            )
+    return chosen
 
 
 @dataclass(frozen=True)
