@@ -121,6 +121,14 @@ def _switches(section: Mapping[str, Any]) -> list[str]:
     return [] if keep is None else ["--make-before-break" if keep else "--no-make-before-break"]
 
 
+def spec_make_before_break(spec: CampaignSpec) -> bool:
+    """The operator's ``multibranch.make_before_break`` of ``spec``, on when it is not given; raises
+    :class:`HostedRefused` when it is neither true nor false."""
+
+    keep = _make_before_break(_multibranch_section(spec.multibranch))
+    return True if keep is None else keep
+
+
 def _make_before_break(section: Mapping[str, Any]) -> bool | None:
     keep = section.get("make_before_break")
     if keep is not None and not isinstance(keep, bool):
@@ -297,6 +305,7 @@ __all__ = [
     "refuse_unhosted_branches",
     "reported_stop_reason",
     "run_argv",
+    "spec_make_before_break",
     "toolbox_grant",
     "write_final_exit",
 ]
