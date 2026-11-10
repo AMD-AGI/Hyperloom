@@ -24,15 +24,10 @@ from enum import Enum
 from pathlib import Path
 
 from hyperloom_common.jsonio import read_jsonl
-from hyperloom_common.shared_storage import (
-    SHARED_FILE_MODE,
-    make_shared_dirs,
-    open_shared_append,
-    open_shared_existing,
-    shared_mode,
-)
+from hyperloom_common.shared_storage import SHARED_FILE_MODE, make_shared_dirs, open_shared_append, open_shared_existing
 from hyperloom_multibranch.contracts.blackboard.vocab import Role
 from hyperloom_multibranch.blackboard.codec import key_sorted
+from hyperloom_multibranch.blackboard.local.files import session_file_mode
 
 log = logging.getLogger(__name__)
 
@@ -188,7 +183,8 @@ def _cut_torn_tail(path: Path) -> None:
 
 def _append_line(path: Path, line: bytes, mode: int) -> None:
     """Append ``line`` whole, or put the segment back as it was when the write fails partway. A new segment has
-    ``mode`` (``664`` below shared storage): the run's next leg, maybe another account of the group, appends to it."""
+    ``mode``: ``664`` below shared storage, where the run's next leg, maybe another account of the group, appends to
+    it, owner-only anywhere else."""
 
     fd = open_shared_append(path, mode=mode)
     try:
@@ -213,7 +209,7 @@ class SegmentWriter:
         self.path = Path(segments_dir) / f"{writer}{SEGMENT_SUFFIX}"
         self._last_seq = max((entry.seq for entry in _read_entries(self.path)), default=0) if self.path.exists() else 0
         self._ends_whole = False
-        self._mode = shared_mode(self.path, SHARED_FILE_MODE)  # judged before the directories are made
+        self._mode = session_file_mode(self.path, SHARED_FILE_MODE)  # judged before the directories are made
 
     def append(self, build: Callable[[int], Entry]) -> Entry:
         """Append the entry ``build`` makes for the next sequence number, and return it."""

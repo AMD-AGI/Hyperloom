@@ -965,6 +965,10 @@ def test_a_published_file_outside_shared_storage_keeps_the_umask_and_a_link_at_i
     assert not (tmp_path / "elsewhere.json").exists(), "nothing is written through the link"
 
 
+def _open_existing_and_close(path, *flags):
+    os.close(shared_storage.open_shared_existing(path, *flags))  # closed should it open after all
+
+
 def test_a_file_cut_in_place_is_opened_only_where_it_is_and_never_through_a_link_at_its_name(tmp_path):
     shared = _setgid_parent(tmp_path / "shared")
     (shared / "log.jsonl").write_bytes(b"whole\ntorn")
@@ -976,9 +980,9 @@ def test_a_file_cut_in_place_is_opened_only_where_it_is_and_never_through_a_link
     finally:
         os.close(descriptor)
     with pytest.raises(OSError) as refused:
-        shared_storage.open_shared_existing(shared / "link.jsonl")
+        _open_existing_and_close(shared / "link.jsonl")
     with pytest.raises(FileNotFoundError):
-        shared_storage.open_shared_existing(shared / "missing.jsonl", os.O_RDWR | os.O_CREAT)
+        _open_existing_and_close(shared / "missing.jsonl", os.O_RDWR | os.O_CREAT)
 
     assert refused.value.errno == errno.ELOOP
     assert (shared / "log.jsonl").read_bytes() == b"whole\n"

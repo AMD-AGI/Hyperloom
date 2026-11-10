@@ -3,8 +3,9 @@
 
 """What the blackboard leaves for the run's next leg, which may be another account of the group: below storage set up
 to be shared (setgid, group-writable, closed to others) the segments and logs that leg appends to are ``664`` and
-the files it reads ``644``, in ``2775`` folders, whatever the umask of the leg that made them; anywhere else as private
-as the umask leaves them. No append follows a link a member of the group put at the name.
+the files it reads ``644``, in ``2775`` folders, whatever the umask of the leg that made them. Anywhere else every
+participant runs as the session's user: a segment and a published file stay owner-only, as they always were, and the
+logs and folders are what the umask leaves them. No append follows a link a member of the group put at the name.
 
 The test process's umask keeps group write off what a plain create makes, so each mode below is the writer's own."""
 
@@ -64,6 +65,10 @@ def _segment(directory: Path) -> Path:
     return writer.path
 
 
+#: What stays owner-only outside shared storage (relative to the writers' root): a published file and a segment.
+_OWNER_ONLY_ELSEWHERE = (Path("claims") / "a.json", Path("segments") / f"{WRITER}.jsonl")
+
+
 def _every_writer(root: Path, snapshot: BlackboardSnapshot) -> dict[Path, int]:
     """Run each blackboard writer of the session's shared state once below ``root``; what each made, and its mode
     below shared storage."""
@@ -97,11 +102,12 @@ def test_below_shared_storage_every_writer_leaves_its_file_and_folder_to_the_gro
 
 
 @pytest.mark.parametrize("parent_mode", [0o755, 0o2755, 0o2777, 0o1777], ids=oct)
-def test_outside_shared_storage_every_writer_keeps_what_it_makes_as_private_as_the_umask(
+def test_outside_shared_storage_every_writer_keeps_what_it_makes_as_private_as_before(
     tmp_path: Path, snapshot: BlackboardSnapshot, parent_mode: int
 ) -> None:
-    """A directory that is not setgid, group-writable and closed to others is no shared storage: there each writer
-    makes what a plain create under this umask would, never widening it."""
+    """A directory that is not setgid, group-writable and closed to others is no shared storage: there a published
+    file and a segment are owner-only, and each other writer makes what a plain create under this umask would, never
+    widening it."""
     root = tmp_path / "root"
     root.mkdir()
     root.chmod(parent_mode)
@@ -109,9 +115,12 @@ def test_outside_shared_storage_every_writer_keeps_what_it_makes_as_private_as_t
     made = _every_writer(root, snapshot)
 
     umask = _umask()
+    owner_only = {root / name for name in _OWNER_ONLY_ELSEWHERE}
+    assert owner_only <= made.keys()
     for path, shared_mode in made.items():
         inherited = parent_mode & stat.S_ISGID if path.is_dir() else 0  # mkdir keeps a setgid parent's bit
-        assert _mode(path) == shared_mode & ~umask & 0o777 | inherited, (path, oct(_mode(path)))
+        expected = 0o600 if path in owner_only else shared_mode & ~umask & 0o777 | inherited
+        assert _mode(path) == expected, (path, oct(_mode(path)))
 
 
 def test_a_segment_already_there_is_appended_to_not_replaced(shared: Path) -> None:
