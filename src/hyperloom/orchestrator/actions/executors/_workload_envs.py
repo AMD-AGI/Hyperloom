@@ -32,7 +32,9 @@ from hyperloom.common.benchmark_config import BenchmarkPoint, read_benchmark_poi
 from hyperloom.common.outside_facts import ENV_EVAL_LIMIT, ENV_EVAL_TASKS, ENV_EVAL_TOKENIZED_REQUESTS
 from hyperloom.common.agentx_workload import is_agentx_client_key, pin_mlperf_round_concurrency
 from hyperloom.common.visible_devices import mask_tokens
+from hyperloom.common.session_files import shared_options
 from hyperloom_common.coerce import to_str_list
+from hyperloom_common.io import atomic_write_text
 from hyperloom.inference_optimizer.runtime_environment import prepend_launch_path
 from hyperloom_common.gpu_identity import AMD_GPU_BOARDS
 from hyperloom.common.agentx_objective import AgentXObjective
@@ -1450,10 +1452,8 @@ def materialize_config_with_envs(
         prepend_launch_path(envs, "PYTHONPATH", str(window.patched_copy))
     _drop_benchmark_credentials(envs)
     seal_server_argv(envs, bench.get("framework"))
-    output_dir.mkdir(parents=True, exist_ok=True)
     materialized = output_dir / options.out_name
-    with materialized.open("w", encoding="utf-8") as f:
-        yaml.safe_dump(cfg, f, sort_keys=False)
+    atomic_write_text(materialized, yaml.safe_dump(cfg, sort_keys=False), options=shared_options(cfg))
     return materialized
 
 

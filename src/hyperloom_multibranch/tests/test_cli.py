@@ -62,6 +62,8 @@ from hyperloom.measure import points
 from hyperloom.measure.compile import PackageBase
 from hyperloom.measure.points import PointError
 from hyperloom.measure.runner.cache_build import CacheBuildError
+from hyperloom.orchestrator.state.base_launch import frozen_base
+from hyperloom.orchestrator.state.shared_state import SharedState
 from hyperloom_multibranch import cli
 from hyperloom_multibranch.blackboard import LocalBlackboard
 from hyperloom_multibranch.contracts.blackboard import INTEGRATION_BRANCH, Role, Writer
@@ -2281,6 +2283,92 @@ def test_a_restart_onto_another_build_closes_the_session_before_its_baseline_and
 
     assert [kind for kind, _ in restart.calls] == ["final-only", "run"], "a fix rolled out reaches the run it is for"
     assert host.exit_document() == {"final": True, "returncode": 0, "stop_reason": "time_exhausted"}
+
+
+#: The ``final-only`` a restart closes a session with, before a test puts a stand-in in its place.
+CLOSING = cli.final_only
+
+
+@pytest.mark.usefixtures("ready_environment")
+@pytest.mark.parametrize("damage", ["another-accounts", "not-json"])
+def test_a_restart_that_cannot_read_the_session_before_its_baseline_leaves_it_and_starts_a_new_one(
+    host: Host,
+    restart: Restart,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+    damage: str,
+) -> None:
+    layout = _killed_in_prelude(tmp_path / "MB-20260101T000000Z-0123abcd")
+    state = SharedState.state_path(layout.toolbox)
+    state.parent.mkdir(parents=True, exist_ok=True)
+    state.write_text("{" if damage == "not-json" else "{}", encoding="utf-8")
+    if (
+        damage == "another-accounts"
+    ):  # the owner-only state.json another account of the group left, as the OS refuses it
+        reads = Path.read_text
+
+        def refused(path: Path, *args: object, **kwargs: object) -> str:
+            if path == state:
+                raise PermissionError(errno.EACCES, "Permission denied", str(path))
+            return reads(path, *args, **kwargs)
+
+        monkeypatch.setattr(Path, "read_text", refused)
+    (host.state_dir / "session.json").write_text(json.dumps({"session_dir": str(layout.root)}), encoding="utf-8")
+    left = {path: path.read_bytes() for path in layout.root.rglob("*") if path.is_file() and path != state}
+
+    async def closing(persisted: PersistedRun, peer_factory: PeerFactory, services: object, leg: object) -> int:
+        frozen_base(persisted.layout.toolbox)  # what building the close's peers reads first
+        raise AssertionError("the session could be read")
+
+    starts = cli.run_session
+
+    def run_session(*args: object) -> int:
+        assert not (host.state_dir / "exit.json").exists(), "the run is not over when the new session starts"
+        return starts(*args)
+
+    monkeypatch.setattr(cli, "final_only", CLOSING)
+    monkeypatch.setattr(cli, "_run_leg", closing)
+    monkeypatch.setattr(cli, "run_session", run_session)
+
+    with caplog.at_level(logging.WARNING):
+        assert cli.main(["hosted", "run"]) == 0
+
+    assert [kind for kind, _ in restart.calls] == ["run"], "the run goes on with a new session"
+    session = Path(json.loads((host.state_dir / "session.json").read_text(encoding="utf-8"))["session_dir"])
+    assert session != layout.root and session.parent.parent == host.workspace
+    assert host.exit_document() == {"final": True, "returncode": 0, "stop_reason": "time_exhausted"}
+    after = {path: path.read_bytes() for path in layout.root.rglob("*") if path.is_file() and path != state}
+    assert after == left and not layout.report.exists(), "the session that could not be read is left as it was"
+    [warning] = [record.getMessage() for record in caplog.records if "cannot read" in record.getMessage()]
+    assert str(layout.root) in warning
+    assert (
+        (f"{state}" in warning and "Permission denied" in warning)
+        if damage == "another-accounts"
+        else ("JSONDecodeError" in warning)
+    )
+
+
+@pytest.mark.usefixtures("ready_environment")
+def test_a_restart_refused_a_file_outside_the_session_it_closes_ends_the_run(
+    host: Host, restart: Restart, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    layout = _killed_in_prelude(tmp_path / "MB-20260101T000000Z-0123abcd")
+    (host.state_dir / "session.json").write_text(json.dumps({"session_dir": str(layout.root)}), encoding="utf-8")
+    outside = tmp_path / "workspace-cache" / "index.json"
+
+    async def closing(persisted: PersistedRun, peer_factory: PeerFactory, services: object, leg: object) -> int:
+        raise PermissionError(errno.EACCES, "Permission denied", str(outside))
+
+    monkeypatch.setattr(cli, "final_only", CLOSING)
+    monkeypatch.setattr(cli, "_run_leg", closing)
+
+    assert cli.main(["hosted", "run"]) == cli.EXIT_FAILED
+
+    assert restart.calls == [], "no new session starts over a file that is not the earlier session's"
+    document = host.exit_document()
+    assert document["final"] is True and document["returncode"] == cli.EXIT_FAILED
+    assert str(outside) in document["error"]
 
 
 @pytest.mark.usefixtures("ready_environment")
