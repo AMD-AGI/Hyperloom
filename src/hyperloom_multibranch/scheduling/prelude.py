@@ -23,6 +23,8 @@ and gives none either. Each replay is checked against the toolbox's acceptance o
 refuses stays a lead with the refusal named in place of the replay, unless the champion was built on another image,
 whose launch config alone is checked in its place, and one acceptance has not answered for when
 :data:`PREFLIGHT_SECONDS` run out stays offered, its lead saying it was not checked.
+
+A resumed session runs no PRELUDE: :meth:`Prelude.landed` reads back what its first one recorded.
 """
 
 from __future__ import annotations
@@ -35,6 +37,7 @@ from types import SimpleNamespace
 from typing import TYPE_CHECKING, Any
 
 from hyperloom_common.io import SHARED, atomic_write_json
+from hyperloom_common.jsonio import read_jsonl
 from hyperloom.common.outside_facts.rule_pack import rule_pack_identity
 from hyperloom.common.perf_metric import GRADED_OUTPUT
 from hyperloom.contracts.measurement import Purpose, TestKind, TestResult
@@ -186,6 +189,20 @@ class Prelude:
         await together(baseline, profiled, replayed)
         leads, start = replayed.result().warm_leads, replayed.result().start_commit
         return PreludeResult(opened.commit, start, opened.profile, leads, baseline.result(), profiled.result())
+
+    async def landed(self) -> PreludeResult:
+        """What the PRELUDE an earlier run of this session recorded, for a resumed session that runs none: the root of
+        the baseline, the profile on the blackboard, the longest root test and the root's profile job its decisions
+        name, and the integration head as the commit EXPLORE opens on. Its warm-start leads are not read again."""
+
+        root = (await self._blackboard.baseline()).root_commit
+        profile = await self._blackboard.session_profile()
+        start = await self._repo.head(INTEGRATION_BRANCH)
+        rows = read_jsonl(self._layout.decisions)
+        baseline = next(row for row in rows if row["reason"] == BASELINE_ESTABLISHED)
+        profiled = next((row for row in rows if row["kind"] == DecisionKind.PROFILE.value), None)
+        job = "" if profiled is None else str(profiled["detail"].get("job_id") or "")
+        return PreludeResult(root, start, profile, (), float(baseline["detail"]["longest_test_seconds"]), job)
 
     async def _profile_root_commit(self, root: str) -> str:
         """Profile ``root`` and record how; the job that analysed the profile, ``""`` when none did."""
