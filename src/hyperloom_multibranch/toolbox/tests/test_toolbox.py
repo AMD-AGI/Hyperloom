@@ -251,10 +251,17 @@ async def test_infra_failures_retry_up_to_the_limit_then_measurement_failed_is_s
 
 
 @pytest.mark.parametrize(
-    "deadline_in, waits", [(None, [60.0, 120.0, 240.0]), (100.0, [60.0, 40.0])], ids=["no_deadline", "deadline"]
+    "reason, deadline_in, waits",
+    [
+        ("foreign_process_on_card: card 3 held by pid 4242", None, [60.0, 120.0, 240.0]),
+        ("foreign_process_on_card: card 3 held by pid 4242", 100.0, [60.0, 40.0]),
+        ("runner_start_timeout", None, [60.0, 120.0, 240.0]),
+        ("pull failed", None, []),
+    ],
+    ids=["busy_cards_no_deadline", "busy_cards_deadline", "no_sandbox", "node_s_failure"],
 )
-async def test_infra_retries_wait_their_backoff_and_never_past_the_branch_s_exploration_end(
-    tmp_path: Path, deadline_in: float | None, waits: list[float]
+async def test_infra_retries_wait_their_backoff_only_when_not_the_node_s_and_never_past_the_exploration_end(
+    tmp_path: Path, reason: str, deadline_in: float | None, waits: list[float]
 ) -> None:
     from hyperloom_multibranch.blackboard.tests.factories import FakeClock
     from hyperloom_multibranch.toolbox.attempts import INFRA_BACKOFF_SECONDS
@@ -267,7 +274,7 @@ async def test_infra_retries_wait_their_backoff_and_never_past_the_branch_s_expl
 
     deadline = {} if deadline_in is None else {"b1": clock.now + deadline_in}
     nodes = iter(["n1", "n2", "n3", "n4"])
-    executor = ScriptedExecutor([lambda j: failed(j, FailureClass.INFRA, next(nodes), "pull failed")])
+    executor = ScriptedExecutor([lambda j: failed(j, FailureClass.INFRA, next(nodes), reason)])
     policy = QueuePolicy(branch_deadline=deadline)
     rig = build(
         tmp_path, executor=executor, clock=clock, policy=policy, infra_backoff=INFRA_BACKOFF_SECONDS, sleep=sleep
