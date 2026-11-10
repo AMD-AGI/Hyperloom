@@ -489,7 +489,8 @@ def tree_from_snapshot(
     cross_image: Collection[str] = (),
 ) -> SearchTree:
     """The session's search tree, its gains read off ``metric``; the budget defaults to the time the blackboard spans.
-    ``cross_image`` names the Recipe KB champions built on another image than the session's, by canonical id."""
+    ``cross_image`` names the Recipe KB champions built on another image than the session's, by canonical id. Its best
+    gain leaves out a commit that holds a change a landed retraction undid and not the retraction."""
 
     profile, baseline = snapshot.profile, snapshot.baseline
     if profile is None or baseline is None:
@@ -508,12 +509,20 @@ def tree_from_snapshot(
         snapshot, metric, anchor, start, tests, cross_image=frozenset(cross_image), merge_failed=failed
     )
     ceiling = profile.roofline_ceiling.get(metric)
+    unretracted = snapshot.unretracted()
     return SearchTree(
         session_id=profile.session_id,
         source=SOURCE_BLACKBOARD,
         task=task_conditions(profile),
         budget_seconds=max(0.0, snapshot.taken_at - start) if budget_seconds is None else budget_seconds,
-        final_gain_pct=max((reading.gain(commit.commit_id) for commit in snapshot.lineage.commits), default=0.0),
+        final_gain_pct=max(
+            (
+                reading.gain(commit.commit_id)
+                for commit in snapshot.lineage.commits
+                if commit.commit_id not in unretracted
+            ),
+            default=0.0,
+        ),
         branches=tuple(reading.branch(node) for node in snapshot.lineage.branches),
         noise=MeasurementNoise(
             dispersion_pct=baseline.dispersion_pct.get(metric),
