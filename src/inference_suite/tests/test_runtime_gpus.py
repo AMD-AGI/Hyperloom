@@ -1,0 +1,243 @@
+# SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
+# SPDX-License-Identifier: MIT
+
+"""Contract of the pre-boot GPU check: a round's GPUs must be visible to ``amd-smi`` and no process may have memory
+resident on them beyond the 1 GiB a process that merely opened the card may keep there (an entry that reports no
+memory is a holder), and a refusal names each GPU and why.
+
+A round's GPUs are ``HIP_VISIBLE_DEVICES`` numbers, which ROCm assigns in KFD node order while ``amd-smi`` indexes cards
+in PCI order, so the check must translate one into the other.
+"""
+
+from __future__ import annotations
+
+import pytest
+
+from hyperloom_common.amd_smi import AmdSmiError
+from inference_suite.contracts.config import Deadlines
+from inference_suite.contracts.report import FailedStep
+from inference_suite.runtime import gpus
+from inference_suite.runtime.watch import RoundGate, Stop
+
+_IDLE = [{"process_info": "No running processes detected"}]
+#: An MI355X board's amd-smi indices in ROCm order: HIP GPU 0 is amd-smi card 3, HIP GPU 1 is amd-smi card 0, ...
+_MI355X_ROCM_ORDER = [3, 0, 2, 1, 7, 4, 6, 5]
+
+
+class _Clock:
+    """Stands in for ``time`` in :mod:`inference_suite.runtime.gpus`: sleeping advances it at once."""
+
+    def __init__(self) -> None:
+        self.now = 0.0
+        self.slept = 0.0
+
+    def monotonic(self) -> float:
+        return self.now
+
+    def sleep(self, seconds: float) -> None:
+        self.now += seconds
+        self.slept += seconds
+
+
+@pytest.fixture(autouse=True)
+def clock(monkeypatch) -> _Clock:
+    fake = _Clock()
+    monkeypatch.setattr(gpus, "time", fake)
+    return fake
+
+
+def _gate(cancel=lambda: "") -> RoundGate:
+    return RoundGate(Deadlines(boot_sec=600, round_sec=3600, eval_sec=600, silence_sec=600), cancel, 0.0)
+
+
+def _refused(round_gpus: tuple[int, ...]) -> str | None:
+    """The detail of the GPU refusal :func:`gpus.await_free_gpus` ends with, or ``None`` once the GPUs are free."""
+    stop = gpus.await_free_gpus(round_gpus, _gate())
+    if stop is None:
+        return None
+    assert stop.step is FailedStep.GPUS_UNAVAILABLE
+    return stop.detail
+
+
+def _host(busy: dict[int, list[dict]], count: int = 8) -> list[dict]:
+    """``amd-smi process`` rows, keyed by amd-smi index."""
+    return [{"gpu": gpu, "process_list": busy.get(gpu, _IDLE)} for gpu in range(count)]
+
+
+def _answer(monkeypatch: pytest.MonkeyPatch, payload: object, order: list[int] | None = None) -> list[tuple[str, ...]]:
+    asked: list[tuple[str, ...]] = []
+
+    def read(*args: str) -> object:
+        asked.append(args)
+        if isinstance(payload, Exception):
+            raise payload
+        return payload
+
+    monkeypatch.setattr(gpus, "read_amd_smi_json", read)
+    rocm_order = list(range(8)) if order is None else order
+    monkeypatch.setattr(gpus, "gpus_in_rocm_order", lambda: list(rocm_order))
+    return asked
+
+
+def test_visible_idle_gpus_pass(monkeypatch):
+    asked = _answer(monkeypatch, _host({5: [{"process_info": {"name": "python3", "pid": 77}}]}))
+    assert _refused((0, 1, 2, 3)) is None
+    assert asked == [("process",)]
+
+
+@pytest.mark.parametrize(
+    "entry",
+    [{"process_info": {"name": "python3", "pid": 4242}}, {"name": "python3", "pid": 4242}],
+    ids=["nested", "flat"],
+)
+def test_a_gpu_another_process_holds_is_named_with_its_holder(monkeypatch, entry):
+    _answer(monkeypatch, {"gpu_data": _host({1: [entry]})})
+    assert _refused((0, 1)) == "GPU 1 (amd-smi card 1): held by pid 4242 (python3)"
+
+
+def _opened(pid: int, vram: int) -> dict:
+    """An ``amd-smi process --json`` entry of ``pid`` with ``vram`` bytes resident on the card."""
+    memory = {key: {"value": 0, "unit": "B"} for key in ("gtt_mem", "cpu_mem")}
+    memory["vram_mem"] = {"value": vram, "unit": "B"}
+    return {"process_info": {"name": "python3", "pid": pid, "memory_usage": memory}}
+
+
+def test_a_process_listed_on_every_card_holds_only_the_one_it_has_memory_on(monkeypatch):
+    # A HIP process with no device mask opens every card: amd-smi lists it on all of them, with memory on one.
+    held = 7  # amd-smi card 7 is HIP GPU 4 on an MI355X board
+    _answer(
+        monkeypatch,
+        _host({card: [_opened(4242, 4 << 30 if card == held else 0)] for card in range(8)}),
+        _MI355X_ROCM_ORDER,
+    )
+
+    assert _refused((3, 5, 6, 7)) is None
+    assert _refused((4,)) == "GPU 4 (amd-smi card 7): held by pid 4242 (python3)"
+
+
+def test_a_process_that_only_opened_a_card_does_not_hold_it(monkeypatch):
+    # Recorded per-card drm-memory-vram: an orchestrator masked to card 3 and a scheduler masked to cards 4-7 keep
+    # 36-52 KiB on every card, and a server masked to card 5 keeps 1.7 MiB on the cards it does not use.
+    kib = 1 << 10
+    _answer(
+        monkeypatch,
+        _host(
+            {
+                card: [
+                    _opened(1822180, 52 * kib if card >= 4 else 48 * kib),
+                    _opened(2608305, 52 * kib if card == 3 else 36 * kib),
+                    _opened(2768962, 247_247_288 * kib if card == 5 else 1724 * kib),
+                ]
+                for card in range(8)
+            }
+        ),
+    )
+
+    assert _refused((4, 6, 7)) is None
+    assert _refused((5,)) == "GPU 5 (amd-smi card 5): held by pid 2768962 (python3)"
+
+
+@pytest.mark.parametrize(("vram", "held"), [(1 << 30, False), ((1 << 30) + 1, True)])
+def test_a_card_is_held_only_above_one_gib_resident(monkeypatch, vram, held):
+    # Up to 1 GiB leaves room for a runtime that maps larger staging buffers on a card it does not serve on.
+    _answer(monkeypatch, _host({1: [_opened(4242, vram)]}))
+    expected = "GPU 1 (amd-smi card 1): held by pid 4242 (python3)" if held else None
+    assert _refused((1,)) == expected
+
+
+def test_a_gpu_the_host_does_not_have_is_not_visible(monkeypatch):
+    _answer(monkeypatch, _host({2: [{"process_info": {"name": "vllm", "pid": 9}}]}, count=4), order=[0, 1, 2, 3])
+    assert _refused((2, 6)) == (
+        "GPU 2 (amd-smi card 2): held by pid 9 (vllm); GPU 6: not visible (the host has GPUs 0-3)"
+    )
+
+
+def test_a_held_card_is_found_by_its_rocm_number_not_its_amd_smi_index(monkeypatch):
+    # amd-smi card 0 is HIP GPU 1; amd-smi card 6 is HIP GPU 6.
+    _answer(monkeypatch, _host({0: [{"name": "other", "pid": 5}], 6: [{"name": "vllm", "pid": 6}]}), _MI355X_ROCM_ORDER)
+    assert _refused((0, 2, 3)) is None
+    assert _refused((0, 1)) == "GPU 1 (amd-smi card 0): held by pid 5 (other)"
+    assert _refused((4, 5, 6, 7)) == "GPU 6 (amd-smi card 6): held by pid 6 (vllm)"
+
+
+def test_a_card_amd_smi_process_omits_is_not_visible(monkeypatch):
+    _answer(monkeypatch, _host({}, count=7), _MI355X_ROCM_ORDER)
+    assert _refused((4,)) == "GPU 4 (amd-smi card 7): not listed by amd-smi process"
+
+
+def test_a_host_amd_smi_cannot_read_refuses_rather_than_assuming_free(monkeypatch):
+    _answer(monkeypatch, AmdSmiError("amd-smi process could not run: No such file"))
+    assert _refused((0,)) == "GPUs 0 cannot be checked: amd-smi process could not run: No such file"
+
+
+def test_a_host_whose_rocm_order_is_unknown_refuses(monkeypatch):
+    _answer(monkeypatch, _host({}))
+
+    def unknown() -> list[int]:
+        raise AmdSmiError("amd-smi list reports a card without its KFD node, so its ROCm number is unknown")
+
+    monkeypatch.setattr(gpus, "gpus_in_rocm_order", unknown)
+    assert _refused((0, 1)) == (
+        "GPUs 0, 1 cannot be checked: amd-smi list reports a card without its KFD node, so its ROCm number is unknown"
+    )
+
+
+_HELD = {1: [_opened(4242, 8 << 30)]}
+_HOLDER = "GPU 1 (amd-smi card 1): held by pid 4242 (python3)"
+
+
+def _readings(monkeypatch: pytest.MonkeyPatch, payloads: list[object]) -> list[float]:
+    """Answer ``amd-smi process`` with ``payloads`` in turn, the last one for good; return when each was read."""
+    read_at: list[float] = []
+    monkeypatch.setattr(gpus, "gpus_in_rocm_order", lambda: list(range(8)))
+
+    def read(*_args: str) -> object:
+        read_at.append(gpus.time.monotonic())
+        return payloads[min(len(read_at), len(payloads)) - 1]
+
+    monkeypatch.setattr(gpus, "read_amd_smi_json", read)
+    return read_at
+
+
+def test_a_holder_that_exits_within_the_release_window_is_waited_out(monkeypatch, clock):
+    # A torn-down server's ranks stay <defunct> with memory listed for ~25 s after the round that ran them ended.
+    read_at = _readings(monkeypatch, [_host(_HELD), _host(_HELD), _host({})])
+
+    assert gpus.await_free_gpus((0, 1), _gate()) is None
+    assert read_at == [0.0, gpus.RELEASE_STEP_SEC, 2 * gpus.RELEASE_STEP_SEC]
+
+
+def test_a_holder_that_outlasts_the_release_window_is_refused_with_its_name(monkeypatch, clock):
+    read_at = _readings(monkeypatch, [_host(_HELD)])
+
+    stop = gpus.await_free_gpus((0, 1), _gate())
+
+    assert stop == Stop(FailedStep.GPUS_UNAVAILABLE, _HOLDER)
+    assert read_at[-1] == pytest.approx(gpus.RELEASE_WAIT_SEC)
+    assert clock.now == pytest.approx(gpus.RELEASE_WAIT_SEC)
+
+
+@pytest.mark.parametrize(
+    ("payload", "cards", "detail"),
+    [
+        (_host(_HELD, count=4), 4, f"{_HOLDER}; GPU 6: not visible (the host has GPUs 0-3)"),
+        (_host(_HELD, count=6), 8, f"{_HOLDER}; GPU 6 (amd-smi card 6): not listed by amd-smi process"),
+        (AmdSmiError("amd-smi process timed out"), 8, "GPUs 1, 6 cannot be checked: amd-smi process timed out"),
+    ],
+    ids=["not-visible", "not-listed", "amd-smi-error"],
+)
+def test_a_gpu_no_wait_can_free_is_refused_at_once(monkeypatch, clock, payload, cards, detail):
+    _answer(monkeypatch, payload, list(range(cards)))
+
+    assert gpus.await_free_gpus((1, 6), _gate()) == Stop(FailedStep.GPUS_UNAVAILABLE, detail)
+    assert clock.slept == 0.0
+
+
+def test_a_cancel_during_the_wait_stops_it_at_the_next_poll(monkeypatch, clock):
+    _readings(monkeypatch, [_host(_HELD)])
+    cancel_at = gpus.RELEASE_STEP_SEC + 1.0
+
+    stop = gpus.await_free_gpus((1,), _gate(lambda: "received SIGTERM" if clock.now >= cancel_at else ""))
+
+    assert stop == Stop(FailedStep.CANCELLED, "received SIGTERM")
+    assert clock.now - cancel_at <= gpus.POLL_SEC
