@@ -353,7 +353,7 @@ def local_peers(host: MeasurementHost, sessions: SpecialistSessions, setup: Peer
 
     layout, workload = setup.layout, setup.workload
     _export_workload(workload, layout.toolbox, host.image.ref)
-    base = server_base(freeze_session_base(layout.toolbox, workload, "").launch)
+    base = server_base(freeze_session_base(layout.toolbox, workload).launch)
     native = native_trees(os.environ)
     repo = GitExperimentRepo(layout.repo, setup.blobs, native=native)
     canonical_dir = layout.toolbox / CANONICAL_DIR
