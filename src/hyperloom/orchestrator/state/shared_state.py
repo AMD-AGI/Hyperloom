@@ -461,6 +461,8 @@ class SharedState(_RenderMixin, GapsStateMixin, _PhaseStateMixin, _RooflineState
     # The COLD round above from the server-ready marker onward (benchmark and accuracy eval), and that eval's own time.
     baseline_post_ready_runtime_sec: float = 0.0
     baseline_eval_runtime_sec: float = 0.0
+    # Wall-clock of the slowest roofline (profile + TraceLens) this session finished; CLOSE sizes its own from it.
+    roofline_runtime_sec: float = 0.0
     current_best: dict[str, Any] = field(default_factory=dict)
     # Immutable measurement evidence captured with the current-best promotion.
     current_best_measurement: dict[str, Any] = field(default_factory=dict)
@@ -717,9 +719,7 @@ class SharedState(_RenderMixin, GapsStateMixin, _PhaseStateMixin, _RooflineState
     kernel_integrate_attempts: dict[str, Any] = field(default_factory=dict)
     # Crash-safe stack-validation checkpoints (SWEEP-entry combo E2E).
     pending_stack_validation_result: dict[str, Any] = field(default_factory=dict)
-    pending_stack_validation_apply_results: list[dict[str, Any]] = field(
-        default_factory=list,
-    )
+    pending_stack_validation_apply_results: list[dict[str, Any]] = field(default_factory=list)
     rejected_kernel_patches: list[dict[str, Any]] = field(default_factory=list)
     # Kernel ids with no remaining automated path (from REVERTs + exhausted integrate attempts).
     rejected_kernel_ids: list[str] = field(default_factory=list)

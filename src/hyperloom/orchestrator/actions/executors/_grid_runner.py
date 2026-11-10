@@ -13,13 +13,14 @@ import re
 import shutil
 import subprocess
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from enum import Enum, auto
 from pathlib import Path
 from typing import Any, Callable, NamedTuple, NoReturn
 
 import yaml
 
+from hyperloom.common.deadline import Deadline
 from hyperloom_common.env import env_flag, is_truthy
 from hyperloom.common.perf_metric import GRADED_INTVTY_P50_CHECKPOINT, constraint_fields
 from hyperloom.common.env_safety import (
@@ -34,6 +35,7 @@ from ...phases import machine_state as _phase_state
 from hyperloom.inference_optimizer.trace.task_progress import heartbeat_while_output_flows, report_progress
 from ..stop_attribution import (
     ORCHESTRATOR_CANCELLED_CLASS,
+    PHASE_TIME_EXHAUSTED_CLASS,
     SESSION_TIME_EXHAUSTED_CLASS,
     STOPPED_BY_THE_RUN,
     StoppedByTheRun,
@@ -416,13 +418,25 @@ class GridLaunch:
 
 @dataclass(frozen=True)
 class GridStop:
-    """When a grid must stop: session deadline and owner, a variant's expected cost, failure policy, AgentX checkpoint."""
+    """When a grid must stop: session deadline and owner, a variant's expected cost, failure policy, AgentX checkpoint.
+
+    ``phase_deadline`` bounds only a discarded warmup; a measured round completes, as a phase change awaits booking."""
 
     session_deadline_sec: float | None = None
     variant_expected_sec: float | None = None
     deadline_stop: StoppedByTheRun = STOPPED_BY_THE_RUN[SESSION_TIME_EXHAUSTED_CLASS]
     keep_going_on_failure: bool = True
     checkpoint: AgentxCheckpoint | None = None
+    phase_deadline: Deadline | None = None
+
+    def for_warmup(self) -> GridStop:
+        """This stop with the phase deadline and its owner in place of the session's when the phase ends first."""
+        phase = self.phase_deadline
+        if phase is None or (self.session_deadline_sec is not None and self.session_deadline_sec <= phase.at):
+            return self
+        return replace(
+            self, session_deadline_sec=phase.at, deadline_stop=STOPPED_BY_THE_RUN[PHASE_TIME_EXHAUSTED_CLASS]
+        )
 
 
 @dataclass(frozen=True)
@@ -853,11 +867,7 @@ def _abort_on_round_stop(
 
 def _abandon_rest_of_grid(run: _GridRun, at: _VariantSlot) -> NoReturn:
     stop = run.stop.deadline_stop
-    raise _VariantAborted(
-        _not_run_skip_result(at.variant, stop),
-        halt=_Halt.STOP,
-        abandoned=stop,
-    )
+    raise _VariantAborted(_not_run_skip_result(at.variant, stop), halt=_Halt.STOP, abandoned=stop)
 
 
 def _warn_budget_cannot_admit(run: _GridRun, idx: int, *, rounds_left: int, spent_on: str) -> bool:
@@ -1204,15 +1214,8 @@ async def _restart_multi_node_server(run: _GridRun, at: _VariantSlot, rounds: _V
             unset_env=unset_envs,
         )
     except ServerRestartFailed as exc:
-        log.warning(
-            "grid_runner: variant %s aborted: mn_server_restart_failed: %s",
-            _variant_tag(run, at),
-            exc,
-        )
-        _abort_variant(
-            at,
-            _VariantFailure("mn_server_restart_failed", str(exc), f"mn_server_restart_failed: {exc}"),
-        )
+        log.warning("grid_runner: variant %s aborted: mn_server_restart_failed: %s", _variant_tag(run, at), exc)
+        _abort_variant(at, _VariantFailure("mn_server_restart_failed", str(exc), f"mn_server_restart_failed: {exc}"))
 
 
 async def _run_multi_node_warmup(run: _GridRun, at: _VariantSlot, rounds: _VariantRounds) -> None:
@@ -1240,11 +1243,7 @@ async def _run_multi_node_warmup(run: _GridRun, at: _VariantSlot, rounds: _Varia
             warmup=True,
         ),
     )
-    log.info(
-        "grid_runner: MN warmup pass done (discarded) %s rc=%s",
-        _variant_tag(run, at),
-        proc.returncode,
-    )
+    log.info("grid_runner: MN warmup pass done (discarded) %s rc=%s", _variant_tag(run, at), proc.returncode)
     stopped = stopped_by_the_run(proc.returncode)
     if stopped is not None:
         survivors = _teardown_variant_server(at.path, rounds.lifecycle if rounds.auto_warmup else None)
@@ -1604,7 +1603,8 @@ async def _measure_variant(run: _GridRun, at: _VariantSlot) -> VariantResult:
     # below publishes the cap this variant's rounds were held to, and every row built above publishes
     # none, because no round of this variant was ever granted time.
     at = at._replace(benchmark_timeout_sec=rounds.benchmark_timeout_sec)
-    warmup_tput = await _run_warmup_round(run, at, rounds) if rounds.auto_warmup else None
+    warm_run = run._replace(stop=run.stop.for_warmup())
+    warmup_tput = await _run_warmup_round(warm_run, at, rounds) if rounds.auto_warmup else None
     _log_variant_banner(run, at)
     await _restart_multi_node_server(run, at, rounds)
     # The restart above is a launch of its own and is under no cap, so the budget admitted at the top of the
@@ -1614,7 +1614,7 @@ async def _measure_variant(run: _GridRun, at: _VariantSlot) -> VariantResult:
         if rounds.auto_warmup:
             _teardown_variant_server(at.path, rounds.lifecycle)
         _abandon_rest_of_grid(run, at)
-    await _run_multi_node_warmup(run, at, rounds)
+    await _run_multi_node_warmup(warm_run, at, rounds)
     round_ = await _run_measured_round(run, at, rounds)
     _refuse_reaped_round(run, at, round_)
     workspace, artifacts = _harvest_round_workspace(run, at, round_)
