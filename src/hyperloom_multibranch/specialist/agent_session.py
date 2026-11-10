@@ -178,6 +178,10 @@ def _keep_process_log(workspace: Path) -> None:
 class Processes(Protocol):
     def adopt(self, pid: int, *, branch: str, argv: Sequence[str]) -> object: ...
 
+    def forget(self, pid: int) -> None:
+        """Drop the record of ``pid``, which its starter collected, so a later group reusing the id is never killed
+        in its place."""
+
 
 class DevLeaseHolder(Protocol):
     """The session's dev sandboxes (:class:`~hyperloom_multibranch.specialist.dev_sandbox.DevLeases`), as a branch's

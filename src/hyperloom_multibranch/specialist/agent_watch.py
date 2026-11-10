@@ -4,16 +4,16 @@
 """The watch over a session's agent sandboxes: a process of its own that ends every sandbox once the session's process
 is gone, and kills a process of a sandbox that set a device mask reaching beyond the sandbox's cards.
 
-A sandbox's processes carry :data:`MARKER`, set to the sandbox's root, whichever session or process group they moved
-to, so the marker is what the watch and every kill select by. Each command runs under a launcher
-(:mod:`hyperloom.sandbox.launcher`), a child subreaper that outlives its command, so a process that dropped the marker
-with its environment and detached by a double fork is still the launcher's descendant, and every kill takes the
-launchers' trees as well (:func:`sandbox_pids`). The session's process registers each sandbox's root and
-cards in a directory of its own (:func:`watch`) and starts the watch with the first; the watch outlives a SIGKILL of
-the session, which is how an agent kept running for an hour after its session died. The session's own kill terminates
-the watch with its other children and SIGKILLs it seconds later, so a terminated watch ends the sandboxes at once. A
-look that fails is logged and the next one tries again; a watch that ended all the same is started again by
-:func:`revive`, which an autonomous branch calls through its sandbox as it polls its agent.
+A sandbox's processes carry :data:`MARKER`, set to the sandbox's root, whichever session or process group they moved to,
+so the marker is what the watch and every kill select by. Each command runs under a launcher
+(:mod:`hyperloom.sandbox.launcher`), a child subreaper that outlives its command for as long as anything it started
+runs, so a process that dropped the marker with its environment and detached by a double fork is still the launcher's
+descendant, and every kill takes the launchers' trees as well (:func:`sandbox_pids`). The session's process registers
+each sandbox's root and cards in a directory of its own (:func:`watch`) and starts the watch with the first; the watch
+outlives a SIGKILL of the session, which is how an agent kept running for an hour after its session died. The session's
+own kill terminates the watch with its other children and SIGKILLs it seconds later, so a terminated watch ends the
+sandboxes at once. A look that fails is logged and the next one tries again; a watch that ended all the same is started
+again by :func:`revive`, which an autonomous branch calls through its sandbox as it polls its agent.
 
 The pod allows no device cgroup and no mount or user namespace, so the cards are confined by the environment:
 ``ROCR_VISIBLE_DEVICES`` names them and every HIP-level mask indexes into what ROCr exposes, so only a ROCr-level mask
