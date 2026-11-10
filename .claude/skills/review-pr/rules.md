@@ -91,7 +91,8 @@ the rules listed. Rows overlap; a rule listed twice is read once.
 V1-V8 apply to every PR: they govern how the review is run and published, not what the diff
 contains. X2 does too — it reads `title.txt`, `body.txt` and `commits.txt`, so no row can trigger
 it from the file list, and a docs- or CI-only PR whose description went stale is the case a
-file-shaped row would miss.
+file-shaped row would miss. So does X9, for the same texts and `messages.txt`: a reference to an
+internal discussion rides in on any PR, whatever files it touches.
 
 ---
 
@@ -393,6 +394,16 @@ review, not on the merged result: a PR that cuts its commentary back in a later 
 no longer fires, and the head the review actually ran on is the one the finding is written against.
 **Report as:** `X8 <file>:<line> -- "<narrating sentence>" describes the change, not a constraint; <N> comment
 lines added against <M> code lines`
+
+### X9 -- Public text names nothing a reader outside the team cannot open
+
+**Severity:** blocking
+**Fires when:** `internal-refs.sh` reports a hit in `title.txt`, `body.txt`, `messages.txt` or an added line of `diff.txt`: an internal discussion-board link, topic or comment id, an internal host name or cluster path, a session or task id.
+**The rule:** `AGENTS.md` *The repo is public*: what a PR lands -- code, comments, docs, its title and description, every commit message with its trailers -- is read by people outside the team, and a squash merge copies each commit message into the history of the base branch. A reference those readers cannot open tells them only that the reason lives somewhere else. It is replaced by what it pointed at: the error text, the values or the measurement the run showed, the decision and its reason. The card is public text too: `check-card.sh` refuses one that names such a reference, and a reviewer who verified a finding against an internal artifact quotes what the artifact showed.
+**Seen in:** PR #2534 -- the description named the hosted run behind the change by its board topic and comment id, and the first commit's `Interface-Change:` trailer linked the board topic. PR #2347 -- its squash commit on `main` still carries a board topic and three comment ids, copied from its commit messages.
+**Not a finding when:** the string is a sample value in a test fixture or a documented example and points at no real artifact (a model path on shared storage in a fixture, a session-id regex); the line is `internal-refs.sh` or a test of it; the reference is public -- this repository's `#NNNN`, a public URL, a product endpoint the reference docs document (`KB_STORE_URL`'s default host).
+**Evidence:** `grep -E '^\+' "$WORK/diff.txt" | grep -vE '^\+\+\+ ' > "$WORK/added.txt"; bash .claude/skills/review-pr/internal-refs.sh "$WORK/title.txt" "$WORK/body.txt" "$WORK/messages.txt" "$WORK/added.txt"` -- one `<file>:<line>: <kind>` per hit, naming the kind and never the reference, so the evidence can be quoted where the reference itself may not.
+**Report as:** `X9 <title | description | commit <sha> | file:line> -- names <kind>; state what it stood for instead`
 
 ## T -- Tests and coverage
 
