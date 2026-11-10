@@ -20,6 +20,15 @@ Merged to `main` and not yet carried by a tagged release. Each entry moves
 into the [release](https://github.com/AMD-AGI/Hyperloom/releases) that ships
 it.
 
+- **A hosted multi-branch run takes its base launch as a reference script.**
+  `multibranch.reference_script` in a hosted run's campaign spec names a shell
+  launch script that the session freezes as its base, as `--reference-script`
+  does for `hyperloom-multibranch run`: its `export NAME=value` lines are the
+  server's environment, so a model whose recipe base cannot start on the
+  hardware without an extra setting can run hosted. A multi-branch spec that
+  sets `launch.server_args` or `launch.extra_env` is now refused with exit
+  code 2, naming `multibranch.reference_script`. Before, the hosted run had no
+  way to take a launch script, and it ran without those two fields, silently.
 - **A GEAK or Forge reproduction of the measured launch keeps settings whose
   names contain `TOKEN`.** The GEAK handoff's `baseline_env_spec`, the Forge
   handoff's serving context and the reference launch script now carry launch
