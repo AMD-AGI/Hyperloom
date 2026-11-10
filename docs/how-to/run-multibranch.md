@@ -110,15 +110,23 @@ the profile and the root commit are the ones the first PRELUDE recorded.
   ids and worktrees, on the integration head. Specialist and Arbor branches alike start fresh.
 - **Deadline:** the session's deadline moves by its downtime, the time between the last decision the earlier run
   recorded and the resume. The new deadline is written to the manifest and recorded as a `resume` phase in
-  `MB-decisions.jsonl` with `ended`, `downtime_seconds` and `deadline`.
+  `MB-decisions.jsonl` with `ended`, `downtime_seconds` and `deadline`. GPU hours are not given back: the session
+  reads what it spent, before the stop included, from its blackboard.
+- **Hosted:** a session measured in a grant's sandboxes is resumed by a restart of its hosted run, not by
+  `run --resume`. Its budget counts from the original start, for `--max-hours` as for `--max-gpu-hours`: the deadline
+  stays the one the first start set and the `resume` phase records it with the downtime. Such a resume is refused when
+  the session recorded no baseline, was to stop once its map was made, already spent the GPU hours EXPLORE has under
+  `--max-gpu-hours`, or is past that deadline; the restart then
+  finishes it with `final-only`.
 - **Knowledge steps:** a CLOSE of a session whose search tree the RSI archive already holds runs none of the knowledge
   steps: no RSI archive, playbook proposal or lesson curation. Each is reported `skipped` with the reason
   `an earlier CLOSE of this session archived its search tree`. This holds for every later CLOSE of that session, a
   second `--resume` or a `final-only` included, and also when the earlier CLOSE's exports failed after it archived.
 - **Refusals (exit 2, nothing changed):** `SESSION_DIR` is not a directory or holds no session that ran; the session
   ran on another build, is still running, already chose in FINAL, failed in PRELUDE or recorded no baseline, was
-  measured in a grant's sandboxes (`--measurement hosted`), or was to stop once its map was made; or any other `run`
-  option is given beside `--resume`.
+  measured in a grant's sandboxes (`--measurement hosted`), was to stop once its map was made, or already spent the GPU
+  hours EXPLORE has under `--max-gpu-hours` (all of it less FINAL's share), which would send it straight to FINAL; or
+  any other `run` option is given beside `--resume`.
 
 A session that cannot be resumed but stopped before FINAL can still be finished with `final-only SESSION_DIR`.
 

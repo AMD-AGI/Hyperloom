@@ -105,10 +105,9 @@ search tree the session's own CLOSE archived is left as it was. It is refused wi
 nothing, when the directory is no session that ran, ran on another build than this one, committed no root, is still
 running -- any process ``MB-pids.jsonl`` records, the scheduler included, still alive in this environment -- already
 chose in FINAL, or has another ``final-only`` running over it.
-``run --resume SESSION_DIR`` continues such a session in its directory on its manifest's settings, taking no other
-option but ``-v``: no PRELUDE, new branches on the integration head, and the deadline moved by the time it was down
-(:meth:`~hyperloom_multibranch.scheduling.lifecycle.Session.resume`). It is refused, holds the lock and archives as
-``final-only`` does, and is refused too for a session with no baseline or run with ``--stop-after-map``.
+``run --resume SESSION_DIR`` continues such a session on its manifest's settings and no option but ``-v``: no PRELUDE,
+new branches on the integration head, the deadline moved by the time it was down. It is refused, holds the lock and
+archives as ``final-only`` does, and is refused too as :func:`resumable_run` says.
 """
 
 from __future__ import annotations
@@ -173,7 +172,6 @@ from hyperloom_multibranch.scheduling.lifecycle import (
     SessionOutcome,
     SessionServices,
     persisted_run,
-    resumable_run,
 )
 from hyperloom_multibranch.scheduling.llm import (
     MB_RESOLVER_MAX_TOKENS,
@@ -188,6 +186,7 @@ from hyperloom_multibranch.scheduling.local_peers import (
 from hyperloom_multibranch.scheduling.peers import PeerFactory, PeersUnavailable
 from hyperloom_multibranch.scheduling.processes import ProcessRegistry, adopting_orphans
 from hyperloom_multibranch.scheduling.reference import ReferenceSource, reference_source
+from hyperloom_multibranch.scheduling.resumption import deadline_after_downtime, resumable_run
 from hyperloom_multibranch.scheduling.roster import RosterCaps
 from hyperloom_multibranch.scheduling.stops import SessionStopReason
 from hyperloom_multibranch.scheduling.session_environment import (
@@ -948,11 +947,10 @@ def final_only(persisted: PersistedRun, peer_factory: PeerFactory, services: Ses
     return _over_session(persisted, peer_factory, services, Session.finish)
 
 
-def resume(persisted: PersistedRun, peer_factory: PeerFactory, services: SessionServices) -> int:
-    """Continue the session in the directory ``persisted`` was read from (:meth:`Session.resume`), print it on one
-    stdout line and return the session's exit code."""
+def resume(persisted: PersistedRun, peer_factory: PeerFactory, services: SessionServices, deadline: float) -> int:
+    """:func:`final_only` running :meth:`Session.resume` up to ``deadline`` instead of :meth:`Session.finish`."""
 
-    return _over_session(persisted, peer_factory, services, Session.resume)
+    return _over_session(persisted, peer_factory, services, lambda session, ended: session.resume(ended, deadline))
 
 
 #: What a run over a session directory runs on the session it builds there, given how that session ended.
@@ -1221,8 +1219,10 @@ def main(argv: list[str] | None = None) -> int:
     try:
         if persisted is not None:
             ready = ready_session(settings.workload, load_peers)
-            leg = final_only if args.command == FINAL_ONLY_COMMAND else resume
-            return leg(persisted, ready.peer_factory, ready.services)
+            if args.command == FINAL_ONLY_COMMAND:
+                return final_only(persisted, ready.peer_factory, ready.services)
+            deadline = deadline_after_downtime(persisted.layout, Clock().now())
+            return resume(persisted, ready.peer_factory, ready.services, deadline)
         return _start(settings, grant)
     except (EnvironmentIncomplete, PeersUnavailable, ImageCheckFailed, CacheBuildError, ToolboxInputsError) as exc:
         print(f"{PROG}: cannot run a session, {exc}", file=sys.stderr)
