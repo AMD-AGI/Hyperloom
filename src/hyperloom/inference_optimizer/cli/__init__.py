@@ -142,6 +142,7 @@ from .preflight import (
 )
 from .session_resume import (
     _OperatorLaunchShape,
+    _keep_launch_config_only,
     _open_next_leg,
     _open_resumed_session,
     _reexport_session_environment,
@@ -244,6 +245,7 @@ def _reset_state_file(session_dir: Path, state: SharedState) -> None:
 
     The fresh state keeps ``framework`` and the measurement identity of *state*: the session is single-framework and
     keeps its measurement path, nothing after this point re-derives either, and a later resume checks the latter.
+    It keeps ``--no-source-changes`` too, with the phases that flag turns off: a resume never turns it off.
     """
     state_path = session_dir / "state.json"
     if not state_path.exists():
@@ -254,7 +256,10 @@ def _reset_state_file(session_dir: Path, state: SharedState) -> None:
     except OSError as exc:
         log.warning("--reset-state: could not move %s → %s: %s", state_path, backup_path, exc)
         return
-    SharedState(framework=state.framework, **fresh_measurement_fields(state)).save(session_dir)
+    fresh = SharedState(framework=state.framework, **fresh_measurement_fields(state))
+    if state.no_source_changes:
+        _keep_launch_config_only(fresh)
+    fresh.save(session_dir)
     log.info(
         "--reset-state: backed up state.json to %s; session starts blank except for framework=%s.",
         backup_path.name,

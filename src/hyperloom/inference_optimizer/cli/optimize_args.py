@@ -395,6 +395,21 @@ def add_run_mode_arguments(opt: argparse.ArgumentParser) -> None:
     )
 
 
+class _NoSourceChangesAction(argparse.Action):
+    """``--no-source-changes``, which also turns off the kernel phase and the PRELUDE warm replay.
+
+    Neither lands its source changes through integrate_patch, so the gate there cannot keep them out.
+    """
+
+    def __init__(self, option_strings, dest, **kwargs):
+        super().__init__(option_strings, dest, nargs=0, default=False, **kwargs)
+
+    def __call__(self, parser, namespace, values, option_string=None):
+        namespace.no_source_changes = True
+        namespace.no_kernel = True
+        namespace.no_warm_replay = True
+
+
 def add_framework_agent_arguments(opt: argparse.ArgumentParser) -> None:
     """Add the framework-agent, enablement and local-explore flags of ``optimize``."""
     opt.add_argument(
@@ -434,6 +449,17 @@ def add_framework_agent_arguments(opt: argparse.ArgumentParser) -> None:
         "restores the historical behavior of exiting after "
         "DISCOVER_FAILURE_RETRY_LIMIT (3) empty/failed discoveries. Requires "
         "the authoring track (has no effect under diff-only mode).",
+    )
+    opt.add_argument(
+        "--no-source-changes",
+        dest="no_source_changes",
+        action=_NoSourceChangesAction,
+        help="Keep only server arguments and environment variables. No source, "
+        "file or runtime change from the framework phase, specialists, upstream "
+        "PRs or enablement is kept: a round that carries a patch, a tuned "
+        "artifact, a rewrite switch, an install or another runtime is skipped. "
+        "The kernel phase and the PRELUDE warm replay are off as well, as with "
+        "--no-kernel and --no-warm-replay. Default: source changes are kept.",
     )
 
 
