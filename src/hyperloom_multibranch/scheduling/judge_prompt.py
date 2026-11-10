@@ -93,8 +93,8 @@ known""",
     free_slot="""\
 When the open areas list no op, leave a free slot free: give its tests to the running branches by raising their K
 where the caps allow, or to the pending forks and repairs; the scheduler then opens only the branches you name a focus
-for. Reopen an op a stopped branch was opened on only for an angle its history has not tried, and say in your
-reasoning which.""",
+for. Reopen an op a stopped branch was opened on only for an angle its history has not tried, or, for one spent by a
+give-up, when its 'worth again if' holds, and say in your reasoning which.""",
     out_of_ideas="""\
 a branch out of ideas is one to stop, its slot refilled while an open area is left, rather than stop
 the session""",
