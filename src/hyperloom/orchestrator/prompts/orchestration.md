@@ -327,7 +327,10 @@ contribution.
 `reusable_native_kernel_ids` is empty and no compute/fusion candidates
 exist (e.g. dominant kernels are vendor RCCL/NCCL binaries), drain
 `pending_keep_kernels`. The Coordinator exits KERNEL automatically once the
-agent is settled and no kernel work is pending; no hint advances it.
+agent is settled and no kernel work is pending; no hint advances it. While
+a `kernel_agent` task is in flight the rewrite controller is still choosing
+and measuring its own operators, so an empty `pending_keep_kernels` then
+means its round has not reported yet, not that the phase has no lever.
 Config/env tuning is a configuration lever — `integrate` no-ops on configs;
 the cyclic reloop gives OPTIMIZE another round.
 

@@ -1195,15 +1195,15 @@ def _kernel_exit(inputs: dict[str, Any]) -> tuple[str, dict[str, Any]] | None:
     pending = dict(inputs.get("pending_work") or {})
     plateau = dict(inputs.get("plateau") or {})
     work_pending = bool(pending.get("kernel_work_pending"))
-    if not bool(pending.get("kernel_agent_in_flight")):
-        controller_settled = _controller_round_settled(pending, inputs.get("macro_cycle"))
-        if controller_settled and not work_pending:
-            return "kernel_controller_done", {
-                "controller_status": pending.get("controller_status"),
-                "patch_count": int(pending.get("controller_patch_count") or 0),
-                "task_count": int(pending.get("controller_task_count") or 0),
-                "reason": str(pending.get("controller_reason") or ""),
-            }
+    if _controller_round_settled(pending, inputs.get("macro_cycle")) and not work_pending:
+        return "kernel_controller_done", {
+            "controller_status": pending.get("controller_status"),
+            "patch_count": int(pending.get("controller_patch_count") or 0),
+            "task_count": int(pending.get("controller_task_count") or 0),
+            "reason": str(pending.get("controller_reason") or ""),
+            "agent_in_flight": bool(pending.get("kernel_agent_in_flight")),
+        }
+    if not pending.get("kernel_agent_in_flight"):
         if not work_pending:
             if pending.get("geak_status") == GEAK_STATUS_ERROR:
                 return "kernel_geak_failed", {

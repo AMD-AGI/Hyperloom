@@ -70,14 +70,20 @@ def test_gemm_treats_an_unusable_estimate_as_the_default(cost: Any) -> None:
     assert lb.max_targets(lb.LANE_GEMM, lb.GEMM_DEFAULT_TARGET_SEC, target_costs_sec=(cost,)) == 1
 
 
-def test_fusion_is_capped_by_count_not_by_division() -> None:
-    """It has neither an admission floor nor a per-recipe estimate."""
-    assert lb.max_targets(lb.LANE_FUSION, 10) == lb.FUSION_MAX_TARGETS
-    assert lb.max_targets(lb.LANE_FUSION, 10_000) == lb.FUSION_MAX_TARGETS
-
-
-def test_fusion_with_no_budget_funds_nothing() -> None:
-    assert lb.max_targets(lb.LANE_FUSION, 0) == 0
+@pytest.mark.parametrize(
+    ("budget_sec", "expected"),
+    [
+        (10_000_000, lb.FUSION_MAX_TARGETS),
+        (lb.FUSION_MAX_TARGETS * lb.FUSION_DEFAULT_TARGET_SEC, lb.FUSION_MAX_TARGETS),
+        (2 * lb.FUSION_DEFAULT_TARGET_SEC, 2),
+        (lb.FUSION_DEFAULT_TARGET_SEC, 1),
+        (lb.FUSION_DEFAULT_TARGET_SEC - 1, 0),
+        (223, 0),
+        (0, 0),
+    ],
+)
+def test_fusion_funds_only_the_recipes_its_share_pays_for(budget_sec: int, expected: int) -> None:
+    assert lb.max_targets(lb.LANE_FUSION, budget_sec) == expected
 
 
 def test_allocate_covers_every_lane_in_one_pass() -> None:

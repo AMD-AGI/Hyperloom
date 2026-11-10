@@ -711,6 +711,7 @@ class SharedState(_RenderMixin, GapsStateMixin, _PhaseStateMixin, _RooflineState
     plateau_overrides: dict[str, Any] = field(default_factory=dict)
     # E2E integrate bookkeeping keyed by kernel_id+patch_path+args; prevents re-validating the same patch after NEEDS_REVIEW/REVERT.
     kernel_integrate_attempts: dict[str, Any] = field(default_factory=dict)
+    kernel_bundle_pending: list[dict[str, Any]] = field(default_factory=list)  # P50-refused wins for one bundled E2E.
     # Crash-safe stack-validation checkpoints (SWEEP-entry combo E2E).
     pending_stack_validation_result: dict[str, Any] = field(default_factory=dict)
     pending_stack_validation_apply_results: list[dict[str, Any]] = field(default_factory=list)
