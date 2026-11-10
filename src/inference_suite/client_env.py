@@ -58,6 +58,7 @@ INPUT_WHEELS = "wheels"
 LOCK_PLATFORMS = (*(f"manylinux_2_{minor}_x86_64" for minor in range(28, 16, -1)), "manylinux2014_x86_64")
 #: The directory the build's archive unpacks to.
 _ARCHIVE_ROOT = "python"
+_ENCODING = "utf-8"
 _LOCK_LINE = re.compile(
     r"(?P<name>[A-Za-z0-9][A-Za-z0-9._-]*)==(?P<version>\S+) --hash=sha256:(?P<sha256>[0-9a-f]{64})"
 )
@@ -258,7 +259,7 @@ def install(inputs: Path, root: Path) -> None:
     except aiperf_patch.AiperfPatchError as exc:
         raise ClientEnvError(f"the installed AgentX client cannot be patched to export error_osl: {exc}") from exc
     build = {"version": AGENTX_PYTHON_BUILD.version, "sha256": AGENTX_PYTHON_BUILD.sha256, "bundled": bundled}
-    (root / BUILD_FILE).write_text(json.dumps(build, sort_keys=True, indent=2) + "\n", encoding="utf-8")
+    (root / BUILD_FILE).write_text(json.dumps(build, sort_keys=True, indent=2) + "\n", encoding=_ENCODING)
 
 
 def client_identity(root: Path, inferencex: str) -> NormalisedManifest:
@@ -269,8 +270,8 @@ def client_identity(root: Path, inferencex: str) -> NormalisedManifest:
             another version, or its build record or lock does not read.
     """
     try:
-        build = json.loads((root / BUILD_FILE).read_text(encoding="utf-8"))
-        pins = read_lock((root / STAGED_LOCK).read_text(encoding="utf-8"))
+        build = json.loads((root / BUILD_FILE).read_text(encoding=_ENCODING))
+        pins = read_lock((root / STAGED_LOCK).read_text(encoding=_ENCODING))
         version, sha256, bundled = build["version"], build["sha256"], set(build["bundled"])
     except (OSError, ValueError, KeyError, TypeError) as exc:
         raise ClientEnvError(f"the AgentX client staged in {root} cannot be read: {exc}") from exc
@@ -307,7 +308,7 @@ def _generate_lock(requirements: Path, label: str) -> str:
             str(requirements),
         ]
         _run(resolve, f"resolving {requirements}")
-        return lock_text(json.loads(report.read_text(encoding="utf-8")), label)
+        return lock_text(json.loads(report.read_text(encoding=_ENCODING)), label)
 
 
 def main(argv: Sequence[str] | None = None) -> int:
