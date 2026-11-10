@@ -141,18 +141,29 @@ def test_a_node_must_grow_from_a_known_parent_on_a_known_direction():
         tree.add_node(_node("2" * 40, "1" * 40, "d001", iteration=3))
 
 
-def test_history_scope_covers_the_path_its_failures_and_every_attempt_from_the_start():
+def _attempt(iteration: int, slot: int, start: str, outcome: AttemptOutcome, node: str = "") -> Attempt:
+    return Attempt(iteration, slot, SlotType.DEEPEN, start, "d001", outcome, None, node, "", "r")
+
+
+def test_a_line_holds_its_path_and_the_attempts_made_along_it():
     tree = _grown_tree()
-    tree.open_round(Round(iteration=3, slots=(Slot(1, SlotType.DEEPEN, "2" * 40, "r", direction="d001"),)))
-    tree.close_round(
+    root, n1, n2, n3 = tree.root.commit, "1" * 40, "2" * 40, "3" * 40
+    tree.attempts.extend(
         [
-            Attempt(3, 1, SlotType.DEEPEN, "2" * 40, "d001", AttemptOutcome.INCORRECT, None, "", "a", "r"),
+            _attempt(1, 1, root, AttemptOutcome.NODE, n1),
+            _attempt(2, 1, n1, AttemptOutcome.NODE, n2),
+            # Another line: the node it made, and every attempt from that node.
+            _attempt(2, 2, root, AttemptOutcome.NODE, n3),
+            _attempt(4, 1, n3, AttemptOutcome.INCORRECT),
+            _attempt(3, 2, n1, AttemptOutcome.INCORRECT),
+            _attempt(3, 1, n2, AttemptOutcome.NO_CHANGES),
         ]
     )
-    tree.open_round(Round(iteration=4, slots=(Slot(1, SlotType.DEEPEN, "3" * 40, "r", direction="d002"),)))
-    tree.close_round([Attempt(4, 1, SlotType.DEEPEN, "3" * 40, "d002", AttemptOutcome.INCORRECT, None, "", "a", "r")])
 
-    assert tree.history_scope("2" * 40) == frozenset({1, 2, 3})
+    line = tree.line(n2)
+
+    assert [node.commit for node in line.nodes] == [root, n1, n2]
+    assert [(item.iteration, item.slot) for item in line.attempts] == [(1, 1), (2, 1), (3, 1), (3, 2)]
 
 
 def test_an_interrupted_round_keeps_the_node_a_slot_already_admitted():
@@ -190,8 +201,10 @@ def test_the_tree_round_trips_through_its_store(tmp_path):
         focus_cases=("m_1",),
         agent_profile_id="codex",
         case_samples={"m_1": (1.0, 1.01, 0.99)},
+        records="tree_rounds/iter_003/slot_01",
     )
     tree.add_node(focused)
+    tree.attempts.append(replace(_attempt(2, 1, "1" * 40, AttemptOutcome.INCORRECT), plan_path="start_1/slot_01.md"))
     store = SearchTreeStore(tmp_path / "search_tree.json")
 
     store.save(tree)
@@ -201,22 +214,25 @@ def test_the_tree_round_trips_through_its_store(tmp_path):
     assert store.load().node(focused.commit) == focused
 
 
-def test_a_tree_saved_before_it_recorded_lane_focus_agent_profiles_and_bench_runs_still_loads():
+def test_a_tree_saved_before_it_recorded_lane_focus_profiles_runs_and_records_still_loads():
     tree = _grown_tree()
     tree.open_round(Round(iteration=3, slots=(Slot(1, SlotType.DEEPEN, "3" * 40, "r", direction="d002"),)))
     tree.close_round([lost_attempt(3, tree.round.slots[0], "lost")])
     tree.open_round(Round(iteration=4, slots=(Slot(1, SlotType.DEEPEN, "3" * 40, "r", direction="d002"),)))
     payload = json.loads(json.dumps(tree_to_dict(tree)))
     for node in payload["nodes"]:
-        del node["approach"], node["focus_cases"], node["agent_profile_id"], node["case_samples"]
+        for name in ("approach", "focus_cases", "agent_profile_id", "case_samples", "records"):
+            del node[name]
     for record in (*payload["attempts"], *payload["round"]["slots"]):
         del record["agent_profile_id"]
+    del payload["attempts"][0]["plan_path"]
 
     loaded = tree_from_dict(payload)
 
     assert [(node.approach, node.focus_cases, node.agent_profile_id) for node in loaded.nodes] == [("", (), "")] * 4
-    assert [node.case_samples for node in loaded.nodes] == [{}] * 4
+    assert [(node.case_samples, node.records) for node in loaded.nodes] == [({}, "")] * 4
     assert [item.agent_profile_id for item in (*loaded.attempts, *loaded.round.slots)] == ["", ""]
+    assert loaded.attempts[0].plan_path == ""
 
 
 def test_the_store_refuses_a_field_set_it_did_not_write(tmp_path):

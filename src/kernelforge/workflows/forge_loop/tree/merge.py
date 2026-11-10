@@ -93,7 +93,7 @@ class TreeMergeMixin:
 
     The host supplies ``ic``, ``device_hazard``, ``_experiments``, ``_start_worktrees``, ``_time_remaining`` and
     ``_measurement_estimate_sec``, and the admission mixin's ``_run_sessions``, ``_candidate_refusal``,
-    ``_measure_and_admit``, ``_admit_merge`` and ``_write_record``.
+    ``_measure_and_admit``, ``_admit_merge``, ``_write_lesson`` and ``_write_record``.
     """
 
     async def _merge_round(
@@ -173,7 +173,7 @@ class TreeMergeMixin:
         lanes = await self._run_sessions(iteration, [LaneSession(LanePlan(lane_id, plan, str(worktree)), plan, agent)])
         lane = lanes.get(lane_id)
         if lane is not None:
-            self._write_record(merge.records, "lesson.md", lane.lesson.text or f"(no lesson: {lane.lesson.reason})")
+            self._write_lesson(merge.records, lane)
             if lane.contended:
                 self._record_held_device(iteration, lane)
                 return "the merge session left the device held"

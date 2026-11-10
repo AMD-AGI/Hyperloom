@@ -16,6 +16,7 @@ from kernelforge.workflows.forge_loop.iteration.fanout import LanePlan, LaneResu
 from kernelforge.workflows.forge_loop.iteration.iteration_types import IterationResult
 from kernelforge.workflows.forge_loop.iteration.lane_runtime import _lane_prompt
 from kernelforge.workflows.forge_loop.memory.lessons import SummaryOutcome
+from kernelforge.workflows.forge_loop.tree.facts import LESSON_FILENAME, LESSON_MISSING_FILENAME
 from kernelforge.workflows.forge_loop.tree.model import (
     Attempt,
     AttemptOutcome,
@@ -200,8 +201,7 @@ class TreeAdmissionMixin:
         for plan in plans:
             lane = lanes.get(plan.slot.index)
             if lane is not None:
-                lesson = lane.lesson.text or f"(no lesson: {lane.lesson.reason})"
-                self._write_slot_record(iteration, plan.slot, "lesson.md", lesson)
+                self._write_lesson(self._slot_dir(iteration, plan.slot), lane)
             outcomes.append(await self._measure_slot(tree, iteration, plan, lane))
         return outcomes
 
@@ -212,23 +212,30 @@ class TreeAdmissionMixin:
         refusal = self._candidate_refusal(lane)
         if refusal:
             outcome = AttemptOutcome.NO_CHANGES if lane is not None and not lane.error else AttemptOutcome.ERROR
-            return self._unmeasured(iteration, slot, outcome, refusal)
+            return self._unmeasured(iteration, plan, outcome, refusal)
         self._write_slot_record(iteration, slot, "change.diff", lane.diff)
         worktree = self._start_worktrees.ensure(slot.start)
         if not self._start_worktrees.apply(worktree, lane.diff):
-            return self._unmeasured(iteration, slot, AttemptOutcome.ERROR, "the lane's diff did not apply to its start")
+            return self._unmeasured(iteration, plan, AttemptOutcome.ERROR, "the lane's diff did not apply to its start")
         staged = StagedCandidate(worktree, slot.start, plan.text, self._slot_dir(iteration, slot))
         measured = await self._measure_and_admit(
             tree, iteration, staged, lambda result: self._admit(tree, iteration, plan, result, worktree)
         )
         if measured.holder:
             return self._unmeasured(
-                iteration, slot, AttemptOutcome.NO_CHANGES, f"the candidate is node {measured.holder}"
+                iteration, plan, AttemptOutcome.NO_CHANGES, f"the candidate is node {measured.holder}"
             )
         node = measured.node
         outcome = AttemptOutcome.INCORRECT if node is None else AttemptOutcome.NODE
-        attempt = self._attempt(iteration, slot, outcome, measured.result, "" if node is None else node.commit)
+        attempt = self._attempt(iteration, plan, outcome, measured.result, "" if node is None else node.commit)
         return SlotOutcome(attempt, node, measured.result)
+
+    def _write_lesson(self, directory: Path, lane: LaneResult) -> None:
+        """The session's own record of what it tried, or why it left none."""
+        if lane.lesson.text:
+            self._write_record(directory, LESSON_FILENAME, lane.lesson.text)
+        else:
+            self._write_record(directory, LESSON_MISSING_FILENAME, lane.lesson.reason or "the session left no record")
 
     async def _measure_and_admit(
         self, tree: SearchTree, iteration: int, staged: StagedCandidate, admit: Callable[[IterationResult], TreeNode]
@@ -284,8 +291,9 @@ class TreeAdmissionMixin:
         commit = self._start_worktrees.commit(worktree, _commit_message(iteration, slot, direction_id, plan, result))
         pin_node(self.ic.workspace_dir, commit)
         provenance = (slot.source,) if slot.slot_type is SlotType.PORT else ()
+        placement = _Placement(commit, slot.start, direction_id, provenance, str(self._slot_dir(iteration, slot)))
         node = replace(
-            _node_of(result, _Placement(commit, slot.start, direction_id, provenance), slot=slot, plan=plan.title),
+            _node_of(result, placement, slot=slot, plan=plan.title),
             approach=plan.approach,
             focus_cases=plan.focus_cases,
             agent_profile_id=slot.agent_profile_id,
@@ -301,7 +309,7 @@ class TreeAdmissionMixin:
         message = f"iter-{result.iteration}-merge: {source.commit[:12]} onto {base.commit[:12]}"
         commit = self._start_worktrees.commit(staged.worktree, message)
         pin_node(self.ic.workspace_dir, commit)
-        placement = _Placement(commit, base.commit, base.direction, (source.commit,))
+        placement = _Placement(commit, base.commit, base.direction, (source.commit,), str(staged.records))
         node = replace(_node_of(result, placement, slot=None, plan=staged.plan), agent_profile_id=staged.producer)
         self._add_node(tree, node)
         return node
@@ -347,8 +355,9 @@ class TreeAdmissionMixin:
                 self._tree_store.save(tree)
 
     def _attempt(
-        self, iteration: int, slot: Slot, outcome: AttemptOutcome, result: IterationResult | None, node: str
+        self, iteration: int, plan: SlotPlan, outcome: AttemptOutcome, result: IterationResult | None, node: str
     ) -> Attempt:
+        slot = plan.slot
         return Attempt(
             iteration=iteration,
             slot=slot.index,
@@ -361,12 +370,14 @@ class TreeAdmissionMixin:
             archive_path=str(self._slot_dir(iteration, slot)),
             reason=slot.reason,
             agent_profile_id=slot.agent_profile_id,
+            plan_path=plan.path,
         )
 
-    def _unmeasured(self, iteration: int, slot: Slot, outcome: AttemptOutcome, reason: str) -> SlotOutcome:
+    def _unmeasured(self, iteration: int, plan: SlotPlan, outcome: AttemptOutcome, reason: str) -> SlotOutcome:
+        slot = plan.slot
         print(f"  [tree] slot {slot.index} ({slot.slot_type.value} at {slot.start[:12]}): {reason}")
         self._write_slot_record(iteration, slot, "outcome.txt", reason)
-        return SlotOutcome(replace(self._attempt(iteration, slot, outcome, None, ""), detail=reason), None, None)
+        return SlotOutcome(replace(self._attempt(iteration, plan, outcome, None, ""), detail=reason), None, None)
 
     def _slot_dir(self, iteration: int, slot: Slot) -> Path:
         return self._experiments.tree_round(iteration) / f"slot_{slot.index:02d}"
@@ -381,12 +392,13 @@ class TreeAdmissionMixin:
 
 @dataclass(frozen=True)
 class _Placement:
-    """Where a new node sits: its commit, the node it grew from, its direction, and the nodes it carries changes of."""
+    """Where a new node sits: its commit, parent and direction, the nodes it carries changes of, and its records."""
 
     commit: str
     parent: str
     direction: str
     provenance: tuple[str, ...] = ()
+    records: str = ""
 
 
 def _node_of(result: IterationResult, placement: _Placement, *, slot: Slot | None, plan: str) -> TreeNode:
@@ -405,6 +417,7 @@ def _node_of(result: IterationResult, placement: _Placement, *, slot: Slot | Non
         plan=_summary(plan),
         source=_source_of(slot),
         provenance=placement.provenance,
+        records=placement.records,
     ).with_measurement(node_measurement(result))
 
 

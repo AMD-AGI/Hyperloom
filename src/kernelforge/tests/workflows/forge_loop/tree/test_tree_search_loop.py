@@ -22,6 +22,7 @@ from kernelforge.utils.process_reaping import ReapReport
 from kernelforge.workflows.forge_loop.iteration import attempt_verdict, campaign_runtime, fanout, scoring_runtime
 from kernelforge.workflows.forge_loop.iteration.iteration_types import IterationConfig, LoopAgents
 from kernelforge.workflows.forge_loop.roles.contracts import PublishedLane
+from kernelforge.workflows.forge_loop.roles.orchestration import LINE_HISTORY_EVIDENCE
 from kernelforge.workflows.forge_loop.roles.slot_selector import SelectorAnswer
 from kernelforge.workflows.forge_loop.search.agent_relay import (
     AgentAvailabilitySnapshot,
@@ -138,6 +139,8 @@ class _Planning:
         workspace = Path(context.workspace)
         assert workspace.is_dir() and _git(workspace, "rev-parse", "HEAD") == context.analysis_commit
         assert Path(context.source_map_path).is_relative_to(workspace)
+        # Every start is planned from its own line's history.
+        assert any(ref.kind == LINE_HISTORY_EVIDENCE and Path(ref.path).is_file() for ref in context.evidence_refs)
         brief = context.program_context
         approaches: tuple[PublishedLane, ...] = ()
         if "BRANCH" in brief:
@@ -423,6 +426,9 @@ def test_the_next_round_deepens_both_routes_from_their_own_code(tmp_path, monkey
     assert by_value[2.5].parent == by_value[2.0].commit
     assert tree.published_best == by_value[2.5].commit
     assert (workspace / "kernel.py").read_text() == "VALUE = 4\n"
+    # The fast route's round-2 planners read its line: the path to it and the attempt that made it.
+    line = (ExperimentsLayout.of(workspace).tree_round(2) / f"line_{by_value[2.0].commit[:12]}.md").read_text()
+    assert tree.root.commit in line and "- iter 1 slot 1 BRANCH new NODE" in line
     # Round 2 measured 11 in the slow route's checkout and 4 in the fast one's, then 4 again on the campaign branch.
     assert [item["VALUE"] for item in measured[-3:]] in ([4, 11, 4], [11, 4, 4])
     assert "structural route" in selector.facts[1]
@@ -555,6 +561,9 @@ def test_a_split_relay_gives_no_slot_to_a_profile_whose_line_stopped_answering(t
         ("claude_opus", AttemptOutcome.NODE),
         ("codex_gpt", AttemptOutcome.NO_CHANGES),
     ]
+    # The silent session left no record; its slot says why instead.
+    silent = ExperimentsLayout.of(workspace).tree_round(1) / "slot_02"
+    assert (silent / "lesson_missing.txt").is_file() and not (silent / "lesson.md").exists()
     # The boundary checked the profile again, found it down, and gave the next round to the one that still runs.
     assert not loop.run_state.agent_availability_snapshot.profiles["codex_gpt"].available
     assert {item.agent_profile_id for item in tree.attempts if item.iteration == 2} == {"claude_opus"}

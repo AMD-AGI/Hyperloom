@@ -91,6 +91,8 @@ class TreeNode:
     # Each case's time in every bench run of every measurement of the node: ``case_times`` is its median and
     # ``case_spreads`` its standard deviation. Empty for a node a tree recorded without it.
     case_samples: dict[str, tuple[float, ...]] = field(default_factory=dict)
+    # The directory recording the change that made the node: its slot's or its merge's; empty for the root.
+    records: str = ""
 
     @property
     def score(self) -> float:
@@ -169,6 +171,8 @@ class Attempt:
     detail: str = ""
     # The Agent profile the slot ran on.
     agent_profile_id: str = ""
+    # The plan the slot's Implementer was given; empty for a slot that was never planned.
+    plan_path: str = ""
 
 
 @dataclass(frozen=True)
@@ -178,6 +182,14 @@ class MergeFailure:
     source: str
     base: str
     reason: str
+
+
+@dataclass(frozen=True)
+class Line:
+    """The history one start node is planned from: the path from the root to it, and the attempts of that path."""
+
+    nodes: tuple[TreeNode, ...]
+    attempts: tuple[Attempt, ...]
 
 
 @dataclass(frozen=True)
@@ -266,20 +278,21 @@ class SearchTree:
     def attempts_from(self, commit: str) -> list[Attempt]:
         return [item for item in self.attempts if item.start == commit]
 
-    def history_scope(self, start: str) -> frozenset[int]:
-        """Iterations whose history belongs to the line ending at ``start``.
+    def line(self, start: str) -> Line:
+        """The line ending at ``start``: the path to it, and every attempt made from a node on that path.
 
-        The nodes on the path, the attempts from any of them that produced no node, and every attempt made from the
-        start itself; a node made from an ancestor that is not on the path belongs to another line.
+        An attempt from the path belongs to the line when it produced no node, when its node is on the path, or when it
+        started at ``start`` itself; a node made from the path but not on it, and what grew from it, is another line.
         """
         path = self.ancestors(start)
         on_path = {item.commit for item in path}
-        scope = {item.iteration for item in path if item.iteration > 0}
-        for attempt in self.attempts:
-            produced_nothing = attempt.outcome is not AttemptOutcome.NODE
-            if attempt.start == start or (attempt.start in on_path and produced_nothing):
-                scope.add(attempt.iteration)
-        return frozenset(scope)
+        attempts = [
+            item
+            for item in self.attempts
+            if item.start in on_path
+            and (item.start == start or item.outcome is not AttemptOutcome.NODE or item.node in on_path)
+        ]
+        return Line(tuple(path), tuple(sorted(attempts, key=lambda item: (item.iteration, item.slot))))
 
     def allocate_direction(self, proposal: "DirectionProposal", *, origin: str, iteration: int) -> Direction:
         """Name, record and return a new direction opened at ``origin``."""
@@ -415,6 +428,7 @@ __all__ = [
     "Direction",
     "DirectionProposal",
     "DirectionStatus",
+    "Line",
     "MergeFailure",
     "NodeMeasurement",
     "NodeSource",

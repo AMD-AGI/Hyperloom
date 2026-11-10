@@ -122,8 +122,14 @@ def _optional_float(value: object) -> float | None:
 
 
 # Fields a tree written before they existed lacks, and the value such a record carries.
-_NODE_FIELDS_OLDER_TREES_LACK = {"approach": "", "focus_cases": [], "agent_profile_id": "", "case_samples": {}}
-_ATTEMPT_FIELDS_OLDER_TREES_LACK = {"agent_profile_id": ""}
+_NODE_FIELDS_OLDER_TREES_LACK = {
+    "approach": "",
+    "focus_cases": [],
+    "agent_profile_id": "",
+    "case_samples": {},
+    "records": "",
+}
+_ATTEMPT_FIELDS_OLDER_TREES_LACK = {"agent_profile_id": "", "plan_path": ""}
 _SLOT_FIELDS_OLDER_TREES_LACK = {"agent_profile_id": ""}
 
 
@@ -150,6 +156,7 @@ def _node(payload: object) -> TreeNode:
         case_samples={
             str(case): tuple(float(item) for item in times) for case, times in dict(data["case_samples"]).items()
         },
+        records=str(data["records"]),
     )
 
 
@@ -189,6 +196,7 @@ def _attempt(payload: object) -> Attempt:
         reason=str(data["reason"]),
         detail=str(data["detail"]),
         agent_profile_id=str(data["agent_profile_id"]),
+        plan_path=str(data["plan_path"]),
     )
 
 
