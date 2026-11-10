@@ -18,6 +18,7 @@ from inference_suite.compose import GPU_MASK_ENV
 from inference_suite.contracts import LaunchDelta, RunLayout
 from inference_suite.contracts.base_launch import Redacted
 from inference_suite.contracts.launch import Launch
+from inference_suite.tests.test_base_launch_contract import _base, _golden
 from inference_suite.tests.test_compose import _launch as _compose_launch
 
 from ._geak_helpers import stop_geak_before_launch
@@ -263,6 +264,23 @@ def test_env_spec_hands_on_no_structured_flag_and_no_credential_or_loader_env(tm
         not {"OPENAI_API_KEY", "LD_PRELOAD", "PATH", "HF_TOKEN", "PYTHONPATH", GPU_MASK_ENV}
         & config["extra_envs"].keys()
     )
+
+
+def test_env_spec_keeps_token_named_knobs_and_no_credential_in_the_clear(tmp_path: Path) -> None:
+    golden_env = {"SGLANG_SIMULATE_ACC_LEN": "3.48", "SGLANG_SIMULATE_ACC_TOKEN_MODE": "real-draft-token"}
+    knobs = {"SGLANG_USE_AITER_FP8_PER_TOKEN": "1", "MAX_NUM_BATCHED_TOKENS": "8"}
+    credentials = {"GITHUB_TOKEN": "ghp-clear-secret", "AWS_SECRET_ACCESS_KEY": "aws-clear-secret"}
+    launch = _compose_launch(
+        _base(golden_al=_golden(env=golden_env)), user=LaunchDelta(env_set={**knobs, **credentials})
+    )
+    state = SharedState(current_best={"tput": 100.0, "optimization_stack": []})
+    _measured_in(tmp_path, state, launch)
+
+    spec = _writeback(tmp_path, state).build_env_spec()
+
+    assert {**golden_env, **knobs}.items() <= spec["config"]["extra_envs"].items()
+    assert not ({*credentials, "HF_TOKEN"} & spec["config"]["extra_envs"].keys())
+    assert not any(secret in json.dumps(spec) for secret in credentials.values())
 
 
 def test_a_round_without_launch_json_hands_on_no_launch_record(tmp_path: Path) -> None:
