@@ -544,6 +544,8 @@ def recover_orphaned_commit(
         git(container, workspace, "checkout", "--", ".")
         git(container, workspace, "clean", "-fd")
     except RuntimeError:
+        # A tree that cannot be cleaned is still reverted below: `git revert` refuses a dirty tree on its own, and
+        # that error is the one the caller sees.
         pass
     for sha, subject in orphans:
         print(f"[arbor] Orphaned commit detected ({subject.split(':', 1)[0]} > recorded "
