@@ -455,8 +455,6 @@ class SpecialistSubprocessDispatcher:
             try:
                 _raise_if_cancelled(scope)
                 if request.gpu_lease is not None:
-                    # Created fresh here as in the local branch; the actor appends to this file only, never to what
-                    # the agent of an earlier launch left at the name.
                     log_fh = create_nofollow(request.workspace, (process_log.name,))
                     started = await self._start_ray_actor(request, launch, scope, file_identity(log_fh))
                     if isinstance(started, SpecialistSubprocessResult):
@@ -534,16 +532,12 @@ class SpecialistSubprocessDispatcher:
         request: SpecialistSpawn, launch: SpecialistLaunch, scope: CancelScope | None, log_identity: tuple[int, int]
     ) -> _RayLeaseProcess | SpecialistSubprocessResult:
         """Submit the GPU actor launch and poll until it has a pid; a failure returns the task's result."""
-        # Non-blocking start: submit the actor launch, then poll for
-        # the pid with ``asyncio.sleep`` between polls. This keeps the
-        # Coordinator event loop responsive while Ray schedules the actor
-        # (no blocking ``ray.get``), and — combined with the timing split
-        # below — excludes Ray *pending* time from the specialist's running
-        # wall budget. A bounded pending deadline turns a permanently
-        # unschedulable request into a structured task failure instead of an
-        # unbounded stall. The actor appends to the process.log created here
-        # (``log_identity``; same host on single-node), so the reaper below
-        # reads it directly.
+        # Non-blocking start: submit the actor launch, then poll for the pid with ``asyncio.sleep`` between polls. This
+        # keeps the Coordinator event loop responsive while Ray schedules the actor (no blocking ``ray.get``), and —
+        # combined with the timing split below — excludes Ray *pending* time from the specialist's running wall budget.
+        # A bounded pending deadline turns a permanently unschedulable request into a structured task failure instead
+        # of an unbounded stall. The actor only appends to the process.log the caller created fresh (``log_identity``),
+        # never to what an earlier launch's agent left at the name; on one node the reaper below reads it directly.
         from hyperloom.orchestrator.actions.executors._ray_serving import ActorLaunch
 
         try:
