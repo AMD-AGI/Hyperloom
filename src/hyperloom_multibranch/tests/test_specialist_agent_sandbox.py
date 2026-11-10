@@ -9,7 +9,7 @@ import sys
 import tempfile
 import time
 import uuid
-from collections.abc import Callable, Sequence
+from collections.abc import Callable, Iterator, Sequence
 from dataclasses import replace
 from pathlib import Path
 
@@ -22,7 +22,7 @@ from hyperloom_multibranch.specialist.agent_sandbox import (
     mount_namespaces,
     read_only_argv,
 )
-from hyperloom_multibranch.specialist.agent_watch import MARKER, marked_pids
+from hyperloom_multibranch.specialist.agent_watch import MARKER, marked_pids, sandbox_pids
 
 BASE = {
     "PATH": os.environ["PATH"],
@@ -36,10 +36,23 @@ BASE = {
 }
 
 
+#: The sandboxes the running test made, stopped when it ends.
+_made: list[LocalAgentSandbox] = []
+
+
 @pytest.fixture(autouse=True)
-def _local_temp(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+def _local_temp(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Iterator[None]:
     monkeypatch.setattr(tempfile, "tempdir", str(tmp_path / "local-tmp"))
     (tmp_path / "local-tmp").mkdir()
+    yield
+    # The watch ends a sandbox only once this process is gone, and reads which from this test's directory, which may be
+    # deleted by then: a sandbox a test does not stop would outlive the session, launchers and all.
+    made = {str(sandbox.root): sandbox for sandbox in _made}
+    _made.clear()
+    for sandbox in made.values():
+        asyncio.run(sandbox.stop())
+    left = {root: sandbox_pids(root) for root in made}
+    assert not any(pids or launchers for pids, launchers in left.values()), f"outlived the sandbox's stop: {left}"
 
 
 class _Processes:
@@ -52,7 +65,7 @@ class _Processes:
 
 
 def _sandbox(tmp_path: Path, processes: _Processes | None = None, branch: str = "") -> LocalAgentSandbox:
-    return LocalAgentSandbox(
+    sandbox = LocalAgentSandbox(
         cards=(4, 5),
         python_path=(tmp_path / "worktree" / "python",),
         root=tmp_path / "sandbox",
@@ -62,6 +75,8 @@ def _sandbox(tmp_path: Path, processes: _Processes | None = None, branch: str = 
         processes=processes,
         branch=branch,
     )
+    _made.append(sandbox)
+    return sandbox
 
 
 def _alive(pid: int) -> bool:
@@ -443,6 +458,20 @@ def test_a_finished_run_leaves_no_process_behind(tmp_path: Path) -> None:
 
     assert done.returncode == 3
     assert marked_pids(str(tmp_path / "sandbox")) == []
+
+
+def test_stop_leaves_no_launcher_of_the_sandbox_running(tmp_path: Path) -> None:
+    async def scenario() -> list[int]:
+        sandbox = _sandbox(tmp_path)
+        running = await sandbox.start("sleep 60", tmp_path, {})
+        ended = await sandbox.start("true", tmp_path, {})
+        await _until(lambda: ended.returncode is not None)
+        await sandbox.stop()
+        return [running.popen.pid, ended.popen.pid]
+
+    launchers = asyncio.run(scenario())
+
+    assert [pid for pid in launchers if _alive(pid)] == []
 
 
 def test_pkill_never_selects_the_sandbox_s_launchers(tmp_path: Path) -> None:

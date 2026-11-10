@@ -7,8 +7,10 @@ Every top-level process of a sandbox runs under a launcher. The launcher marks
 itself a child subreaper (``PR_SET_CHILD_SUBREAPER``), so a descendant that
 detaches (double fork, ``setsid``, an emptied environment) and loses its parent
 is re-parented to the launcher, never to init. The launcher outlives its command
-until the sandbox's reaper kills it, so the reaper can always enumerate every
-process the sandbox ever started by walking from the launcher.
+while any process the command started runs, reaping each as it ends, so the
+reaper can always enumerate every process the sandbox ever started by walking
+from the launcher. Once it has no child left it exits: only a descendant can
+become its child, and it has none.
 """
 
 from __future__ import annotations
@@ -23,7 +25,7 @@ __all__ = ["LAUNCHER_SOURCE", "StatusPipe", "launcher_argv"]
 #: Self-contained (standard library only) so it runs under any python3 and
 #: under another account.
 LAUNCHER_SOURCE = r"""
-import ctypes, os, signal, sys, time
+import ctypes, os, signal, sys
 status_fd = int(sys.argv[1])
 argv = sys.argv[2:]
 try:
@@ -53,7 +55,7 @@ while True:
     try:
         os.wait()  # reap re-parented orphans as they exit
     except ChildProcessError:
-        time.sleep(0.2)
+        break
 """
 
 
