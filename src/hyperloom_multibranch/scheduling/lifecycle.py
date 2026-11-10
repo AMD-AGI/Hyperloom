@@ -702,7 +702,7 @@ class Session:
         plans = await agent_plans(agents, map_file, work, *given)
         self._dealer = map_dealer(map_file, plans, work)
         if self._dealer is not None:
-            await self._branches.record_map(SharedMap.read(self._dealer.map_file, plans))
+            await self._branches.record_map(SharedMap.read(self._dealer.map_file, plans), self._dealer)
         return plans
 
     async def _deal(self, branch: str, agent: str, plan: str, report: Path) -> str:

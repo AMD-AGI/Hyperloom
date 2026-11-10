@@ -2377,6 +2377,35 @@ async def test_an_order_whose_branch_the_fork_desk_rejects_is_no_longer_held_at_
     ]
 
 
+class NoOrderRuntime(RefusingRuntime):
+    """A runtime that cannot start a branch on a dealt order; a failure double, not a placeholder."""
+
+    async def start(self, branch: str, start_commit: str, task: BranchTask = BranchTask()) -> None:
+        if "order-" in task.plan:
+            raise RuntimeError(f"no Arbor CLI for {branch}")
+        await super().start(branch, start_commit, task)
+
+
+async def test_an_order_whose_branch_fails_to_start_is_no_longer_held_at_the_next_deal(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    stage, asked, first = _one_reports(tmp_path, monkeypatch, [{"id": "m-allreduce"}])
+    second = worker_report(tmp_path / "worker_report-2.json", {"id": "m-moe", "status": "killed", "why": "no gain"})
+    stage.steps["b02"] = _hands_back(stage, second, REPORT_SECONDS + 60.0)
+    stage.runtime_type = NoOrderRuntime
+
+    await stage.run()
+
+    [dealt, _] = [row for row in _decisions(stage) if row["reason"] == DEALT]
+    [stop] = [row for row in _decisions(stage) if row["kind"] == "stop" and row["branch"] == dealt["detail"]["branch"]]
+    assert str(stop["reason"]).startswith(StopCause.START_FAILED.value)
+    # The order dealt to the branch that did not start is not held at the second deal.
+    assert [(request.reports, request.held) for request in asked] == [
+        ((first,), (tmp_path / "share-2.json",)),
+        ((first, second), ()),
+    ]
+
+
 #: Two agents' keeps, each a gain alone and more together: ``a1`` and ``a2`` both land on the integration branch.
 AGENT_CURVES = {
     frozenset(): {MAIN_POINT: 1000.0, CONC: 1000.0},
