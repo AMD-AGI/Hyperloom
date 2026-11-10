@@ -160,6 +160,21 @@ def test_a_spec_without_a_launch_section_maps_onto_run() -> None:
     assert "--workload=inferencex" in run_argv(_spec("hosted"), 1.0, 1)
 
 
+def test_a_spec_gives_its_base_launch_as_the_reference_script_of_run() -> None:
+    spec = _spec("hosted", multibranch={"workload": "inferencex", "reference_script": "/data/launch.sh"})
+
+    assert "--reference-script=/data/launch.sh" in run_argv(spec, 1.0, 1)
+    assert not any(arg.startswith("--reference-script") for arg in run_argv(_spec("hosted"), 1.0, 1))
+
+
+@pytest.mark.parametrize("path", [7, ["/data/launch.sh"], "", "  "])
+def test_a_reference_script_that_is_no_path_is_refused_naming_the_field(path: object) -> None:
+    spec = _spec("hosted", multibranch={"workload": "inferencex", "reference_script": path})
+
+    with pytest.raises(HostedRefused, match="multibranch.reference_script must be the path of a launch script"):
+        run_argv(spec, 1.0, 1)
+
+
 @pytest.mark.parametrize(
     ("launch", "named"),
     [
@@ -169,14 +184,14 @@ def test_a_spec_without_a_launch_section_maps_onto_run() -> None:
     ],
     ids=["server-args", "extra-env", "both"],
 )
-def test_a_spec_whose_launch_a_multibranch_run_would_not_read_is_refused_naming_the_field(
+def test_a_spec_whose_launch_a_multibranch_run_would_not_read_is_refused_pointing_at_the_reference_script(
     launch: dict[str, object], named: str
 ) -> None:
-    spec = _spec("hosted", launch=launch)
+    spec = _spec("hosted", launch=launch, multibranch={"workload": "inferencex", "reference_script": "/data/l.sh"})
 
     with pytest.raises(HostedRefused, match=named) as refused:
         run_argv(spec, 1.0, 1)
-    assert "its base launch is resolved from the recipe sources" in str(refused.value)
+    assert "give the base launch as multibranch.reference_script" in str(refused.value)
 
 
 @pytest.mark.parametrize(

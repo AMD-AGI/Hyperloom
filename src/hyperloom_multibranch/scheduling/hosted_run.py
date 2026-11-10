@@ -7,14 +7,14 @@ The campaign spec maps onto the options of ``run`` (:func:`run_argv`), so a host
 of :class:`~hyperloom_multibranch.scheduling.settings.RunSettings` a command-line session is. Besides the common part
 the legacy entry validated, a multi-branch session needs ``multibranch.workload`` (``--workload``),
 ``workload.conc`` and ``workload.precision``; ``multibranch.inferencex_commit`` is ``--inferencex-commit``,
-``multibranch.max_branches`` ``--max-branches``,
+``multibranch.reference_script`` ``--reference-script``, ``multibranch.max_branches`` ``--max-branches``,
 ``multibranch.dev_leases`` ``--dev-leases``, each source of ``multibranch.autonomous_agents`` one
 ``--autonomous-agent``, ``multibranch.make_before_break`` (``true`` by default) ``--make-before-break`` or
 ``--no-make-before-break``, ``placement.measurement`` is ``--measurement``, and ``placement.max_parallel_tests`` is
 ``--max-parallel-tests``, at most what runs at once where the session measures. The fields ``run`` has no option for --
 ``objective``, ``options``, ``placement.profile`` and ``placement.specialist_capacity`` -- are not read. A spec that
-sets ``launch.server_args`` or ``launch.extra_env`` is refused rather than run without them: a multi-branch session
-resolves its base launch from the recipe sources, as ``run`` does, and reads neither (:func:`run_argv`).
+sets ``launch.server_args`` or ``launch.extra_env`` is refused rather than run without them: a multi-branch session's
+base launch, its flags and its environment, is the shell script ``multibranch.reference_script`` names.
 
 With ``placement.measurement`` ``hosted`` (the default), every test, PRELUDE's included, runs in a measurement sandbox
 of the grant, so the application's container needs no card: ``hosted-cpu`` serves as ``hosted-gpu`` does. Dev
@@ -157,6 +157,7 @@ def run_argv(spec: CampaignSpec, max_hours: float, parallel_tests: int) -> list[
         "osl": spec.osl,
         "ep": spec.ep,
         "inferencex-commit": _inferencex_commit(section.get("inferencex_commit")),
+        "reference-script": _reference_script(section.get("reference_script")),
         "max-hours": max_hours,
         "max-gpu-hours": spec.max_gpu_hours,
         "max-llm-usd": spec.max_llm_usd,
@@ -204,6 +205,12 @@ def _inferencex_commit(commit: object) -> str | None:
     return commit
 
 
+def _reference_script(path: object) -> str | None:
+    if path is not None and (not isinstance(path, str) or not path.strip()):
+        raise HostedRefused("multibranch.reference_script must be the path of a launch script")
+    return path
+
+
 def _refuse_launch_fields(spec: CampaignSpec) -> None:
     given = [
         field
@@ -212,8 +219,9 @@ def _refuse_launch_fields(spec: CampaignSpec) -> None:
     ]
     if given:
         raise HostedRefused(
-            f"a multibranch run does not read {' or '.join(given)}: its base launch is resolved from the recipe sources"
-            " (InferenceX, the framework's cookbook, the default table), as hyperloom-multibranch run resolves it"
+            f"a multibranch run does not read {' or '.join(given)}: give the base launch as"
+            " multibranch.reference_script, a shell launch script whose 'export NAME=value' lines set its environment"
+            " and whose server command carries its flags"
         )
 
 

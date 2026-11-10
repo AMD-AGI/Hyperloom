@@ -34,6 +34,7 @@ from collections.abc import Callable
 from dataclasses import asdict, dataclass, replace
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
+from typing import NoReturn
 
 import pytest
 
@@ -108,10 +109,12 @@ from hyperloom_multibranch.scheduling.settings import (
     RunSettings,
     Workload,
 )
+from hyperloom_multibranch.scheduling.session_base import freeze_session_base
 from hyperloom_multibranch.scheduling.session_environment import hosted_runner_cache
 from hyperloom_multibranch.scheduling.stops import SessionStopReason
 from hyperloom_multibranch.tests.base_records import write_record
 from hyperloom_multibranch.tests.staging_rig import verified_tool_cache
+from inference_suite.recipe import sources
 
 #: What the session's launcher sets to name the image the session runs on.
 IMAGE_VARS = ("HYPERLOOM_ACTIVE_IMAGE_REF", "HYPERLOOM_ACTIVE_IMAGE_DIGEST")
@@ -1677,20 +1680,6 @@ def test_a_restarted_hosted_run_checks_its_agents_isolation_before_it_finishes_t
     assert agent_cli == [], "the earlier session is left as it was"
 
 
-@pytest.mark.usefixtures("ready_environment")
-def test_a_hosted_spec_with_a_launch_section_ends_for_good_naming_the_field(
-    host: Host, agent_cli: list[RunSettings]
-) -> None:
-    host.spec(launch={"extra_env": {"AITER_BF16_FP8_MOE_BOUND": "0"}})
-
-    assert cli.main(["hosted", "run"]) == cli.EXIT_USAGE
-
-    document = host.exit_document()
-    assert (document["final"], document["returncode"]) == (True, cli.EXIT_USAGE)
-    assert "a multibranch run does not read launch.extra_env" in str(document["error"])
-    assert agent_cli == [] and not any(host.workspace.iterdir())
-
-
 @pytest.mark.parametrize(
     ("name", "value", "named"),
     [
@@ -1744,6 +1733,47 @@ def test_a_hosted_spec_resolves_its_base_from_inferencex_at_the_commit_it_names(
 
     assert agent_cli == [on_the_command_line]
     assert on_the_command_line.inferencex_commit == "8a76a78e41"
+
+
+@pytest.mark.usefixtures("ready_environment")
+def test_a_hosted_spec_freezes_the_reference_script_it_names_with_its_environment_as_the_base(
+    host: Host, agent_cli: list[RunSettings], tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    script = tmp_path / "launch.sh"
+    script.write_text(
+        "export AITER_BF16_FP8_MOE_BOUND=0\nvllm serve /models/Llama-3-8B --tensor-parallel-size 2 --enforce-eager\n",
+        encoding="utf-8",
+    )
+    host.spec(multibranch={**SPEC["multibranch"], "reference_script": str(script)})
+    on_the_command_line = _settings(*SPEC_RUN_ARGS, "--reference-script", str(script))
+    monkeypatch.setattr(local_peers, "machine_cards", _no_local_cards)
+    monkeypatch.setattr(sources, "_inferencex", _no_recipe_source)
+
+    assert cli.main(["hosted", "run"]) == 0
+
+    [settings] = agent_cli
+    assert settings == on_the_command_line
+    frozen = freeze_session_base(tmp_path / "toolbox", settings.workload, settings.reference_script)
+    assert frozen.launch.env["AITER_BF16_FP8_MOE_BOUND"] == "0" and "--enforce-eager" in frozen.launch.args
+
+
+@pytest.mark.usefixtures("ready_environment")
+def test_a_hosted_spec_with_a_launch_section_ends_for_good_pointing_at_the_reference_script(
+    host: Host, agent_cli: list[RunSettings]
+) -> None:
+    host.spec(launch={"extra_env": {"AITER_BF16_FP8_MOE_BOUND": "0"}})
+
+    assert cli.main(["hosted", "run"]) == cli.EXIT_USAGE
+
+    document = host.exit_document()
+    assert "does not read launch.extra_env: give the base launch as multibranch.reference_script" in str(
+        document["error"]
+    )
+    assert agent_cli == [] and not any(host.workspace.iterdir())
+
+
+def _no_recipe_source(*_: object) -> NoReturn:
+    raise AssertionError("a recipe source was read beside the reference script")
 
 
 @pytest.mark.parametrize(
