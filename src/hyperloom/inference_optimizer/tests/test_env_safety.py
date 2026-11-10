@@ -465,3 +465,77 @@ def test_an_external_source_may_not_carry_a_credential(name):
 def test_an_external_source_may_not_set_what_the_evaluation_runs(name):
     """A recipe that sets the evaluation's task or limit would grade every candidate on another evaluation."""
     assert not common_env_safety.is_allowed_external_env_key(name)
+
+
+@pytest.mark.parametrize(
+    "document",
+    [
+        {},
+        {"operator_extra_env": None, "operator_server_args": None},
+        {
+            "operator_extra_env": {
+                "SGLANG_USE_AITER": "1",
+                "MAX_NUM_BATCHED_TOKENS": "8192",
+                "TOKENIZERS_PARALLELISM": "x",
+            }
+        },
+        {"operator_server_args": "--tp 8 --max-total-tokens=120000 --tokenizer-path /models/m --max-prefill-tokens 5"},
+        {"rows": [{"tput": 1.5, "note": "-1", "key": ""}], "ok": True},
+        {"env": {"HF_TOKEN": ""}},
+        {"authored_framework_levers": ["a"], "baseline_last_failure_signature": "x", "reauthor_attempts": 3},
+        {"HF_TOKEN": "a field of the document, not an environment"},
+        {"operator_extra_env": {"HF_ENDPOINT": "https://hf-mirror.example/models?revision=main"}},
+        {"note": "write to ops@example.com, or see user@host without a scheme"},
+    ],
+    ids=[
+        "empty",
+        "none",
+        "env-knobs",
+        "server-arg-knobs",
+        "numbers",
+        "credential-name-without-a-value",
+        "field-names-that-contain-auth-or-signature",
+        "credential-name-outside-an-env-mapping",
+        "url-without-userinfo",
+        "an-at-sign-outside-a-url",
+    ],
+)
+def test_holds_credentials_is_false_for_knobs_and_numbers(document):
+    assert common_env_safety.holds_credentials(document) is False
+
+
+@pytest.mark.parametrize(
+    "document",
+    [
+        {"env": {"HF_TOKEN": "hf_live_value_123"}},
+        {"nested": [{"extra_envs": {"MY_SERVICE_API_KEY": "plaintext"}}]},
+        {"operator_extra_env": {"HF_TOKEN": "hf_live_value_123"}},
+        {"operator_server_args": "--tp 8 --api-key not-a-pattern"},
+        {"operator_server_args": "--tp 8 --admin-api-key=not-a-pattern"},
+        {"operator_server_args": "--hf-token abc"},
+        {"note": "Authorization: Bearer abcdefghijklmnop"},
+        ["--header", "sk-abcdefghijkl"],
+        ("ghp_abcdef",),
+        {"operator_extra_env": {"HF_ENDPOINT": "https://alice:s3cret-tok3n@hf-mirror"}},
+        {"operator_extra_env": {"HF_ENDPOINT": "https://tok3n@hf-mirror/models"}},
+        {"operator_server_args": "--tp 8 --model-url http://user:pw@host:8000/m"},
+        {"dependencies": {"remote": "git+https://user:pw@example.com/org/repo.git"}},
+    ],
+    ids=[
+        "name",
+        "nested-name",
+        "pins",
+        "flag",
+        "flag-equals",
+        "flag-token",
+        "bearer",
+        "list-of-strings",
+        "tuple",
+        "url-user-and-password",
+        "url-token-as-user",
+        "url-in-server-args",
+        "vcs-url",
+    ],
+)
+def test_holds_credentials_is_true_for_a_credential_by_name_flag_value_or_url_userinfo(document):
+    assert common_env_safety.holds_credentials(document) is True

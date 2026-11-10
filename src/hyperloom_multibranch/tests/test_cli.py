@@ -692,6 +692,12 @@ def test_an_agent_directions_map_without_an_agent_or_directions_is_a_usage_error
         _settings(*agents, "--agent-directions", str(path))
 
 
+def test_make_before_break_is_on_unless_the_command_line_turns_it_off() -> None:
+    assert _settings().make_before_break is True
+    assert _settings("--make-before-break").make_before_break is True
+    assert _settings("--no-make-before-break").make_before_break is False
+
+
 def test_dev_leases_lend_specialists_dev_sandboxes_and_default_to_none() -> None:
     assert _settings().dev_leases == 0
     assert _settings("--dev-leases", "2").dev_leases == 2
@@ -1592,7 +1598,7 @@ def _no_local_cards() -> tuple[int, ...]:
     raise AssertionError("a hosted run measures on the grant's cards, not this container's")
 
 
-@pytest.mark.parametrize(("max_sandboxes", "tests"), [(8, 4), (3, 3)])
+@pytest.mark.parametrize(("max_sandboxes", "tests"), [(8, 3), (3, 2)])
 @pytest.mark.usefixtures("ready_environment")
 def test_a_hosted_session_runs_as_many_tests_at_once_as_the_grant_has_cards_and_sandboxes_for(
     max_sandboxes: int, tests: int, host: Host, agent_cli: list[RunSettings], monkeypatch: pytest.MonkeyPatch
@@ -1604,7 +1610,30 @@ def test_a_hosted_session_runs_as_many_tests_at_once_as_the_grant_has_cards_and_
     assert cli.main(["hosted", "run"]) == 0
 
     [settings] = agent_cli
-    assert settings.caps.max_parallel_tests == tests, "TP=2 on 8 GPUs, at most one test per sandbox"
+    assert settings.caps.max_parallel_tests == tests, (
+        "TP=2 on 8 GPUs, at most one test per sandbox, and one test's room kept for the sandbox handed to the next test"
+    )
+
+
+@pytest.mark.parametrize(("given", "keep", "tests"), [({}, True, 3), ({"make_before_break": False}, False, 4)])
+@pytest.mark.usefixtures("ready_environment")
+def test_the_spec_turns_make_before_break_off_and_the_session_runs_every_test_the_grant_fits(
+    given: dict[str, bool],
+    keep: bool,
+    tests: int,
+    host: Host,
+    agent_cli: list[RunSettings],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(local_peers, "machine_cards", _no_local_cards)
+    monkeypatch.setenv("HYPERLOOM_GRANT_LIMITS", json.dumps({**GRANT, "max_gpus": 8, "max_sandboxes": 8}))
+    host.spec(placement={"profile": "hosted-gpu"}, multibranch={**SPEC["multibranch"], **given})
+
+    assert cli.main(["hosted", "run"]) == 0
+
+    [settings] = agent_cli
+    assert settings.make_before_break is keep
+    assert settings.caps.max_parallel_tests == tests, "TP=2 on 8 GPUs: four fit, one's room kept only when it is on"
 
 
 @pytest.mark.usefixtures("ready_environment")
@@ -2282,9 +2311,9 @@ def test_a_hosted_run_measures_in_the_sandboxes_of_the_grant_handed_to_it(handed
         None,
     )
     assert host.sandbox_keys.measurement.reveal() == HANDED["HYPERLOOM_SANDBOX_KEY_MEASUREMENT"]
-    assert settings.caps.max_parallel_tests == 3, "TP=2 on 8 GPUs, at most one test per sandbox"
-    on_three_cards = cli.settings_from(cli.build_parser().parse_args(["run", *WORKLOAD_ARGS]), lambda tp: 3)
-    assert settings == replace(on_three_cards, max_hours=settings.max_hours), "the flags give the workload"
+    assert settings.caps.max_parallel_tests == 2, "TP=2 on 8 GPUs and 3 sandboxes, one test's room kept for a handover"
+    on_two_tests = cli.settings_from(cli.build_parser().parse_args(["run", *WORKLOAD_ARGS]), lambda tp: 2)
+    assert settings == replace(on_two_tests, max_hours=settings.max_hours), "the flags give the workload"
     assert "HYPERLOOM_SANDBOX_KEY_MEASUREMENT" not in os.environ, "no child process inherits a grant key"
 
 
@@ -2321,6 +2350,15 @@ def test_a_hosted_run_makes_the_shared_directories_it_writes_2775_when_they_are_
     for name in ("USER_DATA_PATH", "HYPERLOOM_RUNNER_CACHE"):
         made = stat.S_IMODE(Path(os.environ[name]).stat().st_mode)
         assert made == (0o2775 if shared else 0o2775 & ~current_umask() & 0o777), (name, oct(made))
+
+
+@pytest.mark.usefixtures("ready_environment")
+def test_a_hosted_run_without_make_before_break_runs_every_test_the_handed_grant_fits(handed: Started) -> None:
+    assert cli.main(["run", *WORKLOAD_ARGS, "--measurement", "hosted", "--no-make-before-break"]) == 0
+
+    [(settings, _)] = handed.sessions
+    assert settings.make_before_break is False
+    assert settings.caps.max_parallel_tests == 3, "TP=2 on 8 GPUs and 3 sandboxes, no room kept"
 
 
 @pytest.mark.usefixtures("ready_environment")

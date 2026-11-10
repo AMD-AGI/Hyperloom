@@ -6,6 +6,7 @@
 from __future__ import annotations
 
 import errno
+import json
 import logging
 import os
 import hashlib
@@ -15,7 +16,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from uuid import uuid4
 
-from hyperloom_common.shared_storage import make_shared_dirs, writable_problems
+from hyperloom_common.shared_storage import SHARED_DIR_MODE, make_shared_dirs, ownership, writable_problems
 from hyperloom_common.timeutil import utc_now_compact
 
 log = logging.getLogger(__name__)
@@ -63,14 +64,31 @@ ARCHIVE_MODE = 0o2770
 #: shown to a specialist.  Whatever copies a session directory elsewhere must leave these out.
 PRIVATE_SESSION_SUBDIRS: tuple[str, ...] = (ARCHIVE_DIRNAME,)
 
-# Workspace-shared layout (one copy per $USER_DATA_PATH). mkdir-ed by install.sh + reused for every session_dir
-# launched from this workspace.
-_WORKSPACE_SKELETON: tuple[str, ...] = (
-    "runtime",  # install-generated runtime state (GEAK litellm config, source mirrors)
-    # Workspace-level KB root; it only coincides with the KB path when session_dir == workspace_root.
-    "runtime/recipe_kb",
-    "logs",  # launcher stdout (workspace-shared)
-)
+#: Where an account keeps the coordinator database of a session that holds a credential, below ``${TMPDIR:-/tmp}``:
+#: ``hyperloom-ledger-<uid>/<session id>-<hash of the id>/``, keyed by the session's id, not by the path it is mounted at. Not in the session directory, which the
+#: group can write: SQLite reaches a database, and makes its journal files, by path, so any directory on that path that
+#: another account can rename entries in lets it put a database of its own there while one is opened.
+PRIVATE_DB_DIR_PREFIX = "hyperloom-ledger-"
+#: A directory of this account's, ``0700``, that outlives the container, named instead of the one below ``TMPDIR`` (an
+#: operator prepares it: below a sticky parent, or one only this account can write in): a container's ``TMPDIR`` is its
+#: own disk, so a run resumed in a new container (after a preemption, say) finds no database there.
+ENV_LEDGER_DIR = "HYPERLOOM_LEDGER_DIR"
+
+#: The workspace root and its ``runtime/``, where the installer puts what later steps source or run (GEAK litellm config,
+#: source mirrors): the group may enter and read them, only their owner may change them, so no other account can swap
+#: what a run uses. The session directory below the root, with its own ``runtime/`` (lock, ledger, breakdown), is
+#: ``2775`` instead.
+_INSTALL_OWNED_MODE = 0o2755
+
+# Workspace-shared layout (one copy per $USER_DATA_PATH), with each entry's mode. mkdir-ed by install.sh + reused for
+# every session_dir launched from this workspace.
+_WORKSPACE_SKELETON: dict[str, int] = {
+    "runtime": _INSTALL_OWNED_MODE,  # install-generated runtime state (GEAK litellm config, source mirrors)
+    # Workspace-level KB root; it only coincides with the KB path when session_dir == workspace_root. What the accounts
+    # of a run write there is a marker nothing sources.
+    "runtime/recipe_kb": SHARED_DIR_MODE,
+    "logs": SHARED_DIR_MODE,  # launcher stdout (workspace-shared)
+}
 
 # Filename-safety regex for model_basename (ROCm/Claude CLI choke on ``:`` / ``/`` / whitespace).
 _MODEL_BASENAME_SANITIZE = re.compile(r"[^A-Za-z0-9._-]+")
@@ -181,12 +199,31 @@ def ensure_archive_root(session_dir: Path) -> Path:
     return root
 
 
+def _make_dirs(path: Path, mode: int = SHARED_DIR_MODE) -> None:
+    """:func:`~hyperloom_common.shared_storage.make_shared_dirs`, with a refusal that names the directory this account
+    cannot create in, its owner and mode, and what it needs to be."""
+    try:
+        make_shared_dirs(path, mode=mode)
+    except PermissionError as exc:
+        failed = Path(str(exc.filename or path))
+        parent = failed.parent
+        raise PermissionError(
+            exc.errno,
+            f"cannot create {failed}: the directory {parent}{ownership(parent)} is not writable by this account; the "
+            f"accounts of a run share it, so it needs group write and the setgid bit in the run's group (chmod 2775)",
+        ) from exc
+
+
 def ensure_session_skeleton(session_dir: Path) -> None:
     """Create ``session_dir`` and its per-session directory skeleton, each missing directory ``2775``
     (:func:`~hyperloom_common.shared_storage.make_shared_dirs`): the next leg of a hosted run may be another account of
-    the group."""
+    the group.
+
+    Raises:
+        PermissionError: This account cannot create in a directory that exists, which the message names.
+    """
     for sub in _SESSION_SKELETON:
-        make_shared_dirs(session_dir / sub)
+        _make_dirs(session_dir / sub)
 
 
 def make_session_dir(model_name: str | os.PathLike[str] | None = None, *, target: Path | None = None) -> Path:
@@ -196,9 +233,9 @@ def make_session_dir(model_name: str | os.PathLike[str] | None = None, *, target
     generated one.
     """
     ws = workspace_root()
-    ws.mkdir(parents=True, exist_ok=True)
-    for sub in _WORKSPACE_SKELETON:
-        (ws / sub).mkdir(parents=True, exist_ok=True)
+    _make_dirs(ws, _INSTALL_OWNED_MODE)
+    for sub, mode in _WORKSPACE_SKELETON.items():
+        _make_dirs(ws / sub, mode)
 
     if target is not None:
         sd = Path(target)
@@ -218,9 +255,75 @@ def make_session_dir(model_name: str | os.PathLike[str] | None = None, *, target
     return sd
 
 
-def db_path_for(session_dir: Path) -> Path:
-    """Return the canonical SQLite database path for a session."""
+def shared_db_path_for(session_dir: Path) -> Path:
+    """Return the coordinator database path in the session directory, where every account of the group can open it."""
     return Path(session_dir) / "storage" / "coordinator.db"
+
+
+def named_ledger_dir() -> Path | None:
+    """The directory ``HYPERLOOM_LEDGER_DIR`` names for this account's ledgers, or ``None`` when it is not set.
+
+    Raises:
+        ValueError: When it is not an absolute path: a relative one names a different ledger from each working directory.
+    """
+    named = os.environ.get(ENV_LEDGER_DIR, "").strip()
+    if named and not os.path.isabs(named):
+        raise ValueError(f"{ENV_LEDGER_DIR} must be an absolute path, not {named!r}")
+    return Path(named) if named else None
+
+
+def _recorded_session_id(session_dir: Path) -> str:
+    """The id ``manifest.json`` records for the session, else the one ``state.json`` does; ``""`` when neither is
+    readable (a session not yet started, or one another account's pins keep owner-only)."""
+    for name in SESSION_FILES:
+        try:
+            recorded = json.loads((Path(session_dir) / name).read_text(encoding="utf-8")).get("session_id")
+        except (OSError, ValueError, AttributeError):
+            continue
+        if isinstance(recorded, str) and recorded.strip():
+            return recorded.strip()
+    return ""
+
+
+def session_ledger_key(session_dir: Path) -> str:
+    """The name of the session's directory among an account's ledgers: its recorded session id (the id ``manifest.json``
+    gives it when it starts, so the same for every leg and for every path the session directory is mounted at), else the
+    name of the session directory, which a mount of it at another path keeps too. Neither is the path."""
+    ident = _recorded_session_id(session_dir) or Path(os.path.realpath(session_dir)).name or "session"
+    return f"{re.sub(r'[^A-Za-z0-9_.-]', '_', ident)[:40]}-{hashlib.sha256(ident.encode()).hexdigest()[:16]}"
+
+
+def private_db_path_for(session_dir: Path) -> Path:
+    """Return the path of this account's own coordinator database for a session, outside the session directory (see
+    :data:`PRIVATE_DB_DIR_PREFIX`, :data:`ENV_LEDGER_DIR` and :func:`session_ledger_key`); nothing is made there.
+
+    Raises:
+        ValueError: When ``HYPERLOOM_LEDGER_DIR`` is not an absolute path.
+    """
+    ledgers = named_ledger_dir() or Path(os.environ.get("TMPDIR") or "/tmp") / f"{PRIVATE_DB_DIR_PREFIX}{os.geteuid()}"
+    return ledgers / session_ledger_key(session_dir) / "coordinator.db"
+
+
+def ledger_mark_path(session_dir: Path) -> Path:
+    """Return the file a leg writes into the session directory when it opens a ledger outside it: from then on the
+    session's database is not in the session directory, and one found there is stale or was put there."""
+    return Path(session_dir) / "runtime" / "ledger_private.json"
+
+
+def private_db_exists(session_dir: Path) -> bool:
+    """Whether this account has made its own coordinator database for a session: a regular file of this account's, a
+    link never followed at the end. An entry another account planted there (a link, a file of its own) is not one."""
+    try:
+        info = os.lstat(private_db_path_for(session_dir))
+    except OSError:
+        return False
+    return stat.S_ISREG(info.st_mode) and info.st_uid == os.geteuid()
+
+
+def db_path_for(session_dir: Path) -> Path:
+    """Return the coordinator database this account uses for a session: its own outside the session directory once it
+    has made one, else the one in the session directory."""
+    return private_db_path_for(session_dir) if private_db_exists(session_dir) else shared_db_path_for(session_dir)
 
 
 def asset_root() -> Path:
@@ -322,9 +425,11 @@ __all__ = [
     "AssetRootNotFound",
     "DEFAULT_SESSION_DIR",
     "ENV_CURRENT_SESSION_DIR",
+    "ENV_LEDGER_DIR",
     "ENV_OVERRIDE_ASSET_ROOT",
     "ENV_USER_DATA_PATH",
     "PACKAGE_ROOT",
+    "PRIVATE_DB_DIR_PREFIX",
     "PRIVATE_SESSION_SUBDIRS",
     "SESSION_FILES",
     "asset_prompt_references_dir",
@@ -339,9 +444,15 @@ __all__ = [
     "make_session_dir",
     "mn_profile_trace_root",
     "deps_cache_root",
+    "ledger_mark_path",
+    "named_ledger_dir",
+    "private_db_exists",
+    "private_db_path_for",
     "resolve_dep_dir",
     "runtime_dir",
     "session_dir",
+    "session_ledger_key",
+    "shared_db_path_for",
     "workspace_root",
 ]
 

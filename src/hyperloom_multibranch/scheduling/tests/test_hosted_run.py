@@ -56,7 +56,7 @@ ACCOUNT = RunAs(user="hl-specialist", uid=1500, gid=1500, groups=(1500,), home="
 DENIED = "bwrap: setting up uid map: Permission denied"
 
 
-def _spec(measurement: str, image: str = f"registry.example/vllm@{DIGEST}") -> CampaignSpec:
+def _spec(measurement: str, image: str = f"registry.example/vllm@{DIGEST}", **multibranch: object) -> CampaignSpec:
     return parse_campaign(
         {
             "schema": "hyperloom.campaign-spec/v1",
@@ -67,7 +67,7 @@ def _spec(measurement: str, image: str = f"registry.example/vllm@{DIGEST}") -> C
             "workload": {"conc": 16, "isl": 1024, "osl": 512, "precision": "fp8"},
             "budget": {"max_hours": 1},
             "placement": {"profile": "hosted-gpu", "measurement": measurement},
-            "multibranch": {"workload": "inferencex"},
+            "multibranch": {"workload": "inferencex", **multibranch},
         }
     )
 
@@ -396,3 +396,24 @@ def test_a_hosted_run_with_no_account_and_a_real_layer_bubblewrap_measures_here_
     assert launch_isolation(local=True) == LaunchIsolation(
         agent_isolation.BWRAP, agent_isolation.BWRAP, agent_isolation.BWRAP, True, ()
     )
+
+
+@pytest.mark.parametrize(
+    ("given", "switches"),
+    [
+        ({}, []),  # run's default: on
+        ({"make_before_break": True}, ["--make-before-break"]),
+        ({"make_before_break": False}, ["--no-make-before-break"]),
+    ],
+)
+def test_the_operator_turns_make_before_break_on_or_off_in_the_spec(
+    given: dict[str, bool], switches: list[str]
+) -> None:
+    argv = run_argv(_spec("hosted", **given), 1.0, 8)
+    assert [arg for arg in argv if arg.endswith("make-before-break")] == switches
+
+
+@pytest.mark.parametrize("given", ["false", 0, 1])
+def test_a_make_before_break_that_is_not_true_or_false_is_refused(given: object) -> None:
+    with pytest.raises(HostedRefused, match="multibranch.make_before_break must be true or false"):
+        run_argv(_spec("hosted", make_before_break=given), 1.0, 8)

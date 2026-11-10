@@ -69,7 +69,8 @@ _SOURCE_MODE = 0o755
 @dataclass(frozen=True)
 class HostedSandboxes:
     """Tests run in runner sandboxes of the host's sandbox service, on the inputs ``inputs`` gives for the session's
-    ``MB-toolbox`` directory and the workload's TP."""
+    ``MB-toolbox`` directory and the workload's TP; a finished test's sandbox is kept for the next test as the
+    session's ``make_before_break`` says (the operator's ``multibranch.make_before_break``)."""
 
     inputs: ToolboxInputsFor
     on_this_machine: ClassVar[bool] = False
@@ -80,7 +81,9 @@ class HostedSandboxes:
         from hyperloom_multibranch.toolbox.hosted_toolbox import HostedOptions, build_hosted_toolbox
 
         inputs = self.inputs(setup.layout, setup.workload.tp)
-        options = HostedOptions(timeout_sec=attempt_timeout_sec(setup.workload))
+        options = HostedOptions(
+            timeout_sec=attempt_timeout_sec(setup.workload), make_before_break=setup.make_before_break
+        )
         return build_hosted_toolbox(inputs, blackboard, acceptance, spec, options=options)
 
 

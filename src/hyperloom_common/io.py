@@ -102,6 +102,9 @@ class WriteOptions:
     ``group_read`` lets the directory's group read a new file when the directory is shared
     with that group (setgid and group-readable); never other-readable, and ignored when
     ``mode`` or ``preserve_mode`` applies, or ``shared`` widens the file.
+    ``share_parents`` makes the parents ``make_parents`` creates follow ``make_shared_dirs``
+    as well while the file keeps its own mode: a file only its owner may read still lives in
+    a directory the group can write.
     ``fsync`` and ``fsync_dir`` raise the
     ``OSError`` of a flush that fails: a caller that asks for durability learns
     when it did not get it.
@@ -114,6 +117,7 @@ class WriteOptions:
     preserve_mode: bool = False
     shared: bool = False
     group_read: bool = False
+    share_parents: bool = False
 
 
 #: A crash-safe replace: parents created, the data and the rename flushed to disk, an existing file's mode kept.
@@ -188,7 +192,9 @@ def atomic_write_bytes(path: str | Path, data: bytes, *, options: WriteOptions =
             flush=Flush(file=options.fsync, directory=options.fsync_dir),
         )
         return
-    if options.make_parents:
+    if options.make_parents and options.share_parents:
+        make_shared_dirs(path.parent)
+    elif options.make_parents:
         path.parent.mkdir(parents=True, exist_ok=True)
     fd, tmp_str = tempfile.mkstemp(prefix=f".{path.name}.", suffix=".tmp", dir=str(path.parent))
     tmp = Path(tmp_str)
