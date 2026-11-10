@@ -802,10 +802,9 @@ class Session:
         return SessionOutcome(SessionStopReason.MAPPED, None, None, "")
 
     async def _root_shares(self, prelude: PreludeResult) -> RootShares | None:
-        """The root's shares, waited for (its op shares, else its kernel shares), recorded as a ``PRELUDE`` decision;
-        ``None`` when it has none."""
+        """The root's op shares, waited for, recorded as a ``PRELUDE`` decision; ``None`` when it has none."""
 
-        sources = ShareSources(self._blackboard, self._toolbox, self._clock, self._layout.toolbox)
+        sources = ShareSources(self._blackboard, self._toolbox, self._clock)
         read = await root_shares(sources, prelude.root_commit, prelude.root_profile_job)
         self._decisions.record(Decision(DecisionKind.PRELUDE, ROOT_SHARES_READ, INTEGRATION_BRANCH, read.detail))
         return read.shares
