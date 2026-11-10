@@ -34,10 +34,17 @@ EXCLUDES = (*GIT_EXCLUDE_PATTERNS, "*.so", "*.o", "jit/build/", "jit/flydsl_cach
 _IDENTITY = ("-c", "user.name=arbor", "-c", "user.email=arbor@localhost")
 
 
+def editable(config: dict) -> list[dict]:
+    """The config's editable packages other than the workspace (which landed.patch carries). Here rather than in
+    arbor/execute/packages.py, which imports this module, so the two do not import each other."""
+    ws = str(config.get("workspace_root") or "").rstrip("/")
+    return [p for p in config.get("editable_packages") or []
+            if p.get("name") and p.get("path") and str(p["path"]).rstrip("/") != ws]
+
+
 def paths(config: dict) -> list[str]:
     """The editable packages other than the workspace, which this module tracks: none under a host."""
     from arbor import component
-    from arbor.execute.packages import editable
     if component.is_component(config):
         return []
     return [str(p["path"]).rstrip("/") for p in editable(config)]

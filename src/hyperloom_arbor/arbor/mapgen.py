@@ -158,10 +158,9 @@ def generate(profile: dict, min_share: float = DEFAULT_MIN_SHARE) -> tuple[list[
     return directions, {"groups": totals, "unmapped": sorted(unmapped, key=lambda o: -o[1])}
 
 
-def main(argv: list[str]) -> int:
+def parser():
+    """``python3 -m arbor.directions generate``'s parser, built without parsing (arbor/cli/payload.py)."""
     import argparse
-    from arbor import component
-    from arbor.directions import _entry
     ap = argparse.ArgumentParser(prog="python3 -m arbor.directions generate",
                                  description="A directions map from a host's root profile, with a "
                                              "serving roadmap as the template.")
@@ -169,8 +168,14 @@ def main(argv: list[str]) -> int:
     ap.add_argument("--out", required=True, help="the map to write: {\"directions\": [...]}")
     ap.add_argument("--min-share", type=float, default=DEFAULT_MIN_SHARE,
                     help=f"leave out an op family under this percent of GPU time ({DEFAULT_MIN_SHARE:g})")
+    return ap
+
+
+def main(argv: list[str]) -> int:
+    from arbor import component
+    from arbor.directions import _entry
     try:
-        args = ap.parse_args(argv)
+        args = parser().parse_args(argv)
     except SystemExit as exc:
         return 0 if exc.code == 0 else 2
     try:

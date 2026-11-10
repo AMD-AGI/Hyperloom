@@ -20,6 +20,22 @@ Merged to `main` and not yet carried by a tagged release. Each entry moves
 into the [release](https://github.com/AMD-AGI/Hyperloom/releases) that ships
 it.
 
+- **An Arbor agent on an AgentX session keeps by MB's rule and no longer
+  reads the round's numbers itself.** MB writes `component.bench_read`, so
+  Arbor's harness reads the session's objective and its guards (P50 or P90
+  interactivity, total token throughput) and the output throughput from each
+  run's `report.json` by path, averages them over replays, and books as
+  NOT_MEASURED a run whose report lacks one, or whose round did not complete,
+  stopped at the failed-request threshold, or ran in fast mode
+  (`bench_read.require`). `opt_objective` is now the structured form: the
+  objective, MB's 2% bar and each guard's noise band (`HYPERLOOM_PERF_NOISE_PCT`,
+  5% by default), and Arbor reverts a change that breaks a guard. Before, the
+  bench agent read the numbers at the paths the directives named, a partial
+  round's numbers could be kept, and Arbor kept on its pack's bar and second
+  axis. Any AgentX session now needs Arbor `29c72f9`, and one measured by MB's
+  round `1c6eef1` (`v0.9.6`, the vendored copy), or later; an older pin is
+  refused at preflight naming the commit. A P50 session on an Arbor without
+  `arbor/objective.py` is refused too, where it ran on its pack's metric.
 - **Each round records its power in one `power.json`, with energy and J per token.**
   An InferenceSuite round (and a GEAK replay) now writes `power.json` in place
   of `gpu_power.json` and `gpu_samples.csv`: every card's sysfs power,
@@ -93,9 +109,7 @@ it.
   `total_throughput_gain_pct`, not `interactivity_gain_pct`, and does not
   replace an interactivity champion. Each Arbor is given the objective as its
   config's `opt_objective` and optimizes it instead of its pack's metric; an
-  Arbor that cannot (before `9c455df` for P50, `df9b55a` for total token
-  throughput) is refused at preflight, except an older
-  one in a P50 session, which runs on its pack's metric as before.
+  Arbor that cannot is refused at preflight.
   `--agentx-objective` with
   `--workload inferencex` exits 2. Before, an operator had to patch the source
   to grade on total throughput.

@@ -5,7 +5,9 @@ A session is a master and its workers (``arbor/roles.py``). The master:
 - **sets the campaign up** (``prepare``): the mode's refusals, the roll lease, the review gate, the skill
   conflicts, ``init``, the recorded baseline, the host's run and the root's accuracy;
 - **clears each pass** (``before_pass``): STOP, an abort, the iteration and time limits, a pending round end, the
-  target, a rolling chunk's switch, a host's dossier pass whose map is set, and the host's deadline;
+  target, a rolling chunk's switch, a host's dossier pass whose map is set, and the host's deadline; then, with the
+  map's directions all closed and time for one more iteration, arms a revisit of a NOT MEASURED change
+  (``arbor/revisit.py``);
 - **ends a round** (``round_end``): its same-node A/B, booked (``arbor/rounds.py``);
 - **ends the campaign** (``finish``): the ``end`` event and, under a host, the exit record.
 
@@ -26,7 +28,7 @@ from pathlib import Path
 
 import yaml
 
-from arbor import component, conflicts, directions, lifecycle, retraction, review, roles, rounds, triggers
+from arbor import component, conflicts, directions, lifecycle, retraction, review, revisit, roles, rounds, triggers
 from arbor.cli.iterate import _find_arbor_root, cmd_init
 from arbor.pack import load_campaign, validate_campaign
 from arbor.pack.loader import PACK_RESULTS_CONCERNS, PACK_RESULTS_DIR, PACK_RESULTS_FLAG
@@ -364,6 +366,11 @@ def prepare(args: argparse.Namespace, held: dict) -> Session | int:
     if component.is_component(campaign):
         refused += [e for e in validate_campaign(campaign, allow_results=args.allow_pack_results)
                     if e not in refused]
+    # The objective (arbor/objective.py): one Arbor cannot read, or another than the session started on.
+    from arbor import objective as _objective
+    wrong = _objective.problem(campaign, session_dir)
+    if wrong and wrong not in refused:
+        refused.append(wrong)
     if component.stops_at_map(campaign.config) and not directions.enabled(campaign):
         refused.append("component.stop_at \"map\" needs map rounds, which this campaign does not "
                        "run: they need the dossier skill in the pack, a workload that is not a "
@@ -387,6 +394,22 @@ def prepare(args: argparse.Namespace, held: dict) -> Session | int:
             refused.append(problem)
     if refused:
         return component.refuse(refused, campaign.config, session_dir)
+    # What this campaign optimizes, for a host to check before it trusts the run (arbor/objective.py).
+    if session_dir:
+        try:
+            told = _objective.record(campaign, session_dir)
+            if told["source"] != "pack":
+                print(f"[arbor] Objective: {told['metric']} ({told['direction']}), asked as \"{told['asked']}\", "
+                      f"in place of the pack's {told['pack_metric']}", file=sys.stderr, flush=True)
+        except OSError as exc:
+            print(f"[arbor] could not write {_objective.FILE}: {exc}", file=sys.stderr, flush=True)
+        # How this start was asked for: its parameters, and which came from a payload (arbor/cli/payload.py).
+        from arbor.cli import payload as _payload
+        try:
+            _payload.record(session_dir, args, "worker" if hasattr(args, "order") else
+                            "run" if hasattr(args, "split") else "master")
+        except OSError as exc:
+            print(f"[arbor] could not write {_payload.RECORD}: {exc}", file=sys.stderr, flush=True)
     # The other editable trees (AITER) become git trees with a baseline, at every start, so each
     # iteration commits and reverts them with the workspace (arbor/execute/trees.py).
     if not component.is_component(campaign) and campaign.config.get("docker_container"):
@@ -497,6 +520,14 @@ def prepare(args: argparse.Namespace, held: dict) -> Session | int:
         state = CampaignState.load(state_path)
         state.mode = campaign.mode
         state.save(state_path)
+    # The kept point a REVERT or a NOT MEASURED iteration goes back to (arbor/execute/kept.py): this container's
+    # record, or the tree as it stands at this start, after the seed commit and any restored KEEP.
+    if campaign.config.get("docker_container") and campaign.config.get("workspace_root"):
+        from arbor.execute import kept as _kept
+        try:
+            _kept.ensure(campaign.config["docker_container"], campaign.config, session_dir)
+        except Exception as exc:   # noqa: BLE001 - without it, a REVERT reverts its own commit, as before
+            print(f"[arbor] WARNING: no kept point recorded ({exc})", file=sys.stderr, flush=True)
 
     # A run split into commands (arbor run --split processes, a worker's order) keeps its first start, so a time
     # budget bounds the whole run, not each command. A resumed standalone session keeps what it already spent
@@ -689,6 +720,20 @@ def before_pass(s: Session) -> Step:
     if s.comp and not s.comp.may_start(state):
         s.exit_reason = s.comp.reason
         return Step("exit")
+
+    # The revisit phase (arbor/revisit.py): with every direction closed and time for one more iteration, a NOT
+    # MEASURED change is measured once more before the round closes. Under a host or a rolling job the deadline was
+    # checked above; a standalone run checks its time budget here.
+    cfg = s.campaign.config
+    if cfg.get("docker_container") and cfg.get("workspace_root"):
+        try:
+            ok, line = revisit.time_fits(state, None if s.comp else s.time_budget, s.start_time)
+            armed = revisit.arm(cfg["docker_container"], cfg, s.session_dir, iteration, state, ok)
+            if armed:
+                print(f"[arbor] revisit: iteration {iteration} measures iteration {armed['of']}'s change again "
+                      f"({line})")
+        except Exception as exc:   # noqa: BLE001 - without it the round closes as it did before
+            print(f"[arbor] WARNING: no revisit armed: {exc}")
     return Step("run", iteration, state)
 
 

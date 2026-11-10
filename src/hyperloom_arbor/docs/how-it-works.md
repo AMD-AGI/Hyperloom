@@ -88,15 +88,24 @@ The agent declares what its change is for. The intent sets how the gate judges i
 | `WIN` (the default) | a faster tree | KEEP only if the metric clears the bar |
 | `FIX` | a defect, cleanup or enabling change | KEEP when neutral; no bar |
 | `FIX-CORRECTNESS` | a correctness fix | KEEP when neutral; may cost up to `correctness_regression_cap_pct` (5 %) of the metric |
+| `FIX-STABILITY` | a fix for a hang, a stall or a lost device on the kept tree | with `FAILURE: iter-K`, an iteration since the last KEEP whose server log or row shows the failure (or whose reading collapsed), and none in its own run: may cost up to `stability_regression_cap_pct` (3 %); without that evidence, gated as a FIX |
 | `LEARN` | a probe: evidence, not a tree | KEEP as PROBE when it records findings; books nothing |
 
-Older names still parse: `CLASS: B` (WIN), `A` (FIX), `A-CORRECTNESS`, `PROBE` (LEARN).
+Older names still parse: `CLASS: B` (WIN), `A` (FIX), `A-CORRECTNESS`, `A-STABILITY`, `PROBE` (LEARN).
+
+The server log's tail after the bench is kept as `iter_N/server_end.log`, for the stability check.
 
 **Verdicts:** KEEP, REVERT and NOT_MEASURED. NOT_MEASURED means the iteration says nothing about
 the change: an integrity failure (a protected validator file changed), an arm mismatch under
 `arm_check: enforce`, an infrastructure error in correctness, a bench that did not run, or a
 missing or non-positive metric. It changes no counter except the invalid streak; three in a row
 write `ABORTED.md` and stop the campaign.
+
+**The kept tree:** after every REVERT and every NOT_MEASURED iteration, the workspace and the
+editable trees go back to the tree last kept (the start, a KEEP or PROBE, or a commit the harness
+made between iterations), in one `Restore the kept tree ...` commit. No unmeasured change stays
+under later ones. A NOT_MEASURED iteration's change is noted in `<session>/invalids.json` first,
+for the revisit phase below.
 
 **The bar:** the pack's `objective.measurement.threshold_rel` (1.01 by default) over the best
 booked result. A change inside the noise band (`noise_band_pct`, 1.0 % by default) is neutral:
@@ -150,7 +159,12 @@ With the `dossier-v1` skill enabled (and a serving workload), a campaign plans b
    harness writes it, and a hand edit is undone.
 3. **Working the map:** the agent cites the direction it works in its DONE line and closes it with
    `DIRECTION: {"id": ..., "status": "done|killed|below_floor|plan", "why": ...}`.
-4. **The update round:** when every direction is closed, the next iterations re-profile, write the
+4. **The revisit phase:** when every direction is closed and the time left fits one more
+   iteration (the time budget, or a host's or a rolling job's deadline), each noted NOT_MEASURED
+   change is applied to the kept tree again and measured once, oldest first, before the round
+   closes (`arbor/revisit.py`). A probe's change, one that no longer applies, and a revisit that
+   is not measured either are not tried again; the outcome is recorded on the change's entry.
+5. **The update round:** when every direction is closed, the next iterations re-profile, write the
    lessons and re-rank the directions (LEARNs, the cap waived, at most 8). The new map starts the
    next round; a map with nothing new leads to a fresh start, then to the top planned rewrite, then
    to STOP. Two rounds in a row without a KEEP stop the campaign.
