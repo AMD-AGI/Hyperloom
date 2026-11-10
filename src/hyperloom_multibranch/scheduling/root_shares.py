@@ -16,7 +16,6 @@ session mapping without shares at once; one whose analysis gave none, once the w
 from __future__ import annotations
 
 from dataclasses import dataclass
-from pathlib import Path
 from typing import TYPE_CHECKING
 
 from hyperloom_multibranch.contracts.blackboard.records import OpShares
@@ -50,13 +49,11 @@ class SharesRead:
 
 @dataclass(frozen=True)
 class ShareSources:
-    """Where :func:`root_shares` reads: the toolbox's jobs and the blackboard's op shares, on the session's clock.
-    ``toolbox_dir``, the session's toolbox directory, is not read: the shares come from the blackboard."""
+    """Where :func:`root_shares` reads: the toolbox's jobs and the blackboard's op shares, on the session's clock."""
 
     blackboard: RecordSearch
     toolbox: RealToolbox
     clock: Clock
-    toolbox_dir: Path
 
 
 async def root_shares(sources: ShareSources, root_commit: str, job: str) -> SharesRead:

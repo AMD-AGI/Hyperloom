@@ -27,6 +27,7 @@ OWN_PACKAGES = ("hyperloom.", "hyperloom_multibranch.")
 NOT_YET_IN_PACKAGE = frozenset(
     {
         "hyperloom_multibranch.specialist.agent_sessions",
+        "hyperloom_multibranch.specialist.autonomous_session",
         "hyperloom_multibranch.specialist.dossier_pass",
         "hyperloom_multibranch.specialist.map_session",
         "hyperloom_multibranch.specialist.model_sessions",
