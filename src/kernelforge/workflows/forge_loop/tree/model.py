@@ -311,29 +311,30 @@ class SearchTree:
         self.round = round_
 
     def mark_slot(self, index: int, status: SlotStatus) -> None:
-        if self.round is None:
-            raise ValueError("no round is open")
-        slots = tuple(replace(item, status=status) if item.index == index else item for item in self.round.slots)
-        self.round = replace(self.round, slots=slots)
+        round_ = self._open_round()
+        slots = tuple(replace(item, status=status) if item.index == index else item for item in round_.slots)
+        self.round = replace(round_, slots=slots)
 
     def close_round(self, attempts: list[Attempt]) -> None:
         """Record the round's attempts and clear it."""
-        if self.round is None:
-            raise ValueError("no round is open")
-        if any(item.iteration != self.round.iteration for item in attempts):
-            raise ValueError(f"an attempt does not belong to iteration {self.round.iteration}")
+        iteration = self._open_round().iteration
+        if any(item.iteration != iteration for item in attempts):
+            raise ValueError(f"an attempt does not belong to iteration {iteration}")
         self.attempts.extend(attempts)
         self.round = None
 
     def close_interrupted_round(self, reason: str) -> None:
         """Close the round a session left open: a slot whose node was admitted keeps it, every other slot is lost."""
+        round_ = self._open_round()
+        admitted = {item.slot: item for item in self.nodes if item.iteration == round_.iteration and item.slot}
+        self.close_round(
+            [_interrupted_attempt(round_.iteration, slot, admitted.get(slot.index), reason) for slot in round_.slots]
+        )
+
+    def _open_round(self) -> Round:
         if self.round is None:
             raise ValueError("no round is open")
-        iteration = self.round.iteration
-        admitted = {item.slot: item for item in self.nodes if item.iteration == iteration and item.slot}
-        self.close_round(
-            [_interrupted_attempt(iteration, slot, admitted.get(slot.index), reason) for slot in self.round.slots]
-        )
+        return self.round
 
 
 @dataclass(frozen=True)
