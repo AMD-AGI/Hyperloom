@@ -379,6 +379,10 @@ def _break_spec(run, doc):
         (lambda r, m: m.delenv(Var.RUN_ID), Var.RUN_ID),
         (lambda r, m: m.setenv(Var.MCP_PORT, "99999"), Var.MCP_PORT),
         (lambda r, m: m.setenv("USER_DATA_PATH", "relative"), "USER_DATA_PATH must be set to an absolute path"),
+        (
+            lambda r, m: m.setenv("HYPERLOOM_LEDGER_DIR", "relative/ledgers"),
+            "HYPERLOOM_LEDGER_DIR must be an absolute path",
+        ),
     ],
 )
 def test_a_refused_request_is_final_with_return_code_2_and_never_reaches_optimize(run, monkeypatch, mutate, message):
@@ -1174,3 +1178,73 @@ def test_write_exit_is_public_and_writes_the_documented_document(tmp_path):
     write_exit(tmp_path, final=True, returncode=3, stop_reason="x")
 
     assert json.loads((tmp_path / "exit.json").read_text()) == {"final": True, "returncode": 3, "stop_reason": "x"}
+
+
+# -- a resume that cannot be inspected is final, whatever the previous leg ended on ---------------------------------
+_CREDENTIAL_SESSION = {
+    "operator_extra_env": {"HF_TOKEN": "hf_live_value_123"},
+    "tick": 3,
+    "stop_reason": "supervisor_restart_requested",  # what a watchdog restart left: the host starts the run again
+}
+
+
+def _a_credential_session_that_ran_in_another_container(run, monkeypatch, tmp_path):
+    """A first leg leaves a session; it is a credential session that ran on a ledger in the first container's TMPDIR, and
+    its last ``stop_reason`` is the watchdog's. The next leg starts in a new container, with a TMPDIR of its own."""
+    monkeypatch.delenv("HYPERLOOM_LEDGER_DIR", raising=False)
+    first = tmp_path / "tmp-container-1"
+    first.mkdir(mode=0o700)
+    monkeypatch.setenv("TMPDIR", str(first))
+    FakeOptimize(monkeypatch)  # the first leg: leaves a session behind
+    assert entry.main(["run"]) == 0
+    session = Path(_session_json(run))
+    (session / "state.json").write_text(json.dumps(_CREDENTIAL_SESSION))
+    from hyperloom.inference_optimizer.session.paths import ledger_mark_path
+
+    ledger_mark_path(session).parent.mkdir(parents=True, exist_ok=True)
+    ledger_mark_path(session).write_text(
+        '{"ledger_private": true}'
+    )  # what the first leg left when it opened its ledger
+    run.restart()
+    second = tmp_path / "tmp-container-2"
+    second.mkdir(mode=0o700)
+    monkeypatch.setenv("TMPDIR", str(second))
+    (run.state / "install.log").unlink(missing_ok=True)
+    return session
+
+
+def test_a_resume_with_no_ledger_is_final_with_the_remedy_even_after_a_watchdog_restart(run, monkeypatch, tmp_path):
+    session = _a_credential_session_that_ran_in_another_container(run, monkeypatch, tmp_path)
+    fake = FakeOptimize(monkeypatch)
+    assert entry.main(["run"]) == 2
+    written = _exit(run)
+    assert (written["final"], written["returncode"]) == (True, 2), written
+    assert "HYPERLOOM_LEDGER_DIR" in written["error"] and "start a new session" in written["error"]
+    assert "stop_reason" not in written, "not the previous leg's"
+    assert fake.calls == [] and not (run.state / "install.log").exists(), "nothing was installed or started"
+
+    run.restart()  # the host starts it again, in another container
+    assert entry.main(["run"]) == 2
+    assert _exit(run) == written, "the same final answer, nothing was run"
+    assert fake.calls == [] and json.loads((session / "state.json").read_text()) == _CREDENTIAL_SESSION
+
+
+def test_a_resume_the_guard_of_optimize_would_refuse_is_final_too(run, monkeypatch, tmp_path):
+    """A worker whose exit is not proven (a held GPU lease in the session's database): ``optimize`` would exit 2, which
+    after a watchdog restart ``exit.json`` records as not final, and the host would start the run again for ever."""
+    from hyperloom.inference_optimizer.session.paths import shared_db_path_for
+    from hyperloom.orchestrator.bus.storage.connection import SqliteConnection
+
+    FakeOptimize(monkeypatch)
+    assert entry.main(["run"]) == 0
+    session = Path(_session_json(run))
+    (session / "state.json").write_text(json.dumps({"stop_reason": "supervisor_restart_requested", "tick": 3}))
+    database = SqliteConnection(shared_db_path_for(session))
+    database.raw.execute("INSERT INTO gpu_leases (gpu_id, holder_id, task_id) VALUES (0, 'worker', 'ti-live')")
+    database.raw.close()
+    run.restart()
+    fake = FakeOptimize(monkeypatch)
+    assert entry.main(["run"]) == 2
+    written = _exit(run)
+    assert (written["final"], written["returncode"]) == (True, 2) and "worker exit is unproven" in written["error"]
+    assert fake.calls == []
