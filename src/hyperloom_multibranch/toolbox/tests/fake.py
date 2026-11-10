@@ -314,6 +314,7 @@ class FakeToolbox(RealToolbox):
             claim_ttl_seconds=self.config.claim_ttl_seconds,
             clock=lambda: self.executor.now,
             build_retry_seconds=0.0,
+            infra_backoff_seconds=(),
         )
         super().__init__(stores, self.executor, acceptance, tuning=tuning)
 

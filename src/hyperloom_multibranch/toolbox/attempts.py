@@ -7,12 +7,14 @@ An :class:`Executor` runs ONE attempt in a fresh sandbox and returns a ``TestRes
 attempts into the request's single result:
 
 * ``infra`` failure: another sandbox, away from every node tried, up to ``max_infra_retries`` retries, then
-  ``measurement_failed``; the node is reported as an infrastructure failure. An infrastructure failure every sandbox
-  repeats (:data:`UNRETRIED_INFRA_REASONS`) ends as ``measurement_failed`` at once, and its node is not reported; one it
-  likely repeats (:data:`ONCE_RETRIED_INFRA_REASONS`: an aiter build past the watchdog, a sandbox that failed before it
-  ran) is retried once, and its node is not reported either. One that says nothing about the node
-  (:data:`NODE_BLAMELESS_INFRA_REASONS`: a runner that could not start, a runner lost, a Hub download refused for its
-  rate limit) is retried like any other, and its node is not reported.
+  ``measurement_failed``; the node is reported as an infrastructure failure. Each retry waits first, longer each time
+  (:class:`InfraBackoff`), so a minute in which the cards or the platform are busy does not spend every attempt; the
+  wait never runs past the time its branch can still have a test measured (``latest_start``). An infrastructure
+  failure every sandbox repeats (:data:`UNRETRIED_INFRA_REASONS`) ends as ``measurement_failed`` at once, and its node
+  is not reported; one it likely repeats (:data:`ONCE_RETRIED_INFRA_REASONS`: an aiter build past the watchdog, a
+  sandbox that failed before it ran) is retried once, and its node is not reported either. One that says nothing about
+  the node (:data:`NODE_BLAMELESS_INFRA_REASONS`: a runner that could not start, a runner lost, a Hub download refused
+  for its rate limit) is retried like any other, and its node is not reported.
 * ``candidate`` failure (a known failure signature): ``candidate_failed`` at once.
 * ``unclear`` failure: one rerun away from the first node. A second failure is ``candidate_failed``; a success is the
   result, and the first attempt is re-labelled an infrastructure failure of its node and reported as a failure that
@@ -27,9 +29,11 @@ attempt ``same_node``.
 
 from __future__ import annotations
 
+import asyncio
 import logging
+import time
 from collections.abc import Awaitable, Callable
-from dataclasses import dataclass, replace
+from dataclasses import dataclass, field, replace
 from typing import NamedTuple, Protocol
 
 from hyperloom.measure.failures import (
@@ -53,6 +57,10 @@ from hyperloom_multibranch.contracts.toolbox import WorkloadKind
 log = logging.getLogger(__name__)
 
 DEFAULT_MAX_INFRA_RETRIES = 3
+#: How long the attempts wait before each infrastructure retry, the first, the second and every later one. Back to back,
+#: the four attempts of a test spent about forty seconds, so cards a process outside the test held for a minute ended it
+#: ``measurement_failed``; these spread them over seven minutes. The wait holds no card or sandbox.
+INFRA_BACKOFF_SECONDS: tuple[float, ...] = (60.0, 120.0, 240.0)
 #: Infrastructure failures a fresh sandbox repeats, by the name a reason starts with (before its ``: <detail>``). They are
 #: about how the test was built, not about a node: a patch whose files the server did not import from the farm imports
 #: them from the same place in every sandbox, so a retry only spends GPU time. An attempt that waited the test's whole
@@ -107,6 +115,33 @@ def carries_request_classes(workload: WorkloadKind, request: TestRequest, validi
 
 class MeasurementRefused(Exception):
     """The measurement itself is broken (spec rejected, result failed verification): a program error, never retried."""
+
+
+def _no_latest_start(_request: TestRequest) -> float | None:
+    return None
+
+
+@dataclass(frozen=True)
+class InfraBackoff:
+    """How long the attempts of a test wait before an infrastructure retry: ``seconds[n - 1]`` before the ``n``-th, the
+    last of them before any later one, none when ``seconds`` is empty. ``latest_start`` gives the time by which a retry
+    of a request must start for its branch to still have it measured (``None``: no such time), and a wait never runs
+    past it: a retry that cannot wait goes at once, as before. ``clock`` and ``sleep`` are the real ones by default."""
+
+    seconds: tuple[float, ...] = INFRA_BACKOFF_SECONDS
+    latest_start: Callable[[TestRequest], float | None] = _no_latest_start
+    clock: Callable[[], float] = field(default=time.time)
+    sleep: Callable[[float], Awaitable[None]] = field(default=asyncio.sleep)
+
+    def before(self, retry: int, request: TestRequest) -> float:
+        """The seconds to wait before the ``retry``-th infrastructure retry of ``request`` (counted from 1)."""
+        if not self.seconds or retry < 1:
+            return 0.0
+        wait = self.seconds[min(retry, len(self.seconds)) - 1]
+        latest = self.latest_start(request)
+        if latest is not None:
+            wait = min(wait, latest - self.clock())
+        return max(0.0, wait)
 
 
 @dataclass(frozen=True)
@@ -206,7 +241,7 @@ class _Ending(NamedTuple):
 
 class AttemptRunner:
     """Runs a request's attempts with ``executor``; ``avoid`` supplies the quarantine list, ``on_node_failure`` hears of
-    a node that failed."""
+    a node that failed, ``backoff`` paces the infrastructure retries."""
 
     def __init__(
         self,
@@ -215,11 +250,13 @@ class AttemptRunner:
         avoid: Callable[[], frozenset[str]],
         on_node_failure: NodeFailure,
         max_infra_retries: int = DEFAULT_MAX_INFRA_RETRIES,
+        backoff: InfraBackoff = InfraBackoff(),
     ) -> None:
         self._executor = executor
         self._avoid = avoid
         self._on_node_failure = on_node_failure
         self._max_infra_retries = max_infra_retries
+        self._backoff = backoff
 
     async def run(self, job: TestJob) -> TestResult:
         attempts: list[Attempt] = []
@@ -272,6 +309,13 @@ class AttemptRunner:
                     job, result, attempts, _Ending(Validity.MEASUREMENT_FAILED, FailureClass.INFRA, reason)
                 )
             infra_retries += 1
+            await self._back_off(job.request, infra_retries)
+
+    async def _back_off(self, request: TestRequest, retry: int) -> None:
+        wait = self._backoff.before(retry, request)
+        if wait > 0:
+            log.info("test %s: infrastructure retry %d waits %.0f s first", request.request_id, retry, wait)
+            await self._backoff.sleep(wait)
 
     async def _succeeded(self, job: TestJob, result: TestResult, attempts: list[Attempt]) -> TestResult:
         first = attempts[0]
