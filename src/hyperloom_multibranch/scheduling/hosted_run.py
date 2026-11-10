@@ -56,6 +56,7 @@ import signal
 import threading
 from dataclasses import dataclass
 from datetime import datetime
+from functools import partial
 from collections.abc import Callable, Mapping
 from pathlib import Path
 from typing import Any
@@ -530,15 +531,57 @@ def take_over_earlier_session(state_dir: Path) -> EarlierSession:
 
 def close_then_start(left: PersistedRun | None, close: Callable[[PersistedRun], int], start: Callable[[], int]) -> int:
     """Close ``left``, a session that ended before its baseline was recorded, when there is one, with ``close``
-    (``final-only``, which ends the sandboxes of the tests it left), then ``start`` the spec's session, unless a stop
-    during the close ended the run: then the close's exit code."""
+    (``final-only``, which ends the sandboxes of the tests it left; :func:`close_before_starting_again`), then ``start``
+    the spec's session, unless a stop during the close ended the run: then the close's exit code."""
 
-    if left is not None:
-        log.warning("%s ended before PRELUDE recorded its baseline: closing it, then starting again", left.layout.root)
-        closed = close(left)
-        if reported_stop_reason(left.layout.root) != left.ended.value:
-            return closed
+    if left is not None and (ended := close_before_starting_again(partial(close, left), left)) is not None:
+        return ended
     return start()
+
+
+#: What reading back an earlier session fails with when this account cannot read what it left: a file an earlier leg of
+#: another account of the group made owner-only, or one that is not the text it wrote.
+CANNOT_READ_SESSION = (PermissionError, UnicodeDecodeError, json.JSONDecodeError)
+
+
+def close_before_starting_again(close: Callable[[], int], left: PersistedRun) -> int | None:
+    """Close ``left``, which ended before PRELUDE recorded its baseline, with ``close`` (which ends the sandboxes of the
+    tests it left) before the run starts the spec's session again: the exit code the run ends with when a stop during
+    the close ended it, else ``None``. A close that cannot read ``left`` (:data:`CANNOT_READ_SESSION`, and for a file
+    the OS refuses, one inside ``left``'s directory) leaves it as it is, one warning names the file and why, and
+    ``None`` says the run goes on with a new session in a directory of its own, as that session measured nothing a
+    restart carries on from. A file outside that directory the OS refuses is not the earlier session's to skip: it
+    raises, and ends the run as before."""
+
+    root = left.layout.root
+    log.warning("%s ended before PRELUDE recorded its baseline: closing it, then starting again", root)
+    try:
+        closed = close()
+    except CANNOT_READ_SESSION as exc:
+        if not _names_a_file_of(root, exc):
+            raise
+        log.warning("cannot read %s to close it, so it is left as it is and a new session starts: %s", root, _why(exc))
+        return None
+    return None if reported_stop_reason(root) == left.ended.value else closed
+
+
+def _names_a_file_of(root: Path, exc: BaseException) -> bool:
+    """Whether ``exc`` is about what the session in ``root`` left: a refused file inside ``root``, or text that is not
+    what was written (which names no file)."""
+
+    if not isinstance(exc, OSError):
+        return True
+    return exc.filename is not None and Path(os.path.abspath(os.fsdecode(exc.filename))).is_relative_to(
+        os.path.abspath(root)
+    )
+
+
+def _why(exc: BaseException) -> str:
+    """The file an error names, with its owner and mode, and the reason; else the error."""
+
+    if isinstance(exc, OSError) and exc.filename:
+        return f"{exc.filename}{ownership(Path(exc.filename))}: {exc.strerror}"
+    return f"{type(exc).__name__}: {exc}"
 
 
 def prelude_landed(root: Path) -> bool:
@@ -564,6 +607,7 @@ def reported_stop_reason(root: Path) -> str | None:
 
 
 __all__ = [
+    "CANNOT_READ_SESSION",
     "EXIT_FILE",
     "FINAL_ATTEMPTS",
     "FINAL_COLD_START_SECONDS",
@@ -578,6 +622,7 @@ __all__ = [
     "HostedRefused",
     "arm_grant_stop",
     "campaign_spec",
+    "close_before_starting_again",
     "close_then_start",
     "final_reserve_seconds",
     "grant_deadline",
