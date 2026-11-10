@@ -204,3 +204,31 @@ def test_validate_compares_time_and_class_mix(tmp_path):
     assert result["error_pct"] == pytest.approx(-20.0)
     assert [m["trace"] for m in result["mix"]] == [trace]
     assert 0.0 < result["mix"][0]["total_variation"] < 1.0
+
+
+def test_the_primus_route_projects_the_baseline_training_config(tmp_path, monkeypatch):
+    from hyperloom.orchestrator.actions.executors import trace_analyze as ta
+
+    monkeypatch.setenv("HYPERLOOM_PRIMUS_CALIBRATION", "/cal.json")
+    state = SimpleNamespace(model_name="gpt_oss", model_path="", gpu_type="MI355X", baseline_config_path="/train.yaml")
+    cmd = ta._build_primus_cmd({"nodes": 2}, state, session_dir=tmp_path)
+    assert cmd[2:4] == [pt.__name__, "analyze"]
+    joined = " ".join(cmd)
+    for part in ("--config /train.yaml", "--nodes 2", "--kernel-calibration /cal.json", "--framework megatron"):
+        assert part in joined
+    explicit = ta._build_primus_cmd(
+        {"primus_config": "/b.yaml", "kernel_calibration": "/c.json"}, state, session_dir=tmp_path
+    )
+    assert "--config /b.yaml" in " ".join(explicit) and "--kernel-calibration /c.json" in " ".join(explicit)
+
+
+def test_the_primus_route_reads_no_trace(tmp_path):
+    from hyperloom.orchestrator.actions.executors import trace_analyze as ta
+
+    report = tmp_path / "kernel_report.json"
+    report.write_text(json.dumps(_report()))
+    payload = {"analysis_route": "primus", "kernel_report": str(report), "workspace_path": str(tmp_path / "ws")}
+    result = asyncio.run(ta.trace_analyze_handler(payload, session_dir=tmp_path))
+    assert result["status"] == "ok", result
+    assert result["analysis_meta"]["tool"] == "primus" and result["analysis_meta"]["route"] == "primus"
+    assert result["hot_kernels"][0]["name"] == "primus::output::gemm::lm_head.fwd"
