@@ -76,6 +76,11 @@ DEFAULT_METRICS_PORT = 8888
 #: approaching this budget is already pathological.
 _SCRAPE_TIMEOUT_SEC = 0.4
 
+_ENCODING = "utf-8"
+#: Logs and HTTP bodies are another process's bytes: a stray undecodable byte must not cost the reading.
+_DECODE_ERRORS = "ignore"
+_NS_PER_SEC = 1e9
+
 #: Opener that ignores the ambient proxy configuration. ``urlopen`` honours ``http_proxy`` by default, which on a
 #: corporate host routes a loopback scrape through an external proxy: wrong by construction, and slow enough that the
 #: blocking call visibly delays the watchdog loop it runs inside.
@@ -195,9 +200,11 @@ _SERVER_METRICS_RELPATHS = (
     "*/aiperf_artifacts/server_metrics_export.json",
 )
 
+#: aiperf's ``CreditPhase`` name for its warmup.
+_AIPERF_WARMUP = "warmup"
 #: aiperf's ``CreditPhase`` values, mapped onto ours, for both the export and the progress API. It has no notion of the
 #: accuracy eval or of boot, which is why the live path and the log markers still own those.
-AIPERF_PHASE_NAMES = {"warmup": "warmup", "profiling": "measured"}
+AIPERF_PHASE_NAMES = {_AIPERF_WARMUP: "warmup", "profiling": "measured"}
 
 
 def families_from_aiperf_record(metrics: Any) -> ParsedFamilies:
@@ -267,7 +274,7 @@ def _phase_blocks(payload: dict[str, Any]) -> list[tuple[str, dict[str, Any], tu
     blocks: list[tuple[str, dict[str, Any], tuple[int, int]]] = []
     warmup = payload.get("warmup_metrics")
     if isinstance(warmup, dict):
-        blocks.append(("warmup", warmup, window("warmup")))
+        blocks.append((AIPERF_PHASE_NAMES[_AIPERF_WARMUP], warmup, window(_AIPERF_WARMUP)))
     measured = payload.get("metrics")
     if isinstance(measured, dict):
         metrics_phase = str(payload.get("metrics_phase") or "").lower()
@@ -329,7 +336,7 @@ def _metric_readings(
 def read_aiperf_server_metrics(path: Path) -> list[tuple[KvSample, dict[str, Any], str | None]]:
     """Read AIPerf aggregate JSON as ``(sample, timing, phase)`` rows."""
     try:
-        payload = json.loads(path.read_text(encoding="utf-8"))
+        payload = json.loads(path.read_text(encoding=_ENCODING))
     except (OSError, ValueError) as exc:
         log.debug("kv_metrics: could not read %s (%s)", path, exc)
         return []
@@ -347,7 +354,7 @@ def read_aiperf_server_metrics(path: Path) -> list[tuple[KvSample, dict[str, Any
 
     out: list[tuple[KvSample, dict[str, Any], str | None]] = []
     for (start, end, phase), record in sorted(grouped.items()):
-        ts = end / 1e9
+        ts = end / _NS_PER_SEC
         sample = sample_from_families(families_from_aiperf_record(record), ts=ts, mono=ts)
         if not sample.has_readings():
             continue
@@ -355,9 +362,9 @@ def read_aiperf_server_metrics(path: Path) -> list[tuple[KvSample, dict[str, Any
             (
                 sample,
                 {
-                    "scrape_start_unix": start / 1e9,
-                    "scrape_end_unix": end / 1e9,
-                    "scrape_sec": round(max(0, end - start) / 1e9, 4),
+                    "scrape_start_unix": start / _NS_PER_SEC,
+                    "scrape_end_unix": end / _NS_PER_SEC,
+                    "scrape_sec": round(max(0, end - start) / _NS_PER_SEC, 4),
                 },
                 phase,
             )
@@ -670,7 +677,7 @@ def port_from_server_log(workspace: Any) -> int | None:
 def _logged_bind_port(candidate: Path) -> int | None:
     """The first usable port a server log's head announces binding to, or ``None``."""
     # The banner is near the top; a served round's log grows to megabytes and is on shared storage.
-    with candidate.open(encoding="utf-8", errors="ignore") as handle:
+    with candidate.open(encoding=_ENCODING, errors=_DECODE_ERRORS) as handle:
         head = handle.read(_SERVER_LOG_HEAD_BYTES)
     for line in head.splitlines():
         # Matched on what the line is about rather than on its exact wording. The observed builds say
@@ -701,7 +708,7 @@ def port_from_workspace(workspace: Any) -> int | None:
         for pattern in ("*.yaml", "*/config.yaml"):
             for candidate in sorted(root.glob(pattern)):
                 try:
-                    payload = yaml.safe_load(candidate.read_text(encoding="utf-8"))
+                    payload = yaml.safe_load(candidate.read_text(encoding=_ENCODING))
                 except (OSError, ValueError, yaml.YAMLError):
                     continue
                 if not isinstance(payload, dict):
@@ -728,7 +735,7 @@ def port_from_server_command(workspace: Any) -> int | None:
         root = Path(workspace)
         for pattern in ("vllm_command.txt", "*/vllm_command.txt"):
             for candidate in sorted(root.glob(pattern)):
-                text = candidate.read_text(encoding="utf-8", errors="ignore")
+                text = candidate.read_text(encoding=_ENCODING, errors=_DECODE_ERRORS)
                 match = re.search(r"(?:^|\s)--port(?:=|\s+)(\d+)(?:\s|$)", text)
                 port = _port_value(match.group(1)) if match else None
                 if port is not None:
@@ -842,7 +849,7 @@ class KvMetricsPoller:
             self._first_attempt_mono = now
         try:
             with _OPENER.open(self.url, timeout=_SCRAPE_TIMEOUT_SEC) as response:
-                body = response.read().decode("utf-8", "ignore")
+                body = response.read().decode(_ENCODING, _DECODE_ERRORS)
         except (urllib.error.URLError, http.client.HTTPException, OSError, ValueError) as exc:
             self._failures += 1
             # Both a count and a clock. On the count alone, three misses inside six seconds park the poller for the rest
@@ -900,7 +907,7 @@ def read_aiperf_phases(url: str) -> dict[str, Any] | None:
         urllib.error.URLError, http.client.HTTPException, OSError, ValueError: The API could not be read.
     """
     with _OPENER.open(f"{url.rstrip('/')}/api/progress", timeout=_SCRAPE_TIMEOUT_SEC) as response:
-        payload = json.loads(response.read().decode("utf-8", "ignore"))
+        payload = json.loads(response.read().decode(_ENCODING, _DECODE_ERRORS))
     phases = payload.get("phases") if isinstance(payload, dict) else None
     return phases if isinstance(phases, dict) else None
 
@@ -937,7 +944,7 @@ class AiperfProgressPoller:
             root = Path(self._workspace)
             for pattern in _PROGRESS_ADDRESS_RELPATHS:
                 for candidate in sorted(root.glob(pattern)):
-                    payload = json.loads(candidate.read_text(encoding="utf-8"))
+                    payload = json.loads(candidate.read_text(encoding=_ENCODING))
                     url = payload.get("url") if isinstance(payload, dict) else None
                     if isinstance(url, str) and url.startswith("http"):
                         self.url = url

@@ -348,9 +348,11 @@ def test_close_is_idempotent_and_an_unknown_phase_is_ignored(tmp_path):
     recorder.start()
     recorder.note_phase("profile_open", time.monotonic())
     first = recorder.close()
-    assert recorder.close() is first and first.marks == []
+    again = recorder.close()
+    assert again is first and first.marks == []
     recorder.note_phase("measured", time.monotonic())
-    assert recorder.close().marks == []
+    after = recorder.close()
+    assert after.marks == []
 
 
 def test_the_gpu_monitor_blocks_are_the_energy_cards_over_the_measured_phase(tmp_path):
