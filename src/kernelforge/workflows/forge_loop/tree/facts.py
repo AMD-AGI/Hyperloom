@@ -5,6 +5,7 @@
 
 from __future__ import annotations
 
+from collections.abc import Mapping
 from dataclasses import dataclass
 
 from kernelforge.workflows.forge_loop.iteration.merge_candidates import cases_beating_reference
@@ -26,6 +27,9 @@ class RoundOutlook:
     remaining_sec: float
     # None until a round of this campaign has finished and given its cost.
     rounds_left: int | None
+    # The model each slot position of this round is planned and implemented on, in the order the selector names its
+    # slots; empty when every slot runs on one model.
+    slot_models: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -42,14 +46,15 @@ def render_facts(
     outlook: RoundOutlook,
     sources: FactSources,
     merge_failures: tuple[MergeFailure, ...] = (),
+    models: Mapping[str, str] | None = None,
 ) -> str:
-    """Every fact the selector is given, in the order it reads them."""
+    """Every fact the selector is given, in the order it reads them; ``models`` names each Agent profile's model."""
     return "\n".join(
         [
             *_sources(sources),
             *_standing(tree, outlook),
             *_directions(tree),
-            *_nodes(tree),
+            *_nodes(tree, models or {}),
             *_merge_failures(merge_failures),
             *_previous_selections(tree),
         ]
@@ -69,7 +74,8 @@ def _sources(sources: FactSources) -> list[str]:
         "## Where the detail lives",
         f"- {sources.archive_dir}/iter_NNN/slot_KK/: one slot's change.diff, measurement.json (per-case timings of "
         "every run) and lesson.md (its Implementer's own record of what it tried and found); "
-        "start_<commit>/slot_KK.md is the plan it ran.",
+        "start_<commit>/slot_KK.md is the plan it ran (start_<commit>_<profile>/ when the start's slots ran on "
+        "several profiles).",
         f"- {sources.selections_dir}/iter_NNN.md: what you were shown and answered in an earlier round.",
         "- Every node is a commit: `git show <commit>`, `git diff <parent> <commit>`, `git log --oneline <branch>`.",
         "",
@@ -90,7 +96,18 @@ def _standing(tree: SearchTree, outlook: RoundOutlook) -> list[str]:
         f"- Highest measured node: {measured.commit}, score {measured.score:.6f}x.",
         f"- Lanes this round: {outlook.lanes}. Campaign time left: {outlook.remaining_sec / 60:.0f} min, {rounds}.",
         f"- {len(tree.nodes)} node(s), {len(tree.directions)} direction(s), {len(tree.attempts)} finished attempt(s).",
+        *_slot_models(outlook.slot_models),
         "",
+    ]
+
+
+def _slot_models(models: tuple[str, ...]) -> list[str]:
+    if not models:
+        return []
+    order = ", ".join(f"slot {position} on {model}" for position, model in enumerate(models, start=1))
+    return [
+        f"- Each slot of this round is planned and implemented on its own model, by the position you name it at: "
+        f"{order}."
     ]
 
 
@@ -124,25 +141,26 @@ def _direction(tree: SearchTree, direction: Direction) -> list[str]:
     return lines
 
 
-def _nodes(tree: SearchTree) -> list[str]:
+def _nodes(tree: SearchTree, models: Mapping[str, str]) -> list[str]:
     published = tree.require_node(tree.published_best)
     lines = ["## Nodes, depth first"]
     stack = [tree.root]
     while stack:
         node = stack.pop()
         depth = len(tree.ancestors(node.commit)) - 1
-        lines.extend(_node(tree, node, published, "  " * depth))
+        lines.extend(_node(tree, node, published, "  " * depth, models))
         stack.extend(reversed(tree.children(node.commit)))
     return [*lines, ""]
 
 
-def _node(tree: SearchTree, node: TreeNode, published: TreeNode, indent: str) -> list[str]:
+def _node(tree: SearchTree, node: TreeNode, published: TreeNode, indent: str, models: Mapping[str, str]) -> list[str]:
     parent = tree.node(node.parent)
     versus_parent = f", {_percent(node.score, parent.score)} vs parent" if parent is not None else ""
     marks = [mark for mark, on in (("PUBLISHED", node.commit == published.commit), ("root", node.is_root)) if on]
     head = (
         f"{indent}- {node.commit} [{', '.join([node.direction or '-', *marks])}] "
-        f"{node.source.value} in iteration {node.iteration}: {node.score:.6f}x over {len(node.samples)} sample(s)"
+        f"{node.source.value} in iteration {node.iteration}{_model(node.agent_profile_id, models, 'by')}: "
+        f"{node.score:.6f}x over {len(node.samples)} sample(s)"
         f"{versus_parent}, {_percent(node.score, published.score)} vs published"
     )
     lines = [head]
@@ -155,8 +173,12 @@ def _node(tree: SearchTree, node: TreeNode, published: TreeNode, indent: str) ->
     opened = tree.directions_from(node.commit)
     if opened:
         lines.append(f"{indent}  directions opened here: {', '.join(item.direction_id for item in opened)}")
-    lines.extend(_attempts(tree.attempts_from(node.commit), indent))
+    lines.extend(_attempts(tree.attempts_from(node.commit), indent, models))
     return lines
+
+
+def _model(profile_id: str, models: Mapping[str, str], preposition: str) -> str:
+    return f" {preposition} {models.get(profile_id, profile_id)}" if profile_id else ""
 
 
 def _case_standing(node: TreeNode, published: TreeNode, indent: str) -> list[str]:
@@ -172,7 +194,7 @@ def _case_standing(node: TreeNode, published: TreeNode, indent: str) -> list[str
     ]
 
 
-def _attempts(attempts: list[Attempt], indent: str) -> list[str]:
+def _attempts(attempts: list[Attempt], indent: str, models: Mapping[str, str]) -> list[str]:
     if not attempts:
         return [f"{indent}  attempts from here: none"]
     lines = [f"{indent}  attempts from here: {len(attempts)}"]
@@ -184,7 +206,8 @@ def _attempts(attempts: list[Attempt], indent: str) -> list[str]:
         child = f" -> {_short(attempt.node)}" if attempt.node else ""
         lines.append(
             f"{indent}    iter {attempt.iteration} slot {attempt.slot} {attempt.slot_type.value} "
-            f"{attempt.direction or 'new'} {attempt.outcome.value}{score}{child}{_detail(attempt)}"
+            f"{attempt.direction or 'new'}{_model(attempt.agent_profile_id, models, 'on')} "
+            f"{attempt.outcome.value}{score}{child}{_detail(attempt)}"
         )
     return lines
 

@@ -238,11 +238,12 @@ def test_optimize_spells_the_roofline_switch_out_for_the_nested_loop(tmp_path, m
 
 def test_optimize_hands_the_requested_loop_shape_to_the_nested_loop(tmp_path, monkeypatch):
     """A caller comparing search strategies gets the lanes and strategy it named, not the nested loop's defaults."""
-    options = optimize.OptimizeOptions(lanes=3, search_strategy="tree")
+    options = optimize.OptimizeOptions(lanes=3, search_strategy="tree", relay_mode="split")
     command = _nested_loop_command(tmp_path, monkeypatch, optimize.OptimizeRequest(str(tmp_path), options=options))
 
     assert command[command.index("--lanes") + 1] == "3"
     assert command[command.index("--search-strategy") + 1] == "tree"
+    assert command[command.index("--relay-mode") + 1] == "split"
 
 
 def test_optimize_leaves_an_unrequested_loop_shape_to_the_nested_loop(tmp_path, monkeypatch):
@@ -251,6 +252,7 @@ def test_optimize_leaves_an_unrequested_loop_shape_to_the_nested_loop(tmp_path, 
 
     assert "--lanes" not in command
     assert "--search-strategy" not in command
+    assert "--relay-mode" not in command
 
 
 def test_run_rewrite_hands_the_source_timings_to_optimize(tmp_path, monkeypatch):

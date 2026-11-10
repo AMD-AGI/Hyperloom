@@ -25,8 +25,8 @@ from kernelforge.workflows.forge_loop.bootstrap.errors import (
 )
 from kernelforge.workflows.forge_loop.bootstrap.request import ForgeLoopRequest
 from kernelforge.workflows.forge_loop.bootstrap.run import run_forge_loop
-from kernelforge.workflows.forge_loop.bootstrap.search_strategy import require_lanes_for
-from kernelforge.workflows.forge_loop.campaign.campaign_config import SearchStrategy
+from kernelforge.workflows.forge_loop.bootstrap.search_strategy import require_lanes_for, require_relay_mode_for
+from kernelforge.workflows.forge_loop.campaign.campaign_config import RelayMode, SearchStrategy
 from kernelforge.workflows.forge_loop.gate.gate_settings import GateMeasurement
 from kernelforge.workflows.forge_loop.campaign.path_ownership import (
     ATTEMPT_ROOT_DIR,
@@ -96,6 +96,7 @@ __all__ = [
     "ImplementerTask",
     "PRODUCER_PATH_PATTERNS",
     "RESULT_SENTINEL",
+    "RelayMode",
     "SearchStrategy",
     "SessionOptions",
     "TaskPreparationFailed",
@@ -106,6 +107,7 @@ __all__ = [
     "make_agent_fn",
     "parse_forge_loop_result",
     "require_lanes_for",
+    "require_relay_mode_for",
     "run_forge_loop",
     "runtime_gitignore_globs",
 ]

@@ -11,6 +11,7 @@ from dataclasses import dataclass, field, replace
 from kernelforge.agent_backends.structured_output import AgentAnswer
 from kernelforge.workflows.forge_loop.roles.slot_selector import DirectionStatusAnswer, SlotAnswer, SlotSelectionAnswer
 from kernelforge.workflows.forge_loop.tree.model import DirectionStatus, SearchTree, Slot, SlotType
+from kernelforge.workflows.forge_loop.tree.profiles import profile_at
 
 # How much of a dropped request its record quotes.
 _QUOTED_CHARS = 300
@@ -49,24 +50,37 @@ class _Reading:
     keys: set[tuple[str, str, str]] = field(default_factory=set)
 
 
-def read_selection(tree: SearchTree, answer: SlotSelectionAnswer | None, *, lanes: int, failure: str = "") -> Selection:
-    """The legal part of the selector's answer, or the fallback slot when nothing in it is legal."""
+def read_selection(
+    tree: SearchTree,
+    answer: SlotSelectionAnswer | None,
+    *,
+    lanes: int,
+    failure: str = "",
+    profile_cycle: Sequence[str] = (),
+) -> Selection:
+    """The legal part of the selector's answer, or the fallback slot when nothing in it is legal.
+
+    Each slot runs on the profile ``profile_cycle`` gives the position the selector named it at, so a slot dropped
+    before it does not move it onto another profile.
+    """
     given = answer if answer is not None else _NO_ANSWER
     changes, dropped = _status_changes(tree, given.direction_status)
     reading = _Reading(tree, {item.direction_id: item.status for item in tree.directions}, dropped=dropped)
     reading.statuses.update({change.direction_id: change.status for change in changes})
-    for raw in given.slots:
+    for position, raw in enumerate(given.slots):
         if len(reading.slots) >= lanes:
             reading.dropped.append(_quoted(f"slot beyond the round's {lanes} lane(s)", raw))
             continue
-        _read_slot(reading, raw)
+        _read_slot(reading, raw, profile_at(profile_cycle, position))
     remeasure, dropped_remeasure = _nodes(tree, given.remeasure, "remeasure")
     refresh, dropped_refresh = _nodes(tree, given.refresh_analysis, "refresh_analysis")
     reading.dropped.extend([*dropped_remeasure, *dropped_refresh])
     fallback = ""
     if not reading.slots:
         fallback = failure or "the selector named no legal slot"
-        reading.slots.append(fallback_slot(tree, reading.statuses))
+        reading.slots.append(
+            replace(fallback_slot(tree, reading.statuses), agent_profile_id=profile_at(profile_cycle, 0))
+        )
     return Selection(
         slots=tuple(reading.slots),
         remeasure=remeasure,
@@ -90,7 +104,7 @@ def _quoted(message: str, item: AgentAnswer) -> str:
     return f"{message}: {item.model_dump()!r}"[:_QUOTED_CHARS]
 
 
-def _read_slot(reading: _Reading, raw: SlotAnswer) -> None:
+def _read_slot(reading: _Reading, raw: SlotAnswer, profile_id: str) -> None:
     slot_type = SlotType(raw.slot_type)
     start = reading.tree.resolve(raw.start)
     if not start:
@@ -102,6 +116,7 @@ def _read_slot(reading: _Reading, raw: SlotAnswer) -> None:
         start=start,
         reason=raw.reason.strip(),
         hint=raw.hint.strip() if slot_type is SlotType.BRANCH else "",
+        agent_profile_id=profile_id,
     )
     refusal, slot = _completed(reading, slot, raw)
     if refusal:

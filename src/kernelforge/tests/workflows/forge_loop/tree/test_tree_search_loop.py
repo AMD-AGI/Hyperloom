@@ -17,6 +17,7 @@ import pytest
 
 from kernelforge.workflows.forge_loop.campaign.experiment import ExperimentTracker
 from kernelforge.workflows.forge_loop.campaign.experiments_layout import ExperimentsLayout
+from kernelforge.agent_backends.session_resume import EXHAUSTED_END_REASON
 from kernelforge.utils.process_reaping import ReapReport
 from kernelforge.workflows.forge_loop.iteration import attempt_verdict, campaign_runtime, fanout, scoring_runtime
 from kernelforge.workflows.forge_loop.iteration.iteration_types import IterationConfig, LoopAgents
@@ -103,6 +104,16 @@ def _stub_device(monkeypatch, measured: list[dict[str, int]]):
     monkeypatch.setattr(attempt_verdict, "check_registers", registers)
 
 
+_FAST_TABLE = (
+    "## Direction\n- name: fast table\n- hypothesis: smaller value\n- expected ceiling: 2x\n- fails if: no gain\n\n"
+    "set VALUE = 5"
+)
+_STRUCTURAL_ROUTE = (
+    "## Direction\n- name: structural route\n- hypothesis: pays later\n- expected ceiling: 3x\n"
+    "- fails if: never faster\n\nset VALUE = 12"
+)
+
+
 class _Planning:
     """Two BRANCH plans at the root; one DEEPEN plan per direction later."""
 
@@ -114,12 +125,7 @@ class _Planning:
         brief = context.program_context
         approaches: tuple[PublishedLane, ...] = ()
         if "BRANCH" in brief:
-            plans = (
-                "## Direction\n- name: fast table\n- hypothesis: smaller value\n- expected ceiling: 2x\n"
-                "- fails if: no gain\n\nset VALUE = 5",
-                "## Direction\n- name: structural route\n- hypothesis: pays later\n- expected ceiling: 3x\n"
-                "- fails if: never faster\n\nset VALUE = 12",
-            )
+            plans = (_FAST_TABLE, _STRUCTURAL_ROUTE)
             approaches = (
                 PublishedLane(1, approach="shrink the table", focus_cases=("value",)),
                 PublishedLane(2, approach="restructure the loop"),
@@ -194,6 +200,7 @@ class _Selector:
                     "reason": f"continue {d}",
                 }
                 for d in ("d001", "d002")
+                if tree.direction_best(d) is not None
             ]
         return SelectorAnswer(answer=_selection(slots))
 
@@ -204,6 +211,35 @@ class _RemeasuringSelector(_Selector):
     async def select(self, *, workspace, facts, lanes, usage=None):
         answer = await super().select(workspace=workspace, facts=facts, lanes=lanes, usage=usage)
         return SelectorAnswer(answer=answer.answer.model_copy(update={"remeasure": [self.loop._tree.root.commit]}))
+
+
+class _OtherProfilePlanning(_Planning):
+    """Another model's planning: at the root it opens the structural route; later it plans as the first one does."""
+
+    async def run(self, context, *, usage=None, lanes=1):
+        if "BRANCH" in context.program_context:
+            return _planned((_STRUCTURAL_ROUTE,)[:lanes])
+        return await super().run(context, usage=usage, lanes=lanes)
+
+
+def _recorded(profile_id: str, sessions: list[str]):
+    """The stand-in Implementer of one profile, which records each session it is asked to run."""
+
+    def factory(lane_dir, serialized_driver):
+        sessions.append(profile_id)
+        return _lane_factory(lane_dir, serialized_driver)
+
+    return factory
+
+
+def _exhausted_lane_factory(_lane_dir, _serialized_driver):
+    """An Implementer whose API retries run out before it writes anything."""
+
+    async def session(kernel_path, prompt, session_sink=None):
+        session_sink["end_reason"] = EXHAUSTED_END_REASON
+        return ""
+
+    return session
 
 
 class _SlowerPlanning(_Planning):
@@ -227,32 +263,55 @@ class _CaseSplitPlanning(_Planning):
         return _planned(plans[:lanes], focus[:lanes])
 
 
-def _relay_of(agents: LoopAgents) -> LoopAgents:
-    """The same agents served as the one profile of a relay."""
-    profile = AgentProfile("claude_opus", "claude", "claude-opus-5")
+_PROFILES = (AgentProfile("claude_opus", "claude", "claude-opus-5"), AgentProfile("codex_gpt", "codex", "gpt-5"))
+
+
+def _relay_of(*members: LoopAgents, recheck=None) -> LoopAgents:
+    """The agents served as the profiles of a relay, one profile per member, the first member the primary."""
+    profiles = _PROFILES[: len(members)]
     availability = AgentAvailabilitySnapshot(
         checked_at="2026-10-28T00:00:00Z",
         session_index=1,
-        providers={"claude": ProviderAvailability(available=True)},
+        providers={profile.provider: ProviderAvailability(available=True) for profile in profiles},
         profiles={
-            "claude_opus": ProfileAvailability(
-                provider="claude", model="claude-opus-5", provider_available=True, model_available=True, available=True
+            profile.profile_id: ProfileAvailability(
+                provider=profile.provider,
+                model=profile.model,
+                provider_available=True,
+                model_available=True,
+                available=True,
             )
+            for profile in profiles
         },
     )
-    bundle = SearchActorBundle(
-        profile=profile,
-        agent_fn=lambda *_args, **_kwargs: None,
-        agent_factory=agents.agent_factory,
-        orchestration_factory=agents.orchestration_factory,
-        slot_selector=agents.slot_selector,
-    )
+    bundles = {
+        profile.profile_id: SearchActorBundle(
+            profile=profile,
+            agent_fn=lambda *_args, **_kwargs: None,
+            agent_factory=member.agent_factory,
+            orchestration_factory=member.orchestration_factory,
+            slot_selector=member.slot_selector,
+        )
+        for profile, member in zip(profiles, members)
+    }
     pool = SearchActorPool(
-        config=AgentRelayConfig(primary_profile_id="claude_opus", profiles=(profile,)),
+        config=AgentRelayConfig(primary_profile_id=profiles[0].profile_id, profiles=profiles),
         availability=availability,
-        bundles={"claude_opus": bundle},
+        bundles=bundles,
+        recheck=recheck,
     )
-    return replace(agents, search_actors=pool)
+    return replace(members[0], search_actors=pool)
+
+
+def _unavailable(profile: AgentProfile) -> ProfileAvailability:
+    return ProfileAvailability(
+        provider=profile.provider,
+        model=profile.model,
+        provider_available=True,
+        model_available=False,
+        available=False,
+        reason="its API retries ran out",
+    )
 
 
 def _run_campaign(
@@ -265,7 +324,9 @@ def _run_campaign(
     planning=_Planning,
     selector_type=_Selector,
     relay: bool = False,
+    split=None,
 ):
+    """Run a tree campaign; ``split`` turns the round's agents into the relay whose profiles share each round."""
     workspace = workspace or _workspace(tmp_path)
     measured: list[dict[str, int]] = []
     _stub_device(monkeypatch, measured)
@@ -279,6 +340,7 @@ def _run_campaign(
         git_branch="opt",
         workspace_dir=str(workspace),
         lanes=2,
+        split_relay=split is not None,
     )
     loop = TreeSearchLoop(
         config,
@@ -294,7 +356,11 @@ def _run_campaign(
         orchestration_factory=planning,
         slot_selector=selector,
     )
-    asyncio.run(loop.run(_relay_of(agents) if relay else agents))
+    if split is not None:
+        agents = split(agents)
+    elif relay:
+        agents = _relay_of(agents)
+    asyncio.run(loop.run(agents))
     return loop, workspace, selector, measured
 
 
@@ -414,6 +480,56 @@ def test_a_round_that_publishes_nothing_counts_against_the_profile_that_ran_it(t
     assert SearchTreeStore(ExperimentsLayout.of(workspace).search_tree).load().published_best == loop._tree.root.commit
     assert loop.run_state.agent_relay.active_no_improvement_streak == 1
     assert (handoff["agent_profile_id"], handoff["agent_model"]) == ("claude_opus", "claude-opus-5")
+
+
+def test_a_split_relay_plans_and_implements_each_slot_on_the_profiles_in_turn(tmp_path, monkeypatch):
+    sessions: list[str] = []
+
+    def split(agents):
+        return _relay_of(
+            replace(agents, agent_factory=_recorded("claude_opus", sessions)),
+            LoopAgents(agent_factory=_recorded("codex_gpt", sessions), orchestration_factory=_OtherProfilePlanning),
+        )
+
+    _loop, workspace, selector, _measured = _run_campaign(tmp_path, monkeypatch, rounds=2, split=split)
+    layout = ExperimentsLayout.of(workspace)
+    tree = SearchTreeStore(layout.search_tree).load()
+    by_value = {round(node.score, 3): node for node in tree.nodes}
+
+    # Round 1 starts on the primary, round 2 one profile further along.
+    assert (by_value[2.0].agent_profile_id, by_value[0.833].agent_profile_id) == ("claude_opus", "codex_gpt")
+    assert (by_value[2.5].agent_profile_id, by_value[0.909].agent_profile_id) == ("codex_gpt", "claude_opus")
+    assert sorted(sessions) == ["claude_opus", "claude_opus", "codex_gpt", "codex_gpt"]
+    assert "slot 1 on claude/claude-opus-5, slot 2 on codex/gpt-5" in selector.facts[0]
+    assert "slot 1 on codex/gpt-5, slot 2 on claude/claude-opus-5" in selector.facts[1]
+    assert "by codex/gpt-5" in selector.facts[1]
+    root = tree.root.commit[:12]
+    assert sorted(path.name for path in layout.tree_round(1).glob("start_*")) == [
+        f"start_{root}_claude_opus",
+        f"start_{root}_codex_gpt",
+    ]
+    # A round is the profile's that wrote what it published.
+    handoff = json.loads((workspace / "forge_experiments" / "handoffs" / "iter_002.json").read_text())
+    assert handoff["agent_profile_id"] == "codex_gpt"
+
+
+def test_a_split_relay_gives_no_slot_to_a_profile_whose_line_stopped_answering(tmp_path, monkeypatch):
+    def split(agents):
+        other = LoopAgents(agent_factory=_exhausted_lane_factory, orchestration_factory=_OtherProfilePlanning)
+        return _relay_of(agents, other, recheck=_unavailable)
+
+    loop, workspace, selector, _measured = _run_campaign(tmp_path, monkeypatch, rounds=2, split=split)
+    tree = SearchTreeStore(ExperimentsLayout.of(workspace).search_tree).load()
+
+    first = [item for item in tree.attempts if item.iteration == 1]
+    assert [(item.agent_profile_id, item.outcome) for item in first] == [
+        ("claude_opus", AttemptOutcome.NODE),
+        ("codex_gpt", AttemptOutcome.NO_CHANGES),
+    ]
+    # The boundary checked the profile again, found it down, and gave the next round to the one that still runs.
+    assert not loop.run_state.agent_availability_snapshot.profiles["codex_gpt"].available
+    assert {item.agent_profile_id for item in tree.attempts if item.iteration == 2} == {"claude_opus"}
+    assert "slot 1 on" not in selector.facts[1]
 
 
 def test_a_workspace_with_untracked_sources_is_refused(tmp_path, monkeypatch):

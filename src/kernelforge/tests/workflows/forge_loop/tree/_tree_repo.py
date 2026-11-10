@@ -122,9 +122,12 @@ class _Host(TreeMergeMixin, TreeAdmissionMixin):
         self.measured: list[str] = []
         # Kernel sources that measure incorrect.
         self.incorrect: set[str] = set()
-        # What each session was asked, and what each one returns, in order.
+        # What each session was asked and on which profile, and what each one returns, in order.
         self.prompts: list[str] = []
+        self.session_profiles: list[str] = []
         self.session_results: list[LaneResult] = []
+        # The profiles whose startup check the next boundary is asked to run again.
+        self.rechecked: list[str] = []
 
     def _time_remaining(self) -> float:
         return self.remaining_sec
@@ -137,9 +140,14 @@ class _Host(TreeMergeMixin, TreeAdmissionMixin):
         self.measured.append(text)
         return _measurement(iteration, _values(text), correct=text not in self.incorrect)
 
-    async def _run_sessions(self, iteration: int, sessions, agent_factory) -> dict[str, LaneResult]:
+    async def _run_sessions(self, iteration: int, sessions) -> dict[str, LaneResult]:
         results = {}
-        for lane, prompt in sessions:
-            self.prompts.append(prompt)
+        for session in sessions:
+            self.prompts.append(session.prompt)
+            self.session_profiles.append(session.agent.profile_id)
+            lane = session.lane
             results[lane.lane_id] = replace(self.session_results.pop(0), lane_id=lane.lane_id, plan=lane.plan)
         return results
+
+    def _check_profile_again(self, profile_id: str) -> None:
+        self.rechecked.append(profile_id)

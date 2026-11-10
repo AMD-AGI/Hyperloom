@@ -31,7 +31,12 @@ from kernelforge.workflows.forge_loop.iteration.iteration_types import (
 )
 from kernelforge.workflows.forge_loop.iteration.runner import IterationLoop
 from kernelforge.workflows.forge_loop.roles.slot_selector import SelectorAnswer
-from kernelforge.workflows.forge_loop.tree.admission import SlotOutcome, TreeAdmissionMixin, measured_correct
+from kernelforge.workflows.forge_loop.tree.admission import (
+    SessionAgent,
+    SlotOutcome,
+    TreeAdmissionMixin,
+    measured_correct,
+)
 from kernelforge.workflows.forge_loop.tree.facts import FactSources, RoundOutlook, render_facts
 from kernelforge.workflows.forge_loop.tree.merge import TreeMergeMixin
 from kernelforge.workflows.forge_loop.tree.model import (
@@ -43,6 +48,7 @@ from kernelforge.workflows.forge_loop.tree.model import (
     lost_attempt,
 )
 from kernelforge.workflows.forge_loop.tree.planning import RoundPlans, TreePlanningMixin
+from kernelforge.workflows.forge_loop.tree.profiles import SlotActors, profile_at, round_profile_cycle
 from kernelforge.workflows.forge_loop.tree.refs import node_holding_tree, pin_node, reconcile_node_refs
 from kernelforge.workflows.forge_loop.tree.selection import Selection, read_selection
 from kernelforge.workflows.forge_loop.tree.store import SearchTreeStore
@@ -64,7 +70,16 @@ class TreeSearchLoop(TreePlanningMixin, TreeMergeMixin, TreeAdmissionMixin, Iter
     async def _begin_locked_run(self, agents: LoopAgents, *, callbacks: LoopCallbacks, usage=None) -> LoopAgents:
         actors = await super()._begin_locked_run(agents, callbacks=callbacks, usage=usage)
         self._begin_search_tree()
+        if self.ic.split_relay and len(self._split_profiles()) < 2:
+            print(
+                "  [tree] relay mode split: fewer than two Agent profiles can run this session, so every slot runs on "
+                "the active one until another passes its check"
+            )
         return actors
+
+    def _switches_profile_at_blockage(self) -> bool:
+        """A split relay runs every profile each round, so a blockage has no other profile to hand the search to."""
+        return not self.ic.split_relay
 
     async def _run_supervisor_review(self, *_args, **_kwargs) -> None:
         """A tree campaign has no Supervisor: the selector owns every change of direction."""
@@ -141,13 +156,15 @@ class TreeSearchLoop(TreePlanningMixin, TreeMergeMixin, TreeAdmissionMixin, Iter
             tree.set_direction_status(change.direction_id, change.status, change.reason)
         tree.open_round(round_)
         self._tree_store.save(tree)
-        plans = await self._plan_round_slots(tree, round_, turn.actors.orchestration_factory)
+        actors = self._slot_actors(turn)
+        plans = await self._plan_round_slots(tree, round_, actors)
         if not self._admit_dispatch(turn.iteration):
             self._close_tree_round(tree, [], plans, "the round could not pay for its sessions")
             return False
-        outcomes = await self._expand(tree, turn, plans)
+        outcomes = await self._expand(tree, turn, plans, actors)
         admitted = [(o.node, o.result) for o in outcomes if o.node is not None]
-        merges = await self._merge_round(tree, turn.iteration, admitted, turn.actors.agent_factory)
+        merge_agent = SessionAgent(turn.actors.agent_factory, self.run_state.agent_relay.active_profile_id)
+        merges = await self._merge_round(tree, turn.iteration, admitted, merge_agent)
         # Nothing is measured on a device a session of this round left held.
         if self.device_hazard.live is None:
             await self._remeasure(tree, turn.iteration, round_.remeasure)
@@ -157,11 +174,13 @@ class TreeSearchLoop(TreePlanningMixin, TreeMergeMixin, TreeAdmissionMixin, Iter
         self._start_worktrees.release([tree.published_best])
         return True
 
-    async def _expand(self, tree: SearchTree, turn: IterationTurn, plans: RoundPlans) -> list[SlotOutcome]:
+    async def _expand(
+        self, tree: SearchTree, turn: IterationTurn, plans: RoundPlans, actors: SlotActors
+    ) -> list[SlotOutcome]:
         """Run the round's lanes and measure what they wrote; nothing is measured on a device a lane left held."""
         if not plans.plans:
             return []
-        lanes = await self._run_slot_lanes(tree, turn.iteration, plans.plans, turn.actors.agent_factory)
+        lanes = await self._run_slot_lanes(tree, turn.iteration, plans.plans, actors)
         contended = [lane for lane in lanes.values() if lane.contended]
         if contended:
             self.device_hazard.record(
@@ -175,14 +194,23 @@ class TreeSearchLoop(TreePlanningMixin, TreeMergeMixin, TreeAdmissionMixin, Iter
     async def _select(self, turn: IterationTurn) -> Selection:
         """Ask the selector for this round's slots and keep the legal part of its answer."""
         tree = self._tree
+        cycle = self._profile_cycle(turn.iteration)
+        labels = self._profile_labels()
+        slot_models = tuple(labels.get(profile_at(cycle, position), "") for position in range(turn.round_lanes))
         facts = render_facts(
             tree,
-            outlook=RoundOutlook(turn.round_lanes, self._time_remaining(), self._rounds_left()),
+            outlook=RoundOutlook(
+                turn.round_lanes,
+                self._time_remaining(),
+                self._rounds_left(),
+                slot_models=slot_models if len(set(slot_models)) > 1 else (),
+            ),
             sources=FactSources(
                 archive_dir=str(self._experiments.tree_rounds),
                 selections_dir=str(self._experiments.tree_selections),
             ),
             merge_failures=self._merge_failures,
+            models=labels,
         )
         started_at = time.time()
         selector = turn.actors.slot_selector
@@ -194,9 +222,45 @@ class TreeSearchLoop(TreePlanningMixin, TreeMergeMixin, TreeAdmissionMixin, Iter
             )
             self._checkpoint_llm_usage()
         self._round_planning_sec += max(0.0, time.time() - started_at)
-        selection = read_selection(tree, answer.answer, lanes=turn.round_lanes, failure=answer.failure)
+        selection = read_selection(
+            tree, answer.answer, lanes=turn.round_lanes, failure=answer.failure, profile_cycle=cycle
+        )
         self._record_selection(turn.iteration, facts, answer, selection)
         return selection
+
+    def _split_profiles(self) -> tuple[str, ...]:
+        """The profiles a split relay gives this round's slots to: every one this session built that is available."""
+        pool = self._search_actors
+        if not self.ic.split_relay or pool is None:
+            return ()
+        statuses = self.run_state.agent_availability_snapshot.profiles
+        return tuple(
+            profile.profile_id
+            for profile in pool.profiles
+            if pool.has_bundle(profile.profile_id)
+            and statuses.get(profile.profile_id) is not None
+            and statuses[profile.profile_id].available
+        )
+
+    def _profile_cycle(self, iteration: int) -> tuple[str, ...]:
+        """The profiles this round's slot positions take in turn: under a split relay every one that can run."""
+        split = self._split_profiles()
+        if len(split) >= 2:
+            return round_profile_cycle(split, iteration)
+        active = self.run_state.agent_relay.active_profile_id
+        return (active,) if active else ()
+
+    def _slot_actors(self, turn: IterationTurn) -> SlotActors:
+        """The search actor of each slot: its own profile's under a split relay, else the round's."""
+        split = self._split_profiles()
+        if len(split) < 2:
+            return SlotActors(turn.actors)
+        return SlotActors(turn.actors, {profile_id: self._search_actors.bundle(profile_id) for profile_id in split})
+
+    def _profile_labels(self) -> dict[str, str]:
+        """Each Agent profile this campaign knows, as its provider and model."""
+        statuses = self.run_state.agent_availability_snapshot.profiles
+        return {profile_id: f"{status.provider}/{status.model}" for profile_id, status in statuses.items()}
 
     def _rounds_left(self) -> int | None:
         recent = [item.total_sec for item in self.run_state.round_costs.recent if item.total_sec > 0]
@@ -207,7 +271,7 @@ class TreeSearchLoop(TreePlanningMixin, TreeMergeMixin, TreeAdmissionMixin, Iter
     def _record_selection(self, iteration: int, facts: str, answer: SelectorAnswer, selection: Selection) -> None:
         slots = "\n".join(
             f"- slot {slot.index}: {slot.slot_type.value} at {slot.start} {slot.direction or slot.source or ''} "
-            f"-- {slot.reason}"
+            f"on {slot.agent_profile_id or 'the session agent'} -- {slot.reason}"
             for slot in selection.slots
         )
         record = "\n".join(
@@ -234,7 +298,10 @@ class TreeSearchLoop(TreePlanningMixin, TreeMergeMixin, TreeAdmissionMixin, Iter
         )
         atomic_write_text(self._experiments.tree_selection(iteration), record, options=DURABLE)
         for slot in selection.slots:
-            print(f"  [tree] slot {slot.index}: {slot.slot_type.value} at {slot.start[:12]} {slot.direction}")
+            print(
+                f"  [tree] slot {slot.index}: {slot.slot_type.value} at {slot.start[:12]} {slot.direction} "
+                f"on {slot.agent_profile_id or 'the session agent'}"
+            )
         if selection.fallback:
             print(f"  [tree] selector fallback: {selection.fallback}")
 
@@ -253,18 +320,19 @@ class TreeSearchLoop(TreePlanningMixin, TreeMergeMixin, TreeAdmissionMixin, Iter
     async def _settle_round(self, turn: IterationTurn, candidates: list, outcomes: list[SlotOutcome], callbacks):
         """Close the iteration: publish the round's best candidate that cleared the bar, or record why none did."""
         clearing = [(node, result) for node, result in candidates if result.kept]
+        published = max(clearing, key=lambda item: item[0].score)[0] if clearing else None
         frame = _IterationFrame(turn.iteration, {"plan": _round_summary(outcomes)}, _StagedMerge(None, ""))
-        # The relay switches profile only between iterations, so every slot of this round ran on the active one.
-        self._bind_session_producer(frame.session_sink, self.run_state.agent_relay.active_profile_id)
+        # The round's outcome is the profile's that wrote what it publishes, else the active profile's, which ran it.
+        producer = published.agent_profile_id if published is not None else ""
+        self._bind_session_producer(frame.session_sink, producer or self.run_state.agent_relay.active_profile_id)
         hazard = self.device_hazard.live
         if hazard is not None:
             # A session of this round left the device held: nothing after it is measured, the publication included.
             attempt = _Attempt(_held_device_result(turn.iteration, hazard.describe()), "", "", "", "", None, "", True)
             await self._settle_locked_attempt(attempt, frame, callbacks=callbacks)
             return
-        if clearing:
-            node, _ = max(clearing, key=lambda item: item[0].score)
-            await self._publish_node(node, frame, callbacks)
+        if published is not None:
+            await self._publish_node(published, frame, callbacks)
             return
         measured = [o.result for o in outcomes if o.result is not None]
         if not measured:

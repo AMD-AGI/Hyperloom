@@ -42,10 +42,10 @@ _TICK_SEC = 0.1
 
 @dataclass(frozen=True)
 class OptimizeOptions:
-    """The nested forge-loop's branch, supervisor backend, Analysis timeout, lanes and search strategy.
+    """The nested forge-loop's branch, supervisor backend, Analysis timeout, lanes, search strategy and relay mode.
 
-    ``lanes`` and ``search_strategy`` are None when the caller did not ask, and the nested loop then uses its own
-    defaults.
+    ``lanes``, ``search_strategy`` and ``relay_mode`` are None when the caller did not ask, and the nested loop then
+    uses its own defaults.
     """
 
     git_branch: str = "forge-rewrite-optimize"
@@ -53,6 +53,7 @@ class OptimizeOptions:
     profile_timeout_sec: int = 1800
     lanes: int | None = None
     search_strategy: str | None = None
+    relay_mode: str | None = None
 
 
 @dataclass(frozen=True)
@@ -356,6 +357,8 @@ def _optional_loop_args(config: Config, request: OptimizeRequest, baseline_json:
         cmd += ["--lanes", str(options.lanes)]
     if options.search_strategy is not None:
         cmd += ["--search-strategy", options.search_strategy]
+    if options.relay_mode is not None:
+        cmd += ["--relay-mode", options.relay_mode]
     return cmd
 
 

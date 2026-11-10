@@ -12,6 +12,7 @@ import click
 from kernelforge.cli.option_groups import option_group
 from kernelforge.cli.options import (
     LANE_COUNTS,
+    RELAY_MODES,
     SEARCH_STRATEGIES,
     _agent_runtime_options,
     _gpu_options,
@@ -249,6 +250,17 @@ ANALYSIS_TIMEOUT_SEC = 7200
             "opening a new one, or carrying gains from one node onto another -- each planned and implemented in its "
             "own checkout of its node; the round's best node that clears the KEEP bar is published. Immutable per "
             "campaign: snapshotted into campaign_config.json, and a --resume may only repeat it.",
+        ),
+        click.option(
+            "--relay-mode",
+            type=RELAY_MODES,
+            default=None,
+            help="How the model relay uses its Agent profiles (one per provider whose line passes the startup "
+            "check). 'handoff' (the default for a fresh campaign) runs one profile at a time and hands the search "
+            "to another at a blockage. 'split' needs --search-strategy tree: every round's slots are split across "
+            "the profiles that can run, in turn, each slot planned and implemented on its own profile, and the "
+            "selector is told which profile each slot position runs on. Immutable per campaign: snapshotted into "
+            "campaign_config.json, and a --resume may only repeat it.",
         ),
     ),
     _roofline_ceiling_option(

@@ -1,7 +1,7 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""Plan one tree round: every start node is planned in its own checkout, all of them side by side."""
+"""Plan one tree round: every start node is planned in its own checkout, on each profile its slots run on, all side by side."""
 
 from __future__ import annotations
 
@@ -22,6 +22,7 @@ from kernelforge.workflows.forge_loop.search.search_policy import (
     SEARCH_MODE_EXPLOIT,
 )
 from kernelforge.workflows.forge_loop.tree.model import DirectionProposal, Round, SearchTree, Slot, SlotType, TreeNode
+from kernelforge.workflows.forge_loop.tree.profiles import SlotActors
 
 _DIRECTION_HEADING = "## direction"
 # Markdown emphasis a planner may wrap a record's keys and values in.
@@ -72,6 +73,33 @@ class RoundPlans:
 
     plans: tuple[SlotPlan, ...]
     unplanned: tuple[UnplannedSlot, ...]
+
+
+@dataclass(frozen=True)
+class PlanningUnit:
+    """The slots of one start that one Agent profile plans together, and the directory their records go to."""
+
+    start: str
+    profile_id: str
+    slots: tuple[Slot, ...]
+    records: Path
+
+
+def planning_units(slots: Sequence[Slot], round_dir: Path) -> list[PlanningUnit]:
+    """The round's slots grouped by start and then by profile, in the order the slots name them.
+
+    A start planned on one profile keeps its records in ``start_<commit>``; a start whose slots run on several gives
+    each profile a directory of its own.
+    """
+    by_start: dict[str, dict[str, list[Slot]]] = {}
+    for slot in slots:
+        by_start.setdefault(slot.start, {}).setdefault(slot.agent_profile_id, []).append(slot)
+    units = []
+    for start, by_profile in by_start.items():
+        for profile_id, members in by_profile.items():
+            name = f"start_{start[:12]}" + (f"_{profile_id}" if len(by_profile) > 1 else "")
+            units.append(PlanningUnit(start, profile_id, tuple(members), round_dir / name))
+    return units
 
 
 def read_direction_record(plan: str) -> tuple[DirectionProposal | None, str]:
@@ -161,22 +189,26 @@ def port_plan(tree: SearchTree, slot: Slot, diff_path: str) -> str:
 
 
 class TreePlanningMixin:
-    """Buy one round's plans: one planning unit per start, all of them side by side.
+    """Buy one round's plans: one planning unit per start and profile, all of them side by side.
 
     The host supplies the iteration loop's context builders, ``ic``, ``_usage``, ``_round_planning_sec``,
-    ``_checkpoint_llm_usage``, ``_record_probe_hazard``, ``_start_worktrees`` and ``_experiments``.
+    ``_checkpoint_llm_usage``, ``_record_probe_hazard``, ``_check_profile_again``, ``_start_worktrees`` and
+    ``_experiments``.
     """
 
-    async def _plan_round_slots(self, tree: SearchTree, round_: Round, orchestration_factory) -> RoundPlans:
-        """Plan every slot of ``round_``; a start whose planning failed leaves its slots unplanned."""
+    async def _plan_round_slots(self, tree: SearchTree, round_: Round, actors: SlotActors) -> RoundPlans:
+        """Plan every slot of ``round_`` on its own profile; a unit whose planning failed leaves its slots unplanned."""
         started_at = time.time()
         try:
-            groups = _by_start(round_.slots)
+            units = planning_units(round_.slots, self._experiments.tree_round(round_.iteration))
             # One after another: concurrent ``git worktree add`` calls contend for the repository's own locks.
-            for start, _ in groups:
+            for start in dict.fromkeys(unit.start for unit in units):
                 self._start_worktrees.ensure(start)
             outcomes = await asyncio.gather(
-                *(self._plan_start(tree, round_, start, slots, orchestration_factory) for start, slots in groups)
+                *(
+                    self._plan_unit(tree, round_.iteration, unit, actors.of(unit.slots[0]).orchestration_factory)
+                    for unit in units
+                )
             )
         finally:
             self._round_planning_sec += max(0.0, time.time() - started_at)
@@ -184,28 +216,30 @@ class TreePlanningMixin:
         unplanned = tuple(item for outcome in outcomes for item in outcome.unplanned)
         return RoundPlans(plans, unplanned)
 
-    async def _plan_start(
-        self, tree: SearchTree, round_: Round, start: str, slots: list[Slot], orchestration_factory
+    async def _plan_unit(
+        self, tree: SearchTree, iteration: int, unit: PlanningUnit, orchestration_factory
     ) -> RoundPlans:
-        ports = [slot for slot in slots if slot.slot_type is SlotType.PORT]
-        planned = [slot for slot in slots if slot.slot_type is not SlotType.PORT]
-        port_plans = tuple(self._write_port_plan(tree, round_.iteration, slot) for slot in ports)
+        ports = [slot for slot in unit.slots if slot.slot_type is SlotType.PORT]
+        planned = [slot for slot in unit.slots if slot.slot_type is not SlotType.PORT]
+        port_plans = tuple(self._write_port_plan(tree, unit, slot) for slot in ports)
         if not planned:
             return RoundPlans(port_plans, ())
         if orchestration_factory is None:
             return RoundPlans(
                 port_plans, tuple(UnplannedSlot(slot, "no planning service is configured") for slot in planned)
             )
-        context = self._start_context(tree, tree.require_node(start), planned)
+        context = self._start_context(tree, tree.require_node(unit.start), planned)
         try:
             result = await orchestration_factory().run(context, usage=self._usage, lanes=len(planned))
         except OrchestrationInfrastructureError as error:
+            # The profile's line may be down: the next round's boundary checks it before it is given slots again.
+            self._check_profile_again(unit.profile_id)
             reason = f"planning failed: {type(error).__name__}: {error}"
             return RoundPlans(port_plans, tuple(UnplannedSlot(slot, reason) for slot in planned))
         finally:
             self._checkpoint_llm_usage()
-        self._record_probe_hazard(round_.iteration, result)
-        mapped = self._map_plans(round_.iteration, planned, result)
+        self._record_probe_hazard(iteration, result)
+        mapped = self._map_plans(unit, planned, result)
         return RoundPlans((*port_plans, *mapped.plans), mapped.unplanned)
 
     def _start_context(self, tree: SearchTree, start: TreeNode, slots: Sequence[Slot]):
@@ -245,7 +279,7 @@ class TreePlanningMixin:
             lane_assignments=slot_assignments(tree, start, slots),
         )
 
-    def _map_plans(self, iteration: int, slots: list[Slot], result) -> RoundPlans:
+    def _map_plans(self, unit: PlanningUnit, slots: list[Slot], result) -> RoundPlans:
         """Give each slot the plan published for its lane; a slot whose lane has none says why.
 
         Slot k is planning lane k, and each published plan names the lane it was made for, so a lane lost anywhere
@@ -266,46 +300,41 @@ class TreePlanningMixin:
         for lane_id, slot in enumerate(slots, start=1):
             lane, text = published.get(lane_id, (None, ""))
             if lane is not None and text.strip():
-                plans.append(
-                    self._slot_plan(iteration, slot, text.strip(), approach=lane.approach, focus_cases=lane.focus_cases)
-                )
+                plans.append(_slot_plan(unit, slot, text.strip(), approach=lane.approach, focus_cases=lane.focus_cases))
             else:
                 unplanned.append(UnplannedSlot(slot, losses.get(str(lane_id)) or unavailable))
-        self._write_round_record(iteration, slots[0].start, "orchestration.json", diagnostics)
+        _write_record(unit.records, "orchestration.json", diagnostics)
         return RoundPlans(tuple(plans), tuple(unplanned))
 
-    def _slot_plan(
-        self, iteration: int, slot: Slot, text: str, *, approach: str = "", focus_cases: tuple[str, ...] = ()
-    ) -> SlotPlan:
-        proposal, hint_answer = read_direction_record(text) if slot.slot_type is SlotType.BRANCH else (None, "")
-        path = self._write_round_record(iteration, slot.start, f"slot_{slot.index:02d}.md", text)
-        return SlotPlan(slot, text, str(path), proposal, hint_answer, approach=approach, focus_cases=focus_cases)
-
-    def _write_port_plan(self, tree: SearchTree, iteration: int, slot: Slot) -> SlotPlan:
+    def _write_port_plan(self, tree: SearchTree, unit: PlanningUnit, slot: Slot) -> SlotPlan:
         ancestor = git("merge-base", slot.start, slot.source, cwd=self.ic.workspace_dir).stdout.strip()
         diff = git("diff", ancestor, slot.source, cwd=self.ic.workspace_dir).stdout
-        diff_path = self._write_round_record(iteration, slot.start, f"slot_{slot.index:02d}_source.diff", diff)
-        return self._slot_plan(iteration, slot, port_plan(tree, slot, str(diff_path)))
-
-    def _write_round_record(self, iteration: int, start: str, name: str, content) -> Path:
-        path = self._experiments.tree_round(iteration) / f"start_{start[:12]}" / name
-        text = content if isinstance(content, str) else json.dumps(content, indent=2, sort_keys=True, default=str)
-        atomic_write_text(path, text, options=DURABLE)
-        return path
+        diff_path = _write_record(unit.records, f"slot_{slot.index:02d}_source.diff", diff)
+        return _slot_plan(unit, slot, port_plan(tree, slot, str(diff_path)))
 
 
-def _by_start(slots: Sequence[Slot]) -> list[tuple[str, list[Slot]]]:
-    groups: dict[str, list[Slot]] = {}
-    for slot in slots:
-        groups.setdefault(slot.start, []).append(slot)
-    return list(groups.items())
+def _slot_plan(
+    unit: PlanningUnit, slot: Slot, text: str, *, approach: str = "", focus_cases: tuple[str, ...] = ()
+) -> SlotPlan:
+    proposal, hint_answer = read_direction_record(text) if slot.slot_type is SlotType.BRANCH else (None, "")
+    path = _write_record(unit.records, f"slot_{slot.index:02d}.md", text)
+    return SlotPlan(slot, text, str(path), proposal, hint_answer, approach=approach, focus_cases=focus_cases)
+
+
+def _write_record(directory: Path, name: str, content) -> Path:
+    path = directory / name
+    text = content if isinstance(content, str) else json.dumps(content, indent=2, sort_keys=True, default=str)
+    atomic_write_text(path, text, options=DURABLE)
+    return path
 
 
 __all__ = [
+    "PlanningUnit",
     "RoundPlans",
     "SlotPlan",
     "TreePlanningMixin",
     "UnplannedSlot",
+    "planning_units",
     "port_plan",
     "read_direction_record",
     "slot_assignments",

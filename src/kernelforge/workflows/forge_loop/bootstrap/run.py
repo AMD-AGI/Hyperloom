@@ -34,6 +34,8 @@ from kernelforge.workflows.forge_loop.bootstrap.run_context import _ForgeDeadlin
 from kernelforge.workflows.forge_loop.bootstrap.search_strategy import (
     loop_class_for,
     require_lanes_for,
+    require_relay_mode_for,
+    requested_relay_mode,
     requested_strategy,
 )
 from kernelforge.workflows.forge_loop.bootstrap.session_budget import _forge_session_timeout_sec, _is_long_horizon
@@ -152,7 +154,7 @@ def _profile_timeout_override(env_timeout, profile_timeout_sec: int) -> int:
     return override
 
 
-def _reject_incompatible_loop_options(*, producer: str, loop_shape: LoopShape) -> None:
+def _reject_incompatible_loop_options(*, producer: str, loop_shape: LoopShape, resume: bool) -> None:
     """Refuse an option combination the loop cannot honour, before anything is set up."""
     if producer:
         from kernelforge.knowledge.kb_store.identity.kernel_recipe import KERNEL_RECIPE_PRODUCERS
@@ -161,6 +163,9 @@ def _reject_incompatible_loop_options(*, producer: str, loop_shape: LoopShape) -
             raise ForgeLoopUsageError(f"--producer must be one of: {', '.join(sorted(KERNEL_RECIPE_PRODUCERS))}")
     if loop_shape.search_strategy is not None:
         require_lanes_for(requested_strategy(loop_shape), loop_shape.lanes)
+    # A resume that names no strategy is checked against the one it was created with, once that is read.
+    if loop_shape.relay_mode is not None and (loop_shape.search_strategy is not None or not resume):
+        require_relay_mode_for(requested_strategy(loop_shape), requested_relay_mode(loop_shape))
 
 
 def _resumed_profile_id(state_path: Path) -> str:
@@ -280,6 +285,7 @@ def _resolve_campaign(request: ForgeLoopRequest, workspace: Path, agent_relay) -
                 commit_new_paths=tuple(request.loop_shape.commit_new_paths),
                 agent_relay=agent_relay,
                 search_strategy=requested_strategy(request.loop_shape).value,
+                relay_mode=requested_relay_mode(request.loop_shape).value,
             ),
             resume=request.resume,
             prepare_task=request.prepare_task,
@@ -473,7 +479,9 @@ def run_forge_loop(request: ForgeLoopRequest, *, publish_result: Callable[[dict]
     except ValueError as exc:
         raise ForgeLoopError(str(exc)) from exc
 
-    _reject_incompatible_loop_options(producer=request.knowledge.producer, loop_shape=request.loop_shape)
+    _reject_incompatible_loop_options(
+        producer=request.knowledge.producer, loop_shape=request.loop_shape, resume=request.resume
+    )
 
     from kernelforge.workflows.forge_loop.campaign.run_state import WorkspaceLock, WorkspaceLockError
 
@@ -587,6 +595,7 @@ def _agent_session(inputs: _RunInputs, opened: _OpenedCampaign) -> _AgentSession
 
 def _iteration_config(inputs: _RunInputs, campaign: CampaignConfig) -> IterationConfig:
     """The loop's configuration: the campaign's task and measurement semantics, and this invocation's budget."""
+    from kernelforge.workflows.forge_loop.campaign.campaign_config import RelayMode
     from kernelforge.workflows.forge_loop.iteration.iteration_types import IterationConfig
 
     request, workspace, deadline = inputs.request, inputs.workspace, inputs.deadline
@@ -617,6 +626,7 @@ def _iteration_config(inputs: _RunInputs, campaign: CampaignConfig) -> Iteration
         bench_repeat=campaign.bench_repeat,
         lanes=request.loop_shape.lanes,
         merge_stacking=request.loop_shape.merge_stacking,
+        split_relay=RelayMode(campaign.relay_mode) is RelayMode.SPLIT,
         # New files a KEEP may carry; a REVERT removes exactly the same set. From the campaign, so a resumed session
         # can still ship or remove the new file an earlier session was configured to.
         commit_new_paths=list(campaign.commit_new_paths),

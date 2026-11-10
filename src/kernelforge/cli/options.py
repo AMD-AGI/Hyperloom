@@ -11,14 +11,16 @@ import click
 
 from kernelforge.cli.option_groups import option_group
 from kernelforge.config import CEILING_OFF, CEILING_ON, AgentRuntimeOptions, CeilingSwitch, GpuOptions
-from kernelforge.workflows.forge_loop.api import SearchStrategy
+from kernelforge.workflows.forge_loop.api import RelayMode, SearchStrategy
 
 
 MIN_MAX_HOURS = 1.0  # a run shorter than this can't complete a productive campaign
 
-#: The values ``--lanes`` and ``--search-strategy`` accept, shared by every command that runs or nests a forge-loop.
+#: The values ``--lanes``, ``--search-strategy`` and ``--relay-mode`` accept, shared by every command that runs or nests
+#: a forge-loop.
 LANE_COUNTS = click.IntRange(min=1, max=8)
 SEARCH_STRATEGIES = click.Choice([item.value for item in SearchStrategy])
+RELAY_MODES = click.Choice([item.value for item in RelayMode])
 
 
 def _validate_max_hours(ctx, param, value):

@@ -11,7 +11,13 @@ from kernelforge.workflows.forge_loop.campaign.experiments_layout import Experim
 from kernelforge.workflows.forge_loop.roles.contracts import PublishedLane
 from kernelforge.workflows.forge_loop.tree.admission import slot_prompt
 from kernelforge.workflows.forge_loop.tree.model import NodeSource, Slot, SlotType, TreeNode
-from kernelforge.workflows.forge_loop.tree.planning import SlotPlan, TreePlanningMixin, read_direction_record
+from kernelforge.workflows.forge_loop.tree.planning import (
+    PlanningUnit,
+    SlotPlan,
+    TreePlanningMixin,
+    planning_units,
+    read_direction_record,
+)
 
 # The shape a real planner wrote: an opening sentence, then a record whose keys are bold.
 PLAN = """I'll read the kernel source and the analysis report before planning.
@@ -64,6 +70,11 @@ def _slots(count: int) -> list[Slot]:
     return [Slot(index, SlotType.BRANCH, "a" * 40, "r") for index in range(1, count + 1)]
 
 
+def _unit(tmp_path, slots: list[Slot]) -> PlanningUnit:
+    (unit,) = planning_units(slots, tmp_path / "iter_001")
+    return unit
+
+
 def _planning_result(plans: tuple[str, ...], lanes: tuple[PublishedLane, ...], **diagnostics) -> SimpleNamespace:
     return SimpleNamespace(optimization_plans=plans, published_lanes=lanes, structured_output_diagnostics=diagnostics)
 
@@ -76,7 +87,7 @@ def test_a_lane_lost_mid_round_costs_only_its_own_slot(tmp_path):
         lane_losses={"2": "no analysis read the epilogue"},
     )
 
-    mapped = _Host(tmp_path)._map_plans(1, slots, result)
+    mapped = _Host(tmp_path)._map_plans(_unit(tmp_path, slots), slots, result)
 
     assert [(plan.slot.index, plan.text) for plan in mapped.plans] == [(1, "plan for lane 1"), (3, "plan for lane 3")]
     assert [(item.slot.index, item.reason) for item in mapped.unplanned] == [(2, "no analysis read the epilogue")]
@@ -89,7 +100,7 @@ def test_a_slot_whose_lane_the_critic_dropped_says_so(tmp_path):
         lane_narrowing={"dropped_lanes": {"1": "lane 2 already covers it"}},
     )
 
-    mapped = _Host(tmp_path)._map_plans(1, _slots(2), result)
+    mapped = _Host(tmp_path)._map_plans(_unit(tmp_path, _slots(2)), _slots(2), result)
 
     assert [(plan.slot.index, plan.text) for plan in mapped.plans] == [(2, "plan for lane 2")]
     assert [item.reason for item in mapped.unplanned] == ["the plan critic dropped its lane: lane 2 already covers it"]
@@ -102,7 +113,7 @@ def test_a_round_whose_synthesis_failed_runs_no_slot_on_the_framework_plan(tmp_p
         synthesis={"status": "unavailable", "message": "OrchestrationOutputError: no lane plan"},
     )
 
-    mapped = _Host(tmp_path)._map_plans(1, _slots(2), result)
+    mapped = _Host(tmp_path)._map_plans(_unit(tmp_path, _slots(2)), _slots(2), result)
 
     assert mapped.plans == ()
     assert {item.reason for item in mapped.unplanned} == {"OrchestrationOutputError: no lane plan"}
@@ -114,11 +125,31 @@ def test_a_slot_is_planned_with_the_approach_and_cases_its_lane_was_given(tmp_pa
         (PublishedLane(1, approach="retime the MFMA issue", focus_cases=("m_64",)), PublishedLane(2)),
     )
 
-    mapped = _Host(tmp_path)._map_plans(1, _slots(2), result)
+    mapped = _Host(tmp_path)._map_plans(_unit(tmp_path, _slots(2)), _slots(2), result)
 
     assert [(plan.approach, plan.focus_cases) for plan in mapped.plans] == [
         ("retime the MFMA issue", ("m_64",)),
         ("", ()),
+    ]
+
+
+def test_a_start_whose_slots_run_on_several_profiles_is_planned_once_per_profile(tmp_path):
+    slots = [
+        Slot(1, SlotType.BRANCH, "a" * 40, "r", agent_profile_id="claude"),
+        Slot(2, SlotType.BRANCH, "a" * 40, "r", agent_profile_id="codex"),
+        Slot(3, SlotType.BRANCH, "b" * 40, "r", agent_profile_id="claude"),
+        Slot(4, SlotType.BRANCH, "a" * 40, "r", agent_profile_id="claude"),
+    ]
+
+    units = planning_units(slots, tmp_path)
+
+    assert [
+        (unit.start[0], unit.profile_id, [slot.index for slot in unit.slots], unit.records.name) for unit in units
+    ] == [
+        ("a", "claude", [1, 4], "start_aaaaaaaaaaaa_claude"),
+        ("a", "codex", [2], "start_aaaaaaaaaaaa_codex"),
+        # A start planned on one profile keeps the directory it has always had.
+        ("b", "claude", [3], "start_bbbbbbbbbbbb"),
     ]
 
 

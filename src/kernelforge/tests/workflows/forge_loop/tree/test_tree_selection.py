@@ -21,6 +21,7 @@ from kernelforge.workflows.forge_loop.tree.model import (
     SlotType,
     TreeNode,
 )
+from kernelforge.workflows.forge_loop.tree.profiles import profile_at, round_profile_cycle
 from kernelforge.workflows.forge_loop.tree.selection import read_selection
 from kernelforge.tests.workflows.forge_loop.tree._selection_answers import _selection
 
@@ -197,6 +198,59 @@ def test_the_facts_say_what_a_node_s_lane_attempted_and_the_cases_it_aimed_at():
     assert "approach: stage the operand through LDS; aimed at: big" in facts
     # A node no partition lane produced carries no such line.
     assert facts.count("approach:") == 1
+
+
+def test_the_slot_positions_take_the_profiles_in_turn_starting_one_further_each_round():
+    assert round_profile_cycle(("claude", "codex"), 1) == ("claude", "codex")
+    assert round_profile_cycle(("claude", "codex"), 2) == ("codex", "claude")
+    assert [profile_at(("claude", "codex"), position) for position in range(3)] == ["claude", "codex", "claude"]
+    assert profile_at((), 0) == ""
+
+
+def test_each_slot_runs_on_the_profile_of_the_position_the_selector_named_it_at():
+    answer = _selection(
+        [
+            {"slot_type": "BRANCH", "start": N2, "reason": "first"},
+            {"slot_type": "BRANCH", "start": "f" * 40, "reason": "names no node, so it is dropped"},
+            {"slot_type": "BRANCH", "start": N3, "reason": "third"},
+        ]
+    )
+
+    selection = read_selection(_tree(), answer, lanes=3, profile_cycle=("claude", "codex"))
+
+    # The dropped second slot does not move the third onto its profile.
+    assert [(slot.index, slot.agent_profile_id) for slot in selection.slots] == [(1, "claude"), (2, "claude")]
+    fallback = read_selection(_tree(), None, lanes=2, failure="no answer", profile_cycle=("codex", "claude"))
+    assert [slot.agent_profile_id for slot in fallback.slots] == ["codex"]
+
+
+def test_the_selector_is_told_the_model_of_each_slot_position_node_and_attempt():
+    tree = _tree()
+    tree.add_node(
+        replace(
+            _node("4" * 40, N3, "d002", 1.0, case_times={"small": 1.2, "big": 2.9}, iteration=3),
+            agent_profile_id="codex",
+        )
+    )
+    tree.open_round(Round(iteration=4, slots=(Slot(1, SlotType.DEEPEN, N3, "go on", direction="d002"),)))
+    attempt = Attempt(4, 1, SlotType.DEEPEN, N3, "d002", AttemptOutcome.INCORRECT, None, "", "", "go on")
+    tree.close_round([replace(attempt, agent_profile_id="claude")])
+    models = {"claude": "claude/opus", "codex": "codex/gpt"}
+
+    facts = render_facts(
+        tree,
+        outlook=RoundOutlook(lanes=2, remaining_sec=3600, rounds_left=2, slot_models=("codex/gpt", "claude/opus")),
+        sources=FactSources("/a", "/s"),
+        models=models,
+    )
+
+    assert "by the position you name it at: slot 1 on codex/gpt, slot 2 on claude/opus." in facts
+    assert "iteration in iteration 3 by codex/gpt:" in facts
+    assert "iter 4 slot 1 DEEPEN d002 on claude/opus INCORRECT" in facts
+    plain = render_facts(
+        tree, outlook=RoundOutlook(lanes=2, remaining_sec=3600, rounds_left=2), sources=FactSources("/a", "/s")
+    )
+    assert "by the position you name it at" not in plain
 
 
 def test_the_selector_reads_why_a_slot_came_to_nothing():

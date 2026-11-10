@@ -23,6 +23,7 @@ from kernelforge.workflows.forge_loop.tree.model import (
     SlotStatus,
     SlotType,
     TreeNode,
+    lost_attempt,
 )
 from kernelforge.workflows.forge_loop.tree.refs import (
     pin_node,
@@ -154,27 +155,40 @@ def test_a_prefix_resolves_only_when_it_names_one_node():
 def test_the_tree_round_trips_through_its_store(tmp_path):
     tree = _grown_tree()
     tree.set_direction_status("d002", DirectionStatus.CLOSED, "converged")
-    tree.open_round(Round(iteration=3, slots=(Slot(1, SlotType.PORT, "3" * 40, "r", source="2" * 40),)))
+    slot = Slot(1, SlotType.PORT, "3" * 40, "r", source="2" * 40, agent_profile_id="codex")
+    tree.open_round(Round(iteration=3, slots=(slot,)))
     tree.mark_slot(1, SlotStatus.DISPATCHED)
-    focused = replace(_node("4" * 40, "3" * 40, "d002", iteration=3), approach="stage via LDS", focus_cases=("m_1",))
+    focused = replace(
+        _node("4" * 40, "3" * 40, "d002", iteration=3),
+        approach="stage via LDS",
+        focus_cases=("m_1",),
+        agent_profile_id="codex",
+    )
     tree.add_node(focused)
     store = SearchTreeStore(tmp_path / "search_tree.json")
 
     store.save(tree)
 
     assert tree_to_dict(store.load()) == tree_to_dict(tree)
-    assert store.load().round.slots[0].status is SlotStatus.DISPATCHED
+    assert store.load().round.slots[0] == replace(slot, status=SlotStatus.DISPATCHED)
     assert store.load().node(focused.commit) == focused
 
 
-def test_a_tree_saved_before_nodes_carried_their_lane_s_focus_still_loads():
-    payload = json.loads(json.dumps(tree_to_dict(_grown_tree())))
+def test_a_tree_saved_before_it_recorded_lane_focus_and_agent_profiles_still_loads():
+    tree = _grown_tree()
+    tree.open_round(Round(iteration=3, slots=(Slot(1, SlotType.DEEPEN, "3" * 40, "r", direction="d002"),)))
+    tree.close_round([lost_attempt(3, tree.round.slots[0], "lost")])
+    tree.open_round(Round(iteration=4, slots=(Slot(1, SlotType.DEEPEN, "3" * 40, "r", direction="d002"),)))
+    payload = json.loads(json.dumps(tree_to_dict(tree)))
     for node in payload["nodes"]:
-        del node["approach"], node["focus_cases"]
+        del node["approach"], node["focus_cases"], node["agent_profile_id"]
+    for record in (*payload["attempts"], *payload["round"]["slots"]):
+        del record["agent_profile_id"]
 
-    tree = tree_from_dict(payload)
+    loaded = tree_from_dict(payload)
 
-    assert [(node.approach, node.focus_cases) for node in tree.nodes] == [("", ())] * len(tree.nodes)
+    assert [(node.approach, node.focus_cases, node.agent_profile_id) for node in loaded.nodes] == [("", (), "")] * 4
+    assert [item.agent_profile_id for item in (*loaded.attempts, *loaded.round.slots)] == ["", ""]
 
 
 def test_the_store_refuses_a_field_set_it_did_not_write(tmp_path):

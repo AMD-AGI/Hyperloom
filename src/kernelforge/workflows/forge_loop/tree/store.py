@@ -121,8 +121,10 @@ def _optional_float(value: object) -> float | None:
     return None if value is None else float(value)
 
 
-# Node fields a tree written before they existed lacks, and the value such a node carries.
-_NODE_FIELDS_OLDER_TREES_LACK = {"approach": "", "focus_cases": []}
+# Fields a tree written before they existed lacks, and the value such a record carries.
+_NODE_FIELDS_OLDER_TREES_LACK = {"approach": "", "focus_cases": [], "agent_profile_id": ""}
+_ATTEMPT_FIELDS_OLDER_TREES_LACK = {"agent_profile_id": ""}
+_SLOT_FIELDS_OLDER_TREES_LACK = {"agent_profile_id": ""}
 
 
 def _node(payload: object) -> TreeNode:
@@ -144,6 +146,7 @@ def _node(payload: object) -> TreeNode:
         provenance=tuple(str(item) for item in data["provenance"]),
         approach=str(data["approach"]),
         focus_cases=tuple(str(item) for item in data["focus_cases"]),
+        agent_profile_id=str(data["agent_profile_id"]),
     )
 
 
@@ -169,7 +172,7 @@ def _direction(payload: object) -> Direction:
 
 
 def _attempt(payload: object) -> Attempt:
-    data = _exact(payload, Attempt, "search tree attempt")
+    data = _exact(_with_older_defaults(payload, _ATTEMPT_FIELDS_OLDER_TREES_LACK), Attempt, "search tree attempt")
     return Attempt(
         iteration=int(data["iteration"]),
         slot=int(data["slot"]),
@@ -182,11 +185,12 @@ def _attempt(payload: object) -> Attempt:
         archive_path=str(data["archive_path"]),
         reason=str(data["reason"]),
         detail=str(data["detail"]),
+        agent_profile_id=str(data["agent_profile_id"]),
     )
 
 
 def _slot(payload: object) -> Slot:
-    data = _exact(payload, Slot, "search tree slot")
+    data = _exact(_with_older_defaults(payload, _SLOT_FIELDS_OLDER_TREES_LACK), Slot, "search tree slot")
     return Slot(
         index=int(data["index"]),
         slot_type=SlotType(data["slot_type"]),
@@ -197,6 +201,7 @@ def _slot(payload: object) -> Slot:
         hint=str(data["hint"]),
         gains=str(data["gains"]),
         status=SlotStatus(data["status"]),
+        agent_profile_id=str(data["agent_profile_id"]),
     )
 
 

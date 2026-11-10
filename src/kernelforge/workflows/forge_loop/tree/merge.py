@@ -22,7 +22,12 @@ from kernelforge.workflows.forge_loop.iteration.fanout import LanePlan, LaneResu
 from kernelforge.workflows.forge_loop.iteration.iteration_types import IterationResult
 from kernelforge.workflows.forge_loop.iteration.merge_candidates import cases_beating_reference
 from kernelforge.workflows.forge_loop.policy.round_budget import admit_dispatch
-from kernelforge.workflows.forge_loop.tree.admission import MeasuredCandidate, StagedCandidate
+from kernelforge.workflows.forge_loop.tree.admission import (
+    LaneSession,
+    MeasuredCandidate,
+    SessionAgent,
+    StagedCandidate,
+)
 from kernelforge.workflows.forge_loop.tree.model import MergeFailure, SearchTree, TreeNode
 from kernelforge.workflows.forge_loop.tree.refs import is_ancestor
 
@@ -92,9 +97,13 @@ class TreeMergeMixin:
     """
 
     async def _merge_round(
-        self, tree: SearchTree, iteration: int, admitted: Sequence[tuple[TreeNode, IterationResult]], agent_factory
+        self,
+        tree: SearchTree,
+        iteration: int,
+        admitted: Sequence[tuple[TreeNode, IterationResult]],
+        agent: SessionAgent,
     ) -> MergeRound:
-        """Merge the round's gains into the node the round would publish, as the module docstring describes."""
+        """Merge the round's gains into the node the round would publish, any merge session running on ``agent``."""
         if not admitted:
             return MergeRound()
         base = max([item for item in admitted if item[1].kept] or admitted, key=lambda item: item[0].score)[0]
@@ -110,7 +119,7 @@ class TreeMergeMixin:
             if not self._has_gains_for(base, source):
                 continue
             attempted += 1
-            step = await self._merge(tree, iteration, self._merge_of(iteration, attempted, base, source), agent_factory)
+            step = await self._merge(tree, iteration, self._merge_of(iteration, attempted, base, source), agent)
             if step.failure:
                 failures.append(MergeFailure(source.commit, base.commit, step.failure))
             if step.node is not None:
@@ -129,26 +138,26 @@ class TreeMergeMixin:
         ancestor = git("merge-base", source.commit, base.commit, cwd=self.ic.workspace_dir).stdout.strip()
         return _Merge(base, source, ancestor, self._experiments.tree_round(iteration) / f"merge_{index:02d}")
 
-    async def _merge(self, tree: SearchTree, iteration: int, merge: _Merge, agent_factory) -> _Step:
+    async def _merge(self, tree: SearchTree, iteration: int, merge: _Merge, agent: SessionAgent) -> _Step:
         """Carry the source's change onto the base as it is when it applies, else by a merge session, and measure it."""
         source_change = self._change_since_ancestor(merge, merge.source)
         self._write_record(merge.records, "source.diff", source_change)
         if not self._can_measure_a_merge():
             return self._recorded(merge, "", _Step(failure="the campaign had too little time left to measure a merge"))
         worktree = self._start_worktrees.ensure(merge.base.commit)
-        method = _MECHANICAL
+        method, producer = _MECHANICAL, ""
         if not self._start_worktrees.apply(worktree, source_change):
-            method = _SESSION
-            failure = await self._stage_merge_session(iteration, merge, worktree, agent_factory)
+            method, producer = _SESSION, agent.profile_id
+            failure = await self._stage_merge_session(iteration, merge, worktree, agent)
             if failure:
                 return self._recorded(merge, method, _Step(failure=failure))
-        staged = StagedCandidate(worktree, merge.base.commit, merge.title, merge.records)
+        staged = StagedCandidate(worktree, merge.base.commit, merge.title, merge.records, producer)
         measured = await self._measure_and_admit(
             tree, iteration, staged, lambda result: self._admit_merge(tree, staged, result, merge.source)
         )
         return self._recorded(merge, method, _measured_step(measured))
 
-    async def _stage_merge_session(self, iteration: int, merge: _Merge, worktree: Path, agent_factory) -> str:
+    async def _stage_merge_session(self, iteration: int, merge: _Merge, worktree: Path, agent: SessionAgent) -> str:
         """Have an Implementer merge the two nodes on a copy of the base's worktree, and stage what it wrote there.
 
         Returns why nothing was staged, or an empty string.
@@ -161,7 +170,7 @@ class TreeMergeMixin:
         plan = _merge_plan(merge)
         self._write_record(merge.records, "plan.md", plan)
         lane_id = merge.records.name
-        lanes = await self._run_sessions(iteration, [(LanePlan(lane_id, plan, str(worktree)), plan)], agent_factory)
+        lanes = await self._run_sessions(iteration, [LaneSession(LanePlan(lane_id, plan, str(worktree)), plan, agent)])
         lane = lanes.get(lane_id)
         if lane is not None:
             self._write_record(merge.records, "lesson.md", lane.lesson.text or f"(no lesson: {lane.lesson.reason})")
