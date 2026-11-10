@@ -153,7 +153,7 @@ from hyperloom_multibranch.scheduling.lifecycle import (
 )
 from hyperloom_multibranch.scheduling.local_peers import workload_rule
 from hyperloom_multibranch.scheduling.manifest import read_manifest
-from hyperloom_multibranch.scheduling.resumption import deadline_after_downtime, resumable_run
+from hyperloom_multibranch.scheduling.resumption import ResumeRefused, deadline_after_downtime, resumable_run
 from hyperloom_multibranch.contracts.llm import CompletionFailed, CompletionReply
 from hyperloom_multibranch.scheduling.peers import Peers, PeerSetup
 from hyperloom_multibranch.scheduling.prelude import roofline_ceiling
@@ -2120,6 +2120,23 @@ async def test_a_resume_up_to_the_first_starts_deadline_gives_no_downtime_back(t
     assert read_manifest(stage.layout.manifest) == manifest
     [explore] = [row for row in _decisions(stage) if row["kind"] == "phase" and row["reason"] == "explore"][1:]
     assert explore["detail"]["explore_end"] <= manifest.deadline
+
+
+async def test_a_resume_is_refused_once_the_session_spent_the_gpu_hours_explore_has(tmp_path: Path) -> None:
+    stage = _stage(tmp_path)
+    stage.steps = _signalling(stage)
+    await stage.run()
+    manifest = json.loads(stage.layout.manifest.read_text())
+
+    manifest["settings"]["max_gpu_hours"] = TINY_GPU_HOURS
+    stage.layout.manifest.write_text(json.dumps(manifest))
+
+    with pytest.raises(ResumeRefused, match="all EXPLORE has under --max-gpu-hours 0.01"):
+        await asyncio.to_thread(resumable_run, stage.layout.root)
+
+    manifest["settings"]["max_gpu_hours"] = LEASED_GPU_HOURS * 100
+    stage.layout.manifest.write_text(json.dumps(manifest))
+    assert (await asyncio.to_thread(resumable_run, stage.layout.root)).settings.max_gpu_hours == LEASED_GPU_HOURS * 100
 
 
 async def test_a_second_resume_after_a_stopped_resume_archives_nothing_again_either(

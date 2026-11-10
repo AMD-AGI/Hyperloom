@@ -1236,6 +1236,7 @@ __all__ = [
     "LESSONS_KEY",
     "NO_BASELINE",
     "NO_CARDS_LEFT",
+    "RESTART_READER",
     "PersistedRun",
     "Session",
     "SessionHost",

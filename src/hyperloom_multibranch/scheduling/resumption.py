@@ -12,13 +12,19 @@ Session.resume`), and the deadline ``run --resume`` resumes it up to.
 
 from __future__ import annotations
 
+import asyncio
+import math
 from pathlib import Path
 
 from hyperloom_common.jsonio import read_jsonl
+from hyperloom_multibranch.blackboard import LocalBlackboard
+from hyperloom_multibranch.contracts.blackboard import Role, Writer
+from hyperloom_multibranch.scheduling.budget import MB_SECONDS_PER_HOUR, explore_gpu_seconds
 from hyperloom_multibranch.scheduling.decisions import downtime_until
+from hyperloom_multibranch.scheduling.explore import spent_gpu_seconds
 from hyperloom_multibranch.scheduling.launch_isolation import HOSTED
 from hyperloom_multibranch.scheduling.layout import SessionLayout
-from hyperloom_multibranch.scheduling.lifecycle import PersistedRun, persisted_run, prelude_landed
+from hyperloom_multibranch.scheduling.lifecycle import RESTART_READER, PersistedRun, persisted_run, prelude_landed
 from hyperloom_multibranch.scheduling.manifest import read_manifest
 from hyperloom_multibranch.scheduling.prelude import baseline_decision
 
@@ -29,13 +35,23 @@ class ResumeRefused(ValueError):
 
 def require_resumable(persisted: PersistedRun) -> None:
     """Raise ResumeRefused when a resume has nothing to continue ``persisted`` from: PRELUDE recorded no baseline or
-    not the decision that names it, or the session was to stop once its map was made. Blocks."""
+    not the decision that names it, the session was to stop once its map was made, or it already spent the GPU hours
+    EXPLORE has under ``--max-gpu-hours``, which would send the resume straight to FINAL. Blocks."""
 
     root = persisted.layout.root
     if not prelude_landed(root) or baseline_decision(read_jsonl(persisted.layout.decisions)) is None:
         raise ResumeRefused(f"the session in {root} recorded no baseline to resume from; start a new session")
     if persisted.settings.stop_after_map:
         raise ResumeRefused(f"the session in {root} was to stop once its map was made, so it has no EXPLORE to resume")
+    explore_gpu = explore_gpu_seconds(persisted.settings.max_gpu_hours)
+    if explore_gpu != math.inf:
+        reader = LocalBlackboard(persisted.layout.blackboard, Writer(Role.OBSERVER, RESTART_READER))
+        spent = spent_gpu_seconds(asyncio.run(reader.progress()))
+        if spent >= explore_gpu:
+            raise ResumeRefused(
+                f"the session in {root} spent {spent / MB_SECONDS_PER_HOUR:.2f} GPU hours, all EXPLORE has under --max-gpu-hours"
+                f" {persisted.settings.max_gpu_hours:g}, so it has no EXPLORE to resume"
+            )
 
 
 def resumable_run(root: Path) -> PersistedRun:
