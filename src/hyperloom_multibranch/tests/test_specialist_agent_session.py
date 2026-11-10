@@ -150,6 +150,9 @@ class _Processes:
     def adopt(self, pid, *, branch, argv):
         self.adopted.append((pid - FIRST_PID, branch, tuple(argv)))
 
+    def forget(self, pid):
+        pass
+
 
 @pytest.fixture
 async def rig(tmp_path):

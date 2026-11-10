@@ -71,6 +71,9 @@ class _Processes:
     def adopt(self, pid, *, branch, argv):
         pass
 
+    def forget(self, pid):
+        pass
+
 
 async def _until(condition, what: str) -> None:
     for _ in range(600):

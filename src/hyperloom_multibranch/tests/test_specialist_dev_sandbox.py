@@ -946,7 +946,7 @@ async def session_rig(tmp_path):
         env={},
         runner=_CrashingRunner(),
         tokens=_Tokens(),
-        processes=SimpleNamespace(adopt=lambda *args, **kwargs: None),
+        processes=SimpleNamespace(adopt=lambda *args, **kwargs: None, forget=lambda pid: None),
         repo=built.repo,
         dev_leases=held,
     )
