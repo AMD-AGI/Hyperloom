@@ -393,12 +393,7 @@ def _add_concurrency_options(run: argparse.ArgumentParser) -> None:
         "--make-before-break",
         action=argparse.BooleanOptionalAction,
         default=True,
-        help=(
-            "Measured in the grant's sandboxes, keep a finished test's sandbox until the next test's runs, so that the"
-            " cluster does not give its node to another job between two tests; only where the grant fits at least three"
-            " tests at once, and it runs one test fewer at once there. --no-make-before-break runs every test the grant"
-            " fits and closes each sandbox when its test ends. Ignored where tests run on this machine's cards."
-        ),
+        help="Hosted: keep a finished test's sandbox until the next one runs, where 3+ tests fit (one fewer runs).",
     )
     run.add_argument(
         "--measurement",
