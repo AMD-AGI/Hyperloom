@@ -260,7 +260,7 @@ def _arms(master: Mapping[str, Any]) -> Iterator[_Arm]:
     for name, entry in master.items():
         if entry.get("multinode", False):
             continue
-        for scenario in Scenario:
+        for scenario in list(Scenario):
             for group, block in enumerate(entry["scenarios"].get(scenario.value) or ()):
                 for index, benchmark in enumerate(block["search-space"]):
                     yield _Arm(name, entry, scenario, group, index, block, benchmark)
