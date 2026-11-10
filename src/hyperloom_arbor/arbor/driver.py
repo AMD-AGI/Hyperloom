@@ -45,7 +45,8 @@ from pathlib import Path
 if hasattr(sys.stdout, "reconfigure"):
     sys.stdout.reconfigure(line_buffering=True)
 
-from arbor import component, conflicts, lifecycle, master, review, roles, triggers, worker
+from arbor import component, conflicts, lifecycle, master, objective, review, revisit, roles, triggers, worker
+from arbor.execute import kept
 from arbor.execute.workspace import recover_orphaned_commit
 from arbor.master import (  # noqa: F401 - their old home, which callers and tests import from
     _aborted_detail, _aborted_exit, _best_text, _resolve_target, _root_accuracy, _round_end, _seed_baseline,
@@ -103,10 +104,10 @@ DESCRIPTIONS = {
 SPLITS, SPLIT_ENV = ("loop", "processes", "workers"), "ARBOR_SPLIT"
 
 
-def _parse(argv: list[str] | None, prog: str = "arbor run") -> argparse.Namespace:
+def parser(prog: str = "arbor run") -> argparse.ArgumentParser:
+    """The command's parser, built without parsing: :func:`_parse` parses with it, and the payload's argv and schema
+    are made from it (arbor/cli/payload.py)."""
     parser = argparse.ArgumentParser(prog=prog, description=DESCRIPTIONS[prog])
-    if prog == "arbor run" and (os.environ.get(SPLIT_ENV) or "loop") not in SPLITS:
-        parser.error(f"{SPLIT_ENV} is {os.environ[SPLIT_ENV]!r}, not one of {', '.join(SPLITS)}")
     if prog == "arbor worker":
         parser.add_argument("--order", required=True, help="the work order (work_order.json) the master wrote")
         parser.add_argument("--config", default=None,
@@ -135,6 +136,10 @@ def _parse(argv: list[str] | None, prog: str = "arbor run") -> argparse.Namespac
                         help="0 = run until target or STOP file")
     parser.add_argument("--cooldown", type=int, default=30,
                         help="Seconds between iterations")
+    parser.add_argument("--opt-objective", default=None, metavar="TEXT",
+                        help="optimize this metric in place of the pack's: a name (\"P50 interactivity\", \"total "
+                             "throughput\") or a bench key with its direction (\"tpot_p50:min\"). Also "
+                             f"{objective.ENV}, or \"{objective.CONFIG_KEY}\" in the config; arbor/objective.py")
     parser.add_argument(PACK_RESULTS_FLAG, action="store_true",
                         help=f"accept a {PACK_RESULTS_DIR}/ directory inside the pack (refused by "
                              f"default: {PACK_RESULTS_CONCERNS})")
@@ -150,7 +155,17 @@ def _parse(argv: list[str] | None, prog: str = "arbor run") -> argparse.Namespac
                         help="two loaded skills that write the same thing: pause for a person to decide (the "
                              "default), or merge them with an agent, without a pause (also "
                              f"{conflicts.ENV}, or \"skill_conflicts\" in the config; arbor/conflicts.py)")
-    args = parser.parse_args(argv)
+    return parser
+
+
+def _parse(argv: list[str] | None, prog: str = "arbor run") -> argparse.Namespace:
+    p = parser(prog)
+    if prog == "arbor run" and (os.environ.get(SPLIT_ENV) or "loop") not in SPLITS:
+        p.error(f"{SPLIT_ENV} is {os.environ[SPLIT_ENV]!r}, not one of {', '.join(SPLITS)}")
+    args = p.parse_args(argv)
+    # Every load of the campaign in this run, and the agents' arbor commands, read it from the environment.
+    if args.opt_objective:
+        os.environ[objective.ENV] = args.opt_objective
     return args
 
 
@@ -430,6 +445,13 @@ def _run_pass(s: master.Session, iteration: int, state: CampaignState) -> str:
     workspace = campaign.config.get("workspace_root", "")
     if container and workspace:
         recover_orphaned_commit(container, workspace, state.iteration)
+        # The tree now is the kept one (arbor/execute/kept.py): what the harness committed since the last pass (an
+        # integration of the workers' KEEPs) is kept too.
+        try:
+            if kept.refresh(container, campaign.config, session_dir, iteration):
+                print("[arbor] kept tree: moved to the tree at this pass's start")
+        except Exception as exc:   # noqa: BLE001 - the restore then goes to the older point, as it is recorded
+            print(f"[arbor] WARNING: the kept tree was not refreshed: {exc}")
 
     t_iter = time.time()
     if comp:
@@ -443,14 +465,31 @@ def _run_pass(s: master.Session, iteration: int, state: CampaignState) -> str:
         print(f"[arbor] {result.get('decision')}: {result.get('change')} "
               f"→ {result.get('metric')}")
         decided = str(result.get("decision") or "").lower()
+        # The tree after the verdict (arbor/execute/kept.py): a KEEP or PROBE is the new kept point; a REVERT or a
+        # NOT MEASURED iteration goes back to the last one, an INVALID's change noted first for the revisit phase.
+        if container and workspace:
+            try:
+                done = kept.after_pass(container, campaign.config, session_dir, iteration, result)
+                if done:
+                    print(f"[arbor] {done}")
+            except Exception as exc:   # noqa: BLE001 - bookkeeping must not cost the verdict
+                print(f"[arbor] WARNING: the kept tree was not restored or recorded: {exc}")
+        # A revisit's verdict on the change it measured again (arbor/revisit.py).
+        try:
+            closed = revisit.close(session_dir, iteration, result)
+            if closed:
+                print(f"[arbor] revisit: iteration {iteration} {closed['decision']}")
+        except Exception as exc:   # noqa: BLE001 - the next pass closes it from the session's record
+            print(f"[arbor] WARNING: the revisit was not closed: {exc}")
         if decided in triggers.FIRED:
             s.fire(decided, iteration, change=result.get("change"), metric=result.get("metric"))
         if decided == "invalid" and str(result.get("reason") or "").startswith("agent did not run"):
             s.fire("agent_failed", iteration, reason=result.get("reason"))
-        if result.get("decision") in ("STOPPED", "ROUND_END"):
+        if result.get("decision") in ("STOPPED", "ROUND_END", "SKIPPED"):
             # The map stopped the campaign, or ended its round, before the agent
-            # ran (arbor/directions.py): no iteration to time; the loop's STOP
-            # check exits, or its round-end check runs the A/B.
+            # ran (arbor/directions.py), or a revisit's change no longer applied
+            # (arbor/revisit.py): no iteration to time; the loop's STOP check
+            # exits, its round-end check runs the A/B, or the next revisit arms.
             return "again"
     except KeyboardInterrupt:
         print("\n[arbor] Interrupted — exiting.")

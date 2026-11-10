@@ -278,6 +278,21 @@ async def test_a_pass_whose_arbor_exited_is_still_killed_before_its_cards_go_bac
     assert toolbox.released == ["L1"]
 
 
+async def test_a_pass_whose_sandbox_times_out_while_it_installs_says_it_did_not_start(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    async def unavailable(*_args: object) -> None:
+        raise SandboxUnavailable("the sandbox service timed out")
+
+    monkeypatch.setattr(LocalSandbox, "run", unavailable)
+    monkeypatch.setattr(arbor_adapter, "INSTALL", ("pip install -e .",))
+    outcome, toolbox, _, _ = await _pass(tmp_path, "mapped")
+
+    assert outcome.map is None and outcome.reason.startswith("it did not start: ")
+    assert "the sandbox service timed out" in outcome.reason
+    assert toolbox.released == ["L1"]
+
+
 async def test_a_pass_whose_kill_fails_still_gives_its_cards_back_and_says_how_it_ended(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
 ) -> None:

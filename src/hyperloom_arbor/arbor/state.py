@@ -169,6 +169,9 @@ class CampaignState:
     # no secondary metric, in which case every gate path is single-axis.
     baseline_secondary: float | None = None
     best_secondary: float | None = None
+    # The kept tree's readings of a host's band guards (arbor/measure/guards.py), taken at every measured KEEP and
+    # PROBE; empty without guards. An older session.json loads without it.
+    guard_ref: dict[str, float] = field(default_factory=dict)
     iteration: int = 0
     tier: str = "config"
     null_streak: int = 0
@@ -426,9 +429,10 @@ class CampaignState:
         # that, and crediting it twice would let a campaign stay barren for
         # dozens of iterations while every visible counter read zero.
         #
-        # FIX-CORRECTNESS is EXEMPT (not merely reset-proof): a correctness
-        # fix that costs throughput is still the right move, and counting it
-        # as drought would pressure the agent away from fixing bugs.
+        # FIX-CORRECTNESS and FIX-STABILITY are EXEMPT (not merely reset-proof):
+        # a correctness or stability fix that costs throughput is still the
+        # right move, and counting it as drought would pressure the agent away
+        # from fixing bugs. The row's ``pareto_exempt`` says which.
         # NOT_MEASURED freezes it, as it freezes every other counter — nothing
         # was learned about the candidate either way.
         # THE RATCHET IS AUTHORITATIVE, not `advanced_metric`. A neutral KEEP
@@ -439,7 +443,7 @@ class CampaignState:
         # assert "no advance in N iterations" while the monitor showed the bar
         # moving more recently. The drought
         # is a statement about THE BARS; if a bar moved, it is over.
-        if verdict != NOT_MEASURED and intent_row.name != "FIX-CORRECTNESS":
+        if verdict != NOT_MEASURED and not intent_row.pareto_exempt:
             booked = bool(
                 verdict == KEEP and intent_row.books
                 and (frontier or self._would_ratchet(value, secondary))
@@ -513,13 +517,14 @@ class CampaignState:
         # change competing against a composite point that no single
         # configuration ever achieved, and the bar would drift out of reach one
         # trade at a time.
-        # A correctness fix REBASES both bars to its own reading, the other way
-        # too: the tree no longer holds the faster, wrong result, so a later
+        # A correctness or stability fix REBASES both bars to its own reading,
+        # the other way too: the tree no longer holds the faster, wrong (or
+        # failing) result, so a later
         # change is held to what the fixed tree measures, as after a retraction.
         # Kept at the pre-fix best, every later WIN first had to win back the
         # fix's cost (a later split-K gain could not clear a bar the fix had
         # left above the tree).
-        rebase = intent.name == "FIX-CORRECTNESS" and not frontier
+        rebase = intent.pareto_exempt and not frontier
         if self.best_metric is None or (rebase and metric is not None):
             self.best_metric = metric
         elif frontier:
@@ -763,8 +768,9 @@ class CampaignState:
         off manufactured nulls. Such REVERTs can make up most of a campaign's,
         and can reject a correct change again and again.
 
-        So: the tree is NOT reverted, ``null_streak`` does NOT move, the tier
-        counters do NOT move, and the caller retries. Only ``invalid_streak``
+        So: ``null_streak`` does NOT move and the tier counters do NOT move.
+        The driver puts the tree back to the last one kept and notes the change
+        for a revisit once the directions are done (arbor/execute/kept.py). Only ``invalid_streak``
         advances, so a systemically broken harness still stops the loop.
         """
         self.record(

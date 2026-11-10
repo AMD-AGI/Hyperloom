@@ -29,7 +29,8 @@ the intent, and it now lives on the intent.
 WHY ``NOT_MEASURED`` IS. A bench that never ran, a server that never came up, a
 404 from the wrong wire name, a moved instrument — none of these say anything
 about the change. They are not a REVERT, they are the absence of a
-measurement: the tree stands, the counters do not move, and the caller retries.
+measurement: the counters do not move, the tree goes back to the last one kept, and
+the change is noted for a revisit (arbor/execute/kept.py, arbor/revisit.py).
 """
 
 from __future__ import annotations
@@ -43,9 +44,10 @@ NOT_MEASURED = "NOT_MEASURED"
 
 VERDICTS = (KEEP, REVERT, NOT_MEASURED)
 
-# Verdicts under which the change stays in the tree. `NOT_MEASURED` is here
-# because it means "no action" — the tree is untouched precisely BECAUSE
-# nothing was learned about it.
+# Verdicts under which the gate leaves the tree: it reverts nothing. `NOT_MEASURED`
+# is here because nothing was learned about the change; the driver then puts the
+# tree back to the last one kept and notes the change for a revisit
+# (arbor/execute/kept.py), so an unmeasured change never stays under later ones.
 TREE_STANDS = (KEEP, NOT_MEASURED)
 
 
@@ -75,9 +77,10 @@ class Intent:
 
     ``pareto_exempt``
         Whether the second axis may decide this intent's verdict. True only for
-        a correctness fix: it carries no performance claim on EITHER axis, so
-        it is judged solely against its own tolerance and a secondary
-        regression must not refuse it. Note this is not the same as "makes no
+        a correctness or a stability fix: it carries no performance claim on
+        EITHER axis, so it is judged solely against its own cap, a secondary
+        regression must not refuse it, its cost is no drought, and the bars
+        rebase to its reading (arbor/state.py). Note this is not the same as "makes no
         metric claim" — a probe makes none either, yet a probe that regresses
         the tree is still refused, and a frontier trade still applies to it.
     """
@@ -107,6 +110,12 @@ DEFAULT_NOISE_BAND_PCT = 1.0
 # only a catastrophe — a fix that disables a fast path outright — is worth
 # refusing. Without this, the loop reverts fixes for being slow.
 DEFAULT_CORRECTNESS_CAP_PCT = 5.0
+
+# How far a stability fix may regress: narrower than a correctness fix's cap, wider
+# than the noise band. It ships only when the harness sees the failure on the kept
+# tree and not in its own run (arbor/measure/stability.py), so the cap prices the
+# cure, not a claim.
+DEFAULT_STABILITY_CAP_PCT = 3.0
 
 
 REGISTRY: tuple[Intent, ...] = (
@@ -157,6 +166,26 @@ REGISTRY: tuple[Intent, ...] = (
             "regression. The test: if the defect were harmless to performance, "
             "would it still be worth fixing? If no, it is a WIN wearing a "
             "costume."
+        ),
+    ),
+    Intent(
+        name="FIX-STABILITY",
+        aliases=("A-STABILITY",),
+        tolerance_key="stability_regression_cap_pct",
+        tolerance_default=DEFAULT_STABILITY_CAP_PCT,
+        requires_bar=False,
+        books=True,
+        server="always",
+        pareto_exempt=True,
+        deliverable=(
+            "a fix for a failure the kept tree shows: a hang, a stall, a "
+            "collective timeout, a lost device. Cite it with `FAILURE: iter-K`, "
+            "an iteration since the last KEEP; the harness checks that its "
+            "server log or row shows the failure (or its reading collapsed) and "
+            "that this run's log does not. Then it may cost up to "
+            "`stability_regression_cap_pct` (3 %) of the metric. Without the "
+            "failure on record it is gated as a FIX; with it in its own run, "
+            "a REVERT."
         ),
     ),
     Intent(
@@ -321,9 +350,9 @@ def render_shared_doc() -> str:
         f"declaration resolves to `{DEFAULT_INTENT_NAME}` — the strictest bar, "
         "so a formatting slip cannot buy the easiest rule.\n\n"
         "The verdict is the harness's, and it is the git action: "
-        f"`{'` / `'.join(VERDICTS)}`. `{NOT_MEASURED}` means no action at all — "
-        "the tree stands, the counters do not move, and the iteration is "
-        "retried.\n"
+        f"`{'` / `'.join(VERDICTS)}`. `{NOT_MEASURED}` books nothing: the "
+        "counters do not move, the tree goes back to the last one kept, and the "
+        "change is noted for a revisit once the directions are done.\n"
     )
 
 
