@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import random
 import time
 import urllib.error
 import urllib.request
@@ -18,7 +19,16 @@ from typing import Any
 import pytest
 
 from hyperloom.contracts.measurement import TestRequest
-from hyperloom.hosted.mcp_server import HOST_KIND, McpServer, McpServerConfig
+from hyperloom.hosted.mcp_server import (
+    HOST_KIND,
+    SPECIALIST_KIND,
+    CallContext,
+    InvalidParamsError,
+    McpPrincipal,
+    McpServer,
+    McpServerConfig,
+    ReplyCall,
+)
 from hyperloom_multibranch.contracts.blackboard import Role, Writer
 from hyperloom_multibranch.contracts.blackboard.vocab import InboxKind
 from hyperloom_multibranch.contracts.blackboard.records import InboxItem, InboxPage, StartupBrief
@@ -913,3 +923,106 @@ def test_a_page_cursor_resumes_after_the_last_item_it_returned_when_the_feed_mov
         assert _pointers(rest) == [f"x{n}" for n in range(POLL_INBOX_MAX_ITEMS, 2 * POLL_INBOX_MAX_ITEMS + 5)]
     finally:
         rig.server.stop()
+
+
+async def test_a_poll_inbox_page_with_none_of_the_unread_items_keeps_the_reply_block_coming(
+    wait_rig: Rig, waiting: Writers, caplog: pytest.LogCaptureFixture
+) -> None:
+    """A ``poll_inbox`` with no cursor on a feed longer than one page returns none of the token's unread items, so the
+    reply cursor moves past none of them: it must stay one the next reply can read, and that reply lists them."""
+    await _land(waiting, POLL_INBOX_MAX_ITEMS + 5)
+    token = wait_rig.token("s1")
+    _news(wait_rig, token)
+    await _land(waiting, 3, first=POLL_INBOX_MAX_ITEMS + 6)
+    page = json.loads(wait_rig.ok(token, "poll_inbox"))
+    assert page["remaining"] and not {item["pointer"] for item in page["items"]} & {"x26", "x27", "x28"}
+    with caplog.at_level("WARNING"):
+        news = _news(wait_rig, token)
+    assert [line.split(":")[0] for line in news] == [REPLY_INBOX_HEADER[:-1], "result x26", "result x27", "result x28"]
+    assert _news(wait_rig, token) == []
+    assert not [record for record in caplog.records if record.levelname == "WARNING"]
+
+
+class CursorInbox:
+    """A blackboard whose cursor is how many items come before it (``at-<n>``); like the blackboard's, a cursor it
+    never gave is a ``ValueError``."""
+
+    def __init__(self) -> None:
+        self.items: list[InboxItem] = []
+
+    def land(self, count: int) -> None:
+        first = len(self.items)
+        self.items += [
+            InboxItem(InboxKind.RESULT, "s1", f"x{n}", f"result x{n}", float(n)) for n in range(first, first + count)
+        ]
+
+    async def poll(self, branch: str, cursor: str = "") -> InboxPage:
+        start = 0
+        if cursor:
+            number = cursor.removeprefix("at-")
+            if not (cursor.startswith("at-") and number.isdigit() and int(number) <= len(self.items)):
+                raise ValueError(f"not an inbox cursor: {cursor!r}")
+            start = int(number)
+        return InboxPage(tuple(self.items[start:]), f"at-{len(self.items)}")
+
+
+_S1 = McpPrincipal(SPECIALIST_KIND, "specialist-s1", "s1", "camp", frozenset({SCOPE_SPECIALIST}))
+
+
+async def _unread(inbox: CursorInbox, cursor: str) -> tuple[InboxItem, ...]:
+    """The items the feed reads from ``cursor``; raises when the feed cannot read it."""
+    return (await mcp_tools._read_feed(inbox, "s1", cursor)).items  # type: ignore[arg-type]
+
+
+@pytest.mark.parametrize("seed", range(120))
+async def test_every_cursor_the_service_hands_out_reads_back_and_drops_no_unread_item(seed: int) -> None:
+    """Random runs of landings, ``poll_inbox`` pages from every cursor it gave, failed polls and other replies, over
+    feeds from empty to several pages: every cursor a page or a reply note carries is one the feed reads, and the reply
+    cursor drops none of its unread items that the poll did not return."""
+    rng = random.Random(seed)
+    inbox = CursorInbox()
+    annotate = mcp_tools.reply_inbox(lambda branch: inbox)  # type: ignore[arg-type,return-value]
+    poll = mcp_tools._poll_inbox(lambda branch: inbox)  # type: ignore[arg-type,return-value]
+    handed, reply_cursor = [""], None
+    for _ in range(25):
+        step = rng.choice(["land", "land", "poll", "poll", "poll", "failed poll", "reply"])
+        if step == "land":
+            inbox.land(
+                rng.choice([1, 2, 5, POLL_INBOX_MAX_ITEMS - 1, POLL_INBOX_MAX_ITEMS, 2 * POLL_INBOX_MAX_ITEMS + 3])
+            )
+            continue
+        if reply_cursor is None:
+            reply_cursor = (await annotate(ReplyCall(_S1, "queue_state", {}, False), None)).cursor
+        before = await _unread(inbox, reply_cursor)
+        if step == "reply":
+            note = await annotate(ReplyCall(_S1, "queue_state", {}, False), reply_cursor)
+            returned: set[InboxItem] = set(before)
+        else:
+            cursor = rng.choice(handed)
+            page = await poll({"cursor": cursor}, CallContext(_S1, "poll_inbox"))
+            await _unread(inbox, page["cursor"])
+            handed.append(page["cursor"])
+            failed = step == "failed poll"
+            note = await annotate(ReplyCall(_S1, "poll_inbox", {"cursor": cursor}, failed), reply_cursor)
+            returned = set() if failed else {item for item in inbox.items if jsonable(item) in page["items"]}
+        after = await _unread(inbox, note.cursor)
+        assert set(before) - returned <= set(after), (seed, reply_cursor, note.cursor)
+        reply_cursor = note.cursor
+
+
+def _bad_cursor(feed: Any, count: int) -> str:
+    """What ``_Feed.after`` made before the fix: a page cursor with an empty fingerprint where no item was returned."""
+    if count >= len(feed.items):
+        return str(feed.end)
+    anchor = mcp_tools._fingerprint(feed.items[count - 1]) if count else feed.anchor
+    return f"page:{feed.skipped + count}:{anchor}:{feed.base}"
+
+
+async def test_the_old_cursor_with_no_returned_item_was_one_the_feed_refuses() -> None:
+    inbox = CursorInbox()
+    inbox.land(3)
+    feed = await mcp_tools._read_feed(inbox, "s1", "at-1")  # type: ignore[arg-type]
+    assert _bad_cursor(feed, 0) == "page:0::at-1"
+    with pytest.raises(InvalidParamsError, match="not an inbox cursor"):
+        await _unread(inbox, _bad_cursor(feed, 0))
+    assert feed.after(0) == "at-1" and await _unread(inbox, feed.after(0)) == tuple(inbox.items[1:])
