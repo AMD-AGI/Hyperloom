@@ -802,7 +802,7 @@ def settings_from(
     missing = [f"--{name.replace('_', '-')}" for name in RUN_REQUIRED if getattr(args, name) is None]
     if missing:
         raise ValueError(f"the following arguments are required: {', '.join(missing)}")
-    sizes = ("tp", "conc") if args.ep is None else ("tp", "ep", "conc")
+    sizes = tuple(name for name in ("tp", "ep", "conc") if getattr(args, name) is not None)
     errors = _shape_errors(args) + _agentx_only_errors(args) + _positive(args, sizes)
     errors += _limit_errors(args)
     if errors:
