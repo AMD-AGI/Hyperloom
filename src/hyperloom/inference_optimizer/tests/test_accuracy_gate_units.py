@@ -273,8 +273,7 @@ class TestTheAgentXAccuracyGate:
         assert (out["accuracy"], out["task"], out["metric"]) == (0.945, "gsm8k", "exact_match,strict-match")
 
     def test_a_dropped_score_is_not_hidden_behind_a_clean_error_rate(self, tmp_path):
-        """#155 c5075: a candidate at 0.000 against a 0.945 baseline passed while the gate read 1.0 off its error
-        rate."""
+        """A candidate at 0.000 against a 0.945 baseline passed while the gate read 1.0 off its error rate."""
         _error_rate(tmp_path, request_error_rate=0.0)
         _accuracy_round(tmp_path, 0.0)
         assert (
