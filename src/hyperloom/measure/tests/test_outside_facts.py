@@ -358,3 +358,18 @@ def test_every_profile_yaml_copy_holds_the_owners_replay_setting() -> None:
         for name, values in holders.items()
         if values != [outside_facts.HIP_GRAPH_PACKET_CAPTURE_NODE_BY_NODE]
     } == {}
+
+
+def test_the_sglang_profile_yaml_holds_the_owners_symbolizer_setting() -> None:
+    """Only the SGLang profile turns on the graph-capture snapshot dump; its copy of the setting is the owner's."""
+    holders = {}
+    for path in sorted(_PROFILES.glob("*.yaml")):
+        values = _entries(yaml.safe_load(path.read_text(encoding="utf-8")), outside_facts.TORCH_SYMBOLIZE_MODE_ENV)
+        if values:
+            holders[path.name] = values
+    assert holders == {"profile_sglang.yaml": [outside_facts.TORCH_SYMBOLIZE_BY_LOADER]}
+
+
+def test_the_snapshot_frame_is_read_from_the_owner(probe: dict[str, Any]) -> None:
+    """The cause reader finds the profiler's snapshot dump by the owner's pattern."""
+    assert "TORCH_MEMORY_SNAPSHOT_FRAME" in probe["causes"]

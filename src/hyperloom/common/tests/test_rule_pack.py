@@ -166,6 +166,9 @@ _LITERALS: dict[str, str | list[str] | dict[str, str]] = {
     "SGLANG_IMAGE_WORKSPACE": "/sgl-workspace",
     "TRANSFORMERS_DOES_NOT_RECOGNIZE": "Transformers does not recognize",
     "TRANSFORMERS_UNKNOWN_ARCHITECTURE": "does not recognize this architecture",
+    "TORCH_MEMORY_SNAPSHOT_FRAME": r"\bin (?:_dump_snapshot|_post_process_after_profile)\s*$|\b_cuda_memorySnapshot\(",
+    "TORCH_SYMBOLIZE_BY_LOADER": "dladdr",
+    "TORCH_SYMBOLIZE_MODE_ENV": "TORCH_SYMBOLIZE_MODE",
     "TUNABLEOP_ENABLED_ENV": "PYTORCH_TUNABLEOP_ENABLED",
     "TUNABLEOP_TABLE_ENV": "PYTORCH_TUNABLEOP_FILENAME",
     "TUNABLEOP_TUNING_ENV": "PYTORCH_TUNABLEOP_TUNING",
@@ -232,8 +235,8 @@ def test_the_reference_pack_loads_and_passes_its_own_examples() -> None:
     assert pack.version == str(yaml.safe_load(DEFAULT_PACK_PATH.read_text(encoding="utf-8"))["version"])
     assert Counter(entry.kind for entry in pack.entries.values()) == {
         Kind.NAMES: 20,
-        Kind.LOG_REGEX: 15,
-        Kind.ENV_DEFAULT: 1,
+        Kind.LOG_REGEX: 16,
+        Kind.ENV_DEFAULT: 2,
         Kind.COMPONENT_LAYOUT: 9,
     }
 
