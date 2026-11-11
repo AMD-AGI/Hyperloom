@@ -5,6 +5,8 @@
 
 from __future__ import annotations
 
+import os
+
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
@@ -189,6 +191,7 @@ def write_setting_script(
         ),
         target=target,
         setup_script=SETUP_SCRIPT_NAME,
+        deployment_dir=os.path.relpath(Path(session_dir) / "deployment", enablement_dir(Path(session_dir))),
     )
     out = enablement_dir(Path(session_dir)) / "enablement_setting.sh"
     atomic_write_text(out, text, options=WriteOptions(make_parents=True, mode=0o700))

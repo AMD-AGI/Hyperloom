@@ -87,6 +87,9 @@ PACKAGE_GLOBS: tuple[str, ...] = (
     "state.json",
     "manifest.json",
     "current_setting.sh",
+    "deployment/**",
+    # A single-file export writes its metadata here, not under deployment/.
+    "reports/deployment.json",
     # ── final report ──────────────────────────────────────────────────
     "reports/final.json",
     # ── bring-up ladder: pinned source trees, one JSON per attempt ────

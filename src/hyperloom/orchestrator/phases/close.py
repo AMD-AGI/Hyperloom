@@ -5,6 +5,7 @@
 
 from __future__ import annotations
 import asyncio
+import json
 import hashlib
 import sqlite3
 import time
@@ -435,6 +436,23 @@ class ClosePhase(CoordinatorCollaborator):
         record_session_breakdown(self.session_dir)
         await self._record_close_step("langfuse_flush", status="done")
 
+    async def _do_inference_export(self) -> None:
+        """Capture the accepted custom workload as a standalone inference artifact.
+
+        A refusal is recorded with its reason rather than concealed: the packaged
+        artifacts must not imply an export that does not exist.
+        """
+        if self.shared_state.framework != "custom":
+            return
+        from hyperloom.orchestrator.deployment.export import export_custom_inference
+
+        deployment = await asyncio.to_thread(export_custom_inference, self.session_dir, self.shared_state.to_dict())
+        await self._record_close_step(
+            "inference_export",
+            status="done" if deployment["status"] == "exported" else "failed",
+            detail=json.dumps({"status": deployment["status"], "reasons": deployment["reasons"]}),
+        )
+
     async def _do_artifact_package(self) -> Path | None:
         """Bundle session artifacts into a zip under ``/workspace``.
 
@@ -504,6 +522,9 @@ class ClosePhase(CoordinatorCollaborator):
         # Langfuse flush + receipt splice: must run before the artifact package so flush_session flips the receipt
         # to final counts and patch_breakdown_langfuse splices it back into session_breakdown.json.
         await self._run_close_step("langfuse_flush", self._do_langfuse_flush())
+
+        # Standalone inference export: must run before the artifact package, which ships ``deployment/``.
+        await self._run_close_step("inference_export", self._do_inference_export())
 
         # Artifact package: bundle the curated result/report/analysis files into a single zip under
         # ``HYPERLOOM_SESSION_PACKAGE_DEST`` (``/workspace`` when unset, where the Claw sandbox sync ships it to object

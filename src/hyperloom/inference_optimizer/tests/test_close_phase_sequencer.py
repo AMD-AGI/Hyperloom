@@ -623,6 +623,26 @@ async def test_close_sequencer_runs_all_steps_in_order_happy_path(
 
 
 @pytest.mark.asyncio
+async def test_custom_close_packages_an_explicit_export_refusal(coord, tmp_path, monkeypatch):
+    """A refused export is shipped saying so, rather than leaving the package to imply one happened."""
+    monkeypatch.setenv("HYPERLOOM_SESSION_PACKAGE_DEST", str(tmp_path / "packages"))
+    coord.shared_state.framework = "custom"
+    coord.shared_state.phase_history = [_close_phase_history_row()]
+    coord.shared_state.to_dict = lambda: {"framework": "custom", "framework_repo_path": str(tmp_path / "missing")}
+
+    await coord.phase_close.on_enter_close(Transition(from_phase="SWEEP", to_phase="CLOSE", reason="test", evidence={}))
+
+    rows = coord.shared_state.phase_history[-1]["evidence"]["close_steps"]
+    export_step = next(row for row in rows if row["step"] == "inference_export")
+    assert export_step["status"] == "failed"
+    assert coord.shared_state.close_sequence_done is True
+    packages = list((tmp_path / "packages").rglob("*.zip"))
+    assert packages
+    with zipfile.ZipFile(packages[0]) as archive:
+        assert json.loads(archive.read("deployment/deployment.json"))["status"] == "incomplete"
+
+
+@pytest.mark.asyncio
 async def test_close_sequencer_records_its_own_verdict_and_artifacts(
     coord,
     tmp_path,

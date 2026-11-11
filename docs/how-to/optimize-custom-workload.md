@@ -345,6 +345,20 @@ The declaration is the boundary, and it is enforced everywhere a change could en
 
 A workload with no declaration is unaffected; everything above continues to apply to it.
 
+## Use the optimized model without Hyperloom
+
+On CLOSE, a custom session exports what it accepted. A single-file workload produces `deployment/hyperloom_optimize.py` with bookkeeping in `reports/deployment.json` (`kind: single_file`); a workload that declares an adapter through `hyperloom_inference.json` produces a self-contained `deployment/` with its own `inference.py` CLI, its source and assets captured, and runtime paths relocated so the directory can be moved.
+
+Copy the single module beside the original script and run that script in its original runtime. No Hyperloom installation is needed at the destination.
+
+The export is checked against what was benchmarked, and refuses rather than shipping something unproven. The module is compared byte for byte against the source snapshots recorded at each KEEP, so it is refused if it differs from what was measured, if no snapshot covers it at all, or if it imports a file sitting beside it -- only the one module ships, so a sibling import would arrive broken. None of this requires the file to live in a git repository.
+
+A refusal is recorded with its reason on the CLOSE step and written into the session package, so the artifacts never imply an export that did not happen.
+
+`deployment.json` always reports `"validation": "not_run"`, and it can never say anything else. The standalone `--validate` command writes its result to a separate file stamped with a checksum of `deployment.json`; putting the result inside `deployment.json` would change that checksum, so the result could no longer point at the thing it checked. A single-file export has no such check to run anyway -- it ships one module, with no `inference.py` or adapter.
+
+What stands behind the module is everything that happened before it was written out: every accepted change had to pass your own quality gate, and the module is compared against the copy saved at the moment it was accepted. Do not read the field as a check that failed.
+
 ## Troubleshooting
 
 | Symptom | Cause |
