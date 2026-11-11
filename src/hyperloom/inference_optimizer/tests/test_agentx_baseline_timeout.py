@@ -53,3 +53,44 @@ def test_agentx_switch_keeps_profile_yaml_cap(monkeypatch):
 
 
 # --- the grace declares which concurrency it was measured at -------------------
+
+
+@pytest.mark.parametrize("executor_class", [BaselineExecutor, ProfileExecutor])
+async def test_a_round_of_a_point_that_names_no_timeout_runs_under_the_executors_cap(
+    monkeypatch, tmp_path, executor_class
+):
+    """A session's AgentX ``benchmark.yaml`` names no ``timeout_seconds``; the round the suite runs carries the cap."""
+    from types import SimpleNamespace
+
+    import yaml
+
+    from hyperloom.orchestrator.actions.executors.benchmark_run import launch
+    from hyperloom.orchestrator.actions.executors.benchmark_run.records import BenchmarkAttempt
+
+    _clear(monkeypatch)
+    monkeypatch.setenv("INFERENCE_OPTIMIZER_BENCHMARK_TIMEOUT_SEC", "7800")
+    config = tmp_path / "benchmark.yaml"
+    config.write_text(yaml.safe_dump({"benchmark": {"framework": "sglang", "agentx": {"enabled": True}}}))
+    seen = {}
+
+    def run_suite_round(_route, request, **_kwargs):
+        seen.update(yaml.safe_load(request.config_path.read_text())["benchmark"])
+        raise launch.SuiteRoundRefused("test_stop", "the config is read")
+
+    monkeypatch.setattr(launch, "run_suite_round", run_suite_round)
+    executor = executor_class(session_dir=tmp_path)
+    executor.shared_state = SimpleNamespace()
+    attempt = BenchmarkAttempt(
+        timeout_sec=executor._resolve_timeout({}),
+        override_result_dir=None,
+        resolved_model="m",
+        materialized_config_path=config,
+        inferencex_path="",
+        effective_extra_server_args="",
+        params={},
+        ctx=SimpleNamespace(extra={}),
+    )
+
+    await executor._run_single_benchmark(attempt, config_path=config, output_dir=tmp_path / "round")
+
+    assert seen["timeout_seconds"] == attempt.timeout_sec
