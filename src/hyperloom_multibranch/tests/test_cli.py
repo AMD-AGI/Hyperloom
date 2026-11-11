@@ -1457,6 +1457,20 @@ def test_a_hosted_inferencex_spec_runs_its_session_at_the_hardware_ep_it_names(
     assert on_the_command_line.workload.ep == 2
 
 
+@pytest.mark.usefixtures("ready_environment")
+def test_a_hosted_spec_with_a_launch_section_ends_for_good_naming_the_field(
+    host: Host, agent_cli: list[RunSettings]
+) -> None:
+    host.spec(launch={"extra_env": {"AITER_BF16_FP8_MOE_BOUND": "0"}})
+
+    assert cli.main(["hosted", "run"]) == cli.EXIT_USAGE
+
+    document = host.exit_document()
+    assert (document["final"], document["returncode"]) == (True, cli.EXIT_USAGE)
+    assert "a multibranch run does not read launch.extra_env" in str(document["error"])
+    assert agent_cli == [] and not any(host.workspace.iterdir())
+
+
 @pytest.mark.parametrize(
     ("name", "value", "named"),
     [
