@@ -147,9 +147,17 @@ starts, as the toolbox's acceptance does, with the same reading of the flags. MI
 ## How it is used
 
 Arbor runs from its own root: `python -m arbor run --config <config>` with this directory as the working directory
-(`README.md`, `docs/getting-started.md`). It is not a Python package of this repository, so the wheel does not ship it
-(`pyproject.toml` excludes `hyperloom_arbor` from the packages). MB starts it with `--autonomous-agent arbor`, which
-names this tree.
+(`README.md`, `docs/getting-started.md`). MB starts it with `--autonomous-agent arbor`, which names this tree, and
+copies it into the session it runs in.
+
+**In the wheel too** (from `v0.9.8`): the wheel ships this tree whole as package data, so `--autonomous-agent arbor`
+works on a wheel install as in a checkout (`site-packages/hyperloom_arbor`).
+- **How:** `pyproject.toml` declares the tree as `hyperloom_arbor`'s package data and keeps its subtrees out of module
+  discovery, as KernelForge's examples. Nothing imports it as `hyperloom_arbor.*`.
+- **What stays out:** git's own files (`.gitattributes`, `.gitignore`, `.gitkeep`).
+- **The checks:** `scripts/check_wheel_contents.py` checks that the engine, packs and skills are all in the wheel, and
+  the packaging workflow runs Arbor from an installed wheel.
+- **Before `v0.9.8`:** the wheel left it out, and a hosted spec had to name an exported copy's path.
 
 Its `install.sh` pins TraceLens for a standalone Arbor. Under MB, Arbor uses the TraceLens this repository's own
 install pins.
