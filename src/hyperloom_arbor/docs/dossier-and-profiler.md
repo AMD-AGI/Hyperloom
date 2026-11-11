@@ -30,8 +30,7 @@ A pack on the dossier family may add `architecture:performance` to its `lifecycl
 Arbor runs it after dossier parts 1–5 (`dossier:discover`) and before baseline/profiling
 (parts 6–7, `dossier:measure`). Its hypotheses inform the profile plan; parts 8 and
 11 reconcile them with observed dispatch and measured bottlenecks. Existing pack
-defaults remain unchanged. See the [workflow and opt-in guide](model-architecture-performance.md)
-for the artifact, cache-capacity coverage, and throughput/latency action tables.
+defaults remain unchanged. This copy leaves the family out (`VENDOR.md`).
 
 ## The dossier
 

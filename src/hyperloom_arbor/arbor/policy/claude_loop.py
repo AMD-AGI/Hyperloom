@@ -132,7 +132,7 @@ def _build_critic_prompt(
                          f"− {accuracy.get('tolerance')} ({accuracy.get('source')})\n")
 
     # Where the records are, so the critic reads them instead of searching for them (a `find /` over network
-    # storage once ran 46 min).
+    # storage can run without end).
     paths_block = ""
     if paths and paths.get("iteration"):
         paths_block = (f"### Where the records are\n"
@@ -1259,7 +1259,7 @@ def _finalize_iteration(
     # ── A REVERT owes a record ──────────────────────────────────────────────
     # Placed after the critic so it captures the FINAL reason, including a
     # critic override. Bookkeeping, so a failure here must never change the
-    # verdict -- that mistake has been made three times in this function.
+    # verdict -- that mistake has been made more than once in this function.
     if decision == "REVERT" and not finding_ids:
         try:
             finding_ids = _synthesize_dead_end(
@@ -1904,8 +1904,8 @@ def _server_alive(config: dict) -> bool | None:
 
 def _wait_healthy(config: dict, timeout: int = 600) -> bool:
     """Wait until the server answers its health check, for at most ``timeout`` s. In component mode, stop at once when
-    the server Arbor started has died (two polls in a row), with its log's tail: a server that exits in seconds made
-    the harness wait out the whole cap (46 min under one host)."""
+    the server Arbor started has died (two polls in a row), with its log's tail: a server that exits in seconds would
+    otherwise make the harness wait out the whole cap."""
     port = config.get("port", 8888)
     health = frameworks.get(config).health_path
     deadline = time.time() + timeout
@@ -2347,7 +2347,7 @@ def _host_bench_steps(command: str, port, iter_dir, bench_output_path: str,
     replay); with replays, the fixed block books the mean, as with the pack's bench.
     The pack's second metric (``secondary_key``) is recorded beside it when the client
     gives it: without it the gate is one-axis, blind to a gain bought with the other
-    axis (one host's run recorded `secondary: None` on every KEEP).
+    axis (`secondary: None` on every KEEP).
 
     With ``read`` (``component.bench_read``) nothing is read by the agent: after each replay
     it runs a fixed block that takes every key from the report by its path.
@@ -3056,8 +3056,8 @@ def run_iteration(
             host_bench, port, iter_dir, bench_output_path, metric_key, bench_repeats,
             campaign.pack.objective.get("measurement", {}).get("secondary_metric"),
             read=component.bench_read(config))
-    # Component mode: the bench ran as a child of the agent's shell, so a command the CLI ended took it along (one
-    # host's replays died at 30 min). Where step 1 is all fixed commands (the pack's bench, or the host's with
+    # Component mode: the bench runs as a child of the agent's shell, so a command the CLI ends takes it along (a
+    # long replay dies with it). Where step 1 is all fixed commands (the pack's bench, or the host's with
     # bench_read), they go into a script the agent starts detached; the agent then only waits.
     detached = comp and (not host_bench or bool(component.bench_read(config)))
     out_q = shlex.quote(str(iter_dir / "bench_output.json"))

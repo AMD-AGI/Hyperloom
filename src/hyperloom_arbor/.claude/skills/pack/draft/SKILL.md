@@ -10,8 +10,8 @@ metadata:
 
 A pack is the contract every campaign of one kind shares: the objective and its bands, the protected validators, the
 workload, the policy, the constraints the agent reads, and where skills take part (`docs/packs.md`). A new kind of
-campaign gets a new pack. Today that means copying the nearest one by hand, and it shows: 30 `pack.yaml` files, and
-one model's line alone has a dozen variants of about 800 lines that differ in hundreds. This skill drafts one instead.
+campaign gets a new pack. Today that means copying the nearest one by hand, and the copies drift apart. This skill drafts
+one instead.
 
 **It drafts; a person decides.** It writes the draft, checks it and explains it. It does not run a campaign, commit, or
 change another pack.

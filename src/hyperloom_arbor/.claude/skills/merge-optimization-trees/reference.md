@@ -30,8 +30,8 @@ own output directory so their aggregate files cannot overwrite each other.
 ## Warm up before every measured run
 
 The first replay against a fresh server pays cold JIT compilation, tuned-config
-resolution, and an empty prefix cache. The cold first replay is a **clear low
-outlier**, and including it can more than double the run-to-run spread.
+resolution, and an empty prefix cache. The cold first replay is a **low
+outlier**: including it widens the run-to-run spread considerably.
 
 This matters more in a knob sweep than anywhere else, because each knob state
 usually gets a fresh server — so **every measurement is a cold first replay**
@@ -47,9 +47,8 @@ Derive the acceptance threshold from the baseline's own spread, not from a
 round number. A gate set below the noise floor books noise as wins.
 
 Compute the baseline's relative spread over at least 3 replays and use it as
-the minimum credible gain. Secondary metrics are much noisier — p90
-interactivity can spread several times wider than throughput, so a p90
-"win" inside its own spread is not a result.
+the minimum credible gain. Secondary metrics are much noisier than the primary
+— a p90 interactivity "win" inside its own spread is not a result.
 
 Re-derive the threshold on the integration branch. It is a property of the
 tree and node, not a constant.

@@ -5,7 +5,7 @@ Reads from campaign lineage.jsonl and renders a text table + ASCII chart:
 
 Usage:
     python3 -m arbor.policy.evolve_asm.roofline_tracker \
-        --lineage experiments/.../lineage.jsonl --baseline-us 91.4
+        --lineage experiments/.../lineage.jsonl --baseline-us <baseline us>
 """
 from __future__ import annotations
 

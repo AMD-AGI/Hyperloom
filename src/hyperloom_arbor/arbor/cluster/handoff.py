@@ -427,8 +427,8 @@ class Roll:
 
 # -- the flag KEEPs across containers, rolling or not ------------------------------------
 # A driver that does not roll calls these too (arbor/driver.py): a campaign moved to a job
-# with roll mode off got a fresh container seeded from the config, and its first iteration
-# there ran without its kept --enable-expert-parallel, measurably slower.
+# with roll mode off gets a fresh container seeded from the config, and its first iteration
+# there would run without the flags its KEEPs added.
 
 
 def mirror_workspace_config(config: dict, session: Path, job: str = "", clock=time.time) -> None:

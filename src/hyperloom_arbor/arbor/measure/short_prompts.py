@@ -17,8 +17,8 @@ SAME tree (docs/component-mode.md §8):
   prompts sent one at a time that the two processes answer differently is the session's floor;
   a later KEEP above it is a defect, and the KEEP becomes REVERT. The batched half is recorded
   and refuses nothing: its answers move with the batch a boot happens to form (check_keep says
-  how much). Two processes catch a one-in-three defect about 4 times in 9, and every later
-  KEEP that carries it is another chance.
+  how much). Two processes catch a defect that shows in only some processes part of the
+  time, and every later KEEP that carries it is another chance.
 - **A check that cannot finish refuses nothing**, as MB's does: an incomplete probe, no time
   left before the deadline, or a second launch that never comes up is recorded and the KEEP
   stands. The host re-gates every KEEP anyway.
@@ -255,11 +255,10 @@ def check_keep(config: dict, session_dir, iter_dir, *, relaunch: Callable[[], bo
         _write(out, rec)
         return rec
     cmp = compare(first, second)
-    # Only the prompts sent one at a time gate. On one model at TP4 an unchanged tree's
-    # two processes differed on none of them every time, and on most of the batched ones
-    # in their first tokens: which prompts share a
+    # Only the prompts sent one at a time gate. An unchanged tree's two processes agree on
+    # them, but can differ on the batched ones in their first tokens: which prompts share a
     # prefill batch changes between boots, and that flips near-tied greedy picks. A pooled
-    # count hid a small single-request defect under that noise and could refuse a good KEEP
+    # count can hide a small single-request defect under that noise and refuse a good KEEP
     # on a noisy boot, so the batched half is recorded for the host and refuses nothing.
     modes = {p["id"]: p["mode"] for p in prompts}
     seq = [i for i in cmp["first_difference"] if modes.get(i) == SEQUENTIAL]

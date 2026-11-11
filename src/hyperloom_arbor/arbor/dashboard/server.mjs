@@ -209,8 +209,8 @@ function ssh(host, command) {
   return run(SSH, ["-o", "BatchMode=yes", "-o", "ConnectTimeout=20", ...cfg.sshOpts, host, command]);
 }
 
-// The command's answer is the JSON object on its stdout. Through the share
-// host's ssh gateway every command exits 0 and its stderr arrives on stdout,
+// The command's answer is the JSON object on its stdout. Through some
+// ssh gateways every command exits 0 and its stderr arrives on stdout,
 // so a failure there is either share_query's
 // {"error": ...} or output that is not JSON, never an exit status.
 function parseJson(result) {

@@ -123,8 +123,7 @@ KNOBS = {
 }
 
 #: How many open directions a dossier's map aims at, by the config's ``directions_length``. Long is the default,
-#: because generated maps ran too short: a hand-written roadmap held about 18 items, while the maps dossier passes
-#: wrote opened with 2 to 9.
+#: because generated maps ran too short against a hand-written roadmap.
 LENGTHS = {"short": (4, 6), "medium": (8, 12), "long": (15, 25)}
 DEFAULT_LENGTH = "long"
 

@@ -55,7 +55,7 @@ def _lesson_label(lesson: dict) -> str:
     """`INTENT → VERDICT`, or the annotation's own word.
 
     Used by BOTH the per-iteration line and the header tally, because a
-    document that says "26 PROBE" above rows labelled "LEARN → KEEP" makes the
+    document that says "N PROBE" above rows labelled "LEARN → KEEP" makes the
     reader reconcile two vocabularies — the exact cost the split was meant to
     remove. Annotation rows (BASELINE / ESCALATE / NOTE) are exempt: no gate
     produced them and no intent was declared, so re-deriving a pair would print

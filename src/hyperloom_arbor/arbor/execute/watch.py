@@ -49,7 +49,7 @@ def check_http(url: str, timeout: int = 3) -> bool:
 def _gpu_ids(value) -> list[int] | None:
     """``gpu_ids`` as a list of ints, from "0,1,2,3" or [0, 1, 2, 3] (a config may write either), as
     component.gpu_list reads it; None for none. A string reached the membership test below as it
-    was, and ``int in str`` raised: S4's server stop crashed the iteration after its gate."""
+    was, ``int in str`` would raise, and the server stop after a gate would crash the iteration."""
     if value is None:
         return None
     items = value if isinstance(value, (list, tuple, set)) else str(value).split(",")
