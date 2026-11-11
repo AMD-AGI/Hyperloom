@@ -49,7 +49,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 from hyperloom.common.visible_devices import GPU_MASK_ENV_NAMES
-from hyperloom_common.shared_storage import create_shared_file, make_shared_dirs, write_shared_text
+from hyperloom_common.shared_storage import child_umask, create_shared_file, make_shared_dirs, write_shared_text
 from hyperloom.sandbox import RunSettings, Sandbox, SandboxGone, SandboxUnavailable
 from hyperloom_multibranch.specialist.agent_onboarding import ENCODING, CommandResult
 from hyperloom_multibranch.specialist.agent_sandbox import TIMED_OUT, read_tail
@@ -98,15 +98,15 @@ FORWARDED_NAMES = frozenset(
 LAUNCH_SCRIPT = f"""#!/bin/bash
 # hl-launch.sh RUN N LOG CWD: run $HL_COMMAND in CWD, in a session of its own, its output appended to LOG; write
 # "LAUNCHER COMMAND" pids to RUN/N.pid and the exit code to RUN/N.exit. Only the command carries the marks, so a kill
-# leaves the launcher to write how the command ended. What it and the command make on the shared storage is the group's
-# to write, as the next leg's account may be another one of it.
-umask 002
+# leaves the launcher to write how the command ended. On shared storage HL_UMASK makes what it and the command make the
+# group's to write, as the next leg's account may be another one of it.
+if [ -n "$HL_UMASK" ]; then umask "$HL_UMASK"; fi
 run=$1 n=$2 log=$3 cwd=$4
 command=$HL_COMMAND
 export PATH="${{HL_PATH_PREFIX:+$HL_PATH_PREFIX:}}$PATH"
 export PYTHONPATH="$HL_PYTHONPATH${{PYTHONPATH:+:$PYTHONPATH}}"
 root=$HL_ROOT
-unset HL_COMMAND HL_PATH_PREFIX HL_PYTHONPATH HL_ROOT
+unset HL_COMMAND HL_PATH_PREFIX HL_PYTHONPATH HL_ROOT HL_UMASK
 mkdir -p "$TMPDIR"
 if cd "$cwd" 2>>"$log"; then
   env "{MARKER}=$root" "{PROCESS_MARKER}=$root/$n" setsid bash -c "$command" >>"$log" 2>&1 </dev/null &
@@ -306,6 +306,8 @@ class RemoteAgentSandbox:
         merged["HL_PATH_PREFIX"] = os.pathsep.join(_added_path(env.get("PATH", "")))
         merged["HL_PYTHONPATH"] = os.pathsep.join(map(str, self.python_path))
         merged["HL_ROOT"] = str(self.root)
+        if (umask := child_umask(self.root)) != -1:
+            merged["HL_UMASK"] = f"{umask:03o}"
         return merged
 
     async def run(self, command: str, cwd: Path, env: Mapping[str, str], timeout: float) -> CommandResult:

@@ -243,6 +243,7 @@ async def test_a_new_leg_replaces_the_scripts_by_rename_never_rewriting_the_file
 
 async def test_what_a_command_makes_below_the_root_is_the_groups_to_write(tmp_path):
     assert _umask() & 0o020, "the test needs a umask that keeps group write off what a plain create makes"
+    tmp_path.chmod(0o2775)  # storage set up to be shared: setgid, group-writable, closed to others
     remote = _remote(tmp_path)
 
     done = await remote.run("mkdir made && echo x > made/file", remote.root / "home", {}, timeout=10)
@@ -250,3 +251,15 @@ async def test_what_a_command_makes_below_the_root_is_the_groups_to_write(tmp_pa
     assert done.returncode == 0, done.output
     assert _mode(remote.root / "home" / "made") & 0o070 == 0o070
     assert _mode(remote.root / "home" / "made" / "file") & 0o060 == 0o060
+
+
+async def test_what_a_command_makes_outside_shared_storage_follows_the_umask(tmp_path):
+    assert _umask() & 0o020, "the test needs a umask that keeps group write off what a plain create makes"
+    tmp_path.chmod(0o755)
+    remote = _remote(tmp_path)
+
+    done = await remote.run("mkdir made && echo x > made/file", remote.root / "home", {}, timeout=10)
+
+    assert done.returncode == 0, done.output
+    assert _mode(remote.root / "home" / "made") & 0o020 == 0
+    assert _mode(remote.root / "home" / "made" / "file") & 0o020 == 0
