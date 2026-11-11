@@ -306,9 +306,11 @@ The following are known limitations of the Slurm integration.
 - The docker path exposes all node GPUs to the container, so TP=8 occupies a
   whole node. Running multiple jobs per node requires isolating devices with
   `HIP_VISIBLE_DEVICES` / `ROCR_VISIBLE_DEVICES` (the scripts do not do this).
-- The installer pip-installs Magpie and clones InferenceX / GEAK / TraceLens from GitHub, so
-  nodes need GitHub egress. A fully offline setup must bake these into the image
-  and pre-stage model weights on the shared mount.
+- The installer clones InferenceX, GEAK and TraceLens from GitHub, and a fresh
+  session reads its base launch from InferenceX and the framework's cookbook there,
+  so nodes need GitHub egress. A fully offline setup must bake the checkouts and the
+  InferenceSuite tool cache into the image and pre-stage model weights on the
+  shared mount.
 - If the gateway's upstream lacks subscription credentials, real completions might
   return `missing subscription key` even though listing models and auth succeed;
   that is a gateway-side issue.

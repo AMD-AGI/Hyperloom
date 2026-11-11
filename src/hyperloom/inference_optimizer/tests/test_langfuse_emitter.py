@@ -282,7 +282,7 @@ def test_session_start_emits_marker_with_provenance(tmp_path, monkeypatch):
                 "pid": 4242,
                 "stack_fingerprint": {"rocm": "6.2", "vllm": "0.6"},
                 "workload": {"isl": 128, "osl": 256},
-                "dependencies": {"magpie": {"path": "/weka/magpie", "commit": "deadbee"}},
+                "dependencies": {"inferencex": {"path": "/weka/inferencex", "commit": "deadbee"}},
             }
         ),
         encoding="utf-8",
@@ -302,7 +302,7 @@ def test_session_start_emits_marker_with_provenance(tmp_path, monkeypatch):
     assert out["pid"] == 4242
     assert out["stack_fingerprint"] == {"rocm": "6.2", "vllm": "0.6"}
     assert out["workload"] == {"isl": 128, "osl": 256}
-    assert out["dependencies"]["magpie"]["commit"] == "deadbee"
+    assert out["dependencies"]["inferencex"]["commit"] == "deadbee"
     assert out["user_data_path"] == "/weka/users/alice"
     # Environment snapshot is attached, with secret-looking values redacted.
     env = out["env"]

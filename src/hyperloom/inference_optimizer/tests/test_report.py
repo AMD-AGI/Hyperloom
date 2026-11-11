@@ -178,6 +178,10 @@ def test_format_md_shows_validated_gain_when_timestamp_missing():
     assert "never validated" not in md
 
 
+#: What the report mapper stamps on every AgentX round it accepts as evidence.
+_AGENTX_EVIDENCE = {"valid_measurement": True, "diagnostic_only": False, "workload_identity": "agentx-workload"}
+
+
 @pytest.fixture
 def report_performance_state(monkeypatch):
     from hyperloom.orchestrator.state.shared_state import SharedState
@@ -197,6 +201,7 @@ def report_performance_state(monkeypatch):
         GRADED_INTVTY_P50: 100.0,
         "duration_seconds": 900.0,
         "request_error_rate": 0.0,
+        **_AGENTX_EVIDENCE,
     }
     state.current_best = {
         "action": "integrate",
@@ -209,6 +214,7 @@ def report_performance_state(monkeypatch):
         GRADED_INTVTY_P50: 120.0,
         "duration_seconds": 900.0,
         "request_error_rate": 0.0,
+        **_AGENTX_EVIDENCE,
         "extra_envs": {"RECIPE": "measured"},
     }
     state.optimization_stack = [{"action": "integrate"}]

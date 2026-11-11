@@ -12,11 +12,8 @@ from typing import Any
 
 from hyperloom.common.env_safety import filter_untrusted_env_mapping, is_allowed_variant_env_key
 from hyperloom.common.failure_signature import RESOURCE_CONSTRAINT, FailureSignature
-from hyperloom.inference_optimizer.grid_server_args import (
-    dedupe_extra_server_args,
-    merge_server_args,
-    tokenize_server_args_preserving_json,
-)
+from hyperloom.inference_optimizer.grid_server_args import dedupe_extra_server_args, merge_server_args
+from inference_suite.argv import tokenize_server_args_preserving_json
 
 from . import _framework_switch_manifest as _switch_manifest
 from ._patch_sources import _acquiring_round, _done_field

@@ -20,7 +20,7 @@ import asyncio
 import logging
 from dataclasses import dataclass
 
-from hyperloom_common.io import WriteOptions, atomic_write_json, atomic_write_text
+from hyperloom_common.io import SHARED, atomic_write_json, atomic_write_text
 from hyperloom_common.jsonio import read_json_strict
 from hyperloom.contracts.recipe import RecipeError
 from hyperloom_multibranch.contracts.blackboard.interfaces import BlackboardError
@@ -75,6 +75,7 @@ def report_document(
             "knowledge": exports.knowledge_document(),
             "breakdown": str(exports.breakdown),
             "dashboard": {"json": str(exports.dashboard.json), "html": str(exports.dashboard.html)},
+            "agentx_checkpoint": None if exports.checkpoint is None else exports.checkpoint.to_document(),
         },
         "stop": {
             "clean": report.stop.clean,
@@ -159,6 +160,7 @@ def report_markdown(report: CloseReport, session_id: str, agent_isolation: Launc
         "",
         *_export_lines(report.exports),
         *_stop_lines(report.stop),
+        *_checkpoint_lines(report.exports),
     ]
     return "\n".join(lines) + "\n"
 
@@ -180,6 +182,12 @@ def _export_lines(exports: CloseExports | None) -> list[str]:
         f"Breakdown: {exports.breakdown}",
         f"Dashboard: {exports.dashboard.html}",
     ]
+
+
+def _checkpoint_lines(exports: CloseExports | None) -> list[str]:
+    if exports is None or exports.checkpoint is None:
+        return []
+    return ["", "## AgentX checkpoint", "", *exports.checkpoint.lines()]
 
 
 def _stop_lines(stop: StopReport) -> list[str]:
@@ -232,9 +240,9 @@ class Closer:
         """Write ``MB-report.json`` and ``MB-report.md``; the session writes a CLOSE it cut short through here."""
 
         session_id, isolation = self._layout.session_id, self._agent_isolation
-        atomic_write_json(self._layout.report, report_document(report, session_id, self._clock.now(), isolation))
-        markdown = report_markdown(report, session_id, isolation)
-        atomic_write_text(self._layout.report_markdown, markdown, options=WriteOptions(make_parents=True))
+        document = report_document(report, session_id, self._clock.now(), isolation)
+        atomic_write_json(self._layout.report, document, options=SHARED)
+        atomic_write_text(self._layout.report_markdown, report_markdown(report, session_id, isolation), options=SHARED)
 
 
 __all__ = ["EXPORT_FAILURES", "CloseReport", "Closer", "ended_before_final", "report_document", "report_markdown"]

@@ -253,7 +253,7 @@ def test_resume_restores_pins_before_the_agentx_staleness_guard(tmp_path, monkey
     import pytest
 
     from hyperloom.inference_optimizer.cli import _build_parser, _run_optimize
-    from hyperloom.inference_optimizer.cli.bootstrap import AGENTX_MEASUREMENT_EPOCH
+    from hyperloom.inference_optimizer.cli.bootstrap import MEASUREMENT_EPOCH
 
     cli_mod = "hyperloom.inference_optimizer.cli"
 
@@ -273,7 +273,7 @@ def test_resume_restores_pins_before_the_agentx_staleness_guard(tmp_path, monkey
         model_name=model.name,
         model_path=str(model),
         benchmark_mode="agentx",
-        agentx_epoch=AGENTX_MEASUREMENT_EPOCH,
+        measurement_epoch=MEASUREMENT_EPOCH,
         agentx_backend="mlperf",
         operator_extra_env={"HYPERLOOM_AGENTIC_BACKEND": "mlperf"},
     ).save(resume_dir)
@@ -402,7 +402,6 @@ def test_launch_shape_survives_a_state_roundtrip():
         warm_replay_min_confidence=0.55,
         bypass_scripts_dir="/scripts",
         framework_repo_path="/fw",
-        benchmark_backend="bypass",
     )
 
     restored = SharedState.from_dict(state.to_dict())
@@ -414,7 +413,6 @@ def test_launch_shape_survives_a_state_roundtrip():
     assert restored.warm_replay_min_confidence == 0.55
     assert restored.bypass_scripts_dir == "/scripts"
     assert restored.framework_repo_path == "/fw"
-    assert restored.benchmark_backend == "bypass"
 
 
 def test_pre_existing_state_without_the_fields_loads_defaults():
@@ -428,7 +426,14 @@ def test_pre_existing_state_without_the_fields_loads_defaults():
     assert restored.warm_replay_min_confidence == 0.7
     assert restored.bypass_scripts_dir == ""
     assert restored.framework_repo_path == ""
-    assert restored.benchmark_backend == ""
+
+
+def test_state_archived_with_the_retired_backend_field_still_loads():
+    """A state.json that recorded the retired benchmark_backend field loads; the field is dropped, not restored."""
+    restored = SharedState.from_dict({"session_id": "old", "benchmark_backend": "bypass", "framework_repo_path": "/fw"})
+
+    assert restored.framework_repo_path == "/fw"
+    assert "benchmark_backend" not in restored.to_dict()
 
 
 def test_restore_operator_paths_fills_env_from_state(monkeypatch):
@@ -436,7 +441,6 @@ def test_restore_operator_paths_fills_env_from_state(monkeypatch):
 
     monkeypatch.setenv("FRAMEWORK_REPO_PATH", "")
     monkeypatch.setenv("HYPERLOOM_BYPASS_SCRIPTS_DIR", "")
-    monkeypatch.setenv("HYPERLOOM_BENCHMARK_BACKEND", "")
     monkeypatch.setenv("SGLANG_REPO_PATH", "")
     monkeypatch.setenv("SGLANG_DIR", "")
     state = SharedState(
@@ -444,13 +448,11 @@ def test_restore_operator_paths_fills_env_from_state(monkeypatch):
         framework="sglang",
         framework_repo_path="/archived/fw",
         bypass_scripts_dir="/archived/scripts",
-        benchmark_backend="bypass",
     )
     _restore_operator_supplied_paths_from_state(_ns(framework_path=None, benchmark_scripts_dir=None), state)
     assert os.environ["FRAMEWORK_REPO_PATH"] == "/archived/fw"
     assert os.environ["SGLANG_REPO_PATH"] == "/archived/fw"
     assert os.environ["HYPERLOOM_BYPASS_SCRIPTS_DIR"] == "/archived/scripts"
-    assert os.environ["HYPERLOOM_BENCHMARK_BACKEND"] == "bypass"
 
 
 def test_restore_operator_paths_leaves_env_when_cli_repasses(monkeypatch):
@@ -458,12 +460,10 @@ def test_restore_operator_paths_leaves_env_when_cli_repasses(monkeypatch):
 
     monkeypatch.setenv("FRAMEWORK_REPO_PATH", "")
     monkeypatch.setenv("HYPERLOOM_BYPASS_SCRIPTS_DIR", "")
-    monkeypatch.setenv("HYPERLOOM_BENCHMARK_BACKEND", "")
     state = SharedState(
         session_id="s",
         framework_repo_path="/archived/fw",
         bypass_scripts_dir="/archived/scripts",
-        benchmark_backend="bypass",
     )
     _restore_operator_supplied_paths_from_state(
         _ns(framework_path="/cli/fw", benchmark_scripts_dir="/cli/scripts"),
@@ -471,4 +471,3 @@ def test_restore_operator_paths_leaves_env_when_cli_repasses(monkeypatch):
     )
     assert os.environ.get("FRAMEWORK_REPO_PATH", "") == ""
     assert os.environ.get("HYPERLOOM_BYPASS_SCRIPTS_DIR", "") == ""
-    assert os.environ["HYPERLOOM_BENCHMARK_BACKEND"] == "bypass"

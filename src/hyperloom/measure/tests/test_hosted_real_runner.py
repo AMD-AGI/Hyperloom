@@ -9,6 +9,7 @@ import json
 import subprocess
 import sys
 from collections.abc import Mapping
+from dataclasses import replace
 from pathlib import Path
 from typing import Any
 
@@ -16,7 +17,10 @@ import pytest
 
 from hyperloom.measure.hosted_log import STATE_FINISHED
 from hyperloom.measure.local_templates import image_env
+from hyperloom.measure.runner.cache_layout import CACHE_ENV
+from hyperloom.measure.tests.bundle_factory import STAGING, base_launch, stage_into
 from hyperloom.measure.returncodes import HOSTED_SPEC_REJECTED_RC
+from hyperloom.measure.socket import SessionFacts
 from hyperloom.measure.tests.gpu_free_host import IDLE_CARDS_PYTHON
 from hyperloom.measure.tests.hosted_fixtures import Rig, make_call, make_rig
 from hyperloom.sandbox.local import LocalTemplate
@@ -41,8 +45,19 @@ def _git_repo(path: Path) -> str:
     env = {"GIT_AUTHOR_NAME": "t", "GIT_AUTHOR_EMAIL": "t@t", "GIT_COMMITTER_NAME": "t", "GIT_COMMITTER_EMAIL": "t@t"}
     for args in (["init", "-q"], ["add", "."], ["commit", "-q", "-m", "x"]):
         subprocess.run(["git", *args], cwd=path, check=True, env={**env, "PATH": "/usr/bin:/bin"})
-    done = subprocess.run(["git", "rev-parse", "HEAD"], cwd=path, check=True, capture_output=True, text=True)
+    return _head(path)
+
+
+def _head(repo: Path) -> str:
+    done = subprocess.run(["git", "rev-parse", "HEAD"], cwd=repo, check=True, capture_output=True, text=True)
     return done.stdout.strip()
+
+
+def _call(tmp: Path, **overrides: Any):
+    """A call whose frozen base is measured with the rig's InferenceX repository, the commit its sheet then names."""
+    base = base_launch()
+    base = replace(base, client=replace(base.client, commit=_head(tmp / "inferencex")))
+    return make_call(tmp, session_facts=SessionFacts(staging=STAGING, base_launch=base), **overrides)
 
 
 class _Environment:
@@ -73,7 +88,8 @@ class _Environment:
 def _rigs(tmp_path: Path, command: tuple[str, ...]):
     """A factory of rigs over the runner ``command``: ``envs`` are added to the template's, ``config`` to the backend's."""
     repo = tmp_path / "inferencex"
-    commit = _git_repo(repo)
+    _git_repo(repo)
+    runner_cache = stage_into(tmp_path / "runner-cache").parents[1]
     built: list[Rig] = []
 
     def make(*, envs: Mapping[str, str] | None = None, config: Mapping[str, Any] | None = None, **spec) -> Rig:
@@ -84,12 +100,12 @@ def _rigs(tmp_path: Path, command: tuple[str, ...]):
             gpus=1,
             sealed=True,
             signing=True,
-            envs={**image_env(), "INFERENCEX_REPO": str(repo), **(envs or {})},
+            envs={**image_env(), "INFERENCEX_REPO": str(repo), CACHE_ENV: str(runner_cache), **(envs or {})},
         )
         r = make_rig(
             tmp_path,
             templates=[template],
-            spec={"inferencex_commit": commit, "benchmark_backend": "bypass", **spec},
+            spec=spec,
             poll_interval_sec=0.1,
             **(config or {}),
         )
@@ -131,7 +147,7 @@ def _point(tmp: Path, **envs: str) -> Path:
 
 def test_the_shipped_runner_flow_produces_a_result_the_backend_accepts(real, tmp_path) -> None:
     r = real()
-    call = make_call(tmp_path, point=_point(tmp_path), timeout_sec=120)
+    call = _call(tmp_path, point=_point(tmp_path), timeout_sec=120)
     outcome = r.backend.run_test(call)
     assert outcome.returncode == 0, outcome.stderr
     assert outcome.failure_class is None
@@ -141,10 +157,10 @@ def test_the_shipped_runner_flow_produces_a_result_the_backend_accepts(real, tmp
     envs = seen["benchmark"]["envs"]
     assert envs["ROCR_VISIBLE_DEVICES"] == "0", "the rewritten point carries this sandbox's cards"
     inferencex = seen["benchmark"]["inferencex_path"]
-    assert inferencex.endswith("InferenceX-" + r.config.spec.inferencex_commit)
+    assert inferencex.endswith("InferenceX-" + _head(tmp_path / "inferencex"))
     assert inferencex.startswith(str(tmp_path / "sandboxes")), "the runner's scratch is the sandbox's own directory"
     assert [x.phase for x in outcome.rounds] == ["measure"]
-    assert outcome.rounds[0].output_dir == call.output_dir / "benchmark_stub_20000101_000000"
+    assert outcome.rounds[0].output_dir == call.output_dir / "suite_run_0"
     assert (outcome.sandbox.gpu_ids, outcome.sandbox.node_name) == ((0,), "node-a")
 
 
@@ -152,7 +168,7 @@ def test_a_rebuilt_framework_is_what_the_server_would_import(real, tmp_path) -> 
     r = real()
     blob = r.config.spec.blobs.put(MARKER)
     environment = _Environment(blob, r.config.spec.blobs.root)
-    call = make_call(
+    call = _call(
         tmp_path,
         point=_point(tmp_path, HYPERLOOM_FRAMEWORK_PYTHON=sys.executable),
         timeout_sec=120,
@@ -168,7 +184,7 @@ def test_a_rebuilt_framework_is_what_the_server_would_import(real, tmp_path) -> 
 @pytest.mark.parametrize("fixture", ["real", "real_cli"])
 def test_a_sheet_the_real_runner_refuses_is_a_refused_sheet_not_a_failed_candidate(fixture, request, tmp_path) -> None:
     r = request.getfixturevalue(fixture)(model_hashes={"config.json": "00" * 32})
-    call = make_call(tmp_path, point=_point(tmp_path), timeout_sec=120)
+    call = _call(tmp_path, point=_point(tmp_path), timeout_sec=120)
     outcome = r.backend.run_test(call)
     assert outcome.returncode == HOSTED_SPEC_REJECTED_RC
     assert outcome.failure_class is None

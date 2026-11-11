@@ -1289,7 +1289,7 @@ def test_a_patch_review_lands_on_the_candidate_it_judged(session_dir: Path):
     import asyncio
 
     from hyperloom.inference_optimizer.breakdown.recorder.framework_event import ARM_SOURCE, PRODUCER_SPECIALIST
-    from hyperloom.orchestrator.loop.proposals import PendingProposal
+    from hyperloom.orchestrator.state.pending_proposal import PendingProposal
 
     coord = _coordinator(session_dir)
     coord.shared_state.phase = "FRAMEWORK_AGENT"

@@ -6,7 +6,6 @@
 from __future__ import annotations
 
 import json
-import sys
 from types import SimpleNamespace
 
 import pytest
@@ -93,34 +92,34 @@ def test_materialize_pd_forces_string_prompts_for_lm_eval(tmp_path, monkeypatch)
     # PD-disaggregated: force lm_eval string prompts so the sglang_router's /v1/completions (StringOrArray) does not
     # 422 on token-id prompts.
     clear_env(monkeypatch)
-    monkeypatch.delenv("MAGPIE_EVAL_TOKENIZED_REQUESTS", raising=False)
+    monkeypatch.delenv("HYPERLOOM_EVAL_TOKENIZED_REQUESTS", raising=False)
     from hyperloom.orchestrator.actions.executors import _multi_node_env as mne
 
     monkeypatch.setattr(mne, "resolve_kb_topology", lambda: KbTopology(pd_mode="disaggregated"))
     src = tmp_path / "base.yaml"
     write_config(src)
     bench = materialize(src, tmp_path / "out")
-    assert bench["envs"].get("MAGPIE_EVAL_TOKENIZED_REQUESTS") == "false"
+    assert bench["envs"].get("HYPERLOOM_EVAL_TOKENIZED_REQUESTS") == "false"
 
 
 def test_materialize_aggregated_leaves_lm_eval_default(tmp_path, monkeypatch):
     # Aggregated hits the sglang server directly (accepts token-id prompts), so the env is left unset and the default
     # tokenized path is preserved.
     clear_env(monkeypatch)
-    monkeypatch.delenv("MAGPIE_EVAL_TOKENIZED_REQUESTS", raising=False)
+    monkeypatch.delenv("HYPERLOOM_EVAL_TOKENIZED_REQUESTS", raising=False)
     from hyperloom.orchestrator.actions.executors import _multi_node_env as mne
 
     monkeypatch.setattr(mne, "resolve_kb_topology", lambda: KbTopology(pd_mode="aggregated"))
     src = tmp_path / "base.yaml"
     write_config(src)
     bench = materialize(src, tmp_path / "out")
-    assert "MAGPIE_EVAL_TOKENIZED_REQUESTS" not in bench["envs"]
+    assert "HYPERLOOM_EVAL_TOKENIZED_REQUESTS" not in bench["envs"]
 
 
 def test_materialize_fails_when_the_pd_topology_cannot_be_resolved(tmp_path, monkeypatch):
     # An unresolved topology must not leave a PD run's lm_eval on token-id prompts, which reads accuracy 0.
     clear_env(monkeypatch)
-    monkeypatch.delenv("MAGPIE_EVAL_TOKENIZED_REQUESTS", raising=False)
+    monkeypatch.delenv("HYPERLOOM_EVAL_TOKENIZED_REQUESTS", raising=False)
     from hyperloom.inference_optimizer.multi_node._internal.topology_file import TopologyHandoffError
     from hyperloom.orchestrator.actions.executors import _multi_node_env as mne
 
@@ -134,77 +133,20 @@ def test_materialize_fails_when_the_pd_topology_cannot_be_resolved(tmp_path, mon
         materialize(src, tmp_path / "out")
 
 
-# ---- _visible_gpu_count ---------------------------------------------------
-def test_visible_gpu_count_override_valid(monkeypatch):
-    clear_env(monkeypatch)
-    monkeypatch.setenv("INFERENCE_OPTIMIZER_VISIBLE_GPU_COUNT", "4")
-    assert we._visible_gpu_count() == 4
-
-
-def test_visible_gpu_count_override_invalid_then_torch(monkeypatch):
-    clear_env(monkeypatch)
-    monkeypatch.setenv("INFERENCE_OPTIMIZER_VISIBLE_GPU_COUNT", "not-int")
-    fake_torch = SimpleNamespace(cuda=SimpleNamespace(device_count=lambda: 2))
-    monkeypatch.setitem(sys.modules, "torch", fake_torch)
-    assert we._visible_gpu_count() == 2
-
-
-def test_visible_gpu_count_rocm_smi(monkeypatch):
-    clear_env(monkeypatch)
-    fake_torch = SimpleNamespace(cuda=SimpleNamespace(device_count=lambda: 0))
-    monkeypatch.setitem(sys.modules, "torch", fake_torch)
-    monkeypatch.setattr(we.shutil, "which", lambda name: "/usr/bin/rocm-smi")
-    out = "GPU[0]\t: foo\nGPU[0]\t: bar\nGPU[1]\t: baz\nother\n"
-    monkeypatch.setattr(we.subprocess, "run", lambda *a, **k: SimpleNamespace(returncode=0, stdout=out))
-    assert we._visible_gpu_count() == 2
-
-
-def test_visible_gpu_count_rocm_smi_error(monkeypatch):
-    clear_env(monkeypatch)
-    fake_torch = SimpleNamespace(cuda=SimpleNamespace(device_count=lambda: 0))
-    monkeypatch.setitem(sys.modules, "torch", fake_torch)
-    monkeypatch.setattr(we.shutil, "which", lambda name: "/usr/bin/rocm-smi")
-
-    def _raise(*a, **k):
-        raise OSError("denied")
-
-    monkeypatch.setattr(we.subprocess, "run", _raise)
-    assert we._visible_gpu_count() == 0
-
-
-def test_precision_and_gpu_type_no_framework_agent(monkeypatch, tmp_path):
+def test_precision_pins_and_the_board_keeps_the_point_script(monkeypatch, tmp_path):
     clear_env(monkeypatch)
     monkeypatch.setenv("PRECISION", "fp8")
-    monkeypatch.setenv("INFERENCE_OPTIMIZER_DISABLE_TP_CLAMP", "1")
     src = tmp_path / "cfg.yaml"
-    # framework empty -> gpu_type branch pops benchmark_script
     src.write_text(
         yaml.safe_dump({"benchmark": {"model": "/m", "envs": {}, "benchmark_script": "old.sh"}}), encoding="utf-8"
     )
     bench = materialize(src, tmp_path / "out", target=we.BenchmarkTarget(gpu_type="mi300x"))
     assert bench["precision"] == "fp8"
-    assert "benchmark_script" not in bench
-
-
-def test_bypass_scriptable_prefers_absolute_benchmark_script(tmp_path):
-    from hyperloom.orchestrator.actions.executors import bypass_scriptable
-
-    script = tmp_path / "custom_mi355x.sh"
-    script.write_text("#!/usr/bin/env bash\n", encoding="utf-8")
-
-    resolved = bypass_scriptable.resolve_scriptable_script(
-        "custom",
-        "mi355x",
-        "",
-        {"benchmark_script": str(script)},
-    )
-
-    assert resolved == script
+    assert bench["benchmark_script"] == "old.sh"
 
 
 def test_rocr_derives_tp(monkeypatch, tmp_path):
     clear_env(monkeypatch)
-    monkeypatch.setenv("INFERENCE_OPTIMIZER_DISABLE_TP_CLAMP", "1")
     monkeypatch.setenv("ROCR_VISIBLE_DEVICES", "0,1,2")
     src = write_config(tmp_path / "cfg.yaml")
     bench = materialize(src, tmp_path / "out")
@@ -221,7 +163,6 @@ def test_rocr_derives_tp(monkeypatch, tmp_path):
 )
 def test_num_prompts_factor(monkeypatch, tmp_path, isl, osl, conc, factor):
     clear_env(monkeypatch)
-    monkeypatch.setenv("INFERENCE_OPTIMIZER_DISABLE_TP_CLAMP", "1")
     monkeypatch.setenv("ISL", str(isl))
     monkeypatch.setenv("OSL", str(osl))
     monkeypatch.setenv("CONC", str(conc))
@@ -232,7 +173,6 @@ def test_num_prompts_factor(monkeypatch, tmp_path, isl, osl, conc, factor):
 
 def test_server_args_merge_existing(monkeypatch, tmp_path):
     clear_env(monkeypatch)
-    monkeypatch.setenv("INFERENCE_OPTIMIZER_DISABLE_TP_CLAMP", "1")
     src = write_config(tmp_path / "cfg.yaml", envs={"EXTRA_SGLANG_ARGS": "--mem-fraction-static 0.9"})
     bench = materialize(src, tmp_path / "out", launch=we.LaunchLayer(extra_server_args="--chunked-prefill-size 2048"))
     merged = bench["envs"]["EXTRA_SGLANG_ARGS"]
@@ -243,7 +183,6 @@ def test_server_args_merge_existing(monkeypatch, tmp_path):
 def _ep_materialize(monkeypatch, tmp_path, *, framework, args, tp, ep):
     """Materialize ``framework`` at ``tp``/``ep`` and return its benchmark envs."""
     clear_env(monkeypatch)
-    monkeypatch.setenv("INFERENCE_OPTIMIZER_DISABLE_TP_CLAMP", "1")
     monkeypatch.setenv("TP", str(tp))
     monkeypatch.setenv("EP", str(ep))
     src = write_config(tmp_path / "cfg.yaml", framework=framework, envs={server_args_env_name(framework): args})
@@ -287,22 +226,6 @@ def test_materialize_ep_one_adds_no_expert_parallel_flag(monkeypatch, tmp_path):
     assert envs["EXTRA_VLLM_ARGS"] == "--trust-remote-code"
 
 
-def test_materialize_drops_an_ep_the_clamped_tp_cannot_hold(monkeypatch, tmp_path, caplog):
-    clear_env(monkeypatch)
-    monkeypatch.setenv("INFERENCE_OPTIMIZER_VISIBLE_GPU_COUNT", "4")
-    monkeypatch.setenv("TP", "8")
-    monkeypatch.setenv("EP", "8")
-    src = write_config(tmp_path / "cfg.yaml", envs={"EXTRA_SGLANG_ARGS": "--mem-fraction-static 0.9"})
-
-    with caplog.at_level("WARNING"):
-        envs = materialize(src, tmp_path / "out")["envs"]
-
-    assert envs["TP"] == 4
-    assert envs["EP"] == 8
-    assert "--ep-size" not in envs["EXTRA_SGLANG_ARGS"]
-    assert "EP=8 does not divide the launched TP=4" in caplog.text
-
-
 def test_materialize_drops_an_ep_that_does_not_divide_tp(monkeypatch, tmp_path, caplog):
     with caplog.at_level("WARNING"):
         envs = _ep_materialize(monkeypatch, tmp_path, framework="sglang", args="--mem-fraction-static 0.9", tp=8, ep=3)
@@ -324,7 +247,6 @@ def test_materialize_drops_an_ep_that_does_not_divide_tp(monkeypatch, tmp_path, 
 def test_an_extra_env_ep_that_does_not_divide_tp_adds_no_flag(monkeypatch, tmp_path, caplog, environ, extra_envs):
     """An EP written by the extra-env merge meets the same TP rule as the run's own EP."""
     clear_env(monkeypatch)
-    monkeypatch.setenv("INFERENCE_OPTIMIZER_DISABLE_TP_CLAMP", "1")
     monkeypatch.setenv("TP", "8")
     for name, value in environ.items():
         monkeypatch.setenv(name, value)
@@ -342,7 +264,6 @@ def test_materialize_leaves_multi_node_ep_to_the_launcher(monkeypatch, tmp_path,
     """The multi-node launcher passes EP itself; this pod's GPU count is not the cluster's TP."""
     clear_env(monkeypatch)
     monkeypatch.setenv("INFERENCE_OPTIMIZER_NODES", "2")
-    monkeypatch.setenv("INFERENCE_OPTIMIZER_VISIBLE_GPU_COUNT", "8")
     monkeypatch.setenv("TP", "16")
     monkeypatch.setenv("EP", "16")
     if operator_pin:
@@ -356,7 +277,6 @@ def test_materialize_leaves_multi_node_ep_to_the_launcher(monkeypatch, tmp_path,
 
 def test_mimo_v2_injects_triton_attention(monkeypatch, tmp_path):
     clear_env(monkeypatch)
-    monkeypatch.setenv("INFERENCE_OPTIMIZER_DISABLE_TP_CLAMP", "1")
     src = write_config(tmp_path / "cfg.yaml")
     bench = materialize(src, tmp_path / "out", target=we.BenchmarkTarget(model_path="/path/models/MiMo-V2-7B"))
     assert "attention-backend triton" in bench["envs"]["EXTRA_SGLANG_ARGS"]
@@ -364,7 +284,6 @@ def test_mimo_v2_injects_triton_attention(monkeypatch, tmp_path):
 
 def test_mimo_v2_attention_pin_is_not_suppressed_by_a_compound_backend_flag(monkeypatch, tmp_path):
     clear_env(monkeypatch)
-    monkeypatch.setenv("INFERENCE_OPTIMIZER_DISABLE_TP_CLAMP", "1")
     src = write_config(tmp_path / "cfg.yaml", envs={"EXTRA_SGLANG_ARGS": "--decode-attention-backend aiter"})
     bench = materialize(src, tmp_path / "out", target=we.BenchmarkTarget(model_path="/path/models/MiMo-V2-7B"))
     tokens = bench["envs"]["EXTRA_SGLANG_ARGS"].split()
@@ -391,7 +310,6 @@ def test_sparse_block_size_keeps_an_operator_pin(monkeypatch):
 
 def test_run_eval_from_env(monkeypatch, tmp_path):
     clear_env(monkeypatch)
-    monkeypatch.setenv("INFERENCE_OPTIMIZER_DISABLE_TP_CLAMP", "1")
     monkeypatch.setenv("RUN_EVAL", "true")
     src = write_config(tmp_path / "cfg.yaml")
     bench = materialize(src, tmp_path / "out")
@@ -400,7 +318,6 @@ def test_run_eval_from_env(monkeypatch, tmp_path):
 
 def test_run_eval_defaults_true(monkeypatch, tmp_path):
     clear_env(monkeypatch)
-    monkeypatch.setenv("INFERENCE_OPTIMIZER_DISABLE_TP_CLAMP", "1")
     src = write_config(tmp_path / "cfg.yaml")
     bench = materialize(src, tmp_path / "out")
     assert bench["envs"]["RUN_EVAL"] == "true"
@@ -408,7 +325,6 @@ def test_run_eval_defaults_true(monkeypatch, tmp_path):
 
 def test_run_eval_process_env_false_is_ignored(monkeypatch, tmp_path):
     clear_env(monkeypatch)
-    monkeypatch.setenv("INFERENCE_OPTIMIZER_DISABLE_TP_CLAMP", "1")
     monkeypatch.setenv("RUN_EVAL", "false")
     monkeypatch.setenv(OPERATOR_EXTRA_ENV_VAR, json.dumps({"RUN_EVAL": "false", "MY_KNOB": "1"}))
     src = write_config(tmp_path / "cfg.yaml", envs={"RUN_EVAL": "false"})
@@ -419,7 +335,6 @@ def test_run_eval_process_env_false_is_ignored(monkeypatch, tmp_path):
 
 def test_profile_negative_delay_clamped(monkeypatch, tmp_path):
     clear_env(monkeypatch)
-    monkeypatch.setenv("INFERENCE_OPTIMIZER_DISABLE_TP_CLAMP", "1")
     monkeypatch.setenv("ISL", "1")
     monkeypatch.setenv("OSL", "1")
     monkeypatch.setenv("CONC", "8")
@@ -431,7 +346,6 @@ def test_profile_negative_delay_clamped(monkeypatch, tmp_path):
 
 def test_profile_max_iters_override(monkeypatch, tmp_path):
     clear_env(monkeypatch)
-    monkeypatch.setenv("INFERENCE_OPTIMIZER_DISABLE_TP_CLAMP", "1")
     monkeypatch.setenv("HYPERLOOM_PROFILE_MAX_ITERS", "8")
     monkeypatch.setenv("HYPERLOOM_PROFILE_DELAY_ITERS", "4")
     src = write_config(tmp_path / "cfg.yaml", envs={"PROFILE": "1"})
@@ -441,7 +355,6 @@ def test_profile_max_iters_override(monkeypatch, tmp_path):
 
 def test_a_synthetic_run_still_honors_the_delay_override(monkeypatch, tmp_path):
     clear_env(monkeypatch)
-    monkeypatch.setenv("INFERENCE_OPTIMIZER_DISABLE_TP_CLAMP", "1")
     monkeypatch.delenv("HYPERLOOM_AGENTX", raising=False)
     monkeypatch.setenv("HYPERLOOM_PROFILE_MAX_ITERS", "128")
     monkeypatch.setenv("HYPERLOOM_PROFILE_DELAY_ITERS", "64")
@@ -453,7 +366,6 @@ def test_a_synthetic_run_still_honors_the_delay_override(monkeypatch, tmp_path):
 
 def test_profile_atom_num_prompts_equals_conc(monkeypatch, tmp_path):
     clear_env(monkeypatch)
-    monkeypatch.setenv("INFERENCE_OPTIMIZER_DISABLE_TP_CLAMP", "1")
     monkeypatch.setenv("CONC", "16")
     monkeypatch.setattr(profile_setup, "_atom_tracelens_caps", lambda: profile_setup._ATOM_CAPS_NONE)
     src = tmp_path / "cfg.yaml"
@@ -471,7 +383,6 @@ def test_profile_atom_num_prompts_equals_conc(monkeypatch, tmp_path):
 
 def test_profile_atom_injects_tracelens_knobs_when_probe_hits(monkeypatch, tmp_path):
     clear_env(monkeypatch)
-    monkeypatch.setenv("INFERENCE_OPTIMIZER_DISABLE_TP_CLAMP", "1")
     monkeypatch.setenv("CONC", "8")
     monkeypatch.setattr(
         profile_setup,
@@ -518,7 +429,6 @@ def test_atom_tracelens_caps_parses_and_fail_soft(monkeypatch):
 
 def test_profile_sglang_bad_extra_body(monkeypatch, tmp_path):
     clear_env(monkeypatch)
-    monkeypatch.setenv("INFERENCE_OPTIMIZER_DISABLE_TP_CLAMP", "1")
     src = write_config(tmp_path / "cfg.yaml", envs={"PROFILE": "1", "PROFILE_EXTRA_BODY": "{bad json"})
     bench = materialize(src, tmp_path / "out")
     body = bench["envs"]["PROFILE_EXTRA_BODY"]
@@ -535,7 +445,6 @@ def _profile_num_steps(bench) -> int:
 def test_profile_default_caps_steps_and_osl(monkeypatch, tmp_path):
     # No PROFILE_OSL: capture capped at 128, profile OSL defaults to min(OSL, 1024).
     clear_env(monkeypatch)
-    monkeypatch.setenv("INFERENCE_OPTIMIZER_DISABLE_TP_CLAMP", "1")
     monkeypatch.setenv("OSL", "8192")
     monkeypatch.setenv("CONC", "64")
     src = write_config(tmp_path / "cfg.yaml", envs={"PROFILE": "1"})
@@ -547,7 +456,6 @@ def test_profile_default_caps_steps_and_osl(monkeypatch, tmp_path):
 def test_profile_explicit_profile_osl_honored(monkeypatch, tmp_path):
     # PROFILE_OSL overrides the profile OSL verbatim.
     clear_env(monkeypatch)
-    monkeypatch.setenv("INFERENCE_OPTIMIZER_DISABLE_TP_CLAMP", "1")
     monkeypatch.setenv("OSL", "8192")
     monkeypatch.setenv("CONC", "64")
     monkeypatch.setenv("PROFILE_OSL", "512")
@@ -559,7 +467,6 @@ def test_profile_explicit_profile_osl_honored(monkeypatch, tmp_path):
 
 def test_profile_steps_cap_env_override(monkeypatch, tmp_path):
     clear_env(monkeypatch)
-    monkeypatch.setenv("INFERENCE_OPTIMIZER_DISABLE_TP_CLAMP", "1")
     monkeypatch.setenv("OSL", "1024")
     monkeypatch.setenv("CONC", "64")
     monkeypatch.setenv("HYPERLOOM_PROFILE_MAX_STEPS_CAP", "256")
@@ -572,7 +479,6 @@ def test_profile_high_osl_low_conc_auto_lowers_osl(monkeypatch, tmp_path, caplog
     # Low CONC pushes the steady-state floor above the cap, so the auto path lowers the profile OSL until the floor
     # fits the 128-step cap.
     clear_env(monkeypatch)
-    monkeypatch.setenv("INFERENCE_OPTIMIZER_DISABLE_TP_CLAMP", "1")
     monkeypatch.setenv("OSL", "8192")
     monkeypatch.setenv("CONC", "4")
     src = write_config(tmp_path / "cfg.yaml", envs={"PROFILE": "1"})
@@ -587,7 +493,6 @@ def test_profile_high_osl_low_conc_auto_lowers_osl(monkeypatch, tmp_path, caplog
 def test_profile_manual_max_iters_below_floor_warns(monkeypatch, tmp_path, caplog):
     # An explicit too-small capture is honored but warned about.
     clear_env(monkeypatch)
-    monkeypatch.setenv("INFERENCE_OPTIMIZER_DISABLE_TP_CLAMP", "1")
     monkeypatch.setenv("OSL", "1024")
     monkeypatch.setenv("CONC", "8")
     monkeypatch.setenv("HYPERLOOM_PROFILE_MAX_ITERS", "8")
@@ -601,7 +506,6 @@ def test_profile_manual_max_iters_below_floor_warns(monkeypatch, tmp_path, caplo
 def test_profile_explicit_osl_over_cap_warns_not_lowered(monkeypatch, tmp_path, caplog):
     # Explicit PROFILE_OSL whose steady floor exceeds the cap is honored as-is, but a warning is emitted.
     clear_env(monkeypatch)
-    monkeypatch.setenv("INFERENCE_OPTIMIZER_DISABLE_TP_CLAMP", "1")
     monkeypatch.setenv("OSL", "1024")
     monkeypatch.setenv("CONC", "4")
     monkeypatch.setenv("PROFILE_OSL", "8192")
@@ -616,7 +520,6 @@ def test_profile_explicit_osl_over_cap_warns_not_lowered(monkeypatch, tmp_path, 
 def test_profile_manual_max_iters_above_cap_warns(monkeypatch, tmp_path, caplog):
     # An explicit too-large capture is honored but warned about.
     clear_env(monkeypatch)
-    monkeypatch.setenv("INFERENCE_OPTIMIZER_DISABLE_TP_CLAMP", "1")
     monkeypatch.setenv("OSL", "256")
     monkeypatch.setenv("CONC", "64")
     monkeypatch.setenv("HYPERLOOM_PROFILE_MAX_ITERS", "2000")
@@ -630,7 +533,6 @@ def test_profile_manual_max_iters_above_cap_warns(monkeypatch, tmp_path, caplog)
 def test_quality_ref_variant_compares(monkeypatch, tmp_path):
     # A non-baseline scriptable variant must COMPARE against the operator reference and must NOT write.
     clear_env(monkeypatch)
-    monkeypatch.setenv("INFERENCE_OPTIMIZER_DISABLE_TP_CLAMP", "1")
     monkeypatch.setenv("XDIT_QUALITY_REF", "/ref/q.png")
     src = write_config(tmp_path / "cfg.yaml", framework="xdit", envs={"XDIT_QUALITY_REF": ""})
     bench = materialize(src, tmp_path / "out")
@@ -641,7 +543,6 @@ def test_quality_ref_variant_compares(monkeypatch, tmp_path):
 def test_quality_ref_baseline_establishes(monkeypatch, tmp_path):
     # The baseline ESTABLISHES the reference: compare off and write it fresh.
     clear_env(monkeypatch)
-    monkeypatch.setenv("INFERENCE_OPTIMIZER_DISABLE_TP_CLAMP", "1")
     monkeypatch.setenv("XDIT_QUALITY_REF", "/ref/q.png")
     src = write_config(tmp_path / "cfg.yaml", framework="xdit", envs={"XDIT_QUALITY_REF": ""})
     bench = materialize(src, tmp_path / "out", options=we.MaterializeOptions(establish_quality_ref=True))
@@ -657,7 +558,6 @@ def test_custom_baseline_gets_no_xdit_only_envs(monkeypatch, tmp_path):
     # -- least of all an attention backend on the BASELINE, which would make the reference measurement something the
     # operator never asked for.
     clear_env(monkeypatch)
-    monkeypatch.setenv("INFERENCE_OPTIMIZER_DISABLE_TP_CLAMP", "1")
     monkeypatch.setenv("XDIT_MODEL_ROOT", "/models")
     src = write_config(tmp_path / "cfg.yaml", framework="custom", envs={})
     bench = materialize(src, tmp_path / "out", options=we.MaterializeOptions(establish_quality_ref=True))
@@ -668,7 +568,6 @@ def test_custom_baseline_gets_no_xdit_only_envs(monkeypatch, tmp_path):
 def test_xdit_baseline_still_gets_xdit_only_envs(monkeypatch, tmp_path):
     # The counterpart: scoping those envs to xdit must not disarm xdit itself.
     clear_env(monkeypatch)
-    monkeypatch.setenv("INFERENCE_OPTIMIZER_DISABLE_TP_CLAMP", "1")
     monkeypatch.setenv("XDIT_MODEL_ROOT", "/models")
     src = write_config(tmp_path / "cfg.yaml", framework="xdit", envs={})
     bench = materialize(src, tmp_path / "out", options=we.MaterializeOptions(establish_quality_ref=True))
@@ -679,7 +578,6 @@ def test_xdit_baseline_still_gets_xdit_only_envs(monkeypatch, tmp_path):
 def test_quality_ref_emitted_under_both_names(monkeypatch, tmp_path):
     # The gate itself IS generic, so a custom workload keeps it.
     clear_env(monkeypatch)
-    monkeypatch.setenv("INFERENCE_OPTIMIZER_DISABLE_TP_CLAMP", "1")
     monkeypatch.setenv("HYPERLOOM_QUALITY_REF", "/ref/q.png")
     src = write_config(tmp_path / "cfg.yaml", framework="custom", envs={})
     bench = materialize(src, tmp_path / "out")
@@ -693,7 +591,6 @@ def test_quality_ref_legacy_name_still_resolves(monkeypatch, tmp_path):
     # Operator scripts that predate the rename set only the XDIT_ name; it must still select the reference until they
     # migrate.
     clear_env(monkeypatch)
-    monkeypatch.setenv("INFERENCE_OPTIMIZER_DISABLE_TP_CLAMP", "1")
     monkeypatch.setenv("XDIT_QUALITY_REF", "/ref/legacy.png")
     src = write_config(tmp_path / "cfg.yaml", framework="custom", envs={})
     bench = materialize(src, tmp_path / "out")
@@ -704,7 +601,6 @@ def test_quality_ref_legacy_name_still_resolves(monkeypatch, tmp_path):
 def test_quality_ref_baseline_write_env_override(monkeypatch, tmp_path):
     # Explicit XDIT_QUALITY_REF_WRITE wins over the derived path on baseline.
     clear_env(monkeypatch)
-    monkeypatch.setenv("INFERENCE_OPTIMIZER_DISABLE_TP_CLAMP", "1")
     monkeypatch.setenv("XDIT_QUALITY_REF", "/ref/q.png")
     monkeypatch.setenv("XDIT_QUALITY_REF_WRITE", "/ref/write.png")
     src = write_config(tmp_path / "cfg.yaml", framework="xdit", envs={"XDIT_QUALITY_REF": ""})
@@ -715,7 +611,6 @@ def test_quality_ref_baseline_write_env_override(monkeypatch, tmp_path):
 def test_quality_ref_profile_disabled_and_no_write(monkeypatch, tmp_path):
     # Profiling/roofline must never gate AND never write.
     clear_env(monkeypatch)
-    monkeypatch.setenv("INFERENCE_OPTIMIZER_DISABLE_TP_CLAMP", "1")
     monkeypatch.setenv("XDIT_QUALITY_REF", "/ref/q.png")
     monkeypatch.setenv("XDIT_QUALITY_REF_WRITE", "/ref/q.png")
     src = write_config(tmp_path / "cfg.yaml", framework="xdit", envs={"PROFILE": "1"})
@@ -727,7 +622,6 @@ def test_quality_ref_profile_disabled_and_no_write(monkeypatch, tmp_path):
 def test_quality_ref_untouched_for_serving_framework(monkeypatch, tmp_path):
     # Serving frameworks inject no XDIT_QUALITY_* keys even when the env is set.
     clear_env(monkeypatch)
-    monkeypatch.setenv("INFERENCE_OPTIMIZER_DISABLE_TP_CLAMP", "1")
     monkeypatch.setenv("XDIT_QUALITY_REF", "/ref/q.png")
     src = write_config(tmp_path / "cfg.yaml", framework="sglang", envs={})
     bench = materialize(src, tmp_path / "out")
@@ -738,7 +632,6 @@ def test_quality_ref_untouched_for_serving_framework(monkeypatch, tmp_path):
 def test_quality_ref_zero_config_variant_defaults_to_session_ref(monkeypatch, tmp_path):
     # No operator reference: a stable per-session reference is derived so the gate stays active.
     clear_env(monkeypatch)
-    monkeypatch.setenv("INFERENCE_OPTIMIZER_DISABLE_TP_CLAMP", "1")
     sess = tmp_path / "sess"
     monkeypatch.setenv("INFERENCE_OPTIMIZER_CURRENT_SESSION_DIR", str(sess))
     src = write_config(tmp_path / "cfg.yaml", framework="xdit", envs={})
@@ -752,7 +645,6 @@ def test_quality_ref_zero_config_baseline_writes_session_ref(monkeypatch, tmp_pa
     # The baseline writes the derived per-session reference (compare off) so a subsequent variant has something to
     # gate against.
     clear_env(monkeypatch)
-    monkeypatch.setenv("INFERENCE_OPTIMIZER_DISABLE_TP_CLAMP", "1")
     sess = tmp_path / "sess"
     monkeypatch.setenv("INFERENCE_OPTIMIZER_CURRENT_SESSION_DIR", str(sess))
     src = write_config(tmp_path / "cfg.yaml", framework="xdit", envs={})

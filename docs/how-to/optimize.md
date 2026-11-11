@@ -55,16 +55,16 @@ Requirements:
 | Field | Meaning | How to choose |
 |-------|---------|---------------|
 | `TP` | Tensor-parallel size — number of GPUs the model is sharded across | Must match the number of GPUs in your server node (for example, `8` for a single 8-GPU MI300X node) |
-| `CONC` | Concurrent requests — baseline benchmark concurrency (`--conc`, default `64`) | Set to your target concurrency. The SWEEP phase separately measures a ladder around it: `256,128,64,32,16,8,4,2` for a synthetic workload. Native Magpie AgentX uses one fixed YAML concurrency per session. Override the ladder with `--conc-sweep-concs`. |
+| `CONC` | Concurrent requests — baseline benchmark concurrency (`--conc`, default `64`) | Set to your target concurrency. The SWEEP phase separately measures a ladder around it: `256,128,64,32,16,8,4,2` for a synthetic workload. An AgentX session runs one fixed concurrency. Override the ladder with `--conc-sweep-concs`. |
 | `ISL` | Input sequence length — tokens in each request's prompt | Match your production workload; `1024` is a common starting point |
 | `OSL` | Output sequence length — tokens generated per response | Match your production workload; `1024` is a common starting point |
 
 ```{note}
-`ISL` / `OSL` describe the synthetic request shape. Under the opt-in agentic
-Magpie AgentX trace-replay mode (`HYPERLOOM_AGENTX=1` or `--benchmark-config agentx.yaml`) request lengths come from the recorded
-trace corpus instead, so these two values do not affect what is measured — the
-server's context window comes from Magpie's resolved recipe or custom-model
-configuration.
+`ISL` / `OSL` describe the synthetic request shape. Under the opt-in AgentX
+trace-replay mode (`HYPERLOOM_AGENTX=1` or `--benchmark-config agentx.yaml`) request
+lengths come from the recorded trace corpus instead, so these two values do not
+affect what is measured — the server's context window comes from the session's
+base launch.
 ```
 
 See [`src/hyperloom/inference_optimizer/SKILL.md`](https://github.com/AMD-AGI/Hyperloom/blob/main/src/hyperloom/inference_optimizer/SKILL.md)
@@ -128,6 +128,55 @@ implementation, a malformed or missing manifest, an unset `${VAR}` without a def
 leaves `state.json` and the rest of the session exactly as they were, so it can be retried with the flag fixed.
 Fix or remove a damaged `plugs.resolved.json` to resume.
 
+## Choose the base launch
+
+Every server a fixed-workload or native AgentX session starts begins from one
+base launch: the framework's flags and environment that the optimizer's own
+changes sit on top of. A fresh session resolves it once, at launch, from the
+first source that serves the model on your GPU board:
+
+1. `--reference-script PATH_OR_URL`, when given.
+2. InferenceX `main`, or the commit `--inferencex-commit SHA` pins.
+3. The framework's cookbook `main` (SGLang cookbook, vLLM recipes, ATOM).
+4. A built-in default table, with a warning (fixed workloads without
+   `--inferencex-commit` only).
+
+`--inferencex-commit SHA` resolves from InferenceX at that commit, a full sha
+or a prefix of 7 or more hex digits, for example to match a CI run; the full
+sha is recorded in `base_launch.json`. Only InferenceX is pinned: the
+cookbooks are still read at `main`. The launch exits 2 when InferenceX has no
+such commit, when the commit lacks a function the resolver runs from
+InferenceX's own code (naming what it lacks), when any source cannot be read
+(naming the source and its error, git's included), or when no recipe serves
+the session (naming why each source missed): a pinned session never runs on
+the default table. To use such a commit, resolve the
+base where its code was run and pass that `base_launch.json` as
+`--reference-script`. A resume keeps its frozen base.
+
+Without `--inferencex-commit`, when a source cannot be read, InferenceX
+included, a fixed session runs on the default table and the warning names that
+source; an AgentX session exits 2. An AgentX session that no source serves
+exits 2 and names why each source missed. When `--tp` or `--ep`
+is omitted, the session runs at the
+topology the base chose. The base is frozen as `$SESSION_DIR/base_launch.json`
+and its warnings print in the startup banner; `--resume-from` reads that file
+and never refetches. A session whose state predates `base_launch.json` cannot
+be resumed: start a new one.
+
+`--reference-script` takes a shell launch script or a `base_launch.json` from
+an earlier session. A script must name the session's framework entrypoint and
+fix every flag in its text. These exit 2:
+
+- a flag whose value is a shell variable, such as `--tp $TP`;
+- a `# hyperloom-launch-controls:` line;
+- a file that cannot be read or launches another framework.
+- a launch that needs more GPUs than the session has.
+
+`--host`, `--port`, `--served-model-name` and `--result-*` are dropped and
+recorded under `stripped`, because the runner sets them every round.
+`$SESSION_DIR/current_setting.sh` re-feeds as a launch file unless it carries
+launch controls (an overlay, unset envs, removed args or replaced args).
+
 ---
 
 ## Output and artifacts
@@ -153,7 +202,7 @@ If a run fails on first launch, see [Troubleshooting Hyperloom](../reference/tro
 ## Optimize an AgentX workload
 
 Use the ordinary Hyperloom workload flags with `HYPERLOOM_AGENTX=1`. Hyperloom
-translates them into Magpie's native AgentX YAML and saves it in the session:
+writes them into the session's AgentX workload, `$SESSION_DIR/benchmark.yaml`:
 
 ```bash
 HYPERLOOM_AGENTX=1 hyperloom optimize \
@@ -163,29 +212,28 @@ HYPERLOOM_AGENTX=1 hyperloom optimize \
   --max-hours 12
 ```
 
-This path is **single-node** SGLang or vLLM. Hyperloom invokes Magpie in local
-mode: run Hyperloom inside your serving image. `--docker-image IMAGE` records
-that runtime image; it does not launch a container. A registered recipe can
-supply its image when the flag is omitted. Custom models require an explicit
-`--docker-image`, including local runs.
+This path is **single-node** SGLang or vLLM: run Hyperloom inside your serving
+image. `--docker-image IMAGE` records that runtime image; it does not launch a
+container. Custom models require an explicit `--docker-image`.
 
-`--model`, `--framework`, `--precision`, `--tp`, `--ep` and `--conc` use
-Hyperloom's existing resolution rules. `--server-args` and serving `--extra-env`
-pins become Magpie server launch overrides, with candidate changes applied on
-top. ISL/OSL are not injected: request lengths come from the AgentX trace corpus.
-Concurrency stays fixed for the session.
+The server starts from the session's base launch (see
+[Choose the base launch](#choose-the-base-launch)). An AgentX session that neither
+`--reference-script`, InferenceX nor the framework's cookbook serves is refused,
+and so is a serving image whose framework is older than the recipe's image.
+`--server-args` and serving `--extra-env` pins form the operator's layer on the
+base, and candidate changes sit on top. A flag the installed framework does not
+know is refused, never dropped. Request lengths come from the AgentX trace corpus;
+concurrency stays fixed for the session.
 
-Native AgentX rejects `--enable-conc-sweep`, `--isl`, `--osl`, `--profile-osl`,
-`--max-model-len`, `--reference-script`, `--quantize` and `--quantize-scheme`.
+AgentX rejects `--enable-conc-sweep`, `--isl`, `--osl`, `--profile-osl`,
+`--max-model-len`, `--quantize` and `--quantize-scheme`.
 It also rejects multi-node execution and frameworks other than SGLang/vLLM.
 Through `--extra-env`, `ISL`, `OSL`, `RANDOM_RANGE_RATIO`, `MAX_MODEL_LEN`,
 `EP_SIZE` and keys beginning with `AIPERF_`, `AGENTX_` or `AGENTIC_` are unsupported;
-use `--ep` for expert parallelism. Request lengths and model context come from
-Magpie's resolved workload. Prepare any quantized checkpoint before this run,
+use `--ep` for expert parallelism. Prepare any quantized checkpoint before this run,
 and start a separate session for another concurrency.
 
-For recipe selectors, profiling settings or other advanced Magpie options,
-provide a YAML directly. Start with
+To define the workload in a file, pass a YAML. Start with
 `src/hyperloom/inference_optimizer/assets/configs/agentx_sglang.yaml`:
 
 ```bash
@@ -194,7 +242,20 @@ hyperloom optimize --benchmark-config /workspace/agentx.yaml --max-hours 12
 
 The YAML defines the workload, including positive `envs.TP` and `envs.CONC` for
 resource accounting. Conflicting CLI workload flags are rejected. Both entrypoints
-use the same materialization, execution and result-validation path.
+use the same execution and result-validation path. For a local checkpoint, pass
+its path with `--model`, or name it in `envs.MODEL_PATH` while `model` keeps its
+canonical identifier. The model must support the replay's context length and
+protocol.
+
+Every round runs through [InferenceSuite](../reference/inference-suite.md), which
+starts the server, replays the trace, profiles and cleans up. Hyperloom compares
+the rounds' `report.json`: a round that did not complete, or whose measurement is
+invalid, cannot supply KEEP evidence, and baseline and candidate must have the
+same workload identity. GEAK's search measurements are provisional until the
+candidate passes the same workload and Hyperloom's KEEP gate. GEAK searches on
+the trace the accepted round replayed: the handoff's `workload_spec` declares
+the corpus and entry count from that round's aiperf export, the session's
+concurrency and the mean request shape the round measured.
 
 When the serving image's kernels run only some draft shapes, declare the bounds
 under `speculative_draft_limits` so a candidate outside them is refused before
@@ -213,40 +274,19 @@ itself is not judged: with `--speculative-eagle-topk 1`, SGLang verifies
 `num_steps + 1` tokens, so bound `draft_length` too when the cap is on the
 verify window. A malformed declaration stops the session before it starts.
 
-Magpie resolves the pinned InferenceX recipe and owns server startup, replay,
-profiling and cleanup. If the model has no registered recipe, Magpie's custom-model
-resolver uses the generated or supplied configuration. For a local custom checkpoint,
-pass its path with `--model`. In an explicit YAML, `envs.MODEL_PATH` can name the local
-checkpoint while `model` retains its canonical identifier. The model must support
-the replay's context length and protocol; custom resolution does not make an
-arbitrary small-context model a valid canonical AgentX target.
+The baseline, and each candidate that passes the KEEP threshold, also runs a
+GSM8K accuracy round on a server of its own. `--no-agentx-accuracy` turns it off
+for the session.
 
-Hyperloom changes serving arguments and environment through
-`agentx.launch_overrides`, applies reviewed source/kernel patches, and compares
-Magpie's public report. Missing, invalid, non-publishable, or diagnostic reports
-cannot supply KEEP evidence. Baseline and candidate must have the same workload
-identity. GEAK's search measurements are provisional until the candidate passes
-the same canonical Magpie workload and Hyperloom's KEEP gate. GEAK searches on
-the trace the accepted Magpie round replayed: the handoff's `workload_spec`
-declares that round's corpus, entry count, concurrency and mean request shape,
-and `AIPERF_BIN` points at the aiperf the round replayed with unless the
-environment already sets it.
-
-The profile phase prepares the TraceLens runtime patch and SGLang kernel-shape tool
-using the same helpers as fixed-sequence profiling, on a separate copy of the YAML.
-The copy enables `profiler.torch_profiler` and preserves explicit capture steps, count,
-start delay, interval, and detailed-annotation settings. A missing capture setting
-becomes one capture of 256 steps, a 300-second start delay, and a 900-second interval.
-When annotation settings are absent, the profile copy sets `detailed_annotations` to true,
-or to false when the TraceLens runtime patch was attempted and did not apply.
-The shape tool is prepended to the server's existing Python path, preserving candidate
-runtime paths. Magpie owns server profiling flags and the capture/flush lifecycle.
+A profile round adds the profiler layer and the SGLang kernel-shape tool to the
+round's launch, and opens its capture window once the replay reaches measurement.
+A missing capture setting becomes one capture of 256 steps after a 300-second start
+delay. A profile round captures one window; a YAML whose `num_profiles` is not 1 is
+refused when the session starts.
 Profiled measurements never replace the unprofiled performance baseline.
 
-The session archives its resolved workload as `benchmark.yaml` before writing the
-manifest. `hyperloom optimize --resume-from SESSION_DIR` reuses that file without
-requiring the switch or original YAML again. Changing the workload requires a new
-session. Old AIPerf session history is not migrated; `HYPERLOOM_AGENTX=1` selects
-Magpie for new sessions. Do not combine this entrypoint
-with CLI ISL/OSL, concurrency sweeps, quantization or benchmark-script overrides.
-The independent MLPerf agentic backend keeps its existing entrypoint.
+`hyperloom optimize --resume-from SESSION_DIR` reuses the archived `benchmark.yaml`
+without requiring the switch or original YAML again. Changing the workload requires
+a new session. Do not combine this entrypoint with CLI ISL/OSL, concurrency sweeps,
+quantization or benchmark-script overrides. The independent MLPerf agentic backend
+keeps its existing entrypoint.
