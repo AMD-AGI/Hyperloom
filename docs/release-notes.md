@@ -129,9 +129,10 @@ it.
   the same under either objective. The objective is
   recorded in the manifest and kept on resume; FINAL, the dashboard and
   `MB-report.md` name it, and the bar's refusal reads
-  `total_throughput_gain_below_threshold`. Its Recipe KB record carries
-  `total_throughput_gain_pct`, not `interactivity_gain_pct`, and does not
-  replace an interactivity champion. `--agentx-objective` with
+  `total_throughput_gain_below_threshold`. It writes no Recipe KB record
+  (`objective_not_partitioned`): the KB files AgentX records by workload, not
+  objective, so its record would sit beside the interactivity champions of the
+  same workload. `--agentx-objective` with
   `--workload inferencex` exits 2. Before, an operator had to patch the source
   to grade on total throughput.
 - **An MB AgentX session's Recipe KB record carries both total throughputs.**

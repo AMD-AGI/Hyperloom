@@ -10,12 +10,11 @@ read from the session's blob store by the hash the recipe pins (the experiment r
 copied out of a checkout when no store is given, and staged under the refs ``value`` names; each is checked against
 its pinned hash, so the KB stores exactly what was measured.
 
-InferenceX sessions compare ``optimized_throughput`` with the champion of their partition. An AgentX session compares
-its gain on its objective over its own baseline (objective ``agentx_keep``), and carries both values beside it: one
-graded on P50 interactivity writes, as the main flow's AgentX records do, ``interactivity_gain_pct`` with both
-interactivities, one graded on total token throughput ``total_throughput_gain_pct``; both carry both total
-throughputs when the gate recorded them. A champion on the other objective's gain is not compared with, and the write
-is refused. Its provenance says ``outputs_checked: false``: that gate reads speed and the request error rate, so a
+InferenceX sessions compare ``optimized_throughput`` with the champion of their partition. An AgentX session graded on
+P50 interactivity compares its gain over its own baseline (objective ``agentx_keep``) and writes, as the main flow's
+AgentX records do, ``interactivity_gain_pct`` with both interactivities, and both total throughputs when the gate
+recorded them. One graded on total token throughput writes nothing (``objective_not_partitioned``): the KB partitions
+by workload, not objective. Its provenance says ``outputs_checked: false``: that gate reads speed and the request error rate, so a
 change to what the model says is kept all the same. When the blackboard recorded the final commit's recipe
 digest, a recipe with another digest is skipped
 (``recipe_digest_mismatch``): CLOSE was handed some other commit's recipe. A recipe that names anything as unexpressed
@@ -86,10 +85,10 @@ class AgentXColumns:
 
 
 #: The columns of an AgentX record by the metric its session is graded on, named as the main flow names them. No name
-#: has a ``token`` word: the shared-knowledge sanitizer drops such a key as a secret.
+#: has a ``token`` word: the shared-knowledge sanitizer drops such a key as a secret. The KB files AgentX records by
+#: workload, not objective, and its champions are interactivity ones, so a session graded on another metric writes none.
 AGENTX_COLUMNS = {
     GRADED_INTVTY_P50: AgentXColumns("interactivity_gain_pct", "candidate_interactivity", "baseline_interactivity"),
-    TOTAL_TOKEN_THROUGHPUT: AgentXColumns("total_throughput_gain_pct", GRADED_TOTAL, "baseline_total_throughput"),
 }
 
 
@@ -98,8 +97,9 @@ class FinalRecipe:
     """The commit CLOSE publishes, its recipe, and where the patch and kernel files the recipe names are read from.
 
     ``metric`` is the recorded-value metric the session is graded on: output throughput for InferenceX, the
-    objective's metric for AgentX (a key of :data:`AGENTX_COLUMNS`). With ``blobs`` (the session's blob store) every file is read from it by its pinned sha256
-    and ``files_root`` is not read; without it the files are taken from the checkout at ``files_root``.
+    objective's metric for AgentX (only a key of :data:`AGENTX_COLUMNS` is published). With ``blobs`` (the session's
+    blob store) every file is read from it by its pinned sha256 and ``files_root`` is not read; without it the files
+    are taken from the checkout at ``files_root``.
     """
 
     commit_id: str
@@ -296,8 +296,10 @@ def publish_final_recipe(
     commit = snapshot.lineage.commit(final.commit_id)
     if commit is not None and commit.recipe_digest not in (None, final.recipe.digest()):
         return RemoteWriteResult(SKIPPED, "recipe_digest_mismatch", canonical_id, profile.session_id)
-    knowledge = knowledge_document(snapshot, profile, final, scope, rule_pack=rule_pack)
     agentx = scope.identity_scheme == AGENTX
+    if agentx and final.metric not in AGENTX_COLUMNS:
+        return RemoteWriteResult(SKIPPED, "objective_not_partitioned", canonical_id, profile.session_id)
+    knowledge = knowledge_document(snapshot, profile, final, scope, rule_pack=rule_pack)
     metric, objective = (
         (AGENTX_COLUMNS[final.metric].gain, AGENTX_OBJECTIVE_SCHEMA) if agentx else (KB_METRIC, OBJECTIVE_SCHEMA)
     )

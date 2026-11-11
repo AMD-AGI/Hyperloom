@@ -82,8 +82,8 @@ agent CLI the specialists run must be installed. `--measurement hosted` also nee
   suits a high `--conc` only: at a low one the trace's tool and think time paces the lanes, so a server gain barely
   moves it (the same stack on GLM-5.3 TP4/EP4 gained +1.8% total per GPU at conc 4 and +7–14% at conc 8–16). The
   bar and guards are read from the code, so a resumed session judges by the current rule. The manifest records the
-  objective, so a resumed session keeps it; the frontier, FINAL, the dashboard, `MB-report.md` and the Recipe KB record
-  (`total_throughput_gain_pct`) all read that metric.
+  objective, so a resumed session keeps it; the frontier, FINAL, the dashboard and `MB-report.md` all read that metric. A
+  `total_token_throughput` session writes no Recipe KB record: the KB partitions by workload, not objective.
 - **Base launch:** `--reference-script FILE`, a shell launch script or a base launch record frozen elsewhere, as for
   `hyperloom optimize`; the session freezes it as its base, a record without reading any recipe source. Without it
   the base comes from the recipe sources.
