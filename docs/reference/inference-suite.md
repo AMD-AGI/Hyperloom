@@ -212,7 +212,7 @@ python -m inference_suite.staging check --tool-cache <dir>
 
 | Command | Behavior |
 |---|---|
-| `run --config <config.yaml> --run-dir <dir>` | Runs one round into an absent or empty directory and prints the `report.json` path. SIGTERM and SIGINT cancel the round, which still reaps what it started and writes its report. |
+| `run --config <config.yaml> --run-dir <dir>` | Runs one round into an absent or empty directory and prints the `report.json` path. A relative path, on the command line or in the config, is read below the directory `run` starts in; a relative `model_path` only when it names something there, otherwise it is a hub id. SIGTERM and SIGINT cancel the round, which still reaps what it started and writes its report. |
 | `stop --pid-dir <dir>` | Reaps the server the directory's `server.pid` records and prints `{"reaped": [...], "survivors": [...]}`. |
 | `resolve --query <query.json> --gpus <n> --out <base_launch.json> [--user-file <file>] [--inferencex-commit <sha>]` | Reads the sources once and writes the base they give, printing its digest. With `--inferencex-commit`, InferenceX is read at that commit instead of the head of its `main`. |
 | `stage --tool-cache <dir> [--source <InferenceX repository>]` | Stages the pinned tools into the tool cache unless it holds them intact, fetching InferenceX at its pin without `--source`, and prints the manifest's sha256. |
