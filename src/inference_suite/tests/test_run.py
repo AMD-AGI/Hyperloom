@@ -13,6 +13,7 @@ import functools
 import hashlib
 import json
 import os
+import signal
 import socket
 import subprocess
 import sys
@@ -24,7 +25,7 @@ from pathlib import Path
 import pytest
 import yaml
 
-from hyperloom_common import gpu_telemetry
+from hyperloom_common import amd_smi, gpu_telemetry
 from hyperloom_common.gpu_telemetry import RecorderSources
 from hyperloom_common.power_sources import SysfsNode
 from hyperloom_common.tests.test_gpu_telemetry import _AmdSmi, _sysfs
@@ -69,6 +70,8 @@ from inference_suite.runtime.watch import Stop
 from inference_suite.staging import AGENTX_PYTHON, GSM8K_TASK, StagingReport
 from inference_suite.tests.test_base_launch_contract import _base
 from inference_suite.tests.test_config_contract import _AGENTX, _MLPERF, _SHA, _config, _eval
+
+_READ_AMD_SMI = amd_smi.read_amd_smi_json
 
 pytestmark = pytest.mark.skipif(not Path("/proc/net/tcp").exists(), reason="needs Linux procfs")
 
@@ -118,12 +121,19 @@ _CLIENT = textwrap.dedent(
     args, _ = parser.parse_known_args()
     with open(os.environ["FAKE_CLIENT_CALLS"], "a") as calls:
         calls.write(json.dumps({"seed": args.seed, "num_prompts": args.num_prompts}) + "\\n")
+    # Setup and teardown around the timed run, as the real client loads its tokenizer and writes its result.
+    time.sleep(0.4)
+    start, began = time.time(), time.perf_counter()
     for _ in range(6):
         print("request done", flush=True)
         time.sleep(0.2)
+    duration = time.perf_counter() - began + float(os.environ.get("FAKE_CLIENT_DURATION_SKEW", "0"))
+    end = time.time()
+    time.sleep(0.4)
     if args.save_result:
         result = {"output_throughput": 812.5, "completed": int(args.num_prompts), "num_prompts": int(args.num_prompts),
-                  "duration": 1.2, "benchmark_outcome": {"failed": 0}}
+                  "duration": duration, "benchmark_start_time_unix": start, "benchmark_end_time_unix": end,
+                  "benchmark_outcome": {"failed": 0}}
         with open(os.path.join(args.result_dir, args.result_filename), "w") as fh:
             json.dump(result, fh)
     """
@@ -262,6 +272,8 @@ class _Rig:
             _AmdSmi(cards=8), SysfsNode(_sysfs(tmp_path / "sys", cards=8, serving=tuple(range(8))))
         )
         monkeypatch.setattr(run, "PowerRecorder", functools.partial(gpu_telemetry.PowerRecorder, sources=sources))
+        self.rocm_order = list(range(8))
+        monkeypatch.setattr(amd_smi, "read_amd_smi_json", self._amd_smi_list)
         planned = EvalPlan.invocation
         monkeypatch.setattr(
             EvalPlan,
@@ -278,6 +290,10 @@ class _Rig:
             "await_free_gpus",
             lambda gpus, gate: None if self.busy_gpus is None else Stop(FailedStep.GPUS_UNAVAILABLE, self.busy_gpus),
         )
+
+    def _amd_smi_list(self, *args):
+        assert args == ("list",)
+        return [{"gpu": card, "node_id": node} for node, card in enumerate(self.rocm_order)]
 
     def _probe(self, python, framework, env, *, cwd):
         assert env["HF_TOKEN"] == _SECRET
@@ -342,6 +358,8 @@ def test_a_fixed_round_with_eval_reports_what_it_measured_and_leaves_its_run_dir
     assert SuiteConfig.from_document(yaml.safe_load(layout.config.read_text())) == config
     assert report.fixed is not None and report.fixed.values["output_throughput"] == 812.5
     assert report.codes.client == 0 and report.codes.eval == 0 and report.concurrency == _FIXED.concurrency
+    # The round reaps its own server with SIGTERM.
+    assert report.codes.server == -signal.SIGTERM
     assert [json.loads(line) for line in rig.calls.read_text().splitlines()] == [
         {"seed": "1", "num_prompts": "2"},
         {"seed": "0", "num_prompts": "8"},
@@ -389,9 +407,13 @@ def test_power_json_bounds_each_phase_by_its_mark_and_the_report_carries_its_ene
     assert [mark["phase"] for mark in document["phase_marks"]] == [
         "boot", "ready", "warmup", "measured", "finished", "eval", "finished", "teardown",
     ]  # fmt: skip
+    timed = json.loads(layout.inferencex_result.read_text())
     window = document["energy"]["window"]
-    assert window["start_unix"] == pytest.approx(marks[Phase.MEASURED.value], abs=0.002)
-    assert window["end_unix"] == pytest.approx(marks[Phase.FINISHED.value], abs=0.002)
+    assert window["start_unix"] == pytest.approx(timed["benchmark_start_time_unix"], abs=0.002)
+    assert window["end_unix"] == pytest.approx(timed["benchmark_end_time_unix"], abs=0.002)
+    # The client's setup and teardown are outside the window.
+    assert window["start_unix"] >= marks[Phase.MEASURED.value] + 0.4
+    assert window["end_unix"] <= marks[Phase.FINISHED.value] - 0.4
     assert {"boot", "warmup", "measured", "eval", "teardown"} <= set(document["phases"])
     assert document["scope"]["gpus_configured"] == list(range(8))
 
@@ -408,6 +430,37 @@ def test_power_json_bounds_each_phase_by_its_mark_and_the_report_carries_its_ene
     }
     blocks = result.report.gpu_monitor
     assert [block.gpu for block in blocks] == list(range(8))
+
+
+def test_a_fixed_client_whose_timed_run_disagrees_with_its_duration_invalidates_the_energy(rig, monkeypatch):
+    monkeypatch.setenv("FAKE_CLIENT_DURATION_SKEW", "2.0")
+    config = rig.config("r1")
+    inherit = (*config.server.env_inherit, "FAKE_CLIENT_DURATION_SKEW")
+    power = run.run_round(replace(config, server=replace(config.server, env_inherit=inherit))).report.power
+
+    assert power is not None and power.power_valid == 0 and "benchmark_duration_mismatch" in power.reasons
+
+
+def test_the_power_scope_is_the_amd_smi_card_behind_each_hip_gpu(rig):
+    # The MI355X order test_amd_smi records: HIP GPU 0 is amd-smi card 3.
+    rig.rocm_order = [3, 0, 2, 1, 7, 4, 6, 5]
+    config = rig.config("r1")
+    result = run.run_round(replace(config, server=replace(config.server, gpus=(0, 1))))
+
+    document = json.loads(result.layout.power.read_text())
+    assert document["scope"]["gpus_configured"] == [3, 0]
+    assert result.report.power is not None and result.report.power.energy_gpus == (3, 0)
+    assert [block.gpu for block in result.report.gpu_monitor] == [3, 0]
+
+
+def test_a_round_whose_card_order_cannot_be_read_measures_no_energy(rig, monkeypatch):
+    def failing(*args):
+        raise amd_smi.AmdSmiError("amd-smi list --json exited 1 and printed nothing")
+
+    monkeypatch.setattr(amd_smi, "read_amd_smi_json", failing)
+    power = run.run_round(rig.config("r1")).report.power
+
+    assert power is not None and power.power_valid == 0 and power.energy_gpus == ()
 
 
 def test_kv_samples_cover_the_ready_server_and_carry_their_phase(rig):
@@ -627,6 +680,20 @@ def test_an_mlperf_harness_that_is_not_there_is_refused_before_the_server_starts
     assert not result.layout.launch.exists() and not rig.calls.exists()
 
 
+def test_a_server_whose_death_excerpt_is_cut_on_whitespace_still_writes_its_report(rig):
+    # The excerpt keeps the log's last 1200 characters, and the cut lands on the space opening the last line.
+    (rig.tmp / "fake_server.py").write_text(
+        'print("a" * 100)\nprint("EngineCore failed to start")\nprint(" " + "c" * 1199)\nraise SystemExit(1)\n'
+    )
+
+    result = run.run_round(rig.config("r1"))
+
+    report = Report.from_document(json.loads(result.layout.report.read_text()))
+    assert report.failed_step is FailedStep.SERVER_EXITED_BEFORE_READY
+    assert report.failure_detail == "c" * 1199
+    assert report.codes.server == 1
+
+
 def test_a_round_whose_gpus_another_process_holds_is_refused_before_its_server_starts(rig):
     rig.busy_gpus = "GPU 3: held by pid 4242 (python3)"
 
@@ -645,6 +712,7 @@ def test_a_round_whose_amd_smi_fails_silently_records_the_refusal(rig, monkeypat
     (bin_dir / "amd-smi").chmod(0o755)
     monkeypatch.setenv("PATH", f"{bin_dir}:{os.environ['PATH']}")
     monkeypatch.setattr(runtime_server, "await_free_gpus", runtime_gpus.await_free_gpus)
+    monkeypatch.setattr(amd_smi, "read_amd_smi_json", _READ_AMD_SMI)
 
     report = run.run_round(rig.config("r1")).report
 

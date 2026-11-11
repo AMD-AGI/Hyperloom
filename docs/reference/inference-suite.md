@@ -20,7 +20,9 @@ holds a launch for the session's model, board, workload, concurrency, TP and EP
 gives the base:
 
 1. the operator's `--reference-script`: a shell launch script, or a
-   `base_launch.json` frozen by an earlier session;
+   `base_launch.json` frozen by an earlier session; a script's credential exports
+   (`HF_TOKEN`, `*_API_KEY`, ...) are recorded as their sha256 only, and a round
+   takes each value from its host, which must hold the value the script set;
 2. InferenceX's AMD single-node master entries;
 3. the framework's cookbook: the SGLang cookbook, the vLLM recipes site, or
    ATOM's catalog (fixed workloads only);
@@ -175,9 +177,9 @@ shared by several hosts as `<dir>/<staging key>` by rename. A round refuses with
 lists a file that is absent, changed or staged at another commit, or when an eval
 round finds no `lm_eval` installed in the Python that runs it.
 
-`install.sh` stages the cache at `INFERENCE_SUITE_TOOL_CACHE`, which defaults to
-`inference-suite-tools` under the dependency cache, and installs the pinned
-lm-eval into the Python rounds run under. `check` fails with `staging_missing`
+`install.sh <tool-cache-dir>` stages the cache at `<tool-cache-dir>` and
+pip-installs the pinned `lm_eval[api]` with its dependencies into the Python
+rounds run under (`PYTHON`, default `python3`). `check` fails with `staging_missing`
 when the cache does not verify or that Python lacks the pinned lm-eval; `stage`
 without `--source` fetches nothing and installs lm-eval beside a cache that
 verifies. To stage or check by hand:
@@ -258,7 +260,11 @@ share and the share of firmware ticks each throttle accumulator counted; the
 node's and the CPU's power where read. Each phase begins at the instant its mark
 carries, not when the recorder heard it.
 
-`energy` is the measured window's, computed as InferenceX does: each configured
+`energy` is the measured window's, computed as InferenceX does. A fixed round's
+window is the client's own timed run (`benchmark_start_time_unix` to
+`benchmark_end_time_unix` in its result), so its tokenizer load, prompt
+building and result writing fall outside it; an AgentX round's is aiperf's
+profiling phase. Each configured
 card's power is interpolated at the window's boundaries and integrated by
 trapezoid, giving `total_gpu_energy_j`, `avg/p75/p90_power_w` per card and
 `avg/p75/p90_total_gpu_power_w` (time-weighted quantiles of the summed curve),
@@ -270,10 +276,11 @@ figure is `null` and `reasons` says why:
 | Reason | Meaning |
 |---|---|
 | `invalid_benchmark_window` | The round never entered its measured phase. |
+| `benchmark_duration_mismatch` | The client's stamps and the duration it timed differ by more than 0.5 s or 1%. |
 | `benchmark_window_not_bracketed`, `insufficient_power_samples` | A card has no sample on one side of the window. |
 | `sampling_gap_exceeded` | A card's samples across the window, its boundaries included, are more than 3 s apart. |
 | `invalid_power_sample` | A card's power did not read inside the window. |
-| `expected_gpu_count_mismatch` | A configured card holds no model or was never read. Cards outside the configured ones are sampled but never counted, so another server on them does not invalidate the round. |
+| `expected_gpu_count_mismatch` | A configured card holds no model or was never read, or the round's GPUs could not be matched to amd-smi cards. Cards outside the configured ones are sampled but never counted, so another server on them does not invalidate the round. |
 | `external_server` | The load ran on a server this host does not run; nothing local is its energy. |
 | `aborted` | The round stopped on a failed step. |
 
@@ -287,7 +294,9 @@ the same span (`accumulator_check`); beyond 5% it is the warning
 `report.json` carries the summary in its `power` section: the energy figures,
 `per_gpu_avg_power_w`, `accumulator_relative_error`,
 `power_throttle_fraction_max`, `power_valid`, `reasons` and `warnings`.
-`gpu_monitor` is derived from the same samples.
+`gpu_monitor` is derived from the same samples. `power.json`, the `power` section
+and `gpu_monitor` number cards by amd-smi index, not by the round's
+`HIP_VISIBLE_DEVICES` numbers.
 
 ## report.json
 
@@ -308,7 +317,7 @@ A round that did not complete names one `failed_step`:
 | Server | `server_exited_before_ready`, `server_silent_before_ready`, `server_boot_timeout`, `server_stalled`, `server_died` |
 | Client | `client_failed`, `client_output_missing` |
 | Eval | `eval_failed` |
-| Any | `round_timeout`, `deadline_exhausted`, `cancelled`, `disk_full`, `teardown_incomplete` |
+| Any | `round_timeout`, `deadline_exhausted`, `cancelled`, `teardown_incomplete` |
 
 Every metric key is fixed: a metric nobody measured is `null`, never `0`. An eval
 records its definition digest, and two scores compare only under one definition.

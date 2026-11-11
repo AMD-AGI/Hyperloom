@@ -154,7 +154,7 @@ def test_own_round_tears_its_server_down_and_deletes_its_pidfile(tmp_path):
 
     released = lifecycle.release()
 
-    assert released == server.Released(None, None)
+    assert released == server.Released(None, None, -signal.SIGTERM)
     assert not layout.server_pid.exists()
     assert _gone(record.pid) and _gone(rig.worker_pid())
     assert _READY_LINE in layout.server_log.read_text()
@@ -273,7 +273,7 @@ def test_cancel_during_boot_reaps_the_whole_tree(tmp_path):
     assert stopped == Stop(FailedStep.CANCELLED, "operator stop")
     assert _gone(rig.worker_pid())
     assert not (tmp_path / "r1" / "server.pid").exists()
-    assert lifecycle.release() == server.Released(None, None)
+    assert lifecycle.release() == server.Released(None, None, -signal.SIGTERM)
 
 
 def test_a_server_that_exits_before_ready_names_why(tmp_path):

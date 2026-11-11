@@ -410,13 +410,11 @@ class Launch:
             raise LaunchError(f"launch schema {fields.get('schema')!r} is not {LAUNCH_SCHEMA}")
         client, eval_ = fields.get("client"), fields.get("eval")
         base = BaseLaunch.from_document(fields.get("base"))
-        # A round folder written before the entrypoint was recorded ran the base's; resumed sessions read those.
-        entrypoint = fields.get("entrypoint", list(base.entrypoint))
         launch = cls(
             base=base,
             config_sha256=fields.get("config_sha256"),
             golden_use=fields.get("golden_use"),
-            entrypoint=_FIELDS.strings(entrypoint, "the launch entrypoint"),
+            entrypoint=_FIELDS.strings(fields.get("entrypoint"), "the launch entrypoint"),
             args=tuple(LaunchArg.from_document(item) for item in _FIELDS.items(fields.get("args"), "the args")),
             env_sources=tuple(
                 LaunchEnv.from_document(item) for item in _FIELDS.items(fields.get("env_sources"), "the env sources")

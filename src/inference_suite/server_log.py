@@ -3,9 +3,8 @@
 
 """What a serving framework's ``server.log`` says: ready, dead, generating, and where a round's client phases begin.
 
-The marker tables here are the only copies; a reader that needs one imports it. :class:`LogCursor` follows the
-logs a round writes beside ``server.log`` incrementally, and :func:`death_excerpt` pulls the line that names why an
-engine died.
+:class:`LogCursor` follows the logs a round writes beside ``server.log`` incrementally, and :func:`death_excerpt` pulls
+the line that names why an engine died.
 """
 
 from __future__ import annotations
@@ -129,8 +128,8 @@ def death_excerpt(path: str, *, max_chars: int = 1200) -> str | None:
         max_chars: Cap on the returned excerpt.
 
     Returns:
-        The excerpt, or ``None`` when the file cannot be read or names no
-        terminal marker.
+        The excerpt, without surrounding whitespace, or ``None`` when the file
+        cannot be read or names no terminal marker.
     """
     before: deque[str] = deque(maxlen=_MARKER_CONTEXT_LINES)
     try:
@@ -143,8 +142,8 @@ def death_excerpt(path: str, *, max_chars: int = 1200) -> str | None:
                 # legacy extraction, whose cause sits above the marker.
                 if any(marker in line for marker in _DEAD_MARKERS):
                     after = _read_lines(fh, _MARKER_CONTEXT_LINES)
-                    excerpt = "\n".join([*before, line, *after]).strip()
-                    return excerpt[-max_chars:] or None
+                    excerpt = "\n".join([*before, line, *after])
+                    return excerpt.strip()[-max_chars:].strip() or None
                 if any(marker in line for marker in _FATAL_ENGINE_MARKERS):
                     return _cause_first_excerpt(
                         line.strip(), _read_lines(fh, _MARKER_WINDOW_LINES - 1), max_chars=max_chars
@@ -178,7 +177,7 @@ def _cause_first_excerpt(head: str, window: list[str], *, max_chars: int) -> str
     """
     room = max_chars - len(head) - 1
     if room <= 0:
-        return head[:max_chars] or None
+        return head[:max_chars].rstrip() or None
     causes: list[str] = []
     used = 0
     for line in window:
@@ -191,8 +190,8 @@ def _cause_first_excerpt(head: str, window: list[str], *, max_chars: int) -> str
         used += len(text) + 1
     if causes:
         return head + "\n" + "\n".join(causes)
-    rest = "\n".join(window).strip()
-    return f"{head}\n{rest[-room:]}" if rest else head[:max_chars] or None
+    rest = "\n".join(window).strip()[-room:].strip()
+    return f"{head}\n{rest}" if rest else head[:max_chars].rstrip() or None
 
 
 def _resolve_scan_logs(server_log_path: str) -> list[str]:

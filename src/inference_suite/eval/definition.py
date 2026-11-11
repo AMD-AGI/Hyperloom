@@ -17,6 +17,7 @@ import json
 from dataclasses import dataclass
 from pathlib import Path
 
+from hyperloom_common.jsonio import read_json
 from inference_suite.argv import argv_flag_occurrences, canonical_flag_name, last_alias_value
 from inference_suite.contracts.base_launch import DIGEST_PREFIX
 from inference_suite.contracts.config import SuiteConfig
@@ -91,18 +92,10 @@ def definition_digest(definition: EvalDefinition) -> str:
     return DIGEST_PREFIX + _sha256(_canonical(definition.to_document()).encode())
 
 
-def _read_json(path: Path) -> dict[str, object]:
-    try:
-        data = json.loads(path.read_text(encoding=_UTF8))
-    except (OSError, ValueError):
-        return {}
-    return data if isinstance(data, dict) else {}
-
-
 def _native_context(model_dir: Path | None) -> int | None:
     if model_dir is None:
         return None
-    config = _read_json(model_dir / "config.json")
+    config = read_json(model_dir / "config.json", {}, require_dict=True)
     text_config = config.get("text_config")
     for section in (config, text_config if isinstance(text_config, dict) else {}):
         for key in _NATIVE_CONTEXT_KEYS:
@@ -132,7 +125,7 @@ def chat_template_sha256(model_dir: Path | None) -> str | None:
         path = model_dir / name
         if path.is_file():
             return _sha256(path.read_bytes())
-    template = _read_json(model_dir / "tokenizer_config.json").get("chat_template")
+    template = read_json(model_dir / "tokenizer_config.json", {}, require_dict=True).get("chat_template")
     return None if template is None else _sha256(_canonical(template).encode())
 
 
