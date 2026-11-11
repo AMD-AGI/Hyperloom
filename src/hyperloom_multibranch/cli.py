@@ -62,7 +62,7 @@ PRELUDE reads warm-start leads from and CLOSE writes the final recipe back to is
 names must be set and a writable directory (no path is assumed: each deployment names its own shared folder); a
 session's runners read the inference_suite staging from ``HYPERLOOM_RUNNER_CACHE``, this host's directory of the runner
 cache, which a session measured in hosted sandboxes must set and one on this machine's cards takes as ``/runner-cache``
-when unset; the image the session runs on must be named by both
+when unset and publishes the staging into once the session directory exists; the image the session runs on must be named by both
 ``HYPERLOOM_ACTIVE_IMAGE_REF`` and ``HYPERLOOM_ACTIVE_IMAGE_DIGEST``; the application's inference_suite tool cache
 must hold a staging of the InferenceX client that verifies; the framework's package must be installed in the image;
 and the agent CLI the specialists run must be installed. A canonical measurement that cannot be taken fails the command
