@@ -161,7 +161,9 @@ A round fetches nothing. The InferenceX client, at the commit
 `src/inference_suite/pins.py` pins, and the AgentX harness, installed with
 `--no-deps` from `src/inference_suite/agentx-client.lock` into the relocatable
 CPython 3.12 build `pins.py` pins, are staged ahead of time into a tool cache with
-one `staging_manifest.json`. Staging patches the harness's aiperf so a reply it found no content in exports the
+one `staging_manifest.json`. InferenceX's files are read from the pinned commit's tree (`git archive`),
+never from a checkout's working tree: a `--source` checkout's local edits, untracked files and later commits are
+not staged, and a checkout that lacks the pinned commit is refused. Staging patches the harness's aiperf so a reply it found no content in exports the
 server's output token count as `error_osl`; a harness the patch does not apply to fails the staging, and a cache
 staged before the patch is staged again. Two hosts compare stagings by their normalised
 manifest: each installed package's name, version and wheel sha256, the
@@ -184,7 +186,7 @@ without `--source` fetches nothing and installs lm-eval beside a cache that
 verifies. To stage or check by hand:
 
 ```bash
-python -m inference_suite.staging stage --source <InferenceX checkout> --tool-cache <dir>
+python -m inference_suite.staging stage --source <InferenceX repository> --tool-cache <dir>
 python -m inference_suite.staging stage --tool-cache <dir>
 python -m inference_suite.staging check --tool-cache <dir>
 ```
@@ -198,8 +200,8 @@ python -m inference_suite.staging check --tool-cache <dir>
 | `run --config <config.yaml> --run-dir <dir>` | Runs one round into an absent or empty directory and prints the `report.json` path. SIGTERM and SIGINT cancel the round, which still reaps what it started and writes its report. |
 | `stop --pid-dir <dir>` | Reaps the server the directory's `server.pid` records and prints `{"reaped": [...], "survivors": [...]}`. |
 | `resolve --query <query.json> --gpus <n> --out <base_launch.json> [--user-file <file>] [--inferencex-commit <sha>]` | Reads the sources once and writes the base they give, printing its digest. With `--inferencex-commit`, InferenceX is read at that commit instead of the head of its `main`. |
-| `stage --tool-cache <dir> [--source <InferenceX checkout>]` | Stages the pinned tools into the tool cache unless it holds them intact, fetching InferenceX at its pin without `--source`, and prints the manifest's sha256. |
-| `publish --stagings <dir> [--source <InferenceX checkout>]` | Publishes the staging of the pins in force as `<dir>/<staging key>`, staging it there when absent, and prints its path. |
+| `stage --tool-cache <dir> [--source <InferenceX repository>]` | Stages the pinned tools into the tool cache unless it holds them intact, fetching InferenceX at its pin without `--source`, and prints the manifest's sha256. |
+| `publish --stagings <dir> [--source <InferenceX repository>]` | Publishes the staging of the pins in force as `<dir>/<staging key>`, staging it there when absent, and prints its path. |
 
 Exit codes: `0` when the round completed (or nothing survived `stop`, a base was
 written, or a staging is in place); `1` when the round did not complete, or a
