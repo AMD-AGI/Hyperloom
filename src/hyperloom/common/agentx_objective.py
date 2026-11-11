@@ -2,7 +2,7 @@
 # SPDX-License-Identifier: MIT
 
 """The AgentX keep rule's facts: the objectives a session is graded on, the bar each must clear and the guards it
-may not pay for that gain with."""
+may not pay for that gain with. Single-lineage and multibranch grading both read them from here."""
 
 from __future__ import annotations
 
