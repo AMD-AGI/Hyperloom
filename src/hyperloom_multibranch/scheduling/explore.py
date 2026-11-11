@@ -8,7 +8,8 @@ commit the window names -- the root, or the Recipe KB champion PRELUDE replayed 
 batch; the opening judge call sizes that batch into the slots those branches leave. Gains are still measured from the
 root, which the window names apart.
 
-The loop wakes every :data:`EXPLORE_TICK_SECONDS`: it hands the toolbox the quota again, which takes a stopped branch
+The loop wakes every :data:`EXPLORE_TICK_SECONDS`: it ends EXPLORE sooner when the window's ``final_cap`` now says so,
+hands the toolbox the quota again, which takes a stopped branch
 out once the tests it was left to finish have ended, stops the repair branches that used up their time and the branches
 whose specialist gave up, once no candidate of theirs waits for its confirm, moves the forks and repairs queued on the
 fork desk onto the free slots, has the rule gate land each admitted fork and starts the admitted forks and repairs, and
@@ -142,7 +143,7 @@ class ExploreWindow:
     the Arbor agents whose directions one mapping branch maps in EXPLORE before each runs its share (empty for none).
 
     ``root_commit`` is the session's measurement anchor and nothing moves it. ``start_commit`` is where EXPLORE opens:
-    the root, or the Recipe KB champion PRELUDE replayed onto it. ``final_cap`` says, asked once a judge interval, the
+    the root, or the Recipe KB champion PRELUDE replayed onto it. ``final_cap`` says, asked every tick, the
     latest EXPLORE may now end at for FINAL to end inside a limit of the session's caller, which comes sooner as the
     validation FINAL would run grows; ``explore_end`` moves to it when it is sooner.
     """
@@ -283,12 +284,11 @@ class Explorer:
                 await self._branches.open_map_branch(window.map_for, window.start_commit, window.explore_end)
 
     async def _steer(self, window: ExploreWindow, merging: asyncio.Future[None]) -> SessionStopReason:
-        next_judge = next_cap = self._clock.now() + self._interval
+        next_judge = self._clock.now() + self._interval
         while (now := self._clock.now()) < window.explore_end:
-            if now >= next_cap:
-                next_cap, window = now + self._interval, await self._capped(window)
-                if now >= window.explore_end:
-                    break
+            window = await self._capped(window)
+            if now >= window.explore_end:
+                break
             if merging.done():
                 merging.result()
             if (spent := await self._budget_spent(window)) is not None:
