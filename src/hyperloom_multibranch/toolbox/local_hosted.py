@@ -77,6 +77,7 @@ from hyperloom_multibranch.toolbox.attempts import DEFAULT_MAX_INFRA_RETRIES, IN
 from hyperloom_multibranch.toolbox.branch_leases import BranchLeases, CardDrain
 from hyperloom_multibranch.toolbox.build_preflight import changeable_by_others
 from hyperloom_multibranch.toolbox.hosted_executor import DEFAULT_TEST_TIMEOUT_SEC, HostedExecutor
+from hyperloom_multibranch.toolbox.merge_smoke import merge_smoke_from
 from hyperloom_multibranch.toolbox.leased_toolbox import (
     LeasedToolbox,
     capped_policy,
@@ -523,6 +524,7 @@ def build_local_toolbox(
         magpie_python=options.python,
         workload_kind=acceptance.workload_kind,
     )
+    executor.smoke = merge_smoke_from(os.environ)
     toolbox = LocalHostedToolbox(
         session_stores(blackboard, directory, session.run_id, native.driver if native else None),
         executor,

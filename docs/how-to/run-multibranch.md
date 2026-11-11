@@ -37,6 +37,12 @@ session directory left behind. Only the image check itself runs later, in the ne
 agent CLI the specialists run must be installed. `--measurement hosted` also needs the grant variables its help lists
 (see [Hosted run inputs](../reference/environment-variables.md#hosted-run-inputs)).
 
+Before a test that carries patches is given a sandbox or cards, its toolbox byte-compiles every Python file the patch
+stack changes and imports each patched component on CPU (the merge smoke): a file that does not compile or a module
+that does not import fails the test as the candidate's (`merge_smoke`), and a smoke that cannot run is an infrastructure
+failure (`smoke_not_run`), retried once. `HYPERLOOM_MERGE_SMOKE=off` in the session's environment turns it off; any
+value but `on`, `off` or empty is refused when the toolbox is built.
+
 ## Options of `run`
 
 `hyperloom-multibranch run --help` has the full text of each option.
