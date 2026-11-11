@@ -10,6 +10,7 @@ from inference_suite.contracts.base_launch import (
     BaseLaunch,
     BaseLaunchError,
     ClientLaunch,
+    CredentialNotHeld,
     GoldenAcceptance,
     GoldenCurve,
     ImageFacts,
@@ -27,6 +28,7 @@ from inference_suite.contracts.base_launch import (
     UpstreamSource,
     VersionBasis,
     Workload,
+    held_env,
 )
 from inference_suite.contracts.config import (
     AGENTX_CLIENT_ENV_PREFIX,
@@ -116,6 +118,7 @@ __all__ = [
     "BaseRef",
     "ClientLaunch",
     "ConfigError",
+    "CredentialNotHeld",
     "Deadlines",
     "EvalConfig",
     "EvalDefinition",
@@ -177,5 +180,6 @@ __all__ = [
     "Workload",
     "WorkloadKind",
     "format_ready_stamp",
+    "held_env",
     "parse_ready_stamp",
 ]
