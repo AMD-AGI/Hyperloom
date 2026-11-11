@@ -30,6 +30,7 @@ from pathlib import Path, PurePosixPath
 from typing import TYPE_CHECKING, Protocol
 
 from hyperloom.measure.compile import COMPONENT_LAYOUTS
+from hyperloom.orchestrator.actions.executors import staged_tool_cache
 from hyperloom.sandbox import Sandbox, SandboxGone
 from hyperloom_multibranch.contracts.repo import ExperimentRepo
 from hyperloom_multibranch.contracts.blackboard.vocab import LeaseKind
@@ -97,9 +98,10 @@ class AgentSandboxes(Protocol):
 class LocalAgentSandboxes:
     """Sandboxes on this host, every process joining ``processes``. Where bubblewrap can sandbox an agent here (asked
     once, at the first sandbox, of ``choose``), each runs in one with the lease's root, the branch's agent directory
-    and worktree writable and a home of its own in the branch's directory, where its Claude CLI keeps its transcripts,
-    the same place a hosted sandbox's are. Else each runs as before, with the image's installed frameworks protected
-    (``frameworks``, default :func:`~hyperloom_multibranch.specialist.agent_sandbox.framework_protection`).
+    and worktree writable, the staged tools its gate client runs read-only, and a home of its own in the branch's
+    directory, where its Claude CLI keeps its transcripts, the same place a hosted sandbox's are. Else each runs as
+    before, with the image's installed frameworks protected (``frameworks``, default
+    :func:`~hyperloom_multibranch.specialist.agent_sandbox.framework_protection`).
 
     Raises:
         IsolationRefused: In a hosted run, where bubblewrap cannot sandbox an agent.
@@ -123,7 +125,7 @@ class LocalAgentSandboxes:
             )
         paths = SandboxPaths(
             writable=(place.workspace, place.worktree.path),
-            readable=place.worktree.linked,
+            readable=(*place.worktree.linked, staged_tool_cache()),
             home=place.workspace / SANDBOX_DIR / HOME_DIR,
         )
         return LocalAgentSandbox(

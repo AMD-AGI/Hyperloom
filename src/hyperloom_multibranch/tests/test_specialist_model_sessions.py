@@ -2,6 +2,7 @@
 # SPDX-License-Identifier: MIT
 
 import asyncio
+import os
 import shlex
 import tempfile
 from dataclasses import replace
@@ -12,7 +13,7 @@ import pytest
 
 from hyperloom.common.agent_isolation import BwrapIsolation
 from hyperloom.measure.compile import PackageBase
-from hyperloom_common.bwrap import BwrapProbe
+from hyperloom_common.bwrap import BwrapProbe, Scratch
 from hyperloom.sandbox import SandboxGone
 from hyperloom_multibranch.contracts.toolbox import BranchLease
 from hyperloom_multibranch.specialist import agent_sessions
@@ -288,8 +289,9 @@ def test_a_hosted_agent_runs_in_its_lease_s_sandbox_found_again_by_the_lease_alo
 
 
 def test_where_bubblewrap_sandboxes_an_agent_its_sandbox_writes_its_branch_s_trees_and_keeps_its_own_claude_dir(
-    tmp_path: Path,
+    tmp_path: Path, monkeypatch
 ) -> None:
+    monkeypatch.setenv("INFERENCE_SUITE_TOOL_CACHE", str(tmp_path / "tools"))
     asked: list[object] = []
     isolation = BwrapIsolation(BwrapProbe("/usr/bin/bwrap", (0, 13, 1), ()))
 
@@ -309,10 +311,30 @@ def test_where_bubblewrap_sandboxes_an_agent_its_sandbox_writes_its_branch_s_tre
         home = place.workspace / "sandbox" / "home"
         assert sandbox.isolation is isolation and sandbox.paths.home == home
         assert sandbox.paths.writable == (place.workspace, worktree.path)
-        assert sandbox.paths.readable == worktree.linked
+        assert sandbox.paths.readable == (*worktree.linked, tmp_path / "tools")
         assert sandboxes.claude_config(place) == home / ".claude" == Path(sandbox.env({})["CLAUDE_CONFIG_DIR"])
     finally:
         asyncio.run(sandbox.stop())
     assert len(asked) == 1, "the session asks once how its sandboxes run"
     unconfined = LocalAgentSandboxes(object(), choose=lambda: UNCONFINED)
     assert unconfined.claude_config(place) != home / ".claude"
+
+
+def test_a_bubblewrapped_agent_reads_the_staged_tools_its_gate_client_runs(tmp_path: Path, monkeypatch) -> None:
+    tools = tmp_path / "inference-suite-tools"
+    tools.mkdir()
+    monkeypatch.setenv("INFERENCE_SUITE_TOOL_CACHE", str(tools))
+    isolation = BwrapIsolation(BwrapProbe("/usr/bin/bwrap", (0, 13, 1), ()))
+    worktree = SimpleNamespace(path=tmp_path / "worktree", linked=())
+    worktree.path.mkdir()
+    place = BranchPlace(worktree, object(), tmp_path / "branch" / "session")
+    lease = BranchLease("lease-1", "a1", (6,), tmp_path / "lease-1", {}, 1)
+
+    sandbox = LocalAgentSandboxes(object(), choose=lambda: isolation).sandbox("a1", place, worktree.path, lease)
+    try:
+        policy = sandbox._policy(
+            dict(os.environ), sandbox.paths.home, Scratch(str(tmp_path / "tmp"), str(tmp_path / "shm"))
+        )
+        assert str(tools) in policy.read_only and str(tools) not in policy.writable
+    finally:
+        asyncio.run(sandbox.stop())
