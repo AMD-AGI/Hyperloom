@@ -27,6 +27,7 @@ from hyperloom.common.outside_facts import (
     HUB_RATE_LIMITED,
     PY_IMPORT_ERROR,
     PY_MODULE_NOT_FOUND_ERROR,
+    TORCH_MEMORY_SNAPSHOT_FRAME,
 )
 
 #: A cause line longer than this is cut, so a reason stays one readable line.
@@ -93,6 +94,8 @@ _HSA_STATUS_TOKEN = re.compile(HSA_STATUS_ERROR + r"[A-Z_]*")
 #: ``SomeError: message`` after an optional log prefix, or a bare ``SomeError`` on a line of its own.
 _EXCEPTION_WITH_MESSAGE = re.compile(r"(?<![\w.])((?:[A-Za-z_]\w*\.)*(?:[A-Z]\w*)?(?:Error|Exception)):\s*\S")
 _EXCEPTION_ALONE = re.compile(r"^\s*(?:[A-Za-z_]\w*\.)*(?:[A-Z]\w*)?(?:Error|Exception)\s*$")
+#: A frame of the allocator's memory-snapshot dump SGLang's CUDA-graph profile runs after the capture.
+_SNAPSHOT_FRAME = re.compile(TORCH_MEMORY_SNAPSHOT_FRAME)
 
 
 def one_line(text: str) -> str:
@@ -138,6 +141,24 @@ def import_error(text: str) -> str | None:
 def python_exception(text: str) -> str | None:
     """The last ``SomeError: message`` line of a traceback or of a logged exception."""
     return _last_matching(text, lambda line: bool(_EXCEPTION_WITH_MESSAGE.search(line) or _EXCEPTION_ALONE.match(line)))
+
+
+def profiler_snapshot_failure(text: str) -> str | None:
+    """The exception a traceback through the profiler's memory-snapshot dump ended on: the first unindented line after a
+    frame of the dump, when that line is an exception (``RuntimeError: stoi``); ``None`` when no such traceback is in
+    ``text``. Lines of another process written into the traceback leave it unread rather than misread."""
+    lines = text.splitlines()
+    found = None
+    for index, line in enumerate(lines):
+        if not _SNAPSHOT_FRAME.search(line):
+            continue
+        for after in lines[index + 1 :]:
+            if not after.strip() or after[:1].isspace():
+                continue
+            if _EXCEPTION_WITH_MESSAGE.search(after) or _EXCEPTION_ALONE.match(after):
+                found = one_line(after)
+            break
+    return found
 
 
 def git_fetch_timeout(text: str) -> str | None:
