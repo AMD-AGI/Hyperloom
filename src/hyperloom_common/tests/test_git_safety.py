@@ -692,6 +692,11 @@ def test_a_link_at_the_git_directory_s_own_name_is_not_a_shared_repository(tmp_p
     assert raised.value.errno == errno.ENOTDIR  # O_NOFOLLOW with O_DIRECTORY on a link
 
 
+def _blob_directory(data: bytes) -> str:
+    """The object directory git stores a blob of ``data`` in."""
+    return hashlib.sha1(b"blob %d\0" % len(data) + data, usedforsecurity=False).hexdigest()[:2]
+
+
 @pytest.mark.parametrize(("common_mode", "shared"), [(0o2775, True), (0o2755, False), (0o755, False)], ids=oct)
 def test_git_writes_what_the_group_can_write_only_in_a_repository_on_shared_storage(tmp_path, common_mode, shared):
     """In a repository whose git directory is set up to be shared (setgid, group-writable, closed to others) the next
@@ -705,13 +710,18 @@ def test_git_writes_what_the_group_can_write_only_in_a_repository_on_shared_stor
     common.chmod(common_mode)
     if common_mode & stat.S_ISGID and not common.stat().st_mode & stat.S_ISGID:
         pytest.skip("this filesystem does not keep the setgid bit for the test user")
-    (tree.worktree / "new.py").write_text("new = 1\n", encoding="utf-8")
-    before = {path for path in (common / "objects").iterdir() if path.is_dir()}
+    before = {path.name for path in (common / "objects").iterdir() if path.is_dir()}
+    # A blob whose object directory git has not made yet (the base commit's objects vary with its timestamp).
+    content = next(
+        data for data in (f"new = {n}\n".encode() for n in range(1000)) if _blob_directory(data) not in before
+    )
+    (tree.worktree / "new.py").write_bytes(content)
 
     done = app_git(tree.worktree, "add", "-A", admin=git_safety.trusted_admin_dir(tree.worktree, common))
 
     assert done.returncode == 0, done.stderr
-    made = [path for path in (common / "objects").iterdir() if path.is_dir() and path not in before]
+    made = [path for path in (common / "objects").iterdir() if path.is_dir() and path.name not in before]
+    assert common / "objects" / _blob_directory(content) in made
     index = common / "worktrees" / tree.worktree.name / "index"
     expected = (0o775, 0o664) if shared else (0o777 & ~umask, 0o666 & ~umask)
     assert made and {stat.S_IMODE(path.stat().st_mode) for path in made} == {expected[0]}
