@@ -5,6 +5,7 @@ import asyncio
 import json
 import math
 import os
+import stat
 import sys
 import time
 from dataclasses import dataclass, replace
@@ -228,6 +229,20 @@ async def test_a_session_that_ends_as_it_should_is_followed_by_a_fresh_one(rig):
     assert (rig.runner.cancelled, rig.runner.collected) == ([3], [1, 2, 3])
     assert (rig.tokens.issued, rig.tokens.revoked) == ([BRANCH], [BRANCH])
     assert rig.worktree.head() == rig.root
+
+
+async def test_a_launch_shows_the_files_its_worktree_links_and_the_worktree_s_git(rig):
+    session = rig.session()
+    running = asyncio.create_task(session.run())
+    await _until(lambda: len(rig.runner.specs) == 1, "the launch")
+    await session.stop()
+    rig.runner.end(1, EXITED_WELL, 1.0)
+    await asyncio.wait_for(running, 1)
+
+    spec = rig.runner.specs[0]
+    assert spec.readable == rig.worktree.linked
+    assert spec.git_admin is not None and spec.git_admin == rig.worktree.admin
+    assert (spec.git_admin / "gitdir").read_text().strip() == str(rig.worktree.path / ".git")
 
 
 def _end_turn(rig, *rows) -> None:
@@ -1440,3 +1455,15 @@ async def test_a_run_that_ends_keeps_a_long_dev_lease_whose_process_runs_and_its
 
     await session.release()
     assert dev.toolbox.released == ["lease-1"] and not dev.forge.alive(), "the branch's stop ends it"
+
+
+async def test_the_workspace_a_session_makes_is_the_group_s_for_the_dev_sandboxes_and_the_next_leg(rig):
+    rig.workspace.parent.chmod(0o2775)  # the session directory, set up to be shared
+    session = rig.session()
+    running = asyncio.create_task(session.run())
+
+    await _until(lambda: len(rig.runner.specs) == 1, "the first launch")
+    await session.stop()
+    await asyncio.wait_for(running, 1)
+
+    assert stat.S_IMODE(rig.workspace.stat().st_mode) == 0o2775
