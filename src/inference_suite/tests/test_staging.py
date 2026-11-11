@@ -305,12 +305,34 @@ def test_a_cache_staged_at_another_commit_than_the_pin_is_staging_missing(staged
     assert report.missing == (f"{INFERENCEX_TOOL} at its pin {'b' * 40} (staged at {commit})",)
 
 
-def test_staging_refuses_a_checkout_off_the_pin(tmp_path: Path, install) -> None:
-    repo, commit = _checkout(tmp_path)
+def test_staging_refuses_a_checkout_without_the_pinned_commit(tmp_path: Path, install) -> None:
+    repo, _ = _checkout(tmp_path)
 
-    with pytest.raises(StagingError, match=f"checked out at '{commit}'.*pinned at {INFERENCEX_CLIENT_COMMIT}"):
+    with pytest.raises(StagingError, match=f"has no commit {INFERENCEX_CLIENT_COMMIT}"):
         stage(repo, tmp_path / "tools")
     assert not (tmp_path / "tools" / MANIFEST_FILE).exists()
+
+
+def test_staging_stages_the_pinned_commit_not_the_checkouts_edits_untracked_files_or_later_commits(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, install
+) -> None:
+    repo, commit = _checkout(tmp_path)
+    monkeypatch.setattr(staging, "PINNED_TOOLS", {INFERENCEX_TOOL: commit})
+    project = repo / INFERENCEX_PROJECT_DIR
+    (project / GSM8K_TASK).write_text("task: committed later\n")
+    _git(repo, "commit", "-qam", "later")
+    (project / _CLIENT).write_text("print('edited')\n")
+    (project / "infx/bench_serving/untracked.py").write_text("print('untracked')\n")
+    cache = tmp_path / "tools"
+    cache.mkdir()
+
+    digest = stage(repo, cache)
+
+    root = inferencex_root(cache)
+    assert (root / _CLIENT).read_text() == _CLIENT_TEXT
+    assert (root / GSM8K_TASK).read_text() == "task: gsm8k\n"
+    assert not (root / "infx/bench_serving/untracked.py").exists()
+    assert verify(cache, digest).failed_step is None
 
 
 def test_staging_refuses_a_checkout_without_the_client(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -328,7 +350,7 @@ def test_staging_refuses_a_checkout_whose_client_package_lacks_the_client_module
     repo, commit = _checkout(tmp_path, without=_CLIENT)
     monkeypatch.setattr(staging, "PINNED_TOOLS", {INFERENCEX_TOOL: commit})
 
-    with pytest.raises(StagingError, match=f"has no {re.escape(_CLIENT)}$"):
+    with pytest.raises(StagingError, match=f"has no {re.escape(_CLIENT)} at {commit}$"):
         stage(repo, tmp_path / "tools")
     assert not (tmp_path / "tools").exists()
 

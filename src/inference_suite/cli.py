@@ -11,9 +11,9 @@ outlives SIGKILL. ``resolve --query <query.json> --gpus <n> --out <base_launch.j
 reads the sources once, InferenceX at ``<sha>`` instead of the head of its ``main`` when given, and writes the base
 they give, or exits 2 naming why each source holds none, or why ``<sha>`` is refused: InferenceX has no such commit, or
 it lacks code the resolver runs. ``stage --tool-cache <dir> [--source
-<InferenceX checkout>]`` stages the pinned tools (:func:`inference_suite.staging.ensure_staged`) and prints the
+<InferenceX repository>]`` stages the pinned tools (:func:`inference_suite.staging.ensure_staged`) and prints the
 manifest's sha256; it stages nothing into a cache that already verifies, and exits 2 with ``staging_missing`` when it
-cannot stage or the cache is damaged. ``publish --stagings <dir> [--source <InferenceX checkout>]`` publishes the
+cannot stage or the cache is damaged. ``publish --stagings <dir> [--source <InferenceX repository>]`` publishes the
 staging of the pins in force as ``<dir>/<key>`` (:func:`inference_suite.staging.publish`) and prints that directory,
 or exits 2 with ``staging_missing``. Exit 2 is also a document that breaks its contract.
 """
@@ -171,7 +171,7 @@ def _parser() -> argparse.ArgumentParser:
     stage_parser = commands.add_parser("stage", help="stage the pinned tools into a tool cache unless it holds them")
     stage_parser.add_argument("--tool-cache", type=Path, required=True, help="the tool cache rounds verify")
     stage_parser.add_argument(
-        "--source", type=Path, help="an InferenceX checkout at the pin; fetched at the pin when omitted"
+        "--source", type=Path, help="an InferenceX repository holding the pinned commit; fetched when omitted"
     )
     stage_parser.set_defaults(handler=_stage)
     publish_parser = commands.add_parser(
@@ -179,7 +179,7 @@ def _parser() -> argparse.ArgumentParser:
     )
     publish_parser.add_argument("--stagings", type=Path, required=True, help="the directory published stagings live in")
     publish_parser.add_argument(
-        "--source", type=Path, help="an InferenceX checkout at the pin; fetched at the pin when omitted"
+        "--source", type=Path, help="an InferenceX repository holding the pinned commit; fetched when omitted"
     )
     publish_parser.set_defaults(handler=_publish)
     return parser

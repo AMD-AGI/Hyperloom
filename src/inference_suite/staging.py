@@ -16,7 +16,7 @@ the two aiperf files staging patches so the harness exports ``error_osl``.
 The file manifest names bytes, some of which hold the directory the staging was built in; what two hosts compare is
 :func:`normalised_manifest`, the staging's identity with every path left out, and the lm-eval this interpreter runs.
 
-``python -m inference_suite.staging stage --source <InferenceX checkout> --tool-cache <dir>`` stages; without
+``python -m inference_suite.staging stage --source <InferenceX repository> --tool-cache <dir>`` stages; without
 ``--source`` it stages nothing and only completes a cache that already verifies. Either installs the pinned lm-eval
 into the interpreter running it, from the sealed runner's hash lock (:func:`runner_lock`). ``check --tool-cache <dir>``
 reports whether a round could identify the staging: the cache holds the current pins intact and the interpreter running
@@ -37,6 +37,7 @@ import argparse
 import errno
 import hashlib
 import importlib.metadata
+import io
 import itertools
 import json
 import os
@@ -44,6 +45,7 @@ import re
 import shutil
 import subprocess
 import sys
+import tarfile
 import tempfile
 import uuid
 from collections.abc import Iterator, Mapping, Sequence
@@ -71,7 +73,7 @@ from inference_suite.pins import (
 
 STAGING_SCHEMA = "inference-suite-staging/1"
 MANIFEST_FILE = "staging_manifest.json"
-#: The project directory of an InferenceX checkout that holds the ``infx`` package.
+#: The project directory of an InferenceX tree that holds the ``infx`` package.
 INFERENCEX_PROJECT_DIR = "inferencex-e2e"
 #: The GSM8K task file the eval scores, under the staged InferenceX root.
 GSM8K_TASK = "infx/evals/gsm8k.yaml"
@@ -115,7 +117,6 @@ _RUNNER_LOCK = "requirements/runner.lock"
 _VERSION_LOCK = "requirements/runner-cp{digits}.lock"
 _COMMIT = re.compile(r"[0-9a-f]{40}")
 _GIT = "git"
-_SKIPPED_DIRS = frozenset({"__pycache__"})
 _SCHEMA_KEY = "schema"
 _TOOLS_KEY = "tools"
 
@@ -295,26 +296,33 @@ def verify(tool_cache: Path, manifest_sha256: str) -> StagingReport:
     )
 
 
-def _checkout_commit(source: Path) -> str:
-    done = subprocess.run([_GIT, "-C", str(source), "rev-parse", "HEAD"], capture_output=True, text=True, check=False)
+def _git_output(source: Path, *args: str) -> bytes:
+    done = subprocess.run([_GIT, "-C", str(source), *args], capture_output=True, check=False)
     if done.returncode != 0:
-        raise StagingError(f"{source} is not a git checkout: {done.stderr.strip()}")
-    return done.stdout.strip()
+        raise StagingError(f"git {args[0]} in {source} failed: {done.stderr.decode(errors='replace').strip()}")
+    return done.stdout
 
 
-def _subset_files(project: Path) -> Iterator[Path]:
+def _extract_pinned_subset(source: Path, pin: str, partial: Path) -> None:
+    """Write InferenceX's subset as the commit ``pin`` in the repository ``source`` holds it into ``partial``; a
+    checkout's working tree never reaches the staging."""
+    found = subprocess.run(
+        [_GIT, "-C", str(source), "rev-parse", "--verify", "--quiet", f"{pin}^{{commit}}"],
+        capture_output=True,
+        check=False,
+    )
+    if found.returncode != 0:
+        raise StagingError(f"{source} has no commit {pin}; {INFERENCEX_TOOL} is pinned at {pin}")
+    tree = f"{pin}:{INFERENCEX_PROJECT_DIR}"
     wanted = (*INFERENCEX_SUBSET, CLIENT_FILE, AGENTX_AGGREGATOR_FILE)
-    absent = [entry for entry in wanted if not (project / entry).exists()]
+    listed = _git_output(source, "ls-tree", "-r", "--name-only", "-z", tree, "--", *INFERENCEX_SUBSET)
+    paths = [path for path in listed.decode().split("\0") if path]
+    absent = [entry for entry in wanted if not any(path == entry or path.startswith(f"{entry}/") for path in paths)]
     if absent:
-        raise StagingError(f"{project} has no {', '.join(absent)}")
-    for entry in INFERENCEX_SUBSET:
-        path = project / entry
-        if path.is_file():
-            yield path
-            continue
-        for item in sorted(path.rglob("*")):
-            if item.is_file() and not _SKIPPED_DIRS.intersection(item.relative_to(project).parts):
-                yield item
+        raise StagingError(f"{source / INFERENCEX_PROJECT_DIR} has no {', '.join(absent)} at {pin}")
+    archive = _git_output(source, "archive", "--format=tar", tree, "--", *INFERENCEX_SUBSET)
+    with tarfile.open(fileobj=io.BytesIO(archive)) as members:
+        members.extractall(partial, filter="data")
 
 
 def _run_staging_step(argv: Sequence[str], what: str) -> None:
@@ -324,28 +332,23 @@ def _run_staging_step(argv: Sequence[str], what: str) -> None:
 
 
 def stage(source: Path, tool_cache: Path) -> str:
-    """Copy InferenceX's subset from the checkout ``source`` into ``tool_cache`` and build the AgentX client
-    environment beside it from the pinned build and lock, both downloaded; returns the manifest's sha256.
+    """Copy InferenceX's subset as committed at its pin in the repository ``source`` into ``tool_cache`` and build the
+    AgentX client environment beside it from the pinned build and lock, both downloaded; returns the manifest's sha256.
 
     Raises:
-        StagingError: ``source`` is not a checkout at the pinned commit, lacks part of the subset, or the client
-            environment cannot be fetched or installed.
+        StagingError: ``source`` is not a repository holding the pinned commit, the commit lacks part of the subset, or
+            the client environment cannot be fetched or installed.
     """
     pin = PINNED_TOOLS[INFERENCEX_TOOL]
-    commit = _checkout_commit(source)
-    if commit != pin:
-        raise StagingError(f"{source} is checked out at {commit!r}; {INFERENCEX_TOOL} is pinned at {pin}")
-    project = source / INFERENCEX_PROJECT_DIR
     root = tool_root(tool_cache, INFERENCEX_TOOL, pin)
     partial = root.with_name(f".{pin}.{os.getpid()}")
     shutil.rmtree(partial, ignore_errors=True)
-    files: dict[str, str] = {}
-    for path in _subset_files(project):
-        relative = path.relative_to(project)
-        target = partial / relative
-        target.parent.mkdir(parents=True, exist_ok=True)
-        shutil.copy2(path, target)
-        files[relative.as_posix()] = _sha256(target.read_bytes())
+    _extract_pinned_subset(source, pin, partial)
+    files = {
+        path.relative_to(partial).as_posix(): _sha256(path.read_bytes())
+        for path in sorted(partial.rglob("*"))
+        if path.is_file()
+    }
     try:
         with tempfile.TemporaryDirectory(dir=tool_cache, prefix=".inputs-") as inputs:
             client_env.fetch_inputs(Path(inputs))
@@ -439,13 +442,12 @@ def _intact_digest(tool_cache: Path) -> str | None:
     return None
 
 
-def _fetch_inferencex(checkout: Path) -> None:
-    """Check out InferenceX at its pin from :data:`INFERENCEX_REPO_URL` into the empty directory ``checkout``."""
+def _fetch_inferencex(repository: Path) -> None:
+    """Fetch InferenceX's pinned commit from :data:`INFERENCEX_REPO_URL` into a new repository at ``repository``."""
     pin = PINNED_TOOLS[INFERENCEX_TOOL]
-    git = [_GIT, "-C", str(checkout)]
-    _run_staging_step([_GIT, "init", "-q", str(checkout)], f"creating {checkout}")
-    _run_staging_step([*git, "fetch", "-q", "--depth", "1", INFERENCEX_REPO_URL, pin], f"fetching InferenceX {pin}")
-    _run_staging_step([*git, "checkout", "-q", "FETCH_HEAD"], f"checking out InferenceX {pin}")
+    _run_staging_step([_GIT, "init", "-q", str(repository)], f"creating {repository}")
+    fetch = [_GIT, "-C", str(repository), "fetch", "-q", "--depth", "1", INFERENCEX_REPO_URL, pin]
+    _run_staging_step(fetch, f"fetching InferenceX {pin}")
 
 
 def ensure_staged(tool_cache: Path, source: Path | None) -> str:
@@ -453,7 +455,7 @@ def ensure_staged(tool_cache: Path, source: Path | None) -> str:
 
     A cache whose manifest verifies stages nothing. One staged at a pin no longer in force, or without a file a load
     now runs, is staged again. One whose staged files were removed or edited, or whose manifest does not parse, is
-    refused as it stands, never overwritten. InferenceX is staged from the checkout ``source``, or with none,
+    refused as it stands, never overwritten. InferenceX is staged from the repository ``source``, or with none,
     fetched at its pin. lm-eval is installed at its pin into the interpreter running this.
 
     Raises:
@@ -476,16 +478,16 @@ def _stage_unless_intact(tool_cache: Path, source: Path | None) -> str:
 
 
 def _stage_from(source: Path | None, tool_cache: Path) -> str:
-    """:func:`stage` from the checkout ``source``, or from InferenceX fetched at its pin into ``tool_cache``."""
+    """:func:`stage` from the repository ``source``, or from InferenceX fetched at its pin into ``tool_cache``."""
     if source is not None:
         return stage(source, tool_cache)
-    checkout = tool_cache / f".source-{PINNED_TOOLS[INFERENCEX_TOOL]}"
-    shutil.rmtree(checkout, ignore_errors=True)
+    repository = tool_cache / f".source-{PINNED_TOOLS[INFERENCEX_TOOL]}"
+    shutil.rmtree(repository, ignore_errors=True)
     try:
-        _fetch_inferencex(checkout)
-        return stage(checkout, tool_cache)
+        _fetch_inferencex(repository)
+        return stage(repository, tool_cache)
     finally:
-        shutil.rmtree(checkout, ignore_errors=True)
+        shutil.rmtree(repository, ignore_errors=True)
 
 
 def _staged_identity(tool_cache: Path) -> NormalisedManifest:
@@ -635,7 +637,9 @@ def main(argv: Sequence[str] | None = None) -> int:
         "stage", help="stage the pinned tools and install the pinned lm-eval into this interpreter"
     )
     stage_parser.add_argument(
-        "--source", type=Path, help="an InferenceX checkout at the pin; when omitted, the cache must already verify"
+        "--source",
+        type=Path,
+        help="an InferenceX repository holding the pinned commit; when omitted, the cache must already verify",
     )
     stage_parser.add_argument("--tool-cache", type=Path, required=True)
     check_parser = commands.add_parser(
