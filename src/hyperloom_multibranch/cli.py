@@ -146,7 +146,7 @@ from hyperloom_multibranch.rulegate.agentx import AgentXObjective
 from hyperloom_multibranch.rulegate.critic import LlmCritic, anthropic_critic
 from hyperloom_multibranch.scheduling.budget import MB_DEFAULT_MAX_HOURS, ExploreCap
 from hyperloom_multibranch.scheduling.clock import Clock
-from hyperloom_multibranch.scheduling.hosted_peers import PinnedToolboxInputs, load_hosted_peers
+from hyperloom_multibranch.scheduling.hosted_peers import PinnedToolboxInputs, load_hosted_peers, local_grant_peers
 from hyperloom_multibranch.scheduling.hosted_run import (
     GrantDeadline,
     HostedExit,
@@ -1030,10 +1030,11 @@ class ReadySession:
 
 def hosted_ready_session(host: HostInfo, workload: Workload, *, local: bool = False) -> ReadySession:
     """:func:`ready_session` measured in the sandboxes of ``host``'s grant, or this container's cards with ``local``:
-    the one builder of the peers of ``hosted run`` and ``run --measurement hosted``."""
+    the one builder of the peers of ``hosted run`` and ``run --measurement hosted``. Either way the tests end by the
+    stop of the grant (:func:`local_grant_peers`)."""
 
     cache = hosted_runner_cache(os.environ)
-    load = load_peers if local else partial(load_hosted_peers, inputs=PinnedToolboxInputs(host, cache))
+    load = local_grant_peers(host) if local else partial(load_hosted_peers, inputs=PinnedToolboxInputs(host, cache))
     return ready_session(workload, load)
 
 
@@ -1049,10 +1050,9 @@ def ready_session(workload: Workload, load: Callable[[Workload], PeerFactory]) -
 
 @dataclass(frozen=True)
 class HostedStart:
-    """What ``hosted run`` runs, and the deadline of the grant it runs in."""
+    """What ``hosted run`` runs."""
 
     run: Callable[[], int]
-    deadline: GrantDeadline
 
 
 def hosted_run() -> int:
@@ -1093,7 +1093,7 @@ def _hosted_start(host: HostInfo) -> HostedStart:
     require_local_image(spec, os.environ)
     earlier = take_over_earlier_session(host.state_dir)
     if earlier.closed is not None:  # it closed with no baseline, which ended the run, and was killed before exit.json
-        return HostedStart(lambda: EXIT_FAILED, deadline)
+        return HostedStart(lambda: EXIT_FAILED)
     persisted = earlier.finish
     if (taken := persisted or earlier.left) is not None:
         share_with_the_group(taken.layout.root)
@@ -1102,10 +1102,10 @@ def _hosted_start(host: HostInfo) -> HostedStart:
     ready = hosted_ready_session(host, settings.workload, local=spec.measurement == MEASUREMENT_LOCAL)
     close = partial(final_only, peer_factory=ready.peer_factory, services=ready.services)
     if persisted is not None:
-        return HostedStart(partial(close, persisted, restart=True), deadline)
+        return HostedStart(partial(close, persisted, restart=True))
     record = partial(started_session, host.state_dir)
     start = partial(run_session, settings, ready.peer_factory, ready.services, record, grant_explore_cap(host))
-    return HostedStart(partial(close_then_start, earlier.left, close, start), deadline)
+    return HostedStart(partial(close_then_start, earlier.left, close, start))
 
 
 def _stop_before_grant_ends(host: HostInfo) -> None:

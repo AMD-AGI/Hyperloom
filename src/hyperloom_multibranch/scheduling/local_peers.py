@@ -197,9 +197,12 @@ class ToolboxBackend(Protocol):
 class LocalCards:
     """Tests run in local sandboxes on these cards of this machine, their sandboxes, archive and submit log under
     ``MB-toolbox``. The runners read the inference_suite staging from this host's runner cache, where it is published
-    before the toolbox is built; one already published is verified and kept."""
+    before the toolbox is built; one already published is verified and kept. ``tests_end_by`` is when every test must
+    have ended, Unix seconds, in a hosted run measured on these cards (the grant's
+    :attr:`~hyperloom_multibranch.scheduling.hosted_run.GrantEnd.tests_end_by`), ``None`` without a grant end."""
 
     cards: tuple[int, ...]
+    tests_end_by: float | None = None
     on_this_machine: ClassVar[bool] = True
 
     def toolbox(
@@ -222,7 +225,11 @@ class LocalCards:
         session = LocalSession(layout.toolbox, layout.session_id, self.cards, setup.workload.tp)
         # The tests read private copies of the tables of the aiter this machine's servers import (a vLLM image's
         # site-packages, not an SGLang image's workspace), or a keep that adds rows to a default table is refused.
-        options = LocalOptions(timeout_sec=attempt_timeout_sec(setup.workload), framework_configs=str(image_configs()))
+        options = LocalOptions(
+            timeout_sec=attempt_timeout_sec(setup.workload),
+            framework_configs=str(image_configs()),
+            tests_end_by=self.tests_end_by,
+        )
         return build_local_toolbox(session, blackboard, acceptance, spec, options=options)
 
 
@@ -820,15 +827,15 @@ def _agent_spec(
     )
 
 
-def load_peers(workload: Workload) -> PeerFactory:
-    """The factory of the real peers of a session of ``workload`` whose tests run on this machine's cards; raises
-    :class:`PeersUnavailable` when this machine cannot run them.
+def load_peers(workload: Workload, *, tests_end_by: float | None = None) -> PeerFactory:
+    """The factory of the real peers of a session of ``workload`` whose tests run on this machine's cards, ending by
+    ``tests_end_by`` (:class:`LocalCards`); raises :class:`PeersUnavailable` when this machine cannot run them.
 
     It creates nothing, so the command line calls it before the session directory exists.
     """
 
     require_local_model(workload)
-    return peers_on(measurement_host(os.environ, LocalCards(machine_cards())), workload)
+    return peers_on(measurement_host(os.environ, LocalCards(machine_cards(), tests_end_by)), workload)
 
 
 def require_local_model(workload: Workload) -> None:
