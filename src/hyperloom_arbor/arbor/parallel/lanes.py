@@ -47,7 +47,7 @@ from arbor.parallel.trees import (Conflict, FlagConflict, flags_from_workspace, 
 
 ACTIVE = ("SUBMITTING", "PENDING", "RUNNING")
 FINAL = ("CLOSED", "STOPPED")
-INTENT_RANK = {"LEARN": 0, "FIX-CORRECTNESS": 1, "FIX": 2, "WIN": 3}
+INTENT_RANK = {"LEARN": 0, "FIX-CORRECTNESS": 1, "FIX-STABILITY": 1, "FIX": 2, "WIN": 3}
 MAX_REFUSALS = 3
 
 
@@ -301,6 +301,8 @@ def submit(ctx, rec: Lane) -> Lane:
     rec.job_name = f"{rec.campaign}-c{len(rec.jobs)}"
     if rec.state != "SUBMITTING":
         _to(ctx, rec, "SUBMITTING", kind="lane.submitting", job_name=rec.job_name)
+    if not cl.lane_script:
+        raise ValueError("the run config names no cluster.lane_script, the launcher of a lane's campaign")
     env = {"CAMPAIGN": rec.campaign, "CAMPAIGN_CONFIG": rec.config_path, "CAMPAIGN_ARBOR": rec.worktree,
            "ARBOR_ROOT": rec.worktree, "CALIBRATE": "0", "MAX_CHUNKS": "0", "ROUND_AB": "0",
            "PAR_LANE_DIR": str(lane_dir(ctx, rec)), **kinds.env(rec.kind)}

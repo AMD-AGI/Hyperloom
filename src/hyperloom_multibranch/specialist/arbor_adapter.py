@@ -43,7 +43,6 @@ import json
 import os
 import re
 import shlex
-import shutil
 import subprocess
 from collections.abc import Mapping
 from dataclasses import dataclass, field
@@ -69,6 +68,7 @@ from hyperloom.measure.compile import (
     locate_installed_package,
 )
 from hyperloom.measure.surface import POINT_ENV_KEYS, REQUEST_ENV_KEYS, SURFACE_ENV_KEYS
+from hyperloom_common.shared_storage import copy_shared_file, make_shared_dirs
 from hyperloom_multibranch.repo.isolated_git import pinned_git
 from hyperloom_multibranch.specialist.agent_manifest import EXIT_FILE, AgentManifest
 from hyperloom_multibranch.specialist.agent_spec import AgentSpec
@@ -119,6 +119,12 @@ VLLM = "vllm"
 VLLM_TP_FLAGS = ("--tensor-parallel-size", "-tp")
 #: The interpreter Arbor runs under, the sandbox's.
 PYTHON = "python3"
+#: The file Arbor (v0.9.4 on) reads its ``ARBOR_*`` defaults from, ``~/.arbor/settings.env`` when unset or empty.
+#: Pointed at an empty file, so a local run never takes the running user's settings (an ``ARBOR_ROLL``, a review gate,
+#: an agent backend) past the preflight that refuses them in the environment.
+SETTINGS_ENV = "ARBOR_SETTINGS"
+#: :data:`PYTHON` run as Arbor: with no site settings file.
+ARBOR_PYTHON = f"env {SETTINGS_ENV}=/dev/null {PYTHON}"
 #: What Arbor needs beyond the image (its docs/getting-started.md, and the third-party modules arbor/ imports outside
 #: its tests): Python 3.11, PyYAML and the Claude agent SDK, which brings its CLI. Each is installed only when it does
 #: not import, and the last command checks that both import.
@@ -317,13 +323,14 @@ def arbor_manifest(spec: AgentSpec, checkout: ArborCheckout, run: ArborRun) -> A
     reasons = [*_launch_refusals(spec), *refusals(config, declared_keys(path))]
     if reasons:
         raise ArborRefused(reasons)
-    (path / run.session_dir).mkdir(parents=True, exist_ok=True)
+    make_shared_dirs(path / run.session_dir)
     component = config["component"]
     if component.get("plan"):
         carried = path / PLAN_FILE
-        carried.write_bytes(Path(component["plan"]).read_bytes())
+        make_shared_dirs(carried.parent)
+        copy_shared_file(Path(component["plan"]), carried)
         component["plan"] = str(carried)
-    launch = f"{PYTHON} -m arbor run --config {shlex.quote(run.config_file)}"
+    launch = f"{ARBOR_PYTHON} -m arbor run --config {shlex.quote(run.config_file)}"
     return AgentManifest.read(
         {
             "source": checkout.source,
@@ -366,7 +373,7 @@ def link_built(workspace: Path, framework: str) -> int:
         destination = target / source.relative_to(package.path)
         if os.path.lexists(destination):
             continue
-        destination.parent.mkdir(parents=True, exist_ok=True)
+        make_shared_dirs(destination.parent)
         os.symlink(source, destination)
         linked += 1
     return linked
@@ -378,8 +385,13 @@ def carry_dossier(checkout: Path, dossier: Path) -> None:
     own. One already there stays."""
 
     target = checkout / DOSSIER_DIR / dossier.name
-    if dossier.is_dir() and not target.exists():
-        shutil.copytree(dossier, target)
+    if not dossier.is_dir() or target.exists():
+        return
+    for directory, _subdirectories, files in os.walk(dossier, followlinks=True):
+        made = target / Path(directory).relative_to(dossier)
+        make_shared_dirs(made)
+        for name in files:
+            copy_shared_file(Path(directory) / name, made / name)
 
 
 def dossier_notes(checkout: Path, dossier: str | None) -> tuple[str, ...]:
@@ -800,12 +812,17 @@ async def generate_directions(checkout: Path, profile: Path, out: Path) -> Path:
 
 
 async def _directions(checkout: Path, written: tuple[Path, ...], *args: str) -> None:
-    """Run ``python3 -m arbor.directions`` with ``args`` in ``checkout``; raise :class:`SplitFailed` with what it
-    printed when it fails or leaves any of ``written`` unwritten."""
+    """Run ``python3 -m arbor.directions`` with ``args`` in ``checkout``, as Arbor's other commands with no site
+    settings file (:data:`SETTINGS_ENV`); raise :class:`SplitFailed` with what it printed when it fails or leaves any
+    of ``written`` unwritten."""
 
     argv = [PYTHON, "-m", "arbor.directions", *args]
     process = await asyncio.create_subprocess_exec(
-        *argv, cwd=checkout, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.STDOUT
+        *argv,
+        cwd=checkout,
+        env={**os.environ, SETTINGS_ENV: os.devnull},
+        stdout=asyncio.subprocess.PIPE,
+        stderr=asyncio.subprocess.STDOUT,
     )
     output, _ = await process.communicate()
     said = " | ".join(line.strip() for line in output.decode(errors="replace").strip().splitlines()[-_TAIL_LINES:])
@@ -819,6 +836,7 @@ async def _directions(checkout: Path, written: tuple[Path, ...], *args: str) -> 
 __all__ = [
     "ACCURACY_FLOOR_ENV",
     "ACCURACY_POLICY",
+    "ARBOR_PYTHON",
     "BLOCK_KEYS",
     "BRANCH_RUN",
     "BUILT",
@@ -838,6 +856,7 @@ __all__ = [
     "REVIEW_HOST",
     "REVIEW_KEY",
     "REVIEW_OFF",
+    "SETTINGS_ENV",
     "ArborCheckout",
     "ArborRefused",
     "ArborRun",
