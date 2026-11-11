@@ -2,6 +2,8 @@
 # SPDX-License-Identifier: MIT
 
 import asyncio
+import os
+import stat
 import subprocess
 
 import pytest
@@ -63,6 +65,63 @@ async def test_the_root_commit_holds_the_baseline_on_the_integration_branch(tmp_
 
     assert await repo.head(INTEGRATION_BRANCH) == root
     assert await repo.read_recipe(root) == BASELINE
+
+
+def _session(tmp_path, mode: int):
+    session = tmp_path / "session"
+    session.mkdir()
+    session.chmod(mode)
+    if mode & stat.S_ISGID and not session.stat().st_mode & stat.S_ISGID:
+        pytest.skip("this filesystem does not keep the setgid bit for the test user")
+    return session
+
+
+@pytest.mark.parametrize("mask", [0o002, 0o022], ids=["umask-002", "umask-022"])
+async def test_below_shared_storage_the_repository_s_config_is_the_app_s_alone(tmp_path, blobs, mask):
+    """The run's next leg may be another account of the group: the config it would have to trust is owner-only,
+    whatever the umask the repository was made under."""
+    path = _session(tmp_path, 0o2775) / "experiments.git"
+    previous = os.umask(mask)
+    try:
+        repo = await _rooted(path, blobs)
+    finally:
+        os.umask(previous)
+
+    assert stat.S_IMODE((path / "config").stat().st_mode) == 0o600
+    assert await repo.read_recipe(await repo.root()) == BASELINE
+
+
+@pytest.mark.parametrize("mask", [0o002, 0o022], ids=["umask-002", "umask-022"])
+async def test_off_shared_storage_the_repository_s_config_follows_the_umask(tmp_path, blobs, mask):
+    path = _session(tmp_path, 0o755) / "experiments.git"
+    previous = os.umask(mask)
+    try:
+        await _rooted(path, blobs)
+    finally:
+        os.umask(previous)
+
+    assert stat.S_IMODE((path / "config").stat().st_mode) == 0o666 & ~mask
+
+
+@pytest.mark.skipif(os.geteuid() != 0, reason="a config of another owner needs root to chown")
+async def test_a_leg_after_another_account_s_replaces_its_config_unread_and_reads_the_repository(tmp_path, blobs):
+    """The config an earlier leg of another account left is never read: a fresh one of this account's replaces it,
+    and the commits that leg made are read through it."""
+    path = _session(tmp_path, 0o2775) / "experiments.git"
+    previous = os.umask(0o002)
+    try:
+        repo = await _rooted(path, blobs)
+    finally:
+        os.umask(previous)
+    config = path / "config"
+    config.write_text(config.read_text() + "[core]\n\tbigFileThreshold = 1\n")
+    os.chown(config, 65534, 65533)
+
+    later = GitExperimentRepo(path, blobs)
+
+    assert await later.read_recipe(await later.root()) == BASELINE
+    assert config.stat().st_uid == os.geteuid() and stat.S_IMODE(config.stat().st_mode) == 0o600
+    assert "bigFileThreshold" not in config.read_text()
 
 
 async def test_a_branch_moves_only_on_its_own_commits(repo):

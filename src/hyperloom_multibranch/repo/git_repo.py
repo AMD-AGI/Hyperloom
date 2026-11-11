@@ -40,6 +40,7 @@ from hyperloom.measure.compile import (
 from hyperloom_multibranch.contracts.blackboard.vocab import INTEGRATION_BRANCH
 from hyperloom_multibranch.contracts.repo import BranchMoved, BundleMerge, RepoMerge
 from hyperloom_multibranch.contracts.sources import NativeTree, SourceRoot, source_roots
+from hyperloom_common.git_safety import own_git_admin
 from hyperloom_multibranch.repo.isolated_git import INIT, git_argv, git_env
 from hyperloom_multibranch.repo.merge import Stored, carry, stack_kernel_slot
 from hyperloom_multibranch.repo.rebase import Files
@@ -360,6 +361,15 @@ class GitExperimentRepo:
         return completed.out
 
     async def _run(self, *args: str, stdin: bytes | None = None) -> _Completed:
+        """``git <args>`` on the repository. Before any command but ``init`` the repository's config is made this
+        account's alone below shared storage (:func:`~hyperloom_common.git_safety.own_git_admin`): an earlier leg may
+        have been another account of the group, whose config this one never reads.
+
+        Raises:
+            OSError: The config is another account's and cannot be replaced (nothing was run).
+        """
+        if tuple(args[: len(INIT)]) != INIT:
+            own_git_admin(self._path, bare=True)
         process = await asyncio.create_subprocess_exec(
             *git_argv(*args),
             cwd=self._path,

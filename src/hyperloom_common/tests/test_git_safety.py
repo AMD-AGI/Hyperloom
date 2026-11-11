@@ -10,6 +10,7 @@ does not run would prove nothing.
 
 from __future__ import annotations
 
+import contextlib
 import errno
 import hashlib
 import http.server
@@ -619,77 +620,74 @@ def _chown_tree(root: Path, uid: int, gid: int) -> None:
         os.lchown(path, uid, gid)
 
 
-_ROOT_ONLY = pytest.mark.skipif(os.geteuid() != 0, reason="an admin directory of another owner needs root to chown")
-_ANOTHER, _GROUP, _STRANGER = 65534, 65533, 65532
+_ROOT_ONLY = pytest.mark.skipif(os.geteuid() != 0, reason="an entry of another owner needs root to chown")
+_ANOTHER, _GROUP = 65534, 65533
 
 
-def _repository_of_another_account(tmp_path: Path, common_mode: int) -> tuple[_Tree, Path]:
-    """A tree whose git directory another account of ``_GROUP`` made, setgid throughout, the git directory itself
-    ``common_mode``."""
-    tree = _tree(tmp_path / "t")
+def _umask_now() -> int:
+    with open("/proc/self/status", encoding="ascii") as status:
+        return next(int(line.split()[1], 8) for line in status if line.startswith("Umask:"))
+
+
+@contextlib.contextmanager
+def _umask(mask: int) -> Iterator[None]:
+    previous = os.umask(mask)
+    try:
+        yield
+    finally:
+        os.umask(previous)
+
+
+def _mode(path: Path) -> int:
+    return stat.S_IMODE(path.lstat().st_mode)
+
+
+def _shared_tree(tmp_path: Path, mask: int = 0o022) -> tuple[_Tree, Path]:
+    """A tree made under ``mask`` in a session directory set up to be shared (``2775``), its git directory ``2775``
+    as well, git's own state there then made the app's alone as the app makes it."""
+    session = tmp_path / "session"
+    session.mkdir()
+    session.chmod(0o2775)
+    if not session.stat().st_mode & stat.S_ISGID:
+        pytest.skip("this filesystem does not keep the setgid bit for the test user")
+    with _umask(mask):
+        tree = _tree(session / "t")
     common = tree.base / ".git"
-    _chown_tree(common, _ANOTHER, _GROUP)
-    for path in (common, *common.rglob("*")):
-        if path.is_dir() and not path.is_symlink():
-            path.chmod(path.stat().st_mode | stat.S_ISGID)
-    common.chmod(common_mode)
+    common.chmod(0o2775)
+    git_safety.own_git_admin(common, bare=False)
+    git_safety.own_worktree_admin(git_safety.recorded_admin_dir(tree.base, tree.worktree))
     return tree, common
 
 
 @_ROOT_ONLY
-def test_an_admin_directory_another_account_made_is_trusted_only_in_a_shared_repository_of_its_group(tmp_path):
-    """Another account's admin directory is the app's only when ``common`` is a git directory set up to be shared
-    (``2775``: setgid, group-writable, closed to others) and the entry is in that directory's group: the run's legs,
-    accounts of one group, make the repository in turn."""
-    tree, common = _repository_of_another_account(tmp_path, 0o755)
-    admin = common / "worktrees" / "worktree"
-
-    with pytest.raises(OSError, match="not a directory owned by the app"):
-        app_git(
-            tree.worktree, "status", "--porcelain", admin=git_safety.trusted_admin_dir(tree.worktree, common)
-        )  # not setgid: not shared
-    common.chmod(0o2775)
-    assert stat.S_IMODE(common.stat().st_mode) == 0o2775
-    assert (
-        app_git(
-            tree.worktree, "status", "--porcelain", admin=git_safety.trusted_admin_dir(tree.worktree, common)
-        ).returncode
-        == 0
-    )
-    with pytest.raises(OSError, match="not a directory owned by the app"):
-        app_git(tree.worktree, "status", "--porcelain")  # no common: the uid alone
-    os.lchown(admin, _ANOTHER, _STRANGER)
-    with pytest.raises(OSError, match="not a directory owned by the app"):
-        app_git(tree.worktree, "status", "--porcelain", admin=git_safety.trusted_admin_dir(tree.worktree, common))
-    os.lchown(admin, _ANOTHER, _GROUP)
-    os.lchown(admin / "gitdir", _ANOTHER, _STRANGER)
-    with pytest.raises(OSError, match="not an admin dir of a linked worktree"):
-        app_git(tree.worktree, "status", "--porcelain", admin=git_safety.trusted_admin_dir(tree.worktree, common))
-
-
-@_ROOT_ONLY
-@pytest.mark.parametrize("common_mode", [0o2755, 0o2777], ids=oct)
-def test_a_setgid_git_directory_not_set_up_to_be_shared_trusts_no_entry_of_its_group(tmp_path, common_mode):
-    """A setgid git directory the group cannot write (``2755``), or one others can write too (``2777``), is not
-    shared storage, by the same rule that leaves git's umask alone there: an entry of its group is refused, since in
-    a setgid directory others can write an account outside the group makes entries of the group."""
-    tree, common = _repository_of_another_account(tmp_path, common_mode)
-    assert stat.S_IMODE(common.stat().st_mode) == common_mode
+@pytest.mark.parametrize("common_mode", [0o2775, 0o2755, 0o2777, 0o755], ids=oct)
+def test_an_admin_directory_another_account_made_is_refused_even_in_a_shared_repository_of_its_group(
+    tmp_path, common_mode
+):
+    """Only the app's uid is trusted for a linked worktree's admin directory, on shared storage too: one another
+    account of the git directory's group made is refused, whether or not that directory is set up to be shared."""
+    tree = _tree(tmp_path / "t")
+    common = tree.base / ".git"
+    _chown_tree(common / "worktrees", _ANOTHER, _GROUP)
+    os.lchown(common, -1, _GROUP)
+    common.chmod(common_mode)
 
     with pytest.raises(OSError, match="not a directory owned by the app"):
         git_safety.trusted_admin_dir(tree.worktree, common)
+    with pytest.raises(OSError, match="not a directory owned by the app"):
+        app_git(tree.worktree, "status", "--porcelain")
 
 
-@_ROOT_ONLY
-def test_a_link_at_the_git_directory_s_own_name_is_not_a_shared_repository(tmp_path):
-    """``common`` named through a link is refused, not judged by what the link points at."""
-    tree, common = _repository_of_another_account(tmp_path, 0o2775)
+def test_a_link_at_the_git_directory_s_own_name_is_not_judged_by_what_it_points_at(tmp_path):
+    """``below_shared_storage`` opens the git directory without following a link at its own name."""
+    tree, common = _shared_tree(tmp_path)
     link = tmp_path / "link"
     link.symlink_to(common)
 
     with pytest.raises(OSError) as raised:
-        git_safety.trusted_admin_dir(tree.worktree, link)
+        git_safety.below_shared_storage(link)
     assert raised.value.errno == errno.ENOTDIR  # O_NOFOLLOW with O_DIRECTORY on a link
+    assert git_safety.below_shared_storage(common)
 
 
 def _blob_directory(data: bytes) -> str:
@@ -700,16 +698,17 @@ def _blob_directory(data: bytes) -> str:
 @pytest.mark.parametrize(("common_mode", "shared"), [(0o2775, True), (0o2755, False), (0o755, False)], ids=oct)
 def test_git_writes_what_the_group_can_write_only_in_a_repository_on_shared_storage(tmp_path, common_mode, shared):
     """In a repository whose git directory is set up to be shared (setgid, group-writable, closed to others) the next
-    leg, another account of the group, writes the index and the objects after this one: git runs under the shared
-    child umask there, and under this process's anywhere else."""
-    with open("/proc/self/status", encoding="ascii") as status:
-        umask = next(int(line.split()[1], 8) for line in status if line.startswith("Umask:"))
+    leg, another account of the group, writes the objects after this one: git runs under the shared child umask
+    there, and under this process's anywhere else. The index lies in the worktree's admin directory, which is the
+    app's alone there."""
+    umask = _umask_now()
     assert umask & 0o020, "the test needs a umask that keeps group write off what a plain create makes"
     tree = _tree(tmp_path / "t")
     common = tree.base / ".git"
     common.chmod(common_mode)
     if common_mode & stat.S_ISGID and not common.stat().st_mode & stat.S_ISGID:
         pytest.skip("this filesystem does not keep the setgid bit for the test user")
+    git_safety.own_worktree_admin(git_safety.recorded_admin_dir(tree.base, tree.worktree))
     before = {path.name for path in (common / "objects").iterdir() if path.is_dir()}
     # A blob whose object directory git has not made yet (the base commit's objects vary with its timestamp).
     content = next(
@@ -724,8 +723,139 @@ def test_git_writes_what_the_group_can_write_only_in_a_repository_on_shared_stor
     assert common / "objects" / _blob_directory(content) in made
     index = common / "worktrees" / tree.worktree.name / "index"
     expected = (0o775, 0o664) if shared else (0o777 & ~umask, 0o666 & ~umask)
-    assert made and {stat.S_IMODE(path.stat().st_mode) for path in made} == {expected[0]}
-    assert stat.S_IMODE(index.stat().st_mode) == expected[1]
+    assert made and {_mode(path) for path in made} == {expected[0]}
+    assert _mode(index) == expected[1]
+    if shared:
+        assert _mode(index.parent) == 0o700, "the index is in an admin directory no other account enters"
+
+
+def _git_s_own_state(common: Path, admin: Path) -> list[Path]:
+    """Every entry of git's own state in a repository and one worktree's admin directory: the config, hooks and info
+    with what they hold, the admin directory with its gitdir and commondir."""
+    held = [common / "config", admin, admin / "gitdir", admin / "commondir"]
+    for name in ("hooks", "info"):
+        held += [common / name, *(common / name).rglob("*")]
+    return held
+
+
+@pytest.mark.parametrize("mask", [0o002, 0o022], ids=["umask-002", "umask-022"])
+def test_below_shared_storage_git_s_own_state_is_owner_only_and_objects_and_refs_stay_the_group_s(tmp_path, mask):
+    """Below shared storage the config, hooks and info, and a worktree's admin directory with its gitdir and
+    commondir, are the app's uid's alone (files ``0600``, directories ``0700``) whatever the umask; the objects and
+    refs the app's git makes stay the group's to write, and the app's git runs."""
+    tree, common = _shared_tree(tmp_path, mask)
+    admin = common / "worktrees" / tree.worktree.name
+    assert (common / "hooks").is_dir() and (common / "info" / "exclude").is_file(), "git's template made both"
+
+    for path in _git_s_own_state(common, admin):
+        assert path.lstat().st_uid == os.geteuid()
+        assert _mode(path) == (0o700 if path.is_dir() else 0o600), (path, oct(_mode(path)))
+    (tree.worktree / "new.py").write_text("made = 1\n", encoding="utf-8")
+    with _umask(mask):
+        assert app_git(tree.worktree, "add", "-A").returncode == 0
+        done = app_git(tree.worktree, "-c", "user.name=t", "-c", "user.email=t@t.local", "commit", "-q", "-m", "x")
+    assert done.returncode == 0, done.stderr
+    ref = common / "refs" / "heads" / "task"
+    assert _mode(ref) & 0o060 == 0o060, oct(_mode(ref))
+    loose = [path for path in (common / "objects").iterdir() if len(path.name) == 2 and _mode(path) & 0o020]
+    assert loose, "objects the app's git made below shared storage are the group's to write"
+
+
+@pytest.mark.parametrize("mask", [0o002, 0o022], ids=["umask-002", "umask-022"])
+@pytest.mark.parametrize("parent_mode", [0o755, 0o775, 0o777], ids=oct)
+def test_off_shared_storage_nothing_about_git_s_own_state_changes(tmp_path, mask, parent_mode):
+    """Off shared storage (no setgid directory: under a ``002`` umask a setgid one makes its children shared storage)
+    the umask decides git's own state as before: making it owner-only changes no mode, and a config the group can
+    write runs as it did."""
+    parent = tmp_path / "p"
+    parent.mkdir()
+    parent.chmod(parent_mode)
+    with _umask(mask):
+        tree = _tree(parent / "t")
+    common = tree.base / ".git"
+    admin = git_safety.recorded_admin_dir(tree.base, tree.worktree)
+    assert not git_safety.below_shared_storage(common)
+    before = {path: _mode(path) for path in _git_s_own_state(common, admin)}
+
+    git_safety.own_git_admin(common, bare=False)
+    git_safety.own_worktree_admin(admin)
+
+    assert {path: _mode(path) for path in before} == before
+    (common / "config").chmod(0o664)
+    assert app_git(tree.worktree, "status", "--porcelain").returncode == 0
+
+
+def _another_account_s(path: Path) -> None:
+    os.lchown(path, _ANOTHER, _GROUP)
+
+
+def _group_writable(path: Path) -> None:
+    path.chmod(_mode(path) | 0o020)
+
+
+def _planted_info(common: Path) -> Path:
+    planted = common / "info" / "attributes"
+    planted.write_text("* filter=own\n", encoding="utf-8")
+    planted.chmod(0o600)
+    return planted
+
+
+_SPOILS = {
+    "config-of-another-account": (lambda common, admin: common / "config", _another_account_s),
+    "config-group-writable": (lambda common, admin: common / "config", _group_writable),
+    "info-of-another-account": (lambda common, admin: _planted_info(common), _another_account_s),
+    "info-group-writable": (lambda common, admin: common / "info", _group_writable),
+    "hook-of-another-account": (lambda common, admin: common / "hooks", _another_account_s),
+    "admin-group-writable": (lambda common, admin: admin, _group_writable),
+    "gitdir-group-writable": (lambda common, admin: admin / "gitdir", _group_writable),
+    "commondir-of-another-account": (lambda common, admin: admin / "commondir", _another_account_s),
+}
+
+
+@pytest.mark.parametrize("plant", list(_SPOILS))
+def test_below_shared_storage_the_app_s_git_trusts_no_admin_state_another_account_can_write(tmp_path, plant):
+    """Below shared storage an entry of git's own state that another account owns, or that the group can write, is
+    refused before git runs, whichever way the admin directory was found."""
+    pick, spoil = _SPOILS[plant]
+    if spoil is _another_account_s and os.geteuid() != 0:
+        pytest.skip("an entry of another owner needs root to chown")
+    tree, common = _shared_tree(tmp_path)
+    admin = common / "worktrees" / tree.worktree.name
+    assert app_git(tree.worktree, "status", "--porcelain").returncode == 0
+    spoil(pick(common, admin))
+
+    with pytest.raises(OSError, match="only the app's uid writes git's own state"):
+        app_git(tree.worktree, "status", "--porcelain")
+    with pytest.raises(OSError, match="only the app's uid writes git's own state"):
+        app_git(tree.worktree, "status", "--porcelain", admin=git_safety.recorded_admin_dir(tree.base, tree.worktree))
+
+
+@_ROOT_ONLY
+def test_a_config_another_account_left_is_replaced_unread_and_git_runs_on_the_shared_objects(tmp_path):
+    """A leg after another account's never reads that account's config: a fresh one of its own replaces it, so a
+    driver the other config names is gone, and git runs on the objects and refs the earlier leg left."""
+    tree, common = _shared_tree(tmp_path, 0o002)
+    config = common / "config"
+    config.write_text(config.read_text(encoding="utf-8") + f'[filter "own"]\n\tclean = {tree.filter}\n')
+    _another_account_s(config)
+    head = _git(tree.base, "rev-parse", "HEAD").strip()
+
+    git_safety.own_git_admin(common, bare=False)
+
+    assert config.lstat().st_uid == os.geteuid() and _mode(config) == 0o600
+    assert "filter" not in config.read_text(encoding="utf-8")
+    assert "sharedrepository = 1" in config.read_text(encoding="utf-8"), "the git directory is shared storage"
+    assert app_git(tree.worktree, "rev-parse", "HEAD").stdout.strip() == head
+    assert not list(common.glob(".config.*")), "no temporary file is left"
+
+
+@_ROOT_ONLY
+def test_hooks_or_info_of_another_account_are_refused_not_adopted(tmp_path):
+    tree, common = _shared_tree(tmp_path)
+    _another_account_s(_planted_info(common))
+
+    with pytest.raises(OSError, match="another account's"):
+        git_safety.own_git_admin(common, bare=False)
 
 
 def test_the_caller_s_environment_never_outranks_what_keeps_the_config_out(tmp_path):

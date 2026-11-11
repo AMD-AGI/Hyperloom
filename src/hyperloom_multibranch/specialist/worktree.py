@@ -38,7 +38,14 @@ from hyperloom.measure.compile import (
 )
 from hyperloom.measure.pins import ImagePinError, active_image
 from hyperloom_multibranch.contracts.sources import NativeTree, SourceRoot, meta_sections, source_roots
-from hyperloom_common.git_safety import app_git, trusted_admin_dir
+from hyperloom_common.git_safety import (
+    app_git,
+    below_shared_storage,
+    own_git_admin,
+    own_worktree_admin,
+    recorded_admin_dir,
+    trusted_admin_dir,
+)
 from hyperloom_multibranch.repo.isolated_git import (
     INIT,
     NO_EXCLUDES_FILE,
@@ -352,14 +359,27 @@ class SourceBase:
         (git_dir / "info").mkdir(exist_ok=True)
         (git_dir / "info" / "exclude").write_text("".join(f"{line}\n" for line in excluded))
         (git_dir / LINKED_PATHS).write_text("".join(f"{prefix}\t{target}\n" for prefix, target in links))
+        own_git_admin(git_dir, bare=False)
         _commit_all(self.path, BASE_BRANCH)
 
     def worktree(self, branch: str, path: Path) -> BranchWorktree:
         """The worktree of ``branch`` at ``path``, added at the installed packages the first time; every call for
         ``path`` returns the same one, so all its callers share its :attr:`~BranchWorktree.lock`."""
+        common = self.path / _GIT_DIR
+        shared = common.is_dir() and below_shared_storage(common)
+        if shared:
+            # Git's own state stays this account's alone there: the base's config, hooks and info, and the worktree's
+            # admin directory; another account of the group writes only objects and refs.
+            own_git_admin(common, bare=False)
         if not path.exists():
             _git(self.path, "worktree", _ADD, "-b", f"mb/{branch}", str(path), BASE_BRANCH)
-        common = self.path / _GIT_DIR
+        if shared:
+            try:
+                own_worktree_admin(recorded_admin_dir(self.path, path))
+            except (OSError, subprocess.SubprocessError) as error:
+                raise WorktreeError(
+                    f"the admin directory of {path} cannot be made this account's alone: {error}"
+                ) from error
         for prefix, target in linked_paths(common):
             _link(path, PurePosixPath(prefix), target)
         return self._worktrees.setdefault(path, BranchWorktree(path, self._native, common=common))

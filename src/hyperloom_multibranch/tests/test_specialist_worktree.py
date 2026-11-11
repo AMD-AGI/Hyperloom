@@ -3,6 +3,7 @@
 
 import os
 import shutil
+import stat
 import subprocess
 from dataclasses import replace
 from pathlib import Path
@@ -53,6 +54,43 @@ def test_the_base_holds_the_installed_sources_at_their_upstream_paths(base):
     ]
     assert sorted(path.relative_to(base.path).as_posix() for path in tracked) == ["vllm/config.py", "vllm/scheduler.py"]
     assert base.worktree("s1", base.path.parent / "s1").head() is None
+
+
+def _modes(*paths: Path) -> dict[str, int]:
+    return {path.name: stat.S_IMODE(path.stat().st_mode) for path in paths}
+
+
+@pytest.mark.parametrize("mask", [0o002, 0o022], ids=["umask-002", "umask-022"])
+def test_below_shared_storage_the_base_s_and_a_worktree_s_git_state_is_the_app_s_alone(
+    tmp_path, installed, monkeypatch, mask
+):
+    """Below shared storage the base's config and info, and a branch worktree's admin directory, are writable by no
+    one but the app's uid whatever the umask, and the worktree's git still runs. Under a ``002`` umask the base's
+    directories are shared storage themselves, and git's own state there is owner-only; under ``022`` the base is
+    made ``2755``, which no other account writes, and the umask decides as before."""
+    session = tmp_path / "session"
+    session.mkdir()
+    session.chmod(0o2775)
+    if not session.stat().st_mode & stat.S_ISGID:
+        pytest.skip("this filesystem does not keep the setgid bit for the test user")
+    monkeypatch.setattr(worktree_module, "locate_installed_package", lambda _layout: installed)
+    base = SourceBase(session / "source")
+    common = base.path / ".git"
+    admin = common / "worktrees" / "s1"
+    previous = os.umask(mask)
+    try:
+        base.build(["vllm"])
+        built = _modes(common / "config", common / "info", common / "info" / "exclude")
+        worktree = base.worktree("s1", session / "s1")
+    finally:
+        os.umask(previous)
+
+    modes = {**built, **_modes(admin, admin / "gitdir")}
+    if mask == 0o002:
+        assert modes == {"config": 0o600, "info": 0o700, "exclude": 0o600, "s1": 0o700, "gitdir": 0o600}
+    else:
+        assert not {name for name, mode in modes.items() if mode & 0o022}, modes
+    assert worktree.head() is None
 
 
 def test_a_change_in_a_worktree_is_a_patch_the_toolbox_applies_to_the_installed_package(tmp_path, base, installed):
