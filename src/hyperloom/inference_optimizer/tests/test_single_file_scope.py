@@ -409,6 +409,26 @@ def test_a_confined_specialist_reads_the_declaration_and_edits_its_worktree_copy
     assert f"copy of that file at `{module.name}`" in hint
 
 
+def test_a_specialist_reads_the_script_directory_the_benchmark_runs(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The user's script is the model code the specialist rewrites around, and is outside the benchmark directory."""
+    from hyperloom.orchestrator.specialists.runner import _scope_readable
+
+    benchmark, source = tmp_path / "benchmark", tmp_path / "model-src"
+    benchmark.mkdir()
+    source.mkdir()
+    _declare(benchmark, monkeypatch)
+    workload = {
+        "script": str(source / "model_run.py"),
+        "cwd": str(source),
+        "python": str(tmp_path / "venv" / "bin" / "python"),
+    }
+    (benchmark / "script_workload.json").write_text(json.dumps(workload), encoding="utf-8")
+
+    assert _scope_readable() == (benchmark, source)
+
+
 def test_a_session_without_a_declaration_names_no_worktree_copy(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

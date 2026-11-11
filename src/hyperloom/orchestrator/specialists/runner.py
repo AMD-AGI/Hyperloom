@@ -100,14 +100,18 @@ def _worktree_source(params: dict[str, Any], *, framework_repo_path: str = "") -
 
 
 def _scope_readable() -> tuple[Path, ...]:
-    """The directory holding ``optimization_scope.json``.
+    """The benchmark directory, and what its prepared workload reads: the user's script and working directory.
 
     ``HYPERLOOM_BYPASS_SCRIPTS_DIR`` reaches the specialist's environment but no bind
     follows it -- it is not one of ``confinement.DATA_VARIABLES`` -- so in a sandbox the
     variable names a directory that is not there and reading the declaration is ``ENOENT``.
+    The script is the model code the specialist rewrites around; without its directory
+    bound the specialist ships a generic wrapper for a model it could not read.
     """
+    from hyperloom.inference_optimizer.script_workload import benchmark_inputs
+
     declared = os.environ.get("HYPERLOOM_BYPASS_SCRIPTS_DIR", "").strip()
-    return (Path(declared),) if declared else ()
+    return tuple(dict.fromkeys((Path(declared), *benchmark_inputs(Path(declared))))) if declared else ()
 
 
 def _subprocess_call_outcome(result: SpecialistSubprocessResult) -> tuple[str, dict[str, Any]]:
