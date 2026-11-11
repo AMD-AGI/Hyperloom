@@ -31,6 +31,7 @@ __all__ = [
     "ENERGY_METHOD",
     "MAX_SAMPLE_GAP_S",
     "EnergyInputs",
+    "TimedRun",
     "TokenCounts",
     "Window",
     "counter_delta",
@@ -67,14 +68,25 @@ class TokenCounts:
 
 
 @dataclass(frozen=True)
+class TimedRun:
+    """A load's own timed run: the wall-clock instants it stamped, and the duration it timed on its own clock."""
+
+    start_unix: float
+    end_unix: float
+    duration_s: float
+
+
+@dataclass(frozen=True)
 class Window:
-    """The measured window: monotonic intervals, with the wall-clock instants of its first start and last end."""
+    """The measured window: monotonic intervals, with the wall-clock instants of its first start and last end, and
+    the duration the load timed it at when the load stamped the window itself."""
 
     phase: str
     intervals: tuple[tuple[float, float], ...]
     start_unix: float
     end_unix: float
     source: str
+    reported_duration_s: float | None = None
 
     @property
     def duration_s(self) -> float:
@@ -273,6 +285,14 @@ def _quantile(pieces: Sequence[tuple[float, float, float]], quantile: float) -> 
     return upper
 
 
+def _duration_reasons(window: Window, reasons: list[str]) -> None:
+    """InferenceX's check that the stamps agree with the duration the load timed: a clock step between them moves
+    the window off the run."""
+    reported = window.reported_duration_s
+    if reported is not None and abs(reported - window.duration_s) > max(0.5, 0.01 * window.duration_s):
+        _append(reasons, "benchmark_duration_mismatch")
+
+
 def _scope_reasons(inputs: EnergyInputs, reasons: list[str]) -> None:
     if inputs.aborted:
         _append(reasons, "aborted")
@@ -392,6 +412,8 @@ def energy_block(inputs: EnergyInputs, counts: TokenCounts | None) -> dict[str, 
     window = inputs.window
     if window is None or not window.intervals or window.duration_s <= 0:
         _append(reasons, "invalid_benchmark_window")
+    else:
+        _duration_reasons(window, reasons)
     _scope_reasons(inputs, reasons)
     cards: dict[int, _Card] = {}
     if window is not None and window.duration_s > 0:
