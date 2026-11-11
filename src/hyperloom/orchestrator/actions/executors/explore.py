@@ -905,8 +905,8 @@ class _ExploreRound:
         # xDiT do-not-set list, plus flags the model class does not support.
         runnable, incompatible = apply_compatibility_filter(
             runnable,
-            serving=ServingStack(
-                framework=self.framework,
+            serving=ServingStack.of_recipe(
+                self.bench,
                 model_path=self.target.model_path,
                 gpu_type=self.target.gpu_type or str(getattr(self.ss, "gpu_type", "") or ""),
                 stack_fingerprint=getattr(self.ss, "stack_fingerprint_meta", None),
