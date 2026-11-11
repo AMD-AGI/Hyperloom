@@ -246,9 +246,7 @@ def source_unkept(component: str, recipe: Recipe) -> str:
     )
 
 
-def _git(
-    cwd: Path, *args: str, index: Path | None = None, common: Path | None = None, umask: int = -1, base: bool = False
-) -> str:
+def _git(cwd: Path, *args: str, index: Path | None = None, common: Path | None = None, base: bool = False) -> str:
     """``git <args>`` in ``cwd``.
 
     With ``common``, ``cwd`` is a branch's worktree, which the agent writes, made from the repository whose git
@@ -261,15 +259,18 @@ def _git(
     must be its maker's alone, or nothing runs, and git is pinned to that git directory (``GIT_COMMON_DIR``) and runs
     under the shared child umask, so the admin directory of a worktree it adds is the group's. With ``base``, ``cwd``
     is the source base, which below shared storage must be such a repository
-    (:func:`~hyperloom_common.git_safety.check_session_repository`). Either way no program the config names runs.
-    ``umask`` is git's (``-1``: this process's, or the shared child umask there)."""
+    (:func:`~hyperloom_common.git_safety.check_session_repository`). Either way no program the config names runs. An
+    ``init`` runs under :func:`~hyperloom_common.git_safety.git_dir_umask`, any other command under this process's
+    umask, or the shared child umask there."""
     pinned = _GIT_IDENTITY if index is None else {**_GIT_IDENTITY, "GIT_INDEX_FILE": str(index)}
     if common is not None:
         return _worktree_git(cwd, common, args, pinned)
+    umask = git_dir_umask() if tuple(args[: len(INIT)]) == INIT else -1
+    shared = _base_is_shared if base else _shared_git_dir
     try:
-        if _shared_git_dir(cwd, base=base):
+        if shared(cwd):
             pinned = {**pinned, "GIT_COMMON_DIR": str(cwd / _GIT_DIR)}
-            umask = SHARED_CHILD_UMASK if umask == -1 else umask
+            umask = SHARED_CHILD_UMASK
     except OSError as error:
         raise WorktreeError(f"git in {cwd} was refused: {error}") from error
     env = git_env(**pinned)
@@ -292,17 +293,24 @@ def _git(
     return done.stdout.decode()
 
 
-def _shared_git_dir(cwd: Path, *, base: bool = False) -> bool:
-    """Whether ``cwd`` holds the git directory of a shared repository, checked before git runs there
-    (:func:`~hyperloom_common.git_safety.check_shared_repository`; with ``base``, as the source base,
-    :func:`~hyperloom_common.git_safety.check_session_repository`).
+def _base_is_shared(cwd: Path) -> bool:
+    """Whether the source base ``cwd`` holds a shared repository, checked before git runs there as a session's
+    (:func:`~hyperloom_common.git_safety.check_session_repository`).
 
     Raises:
-        OSError: It holds state another account could have written, or, as the source base below shared storage, is
-            not laid out shared or has a ``.git`` that is no directory.
+        OSError: It holds state another account could have written, or lies below shared storage and is not laid out
+            shared or has a ``.git`` that is no directory.
     """
-    if base:
-        return check_session_repository(cwd / _GIT_DIR) is not None
+    return check_session_repository(cwd / _GIT_DIR) is not None
+
+
+def _shared_git_dir(cwd: Path) -> bool:
+    """Whether ``cwd`` holds the git directory of a shared repository, checked before git runs there
+    (:func:`~hyperloom_common.git_safety.check_shared_repository`).
+
+    Raises:
+        OSError: It holds state another account could have written.
+    """
     try:
         info = (cwd / _GIT_DIR).lstat()
     except FileNotFoundError:
@@ -392,7 +400,7 @@ class SourceBase:
         self.path.mkdir(_OWNER_DIR)
         if shared:
             self.path.chmod(0o2755)
-        _git(self.path, *INIT, *(("--shared=group",) if shared else ()), f"--initial-branch={BASE_BRANCH}", umask=umask)
+        _git(self.path, *INIT, *(("--shared=group",) if shared else ()), f"--initial-branch={BASE_BRANCH}")
         excluded = list(SKIPPED)
         links: list[tuple[str, str]] = []
         for component in components:
