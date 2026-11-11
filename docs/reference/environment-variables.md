@@ -1474,6 +1474,19 @@ the same value to every measurement runner it starts.
 |----------|---------|-------------|
 | `HYPERLOOM_CARD_GUARD` | `enforce` | `enforce`: a card some process holds is not handed out (the test waits for a free one; the log names the card, the process and the memory it holds, once per holder), and a test whose card a process outside it holds is ended at the first look that finds it (about once a second) and refused as the infrastructure failure `foreign_process_on_card`, which is retried on other cards. `observe`: cards are handed out and tests run to their end; the signed result says `foreign` with the process, the card and when, and carries a warning. Any other value is refused at start-up. Where the cards cannot be read, both modes go on and the result says `unknown` and why. |
 
+## Merge smoke
+
+Before a test that carries patches is given a sandbox or cards, the multi-branch toolbox (hosted and local) byte-compiles
+every Python file the test's patch stack changes and imports each patched component on CPU, with every GPU hidden and the
+point's server variables set. A file that does not compile, or an `ImportError`, `ModuleNotFoundError`, `NameError` or
+`AttributeError` raised from a patched file while the image's own copy imports, fails the test as the candidate's
+(`merge_smoke`); any other import failure is logged and the test is measured as usual. A smoke that cannot run is the
+infrastructure failure `smoke_not_run`, retried once.
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `HYPERLOOM_MERGE_SMOKE` | Unset (on) | Read from the toolbox host's environment when the toolbox is built. Unset, empty or `on` (any case, surrounding spaces ignored) keeps the merge smoke on; `off` turns it off, so every test goes straight to its sandbox. Any other value is refused: building the toolbox fails with a `ValueError`. Operator configuration. |
+
 ## Variables intentionally not exposed
 
 These are read by `os.environ` somewhere in the codebase but are
