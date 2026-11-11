@@ -85,7 +85,14 @@ from hyperloom_multibranch.specialist.agent_manifest import EXIT_FILE, AgentMani
 from hyperloom_multibranch.specialist.agent_spec import AgentSpec
 from hyperloom_multibranch.specialist.worktree import SKIPPED
 from inference_suite.argv import remove_server_args, reserialize_json_blobs, tokenize_server_args_preserving_json
-from inference_suite.contracts import BASE_LAUNCH_SCHEMA, BaseLaunch, BaseLaunchError, RunStatus
+from inference_suite.contracts import (
+    BASE_LAUNCH_SCHEMA,
+    BaseLaunch,
+    BaseLaunchError,
+    CredentialNotHeld,
+    RunStatus,
+    held_env,
+)
 from inference_suite.contracts.layout import REPORT_FILE
 
 
@@ -353,10 +360,11 @@ def read_launch(path: Path) -> ResolvedLaunch:
 
 def _read_record(path: Path, document: Mapping[str, Any]) -> ResolvedLaunch:
     """The launch the base launch record ``document`` read from ``path`` serves: its server argv and environment as the
-    gate seeds a launch with them (:func:`~hyperloom.orchestrator.state.base_launch.server_base`), the record itself,
-    its digest and its entrypoint, which Arbor checks its own launch against at its start. The record names no
-    served model and no client command: those are the gate's client's. Raise :class:`ArborRefused` when it is no
-    valid record, or a scriptable base, which launches no server."""
+    gate seeds a launch with them (:func:`~hyperloom.orchestrator.state.base_launch.server_base`) and each redacted
+    value from this host (:func:`~inference_suite.contracts.held_env`, as the suite's own round fills it), the record itself, its
+    digest and its entrypoint, which Arbor checks its own launch against at its start. The record names no served
+    model and no client command: those are the gate's client's. Raise :class:`ArborRefused` when it is no valid record,
+    a scriptable base, which launches no server, or one whose redacted value this host does not hold."""
 
     from hyperloom.orchestrator.state.base_launch import server_argv, server_base
 
@@ -366,9 +374,13 @@ def _read_record(path: Path, document: Mapping[str, Any]) -> ResolvedLaunch:
         raise ArborRefused([f"the base launch record {path} cannot be used: {error}"]) from error
     if base.scriptable:
         raise ArborRefused([f"the base launch record {path} runs a script and launches no server for Arbor"])
+    try:
+        held = held_env(base.env, os.environ)
+    except CredentialNotHeld as error:
+        raise ArborRefused([f"the base launch record {path} cannot be served: {error}"]) from error
     return ResolvedLaunch(
         server_flags=" ".join(_flag_word(word) for word in server_argv(base)),
-        server_env=dict(server_base(base).env),
+        server_env={**held, **server_base(base).env},
         record=str(path),
         digest=base.digest(),
         entrypoint=base.entrypoint,

@@ -29,7 +29,10 @@ it.
   fixed-workload Arbor was served only the root recipe's flags. `--agent-launch`
   still replaces the base. The start check holds only while the root recipe
   adds nothing to the base; a branch whose root recipe does (a replayed Recipe
-  KB champion, for one) starts without it.
+  KB champion, for one) starts without it. A credential the base exports, which
+  the session froze as its sha256, is served from the host's variable of the
+  same name; a host that holds no value of it, or another one, refuses the
+  Arbor at preflight.
 - **A recipe can bound the SGLang draft its deployment runs.** A benchmark YAML
   may declare `speculative_draft_limits` (`draft_length`, `draft_tokens`,
   `topk`, each with `min` and/or `max`). An explore variant outside them is
