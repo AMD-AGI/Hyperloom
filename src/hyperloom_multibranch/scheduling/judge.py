@@ -19,9 +19,10 @@ candidate waiting for its confirm, unless its judging failed. In a session that 
 reads :data:`~hyperloom_multibranch.scheduling.judge_prompt.PLAYBOOK_JUDGE_PROMPT`, where the stall evidence is the one
 stop rule for a stall, and the playbook's safety envelope refuses the stop, though not a lower K, of a branch with a
 stranded lead and of one drawn for probation (:func:`envelope_holds`). A branch in line for a dev sandbox is held the
-same way while it waits (:func:`dev_wait_holds`), so the time it waits does not stop it for a stall. The scheduler finds the held branches again as it applies the decision, since a
-candidate can start waiting while the judge answers, and :func:`hold_decision` refuses their orders and names them in
-the decision.
+same way while it waits (:func:`dev_wait_holds`): the hold defers a stop while the branch is in line, and the stall it
+builds meanwhile still counts once it leaves the line. The scheduler finds the held branches again as it applies the
+decision, since a candidate can start waiting while the judge answers, and :func:`hold_decision` refuses their orders
+and names them in the decision.
 """
 
 from __future__ import annotations
