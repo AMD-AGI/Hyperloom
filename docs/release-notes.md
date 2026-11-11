@@ -231,11 +231,24 @@ it.
   `--reference-script`. See
   [Options of `run`](how-to/run-multibranch.md#options-of-run).
 
-- **A local `hyperloom-multibranch run` needs its model on the machine.**
-  `--model` must be a checkpoint directory, or a hub id found under
-  `HL_MODEL_BASE` or in the Hugging Face cache; otherwise the command refuses
-  before the session directory exists. Before, the local test's server, whose
+- **A local `hyperloom-multibranch run`, `resume` or `final-only` needs its
+  model on the machine.** `--model` must be a checkpoint directory, or a hub id
+  found under `HL_MODEL_BASE` or in the Hugging Face cache; otherwise `run`
+  refuses before the session directory exists, and `resume` and `final-only`
+  refuse a session recorded with such a model. Before, the local test's server, whose
   home is its sandbox directory, fetched the hub id from the hub.
+
+- **A hosted `hyperloom-multibranch` run publishes its own inference_suite
+  staging.** When it pins its runner cache entry, the run now also publishes
+  the commit's inference_suite staging into the runner cache; a staging it
+  cannot publish ends the run with exit 1 (`CacheBuildError`) before anything
+  is measured. Before, a hosted runner found only the staging a `cache_build`
+  run had published for the commit.
+
+- **Single-lineage warm start replays a recipe that only removes launch
+  options.** `hyperloom optimize` now replays a Recipe KB record whose only
+  change is `remove_args`, as an MB branch writes one. Before, such a record
+  was dropped as having nothing to replay.
 
 - **A serving round's server runs in the interpreter its framework checks
   read.** The server now starts as `<framework_python> -m sglang.launch_server`

@@ -34,7 +34,8 @@ from ._subprocess_kill import (
 from .benchmark_result import harvest_leaked_artifacts
 from ._agentx_checkpoint import CHECKPOINT_ARTIFACT_NAME, AgentxCheckpoint
 from ._agentx_prefix_cache import PREFIX_CACHE_OFF_ERROR_CLASS, refuse_cacheless_agentx_baseline
-from ._round_folder import RoundFolder, is_round_folder
+from ._failed_step import failed_step_error_class
+from ._round_folder import RoundFolder, is_round_folder, read_round_launch
 from ._suite.config import fixed_workload
 from ._suite.rounds import TOOL_CACHE_ENV, SuiteRoundRefused, external_agentx_config, staged_tool_cache
 from ._spec_decode_context_copy import CONTEXT_COPY_REFUSAL, context_copy_refusal
@@ -83,12 +84,14 @@ __all__ = [
     "context_copy_refusal",
     "default_baseline_config",
     "explore_executor",
+    "failed_step_error_class",
     "external_agentx_config",
     "fixed_workload",
     "harvest_leaked_artifacts",
     "is_round_folder",
     "materialize_benchmark_config",
     "normalize_proposal",
+    "read_round_launch",
     "refuse_cacheless_agentx_baseline",
     "refuse_unpinned_speculative_change",
     "report_executor",

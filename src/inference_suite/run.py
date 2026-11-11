@@ -692,8 +692,45 @@ def _eval_result(layout: RunLayout, plan: EvalPlan, task: str) -> EvalResult | S
         return Stop(FailedStep.EVAL_FAILED, f"the eval output in {layout.eval_dir} cannot be read: {exc!r}")
 
 
+def _anchored(config: SuiteConfig, root: Path) -> SuiteConfig:
+    """``config`` with its relative paths below ``root``: the server, the harness and the probes start elsewhere."""
+
+    def under(path: str) -> str:
+        return str(root / path)
+
+    server = config.server
+    model_path = server.model_path
+    if (root / model_path).exists():
+        model_path = under(model_path)
+    python = server.framework_python
+    if Path(python).parent != Path():
+        python = under(python)
+    pid_dir = config.lifecycle.pid_dir
+    mlperf = config.mlperf
+    return replace(
+        config,
+        server=replace(
+            server,
+            base=replace(server.base, path=under(server.base.path)),
+            model_path=model_path,
+            framework_python=python,
+        ),
+        lifecycle=replace(config.lifecycle, pid_dir=None if pid_dir is None else under(pid_dir)),
+        paths=replace(config.paths, run_dir=under(config.paths.run_dir), tool_cache=under(config.paths.tool_cache)),
+        mlperf=None
+        if mlperf is None
+        else replace(
+            mlperf,
+            dataset=under(mlperf.dataset),
+            tokenizer=under(mlperf.tokenizer),
+            endpoints_dir=under(mlperf.endpoints_dir),
+        ),
+    )
+
+
 def run_round(config: SuiteConfig, *, cancel: Cancel = _not_cancelled) -> RoundResult:
-    """Run the one round ``config`` describes into its run_dir, which must be absent or empty.
+    """Run the one round ``config`` describes into its run_dir, which must be absent or empty. A relative path in
+    ``config`` names a path below the caller's working directory.
 
     ``cancel`` is asked at every poll; a non-empty answer stops the round, reaps what it started, and is the report's
     failure detail.
@@ -701,6 +738,7 @@ def run_round(config: SuiteConfig, *, cancel: Cancel = _not_cancelled) -> RoundR
     Raises:
         RunDirError: The run_dir already holds something.
     """
+    config = _anchored(config, Path.cwd())
     layout = RunLayout(Path(config.paths.run_dir))
     layout.claim()
     config_sha256 = _write_config(config, layout)

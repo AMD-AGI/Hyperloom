@@ -108,12 +108,12 @@ INFERENCEX_REQUIRED = (CLIENT_FILE, GSM8K_TASK, AGENTX_AGGREGATOR_FILE, AGENTX_P
 #: The prefix of a staging :func:`publish` has not renamed into place yet; no reader looks below one.
 PUBLISHING_PREFIX = ".staging-"
 
-#: The Hyperloom source tree this package runs from. Its runner lock pins the lm-eval a round's eval runs, and that
-#: release's dependency tree, with hashes; the package ships no lock of its own for it, so it stages lm-eval only from
-#: a source tree, as ``install.sh`` runs it.
-_SOURCE_TREE = Path(__file__).resolve().parents[2]
-_RUNNER_LOCK = "requirements/runner.lock"
-_VERSION_LOCK = "requirements/runner-cp{digits}.lock"
+#: Where this package ships the sealed runner's locks, which pin the lm-eval a round's eval runs and that release's
+#: dependency tree, with hashes. Each is a symlink in the source tree to the ``requirements/`` lock it ships, so a
+#: wheel carries the file and the source tree keeps one copy.
+_LOCK_DIR = Path(__file__).resolve().parent
+_RUNNER_LOCK = "runner.lock"
+_VERSION_LOCK = "runner-cp{digits}.lock"
 _COMMIT = re.compile(r"[0-9a-f]{40}")
 _GIT = "git"
 _SCHEMA_KEY = "schema"
@@ -384,12 +384,12 @@ def _lm_eval_off_pin() -> str | None:
 def _runner_lock(python_version: str) -> Path:
     # The rule of hyperloom.measure.runner.cache_layout.lock_file, which this package may not import; a test holds the
     # two to the same file for every Python.
-    own = _SOURCE_TREE / _VERSION_LOCK.format(digits=python_version.replace(".", ""))
-    return own if own.is_file() else _SOURCE_TREE / _RUNNER_LOCK
+    own = _LOCK_DIR / _VERSION_LOCK.format(digits=python_version.replace(".", ""))
+    return own if own.is_file() else _LOCK_DIR / _RUNNER_LOCK
 
 
 def runner_lock() -> Path:
-    """The hash lock the sealed runner installs on this interpreter's Python, in the source tree staging runs from."""
+    """The hash lock the sealed runner installs on this interpreter's Python, as this package ships it."""
     return _runner_lock(f"{sys.version_info[0]}.{sys.version_info[1]}")
 
 
@@ -405,7 +405,7 @@ def _install_lm_eval() -> None:
         return
     lock = runner_lock()
     if not lock.is_file():
-        raise StagingError(f"{lock} is absent: lm-eval is installed only from a Hyperloom source tree's runner lock")
+        raise StagingError(f"{lock} is absent: lm-eval is installed only from the runner lock this package ships")
     # pip before 26.1 ignores a constraints file's hashes, so every pin is a requirement.
     install = [sys.executable, "-m", "pip", "install", "--no-input", "--disable-pip-version-check"]
     _run_staging_step([*install, "--require-hashes", "--requirement", str(lock)], f"installing {LM_EVAL_REQUIREMENT}")

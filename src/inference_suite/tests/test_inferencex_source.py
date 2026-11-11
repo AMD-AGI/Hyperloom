@@ -24,6 +24,7 @@ from pathlib import Path
 import pytest
 import yaml
 
+from hyperloom_common.gpu_identity import AMD_GPU_BOARDS
 from inference_suite.contracts import LaunchQuery, SourceKind, Workload
 from inference_suite.pins import INFERENCEX_CLIENT_COMMIT, INFERENCEX_REPO_URL
 from inference_suite.recipe import inferencex
@@ -31,8 +32,9 @@ from inference_suite.recipe.inferencex import (
     MASTER,
     PROJECT,
     agentx_trace,
+    InferencexPoint,
     inferencex_launches,
-    inferencex_points,
+    served_points,
     srtctl_cli_args,
 )
 from inference_suite.recipe.model import (
@@ -75,6 +77,17 @@ def _agentx(model: str, *, concurrencies, framework: str = "sglang", board: str 
     )
 
 
+def every_point(bundle: RepoBundle) -> tuple[InferencexPoint, ...]:
+    """Every point of ``bundle``, as the queries for each model, framework and board its master config names see them."""
+    master = yaml.safe_load(bundle.text(MASTER))
+    served: dict[str, InferencexPoint] = {}
+    for model, framework in sorted({(entry["model"], entry["framework"]) for entry in master.values()}):
+        for board in AMD_GPU_BOARDS:
+            query = _fixed(model, framework=framework, board=board)
+            served.update((point.key, point) for point in served_points(query, bundle).points)
+    return tuple(served.values())
+
+
 def _launches(query: LaunchQuery, snapshot: InferencexSnapshot | None = None) -> tuple[SourceLaunch, ...]:
     found = inferencex_launches(query, snapshot or _main())
     assert not isinstance(found, SourceMiss), found
@@ -88,7 +101,7 @@ def _point_digest(recipe: str, environment: dict[str, str]) -> str:
 
 
 def test_points_and_their_launcher_environment_match_inferencex_own_matrix():
-    points = inferencex_points(_main().bundle)
+    points = every_point(_main().bundle)
 
     assert len(points) == 321
     assert sorted(_point_digest(point.recipe, point.environment()) for point in points) == sorted(
@@ -98,7 +111,7 @@ def test_points_and_their_launcher_environment_match_inferencex_own_matrix():
 
 def test_every_point_binds_exactly_one_variant_as_recorded():
     snapshot = _main()
-    points = inferencex_points(snapshot.bundle)
+    points = every_point(snapshot.bundle)
 
     assert {point.key for point in points} == set(snapshot.selections)
     assert not snapshot.rejections
@@ -208,7 +221,7 @@ def test_agentx_launch_carries_the_recorded_golden_acceptance():
 
 
 def test_agentx_skips_atom_entries():
-    points = [point for point in inferencex_points(_main().bundle) if point.framework == "atom"]
+    points = [point for point in every_point(_main().bundle) if point.framework == "atom"]
     agentic = next(point for point in points if point.scenario.value == "agentic-coding")
     query = _agentx(agentic.model, concurrencies=(agentic.conc,), framework="atom", board=agentic.board)
 
@@ -239,7 +252,7 @@ def test_pr4593_snapshot_serves_glm53_agentx_c8_with_golden_3_48():
 
 
 def test_a_cluster_runner_stands_for_its_board_and_like_boards_share_launches():
-    points = {point.runner: point.board for point in inferencex_points(_main().bundle)}
+    points = {point.runner: point.board for point in every_point(_main().bundle)}
     assert points["cluster:mi355x-amds"] == "mi355x"
     assert points["cluster:mi325x-amd"] == "mi325x"
     assert points["cluster:mi300x-amd"] == "mi300x"

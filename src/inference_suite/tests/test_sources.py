@@ -43,11 +43,12 @@ from inference_suite.contracts import (
 )
 from inference_suite.recipe import sources
 from inference_suite.recipe.golden_curve import GoldenLength, GoldenRequest
-from inference_suite.recipe.inferencex import INFERENCEX_REPO, PROJECT, InferencexPoint, Scenario, inferencex_points
+from inference_suite.recipe.inferencex import INFERENCEX_REPO, PROJECT, InferencexPoint, Scenario
 from inference_suite.recipe.model import ApiResponse, InferencexSelection, InferencexSnapshot, RecipeSourceError
 from inference_suite.recipe.resolve import UnreadSource
 from inference_suite.recipe.user_file import UserFile, parse_user_file
 from inference_suite import cli
+from inference_suite.tests.test_inferencex_source import every_point
 from inference_suite.recipe.sources import (
     HF_MODELS_API,
     MAIN,
@@ -378,7 +379,7 @@ def _sha256(text: str) -> str:
 
 
 def test_inferencex_answers_are_recorded_as_data_from_an_isolated_interpreter(tmp_path: Path) -> None:
-    points = inferencex_points(_main_fixture().bundle)
+    points = every_point(_main_fixture().bundle)
     fixed = next(point for point in points if (point.framework, point.scenario) == ("sglang", Scenario.FIXED))
     agentic = next(point for point in points if (point.framework, point.scenario) == ("sglang", Scenario.AGENTIC))
     refused = next(point for point in points if point.framework == "atom")
@@ -411,7 +412,7 @@ def test_inferencex_answers_are_recorded_as_data_from_an_isolated_interpreter(tm
 
 
 def test_upstream_code_that_fails_rather_than_answers_is_refused(tmp_path: Path) -> None:
-    point = inferencex_points(_main_fixture().bundle)[0]
+    point = every_point(_main_fixture().bundle)[0]
     project = _stand_in_project(tmp_path / "project", [point])
     (project / "infx/srt_slurm/workload.py").write_text("raise ImportError('srtctl is missing')\n", encoding="utf-8")
 
@@ -453,7 +454,7 @@ def test_the_main_inferencex_fixture_is_what_inferencex_answers_at_its_commit(tm
     recorded = _main_fixture()
     _checkout_commit(INFERENCEX_REPO, recorded.bundle.commit, tmp_path / "inferencex")
     project = tmp_path / "inferencex" / PROJECT
-    points = inferencex_points(recorded.bundle)
+    points = every_point(recorded.bundle)
     drafted = next(
         point
         for point in points

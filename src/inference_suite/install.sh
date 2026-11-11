@@ -4,9 +4,9 @@
 #
 # install.sh <tool-cache-dir>: stage the tools an inference_suite round runs into <tool-cache-dir> and print the
 # manifest's sha256 (python -m inference_suite stage). Re-running on a staged cache verifies it and stages nothing.
-# PYTHON (python3) must be the interpreter rounds run under: lm-eval is installed into it from the hash lock of the
-# source tree this script sits in (requirements/runner.lock). The inference_suite beside
-# this script is the one that stages, so the pins it ships are the ones staged.
+# PYTHON (python3) must be the interpreter rounds run under: lm-eval is installed into it from the runner hash lock
+# the inference_suite beside this script ships. That package is the one that stages, so the pins it ships are the
+# ones staged.
 set -euo pipefail
 
 if [ "$#" -ne 1 ]; then
