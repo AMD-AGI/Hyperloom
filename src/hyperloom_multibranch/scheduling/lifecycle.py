@@ -22,8 +22,10 @@ closing the toolbox within its own short bound and killing every registered proc
 A session that ended before FINAL, killed with its machine before CLOSE included, is read back by :func:`persisted_run`
 and taken up again by :meth:`Session.finish`, which runs FINAL and CLOSE alone on a budget that is already spent,
 carrying the stop reason that session ended with: the roster and the branches are the ones that session persisted,
-and only its report, dashboard and breakdown are written again. One whose PRELUDE recorded its baseline can be
-continued instead, without PRELUDE, by :meth:`Session.resume` (:func:`resumable_run`).
+and only its report, dashboard and breakdown are written again. One that ended before PRELUDE recorded its baseline
+(:func:`prelude_landed`) has no candidate: the finish withdraws its unfinished tests and CLOSE reports why nothing was
+chosen. One whose PRELUDE recorded its baseline can be continued instead, without PRELUDE, by :meth:`Session.resume`
+(:func:`resumable_run`).
 """
 
 from __future__ import annotations
@@ -45,8 +47,8 @@ from hyperloom.measure.versions import socket_versions
 from hyperloom.orchestrator.knowledge.remote_recipe.client import RemoteRecipeClient
 from hyperloom_multibranch.contracts.fork import ShareRequest
 from hyperloom_multibranch.contracts.blackboard import INTEGRATION_BRANCH, Role, Writer
-from hyperloom_multibranch.contracts.blackboard.interfaces import UsageSink
-from hyperloom_multibranch.contracts.blackboard.records import LineageEvent, ManifestFingerprint
+from hyperloom_multibranch.contracts.blackboard.interfaces import NotRecorded, UsageSink
+from hyperloom_multibranch.contracts.blackboard.records import BaselineRecord, LineageEvent, ManifestFingerprint
 from hyperloom_multibranch.contracts.blackboard.records import SessionProfile
 from hyperloom_multibranch.contracts.blackboard.vocab import LineageKind, UsageSource
 from hyperloom_multibranch.contracts.repo import ExperimentRepo
@@ -196,6 +198,10 @@ COMPLETED_REASONS = frozenset(
 )
 CUT_SHORT = "CLOSE was cut short after a stop signal"
 NO_CARDS_LEFT = "the toolbox has fewer usable cards than one test needs, so FINAL could not run"
+#: Why FINAL over a session that ended before its baseline was recorded chose nothing.
+NO_BASELINE = "no candidate: the session ended before PRELUDE recorded its baseline, so FINAL had nothing to validate"
+#: The blackboard writer name a restart reads the baseline as.
+RESTART_READER = "restart"
 #: Why a session that was to stop after its map kept none.
 NO_ARBOR_TO_MAP = "no map: no agent named is an Arbor whose directions could be mapped"
 NO_MAP = "no map: the dossier pass set none and none could be generated from the root's shares"
@@ -438,19 +444,23 @@ class Session:
         make it so.
 
         The candidates are read before anything else happens, so a session FINAL cannot run over is refused without a
-        stop or a report being written. The budget is already spent, which is the state the normal path is in when
-        FINAL overruns the deadline: FINAL is unbounded and CLOSE gets one CLOSE grace from its end. The report says
-        how that session's agents were isolated, as its manifest recorded.
+        stop or a report being written. A session that ended before PRELUDE recorded its baseline has no candidate:
+        its unfinished tests are withdrawn and CLOSE reports :data:`NO_BASELINE` (:meth:`_no_final`). The budget is
+        already spent, which is the state the normal path is in when FINAL overruns the deadline: FINAL is unbounded
+        and CLOSE gets one CLOSE grace from its end. The report says how that session's agents were isolated, as its
+        manifest recorded.
         """
 
-        candidates = await self._final_candidates()
+        landed = await recorded_baseline(self._blackboard) is not None
+        candidates = await self._final_candidates() if landed else None
         self._agent_isolation = read_manifest(self._layout.manifest).agent_isolation
         total = budget_seconds(self._settings.max_hours)
         budget = SessionBudget(self._clock.now() - total, total)
         self._in_final = True
         hard_stop = HardStop(budget, self._clock)
         ending = SessionOutcome(ended, None, None, "")
-        return await self._run_and_close(self._final_phases(candidates, ended), ending, budget, hard_stop)
+        work = self._no_final(ended) if candidates is None else self._final_phases(candidates, ended)
+        return await self._run_and_close(work, ending, budget, hard_stop)
 
     async def resume(self, ended: SessionStopReason) -> SessionOutcome:
         """Continue the session an earlier run left here, which ended for ``ended`` before FINAL, with EXPLORE, FINAL
@@ -890,6 +900,15 @@ class Session:
         await self._toolbox.set_policy(final_quota(self._settings.caps))
         return await self._final(candidates, ended)
 
+    async def _no_final(self, ended: SessionStopReason) -> SessionOutcome:
+        """No FINAL over a session that recorded no baseline: the toolbox takes the dead session's unfinished tests up
+        again from its submit log, which re-attaches a measurement still running, and withdraws them (:meth:`_take_up`),
+        so CLOSE ends their sandboxes instead of leaving them to hold the grant's slots until they time out."""
+
+        await self._take_up(ended)
+        self._decisions.record(Decision(DecisionKind.FINAL, NO_BASELINE, detail={"chosen": None}))
+        return SessionOutcome(ended, None, None, NO_BASELINE)
+
     async def _take_up(self, ended: SessionStopReason) -> None:
         """Start the toolbox, which takes up an earlier run's unfinished tests from its log, and withdraw them."""
 
@@ -998,9 +1017,8 @@ class Session:
         integration = integration_row(progress)
         if integration is None:
             raise RuntimeError("the blackboard has no integration branch after PRELUDE recorded its root")
-        return await choose_candidates(
-            progress, integration.head_commit, integration.head_value, self._settings.workload.metric, self._repo
-        )
+        root = (await self._blackboard.baseline()).root_commit
+        return await choose_candidates(progress, integration, self._settings.workload.metric, self._repo, root)
 
     async def _close(self, ending: SessionOutcome, hard_stop: HardStop) -> SessionOutcome:
         if ending.stop_reason is SessionStopReason.ABORTED:
@@ -1093,10 +1111,45 @@ class PersistedRun:
     ended: SessionStopReason
 
 
+async def recorded_baseline(blackboard: LocalBlackboard) -> BaselineRecord | None:
+    """The baseline the rule gate wrote on ``blackboard``, ``None`` while it has written none."""
+
+    try:
+        return await blackboard.baseline()
+    except NotRecorded:
+        return None
+
+
+def prelude_landed(root: Path) -> bool:
+    """Whether the session in ``root`` got through PRELUDE far enough for FINAL to validate it: it committed its root
+    and the rule gate wrote its baseline. A session that did not measured nothing a later start could carry on from.
+    Creates nothing. Blocks, and runs an event loop of its own."""
+
+    layout = SessionLayout(root)
+    if not layout.root_recipe.is_file():
+        return False
+    reader = LocalBlackboard(layout.blackboard, Writer(Role.OBSERVER, RESTART_READER))
+    return asyncio.run(recorded_baseline(reader)) is not None
+
+
 def persisted_run(root: Path) -> PersistedRun:
     """The session in ``root``, read back from what :meth:`Session._write_manifest` and CLOSE left there, or from what
     a session that was killed left without a CLOSE; raises ValueError naming what keeps FINAL from running over it.
-    Creates nothing. Blocks."""
+    Only the build it ran on may read back what it measured. Creates nothing. Blocks."""
+
+    persisted = persisted_session(root)
+    ran_on, here = read_manifest(persisted.layout.manifest).code_version, code_version()
+    if ran_on != here:
+        raise ValueError(
+            f"the session in {root} ran on {ran_on} and this build is {here}; FINAL and CLOSE read back what that "
+            "build persisted, so run them from it"
+        )
+    return persisted
+
+
+def persisted_session(root: Path) -> PersistedRun:
+    """:func:`persisted_run` on any build: for a session that recorded no baseline, which a restart only closes, so
+    nothing it measured is read back."""
 
     if not root.is_dir():
         raise ValueError(f"{root} is not a directory")
@@ -1105,12 +1158,6 @@ def persisted_run(root: Path) -> PersistedRun:
         manifest = read_manifest(layout.manifest)
     except (OSError, ValueError, KeyError, TypeError) as exc:
         raise ValueError(f"{root} is no multi-branch session that ran: {exc}") from exc
-    ran_on, here = manifest.code_version, code_version()
-    if ran_on != here:
-        raise ValueError(
-            f"the session in {root} ran on {ran_on} and this build is {here}; FINAL and CLOSE read back what that "
-            "build persisted, so run them from it"
-        )
     if not layout.root_recipe.is_file():
         raise ValueError(f"the session in {root} committed no root, so FINAL has nothing to validate")
     return PersistedRun(layout, manifest.settings, ended_before_final(layout))
@@ -1139,6 +1186,7 @@ __all__ = [
     "COMPLETED_REASONS",
     "JUDGE_PROMPT_KEY",
     "LESSONS_KEY",
+    "NO_BASELINE",
     "NO_CARDS_LEFT",
     "PersistedRun",
     "Session",
@@ -1146,5 +1194,8 @@ __all__ = [
     "SessionOutcome",
     "SessionServices",
     "persisted_run",
+    "persisted_session",
+    "prelude_landed",
+    "recorded_baseline",
     "resumable_run",
 ]
