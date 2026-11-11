@@ -1,14 +1,16 @@
 # reference/: a curated copy of KernelForge
 
-**Source:** KernelForge (this repository carries it as `src/kernelforge`), MIT licence
+**Source:** KernelForge, AMD's kernel-optimization framework and knowledge base (public in
+[AMD-AGI/Hyperloom](https://github.com/AMD-AGI/Hyperloom) as `src/kernelforge`), MIT licence
 (`LICENSE-KernelForge`, copied unchanged).
-- **Commit:** `cd9c585` (2026-08-17), from that copy's `RUNNER_README.txt`. The copy is not a git
+- **Commit:** `cd9c585`, as recorded with the copy it was taken from. That copy was not a git
   checkout, so `git log` cannot confirm it.
-- KernelForge's AITER pages cite AITER `b467ce342`; its FlyDSL pages, FlyDSL `2812676` (2026-05-18).
+- KernelForge's AITER pages cite AITER `b467ce342`; its FlyDSL pages, FlyDSL `2812676`.
   Check every claim against the source installed in the image (`../probe-image.sh` prints the paths).
 
-The layout under this directory is KernelForge's own. The files are copied unchanged: never edit
-them. Corrections go in `STALE.md` and in `../SKILL.md`.
+The layout under this directory is KernelForge's own. The files are as copied, but for edits that
+took out dates, names and measured results before publication; never edit them otherwise.
+Corrections go in `STALE.md` and in `../SKILL.md`.
 
 ## What was copied
 
@@ -21,7 +23,7 @@ them. Corrections go in `STALE.md` and in `../SKILL.md`.
 | `knowledge_base/aiter/` | 5 of its 11 pages: `operator_catalog.md`, `backend_dispatch.md`, `integration_patterns.md`, `jit_and_build.md`, `pitfalls.md` | 42,101 | AITER's ops, dispatch, build and traps |
 | `knowledge_base/skills/` | 2 of 36: `mfma_16x16x128_f8f6f4_fp4_operand_layout.json`, `mfma_16x16x128_f8f6f4_operand_layout.json` | 9,963 | the scaled-MFMA operand layouts the SKILL.md cites for block-scaled FP4/FP8 on gfx950 |
 | `knowledge_base/README.md` | 1 | 1,687 | the citation prefixes the CK and HIP playbooks use |
-| `examples/triton2flydsl-mxfp8-grouped-gemm/` | all 7 | 27,798 | a Triton → FlyDSL port of SGLang's MXFP8 MoE grouped GEMM (MiniMax-M3, MI355X) |
+| `examples/triton2flydsl-mxfp8-grouped-gemm/` | all 7 | 27,798 | a Triton → FlyDSL port of SGLang's MXFP8 MoE grouped GEMM (one MoE model's shapes, MI355X) |
 | `examples/triton2flydsl-softmax-flydsl-rewrite/` | all 6 | 28,194 | the smallest Triton → FlyDSL port |
 | `examples/flydsl_gemma_rmsnorm/` | all 5 | 24,995 | a FlyDSL kernel with driver, oracle and graph harness |
 | `examples/flydsl-softmax-forge-loop/` | all 5 | 34,096 | the same for softmax, with the capture-validity guard |
@@ -41,7 +43,8 @@ copied (`fmoe.md`, `dispatch_and_rebind.md`, `languages/flydsl/...`) do not reso
 ## What was not copied, and why
 
 - **`knowledge_base/shared/gpu_arch_gfx950.md`:** stale. It says gfx950 has 304 CUs, 32 LDS banks
-  and HBM "similar to MI300X's 5.3 TB/s"; it has 256, 64 and 8.0 TB/s (the hardware skill).
+  and HBM "similar to MI300X's 5.3 TB/s"; it has 256, 64 and 8.0 TB/s (the hardware skill, from
+  AMD's published MI355X specifications).
 - **Nothing was skipped for size.** No copied directory holds a binary, trace or log; the largest
   file is `knowledge_base/ck/ck_playbook.md` (211,879 bytes), a document, kept.
 - **Outside the plan's list:** the rest of `knowledge_base/aiter/` (the asm playbooks and notes,

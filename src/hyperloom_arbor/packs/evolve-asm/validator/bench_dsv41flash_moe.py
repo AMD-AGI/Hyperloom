@@ -8,7 +8,7 @@ sys.path.insert(0, '/usr/local/lib/python3.12/dist-packages')
 
 # The optimized kernel registration
 import aiter.ops.flydsl.moe_kernels as _mk
-# Use the actual compiled heuristic fallback kernel for DSv4.1-Flash decode.
+# Use the actual compiled heuristic fallback kernel for the decode shapes.
 DEFAULT_MOE2_KERNEL = 'flydsl_moe2_afp8_wfp4_bf16_t32x128x128_atomic_bnt2'
 
 def parse_args():
@@ -59,13 +59,13 @@ def bench_moe1(args):
     # while the grid is under-occupied; once tile_n=128 alone fills the
     # machine, the smaller tile is pure MFMA-efficiency loss. Under the
     # official validator, t16x32x256/kw4 wins at the smallest M, ties near
-    # M=64 and loses above it (worst at the DSpark verify shape), so the
+    # M=64 and loses above it (worst at the largest verify shape), so the
     # small-M tile is gated to M<=64 and M=96..256 keeps t16x128x256.
     # Bit-exact vs the validator's reference config under real e8m0 scales.
     if M <= 64:
         _tm, _tn, _kw, _wpe, _bnt = 16, 32, 4, 3, 0    # small-batch decode
     elif M <= 256:
-        _tm, _tn, _kw, _wpe, _bnt = 16, 128, 1, 3, 0   # decode / DSpark verify
+        _tm, _tn, _kw, _wpe, _bnt = 16, 128, 1, 3, 0   # decode / speculative verify
     else:
         _tm, _tn, _kw, _wpe, _bnt = 64, 128, 1, 2, 1   # prefill
     tile_m = int(os.environ.get('FLYDSL_TM', str(_tm)))

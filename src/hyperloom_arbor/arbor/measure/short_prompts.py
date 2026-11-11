@@ -1,7 +1,7 @@
 """The short-prompt check: one tree, two server processes, the same greedy answers (slice 3).
 
-A KEEP's tree can give wrong output on short prompts in some server processes and not in
-others, and GSM8K does not see it: a long, batched, averaged evaluation. MB first compared each candidate with its parent and
+A KEEP's tree can give wrong output on short prompts in some server processes and not in others,
+and GSM8K does not see it: a long, batched, averaged evaluation. MB first compared each candidate with its parent and
 dropped that: exact greedy matching fires on the largest gains (fp8 KV, quantized GEMMs move
 greedy tokens early). A defect that is wrong in every process is one GSM8K already sees; the
 gap is the defect that is wrong in some processes. So the check compares two processes of the
@@ -255,12 +255,11 @@ def check_keep(config: dict, session_dir, iter_dir, *, relaunch: Callable[[], bo
         _write(out, rec)
         return rec
     cmp = compare(first, second)
-    # Only the prompts sent one at a time gate. An unchanged tree's two processes can agree
-    # on every one of them and still differ on many batched ones in their first tokens:
-    # which prompts share a prefill batch changes between boots, and that flips near-tied
-    # greedy picks. A pooled count hid a small single-request defect under that noise and
-    # could refuse a good KEEP on a noisy boot, so the batched half is recorded for the host
-    # and refuses nothing.
+    # Only the prompts sent one at a time gate. An unchanged tree's two processes agree on
+    # them, but can differ on the batched ones in their first tokens: which prompts share a
+    # prefill batch changes between boots, and that flips near-tied greedy picks. A pooled
+    # count can hide a small single-request defect under that noise and refuse a good KEEP
+    # on a noisy boot, so the batched half is recorded for the host and refuses nothing.
     modes = {p["id"]: p["mode"] for p in prompts}
     seq = [i for i in cmp["first_difference"] if modes.get(i) == SEQUENTIAL]
     n_seq = sum(1 for o in second.get("outputs", []) if modes.get(o["id"]) == SEQUENTIAL)

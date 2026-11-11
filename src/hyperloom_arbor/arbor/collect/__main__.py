@@ -76,8 +76,8 @@ def cmd_check(args: argparse.Namespace) -> int:
 def cmd_project(args: argparse.Namespace) -> int:
     ident = identify(args)
     share = Share()
-    print(json.dumps({**ident, "share_dir": share.campaign_dir(ident["project"], ident["user"],
-                                                               ident["campaign"])}, indent=1))
+    where = share.campaign_dir(ident["project"], ident["user"], ident["campaign"]) if share.root else None
+    print(json.dumps({**ident, "share_dir": where}, indent=1))
     return 0
 
 

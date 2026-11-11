@@ -161,6 +161,9 @@ def cmd_begin(args: argparse.Namespace) -> int:
         state.save(session_dir / "session.json")
         print("[arbor] Map: the round ends; its A/B runs before the next iteration", file=sys.stderr)
         return 0
+    if moved == "revisit":
+        # Every direction is closed, and this iteration measures a NOT MEASURED change once more (arbor/revisit.py).
+        print("[arbor] Map: every direction closed; this iteration is a revisit", file=sys.stderr)
 
     levels = campaign.space.get("levels", [])
     escalation = state.check_escalation(levels)
@@ -321,11 +324,9 @@ def cmd_gate(args: argparse.Namespace) -> int:
             # Archive the diff BEFORE reverting. The revert itself is safe —
             # `git revert` keeps the original commit in history — but that
             # history lives only in the container, and a container lives only on
-            # one node whose docker store is not persistent. A campaign can lose the
-            # patches of changes the gate scored as primary WINS and rejected for
-            # mechanical faults (a contaminated secondary bar, or a
-            # crashing correctness script): once the node's
-            # containers and images are gone, nothing of them is left to look at.
+            # one node whose docker store is not persistent. A REVERT can reject
+            # a primary WIN for a mechanical fault (a contaminated secondary bar,
+            # a crashing correctness script), and its patch must outlive the node.
             #
             # Best-effort on purpose: a REVERT must still revert even if the
             # archive fails, so this never raises into the control flow.
@@ -361,7 +362,13 @@ def cmd_gate(args: argparse.Namespace) -> int:
     return 0
 
 
-def main(argv: list[str] | None = None) -> int:
+CONFIG_HELP = "the campaign config"
+SESSION_HELP = "the campaign's session directory"
+ITER_HELP = "the iteration's number; begin takes the session's next when it is left out"
+
+
+def parser() -> argparse.ArgumentParser:
+    """The command's parser, built without parsing (arbor/cli/payload.py makes its argv and schema)."""
     parser = argparse.ArgumentParser(
         prog="arbor iterate",
         description="Iteration loop — the harness mechanics.",
@@ -369,27 +376,30 @@ def main(argv: list[str] | None = None) -> int:
     sub = parser.add_subparsers(dest="cmd")
 
     p = sub.add_parser("init", help="Initialize a new campaign")
-    p.add_argument("--config", required=True)
+    p.add_argument("--config", required=True, help=CONFIG_HELP)
 
     p = sub.add_parser("begin", help="Start an iteration — render program, check escalation")
-    p.add_argument("--config", required=True)
-    p.add_argument("--session-dir", required=True)
-    p.add_argument("--iter", type=int, default=None)
-    p.add_argument("--branch-id", default=None)
-    p.add_argument("--tier", default=None)
-    p.add_argument("--hypothesis", default=None)
+    p.add_argument("--config", required=True, help=CONFIG_HELP)
+    p.add_argument("--session-dir", required=True, help=SESSION_HELP)
+    p.add_argument("--iter", type=int, default=None, help=ITER_HELP)
+    p.add_argument("--branch-id", default=None, help="the branch's id, for the session tracer's mark")
+    p.add_argument("--tier", default=None, help="the escalation tier, for the session tracer's mark")
+    p.add_argument("--hypothesis", default=None, help="the iteration's hypothesis, for the session tracer's mark")
 
     p = sub.add_parser("gate", help="Gate the agent's work — commit, measure, keep/revert")
-    p.add_argument("--config", required=True)
-    p.add_argument("--session-dir", required=True)
-    p.add_argument("--container", required=True)
-    p.add_argument("--workspace", required=True)
-    p.add_argument("--iter", type=int, required=True)
-    p.add_argument("--change", required=True)
+    p.add_argument("--config", required=True, help=CONFIG_HELP)
+    p.add_argument("--session-dir", required=True, help=SESSION_HELP)
+    p.add_argument("--container", required=True, help="the container the served tree runs in")
+    p.add_argument("--workspace", required=True, help="the served tree (a git repository), as the container sees it")
+    p.add_argument("--iter", type=int, required=True, help=ITER_HELP)
+    p.add_argument("--change", required=True, help="what the iteration changed, in one line: its commit's subject")
     p.add_argument("--reported-metric", type=float, default=None,
                    help="Metric value reported by the agent (skips reading bench_output.json)")
+    return parser
 
-    args = parser.parse_args(argv)
+
+def main(argv: list[str] | None = None) -> int:
+    args = parser().parse_args(argv)
 
     if args.cmd == "init":
         return cmd_init(args)

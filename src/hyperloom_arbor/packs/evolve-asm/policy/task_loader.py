@@ -1,4 +1,4 @@
-"""Load the DSv4.1-Flash (and generic) evolve-asm task YAML into orchestrator configs.
+"""Load an evolve-asm task YAML into orchestrator configs.
 
 The task YAML has a `kernels:` list — each kernel becomes its own independent
 orchestrator instance. This loader:
