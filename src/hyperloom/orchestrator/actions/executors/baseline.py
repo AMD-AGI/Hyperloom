@@ -480,7 +480,7 @@ class BenchmarkRunExecutor(_BaselineAccuracyMixin, _BenchmarkLaunchMixin, _Bench
         timeout_sec = attempt.timeout_sec
         if self.benchmark_watchdog:
             silence_timeout_sec, timeout_sec = resolve_benchmark_timeouts()
-            sync_benchmark_timeout(config_path, timeout_sec)
+        sync_benchmark_timeout(config_path, timeout_sec)
         # The materialized YAML is authoritative for the framework: params and $FRAMEWORK are both optional on a
         # baseline task.
         framework = (

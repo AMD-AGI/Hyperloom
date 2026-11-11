@@ -217,7 +217,6 @@ class VariantResult:
     extra_server_args: str
     extra_envs: dict[str, str]
     status: str
-    benchmark_backend: str | None = None
     valid_measurement: bool | None = None
     diagnostic_only: bool | None = None
     workload_identity: str | None = None
@@ -264,7 +263,6 @@ class VariantResult:
     def to_dict(self) -> dict[str, Any]:
         """Serialize this result to a plain JSON-friendly dict."""
         return {
-            "benchmark_backend": self.benchmark_backend,
             "valid_measurement": self.valid_measurement,
             "diagnostic_only": self.diagnostic_only,
             "workload_identity": self.workload_identity,

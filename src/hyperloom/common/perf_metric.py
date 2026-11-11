@@ -471,8 +471,7 @@ def power_veto_reason(
 def native_agentx_veto(source: Mapping[str, Any], state: Any) -> str:
     """Refuse diagnostic, invalid or differently configured evidence in an AgentX session.
 
-    Validity is the report mapper's verdict, ``round_measurement`` for a round and ``agentx_measurement`` for a v1
-    archive. An MLPerf session's rounds are not AgentX trace replays and are not judged here.
+    Validity is the report mapper's verdict (``round_measurement``). An MLPerf session's rounds are not AgentX trace replays and are not judged here.
     """
     if not agentx_replay_session(state):
         return ""

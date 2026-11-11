@@ -505,8 +505,7 @@ def holds_credentials(value: object, *, in_env: bool = False) -> bool:
         )
     if isinstance(value, Mapping):
         return any(
-            (in_env and is_credential_name(key) and bool(item))
-            or holds_credentials(item, in_env=_is_env_field(key))
+            (in_env and is_credential_name(key) and bool(item)) or holds_credentials(item, in_env=_is_env_field(key))
             for key, item in value.items()
         )
     if isinstance(value, (list, tuple)):

@@ -13,14 +13,15 @@ walk to it holds open, never by a second look up the path. There what this modul
 Anywhere else (a ``0755`` home, a ``1777`` ``/tmp``, a setgid directory the group cannot write, one reached through a
 link at its own name) the umask alone decides, exactly as for a plain ``mkdir`` or ``open``, so what is made there stays
 as private as the account keeps its files; a mode asked for is masked by the umask, never widened. A mode narrower than
-the shared one (``0600`` for a file that holds a credential) is kept as asked, shared or not. Nothing is chowned, and
-an existing entry is never chmodded (another account's would fail ``EPERM``): a file is replaced by rename instead, and
-never opened in place, since a member of the group may have put a link there; the one exception is a file the accounts
-append to in turn (:func:`open_shared_append`), opened without following a link at its name. Nor is a link followed on
-the way to it once the way has passed a directory another account can write or owns (:func:`open_directory`): a member
-of the group, or that owner, could have put one there for any directory of the path. A child process that writes such
-a tree gets :data:`SHARED_CHILD_UMASK` through its own launch (``Popen(umask=...)``); the umask of this process is never
-changed, since its threads share it and it would also open up the files only this account may read.
+the shared one (``0600`` for a file that holds a credential) is kept as asked, shared or not. Nothing is chowned, and an
+existing entry is never chmodded (another account's would fail ``EPERM``): a file is replaced by rename instead, and
+never opened in place, since a member of the group may have put a link there; the exceptions are a file the accounts
+append to in turn (:func:`open_shared_append`) and a lock or database the accounts open in turn (:func:`open_shared`),
+each opened without following a link at its name. Nor is a link followed on the way to it once the way has passed a
+directory another account can write or owns (:func:`open_directory`): a member of the group, or that owner, could have
+put one there for any directory of the path. A child process that writes such a tree gets :data:`SHARED_CHILD_UMASK`
+through its own launch (``Popen(umask=...)``); the umask of this process is never changed, since its threads share it
+and it would also open up the files only this account may read.
 
 Nothing the application executes or sources may live in a tree the group can write.
 """

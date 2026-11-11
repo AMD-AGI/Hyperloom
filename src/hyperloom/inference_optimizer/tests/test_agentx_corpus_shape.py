@@ -26,31 +26,28 @@ _MEASURED = {
 
 
 def _workspace(tmp_path: Path, export: dict | None) -> Path:
-    workspace = tmp_path / "benchmark_sglang_round"
-    (workspace / "aiperf_artifacts").mkdir(parents=True)
+    """An AgentX run_dir whose client left ``export`` as aiperf's summary, one level below the run_dir."""
+    from hyperloom.common.tests.test_round_measurement import _agentx
+    from inference_suite.contracts import RunLayout
+
+    run_dir = tmp_path / "run"
+    layout = RunLayout(run_dir)
+    artifacts = layout.client_dir / "aiperf_artifacts"
+    artifacts.mkdir(parents=True)
+    layout.report.write_text(json.dumps(_agentx().to_document()), encoding="utf-8")
     if export is not None:
-        (workspace / "aiperf_artifacts" / "profile_export_aiperf.json").write_text(json.dumps(export))
-    return workspace
+        (artifacts / "profile_export_aiperf.json").write_text(json.dumps(export))
+    return run_dir
 
 
 def _measure(workspace: Path) -> dict:
-    return extract_benchmark_measurement({"scenario": "agentx"}, workspace=workspace)
+    return extract_benchmark_measurement(None, workspace=workspace)
 
 
 def test_the_rounds_aiperf_export_gives_the_measurement_its_corpus_shape(tmp_path):
     measured = _measure(_workspace(tmp_path, {"input_sequence_length": _ISL, "output_sequence_length": _OSL}))
 
     assert measured["agentx_corpus_shape"] == _MEASURED
-
-
-def test_a_round_that_nests_its_benchmark_one_level_down_still_gives_its_corpus_shape(tmp_path):
-    workspace = tmp_path / "round"
-    artifacts = workspace / "benchmark_sglang_round" / "aiperf_artifacts"
-    artifacts.mkdir(parents=True)
-    export = {"input_sequence_length": _ISL, "output_sequence_length": _OSL}
-    (artifacts / "profile_export_aiperf.json").write_text(json.dumps(export))
-
-    assert _measure(workspace)["agentx_corpus_shape"] == _MEASURED
 
 
 @pytest.mark.parametrize("export", [None, {"input_sequence_length": _ISL}, {"input_sequence_length": "n/a"}])

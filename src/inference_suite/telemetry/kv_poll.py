@@ -66,9 +66,7 @@ __all__ = [
 ]
 
 
-#: Port the persistent server binds when ``benchmark.envs.PORT`` is unset. Mirrors
-#: ``_server_lifecycle.REUSE_PORT_DEFAULT``; duplicated rather than imported because that module imports
-#: ``_subprocess_kill``, which is where this one gets wired in.
+#: Port the persistent server binds when ``benchmark.envs.PORT`` is unset.
 DEFAULT_METRICS_PORT = 8888
 
 #: Scrape timeout. Deliberately well under the 0.5s poll interval of the loop this runs inside: a slow endpoint must not

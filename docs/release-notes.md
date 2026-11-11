@@ -29,6 +29,19 @@ it.
   fixed-workload Arbor was served only the root recipe's flags. `--agent-launch`
   still replaces the base. An Arbor now refuses to start when the root recipe
   adds anything to the base, as it already did under `--reference-script`.
+- **Every round runs through InferenceSuite; Magpie and the `bypass` backend
+  are removed.** Baseline, explore, grid, KEEP, profile and GEAK-replay rounds
+  are inference_suite run directories with a `report.json`, and `failed_step`
+  follows the step it names. Magpie is no longer installed or imported, and
+  nothing clones InferenceX: `install.sh` stages the pinned client into
+  `INFERENCE_SUITE_TOOL_CACHE`. `MAGPIE_*`, `HYPERLOOM_BENCHMARK_BACKEND` and
+  `INFERENCEX_REF` are no longer read; `MAGPIE_EVAL_LIMIT` is now
+  `HYPERLOOM_EVAL_LIMIT`. **Upgrade note:** hosted measurement sheets and
+  result manifests are v2 and nothing reads v1 ones any more: a session
+  started before this change cannot be resumed, nor its accepted results
+  verified again. Build the runner cache (`cache_build`) for the new commit
+  before starting hosted sessions on it; a runner whose published staging
+  differs from the sheet's refuses with `preflight_mismatch`.
 - **A GEAK or Forge reproduction of the measured launch keeps settings whose
   names contain `TOKEN`.** The GEAK handoff's `baseline_env_spec`, the Forge
   handoff's serving context and the reference launch script now carry launch

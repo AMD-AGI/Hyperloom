@@ -18,7 +18,7 @@ from hyperloom.contracts.measurement import AccuracyValue
 from hyperloom.measure import signing
 from hyperloom.measure.bundle import RejectReason, ResultRejected
 from hyperloom.measure.failures import SANDBOX_ACQUIRE_TIMEOUT
-from hyperloom.measure.hosted import PRE_SWITCH, STOPPED_RETURNCODE, HostedMeasurementBackend, HostedStartError
+from hyperloom.measure.hosted import STOPPED_RETURNCODE, HostedMeasurementBackend, HostedStartError
 from hyperloom.measure.hosted_log import STATE_FINISHED, STATE_SENT, STATE_SUBMITTED
 from hyperloom.measure.manifest import encode_manifest
 from hyperloom.measure.returncodes import (
@@ -628,42 +628,6 @@ def test_a_restart_after_the_sandbox_is_gone_measures_again_as_the_next_attempt(
     ]
     assert r.backend.journal.records()[2].extra["verdict"] == "runner_lost"
     assert r.backend.journal.latest("req-1").sandbox_id == resumed.sandbox.sandbox_id
-
-
-def _as_v1_sheet(raw: bytes) -> bytes:
-    """The journalled sheet as the application wrote it before the switch: Magpie, and no base."""
-    document = json.loads(raw)
-    document["schema"] = "hyperloom.measurement-spec/v1"
-    document["tools"] = {"magpie": {"commit": "a" * 40}, "inferencex": document["tools"]["inferencex"]}
-    del document["procedure"]["base_launch"]
-    document["procedure"]["benchmark_backend"] = "magpie"
-    return json.dumps(document).encode()
-
-
-def test_a_restart_that_finds_a_pre_switch_sheet_journalled_measures_afresh_instead_of_resuming_it(
-    rig, tmp_path
-) -> None:
-    """An unfinished attempt of a v1 sheet is a miss: its sandbox measures through Magpie, which the session no longer
-    asks for, so it is closed and the test starts its next attempt with the session's v2 sheet."""
-    r = rig()
-    call = make_call(tmp_path, point=point_yaml(tmp_path, fake_delay=0.5))
-    _crash_mid_wait(r, call)
-    first = r.backend.journal.latest("req-1")
-    raw = r.backend.journal.load_spec(first.request_id, first.attempt)
-    r.backend.journal.save_spec(first.request_id, first.attempt, _as_v1_sheet(raw))
-
-    resumed = r.another_backend().run_test(call)
-
-    assert resumed.returncode == 0 and resumed.sandbox.sandbox_id != first.sandbox_id
-    ended = [x for x in r.backend.journal.records() if x.attempt == 1 and x.state == STATE_FINISHED]
-    assert [x.extra["verdict"] for x in ended] == [PRE_SWITCH]
-    assert first.sandbox_id not in {info.sandbox_id for info in r.provider.find({}, role="measurement")}
-    latest = r.backend.journal.latest("req-1")
-    assert (
-        latest.attempt == 2
-        and MeasurementSpec.from_bytes(r.backend.journal.load_spec(latest.request_id, latest.attempt)).schema
-        == "hyperloom.measurement-spec/v2"
-    )
 
 
 def test_a_second_call_for_a_finished_request_is_the_next_attempt(rig, tmp_path) -> None:

@@ -249,6 +249,24 @@ class LocalSandbox:
         the sandbox's processes write the tree, so a path is never checked and then opened again by name."""
         return open_rooted(self.fs, virt, flags, make_parents=make_parents)
 
+    def _write_target(self, virt: str) -> int:
+        """``virt`` open to write from its start, made with its parents if missing. A file made here is the app's alone
+        (:func:`~hyperloom.sandbox.rooted.open_rooted`), and is given to the account the sandbox's processes run as, if
+        any, as the provider gives it the rest of their tree: never a file that was there, which a process of theirs
+        may have linked to one of the app's, nor one made through a link left at its name."""
+        flags = os.O_WRONLY | os.O_CREAT | os.O_TRUNC | os.O_NONBLOCK
+        try:
+            fd = self._open(virt, flags | os.O_EXCL, make_parents=True)
+        except FileExistsError:
+            return self._open(virt, flags)
+        if self._user is not None:
+            try:
+                os.fchown(fd, *self._user)
+            except BaseException:
+                os.close(fd)
+                raise
+        return fd
+
     def _file(self, path: str, *, write: bool) -> IO[bytes]:
         """The regular file ``path`` names, open to read, or to write from its start (made if missing, with its
         parents); never a pipe or device a sandbox's process put there, which could block the app.
@@ -258,8 +276,7 @@ class LocalSandbox:
             IsADirectoryError: For a directory.
         """
         virt = self._gate(path, write=write)
-        flags = os.O_WRONLY | os.O_CREAT | os.O_TRUNC if write else os.O_RDONLY
-        fd = self._open(virt, flags | os.O_NONBLOCK, make_parents=write)
+        fd = self._write_target(virt) if write else self._open(virt, os.O_RDONLY | os.O_NONBLOCK)
         try:
             mode = os.fstat(fd).st_mode
             if stat.S_ISDIR(mode):
