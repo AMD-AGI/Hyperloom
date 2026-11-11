@@ -352,6 +352,18 @@ The declaration is the boundary, and it is enforced everywhere a change could en
 
 A workload with no declaration is unaffected; everything above continues to apply to it.
 
+## Use the optimized model without Hyperloom
+
+On CLOSE, a session that declared a scope exports what it accepted: `deployment/hyperloom_optimize.py`, with bookkeeping in `reports/deployment.json` (`kind: single_file`). A session that declared none asks for no export, and the CLOSE step records `skipped`.
+
+Copy the single module beside the original script and run that script in its original runtime. No Hyperloom installation is needed at the destination.
+
+The export is checked against what was benchmarked, and refuses rather than shipping something unproven. The module is compared byte for byte against the source snapshots recorded at each KEEP, so it is refused if it differs from what was measured, if no snapshot covers it at all, or if it imports a file sitting beside it -- only the one module ships, so a sibling import would arrive broken. For the same reason it is refused when the accepted stack changed any file other than the module: one file is the whole deliverable, so a configuration that needed more than one was never one you could be handed. None of this requires the file to live in a git repository.
+
+A refusal is recorded with its reason on the CLOSE step and written into the session package, so the artifacts never imply an export that did not happen.
+
+`reports/deployment.json` always reports `"validation": "not_run"`, and it can never say anything else -- a single-file export ships one module, with no CLI of its own to run a check. What stands behind the module is everything that happened before it was written out: every accepted change had to pass your own quality gate, and the module is compared against the copy saved at the moment it was accepted. Do not read the field as a check that failed.
+
 ## Troubleshooting
 
 | Symptom | Cause |
