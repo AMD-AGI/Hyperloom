@@ -78,7 +78,7 @@ vLLM/SGLang ship **per-shape JSON** configs (`E=…,N=…,device_name=MI300X.jso
 > config for an unseen `E,N,int4_w4a16` shape → the int4 expert GEMM runs on a slow default fallback
 > (the "Using default MoE config" warning). A per-M-bucket micro-sweep → `VLLM_TUNED_CONFIG_FOLDER`
 > (vLLM's env, NOT the sglang one above) speeds up the prefill-dominant buckets and only
-> changes Triton tile/scheduling, so it adds **no memory**. Proven e2e on Kimi-K2.6 (TP=8,
+> changes Triton tile/scheduling, so it adds **no memory**. Proven e2e on an int4 MoE model (TP=8,
 > int4) with `--max-num-batched-tokens 16384`. Recipe + driver: `e2e_workflow/knowledge/gemm_tuning/moe_int4_tuning.md`.
 >
 > ⚠️ **Memory caveat for the quant path (§1) at e2e.** The fp8/CK block-scale path is the dominant

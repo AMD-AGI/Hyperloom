@@ -158,11 +158,11 @@ def outcome_metrics(steps: list[dict[str, Any]], session_json: dict[str, Any],
         delta = mark.get("delta_pct")
         if (spread is not None and isinstance(delta, (int, float))
                 and abs(delta) < spread):
-            # Carry the individual runs. The spread alone can mislead: it can be
-            # large only because a hot-cache run the agent had itself discarded
-            # as invalid is among the artifacts, while the cold runs spread far
-            # less. A reader needs the values to judge which comparison is the
-            # honest one.
+            # Carry the individual runs. The spread alone can mislead: it is
+            # large when a hot-cache run the agent had itself discarded as
+            # invalid is among the artifacts, while the cold runs spread far
+            # less. A reader needs the values to judge
+            # which comparison is the honest one.
             below_noise.append({"iteration": it, "delta_pct": delta,
                                 "noise_spread_pct": spread,
                                 "decision": mark.get("decision"),
@@ -192,9 +192,9 @@ def _billed_usages(steps: list[dict[str, Any]]) -> list[dict[str, Any]]:
     A single assistant message becomes several trajectory steps — a thinking
     block, some text, one per tool_use — and every step carries that message's
     whole ``usage`` dict. Summing per step therefore counts the same tokens
-    once per block, several times over for output and thinking tokens, which
-    made every cost-per-percent number in the report several times too
-    expensive.
+    once per block: between two and three times over for output and thinking
+    tokens on a long validation run, which made every cost-per-percent number
+    in the report that many times too expensive.
 
     Steps predating ``message_id`` (or reconstructed from hooks alone, which
     have no usage at all) fall back to identity so nothing is silently dropped.
