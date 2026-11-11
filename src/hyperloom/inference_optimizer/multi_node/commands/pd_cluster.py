@@ -79,7 +79,7 @@ def _find_server(pidfile, needle):
             parent = _ppid(cand)
         except OSError:
             continue
-        if needle not in cmd:
+        if not any(part in cmd for part in needle.split("|")):
             continue
         if parent == 1:
             return cand
@@ -364,10 +364,11 @@ def engines_not_running(state: dict[str, Any], *, timeout: int = 30) -> list[str
         role = str(pod.get("role") or "")
         ip = str(pod["podIP"])
         port = int(pod.get("sshPort") or state.get("ssh_port") or 0)
-        needle = shlex.quote(cmdline_needle(role, str(state.get("backend") or "atomesh")))
+        needle = cmdline_needle(role, str(state.get("backend") or "atomesh"))
+        patterns = " ".join(f"-e {shlex.quote(part)}" for part in needle.split("|"))
         script = (
             f'pid=$(cat {_pidfile(role)} 2>/dev/null) && kill -0 "$pid" 2>/dev/null '
-            f"&& tr '\\0' ' ' < /proc/\"$pid\"/cmdline | grep -qF -- {needle} && echo HL_ALIVE || echo HL_GONE"
+            f"&& tr '\\0' ' ' < /proc/\"$pid\"/cmdline | grep -qF {patterns} && echo HL_ALIVE || echo HL_GONE"
         )
         try:
             completed = _cli()._infera_ssh_bash_with_env(state, ip, script, timeout=timeout, port=port)

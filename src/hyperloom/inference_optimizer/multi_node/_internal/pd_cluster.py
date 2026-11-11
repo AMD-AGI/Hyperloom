@@ -229,9 +229,12 @@ def command_for(role: str, spec: LaunchSpec) -> str:
 
 
 def cmdline_needle(role: str, backend: str) -> str:
-    """Substring that identifies the server process on a pod of this role."""
+    """`|`-separated substrings, any of which identifies the server process on a pod of this role.
+
+    The sglangrouter router renames its process to `sglang::router` once it starts.
+    """
     if role == "router":
-        return "sglang_router.launch_router" if backend == "sglangrouter" else "atomesh"
+        return "sglang_router.launch_router|sglang::router" if backend == "sglangrouter" else "atomesh"
     return "sglang.launch_server"
 
 

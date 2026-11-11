@@ -9,6 +9,7 @@ import json
 import os
 import socket
 import subprocess
+import sys
 import time
 from pathlib import Path
 
@@ -520,6 +521,37 @@ def test_engines_not_running_names_pods_whose_launch_is_gone(monkeypatch: pytest
     monkeypatch.setattr(pd_cmds, "_cli", lambda: fake)
     assert pd_cmds.engines_not_running(dict(_PD_STATE)) == ["decode 10.0.0.2"]
     assert "/tmp/hyperloom-mn-decode.pid" in dict(fake.calls)["10.0.0.2"]
+
+
+def test_sglangrouter_router_needle_matches_the_renamed_process() -> None:
+    needle = pd_internal.cmdline_needle("router", "sglangrouter")
+    assert "sglang::router" in needle.split("|")
+    assert "sglang_router.launch_router" in needle.split("|")
+
+
+def test_remote_driver_finds_the_server_by_any_needle(tmp_path: Path) -> None:
+    driver = pd_cmds._REMOTE_DRIVER.replace("\nrestart_remote_main()\n", "\n")
+    scope: dict[str, object] = {"os": os}
+    exec(driver, scope)
+    token = f"hl-needle-{os.getpid()}-{time.monotonic_ns()}"
+    named = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(30)", token])
+    try:
+        time.sleep(0.2)
+        find = scope["_find_server"]
+        assert find(str(tmp_path / "none.pid"), f"absent-{token}|{token}") == named.pid
+        assert find(str(tmp_path / "none.pid"), f"absent-{token}") == 0
+    finally:
+        named.kill()
+        named.wait()
+
+
+def test_liveness_probe_greps_every_needle(monkeypatch: pytest.MonkeyPatch) -> None:
+    fake = _FakeCli({"10.0.0.1": "HL_ALIVE\n", "10.0.0.2": "HL_ALIVE\n"})
+    monkeypatch.setattr(pd_cmds, "_cli", lambda: fake)
+    monkeypatch.setattr(pd_cmds, "cmdline_needle", lambda _role, _backend: "first|second")
+    assert pd_cmds.engines_not_running(dict(_PD_STATE)) == []
+    script = dict(fake.calls)["10.0.0.1"]
+    assert "grep -qF -e first -e second" in script
 
 
 def test_engine_flags_are_probed_once_and_only_for_legacy_flags(monkeypatch: pytest.MonkeyPatch) -> None:
