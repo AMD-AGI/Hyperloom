@@ -69,7 +69,7 @@ as [`references/re-review.md`](references/re-review.md) says.
 Take every row of the index atop [`rules.md`](rules.md) whose trigger matches `files.txt`, a skim of `diff.txt`, or a
 `label:` line in `meta.txt`; write the union of their ids into `$WORK/rules.txt`, one per line, and read only those
 bodies. **Never read `rules.md` whole**: a reviewer told to attend to every rule attends to none. Match rows
-generously: a row you are unsure about is taken, never dropped. V1-V8, X2 and X9 are on every list, V2 and V7 without
+generously: a row you are unsure about is taken, never dropped. V1-V8, X2, X9 and R6 are on every list, V2, V7 and R6 without
 a verdict line; on a re-review, so are the rules of earlier findings that still hold.
 
 ## Step 2 — Semantic understanding
