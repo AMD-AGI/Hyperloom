@@ -74,7 +74,14 @@ from hyperloom_multibranch.blackboard.rsi.replay import (
     stops_in,
     variants,
 )
-from hyperloom_multibranch.blackboard.rsi.similarity import WORKLOAD, model_name, workload_kind
+from hyperloom_multibranch.blackboard.rsi.similarity import (
+    AGENTX,
+    OBJECTIVE,
+    WORKLOAD,
+    agentx_objective,
+    model_name,
+    workload_kind,
+)
 from hyperloom_multibranch.blackboard.rsi.stops import EARLY_STOP_TESTS, StopAudit
 
 #: Asks the LLM with a system prompt and a prompt, and returns its answer.
@@ -330,19 +337,20 @@ class Pair:
 
 
 def session_task(tree: SearchTree) -> str:
-    """The task ``tree`` ran, as one key: its workload's kind, its :data:`TASK_LABELS` and :data:`TASK_SIZES` and its
-    budget. Two sessions pair only when their keys are one."""
+    """The task ``tree`` ran, as one key: its workload's kind, an AgentX one's objective, its :data:`TASK_LABELS` and
+    :data:`TASK_SIZES` and its budget. Two sessions pair only when their keys are one: gains on different objectives
+    measure different metrics."""
 
     labels, sizes = tree.task.labels, tree.task.sizes
+    kind = workload_kind(tree.task)
+    objective = [f"{OBJECTIVE}={agentx_objective(tree.task).value}"] if kind == AGENTX else []
     named = [
         f"{key}={model_name(labels[key]) if key == MODEL else labels[key].lower()}"
         for key in TASK_LABELS
         if key in labels
     ]
     sized = [f"{key}={sizes[key]:g}" for key in TASK_SIZES if key in sizes]
-    return " ".join(
-        [f"{WORKLOAD}={workload_kind(tree.task)}", *named, *sized, f"budget={tree.budget_seconds / _MINUTE:g}m"]
-    )
+    return " ".join([f"{WORKLOAD}={kind}", *objective, *named, *sized, f"budget={tree.budget_seconds / _MINUTE:g}m"])
 
 
 def session_measures(tree: SearchTree, audit: StopAudit) -> dict[str, float]:

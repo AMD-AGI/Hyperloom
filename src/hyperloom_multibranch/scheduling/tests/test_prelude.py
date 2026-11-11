@@ -340,14 +340,18 @@ async def test_the_session_profile_bounds_output_throughput_by_the_main_flows_de
     assert await _blackboard(layout).session_profile() == result.profile
 
 
-async def test_an_agentx_session_profile_has_no_roofline_ceiling(tmp_path: Path) -> None:
-    """The decode ceiling bounds output throughput; AgentX is graded on interactivity."""
+async def test_an_agentx_session_profile_names_its_objective_and_has_no_roofline_ceiling(tmp_path: Path) -> None:
+    """The decode ceiling bounds output throughput; AgentX is graded on its objective."""
 
     layout = _layout(tmp_path)
+    workload = replace(
+        AGENTX, model=str(model_checkout(tmp_path)), agentx_objective=AgentXObjective.TOTAL_TOKEN_THROUGHPUT
+    )
 
-    result = await _run(_prelude(layout, _peers(layout)), replace(AGENTX, model=str(model_checkout(tmp_path))))
+    result = await _run(_prelude(layout, _peers(layout)), workload)
 
     assert dict(result.profile.roofline_ceiling) == {}
+    assert result.profile.agentx_objective is AgentXObjective.TOTAL_TOKEN_THROUGHPUT
 
 
 async def test_a_prelude_whose_backend_cannot_analyse_the_root_profile_records_it_and_goes_on(tmp_path: Path) -> None:
