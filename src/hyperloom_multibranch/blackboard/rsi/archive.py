@@ -601,6 +601,11 @@ class TreeArchive:
         if replace(held, started_at=tree.started_at) != tree:
             raise TreeConflict(f"{path} already holds another tree for session {tree.session_id}")
 
+    def holds(self, session_id: str) -> bool:
+        """Whether the archive holds a tree of session ``session_id``, whenever it was written."""
+
+        return (self.root / f"{session_id}.json").is_file()
+
     def load(self) -> list[SearchTree]:
         """Every readable archived tree, as of ``as_of``; one this version cannot read is skipped with a warning."""
 

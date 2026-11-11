@@ -6,8 +6,8 @@
 A session lives at ``<workspace>/<model_basename>/MB-<UTC>-<rand8>/``. Every entry the
 scheduler creates carries the ``MB-`` prefix so it never collides with a single-lineage
 session in the same workspace. Each run creates a fresh directory; only the emergency
-``final-only`` command attaches to one again, and only to a session that is over and
-whose FINAL never chose. Two of those would write over each other, so one holds
+``final-only`` command and ``run --resume`` attach to one again, and only to a session
+that is over and whose FINAL never chose. Two of those would write over each other, so one holds
 :data:`FINAL_ONLY_LOCK` in the session directory for as long as it runs.
 """
 
@@ -45,7 +45,7 @@ DASHBOARD_DIR = "MB-dashboard"
 REPORTS_DIR = "MB-reports"
 LOGS_DIR = "MB-logs"
 PIDS_FILE = "MB-pids.jsonl"
-#: Created exclusively by a ``final-only`` run and removed when it ends; holds the pid that took it.
+#: Created exclusively by a ``final-only`` or ``run --resume`` run and removed when it ends; holds the pid that took it.
 FINAL_ONLY_LOCK = "MB-final-only.lock"
 
 ROSTER_FILE = "MB-roster.json"
