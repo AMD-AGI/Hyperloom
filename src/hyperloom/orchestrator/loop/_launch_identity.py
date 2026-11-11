@@ -21,7 +21,7 @@ from hyperloom.inference_optimizer.grid_server_args import merge_cumulative_extr
 from inference_suite.contracts.launch import Launch, LayerSource
 from inference_suite.contracts.layout import RunLayout
 
-from ..actions.executors._round_folder import read_round_launch
+from ..actions.executors import read_round_launch
 from ..kernel.geak_config import _geak_overlay_digest
 from ._keep_patch_column import _source_snapshot_layers
 

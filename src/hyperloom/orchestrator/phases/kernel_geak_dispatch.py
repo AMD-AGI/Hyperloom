@@ -27,8 +27,7 @@ from hyperloom_common.jsonio import read_json
 from hyperloom.common.benchmark_config import BenchmarkPoint, BenchmarkPointError, read_benchmark_point
 from hyperloom.inference_optimizer.agentx.report import replayed_trace
 from inference_suite import CLIENT_ROOT_ENV, CLIENT_SCRIPT, inferencex_root
-from ..actions.executors._round_folder import read_round_launch
-from ..actions.executors._suite.rounds import staged_tool_cache
+from ..actions.executors import read_round_launch, staged_tool_cache
 from ..actions.executors._workload_envs import geak_grading_fields, geak_metric_axis
 from ..bus.message_bus import Message
 from ..kernel.geak_config import _geak_has_accepted_kernel
