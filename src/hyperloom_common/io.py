@@ -121,7 +121,8 @@ class WriteOptions:
 
 #: A crash-safe replace: parents created, the data and the rename flushed to disk, an existing file's mode kept.
 DURABLE = WriteOptions(make_parents=True, fsync=True, fsync_dir=True, preserve_mode=True)
-#: A replace in a tree the accounts of one group write in turn: the file ``664``, the parents it creates ``2775``.
+#: A replace in a tree the accounts of one group write in turn: below shared storage the file ``664`` and the parents it
+#: creates ``2775``, elsewhere as private as a plain write.
 SHARED = WriteOptions(make_parents=True, shared=True)
 
 
