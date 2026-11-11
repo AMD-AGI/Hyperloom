@@ -14,7 +14,7 @@ import pytest
 import yaml
 
 from hyperloom.orchestrator.actions.executors._server_lifecycle import GpuHandoff
-from hyperloom.orchestrator.actions.executors._workload_envs import geak_grading_fields
+from hyperloom.orchestrator.actions.executors._workload_envs import build_agentx_workload_spec, geak_grading_fields
 from hyperloom.orchestrator.loop.coordinator import Coordinator
 from hyperloom.orchestrator.state.shared_state import SharedState
 
@@ -261,6 +261,27 @@ async def test_an_agentx_handoff_declares_the_trace_the_accepted_round_replayed(
     )
     assert (spec["num_entries"], spec["canonical_num_entries"], spec["concurrency"]) == (393, 393, 6)
     assert spec["metric_basis"] == geak_grading_fields(None)["metric_basis"]
+
+
+@pytest.mark.asyncio
+async def test_an_mlperf_agentx_handoff_keeps_the_graded_mlperf_workload(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """GEAK picks its client from the kind, so an MLPerf session must not be handed the trace-replay one."""
+    coord = _coord(tmp_path)
+    recipe = Path(coord.shared_state.baseline_config_path)
+    document = yaml.safe_load(recipe.read_text(encoding="utf-8"))
+    mlperf = build_agentx_workload_spec(document["benchmark"]["envs"], env={"CONC": "6"})
+    document["benchmark"]["workload_spec"] = mlperf
+    recipe.write_text(yaml.safe_dump(document), encoding="utf-8")
+
+    spec = (await _handoff(coord, monkeypatch))["workload_spec"]
+
+    assert {key: spec[key] for key in ("kind", "client", "scenario", "corpus", "num_entries")} == {
+        key: mlperf[key] for key in ("kind", "client", "scenario", "corpus", "num_entries")
+    }
+    assert spec["kind"] == "agentx_mlperf_agentic"
+    assert spec["concurrency"] == 6
 
 
 @pytest.mark.asyncio

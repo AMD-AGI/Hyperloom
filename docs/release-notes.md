@@ -41,6 +41,16 @@ it.
   verified again. Build the runner cache (`cache_build`) for the new commit
   before starting hosted sessions on it; a runner whose published staging
   differs from the sheet's refuses with `preflight_mismatch`.
+- **Native AgentX accuracy is a GSM8K round.** The baseline, and each
+  candidate that clears the KEEP bar, runs GSM8K on a server of its own,
+  graded like any lm-eval score; `--no-agentx-accuracy` turns it off. The
+  request error rate is no longer an accuracy score, only the measurement's
+  validity. The MLPerf backend still grades on its inline score.
+- **A custom workload's quality gate may carry raw scores alone.** A
+  `quality_gate` without `passed` is judged against the limits it names, else
+  `lpips` 0.15, `ssim` 0.85 and `mse` 0.006; before, such a gate failed. A
+  baseline whose report carries no `quality_gate` now stops the run with
+  `baseline_accuracy_failed` instead of rejecting every candidate.
 - **A GEAK or Forge reproduction of the measured launch keeps settings whose
   names contain `TOKEN`.** The GEAK handoff's `baseline_env_spec`, the Forge
   handoff's serving context and the reference launch script now carry launch

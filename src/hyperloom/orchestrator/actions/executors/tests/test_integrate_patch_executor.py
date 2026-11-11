@@ -2446,6 +2446,7 @@ async def test_bench_patch_preserves_measurement_and_protocol(tmp_path: Path, mo
     }
     assert gate == {
         "accuracy_pass": None,
+        "accuracy_incomparable": False,
         "accuracy": None,
         "enablement_accuracy": None,
         "enablement_accuracy_task": "",
