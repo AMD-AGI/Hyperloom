@@ -5,8 +5,8 @@
 
 The contract: the warmup, the measured, a caller's boot and a caller's reuse round are each one round with its own
 run_dir; the server a variant booted for its own rounds is reaped with ``stop`` on its slot, a caller's last reuse
-round takes the caller's server down, a failed step and a refusal map to their error classes, and a session that froze
-no base runs nothing.
+round takes the caller's server down, a failed step and a refusal map to their error classes, a variant the session
+budget cannot admit is skipped unlaunched, and a session that froze no base runs nothing.
 """
 
 from __future__ import annotations
@@ -35,7 +35,7 @@ from hyperloom.orchestrator.rehearsal import READY, STAGE_FAILED, LaunchAttempt,
 from hyperloom.orchestrator.rehearsal import VirtualClock, installed_clock
 from hyperloom.orchestrator.rehearsal.scenario import ScenarioError
 from hyperloom.orchestrator.state.failure_evidence import ARGV_INVALID
-from hyperloom.orchestrator.actions.stop_attribution import ORCHESTRATOR_CANCELLED_CLASS
+from hyperloom.orchestrator.actions.stop_attribution import ORCHESTRATOR_CANCELLED_CLASS, SESSION_TIME_EXHAUSTED_CLASS
 from inference_suite.contracts import FailedStep, LifecycleMode, RunLayout, WorkloadKind
 from inference_suite.runtime.process import Reaped
 from inference_suite.tests.test_compose import _launch
@@ -368,3 +368,42 @@ def test_an_agentx_round_holds_the_server_its_caller_asked_for(monkeypatch, suit
     assert [(c.workload, c.lifecycle.mode, c.lifecycle.pid_dir) for c in played] == [
         (WorkloadKind.AGENTX, mode, held["pid_dir"])
     ]
+
+
+@pytest.mark.parametrize(
+    ("left_sec", "expected_sec", "warmup", "measured"),
+    [
+        (-1.0, None, False, 0),
+        (5.0, 10.0, False, 0),
+        (40.0, 30.0, True, 0),
+        (300.0, 30.0, False, 2),
+        (300.0, 30.0, True, 2),
+    ],
+    ids=["spent", "a-variant-does-not-fit", "the-warmup-does-not-fit", "fits", "fits-with-its-warmup"],
+)
+def test_a_grid_starts_no_variant_the_session_budget_cannot_admit(
+    monkeypatch, suite, left_sec, expected_sec, warmup, measured
+):
+    """Admission prices each variant at its expected rounds, the discarded warmup included, not at the backstop."""
+    attempts = tuple(LaunchAttempt(outcome=READY, metrics=_HOT) for _ in range(4))
+    rounds = ScriptedRounds(scenario=LaunchScenario(attempts=attempts), clock=VirtualClock(), launch=_launch())
+    monkeypatch.setattr(suite_rounds, "run_round", rounds.run_round)
+    clock = rounds.clock
+    stop = GridStop(session_deadline_sec=clock.monotonic() + left_sec, variant_expected_sec=expected_sec)
+
+    with installed_clock(clock):
+        results = asyncio.run(
+            run_grid(
+                grid=[GridVariant("v0"), GridVariant("v1")],
+                output_root=suite.out,
+                recipe=GridRecipe(suite.point),
+                launch=GridLaunch(warmup_before_measure=warmup),
+                stop=stop,
+            )
+        )
+
+    assert sum(row.status == "succeeded" for row in results) == measured, results
+    skipped = [row for row in results if row.status == "skipped"]
+    assert len(skipped) == 2 - measured
+    assert {row.error_class for row in skipped} <= {SESSION_TIME_EXHAUSTED_CLASS}
+    assert len(rounds.calls) == measured * (2 if warmup else 1)

@@ -405,6 +405,10 @@ class _GeakDispatchMixin:
         if not agentx:
             return {"kind": _SYNTHETIC_WORKLOAD}
         state = self.shared_state
+        session = {"concurrency": int(state.conc or 0), **geak_grading_fields(state.grading or None)}
+        if spec:
+            # Only an MLPerf AgentX recipe carries a spec; it names the graded workload and its client.
+            return {**spec, **session}
         workspace = str(state.current_best_measurement.get("benchmark_workspace") or "")
         # GEAK keeps its own default for each field left out, so a trace it is not told about is its default corpus.
         replayed = replayed_trace(Path(workspace) if workspace else None)
@@ -416,13 +420,7 @@ class _GeakDispatchMixin:
             )
         else:
             log.warning("workload_spec: no aiperf export under %r names a corpus; GEAK replays its default", workspace)
-        return {
-            **spec,
-            **replayed,
-            "concurrency": int(state.conc or 0),
-            **geak_grading_fields(state.grading or None),
-            "kind": _AGENTX_WORKLOAD,
-        }
+        return {**replayed, **session, "kind": _AGENTX_WORKLOAD}
 
     def _geak_session_fields(self, *, agentx: bool) -> dict[str, Any]:
         state = self.shared_state

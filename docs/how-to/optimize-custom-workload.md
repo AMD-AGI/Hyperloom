@@ -109,6 +109,11 @@ A baseline whose report carries no `quality_gate` **stops the run at once** with
 A candidate whose report has no gate scores 0.0 accuracy and is rejected.
 ```
 
+A gate with `passed` is taken as written. A gate without it is judged on the
+raw scores it carries, each against the limit the gate names or, when it names
+none, against Hyperloom's: `lpips` at most 0.15, `ssim` at least 0.85, `mse` at
+most 0.006. A gate with neither `passed` nor a score fails.
+
 Run your entrypoint by hand once and confirm the key is actually present in
 `inferencex_result.json` before you spend a budget on it.
 
