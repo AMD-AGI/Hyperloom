@@ -113,6 +113,40 @@ def test_confirm_source_present_no_cue_is_unknown(tmp_path: Path) -> None:
     assert source_import._confirm_source_imported("my_kernel.py", tmp_path) is None
 
 
+def _write_triton_source(repo: Path) -> str:
+    rel = "ops/attn_decode_fused.py"
+    (repo / "ops").mkdir(parents=True)
+    (repo / rel).write_text(
+        "import triton\n\n@triton.autotune(configs=[], key=['n'])\n@triton.jit\ndef _attn_dual_scope_kernel(x):\n"
+        "    pass\n\ndef launcher(x):\n    return _attn_dual_scope_kernel[(1,)](x)\n",
+        encoding="utf-8",
+    )
+    return rel
+
+
+def test_confirm_source_triton_kernel_compile_is_true(tmp_path: Path) -> None:
+    """A silently imported module is confirmed by its own Triton kernel compiling."""
+    repo, workspace = tmp_path / "repo", tmp_path / "bench"
+    workspace.mkdir()
+    rel = _write_triton_source(repo)
+    (workspace / "server.log").write_text(
+        "[TP0] Triton kernel '_attn_dual_scope_kernel' took 1.77 s to compile after serving started.\n",
+        encoding="utf-8",
+    )
+    assert source_import._confirm_source_imported(rel, workspace, repo_root=repo) is True
+    assert source_import._confirm_source_imported(str(repo / rel), workspace) is True
+
+
+def test_confirm_source_triton_kernel_absent_stays_false(tmp_path: Path) -> None:
+    repo, workspace = tmp_path / "repo", tmp_path / "bench"
+    workspace.mkdir()
+    rel = _write_triton_source(repo)
+    (workspace / "server.log").write_text(
+        "Triton kernel '_other_kernel' took 1.0 s to compile\nlauncher ready\n", encoding="utf-8"
+    )
+    assert source_import._confirm_source_imported(rel, workspace, repo_root=repo) is False
+
+
 # -- _confirm_sources_imported (multi-file aggregate) ----------------------
 def _write_server_log(tmp_path: Path, text: str) -> None:
     (tmp_path / "server.log").write_text(text, encoding="utf-8")
