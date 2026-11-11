@@ -19,7 +19,7 @@ from hyperloom_common.bwrap import BwrapProbe
 from hyperloom.common.agent_isolation import AccountIsolation, BwrapIsolation, NoIsolation
 from hyperloom.common.env_safety import RunAs
 from hyperloom.common import agent_isolation
-from hyperloom.common.proctree import REAP_MARK_ENV
+from hyperloom_common.proctree import REAP_MARK_ENV
 from hyperloom.orchestrator.specialists import agent_runner
 from hyperloom.orchestrator.specialists.agent_runner import AgentConfigError
 from hyperloom.orchestrator.specialists.launch_env import (
