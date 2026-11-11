@@ -78,6 +78,7 @@ from hyperloom_multibranch.blackboard.codec import encode
 from hyperloom_multibranch.blackboard.knowledge.reference_leads import INFERENCEX_REFERENCE
 from hyperloom_multibranch.blackboard.rsi.archive import ARCHIVE_ENV
 from hyperloom_multibranch.scheduling.budget import MB_CLOSE_GRACE_CAP_SECONDS, MB_DEFAULT_MAX_HOURS, ExploreCap
+from hyperloom_multibranch.scheduling import hosted_peers
 from hyperloom_multibranch.scheduling import hosted_run as hosted_run_module
 from hyperloom_multibranch.scheduling.hosted_run import (
     GRANT_MARGIN_SECONDS,
@@ -2663,16 +2664,25 @@ def test_a_restart_of_a_spec_measured_locally_finishes_the_session_on_this_conta
     host: Host, agent_cli: list[RunSettings], tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     _grant_untouched(monkeypatch)
-    loaded: list[Workload] = []
+    loaded: list[tuple[Workload, float | None]] = []
     real = cli.load_peers
-    monkeypatch.setattr(cli, "load_peers", lambda workload: (loaded.append(workload), real(workload))[1])
+
+    def load(workload: Workload, *, tests_end_by: float | None) -> PeerFactory:
+        loaded.append((workload, tests_end_by))
+        return real(workload, tests_end_by=tests_end_by)
+
+    monkeypatch.setattr(hosted_peers, "load_peers", load)
     layout = _ended_before_final(tmp_path / "MB-20260101T000000Z-0123abcd")
     (host.state_dir / "session.json").write_text(json.dumps({"session_dir": str(layout.root)}), encoding="utf-8")
     host.spec(**LOCAL)
+    created = datetime.fromisoformat(os.environ["HYPERLOOM_RUN_CREATED_AT"]).timestamp()
 
     assert cli.main(["hosted", "run"]) == 0
 
-    assert agent_cli == [_settings()] and loaded == [_settings().workload]
+    stop = created + GRANT["max_runtime_sec"] - MB_CLOSE_GRACE_CAP_SECONDS
+    assert agent_cli == [_settings()] and loaded == [(_settings().workload, pytest.approx(stop, abs=1.0))], (
+        "FINAL's tests on this container's cards end by the grant's stop, as in the grant's sandboxes"
+    )
     assert host.exit_document() == {"final": True, "returncode": 0, "stop_reason": "time_exhausted"}
 
 

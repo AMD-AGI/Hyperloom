@@ -375,7 +375,11 @@ class LocalOptions:
     their template, which therefore wins over the same name in ``runner_envs``), the branches' sandboxes are not told.
     ``long_context`` is the staged prompt set of the long-context check, named, found and read the same way (``None`` takes
     the key in ``HYPERLOOM_LONG_CONTEXT``, ``off`` for no check, and without either the model's own set at the context
-    each test's launch serves).
+    each test's launch serves). ``tests_end_by`` is when every test of the session must have ended, Unix seconds, in a
+    hosted run measured on this container's cards (the grant's
+    :attr:`~hyperloom_multibranch.scheduling.hosted_run.GrantEnd.tests_end_by`): no infrastructure retry, FINAL's on
+    the integration branch included, waits past the time a test of its kind can still end by it; ``None`` for no such
+    time.
     """
 
     policy: QueuePolicy | None = None
@@ -394,6 +398,7 @@ class LocalOptions:
     card_memory: Callable[[Sequence[int]], CardReading] = read_listed
     short_prompts: ShortPromptSetup | None = None
     long_context: LongContextSetup | None = None
+    tests_end_by: float | None = None
 
 
 def card_guard_of(options: LocalOptions, environ: Mapping[str, str] | None = None) -> CardGuard:
@@ -796,6 +801,7 @@ def build_local_toolbox(
             policy=capped_policy(options.policy, parallel),
             max_infra_retries=options.max_infra_retries,
             infra_backoff_seconds=options.infra_backoff_seconds,
+            tests_end_by=options.tests_end_by,
         ),
     )
     toolbox.backend, toolbox.provider, toolbox.trace_root = backend, provider, directory

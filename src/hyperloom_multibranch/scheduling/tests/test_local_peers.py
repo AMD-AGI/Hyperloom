@@ -715,6 +715,23 @@ async def test_a_local_session_publishes_the_staging_its_runners_read_into_their
         assert publishes.caches == [(tmp_path / "runner-cache").resolve()]
 
 
+@pytest.mark.parametrize("tests_end_by", [None, 1_800_000_000.0])
+def test_the_local_cards_hand_their_toolbox_the_time_every_test_must_end_by(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, tests_end_by: float | None
+) -> None:
+    monkeypatch.setenv("HYPERLOOM_RUNNER_CACHE", str(tmp_path / "runner-cache"))
+    monkeypatch.setattr(suite_publish, "publish_own_inference_suite", _Publishes())
+    built: list[object] = []
+    monkeypatch.setattr(local_hosted, "build_local_toolbox", lambda *args, options: built.append(options) or options)
+    layout = SimpleNamespace(toolbox=tmp_path / "MB-toolbox", session_id="MB-1")
+    setup = SimpleNamespace(layout=layout, workload=WORKLOAD)
+
+    LocalCards((0, 1), tests_end_by).toolbox(setup, None, None, None)  # type: ignore[arg-type]
+
+    [options] = built
+    assert options.tests_end_by == tests_end_by  # type: ignore[attr-defined]
+
+
 async def test_a_local_session_whose_staging_cannot_be_published_is_refused(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

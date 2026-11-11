@@ -23,7 +23,7 @@ import pytest
 from hyperloom.common import confinement
 from hyperloom.common.outside_facts import ENV_CONC, ENV_ISL, ENV_NUM_PROMPTS, ENV_NUM_WARMUPS, ENV_OSL
 from hyperloom.common.outside_facts.rule_pack import PACK_ENV, load_pack
-from hyperloom.contracts.measurement import FailureClass, TestResult, Validity
+from hyperloom.contracts.measurement import FailureClass, Purpose, TestResult, Validity
 from hyperloom.measure.archive import DirResultArchive
 from hyperloom.measure.framework.base import FRAMEWORK_BASE_FILE, SNAPSHOT_ENV, load_snapshot, take_snapshot
 from hyperloom.measure.hosted_log import STATE_FINISHED, STATE_SENT, MeasurementJournal, Record
@@ -38,6 +38,7 @@ from hyperloom.measure.tests.test_hosted_real_runner import _git_repo, _point
 from hyperloom.sandbox.local import LocalSandboxProvider
 from hyperloom_common.tests._bwrap_host import usable_bwrap
 from hyperloom_multibranch.contracts.blackboard import Role, Writer
+from hyperloom_multibranch.contracts.blackboard.vocab import INTEGRATION_BRANCH
 from hyperloom_multibranch.blackboard import LocalBlackboard
 from hyperloom_multibranch.contracts.toolbox import WorkloadKind
 from hyperloom_multibranch.toolbox import local_hosted
@@ -652,6 +653,21 @@ async def test_the_local_toolbox_records_what_its_baseline_is_measured_on_as_a_r
     assert toolbox.measured_on == MeasuredOn(session, "node-a", image, 8)
     assert toolbox.measured_on.record()
     assert check_baseline_reusable(session, range(8)) is None
+
+
+@pytest.mark.parametrize("tests_end_by", [None, 1_800_000_000.0])
+async def test_final_s_retries_on_the_integration_branch_wait_no_later_than_the_time_the_tests_must_end_by(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, tests_end_by: float | None
+) -> None:
+    """A hosted run measured on this container's cards hands the grant's ``tests_end_by`` here: the integration branch
+    has no exploration end, so it is the only time that keeps FINAL's infrastructure retries inside the grant."""
+    commit = "0" * 40
+    pin_inferencex_at(commit, monkeypatch)
+    blackboard = LocalBlackboard(tmp_path / "blackboard", Writer(Role.TOOLBOX, "toolbox"))
+    toolbox = _toolbox_of(blackboard, tmp_path, tmp_path / "session", commit, tests_end_by=tests_end_by)
+    await toolbox.close()
+
+    assert toolbox._latest_retry_start(req(INTEGRATION_BRANCH, purpose=Purpose.FINAL)) == tests_end_by
 
 
 @pytest.mark.agent_isolation

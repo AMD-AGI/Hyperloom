@@ -146,7 +146,7 @@ from hyperloom_multibranch.rulegate.agentx import AgentXObjective
 from hyperloom_multibranch.rulegate.critic import LlmCritic, anthropic_critic
 from hyperloom_multibranch.scheduling.budget import MB_DEFAULT_MAX_HOURS, ExploreCap
 from hyperloom_multibranch.scheduling.clock import Clock
-from hyperloom_multibranch.scheduling.hosted_peers import PinnedToolboxInputs, load_hosted_peers
+from hyperloom_multibranch.scheduling.hosted_peers import PinnedToolboxInputs, load_hosted_peers, local_grant_peers
 from hyperloom_multibranch.scheduling.hosted_run import (
     GrantDeadline,
     HostedExit,
@@ -1040,10 +1040,11 @@ class ReadySession:
 
 def hosted_ready_session(host: HostInfo, workload: Workload, *, local: bool = False) -> ReadySession:
     """:func:`ready_session` measured in the sandboxes of ``host``'s grant, or this container's cards with ``local``:
-    the one builder of the peers of ``hosted run`` and ``run --measurement hosted``."""
+    the one builder of the peers of ``hosted run`` and ``run --measurement hosted``. Either way the tests end by the
+    stop of the grant (:func:`local_grant_peers`)."""
 
     cache = hosted_runner_cache(os.environ)
-    load = load_peers if local else partial(load_hosted_peers, inputs=PinnedToolboxInputs(host, cache))
+    load = local_grant_peers(host) if local else partial(load_hosted_peers, inputs=PinnedToolboxInputs(host, cache))
     return ready_session(workload, load, hosted_storage(host, os.environ, cache))
 
 
@@ -1062,10 +1063,9 @@ def ready_session(
 
 @dataclass(frozen=True)
 class HostedStart:
-    """What ``hosted run`` runs, and the deadline of the grant it runs in."""
+    """What ``hosted run`` runs."""
 
     run: Callable[[], int]
-    deadline: GrantDeadline
 
 
 def hosted_run() -> int:
@@ -1105,7 +1105,7 @@ def _hosted_start(host: HostInfo) -> HostedStart:
     require_local_image(spec, os.environ)
     earlier = earlier_session(host.state_dir)
     if earlier.closed is not None:  # it closed with no baseline, which ended the run, and was killed before exit.json
-        return HostedStart(lambda: EXIT_FAILED, deadline)
+        return HostedStart(lambda: EXIT_FAILED)
     persisted = earlier.finish
     settings = _hosted_settings(host, spec, deadline.session_hours) if persisted is None else persisted.settings
     require_session_environment(settings, os.environ)
@@ -1119,7 +1119,7 @@ def _hosted_start(host: HostInfo) -> HostedStart:
     else:
         record = partial(_record_root, host.state_dir)
         run = partial(run_session, settings, ready.peer_factory, ready.services, record, grant_explore_cap(host))
-    return HostedStart(run, deadline)
+    return HostedStart(run)
 
 
 def _start_again(left: PersistedRun, settings: RunSettings, ready: ReadySession, host: HostInfo) -> int:
