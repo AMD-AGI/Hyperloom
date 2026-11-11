@@ -767,13 +767,6 @@ class Coordinator:
             wait = min(wait, bound)
         return max(0.0, wait)
 
-    def _stage_timeout_sec(self, stage: str) -> float | None:
-        """Return the total wall-clock ceiling for an inline reactor turn."""
-        role = stage.removeprefix("reactor:")
-        if role == stage:
-            return None
-        return self.reactor_turn_timeout_sec
-
     def stop_requested(self) -> bool:
         """Whether an operator has asked this run to stop.
 
@@ -816,27 +809,17 @@ class Coordinator:
         if remaining is not None and remaining <= 0.0:
             log.warning("Coordinator: skipping %s; session bound already elapsed", stage)
             return
-        stage_timeout = self._stage_timeout_sec(stage)
-        timeout = (
-            min(remaining, stage_timeout)
-            if remaining is not None and stage_timeout is not None
-            else remaining
-            if stage_timeout is None
-            else stage_timeout
-        )
-        if timeout is None:
+        if remaining is None:
             await factory()
             return
         try:
-            await asyncio.wait_for(factory(), timeout=timeout)
-        except asyncio.TimeoutError as exc:
+            await asyncio.wait_for(factory(), timeout=remaining)
+        except asyncio.TimeoutError:
             log.warning(
                 "Coordinator: %s hit its %.1fs bound; cancelled so the tick can close",
                 stage,
-                timeout,
+                remaining,
             )
-            if stage_timeout is not None and timeout == stage_timeout:
-                self.record_exception(stage=stage, exc=exc, agent=stage.removeprefix("reactor:"))
 
     # Long-run interface
     async def run(self, *, objective: Objective | None = None, options: RunOptions = RunOptions()) -> str:
@@ -1079,11 +1062,10 @@ class Coordinator:
                         agent_name, prompt=prompt, system_prompt=turn.system_prompt, tools=tools
                     )
                 )
-                result: BackendTurnResult = await backend.run(
-                    prompt=prompt,
-                    system_prompt=turn.system_prompt,
-                    tools=tools,
-                    max_turns=0,
+                # Bounds the LLM call only: the intents it routes below may run benchmarks far longer than a turn.
+                result: BackendTurnResult = await asyncio.wait_for(
+                    backend.run(prompt=prompt, system_prompt=turn.system_prompt, tools=tools, max_turns=0),
+                    timeout=self.reactor_turn_timeout_sec,
                 )
                 call_span.finish(**llm_call_summary(result.metadata))
         except BackendError as exc:
@@ -1100,6 +1082,9 @@ class Coordinator:
                 {"kind": "backend_error", "agent": agent_name, "error": repr(exc)},
             )
             await self._track_backend_error_streak(agent_name, exc)
+            return None
+        except asyncio.TimeoutError as exc:
+            self._record_turn_timeout(agent_name, exc)
             return None
         except NoIntentEmitted as exc:
             # No parseable intents; surface as observation so the next tick self-corrects.
@@ -1135,6 +1120,15 @@ class Coordinator:
                 macro_cycle=int(self.shared_state.macro_cycle or 0),
             )
         return backend_self_traces
+
+    def _record_turn_timeout(self, agent_name: str, exc: asyncio.TimeoutError) -> None:
+        """Record an LLM call cancelled at the turn ceiling as a crash, so an advancing tick cannot hide it."""
+        log.warning(
+            "Coordinator: reactor:%s hit its %.1fs bound; cancelled so the tick can close",
+            agent_name,
+            self.reactor_turn_timeout_sec,
+        )
+        self.record_exception(stage=f"reactor:{agent_name}", exc=exc, agent=agent_name)
 
     async def _record_reactor_exception(self, agent_name: str, exc: Exception) -> None:
         """Record an unexpected reactor-turn failure as an observation and a session exception."""
