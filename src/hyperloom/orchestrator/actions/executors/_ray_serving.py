@@ -127,8 +127,17 @@ def _assert_cluster_feasible(*, num_gpus: float, serving_slot: bool) -> None:
         )
     cluster_gpus = float(totals.get("GPU", 0))
     if cluster_gpus < num_gpus:
+        # Name ROCM_PATH on zero: Ray's AMD-GPU detector ctypes-loads
+        # $ROCM_PATH/lib/librocm_smi64.so and defaults to /opt/rocm, which a rocm-sdk
+        # wheel venv never creates, so the cluster comes up healthy with no GPUs at all.
+        detector_hint = (
+            " -- on a rocm-sdk wheel venv (no /opt/rocm) check $ROCM_PATH, which Ray's "
+            "AMD-GPU detector needs to find librocm_smi64.so"
+            if cluster_gpus == 0
+            else ""
+        )
         raise RayInfeasibleError(
-            f"{RAY_INFEASIBLE_MARKER}: cluster has {cluster_gpus} GPU(s), {num_gpus} requested; "
+            f"{RAY_INFEASIBLE_MARKER}: cluster has {cluster_gpus} GPU(s), {num_gpus} requested{detector_hint}; "
             "set INFERENCE_OPTIMIZER_RAY_EXEC=0 or add GPUs"
         )
 
