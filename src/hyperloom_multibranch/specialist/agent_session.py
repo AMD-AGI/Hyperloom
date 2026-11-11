@@ -816,19 +816,14 @@ class AgentSession:
             backend=setup.command.backend,
             heartbeat_sink=self._sink(grant.heartbeat_sink),
             stdin_open=setup.command.interactive,
-            readable=self._readable(),
+            readable=(*setup.readable, *self._place.worktree.linked, *self._lease_area()),
             git_admin=self._place.worktree.admin,
         )
 
-    def _readable(self) -> tuple[Path, ...]:
-        """What the branch's CLI reads besides its worktree and workspace, each absolute path that exists once: the
-        session's references and model, the files its worktree links, and the area of the branch's own dev leases. The
-        launch's plan masks every credential location these show."""
-        setup = self._setup
-        found = [*setup.readable, *self._place.worktree.linked]
-        if setup.lease_area is not None:
-            found.append(setup.lease_area(self._start.branch))
-        return tuple(path for path in dict.fromkeys(found) if path.is_absolute() and path.exists())
+    def _lease_area(self) -> tuple[Path, ...]:
+        """The area of the branch's own dev leases, when the session has one."""
+        lease_area = self._setup.lease_area
+        return () if lease_area is None else (lease_area(self._start.branch),)
 
     def _sink(self, service: HeartbeatSink) -> HeartbeatSink:
         """Keep the launch's ``beat`` for the idle wait, and hand it on to the MCP service's sink."""

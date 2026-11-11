@@ -68,6 +68,7 @@ from hyperloom.contracts.recipe import (
 from hyperloom.measure.compile import COMPONENT_LAYOUTS, kernel_load_env, locate_installed_package
 from hyperloom.sandbox import SandboxGone
 from hyperloom.sandbox.socket import SandboxUnavailable
+from hyperloom_common.shared_storage import make_shared_dirs
 from hyperloom_multibranch.contracts.branch_log import BranchLogEntry, BranchLogType
 from hyperloom_multibranch.contracts.blackboard.records import Learning
 from hyperloom_multibranch.contracts.blackboard.records import RetractionRef, TestRecord
@@ -356,7 +357,7 @@ class AutonomousSession:
             tables = await lay_start_tables(self._setup.repo, self._start.start_commit, kernels, directory, configs)
         except StartTableError as error:
             raise PreflightFailed([str(error)]) from error
-        self._place.workspace.mkdir(parents=True, exist_ok=True)
+        make_shared_dirs(self._place.workspace)
         save_start_tables(tables, self._place.workspace / START_TABLES_FILE)
         return tables
 

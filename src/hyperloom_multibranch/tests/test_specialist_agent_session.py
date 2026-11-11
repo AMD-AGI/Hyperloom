@@ -232,7 +232,7 @@ async def test_a_session_that_ends_as_it_should_is_followed_by_a_fresh_one(rig):
     assert rig.worktree.head() == rig.root
 
 
-async def test_a_launch_shows_the_session_s_files_its_worktree_s_git_and_its_own_lease_area_that_exist(rig, tmp_path):
+async def test_a_launch_shows_the_session_s_files_its_worktree_s_links_and_git_and_its_own_lease_area(rig, tmp_path):
     reference, model = tmp_path / "MB-reference" / "geak", tmp_path / "models" / "llama"
     reference.mkdir(parents=True)
     model.mkdir(parents=True)
@@ -247,7 +247,7 @@ async def test_a_launch_shows_the_session_s_files_its_worktree_s_git_and_its_own
     await asyncio.wait_for(running, 1)
 
     spec = rig.runner.specs[0]
-    assert spec.readable == (reference, model, areas / BRANCH)
+    assert spec.readable == (*readable, model, *rig.worktree.linked, areas / BRANCH)
     assert spec.git_admin is not None and spec.git_admin == rig.worktree.admin
     assert (spec.git_admin / "gitdir").read_text().strip() == str(rig.worktree.path / ".git")
 

@@ -34,6 +34,7 @@ from hyperloom.measure.compile import (
 from hyperloom.measure.framework.rows import DEFAULT_TABLE_PLACEHOLDER, RowsOnlyRefused, lay_rows_over
 from hyperloom.measure.framework.table_modules import default_tables
 from hyperloom.measure.framework.tables import read_variables
+from hyperloom_common.shared_storage import make_shared_dirs
 from hyperloom_multibranch.contracts.repo import ExperimentRepo
 from hyperloom_multibranch.specialist.agent_import import KeptChange
 
@@ -68,7 +69,7 @@ async def lay_start_tables(
         return {}
     files = directory / FILES_DIR
     await asyncio.to_thread(shutil.rmtree, directory, ignore_errors=True)
-    files.mkdir(parents=True)
+    make_shared_dirs(files)
     await repo.checkout(commit, files)
     try:
         laid = [await asyncio.to_thread(_lay, kernel, files / kernel.ref, directory, configs) for kernel in kernels]
