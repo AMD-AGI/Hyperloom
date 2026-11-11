@@ -38,9 +38,10 @@ agent CLI the specialists run must be installed. `--measurement hosted` also nee
 (see [Hosted run inputs](../reference/environment-variables.md#hosted-run-inputs)).
 
 Before a test that carries patches is given a sandbox or cards, its toolbox byte-compiles every Python file the patch
-stack changes and imports each patched component on CPU (the merge smoke): a file that does not compile or a module
-that does not import fails the test as the candidate's (`merge_smoke`), and a smoke that cannot run is an infrastructure
-failure (`smoke_not_run`), retried once. `HYPERLOOM_MERGE_SMOKE=off` in the session's environment turns it off; any
+stack changes and imports each patched component on CPU, with no GPU visible (the merge smoke): a file that does not
+compile, or an import error, missing name or missing attribute raised from a patched file, fails the test as the
+candidate's (`merge_smoke`); any other import failure (a device probe that finds no GPU, say) is not judged and the test
+is measured. A smoke that cannot run is an infrastructure failure (`smoke_not_run`), retried once. `HYPERLOOM_MERGE_SMOKE=off` in the session's environment turns it off; any
 value but `on`, `off` or empty is refused when the toolbox is built.
 
 ## Options of `run`

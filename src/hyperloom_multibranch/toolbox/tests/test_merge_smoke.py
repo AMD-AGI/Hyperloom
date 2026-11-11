@@ -130,15 +130,75 @@ def test_the_import_sees_no_gpu(tmp_path: Path, framework: Framework, monkeypatc
         "seen = tuple(os.environ.get(name) for name in"
         " ('ROCR_VISIBLE_DEVICES', 'HIP_VISIBLE_DEVICES', 'CUDA_VISIBLE_DEVICES'))\n"
         "if seen != ('', '', ''):\n"
-        "    raise RuntimeError('visible: %r' % (seen,))\n"
+        "    gpu_visible\n"
     )
     assert _check(tmp_path, framework, {"srt/a.py": (OLD_A, probe)}) is None
 
 
+#: A per-arch table chosen by a device probe at import, which raises where no GPU is seen.
+DEVICE_PROBE = {"srt/a.py": (OLD_A, "def get_gfx():\n    raise RuntimeError('no GPU found')\n\nGFX = get_gfx()\n")}
+
+
+def test_a_device_probe_at_import_that_finds_no_gpu_is_not_judged(tmp_path: Path, framework: Framework) -> None:
+    assert _check(tmp_path, framework, DEVICE_PROBE, MERGE_OWN) is None
+
+
+def test_a_variable_the_host_lacks_read_at_import_is_not_judged(tmp_path: Path, framework: Framework) -> None:
+    knob = {"srt/a.py": (OLD_A, "import os\nKNOB = os.environ['HL_NO_SUCH_VARIABLE']\n")}
+    assert _check(tmp_path, framework, knob) is None
+
+
+def _point_with(tmp_path: Path, envs: dict[str, str]) -> Path:
+    point = tmp_path / "envs-point.yaml"
+    point.write_text("benchmark:\n  envs:\n" + "".join(f"    {name}: '{value}'\n" for name, value in envs.items()))
+    return point
+
+
+def test_the_import_gets_the_point_s_server_environment_with_no_gpu(tmp_path: Path, framework: Framework) -> None:
+    """A recipe variable read at import is there; a device mask the point sets is still overridden."""
+    probe = (
+        "import os\n"
+        "if os.environ.get('NEW_KNOB') != '7':\n"
+        "    knob_not_passed\n"
+        "if os.environ.get('HIP_VISIBLE_DEVICES') != '':\n"
+        "    gpu_visible\n"
+    )
+    environment = _environment(tmp_path, framework, {"srt/a.py": (OLD_A, probe)})
+    smoke = MergeSmoke(default_python=framework.python)
+    with_knob = _point_with(tmp_path, {"NEW_KNOB": "7", "HIP_VISIBLE_DEVICES": "3"})
+    assert smoke.check(environment, (with_knob,)) is None
+    without = _point_with(tmp_path, {"HIP_VISIBLE_DEVICES": "3"})
+    error = smoke.check(environment, (without,))
+    assert error is not None and "NameError: name 'knob_not_passed'" in error, error
+
+
+def test_a_missing_module_a_patched_file_imports_is_judged(tmp_path: Path, framework: Framework) -> None:
+    error = _check(tmp_path, framework, {"srt/a.py": (OLD_A, "import hl_no_such_module\n")})
+    assert error == "import sglang: ModuleNotFoundError: No module named 'hl_no_such_module' (sglang/srt/a.py:1)"
+
+
+def test_an_attribute_error_in_a_patched_file_is_judged(tmp_path: Path, framework: Framework) -> None:
+    error = _check(tmp_path, framework, {"srt/a.py": (OLD_A, "import os\nos.no_such_attribute\n")})
+    assert error is not None and error.startswith("import sglang: AttributeError: "), error
+    assert error.endswith("(sglang/srt/a.py:2)"), error
+
+
+def test_an_import_error_raised_in_an_unpatched_module_is_not_judged(tmp_path: Path) -> None:
+    """The patched file calls the image's own probe at import, which raises ``ImportError`` with no GPU: the raising
+    frame is the image's module, not the patch."""
+    probe = "def probe():\n    raise ImportError('no device library without a GPU')\n"
+    framework = _framework(tmp_path / "framework", {**IMAGE_FILES, "srt/probe.py": probe})
+    calls = {"srt/a.py": (OLD_A, "from sglang.srt.probe import probe\nprobe()\n")}
+    assert _check(tmp_path, framework, calls) is None
+
+
 def test_an_import_the_image_fails_too_is_not_judged(tmp_path: Path) -> None:
-    files = {**IMAGE_FILES, "srt/a.py": "import os\nos.environ['HL_NO_SUCH_VARIABLE']\n"}
+    """The patched ``b`` raises an error the smoke judges, but the image's own package fails to import here as well
+    (after ``b``, in its ``a``), so the failure says nothing about the candidate."""
+    init = "from sglang.srt import b\nfrom sglang.srt import a\n"
+    files = {**IMAGE_FILES, "__init__.py": init, "srt/a.py": "import os\nos.environ['HL_NO_SUCH_VARIABLE']\n"}
     framework = _framework(tmp_path / "framework", files)
-    assert _check(tmp_path, framework, {"srt/b.py": (OLD_B, "y = 2\n")}) is None
+    assert _check(tmp_path, framework, {"srt/b.py": (OLD_B, "y = undefined_name\n")}) is None
 
 
 def test_a_missing_interpreter_is_not_run(tmp_path: Path, framework: Framework) -> None:
@@ -257,6 +317,14 @@ async def test_an_import_error_fails_as_the_candidate(tmp_path: Path, framework:
     assert result.failure_reason == (
         f"{MERGE_SMOKE}: import sglang: NameError: name 'undefined_name' is not defined (sglang/srt/a.py:1)"
     )
+
+
+async def test_a_device_probe_with_no_gpu_goes_on_to_its_measurement(tmp_path: Path, framework: Framework) -> None:
+    environment = _environment(tmp_path, framework, DEVICE_PROBE)
+    result, backend, journal = await _through_toolbox(
+        tmp_path, environment, MergeSmoke(default_python=framework.python)
+    )
+    assert result.validity is Validity.SUCCEEDED and backend.calls == 1 and journal is not None
 
 
 async def test_a_good_stack_goes_on_to_its_measurement(tmp_path: Path, framework: Framework) -> None:

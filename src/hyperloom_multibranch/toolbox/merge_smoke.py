@@ -19,12 +19,18 @@ any candidate test alike):
    host's cards if it were left set), writes no bytecode, launches no server and is stopped at
    :attr:`MergeSmoke.timeout_sec`.
 
-A file that does not compile, or a module that does not import while the image's own copy does, is the candidate's
-error: :meth:`MergeSmoke.check` returns its first line, and the executor ends the test as a candidate failure with the
+A file that does not compile, or a module whose import fails with an error only the patch can cause while the image's
+own copy imports, is the candidate's error: :meth:`MergeSmoke.check` returns its first line, and the executor ends the test as a candidate failure with the
 reason ``merge_smoke``. A check that cannot run (no interpreter, a blob missing, a farm that cannot be laid, a child that
 timed out or died) raises :class:`SmokeNotRun`, which the executor reports as an infrastructure failure
 (``smoke_not_run``), so an environment fault never bars a good commit. A module the image's own copy cannot import
 either here (a framework that needs a GPU to import) is not judged: the test goes on to be measured as before.
+
+Only the errors the smoke's own environment cannot cause are judged: a ``SyntaxError``, or an ``ImportError``,
+``ModuleNotFoundError``, ``NameError`` or ``AttributeError`` raised from a file the stack patched. Any other failure (a
+``RuntimeError`` of a device probe that finds no GPU, a ``KeyError`` of a variable the host lacks, an error raised inside
+an unpatched module) is logged and not judged, and the test goes on to its sandbox. The import child gets every
+variable the point launches its server with, over the host's environment, still with every GPU hidden.
 
 Not checked: native and kernel sources (``.cu``, ``.hip``, Triton's JIT), anything that fails only at run time, and the
 modules a top-level import does not reach. A runtime root (a stack whose native build the test waits for) has its
@@ -104,18 +110,31 @@ for name, path in files:
 with open(out, 'w') as handle:
     json.dump({'error': error}, handle)
 """
-#: Imports each module of ``argv[1]`` and writes the first that fails, with where it failed, or none, to ``argv[2]``.
+#: Imports each module of ``argv[1]`` (``modules``) and writes the first that fails, with where it was raised and whether
+#: it is one the smoke judges, or none, to ``argv[2]``. Judged: a ``SyntaxError`` in, or an ``ImportError`` (with
+#: ``ModuleNotFoundError``), ``NameError`` or ``AttributeError`` whose raising frame is in, one of ``patched`` (the
+#: farm's paths of the files the stack changes). The raising frame is the last of the traceback outside the import
+#: machinery's own frozen frames.
 _IMPORT = """\
-import importlib, json, sys, traceback
-modules, out = json.load(open(sys.argv[1])), sys.argv[2]
+import importlib, json, os, sys, traceback
+argument, out = json.load(open(sys.argv[1])), sys.argv[2]
+patched = set(os.path.normpath(path) for path in argument['patched'])
 error = None
-for module in modules:
+for module in argument['modules']:
     try:
         importlib.import_module(module)
     except BaseException as exc:
-        frames = traceback.extract_tb(exc.__traceback__)
-        where = '%s:%s' % (frames[-1].filename, frames[-1].lineno) if frames else ''
-        error = {'module': module, 'error': '%s: %s' % (type(exc).__name__, exc), 'where': where}
+        frames = [f for f in traceback.extract_tb(exc.__traceback__) if not f.filename.startswith('<frozen ')]
+        if isinstance(exc, SyntaxError) and exc.filename:
+            filename, lineno = exc.filename, exc.lineno
+        elif frames:
+            filename, lineno = frames[-1].filename, frames[-1].lineno
+        else:
+            filename, lineno = '', None
+        kinds = (SyntaxError, ImportError, NameError, AttributeError)
+        judged = bool(filename) and isinstance(exc, kinds) and os.path.normpath(filename) in patched
+        where = '%s:%s' % (filename, lineno) if filename else ''
+        error = {'module': module, 'error': '%s: %s' % (type(exc).__name__, exc), 'where': where, 'judged': judged}
         break
 with open(out, 'w') as handle:
     json.dump({'error': error}, handle)
@@ -176,9 +195,7 @@ class MergeSmoke:
         files: list[list[str]] = []
         sources = work / "sources"
         for root in environment.roots:
-            for entry in root.entries:
-                if entry.op != _UPSERT or not entry.path.endswith(".py"):
-                    continue
+            for entry in _patched_py(root):
                 target = sources / str(len(files))
                 target.parent.mkdir(parents=True, exist_ok=True)
                 target.write_bytes(_blob(store, entry.blob or ""))
@@ -213,35 +230,60 @@ class MergeSmoke:
             raise SmokeNotRun(f"the patched framework cannot be laid for the import: {_one_line(str(exc))}") from None
         if farm is None:
             return None
-        patched = dict(yaml_envs)
-        prepend_pythonpath(patched, farm.site)
+        patched_envs = dict(yaml_envs)
+        prepend_pythonpath(patched_envs, farm.site)
         if farm.aiter_meta is not None:
-            patched.setdefault(AITER_META_DIR_ENV, str(farm.aiter_meta))
-        failed = self._child(_IMPORT_STEP, python, modules, work, _smoke_env(os.environ, patched))
+            patched_envs.setdefault(AITER_META_DIR_ENV, str(farm.aiter_meta))
+        files = [str(farm.site / root.import_name / entry.path) for root in roots for entry in _patched_py(root)]
+        argument = {"modules": modules, "patched": files}
+        failed = self._child(_IMPORT_STEP, python, argument, work, _smoke_env(os.environ, patched_envs))
         if not failed:
             return None
+        where = str(failed.get("where") or "").removeprefix(f"{farm.site}{os.sep}")
+        return self._verdict(python, environment, {**failed, "where": where}, work, image_env)
+
+    def _verdict(
+        self,
+        python: str,
+        environment: CompiledEnvironment,
+        failed: Mapping[str, Any],
+        work: Path,
+        image_env: Mapping[str, str],
+    ) -> str | None:
+        """The candidate's error of the failed import ``failed`` (its ``where`` relative to the farm), or ``None``
+        (logged) when it is not judged."""
         module = str(failed.get("module"))
+        why = self._not_judged(python, environment, failed, work, image_env)
+        if why is not None:
+            log.warning(
+                "merge smoke: %s does not import here, but %s, so the import is not judged: %s",
+                module,
+                why,
+                _one_line(str(failed.get("error"))),
+            )
+            return None
+        where = failed.get("where")
+        return _one_line(f"import {module}: {failed.get('error')}" + (f" ({where})" if where else ""))
+
+    def _not_judged(
+        self,
+        python: str,
+        environment: CompiledEnvironment,
+        failed: Mapping[str, Any],
+        work: Path,
+        image_env: Mapping[str, str],
+    ) -> str | None:
+        """Why the failed import ``failed`` says nothing about the candidate, or ``None`` when it does."""
+        if not failed.get("judged"):
+            where = failed.get("where") or "no frame"
+            return f"the error (at {where}) is not one only the patch can cause, the smoke seeing no GPU"
         native = [root.import_name for root in environment.roots if root.kind == _RUNTIME]
         if native:
-            log.warning(
-                "merge smoke: %s does not import without the native stacks %s, whose packages are not laid until their "
-                "builds are ready, so the import is not judged: %s",
-                module,
-                ", ".join(native),
-                _one_line(str(failed.get("error"))),
-            )
-            return None
-        if self._child(_IMAGE_IMPORT_STEP, python, [module], work, image_env):
-            log.warning(
-                "merge smoke: the image's own %s does not import here either, so the import is not judged: %s",
-                module,
-                _one_line(str(failed.get("error"))),
-            )
-            return None
-        where = str(failed.get("where") or "")
-        site = f"{farm.site}{os.sep}"
-        where = where.removeprefix(site)
-        return _one_line(f"import {module}: {failed.get('error')}" + (f" ({where})" if where else ""))
+            return f"the native stacks {', '.join(native)} are not laid until their builds are ready"
+        image_import = {"modules": [str(failed.get("module"))], "patched": []}
+        if self._child(_IMAGE_IMPORT_STEP, python, image_import, work, image_env):
+            return "the image's own copy does not import here either"
+        return None
 
     # -- a child -----------------------------------------------------------------------------------------------------
 
@@ -318,14 +360,17 @@ def _blob(store: LocalBlobStore, address: str) -> bytes:
         raise SmokeNotRun(f"a patched file cannot be read: {exc}") from None
 
 
+def _patched_py(root: Any) -> list[Any]:
+    """The ``.py`` files ``root`` writes."""
+    return [entry for entry in root.entries if entry.op == _UPSERT and entry.path.endswith(".py")]
+
+
 def _smoke_env(environ: Mapping[str, str], yaml_envs: Mapping[str, str]) -> dict[str, str]:
-    """This host's environment with the path the server would import from: the point's ``PYTHONPATH``, and the meta
-    directory it names; no other variable of the point (an attachment's placeholder is not a path here)."""
+    """This host's environment, without its ``PYTHONPATH``, with every variable the point launches its server with over
+    it, so a module that reads a recipe's variable at import finds it. The GPUs stay hidden (:meth:`MergeSmoke._child`
+    sets :data:`SMOKE_HIDDEN_DEVICES` last)."""
     env = {name: value for name, value in environ.items() if name != "PYTHONPATH"}
-    if yaml_envs.get("PYTHONPATH"):
-        env["PYTHONPATH"] = yaml_envs["PYTHONPATH"]
-    if yaml_envs.get(AITER_META_DIR_ENV):
-        env[AITER_META_DIR_ENV] = yaml_envs[AITER_META_DIR_ENV]
+    env.update(yaml_envs)
     return env
 
 
