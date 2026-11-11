@@ -1183,8 +1183,12 @@ async def test_the_specialists_are_told_of_and_give_back_the_dev_sandboxes_the_s
 
     without, lending = built
     assert (without.dev_leases, lending.dev_leases) == (None, leases)
-    assert without.role == role_prompt(_specialist_role(WORKLOAD), references={})
-    assert lending.role == role_prompt(_specialist_role(WORKLOAD), references={}, dev_leases=1) != without.role
+    assert without.role == role_prompt(RoleWorkload(_specialist_role(WORKLOAD)), references={}, base=BASE)
+    assert (
+        lending.role
+        == role_prompt(RoleWorkload(_specialist_role(WORKLOAD)), references={}, base=BASE, dev_leases=1)
+        != without.role
+    )
 
 
 def _package(root: Path, name: str, dist: str, version: str, *files: str) -> PackageBase:

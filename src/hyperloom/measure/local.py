@@ -179,8 +179,7 @@ _PROCESS_LOCK = threading.Lock()
 #: and no prompt count; its boot round pins nothing.
 _BOOT_CLIENT_ENVS = {ENV_RUN_EVAL: "false", ENV_NUM_PROMPTS: "1"}
 _WARMUP, _EVAL = ROLE_WARMUP, ROLE_EVAL  # a held test's rounds other than the measured one are named for their roles
-#: No bench of a graded test evaluates, although its point does. ``RUN_EVAL`` is a client-only knob, so the server the
-#: first round booted is the one each later round reuses.
+#: A graded test's benches never evaluate: ``RUN_EVAL`` is client-only, so each later round reuses the first's server.
 _BENCH_ENVS = {ENV_RUN_EVAL: "false"}
 #: The evaluation round runs no bench: InferenceX's ``run_benchmark_serving`` returns before it on ``EVAL_ONLY``, a
 #: client-only knob (an ``EVAL_*`` name).

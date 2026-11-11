@@ -124,11 +124,11 @@ def _spec(**multibranch: object) -> CampaignSpec:
 def test_the_operator_turns_make_before_break_on_or_off_in_the_spec(
     given: dict[str, bool], switches: list[str]
 ) -> None:
-    argv = run_argv(_spec("hosted", **given), 1.0, 8)
+    argv = run_argv(_spec(**given), 1.0, 8)
     assert [arg for arg in argv if arg.endswith("make-before-break")] == switches
 
 
 @pytest.mark.parametrize("given", ["false", 0, 1])
 def test_a_make_before_break_that_is_not_true_or_false_is_refused(given: object) -> None:
     with pytest.raises(HostedRefused, match="multibranch.make_before_break must be true or false"):
-        run_argv(_spec("hosted", make_before_break=given), 1.0, 8)
+        run_argv(_spec(make_before_break=given), 1.0, 8)
