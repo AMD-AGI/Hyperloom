@@ -552,7 +552,9 @@ def _weigh_gate(
     graded, delta_pct = throughput.graded, throughput.delta_pct
 
     accuracy_pass: bool | None = gate_evidence.get("accuracy_pass")
-    acc_block, acc_reason = _accuracy_block(params, accuracy_pass, attempt.specialist_task_id)
+    acc_block, acc_reason = _accuracy_block(
+        params, accuracy_pass, bool(gate_evidence.get("accuracy_incomparable")), attempt.specialist_task_id
+    )
     # Only a score taken under the baseline's eval definition draws a verdict, and only it compares with the baseline.
     acc_delta_pct = (
         None
@@ -730,8 +732,12 @@ def _live_base_tput(params: dict[str, Any], shared_state: SharedState | None) ->
     return base_tput
 
 
-def _accuracy_block(params: dict[str, Any], accuracy_pass: bool | None, specialist_task_id: str) -> tuple[bool, str]:
-    """Whether the accuracy gate blocks a KEEP, and why."""
+def _accuracy_block(
+    params: dict[str, Any], accuracy_pass: bool | None, incomparable: bool, specialist_task_id: str
+) -> tuple[bool, str]:
+    """Whether the accuracy gate blocks a KEEP, and why; a score the baseline cannot judge blocks like a drop."""
+    if incomparable:
+        return True, "accuracy scored under another eval definition than the baseline's; not comparable"
     fw_authored = bool(params.get("framework_agent_authoring") or params.get("framework_agent_candidate_id"))
     required = bool(params.get("require_accuracy_for_keep", fw_authored))
     acc_block, acc_reason, acc_degraded = accuracy_keep_block(
