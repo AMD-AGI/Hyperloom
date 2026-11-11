@@ -69,7 +69,6 @@ from hyperloom_multibranch.scheduling import local_peers as local_peers_module
 from hyperloom_multibranch.scheduling.launch_isolation import (
     HOSTED,
     SANDBOX_UNCONFINED,
-    TESTS_UNCONFINED,
     launch_isolation,
 )
 from hyperloom_multibranch.scheduling.local_peers import (
@@ -841,7 +840,7 @@ async def test_a_hosted_session_measures_in_the_services_sandboxes_under_its_too
 @pytest.mark.parametrize(
     ("problems", "launched", "said_first"),
     [
-        ((), BWRAP, "agent and dev sandboxes and tests run unconfined on this host ("),
+        ((), BWRAP, "agent and dev sandboxes run unconfined on this host ("),
         (
             ("bwrap: not found",),
             NONE,
@@ -871,7 +870,7 @@ async def test_peers_on_this_machine_record_and_say_once_how_their_sandboxes_and
             isolation = built.peers.isolation
 
     assert isolation == launch_isolation(local=True)
-    assert (isolation.specialists, isolation.sandboxes, isolation.tests) == (launched, NONE, NONE)
+    assert (isolation.specialists, isolation.sandboxes, isolation.tests) == (launched, NONE, launched)
     said = [record for record in caplog.records if record.name == launch_isolation_module.__name__]
     assert [record.levelno for record in said] == [logging.WARNING]
     assert said[0].getMessage().startswith(said_first)
@@ -887,7 +886,7 @@ async def test_peers_measuring_in_the_services_sandboxes_record_their_sandboxes_
         isolation = built.peers.isolation
 
     assert (isolation.sandboxes, isolation.tests) == (HOSTED, HOSTED), "the grant's sandboxes run them, not this host"
-    here = (agent_isolation.SANDBOX_ACCOUNT, SANDBOX_UNCONFINED, TESTS_UNCONFINED)
+    here = (agent_isolation.SANDBOX_ACCOUNT, agent_isolation.TEST_ACCOUNT, SANDBOX_UNCONFINED)
     assert not any(why in reason for reason in isolation.reasons for why in here), "nor why they are not isolated here"
 
 

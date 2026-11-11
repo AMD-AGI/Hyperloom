@@ -24,10 +24,12 @@ from pathlib import Path
 
 from hyperloom.common.outside_facts import ROCR_VISIBLE_DEVICES_ENV
 from hyperloom.sandbox.card_occupancy import SANDBOX_TAG_ENV
+from hyperloom.sandbox.confined import RunnerPlan, SandboxConfiner, sandbox_confiner
 from hyperloom.sandbox.gpu_pool import GpuPool
 from hyperloom.sandbox.identity import generate_signing_identity
 from hyperloom.sandbox.node import node_name
 from hyperloom.sandbox.local_sandbox import WORK_DIR, LocalSandbox, SandboxPlan, SandboxRuntime
+from hyperloom.sandbox.reaper import Leftovers, tag_in_use, wait_exited
 from hyperloom.sandbox.socket import (
     AVOID_NODES_KEY,
     IDEMPOTENCY_KEY,
@@ -48,21 +50,32 @@ from hyperloom.sandbox.templates import RESERVED_ENV_NAMES, LocalTemplate
 
 log = logging.getLogger(__name__)
 
-__all__ = ["LocalSandboxProvider", "LocalTemplate", "ProcessUsers"]
+__all__ = ["LocalSandboxProvider", "LocalTemplate", "ProcessUsers", "RunnerPlan"]
 
 
 @dataclass(frozen=True)
 class ProcessUsers:
-    """The python that runs each process's launcher and the accounts the processes run as.
+    """The python that runs each process's launcher, the accounts the processes run as, and what confines the
+    processes of a kind no account is named for.
 
     ``launcher_python`` must be executable by ``sealed_user`` / ``unsealed_user`` when those are set. ``sealed_user``
     is the optional ``(uid, gid)`` that sealed sandboxes' processes run as, ``unsealed_user`` the one for dev and
-    sub-run sandboxes.
+    sub-run sandboxes. ``plan`` is what those of a kind with neither read when they are confined
+    (:class:`~hyperloom.sandbox.confined.RunnerPlan`); without one nothing is confined.
     """
 
     launcher_python: str = sys.executable
     sealed_user: tuple[int, int] | None = None
     unsealed_user: tuple[int, int] | None = None
+    plan: RunnerPlan | None = None
+
+
+@dataclass(frozen=True)
+class _Withheld:
+    """The cards of an ended sandbox its reap could not confirm empty, and what that reap left."""
+
+    cards: tuple[int, ...]
+    leftovers: Leftovers
 
 
 @dataclass(frozen=True)
@@ -84,13 +97,20 @@ class LocalSandboxProvider:
         base_dir: Where sandbox directories live; a temporary directory that
             :meth:`close` removes when omitted.
         hostname: The node name to report; ``NODE_NAME`` or this machine's hostname by default (:func:`~hyperloom.sandbox.node.node_name`).
-        users: The launcher's python and the accounts the processes run as, see :class:`ProcessUsers`.
+        users: The launcher's python, the accounts the processes run as and the plan that confines the others, see
+            :class:`ProcessUsers`.
 
     Without a ``sealed_user`` and an ``unsealed_user`` every sandbox process runs as the
     calling account, so one sandbox's processes can read another's files,
     including its signing key: the sandboxes are separated by directory and by
     process tree, not by account. Giving the two kinds different accounts (this
-    needs root) puts the signing key out of reach of every other process.
+    needs root) puts the signing key out of reach of every other process. Given a
+    ``plan`` (:attr:`ProcessUsers.plan`), the processes of a kind no account is named for run in bubblewrap
+    where the chooser gives it (:mod:`hyperloom.sandbox.confined`): they reach their
+    own sandbox's tree and key and the plan's trees, never another sandbox's, the
+    app's state or credentials, or its processes; where it does not, they run as
+    before, which is said at WARNING, and a hosted run refuses (``IsolationRefused``,
+    raised here).
     """
 
     name = "local"
@@ -121,12 +141,21 @@ class LocalSandboxProvider:
         self._base.mkdir(parents=True, exist_ok=True)
         if sealed_user or unsealed_user:
             self._base.chmod(0o711)  # other accounts must traverse it to reach their own directory
+        self._confiner: SandboxConfiner | None = None
+        if users.plan is not None and None in (sealed_user, unsealed_user):
+            try:
+                self._confiner = sandbox_confiner(users.plan, base=self._base, python=self._launcher_python)
+            except BaseException:
+                if self._owns_base:
+                    shutil.rmtree(self._base, ignore_errors=True)
+                raise
         self._cond = threading.Condition()
         self._live: dict[str, LocalSandbox] = {}
         self._by_key: dict[tuple[Role, str], LocalSandbox | SandboxError] = {}
         self._creating: set[tuple[Role, str]] = set()
         self._cards: dict[str, tuple[int, ...]] = {}
         self.quarantined: set[int] = set()
+        self._withheld: dict[str, _Withheld] = {}
 
     # -- socket ------------------------------------------------------------
 
@@ -285,7 +314,8 @@ class LocalSandboxProvider:
             self._hand_over(directory, tpl)
             meta, platform_envs = self._platform_view(tpl, sandbox_id, directory, cards, metadata)
             plan = SandboxPlan(sandbox_id, tpl, role, directory, meta, order.envs, platform_envs, order.timeout_sec)
-            runtime = SandboxRuntime(self._on_end, self._launcher_python, self._users[tpl.sealed])
+            user = self._users[tpl.sealed]
+            runtime = SandboxRuntime(self._on_end, self._launcher_python, user, None if user else self._confiner)
             sandbox = LocalSandbox(plan, runtime)
             with self._cond:
                 self._live[sandbox_id] = sandbox
@@ -356,7 +386,31 @@ class LocalSandboxProvider:
         with self._cond:
             self._live.pop(sandbox.sandbox_id, None)
             cards = self._cards.pop(sandbox.sandbox_id, ())
+            if not reaped:
+                self.quarantined.update(cards)
+                self._withheld[sandbox.sandbox_id] = _Withheld(cards, sandbox.leftovers)
         if reaped:
             self.pool.release(cards)
-        else:
-            self.quarantined.update(cards)
+
+    def release_freed_cards(self) -> tuple[int, ...]:
+        """Put back in the pool the withheld cards of every ended sandbox nothing of which runs any more; return them.
+
+        A sandbox whose reap could not confirm it empty keeps its cards out of the pool (``quarantined``). The reap named
+        what it left, each process sent SIGKILL so that it could start no other, and every process the sandbox started
+        that kept its environment carries the sandbox's id. Once none of the named processes and no process with the id
+        runs, nothing of the sandbox can use the cards. A reap that could not tell what it left keeps them for good, and
+        so does a card put in ``quarantined`` by anything but a reap.
+        """
+        with self._cond:
+            withheld = list(self._withheld.items())
+        freed: list[int] = []
+        for sandbox_id, held in withheld:
+            if not wait_exited(held.leftovers).clean or tag_in_use(sandbox_id):
+                continue
+            with self._cond:
+                if self._withheld.pop(sandbox_id, None) is None:
+                    continue  # another call gave them back first
+                self.quarantined.difference_update(held.cards)
+            self.pool.release(held.cards)
+            freed.extend(held.cards)
+        return tuple(sorted(freed))
