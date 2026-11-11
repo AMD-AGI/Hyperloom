@@ -57,6 +57,10 @@ _COMPACTION_PATCH_NAME = "hyperloom-compaction.yml"
 #: composition, so it is slower than any later turn on the same runtime.
 _INITIALIZE_TIMEOUT_SEC = 120.0
 
+#: Environment variable that caps the output tokens of each model request. Unset
+#: keeps the harness default, which exceeds the output limit of some routed models.
+MAX_TOKENS_ENV = "HYPERLOOM_DSH_MAX_TOKENS"
+
 #: Harness token fields, in their wire spelling, mapped onto the shared names.
 #: ``totalTokens`` is deliberately absent: the harness reports it as a running
 #: total for the whole turn, so summing it across steps would count the same
@@ -107,6 +111,20 @@ def sdk_failures() -> tuple[type[BaseException], ...]:
     """The failures a harness call is expected to end in: the SDK's own, a timeout, or the OS refusing."""
     errors = load_harness_sdk().errors
     return (errors.HarnessError, asyncio.TimeoutError, TimeoutError, OSError)
+
+
+def max_tokens_from_env(env: Mapping[str, str]) -> int | None:
+    """The per-request output-token cap ``MAX_TOKENS_ENV`` sets, or ``None`` when it is unset."""
+    raw = env.get(MAX_TOKENS_ENV, "").strip()
+    if not raw:
+        return None
+    try:
+        value = int(raw)
+    except ValueError:
+        value = 0
+    if value <= 0:
+        raise DeepSeekSessionUnavailableError(f"{MAX_TOKENS_ENV} must be a positive integer, got {raw!r}")
+    return value
 
 
 def gateway_env(env: Mapping[str, str]) -> dict[str, str]:
@@ -164,6 +182,7 @@ class HarnessLaunch:
     env: Mapping[str, str]
     request_timeout_sec: float
     initialize_timeout_sec: float = _INITIALIZE_TIMEOUT_SEC
+    max_tokens: int | None = None
 
 
 def start_harness(sdk: Any, launch: HarnessLaunch) -> Any:
@@ -186,6 +205,7 @@ def start_harness(sdk: Any, launch: HarnessLaunch) -> Any:
         provider=DEEPSEEK_PROVIDER_ROUTE,
         model=launch.model,
         reasoning_effort=launch.reasoning_effort,
+        max_tokens=launch.max_tokens,
         env=dict(launch.env),
         initialize_timeout_seconds=launch.initialize_timeout_sec,
         request_timeout_seconds=launch.request_timeout_sec,
@@ -363,6 +383,7 @@ class DeepSeekSession:
                 reasoning_effort=harness_reasoning_effort(self.reasoning_effort or DEFAULT_REASONING_EFFORT),
                 env=child_env,
                 request_timeout_sec=self.request_timeout_sec,
+                max_tokens=max_tokens_from_env(child_env),
             ),
         )
 
@@ -424,9 +445,11 @@ __all__ = [
     "DeepSeekSessionTimeoutError",
     "DeepSeekSessionUnavailableError",
     "HarnessLaunch",
+    "MAX_TOKENS_ENV",
     "child_environment",
     "gateway_env",
     "load_harness_sdk",
+    "max_tokens_from_env",
     "normalize_run_result",
     "sdk_failures",
     "start_harness",
