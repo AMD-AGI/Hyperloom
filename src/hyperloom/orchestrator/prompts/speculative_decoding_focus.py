@@ -8,6 +8,7 @@ from __future__ import annotations
 from collections.abc import Mapping
 from typing import Any
 
+from hyperloom.common.benchmark_config import configured_benchmark
 from hyperloom.inference_optimizer.speculative_capability import speculative_capability_lines
 
 _ROLE: tuple[str, ...] = (
@@ -99,12 +100,13 @@ _CONSTRAINTS: tuple[str, ...] = (
 
 
 def _stack_coverage_lines() -> list[str]:
-    """The pinned stack's draft-kernel coverage, from the same rules the grid's admission layer enforces."""
-    coverage = speculative_capability_lines()
+    """The pinned stack's draft-kernel coverage and the session recipe's draft bounds, from the same rules the grid's
+    admission layer enforces."""
+    coverage = speculative_capability_lines(configured_benchmark())
     header = (
-        "- The pinned stack ships kernels only for some draft shapes; a",
-        "  proposal outside that coverage is refused before it runs, so",
-        "  pick the stated alternative:",
+        "- The pinned stack runs only some draft shapes; a proposal outside",
+        "  them is refused before it runs, so stay within them or pick the",
+        "  stated alternative:",
     )
     return [*header, *(f"  {line}" for line in coverage)] if coverage else []
 
