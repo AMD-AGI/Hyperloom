@@ -653,7 +653,6 @@ def extract_benchmark_measurement(
     *,
     workspace: Path | None = None,
     subprocess_started_unix: float | None = None,
-    config_path: Path | None = None,
 ) -> dict[str, Any]:
     """Extract a normalized measurement from an inference_suite run_dir, or from a benchmark report and InferenceX outputs.
 
@@ -678,13 +677,6 @@ def extract_benchmark_measurement(
     if workspace is not None and is_round_folder(workspace):
         return _round_folder_measurement(workspace, subprocess_started_unix)
     report = report or {}
-    from hyperloom.inference_optimizer.agentx.report import agentx_measurement
-
-    if report.get("scenario") == "agentx" or (config_path is not None and read_benchmark_point(config_path).agentx):
-        measurement = agentx_measurement(report)
-        measurement.update(_round_gpu_power(report, workspace, subprocess_started_unix))
-        _add_agentx_timeline_fields(measurement, workspace)
-        return measurement
     measurement = _measurement_from_report(report, workspace, subprocess_started_unix)
 
     origins: dict[str, str] = {}

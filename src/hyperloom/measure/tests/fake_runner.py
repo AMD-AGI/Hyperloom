@@ -27,8 +27,7 @@ sandbox was given any of them (``status.json`` says ``foreign_process_on_card``)
 checks}`` signs what the runner says of its cards into the manifest; ``fake_notes: [note, ...]`` signs those notes.
 ``fake_phases: [[name, seconds], ...]`` states those phases, back to back, in the manifest's timing (``fake_phases_at``
 is the unix time the first begins, on this fake runner's own clock: 9000 by default); a runner that states none is
-the default. ``fake_legacy_decode: true`` lists the ``decode/outputs.jsonl`` that a runner of the removed decode pass left, so a
-bundle written then can be verified again.
+the default.
 ``fake_short_prompts: good`` leaves the outputs of a short-prompt check whose one process, the test's own server, behaves
 so, when the sheet asks for the check (``bad``: wrong for short prompts, ``drift``: one long prompt differs late, ``fail``:
 did not answer).
@@ -64,12 +63,12 @@ from hyperloom.measure.attachments import place_attachments, substitute
 from hyperloom.measure.repro import REPRO_DIR, find_case, run_case
 from hyperloom.measure.jit_kinds import AITER_JIT
 from hyperloom.measure.jit.store import Snapshot, StoredFile
-from hyperloom.measure.manifest import encode_manifest, result_schema_for
+from hyperloom.measure.manifest import RESULT_SCHEMA, encode_manifest
 from hyperloom.measure.runner.service import Progress
 from hyperloom.measure.long_context.tests.support import outputs_files as long_context_outputs
 from hyperloom.measure.short_prompts.tests.support import outputs_files
 from hyperloom.measure.tests.run_dirs import run_dir_report
-from hyperloom.measure.spec import SPEC_SCHEMA_V1, MeasurementSpec, fingerprint, spec_sha256
+from hyperloom.measure.spec import MeasurementSpec, fingerprint, spec_sha256
 
 REPORT_PATH = "suite_run_0/report.json"
 TRACE_PATH = "profile/torch_trace/rank0.pt.trace.json.gz"
@@ -77,13 +76,6 @@ TRACE_PATH = "profile/torch_trace/rank0.pt.trace.json.gz"
 #: holds alone (named as on a speculative-decoding head).
 CAPTURE_TRACE_PATH = "profile/torch_trace/graph_capture_profile/EAGLEDraftExtendCudaGraphRunner_bs_8_rank0.json.gz"
 EXPORT_PATH = "suite_run_0/aiperf_artifacts/profile_export.jsonl"
-#: What a runner of the removed greedy decode pass left in a bundle: a header line, then one line per prompt.
-LEGACY_DECODE_PATH = "decode/outputs.jsonl"
-LEGACY_DECODE_IDENTITY = "sha256:0123456789abcdef|temperature=0|top_k=1"
-LEGACY_DECODE_OUTPUTS = (
-    json.dumps({"decode_pass": {"identity": LEGACY_DECODE_IDENTITY, "prompts": 2, "isl": 8, "max_tokens": 4}})
-    + '\n{"prompt": 0, "tokens": [1, 2]}\n{"prompt": 1, "tokens": [3]}\n'
-).encode()
 
 
 def _atomic(path: Path, data: bytes) -> None:
@@ -97,7 +89,7 @@ def _visible_cards() -> list[int]:
     return [int(i) for i in os.environ.get("ROCR_VISIBLE_DEVICES", "").split(",") if i.strip().isdigit()]
 
 
-def _runner_facts(key: Any, sandbox_id: str, mode: str, spec: MeasurementSpec) -> dict[str, Any]:
+def _runner_facts(key: Any, sandbox_id: str, mode: str) -> dict[str, Any]:
     public_pem = signing.public_key_pem(key)
     return {
         "sandbox_id": "sbx-other" if mode == "other_sandbox" else sandbox_id,
@@ -108,11 +100,7 @@ def _runner_facts(key: Any, sandbox_id: str, mode: str, spec: MeasurementSpec) -
         "power_cap_w": 500,
         "partition_mode": "SPX/NPS1",
         "hyperloom_version": _version(),
-        **(
-            {"magpie_commit": spec.tools.magpie}
-            if spec.schema == SPEC_SCHEMA_V1
-            else {"inference_suite_staging": "e" * 64}
-        ),
+        "inference_suite_staging": "e" * 64,
         "inferencex_commit": "f" * 40,
         "gpu_ids": _visible_cards(),
         "ecc_delta": {"correctable": 0, "uncorrectable": 0},
@@ -184,8 +172,6 @@ def _write_files(out: Path, config: dict[str, Any], mode: str) -> dict[str, byte
         rounds[0]["nonfatal_warnings"] = list(config["fake_warnings"])
     if config.get("fake_rounds") or "fake_accuracy" in config or "fake_warnings" in config:
         files["rounds.json"] = json.dumps(rounds).encode()
-    if config.get("fake_legacy_decode"):
-        files[LEGACY_DECODE_PATH] = LEGACY_DECODE_OUTPUTS
     for relative, data in files.items():
         _atomic(out / "files" / relative, data)
     return files
@@ -276,12 +262,12 @@ def _manifest(
 ) -> dict[str, Any]:
     failing = mode in ("fail_test", "fail_unknown", "timed_out")
     document = {
-        "schema": result_schema_for(spec.schema),
+        "schema": RESULT_SCHEMA,
         "request_id": "other-request" if mode == "other_request" else spec.request_id,
         "spec_fingerprint": ("0" * 16) if mode == "other_spec" else fingerprint(spec, hyperloom_version=_version()),
         "spec_sha256": spec_sha256(raw),
         "surface_sha256": None,
-        "runner": _runner_facts(key, os.environ["E2B_SANDBOX_ID"], mode, spec),
+        "runner": _runner_facts(key, os.environ["E2B_SANDBOX_ID"], mode),
         "outcome": {
             "returncode": 1 if failing else 0,
             "timed_out": mode == "timed_out",

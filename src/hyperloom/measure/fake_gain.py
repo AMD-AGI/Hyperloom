@@ -14,24 +14,19 @@ here and a test together; the test sends a minimal example through the real enfo
 
 from __future__ import annotations
 
-import json
 import shlex
 from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-from hyperloom.common.benchmark_config import read_benchmark_point
 from hyperloom.common.launch_log_evidence import observed_server_config_from_log
 from hyperloom.contracts.recipe import LaunchConfig
-from hyperloom.inference_optimizer.agentx.report import agentx_measurement, native_launch_evidence
 from hyperloom.orchestrator.actions.executors import (
     PREFIX_CACHE_OFF_ERROR_CLASS,
     CONTEXT_COPY_REFUSAL,
-    RequestedLaunch,
     RoundFolder,
     SpeculativeDecodingPinnedError,
-    build_launch_evidence,
     context_copy_refusal,
     is_round_folder,
     refuse_cacheless_agentx_baseline,
@@ -87,40 +82,17 @@ def _server_log(round_dir: Path) -> str | None:
     return str(found[-1]) if found else None
 
 
-def _own_report(round_dir: Path) -> dict[str, Any]:
-    """The round's own AgentX ``benchmark_report.json``, the file main's grid runner reads from a round's workspace.
-
-    A warm-up round's report below it is another round's, and a landing that writes files in manifest order makes it
-    the newest one there; ``{}`` when the round has no AgentX report that parses.
-    """
-    try:
-        report = json.loads((round_dir / "benchmark_report.json").read_text(encoding="utf-8"))
-    except (OSError, ValueError):
-        return {}
-    return report if isinstance(report, dict) and report.get("scenario") == "agentx" else {}
-
-
-def baseline_prefix_cache_refusal(point: Path, round_dir: Path) -> str:
+def baseline_prefix_cache_refusal(round_dir: Path) -> str:
     """Why an AgentX baseline round served with the prefix cache off may not end ``succeeded``, or ``""``.
 
-    ``point`` is the measurement point the round ran and ``round_dir`` the directory it landed in; main's #1884 check
-    reads the launch evidence built from them. A round the report mapper does not call a valid measurement is not the
-    succeeded round main checks, and is left alone. An inference_suite run_dir is judged by ``round_measurement`` and
-    its launch is the one its ``launch.json`` records; one whose report or launch breaks its contract raises
-    :class:`RoundUnreadable`. A v1 Magpie AgentX round is judged by ``agentx_measurement`` and its launch is the one
-    Magpie reports it ran. Any other point's launch is read from its own server args.
+    ``round_dir`` is the inference_suite run_dir the round landed in; main's #1884 check reads the launch its
+    ``launch.json`` records. A round ``round_measurement`` does not call a valid measurement is not the succeeded round
+    main checks, and is left alone. A run_dir whose report or launch breaks its contract, or a directory that is no
+    run_dir, raises :class:`RoundUnreadable`.
     """
-    log = _server_log(round_dir)
-    if is_round_folder(round_dir):
-        return _suite_round_refusal(round_dir, log)
-    if read_benchmark_point(point).agentx:
-        measurement = agentx_measurement(_own_report(round_dir))
-        if not measurement["valid_measurement"]:
-            return ""
-        return _cacheless_refusal(native_launch_evidence(measurement, point, actual_server_log=log))
-    return _cacheless_refusal(
-        build_launch_evidence(RequestedLaunch(config_path=point, framework=""), actual_server_log=log, slot=round_dir)
-    )
+    if not is_round_folder(round_dir):
+        raise RoundUnreadable(f"{round_dir}: not an inference_suite run_dir")
+    return _suite_round_refusal(round_dir, _server_log(round_dir))
 
 
 def _suite_round_refusal(run_dir: Path, log: str | None) -> str:

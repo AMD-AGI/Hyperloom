@@ -19,7 +19,6 @@ from hyperloom.measure.tests.bundle_factory import (
     point_document,
     point_yaml,
     spec_document,
-    spec_document_v1,
     spec_json,
 )
 from jsonschema import Draft202012Validator
@@ -44,7 +43,6 @@ def _validator(name: str) -> Draft202012Validator:
 
 
 VALIDATOR = _validator("measurement_spec.v2.schema.json")
-VALIDATOR_V1 = _validator("measurement_spec.v1.schema.json")
 
 
 def _fp(document: dict[str, Any], **kwargs: Any) -> str:
@@ -101,8 +99,6 @@ NEGATIVES: dict[str, Callable[[dict[str, Any]], None]] = {
     "normalised package without its wheel": lambda d: d["tools"]["inference_suite"]["normalised"]["packages"][0].pop(
         "wheel_sha256"
     ),
-    "magpie commit in a v2 sheet": lambda d: d["tools"].update(magpie={"commit": "a" * 40}),
-    "benchmark backend in a v2 sheet": lambda d: d["procedure"].update(benchmark_backend="magpie"),
     "no base launch": lambda d: d["procedure"].pop("base_launch"),
     "absolute entry path": lambda d: d["environment"]["roots"][0]["entries"][0].update(path="/etc/x"),
     "dotdot entry path": lambda d: d["environment"]["roots"][0]["entries"][0].update(path="a/../b"),
@@ -476,54 +472,13 @@ def test_the_request_id_in_the_sheet_is_the_one_given() -> None:
     assert MeasurementSpec.from_document(spec_document()).request_id == REQUEST_ID
 
 
-def test_a_sheet_written_while_the_decode_pass_existed_still_parses_and_the_flag_is_dropped() -> None:
-    old = spec_document_v1()
-    old["procedure"]["decode_pass"] = True
-    assert list(VALIDATOR_V1.iter_errors(old)) == []
-
-    spec = MeasurementSpec.from_document(old)
-
-    assert "decode_pass" not in spec.to_document()["procedure"]
-    assert spec.to_document() == MeasurementSpec.from_document(spec_document_v1()).to_document()
-    assert not hasattr(spec.procedure, "decode_pass")
+@pytest.mark.parametrize("schema", ["hyperloom.measurement-spec/v1", "hyperloom.measurement-spec/v3"])
+def test_a_sheet_of_another_version_is_refused_naming_the_one_the_reader_reads(schema: str) -> None:
+    with pytest.raises(DocumentError, match="expected hyperloom.measurement-spec/v2"):
+        MeasurementSpec.from_document(_edit(lambda d: d.update(schema=schema)))
 
 
-#: The fingerprint and bytes hash of :func:`spec_document_v1` before the sheet had a second version.
-_V1_FINGERPRINT = "7ea292d95ef4e78e"
-_V1_SHA256 = "733b2a6a9ad55cc717ce23b1f169928db7800b0c66987df61327c35b4b8d8db5"
-
-
-def test_a_v1_sheet_still_loads_with_the_bytes_and_fingerprint_it_was_recorded_with() -> None:
-    """The journal and the archive keep v1 sheets, and an archived bundle is verified again from its sheet."""
-    document = spec_document_v1()
-    assert list(VALIDATOR_V1.iter_errors(document)) == []
-
-    spec = MeasurementSpec.from_document(document)
-
-    assert spec.schema == "hyperloom.measurement-spec/v1"
-    assert (spec.tools.magpie, spec.tools.staging, spec.procedure.benchmark_backend) == ("a" * 40, None, "magpie")
-    assert spec.procedure.base_launch is None
-    assert spec.to_document() == document
-    assert (spec.sha256(), _fp(document)) == (_V1_SHA256, _V1_FINGERPRINT)
-
-
-def test_a_v1_sheet_cannot_carry_what_only_v2_says() -> None:
-    document = spec_document_v1()
-    document["procedure"]["base_launch"] = base_launch().to_document()
-
-    with pytest.raises(DocumentError, match="unknown key 'base_launch'"):
-        MeasurementSpec.from_document(document)
-
-
-def test_a_sheet_of_a_version_the_reader_does_not_know_is_refused_naming_it_and_the_known_ones() -> None:
-    with pytest.raises(DocumentError) as refused:
-        MeasurementSpec.from_document(_edit(lambda d: d.update(schema="hyperloom.measurement-spec/v3")))
-
-    assert "hyperloom.measurement-spec/v3" in str(refused.value)
-    assert "hyperloom.measurement-spec/v1, hyperloom.measurement-spec/v2" in str(refused.value)
-
-
-def test_a_v2_sheet_without_a_base_launch_is_refused_naming_both_versions() -> None:
+def test_a_sheet_without_a_base_launch_is_refused_naming_both_schemas() -> None:
     with pytest.raises(DocumentError) as refused:
         MeasurementSpec.from_document(_edit(lambda d: d["procedure"].pop("base_launch")))
 
@@ -541,12 +496,11 @@ def test_the_fingerprint_keeps_the_staging_sha256_and_not_the_normalised_manifes
     assert canonical["tools"]["inference_suite"] == {"staging": STAGING.sha256()}
 
 
-def test_a_v2_sheet_carries_the_frozen_base_whole_and_names_the_staging() -> None:
+def test_a_sheet_carries_the_frozen_base_whole_and_names_the_staging() -> None:
     spec = MeasurementSpec.from_document(spec_document())
 
     assert spec.procedure.base_launch == base_launch()
-    assert spec.tools.staging == STAGING and spec.tools.magpie is None
-    assert spec.procedure.benchmark_backend is None
+    assert spec.tools.staging == STAGING
     assert MeasurementSpec.from_bytes(spec.to_bytes()).to_bytes() == spec.to_bytes()
 
 

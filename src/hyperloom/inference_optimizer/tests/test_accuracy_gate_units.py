@@ -347,11 +347,6 @@ class TestParseAgentXErrorRate:
         (tmp_path / "inferencex_result.json").write_text(json.dumps({"request_error_rate": "n/a"}), encoding="utf-8")
         assert ag.parse_agentx_error_rate(tmp_path) is None
 
-    def test_an_invalid_public_report_cannot_be_salvaged(self, tmp_path):
-        (tmp_path / "benchmark_report.json").write_text(json.dumps({"scenario": "agentx", "benchmark_valid": False}))
-        (tmp_path / "inferencex_result.json").write_text(json.dumps({"request_error_rate": 0.0}))
-        assert ag.parse_agentx_error_rate(tmp_path) is None
-
     def test_an_unreadable_result_reports_none_and_warns(self, tmp_path, caplog):
         """A parse failure must not read as a rate of zero."""
         (tmp_path / "inferencex_result.json").write_text("{not json", encoding="utf-8")
