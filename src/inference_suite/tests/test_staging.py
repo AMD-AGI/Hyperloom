@@ -49,6 +49,7 @@ from inference_suite.staging import (
 )
 from inference_suite.tests import aiperf_source
 from inference_suite.tests.client_env_fakes import WHEELS, FakeClient
+from hyperloom.measure.runner.cache_layout import LockPin, lock_file, parse_lock
 
 _CLIENT = "infx/bench_serving/benchmark_serving.py"
 _CLIENT_TEXT = "print('client')\n"
@@ -108,6 +109,7 @@ class _FakeInstall:
 
     def __init__(self, *, fail: str | None = None) -> None:
         self.calls: list[list[str]] = []
+        self.requirements: list[str] = []
         self.fail = fail
 
     def __call__(self, argv: list[str], what: str) -> None:
@@ -115,6 +117,8 @@ class _FakeInstall:
             _REAL_STAGING_STEP(argv, what)
             return
         self.calls.append(list(argv))
+        if "--requirement" in argv:
+            self.requirements.append(Path(argv[argv.index("--requirement") + 1]).read_text())
         if self.fail is not None and self.fail in what:
             raise StagingError(f"{what} exited with code 1: no network")
 
@@ -411,7 +415,7 @@ def test_stage_without_a_source_installs_lm_eval_beside_an_intact_cache_and_stag
 
     assert staging.main(["stage", "--tool-cache", str(cache)]) == 0
     assert capsys.readouterr().out.strip() == digest
-    assert install.calls == ([_lm_eval_install()] if installs else [])
+    assert [call[:-1] for call in install.calls] == ([_lm_eval_install()] if installs else [])
     assert (cache / MANIFEST_FILE).stat().st_mtime_ns == manifest
 
 
@@ -435,7 +439,7 @@ def test_stage_from_a_source_installs_lm_eval_at_its_pin(staged, install, monkey
     install.calls.clear()
 
     assert staging.main(["stage", "--source", str(tmp_path / "InferenceX"), "--tool-cache", str(tmp_path / "t")]) == 0
-    assert _lm_eval_install() in install.calls
+    assert _lm_eval_installs(install) == [_lm_eval_install()]
     assert verify(tmp_path / "t", capsys.readouterr().out.strip()).failed_step is None
 
 
@@ -599,7 +603,23 @@ def test_install_stages_under_the_install_lock_and_installs_no_tool_checkout() -
 
 
 def _lm_eval_install() -> list[str]:
-    return [sys.executable, "-m", "pip", "install", "--no-input", "--disable-pip-version-check", LM_EVAL_REQUIREMENT]
+    """The argv of an lm-eval install, its requirement file's path aside, which :func:`_lm_eval_installs` drops."""
+    return [
+        sys.executable,
+        "-m",
+        "pip",
+        "install",
+        "--no-input",
+        "--disable-pip-version-check",
+        "--require-hashes",
+        "--constraint",
+        str(staging.runner_lock()),
+        "--requirement",
+    ]
+
+
+def _lm_eval_installs(install: _FakeInstall) -> list[list[str]]:
+    return [call[:-1] for call in install.calls if call[:-1] == _lm_eval_install()]
 
 
 @pytest.fixture
@@ -735,7 +755,7 @@ def test_stage_installs_lm_eval_at_its_pin_into_the_staging_interpreter_unless_i
     monkeypatch.setattr(staging, "_distribution_version", {LM_EVAL_DISTRIBUTION: installed}.get)
 
     assert _stage_cli(cache, "--source", str(repo)) == cli.EXIT_OK
-    assert (_lm_eval_install() in install.calls) is installs
+    assert bool(_lm_eval_installs(install)) is installs
 
 
 def test_a_failed_lm_eval_install_is_refused_and_stages_nothing(pinned, monkeypatch, capsys) -> None:
@@ -752,6 +772,61 @@ def test_the_lm_eval_pin_is_the_release_the_runner_extra_locks() -> None:
     pyproject = (_SRC.parent / "pyproject.toml").read_text(encoding="utf-8")
 
     assert f'"{LM_EVAL_REQUIREMENT}",' in pyproject
+
+
+def _locked_lm_eval(lock: Path) -> LockPin:
+    return next(pin for pin in parse_lock(lock.read_text()) if pin.name == "lm-eval")
+
+
+def test_lm_eval_installs_with_the_hashes_the_runner_lock_pins_and_its_tree_held_to_that_lock(
+    pinned, install, monkeypatch
+) -> None:
+    repo, cache = pinned
+    monkeypatch.setattr(staging, "_distribution_version", {}.get)
+
+    assert _stage_cli(cache, "--source", str(repo)) == cli.EXIT_OK
+    assert _lm_eval_installs(install) == [_lm_eval_install()]
+    locked = _locked_lm_eval(staging.runner_lock())
+    assert locked.version == LM_EVAL_VERSION and LM_EVAL_WHEEL_SHA256 in locked.hashes
+    (requirement,) = install.requirements
+    name, *hashes = requirement.split()
+    assert name == LM_EVAL_REQUIREMENT
+    assert {digest.removeprefix("--hash=sha256:") for digest in hashes} == locked.hashes
+
+
+@pytest.mark.parametrize("python_version", ["3.10", "3.12", "3.14", f"{sys.version_info[0]}.{sys.version_info[1]}"])
+def test_the_runner_lock_is_the_one_the_sealed_runner_installs_on_that_python(python_version) -> None:
+    tree = _SRC.parent
+    expected = tree / lock_file(tree, python_version)
+
+    assert staging._runner_lock(python_version) == expected
+    assert _locked_lm_eval(expected).version == LM_EVAL_VERSION
+
+
+def test_lm_eval_is_refused_outside_a_source_tree_holding_the_runner_lock(
+    pinned, install, monkeypatch, tmp_path, capsys
+):
+    repo, cache = pinned
+    monkeypatch.setattr(staging, "_distribution_version", {}.get)
+    monkeypatch.setattr(staging, "_SOURCE_TREE", tmp_path / "site-packages")
+
+    assert _stage_cli(cache, "--source", str(repo)) == cli.EXIT_REFUSED
+    err = capsys.readouterr().err
+    assert err.startswith(f"{FailedStep.STAGING_MISSING.value}: ") and str(tmp_path / "site-packages") in err
+    assert _lm_eval_installs(install) == []
+
+
+def test_a_runner_lock_without_the_pinned_lm_eval_is_refused(pinned, install, monkeypatch, tmp_path, capsys) -> None:
+    repo, cache = pinned
+    monkeypatch.setattr(staging, "_distribution_version", {}.get)
+    monkeypatch.setattr(staging, "_SOURCE_TREE", tmp_path)
+    lock = tmp_path / "requirements" / "runner.lock"
+    lock.parent.mkdir()
+    lock.write_text("lm-eval==0.4.11 \\\n    --hash=sha256:" + "c" * 64 + "\n")
+
+    assert _stage_cli(cache, "--source", str(repo)) == cli.EXIT_REFUSED
+    assert f"{lock} pins no lm-eval=={LM_EVAL_VERSION}" in capsys.readouterr().err
+    assert _lm_eval_installs(install) == []
 
 
 def _run_suite_install(*args: str) -> subprocess.CompletedProcess[str]:
