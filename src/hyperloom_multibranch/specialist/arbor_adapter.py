@@ -79,6 +79,7 @@ from hyperloom.measure.compile import (
 )
 from hyperloom.measure.surface import POINT_ENV_KEYS, REQUEST_ENV_KEYS, SURFACE_ENV_KEYS
 from hyperloom_common.shared_storage import copy_shared_file, make_shared_dirs
+from hyperloom_multibranch.blackboard.local.agent_manifest import REDACTED
 from hyperloom_multibranch.repo.isolated_git import pinned_git
 from hyperloom_multibranch.rulegate.agentx import AgentXObjective
 from hyperloom_multibranch.specialist.agent_manifest import EXIT_FILE, AgentManifest
@@ -356,6 +357,19 @@ def read_launch(path: Path) -> ResolvedLaunch:
     if reasons:
         raise ArborRefused([f"the launch file {path}: {reason}" for reason in reasons])
     return ResolvedLaunch(flags, env, texts["model_name"])
+
+
+def served_config(config: Mapping[str, Any], spec: AgentSpec) -> dict[str, Any]:
+    """``config`` as MB stores it, every credential masked, with each masked ``server_env`` value that ``spec``'s
+    launch file serves read from it again (:func:`read_launch`): a frozen base's from this host. Raise
+    :class:`ArborRefused` when the host no longer holds that value."""
+
+    env = config.get("server_env")
+    masked = [name for name, value in env.items() if value == REDACTED] if isinstance(env, Mapping) else []
+    if not masked or not spec.launch:
+        return dict(config)
+    served = read_launch(Path(spec.launch)).server_env
+    return {**config, "server_env": {**env, **{name: served[name] for name in masked if name in served}}}
 
 
 def _read_record(path: Path, document: Mapping[str, Any]) -> ResolvedLaunch:
@@ -1223,6 +1237,7 @@ __all__ = [
     "read_launch",
     "refusals",
     "refused_reasons",
+    "served_config",
     "server_flags",
     "split_directions",
 ]
