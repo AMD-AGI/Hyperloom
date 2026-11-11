@@ -458,12 +458,13 @@ def _private(tmp_path: Path) -> tuple[Path, Path]:
     return secret, secret / "key"
 
 
-async def test_a_copy_follows_no_link_at_the_checkout_s_name(tmp_path: Path) -> None:
-    tmp_path.chmod(0o2775)
+@pytest.mark.parametrize("shared", [True, False], ids=["shared", "private"])
+async def test_a_copy_follows_no_link_at_the_checkout_s_name(tmp_path: Path, shared: bool) -> None:
+    tmp_path.chmod(0o2775 if shared else 0o755)
     secret, key = _private(tmp_path)
     agent = tmp_path / "agent"
     agent.mkdir()
-    agent.chmod(0o2775)
+    agent.chmod(0o2775 if shared else 0o755)
     (agent / "copied").symlink_to(secret)
     tree = _vendored(tmp_path)
 
@@ -497,6 +498,32 @@ async def test_a_copy_outside_shared_storage_takes_the_tree_s_modes_under_the_um
     assert _mode(tmp_path / "agent" / "copied" / "pkg") == 0o755
     assert _mode(tmp_path / "agent" / "copied" / "pkg" / "run.py") == 0o644
     assert _mode(tmp_path / "agent" / "copied" / "pkg" / "run.sh") == 0o755
+
+
+@pytest.mark.parametrize("umask", [0o022, 0o002], ids=oct)
+async def test_a_copy_outside_shared_storage_is_copytree_s_with_links_followed_and_modes_kept(
+    tmp_path: Path, umask: int
+) -> None:
+    tmp_path.chmod(0o755)
+    secret, key = _private(tmp_path)
+    tree = _vendored(tmp_path)
+    (tree / "pkg" / "up").symlink_to(Path("..", "..", secret.name))
+    (tree / "own").mkdir(mode=0o700)
+    (tree / "own" / "key").write_text("k", encoding="utf-8")
+    (tree / "own" / "key").chmod(0o600)
+    (tree / "own").chmod(0o700)
+    checkout = tmp_path / "agent" / "copied"
+
+    previous = os.umask(umask)
+    try:
+        await fetch_source(str(tree), checkout)
+    finally:
+        os.umask(previous)
+
+    up = checkout / "pkg" / "up"
+    assert not up.is_symlink() and (up / "key").read_text(encoding="utf-8") == "k", "the link's target is copied"
+    copied = (up, up / "key", checkout / "own", checkout / "own" / "key", checkout / "pkg" / "run.py")
+    assert [_mode(path) for path in copied] == [0o700, 0o600, 0o700, 0o600, 0o644]
 
 
 @pytest.mark.skipif(os.geteuid() != 0, reason="a checkout of another owner needs root to chown")
