@@ -120,12 +120,19 @@ _CLIENT = textwrap.dedent(
     args, _ = parser.parse_known_args()
     with open(os.environ["FAKE_CLIENT_CALLS"], "a") as calls:
         calls.write(json.dumps({"seed": args.seed, "num_prompts": args.num_prompts}) + "\\n")
+    # Setup and teardown around the timed run, as the real client loads its tokenizer and writes its result.
+    time.sleep(0.4)
+    start, began = time.time(), time.perf_counter()
     for _ in range(6):
         print("request done", flush=True)
         time.sleep(0.2)
+    duration = time.perf_counter() - began + float(os.environ.get("FAKE_CLIENT_DURATION_SKEW", "0"))
+    end = time.time()
+    time.sleep(0.4)
     if args.save_result:
         result = {"output_throughput": 812.5, "completed": int(args.num_prompts), "num_prompts": int(args.num_prompts),
-                  "duration": 1.2, "benchmark_outcome": {"failed": 0}}
+                  "duration": duration, "benchmark_start_time_unix": start, "benchmark_end_time_unix": end,
+                  "benchmark_outcome": {"failed": 0}}
         with open(os.path.join(args.result_dir, args.result_filename), "w") as fh:
             json.dump(result, fh)
     """
@@ -397,9 +404,13 @@ def test_power_json_bounds_each_phase_by_its_mark_and_the_report_carries_its_ene
     assert [mark["phase"] for mark in document["phase_marks"]] == [
         "boot", "ready", "warmup", "measured", "finished", "eval", "finished", "teardown",
     ]  # fmt: skip
+    timed = json.loads(layout.inferencex_result.read_text())
     window = document["energy"]["window"]
-    assert window["start_unix"] == pytest.approx(marks[Phase.MEASURED.value], abs=0.002)
-    assert window["end_unix"] == pytest.approx(marks[Phase.FINISHED.value], abs=0.002)
+    assert window["start_unix"] == pytest.approx(timed["benchmark_start_time_unix"], abs=0.002)
+    assert window["end_unix"] == pytest.approx(timed["benchmark_end_time_unix"], abs=0.002)
+    # The client's setup and teardown are outside the window.
+    assert window["start_unix"] >= marks[Phase.MEASURED.value] + 0.4
+    assert window["end_unix"] <= marks[Phase.FINISHED.value] - 0.4
     assert {"boot", "warmup", "measured", "eval", "teardown"} <= set(document["phases"])
     assert document["scope"]["gpus_configured"] == list(range(8))
 
@@ -424,6 +435,15 @@ def test_the_report_names_the_host_the_round_ran_on_as_power_json_does(rig):
     document = json.loads(result.layout.power.read_text())
     assert result.report.host == document["host"] == socket.gethostname()
     assert json.loads(result.layout.report.read_text())["host"] == socket.gethostname()
+
+
+def test_a_fixed_client_whose_timed_run_disagrees_with_its_duration_invalidates_the_energy(rig, monkeypatch):
+    monkeypatch.setenv("FAKE_CLIENT_DURATION_SKEW", "2.0")
+    config = rig.config("r1")
+    inherit = (*config.server.env_inherit, "FAKE_CLIENT_DURATION_SKEW")
+    power = run.run_round(replace(config, server=replace(config.server, env_inherit=inherit))).report.power
+
+    assert power is not None and power.power_valid == 0 and "benchmark_duration_mismatch" in power.reasons
 
 
 def test_the_power_scope_is_the_amd_smi_card_behind_each_hip_gpu(rig):

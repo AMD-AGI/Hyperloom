@@ -35,7 +35,7 @@ from typing import Any
 
 from hyperloom_common.amd_smi import NPM_ENABLED, gpu_rows
 from hyperloom_common.io import JsonFormat, atomic_write_json
-from hyperloom_common.power_energy import MAX_SAMPLE_GAP_S, TokenCounts
+from hyperloom_common.power_energy import MAX_SAMPLE_GAP_S, TimedRun, TokenCounts
 from hyperloom_common.power_recording import MEASURED, MetricStats, PowerRecording, RecorderScope, throttle_fraction
 from hyperloom_common.power_sources import (
     CpuDomain,
@@ -220,6 +220,14 @@ class PowerRecorder:
             marks.append((name, mono + self._recording.unix_offset, mono))
             marks.sort(key=lambda mark: mark[2])
         self._wake.set()
+
+    def note_timed_run(self, run: TimedRun) -> None:
+        """Bound the measured phase by ``run``, for a load whose own stamps are its measured window."""
+        offset = self._recording.unix_offset
+        with self._lock:
+            self._recording.reported_duration_s = run.duration_s
+        self.note_phase(GpuPhase.MEASURED.value, run.start_unix - offset)
+        self.note_phase(GpuPhase.FINISHED.value, run.end_unix - offset)
 
     def close(self, *, aborted: bool = False) -> PowerRecording:
         """Stop sampling, take the closing reads and return everything recorded. Idempotent."""

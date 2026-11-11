@@ -114,6 +114,7 @@ _GPU_PHASES: Mapping[Phase, GpuPhase] = {
     Phase.EVAL_END: GpuPhase.FINISHED,
     Phase.TEARDOWN: GpuPhase.TEARDOWN,
 }
+_CLIENT_PROCESS_PHASES = (Phase.MEASURED, Phase.FINISHED)
 #: The ``config_envs`` key :class:`KvMetricsPoller` derives its ``/metrics`` URL from.
 _KV_BASE_URL_KEY = "BENCHMARK_BASE_URL"
 _COUNTED_LOADS = (WorkloadKind.FIXED.value, WorkloadKind.AGENTX.value, WorkloadKind.MLPERF.value)
@@ -154,9 +155,13 @@ def _write_config(config: SuiteConfig, layout: RunLayout) -> str:
     return hashlib.sha256(data).hexdigest()
 
 
-def _gpu_listener(recorder: PowerRecorder) -> PhaseListener:
+def _gpu_listener(recorder: PowerRecorder, workload: WorkloadKind) -> PhaseListener:
+    # A fixed round's marks bracket the client process, its setup and teardown included; the recorder takes its
+    # measured window from the client's own stamps instead (_Round._run_load).
+    skipped = _CLIENT_PROCESS_PHASES if workload is WorkloadKind.FIXED else ()
+
     def hear(phase: Phase, mono: float) -> None:
-        gpu_phase = _GPU_PHASES.get(phase)
+        gpu_phase = None if phase in skipped else _GPU_PHASES.get(phase)
         if gpu_phase is not None:
             recorder.note_phase(gpu_phase, mono)
 
@@ -335,7 +340,9 @@ class _Round:
         self.config = config
         self.layout = layout
         self.kv = _KvSampler(server_url(config.server), layout)
-        self.clock = PhaseClock((self.kv.hear,) if gpu is None else (self.kv.hear, _gpu_listener(gpu)))
+        self.gpu = gpu
+        listeners = (self.kv.hear,) if gpu is None else (self.kv.hear, _gpu_listener(gpu, config.workload))
+        self.clock = PhaseClock(listeners)
         self.cancel = cancel
         self.started_unix = time.time()
         self.gate = RoundGate(config.deadlines, cancel, time.monotonic())
@@ -534,6 +541,8 @@ class _Round:
             return self._loaded(outcome.returncode, outcome.result, outcome.stop)
         if workload is WorkloadKind.FIXED:
             fixed = self._run_fixed(server, prepared)
+            if self.gpu is not None and fixed.timed is not None:
+                self.gpu.note_timed_run(fixed.timed)
             return self._loaded(fixed.returncode, fixed.metrics, fixed.stop)
         return True
 
