@@ -677,6 +677,19 @@ def test_an_mlperf_harness_that_is_not_there_is_refused_before_the_server_starts
     assert not result.layout.launch.exists() and not rig.calls.exists()
 
 
+def test_a_server_whose_death_excerpt_is_cut_on_whitespace_still_writes_its_report(rig):
+    # The excerpt keeps the log's last 1200 characters, and the cut lands on the space opening the last line.
+    (rig.tmp / "fake_server.py").write_text(
+        'print("a" * 100)\nprint("EngineCore failed to start")\nprint(" " + "c" * 1199)\nraise SystemExit(1)\n'
+    )
+
+    result = run.run_round(rig.config("r1"))
+
+    report = Report.from_document(json.loads(result.layout.report.read_text()))
+    assert report.failed_step is FailedStep.SERVER_EXITED_BEFORE_READY
+    assert report.failure_detail == "c" * 1199
+
+
 def test_a_round_whose_gpus_another_process_holds_is_refused_before_its_server_starts(rig):
     rig.busy_gpus = "GPU 3: held by pid 4242 (python3)"
 
