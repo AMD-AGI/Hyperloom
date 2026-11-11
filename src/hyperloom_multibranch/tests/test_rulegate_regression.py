@@ -375,13 +375,30 @@ async def test_final_case_seconds_are_the_cases_own_runs_still_to_make_on_the_co
     await session.start()
     session.answers.update({"fp8_overflow": _fixed_on("c1"), "nan_logits": _fixed_on("c2")})
 
-    before = await session.regression.final_case_seconds(("c2", "c1", "c2"))
+    before = await session.regression.final_case_seconds(("c2", "c1", "c2"), 600.0)
     await session.regression.check_every_case("c2")
 
     each = (400.0, 900.0)
     assert before == each * 3, "each case as long as its own repro test, on c2, c1 and the root, each commit once"
-    assert await session.regression.final_case_seconds(("c2",)) == (900.0,), "c2's verdicts and the root's rerun"
-    assert await session.regression.final_case_seconds((ROOT,)) == (900.0,), "the root as a candidate counts once"
+    assert await session.regression.final_case_seconds(("c2",), 600.0) == (900.0,), "c2's verdicts and the root's rerun"
+    assert await session.regression.final_case_seconds((ROOT,), 600.0) == (900.0,), (
+        "the root as a candidate counts once"
+    )
+
+
+async def test_final_case_seconds_count_the_pool_s_unpulled_cases_on_the_root_then_on_each_commit_and_the_root(
+    session,
+):
+    held, fresh = _pooled(b"clean case", "past-1 c7"), _pooled(b"fresh case", "past-2 c9")
+    await session.pooled_set(held).check("c1", MERGE, sources=())
+    regression_set = session.pooled_set(held, fresh)
+
+    before = await regression_set.final_case_seconds(("c1", "c2"), 600.0)
+    await regression_set.check_every_case("c1")
+    after = await regression_set.final_case_seconds(("c2",), 600.0)
+
+    assert before.count(600.0) == 4, "only the fresh case: its pull on the root, then on c1, c2 and the root"
+    assert 600.0 not in after, "once pulled, the pool's cases are the root's, timed by their own runs"
 
 
 @pytest.mark.parametrize("verdict", [NOT_REPRODUCED, REPRODUCED])
