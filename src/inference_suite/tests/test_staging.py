@@ -20,6 +20,7 @@ import inference_suite
 from hyperloom_common.shared_storage import current_umask
 from inference_suite import cli, staging
 from inference_suite.contracts import FailedStep
+from inference_suite.contracts.normalised import canonical_name
 from inference_suite.pins import (
     INFERENCEX_CLIENT_COMMIT,
     INFERENCEX_TOOL,
@@ -53,6 +54,7 @@ from hyperloom.measure.runner.cache_layout import LockPin, lock_file, parse_lock
 
 _CLIENT = "infx/bench_serving/benchmark_serving.py"
 _CLIENT_TEXT = "print('client')\n"
+_INSTALL_SH = Path(__file__).resolve().parents[2] / "hyperloom" / "inference_optimizer" / "assets" / "install.sh"
 _SRC = Path(__file__).resolve().parents[2]
 _SUITE_INSTALL_SH = _SRC / "inference_suite" / "install.sh"
 _SHA = "a" * 64
@@ -490,6 +492,66 @@ def test_pinned_tools_name_the_client_the_base_launch_records() -> None:
     assert dict(PINNED_TOOLS) == {INFERENCEX_TOOL: INFERENCEX_CLIENT_COMMIT}
 
 
+def _install_function(name: str) -> str:
+    text = _INSTALL_SH.read_text(encoding="utf-8")
+    header = re.search(rf"(?m)^{re.escape(name)}\(\) \{{", text)
+    assert header is not None, f"install.sh has no {name}()"
+    block = text[header.start() :]
+    return block[: re.search(r"(?m)^\}", block).end()]
+
+
+_FAKE_PIP = f"""
+import shutil
+import sys
+from pathlib import Path
+
+site = Path(__file__).resolve().parents[1]
+with open(site / "pip.calls", "a") as calls:
+    calls.write(" ".join(sys.argv[1:]) + "\\n")
+requirement = sys.argv[sys.argv.index("--requirement") + 1] if "--requirement" in sys.argv else None
+if requirement and "{canonical_name(LM_EVAL_DISTRIBUTION)}=={LM_EVAL_VERSION}" in Path(requirement).read_text().split():
+    for old in site.glob("{LM_EVAL_DISTRIBUTION}-*.dist-info"):
+        shutil.rmtree(old)
+    dist = site / "{LM_EVAL_DISTRIBUTION}-{LM_EVAL_VERSION}.dist-info"
+    dist.mkdir()
+    (dist / "METADATA").write_text("Metadata-Version: 2.1\\nName: {LM_EVAL_DISTRIBUTION}\\nVersion: {LM_EVAL_VERSION}\\n")
+"""
+
+
+def _fake_site(tmp_path: Path, lm_eval: str) -> Path:
+    """A directory ahead of site-packages holding lm-eval at ``lm_eval`` and a ``pip`` that only records its argv and
+    installs that fake lm-eval at its pin, so the interpreter install.sh runs is never really installed into."""
+    site = tmp_path / "fake-site"
+    (site / "pip").mkdir(parents=True)
+    (site / "pip" / "__init__.py").write_text("")
+    (site / "pip" / "__main__.py").write_text(_FAKE_PIP)
+    dist = site / f"{LM_EVAL_DISTRIBUTION}-{lm_eval}.dist-info"
+    dist.mkdir()
+    (dist / "METADATA").write_text(f"Metadata-Version: 2.1\nName: {LM_EVAL_DISTRIBUTION}\nVersion: {lm_eval}\n")
+    return site
+
+
+def _run_install_staging(cache: Path, *, check_only: int, fetch: str, site: Path) -> subprocess.CompletedProcess[str]:
+    script = f"""
+set -euo pipefail
+log() {{ echo "LOG $*"; }}
+warn() {{ echo "WARN $*"; }}
+die() {{ echo "DIE $*"; exit 1; }}
+git_fetch_pinned() {{ {fetch}; }}
+PYTHON={sys.executable}
+INFERENCEX_REPO=https://example.invalid/InferenceX.git
+INFERENCE_SUITE_TOOL_CACHE={cache}
+CHECK_ONLY={check_only}
+DRY_RUN=0
+_STALE_KEYS=()
+{_install_function("ensure_inference_suite_staging")}
+ensure_inference_suite_staging
+echo "STALE ${{_STALE_KEYS[*]:-}}"
+"""
+    env = {**os.environ, "PYTHONPATH": f"{site}:{_SRC}"}
+    return subprocess.run(["bash", "-c", script], env=env, capture_output=True, text=True, timeout=120, check=False)
+
+
 def _cache_at_the_real_pin(cache: Path) -> str:
     root = tool_root(cache, INFERENCEX_TOOL, INFERENCEX_CLIENT_COMMIT)
     files = {}
@@ -502,6 +564,66 @@ def _cache_at_the_real_pin(cache: Path) -> str:
     data = StagingManifest({INFERENCEX_TOOL: StagedTool(INFERENCEX_CLIENT_COMMIT, files)}).to_bytes()
     (cache / MANIFEST_FILE).write_bytes(data)
     return hashlib.sha256(data).hexdigest()
+
+
+def test_install_leaves_a_cache_staged_at_the_pin_alone(tmp_path: Path) -> None:
+    cache = tmp_path / "tools"
+    cache.mkdir()
+    digest = _cache_at_the_real_pin(cache)
+    site = _fake_site(tmp_path, LM_EVAL_VERSION)
+
+    done = _run_install_staging(cache, check_only=0, fetch="echo FETCHED; return 1", site=site)
+
+    assert done.returncode == 0, done.stderr
+    assert "FETCHED" not in done.stdout
+    assert f"manifest sha256 {digest}" in done.stdout
+    assert not (site / "pip.calls").exists()
+
+
+def test_install_puts_the_pinned_lm_eval_beside_an_intact_cache_without_fetching(tmp_path: Path) -> None:
+    cache = tmp_path / "tools"
+    cache.mkdir()
+    digest = _cache_at_the_real_pin(cache)
+    site = _fake_site(tmp_path, "0.4.11")
+
+    done = _run_install_staging(cache, check_only=0, fetch="echo FETCHED; return 1", site=site)
+
+    assert done.returncode == 0, done.stderr
+    assert "FETCHED" not in done.stdout and "WARN" not in done.stdout
+    assert f"manifest sha256 {digest}" in done.stdout
+    assert f"--require-hashes --requirement {staging.runner_lock()}" in (site / "pip.calls").read_text()
+    assert (site / f"{LM_EVAL_DISTRIBUTION}-{LM_EVAL_VERSION}.dist-info").is_dir()
+
+
+def test_install_check_only_reports_an_unstaged_cache_as_stale(tmp_path: Path) -> None:
+    done = _run_install_staging(
+        tmp_path / "tools", check_only=1, fetch="echo FETCHED; return 1", site=_fake_site(tmp_path, LM_EVAL_VERSION)
+    )
+
+    assert done.returncode == 0, done.stderr
+    assert "FETCHED" not in done.stdout
+    assert "STALE INFERENCE_SUITE_TOOL_CACHE" in done.stdout
+
+
+def test_install_fetches_the_pinned_commit_and_warns_when_it_cannot(tmp_path: Path) -> None:
+    done = _run_install_staging(
+        tmp_path / "tools",
+        check_only=0,
+        fetch='echo "FETCHED $3"; return 1',
+        site=_fake_site(tmp_path, LM_EVAL_VERSION),
+    )
+
+    assert done.returncode == 0, done.stderr
+    assert f"FETCHED {INFERENCEX_CLIENT_COMMIT}" in done.stdout
+    assert "WARN could not fetch InferenceX" in done.stdout and "staging_missing" in done.stdout
+
+
+def test_install_stages_under_the_install_lock_and_installs_no_tool_checkout() -> None:
+    text = _INSTALL_SH.read_text(encoding="utf-8")
+
+    assert text.index("\nensure_inference_suite_staging\n") > text.index("\nacquire_install_lock\n")
+    assert "ensure_inferencex" not in text
+    assert "INFERENCEX_REF" not in text
 
 
 def _lm_eval_install() -> list[str]:

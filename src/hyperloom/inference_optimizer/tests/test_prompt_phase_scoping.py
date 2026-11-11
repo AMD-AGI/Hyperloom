@@ -69,8 +69,8 @@ ALWAYS_ON = (
     "### Pulling what the projection does not carry",
     "### SESSION_DIR contract",
     "### Output protocol",
+    "RULE F2",
     "RULE F3",
-    "RULE F4",
 )
 
 
@@ -138,18 +138,13 @@ def test_idea_generation_only_in_explore_phase(registry):
 
 
 def test_baseline_recovery_detail_only_in_prelude(registry):
-    """PRELUDE and ENABLEMENT render F1/F2 (the phases where baselines keep failing)."""
+    """PRELUDE and ENABLEMENT render F1 (the phases where baselines keep failing)."""
     refs_dir = asset_prompt_references_dir()
     for phase in _ps.PHASE_NAMES:
         text = _build(registry, phase)
         # Detailed fingerprint text lives in the reference doc, not in any prompt.
         assert BASELINE_FINGERPRINT not in text, f"baseline fingerprint detail leaked into {phase} prompt"
-        if phase in (_ps.PHASE_PRELUDE, _ps.PHASE_ENABLEMENT):
-            assert "RULE F1" in text
-            assert "RULE F2" in text
-        else:
-            assert "RULE F1" not in text
-            assert "RULE F2" not in text
+        assert ("RULE F1" in text) is (phase in (_ps.PHASE_PRELUDE, _ps.PHASE_ENABLEMENT))
     # The reference doc itself must contain the fingerprint detail.
     failure_ref = refs_dir / "failure_recovery.md"
     if failure_ref.exists():

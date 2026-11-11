@@ -16,7 +16,7 @@ from hyperloom.orchestrator.loop.coordinator import Coordinator
 from hyperloom.orchestrator.state.shared_state import SharedState
 from hyperloom.orchestrator.state.task_registry import Task
 
-from ._geak_helpers import forbid_geak_launch, stop_geak_before_launch
+from ._geak_helpers import forbid_geak_launch, measured_in_suite_round, stop_geak_before_launch
 
 
 class _TaskRegistry:
@@ -235,21 +235,16 @@ async def test_geak_handoff_preserves_serving_fidelity_knobs_and_output_metric(
 
 
 @pytest.mark.asyncio
-async def test_an_agentx_handoff_names_the_server_script_not_the_mlperf_client(
+async def test_an_agentx_handoff_launches_natively_from_the_measured_round_not_the_mlperf_client(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """An AgentX baseline must hand GEAK the builtin server script.
+    """An AgentX handoff names no recipe for GEAK to infer a launcher from.
 
-    Without it GEAK derives its launcher from the recipe's ``benchmark_script``,
-    which AgentX has pinned to the aiperf client -- so it runs a CLIENT under
-    ``MAGPIE_RUN_PHASE=server``, gets no pid back, and aborts the bench before a
-    single repeat lands in ``bench_runs.jsonl``.
+    The recipe's ``benchmark_script`` is the aiperf client; a launcher inferred from it runs a CLIENT as the server,
+    gets no pid back, and aborts the bench. GEAK launches natively from the measured round's launch.json, and the
+    workload kind alone selects its replay client.
     """
-    benchmarks = tmp_path / "InferenceX" / "benchmarks"
-    benchmarks.mkdir(parents=True)
-    for name in ("benchmark_lib.sh", "vllm_mi355x.sh", "mlperf_agentic_client.sh"):
-        (benchmarks / name).write_text("# stub\n", encoding="utf-8")
     recipe = tmp_path / "baseline_config.with_envs.yaml"
     recipe.write_text(
         yaml.safe_dump(
@@ -259,7 +254,6 @@ async def test_an_agentx_handoff_names_the_server_script_not_the_mlperf_client(
                     "runner_type": "mi355x",
                     "envs": {"FRAMEWORK": "vllm", "AGENTX_DURATION": "3600"},
                     "benchmark_script": "mlperf_agentic_client.sh",
-                    "inferencex_path": str(benchmarks.parent),
                     "workload_spec": {
                         "kind": "agentx_trace_replay",
                         "client": "aiperf",
@@ -281,6 +275,7 @@ async def test_an_agentx_handoff_names_the_server_script_not_the_mlperf_client(
     coord.shared_state = SharedState(
         baseline_tput=168.99,
         current_best={"action": "baseline", "tput": 168.99},
+        benchmark_mode="agentx",
         model_path="/models/Kimi-K3",
         gpu_type="mi355x",
         isl=1024,
@@ -288,6 +283,7 @@ async def test_an_agentx_handoff_names_the_server_script_not_the_mlperf_client(
         conc=8,
         baseline_config_path=str(recipe),
     )
+    measured_in_suite_round(coord.shared_state, tmp_path / "measured")
     phase = coord.phase_kernel
     phase._record_geak_kernel_journey = lambda _result: None
 
@@ -299,7 +295,8 @@ async def test_an_agentx_handoff_names_the_server_script_not_the_mlperf_client(
     await coord.phase_kernel._run_geak_kernel_phase(from_phase="KERNEL")
 
     handoff = json.loads((tmp_path / "geak" / "handoff.json").read_text(encoding="utf-8"))
-    assert handoff["launch_server_script"] == str(benchmarks / "vllm_mi355x.sh")
+    assert handoff["bench_launcher"] == "native"
+    assert not {"launch_recipe", "launch_server_script", "bench_client"} & handoff.keys()
     spec = handoff.get("workload_spec") or {}
     assert spec.get("kind") == "agentx_trace_replay"
     assert spec.get("client") == "aiperf"

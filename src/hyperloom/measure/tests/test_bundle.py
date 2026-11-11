@@ -104,8 +104,9 @@ def test_an_unusable_public_key_is_not_reported_as_tampering(bundle) -> None:
     assert _reason(bundle.staging, bundle, public_key_pem="not a key") is RejectReason.PUBLIC_KEY_UNUSABLE
 
 
-def test_a_signed_manifest_of_another_schema_is_rejected(bundle) -> None:
-    bundle.write_manifest(bundle.document | {"schema": "hyperloom.measurement-result/v2"})
+@pytest.mark.parametrize("schema", ["hyperloom.measurement-result/v1", "hyperloom.measurement-result/v3"])
+def test_a_signed_manifest_of_another_schema_is_rejected(bundle, schema: str) -> None:
+    bundle.write_manifest(bundle.document | {"schema": schema})
     assert _reason(bundle.staging, bundle) is RejectReason.SCHEMA_MISMATCH
 
 

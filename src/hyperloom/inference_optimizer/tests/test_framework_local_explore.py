@@ -275,15 +275,14 @@ def test_forward_enablement_carriers_eval_origin():
         "enablement_origin": "eval",
         "enablement_accuracy_floor": 0.4,
         "enablement_probe_config_path": "/runs/baseline/materialized.yaml",
-        "enablement_eval_contract_fingerprint": "fp1",
+        "enablement_eval_definition_digest": "sha256:fp1",
     }
     dst: dict[str, Any] = {}
     _forward_enablement_carriers(src, dst)
     assert dst["enablement_origin"] == "eval"
     assert dst["enablement_accuracy_floor"] == 0.4
     assert dst["enablement_probe_config_path"] == "/runs/baseline/materialized.yaml"
-    # The eval-contract fingerprint is no longer forwarded: nothing downstream reads it.
-    assert "enablement_eval_contract_fingerprint" not in dst
+    assert "enablement_eval_definition_digest" not in dst
     # Benches against the original workload config, not the shipped default.
     assert dst["config_path"] == "/runs/baseline/materialized.yaml"
 

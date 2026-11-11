@@ -21,6 +21,7 @@ pin the backend's side of the calls; ruppell's side is ruppell's to test.
 
 from __future__ import annotations
 
+import gzip
 import io
 import tarfile
 import textwrap
@@ -107,7 +108,7 @@ def tree_files() -> dict[str, tuple[str, int]]:
 def archive(commit: str = COMMIT, files: dict[str, tuple[str, int]] | None = None, *, top: str = "ruppell") -> bytes:
     """The tree as ``git archive`` writes it: one top directory and the commit in the pax header's comment."""
     buffer = io.BytesIO()
-    with tarfile.open(fileobj=buffer, mode="w:gz", format=tarfile.PAX_FORMAT, pax_headers={"comment": commit}) as tar:
+    with tarfile.open(fileobj=buffer, mode="w", format=tarfile.PAX_FORMAT, pax_headers={"comment": commit}) as tar:
         directory = tarfile.TarInfo(f"{top}/")
         directory.type, directory.mode = tarfile.DIRTYPE, 0o775
         tar.addfile(directory)
@@ -116,4 +117,5 @@ def archive(commit: str = COMMIT, files: dict[str, tuple[str, int]] | None = Non
             info = tarfile.TarInfo(f"{top}/{path}")
             info.size, info.mode = len(raw), mode
             tar.addfile(info, io.BytesIO(raw))
-    return buffer.getvalue()
+    # A fixed gzip mtime keeps the bytes, and so the parametrized ids xdist workers compare, the same on every worker.
+    return gzip.compress(buffer.getvalue(), mtime=0)

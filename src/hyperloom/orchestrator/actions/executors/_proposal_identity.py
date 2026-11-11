@@ -11,7 +11,6 @@ from typing import Any, Mapping
 
 from hyperloom_common.coerce import to_str_list
 
-from hyperloom.common.benchmark_config import is_magpie_agentx
 from hyperloom.inference_optimizer.canonical_fingerprint import canonical_fingerprint
 
 
@@ -132,14 +131,10 @@ def content_fingerprint(proposal: Mapping[str, Any]) -> str:
 
 
 def keeps_effective_args(
-    benchmark: Mapping[str, Any], base_mode: str, variant_mode: str, remove_args: list[str], unset_envs: list[str]
+    agentx: bool, base_mode: str, variant_mode: str, remove_args: list[str], unset_envs: list[str]
 ) -> bool:
     """Whether a KEEP persists as a replace snapshot of the argv it launched.
 
     Native KEEP edits remain relative to the verified recipe unless explicitly replaced.
     """
-    return (
-        base_mode == "replace"
-        or variant_mode == "replace"
-        or (not is_magpie_agentx(benchmark) and bool(remove_args or unset_envs))
-    )
+    return base_mode == "replace" or variant_mode == "replace" or (not agentx and bool(remove_args or unset_envs))

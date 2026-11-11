@@ -6,4 +6,4 @@
 - Observable effect: what an operator will now see, and what the old behaviour cost them (if none, why the change is unobservable):
 - Breaking changes: yes/no (details if yes)
 - PR addresses single concern: yes/no (details if no):
-- Root cause is upstream (Magpie/TraceLens/GEAK/IntelliKit/AgentKernelArena), ticket filed:
+- Root cause is upstream (TraceLens/GEAK/IntelliKit/AgentKernelArena), ticket filed:

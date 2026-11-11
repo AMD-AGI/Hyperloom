@@ -26,17 +26,13 @@ from hyperloom.common.outside_facts.rule_pack import default_pack
 __all__ = [
     "AIPERF_ERROR_CLASS_KEY",
     "AIPERF_ERROR_KEY",
-    "AIPERF_ERROR_OUTPUT_LENGTH_METRIC",
     "AIPERF_EXPORT_DIR",
     "AIPERF_EXPORT_FILE",
     "AIPERF_INVALID_REPLY_ERROR",
     "AIPERF_METADATA_KEY",
     "AIPERF_METRICS_KEY",
-    "AIPERF_OUTPUT_LENGTH_FILE",
-    "AIPERF_PARSER_FILE",
     "AIPERF_PHASE_KEY",
     "AIPERF_PROFILING_PHASE",
-    "AIPERF_SUBMODULE",
     "AITER_DEVELOP_MODE",
     "AITER_INSTALL_MODE_FILE",
     "AITER_LOG_TUNED_CONFIG_ENV",
@@ -59,9 +55,9 @@ __all__ = [
     "ENV_EP",
     "ENV_EVAL_ONLY",
     "ENV_ISL",
-    "ENV_MAGPIE_EVAL_LIMIT",
-    "ENV_MAGPIE_EVAL_TASKS",
-    "ENV_MAGPIE_EVAL_TOKENIZED_REQUESTS",
+    "ENV_EVAL_LIMIT",
+    "ENV_EVAL_TASKS",
+    "ENV_EVAL_TOKENIZED_REQUESTS",
     "ENV_MAX_MODEL_LEN",
     "ENV_NUM_PROMPTS",
     "ENV_NUM_WARMUPS",
@@ -88,7 +84,6 @@ __all__ = [
     "KFD_RENDER_MINOR_KEY",
     "KFD_ROOT",
     "KFD_VRAM_PREFIX",
-    "MAGPIE_AGENTX_CLIENT_LOG",
     "PID_NAMESPACE_LINK",
     "PY_IMPORT_ERROR",
     "PY_MODULE_NOT_FOUND_ERROR",
@@ -246,9 +241,9 @@ _inferencex = _PACK.names(
     "max_model_len",
     "tp",
     "ep",
-    "magpie_eval_tasks",
-    "magpie_eval_limit",
-    "magpie_eval_tokenized_requests",
+    "eval_tasks",
+    "eval_limit",
+    "eval_tokenized_requests",
 )
 ENV_ISL = _inferencex["isl"]
 ENV_OSL = _inferencex["osl"]
@@ -261,9 +256,9 @@ ENV_NUM_WARMUPS = _inferencex["num_warmups"]
 ENV_MAX_MODEL_LEN = _inferencex["max_model_len"]
 ENV_TP = _inferencex["tp"]
 ENV_EP = _inferencex["ep"]
-ENV_MAGPIE_EVAL_TASKS = _inferencex["magpie_eval_tasks"]
-ENV_MAGPIE_EVAL_LIMIT = _inferencex["magpie_eval_limit"]
-ENV_MAGPIE_EVAL_TOKENIZED_REQUESTS = _inferencex["magpie_eval_tokenized_requests"]
+ENV_EVAL_TASKS = _inferencex["eval_tasks"]
+ENV_EVAL_LIMIT = _inferencex["eval_limit"]
+ENV_EVAL_TOKENIZED_REQUESTS = _inferencex["eval_tokenized_requests"]
 
 _aiperf_export = _PACK.names(
     "aiperf_request_export",
@@ -275,7 +270,6 @@ _aiperf_export = _PACK.names(
     "error_class",
     "phase",
     "profiling_phase",
-    "error_output_length",
 )
 AIPERF_EXPORT_DIR = _aiperf_export["dir"]
 AIPERF_EXPORT_FILE = _aiperf_export["file"]
@@ -285,16 +279,9 @@ AIPERF_ERROR_KEY = _aiperf_export["error"]
 AIPERF_ERROR_CLASS_KEY = _aiperf_export["error_class"]
 AIPERF_PHASE_KEY = _aiperf_export["phase"]
 AIPERF_PROFILING_PHASE = _aiperf_export["profiling_phase"]
-AIPERF_ERROR_OUTPUT_LENGTH_METRIC = _aiperf_export["error_output_length"]
 
 AIPERF_INVALID_REPLY_ERROR = _PACK.names("aiperf_invalid_reply", "error_class")["error_class"]
 
-_aiperf_source = _PACK.names("aiperf_source", "submodule", "parser_file", "output_length_file")
-AIPERF_SUBMODULE = _aiperf_source["submodule"]
-AIPERF_PARSER_FILE = _aiperf_source["parser_file"]
-AIPERF_OUTPUT_LENGTH_FILE = _aiperf_source["output_length_file"]
-
-MAGPIE_AGENTX_CLIENT_LOG = _PACK.names("magpie_agentx_client_log", "file")["file"]
 HUB_RATE_LIMITED = _PACK.pattern("hub_rate_limited")
 
 

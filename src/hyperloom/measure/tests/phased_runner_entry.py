@@ -15,10 +15,10 @@ import os
 import sys
 import time
 from pathlib import Path
-from typing import Any
 
 from hyperloom.measure import local
 from hyperloom.measure.runner import run as runner_flow
+from hyperloom.measure.tests.bundle_factory import lm_eval_at_its_pin
 from hyperloom.measure.tests.phase_rounds import RealClock, Rounds, StagedGrid
 
 
@@ -29,10 +29,12 @@ def main() -> int:
     local.run_grid_warmup_enabled = lambda: True  # type: ignore[assignment]
     local.resolve_lifecycle_params = lambda path: {"eligible": True, "port": 8123, "framework": "sglang"}  # type: ignore[assignment]
 
-    def stop_server(**kwargs: Any) -> None:
+    def stop_server(slot: Path) -> list[int]:
         time.sleep(3.0 * float(os.environ["HL_PHASE_SCALE"]))
+        return []
 
-    local.teardown_lifecycle_server = stop_server  # type: ignore[assignment]
+    local.teardown_variant_server = stop_server  # type: ignore[assignment]
+    sys.path.insert(0, str(lm_eval_at_its_pin(root / "lm-eval-pin")))
     return runner_flow.run(root / "in", root / "out", scratch=root / "work" / "scratch", spec_wait_sec=60)
 
 
