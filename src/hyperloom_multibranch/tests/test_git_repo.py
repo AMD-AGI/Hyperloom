@@ -25,6 +25,8 @@ from hyperloom.measure.compile import BlobError, LocalBlobStore
 from hyperloom_multibranch.contracts.blackboard.vocab import INTEGRATION_BRANCH
 from hyperloom_multibranch.contracts.repo import BranchMoved, ExperimentRepo
 from hyperloom_multibranch.repo.git_repo import GitExperimentRepo
+from hyperloom_multibranch.scheduling.clock import Clock
+from hyperloom_multibranch.scheduling.layout import create_session
 
 VLLM = "https://github.com/vllm-project/vllm"
 BASELINE = Recipe(
@@ -65,6 +67,24 @@ async def test_the_root_commit_holds_the_baseline_on_the_integration_branch(tmp_
 
     assert await repo.head(INTEGRATION_BRANCH) == root
     assert await repo.read_recipe(root) == BASELINE
+
+
+async def test_a_session_in_a_shared_workspace_gets_a_repository_the_group_writes(tmp_path, blobs):
+    """Through the session's own layout: under a umask that masks group write, a session created in a 2775 workspace
+    gets a repository whose objects and refs the next account of the group writes."""
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    workspace.chmod(0o2775)
+    old = os.umask(0o022)
+    try:
+        layout = create_session(workspace, "Llama-3-8B", Clock())
+        repo = await _rooted(layout.repo, blobs)
+        await repo.create_branch("b01", await repo.root())
+    finally:
+        os.umask(old)
+
+    for made in (layout.repo / "objects", layout.repo / "refs" / "heads"):
+        assert stat.S_IMODE(made.stat().st_mode) & stat.S_IWGRP, made
 
 
 @pytest.mark.parametrize(
