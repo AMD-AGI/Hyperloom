@@ -30,6 +30,8 @@ from inference_suite.contracts import (
     SourceApi,
     SourceKind,
     Topology,
+    UpstreamRevision,
+    UpstreamSource,
     VersionBasis,
     Workload,
 )
@@ -37,6 +39,13 @@ from inference_suite.golden import golden_owned_settings
 
 _COMMIT = "a" * 40
 _SHA = "b" * 64
+
+
+_UPSTREAM = (
+    UpstreamRevision(UpstreamSource.INFERENCEX, "https://github.com/SemiAnalysisAI/InferenceX", _COMMIT),
+    UpstreamRevision(UpstreamSource.HF_MODEL, "https://huggingface.co/api/models/zai-org/GLM-5.3", "c" * 40),
+    UpstreamRevision(UpstreamSource.VLLM_RECIPES, "https://recipes.example/x.json", _SHA),
+)
 
 
 def _golden(**changes) -> GoldenAcceptance:
@@ -96,6 +105,7 @@ def _base(**changes) -> BaseLaunch:
         runner_owned=RunnerOwned(args=("--host", "--port"), env=("HIP_VISIBLE_DEVICES",)),
         stripped=("--host",),
         warnings=("no exact point",),
+        upstream=_UPSTREAM,
     )
     return replace(base, **changes)
 
@@ -227,7 +237,7 @@ def test_the_c6254_p1_example_reads_with_the_fields_recorded_beside_it():
     assert base.model == LaunchModel("amd/Qwen3.8-Next-MXFP4", "/data/models/Qwen3.8-Next-MXFP4")
     assert base.client.command == "inferencex --seed 7"
     assert base.runner_owned.env == tuple(p1["runner_owned"]["env"])
-    assert base.to_document() == document
+    assert base.to_document() == {**document, "upstream": []}
 
 
 def test_a_document_whose_digest_does_not_match_is_refused():
@@ -480,3 +490,31 @@ def test_a_serving_base_runs_a_client():
 def test_a_scriptable_query_names_no_sequence_shape():
     with pytest.raises(BaseLaunchError, match="any other query neither"):
         replace(_scriptable().query, isl=1024, osl=128)
+
+
+def test_upstream_revisions_round_trip_and_stay_out_of_the_digest():
+    document = json.loads(json.dumps(_base().to_document()))
+
+    assert document["upstream"][1] == {
+        "source": "hf_model",
+        "location": "https://huggingface.co/api/models/zai-org/GLM-5.3",
+        "revision": "c" * 40,
+    }
+    assert BaseLaunch.from_document(document).upstream == _UPSTREAM
+    assert _base(upstream=()).digest() == _base().digest()
+
+
+def test_a_base_document_written_without_upstream_revisions_still_reads():
+    document = _base().to_document()
+    del document["upstream"]
+
+    assert BaseLaunch.from_document(document).upstream == ()
+
+
+@pytest.mark.parametrize(
+    ("source", "revision"),
+    [(UpstreamSource.INFERENCEX, "main"), (UpstreamSource.HF_MODEL, _SHA), (UpstreamSource.VLLM_RECIPES, _COMMIT)],
+)
+def test_an_upstream_revision_of_the_wrong_form_is_refused(source, revision):
+    with pytest.raises(BaseLaunchError):
+        UpstreamRevision(source, "https://example/x", revision)

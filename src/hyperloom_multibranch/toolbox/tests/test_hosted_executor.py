@@ -29,7 +29,6 @@ from hyperloom_multibranch.toolbox.hosted_executor import (
     DEFAULT_TEST_TIMEOUT_SEC,
     TEST_SILENCE_TIMEOUT_SEC,
     HostedExecutor,
-    _both_ends,
 )
 from hyperloom_multibranch.toolbox.queue import QueuePolicy
 from hyperloom_multibranch.toolbox.tests.helpers import FakePlanner, Rig as ToolboxRig, build, req
@@ -541,11 +540,3 @@ async def test_the_staging_is_read_once_for_the_session_not_for_every_test(tmp_p
     await executor.run(_job(point_yaml(tmp_path)))
 
     assert [call.session_facts.staging for call in backend.calls] == [STAGING, STAGING]  # type: ignore[union-attr]
-
-
-def test_a_long_refusal_keeps_what_was_refused_and_what_the_backend_added() -> None:
-    said = "spec_rejected: the short-prompt set short-prompts-0 cannot be used: " + "x" * 400 + " (the sheet is v2)"
-    kept = _both_ends(said, 300)
-    assert len(kept) <= 300
-    assert kept.startswith("spec_rejected: the short-prompt set short-prompts-0") and kept.endswith("(the sheet is v2)")
-    assert _both_ends("short", 300) == "short"

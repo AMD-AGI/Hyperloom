@@ -11,8 +11,8 @@ and no flag has to be added; the file was simply never read.
 
 This module turns those records into two things:
 
-* an event stream (``phase`` / ``trajectory`` / ``turn`` / ``request`` start and end, plus ``first_token``), written
-  beside the KV artifact so a consumer can join the two on time;
+* an event stream (``trajectory`` / ``turn`` / ``request`` start and end, plus ``first_token``), written beside the
+  KV artifact so a consumer can join the two, and the round's ``phase_marks.json``, on time;
 * an exact in-flight count per KV scrape window, folded into the KV rows themselves, so the common question -- which
   trajectories were live when the pool spiked -- is answerable without the join.
 
@@ -46,15 +46,14 @@ __all__ = [
 #: Artifact written beside ``kv_metrics.json``.
 TIMELINE_ARTIFACT_NAME = "agentx_timeline.jsonl"
 
-#: Where aiperf's per-request export lands, relative to the round's own directory. Mirrors how the progress-API address
-#: and the aiperf log are resolved, since an AgentX round may nest its benchmark one level down.
+#: Where aiperf's per-request export lands, relative to the round's own directory, its client one level down.
 _EXPORT_RELPATHS = ("aiperf_artifacts/profile_export.jsonl", "*/aiperf_artifacts/profile_export.jsonl")
 #: The request metadata field aiperf names the request's phase in, as ``load.agentx`` reads it.
 _PHASE_KEY = "benchmark_phase"
 
 #: Cap on request-level events written out. A three-hour round at high concurrency produces well over a hundred
 #: thousand requests, and three events each would outweigh every other artifact in the session bundle combined. Over
-#: the cap the request layer is stride-sampled; the phase, trajectory and turn layers are always complete, and the
+#: the cap the request layer is stride-sampled; the trajectory and turn layers are always complete, and the
 #: in-flight counts folded into the KV rows are computed from every record before any sampling.
 _MAX_REQUEST_EVENTS = 60000
 #: Event stamps are epoch seconds kept to the microsecond.
@@ -65,8 +64,7 @@ _TS_DECIMALS = 6
 class RequestRecord:
     """One request from aiperf's export, reduced to what a timeline needs.
 
-    Times are epoch seconds. aiperf reports nanoseconds, which is the same clock the progress API stamps phases on, so
-    the two line up without conversion beyond scale.
+    Times are epoch seconds, converted from aiperf's epoch nanoseconds.
     """
 
     request_id: str
@@ -208,27 +206,13 @@ def _span_events(
     return events
 
 
-def build_events(
-    records: list[RequestRecord],
-    phase_bounds: dict[str, tuple[float, float | None]] | None = None,
-) -> tuple[list[dict[str, Any]], dict[str, Any]]:
-    """Turn records into a time-ordered event stream, with a summary of what it covers.
-
-    Phase events come from the caller's authoritative bounds -- aiperf's progress API -- rather than from the records.
-    """
-    events: list[dict[str, Any]] = []
-    for phase, (start, end) in (phase_bounds or {}).items():
-        events.append({"event": "phase_start", "ts": round(start, _TS_DECIMALS), "phase": phase})
-        if end is not None:
-            events.append({"event": "phase_end", "ts": round(end, _TS_DECIMALS), "phase": phase})
-
-    events.extend(
-        _span_events(
-            records,
-            "trajectory",
-            lambda r: r.trajectory_id,
-            lambda r: {"trajectory_id": r.trajectory_id, "conversation_id": r.conversation_id},
-        )
+def build_events(records: list[RequestRecord]) -> tuple[list[dict[str, Any]], dict[str, Any]]:
+    """Turn records into a time-ordered event stream, with a summary of what it covers."""
+    events = _span_events(
+        records,
+        "trajectory",
+        lambda r: r.trajectory_id,
+        lambda r: {"trajectory_id": r.trajectory_id, "conversation_id": r.conversation_id},
     )
     events.extend(
         _span_events(
