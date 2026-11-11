@@ -69,6 +69,7 @@ from hyperloom_multibranch.blackboard.codec import encode
 from hyperloom_multibranch.blackboard.knowledge.reference_leads import INFERENCEX_REFERENCE
 from hyperloom_multibranch.blackboard.rsi.archive import ARCHIVE_ENV
 from hyperloom_multibranch.scheduling.budget import MB_CLOSE_GRACE_CAP_SECONDS, MB_DEFAULT_MAX_HOURS
+from hyperloom_multibranch.scheduling import hosted_run
 from hyperloom_multibranch.scheduling.hosted_run import GRANT_MARGIN_SECONDS
 from hyperloom_multibranch.scheduling.clock import Clock
 from hyperloom_multibranch.scheduling.decisions import Decision, DecisionKind, DecisionLog
@@ -730,14 +731,22 @@ def agent_cli(agent_binaries: None, monkeypatch: pytest.MonkeyPatch) -> list[Run
         runs.append(settings)
         return 0
 
-    def final_only(persisted: PersistedRun, peer_factory: PeerFactory, services: object) -> int:
+    def final_only(
+        persisted: PersistedRun, peer_factory: PeerFactory, services: object, *, restart: bool = False
+    ) -> int:
         runs.append(persisted.settings)
+        FINISHED_AS_RESTART.append(restart)
         return 0
 
+    FINISHED_AS_RESTART.clear()
     monkeypatch.setattr(cli, "run_session", run_session)
     monkeypatch.setattr(cli, "final_only", final_only)
     monkeypatch.setattr(cli, "resume", final_only)
     return runs
+
+
+#: Whether each finish :func:`agent_cli` noted was a restart's.
+FINISHED_AS_RESTART: list[bool] = []
 
 
 @pytest.mark.usefixtures("ready_environment")
@@ -1397,7 +1406,7 @@ def host(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Host:
     for name in ("HYPERLOOM_MCP_PORT", "HYPERLOOM_MCP_TOKEN", "HYPERLOOM_EVENTS_DIR"):
         monkeypatch.delenv(name, raising=False)
     given.started(seconds_ago=600)
-    monkeypatch.setattr(cli, "arm_grant_stop", given.stops.append)
+    monkeypatch.setattr(hosted_run, "arm_grant_stop", given.stops.append)
     return given
 
 
@@ -1744,8 +1753,39 @@ def test_a_restart_finishes_the_session_an_earlier_start_began_and_ends_the_run_
     assert cli.main(["hosted", "run"]) == 0
 
     assert agent_cli == [_settings()], "the session is finished on the settings its manifest holds, not the spec's"
+    assert FINISHED_AS_RESTART == [True], "finished as a restart, which ends a FINAL that chose as finished"
     assert host.exit_document() == {"final": True, "returncode": 0, "stop_reason": "time_exhausted"}
     assert len(host.stops) == 1
+
+
+@pytest.mark.usefixtures("ready_environment", "agent_binaries")
+@pytest.mark.parametrize(
+    ("chose", "returncode", "stop_reason"),
+    [(True, 0, "finished_after_restart"), (False, 1, "killed")],
+    ids=["final-chose", "final-chose-nothing"],
+)
+def test_a_restart_that_finishes_a_preempted_session_ends_the_run_as_its_final_went(
+    host: Host, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, chose: bool, returncode: int, stop_reason: str
+) -> None:
+    """The earlier start was preempted and wrote no report; the restart finishes the session and ``exit.json`` says
+    what the finish ended with: its exit code and the stop reason it reported."""
+    layout = _ended_before_final(tmp_path / "MB-preempted-session")
+    _killed(layout, ANOTHER_POD)
+    (host.state_dir / "session.json").write_text(json.dumps({"session_dir": str(layout.root)}), encoding="utf-8")
+    finishes: list[tuple[SessionStopReason, bool]] = []
+
+    def finish(persisted: PersistedRun, peer_factory: PeerFactory, services: object, *, restart: bool = False) -> int:
+        finishes.append((persisted.ended, restart))
+        ended = SessionStopReason.FINISHED_AFTER_RESTART if restart and chose else persisted.ended
+        _report(persisted.layout, stop_reason=ended.value, final={"chosen": {"commit": "c9"}} if chose else None)
+        return 0 if ended in lifecycle.COMPLETED_REASONS else 1
+
+    monkeypatch.setattr(cli, "final_only", finish)
+
+    assert cli.main(["hosted", "run"]) == returncode
+
+    assert finishes == [(SessionStopReason.KILLED, True)]
+    assert host.exit_document() == {"final": True, "returncode": returncode, "stop_reason": stop_reason}
 
 
 @dataclass
@@ -1762,7 +1802,7 @@ def restart(agent_binaries: None, host: Host, monkeypatch: pytest.MonkeyPatch) -
 
     done = Restart([])
 
-    def final_only(persisted: PersistedRun, peer_factory: PeerFactory, services: object) -> int:
+    def final_only(persisted: PersistedRun, peer_factory: PeerFactory, services: object, **_: object) -> int:
         done.calls.append(("final-only", persisted.layout.root))
         _report(persisted.layout, stop_reason=persisted.ended.value, error=lifecycle.NO_BASELINE)
         return 1
@@ -1843,7 +1883,7 @@ def test_a_restart_takes_over_the_final_only_lock_a_start_killed_while_closing_l
     (host.state_dir / "session.json").write_text(json.dumps({"session_dir": str(layout.root)}), encoding="utf-8")
     held: list[bool] = []
 
-    def final_only(persisted: PersistedRun, peer_factory: PeerFactory, services: object) -> int:
+    def final_only(persisted: PersistedRun, peer_factory: PeerFactory, services: object, **_: object) -> int:
         held.append(persisted.layout.final_only_lock.exists())
         restart.calls.append(("final-only", persisted.layout.root))
         _report(persisted.layout, stop_reason=persisted.ended.value)
@@ -1909,7 +1949,8 @@ def test_a_final_only_takes_its_log_off_when_it_ends(tmp_path: Path, monkeypatch
         def __init__(self, *args: object) -> None:
             pass
 
-        async def finish(self, ended: SessionStopReason) -> SessionOutcome:
+        async def finish(self, ended: SessionStopReason, *, restart: bool) -> SessionOutcome:
+            assert not restart, "final-only is no restart"
             logging.getLogger("hyperloom_multibranch.test").warning("while it closes")
             return SessionOutcome(ended, None, None, "no candidate")
 
@@ -1988,7 +2029,7 @@ def handed(agent_binaries: None, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
         return 0
 
     monkeypatch.setattr(cli, "run_session", run_session)
-    monkeypatch.setattr(cli, "arm_grant_stop", started.stops.append)
+    monkeypatch.setattr(hosted_run, "arm_grant_stop", started.stops.append)
     monkeypatch.setattr(local_peers, "machine_cards", _no_local_cards)
     return started
 

@@ -55,6 +55,7 @@ from hyperloom.contracts.recipe import Recipe, RecipeDelta
 from hyperloom.hosted.mcp_server import MIN_TOKEN_LENGTH, McpServer, McpServerConfig
 from hyperloom.measure.versions import socket_versions
 from hyperloom_multibranch.contracts.fork import AdmissionStatus, ForkAdmission, ForkRequest, RepairRequest
+from hyperloom_multibranch.contracts.gate import RegressionOutcome
 from hyperloom_multibranch.contracts.intent import Intent, IntentLayer
 from hyperloom_multibranch.contracts.judgement import AccuracyVerdict, Judgement, Verdict
 from hyperloom_multibranch.contracts.lifecycle import BranchTask
@@ -134,19 +135,21 @@ from hyperloom_multibranch.scheduling.judge import GRACE_KEY, HoldReason
 from hyperloom_multibranch.scheduling.judge_prompt import JUDGE_PROMPT_VERSION
 from hyperloom_multibranch.scheduling.integrator import ADOPTING_LEAD
 from hyperloom_multibranch.scheduling.launch_isolation import LaunchIsolation
+from hyperloom_multibranch.scheduling.hosted_run import prelude_landed
 from hyperloom_multibranch.scheduling.layout import SessionLayout, create_session
 from hyperloom_multibranch.scheduling import lifecycle
 from hyperloom_multibranch.scheduling.lifecycle import (
+    COMPLETED_REASONS,
     CUT_SHORT,
     LESSONS_KEY,
     NO_BASELINE,
     NO_CARDS_LEFT,
+    PersistedRun,
     Session,
     SessionHost,
     SessionOutcome,
     SessionServices,
     persisted_run,
-    prelude_landed,
     resumable_run,
 )
 from hyperloom_multibranch.scheduling.local_peers import workload_rule
@@ -610,11 +613,12 @@ class Stage:
             patch.setattr(lifecycle, "run_image_check", self.image_check)
             return await self._session().run()
 
-    async def finish(self, ended: SessionStopReason) -> SessionOutcome:
-        """FINAL and CLOSE alone over the session directory this stage was built on, as ``final-only`` runs them."""
+    async def finish(self, ended: SessionStopReason, *, restart: bool = False) -> SessionOutcome:
+        """FINAL and CLOSE alone over the session directory this stage was built on, as ``final-only`` runs them, and
+        with ``restart`` as the restart of a hosted run does."""
 
         with self._polls_on_virtual_time():
-            return await self._session().finish(ended)
+            return await self._session().finish(ended, restart=restart)
 
     async def resume(self, ended: SessionStopReason) -> SessionOutcome:
         """EXPLORE, FINAL and CLOSE over the session directory this stage was built on, as ``run --resume`` runs them."""
@@ -1877,6 +1881,101 @@ async def test_final_only_finishes_a_session_that_was_killed_before_it_could_clo
         persisted_run(stage.layout.root)
 
 
+async def _killed_before_final(tmp_path: Path) -> tuple[Stage, PersistedRun]:
+    """A session whose deadline passed before FINAL and that was then killed with its machine before CLOSE could write
+    its report, as a host's preemption leaves it, read back; and the stage it ran on."""
+    stage = _stage(tmp_path)
+    stage.scripts = SCRIPTS
+    stage.toolbox_type = StuckStopToolbox
+    await stage.run()
+    stage.layout.report.unlink()
+    _as_another_pod(stage.layout.pids)
+    persisted = persisted_run(stage.layout.root)
+    assert persisted.ended is SessionStopReason.KILLED
+    return stage, persisted
+
+
+async def test_a_hosted_restart_whose_final_chooses_finishes_the_preempted_session_after_the_restart(
+    tmp_path: Path,
+) -> None:
+    stage, persisted = await _killed_before_final(tmp_path)
+
+    recovery = _recovery(stage, persisted.settings)
+    outcome = await recovery.finish(persisted.ended, restart=True)
+
+    assert outcome.final is not None and outcome.final.chosen is not None
+    assert outcome.final.chosen.commit == await stage.repo.head(INTEGRATION_BRANCH)
+    assert (outcome.stop_reason, outcome.error, outcome.exit_code) == (SessionStopReason.FINISHED_AFTER_RESTART, "", 0)
+    report = json.loads(stage.layout.report.read_text())
+    assert report["stop_reason"] == SessionStopReason.FINISHED_AFTER_RESTART.value == "finished_after_restart"
+    assert report["final"]["chosen"]["commit"] == outcome.final.chosen.commit
+    # The tests the earlier start left are withdrawn for how it ended; CLOSE withdraws and records for how this one did.
+    ended = [SessionStopReason.KILLED.value, SessionStopReason.FINISHED_AFTER_RESTART.value]
+    assert recovery.toolbox.withdrawals == ended
+    closes = [row["detail"] for row in _decisions(stage) if (row["kind"], row["reason"]) == ("phase", "close")]
+    assert closes[-1]["stop_reason"] == SessionStopReason.FINISHED_AFTER_RESTART.value
+    with pytest.raises(ValueError, match="already chose"):
+        persisted_run(stage.layout.root)
+
+
+async def test_a_hosted_restart_whose_final_is_stopped_still_fails(tmp_path: Path) -> None:
+    stage, persisted = await _killed_before_final(tmp_path)
+    recovery = _recovery(stage, persisted.settings)
+    recovery.toolbox_type = _slow_final(recovery, interrupt=True)
+
+    outcome = await recovery.finish(persisted.ended, restart=True)
+
+    assert (outcome.stop_reason, outcome.final, outcome.exit_code) == (SessionStopReason.SIGNAL, None, 1)
+    assert json.loads(stage.layout.report.read_text())["stop_reason"] == SessionStopReason.SIGNAL.value
+
+
+class FailingRegressionSet(FakeRegressionCheck):
+    """A regression set every commit fails, so FINAL finds no eligible candidate and chooses nothing."""
+
+    async def check_every_case(self, commit: str) -> RegressionOutcome:
+        self.every_case.append(commit)
+        return RegressionOutcome(False, "every case failed", 1)
+
+
+async def test_a_hosted_restart_whose_final_chooses_nothing_keeps_the_reason_the_session_ended_for(
+    tmp_path: Path,
+) -> None:
+    stage, persisted = await _killed_before_final(tmp_path)
+    recovery = _recovery(stage, persisted.settings)
+    recovery.regression = FailingRegressionSet()
+
+    outcome = await recovery.finish(persisted.ended, restart=True)
+
+    assert recovery.regression.every_case, "FINAL checked the candidates"
+    assert outcome.final is not None and outcome.final.chosen is None
+    assert (outcome.stop_reason, outcome.exit_code) == (SessionStopReason.KILLED, 1)
+    assert json.loads(stage.layout.report.read_text())["stop_reason"] == SessionStopReason.KILLED.value
+
+
+async def test_a_hosted_restart_whose_final_fails_reports_the_reason_the_session_ended_for(tmp_path: Path) -> None:
+    stage, persisted = await _killed_before_final(tmp_path)
+    recovery = _recovery(stage, persisted.settings)
+    recovery.regression = NoRegressionSet()
+
+    with pytest.raises(LookupError, match=REGRESSION_SET_GONE):
+        await recovery.finish(persisted.ended, restart=True)
+
+    report = json.loads(stage.layout.report.read_text())
+    assert (report["stop_reason"], report["final"]) == (SessionStopReason.KILLED.value, None)
+
+
+async def test_a_hosted_restart_keeps_a_reason_a_session_that_ran_its_course_ends_for(tmp_path: Path) -> None:
+    stage = _stage(tmp_path)
+    stage.scripts = SCRIPTS
+    stage.toolbox_type = StuckStopToolbox
+    await stage.run()
+    persisted = persisted_run(stage.layout.root)
+
+    outcome = await _recovery(stage, persisted.settings).finish(persisted.ended, restart=True)
+
+    assert (outcome.stop_reason, outcome.exit_code) == (SessionStopReason.TIME_EXHAUSTED, 0)
+
+
 class KilledInPreludeToolbox(LeasingToolbox):
     """A toolbox whose process dies, as a machine that is lost kills it, the moment it has accepted the first root
     test: no test it accepted ever measures, so nothing lands and PRELUDE records no baseline. It prints where the
@@ -2111,6 +2210,7 @@ async def test_a_resume_of_a_killed_session_stops_the_branches_it_left_open(tmp_
     outcome = await resumed.resume(persisted.ended)
 
     assert outcome.final is not None and outcome.final.chosen is not None
+    assert outcome.stop_reason in COMPLETED_REASONS and outcome.exit_code == 0, "a resume that chose finished the run"
     [left_open] = [row for row in _decisions(stage) if row["kind"] == "stop" and row["branch"] == "b01"][1:]
     assert left_open["reason"] == f"session_end: {SessionStopReason.KILLED.value}"
     assert resumed.toolbox.withdrawals[0] == SessionStopReason.KILLED.value
