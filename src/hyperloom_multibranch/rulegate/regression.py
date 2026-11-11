@@ -215,13 +215,15 @@ class RegressionSet:
         named = tuple(case.case_ref for case in cases if case.request_id in carried)
         return RegressionOutcome(not failed, "; ".join(failed), len(cases), named)
 
-    async def final_case_seconds(self, commits: tuple[str, ...]) -> tuple[float, ...]:
+    async def final_case_seconds(self, commits: tuple[str, ...], pooled_seconds: float) -> tuple[float, ...]:
         root, cases = await self._every_case()
+        targets = dict.fromkeys((*commits, root))
         pending = []
-        for commit in dict.fromkeys((*commits, root)):
+        for commit in targets:
             digest = await self._digest(commit, NO_DELTA)
             pending.extend(case for case in cases if (case.request_id, digest) not in self._verdicts)
-        return tuple([_wall_seconds(await self._blackboard.record(case.request_id)) for case in pending])
+        pooled = [pooled_seconds] * (len(await self._unpulled(root)) * (1 + len(targets)))
+        return (*[_wall_seconds(await self._blackboard.record(case.request_id)) for case in pending], *pooled)
 
     async def _every_case(self) -> tuple[str, list[RegressionCase]]:
         """The session's root, and every case the session registered: the root's and every committed commit's."""
@@ -250,10 +252,16 @@ class RegressionSet:
                 root = (await self._blackboard.baseline()).root_commit
             except NotRecorded:
                 return
-            held = await self._held(root)
-            fresh = [case for case in await self._pool.cases() if case.case_id not in held]
-            await _gathered(self._root_case(case, root) for case in fresh)
+            await _gathered(self._root_case(case, root) for case in await self._unpulled(root))
             self._pool = None
+
+    async def _unpulled(self, root: str) -> list[PooledCase]:
+        """The pool's cases :meth:`_pooled` has still to run on ``root``: none once it ran them."""
+
+        if self._pool is None:
+            return []
+        held = await self._held(root)
+        return [case for case in await self._pool.cases() if case.case_id not in held]
 
     async def _held(self, root: str) -> set[str]:
         """The sha256 of each attachment of the cases ``root`` holds."""

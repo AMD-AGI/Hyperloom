@@ -746,7 +746,7 @@ class FakeRegressionCheck:
         reason = self.failures.get(commit)
         return RegressionOutcome(reason is None, reason or "", self.cases.get(commit, 0), self.carried.get(commit, ()))
 
-    async def final_case_seconds(self, commits: tuple[str, ...]) -> tuple[float, ...]:
+    async def final_case_seconds(self, commits: tuple[str, ...], pooled_seconds: float) -> tuple[float, ...]:
         return tuple(seconds for commit in dict.fromkeys(commits) for seconds in self.case_seconds.get(commit, ()))
 
 

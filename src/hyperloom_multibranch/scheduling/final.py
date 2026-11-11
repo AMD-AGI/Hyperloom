@@ -336,11 +336,13 @@ class FinalSelector:
         """What :meth:`select` would run to validate ``candidates``, ``parallel`` tests at once, one attempt of
         each, given ``test_seconds``, one test at the primary conc: for each candidate its sweep, a test per conc of
         :attr:`~hyperloom_multibranch.scheduling.settings.Workload.final_concs`, and its reproduction, and the
-        regression runs still to make (:meth:`~hyperloom_multibranch.contracts.gate.RegressionCheck.final_case_seconds`)."""
+        regression runs still to make (:meth:`~hyperloom_multibranch.contracts.gate.RegressionCheck.final_case_seconds`),
+        a run of another session's case as long as one test."""
 
         sweep = len(self._workload.final_concs) * test_seconds
         tests = [sweep, test_seconds] * len(candidates.each)
-        tests.extend(await self._regression.final_case_seconds(tuple(each.commit for each in candidates.each)))
+        commits = tuple(each.commit for each in candidates.each)
+        tests.extend(await self._regression.final_case_seconds(commits, test_seconds))
         return FinalWork(sum(tests), max(tests), test_seconds, self._parallel)
 
     async def _validated(self, candidate: FinalCandidate) -> CandidateCheck:
