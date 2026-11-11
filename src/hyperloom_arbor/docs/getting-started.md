@@ -26,7 +26,7 @@ From a laptop dry run to a first campaign on a GPU node.
 ## 1. A dry run (no GPU)
 
 ```bash
-git clone <this repository's URL> Arbor && cd Arbor
+cd src/hyperloom_arbor        # this copy runs from its own root (VENDOR.md)
 python3 -m arbor run --config configs/serving-template.json --dry-run
 ```
 

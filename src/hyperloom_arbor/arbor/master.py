@@ -63,11 +63,9 @@ def _resolve_target(target, metric: str):
     """Resolve a campaign `target` to a number, or None if it carries none.
 
     A config may express `target` either as a bare number or as a dict of
-    documented reference points — e.g. a campaign may record
-    ``{"_source": ..., "output_tok_per_chip": <number>, "gap_pct": <number>}``.
-    Comparing `best_metric >= <dict>` raises TypeError, which killed the loop
-    on the first iteration that had a metric to compare (iteration 1 was safe
-    only because best_metric was still None).
+    documented reference points (``{"_source": ..., "<metric>": <number>}``).
+    Comparing `best_metric >= <dict>` raises TypeError, so the dict is resolved
+    to the metric's number first.
     """
     if target is None or isinstance(target, bool):
         return None
@@ -98,7 +96,7 @@ def _aborted_detail(session_dir: Path) -> str:
     """ABORTED.md's message (the streak and the last not-measured reason), for the exit record.
 
     A host has to tell a broken harness from a finished run: an abort recorded as `done`
-    read as a normal end under a host (in a gateway outage).
+    would read as a normal end under a host.
     """
     try:
         text = (session_dir / "ABORTED.md").read_text()
