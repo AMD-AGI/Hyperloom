@@ -909,7 +909,7 @@ class AutonomousSession:
             await self._note(f"keep {kept.seq} changes nothing on the branch head")
             return
         request = TestRequest(TestKind.TEST, Purpose.EXPLORE, self._start.branch, head, delta)
-        held = "" if kept.retracts is None else await self._speed_held(kept.retracts, watch)
+        held = "" if kept.retracts is None else await self._speed_held(kept.retracts, str(kept.seq), watch)
         if kept.retracts is not None and not held:
             request = await self._retraction(request, kept.retracts, watch)
         request_id = await self._setup.toolbox.submit_test(request)
@@ -920,16 +920,16 @@ class AutonomousSession:
             gate = f"is held to the speed gate: {held}" if held else "is not held to the speed gate"
             await self._note(f"keep {kept.seq} retracts {kept.retracts}: {request_id} {gate}")
 
-    async def _speed_held(self, retraction: Retraction, watch: KeepWatch) -> str:
-        """Why the retraction is held to the speed gate, empty when it is not: it undoes the keep it names and nothing
-        else when it changes only what that keep did, and the head is the agent's state on the keep it was made on,
-        since that keep was imported and the import that first carried the named keep and every one after it landed."""
+    async def _speed_held(self, retraction: Retraction, own: str, watch: KeepWatch) -> str:
+        """Why the retraction, keep ``own`` of ``watch``, is held to the speed gate, empty when it is not: it undoes the
+        keep it names and nothing else when it changes only what that keep did, and the head is the agent's state on the
+        keep it was made on, since that keep was imported and every import from the named keep on but its own landed."""
 
         if retraction.beyond:
             return f"it also changes {retraction.beyond}"
         if str(retraction.made_on) not in watch.imported:
             return f"keep {retraction.made_on}, which it was made on, was not imported"
-        since = [request_id for seq, request_id in watch.imported.items() if int(seq) >= retraction.keep]
+        since = [request_id for seq, request_id in watch.imported.items() if int(seq) >= retraction.keep and seq != own]
         snapshot = await self._place.blackboard.snapshot()
         landed = {record.request_id for record in snapshot.records if record.conclusion in _LANDED}
         if not all(request_id in landed for request_id in since):
