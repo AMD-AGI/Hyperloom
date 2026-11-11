@@ -199,6 +199,48 @@ async def test_a_shared_repository_whose_config_the_group_can_write_starts_no_gi
         await repo.head(INTEGRATION_BRANCH)
 
 
+async def _no_git(*argv: str, **kwargs: object) -> NoReturn:
+    raise AssertionError(f"git started: {argv}")
+
+
+@pytest.mark.parametrize("swap", ["objects-0755", "a-link"])
+async def test_below_shared_storage_a_repository_not_laid_out_shared_starts_no_git(tmp_path, blobs, monkeypatch, swap):
+    """What another account of the group could put at the repository's path below shared storage: a repository whose
+    objects are not the group's, or a link to one elsewhere. Its own objects and refs do not decide whether it is
+    checked; where it lives does, and there it must be laid out shared."""
+    session = _session(tmp_path, 0o2775)
+    path = session / "experiments.git"
+    repo = await _rooted(path, blobs)
+    if swap == "objects-0755":
+        (path / "objects").chmod(0o755)
+    else:
+        await _rooted(tmp_path / "elsewhere.git", blobs)
+        path.rename(session / "moved.git")
+        path.symlink_to(tmp_path / "elsewhere.git")
+
+    monkeypatch.setattr(asyncio, "create_subprocess_exec", _no_git)
+    with pytest.raises(OSError, match="below shared storage"):
+        await repo.head(INTEGRATION_BRANCH)
+
+
+async def test_below_shared_storage_what_git_makes_later_no_other_account_writes(tmp_path, blobs):
+    """Under umask ``000`` too: the object directories a later commit makes are the group's, never every account's."""
+    path = _session(tmp_path, 0o2775) / "experiments.git"
+    repo = await _rooted(path, blobs)
+    root = await repo.root()
+    await repo.create_branch("s1", root)
+    before = set((path / "objects").iterdir())
+    previous = os.umask(0)
+    try:
+        await repo.commit("s1", root, CHUNKED, "made under umask 000")
+    finally:
+        os.umask(previous)
+
+    made = [entry for entry in (path / "objects").iterdir() if entry not in before]
+    assert made, "the commit made object directories of its own"
+    assert {_mode(entry) for entry in made} == {0o2775}
+
+
 async def test_every_driver_and_config_hook_the_config_names_is_blanked(tmp_path, blobs, monkeypatch):
     """As every other git the app runs: a filter, a diff driver and a hook the config defines run as nothing."""
     path = tmp_path / "experiments.git"

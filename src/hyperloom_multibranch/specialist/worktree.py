@@ -42,6 +42,7 @@ from hyperloom.measure.pins import ImagePinError, active_image
 from hyperloom_multibranch.contracts.sources import NativeTree, SourceRoot, meta_sections, source_roots
 from hyperloom_common.git_safety import (
     app_git,
+    check_session_repository,
     check_shared_repository,
     git_dir_umask,
     share_objects_and_refs,
@@ -246,7 +247,7 @@ def source_unkept(component: str, recipe: Recipe) -> str:
     )
 
 
-def _git(cwd: Path, *args: str, index: Path | None = None, common: Path | None = None, umask: int = -1) -> str:
+def _git(cwd: Path, *args: str, index: Path | None = None, common: Path | None = None, base: bool = False) -> str:
     """``git <args>`` in ``cwd``.
 
     With ``common``, ``cwd`` is a branch's worktree, which the agent writes, made from the repository whose git
@@ -261,17 +262,20 @@ def _git(cwd: Path, *args: str, index: Path | None = None, common: Path | None =
     :func:`keep_git_files_own` keeps this account's. When ``cwd`` holds a shared repository
     (:func:`~hyperloom_common.git_safety.check_shared_repository`), what git reads besides objects and refs must be
     its maker's alone, or nothing runs; git is then pinned to that git directory (``GIT_COMMON_DIR``) and runs under
-    umask ``002`` too. ``umask`` is git's when given (``-1``: as above)."""
+    umask ``002`` too. With ``base``, ``cwd`` is the source base, which below shared storage must be such a repository
+    (:func:`~hyperloom_common.git_safety.check_session_repository`). An ``init`` runs under
+    :func:`~hyperloom_common.git_safety.git_dir_umask` instead."""
     pinned = _GIT_IDENTITY if index is None else {**_GIT_IDENTITY, "GIT_INDEX_FILE": str(index)}
     if common is not None:
         return _worktree_git(cwd, common, args, pinned)
-    chosen = umask
+    chosen = git_dir_umask() if tuple(args[: len(INIT)]) == INIT else -1
+    shared = _base_is_shared if base else _shared_git_dir
     try:
-        if _shared_git_dir(cwd):
+        if shared(cwd):
             pinned = {**pinned, "GIT_COMMON_DIR": str(cwd / _GIT_DIR)}
             umask = SHARED_CHILD_UMASK if chosen == -1 else chosen
-        elif chosen == -1:
-            umask = child_umask(cwd)
+        else:
+            umask = child_umask(cwd) if chosen == -1 else chosen
     except OSError as error:
         raise WorktreeError(f"git in {cwd} was refused: {error}") from error
     env = git_env(**pinned)
@@ -292,6 +296,17 @@ def _git(cwd: Path, *args: str, index: Path | None = None, common: Path | None =
     if done.returncode != 0:
         raise WorktreeError(f"git {args[0]} in {cwd} exited {done.returncode}: {done.stderr.decode(errors='replace')}")
     return done.stdout.decode()
+
+
+def _base_is_shared(cwd: Path) -> bool:
+    """Whether the source base ``cwd`` holds a shared repository, checked before git runs there as a session's
+    (:func:`~hyperloom_common.git_safety.check_session_repository`).
+
+    Raises:
+        OSError: It holds state another account could have written, or lies below shared storage and is not laid out
+            shared or has a ``.git`` that is no directory.
+    """
+    return check_session_repository(cwd / _GIT_DIR) is not None
 
 
 def _shared_git_dir(cwd: Path) -> bool:
@@ -360,8 +375,8 @@ def _write_owner_file(path: Path, text: str, umask: int) -> None:
 
 def _commit_all(cwd: Path, message: str) -> None:
     """Commit the whole tree at ``cwd``: the source base as it builds it, before any agent writes there."""
-    _git(cwd, *_STAGE)
-    _git(cwd, "commit", _QUIET, "--allow-empty", "-m", message)
+    _git(cwd, *_STAGE, base=True)
+    _git(cwd, "commit", _QUIET, "--allow-empty", "-m", message, base=True)
 
 
 class SourceBase:
@@ -397,7 +412,7 @@ class SourceBase:
         self.path.mkdir(_OWNER_DIR, parents=True)
         if shared:
             self.path.chmod(0o2755)
-        _git(self.path, *INIT, *(("--shared=group",) if shared else ()), f"--initial-branch={BASE_BRANCH}", umask=umask)
+        _git(self.path, *INIT, *(("--shared=group",) if shared else ()), f"--initial-branch={BASE_BRANCH}")
         excluded = list(SKIPPED)
         links: list[tuple[str, str]] = []
         for component in components:
@@ -433,10 +448,15 @@ class SourceBase:
 
     def worktree(self, branch: str, path: Path) -> BranchWorktree:
         """The worktree of ``branch`` at ``path``, added at the installed packages the first time; every call for
-        ``path`` returns the same one, so all its callers share its :attr:`~BranchWorktree.lock`."""
-        if not path.exists():
-            _git(self.path, "worktree", _ADD, "-b", f"mb/{branch}", str(path), BASE_BRANCH)
+        ``path`` returns the same one, so all its callers share its :attr:`~BranchWorktree.lock`. The base is checked
+        first (:func:`~hyperloom_common.git_safety.check_session_repository`), before what it records is read."""
         common = self.path / _GIT_DIR
+        try:
+            check_session_repository(common)
+        except OSError as error:
+            raise WorktreeError(f"the source base at {self.path} was refused: {error}") from error
+        if not path.exists():
+            _git(self.path, "worktree", _ADD, "-b", f"mb/{branch}", str(path), BASE_BRANCH, base=True)
         links = linked_paths(common)
         for prefix, target in links:
             _link(path, PurePosixPath(prefix), target)

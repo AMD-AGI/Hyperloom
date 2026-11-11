@@ -8,10 +8,14 @@ storage (:func:`hyperloom_common.git_safety.share_objects_and_refs`): the second
 from __future__ import annotations
 
 import json
+import os
 import shutil
+from collections.abc import Iterator
+from contextlib import contextmanager
 from pathlib import Path
 
 import hyperloom_common
+from hyperloom.common.env_safety import RunAs
 from hyperloom_common.tests.shared_accounts import Accounts, other_accounts
 
 _PRELUDE = """
@@ -127,3 +131,92 @@ def test_the_next_account_of_the_group_commits_but_writes_none_of_git_s_own_stat
     assert second["make_hooks"] == 17, "the first account made an empty hooks directory (EEXIST)"
     assert second["plant_commondir"] == 0, "the sticky git directory still lets the group make a name of its own"
     assert third["refused"] == 1, "which the first account's next git refuses (EPERM)"
+
+
+_SWAP = """
+session = Path({session!r})
+for name in ("MB-repo", "MB-source"):
+    os.rename(session / name, session / f"{{name}}.moved")
+ok("init", "-q", "--bare", "--template=", str(session / "MB-repo"))
+ok("init", "-q", "--template=", str(session / "MB-source"))
+print(json.dumps({{"unshared": [git_safety.shared_group(session / "MB-repo"), git_safety.shared_group(session / "MB-source" / ".git")]}}))
+"""
+
+_SESSION_CHECK = """
+session = Path({session!r})
+found = {{}}
+for name, common in (("MB-repo", session / "MB-repo"), ("MB-source", session / "MB-source" / ".git")):
+    found[name] = errno_of(lambda: git_safety.check_session_repository(common))
+    found[name + "-owner"] = (session / name).stat().st_uid
+print(json.dumps(found))
+"""
+
+
+def test_an_unshared_repository_another_account_put_in_the_session_is_refused():
+    """Another account of the group renames the session's repositories away and puts unshared ones of its own in their
+    place: the first account's check refuses both, as they lie below shared storage, though their own objects and refs
+    say they are not shared."""
+    first_layout = _FIRST.replace('"source"', '"MB-source"').replace('"repo"', '"MB-repo"')
+    with other_accounts() as accounts:
+        _lib(accounts)
+        session = str(accounts.shared_dir("work") / "session")
+
+        accounts.run(accounts.first, _PRELUDE + first_layout.format(session=session))
+        before = json.loads(accounts.run(accounts.first, _PRELUDE + _SESSION_CHECK.format(session=session)))
+        swapped = json.loads(accounts.run(accounts.second, _PRELUDE + _SWAP.format(session=session)))
+        after = json.loads(accounts.run(accounts.first, _PRELUDE + _SESSION_CHECK.format(session=session)))
+
+    assert before["MB-repo"] == before["MB-source"] == 0, "the session's own repositories pass"
+    assert swapped["unshared"] == [None, None]
+    assert after["MB-repo-owner"] == after["MB-source-owner"] == accounts.second
+    assert after["MB-repo"] == after["MB-source"] == 1, "both substitutes are refused (EPERM)"
+
+
+_SPECIALIST_GIT = """
+env = {{**ENV, **json.loads({env!r})}}
+worktree = Path({worktree!r})
+(worktree / "mod.py").write_text("new = 2\\n")
+found = {{}}
+for name, argv in (("status", ["status", "--porcelain"]), ("diff", ["diff"]), ("log", ["log", "-1", "--format=%s"])):
+    done = subprocess.run(["git", *argv], cwd=worktree, env=env, capture_output=True, text=True, check=False)
+    found[name] = [done.returncode, done.stdout, done.stderr]
+print(json.dumps(found))
+"""
+
+
+@contextmanager
+def _as(uid: int, groups: tuple[int, ...]) -> Iterator[None]:
+    """This process acting as ``uid`` holding ``groups``, as the app's account that launches a specialist is."""
+    held = os.getgroups()
+    os.setgroups(list(groups))
+    os.setegid(groups[0])
+    os.seteuid(uid)
+    try:
+        yield
+    finally:
+        os.seteuid(0)
+        os.setegid(0)
+        os.setgroups(held)
+
+
+def test_a_demoted_specialist_runs_git_in_its_own_worktree_of_a_shared_base():
+    """The launch shares a branch worktree of a base laid out shared with a specialist account that is in none of the
+    session's groups, as it shares any worktree (``RunAs``); that account's git status, diff and log run there."""
+    with other_accounts() as accounts:
+        _lib(accounts)
+        session = accounts.shared_dir("work") / "session"
+        accounts.run(accounts.first, _PRELUDE + _FIRST.format(session=str(session)))
+        worktree = session / "first"
+        specialist = RunAs("specialist", accounts.outsider, accounts.outsider, (accounts.outsider,), str(accounts.root))
+        with _as(accounts.first, (accounts.group, accounts.outsider)):
+            specialist.share_tree(worktree)
+            specialist.share_worktree_git(worktree)
+        env: dict[str, str] = {}
+        specialist.apply_env(env, safe_dirs=[worktree])
+        code = _SPECIALIST_GIT.format(env=json.dumps(env), worktree=str(worktree))
+        found = json.loads(accounts.run(accounts.outsider, _PRELUDE + code))
+
+    assert [found[name][0] for name in ("status", "diff", "log")] == [0, 0, 0], found
+    assert found["status"][1].strip() == "M mod.py"
+    assert "+new = 2" in found["diff"][1]
+    assert found["log"][1].strip() == "base"

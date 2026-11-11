@@ -35,7 +35,13 @@ from collections.abc import Callable, Mapping, Sequence
 from pathlib import Path
 from types import MappingProxyType
 from hyperloom_common.fs_utils import read_text_nofollow
-from hyperloom_common.shared_storage import SHARED_CHILD_UMASK, SHARED_DIR_MODE, current_umask, directory_is_shared
+from hyperloom_common.shared_storage import (
+    SHARED_CHILD_UMASK,
+    SHARED_DIR_MODE,
+    current_umask,
+    directory_is_shared,
+    parent_is_shared,
+)
 
 
 _GITFILE = ".git"
@@ -286,6 +292,28 @@ def check_shared_repository(common: Path) -> int | None:
     for name in _NEVER_IN_COMMON:
         if (common / name).is_symlink() or (common / name).exists():
             raise _refused(common / name, "the app's repositories never hold this in their git directory")
+    return group
+
+
+def check_session_repository(common: Path) -> int | None:
+    """:func:`check_shared_repository` for a repository a multi-branch session keeps (the source base, the experiment
+    repository), whose git directory is ``common``: where it lives, not what it holds, decides whether it is shared.
+    Below shared storage (:func:`~hyperloom_common.shared_storage.parent_is_shared` of its top directory) the session
+    laid it out shared, so one that is not, or whose ``.git`` is no directory, is refused before git runs: another
+    account of the group could have put it there, and a repository's own ``objects`` and ``refs`` would otherwise decide
+    whether it is checked at all. Elsewhere it is checked as :func:`check_shared_repository` checks it.
+
+    Raises:
+        OSError: ``EPERM`` naming what was refused; ``ENOENT`` when below shared storage there is no ``common``.
+    """
+    top = common.parent if common.name == _GITFILE else common
+    if not parent_is_shared(top):
+        return check_shared_repository(common)
+    if not stat.S_ISDIR(common.lstat().st_mode):
+        raise _refused(common, "a session's repository below shared storage has a git directory, and this is none")
+    group = check_shared_repository(common)
+    if group is None:
+        raise _refused(common, "a session's repository below shared storage is laid out shared, and this one is not")
     return group
 
 
@@ -577,6 +605,7 @@ __all__ = [
     "app_git",
     "app_git_diff",
     "blank_driver_programs",
+    "check_session_repository",
     "check_shared_repository",
     "git_dir_umask",
     "recorded_admin_dir",
