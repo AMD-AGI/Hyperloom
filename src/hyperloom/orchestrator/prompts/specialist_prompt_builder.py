@@ -81,10 +81,10 @@ _TASK_KIND_BRIEFS: dict[str, str] = {
 # Forbids global process cleanup that could kill the optimizer's serving /
 # benchmark process. Shared by bash-enabled specialist and leaf prompts.
 BASH_KILL_SAFETY_PREAMBLE = (
-    "Do NOT run global process cleanup. Never run `ps aux | grep ... | xargs "
-    "kill`, `pgrep -f ... | xargs kill`, or `killall` — these can kill the "
-    "optimizer's serving / benchmark process. Only manage processes you "
-    "started yourself, by their own PID."
+    "Do NOT run global process cleanup. Never run `ps aux | grep ... | xargs kill`, `pgrep -f ... | xargs kill`, "
+    "or `killall` — these can kill the optimizer's serving / benchmark process. Only manage processes you started "
+    "yourself. Start a server under `setsid` and stop it by its process group (`kill -- -<pgid>`), never by its PID "
+    "alone: an inference server's workers outlive a killed parent and keep holding the GPUs the next benchmark needs."
 )
 
 

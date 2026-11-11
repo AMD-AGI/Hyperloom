@@ -234,6 +234,30 @@ def test_collect_patches_work_artifacts_only_produces_no_delivery(tmp_path: Path
         assert (wt / rel).read_bytes() == content
 
 
+def test_collect_patches_declared_patch_files_fall_back_to_the_written_patches(tmp_path: Path) -> None:
+    """Targets naming the agent's own patch files harvest nothing, so those patch files are what is delivered."""
+    base, wt = _make_harvest_worktree(tmp_path)
+    patch_dir = wt / "patches"
+    patch_dir.mkdir()
+    written = patch_dir / "001_fix.patch"
+    written.write_text(
+        "diff --git a/runtime.py b/runtime.py\n--- a/runtime.py\n+++ b/runtime.py\n@@ -1 +1 @@\n-x\n+y\n",
+        encoding="utf-8",
+    )
+
+    patches, roots = SpecialistSubprocessDispatcher._collect_patches(
+        wt,
+        tmp_path / "ws",
+        worktree_base=base,
+        pinned=PinnedGit(recorded_admin_dir(base, wt)),
+        targets=("patches/001_fix.patch",),
+    )
+
+    assert patches == [str(written)]
+    assert roots == {}
+    assert not (patch_dir / "_worktree_diff.patch").exists()
+
+
 def test_collect_patches_heartbeat_in_worktree_produces_no_delivery(tmp_path: Path) -> None:
     """A heartbeat the agent writes at the worktree top is its liveness signal, not a change to the tree."""
     base, wt = _make_harvest_worktree(tmp_path)

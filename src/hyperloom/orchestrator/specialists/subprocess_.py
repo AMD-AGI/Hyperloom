@@ -1177,18 +1177,17 @@ class SpecialistSubprocessDispatcher:
     def _harvest_pathspec(targets: Sequence[str] = ()) -> list[str]:
         """Return the ``git diff`` / ``git add`` pathspec that scopes a harvest.
 
-        With no target declared the whole worktree is in scope, minus
-        :data:`_SPECIALIST_SCRATCH_DIRS`, whose whole-file copies would
-        otherwise be harvested as file creations, and minus the work artifacts
-        ``vet_patches`` refuses -- task-owned done files and bytecode caches.
-        Excluding exactly what vetting rejects keeps the harvest from authoring
-        a patch that is guaranteed to be dropped downstream.
+        With no target declared the whole worktree is in scope, minus :data:`_SPECIALIST_SCRATCH_DIRS`,
+        whose whole-file copies would otherwise be harvested as file creations. Either way the work
+        artifacts ``vet_patches`` refuses -- task-owned done files, the ``patches/`` the agent wrote,
+        bytecode caches -- are excluded: a declared target naming one of them would harvest a patch
+        that is dropped downstream, and that harvest displaces the patches the agent claimed.
         """
         from .patch_safety import SPECIALIST_WORK_ARTIFACT_PATHSPECS
 
         declared = [str(t).strip().lstrip("/") for t in targets if str(t).strip()]
         if declared:
-            return declared
+            return [*declared, *SPECIALIST_WORK_ARTIFACT_PATHSPECS]
         return [
             ".",
             *(f":(exclude){name}" for name in _SPECIALIST_SCRATCH_DIRS),

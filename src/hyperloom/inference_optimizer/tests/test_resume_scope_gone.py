@@ -379,6 +379,34 @@ def test_a_reused_pid_that_started_after_the_lease_is_not_its_holder(tmp_path):
     assert _rows(path, "SELECT * FROM leases") == []
 
 
+def test_recover_cli_confirms_a_stopped_task_of_this_environment(tmp_path, monkeypatch, capsys):
+    """Production 10-28: a stopped coordinator left a GPU specialist's leases in this
+    environment. The GPU lease blocked resume; --confirm-stopped refused the nonempty
+    scope and --confirm-scope-gone refused the current scope, so nothing could clear it."""
+    path = _session(tmp_path, LOST_SHAPES["explore"], scope=HERE)
+    _execute(path, "INSERT INTO gpu_leases VALUES (100000, 'explore-1', 'explore-1')")
+    with pytest.raises(ResumeBlocked, match="worker exit is unproven"):
+        ensure_resume_safe(tmp_path, owner_scope=HERE)
+
+    code = _recover(tmp_path, monkeypatch, "--confirm-stopped", "explore-1", "--confirmation-reason", REASON)
+
+    assert code == 0, capsys.readouterr().err
+    assert _rows(path, "SELECT * FROM leases") == [] and _rows(path, "SELECT * FROM gpu_leases") == []
+    ensure_resume_safe(tmp_path, owner_scope=HERE)
+
+
+def test_confirm_stopped_refuses_a_task_whose_holder_still_runs_here(tmp_path):
+    path = _session(tmp_path, LOST_SHAPES["explore"], scope=HERE)
+    _execute(path, "UPDATE leases SET pid=?, acquired_at=?", (os.getpid(), datetime.now(timezone.utc).isoformat()))
+    before = path.read_bytes()
+
+    with pytest.raises(CleanupConfirmationError, match="no longer runs here"):
+        confirm_task_stopped(tmp_path, task_id="explore-1", reason=REASON, current_scope=HERE)
+    with pytest.raises(CleanupConfirmationError, match="no longer runs here"):
+        confirm_task_stopped(tmp_path, task_id="explore-1", reason=REASON, current_scope=OTHER)
+    assert path.read_bytes() == before
+
+
 def test_resume_after_an_in_place_upgrade_still_sees_its_own_two_part_lease(tmp_path):
     """A session continued in the container that recorded the two-part scope: its rows are
     local, for the dead-holder reaper to judge, not a foreign scope that blocks."""

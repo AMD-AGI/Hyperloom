@@ -120,6 +120,21 @@ def test_unsupported_dtype() -> None:
     assert sig.offending_symbol == "Float8_e4m3fn"
 
 
+def test_unsupported_dtype_from_aiter_native_abort() -> None:
+    """aiter's native dtype dispatch aborts before Python raises; that line names the gap."""
+    log = (
+        "[AITER] /sgl-workspace/aiter/aiter_meta/csrc/kernels/quant_kernels.cu:1706 "
+        "operator() not support output type: fp4x2\n"
+        "Fatal Python error: Aborted\n"
+        "RuntimeError: Rank 0 scheduler died during initialization (exit code: -6).\n"
+    )
+    sig = classify_failure(log)
+    assert sig.kind == UNSUPPORTED_DTYPE
+    assert sig.offending_symbol == "fp4x2"
+    assert sig.offending_file.endswith("quant_kernels.cu")
+    assert is_targeted_build_candidate(sig, log) is True
+
+
 def test_shape_mismatch() -> None:
     """A tensor shape error -> shape_mismatch."""
     sig = classify_failure("RuntimeError: shape '[2, 4096]' is invalid for input of size 4096")

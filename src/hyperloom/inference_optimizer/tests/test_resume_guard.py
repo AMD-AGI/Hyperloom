@@ -18,6 +18,7 @@ from unittest.mock import Mock
 
 import pytest
 
+from hyperloom.common.owner_scope import local_owner_scope
 from hyperloom.inference_optimizer.session.paths import db_path_for
 from hyperloom.inference_optimizer.session.resume_guard import ResumeBlocked, ensure_resume_safe
 from hyperloom.orchestrator.state.task_registry import TaskSpec
@@ -25,7 +26,10 @@ from hyperloom.orchestrator.state.task_registry import TaskSpec
 
 def test_real_coordinator_database_path_is_checked_before_resume(tmp_path):
     path = _database(tmp_path)
-    _execute(path, "INSERT INTO leases VALUES ('benchmark_lane', 'holder-1', 'task-1', 123, '')")
+    _execute(
+        path,
+        "INSERT INTO leases (lane, holder_id, task_id, pid, owner_scope) VALUES ('benchmark_lane', 'holder-1', 'task-1', 123, '')",
+    )
     before = path.read_bytes()
 
     with pytest.raises(ResumeBlocked, match="holder-1"):
@@ -40,7 +44,7 @@ def _database(tmp_path):
     with closing(sqlite3.connect(path)) as db:
         db.executescript(
             "CREATE TABLE leases (lane TEXT, holder_id TEXT, task_id TEXT, pid INTEGER,"
-            " owner_scope TEXT NOT NULL DEFAULT '');"
+            " owner_scope TEXT NOT NULL DEFAULT '', acquired_at TEXT NOT NULL DEFAULT '');"
             "CREATE TABLE tasks (task_id TEXT, state TEXT, requires_lanes TEXT, history TEXT, params TEXT,"
             " updated_at TEXT NOT NULL DEFAULT '2026-01-01T00:00:00+00:00');"
             "CREATE TABLE bringup_rounds (round_id TEXT, state TEXT, holder_task_id TEXT);"
@@ -67,7 +71,11 @@ def _task(path, *, state="running", evidence=None, task_id="task-1"):
 def test_unknown_lease_scope_blocks_without_mutating_database(tmp_path, scope):
     path = _database(tmp_path)
     _task(path)
-    _execute(path, "INSERT INTO leases VALUES ('benchmark_lane', 'holder-1', 'task-1', 123, ?)", (scope,))
+    _execute(
+        path,
+        "INSERT INTO leases (lane, holder_id, task_id, pid, owner_scope) VALUES ('benchmark_lane', 'holder-1', 'task-1', 123, ?)",
+        (scope,),
+    )
     before = path.read_bytes()
 
     with pytest.raises(ResumeBlocked) as exc:
@@ -83,7 +91,10 @@ def test_unknown_lease_scope_blocks_without_mutating_database(tmp_path, scope):
 def test_matching_scope_is_left_for_existing_reaper(tmp_path):
     path = _database(tmp_path)
     _task(path)
-    _execute(path, "INSERT INTO leases VALUES ('benchmark_lane', 'holder-1', 'task-1', 123, 'local')")
+    _execute(
+        path,
+        "INSERT INTO leases (lane, holder_id, task_id, pid, owner_scope) VALUES ('benchmark_lane', 'holder-1', 'task-1', 123, 'local')",
+    )
     before = path.read_bytes()
 
     ensure_resume_safe(tmp_path, owner_scope="local")
@@ -127,9 +138,15 @@ def test_unobserved_terminal_holder_keeps_open_round_blocked(tmp_path, with_leas
     path = _database(tmp_path)
     _task(path, state="cancelled", evidence={"reason": "cancelled_in_flight"})
     _execute(path, "INSERT INTO bringup_rounds VALUES ('round-1', 'open', 'task-1')")
-    _execute(path, "INSERT INTO leases VALUES ('bringup_round', 'round-1', 'task-1', 0, '')")
+    _execute(
+        path,
+        "INSERT INTO leases (lane, holder_id, task_id, pid, owner_scope) VALUES ('bringup_round', 'round-1', 'task-1', 0, '')",
+    )
     if with_lease:
-        _execute(path, "INSERT INTO leases VALUES ('benchmark_lane', 'holder-1', 'task-1', 123, 'local')")
+        _execute(
+            path,
+            "INSERT INTO leases (lane, holder_id, task_id, pid, owner_scope) VALUES ('benchmark_lane', 'holder-1', 'task-1', 123, 'local')",
+        )
     before = path.read_bytes()
 
     with pytest.raises(ResumeBlocked) as exc:
@@ -145,7 +162,10 @@ def test_completed_or_unstarted_holder_without_resources_can_resume(tmp_path, st
     path = _database(tmp_path)
     _task(path, state=state, evidence={"reason": "completed"})
     _execute(path, "INSERT INTO bringup_rounds VALUES ('round-1', 'open', 'task-1')")
-    _execute(path, "INSERT INTO leases VALUES ('bringup_round', 'round-1', 'task-1', 0, '')")
+    _execute(
+        path,
+        "INSERT INTO leases (lane, holder_id, task_id, pid, owner_scope) VALUES ('bringup_round', 'round-1', 'task-1', 0, '')",
+    )
 
     ensure_resume_safe(tmp_path, owner_scope="local")
 
@@ -168,7 +188,10 @@ def test_open_round_uses_latest_cleanup_outcome(tmp_path, state, appended, confi
             history.append({"progress": {"message": "completion recorded"}})
             db.execute("UPDATE tasks SET history=?", (json.dumps(history),))
     _execute(path, "INSERT INTO bringup_rounds VALUES ('round-1', 'open', 'task-1')")
-    _execute(path, "INSERT INTO leases VALUES ('bringup_round', 'round-1', 'task-1', 0, '')")
+    _execute(
+        path,
+        "INSERT INTO leases (lane, holder_id, task_id, pid, owner_scope) VALUES ('bringup_round', 'round-1', 'task-1', 0, '')",
+    )
     before = path.read_bytes()
 
     if confirmed:
@@ -189,7 +212,10 @@ def test_open_round_without_holder_record_is_blocked(tmp_path):
 def test_gpu_lease_does_not_infer_worker_exit_from_coordinator_scope(tmp_path):
     path = _database(tmp_path)
     _task(path)
-    _execute(path, "INSERT INTO leases VALUES ('gpu_research_lane', 'coord-1', 'task-1', 123, 'local')")
+    _execute(
+        path,
+        "INSERT INTO leases (lane, holder_id, task_id, pid, owner_scope) VALUES ('gpu_research_lane', 'coord-1', 'task-1', 123, 'local')",
+    )
     _execute(path, "INSERT INTO gpu_leases VALUES (7, 'worker-1', 'task-1')")
     before = path.read_bytes()
 
@@ -203,14 +229,21 @@ def test_gpu_lease_does_not_infer_worker_exit_from_coordinator_scope(tmp_path):
 @pytest.mark.parametrize("pid", [0, -1, None, "invalid"])
 def test_unobservable_pid_cannot_use_matching_scope(tmp_path, pid):
     path = _database(tmp_path)
-    _execute(path, "INSERT INTO leases VALUES ('benchmark_lane', 'holder-1', 'task-1', ?, 'local')", (pid,))
+    _execute(
+        path,
+        "INSERT INTO leases (lane, holder_id, task_id, pid, owner_scope) VALUES ('benchmark_lane', 'holder-1', 'task-1', ?, 'local')",
+        (pid,),
+    )
     with pytest.raises(ResumeBlocked, match="holder-1"):
         ensure_resume_safe(tmp_path, owner_scope="local")
 
 
 def test_missing_local_scope_does_not_match_unknown_lease(tmp_path):
     path = _database(tmp_path)
-    _execute(path, "INSERT INTO leases VALUES ('benchmark_lane', 'holder-1', 'task-1', 123, '')")
+    _execute(
+        path,
+        "INSERT INTO leases (lane, holder_id, task_id, pid, owner_scope) VALUES ('benchmark_lane', 'holder-1', 'task-1', 123, '')",
+    )
     with pytest.raises(ResumeBlocked):
         ensure_resume_safe(tmp_path, owner_scope="")
 
@@ -220,7 +253,7 @@ def test_diagnostics_are_bounded_and_escape_control_characters(tmp_path):
     for index in range(50):
         _execute(
             path,
-            "INSERT INTO leases VALUES ('benchmark_lane', ?, ?, 123, 'foreign')",
+            "INSERT INTO leases (lane, holder_id, task_id, pid, owner_scope) VALUES ('benchmark_lane', ?, ?, 123, 'foreign')",
             (f"holder-{index}\n" + "x" * 2000, f"task-{index}"),
         )
     with pytest.raises(ResumeBlocked) as exc:
@@ -348,7 +381,11 @@ def test_gpu_zero_diagnostic_keeps_actual_resource_id(tmp_path):
 def test_unicode_diagnostics_stay_bounded(tmp_path):
     path = _database(tmp_path)
     for index in range(30):
-        _execute(path, "INSERT INTO leases VALUES (?, ?, ?, 123, '')", ("☃" * 200, "☃" * 200, f"task-{index}"))
+        _execute(
+            path,
+            "INSERT INTO leases (lane, holder_id, task_id, pid, owner_scope) VALUES (?, ?, ?, 123, '')",
+            ("☃" * 200, "☃" * 200, f"task-{index}"),
+        )
     with pytest.raises(ResumeBlocked) as exc:
         ensure_resume_safe(tmp_path, owner_scope="local")
     assert len(str(exc.value)) < 6000
@@ -391,7 +428,9 @@ def test_wal_ownership_is_seen_without_changing_database_or_history(tmp_path):
     path = _database(tmp_path)
     with closing(sqlite3.connect(path)) as writer:
         writer.execute("PRAGMA journal_mode=WAL")
-        writer.execute("INSERT INTO leases VALUES ('benchmark_lane', 'holder-1', 'task-1', 123, 'foreign')")
+        writer.execute(
+            "INSERT INTO leases (lane, holder_id, task_id, pid, owner_scope) VALUES ('benchmark_lane', 'holder-1', 'task-1', 123, 'foreign')"
+        )
         writer.commit()
         before = path.read_bytes()
         wal_path = path.with_name(path.name + "-wal")
@@ -422,7 +461,11 @@ def test_cli_checks_ownership_before_state_changes_or_execution(tmp_path, monkey
     else:
         _task(path)
         scope = "local" if residual == "matching" else "foreign"
-        _execute(path, "INSERT INTO leases VALUES ('benchmark_lane', 'holder-1', 'task-1', 123, ?)", (scope,))
+        _execute(
+            path,
+            "INSERT INTO leases (lane, holder_id, task_id, pid, owner_scope) VALUES ('benchmark_lane', 'holder-1', 'task-1', 123, ?)",
+            (scope,),
+        )
     state_path = session_dir / "state.json"
     state_path.write_text('{"stop_reason":"signal","crash_count":2}', encoding="utf-8")
     before_db = path.read_bytes()
@@ -508,7 +551,9 @@ def test_confirmation_cli_is_offline_and_does_not_resume(tmp_path, monkeypatch, 
     result = recover._run_recover_session(args)
 
     assert result == 0
-    confirm.assert_called_once_with(tmp_path.resolve(), task_id="task-1", reason=args.confirmation_reason)
+    confirm.assert_called_once_with(
+        tmp_path.resolve(), task_id="task-1", reason=args.confirmation_reason, current_scope=local_owner_scope()
+    )
     status_probe.assert_not_called()
     output = capsys.readouterr()
     assert status in output.out and "task-1" in output.out
@@ -609,7 +654,11 @@ def test_confirmation_clears_only_target_execution_with_durable_audit(tmp_path):
         ("bringup_round", "round-1", "task-1"),
         ("other_lane", "execution-2", "other-task"),
     ]:
-        _execute(path, "INSERT INTO leases VALUES (?, ?, ?, 123, '')", (lane, holder, task))
+        _execute(
+            path,
+            "INSERT INTO leases (lane, holder_id, task_id, pid, owner_scope) VALUES (?, ?, ?, 123, '')",
+            (lane, holder, task),
+        )
     _execute(path, "INSERT INTO bringup_rounds VALUES ('round-1', 'open', 'task-1')")
     _execute(path, "INSERT INTO gpu_leases VALUES (0, 'worker-0', 'task-1')")
     _execute(path, "INSERT INTO gpu_leases VALUES (1, 'worker-1', 'other-task')")
@@ -688,7 +737,10 @@ def test_confirmation_does_not_cancel_clean_or_unstarted_task(tmp_path, state, o
     _task(path, state=state, evidence={"reason": "completed"})
     if open_round:
         _execute(path, "INSERT INTO bringup_rounds VALUES ('round-1', 'open', 'task-1')")
-        _execute(path, "INSERT INTO leases VALUES ('bringup_round', 'round-1', 'task-1', 0, '')")
+        _execute(
+            path,
+            "INSERT INTO leases (lane, holder_id, task_id, pid, owner_scope) VALUES ('bringup_round', 'round-1', 'task-1', 0, '')",
+        )
     before = path.read_bytes()
     result = _confirm_in_sqlite(path)
     assert result == dict(status="nothing_to_confirm", task_id="task-1", released_leases=0, released_gpu_leases=0)
@@ -702,8 +754,15 @@ def test_confirmation_rejects_any_nonempty_or_invalid_target_scope(tmp_path, sco
 
     path = _database(tmp_path)
     _task(path)
-    _execute(path, "INSERT INTO leases VALUES ('other_lane', 'empty-owner', 'task-1', 123, '')")
-    _execute(path, "INSERT INTO leases VALUES (?, 'owner', 'task-1', 123, ?)", (lane, scope))
+    _execute(
+        path,
+        "INSERT INTO leases (lane, holder_id, task_id, pid, owner_scope) VALUES ('other_lane', 'empty-owner', 'task-1', 123, '')",
+    )
+    _execute(
+        path,
+        "INSERT INTO leases (lane, holder_id, task_id, pid, owner_scope) VALUES (?, 'owner', 'task-1', 123, ?)",
+        (lane, scope),
+    )
     _execute(path, "INSERT INTO gpu_leases VALUES (0, 'worker-0', 'task-1')")
     before = path.read_bytes()
     with pytest.raises(CleanupConfirmationError, match="scope"):
@@ -726,7 +785,10 @@ def test_confirmation_is_idempotent_but_cannot_authorize_later_work(tmp_path, la
     if later_work == "gpu":
         _execute(path, "INSERT INTO gpu_leases VALUES (0, 'new-worker', 'task-1')")
     elif later_work == "lease":
-        _execute(path, "INSERT INTO leases VALUES ('benchmark_lane', 'new-holder', 'task-1', 123, '')")
+        _execute(
+            path,
+            "INSERT INTO leases (lane, holder_id, task_id, pid, owner_scope) VALUES ('benchmark_lane', 'new-holder', 'task-1', 123, '')",
+        )
     else:
         _execute(path, "UPDATE tasks SET state='running'")
     before = path.read_bytes()
@@ -791,7 +853,10 @@ def test_confirmation_requires_existing_valid_task(tmp_path, missing):
 def test_confirmation_sql_failure_rolls_back_history_and_all_releases(tmp_path, failed_table):
     path = _database(tmp_path)
     _task(path)
-    _execute(path, "INSERT INTO leases VALUES ('benchmark_lane', 'owner', 'task-1', 123, '')")
+    _execute(
+        path,
+        "INSERT INTO leases (lane, holder_id, task_id, pid, owner_scope) VALUES ('benchmark_lane', 'owner', 'task-1', 123, '')",
+    )
     _execute(path, "INSERT INTO gpu_leases VALUES (0, 'worker', 'task-1')")
     _execute(
         path,
@@ -945,7 +1010,10 @@ def test_confirmation_cli_real_unscoped_ledger_then_normal_resume_admission(tmp_
 
     path = _database(tmp_path)
     _task(path)
-    _execute(path, "INSERT INTO leases VALUES ('benchmark_lane', 'holder', 'task-1', 123, '')")
+    _execute(
+        path,
+        "INSERT INTO leases (lane, holder_id, task_id, pid, owner_scope) VALUES ('benchmark_lane', 'holder', 'task-1', 123, '')",
+    )
     _execute(path, "INSERT INTO gpu_leases VALUES (0, 'worker', 'task-1')")
     with pytest.raises(ResumeBlocked):
         ensure_resume_safe(tmp_path, owner_scope="local")

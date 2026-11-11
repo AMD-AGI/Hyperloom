@@ -308,21 +308,43 @@ def ensure_resume_safe(session_dir: Path, *, owner_scope: str) -> None:
             "For a listed task that names no owner scope (such as a lane-less CLOSE-phase step), after "
             "verifying its entire process tree and any remote workers/Ray actors have stopped, record that "
             "confirmation with hyperloom recover --session-dir <session> --confirm-stopped <task-id> "
-            "--confirmation-reason <reason>; it refuses, changing nothing, a task recorded under an owner scope."
+            "--confirmation-reason <reason>; the same applies to a task whose leases this environment recorded "
+            "once their holder process has exited. It refuses, changing nothing, a task recorded under another "
+            "owner scope or whose holder still runs here."
         )
 
 
-def _task_leases(db: sqlite3.Connection, task_id: str, owner_scope: str) -> list[dict]:
-    """Return the execution leases a confirmation releases; every one must carry ``owner_scope``.
+def _lease_confirmable(row: sqlite3.Row, confirmation: _Confirmation) -> bool:
+    """Whether ``confirmation`` may release this lease.
+
+    A one-task confirmation also covers a lease this environment recorded once its
+    holder no longer runs here: the ledger proves the coordinator gone, and the
+    operator vouches for the GPU worker the lease cannot name.
+    """
+    if row["owner_scope"] == confirmation.owner_scope:
+        return True
+    return (
+        not confirmation.owner_scope
+        and same_environment(row["owner_scope"], confirmation.current_scope)
+        and not _holder_runs_here(row["pid"], row["acquired_at"])
+    )
+
+
+def _task_leases(db: sqlite3.Connection, task_id: str, confirmation: _Confirmation) -> list[dict]:
+    """Return the execution leases a confirmation releases; every one must be :func:`_lease_confirmable`.
 
     The empty scope is the legacy unattributed ownership confirmed task by task. A
     bring-up round's lane never records a scope and stays with the round reconciler.
     """
-    rows = list(db.execute("SELECT lane, holder_id, owner_scope FROM leases WHERE task_id=?", (task_id,)))
+    rows = list(
+        db.execute("SELECT lane, holder_id, pid, owner_scope, acquired_at FROM leases WHERE task_id=?", (task_id,))
+    )
+    owner_scope = confirmation.owner_scope
     scoped = [row for row in rows if not owner_scope or row["lane"] != "bringup_round"]
-    if any(row["owner_scope"] != owner_scope for row in scoped):
+    if not all(_lease_confirmable(row, confirmation) for row in scoped):
         raise CleanupConfirmationError(
-            "confirmation is limited to strictly empty owner scope on every target lease"
+            "confirmation is limited to leases with an empty owner scope, or recorded in this "
+            "environment by a holder that no longer runs here"
             if not owner_scope
             else f"task={_label(task_id)} holds a lease outside the confirmed owner scope"
         )
@@ -389,12 +411,16 @@ def _entry_contradicts_confirmation(entry: object, *, index: int, manual_index: 
 
 @dataclass(frozen=True)
 class _Confirmation:
-    """Who confirms cleanup, why and when, and the owner scope vouched gone (\"\" for one task's own confirmation)."""
+    """Who confirms cleanup, why and when, and the owner scope vouched gone (\"\" for one task's own confirmation).
+
+    ``current_scope`` is the environment a one-task confirmation runs in, \"\" when unobservable.
+    """
 
     reason: str
     operator: str
     confirmed_at: str
     owner_scope: str = ""
+    current_scope: str = ""
 
 
 @dataclass(frozen=True)
@@ -506,7 +532,7 @@ def _confirm_task_stopped_in_transaction(db: sqlite3.Connection, task_id: str, c
         raise CleanupConfirmationError(f"task={_label(task_id)} does not exist")
     history = _confirmable_history(task)
 
-    leases = _task_leases(db, task_id, confirmation.owner_scope)
+    leases = _task_leases(db, task_id, confirmation)
     gpu_leases = [
         dict(row) for row in db.execute("SELECT gpu_id, holder_id FROM gpu_leases WHERE task_id=?", (task_id,))
     ]
@@ -635,11 +661,12 @@ def _in_locked_ledger(session_dir: Path, update: Callable[[sqlite3.Connection, s
         ) from exc
 
 
-def confirm_task_stopped(session_dir: Path, *, task_id: str, reason: str) -> dict:
-    """Record an operator's explicit physical-cleanup confirmation for one task that names no owner scope.
+def confirm_task_stopped(session_dir: Path, *, task_id: str, reason: str, current_scope: str = "") -> dict:
+    """Record an operator's explicit physical-cleanup confirmation for one task.
 
-    This does not stop or inspect processes or Ray actors. The operator must first
-    verify their exit. Only empty-scope execution ownership is eligible.
+    This does not stop Ray actors or remote workers; the operator must first verify
+    their exit. Eligible: execution ownership with an empty scope, and ownership
+    recorded in ``current_scope``'s environment whose holder process no longer runs.
     """
     if not isinstance(task_id, str) or not task_id.strip() or task_id != task_id.strip():
         raise CleanupConfirmationError("confirmation requires one exact nonempty task ID")
@@ -648,7 +675,9 @@ def confirm_task_stopped(session_dir: Path, *, task_id: str, reason: str) -> dic
     return _in_locked_ledger(
         session_dir,
         lambda db, operator, confirmed_at: _confirm_task_stopped_in_transaction(
-            db, task_id, _Confirmation(reason=reason, operator=operator, confirmed_at=confirmed_at)
+            db,
+            task_id,
+            _Confirmation(reason=reason, operator=operator, confirmed_at=confirmed_at, current_scope=current_scope),
         ),
     )
 

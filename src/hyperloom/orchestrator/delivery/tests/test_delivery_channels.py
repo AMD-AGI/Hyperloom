@@ -33,7 +33,9 @@ def test_the_harvest_excludes_the_specialists_own_scratch_copies() -> None:
 
 
 def test_declared_targets_scope_the_harvest_pathspec() -> None:
-    assert SpecialistSubprocessDispatcher._harvest_pathspec(["pkg/mod.py"]) == ["pkg/mod.py"]
+    pathspec = SpecialistSubprocessDispatcher._harvest_pathspec(["pkg/mod.py"])
+    assert [p for p in pathspec if not p.startswith(":(")] == ["pkg/mod.py"]
+    assert ":(top,exclude)patches" in pathspec
 
 
 def test_the_round_declaration_scopes_the_harvest() -> None:
