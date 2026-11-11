@@ -27,7 +27,7 @@ from hyperloom.orchestrator.actions.executors._ray_serving import RAY_INFEASIBLE
 from hyperloom.orchestrator.actions.executors._subprocess_kill import AGENTX_PREFLIGHT_ERROR_CLASS
 from hyperloom.orchestrator.actions.stop_attribution import SESSION_TIME_EXHAUSTED_CLASS
 from hyperloom.orchestrator.loop.coordinator import Coordinator
-from hyperloom.orchestrator.loop.proposals import PendingProposal
+from hyperloom.orchestrator.state.pending_proposal import PendingProposal
 from hyperloom.orchestrator.loop._baseline_failures import _authorable_launch_log
 from hyperloom.orchestrator.enablement.params import EnablementParams
 
