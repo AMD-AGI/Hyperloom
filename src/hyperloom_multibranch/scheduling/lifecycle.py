@@ -278,6 +278,7 @@ class Session:
         self._prelude: PreludeResult | None = None
         self._map_shares: tuple[RootShares | None] | None = None
         self._explore_end = math.inf
+        self._explore_cap: Callable[[float], float] | None = None  # budget.ExploreCap, given by run
         peers = peer_factory(self._peer_setup(desk, services))
         context = SchedulerContext(
             self._layout,
@@ -418,8 +419,9 @@ class Session:
         curator = recorded(services.author_completion, self._blackboard, UsageSource.CURATOR)
         self._curator = CloseAuthoring(curator, services.author_model)
 
-    async def run(self) -> SessionOutcome:
-        """Run every phase and CLOSE; an unhandled error propagates once CLOSE has run.
+    async def run(self, explore_cap: Callable[[float], float] | None = None) -> SessionOutcome:
+        """Run every phase and CLOSE; an unhandled error propagates once CLOSE has run. EXPLORE ends no later than
+        ``explore_cap`` (a :data:`~.budget.ExploreCap`, a hosted run's grant's) says, when it is given.
 
         The scheduler records itself before the first phase, so the directory says the session is running from the
         start and a recovery over it is refused while it is. The image check then compares the rule pack's outside
@@ -431,6 +433,7 @@ class Session:
         """
 
         budget = SessionBudget.from_hours(self._settings.max_hours, self._clock.now())
+        self._explore_cap = explore_cap
         self._processes.record_scheduler()
         image_check = await asyncio.to_thread(run_image_check)
         self._image_check = image_check
@@ -616,8 +619,9 @@ class Session:
             logger.info("the agent map was rejected at its review: %s", exc)
             return SessionOutcome(SessionStopReason.REVIEW_REJECTED, None, None, "")
         budget = self._budget or budget  # a review's pause moved the deadline
-        explore_end = self._explore_end = budget.explore_end(self._clock.now(), prelude.longest_root_test)
-        self._phase("explore", explore_end=explore_end)
+        cap = math.inf if self._explore_cap is None else self._explore_cap(prelude.longest_root_test)
+        explore_end = self._explore_end = budget.explore_end(self._clock.now(), prelude.longest_root_test, cap)
+        self._phase("explore", explore_end=explore_end, **({"explore_cap": cap} if math.isfinite(cap) else {}))
         window = ExploreWindow(
             prelude.root_commit,
             prelude.start_commit,

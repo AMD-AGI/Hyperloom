@@ -142,7 +142,7 @@ from hyperloom_multibranch.contracts.toolbox import WorkloadKind
 from hyperloom_multibranch.blackboard.knowledge.reference_leads import INFERENCEX_REFERENCE
 from hyperloom_multibranch.rulegate.agentx import AgentXObjective
 from hyperloom_multibranch.rulegate.critic import LlmCritic, anthropic_critic
-from hyperloom_multibranch.scheduling.budget import MB_DEFAULT_MAX_HOURS
+from hyperloom_multibranch.scheduling.budget import MB_DEFAULT_MAX_HOURS, ExploreCap
 from hyperloom_multibranch.scheduling.clock import Clock
 from hyperloom_multibranch.scheduling.hosted_peers import PinnedToolboxInputs, load_hosted_peers
 from hyperloom_multibranch.scheduling.hosted_run import (
@@ -152,6 +152,7 @@ from hyperloom_multibranch.scheduling.hosted_run import (
     campaign_spec,
     close_then_start,
     grant_deadline,
+    grant_explore_cap,
     grant_tests_that_fit,
     recorded_session,
     refuse_unhosted_branches,
@@ -921,9 +922,10 @@ def run_session(
     peer_factory: PeerFactory,
     services: SessionServices,
     report_root: Callable[[Path], None] = _print_root,
+    explore_cap: ExploreCap | None = None,
 ) -> int:
     """Create the session directory, hand it to ``report_root`` -- by default printed on one stdout line -- before
-    anything else is built in it, run the session and return its exit code.
+    anything else is built in it, run the session (:meth:`Session.run`, given ``explore_cap``) and return its exit code.
 
     The session and its peers are built on the event loop they run on, which the specialist tools of the MCP service
     hand every toolbox call to. Whatever the session's processes orphan is reparented to this process, so the session
@@ -931,11 +933,15 @@ def run_session(
     """
 
     with adopting_orphans():
-        return asyncio.run(_run_session(settings, peer_factory, services, report_root))
+        return asyncio.run(_run_session(settings, peer_factory, services, report_root, explore_cap))
 
 
 async def _run_session(
-    settings: RunSettings, peer_factory: PeerFactory, services: SessionServices, report_root: Callable[[Path], None]
+    settings: RunSettings,
+    peer_factory: PeerFactory,
+    services: SessionServices,
+    report_root: Callable[[Path], None],
+    explore_cap: ExploreCap | None = None,
 ) -> int:
     clock = Clock()
     layout = create_session(workspace_root(), settings.workload.model_basename, clock)
@@ -943,7 +949,7 @@ async def _run_session(
     logging.getLogger().addHandler(_file_handler(layout.scheduler_log))
     host = SessionHost(layout, ProcessRegistry(layout.pids, clock), clock)
     session = Session(settings, peer_factory, host, services)
-    return (await session.run()).exit_code
+    return (await session.run(explore_cap)).exit_code
 
 
 def final_only(persisted: PersistedRun, peer_factory: PeerFactory, services: SessionServices) -> int:
@@ -1087,7 +1093,8 @@ def _hosted_start(host: HostInfo) -> HostedStart:
     close = partial(final_only, peer_factory=ready.peer_factory, services=ready.services)
     if persisted is not None:
         return HostedStart(partial(close, persisted), deadline)
-    start = partial(run_session, settings, ready.peer_factory, ready.services, partial(started_session, host.state_dir))
+    record = partial(started_session, host.state_dir)
+    start = partial(run_session, settings, ready.peer_factory, ready.services, record, grant_explore_cap(host))
     return HostedStart(partial(close_then_start, earlier.left, close, start), deadline)
 
 
@@ -1162,7 +1169,8 @@ def _start(settings: RunSettings, grant: HandedGrant | None) -> int:
     else:
         ready = hosted_ready_session(grant.host, settings.workload)
         _stop_before_grant_ends(grant.deadline)
-    return run_session(settings, ready.peer_factory, ready.services)
+    cap = None if grant is None else grant_explore_cap(grant.host)
+    return run_session(settings, ready.peer_factory, ready.services, explore_cap=cap)
 
 
 def _refuse_options_beside_resume(args: argparse.Namespace) -> None:

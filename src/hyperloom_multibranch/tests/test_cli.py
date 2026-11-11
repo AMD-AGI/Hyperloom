@@ -67,9 +67,9 @@ from hyperloom_multibranch.contracts.toolbox import WorkloadKind
 from hyperloom_multibranch.blackboard.codec import encode
 from hyperloom_multibranch.blackboard.knowledge.reference_leads import INFERENCEX_REFERENCE
 from hyperloom_multibranch.blackboard.rsi.archive import ARCHIVE_ENV
-from hyperloom_multibranch.scheduling.budget import MB_CLOSE_GRACE_CAP_SECONDS, MB_DEFAULT_MAX_HOURS
+from hyperloom_multibranch.scheduling.budget import MB_CLOSE_GRACE_CAP_SECONDS, MB_DEFAULT_MAX_HOURS, ExploreCap
 from hyperloom_multibranch.scheduling import hosted_run
-from hyperloom_multibranch.scheduling.hosted_run import GRANT_MARGIN_SECONDS
+from hyperloom_multibranch.scheduling.hosted_run import GRANT_MARGIN_SECONDS, final_reserve_seconds
 from hyperloom_multibranch.scheduling.clock import Clock
 from hyperloom_multibranch.scheduling.decisions import Decision, DecisionKind, DecisionLog
 from hyperloom_multibranch.scheduling.prelude import BASELINE_ESTABLISHED
@@ -859,18 +859,30 @@ def agent_cli(agent_binaries: None, monkeypatch: pytest.MonkeyPatch) -> list[Run
 
     runs: list[RunSettings] = []
 
-    def run_session(settings: RunSettings, peer_factory: PeerFactory, services: object, *report_root: object) -> int:
+    def run_session(
+        settings: RunSettings,
+        peer_factory: PeerFactory,
+        services: object,
+        report_root: object = None,
+        explore_cap: ExploreCap | None = None,
+    ) -> int:
         runs.append(settings)
+        EXPLORE_CAPS.append(explore_cap)
         return 0
 
     def final_only(persisted: PersistedRun, peer_factory: PeerFactory, services: object) -> int:
         runs.append(persisted.settings)
         return 0
 
+    EXPLORE_CAPS.clear()
     monkeypatch.setattr(cli, "run_session", run_session)
     monkeypatch.setattr(cli, "final_only", final_only)
     monkeypatch.setattr(cli, "resume", final_only)
     return runs
+
+
+#: The EXPLORE cap each session :func:`agent_cli` noted was given.
+EXPLORE_CAPS: list[ExploreCap | None] = []
 
 
 @pytest.mark.usefixtures("ready_environment")
@@ -947,7 +959,7 @@ def test_a_strict_image_check_that_fails_is_refused_like_the_other_start_up_refu
     failing = FactResult("sglang.renamed-flag", "sglang", Status.FAIL, (), "the flag is gone")
     report = ImageCheckReport(ImageCheckMode.STRICT, rule_pack_identity(), "", {}, (failing,))
 
-    def session_refused(settings: RunSettings, peer_factory: PeerFactory, services: object) -> int:
+    def session_refused(settings: RunSettings, peer_factory: PeerFactory, services: object, **_: object) -> int:
         raise ImageCheckFailed(report)
 
     monkeypatch.setattr(cli, "run_session", session_refused)
@@ -1524,7 +1536,9 @@ def _session_ending(stop_reason: str | None, returncode: int) -> Callable[..., i
     """A session that creates its directory in the workspace, reports it, and ends with ``returncode`` after a CLOSE
     that reported ``stop_reason``, or without a CLOSE when it is ``None``."""
 
-    def run_session(settings: RunSettings, peer_factory: object, services: object, report_root: Callable) -> int:
+    def run_session(
+        settings: RunSettings, peer_factory: object, services: object, report_root: Callable, *_: object
+    ) -> int:
         layout = create_session(Path(os.environ["USER_DATA_PATH"]), settings.workload.model_basename, Clock())
         report_root(layout.root)
         if stop_reason is not None:
@@ -1735,6 +1749,32 @@ def test_a_hosted_session_ends_a_close_grace_and_a_margin_before_the_grant_and_i
     assert host.stops == [pytest.approx(3600 - grace, abs=30)]
 
 
+@pytest.mark.usefixtures("ready_environment")
+def test_a_hosted_session_ends_explore_a_final_reserve_before_the_grant_s_stop(
+    host: Host, agent_cli: list[RunSettings]
+) -> None:
+    created = datetime.fromisoformat(os.environ["HYPERLOOM_RUN_CREATED_AT"]).timestamp()
+
+    assert cli.main(["hosted", "run"]) == 0
+
+    stop = created + GRANT["max_runtime_sec"] - MB_CLOSE_GRACE_CAP_SECONDS
+    [cap] = EXPLORE_CAPS
+    assert cap is not None
+    for longest in (0.0, 1500.0):
+        assert cap(longest) == pytest.approx(stop - GRANT_MARGIN_SECONDS - final_reserve_seconds(longest), abs=1.0)
+
+
+@pytest.mark.usefixtures("ready_environment")
+def test_a_session_run_with_no_grant_has_no_explore_cap(
+    agent_cli: list[RunSettings], tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("USER_DATA_PATH", str(tmp_path))
+
+    assert cli.main(["run", *WORKLOAD_ARGS]) == 0
+
+    assert agent_cli == [_settings()] and EXPLORE_CAPS == [None]
+
+
 @pytest.mark.parametrize(
     ("sections", "field"),
     [
@@ -1809,7 +1849,9 @@ def test_a_leg_that_cannot_open_a_file_of_the_run_ends_it_for_good_naming_the_fi
 def test_a_hosted_session_whose_base_launch_is_refused_ends_the_run_for_good_naming_why(
     host: Host, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    def base_refused(settings: RunSettings, peer_factory: object, services: object, report_root: Callable) -> int:
+    def base_refused(
+        settings: RunSettings, peer_factory: object, services: object, report_root: Callable, *_: object
+    ) -> int:
         report_root(create_session(host.workspace, settings.workload.model_basename, Clock()).root)
         raise PeersUnavailable("the base launch could not be resolved: InferenceX has no commit 8a76a78e41")
 
@@ -1849,7 +1891,9 @@ def test_a_strict_image_check_that_fails_ends_the_hosted_run_for_good_naming_it(
     failing = FactResult("sglang.renamed-flag", "sglang", Status.FAIL, (), "the flag is gone")
     report = ImageCheckReport(ImageCheckMode.STRICT, rule_pack_identity(), "", {}, (failing,))
 
-    def session_refused(settings: RunSettings, peer_factory: object, services: object, report_root: Callable) -> int:
+    def session_refused(
+        settings: RunSettings, peer_factory: object, services: object, report_root: Callable, *_: object
+    ) -> int:
         report_root(create_session(host.workspace, settings.workload.model_basename, Clock()).root)
         raise ImageCheckFailed(report)
 
@@ -1930,7 +1974,9 @@ def restart(agent_binaries: None, host: Host, monkeypatch: pytest.MonkeyPatch) -
         _report(persisted.layout, stop_reason=persisted.ended.value, error=lifecycle.NO_BASELINE)
         return 1
 
-    def run_session(settings: RunSettings, peer_factory: object, services: object, report_root: Callable) -> int:
+    def run_session(
+        settings: RunSettings, peer_factory: object, services: object, report_root: Callable, *_: object
+    ) -> int:
         done.calls.append(("run", settings))
         layout = create_session(host.workspace, settings.workload.model_basename, Clock())
         report_root(layout.root)
@@ -2186,7 +2232,7 @@ def handed(agent_binaries: None, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     monkeypatch.setenv("HYPERLOOM_RUNNER_CACHE", str(tmp_path / "runner-cache"))
     started = Started([], [])
 
-    def run_session(settings: RunSettings, peer_factory: PeerFactory, services: object) -> int:
+    def run_session(settings: RunSettings, peer_factory: PeerFactory, services: object, **_: object) -> int:
         started.sessions.append((settings, peer_factory))
         return 0
 

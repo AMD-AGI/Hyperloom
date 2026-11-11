@@ -11,7 +11,7 @@ import pytest
 from hyperloom.contracts.measurement import FailureClass, Purpose, TestResult, Validity
 from hyperloom_multibranch.contracts.gate import ResultUnverified, ResultVerifier
 from hyperloom_multibranch.contracts.blackboard import Role
-from hyperloom_multibranch.contracts.blackboard.vocab import ClaimStatus, DedupStatus
+from hyperloom_multibranch.contracts.blackboard.vocab import INTEGRATION_BRANCH, ClaimStatus, DedupStatus
 from hyperloom_multibranch.contracts.toolbox import Backpressure, CancelOutcome, RequestRejected, UnknownTestRequest
 from hyperloom_multibranch.blackboard.tests.factories import TTL, intent
 from hyperloom_multibranch.toolbox.attempts import TestJob
@@ -285,6 +285,51 @@ async def test_infra_retries_wait_their_backoff_only_when_not_the_node_s_and_nev
     assert slept == pytest.approx(waits, abs=0.1)
     record = await _record(rig, request_id)
     assert record.result is not None and record.result.validity is Validity.MEASUREMENT_FAILED
+
+
+@pytest.mark.parametrize(
+    "branch, deadline_in, end_in, waits",
+    [
+        (INTEGRATION_BRANCH, None, None, [60.0, 120.0, 240.0]),
+        (INTEGRATION_BRANCH, None, 100.0, [60.0, 40.0]),
+        ("b1", 300.0, 100.0, [60.0, 40.0]),
+        ("b1", 100.0, 300.0, [60.0, 40.0]),
+    ],
+    ids=["integration_no_end", "integration_tests_end", "tests_end_first", "branch_deadline_first"],
+)
+async def test_infra_retries_never_wait_past_the_time_every_test_must_have_ended(
+    tmp_path: Path, branch: str, deadline_in: float | None, end_in: float | None, waits: list[float]
+) -> None:
+    """FINAL's validation runs on the integration branch, which has no exploration end: a grant's end (``tests_end_by``)
+    is what keeps its retries from waiting past the time a last attempt can still run."""
+    from hyperloom.measure.failures import FOREIGN_PROCESS_ON_CARD
+    from hyperloom_multibranch.blackboard.tests.factories import FakeClock
+    from hyperloom_multibranch.toolbox.attempts import INFRA_BACKOFF_SECONDS
+
+    clock, slept = FakeClock(), []
+
+    async def sleep(seconds: float) -> None:
+        slept.append(seconds)
+        clock.advance(seconds)
+
+    deadline = {} if deadline_in is None else {branch: clock.now + deadline_in}
+    nodes = iter(["n1", "n2", "n3", "n4"])
+    executor = ScriptedExecutor([lambda j: failed(j, FailureClass.INFRA, next(nodes), FOREIGN_PROCESS_ON_CARD)])
+    rig = build(
+        tmp_path,
+        executor=executor,
+        clock=clock,
+        policy=QueuePolicy(branch_deadline=deadline),
+        infra_backoff=INFRA_BACKOFF_SECONDS,
+        sleep=sleep,
+        tests_end_by=None if end_in is None else clock.now + end_in,
+    )
+    await rig.toolbox.submit_test(
+        req(branch, purpose=Purpose.FINAL if branch == INTEGRATION_BRANCH else Purpose.EXPLORE)
+    )
+    await rig.toolbox.drain()
+    assert len(executor.jobs) == 4, "every retry still runs"
+    assert slept == pytest.approx(waits, abs=0.1)
 
 
 async def test_a_measurement_failed_result_releases_its_claim_and_dedup_does_not_call_it_tested(

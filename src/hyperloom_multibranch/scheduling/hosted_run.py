@@ -22,7 +22,12 @@ Every test, PRELUDE's included, runs in a measurement sandbox, so the applicatio
 
 The grant bounds the session in time (:func:`grant_deadline`): its budget ends one CLOSE grace and a margin before the
 grant does, and the process is sent SIGTERM one CLOSE grace before the grant ends, which ends FINAL and leaves CLOSE
-that grace.
+that grace. The grant's runtime counts from the run's creation (``HYPERLOOM_RUN_CREATED_AT``), which the platform
+stamps when it makes the run, before this process starts, so a session's own deadline, counted from its start, can
+leave FINAL less of the grant than it needs. The grant's end (:func:`grant_end`) therefore also caps EXPLORE: it ends a
+FINAL reserve (:func:`final_reserve_seconds`) and a margin before that SIGTERM, whichever comes first of that and the
+end the session's budget gives it, and the tests' infra retries never wait past the time a test can still end by it
+(:attr:`GrantEnd.tests_end_by`).
 
 The host decides from ``$HYPERLOOM_STATE_DIR/exit.json`` whether to start the run again: never once it holds
 ``final: true`` (:func:`write_final_exit`), and again when it is missing. ``session.json`` there names the session
@@ -52,7 +57,7 @@ from hyperloom.hosted.campaign import CampaignSpec, parse_campaign
 from hyperloom.hosted.host_info import GrantLimits as HostGrantLimits
 from hyperloom.hosted.host_info import HostInfo, Var
 from hyperloom.inference_optimizer.session.paths import ENV_USER_DATA_PATH
-from hyperloom_multibranch.scheduling.budget import MB_CLOSE_GRACE_CAP_SECONDS, MB_SECONDS_PER_HOUR
+from hyperloom_multibranch.scheduling.budget import MB_CLOSE_GRACE_CAP_SECONDS, MB_SECONDS_PER_HOUR, ExploreCap
 from hyperloom_multibranch.scheduling.layout import SessionLayout
 from hyperloom_multibranch.scheduling.lifecycle import PersistedRun, persisted_run, persisted_session, prelude_landed
 from hyperloom_multibranch.scheduling.settings import RunSettings
@@ -64,6 +69,16 @@ EXIT_FILE = "exit.json"
 SESSION_FILE = "session.json"
 #: Seconds between the session's hard stop and the grant's end, for the process to write ``exit.json`` and exit.
 GRANT_MARGIN_SECONDS = 60.0
+#: The attempts of one validation test FINAL's reserve covers: two that meet an infrastructure failure a retry waits out
+#: (cards a process outside the test still holds, a platform with no sandbox to give), and the one that measures.
+FINAL_ATTEMPTS = 3
+#: A fresh sandbox's create and its runner's start, once, which a test measured on a warm node may not have included.
+FINAL_COLD_START_SECONDS = 300.0
+#: From EXPLORE's end to FINAL's first test: the branches stopped, the candidates read and the last merges settled. A
+#: live run took over five minutes for it.
+FINAL_WIND_DOWN_SECONDS = 600.0
+#: FINAL's reserve at the least, and all of it while the session has measured no test.
+FINAL_RESERVE_FLOOR_SECONDS = 1800.0
 #: ``exit.json`` and ``session.json`` reach the disk before their names, and are ``664``: the run's next leg, maybe
 #: another account of the group, reads ``session.json`` to finish the session it names.
 _DURABLE = WriteOptions(fsync=True, shared=True)
@@ -288,6 +303,66 @@ def grant_deadline(host: HostInfo, now: datetime) -> GrantDeadline:
     return GrantDeadline(limits.max_runtime_sec - (now - host.run_created_at).total_seconds())
 
 
+def final_reserve_seconds(test_seconds: float) -> float:
+    """The seconds of the grant FINAL is kept, given the wall time of the session's longest test (``0`` when it measured
+    none): its wind-down from EXPLORE (:data:`FINAL_WIND_DOWN_SECONDS`), :data:`FINAL_ATTEMPTS` attempts of a test that
+    long, the infra backoff before each retry among them (:data:`~hyperloom_multibranch.toolbox.attempts.INFRA_BACKOFF_SECONDS`,
+    as :class:`~hyperloom_multibranch.toolbox.attempts.InfraBackoff` waits it) and one cold start
+    (:data:`FINAL_COLD_START_SECONDS`); no less than :data:`FINAL_RESERVE_FLOOR_SECONDS`."""
+
+    # attempts loads the measurement's failure names, which load the main flow's runtime: the command imports none.
+    from hyperloom_multibranch.toolbox.attempts import INFRA_BACKOFF_SECONDS
+
+    waits = INFRA_BACKOFF_SECONDS
+    backoff = sum(waits[min(retry, len(waits)) - 1] for retry in range(1, FINAL_ATTEMPTS)) if waits else 0.0
+    needed = FINAL_WIND_DOWN_SECONDS + FINAL_ATTEMPTS * max(test_seconds, 0.0) + backoff + FINAL_COLD_START_SECONDS
+    return max(FINAL_RESERVE_FLOOR_SECONDS, needed)
+
+
+@dataclass(frozen=True)
+class GrantEnd:
+    """When the grant ends, Unix seconds: its runtime from the run's creation."""
+
+    at: float
+
+    @property
+    def tests_end_by(self) -> float:
+        """When the session's tests must have ended: when the process is sent SIGTERM, one CLOSE grace before the
+        grant ends (:attr:`GrantDeadline.stop_after_sec`), which ends FINAL."""
+
+        return self.at - MB_CLOSE_GRACE_CAP_SECONDS
+
+    def explore_cap(self, test_seconds: float) -> float:
+        """The latest EXPLORE may end at for FINAL to end a margin before :attr:`tests_end_by`, given the wall time of
+        the session's longest test: an :data:`~hyperloom_multibranch.scheduling.budget.ExploreCap`."""
+
+        return self.tests_end_by - GRANT_MARGIN_SECONDS - final_reserve_seconds(test_seconds)
+
+
+def grant_end(host: HostInfo) -> GrantEnd | None:
+    """When the grant ``host`` states ends, ``None`` when it states no runtime. Every start of the run reads the same
+    creation time, so a restart's grant ends when its first start's did."""
+
+    limits = host.grant_limits
+    if limits is None or limits.max_runtime_sec is None:
+        return None
+    return GrantEnd(host.run_created_at.timestamp() + limits.max_runtime_sec)
+
+
+def grant_tests_end_by(host: HostInfo) -> float | None:
+    """:attr:`GrantEnd.tests_end_by` of ``host``'s grant, ``None`` without a grant runtime."""
+
+    end = grant_end(host)
+    return None if end is None else end.tests_end_by
+
+
+def grant_explore_cap(host: HostInfo) -> ExploreCap | None:
+    """:meth:`GrantEnd.explore_cap` of ``host``'s grant, ``None`` without a grant runtime."""
+
+    end = grant_end(host)
+    return None if end is None else end.explore_cap
+
+
 def arm_grant_stop(seconds: float) -> threading.Timer:
     """Send this process SIGTERM in ``seconds``, the stop signal a session ends on; returns the started timer."""
 
@@ -422,16 +497,25 @@ def reported_stop_reason(root: Path) -> str | None:
 
 __all__ = [
     "EXIT_FILE",
+    "FINAL_ATTEMPTS",
+    "FINAL_COLD_START_SECONDS",
+    "FINAL_RESERVE_FLOOR_SECONDS",
+    "FINAL_WIND_DOWN_SECONDS",
     "GRANT_MARGIN_SECONDS",
     "SESSION_FILE",
     "EarlierSession",
     "GrantDeadline",
+    "GrantEnd",
     "HostedExit",
     "HostedRefused",
     "arm_grant_stop",
     "campaign_spec",
     "close_then_start",
+    "final_reserve_seconds",
     "grant_deadline",
+    "grant_end",
+    "grant_explore_cap",
+    "grant_tests_end_by",
     "grant_tests_that_fit",
     "record_session",
     "recorded_session",
