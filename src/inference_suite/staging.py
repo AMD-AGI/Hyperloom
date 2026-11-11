@@ -110,8 +110,8 @@ INFERENCEX_REQUIRED = (CLIENT_FILE, GSM8K_TASK, AGENTX_AGGREGATOR_FILE, AGENTX_P
 PUBLISHING_PREFIX = ".staging-"
 
 #: Where this package ships the sealed runner's locks, which pin the lm-eval a round's eval runs and that release's
-#: dependency tree, with hashes. Each is a symlink in the source tree to the ``requirements/`` lock it ships, so a
-#: wheel carries the file and the source tree keeps one copy.
+#: dependency tree, with hashes. Each is a copy of the ``requirements/`` lock of its name, held equal by a test: a
+#: link would break the runner's unpack of the source, which refuses one that points outside it.
 _LOCK_DIR = Path(__file__).resolve().parent
 _RUNNER_LOCK = "runner.lock"
 _VERSION_LOCK = "runner-cp{digits}.lock"

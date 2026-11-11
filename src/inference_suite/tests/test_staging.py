@@ -822,17 +822,20 @@ def test_the_runner_lock_is_the_one_the_sealed_runner_installs_on_that_python(py
     tree = _SRC.parent
     expected = tree / lock_file(tree, python_version)
 
-    assert staging._runner_lock(python_version).resolve() == expected
+    assert staging._runner_lock(python_version).read_bytes() == expected.read_bytes()
     assert _locked_lm_eval(expected).version == LM_EVAL_VERSION
 
 
-def test_the_package_ships_every_runner_lock_as_a_link_to_its_requirements_file() -> None:
+def test_the_package_ships_every_runner_lock_as_a_file_equal_to_its_requirements_lock() -> None:
     package = Path(inference_suite.__file__).parent
     shipped = {lock.name: lock for lock in package.glob("runner*.lock")}
     owned = {lock.name: lock for lock in (_SRC.parent / "requirements").glob("runner*.lock")}
 
     assert sorted(shipped) == sorted(owned)
-    assert all(lock.is_symlink() and lock.resolve() == owned[name] for name, lock in shipped.items())
+    stale = [
+        name for name, lock in shipped.items() if lock.is_symlink() or lock.read_bytes() != owned[name].read_bytes()
+    ]
+    assert not stale, f"copy requirements/{{{','.join(stale)}}} over src/inference_suite/ as plain files"
 
 
 def test_lm_eval_is_refused_by_an_install_missing_the_runner_lock(pinned, install, monkeypatch, tmp_path, capsys):
