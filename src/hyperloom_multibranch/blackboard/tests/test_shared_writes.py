@@ -25,7 +25,10 @@ from hyperloom_multibranch.blackboard.learning_search import Retrieval, Retrieva
 from hyperloom_multibranch.blackboard.local.files import publish_once
 from hyperloom_multibranch.blackboard.local.segments import Entry, EntryKind, SegmentWriter
 from hyperloom_multibranch.blackboard.rsi.frontier import FrontierScoring
+from hyperloom_multibranch.blackboard.rsi.ladder import Trial, record_trial
 from hyperloom_multibranch.blackboard.rsi.menu import DirectionMenu, MenuLog
+from hyperloom_multibranch.blackboard.rsi.outcomes import OutcomePool, SpecialistOutcomes
+from hyperloom_multibranch.blackboard.rsi.playbook import PlaybookPool, Retired
 
 WRITER = "a.h.1.0000"
 
@@ -65,8 +68,14 @@ def _segment(directory: Path) -> Path:
     return writer.path
 
 
-#: What stays owner-only outside shared storage (relative to the writers' root): a published file and a segment.
-_OWNER_ONLY_ELSEWHERE = (Path("claims") / "a.json", Path("segments") / f"{WRITER}.jsonl")
+#: What stays owner-only outside shared storage (relative to the writers' root): the published files and a segment.
+_OWNER_ONLY_ELSEWHERE = (
+    Path("claims") / "a.json",
+    Path("outcomes") / "s1.json",
+    Path("playbooks") / "retired" / "p1.json",
+    Path("playbooks") / "trials" / "s1.json",
+    Path("segments") / f"{WRITER}.jsonl",
+)
 
 
 def _every_writer(root: Path, snapshot: BlackboardSnapshot) -> dict[Path, int]:
@@ -79,6 +88,10 @@ def _every_writer(root: Path, snapshot: BlackboardSnapshot) -> dict[Path, int]:
     )
     MenuLog(root / "menus" / "menus.jsonl").record(DirectionMenu("s1", "c1", 0.0, control=False))
     FrontierScoring._append(root / "frontier" / "frontier.jsonl", b"{}\n")
+    OutcomePool(root / "outcomes").record(SpecialistOutcomes("s1"))
+    playbooks = PlaybookPool(root)
+    playbooks.retire(Retired("p1", 1.0, "e"))
+    record_trial(playbooks, Trial("s1", "p1", "h0"))
     return {
         root / "segments": 0o2775,
         segment: 0o664,
@@ -90,6 +103,13 @@ def _every_writer(root: Path, snapshot: BlackboardSnapshot) -> dict[Path, int]:
         root / "menus" / "menus.jsonl": 0o664,
         root / "frontier": 0o2775,
         root / "frontier" / "frontier.jsonl": 0o664,
+        root / "outcomes": 0o2775,
+        root / "outcomes" / "s1.json": 0o644,
+        root / "playbooks": 0o2775,
+        root / "playbooks" / "retired": 0o2775,
+        root / "playbooks" / "retired" / "p1.json": 0o644,
+        root / "playbooks" / "trials": 0o2775,
+        root / "playbooks" / "trials" / "s1.json": 0o644,
     }
 
 
