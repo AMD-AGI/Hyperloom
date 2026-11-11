@@ -20,6 +20,7 @@ import inference_suite
 from hyperloom_common.shared_storage import current_umask
 from inference_suite import cli, staging
 from inference_suite.contracts import FailedStep
+from inference_suite.contracts.normalised import canonical_name
 from inference_suite.pins import (
     INFERENCEX_CLIENT_COMMIT,
     INFERENCEX_TOOL,
@@ -508,7 +509,7 @@ site = Path(__file__).resolve().parents[1]
 with open(site / "pip.calls", "a") as calls:
     calls.write(" ".join(sys.argv[1:]) + "\\n")
 requirement = sys.argv[sys.argv.index("--requirement") + 1] if "--requirement" in sys.argv else None
-if requirement and Path(requirement).read_text().split()[0] == "{LM_EVAL_REQUIREMENT}":
+if requirement and "{canonical_name(LM_EVAL_DISTRIBUTION)}=={LM_EVAL_VERSION}" in Path(requirement).read_text().split():
     for old in site.glob("{LM_EVAL_DISTRIBUTION}-*.dist-info"):
         shutil.rmtree(old)
     dist = site / "{LM_EVAL_DISTRIBUTION}-{LM_EVAL_VERSION}.dist-info"
@@ -590,7 +591,7 @@ def test_install_puts_the_pinned_lm_eval_beside_an_intact_cache_without_fetching
     assert done.returncode == 0, done.stderr
     assert "FETCHED" not in done.stdout and "WARN" not in done.stdout
     assert f"manifest sha256 {digest}" in done.stdout
-    assert f"--require-hashes --constraint {staging.runner_lock()} --requirement" in (site / "pip.calls").read_text()
+    assert f"--require-hashes --requirement {staging.runner_lock()}" in (site / "pip.calls").read_text()
     assert (site / f"{LM_EVAL_DISTRIBUTION}-{LM_EVAL_VERSION}.dist-info").is_dir()
 
 
