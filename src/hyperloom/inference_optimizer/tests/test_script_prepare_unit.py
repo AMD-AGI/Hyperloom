@@ -58,6 +58,18 @@ def test_a_fixed_limit_and_a_calibrated_one_are_different_shapes(tmp_path):
     assert sw._tolerance(calibrated) == {"autocast": "bfloat16", "headroom": 1.15, "floor": 1e-4}
 
 
+def test_the_summary_names_the_units_of_the_limits(tmp_path):
+    report = {"calls": 2, "rel_l2_limits": [0.01, 0.01]}
+    assert sw._recorded_summary(report, _args(tmp_path)) == "Recorded 2 calls; error limits [0.01, 0.01] (relative L2)"
+
+    scored = _args(tmp_path, scorer=tmp_path / "scorer.py")
+    assert sw._recorded_summary(report, scored).endswith("(in the units of scorer.py)")
+
+    calibrated = _args(tmp_path)
+    calibrated.error_limit, calibrated.calibrate_autocast = None, "float16"
+    assert sw._recorded_summary(report, calibrated).endswith("(relative L2, calibrated from float16 autocast)")
+
+
 def test_rel_l2_is_the_old_spelling_of_error_limit():
     """Kept so a command line written against the original flag still runs."""
     base = ["--workspace", "w", "--script", "s.py"]

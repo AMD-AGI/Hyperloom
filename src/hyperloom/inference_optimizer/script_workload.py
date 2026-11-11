@@ -128,6 +128,13 @@ def _discard_partial_workspace(workspace: Path) -> None:
         print(f"The script's output while recording is kept in {workspace}/record_stderr.log", file=sys.stderr)
 
 
+def _recorded_summary(report: dict, args: argparse.Namespace) -> str:
+    """The line printed once the references are recorded; it names the units, which a scorer changes."""
+    units = f"in the units of {args.scorer.name}" if args.scorer else "relative L2"
+    calibrated = f", calibrated from {args.calibrate_autocast} autocast" if args.calibrate_autocast else ""
+    return f"Recorded {report['calls']} calls; error limits {report['rel_l2_limits']} ({units}{calibrated})"
+
+
 def prepare(args: argparse.Namespace) -> Path:
     """Create the workspace and record the references; refuse to touch an existing one."""
     workspace = args.workspace.resolve()
@@ -146,7 +153,7 @@ def prepare(args: argparse.Namespace) -> Path:
     finally:
         if not prepared:
             _discard_partial_workspace(workspace)
-    print(f"Recorded {report['calls']} calls; rel-L2 limits {report['rel_l2_limits']}")
+    print(_recorded_summary(report, args))
     return workspace
 
 
