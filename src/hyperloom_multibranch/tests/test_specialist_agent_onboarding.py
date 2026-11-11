@@ -449,6 +449,20 @@ async def test_no_program_the_agent_writes_into_its_checkout_s_config_runs_as_th
     assert not ran.exists(), ran.read_text()
 
 
+async def test_a_copy_outside_shared_storage_keeps_the_modes_of_the_tree_it_copied(tmp_path: Path) -> None:
+    tmp_path.chmod(0o755)
+    tree = tmp_path / "vendored"
+    (tree / "pkg").mkdir(parents=True)
+    (tree / "pkg" / "run.py").write_text("x", encoding="utf-8")
+    (tree / "pkg").chmod(0o755)
+    (tree / "pkg" / "run.py").chmod(0o644)
+
+    await fetch_source(str(tree), tmp_path / "agent" / "copied")
+
+    assert _mode(tmp_path / "agent" / "copied" / "pkg") == 0o755
+    assert _mode(tmp_path / "agent" / "copied" / "pkg" / "run.py") == 0o644
+
+
 @pytest.mark.skipif(os.geteuid() != 0, reason="a checkout of another owner needs root to chown")
 async def test_a_checkout_another_account_of_the_group_made_is_read_with_no_program_of_its_config_run(
     tmp_path: Path,

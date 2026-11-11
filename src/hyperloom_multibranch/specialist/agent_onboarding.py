@@ -50,7 +50,7 @@ from time import monotonic
 from typing import Protocol
 
 from hyperloom.sandbox import SandboxError
-from hyperloom_common.shared_storage import child_umask, make_shared_dirs, write_shared_text
+from hyperloom_common.shared_storage import child_umask, make_shared_dirs, parent_is_shared, write_shared_text
 from hyperloom_multibranch.contracts.blackboard.records import OpShares
 from hyperloom_common.git_safety import NO_PROGRAMS
 from hyperloom_multibranch.repo.isolated_git import NO_LAZY_FETCH, blank_driver_programs, leading_options, trusting
@@ -403,7 +403,8 @@ async def _commit_tree(tree: Path, checkout: Path) -> None:
     lies in one, since that is the version of what was copied."""
 
     shutil.copytree(tree, checkout, ignore=shutil.ignore_patterns(GIT_DIR, "__pycache__"), dirs_exist_ok=True)
-    _share_copy(checkout)
+    if parent_is_shared(checkout):
+        _share_copy(checkout)
     enclosing = await _git([GIT, REV_PARSE, "HEAD"], tree)
     at = f" at {enclosing.output.strip()}" if enclosing.returncode == 0 else ""
     # Fixed identity and no signing: the host may have neither a git identity nor a signing key.
@@ -421,8 +422,9 @@ async def _commit_tree(tree: Path, checkout: Path) -> None:
 
 
 def _share_copy(checkout: Path) -> None:
-    """Give what :func:`_commit_tree` copied into ``checkout`` -- made just now by this process, with the modes of the
-    tree it copied -- group write, and its directories setgid, never through a link: the agent's sandbox writes it."""
+    """Give what :func:`_commit_tree` copied into ``checkout`` on shared storage -- made just now by this process, with
+    the modes of the tree it copied -- group write, and its directories setgid, never through a link: the agent's
+    sandbox, maybe another account of the group, writes it."""
 
     for directory, _, files in os.walk(checkout):
         _add_mode(directory, stat.S_IWGRP | stat.S_ISGID)
