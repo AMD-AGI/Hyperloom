@@ -3,8 +3,8 @@
 A rewrite's plan (the dossier skill's ``kernel-plan.md``) is a chain of stages
 per design, each with its own gate, because the campaign's A/B gate can judge
 nothing before the last one. Until now a plan's stage records lived in the
-agent's prose: an agent could write addendum after addendum while its plan's
-own stage table never moved past S1. Here the plan carries its items in a block the harness reads:
+agent's prose: one lane wrote addendum after addendum, and its plan's own stage
+table stopped at S1. Here the plan carries its items in a block the harness reads:
 
     ## Items
 
@@ -78,7 +78,7 @@ _STAGE_HEAD = re.compile(r"(?m)^[ \t>*_`#-]*STAGE[*_`]*[ \t]*:[*_`]*")
 
 # Intents from the most lenient to the strictest (arbor/measure/intents.py): a
 # stage is declared by its own intent or a stricter one.
-_RANK = {"LEARN": 0, "FIX-CORRECTNESS": 1, "FIX": 2, "WIN": 3}
+_RANK = {"LEARN": 0, "FIX-CORRECTNESS": 1, "FIX-STABILITY": 1, "FIX": 2, "WIN": 3}
 
 
 @dataclass(frozen=True)
@@ -704,21 +704,29 @@ def gate_text(spec: dict) -> str:
 
 
 def render_host_plan(doc: dict) -> str:
-    """A component-mode campaign's share of its host's directions (``component.plan``)."""
+    """A campaign's share of directions it did not map: its host's (``component.plan``), or its master's (a work
+    order, arbor/roles.py, whose lane has no plan file)."""
     lane = doc.get("lane") or {}
+    dealt = lane.get("kind") == "work-order"
+    if dealt:
+        title, giver = "The work order", "master"
+        given = f"Your master (order `{lane.get('run')}`) gave this worker these directions, and other workers"
+        then = "this worker reports to its master. There is no plan file: these directions are the whole order."
+    else:
+        title, giver = "The host's plan", "host"
+        given = f"Your host (`{lane.get('run', 'host')}`) gave this campaign these directions, and other campaigns"
+        then = "the campaign stops."
     dirs = doc.get("directions") or []
     n_closed = sum(1 for d in dirs if d.get("status") in CLOSED)
     lines = [
-        f"## The host's plan — {n_closed} of {len(dirs)} directions closed\n",
-        f"Your host (`{lane.get('run', 'host')}`) gave this campaign these directions, and other campaigns "
-        "work the rest of its map. Work these and nothing else: no dossier map of your own (a DIRECTIONS "
-        "line is refused); the dossier serves these directions. Lead your DONE line with the direction's "
-        "ID. Close one with `DIRECTION: {\"id\": …, \"status\": \"done|killed|below_floor\", \"why\": …, "
-        "\"evidence\": {\"iterations\": [N], \"ledger\": […]}}`: the harness checks the evidence once that "
-        "iteration has its verdict, and a done increment needs a KEEP whose DONE line cites it. Nothing "
-        "reopens. A direction worth working that is not here: propose it with DIRECTION (`kind` and "
-        "`title`); it goes to the host, not onto this map. When every direction is closed, the campaign "
-        "stops.\n",
+        f"## {title} — {n_closed} of {len(dirs)} directions closed\n",
+        given + " work the rest of its map. Work these and nothing else: no dossier map of your own (a DIRECTIONS "
+        "line is refused); the dossier serves these directions. Lead your DONE line with the direction's ID. Close "
+        "one with `DIRECTION: {\"id\": …, \"status\": \"done|killed|below_floor\", \"why\": …, \"evidence\": "
+        "{\"iterations\": [N], \"ledger\": […]}}`: the harness checks the evidence once that iteration has its "
+        "verdict, and a done increment needs a KEEP whose DONE line cites it. Nothing reopens. A direction worth "
+        f"working that is not here: propose it with DIRECTION (`kind` and `title`); it goes to the {giver}, not "
+        f"onto this map. When every direction is closed, {then}\n",
         "**Directions:**",
     ]
     for d in sorted(dirs, key=lambda d: (d.get("rank") is None, d.get("rank") or 0)):
@@ -732,7 +740,7 @@ def render_host_plan(doc: dict) -> str:
             line += f". {d['why']}"
         lines.append(line)
     if doc.get("proposals"):
-        lines.append("\nProposed to the host: " + ", ".join(f"`{p['id']}`" for p in doc["proposals"]))
+        lines.append(f"\nProposed to the {giver}: " + ", ".join(f"`{p['id']}`" for p in doc["proposals"]))
     rejected = [e for e in (doc.get("events") or [])
                 if not e.get("ok") and e.get("iteration") == doc.get("last_events")]
     if rejected:
@@ -741,10 +749,14 @@ def render_host_plan(doc: dict) -> str:
     return "\n".join(lines) + "\n"
 
 
+#: Lanes of directions handed to the campaign, with no plan file: a host's share, a master's work order.
+DIRECTION_LANES = ("host-plan", "work-order")
+
+
 def render(doc: dict, state=None, campaign=None) -> str:
     """The lane's section of the program: its items, the ready ones with their gates, and STAGE."""
     lane = doc.get("lane") or {}
-    if lane.get("kind") == "host-plan":
+    if lane.get("kind") in DIRECTION_LANES:
         return render_host_plan(doc)
     dirs = doc.get("directions") or []
     root = getattr(campaign, "session_root", None)

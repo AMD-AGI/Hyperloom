@@ -35,9 +35,9 @@ from arbor.profiling.trace import KernelTotals
 
 SCHEMA_VERSION = 2
 
-# Below this, a share is not reported. Chosen so that a profile leaving a sizable share of
-# prefill in `<rest>` and still being useful sits inside the band, while a table that names
-# only half the step does not.
+# Below this, a share is not reported. Chosen so that a profile leaving a sizable
+# share of prefill in `<rest>` and still being useful sits inside the band, while
+# a table that names only half the step does not.
 MIN_COVERAGE = 0.70
 
 

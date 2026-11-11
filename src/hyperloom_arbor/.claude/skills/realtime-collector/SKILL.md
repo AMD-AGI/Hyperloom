@@ -27,21 +27,23 @@ It writes `status.json` and `meta.json` to `<session>/collector/realtime/`, and
 pushes both to the share:
 
 ```text
-/path/to/arbor-share/projects/<project>/<user>/<campaign>/realtime/{status.json,meta.json}
+<share root>/projects/<project>/<user>/<campaign>/realtime/{status.json,meta.json}
 ```
+
+The share root is `ARBOR_SHARE_ROOT` on the host `ARBOR_SHARE_HOST` (Settings, below).
 
 It never samples a GPU node: a probe during a measured replay perturbs it. It
 never raises either: a section that fails is recorded in the snapshot's `errors`.
 
 ## Once per person: reach the share
 
-The share is `/path/to/arbor-share` on a host reached over ssh. When that host
-is a pod behind an ssh gateway, the gateway may take ssh commands, scp and
-sftp, but not rsync and not piped stdin. That is why an upload is one sftp
-batch (make the directories, put each file under a temporary name, rename it
-into place), so a reader never sees half a file. Such a gateway may also return
-exit status 0 for every command and put its stderr on stdout: in anything you
-script against it, print a marker or JSON and read that, never `$?`.
+The share is a directory on a host reached over ssh. When that host is a pod
+behind an ssh gateway, the gateway may take ssh commands, scp and sftp, but not
+rsync and not piped stdin. That is why an upload is one sftp batch (make the
+directories, put each file under a temporary name, rename it into place), so a
+reader never sees half a file. Such a gateway may also return exit status 0 for
+every command and put its stderr on stdout: in anything you script against it,
+print a marker or JSON and read that, never `$?`.
 
 1. Register your public key with the platform that hosts the share, and add
    the share host to `~/.ssh/config` on every host that will run a collector
@@ -51,7 +53,7 @@ script against it, print a marker or JSON and read that, never `$?`.
    Host arbor-share
        HostName <ssh gateway host>
        Port <gateway port>
-       User <your platform user id>.<pod name>
+       User <your user id on the gateway, with the pod and workspace it asks for>
        IdentityFile ~/.ssh/<the key you registered>
        IdentitiesOnly yes
        ServerAliveInterval 60
@@ -66,14 +68,17 @@ script against it, print a marker or JSON and read that, never `$?`.
    and, for the first that fails, says what to do.
 
 The share root and its `projects/` directory are made once, by a person, never
-by a collector: owned by root, the share's group (<gid>) with mode 1775, so every member
-of the group can add a project and no one can remove another person's:
+by a collector. Match the volume's own ownership: owner root, the group of
+everyone who runs campaigns, mode 1775, so every member of the group can add a
+project and no one can remove another person's:
 
 ```bash
-ssh arbor-share 'mkdir -p /path/to/arbor-share/projects && chgrp <gid> /path/to/arbor-share /path/to/arbor-share/projects && chmod 1775 /path/to/arbor-share /path/to/arbor-share/projects'
+ssh arbor-share 'mkdir -p <share root>/projects && chgrp <group> <share root> <share root>/projects && chmod 1775 <share root> <share root>/projects'
 ```
 
-Collectors push summaries, never traces.
+When the cluster mounts the same volume as the share host, a node can read the
+share at its root directly. Collectors still write through the share host. The
+collectors push summaries, never traces: shared volumes fill up.
 
 ## Names: project, user, campaign
 
@@ -141,7 +146,7 @@ the share could not be reached or written (the local copy is still written),
 ## Reading it
 
 - Every campaign, or one live: the `dashboard` skill.
-- By hand: `ssh arbor-share cat /path/to/arbor-share/projects/<project>/<user>/<campaign>/realtime/status.json`,
+- By hand: `ssh arbor-share cat <share root>/projects/<project>/<user>/<campaign>/realtime/status.json`,
   or read the path directly on a node that mounts the share.
 
 ## Settings
@@ -149,6 +154,6 @@ the share could not be reached or written (the local copy is still written),
 | Variable | Default | |
 | --- | --- | --- |
 | `ARBOR_SHARE_HOST` | `arbor-share` | ssh destination, an alias from `~/.ssh/config` |
-| `ARBOR_SHARE_ROOT` | `/path/to/arbor-share` | the share root on that host; a scratch root (under `/tmp`) for tests |
+| `ARBOR_SHARE_ROOT` | none: the site sets it, in the environment or `~/.arbor/settings.env` | the share root on that host; a scratch root (under `/tmp`) for tests |
 | `ARBOR_SHARE_SSH_OPTS` | none | extra options for both ssh and sftp; use `-F` and `-o` forms (`-o Port=<port>`), since ssh and sftp spell `-p` differently |
 | `ARBOR_PROJECT`, `ARBOR_USER` | none | the names above |

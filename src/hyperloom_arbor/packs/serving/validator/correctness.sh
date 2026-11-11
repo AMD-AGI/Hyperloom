@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # The serving template's correctness check: a smoke request, then GSM8K 5-shot on a fixed subset
-# through lm_eval against the running server. From the balanced pack's correctness.sh.
+# through lm_eval against the running server.
 #
 # Env: PORT, MODEL_PATH, MODEL_NAME, CORRECTNESS_OUTPUT (from Arbor).
 # From the config's server_env, optional:

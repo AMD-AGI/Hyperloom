@@ -1,13 +1,13 @@
 """The share: where collectors put campaign data for everyone to read.
 
-Layout under the share root (default /path/to/arbor-share, on the share's pod)::
+Layout under the share root (``ARBOR_SHARE_ROOT``, on a pod behind an ssh gateway)::
 
     projects/<project>/<user>/<campaign>/realtime/          status.json, meta.json
     projects/<project>/<user>/<campaign>/knowledge/<type>/  summary, outcomes, findings,
                                                             profiles, dossier, artifacts
 
-The pod is reached through an ssh gateway, which takes ssh
-commands, scp and sftp but not rsync and not piped stdin.
+The pod is reached through an ssh gateway, which takes ssh commands, scp and
+sftp but not rsync and not piped stdin.
 So an upload is one sftp batch: make the directories, put each file under a
 temporary name, rename it into place. sftp's rename replaces the target in one
 step, so a reader never sees half a file. The gateway also returns exit status
@@ -20,7 +20,8 @@ collectors only write below projects/.
 
 Settings, each with an environment fallback:
     ARBOR_SHARE_HOST      ssh destination, an alias from ~/.ssh/config (default arbor-share)
-    ARBOR_SHARE_ROOT      the share root on that host (default /path/to/arbor-share)
+    ARBOR_SHARE_ROOT      the share root on that host; no default: a site sets it, in the environment or in
+                          ~/.arbor/settings.env. Without one, the collectors write locally and push nothing
     ARBOR_SHARE_SSH_OPTS  extra options for both ssh and sftp; use -F and -o forms
                           (-o Port=2222), since ssh and sftp spell -p differently
 """
@@ -36,7 +37,6 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 DEFAULT_HOST = "arbor-share"
-DEFAULT_ROOT = "/path/to/arbor-share"
 BASE_OPTS = ["-o", "BatchMode=yes", "-o", "ConnectTimeout=20"]
 
 
@@ -47,7 +47,7 @@ def _env_opts() -> list[str]:
 @dataclass
 class Share:
     host: str = field(default_factory=lambda: os.environ.get("ARBOR_SHARE_HOST") or DEFAULT_HOST)
-    root: str = field(default_factory=lambda: os.environ.get("ARBOR_SHARE_ROOT") or DEFAULT_ROOT)
+    root: str = field(default_factory=lambda: os.environ.get("ARBOR_SHARE_ROOT") or "")
     opts: list[str] = field(default_factory=_env_opts)
     timeout: float = 180.0
 
@@ -97,6 +97,10 @@ class Share:
                 out["fix"] = fix
             return ok
 
+        if not step("root", bool(self.root), self.root or "no share root set",
+                    "set ARBOR_SHARE_ROOT, in the environment or in ~/.arbor/settings.env, to the share's root on "
+                    f"{self.host}; until then the collectors write locally and push nothing"):
+            return out
         projects = shlex.quote(self.projects)
         rc, so, se = self.ssh(f"echo __ARBOR_SHARE__; test -d {projects} && test -w {projects} "
                               f"&& echo WRITABLE")
@@ -110,9 +114,9 @@ class Share:
         if not step("share root", "WRITABLE" in so,
                     f"{self.projects} {'is writable' if 'WRITABLE' in so else 'is missing or not writable'}",
                     f"{self.projects} must exist and be writable. A person creates it once: "
-                    f"ssh {self.host} 'mkdir -p {self.projects} && chgrp <gid> {self.root} "
+                    f"ssh {self.host} 'mkdir -p {self.projects} && chgrp <group> {self.root} "
                     f"{self.projects} && chmod 1775 {self.root} {self.projects}' (the mode and "
-                    f"group of /shared itself)"):
+                    f"group of the share's parent directory)"):
             return out
 
         probe_local = Path(tempfile.mkstemp(prefix="arbor-share-probe-")[1])

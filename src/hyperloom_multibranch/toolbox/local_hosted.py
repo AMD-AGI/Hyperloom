@@ -27,6 +27,14 @@ The long-context check is on by default the same way: ``LocalOptions.long_contex
 the session model at the context the test's launch serves, staged here when acceptance first plans a test of that context
 and it is missing (``long_context.ServedLongContext``). It runs under the short-prompt check's triggers, on the test's own
 server.
+
+A test's server runs a branch's patches, so where bubblewrap can sandbox it, every sandbox runs confined
+(:mod:`hyperloom.sandbox.confined`): it writes its own tree and reads its toolchain, its own signing key and what
+:func:`runner_plan` names (the model, the Hugging Face hub cache and the trees its template's variables name), never the
+session's other files, another sandbox's key, the app's credentials or its processes. Where bubblewrap cannot, tests run
+as before, said once at WARNING; a hosted run refuses to build the toolbox. A model whose entry links into a credential
+location (``~/.ssh``, ``~/.claude``, a login file) runs each test as before, said at WARNING, and a hosted run refuses
+its tests: no mask would hide what that bind shows.
 """
 
 from __future__ import annotations
@@ -35,15 +43,17 @@ import asyncio
 import contextlib
 import logging
 import os
+import pwd
 import sys
 import tempfile
 import time
-from collections.abc import Callable, Iterable, Mapping, Sequence
+from collections.abc import Callable, Iterable, Iterator, Mapping, Sequence
 from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Final
 
-from hyperloom.common.outside_facts.rule_pack import rule_pack_identity
+from hyperloom.common.confinement import credential_paths
+from hyperloom.common.outside_facts.rule_pack import PACK_ENV, rule_pack_identity
 from hyperloom.measure.archive import ResultArchive
 from hyperloom.measure.hosted import FILES_ROOT, HostedConfig, HostedMeasurementBackend
 from hyperloom.measure.hosted_log import STATE_FINISHED
@@ -52,7 +62,15 @@ from hyperloom.measure.jit.key import build_surface
 from hyperloom.measure.jit.store import DirJitStore
 from hyperloom.measure.live_log import last_output
 from hyperloom.measure.local import SUPPORTED_KINDS
-from hyperloom.measure.framework.base import SESSION_SNAPSHOT_DIR, framework_envs, image_configs
+from hyperloom.measure.framework.base import (
+    SESSION_SNAPSHOT_DIR,
+    SNAPSHOT_ENV,
+    FrameworkBaseError,
+    framework_envs,
+    image_configs,
+    load_snapshot,
+)
+from hyperloom.measure.jit.native.config import BUILD_STORE_ENV, BUILD_TRUST_ENV
 from hyperloom.measure.local_templates import image_env, local_runner_template
 from hyperloom.measure.rule_pack_stage import rule_pack_envs
 from hyperloom.measure.runner.jit import JIT_CACHE_ENV
@@ -68,7 +86,7 @@ from hyperloom.sandbox.card_occupancy import (
 )
 from hyperloom.sandbox.gated_pool import GatedPool
 from hyperloom.sandbox.gpu_pool import GpuPool
-from hyperloom.sandbox.local import LocalSandboxProvider
+from hyperloom.sandbox.local import LocalSandboxProvider, ProcessUsers, RunnerPlan
 from hyperloom.sandbox.templates import LocalTemplate
 from hyperloom_common.fs_utils import is_private_dir
 from hyperloom_multibranch.blackboard import LocalBlackboard
@@ -112,7 +130,9 @@ __all__ = [
     "MAX_CARDS_PER_NODE",
     "build_local_toolbox",
     "host_tool_repos",
+    "hub_cache",
     "private_jit_store",
+    "runner_plan",
 ]
 
 #: One node serves at most eight cards, so at most ``8 / TP`` tests run at once.
@@ -125,11 +145,30 @@ DEFAULT_JIT_STORE = "hyperloom-jit-store"
 #: The variables that name where a runner clones the tools its tests run (InferenceX, Magpie) from. A local runner starts
 #: from an emptied environment, so :func:`host_tool_repos` carries them from this host's.
 HOST_TOOL_REPO_ENVS: Final = ("INFERENCEX_REPO", "MAGPIE_REPO")
+#: The runner template's variables naming what a confined runner reads: the framework snapshot, the staged rule pack,
+#: the compiled-code store, the runner cache (the check sets), the native build store and its trust file, and a local
+#: InferenceX or Magpie repository.
+RUNNER_READS: Final = (
+    SNAPSHOT_ENV,
+    PACK_ENV,
+    JIT_CACHE_ENV,
+    RUNNER_CACHE_ENV,
+    BUILD_STORE_ENV,
+    BUILD_TRUST_ENV,
+    *HOST_TOOL_REPO_ENVS,
+)
+_FILE_URL = "file://"
+_HUB = "hub"
+_HUGGINGFACE = "huggingface"
+#: A Hugging Face hub repository's directory starts so; its snapshots' files, nested ones too, link into its ``blobs``.
+_HUB_REPOS = ("models--", "datasets--", "spaces--")
+_BLOBS = "blobs"
 _SANDBOXES = "sandboxes"
 _BRANCH_SANDBOXES = "branch-sandboxes"
 _RULE_PACK = "rule-pack"
 _POLL_INTERVAL_SEC = 2.0
 LEAKED_CARDS_REASON = "sandbox processes not provably gone"
+FREED_CARDS_REASON = "nothing of the sandbox that held them runs any more"
 #: A running test's files below its sandbox's directory: a local sandbox's root is its ``fs`` directory.
 _LIVE_FILES = Path("fs") / FILES_ROOT.lstrip("/")
 logger = logging.getLogger(__name__)
@@ -139,8 +178,9 @@ class LocalHostedToolbox(LeasedToolbox):
     """A :class:`RealToolbox` that also owns its hosted backend and local sandbox provider; ``close`` releases them.
 
     ``sandboxes`` is the provider's directory, where a running test's live files are read for :meth:`progress`. The
-    cards tests can run on are the provider's pool less the cards it lost for good (``provider.quarantined``) and the
-    leases; node quarantine does not reduce them.
+    cards tests can run on are the provider's pool less the cards it lost (``provider.quarantined``) and the leases;
+    node quarantine does not reduce them. A card lost by a sandbox of this process comes back once nothing of that
+    sandbox runs; one an earlier process lost stays lost.
     """
 
     backend: HostedMeasurementBackend
@@ -187,12 +227,14 @@ class LocalHostedToolbox(LeasedToolbox):
         return frozenset(self.provider.quarantined)
 
     async def _housekeeping(self) -> None:
-        """Tell the blackboard about cards the provider lost since last time: one event for all the new ones.
+        """Take back the cards the provider freed, then tell the blackboard about cards it lost since last time: one
+        event for all the new ones.
 
         The provider only grows a plain set; this polls it after each settled test and on every tick, so the sandbox
         layer knows nothing of the blackboard. A refused write is retried at the next poll.
         """
 
+        await self._take_back_freed_cards()
         new = self._leaked() - self._reported_cards
         if not new:
             return
@@ -202,6 +244,31 @@ class LocalHostedToolbox(LeasedToolbox):
             logger.warning("could not record leaked cards in the blackboard", exc_info=True)
             return
         self._reported_cards |= new
+
+    async def _take_back_freed_cards(self) -> None:
+        """Put back in the pool the cards of ended sandboxes nothing of which runs any more
+        (:meth:`~hyperloom.sandbox.local.LocalSandboxProvider.release_freed_cards`), lift their record in the blackboard
+        and start the tests they let run.
+
+        A refused lift is not retried: the blackboard keeps the cards recorded as lost, which is read back only by a
+        restart into this session, and keeps them out of the pool there.
+        """
+
+        freed = frozenset(await asyncio.to_thread(self.provider.release_freed_cards))
+        if not freed:
+            return
+        logger.info("cards %s are back in the pool: %s", sorted(freed), FREED_CARDS_REASON)
+        recorded = freed & self._reported_cards
+        if recorded:
+            try:
+                await self._quarantine.return_cards(self.provider.hostname, recorded, FREED_CARDS_REASON)
+            except (BlackboardError, OSError):  # refused or not reached: the cards stay recorded lost
+                logger.warning(
+                    "could not record in the blackboard that cards %s are back", sorted(recorded), exc_info=True
+                )
+            else:
+                self._reported_cards -= recorded
+        self._pump_soon()
 
     async def close(self) -> None:
         await super().close()
@@ -386,6 +453,163 @@ def host_tool_repos(environ: Mapping[str, str] | None = None) -> dict[str, str]:
     return {name: source[name] for name in HOST_TOOL_REPO_ENVS if source.get(name, "").strip()}
 
 
+def hub_cache(environ: Mapping[str, str] | None = None) -> Path | None:
+    """This host's Hugging Face hub cache, where a model's snapshot links point: ``HF_HUB_CACHE``, else ``hub`` below
+    ``HF_HOME``, ``$XDG_CACHE_HOME/huggingface`` or ``~/.cache/huggingface``; ``None`` when that is not a directory.
+    Never the login files beside it."""
+    source = os.environ if environ is None else environ
+    if source.get("HF_HUB_CACHE"):
+        hub = Path(source["HF_HUB_CACHE"])
+    elif source.get("HF_HOME"):
+        hub = Path(source["HF_HOME"], _HUB)
+    elif source.get("XDG_CACHE_HOME"):
+        hub = Path(source["XDG_CACHE_HOME"], _HUGGINGFACE, _HUB)
+    elif source.get("HOME"):
+        hub = Path(source["HOME"], ".cache", _HUGGINGFACE, _HUB)
+    else:
+        return None
+    return hub if hub.is_absolute() and hub.is_dir() else None
+
+
+def _named_path(value: str) -> Path | None:
+    """The local path a variable's value names (an absolute path, or a ``file://`` URL); ``None`` for anything else."""
+    path = value.removeprefix(_FILE_URL) if value.startswith(_FILE_URL) else value
+    return Path(path) if os.path.isabs(path) else None
+
+
+def _real(path: str | os.PathLike[str]) -> Path:
+    return Path(os.path.realpath(path))
+
+
+def _at_or_below(path: Path, tree: Path) -> bool:
+    return path == tree or tree in path.parents
+
+
+def _passwd_home() -> Path | None:
+    try:
+        return Path(pwd.getpwuid(os.geteuid()).pw_dir)
+    except KeyError:
+        return None
+
+
+@dataclass(frozen=True)
+class _LinkRule:
+    """Where a model entry's link may lead (all paths resolved): never to or below one of the credential
+    ``locations``, except below one of the ``homes`` outside its hidden entries, unless a tree the plan reads whole
+    anyway (``bound``) holds the link's target and is itself in that credential location."""
+
+    homes: tuple[Path, ...]
+    locations: tuple[Path, ...]
+    bound: tuple[Path, ...]
+
+    def refusal(self, entry: Path, tree: Path) -> str | None:
+        """Why ``entry``'s bind of ``tree`` would show credentials no mask hides (masks open a credential location up
+        around a bound path, so nothing in that path is masked); ``None`` when it would not: ``tree`` is in no
+        credential location (below a home it may be, outside the hidden entries, ``~/.ssh``, ``~/.config``,
+        ``~/.netrc``, where tools keep their logins by name), or each one it is in holds a tree the plan reads whole
+        that holds ``tree`` too, whose masks are opened up around it already. A tree the plan reads whole above the
+        location (a hub cache that is a home's parent) is no excuse: its masks hide the location, and the link's bind
+        would open them up."""
+        for where, location in self._credentials(tree):
+            if not any(_at_or_below(tree, bound) and _at_or_below(bound, location) for bound in self.bound):
+                return f"{entry} links to {tree}, {where}, which its bind would show unmasked"
+        return None
+
+    def _credentials(self, tree: Path) -> Iterator[tuple[str, Path]]:
+        """Each credential location ``tree`` is at or below, said, with the location: one of ``locations``, or a
+        hidden entry of one of ``homes``."""
+        for location in dict.fromkeys((*self.locations, *self.homes)):
+            if tree == location:
+                yield "a credential location", location
+            elif location in tree.parents:
+                hidden = location / tree.relative_to(location).parts[0]
+                if location not in self.homes:
+                    yield f"below the credential location {location}", location
+                elif hidden.name.startswith("."):
+                    yield f"in {hidden}, a hidden entry of a home where tools keep their logins", hidden
+
+
+def _link_rule(model_dir: Path, hub: Path | None, envs: Mapping[str, str]) -> _LinkRule:
+    """The rule for the links of the model at ``model_dir``: the homes of the app (this process's environment, the one
+    place the masks read it from, and its passwd entry) and of the runner (``envs``), every credential location of
+    either (:func:`~hyperloom.common.confinement.credential_paths` with nothing allowed names each, whole), and the
+    model's directory and the hub cache ``hub``, which the plan reads whole."""
+    homes = (os.environ.get("HOME"), envs.get("HOME"), _passwd_home())
+    return _LinkRule(
+        homes=tuple(dict.fromkeys(_real(home) for home in homes if home and os.path.isabs(home))),
+        locations=credential_paths(envs),
+        bound=tuple(_real(tree) for tree in (model_dir, hub) if tree is not None),
+    )
+
+
+def _model_trees(model_dir: Path, rule: _LinkRule) -> tuple[tuple[Path, ...], tuple[str, ...]]:
+    """The model's directory and what its entries link to, and why a link of it cannot be bound safely. Each link
+    binds its target itself, never the directory it is in (a link to a file in the home would show the whole home),
+    except a hub snapshot's links, whose repository's ``blobs`` is bound whole, so that the snapshot's nested links
+    resolve too. A link whose bind ``rule`` refuses (one into a credential location: ``~/.ssh``, ``~/.claude``, a
+    login file) binds nothing; the reason is kept instead, and a sandbox of the plan runs as before, said at WARNING,
+    or is refused in a hosted run."""
+    linked, refused = [], []
+    with contextlib.suppress(OSError):
+        for entry in model_dir.iterdir():
+            if not entry.is_symlink():
+                continue
+            tree = _linked_tree(_real(entry))
+            why = rule.refusal(entry, tree)
+            if why is None:
+                linked.append(tree)
+            else:
+                refused.append(why)
+    return (model_dir, *dict.fromkeys(linked)), tuple(refused)
+
+
+def _linked_tree(target: Path) -> Path:
+    """What a model entry linking to ``target`` (resolved) binds: the hub repository's ``blobs`` directory for a
+    blob, else ``target``."""
+    blobs = target.parent
+    return blobs if blobs.name == _BLOBS and blobs.parent.name.startswith(_HUB_REPOS) else target
+
+
+def runner_plan(
+    session_dir: Path,
+    model_dir: Path | None,
+    envs: Mapping[str, str],
+    python: str,
+) -> RunnerPlan:
+    """What a confined runner of the session at ``session_dir`` reads besides its toolchain (its launcher's
+    interpreter's, this process's), its own tree and its key: the interpreter ``python`` its template starts it with,
+    the trees its template's variables ``envs`` name (:data:`RUNNER_READS`; a repository named by URL names none), the
+    session's model and what its entries link to (:func:`_model_trees`), and this host's Hugging Face hub cache
+    (:func:`hub_cache` of this process's environment), and the shared tuned tables the framework snapshot
+    was taken from (:func:`_snapshot_source`), which each test hashes to show it changed none of them, read-only as
+    every other tree here. No bind may show the session's directory whole: it
+    holds the blackboard, every sandbox and key, and the leases. A model link into a credential location is refused
+    (:attr:`~hyperloom.sandbox.local.RunnerPlan.refused`), so no test sandbox of the plan runs confined with it."""
+    named = [_named_path(envs.get(name, "")) for name in RUNNER_READS]
+    hub = hub_cache()
+    model: tuple[Path, ...] = ()
+    refused: tuple[str, ...] = ()
+    if model_dir is not None:
+        model, refused = _model_trees(model_dir, _link_rule(model_dir, hub, envs))
+    found = (_named_path(python), *named, *_snapshot_source(envs), *model, hub)
+    return RunnerPlan(
+        readable=tuple(dict.fromkeys(path for path in found if path is not None)),
+        app_only=(Path(session_dir),),
+        refused=refused,
+    )
+
+
+def _snapshot_source(envs: Mapping[str, str]) -> tuple[Path, ...]:
+    """The directory of shared tuned tables the framework snapshot ``envs`` names was taken from; none without one."""
+    directory = envs.get(SNAPSHOT_ENV, "")
+    if not directory:
+        return ()
+    try:
+        return (load_snapshot(Path(directory)).source,)
+    except FrameworkBaseError:
+        return ()  # no snapshot was taken: each test says so in its result
+
+
 def _runner_template(session: LocalSession, options: LocalOptions) -> LocalTemplate:
     """The runner template: the image's variables, the host's tool repositories (:func:`host_tool_repos`), ``runner_envs``
     over both, and the variable that names the session's rule pack. ``runner_envs`` add to the image's variables, never
@@ -408,21 +632,37 @@ def _shared_dirs(jit_store: Path | None, eval_sets: bool, environ: Mapping[str, 
     return {name: str(path) for name, path in named.items() if path is not None}
 
 
+def _measured_template(
+    session: LocalSession, template: LocalTemplate, options: LocalOptions, shared_dirs: Mapping[str, str]
+) -> LocalTemplate:
+    """The runner template that also carries the session's framework tables, the card guard and the directories of the
+    shared stores that are on: none is part of the environment the branches' own sandboxes get."""
+    framework = framework_envs(Path(session.session_dir) / SESSION_SNAPSHOT_DIR, options.framework_configs)
+    guard = {CARD_GUARD_ENV: card_guard_of(options).value}
+    return replace(template, envs={**template.envs, **framework, **shared_dirs, **guard})
+
+
 def _provider(
     session: LocalSession,
     cards: tuple[int, ...],
     template: LocalTemplate,
     options: LocalOptions,
-    shared_dirs: Mapping[str, str],
+    model_dir: Path | None,
 ) -> LocalSandboxProvider:
-    """The provider whose runner template also carries the session's framework tables, the card guard and the directories
-    of the shared stores that are on: none is part of the environment the branches' own sandboxes get. Its cards are
-    handed out, to a test's sandbox and to a lease alike, under the same guard."""
-    framework = framework_envs(Path(session.session_dir) / SESSION_SNAPSHOT_DIR, options.framework_configs)
-    guard = {CARD_GUARD_ENV: card_guard_of(options).value}
-    template = replace(template, envs={**template.envs, **framework, **shared_dirs, **guard})
+    """The provider of the runner ``template`` (:func:`_measured_template`). Its cards are handed out, to a test's
+    sandbox and to a lease alike, under the same guard. Its sandboxes are confined by the runner's plan
+    (:func:`runner_plan`) where bubblewrap can sandbox a test.
+
+    Raises:
+        IsolationRefused: In a hosted run, where bubblewrap cannot sandbox a test.
+    """
+    plan = runner_plan(Path(session.session_dir), model_dir, template.envs, options.python)
     provider = LocalSandboxProvider(
-        [template], gpus=cards, base_dir=Path(session.session_dir) / _SANDBOXES, hostname=session.hostname
+        [template],
+        gpus=cards,
+        base_dir=Path(session.session_dir) / _SANDBOXES,
+        hostname=session.hostname,
+        users=ProcessUsers(plan=plan),
     )
     provider.pool = GatedPool(cards, card_guard_of(options), read=options.card_holders)
     return provider
@@ -491,6 +731,7 @@ def build_local_toolbox(
             set is not staged in this host's runner cache; nothing has been started.
         LongContextNotStaged: The same for the long-context check (the option or ``HYPERLOOM_LONG_CONTEXT``).
         ValueError: The options and the acceptance setup name different short-prompt or long-context sets.
+        IsolationRefused: In a hosted run, where bubblewrap cannot sandbox a test; nothing has been started.
     """
 
     directory, cards, tp = Path(session.session_dir), tuple(session.cards), session.tp
@@ -514,7 +755,8 @@ def build_local_toolbox(
     eval_sets = acceptance.short_prompts is not None or acceptance.long_context is not None
     shared_dirs = {**_shared_dirs(jit_root, eval_sets, os.environ), **(native.runner_envs if native else {})}
     acceptance = replace(acceptance, aiter_builds_missing=aiter_builds_missing({**template.envs, **shared_dirs}))
-    provider = _provider(session, cards, template, options, shared_dirs)
+    measured = _measured_template(session, template, options, shared_dirs)
+    provider = _provider(session, cards, measured, options, spec.model_dir)
     backend = started_backend(provider, config)
     leases = BranchLeases(provider, directory / _BRANCH_SANDBOXES, tp, template.envs, CardDrain(options.card_memory))
     executor = HostedExecutor(
