@@ -463,7 +463,7 @@ def test_the_reference_pack_over_an_image_that_holds_every_fact_it_can_confirm(t
         name for name, entry in pack.entries.items() if entry.image_checks
     ]
     assert all(held[name] is Status.UNVERIFIABLE for name, entry in pack.entries.items() if not entry.image_checks)
-    assert report.counts() == {"pass": 11, "fail": 0, "unverifiable": 32}
+    assert report.counts() == {"pass": 11, "fail": 0, "unverifiable": 34}
     assert report.pack == {"version": pack.version, "digest": pack.digest}
 
 
@@ -483,7 +483,7 @@ def test_an_aiter_that_no_longer_holds_the_merge_directory_literal_fails_that_fa
         "mode": "warn",
         "pack_digest": report.pack["digest"],
         "pass": 10,
-        "unverifiable": 32,
+        "unverifiable": 34,
         "fail": ["aiter_merged_view"],
     }
 
@@ -494,12 +494,12 @@ def test_the_report_is_json_for_close_and_lines_for_people_and_is_written_whole(
 
     document = json.loads(json.dumps(report.to_json()))
     assert document["mode"] == "warn"
-    assert document["counts"] == {"pass": 10, "fail": 1, "unverifiable": 32}
+    assert document["counts"] == {"pass": 10, "fail": 1, "unverifiable": 34}
     assert document["environment"]["python_version"].count(".") == 2
     assert document["environment"]["packages"]["vllm"] == {"installed": True, "version": None}
     assert {fact["fact"] for fact in document["facts"]} == set(pack.entries)
     lines = report.markdown_lines()
-    assert lines[0].startswith(f"Image check (warn) of rule pack {pack.version}: 10 pass, 1 fail, 32 unverifiable")
+    assert lines[0].startswith(f"Image check (warn) of rule pack {pack.version}: 10 pass, 1 fail, 34 unverifiable")
     assert lines[1] == "- FAIL aiter_merged_view (aiter)"
     assert lines[-1].startswith("- Unverifiable here: python_import_errors, ")
     target = tmp_path / "attached" / "image_check.json"
@@ -610,7 +610,7 @@ def test_the_command_line_prints_the_report_and_exits_one_when_a_fact_fails(
     pack = load_pack(DEFAULT_PACK_PATH)
     assert main([], pack=pack, image=_reference_image(tmp_path, _OLD_AITER)) == 0
     assert capsys.readouterr().out.startswith(
-        f"Image check (strict) of rule pack {pack.version}: 11 pass, 0 fail, 32 unverifiable"
+        f"Image check (strict) of rule pack {pack.version}: 11 pass, 0 fail, 34 unverifiable"
     )
 
     other = tmp_path / "other"
@@ -631,7 +631,7 @@ def test_the_command_line_always_checks_whatever_the_session_input_says(
     pack = load_pack(DEFAULT_PACK_PATH)
     assert main([], pack=pack, image=_reference_image(tmp_path, _NEW_AITER)) == 1
     assert capsys.readouterr().out.startswith(
-        f"Image check (strict) of rule pack {pack.version}: 10 pass, 1 fail, 32 unverifiable\n- FAIL aiter_merged_view"
+        f"Image check (strict) of rule pack {pack.version}: 10 pass, 1 fail, 34 unverifiable\n- FAIL aiter_merged_view"
     )
 
 
