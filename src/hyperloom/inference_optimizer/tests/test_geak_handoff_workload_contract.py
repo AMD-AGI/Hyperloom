@@ -14,6 +14,7 @@ import pytest
 import yaml
 
 from hyperloom.orchestrator.actions.executors._server_lifecycle import GpuHandoff
+from hyperloom.orchestrator.actions.executors._workload_envs import geak_grading_fields
 from hyperloom.orchestrator.loop.coordinator import Coordinator
 from hyperloom.orchestrator.state.shared_state import SharedState
 
@@ -242,6 +243,27 @@ async def test_native_handoff_keeps_supported_schema_and_seeds_geaks_own_launche
 
 
 @pytest.mark.asyncio
+async def test_an_agentx_handoff_declares_the_trace_the_accepted_round_replayed(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    coord = _coord(tmp_path)
+    artifacts = tmp_path / "accepted_run" / "client" / "aiperf_artifacts"
+    artifacts.mkdir(parents=True)
+    dataset = {"loader": "semianalysis_cc_traces_weka_062126", "num_dataset_entries": 393}
+    (artifacts / "profile_export_aiperf.json").write_text(json.dumps({"metadata": {"dataset": dataset}}))
+
+    spec = (await _handoff(coord, monkeypatch))["workload_spec"]
+
+    assert (spec["kind"], spec["corpus"], spec["canonical_corpus"]) == (
+        "agentx_trace_replay",
+        "semianalysis_cc_traces_weka_062126",
+        "semianalysis_cc_traces_weka_062126",
+    )
+    assert (spec["num_entries"], spec["canonical_num_entries"], spec["concurrency"]) == (393, 393, 6)
+    assert spec["metric_basis"] == geak_grading_fields(None)["metric_basis"]
+
+
+@pytest.mark.asyncio
 async def test_native_handoff_reproduces_the_measured_launch_json_without_searching_server_logs(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -315,7 +337,7 @@ async def test_agentx_geak_metric_aligned_result_is_only_a_proposal_proxy(
     handoff = json.loads((tmp_path / "geak" / "handoff.json").read_text(encoding="utf-8"))
     [captured_env] = launches
     assert (handoff["e2e_metric"], captured_env["E2E_METRIC"]) == (expected_metric, expected_metric)
-    assert handoff["workload_spec"] == {"kind": "agentx_trace_replay"}
+    assert handoff["workload_spec"] == {"kind": "agentx_trace_replay", "concurrency": 6, **geak_grading_fields(None)}
     assert "INFERENCEX_BENCH_SERVING" not in captured_env
     assert handoff["same_config_reference_status"] == "unverified"
     assert handoff["same_config_reference_verification_status"] == "unverified_workload"

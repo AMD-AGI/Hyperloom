@@ -6,7 +6,8 @@
 The roster says what is running now; the history of the branch tree is the blackboard's lineage, which the roster does
 not copy. The branch cap counts specialist branches that are admitted or running, never the integration branch.
 ``MB-roster.json`` is written after every change and read back when a roster is built over a session directory that
-already has one, so the emergency ``final-only`` run carries the dead session's branches instead of writing them away.
+already has one, so the emergency ``final-only`` run and a resumed session carry the earlier run's branches instead of
+writing them away.
 """
 
 from __future__ import annotations
@@ -253,6 +254,18 @@ class Roster:
 
         self._closed = True
         self._persist()
+
+    def reopen(self) -> bool:
+        """Open again what :meth:`close` and the stop of the integration branch closed, for a resumed session: branches
+        may be opened and admitted, and the integration branch runs. Every specialist branch stays stopped. Whether the
+        integration branch was stopped."""
+
+        self._closed = False
+        integration = self._entries[INTEGRATION_BRANCH]
+        if integration.stop is not None:
+            self._update(integration, stop=None)
+        self._persist()
+        return integration.stop is not None
 
     def add_integration(self, root_commit: str, k: int) -> BranchEntry:
         entry = BranchEntry(

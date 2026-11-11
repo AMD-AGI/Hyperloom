@@ -92,7 +92,7 @@ from hyperloom.measure.runner.tools import (
     ensure_inferencex,
 )
 from hyperloom.measure.socket import RoundPlan, SessionFacts, TestCall
-from hyperloom.measure.spec import SPEC_SCHEMA, SPEC_SCHEMA_V1, MeasurementSpec, fingerprint, spec_sha256
+from hyperloom.measure.spec import SPEC_SCHEMA, MeasurementSpec, fingerprint, spec_sha256
 from hyperloom.measure.surface import extract_surface
 from hyperloom.orchestrator.actions.cancel_channel import CancelScope
 from hyperloom.orchestrator.actions.executors import TOOL_CACHE_ENV, harvest_leaked_artifacts
@@ -205,14 +205,6 @@ def _check_model(yaml_text: str, hashes: dict[str, str]) -> None:
 
 
 _SERVING = frozenset(item.value for item in Framework if framework_facts(item).kind is FrameworkKind.SERVING)
-
-
-def _check_measurable(spec: MeasurementSpec) -> None:
-    """A v1 sheet still parses, for the archive, but names a Magpie run, which no runner executes any more."""
-    if spec.schema == SPEC_SCHEMA_V1:
-        raise RunnerFailure(
-            _SPEC_REJECTED, f"a {SPEC_SCHEMA_V1} sheet is measured through Magpie; this runner measures {SPEC_SCHEMA}"
-        )
 
 
 def _check_runs_on_inference_suite(spec: MeasurementSpec) -> None:
@@ -613,7 +605,6 @@ def _run_sheet(ctx: _Context, spec_path: Path, key, progress: Progress) -> None:
     received = time.time()
     ctx.phases.begin(PREFLIGHT, at=received)
     spec = _parse(raw)
-    _check_measurable(spec)
     visible = _visible(ctx.environ)
     _check_model(spec.config[0].yaml, dict(spec.model_hashes))
     _check_runs_on_inference_suite(spec)

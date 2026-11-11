@@ -91,9 +91,9 @@ __all__ = ["final"]
 
 NOW = 1_800_000_000.0
 CLOCK = Clock(now=lambda: NOW)
-#: How the session's agents were isolated, as its manifest recorded.
 #: Why the agent sandboxes ran unconfined, as the record says it.
 UNCONFINED = "bubblewrap: not found"
+#: How the session's agents were isolated, as its manifest recorded.
 ISOLATION = LaunchIsolation("account", "none", "bwrap", True, (UNCONFINED,))
 HARD_STOP = NOW + 60.0
 #: Real seconds the clock in these tests lets the exports run before the hard stop passes.

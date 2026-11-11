@@ -117,7 +117,6 @@ def verify_args(bundle: Bundle) -> BundleExpectation:
         spec_fingerprint=SPEC_FINGERPRINT,
         spec_sha256=SPEC_SHA256,
         sandbox_id=SANDBOX_ID,
-        result_schema=RESULT_SCHEMA,
     )
 
 
@@ -203,23 +202,12 @@ def base_launch() -> BaseLaunch:
 
 
 def spec_document() -> dict[str, Any]:
-    """A v2 sheet: the frozen base carried whole and the inference_suite staging as its normalised manifest."""
-    document = spec_document_v1()
-    document["schema"] = "hyperloom.measurement-spec/v2"
-    staging = {"staging": STAGING.sha256(), "normalised": STAGING.to_document()}
-    document["tools"] = {"inference_suite": staging, "inferencex": {"commit": "b" * 40}}
-    del document["procedure"]["benchmark_backend"]
-    document["procedure"]["base_launch"] = base_launch().to_document()
-    return document
-
-
-def spec_document_v1() -> dict[str, Any]:
-    """A sheet as the application wrote it while tests ran through Magpie."""
+    """A sheet: the frozen base carried whole and the inference_suite staging as its normalised manifest."""
     yaml_text = (
         "model: m\nserver:\n  pid_dir: /shared/u1/sess-a/pids\n  port: 8000\ninferencex_path: /shared/u1/sess-a/ix\n"
     )
     return {
-        "schema": "hyperloom.measurement-spec/v1",
+        "schema": "hyperloom.measurement-spec/v2",
         "request_id": REQUEST_ID,
         "kind": "test",
         "meta": {"purpose": "explore", "priority": 2, "branch_id": "b1", "parent_commit": "c0ffee", "retest_of": None},
@@ -230,7 +218,10 @@ def spec_document_v1() -> dict[str, Any]:
         "process_env": {"AITER_LOG_LEVEL": "WARNING"},
         "platform_env": {"NCCL_IB_SL": "3"},
         "unset_envs": ["PYTHONPATH"],
-        "tools": {"magpie": {"commit": "a" * 40}, "inferencex": {"commit": "b" * 40}},
+        "tools": {
+            "inference_suite": {"staging": STAGING.sha256(), "normalised": STAGING.to_document()},
+            "inferencex": {"commit": "b" * 40},
+        },
         "environment": {
             "roots": [
                 {
@@ -250,12 +241,12 @@ def spec_document_v1() -> dict[str, Any]:
         "model_hashes": {"config.json": "77" * 32},
         "procedure": {
             "prep": "grid",
-            "benchmark_backend": "magpie",
             "rounds": {"warmup": 1, "measure": 3},
             "accuracy": False,
             "timeout_sec": 3600,
             "silence_timeout_sec": 600,
             "deadline_unix": 1790000000.0,
+            "base_launch": base_launch().to_document(),
         },
         "outputs": {"result_dir": "results", "max_total_bytes": 4294967296},
     }

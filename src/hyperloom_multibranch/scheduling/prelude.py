@@ -23,6 +23,8 @@ and gives none either. Each replay is checked against the toolbox's acceptance o
 refuses stays a lead with the refusal named in place of the replay, unless the champion was built on another image,
 whose launch config alone is checked in its place, and one acceptance has not answered for when
 :data:`PREFLIGHT_SECONDS` run out stays offered, its lead saying it was not checked.
+
+A resumed session runs no PRELUDE: :meth:`Prelude.landed` reads back what its first one recorded.
 """
 
 from __future__ import annotations
@@ -35,6 +37,7 @@ from types import SimpleNamespace
 from typing import TYPE_CHECKING, Any
 
 from hyperloom_common.io import SHARED, atomic_write_json
+from hyperloom_common.jsonio import read_jsonl
 from hyperloom.common.outside_facts.rule_pack import rule_pack_identity
 from hyperloom.common.perf_metric import GRADED_OUTPUT
 from hyperloom.contracts.measurement import Purpose, TestKind, TestResult
@@ -186,6 +189,21 @@ class Prelude:
         await together(baseline, profiled, replayed)
         leads, start = replayed.result().warm_leads, replayed.result().start_commit
         return PreludeResult(opened.commit, start, opened.profile, leads, baseline.result(), profiled.result())
+
+    async def landed(self) -> PreludeResult:
+        """What the PRELUDE an earlier run of this session recorded, for a resumed session that runs none: the root of
+        the baseline, the profile on the blackboard, the longest root test and the root's profile job its decisions
+        name, and the integration head as the commit EXPLORE opens on. Its warm-start leads are not read again."""
+
+        root = (await self._blackboard.baseline()).root_commit
+        profile = await self._blackboard.session_profile()
+        start = await self._repo.head(INTEGRATION_BRANCH)
+        rows = read_jsonl(self._layout.decisions)
+        baseline = baseline_decision(rows)
+        assert baseline is not None, "resumable_run admits a session only once PRELUDE recorded its baseline decision"
+        profiled = next((row for row in rows if row["kind"] == DecisionKind.PROFILE.value), None)
+        job = "" if profiled is None else str(profiled["detail"].get("job_id") or "")
+        return PreludeResult(root, start, profile, (), float(baseline["detail"]["longest_test_seconds"]), job)
 
     async def _profile_root_commit(self, root: str) -> str:
         """Profile ``root`` and record how; the job that analysed the profile, ``""`` when none did."""
@@ -372,7 +390,15 @@ def _session_profile(
     )
 
 
+def baseline_decision(rows: Iterable[Mapping[str, Any]]) -> Mapping[str, Any] | None:
+    """The decision PRELUDE recorded its baseline with among the decision log's ``rows``; ``None`` when there is none,
+    as for a session stopped between the rule gate's baseline and that decision."""
+
+    return next((row for row in rows if row["reason"] == BASELINE_ESTABLISHED), None)
+
+
 __all__ = [
+    "baseline_decision",
     "PreludeFailed",
     "Prelude",
     "PreludeResult",

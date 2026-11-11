@@ -34,7 +34,7 @@ def test_the_sheet_names_the_staging_and_the_inferencex_commit_its_carried_base_
     base = replace(base_launch(), client=replace(base_launch().client, commit="e" * 40))
     _, tools = _tools(tmp_path, session_facts=SessionFacts(staging=OTHER_STAGING, base_launch=base))
 
-    assert (tools.staging, tools.inferencex, tools.magpie) == (OTHER_STAGING, "e" * 40, None)
+    assert (tools.staging, tools.inferencex) == (OTHER_STAGING, "e" * 40)
 
 
 def test_a_frozen_base_names_the_inferencex_commit_the_inference_suite_staging_requires(tmp_path):
@@ -67,7 +67,7 @@ def test_a_scriptable_session_has_no_hosted_sheet(tmp_path):
 def test_the_sheet_carries_the_frozen_base_whole(tmp_path):
     procedure = _procedure(tmp_path)
 
-    assert procedure.base_launch == base_launch() and procedure.benchmark_backend is None
+    assert procedure.base_launch == base_launch()
 
 
 def test_a_base_launch_over_64_kib_is_refused_when_the_sheet_is_written(tmp_path):

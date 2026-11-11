@@ -250,3 +250,32 @@ async def test_a_checkout_writes_every_file_the_recipe_names_at_its_path(tmp_pat
 
 def _adding(patch: PatchRef) -> RecipeDelta:
     return RecipeDelta(components=(ComponentChange("vllm", add_patches=(patch,)),))
+
+
+class _EndingGit:
+    """A git process that ends as soon as it is read, recording that it was."""
+
+    returncode = 0
+    read = False
+
+    async def communicate(self, stdin: bytes | None) -> tuple[bytes, bytes]:
+        self.read = True
+        return b"c0", b""
+
+
+async def test_a_git_call_cancelled_as_git_ends_is_still_cancelled(tmp_path, blobs, monkeypatch):
+    """The cancellation lands after git ended but before the call has its output: it must not be dropped."""
+
+    process = _EndingGit()
+
+    async def spawn(*argv: str, **kwargs: object) -> _EndingGit:
+        return process
+
+    monkeypatch.setattr(asyncio, "create_subprocess_exec", spawn)
+    call = asyncio.ensure_future(GitExperimentRepo(tmp_path / "experiments.git", blobs).head(INTEGRATION_BRANCH))
+    while not process.read:
+        await asyncio.sleep(0)
+    call.cancel()
+
+    with pytest.raises(asyncio.CancelledError):
+        await call

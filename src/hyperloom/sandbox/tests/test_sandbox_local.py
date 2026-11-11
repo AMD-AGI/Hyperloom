@@ -272,6 +272,13 @@ def test_a_pipe_in_the_tree_is_refused_without_blocking_and_links_inside_the_roo
         sb.read_file("/work/dir")
 
 
+def test_a_file_the_app_writes_is_its_own_where_the_sandbox_runs_as_this_account(make) -> None:
+    sb = _create(make([LocalTemplate("dev", "dev")]), "dev", "dev")
+    sb.write_file("/in/made/input.txt", b"x")
+    assert stat.S_IMODE((sb.fs / "in" / "made" / "input.txt").stat().st_mode) == 0o600
+    assert sb.run("cat $HYPERLOOM_SANDBOX_ROOT/in/made/input.txt").stdout == "x", "its own processes read it"
+
+
 def test_path_traversal_is_confined_to_the_root(make) -> None:
     provider = make([LocalTemplate("dev", "dev")])
     sb = _create(provider, "dev", "dev")
@@ -1192,6 +1199,26 @@ def test_separate_accounts_keep_the_signing_key_from_other_sandboxes(make) -> No
     assert stolen.exit_code != 0 and "Permission denied" in stolen.stderr
     assert dev.run(f"ls {key_file.parent}").exit_code != 0
     runner.kill()
+    dev.kill()
+
+
+@_ROOT_ONLY
+@pytest.mark.skipif(not os.access(_SYSTEM_PYTHON, os.X_OK), reason="needs a python3 every account can run")
+def test_a_sandbox_that_runs_as_another_account_reads_the_files_the_app_writes_for_it(make) -> None:
+    provider = make([LocalTemplate("dev", "dev")], users=ProcessUsers(_SYSTEM_PYTHON, unsealed_user=(60002, 60002)))
+    dev = _create(provider, "dev", "dev")
+    dev.write_file("/in/made/input.txt", b"for the account")
+    read = dev.run("id -u; cat $HYPERLOOM_SANDBOX_ROOT/in/made/input.txt")
+    assert read.stdout.split("\n", 1) == ["60002", "for the account"], read.stderr
+    made = (dev.fs / "in" / "made" / "input.txt").stat()
+    assert (made.st_uid, stat.S_IMODE(made.st_mode)) == (60002, 0o600), "the account's alone"
+    there = dev.fs / "in" / "app.txt"
+    there.write_bytes(b"the app's")
+    there.chmod(0o600)
+    dev.write_file("/in/app.txt", b"rewritten")
+    assert (there.stat().st_uid, there.read_bytes()) == (os.geteuid(), b"rewritten"), (
+        "a file that was there keeps its owner"
+    )
     dev.kill()
 
 

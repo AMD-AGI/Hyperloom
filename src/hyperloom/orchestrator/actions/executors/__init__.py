@@ -34,7 +34,6 @@ from ._subprocess_kill import (
 from .benchmark_result import harvest_leaked_artifacts
 from ._agentx_checkpoint import CHECKPOINT_ARTIFACT_NAME, AgentxCheckpoint
 from ._agentx_prefix_cache import PREFIX_CACHE_OFF_ERROR_CLASS, refuse_cacheless_agentx_baseline
-from ._launch_evidence import RequestedLaunch, build_launch_evidence
 from ._round_folder import RoundFolder, is_round_folder
 from ._suite.config import fixed_workload
 from ._suite.rounds import TOOL_CACHE_ENV, SuiteRoundRefused, external_agentx_config, staged_tool_cache
@@ -69,7 +68,6 @@ __all__ = [
     "LaunchLayer",
     "MaterializeOptions",
     "ORCHESTRATOR_CANCELLED_RETURNCODE",
-    "RequestedLaunch",
     "RoundFolder",
     "RoundWatch",
     "SESSION_TIME_EXHAUSTED_RETURNCODE",
@@ -79,7 +77,6 @@ __all__ = [
     "TargetAnalysisExecutor",
     "VariantResult",
     "baseline_executor",
-    "build_launch_evidence",
     "conc_sweep_executor",
     "content_fingerprint",
     "controls_of",

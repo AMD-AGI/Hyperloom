@@ -369,12 +369,18 @@ class GitExperimentRepo:
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
         )
+        # Not asyncio.wait_for: before Python 3.12 it drops a cancellation that lands as git ends, and the caller,
+        # the integration's merge loop among them, then runs on after it was cancelled.
+        communicating = asyncio.ensure_future(process.communicate(stdin))
         try:
-            out, err = await asyncio.wait_for(process.communicate(stdin), GIT_TIMEOUT_S)
-        except asyncio.TimeoutError:
+            await asyncio.wait({communicating}, timeout=GIT_TIMEOUT_S)
+        finally:
+            timed_out = communicating.cancel()
+        if timed_out:
             process.kill()
             await process.wait()
-            raise GitError(f"git {args[0]} did not finish in {GIT_TIMEOUT_S:g}s") from None
+            raise GitError(f"git {args[0]} did not finish in {GIT_TIMEOUT_S:g}s")
+        out, err = communicating.result()
         return _Completed(process.returncode, out.decode().strip(), err.decode(errors="replace").strip())
 
 

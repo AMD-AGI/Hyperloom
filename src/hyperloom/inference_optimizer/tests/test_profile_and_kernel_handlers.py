@@ -1759,30 +1759,14 @@ async def test_roofline_executor_skips_when_framework_atom(monkeypatch, tmp_path
 
 
 def _native_profile_result(trace: Path) -> dict:
-    """What ``ProfileExecutor`` returns for a profiled AgentX round, read by the archived v1 AgentX report reader."""
-    from hyperloom.inference_optimizer.agentx.report import agentx_measurement
+    """What ``ProfileExecutor`` returns for a profiled AgentX round."""
+    from hyperloom.common.round_measurement import round_measurement
+    from hyperloom.common.tests.test_round_measurement import _agentx
+    from inference_suite.contracts import ProfileResult
 
-    measurement = agentx_measurement(
-        {
-            "scenario": "agentx",
-            "success": True,
-            "benchmark_valid": True,
-            "publishable": True,
-            "framework": "sglang",
-            "model": "Qwen/Qwen3-8B",
-            "agentx_metrics": {
-                "execution_owner": "magpie",
-                "server_launch": {"effective_argv": ["python", "-m", "sglang.launch_server"], "effective_env": {}},
-                "diagnostic_only": True,
-                "recipe": {"tp": 8},
-                "throughput": {"output_tokens_per_second": 1234.0},
-                "requests": {},
-                "latency_seconds": {},
-            },
-        }
-    )
+    profile = ProfileResult(trace_dirs=("profile/torch_trace",), has_step_traces=True)
     return {
-        **measurement,
+        **round_measurement(_agentx(profile=profile), None),
         "status": "succeeded",
         "main_trace_path": str(trace),
         "trace_input_ready": True,

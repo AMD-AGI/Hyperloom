@@ -12,7 +12,6 @@ from types import SimpleNamespace
 import pytest
 import yaml
 
-from hyperloom.inference_optimizer.agentx.report import native_launch_evidence
 from hyperloom.orchestrator.actions.executors import (
     _grid_runner,
     _integrate_bench,
@@ -42,16 +41,25 @@ _OPTION = "--cuda-graph-max-bs"
 _ENV = "SGLANG_USE_AITER"
 
 
-def _evidence(config, recipe, effective, env):
-    return native_launch_evidence(
-        {
-            "agentx_metrics": {
-                "server_launch": {"base_argv": recipe, "effective_argv": effective, "effective_env": env},
-                "recipe": {"tp": 1, "ep": 1, "conc": 8},
-            }
-        },
-        config,
-    )
+def native_receipt(config: Path, argv: list[str], env: dict[str, str | None]) -> dict:
+    """The launch evidence a native AgentX round left beside its recipe: the server options of the argv it ran and the
+    environment it exported, ``None`` for a name it cleared."""
+    first_option = next((index for index, token in enumerate(argv) if token.startswith("--")), len(argv))
+    flags = shlex.join(argv[first_option:])
+    return {
+        "schema_version": 1,
+        "materialized_config_path": str(config),
+        "framework": "sglang",
+        "model_path": _MODEL,
+        "requested_server_args": flags,
+        "requested_server_env": {name: value for name, value in env.items() if value is not None},
+        "observed_server_launch_flags": flags,
+        "observed_server_config": {},
+        "observed_server_identity": {},
+        "engine_adjusted_settings": {},
+        "actual_server_log_path": "",
+        "warm_reuse": {"reused": False},
+    }
 
 
 @pytest.fixture
@@ -84,7 +92,7 @@ def native_session(tmp_path, monkeypatch):
         baseline = materialize_benchmark_config(
             source, tmp_path / "baseline", launch=LaunchLayer(extra_server_args=appended, extra_envs=initial_env)
         )
-        evidence = _evidence(baseline, canonical, canonical + shlex.split(appended), initial_env)
+        evidence = native_receipt(baseline, canonical + shlex.split(appended), initial_env)
         persist_launch_evidence(evidence, slot=baseline.parent)
         state = SharedState(
             framework="sglang",
@@ -125,7 +133,7 @@ def _stub_gpu(monkeypatch, session, *, effective):
         )
         launch = load_benchmark(config)["agentx"]["launch_overrides"]
         observed.append(deepcopy(launch))
-        evidence = _evidence(config, session.recipe, effective, launch["env"])
+        evidence = native_receipt(config, effective, launch["env"])
         evidence_path = persist_launch_evidence(evidence, slot=config.parent)
         return [
             VariantResult(

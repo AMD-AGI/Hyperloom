@@ -106,8 +106,9 @@ class JudgeView:
     """What the judge sees; ``opening`` is true only for the call that sizes the opening batch, which opens at least
     one branch unless a specialist branch is open already.
 
-    ``free_slots`` is the roster's own count of branches that may still be opened; ``pending`` are the forks and
-    repairs the fork desk queued for a slot, oldest first; ``history`` is the blackboard's
+    ``free_slots`` is the roster's own count of branches that may still be opened; ``pending`` are the shares, forks
+    and repairs the fork desk queued for a slot: shares first, then forks and repairs oldest first; ``history`` is
+    the blackboard's
     digest of similar archived sessions, empty when the archive holds none. ``widening`` says whether a branch
     opened now would still pay off. ``similar_to`` maps a branch to the running branches whose own change is much the
     same as its own; a branch similar to none is not in it. ``events`` are the events detected since the last call,

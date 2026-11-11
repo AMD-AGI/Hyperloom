@@ -90,10 +90,18 @@ def test_checkpoint_median_waits_for_the_window_to_close(tmp_path):
     assert workspace_checkpoint_p50(tmp_path) is None
 
 
-def test_agentx_measurement_carries_the_checkpoint_median(tmp_path):
-    _write_export(tmp_path, [*_IN_WINDOW, _AFTER_WINDOW])
-    report = {"scenario": "agentx", "framework": "vllm", "model": "m", "agentx_metrics": {}}
-    measurement = extract_benchmark_measurement(report, workspace=tmp_path)
+def test_an_inference_suite_agentx_round_carries_the_checkpoint_median(tmp_path):
+    from hyperloom.common.tests.test_round_measurement import _agentx
+    from inference_suite.contracts import RunLayout
+
+    run_dir = tmp_path / "run-1"
+    layout = RunLayout(run_dir)
+    layout.report.parent.mkdir(parents=True, exist_ok=True)
+    layout.report.write_text(json.dumps(_agentx().to_document()), encoding="utf-8")
+    _write_export(layout.client_dir, [*_IN_WINDOW, _AFTER_WINDOW])
+
+    measurement = extract_benchmark_measurement(None, workspace=run_dir)
+
     assert measurement[GRADED_INTVTY_P50_CHECKPOINT] == 20.0
 
 

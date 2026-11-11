@@ -277,7 +277,7 @@ async def test_the_record_of_the_sandboxes_is_what_a_dev_command_on_this_host_re
     monkeypatch.setattr(dev_sandbox, "framework_protection", FrameworkProtection)
     worktree = SimpleNamespace(path=tmp_path / "worktree", linked=(), holds=lambda component: False)
     worktree.path.mkdir()
-    setup: Any = SimpleNamespace(processes=None)
+    setup: Any = SimpleNamespace(processes=None, agents=())
     sandboxes = branch_sandboxes(LocalCards((0,)), setup, lambda branch: worktree)  # type: ignore[arg-type,return-value]
     sandbox = sandboxes.dev("b1", BranchLease("lease-1", "b1", (0,), tmp_path / "lease", {}, 0))
     try:
