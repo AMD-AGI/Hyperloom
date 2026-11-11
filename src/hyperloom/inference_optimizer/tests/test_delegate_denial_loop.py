@@ -602,3 +602,37 @@ def test_explore_grid_coverage_tells_a_variant_removal_from_the_base_one():
     queued = [SimpleNamespace(kind="explore", params={**base, "grid": [kept]})]
     assert explore_grid_already_covered({**base, "grid": [removes]}, queued, {}) is None
     assert explore_grid_already_covered({**base, "grid": [dict(kept, name="again")]}, queued, {}) is not None
+
+
+@pytest.mark.asyncio
+async def test_delegate_explore_is_priced_on_the_grid_left_after_launch_refusals(session_dir, monkeypatch):
+    """A variant Magpie refuses never runs, so charging its minutes refuses a grid whose launchable part fits."""
+    from hyperloom.orchestrator.actions.executors import magpie_agentx
+    from hyperloom.orchestrator.policy.denial import PolicyDenied
+
+    def _refuse_spec(params, _workspace, _parse):
+        refused = [v for v in params["grid"] if v["name"] == "spec"]
+        params["grid"] = [v for v in params["grid"] if v["name"] != "spec"]
+        return [{"name": v["name"], "reason": "owned by the recipe"} for v in refused]
+
+    priced: list[list[str]] = []
+
+    async def _fits_one_variant(action_name, *, params=None):
+        grid = [v["name"] for v in (params or {}).get("grid") or ()]
+        priced.append(grid)
+        return PolicyDenied("does not fit", rule="phase_time_budget") if len(grid) > 1 else None
+
+    c = _silent_coordinator(session_dir)
+    try:
+        c.shared_state.phase = "FRAMEWORK_AGENT"
+        c.shared_state.baseline_tput = 800.0
+        monkeypatch.setattr(magpie_agentx, "drop_unlaunchable_variants", _refuse_spec)
+        monkeypatch.setattr(c.dispatcher, "admission_denial_for_action", _fits_one_variant)
+
+        await c.router.handle_delegate("orchestration", _explore("r", ("spec", "--spec 4"), ("folded", "--folded 2")))
+
+        assert priced == [["folded"]]
+        queued = [t for t in await c.tasks.by_state("queued") if t.kind == "explore"]
+        assert [[v["name"] for v in t.params["grid"]] for t in queued] == [["folded"]]
+    finally:
+        await c.stop()
