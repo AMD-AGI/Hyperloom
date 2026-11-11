@@ -22,7 +22,8 @@ class AgentSpec:
     server arguments and environment of the commit its branch starts on, ``workspace``, the framework checkout it edits,
     ``cards``, the GPUs it may use, ``seconds``, how long it may run (0: until MB stops it), ``port``, the first of
     the ports its servers may listen on, ``client``, the command the gate measures a server on ``port`` with (empty when
-    the session has none to give), ``baseline``, what the gate measured of the metric on the session's root (``None``
+    the session has none to give), ``client_seconds``, how long one measurement by it may take (``0`` when the
+    agent's own cap bounds it), ``baseline``, what the gate measured of the metric on the session's root (``None``
     before it did), ``knowledge``, the notes on the integration head the agent reads each iteration, and, for an agent
     run as a component, ``deadline``, the clock time it ends by, ``root``, the commit of ``workspace`` its patches
     are made against, and ``root_shares``, the op shares of the session root's profile (``None`` when it has none),
@@ -51,6 +52,7 @@ class AgentSpec:
     seconds: float
     port: int
     client: str = ""
+    client_seconds: float = 0.0
     baseline: float | None = None
     knowledge: str = ""
     deadline: float = 0.0

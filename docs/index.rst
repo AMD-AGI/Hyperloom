@@ -25,6 +25,7 @@ The Hyperloom source code is hosted on GitHub at `https://github.com/AMD-AGI/Hyp
 
     * :doc:`Components </components/index>`
     * :doc:`Hyperloom optimization loop </conceptual/optimization-loop>`
+    * :doc:`Arbor in multi-branch, who runs what </conceptual/multibranch-arbor>`
 
   .. grid-item-card:: How to
 

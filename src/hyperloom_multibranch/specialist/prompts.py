@@ -3,8 +3,8 @@
 
 """What the model behind a branch's specialist is told: its role once, and at every launch where its branch stands.
 
-The role says how a long-running specialist works through the session's tools, what has found gains on ROCm before,
-how its candidates are judged, how it
+The role says how a long-running specialist works through the session's tools, the base launch every recipe changes,
+what has found gains on ROCm before, how its candidates are judged, how it
 declares a correctness fix with its repro case, and which gains the toolbox refuses as fake (main's ``FAKE_GAINS``
 catalog, so a new row reaches the role). The
 launch prompt opens, on a branch log longer than it shows, with a summary of what was tried, its results and the
@@ -24,8 +24,9 @@ from __future__ import annotations
 import hashlib
 import json
 from collections.abc import Mapping, Sequence
-from dataclasses import dataclass
+from dataclasses import asdict, astuple, dataclass
 from pathlib import Path
+from typing import TYPE_CHECKING
 
 from hyperloom.measure.runner.native.recipes import NATIVE_BUILD_REFUSE
 from hyperloom.orchestrator.prompts.specialist_prompt_builder import BASH_KILL_SAFETY_PREAMBLE
@@ -33,11 +34,15 @@ from hyperloom_multibranch.contracts.branch_log import BranchLogType
 from hyperloom_multibranch.contracts.fork import RepairRequest
 from hyperloom_multibranch.contracts.blackboard.records import BranchLogRecord, InboxItem
 from hyperloom_multibranch.contracts.sources import NativeTree
+from hyperloom_multibranch.rulegate.agentx import AgentXObjective
 from hyperloom_multibranch.rulegate.fix_case import CASE_SCRIPT
 from hyperloom_multibranch.specialist.directions import DIRECTIONS, direction_name
 from hyperloom_multibranch.specialist.following import REROOT
 from hyperloom_multibranch.specialist.judging import NOTICE
 from hyperloom_multibranch.specialist.runtime import SessionStart, restart_notice
+
+if TYPE_CHECKING:
+    from hyperloom.orchestrator.state.base_launch import ServerBase
 
 #: Branch-log entries a launch prompt shows; the specialist reads further back with blackboard_branch_log.
 RECENT_ENTRIES = 20
@@ -200,10 +205,15 @@ the target's share of GPU time on that commit (target_share_pct), the summed sha
 speeding up a part worth w of the time gains at most w/(1-w), so prefer the directions with the largest such ceiling. Claim the intent before you work on it. A refused claim says why: the change was \
 tested or is being tested on this state, its ceiling is below the session's bar, or another branch is testing it \
 (testing_elsewhere), whose outcome then reaches you as a peer_outcome; read that result or choose another direction.
-3. Make the change. For server arguments or environment variables, write the delta's config yourself, with exactly \
-these keys: {{{{"config": {{{{"extra_server_args": "--flag value --other-flag", "extra_envs": {{{{"NAME": "value"}}}}}}}}}}}}. \
-extra_server_args is one string of command-line flags; a key the delta does not define is refused, and the error \
-lists the keys it takes. For source, \
+3. Make the change. For server arguments or environment variables, write the delta's config yourself, with these \
+keys, each optional: {{{{"config": {{{{"extra_server_args": "--flag value --other-flag", "extra_envs": {{{{"NAME": \
+"value"}}}}, "remove_args": ["--old-flag"], "unset_envs": ["OLD_NAME"]}}}}}}}}. extra_server_args is one string of \
+command-line flags it adds or sets anew, extra_envs the variables it sets; a key the delta does not define is refused, \
+and the error lists the keys it takes. remove_args turns flags off by name, their values with them: one your head's \
+recipe sets leaves the recipe, and one only the session's base launch sets is removed from the launch on an AgentX \
+workload, while on an InferenceX workload (ISL and OSL) that removal is refused, so such a flag stays: set its value \
+instead where it takes one. unset_envs drops variables your head's recipe sets; a variable of the base launch changes \
+only by setting it in extra_envs. For source, \
 call worktree_sync, edit the files in your worktree, and call worktree_check with the component until it passes (the \
 files compile and the package imports with your change); then worktree_patch returns the delta and the parent commit \
 to test. When your change adds a code path, put a one-time log line on the path it adds, and when its result is \
@@ -361,8 +371,11 @@ batched with it, and a step between two sizes pads up to the next.
 - A constant is often a shape someone validated, not a hardware bound (a row cap, an M threshold, a tile copied \
 from another model or TP size): check it against the shapes the profile shows, and look for an eager fallback that \
 shadows a compiled kernel.
-- With the other linear layers in FP8, a large GEMM still in bf16, such as lm_head (the vocabulary projection), is a \
-candidate: quantizing it is a source change on top of an FP8 GEMM kernel.
+- The model's weight precision is the session's, never yours to change, down or up: no quantization flag \
+(--quantization, --quantization-config, --quantization-param-path, --online-quant-config), no --dtype, no other \
+checkpoint, and no patch that quantizes or de-quantizes weights, lm_head's included; the toolbox refuses those flags. Intermediates may change while the weights stay as they are and accuracy passes: the KV \
+cache dtype, attention's compute precision, a quantized all-reduce, and activation quantization or fusions on \
+weights already FP8 in the checkpoint.
 - A fusion that reorders a floating-point sum changes outputs and must pass the accuracy gate; one that keeps the \
 order leaves them unchanged.
 Examples:
@@ -370,16 +383,15 @@ Examples:
 the all-reduce that consumed the partial sums, in the same summation order, removed a launch per layer on \
 every decode step, every output unchanged.
 - ROCm ran the prefill outside CUDA graphs where CUDA captures it. Enabling the breakable prefill graph on HIP, with \
-the two operators that blocked capture made capturable, cleared the bar on P50.
+the two operators that blocked capture made capturable, cleared the session's bar.
 - Requests failed with NaN under load at some batch sizes. The cause was a default GEMM configuration whose \
 pipelined K loop mishandled the tail block for one shape; a block size that divides K removed the NaN, declared as a \
 correctness fix with its case, and also made that kernel faster.
 - A one-launch replacement for a two-kernel top-k was exact but slower under CUDA graphs: the branch \
 dropped it on that result and took the next operator the profile ranked.
 
-How a candidate is judged: it is compared with its parent's recorded value at the session's graded operating point. A \
-gain must clear the session's bar, set on InferenceX from the spread of the baseline measurements and on AgentX a \
-fixed threshold on the P50, and hold when it is measured again on another node; every commit must also pass the accuracy gate. A gain lands on your branch only while your \
+How a candidate is judged: it is compared with its parent's recorded value at the session's graded operating point. \
+{{bar}} every commit must also pass the accuracy gate. A gain lands on your branch only while your \
 branch head is still the parent it was measured against: submit on your current head.
 
 A test that failed as hip_runtime_error quotes the HIP error, and it is not a missing kernel: an illegal memory \
@@ -391,17 +403,15 @@ Known fake gains: a measurement can show them without the candidate being better
 not spend tests on them.
 {{fake_gains}}
 
-A blocked candidate held its gain on the retest and was held back on both measurements by the same defect: the accuracy \
-gate, on InferenceX requests it did not complete (dropped_requests) or long-context prompts it answered worse \
-than the root beyond the check's noise (long_context_dropped), or on AgentX a guard (P90, output \
-throughput) or more failed requests than its parent. It waits for your diagnosis; conclude it before your next \
+A blocked candidate held its gain on the retest and was held back on both measurements by the same defect: \
+{{blocked_by}}. It waits for your diagnosis; conclude it before your next \
 candidate. Read both results with test_result and find the cause.
 - A fixable defect is one a concrete change removes while the gain stays: quantization scales computed per tensor \
 where the model needs them per head or per channel, a kernel path with a numerical bug, a setting that makes requests \
 fail at a limit. Call request_repair with the root cause and the repair. A new branch, cut at the candidate's parent, \
 starts from its change and your diagnosis; you go on on your branch. An intent is repaired once per commit.
 - An inherent trade-off is one where the gain comes from the defect itself: a lower precision that costs accuracy \
-whatever the scales, a P50 gain bought with P90. Write the lesson with blackboard_learn, citing the candidate in \
+whatever the scales{{trade_off}}. Write the lesson with blackboard_learn, citing the candidate in \
 request_ids, then call decline_repair; it is refused until such a learning exists.
 
 A correctness fix removes a defect your branch head shows (wrong or failed outputs, a crash, a hang). It counts only \
@@ -459,23 +469,81 @@ _DEV_SANDBOX = (
 )
 
 
+@dataclass(frozen=True)
+class _Grading:
+    """How the role tells a session's candidates are judged: the bar, what blocks a gain, and the trade-off a blocked
+    gain can be."""
+
+    bar: str
+    blocked_by: str
+    trade_off: str
+
+
+_INFERENCEX_GRADING = _Grading(
+    bar="A gain must clear the session's bar, set from the spread of the baseline measurements, and hold when it is "
+    "measured again on another node;",
+    blocked_by="the accuracy gate, requests it did not complete (dropped_requests) or long-context prompts it "
+    "answered worse than the root beyond the check's noise (long_context_dropped)",
+    trade_off="",
+)
+
+
+def _agentx_grading(objective: AgentXObjective) -> _Grading:
+    guards = objective.guards
+    held = " and ".join(f"{guard.name} ({guard.metric})" for guard in guards)
+    refusals = ", ".join(f"{guard.name} as {guard.refusal}" for guard in guards)
+    bar = (
+        f"The session is graded on {objective.title} ({objective.metric}): {objective.description} A gain must clear "
+        f"the session's bar of +{objective.bar_pct:g}% on it while {held} each hold within "
+        f"{objective.guard_band_pct:g}% of the parent; that one measurement is final unless a guard, more failed "
+        "requests or the request error rate holds the gain back for a retest;"
+    )
+    return _Grading(
+        bar=bar,
+        blocked_by=f"the accuracy gate (the request error rate), a guard ({refusals}) or more failed requests than "
+        "its parent",
+        trade_off=f", a {objective.title} gain bought with {' or '.join(guard.name for guard in guards)}",
+    )
+
+
+@dataclass(frozen=True)
+class RoleWorkload:
+    """What a session optimizes, as its specialists' role tells it: the workload in words, and the objective of an
+    AgentX session (none: an InferenceX one)."""
+
+    named: str
+    agentx: AgentXObjective | None = None
+
+    @property
+    def grading(self) -> _Grading:
+        return _INFERENCEX_GRADING if self.agentx is None else _agentx_grading(self.agentx)
+
+
 def role_prompt(
-    workload: str,
+    workload: RoleWorkload,
     references: Mapping[str, Path] | None = None,
     *,
+    base: ServerBase | None = None,
     dev_leases: int = 0,
     native: Mapping[str, NativeTree] | None = None,
 ) -> str:
-    """The system prompt of every session of every specialist; ``workload`` names what the session optimizes,
+    """The system prompt of every session of every specialist; ``workload`` is what the session optimizes,
     ``references`` the reference material the session was given, each source's name and the directory it was copied
-    to, ``dev_leases`` how many dev sandboxes the session lends at once (none: the specialist has no GPU), and
-    ``native`` the native trees its worktrees hold, by component (none: native code is not built)."""
-    named = " ".join(workload.split())
+    to, ``base`` the server half of the session's frozen base launch, which every recipe changes (none: not shown),
+    ``dev_leases`` how many dev sandboxes the session lends at once (none: the specialist has no GPU), and ``native``
+    the native trees its worktrees hold, by component (none: native code is not built)."""
+    named = " ".join(workload.named.split())
     if not named:
         raise ValueError("a specialist's role names the workload its session optimizes")
     gpu_rule = _DEV_SANDBOX if dev_leases > 0 else _NO_GPU
-    role = _ROLE.format(workload=named, fake_gains=_fake_gains(), directions=_direction_names(), gpu_rule=gpu_rule)
-    return role + _native(native or {}) + _references(references or {})
+    role = _ROLE.format(
+        workload=named,
+        fake_gains=_fake_gains(),
+        directions=_direction_names(),
+        gpu_rule=gpu_rule,
+        **asdict(workload.grading),
+    )
+    return role + _native(native or {}) + _references(references or {}) + _base(base)
 
 
 _NATIVE = """
@@ -514,6 +582,21 @@ Reference material for this session, read-only and copied in when it started, on
 Before you guess at a kernel, a tuning step or a setting, read what it says about this model's operators and your \
 direction, and name the file you used in your branch log.
 """
+
+
+_BASE = """
+The session's base launch, frozen when it started and read-only: every test's server starts from it, your head's \
+recipe on top of it (a flag set again takes the recipe's value). Server arguments: {args}. Environment: {env}. A \
+recipe holds only what it changes on this launch: an empty extra_server_args means this launch as it is, so read a \
+flag's state here before you call a change to it a no-op.
+"""
+
+
+def _base(base: ServerBase | None) -> str:
+    if base is None:
+        return ""
+    env = " ".join(f"{name}={value}" for name, value in sorted(base.env.items()))
+    return _BASE.format(args=base.args or "none", env=env or "none")
 
 
 def _references(references: Mapping[str, Path]) -> str:
@@ -653,9 +736,14 @@ def nudge_message() -> str:
 def prompt_versions() -> dict[str, str]:
     """``{prompt name: the first hex digits of the sha256 of its text}``, for the session's manifest fingerprint."""
     role = _ROLE.format(
-        workload="{workload}", fake_gains=_fake_gains(), directions=_direction_names(), gpu_rule=_NO_GPU
+        workload="{workload}",
+        fake_gains=_fake_gains(),
+        directions=_direction_names(),
+        gpu_rule=_NO_GPU,
+        **asdict(_INFERENCEX_GRADING),
     )
-    settings = (_DEV_SANDBOX, _NATIVE, _REFERENCES, *_HOLDS.values())
+    agentx = (text for objective in AgentXObjective for text in astuple(_agentx_grading(objective)))
+    settings = (_DEV_SANDBOX, _NATIVE, _REFERENCES, _BASE, *_HOLDS.values(), *agentx)
     texts = {
         "specialist_role": "\n".join((role, *settings)),
         "specialist_launch": "\n".join((*_LAUNCH, _LEASE_WAKE, _WAIT_WAKE)),

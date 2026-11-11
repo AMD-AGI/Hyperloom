@@ -56,7 +56,7 @@ from hyperloom_multibranch.specialist.dossier_pass import (
     DossierStart,
     run_dossier_pass,
 )
-from hyperloom_multibranch.specialist.gate_client import FixedGateClient
+from hyperloom_multibranch.specialist.gate_client import GateClient
 from hyperloom_multibranch.specialist.map_session import MapCalls, MapSession
 from hyperloom_multibranch.specialist.model_sessions import ModelSessions, branch_place
 from hyperloom_multibranch.specialist.remote_sandbox import (
@@ -185,7 +185,7 @@ class AgentSessions:
     toolbox: RealToolbox
     repo: ExperimentRepo
     sandboxes: AgentSandboxes | None
-    client: FixedGateClient | None = None
+    client: GateClient | None = None
     dossier: str | None = None
     maps: MapCalls | None = None
     least_run_seconds: float = 0.0
@@ -257,12 +257,14 @@ class AgentSessions:
 
     def _placed(self, holder: str, place: BranchPlace) -> AgentSpec:
         """The session's spec with ``holder``'s port block, which it keeps for the session, and the gate's client
-        aimed at its first port."""
+        aimed at its first port, staged in ``place``, with how long one measurement by it may take."""
 
         index = self._taken.setdefault(holder, len(self._taken))
         port = self.spec.port + index * PORTS_PER_AGENT
-        client = "" if self.client is None else self.client.stage(port, place.workspace / AGENT_DIR / BENCH_DIR)
-        return replace(self.spec, port=port, client=client)
+        if self.client is None:
+            return replace(self.spec, port=port)
+        client = self.client.stage(port, place.workspace / AGENT_DIR / BENCH_DIR)
+        return replace(self.spec, port=port, client=client, client_seconds=self.client.seconds)
 
     def _sandbox(self, holder: str, place: BranchPlace) -> Callable[[BranchLease], AgentSandbox]:
         """The sandbox of a lease for ``holder`` in ``place``, the framework's source in its worktree imported first."""
