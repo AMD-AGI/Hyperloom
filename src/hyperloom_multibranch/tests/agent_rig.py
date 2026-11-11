@@ -20,6 +20,7 @@ from hyperloom.contracts.measurement import AttachmentRef, TestRequest
 from hyperloom.contracts.recipe import ComponentPatches, KernelArtifact, KernelKind, LaunchConfig, Recipe
 from hyperloom.measure.compile import LocalBlobStore
 from hyperloom.measure.surface import SurfaceViolation, check_launch_envs
+from hyperloom_common.shared_storage import child_umask
 from hyperloom_multibranch.blackboard import LocalBlackboard
 from hyperloom_multibranch.contracts.toolbox import BranchLease, LeaseCharge, RequestRejected
 from hyperloom_multibranch.specialist.agent_onboarding import CommandResult, OnboardingSetup
@@ -262,7 +263,8 @@ class LocalProcess:
 
 
 class LocalSandbox:
-    """Runs commands as local processes, each in a process group of its own."""
+    """Runs commands as local processes, each in a process group of its own, under umask ``002`` below shared storage
+    as a sandbox's launcher runs them."""
 
     def __init__(self, logs: Path) -> None:
         self._logs, self.started, self.envs, self.leases, self.prompts = logs, [], [], [], []
@@ -277,7 +279,15 @@ class LocalSandbox:
 
     async def run(self, command: str, cwd: Path, env: Mapping[str, str], timeout: float) -> CommandResult:
         self.ran.append(command)
-        done = subprocess.run(command, shell=True, cwd=cwd, env={**os.environ, **env}, capture_output=True, text=True)
+        done = subprocess.run(
+            command,
+            shell=True,
+            cwd=cwd,
+            env={**os.environ, **env},
+            capture_output=True,
+            text=True,
+            umask=child_umask(cwd),
+        )
         return CommandResult(done.returncode, done.stdout + done.stderr)
 
     async def start(self, command: str, cwd: Path, env: Mapping[str, str]) -> LocalProcess:
@@ -290,6 +300,7 @@ class LocalSandbox:
             stdout=log.open("w"),
             stderr=subprocess.STDOUT,
             start_new_session=True,
+            umask=child_umask(cwd),
         )
         self.started.append(command)
         self.envs.append(dict(env))
