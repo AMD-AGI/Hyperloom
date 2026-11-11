@@ -9,3 +9,4 @@ linkify-it-py>=2.0
 idna>=3.10
 # sphinx-book-theme 1.1.x crashes on Sphinx 9 (add_source_buttons unpacks None).
 sphinx>=8.1,<9
+sphinxcontrib-mermaid==2.1.1
