@@ -2604,3 +2604,23 @@ def test_render_conc_sweep_curve_propagates_an_unexpected_failure(tmp_path: Path
     monkeypatch.setattr(conc_sweep_plot, "_render", _fail)
     with pytest.raises(TypeError, match="malformed point"):
         render_conc_sweep_curve({}, tmp_path / "out.png", ConcCurveOptions(tp=1))
+
+
+# A scriptable workload has no request concurrency to sweep
+def test_a_scriptable_workload_declines_the_sweep_before_it_starts() -> None:
+    """One forward pass of the operator's script: every rung would measure the same thing."""
+    from hyperloom.orchestrator.kernel.conc_sweep import _decline_before_start
+
+    state = _make_state()
+    state.framework = "custom"
+    declined = _decline_before_start(None, state, _Arm(name="optimized"), [1, 2, 4], 600)
+    assert declined is not None
+    assert declined["skip_reason"] == "non_serving_workload"
+
+
+def test_a_serving_workload_still_starts_its_sweep() -> None:
+    from hyperloom.orchestrator.kernel.conc_sweep import _decline_before_start
+
+    state = _make_state()
+    state.framework = "vllm"
+    assert _decline_before_start(None, state, _Arm(name="optimized"), [1, 2, 4], 600) is None
