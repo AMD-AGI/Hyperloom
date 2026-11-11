@@ -58,6 +58,21 @@ def _ppid(pid):
     return int(stat[stat.rfind(")") + 2 :].split()[1])
 
 
+def _sid(pid):
+    return os.getsid(pid)
+
+
+def _is_parked(pid, parent, cmd):
+    # The launcher's own child exec'd into `sleep infinity` (by this driver's stop or another tool).
+    argv = cmd.split()
+    if parent != 1 or len(argv) != 2 or os.path.basename(argv[0]) != "sleep" or argv[1] != "infinity":
+        return False
+    try:
+        return _sid(pid) == _sid(1)
+    except OSError:
+        return False
+
+
 def _find_server(pidfile, needle):
     if os.path.exists(pidfile):
         try:
@@ -68,6 +83,7 @@ def _find_server(pidfile, needle):
             pass
     self_pid = os.getpid()
     fallback = 0
+    parked = 0
     for entry in os.listdir("/proc"):
         if not entry.isdigit():
             continue
@@ -80,12 +96,14 @@ def _find_server(pidfile, needle):
         except OSError:
             continue
         if not any(part in cmd for part in needle.split("|")):
+            if parked == 0 and _is_parked(cand, parent, cmd):
+                parked = cand
             continue
         if parent == 1:
             return cand
         if fallback == 0:
             fallback = cand
-    return fallback
+    return parked or fallback
 
 
 def restart_remote_main():

@@ -545,6 +545,25 @@ def test_remote_driver_finds_the_server_by_any_needle(tmp_path: Path) -> None:
         named.wait()
 
 
+def test_remote_driver_takes_over_a_parked_launcher_child(tmp_path: Path) -> None:
+    driver = pd_cmds._REMOTE_DRIVER.replace("\nrestart_remote_main()\n", "\n")
+    scope: dict[str, object] = {"os": os}
+    exec(driver, scope)
+    parked = subprocess.Popen(["sleep", "infinity"])
+    other = subprocess.Popen(["sleep", "infinity"])
+    try:
+        time.sleep(0.2)
+        real_ppid = scope["_ppid"]
+        scope["_ppid"] = lambda pid: 1 if pid in (parked.pid, other.pid) else real_ppid(pid)
+        scope["_sid"] = lambda pid: 1 if pid in (1, parked.pid) else 2
+        find = scope["_find_server"]
+        assert find(str(tmp_path / "none.pid"), f"absent-{os.getpid()}-{time.monotonic_ns()}") == parked.pid
+    finally:
+        for p in (parked, other):
+            p.kill()
+            p.wait()
+
+
 def test_liveness_probe_greps_every_needle(monkeypatch: pytest.MonkeyPatch) -> None:
     fake = _FakeCli({"10.0.0.1": "HL_ALIVE\n", "10.0.0.2": "HL_ALIVE\n"})
     monkeypatch.setattr(pd_cmds, "_cli", lambda: fake)
