@@ -16,6 +16,8 @@ from hyperloom.orchestrator.actions.executors._suite.rounds import TOOL_CACHE_EN
 
 DOCS = Path(__file__).resolve().parents[4] / "docs"
 _FLAG = re.compile(r"`(--[a-z][a-z-]*)")
+#: SGLang flags the draft-limits paragraph names; the serving engine parses them, not ``hyperloom optimize``.
+_SERVER_FLAGS = {"--speculative-num-steps", "--speculative-num-draft-tokens", "--speculative-eagle-topk"}
 
 
 def _optimize_flags() -> set[str]:
@@ -27,7 +29,7 @@ def test_every_flag_the_agentx_workflow_names_is_an_optimize_flag() -> None:
     section = (DOCS / "how-to" / "optimize.md").read_text(encoding="utf-8").split("## Optimize an AgentX workload")[1]
     named = set(_FLAG.findall(section))
     assert "--no-agentx-accuracy" in named
-    assert named <= _optimize_flags()
+    assert named - _SERVER_FLAGS <= _optimize_flags()
 
 
 @pytest.mark.parametrize(

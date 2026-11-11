@@ -195,7 +195,9 @@ confirm is judged. A branch whose specialist gave up, and one stopped for a fail
 nor its repair period; a repair branch runs at most {REPAIR_BRANCH_SECONDS / 3600:g} hours whatever you decide.
 unsteered: a branch whose steered is false, which runs a third-party agent the user named, by the agent's own logic, one
 test at a time: no stop or K you give it is applied, unless its judging failed: stop it then, as any branch whose
-judging failed. Otherwise weigh the slot it holds as given.{{envelope}}
+judging failed. Otherwise weigh the slot it holds as given.
+dev_wait: a branch whose specialist waits in line for a dev sandbox, while it waits: you may lower its K, not stop it,
+since its tests judged meanwhile count toward its stall.{{envelope}}
 A branch's pending_candidates are its measured candidates that beat its head by at least the bar while their confirm
 runs, each with its gain_over_head_pct.
 A branch's queued_intents are its explore tests requested and not measured yet, queued or running, each with the

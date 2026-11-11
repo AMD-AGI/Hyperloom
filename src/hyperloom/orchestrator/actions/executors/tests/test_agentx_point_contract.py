@@ -445,6 +445,41 @@ def test_a_native_variant_drafting_without_a_kernel_is_refused_before_it_is_writ
     assert load_benchmark(candidate)["agentx"]["launch_overrides"]["append_args"] == runnable.split(" ")
 
 
+def test_a_native_variant_outside_the_recipes_draft_bounds_is_refused_before_it_is_written(source, tmp_path):
+    from hyperloom.inference_optimizer.speculative_capability import CAPABILITY_UNSUPPORTED, DRAFT_LIMITS_KEY
+
+    config = yaml.safe_load(source.read_text())
+    config["benchmark"][DRAFT_LIMITS_KEY] = {"draft_tokens": {"max": 4}}
+    source.write_text(yaml.safe_dump(config))
+    base = materialize_benchmark_config(source, tmp_path / "base")
+    # The declaration survives materialization, so the round and every variant built from it judge against it.
+    assert load_benchmark(base)[DRAFT_LIMITS_KEY] == {"draft_tokens": {"max": 4}}
+    output_subdir = tmp_path / "candidate"
+    with pytest.raises(ValueError) as refused:
+        _build_variant_yaml(
+            GridRecipe(base_yaml_path=base),
+            GridVariant("spec_steps5", "--speculative-num-steps 5 --speculative-num-draft-tokens 6", {}),
+            output_subdir=output_subdir,
+        )
+    assert refused.value.error_class == CAPABILITY_UNSUPPORTED
+    assert "at most 4" in str(refused.value) and "spells 6" in str(refused.value)
+    assert not list(output_subdir.rglob("config.yaml"))
+    within = "--speculative-num-steps 3 --speculative-num-draft-tokens 4"
+    candidate = _build_variant_yaml(
+        GridRecipe(base_yaml_path=base), GridVariant("spec_steps3", within, {}), output_subdir=tmp_path / "within"
+    )
+    assert load_benchmark(candidate)["agentx"]["launch_overrides"]["append_args"] == within.split(" ")
+
+
+def test_a_malformed_draft_bound_stops_the_session_before_it_starts(source):
+    config = yaml.safe_load(source.read_text())
+    config["benchmark"]["speculative_draft_limits"] = {"draft_tokens": {"max": 0}}
+    source.write_text(yaml.safe_dump(config))
+    args = _build_parser().parse_args(["optimize", "--benchmark-config", str(source)])
+    with pytest.raises(ValueError, match="draft_tokens.max must be a positive integer"):
+        configure_benchmark(args)
+
+
 def test_a_native_variant_is_judged_at_the_tensor_parallel_size_its_launch_carries(vllm_source, tmp_path):
     from hyperloom.inference_optimizer.speculative_capability import CAPABILITY_UNSUPPORTED
 
