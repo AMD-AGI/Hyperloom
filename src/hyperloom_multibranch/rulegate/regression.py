@@ -200,8 +200,7 @@ class RegressionSet:
 
     async def check_every_case(self, commit: str) -> RegressionOutcome:
         await self._pooled()
-        root = (await self._blackboard.baseline()).root_commit
-        cases = await self._cases((root, *(item.commit_id for item in await self._blackboard.committed())))
+        root, cases = await self._every_case()
         if not cases:
             return RegressionOutcome(True)
         outcomes = await self._on(cases, commit, NO_DELTA)
@@ -216,10 +215,29 @@ class RegressionSet:
         named = tuple(case.case_ref for case in cases if case.request_id in carried)
         return RegressionOutcome(not failed, "; ".join(failed), len(cases), named)
 
+    async def final_case_seconds(self, commits: tuple[str, ...]) -> tuple[float, ...]:
+        root, cases = await self._every_case()
+        pending = []
+        for commit in dict.fromkeys((*commits, root)):
+            digest = await self._digest(commit, NO_DELTA)
+            pending.extend(case for case in cases if (case.request_id, digest) not in self._verdicts)
+        return tuple([_wall_seconds(await self._blackboard.record(case.request_id)) for case in pending])
+
+    async def _every_case(self) -> tuple[str, list[RegressionCase]]:
+        """The session's root, and every case the session registered: the root's and every committed commit's."""
+
+        root = (await self._blackboard.baseline()).root_commit
+        return root, await self._cases((root, *(item.commit_id for item in await self._blackboard.committed())))
+
+    async def _digest(self, commit: str, delta: RecipeDelta) -> str:
+        """The digest of ``commit``'s recipe with ``delta`` applied, which a case's verdict is kept by."""
+
+        return apply(await self._repo.read_recipe(commit), delta).digest()
+
     async def _on(self, cases: list[RegressionCase], commit: str, delta: RecipeDelta) -> list[str]:
         """Each case's outcome on ``commit`` with ``delta`` applied, run at once."""
 
-        digest = apply(await self._repo.read_recipe(commit), delta).digest()
+        digest = await self._digest(commit, delta)
         return await _gathered(self._outcome(case, commit, delta, digest) for case in cases)
 
     async def _pooled(self) -> None:
@@ -347,6 +365,15 @@ async def register_case(
     case = RegressionCase(case_ref, fix_commit, repro_request_id)
     await blackboard.add_regression_case(case)
     return case
+
+
+def _wall_seconds(record: TestRecord) -> float:
+    """How long ``record``'s test ran, start to finish; 0 when its result does not say."""
+
+    result = record.result
+    if result is None or result.started_at is None or result.finished_at is None:
+        return 0.0
+    return result.finished_at - result.started_at
 
 
 async def _gathered(awaitables: Iterable[Awaitable[T]]) -> list[T]:

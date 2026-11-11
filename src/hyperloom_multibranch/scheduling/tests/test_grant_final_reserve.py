@@ -8,20 +8,25 @@ starts, so a session's own deadline can leave FINAL less of the grant than it ne
 
 from __future__ import annotations
 
+import asyncio
 import json
 import math
-from dataclasses import replace
+from collections.abc import Awaitable, Callable
+from dataclasses import dataclass, replace
 from datetime import datetime, timezone
 from pathlib import Path
+from typing import TypeVar
 
 import pytest
 
-from hyperloom.contracts.measurement import FailureClass, Purpose, TestResult, Validity
+from hyperloom.contracts.measurement import FailureClass, Purpose, TestRequest, TestResult, Validity
 from hyperloom.hosted.host_info import HostInfo, read_host_info
 from hyperloom.measure.failures import FOREIGN_PROCESS_ON_CARD
 from hyperloom_multibranch.blackboard.tests.factories import FakeClock
 from hyperloom_multibranch.contracts.blackboard.vocab import INTEGRATION_BRANCH
-from hyperloom_multibranch.scheduling.budget import MB_CLOSE_GRACE_CAP_SECONDS, SessionBudget
+from hyperloom_multibranch.contracts.gate import RegressionOutcome
+from hyperloom_multibranch.contracts.judgement import Judgement, Verdict
+from hyperloom_multibranch.scheduling.budget import MB_CLOSE_GRACE_CAP_SECONDS, FinalWork, SessionBudget
 from hyperloom_multibranch.scheduling.hosted_run import (
     FINAL_ATTEMPTS,
     FINAL_COLD_START_SECONDS,
@@ -33,6 +38,10 @@ from hyperloom_multibranch.scheduling.hosted_run import (
     grant_end,
     grant_explore_cap,
 )
+from hyperloom_multibranch.scheduling.final import FinalCandidate, FinalCandidates, FinalSelector
+from hyperloom_multibranch.scheduling.requests import SessionChecks
+from hyperloom_multibranch.scheduling.settings import InferenceXShape, KernelOptimizer, Workload
+from hyperloom_multibranch.scheduling.tests.peer_fakes import FakeRegressionCheck, VirtualClock, judged
 from hyperloom_multibranch.toolbox.attempts import INFRA_BACKOFF_SECONDS, TestJob
 from hyperloom_multibranch.toolbox.tests.helpers import ScriptedExecutor, build, failed, ok, req
 
@@ -44,6 +53,9 @@ BUDGET_SEC = 6 * 3600.0
 STARTED_AFTER_CREATE_SEC = 180.0
 #: The session's longest test.
 TEST_SEC = 1500.0
+T = TypeVar("T")
+#: A validation of one test, on one slot.
+ONE_TEST = FinalWork(TEST_SEC, TEST_SEC, TEST_SEC, 1)
 
 
 def _host(tmp_path: Path, **grant: int) -> HostInfo:
@@ -68,7 +80,7 @@ def test_the_grant_ends_its_runtime_after_the_run_was_created_and_its_tests_end_
     assert end == GrantEnd(CREATED.timestamp() + RUNTIME_SEC)
     assert end.tests_end_by == end.at - MB_CLOSE_GRACE_CAP_SECONDS
     cap = grant_explore_cap(_host(tmp_path, max_runtime_sec=RUNTIME_SEC))
-    assert cap is not None and cap(TEST_SEC) == end.explore_cap(TEST_SEC)
+    assert cap is not None and cap(ONE_TEST) == end.explore_cap(ONE_TEST)
 
 
 @pytest.mark.parametrize("grant", [{}, {"max_gpus": 8}], ids=["no_grant", "no_runtime"])
@@ -79,15 +91,15 @@ def test_a_run_whose_grant_states_no_runtime_has_no_grant_end_and_no_explore_cap
     assert grant_explore_cap(_host(tmp_path, **grant)) is None
 
 
-def test_the_reserve_covers_the_wind_down_three_attempts_their_backoff_and_a_cold_start() -> None:
+def test_the_reserve_of_one_test_covers_the_wind_down_three_attempts_their_backoff_and_a_cold_start() -> None:
     backoff = INFRA_BACKOFF_SECONDS[0] + INFRA_BACKOFF_SECONDS[1]
 
     assert FINAL_ATTEMPTS == 3
-    assert final_reserve_seconds(TEST_SEC) == pytest.approx(
+    assert final_reserve_seconds(ONE_TEST) == pytest.approx(
         FINAL_WIND_DOWN_SECONDS + 3 * TEST_SEC + backoff + FINAL_COLD_START_SECONDS
     )
-    assert final_reserve_seconds(0.0) == FINAL_RESERVE_FLOOR_SECONDS, "nothing measured yet: the floor"
-    assert final_reserve_seconds(60.0) == FINAL_RESERVE_FLOOR_SECONDS
+    assert final_reserve_seconds(FinalWork(0.0, 0.0, 0.0, 1)) == FINAL_RESERVE_FLOOR_SECONDS, "nothing measured yet"
+    assert final_reserve_seconds(FinalWork(60.0, 60.0, 60.0, 1)) == FINAL_RESERVE_FLOOR_SECONDS
 
 
 def test_a_grant_that_ends_after_the_session_s_own_explore_end_leaves_it_as_it_was() -> None:
@@ -95,7 +107,7 @@ def test_a_grant_that_ends_after_the_session_s_own_explore_end_leaves_it_as_it_w
     roomy = GrantEnd(budget.deadline + 10 * 3600)
 
     own = budget.explore_end(budget.started_at, TEST_SEC)
-    assert budget.explore_end(budget.started_at, TEST_SEC, roomy.explore_cap(TEST_SEC)) == own
+    assert budget.explore_end(budget.started_at, TEST_SEC, roomy.explore_cap(ONE_TEST)) == own
     assert budget.explore_end(budget.started_at, TEST_SEC, math.inf) == own
 
 
@@ -152,10 +164,10 @@ async def test_a_grant_that_ends_before_the_session_s_deadline_ends_explore_so_f
     budget = SessionBudget(CREATED.timestamp() + STARTED_AFTER_CREATE_SEC, BUDGET_SEC)
     assert budget.hard_stop_at < grant.at, "the session's own deadline and grace fit the grant"
 
-    explore_end = budget.explore_end(budget.started_at, TEST_SEC, grant.explore_cap(TEST_SEC))
+    explore_end = budget.explore_end(budget.started_at, TEST_SEC, grant.explore_cap(ONE_TEST))
     result, slept = await _final_from(tmp_path / "capped", explore_end, grant)
 
-    assert explore_end == grant.explore_cap(TEST_SEC) < budget.explore_end(budget.started_at, TEST_SEC)
+    assert explore_end == grant.explore_cap(ONE_TEST) < budget.explore_end(budget.started_at, TEST_SEC)
     assert result.validity is Validity.SUCCEEDED and len(result.attempts) == 3
     assert slept == pytest.approx(list(INFRA_BACKOFF_SECONDS[:2]), abs=0.1), "the whole backoff fitted"
     assert result.finished_at is not None
@@ -186,3 +198,128 @@ async def test_final_s_infra_retries_shorten_their_backoff_so_the_last_attempt_s
     assert slept == pytest.approx([60.0, 30.0], abs=0.1)
     assert result.finished_at is not None
     assert result.finished_at == pytest.approx(grant.tests_end_by, abs=1.0), "it ends by the stop, to the second"
+
+
+#: A Workload's sweep of InferenceX: three concs around the primary one.
+WORKLOAD = Workload("org/model", "vllm", 8, 64, "fp8", "mi355x", KernelOptimizer.FORGE, InferenceXShape(1024, 1024))
+INTEGRATION = FinalCandidate("integration", INTEGRATION_BRANCH, "i1", 1040.0)
+BRANCH = FinalCandidate("best_branch", "b02", "c7", 1060.0)
+ROOT = "c0"
+#: A regression case's own repro test.
+CASE_SEC = 900.0
+
+
+class _Slots:
+    """FINAL's tests in virtual time on ``parallel`` slots, taken in turn; ``ended`` is when the last one ended."""
+
+    def __init__(self, clock: VirtualClock, parallel: int) -> None:
+        self._clock, self._slots = clock, asyncio.Semaphore(parallel)
+        self.ended = clock.now()
+
+    async def run(self, *seconds: float) -> None:
+        """One test, its attempts ``seconds`` long, with the infra backoff before each retry."""
+
+        async with self._slots:
+            for attempt, length in enumerate(seconds):
+                if attempt:
+                    await self._clock.sleep(INFRA_BACKOFF_SECONDS[attempt - 1])
+                await self._clock.sleep(length)
+        self.ended = max(self.ended, self._clock.now())
+
+
+class _Tests:
+    """The session's tests: a sweep takes a test per conc, after ``sweep_failures`` attempts a test long each that
+    meet an infrastructure failure, and a reproduction one test."""
+
+    def __init__(self, slots: _Slots, sweep_failures: int = 0) -> None:
+        self._slots, self._failures = slots, sweep_failures
+
+    async def result(self, request: TestRequest) -> TestResult:
+        await self._slots.run(*[TEST_SEC] * self._failures, len(request.concurrency) * TEST_SEC)
+        return TestResult("sweep", Validity.SUCCEEDED)
+
+    async def judged(self, request: TestRequest, judge: Callable[[str], Awaitable[T]]) -> T:
+        await self._slots.run(TEST_SEC)
+        return await judge("reproduction")
+
+
+class _Gate:
+    async def compare(self, request_id: str) -> Judgement:
+        return judged(Verdict.FLAT, 0.0, request_id, 1040.0)
+
+    async def accuracy_passes(self, request_id: str) -> bool:
+        return True
+
+    async def speed_gates(self) -> frozenset[str]:
+        return frozenset()
+
+
+@dataclass
+class _Regression(FakeRegressionCheck):
+    """Runs each case a commit still has on the slots, as long as ``case_seconds`` says."""
+
+    slots: _Slots | None = None
+
+    async def check_every_case(self, commit: str) -> RegressionOutcome:
+        assert self.slots is not None
+        await asyncio.gather(*(self.slots.run(seconds) for seconds in self.case_seconds.get(commit, ())))
+        return await super().check_every_case(commit)
+
+
+def _three_attempts_of_one_test() -> float:
+    """The reserve that counted three attempts of one test, whatever FINAL ran."""
+
+    backoff = INFRA_BACKOFF_SECONDS[0] + INFRA_BACKOFF_SECONDS[1]
+    return FINAL_WIND_DOWN_SECONDS + FINAL_ATTEMPTS * TEST_SEC + backoff + FINAL_COLD_START_SECONDS
+
+
+async def _validated(
+    candidates: FinalCandidates, parallel: int, cases: dict[str, tuple[float, ...]], sweep_failures: int = 0
+) -> tuple[FinalWork, float]:
+    """The validation FINAL plans for ``candidates`` with ``parallel`` slots, and the seconds from EXPLORE's end to
+    its last test's end when it runs: its wind-down, a cold start and its tests."""
+
+    clock = VirtualClock(1_000_000.0)
+    slots = _Slots(clock, parallel)
+    regression = _Regression(case_seconds=cases, slots=slots)
+    selector = FinalSelector(SessionChecks(_Tests(slots, sweep_failures), _Gate(), regression), WORKLOAD, parallel)
+    work = await selector.planned_work(candidates, TEST_SEC)
+    start = clock.now()
+    await selector.select(candidates)
+    return work, FINAL_WIND_DOWN_SECONDS + FINAL_COLD_START_SECONDS + slots.ended - start
+
+
+@pytest.mark.parametrize("parallel", [1, 4], ids=["one_slot", "four_slots"])
+async def test_the_reserve_covers_two_candidates_sweeps_reproductions_and_regression_cases_queued_on_final_s_slots(
+    parallel: int,
+) -> None:
+    cases = {"i1": (CASE_SEC,) * 4, "c7": (CASE_SEC,) * 4}
+
+    work, needed = await _validated(FinalCandidates(INTEGRATION, BRANCH), parallel, cases)
+
+    sweep = len(WORKLOAD.final_concs) * TEST_SEC
+    assert len(WORKLOAD.final_concs) == 3
+    assert work == FinalWork(2 * (sweep + TEST_SEC) + 8 * CASE_SEC, sweep, TEST_SEC, parallel)
+    assert final_reserve_seconds(work) >= needed, "FINAL's tests end inside its reserve"
+    assert _three_attempts_of_one_test() < needed, "three attempts of one test fall short of the queued validation"
+
+
+async def test_more_slots_keep_a_smaller_reserve_but_never_less_than_the_longest_sweep() -> None:
+    cases = {"i1": (CASE_SEC, CASE_SEC), "c7": (CASE_SEC, CASE_SEC)}
+
+    one, _ = await _validated(FinalCandidates(INTEGRATION, BRANCH), 1, cases)
+    four, _ = await _validated(FinalCandidates(INTEGRATION, BRANCH), 4, cases)
+    many = replace(four, parallel=64)
+
+    assert final_reserve_seconds(four) < final_reserve_seconds(one)
+    assert many.run_seconds > many.longest, "the longest sweep runs on one slot however many there are"
+
+
+async def test_a_sweep_dominated_chain_whose_sweep_meets_two_infra_failures_ends_inside_the_reserve() -> None:
+    root = FinalCandidate("integration", INTEGRATION_BRANCH, ROOT, None, root=True)
+
+    work, needed = await _validated(FinalCandidates(root, None), 4, {}, sweep_failures=2)
+
+    assert work.longest == len(WORKLOAD.final_concs) * TEST_SEC
+    assert final_reserve_seconds(work) >= needed
+    assert _three_attempts_of_one_test() < needed, "three attempts of one test fall short of a sweep and its retries"

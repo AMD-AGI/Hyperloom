@@ -44,7 +44,7 @@ import asyncio
 import contextlib
 import logging
 import math
-from collections.abc import Iterable, Mapping
+from collections.abc import Awaitable, Callable, Iterable, Mapping
 from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import TYPE_CHECKING
@@ -129,6 +129,10 @@ def gave_up_reason(status: SpecialistStatus) -> str:
     return f"its specialist gave up after {status.crashes} crashes{lost}"
 
 
+async def _uncapped() -> float:
+    return math.inf
+
+
 @dataclass(frozen=True)
 class ExploreWindow:
     """The commit every gain is measured against, the commit the first branches start from, the clock times EXPLORE and the budget end at, the GPU seconds the session's tests and
@@ -138,7 +142,9 @@ class ExploreWindow:
     the Arbor agents whose directions one mapping branch maps in EXPLORE before each runs its share (empty for none).
 
     ``root_commit`` is the session's measurement anchor and nothing moves it. ``start_commit`` is where EXPLORE opens:
-    the root, or the Recipe KB champion PRELUDE replayed onto it.
+    the root, or the Recipe KB champion PRELUDE replayed onto it. ``final_cap`` says, asked once a judge interval, the
+    latest EXPLORE may now end at for FINAL to end inside a limit of the session's caller, which comes sooner as the
+    validation FINAL would run grows; ``explore_end`` moves to it when it is sooner.
     """
 
     root_commit: str
@@ -151,6 +157,7 @@ class ExploreWindow:
     agents: tuple[str, ...]
     agent_plans: tuple[str, ...] = ()
     map_for: tuple[str, ...] = ()
+    final_cap: Callable[[], Awaitable[float]] = _uncapped
 
 
 @dataclass(frozen=True)
@@ -276,8 +283,12 @@ class Explorer:
                 await self._branches.open_map_branch(window.map_for, window.start_commit, window.explore_end)
 
     async def _steer(self, window: ExploreWindow, merging: asyncio.Future[None]) -> SessionStopReason:
-        next_judge = self._clock.now() + self._interval
+        next_judge = next_cap = self._clock.now() + self._interval
         while (now := self._clock.now()) < window.explore_end:
+            if now >= next_cap:
+                next_cap, window = now + self._interval, await self._capped(window)
+                if now >= window.explore_end:
+                    break
             if merging.done():
                 merging.result()
             if (spent := await self._budget_spent(window)) is not None:
@@ -299,6 +310,15 @@ class Explorer:
                 await self._dashboard.refresh()
             await self._clock.sleep(min(EXPLORE_TICK_SECONDS, window.explore_end - now))
         return SessionStopReason.TIME_EXHAUSTED
+
+    async def _capped(self, window: ExploreWindow) -> ExploreWindow:
+        """``window``, ending no later than its :attr:`~ExploreWindow.final_cap` now says."""
+
+        cap = await window.final_cap()
+        if cap >= window.explore_end:
+            return window
+        logger.info("EXPLORE ends sooner, at %.0f: the validation FINAL would run grew", cap)
+        return replace(window, explore_end=cap)
 
     async def _budget_spent(self, window: ExploreWindow) -> SessionStopReason | None:
         """The budget the session used up, if any: the GPU seconds EXPLORE has, tests' and leases' alike, then the

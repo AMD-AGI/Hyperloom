@@ -67,7 +67,12 @@ from hyperloom_multibranch.contracts.toolbox import WorkloadKind
 from hyperloom_multibranch.blackboard.codec import encode
 from hyperloom_multibranch.blackboard.knowledge.reference_leads import INFERENCEX_REFERENCE
 from hyperloom_multibranch.blackboard.rsi.archive import ARCHIVE_ENV
-from hyperloom_multibranch.scheduling.budget import MB_CLOSE_GRACE_CAP_SECONDS, MB_DEFAULT_MAX_HOURS, ExploreCap
+from hyperloom_multibranch.scheduling.budget import (
+    MB_CLOSE_GRACE_CAP_SECONDS,
+    MB_DEFAULT_MAX_HOURS,
+    ExploreCap,
+    FinalWork,
+)
 from hyperloom_multibranch.scheduling import hosted_run
 from hyperloom_multibranch.scheduling.hosted_run import GRANT_MARGIN_SECONDS, final_reserve_seconds
 from hyperloom_multibranch.scheduling.clock import Clock
@@ -1791,7 +1796,8 @@ def test_a_hosted_session_ends_explore_a_final_reserve_before_the_grant_s_stop(
     [cap] = EXPLORE_CAPS
     assert cap is not None
     for longest in (0.0, 1500.0):
-        assert cap(longest) == pytest.approx(stop - GRANT_MARGIN_SECONDS - final_reserve_seconds(longest), abs=1.0)
+        work = FinalWork(4 * longest, 3 * longest, longest, 1)
+        assert cap(work) == pytest.approx(stop - GRANT_MARGIN_SECONDS - final_reserve_seconds(work), abs=1.0)
 
 
 @pytest.mark.usefixtures("ready_environment")
