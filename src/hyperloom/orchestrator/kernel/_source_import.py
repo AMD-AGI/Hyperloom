@@ -5,23 +5,70 @@
 
 from __future__ import annotations
 
+import ast
 import re
 from pathlib import Path
 from typing import Any, NamedTuple
 
 from .kernel_decisions import _honest_flag
 
+_TRITON_KERNEL_DECORATORS = frozenset({"jit", "autotune", "heuristics"})
+_KERNEL_COMPILE_CUE = re.compile(r"compil|triton", re.IGNORECASE)
 
-def _confirm_source_imported(source_file: str, workspace: str | Path | None) -> bool | None:
+
+def _is_triton_kernel_decorator(node: ast.expr) -> bool:
+    target = node.func if isinstance(node, ast.Call) else node
+    return (
+        isinstance(target, ast.Attribute)
+        and target.attr in _TRITON_KERNEL_DECORATORS
+        and isinstance(target.value, ast.Name)
+        and target.value.id == "triton"
+    )
+
+
+def _triton_kernel_names(source_file: str, repo_root: str | Path | None) -> list[str]:
+    """Names of the ``@triton.*`` kernels the patched source defines; empty when it cannot be read."""
+    path = Path(source_file)
+    if not path.is_absolute() and repo_root:
+        path = Path(repo_root) / path
+    try:
+        tree = ast.parse(path.read_text(encoding="utf-8", errors="ignore"))
+    except (OSError, SyntaxError, ValueError):
+        return []
+    return [
+        node.name
+        for node in ast.walk(tree)
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
+        and any(_is_triton_kernel_decorator(decorator) for decorator in node.decorator_list)
+    ]
+
+
+def _kernel_compiled_in_log(names: list[str], text: str) -> bool:
+    patterns = [re.compile(rf"\b{re.escape(name)}\b") for name in names]
+    return any(
+        _KERNEL_COMPILE_CUE.search(line) and any(pattern.search(line) for pattern in patterns)
+        for line in text.splitlines()
+    )
+
+
+def _confirm_source_imported(
+    source_file: str,
+    workspace: str | Path | None,
+    *,
+    repo_root: str | Path | None = None,
+) -> bool | None:
     """Best-effort confirm the patched source was actually imported/compiled.
 
     Greps the re-baseline server log for evidence the patched module's basename
     was imported/loaded/compiled, so a measured E2E delta is attributed to code
-    the workload really ran. Returns a tri-state:
+    the workload really ran. A plain import logs nothing, so a Triton kernel the
+    patched file defines showing up in a compile line also counts as evidence.
+    Returns a tri-state:
 
-    * ``True``  — the module basename appears in import/load/compile context.
-    * ``False`` — the server log is readable and the basename never appears
-      anywhere (positive evidence the patched file was not exercised).
+    * ``True``  — the module basename appears in import/load/compile context,
+      or one of its Triton kernels appears in a compile line.
+    * ``False`` — the server log is readable and neither the basename nor any
+      of its Triton kernels appears (evidence the file was not exercised).
     * ``None``  — unknown (no source_file, no readable log) — never penalized.
     """
     if not source_file or not workspace:
@@ -43,7 +90,7 @@ def _confirm_source_imported(source_file: str, workspace: str | Path | None) -> 
     except OSError:
         return None
     if stem not in text:
-        return False
+        return _kernel_compiled_in_log(_triton_kernel_names(source_file, repo_root), text)
     # Confirmed only when the basename co-occurs with an import/compile cue.
     for line in text.splitlines():
         if stem in line and re.search(r"import|load|compil|build|\.py", line, re.IGNORECASE):
@@ -55,6 +102,8 @@ def _confirm_source_imported(source_file: str, workspace: str | Path | None) -> 
 def _confirm_sources_imported(
     source_files: list[str],
     workspace: str | Path | None,
+    *,
+    repo_root: str | Path | None = None,
 ) -> tuple[bool | None, dict[str, bool | None]]:
     """Confirm every file a patch wrote was exercised by the served process.
 
@@ -72,7 +121,7 @@ def _confirm_sources_imported(
     ordered = list(dict.fromkeys(path for path in source_files if str(path or "").strip()))
     if not ordered:
         return None, {}
-    per_file = {path: _confirm_source_imported(path, workspace) for path in ordered}
+    per_file = {path: _confirm_source_imported(path, workspace, repo_root=repo_root) for path in ordered}
     verdicts = list(per_file.values())
     if all(verdict is True for verdict in verdicts):
         return True, per_file
@@ -101,7 +150,8 @@ def _confirm_source_import(
     written = [str(path) for path in (payload.get("patch_write_paths") or []) if str(path or "").strip()]
     if not written:
         written = [str(payload.get("target_file") or payload.get("source_file") or "")]
-    confirmed, evidence = _confirm_sources_imported(written, workspace)
+    repo_root = payload.get("repo") or payload.get("kernel_repo")
+    confirmed, evidence = _confirm_sources_imported(written, workspace, repo_root=repo_root)
     downgraded = decision == "KEEP" and confirmed is False and _honest_flag("HL_CONFIRM_SOURCE_IMPORTED_STRICT")
     return _SourceImport(
         confirmed=confirmed,
