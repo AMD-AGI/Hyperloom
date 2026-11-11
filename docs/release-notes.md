@@ -28,10 +28,11 @@ it.
   `INFERENCE_SUITE_TOOL_CACHE`. `MAGPIE_*`, `HYPERLOOM_BENCHMARK_BACKEND` and
   `INFERENCEX_REF` are no longer read; `MAGPIE_EVAL_LIMIT` is now
   `HYPERLOOM_EVAL_LIMIT`. **Upgrade note:** hosted measurement sheets and
-  result manifests are v2 and a runner refuses a v1 sheet, so build the runner
-  cache (`cache_build`) for the new commit before starting hosted sessions on
-  it; a runner whose published staging differs from the sheet's refuses with
-  `preflight_mismatch`.
+  result manifests are v2 and nothing reads v1 ones any more: a session
+  started before this change cannot be resumed, nor its accepted results
+  verified again. Build the runner cache (`cache_build`) for the new commit
+  before starting hosted sessions on it; a runner whose published staging
+  differs from the sheet's refuses with `preflight_mismatch`.
 - **A GEAK or Forge reproduction of the measured launch keeps settings whose
   names contain `TOKEN`.** The GEAK handoff's `baseline_env_spec`, the Forge
   handoff's serving context and the reference launch script now carry launch
