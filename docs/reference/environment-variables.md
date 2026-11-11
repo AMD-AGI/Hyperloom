@@ -1240,6 +1240,25 @@ scriptable frameworks (xDiT, custom) keep output-throughput grading.
 | `HYPERLOOM_AGENTX_EARLY_STOP`  | `enforce`                     | AgentX checkpoint after 1800 s of profiling: the round's median interactivity over the requests finished by then, against the reference's own first 1800 s. The ruling is written to `agentx_checkpoint.json` in the round's slot. `enforce` stops an explore decision round that trails by more than 2% and records it as REVERT; `shadow` only writes the ruling; `off` skips the checkpoint. Any other value raises `EnvValueError`. A reference measured without a checkpoint median is never compared. |
 | `INFERENCE_OPTIMIZER_BASELINE_SERVER_READY_SEC` | `7200` | Initial server-boot budget written by the persistent-server lifecycle configuration helper. Actual benchmark launches synchronize this field to `INFERENCE_OPTIMIZER_BENCHMARK_TIMEOUT_SEC`; this variable is not an additional benchmark deadline or a way to extend one. Non-benchmark lifecycle callers that do not perform that synchronization retain their own boot budget. |
 
+### Cycle screen
+
+A replay round cannot resolve the 1–3% change most framework patches make. With
+`HYPERLOOM_CYCLE_BENCH=1`, an AgentX session admits a specialist patch that gates
+its rewrite behind default-off switches without a replay round, and screens its
+switches on the decode cycle of the current stack (bs 1/2/4, about eight minutes
+per server boot, serialized through the GPU locks). Only switches that read
+faster join the dormant-lever bundle that is replayed against the KEEP rule.
+Before the first batch on a stack, and after each KEEP, two bases are measured
+alone; each batch's base is held to the previous batch's last base, and a tree
+that moved with every switch off closes the screen for the rest of the session.
+A patch touching a path steady decode never exercises (tokenization, the API front
+end, the prefix and hierarchical KV caches) is not screened and takes its own
+replay round. Off, a switched patch takes its own replay round as before.
+
+| Variable                 | Default | Description |
+|--------------------------|---------|-------------|
+| `HYPERLOOM_CYCLE_BENCH`  | off     | `1` turns the cycle screen on for AgentX sessions. Read when a patch is submitted and again when it is integrated, so switching it off on resume returns already-marked patches to their replay round. |
+
 ### MLPerf agentic backend
 
 `HYPERLOOM_AGENTIC_BACKEND=mlperf` (with `HYPERLOOM_AGENTX=1`) keeps Magpie's

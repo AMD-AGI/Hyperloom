@@ -163,3 +163,18 @@ def test_intervention_mix_summary_respects_threshold():
     out = s.to_intervention_mix_summary()
     assert "config_keeps=1" in out
     assert "ESCALATION" not in out
+
+
+def test_a_cycle_batch_is_not_an_intervention():
+    """A cycle-bench batch grades levers for a later bundle; it tried no configuration on the replay."""
+    from hyperloom.orchestrator.loop.coordinator import Coordinator
+    from hyperloom.orchestrator.measurement.cycle_bench import STATUS_SCREENED
+    from hyperloom.orchestrator.state.task_registry import Task
+
+    c = Coordinator.__new__(Coordinator)
+    c.shared_state = SharedState(session_id="cycle-batch")
+    task = Task(task_id="explore-c", kind="explore", state="succeeded", params={}, idempotency_key="explore-c")
+
+    c.writeback.record_intervention_for_task(task, {"status": STATUS_SCREENED, "valid": True}, Verdict.RECORDED)
+
+    assert c.shared_state.intervention_mix == []

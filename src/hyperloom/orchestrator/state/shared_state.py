@@ -498,6 +498,14 @@ class SharedState(_RenderMixin, GapsStateMixin, _PhaseStateMixin, _RooflineState
     warm_replay_min_confidence: float = 0.7
     # Full accepted configuration stack across action families; current_best keeps the materialized full args/env.
     optimization_stack: list[dict[str, Any]] = field(default_factory=list)
+    # Benchmarked authored patches keyed by the lines they changed (``framework.patch_overlap``); newest last, capped.
+    measured_patch_sets: list[dict[str, Any]] = field(default_factory=list)
+    # The last valid cycle batch's base2 ``cycle_ms`` and stack length; the next batch's base is held to it.
+    cycle_reference: dict[str, Any] = field(default_factory=dict)
+    cycle_screen_refused: str = ""  # Why dormant admission for the cycle screen is closed; empty while open.
+    cycle_bundle_screens: dict[str, str] = field(default_factory=dict)  # Cycle verdict per dormant-lever bundle key.
+    # The newest cycle-bench profiler capture (``trace``) and the stack length it ran; the module table's source.
+    last_attribution_trace: dict[str, Any] = field(default_factory=dict)
     # Index-aligned with ``optimization_stack``: per-entry incremental gain pct; missing => None.
     gain_per_stack_entry: list[float | None] = field(default_factory=list)
     # Total gain over ``baseline_tput``, stamped only from a measurement taken with the whole stack applied;

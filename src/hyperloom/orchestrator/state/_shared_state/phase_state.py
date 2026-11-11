@@ -137,7 +137,7 @@ def _accepted_entry(variant: dict[str, Any], config: _AcceptedConfig, cycle: int
     }
 
 
-def _lever_row(entry: dict[str, Any], default_on: bool) -> dict[str, Any]:
+def _lever_row(entry: dict[str, Any], default_on: bool, *, specialist_task_id: str, ts: str) -> dict[str, Any]:
     """The ``authored_framework_levers`` row for one accepted framework-rewrite switch."""
     return {
         "switch": str(entry.get("switch") or "").strip().upper(),
@@ -146,9 +146,13 @@ def _lever_row(entry: dict[str, Any], default_on: bool) -> dict[str, Any]:
         "depends_on": list(entry.get("depends_on") or []),
         "enables": list(entry.get("enables") or []),
         "default_on": default_on,
+        # The cycle bench groups one patch's levers by this pair.
+        "specialist_task_id": specialist_task_id,
+        "ts": ts,
         # Filled in by the explore phase once the lever has been measured on its own; ``None`` means
         # "registered, not yet attributed".
         "attributed_gain_pct": None,
+        "attribution_source": "",
     }
 
 
@@ -411,11 +415,41 @@ class _PhaseStateMixin:
         ]
         self.explore_search = search
 
+    def record_measured_patch_set(
+        self,
+        *,
+        task_id: str,
+        patch_name: str,
+        identity: dict[str, list[str]],
+        outcome: str,
+        landed: bool = False,
+    ) -> None:
+        """Record that a round measured the patch *identity* (``files``, ``line_keys``) describes, and if it stayed."""
+        from ...framework.patch_overlap import MAX_MEASURED
+
+        line_keys = list(identity.get("line_keys") or [])
+        if not line_keys:
+            return
+        self.measured_patch_sets.append(
+            {
+                "task_id": task_id,
+                "patch_name": patch_name,
+                "files": list(identity["files"]),
+                "line_keys": line_keys,
+                "outcome": outcome,
+                "landed": landed,
+                "ts": now_iso(),
+            }
+        )
+        if len(self.measured_patch_sets) > MAX_MEASURED:
+            self.measured_patch_sets = self.measured_patch_sets[-MAX_MEASURED:]
+
     def record_authored_framework_levers(
         self,
         switches: list[dict[str, Any]],
         *,
         default_on: bool,
+        specialist_task_id: str = "",
         source_layer: dict[str, Any] | None = None,
     ) -> bool:
         """Register accepted framework-rewrite switches as search levers.
@@ -427,11 +461,12 @@ class _PhaseStateMixin:
             return False
         rows = list(getattr(self, "authored_framework_levers", None) or [])
         by_switch = {str(r.get("switch") or ""): i for i, r in enumerate(rows) if isinstance(r, dict)}
+        now = now_iso()
         changed = False
         for entry in switches:
             if not isinstance(entry, dict):
                 continue
-            row = _lever_row(entry, bool(default_on))
+            row = _lever_row(entry, bool(default_on), specialist_task_id=specialist_task_id, ts=now)
             name = row["switch"]
             if not name:
                 continue
@@ -447,6 +482,7 @@ class _PhaseStateMixin:
             # Preserve an attribution already measured for this lever; the measurement is more informative than this
             # registration.
             row["attributed_gain_pct"] = prior.get("attributed_gain_pct")
+            row["attribution_source"] = str(prior.get("attribution_source") or "")
             if not source_layer and prior.get("source_layer"):
                 row["source_layer"] = prior["source_layer"]
             if prior != row:
@@ -461,6 +497,7 @@ class _PhaseStateMixin:
         switch: str,
         *,
         gain_pct: float | None,
+        source: str = "",
     ) -> bool:
         """Record a lever's individually measured contribution."""
         name = str(switch or "").strip().upper()
@@ -472,6 +509,7 @@ class _PhaseStateMixin:
                 continue
             updated = dict(row)
             updated["attributed_gain_pct"] = float(gain_pct) if isinstance(gain_pct, (int, float)) else None
+            updated["attribution_source"] = source
             if updated != row:
                 rows[index] = updated
                 self.authored_framework_levers = rows

@@ -30,7 +30,7 @@ from .proposal_schemas import (
     UPSTREAM_CANDIDATE_CONTRACT,
     UPSTREAM_CANDIDATE_EXAMPLE,
 )
-from .specialist_focus import _DOMAIN_FOCUS_TEMPLATES, _is_agentx, split_evidence
+from .specialist_focus import _DOMAIN_FOCUS_TEMPLATES, _is_agentx, owned_module_rows, split_evidence, switch_contract
 from .specialist_prompt_text import (
     IDENTITY_MANDATE_LINES,
     ORCHESTRATOR_CHANNEL_LINES,
@@ -139,7 +139,7 @@ def _source_patch_altitude_block(inp: SpecialistPromptInputs) -> list[str]:
 
 
 def _domain_focus_blocks(inp: SpecialistPromptInputs) -> list[str]:
-    """Render the focus block of the active domain, then of each extra tag on a multi-tag dispatch, closing on the altitude coda that spans them."""
+    """Render the focus block of the active domain, then of each extra tag on a multi-tag dispatch, closing on the altitude and switch-contract codas that span them."""
     body: list[str] = []
     rendered: set[str] = set()
     for key in (inp.domain.key, *(getattr(domain_for_tag(t), "key", "") for t in inp.extra_focus_tags)):
@@ -149,7 +149,7 @@ def _domain_focus_blocks(inp: SpecialistPromptInputs) -> list[str]:
             continue
         body.extend(["", f"### Domain focus — {key}", "", *lines])
         rendered.add(key)
-    body.extend(_source_patch_altitude_block(inp))
+    body.extend([*_source_patch_altitude_block(inp), *switch_contract(inp)])
     return body
 
 
@@ -411,7 +411,7 @@ def _section_mandate(inp: SpecialistPromptInputs) -> list[str]:
     ]
     if anchor:
         rows.append(f"- anchor: `{anchor}`")
-    rows.extend(_mandate_run_status(inp))
+    rows.extend([*owned_module_rows(inp), *_mandate_run_status(inp)])
 
     rows.extend(
         [

@@ -127,41 +127,108 @@ def specialist_admission_minutes(shared_state: SharedState, params: dict[str, An
     return floor_min
 
 
-def time_budget_denial(action: str, expected_cost_minutes: float, shared_state: SharedState) -> PolicyDenied | None:
+def explore_admission_minutes(per_round_minutes: float, params: dict[str, Any] | None) -> float:
+    """What an explore round costs: one measured round per grid variant, or one short boot per cycle-bench arm."""
+    from ..actions.executors.cycle_bench_arm import CYCLE_ARM_MINUTES, CYCLE_ARMS_PARAM
+
+    if CYCLE_ARMS_PARAM in (params or {}):
+        # A cycle batch boots once per candidate and once per bracketing base.
+        return CYCLE_ARM_MINUTES * (len(params[CYCLE_ARMS_PARAM]) + 2)
+    variants = len(((params or {}).get("grid") or ()))
+    return per_round_minutes * variants if variants > 1 else per_round_minutes
+
+
+def expected_round_minutes(
+    action_name: str, params: dict[str, Any] | None, action_registry: Any, shared_state: SharedState
+) -> float:
+    """What one round of a catalogued action is admitted at, on this session's measured baseline round once one exists."""
+    meta = action_registry.get(action_name)
+    if meta is None:
+        return 0.0
+    minutes = expected_action_cost_minutes(meta, measured_baseline_sec=measured_baseline_runtime_sec(shared_state))
+    return explore_admission_minutes(minutes, params) if action_name == "explore" else minutes
+
+
+def queued_lane_minutes(action_name: str, queued: Any, action_registry: Any, shared_state: SharedState) -> float:
+    """Minutes the ``queued`` tasks have committed on the lanes ``action_name`` needs; other lanes run alongside."""
+
+    def lanes(name: str) -> set[str]:
+        meta = action_registry.get(name)
+        return set(meta.requires_lanes) if meta is not None else set()
+
+    wanted = lanes(action_name)
+    total = 0.0
+    for task in queued:
+        if not wanted or wanted & lanes(task.kind):
+            total += expected_round_minutes(task.kind, task.params, action_registry, shared_state)
+    return total
+
+
+def time_budget_denial(
+    action: str,
+    expected_cost_minutes: float,
+    shared_state: SharedState,
+    *,
+    queued_minutes: float = 0.0,
+) -> PolicyDenied | None:
     """Refuse an action that the session's usable time, or the gated phase's remaining time, cannot fit.
 
     Args:
         action: The action being admitted.
         expected_cost_minutes: What the action is expected to cost.
         shared_state: The live session state both budgets are read from.
+        queued_minutes: What work already queued on the action's lanes has spoken for; it is charged first.
 
     Returns:
         A :class:`PolicyDenied` naming the budget that cannot fit the action, else ``None``.
     """
+    needed = expected_cost_minutes + queued_minutes
     session_sec = shared_state.session_budget_usable_sec()
-    if not action_fits_time_budget(usable_sec=session_sec, expected_cost_minutes=expected_cost_minutes):
+    if not action_fits_time_budget(usable_sec=session_sec, expected_cost_minutes=needed):
         return PolicyDenied(
-            _cost_exceeds(action, expected_cost_minutes, session_sec, "the session budget"),
+            _cost_exceeds(action, expected_cost_minutes, queued_minutes, session_sec, "the session budget"),
             rule="time_budget",
-            hint=(
+            hint=_denial_hint(
+                queued_minutes,
+                session_sec,
                 "the wall-clock budget cannot fit this action; pick an action that fits "
-                "the time left, the Coordinator closes the session once none does"
+                "the time left, the Coordinator closes the session once none does",
             ),
         )
     phase_sec = gated_phase_remaining_sec(shared_state)
-    if not action_fits_time_budget(usable_sec=phase_sec, expected_cost_minutes=expected_cost_minutes):
+    if not action_fits_time_budget(usable_sec=phase_sec, expected_cost_minutes=needed):
         return PolicyDenied(
-            _cost_exceeds(action, expected_cost_minutes, phase_sec, f"the {shared_state.phase} phase budget"),
+            _cost_exceeds(
+                action, expected_cost_minutes, queued_minutes, phase_sec, f"the {shared_state.phase} phase budget"
+            ),
             rule="phase_time_budget",
-            hint="the phase's wall-clock budget cannot fit this action; pick one that fits the time left in the phase",
+            hint=_denial_hint(
+                queued_minutes,
+                phase_sec,
+                "the phase's wall-clock budget cannot fit this action; pick one that fits the time left in the phase",
+            ),
         )
     return None
 
 
-def _cost_exceeds(action: str, expected_cost_minutes: float, usable_sec: float | None, budget: str) -> str:
-    """The denial reason: what the action needs against what ``budget`` has left."""
+def _denial_hint(queued_minutes: float, usable_sec: float | None, short_hint: str) -> str:
+    """What to do about a refusal: wait for the queue when it is what fills a budget that can fund it, else ``short_hint``."""
+    if queued_minutes > 0 and action_fits_time_budget(usable_sec=usable_sec, expected_cost_minutes=queued_minutes):
+        return (
+            "the budget is booked, not spent: the work already queued on this action's lanes fits it and runs first. "
+            "Propose again once that queue has drained, or something small enough to fit after it; leaving the phase "
+            "now cancels the queue unmeasured"
+        )
+    return short_hint
+
+
+def _cost_exceeds(
+    action: str, expected_cost_minutes: float, queued_minutes: float, usable_sec: float | None, budget: str
+) -> str:
+    """The denial reason: what the action needs, after the queue, against what ``budget`` has left."""
     remaining_min = (usable_sec or 0.0) / _SECONDS_PER_MINUTE
+    after_queue = f" after the ~{queued_minutes:.0f} min already queued on its lanes" if queued_minutes > 0 else ""
     return (
-        f"action={action!r} denied: needs ~{expected_cost_minutes:.0f} min but only "
+        f"action={action!r} denied: needs ~{expected_cost_minutes:.0f} min{after_queue} but only "
         f"{remaining_min:.0f} min of {budget} is left"
     )

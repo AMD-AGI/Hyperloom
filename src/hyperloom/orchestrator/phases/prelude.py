@@ -1673,9 +1673,7 @@ class PreludePhase(_WarmKernelPrepMixin, CoordinatorCollaborator):
             self._record_prelude_arm_dropped("initial_analysis", evidence)
             return
         try:
-            rl_task = await self.enqueue_internal_analysis_task(
-                reason="prelude_initial",
-            )
+            rl_task = await self.enqueue_internal_analysis_task(reason="prelude_initial")
             if rl_task is None:
                 return
             state.auto_roofline_pending_task_id = rl_task.task_id

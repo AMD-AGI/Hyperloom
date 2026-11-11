@@ -650,7 +650,6 @@ def _sigterm_disposition_kept() -> Iterator[None]:
 
 def quiet_ray_init(num_gpus: Optional[int] = None) -> None:
     """Initialize ray while suppressing the connect banner on stdout."""
-    import contextlib
     import io
     import ray
 

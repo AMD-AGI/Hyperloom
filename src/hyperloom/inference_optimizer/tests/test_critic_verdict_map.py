@@ -1814,6 +1814,7 @@ def _delegate_coord(tmp_path: Path):
     @dataclass
     class _State(_BareSharedState):
         baseline_config_path: str = ""
+        baseline_workspace: str = ""
         baseline_tput: float = 0.0
         current_best: dict = field(default_factory=dict)
         tick: int = 0
@@ -1830,7 +1831,7 @@ def _delegate_coord(tmp_path: Path):
     c.bus = _StubBus()
     c.bus.record_observation = AsyncMock()  # type: ignore[method-assign]
     c.router.record_policy_denied = AsyncMock()  # type: ignore[method-assign]
-    c.dispatcher.admission_denial_for_action = lambda *a, **k: None  # type: ignore[method-assign]
+    c.dispatcher.admission_denial_for_action = AsyncMock(return_value=None)  # type: ignore[method-assign]
     c.dispatcher.registry_lanes_ttl = lambda _name: (set(), 0)  # type: ignore[method-assign]
     c.policy = None
     return c

@@ -46,6 +46,18 @@ def _ground(patch_text: str, base: Path) -> str:
     return grounding[str(patch)]
 
 
+def test_a_patch_that_does_not_apply_is_stale(tmp_path):
+    root = _repo(tmp_path)
+
+    assert _ground(_PATCH.format(old="SOMETHING-ELSE"), root) == ps.GROUND_STALE
+
+
+def test_a_patch_that_applies_is_grounded(tmp_path):
+    root = _repo(tmp_path)
+
+    assert _ground(_PATCH.format(old="original"), root) == ps.GROUND_APPLIES
+
+
 def test_a_worktree_whose_parent_is_gone_is_unchecked_not_stale(tmp_path):
     root = _repo(tmp_path)
     worktree = tmp_path / "wt"

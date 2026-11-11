@@ -52,11 +52,12 @@ from ..specialists.wall_budget import limit_wall_budget_extension
 from ..state.task_registry import IllegalTransition, Task, TaskNotFound, TaskSpec
 from .time_budget import (
     TIME_BUDGET_EXEMPT_ACTIONS,
-    expected_action_cost_minutes,
     gated_phase_remaining_sec,
     lease_ttl_sec,
     measured_baseline_runtime_sec,
     phase_deadline,
+    expected_round_minutes,
+    queued_lane_minutes,
     specialist_admission_minutes,
     time_budget_denial,
 )
@@ -1056,8 +1057,8 @@ class DispatcherCollaborator(DeadHolderAccountingMixin, CoordinatorCollaborator)
             self._coord.writeback.record_intervention_for_task(task, result.result, verdict)
         if promotion is None:
             return
-        if task.kind == "integrate_patch":
-            await self._coord.phase_framework.on_integrate_patch_settled(task, result, verdict)
+        if task.kind in ("explore", "integrate_patch"):
+            await self._coord.phase_framework.on_task_settled(task, result, verdict)
         # replay_warm_recipe is excluded from the fact-write: it is verification, not a fact.
         if task.kind != _REPLAY_WARM_RECIPE:
             try:
@@ -1201,8 +1202,7 @@ class DispatcherCollaborator(DeadHolderAccountingMixin, CoordinatorCollaborator)
 
     def admission_cost_minutes(self, action_name: str) -> float:
         """What a catalogued action is admitted at, priced on this session's measured baseline round once one exists."""
-        measured_sec = measured_baseline_runtime_sec(self.shared_state)
-        return expected_action_cost_minutes(self.action_registry.get(action_name), measured_baseline_sec=measured_sec)
+        return expected_round_minutes(action_name, None, self.action_registry, self.shared_state)
 
     def time_budget_denial_for_action(
         self,
@@ -1210,6 +1210,7 @@ class DispatcherCollaborator(DeadHolderAccountingMixin, CoordinatorCollaborator)
         *,
         fallback_cost_minutes: float | None = None,
         params: dict[str, Any] | None = None,
+        already_committed_minutes: float = 0.0,
     ) -> PolicyDenied | None:
         """Refuse an action whose expected cost cannot fit the remaining session budget or gated phase budget.
 
@@ -1238,16 +1239,17 @@ class DispatcherCollaborator(DeadHolderAccountingMixin, CoordinatorCollaborator)
         if self.shared_state.stop_reason:
             return None
         if self.action_registry.get(action) is not None:
-            expected_min = self.admission_cost_minutes(action)
+            expected_min = expected_round_minutes(action, params, self.action_registry, self.shared_state)
         elif fallback_cost_minutes is not None:
             expected_min = float(fallback_cost_minutes)
         else:
             return None
         if action == "specialist":
             expected_min = max(expected_min, specialist_admission_minutes(self.shared_state, params))
-        return time_budget_denial(action, expected_min, self.shared_state)
+        # Queued minutes are committed though unspent; zero at dispatch, where the queue is being drained.
+        return time_budget_denial(action, expected_min, self.shared_state, queued_minutes=already_committed_minutes)
 
-    def admission_denial_for_action(
+    async def admission_denial_for_action(
         self, action_name: str, *, params: dict[str, Any] | None = None
     ) -> PolicyDenied | None:
         """Run every pre-dispatch gate for an action name, first denial wins.
@@ -1262,11 +1264,18 @@ class DispatcherCollaborator(DeadHolderAccountingMixin, CoordinatorCollaborator)
         Returns:
             The first :class:`PolicyDenied` that fires, else ``None``.
         """
+        if self.admission_frozen:
+            return PolicyDenied(
+                f"action={action_name!r} denied: the phase is leaving and admits nothing new",
+                rule="phase_transition_pending",
+                hint="the next phase starts on quiet GPUs; propose again once it has been entered",
+            )
+        queued = queued_lane_minutes(action_name, await self.tasks.queued(), self.action_registry, self.shared_state)
         return (
             self._phase_denial_for_action(action_name)
             or self._sequence_denial_for_action(action_name)
             or specialist_in_flight_denial(action_name, params, self.tasks, self.shared_state.find_gap)
-            or self.time_budget_denial_for_action(action_name, params=params)
+            or self.time_budget_denial_for_action(action_name, params=params, already_committed_minutes=queued)
             # Last: a session out of time is told so before an explore is told its grid is missing.
             or explore_grid_denial(action_name, params, self.shared_state)
         )

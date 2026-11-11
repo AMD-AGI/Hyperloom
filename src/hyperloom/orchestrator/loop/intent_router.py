@@ -6,8 +6,6 @@
 from __future__ import annotations
 
 import asyncio
-import hashlib
-import json
 import sqlite3
 import time
 import uuid
@@ -59,6 +57,7 @@ from .kernel_request import (
     run_kernel_handler,
 )
 from ._escalate_hint import escalate_hint_denial
+from ._explore_delegate import admit_explore_grid, delegate_idempotency_key
 from .message_delivery import publish_send_message
 
 # ``Coordinator`` is intentionally NOT imported (avoids a module-level import cycle with coordinator.py); it is held
@@ -558,7 +557,9 @@ class IntentRouter(CoordinatorCollaborator):
         # Pruned families are advisory: proposal still queues with an advisory note.
         if self._is_pruned_action(action_name):
             await self._note_pruned_advisory(source, action_name, "proposal_pruned_advisory")
-        denied = self._coord.dispatcher.admission_denial_for_action(action_name, params=intent.payload.get("params"))
+        denied = await self._coord.dispatcher.admission_denial_for_action(
+            action_name, params=intent.payload.get("params")
+        )
         if denied is not None:
             await self.record_policy_denied(source, intent, denied)
             return
@@ -887,34 +888,22 @@ class IntentRouter(CoordinatorCollaborator):
         await self.record_policy_denied(request.source, request.intent, denied, action_name=request.action_name)
         return None
 
-    async def _explore_grid_covered(
-        self, action_name: str, source: str, intent: Intent, params: dict[str, Any]
-    ) -> bool:
-        """Refuse an explore grid that adds nothing new, recording the denial; report whether it was refused."""
-        if action_name != "explore":
-            return False
-        from ..actions.executors.explore import framework_lever_grid
-        from ..actions.executors.explore_prefilter.measured_variants import explore_grid_already_covered
-
-        if framework_lever_grid(self.shared_state):
-            # The executor adds its pending rewrite levers to this grid, so the grid is not all there is to measure.
-            return False
-
-        active = (*await self.tasks.queued(), *await self.tasks.running())
-        covered = explore_grid_already_covered(params, active, self.shared_state.explore_search)
-        if covered is None:
-            return False
-        await self.record_policy_denied(source, intent, covered, action_name="explore")
-        return True
+    async def _delegate_refused(self, source: str, intent: Intent, action_name: str) -> bool:
+        """Whether admission refuses the delegate, judged with the module group a specialist's target implies."""
+        params = intent.payload.get("params")
+        if action_name == "specialist":
+            await self._coord.specialist_dispatch.assign_module_group(params or {})
+        denied = await self._coord.dispatcher.admission_denial_for_action(action_name, params=params)
+        if denied is not None:
+            await self.record_policy_denied(source, intent, denied, action_name=action_name)
+        return denied is not None
 
     async def handle_delegate(self, source: str, intent: Intent) -> None:
         """Validate and enqueue a delegated action as a TaskRegistry task."""
         action_name = intent.payload["action_name"]
         if self._is_pruned_action(action_name):
             await self._note_pruned_advisory(source, action_name, "delegate_pruned_advisory")
-        denied = self._coord.dispatcher.admission_denial_for_action(action_name, params=intent.payload.get("params"))
-        if denied is not None:
-            await self.record_policy_denied(source, intent, denied, action_name=action_name)
+        if await self._delegate_refused(source, intent, action_name):
             return
         # delegate explore runs variants directly (no Critic pre-review).
         payload = dict(intent.payload)
@@ -936,26 +925,17 @@ class IntentRouter(CoordinatorCollaborator):
             return
         if not await self._prepare_specialist_dispatch(request, nested_idempotency_key):
             return
-        content_fp = hashlib.sha1(
-            json.dumps(params, sort_keys=True, default=str).encode(), usedforsecurity=False
-        ).hexdigest()[:10]
-        # An explore round is the grid it measures, so it is keyed by that alone. Other delegates take the top-level
-        # key, then the nested compat alias, then a tick-scoped content key.
-        raw_key = (
-            f"explore:{content_fp}"
-            if action_name == "explore"
-            else intent.payload.get("idempotency_key")
-            or nested_idempotency_key
-            or f"{source}:{action_name}:t{int(self.shared_state.tick or 0)}:{content_fp}"
-        )
-        if await self._explore_grid_covered(action_name, source, intent, params):
+        idempotency_key = delegate_idempotency_key(request, self.shared_state, nested_idempotency_key)
+        if action_name == "explore" and not await admit_explore_grid(
+            self, request, idempotency_key, nested_idempotency_key
+        ):
             return
         # The grid's attempts join its proposal row through this id, as an approved proposal's do. Added after the
         # key is derived, so an identical re-emit still lands on the task already running.
         proposal_id = uuid.uuid4().hex if action_name == "explore" else ""
         if proposal_id:
             params["proposal_msg_id"] = proposal_id
-        task = await self._create_delegated_task(request, raw_key)
+        task = await self._create_delegated_task(request, idempotency_key)
         if task is None:
             return
         self.shared_state.reset_policy_denial_streak(action_name)

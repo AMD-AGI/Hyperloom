@@ -24,6 +24,23 @@ RESULT_BENCHED = "benched"
 #: Error class of a bench the environment kept from measuring: no verdict on the patch.
 BENCH_UNMEASURED_CLASS = "bench_unmeasured"
 
+#: Task param naming the screen a switched patch goes through instead of a replay of its own; carried on the result.
+SCREEN_PARAM = "screen"
+
+#: The cycle bench screens the patch's levers, so integration commits the patch dormant without benching it.
+SCREEN_CYCLE = "cycle"
+
+#: The patch touches a host path the cycle bench cannot see: it takes its own replay round, dispatched first.
+SCREEN_HOST = "host"
+
+#: Attribution source of a lever admitted for the cycle screen and not measured yet.
+ATTRIBUTION_CYCLE_PENDING = "cycle_bench_pending"
+
+#: Attribution sources a cycle batch writes: a graded gain, an arm whose server failed, a batch whose bases disagreed.
+ATTRIBUTION_CYCLE_BENCH = "cycle_bench"
+ATTRIBUTION_CYCLE_BROKEN = "cycle_bench_broken"
+ATTRIBUTION_CYCLE_INCONCLUSIVE = "cycle_bench_inconclusive"
+
 #: Where the patches this action applies came from. Every source lands through
 #: the same apply / vet / bench / KEEP-REVERT pipeline below; they differ only
 #: in how the diff is obtained and, for ``upstream_pr``, in which gate admitted

@@ -15,6 +15,7 @@ from hyperloom.common.env_safety import filter_untrusted_env_mapping, is_allowed
 from hyperloom_common.coerce import to_str_list
 from hyperloom_common.timeutil import now_iso
 
+from ...delivery.deliverable import declared_launch
 from . import _framework_switch_manifest as _switch_manifest
 from ._apply_feedback import ApplyFeedback
 from ._enablement_config import _parse_framework_switches
@@ -139,9 +140,12 @@ class _Deliverable:
         recorded = (done_payload or {}).get("config_changes")
         if not config_changes and isinstance(recorded, dict):
             config_changes = {str(key): str(value) for key, value in recorded.items()}
+        # The switches and args a patch needs are the specialist's declared deliverable; a delegate that leaves them
+        # out would bench the patch with its code path switched off.
+        declared_envs, declared_server_args = declared_launch(done_payload)
         raw_envs = params.get("extra_envs")
         extra_envs, unsafe = filter_untrusted_env_mapping(
-            {**config_changes, **(raw_envs if isinstance(raw_envs, dict) else {})},
+            {**config_changes, **declared_envs, **(raw_envs if isinstance(raw_envs, dict) else {})},
             allow_predicate=is_allowed_variant_env_key,
         )
         dropped = sorted(unsafe)
@@ -165,7 +169,7 @@ class _Deliverable:
         return cls(
             patch_paths=patch_paths,
             config_changes=config_changes,
-            extra_server_args=(raw_args if isinstance(raw_args, str) and raw_args.strip() else ""),
+            extra_server_args=(raw_args if isinstance(raw_args, str) and raw_args.strip() else declared_server_args),
             extra_envs=extra_envs,
             launch_controls=controls_of(normalize_proposal(params)),
             dropped_env_overrides=dropped,

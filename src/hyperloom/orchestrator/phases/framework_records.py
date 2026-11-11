@@ -21,9 +21,18 @@ from ..state.task_registry import TaskNotFound
 from .config_levers import config_lever_from_proposal
 
 if TYPE_CHECKING:
+    from hyperloom.inference_optimizer.session.optimization_journal import Verdict
+
     from ..state.task_registry import Task
 
 log = _logging.getLogger(__name__)
+
+
+class _IntegrateReview(NamedTuple):
+    """What accompanies a specialist deliverable to its synthetic ``integrate_patch`` review."""
+
+    observation: dict[str, Any]
+    overlaps_measured: list[dict[str, Any]] | None = None
 
 
 def _framework_config_levers_from_done(
@@ -64,9 +73,16 @@ def _framework_config_levers_from_done(
     return {}
 
 
-def _patches_on_disk(patch: Path, resolve_bases: list[Path]) -> bool:
-    """True when a specialist's claimed patch path resolves to a real file under one of its worktree roots."""
-    return (patch.is_absolute() and patch.is_file()) or any((base / patch).is_file() for base in resolve_bases)
+def _resolved_patch_paths(patches: list[Any], resolve_bases: list[Path]) -> list[str]:
+    """The claimed patch paths that resolve to a real file, absolute or under one of the specialist's worktree roots."""
+    resolved: list[str] = []
+    for raw in patches:
+        patch = Path(str(raw))
+        candidates = [patch] if patch.is_absolute() else [base / patch for base in resolve_bases]
+        hit = next((c for c in candidates if c.is_file()), None)
+        if hit is not None:
+            resolved.append(str(hit))
+    return resolved
 
 
 def _resolvable_artifacts_from_done(
@@ -516,6 +532,19 @@ def _record_discovered(coord: Any, task: Any, *, raw: Any, candidates: list[dict
 
 class _AuthoredOutcomeMixin:
     """Bridges authored-deliverable outcomes into the FRAMEWORK progress ledger, the attempt ledger and the timeline."""
+
+    def _record_measured_patch_set(self, task: "Task", result: Any, verdict: "Verdict") -> None:
+        """Note the lines this round's patch changed and whether it stayed, so a later proposal can be told it repeats them."""
+        params = task.params or {}
+        identity = params.get("patch_identity") or {}
+        status = str((result.result or {}).get("status") or "")
+        self.shared_state.record_measured_patch_set(
+            task_id=str(task.task_id or ""),
+            patch_name=str(params.get("patch_name") or ""),
+            identity=identity,
+            outcome=verdict.name.lower(),
+            landed=status in _integrate_vocabulary.KEEP_STATUSES,
+        )
 
     def _authored_candidate_id(self, params: Mapping[str, Any]) -> str:
         """The FRAMEWORK candidate (a PR URL) an ``integrate_patch`` task's params name; empty when they name none."""
