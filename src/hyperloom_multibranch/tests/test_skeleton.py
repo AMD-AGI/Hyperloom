@@ -23,6 +23,7 @@ import errno
 import json
 import os
 import signal
+import stat
 import subprocess
 import sys
 from collections.abc import Awaitable, Callable, Iterator, Mapping, Sequence
@@ -36,6 +37,7 @@ import pytest
 
 import hyperloom_multibranch
 from hyperloom_common.jsonio import read_jsonl
+from hyperloom_common.tests.shared_accounts import Accounts, other_accounts
 from hyperloom.common.perf_metric import GRADED_INTVTY_P50, GRADED_OUTPUT
 from hyperloom_common.proctree import running
 from hyperloom.common.outside_facts.image_check import FactResult, ImageCheckFailed, ImageCheckMode, ImageCheckReport
@@ -2069,6 +2071,79 @@ async def test_a_finish_over_a_session_killed_before_its_baseline_ends_with_no_c
     record = await recovery.handle(Role.OBSERVER).record(in_flight)
     assert record.result is None and record.withdrawal_reason == SessionStopReason.KILLED.value
     assert [row["reason"] for row in _decisions(recovery) if row["kind"] == "final"] == [NO_BASELINE]
+
+
+def _leave_before_final(workspace: Path) -> dict[str, object]:
+    """Run a session in ``workspace`` whose deadline passes before FINAL, as the account this process is: where it is,
+    the time it ended at and the framework checkout it rooted on. Another account runs it through :func:`_as_account`."""
+
+    framework = framework_checkout(workspace)
+    os.environ[MB_FRAMEWORK_REPO_ENV] = str(framework)
+    judge.SETTLED_TESTS = 0
+    stage = _stage(workspace)
+    stage.scripts = SCRIPTS
+    stage.toolbox_type = StuckStopToolbox
+    asyncio.run(stage.run())
+    return {"root": str(stage.layout.root), "now": stage.time.now(), "framework": str(framework)}
+
+
+def _finish_as_final_only(left: Mapping[str, object]) -> dict[str, object]:
+    """FINAL and CLOSE over the session :func:`_leave_before_final` ``left``, read back as ``final-only`` reads it, as
+    the account this process is: how it ended and the commit it chose."""
+
+    os.environ[MB_FRAMEWORK_REPO_ENV] = str(left["framework"])
+    judge.SETTLED_TESTS = 0
+    persisted = persisted_run(Path(str(left["root"])))
+    time = VirtualClock(float(str(left["now"])))
+    registry = HeldRegistry(persisted.layout.pids, time)
+    recovery = Stage(persisted.layout, time, registry, ScriptedCompletion(), [], settings=persisted.settings)
+    outcome = asyncio.run(recovery.finish(persisted.ended))
+    chosen = None if outcome.final is None or outcome.final.chosen is None else outcome.final.chosen.commit
+    return {"stop_reason": outcome.stop_reason.value, "exit_code": outcome.exit_code, "chosen": chosen}
+
+
+def _as_account(accounts: Accounts, uid: int, call: str) -> dict[str, object]:
+    """``call``, an expression of this module's, evaluated by ``uid`` in a process of its own under umask ``022``: its
+    JSON result."""
+
+    source = Path(hyperloom_multibranch.__file__).parents[1]
+    code = (
+        f"import json, sys\nfrom pathlib import Path\nsys.path.insert(0, {str(source)!r})\n"
+        f"from hyperloom_multibranch.tests import test_skeleton\nprint(json.dumps(test_skeleton.{call}))"
+    )
+    return json.loads(accounts.run(uid, code).splitlines()[-1])
+
+
+def test_a_final_only_of_another_account_of_the_group_finishes_what_one_account_left_before_final() -> None:
+    with other_accounts() as accounts:
+        source = Path(hyperloom_multibranch.__file__).parents[1]
+        if any(not directory.stat().st_mode & stat.S_IXOTH for directory in (source, *source.parents)):
+            pytest.skip(f"another account cannot reach this checkout's {source}")
+        if accounts.python != sys.executable:
+            pytest.skip(f"another account cannot run {sys.executable}, whose environment holds the project's packages")
+        workspace = accounts.shared_dir("workspace")
+        left = _as_account(accounts, accounts.first, f"_leave_before_final(Path({str(workspace)!r}))")
+
+        finished = _as_account(accounts, accounts.second, f"_finish_as_final_only({left!r})")
+
+        assert (finished["stop_reason"], finished["exit_code"]) == (SessionStopReason.TIME_EXHAUSTED.value, 0)
+        root = Path(str(left["root"]))
+        layout = SessionLayout(root)
+        assert finished["chosen"] is not None
+        assert json.loads(layout.report.read_text())["final"]["chosen"]["commit"] == finished["chosen"]
+        assert (layout.report.stat().st_uid, layout.decisions.stat().st_uid) == (accounts.second, accounts.first)
+        assert [row["kind"] for row in read_jsonl(layout.decisions)].count("final") == 1, (
+            "the second account appended FINAL's decision to the log the first one made"
+        )
+        # The experiment repository's own modes are git's shared-repository rule, not the session files' one.
+        found = (path for path in root.rglob("*") if path.is_dir() and not path.is_symlink())
+        directories = [root, *(path for path in found if not path.is_relative_to(layout.repo))]
+        assert [path for path in directories if stat.S_IMODE(path.stat().st_mode) != 0o2775] == []
+        records = (layout.roster, layout.decisions, layout.judge, layout.merges, layout.root_recipe, layout.pids)
+        records += (layout.report, layout.report_markdown, layout.reports / FRONTIER_LOG)
+        assert [path for path in records if stat.S_IMODE(path.stat().st_mode) != 0o664] == [], (
+            "every record a later leg reads or appends to is the group's"
+        )
 
 
 async def test_a_stop_signal_during_a_final_only_still_leaves_a_report_within_one_close_grace(

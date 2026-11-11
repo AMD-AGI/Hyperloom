@@ -9,9 +9,11 @@ the pointer it pushed. A running job is joined and a succeeded one shared; a fai
 so the next submission starts a new job and the key names that one. A job that was running when the toolbox stopped
 ended with it: the ledger still says running, and the job is in no restarted runner, so it answers nothing either.
 
-The ledger is one JSON file below the runner's results directory, rewritten whole on every change. One that cannot be
-read is reported and set aside: the toolbox then starts new jobs for keys it would have shared, which costs a repeated
-analysis and loses no result.
+The ledger is one JSON file below the runner's results directory, rewritten whole on every change. A restarted toolbox
+may run as another account of the run's group, so the ledger is a session file
+(:func:`~hyperloom.common.session_files.shared_options`): ``664`` below shared storage, ``600`` while it holds a
+credential. One that cannot be read is reported and set aside: the toolbox then starts new jobs for keys it would have
+shared, which costs a repeated analysis and loses no result.
 """
 
 from __future__ import annotations
@@ -22,6 +24,7 @@ from dataclasses import asdict, dataclass, replace
 from pathlib import Path
 from typing import Any
 
+from hyperloom.common.session_files import shared_options
 from hyperloom_common.io import atomic_write_json
 from hyperloom_multibranch.contracts.blackboard.records import ToolResultPointer
 
@@ -82,8 +85,8 @@ class SharedJobLedger:
     def record(self, key: str, entry: SharedEntry) -> None:
         """Name ``entry`` the job of ``key`` and write the ledger."""
         self._entries[key] = entry
-        keys = {name: _document(found) for name, found in self._entries.items()}
-        atomic_write_json(self._path, {"schema": _SCHEMA, "keys": keys})
+        document = {"schema": _SCHEMA, "keys": {name: _document(found) for name, found in self._entries.items()}}
+        atomic_write_json(self._path, document, options=shared_options(document))
 
 
 def _document(entry: SharedEntry) -> dict[str, Any]:
