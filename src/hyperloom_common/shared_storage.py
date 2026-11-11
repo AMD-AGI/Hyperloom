@@ -13,12 +13,15 @@ walk to it holds open, never by a second look up the path. There what this modul
 Anywhere else (a ``0755`` home, a ``1777`` ``/tmp``, a setgid directory the group cannot write, one reached through a
 link at its own name) the umask alone decides, exactly as for a plain ``mkdir`` or ``open``, so what is made there stays
 as private as the account keeps its files; a mode asked for is masked by the umask, never widened. A mode narrower than
-the shared one (``0600`` for a file that holds a credential) is kept as asked, shared or not. Nothing is chowned, and an existing entry is never chmodded (another account's would fail ``EPERM``): a file is
-replaced by rename instead, and never opened in place, since a member of the group may have put a link there. Nor is
-a link followed on the way to it once the way has passed a directory another account can write or owns
-(:func:`open_directory`): a member of the group, or that owner, could have put one there for any directory of the path. The umask of
-this process is never changed, since its threads share it and it would also open up the files only this account may
-read.
+the shared one (``0600`` for a file that holds a credential) is kept as asked, shared or not. Nothing is chowned, and an
+existing entry is never chmodded (another account's would fail ``EPERM``): a file is replaced by rename instead, and
+never opened in place, since a member of the group may have put a link there; the exceptions are a file the accounts
+append to in turn (:func:`open_shared_append`) and a lock or database the accounts open in turn (:func:`open_shared`),
+each opened without following a link at its name. Nor is a link followed on the way to it once the way has passed a
+directory another account can write or owns (:func:`open_directory`): a member of the group, or that owner, could have
+put one there for any directory of the path. A child process that writes such a tree gets :data:`SHARED_CHILD_UMASK`
+through its own launch (``Popen(umask=...)``); the umask of this process is never changed, since its threads share it
+and it would also open up the files only this account may read.
 
 Nothing the application executes or sources may live in a tree the group can write.
 """
@@ -42,6 +45,8 @@ log = logging.getLogger(__name__)
 
 SHARED_DIR_MODE = 0o2775
 SHARED_FILE_MODE = 0o664
+#: The umask of a child process that creates entries in a shared tree (git, shells, installers).
+SHARED_CHILD_UMASK = 0o002
 
 _DIRECTORY = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC
 #: How each directory of a path is opened on the way (:func:`open_directory`): only to name what is below it, which
@@ -147,6 +152,12 @@ def _exists(directory: int, name: str) -> bool:
     except FileNotFoundError:
         return False
     return True
+
+
+def directory_is_shared(descriptor: int) -> bool:
+    """Whether the directory open as ``descriptor`` is storage set up to be shared (setgid, group-writable, not
+    writable by others): for a writer of its own that walks below a directory it opened without following a link."""
+    return _set_up_to_share(os.fstat(descriptor).st_mode)
 
 
 def _set_up_to_share(mode: int) -> bool:
@@ -512,6 +523,13 @@ def shared_mode(path: Path, mode: int) -> int:
     return mode if parent_is_shared(path) else mode & ~current_umask()
 
 
+def child_umask(directory: Path) -> int:
+    """The umask of a child process that writes below ``directory`` (git, a shell): :data:`SHARED_CHILD_UMASK` where
+    ``directory`` is shared storage (:func:`parent_is_shared` of what is made in it), else ``-1``, this process's
+    (``Popen(umask=-1)`` changes nothing)."""
+    return SHARED_CHILD_UMASK if parent_is_shared(Path(directory) / "-") else -1
+
+
 def open_shared_append(path: Path, *, mode: int = SHARED_FILE_MODE, make_parents: bool = False) -> int:
     """``path`` opened for appending (the caller closes the descriptor), its directory reached as
     :func:`open_directory` reaches it and never through a link at its own name.
@@ -537,6 +555,46 @@ def open_shared_append(path: Path, *, mode: int = SHARED_FILE_MODE, make_parents
             except FileExistsError:
                 continue  # made meanwhile by another process: opened as it is
     raise FileExistsError(errno.EEXIST, "made and removed again by another process each time", str(path))
+
+
+def open_shared_existing(path: Path, flags: int = os.O_RDWR) -> int:
+    """The existing file ``path`` opened with ``flags`` (never created; the caller closes it), its directory reached as
+    :func:`open_directory` reaches it and never through a link at its own name: for a file the accounts append to in
+    turn whose torn tail is cut in place.
+
+    Raises:
+        OSError: ``FileNotFoundError`` when it is missing, ``ELOOP`` for a link at its name or on the way.
+    """
+    with shared_parent(path) as (directory, name, _widen):
+        return os.open(name, (flags & ~os.O_CREAT) | os.O_NOFOLLOW | os.O_CLOEXEC, dir_fd=directory)
+
+
+def publish_shared_bytes(path: Path, data: bytes, *, mode: int, make_parents: bool = False) -> bool:
+    """Create ``path`` holding ``data`` unless something has that name; ``False`` when it has, which is left as it is.
+
+    The file is written and flushed under a new name of its own beside ``path`` and linked into place complete
+    (``link`` is atomic on NFSv3 and later, where ``O_EXCL`` alone would show the file before its bytes), never through
+    a link on the way (:func:`open_directory`). Its ``mode`` is as asked below shared storage (:func:`parent_is_shared`),
+    else as the umask leaves it; with ``make_parents`` the missing directories are made first, the mode judged before
+    them (:func:`shared_mode`).
+    """
+    if make_parents:
+        mode = shared_mode(path, mode)
+        make_shared_dirs(Path(path).parent)
+    with shared_parent(path) as (directory, name, widen):
+        descriptor, temporary = _new_temporary(directory, name, _final_mode(mode, widen))
+        try:
+            with os.fdopen(descriptor, "wb") as handle:
+                handle.write(data)
+                handle.flush()
+                os.fsync(handle.fileno())
+            os.link(temporary, name, src_dir_fd=directory, dst_dir_fd=directory, follow_symlinks=False)
+        except FileExistsError:
+            return False
+        finally:
+            with suppress(OSError):
+                os.unlink(temporary, dir_fd=directory)
+    return True
 
 
 def _create_in_place(directory: int, name: str, mode: int) -> int:
@@ -641,21 +699,26 @@ def ownership(path: Path) -> str:
 
 
 __all__ = [
+    "SHARED_CHILD_UMASK",
     "SHARED_DIR_MODE",
     "SHARED_FILE_MODE",
     "Flush",
+    "child_umask",
     "copy_shared_file",
     "create_new_shared_file",
     "current_umask",
+    "directory_is_shared",
     "make_shared_dirs",
     "open_directory",
     "open_shared",
     "open_shared_append",
+    "open_shared_existing",
     "read_directory",
     "replace_shared_file",
     "open_shared_replacement",
     "ownership",
     "parent_is_shared",
+    "publish_shared_bytes",
     "share_new_directory",
     "shared_mode",
     "shared_parent",

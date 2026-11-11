@@ -24,8 +24,10 @@ from enum import Enum
 from pathlib import Path
 
 from hyperloom_common.jsonio import read_jsonl
+from hyperloom_common.shared_storage import SHARED_FILE_MODE, make_shared_dirs, open_shared_append, open_shared_existing
 from hyperloom_multibranch.contracts.blackboard.vocab import Role
 from hyperloom_multibranch.blackboard.codec import key_sorted
+from hyperloom_multibranch.blackboard.local.files import session_file_mode
 
 log = logging.getLogger(__name__)
 
@@ -156,7 +158,7 @@ def _cut_torn_tail(path: Path) -> None:
     """Cut a last line that does not end in a newline, so the next row is not glued onto it."""
 
     try:
-        handle = path.open("r+b")
+        handle = os.fdopen(open_shared_existing(path), "r+b")  # never through a link a member of the group put there
     except FileNotFoundError:
         return
     with handle:
@@ -179,10 +181,12 @@ def _cut_torn_tail(path: Path) -> None:
         handle.truncate(cut)
 
 
-def _append_line(path: Path, line: bytes) -> None:
-    """Append ``line`` whole, or put the segment back as it was when the write fails partway."""
+def _append_line(path: Path, line: bytes, mode: int) -> None:
+    """Append ``line`` whole, or put the segment back as it was when the write fails partway. A new segment has
+    ``mode``: ``664`` below shared storage, where the run's next leg, maybe another account of the group, appends to
+    it, owner-only anywhere else."""
 
-    fd = os.open(path, os.O_WRONLY | os.O_APPEND | os.O_CREAT | getattr(os, "O_BINARY", 0), 0o600)
+    fd = open_shared_append(path, mode=mode)
     try:
         size = os.fstat(fd).st_size
         try:
@@ -205,6 +209,7 @@ class SegmentWriter:
         self.path = Path(segments_dir) / f"{writer}{SEGMENT_SUFFIX}"
         self._last_seq = max((entry.seq for entry in _read_entries(self.path)), default=0) if self.path.exists() else 0
         self._ends_whole = False
+        self._mode = session_file_mode(self.path, SHARED_FILE_MODE)  # judged before the directories are made
 
     def append(self, build: Callable[[int], Entry]) -> Entry:
         """Append the entry ``build`` makes for the next sequence number, and return it."""
@@ -213,11 +218,11 @@ class SegmentWriter:
         if entry.writer != self.writer or entry.seq != self._last_seq + 1:
             raise ValueError(f"segment {self.writer} expects seq {self._last_seq + 1}, got {entry.entry_id}")
         line = json.dumps(key_sorted(entry.to_dict()), ensure_ascii=True) + "\n"
-        self.path.parent.mkdir(parents=True, exist_ok=True)
+        make_shared_dirs(self.path.parent)
         if not self._ends_whole:
             _cut_torn_tail(self.path)
         self._ends_whole = False
-        _append_line(self.path, line.encode("ascii"))
+        _append_line(self.path, line.encode("ascii"), self._mode)
         self._ends_whole = True
         self._last_seq = entry.seq
         return entry
