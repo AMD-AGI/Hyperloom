@@ -5,8 +5,9 @@
 ``stage`` the tools a round runs, ``publish`` them where several hosts share them.
 
 ``run --config <config.yaml> --run-dir <dir>`` runs the round into ``<dir>``, prints its ``report.json`` path and
-exits 0 when the round completed, 1 when it did not. SIGTERM and SIGINT cancel the round, which still reaps what it
-started and writes its report. ``stop --pid-dir <dir>`` prints what it reaped as JSON and exits 1 while a process
+exits 0 when the round completed, 1 when it did not; a relative path there or in the config is read below the
+caller's directory, and a relative ``model_path`` only when it names something there. SIGTERM and SIGINT cancel the
+round, which still reaps what it started and writes its report. ``stop --pid-dir <dir>`` prints what it reaped as JSON and exits 1 while a process
 outlives SIGKILL. ``resolve --query <query.json> --gpus <n> --out <base_launch.json> [--inferencex-commit <sha>]``
 reads the sources once, InferenceX at ``<sha>`` instead of the head of its ``main`` when given, and writes the base
 they give, or exits 2 naming why each source holds none, or why ``<sha>`` is refused: InferenceX has no such commit, or
@@ -71,9 +72,44 @@ def _refused(detail: str) -> int:
 
 
 def read_config(path: Path, run_dir: Path) -> SuiteConfig:
-    """The config at ``path``, writing its round into ``run_dir``."""
+    """The config at ``path``, writing its round into ``run_dir``, its relative paths anchored at the caller's
+    directory: the server, the harness and the probes start elsewhere."""
     config = SuiteConfig.from_document(yaml.safe_load(path.read_text(encoding=_UTF8)))
-    return replace(config, paths=replace(config.paths, run_dir=str(run_dir)))
+    return _anchored(replace(config, paths=replace(config.paths, run_dir=str(run_dir))), Path.cwd())
+
+
+def _anchored(config: SuiteConfig, root: Path) -> SuiteConfig:
+    def under(path: str) -> str:
+        return str(root / path)
+
+    server = config.server
+    model_path = server.model_path
+    if (root / model_path).exists():
+        model_path = under(model_path)
+    python = server.framework_python
+    if Path(python).parent != Path():
+        python = under(python)
+    pid_dir = config.lifecycle.pid_dir
+    mlperf = config.mlperf
+    return replace(
+        config,
+        server=replace(
+            server,
+            base=replace(server.base, path=under(server.base.path)),
+            model_path=model_path,
+            framework_python=python,
+        ),
+        lifecycle=replace(config.lifecycle, pid_dir=None if pid_dir is None else under(pid_dir)),
+        paths=replace(config.paths, run_dir=under(config.paths.run_dir), tool_cache=under(config.paths.tool_cache)),
+        mlperf=None
+        if mlperf is None
+        else replace(
+            mlperf,
+            dataset=under(mlperf.dataset),
+            tokenizer=under(mlperf.tokenizer),
+            endpoints_dir=under(mlperf.endpoints_dir),
+        ),
+    )
 
 
 def _run(args: argparse.Namespace) -> int:
