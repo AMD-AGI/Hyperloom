@@ -187,6 +187,7 @@ async def test_a_retest_appends_a_judgement_and_the_latest_one_is_in_force(open_
         (Role.SCHEDULER, LineageEvent(LineageKind.SPLIT, "s1-fix", commit_id="c2", from_commit="c1", from_branch="s1")),
         (Role.GATE, LineageEvent(LineageKind.STOP, "s1")),
         (Role.GATE, LineageEvent(LineageKind.PROBATION, "s1", tests=4)),
+        (Role.INTEGRATOR, LineageEvent(LineageKind.REOPEN, INTEGRATION_BRANCH)),
     ],
 )
 async def test_each_lineage_event_has_one_writer(open_as: Open, role: Role, event: LineageEvent) -> None:
@@ -208,6 +209,7 @@ async def test_each_lineage_event_has_one_writer(open_as: Open, role: Role, even
         LineageEvent(LineageKind.PROBATION, "s1"),
         LineageEvent(LineageKind.STOP, "s1", tests=4),
         LineageEvent(LineageKind.PROBATION, INTEGRATION_BRANCH, tests=4),
+        LineageEvent(LineageKind.REOPEN, "s1", reason="resumed"),
     ],
 )
 async def test_a_lineage_event_names_what_its_kind_needs(open_as: Open, event: LineageEvent) -> None:
@@ -245,6 +247,31 @@ async def test_a_branch_carries_the_focus_its_open_names_and_one_opened_without_
 
     focus = {node.branch: node.focus for node in (await open_as(Role.INTEGRATOR).lineage()).branches}
     assert focus == {INTEGRATION_BRANCH: "", "b01": "attention", "b02": ""}
+
+
+async def test_a_resumed_session_reopens_its_stopped_integration_branch_and_stops_it_again(open_as: Open) -> None:
+    scheduler = open_as(Role.SCHEDULER)
+    await scheduler.record_lineage(LineageEvent(LineageKind.ROOT, INTEGRATION_BRANCH, commit_id="c0"))
+    stop = LineageEvent(LineageKind.STOP, INTEGRATION_BRANCH, reason="time_exhausted")
+    reopen = LineageEvent(LineageKind.REOPEN, INTEGRATION_BRANCH, reason="resumed after time_exhausted")
+    with pytest.raises(ConflictingWrite, match="not stopped"):
+        await scheduler.record_lineage(reopen)
+
+    await scheduler.record_lineage(stop)
+    for event in (reopen, reopen):
+        await scheduler.record_lineage(event)
+    running = {node.branch: node for node in (await scheduler.lineage()).branches}[INTEGRATION_BRANCH]
+    await scheduler.record_lineage(stop)
+
+    stopped = {node.branch: node for node in (await scheduler.lineage()).branches}[INTEGRATION_BRANCH]
+    assert (running.stopped_at, running.stop_reason) == (None, None)
+    assert (stopped.stop_reason, stopped.stopped_at is not None) == ("time_exhausted", True)
+    assert [event.kind for event in scheduler._state().lineage] == [
+        LineageKind.ROOT,
+        LineageKind.STOP,
+        LineageKind.REOPEN,
+        LineageKind.STOP,
+    ]
 
 
 async def test_a_running_branch_is_held_on_probation_once_a_stall(open_as: Open) -> None:

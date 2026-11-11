@@ -81,7 +81,7 @@ from hyperloom_multibranch.contracts.toolbox import CancelOutcome, MeasurementCa
 from hyperloom_multibranch.blackboard import LocalBlackboard
 from hyperloom_multibranch.blackboard.knowledge.learning_recall import LearningRecall
 from hyperloom_multibranch.blackboard.knowledge.reference_leads import INFERENCEX_REFERENCE
-from hyperloom_multibranch.blackboard.rsi.archive import ARCHIVE_ENV, SKIPPED, TreeArchive
+from hyperloom_multibranch.blackboard.rsi.archive import ARCHIVE_ENV, ARCHIVED, SKIPPED, TreeArchive
 from hyperloom_multibranch.blackboard.rsi.briefing import SessionBriefs
 from hyperloom_multibranch.blackboard.rsi.decisions import decision_calls
 from hyperloom_multibranch.blackboard.rsi.playbook import (
@@ -124,7 +124,7 @@ from hyperloom_multibranch.scheduling.explore import (
     FORK_NOT_LANDED,
     OPEN_CUT_REASON,
 )
-from hyperloom_multibranch.scheduling.exports import IMAGE_CHECK_FILE
+from hyperloom_multibranch.scheduling.exports import ARCHIVED_BEFORE, IMAGE_CHECK_FILE
 from hyperloom_multibranch.scheduling.final import INTEGRATION_LABEL, PRIMARY_POINT_ONLY
 from hyperloom_multibranch.scheduling import judge
 from hyperloom_multibranch.scheduling.judge import GRACE_KEY, HoldReason
@@ -141,6 +141,7 @@ from hyperloom_multibranch.scheduling.lifecycle import (
     SessionOutcome,
     SessionServices,
     persisted_run,
+    resumable_run,
 )
 from hyperloom_multibranch.scheduling.local_peers import workload_rule
 from hyperloom_multibranch.scheduling.manifest import read_manifest
@@ -593,6 +594,13 @@ class Stage:
         with self._polls_on_virtual_time():
             return await self._session().finish(ended)
 
+    async def resume(self, ended: SessionStopReason) -> SessionOutcome:
+        """EXPLORE, FINAL and CLOSE over the session directory this stage was built on, as ``run --resume`` runs them."""
+
+        with self._polls_on_virtual_time() as patch:
+            patch.setattr(lifecycle, "run_image_check", self.image_check)
+            return await self._session().resume(ended)
+
     @contextlib.contextmanager
     def _polls_on_virtual_time(self) -> Iterator[pytest.MonkeyPatch]:
         """The rule gate's and the repro runner's waits pass on this stage's clock."""
@@ -634,6 +642,20 @@ def _recovery(stage: Stage, settings: RunSettings) -> Stage:
     the settings read back from its manifest, every peer fresh and no specialist script."""
 
     time = VirtualClock(stage.time.now())
+    return Stage(stage.layout, time, HeldRegistry(stage.layout.pids, time), ScriptedCompletion(), [], settings=settings)
+
+
+#: How long a resumed session was down, between its last decision and the resume.
+DOWNTIME_SECONDS = 1800.0
+
+
+def _resumed(stage: Stage, settings: RunSettings) -> Stage:
+    """A second stage over the directory ``stage`` left, as ``run --resume`` builds one :data:`DOWNTIME_SECONDS` after
+    the last decision that session recorded: the same directory and the settings its manifest holds, every peer
+    fresh, no specialist script and a judge that never answers."""
+
+    stopped_at = float(read_jsonl(stage.layout.decisions)[-1]["at"])
+    time = VirtualClock(stopped_at + DOWNTIME_SECONDS)
     return Stage(stage.layout, time, HeldRegistry(stage.layout.pids, time), ScriptedCompletion(), [], settings=settings)
 
 
@@ -1836,6 +1858,126 @@ async def test_a_stop_signal_during_a_final_only_still_leaves_a_report_within_on
     # The signal is how this one ended, so the session it reports ends there too and is still open to a later FINAL.
     assert json.loads(stage.layout.report.read_text())["stop_reason"] == SessionStopReason.SIGNAL.value
     assert persisted_run(stage.layout.root).ended is SessionStopReason.SIGNAL
+
+
+async def test_a_resume_after_a_stop_signal_continues_explore_on_new_branches_and_archives_nothing_again(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    archive = tmp_path / "rsi"
+    monkeypatch.setenv(ARCHIVE_ENV, str(archive))
+    stage = _stage(tmp_path)
+    stage.steps = _signalling(stage)
+    stopped = await stage.run()
+    assert stopped.stop_reason is SessionStopReason.SIGNAL
+    first = json.loads(stage.layout.report.read_text())
+    assert first["exports"]["knowledge"]["archive"]["status"] == ARCHIVED
+    [tree] = (archive / "trees").glob("*.json")
+    archived, deadline = tree.read_bytes(), read_manifest(stage.layout.manifest).deadline
+
+    persisted = await asyncio.to_thread(resumable_run, stage.layout.root)
+    assert persisted.ended is SessionStopReason.SIGNAL
+    resumed = _resumed(stage, persisted.settings)
+    outcome = await resumed.resume(persisted.ended)
+
+    assert (outcome.stop_reason, outcome.error, outcome.exit_code) == (SessionStopReason.TIME_EXHAUSTED, "", 0)
+    assert outcome.close is not None and outcome.close.stop.clean
+    head = await resumed.repo.head(INTEGRATION_BRANCH)
+    assert outcome.final is not None and outcome.final.chosen is not None and outcome.final.chosen.commit == head
+    submitted = [test for rid, test in resumed.toolbox.requests.items() if rid not in stage.toolbox.requests]
+    assert submitted and not any(test.purpose is Purpose.BASELINE for test in submitted), "no PRELUDE"
+    [phase] = [row for row in _decisions(stage) if row["kind"] == "phase" and row["reason"] == "resume"]
+    assert phase["detail"] == {
+        "ended": "signal",
+        "downtime_seconds": DOWNTIME_SECONDS,
+        "deadline": deadline + DOWNTIME_SECONDS,
+    }
+    assert read_manifest(stage.layout.manifest).deadline == deadline + DOWNTIME_SECONDS
+    assert [row["reason"] for row in _decisions(stage) if row["kind"] == "phase"].count("prelude") == 1
+    roster = {entry["branch"]: entry for entry in json.loads(stage.layout.roster.read_text())["entries"]}
+    assert {"b01", "b02"} < roster.keys() and roster["b03"]["origin"] == BranchOrigin.FIRST_BATCH.value
+    assert resumed.sessions.started == {"b03": await stage.root()}
+    lineage = {branch.branch: branch for branch in (await resumed.handle(Role.OBSERVER).lineage()).branches}
+    assert lineage[INTEGRATION_BRANCH].stop_reason == f"session_end: {SessionStopReason.TIME_EXHAUSTED.value}"
+    report = json.loads(stage.layout.report.read_text())
+    knowledge = report["exports"]["knowledge"]
+    assert {(step["status"], step["reason"]) for step in knowledge.values()} == {(SKIPPED, ARCHIVED_BEFORE)}
+    assert tree.read_bytes() == archived and resumed.author.calls == []
+
+    with pytest.raises(ValueError, match="already chose"):
+        await asyncio.to_thread(resumable_run, stage.layout.root)
+
+
+async def test_a_second_resume_after_a_stopped_resume_archives_nothing_again_either(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    archive = tmp_path / "rsi"
+    monkeypatch.setenv(ARCHIVE_ENV, str(archive))
+    stage = _stage(tmp_path)
+    stage.steps = _signalling(stage)
+    await stage.run()
+    [tree] = (archive / "trees").glob("*.json")
+    archived = tree.read_bytes()
+
+    persisted = await asyncio.to_thread(resumable_run, stage.layout.root)
+    resumed = _resumed(stage, persisted.settings)
+    resumed.steps = {"b03": _signalling(resumed)["b01"]}
+    stopped = await resumed.resume(persisted.ended)
+    assert stopped.stop_reason is SessionStopReason.SIGNAL and stopped.final is None
+
+    persisted = await asyncio.to_thread(resumable_run, stage.layout.root)
+    again = _resumed(stage, persisted.settings)
+    outcome = await again.resume(persisted.ended)
+
+    assert outcome.final is not None and outcome.final.chosen is not None
+    knowledge = json.loads(stage.layout.report.read_text())["exports"]["knowledge"]
+    assert {(step["status"], step["reason"]) for step in knowledge.values()} == {(SKIPPED, ARCHIVED_BEFORE)}
+    assert tree.read_bytes() == archived and resumed.author.calls == [] and again.author.calls == []
+
+
+async def test_a_resume_after_a_close_whose_exports_failed_once_it_archived_archives_nothing_again(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    archive = tmp_path / "rsi"
+    monkeypatch.setenv(ARCHIVE_ENV, str(archive))
+    stage = _stage(tmp_path)
+    stage.steps = _signalling(stage)
+    await stage.run()
+    [tree] = (archive / "trees").glob("*.json")
+    archived = tree.read_bytes()
+    report = json.loads(stage.layout.report.read_text())
+    stage.layout.report.write_text(json.dumps({**report, "exports": None}), encoding="utf-8")
+
+    persisted = await asyncio.to_thread(resumable_run, stage.layout.root)
+    resumed = _resumed(stage, persisted.settings)
+    outcome = await resumed.resume(persisted.ended)
+
+    assert outcome.final is not None and outcome.final.chosen is not None
+    knowledge = json.loads(stage.layout.report.read_text())["exports"]["knowledge"]
+    assert {(step["status"], step["reason"]) for step in knowledge.values()} == {(SKIPPED, ARCHIVED_BEFORE)}
+    assert tree.read_bytes() == archived and resumed.author.calls == []
+
+
+async def test_a_resume_of_a_killed_session_stops_the_branches_it_left_open(tmp_path: Path) -> None:
+    stage = _stage(tmp_path)
+    stage.steps = _signalling(stage)
+    await stage.run()
+    stage.layout.report.unlink()
+    _as_another_pod(stage.layout.pids)
+    snapshot = json.loads(stage.layout.roster.read_text())
+    for entry in snapshot["entries"]:
+        if entry["branch"] == "b01":
+            entry["stop"] = None
+    stage.layout.roster.write_text(json.dumps({**snapshot, "closed": False}), encoding="utf-8")
+
+    persisted = await asyncio.to_thread(resumable_run, stage.layout.root)
+    assert persisted.ended is SessionStopReason.KILLED
+    resumed = _resumed(stage, persisted.settings)
+    outcome = await resumed.resume(persisted.ended)
+
+    assert outcome.final is not None and outcome.final.chosen is not None
+    [left_open] = [row for row in _decisions(stage) if row["kind"] == "stop" and row["branch"] == "b01"][1:]
+    assert left_open["reason"] == f"session_end: {SessionStopReason.KILLED.value}"
+    assert resumed.toolbox.withdrawals[0] == SessionStopReason.KILLED.value
 
 
 class NoRegressionSet(FakeRegressionCheck):
