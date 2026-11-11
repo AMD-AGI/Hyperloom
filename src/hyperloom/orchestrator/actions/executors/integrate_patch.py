@@ -4016,89 +4016,9 @@ class IntegratePatchExecutor:
                 bench_result=bench_result,
             )
 
-        source_snapshot_dir = ""
-        source_manifest_path = ""
-        source_target_files: list[str] = []
-        source_base_sha = ""
-        source_snapshot_complete = False
-        source_import_root_val = ""
-        source_realized_patch = ""
-        source_artifacts_outside_root = 0
-        try:
-            from ...source_snapshot import MANIFEST_NAME, snapshot_source_layer
-            from ._patch_snapshot import _patch_touched_paths_split, harvest_realized_diff
-
-            if framework_root is not None:
-                source_base_sha = _git_head_sha(framework_root)
-                upserted_patch, deleted_patch = _patch_touched_paths_split(framework_root, applied)
-                declared_ops = dict.fromkeys(upserted_patch, "upsert")
-                declared_ops.update(dict.fromkeys(deleted_patch, "delete"))
-                rel_paths = upserted_patch + deleted_patch
-                # An artifact installed into a sibling tree is not addressable by
-                # a rel path under this root, so it belongs to no snapshot here.
-                # The count travels so a KEEP whose gain lives outside the tree
-                # reads as a known gap rather than as a clean capture.
-                inside_root = [
-                    str(a["rel_target"])
-                    for a in (applied_artifacts or [])
-                    if isinstance(a, dict)
-                    and a.get("rel_target")
-                    and Path(str(a.get("root") or framework_root)).resolve() == framework_root.resolve()
-                ]
-                source_artifacts_outside_root = len(
-                    [
-                        a
-                        for a in (applied_artifacts or [])
-                        if isinstance(a, dict)
-                        and a.get("rel_target")
-                        and Path(str(a.get("root") or framework_root)).resolve() != framework_root.resolve()
-                    ]
-                )
-                rel_paths += inside_root
-                from ...enablement.runtime.adapters import get_adapter
-
-                source_import_root_val = get_adapter(str(params.get("framework") or "")).source_import_root(
-                    str(framework_root)
-                )
-                dest = (
-                    self.session_dir
-                    / "optimization_stack"
-                    / "src"
-                    / (specialist_task_id or str(attempt.task_id or "keep"))
-                )
-                snap = snapshot_source_layer(
-                    framework_root=framework_root,
-                    base_sha=source_base_sha,
-                    rel_paths=rel_paths,
-                    dest_dir=dest,
-                    provenance="integrate_patch",
-                    extra={"specialist_task_id": specialist_task_id},
-                    declared_ops=declared_ops,
-                    import_root=source_import_root_val,
-                )
-                if snap:
-                    source_snapshot_dir = str(snap.get("snapshot_dir") or "")
-                    if source_snapshot_dir:
-                        source_manifest_path = str(Path(source_snapshot_dir) / MANIFEST_NAME)
-                    source_target_files = [
-                        str(item.get("rel") or "")
-                        for item in (snap.get("files") or [])
-                        if isinstance(item, dict) and item.get("rel")
-                    ]
-                    source_snapshot_complete = bool(snap.get("complete"))
-                    # Only harvest when a real commit landed. Without a new
-                    # commit ``HEAD^..HEAD`` is the previous KEEP; harvesting it
-                    # would publish that diff as this KEEP's realized change.
-                    # Leaving it empty falls back to the delivered patch
-                    # (realized=False), which is the honest record.
-                    if keep_committed:
-                        source_realized_patch = harvest_realized_diff(
-                            framework_root,
-                            rel_paths,
-                            Path(source_snapshot_dir) / "realized.patch",
-                        )
-        except Exception:
-            log.exception("integrate_patch: source-layer snapshot failed")
+        source = self._capture_source_layer(
+            attempt, params=params, specialist_task_id=specialist_task_id, keep_committed=keep_committed
+        )
 
         return {
             "status": "kept",
@@ -4127,15 +4047,8 @@ class IntegratePatchExecutor:
             "resolves_finding": decision.resolves_finding if decision.correctness_fix else "",
             "bench_result": bench_result,
             "workspace": str(output_root),
-            "source_snapshot": source_snapshot_dir,
-            "source_manifest": source_manifest_path,
-            "source_snapshot_complete": source_snapshot_complete,
-            "source_import_root": source_import_root_val,
-            "source_realized_patch": source_realized_patch,
-            "source_artifacts_outside_root": source_artifacts_outside_root,
-            "target_files": source_target_files,
+            **source,
             "framework_root": str(framework_root or ""),
-            "base_sha": source_base_sha,
             # The bundle cleared the gate, so its switches join the running
             # configuration and are registered as levers that are already on.
             # Attribution from here is leave-one-out.
@@ -4277,6 +4190,126 @@ class IntegratePatchExecutor:
             "reason": f"switch-off parity within +/-{band_pct:.2f}% ({delta_pct:+.2f}%)",
         }
 
+    def _capture_source_layer(
+        self,
+        attempt: Any,
+        *,
+        params: dict[str, Any],
+        specialist_task_id: str,
+        keep_committed: bool,
+    ) -> dict[str, Any]:
+        """Snapshot the source this attempt committed, as the handles a source layer carries.
+
+        A KEEP and a KEEP_INERT both leave committed source in the tree, so both
+        need one: the export checks the tree against the recorded source layers.
+
+        Args:
+            attempt: The applied attempt.
+            params: The task params.
+            specialist_task_id: The specialist that authored the patch.
+            keep_committed: Whether a new commit landed for this attempt.
+
+        Returns:
+            The ``source_*``, ``target_files`` and ``base_sha`` result fields; the
+            snapshot fields stay empty when no snapshot could be taken.
+        """
+        framework_root = attempt.framework_root
+        applied = attempt.applied
+        applied_artifacts = attempt.applied_artifacts
+        source_snapshot_dir = ""
+        source_manifest_path = ""
+        source_target_files: list[str] = []
+        source_base_sha = ""
+        source_snapshot_complete = False
+        source_import_root_val = ""
+        source_realized_patch = ""
+        source_artifacts_outside_root = 0
+        try:
+            from ...source_snapshot import MANIFEST_NAME, snapshot_source_layer
+            from ._patch_snapshot import _patch_touched_paths_split, harvest_realized_diff
+
+            if framework_root is not None:
+                source_base_sha = _git_head_sha(framework_root)
+                upserted_patch, deleted_patch = _patch_touched_paths_split(framework_root, applied)
+                declared_ops = dict.fromkeys(upserted_patch, "upsert")
+                declared_ops.update(dict.fromkeys(deleted_patch, "delete"))
+                rel_paths = upserted_patch + deleted_patch
+                # An artifact installed into a sibling tree is not addressable by
+                # a rel path under this root, so it belongs to no snapshot here.
+                # The count travels so a KEEP whose gain lives outside the tree
+                # reads as a known gap rather than as a clean capture.
+                inside_root = [
+                    str(a["rel_target"])
+                    for a in (applied_artifacts or [])
+                    if isinstance(a, dict)
+                    and a.get("rel_target")
+                    and Path(str(a.get("root") or framework_root)).resolve() == framework_root.resolve()
+                ]
+                source_artifacts_outside_root = len(
+                    [
+                        a
+                        for a in (applied_artifacts or [])
+                        if isinstance(a, dict)
+                        and a.get("rel_target")
+                        and Path(str(a.get("root") or framework_root)).resolve() != framework_root.resolve()
+                    ]
+                )
+                rel_paths += inside_root
+                from ...enablement.runtime.adapters import get_adapter
+
+                source_import_root_val = get_adapter(str(params.get("framework") or "")).source_import_root(
+                    str(framework_root)
+                )
+                dest = (
+                    self.session_dir
+                    / "optimization_stack"
+                    / "src"
+                    / (specialist_task_id or str(attempt.task_id or "keep"))
+                )
+                snap = snapshot_source_layer(
+                    framework_root=framework_root,
+                    base_sha=source_base_sha,
+                    rel_paths=rel_paths,
+                    dest_dir=dest,
+                    provenance="integrate_patch",
+                    extra={"specialist_task_id": specialist_task_id},
+                    declared_ops=declared_ops,
+                    import_root=source_import_root_val,
+                )
+                if snap:
+                    source_snapshot_dir = str(snap.get("snapshot_dir") or "")
+                    if source_snapshot_dir:
+                        source_manifest_path = str(Path(source_snapshot_dir) / MANIFEST_NAME)
+                    source_target_files = [
+                        str(item.get("rel") or "")
+                        for item in (snap.get("files") or [])
+                        if isinstance(item, dict) and item.get("rel")
+                    ]
+                    source_snapshot_complete = bool(snap.get("complete"))
+                    # Only harvest when a real commit landed. Without a new
+                    # commit ``HEAD^..HEAD`` is the previous KEEP; harvesting it
+                    # would publish that diff as this KEEP's realized change.
+                    # Leaving it empty falls back to the delivered patch
+                    # (realized=False), which is the honest record.
+                    if keep_committed:
+                        source_realized_patch = harvest_realized_diff(
+                            framework_root,
+                            rel_paths,
+                            Path(source_snapshot_dir) / "realized.patch",
+                        )
+        except Exception:
+            log.exception("integrate_patch: source-layer snapshot failed")
+        return {
+            "source_snapshot": source_snapshot_dir,
+            "source_manifest": source_manifest_path,
+            "source_snapshot_complete": source_snapshot_complete,
+            "source_import_root": source_import_root_val,
+            "source_realized_patch": source_realized_patch,
+            "source_artifacts_outside_root": source_artifacts_outside_root,
+            "target_files": source_target_files,
+            "base_sha": source_base_sha,
+        }
+
     async def _keep_inert_switches(
         self,
         attempt: IntegrateAttempt,
@@ -4327,7 +4360,9 @@ class IntegratePatchExecutor:
             The ``kept_inert`` result envelope.
         """
         switch_manifest = attempt.switch_manifest
-        commit_failure, _ = self._commit_accepted_work(attempt, f"hyperloom KEEP_INERT {attempt.specialist_task_id}")
+        commit_failure, keep_committed = self._commit_accepted_work(
+            attempt, f"hyperloom KEEP_INERT {attempt.specialist_task_id}"
+        )
         if commit_failure:
             return _uncommitted_revert(
                 attempt,
@@ -4337,6 +4372,11 @@ class IntegratePatchExecutor:
                 delta_pct=delta_pct,
                 bench_result=bench_result,
             )
+        # The code is committed to the tree, so it needs a source layer: later explore entries switch these levers on,
+        # and an export of a tree no snapshot covers is refused.
+        source = self._capture_source_layer(
+            attempt, params=params, specialist_task_id=attempt.specialist_task_id, keep_committed=keep_committed
+        )
         enablers = [entry["switch"] for entry in switch_manifest if entry.get("enabler")]
         await self._maybe_write_framework_kb_record(
             params=params,
@@ -4384,6 +4424,7 @@ class IntegratePatchExecutor:
             "bench_result": bench_result,
             "workspace": str(attempt.output_root),
             "framework_root": str(attempt.framework_root or ""),
+            **source,
             "framework_levers": switch_manifest,
             "framework_lever_outcome": "registered_off",
             "switch_off_parity": parity,

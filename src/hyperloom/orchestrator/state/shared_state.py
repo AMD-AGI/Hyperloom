@@ -512,6 +512,9 @@ class SharedState(_RenderMixin, GapsStateMixin, _PhaseStateMixin):
     # Unequal => ``current_best`` is not the Recipe the validated gain was measured on, even at the same stack depth.
     working_recipe_generation: int = 0
     validated_recipe_generation: int = 0
+    # Source an inert KEEP committed with every switch off: snapshot handles plus ``after_stack_len``. Not an
+    # adoption, so it stays off ``optimization_stack`` and out of every length and attribution count over it.
+    inert_source_layers: list[dict[str, Any]] = field(default_factory=list)
     # Resume sentinels.
     pending_integrate: dict[str, Any] = field(default_factory=dict)
     # A GEAK e2e candidate with a self-reported win not yet confirmed by a main-flow rebench; kept OUT of current_best

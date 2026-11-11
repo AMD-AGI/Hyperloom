@@ -59,6 +59,19 @@ def source_layer_overlay_dir(entry: dict[str, Any]) -> str:
     return str(overlay / import_root) if import_root else str(overlay)
 
 
+def source_layers_in_order(
+    stack: Iterable[dict[str, Any]],
+    inert_layers: Iterable[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    """Merge stack entries and inert source layers in the order they reached the tree.
+
+    An inert layer landed after the first ``after_stack_len`` stack entries.
+    """
+    keyed = [((index, 1), entry) for index, entry in enumerate(stack)]
+    keyed += [((int(layer.get("after_stack_len") or 0), 0), layer) for layer in inert_layers]
+    return [entry for _, entry in sorted(keyed, key=lambda item: item[0])]
+
+
 def snapshot_source_layer(
     *,
     framework_root: str | Path,

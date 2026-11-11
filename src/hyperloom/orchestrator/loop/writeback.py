@@ -3040,6 +3040,35 @@ class WritebackCollaborator(CoordinatorCollaborator):
             )
         return evidence.exported
 
+    def _record_inert_source_layer(self, result: Mapping[str, Any]) -> bool:
+        """Record the source an inert KEEP committed, leaving the stack and ``current_best`` alone.
+
+        Later explore entries switch the code on, and the export refuses a tree
+        that no snapshot covers, so the layer is kept beside the stack. It is not
+        an adoption: on the stack it would count as an unvalidated KEEP and be
+        published as one. Only ``custom`` is handled: it is the one framework whose export reads this layer.
+
+        Args:
+            result: A ``kept_inert`` integrate_patch result.
+
+        Returns:
+            Whether a layer was recorded.
+        """
+        if not result.get("source_snapshot") or str(self.shared_state.framework or "").strip().lower() != "custom":
+            return False
+        specialist = str(result.get("specialist_task_id") or "")
+        self.shared_state.inert_source_layers.append(
+            {
+                "variant_name": f"{specialist}:inert" if specialist else "inert",
+                "specialist_task_id": specialist,
+                "after_stack_len": len(self.shared_state.optimization_stack),
+                "ts": datetime.now(timezone.utc).isoformat(),
+                "scope": "source_patch",
+                **_source_layer_handles(result),
+            }
+        )
+        return True
+
     async def _promote_integrate_patch(
         self,
         result: dict,
@@ -3183,6 +3212,7 @@ class WritebackCollaborator(CoordinatorCollaborator):
             # Applied but every switch off: nothing was adopted, yet the patch
             # stays on disk as registered levers, so it is not a failure either.
             outcome.verdict = Verdict.RECORDED
+            changed = self._record_inert_source_layer(result) or changed
         else:
             outcome.verdict = Verdict.FAILED
         # A measured integrate counts either way; KEEP/REVERT is a later judgement.
@@ -3578,7 +3608,7 @@ class WritebackCollaborator(CoordinatorCollaborator):
         baseline ref is materialized from the SAME layers as ``current_best``
         (not just its flags/env), closing the cross-harness baseline gap.
         """
-        from ..source_snapshot import source_layer_overlay_dir, source_layer_reproducible
+        from ..source_snapshot import source_layer_overlay_dir, source_layer_reproducible, source_layers_in_order
 
         cb = self.shared_state.current_best if isinstance(self.shared_state.current_best, Mapping) else {}
         materialized = self.current_best_launch_config()
@@ -3586,8 +3616,14 @@ class WritebackCollaborator(CoordinatorCollaborator):
         # mutable global stack here could attach an unrelated source patch after
         # a resume or partial state write.
         stack = [e for e in (cb.get("optimization_stack") or []) if isinstance(e, dict)]
+        # An inert layer that landed after current_best's lift was not in the tree it was measured on.
+        inert = [
+            layer
+            for layer in self.shared_state.inert_source_layers
+            if int(layer.get("after_stack_len") or 0) < len(stack)
+        ]
         source_snapshots: list[dict[str, Any]] = []
-        for entry in stack:
+        for entry in source_layers_in_order(stack, inert):
             if entry.get("scope") != "source_patch":
                 continue
             snap = str(entry.get("source_snapshot") or "").strip()

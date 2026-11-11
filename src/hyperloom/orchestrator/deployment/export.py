@@ -18,7 +18,7 @@ from typing import Any
 from hyperloom.common.io import atomic_write_json
 from hyperloom.common.env_safety import is_secret_shaped_env_name
 from hyperloom.orchestrator.enablement.recipe.keep_probe import probe_environment_closure
-from hyperloom.orchestrator.source_snapshot import snapshot_source_layer
+from hyperloom.orchestrator.source_snapshot import snapshot_source_layer, source_layers_in_order
 
 CONTRACT_NAME = "hyperloom_inference.json"
 _MAX_BYTES = 128 * 1024 * 1024
@@ -130,10 +130,11 @@ def _verify_accepted_source(state: dict, captured: Path) -> set[str]:
 
     The returned set lets a caller fail closed. A stack whose entries carry no
     snapshot -- a config-only KEEP touches no file, so it records none -- verifies
-    nothing here, and silently returning would ship whatever is on disk.
+    nothing here, and silently returning would ship whatever is on disk. The
+    source inert KEEPs committed is checked in the order it landed between them.
     """
     expected = {}
-    for entry in state.get("optimization_stack", []):
+    for entry in source_layers_in_order(state.get("optimization_stack", []), state.get("inert_source_layers", [])):
         if not entry.get("source_snapshot"):
             continue
         snapshot = Path(entry["source_snapshot"])
@@ -211,17 +212,19 @@ def _build(session: Path, state: dict, dest: Path) -> dict:
     if not state.get("framework_repo_path"):
         raise ValueError("Framework source root is unavailable")
     root = Path(state.get("framework_repo_path") or "")
-    from hyperloom.orchestrator.framework.optimization_scope import optimization_file
+    from hyperloom.orchestrator.framework.optimization_scope import optimization_scope
 
-    hook = optimization_file(str(state.get("bypass_scripts_dir") or ""))
-    if hook is not None:
+    scope = optimization_scope(str(state.get("bypass_scripts_dir") or ""))
+    if scope is not None:
         from .single_file import build_single_file
 
         # Fail closed: the module is the whole deliverable, so exporting it unverified
         # would ship bytes nothing proves were benchmarked.
-        if hook.name not in _verify_accepted_source(state, root):
-            raise ValueError(f"No accepted source snapshot covers {hook.name}; nothing proves what was benchmarked")
-        return build_single_file(state, root, hook, dest)
+        if scope.file.name not in _verify_accepted_source(state, root):
+            raise ValueError(
+                f"No accepted source snapshot covers {scope.file.name}; nothing proves what was benchmarked"
+            )
+        return build_single_file(state, root, scope, dest)
     contract = _read_contract(root)
     best = state.get("current_best") or {}
     if not best:

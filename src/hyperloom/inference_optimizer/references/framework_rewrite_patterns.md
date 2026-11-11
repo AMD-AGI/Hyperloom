@@ -400,6 +400,9 @@ usually telling you about the compiler rather than the model; a targeted
   module. That is another way a shared package path aliases, and another reason the
   per-process rule above is not negotiable.
 
+- **Clone the result before returning it.** A loaded package writes into static
+  output buffers, so the next call overwrites what the last one returned. See
+  *Clone an output you did not allocate this call* under **Pitfalls**.
 - **The accuracy gate must run against the artifact**, never against the Python model
   that produced it. Export involves wrapper code, patched methods and custom ops, all
   of which can be wrong in ways tracing does not catch.
@@ -504,6 +507,14 @@ number instead of a position in someone's ordering.
 - **Graph capture conflicts with lazily populated caches.** The first call
   allocates inside the capture. Do not combine graph capture with these
   rewrites; disable it or populate the caches during warm-up.
+- **Clone an output you did not allocate this call.** Graph replay and an
+  AOTInductor package both write their results into static buffers, so the next
+  call overwrites the tensor the previous one returned. A caller that keeps an
+  output across calls then reads the newer value, which makes the module a
+  faster but wrong drop-in replacement. Return `output.clone()`. The copy is
+  negligible beside the inference it follows unless the output is very large,
+  and the script-workload gate rejects a module that skips it, reporting
+  `output_buffer_reuse`.
 - **Switch-name collisions.** A name that matches an upstream variable will be
   honoured by upstream code too. Namespace yours.
 - **A cache that never invalidates across workloads.** Fine within one

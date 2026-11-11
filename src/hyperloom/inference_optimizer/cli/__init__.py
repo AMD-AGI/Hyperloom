@@ -22,6 +22,7 @@ from hyperloom.common import llm_config
 from hyperloom.common.env import env_bool
 from hyperloom.common.llm_config import CLAUDE_OAUTH_TOKEN_ENV
 from hyperloom.common.llm_headers import parse_custom_headers
+from hyperloom.common.sandbox import SandboxRoots
 from .executors import (
     _build_specialist_executor,
     _register_executors,
@@ -114,10 +115,12 @@ from hyperloom.orchestrator.prompts.prompt_builder import (
 from hyperloom.inference_optimizer.breakdown.stop_reasons import SUPERVISOR_RESTART_REASON
 
 from ..session.lock import SessionAlreadyRunning, SessionLock
+from ..script_workload import benchmark_inputs
 from ..session.paths import (
     ENV_USER_DATA_PATH,
     asset_system_prompts_dir,
     make_session_dir,
+    workspace_root,
 )
 
 
@@ -155,6 +158,32 @@ def _normalise_framework_name(value: str | None) -> str:
     return str(value or "").strip().lower().replace("_", "-")
 
 
+def sandbox_roots(argv: list[str]) -> SandboxRoots:
+    """What an ``optimize`` run writes and reads, derived from its flags for the bwrap sandbox."""
+    if {"-h", "--help"} & set(argv):
+        return SandboxRoots()
+    try:
+        args, _ = _build_parser().parse_known_args(argv)
+    except SystemExit:
+        # A malformed command line; the strict parse inside the sandbox reports it.
+        return SandboxRoots()
+    if args.command != "optimize":
+        return SandboxRoots()
+    writable = [workspace_root().absolute()]
+    framework_path = args.framework_path or os.environ.get("FRAMEWORK_REPO_PATH", "").strip()
+    if framework_path:
+        writable.append(Path(framework_path).expanduser().resolve())
+    readonly: list[Path] = []
+    if args.model and Path(args.model).expanduser().exists():
+        model = Path(args.model).expanduser().resolve()
+        readonly.append(model if model.is_dir() else model.parent)
+    scripts = args.benchmark_scripts_dir or os.environ.get("HYPERLOOM_BYPASS_SCRIPTS_DIR", "").strip()
+    if scripts:
+        benchmark = Path(scripts).expanduser().resolve()
+        readonly += [benchmark, *benchmark_inputs(benchmark)]
+    return SandboxRoots(writable=tuple(writable), readonly=tuple(readonly))
+
+
 def _apply_operator_supplied_paths(args: Any, framework: str) -> None:
     """Publish ``--framework-path`` / ``--benchmark-scripts-dir`` as env."""
     fatal: list[str] = []
@@ -162,16 +191,16 @@ def _apply_operator_supplied_paths(args: Any, framework: str) -> None:
         from hyperloom.orchestrator.actions.executors.benchmark_backend import (
             BENCHMARK_BACKEND_ENV,
             DEFAULT_BENCHMARK_BACKEND,
+            select_bypass_for_custom,
         )
 
-        # Matches install.sh's normalisation so the two gates agree on a value like " Bypass "; anything else,
-        # including unset, is refused.
+        select_bypass_for_custom(framework)
+        # Matches install.sh's normalisation so the two gates agree on a value like " Bypass ".
         backend = os.environ.get(BENCHMARK_BACKEND_ENV, "").strip().lower()
         if backend != "bypass":
-            shown = f"{backend!r}" if backend else f"unset (defaults to {DEFAULT_BENCHMARK_BACKEND!r})"
             fatal.append(
-                f"--framework custom requires {BENCHMARK_BACKEND_ENV}=bypass; it is {shown}. "
-                "The default backend cannot run an operator-supplied script."
+                f"--framework custom requires {BENCHMARK_BACKEND_ENV}=bypass (or unset); it is {backend!r}. "
+                f"The {DEFAULT_BENCHMARK_BACKEND!r} backend cannot run an operator-supplied script."
             )
     for flag, value, env_name in (
         ("--framework-path", getattr(args, "framework_path", None), "FRAMEWORK_REPO_PATH"),

@@ -86,6 +86,31 @@ jobs:
   # with pytest-split and in-runner xdist, then uploads a partial coverage data
   # file. No gate here -- a single shard's coverage is intentionally incomplete.
   # ---------------------------------------------------------------------------
+  script-harness:
+    # These tests skip without torch. Its own job rather than the test matrix, which
+    # would install torch once per shard per Python version.
+    name: script workload harness (torch, CPU)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/setup-python@v7
+        with:
+          python-version: "3.11"
+          cache: 'pip'
+          cache-dependency-path: pyproject.toml
+
+      - name: Install dependencies
+        run: |
+          pip install --upgrade pip
+          pip install -e ".[test]"
+          # The CPU index explicitly: a bare specifier resolves to the CUDA wheel.
+          pip install torch --index-url https://download.pytorch.org/whl/cpu
+
+      - name: Run harness tests
+        run: |
+          python -m pytest src/hyperloom/inference_optimizer/tests/test_script_workload.py -v --no-header -p no:randomly
+
   test:
     name: test (py${{ matrix.python-version }} shard ${{ matrix.shard }}/6)
     needs: prepare-durations

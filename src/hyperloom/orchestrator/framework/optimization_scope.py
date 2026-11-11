@@ -5,10 +5,10 @@
 
 from __future__ import annotations
 
+from dataclasses import dataclass
 import json
 import logging
 import os
-from dataclasses import dataclass
 from pathlib import Path
 
 from ..specialists.patch_safety import parse_patch_targets
@@ -18,6 +18,18 @@ log = logging.getLogger(__name__)
 # Schema 2 adds the optional "aoti" block: the operator's opt-in to ahead-of-time
 # export, plus the dynamic input dims the agent must not guess.
 SUPPORTED_SCHEMA_VERSIONS = (1, 2)
+
+
+# The entry function's name before a declaration could choose one.
+_SCHEMA_1_FUNCTION = "hyperloom_optimize"
+
+
+@dataclass(frozen=True)
+class OptimizationScope:
+    """The sole editable module and the function the user script passes its model through."""
+
+    file: Path
+    function: str
 
 
 @dataclass(frozen=True)
@@ -60,19 +72,39 @@ def _read_scope(directory: str | None = None) -> dict | None:
         path = Path(scope["file"])
     except (OSError, TypeError, KeyError, json.JSONDecodeError) as exc:
         raise ValueError(f"Unreadable single-file optimization scope: {exc}") from exc
-    if scope.get("schema_version") not in SUPPORTED_SCHEMA_VERSIONS or not path.is_absolute() or path.suffix != ".py":
+    if (
+        scope.get("schema_version") not in SUPPORTED_SCHEMA_VERSIONS
+        or not path.is_absolute()
+        or path.suffix != ".py"
+        or not _scope_function(scope).isidentifier()
+    ):
         raise ValueError("Invalid single-file optimization scope")
     if path.is_symlink() or not path.is_file():
         raise ValueError("Optimization file must be an existing regular Python file")
     return scope
 
 
-def optimization_file(directory: str | None = None) -> Path | None:
+def _scope_function(scope: dict) -> str:
+    """The entry function the user script calls.
+
+    Optional in every schema: naming it and declaring an ``aoti`` block arrived in
+    schema 2 independently, so a declaration may carry either, both or neither.
+    """
+    return str(scope.get("function") or _SCHEMA_1_FUNCTION)
+
+
+def optimization_scope(directory: str | None = None) -> OptimizationScope | None:
     """Read the write boundary from the frozen benchmark directory, if declared."""
     scope = _read_scope(directory)
     if scope is None:
         return None
-    return Path(scope["file"]).resolve()
+    return OptimizationScope(file=Path(scope["file"]).resolve(), function=_scope_function(scope))
+
+
+def optimization_file(directory: str | None = None) -> Path | None:
+    """The sole editable module, when one is declared."""
+    scope = optimization_scope(directory)
+    return None if scope is None else scope.file
 
 
 def _parse_dim(entry: object, index: int) -> AotiDim:
@@ -137,9 +169,10 @@ def aoti_config(directory: str | None = None) -> AotiConfig | None:
 
 def check_patch_scope(root: Path, texts: list[str]) -> None:
     """Reject patches outside the sole model artifact before applying them."""
-    allowed = optimization_file()
-    if allowed is None:
+    scope = optimization_scope()
+    if scope is None:
         return
+    allowed = scope.file
     if root.resolve() != allowed.parent:
         raise ValueError(f"Single-file workload permits changes only to {allowed}")
     for text in texts:
@@ -176,14 +209,14 @@ def _aoti_instructions(config: AotiConfig) -> str:
 
 def scope_instructions() -> str:
     """Describe the operator's artifact boundary to optimization agents."""
-    allowed = optimization_file()
-    if allowed is None:
+    scope = optimization_scope()
+    if scope is None:
         return ""
     base = (
-        f"Single-file optimization contract: only {allowed} may change. "
-        "It must define hyperloom_optimize(model) returning the optimized callable. "
-        "The user script owns inputs, weights, validation and latency measurement. "
-        "Do not edit that script or installed packages. All reusable optimization logic, "
+        f"Single-file optimization contract: only {scope.file} may change. "
+        f"It must define {scope.function}(model) returning the optimized callable. "
+        "The benchmark owns inputs, weights, validation and latency measurement. "
+        "Do not edit the user script, the benchmark directory or installed packages. All reusable optimization logic, "
         "including custom kernels and runtime setup, must live in this one Python module. "
         "External environment changes, overlays and auxiliary source files are not deliverables."
     )
