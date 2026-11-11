@@ -51,6 +51,7 @@ from pathlib import Path
 from types import MappingProxyType
 
 from hyperloom_common.contract_fields import ContractFields, field_names
+from hyperloom_common.io import SHARED, atomic_write_bytes
 from hyperloom_common.shared_storage import make_shared_dirs
 from inference_suite import aiperf_patch, client_env
 from inference_suite.client_env import CLIENT_PYTHON, PATCHED_FILES, ClientEnvError
@@ -315,12 +316,6 @@ def _run_staging_step(argv: Sequence[str], what: str) -> None:
         raise StagingError(f"{what} exited with code {done.returncode}: {done.stderr.strip()[-2000:]}")
 
 
-def _write_atomically(path: Path, data: bytes) -> None:
-    partial = path.with_name(f".{path.name}.{os.getpid()}")
-    partial.write_bytes(data)
-    os.replace(partial, path)
-
-
 def stage(source: Path, tool_cache: Path) -> str:
     """Copy InferenceX's subset from the checkout ``source`` into ``tool_cache`` and build the AgentX client
     environment beside it from the pinned build and lock, both downloaded; returns the manifest's sha256.
@@ -357,7 +352,7 @@ def stage(source: Path, tool_cache: Path) -> str:
     os.replace(partial, root)
     manifest = StagingManifest({INFERENCEX_TOOL: StagedTool(pin, files)})
     data = manifest.to_bytes()
-    _write_atomically(tool_cache / MANIFEST_FILE, data)
+    atomic_write_bytes(tool_cache / MANIFEST_FILE, data, options=SHARED)
     return _sha256(data)
 
 
