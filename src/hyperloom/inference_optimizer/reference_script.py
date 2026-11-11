@@ -110,13 +110,28 @@ def render_reference_script(
     launch: LaunchSettings,
     target: ServingTarget = ServingTarget(),
     setup_script: str | None = None,
+    deployment_dir: str = "deployment",
 ) -> str:
     """Render a runnable ``*.sh`` artifact from a launch recipe.
 
     ``setup_script`` names a script beside this one that prepares the
     environment. It runs before the launch envs are exported, as the session's
     own setup did, and the launch follows only when it succeeds.
+
+    A custom workload serves no server, so its script runs the standalone export
+    under ``deployment_dir`` instead of a launch recipe.
     """
+    if str(framework or "").strip().lower() == "custom":
+        return (
+            "#!/usr/bin/env bash\nset -euo pipefail\n"
+            'SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"\n'
+            f'DEPLOYMENT_DIR="$SCRIPT_DIR"/{shlex.quote(deployment_dir)}\n'
+            'if [[ ! -f "$DEPLOYMENT_DIR/inference.py" ]]; then\n'
+            '  echo "Standalone inference export is unavailable; see $DEPLOYMENT_DIR/deployment.json" >&2\n'
+            "  exit 1\n"
+            "fi\n"
+            'exec uv run --no-project --no-sync python "$DEPLOYMENT_DIR/inference.py" "$@"\n'
+        )
     overlay_pythonpath, unset_envs = launch.overlay_pythonpath, launch.unset_envs
     model, tp, max_model_len, gpu_type = target.model, target.tp, target.max_model_len, target.gpu_type
 
