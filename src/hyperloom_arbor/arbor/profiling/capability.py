@@ -8,7 +8,7 @@ build exposes a full torch-profiler schedule on ``ProfilerConfig`` —
 ``torch_profiler_record_shapes``. A plan written against either tree breaks on
 the other: against the newer build you leave the schedule unconfigured and
 profile more than you meant to; against the older one you pass fields that do
-not exist and lose a GPU-hour to a ``TypeError``.
+not exist and lose GPU time to a ``TypeError``.
 
 Neither tree is "the" answer, which is the whole point. Profiling configuration
 is the fastest-drifting part of an engine, an optimization agent runs against

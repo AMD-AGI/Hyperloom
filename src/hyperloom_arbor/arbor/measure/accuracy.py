@@ -57,8 +57,8 @@ ROOT_FILE = "baseline_accuracy.json"
 BASELINE_SOURCE = "the baseline's full GSM8K (baseline_record)"
 ROOT_SOURCE = "the root's full GSM8K, measured by this session"
 FLOOR_SOURCE = "GSM8K_MIN: no golden score on record"
-# What measuring the root needs before the deadline: one server boot and the full set (an 8B
-# model at TP1 on one MI350X takes a few minutes for each). A run with less left keeps the floor.
+# What measuring the root needs before the deadline: one server boot and the full set (a small
+# model on one GPU takes minutes for each). A run with less left keeps the floor.
 ROOT_NEED_S = 30 * 60
 # The full set's result beside its output (measure), which a KEEP's snapshot carries.
 ACCURACY_FILE = "accuracy.json"

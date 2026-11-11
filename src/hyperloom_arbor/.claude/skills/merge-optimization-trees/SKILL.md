@@ -163,8 +163,8 @@ An illustrative sequence:
 |---|---|
 | all of them | dies |
 | all but the most-suspected | dies → the suspicion was wrong |
-| two known-active only | clean |
-| those two + one more | dies → **culprit found** |
+| the known-active ones only | clean |
+| those + one more | dies → **culprit found** |
 
 Note the second row. A first hypothesis can be wrong, and the bisect says so
 immediately — which is the point of bisecting rather than reasoning.
@@ -270,7 +270,7 @@ Phase G — confirm    : re-measure the winning set at 3 seeds, both axes
 ```
 
 Total roughly `N + log2(N) + a few`, against `2^N`. **Never enumerate the
-power set**: fourteen features is 16384 configurations.
+power set**: twenty features is over a million configurations.
 
 Two legitimate shortcuts, and one that is not:
 

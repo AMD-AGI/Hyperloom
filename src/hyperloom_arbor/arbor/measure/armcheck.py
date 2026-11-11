@@ -3,8 +3,8 @@
 A knob in arbor/config.json is a claim about the server, not a fact about it.
 The recipes behind the serving-playbook skill lost settings on the way to the
 process several times (amd-knobs.md §0, rule 1), and this harness did too: the
-server sub-agent's suggested launch passed no env, while the baseline
-(a campaign's baseline launcher) passed ``server_env`` with ``-e``, so
+server sub-agent's suggested launch passed no env, while the campaign's baseline
+script passed ``server_env`` with ``-e``, so
 an iteration and its bar could run under different env.
 
 ``capture`` reads the live server process inside the container: its env,

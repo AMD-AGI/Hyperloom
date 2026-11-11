@@ -29,7 +29,7 @@ recorded in `session.json`, and a resumed session keeps it.
 "component": {
   "host": "hyperloom-mb",
   "deadline": "2030-01-01T00:00:00Z",
-  "seconds": 25200,
+  "seconds": 3600,
   "notes": "/abs/path/mb-integration.md",
   "bench_command": "python3 benchmark_serving.py ... --base-url http://127.0.0.1:{port} --result-dir {out}",
   "outbox": "keeps"
@@ -202,8 +202,8 @@ command in the prompts (`arbor/component.py`, `arbor/policy/claude_loop.py`), an
   block aggregates, as with the pack's bench. The same command also takes the pack's
   `secondary_metric` when the client gives it; without it, the gate would see only the primary
   (`secondary: None` on every KEEP).
-- **The bench runs detached.** A command the agent's CLI ends takes its children with it, and
-  one host's replays died at 30 min that way. Where step 1 is all fixed commands (the pack's
+- **The bench runs detached.** A command the agent's CLI ends takes its children with it, a
+  long replay among them. Where step 1 is all fixed commands (the pack's
   bench, or the host's with `bench_read`), the harness writes them to `iter_N/bench_run.sh`; the
   agent starts it with `setsid nohup`, its output in `iter_N/bench.log` and its PID in
   `iter_N/bench.pid`, and waits on the output or the PID. When the turn ends, a bench still
@@ -253,20 +253,19 @@ A second launch at each KEEP, component mode only.
   health under the `server` cap, and probes again (`iter_N/short_prompts_2.json`). The
   session's first KEEP sets the floor (`<session>/short_prompts/floor.json`); a later KEEP whose
   processes differ on more prompts sent one at a time than the floor becomes REVERT, with the
-  first differing positions in the reason. The batched half is recorded and refuses nothing
-  (from the GPU run): an unchanged tree's two boots never differed on the prompts sent one at a
-  time, and differed on most of the batched ones in their first tokens, because which prompts
-  share a prefill batch changes
-  between boots and that flips near-tied greedy picks; pooled, that noise hid a small
-  single-request defect and could refuse a good KEEP. The second launch's server log is kept
+  first differing positions in the reason. The batched half is recorded and refuses nothing:
+  an unchanged tree's two boots agree on the prompts sent one at a time but can differ on the
+  batched ones in their first tokens, because which prompts share a prefill batch changes
+  between boots and that flips near-tied greedy picks; pooled, that noise can hide a small
+  single-request defect and refuse a good KEEP. The second launch's server log is kept
   as `iter_N/server_2.log`. The record is `iter_N/short_prompts_check.json`; `keep.json` gets its
   brief, and a snapshot carries the record when the check ran.
 - **What refuses nothing:** an iteration probe that did not finish (no boot is spent then), a
   second boot that does not come up, no time left, a second probe that does not finish. The
   KEEP stands and `keep.json` says why, as MB's check does; MB re-gates every KEEP.
-- **Odds and cost:** two processes catch a one-in-three defect 4 times in 9 per KEEP, and every
-  later KEEP that carries it is another chance. The cost is one server boot and two probes per
-  KEEP (about 5 minutes for a large model at TP4), which a host should allow for in its deadline.
+- **Odds and cost:** two processes catch a defect that shows in only some processes part of the
+  time, and every later KEEP that carries it is another chance. The cost is one server boot and
+  two probes per KEEP, which a host should allow for in its deadline.
 
 ### The host's plan
 

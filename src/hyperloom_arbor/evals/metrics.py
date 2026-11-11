@@ -463,8 +463,8 @@ def pathology_metrics(steps: list[dict[str, Any]], session_dir: Path,
     # A retried change is only waste if it was already tried and REVERTED.
     #
     # An earlier version counted any env var or flag seen in more than one
-    # server launch, which reported `--model×2` and `--port×2` — the constants
-    # present in every launch — as repeated changes, and `SESSION_DIR×3`, a
+    # server launch, which reported `--model×N` and `--port×N` — the constants
+    # present in every launch — as repeated changes, and `SESSION_DIR×N`, a
     # shell variable that never reaches the server. Noise that looks like a
     # finding is worse than no finding, so this now measures the real thing:
     # settings carried by an iteration that reverted, and tried again later.

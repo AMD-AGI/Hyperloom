@@ -424,9 +424,9 @@ def run_gate(
                        booked=True)
 
     # ── Pareto shape, computed once and shared by every class ───────────────
-    # The leaderboard this campaign targets is a throughput-vs-interactivity
-    # CURVE. A change that buys one axis by spending the other is a new point
-    # on the frontier, not a failure — a single-axis gate cannot see that and
+    # A serving leaderboard is a throughput-vs-interactivity CURVE. A change
+    # that buys one axis by spending the other is a new point on the
+    # frontier, not a failure — a single-axis gate cannot see that and
     # would revert it.
     both_ok = pri.ok and sec.ok
     is_frontier = (pri.gain and not sec.ok) or (sec.gain and not pri.ok)
@@ -452,10 +452,10 @@ def run_gate(
     #                        secondary_exchange_rate * primary_gain_pct)
     #
     # so the size of the primary win sets how much of the second axis it may
-    # buy, and an absolute ceiling still bounds the whole thing. A flat cap got
-    # this wrong in both directions at once: set low enough to refuse a
-    # marginal +1% win spending 5%, it also refused a decisive +8% win spending
-    # 5%, which is a real point on the frontier.
+    # buy, and an absolute ceiling still bounds the whole thing. A flat cap
+    # gets this wrong in both directions at once: set low enough to refuse a
+    # marginal win that spends several times what it gained, it also refuses
+    # a decisive win spending the same, which is a real point on the frontier.
     #
     # `secondary_exchange_rate` defaults to 1.0 when a cap is set: never give
     # up more percent of the second axis than you gained on the first. Set it
