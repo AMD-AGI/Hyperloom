@@ -149,13 +149,14 @@ from hyperloom_multibranch.scheduling.hosted_run import (
     close_then_start,
     grant_deadline,
     grant_tests_that_fit,
-    record_session,
     recorded_session,
     refuse_unhosted_branches,
     reported_stop_reason,
     require_hosted_isolation,
     run_argv,
+    share_with_the_group,
     spec_make_before_break,
+    started_session,
     stop_before_grant_ends,
     take_over_earlier_session,
     write_final_exit,
@@ -1078,13 +1079,15 @@ def _hosted_start(host: HostInfo) -> HostedStart:
     if earlier.closed is not None:  # it closed with no baseline, which ended the run, and was killed before exit.json
         return HostedStart(lambda: EXIT_FAILED, deadline)
     persisted = earlier.finish
+    if (taken := persisted or earlier.left) is not None:
+        share_with_the_group(taken.layout.root)
     settings = _hosted_settings(host, deadline.session_hours) if persisted is None else persisted.settings
     require_session_environment(settings, os.environ)
     ready = hosted_ready_session(host, settings.workload)
     close = partial(final_only, peer_factory=ready.peer_factory, services=ready.services)
     if persisted is not None:
         return HostedStart(partial(close, persisted, restart=True), deadline)
-    start = partial(run_session, settings, ready.peer_factory, ready.services, partial(_record_root, host.state_dir))
+    start = partial(run_session, settings, ready.peer_factory, ready.services, partial(started_session, host.state_dir))
     return HostedStart(partial(close_then_start, earlier.left, close, start), deadline)
 
 
@@ -1107,11 +1110,6 @@ def _parsed_run(argv: list[str]) -> argparse.Namespace:
     except SystemExit as exc:
         message = errors.getvalue().strip().splitlines()[-1]
         raise ValueError(f"the spec does not map onto the options of run: {message}") from exc
-
-
-def _record_root(state_dir: Path, root: Path) -> None:
-    _print_root(root)
-    record_session(state_dir, root)
 
 
 def _not_run(state_dir: Path, returncode: int, exc: Exception) -> int:
