@@ -67,6 +67,9 @@ class SessionGate(Protocol):
     async def accuracy_passes(self, request_id: str) -> bool:
         """Whether the test clears the accuracy gate every commit clears."""
 
+    async def speed_gates(self) -> frozenset[str]:
+        """The refusals of the session's rule that say only that a candidate is not faster than its parent."""
+
 
 @dataclass(frozen=True)
 class RegressionOutcome:
