@@ -145,13 +145,12 @@ class MergeSmoke:
     """The merge smoke of one toolbox.
 
     ``default_python`` is the interpreter a point that names none is smoked with: the toolbox's own, which the compile
-    found the image's packages with. ``scratch`` is where each check's farm is laid (the host's temporary directory when
-    ``None``); it is removed after the check.
+    found the image's packages with. Each check lays its farm in a directory of its own under the host's temporary
+    directory and removes it after the check.
     """
 
     timeout_sec: float = SMOKE_TIMEOUT_SEC
     default_python: str = sys.executable
-    scratch: Path | None = None
 
     def check(self, environment: object, points: Sequence[Path]) -> str | None:
         """The first error of the candidate's patched Python, or ``None`` when it compiles and imports (or carries no
@@ -161,7 +160,7 @@ class MergeSmoke:
             return None
         config = _point_config(points)
         python = _resolved(named_python(config) or self.default_python)
-        work = Path(tempfile.mkdtemp(prefix="hl-merge-smoke-", dir=self.scratch))
+        work = Path(tempfile.mkdtemp(prefix="hl-merge-smoke-"))
         try:
             store = LocalBlobStore(environment.blob_root)
             error = self._compile(python, environment, store, work)

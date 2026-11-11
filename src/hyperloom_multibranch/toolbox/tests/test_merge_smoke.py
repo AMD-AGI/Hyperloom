@@ -10,6 +10,7 @@ import asyncio
 import os
 import subprocess
 import sys
+import tempfile
 from dataclasses import dataclass, field, replace
 from pathlib import Path
 
@@ -193,6 +194,8 @@ class _Backend:
     inner: object
     calls: int = 0
     seen: list[object] = field(default_factory=list)
+    #: The point the first sandbox measures in place of the planned one (a fault the next attempt does not meet).
+    first: Path | None = None
 
     name = "hosted"
 
@@ -202,16 +205,17 @@ class _Backend:
 
     def run_test(self, call):  # type: ignore[no-untyped-def]
         self.calls += 1
-        return self.inner.run_test(replace(call, environment=None))  # type: ignore[attr-defined]
+        points = (self.first,) if self.first is not None and self.calls == 1 else call.points
+        return self.inner.run_test(replace(call, environment=None, points=points))  # type: ignore[attr-defined]
 
 
 async def _through_toolbox(
-    tmp_path: Path, environment: CompiledEnvironment, smoke: MergeSmoke
+    tmp_path: Path, environment: CompiledEnvironment, smoke: MergeSmoke, first: dict[str, str] | None = None
 ) -> tuple[TestResult, _Backend, object]:
     rig = make_rig(tmp_path)
     try:
         point = point_yaml(tmp_path, "planned.yaml", fake_mode="ok")
-        backend = _Backend(rig.backend)
+        backend = _Backend(rig.backend, first=point_yaml(tmp_path, "first.yaml", **first) if first else None)
         executor = HostedExecutor(backend, tmp_path / "session")  # type: ignore[arg-type]
         executor.smoke = smoke
         tb = build(
@@ -283,10 +287,30 @@ async def test_a_smoke_past_its_timeout_is_infrastructure(tmp_path: Path, framew
     assert "timed out after 2 s" in (result.failure_reason or "")
 
 
-def test_the_smoke_runs_in_a_directory_of_its_own(tmp_path: Path, framework: Framework) -> None:
+@dataclass(frozen=True)
+class _CountingSmoke(MergeSmoke):
+    checks: list[int] = field(default_factory=list)
+
+    def check(self, environment: object, points: tuple[Path, ...]) -> str | None:  # type: ignore[override]
+        self.checks.append(1)
+        return super().check(environment, points)
+
+
+async def test_a_retry_after_a_passed_smoke_is_not_smoked_again(tmp_path: Path, framework: Framework) -> None:
+    environment = _environment(tmp_path, framework, MERGE_OWN)
+    smoke = _CountingSmoke(default_python=framework.python)
+    result, backend, _ = await _through_toolbox(tmp_path, environment, smoke, first={"fake_mode": "node_fault"})
+    assert result.validity is Validity.SUCCEEDED and backend.calls == 2 and len(result.attempts) == 2
+    assert len(smoke.checks) == 1, "the second sandbox was not held back for a smoke that already passed"
+
+
+def test_the_smoke_runs_in_a_directory_of_its_own(
+    tmp_path: Path, framework: Framework, monkeypatch: pytest.MonkeyPatch
+) -> None:
     scratch = tmp_path / "scratch"
     scratch.mkdir()
-    assert _check(tmp_path, framework, MERGE_OWN, scratch=scratch) is None
+    monkeypatch.setattr(tempfile, "tempdir", str(scratch))
+    assert _check(tmp_path, framework, MERGE_OWN) is None
     assert os.listdir(scratch) == [], "each check removes what it laid"
 
 
