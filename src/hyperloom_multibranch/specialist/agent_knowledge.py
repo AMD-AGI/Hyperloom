@@ -18,7 +18,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from hyperloom.contracts.recipe import Recipe
-from hyperloom_common.shared_storage import make_shared_dirs
+from hyperloom_common.shared_storage import make_shared_dirs, write_shared_text
 from hyperloom_multibranch.contracts.blackboard.records import BlackboardSnapshot
 from hyperloom_multibranch.contracts.blackboard.vocab import INTEGRATION_BRANCH
 from hyperloom_multibranch.contracts.repo import ExperimentRepo
@@ -27,7 +27,6 @@ from hyperloom_multibranch.specialist.agent_session import SessionBlackboard
 NOTES_FILE = "mb-integration.md"
 #: Where the head's patch and kernel files are written, beside the notes, at the paths its recipe names.
 FILES_DIR = "mb-integration"
-ENCODING = "utf-8"
 NONE = "- none"
 
 
@@ -125,7 +124,7 @@ class IntegrationNotes:
         await self._repo.checkout(head, files)
         merged = merged_changes(await self._blackboard.snapshot(), head)
         text = render_notes(head, await self._repo.read_recipe(head), merged, files)
-        self._path.write_text(text, encoding=ENCODING)
+        write_shared_text(self._path, text)
         self._written = head
         return True
 

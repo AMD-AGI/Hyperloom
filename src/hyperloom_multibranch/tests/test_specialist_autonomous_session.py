@@ -5,8 +5,11 @@ import asyncio
 from types import SimpleNamespace
 import json
 import os
+import select
+import signal
 import subprocess
 import time
+from collections.abc import Awaitable, Callable
 from dataclasses import asdict, replace, dataclass, field
 from pathlib import Path
 
@@ -57,6 +60,7 @@ from hyperloom_multibranch.specialist.runtime import (
     SessionStart,
 )
 from hyperloom_multibranch.specialist.worktree import Upstream
+from hyperloom_common.tests.shared_accounts import Accounts, other_accounts
 from hyperloom_multibranch.tests.branch_rig import branch_rig
 from hyperloom_multibranch.tests.agent_rig import (
     BRANCH,
@@ -1592,6 +1596,75 @@ async def test_a_preflight_makes_the_branch_s_directories_the_group_s_only_on_sh
     made = [agent.parent, agent, agent / "src", *([agent / START_TABLES_DIR] if tables else [])]
     modes = {path.name: oct(path.stat().st_mode & 0o7777) for path in made}
     assert modes == dict.fromkeys(modes, oct(0o2775 if shared else 0o755))
+    written = [path for path in (agent.parent.iterdir()) if path.is_file()] + [agent / "mb-integration.md"]
+    written += [path for path in (agent / START_TABLES_DIR).rglob("*") if path.is_file()] if tables else []
+    modes = {str(path): oct(path.stat().st_mode & 0o777) for path in written}
+    assert len(modes) > 4 and modes == dict.fromkeys(modes, oct(0o664 if shared else 0o644))
+
+
+def _as_member(accounts: Accounts, uid: int, leg: Callable[[], Awaitable[None]]) -> str:
+    """Run ``leg`` in a child process as ``uid`` of the accounts' group under umask ``022``: what it raised, or
+    ``"finished"``."""
+    read, write = os.pipe()
+    pid = os.fork()
+    if pid == 0:
+        said = "finished"
+        try:
+            os.setgroups([accounts.group])
+            os.setresgid(uid, uid, uid)
+            os.setresuid(uid, uid, uid)
+            os.umask(0o022)
+            asyncio.run(leg())
+        except BaseException as error:  # noqa: BLE001 - everything the leg raised goes back to the test
+            said = repr(error)
+        os.write(write, said.encode())
+        os._exit(0)
+    os.close(write)
+    if not select.select([read], [], [], 120)[0]:
+        os.kill(pid, signal.SIGKILL)  # forked from a process with threads, it may hang on a lock one of them held
+    with os.fdopen(read) as told:
+        said = told.read()
+    os.waitpid(pid, 0)
+    return said
+
+
+@pytest.mark.filterwarnings("ignore:This process .* is multi-threaded:DeprecationWarning")
+def test_another_account_of_the_group_resumes_a_branch_whose_files_a_first_leg_wrote_under_umask_022() -> None:
+    with other_accounts() as accounts:
+        tmp_path = accounts.shared_dir("run")
+        blobs = LocalBlobStore(tmp_path / "blobs")
+        agent = Agent(keeps=(), exit=3, resume="exit 3")
+        rig = asyncio.run(_rig(tmp_path, agent, start=_replayed(blobs), aiter=_aiter(tmp_path)))
+
+        async def first_leg() -> None:
+            # The integration head holds a kernel table, laid out below the notes, and moves once the first leg ends.
+            root = await rig.repo.head(INTEGRATION_BRANCH)
+            held = await rig.repo.commit(INTEGRATION_BRANCH, root, _replayed(blobs), "kb")
+            await rig.session.preflight()
+            with pytest.raises(SessionCrashed):
+                await asyncio.wait_for(rig.session.run(), 10)
+            await rig.session.stop()
+            moved = replace(_replayed(blobs), launch=LaunchConfig("--max-num-seqs 512"))
+            await rig.repo.commit(INTEGRATION_BRANCH, held, moved, "moved")
+
+        previous = os.umask(0o022)
+        try:
+            asyncio.run(first_leg())
+        finally:
+            os.umask(previous)
+        session = tmp_path / BRANCH / "session"
+        for path in (session, *session.rglob("*")):
+            os.lchown(path, accounts.first, -1)
+        (tmp_path / "logs").chmod(0o2775)  # the fake sandbox's own logs
+
+        async def resumed_leg() -> None:
+            resumed = rig.restart()
+            with pytest.raises(SessionCrashed, match="exited 3"):
+                await asyncio.wait_for(resumed.run(), 10)
+            await resumed.stop()
+
+        assert _as_member(accounts, accounts.second, resumed_leg) == "finished"
+        assert "--max-num-seqs 512" in (session / AGENT_DIR / "mb-integration.md").read_text(encoding="utf-8")
 
 
 def _spec_envs(rig: Rig) -> dict[str, str]:

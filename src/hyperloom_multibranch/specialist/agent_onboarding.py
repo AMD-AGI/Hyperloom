@@ -53,6 +53,7 @@ from hyperloom_common.shared_storage import (
     child_umask,
     copy_shared_file,
     make_shared_dirs,
+    parent_is_shared,
     shared_parent,
     write_shared_text,
 )
@@ -429,20 +430,26 @@ async def _commit_tree(tree: Path, checkout: Path) -> None:
 
 
 def _copy_tree(tree: Path, checkout: Path) -> None:
-    """Copy ``tree`` into ``checkout`` but its ``.git`` and ``__pycache__``, by the shared-storage writers: directories
-    ``2775`` and files with their mode plus group write below shared storage, the umask's anywhere else. The agent's
-    sandbox, maybe another account of the group, writes the checkout and may have put a link anywhere in it, so none is
-    followed on the way; a link in ``tree`` is copied as the link, as a clone gives it, so that nothing outside ``tree``
-    is copied to the group.
+    """Copy ``tree`` into ``checkout`` but its ``.git`` and ``__pycache__``.
+
+    Below shared storage, judged before ``checkout`` is made, it is copied by the shared-storage writers: directories
+    ``2775`` and files with their mode plus group write. The agent's sandbox, maybe another account of the group, writes
+    the checkout and may have put a link anywhere in it, so none is followed on the way; a link in ``tree`` is copied as
+    the link, as a clone gives it, so that nothing outside ``tree`` is copied to the group. Anywhere else only this
+    account writes the checkout, and ``copytree`` copies it: a link as its target's content, every entry with its mode.
 
     Raises:
         OSError: for a link at ``checkout``'s name, ``ENOTDIR`` when it is this account's own (which
             :func:`make_shared_dirs` follows) and ``ELOOP`` when it is another account's, as for one further on the way.
     """
 
+    shared = parent_is_shared(checkout)
     make_shared_dirs(checkout)
     with shared_parent(checkout) as (parent, name, _shared):
         os.close(os.open(name, _NO_LINK_DIRECTORY, dir_fd=parent))
+    if not shared:
+        shutil.copytree(tree, checkout, ignore=shutil.ignore_patterns(*_NOT_COPIED), dirs_exist_ok=True)
+        return
     # Not following links, the walk lists a link to a directory among the directories, and does not go into it.
     for directory, subdirectories, files in os.walk(tree, onerror=_raise):
         subdirectories[:] = [name for name in subdirectories if name not in _NOT_COPIED]
