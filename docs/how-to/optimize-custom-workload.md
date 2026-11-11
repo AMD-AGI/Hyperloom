@@ -314,6 +314,37 @@ shows it immediately, instead of after hours of search against the wrong
 denominator. For the full artifact schema, see
 [`session_breakdown.json` integration in Hyperloom](../reference/session-breakdown.md).
 
+## Optimize a single Python module
+
+Everything above asks you to write a benchmark. You can instead keep model loading, inputs, validation and timing in the script you already have, and expose one optimization point:
+
+```python
+try:
+    from hyperloom_optimize import hyperloom_optimize
+except ModuleNotFoundError as exc:
+    if exc.name != "hyperloom_optimize":
+        raise
+
+    def hyperloom_optimize(model):
+        return model
+
+# Load model and weights, construct inputs, and capture any reference first.
+model = hyperloom_optimize(model)
+outputs = model(**inputs)
+```
+
+Point `--framework-path` at a directory holding `hyperloom_optimize.py`, initially an identity function. It does not need to be a Git checkout. In the frozen benchmark directory, declare `optimization_scope.json`:
+
+```json
+{"schema_version": 1, "file": "/absolute/workspace/optimization/hyperloom_optimize.py"}
+```
+
+An optional `function` names the entry point, so neither the module nor the function need mention Hyperloom: `{"schema_version": 1, "file": ".../encoder_opt.py", "function": "apply"}`.
+
+The declaration is the boundary, and it is enforced everywhere a change could enter the tree. Patch integration is narrowed to that exact file and root, including patches carrying a recorded source root. Direct kernel-patch installation is refused outright: a custom kernel belongs in the optimization module and goes in through the normal patch path. Coordinator and specialist prompts carry the same boundary, so an agent is told the rule rather than discovering it by having a patch rejected. The declaration is checked once at launch, against `--framework-path`, so a campaign aimed at the wrong tree costs nothing instead of failing at its first patch.
+
+A workload with no declaration is unaffected; everything above continues to apply to it.
+
 ## Troubleshooting
 
 | Symptom | Cause |

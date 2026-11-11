@@ -55,6 +55,9 @@ _SPECIALIST_ENV_ALLOWLIST: frozenset[str] = frozenset(
         "HOME",
         "HTTPS_PROXY",
         "HTTP_PROXY",
+        # The custom workload's frozen benchmark directory, which holds the
+        # optimization-scope declaration a specialist is told its boundary from.
+        "HYPERLOOM_BYPASS_SCRIPTS_DIR",
         "INFERENCEX_PATH",
         "LANG",
         "LC_ALL",

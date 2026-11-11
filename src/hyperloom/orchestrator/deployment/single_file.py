@@ -1,0 +1,77 @@
+# SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
+# SPDX-License-Identifier: MIT
+
+"""Export the sole source artifact of a script-owned benchmark."""
+
+from __future__ import annotations
+
+import ast
+import hashlib
+from pathlib import Path
+
+from hyperloom.orchestrator.framework.optimization_scope import OptimizationScope
+
+
+def _sibling_import(tree: ast.Module, root: Path, hook: Path) -> str | None:
+    """Name a module the hook imports from beside itself, or ``None``.
+
+    Only the hook is exported, so an import that resolves to a sibling file ships
+    broken. Reading the imports tests that property itself, and ignores scratch files
+    the agent left behind that nothing imports.
+
+    Import statements only. A dynamic import names its target at runtime, so no reading
+    of the source settles it, and matching the literal cases would only catch code no
+    one writes to reach a file beside them.
+    """
+    names = set()
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Import):
+            names.update(alias.name.split(".")[0] for alias in node.names)
+        elif isinstance(node, ast.ImportFrom) and node.level == 0 and node.module:
+            names.add(node.module.split(".")[0])
+        elif isinstance(node, ast.ImportFrom) and node.level:
+            return node.module or "."  # a relative import cannot resolve from one file
+    stem = hook.stem
+    for name in sorted(names):
+        if name == stem:
+            continue
+        # A directory counts whether or not it holds __init__.py: since PEP 420 a
+        # plain directory imports fine as a namespace package.
+        if (root / f"{name}.py").is_file() or (root / name).is_dir():
+            return name
+    return None
+
+
+def build_single_file(state: dict, root: Path, scope: OptimizationScope, dest: Path) -> dict:
+    """Capture a clean, accepted optimization module without wrapping its API.
+
+    The module is read from disk: the caller has already proven it byte-identical to
+    the complete KEEP-time stack snapshots, which does not require the operator to keep
+    the file in a repository.
+    """
+    hook = scope.file
+    if hook.parent != root.resolve() or not state.get("current_best"):
+        raise ValueError("No accepted single-file workload to export")
+    content = hook.read_bytes()
+    try:
+        tree = ast.parse(content)
+    except SyntaxError as exc:
+        raise ValueError("Optimization module is not valid Python") from exc
+    if not any(isinstance(node, ast.FunctionDef) and node.name == scope.function for node in tree.body):
+        raise ValueError(f"Module must define {scope.function}(model)")
+    sibling = _sibling_import(tree, root, hook)
+    if sibling is not None:
+        raise ValueError(f"Optimization module imports {sibling!r} from beside itself; the export ships one file")
+    (dest / hook.name).write_bytes(content)
+    return {
+        "schema_version": 1,
+        "status": "exported",
+        "reasons": [],
+        "kind": "single_file",
+        "entrypoint": f"{hook.stem}.{scope.function}",
+        "files": {hook.name: hashlib.sha256(content).hexdigest()},
+        "warnings": [],
+        "validation": "not_run",
+        "accepted_performance": {"tput": state["current_best"].get("tput")},
+        "usage": (f"Copy {hook.name} beside the original user script and run that script in its original runtime."),
+    }

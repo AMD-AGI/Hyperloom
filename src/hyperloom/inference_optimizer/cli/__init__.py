@@ -252,6 +252,17 @@ def _require_custom_entrypoint(framework: str, gpu_type: str | None = None) -> N
         print(f"ERROR: {exc}", file=sys.stderr)
         sys.exit(2)
 
+    # An operator-declared boundary is checked before the session exists, so a campaign
+    # pointed at the wrong tree costs nothing rather than failing at its first patch.
+    from hyperloom.orchestrator.framework.optimization_scope import check_patch_scope, optimization_file
+
+    try:
+        if optimization_file() is not None:
+            check_patch_scope(Path(os.environ.get("FRAMEWORK_REPO_PATH", "")), [])
+    except ValueError as exc:
+        print(f"ERROR: {exc}", file=sys.stderr)
+        sys.exit(2)
+
     bench: dict[str, Any] = {"framework": "custom"}
     apply_scriptable_runtime_defaults(bench, {}, gpu_type=gpu_type, explicit_benchmark_script=False)
     if bench.get("benchmark_script"):

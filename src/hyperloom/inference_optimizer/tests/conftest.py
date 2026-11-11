@@ -893,3 +893,93 @@ def heartbeat_orchestration_with_mock_critic() -> dict[str, object]:
         "orchestration": MockBackend(silent, name="orch"),
         "critic": MockCriticBackend(),
     }
+
+
+import json
+import pytest
+
+
+def accept_source(session, hook, stack_entry_id="accepted0"):
+    """Record ``hook``'s current bytes as an accepted stack snapshot.
+
+    Mirrors what the integrate_patch executor writes on a KEEP. Export verifies the
+    tree against these, so a workload with no snapshot has nothing proving what it
+    benchmarked -- which is why the fixture writes one rather than relying on a git
+    checkout to stand in for it.
+    """
+    snapshot = session / "optimization_stack" / "src" / stack_entry_id
+    (snapshot / "files").mkdir(parents=True, exist_ok=True)
+    (snapshot / "files" / hook.name).write_bytes(hook.read_bytes())
+    (snapshot / "manifest.json").write_text(
+        json.dumps(
+            {
+                "schema_version": 2,
+                "complete": True,
+                "files": [{"rel": hook.name, "op": "upsert"}],
+            }
+        )
+    )
+    return {
+        "stack_entry_id": stack_entry_id,
+        "source_snapshot": str(snapshot),
+        "source_snapshot_complete": True,
+        "target_files": [hook.name],
+    }
+
+
+def _make_workload(tmp_path, monkeypatch, module: str, function: str, scope: dict):
+    root, bench, session = [tmp_path / name for name in ("model", "bench", "session")]
+    for directory in (root, bench, session):
+        directory.mkdir()
+    hook = root / module
+    hook.write_text(f"def {function}(model):\n    return model\n")
+    (bench / "optimization_scope.json").write_text(json.dumps({**scope, "file": str(hook)}))
+    monkeypatch.setenv("HYPERLOOM_BYPASS_SCRIPTS_DIR", str(bench))
+    monkeypatch.setenv("FRAMEWORK_REPO_PATH", str(root))
+    state = {
+        "framework": "custom",
+        "framework_repo_path": str(root),
+        "bypass_scripts_dir": str(bench),
+        "current_best": {"tput": 100},
+        "optimization_stack": [accept_source(session, hook)],
+    }
+    return root, hook, session, state
+
+
+@pytest.fixture
+def workload(tmp_path, monkeypatch):
+    return _make_workload(tmp_path, monkeypatch, "hyperloom_optimize.py", "hyperloom_optimize", {"schema_version": 1})
+
+
+@pytest.fixture
+def named_workload(tmp_path, monkeypatch):
+    # Schema 1: ``function`` is read whatever the version, and 2 only gates the aoti block.
+    scope = {"schema_version": 1, "function": "apply"}
+    return _make_workload(tmp_path, monkeypatch, "encoder_opt.py", "apply", scope)
+
+
+def patch(name):
+    return f"diff --git a/{name} b/{name}\n--- a/{name}\n+++ b/{name}\n@@ -1 +1 @@\n-old\n+new\n"
+
+
+def declare(bench, hook, aoti=None, schema_version=2):
+    """Rewrite the scope declaration, optionally carrying an aoti block."""
+    scope = {"schema_version": schema_version, "file": str(hook)}
+    if aoti is not None:
+        scope["aoti"] = aoti
+    (bench / "optimization_scope.json").write_text(json.dumps(scope))
+
+
+def _landed_without_snapshot(**over):
+    """A stack entry that changed the tree and recorded nothing to prove what it changed."""
+    return {"scope": "source_patch", "source_layer_landed": True, "source_snapshot": "", **over}
+
+
+def _lift_coordinator(tmp_path):
+    from hyperloom.orchestrator.loop.coordinator import Coordinator
+    from hyperloom.orchestrator.state.shared_state import SharedState
+
+    coord = Coordinator.__new__(Coordinator)
+    coord.session_dir = tmp_path
+    coord.shared_state = SharedState(baseline_tput=1000.0, model_path="/models/m", gpu_type="mi355x")
+    return coord
