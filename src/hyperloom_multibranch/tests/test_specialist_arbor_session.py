@@ -9,7 +9,7 @@ from pathlib import Path
 
 import pytest
 
-from hyperloom.contracts.measurement import TestRequest
+from hyperloom.contracts.measurement import TestRequest, Validity
 from hyperloom.contracts.recipe import ConfigDelta, apply
 from hyperloom.measure.compile import LocalBlobStore
 from hyperloom_multibranch.blackboard import LocalBlackboard
@@ -19,7 +19,7 @@ from hyperloom_multibranch.contracts.blackboard.vocab import Conclusion
 from hyperloom_multibranch.contracts.toolbox import Backpressure
 from hyperloom_multibranch.rulegate.rules import RETRACTION_ID
 from hyperloom_multibranch.specialist.agent_import import KeptChange, Retraction
-from hyperloom_multibranch.specialist import arbor_adapter
+from hyperloom_multibranch.specialist import arbor_adapter, keep_requeue
 from hyperloom_multibranch.specialist.autonomous_session import AGENT_DIR, MANIFEST_FILE, START_TABLES_FILE, KeepWatch
 from hyperloom_multibranch.specialist.judging import NOTICE
 from hyperloom_multibranch.specialist.runtime import SessionCrashed, SessionFinished, SessionRefused
@@ -37,7 +37,7 @@ from hyperloom_multibranch.tests.agent_rig import (
     _replayed,
     _until,
 )
-from hyperloom_multibranch.tests.test_specialist_autonomous_session import Rig, _imported, _rig, fast_session  # noqa: F401
+from hyperloom_multibranch.tests.test_specialist_autonomous_session import Rig, _failed, _imported, _rig, fast_session  # noqa: F401
 
 
 async def test_an_arbor_run_on_the_adapter_s_config_has_its_keeps_imported_end_to_end(
@@ -221,6 +221,36 @@ async def test_a_retraction_goes_alone_after_the_keep_it_was_made_on_and_before_
     assert "+max_num_seqs = 256" in rig.patch(first) and "-max_num_seqs = 256" in rig.patch(retraction)
     assert "+max_num_seqs = 768" in rig.patch(after)
     assert [len(request.attachments) for request in (first, retraction, after)] == [0, 1, 0]
+
+
+async def test_a_retraction_whose_import_measured_nothing_goes_once_more_as_the_retraction_it_went_as(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(keep_requeue, "REQUEUE_SECONDS", 0.3)
+    rig = await _rig(tmp_path, _retracting((256, 512)), start_seconds=0.2)
+    gate = LocalBlackboard(tmp_path / "blackboard", Writer(Role.GATE, "gate"))
+
+    await rig.session.preflight()
+    running = asyncio.create_task(rig.session.run())
+    await _until(lambda: rig.toolbox.requests, "the first import")
+    first = rig.toolbox.requests[0]
+    await rig.toolbox_blackboard.write_result(result("r1"))
+    recipe = apply(await rig.repo.read_recipe(first.parent_commit), first.delta)
+    made = await rig.repo.commit(BRANCH, first.parent_commit, recipe, "r1")
+    await gate.write_judgement("r1", judgement(-3.0, ("r1",)), Conclusion.COMMITTED, made)
+    await _until(lambda: len(rig.toolbox.requests) == 2, "the retraction's import")
+    await rig.toolbox_blackboard.write_result(_failed("r2", Validity.MEASUREMENT_FAILED))
+    await _until(lambda: len(rig.toolbox.requests) == 3, "the requeued retraction")
+    await rig.toolbox_blackboard.write_result(result("r3"))
+    with pytest.raises(SessionFinished):
+        await asyncio.wait_for(running, 10)
+
+    _, retraction, again = rig.toolbox.requests
+    assert rig.patch(again) == rig.patch(retraction) and again.parent_commit == retraction.parent_commit
+    assert [attachment.id for attachment in again.attachments] == [RETRACTION_ID]
+    assert again.attachments == retraction.attachments
+    assert (again.consistency_check, again.long_context_check) == (True, True)
+    assert any(note.endswith("r3 is not held to the speed gate") for note in await rig.notices())
 
 
 def test_the_keeps_waiting_at_a_crash_are_read_back_by_the_run_after_it(tmp_path: Path) -> None:

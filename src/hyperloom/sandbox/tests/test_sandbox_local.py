@@ -9,6 +9,7 @@ import contextlib
 import itertools
 import json
 import os
+import shutil
 import signal
 import stat
 import subprocess
@@ -196,6 +197,86 @@ def test_a_dev_symlink_cannot_escape_the_root(make) -> None:
     sb.run("ln -s /tmp tmpdir")
     with pytest.raises(SandboxDenied, match="resolves outside the sandbox"):
         sb.write_file("/work/tmpdir/escape.txt", b"x")
+
+
+@pytest.mark.parametrize("verb", ["read_file", "copy_out", "list_dir", "write_file"])
+def test_a_path_swapped_for_a_link_out_after_its_gate_is_never_followed(
+    make, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, verb: str
+) -> None:
+    """A sandbox's process that puts a link to an app's file where the gated path was, in the moment between the gate
+    and the open, gets a refusal: no name is resolved twice, so nothing of the app's is read, listed or written."""
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    (outside / "credentials.json").write_text("SECRET")
+    provider = make([LocalTemplate("dev", "dev")])
+    sb = _create(provider, "dev", "dev")
+    sb.run("mkdir -p out/files && echo harmless > out/files/a.log")
+    real_gate = local_sandbox.LocalSandbox._gate
+
+    files = sb.fs / "work" / "out" / "files"
+    gated, target = (files, outside) if verb == "list_dir" else (files / "a.log", outside / "credentials.json")
+
+    def swapped(self, path: str, *, write: bool):
+        if gated.is_symlink():  # what any gate (a second one too) checks is the sandbox's own file
+            gated.unlink()
+            gated.mkdir() if verb == "list_dir" else gated.write_text("harmless\n")
+        found = real_gate(self, path, write=write)
+        (self.fs / "work" / "swap").symlink_to(target)
+        if gated.is_dir():
+            shutil.rmtree(gated)
+        os.replace(self.fs / "work" / "swap", gated)
+        return found
+
+    monkeypatch.setattr(local_sandbox.LocalSandbox, "_gate", swapped)
+    named = f"/work/{gated.relative_to(sb.fs / 'work')}"
+    with pytest.raises(SandboxDenied, match="resolves outside the sandbox"):
+        if verb == "copy_out":
+            sb.copy_out(named, tmp_path / "saved.log")
+        elif verb == "write_file":
+            sb.write_file(named, b"chosen by the app")
+        else:
+            getattr(sb, verb)(named)
+    assert (outside / "credentials.json").read_text() == "SECRET" and sorted(os.listdir(outside)) == [
+        "credentials.json"
+    ]
+    assert not (tmp_path / "saved.log").exists() or b"SECRET" not in (tmp_path / "saved.log").read_bytes()
+
+
+def test_a_pipe_in_the_tree_is_refused_without_blocking_and_links_inside_the_root_are_followed(make) -> None:
+    provider = make([LocalTemplate("dev", "dev")])
+    sb = _create(provider, "dev", "dev")
+    sb.run(
+        "mkfifo pipe && echo real > real.txt && mkdir dir && ln -s real.txt alias && ln -s dir via && "
+        'ln -s "$HYPERLOOM_SANDBOX_ROOT/work/real.txt" absolute'
+    )
+    outcome: list[object] = []
+
+    def read_pipe() -> None:
+        try:
+            outcome.append(sb.read_file("/work/pipe"))
+        except SandboxDenied as exc:
+            outcome.append(exc)
+
+    reader = threading.Thread(target=read_pipe, daemon=True)
+    reader.start()
+    reader.join(10)
+    if reader.is_alive():
+        os.close(os.open(sb.fs / "work" / "pipe", os.O_WRONLY | os.O_NONBLOCK))  # lets the blocked read end
+    assert [type(found) for found in outcome] == [SandboxDenied] and "not a regular file" in str(outcome[0])
+    with pytest.raises((SandboxDenied, OSError)):  # no reader: ENXIO; a reader: not a regular file
+        sb.write_file("/work/pipe", b"x")
+    sb.write_file("/work/via/new/file.txt", b"through a link inside")
+    assert sb.read_file("/work/alias") == b"real\n" and sb.read_file("/work/absolute") == b"real\n"
+    assert sb.read_file("/work/dir/new/file.txt") == b"through a link inside"
+    with pytest.raises(IsADirectoryError):
+        sb.read_file("/work/dir")
+
+
+def test_a_file_the_app_writes_is_its_own_where_the_sandbox_runs_as_this_account(make) -> None:
+    sb = _create(make([LocalTemplate("dev", "dev")]), "dev", "dev")
+    sb.write_file("/in/made/input.txt", b"x")
+    assert stat.S_IMODE((sb.fs / "in" / "made" / "input.txt").stat().st_mode) == 0o600
+    assert sb.run("cat $HYPERLOOM_SANDBOX_ROOT/in/made/input.txt").stdout == "x", "its own processes read it"
 
 
 def test_path_traversal_is_confined_to_the_root(make) -> None:
@@ -1025,6 +1106,26 @@ def test_separate_accounts_keep_the_signing_key_from_other_sandboxes(make) -> No
     assert stolen.exit_code != 0 and "Permission denied" in stolen.stderr
     assert dev.run(f"ls {key_file.parent}").exit_code != 0
     runner.kill()
+    dev.kill()
+
+
+@_ROOT_ONLY
+@pytest.mark.skipif(not os.access(_SYSTEM_PYTHON, os.X_OK), reason="needs a python3 every account can run")
+def test_a_sandbox_that_runs_as_another_account_reads_the_files_the_app_writes_for_it(make) -> None:
+    provider = make([LocalTemplate("dev", "dev")], users=ProcessUsers(_SYSTEM_PYTHON, unsealed_user=(60002, 60002)))
+    dev = _create(provider, "dev", "dev")
+    dev.write_file("/in/made/input.txt", b"for the account")
+    read = dev.run("id -u; cat $HYPERLOOM_SANDBOX_ROOT/in/made/input.txt")
+    assert read.stdout.split("\n", 1) == ["60002", "for the account"], read.stderr
+    made = (dev.fs / "in" / "made" / "input.txt").stat()
+    assert (made.st_uid, stat.S_IMODE(made.st_mode)) == (60002, 0o600), "the account's alone"
+    there = dev.fs / "in" / "app.txt"
+    there.write_bytes(b"the app's")
+    there.chmod(0o600)
+    dev.write_file("/in/app.txt", b"rewritten")
+    assert (there.stat().st_uid, there.read_bytes()) == (os.geteuid(), b"rewritten"), (
+        "a file that was there keeps its owner"
+    )
     dev.kill()
 
 

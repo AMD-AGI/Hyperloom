@@ -6,8 +6,8 @@
 A session lives at ``<workspace>/<model_basename>/MB-<UTC>-<rand8>/``. Every entry the
 scheduler creates carries the ``MB-`` prefix so it never collides with a single-lineage
 session in the same workspace. Each run creates a fresh directory; only the emergency
-``final-only`` command attaches to one again, and only to a session that is over and
-whose FINAL never chose. Two of those would write over each other, so one holds
+``final-only`` command and ``run --resume`` attach to one again, and only to a session
+that is over and whose FINAL never chose. Two of those would write over each other, so one holds
 :data:`FINAL_ONLY_LOCK` in the session directory for as long as it runs.
 """
 
@@ -19,6 +19,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 from hyperloom.inference_optimizer.session.session_paths import fs_safe_id
+from hyperloom_common.shared_storage import SHARED_DIR_MODE, make_shared_dirs, share_new_directory
 from hyperloom_multibranch.scheduling.clock import Clock
 
 SESSION_PREFIX = "MB-"
@@ -45,7 +46,7 @@ DASHBOARD_DIR = "MB-dashboard"
 REPORTS_DIR = "MB-reports"
 LOGS_DIR = "MB-logs"
 PIDS_FILE = "MB-pids.jsonl"
-#: Created exclusively by a ``final-only`` run and removed when it ends; holds the pid that took it.
+#: Created exclusively by a ``final-only`` or ``run --resume`` run and removed when it ends; holds the pid that took it.
 FINAL_ONLY_LOCK = "MB-final-only.lock"
 
 ROSTER_FILE = "MB-roster.json"
@@ -225,12 +226,18 @@ def session_dir_name(now: float) -> str:
 
 
 def create_session(workspace: Path, model_basename: str, clock: Clock) -> SessionLayout:
-    """Create a fresh session directory with every subdirectory; an existing one is an error."""
+    """Create a fresh session directory with every subdirectory; an existing one is an error.
+
+    Below shared storage each is ``2775`` (:func:`~hyperloom_common.shared_storage.make_shared_dirs`), whatever the
+    umask: a later leg of a hosted run, and the sandboxes it lends, may be other accounts of the group, and they write
+    in it. Elsewhere the umask decides."""
     root = workspace / fs_safe_id(model_basename) / session_dir_name(clock.now())
-    root.parent.mkdir(parents=True, exist_ok=True)
-    root.mkdir(exist_ok=False)
+    make_shared_dirs(root.parent)
+    root.mkdir(SHARED_DIR_MODE)
+    share_new_directory(root)
     for name in SESSION_SUBDIRS:
-        (root / name).mkdir()
+        (root / name).mkdir(SHARED_DIR_MODE)
+        share_new_directory(root / name)
     return SessionLayout(root)
 
 

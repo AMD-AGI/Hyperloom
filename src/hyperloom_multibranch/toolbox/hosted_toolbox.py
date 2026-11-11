@@ -117,6 +117,8 @@ class HostedToolboxInputs:
             characters, as the cache builder reported it. Given, it is passed on every ``measurement`` create
             (``HYPERLOOM_RUNNER_CACHE_MANIFEST_SHA256``) and the runner's bootstrap accepts only that manifest; without
             it the manifest vouches only for the entry it sits in.
+        session_id: The session's id when ``run_id`` is the run's, which a restart of the run that starts its session
+            again shares: it keeps the new session's request ids, and so its sandboxes, apart from the closed one's.
         sandbox_workspace: The workspace every sandbox is created in (``HYPERLOOM_SANDBOX_WORKSPACE``), sent on each
             create as ``agent-sandbox.io/workspace``. A SaFE key used directly needs it when its user is in more than
             one workspace, and a ``system-admin`` key always does; a Claw grant's key names its own, so a Claw host
@@ -140,6 +142,7 @@ class HostedToolboxInputs:
     grant_limits: Mapping[str, float] | None = None
     runner_cache_manifest_sha256: str | None = None
     sandbox_workspace: str | None = None
+    session_id: str | None = None
 
     def __post_init__(self) -> None:
         for name in _REQUIRED_TEXT:
@@ -527,7 +530,9 @@ def build_hosted_toolbox(
         backend, directory, timeout_sec=options.timeout_sec, workload_kind=acceptance.workload_kind
     )
     toolbox = HostedToolbox(
-        session_stores(blackboard, directory, inputs.run_id, native.driver if native else None),
+        session_stores(
+            blackboard, directory, inputs.run_id, native.driver if native else None, inputs.session_id or ""
+        ),
         executor,
         acceptance,
         tools=session_tools(options.tools if options.tools is not None else (tracelens_tool(),), blackboard, directory),
