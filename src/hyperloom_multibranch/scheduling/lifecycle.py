@@ -623,7 +623,6 @@ class Session:
             prelude.start_commit,
             explore_end,
             budget.deadline,
-            budget.total_seconds,
             explore_gpu_seconds(self._settings.max_gpu_hours),
             self._settings.max_llm_usd or math.inf,
             self._settings.user_directions,

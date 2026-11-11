@@ -387,6 +387,7 @@ def _session_profile(
         isl=None if shape is None else shape.isl,
         osl=None if shape is None else shape.osl,
         kernel_optimizer=workload.kernel_optimizer.value,
+        agentx_objective=workload.agentx_objective,
     )
 
 

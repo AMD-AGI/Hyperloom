@@ -165,6 +165,34 @@ def test_an_integrate_bench_is_graded_only_under_the_baselines_definition(tmp_pa
     assert gate_evidence["accuracy_pass"] is expected
 
 
+@pytest.mark.parametrize("digest", [BASELINE_DIGEST, OTHER_DIGEST], ids=["same_definition", "other_definition"])
+def test_an_integrate_patch_that_wins_on_throughput_is_not_kept_on_a_score_the_baseline_cannot_judge(tmp_path, digest):
+    """A collapsed score blocks the KEEP whether it is a measured drop or was taken under another eval definition."""
+    from hyperloom.common.perf_metric import VERDICT_KEEP, GradedComparison
+    from hyperloom.orchestrator.actions.executors._integrate_attempt import IntegrateAttempt
+    from hyperloom.orchestrator.actions.executors._integrate_bench import _grade_bench_accuracy
+    from hyperloom.orchestrator.actions.executors._integrate_perf_gate import _GateBasis, _ThroughputGrade, _weigh_gate
+    from hyperloom.orchestrator.actions.executors._integrate_results import _PatchBench
+
+    slot = tmp_path / "variant_00"
+    suite_eval(slot / ag.ACCURACY_DIR, 0.0, digest)
+    params = {"accuracy_baseline": 0.945, "framework": "vllm"}
+    bench_leg = _PatchBench(
+        params=params,
+        output_root=tmp_path,
+        specialist_task_id="t",
+        benchmark_mode="agentx",
+        accuracy_definition_digest=BASELINE_DIGEST,
+    )
+    gate_evidence: dict = {}
+    _grade_bench_accuracy({"status": "succeeded"}, bench_leg, str(slot), gate_evidence)
+    won = GradedComparison(objective="output_throughput", candidate=120.0, reference=100.0, verdict=VERDICT_KEEP)
+    throughput = _ThroughputGrade(_GateBasis(100.0, 1.0), won, 20.0)
+    attempt = IntegrateAttempt(task_id="t-int", specialist_task_id="t", shared_state=SharedState())
+    verdict = _weigh_gate(attempt, params, {"output_throughput": 120.0}, gate_evidence, throughput)
+    assert (verdict.perf_kept, verdict.passed, verdict.accuracy_block) == (True, False, True)
+
+
 @pytest.mark.parametrize(
     ("digest", "accuracy_pass"), [(BASELINE_DIGEST, False), (OTHER_DIGEST, None)], ids=["same_definition", "other"]
 )

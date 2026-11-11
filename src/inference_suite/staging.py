@@ -38,7 +38,6 @@ import errno
 import hashlib
 import importlib.metadata
 import io
-import itertools
 import json
 import os
 import re
@@ -58,7 +57,7 @@ from hyperloom_common.io import SHARED, atomic_write_bytes
 from hyperloom_common.shared_storage import make_shared_dirs
 from inference_suite import aiperf_patch, client_env
 from inference_suite.client_env import CLIENT_PYTHON, PATCHED_FILES, ClientEnvError
-from inference_suite.contracts.normalised import NormalisedManifest, PackageIdentity, canonical_name
+from inference_suite.contracts.normalised import NormalisedManifest, PackageIdentity
 from inference_suite.contracts.report import FailedStep
 from inference_suite.pins import (
     AGENTX_PYTHON_BUILD,
@@ -394,35 +393,22 @@ def runner_lock() -> Path:
     return _runner_lock(f"{sys.version_info[0]}.{sys.version_info[1]}")
 
 
-def _locked_lm_eval(lock: Path) -> str:
-    """The pinned lm-eval requirement with every hash ``lock`` allows for it, as a hash-checking pip line.
+def _install_lm_eval() -> None:
+    """Install the pinned lm-eval into this interpreter unless it is there, from the whole
+    :func:`runner_lock` (the ``runner`` extra: lm-eval's dependency tree and a few small packages), each pin with its
+    hashes.
 
     Raises:
-        StagingError: ``lock`` is absent, or pins no lm-eval at :data:`LM_EVAL_VERSION`.
+        StagingError: The lock is absent, or pip fails.
     """
-    if not lock.is_file():
-        raise StagingError(f"{lock} is absent: lm-eval is installed only from a Hyperloom source tree's runner lock")
-    pin = f"{canonical_name(LM_EVAL_DISTRIBUTION)}=={LM_EVAL_VERSION}"
-    lines = [line.strip().removesuffix("\\").strip() for line in lock.read_text().splitlines()]
-    if pin not in lines:
-        raise StagingError(f"{lock} pins no {pin}")
-    hashes = itertools.takewhile(lambda line: line.startswith("--hash="), lines[lines.index(pin) + 1 :])
-    return " ".join([LM_EVAL_REQUIREMENT, *hashes]) + "\n"
-
-
-def _install_lm_eval() -> None:
-    """Install the pinned lm-eval into this interpreter unless it is there: its own hashes and every dependency's come
-    from :func:`runner_lock`, so pip installs nothing the lock does not name."""
     if _lm_eval_off_pin() is None:
         return
     lock = runner_lock()
-    requirement = _locked_lm_eval(lock)
-    with tempfile.TemporaryDirectory(prefix="inference-suite-lm-eval-") as scratch:
-        requirement_file = Path(scratch, "lm-eval.txt")
-        requirement_file.write_text(requirement)
-        install = [sys.executable, "-m", "pip", "install", "--no-input", "--disable-pip-version-check"]
-        install += ["--require-hashes", "--constraint", str(lock), "--requirement", str(requirement_file)]
-        _run_staging_step(install, f"installing {LM_EVAL_REQUIREMENT}")
+    if not lock.is_file():
+        raise StagingError(f"{lock} is absent: lm-eval is installed only from a Hyperloom source tree's runner lock")
+    # pip before 26.1 ignores a constraints file's hashes, so every pin is a requirement.
+    install = [sys.executable, "-m", "pip", "install", "--no-input", "--disable-pip-version-check"]
+    _run_staging_step([*install, "--require-hashes", "--requirement", str(lock)], f"installing {LM_EVAL_REQUIREMENT}")
 
 
 def _intact_digest(tool_cache: Path) -> str | None:

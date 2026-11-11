@@ -26,7 +26,7 @@ from hyperloom.measure.points import AMBIENT_SHAPE_ENVS
 from hyperloom.measure.repro import read_verdict
 from hyperloom.measure.runner.rounds import rounds_document
 from hyperloom.measure.socket import RoundPlan, SessionFacts, TestCall
-from hyperloom.measure.tests import eval_refusal_logs, test_log_causes
+from hyperloom.measure.tests import eval_refusal_logs, test_hf_cache_permission, test_log_causes
 from hyperloom.measure.tests._inferencex import CLIENT, CLIENT_PATH, LIBRARY, LIBRARY_PATH, stock_checkout
 from hyperloom.measure.tests.run_dirs import write_run_dir
 from hyperloom.orchestrator.actions.executors import (
@@ -1860,13 +1860,15 @@ def test_a_repro_call_that_is_not_one_case_against_one_server_is_refused(grid, s
     assert grid.calls == []
 
 
-def _failed_round_with_logs(grid, tmp_path, *, server_log: str, benchmark_stderr: str = "") -> VariantResult:
-    workspace = tmp_path / "ws" / "test"
-    workspace.mkdir(parents=True)
-    (workspace / "server.log").write_text(server_log, encoding="utf-8")
-    if benchmark_stderr:
-        (workspace / "benchmark_stderr.log").write_text(benchmark_stderr, encoding="utf-8")
-    return grid.result("test", status="failed", returncode=1, error="", server_log_path=str(workspace / "server.log"))
+def _failed_round_with_logs(grid, tmp_path, *, server_log: str, client_stderr: str = "") -> VariantResult:
+    """A measured round of a suite run_dir whose client exited nonzero, with its server log and client stderr."""
+    workspace = write_run_dir(tmp_path / "ws" / "test", failed_step=FailedStep.CLIENT_FAILED)
+    layout = RunLayout(workspace)
+    layout.server_log.write_text(server_log, encoding="utf-8")
+    if client_stderr:
+        layout.client_stderr.parent.mkdir(parents=True, exist_ok=True)
+        layout.client_stderr.write_text(client_stderr, encoding="utf-8")
+    return grid.result("test", status="failed", returncode=1, error="", server_log_path=str(layout.server_log))
 
 
 def test_a_failed_round_is_classified_from_the_flag_error_in_its_server_log(grid, tmp_path):
@@ -1895,10 +1897,10 @@ def test_a_round_whose_replay_client_the_hub_refused_is_an_infrastructure_failur
     assert (outcome.failure_class, outcome.failure_reason) == ("infra", f"hub_rate_limited: {refusal}")
 
 
-def test_a_failed_round_is_classified_from_the_refused_request_in_its_benchmark_stderr(grid, tmp_path):
+def test_a_failed_round_is_classified_from_the_refused_request_in_its_client_stderr(grid, tmp_path):
     refusal = 'API request failed with error message: {"message":"maximum context length is 5120 tokens","code":400}'
     grid.answers["test"] = _failed_round_with_logs(
-        grid, tmp_path, server_log="INFO server booted\n", benchmark_stderr=f"WARNING {refusal}\n"
+        grid, tmp_path, server_log="INFO server booted\n", client_stderr=f"WARNING {refusal}\n"
     )
 
     outcome = _run(_call(tmp_path))
@@ -1933,7 +1935,7 @@ def test_a_refused_evaluation_names_the_refusal_that_a_flood_of_tracebacks_pushe
     grid, server, tmp_path
 ):
     grid.answers["eval"] = _failed_evaluation(
-        grid, tmp_path, eval_refusal_logs.server_log(), eval_refusal_logs.benchmark_stderr()
+        grid, tmp_path, eval_refusal_logs.server_log(), eval_refusal_logs.eval_stderr()
     )
 
     outcome = _run(_graded_call(tmp_path))
@@ -1988,7 +1990,7 @@ def test_an_evaluation_that_fails_is_classified_from_the_logs_it_wrote(grid, ser
 
     assert [c["grid"][0].name for c in grid.calls] == ["warmup", "test", "eval"]
     assert [(r.phase, r.returncode) for r in outcome.rounds] == [("warmup", 0), ("measure", 0), ("accuracy", 1)]
-    assert (outcome.returncode, outcome.failure_class) == (1, "unclear")
+    assert (outcome.returncode, outcome.failure_class) == (1, "candidate")
     reason = outcome.failure_reason or ""
     assert reason.startswith("lm_eval_http_400: "), "the refusal, not the session the client closed after it"
     assert "longer than the model's context length (400 tokens)" in reason
@@ -1996,19 +1998,37 @@ def test_an_evaluation_that_fails_is_classified_from_the_logs_it_wrote(grid, ser
 
 
 def _failed_evaluation(grid: _Grid, tmp_path: Path, server_log: str, stderr: str, *, error: str = "") -> VariantResult:
-    """An evaluation round whose evaluation failed: it ran no bench, so it has no measurement and its round failed."""
-    workspace = tmp_path / "ws" / "eval"
-    workspace.mkdir(parents=True, exist_ok=True)
-    (workspace / "server.log").write_text(server_log, encoding="utf-8")
-    (workspace / "benchmark_stderr.log").write_text(stderr, encoding="utf-8")
+    """An evaluation round whose evaluation failed: it ran no bench, so it has no measurement and its round failed.
+
+    The suite's run_dir: the report names ``eval_failed``, the evaluation's own output is in ``eval/stderr.log``.
+    """
+    workspace = write_run_dir(
+        tmp_path / "ws" / "eval", failed_step=FailedStep.EVAL_FAILED, failure_detail="the eval exited with code 1"
+    )
+    layout = RunLayout(workspace)
+    layout.server_log.write_text(server_log, encoding="utf-8")
+    layout.eval_stderr.parent.mkdir(parents=True, exist_ok=True)
+    layout.eval_stderr.write_text(stderr, encoding="utf-8")
     return grid.result(
         "eval",
         status="failed",
         returncode=1,
         error=error,
         error_class="round_nonzero_invalid_measurement",
-        server_log_path=str(workspace / "server.log"),
+        server_log_path=str(layout.server_log),
     )
+
+
+def test_an_evaluation_the_shared_dataset_cache_refused_is_an_infrastructure_failure(grid, server, tmp_path):
+    """The lock is the cache's, shared by every node that mounts it: no candidate causes it, and a rerun meets it."""
+    lock = test_hf_cache_permission.LOCK
+    grid.answers["eval"] = _failed_evaluation(
+        grid, tmp_path, "INFO server booted\n", test_hf_cache_permission.TRACEBACK
+    )
+
+    outcome = _run(_graded_call(tmp_path))
+
+    assert (outcome.failure_class, outcome.failure_reason) == ("infra", f"hf_cache_permission: {lock}")
 
 
 def _warmup_with_logs(grid: _Grid, tmp_path: Path, server_log: str, *, returncode: int) -> None:

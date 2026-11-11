@@ -294,6 +294,7 @@ class BenchStageMixin:
 #: Gate evidence of a bench leg before anything graded it; copied per leg, which fills it in.
 _EMPTY_GATE_EVIDENCE: dict[str, Any] = {
     "accuracy_pass": None,
+    "accuracy_incomparable": False,
     "accuracy": None,
     "enablement_accuracy": None,
     "enablement_accuracy_task": "",
@@ -464,12 +465,11 @@ def _grade_bench_accuracy(
     accuracy = results_payload.get("accuracy")
     # Raw accuracy for the KB record; ``accuracy_pass`` only carries a verdict.
     measured = float(accuracy) if isinstance(accuracy, (int, float)) else None
+    reference = AccuracyReference(to_float(params.get("accuracy_baseline"), 0.0), bench_leg.accuracy_definition_digest)
     gate_evidence["accuracy_pass"] = grade_accuracy(
-        eval_search_root,
-        AccuracyReference(to_float(params.get("accuracy_baseline"), 0.0), bench_leg.accuracy_definition_digest),
-        framework=framework,
-        benchmark_mode=bench_leg.benchmark_mode,
+        eval_search_root, reference, framework=framework, benchmark_mode=bench_leg.benchmark_mode
     )
+    gate_evidence["accuracy_incomparable"] = reference.incomparable(results_payload)
     gate_evidence["accuracy"] = measured
     # The enablement branch applies a floor of its own, so it needs the raw score.
     if params.get("enablement"):

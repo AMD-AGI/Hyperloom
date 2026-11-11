@@ -13,6 +13,7 @@ from pathlib import Path
 
 import pytest
 
+from hyperloom.common.agentx_objective import AgentXObjective
 from hyperloom_multibranch.blackboard.codec import encode
 from hyperloom_multibranch.blackboard.rsi import ladder
 from hyperloom_multibranch.blackboard.rsi.archive import SearchTree
@@ -63,9 +64,10 @@ from hyperloom_multibranch.blackboard.rsi.playbook import (
     replaced,
 )
 from hyperloom_multibranch.blackboard.rsi.replay import OLD_RULE
-from hyperloom_multibranch.blackboard.rsi.similarity import TaskConditions, model_name
+from hyperloom_multibranch.blackboard.rsi.similarity import TaskConditions, model_name, task_conditions
 from hyperloom_multibranch.blackboard.rsi.stops import stop_audit
 from hyperloom_multibranch.blackboard.rsi.tests.trees import HOUR, branch, tree
+from hyperloom_multibranch.blackboard.tests.factories import profile
 
 MINUTE = 60.0
 PATIENT = Playbook("patient", replaced(H0, stall_tests=8).numbers, parent=H0.label, measure="early_stops")
@@ -459,6 +461,19 @@ def test_a_sessions_task_is_its_workload_model_image_sizes_and_budget_and_its_tr
         "tp=2 conc=64 isl=1024 osl=1024 budget=240m"
     )
     assert (trial.task, trial.started_at, trial.fell_back) == (session_task(played), 1000.0, True)
+
+
+def test_agentx_sessions_on_different_objectives_are_different_tasks_and_an_older_one_was_on_p50() -> None:
+    def task_of(**overrides: object) -> str:
+        conditions = task_conditions(profile(isl=None, osl=None, **overrides))
+        return session_task(dataclasses.replace(SESSION, task=conditions))
+
+    p50, total = (task_of(agentx_objective=objective) for objective in AgentXObjective)
+    unlabelled = task_conditions(profile(isl=None, osl=None))
+    older = TaskConditions({k: v for k, v in unlabelled.labels.items() if k != "objective"}, unlabelled.sizes)
+
+    assert p50 != total and "objective=total_token_throughput" in total
+    assert session_task(dataclasses.replace(SESSION, task=older)) == p50
 
 
 def test_the_replay_standing_reads_every_playbook_against_the_champion_and_keeps_once(

@@ -24,12 +24,14 @@ The session directory is created under `USER_DATA_PATH` and its path is printed 
 ## Environment
 
 Every variable below is checked before anything is created: a missing or malformed one fails the command with no
-session directory left behind. Only the image check itself runs later, in the new session before PRELUDE.
+session directory left behind. Two steps run later, in the new session before PRELUDE: the image check, and on a local
+session the publish of the inference_suite staging into the runner cache, which fails the command (exit 1) with the
+session directory left behind when that directory cannot be written.
 
 | Variable | Required | Meaning |
 | --- | --- | --- |
 | `HYPERLOOM_RSI_ARCHIVE` | yes | Writable shared directory the session reads its predecessors from and archives its search tree in. No default. |
-| `HYPERLOOM_RUNNER_CACHE` | with `--measurement hosted` | Absolute path of this host's runner cache directory, on storage the measurement sandboxes mount. |
+| `HYPERLOOM_RUNNER_CACHE` | with `--measurement hosted` | This host's runner cache directory, which holds the inference_suite staging every test runs. Hosted: an absolute path on storage the measurement sandboxes mount, no default. Local: `/runner-cache` when unset, and it must be writable. |
 | `HYPERLOOM_IMAGE_CHECK` | no | `warn` (default) logs a failing fact of the rule pack about the image, `strict` fails the command before PRELUDE (exit 1), `off` checks nothing. Any other value is a usage error. |
 | `INFERENCE_SUITE_TOOL_CACHE` | no | The tool cache `install.sh` staged the pinned InferenceX client in, which every test runs. Default `inference-suite-tools` under the dependency cache. Without a staging there that verifies, the command fails, naming `python -m inference_suite stage --tool-cache <dir>`. |
 | `KB_STORE_URL`, `KB_STORE_TOKEN` | no | Both set: PRELUDE reads warm-start leads from the Recipe KB and CLOSE writes the final recipe back. Neither set: no Recipe KB. Only one set is refused. |
@@ -80,9 +82,9 @@ agent CLI the specialists run must be installed. `--measurement hosted` also nee
   suits a high `--conc` only: at a low one the trace's tool and think time paces the lanes, so a server gain barely
   moves it (the same stack on GLM-5.3 TP4/EP4 gained +1.8% total per GPU at conc 4 and +7–14% at conc 8–16). The
   bar and guards are read from the code, so a resumed session judges by the current rule. The manifest records the
-  objective, so a resumed session keeps it; the frontier, FINAL, the dashboard, `MB-report.md` and the Recipe KB record
-  (`total_throughput_gain_pct`) all read that metric. Each Arbor is given it with its bar and guards (`opt_objective`),
-  which needs Arbor `29c72f9` or later.
+  objective, so a resumed session keeps it; the frontier, FINAL, the dashboard and `MB-report.md` all read that metric. A
+  `total_token_throughput` session writes no Recipe KB record: the KB partitions by workload, not objective. Each Arbor
+  is given the objective with its bar and guards (`opt_objective`), which needs Arbor `29c72f9` or later.
 - **Base launch:** `--reference-script FILE`, a shell launch script or a base launch record frozen elsewhere, as for
   `hyperloom optimize`; the session freezes it as its base, a record without reading any recipe source. Without it
   the base comes from the recipe sources. Every Arbor is served the frozen base unless `--agent-launch` gives a launch

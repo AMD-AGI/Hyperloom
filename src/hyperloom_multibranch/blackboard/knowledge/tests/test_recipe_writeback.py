@@ -28,7 +28,6 @@ from hyperloom.contracts.recipe import (
 from hyperloom.measure.compile import LocalBlobStore
 from hyperloom.orchestrator.knowledge.remote_recipe import KBStoreError
 from hyperloom.orchestrator.knowledge.remote_recipe.client import RemoteRecipeClient
-from hyperloom.orchestrator.knowledge.remote_recipe.models import RemoteRecipeValidationError
 from hyperloom.orchestrator.knowledge.remote_recipe.values import knowledge_to_warm_recipe
 from hyperloom_multibranch.contracts.blackboard.records import BlackboardSnapshot
 from hyperloom_multibranch.contracts.repo import ResolvedPatch
@@ -316,40 +315,19 @@ def test_an_agentx_session_without_total_throughput_carries_interactivity_alone_
     assert (outcome.status, outcome.reason, kept.promoted) == ("skipped", "not_better_than_champion", None)
 
 
-def test_a_total_throughput_session_writes_its_total_token_throughput_gain_and_never_an_interactivity_one(
-    snapshot: BlackboardSnapshot, final: FinalRecipe
+@pytest.mark.parametrize("champion", [None, {"metric": AGENTX_METRIC, "session_id": "older", "value": 5.0}])
+def test_a_total_throughput_session_writes_no_record_beside_the_interactivity_champions_of_its_workload(
+    snapshot: BlackboardSnapshot, final: FinalRecipe, champion: dict[str, object] | None
 ) -> None:
-    store = FakeRecipeStore()
-    values = (
-        {GRADED_INTVTY_P50: 10.0, TOTAL_TOKEN_THROUGHPUT: 2000.0},
-        {GRADED_INTVTY_P50: 10.0, TOTAL_TOKEN_THROUGHPUT: 2200.0},
-    )
-    agentx = _agentx(snapshot, *values)
+    store = FakeRecipeStore(champion=champion)
+    agentx = _agentx(snapshot, {TOTAL_TOKEN_THROUGHPUT: 2000.0}, {TOTAL_TOKEN_THROUGHPUT: 2200.0})
 
     outcome = publish_final_recipe(
         RemoteRecipeClient(store), agentx, dataclasses.replace(final, metric=TOTAL_TOKEN_THROUGHPUT)
     )
 
-    assert (outcome.status, outcome.primary_metric) == ("written", "total_throughput_gain_pct")
-    assert store.objective_schema == AGENTX_OBJECTIVE_SCHEMA
-    knowledge = store.knowledge
-    assert knowledge is not None
-    assert knowledge["total_throughput_gain_pct"] == pytest.approx(10.0)
-    assert (knowledge[GRADED_TOTAL], knowledge["baseline_total_throughput"]) == (2200.0, 2000.0)
-    assert not {AGENTX_METRIC, "candidate_interactivity", "baseline_interactivity"} & set(knowledge)
-
-
-def test_a_total_throughput_session_does_not_replace_an_interactivity_champion(
-    snapshot: BlackboardSnapshot, final: FinalRecipe
-) -> None:
-    store = FakeRecipeStore(champion={"metric": AGENTX_METRIC, "session_id": "older", "value": 5.0})
-    agentx = _agentx(snapshot, {TOTAL_TOKEN_THROUGHPUT: 2000.0}, {TOTAL_TOKEN_THROUGHPUT: 2200.0})
-
-    with pytest.raises(RemoteRecipeValidationError, match="cannot compare or replace champion"):
-        publish_final_recipe(
-            RemoteRecipeClient(store), agentx, dataclasses.replace(final, metric=TOTAL_TOKEN_THROUGHPUT)
-        )
-    assert store.promoted is None
+    assert (outcome.status, outcome.reason) == ("skipped", "objective_not_partitioned")
+    assert (store.knowledge, store.promoted) == (None, None)
 
 
 @pytest.mark.parametrize(

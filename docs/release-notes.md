@@ -50,6 +50,16 @@ it.
   verified again. Build the runner cache (`cache_build`) for the new commit
   before starting hosted sessions on it; a runner whose published staging
   differs from the sheet's refuses with `preflight_mismatch`.
+- **Native AgentX accuracy is a GSM8K round.** The baseline, and each
+  candidate that clears the KEEP bar, runs GSM8K on a server of its own,
+  graded like any lm-eval score; `--no-agentx-accuracy` turns it off. The
+  request error rate is no longer an accuracy score, only the measurement's
+  validity. The MLPerf backend still grades on its inline score.
+- **A custom workload's quality gate may carry raw scores alone.** A
+  `quality_gate` without `passed` is judged against the limits it names, else
+  `lpips` 0.15, `ssim` 0.85 and `mse` 0.006; before, such a gate failed. A
+  baseline whose report carries no `quality_gate` now stops the run with
+  `baseline_accuracy_failed` instead of rejecting every candidate.
 - **A GEAK or Forge reproduction of the measured launch keeps settings whose
   names contain `TOKEN`.** The GEAK handoff's `baseline_env_spec`, the Forge
   handoff's serving context and the reference launch script now carry launch
@@ -145,12 +155,12 @@ it.
   the same under either objective. The objective is
   recorded in the manifest and kept on resume; FINAL, the dashboard and
   `MB-report.md` name it, and the bar's refusal reads
-  `total_throughput_gain_below_threshold`. Its Recipe KB record carries
-  `total_throughput_gain_pct`, not `interactivity_gain_pct`, and does not
-  replace an interactivity champion. Each Arbor is given the objective as its
-  config's `opt_objective` and optimizes it instead of its pack's metric; an
-  Arbor that cannot is refused at preflight.
-  `--agentx-objective` with
+  `total_throughput_gain_below_threshold`. It writes no Recipe KB record
+  (`objective_not_partitioned`): the KB files AgentX records by workload, not
+  objective, so its record would sit beside the interactivity champions of the
+  same workload. Each Arbor is given the objective as its config's
+  `opt_objective` and optimizes it instead of its pack's metric; an Arbor that
+  cannot is refused at preflight. `--agentx-objective` with
   `--workload inferencex` exits 2. Before, an operator had to patch the source
   to grade on total throughput.
 - **An MB AgentX session's Recipe KB record carries both total throughputs.**
@@ -217,6 +227,12 @@ it.
   beside `--reference-script`, now exits 2; pass the record as
   `--reference-script`. See
   [Options of `run`](how-to/run-multibranch.md#options-of-run).
+
+- **A local `hyperloom-multibranch run` needs its model on the machine.**
+  `--model` must be a checkpoint directory, or a hub id found under
+  `HL_MODEL_BASE` or in the Hugging Face cache; otherwise the command refuses
+  before the session directory exists. Before, the local test's server, whose
+  home is its sandbox directory, fetched the hub id from the hub.
 
 - **A serving round's server runs in the interpreter its framework checks
   read.** The server now starts as `<framework_python> -m sglang.launch_server`
