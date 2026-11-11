@@ -14,7 +14,7 @@ import time
 from collections.abc import Callable
 from pathlib import Path
 
-from hyperloom.common import proctree
+from hyperloom_common import proctree
 from hyperloom.sandbox.launcher import launcher_argv
 from hyperloom.sandbox.reaper import kill_launchers
 

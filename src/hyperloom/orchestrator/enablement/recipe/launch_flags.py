@@ -12,6 +12,8 @@ from __future__ import annotations
 
 import shlex
 
+from inference_suite.argv import tokenize_server_args_preserving_json
+
 #: The requested spellings of each parallelism axis ``observed_model_binding``
 #: reports, so the requested side is compared against the binding rather than
 #: against a launch line the extractor strips these from.
@@ -33,8 +35,6 @@ def requested_flags(argv: str) -> dict[str, str]:
     split turns ``{"mode":3}`` into ``{mode:3}``, which is no longer JSON and
     cannot be compared with what the engine recorded.
     """
-    from hyperloom.inference_optimizer.grid_server_args import tokenize_server_args_preserving_json
-
     tokenized = tokenize_server_args_preserving_json(str(argv or ""))
     if tokenized is not None:
         tokens = tokenized[1]

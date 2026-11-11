@@ -50,7 +50,7 @@ Advisory review. Flag only what static gates can't.
   `*_e2e` marker CI excludes, belongs here as well.
 - **PR focus**: the PR addresses one aspect. If it bundles unrelated changes, say so.
 - **Fix-around instead of fix-upstream**: a local workaround for what is really a
-  GEAK/Magpie/TraceLens/framework defect.
+  GEAK/TraceLens/framework defect.
 - **Debt growth**: a new feature flag / env toggle used to route around a design
   problem, a new suppression without a stated reason, or dead code left in place —
   unreachable statements after a `return`/`raise`, commented-out blocks, `# removed …`

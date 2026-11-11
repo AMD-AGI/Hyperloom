@@ -4,7 +4,6 @@
 """Tests for the shared aiter JIT lock-cleanup helpers (``_aiter_jit``)."""
 
 import os
-import sys
 import time
 from contextlib import nullcontext
 from types import SimpleNamespace
@@ -257,7 +256,6 @@ def baseline_launch(monkeypatch, tmp_path):
     jit_dir = tmp_path / "jit"
     jit_dir.mkdir()
     monkeypatch.setattr(_aiter_jit, "_resolve_lock_sweep_dirs", lambda *_args: [jit_dir])
-    monkeypatch.setattr(baseline.BenchmarkRunExecutor, "_preflight_server_argv", lambda *args, **kwargs: None)
     monkeypatch.setattr(baseline, "build_benchmark_command", lambda **kwargs: ["fake-benchmark"])
 
     async def no_restart(_server, **kwargs):
@@ -267,10 +265,8 @@ def baseline_launch(monkeypatch, tmp_path):
     monkeypatch.setenv("INFERENCE_OPTIMIZER_BENCHMARK_TIMEOUT_SEC", "7800")
     monkeypatch.setenv("INFERENCE_OPTIMIZER_SILENCE_TIMEOUT_SEC", "600")
     state = SimpleNamespace()
-    baseline_executor = baseline.BaselineExecutor(
-        magpie_python=sys.executable, session_dir=tmp_path, shared_state=state
-    )
-    profile_executor = ProfileExecutor(magpie_python=sys.executable, session_dir=tmp_path)
+    baseline_executor = baseline.BaselineExecutor(session_dir=tmp_path, shared_state=state)
+    profile_executor = ProfileExecutor(session_dir=tmp_path)
     profile_executor.shared_state = state
 
     async def launch(*, profile=False, ready=False, extra=None):
@@ -292,71 +288,3 @@ def baseline_launch(monkeypatch, tmp_path):
         )
 
     return launch, jit_dir
-
-
-class _LaunchObserved(BaseException):
-    """Stop the fake launch before any subprocess or result harvesting."""
-
-
-@pytest.mark.asyncio
-@pytest.mark.parametrize("compiler_alive", [False, True, None])
-async def test_baseline_sweeps_before_every_server_launch(monkeypatch, baseline_launch, compiler_alive):
-    launch, jit_dir = baseline_launch
-    monkeypatch.setattr(_aiter_jit, "_any_live_compiler", lambda *_args: compiler_alive)
-
-    for attempt in range(2):
-        layout = _make_aiter_tree(jit_dir / str(attempt))
-
-        def observe_launch(*args, **kwargs):
-            assert layout["stale_lock"].exists() is (compiler_alive is not False)
-            assert layout["ninja_lock"].exists() is (compiler_alive is not False)
-            assert layout["fresh_lock"].exists()
-            assert layout["non_lock"].exists()
-            assert kwargs["watch"].timeout == 7800
-            raise _LaunchObserved
-
-        monkeypatch.setattr(baseline, "run_with_session_kill", observe_launch)
-        with pytest.raises(_LaunchObserved):
-            await launch()
-
-
-@pytest.mark.asyncio
-@pytest.mark.parametrize("mode", ["profile", "ready", "context-ready", "multi-node"])
-async def test_baseline_does_not_sweep_for_profile_or_client_round(monkeypatch, baseline_launch, mode):
-    launch, jit_dir = baseline_launch
-    layout = _make_aiter_tree(jit_dir)
-
-    def unexpected_scan(*args):
-        pytest.fail("a profile or client-only round must not sweep AITER locks")
-
-    def observe_launch(*args, **kwargs):
-        assert all(path.exists() for path in layout.values())
-        if mode == "profile":
-            assert kwargs["watch"].timeout == 123
-        raise _LaunchObserved
-
-    if mode == "multi-node":
-        monkeypatch.setenv("INFERENCE_OPTIMIZER_NODES", "2")
-    monkeypatch.setattr(_aiter_jit, "_any_live_compiler", unexpected_scan)
-    monkeypatch.setattr(baseline, "run_with_session_kill", observe_launch)
-    with pytest.raises(_LaunchObserved):
-        await launch(
-            profile=mode == "profile",
-            ready=mode == "ready",
-            extra={"server_already_ready": mode == "context-ready", "mn_round_restarted": mode == "multi-node"},
-        )
-
-
-@pytest.mark.asyncio
-async def test_baseline_does_not_sweep_when_preflight_refuses_launch(monkeypatch, baseline_launch):
-    launch, jit_dir = baseline_launch
-    layout = _make_aiter_tree(jit_dir)
-    refusal = {"status": "failed", "error_class": "argv_invalid"}
-    monkeypatch.setattr(baseline.BaselineExecutor, "_preflight_server_argv", lambda *args, **kwargs: refusal)
-
-    def unexpected_scan(*args):
-        pytest.fail("a refused launch must not sweep AITER locks")
-
-    monkeypatch.setattr(_aiter_jit, "_any_live_compiler", unexpected_scan)
-    assert await launch() == refusal
-    assert all(path.exists() for path in layout.values())

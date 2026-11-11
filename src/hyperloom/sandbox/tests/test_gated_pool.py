@@ -171,6 +171,21 @@ def test_the_default_probe_reads_the_kernels_list(tmp_path: Path) -> None:
     assert pool.acquire(1, 0.0) == (3,)
 
 
+def test_a_foreign_process_that_opened_every_card_keeps_only_the_card_it_holds_from_a_tp4_test(tmp_path: Path) -> None:
+    """A HIP process with no device mask opens every card but holds memory on one; the other free cards are handed out."""
+    tree = KernelTree(tmp_path, gpus=8)
+    tree.process(900, command=("python3", "foreign.py"))
+    tree.opened_only(900)
+    tree.holds(900, 4, vram=int(4.1 * (1 << 30)))
+    pool = GatedPool(
+        range(8), CardGuard.ENFORCE, read=lambda cards: read_holders(cards, kfd=tree.kfd, procfs=tree.procfs)
+    )
+    assert pool.acquire(3, 0.0) == (0, 1, 2)
+
+    assert pool.acquire(4, 0.0) == (3, 5, 6, 7)
+    assert pool.free_cards() == (4,)
+
+
 # --- a guard that only observes ---------------------------------------------------------------------------------------
 
 

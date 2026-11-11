@@ -16,7 +16,7 @@ from dataclasses import dataclass, field
 from enum import Enum
 from pathlib import Path
 
-from hyperloom_common.io import append_jsonl
+from hyperloom_common.io import append_shared_jsonl
 from hyperloom_multibranch.blackboard.codec import encode
 from hyperloom_multibranch.scheduling.clock import Clock
 
@@ -55,7 +55,7 @@ class DecisionLog:
         self._clock = clock
 
     def record(self, decision: Decision) -> None:
-        append_jsonl(
+        append_shared_jsonl(
             self._path,
             {
                 "at": self._clock.now(),
@@ -64,7 +64,6 @@ class DecisionLog:
                 "branch": decision.branch,
                 "detail": encode(dict(decision.detail)),
             },
-            make_parents=True,
         )
 
 

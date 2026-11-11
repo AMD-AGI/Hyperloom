@@ -22,7 +22,7 @@ from hyperloom.common.visible_devices import COUNTING_VISIBLE_DEVICE_VARS
 from ._subprocess_kill import COOPERATIVE_REAP_BUDGET_SEC
 
 if TYPE_CHECKING:
-    from ._ray_backend import SessionKillRound
+    from ._ray_backend import LeasedRound
 
 log = logging.getLogger(__name__)
 
@@ -59,7 +59,7 @@ CLOSE_STOP_TIMEOUT_SEC: float = 10.0
 # leaving their lane leases to expire unreclaimed.
 #
 # The slack covers only what the round spends OUTSIDE its own cap, which is less than it looks: server bringup is
-# inside it, because ``_grid_runner.sync_benchmark_timeout`` writes the same ``timeout_sec`` into the benchmark's
+# inside it, because ``_grid_base.sync_benchmark_timeout`` writes the same ``timeout_sec`` into the benchmark's
 # ``server_lifecycle.server_ready_timeout_s``, and both submitters run that before submitting. What is genuinely
 # outside is Ray dispatching the method onto an actor ``ensure()`` already created, the cooperative reap the actor
 # performs once the cap fires (``COOPERATIVE_REAP_BUDGET_SEC``), and shipping the round's captured stdout/stderr
@@ -267,8 +267,8 @@ def _pdeathsig_preexec() -> None:
     the server is ``setsid``'d into its own process group, so the only in-band teardown that can reach it is the
     wrapper's own ``trap cleanup EXIT INT TERM``. SIGKILL cannot be trapped, so arming it here killed the one process
     that knew how to stop the server and orphaned a multi-GPU vLLM tree. A no-op where prctl is unavailable, and no
-    guarantee either way -- the durable backstop is the pidfile scanned by
-    :func:`._server_lifecycle.reap_orphaned_servers`.
+    guarantee either way -- the durable backstop is the session's ``server.pid`` files, which
+    :func:`._server_lifecycle.reap_orphaned_servers` stops through :func:`inference_suite.stop`.
     """
     try:
         import ctypes
@@ -460,13 +460,12 @@ def _serving_actor_body() -> Any:
             import subprocess as _sp
 
             from ..cancel_channel import CancelScope, use_cancel_scope
-            from ._ray_backend import _run_subprocess_worker
 
             scope = CancelScope()
             self._round_scope = scope
             try:
                 with use_cancel_scope(scope):
-                    return _run_subprocess_worker(bench_round)
+                    return bench_round.run()
             except _sp.TimeoutExpired as exc:
                 return _ACTOR_TIMEOUT_RC, "", f"TimeoutExpired: {exc}"
             finally:
@@ -548,7 +547,7 @@ class ServingLease:
             )
             _note_lease_actor_submitted()
 
-    def run_session_kill(self, bench_round: SessionKillRound) -> tuple[int, str, str]:
+    def run_session_kill(self, bench_round: LeasedRound) -> tuple[int, str, str]:
         """Run one benchmark round inside the lease's actor; return ``(rc, stdout, stderr)``."""
         from ..cancel_channel import cancel_scope_listener
 
@@ -582,7 +581,7 @@ class ServingLease:
         ref: Any,
         *,
         acquire_ref: Any,
-        bench_round: SessionKillRound,
+        bench_round: LeasedRound,
         cancel_scope: Any,
     ) -> tuple[int, str, str]:
         """Wait for a submitted round, forwarding a cancel to the actor if one comes."""

@@ -5,9 +5,8 @@
 
 The keys that decide whether a draft has a kernel at all -- its backend, its KV cache dtype, its draft length -- live
 inside ``--speculative-config``, so a filter reading flag names never sees them. This module reads a composed launch
-with the parser :mod:`hyperloom.inference_optimizer.grid_server_args` owns and states the stack's kernel coverage as
-data, so the grid can refuse an unrunnable draft rather than spend a measurement on it, and the prompt can name the
-same constraint.
+with the parser :mod:`inference_suite.argv` owns and states the stack's kernel coverage as data, so the grid can refuse
+an unrunnable draft rather than spend a measurement on it, and the prompt can name the same constraint.
 
 A rule refuses only the shape it knows has no kernel: the draft's query heads per rank, read off the model that does
 the drafting -- the drafter's own checkpoint, or the target's when the method drafts with the target's layers. A
@@ -25,13 +24,9 @@ from dataclasses import dataclass, field
 from types import MappingProxyType
 from typing import Any
 
-from .grid_server_args import (
-    SERVED_MODEL_FLAGS,
-    TENSOR_PARALLEL_FLAGS,
-    flag_occurrences,
-    last_alias_value,
-    speculative_config,
-)
+from inference_suite.argv import flag_occurrences, last_alias_value, speculative_config
+
+from .grid_server_args import SERVED_MODEL_FLAGS, TENSOR_PARALLEL_FLAGS
 from .model_config_utils import summarize_model_config
 
 CAPABILITY_UNSUPPORTED = "capability_unsupported"

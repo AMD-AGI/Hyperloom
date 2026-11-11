@@ -20,6 +20,7 @@ import yaml
 
 from hyperloom.measure import local
 from hyperloom.measure.runner import run as runner_flow
+from hyperloom.measure.tests.bundle_factory import lm_eval_at_its_pin
 from hyperloom.orchestrator.actions.executors import GridRecipe, VariantResult
 
 PORT = 8123
@@ -31,7 +32,7 @@ async def fake_run_grid(
     *, grid: list[Any], output_root: Path, recipe: GridRecipe, **kwargs: Any
 ) -> list[VariantResult]:
     name = grid[0].name
-    workspace = Path(output_root) / name / "benchmark_stub_20000101_000000"
+    workspace = Path(output_root) / name / "suite_run_0"
     workspace.mkdir(parents=True)
     envs = (yaml.safe_load(Path(recipe.base_yaml_path).read_text()).get("benchmark") or {}).get("envs") or {}
     if envs.get("FAKE_BOOT") == "fail":
@@ -73,7 +74,8 @@ def main() -> int:
         "framework": "sglang",
         "reason": "",
     }
-    local.teardown_lifecycle_server = lambda **kwargs: None  # type: ignore[assignment]
+    local.teardown_variant_server = lambda slot: []  # type: ignore[assignment]
+    sys.path.insert(0, str(lm_eval_at_its_pin(root / "lm-eval-pin")))
     return runner_flow.run(root / "in", root / "out", scratch=root / "work" / "scratch", spec_wait_sec=60)
 
 

@@ -23,19 +23,20 @@ import errno
 import json
 import os
 import signal
+import stat
 import subprocess
 import sys
 from collections.abc import Awaitable, Callable, Iterator, Mapping, Sequence
 from dataclasses import dataclass, field, replace
 from datetime import datetime
 from pathlib import Path
-from types import ModuleType
-from typing import TYPE_CHECKING, Any, NoReturn, cast
+from typing import Any, NoReturn, cast
 
 import pytest
 
 import hyperloom_multibranch
 from hyperloom_common.jsonio import read_jsonl
+from hyperloom_common.tests.shared_accounts import Accounts, other_accounts
 from hyperloom.common.perf_metric import GRADED_INTVTY_P50, GRADED_OUTPUT
 from hyperloom_common.proctree import running
 from hyperloom.common.outside_facts.image_check import FactResult, ImageCheckFailed, ImageCheckMode, ImageCheckReport
@@ -223,25 +224,13 @@ from hyperloom_multibranch.scheduling.review import (
     REVIEW_SKIPPED,
 )
 from hyperloom_multibranch.scheduling.settings import DOSSIER_MINUTES
+from hyperloom_multibranch.specialist import autonomous_session
 from hyperloom_multibranch.specialist.arbor_adapter import MAPPED, SplitFailed
 from hyperloom_multibranch.specialist.dev_sandbox import DevLeases
 from hyperloom_multibranch.specialist.directions import DIRECTIONS
+from hyperloom_multibranch.specialist.dossier_pass import DossierOutcome, DossierPass, DossierStart
 from hyperloom_multibranch.specialist.prompts import prompt_versions
 from hyperloom_multibranch.specialist.runtime import MAX_LOSS_RESTARTS, SessionCrashed
-
-if TYPE_CHECKING:
-    from hyperloom_multibranch.specialist.dossier_pass import DossierOutcome, DossierPass, DossierStart
-
-
-def _specialist_module(name: str) -> ModuleType:
-    """The specialist package's module ``name``, which a test that maps or runs an Arbor share needs; the test is
-    skipped while the package has no such module."""
-    return pytest.importorskip(f"hyperloom_multibranch.specialist.{name}")
-
-
-def _dossier_outcome() -> type[DossierOutcome]:
-    return _specialist_module("dossier_pass").DossierOutcome
-
 
 START = 1_700_000_000.0
 CONC = 16
@@ -601,11 +590,8 @@ class Stage:
         await then(branch, head)
 
     async def run(self) -> SessionOutcome:
-        """Run the session, its image check answered by ``image_check`` instead of this environment; a session with
-        autonomous agents maps and runs them on the specialist's map and autonomous sessions."""
+        """Run the session, its image check answered by ``image_check`` instead of this environment."""
 
-        for module in ("map_session", "autonomous_session") if self.settings.agents else ():
-            _specialist_module(module)
         with self._polls_on_virtual_time() as patch:
             patch.setattr(lifecycle, "run_image_check", self.image_check)
             return await self._session().run()
@@ -1079,6 +1065,15 @@ async def test_the_agent_port_of_the_run_reaches_the_peers(tmp_path: Path) -> No
     stage._session()
 
     assert stage.setup.agent_port == 32100
+
+
+async def test_the_inferencex_commit_of_the_run_reaches_the_peers(tmp_path: Path) -> None:
+    stage = _stage(tmp_path)
+    stage.settings = replace(stage.settings, inferencex_commit="8a76a78e41")
+
+    stage._session()
+
+    assert stage.setup.inferencex_commit == "8a76a78e41"
 
 
 @pytest.mark.parametrize(("review_gate", "handed"), [(True, "host"), (False, "off")])
@@ -1972,6 +1967,79 @@ async def test_a_finish_over_a_session_killed_before_its_baseline_ends_with_no_c
     assert [row["reason"] for row in _decisions(recovery) if row["kind"] == "final"] == [NO_BASELINE]
 
 
+def _leave_before_final(workspace: Path) -> dict[str, object]:
+    """Run a session in ``workspace`` whose deadline passes before FINAL, as the account this process is: where it is,
+    the time it ended at and the framework checkout it rooted on. Another account runs it through :func:`_as_account`."""
+
+    framework = framework_checkout(workspace)
+    os.environ[MB_FRAMEWORK_REPO_ENV] = str(framework)
+    judge.SETTLED_TESTS = 0
+    stage = _stage(workspace)
+    stage.scripts = SCRIPTS
+    stage.toolbox_type = StuckStopToolbox
+    asyncio.run(stage.run())
+    return {"root": str(stage.layout.root), "now": stage.time.now(), "framework": str(framework)}
+
+
+def _finish_as_final_only(left: Mapping[str, object]) -> dict[str, object]:
+    """FINAL and CLOSE over the session :func:`_leave_before_final` ``left``, read back as ``final-only`` reads it, as
+    the account this process is: how it ended and the commit it chose."""
+
+    os.environ[MB_FRAMEWORK_REPO_ENV] = str(left["framework"])
+    judge.SETTLED_TESTS = 0
+    persisted = persisted_run(Path(str(left["root"])))
+    time = VirtualClock(float(str(left["now"])))
+    registry = HeldRegistry(persisted.layout.pids, time)
+    recovery = Stage(persisted.layout, time, registry, ScriptedCompletion(), [], settings=persisted.settings)
+    outcome = asyncio.run(recovery.finish(persisted.ended))
+    chosen = None if outcome.final is None or outcome.final.chosen is None else outcome.final.chosen.commit
+    return {"stop_reason": outcome.stop_reason.value, "exit_code": outcome.exit_code, "chosen": chosen}
+
+
+def _as_account(accounts: Accounts, uid: int, call: str) -> dict[str, object]:
+    """``call``, an expression of this module's, evaluated by ``uid`` in a process of its own under umask ``022``: its
+    JSON result."""
+
+    source = Path(hyperloom_multibranch.__file__).parents[1]
+    code = (
+        f"import json, sys\nfrom pathlib import Path\nsys.path.insert(0, {str(source)!r})\n"
+        f"from hyperloom_multibranch.tests import test_skeleton\nprint(json.dumps(test_skeleton.{call}))"
+    )
+    return json.loads(accounts.run(uid, code).splitlines()[-1])
+
+
+def test_a_final_only_of_another_account_of_the_group_finishes_what_one_account_left_before_final() -> None:
+    with other_accounts() as accounts:
+        source = Path(hyperloom_multibranch.__file__).parents[1]
+        if any(not directory.stat().st_mode & stat.S_IXOTH for directory in (source, *source.parents)):
+            pytest.skip(f"another account cannot reach this checkout's {source}")
+        if accounts.python != sys.executable:
+            pytest.skip(f"another account cannot run {sys.executable}, whose environment holds the project's packages")
+        workspace = accounts.shared_dir("workspace")
+        left = _as_account(accounts, accounts.first, f"_leave_before_final(Path({str(workspace)!r}))")
+
+        finished = _as_account(accounts, accounts.second, f"_finish_as_final_only({left!r})")
+
+        assert (finished["stop_reason"], finished["exit_code"]) == (SessionStopReason.TIME_EXHAUSTED.value, 0)
+        root = Path(str(left["root"]))
+        layout = SessionLayout(root)
+        assert finished["chosen"] is not None
+        assert json.loads(layout.report.read_text())["final"]["chosen"]["commit"] == finished["chosen"]
+        assert (layout.report.stat().st_uid, layout.decisions.stat().st_uid) == (accounts.second, accounts.first)
+        assert [row["kind"] for row in read_jsonl(layout.decisions)].count("final") == 1, (
+            "the second account appended FINAL's decision to the log the first one made"
+        )
+        # The experiment repository's own modes are git's shared-repository rule, not the session files' one.
+        found = (path for path in root.rglob("*") if path.is_dir() and not path.is_symlink())
+        directories = [root, *(path for path in found if not path.is_relative_to(layout.repo))]
+        assert [path for path in directories if stat.S_IMODE(path.stat().st_mode) != 0o2775] == []
+        records = (layout.roster, layout.decisions, layout.judge, layout.merges, layout.root_recipe, layout.pids)
+        records += (layout.report, layout.report_markdown, layout.reports / FRONTIER_LOG)
+        assert [path for path in records if stat.S_IMODE(path.stat().st_mode) != 0o664] == [], (
+            "every record a later leg reads or appends to is the group's"
+        )
+
+
 async def test_a_stop_signal_during_a_final_only_still_leaves_a_report_within_one_close_grace(
     tmp_path: Path,
 ) -> None:
@@ -2378,7 +2446,6 @@ PASS_SECONDS = 600.0
 async def test_without_a_map_two_arbors_split_the_map_of_the_session_s_dossier_pass(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    outcome = _dossier_outcome()
     asked: list[tuple[str, OpShares | None]] = []
     started: list[DossierStart] = []
 
@@ -2391,7 +2458,7 @@ async def test_without_a_map_two_arbors_split_the_map_of_the_session_s_dossier_p
     async def dossier(start: DossierStart) -> DossierOutcome:
         started.append(start)
         await stage.time.sleep(PASS_SECONDS)
-        return outcome(Path("/pass/directions.json"), Path("/pass/docs/dossier/qwen3-8b"), MAPPED)
+        return DossierOutcome(Path("/pass/directions.json"), Path("/pass/docs/dossier/qwen3-8b"), MAPPED)
 
     monkeypatch.setattr(lifecycle, "agent_plans", split)
     monkeypatch.setattr(lifecycle, "arbor_agents", _two_arbors)
@@ -2434,7 +2501,6 @@ async def test_without_a_map_two_arbors_split_the_map_of_the_session_s_dossier_p
 async def test_a_dossier_pass_with_no_map_or_no_minutes_leaves_the_split_to_the_generic_map(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, minutes: float
 ) -> None:
-    outcome = _dossier_outcome()
     asked: list[str] = []
     started: list[DossierStart] = []
 
@@ -2446,7 +2512,7 @@ async def test_a_dossier_pass_with_no_map_or_no_minutes_leaves_the_split_to_the_
 
     async def dossier(start: DossierStart) -> DossierOutcome:
         started.append(start)
-        return outcome(None, None, "it refused its config: the pack has no dossier skill")
+        return DossierOutcome(None, None, "it refused its config: the pack has no dossier skill")
 
     monkeypatch.setattr(lifecycle, "agent_plans", split)
     monkeypatch.setattr(lifecycle, "arbor_agents", _two_arbors)
@@ -2484,13 +2550,12 @@ def _pass_wrote(tmp_path: Path) -> tuple[Path, Path]:
 async def test_a_run_that_stops_after_its_map_maps_one_arbor_keeps_map_and_dossier_and_opens_no_branch(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    outcome = _dossier_outcome()
     map_file, dossier = _pass_wrote(tmp_path)
     started: list[DossierStart] = []
 
     async def mapping(start: DossierStart) -> DossierOutcome:
         started.append(start)
-        return outcome(map_file, dossier, MAPPED)
+        return DossierOutcome(map_file, dossier, MAPPED)
 
     monkeypatch.setattr(lifecycle, "arbor_agents", _one_arbor)
     stage = _stage(tmp_path)
@@ -2524,12 +2589,11 @@ async def test_a_run_that_stops_after_its_map_maps_one_arbor_keeps_map_and_dossi
 async def test_a_run_that_stops_after_its_map_keeps_a_map_generated_from_the_root_when_the_pass_set_none(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    outcome = _dossier_outcome()
     generated = tmp_path / "generated-directions.json"
     generated.write_text(json.dumps({"directions": [{"id": "m-gemm"}]}))
 
     async def mapping(_start: DossierStart) -> DossierOutcome:
-        return outcome(None, None, "it set no map by its deadline and was stopped")
+        return DossierOutcome(None, None, "it set no map by its deadline and was stopped")
 
     async def generate(*_args: object) -> Path:
         return generated
@@ -2555,10 +2619,9 @@ async def test_a_run_that_stops_after_its_map_keeps_a_map_generated_from_the_roo
 async def test_a_run_that_stops_after_its_map_and_gets_none_fails_with_why_and_keeps_nothing(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    outcome = _dossier_outcome()
 
     async def mapping(_start: DossierStart) -> DossierOutcome:
-        return outcome(None, None, "it refused its config: the pack has no dossier skill")
+        return DossierOutcome(None, None, "it refused its config: the pack has no dossier skill")
 
     async def generate(*_args: object) -> Path:
         raise SplitFailed("the root has no shares to generate a map from")
@@ -2628,8 +2691,6 @@ def _review_steps(stage: Stage) -> list[str]:
 def _two_arbors_reviewed(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, read: list[str]) -> tuple[Stage, Path, Path]:
     """A session of two Arbors with the review on, whose dossier pass writes a map and a dossier; the split records
     the map's text as it reads it."""
-
-    outcome = _dossier_outcome()
     map_file, dossier = _pass_wrote(tmp_path)
 
     async def split(
@@ -2639,7 +2700,7 @@ def _two_arbors_reviewed(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, read: 
         return ("/shares/share-1.json", "/shares/share-2.json")
 
     async def mapping(_start: DossierStart) -> DossierOutcome:
-        return outcome(map_file, dossier, MAPPED)
+        return DossierOutcome(map_file, dossier, MAPPED)
 
     monkeypatch.setattr(lifecycle, "agent_plans", split)
     monkeypatch.setattr(lifecycle, "arbor_agents", _two_arbors)
@@ -2734,7 +2795,7 @@ async def test_a_review_decided_after_its_clock_ran_out_opens_no_share_and_says_
     stage, _map_file, _dossier = _two_arbors_reviewed(tmp_path, monkeypatch, read)
     stage.settings = replace(stage.settings, agent_share_minutes=2.0)
     # No margin before EXPLORE's end: a share opened at any time would run until it, so the clock is EXPLORE's alone.
-    monkeypatch.setattr(_specialist_module("autonomous_session"), "collection_margin", lambda _records, _floor: 0.0)
+    monkeypatch.setattr(autonomous_session, "collection_margin", lambda _records, _floor: 0.0)
 
     async def late() -> dict[str, Any]:
         open_by = await _open_by(stage)
@@ -2767,7 +2828,6 @@ async def test_without_the_review_gate_two_arbors_split_their_map_at_once_and_th
 async def test_with_the_review_on_one_arbor_gets_the_map_step_and_takes_the_reviewed_map_whole(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    outcome = _dossier_outcome()
     map_file, dossier = _pass_wrote(tmp_path)
     asked: list[tuple[tuple[str, ...], str]] = []
 
@@ -2778,7 +2838,7 @@ async def test_with_the_review_on_one_arbor_gets_the_map_step_and_takes_the_revi
         return ("/shares/share-1.json",)
 
     async def mapping(_start: DossierStart) -> DossierOutcome:
-        return outcome(map_file, dossier, MAPPED)
+        return DossierOutcome(map_file, dossier, MAPPED)
 
     monkeypatch.setattr(lifecycle, "agent_plans", split)
     monkeypatch.setattr(lifecycle, "arbor_agents", _one_arbor)
@@ -2830,11 +2890,10 @@ async def test_a_run_that_stops_after_its_map_does_not_pause_even_with_the_revie
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     # Its stop is the review point: the map is kept and reviewed offline, across the points.
-    outcome = _dossier_outcome()
     map_file, dossier = _pass_wrote(tmp_path)
 
     async def mapping(_start: DossierStart) -> DossierOutcome:
-        return outcome(map_file, dossier, MAPPED)
+        return DossierOutcome(map_file, dossier, MAPPED)
 
     monkeypatch.setattr(lifecycle, "arbor_agents", _one_arbor)
     stage = _stage(tmp_path)

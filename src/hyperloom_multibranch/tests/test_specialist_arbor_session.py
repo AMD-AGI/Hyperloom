@@ -37,6 +37,8 @@ from hyperloom_multibranch.tests.agent_rig import (
     _replayed,
     _until,
 )
+from hyperloom_multibranch.scheduling.session_base import served_launch
+from hyperloom_multibranch.tests.test_specialist_arbor_adapter import _TOKEN, credential_session  # noqa: F401
 from hyperloom_multibranch.tests.test_specialist_autonomous_session import Rig, _failed, _imported, _rig, fast_session  # noqa: F401
 
 
@@ -119,6 +121,31 @@ async def test_an_arbor_restarted_after_a_crash_is_resumed_by_its_stored_manifes
     assert rig.sandbox.started == [LAUNCH, LAUNCH] and rig.sandbox.prompts == []
     assert config.read_text() == written
     assert any(note == f"{NOTICE} the agent resumed with `{LAUNCH}`" for note in await rig.notices())
+
+
+async def test_an_arbor_served_a_frozen_base_s_credential_keeps_it_out_of_its_stored_manifest_and_resumes_with_the_host_s(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, credential_session
+) -> None:
+    monkeypatch.setattr(arbor_adapter, "INSTALL", ())
+    monkeypatch.setenv("HF_TOKEN", _TOKEN)
+    agent = Component(keeps=(256,), gap=1.0, tail=0.6)
+    launch = served_launch(credential_session, "")
+    rig = await _rig(tmp_path, source=_arbor_repo(tmp_path, agent), start_seconds=0.2, spec_fields={"launch": launch})
+    config = tmp_path / BRANCH / "session" / AGENT_DIR / "src" / CONFIG_FILE
+
+    await rig.session.preflight()
+    await rig.session.stop()
+    resumed = rig.restart()
+    running = asyncio.create_task(resumed.run())
+    await _until(lambda: rig.toolbox.requests, "the import")
+    await rig.toolbox_blackboard.write_result(result("r1"))
+    with pytest.raises(SessionFinished):
+        await asyncio.wait_for(running, 10)
+
+    assert _TOKEN not in (tmp_path / BRANCH / "session" / MANIFEST_FILE).read_text()
+    assert json.loads(config.read_text())["server_env"]["HF_TOKEN"] == _TOKEN
+    [request] = rig.toolbox.requests
+    assert request.delta.config.envs == {} and "+max_num_seqs = 256" in rig.patch(request)
 
 
 async def test_an_arbor_that_refuses_its_config_ends_the_branch_for_good_with_its_reasons(

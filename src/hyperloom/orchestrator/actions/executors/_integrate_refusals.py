@@ -10,16 +10,16 @@ from pathlib import Path
 from typing import Any
 
 from hyperloom_common.coerce import to_float, to_str_list
+from hyperloom.common.agentx_objective import AgentXObjective
 from hyperloom.common.gain_math import incremental_gain_pct
 from hyperloom.common.perf_metric import (
-    GRADED_INTVTY,
-    GRADED_OUTPUT,
     VERDICT_KEEP,
     constraint_veto_reason,
     holds_within_band,
     incomparability_reason,
     perf_snapshot_from_mapping,
     resolve_grading_anchor_perf,
+    snapshot_axis,
 )
 from hyperloom.inference_optimizer.grading import resolved_grading
 from hyperloom.orchestrator.measurement.runtime_findings import (
@@ -128,9 +128,10 @@ def _intvty_guard_refusals(shared_state: Any, bench_result: dict[str, Any]) -> l
     cand_perf = perf_snapshot_from_mapping(bench_result)
     _, noise_pct = resolved_grading(shared_state)
     band = f"{noise_pct:.1f}% noise band" if noise_pct is not None else "noise band"
+    axes = (snapshot_axis(guard.metric) for guard in AgentXObjective.P50_INTERACTIVITY.guards)
     refusals = [
         f"{key} fell outside the {band}"
-        for key in (GRADED_INTVTY, GRADED_OUTPUT)
+        for key in axes
         if not holds_within_band(cand_perf, ref_perf, key, noise_pct=noise_pct)
     ]
     incomparable = incomparability_reason(cand_perf, ref_perf)
