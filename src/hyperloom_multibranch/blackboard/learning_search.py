@@ -29,7 +29,7 @@ from enum import Enum
 from pathlib import Path
 from typing import Protocol
 
-from hyperloom_common.io import append_jsonl
+from hyperloom_common.io import append_shared_jsonl
 from hyperloom_multibranch.contracts.blackboard.peers import Intent, Validity
 from hyperloom_multibranch.contracts.blackboard.records import Learning, LearningRecord, BlackboardSnapshot, TestRecord
 from hyperloom_multibranch.blackboard.codec import key_sorted
@@ -114,7 +114,7 @@ class RetrievalLog:
         if retrieval.leads:
             line["leads"] = [{"ref": lead.ref, "change": lead.change} for lead in retrieval.leads]
         try:
-            append_jsonl(self.path, key_sorted(line), make_parents=True)
+            append_shared_jsonl(self.path, key_sorted(line))
         except OSError as exc:
             log.warning("could not append the learnings retrieval to %s: %s", self.path, exc)
 

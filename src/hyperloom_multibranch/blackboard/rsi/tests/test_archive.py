@@ -8,6 +8,7 @@ from __future__ import annotations
 import dataclasses
 import json
 import logging
+import stat
 from pathlib import Path
 
 import pytest
@@ -391,3 +392,33 @@ def test_a_write_only_session_reads_no_archive_and_still_archives_into_it(
     assert TreeArchive.read_from_env({**env, WRITE_ONLY_ENV: "0"}) is not None
     assert archive_session(snapshot, METRIC, written).status == ARCHIVED
     assert [item.session_id for item in written.load()] == ["sess-1"]
+
+
+def test_an_archived_tree_is_readable_by_every_account_of_the_deployment_s_group_and_its_folder_is_the_group_s(
+    snapshot: BlackboardSnapshot, tmp_path: Path
+) -> None:
+    tmp_path.chmod(0o2775)  # the deployment's archive storage, set up to be shared
+    archive = TreeArchive(tmp_path / "archive")
+
+    archive.put(tree_from_snapshot(snapshot, METRIC))
+
+    [stored] = archive.root.glob("*.json")
+    assert stat.S_IMODE(stored.stat().st_mode) == 0o644
+    assert stat.S_IMODE(archive.root.stat().st_mode) == 0o2775
+
+
+def test_a_tree_this_account_cannot_open_is_named_with_its_owner_and_mode_not_dropped_silently(
+    snapshot: BlackboardSnapshot, tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    searched = tree_from_snapshot(snapshot, METRIC)
+    archive = TreeArchive(tmp_path / "archive")
+    archive.put(searched)
+    unopenable = archive.root / "other-account.json"
+    unopenable.mkdir()  # read_text fails with an OSError as a file another account wrote owner-only does
+    unopenable.chmod(0o700)
+
+    with caplog.at_level(logging.WARNING, logger="hyperloom_multibranch.blackboard.rsi.archive"):
+        assert archive.load() == [searched]
+
+    info = unopenable.stat()
+    assert f"{unopenable} (owner {info.st_uid}:{info.st_gid} 0700)" in caplog.text

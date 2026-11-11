@@ -29,6 +29,7 @@ from hyperloom_multibranch.contracts.blackboard import INTEGRATION_BRANCH, NotRe
 from hyperloom_multibranch.contracts.blackboard.interfaces import SessionRecords
 from hyperloom_multibranch.contracts.blackboard.records import BlackboardSnapshot
 from hyperloom_multibranch.blackboard.codec import decode, encode
+from hyperloom_common.shared_storage import ownership
 from hyperloom_multibranch.blackboard.local.files import encode_json, publish_once
 from hyperloom_multibranch.blackboard.rsi.archive import TreeArchive
 from hyperloom_multibranch.rulegate.fix_case import CaseError, case_of, pack_case, read_case
@@ -100,7 +101,8 @@ class CasePool:
         return publish_once(self.root / f"{name}.json", encode_json({"format": CASE_FORMAT, "case": encode(entry)}))
 
     def entries(self) -> tuple[PoolEntry, ...]:
-        """Every readable case, by file name; a file of another format, or one that does not parse, is left out."""
+        """Every readable case, by file name; a file of another format, or one that does not parse, is left out, and one
+        this account cannot open is left out with a warning naming it, its owner and its mode."""
 
         found = []
         for path in sorted(self.root.glob("*.json")):
@@ -110,7 +112,9 @@ class CasePool:
                     entry = decode(PoolEntry, document.get("case"))
                     if self.as_of is None or entry.written_at <= self.as_of:
                         found.append(entry)
-            except (OSError, AttributeError, KeyError, TypeError, ValueError):
+            except OSError as exc:
+                log.warning("skipping unreadable case %s%s: %s", path, ownership(path), exc.strerror or exc)
+            except (AttributeError, KeyError, TypeError, ValueError):
                 continue
         return tuple(found)
 
