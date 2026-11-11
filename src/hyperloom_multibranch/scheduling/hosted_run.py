@@ -297,10 +297,11 @@ def record_session(state_dir: Path, root: Path) -> None:
 
 def share_with_the_group(root: Path) -> None:
     """Below shared storage, run the rest of this process under the umask of a child that writes below the session
-    directory ``root`` (:func:`~hyperloom_common.shared_storage.child_umask`), so every process it starts, and the
-    commands of the agent sandboxes it lends, inherit it: what Arbor, an agent or a tool writes there with the default
-    modes stays writable by the group, whose other accounts may run the run's next leg. Elsewhere the umask is left
-    as it is."""
+    directory ``root`` (:func:`~hyperloom_common.shared_storage.child_umask`), so every process it starts here, the
+    commands of its local agent sandboxes among them, inherits it: what Arbor, an agent or a tool writes there with the
+    default modes stays writable by the group, whose other accounts may run the run's next leg. A remote sandbox's
+    commands run in another container and take the umask from its launcher instead. Elsewhere the umask is left as
+    it is."""
 
     umask = child_umask(root)
     if umask != -1:
