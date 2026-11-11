@@ -307,3 +307,56 @@ def test_derive_runtime_paths_noop_when_no_rocm_sdk_wheel(monkeypatch):
     cli_preflight_env._derive_runtime_paths()
 
     assert os.environ.get("LD_LIBRARY_PATH") is None
+
+
+def _wheel_root(tmp_path: Path, package: str, *libs: str) -> Path:
+    """A ``_rocm_sdk_*`` package root carrying ``libs`` under ``lib/``."""
+    root = tmp_path / package
+    (root / "lib").mkdir(parents=True)
+    for lib in libs:
+        (root / "lib" / lib).write_bytes(b"")
+    return root
+
+
+def test_rocm_path_points_at_the_wheel_carrying_the_unversioned_library(tmp_path, monkeypatch):
+    """The file decides, not the package: only devel ships the development symlink."""
+    core = _wheel_root(tmp_path, "_rocm_sdk_core", "librocm_smi64.so.1")
+    devel = _wheel_root(tmp_path, "_rocm_sdk_devel", "librocm_smi64.so", "librocm_smi64.so.1")
+    monkeypatch.setattr(cli_preflight_env, "_rocm_sdk_wheel_roots", lambda: [core, devel])
+    monkeypatch.setenv("ROCM_PATH", "/opt/rocm")  # Ray's default; a wheel install never creates it.
+
+    cli_preflight_env._derive_rocm_path()
+
+    assert os.environ["ROCM_PATH"] == str(devel)
+
+
+def test_an_existing_rocm_path_is_left_alone(tmp_path, monkeypatch):
+    devel = _wheel_root(tmp_path, "_rocm_sdk_devel", "librocm_smi64.so")
+    installed = tmp_path / "opt-rocm"
+    installed.mkdir()
+    monkeypatch.setattr(cli_preflight_env, "_rocm_sdk_wheel_roots", lambda: [devel])
+    monkeypatch.setenv("ROCM_PATH", str(installed))
+
+    cli_preflight_env._derive_rocm_path()
+
+    assert os.environ["ROCM_PATH"] == str(installed)
+
+
+def test_no_wheel_leaves_rocm_path_untouched(monkeypatch):
+    monkeypatch.setattr(cli_preflight_env, "_rocm_sdk_wheel_roots", list)
+    monkeypatch.delenv("ROCM_PATH", raising=False)
+
+    cli_preflight_env._derive_rocm_path()
+
+    assert "ROCM_PATH" not in os.environ
+
+
+def test_a_wheel_without_the_unversioned_library_is_not_selected(tmp_path, monkeypatch):
+    """librocm_smi64.so.1 alone is what core ships, and the ctypes load does not find it."""
+    core = _wheel_root(tmp_path, "_rocm_sdk_core", "librocm_smi64.so.1")
+    monkeypatch.setattr(cli_preflight_env, "_rocm_sdk_wheel_roots", lambda: [core])
+    monkeypatch.delenv("ROCM_PATH", raising=False)
+
+    cli_preflight_env._derive_rocm_path()
+
+    assert "ROCM_PATH" not in os.environ
