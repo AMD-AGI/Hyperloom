@@ -30,8 +30,8 @@ MAX_CONSECUTIVE_PROBES = 2
 # escalate into, it does not know what to do next — which is precisely when it
 # should buy knowledge rather than guess again. At that point a probe is
 # MANDATED, not merely permitted: otherwise a campaign on the terminal tier
-# with many unresolved ledger findings never probes, because every counter it
-# can see treats probing as failure.
+# with unresolved ledger findings never probes, because every counter it can
+# see treats probing as failure.
 PROBE_MANDATE_NULL_STREAK = 3
 
 # Consecutive not-measured iterations that mean the harness, not the campaign,
@@ -45,10 +45,10 @@ MAX_CONSECUTIVE_INVALID = 3
 # WHY THIS COUNTER EXISTS. `best_secondary` is a high-water mark over
 # single-replay measurements, so it is an UPWARD-BIASED estimator: each ratchet
 # keeps whichever draw happened to be high, and the bias grows with the number
-# of ratchet events. A few ratchets can land the incumbent above its own
-# matched-draw cohort by most of its secondary band before any real effect.
-# Later iterations are then each REVERTED on the secondary axis alone -- even
-# a BYTE-IDENTICAL tree.
+# of ratchet events. A few ratchets can put the bar above its own
+# matched-draw cohort by most of the secondary band before any real effect,
+# and later iterations are then REVERTED on the secondary axis alone -- a
+# BYTE-IDENTICAL tree included.
 #
 # The inference is statistical, not about any one change: several UNRELATED
 # changes reading null on the primary and failing only on the secondary is far
@@ -69,13 +69,13 @@ SECONDARY_SUSPECT_STREAK = 3
 #
 # `null_streak` is wired to three consumers that want different things —
 # escalation, the LEARN mandate, and a reset from LEARN-with-findings. That
-# third wire is correct (without it a campaign can sit at
-# a high null_streak with many unresolved findings and never probe) but it makes the
+# third wire is correct (without it a campaign can sit at a long null_streak
+# with unresolved findings and never probe) but it makes the
 # counter unable to answer "are we converting effort into wins?". A campaign
 # can go many iterations without moving either bar while `null_streak` reads
-# 0, because a REVERT raises it to 1 and the next LEARN — closing genuine
+# 0, when a REVERT raises it to 1 and the next LEARN — closing genuine
 # findings — resets it to 0. It never reaches ESCALATE_NULL_STREAK, so
-# nothing is ever rendered into the prompt.
+# nothing is rendered into the prompt.
 #
 # So: one counter per question. `null_streak` keeps its meaning ("is this tier
 # dry?"), which foundation work legitimately answers. `barren_streak` answers
@@ -87,8 +87,7 @@ BARREN_ACT = 16
 # The one wire between the two knobs. A drought WIDENS the LEARN budget rather
 # than tightening it, which is the correction: today the system rations
 # exploration hardest at the moment exploitation has proven least productive
-# (a probe budget exhausted deep into a
-# drought). A LEARN touching only `eval/` and the ledger skips the server run,
+# (a probe budget exhausted deep into a drought). A LEARN touching only `eval/` and the ledger skips the server run,
 # so this is nearly free in wall-clock.
 #
 # It is not circular: LEARN resets `null_streak` but NEVER `barren_streak`, so
@@ -170,6 +169,9 @@ class CampaignState:
     # no secondary metric, in which case every gate path is single-axis.
     baseline_secondary: float | None = None
     best_secondary: float | None = None
+    # The kept tree's readings of a host's band guards (arbor/measure/guards.py), taken at every measured KEEP and
+    # PROBE; empty without guards. An older session.json loads without it.
+    guard_ref: dict[str, float] = field(default_factory=dict)
     iteration: int = 0
     tier: str = "config"
     null_streak: int = 0
@@ -424,22 +426,24 @@ class CampaignState:
         # ── The BARREN knob ──────────────────────────────────────────────
         # Only a real advance clears it. A LEARN that closed a dozen findings
         # does not, which is the entire point: `null_streak` already credits
-        # that, and crediting it twice would let a campaign stay barren for dozens of iterations
-        # while every visible counter read zero.
+        # that, and crediting it twice would let a campaign stay barren for
+        # dozens of iterations while every visible counter read zero.
         #
-        # FIX-CORRECTNESS is EXEMPT (not merely reset-proof): a correctness
-        # fix that costs throughput is still the right move, and counting it
-        # as drought would pressure the agent away from fixing bugs.
+        # FIX-CORRECTNESS and FIX-STABILITY are EXEMPT (not merely reset-proof):
+        # a correctness or stability fix that costs throughput is still the
+        # right move, and counting it as drought would pressure the agent away
+        # from fixing bugs. The row's ``pareto_exempt`` says which.
         # NOT_MEASURED freezes it, as it freezes every other counter — nothing
         # was learned about the candidate either way.
         # THE RATCHET IS AUTHORITATIVE, not `advanced_metric`. A neutral KEEP
         # normally reads below the incumbent and is a drought iteration, but it
-        # CAN set a new high-water: a KEEP shipped with `booked=False` can
-        # still move both bars, because _record_keep ratchets whatever it is
-        # handed. Calling that barren would have the prompt assert "no advance
-        # in N iterations" while the monitor showed the bar moving. The drought
+        # CAN set a new high-water: one iteration shipped `booked=False`
+        # and still moved both bars slightly, because _record_keep ratchets
+        # whatever it is handed. Calling that barren would have the prompt
+        # assert "no advance in N iterations" while the monitor showed the bar
+        # moving more recently. The drought
         # is a statement about THE BARS; if a bar moved, it is over.
-        if verdict != NOT_MEASURED and intent_row.name != "FIX-CORRECTNESS":
+        if verdict != NOT_MEASURED and not intent_row.pareto_exempt:
             booked = bool(
                 verdict == KEEP and intent_row.books
                 and (frontier or self._would_ratchet(value, secondary))
@@ -513,7 +517,15 @@ class CampaignState:
         # change competing against a composite point that no single
         # configuration ever achieved, and the bar would drift out of reach one
         # trade at a time.
-        if self.best_metric is None:
+        # A correctness or stability fix REBASES both bars to its own reading,
+        # the other way too: the tree no longer holds the faster, wrong (or
+        # failing) result, so a later
+        # change is held to what the fixed tree measures, as after a retraction.
+        # Kept at the pre-fix best, every later WIN first had to win back the
+        # fix's cost (a later split-K gain could not clear a bar the fix had
+        # left above the tree).
+        rebase = intent.pareto_exempt and not frontier
+        if self.best_metric is None or (rebase and metric is not None):
             self.best_metric = metric
         elif frontier:
             pass
@@ -524,7 +536,7 @@ class CampaignState:
         if secondary is not None and not frontier:
             if self.baseline_secondary is None:
                 self.baseline_secondary = secondary
-            if self.best_secondary is None:
+            if self.best_secondary is None or rebase:
                 self.best_secondary = secondary
             elif (self.secondary_direction or "max") == "min":
                 self.best_secondary = min(self.best_secondary, secondary)
@@ -689,8 +701,8 @@ class CampaignState:
         campaign surveying forever, but combined with the probe cap it made
         every visible counter treat probing as failure: probe_streak is a
         limit, null_streak kept climbing, best_metric could not move. A
-        campaign then stops probing early and accumulates
-        many unresolved findings while its null_streak climbs. A probe that
+        campaign then stops probing early and accumulates unresolved
+        findings while sitting at a long null_streak. A probe that
         closes a real uncertainty IS progress; a probe that closes nothing is
         still counted as a null, and MAX_CONSECUTIVE_PROBES still bounds the
         survey.
@@ -698,6 +710,44 @@ class CampaignState:
         self.record(
             "KEEP", iteration=iteration, change=change, tier=tier,
             reason=reason, metric=metric, intent="PROBE", findings=findings,
+        )
+
+    def record_retraction(
+        self,
+        iteration: int,
+        retracts: dict,
+        change: str,
+        bar: float | None = None,
+        secondary_bar: float | None = None,
+    ) -> None:
+        """A KEEP of this campaign taken back, its change reverted (arbor/retraction.py).
+
+        ``retracts`` is ``{iteration, keep, finding}``: the KEEP's iteration, its number in
+        the KEEP count, and the ledger record that found it invalid. The row is a KEEP, so a
+        host counting KEEPs sees it, under FIX-CORRECTNESS, the intent of a correctness fix
+        that costs throughput. It claims no metric and moves no counter. ``bar`` and
+        ``secondary_bar``, when known, are where the bars stood before the retracted KEEP:
+        the tree no longer holds what that KEEP measured.
+        """
+        from arbor.measure.intents import resolve
+
+        if bar is not None:
+            self.best_metric = bar
+        if secondary_bar is not None:
+            self.best_secondary = secondary_bar
+        intent = resolve("FIX-CORRECTNESS")
+        self._lesson(
+            iteration=iteration,
+            decision="KEEP",
+            verdict="KEEP",
+            metric=None,
+            booked=False,
+            change=change,
+            tier=self.tier,
+            claim_class=intent.aliases[0],
+            intent=intent.name,
+            findings=[retracts["finding"]],
+            retracts=dict(retracts),
         )
 
     def record_invalid(
@@ -715,11 +765,12 @@ class CampaignState:
         wrong wire name, a pinned instrument that moved — none of these are
         evidence about the candidate. Reporting them as REVERT discarded
         working code, incremented ``null_streak``, and drove tier escalation
-        off manufactured nulls. Such REVERTs can make up most of a
-        campaign's, and can reject a correct change again and again.
+        off manufactured nulls. Such REVERTs can make up most of a campaign's,
+        and can reject a correct change again and again.
 
-        So: the tree is NOT reverted, ``null_streak`` does NOT move, the tier
-        counters do NOT move, and the caller retries. Only ``invalid_streak``
+        So: ``null_streak`` does NOT move and the tier counters do NOT move.
+        The driver puts the tree back to the last one kept and notes the change
+        for a revisit once the directions are done (arbor/execute/kept.py). Only ``invalid_streak``
         advances, so a systemically broken harness still stops the loop.
         """
         self.record(
@@ -734,7 +785,7 @@ class CampaignState:
         Deliberately not a correction. The only honest way to move an incumbent
         is to measure it: bench the CURRENT tree unchanged and compare. That
         run is cheap relative to what it settles: a byte-identical tree can
-        read as a regression.
+        read well below the incumbent.
         """
         n = self.policy.secondary_suspect_streak if limit is None else limit
         return n > 0 and self.secondary_only_streak >= n
@@ -792,8 +843,8 @@ class CampaignState:
     def diagnose(self) -> str:
         """One line naming the regime, for the prompt header and the monitor.
 
-        A long drought can stay invisible while every counter anyone
-        looks at faithfully reports a small `null_streak`.
+        A long drought stays invisible while every counter anyone looks at
+        faithfully reports a low `null_streak`.
         """
         return (f"iteration {self.iteration} | tier {self.tier} | "
                 f"barren {self.barren_streak} ({self.barren_stage()}) | "

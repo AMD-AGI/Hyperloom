@@ -17,10 +17,11 @@ from arbor import component
 
 VALID_OBJECTIVE_KINDS = {"maximize_perf", "find_witness"}
 VALID_WORKLOAD_KINDS = {"serving", "kernel", "repro", "document"}
-ALLOWED_PACK_DIRS = {"knowledge", "validator", "eval"}
+# tools/: helper scripts the pack's `tools:` names (the agentx pack's KV-trace tools); not pinned, not served.
+ALLOWED_PACK_DIRS = {"knowledge", "validator", "eval", "tools"}
 
 # A pack's results/ is refused unless the user opts in (`arbor run --allow-pack-results`):
-# some packs keep their results there.
+# some contributed packs keep their results there.
 PACK_RESULTS_DIR = "results"
 PACK_RESULTS_FLAG = "--allow-pack-results"
 PACK_RESULTS_CONCERNS = (
@@ -45,7 +46,7 @@ class Pack:
     knowledge_dir: Path
     pack_dir: Path
     # Optional pace-threshold overrides (arbor.state.Policy field names).
-    # Absent from every pack written before it existed, which is why it
+    # Absent from older packs, which is why it
     # defaults rather than being required.
     policy: dict | None = None
     # Skills the campaign agent may use, by name: <arbor_root>/.claude/skills/<name>/.
@@ -53,9 +54,21 @@ class Pack:
     # (agent_skills). Listing "profiler" makes every profile go through that
     # skill (render.py states the precedence); a pack without it profiles its
     # own way. With nothing declared and no default-on skills, the agent runs
-    # as before skills existed.
+    # as it did before packs declared skills.
     skills: list[str] | None = None
     opt_out_skills: list[str] | None = None
+    # The skills the pack loads, {load: [...]}, each placed by its own metadata (arbor/lifecycle.py).
+    # None when the pack does not declare it, as every older pack.
+    lifecycle: dict | None = None
+    # v0.9.2's keys, read only to refuse them: families now resolve by a skill's name, and a
+    # trigger skill names its events in its metadata.
+    plugins: list[str] | None = None
+    triggers: dict | None = None
+    # pack.yaml has a key YAML read as true: an `on:` meant as `triggers:`.
+    on_key: bool = False
+    # What changes under a host (component mode): its `lifecycle.load` replaces the pack's
+    # (arbor/lifecycle.py loaded).
+    component: dict | None = None
 
 
 @dataclass
@@ -70,6 +83,11 @@ class Campaign:
     # (a host owns them: arbor/component.py, docs/component-mode.md). Read once here;
     # the driver records it in session.json and refuses a config that changes it.
     mode: str = "standalone"
+    # Why the asked objective (arbor/objective.py) could not be read; the start refuses it. "" otherwise.
+    objective_error: str = ""
+    # The config file this campaign was loaded from: relative paths in the config (prompt_profile) resolve against
+    # its directory (arbor/prompts.py). "" for a campaign built in memory.
+    config_path: str = ""
 
 
 def load_pack(pack_dir: str | Path) -> Pack:
@@ -87,6 +105,11 @@ def load_pack(pack_dir: str | Path) -> Pack:
         policy=manifest.get("policy") or None,
         skills=manifest.get("skills"),
         opt_out_skills=manifest.get("opt-out-skills"),
+        plugins=manifest.get("plugins"),
+        lifecycle=manifest.get("lifecycle"),
+        triggers=manifest.get("triggers"),
+        on_key=True in manifest,
+        component=manifest.get("component"),
     )
 
 
@@ -117,6 +140,16 @@ def load_campaign(config_path: str | Path, arbor_root: str | Path) -> Campaign:
     arbor_root = Path(arbor_root)
     config = json.loads(config_path.read_text())
     pack = load_pack(arbor_root / "packs" / config["pack"])
+    # --opt-objective, or the config's opt_objective (arbor/objective.py): another metric in place of the pack's, for
+    # every load, so the program, the bench, the gate and the bars agree. One Arbor cannot read is refused at the start.
+    from arbor import objective as _objective
+    objective_error = ""
+    text = _objective.asked(config)
+    if text:
+        try:
+            pack.objective = _objective.apply(pack.objective, text)
+        except ValueError as exc:
+            objective_error = str(exc)
     return Campaign(
         pack=pack,
         config=config,
@@ -125,6 +158,8 @@ def load_campaign(config_path: str | Path, arbor_root: str | Path) -> Campaign:
         space=config.get("space", {}),
         session_root=Path(os.path.expandvars(os.path.expanduser(config.get("session_root", "")))),
         mode=component.mode_of(config),
+        objective_error=objective_error,
+        config_path=str(config_path.resolve()),
     )
 
 
@@ -202,7 +237,65 @@ def validate_pack(pack: Pack, default_on: tuple[str, ...] | None = None,
             if not (skills_dir / name / "SKILL.md").is_file():
                 skill_errors.append(f"skill not found: {name} (no .claude/skills/{name}/SKILL.md)")
     errors.extend(skill_errors)
+    errors.extend(lifecycle_errors(pack))
 
+    return errors
+
+
+def lifecycle_errors(pack: Pack) -> list[str]:
+    """What is wrong with the skills the pack loads (arbor/lifecycle.py): the section's shape, the keys it replaced,
+    and skills that are not there, are for developing Arbor, or cannot be placed by their metadata. A loaded skill's
+    own errors (arbor/skillcheck.py) count as the pack's."""
+    from arbor import lifecycle, skillcheck
+
+    errors = []
+    if pack.on_key:
+        errors.append("pack.yaml has an `on:` key, which YAML reads as true; a trigger skill names its events in its "
+                      "own metadata (metadata.arbor.triggers)")
+    if pack.plugins is not None:
+        errors.append("plugins: is gone: load a family's skills by name in lifecycle.load (dossier:discover); "
+                      "Arbor finds their family under .claude/skills/")
+    if pack.triggers is not None:
+        errors.append("triggers: is gone: a trigger skill names its events in its metadata (metadata.arbor.triggers); "
+                      "load it in lifecycle.load")
+    if pack.lifecycle is not None and (pack.skills is not None or pack.opt_out_skills is not None):
+        errors.append("a pack gives its agent's skills with skills: (every chapter) or lifecycle: (loaded, and placed "
+                      "by their metadata), not both")
+    shape = lifecycle.errors(pack.lifecycle) + _component_errors(pack)
+    if shape or pack.lifecycle is None:
+        return [*errors, *shape]
+    root = pack.pack_dir.parent.parent  # packs live in <arbor_root>/packs/<name>
+    found = skillcheck.find(root)
+    lists = [pack.lifecycle[lifecycle.LOAD]]
+    hosted = (pack.component or {}).get("lifecycle")
+    if hosted:
+        lists.append(hosted[lifecycle.LOAD])
+    for names in lists:
+        _plan, problems = lifecycle.place(names, found)
+        errors += [f"{problem} (no {skillcheck.resolve(root, problem.split()[-1]).relative_to(root).as_posix()})"
+                   if problem.startswith("skill not found: ") else problem for problem in problems]
+        for name in names:
+            if name in found:
+                errors += skillcheck.skill_problems(found[name])[0]
+    return list(dict.fromkeys(errors))
+
+
+def _component_errors(pack: Pack) -> list[str]:
+    """What is wrong with the pack's ``component:`` section, which Arbor reads only under a host."""
+    from arbor import lifecycle
+
+    section = pack.component
+    if section is None:
+        return []
+    if not isinstance(section, dict):
+        return [f"component must be a mapping: {section!r}"]
+    errors = [f"component.{key} is not built yet; Arbor reads only "
+              f"{', '.join(lifecycle.COMPONENT_KEYS)}" for key in section if key not in lifecycle.COMPONENT_KEYS]
+    if "lifecycle" in section:
+        if pack.lifecycle is None:
+            errors.append("component.lifecycle replaces lifecycle.load, which the pack does not declare")
+        else:
+            errors += [f"component.{error}" for error in lifecycle.errors(section["lifecycle"])]
     return errors
 
 
@@ -227,5 +320,7 @@ def validate_campaign(campaign: Campaign, allow_results: bool = False) -> list[s
     # The mode and its component block (arbor/component.py). The driver refuses to
     # start on these, and on a component config's other refusals, with exit 2.
     errors.extend(component.config_errors(campaign.config))
+    if campaign.objective_error:
+        errors.append(campaign.objective_error)
 
     return errors
