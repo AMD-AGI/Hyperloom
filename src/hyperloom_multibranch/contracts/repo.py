@@ -69,9 +69,10 @@ class ResolvedPatch:
 class UnitedTable:
     """A kernel slot both sides filled with tables neither of which holds every row of the other, carried as ``table``:
     the rows of the candidate's ``theirs`` and the head's ``ours`` as one table, one row to a shape, and ``ours`` itself
-    when that union is its rows. Where both set a shape to other rows, ``table`` takes the candidate's row if the head's
-    is still the merge base's, and the head's row otherwise, measured on the head already; ``kept_head_shapes`` names by
-    their key columns the shapes whose head's row won though the candidate had moved it from the base."""
+    when that union is its rows. Where both set a shape to other rows, ``table`` takes the row with the lower positive
+    measured time (the tuner's ``us``). Where the times tie or either row has none, it takes the candidate's row if the
+    head's is still the merge base's, and the head's row otherwise, measured on the head already; ``kept_head_shapes``
+    names by their key columns the shapes whose head's row won though the candidate had moved it from the base."""
 
     theirs: KernelArtifact
     ours: KernelArtifact
@@ -164,8 +165,7 @@ class ExperimentRepo(Protocol):
         ``RecipeError`` when the two cannot combine or have several merge bases.
 
         ``protected`` are the commits merged into ``onto`` as foundation fixes: no head patch they contributed is
-        replaced. The set is the session's, so a head carried into a later session protects nothing until it is
-        derived from the merge log.
+        replaced. The caller re-derives the set on every call, so it holds across a resumed session too.
         """
 
     async def merge_many(
