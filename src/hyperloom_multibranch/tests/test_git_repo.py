@@ -2,6 +2,8 @@
 # SPDX-License-Identifier: MIT
 
 import asyncio
+import os
+import stat
 import subprocess
 
 import pytest
@@ -63,6 +65,28 @@ async def test_the_root_commit_holds_the_baseline_on_the_integration_branch(tmp_
 
     assert await repo.head(INTEGRATION_BRANCH) == root
     assert await repo.read_recipe(root) == BASELINE
+
+
+@pytest.mark.parametrize(
+    ("parent_mode", "group_writes"), [(0o2775, True), (0o755, False), (0o2755, False)], ids=["2775", "0755", "2755"]
+)
+async def test_the_repository_is_the_group_s_to_write_only_below_shared_storage(
+    tmp_path, blobs, parent_mode, group_writes
+):
+    """Below a setgid, group-writable directory closed to others the run's next leg, maybe another account of the group,
+    writes objects and refs; anywhere else the repository follows the umask like the rest of the session."""
+    parent = tmp_path / "session"
+    parent.mkdir()
+    parent.chmod(parent_mode)
+    old = os.umask(0o022)
+    try:
+        repo = await _rooted(parent / "experiments.git", blobs)
+        await repo.create_branch("b01", await repo.root())
+    finally:
+        os.umask(old)
+
+    for made in (parent / "experiments.git" / "objects", parent / "experiments.git" / "refs" / "heads"):
+        assert bool(stat.S_IMODE(made.stat().st_mode) & stat.S_IWGRP) is group_writes, made
 
 
 async def test_a_branch_moves_only_on_its_own_commits(repo):
