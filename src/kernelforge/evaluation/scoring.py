@@ -53,10 +53,12 @@ so a guard you add for the shape you tested can still reject it there."""
 # The gate for a backend whose candidate is judged by the driver alone. Saying only what decides, because an agent
 # told how acceptance is mechanized optimizes against the mechanism.
 _DRIVER_GATE_PROMPT = f"""\
-A KEEP needs the driver's own correctness suite to clear the SNR gate
-({DEFAULT_SNR_THRESHOLD_DB:g} dB unless the campaign set another) with no failed emitted
-`allclose:` verdict, and the mean measured speedup must beat the incumbent by more than this candidate's own
-measurement spread. Verify through the driver before you propose a change.
+A KEEP needs the driver's correctness suite to pass and the mean measured
+speedup to beat the incumbent by more than this candidate's own measurement
+spread. An emitted SNR must clear {DEFAULT_SNR_THRESHOLD_DB:g} dB unless the campaign set
+another threshold; every emitted `allclose:` verdict must pass, including
+when SNR is present. A driver with neither metric or a nonzero exit fails.
+Verify through the driver before you propose a change.
 Whoever consumes the result may apply checks forge does not run -- an evaluator
 that builds a smaller shape than the one you measure, for instance -- so
 clearing this gate is not the same as being accepted downstream."""
