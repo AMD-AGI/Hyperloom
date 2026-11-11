@@ -11,8 +11,11 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
+from hyperloom.common.round_measurement import round_measurement
 from hyperloom_common.io import safe_mtime
-from hyperloom_common.jsonio import read_json as _read_json
+from hyperloom_common.jsonio import read_json_strict
+from inference_suite.contracts import Report
+from inference_suite.contracts.layout import REPORT_FILE
 
 from .shared_state import resolve_grading_anchor_tput
 
@@ -203,15 +206,15 @@ class TargetBaselineObjective(_RatioObjective):
         path = Path(self.baseline_dir)
         if not path.exists():
             raise ObjectiveError(f"TargetBaselineObjective: baseline_dir not found: {path}")
-        reports = list(path.rglob("benchmark_report.json"))
+        reports = list(path.rglob(REPORT_FILE))
         measured = [p for p in reports if "warmup_round" not in p.parts]
         if reports and not measured:
             log.warning("TargetBaselineObjective: reference throughput comes from a warmup round under %s", path)
         candidates = sorted(measured or reports, key=safe_mtime)
         if not candidates:
-            raise ObjectiveError(f"TargetBaselineObjective: no benchmark_report.json under {path}")
-        ref = _read_json(candidates[-1], default={}, require_dict=True)
-        tput = (ref.get("throughput") or {}).get("output_throughput")
+            raise ObjectiveError(f"TargetBaselineObjective: no round report ({REPORT_FILE}) under {path}")
+        report = Report.from_document(read_json_strict(candidates[-1]))
+        tput = round_measurement(report, None).get("output_throughput")
         if not isinstance(tput, (int, float)) or tput <= 0:
             raise ObjectiveError(f"TargetBaselineObjective: invalid output_throughput in {candidates[-1]}")
         self._ref_tput = float(tput)
