@@ -32,7 +32,9 @@ from .backends import (
     _build_backends,
     _build_proposal_scorer,
     _orchestration_banner,
+    _resolve_orchestration_backend,
 )
+from .codex_sandbox import _check_codex_sandbox
 from .model_gate import (
     _finish_model_gate,
     _preflight_context_window,
@@ -1618,6 +1620,12 @@ async def _prepare_run(args: argparse.Namespace) -> _ProviderIntent:
     # Before either session branch: these are read by the fresh-launch seeding AND by the resume path, so this is the
     # one place that covers both.
     _preflight_agentx_backend(args)
+    # The session that refuses without a sandbox is the orchestration role's, decided on the pre-preflight intent.
+    _check_codex_sandbox(
+        _resolve_orchestration_backend(
+            codex_follows_claude=codex_follows_claude, claude_follows_codex=claude_follows_codex
+        )
+    )
     if not args.resume_from:
         _scope_error = latency_budget_scope_error(
             getattr(args, "framework", None) or os.environ.get("FRAMEWORK", ""), getattr(args, "max_latency_ms", None)

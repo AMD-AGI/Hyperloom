@@ -13,16 +13,16 @@ from hyperloom.common.codex_session import (
     probe_codex_sandbox_capability,
     resolve_codex_sandbox_mode,
 )
-from hyperloom_common.llm.llm_config import AGENT_BACKEND_CODEX, preferred_agent_backend
+from hyperloom_common.llm.llm_config import AGENT_BACKEND_CODEX
 
 
-def _check_codex_sandbox() -> None:
-    """Stop before launch when Codex needs a bubblewrap sandbox this host cannot create.
+def _check_codex_sandbox(backend: str) -> None:
+    """Stop before launch when the orchestration ``backend`` is Codex and this host cannot create its sandbox.
 
     The same probe runs at every orchestration turn and refuses to fall back to bypass,
     so without this gate a run only fails turn by turn after the optimizer has started.
     """
-    if preferred_agent_backend() != AGENT_BACKEND_CODEX:
+    if backend != AGENT_BACKEND_CODEX:
         return
     try:
         mode = resolve_codex_sandbox_mode()
