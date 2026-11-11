@@ -1,6 +1,6 @@
 # Triton Pitfalls (AMD Backend)
 
-## AMD vs NVIDIA Differences
+## What differs on AMD
 
 ### Warp size
 - AMD: wavefront = 64 lanes (not 32)

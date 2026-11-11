@@ -1,7 +1,7 @@
 """A round's map: the profile and the dossier's first half in parallel, then its second half, then the checks.
 
 - **The profile** (`profile_round.sbatch`, a node): the round's base served
-  once, its bar replays and a profile capture, into map/profile/attempt-K/
+  once, its bar replays and a profiler capture, into map/profile/attempt-K/
   ({bar.json, profile/, DONE}).
 - **Dossier A** (`dossier_round.sh A`, a user unit on this host): a document
   campaign that reads the base tree, the last round's ROUND.md and every lane's
@@ -43,7 +43,7 @@ from arbor.parallel.store import atomic_write_json, read_json
 
 MAX_ATTEMPTS = 2
 PARTS = {"A": ("03", "10"), "B": ("03", "06", "07", "10", "11")}
-CHECK_DOSSIER = Path(__file__).resolve().parents[2] / ".claude" / "skills" / "dossier" / "check-dossier.py"
+CHECK_DOSSIER = Path(__file__).resolve().parents[2] / ".claude" / "skills" / "dossier-v1" / "check-dossier.py"
 _UK = re.compile(r"(?<![a-z0-9])u(\d+)(?![0-9])")
 
 
@@ -221,7 +221,7 @@ def dossier_directives(ctx, n: int, part: str, k: int, errors: list[str]) -> lis
                 f"reports/11.u{k}-plan-<region>.md with its ## Items block.",
                 f"THE REOPEN RULE: a direction that died earlier in this run comes back only with "
                 f"`reopens` {{round, why}}, on 10.u{k}'s evidence. Died so far: {_killed_text(ctx, n)}.",
-                f"CHECK BEFORE DONE: python3 .claude/skills/dossier/check-dossier.py reports --round u{k} "
+                f"CHECK BEFORE DONE: python3 .claude/skills/dossier-v1/check-dossier.py reports --round u{k} "
                 "--no-index, and python3 -m arbor.directions check reports/11.u"
                 f"{k}-directions.md --dossier reports."]
         if errors:

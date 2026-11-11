@@ -1,10 +1,10 @@
 #!/usr/bin/env node
 // Arbor campaign dashboard: one campaign live (local mode), or every campaign
-// on the share (global mode). Ported from an earlier campaign dashboard;
-// README.md here says what changed.
+// on the share (global mode). Ported from an earlier per-cluster campaign
+// dashboard; README.md here says what changed.
 //
 //   node server.mjs local    --host <host with the session> --session <dir> [--slurm-job <name>] ...
-//   node server.mjs global   [--share-host arbor-share] [--share-root /path/to/arbor-share]
+//   node server.mjs global   [--share-host arbor-share] [--share-root <share root>]
 //   node server.mjs parallel --host <host with the run's store> --store <store>/<run_id>
 //
 // local:  each refresh runs the realtime collector (arbor/collect/realtime.py,
@@ -24,11 +24,29 @@
 
 import { spawn } from "node:child_process";
 import { readFile } from "node:fs/promises";
-import { existsSync } from "node:fs";
+import { existsSync, readFileSync } from "node:fs";
+import os from "node:os";
 import { createServer } from "node:http";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { shipped } from "./ship.mjs";
+
+// A site's own values: the environment, else ARBOR_SETTINGS (default ~/.arbor/settings.env), as Arbor reads them.
+function siteSetting(key) {
+  if (process.env[key]) return process.env[key];
+  const file = process.env.ARBOR_SETTINGS || path.join(os.homedir(), ".arbor", "settings.env");
+  let text = "";
+  try { text = readFileSync(file, "utf8"); } catch { return ""; }
+  let found = "";
+  for (const raw of text.split(/\r?\n/)) {
+    const m = raw.trim().replace(/^export\s+/, "").match(/^([A-Z0-9_]+)=(.*)$/);
+    if (!m || m[1] !== key) continue;
+    let v = m[2].trim();
+    if (v.length >= 2 && v[0] === v[v.length - 1] && (v[0] === '"' || v[0] === "'")) v = v.slice(1, -1);
+    found = v;
+  }
+  return found;
+}
 
 const MODULE_DIR = path.dirname(fileURLToPath(import.meta.url));
 // The Arbor checkout this file is in: the collector it sends comes from here.
@@ -78,8 +96,8 @@ function parseArgs(argv) {
     // parallel
     store: "",
     // global
-    shareHost: process.env.ARBOR_SHARE_HOST || "arbor-share",
-    shareRoot: process.env.ARBOR_SHARE_ROOT || "/path/to/arbor-share",
+    shareHost: siteSetting("ARBOR_SHARE_HOST") || "arbor-share",
+    shareRoot: siteSetting("ARBOR_SHARE_ROOT"),
     maxOutputBytes: 32 * 1024 * 1024,
   };
   const flags = {
@@ -115,6 +133,9 @@ function parseArgs(argv) {
   } else if (mode === "parallel") {
     if (!cfg.host || !cfg.store) throw new Error(`parallel mode needs --host and --store\n${USAGE}`);
   } else {
+    if (!cfg.shareRoot) {
+      throw new Error("global mode needs the share root: --share-root, ARBOR_SHARE_ROOT, or ~/.arbor/settings.env");
+    }
     safe(cfg.shareHost, "ARBOR_SHARE_HOST");
     safe(cfg.shareRoot, "ARBOR_SHARE_ROOT");
   }
