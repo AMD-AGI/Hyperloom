@@ -507,7 +507,8 @@ from pathlib import Path
 site = Path(__file__).resolve().parents[1]
 with open(site / "pip.calls", "a") as calls:
     calls.write(" ".join(sys.argv[1:]) + "\\n")
-if "{LM_EVAL_REQUIREMENT}" in sys.argv:
+requirement = sys.argv[sys.argv.index("--requirement") + 1] if "--requirement" in sys.argv else None
+if requirement and Path(requirement).read_text().split()[0] == "{LM_EVAL_REQUIREMENT}":
     for old in site.glob("{LM_EVAL_DISTRIBUTION}-*.dist-info"):
         shutil.rmtree(old)
     dist = site / "{LM_EVAL_DISTRIBUTION}-{LM_EVAL_VERSION}.dist-info"
@@ -589,7 +590,7 @@ def test_install_puts_the_pinned_lm_eval_beside_an_intact_cache_without_fetching
     assert done.returncode == 0, done.stderr
     assert "FETCHED" not in done.stdout and "WARN" not in done.stdout
     assert f"manifest sha256 {digest}" in done.stdout
-    assert LM_EVAL_REQUIREMENT in (site / "pip.calls").read_text()
+    assert f"--require-hashes --constraint {staging.runner_lock()} --requirement" in (site / "pip.calls").read_text()
     assert (site / f"{LM_EVAL_DISTRIBUTION}-{LM_EVAL_VERSION}.dist-info").is_dir()
 
 
