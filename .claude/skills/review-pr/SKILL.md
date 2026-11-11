@@ -19,7 +19,7 @@ failure it names?** Blocking means one of four kinds, equal in weight:
 
 | Kind | What counts |
 |---|---|
-| Wrong behaviour | correctness, crash, data or precision error, compatibility break, security (whose actor R6 bounds), performance regression |
+| Wrong behaviour | correctness, crash, data or precision error, compatibility break, security a correct run hits (R6), performance regression |
 | Ineffective | the premise does not reproduce at the merge base, or the failure the PR names still happens at the head, or a check is dropped as covered by something that decides less — rules E1-E5 |
 | Desync | an operator-observable change the description never states; a title or description that does not match the diff at the current head |
 | Contract violation | the diff breaks a rule `AGENTS.md` states outright; the finding names the bullet and, for an ownership bullet, the module in this repo that already owns the concern |

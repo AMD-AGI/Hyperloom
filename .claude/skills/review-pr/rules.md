@@ -531,15 +531,15 @@ order itself or merely replays it; `$WORK/base.txt` for the run that must fail.
 **Evidence:** `$WORK/diff.txt` for the apply/extract call and any validation added alongside it; `$WORK/testfiles.txt` for the absolute-path and `..` regression tests.
 **Report as:** `R5: <file>:<line> applies backend-produced <patch|archive> without header validation (<flag>), allowing escape to <path>`
 
-### R6 -- The accounts of one run's group are trusted; a security finding needs a correct run or an outsider
+### R6 -- A security finding is blocking only when a correct run hits it
 
-**Severity:** blocking by owner decision 2026-11-11, for the three shapes in *The rule*; the shape it excludes is never a finding.
+**Severity:** blocking only in the shape *The rule* keeps, by owner decision 2026-11-11; every other security shape is never a finding.
 **Fires when:** a security finding is drafted against a diff that shares storage, sets modes or a umask, follows or copies links, or lets git read files in a directory the group writes.
-**The rule:** the accounts of one run's group -- the legs of a session, its dev sandboxes, the agents it launches under them -- are trusted. A trigger that needs one of them, or an agent the run launched under one, to act deliberately against the run -- plant a link, forge or rewrite a record or git file the run reads, race a write inside a window, rename a file it trusts -- states no failure a correct run hits, and file modes cannot stop same-group sabotage. Still blocking: (1) what a correct, non-malicious run hits in its ordinary course -- a race between two honest legs, a write an honest second leg is refused; a window reached only when the run is killed between two adjacent steps is not one; (2) what an account outside the group, or input from outside the run, reaches -- downloaded content, a third-party repository, a model's output parsed as paths or applied (R5); (3) a maintainers' rule broken in the steady state -- git `config`, `hooks/` and `info/` end owner-only.
-**Seen in:** PR #2604 -- round 4's three findings each needed a group member to act: plant a link in the dossier the Arbor copy followed, forge the linked-paths record or `alternates` a bubblewrap launch reads, or race or rename the source base's git `config`. PR #2598 at fc8eeede4 -- a `commondir` another account of the group wrote in the group-writable, sticky repository top redirected the app's git to that account's clone: a real cross-account redirect, but only a hostile member writes it.
-**Not a finding when:** the trigger's actor is a group account or a run-launched agent acting on purpose. Report it under the kind it falls in when an honest second leg reaches the same effect, when the actor is outside the group, or when the end state breaks the maintainers' rule.
-**Evidence:** the finding's reproduction -- which account acted, and whether that act is one a correct run performs; `$WORK/diff.txt` for the end mode of each git file the rule names.
-**Report as:** `R6 <file>:<line> -- <correct-run sequence | outside actor | steady-state mode> reaches <effect>`
+**The rule:** a security finding blocks only when a correct, non-malicious run hits it in its ordinary course, e.g. a race between two honest legs or a write an honest second leg is refused. A trigger that needs someone to act against the run is the environment's, not the diff's: an account of the run's group or an agent it launched planting a link, forging or rewriting a record or git file, racing a write or renaming a file the run trusts; an account outside the group; hostile outside input. So is a window reached only when the run is killed between two adjacent steps. File modes cannot stop an account that may write, and hardening against it does not converge.
+**Seen in:** PR #2604 -- four rounds, the last with three findings that each needed a group member to act: plant a link in the dossier the Arbor copy followed, forge the linked-paths record or `alternates` a bubblewrap launch reads, or race or rename the source base's git `config`. PR #2598 at fc8eeede4 -- a `commondir` another account of the group wrote in the repository top redirected the app's git to its own clone.
+**Not a finding when:** the reproduction needs any actor other than the run itself, or a kill between two adjacent steps.
+**Evidence:** the finding's reproduction -- which actor acted, and whether a correct run performs that act.
+**Report as:** `R6 <file>:<line> -- <correct-run sequence> reaches <effect>`
 
 ## P -- Concurrency, budgets and cost
 
