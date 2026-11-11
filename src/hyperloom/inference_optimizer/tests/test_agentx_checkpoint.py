@@ -16,15 +16,16 @@ from hyperloom.common.perf_metric import (
     graded_axes_of,
     perf_snapshot_from_mapping,
 )
+from hyperloom.common.agentx_early_stop import EARLY_STOP_ENV
 from hyperloom.orchestrator.actions.executors import _grid_runner as gr
 from hyperloom.orchestrator.actions.executors._agentx_checkpoint import (
     CHECKPOINT_ARTIFACT_NAME,
-    EARLY_STOP_ENV,
     AgentxCheckpoint,
     CheckpointJudge,
     round_checkpoint,
     workspace_checkpoint_p50,
 )
+from hyperloom.orchestrator.actions.executors._grid_base import SuiteRoundExit
 from hyperloom.orchestrator.actions.executors._grid_runner import GridRecipe, GridStop, GridVariant, run_grid
 from hyperloom.orchestrator.actions.executors._subprocess_kill import (
     AGENTX_EARLY_STOP_ERROR_CLASS,
@@ -89,10 +90,18 @@ def test_checkpoint_median_waits_for_the_window_to_close(tmp_path):
     assert workspace_checkpoint_p50(tmp_path) is None
 
 
-def test_agentx_measurement_carries_the_checkpoint_median(tmp_path):
-    _write_export(tmp_path, [*_IN_WINDOW, _AFTER_WINDOW])
-    report = {"scenario": "agentx", "framework": "vllm", "model": "m", "agentx_metrics": {}}
-    measurement = extract_benchmark_measurement(report, workspace=tmp_path)
+def test_an_inference_suite_agentx_round_carries_the_checkpoint_median(tmp_path):
+    from hyperloom.common.tests.test_round_measurement import _agentx
+    from inference_suite.contracts import RunLayout
+
+    run_dir = tmp_path / "run-1"
+    layout = RunLayout(run_dir)
+    layout.report.parent.mkdir(parents=True, exist_ok=True)
+    layout.report.write_text(json.dumps(_agentx().to_document()), encoding="utf-8")
+    _write_export(layout.client_dir, [*_IN_WINDOW, _AFTER_WINDOW])
+
+    measurement = extract_benchmark_measurement(None, workspace=run_dir)
+
     assert measurement[GRADED_INTVTY_P50_CHECKPOINT] == 20.0
 
 
@@ -192,16 +201,17 @@ async def test_grid_records_a_stopped_round_and_moves_on(tmp_path, monkeypatch):
     checkpoint = AgentxCheckpoint(25.0, enforce=True)
     seen: list[AgentxCheckpoint | None] = []
 
-    def _stopped_at_checkpoint(bench_round, **_kwargs):
+    def _stopped_at_checkpoint(_route, bench_round, **_kwargs):
         seen.append(bench_round.checkpoint)
         _write_export(bench_round.output_dir, [*_IN_WINDOW, _AFTER_WINDOW])
         judge = CheckpointJudge(checkpoint, bench_round.output_dir)
         judge.note_phase("measured", 0.0)
         with pytest.raises(AgentxCheckpointMissed):
             judge.tick(1_800.0)
-        return AGENTX_EARLY_STOP_RETURNCODE, "", ""
+        return SuiteRoundExit(AGENTX_EARLY_STOP_RETURNCODE)
 
-    monkeypatch.setattr(gr, "_run_magpie", _stopped_at_checkpoint)
+    monkeypatch.setattr(gr, "suite_route", lambda session_dir: object())
+    monkeypatch.setattr(gr, "run_grid_suite_round", _stopped_at_checkpoint)
     results = await run_grid(
         grid=[GridVariant("vA"), GridVariant("vB")],
         output_root=tmp_path / "out",

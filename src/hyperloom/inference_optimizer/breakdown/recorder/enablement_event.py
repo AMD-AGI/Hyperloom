@@ -171,7 +171,7 @@ class LaneTrigger:
     accuracy_floor: Any = None
     observed_task: Any = None
     observed_metric: Any = None
-    eval_contract_fingerprint: Any = None
+    eval_definition_digest: Any = None
     probe_config_path: Any = None
 
     def block(self) -> dict[str, Any]:
@@ -184,7 +184,7 @@ class LaneTrigger:
             "accuracy_floor": _float_or_none(self.accuracy_floor),
             "observed_task": _text_or_none(self.observed_task),
             "observed_metric": _text_or_none(self.observed_metric),
-            "eval_contract_fingerprint": _text_or_none(self.eval_contract_fingerprint),
+            "eval_definition_digest": _text_or_none(self.eval_definition_digest),
             "probe_config_path": _text_or_none(self.probe_config_path),
         }
 

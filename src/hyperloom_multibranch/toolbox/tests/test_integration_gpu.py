@@ -10,17 +10,16 @@ changed request cap rarely gain more than the bar, this variant cannot promise a
 rule gate decided is what the repository and the blackboard say, and that the round's mechanics (fresh sandboxes, verified
 bundles, the retest beside a full branch, the withdrawals) hold with real measurements.
 
-Needs SGLang, a model directory and an InferenceX git checkout: ``HL_INTEGRATION_MODEL``, ``HL_INTEGRATION_INFERENCEX``
+Needs SGLang, a model directory and an InferenceX git repository holding the client commit inference_suite pins:
+``HL_INTEGRATION_MODEL``, ``HL_INTEGRATION_INFERENCEX``
 and ``HL_INTEGRATION_OUT`` (a directory the test makes its own subdirectory in), and optionally ``HL_INTEGRATION_CARDS``
 (default ``0,1``). Anywhere else the module is skipped.
 """
 
 from __future__ import annotations
 
-import importlib.util
 import json
 import os
-import subprocess
 import uuid
 from pathlib import Path
 
@@ -30,6 +29,7 @@ from hyperloom.measure.compile import COMPONENT_LAYOUTS, locate_installed_packag
 from hyperloom.measure.points import default_canonical
 from hyperloom.measure.tests.hosted_fixtures import spec_context
 from hyperloom.orchestrator.actions.executors._workload_envs import default_baseline_config
+from hyperloom_multibranch.toolbox.tests.gpu_session import freeze_gpu_session_base, gpu_inputs_missing
 from hyperloom_multibranch.toolbox.tests.integration_inputs import (
     IMAGE,
     PATCHED_FILE,
@@ -47,11 +47,12 @@ OUT = os.environ.get("HL_INTEGRATION_OUT", "")
 CARDS = tuple(int(card) for card in os.environ.get("HL_INTEGRATION_CARDS", "0,1").split(","))
 USES_REAL_GPUS = True  # keep the host's amd-smi and rocm-smi: see hyperloom.measure.tests.gpu_free_host
 pytestmark = pytest.mark.skipif(
-    importlib.util.find_spec("sglang") is None or not Path(MODEL).is_dir() or not Path(INFERENCEX, ".git").exists(),
-    reason="needs SGLang, HL_INTEGRATION_MODEL and HL_INTEGRATION_INFERENCEX (a git checkout)",
+    gpu_inputs_missing(MODEL, INFERENCEX, OUT),
+    reason="needs SGLang, HL_INTEGRATION_MODEL, HL_INTEGRATION_OUT and HL_INTEGRATION_INFERENCEX (a git checkout holding inference_suite.pins.INFERENCEX_CLIENT_COMMIT)",
 )
 EVAL_LIMIT = "60"
 SERVER_READY_SEC = "900"
+PRIMARY = 4
 
 
 def _probe(label: str, **fields: object) -> None:
@@ -61,20 +62,16 @@ def _probe(label: str, **fields: object) -> None:
 async def test_a_round_of_two_branches_with_real_measurements(monkeypatch: pytest.MonkeyPatch) -> None:
     root = Path(OUT) / f"integration-{uuid.uuid4().hex[:8]}"
     root.mkdir(parents=True, exist_ok=False)
-    set_workload_environment(monkeypatch, root / "user-data", MAGPIE_EVAL_LIMIT=EVAL_LIMIT)
-    commit = subprocess.run(
-        ["git", "rev-parse", "HEAD"], cwd=INFERENCEX, capture_output=True, text=True, check=True
-    ).stdout.strip()
+    set_workload_environment(monkeypatch, root / "user-data", HYPERLOOM_EVAL_LIMIT=EVAL_LIMIT)
     spec = spec_context(
         root,
         image_ref="local",
         image_digest=IMAGE,
         gpu_type="MI355X",
-        inferencex_commit=commit,
-        benchmark_backend="bypass",
     )
+    freeze_gpu_session_base(root / "session", MODEL, spec.gpu_type, tp=1, conc=PRIMARY)
     canonical = default_canonical(
-        root / "canonical", primary_concurrency=4, config_path=default_baseline_config(), model_path=MODEL
+        root / "canonical", primary_concurrency=PRIMARY, config_path=default_baseline_config(), model_path=MODEL
     )
     variant = Variant(
         CARDS,

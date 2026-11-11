@@ -7,7 +7,6 @@ import pytest
 
 from hyperloom.common.gain_math import ACCURACY_METRICS
 from hyperloom.common.perf_metric import (
-    AGENTX_KEEP_P50_THRESHOLD_PCT,
     GRADED_DURATION,
     GRADED_ERROR_RATE,
     GRADED_INTVTY,
@@ -23,6 +22,7 @@ from hyperloom_multibranch.contracts.blackboard.records import BaselineRecord
 from hyperloom_multibranch.blackboard import LocalBlackboard, codec
 from hyperloom_multibranch.blackboard.tests.factories import delta, result
 from hyperloom_multibranch.rulegate.accuracy import BaselineAccuracyError
+from hyperloom_multibranch.rulegate.agentx import P50_BAR_PCT
 from hyperloom_multibranch.rulegate.baseline import (
     write_agentx_baseline,
     read_inferencex_baseline,
@@ -137,7 +137,7 @@ async def test_an_agentx_baseline_is_its_one_root_test(session):
     record = await write_agentx_baseline(session.gate, ROOT, root_test)
 
     assert (record.values, record.request_ids, record.dispersion_pct) == (AGENTX, ("b0",), {})
-    assert record.threshold_pct == {GRADED_INTVTY_P50: AGENTX_KEEP_P50_THRESHOLD_PCT}
+    assert record.threshold_pct == {GRADED_INTVTY_P50: P50_BAR_PCT}
     assert (record.source, record.wall_seconds) == ("", None)
     assert await session.gate.baseline() == record
 

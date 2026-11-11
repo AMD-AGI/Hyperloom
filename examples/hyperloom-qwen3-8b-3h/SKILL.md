@@ -160,7 +160,7 @@ PY
 Before the first `optimize` launch, run the full runtime installer in the same
 environment that will launch the optimizer. This is required even for this
 `--no-kernel` demo: preflight loads `kernel-agent.env.sh` before it can reach the
-later Ray/Magpie/InferenceX auto-install checks.
+later Ray and benchmark-client auto-install checks.
 
 For Docker mode, run this inside the container. For bare-metal mode, run it on
 the host:

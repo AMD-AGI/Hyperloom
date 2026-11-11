@@ -5,7 +5,7 @@
 
 from __future__ import annotations
 
-from hyperloom.common.benchmark_config import configured_benchmark, is_magpie_agentx
+from hyperloom.common.benchmark_config import configured_benchmark, is_agentx
 from hyperloom_common.coerce import optional_positive_float
 
 from dataclasses import dataclass
@@ -32,6 +32,9 @@ GRADED_INTVTY = "e2e_norm_intvty_p90"
 GRADED_INTVTY_P50 = "e2e_norm_intvty_p50"
 GRADED_TOTAL = "total_throughput"
 GRADED_OUTPUT = "output_throughput"
+# Total token throughput as a round measurement records it, per server rather than per GPU; ``graded_axes_of``
+# normalises it onto GRADED_TOTAL.
+TOTAL_TOKEN_THROUGHPUT = "total_token_throughput"
 
 # Every percentile of the interactivity family. A consumer asking "was this graded on interactivity" must read this
 # rather than one axis name, or it silently answers no the next time the graded percentile moves.
@@ -62,7 +65,7 @@ _PERCENT = 100.0
 # slack admits more failures in a longer or more concurrent round and none in a round of fewer than 200 requests (an
 # MLPerf smoke run issues 150 samples). Percentiles are read over the same round's successful requests, so dropping a
 # fraction f of them moves any percentile by at most f in rank, and the slack cannot buy a median gain anywhere near
-# AGENTX_KEEP_P50_THRESHOLD_PCT.
+# the AgentX objective's bar (``agentx_objective``).
 ERROR_RATE_SLACK_PCT = 0.5
 
 # The axes ``graded_axes_of`` can carry, for a consumer that must publish all of them including the ones a
@@ -95,9 +98,6 @@ GRADED_AXIS_KEYS = (
 # to the top of that range instead of rejecting movement upstream would call noise.
 _DEFAULT_INTVTY_NOISE_PCT = 5.0
 
-# The median bar is a property of the objective, so the session's decaying threshold does not apply to it.
-AGENTX_KEEP_P50_THRESHOLD_PCT = 3.0
-
 # Median interactivity over the first half hour of profiling. On 808 graded rounds no KEEP trailed its reference here
 # by more than 0.47%, so a candidate behind by more than the drop is stopped instead of measured to the end.
 GRADED_INTVTY_P50_CHECKPOINT = "e2e_norm_intvty_p50_1800s"
@@ -110,12 +110,20 @@ VERDICT_REVERT = "REVERT"
 
 def agentx_enabled(env: Mapping[str, str] | None = None) -> bool:
     """Return whether CLI workload translation or a bound YAML selects AgentX."""
-    return is_magpie_agentx(configured_benchmark(env)) or env_bool(_AGENTX_ENV, env=env)
+    return is_agentx(configured_benchmark(env)) or env_bool(_AGENTX_ENV, env=env)
 
 
 def is_agentx_mode(benchmark_mode: Any) -> bool:
     """Whether a ``benchmark_mode`` names the agentic workload."""
     return str(benchmark_mode or "").strip().lower() == _AGENTX_MODE
+
+
+def agentx_replay_session(state: Any) -> bool:
+    """Whether *state* records an AgentX session whose rounds replay traces, i.e. not one on the MLPerf backend."""
+    from hyperloom.common.agentx_workload import BACKEND_ENV, is_mlperf_backend
+
+    backend = str(getattr(state, "agentx_backend", "") or "")
+    return is_agentx_mode(getattr(state, "benchmark_mode", "")) and not is_mlperf_backend({BACKEND_ENV: backend})
 
 
 def agentx_active(*, benchmark_mode: Any = "") -> bool:
@@ -170,13 +178,13 @@ def _non_negative(value: Any) -> float | None:
     return coerced if coerced >= 0 else None
 
 
-_AGENTX_EVIDENCE = ("benchmark_backend", "benchmark_valid", "diagnostic_only", "workload_identity")
+_AGENTX_EVIDENCE = ("valid_measurement", "diagnostic_only", "workload_identity")
 
 
 def perf_snapshot_from_mapping(source: Mapping[str, Any] | None) -> dict[str, float] | None:
     """The graded axes from a measurement or a ``current_best``; None unless objective and guards are all positive."""
     # Requiring all of them is what stops a lane half-applying the objective. A total that is absent, null or
-    # non-positive coalesces to input plus output, the same fallback ``agentx.mapping`` applies.
+    # non-positive coalesces to input plus output.
     if not isinstance(source, Mapping):
         return None
     intvty = optional_positive_float(source.get(GRADED_INTVTY))
@@ -186,7 +194,7 @@ def perf_snapshot_from_mapping(source: Mapping[str, Any] | None) -> dict[str, fl
     inp = optional_positive_float(source.get("input_throughput"))
     out = optional_positive_float(source.get(GRADED_OUTPUT)) or optional_positive_float(source.get("tput"))
     total = optional_positive_float(source.get(GRADED_TOTAL)) or optional_positive_float(
-        source.get("total_token_throughput")
+        source.get(TOTAL_TOKEN_THROUGHPUT)
     )
     if total is None and inp is not None and out is not None:
         total = inp + out
@@ -238,6 +246,11 @@ def intvty_of(snapshot: Mapping[str, float] | None) -> float:
     return axis_of(snapshot, GRADED_INTVTY)
 
 
+def snapshot_axis(metric: str) -> str:
+    """The key a perf snapshot carries round metric *metric* under: the snapshot normalises total token throughput."""
+    return GRADED_TOTAL if metric == TOTAL_TOKEN_THROUGHPUT else metric
+
+
 def total_tput_of(snapshot: Mapping[str, float] | None) -> float:
     """Total token throughput from a perf snapshot; 0.0 when unavailable."""
     return axis_of(snapshot, GRADED_TOTAL)
@@ -264,7 +277,7 @@ def graded_axes_of(source: Mapping[str, Any] | None) -> dict[str, float]:
     if intvty is not None:
         axes[GRADED_INTVTY] = intvty
     total = optional_positive_float(source.get(GRADED_TOTAL)) or optional_positive_float(
-        source.get("total_token_throughput")
+        source.get(TOTAL_TOKEN_THROUGHPUT)
     )
     if total is not None:
         axes[GRADED_TOTAL] = total
@@ -456,10 +469,13 @@ def power_veto_reason(
 
 
 def native_agentx_veto(source: Mapping[str, Any], state: Any) -> str:
-    """Refuse diagnostic, invalid or differently configured AgentX evidence."""
-    if getattr(state, "agentx_backend", "") != "magpie" and source.get("benchmark_backend") != "magpie_agentx":
+    """Refuse diagnostic, invalid or differently configured evidence in an AgentX session.
+
+    Validity is the report mapper's verdict (``round_measurement``). An MLPerf session's rounds are not AgentX trace replays and are not judged here.
+    """
+    if not agentx_replay_session(state):
         return ""
-    if source.get("benchmark_valid") is not True or source.get("diagnostic_only") is not False:
+    if source.get("valid_measurement") is not True or source.get("diagnostic_only") is not False:
         return "agentx_evidence_invalid"
     anchor = getattr(state, "current_best", None) or getattr(state, _BASELINE_PERF_ATTR, None) or {}
     identity = source.get("workload_identity")
@@ -488,8 +504,7 @@ CONSTRAINT_FIELDS = (
     "e2el_mean_ms",
     "gpu_power_avg_w",
     "gpu_power_by_gpu_w",
-    "benchmark_backend",
-    "benchmark_valid",
+    "valid_measurement",
     "diagnostic_only",
     "workload_identity",
 )
@@ -556,7 +571,6 @@ class GradingAnchor:
 __all__ = [
     "AGENTX_CHECKPOINT_MAX_DROP_PCT",
     "AGENTX_CHECKPOINT_SEC",
-    "AGENTX_KEEP_P50_THRESHOLD_PCT",
     "CONSTRAINT_FIELDS",
     "DURATION_DRIFT_PCT",
     "ERROR_RATE_SLACK_PCT",
@@ -572,6 +586,7 @@ __all__ = [
     "GRADED_OUTPUT_PER_GPU",
     "GRADED_REQUESTS_TOTAL",
     "GRADED_TOTAL",
+    "TOTAL_TOKEN_THROUGHPUT",
     "GRADED_UNSERVED_REQUESTS",
     "INTVTY_OBJECTIVES",
     "INTVTY_V1",
@@ -596,6 +611,7 @@ __all__ = [
     "parse_intvty_noise_pct",
     "perf_snapshot_from_mapping",
     "resolve_grading_anchor_perf",
+    "snapshot_axis",
     "stamp_output_per_gpu",
     "with_output_per_gpu",
     "total_tput_of",

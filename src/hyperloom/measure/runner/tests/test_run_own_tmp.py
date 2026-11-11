@@ -23,9 +23,7 @@ MERGED = "aiter_configs/merged.csv"
 def _call(tmp_path: Path, envs: dict[str, str]) -> TestCall:
     point = tmp_path / "point.yaml"
     point.write_text(yaml.safe_dump({"benchmark": {"envs": envs}}), encoding="utf-8")
-    return TestCall(
-        points=(point,), output_dir=tmp_path, timeout_sec=1, cwd=str(tmp_path), magpie_python="", task_id="t"
-    )
+    return TestCall(points=(point,), output_dir=tmp_path, timeout_sec=1, cwd=str(tmp_path), task_id="t")
 
 
 def test_each_run_of_a_test_writes_below_a_temporary_directory_of_its_own_removed_afterwards(rig, monkeypatch) -> None:

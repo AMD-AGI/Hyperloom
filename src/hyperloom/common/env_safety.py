@@ -13,7 +13,7 @@ import stat
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Iterable, MutableMapping, Sequence
-from hyperloom_common.credential_names import is_credential_env_name
+from hyperloom_common.credential_names import env_name_spelled_by, is_credential_env_name
 from hyperloom_common.env import env_str
 from hyperloom_common.git_safety import trusted_admin_dir
 from hyperloom_common.fs_utils import rewrite_lines_nofollow
@@ -22,6 +22,9 @@ from hyperloom.common.id_map import unmapped_ids
 from hyperloom.common.outside_facts import (
     ENV_CONC,
     ENV_EP,
+    ENV_EVAL_LIMIT,
+    ENV_EVAL_TASKS,
+    ENV_EVAL_TOKENIZED_REQUESTS,
     ENV_ISL,
     ENV_MAX_MODEL_LEN,
     ENV_NUM_PROMPTS,
@@ -48,9 +51,6 @@ _PYTHON_PACKAGE_ROOT_BASENAMES: frozenset[str] = frozenset({"site-packages", "di
 
 BLOCKED_UNTRUSTED_ENV_NAMES: frozenset[str] = frozenset(
     {
-        # Names a second variable for the agentic client to export, so it reaches a shell indirection the way the
-        # loader vars below do: whoever sets it chooses which variable gets written, not merely a value.
-        "AGENTX_KEEP_ALIVE_ENV",
         "BASH_ENV",
         "CDPATH",
         "ENV",
@@ -201,7 +201,6 @@ DOTENV_EXACT_ALLOWLIST: frozenset[str] = frozenset(
         "HF_HUB_CACHE",
         "HF_HUB_OFFLINE",
         "HF_TOKEN",
-        "HYPERLOOM_BENCHMARK_BACKEND",
         "HYPERLOOM_DOCKER_TARGET_HOST",
         "HYPERLOOM_FRAMEWORK_ENV",
         "HYPERLOOM_LLM_MODE",
@@ -254,7 +253,6 @@ DOTENV_NOT_PRIVATE_LENT_VALUES: Mapping[str, frozenset[str]] = MappingProxyType(
         "FRAMEWORK": frozenset({"atom", "custom", "sglang", "vllm", "xdit"}),
         "HF_DATASETS_OFFLINE": frozenset({"0", "1"}),
         "HF_HUB_OFFLINE": frozenset({"0", "1"}),
-        "HYPERLOOM_BENCHMARK_BACKEND": frozenset({"bypass", "magpie"}),
         "HYPERLOOM_DOTENV_CREDENTIALS": frozenset({"kernel-agent-env"}),
         "HYPERLOOM_FRAMEWORK_ENV": frozenset({"isolated", "shared"}),
         "HYPERLOOM_LLM_MODE": frozenset({"anthropic", "deepseek", "openai"}),
@@ -287,8 +285,6 @@ KERNEL_AGENT_ENV_EXACT_ALLOWLIST: frozenset[str] = frozenset(
         # KernelForge's writable-state root.
         "KERNELFORGE_PROJECT_ROOT",
         "KERNEL_OPT_BACKEND_ORDER",
-        "MAGPIE_PATH",
-        "MAGPIE_PYTHON",
         "OPENAI_API_KEY",
         "OPENAI_BASE_URL",
         # install.sh never writes the OpenAI side itself, but the URL and key are already accepted from an
@@ -325,6 +321,9 @@ BLOCKED_EXTERNAL_ENV_NAMES: frozenset[str] = (
             ENV_NUM_WARMUPS,
             ENV_RANDOM_RANGE_RATIO,
             ENV_RUN_EVAL,
+            ENV_EVAL_TASKS,
+            ENV_EVAL_LIMIT,
+            ENV_EVAL_TOKENIZED_REQUESTS,
             "PROFILE",
             "RESULT_DIR",
             "RESULT_FILENAME",
@@ -397,8 +396,30 @@ def is_secret_shaped_env_name(key: object) -> bool:
     return any(fragment in upper for fragment in _SECRET_NAME_FRAGMENTS)
 
 
-def _is_credential_env_name(key: object) -> bool:
-    return str(key or "").strip().upper() in BENCHMARK_SECRET_ENV_NAMES or is_credential_env_name(key)
+def is_credential_name(name: object) -> bool:
+    """True when an env name or a flag says its value is a credential: one of Hyperloom's own secrets, or any name
+    :func:`~hyperloom_common.credential_names.is_credential_env_name` classifies as one."""
+    return env_name_spelled_by(name) in BENCHMARK_SECRET_ENV_NAMES or is_credential_env_name(name)
+
+
+def _is_credential_flag(word: str) -> bool:
+    return word.startswith("-") and is_credential_name(word)
+
+
+def credential_arg_indices(argv: Sequence[str]) -> list[int]:
+    """The indices of the words of ``argv`` that hold a credential.
+
+    A credential-named flag's value counts in both its ``--flag=value`` and ``--flag value`` forms, and so does any word
+    :func:`redact_secret_values` would change.
+    """
+    found = []
+    for index, word in enumerate(argv):
+        flag, joined, _ = word.partition("=")
+        if (joined and _is_credential_flag(flag)) or redact_secret_values(word) != word:
+            found.append(index)
+        elif index and _is_credential_flag(argv[index - 1]) and not word.startswith("-"):
+            found.append(index)
+    return found
 
 
 def redact_secret_env_values(env: Mapping[str, object] | None) -> dict[str, object]:
@@ -408,7 +429,7 @@ def redact_secret_env_values(env: Mapping[str, object] | None) -> dict[str, obje
     """
     return {
         key: "[REDACTED]"
-        if _is_credential_env_name(key)
+        if is_credential_name(key)
         else (redact_secret_values(value) if isinstance(value, str) and value else value)
         for key, value in (env or {}).items()
     }
@@ -431,12 +452,11 @@ def holds_credentials(value: object, *, in_env: bool = False) -> bool:
         return (
             redact_secret_values(value) != value
             or CREDENTIALED_URL_RE.search(value) is not None
-            or any(_is_credential_env_name(flag) for flag in flags)
+            or any(is_credential_name(flag) for flag in flags)
         )
     if isinstance(value, Mapping):
         return any(
-            (in_env and _is_credential_env_name(key) and bool(item))
-            or holds_credentials(item, in_env=_is_env_field(key))
+            (in_env and is_credential_name(key) and bool(item)) or holds_credentials(item, in_env=_is_env_field(key))
             for key, item in value.items()
         )
     if isinstance(value, (list, tuple)):
@@ -449,7 +469,7 @@ def is_allowed_external_env_key(key: object) -> bool:
     upper = str(key or "").strip().upper()
     if not valid_env_key(upper) or upper in BLOCKED_EXTERNAL_ENV_NAMES:
         return False
-    return not is_secret_shaped_env_name(upper)
+    return not is_credential_name(upper)
 
 
 def is_allowed_variant_env_key(key: object) -> bool:
@@ -900,6 +920,7 @@ __all__ = [
     "LAUNCH_PROVIDED_ENV_PREFIXES",
     "OPERATOR_EXTRA_ENV_VAR",
     "build_benchmark_env",
+    "credential_arg_indices",
     "env_file_list_elements",
     "filter_untrusted_env_mapping",
     "holds_credentials",
@@ -907,6 +928,7 @@ __all__ = [
     "is_allowed_external_env_key",
     "is_allowed_kernel_agent_env_key",
     "is_allowed_variant_env_key",
+    "is_credential_name",
     "is_file_referencing_env_name",
     "is_launch_provided_env_name",
     "is_python_package_root",

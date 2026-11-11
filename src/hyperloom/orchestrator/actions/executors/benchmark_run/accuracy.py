@@ -1,22 +1,48 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""Eval-failure routing and the accuracy stop of ``BenchmarkRunExecutor``."""
+"""Eval-failure routing, the accuracy stop and the AgentX accuracy round of ``BenchmarkRunExecutor``.
+
+:func:`run_accuracy_round` is the one entry to the D9 accuracy round of a slot, which the baseline runs here once its
+throughput round succeeded, and a candidate gate through :func:`run_candidate_accuracy_round` once its throughput
+cleared the KEEP threshold. Every gate, the baseline's included, reads the round's score through
+``parse_eval_results``.
+"""
 
 from __future__ import annotations
 
+import asyncio
 import logging
+from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
+from hyperloom.common.agentx_workload import is_mlperf_backend
+from hyperloom.common.perf_metric import agentx_active
 from hyperloom.inference_optimizer.breakdown.recorder.baseline_event import RUN_AFTER_MOE_RUNNER_FAILURE, RUN_INITIAL
-from .._subprocess_kill import server_log_death_excerpt
+from hyperloom.inference_optimizer.trace.task_progress import heartbeat_while_output_flows
+from inference_suite.contracts import FailedStep
+from inference_suite.server_log import death_excerpt
+from .._accuracy_gate import (
+    ACCURACY_DEFINITION_DIGEST_KEY,
+    EVAL_DEFINITION_DIGEST_KEY,
+    EVAL_KIND_QUALITY_GATE_MISSING,
+    parse_eval_results,
+)
+from .._failed_step import failed_step_error_class
+from .._grid_runner import lease_cards, session_grid_bounds
+from .._ray_serving import ServingLease, maybe_serving_lease
+from .._subprocess_kill import resolve_benchmark_timeouts
+from .._suite.rounds import AccuracyRound, SuiteRoundRefused, deadline_unix, run_accuracy_suite_round, session_route
 from .records import (
+    ACCURACY_EVAL_KIND_KEY,
+    _BENCHMARK_MODE_ATTR,
     _DOUBLE_RUN_ROUND_DIRS,
     _is_double_run_accuracy_handoff,
     _iter_log_tails,
     _requested_framework,
     _should_establish_quality_ref,
+    record_eval_score,
 )
 
 if TYPE_CHECKING:
@@ -41,6 +67,77 @@ _EVAL_SERVER_UNREACHABLE_MARKERS = (
 )
 # Bounded per-file read so log scanning never slurps a multi-GB server.log.
 _LOG_SCAN_MAX_BYTES = 262_144
+#: The result key a slot's accuracy round is recorded under.
+ACCURACY_ROUND_KEY = "agentx_accuracy_round"
+_ACCURACY_ROUND_FAILED = "agentx_accuracy_round_failed"
+
+
+@dataclass(frozen=True)
+class AccuracyRoundOutcome:
+    """What a slot's accuracy round left: where it ran, and the error class it ended on, ``""`` when it completed."""
+
+    run_dir: Path
+    error_class: str
+
+    def to_record(self) -> dict[str, str]:
+        return {"run_dir": str(self.run_dir), "error_class": self.error_class}
+
+
+def _native_agentx(state: Any) -> bool:
+    return agentx_active(benchmark_mode=getattr(state, _BENCHMARK_MODE_ATTR, "")) and not is_mlperf_backend()
+
+
+def accuracy_round_due(state: Any) -> bool:
+    """Whether the session ``state`` runs the D9 accuracy round: native AgentX outside MLPerf, and not opted out."""
+    return _native_agentx(state) and state.agentx_accuracy
+
+
+async def run_accuracy_round(request: AccuracyRound, *, session: Path) -> AccuracyRoundOutcome:
+    """Run the D9 accuracy round ``request`` names into ``<slot>/accuracy``.
+
+    The round serves the slot's launch on a server of its own with the base's golden layer left out, and runs only the
+    eval. A request without a serving lease runs on one of its own when Ray manages the GPUs.
+    """
+    slot = request.slot
+    route = session_route(session)
+    if route is None:
+        log.error("accuracy_round: %s froze no base launch to serve the accuracy round on", session)
+        return AccuracyRoundOutcome(slot, failed_step_error_class(FailedStep.CONFIG_INVALID))
+    owned = None
+    if request.serving_lease is None:
+        owned = maybe_serving_lease(num_gpus=lease_cards(request.config_path, session))
+        request = replace(request, serving_lease=owned)
+    try:
+        async with heartbeat_while_output_flows(unit="accuracy_round", label="eval") as activity:
+            ran = await asyncio.to_thread(run_accuracy_suite_round, route, request, on_poll=activity.note)
+    except SuiteRoundRefused as exc:
+        log.error("accuracy_round: refused before it ran: %s", exc)
+        return AccuracyRoundOutcome(slot, exc.error_class)
+    finally:
+        if owned is not None:
+            owned.close()
+    step = ran.report.failed_step
+    return AccuracyRoundOutcome(ran.layout.root, "" if step is None else failed_step_error_class(step))
+
+
+async def run_candidate_accuracy_round(
+    slot: Path, launch: Path, state: Any, *, session: Path, lease: ServingLease | None = None
+) -> AccuracyRoundOutcome:
+    """Run the accuracy round of a candidate whose throughput cleared the KEEP threshold, capped as a benchmark round.
+
+    ``launch`` is the AgentX point the candidate ran in ``slot``; ``lease`` is the serving lease its gate still holds.
+    """
+    timeout_sec = resolve_benchmark_timeouts()[1]
+    deadline = deadline_unix(session_grid_bounds(state)[0])
+    return await run_accuracy_round(AccuracyRound(launch, slot, timeout_sec, deadline, lease), session=session)
+
+
+def record_accuracy_round(result: dict[str, Any], outcome: AccuracyRoundOutcome) -> None:
+    """Record ``outcome`` in ``result``: a round that failed leaves a warning, never a verdict of its own."""
+    result[ACCURACY_ROUND_KEY] = outcome.to_record()
+    if outcome.error_class:
+        log.warning("accuracy_round: the AgentX accuracy round ended %s in %s", outcome.error_class, outcome.run_dir)
+        result.setdefault("nonfatal_warnings", []).append(_ACCURACY_ROUND_FAILED)
 
 
 class _BaselineAccuracyMixin:
@@ -141,7 +238,7 @@ class _BaselineAccuracyMixin:
         )
 
     async def _run_retrying(self, ctx: RunnerContext, *, recorder: Any = None) -> dict[str, Any]:
-        """Run the Magpie baseline; an eval-rooted failure fails the round, a MoE-runner failure retries once."""
+        """Run the baseline; an eval-rooted failure fails the round, a MoE-runner failure retries once."""
         result = await self._run_pass(ctx, recorder=recorder, attempt_reason=RUN_INITIAL)
         # An eval that never reached a verdict because the server was gone is a broken measurement, not a statement
         # about accuracy or about a missing framework capability. Leaving it in the eval-rooted branch stamps it as an
@@ -167,7 +264,7 @@ class _BaselineAccuracyMixin:
                         "enablement instead of salvaging (RUN_EVAL stays on)."
                     )
                     self._stamp_eval_failure_contract(
-                        ctx, result, kind=EVAL_KIND_RUNTIME_FAILURE, observed_accuracy=None, evidence=evidence
+                        result, kind=EVAL_KIND_RUNTIME_FAILURE, observed_accuracy=None, evidence=evidence
                     )
                     return result
                 result.setdefault("nonfatal_warnings", [])
@@ -201,8 +298,36 @@ class _BaselineAccuracyMixin:
             )
             retry.setdefault("nonfatal_warnings", []).append("moe_runner_backend_fallback_dropped_flag")
             result = retry
+        await self._run_baseline_accuracy_round(ctx, result)
         self._maybe_stop_on_missing_baseline_accuracy(ctx, result)
         return result
+
+    async def _run_baseline_accuracy_round(self, ctx: RunnerContext, result: dict[str, Any]) -> None:
+        """Run the accuracy round of a genuine native AgentX baseline that succeeded, unless the session opted out.
+
+        It runs after the attempt released its server, so the round's own server has the GPUs to itself.
+        """
+        params = ctx.task.params or {}
+        if result.get("status") != "succeeded" or not _should_establish_quality_ref(
+            getattr(ctx.task, "kind", ""), params
+        ):
+            return
+        state = self._resolve_shared_state(ctx.extra.get("shared_state"))
+        if not accuracy_round_due(state):
+            return
+        slot = Path(result["output_dir"])
+        if slot.name in _DOUBLE_RUN_ROUND_DIRS:
+            slot = slot.parent
+        request = AccuracyRound(
+            Path(result["materialized_config"]),
+            slot,
+            self._resolve_timeout(params),
+            deadline_unix(session_grid_bounds(state)[0]),
+        )
+        record_accuracy_round(result, await run_accuracy_round(request, session=self.session_dir))
+        eval_data = parse_eval_results(slot, _requested_framework(params), state.benchmark_mode)
+        if not record_eval_score(result, eval_data):
+            log.warning("baseline_executor: the accuracy round left no score: %s", eval_data.get("error"))
 
     @staticmethod
     def _accuracy_stop_death_evidence(result: dict[str, Any]) -> str:
@@ -222,9 +347,9 @@ class _BaselineAccuracyMixin:
         path = str(result.get("server_log_path") or "").strip()
         if not path:
             return ""
-        # ``server_log_death_excerpt`` already answers ``None`` for a log it cannot read,
+        # ``death_excerpt`` already answers ``None`` for a log it cannot read,
         # so an unreadable path is simply "no death on record" -- no guard of our own.
-        return server_log_death_excerpt(path) or ""
+        return death_excerpt(path) or ""
 
     def _eval_enablement_active(self, ctx: RunnerContext) -> bool:
         """Whether an eval failure should route into enablement this run."""
@@ -238,9 +363,8 @@ class _BaselineAccuracyMixin:
             return False
         return _should_establish_quality_ref(getattr(ctx.task, "kind", ""), ctx.task.params or {})
 
+    @staticmethod
     def _stamp_eval_failure_contract(
-        self,
-        ctx: RunnerContext,
         result: dict[str, Any],
         *,
         kind: str,
@@ -250,31 +374,24 @@ class _BaselineAccuracyMixin:
         """Mark ``result`` as an eval-rooted baseline failure for enablement."""
         from .._accuracy_gate import (
             BASELINE_EVAL_ACCURACY_FLOOR_KEY,
-            BASELINE_EVAL_CONTRACT_FINGERPRINT_KEY,
             BASELINE_EVAL_EVIDENCE_KEY,
             BASELINE_EVAL_FAILED_KEY,
             BASELINE_EVAL_FAILURE_KIND_KEY,
             BASELINE_EVAL_OBSERVED_ACCURACY_KEY,
-            eval_contract_fingerprint,
+            run_eval_definition_digest,
         )
         from hyperloom.common.gain_math import DEFAULT_ENABLEMENT_ACCURACY_FLOOR
 
-        params = ctx.task.params or {}
-        framework = _requested_framework(params)
-        model = params.get("model") or params.get("resolved_model")
         floor = DEFAULT_ENABLEMENT_ACCURACY_FLOOR
         result[BASELINE_EVAL_FAILED_KEY] = True
         result[BASELINE_EVAL_FAILURE_KIND_KEY] = kind
         result[BASELINE_EVAL_OBSERVED_ACCURACY_KEY] = observed_accuracy
         result[BASELINE_EVAL_ACCURACY_FLOOR_KEY] = floor
         result[BASELINE_EVAL_EVIDENCE_KEY] = (evidence or "")[:4000]
-        # Fingerprint derives from the materialized YAML contract fields only — task/metric are result outputs and may
-        # be absent on eval crash, so they must not participate in the stable identity.
-        result[BASELINE_EVAL_CONTRACT_FINGERPRINT_KEY] = eval_contract_fingerprint(
-            config_path=result.get("materialized_config"),
-            framework=framework,
-            model=model,
-        )
+        accuracy_round = result.get(ACCURACY_ROUND_KEY)
+        if accuracy_round and not result.get(ACCURACY_DEFINITION_DIGEST_KEY):
+            # A round that left no score still planned the definition it failed under.
+            result[ACCURACY_DEFINITION_DIGEST_KEY] = run_eval_definition_digest(Path(accuracy_round["run_dir"]))
         result["eval_origin"] = "eval"
         return result
 
@@ -331,6 +448,10 @@ class _BaselineAccuracyMixin:
         # A failed status must NOT skip straight past the salvage below.
         if result.get("status") != "succeeded" and not self._is_eval_rooted_failure(result):
             return
+        shared_state = ctx.extra.get("shared_state") or self.shared_state
+        # An AgentX session that opted out of the accuracy round has no reference by design; its gates skip accuracy.
+        if _native_agentx(shared_state) and not shared_state.agentx_accuracy:
+            return
         acc = result.get("accuracy")
         eval_enablement = self._eval_enablement_active(ctx)
         from hyperloom.common.gain_math import DEFAULT_ENABLEMENT_ACCURACY_FLOOR, accuracy_meets_floor
@@ -344,7 +465,16 @@ class _BaselineAccuracyMixin:
         if accuracy_meets_floor(acc, usable_floor):
             return
         framework = _requested_framework(params)
-        shared_state = ctx.extra.get("shared_state") or self.shared_state
+        context = f"baseline:{framework or 'unknown'}"
+        # The operator's script broke the scriptable contract: no specialist can repair it, and a sibling attempt ran
+        # the same script.
+        if result.get(ACCURACY_EVAL_KIND_KEY) == EVAL_KIND_QUALITY_GATE_MISSING:
+            request_baseline_accuracy_stop(
+                shared_state,
+                context=f"{context}:{EVAL_KIND_QUALITY_GATE_MISSING}",
+                cause=self._quality_gate_missing_cause(result),
+            )
+            return
         # Session-level salvage (complements #942): the cold-start guard and the coordinator's retries each run in
         # their own ``runs/baseline/<attempt>`` dir. #942 keeps every attempt's eval output inside that attempt's
         # ``$RESULT_DIR``, but the accuracy-stop decision runs on the *deciding* attempt -- whose dir can be empty
@@ -383,7 +513,7 @@ class _BaselineAccuracyMixin:
         # Only a *missing* reference can be explained by a dead server. A measured zero -- including one salvaged
         # from a sibling attempt -- means the eval did run and did write its results, so blaming the death here would
         # state the opposite of what the artifacts show, however dead the server later became.
-        context, cause = f"baseline:{framework or 'unknown'}", ""
+        cause = ""
         if acc is None and (death := self._accuracy_stop_death_evidence(result)):
             log.error(
                 "baseline_executor: no accuracy reference, and this round's server.log "
@@ -398,6 +528,11 @@ class _BaselineAccuracyMixin:
                 "no accuracy result, and a fatal engine death on record for this round",
             )
         request_baseline_accuracy_stop(shared_state, context=context, cause=cause)
+
+    @staticmethod
+    def _quality_gate_missing_cause(result: dict[str, Any]) -> str:
+        report = result.get("accuracy_source") or "no round report found"
+        return f"the entrypoint's result JSON carries no quality_gate block (report: {report})"
 
     def _route_baseline_accuracy_to_enablement(
         self,
@@ -425,7 +560,6 @@ class _BaselineAccuracyMixin:
             kind = EVAL_KIND_GENERATION_PATHOLOGY
             evidence = f"{evidence}; {eval_probe_summary(probe)}"
         self._stamp_eval_failure_contract(
-            ctx,
             result,
             kind=kind or "",
             observed_accuracy=float(acc) if isinstance(acc, (int, float)) else None,
@@ -455,6 +589,8 @@ class _BaselineAccuracyMixin:
         result["accuracy_task"] = salvaged.get("task", "gsm8k")
         result["accuracy_metric"] = salvaged.get("metric", "")
         result["accuracy_source"] = salvaged.get("source_file", "")
+        definition_digest = salvaged.get(EVAL_DEFINITION_DIGEST_KEY, "")
+        result[ACCURACY_DEFINITION_DIGEST_KEY] = definition_digest
         if expected_handoff:
             log.info(
                 "baseline_executor: cold-start guard — reading accuracy=%.4f from "
@@ -473,6 +609,7 @@ class _BaselineAccuracyMixin:
             result.setdefault("nonfatal_warnings", []).append("baseline_accuracy_salvaged_from_sibling_attempt")
         if shared_state is not None and accuracy_meets_floor(acc_val, 0.0):
             shared_state.baseline_accuracy = acc_val
+            shared_state.baseline_accuracy_definition_digest = definition_digest
         return acc_val
 
     def _salvage_sibling_baseline_accuracy(
@@ -489,8 +626,6 @@ class _BaselineAccuracyMixin:
             return None
         try:
             from hyperloom.common.gain_math import finite_score
-
-            from .._accuracy_gate import parse_eval_results
 
             eval_data = parse_eval_results(runs_root, framework=framework)
         except (OSError, ValueError, AttributeError, TypeError):

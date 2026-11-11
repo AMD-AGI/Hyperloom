@@ -53,7 +53,7 @@ def _resolve_run_max_model_len(args: argparse.Namespace) -> tuple[int, str]:
         # Model not on disk yet (uncached HF id).
         print(
             "NOTE: Model context is unavailable locally; using a planning estimate. "
-            "Magpie resolves the AgentX serving context from its workload configuration.",
+            "The AgentX serving context is resolved from its workload configuration.",
             file=sys.stderr,
         )
     return (
@@ -127,6 +127,9 @@ def _resolve_workload_knobs(
     and on a resume also the recorded workload :func:`_seed_env_from_resumed_state` writes over any shell export -- a
     resumed value therefore arrives through that rung rather than through ``state``. Precision has its own function
     because it reads the checkpoint, so it cannot run this early.
+
+    ``args.operator_tp`` and ``args.operator_ep`` keep the TP and EP the flag or environment rung gave, ``None`` when
+    the ladder reached the state or default rung: a recipe chooses the topology the operator left open.
     """
     int_knobs = (
         ("isl", DEFAULT_ISL),
@@ -138,9 +141,12 @@ def _resolve_workload_knobs(
     for name, default in int_knobs:
         val = getattr(args, name, None)
         if val is None:
-            from_env = _positive_env_int(name)
+            val = _positive_env_int(name) or None
+        if name in ("tp", "ep"):
+            setattr(args, f"operator_{name}", None if val is None else int(val))
+        if val is None:
             persisted = int(getattr(state, name, 0) or 0) if state is not None else 0
-            val = from_env or (persisted if persisted > 0 else default)
+            val = persisted if persisted > 0 else default
         setattr(args, name, int(val))
 
 
@@ -178,7 +184,7 @@ def _export_workload_envs_for_optimize(
     tp_resolved: int,
     ep_resolved: int,
 ) -> None:
-    """Project resolved workload knobs (TP/CONC/EP) into env for downstream Magpie YAMLs."""
+    """Project resolved workload knobs (TP/CONC/EP) into env for downstream point YAMLs."""
     os.environ["TP"] = str(max(1, int(tp_resolved or 1)))
     os.environ["CONC"] = str(max(1, int(getattr(args, "conc", DEFAULT_CONC) or DEFAULT_CONC)))
     os.environ["EP"] = str(max(1, int(ep_resolved or 1)))

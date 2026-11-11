@@ -10,7 +10,11 @@ from inference_suite import server_log
 from inference_suite.server_log import READY_MARKERS, LogCursor, throughput_samples
 
 
-def test_the_ready_table_names_the_vllm_ready_line() -> None:
+def test_the_ready_table_is_the_only_one_the_launcher_reads() -> None:
+    from hyperloom.orchestrator.actions.executors import _subprocess_kill
+
+    tables = [value for value in vars(_subprocess_kill).values() if isinstance(value, tuple)]
+    assert not [table for table in tables if set(table) & set(READY_MARKERS)]
     assert "OpenAI server is ready to accept requests" in READY_MARKERS
 
 

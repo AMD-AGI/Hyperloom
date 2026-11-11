@@ -5,9 +5,11 @@
 
 from __future__ import annotations
 
+import json
+
 import pytest
 
-from hyperloom.common.model_paths import model_identities_match, model_identity_candidates
+from hyperloom.common.model_paths import hf_repo_id, model_identities_match, model_identity_candidates
 
 
 @pytest.mark.parametrize(
@@ -63,3 +65,45 @@ def test_model_identities_match_cross_org_is_false():
 
 def test_model_identities_match_same_org_is_true():
     assert model_identities_match("vendor-a/SmallModel", "vendor-a/SmallModel") is True
+
+
+@pytest.mark.parametrize(
+    ("model", "expected"),
+    [
+        ("deepseek-ai/DeepSeek-R1-0528", "deepseek-ai/DeepSeek-R1-0528"),
+        ("deepseek-ai/DeepSeek-R1-0528/", "deepseek-ai/DeepSeek-R1-0528"),
+        ("DeepSeek-R1-0528", None),
+        ("/models/DeepSeek-R1-0528", None),
+        ("./DeepSeek-R1-0528", None),
+        ("~/DeepSeek-R1-0528", None),
+        ("", None),
+        (None, None),
+    ],
+)
+def test_hf_repo_id_of_a_value_that_is_no_directory(model, expected):
+    assert hf_repo_id(model) == expected
+
+
+@pytest.mark.parametrize(
+    ("layout", "config", "expected"),
+    [
+        ("hub/models--deepseek-ai--DeepSeek-R1-0528/snapshots/abc", None, "deepseek-ai/DeepSeek-R1-0528"),
+        ("models/R1", {"_name_or_path": "deepseek-ai/DeepSeek-R1-0528"}, "deepseek-ai/DeepSeek-R1-0528"),
+        ("models/R1", {"_name_or_path": "/scratch/r1"}, None),
+        ("models/R1", None, None),
+    ],
+)
+def test_hf_repo_id_of_a_local_checkpoint_keeps_org_and_case(tmp_path, layout, config, expected):
+    model = tmp_path / layout
+    model.mkdir(parents=True)
+    if config is not None:
+        (model / "config.json").write_text(json.dumps(config))
+
+    assert hf_repo_id(model) == expected
+
+
+def test_a_relative_directory_shaped_like_a_repo_id_is_no_repo_id(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    (tmp_path / "org" / "repo").mkdir(parents=True)
+
+    assert hf_repo_id("org/repo") is None

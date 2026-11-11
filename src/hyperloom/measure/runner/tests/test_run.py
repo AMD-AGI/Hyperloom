@@ -7,11 +7,13 @@ from __future__ import annotations
 
 import errno
 import hashlib
+import importlib
 import json
 import os
 import shutil
 import subprocess
 import sys
+from dataclasses import replace
 
 import pytest
 import yaml
@@ -31,11 +33,19 @@ from hyperloom.measure.long_context.plan import LongContextPlan
 from hyperloom.measure.short_prompts.plan import ShortPromptPlan
 from hyperloom.measure.socket import RoundOutcome, TestCall, TestOutcome
 from hyperloom.measure.spec import MeasurementSpec
-from hyperloom.measure.runner.tests import aiperf_source
 from hyperloom.measure.tests._recipes import IMAGE, recipe_with
-from hyperloom.measure.tests.bundle_factory import REQUEST_ID, spec_document
+from hyperloom.measure.runner import tools as runner_tools
+from hyperloom.measure.runner.cache_layout import CACHE_ENV
+from hyperloom.measure.tests.bundle_factory import (
+    REQUEST_ID,
+    STAGING,
+    base_launch,
+    spec_document,
+    stage_into,
+)
 from hyperloom.contracts.measurement import SandboxFacts
 from hyperloom.orchestrator.actions.executors._workload_envs import default_baseline_config
+from inference_suite import staging_key
 
 SHEET_IMAGE = spec_document()["image"]["digest"]
 POINT = {"benchmark": {"model": "/m", "framework": "sglang", "envs": {"TP": 1, "CONC": 4, "RUN_EVAL": "false"}}}
@@ -49,9 +59,7 @@ def _sheet(**changes) -> dict:
     document["environment"] = {"roots": [], "runtime": None, "blob_root": "/b"}
     document["model_hashes"] = {}
     document["unset_envs"] = ["STALE_PIN"]
-    document["procedure"].update(
-        {"benchmark_backend": "bypass", "rounds": {"warmup": 1, "measure": 1}, "deadline_unix": 0}
-    )
+    document["procedure"].update({"rounds": {"warmup": 1, "measure": 1}, "deadline_unix": 0})
     document.update(changes)
     return document
 
@@ -93,8 +101,11 @@ def env(tmp_path, key, monkeypatch):
         "PET_RANK": "0",
         "NCCL_IB_SL": "9",
         IMAGE_DIGEST_VAR: SHEET_IMAGE,
+        CACHE_ENV: str(stage_into(tmp_path / "runner-cache").parents[1]),
     }
     monkeypatch.setattr(runner, "ensure_inferencex", lambda commit, cache: tmp_path / "ix")
+    # this interpreter's identity of the published staging; lm-eval is not installed in CI
+    monkeypatch.setattr(runner_tools, "normalised_manifest", lambda tool_cache: STAGING)
     # a machine that answers every question: the sheet's card, no errors, nothing resident
     monkeypatch.setattr(
         runner.hardware, "read_gpu_facts", lambda visible: [GpuFacts(0, "AMD Instinct MI355X", 1400.0, "SPX/NPS1")]
@@ -127,6 +138,96 @@ def test_a_sheet_that_does_not_parse_is_spec_rejected(tmp_path, env):
     assert _go(tmp_path, env, b"{not json") == 3
     assert _status(tmp_path)["error_class"] == "spec_rejected"
     assert not (tmp_path / "out" / "manifest.json").exists()
+
+
+@pytest.mark.parametrize(
+    ("point", "hashes"),
+    [({"model": "/m"}, {}), ({"benchmark": {"framework": "sglang"}}, {"config.json": "ab" * 32})],
+    ids=["no benchmark block", "hashed model files with no model"],
+)
+def test_a_sheet_whose_point_names_no_model_to_hash_is_spec_rejected(tmp_path, env, point, hashes):
+    text = yaml.safe_dump(point)
+    config = [{"yaml": text, "sha256": hashlib.sha256(text.encode()).hexdigest()}]
+
+    assert _go(tmp_path, env, _sheet(config=config, model_hashes=hashes)) == 3
+    assert _status(tmp_path)["error_class"] == "spec_rejected"
+
+
+def test_a_v2_sheet_hands_the_test_its_frozen_base_and_the_runners_own_staging_and_signs_a_v2_manifest(
+    tmp_path, env, monkeypatch
+):
+    backend = _Backend(_ok)
+    monkeypatch.setattr(runner, "LocalMeasurementBackend", backend)
+
+    assert _go(tmp_path, env, _sheet()) == 0
+
+    (call,) = backend.calls
+    assert (call.session_facts.base_launch, call.session_facts.staging) == (base_launch(), STAGING)
+    assert "HYPERLOOM_BENCHMARK_BACKEND" not in env
+    tool_cache = tmp_path / "runner-cache" / "inference-suite" / staging_key()
+    assert env["INFERENCE_SUITE_TOOL_CACHE"] == str(tool_cache)
+    manifest = ResultManifest.from_bytes((tmp_path / "out" / "manifest.json").read_bytes())
+    assert manifest.runner.inference_suite_staging == STAGING.sha256()
+
+
+def test_a_v2_sheet_whose_staging_is_other_software_than_the_runners_is_a_preflight_mismatch_naming_it(
+    tmp_path, env, monkeypatch
+):
+    backend = _Backend(_ok)
+    monkeypatch.setattr(runner, "LocalMeasurementBackend", backend)
+    theirs = replace(STAGING, interpreter_version="3.12.16")
+    sheet = _sheet()
+    sheet["tools"] = {
+        **sheet["tools"],
+        "inference_suite": {"staging": theirs.sha256(), "normalised": theirs.to_document()},
+    }
+
+    assert _go(tmp_path, env, sheet) != 0
+
+    status = _status(tmp_path)
+    assert status["error_class"] == "preflight_mismatch" and "interpreter 3.12.15" in status["message"], status
+    assert backend.calls == []
+
+
+@pytest.mark.parametrize(
+    ("sheet", "named"),
+    [
+        (lambda: _sheet() | {"schema": "hyperloom.measurement-spec/v1"}, ("measurement-spec/v2",)),
+        (
+            lambda: _sheet() | {"procedure": {k: v for k, v in _sheet()["procedure"].items() if k != "base_launch"}},
+            ("measurement-spec/v2", "hyperloom-base-launch/1"),
+        ),
+    ],
+    ids=["another version", "without its base"],
+)
+def test_a_sheet_of_another_version_or_without_its_base_is_refused_naming_both_and_runs_nothing(
+    tmp_path, env, monkeypatch, sheet, named
+):
+    backend = _Backend(_ok)
+    monkeypatch.setattr(runner, "LocalMeasurementBackend", backend)
+
+    assert _go(tmp_path, env, sheet()) == 3
+
+    status = _status(tmp_path)
+    assert status["error_class"] == "spec_rejected" and all(name in status["message"] for name in named)
+    assert backend.calls == [] and not (tmp_path / "out" / "manifest.json").exists()
+
+
+def _point_config(benchmark: dict) -> list[dict]:
+    text = yaml.safe_dump({"benchmark": {**POINT["benchmark"], **benchmark}})
+    return [{"yaml": text, "sha256": hashlib.sha256(text.encode()).hexdigest()}]
+
+
+def test_a_sheet_whose_point_inference_suite_does_not_run_is_refused(tmp_path, env, monkeypatch):
+    backend = _Backend(_ok)
+    monkeypatch.setattr(runner, "LocalMeasurementBackend", backend)
+    reason = "'xdit' serves nothing; a hyperloom.measurement-spec/v2 sheet measures a server"
+
+    assert _go(tmp_path, env, _sheet(config=_point_config({"framework": "xdit"}))) == 3
+
+    status = _status(tmp_path)
+    assert status["error_class"] == "spec_rejected" and reason in status["message"], status
+    assert backend.calls == []
 
 
 def test_a_missing_signing_key_stops_the_runner_at_start(tmp_path, env):
@@ -185,7 +286,7 @@ def test_the_call_is_built_from_the_sheet_and_the_environment_is_the_sandboxes(t
     assert rewritten["inferencex_path"] == str(tmp_path / "ix")
     assert rewritten["envs"]["ROCR_VISIBLE_DEVICES"] == "0"
     assert env["NCCL_IB_SL"] == "3" and "MASTER_ADDR" not in env and "PET_RANK" not in env
-    assert "HYPERLOOM_SIGNING_KEY_FILE" not in env and env["HYPERLOOM_BENCHMARK_BACKEND"] == "bypass"
+    assert "HYPERLOOM_SIGNING_KEY_FILE" not in env
 
 
 def test_a_profile_whose_patch_cannot_be_laid_in_its_farm_runs_and_its_points_and_status_say_so(
@@ -844,7 +945,7 @@ def _rewrite(path_in_tmp: str, text: str):
     "change",
     [
         lambda tmp_path, config: _surface_config(tmp_path, ISL=2048),
-        lambda tmp_path, config: _surface_config(tmp_path, MAGPIE_EVAL_LIMIT=5),
+        lambda tmp_path, config: _surface_config(tmp_path, HYPERLOOM_EVAL_LIMIT=5),
         _rewrite("ix/benchmarks/run.sh", "run --other\n"),
         _rewrite("model/config.json", '{"hidden": 2}'),
     ],
@@ -877,15 +978,14 @@ def accepted(tmp_path, monkeypatch):
     ):
         monkeypatch.delenv(name, raising=False)
     for name in (
-        "MAGPIE_EVAL_TASKS",
-        "MAGPIE_EVAL_LIMIT",
-        "MAGPIE_EVAL_TOKENIZED_REQUESTS",
+        "HYPERLOOM_EVAL_TASKS",
+        "HYPERLOOM_EVAL_LIMIT",
+        "HYPERLOOM_EVAL_TOKENIZED_REQUESTS",
         "INFERENCE_OPTIMIZER_SERVER_ARGS",
     ):
         monkeypatch.delenv(name, raising=False)
     monkeypatch.setenv("FRAMEWORK", "sglang")
     monkeypatch.setenv("USER_DATA_PATH", str(tmp_path / "userdata"))
-    monkeypatch.setenv("INFERENCE_OPTIMIZER_DISABLE_TP_CLAMP", "1")
     model = tmp_path / "model"
     model.mkdir()
     (model / "config.json").write_text("{}")
@@ -919,97 +1019,23 @@ def test_the_hash_the_runner_signs_is_the_one_acceptance_computed_for_the_same_r
     assert _surface_run(tmp_path, env, key, "later", yaml.safe_load(text)) != canonical.surface.sha256
 
 
-def test_under_magpie_the_signed_script_hash_is_of_the_launcher_the_backend_installs(tmp_path, env, key, monkeypatch):
-    """The backend overwrites the checkout's script with Magpie's launcher; the surface is of the file that runs."""
-    magpie = tmp_path / "magpie-checkout"
-    (magpie / "Magpie" / "scripts" / "benchmark").mkdir(parents=True)
-    (magpie / "Magpie" / "scripts" / "benchmark" / "run.sh").write_text("magpie launcher\n")
-    monkeypatch.setattr(runner, "ensure_magpie", lambda commit, cache: magpie)
-    monkeypatch.setenv("MAGPIE_PATH", str(magpie))
-    monkeypatch.setattr(runner, "LocalMeasurementBackend", _Backend(_ok))
-    config = _surface_config(tmp_path)
-
-    def signed(name: str, sheet_backend: str) -> str | None:
-        root = tmp_path / name
-        root.mkdir()
-        (root / "key.pem").write_bytes(signing.private_key_pem(key))
-        text = yaml.safe_dump(config)
-        sheet = _sheet(config=[{"yaml": text, "sha256": hashlib.sha256(text.encode()).hexdigest()}])
-        sheet["procedure"]["benchmark_backend"] = sheet_backend
-        assert _go(root, {**env, "HYPERLOOM_SIGNING_KEY_FILE": str(root / "key.pem")}, sheet) == 0, _status(root)
-        return ResultManifest.from_bytes((root / "out" / "manifest.json").read_bytes()).surface_sha256
-
-    stale_checkout = signed("bypass", "bypass")  # no launcher installed: the script is the checkout's own
-    installed = signed("magpie", "magpie")
-    (tmp_path / "ix" / "benchmarks" / "run.sh").write_text("magpie launcher\n")
-    already_installed = signed("settled", "bypass")
-
-    assert installed != stale_checkout
-    assert installed == already_installed
-
-
 def _agentx_sheet() -> dict:
     text = yaml.safe_dump({"benchmark": {**POINT["benchmark"], "agentx": {"enabled": True}}})
     return _sheet(config=[{"yaml": text, "sha256": hashlib.sha256(text.encode()).hexdigest()}])
 
 
-def _parser_when_the_test_runs(tmp_path, seen: list[str]):
-    """A backend that records the replay client's parser as it is when the test starts."""
-
-    def run(call):
-        seen.append((tmp_path / "ix" / "utils" / "aiperf" / aiperf_source.PARSER_FILE).read_text())
-        return _ok(call)
-
-    return _Backend(run)
-
-
-def test_an_agentx_tests_replay_client_is_patched_before_the_test_starts(tmp_path, env, monkeypatch):
-    aiperf_source.write_client(tmp_path / "ix")
-    seen: list[str] = []
-    monkeypatch.setattr(runner, "LocalMeasurementBackend", _parser_when_the_test_runs(tmp_path, seen))
-
-    assert _go(tmp_path, env, _agentx_sheet()) == 0
-
-    assert len(seen) == 1 and "token_counts=record.token_counts or TokenCounts()," in seen[0]
-    assert _status(tmp_path) == {"state": "succeeded", "error_class": None, "message": ""}
-
-
-def test_a_test_that_is_not_an_agentx_one_leaves_the_replay_client_as_it_is(tmp_path, env, monkeypatch):
-    aiperf_source.write_client(tmp_path / "ix")
-    seen: list[str] = []
-    monkeypatch.setattr(runner, "LocalMeasurementBackend", _parser_when_the_test_runs(tmp_path, seen))
-
-    assert _go(tmp_path, env, _sheet()) == 0
-
-    assert seen == [aiperf_source.PARSER]
-    assert _status(tmp_path)["message"] == ""
-
-
-@pytest.mark.parametrize(
-    ("parser", "why"),
-    [
-        (None, "has no utils/aiperf submodule"),
-        (aiperf_source.PARSER.replace("return as error record", "moved"), "inference_result_parser.py does not hold"),
-    ],
-    ids=["no-client", "other-client"],
-)
-def test_an_agentx_test_whose_client_cannot_be_patched_still_runs_and_the_status_says_it_ran_without(
-    tmp_path, env, monkeypatch, parser, why
-):
-    if parser is not None:
-        aiperf_source.write_client(tmp_path / "ix", parser=parser)
+def test_an_agentx_test_runs_on_the_staged_client_and_the_runner_patches_no_checkout(tmp_path, env, monkeypatch):
+    """Staging patches the client an AgentX test runs; the runner leaves the InferenceX checkout alone and adds no
+    note about it."""
     backend = _Backend(_ok)
     monkeypatch.setattr(runner, "LocalMeasurementBackend", backend)
 
     assert _go(tmp_path, env, _agentx_sheet()) == 0
 
-    assert len(backend.calls) == 1, "the patch only adds a field to a failed request's line: the test runs without it"
-    status = _status(tmp_path)
-    assert status["state"] == "succeeded"
-    assert status["message"].startswith(
-        "the replay client was not patched to export the output token count of a failed"
-    )
-    assert why in status["message"]
+    assert len(backend.calls) == 1
+    assert _status(tmp_path) == {"state": "succeeded", "error_class": None, "message": ""}
+    with pytest.raises(ModuleNotFoundError):
+        importlib.import_module("hyperloom.measure.runner.aiperf_patch")
 
 
 SHORT_PROMPTS = {
@@ -1049,7 +1075,6 @@ def test_a_prompt_set_the_sandbox_does_not_hold_is_spec_rejected_before_any_serv
         output_dir=tmp_path / "out",
         timeout_sec=60,
         cwd=str(tmp_path),
-        magpie_python="",
         task_id="t",
         short_prompts=ShortPromptPlan.parse(SHORT_PROMPTS, "sheet"),
     )
@@ -1101,7 +1126,6 @@ def test_a_long_context_set_the_sandbox_does_not_hold_is_spec_rejected_before_an
         output_dir=tmp_path / "out",
         timeout_sec=60,
         cwd=str(tmp_path),
-        magpie_python="",
         task_id="t",
         long_context=LongContextPlan.parse(LONG_CONTEXT, "sheet"),
     )
@@ -1111,3 +1135,19 @@ def test_a_long_context_set_the_sandbox_does_not_hold_is_spec_rejected_before_an
     ) as info:
         runner._execute(call)
     assert info.value.error_class == "spec_rejected"
+
+
+@pytest.mark.parametrize("laid", [False, True], ids=["image", "farm"])
+def test_the_runner_tells_the_rounds_verdict_whether_its_farm_changed_the_framework(tmp_path, monkeypatch, laid):
+    """A serving interpreter that cannot import its framework is the image's fault unless the test rebuilt it."""
+    from types import SimpleNamespace
+
+    from hyperloom.measure.farm import Farm
+
+    monkeypatch.setattr(runner, "own_aiter_jit", lambda *args: {})
+    monkeypatch.setattr(runner, "raise_rebuild_watchdog", lambda *args: None)
+    context = SimpleNamespace(environ={}, work=tmp_path, notes=[], compile=tmp_path / "compile")
+    farm = Farm(site=tmp_path / "farm" / "site", packages=("sglang",)) if laid else None
+    call = TestCall(points=(), output_dir=tmp_path, timeout_sec=1, cwd=str(tmp_path), task_id="t")
+
+    assert runner._own_directories(context, call, None, farm, None).framework_changed is laid

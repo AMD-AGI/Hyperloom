@@ -1221,6 +1221,10 @@ class TestHandleGemmTuningResult:
         assert coord.shared_state.cumulative_gain_validated == pytest.approx(50.0)
 
 
+#: What the report mapper stamps on every AgentX round it accepts as evidence.
+_AGENTX_EVIDENCE = {"valid_measurement": True, "diagnostic_only": False, "workload_identity": "agentx-workload"}
+
+
 class TestKernelE2EMeasurementPromotion:
     @pytest.fixture
     def coord(self, tmp_path, monkeypatch):
@@ -1238,6 +1242,7 @@ class TestKernelE2EMeasurementPromotion:
                 "e2e_norm_intvty_p50": 100.0,
                 "duration_seconds": 900.0,
                 "request_error_rate": 0.0,
+                **_AGENTX_EVIDENCE,
             },
             current_best={
                 "tput": 100.0,
@@ -1246,6 +1251,7 @@ class TestKernelE2EMeasurementPromotion:
                 "e2e_norm_intvty_p50": 100.0,
                 "duration_seconds": 900.0,
                 "request_error_rate": 0.0,
+                **_AGENTX_EVIDENCE,
                 "extra_envs": {"BASE_ENV": "1"},
             },
         )
@@ -1268,6 +1274,7 @@ class TestKernelE2EMeasurementPromotion:
             "ttft_mean_ms": 12.0,
             "e2el_mean_ms": 23.0,
             "tpot_mean_ms": 4.0,
+            **_AGENTX_EVIDENCE,
             "workspace": f"/e2e/{name}",
             "raw_result_path": f"/e2e/{name}/raw.json",
             "report_path": f"/e2e/{name}/report.json",
@@ -1478,7 +1485,7 @@ class TestKernelE2EMeasurementPromotion:
 
     @pytest.fixture
     def paired_handler(self, monkeypatch):
-        from hyperloom.orchestrator.actions.executors import _multi_node_env, benchmark_backend
+        from hyperloom.orchestrator.actions.executors import _multi_node_env
 
         def unexpected(*args, **kwargs):
             raise AssertionError("Paired measurements must not resolve, apply, or grade a patch")
@@ -1492,7 +1499,6 @@ class TestKernelE2EMeasurementPromotion:
         monkeypatch.setattr(integrate_accuracy, "grade_integrate_accuracy", unexpected)
         monkeypatch.setattr(integrate_outcomes, "_maybe_finalize_kernel_patch", unexpected)
         monkeypatch.setattr(integrate_rebaseline, "_sweep_integrate_aiter_locks", lambda **kwargs: {})
-        monkeypatch.setattr(benchmark_backend, "resolve_benchmark_interpreter", lambda: "/usr/bin/python3")
         monkeypatch.setattr(_multi_node_env, "is_multi_node", lambda: False)
         return krh_mod.integrate_handler
 
@@ -1832,7 +1838,7 @@ class TestKernelE2EMeasurementPromotion:
     async def test_gemm_legacy_measurement_does_not_borrow_micro_axes(self, coord, monkeypatch, explicit_output):
         if explicit_output:
             monkeypatch.setenv("HYPERLOOM_PERF_METRIC", "output_throughput")
-        fake = _make_integrate([{"decision": "KEEP", "new_tput": 110.0, "gain_pct": 10.0}])
+        fake = _make_integrate([{"decision": "KEEP", "new_tput": 110.0, "gain_pct": 10.0, **_AGENTX_EVIDENCE}])
         monkeypatch.setattr(krh_mod, "integrate_handler", fake)
         result = self._result()
         anchor = deepcopy(coord.shared_state.current_best)

@@ -4,12 +4,14 @@
 """The local measurement backend: one complete test on this machine, through the existing ``run_grid``.
 
 * a single-point test runs on one server the lifecycle holds up, one ``run_grid`` call per round, in one order whatever
-  the test: the warmup bench, the measured bench, then, for a graded test (accuracy asked for), the evaluation in a
-  round of its own that runs no bench, which the accuracy is read from. No bench evaluates, in a sweep arm either;
+  the test: the warmup bench (none for a point measured once, an AgentX replay), the measured bench, then, for a graded
+  test (accuracy asked for), the evaluation in a round of its own that runs no bench, which the accuracy is read from.
+  No bench evaluates, in a sweep arm either;
 * a single-point test whose server the lifecycle cannot hold (a profile, a framework it cannot hold) is ``run_grid``
   with one variant: measured round, the evaluation after its bench when the point asks for one, teardown;
 * one arm of a concurrency sweep boots the inference server once and benches the levels from high to low on it, the
-  way ``conc_sweep`` does, stepping down a level when the boot fails; a graded arm then evaluates once on that server;
+  way ``conc_sweep`` does; a graded arm then evaluates once on that server. An arm whose levels must not share a
+  server (``BenchmarkPoint.sweeps_on_cold_servers``), or whose server the lifecycle cannot hold, boots one per level;
 * accuracy is the ``RUN_EVAL`` switch in the point's own YAML, which must say what the caller asked for.
 
 Nothing in the old flow changes: this file only calls what ``orchestrator.actions.executors`` exports.
@@ -33,8 +35,9 @@ from pathlib import Path
 from typing import Any
 
 import yaml
+from inference_suite.contracts import FailedStep, RunLayout
 
-from hyperloom.common.benchmark_config import is_magpie_agentx
+from hyperloom.common.benchmark_config import BenchmarkPoint, BenchmarkPointError, read_benchmark_point
 from hyperloom_common.env import is_truthy
 from hyperloom.common.env_safety import filter_untrusted_env_mapping, is_allowed_variant_env_key
 from hyperloom.common.outside_facts import (
@@ -43,11 +46,9 @@ from hyperloom.common.outside_facts import (
     ENV_NUM_PROMPTS,
     ENV_RUN_EVAL,
     ENV_TP,
-    MAGPIE_AGENTX_CLIENT_LOG,
     ROCR_VISIBLE_DEVICES_ENV,
 )
 from hyperloom.contracts.measurement import PhaseTiming, SandboxFacts
-from hyperloom.inference_optimizer import framework_registry
 from hyperloom.measure.attachments import AttachmentError, place_attachments, substitute
 from hyperloom.measure.accuracy import read_accuracy
 from hyperloom.measure import log_causes
@@ -55,7 +56,14 @@ from hyperloom.measure.boot_watch import BOOT_CANCEL_REASON, BootGuard, boot_lim
 from hyperloom.measure.compile import CompiledEnvironment, LocalBlobStore
 from hyperloom.measure.jit.native.config import store_from_environment
 from hyperloom.measure.jit.native.laying import NamedBuild, NativeLayError, SheetBuilds, sheet_builds
-from hyperloom.measure.failures import Disposition, FailureClassification, classify_test_failure, decides_test
+from hyperloom.measure.failures import (
+    Disposition,
+    FailureClassification,
+    FailureEvidence,
+    StepFailure,
+    classify_test_failure,
+    decides_test,
+)
 from hyperloom.measure.farm import (
     FarmError,
     build_farm,
@@ -81,7 +89,6 @@ from hyperloom.measure.long_context.held import (
     served_by,
 )
 from hyperloom.measure.long_context import staging as long_context_staging
-from hyperloom.measure.magpie_launchers import install_launchers
 from hyperloom.measure.phases import (
     JIT_CACHE,
     KERNEL_TABLES,
@@ -93,7 +100,6 @@ from hyperloom.measure.phases import (
 )
 from hyperloom.measure.points import AMBIENT_SHAPE_ENVS, launch_carriers
 from hyperloom.common.ports import pick_server_port
-from hyperloom.measure.profile_client import ProfileClientError, patch_profile_client
 from hyperloom.measure.profile_traces import PROFILE_DIR, collect_traces, round_has_traces
 from hyperloom.measure.repro import ReproError, find_case, run_case
 from hyperloom.measure.returncodes import HOSTED_INFRA_FAILURE_RC, SERVER_BOOT_TIMEOUT_RC
@@ -110,28 +116,27 @@ from hyperloom.measure.spec import EnvRoot as SpecEnvRoot
 from hyperloom.orchestrator.actions.executors import (
     ORCHESTRATOR_CANCELLED_RETURNCODE,
     SESSION_TIME_EXHAUSTED_RETURNCODE,
+    RoundFolder,
     GridLaunch,
     GridRecipe,
     GridStop,
     GridVariant,
     LaunchLayer,
     VariantResult,
+    is_round_folder,
     resolve_lifecycle_params,
     run_grid,
     run_grid_warmup_enabled,
-    teardown_lifecycle_server,
+    teardown_variant_server,
 )
 from hyperloom.orchestrator.actions.cancel_channel import CancelScope, current_cancel_scope, use_cancel_scope
-from hyperloom.orchestrator.actions.executors.benchmark_backend import resolve_backend
-from hyperloom.orchestrator.actions.stop_attribution import (
-    ORCHESTRATOR_CANCELLED_CLASS,
-    SESSION_TIME_EXHAUSTED_CLASS,
-)
+from hyperloom.orchestrator.actions.stop_attribution import ORCHESTRATOR_CANCELLED_CLASS, SESSION_TIME_EXHAUSTED_CLASS
+from hyperloom.orchestrator.state.base_launch import freeze_base
 
 __all__ = ["LocalMeasurementBackend", "SUPPORTED_KINDS", "TestCallRefused"]
 
 #: ``VariantResult.error_class`` of a round the per-round cap reaped.
-_TIMEOUT_CLASSES = frozenset({"magpie_timeout", "warmup_magpie_timeout"})
+_TIMEOUT_CLASSES = frozenset({FailedStep.ROUND_TIMEOUT.value})
 #: Return codes of rounds the run itself stopped, keyed by the class the result carries.
 _STOP_RETURNCODES = {
     SESSION_TIME_EXHAUSTED_CLASS: SESSION_TIME_EXHAUSTED_RETURNCODE,
@@ -145,7 +150,6 @@ _MIB = 1 << 20
 _REFUSAL_SCAN_CHARS = 16 * _MIB
 _REFUSAL_BLOCK_CHARS = _MIB
 _REFUSAL_BLOCK_OVERLAP_CHARS = 4096
-_BENCHMARK_STDERR = "benchmark_stderr.log"
 _ACCURACY = "accuracy"
 _UTF8 = "utf-8"
 _PROFILE = "profile"
@@ -167,21 +171,17 @@ _CONTRIBUTING = frozenset({_TEST, _ACCURACY})
 #: The old flow reads the process environment, so two tests in one process would see each other's settings.
 _PROCESS_LOCK = threading.Lock()
 
-#: What a boot round pins in its round's environment, on top of the point and of what the backend says a boot round is
-#: (``boot_phase_envs``). A boot round only brings a server up for the rounds that measure, yet Magpie runs the server
-#: phase and then a full client round whatever ``MAGPIE_RUN_PHASE`` says, so that round has to be made small: no
-#: evaluation (``RUN_EVAL``: 1319 questions on a GSM8K point) and one request, not the point's ``NUM_PROMPTS``. Both are
-#: in Magpie's ``CLIENT_ONLY_REUSE_ENV_KEYS``, which a persistent server's reuse check leaves out; a variable outside
-#: those keys would make the check refuse the rounds that measure. ``NUM_WARMUPS`` stays the point's (Magpie takes its
-#: warmups from the concurrency). An AgentX point has no evaluation round and no prompt count; its boot round carries
-#: only what the backend says.
+#: What a boot round pins in its round's environment, on top of the point. A boot round only brings a server up for the
+#: rounds that measure, and pins it small in case it runs a load: no evaluation (``RUN_EVAL``: 1319 questions on a
+#: GSM8K point) and one request, not the point's ``NUM_PROMPTS``. Both are client-only knobs, so the rounds that measure
+#: reuse the server the boot round started. ``NUM_WARMUPS`` stays the point's. An AgentX point has no evaluation round
+#: and no prompt count; its boot round pins nothing.
 _BOOT_CLIENT_ENVS = {ENV_RUN_EVAL: "false", ENV_NUM_PROMPTS: "1"}
 _WARMUP, _EVAL = ROLE_WARMUP, ROLE_EVAL  # a held test's rounds other than the measured one are named for their roles
-#: No bench of a graded test evaluates, although its point does. ``RUN_EVAL`` is one of Magpie's
-#: ``CLIENT_ONLY_REUSE_ENV_KEYS``, so the server the first round booted is the one each later round reuses.
+#: A graded test's benches never evaluate: ``RUN_EVAL`` is client-only, so each later round reuses the first's server.
 _BENCH_ENVS = {ENV_RUN_EVAL: "false"}
-#: The evaluation round runs no bench: InferenceX's ``run_benchmark_serving`` returns before it on ``EVAL_ONLY``, which
-#: Magpie's reuse check leaves out (an ``EVAL_*`` name).
+#: The evaluation round runs no bench: InferenceX's ``run_benchmark_serving`` returns before it on ``EVAL_ONLY``, a
+#: client-only knob (an ``EVAL_*`` name).
 _EVAL_ENVS = {ENV_RUN_EVAL: "true", ENV_EVAL_ONLY: "true"}
 #: What ``run_grid`` writes on a point whose warmup round it discarded, with the throughput of that round.
 _WARMUP_DISCARDED = "run_grid_warmup_discarded_first"
@@ -189,6 +189,7 @@ _WARMUP_DISCARDED = "run_grid_warmup_discarded_first"
 _CHECK_SKIPPED = "short_prompt_check skipped: test failed"
 _LONG_CONTEXT_SKIPPED = "long_context_check skipped: test failed"
 _NOT_HELD = "the test's server was not held up for the check (its framework's lifecycle cannot hold one)"
+_NOT_CHECKED = "the test's server was not held up for the check (an AgentX test runs no accuracy check)"
 _WARMUP_TPUT = "warmup_round_tput"
 
 
@@ -298,12 +299,8 @@ def _measure(call: TestCall, phases: PhaseRecorder, tracer: ruppell.Tracer | Non
         _framework_tables(call) as private,
         _patched_server(private.call) as call,
     ):
-        if call.kind == _PROFILE:
-            _patch_profile_client(call)
         with _test_environment(call) as unset_envs:
             call, tracer = _traced(call, tracer, notes)
-            if resolve_backend().name == "magpie":
-                install_launchers(call.points)
             run = _Run(call, [name for name in unset_envs if name not in private.redirected], phases=phases)
             run.traced = tracer
             with _watch_output(call), _guard_boot(run):
@@ -328,8 +325,11 @@ def _point_config(point: Path) -> dict[str, Any]:
     return yaml.safe_load(Path(point).read_text(encoding=_UTF8)) or {}
 
 
-def _point_envs(point: Path) -> dict[str, Any]:
-    return dict((_point_config(point).get("benchmark") or {}).get("envs") or {})
+def _point(point: Path) -> BenchmarkPoint:
+    try:
+        return read_benchmark_point(Path(point))
+    except BenchmarkPointError as exc:
+        raise TestCallRefused(str(exc)) from exc
 
 
 def _validate(call: TestCall) -> None:
@@ -366,10 +366,9 @@ def _validate_profile(call: TestCall) -> None:
         raise TestCallRefused("a profile test profiles one point; it is not a sweep")
     if call.accuracy:
         raise TestCallRefused("a profile test does not run accuracy")
-    benchmark = _point_config(call.points[0]).get("benchmark") or {}
-    torch_profiler = (benchmark.get("profiler") or {}).get("torch_profiler") or {}
-    client_profiling = str((benchmark.get("envs") or {}).get("PROFILE", "")).strip() == "1"
-    if torch_profiler.get("enabled") is not True or not (client_profiling or is_magpie_agentx(benchmark)):
+    point = _point(call.points[0])
+    client_profiling = str(point.envs.get("PROFILE", "")).strip() == "1"
+    if not point.torch_profiler or not (client_profiling or point.agentx):
         raise TestCallRefused(
             f"{call.points[0]} does not turn the torch profiler on (torch_profiler, and PROFILE=1 unless AgentX)"
         )
@@ -405,7 +404,7 @@ def _validate_repro(call: TestCall) -> None:
 
 def _check_run_eval(point: Path, accuracy: bool) -> None:
     """The point must say, explicitly, whether it runs accuracy; an unset ``RUN_EVAL`` means on in the old flow."""
-    raw = _point_envs(point).get(ENV_RUN_EVAL)
+    raw = _point(point).envs.get(ENV_RUN_EVAL)
     if raw is None:
         raise TestCallRefused(f"{point} does not set RUN_EVAL; an unset value runs accuracy")
     if is_truthy(raw, default=True) != accuracy:
@@ -413,30 +412,13 @@ def _check_run_eval(point: Path, accuracy: bool) -> None:
 
 
 def _levels(points: Sequence[Path]) -> list[int]:
-    return [int(_point_envs(point).get(ENV_CONC) or 0) for point in points]
+    return [int(_point(point).envs.get(ENV_CONC) or 0) for point in points]
 
 
 def _check_sweep_levels(points: Sequence[Path]) -> None:
     levels = _levels(points)
     if any(level <= 0 for level in levels) or len(set(levels)) != len(levels):
         raise TestCallRefused(f"every sweep point names its own CONC, got {levels}")
-
-
-def _patch_profile_client(call: TestCall) -> None:
-    """Make the InferenceX checkout a profile point runs honour the point's capture window, or refuse the test.
-
-    The checkout is the one the point names, else the session's; a test with neither (an AgentX point, whose client is
-    Magpie's, or a framework with no InferenceX script) has none to patch.
-    """
-    benchmark = _point_config(call.points[0]).get("benchmark") or {}
-    facts = call.session_facts
-    root = benchmark.get("inferencex_path") or (facts.inferencex_path if facts is not None else None)
-    if not root or is_magpie_agentx(benchmark) or framework_registry.is_scriptable(benchmark.get("framework")):
-        return
-    try:
-        patch_profile_client(root)
-    except ProfileClientError as exc:
-        raise TestCallRefused(str(exc)) from exc
 
 
 @contextlib.contextmanager
@@ -474,12 +456,12 @@ def _rebuilt_environment(call: TestCall, notes: list[str]) -> Iterator[TestCall]
         return
     work = Path(tempfile.mkdtemp(prefix="hl-farm-"))
     try:
-        yield dataclasses.replace(call, points=_rebuilt_points(call, environment, work, notes))
+        yield _rebuilt_call(call, environment, work, notes)
     finally:
         shutil.rmtree(work, ignore_errors=True)
 
 
-def _rebuilt_points(call: TestCall, environment: CompiledEnvironment, work: Path, notes: list[str]) -> tuple[Path, ...]:
+def _rebuilt_call(call: TestCall, environment: CompiledEnvironment, work: Path, notes: list[str]) -> TestCall:
     if call.jit is None and patches_aiter_sources(environment.roots):
         raise TestCallRefused(
             "the patch changes aiter's csrc or hsa, which is measured only by building the modules it touches in the "
@@ -492,11 +474,8 @@ def _rebuilt_points(call: TestCall, environment: CompiledEnvironment, work: Path
         return store.get(address.removeprefix("sha256:"))
 
     try:
-        placed = place_attachments(
-            [Attachment(a.id, a.kind, f"sha256:{a.sha256}", "0" * 64) for a in environment.attachments],
-            work / "attach",
-            read_blob,
-        )
+        attachments = [Attachment(a.id, a.kind, f"sha256:{a.sha256}", "0" * 64) for a in environment.attachments]
+        placed = place_attachments(attachments, work / "attach", read_blob)
         python = server_python(_point_config(call.points[0]), default=sys.executable)
         roots = [SpecEnvRoot.parse(root.to_document(), "environment.roots") for root in environment.roots]
         inherited = inherited_environment(os.environ, call.env_overrides, call.unset_envs)
@@ -517,7 +496,7 @@ def _rebuilt_points(call: TestCall, environment: CompiledEnvironment, work: Path
             points.append(target)
     except (AttachmentError, FarmError, NativeLayError, OSError, ValueError) as exc:
         raise TestCallRefused(f"the compiled environment cannot be rebuilt here: {exc}") from exc
-    return tuple(points)
+    return dataclasses.replace(call, points=tuple(points), framework_changed=farm is not None)
 
 
 def _builds(environment: CompiledEnvironment) -> SheetBuilds | None:
@@ -532,11 +511,9 @@ def _builds(environment: CompiledEnvironment) -> SheetBuilds | None:
 
 @contextlib.contextmanager
 def _test_environment(call: TestCall) -> Iterator[list[str]]:
-    """Set the process environment ``run_grid`` reads for this test, and put it back afterwards.
-
-    Yields the variables the test's rounds unset. The session directory is a fresh empty one, so the reference launch
-    the old flow keeps there reads as empty whatever else is on this machine.
-    """
+    """Set the process environment ``run_grid`` reads for this test, and put it back afterwards; yields the variables
+    the test's rounds unset. The session directory is a fresh one holding only the base the call carries, frozen as a
+    session freezes it, so the rounds never read the asking application's session."""
     facts = call.session_facts
     session = Path(tempfile.mkdtemp(prefix="hl-session-"))
     settings = {
@@ -548,7 +525,7 @@ def _test_environment(call: TestCall) -> Iterator[list[str]]:
         settings["INFERENCE_OPTIMIZER_BENCHMARK_SILENCE_TIMEOUT_SEC"] = str(call.silence_timeout_sec)
     if facts is not None and facts.inferencex_path:
         settings["INFERENCEX_PATH"] = facts.inferencex_path
-    if call.kind == _PROFILE and (body := _point_envs(call.points[0]).get(_PROFILE_BODY_ENV)):
+    if call.kind == _PROFILE and (body := _point(call.points[0]).envs.get(_PROFILE_BODY_ENV)):
         settings[_PROFILE_BODY_ENV] = str(body)
     settings.update({str(key): str(value) for key, value in call.env_overrides.items()})
     saved = {key: os.environ.get(key) for key in (*AMBIENT_SHAPE_ENVS, *settings)}
@@ -556,13 +533,13 @@ def _test_environment(call: TestCall) -> Iterator[list[str]]:
         os.environ.pop(key, None)
     os.environ.update(settings)
     try:
+        if facts is not None and facts.base_launch is not None:
+            freeze_base(session, facts.base_launch)
         yield list(dict.fromkeys([*(facts.reference_unset_envs if facts else ()), *call.unset_envs]))
     finally:
-        for key, value in saved.items():
-            if value is None:
-                os.environ.pop(key, None)
-            else:
-                os.environ[key] = value
+        os.environ.update({key: value for key, value in saved.items() if value is not None})
+        for key in [key for key, value in saved.items() if value is None]:
+            os.environ.pop(key, None)
         shutil.rmtree(session, ignore_errors=True)
 
 
@@ -615,7 +592,7 @@ def _booting(run: _Run, point: int, round_args: dict[str, Any]) -> contextlib.Ab
     call = run.call
     if run.boot is None or round_args.get("server_already_ready") or call.serving_lease is not None:
         return contextlib.nullcontext()
-    limit = boot_limit_sec(_point_config(call.points[point]).get("benchmark") or {}, call.timeout_sec)
+    limit = boot_limit_sec(_point(call.points[point]), call.timeout_sec)
     return contextlib.nullcontext() if limit is None else run.boot.watching(limit)
 
 
@@ -628,7 +605,7 @@ def _free_port_for(point: Path, server_lifecycle: dict[str, Any] | None) -> Iter
 
     A round the server lifecycle does not hold (a profile round, a framework that cannot hold a server, a warmup that
     is not planned) has no port assigned, and its server listens on the default: two of them on one machine collide on
-    it. The InferenceX script and Magpie's AgentX server both read the port from ``benchmark.envs.PORT``, so it goes
+    it. The InferenceX script and the AgentX server both read the port from ``benchmark.envs.PORT``, so it goes
     there, into a copy: the point itself is shared by every test that runs it. The port is picked where the server is
     launched (:func:`~hyperloom.common.ports.pick_server_port`).
     """
@@ -655,8 +632,8 @@ async def _grid(run: _Run, point: int, name: str, **launch: Any) -> VariantResul
             grid=[GridVariant(name, unset_envs=run.unset_envs)],
             output_root=Path(call.output_dir),
             recipe=GridRecipe(base_yaml, base=LaunchLayer(extra_envs=envs)),
-            launch=GridLaunch(call.magpie_python or None, call.result_dir, call.serving_lease, **launch),
-            stop=GridStop(session_deadline_sec=call.session_deadline_sec),
+            launch=GridLaunch(call.result_dir, call.serving_lease, **launch),
+            stop=GridStop(call.session_deadline_sec, checkpoint=call.checkpoint and call.checkpoint.on(name == _TEST)),
         )
         ended = time.time()
     _stamp_round(run, point, _round_shape(run, point, name, launch, results[0]), (started, ended))
@@ -667,11 +644,10 @@ def _round_shape(run: _Run, point: int, name: str, kwargs: dict[str, Any], resul
     """What a round's call says about it, for reading the phases off the marks it left."""
     lifecycle = kwargs.get("server_lifecycle")
     role = ROLE_BOOT if kwargs.get("lifecycle_boot_only") else name if name in (_WARMUP, _EVAL) else ROLE_MEASURE
-    benchmark = _point_config(run.call.points[point]).get("benchmark") or {}
     stays_up = lifecycle is not None and not lifecycle.get("cleanup", True)
     return RoundShape(
         role,
-        is_magpie_agentx(benchmark),
+        _point(run.call.points[point]).agentx,
         bool(kwargs.get("server_already_ready")),
         _is_failure(result),
         ROUND_COLLECT if stays_up else TEARDOWN,
@@ -687,7 +663,8 @@ def _stamp_round(run: _Run, point: int, shape: RoundShape, window: tuple[float, 
 
 async def _single(run: _Run) -> None:
     # A profiled round is not a statistic: it runs once, with no warmup before it.
-    warmup = 0 if run.call.kind == _PROFILE else run.call.rounds.warmup_rounds
+    once = run.call.kind == _PROFILE or _point(run.call.points[0]).measured_once
+    warmup = 0 if once else run.call.rounds.warmup_rounds
     lifecycle = _Lifecycle(run)
     if lifecycle.eligible:
         await _held_rounds(run, lifecycle, _warms(warmup))
@@ -700,15 +677,17 @@ def _warms(warmup: int | None) -> bool:
 
 
 def _checks_held(call: TestCall) -> bool:
-    """Whether the test runs an accuracy check, which asks the test's own server before its teardown."""
-    return call.short_prompts is not None or call.long_context is not None
+    """Whether the test runs an accuracy check, which asks the test's own server before its teardown; a point that holds
+    none (``BenchmarkPoint.holds_accuracy_checks``) has its planned checks recorded as not held."""
+    planned = call.short_prompts is not None or call.long_context is not None
+    return planned and _point(call.points[0]).holds_accuracy_checks
 
 
 async def _held_rounds(run: _Run, lifecycle: _Lifecycle, warm: bool) -> None:
-    """The warmup bench, the measured bench and, for a graded test, the evaluation (``_evaluate``), on one server; then
-    the accuracy checks on it. A bench that followed the evaluation started on the KV pool it left full, and read lower.
-    The warmup draws prompts of its own (``_grid``); when it failed, was stopped or its logs name a cause that settles
-    the test (a crashed server, a refused request), nothing is measured."""
+    """The warmup bench when ``warm``, the measured bench and, for a graded test, the evaluation (``_evaluate``), on one
+    server; then the accuracy checks on it (``_checks_held``). A bench that followed the evaluation started on the KV pool it left full, and
+    read lower. The warmup draws prompts of its own (``_grid``); when it failed, was stopped or its logs name a cause
+    that settles the test (a crashed server, a refused request), nothing is measured."""
     run.evaluates_apart = True
     bench_envs = _BENCH_ENVS if run.call.accuracy else None  # an explore's point does not evaluate
     try:
@@ -811,47 +790,46 @@ class _Lifecycle:
         self.framework = str(info.get("framework") or "")
         self.reason = str(info.get("reason") or "")
         self._phases = run.phases
+        self._notes = run.notes
 
     def settings(self, *, cleanup: bool) -> dict[str, Any]:
         return {"cleanup": cleanup, "pid_dir": str(self.pid_dir), "port": self.port}
 
     def teardown(self) -> None:
         self._phases.begin(TEARDOWN)
-        teardown_lifecycle_server(pid_dir=self.pid_dir, framework=self.framework, port=self.port)
+        survivors = teardown_variant_server(self.pid_dir)
+        if survivors:
+            self._notes.append(f"server pids {survivors} outlived SIGKILL; {self.pid_dir} keeps their record")
         self._phases.begin(OTHER)
 
 
 async def _sweep(run: _Run) -> None:
-    """One arm: boot once on the highest level that boots, bench every level on that server, evaluate a graded arm once
-    after the last bench from the level it booted on (the highest, the quickest to evaluate), tear the server down."""
+    """One arm: boot once on the highest level, bench every level on that server, evaluate a graded arm once after the
+    last bench from the level it booted on (the quickest to evaluate), tear the server down."""
     order = sorted(range(len(run.call.points)), key=lambda i: -_levels(run.call.points)[i])
+    if _point(run.call.points[0]).sweeps_on_cold_servers:
+        run.notes.append("server restarted per level: an AgentX replay is cache-sensitive")
+        await _sweep_by_restart(run, order)
+        return
     lifecycle = _Lifecycle(run)
     if not lifecycle.eligible:
         run.notes.append(f"server restarted per level: {lifecycle.reason}")
         await _sweep_by_restart(run, order)
         return
     try:
-        booted = await _boot(run, lifecycle, order)
-        if run.stopped_rc is not None:
-            return
-        if booted is None:
-            run.notes.append("every boot attempt failed; server restarted per level")
-            await _sweep_by_restart(run, order)
+        if not await _boot(run, lifecycle, order[0]):
             return
         run.evaluates_apart = True
-        await _reuse(run, lifecycle, order[booted:])
-        await _evaluate(run, lifecycle, order[booted])
+        await _reuse(run, lifecycle, order)
+        await _evaluate(run, lifecycle, order[0])
         await _held_checks(run, lifecycle)
     finally:
         lifecycle.teardown()
 
 
 def _boot_envs(point: Path) -> dict[str, str]:
-    """The environment a boot round of ``point`` is run with: the backend's boot phase, no evaluation, one request."""
-    phase = dict(resolve_backend().boot_phase_envs)
-    if is_magpie_agentx(_point_config(point).get("benchmark") or {}):
-        return phase
-    return {**phase, **_BOOT_CLIENT_ENVS}
+    """The environment a boot round of ``point`` is run with: no evaluation and one request, nothing for AgentX."""
+    return {} if _point(point).agentx else dict(_BOOT_CLIENT_ENVS)
 
 
 async def _boot_server(run: _Run, lifecycle: _Lifecycle, point: int, name: str) -> VariantResult:
@@ -871,18 +849,14 @@ async def _boot_server(run: _Run, lifecycle: _Lifecycle, point: int, name: str) 
     )
 
 
-async def _boot(run: _Run, lifecycle: _Lifecycle, order: list[int]) -> int | None:
-    """Boot the server on the first level in ``order`` that boots (stepping down on failure); its position, or None."""
-    for position, point in enumerate(order):
-        boot = await _boot_server(run, lifecycle, point, f"c{_levels(run.call.points)[point]}")
-        if not _is_failure(boot):
-            return position
-        if boot.error_class in _STOP_RETURNCODES:
-            run.add(point, boot)
-            return None
-        lifecycle.teardown()
-        run.notes.append(f"boot at {_levels(run.call.points)[point]} failed ({boot.error_class}); stepping down")
-    return None
+async def _boot(run: _Run, lifecycle: _Lifecycle, point: int) -> bool:
+    """Boot the server from the point at index ``point``; whether it is up. A failed boot is the arm's failed row: no
+    level boots another server, as ``CONC`` never reaches the server's launch."""
+    boot = await _boot_server(run, lifecycle, point, f"c{_levels(run.call.points)[point]}")
+    if _is_failure(boot):
+        run.add(point, boot)
+        return False
+    return True
 
 
 async def _reuse(run: _Run, lifecycle: _Lifecycle, order: list[int]) -> None:
@@ -903,7 +877,7 @@ async def _reuse(run: _Run, lifecycle: _Lifecycle, order: list[int]) -> None:
 
 
 async def _sweep_by_restart(run: _Run, order: list[int]) -> None:
-    """The fallback ``conc_sweep`` has for a framework that cannot hold a server: one server per level."""
+    """One server per level, booted and torn down by the level's own round."""
     for point in order:
         result = await _grid(run, point, f"c{_levels(run.call.points)[point]}", warmup_before_measure=False)
         if not run.add(point, result):
@@ -954,13 +928,13 @@ def _run_case(run: _Run, port: int) -> None:
 
 
 def _model_of(call: TestCall) -> str:
-    return str((_point_config(call.points[0]).get("benchmark") or {}).get("model") or "")
+    return _point(call.points[0]).model
 
 
 async def _short_prompts(run: _Run) -> None:
     """Write the short-prompt check: the test's own server's answers, or why it gave none; a failure of the check is the
     check's (``outputs.json`` says), never the test's."""
-    first = run.held.short if run.held is not None else not_held(_held_checks_of(run.call), _NOT_HELD)
+    first = run.held.short if run.held is not None else not_held(_held_checks_of(run.call), _unheld_reason(run.call))
     if first is not None:
         write_answered(first, Path(run.call.output_dir))
 
@@ -968,7 +942,11 @@ async def _short_prompts(run: _Run) -> None:
 async def _long_context_unheld(run: _Run) -> None:
     """The long-context check of a test whose server was not held up for it (one that was ran it there)."""
     if run.held is None:
-        await long_context_unheld(_held_checks_of(run.call), _NOT_HELD)
+        await long_context_unheld(_held_checks_of(run.call), _unheld_reason(run.call))
+
+
+def _unheld_reason(call: TestCall) -> str:
+    return _NOT_HELD if _point(call.points[0]).holds_accuracy_checks else _NOT_CHECKED
 
 
 def _held_checks_of(call: TestCall) -> HeldChecks:
@@ -1034,7 +1012,7 @@ def _set_aside(run: _Run) -> None:
 def _ranks(call: TestCall) -> int:
     """The worker processes ruppell's check expects: the point's tensor-parallel size."""
     try:
-        return max(1, int(_point_envs(call.points[0]).get(ENV_TP) or 1))
+        return max(1, int(_point(call.points[0]).envs.get(ENV_TP) or 1))
     except (TypeError, ValueError):
         return 1
 
@@ -1075,12 +1053,10 @@ def _result_returncode(result: VariantResult) -> int:
 
 
 def _eval_returncode(result: VariantResult) -> int:
-    """The accuracy pass's own exit code when the round recorded one, else the round's."""
-    marker = Path(result.workspace or "") / "eval_returncode"
-    try:
-        return int(marker.read_text(encoding=_UTF8).strip())
-    except (OSError, ValueError):
-        return _result_returncode(result)
+    """The accuracy pass's own exit code when its run_dir's report has one, else the round's."""
+    workspace = Path(result.workspace or "")
+    code = RoundFolder.read(workspace).report.codes.eval if is_round_folder(workspace) else None
+    return _result_returncode(result) if code is None else code
 
 
 def _warmup_round_outcome(point: int, result: VariantResult, workspace: Path) -> RoundOutcome:
@@ -1176,31 +1152,30 @@ def _clean_returncode(run: _Run) -> int:
 
 
 def _failure_logs(failing: list[VariantResult]) -> list[str]:
-    """The tails of the server log and of the benchmark's own stderr of every result with a failed round.
+    """The tails of the server log and of the client's and the evaluation's stderr of every result with a failed round.
 
     The launcher's pipe seldom holds the cause: the server prints a refused flag or a crash into ``server.log``, and the
-    evaluation client prints a refused request into ``benchmark_stderr.log``.
+    client or the evaluation prints a refused request into its own stderr in the round's run_dir.
     """
     logs: list[str] = []
     for result in failing:
-        if not result.server_log_path:
-            continue
-        beside = Path(result.server_log_path).parent
-        stderr_logs = [beside / _BENCHMARK_STDERR, *sorted(beside.glob(f"benchmark_*/{_BENCHMARK_STDERR}"))]
-        logs.extend(_read_tail(str(path)) for path in [Path(result.server_log_path), *stderr_logs])
-        logs.extend(_read_refusal(path) for path in stderr_logs)
+        if result.server_log_path:
+            logs.append(_read_tail(result.server_log_path))
+        if result.workspace:
+            layout = RunLayout(Path(result.workspace))
+            stderr_logs = [layout.client_stderr, layout.eval_stderr]
+            logs.extend(_read_tail(str(path)) for path in stderr_logs)
+            logs.extend(_read_refusal(path) for path in stderr_logs)
     return logs
 
 
 def _client_logs(failing: list[VariantResult]) -> list[str]:
-    """The tails of the AgentX replay client's own log beside the server log of every result with a failed round.
+    """The tails of the AgentX replay client's own log in the run_dir of every result with a failed round.
 
-    Magpie records only the client's exit code as the round's error; what the client was refused is in this log alone.
+    The round's report names only the client's exit code; what the client was refused is in this log alone.
     """
     return [
-        _read_tail(str(Path(result.server_log_path).parent / MAGPIE_AGENTX_CLIENT_LOG))
-        for result in failing
-        if result.server_log_path
+        _read_tail(str(RunLayout(Path(result.workspace)).agentx_client_log)) for result in failing if result.workspace
     ]
 
 
@@ -1247,9 +1222,34 @@ def _ended(run: _Run) -> _Ended:
     failed = [r for r in rounds if r.returncode != 0]
     returncode = failed[0].returncode if failed else _clean_returncode(run)
     stderr = "\n".join([*(result.error for _, result in run.results if result.error), *notes])
-    logs = [stderr, *_failure_logs(failing)]
-    verdict = classify_test_failure(returncode=returncode, logs=logs, client_logs=_client_logs(failing), detail=detail)
+    evidence = FailureEvidence(
+        logs=(stderr, *_failure_logs(failing)),
+        client_logs=tuple(_client_logs(failing)),
+        detail=detail,
+        step_failure=_step_failure(failing),
+        unrun=_unrun(failing),
+        framework_changed=run.call.framework_changed,
+    )
+    verdict = classify_test_failure(returncode=returncode, evidence=evidence)
     return _Ended(rounds, returncode, stderr, verdict)
+
+
+def _step_failure(failing: list[VariantResult]) -> StepFailure | None:
+    """The failed step and detail of the first failed round whose report names one; a round with no run_dir names none."""
+    folders = (Path(result.workspace) for result in failing if result.workspace)
+    for report in (RoundFolder.read(folder).report for folder in folders if is_round_folder(folder)):
+        if report.failed_step is not None:
+            return StepFailure(report.failed_step, report.failure_detail or "")
+    return None
+
+
+def _unrun(failing: list[VariantResult]) -> str:
+    """``<error_class>: <error>`` of the first failed round that left neither a workspace nor a server log (it was refused
+    before it ran), else ``""``."""
+    for result in failing:
+        if result.error_class and not result.workspace and not result.server_log_path:
+            return f"{result.error_class}: {result.error}" if result.error else result.error_class
+    return ""
 
 
 def _outcome(run: _Run) -> TestOutcome:

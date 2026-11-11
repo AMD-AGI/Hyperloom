@@ -23,7 +23,7 @@ from hyperloom_multibranch.specialist.agent_sessions import (
     with_agents,
 )
 from hyperloom_multibranch.specialist.autonomous_session import AutonomousSession
-from hyperloom_multibranch.specialist.gate_client import GateClient
+from hyperloom_multibranch.specialist.gate_client import read_gate_client
 from hyperloom_multibranch.specialist.agent_session import AgentCommand, AgentSession, AgentSetup, BranchPlace
 from hyperloom_multibranch.specialist.model_sessions import ModelSessions, model_sessions
 from hyperloom_multibranch.specialist.prompts import role_prompt
@@ -139,7 +139,7 @@ benchmark:
     NUM_PROMPTS: 320
     NUM_WARMUPS: 8
     RUN_EVAL: 'true'
-    MAGPIE_TRUST_REMOTE_CODE: '1'
+    BENCH_TRUST_REMOTE_CODE: '1'
   benchmark_script: sglang_mi355x.sh
   inferencex_path: /cache/InferenceX
 """
@@ -191,10 +191,24 @@ def test_a_run_given_a_reviewed_dossier_gives_it_to_every_agent_branch(tmp_path)
     assert [spec.dossier for spec in specs] == ["/reviewed/dossier/qwen3-8b"] * 2
 
 
+def _flags(argv: list[str]) -> dict[str | None, object]:
+    """One pass of the gate's client: its interpreter and module under ``None``, then each flag's value (``True`` for a
+    switch); the ``NAME=value`` environment prefix is left out."""
+
+    argv = [token for token in argv if "=" not in token or token.startswith("-")]
+    flags: dict[str | None, object] = {None: argv[:3]}
+    rest = argv[3:]
+    for index, token in enumerate(rest):
+        if token.startswith("--"):
+            following = rest[index + 1] if index + 1 < len(rest) else "--"
+            flags[token] = True if following.startswith("--") else following
+    return flags
+
+
 def test_each_agent_is_given_the_client_the_gate_measures_with_on_its_own_port(tmp_path):
     canonical = tmp_path / "canonical.yaml"
     canonical.write_text(CANONICAL, encoding="utf-8")
-    agents = replace(_agent_sessions(), client=GateClient.read(canonical))
+    agents = replace(_agent_sessions(), client=read_gate_client(canonical))
     places = [
         BranchPlace(SimpleNamespace(path=tmp_path / branch / "worktree"), object(), tmp_path / branch / "session")
         for branch in ("a1", "a2")
@@ -205,28 +219,28 @@ def test_each_agent_is_given_the_client_the_gate_measures_with_on_its_own_port(t
         for branch, place in zip(("a1", "a2"), places)
     )
 
-    command = shlex.split(second._setup.spec.client)
-    assert command[:2] == ["python3", "/cache/InferenceX/utils/bench_serving/benchmark_serving.py"]
-    flags = dict(zip(command[2::2], command[3::2]))
-    assert {key: flags[key] for key in ("--model", "--backend", "--base-url", "--dataset-name")} == {
+    warmup, measured = (_flags(shlex.split(part)) for part in second._setup.spec.client.split(" && "))
+    assert measured[None] == ["python3", "-m", "infx.bench_serving.benchmark_serving"]
+    assert {key: measured[key] for key in ("--model", "--backend", "--base-url", "--dataset-name")} == {
         "--model": "/models/Qwen3-Next-80B-A3B-Instruct-FP8",
         "--backend": "vllm",
         "--base-url": "http://0.0.0.0:31110",
         "--dataset-name": "random",
     }
-    assert [flags[key] for key in ("--random-input-len", "--random-output-len", "--max-concurrency")] == [
+    assert [measured[key] for key in ("--random-input-len", "--random-output-len", "--max-concurrency")] == [
         "1024", "1024", "64",
     ]  # fmt: skip
-    assert (flags["--num-prompts"], flags["--num-warmups"], float(flags["--random-range-ratio"])) == ("320", "128", 1)
-    assert "--ignore-eos" in command and "--trust-remote-code" in command
+    assert (measured["--num-prompts"], warmup["--num-prompts"]) == ("320", "8")
+    assert float(measured["--random-range-ratio"]) == 1
+    assert "--ignore-eos" in measured and "--trust-remote-code" in measured
     assert "http://0.0.0.0:31100" in first._setup.spec.client
 
 
 def test_an_agentx_canonical_has_no_client_to_give(tmp_path):
     canonical = tmp_path / "canonical.yaml"
-    canonical.write_text("benchmark:\n  model: /models/m\n  envs:\n    CONC: '8'\n", encoding="utf-8")
+    canonical.write_text("benchmark:\n  model: /models/m\n  agentx: true\n  envs:\n    CONC: '8'\n", encoding="utf-8")
 
-    assert GateClient.read(canonical) is None
+    assert read_gate_client(canonical) is None
 
 
 def test_a_hosted_agent_runs_in_its_lease_s_sandbox_found_again_by_the_lease_alone(tmp_path):

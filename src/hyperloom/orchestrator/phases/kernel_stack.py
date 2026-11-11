@@ -625,11 +625,12 @@ class KernelStackPhase(CoordinatorCollaborator):
 
     def _accuracy_gate_withholds_keep(self, bench_result: dict[str, Any], workspace: Path, stack_id: str) -> bool:
         """Whether the accuracy gate refuses a stack the KEEP its throughput earned."""
+        from ..actions.executors._accuracy_gate import AccuracyReference
         from ..kernel.integrate_accuracy import grade_integrate_accuracy
 
         accuracy_gate = grade_integrate_accuracy(
             bench_result,
-            baseline_accuracy=float(self.shared_state.baseline_accuracy or 0.0),
+            reference=AccuracyReference.of_baseline(self.shared_state),
             workspace=workspace,
             # The args the bench server ran under, so a serving context too small to host an eval is not
             # read as a broken eval.

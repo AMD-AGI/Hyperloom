@@ -126,6 +126,10 @@ def test_a_degraded_agentx_lift_is_refused(session_dir, monkeypatch):
         assert _rows() == []
 
 
+#: What the report mapper stamps on every AgentX round it accepts as evidence.
+_AGENTX_EVIDENCE = {"valid_measurement": True, "diagnostic_only": False, "workload_identity": "agentx-workload"}
+
+
 def _agentx_coord(session_dir: Path, *, with_baseline_axes: bool) -> Coordinator:
     """A coordinator graded on p50 whose session baseline is an output rate on a different scale."""
     coord = _coord(session_dir, baseline=1000.0, anchor=1000.0)
@@ -138,6 +142,7 @@ def _agentx_coord(session_dir: Path, *, with_baseline_axes: bool) -> Coordinator
         "e2e_norm_intvty_p90": 33.7,
         "duration_seconds": 3600.0,
         "request_error_rate": 0.0,
+        **_AGENTX_EVIDENCE,
     }
     coord.shared_state.current_best = {
         "action": "baseline",
@@ -194,6 +199,7 @@ def test_an_agentx_lift_keeps_a_winner_with_comparability_axes(session_dir, monk
                     "e2e_norm_intvty_p90": 38.3,
                     "duration_seconds": 3600.0,
                     "request_error_rate": 0.0,
+                    **_AGENTX_EVIDENCE,
                 },
             )
             is True
@@ -213,6 +219,7 @@ def _agentx_winner(name: str, *, output: float, p50: float, p90: float) -> dict[
         "e2e_norm_intvty_p90": p90,
         "duration_seconds": 3600.0,
         "request_error_rate": 0.0,
+        **_AGENTX_EVIDENCE,
     }
 
 

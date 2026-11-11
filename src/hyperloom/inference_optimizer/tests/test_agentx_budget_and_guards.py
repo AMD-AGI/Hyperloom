@@ -15,8 +15,8 @@ from hyperloom.inference_optimizer.cli import (
     _preflight_agentx_backend,
 )
 from hyperloom.inference_optimizer.cli.bootstrap import (
-    AGENTX_MEASUREMENT_EPOCH,
-    agentx_state_is_stale,
+    MEASUREMENT_EPOCH,
+    measurement_state_is_stale,
 )
 from hyperloom.inference_optimizer.cli.parser import DEFAULT_MAX_HOURS
 
@@ -113,31 +113,9 @@ def test_a_bare_resume_notes_the_default_only_when_the_leg_runs_on_it(
 
 
 # --- explicit-flag detection --------------------------------------------------
-def test_bypass_guard_allows_magpie(native_benchmark, monkeypatch):
-    _on(monkeypatch, native_benchmark)
-    monkeypatch.delenv("HYPERLOOM_BENCHMARK_BACKEND", raising=False)
-    _preflight_agentx_backend(argparse.Namespace())  # must not raise
-
-
-def test_bypass_guard_is_inert_without_agentx(monkeypatch):
-    _off(monkeypatch)
-    monkeypatch.setenv("HYPERLOOM_BENCHMARK_BACKEND", "bypass")
-    _preflight_agentx_backend(argparse.Namespace())  # must not raise
-
-
-def test_bypass_guard_rejects_the_silent_combination(native_benchmark, monkeypatch):
-    """AgentX + bypass runs synthetic work and labels it AgentX."""
-    _on(monkeypatch, native_benchmark)
-    monkeypatch.setenv("HYPERLOOM_BENCHMARK_BACKEND", "bypass")
-    with pytest.raises(SystemExit) as ei:
-        _preflight_agentx_backend(argparse.Namespace())
-    assert ei.value.code == 2
-
-
 def test_guard_rejects_agentx_with_a_scriptable_framework(native_benchmark, monkeypatch):
     """The other way for the switch to no-op while every gate still fires."""
     _on(monkeypatch, native_benchmark)
-    monkeypatch.delenv("HYPERLOOM_BENCHMARK_BACKEND", raising=False)
     with pytest.raises(SystemExit) as ei:
         _preflight_agentx_backend(argparse.Namespace(framework="xdit"))
     assert ei.value.code == 2
@@ -145,7 +123,6 @@ def test_guard_rejects_agentx_with_a_scriptable_framework(native_benchmark, monk
 
 def test_guard_allows_agentx_with_a_serving_framework(native_benchmark, monkeypatch):
     _on(monkeypatch, native_benchmark)
-    monkeypatch.delenv("HYPERLOOM_BENCHMARK_BACKEND", raising=False)
     for fw in ("vllm", "sglang"):
         _preflight_agentx_backend(argparse.Namespace(framework=fw))  # must not raise
 
@@ -160,55 +137,71 @@ def test_scriptable_guard_is_inert_without_agentx(monkeypatch):
 
 
 class _St:
-    def __init__(self, mode="", epoch=0, backend="magpie"):
+    def __init__(self, mode="", epoch=MEASUREMENT_EPOCH, backend="inferencex"):
         self.benchmark_mode = mode
-        self.agentx_epoch = epoch
+        self.measurement_epoch = epoch
         self.agentx_backend = backend
 
 
 def test_resume_accepts_matching_agentx_state(native_benchmark, monkeypatch):
     _on(monkeypatch, native_benchmark)
-    assert agentx_state_is_stale(_St("agentx", AGENTX_MEASUREMENT_EPOCH)) == ""
+    assert measurement_state_is_stale(_St("agentx")) == ""
 
 
 def test_resume_accepts_matching_synthetic_state(monkeypatch):
     _off(monkeypatch)
-    assert agentx_state_is_stale(_St("synthetic", 0)) == ""
+    assert measurement_state_is_stale(_St("synthetic", backend="")) == ""
 
 
 def test_resume_rejects_mode_switch(native_benchmark, monkeypatch):
     """The KEEP ledger keys on server args alone, so the rows would collide."""
     _on(monkeypatch, native_benchmark)
-    assert "benchmark_mode" in agentx_state_is_stale(_St("synthetic", 0))
+    assert "benchmark_mode" in measurement_state_is_stale(_St("synthetic"))
     _off(monkeypatch)
-    assert "benchmark_mode" in agentx_state_is_stale(_St("agentx", 1))
+    assert "benchmark_mode" in measurement_state_is_stale(_St("agentx"))
 
 
 def test_resume_rejects_a_backend_switch(native_benchmark, monkeypatch):
-    """Magpie and MLPerf sessions must not anchor each other, epoch unchanged."""
+    """InferenceX and MLPerf sessions must not anchor each other, epoch unchanged."""
     _on(monkeypatch, native_benchmark)
-    assert agentx_state_is_stale(_St("agentx", AGENTX_MEASUREMENT_EPOCH, "magpie")) == ""
+    assert measurement_state_is_stale(_St("agentx", backend="inferencex")) == ""
     monkeypatch.delenv("HYPERLOOM_BENCHMARK_CONFIG", raising=False)
     monkeypatch.setenv("HYPERLOOM_AGENTX", "1")
     monkeypatch.setenv("HYPERLOOM_AGENTIC_BACKEND", "mlperf")
-    reason = agentx_state_is_stale(_St("agentx", AGENTX_MEASUREMENT_EPOCH, "magpie"))
-    assert "backend" in reason
-    assert agentx_state_is_stale(_St("agentx", AGENTX_MEASUREMENT_EPOCH, "mlperf")) == ""
+    assert "backend" in measurement_state_is_stale(_St("agentx", backend="inferencex"))
+    assert measurement_state_is_stale(_St("agentx", backend="mlperf")) == ""
 
 
 def test_resume_rejects_a_missing_backend(native_benchmark, monkeypatch):
     _on(monkeypatch, native_benchmark)
-    assert "backend" in agentx_state_is_stale(_St("agentx", AGENTX_MEASUREMENT_EPOCH, ""))
+    assert "backend" in measurement_state_is_stale(_St("agentx", backend=""))
 
 
-def test_resume_rejects_stale_agentx_epoch(native_benchmark, monkeypatch):
-    """Same knobs, different workload: the old numbers cannot anchor."""
-    _on(monkeypatch, native_benchmark)
-    reason = agentx_state_is_stale(_St("agentx", AGENTX_MEASUREMENT_EPOCH - 1))
-    assert "epoch" in reason
+@pytest.mark.parametrize("mode", ["agentx", "synthetic", ""])
+@pytest.mark.parametrize("epoch", [0, 1])
+def test_resume_refuses_every_session_measured_before_the_switch(native_benchmark, monkeypatch, mode, epoch):
+    """A session from before the move onto inference_suite cannot resume, whatever it measured."""
+    if mode == "agentx":
+        _on(monkeypatch, native_benchmark)
+    else:
+        _off(monkeypatch)
+    assert "epoch" in measurement_state_is_stale(_St(mode, epoch))
 
 
-def test_resume_tolerates_sessions_predating_the_field(monkeypatch):
+def test_resume_refuses_a_state_without_the_epoch_field(monkeypatch):
+    _off(monkeypatch)
+    assert "epoch" in measurement_state_is_stale(object())
+
+
+def test_agentic_backend_names_inferencex_unless_mlperf_is_asked_for():
+    from hyperloom.common.agentx_workload import agentic_backend
+
+    assert agentic_backend({}) == "inferencex"
+    assert agentic_backend({"HYPERLOOM_AGENTIC_BACKEND": "other"}) == "inferencex"
+    assert agentic_backend({"HYPERLOOM_AGENTIC_BACKEND": "MLPerf"}) == "mlperf"
+
+
+def test_resume_tolerates_sessions_predating_the_mode_field(monkeypatch):
     """An empty mode means "not asserted", not "mismatch"."""
     _off(monkeypatch)
-    assert agentx_state_is_stale(_St("", 0)) == ""
+    assert measurement_state_is_stale(_St("", backend="")) == ""

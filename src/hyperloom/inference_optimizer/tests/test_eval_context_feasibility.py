@@ -104,7 +104,7 @@ class TestGradeMarksTheRoundInfeasible:
         monkeypatch.delenv("HYPERLOOM_EVAL_MAX_TOKENS", raising=False)
         return integrate_accuracy.grade_integrate_accuracy(
             {"accuracy": None},
-            baseline_accuracy=0.0,
+            reference=ag.AccuracyReference(0.0, ""),
             workspace=tmp_path,
             server_args=server_args,
         )

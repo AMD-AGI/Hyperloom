@@ -11,7 +11,7 @@ from types import SimpleNamespace
 
 import pytest
 
-from hyperloom.orchestrator.phases.geak_native_revalidation import ORIGIN
+from hyperloom.orchestrator.phases.geak_native_revalidation import ORIGIN, source_rebench_params
 from hyperloom.orchestrator.loop.verdicts import CriticRuling
 from .test_geak_revalidation_dispatch import coordinator as coordinator
 
@@ -19,7 +19,7 @@ from .test_geak_revalidation_dispatch import coordinator as coordinator
 def _candidate(c, tmp_path):
     state = c.shared_state
     state.benchmark_mode = "agentx"
-    state.agentx_backend = "magpie"
+    state.agentx_backend = "inferencex"
     state.baseline_config_path = str(tmp_path / "native.yaml")
     state.baseline_tput = 100.0
     state.current_best = {"tput": 110.0, "extra_server_args": "--incumbent", "extra_envs": {"SGLANG_USE_AITER": "0"}}
@@ -62,6 +62,14 @@ def test_source_route_retains_configuration_and_stages_exact_patches(coordinator
     assert "--incumbent" in params["base_extra_args"]
     assert Path(params["patches"][0]).read_bytes() == patch.read_bytes()
     assert "final_throughput_tok_s" not in params
+
+
+@pytest.mark.parametrize(("mode", "backend"), [("synthetic", ""), ("agentx", "mlperf")])
+def test_only_an_inferencex_agentx_session_takes_the_source_route(coordinator, tmp_path, mode, backend):
+    _candidate(coordinator, tmp_path)
+    coordinator.shared_state.benchmark_mode = mode
+    coordinator.shared_state.agentx_backend = backend
+    assert source_rebench_params(coordinator, reason="unit", result={}, launch={}, overlay="") is None
 
 
 @pytest.mark.asyncio

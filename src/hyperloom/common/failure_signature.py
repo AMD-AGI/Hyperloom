@@ -495,6 +495,31 @@ def is_targeted_build_candidate(
     return False
 
 
+#: The exception a failed import raised, ``ImportError: message`` or ``ModuleNotFoundError: message`` after an optional
+#: log prefix. A server that skips a model whose imports fail logs ``Ignore import error when loading <module>: ...``
+#: and carries on; that line is not an exception and does not match.
+IMPORT_FAILURE_LINE = re.compile(
+    r"(?<![\w.])(?:[A-Za-z_]\w*\.)*(?:" + PY_IMPORT_ERROR + "|" + PY_MODULE_NOT_FOUND_ERROR + r"):\s*\S"
+)
+#: What inference_suite's framework probe says when the serving interpreter finds no package of the framework at all
+#: (``framework_probe.probe_install``). The probe says it as the whole detail, so it is taken only at the end of the
+#: detail, never from a line inside it.
+_PROBE_CANNOT_IMPORT = re.compile(r"\scannot import [A-Za-z_][\w.]*\s*\Z")
+
+
+def framework_unimportable_line(detail: str) -> str | None:
+    """What a failed framework probe's ``detail`` says of an import of the framework that cannot succeed: the probe's
+    own ``cannot import <package>`` answer, else the last ``ImportError``/``ModuleNotFoundError`` line; ``None`` when
+    the probe failed otherwise (it ran too long, could not start, or read no version), which says nothing of the
+    install."""
+    if _PROBE_CANNOT_IMPORT.search(detail):
+        return detail.strip()
+    for line in reversed(detail.splitlines()):
+        if IMPORT_FAILURE_LINE.search(line):
+            return line
+    return None
+
+
 __all__ = [
     "ACCURACY_BELOW_FLOOR",
     "CAPABILITY_DISABLED",
@@ -503,6 +528,7 @@ __all__ = [
     "HIP_KERNEL_MISSING",
     "HIP_RUNTIME_ERROR",
     "IMPORT_ERROR",
+    "IMPORT_FAILURE_LINE",
     "MISSING_MODEL_ARCH",
     "MISSING_WEIGHT",
     "NOT_IMPLEMENTED",
@@ -516,6 +542,7 @@ __all__ = [
     "FailureSignature",
     "argparse_refusal",
     "classify_failure",
+    "framework_unimportable_line",
     "is_targeted_build_candidate",
     "runnable_decision",
 ]

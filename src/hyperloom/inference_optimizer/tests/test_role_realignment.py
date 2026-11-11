@@ -954,7 +954,7 @@ async def test_extend_lease_wall_budget_grant_failure_is_recorded_as_an_intent_e
 
 @pytest.mark.asyncio
 async def test_enablement_rearm_failure_on_critic_reject_reaches_the_router(coordinator_with_mocks, monkeypatch):
-    from hyperloom.orchestrator.loop.proposals import PendingProposal
+    from hyperloom.orchestrator.state.pending_proposal import PendingProposal
     from hyperloom.orchestrator.loop.verdicts import CriticRuling
 
     c = coordinator_with_mocks

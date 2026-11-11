@@ -569,7 +569,7 @@ async def test_a_keep_imported_without_a_conflicting_flag_takes_it_off_the_head_
     assert apply(root, delta).launch == LaunchConfig("--tp 1 --mem-fraction-static 0.8", {MONOKERNEL: "1"})
 
 
-#: The launch Magpie resolves from an InferenceX recipe, and the start commit's own arguments, which add to it.
+#: The launch a round resolves from an InferenceX recipe, and the start commit's own arguments, which add to it.
 RESOLVED_FLAGS = f"--tp 1 {REPLAYSSM} --mem-fraction-static 0.8 --disable-radix-cache"
 OWN_LAUNCH = LaunchConfig("--chunked-prefill-size 4096")
 

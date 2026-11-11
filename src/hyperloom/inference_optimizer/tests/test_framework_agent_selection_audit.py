@@ -377,7 +377,7 @@ async def test_a_removal_only_lever_is_benched_and_its_ledger_verdict_found_agai
 ) -> None:
     from hyperloom.agents.framework.kb import KB_ROOT_ENV
     from hyperloom.orchestrator.actions.executors._integrate_attempt import IntegrateAttempt
-    from hyperloom.orchestrator.actions.executors._integrate_perf_gate import _GateBasis, _weigh_gate
+    from hyperloom.orchestrator.actions.executors._integrate_perf_gate import _GateBasis, _grade_throughput, _weigh_gate
     from hyperloom.orchestrator.knowledge.kb_writeback import (
         OUTCOME_REVERTED_SMOKE_FAIL,
         FrameworkOutcome,
@@ -392,7 +392,8 @@ async def test_a_removal_only_lever_is_benched_and_its_ledger_verdict_found_agai
     assert (params["patch_name"], params["remove_args"]) == ("no-cuda-graph-off", removals)
 
     attempt = IntegrateAttempt(task_id="t-int", specialist_task_id="spec-1", shared_state=coord.shared_state)
-    measured = _weigh_gate(attempt, params, {}, {"accuracy": 0.5}, _GateBasis(100.0, 1.0)).measured
+    throughput = _grade_throughput(coord.shared_state, {}, _GateBasis(100.0, 1.0))
+    measured = _weigh_gate(attempt, params, {}, {"accuracy": 0.5}, throughput).measured
     await write_framework_record(
         FrameworkOutcome(
             pr_url="cand-1",
@@ -420,7 +421,7 @@ async def test_autosubmit_config_idempotent_on_existing_verdict(coord: Coordinat
 
 @pytest.mark.asyncio
 async def test_autosubmit_config_returns_when_review_in_flight(coord: Coordinator) -> None:
-    from hyperloom.orchestrator.loop.proposals import PendingProposal
+    from hyperloom.orchestrator.state.pending_proposal import PendingProposal
 
     coord.state.pending_proposals["existing"] = PendingProposal(
         proposal_msg_id="existing",
@@ -437,7 +438,7 @@ async def test_autosubmit_config_returns_when_review_in_flight(coord: Coordinato
 @pytest.mark.asyncio
 async def test_autosubmit_config_proceeds_for_a_different_specialist(coord: Coordinator) -> None:
     """The scan keys on the specialist task id, so another specialist's review does not block this one."""
-    from hyperloom.orchestrator.loop.proposals import PendingProposal
+    from hyperloom.orchestrator.state.pending_proposal import PendingProposal
 
     coord.state.pending_proposals["existing"] = PendingProposal(
         proposal_msg_id="existing",

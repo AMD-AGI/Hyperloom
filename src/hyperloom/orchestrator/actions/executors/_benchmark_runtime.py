@@ -9,7 +9,8 @@ import os
 from typing import Any
 
 from hyperloom.common.agentx_workload import is_agentx_client_script, pin_mlperf_round_concurrency
-from hyperloom.inference_optimizer.gpu_types import gpu_runner_type
+from hyperloom.inference_optimizer.session.paths import session_dir
+from hyperloom.orchestrator.state.base_launch import session_cards
 
 from ._workload_envs import (
     apply_agentx_switch,
@@ -38,7 +39,7 @@ def apply_runtime_benchmark_overrides(
     benchmark_script: str | None = None,
     conc: Any = None,
 ) -> dict[str, Any]:
-    """Apply runtime env/CLI overrides to a Magpie benchmark YAML."""
+    """Apply runtime env/CLI overrides to a point YAML."""
     agentx_mode = True if is_agentx_client_script(str(bench.get("benchmark_script") or "")) else None
 
     if model_path:
@@ -48,27 +49,12 @@ def apply_runtime_benchmark_overrides(
     if precision:
         bench["precision"] = precision
 
-    if gpu_type:
-        bench["runner_type"] = gpu_runner_type(gpu_type)
-        # Force-pin the generic ``{framework}_{runner_type}.sh`` so Magpie's resolver doesn't fall through to InferenceX
-        # native scripts that ignore ``EXTRA_*_ARGS``.
-        framework = str(bench.get("framework") or "").lower()
-        if framework:
-            bench["benchmark_script"] = f"{framework}_{bench['runner_type']}.sh"
-        else:
-            bench.pop("benchmark_script", None)
-
     if benchmark_script:
         bench["benchmark_script"] = str(benchmark_script)
 
-    # AgentX switch on the shared rebuild path: without this, the gpu_type block above re-pins the synthetic
-    # {framework}_{gpu_type}.sh and silently reverts a materialize-time AgentX swap (grid/baseline/profile executors
-    # rebuild via this function).
     apply_agentx_switch(bench, model_path, conc=conc, active=agentx_mode)
 
     envs: dict[str, Any] = bench.setdefault("envs", {})
-    # Same hazard as the AgentX swap above: the gpu_type block re-pins the bare {framework}_{gpu_type}.sh over the
-    # bundled absolute path the materialize path resolved, so grid variants must re-apply the scriptable defaults.
     apply_scriptable_runtime_defaults(
         bench,
         envs,
@@ -77,6 +63,6 @@ def apply_runtime_benchmark_overrides(
     )
     _apply_sizing_env_overrides(envs)
     pin_mlperf_round_concurrency(envs)
-    pin_rocr_visible_devices(envs, tp=int(envs.get("TP", 1) or 1))
+    pin_rocr_visible_devices(envs, cards=session_cards(session_dir(), int(envs.get("TP", 1) or 1)))
 
     return envs

@@ -2446,6 +2446,7 @@ async def test_bench_patch_preserves_measurement_and_protocol(tmp_path: Path, mo
     }
     assert gate == {
         "accuracy_pass": None,
+        "accuracy_incomparable": False,
         "accuracy": None,
         "enablement_accuracy": None,
         "enablement_accuracy_task": "",
@@ -2462,10 +2463,10 @@ async def test_bench_patch_preserves_measurement_and_protocol(tmp_path: Path, mo
         pytest.param("agentx", 25000.0, 300.0, 200.0, None, "reverted", -100.0 / 3, id="interactivity-tradeoff"),
         pytest.param("agentx", 15000.0, 300.0, 200.0, None, "reverted", -100.0 / 3, id="both-axes-regress"),
         pytest.param("agentx", 25000.0, 450.0, 200.0, None, "reverted", 0.0, id="flat-interactivity"),
-        pytest.param("agentx", 20000.0, 495.0, 90.0, None, "reverted", 10.0, id="output-guard-breach"),
-        pytest.param("agentx", 19000.0, 459.0, 90.0, None, "reverted", 2.0, id="median-below-bar-and-output-breach"),
-        pytest.param("agentx", 18999.0, 495.0, 200.0, None, "kept", 10.0, id="total-no-longer-participates"),
-        pytest.param("agentx", 25000.0, 463.5, 200.0, None, "kept", 3.0, id="median-at-the-bar"),
+        pytest.param("agentx", 20000.0, 495.0, 90.0, None, "kept", 10.0, id="output-drop-alone-holds"),
+        pytest.param("agentx", 19000.0, 458.9, 90.0, None, "reverted", 1.9777777777777727, id="median-below-bar"),
+        pytest.param("agentx", 18999.0, 495.0, 200.0, None, "reverted", 10.0, id="total-guard-breach"),
+        pytest.param("agentx", 25000.0, 459.0, 200.0, None, "kept", 2.0, id="median-at-the-bar"),
         pytest.param("agentx", 25000.0, 458.9, 200.0, None, "reverted", 1.9777777777777727, id="median-below-the-bar"),
         pytest.param("synthetic", 15000.0, 300.0, 200.0, None, "kept", 100.0, id="synthetic-output-grading"),
         *[
@@ -2514,8 +2515,12 @@ async def test_executor_grades_real_patch_bench(
         json.dumps({"results": {"gsm8k": {"exact_match,strict-match": 0.9}}}), encoding="utf-8"
     )
     if grading_mode != "synthetic":
-        # An AgentX round's correctness signal is its request error rate, which the client writes here.
-        (workspace / "inferencex_result.json").write_text(json.dumps({"request_error_rate": 0.0}), encoding="utf-8")
+        # An AgentX slot is graded on the GSM8K score its accuracy round wrote.
+        eval_dir = workspace.parent / "accuracy" / "eval"
+        eval_dir.mkdir(parents=True)
+        (eval_dir / "results_1.json").write_text(
+            json.dumps({"results": {"gsm8k": {"exact_match,strict-match": 0.9}}}), encoding="utf-8"
+        )
     measured = VariantResult(
         name="patch-grading",
         extra_server_args="",
@@ -2529,6 +2534,9 @@ async def test_executor_grades_real_patch_bench(
         duration_seconds=900.0,
         request_error_rate=0.0,
         tpot_p90_ms=3.0,
+        valid_measurement=True,
+        diagnostic_only=False,
+        workload_identity="agentx-workload",
         workspace=str(workspace),
     )
 
@@ -2543,6 +2551,7 @@ async def test_executor_grades_real_patch_bench(
         enablement=EnablementRound(),
         framework="vllm",
         benchmark_mode="synthetic" if grading_mode == "synthetic" else "agentx",
+        agentx_accuracy=False,
         current_best={
             "tput": 100.0,
             "total_throughput": 20000.0,
@@ -2550,6 +2559,7 @@ async def test_executor_grades_real_patch_bench(
             "e2e_norm_intvty_p50": 450.0,
             "duration_seconds": 900.0,
             "request_error_rate": 0.0,
+            "workload_identity": "agentx-workload",
         },
         baseline_accuracy=0.9,
         get_specialist_patch_verdict=lambda _sid: "approve",

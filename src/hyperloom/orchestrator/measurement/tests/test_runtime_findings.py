@@ -312,16 +312,7 @@ def test_agentx_baseline_writes_runtime_findings(tmp_path):
     (tmp_path / "server.log").write_text(
         "[2026-10-28 03:42:18 TP0 EP0] [AR] All-reduce call path: NCCL (custom AR disabled)\n", encoding="utf-8"
     )
-    result: dict = {
-        "benchmark_backend": "magpie_agentx",
-        "agentx_metrics": {
-            "server_launch": {
-                "effective_argv": ["python3", "-m", "sglang.launch_server", "--model-path", "/m"],
-                "effective_env": {},
-            },
-            "recipe": {"tp": 8},
-        },
-    }
+    result: dict = {}
 
     _attach_baseline_launch_evidence(
         result, config_path=tmp_path / "config.yaml", output_dir=tmp_path, framework="sglang"

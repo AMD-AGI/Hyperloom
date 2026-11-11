@@ -125,8 +125,7 @@ artifacts.
 
 ```text
 ${NFS_SHARED_ROOT}/models/Qwen3-30B-A3B/   # --model
-${NFS_SHARED_ROOT}/InferenceX/             # INFERENCEX_PATH
-${NFS_SHARED_ROOT}/Magpie/                 # MAGPIE_PATH
+${NFS_SHARED_ROOT}/inference-suite-tools/  # INFERENCE_SUITE_TOOL_CACHE
 ${NFS_SHARED_ROOT}/TraceLens/              # TRACELENS_ROOT
 ${NFS_SHARED_ROOT}/TraceLens-internal/     # TRACELENS_INTERNAL_ROOT (optional)
 ```
@@ -189,8 +188,7 @@ The following variables are exported on the sandbox side before calling `optimiz
 | Variable | Meaning |
 |----------|---------|
 | `RANDOM_RANGE_RATIO` | Sequence-length jitter for the benchmark |
-| `INFERENCEX_PATH` | InferenceX checkout path under `${NFS_SHARED_ROOT}` |
-| `MAGPIE_PATH` | Magpie checkout path under `${NFS_SHARED_ROOT}` |
+| `INFERENCE_SUITE_TOOL_CACHE` | InferenceSuite tool cache under `${NFS_SHARED_ROOT}`, staged by `install.sh` |
 | `TRACELENS_ROOT` | TraceLens checkout path under `${NFS_SHARED_ROOT}` |
 | `SGLANG_DISAGGREGATION_*_TIMEOUT` | PD bootstrap and wait timeouts (Workload A only) |
 
