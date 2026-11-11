@@ -619,13 +619,30 @@ def test_spawn_without_a_server_takes_the_container_environment(
     assert [c[2] for c in calls if c[0] == "spawn"] == [("FROM=1",)]
 
 
-def test_detached_spawn_runs_with_the_given_environment(tmp_path: Path) -> None:
+@pytest.mark.parametrize(("found", "expected"), [(4242, "running"), (0, "spawn")])
+def test_ensure_starts_the_server_only_when_none_runs(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, capsys: pytest.CaptureFixture[str], found: int, expected: str
+) -> None:
+    calls: list = []
+    scope = _driver_scope(monkeypatch, held=False, calls=calls)
+    scope["_find_server"] = lambda _pidfile, _needle: found
+    monkeypatch.setenv("HL_PIDFILE", str(tmp_path / "role.pid"))
+    monkeypatch.setenv("HL_LAUNCH_PATH", str(tmp_path / "launch.sh"))
+    monkeypatch.setenv("HL_ACTION", "ensure")
+    scope["restart_remote_main"]()
+    assert json.loads(capsys.readouterr().out.strip().splitlines()[-1])["action"] == expected
+    assert not [c for c in calls if c[0] in ("kill", "exec")]
+    assert [c[2] for c in calls if c[0] == "spawn"] == ([("FROM=1",)] if found == 0 else [])
+
+
+def test_detached_spawn_runs_with_the_given_environment(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     driver = pd_cmds._REMOTE_DRIVER.replace("\nrestart_remote_main()\n", "\n")
     scope: dict = {"os": os}
     exec(driver, scope)
+    monkeypatch.setenv("HL_CONSOLE", str(tmp_path / "none"))
     launch = tmp_path / "launch.sh"
     launch.write_text('#!/bin/bash\necho "hl-env-$HL_TEST_MARK"\n', encoding="utf-8")
-    env = [f"PATH={os.environ['PATH']}", "HL_TEST_MARK=from-container", f"HL_CONSOLE={tmp_path / 'none'}"]
+    env = [f"PATH={os.environ['PATH']}", "HL_TEST_MARK=from-container"]
     pid = scope["_spawn_detached"](str(launch), env)
     os.waitpid(pid, 0)
     assert "hl-env-from-container" in (tmp_path / "launch.sh.log").read_text(encoding="utf-8")

@@ -177,7 +177,7 @@ def build_external_state_from_env() -> dict[str, Any]:
         has_pod_ips=bool(prefill or decode or worker),
         head_ip=head_ip,
     )
-    router = _ips("HYPERLOOM_MN_EXT_ROUTER_IPS") if backend in ("atomesh", "sglangrouter") else []
+    router = _ips("HYPERLOOM_MN_EXT_ROUTER_IPS") if backend in ("atomesh", "sglangrouter", "infera") else []
     pod_count = _handoff_pod_count(pd_mode, prefill=prefill, decode=decode, worker=worker)
     if backend in ("atomesh", "sglangrouter"):
         pod_count = len(set(router + prefill + decode))
@@ -204,6 +204,9 @@ def build_external_state_from_env() -> dict[str, Any]:
         "worker_pods": _external_pods(worker, "worker", ssh_port),
         "user_data_path": str(workspace_root()),
     }
+    if backend == "infera" and router:
+        state["router_pod_ips"] = router
+        state["router_pods"] = _external_pods(router, "router", ssh_port)
     if ssh_key:
         state["ssh_key_path"] = ssh_key
     if known_hosts:

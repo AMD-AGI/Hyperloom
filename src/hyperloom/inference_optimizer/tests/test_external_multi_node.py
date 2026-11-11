@@ -135,6 +135,21 @@ def test_external_pod_ssh_ports_follow_the_lws_ordinal(
     ]
 
 
+def test_infera_router_ips_are_frontend_ssh_targets(
+    _external_env: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The frontend's sshd sits past the decode stride, so it never shares a port with a GPU role."""
+    monkeypatch.setenv("HYPERLOOM_MN_EXT_SSH_PORT", "2222")
+    monkeypatch.setenv("HYPERLOOM_MN_EXT_ROUTER_IPS", "10.0.0.9")
+
+    state = ext.build_external_state_from_env()
+
+    assert state["router_pod_ips"] == ["10.0.0.9"]
+    assert [(p["role"], p["podIP"], p["sshPort"]) for p in state["router_pods"]] == [("router", "10.0.0.9", 2242)]
+    assert state["nodes"] == 2
+
+
 def test_external_aggregated_worker_ports_follow_the_lws_ordinal(
     _external_env: Path,
     monkeypatch: pytest.MonkeyPatch,

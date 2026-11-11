@@ -198,6 +198,7 @@ def _infera_overlay(path: str, doc: dict[str, Any]) -> dict[str, str]:
         "HYPERLOOM_MN_EXT_SSH_KEY": _text(path, infera, "ssh_key_file", "infera."),
         "HYPERLOOM_MN_EXT_SSH_PORT": "" if port is None else str(port),
         "HYPERLOOM_MN_EXT_SSH_KNOWN_HOSTS": _text(path, infera, "known_hosts_file", "infera."),
+        "HYPERLOOM_MN_EXT_ROUTER_IPS": _ip_list(path, infera, "router_ips"),
         "HYPERLOOM_MN_EXT_PREFILL_IPS": _ip_list(path, infera, "prefill_ips"),
         "HYPERLOOM_MN_EXT_DECODE_IPS": _ip_list(path, infera, "decode_ips"),
         "HYPERLOOM_MN_EXT_WORKER_IPS": _ip_list(path, infera, "worker_ips"),

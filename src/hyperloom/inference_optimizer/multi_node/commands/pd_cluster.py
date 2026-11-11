@@ -135,6 +135,9 @@ def restart_remote_main():
     pidfile = os.environ["HL_PIDFILE"]
     action = os.environ.get("HL_ACTION", "restart")
     pid = _find_server(pidfile, needle)
+    if action == "ensure" and pid > 0:
+        print(json.dumps({"status": "ok", "action": "running", "pid": pid}))
+        return
     if action == "stop":
         if pid <= 0:
             print(json.dumps({"status": "ok", "action": "stop", "pid": 0}))
@@ -219,6 +222,11 @@ def _bash_payload(role: str, script_body: str, needle: str, action: str) -> str:
             py_end,
         ]
     )
+
+
+def ensure_payload(role: str, command: str, needle: str) -> str:
+    """Bash that starts ``command`` detached on the pod unless a process matching ``needle`` already runs."""
+    return _bash_payload(role, f"exec {command}\n", needle, "ensure")
 
 
 def _require_state() -> dict[str, Any]:
