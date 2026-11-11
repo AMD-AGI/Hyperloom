@@ -102,6 +102,14 @@ HF_CACHE_PERMISSION = "hf_cache_permission"
 #: sandboxes: ``hyperloom_multibranch.toolbox.attempts`` ends the test with it.
 SANDBOX_ACQUIRE_TIMEOUT = "sandbox_acquire_timeout"
 
+#: The server died in the memory-snapshot dump SGLang's CUDA-graph profile runs after the capture
+#: (``torch.cuda.memory._dump_snapshot``; on a ROCm PyTorch ``RuntimeError: stoi`` from its addr2line symbolizer). Only a
+#: profile's ``--enable-profile-cuda-graph`` runs that dump, and it fails on what the image's PyTorch makes of the stacks it
+#: recorded, so it says nothing of the candidate, whose measurement runs without it: an infrastructure failure, which every
+#: sandbox of the image repeats (``hyperloom_multibranch.toolbox.attempts`` ends the test with it at once). The reason is
+#: ``<this>: <the exception the dump raised>``.
+PROFILER_SNAPSHOT_FAILED = "profiler_snapshot_failed"
+
 #: ``error_class`` values a runner, the hosted backend or the platform reports that are not about the candidate.
 INFRA_ERROR_CLASSES: frozenset[str] = frozenset(
     {
@@ -285,7 +293,8 @@ def _from_error_class(error_class: str) -> FailureClassification:
 
 
 def _named_by_logs(text: str, parts: list[str]) -> FailureClassification | None:
-    """The verdict a log gives by itself: a port taken, a known signature, a refused command line; else ``None``.
+    """The verdict a log gives by itself: a port taken, a known signature, a refused command line, a profile's snapshot
+    dump that failed; else ``None``.
 
     ``text`` is the logs ``parts`` joined.
     """
@@ -318,6 +327,10 @@ def _named_by_logs(text: str, parts: list[str]) -> FailureClassification | None:
     flag_error = log_causes.argparse_error(text)
     if flag_error:
         return _candidate(f"{SERVE_FLAG}: {flag_error}")
+    # After the signatures: a failure a candidate is known to cause stays the candidate's even in a profile's log.
+    snapshot = log_causes.profiler_snapshot_failure(text)
+    if snapshot:
+        return _infra(f"{PROFILER_SNAPSHOT_FAILED}: {snapshot}")
     return None
 
 
