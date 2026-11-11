@@ -404,11 +404,12 @@ def test_pgrep_does_not_find_itself_so_a_wait_for_a_process_to_end_ends(tmp_path
 #: Leaves the caller's tree by a double fork and setsid() and drops the sandbox's marker with its environment, as
 #: `env -i` or a daemonizing server does; appends its pid to argv[1] and sleeps.
 ESCAPE = """
-import os, sys
+import os, sys, time
 if os.fork():
     os._exit(0)
 os.setsid()
 if os.fork():
+    time.sleep(0.5)
     os._exit(0)
 with open(sys.argv[1], "a") as pids:
     pids.write(f"{os.getpid()}\\n")
@@ -430,6 +431,10 @@ def _end(pids: Path) -> None:
             continue
 
 
+def _parent(pid: int) -> int:
+    return int(Path(f"/proc/{pid}/stat").read_text().rsplit(")", 1)[1].split()[1])
+
+
 def test_kill_ends_an_unmarked_grandchild_that_double_forked_and_left_the_session(tmp_path: Path) -> None:
     escape, pids = _escape(tmp_path)
 
@@ -438,7 +443,9 @@ def test_kill_ends_an_unmarked_grandchild_that_double_forked_and_left_the_sessio
         await _until(lambda: pids.exists() and pids.read_text().strip())
         escaped = int(pids.read_text())
         await _until(lambda: f"{MARKER}=".encode() not in Path(f"/proc/{escaped}/environ").read_bytes())
-        parent = int(Path(f"/proc/{escaped}/stat").read_text().rsplit(")", 1)[1].split()[1])
+        # The grandchild is reparented only once the process that forked it has exited, which ESCAPE delays.
+        await _until(lambda: _parent(escaped) == process.popen.pid)
+        parent = _parent(escaped)
         await process.kill()
         return escaped, parent, process.popen.pid
 

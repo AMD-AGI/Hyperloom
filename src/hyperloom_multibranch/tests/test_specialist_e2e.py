@@ -33,7 +33,7 @@ from hyperloom_multibranch.specialist.agent_session import AgentCommand, AgentSe
 from hyperloom_multibranch.specialist.directions import DIRECTIONS
 from hyperloom_multibranch.specialist.judging import NOTICE, Judging
 from hyperloom_multibranch.specialist.model_sessions import SESSION_DIR, model_sessions
-from hyperloom_multibranch.specialist.prompts import role_prompt
+from hyperloom_multibranch.specialist.prompts import RoleWorkload, role_prompt
 from hyperloom_multibranch.specialist.runtime import RuntimePacing, SpecialistRuntime
 from hyperloom_multibranch.specialist import tools as tools_module
 from hyperloom_multibranch.specialist.tools import register_worktree_tools
@@ -193,7 +193,7 @@ async def test_a_model_backed_specialist_lands_a_source_change_through_the_sessi
     cli.chmod(0o755)
     setup = AgentSetup(
         command=AgentCommand("claude", str(cli), model="claude-opus-5-5"),
-        role=role_prompt("qwen3-8b on vllm, TP 1, ISL 1024, OSL 1024, concurrency 64"),
+        role=role_prompt(RoleWorkload("qwen3-8b on vllm, TP 1, ISL 1024, OSL 1024, concurrency 64")),
         env={"PATH": os.environ.get("PATH", "")},
         runner=LocalAgentRunner(
             session_dir=tmp_path / "agents", poll_interval_seconds=0.05, version_probe=lambda a, e: "x"

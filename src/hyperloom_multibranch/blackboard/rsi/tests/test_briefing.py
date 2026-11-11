@@ -13,6 +13,7 @@ from pathlib import Path
 import pytest
 from hyperloom_kb import RemoteReadResult
 
+from hyperloom.common.perf_metric import TOTAL_TOKEN_THROUGHPUT
 from hyperloom.contracts.measurement import REPRODUCED, AttachmentRef, Purpose, TestKind, TestRequest
 from hyperloom.contracts.recipe import (
     ComponentChange,
@@ -43,6 +44,7 @@ from hyperloom_multibranch.blackboard import LocalBlackboard
 from hyperloom_multibranch.blackboard.knowledge.recall import (
     INTERACTIVITY_OBJECTIVE,
     THROUGHPUT_OBJECTIVE,
+    TOTAL_THROUGHPUT_OBJECTIVE,
     IdentityIndex,
 )
 from hyperloom_multibranch.blackboard.knowledge.tests.fakes import (
@@ -346,6 +348,35 @@ async def test_an_experience_of_the_other_kind_of_session_is_only_a_lesson_to_re
     assert brief.leads == ("prior: --block-size 16: keep +10.00% [exp-faster]",)
     assert brief.lessons[-1] == (
         "to re-verify: --block-size 16: keep +12.00% on e2e_interactivity@v1 (objective differ) [exp-agentx]"
+    )
+
+
+async def test_an_agentx_briefing_graded_on_total_throughput_reads_that_objective_and_its_baseline(
+    tmp_path: Path,
+) -> None:
+    class _AgentX(_WithExtraFailure):
+        async def snapshot(self) -> BlackboardSnapshot:
+            snapshot = await self.blackboard.snapshot()
+            assert snapshot.baseline is not None
+            baseline = dataclasses.replace(snapshot.baseline, values={TOTAL_TOKEN_THROUGHPUT: 9000.0})
+            return dataclasses.replace(snapshot, profile=profile(isl=None, osl=None), baselines=(baseline,))
+
+    blackboard = _AgentX(await scripted_session(tmp_path / "blackboard", FakeClock()))
+    reader = _reader()
+
+    await CrossSessionBriefing(
+        blackboard,
+        recalls=RecallCache(),
+        champions={},
+        refused={},
+        experiences=reader,
+        metric=TOTAL_TOKEN_THROUGHPUT,
+    ).startup_brief("c0")
+
+    ((_, context, _),) = reader.calls
+    assert (context["objective"]["id"], context["benchmark_baseline"]["total_throughput"]) == (
+        TOTAL_THROUGHPUT_OBJECTIVE,
+        9000.0,
     )
 
 

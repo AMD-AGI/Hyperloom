@@ -269,7 +269,8 @@ class CrossSessionBriefing(StartupBriefProvider):
 
     ``warm`` are the leads PRELUDE read; ``references`` the reference launches the run was given, listed after them and
     never replayed; ``experiences`` the Experience KB, read for ``focus`` (the bottleneck the specialist attacks) on
-    ``branch``; ``metric`` the throughput metric whose baseline the read carries.
+    ``branch``; ``metric`` the metric the session is graded on, whose baseline the read carries and whose objective
+    an AgentX session's read asks for.
     ``identities`` looks up the conditions a read's summaries leave out; by default one is built on ``experiences``,
     and passing one index to every briefing of a session reads the export once. ``learnings`` is the session's one
     recall of the specialists' learnings; without it the brief holds this session's only. ``recalls`` keeps the
@@ -445,7 +446,7 @@ class CrossSessionBriefing(StartupBriefProvider):
             self.experiences,
             snapshot.profile,
             baseline,
-            RecallQuery(self.focus, self.branch),
+            RecallQuery(self.focus, self.branch, self.metric),
             identities=self.identities,
         )
         self.recalls.keep(key, recall)
