@@ -19,6 +19,7 @@ _COMMANDS: dict[str, tuple[str, tuple[str, ...], str]] = {
     "quantize": ("hyperloom.agents.quantization.cli", (), "Quantize a model with AMD Quark"),
     "multi-node": (f"{_IO}.multi_node.cli", (), "Operate the multi-node cluster of a session"),
     "hosted": ("hyperloom.hosted.entry", (), "Run a campaign that a hosting platform handed over ('hosted run')"),
+    "script": (f"{_IO}.script_workload", (), "Prepare a workspace that optimizes an existing model script"),
 }
 
 _SESSION_COMMANDS: dict[str, tuple[str, str]] = {

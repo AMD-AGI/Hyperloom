@@ -318,6 +318,8 @@ hyperloom = [
     # PYTHONPATH prefix (see _framework_rewrite_evidence). Shipped so wheel
     # installs can arm it.
     "assets/host_probe/*.py",
+    # Benchmark harness copied into a script workload's benchmark directory.
+    "assets/script_workload/*.py",
     # Slurm submission bundle (see docs/install/slurm.md).
     "assets/slurm/*.sh",
     "assets/slurm/*.sbatch",
@@ -453,6 +455,12 @@ omit = [
     # tests do run (``scripts/tests`` is in ``testpaths``); it is the measured
     # denominator they stay out of, not the suite.
     "scripts/*",
+    # The script-workload harness runs inside the operator's model environment, so its
+    # tests need torch and run in their own CI job (``script-harness``) rather than the
+    # matrix. Same reasoning as ``scripts/*`` above: the tests do run, it is the measured
+    # denominator they stay out of. ``assets/host_probe`` is not omitted -- its tests
+    # need no torch and the matrix covers it.
+    "src/hyperloom/inference_optimizer/assets/script_workload/*",
     # Byte-identical upstream KB Store SDK; guarded by a blob checksum test.
     "src/hyperloom/orchestrator/knowledge/remote_recipe/_vendor/*",
     # CLI drivers.
