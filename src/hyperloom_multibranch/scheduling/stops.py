@@ -70,6 +70,10 @@ class SessionStopReason(str, Enum):
     #: The session was killed with the machine it ran on, so it never closed and wrote no report; only the emergency
     #: ``final-only`` recovery reports it, and finishing a dead session does not make it one that ran its course.
     KILLED = "killed"
+    #: A restart of a hosted run, which its host starts again after a preemption, ran FINAL over a session an earlier
+    #: start left before FINAL and FINAL chose a commit: the run finished, after a restart, and counts as one that ran
+    #: its course. Only ``hosted run`` ends a session for it; ``final-only`` keeps the reason the session ended for.
+    FINISHED_AFTER_RESTART = "finished_after_restart"
 
 
 class StopSignals:
