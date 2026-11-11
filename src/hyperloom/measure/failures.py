@@ -164,7 +164,6 @@ _FAILED_STEP_VERDICTS: dict[FailedStep, tuple[FailureClass, str]] = {
     FailedStep.PORT_IN_USE: (FailureClass.INFRA, PORT_IN_USE_REASON),
     FailedStep.GPUS_UNAVAILABLE: (FailureClass.INFRA, HOST_GPUS_UNAVAILABLE_REASON),
     FailedStep.SERVER_SILENT_BEFORE_READY: (FailureClass.INFRA, HUNG_BEFORE_READY),
-    FailedStep.DISK_FULL: (FailureClass.INFRA, DISK_FULL),
     FailedStep.TEARDOWN_INCOMPLETE: (FailureClass.INFRA, FailedStep.TEARDOWN_INCOMPLETE.value),
     FailedStep.SERVER_STALLED: (FailureClass.UNCLEAR, SERVER_STALLED_REASON),
 }
