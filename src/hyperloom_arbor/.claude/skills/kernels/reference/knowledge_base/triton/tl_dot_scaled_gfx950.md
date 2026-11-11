@@ -66,7 +66,7 @@ relative error). Same floor as tensorwise and rowwise fp8.
 
 Do NOT expect SNR >> 30 dB on random inputs — it's physically impossible
 with fp8 e4m3. Industry standard correctness gate is **25 dB for e4m3**,
-**20 dB for e5m2** (e.g. Transformer Engine, NVIDIA MX kernels, AMD
+**20 dB for e5m2** (e.g. AMD
 ROCm Primus-Turbo tests).
 
 ## Shape-dependent surprises on gpt_oss_20B (M=65536, K=2880, N=5760, G=32)

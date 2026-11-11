@@ -5,9 +5,10 @@ the kernel plan (the dossier skill's kernel-plan.md, the kernels skill) asks
 five things of it: the switch defaults off, dispatch on every rank, zero JIT
 compiles while serving, both switch positions tested, and the accuracy gate.
 Until v0.9.1 the agent asserted them as flags in its STAGE line, which only
-parallel mode's lanes judge. Such a step (a split-K decode GEMM behind a
-switch, JIT-compiled at first call) can pass its per-GEMM check at a few batch
-sizes and, served with the switch on, still collapse GSM8K accuracy.
+parallel mode's lanes judge. Under Hyperloom MB an Arbor kept such a step
+(``HL_OSK_DECODE``, a split-K decode GEMM JIT-compiled at first call) whose
+per-GEMM check passed at three batch sizes; served with the switch on, GSM8K
+collapsed to zero.
 
 So the harness checks every switch a KEEP lands, lane or not:
 
@@ -16,6 +17,13 @@ So the harness checks every switch a KEEP lands, lane or not:
   read that the tree did not name before and that neither the arm nor the
   campaign's launch sets. An undeclared one refuses the KEEP: the harness
   cannot know how to turn it on.
+- **Not a switch:** a variable another editable package already reads (AITER's
+  ``AITER_CONFIG_*``) is that package's, not one the change adds, so the
+  packages are searched too (``existed_in``). A variable whose unset value
+  runs the new path (an opt-out, ``DISABLE_X``) is declared with a
+  ``DEFAULT_ON: NAME`` line: the arm's own run served that path, and S4 has no
+  off position to serve. Both had refused a measured table that a change read
+  behind AITER's own variable.
 - **Off by default:** neither the arm's settings nor the campaign's launch set
   it to anything but off (``OFF_VALUES``), and the added code's own default,
   where a read names one (``os.getenv("X", "1")``), is off too. A new read
@@ -59,6 +67,7 @@ DEFAULT_ON = "1"
 
 # Upper case only, as STAGE: "Switch:" is an ordinary word in a DONE line.
 _SWITCH_LINE = re.compile(r"^[*_`>#\-\s]*SWITCH[*_`]*\s*:[\s*_`]*([A-Z][A-Z0-9_]+)(?:\s*=\s*([^\s`*,;]+))?")
+_DEFAULT_ON_LINE = re.compile(r"^[*_`>#\-\s]*DEFAULT_ON[*_`]*\s*:[\s*_`]*([A-Z][A-Z0-9_]+)")
 _NAME = r"([A-Z][A-Z0-9_]{2,})"
 _READS = re.compile(
     rf"""(?:os\.environ\.get|os\.getenv|environ\.get|getenv)\(\s*["']{_NAME}["']"""
@@ -100,6 +109,30 @@ def declared(output: str) -> dict[str, str]:
     return out
 
 
+def declared_default_on(output: str) -> set[str]:
+    """``DEFAULT_ON: NAME`` lines, decorated or not: variables whose unset value runs the new path."""
+    return {m.group(1) for m in map(_DEFAULT_ON_LINE.match, (output or "").splitlines()) if m}
+
+
+def existed_in(run_in, container: str, workspace: str, packages=()) -> Callable[[str], bool]:
+    """``existed(name)`` for :func:`landed`: whether the tree named ``name`` before the change
+    (``git grep`` at ``HEAD~1``), or another editable package's Python reads it now. Only "not
+    found" proves a name new: a ``git grep`` that cannot run counts as found."""
+    others = [str(p) for p in packages if p and str(p).rstrip("/") != str(workspace).rstrip("/")]
+
+    def existed(name: str) -> bool:
+        r = run_in(container, ["git", "grep", "-q", "-F", "-e", name, "HEAD~1", "--"],
+                   workdir=workspace, capture_output=True, text=True)
+        if r.returncode != 1:
+            return True
+        if not others:
+            return False
+        p = run_in(container, ["grep", "-rqsF", "--include=*.py", "-e", name, *others],
+                   capture_output=True, text=True, timeout=300)
+        return p.returncode == 0
+    return existed
+
+
 def _served_lines(git_diff: str):
     """The diff's added lines in the served tree's Python."""
     path = ""
@@ -139,15 +172,16 @@ def landed(output: str, git_diff: str, settings: dict, launch_env: dict,
     switches = declared(output)
     defaults = code_defaults(git_diff)
     refusals = []
-    for name in sorted(env_reads(git_diff) - set(switches)):
+    for name in sorted(env_reads(git_diff) - set(switches) - declared_default_on(output)):
         if name in settings or name in (launch_env or {}) or not is_off(defaults.get(name)):
             continue   # a setting the arm or the launch gives, or a path the arm served
         if existed(name):
-            continue   # one the tree already read
+            continue   # one the tree, or another editable package, already read
         refusals.append(
             f"the change starts to read {name}, which the tree did not name and the arm leaves "
             f"unset: a switch that defaults off. Declare it with `SWITCH: {name}=<on value>` so "
-            f"the harness serves it on, or set it in the arm")
+            f"the harness serves it on, or set it in the arm; if leaving it unset runs the new "
+            f"path, declare `DEFAULT_ON: {name}`")
     return switches, refusals
 
 

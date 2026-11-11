@@ -1,5 +1,5 @@
 {
-  "_doc": "One project per model family, whatever a campaign calls the model. 'match' is a regex searched in the name lowercased with everything but letters and digits removed ('DeepSeek V4.1 Flash' -> 'deepseekv41flash'). The first project that matches wins, so list the narrower pattern first. Every example must resolve to its project (arbor/tests/test_collect.py).",
+  "_doc": "One project per model family, whatever a campaign calls the model. 'match' is a regex searched in the name lowercased with everything but letters and digits removed ('DeepSeek V4.1 Flash' -> 'deepseekv41flash'). The first project that matches wins, so list the narrower pattern first. Every example must resolve to its project (arbor/tests/test_collect.py). A site's own projects go in the file ARBOR_PROJECTS names, in this form; they are read first.",
   "projects": [
     {
       "project": "deepseek-v4.1-flash",

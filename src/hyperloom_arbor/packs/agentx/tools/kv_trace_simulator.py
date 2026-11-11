@@ -25,7 +25,7 @@ class CacheConfig:
     host_tokens: int = 3_700_000
     gpu_to_host_bw_gbps: float = 16.0
     host_to_gpu_bw_gbps: float = 12.0
-    bytes_per_token: int = 73728  # GLM-5.2 MLA: (nope=512 + rope=64) * fp8 * 78 layers / TP4
+    bytes_per_token: int = 73728  # an MLA model: (nope=512 + rope=64) * fp8 * 78 layers / TP4
     write_policy: str = "write_through"
 
 

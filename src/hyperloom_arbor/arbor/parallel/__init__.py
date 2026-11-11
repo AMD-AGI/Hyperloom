@@ -14,7 +14,8 @@ with no dependent work left to schedule, does.
     python3 -m arbor.parallel --help
 
 The controller (`controller.tick`) is stateless between ticks: everything is in
-the run's store (`store.py`).
+the run's store (`store.py`). Nothing here imports `arbor.mesh` or
+`arbor.mesh2`; `trees`, `cluster` and `gatecheck` are ported from an earlier executor.
 """
 
 SCHEMA_VERSION = 1

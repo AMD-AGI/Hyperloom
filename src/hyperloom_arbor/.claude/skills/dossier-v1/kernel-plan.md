@@ -38,10 +38,9 @@ source and label, as everywhere in the dossier.
   - FLOPs it must do;
   - launches it cannot avoid.
 
-  Turn each into time with the device's measured bandwidth and peaks: the
-  hardware skill's "Measured, not spec" section
-  (`.claude/skills/hardware/SKILL.md`) says how to measure them; never use
-  the datasheet alone. Its reference pages give the instruction-level limits (MFMA
+  Turn each into time with the device's measured bandwidth and peaks: a
+  measurement on the node (the hardware skill's "Measured, not spec",
+  `.claude/skills/hardware/SKILL.md`), never the datasheet. Its reference pages give the instruction-level limits (MFMA
   rates, LDS banks, direct-to-LDS widths) a kernel design has to respect.
 - **The gap:** the region's time now minus the floor, in µs per layer, per
   step and as a share of the run.
@@ -91,6 +90,9 @@ source and label, as everywhere in the dossier.
     FP8, BF16);
   - LDS per CU (check `rocminfo` on the node);
   - CU count, and the XGMI bandwidth when a collective borders the region.
+
+  Port a reference-platform idea only after naming the gap that could block
+  it.
 - **The language:** Triton, FlyDSL, CK or HIP, and why. A kernel that belongs
   in AITER (a tuned row, an operator AITER already owns) is written to land
   there, and the plan says so. The `kernels` skill says which tool fits which
@@ -136,7 +138,7 @@ losing design does not hold up the others:
 
 ITEMS: [
  {"id": "s1", "stage": "S1", "title": "Reference: the region in situ",
-  "gate": {"measure": "region_us", "reference": 1000.0, "tolerance_pct": 10},
+  "gate": {"measure": "region_us", "reference": 400.0, "tolerance_pct": 10},
   "stop": {"measure": "gap_x_gate", "below": 3, "status": "below_floor"}, "stops_plan": true},
  {"id": "c.s2", "stage": "S2", "after": ["s1"], "gate": {"require": ["correct", "negative_control_fired"], "measure": "snr_db", "min": 30.0}},
  {"id": "c.s3", "stage": "S3", "after": ["c.s2"], "gate": {"measure": "gap_share", "min": 0.5}},
@@ -164,7 +166,7 @@ Check it with `python3 -m arbor.stages check <plan.md>`.
 **In the campaign, the agent declares each stage's result on one line:**
 
 ```
-STAGE: {"item": "m-<region>.c.s2", "result": "pass", "measured": {"snr_db": <dB>, "correct": true, "negative_control_fired": true}, "evidence": {"artifacts": ["iter_<n>/<file>.json"], "ledger": ["<ledger id>"]}}
+STAGE: {"item": "m-<region>.c.s2", "result": "pass", "measured": {"snr_db": "<dB>", "correct": true, "negative_control_fired": true}, "evidence": {"artifacts": ["iter_<n>/<check>.json"], "ledger": ["<ledger ID>"]}}
 ```
 
 `result` is pass, fail or stop. The harness judges the line at the next
@@ -196,8 +198,10 @@ it. Turning the switch on is held to the accuracy gate.
 - **The campaign:**
   - one rewrite per campaign;
   - its config sets `"space": {"levels": ["kernel"]}`;
-  - its pack raises `policy.max_consecutive_probes` to cover S1–S3, which
-    are probes;
+  - it runs as the plan's lane (`python3 -m arbor.stages seed`, below), where
+    the harness waives the LEARN cap while the next item is S1–S3, which are
+    probes; a campaign not seeded as a lane raises
+    `policy.max_consecutive_probes` instead;
   - its pack knowledge is this plan plus the dossier's digest.
 - **Checkpoints the operator sees:** the end of each stage, with its
   numbers.
@@ -208,7 +212,8 @@ it. Turning the switch on is held to the accuracy gate.
     copy of the plan. The campaign stops when every item has its verdict,
     with `LANE_CLOSED.json` and a STOP that starts `lane-closed:`.
     `python3 -m arbor.stages show --session <dir>` shows where it is.
-  - **As a kernel-plan lane in the parallel mode** (coming): the coordinator seeds the same lane on its own node, beside the
+  - **As a kernel-plan lane in the parallel mode** (coming): the
+    coordinator seeds the same lane on its own node, beside the
     round's other lanes.
 
   Either way, while the next item is S1–S3 the LEARN cap does not demote
@@ -301,9 +306,9 @@ ITEMS: [
  {"id": "f.s5", "stage": "S5", "title": "Fusion: the A/B", "after": ["f.s2"]}]
 ```
 
-At its census iteration, `STAGE: {"item": "<map ID>.s1", "result": "stop", "measured":
-{"gain_x_gate": <under 3>, "census": true}, ...}` closes `s1` as below_floor and
-every later item as killed, and the lane closes.
+At the census's iteration, `STAGE: {"item": "<map ID>.s1", "result": "stop",
+"measured": {"gain_x_gate": 2.0, "census": true}, ...}` closes `s1` as
+below_floor and every later item as killed, and the lane closes.
 
 **A plan stopped at S1 is a success.** One iteration, no build, and the
 verdict the plan asked for: the region is at its floor. The plan also says

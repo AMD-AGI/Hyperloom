@@ -1,10 +1,9 @@
 """The end of an optimization round: a same-node A/B, then the next round.
 
-The target is not a STOP: it triggers an A/B and the next round of optimization,
-and the "all plan items verdicted" trigger is unified with it. An early-exit target
-would stop a campaign while its last KEEP still gains, on a number that is the
-chained first-node scale (arbor/rebaseline.py), each KEEP's single replay carried
-forward: an upper bound.
+The target is not a STOP: it triggers an A/B and the next round of optimization, and
+so does the "every plan item has a verdict" trigger. An early-exit target would stop a
+campaign while its last KEEP still gains, on a number that is the chained first-node
+scale (arbor/rebaseline.py), each KEEP's single replay carried forward: an upper bound.
 
 A round ends on either trigger:
 
@@ -15,7 +14,7 @@ Then, before the next iteration:
 
 1. **A/B.** The launcher's hook (``ARBOR_ROUND_AB``, or the config's
    ``round_ab.command``) serves the campaign's base tree and the current tree on this
-   node in alternating rounds (the round-end A/B script) and writes a
+   node in alternating rounds (a launcher's round_ab script) and writes a
    verdict to ``<out>/summary.json``.
 2. **Confirmed:** the current tree's A/B mean becomes the bar on this node, the base
    tree's the baseline, and the chained scale starts again from them (a ``ROUND_AB``
@@ -36,7 +35,8 @@ State lives in ``<session>/round_end.json``; only the harness writes it.
 
 Parallel mode (arbor/parallel) is the same loop, faster: its round ends when every
 lane has closed and no dependent lane waits; its integration is the A/B, and the next
-round maps the integrated tree. A lane runs
+round maps the integrated tree (once all lanes have finished and no dependent work is
+scheduled, the A/B and the next batch of plans start). A lane runs
 no round end of its own: its config has no target and no round_ab, and its launch
 sets ROUND_AB=0.
 
@@ -63,7 +63,7 @@ TRIGGERS = ("target", "map")
 VERDICTS = ("confirmed", "not_confirmed", "incomplete")
 
 KNOBS = {
-    "round_target_ratio": 1.40,   # the next target, over the A/B bar
+    "round_target_ratio": 1.40,   # the next target, over the A/B bar (calibrate_baseline.py's ratio)
     "round_ab_minutes": 150,      # time an A/B needs; less left before a chunk's switch hands off
     "round_ab_attempts": 3,       # incomplete A/Bs before the round end stops for the operator
 }

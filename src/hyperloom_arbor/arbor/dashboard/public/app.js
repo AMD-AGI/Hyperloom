@@ -405,7 +405,7 @@ function render(payload) {
   // ---- node ----------------------------------------------------------------
   // The realtime collector never samples GPU nodes (a probe during a measured
   // replay perturbs it), so this panel only shows when a snapshot carries node
-  // data.
+  // data, as an earlier collector's did.
   const node = snap.node || {};
   const gpus = node.gpus || [];
   const containers = node.containers || [];
@@ -509,7 +509,7 @@ function renderAb(ab, abJob) {
   return parts.join("");
 }
 
-// A round end's A/B (the round-end A/B script), newest attempt first: per round,
+// A round end's A/B (the launcher's round-end hook, arbor/rounds.py), newest attempt first: per round,
 // the base and current arms at each point, the campaign's own (judged) point first. A row
 // is [round, arm, concurrency, metric, secondary]; the current arm's full GSM8K is a dict.
 function renderRoundAb(tries, c, jobs) {

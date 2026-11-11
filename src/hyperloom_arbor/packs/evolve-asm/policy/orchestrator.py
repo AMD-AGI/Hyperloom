@@ -220,7 +220,7 @@ THINK BIG — NOP REMOVAL IS NOT ENOUGH:
    A 30-min session that reduces VGPR from 512 to 200 is worth 10 sessions of NOP removal.
 
 BENCH PATH — USE KERNEL-ONLY TIMING (not full pipeline):
-   The default bench measures _flydsl_stage2_wrapper, which can pick
+   The default bench measures _flydsl_stage2_wrapper which on some nodes uses
    a much slower persist=True kernel. Always pass the known
    fast baseline explicitly when benching moe2:
 

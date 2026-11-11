@@ -1,8 +1,8 @@
 """The cluster as the controller sees it: Known, Unknown or Failed.
 
 `Unknown` is what a timed-out or unreadable `squeue`/`sacct` gives, and it
-never triggers an action. A restart guard that reads "could not check" as
-"nothing running" can relaunch a driver into a point that is mid-
+never triggers an action. A restart guard that read "could not check" as
+"nothing running" once relaunched a driver into a point that was mid-
 measurement; here the controller simply waits for the
 next tick.
 

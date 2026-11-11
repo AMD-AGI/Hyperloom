@@ -70,16 +70,16 @@ COMPONENT_SUBAGENT = "specialist"
 #: iteration a step belongs to is recoverable from the command line even when
 #: the agent forgets its mark.
 #:
-#: The lookbehind is not paranoia: without it this would match a name like
-#: ``aiter-<N>x-speedup`` in a URL and invent an iteration the run never had.
-#: AITER is the central ROCm library in this domain, so ``aiter`` appears in
-#: nearly every session — an unbounded ``iter`` match misattributes constantly.
+#: The lookbehind is not paranoia: without it this matched ``aiter-7x-speedup``
+#: in a URL and invented an iteration that the run never had. AITER is
+#: the central ROCm library in this domain, so ``aiter`` appears in nearly every
+#: session — an unbounded ``iter`` match misattributes constantly.
 #:
-#: The leading ``/`` is the second half of the same lesson: a banner a subagent
-#: echoes, such as ``=== iter_<n> / baseline ===``, would invent an iteration
-#: holding one step, which lowers the agent-dispatch rate and makes the report
-#: show a protocol violation that never happened. Only a path
-#: segment is evidence of an iteration; prose is not.
+#: The leading ``/`` is the second half of the same lesson: a subagent ran
+#: ``echo "=== iter_0 / baseline ==="`` and this invented an iteration 0 holding
+#: one step, which dragged the agent-dispatch rate below 100 % and made the
+#: report show a protocol violation that never happened. Only a path segment is
+#: evidence of an iteration; prose is not.
 _ITER_RE = re.compile(r"/iter[_-]?(\d+)")
 
 #: Preferred and unambiguous: the flag bench.py is actually invoked with.
@@ -180,8 +180,8 @@ def parse_transcripts(paths: list[Path]) -> dict[str, Any]:
             # One assistant message becomes several steps (a thinking block, some
             # text, N tool_use blocks) and every one of them carries this same
             # usage dict. Summing usage per step therefore multiplies the true
-            # cost by the number of blocks, several times over for output and
-            # thinking tokens. Carry the message identity
+            # cost by the number of blocks — two to three times over for output
+            # and thinking tokens on a long run. Carry the message identity
             # so aggregates can count each message exactly once.
             message_id = msg.get("id") or row.get("uuid")
 
@@ -385,9 +385,9 @@ def load_artifacts(session_dir: Path) -> dict[int, dict[str, Any]]:
         it = int(m.group(1))
         entry: dict[str, Any] = {}
         # Glob, not a fixed name. A rigorous run writes more than one bench:
-        # bench_output_cold<n>/confirm.json, say (cold runs plus a discarded
-        # hot one), or bench_output_<variant>.json for
-        # an ablation. Matching only "bench_output.json" found nothing for most
+        # bench_output_cold1/cold2/confirm.json, say (cold runs plus a
+        # discarded hot one), or bench_output_normonly.json for an ablation.
+        # Matching only "bench_output.json" found nothing for most
         # iterations and silently left the agent's self-reported number
         # unchecked — which is the one thing this cross-check exists to prevent.
         # ``bench_result*`` as well as ``bench_output*``: the filename is the
@@ -541,8 +541,8 @@ def build_trajectory(events: list[dict[str, Any]], parsed: dict[str, Any],
 
     # Tool calls that fired hooks but have no transcript entry are the
     # subagents'. Claude Code does not write dispatched-agent turns into the
-    # parent transcript — most tool calls can exist only in the
-    # hook stream, among them every WebSearch and WebFetch the
+    # parent transcript — measured on a real run, 133 of 177 tool calls existed
+    # only in the hook stream, among them every WebSearch and WebFetch the
     # research-protocol check is supposed to score. Reconstructing them from
     # hooks alone is the only way the specialist's work reaches the trajectory.
     transcript_tuids = {s.get("tool_use_id") for s in steps if s.get("tool_use_id")}
@@ -601,7 +601,7 @@ def build_trajectory(events: list[dict[str, Any]], parsed: dict[str, Any],
 
         # Attribute transcript-derived sidechain steps too, not just hook-only
         # ones. Both kinds need to say *which* specialist they came from — a run
-        # with many dispatches and many subagent steps is unreadable otherwise.
+        # with many dispatches and over a thousand subagent steps is unreadable otherwise.
         parent_agent = step.get("parent_agent_id")
         if is_side and not parent_agent:
             parent_agent = _enclosing_agent(step.get("ts"), agent_windows)

@@ -4,12 +4,12 @@ Standalone Arbor owns a node, its container and its clock. In component mode a
 host owns them: Hyperloom's multibranch (MB) today, which runs Arbor as an
 "autonomous branch" on a lease of GPUs and under its own deadline, gates and
 merges what Arbor keeps, and polls session.json's KEEP lessons as the keep
-signal (docs/component-mode.md, the design and the operator's decisions).
+signal (docs/component-mode.md, the design and its decisions).
 
-MB runs Arbor in a sandbox, against what standalone Arbor would do wrong inside it: stop
-MB's servers with a pattern `pkill`, run on cards outside its lease, keep iterating after
-the session has ended, hang in an agent turn with no bound, and load kernel tables from
-paths outside the workspace.
+MB runs Arbor in a sandbox, against what standalone Arbor would do wrong inside
+it: stop the host's servers with a pattern `pkill`, run on cards outside its
+lease, iterate past the session's end, hang, and load kernel tables from paths
+outside the workspace.
 This module is the part of the fix that is not the serving path:
 
 - **the switch**: ``"mode": "standalone" | "component"`` and the ``"component"``
@@ -96,14 +96,27 @@ NOTES_MAX_BYTES = 20 * 1024
 NOTES_RULE = ("The host has already measured and merged the following; never redo a change it "
               "lists, and do not copy it into your workspace.")
 
+# "ordered" and "reported": the master's and a worker's commands (arbor master, arbor worker; arbor/roles.py) handed
+# over: a work order is ready, a worker has reported. Component interface 2. "retraction_conflict": a KEEP the
+# agent found invalid that could not be reverted (arbor/retraction.py). Component interface 3.
+# "paused": `arbor pause` stopped the run at a pass boundary, its checkpoint written (arbor/checkpoints.py); the
+# process exits 76. Component interface 5.
 REASONS = ("deadline", "map_exhausted", "done", "sigterm", "mapped", "aborted", "unreachable",
-           "review_rejected")
+           "review_rejected", "ordered", "reported", "retraction_conflict", "paused")
 
 # The host sets the GPU masks; Arbor never sets or passes them (design §2).
 MASK_KEYS = ("ROCR_VISIBLE_DEVICES", "HIP_VISIBLE_DEVICES", "CUDA_VISIBLE_DEVICES")
 
 BLOCK_KEYS = ("host", "deadline", "seconds", "notes", "bench_command", "outbox", "phase_minutes",
-              "root", "plan", "stop_at", "profile", "review")
+              "root", "plan", "stop_at", "profile", "review", "callbacks", "base_launch", "entrypoint", "bench_read")
+
+# component.bench_read: where the host's client puts each metric, {"file": <under {out}>, "keys": {metric: dotted
+# path}}. With it the harness reads the metrics itself after each replay of bench_command (a fixed block the bench
+# agent runs as given), and a missing file or path makes the iteration NOT_MEASURED; without it the agent reads them.
+
+# component.base_launch: the host's frozen base launch, {"path": <its record>, "digest": ...}, which
+# Arbor's launch must equal before it starts (arbor/base_launch.py). component.entrypoint: the
+# server's command, from that record, in place of the framework's own (arbor/frameworks/base.py).
 
 # component.review: who reviews the campaign before it runs. "host": the host does, before it
 # starts this run (MB pauses after its dossier pass, holding no lease), so the review gate
@@ -121,9 +134,19 @@ STOP_AT = ("map",)
 _SHA = re.compile(r"^[0-9a-fA-F]{7,40}$")
 
 # Each phase's cap, in minutes (``component.phase_minutes`` overrides): an agent
-# turn with no bound at all can hang.
+# turn with no bound at all can hang for hours.
 PHASE_MINUTES = {"agent": 90, "server": 45, "bench": 60, "critic": 15, "correctness": 30,
                  "short_prompts": 10}
+
+# Standalone, an agent turn has a cap too (a critic's `find /` over network storage once ran 46 min,
+# and a bench agent's wait loop never ended). A backstop against a hang, not a budget: a dossier's measure turn ran up
+# to 108 min. The config's `phase_minutes` sets one (0: none); the bench's is never shorter than the config's
+# bench_timeout plus 30 min, since the bench runs inside the turn.
+STANDALONE_TURN_MINUTES = {"agent": 240, "server": 60, "bench": 90, "critic": 20}
+# A pack may declare how long its bench runs (``measurement.bench_minutes``; -1: no cap). The bench turn's default cap
+# is never under it plus this margin, in either mode: a 3600 s AgentX replay with its warmup ran 64 min against a
+# 60 min cap, so every bench was NOT MEASURED. A cap the host or config sets itself still wins.
+DECLARED_MARGIN_MIN = 15
 
 # Every phase ends this long before the deadline, and an iteration starts only
 # if it ends by then: time to stop our own server (up to two minutes, never
@@ -209,7 +232,7 @@ def session_root(config) -> Path:
 
 def parse_deadline(value) -> float:
     """An absolute deadline: epoch seconds (a number or a numeric string), or ISO 8601
-    with a timezone ("2030-01-01T00:00:00Z"). ValueError otherwise: a deadline with no
+    with a timezone ("2026-10-29T03:20:00Z"). ValueError otherwise: a deadline with no
     timezone is read differently on every host."""
     if isinstance(value, bool):
         raise ValueError(f"deadline {value!r} is not a time")
@@ -275,6 +298,15 @@ def config_errors(config) -> list[str]:
         errors.append(f"component.root must be a commit sha (7 to 40 hex digits), not {raw['root']!r}")
     if raw.get("plan") is not None:
         errors += plan_entries(config)[1]
+    if raw.get("callbacks") is not None:
+        from arbor import triggers
+        errors += triggers.callback_errors(raw["callbacks"])
+    if raw.get("base_launch") is not None or raw.get("entrypoint") is not None:
+        from arbor import base_launch
+        if raw.get("base_launch") is not None:
+            errors += base_launch.errors(raw["base_launch"])
+        if raw.get("entrypoint") is not None:
+            errors += base_launch.entrypoint_errors(raw["entrypoint"])
     if raw.get("deadline") is not None:
         try:
             parse_deadline(raw["deadline"])
@@ -283,6 +315,8 @@ def config_errors(config) -> list[str]:
     if _seconds(raw) is not None and not _positive(raw["seconds"]):
         errors.append(f"component.seconds must be a positive number (0 for none), "
                       f"not {raw['seconds']!r}")
+    if raw.get("bench_read") is not None:
+        errors += bench_read_errors(raw["bench_read"], raw.get("bench_command"))
     pm = raw.get("phase_minutes")
     if pm is not None:
         if not isinstance(pm, dict):
@@ -291,8 +325,9 @@ def config_errors(config) -> list[str]:
             for k, v in pm.items():
                 if k not in PHASE_MINUTES:
                     errors.append(f"component.phase_minutes.{k} is not a phase ({', '.join(PHASE_MINUTES)})")
-                elif not _positive(v):
-                    errors.append(f"component.phase_minutes.{k} must be a positive number of minutes")
+                elif not (_positive(v) or (v == -1 and not isinstance(v, bool))):
+                    errors.append(f"component.phase_minutes.{k} must be a positive number of minutes, or -1 for "
+                                  f"no cap")
     return errors
 
 
@@ -313,7 +348,8 @@ except Exception as e:
 
 def _native_import_error(config, env) -> str | None:
     """A refusal when the framework's package is there but its compiled extension does not
-    import, as a source-only worktree's vLLM lacks ``vllm._C``: every server start would fail. Checked with the driver's environment, the
+    import, as a source-only worktree's vLLM lacks ``vllm._C``: every server start would
+    fail. Checked with the driver's environment, the
     server_env's PYTHONPATH over it, by the ``python3`` on its PATH. A package that is not
     found at all, or a check that cannot run, refuses nothing."""
     from arbor import frameworks
@@ -373,7 +409,8 @@ def refusals(config, env=None, session_dir=None) -> list[str]:
             if r.returncode != 0 or not r.stdout.strip():
                 out.append(f"component.root {root} is not a commit of the workspace {ws}: every "
                            "patch and snapshot is measured against it")
-        # A server with no flags is not the host's launch.
+        # A server with no flags is not the host's launch: one MB onboarding wrote an empty
+        # server_flags, and the base server then failed its CUDA-graph capture.
         if not str(config.get("server_flags") or "").strip():
             out.append("component mode needs server_flags: the launch the host measures (its "
                        "start commit's server args); an empty one serves defaults that are not it")
@@ -381,6 +418,12 @@ def refusals(config, env=None, session_dir=None) -> list[str]:
             broken = _native_import_error(config, env)
             if broken:
                 out.append(broken)
+        # The host's base launch: Arbor starts from the launch the host's gate measures, or not
+        # at all. A malformed block is config_errors'.
+        if b.get("base_launch") is not None:
+            from arbor import base_launch
+            if not base_launch.errors(b["base_launch"]):
+                out += base_launch.check(config)[1]
     if session_dir and mode in MODES:
         raw = _read_json(Path(session_dir) / "session.json") or {}
         recorded = raw.get("mode")
@@ -437,7 +480,8 @@ def refuse_unloadable(config_path, exc: BaseException) -> int:
 def plan_entries(config) -> tuple[list[dict], list[str]]:
     """``component.plan``: the directions this campaign works, and what is wrong with them.
 
-    A host running several Arbors from one set of directions gives each its share. The plan is a list of directions in the
+    A host running several Arbors from one set of directions gives each its share. The plan
+    is a list of directions in the
     form a DIRECTIONS line takes (``{"id": "m-<component>", "kind": "increment"|"rewrite",
     "title": ..., "why"?, "rank"?, "ceiling"?}``), or ``{"directions": [...]}``, or the path
     of a JSON file holding either. Every entry is open; ids are unique.
@@ -491,17 +535,9 @@ def seed_plan(config, session_dir) -> str | None:
     doc, _ = directions.load(session)
     if doc is not None:
         return f"the host's plan: kept the map this session already has ({len(doc.get('directions') or [])} directions)"
-    now = time.time()
     host = block(config).get("host") or "host"
-    doc = directions.new_doc()
-    doc.update(scope="lane", phase="active", map_round=1, round_started=1, round_started_ts=now,
-               phase_started_ts=now,
-               lane={"run": host, "round": 1, "lane": host, "direction": f"{len(entries)} directions",
-                     "kind": "host-plan", "plan": None, "plan_sha256": None, "source": "component.plan"},
-               directions=[{**e, "status": directions.OPEN, "why": e.get("why", ""), "added_at": 1,
-                            "closed_at": None, "worked": [], "keeps": [], "flagged": False}
-                           for e in entries])
-    directions.save(session, doc)
+    directions.seed_lane(session, entries, {"run": host, "lane": host, "kind": "host-plan",
+                                            "source": "component.plan"})
     return (f"the host's plan: this campaign works {len(entries)} directions "
             f"({', '.join(e['id'] for e in entries)}) and nothing else")
 
@@ -732,20 +768,64 @@ class PhaseTimeout(Exception):
                                 f"(component mode: its cap, or the deadline)")
 
 
-def phase_seconds(config, phase_name: str, session_dir=None, now: float | None = None) -> float | None:
+def _capped_minutes(given: dict, phase_name: str, default, floor_minutes) -> float | None:
+    """A phase's minutes: the host's or config's own value wins; else the default, never under a pack's declared length
+    (``floor_minutes``) plus DECLARED_MARGIN_MIN. None for no cap: a negative value (-1), given or declared."""
+    if phase_name in given:
+        minutes = float(given[phase_name])
+    else:
+        if default is None:
+            return None
+        minutes = float(default)
+        try:
+            floor = None if isinstance(floor_minutes, bool) else float(floor_minutes)
+        except (TypeError, ValueError):     # none declared, or not a number: the default stands
+            floor = None
+        if floor is not None:
+            minutes = -1.0 if floor < 0 else max(minutes, floor + DECLARED_MARGIN_MIN)
+    return None if minutes < 0 else minutes
+
+
+def phase_seconds(config, phase_name: str, session_dir=None, now: float | None = None,
+                  floor_minutes: float | None = None) -> float | None:
     """The phase's timeout: min(its cap, seconds left before the deadline less the margin).
 
-    None in standalone, where phases have no timeout. Zero or less: no time is left.
+    None in standalone, where phases have no timeout. Zero or less: no time is left. A cap of -1 (the host's, or a
+    pack's declared length, ``floor_minutes``) is none: the deadline alone bounds the phase.
     """
     if not is_component(config):
         return None
-    minutes = (block(config).get("phase_minutes") or {}).get(phase_name, PHASE_MINUTES[phase_name])
-    cap = float(minutes) * 60
+    given = block(config).get("phase_minutes") or {}
+    minutes = _capped_minutes(given if isinstance(given, dict) else {}, phase_name, PHASE_MINUTES[phase_name],
+                              floor_minutes)
+    cap = float("inf") if minutes is None else minutes * 60
     dl = deadline_of(session_dir if session_dir is not None else session_root(config))
     if dl is None:
-        return cap
+        return None if minutes is None else cap
     now = time.time() if now is None else now
     return min(cap, dl - DEADLINE_MARGIN_S - now)
+
+
+def turn_seconds(config, phase_name: str, session_dir=None, now: float | None = None,
+                 floor_minutes: float | None = None) -> float | None:
+    """An agent turn's timeout: component mode's ``phase_seconds``; standalone, ``STANDALONE_TURN_MINUTES`` or the
+    config's ``phase_minutes``, never under a pack's declared length (``floor_minutes``). None for no cap: -1 (or 0
+    standalone)."""
+    if is_component(config):
+        return phase_seconds(config, phase_name, session_dir, now, floor_minutes)
+    raw = (config or {}).get("phase_minutes")
+    given = raw if isinstance(raw, dict) else {}
+    try:
+        minutes = _capped_minutes(given, phase_name, STANDALONE_TURN_MINUTES.get(phase_name), floor_minutes)
+    except (TypeError, ValueError):
+        minutes = STANDALONE_TURN_MINUTES.get(phase_name)
+    if not minutes or minutes <= 0:
+        return None
+    if phase_name == "bench":
+        bt = (config or {}).get("bench_timeout")
+        if isinstance(bt, (int, float)) and not isinstance(bt, bool) and bt > 0:
+            minutes = max(minutes, bt / 60 + 30)
+    return minutes * 60
 
 
 # ── the serving path's files ───────────────────────────────────────────────────
@@ -771,7 +851,7 @@ def seed_env(config) -> dict:
 
 def gpu_list(value) -> list[int] | None:
     """``gpu_ids`` as a list of ints: "4,5,6,7" or [4, 5, 6, 7], since a host's manifest
-    may write either; None when there are none."""
+    may write either (a list crashed every iteration before); None when there are none."""
     items = value if isinstance(value, (list, tuple)) else str(value or "").split(",")
     ids = [int(g) for g in items if str(g).strip()]
     return ids or None
@@ -782,9 +862,9 @@ def gpu_list(value) -> list[int] | None:
 def turn_block(config, session_dir=None, now: float | None = None) -> str:
     """The main agent's time this turn: its phase cap and what is left before the deadline.
 
-    Under a host, an agent that is not told how long its turn is can start a tuning sweep
-    inside a capped turn, hit the cap before measuring, and lose much of Arbor's time.
-    Empty in standalone, where turns have no cap.
+    Under a host, an agent started an AITER fused-MoE tuning sweep inside a 30-minute
+    turn, hit the cap before measuring, and lost half of Arbor's time: nothing had
+    told it how long its turn was. Empty in standalone, where turns have no cap.
     """
     if not is_component(config):
         return ""
@@ -928,6 +1008,42 @@ def bench_command(config) -> str | None:
     return cmd.strip()
 
 
+def bench_read_errors(raw, command) -> list[str]:
+    """What is wrong with ``component.bench_read``: it needs a bench_command, a file under ``{out}`` and a map of
+    metric keys to dotted paths. ``require``, optional, maps dotted paths to the scalar each must equal (a round the
+    client did not complete keeps its numbers: ``{"run_status": "completed", "agentx.stopped_by_threshold": false}``)."""
+    if not isinstance(raw, dict):
+        return ["component.bench_read must be an object: {\"file\": ..., \"keys\": {metric: path}}"]
+    errors = []
+    if not isinstance(command, str) or not command.strip():
+        errors.append("component.bench_read needs component.bench_command: it reads that command's report")
+    f = raw.get("file")
+    if not isinstance(f, str) or not f.strip() or f.startswith("/") or ".." in f.replace("\\", "/").split("/"):
+        errors.append(f"component.bench_read.file must be a path under the command's {{out}}, not {f!r}")
+    keys = raw.get("keys")
+    if not isinstance(keys, dict) or not keys or not all(
+            isinstance(k, str) and k and isinstance(v, str) and v.strip() for k, v in keys.items()):
+        errors.append("component.bench_read.keys must map each metric key to a dotted path in the file")
+    require = raw.get("require", {})
+    if not isinstance(require, dict) or not all(
+            isinstance(k, str) and k.strip() and (v is None or isinstance(v, (str, int, float, bool)))
+            for k, v in require.items()):
+        errors.append("component.bench_read.require must map dotted paths to the value each must equal "
+                      "(a string, a number, true, false or null)")
+    unknown = set(raw) - {"file", "keys", "require"}
+    if unknown:
+        errors.append(f"component.bench_read has unknown key(s) {sorted(unknown)}")
+    return errors
+
+
+def bench_read(config) -> dict | None:
+    """``component.bench_read`` when it is set and well formed; None: the bench agent reads the metrics."""
+    raw = block(config).get("bench_read")
+    if not is_component(config) or raw is None or bench_read_errors(raw, block(config).get("bench_command")):
+        return None
+    return {"file": raw["file"].strip(), "keys": dict(raw["keys"]), "require": dict(raw.get("require") or {})}
+
+
 def fill_bench(command: str, port, out) -> str:
     """The host's bench command with ``{port}`` and ``{out}`` filled, nothing else changed:
     str.replace, so any other braces in it (a JSON argument) stay as they are."""
@@ -987,7 +1103,8 @@ def _copy_tables(server_env: dict, workspace: str, dest: Path, say=log,
     TABLE_MAX_BYTES is listed with ``skipped``, not copied.
 
     A value that is a ``:``-separated list (aiter's tables: MB gives the start's as its
-    private default copies, then the start's rows; the agent appends its own) is {path: the whole value, files: [...]}: each part that is a file
+    private default copies, then the start's rows; the agent appends its own) is
+    {path: the whole value, files: [...]}: each part that is a file
     copied to ``tables/<VAR>/<k>-<basename>`` (k its place in the list) and listed in
     order. Parts that are not files stay in ``path`` only; a list with no file is not a
     table.
@@ -1065,7 +1182,7 @@ def carried_changes(container: str, workspace: str, parent: str, commit: str, it
     ``Revert "iter-N: ..."`` undoes, and that changes what is served: the served pathspec,
     or arbor/config.json (flags and env, which the patches leave out). A NOT_MEASURED
     iteration keeps its tree, so its change rides into the next KEEP, whose gate judges
-    only the two together.
+    only the two together (an earlier iteration's quick-reduce env rode into a later KEEP, for one).
     Each is named with its own verdict from session.json, for the host to see.
     """
     from arbor.execute.workspace import git
@@ -1100,7 +1217,7 @@ def carried_changes(container: str, workspace: str, parent: str, commit: str, it
 
 def snapshot_keep(config, session_dir, *, container: str, workspace: str, number: int,
                   iteration: int, metric, change: str, intent: str,
-                  now: float | None = None) -> dict:
+                  now: float | None = None, retracts: dict | None = None) -> dict:
     """The KEEP's snapshot (design §4): ``<outbox>/NNNN/``, then LATEST. Returns keep.json.
 
     The driver calls it before session.json records the KEEP, so the snapshot is
@@ -1122,6 +1239,10 @@ def snapshot_keep(config, session_dir, *, container: str, workspace: str, number
       is named here, with its size (a GPU core dump, for example).
     - config.json is the live arbor/config.json, what was measured (the server and
       bench agents may edit it after the commit), without the GPU masks the launch drops.
+    - ``retracts`` (``{iteration, keep, finding}``) makes it a retraction's snapshot
+      (arbor/retraction.py): the tree with an earlier KEEP's change reverted, which no
+      gate measured. It goes into keep.json, and the iteration's own check records stay
+      out: they are of the iteration's candidate, not of this tree.
     """
     from arbor.execute.workspace import (
         _write_diff, base_commit, git, landed_pathspec, oversize, read_workspace_config, without,
@@ -1180,6 +1301,8 @@ def snapshot_keep(config, session_dir, *, container: str, workspace: str, number
                "change": change, "intent": intent, "root": root, "parent": parent,
                "commit": commit, "carries": carries, "ts": iso(now), "tables": tables,
                "tables_outside_workspace": outside}
+        if retracts is not None:
+            doc["retracts"] = dict(retracts)
         # The links the served tree makes outside itself, and how they are rebuilt
         # (arbor/execute/outside.py), when the driver recorded some for this commit.
         links = _read_json(Path(session_dir) / "outside.json") or {}
@@ -1189,7 +1312,8 @@ def snapshot_keep(config, session_dir, *, container: str, workspace: str, number
         # The short-prompt check at this KEEP (arbor/measure/short_prompts.py): its brief
         # always, why it did not run included; its record when it ran.
         sp = Path(session_dir) / f"iter_{iteration}" / "short_prompts_check.json"
-        if sp.is_file():
+        checked = retracts is None     # a retraction's tree is not the one these checked
+        if checked and sp.is_file():
             from arbor.measure.short_prompts import brief
             rec = json.loads(sp.read_text())
             doc["short_prompts"] = brief(rec)
@@ -1198,11 +1322,11 @@ def snapshot_keep(config, session_dir, *, container: str, workspace: str, number
         # The full GSM8K this KEEP was held to (arbor/measure/accuracy.py), and the
         # switches it lands, served on (arbor/measure/switches.py): what a host
         # that turns one on later needs to know.
-        acc = _read_json(Path(session_dir) / f"iter_{iteration}" / "accuracy" / "accuracy.json")
+        acc = checked and _read_json(Path(session_dir) / f"iter_{iteration}" / "accuracy" / "accuracy.json")
         if acc:
             from arbor.measure.accuracy import brief as accuracy_brief
             doc["accuracy"] = accuracy_brief(acc)
-        sw = _read_json(Path(session_dir) / f"iter_{iteration}" / "switches" / "switches.json")
+        sw = checked and _read_json(Path(session_dir) / f"iter_{iteration}" / "switches" / "switches.json")
         if sw:
             from arbor.measure.switches import brief as switches_brief
             doc["switches"] = switches_brief(sw)

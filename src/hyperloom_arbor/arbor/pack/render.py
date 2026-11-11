@@ -2,12 +2,11 @@
 
 from __future__ import annotations
 
-import re
 from collections import Counter
 from pathlib import Path
 
 from arbor.measure.intents import from_legacy, is_history_row
-from arbor.pack.loader import agent_skills
+from arbor import lifecycle
 
 # How many recent non-KEEP iterations to show in full. KEEPs are always shown —
 # they describe the tree the agent is actually looking at.
@@ -25,15 +24,15 @@ _SKILL_RULES = {
         "It takes precedence over any profiling procedure in the knowledge above. "
         "The validator and the evaluators are unchanged."
     ),
-    "dossier": (
+    "dossier-v1": (
         "read this campaign's dossier before choosing what to work on. The skill "
         "looks it up first and uses it; it refreshes only stale parts, and writes "
         "a dossier only when none exists."
     ),
     # The balanced pack's three reference skills.
     "hardware": (
-        "price every floor, roofline and kernel plan against numbers measured on "
-        "this node, with sources, not the datasheet; its "
+        "price every floor, roofline and kernel plan against what this device "
+        "measurably achieves (its table, with sources), not the datasheet; its "
         "reference pages hold the ISA, LDS and MFMA limits a kernel must respect."
     ),
     "serving-playbook": (
@@ -56,7 +55,7 @@ def _lesson_label(lesson: dict) -> str:
     """`INTENT → VERDICT`, or the annotation's own word.
 
     Used by BOTH the per-iteration line and the header tally, because a
-    document that says "N PROBE" above rows labelled "LEARN → KEEP" makes the
+    document that says "26 PROBE" above rows labelled "LEARN → KEEP" makes the
     reader reconcile two vocabularies — the exact cost the split was meant to
     remove. Annotation rows (BASELINE / ESCALATE / NOTE) are exempt: no gate
     produced them and no intent was declared, so re-deriving a pair would print
@@ -121,8 +120,8 @@ def _render_history(lessons: list[dict]) -> str:
     #
     # Deliberately still a literal, and NOT the rule "verdict != REVERT" that
     # the intent split makes tempting. Those are not the same set: a LEARN that
-    # passed has verdict KEEP, so that rule would pin every probe — a campaign
-    # can run many, almost all of whose artifacts live in `eval/`
+    # passed has verdict KEEP, so that rule would pin every probe, and a
+    # probe's artifacts mostly live in `eval/`
     # rather than in the tree. It would also pin ESCALATE. Which rows are worth
     # permanent prompt budget is a judgement about cost, not something derivable
     # from the verdict, so it stays written down.
@@ -197,8 +196,8 @@ def _render_barren(campaign, state) -> str:
         # NOT a claim about what the campaign has or has not measured. The
         # design sketched two variants ("nothing has measured it" / "the last
         # measurement was iteration X"), and rendering the first against a
-        # campaign that holds many denominator and census ledger entries
-        # produces a flat falsehood. A block the agent can catch lying is a
+        # campaign that held many denominator and census ledger entries
+        # produced a flat falsehood. A block the agent can catch lying is a
         # block it discounts. Asking instead is always true, and after N landed
         # changes STALENESS is the live question anyway.
         prov = ("Name the measurement that answer rests on, and when it was "
@@ -305,12 +304,10 @@ def _render_barren(campaign, state) -> str:
 
 
 def _skill_description(arbor_root: Path, name: str) -> str:
-    try:
-        text = (arbor_root / ".claude" / "skills" / name / "SKILL.md").read_text()
-    except OSError:
-        return ""
-    m = re.search(r"^description:\s*(.+)$", text, re.MULTILINE)
-    return m.group(1).strip() if m else ""
+    """A skill's description, its front matter read as YAML, so a folded one (`>-`) reads as its text; a family's
+    skill (`family:name`) is found in its family's folder."""
+    from arbor import skillcheck
+    return skillcheck.description(skillcheck.resolve(arbor_root, name).parent)
 
 
 def _render_skills(skills: list[str], arbor_root: Path) -> str:
@@ -379,7 +376,10 @@ def _render_switches() -> str:
         "one, with the switch's name, where the kernel dispatches.\n\n"
         "A new variable your change reads that the tree did not name, that the arm leaves unset "
         "and that you did not declare, refuses the KEEP: the harness cannot know how to turn it "
-        "on."
+        "on. Two are not switches: a variable another editable package already reads (AITER's "
+        "`AITER_CONFIG_*`), and one whose unset value runs your new path (an opt-out such as "
+        "`DISABLE_X`), which you declare on its own line as `DEFAULT_ON: DISABLE_X`: the arm's "
+        "own run served that path."
     )
 
 
@@ -399,9 +399,8 @@ def render_program(campaign, state, arbor_root: str | Path,
 
     sections.append(f"# {campaign.pack.name} — {campaign.goal}\n")
 
-    # The regime, stated once at the top. A long drought can stay invisible
-    # when every counter anyone looks at faithfully reports a small
-    # `null_streak`.
+    # The regime, stated once at the top: a long drought stays invisible while
+    # every counter anyone looks at faithfully reports a low `null_streak`.
     if hasattr(state, "diagnose") and state.lessons:
         sections.append(f"_{state.diagnose()}_")
 
@@ -413,9 +412,11 @@ def render_program(campaign, state, arbor_root: str | Path,
     #
     # It was parsed into Pack.description from the beginning but at first
     # never rendered. Packs had been written against the assumption that it
-    # reached the agent, so a pack's header -- its operating point, its
-    # baseline and target -- was invisible to the
-    # agent it was written for.
+    # reached the agent, so one pack's header -- its concurrency, its
+    # baseline and target, and the warning that the inherited roadmap's
+    # numbers were leads from another concurrency -- was invisible to the
+    # agent it was written for, and the distinction survived only in the
+    # config goal and a knowledge file.
     if campaign.pack.description:
         sections.append(campaign.pack.description.strip())
 
@@ -434,10 +435,24 @@ def render_program(campaign, state, arbor_root: str | Path,
     obj = campaign.pack.objective
     unit = obj.get('unit', '')
     unit_s = f" {unit}" if unit else ""
+    # An objective asked in place of the pack's (arbor/objective.py): the pack's own text still names its metric.
+    over = obj.get("opt_objective") or {}
+    shown = over.get("asked") if isinstance(over.get("asked"), str) else obj["metric"]
+    asked_s = (f"- Asked for this campaign (\"{shown}\") in place of the pack's {over.get('pack_metric')}: "
+               f"where the pack's text names its own metric, read this one. A change is kept for what it does to "
+               f"{obj['metric']}.\n") if over and over.get("pack_metric") != obj["metric"] else ""
+    # A host's guards (arbor/measure/guards.py): what a KEEP must not give up.
+    guards = (obj.get("measurement") or {}).get("guards") or []
+    if guards:
+        held = "; ".join(f"{g['metric']} at most {g['max_pct']:g} %" if "max_pct" in g else
+                         f"{g['metric']} within {g['band_pct']:g} % of the kept tree" for g in guards)
+        asked_s += (f"- Guards: {held}. A change that breaks one is reverted, whatever its gain: buy {obj['metric']} "
+                    f"without them.\n")
     sections.append(
         f"## Objective\n\n"
         f"- Kind: {obj['kind']}\n"
         f"- Metric: {obj['metric']} ({obj['direction']}){unit_s}\n"
+        + asked_s +
         f"- Baseline: {state.baseline}\n"
         f"- Best: {state.best_metric}\n"
         f"- Target: {campaign.config.get('target', 'not set')}\n"
@@ -505,7 +520,7 @@ def render_program(campaign, state, arbor_root: str | Path,
 
     # Skills — after the knowledge and constraints, because a listed skill
     # can take precedence over a procedure they describe (_SKILL_RULES).
-    skills = agent_skills(campaign.pack)
+    _chapter, skills = lifecycle.turn_skills(campaign, state)
     if skills:
         sections.append(_render_skills(skills, arbor_root))
 

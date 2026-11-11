@@ -4,7 +4,7 @@ From a laptop dry run to a first campaign on a GPU node.
 
 ## What you need
 
-- **Linux** (or WSL) and **Python 3.11 or newer**: the harness uses POSIX calls.
+- **Linux** (or WSL) and **Python 3.10 or newer**: the harness uses POSIX calls. (3.10 is what serving images ship.)
 - **Python packages:** `pyyaml` (every command) and `claude-agent-sdk` (to run agents; it brings
   its own Claude CLI). Arbor has no requirements file yet:
 
@@ -26,8 +26,8 @@ From a laptop dry run to a first campaign on a GPU node.
 ## 1. A dry run (no GPU)
 
 ```bash
-cd src/hyperloom_arbor   # this repository's copy
-python3 -m arbor run --config configs/serving-template.json --dry-run
+git clone <this repository's URL> Arbor && cd Arbor
+python3 -m arbor run --config configs/agentx-glm52-mi355x.json --dry-run
 ```
 
 The dry run drives the real loop (the program, the gate, escalation, the records) on synthetic
