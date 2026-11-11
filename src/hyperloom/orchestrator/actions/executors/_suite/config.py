@@ -89,6 +89,7 @@ from inference_suite.frameworks import Framework, FrameworkKind, framework_facts
 
 from .._gpu_pin import ROCR_AUTOFILL_ENV
 from .._workload_envs import QUALITY_REF_ENVS
+from .custom_workload import enforce_custom_scope
 from .._profile_setup import (
     _DELAY_ITERATIONS,
     _MAX_ITERATIONS,
@@ -686,9 +687,18 @@ def scriptable_workload(bench: Mapping[str, Any], envs: Mapping[str, str]) -> Sc
 def _scriptable_config(
     bench: Mapping[str, Any], point: _Point, base: BaseLaunch, settings: RoundSettings, boot_only: bool
 ) -> SuiteConfig:
-    """The scriptable point's round: its base's script, once, on a server-less round of its own."""
+    """The scriptable point's round: its base's script, once, on a server-less round of its own.
+
+    Raises:
+        ConfigError: When the round would boot or reuse a server, or when a custom point's declared
+            optimization scope is unreadable or does not hold.
+    """
     if boot_only or settings.lifecycle.mode is not LifecycleMode.OWN:
         raise ConfigError("a scriptable point runs no server, so its round neither boots one nor reuses one")
+    try:
+        enforce_custom_scope(point.framework.value)
+    except ValueError as exc:
+        raise ConfigError(f"the custom point's optimization scope does not hold: {exc}") from exc
     return SuiteConfig(
         server=_server(point, base, settings, None, LaunchDelta()),
         workload=WorkloadKind.SCRIPTABLE,

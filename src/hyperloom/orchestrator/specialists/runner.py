@@ -101,6 +101,17 @@ def _worktree_source(params: dict[str, Any], *, framework_repo_path: str = "") -
     )
 
 
+def _scope_readable() -> tuple[Path, ...]:
+    """The directory holding ``optimization_scope.json``.
+
+    ``HYPERLOOM_BYPASS_SCRIPTS_DIR`` reaches the specialist's environment but no bind
+    follows it -- it is not one of ``confinement.DATA_VARIABLES`` -- so in a sandbox the
+    variable names a directory that is not there and reading the declaration is ``ENOENT``.
+    """
+    declared = os.environ.get("HYPERLOOM_BYPASS_SCRIPTS_DIR", "").strip()
+    return (Path(declared),) if declared else ()
+
+
 def _subprocess_call_outcome(result: SpecialistSubprocessResult) -> tuple[str, dict[str, Any]]:
     """The terminal status and attributes of a specialist subprocess's ``llm.call`` span."""
     attributes: dict[str, Any] = {
@@ -912,7 +923,7 @@ class SpecialistRunner:
                     deadline=deadline,
                     gpu_lease=ctx.extra.get("gpu_specialist_lease"),
                     progress_cb=ctx.extra.get("specialist_progress_cb"),
-                    readable=(Path(str((ctx.task.params or {}).get("model_path") or "")),),
+                    readable=(Path(str((ctx.task.params or {}).get("model_path") or "")), *_scope_readable()),
                 )
             )
             call_status, call_attributes = _subprocess_call_outcome(sub_result)
