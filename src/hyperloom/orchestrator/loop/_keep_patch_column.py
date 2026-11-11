@@ -146,8 +146,13 @@ def _keep_origin_provenance(result: Mapping[str, Any], sources: list[Path], *, r
     }
 
 
-def _source_snapshot_layers(stack: Any) -> list[dict[str, Any]]:
-    from ..source_snapshot import source_layer_overlay_dir, source_layer_reproducible
+def _source_snapshot_layers(stack: Any, inert_layers: Any = ()) -> list[dict[str, Any]]:
+    """The durable source layers a consumer replays, in the order they reached the tree.
+
+    ``inert_layers`` are the source an inert KEEP committed: kept beside the stack
+    because they are not adoptions, but still in the tree the measurement ran on.
+    """
+    from ..source_snapshot import source_layer_overlay_dir, source_layer_reproducible, source_layers_in_order
 
     return [
         {
@@ -159,8 +164,8 @@ def _source_snapshot_layers(stack: Any) -> list[dict[str, Any]]:
             "base_sha": str(entry.get("base_sha") or ""),
             "reproducible": source_layer_reproducible(entry) if snapshot else False,
         }
-        for entry in (stack or [])
-        if isinstance(entry, dict) and entry.get("scope") == "source_patch"
+        for entry in source_layers_in_order([e for e in (stack or []) if isinstance(e, dict)], list(inert_layers or []))
+        if entry.get("scope") == "source_patch"
         for snapshot in (str(entry.get("source_snapshot") or "").strip(),)
     ]
 

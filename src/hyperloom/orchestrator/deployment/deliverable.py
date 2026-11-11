@@ -32,11 +32,13 @@ def _verify_accepted_source(state: dict, captured: Path) -> set[str]:
     one *landed* code and recorded nothing anyway. That entry changed the tree being
     captured and nothing proves what it changed, so it is refused rather than skipped.
 
-    ``source_layers_in_order`` also merges in a second list, for source an inert KEEP
-    committed. Nothing records one yet, so that half is inert here; it is wired, and
-    described, by the commit that makes inert KEEPs.
+    The source inert KEEPs committed is checked in the order it landed between them.
     """
     expected = {}
+    # Every inert layer, unfiltered -- unlike ``_inert_layers_in``, which drops the ones
+    # that landed after the lift. This checks the tree on disk, which holds all of them
+    # since an inert KEEP is never reverted; that one reconstructs the tree a past
+    # measurement ran on. Different questions, so the asymmetry is deliberate.
     for entry in source_layers_in_order(state.get("optimization_stack", []), state.get("inert_source_layers", [])):
         if not entry.get("source_snapshot"):
             if missing_source_snapshot(entry):
