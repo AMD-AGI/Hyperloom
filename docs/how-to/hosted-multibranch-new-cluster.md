@@ -41,6 +41,11 @@ These are set in the app container's environment.
 The model is named by the campaign spec (`model.path`), not by a variable. The app host reads the model's tokenizer
 files at that path.
 
+A multi-branch spec resolves its base launch from the recipe sources (InferenceX, the framework's cookbook, the default
+table), as `hyperloom-multibranch run` does, and does not read `launch.server_args` or `launch.extra_env`, which only
+flow `single` reads: a spec that sets either ends the run (exit code 2), naming the field, instead of running without
+it.
+
 ## Measurement sandbox template
 
 These are set in the `measurement` template's environment (or its mounts). They are read inside the sandbox, so they

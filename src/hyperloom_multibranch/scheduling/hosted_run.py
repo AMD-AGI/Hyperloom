@@ -10,8 +10,10 @@ the legacy entry validated, a multi-branch session needs ``multibranch.workload`
 ``multibranch.dev_leases`` ``--dev-leases``, each source of ``multibranch.autonomous_agents`` one
 ``--autonomous-agent``, ``multibranch.make_before_break`` (``true`` by default) ``--make-before-break`` or
 ``--no-make-before-break``, and ``placement.max_parallel_tests`` is ``--max-parallel-tests``, at most what the grant
-runs at once. The fields ``run`` has no option for -- ``objective``, ``launch``, ``options``, ``placement.profile`` and
-``placement.specialist_capacity`` -- are not read. Dev sandboxes and agents run in ``dev`` sandboxes of the grant, so
+runs at once. The fields ``run`` has no option for -- ``objective``, ``options``, ``placement.profile`` and
+``placement.specialist_capacity`` -- are not read. A spec that sets ``launch.server_args`` or ``launch.extra_env`` is
+refused rather than run without them: a multi-branch session resolves its base launch from the recipe sources, as
+``run`` does, and reads neither (:func:`run_argv`). Dev sandboxes and agents run in ``dev`` sandboxes of the grant, so
 they need its ``dev`` key and the session directory on the storage ``USER_DATA_PATH`` names, which the ``dev``
 template mounts at the same path (:func:`refuse_unhosted_branches`).
 Every test, PRELUDE's included, runs in a measurement sandbox, so the application's container needs no card:
@@ -85,10 +87,12 @@ def run_argv(spec: CampaignSpec, max_hours: float, parallel_tests: int) -> list[
     tests at once; every value is written ``--option=value`` so that one starting with ``-`` is no option.
 
     Raises:
-        HostedRefused: When the spec lacks what a multi-branch session needs, naming each missing field.
+        HostedRefused: When the spec lacks what a multi-branch session needs, naming each missing field, or sets a
+            launch field the session would not read.
     """
 
     section = _multibranch_section(spec.multibranch)
+    _refuse_launch_fields(spec)
     values: dict[str, Any] = {
         "model": spec.model_path,
         "framework": spec.framework_name,
@@ -144,6 +148,19 @@ def _make_before_break(section: Mapping[str, Any]) -> bool | None:
     if keep is not None and not isinstance(keep, bool):
         raise HostedRefused("multibranch.make_before_break must be true or false")
     return keep
+
+
+def _refuse_launch_fields(spec: CampaignSpec) -> None:
+    given = [
+        field
+        for field, value in (("launch.server_args", spec.server_args), ("launch.extra_env", spec.extra_env))
+        if value is not None
+    ]
+    if given:
+        raise HostedRefused(
+            f"a multibranch run does not read {' or '.join(given)}: its base launch is resolved from the recipe sources"
+            " (InferenceX, the framework's cookbook, the default table), as hyperloom-multibranch run resolves it"
+        )
 
 
 def _agent_sources(sources: object) -> list[str]:
