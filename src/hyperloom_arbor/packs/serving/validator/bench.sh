@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # The serving template's bench: `vllm bench serve` on random tokens at the campaign's operating
-# point, with one discarded warmup, written as Arbor's bench_output.json. From the balanced
-# pack's bench_8k1k.sh, with the operating point taken from the environment.
+# point, with one discarded warmup, written as Arbor's bench_output.json, with the
+# operating point taken from the environment.
 #
 # Arbor injects: PORT, MODEL_PATH, MODEL_NAME, CONCURRENCY, NUM_PROMPTS, BENCH_OUTPUT, plus the
 # config's server_env. From server_env (or the environment), optional:

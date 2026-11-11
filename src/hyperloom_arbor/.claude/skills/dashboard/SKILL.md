@@ -8,7 +8,7 @@ description: Watch Arbor campaigns in a browser. Local mode shows one campaign l
 Audience: whoever runs or follows Arbor campaigns. The server is
 [`arbor/dashboard/server.mjs`](../../../arbor/dashboard/server.mjs) (Node 16 or
 later, no dependencies); its README has the files, routes, what changed from
-the earlier dashboard it was ported from, and troubleshooting. The data comes from
+the cluster dashboard it was ported from, and troubleshooting. The data comes from
 the collectors (`realtime-collector`, `knowledge-collector` skills).
 
 The server runs on your machine, binds to `127.0.0.1` only, and runs

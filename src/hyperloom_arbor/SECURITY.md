@@ -13,7 +13,7 @@ If you discover a security vulnerability in Arbor, please **do not** open a publ
 Instead, use one of the following channels:
 
 - **GitHub Private Vulnerability Reporting** (preferred): Use the "Report a vulnerability" button on the [Security tab](../../security/advisories/new) of this repository.
-- **Email**: Contact the maintainer directly via GitHub (<maintainer>) for the appropriate security contact.
+- **Maintainers**: If private reporting is unavailable, contact a maintainer listed in `.github/CODEOWNERS` through GitHub for the appropriate security contact.
 
 Please include:
 - A description of the vulnerability

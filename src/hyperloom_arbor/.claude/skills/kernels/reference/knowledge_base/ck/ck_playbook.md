@@ -1245,7 +1245,7 @@ two-pass vs three-pass).
    `mean += delta/count; var += delta*delta2` — single pass, numerically stable.
 2. **`kFastFDiv` switch** —
    [:15-18, :41-44](aiter-amd/3rdparty/composable_kernel/include/ck_tile/ops/welford/thread/thread_welford.hpp#L15)
-   `__builtin_amdgcn_rcpf()` replaces `fdiv` (~2× faster, lower accuracy).
+   `__builtin_amdgcn_rcpf()` replaces `fdiv` (faster, lower accuracy).
 3. **Welford merge for multi-pass** —
    [:28-55](aiter-amd/3rdparty/composable_kernel/include/ck_tile/ops/welford/thread/thread_welford.hpp#L28)
    — combine partial stats with M2 correction term.
@@ -2304,7 +2304,7 @@ These appear in *every* CK family — print them on a sticky note:
 1. **C lives in VGPRs** (`static_distributed_tensor` or
    `StaticBufferTupleOfVector`). Never spill to LDS.
 2. **LDS is double-buffered or has XOR/word-pad bank avoidance.** Plain LDS
-   layouts cost 20–40 % throughput on gfx942/950.
+   layouts cost substantial throughput on gfx942/950.
 3. **Async load (`global_load_lds`) bypasses VGPRs** wherever the pipeline
    variant supports it. Pair with `vmcnt` drain, not `lgkmcnt`.
 4. **`sched_group_barrier` counts are derived from problem geometry at

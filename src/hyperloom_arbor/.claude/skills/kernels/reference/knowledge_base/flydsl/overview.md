@@ -143,7 +143,7 @@ Detection in `python/flydsl/runtime/device.py:get_rocm_arch()`:
 
 **FlyDSL** = maximum control over data layout in registers / LDS / global, with
 explicit thread-value mapping and explicit MFMA atom placement. The right tool
-when you need to hit close to peak MFMA utilization or beat the CUTLASS/CK
+when you need to hit close to peak MFMA utilization or beat the CK
 pattern catalog on a specific shape.
 
 **Not the right tool** for fast iteration on novel research kernels — use
