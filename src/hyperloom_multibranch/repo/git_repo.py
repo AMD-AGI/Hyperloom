@@ -215,8 +215,8 @@ class GitExperimentRepo:
         """The paths of the patches the merges of ``merged`` added to ``onto``'s first-parent chain: each merge commit's
         later parents are the commits it merged, and the patches its recipe added over its first parent's are theirs.
 
-        The chain is read from the repository, but ``merged`` is the session's: a head carried into a later session
-        protects nothing until that set is derived from the merge log.
+        The chain is read from the repository; ``merged`` is re-derived by the caller on every call, so it holds
+        across a resumed session too.
         """
         if not merged:
             return frozenset()
