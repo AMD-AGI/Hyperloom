@@ -335,9 +335,10 @@ def test_a_hosted_run_refuses_an_unconfined_test_sandbox_and_probes_only_its_lay
     assert probe.asked == [LAYER]
 
 
-def test_an_answer_the_caller_already_has_is_decided_as_a_fresh_probe_s_and_probes_nothing(probe):
+@pytest.mark.parametrize("choose", [choose_sandbox_isolation, choose_test_isolation])
+def test_an_answer_the_caller_already_has_is_decided_as_a_fresh_probe_s_and_probes_nothing(probe, choose):
     failed = BwrapProbe(LAYER, (0, 13, 1), ("the sandbox's own paths cannot be bound safely",))
-    found = choose_test_isolation(known=failed)
+    found = choose(known=failed)
     assert isinstance(found, NoIsolation) and found.reasons[1:] == (
         f"bubblewrap ({LAYER}, 0.13.1): the sandbox's own paths cannot be bound safely",
     )
@@ -345,7 +346,7 @@ def test_an_answer_the_caller_already_has_is_decided_as_a_fresh_probe_s_and_prob
     require_agent_isolation(bwrap=LAYER)
     probe.asked.clear()
     with pytest.raises(IsolationRefused):
-        choose_test_isolation(known=failed)
+        choose(known=failed)
     assert probe.asked == [], "the answer given, not a probe of the module's"
 
 
