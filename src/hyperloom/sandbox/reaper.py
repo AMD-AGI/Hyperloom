@@ -14,7 +14,7 @@ from collections.abc import Callable, Collection, Iterable
 from dataclasses import dataclass, field
 from pathlib import Path
 
-from hyperloom.common import proctree
+from hyperloom_common import proctree
 from hyperloom.sandbox.card_occupancy import SANDBOX_TAG_ENV
 from hyperloom.sandbox.launcher import runs_launcher
 

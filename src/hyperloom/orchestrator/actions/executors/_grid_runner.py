@@ -1952,9 +1952,7 @@ def _build_variant_yaml(
         apply_runtime_override(envs, _rt_override)
     refuse_unpinned_speculative_change(base_args, base_envs, combined, envs)
     # ``envs`` is the launch's environment, TP included; the AgentX branch meets it in ``materialize_variant``.
-    speculative_capability.refuse_unrunnable_speculative_stack(
-        combined, framework=str(bench.get("framework") or ""), envs=envs, model_path=target.model_path
-    )
+    speculative_capability.refuse_unrunnable_speculative_stack(combined, bench, envs=envs, model_path=target.model_path)
 
     pin_xdit_tool_path(envs, bench.get("framework"))
 

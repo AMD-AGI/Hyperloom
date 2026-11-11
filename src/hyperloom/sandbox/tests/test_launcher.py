@@ -14,7 +14,7 @@ from pathlib import Path
 
 import pytest
 
-from hyperloom.common import proctree
+from hyperloom_common import proctree
 from hyperloom.sandbox.launcher import StatusPipe, launcher_argv
 
 #: How long a launcher with nothing left to hold may take to end.

@@ -267,6 +267,29 @@ async def test_a_stopped_branch_leaves_the_line(rig):
     await built.server.call("dev_sandbox_lease", branch=B3)
 
 
+async def test_the_branches_waiting_are_those_in_line_until_granted_or_stopped(rig):
+    built = rig.build(cap=1)
+    await built.server.call("dev_sandbox_lease")
+    await _refused(built.server.call("dev_sandbox_lease", branch=B2), "cap_reached")
+    await _refused(built.server.call("dev_sandbox_lease", branch=B3), "cap_reached")
+    assert built.leases.waiting() == {B2, B3}
+    await built.leases.reclaim(B3, "its branch stopped")
+    await built.server.call("dev_sandbox_release")
+    assert built.leases.waiting() == {B2}
+    await built.server.call("dev_sandbox_lease", branch=B2)
+    assert built.leases.waiting() == frozenset()
+
+
+async def test_a_branch_whose_held_slot_lapsed_is_no_longer_waiting(rig):
+    built = rig.build(cap=1)
+    await built.server.call("dev_sandbox_lease")
+    await _refused(built.server.call("dev_sandbox_lease", branch=B2), "cap_reached")
+    await built.server.call("dev_sandbox_release")
+    assert built.leases.waiting() == {B2}
+    rig.clock.now += LIMITS.hold_s + 1
+    assert built.leases.waiting() == frozenset()
+
+
 async def test_a_branch_the_toolbox_has_no_cards_for_is_put_in_line(rig):
     server = rig.build(cap=2).server
     rig.toolbox.refusal = SandboxUnavailable("no card is free")
@@ -856,6 +879,81 @@ async def test_a_lease_granted_after_it_answered_starting_and_released_is_not_gr
     await _granted_after_starting(rig, built)
     await built.server.call("dev_sandbox_release")
     assert (await built.server.call("dev_sandbox_lease"))["lease_id"] == "lease-2"
+
+
+def _slow_toolbox(rig) -> asyncio.Event:
+    """Hold every lease until the event is set."""
+    up = asyncio.Event()
+    leasing = rig.toolbox.lease_branch_sandbox
+
+    async def slow(*args, **kwargs):
+        await up.wait()
+        return await leasing(*args, **kwargs)
+
+    rig.toolbox.lease_branch_sandbox = slow
+    return up
+
+
+async def _second_in_line_then_held(built) -> None:
+    await built.server.call("dev_sandbox_lease")
+    await _refused(built.server.call("dev_sandbox_lease", branch=B2), "cap_reached")
+    await built.server.call("dev_sandbox_release")
+
+
+async def test_a_branch_granted_after_it_answered_starting_is_no_longer_waiting_without_asking_again(rig):
+    built = rig.build(cap=1, limits=replace(LIMITS, lease_wait_s=0.05))
+    await _second_in_line_then_held(built)
+    up = _slow_toolbox(rig)
+    assert (await built.server.call("dev_sandbox_lease", branch=B2))["state"] == "starting"
+    up.set()
+    await asyncio.sleep(0.01)
+    await built.server.call("dev_sandbox_run", branch=B2, command="true")
+    assert built.leases.waiting() == frozenset()
+
+
+async def test_a_branch_whose_start_was_abandoned_is_held_its_slot_again_and_leaves_the_line_once_it_lapses(rig):
+    built = rig.build(cap=1, limits=replace(LIMITS, lease_wait_s=0.05))
+    await _second_in_line_then_held(built)
+    _slow_toolbox(rig)
+    assert (await built.server.call("dev_sandbox_lease", branch=B2))["state"] == "starting"
+    await built.leases.reclaim_unless_busy(B2, "its specialist's run ended")
+    assert built.leases.waiting() == {B2}
+    rig.clock.now += LIMITS.hold_s + 1
+    assert built.leases.waiting() == frozenset()
+
+
+async def test_a_slot_an_abandoned_start_frees_is_held_for_the_first_in_line(rig):
+    built = rig.build(cap=1, limits=replace(LIMITS, lease_wait_s=0.05))
+    _slow_toolbox(rig)
+    assert (await built.server.call("dev_sandbox_lease"))["state"] == "starting"
+    await _refused(built.server.call("dev_sandbox_lease", branch=B2), "cap_reached")
+    await built.leases.reclaim_unless_busy(B1, "its specialist's run ended")
+    assert any(entry.branch == B2 and "held for you" in entry.content for entry in rig.logs.entries)
+
+
+async def test_a_slot_a_start_cancelled_before_it_ran_frees_is_held_for_the_first_in_line(rig):
+    built = rig.build(cap=1)
+    await built.server.call("dev_sandbox_lease")
+    await _refused(built.server.call("dev_sandbox_lease", branch=B2), "cap_reached")
+    await built.server.call("dev_sandbox_release")
+    leasing = asyncio.create_task(built.server.call("dev_sandbox_lease", branch=B2))
+    # One step runs the call up to its wait, leaving the start it made scheduled but not yet run.
+    await asyncio.sleep(0)
+    await built.leases.reclaim(B2, "its branch stopped")
+    await asyncio.gather(leasing, return_exceptions=True)
+    await built.server.call("dev_sandbox_lease", branch=B3)
+    assert rig.toolbox.leased == [(B1, 1), (B3, 1)]
+
+
+async def test_a_slot_a_start_that_failed_after_it_answered_starting_frees_is_held_for_the_first_in_line(rig):
+    built = rig.build(cap=1, limits=replace(LIMITS, lease_wait_s=0.05))
+    up = _slow_toolbox(rig)
+    assert (await built.server.call("dev_sandbox_lease"))["state"] == "starting"
+    await _refused(built.server.call("dev_sandbox_lease", branch=B2), "cap_reached")
+    rig.toolbox.refusal = RequestRejected("bad_request", "no such image")
+    up.set()
+    await asyncio.sleep(0.01)
+    assert any(entry.branch == B2 and "held for you" in entry.content for entry in rig.logs.entries)
 
 
 class _HostedToolbox(_Toolbox):

@@ -43,7 +43,6 @@ import json
 import os
 import re
 import shlex
-import shutil
 import subprocess
 from collections.abc import Mapping
 from dataclasses import dataclass, field
@@ -69,6 +68,7 @@ from hyperloom.measure.compile import (
     locate_installed_package,
 )
 from hyperloom.measure.surface import POINT_ENV_KEYS, REQUEST_ENV_KEYS, SURFACE_ENV_KEYS
+from hyperloom_common.shared_storage import copy_shared_file, make_shared_dirs
 from hyperloom_multibranch.repo.isolated_git import pinned_git
 from hyperloom_multibranch.specialist.agent_manifest import EXIT_FILE, AgentManifest
 from hyperloom_multibranch.specialist.agent_spec import AgentSpec
@@ -317,11 +317,12 @@ def arbor_manifest(spec: AgentSpec, checkout: ArborCheckout, run: ArborRun) -> A
     reasons = [*_launch_refusals(spec), *refusals(config, declared_keys(path))]
     if reasons:
         raise ArborRefused(reasons)
-    (path / run.session_dir).mkdir(parents=True, exist_ok=True)
+    make_shared_dirs(path / run.session_dir)
     component = config["component"]
     if component.get("plan"):
         carried = path / PLAN_FILE
-        carried.write_bytes(Path(component["plan"]).read_bytes())
+        make_shared_dirs(carried.parent)
+        copy_shared_file(Path(component["plan"]), carried)
         component["plan"] = str(carried)
     launch = f"{PYTHON} -m arbor run --config {shlex.quote(run.config_file)}"
     return AgentManifest.read(
@@ -366,7 +367,7 @@ def link_built(workspace: Path, framework: str) -> int:
         destination = target / source.relative_to(package.path)
         if os.path.lexists(destination):
             continue
-        destination.parent.mkdir(parents=True, exist_ok=True)
+        make_shared_dirs(destination.parent)
         os.symlink(source, destination)
         linked += 1
     return linked
@@ -378,8 +379,13 @@ def carry_dossier(checkout: Path, dossier: Path) -> None:
     own. One already there stays."""
 
     target = checkout / DOSSIER_DIR / dossier.name
-    if dossier.is_dir() and not target.exists():
-        shutil.copytree(dossier, target)
+    if not dossier.is_dir() or target.exists():
+        return
+    for directory, _subdirectories, files in os.walk(dossier, followlinks=True):
+        made = target / Path(directory).relative_to(dossier)
+        make_shared_dirs(made)
+        for name in files:
+            copy_shared_file(Path(directory) / name, made / name)
 
 
 def dossier_notes(checkout: Path, dossier: str | None) -> tuple[str, ...]:

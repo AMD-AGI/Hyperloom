@@ -5,14 +5,18 @@ import asyncio
 from types import SimpleNamespace
 import json
 import os
+import select
+import signal
+import stat
 import subprocess
 import time
+from collections.abc import Awaitable, Callable, Mapping
 from dataclasses import asdict, replace, dataclass, field
 from pathlib import Path
 
 import pytest
 
-from hyperloom.contracts.measurement import Attempt, Purpose, TestKind, TestRequest
+from hyperloom.contracts.measurement import Attempt, Purpose, TestKind, TestRequest, Validity
 from hyperloom.contracts.recipe import (
     ConfigDelta,
     KernelKind,
@@ -32,14 +36,20 @@ from hyperloom_multibranch.contracts.blackboard.records import BaselineRecord, T
 from hyperloom_multibranch.blackboard import LocalBlackboard
 from hyperloom_multibranch.blackboard.local.blackboard import LEARNING_MAX_CHARS
 from hyperloom_multibranch.blackboard.tests.factories import result
-from hyperloom_multibranch.specialist import autonomous_session, worktree as worktree_module
-from hyperloom_multibranch.specialist.agent_onboarding import OnboardingSetup
+from hyperloom_multibranch.specialist import (
+    arbor_adapter,
+    autonomous_session,
+    keep_requeue,
+    worktree as worktree_module,
+)
+from hyperloom_multibranch.specialist.agent_onboarding import SHIM_DIR, OnboardingSetup
 from hyperloom_multibranch.specialist.agent_spec import AgentSpec
 from hyperloom_multibranch.specialist.agent_session import BranchPlace
 from hyperloom_multibranch.specialist.agent_manifest import AgentManifest
 from hyperloom_multibranch.specialist.autonomous_session import (
     AGENT_DIR,
     MANIFEST_FILE,
+    START_TABLES_DIR,
     AutonomousSession,
     AutonomousSetup,
     collection_margin,
@@ -56,6 +66,7 @@ from hyperloom_multibranch.specialist.runtime import (
     SessionStart,
 )
 from hyperloom_multibranch.specialist.worktree import Upstream
+from hyperloom_common.tests.shared_accounts import Accounts, other_accounts
 from hyperloom_multibranch.tests.branch_rig import branch_rig
 from hyperloom_multibranch.tests.agent_rig import (
     BRANCH,
@@ -70,6 +81,7 @@ from hyperloom_multibranch.tests.agent_rig import (
     LocalSandbox,
     Toolbox,
     _aiter,
+    _arbor_repo,
     _replayed,
     _until,
 )
@@ -260,6 +272,7 @@ async def _rig(
     agent: Agent | Component = Agent(),
     *,
     clock=time.time,
+    sleep=asyncio.sleep,
     start: Recipe | None = None,
     deadline: float = 0.0,
     spend: type[AgentSpend] = AgentSpend,
@@ -267,10 +280,11 @@ async def _rig(
     aiter: Path | None = None,
     source: Path | None = None,
     least_run: float = 0.0,
+    spec_fields: Mapping[str, object] | None = None,
 ) -> Rig:
     """A session of the agent on :data:`BRANCH`, opened at the root, or at ``start`` committed onto it the way PRELUDE
     replays a Recipe KB champion; the agent's source is ``source``, or a repository holding :data:`AGENT` and
-    :data:`COMPONENT_AGENT`."""
+    :data:`COMPONENT_AGENT`, and its spec has ``spec_fields``."""
 
     rig = await branch_rig(tmp_path, ROOT, BRANCH)
     start_commit = rig.root if start is None else await rig.repo.commit(BRANCH, rig.root, start, "champion")
@@ -292,6 +306,7 @@ async def _rig(
         return sandbox
 
     spec = AgentSpec("/models/m", "vllm", 1, "fp8", "mi355x", {}, "output_throughput", "", {}, "", (), 60.0, 31100)
+    spec = replace(spec, **(spec_fields or {}))
 
     def spend_of(roots: tuple[Path, ...], ledger: Path) -> AgentSpend:
         return spend(tmp_path / "claude", roots, ledger, BRANCH, "claude-sonnet-5-5", sandbox.usage)
@@ -304,6 +319,7 @@ async def _rig(
         rig.repo,
         "vllm",
         spend_of,
+        sleep=sleep,
         clock=clock,
         least_run_seconds=least_run,
     )
@@ -861,7 +877,12 @@ async def test_an_agent_whose_lease_is_refused_for_another_reason_fails_its_pref
 async def test_an_agent_that_waits_for_cards_past_the_time_it_needs_to_run_fails_its_preflight(
     tmp_path: Path,
 ) -> None:
-    rig = await _rig(tmp_path, deadline=time.time() + 3.0, least_run=2.0)
+    now = [0.0]
+
+    async def sleep(seconds: float) -> None:
+        now[0] += seconds
+
+    rig = await _rig(tmp_path, clock=lambda: now[0], sleep=sleep, deadline=3.0, least_run=2.0)
     rig.toolbox.cards_left = 0
 
     with pytest.raises(PreflightFailed, match="waited .* for cards.*lease_leaves_no_measurement"):
@@ -1572,6 +1593,155 @@ async def test_a_stop_whose_kill_times_out_is_noted_and_the_lease_still_goes_bac
     assert rig.toolbox.released == ["L1"]
 
 
+@pytest.mark.parametrize("shared", [True, False], ids=["shared", "private"])
+@pytest.mark.parametrize("tables", [False, True], ids=["root", "kb-champion"])
+async def test_a_preflight_makes_the_branch_s_directories_the_group_s_only_on_shared_storage(
+    tmp_path: Path, shared: bool, tables: bool
+) -> None:
+    given = {"start": _replayed(LocalBlobStore(tmp_path / "blobs")), "aiter": _aiter(tmp_path)} if tables else {}
+    rig = await _rig(tmp_path, **given)
+    (tmp_path / BRANCH).chmod(0o2775 if shared else 0o755)
+    previous = os.umask(0o022)
+    try:
+        await rig.session.preflight()
+    finally:
+        os.umask(previous)
+    await rig.session.stop()
+
+    agent = tmp_path / BRANCH / "session" / AGENT_DIR
+    made = [agent.parent, agent, agent / "src", *([agent / START_TABLES_DIR] if tables else [])]
+    modes = {path.name: oct(path.stat().st_mode & 0o7777) for path in made}
+    assert modes == dict.fromkeys(modes, oct(0o2775 if shared else 0o755))
+    written = [path for path in (agent.parent.iterdir()) if path.is_file()] + [agent / "mb-integration.md"]
+    written += [path for path in (agent / START_TABLES_DIR).rglob("*") if path.is_file()] if tables else []
+    modes = {str(path): oct(path.stat().st_mode & 0o777) for path in written}
+    assert len(modes) > 4 and modes == dict.fromkeys(modes, oct(0o664 if shared else 0o644))
+
+
+def _under_git(path: Path, names: tuple[str, ...]) -> bool:
+    parts = path.parts
+    return any(parts[i] == ".git" and parts[i + 1] in names for i in range(len(parts) - 1))
+
+
+@pytest.mark.parametrize("arbor", [False, True], ids=["agent", "arbor"])
+async def test_a_preflight_below_shared_storage_leaves_the_group_write_on_all_it_made_but_git_s_own_files(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, arbor: bool
+) -> None:
+    tmp_path.chmod(0o2775)
+    previous = os.umask(0o022)
+    try:
+        given: dict[str, object] = {}
+        if arbor:
+            monkeypatch.setattr(arbor_adapter, "INSTALL", ())
+            plan, dossier = tmp_path / "plan.json", tmp_path / "dossier" / "d1"
+            plan.write_text(json.dumps({"directions": ["fuse the decode norm"]}))
+            dossier.mkdir(parents=True)
+            (dossier / "index.md").write_text("# dossier\n")
+            source = _arbor_repo(tmp_path, Component(keeps=(), tail=0.6))
+            given = {
+                "source": source,
+                "start_seconds": 0.2,
+                "spec_fields": {"plan": str(plan), "dossier": str(dossier)},
+            }
+        rig = await _rig(tmp_path, **given)
+        await rig.session.preflight()
+    finally:
+        os.umask(previous)
+    await rig.session.stop()
+
+    # Git writes every object read-only, and the docker shim is replaced by rename, never rewritten.
+    made = [
+        path
+        for path in (tmp_path / BRANCH).rglob("*")
+        if not path.is_symlink()
+        and not (path.is_file() and _under_git(path, ("objects",)))
+        and path != tmp_path / BRANCH / "session" / AGENT_DIR / SHIM_DIR / "docker"
+    ]
+    git = [path for path in made if _under_git(path, ("config", "hooks", "info"))]
+    base = tmp_path / "source" / ".git"
+    git += [base / "config", base / "info", *(base / "info").iterdir()]
+    private = [str(path) for path in made if path not in git and not path.stat().st_mode & stat.S_IWGRP]
+    widened = [str(path) for path in git if path.stat().st_mode & 0o022]
+    assert len(made) > 20 and len(git) > 6
+    assert private == [] and widened == []
+
+
+def _as_member(accounts: Accounts, uid: int, leg: Callable[[], Awaitable[None]]) -> str:
+    """Run ``leg`` in a child process as ``uid`` of the accounts' group under umask ``022``: what it raised, or
+    ``"finished"``."""
+    read, write = os.pipe()
+    pid = os.fork()
+    if pid == 0:
+        said = "finished"
+        try:
+            os.setgroups([accounts.group])
+            os.setresgid(uid, uid, uid)
+            os.setresuid(uid, uid, uid)
+            os.umask(0o022)
+            asyncio.run(leg())
+        except BaseException as error:  # noqa: BLE001 - everything the leg raised goes back to the test
+            said = repr(error)
+        os.write(write, said.encode())
+        os._exit(0)
+    os.close(write)
+    if not select.select([read], [], [], 120)[0]:
+        os.kill(pid, signal.SIGKILL)  # forked from a process with threads, it may hang on a lock one of them held
+    with os.fdopen(read) as told:
+        said = told.read()
+    os.waitpid(pid, 0)
+    return said
+
+
+@pytest.mark.filterwarnings("ignore:This process .* is multi-threaded:DeprecationWarning")
+@pytest.mark.parametrize("arbor", [False, True], ids=["agent", "arbor"])
+def test_another_account_of_the_group_resumes_a_branch_whose_files_a_first_leg_wrote_under_umask_022(
+    monkeypatch: pytest.MonkeyPatch, arbor: bool
+) -> None:
+    with other_accounts() as accounts:
+        tmp_path = accounts.shared_dir("run")
+        blobs = LocalBlobStore(tmp_path / "blobs")
+        given: dict[str, object] = {"start": _replayed(blobs), "aiter": _aiter(tmp_path)}
+        if arbor:
+            monkeypatch.setattr(arbor_adapter, "INSTALL", ())
+            plan = tmp_path / "plan.json"
+            plan.write_text(json.dumps({"directions": ["fuse the decode norm"]}))
+            source = _arbor_repo(tmp_path, Component(keeps=(), exit=3, tail=0.6))
+            given |= {"source": source, "start_seconds": 0.2, "spec_fields": {"plan": str(plan)}}
+        agent = Agent(keeps=(), exit=3, resume="exit 3")
+        rig = asyncio.run(_rig(tmp_path, agent, **given))
+
+        async def first_leg() -> None:
+            # The integration head holds a kernel table, laid out below the notes, and moves once the first leg ends.
+            root = await rig.repo.head(INTEGRATION_BRANCH)
+            held = await rig.repo.commit(INTEGRATION_BRANCH, root, _replayed(blobs), "kb")
+            await rig.session.preflight()
+            with pytest.raises(SessionCrashed):
+                await asyncio.wait_for(rig.session.run(), 10)
+            await rig.session.stop()
+            moved = replace(_replayed(blobs), launch=LaunchConfig("--max-num-seqs 512"))
+            await rig.repo.commit(INTEGRATION_BRANCH, held, moved, "moved")
+
+        previous = os.umask(0o022)
+        try:
+            asyncio.run(first_leg())
+        finally:
+            os.umask(previous)
+        session = tmp_path / BRANCH / "session"
+        for path in (session, *session.rglob("*")):
+            os.lchown(path, accounts.first, -1)
+        (tmp_path / "logs").chmod(0o2775)  # the fake sandbox's own logs
+
+        async def resumed_leg() -> None:
+            resumed = rig.restart()
+            await resumed.preflight()
+            with pytest.raises(SessionCrashed, match="exited 3"):
+                await asyncio.wait_for(resumed.run(), 10)
+            await resumed.stop()
+
+        assert _as_member(accounts, accounts.second, resumed_leg) == "finished"
+        assert "--max-num-seqs 512" in (session / AGENT_DIR / "mb-integration.md").read_text(encoding="utf-8")
+
+
 def _spec_envs(rig: Rig) -> dict[str, str]:
     prompt = rig.sandbox.prompts[0]
     return json.loads(prompt[prompt.index("{\n") : prompt.index("\n}\n") + 2])["envs"]
@@ -1695,3 +1865,157 @@ async def test_a_multi_part_snapshot_of_the_start_s_tables_as_they_were_given_im
 
     assert (request.delta.add_kernels, request.delta.remove_kernels) == ((), ())
     assert request.delta.config == ConfigDelta()
+
+
+INFRA_REASON = "4 attempts failed for infrastructure reasons: foreign_process_on_card: pid 4242 on card 3"
+
+
+@pytest.fixture
+def quick_requeue(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(keep_requeue, "REQUEUE_SECONDS", 0.3)
+
+
+def _failed(request_id: str, validity: Validity, reason: str = INFRA_REASON):
+    return result(request_id, validity=validity, failure_reason=reason)
+
+
+async def test_a_keep_whose_import_measured_nothing_for_infrastructure_goes_once_more_and_is_measured(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # The agent exits while the requeue still waits: its run finishes only once the requeued import settled.
+    monkeypatch.setattr(keep_requeue, "REQUEUE_SECONDS", 2.0)
+    rig = await _rig(tmp_path, Agent(keeps=(256,), tail=0.3))
+
+    await rig.session.preflight()
+    running = asyncio.create_task(rig.session.run())
+    await _until(lambda: rig.toolbox.requests, "the import")
+    await rig.toolbox_blackboard.write_result(_failed("r1", Validity.MEASUREMENT_FAILED))
+    await _until(lambda: len(rig.toolbox.requests) == 2, "the requeued import")
+    await rig.toolbox_blackboard.write_result(result("r2"))
+    with pytest.raises(SessionFinished):
+        await asyncio.wait_for(running, 10)
+
+    first, again = rig.toolbox.requests
+    assert rig.patch(again) == rig.patch(first) and again.delta.config == first.delta.config, "the same keep again"
+    notices = await rig.notices()
+    assert any(f"keep 1's import r1 measured nothing ({INFRA_REASON}); it goes once more" in n for n in notices)
+    assert notices[-1] == f"{NOTICE} the agent finished its run", "the run waited for the requeued import"
+
+
+async def test_a_requeue_waits_its_time_after_the_import_ended(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(keep_requeue, "REQUEUE_SECONDS", 3.0)
+    rig = await _rig(tmp_path, Agent(keeps=(256,), tail=30.0))
+
+    await rig.session.preflight()
+    running = asyncio.create_task(rig.session.run())
+    await _until(lambda: rig.toolbox.requests, "the import")
+    await rig.toolbox_blackboard.write_result(_failed("r1", Validity.MEASUREMENT_FAILED))
+    await asyncio.sleep(1.5)
+    assert len(rig.toolbox.requests) == 1, "not before its time"
+    await _until(lambda: len(rig.toolbox.requests) == 2, "the requeued import")
+
+    await rig.session.stop()
+    await asyncio.wait_for(running, 10)
+
+
+@pytest.mark.parametrize(
+    "validity, reason",
+    [
+        (Validity.CANDIDATE_FAILED, "server_boot_timeout: no ready line"),
+        (Validity.MEASUREMENT_FAILED, "measurement refused: the spec was rejected"),
+        (Validity.MEASUREMENT_FAILED, "inert_patch: process 1 imported aiter from the image, not from the farm"),
+    ],
+    ids=["candidate", "program_error", "repeats_in_every_sandbox"],
+)
+async def test_a_keep_whose_import_failed_otherwise_is_not_requeued(
+    tmp_path: Path, quick_requeue: None, validity: Validity, reason: str
+) -> None:
+    rig = await _rig(tmp_path, Agent(keeps=(256,), tail=1.0))
+
+    await rig.session.preflight()
+    running = asyncio.create_task(rig.session.run())
+    await _until(lambda: rig.toolbox.requests, "the import")
+    await rig.toolbox_blackboard.write_result(_failed("r1", validity, reason))
+    with pytest.raises(SessionFinished):
+        await asyncio.wait_for(running, 10)
+    await asyncio.sleep(0.6)
+
+    assert len(rig.toolbox.requests) == 1
+    assert not any("goes once more" in note for note in await rig.notices())
+
+
+async def test_a_keep_is_requeued_once_and_after_the_cap_of_failed_requeues_none_is(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, quick_requeue: None
+) -> None:
+    monkeypatch.setattr(keep_requeue, "REQUEUE_FAILURES", 1)
+    rig = await _rig(tmp_path, Agent(keeps=(256, 512), gap=4.0, tail=1.0))
+
+    await rig.session.preflight()
+    running = asyncio.create_task(rig.session.run())
+    await _until(lambda: rig.toolbox.requests, "the first import")
+    await rig.toolbox_blackboard.write_result(_failed("r1", Validity.MEASUREMENT_FAILED))
+    await _until(lambda: len(rig.toolbox.requests) == 2, "the requeued import")
+    await rig.toolbox_blackboard.write_result(_failed("r2", Validity.MEASUREMENT_FAILED))
+    await _until(lambda: len(rig.toolbox.requests) == 3, "the second keep's import", seconds=15.0)
+    await rig.toolbox_blackboard.write_result(_failed("r3", Validity.MEASUREMENT_FAILED))
+    with pytest.raises(SessionFinished):
+        await asyncio.wait_for(running, 15)
+    await asyncio.sleep(0.6)
+
+    assert "+max_num_seqs = 512" in rig.patch(rig.toolbox.requests[2]) and len(rig.toolbox.requests) == 3
+    notices = await rig.notices()
+    assert any("keep 1's import r2 measured nothing" in n and "it went once more already" in n for n in notices)
+    assert any(
+        "keep 2's import r3 measured nothing" in n and "the last 1 requeued imports measured nothing again" in n
+        for n in notices
+    ), "a node that stays broken does not loop"
+
+
+async def test_a_later_keep_carries_the_change_of_one_that_measured_nothing_and_no_requeue_goes(
+    tmp_path: Path, quick_requeue: None
+) -> None:
+    rig = await _rig(tmp_path, Agent(keeps=(256, 512), gap=0.3, tail=1.0))
+
+    await rig.session.preflight()
+    running = asyncio.create_task(rig.session.run())
+    await _until(lambda: rig.toolbox.requests, "the first import")
+    await asyncio.sleep(1.0)
+    await rig.toolbox_blackboard.write_result(_failed("r1", Validity.MEASUREMENT_FAILED))
+    await _until(lambda: len(rig.toolbox.requests) == 2, "the second keep's import")
+    await rig.toolbox_blackboard.write_result(result("r2"))
+    with pytest.raises(SessionFinished):
+        await asyncio.wait_for(running, 10)
+    await asyncio.sleep(0.6)
+
+    assert len(rig.toolbox.requests) == 2 and "+max_num_seqs = 512" in rig.patch(rig.toolbox.requests[1])
+    assert not any("goes once more" in note for note in await rig.notices())
+
+
+async def test_a_requeue_due_while_a_later_keep_waits_gives_way_to_it(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # The first keep's requeue falls due while another test keeps the branch busy and the second keep lands: once the
+    # branch is free, the second keep, which carries the first's change, goes, and the requeue does not take its place.
+    monkeypatch.setattr(keep_requeue, "REQUEUE_SECONDS", 1.0)
+    rig = await _rig(tmp_path, Agent(keeps=(256, 512), gap=3.0, tail=1.0))
+    watch_file = rig.session._place.workspace / autonomous_session.WATCH_FILE
+
+    def watched() -> dict:
+        return json.loads(watch_file.read_text(encoding="utf-8")) if watch_file.exists() else {}
+
+    await rig.session.preflight()
+    running = asyncio.create_task(rig.session.run())
+    await _until(lambda: rig.toolbox.requests, "the first import")
+    await rig.toolbox_blackboard.write_result(_failed("r1", Validity.MEASUREMENT_FAILED))
+    await _until(lambda: watched().get("requeue_at"), "the requeue's time")
+    await rig.toolbox_blackboard.write_request(replace(rig.toolbox.requests[0], request_id="x1"))
+    await _until(lambda: (watched().get("pending") or {}).get("seq") == 2, "the second keep")
+    await _until(lambda: time.time() > watched()["requeue_at"], "the requeue falling due")
+    await rig.toolbox_blackboard.write_result(result("x1"))
+    await _until(lambda: len(rig.toolbox.requests) == 2, "the next import")
+    await rig.toolbox_blackboard.write_result(result("r2"))
+    with pytest.raises(SessionFinished):
+        await asyncio.wait_for(running, 10)
+
+    assert len(rig.toolbox.requests) == 2 and "+max_num_seqs = 512" in rig.patch(rig.toolbox.requests[1])
+    assert not any("goes once more" in note for note in await rig.notices())
