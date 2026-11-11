@@ -32,6 +32,7 @@ from hyperloom.common.failure_signature import (
     HIP_RUNTIME_ERROR,
     IMPORT_ERROR,
     SERVE_FLAG,
+    FailureSignature,
     classify_failure,
     framework_unimportable_line,
 )
@@ -302,7 +303,7 @@ def classify_test_failure(
     by_step = _from_step(reported, evidence.framework_changed) if reported else None
     if by_step is not None:
         return by_step
-    named = _named_by_logs(text, parts)
+    named = _named_by_logs(text, parts, eval_failed=step is FailedStep.EVAL_FAILED)
     if named is not None:
         return named
     if returncode == SERVER_BOOT_TIMEOUT_RC or step is FailedStep.SERVER_BOOT_TIMEOUT:
@@ -358,10 +359,11 @@ def _framework_unimportable(detail: str, changed: bool) -> FailureClassification
     return _infra(f"{FRAMEWORK_UNIMPORTABLE_REASON}: {line}")
 
 
-def _named_by_logs(text: str, parts: list[str]) -> FailureClassification | None:
+def _named_by_logs(text: str, parts: list[str], *, eval_failed: bool = False) -> FailureClassification | None:
     """The verdict a log gives by itself: a port taken, a known signature, a refused command line; else ``None``.
 
-    ``text`` is the logs ``parts`` joined.
+    ``text`` is the logs ``parts`` joined. ``eval_failed`` is a round report's ``eval_failed``, which states what the
+    ``run_eval failed`` line of the signature table states: the evaluation itself ended the test.
     """
     if _PORT_IN_USE.search(text):
         return _infra(PORT_IN_USE_REASON)
@@ -380,6 +382,8 @@ def _named_by_logs(text: str, parts: list[str]) -> FailureClassification | None:
     if hang:
         return _infra(f"{JIT_BUILD_TIMEOUT}: {hang}")
     signature = classify_failure(text)
+    if eval_failed and not signature.is_actionable:
+        signature = FailureSignature(kind=EVAL_RUNTIME_FAILURE)
     if signature.kind == EVAL_RUNTIME_FAILURE:
         refusal = log_causes.bad_request(text)
         if refusal:
