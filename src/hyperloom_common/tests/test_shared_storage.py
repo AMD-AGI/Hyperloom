@@ -523,6 +523,50 @@ def test_io_shared_writes_are_664_whatever_the_umask_and_make_their_parents_2775
     assert (_mode(target.parent), _mode(target)) == (0o2775, 0o664)
 
 
+_APPENDING_LEG = """
+import os
+from pathlib import Path
+from hyperloom_common.shared_storage import open_shared_append
+shared = Path({shared!r})
+os.write(log := open_shared_append(shared / "events.log"), b"leg 1\\n")
+os.close(log)
+with open(shared / "plain.log", "a") as plain:
+    plain.write("leg 1\\n")
+"""
+
+_NEXT_APPENDING_LEG = """
+import errno, json, os
+from pathlib import Path
+from hyperloom_common.shared_storage import open_shared_append
+shared = Path({shared!r})
+seen = {{}}
+def append(path):
+    descriptor = open_shared_append(path)
+    os.write(descriptor, b"leg 2\\n")
+    os.close(descriptor)
+def attempt(name, action):
+    try:
+        action()
+        seen[name] = "ok"
+    except OSError as exc:
+        seen[name] = errno.errorcode[exc.errno]
+attempt("append to its log", lambda: append(shared / "events.log"))
+attempt("append to its umask-022 log", lambda: append(shared / "plain.log"))
+print(json.dumps(seen))
+"""
+
+
+def test_the_next_account_of_the_group_appends_to_what_the_first_made_for_appending_and_to_nothing_else(tmp_path):
+    with other_accounts() as accounts:
+        shared = accounts.shared_dir("shared")
+        accounts.run(accounts.first, _APPENDING_LEG.format(shared=str(shared)), umask=0o022)
+
+        seen = json.loads(accounts.run(accounts.second, _NEXT_APPENDING_LEG.format(shared=str(shared)), umask=0o022))
+
+        assert seen == {"append to its log": "ok", "append to its umask-022 log": "EACCES"}
+        assert (shared / "events.log").read_text() == "leg 1\nleg 2\n"
+
+
 # -- a link a member of the group put on the way ------------------------------------------------------------------
 @pytest.fixture
 def unshared(tmp_path: Path) -> Iterator[Path | None]:
@@ -876,3 +920,94 @@ def test_parent_is_shared_judges_the_nearest_existing_directory_as_the_walk_reac
     assert shared_storage.parent_is_shared(tmp_path / "link" / "below" / "new"), "past the link its target decides"
     assert not shared_storage.parent_is_shared(shared / "dangling" / "new"), "a link to nothing is no shared storage"
     assert not shared_storage.parent_is_shared(shared / "planted" / "new"), "a link the walk refuses: not shared"
+
+
+# -- the writers of a run's own logs and published files ------------------------------------------------------------
+def test_a_published_file_is_linked_complete_in_its_mode_below_shared_storage_and_never_twice(tmp_path):
+    shared = _setgid_parent(tmp_path / "shared")
+    target = shared / "claims" / "a.json"
+    out = _here(
+        "from pathlib import Path\n"
+        "from hyperloom_common.shared_storage import publish_shared_bytes\n"
+        f"print(publish_shared_bytes(Path({str(target)!r}), b'one', mode=0o644, make_parents=True))\n"
+        f"print(publish_shared_bytes(Path({str(target)!r}), b'two', mode=0o644, make_parents=True))\n",
+        umask=0o077,
+    )
+    assert out.split() == ["True", "False"]
+    assert (target.read_bytes(), _mode(target), _mode(target.parent)) == (b"one", 0o644, 0o2775)
+    assert [path.name for path in target.parent.iterdir()] == ["a.json"], "no temporary file is left"
+
+
+def test_a_published_file_outside_shared_storage_keeps_the_umask_and_a_link_at_its_name_is_left_alone(tmp_path):
+    plain = tmp_path / "plain"
+    plain.mkdir(mode=0o755)
+    (plain / "link.json").symlink_to(tmp_path / "elsewhere.json")
+    out = _here(
+        "from pathlib import Path\n"
+        "from hyperloom_common.shared_storage import publish_shared_bytes\n"
+        f"print(publish_shared_bytes(Path({str(plain / 'new' / 'a.json')!r}), b'x', mode=0o644, make_parents=True))\n"
+        f"print(publish_shared_bytes(Path({str(plain / 'link.json')!r}), b'x', mode=0o644))\n",
+        umask=0o077,
+    )
+    assert out.split() == ["True", "False"]
+    assert (_mode(plain / "new"), _mode(plain / "new" / "a.json")) == (0o700, 0o600)
+    assert not (tmp_path / "elsewhere.json").exists(), "nothing is written through the link"
+
+
+def _open_existing_and_close(path, *flags):
+    os.close(shared_storage.open_shared_existing(path, *flags))  # closed should it open after all
+
+
+def test_a_file_cut_in_place_is_opened_only_where_it_is_and_never_through_a_link_at_its_name(tmp_path):
+    shared = _setgid_parent(tmp_path / "shared")
+    (shared / "log.jsonl").write_bytes(b"whole\ntorn")
+    (shared / "link.jsonl").symlink_to(shared / "log.jsonl")
+
+    descriptor = shared_storage.open_shared_existing(shared / "log.jsonl")
+    try:
+        os.ftruncate(descriptor, 6)
+    finally:
+        os.close(descriptor)
+    with pytest.raises(OSError) as refused:
+        _open_existing_and_close(shared / "link.jsonl")
+    with pytest.raises(FileNotFoundError):
+        _open_existing_and_close(shared / "missing.jsonl", os.O_RDWR | os.O_CREAT)
+
+    assert refused.value.errno == errno.ELOOP
+    assert (shared / "log.jsonl").read_bytes() == b"whole\n"
+    assert not (shared / "missing.jsonl").exists(), "it never creates"
+
+
+@pytest.mark.parametrize(("parent_mode", "widened"), [(0o2775, True), (0o2755, False), (0o2777, False), (0o755, False)])
+def test_a_child_gets_umask_002_and_a_mode_is_kept_as_asked_only_below_shared_storage(tmp_path, parent_mode, widened):
+    parent = tmp_path / "parent"
+    parent.mkdir()
+    parent.chmod(parent_mode)
+    if parent_mode & stat.S_ISGID and not parent.stat().st_mode & stat.S_ISGID:
+        pytest.skip("this filesystem does not keep the setgid bit for the test user")
+
+    assert shared_storage.child_umask(parent) == (shared_storage.SHARED_CHILD_UMASK if widened else -1)
+    expected = 0o664 if widened else 0o664 & ~shared_storage.current_umask()
+    assert shared_storage.shared_mode(parent / "missing" / "file", 0o664) == expected, "judged at the nearest existing"
+
+
+@pytest.mark.parametrize(
+    ("mode", "shared"),
+    [(0o2775, True), (0o2755, False), (0o2777, False), (0o775, False)],
+    ids=["2775", "2755", "2777", "775"],
+)
+def test_a_directory_opened_without_following_a_link_is_shared_by_the_same_rule_as_a_child_s_umask(
+    tmp_path, mode, shared
+):
+    directory = tmp_path / "directory"
+    directory.mkdir()
+    directory.chmod(mode)
+    if mode & stat.S_ISGID and not directory.stat().st_mode & stat.S_ISGID:
+        pytest.skip("this filesystem does not keep the setgid bit for the test user")
+
+    descriptor = os.open(directory, os.O_PATH | os.O_DIRECTORY | os.O_NOFOLLOW)
+    try:
+        assert shared_storage.directory_is_shared(descriptor) is shared
+    finally:
+        os.close(descriptor)
+    assert (shared_storage.child_umask(directory) == shared_storage.SHARED_CHILD_UMASK) is shared

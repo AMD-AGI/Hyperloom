@@ -373,7 +373,6 @@ def session_measures(tree: SearchTree, audit: StopAudit) -> dict[str, float]:
 
 def _keep(folder: Path, session_id: str, fmt: str, record: object) -> bool:
     path = folder / f"{re.sub(r'[^A-Za-z0-9._-]+', '-', session_id)}.json"
-    path.parent.mkdir(parents=True, exist_ok=True)
     return publish_once(path, encode_json({"format": fmt, "record": encode(record)}))
 
 
