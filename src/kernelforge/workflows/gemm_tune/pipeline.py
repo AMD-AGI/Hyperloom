@@ -817,6 +817,7 @@ def _tuner_registry() -> dict:
     from .tuners.a8w8_blockscale_bpreshuffle import A8W8BlockscaleBpreshuffleTuner
     from .tuners.a4w4_blockscale import A4W4BlockscaleTuner
     from .tuners.vllm_moe_triton import VllmMoeTritonTuner
+    from .tuners.vllm_mxfp4_matmul_ogs import VllmMxfp4MatmulOgsTuner
     from .tuners.vllm_dense_tunableop import VllmDenseTunableopTuner
     from .tuners.sglang_dense_bf16 import SglangDenseBf16Tuner
 
@@ -828,6 +829,7 @@ def _tuner_registry() -> dict:
         "a8w8_blockscale_bpreshuffle": A8W8BlockscaleBpreshuffleTuner,
         "a4w4_blockscale": A4W4BlockscaleTuner,
         "vllm_moe_triton": VllmMoeTritonTuner,
+        "vllm_mxfp4_matmul_ogs": VllmMxfp4MatmulOgsTuner,
         "vllm_dense_tunableop": VllmDenseTunableopTuner,
         "sglang_dense_bf16": SglangDenseBf16Tuner,
     }

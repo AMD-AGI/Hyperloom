@@ -12,6 +12,7 @@ from pathlib import Path
 from typing import Any
 
 from kernelforge.utils.gpu_arch import canonical_gpu_type, detect_arch, product_arch
+from hyperloom_common.gpu_identity import board_named_in
 
 from .model_analyzer import ModelProfile
 
@@ -318,8 +319,8 @@ def select_tuners(
                 profile,
                 resolved_precision,
                 _resolve_quant_type(resolved_precision, target.quant_type, profile, kernel_signature_log),
-                evidence.has_shapes_json,
-                evidence.has_tunableop_input,
+                evidence,
+                target.gpu_type,
             )
         )
         tuners.extend(
@@ -624,15 +625,25 @@ def _select_vllm_tuners(
     profile: ModelProfile,
     precision: str,
     quant_type: str,
-    has_shapes_json: bool,
-    has_tunableop_input: bool,
+    evidence: RoutingEvidence,
+    gpu_type: str,
 ) -> list[TunerSpec]:
     """Select tuners for vLLM framework."""
     tuners: list[TunerSpec] = []
 
+    ogs_mxfp4 = False
     if profile.is_moe:
         unmeasurable = _unmeasurable_moe_triton_quantization(profile, precision, quant_type)
-        if unmeasurable:
+        ogs_mxfp4 = (
+            unmeasurable == "mxfp4"
+            and (board := board_named_in(gpu_type)) is not None
+            and board.product == "r9700"
+            and profile.architecture.lower() == "gptossforcausallm"
+            and profile.model_dtype.lower() in ("bfloat16", "torch.bfloat16", "bf16")
+        )
+        if ogs_mxfp4:
+            tuners.append(TunerSpec("vllm_mxfp4_matmul_ogs", priority=10, estimated_minutes=45))
+        elif unmeasurable:
             tuners.append(
                 TunerSpec(
                     "vllm_moe_triton",
@@ -645,8 +656,8 @@ def _select_vllm_tuners(
             tuners.append(TunerSpec("vllm_moe_triton", priority=10, estimated_minutes=30))
 
     # Dense GEMM via TunableOp
-    if has_tunableop_input or has_shapes_json:
-        tuners.append(TunerSpec("vllm_dense_tunableop", priority=20, estimated_minutes=45))
+    if evidence.has_tunableop_input or evidence.has_shapes_json:
+        tuners.append(TunerSpec("vllm_dense_tunableop", priority=20, estimated_minutes=45, fallback=ogs_mxfp4))
     elif not profile.is_moe:
         # Dense-only model without shape input
         tuners.append(
