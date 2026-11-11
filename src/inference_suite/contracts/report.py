@@ -12,7 +12,7 @@ the caller's mapper (D2).
 from __future__ import annotations
 
 import re
-from collections.abc import Iterable, Mapping
+from collections.abc import Mapping
 from dataclasses import dataclass, field
 from enum import Enum
 
@@ -137,14 +137,6 @@ def _complete(document: object, keys: tuple[str, ...], what: str) -> Mapping[str
     if missing:
         raise ReportError(f"{what} is missing {', '.join(missing)}; an unmeasured value is written null")
     return fields
-
-
-def _with_unread(document: object, keys: Iterable[str]) -> object:
-    """``document`` with ``keys`` read as ``null`` where it lacks them: reports written before those keys existed
-    still read, as unmeasured."""
-    if not isinstance(document, Mapping):
-        return document
-    return {**dict.fromkeys(keys), **document}
 
 
 def _measured(values: Mapping[str, object], keys: tuple[str, ...], integers: frozenset[str], what: str) -> None:
@@ -519,9 +511,7 @@ class AgentxResult:
                 f"is not {AGENTX_ERROR_RATE_DEFINITION}"
             )
         return cls(
-            counts=dict(
-                _complete(_with_unread(fields["counts"], _AGENTX_TOKEN_COUNTS), AGENTX_COUNT_KEYS, "the AgentX counts")
-            ),
+            counts=dict(_complete(fields["counts"], AGENTX_COUNT_KEYS, "the AgentX counts")),
             throughput=dict(_complete(fields["throughput"], AGENTX_THROUGHPUT_KEYS, "the AgentX throughput")),
             latency_seconds=dict(_complete(fields["latency_seconds"], AGENTX_LATENCY_KEYS, "the AgentX latency")),
             e2e_norm_intvty=dict(_complete(fields["e2e_norm_intvty"], AGENTX_INTVTY_KEYS, "the AgentX intvty")),
@@ -963,7 +953,7 @@ class Report:
 
     @classmethod
     def from_document(cls, document: object) -> Report:
-        fields = _complete(_with_unread(document, ("power",)), REPORT_KEYS, "a round report")
+        fields = _complete(document, REPORT_KEYS, "a round report")
         if fields["schema"] != REPORT_SCHEMA:
             raise ReportError(f"round report schema {fields['schema']!r} is not {REPORT_SCHEMA}")
         monitor = _FIELDS.items(fields["gpu_monitor"], "gpu_monitor")
