@@ -150,7 +150,6 @@ _MIB = 1 << 20
 _REFUSAL_SCAN_CHARS = 16 * _MIB
 _REFUSAL_BLOCK_CHARS = _MIB
 _REFUSAL_BLOCK_OVERLAP_CHARS = 4096
-_BENCHMARK_STDERR = "benchmark_stderr.log"
 _ACCURACY = "accuracy"
 _UTF8 = "utf-8"
 _PROFILE = "profile"
@@ -1153,19 +1152,20 @@ def _clean_returncode(run: _Run) -> int:
 
 
 def _failure_logs(failing: list[VariantResult]) -> list[str]:
-    """The tails of the server log and of the benchmark's own stderr of every result with a failed round.
+    """The tails of the server log and of the client's and the evaluation's stderr of every result with a failed round.
 
     The launcher's pipe seldom holds the cause: the server prints a refused flag or a crash into ``server.log``, and the
-    evaluation client prints a refused request into ``benchmark_stderr.log``.
+    client or the evaluation prints a refused request into its own stderr in the round's run_dir.
     """
     logs: list[str] = []
     for result in failing:
-        if not result.server_log_path:
-            continue
-        beside = Path(result.server_log_path).parent
-        stderr_logs = [beside / _BENCHMARK_STDERR, *sorted(beside.glob(f"benchmark_*/{_BENCHMARK_STDERR}"))]
-        logs.extend(_read_tail(str(path)) for path in [Path(result.server_log_path), *stderr_logs])
-        logs.extend(_read_refusal(path) for path in stderr_logs)
+        if result.server_log_path:
+            logs.append(_read_tail(result.server_log_path))
+        if result.workspace:
+            layout = RunLayout(Path(result.workspace))
+            stderr_logs = [layout.client_stderr, layout.eval_stderr]
+            logs.extend(_read_tail(str(path)) for path in stderr_logs)
+            logs.extend(_read_refusal(path) for path in stderr_logs)
     return logs
 
 
