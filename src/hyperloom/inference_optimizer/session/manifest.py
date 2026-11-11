@@ -17,6 +17,7 @@ from pathlib import Path
 from typing import Any
 
 from hyperloom_common.io import atomic_write_json
+from hyperloom.common.benchmark_config import configured_benchmark
 from hyperloom.common.provenance import build_provenance
 from hyperloom.common.session_files import shared_options
 from hyperloom.common.url_userinfo import strip_url_userinfo
@@ -98,7 +99,12 @@ def _describe_dep(*env_vars: str) -> dict[str, str]:
             break
     if not raw:
         return {"path": "", "commit": "", "remote": ""}
-    _warn_if_dependency_escapes_user_data(env_var, raw)
+    return _describe_checkout(raw, env_var)
+
+
+def _describe_checkout(raw: str, source: str) -> dict[str, str]:
+    """Describe a selected local checkout without resolving or preparing it."""
+    _warn_if_dependency_escapes_user_data(source, raw)
     path = Path(raw)
     if not path.is_dir():
         return {"path": raw, "commit": "", "remote": ""}
@@ -111,9 +117,11 @@ def _describe_dep(*env_vars: str) -> dict[str, str]:
 
 def _build_dependencies() -> dict[str, dict[str, str]]:
     """Provenance (path/commit/remote) for the InferenceX tree this session executes against, so debuggers can answer "which upstream?" later."""
-    return {
-        "inferencex": _describe_dep("INFERENCEX_PATH"),
-    }
+    selected = str(configured_benchmark().get("inferencex_path") or "").strip()
+    dependency = (
+        _describe_checkout(selected, "benchmark.inferencex_path") if selected else _describe_dep("INFERENCEX_PATH")
+    )
+    return {"inferencex": dependency}
 
 
 def _objective_summary(args: argparse.Namespace | None) -> dict[str, Any]:
