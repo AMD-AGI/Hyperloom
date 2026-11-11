@@ -11,6 +11,8 @@ from pathlib import Path
 
 from hyperloom.orchestrator.framework.optimization_scope import OptimizationScope
 
+from .settings_prelude import apply_settings_prelude, plan_settings
+
 
 def _sibling_import(tree: ast.Module, root: Path, hook: Path) -> str | None:
     """Name a module the hook imports from beside itself, or ``None``.
@@ -62,16 +64,33 @@ def build_single_file(state: dict, root: Path, scope: OptimizationScope, dest: P
     sibling = _sibling_import(tree, root, hook)
     if sibling is not None:
         raise ValueError(f"Optimization module imports {sibling!r} from beside itself; the export ships one file")
+    base_digest = hashlib.sha256(content).hexdigest()
+    best = state.get("current_best") or {}
+    plan = plan_settings(best.get("extra_envs"), unset_envs=best.get("unset_envs") or ())
+    content = apply_settings_prelude(content, plan, scope.function)
     (dest / hook.name).write_bytes(content)
     return {
-        "schema_version": 1,
+        "schema_version": 2,
         "status": "exported",
         "reasons": [],
         "kind": "single_file",
         "entrypoint": f"{hook.stem}.{scope.function}",
         "files": {hook.name: hashlib.sha256(content).hexdigest()},
-        "warnings": [],
+        "settings": {
+            "source": "current_best.extra_envs",
+            "base_sha256": base_digest,
+            "applied_env": dict(plan.applied_env),
+            "applied_api": list(plan.applied_api),
+            "unset_env": list(plan.unset_env),
+            "excluded": list(plan.excluded),
+            "untranslated": list(plan.untranslated),
+        },
+        "warnings": [f"settings_not_carried: {entry['name']} ({entry['reason']})" for entry in plan.untranslated],
         "validation": "not_run",
         "accepted_performance": {"tput": state["current_best"].get("tput")},
-        "usage": (f"Copy {hook.name} beside the original user script and run that script in its original runtime."),
+        "usage": (
+            f"Copy {hook.name} beside the original user script and run that script in its original runtime. "
+            "Accepted runtime settings are baked into the module and applied on import -- import it once, early, "
+            "before any other import (side effect only), and again at the usual call site after the model is loaded."
+        ),
     }

@@ -318,7 +318,17 @@ denominator. For the full artifact schema, see
 
 Everything above asks you to write a benchmark. You can instead keep model loading, inputs, validation and timing in the script you already have, and expose one optimization point:
 
+Import the hook **twice**. Once as the very first thing in the script, before any other import -- side effect only, so accepted settings land as environment variables before anything else can read and cache them. And once again at the documented call site, after the model is loaded, for the patches themselves, which need the model object and so cannot move earlier. Python runs a module's top-level code only on its first import, so the second import is a cached no-op for the side-effecting part; this costs one extra line.
+
 ```python
+try:
+    import hyperloom_optimize  # noqa: F401  -- side effect only; must be first
+except ModuleNotFoundError as exc:
+    if exc.name != "hyperloom_optimize":
+        raise
+
+# ... all your other imports, including torch, go after the block above ...
+
 try:
     from hyperloom_optimize import hyperloom_optimize
 except ModuleNotFoundError as exc:
@@ -332,6 +342,8 @@ except ModuleNotFoundError as exc:
 model = hyperloom_optimize(model)
 outputs = model(**inputs)
 ```
+
+Skipping the early import does not fail quietly. If the exported module carries accepted settings, it checks at import time whether the GPU is already initialized or torch's compiler stack is already loaded, and raises if so, rather than silently shipping a setting that never took effect.
 
 Point `--framework-path` at a directory holding `hyperloom_optimize.py`, initially an identity function. It does not need to be a Git checkout. In the frozen benchmark directory, declare `optimization_scope.json`:
 
@@ -350,6 +362,8 @@ A workload with no declaration is unaffected; everything above continues to appl
 On CLOSE, a custom session exports what it accepted. A single-file workload produces `deployment/hyperloom_optimize.py` with bookkeeping in `reports/deployment.json` (`kind: single_file`); a workload that declares an adapter through `hyperloom_inference.json` produces a self-contained `deployment/` with its own `inference.py` CLI, its source and assets captured, and runtime paths relocated so the directory can be moved.
 
 Copy the single module beside the original script and run that script in its original runtime. No Hyperloom installation is needed at the destination.
+
+The accepted runtime settings travel inside the module. `reports/deployment.json` records what was carried under `settings`: what became a torch API call, what stayed an environment variable, what was deliberately excluded, and what could not be carried at all. An absolute cache path is in the last group -- it is not portable to another machine -- and surfaces as a `settings_not_carried` warning rather than being dropped silently.
 
 The export is checked against what was benchmarked, and refuses rather than shipping something unproven. The module is compared byte for byte against the source snapshots recorded at each KEEP, so it is refused if it differs from what was measured, if no snapshot covers it at all, or if it imports a file sitting beside it -- only the one module ships, so a sibling import would arrive broken. None of this requires the file to live in a git repository.
 
