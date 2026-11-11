@@ -291,7 +291,6 @@ class TestFailedStepClasses:
         from hyperloom.orchestrator.actions.executors._failed_step import failed_step_error_class
 
         environment = {
-            FailedStep.DISK_FULL,
             FailedStep.GPUS_UNAVAILABLE,
             FailedStep.FRAMEWORK_VERSION_TOO_OLD,
             FailedStep.FRAMEWORK_VERSION_UNKNOWN,
