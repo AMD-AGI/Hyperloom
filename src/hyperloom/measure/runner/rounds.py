@@ -4,14 +4,12 @@
 """The list of rounds a test ran, in the result the runner signs.
 
 The measurement backend names each round's directory: the report of a measuring round and the discarded warm-up round
-that came before it look alike on disk, so a reader that only sees files cannot tell them apart. The runner lists them,
-each with the host it ran on, so two measurements of one recipe taken on different hosts can be told apart.
+that came before it look alike on disk, so a reader that only sees files cannot tell them apart. The runner lists them.
 """
 
 from __future__ import annotations
 
 import json
-import socket
 from pathlib import Path
 
 from hyperloom.measure.socket import TestOutcome
@@ -26,12 +24,11 @@ WARMUP_DIR = "warmup_round"
 
 
 def rounds_document(outcome: TestOutcome | None, files_dir: Path) -> list[dict[str, object]]:
-    """One entry per round that left its directory below ``files_dir``: point, phase, directory (relative), return code,
-    the host it ran on (this runner's) and, for an accuracy round, the scores."""
+    """One entry per round that left its directory below ``files_dir``: point, phase, directory (relative), return code
+    and, for an accuracy round, the scores."""
     if outcome is None:
         return []
     root = Path(files_dir).resolve()
-    host = socket.gethostname()
     entries = []
     for round_ in outcome.rounds:
         try:
@@ -43,7 +40,6 @@ def rounds_document(outcome: TestOutcome | None, files_dir: Path) -> list[dict[s
             "phase": round_.phase,
             "dir": relative.as_posix(),
             "returncode": round_.returncode,
-            "host": host,
         }
         if round_.nonfatal_warnings:
             entry["nonfatal_warnings"] = list(round_.nonfatal_warnings)
