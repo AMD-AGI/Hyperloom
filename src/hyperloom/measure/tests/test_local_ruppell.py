@@ -20,9 +20,9 @@ from hyperloom.measure.tests.test_local_backend import (  # noqa: F401 (fixtures
     _profile_point,
     _run,
     grid,
-    magpie_backend,
 )
 from hyperloom.orchestrator.actions.executors import VariantResult
+from inference_suite.contracts import RunLayout
 
 TRACED = {"RUPPELL_SGLANG": "1", "RUPPELL_DETAIL": "5/1000", "RUPPELL_TOOL_LIB": "/w/build/libruppell_tool.so"}
 
@@ -69,8 +69,9 @@ def _traced(config: dict[str, Any]) -> bool:
 def _traced_result(grid: _Grid, *, trace: bool = True, **fields: Any) -> VariantResult:
     result = grid.result("test", **fields)
     if trace:
-        (Path(result.workspace) / "torch_trace").mkdir(parents=True, exist_ok=True)
-        (Path(result.workspace) / "torch_trace" / "rank0.pt.trace.json.gz").write_bytes(b"trace")
+        traces = RunLayout(Path(result.workspace)).profile_torch_trace
+        traces.mkdir(parents=True, exist_ok=True)
+        (traces / "rank0.pt.trace.json.gz").write_bytes(b"trace")
     return result
 
 
@@ -148,9 +149,7 @@ def test_a_traced_attempt_that_left_no_trace_is_profiled_again(grid, tracer, tmp
 
 
 def test_a_traced_attempt_that_timed_out_is_not_run_again(grid, tracer, tmp_path, monkeypatch):
-    _answers(
-        grid, monkeypatch, lambda: _traced_result(grid, trace=False, status="failed", error_class="magpie_timeout")
-    )
+    _answers(grid, monkeypatch, lambda: _traced_result(grid, trace=False, status="failed", error_class="round_timeout"))
 
     with pytest.raises(local.MeasurementTimeout):
         _run(_call(tmp_path, _profile_point(tmp_path), kind="profile"))

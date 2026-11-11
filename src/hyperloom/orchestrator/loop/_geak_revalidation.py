@@ -27,7 +27,6 @@ from ..actions.executors._accuracy_gate import EVAL_KIND_ACCURACY_UNAVAILABLE
 from ..actions.executors.explore import STACK_REVALIDATE_SOURCE
 from ..collaborator import CoordinatorCollaborator
 from ..kernel.geak_config import (
-    _accepted_config_as_variant,
     _accepted_config_controls,
     _geak_accepted_kernel_specs,
     _geak_has_accepted_kernel,
@@ -36,8 +35,10 @@ from ..kernel.geak_config import (
     _geak_revalidation_decision,
     _geak_sweep_measured_tput,
     _normalize_geak_overlay_dir,
+    geak_candidate_launch,
     geak_spec_name,
 )
+from ..state.base_launch import session_runner_owned
 from ..state.shared_state import ActionAttempt, resolve_graded_comparison, stack_base_params
 from ..state.task_registry import Task
 
@@ -218,7 +219,7 @@ class GeakRevalidation(CoordinatorCollaborator):
         controls = _accepted_config_controls(
             config, inherited_remove_args=self.current_best_launch_config()["remove_args"]
         )
-        flags, envs = _accepted_config_as_variant(config)
+        flags, envs = geak_candidate_launch(config, session_runner_owned(self.session_dir))
         overlay = _normalize_geak_overlay_dir(str(accepted.get("final_overlay") or "").strip())
         has_artifact = _geak_result_has_artifact(accepted)
         deployable = config.get("flags") or config.get("env") or "env_map" in config or controls or has_artifact
@@ -285,10 +286,12 @@ class GeakRevalidation(CoordinatorCollaborator):
         lists count as identity: a removal whose effect the composed flags cannot show still changes the launch.
         """
         from hyperloom.inference_optimizer.canonical_fingerprint import canonical_fingerprint
-        from hyperloom.inference_optimizer.grid_server_args import compose_server_args
+        from hyperloom.inference_optimizer.grid_server_args import compose_server_args, without_runner_owned
 
         launch = self.current_best_launch_config()
-        complete_flags = self.build_env_spec()["config"]["server_launch_flags"]
+        complete_flags = without_runner_owned(
+            self.build_env_spec()["config"]["server_launch_flags"], session_runner_owned(self.session_dir)
+        )
         replacing = controls.get("args_mode") == "replace"
         added_removals = controls.get("remove_args", [])
         candidate_removals = (

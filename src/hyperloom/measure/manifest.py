@@ -1,7 +1,10 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""The signed result manifest (``MeasurementResult`` v1) a runner writes to ``/out/manifest.json``.
+"""The signed result manifest (``MeasurementResult`` v2) a runner writes to ``/out/manifest.json``.
+
+The runner states the inference_suite staging it ran (``runner.inference_suite_staging``, the sha256 of the staging's
+normalised manifest, which is the sheet's).
 
 The manifest is read only after its signature has been verified over the raw bytes (see
 :func:`hyperloom.measure.bundle.verify_bundle`); parsing here is strict all the same, because a manifest that is signed
@@ -34,7 +37,7 @@ from hyperloom.measure.docs import (
     relative_path,
 )
 
-RESULT_SCHEMA = "hyperloom.measurement-result/v1"
+RESULT_SCHEMA = "hyperloom.measurement-result/v2"
 FAILURE_CLASSES = ("infra", "unclear", "candidate")
 #: Names the bundle itself owns; a manifest never lists them as result files.
 RESERVED_NAMES = ("manifest.json", "manifest.sig")
@@ -108,7 +111,7 @@ class RunnerFacts:
     power_cap_w: float | None
     partition_mode: str | None
     hyperloom_version: str
-    magpie_commit: str
+    inference_suite_staging: str
     inferencex_commit: str
     gpu_ids: tuple[int, ...]
     ecc_delta: EccDelta | None
@@ -130,7 +133,7 @@ class RunnerFacts:
             power_cap_w=r.number("power_cap_w", minimum=0, optional=True),
             partition_mode=r.text("partition_mode", optional=True),
             hyperloom_version=r.text("hyperloom_version") or "",
-            magpie_commit=r.text("magpie_commit") or "",
+            inference_suite_staging=r.text("inference_suite_staging", pattern=SHA256_RE) or "",
             inferencex_commit=r.text("inferencex_commit") or "",
             gpu_ids=r.sequence("gpu_ids", _gpu_id),
             ecc_delta=None if ecc is None else EccDelta.parse(ecc, r.at("ecc_delta")),

@@ -14,6 +14,7 @@ from typing import Any, NamedTuple
 
 import yaml
 
+from hyperloom.common.benchmark_config import BenchmarkPoint, BenchmarkPointError
 from hyperloom.common.launch_log_evidence import (
     engine_adjusted_settings_from_log,
     launch_argv_from_log,
@@ -67,26 +68,26 @@ def _binding_from_identity(identity: dict[str, Any]) -> dict[str, Any]:
     }
 
 
+_UNREAD_POINT = BenchmarkPoint.from_document({"benchmark": {}})
+
+
 class _ConfigRecipe(NamedTuple):
-    """The materialized config's bytes and its ``benchmark`` block."""
+    """The materialized config's bytes and its point, which declares nothing when the config does not read as one."""
 
     raw: bytes
-    benchmark: dict[str, Any]
+    point: BenchmarkPoint
 
 
 def _read_config_recipe(config_path: Path) -> _ConfigRecipe:
     """Read the materialized config; one that was read but will not parse still counts as materialized."""
     raw = b""
-    benchmark: dict[str, Any] = {}
+    point = _UNREAD_POINT
     try:
         raw = config_path.read_bytes()
-        parsed = yaml.safe_load(raw.decode("utf-8")) or {}
-        if isinstance(parsed, dict):
-            raw_benchmark = parsed.get("benchmark")
-            benchmark = raw_benchmark if isinstance(raw_benchmark, dict) else {}
-    except (OSError, UnicodeDecodeError, yaml.YAMLError):
+        point = BenchmarkPoint.from_document(yaml.safe_load(raw.decode("utf-8")), source=str(config_path))
+    except (OSError, UnicodeDecodeError, yaml.YAMLError, BenchmarkPointError):
         log.debug("launch evidence could not read materialized config %s", config_path, exc_info=True)
-    return _ConfigRecipe(raw, benchmark)
+    return _ConfigRecipe(raw, point)
 
 
 def _observed_launch_from_log(actual_server_log: str | None, framework: str) -> dict[str, Any]:
@@ -168,16 +169,16 @@ def build_launch_evidence(
 ) -> dict[str, Any]:
     """Build declared and observed evidence for one measured server launch."""
     recipe = _read_config_recipe(requested.config_path)
-    benchmark = recipe.benchmark
+    point = recipe.point
 
-    resolved_framework = str(benchmark.get("framework") or requested.framework or "sglang").strip().lower()
+    resolved_framework = (point.framework or requested.framework or "sglang").strip().lower()
     args_env = server_args_env_name(resolved_framework)
-    envs = benchmark.get("envs") if isinstance(benchmark.get("envs"), dict) else {}
+    envs = point.envs
     declared_env = {str(key): str(value) for key, value in envs.items() if str(key) != args_env}
     declared_args = str(envs.get(args_env) or "").strip()
     requested_env = requested.server_env if requested.server_env is not None else declared_env
     requested_args = str(requested.server_args).strip() if requested.server_args is not None else declared_args
-    requested_model = str(requested.model_path if requested.model_path is not None else benchmark.get("model") or "")
+    requested_model = str(requested.model_path if requested.model_path is not None else point.model)
 
     return {
         "schema_version": 1,

@@ -15,9 +15,8 @@ class AgentXPreflightError(RuntimeError):
 def _check_mlperf_framework(env: Mapping[str, str]) -> None:
     """Raise unless this framework can serve the agentic client.
 
-    The client speaks OpenAI chat-completions to ``$PORT`` and delegates the server to Magpie's
-    ``{framework}_{gpu}.sh``, so every registered *serving* framework qualifies -- sglang, vllm and atom all expose
-    that surface. A scriptable framework has no endpoint to drive and is refused by kind rather than by name, so a
+    The client speaks OpenAI chat-completions to ``$PORT`` at a server inference_suite boots, so every registered
+    *serving* framework qualifies -- sglang, vllm and atom all expose that surface. A scriptable framework has no endpoint to drive and is refused by kind rather than by name, so a
     framework added to the registry later does not silently inherit a guard written before it existed.
     """
     from .. import framework_registry

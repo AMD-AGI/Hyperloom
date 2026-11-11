@@ -32,7 +32,7 @@ def _gpu_type_choices(parser) -> list | None:
 
 
 def test_every_board_has_exactly_one_policy_row():
-    """Each hardware row pairs with one policy row, so every board launches through its own runner."""
+    """Each hardware row pairs with one policy row, so every board says what Hyperloom does on it."""
     assert set(gpu_types._BOARD_POLICIES) == set(AMD_GPU_BOARDS)
 
 

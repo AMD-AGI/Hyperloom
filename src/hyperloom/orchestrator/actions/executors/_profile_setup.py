@@ -4,8 +4,9 @@
 """TraceLens profile setup shared by fixed-sequence and native AgentX runs.
 
 Runtime patching and shape discovery are shared with native AgentX.
-Fixed-sequence capture planning and shell arguments stay on the synthetic path;
-Magpie owns the native capture configuration.
+Fixed-sequence capture planning and shell arguments stay on the synthetic path.
+An AgentX point's ``profiler.torch_profiler`` becomes its inference_suite round's capture window
+(:func:`agentx_profile`) and the layer the profiled server adds to its own launch (:func:`profiled_server`).
 """
 
 from __future__ import annotations
@@ -16,17 +17,25 @@ import math
 import os
 import re
 import subprocess
+from dataclasses import replace
 from functools import cache
 from pathlib import Path
+from types import MappingProxyType
 from typing import Any, Mapping, NamedTuple
 
 from hyperloom_common.env import env_bool, env_flag, is_truthy
 from hyperloom.common.workload_defaults import DEFAULT_CONC, DEFAULT_OSL
 from hyperloom.inference_optimizer.model_config_utils import model_is_gemma2
 from hyperloom.inference_optimizer.runtime_environment import prepend_launch_path
+from inference_suite.argv import argv_flag_occurrences, canonical_flag_name
+from inference_suite.contracts import BaseLaunch, ConfigError, LaunchDelta, ProfileConfig, ServerConfig
+from inference_suite.frameworks import Framework
 from ._benchmark_interpreter import _resolve_probe_python
 
 log = logging.getLogger(__name__)
+
+#: How vLLM's ``--profiler-config`` fields and SGLang's profile variables spell true.
+_TRUE = "True"
 
 # Profile-phase capture defaults. Trace size scales with captured decode steps;
 # an oversized capture serializes too slowly and kills the engine. 128 steps is
@@ -51,6 +60,8 @@ _SPECULATIVE_FALLBACK_TOKENS_PER_STEP = 8
 _DELAY_ITERATIONS = "delay_iterations"
 _MAX_ITERATIONS = "max_iterations"
 _DEFAULT_PROFILE_DELAY_ITERS = 8
+#: The ``PROFILE_EXTRA_BODY`` keys that bound SGLang's capture window, in engine forward steps: its delay and length.
+SGLANG_START_STEP, SGLANG_NUM_STEPS = "start_step", "num_steps"
 _VLLM_DELAY_FLAG = re.compile(r"(--profiler-config\.delay_iterations[=\s]+)\d+")
 
 # ``HYPERLOOM_PROFILE_DEGRADED_REASON`` value meaning the TraceLens runtime patch
@@ -337,9 +348,9 @@ def fit_capture_to_speculative(envs: dict[str, Any], framework_env: str) -> None
         return
     body = _profile_extra_body(envs)
     vllm_delay = _profiler_flag_value(server_args, _DELAY_ITERATIONS)
-    if isinstance(body.get("start_step"), int):
-        delay, steps = body["start_step"], int(body.get("num_steps") or 0)
-        body["start_step"] = delay // tokens
+    if isinstance(body.get(SGLANG_START_STEP), int):
+        delay, steps = body[SGLANG_START_STEP], int(body.get(SGLANG_NUM_STEPS) or 0)
+        body[SGLANG_START_STEP] = delay // tokens
         envs["PROFILE_EXTRA_BODY"] = json.dumps(body)
     elif vllm_delay is not None and vllm_delay.isdigit():
         delay, steps = int(vllm_delay), int(_profiler_flag_value(server_args, _MAX_ITERATIONS) or 0)
@@ -486,6 +497,15 @@ SGLANG_PATCH_SERVER_FLAG = "--enable-shape-discovery-for-cuda-graph-profile"
 VLLM_PATCH_PROFILER_FIELDS: tuple[str, ...] = ("capture_torch_profiler", "detailed_trace_annotation")
 
 
+def vllm_profiler_fields(*, patched: bool) -> dict[str, str]:
+    """The ``--profiler-config`` fields every vLLM profile passes beside its trace dir and window, by value.
+
+    ``patched`` says the server runs TraceLens's patched vLLM, the only one that takes the patch's fields.
+    """
+    fields = dict.fromkeys(VLLM_PATCH_PROFILER_FIELDS, _TRUE) if patched else {}
+    return {**fields, "ignore_frontend": _TRUE, "torch_profiler_dump_cuda_time_total": "False"}
+
+
 def _apply_vllm_profile(
     envs: dict[str, Any],
     *,
@@ -498,15 +518,13 @@ def _apply_vllm_profile(
         (_DELAY_ITERATIONS, f"--profiler-config.delay_iterations {delay_iters}"),
         (_MAX_ITERATIONS, f"--profiler-config.max_iterations {max_iters}"),
     ]
-    # Magpie's launcher puts ``profiler=torch`` before EXTRA_VLLM_ARGS. The argv
-    # probe only sees EXTRA_VLLM_ARGS, and vLLM rejects the bounds without it.
-    # A dir here would override Magpie's ``<workspace>/torch_trace`` by last-wins.
+    # The argv probe only sees EXTRA_VLLM_ARGS, and vLLM rejects the bounds
+    # without ``profiler=torch``. A dir here would override the round's trace
+    # directory by last-wins.
     if _profiler_flag_value(existing, "profiler") is None:
         flags.append(("profiler", "--profiler-config.profiler torch"))
-    if patch_ok:
-        flags.extend((field, f"--profiler-config.{field} True") for field in VLLM_PATCH_PROFILER_FIELDS)
-    flags.append(("ignore_frontend", "--profiler-config.ignore_frontend True"))
-    flags.append(("torch_profiler_dump_cuda_time_total", "--profiler-config.torch_profiler_dump_cuda_time_total False"))
+    fields = vllm_profiler_fields(patched=patch_ok).items()
+    flags.extend((name, f"--profiler-config.{name} {value}") for name, value in fields)
     # Repeated flags last-win, so the computed cap replaces a YAML pin.
     # ``ignore_frontend`` is already in the shipped YAML; vLLM warns on the duplicate.
     profiler_args = " ".join(
@@ -538,8 +556,8 @@ def _apply_sglang_profile(
 ) -> None:
     delay_iters, max_iters = capture_window
     extra_body = _profile_extra_body(envs)
-    extra_body["start_step"] = delay_iters
-    extra_body["num_steps"] = max_iters
+    extra_body[SGLANG_START_STEP] = delay_iters
+    extra_body[SGLANG_NUM_STEPS] = max_iters
     shape_discovery = shape_discovery_enabled(bench)
     if sitecustomize:
         apply_sglang_shape_tool(envs, shape_discovery=shape_discovery)
@@ -602,3 +620,84 @@ def _profile_extra_body(envs: dict[str, Any]) -> dict[str, Any]:
     except (ValueError, TypeError):
         return {}
     return raw if isinstance(raw, dict) else {}
+
+
+#: The keys an AgentX ``profiler.torch_profiler`` may set, and the defaults for two.
+#: ``interval_seconds`` spaces the captures after the first, and the round opens one.
+_AGENTX_PROFILE_KEYS = frozenset(
+    {"enabled", "num_steps", "num_profiles", "start_seconds", "interval_seconds", "detailed_annotations"}
+    | {"capture_timeout_seconds"}
+)
+_AGENTX_CAPTURE_STEPS = 20
+_AGENTX_CAPTURE_SEC = 300.0
+#: What an annotated SGLang AgentX capture sets: shapes and stacks
+#: in the trace, and the CUDA-graph replays profiled unless the server runs eager.
+_SGLANG_ANNOTATION_ENV = MappingProxyType(
+    dict.fromkeys(("SGLANG_PROFILE_WITH_STACK", "SGLANG_PROFILE_RECORD_SHAPES", "SGLANG_GRAPH_BATCH_CAPTURE"), _TRUE)
+)
+_SGLANG_GRAPH_PROFILE_FLAG = "--enable-profile-cuda-graph"
+_SGLANG_EAGER_FLAG = "--disable-cuda-graph"
+
+
+def torch_profiler(bench: Mapping[str, Any]) -> Mapping[str, Any]:
+    return (bench.get("profiler") or {}).get("torch_profiler") or {}
+
+
+def refuse_agentx_keys(keys: object, known: frozenset[str], where: str) -> None:
+    unknown = sorted(set(keys) - known) if isinstance(keys, Mapping) else []
+    if unknown:
+        raise ConfigError(f"the AgentX point sets {where} {', '.join(unknown)}, which no inference_suite round carries")
+
+
+def agentx_profile(bench: Mapping[str, Any], framework: Framework) -> ProfileConfig:
+    """The capture window an AgentX point asks for, opened ``start_seconds`` into the replay's measured phase."""
+    settings = torch_profiler(bench)
+    if not settings.get("enabled"):
+        return ProfileConfig(enabled=False)
+    refuse_agentx_keys(settings, _AGENTX_PROFILE_KEYS, "profiler.torch_profiler")
+    if settings.get("num_profiles", 1) != 1:
+        raise ConfigError(f"the AgentX point asks for {settings['num_profiles']} captures; a round opens one")
+    annotated = framework is Framework.SGLANG and settings.get("detailed_annotations") is True
+    return ProfileConfig(
+        enabled=True,
+        start_body={"detailed_annotations": True} if annotated else None,
+        delay_iters=0,
+        max_iters=settings.get("num_steps", _AGENTX_CAPTURE_STEPS),
+        agentx_open_after_sec=settings.get("start_seconds", 0.0),
+        agentx_duration_sec=settings.get("capture_timeout_seconds", _AGENTX_CAPTURE_SEC),
+    )
+
+
+def _graph_disabled(user: LaunchDelta, base: BaseLaunch) -> bool:
+    golden_args = base.golden_al.args if base.golden_al is not None else ()
+    ran = {name for name, _ in argv_flag_occurrences((*base.args, *golden_args, *user.args_add))}
+    removed = {canonical_flag_name(flag) for flag in user.args_remove}
+    return canonical_flag_name(_SGLANG_EAGER_FLAG) in ran - removed
+
+
+def _agentx_profile_layer(
+    bench: Mapping[str, Any], framework: Framework, user: LaunchDelta, base: BaseLaunch
+) -> LaunchDelta:
+    """What an AgentX profile adds to the server's own layer ``user`` for the annotations it asks for."""
+    settings = torch_profiler(bench)
+    if not settings.get("enabled"):
+        return LaunchDelta()
+    annotated = settings.get("detailed_annotations") is True
+    if framework is Framework.VLLM:
+        fields = vllm_profiler_fields(patched=annotated).items()
+        return LaunchDelta(
+            args_add=tuple(token for name, value in fields for token in (f"--profiler-config.{name}", value))
+        )
+    if not annotated:
+        return LaunchDelta()
+    graph = () if _graph_disabled(user, base) else (_SGLANG_GRAPH_PROFILE_FLAG,)
+    return LaunchDelta(args_add=graph, env_set=_SGLANG_ANNOTATION_ENV)
+
+
+def profiled_server(server: ServerConfig, bench: Mapping[str, Any], base: BaseLaunch) -> ServerConfig:
+    user = server.user
+    layer = _agentx_profile_layer(bench, Framework(base.framework), user, base)
+    return replace(
+        server,
+        user=replace(user, args_add=(*user.args_add, *layer.args_add), env_set={**user.env_set, **layer.env_set}),
+    )
