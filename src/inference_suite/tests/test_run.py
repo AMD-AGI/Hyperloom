@@ -13,6 +13,7 @@ import functools
 import hashlib
 import json
 import os
+import signal
 import socket
 import subprocess
 import sys
@@ -357,6 +358,8 @@ def test_a_fixed_round_with_eval_reports_what_it_measured_and_leaves_its_run_dir
     assert SuiteConfig.from_document(yaml.safe_load(layout.config.read_text())) == config
     assert report.fixed is not None and report.fixed.values["output_throughput"] == 812.5
     assert report.codes.client == 0 and report.codes.eval == 0 and report.concurrency == _FIXED.concurrency
+    # The round reaps its own server with SIGTERM.
+    assert report.codes.server == -signal.SIGTERM
     assert [json.loads(line) for line in rig.calls.read_text().splitlines()] == [
         {"seed": "1", "num_prompts": "2"},
         {"seed": "0", "num_prompts": "8"},
@@ -696,6 +699,7 @@ def test_a_server_whose_death_excerpt_is_cut_on_whitespace_still_writes_its_repo
     report = Report.from_document(json.loads(result.layout.report.read_text()))
     assert report.failed_step is FailedStep.SERVER_EXITED_BEFORE_READY
     assert report.failure_detail == "c" * 1199
+    assert report.codes.server == 1
 
 
 def test_a_round_whose_gpus_another_process_holds_is_refused_before_its_server_starts(rig):

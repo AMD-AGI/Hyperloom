@@ -187,7 +187,6 @@ def test_failed_step_is_a_closed_list() -> None:
         "round_timeout",
         "deadline_exhausted",
         "cancelled",
-        "disk_full",
         "teardown_incomplete",
     }
     document = _document(_report(run_status=RunStatus.FAILED, failed_step=FailedStep.SERVER_DIED, fixed=None))

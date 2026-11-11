@@ -321,7 +321,7 @@ A round that did not complete names one `failed_step`:
 | Server | `server_exited_before_ready`, `server_silent_before_ready`, `server_boot_timeout`, `server_stalled`, `server_died` |
 | Client | `client_failed`, `client_output_missing` |
 | Eval | `eval_failed` |
-| Any | `round_timeout`, `deadline_exhausted`, `cancelled`, `disk_full`, `teardown_incomplete` |
+| Any | `round_timeout`, `deadline_exhausted`, `cancelled`, `teardown_incomplete` |
 
 `host` names the machine the round ran on, the one `power.json` names
 (`server.host` is the address the server listens on), so two measurements of one

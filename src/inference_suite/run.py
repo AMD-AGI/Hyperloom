@@ -509,6 +509,7 @@ class _Round:
             server = self.config.server
             reused = self.config.lifecycle.mode.finds_server
             self.server = ServerFacts(server.host, server.port, server.served_model_name, reused, released.log_range)
+            self.codes = replace(self.codes, server=released.returncode)
             if released.teardown is not None:
                 self.fail(released.teardown)
             if self.capture is not None:
