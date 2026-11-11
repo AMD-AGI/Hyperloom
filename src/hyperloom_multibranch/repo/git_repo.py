@@ -16,7 +16,7 @@ from collections.abc import Collection, Mapping, Sequence
 from dataclasses import dataclass, replace
 from pathlib import Path
 
-from hyperloom_common.shared_storage import make_shared_dirs, write_shared_bytes
+from hyperloom_common.shared_storage import SHARED_CHILD_UMASK, make_shared_dirs, parent_is_shared, write_shared_bytes
 from hyperloom.contracts.recipe import (
     PATCH_ROOT,
     ComponentPatches,
@@ -41,8 +41,7 @@ from hyperloom.measure.compile import (
 from hyperloom_multibranch.contracts.blackboard.vocab import INTEGRATION_BRANCH
 from hyperloom_multibranch.contracts.repo import BranchMoved, BundleMerge, RepoMerge
 from hyperloom_multibranch.contracts.sources import NativeTree, SourceRoot, source_roots
-from hyperloom_common.git_safety import check_shared_repository, git_dir_umask, share_objects_and_refs
-from hyperloom_common.shared_storage import parent_is_shared
+from hyperloom_common.git_safety import check_session_repository, git_dir_umask, share_objects_and_refs
 from hyperloom_multibranch.repo.isolated_git import INIT, blank_driver_programs, git_argv, git_env
 from hyperloom_multibranch.repo.merge import Stored, carry, stack_kernel_slot
 from hyperloom_multibranch.repo.rebase import Files
@@ -373,21 +372,24 @@ class GitExperimentRepo:
         return completed.out
 
     async def _run(self, *args: str, stdin: bytes | None = None, umask: int = -1) -> _Completed:
-        """``git <args>`` on the repository under ``umask`` (``-1``: this process's).
+        """``git <args>`` on the repository under ``umask`` (``-1``: this process's, or in a shared repository the
+        shared child umask, so what git makes there later stays the group's and no one else's).
 
-        Before every command but ``init``, a shared repository whose config, hooks or ``info`` another account could
-        have written is refused (:func:`~hyperloom_common.git_safety.check_shared_repository`), git is pinned to the
-        repository (``GIT_COMMON_DIR``, so a ``commondir`` names no other), and every driver program and config-defined
-        hook its config names is blanked, as for every other git the app runs.
+        Before every command but ``init``, the repository is checked as a session's
+        (:func:`~hyperloom_common.git_safety.check_session_repository`): below shared storage one not laid out shared
+        is refused, and so is a shared one whose config, hooks or ``info`` another account could have written. Git is
+        then pinned to the repository (``GIT_COMMON_DIR``, so a ``commondir`` names no other), and every driver program
+        and config-defined hook its config names is blanked, as for every other git the app runs.
 
         Raises:
-            OSError: The repository holds state another account could have written, or its config cannot be read to
-                blank its programs (nothing was run).
+            OSError: The repository is refused, or its config cannot be read to blank its programs (nothing was run).
         """
         argv, env = git_argv(*args), self._env
         if tuple(args[: len(INIT)]) != INIT:
             env = {**env, "GIT_COMMON_DIR": str(self._path)}
-            argv = git_argv(*await asyncio.to_thread(self._blanked, env), *args)
+            blanked, group = await asyncio.to_thread(self._blanked, env)
+            argv = git_argv(*blanked, *args)
+            umask = SHARED_CHILD_UMASK if group is not None and umask == -1 else umask
         process = await asyncio.create_subprocess_exec(
             *argv,
             cwd=self._path,
@@ -411,13 +413,13 @@ class GitExperimentRepo:
         out, err = communicating.result()
         return _Completed(process.returncode, out.decode().strip(), err.decode(errors="replace").strip())
 
-    def _blanked(self, env: dict[str, str]) -> list[str]:
-        """The ``-c`` pairs that blank the repository's driver programs, once it is checked; none where there is no
-        repository yet, whose git fails on its own."""
-        if not self._path.is_dir():
-            return []
-        check_shared_repository(self._path)
-        return blank_driver_programs(self._path, env)
+    def _blanked(self, env: dict[str, str]) -> tuple[list[str], int | None]:
+        """The ``-c`` pairs that blank the repository's driver programs, once it is checked, and its group when it is
+        shared; neither where nothing is at its path yet, whose git fails on its own."""
+        if not self._path.is_symlink() and not self._path.exists():
+            return [], None
+        group = check_session_repository(self._path)
+        return blank_driver_programs(self._path, env), group
 
 
 __all__ = ["GIT_TIMEOUT_S", "RECIPE_FILE", "GitError", "GitExperimentRepo"]

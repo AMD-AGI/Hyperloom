@@ -127,3 +127,42 @@ def test_the_next_account_of_the_group_commits_but_writes_none_of_git_s_own_stat
     assert second["make_hooks"] == 17, "the first account made an empty hooks directory (EEXIST)"
     assert second["plant_commondir"] == 0, "the sticky git directory still lets the group make a name of its own"
     assert third["refused"] == 1, "which the first account's next git refuses (EPERM)"
+
+
+_SWAP = """
+session = Path({session!r})
+for name in ("MB-repo", "MB-source"):
+    os.rename(session / name, session / f"{{name}}.moved")
+ok("init", "-q", "--bare", "--template=", str(session / "MB-repo"))
+ok("init", "-q", "--template=", str(session / "MB-source"))
+print(json.dumps({{"unshared": [git_safety.shared_group(session / "MB-repo"), git_safety.shared_group(session / "MB-source" / ".git")]}}))
+"""
+
+_SESSION_CHECK = """
+session = Path({session!r})
+found = {{}}
+for name, common in (("MB-repo", session / "MB-repo"), ("MB-source", session / "MB-source" / ".git")):
+    found[name] = errno_of(lambda: git_safety.check_session_repository(common))
+    found[name + "-owner"] = (session / name).stat().st_uid
+print(json.dumps(found))
+"""
+
+
+def test_an_unshared_repository_another_account_put_in_the_session_is_refused():
+    """Another account of the group renames the session's repositories away and puts unshared ones of its own in their
+    place: the first account's check refuses both, as they lie below shared storage, though their own objects and refs
+    say they are not shared."""
+    first_layout = _FIRST.replace('"source"', '"MB-source"').replace('"repo"', '"MB-repo"')
+    with other_accounts() as accounts:
+        _lib(accounts)
+        session = str(accounts.shared_dir("work") / "session")
+
+        accounts.run(accounts.first, _PRELUDE + first_layout.format(session=session))
+        before = json.loads(accounts.run(accounts.first, _PRELUDE + _SESSION_CHECK.format(session=session)))
+        swapped = json.loads(accounts.run(accounts.second, _PRELUDE + _SWAP.format(session=session)))
+        after = json.loads(accounts.run(accounts.first, _PRELUDE + _SESSION_CHECK.format(session=session)))
+
+    assert before["MB-repo"] == before["MB-source"] == 0, "the session's own repositories pass"
+    assert swapped["unshared"] == [None, None]
+    assert after["MB-repo-owner"] == after["MB-source-owner"] == accounts.second
+    assert after["MB-repo"] == after["MB-source"] == 1, "both substitutes are refused (EPERM)"

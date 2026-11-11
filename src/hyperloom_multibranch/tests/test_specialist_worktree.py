@@ -8,6 +8,7 @@ import stat
 import subprocess
 from dataclasses import replace
 from pathlib import Path
+from typing import NoReturn
 
 import pytest
 
@@ -110,6 +111,38 @@ def test_git_on_a_shared_base_whose_config_the_group_can_write_runs_nothing(tmp_
 
     with pytest.raises(worktree_module.WorktreeError, match="git's own state of a shared repository is refused"):
         base.worktree("s1", session / "s1")
+    assert not (session / "s1").exists()
+
+
+def _refusing_git(*argv: object, **kwargs: object) -> NoReturn:
+    raise AssertionError(f"git started: {argv}")
+
+
+@pytest.mark.parametrize("swap", ["objects-0755", "a-gitfile"])
+def test_below_shared_storage_a_base_not_laid_out_shared_starts_no_git(tmp_path, installed, monkeypatch, swap):
+    """What another account of the group could put at the base's path below shared storage: a repository whose objects
+    are not the group's, or a tree whose ``.git`` names one elsewhere. Neither is the session's base, and no git runs."""
+    session = _shared_session(tmp_path)
+    monkeypatch.setattr(worktree_module, "locate_installed_package", lambda _layout: installed)
+    base = SourceBase(session / "source")
+    base.build(["vllm"])
+    base.worktree("s0", session / "s0")
+    common = base.path / ".git"
+    if swap == "objects-0755":
+        (common / "objects").chmod(0o755)
+    else:
+        elsewhere = tmp_path / "elsewhere"
+        subprocess.run(["git", "init", "-q", str(elsewhere)], check=True)
+        common.rename(base.path / "moved")
+        common.write_text(f"gitdir: {elsewhere / '.git'}\n")
+
+    monkeypatch.setattr(subprocess, "run", _refusing_git)
+    with pytest.raises(worktree_module.WorktreeError, match="below shared storage"):
+        base.worktree("s1", session / "s1")
+    with pytest.raises(worktree_module.WorktreeError, match="below shared storage"):
+        base.worktree("s0", session / "s0")  # nothing the substitute records is read for a worktree already there
+    with pytest.raises(worktree_module.WorktreeError, match="below shared storage"):
+        worktree_module._git(base.path, "status", base=True)
     assert not (session / "s1").exists()
 
 
