@@ -6,6 +6,8 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
+import pytest
+
 from kernelforge.workflows.rewrite_controller import ControllerLayout, TaskStateStore
 from kernelforge.workflows.rewrite_controller import scheduler
 from kernelforge.workflows.rewrite_controller.dispatcher import SingleTaskResult
@@ -72,6 +74,32 @@ def test_fixed_scheduler_budgets_match_the_design() -> None:
     assert scheduler.ANALYSIS_BUDGET_SEC == 60 * 60
     assert scheduler.FORGE_LOOP_BUDGET_SEC == 90 * 60
     assert scheduler.MIN_TASK_START_REMAINING_SEC == 30 * 60
+
+
+@pytest.mark.parametrize(
+    ("allocation_kwargs", "expected"),
+    [({"explicit_allocation": True}, [19000, 37000]), ({}, [6400, 24400])],
+    ids=["shared-allocation", "default-operator-cap"],
+)
+def test_controller_operator_deadlines_follow_the_allocation_policy(tmp_path, monkeypatch, allocation_kwargs, expected):
+    layout = ControllerLayout(tmp_path / "output")
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    _publish_task(layout, repo_root=repo, kernel_name="up", priority=0)
+    _publish_task(layout, repo_root=repo, kernel_name="down", priority=1)
+    deadlines = []
+
+    def dispatch(task_dir, *, deadline_unix, **_kwargs):
+        task = scheduler.load_task(task_dir, record_state=False).task
+        deadlines.append(deadline_unix)
+        return _result(task, "succeeded")
+
+    clock = iter([1000, 19000])
+    monkeypatch.setattr(scheduler, "dispatch_single_task", dispatch)
+    scheduler.dispatch_prepared_tasks(
+        layout, controller_deadline_unix=37000, clock=lambda: next(clock), **allocation_kwargs
+    )
+    assert deadlines == expected
 
 
 def test_tasks_run_sequentially_by_priority_and_continue_after_failure(

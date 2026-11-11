@@ -355,12 +355,12 @@ class SharedState(_RenderMixin, GapsStateMixin, _PhaseStateMixin, _RooflineState
     profile_osl: int = 0
     max_model_len: int = 0
     kernel_enabled: bool = True
-    # KERNEL-phase backend, recorded once when the session is created: "geak" (default) or "forge".
-    kernel_optimizer: str = "geak"
+    kernel_optimizer: str = "geak"  # KERNEL backend fixed at launch: "geak" (default) or "forge".
     # Snapshot of the last GEAK e2e run (result.json + final_launch.sh / bench_e2e.sh handles the SWEEP phase reuses).
     geak_result: dict[str, Any] = field(default_factory=dict)
-    # Terminal result of the phase-level KernelForge rewrite controller.
+    # Forge controller's last result and optional session allocation; None keeps per-cycle KERNEL budgeting.
     kernel_rewrite_controller_result: dict[str, Any] = field(default_factory=dict)
+    forge_controller_allocation_sec: int | None = None
     # SWEEP-phase concurrency sweep; ``_seed_shared_state`` resolves it at seed time from ``--enable-conc-sweep`` and the
     # benchmark mode.
     conc_sweep_enabled: bool = True

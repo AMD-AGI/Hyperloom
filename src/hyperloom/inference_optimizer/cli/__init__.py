@@ -54,7 +54,7 @@ from .bootstrap import (
     LaunchInfo,
     LaunchPlatform,
     _emit_launch_info,
-    constraint_budget_resume_conflict,
+    budget_resume_conflict,
     resolve_launch_gpu_power,
     _begin_resume_leg,
     _install_executors,
@@ -1226,7 +1226,7 @@ async def _resume_session(args: argparse.Namespace) -> _SessionStart:
     # Checked before any resume step persists state, so a refused resume leaves the session as it was.
     _resume_conflict = (
         latency_budget_scope_error(state.framework, getattr(args, "max_latency_ms", None))
-        or constraint_budget_resume_conflict(args, state)
+        or budget_resume_conflict(args, state)
         or _custom_specialist_conflict(args, state)
     )
     if _resume_conflict:

@@ -74,6 +74,13 @@ or in `cli/gpu_power_args.py` for the GPU power settings).
 
 ## Monitor the run
 
+For one Forge rewrite-controller balance shared across macro cycles, pass
+`--forge-controller-allocation-minutes 600` to `hyperloom optimize` (or choose
+another positive minute value). The allocation is saved in the session manifest
+and state, and failed controller attempts spend from the same balance. Without
+the option, each cycle uses its usual KERNEL phase budget. An explicit value on
+resume must match the saved allocation.
+
 The agent reports a session ID, log path, and PID, then reads persisted state
 on requested status checks. Recurring checks may use the hosting platform's
 scheduled invocations; no background supervisor or automatic restart is started.
