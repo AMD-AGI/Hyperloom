@@ -45,7 +45,6 @@ from hyperloom_multibranch.scheduling import launch_isolation as launch_isolatio
 from hyperloom_multibranch.scheduling.launch_isolation import (
     HOSTED,
     SANDBOX_UNCONFINED,
-    TESTS_UNCONFINED,
     LaunchIsolation,
     announce_launch_isolation,
     launch_isolation,
@@ -62,8 +61,8 @@ LAYER_PROBE = BwrapProbe("/opt/layer/bin/bwrap", (0, 13, 1), ())
 SPECIALIST_WHY = (f"running them as an account: {SPECIALIST_USER_ENV} is not set", "no bwrap")
 #: A shell line that prints whether it can read this test process's environment, as an unconfined command can.
 REACHES = "if cat /proc/{pid}/environ >/dev/null 2>&1; then echo reached; else echo fenced; fi"
-#: Why a test or an agent or dev sandbox on this host runs unconfined.
-HERE_WHY = (SANDBOX_UNCONFINED, TESTS_UNCONFINED)
+#: Why a test on this host runs unconfined, as the test chooser says it.
+TEST_WHY = ("running them as an account: a test sandbox runs as the app's own account", "no bwrap")
 
 
 @pytest.fixture(autouse=True)
@@ -136,20 +135,41 @@ def test_a_specialist_the_runner_would_refuse_is_recorded_refused_with_the_runne
     )
 
 
+def _tests_give(monkeypatch: pytest.MonkeyPatch, *, confined: bool) -> None:
+    """The test chooser gives bubblewrap (``confined``), else unconfined with its reasons."""
+
+    monkeypatch.setattr(
+        launch_isolation_module, "local_test_isolation", lambda: (BWRAP, ()) if confined else (NONE, TEST_WHY)
+    )
+
+
+def test_tests_on_this_hosts_cards_are_recorded_under_bubblewrap_where_their_chooser_gives_it(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _runner_gives(monkeypatch, AccountIsolation(ACCOUNT_RUN_AS))
+    _tests_give(monkeypatch, confined=True)
+
+    isolation = launch_isolation(local=True)
+
+    assert isolation == LaunchIsolation(ACCOUNT, NONE, BWRAP, False, (SANDBOX_UNCONFINED,))
+    assert isolation.problems() == f"agent and dev sandboxes run unconfined on this host ({SANDBOX_UNCONFINED})"
+
+
 def test_sandboxes_and_tests_on_this_hosts_cards_are_recorded_unconfined_naming_why_once(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     _runner_gives(monkeypatch, AccountIsolation(ACCOUNT_RUN_AS))
+    _tests_give(monkeypatch, confined=False)
 
     isolation = launch_isolation(local=True)
 
-    assert isolation == LaunchIsolation(ACCOUNT, NONE, NONE, False, HERE_WHY)
+    assert isolation == LaunchIsolation(ACCOUNT, NONE, NONE, False, (SANDBOX_UNCONFINED, *TEST_WHY))
     assert isolation.problems() == (
-        f"agent and dev sandboxes and tests run unconfined on this host ({SANDBOX_UNCONFINED}; {TESTS_UNCONFINED})"
+        f"agent and dev sandboxes and tests run unconfined on this host ({SANDBOX_UNCONFINED}; {'; '.join(TEST_WHY)})"
     )
 
 
-def test_sandboxes_and_tests_a_hosted_run_launches_here_are_recorded_unconfined_as_they_run(
+def test_tests_a_hosted_run_cannot_confine_here_are_recorded_refused_and_its_sandboxes_unconfined_as_they_run(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     _runner_gives(monkeypatch, AccountIsolation(ACCOUNT_RUN_AS))
@@ -157,8 +177,11 @@ def test_sandboxes_and_tests_a_hosted_run_launches_here_are_recorded_unconfined_
 
     isolation = launch_isolation(local=True)
 
-    assert (isolation.sandboxes, isolation.tests, isolation.reasons) == (NONE, NONE, HERE_WHY)
-    assert isolation.problems().startswith("agent and dev sandboxes and tests run unconfined on this host (")
+    assert (isolation.sandboxes, isolation.tests) == (NONE, REFUSED)
+    assert SANDBOX_UNCONFINED in isolation.reasons and agent_isolation.NO_LAYER_BWRAP in isolation.reasons
+    assert isolation.problems().startswith(
+        "agent and dev sandboxes run unconfined on this host; tests will be refused ("
+    )
 
 
 def test_sandboxes_and_tests_measured_in_a_grants_sandboxes_are_recorded_there_not_unconfined_here(
@@ -279,7 +302,7 @@ def test_the_record_of_the_tests_is_what_a_test_sandbox_on_this_host_reaches(tmp
     template = replace(local_runner_template("runner-1", gpus=0), command=probe)
     session: Any = SimpleNamespace(session_dir=str(tmp_path / "session"), hostname="node-1")
     options = LocalOptions(framework_configs="", card_guard=CardGuard.OBSERVE)
-    provider = local_hosted._provider(session, (0,), template, options, {})
+    provider = local_hosted._provider(session, (0,), template, options, None)
     sandbox = provider.create(template.name, role="measurement", timeout_sec=60, metadata={})
     try:
         process, status = sandbox._startup  # type: ignore[attr-defined]
@@ -296,10 +319,10 @@ def test_the_record_of_the_tests_is_what_a_test_sandbox_on_this_host_reaches(tmp
 
 #: How each case launches (specialists, sandboxes, tests) on this host's cards, and in a grant's sandboxes.
 FOUR_CASES = {
-    "local-bwrap": ((BWRAP, NONE, NONE), (BWRAP, HOSTED, HOSTED)),
+    "local-bwrap": ((BWRAP, NONE, BWRAP), (BWRAP, HOSTED, HOSTED)),
     "local-no-bwrap": ((NONE, NONE, NONE), (NONE, HOSTED, HOSTED)),
-    "hosted-layer-bwrap": ((BWRAP, NONE, NONE), (BWRAP, HOSTED, HOSTED)),
-    "hosted-no-layer-bwrap": ((REFUSED, NONE, NONE), (REFUSED, HOSTED, HOSTED)),
+    "hosted-layer-bwrap": ((BWRAP, NONE, BWRAP), (BWRAP, HOSTED, HOSTED)),
+    "hosted-no-layer-bwrap": ((REFUSED, NONE, REFUSED), (REFUSED, HOSTED, HOSTED)),
 }
 
 
