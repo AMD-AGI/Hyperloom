@@ -54,6 +54,7 @@ from hyperloom.contracts.measurement import (
 )
 from hyperloom.contracts.recipe import Recipe, RecipeDelta
 from hyperloom.hosted.mcp_server import MIN_TOKEN_LENGTH, McpServer, McpServerConfig
+from hyperloom.measure.tests.gpu_free_host import TEST_SCRATCH_ENV
 from hyperloom.measure.versions import socket_versions
 from hyperloom_multibranch.contracts.fork import AdmissionStatus, ForkAdmission, ForkRequest, RepairRequest
 from hyperloom_multibranch.contracts.intent import Intent, IntentLayer
@@ -2085,11 +2086,14 @@ def _finish_as_final_only(left: Mapping[str, object]) -> dict[str, object]:
 
 def _as_account(accounts: Accounts, uid: int, call: str) -> dict[str, object]:
     """``call``, an expression of this module's, evaluated by ``uid`` in a process of its own under umask ``022``: its
-    JSON result."""
+    JSON result. The account's helper scratch is a directory of the accounts' own, as the test's is below pytest's base
+    temporary directory, which another account cannot reach."""
 
     source = Path(hyperloom_multibranch.__file__).parents[1]
+    scratch = accounts.shared_dir(f"test-scratch-{uid}")
     code = (
-        f"import json, sys\nfrom pathlib import Path\nsys.path.insert(0, {str(source)!r})\n"
+        f"import json, os, sys\nfrom pathlib import Path\nsys.path.insert(0, {str(source)!r})\n"
+        f"os.environ[{TEST_SCRATCH_ENV!r}] = {str(scratch)!r}\n"
         f"from hyperloom_multibranch.tests import test_skeleton\nprint(json.dumps(test_skeleton.{call}))"
     )
     return json.loads(accounts.run(uid, code).splitlines()[-1])

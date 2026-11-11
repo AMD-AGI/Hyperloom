@@ -22,6 +22,7 @@ from hyperloom.contracts.measurement import (
     Validity,
 )
 from hyperloom.contracts.recipe import ConfigDelta, RecipeDelta
+from hyperloom.measure.tests.gpu_free_host import TEST_SCRATCH_ENV
 from hyperloom_multibranch.contracts.blackboard.records import QuarantineEvent, Withdrawal
 from hyperloom_multibranch.contracts.blackboard.vocab import QuarantineAction
 from hyperloom_multibranch.contracts.toolbox import (
@@ -955,3 +956,23 @@ async def test_the_fake_refuses_an_attachment_id_the_sheet_would_refuse_and_a_tr
     with pytest.raises(RequestRejected) as truncated:
         await fake.put_attachment("case", "dir", gzip.compress(b"x" * 2000)[:20])
     assert truncated.value.code == "attachment_unreadable"
+
+
+def test_a_fake_toolboxs_scratch_lies_below_pytests_base_temporary_directory(
+    tmp_path_factory: pytest.TempPathFactory,
+) -> None:
+    """A run that is killed before the toolbox's finalizers run leaves its submit log and blobs where pytest rotates
+    them away, never in the host's temporary directory."""
+    toolbox = FakeToolbox()
+    base = tmp_path_factory.getbasetemp().resolve()
+
+    assert toolbox._scratch is not None
+    for scratch in (toolbox._scratch.name, toolbox._blob_scratch.name):
+        assert Path(scratch).resolve().is_relative_to(base), scratch
+
+
+def test_a_fake_toolbox_where_no_conftest_names_a_scratch_is_refused(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.delenv(TEST_SCRATCH_ENV)
+
+    with pytest.raises(RuntimeError, match=f"FakeToolbox needs {TEST_SCRATCH_ENV}"):
+        FakeToolbox()
