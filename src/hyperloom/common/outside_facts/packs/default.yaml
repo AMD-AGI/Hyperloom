@@ -372,7 +372,6 @@ facts:
     value: dladdr
     examples:
       - "hyperloom/inference_optimizer/assets/configs/profile_sglang.yaml: the profile launch's env block"
-      - "hyperloom.orchestrator.actions.executors._profile_setup: the env an annotated AgentX SGLang profile adds with its graph-capture flag"
 
   torch_memory_snapshot_frame:
     kind: log_regex
