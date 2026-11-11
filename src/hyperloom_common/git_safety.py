@@ -35,7 +35,7 @@ from collections.abc import Mapping, Sequence
 from pathlib import Path
 from types import MappingProxyType
 from hyperloom_common.fs_utils import read_text_nofollow
-from hyperloom_common.shared_storage import child_umask
+from hyperloom_common.shared_storage import child_umask, directory_is_shared
 
 
 _GITFILE = ".git"
@@ -104,13 +104,18 @@ _ADD_BATCH = 256  # paths per add: at PATH_MAX each, 1 MiB, inside the kernel's 
 
 
 def _shared_group(common: Path | None) -> int | None:
-    """The group whose accounts write the repository at ``common`` in turn, when its git directory is a shared one
-    (setgid, as ``hyperloom_common.shared_storage`` makes it): each leg of a run may be another account of that group,
-    and what the earlier one made is that group's. ``None`` when ``common`` is not given or not shared."""
+    """The group whose accounts write the repository at ``common`` in turn, when its git directory is storage set up
+    to be shared by the rule :func:`~hyperloom_common.shared_storage.directory_is_shared` applies (setgid,
+    group-writable, not writable by others; the one :func:`~hyperloom_common.shared_storage.child_umask` applies too):
+    each leg of a run may be another account of that group, and what the earlier one made is that group's. ``None``
+    when ``common`` is not given or not shared; a link at ``common``'s own name is refused (``ENOTDIR``)."""
     if common is None:
         return None
-    info = os.lstat(common)
-    return info.st_gid if stat.S_ISDIR(info.st_mode) and info.st_mode & stat.S_ISGID else None
+    descriptor = os.open(common, os.O_PATH | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC)
+    try:
+        return os.fstat(descriptor).st_gid if directory_is_shared(descriptor) else None
+    finally:
+        os.close(descriptor)
 
 
 def _app_owned(info: os.stat_result, group: int | None) -> bool:
@@ -134,9 +139,10 @@ def trusted_admin_dir(worktree: Path, common: Path | None = None) -> Path:
     out anywhere else it writes, a caller that knows the repository it made the worktree from passes its git directory
     as ``common``, and the admin directory must then be one of that repository's.
 
-    The app is its uid, and, when ``common`` is a shared git directory (setgid), the group that directory is in too:
-    the run's legs, accounts of that group, make the repository and its worktrees in turn. No one else writes there,
-    so the group owning an entry under it proves the same as the uid does.
+    The app is its uid, and, when ``common`` is a shared git directory (setgid, group-writable, closed to others), the
+    group that directory is in too: the run's legs, accounts of that group, make the repository and its worktrees in
+    turn. No one else writes there, so the group owning an entry under it proves the same as the uid does. A setgid
+    directory others can write is not shared: there an account outside the group makes entries of the group.
 
     Raises:
         OSError: ``.git`` is not a gitfile, or the directory it names is not an
@@ -272,7 +278,7 @@ def app_git(
     writes a driver in between. A repository nested in the tree is the caller's to keep out (see the module docstring).
     ``env`` adds variables of the caller's (an index file, an identity) under the ones that keep this so. A caller that
     holds the repository passes ``admin=trusted_admin_dir(worktree, common)`` to have the admin dir checked against it.
-    In a shared repository (the admin dir's git directory setgid) git runs under the shared child umask, so what it
+    In a shared repository (the admin dir's git directory set up to be shared) git runs under the shared child umask, so what it
     makes -- objects, refs, the worktree's files -- stays the group's to write.
 
     Raises:
