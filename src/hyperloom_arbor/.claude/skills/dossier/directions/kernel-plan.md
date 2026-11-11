@@ -90,9 +90,6 @@ source and label, as everywhere in the dossier.
     FP8, BF16);
   - LDS per CU (check `rocminfo` on the node);
   - CU count, and the XGMI bandwidth when a collective borders the region.
-
-  Port a reference-platform idea only after naming the gap that could block
-  it.
 - **The language:** Triton, FlyDSL, CK or HIP, and why. A kernel that belongs
   in AITER (a tuned row, an operator AITER already owns) is written to land
   there, and the plan says so. The `kernels` skill says which tool fits which

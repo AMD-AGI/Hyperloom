@@ -20,7 +20,7 @@ learned along the way.
 
 ```bash
 python3 -m pip install pyyaml claude-agent-sdk
-python3 -m arbor run --config configs/agentx-glm52-mi355x.json --dry-run
+python3 -m arbor run --config configs/serving-template.json --dry-run
 ```
 
 The dry run drives the real loop on synthetic numbers in a temporary repository: no GPU, container

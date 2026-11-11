@@ -267,7 +267,7 @@ def _report_agent_tmp_health() -> None:
 
     WHAT THE ERRNO MEANS HERE, because it is the diagnosis. Where Slurm runs
     ``JobContainerType=job_container/tmpfs``, /tmp is a bind mount from a
-    PER-JOB path (``/slurm/<jobid>/.<jobid>/_tmp``, as findmnt on a job
+    PER-JOB path (``<BasePath>/<jobid>/.<jobid>/_tmp``, as findmnt on a job
     shows). If that bind SOURCE is removed while the mount
     stays, every lookup under /tmp returns ENOENT rather than ENOSPC or
     EACCES. So: ENOENT here points at the mount, a full filesystem would say
@@ -520,7 +520,7 @@ async def _run_claude_once(prompt: str, cwd: str, allowed_tools: list[str],
                 # The CLI reports a failed API call as an assistant message of its own, from
                 # the model "<synthetic>" ("API Error: Couldn't connect through your proxy"):
                 # not the agent's words, so neither its output nor a sign that the turn started.
-                # Counted as text, it made every gateway outage look like a turn that did work,
+                # Counted as text, it would make every gateway outage look like a turn that did work,
                 # which is never retried.
                 synthetic = getattr(message, "model", None) == SYNTHETIC_MODEL
                 for block in message.content:
@@ -1471,7 +1471,7 @@ def _as_claim_class(name: str | None) -> str:
 
     Returning the alias rather than the new name is deliberate and permanent:
     `claim_class` is what lands in session.json, and
-    check_review_consistency.py reads those strings out of archived
+    a review-consistency check reads those strings out of archived
     campaigns. The rename is a change of what the agent WRITES, not of what the
     campaign RECORDS.
     """
@@ -2992,11 +2992,11 @@ def run_iteration(
     # The aggregation is done by a fixed python block, NOT by the sub-agent:
     # asking a model to average numbers it just read is an avoidable way to get
     # a wrong bar. Individual runs are preserved under `runs` so the spread is
-    # auditable and L0-AUDIT can widen or tighten the bands from real data.
+    # auditable and an audit can widen or tighten the bands from real data.
     # Read from the pack's measurement block FIRST, because that block is
     # reloaded every iteration (driver.py) while `config` is loaded once. So a
     # campaign can start at 2 replays while the noise floor is still being
-    # established and drop to 1 once L0-AUDIT has characterised the spread --
+    # established and drop to 1 once an audit has characterised the spread --
     # without restarting the job, which would cost the allocation. The config
     # key stays supported as the static fallback.
     _meas = campaign.pack.objective.get("measurement", {})

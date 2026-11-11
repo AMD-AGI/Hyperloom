@@ -73,8 +73,7 @@ The procedure is [kernels.md](kernels.md).
 
 - **Answers:** which kernels serve each op at the served shapes, why those
   were chosen, and whether better ones exist: unused in the libraries already
-  shipped, documented in AITER and KernelForge, or picked by the reference
-  platform.
+  shipped, or documented in AITER and KernelForge.
 - **Contains:** one row per op family: the kernels that ran (symbol,
   provider, calls and share per step, shapes, step kinds); the dispatch
   decision (call site, flag, tuned-table hit or fallback); alternatives in the

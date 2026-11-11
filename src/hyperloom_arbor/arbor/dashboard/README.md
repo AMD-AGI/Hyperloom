@@ -87,7 +87,7 @@ Changed:
   snapshot carries node data.
 - No hard-coded model, operating point or target. The KPIs show the
   campaign's own metric and unit; the progress bar shows only when the
-  campaign config states a target (the earlier page fell back to a fixed number).
+  campaign config states a target.
 - The events panel shows only when the collector is given `--events`;
   `event_recorder.sh`, which watched one campaign's paths, is not ported.
 - Global mode, the knowledge panel, and the share's index are new.

@@ -1,10 +1,10 @@
 """Accuracy-changing knobs are gated on accuracy.
 
-A throughput gate cannot see accuracy: an FP8 MoE combine was merged on its
-throughput and then failed GSM8K far below its golden score, and a decode-only
-MTP setting cut GSM8K sharply with no error and no slowdown. The packs'
-per-iteration correctness check is a floor for a broken model (for one pack,
-400 questions, pass at 0.92), not a comparison with the baseline.
+A throughput gate cannot see accuracy: an FP8 MoE combine can pass on its
+throughput and fail GSM8K far below its golden score, and a decode-only
+MTP setting can cut GSM8K sharply with no error and no slowdown. The packs'
+per-iteration correctness check is a floor for a broken model (a subset of the
+questions and a pass score), not a comparison with the baseline.
 
 So, when the pack turns ``policy.accuracy_gate`` on and the iteration's change
 moves a knob that changes numerics (knobs.json) or the agent writes
@@ -16,8 +16,7 @@ it) minus ``policy.accuracy_tolerance``. Without a golden score it compares
 with the pack's ``GSM8K_MIN`` and says so.
 
 Under a host there is no baseline record, and the host's own eval of the root
-reads on another scale (MB's eval and a pack's read one small model at clearly
-different scores), so it cannot stand in. So in component mode, before iteration 1,
+reads on another scale, so it cannot stand in. So in component mode, before iteration 1,
 the driver serves the root as initialized and runs the full set once
 (``measure_root``), into ``<session>/baseline_accuracy.json``; the gate then
 holds a numerics change to that score less the tolerance, on the same eval.
@@ -25,8 +24,7 @@ When the root could not be measured, ``GSM8K_MIN`` stays the floor.
 
 In component mode every KEEP is held to the full set, not only a numerics one:
 a host imports what Arbor keeps, and a change the agent did not call numerics
-can still break the served model (under MB, a kept decode GEMM, its switch
-turned on, scored nothing on GSM8K). The gate decides first without the
+can still break the served model. The gate decides first without the
 eval, and only an arm it would keep pays for the set. Turning on a switch that
 an earlier KEEP landed off (arbor/measure/switches.py) calls for it in every
 mode.

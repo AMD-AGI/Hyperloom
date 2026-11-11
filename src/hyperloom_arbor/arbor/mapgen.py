@@ -69,18 +69,18 @@ _FAMILY_RES = tuple((name, re.compile(_boundaries(pat), re.IGNORECASE)) for name
 # Each family's direction, framed as the roadmap frames that gap: (id, title).
 TEMPLATE: dict[str, tuple[str, str]] = {
     "attention": ("m-attn", "Attention: the kernel each served shape dispatches, prefill and decode, "
-                            "and the metadata it builds per step (v2 roadmap B: selection by shape)"),
+                            "and the metadata it builds per step (selection by shape)"),
     "linear attention": ("m-linattn", "Linear attention: the recurrent and conv kernels on the decode "
                                       "path, and their state layout"),
     "moe": ("m-moe", "MoE: expert GEMMs in the checkpoint's own datatype, routing and top-k, and TP "
-                     "against EP for the served batches (v2 roadmap A2, D2)"),
+                     "against EP for the served batches"),
     "gemm": ("m-gemm", "Dense GEMMs: tuned kernels for the served shapes, the scale layout, and no "
-                       "silent fallback (v2 roadmap A1)"),
+                       "silent fallback"),
     "small": ("m-fuse", "Small kernels: norm, RoPE, activation and elementwise folded into their "
-                        "producers, fewer launches at small batch (v2 roadmap A3, X3)"),
+                        "producers, fewer launches at small batch"),
     "sampling": ("m-sampling", "Sampling and logits: the path after the forward pass"),
     "collectives": ("m-comm", "Collectives: all-reduce, all-gather and reduce-scatter on the custom "
-                              "paths, overlapped or fused with their neighbours (v2 roadmap D)"),
+                              "paths, overlapped or fused with their neighbours"),
 }
 SMALL = ("norm", "rope", "activation", "elementwise")
 

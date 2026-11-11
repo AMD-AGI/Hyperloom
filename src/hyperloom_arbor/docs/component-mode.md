@@ -9,10 +9,10 @@ to empty, it rolls from node to node, ends rounds with its own same-node A/B and
 
 **Component mode** is Arbor run by a host that owns all of that: Hyperloom's multibranch (MB)
 today, which runs Arbor as an "autonomous branch" on a lease of GPUs, under its own deadline, and
-gates and merges what Arbor keeps. MB already ran Arbor this way, with a sandbox built around
-what standalone Arbor did wrong inside it: stopping MB's servers with a pattern `pkill`, running
-on cards outside its lease, iterating long after the session died, hanging for hours, loading
-kernel tables from paths outside the workspace.
+gates and merges what Arbor keeps. MB already runs Arbor this way, in a sandbox against what
+standalone Arbor would do wrong inside it: stop MB's servers with a pattern `pkill`, run on cards
+outside its lease, iterate past the session's end, hang, and load kernel tables from paths outside
+the workspace.
 Component mode makes Arbor do the right thing itself.
 
 Which side runs each step of an MB session, and the files between the two:
@@ -123,7 +123,7 @@ manifest without either side writing host-specific code.
 1. **The switch and the safety:** the mode and its validation; the deadline, the iteration
    estimate, phase timeouts, SIGTERM; stopping by PID; no masks, no memory kills, no docker on
    `@host`; the heartbeat; target, round ends and rolling refused or ignored. Tested on `@host`
-   fakes; then once on a node with a lease of 4 cards and something else on the other 4.
+   fakes; then on a GPU node with a lease of 4 cards and something else on the other 4.
 2. **The KEEP snapshot,** the notes and the bench command in the prompts, the tables check.
 3. **The short-prompt check** (the README section came with slice 2).
 
@@ -156,7 +156,7 @@ build settled what the design left open:
   in hand before it, by the iteration gate and the phase timeouts alike. `component.json` keeps
   it across resumes; without that file the clock falls back to session.json's `start_epoch`,
   never to now. A session recorded in one mode and resumed in the other exits 2.
-- **Exit 2 is refusal only** (MB had resumed an exit 2 like a crash). Two more ways of exiting 2 were added, so that no config a
+- **Exit 2 is refusal only.** Two more ways of exiting 2 were added, so that no config a
   restart cannot fix ever crashes: a config `load_campaign` cannot load (unparsable JSON, no
   `pack`, a missing or broken `pack.yaml`), and in component mode a campaign that
   `validate_campaign` rejects, or one without a `session_root`. Read errors that may pass (an

@@ -87,8 +87,8 @@ dossier's index under "Open asks" and go on.
 
 - **Parts in order.** Each states its question, what it contains, where the
   evidence comes from, and when it is done. Parts 1 to 5 and 10 need no GPU
-  if the evidence exists; 6 and 7 need a node; 8 needs 3 and 7; 9 needs the
-  user; 11 is written last, from the others only.
+  if the evidence exists; 6 and 7 need a node; 8 needs 3 and 7; 11 is
+  written last, from the others only.
 - **The profile is taken while the dossier is written.** Where the target
   hardware is available (a campaign holds a node), part 7 is a TraceLens profile
   (the `profiler` skill) on the served tree, taken right after parts 1 to 6
@@ -276,8 +276,7 @@ The procedure is [kernels.md](kernels.md).
 
 - **Answers:** which kernels serve each op at the served shapes, why those
   were chosen, and whether better ones exist: unused in the libraries already
-  shipped, documented in AITER and KernelForge, or picked by the reference
-  platform.
+  shipped, or documented in AITER and KernelForge.
 - **Contains:** one row per op family: the kernels that ran (symbol,
   provider, calls and share per step, shapes, step kinds); the dispatch
   decision (call site, flag, tuned-table hit or fallback); alternatives in the

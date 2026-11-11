@@ -36,8 +36,8 @@ for the artifact, cache-capacity coverage, and throughput/latency action tables.
 ## The dossier
 
 A dossier is written once per model, workload and GPU type, then refreshed part by part. It has
-twelve parts: model, system, code reading, target, workload, baseline, profile, kernels, reference
-platform, earlier optimizations, directions and fast bench. Part 11, the directions, ends with the
+eleven parts: model, system, code reading, target, workload, baseline, profile, kernels, earlier
+optimizations, directions and fast bench. Part 11, the directions, ends with the
 map a campaign works.
 
 ### The dossier family: the same dossier, written by five skills
@@ -100,8 +100,7 @@ What the agent does:
 What you do:
 
 - **Before the launch:** if a dossier exists, put it where the lookup will find it. Commit it to
-  `docs/dossier/` on the branch the campaign runs from; on the clusters, that is the branch the
-  mirror carries.
+  `docs/dossier/` on the branch the campaign runs from.
 - **While it runs:**
   - The map is in `<session>/directions.json`; the dashboard shows it as a checklist.
   - A stop that waits for a person writes `MAP_STOP.md`.

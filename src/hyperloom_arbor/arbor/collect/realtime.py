@@ -94,8 +94,8 @@ def warm_chain(session: Path, lessons: list, end):
     # node's bar. A rebased bar's warm reading is its record's replays after the
     # container's first, which reads low (the launcher's bar measurement), unless
     # the record discarded a warm-up itself. Each lesson gets the factor in force after it;
-    # returned: the factor now, and the best on this node, warm. Read this way, one
-    # campaign's chain agreed with its round-end A/B, where the driver's chain read high.
+    # returned: the factor now, and the best on this node, warm. The chained reading
+    # can overstate the gain.
     scale = 1.0
     for x in lessons:
         d, m = x.get("decision"), x.get("metric")

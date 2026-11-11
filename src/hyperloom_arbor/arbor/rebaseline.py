@@ -2,9 +2,9 @@
 
 A rolling chunk measures the current tree on its own node and makes that the bar
 (the launcher's rebase script), so the gate and the agent compare against the node
-they run on. Read in sequence, though, the bar then jumps with the node: one
-campaign's bar dropped on a slower node after several KEEPs, which reads as a
-regression. So the numbers are put on one scale instead of jumping with the node.
+they run on. Read in sequence, though, the bar then jumps with the node: on a slower
+node it drops, even after several KEEPs, which reads as a regression. So the numbers
+are put on one scale instead of jumping with the node.
 
 Each REBASELINE lesson carries its step: the bar before it (the previous node's)
 over this node's reading of the same tree. The steps chain into a factor that puts
@@ -62,7 +62,7 @@ def applies(campaign, session=None) -> tuple[bool, str]:
     return True, f"{len(dirs)} direction(s) from the dossier"
 
 
-# rebase_bar.py's lesson text, for lessons written before they carried the fields:
+# The rebaseline step's lesson text, for lessons written before they carried the fields:
 # "bar rebased on <node> (job <id>): <old> -> <new> (<rel>), <secondary> <old> -> <new>; ..."
 _PRIMARY = re.compile(r"bar rebased on \S+ \(job [^)]*\): (\S+) -> ([-+.\deE]+)")
 _SECONDARY = re.compile(r"-> [-+.\deE]+(?: \([^)]*\))?, \S+ (\S+) -> ([-+.\deE]+|None);")

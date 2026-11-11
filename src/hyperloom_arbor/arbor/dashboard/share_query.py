@@ -12,7 +12,7 @@ that Git for Windows' ssh passes (``arbor/tests/test_dashboard.py`` holds it
 there). Standard library only, Python 3.8 or later.
 
 The answer is always one JSON object on stdout, ``{"error": "..."}`` when the
-query failed: through the gateway, every command exits 0 and its stderr
+query failed: through such a gateway, every command exits 0 and its stderr
 arrives on stdout, so neither can say that it failed.
 
 The layout is the collectors' (``arbor/collect/share.py``):

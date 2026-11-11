@@ -462,9 +462,8 @@ def load(root) -> tuple[dict | None, str | None]:
     """(the map, None); (None, None) when there is none; (None, why) when it cannot be read.
 
     Only the harness writes the map (``save``, which keeps its own copy beside it). A file
-    that differs from that copy was edited by hand: a campaign's agent wrote its own map
-    into it after its DIRECTIONS list was rejected, then worked from it while the harness
-    waited for the list, and the fresh start ran out. The copy is
+    that differs from that copy was edited by hand: an agent whose DIRECTIONS list was rejected
+    can write its own map into it, then work from it while the harness waits for the list. The copy is
     put back, and the map says so (``hand_edit``) until the next map is accepted.
     """
     p = map_path(root)
@@ -1236,7 +1235,7 @@ def render(doc: dict, state=None, campaign=None) -> str:
     phase = doc.get("phase")
     k = doc.get("map_round", 0)
     # While the map is being written, a rejected list stays shown until a map is accepted:
-    # an agent that saw its rejection once worked from a map the harness never took.
+    # otherwise an agent can work from a map the harness never took.
     last = doc.get("last_events")
     writing = phase in ("bootstrap", "unmapped", "updating", "fresh")
     rejected = [e for e in (doc.get("events") or []) if not e.get("ok") and (
