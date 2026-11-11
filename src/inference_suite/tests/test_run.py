@@ -419,6 +419,8 @@ def test_kv_samples_cover_the_ready_server_and_carry_their_phase(rig):
     assert launch.client is not None and launch.client.argv[launch.client.argv.index("--base-url") + 1] == base_url
     kv = json.loads(result.layout.kv_metrics.read_text())
     assert kv["url"] == base_url + "/metrics" and kv["available"] is True and not kv["aborted"]
+    assert (kv["phase_source"], kv["sample_source"]) == ("phase_marks", "watchdog_scrape")
+    assert not {"phase_timeline", "scope"} & set(kv)
     phases = {row["phase"] for row in kv["samples"]}
     assert {Phase.WARMUP.value, Phase.MEASURED.value, Phase.FINISHED.value, Phase.EVAL.value} <= phases
     assert all(row["capacity_tokens"] == 4096 for row in kv["samples"])

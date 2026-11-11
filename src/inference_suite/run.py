@@ -87,7 +87,7 @@ from inference_suite.runtime.server import Server, ServerLaunch, ServerLifecycle
 from inference_suite.runtime.watch import POLL_SEC, Cancel, RoundGate, Stop, wait_child
 from inference_suite.telemetry.kv_poll import KvMetricsPoller
 from inference_suite.telemetry.kv_record import PHASES as KV_PHASES
-from inference_suite.telemetry.kv_record import KvMetricsRecorder, KvRound
+from inference_suite.telemetry.kv_record import KvMetricsRecorder
 
 #: The eval process's request, beside the definition it was planned from.
 EVAL_REQUEST_FILE = "request.json"
@@ -108,8 +108,6 @@ _GPU_PHASES: Mapping[Phase, GpuPhase] = {
     Phase.EVAL_END: GpuPhase.FINISHED,
     Phase.TEARDOWN: GpuPhase.TEARDOWN,
 }
-#: The ``config_envs`` key :class:`KvMetricsPoller` derives its ``/metrics`` URL from.
-_KV_BASE_URL_KEY = "BENCHMARK_BASE_URL"
 _COUNTED_LOADS = (WorkloadKind.FIXED.value, WorkloadKind.AGENTX.value, WorkloadKind.MLPERF.value)
 _UTF8 = "utf-8"
 
@@ -278,8 +276,7 @@ class _KvSampler:
     """
 
     def __init__(self, base_url: str, layout: RunLayout) -> None:
-        poller = KvMetricsPoller(config_envs={_KV_BASE_URL_KEY: base_url})
-        self._recorder = KvMetricsRecorder(poller=poller, kv_round=KvRound(output_path=str(layout.kv_metrics)))
+        self._recorder = KvMetricsRecorder(poller=KvMetricsPoller(f"{base_url}/metrics"), output_path=layout.kv_metrics)
         self._lock = threading.Lock()
         self._done = threading.Event()
         self._thread: threading.Thread | None = None
