@@ -2604,3 +2604,24 @@ def test_render_conc_sweep_curve_propagates_an_unexpected_failure(tmp_path: Path
     monkeypatch.setattr(conc_sweep_plot, "_render", _fail)
     with pytest.raises(TypeError, match="malformed point"):
         render_conc_sweep_curve({}, tmp_path / "out.png", ConcCurveOptions(tp=1))
+
+
+def test_a_scriptable_workload_declines_the_sweep_before_it_starts() -> None:
+    """One forward pass of the operator's script: every rung would measure the same thing."""
+    from hyperloom.orchestrator.actions.executors.conc_sweep import _declined_as_non_serving
+
+    state = _make_state()
+    state.framework = "custom"
+    declined = _declined_as_non_serving(state)
+    assert declined is not None
+    assert declined["skip_reason"] == "non_serving_workload"
+    assert declined["was_skipped"] is True
+    assert declined["status"] == "succeeded", "a skip is not an executor failure"
+
+
+def test_a_serving_workload_still_starts_its_sweep() -> None:
+    from hyperloom.orchestrator.actions.executors.conc_sweep import _declined_as_non_serving
+
+    state = _make_state()
+    state.framework = "vllm"
+    assert _declined_as_non_serving(state) is None

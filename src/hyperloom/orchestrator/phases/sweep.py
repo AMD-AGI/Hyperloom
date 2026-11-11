@@ -12,6 +12,7 @@ from ..state.task_registry import TERMINAL_STATES, Task, TaskSpec
 from ..state.orchestration_memory import CYCLE_DIRECTIVE_REQUEST, build_cycle_memory
 from ..collaborator import CoordinatorCollaborator
 from . import machine_state as _phase_state
+from hyperloom.inference_optimizer.framework_registry import is_scriptable
 
 if TYPE_CHECKING:
     from .machine import Transition
@@ -90,6 +91,8 @@ class SweepPhase(CoordinatorCollaborator):
             await self._coord.phase_kernel_stack.drain_pending_keep_integrates()
         # Validate the stack for positive NEEDS_REVIEW kernels.
         await self._coord.phase_kernel_stack.maybe_validate_positive_needs_review_stack()
+        if self._skip_conc_sweep_for_non_serving_workload(from_phase):
+            return
         if not state.conc_sweep_enabled:
             log.info(
                 "SWEEP entry (from=%s): conc_sweep disabled; recording terminal skip.",
@@ -137,6 +140,24 @@ class SweepPhase(CoordinatorCollaborator):
             # Verbatim: None records "the workload picks", which is not the same statement as an empty ladder.
             auto_conc_sweep_concs=task.params.get("concs"),
         )
+
+    def _skip_conc_sweep_for_non_serving_workload(self, from_phase: str) -> bool:
+        """Record a terminal skip for a workload with no request concurrency; True when skipped."""
+        framework = self.shared_state.framework
+        if not is_scriptable(framework):
+            return False
+        # One forward pass of the operator's own script: every rung would measure the same thing.
+        log.info(
+            "SWEEP entry (from=%s): %s is a non-serving workload; recording terminal skip.",
+            from_phase or "<unknown>",
+            framework,
+        )
+        self._record_terminal_conc_sweep(
+            "skipped",
+            "non_serving_workload",
+            auto_conc_sweep_skipped="non_serving_workload",
+        )
+        return True
 
     def _skip_conc_sweep_without_new_gain(self, from_phase: str) -> bool:
         """Record a terminal skip when no validated gain landed since the last ``conc_sweep``; True when skipped."""
