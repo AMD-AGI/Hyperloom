@@ -78,7 +78,6 @@ patch candidate will take `ref.fa` and `reads.fq` with it:
 # layout: $WORK/minimap2 (the clone), $WORK/data (ref.fa + reads.fq), $WORK/adapter (these files)
 export WORK=~/minimap2-run
 
-export HYPERLOOM_BENCHMARK_BACKEND=bypass
 export HYPERLOOM_BYPASS_SCRIPTS_DIR="$WORK/adapter"
 export MINIMAP2_BIN="$WORK/minimap2/build/bin/minimap2"
 export MINIMAP2_REF="$WORK/data/ref.fa"

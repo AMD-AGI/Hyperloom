@@ -150,7 +150,7 @@ def test_classify_root_cause_type_death_outranks_the_harness_class():
     """A crash after the last request is a crash, not the harness refusing the measurement."""
     assert (
         classify_root_cause_type(
-            "magpie_nonzero_invalid_measurement", "Memory access fault by GPU node-2 on address 0x7f1c00000000"
+            "round_nonzero_invalid_measurement", "Memory access fault by GPU node-2 on address 0x7f1c00000000"
         )
         == "worker_crash"
     )
@@ -159,7 +159,7 @@ def test_classify_root_cause_type_death_outranks_the_harness_class():
 def test_classify_root_cause_type_harness_class():
     """A class the attribution table calls harness-side is reported as such."""
     assert (
-        classify_root_cause_type("magpie_nonzero_invalid_measurement", "benchmark exited 3 after the last request")
+        classify_root_cause_type("round_nonzero_invalid_measurement", "benchmark exited 3 after the last request")
         == "benchmark_harness"
     )
 

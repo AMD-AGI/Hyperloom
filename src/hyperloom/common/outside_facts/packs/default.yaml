@@ -24,7 +24,7 @@
 # reads a name another entry holds. A fact with no check is reported unverifiable by the image check.
 # Every entry names its project, says why the fact exists and carries examples. A pack that fails its own examples, or
 # lacks an entry the code reads, is refused when it is loaded; nothing falls back to a default.
-version: "19"
+version: "23"
 facts:
   aiter_merged_view:
     kind: names
@@ -326,8 +326,9 @@ facts:
     project: InferenceX
     reason: >-
       The names of the workload, the request and the evaluation in benchmark.envs, as InferenceX's benchmark scripts read
-      them; a renamed variable is silently ignored by the script and the point measures another workload. EVAL_ONLY is
-      the switch benchmark_lib.sh's run_benchmark_serving returns on before the bench, so a round only evaluates.
+      them and, for the evaluation, as Hyperloom's round translation reads them; a renamed variable is silently ignored
+      and the point measures another workload. EVAL_ONLY is the switch benchmark_lib.sh's run_benchmark_serving returns
+      on before the bench, so a round only evaluates.
     names:
       isl: ISL
       osl: OSL
@@ -340,9 +341,9 @@ facts:
       max_model_len: MAX_MODEL_LEN
       tp: TP
       ep: EP
-      magpie_eval_tasks: MAGPIE_EVAL_TASKS
-      magpie_eval_limit: MAGPIE_EVAL_LIMIT
-      magpie_eval_tokenized_requests: MAGPIE_EVAL_TOKENIZED_REQUESTS
+      eval_tasks: HYPERLOOM_EVAL_TASKS
+      eval_limit: HYPERLOOM_EVAL_LIMIT
+      eval_tokenized_requests: HYPERLOOM_EVAL_TOKENIZED_REQUESTS
     examples:
       - "hyperloom.measure.surface: SURFACE_ENV_KEYS, POINT_ENV_KEYS and REQUEST_ENV_KEYS group these names by who may set them"
       - "hyperloom.common.env_safety: BLOCKED_EXTERNAL_ENV_NAMES refuses these names in an env export from an untrusted source"
@@ -357,6 +358,40 @@ facts:
     value: "0"
     examples:
       - "hyperloom/inference_optimizer/assets/configs/profile_sglang.yaml, profile_vllm.yaml and profile_atom.yaml: the profile launch's env block"
+
+  torch_symbolize_mode:
+    kind: env_default
+    project: PyTorch (the C++ stack symbolizer of torch/csrc/profiler/unwind)
+    reason: >-
+      A CUDA-graph profile of SGLang (--enable-profile-cuda-graph) records the allocator's history with C++ stacks and
+      dumps it after the capture (torch.cuda.memory._dump_snapshot), which names every C++ frame. By default PyTorch
+      names them by running addr2line and reads the text after the last colon of each "file:line" answer with std::stoi,
+      which throws when that text is neither a number nor "?", and the server dies with "RuntimeError: stoi" after the
+      capture traces are written (seen on a ROCm PyTorch serving DeepSeek-V4-Flash). In dladdr mode PyTorch names a frame
+      from the loader's symbol table and parses no addr2line output; it accepts dladdr, addr2line and fast here.
+    env: TORCH_SYMBOLIZE_MODE
+    value: dladdr
+    examples:
+      - "hyperloom/inference_optimizer/assets/configs/profile_sglang.yaml: the profile launch's env block"
+
+  torch_memory_snapshot_frame:
+    kind: log_regex
+    project: PyTorch (torch.cuda.memory) as SGLang's CUDA-graph profile calls it
+    reason: >-
+      SGLang's CUDA-graph profile dumps the allocator's memory snapshot after the capture
+      (torch.cuda.memory._dump_snapshot, which calls torch._C._cuda_memorySnapshot). A traceback through these frames is
+      the profiler's own bookkeeping failing after the capture ran, not the served model.
+    pattern: >-
+      \bin (?:_dump_snapshot|_post_process_after_profile)\s*$|\b_cuda_memorySnapshot\(
+    examples:
+      match:
+        - '  File "/opt/venv/lib/python3.10/site-packages/torch/cuda/memory.py", line 1059, in _dump_snapshot'
+        - "    return _C._cuda_memorySnapshot(None)"
+        - '  File "/sgl-workspace/sglang/python/sglang/srt/model_executor/runner/decode_cuda_graph_runner.py", line 872, in _post_process_after_profile'
+      no_match:
+        - "Memory Usage is saved to cuda_graph_runner_memory_usage.pickle"
+        - '  File "/sgl-workspace/sglang/python/sglang/srt/model_executor/runner/decode_cuda_graph_runner.py", line 1120, in capture'
+        - '  File "/opt/venv/lib/python3.10/site-packages/torch/cuda/memory.py", line 900, in memory_snapshot_summary'
 
   hip_undefined_symbol:
     kind: log_regex
@@ -651,8 +686,9 @@ facts:
       summary counts the requests of the profiling phase only. The metrics of a failed line are at most error_isl, the
       input token count (InferenceX asks for the server's token counts, so a request that got no reply has none), and
       the client as released exports no output token count for it, so it cannot tell a reply it found no content in as
-      empty from short. The runner's patch of the client (aiperf_source) adds error_osl, the output and reasoning token
-      count the server reported, to the line of a reply that arrived and held nothing the client could use.
+      empty from short. inference_suite's staging patches the client it stages (inference_suite.aiperf_patch, which owns
+      the name error_osl) to add the output and reasoning token count the server reported to the line of a reply that
+      arrived and held nothing the client could use.
     names:
       dir: aiperf_artifacts
       file: profile_export.jsonl
@@ -662,16 +698,14 @@ facts:
       error_class: type
       phase: benchmark_phase
       profiling_phase: profiling
-      error_output_length: error_osl
     examples:
       - "hyperloom.measure.agentx_requests: the export of a measured round is found at <round>/aiperf_artifacts/profile_export.jsonl or one directory below the round, and a request is counted when its phase is the profiling one or absent"
       - "hyperloom.measure.agentx_requests: a request is failed when its line has an error, and the output length of a no-content failure is read from the metrics of its line only when the line holds one"
-      - "hyperloom.measure.runner.aiperf_patch: the metric the patched client adds to the line of a no-content failure is named by this role, so the patch and the reader state it once"
       - 'export line, a request the server answered, as the aiperf docs print it (docs/tutorials/working-with-profile-exports.md at the pinned commit; reconstructed, no real export was at hand): {"metadata": {"session_num": 45, "x_request_id": "7609a2e7-aa53-4ab1-98f4-f35ecafefd25", "x_correlation_id": "32ee4f33-cfca-4cfc-988f-79b45408b909", "conversation_id": "77aa5b0e-b305-423f-88d5-c00da1892599", "turn_index": 0, "request_start_ns": 1759813207532900363, "request_ack_ns": 1759813207650730976, "request_end_ns": 1759813207838764604, "worker_id": "worker_359d423a", "record_processor_id": "record_processor_1fa47cd7", "benchmark_phase": "profiling", "was_cancelled": false}, "metrics": {"input_sequence_length": {"value": 550, "unit": "tokens"}, "time_to_first_token": {"value": 255.88656799999998, "unit": "ms"}, "request_latency": {"value": 297.52522799999997, "unit": "ms"}, "output_token_count": {"value": 9, "unit": "tokens"}, "output_sequence_length": {"value": 9, "unit": "tokens"}}}'
       - 'export line, a request the server refused with an HTTP status (aiohttp_client.py: code is the status, type its reason phrase), produced by the pinned client''s own parser, metric processor and export writer on a constructed reply as InferenceX runs it (server token counts, no AgentX run): {"metadata":{"session_num":5,"x_request_id":"http_error","conversation_id":"c","turn_index":0,"request_start_ns":1000000000,"request_end_ns":1100000000,"worker_id":"worker-1","record_processor_id":"processor-1","benchmark_phase":"profiling","was_cancelled":false,"context_overflow_skip":false,"agent_depth":0},"metrics":{},"error":{"code":503,"type":"Service Unavailable","message":"overloaded"}}'
       - 'export line, a request that never reached a server (the exception''s class name is the type and cause_chain lists the chain), produced by the pinned client''s own parser, metric processor and export writer on a constructed reply as InferenceX runs it (server token counts, no AgentX run): {"metadata":{"session_num":6,"x_request_id":"unreachable","conversation_id":"c","turn_index":0,"request_start_ns":1000000000,"request_end_ns":1100000000,"worker_id":"worker-1","record_processor_id":"processor-1","benchmark_phase":"profiling","was_cancelled":false,"context_overflow_skip":false,"agent_depth":0},"metrics":{},"error":{"type":"ClientConnectorError","message":"ClientConnectorError(ConnectionKey(host=''localhost'', port=30000, is_ssl=False, ssl=True, proxy=None, proxy_auth=None, proxy_headers_hash=None), ConnectionRefusedError(111, ''Connect call failed''))","cause_chain":["ClientConnectorError","ConnectionRefusedError"]}}'
       - 'export line of the client as released, a request the server answered with 2xx and nothing the client could use (error.type names InvalidInferenceResultError; the metrics hold the input token count the server reported and no output token count), produced by the pinned client''s own parser, metric processor and export writer on a constructed reply as InferenceX runs it (server token counts, no AgentX run): {"metadata":{"session_num":1,"x_request_id":"no_content_usage_zero","conversation_id":"c","turn_index":0,"request_start_ns":1000000000,"request_end_ns":1100000000,"worker_id":"worker-1","record_processor_id":"processor-1","benchmark_phase":"profiling","was_cancelled":false,"context_overflow_skip":false,"agent_depth":0},"metrics":{"error_isl":{"value":550,"unit":"tokens"}},"error":{"type":"InvalidInferenceResultError","message":"InvalidInferenceResultError(''Invalid inference result: No responses with actual content were received from the server (only usage/metadata, null/empty data, or [DONE] markers)'')","cause_chain":["InvalidInferenceResultError"]}}'
-      - 'export line of the client the runner patched, the same reply: error_osl is the output token count the server reported (here 0: it produced nothing), produced by the pinned client''s own parser, metric processor and export writer on a constructed reply as InferenceX runs it (server token counts, no AgentX run): {"metadata":{"session_num":1,"x_request_id":"no_content_usage_zero","conversation_id":"c","turn_index":0,"request_start_ns":1000000000,"request_end_ns":1100000000,"worker_id":"worker-1","record_processor_id":"processor-1","benchmark_phase":"profiling","was_cancelled":false,"context_overflow_skip":false,"agent_depth":0},"metrics":{"error_osl":{"value":0,"unit":"tokens"},"error_isl":{"value":550,"unit":"tokens"}},"error":{"type":"InvalidInferenceResultError","message":"InvalidInferenceResultError(''Invalid inference result: No responses with actual content were received from the server (only usage/metadata, null/empty data, or [DONE] markers)'')","cause_chain":["InvalidInferenceResultError"]}}'
+      - 'export line of the client staging patched, the same reply: error_osl is the output token count the server reported (here 0: it produced nothing), produced by the pinned client''s own parser, metric processor and export writer on a constructed reply as InferenceX runs it (server token counts, no AgentX run): {"metadata":{"session_num":1,"x_request_id":"no_content_usage_zero","conversation_id":"c","turn_index":0,"request_start_ns":1000000000,"request_end_ns":1100000000,"worker_id":"worker-1","record_processor_id":"processor-1","benchmark_phase":"profiling","was_cancelled":false,"context_overflow_skip":false,"agent_depth":0},"metrics":{"error_osl":{"value":0,"unit":"tokens"},"error_isl":{"value":550,"unit":"tokens"}},"error":{"type":"InvalidInferenceResultError","message":"InvalidInferenceResultError(''Invalid inference result: No responses with actual content were received from the server (only usage/metadata, null/empty data, or [DONE] markers)'')","cause_chain":["InvalidInferenceResultError"]}}'
 
   aiperf_invalid_reply:
     kind: names
@@ -687,53 +721,6 @@ facts:
     examples:
       - "hyperloom.measure.agentx_requests: a failed request whose error class is this one is a no-content failure, every other failed request a transport failure"
       - "hyperloom_multibranch.toolbox.hosted_executor: the classes a result carries for each measured round of an AgentX test are read from the export with this"
-
-  aiperf_source:
-    kind: names
-    project: aiperf (the replay client of an AgentX round, SemiAnalysisAI fork pinned by InferenceX)
-    reason: >-
-      InferenceX carries the client as the git submodule named utils/aiperf (at utils/aiperf at the commit Hyperloom pins,
-      at inferencex-e2e/utils/aiperf at later commits Magpie pins; the patch finds it by name), and its benchmark
-      library installs it editable into an environment made for each job, so the source of that submodule is what a round
-      runs. The released client keeps only the input token count of a reply it converts to an error record
-      (inference_result_parser.py, the branch of a parsed record that is invalid), and computes only the metrics flagged
-      error-only for an error record (output_sequence_length_metric.py holds the output length metric, which is not one).
-    names:
-      submodule: utils/aiperf
-      parser_file: src/aiperf/records/inference_result_parser.py
-      output_length_file: src/aiperf/metrics/types/output_sequence_length_metric.py
-    examples:
-      - "hyperloom.measure.runner.aiperf_patch: the runner edits these two files of the submodule before an AgentX round, so the client keeps the output token count of a no-content failure and exports it as an error-only metric"
-    image_check:
-      - check: source_contains
-        path: [{env: INFERENCEX_PATH}, .gitmodules]
-        text: {ref: aiperf_source.submodule}
-        examples:
-          pass:
-            - env: {INFERENCEX_PATH: /checkout}
-              source: |-
-                [submodule "utils/aiperf"]
-                    path = utils/aiperf
-                    url = https://github.com/SemiAnalysisAI/aiperf.git
-          fail:
-            - env: {INFERENCEX_PATH: /checkout}
-              source: |-
-                [submodule "inferencex-e2e/utils/srt-slurm"]
-                    path = inferencex-e2e/utils/srt-slurm
-                    url = https://github.com/NVIDIA/srt-slurm.git
-
-  magpie_agentx_client_log:
-    kind: names
-    project: Magpie (native AgentX runtime at the commit Hyperloom pins)
-    reason: >-
-      A native AgentX round boots its server and then runs the InferenceX replay client with its output written to this
-      file in the round's workspace, beside server.log (agentx_runtime.py, _execute_local). The client's own failures (a
-      Hugging Face download refused, say) are only in this file: Magpie records the client's exit code as the round's
-      error and keeps the client's words out of benchmark_stderr.log.
-    names:
-      file: agentx_client.log
-    examples:
-      - "hyperloom.measure.local: a failed round's client log is read from this file beside its server.log, for the infrastructure causes the client states"
 
   hub_rate_limited:
     kind: log_regex

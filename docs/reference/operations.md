@@ -73,8 +73,8 @@ Commands below use `$SESSION_DIR` for that concrete session directory.
 
 The largest contributors are:
 
-* `$SESSION_DIR/runs/<action>/<task_id>/` Magpie outputs (per-benchmark trace
-  + result.json).
+* `$SESSION_DIR/runs/<action>/<task_id>/` InferenceSuite run directories
+  (server and client logs, `report.json`, profile traces).
 * `$SESSION_DIR/kernel-agent/runs/<session_id>/` kernel optimization and
   TraceLens artifacts (especially GEAK reports, prompts, traces, and patches).
 * `$SESSION_DIR/kernel-agent/runs/<session_id>/tracelens/` per-session traces

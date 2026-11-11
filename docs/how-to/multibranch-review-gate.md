@@ -95,3 +95,5 @@ Arbor has a review gate of its own, at the start of a new campaign. Under MB the
 - **The review off:** MB writes `"review_gate": false`.
 - **An Arbor without the gate** (before Arbor `1fa2069`) gets neither key: MB reads whether the checkout's
   `arbor/component.py` lists `review` among its block keys.
+
+Which side does what in a session: {doc}`Arbor in multi-branch </conceptual/multibranch-arbor>`.

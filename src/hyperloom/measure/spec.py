@@ -1,12 +1,17 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""The measurement instruction sheet (``MeasurementSpec`` v1): what the application asks a runner to measure.
+"""The measurement instruction sheet (``MeasurementSpec`` v2): what the application asks a runner to measure.
 
 The application writes the sheet to ``/in/spec.json`` of the authoritative sandbox. Its identity has two forms: the
 sha256 of the exact bytes written (:meth:`MeasurementSpec.sha256`, recorded in the result manifest) and a short
 *fingerprint* of the measurement content that is stable across sessions (:func:`fingerprint`), so the same measurement
 deduplicates inside a campaign and compares across campaigns.
+
+A v2 sheet carries the session's frozen base launch whole (``procedure.base_launch``) and the application's
+inference_suite staging as its normalised manifest (``tools.inference_suite.normalised``) and that manifest's sha256
+(``tools.inference_suite.staging``); a hosted runner refuses a test whose own published staging differs from it and
+its result manifest names its own normalised sha256. A sheet of any other schema is refused.
 
 The result manifest lives in :mod:`hyperloom.measure.manifest`.
 """
@@ -16,13 +21,17 @@ from __future__ import annotations
 import hashlib
 import re
 from collections.abc import Iterator, Mapping
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from typing import Any
 
+from hyperloom.common.benchmark_config import BenchmarkPoint, BenchmarkPointError
+from hyperloom.common.launch_credentials import credentials_in_the_clear
 from hyperloom.contracts.measurement import Purpose
+from hyperloom.measure.checkpoint import CheckpointPlan
 from hyperloom.measure.long_context.plan import LongContextPlan
 from hyperloom.measure.short_prompts.plan import ShortPromptPlan
 from hyperloom.measure.surface import POINT_ENV_KEYS, REQUEST_ENV_KEYS
+from inference_suite.contracts import BASE_LAUNCH_SCHEMA, BaseLaunch, NormalisedError, NormalisedManifest
 from hyperloom.measure.docs import (
     PREFIXED_SHA256_RE,
     SHA256_RE,
@@ -35,7 +44,14 @@ from hyperloom.measure.docs import (
     string_map,
 )
 
-SPEC_SCHEMA = "hyperloom.measurement-spec/v1"
+SPEC_SCHEMA = "hyperloom.measurement-spec/v2"
+#: The most bytes the carried base launch may take as canonical JSON; a resolved base is a few KiB, and the sheet is
+#: written whole into a sandbox and journalled with every attempt.
+MAX_BASE_LAUNCH_BYTES = 64 * 1024
+_BASE_LAUNCH = "base_launch"
+_INFERENCEX = "inferencex"
+_INFERENCE_SUITE = "inference_suite"
+_NORMALISED = "normalised"
 _KIND = "kind"
 _UPSERT = "upsert"
 _RUNTIME = "runtime"
@@ -44,10 +60,8 @@ _MANIFEST_SHA256 = "manifest_sha256"
 _ACCURACY = "accuracy"
 _SHORT_PROMPTS = "short_prompts"
 _LONG_CONTEXT = "long_context"
+_CHECKPOINT = "checkpoint"
 _RESULT_DIR = "result_dir"
-#: A key the sheet of a test that ran a greedy decode pass carried. The pass is gone and the key means nothing, but the
-#: journal keeps those sheets and a result is verified again from them, so the key is read and dropped.
-_REMOVED_DECODE_PASS = "decode_pass"
 KINDS = ("test", "profile", _ACCURACY, "repro")
 PURPOSES = tuple(purpose.value for purpose in Purpose)
 DEFAULT_MAX_TOTAL_BYTES = 4 * 1024**3
@@ -219,21 +233,40 @@ class Attachment:
 
 @dataclass(frozen=True)
 class ToolCommits:
-    magpie: str
+    """The tools a sheet names: the InferenceX commit, and the normalised manifest of the application's inference_suite
+    staging (``staging``)."""
+
     inferencex: str
+    staging: NormalisedManifest | None = None
 
     @classmethod
     def parse(cls, value: Any, path: str) -> "ToolCommits":
         r = Reader(value, path)
-        tools = cls(
-            magpie=r.section("magpie", _commit_of),
-            inferencex=r.section("inferencex", _commit_of),
-        )
+        tools = cls(inferencex=r.section(_INFERENCEX, _commit_of), staging=r.section(_INFERENCE_SUITE, _staging_of))
         r.done()
         return tools
 
     def to_document(self) -> dict[str, Any]:
-        return {"magpie": {"commit": self.magpie}, "inferencex": {"commit": self.inferencex}}
+        staging = (
+            None
+            if self.staging is None
+            else {"staging": self.staging.sha256(), _NORMALISED: self.staging.to_document()}
+        )
+        return {_INFERENCE_SUITE: staging, _INFERENCEX: {"commit": self.inferencex}}
+
+
+def _staging_of(value: Any, path: str) -> NormalisedManifest:
+    """The normalised manifest a sheet carries, refused when it is not the one its ``staging`` sha256 names."""
+    r = Reader(value, path)
+    sha256 = r.text("staging", pattern=SHA256_RE) or ""
+    try:
+        staging = NormalisedManifest.from_document(r.raw(_NORMALISED))
+    except NormalisedError as exc:
+        raise DocumentError(f"{r.at(_NORMALISED)}: {exc}") from None
+    r.done()
+    if staging.sha256() != sha256:
+        raise DocumentError(f"{r.at('staging')}: {sha256} is not the sha256 of the normalised manifest it carries")
+    return staging
 
 
 def _commit_of(value: Any, path: str) -> str:
@@ -414,18 +447,45 @@ def _long_context(value: Any, path: str) -> LongContextPlan | None:
     return None if value is None else LongContextPlan.parse(value, path)
 
 
+def _checkpoint(value: Any, path: str) -> CheckpointPlan | None:
+    """The sheet's AgentX checkpoint, absent from a sheet whose measured round is not judged."""
+    return None if value is None else CheckpointPlan.parse(value, path)
+
+
+def _base_launch(value: Any, path: str) -> BaseLaunch:
+    """The frozen base a v2 sheet carries, its digest recomputed from its content and no credential in the clear."""
+    if value is None:
+        raise DocumentError(
+            f"{path}: a {SPEC_SCHEMA} sheet carries the session's frozen {BASE_LAUNCH_SCHEMA} base, and this one has none"
+        )
+    size = len(canonical_json(value).encode())
+    if size > MAX_BASE_LAUNCH_BYTES:
+        raise DocumentError(f"{path}: base_launch too large ({size} bytes > {MAX_BASE_LAUNCH_BYTES})")
+    try:
+        base = BaseLaunch.from_document(value)
+    except ValueError as exc:
+        raise DocumentError(f"{path}: {exc}") from None
+    found = credentials_in_the_clear(base)
+    if found:
+        raise DocumentError(f"{path}: the base holds an unredacted credential in {', '.join(found)}")
+    return base
+
+
 @dataclass(frozen=True)
 class Procedure:
+    """How the test runs, and the session's frozen base launch it runs on (``base_launch``)."""
+
     prep: str
-    benchmark_backend: str
     warmup_rounds: int
     measure_rounds: int
     accuracy: bool
     timeout_sec: float
     silence_timeout_sec: float
     deadline_unix: float
+    base_launch: BaseLaunch | None = None
     short_prompts: ShortPromptPlan | None = None
     long_context: LongContextPlan | None = None
+    checkpoint: CheckpointPlan | None = None
 
     @classmethod
     def parse(cls, value: Any, path: str) -> "Procedure":
@@ -435,34 +495,37 @@ class Procedure:
         rounds.done()
         procedure = cls(
             prep=r.choice("prep", ("grid", "conc_sweep")) or "",
-            benchmark_backend=r.choice("benchmark_backend", ("magpie", "bypass")) or "",
             warmup_rounds=warmup,
             measure_rounds=measure,
             accuracy=r.boolean(_ACCURACY),
             timeout_sec=r.number("timeout_sec", minimum=1) or 1.0,
             silence_timeout_sec=r.number("silence_timeout_sec", minimum=1) or 1.0,
             deadline_unix=r.number("deadline_unix", minimum=0) or 0.0,
+            base_launch=_base_launch(r.optional(_BASE_LAUNCH), r.at(_BASE_LAUNCH)),
             short_prompts=_short_prompts(r.optional(_SHORT_PROMPTS), r.at(_SHORT_PROMPTS)),
             long_context=_long_context(r.optional(_LONG_CONTEXT), r.at(_LONG_CONTEXT)),
+            checkpoint=_checkpoint(r.optional(_CHECKPOINT), r.at(_CHECKPOINT)),
         )
-        r.optional(_REMOVED_DECODE_PASS)
         r.done()
         return procedure
 
     def to_document(self) -> dict[str, Any]:
         document: dict[str, Any] = {
             "prep": self.prep,
-            "benchmark_backend": self.benchmark_backend,
             "rounds": {"warmup": self.warmup_rounds, "measure": self.measure_rounds},
             _ACCURACY: self.accuracy,
             "timeout_sec": self.timeout_sec,
             "silence_timeout_sec": self.silence_timeout_sec,
             "deadline_unix": self.deadline_unix,
         }
+        if self.base_launch is not None:
+            document[_BASE_LAUNCH] = self.base_launch.to_document()
         if self.short_prompts is not None:
             document[_SHORT_PROMPTS] = self.short_prompts.to_document()
         if self.long_context is not None:
             document[_LONG_CONTEXT] = self.long_context.to_document()
+        if self.checkpoint is not None:
+            document[_CHECKPOINT] = self.checkpoint.to_document()
         return document
 
 
@@ -499,16 +562,14 @@ def _check_points(points: tuple[Config, ...], prep: str) -> None:
             raise DocumentError("spec.config: the points of one arm differ in more than the concurrency level")
 
 
-def _without_point_values(config: Any) -> Any:
+def _without_point_values(config: Any) -> dict[str, Any]:
     """The configuration with the values the concurrency level decides removed, as the points are compared."""
-    if not isinstance(config, Mapping):
-        return config
-    result = dict(config)
-    benchmark = result.get("benchmark")
-    if isinstance(benchmark, Mapping) and isinstance(benchmark.get("envs"), Mapping):
-        envs = {k: v for k, v in benchmark["envs"].items() if k not in POINT_VALUE_KEYS}
-        result["benchmark"] = {**benchmark, "envs": envs}
-    return result
+    try:
+        envs = BenchmarkPoint.from_document(config, source="spec.config.yaml").envs
+    except BenchmarkPointError as exc:
+        raise DocumentError(str(exc)) from None
+    benchmark = {**config["benchmark"], "envs": {k: v for k, v in envs.items() if k not in POINT_VALUE_KEYS}}
+    return {**config, "benchmark": benchmark}
 
 
 def _model_hashes(value: Any, path: str) -> dict[str, str]:
@@ -555,7 +616,6 @@ class MeasurementSpec:
     model_hashes: Mapping[str, str]
     procedure: Procedure
     outputs: Outputs
-    schema: str = field(default=SPEC_SCHEMA)
 
     @classmethod
     def from_document(cls, document: Any) -> "MeasurementSpec":
@@ -594,7 +654,7 @@ class MeasurementSpec:
 
     def to_document(self) -> dict[str, Any]:
         return {
-            "schema": self.schema,
+            "schema": SPEC_SCHEMA,
             "request_id": self.request_id,
             _KIND: self.kind,
             "meta": self.meta.to_document(),
@@ -718,13 +778,18 @@ def canonical_for_fingerprint(spec: MeasurementSpec, *, session_dir: str | None 
     """The sheet with everything that is not measurement content removed or replaced.
 
     Removed: ``request_id``, ``meta``, ``procedure.deadline_unix``, ``config.sha256`` (it hashes paths), the session's
-    blob root and runtime snapshot location. Replaced: path-valued YAML fields and session-directory prefixes become
-    placeholders. Blobs and attachments keep only their hashes.
+    blob root and runtime snapshot location, and the staging's normalised manifest, which its sha256 stands for. Replaced: path-valued YAML fields and session-directory prefixes become
+    placeholders, and the carried base launch its digest, which leaves out where and when it was resolved. Blobs and
+    attachments keep only their hashes.
     """
     document = spec.to_document()
     for key in ("request_id", "meta"):
         del document[key]
     del document["procedure"]["deadline_unix"]
+    if spec.procedure.base_launch is not None:
+        document["procedure"][_BASE_LAUNCH] = spec.procedure.base_launch.digest()
+    if spec.tools.staging is not None:
+        del document["tools"][_INFERENCE_SUITE][_NORMALISED]
     del document["environment"]["blob_root"]
     if document["environment"][_RUNTIME] is not None:
         del document["environment"][_RUNTIME]["snapshot"]
