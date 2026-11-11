@@ -283,6 +283,7 @@ class Session:
         self._map_shares: tuple[RootShares | None] | None = None
         self._dealer: MapDealer | None = None
         self._explore_end = math.inf
+        self._explore_cap: Callable[[float], float] | None = None  # budget.ExploreCap, given by run or resume
         peers = peer_factory(self._peer_setup(desk, services))
         context = SchedulerContext(
             self._layout,
@@ -416,8 +417,9 @@ class Session:
         curator = recorded(services.author_completion, self._blackboard, UsageSource.CURATOR)
         self._curator = CloseAuthoring(curator, services.author_model)
 
-    async def run(self) -> SessionOutcome:
-        """Run every phase and CLOSE; an unhandled error propagates once CLOSE has run.
+    async def run(self, explore_cap: Callable[[float], float] | None = None) -> SessionOutcome:
+        """Run every phase and CLOSE; an unhandled error propagates once CLOSE has run. EXPLORE ends no later than
+        ``explore_cap`` (a :data:`~.budget.ExploreCap`, a hosted run's grant's) says, when it is given.
 
         The scheduler records itself before the first phase, so the directory says the session is running from the
         start and a recovery over it is refused while it is. The image check then compares the rule pack's outside
@@ -429,6 +431,7 @@ class Session:
         """
 
         budget = SessionBudget.from_hours(self._settings.max_hours, self._clock.now())
+        self._explore_cap = explore_cap
         self._processes.record_scheduler()
         image_check = await asyncio.to_thread(run_image_check)
         self._image_check = image_check
@@ -464,16 +467,19 @@ class Session:
         work = self._no_final(ended) if candidates is None else self._final_phases(candidates, ended, restart)
         return await self._run_and_close(work, ending, budget, hard_stop)
 
-    async def resume(self, ended: SessionStopReason, deadline: float) -> SessionOutcome:
+    async def resume(
+        self, ended: SessionStopReason, deadline: float, explore_cap: Callable[[float], float] | None = None
+    ) -> SessionOutcome:
         """Continue the session an earlier run left here, which ended for ``ended`` before FINAL, with EXPLORE, FINAL
         and CLOSE and no PRELUDE (:meth:`Prelude.landed`), up to ``deadline``, which the manifest keeps: the caller
         decides whether the time the session was down is given back
         (:func:`~hyperloom_multibranch.scheduling.resumption.deadline_after_downtime`) or not, so that its budget counts
         from the original start (:func:`~hyperloom_multibranch.scheduling.hosted_run.hosted_resume_deadline`). That run's tests are withdrawn and its
         open branches stopped, the roster and the integration branch open again, and EXPLORE opens new branches on the
-        integration head."""
+        integration head. ``explore_cap`` is :meth:`run`'s."""
 
         budget = self._resumed_budget(ended, deadline)
+        self._explore_cap = explore_cap
         self._processes.record_scheduler()
         self._image_check = await asyncio.to_thread(run_image_check)
         hard_stop = HardStop(budget, self._clock)
@@ -616,8 +622,9 @@ class Session:
             logger.info("the agent map was rejected at its review: %s", exc)
             return SessionOutcome(SessionStopReason.REVIEW_REJECTED, None, None, "")
         budget = self._budget or budget  # a review's pause moved the deadline
-        explore_end = self._explore_end = budget.explore_end(self._clock.now(), prelude.longest_root_test)
-        self._phase("explore", explore_end=explore_end)
+        cap = math.inf if self._explore_cap is None else self._explore_cap(prelude.longest_root_test)
+        explore_end = self._explore_end = budget.explore_end(self._clock.now(), prelude.longest_root_test, cap)
+        self._phase("explore", explore_end=explore_end, **({"explore_cap": cap} if math.isfinite(cap) else {}))
         window = ExploreWindow(
             prelude.root_commit,
             prelude.start_commit,

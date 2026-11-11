@@ -131,7 +131,10 @@ class ToolboxStores:
 class ToolboxTuning:
     """The queue policy, the infrastructure retries (of tests and of native builds) and the waits before a test's
     (``infra_backoff_seconds``, :class:`~.attempts.InfraBackoff`), the claim lifetime, the clock and the sleep; the
-    defaults are the real ones."""
+    defaults are the real ones. ``tests_end_by`` is when every test must have ended, Unix seconds, ``None`` for no such
+    time: a hosted session's grant ends then. A wait before a retry never runs past one typical test before it, as it
+    never runs past one before its branch's exploration ends; the integration branch's tests, FINAL's validation among
+    them, have only this bound."""
 
     policy: QueuePolicy | None = None
     max_infra_retries: int = DEFAULT_MAX_INFRA_RETRIES
@@ -140,6 +143,7 @@ class ToolboxTuning:
     build_retry_seconds: float = BUILD_RETRY_SECONDS
     infra_backoff_seconds: tuple[float, ...] = INFRA_BACKOFF_SECONDS
     sleep: Callable[[float], Awaitable[None]] = asyncio.sleep
+    tests_end_by: float | None = None
 
 
 class RealToolbox:
@@ -186,6 +190,7 @@ class RealToolbox:
             ),
         )
         self._ttl, self._clock = tuning.claim_ttl_seconds, tuning.clock
+        self._tests_end_by = tuning.tests_end_by
         self._tools, self._repo, self._kinds = tools, acceptance.repo, acceptance.supported_kinds
         self._closed = False
         self._tool_jobs: dict[str, list[str]] = {}
@@ -282,11 +287,13 @@ class RealToolbox:
 
     def _latest_retry_start(self, request: TestRequest) -> float | None:
         """When an infrastructure retry of ``request`` must start at the latest: a typical test of its kind before its
-        branch's exploration ends; ``None`` for a branch with no deadline."""
-        deadline = self._queue.policy.branch_deadline.get(request.branch_id, 0.0)
-        if not deadline:
+        branch's exploration ends or every test must have ended (``tests_end_by``), whichever is first; ``None`` when
+        neither is set."""
+        branch_end = self._queue.policy.branch_deadline.get(request.branch_id, 0.0)
+        ends = [end for end in (branch_end, self._tests_end_by) if end]
+        if not ends:
             return None
-        return deadline - median_test_seconds(self._log.entries(), request.kind)
+        return min(ends) - median_test_seconds(self._log.entries(), request.kind)
 
     def _check_build_deadline(self, request: TestRequest, needs: tuple[BuildNeed, ...]) -> None:
         deadline = self._queue.policy.branch_deadline.get(request.branch_id, 0.0)

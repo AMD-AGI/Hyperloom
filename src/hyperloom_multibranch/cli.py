@@ -144,7 +144,7 @@ from hyperloom_multibranch.contracts.toolbox import WorkloadKind
 from hyperloom_multibranch.blackboard.knowledge.reference_leads import INFERENCEX_REFERENCE
 from hyperloom_multibranch.rulegate.agentx import AgentXObjective
 from hyperloom_multibranch.rulegate.critic import LlmCritic, anthropic_critic
-from hyperloom_multibranch.scheduling.budget import MB_DEFAULT_MAX_HOURS
+from hyperloom_multibranch.scheduling.budget import MB_DEFAULT_MAX_HOURS, ExploreCap
 from hyperloom_multibranch.scheduling.clock import Clock
 from hyperloom_multibranch.scheduling.hosted_peers import PinnedToolboxInputs, load_hosted_peers
 from hyperloom_multibranch.scheduling.hosted_run import (
@@ -155,6 +155,7 @@ from hyperloom_multibranch.scheduling.hosted_run import (
     close_before_starting_again,
     earlier_session,
     grant_deadline,
+    grant_explore_cap,
     grant_tests_that_fit,
     hosted_restart_leg,
     hosted_storage,
@@ -924,9 +925,10 @@ def run_session(
     peer_factory: PeerFactory,
     services: SessionServices,
     report_root: Callable[[Path], None] = _print_root,
+    explore_cap: ExploreCap | None = None,
 ) -> int:
     """Create the session directory, hand it to ``report_root`` -- by default printed on one stdout line -- before
-    anything else is built in it, run the session and return its exit code.
+    anything else is built in it, run the session (:meth:`Session.run`, given ``explore_cap``) and return its exit code.
 
     The session and its peers are built on the event loop they run on, which the specialist tools of the MCP service
     hand every toolbox call to. Whatever the session's processes orphan is reparented to this process, so the session
@@ -934,11 +936,15 @@ def run_session(
     """
 
     with adopting_orphans():
-        return asyncio.run(_run_session(settings, peer_factory, services, report_root))
+        return asyncio.run(_run_session(settings, peer_factory, services, report_root, explore_cap))
 
 
 async def _run_session(
-    settings: RunSettings, peer_factory: PeerFactory, services: SessionServices, report_root: Callable[[Path], None]
+    settings: RunSettings,
+    peer_factory: PeerFactory,
+    services: SessionServices,
+    report_root: Callable[[Path], None],
+    explore_cap: ExploreCap | None = None,
 ) -> int:
     clock = Clock()
     layout = create_session(workspace_root(), settings.workload.model_basename, clock)
@@ -946,7 +952,7 @@ async def _run_session(
     logging.getLogger().addHandler(_file_handler(layout.scheduler_log))
     host = SessionHost(layout, ProcessRegistry(layout.pids, clock), clock)
     session = Session(settings, peer_factory, host, services)
-    return (await session.run()).exit_code
+    return (await session.run(explore_cap)).exit_code
 
 
 def final_only(
@@ -961,10 +967,18 @@ def final_only(
     )
 
 
-def resume(persisted: PersistedRun, peer_factory: PeerFactory, services: SessionServices, deadline: float) -> int:
-    """:func:`final_only` running :meth:`Session.resume` up to ``deadline`` instead of :meth:`Session.finish`."""
+def resume(
+    persisted: PersistedRun,
+    peer_factory: PeerFactory,
+    services: SessionServices,
+    deadline: float,
+    explore_cap: ExploreCap | None = None,
+) -> int:
+    """:func:`final_only` running :meth:`Session.resume` up to ``deadline`` and ``explore_cap``, not :meth:`Session.finish`."""
 
-    return _over_session(persisted, peer_factory, services, lambda session, ended: session.resume(ended, deadline))
+    return _over_session(
+        persisted, peer_factory, services, lambda session, ended: session.resume(ended, deadline, explore_cap)
+    )
 
 
 #: What a run over a session directory runs on the session it builds there, given how that session ended.
@@ -1098,22 +1112,25 @@ def _hosted_start(host: HostInfo) -> HostedStart:
     ready = hosted_ready_session(host, settings.workload, local=spec.measurement == MEASUREMENT_LOCAL)
     if persisted is not None:
         finish = partial(final_only, restart=True)
-        run = partial(hosted_restart_leg(persisted, finish, resume), persisted, ready.peer_factory, ready.services)
+        leg = hosted_restart_leg(persisted, finish, resume, grant_explore_cap(host))
+        run = partial(leg, persisted, ready.peer_factory, ready.services)
     elif earlier.left is not None:
-        run = partial(_start_again, earlier.left, settings, ready, host.state_dir)
+        run = partial(_start_again, earlier.left, settings, ready, host)
     else:
-        run = partial(run_session, settings, ready.peer_factory, ready.services, partial(_record_root, host.state_dir))
+        record = partial(_record_root, host.state_dir)
+        run = partial(run_session, settings, ready.peer_factory, ready.services, record, grant_explore_cap(host))
     return HostedStart(run, deadline)
 
 
-def _start_again(left: PersistedRun, settings: RunSettings, ready: ReadySession, state_dir: Path) -> int:
+def _start_again(left: PersistedRun, settings: RunSettings, ready: ReadySession, host: HostInfo) -> int:
     """Close ``left``, which ended before its baseline was recorded, with :func:`final_only`, or leave it when it cannot
     be read (:func:`close_before_starting_again`); then start the spec's session unless a stop during it ended the run."""
 
     ended = close_before_starting_again(partial(final_only, left, ready.peer_factory, ready.services), left)
     if ended is not None:
         return ended
-    return run_session(settings, ready.peer_factory, ready.services, partial(_record_root, state_dir))
+    record = partial(_record_root, host.state_dir)
+    return run_session(settings, ready.peer_factory, ready.services, record, grant_explore_cap(host))
 
 
 def _stop_before_grant_ends(deadline: GrantDeadline) -> None:
@@ -1192,7 +1209,8 @@ def _start(settings: RunSettings, grant: HandedGrant | None) -> int:
     else:
         ready = hosted_ready_session(grant.host, settings.workload)
         _stop_before_grant_ends(grant.deadline)
-    return run_session(settings, ready.peer_factory, ready.services)
+    cap = None if grant is None else grant_explore_cap(grant.host)
+    return run_session(settings, ready.peer_factory, ready.services, explore_cap=cap)
 
 
 def _refuse_options_beside_resume(args: argparse.Namespace) -> None:

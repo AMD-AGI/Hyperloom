@@ -19,6 +19,7 @@ import os
 import stat
 import sys
 import time
+from datetime import datetime
 from functools import partial
 from pathlib import Path
 from typing import Any
@@ -33,6 +34,7 @@ from hyperloom_common.tests.shared_accounts import Accounts, other_accounts
 from hyperloom_multibranch import cli
 from hyperloom_multibranch.blackboard.codec import encode
 from hyperloom_multibranch.scheduling import hosted_run
+from hyperloom_multibranch.scheduling.budget import MB_CLOSE_GRACE_CAP_SECONDS
 from hyperloom_multibranch.scheduling.layout import SessionLayout
 from hyperloom_multibranch.scheduling.settings import RunSettings
 from hyperloom_multibranch.tests.test_cli import (  # noqa: F401 - fixtures of the hosted entry
@@ -41,6 +43,8 @@ from hyperloom_multibranch.tests.test_cli import (  # noqa: F401 - fixtures of t
     IMAGE_VARS,
     ISOLATED,
     LOCAL,
+    EXPLORE_CAPS,
+    GRANT,
     RESUMED_TO,
     Host,
     _ended_before_final,
@@ -116,6 +120,23 @@ def test_a_restart_on_another_node_resumes_the_session_up_to_the_first_starts_de
     assert RESUMED_TO == [deadline], "the budget counts from the original start: no downtime is given back"
     assert _warnings(caplog) == []
     assert len(host.stops) == 1, "the grant stop is armed for the resume as for every start"
+
+
+@pytest.mark.usefixtures("ready_environment", "rescheduled")
+def test_a_restart_resumes_the_session_with_explore_capped_by_the_grant_the_first_start_ran_in(
+    host: Host, agent_cli: list[RunSettings], tmp_path: Path
+) -> None:
+    _session_of(host, tmp_path)
+    created = datetime.fromisoformat(os.environ["HYPERLOOM_RUN_CREATED_AT"]).timestamp()
+
+    assert cli.main(["hosted", "run"]) == 0
+
+    [cap] = EXPLORE_CAPS
+    stop = created + GRANT["max_runtime_sec"] - MB_CLOSE_GRACE_CAP_SECONDS
+    assert cap is not None
+    assert cap(1500.0) == pytest.approx(
+        stop - hosted_run.GRANT_MARGIN_SECONDS - hosted_run.final_reserve_seconds(1500.0), abs=1.0
+    ), "the grant counts from the run's creation, which the restart reads as the first start did"
 
 
 def _changed_image(monkeypatch: pytest.MonkeyPatch) -> str:

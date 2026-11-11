@@ -10,12 +10,15 @@ it started, past the deadline and the hard stop if need be, so its reserve is th
 bound on it. CLOSE keeps nothing before the deadline: the deadline plus the CLOSE grace is the hard stop, and a FINAL
 that ends later leaves CLOSE one CLOSE grace from its end. The constants are re-declared because their owners are
 modules this package must not import; each names its source. A GPU-hour budget keeps FINAL the main flow's share:
-EXPLORE ends once the tests' GPU time plus the card time any lease holds has used the rest of it.
+EXPLORE ends once the tests' GPU time plus the card time any lease holds has used the rest of it. A session that runs
+inside a limit of its own caller, such as a hosted run's grant, may be given a cap (:data:`ExploreCap`): EXPLORE then
+ends no later than the cap says, so that FINAL ends inside that limit too.
 """
 
 from __future__ import annotations
 
 import math
+from collections.abc import Callable
 from dataclasses import dataclass
 
 from hyperloom_multibranch.scheduling.clock import Clock
@@ -32,6 +35,10 @@ MB_CLOSE_GRACE_CAP_SECONDS = 120.0
 MB_CLOSE_GRACE_FRACTION = 0.02
 
 MB_SECONDS_PER_HOUR = 3600.0
+
+#: The latest time, clock seconds, EXPLORE may end at for FINAL to end inside a limit the session's caller has, given
+#: the seconds of the session's longest test (``0`` when it measured none); a hosted run's grant is such a limit.
+ExploreCap = Callable[[float], float]
 
 
 def budget_seconds(max_hours: float) -> float:
@@ -77,12 +84,12 @@ class SessionBudget:
     def remaining(self, now: float) -> float:
         return max(0.0, self.deadline - now)
 
-    def explore_end(self, now: float, final_test_seconds: float) -> float:
+    def explore_end(self, now: float, final_test_seconds: float, cap: float = math.inf) -> float:
         """When EXPLORE ends: ``final_test_seconds`` and one CLOSE grace before the deadline, but no sooner than
-        ``now``."""
+        ``now``; and no later than ``cap`` (an :data:`ExploreCap`'s answer), unless that is sooner than ``now``."""
 
         reserve = final_test_seconds + self.close_grace_seconds
-        return self.deadline - min(reserve, self.remaining(now))
+        return min(self.deadline - min(reserve, self.remaining(now)), max(now, cap))
 
 
 class HardStop:
@@ -136,6 +143,7 @@ __all__ = [
     "MB_EXPLORE_SHARE",
     "MB_FINAL_SHARE",
     "MB_UNLIMITED_HOURS",
+    "ExploreCap",
     "HardStop",
     "SessionBudget",
     "budget_seconds",
