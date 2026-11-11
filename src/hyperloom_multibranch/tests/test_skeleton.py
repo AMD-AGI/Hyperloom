@@ -2030,7 +2030,8 @@ def test_a_final_only_of_another_account_of_the_group_finishes_what_one_account_
         assert (finished["stop_reason"], finished["exit_code"]) == (SessionStopReason.TIME_EXHAUSTED.value, 0)
         root = Path(str(left["root"]))
         layout = SessionLayout(root)
-        assert json.loads(layout.report.read_text())["final"]["chosen"]["commit"] == finished["chosen"] is not None
+        assert finished["chosen"] is not None
+        assert json.loads(layout.report.read_text())["final"]["chosen"]["commit"] == finished["chosen"]
         assert (layout.report.stat().st_uid, layout.decisions.stat().st_uid) == (accounts.second, accounts.first)
         assert [row["kind"] for row in read_jsonl(layout.decisions)].count("final") == 1, (
             "the second account appended FINAL's decision to the log the first one made"

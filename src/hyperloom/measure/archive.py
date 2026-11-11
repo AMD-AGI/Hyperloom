@@ -109,7 +109,10 @@ class DirResultArchive:
                 finally:
                     os.close(parent_fd)
             finally:
-                _remove_incoming(root_fd, incoming, top)
+                try:
+                    _remove_incoming(root_fd, incoming, top)
+                finally:
+                    os.close(top)
         finally:
             os.close(root_fd)
         return os.fspath(final)
@@ -171,10 +174,13 @@ def _open_incoming(root_fd: int, incoming: str) -> int:
     account's own and closed to everyone else: the archive's root may be a directory the group writes, so its name may
     have been taken over since it was made. Everything stored is written through this descriptor."""
     top = os.open(incoming, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC, dir_fd=root_fd)
-    found = os.fstat(top)
-    if found.st_uid != os.geteuid() or found.st_mode & 0o077:
+    try:
+        found = os.fstat(top)
+        if found.st_uid != os.geteuid() or found.st_mode & 0o077:
+            raise ArchiveError("the archive's incoming directory was replaced while the bundle was being stored")
+    except BaseException:
         os.close(top)
-        raise ArchiveError("the archive's incoming directory was replaced while the bundle was being stored")
+        raise
     return top
 
 
@@ -193,14 +199,12 @@ def _fill(top: int, staging_dir: Path, listing: dict[str, str], dir_mode: int | 
 
 
 def _remove_incoming(root_fd: int, incoming: str, top: int) -> None:
-    """Remove what is left of ``incoming`` when it still names the directory open as ``top``, then close ``top``; a
-    name another account took over is left as it is."""
+    """Remove what is left of ``incoming`` when it still names the directory open as ``top``; a name another account
+    took over is left as it is."""
     try:
         here, opened = os.stat(incoming, dir_fd=root_fd, follow_symlinks=False), os.fstat(top)
     except OSError:
         return  # renamed into place, or gone
-    finally:
-        os.close(top)
     if (here.st_dev, here.st_ino) == (opened.st_dev, opened.st_ino):
         shutil.rmtree(os.path.join(f"/proc/self/fd/{root_fd}", incoming), ignore_errors=True)
 
