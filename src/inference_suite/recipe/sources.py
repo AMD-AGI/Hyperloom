@@ -551,7 +551,7 @@ def _cookbook_agentx_requests(
 def _with_inferencex_answers(
     snapshot: SourceSnapshot, query: LaunchQuery, checkout: Checkout, inferencex: InferencexSnapshot, scratch: Path
 ) -> SourceSnapshot:
-    points = served_points(query, inferencex.bundle)
+    points = served_points(query, inferencex.bundle).points
     requests = _cookbook_agentx_requests(query, snapshot, inferencex) if query.workload is Workload.AGENTX else ()
     if not points and not requests:
         return snapshot

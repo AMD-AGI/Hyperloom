@@ -61,6 +61,10 @@ two (`-tp 8`, `--tp 8`).
 A launch script, frozen base or default row that needs more GPUs than `--gpus` is
 refused, naming both counts.
 
+An InferenceX entry of the session's model that its config cannot place (a runner
+on no board label, a missing key) is that entry's miss; entries of other models are
+not read.
+
 A source may hold several launches for one point. The base takes the one with the
 largest TP the GPUs fit, preferring an arm that does not offload KV cache, and
 records the others as alternatives.
@@ -204,7 +208,8 @@ Exit codes: `0` when the round completed (or nothing survived `stop`, a base was
 written, or a staging is in place); `1` when the round did not complete, or a
 process outlived `stop`; `2` when the config, query or pidfile breaks its contract,
 the run directory is not empty, no source holds a base, in which case each
-source's reason is printed to stderr, `--inferencex-commit` is refused, or a staging cannot be built or verified,
+source's reason is printed to stderr, `--inferencex-commit` is refused, a source
+answers in a form resolve cannot read (an HTML page where JSON was asked), or a staging cannot be built or verified,
 printed as `staging_missing: <reason>`.
 
 ## Run directory

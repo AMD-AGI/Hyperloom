@@ -42,7 +42,7 @@ from inference_suite.contracts import (
 from inference_suite.recipe import sources
 from inference_suite.recipe.golden_curve import GoldenLength, GoldenRequest
 from inference_suite.recipe.inferencex import INFERENCEX_REPO, PROJECT, InferencexPoint, Scenario, inferencex_points
-from inference_suite.recipe.model import InferencexSelection, InferencexSnapshot
+from inference_suite.recipe.model import InferencexSelection, InferencexSnapshot, RecipeSourceError
 from inference_suite.recipe.resolve import UnreadSource
 from inference_suite.recipe.user_file import UserFile, parse_user_file
 from inference_suite import cli
@@ -587,6 +587,19 @@ def test_resolve_exits_2_naming_why_a_pinned_commit_is_refused(tmp_path: Path, m
 
     assert cli.main(_resolve_argv(tmp_path, "--inferencex-commit", "8a76a78e41")) == cli.EXIT_REFUSED
     assert "InferenceX 8a76a78e41 lacks infx.srt_slurm.x.verifier" in capsys.readouterr().err
+    assert not (tmp_path / "base_launch.json").exists()
+
+
+@pytest.mark.parametrize("stage", ["fetch_sources", "resolve_base"])
+def test_resolve_exits_2_naming_a_source_that_breaks_its_format(tmp_path: Path, monkeypatch, capsys, stage) -> None:
+    def broken(*args, **kwargs):
+        raise RecipeSourceError("https://huggingface.co/api/models/m answered with no JSON")
+
+    monkeypatch.setattr(cli, "fetch_sources", lambda query, **kwargs: sources.SourceSnapshot(_main_fixture(), 1))
+    monkeypatch.setattr(cli, stage, broken)
+
+    assert cli.main(_resolve_argv(tmp_path)) == cli.EXIT_REFUSED
+    assert "answered with no JSON" in capsys.readouterr().err
     assert not (tmp_path / "base_launch.json").exists()
 
 

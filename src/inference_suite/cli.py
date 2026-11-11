@@ -10,7 +10,7 @@ started and writes its report. ``stop --pid-dir <dir>`` prints what it reaped as
 outlives SIGKILL. ``resolve --query <query.json> --gpus <n> --out <base_launch.json> [--inferencex-commit <sha>]``
 reads the sources once, InferenceX at ``<sha>`` instead of the head of its ``main`` when given, and writes the base
 they give, or exits 2 naming why each source holds none, or why ``<sha>`` is refused: InferenceX has no such commit, or
-it lacks code the resolver runs. ``stage --tool-cache <dir> [--source
+it lacks code the resolver runs, or a source breaks its own format. ``stage --tool-cache <dir> [--source
 <InferenceX checkout>]`` stages the pinned tools (:func:`inference_suite.staging.ensure_staged`) and prints the
 manifest's sha256; it stages nothing into a cache that already verifies, and exits 2 with ``staging_missing`` when it
 cannot stage or the cache is damaged. ``publish --stagings <dir> [--source <InferenceX checkout>]`` publishes the
@@ -35,6 +35,7 @@ from inference_suite.contracts.base_launch import LaunchQuery
 from inference_suite.contracts.config import SuiteConfig
 from inference_suite.contracts.layout import RunDirError
 from inference_suite.contracts.report import FailedStep, RunStatus
+from inference_suite.recipe.model import RecipeSourceError
 from inference_suite.recipe.resolve import Miss, resolve_base
 from inference_suite.recipe.sources import InferencexCommitRefused, fetch_sources
 from inference_suite.recipe.user_file import parse_user_file
@@ -113,9 +114,9 @@ def _resolve(args: argparse.Namespace) -> int:
         return _refused(f"{FailedStep.CONFIG_INVALID.value}: {exc}")
     try:
         snapshot = fetch_sources(query, user_file=user_file, inferencex_commit=args.inferencex_commit)
-    except InferencexCommitRefused as exc:
+        resolved = resolve_base(query, snapshot, gpus=args.gpus)
+    except (InferencexCommitRefused, RecipeSourceError) as exc:
         return _refused(str(exc))
-    resolved = resolve_base(query, snapshot, gpus=args.gpus)
     if isinstance(resolved, Miss):
         for reason in resolved.reasons():
             print(reason, file=sys.stderr)

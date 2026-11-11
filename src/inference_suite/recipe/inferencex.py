@@ -599,28 +599,46 @@ def _arm_point(points: Sequence[InferencexPoint], target: int) -> InferencexPoin
     return min(fitting, key=lambda point: point.conc) if fitting else None
 
 
-def served_points(query: LaunchQuery, bundle: RepoBundle) -> tuple[InferencexPoint, ...]:
+@dataclass(frozen=True)
+class ServedPoints:
+    """The points that serve a query, and why each entry of its model and framework that gives none cannot be read."""
+
+    points: tuple[InferencexPoint, ...]
+    unread: Mapping[str, str]
+
+
+def served_points(query: LaunchQuery, bundle: RepoBundle) -> ServedPoints:
     """The points of ``bundle`` that serve ``query``'s model with its framework on a board interchangeable with its own:
-    every point a snapshot must record InferenceX's selection for to answer ``query``."""
-    return tuple(
-        point
-        for point in inferencex_points(bundle)
-        if (point.model, point.framework) == (query.model_id, query.framework)
-        and boards_interchangeable(query.board, point.board)
-    )
+    every point a snapshot must record InferenceX's selection for to answer ``query``.
+
+    Only the entries of that model and framework are read, so one InferenceX cannot place does not stop the others.
+    """
+    runners = _yaml_mapping(bundle, RUNNERS)
+    points: list[InferencexPoint] = []
+    unread: dict[str, str] = {}
+    for name, entry in _yaml_mapping(bundle, MASTER).items():
+        if (entry.get("model"), entry.get("framework")) != (query.model_id, query.framework):
+            continue
+        try:
+            placed = [point for arm in _arms({name: entry}) for point in _arm_points(arm, runners)]
+        except (RecipeSourceError, KeyError) as error:
+            unread[name] = f"InferenceX's config does not place it: {error}"
+            continue
+        points += [point for point in placed if boards_interchangeable(query.board, point.board)]
+    return ServedPoints(tuple(points), unread)
 
 
 def inferencex_launches(query: LaunchQuery, snapshot: InferencexSnapshot) -> tuple[SourceLaunch, ...] | SourceMiss:
     """The launch each InferenceX arm that fits ``query`` binds at ``max(query.concurrencies)``, one per arm."""
     served = served_points(query, snapshot.bundle)
-    if not served:
+    if not served.points and not served.unread:
         return SourceMiss(
             SourceKind.INFERENCEX, f"no entry serves {query.model_id} with {query.framework} on a {query.board}"
         )
     target = max(query.concurrencies)
     arms: dict[str, list[InferencexPoint]] = {}
-    reasons: dict[str, str] = {}
-    for point in served:
+    reasons = dict(served.unread)
+    for point in served.points:
         misfit = _misfit(point, query)
         if misfit is None:
             arms.setdefault(point.arm_key, []).append(point)
@@ -652,6 +670,7 @@ __all__ = [
     "RUNNERS",
     "InferencexPoint",
     "Scenario",
+    "ServedPoints",
     "agentx_trace",
     "inferencex_launches",
     "inferencex_points",
