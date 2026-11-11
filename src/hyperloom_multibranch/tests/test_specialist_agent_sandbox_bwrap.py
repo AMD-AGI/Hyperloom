@@ -43,7 +43,7 @@ from hyperloom_multibranch.specialist.agent_watch import MARKER, PROCESS_MARKER,
 
 pytestmark = pytest.mark.agent_isolation
 
-SECRET = "app-secret-canary-value"
+CANARY = "app-canary-value"
 PYTHON = shlex.quote(sys.executable)
 #: A server: listens on loopback, says where in the sandbox's /tmp, then serves until it is stopped.
 SERVER = r"""
@@ -105,7 +105,7 @@ seen["test_pid_listed"] = args["test_pid"] in pids
 leaked = []
 for pid in pids:
     try:
-        if args["secret"].encode() in open(f"/proc/{pid}/environ", "rb").read():
+        if args["canary"].encode() in open(f"/proc/{pid}/environ", "rb").read():
             leaked.append(pid)
     except OSError:
         pass
@@ -367,7 +367,7 @@ async def test_a_confined_command_reaches_its_trees_and_frameworks_and_nothing_o
         path.write_text(text)
     monkeypatch.setenv("HOME", str(app_home))
     monkeypatch.setenv("HYPERLOOM_STATE_DIR", str(state))
-    first = _sandbox(area, probe, HF_HOME=str(hf), HYPERLOOM_TEST_APP_VALUE=SECRET, GH_TOKEN=SECRET)
+    first = _sandbox(area, probe, HF_HOME=str(hf), HYPERLOOM_TEST_APP_VALUE=CANARY, GH_TOKEN=CANARY)
     worktree, agent = area / "worktree", area / "agent"
     (worktree / "source.py").write_text("source")
     (worktree / "3rdparty").symlink_to(base / "third-party")
@@ -402,7 +402,7 @@ async def test_a_confined_command_reaches_its_trees_and_frameworks_and_nothing_o
             "vllm": str(frameworks["vllm"] / "patched.py"),
         },
         "test_pid": os.getpid(),
-        "secret": SECRET,
+        "canary": CANARY,
     }
     check = agent / "reach.py"
     check.write_text(REACH)
@@ -434,7 +434,7 @@ async def test_a_confined_command_reaches_its_trees_and_frameworks_and_nothing_o
         "leaked": [],
     }
     assert (agent / "written").read_text() == "from inside" and not (worktree / "written").exists()
-    assert SECRET not in json.dumps(env) and "GH_TOKEN" not in env and "HYPERLOOM_TEST_APP_VALUE" not in env
+    assert CANARY not in json.dumps(env) and "GH_TOKEN" not in env and "HYPERLOOM_TEST_APP_VALUE" not in env
     assert env["ANTHROPIC_BASE_URL"] == "http://127.0.0.1:1/gateway" and env["HF_HOME"] == str(hf)
     assert (env["HOME"], env["CLAUDE_CONFIG_DIR"], env["TMPDIR"]) == (str(home), str(home / ".claude"), "/tmp")
     assert "AITER_JIT_DIR" not in env and "FLYDSL_RUNTIME_CACHE_DIR" not in env, "aiter's own, in its writable tree"
