@@ -179,6 +179,23 @@ def test_an_unreadable_record_is_skipped_with_a_warning(tmp_path: Path, caplog: 
     assert caplog.text.count("skipping unreadable lesson record") == 2
 
 
+def test_a_record_this_account_cannot_open_is_named_with_its_owner_and_mode(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    pool = LessonPool(tmp_path)
+    pool.write(revision("first", START))
+    unopenable = pool.root / "revisions" / "rev-0000000000000000.json"
+    unopenable.mkdir()  # read_text fails with an OSError as a file another account wrote owner-only does
+    unopenable.chmod(0o700)
+
+    with caplog.at_level(logging.WARNING, logger="hyperloom_multibranch.blackboard.rsi.lessons"):
+        found = pool.revisions()
+
+    info = unopenable.stat()
+    assert [item.revision_id for item in found] == [revision_id_for("first")]
+    assert f"{unopenable} (owner {info.st_uid}:{info.st_gid} 0700)" in caplog.text
+
+
 def test_standings_are_written_once_a_session_and_weigh_a_lesson_by_what_bore_it_out(tmp_path: Path) -> None:
     pool = LessonPool(tmp_path)
     contradicted = lesson_id_for("contradicted")

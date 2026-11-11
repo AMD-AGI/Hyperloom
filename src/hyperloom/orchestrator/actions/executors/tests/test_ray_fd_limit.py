@@ -98,7 +98,9 @@ def _install_fake_ray_start(monkeypatch, events):
     """Make ``ray status`` report 'down' initially, 'up' after ray start."""
     started = False
 
-    monkeypatch.setattr(ray_runtime, "ray_status_ok", lambda: started)
+    monkeypatch.setattr(
+        ray_runtime, "ray_probe", lambda timeout=None: ray_runtime.RayProbe.UP if started else ray_runtime.RayProbe.DOWN
+    )
 
     def _fake_run(cmd, **kwargs):
         nonlocal started
@@ -242,8 +244,8 @@ def test_force_restart_local_cluster_runs_fd_preflight_before_ray_start(monkeypa
     assert kinds.index("setrlimit") < kinds.index("ray_start")
 
 
-def test_ray_status_timeout_is_treated_as_down(monkeypatch):
-    """A stale ``ray_current_cluster`` can make ``ray status`` hang on dead GCS."""
+def test_ray_status_timeout_is_unknown(monkeypatch):
+    """A stale ``ray_current_cluster`` can make ``ray status`` hang on dead GCS, and a slow healthy head looks the same."""
     monkeypatch.delenv("HYPERLOOM_RAY_STATUS_TIMEOUT_SEC", raising=False)
     calls: list = []
 
@@ -253,7 +255,7 @@ def test_ray_status_timeout_is_treated_as_down(monkeypatch):
 
     monkeypatch.setattr(ray_runtime.subprocess, "run", _timeout_run)
 
-    assert ray_runtime.ray_status_ok() is False
+    assert ray_runtime.ray_probe() is ray_runtime.RayProbe.UNKNOWN
     assert calls
     assert calls[0][1].get("timeout") == ray_runtime.DEFAULT_RAY_STATUS_TIMEOUT_SEC
 
@@ -339,7 +341,7 @@ def _install_failing_ray_start(monkeypatch, stdout: str, stderr: str):
             self.stdout = stdout
             self.stderr = stderr
 
-    monkeypatch.setattr(ray_runtime, "ray_status_ok", lambda: False)
+    monkeypatch.setattr(ray_runtime, "ray_probe", lambda timeout=None: ray_runtime.RayProbe.DOWN)
 
     def _fake_run(cmd, **kwargs):
         if cmd[:2] == ["ray", "start"]:

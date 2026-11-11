@@ -239,7 +239,6 @@ def test_restart_stops_then_starts_with_the_slot_and_reconnects(monkeypatch):
     _install_ray_module(monkeypatch, fake)
     calls: list[Any] = []
     monkeypatch.setattr(rr, "force_restart_local_cluster", lambda **kw: calls.append(("restart", kw["num_gpus"])))
-    monkeypatch.setattr(rr, "ray_status_ok", lambda: True)
     monkeypatch.setattr(rr, "quiet_ray_init", lambda **kw: calls.append(("init", kw["num_gpus"])))
 
     rr.restart_local_head_with_serving_slot(num_gpus=4)
@@ -373,7 +372,6 @@ def test_restart_logs_a_failed_driver_shutdown_and_still_restarts(monkeypatch, c
     _install_ray_module(monkeypatch, fake)
     calls: list[str] = []
     monkeypatch.setattr(rr, "force_restart_local_cluster", lambda **kw: calls.append("restart"))
-    monkeypatch.setattr(rr, "ray_status_ok", lambda: True)
     monkeypatch.setattr(rr, "quiet_ray_init", lambda **kw: calls.append("init"))
 
     with caplog.at_level("WARNING", logger=rr.__name__):

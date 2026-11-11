@@ -208,9 +208,9 @@ def test_a_claim_generation_reaches_the_disk_before_it_is_linked(
         calls.append("fsync")
         fsync(fd)
 
-    def linked(source: str, target: Path) -> None:
+    def linked(source: str, target: str, **kwargs: object) -> None:
         calls.append("link")
-        link(source, target)
+        link(source, target, **kwargs)  # type: ignore[arg-type]
 
     monkeypatch.setattr(os, "fsync", synced)
     monkeypatch.setattr(os, "link", linked)

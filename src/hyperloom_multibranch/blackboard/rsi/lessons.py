@@ -46,6 +46,7 @@ from hyperloom_multibranch.contracts.blackboard.records import LESSON_ID, is_les
 from hyperloom_multibranch.contracts.blackboard.vocab import LearningKind
 from hyperloom_multibranch.blackboard.codec import decode, encode
 from hyperloom_multibranch.blackboard.learning_search import words
+from hyperloom_common.shared_storage import ownership
 from hyperloom_multibranch.blackboard.local.files import encode_json, publish_once
 from hyperloom_multibranch.blackboard.local.blackboard import LEARNING_MAX_CHARS, LEARNING_MIN_CHARS
 from hyperloom_multibranch.blackboard.rsi.archive import ARCHIVE_ENV, TreeArchive, written_by
@@ -206,7 +207,10 @@ def _document(path: Path, kind: type[Kept], name: str, what: str) -> Kept | None
         if document.get(_FORMAT) != name:
             raise ValueError(f"unsupported format {document.get(_FORMAT)!r}")
         return decode(kind, document.get(_RECORD))
-    except (AttributeError, OSError, KeyError, TypeError, ValueError) as exc:
+    except OSError as exc:
+        log.warning("skipping unreadable %s record %s%s: %s", what, path, ownership(path), exc.strerror or exc)
+        return None
+    except (AttributeError, KeyError, TypeError, ValueError) as exc:
         log.warning("skipping unreadable %s record %s: %s", what, path, exc)
         return None
 
