@@ -5,6 +5,7 @@
 
 from __future__ import annotations
 
+import socket
 from pathlib import Path
 
 import pytest
@@ -44,3 +45,36 @@ def test_a_host_that_leaves_no_port_below_its_ephemeral_range_is_an_error_not_a_
 
     with pytest.raises(OSError, match="no server port in 10000-9999 below the ephemeral range"):
         pick_server_port()
+
+
+def _listening_socket() -> socket.socket:
+    sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    sock.bind(("", 0))
+    sock.listen()
+    return sock
+
+
+def _no_reserved_blocks(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(ports, "DEV_SANDBOX_PORTS", range(0))
+    monkeypatch.setattr(ports, "RAY_WORKER_PORTS", range(0))
+
+
+def test_a_port_already_bound_is_skipped(monkeypatch, tmp_path) -> None:
+    _no_reserved_blocks(monkeypatch)
+    with _listening_socket() as held:
+        taken = held.getsockname()[1]
+        monkeypatch.setattr(ports, "_LOWEST_SERVER_PORT", taken)
+        _ephemeral_from(monkeypatch, tmp_path, taken + 2)
+
+        assert pick_server_port() == taken + 1
+
+
+def test_every_candidate_bound_raises(monkeypatch, tmp_path) -> None:
+    _no_reserved_blocks(monkeypatch)
+    with _listening_socket() as held:
+        taken = held.getsockname()[1]
+        monkeypatch.setattr(ports, "_LOWEST_SERVER_PORT", taken)
+        _ephemeral_from(monkeypatch, tmp_path, taken + 1)
+
+        with pytest.raises(OSError, match="could be bound"):
+            pick_server_port()

@@ -7,22 +7,27 @@ from __future__ import annotations
 
 import copy
 import hashlib
+import importlib
 import json
+import logging
 import os
 from dataclasses import dataclass, field
 from pathlib import Path
 from types import MappingProxyType
-from typing import Any, Mapping, NamedTuple, Sequence
+from typing import Any, Callable, Mapping, NamedTuple, Sequence
 
 import yaml
 
 from hyperloom.common.benchmark_config import is_magpie_agentx
 from hyperloom.common.outside_facts import AITER_LOG_TUNED_CONFIG_ENV
+from hyperloom_common.coerce import to_str_list
 from hyperloom_common.unified_diff import touched_paths
 from hyperloom.inference_optimizer.breakdown.stop_reasons import ARGV_INVALID
 
+log = logging.getLogger(__name__)
 
 _ENCODING = "utf-8"
+_MAGPIE_LAUNCH_MODULE = "Magpie.modes.benchmark.agentx_launch"
 
 
 class ServerArgvInvalidError(ValueError):
@@ -437,17 +442,7 @@ def materialize_variant(
     config = yaml.safe_load(config_path.read_text(encoding=_ENCODING))
     recipe = recipe_base_launch(config_path)
     apply_launch_changes(config["benchmark"], base, recipe=recipe, accepted=True)
-    apply_launch_changes(
-        config["benchmark"],
-        LaunchChanges(
-            variant.extra_server_args,
-            variant.extra_envs,
-            variant.remove_args,
-            variant.unset_envs,
-            variant.args_mode == REPLACE,
-        ),
-        recipe=recipe,
-    )
+    apply_launch_changes(config["benchmark"], _variant_changes(variant), recipe=recipe)
     _refuse_unrunnable_speculative_launch(config["benchmark"], recipe=recipe, model_path=model_path)
     path = materialize_agentx(config, output / "config.yaml", model_path=model_path)
     bind_source_evidence(path, variant.source_patches)
@@ -472,3 +467,83 @@ def materialize_grid_variant(
             base.args_mode == "replace",
         ),
     )
+
+
+def _variant_changes(variant: Any) -> LaunchChanges:
+    return LaunchChanges(
+        variant.extra_server_args,
+        variant.extra_envs,
+        variant.remove_args,
+        variant.unset_envs,
+        variant.args_mode == REPLACE,
+    )
+
+
+def _resolved_agentx(workspace: str) -> dict[str, Any] | None:
+    """The ``agentx`` section Magpie snapshotted in a benchmark workspace, when it carries a resolved server spec."""
+    path = Path(workspace) / "config.yaml"
+    if not workspace or not path.is_file():
+        return None
+    agentx = (yaml.safe_load(path.read_text(encoding=_ENCODING)) or {}).get("agentx")
+    if not isinstance(agentx, dict) or not (agentx.get("resolved") or {}).get("server-launch-spec"):
+        return None
+    return agentx
+
+
+def _launch_refusal(contract: Any, agentx: Mapping[str, Any], layers: list[LaunchChanges]) -> str:
+    """Magpie's reason to refuse ``layers`` composed over the accepted launch; ``""`` when it would start the server."""
+    spec = agentx["resolved"]["server-launch-spec"]
+    benchmark = {"agentx": {"launch_overrides": copy.deepcopy(agentx.get("launch_overrides") or {"version": 1})}}
+    recipe = RecipeLaunch([str(token) for token in spec["argv"]])
+    # The golden-acceptance check is private to Magpie; an install without it checks the rest.
+    validate_golden = getattr(contract, "_validate_golden_launch", None)
+    try:
+        for index, layer in enumerate(layers):
+            apply_launch_changes(benchmark, layer, recipe=recipe, accepted=index == 0)
+        effective = contract.apply_launch_args(spec["argv"], benchmark["agentx"]["launch_overrides"], spec["framework"])
+        if validate_golden is not None:
+            validate_golden(spec, effective)
+    except ValueError as exc:
+        return str(exc)
+    return ""
+
+
+def drop_unlaunchable_variants(
+    params: dict[str, Any], workspace: str, parse_variants: Callable[[list[Any]], list[Any]]
+) -> list[dict[str, str]]:
+    """Drop from ``params['grid']`` the variants Magpie would refuse to launch; each refused name and reason.
+
+    Judged by Magpie's own launch validation against the resolved AgentX recipe of the baseline in ``workspace``;
+    a session without one, or a process that cannot import Magpie, keeps every variant.
+    """
+    grid = params.get("grid")
+    agentx = _resolved_agentx(workspace) if grid else None
+    if agentx is None:
+        return []
+    try:
+        contract = importlib.import_module(_MAGPIE_LAUNCH_MODULE)
+    except ImportError:
+        log.info("%s is not importable; explore variants are validated at launch only", _MAGPIE_LAUNCH_MODULE)
+        return []
+    base = LaunchChanges(
+        str(params.get("base_extra_args") or ""),
+        dict(params.get("base_extra_envs") or {}),
+        to_str_list(params.get("base_remove_args")),
+        to_str_list(params.get("base_unset_envs")),
+        str(params.get("base_args_mode") or "").strip().lower() == REPLACE,
+    )
+    kept: list[Any] = []
+    refused: list[dict[str, str]] = []
+    for raw in grid:
+        try:
+            variants = parse_variants([raw])
+            reason = _launch_refusal(contract, agentx, [base, _variant_changes(variants[0])]) if variants else ""
+        except Exception:  # isolates one variant's check: Magpie validates it again at launch
+            log.warning("Launch contract check failed for explore variant %r", raw, exc_info=True)
+            reason = ""
+        if reason:
+            refused.append({"name": str(raw.get("name") or ""), "reason": reason})
+        else:
+            kept.append(raw)
+    params["grid"] = kept
+    return refused

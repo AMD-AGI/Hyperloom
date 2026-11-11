@@ -260,17 +260,25 @@ def levers_without_readers(
         resolved or could not be read -- which is not evidence that every
         lever has one.
     """
-    if not framework.strip():
-        return []
     # This KEEP's own effective config wins. The standing ``accepted_config``
     # is not replaced with it until the lane re-arms on the result, so a
     # lever this round introduced -- the one the recipe will export -- is
     # not in shared state yet, and scanning only that would check every
     # round's levers except the decisive one.
     envs = {**enablement.accepted_config.get("extra_envs", {}), **(effective_config or {}).get("extra_envs", {})}
+    return framework_envs_without_readers(envs, framework_root, framework=framework)
+
+
+def framework_envs_without_readers(
+    envs: Mapping[str, Any], framework_root: Path | None, *, framework: str
+) -> list[str] | None:
+    """Return the names in ``envs`` under the framework's prefix that no file in ``framework_root`` contains.
+
+    ``None`` when the tree was not resolved or could not be read.
+    """
     prefix = f"{framework.strip().upper()}_"
     names = sorted({str(k).strip() for k in envs if str(k).strip().startswith(prefix)})
-    if not names:
+    if not framework.strip() or not names:
         return []
     if framework_root is None or not framework_root.is_dir():
         # An empty walk over a tree that is not there would report every

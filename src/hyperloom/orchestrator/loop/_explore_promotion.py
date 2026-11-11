@@ -10,11 +10,29 @@ from typing import Any, Mapping, NamedTuple
 
 from hyperloom.inference_optimizer.session.optimization_journal import Verdict
 
+from ..actions.executors._integrate_vocabulary import ATTRIBUTION_CYCLE_BENCH, ATTRIBUTION_CYCLE_BROKEN
+from ..actions.executors.cycle_bench_arm import (
+    BUNDLE_ARM_KEY,
+    BUNDLE_REFUSED,
+    CYCLE_ARMS_PARAM,
+    release_unscreened_levers,
+)
 from ..actions.executors.explore import STACK_REVALIDATE_SOURCE, is_stack_revalidation
+from ..measurement.cycle_bench import STATUS_SCREENED, VERDICT_BROKEN
 from ._promote_outcome import _PromoteOutcome
 from ..state.task_registry import Task
 
 log = logging.getLogger(__name__)
+
+_OBSERVER = "coordinator"
+_OBSERVATION = "observation"
+
+
+def _cycle_attribution(verdict: Mapping[str, Any]) -> tuple[float | None, str]:
+    """The ``(gain, source)`` one arm's verdict in a valid batch records; a broken arm falls back to replay."""
+    if verdict["verdict"] == VERDICT_BROKEN:
+        return None, ATTRIBUTION_CYCLE_BROKEN
+    return float(verdict["gain_pct"]), ATTRIBUTION_CYCLE_BENCH
 
 
 class _ExploreLift(NamedTuple):
@@ -52,6 +70,11 @@ class ExplorePromotionMixin:
         outcome: _PromoteOutcome,
     ) -> None:
         """Promote an explore result: ledger increment, winners, current_best lift, resume revalidation."""
+        if result.get("status") == STATUS_SCREENED:
+            # A cycle batch grades levers for a later bundle; it measured no replay and lifts nothing.
+            self._record_cycle_batch(result)
+            outcome.changed = True
+            return
         # The Coordinator is single-writer for explore_search.accepted,
         # current_best and optimization_stack.
         update = result.get("explore_search_update")
@@ -100,6 +123,44 @@ class ExplorePromotionMixin:
             outcome.verdict = Verdict.RECORDED if is_revalidation_task else Verdict.REVERTED
         outcome.audit_extras = _explore_audit_extras(result)
 
+    def _record_cycle_batch(self, result: Mapping[str, Any]) -> None:
+        """Write a cycle batch's verdict onto every lever its arms switched on, and keep its base2 as the reference."""
+        state = self.shared_state
+        if result["parity_broken"]:
+            self._close_cycle_screen(result["reason"])
+        # The base's capture describes the stack whether or not the batch's timing holds.
+        if capture := result["arms"]["base"]["attribution_trace"]:
+            state.last_attribution_trace = {"stack_len": len(state.optimization_stack), "trace": capture}
+        if not result["valid"]:
+            release_unscreened_levers(state, result)
+            return
+        state.cycle_reference = {
+            "stack_len": len(state.optimization_stack),
+            "cycle_ms": {str(bs): float(ms) for bs, ms in result["arms"]["base2"]["cycle_ms"].items()},
+        }
+        for arm in result[CYCLE_ARMS_PARAM]:
+            verdict = result["verdicts"][arm["name"]]
+            if arm.get(BUNDLE_ARM_KEY):
+                self._record_bundle_screen(arm, verdict["verdict"])
+                continue
+            gain, source = _cycle_attribution(verdict)
+            for switch in arm["envs"]:
+                state.record_framework_lever_attribution(switch, gain_pct=gain, source=source)
+
+    def _record_bundle_screen(self, arm: Mapping[str, Any], verdict: str) -> None:
+        """Keep a bundle arm's verdict on its bundle; its levers keep the verdicts they earned alone."""
+        key = arm[BUNDLE_ARM_KEY]
+        self.shared_state.cycle_bundle_screens = {**self.shared_state.cycle_bundle_screens, key: verdict}
+        if verdict in BUNDLE_REFUSED:
+            log.warning(
+                "cycle bench: lever bundle %s is %s with %s on together; it stays dormant", key, verdict, arm["envs"]
+            )
+
+    def _close_cycle_screen(self, reason: str) -> None:
+        """Stop admitting patches dormant: one already admitted moved the tree with its switches off."""
+        self.shared_state.cycle_screen_refused = reason
+        log.warning("cycle bench: dormant admission closed for the session: %s", reason)
+
     def _record_framework_lever_attributions(self, result: Mapping[str, Any]) -> None:
         for attribution in result.get("framework_lever_attributions") or []:
             if not isinstance(attribution, dict):
@@ -121,8 +182,8 @@ class ExplorePromotionMixin:
             working_generation,
         )
         await self.bus.record_observation(
-            "coordinator",
-            "observation",
+            _OBSERVER,
+            _OBSERVATION,
             {
                 "kind": "stale_stack_revalidation",
                 "task_id": task.task_id,
@@ -147,8 +208,8 @@ class ExplorePromotionMixin:
         if float(measured) >= float(recorded) * floor / 100.0:
             return
         await self.bus.record_observation(
-            "coordinator",
-            "observation",
+            _OBSERVER,
+            _OBSERVATION,
             {
                 "kind": "current_best_drift",
                 "severity": "high",

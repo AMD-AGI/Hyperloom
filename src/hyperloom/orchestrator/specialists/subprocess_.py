@@ -137,11 +137,7 @@ class SpecialistSubprocessConfig:
     """Model id for the selected agent CLI. Empty = that CLI's own default."""
 
     framework_source_roots: tuple[str, ...] = ()
-    """Roots used to seed ``git worktree add`` and as ``--add-dir`` parents.
-
-    The first existing root becomes the worktree base; the rest are exposed
-    to the CLI as additional ``--add-dir`` entries.
-    """
+    """Framework trees the task may read; the first checkout among them seeds ``git worktree add``."""
 
     mcp_config_path: str | None = None
     """Optional path to a JSON file holding ``{"mcpServers": {...}}``."""
@@ -793,12 +789,13 @@ class SpecialistSubprocessDispatcher:
             )
         return backend
 
-    def _writable_dirs(self, workspace: Path, worktree: Path | None) -> list[str]:
-        """Return the dirs an agent CLI may write, in precedence order.
+    def _accessible_dirs(self, workspace: Path, worktree: Path | None) -> list[str]:
+        """Return the dirs an agent CLI may open, in precedence order.
 
         Worktree first (where patches are authored), then the workspace (where
-        ``specialist_done.json`` lands). The framework source trees are absent:
-        ``integrate_patch`` is their only writer. Reads are unaffected.
+        ``specialist_done.json`` lands), then every existing framework source
+        tree: ``--add-dir`` is the CLIs' only filesystem grant and does not
+        separate reads from writes. The patch-safety gate keeps output grounded.
 
         Args:
             workspace (Path): Task workspace.
@@ -811,6 +808,8 @@ class SpecialistSubprocessDispatcher:
         if worktree is not None:
             dirs.append(str(worktree))
         dirs.append(str(workspace))
+        roots = dict.fromkeys(str(root or "").strip() for root in self.config.framework_source_roots)
+        dirs.extend(path for path in roots if path and path not in dirs and Path(path).is_dir())
         return dirs
 
     def _build_codex_launch(
@@ -899,7 +898,7 @@ class SpecialistSubprocessDispatcher:
     ) -> list[str]:
         """Assemble the ``codex exec`` argv for a specialist under ``sandbox_mode``."""
         cfg = self.config
-        writable_dirs = self._writable_dirs(workspace, worktree)
+        accessible_dirs = self._accessible_dirs(workspace, worktree)
         cmd: list[str] = [
             executable,
             "exec",
@@ -913,7 +912,7 @@ class SpecialistSubprocessDispatcher:
             cmd.extend(["--sandbox", sandbox_mode])
         # Primary working root; the reap loop spawns with the same cwd.
         cmd.extend(["-C", str(worktree or workspace)])
-        for extra_dir in writable_dirs[1:]:
+        for extra_dir in accessible_dirs[1:]:
             cmd.extend(["--add-dir", extra_dir])
         # ``features.memories=false`` matches the SDK session: a specialist must
         # not carry state between tasks.
@@ -978,7 +977,7 @@ class SpecialistSubprocessDispatcher:
         cmd.extend(["--agents", build_leaf_agents_json()])
         if cfg.mcp_config_path:
             cmd.extend(["--mcp-config", cfg.mcp_config_path])
-        for d in self._writable_dirs(workspace, worktree):
+        for d in self._accessible_dirs(workspace, worktree):
             cmd.extend(["--add-dir", d])
         return cmd
 

@@ -17,7 +17,7 @@ from hyperloom.inference_optimizer.session.optimization_journal import Verdict
 
 from . import machine_state as _phase_state
 from ..state.task_registry import TaskNotFound, TaskSpec
-from ..state.shared_state import resolve_grading_anchor_tput, inject_stack_base_params
+from ..state.shared_state import resolve_grading_anchor_tput
 
 if TYPE_CHECKING:
     from ..predictor.payload import PhaseBudget
@@ -34,6 +34,7 @@ from .framework_records import (
     ProgressStamp,
     ProposalStep,
     _AuthoredOutcomeMixin,
+    _IntegrateReview,
     _record_review_outcome,
     _record_run,
     _record_step,
@@ -290,6 +291,7 @@ class FrameworkPhase(_AuthoredOutcomeMixin, _CandidateDiscoveryMixin, ProposalBe
         """Record an authored patch's settled outcome, then re-arm or drain the authored lane."""
         if (task.params or {}).get("framework_agent_authoring"):
             self._record_framework_agent_authored_outcome(task=task, result=result, adopted=verdict is Verdict.ADOPTED)
+        self._record_measured_patch_set(task, result, verdict)
         await self._maybe_rearm_authored_lane(result.result, to_mapping(task.params))
         await self._drain_apply_fail_retry_pending()
 
@@ -1746,6 +1748,8 @@ class FrameworkPhase(_AuthoredOutcomeMixin, _CandidateDiscoveryMixin, ProposalBe
                 return
             await self._pump_framework_agent_phase()
             await self._maybe_bench_untested_proposals()
+            await self.enqueue_dormant_lever_bundle()
+            await self.enqueue_cycle_batch()
             await self._coord.phase_internal.maybe_enqueue_explore_research_scout()
             await self._coord.phase_internal.maybe_enqueue_config_plateau_static_recon()
             await self._coord.specialist_dispatch.maybe_force_stalled_domain_specialist()
@@ -1782,7 +1786,6 @@ class FrameworkPhase(_AuthoredOutcomeMixin, _CandidateDiscoveryMixin, ProposalBe
         """Enqueue one explore grid benching ``rows``; returns whether a new task was created."""
         from ..actions.executors._proposal_identity import controls_of
 
-        state = self.shared_state
         grid = [
             {
                 "name": row["name"],
@@ -1806,26 +1809,11 @@ class FrameworkPhase(_AuthoredOutcomeMixin, _CandidateDiscoveryMixin, ProposalBe
         }
         if operator_priority:
             params["operator_priority"] = True
-        if state.baseline_config_path:
-            params["config_path"] = state.baseline_config_path
-        inject_stack_base_params(params, state, anchor=True)
-        benchmark_script = state.accepted_baseline_script()
-        if benchmark_script:
-            params["benchmark_script"] = benchmark_script
-        lanes, ttl = self._coord.dispatcher.registry_lanes_ttl("explore")
-        etask, was_existing = await self.tasks.create_or_return_existing(
-            TaskSpec(
-                kind="explore",
-                params=params,
-                idempotency_key=self._bench_key(rows, operator_priority=operator_priority),
-                requires_lanes=lanes,
-                lease_ttl_sec=ttl,
-                dispatch_class="coordinator",
-            )
+        etask = await self._enqueue_coordinator_explore(
+            params, idempotency_key=self._bench_key(rows, operator_priority=operator_priority)
         )
-        if was_existing:
+        if etask is None:
             return False
-        log.info("auto_bench: enqueued explore task_id=%s (variants=%d)", etask.task_id, len(grid))
         from ..loop.proposals import record_config_proposal
 
         record_config_proposal(
@@ -1840,7 +1828,7 @@ class FrameworkPhase(_AuthoredOutcomeMixin, _CandidateDiscoveryMixin, ProposalBe
         done_payload: dict[str, Any],
         deliverable: dict[str, Any],
         *,
-        observation: dict[str, Any],
+        review: _IntegrateReview,
     ) -> PendingProposal | None:
         """Propose a specialist deliverable to the Critic as a synthetic integrate_patch; idempotent per specialist.
 
@@ -1850,7 +1838,7 @@ class FrameworkPhase(_AuthoredOutcomeMixin, _CandidateDiscoveryMixin, ProposalBe
                 enablement context travel to integrate_patch.
             done_payload: The specialist's ``specialist_done`` payload.
             deliverable: The integrate_patch params that say what to apply.
-            observation: The bus observation recorded with the proposal.
+            review: The bus observation, and the measured rounds the deliverable's patch repeats.
 
         Returns:
             The recorded proposal, or ``None`` when the Critic already ruled on
@@ -1861,26 +1849,30 @@ class FrameworkPhase(_AuthoredOutcomeMixin, _CandidateDiscoveryMixin, ProposalBe
         ):
             return None
         params = _integrate_review_params(sid, spec_params, done_payload, deliverable)
+        payload: dict[str, Any] = {
+            "action_name": "integrate_patch",
+            "provenance": "specialist",
+            "predicted_gain_pct": 0.0,
+            "params": params,
+        }
+        if review.overlaps_measured:
+            payload["overlaps_measured"] = review.overlaps_measured
         pending = await record_proposal(
             self._coord,
             from_agent="coordinator",
             action_name="integrate_patch",
             predicted_gain_pct=0.0,
-            payload={
-                "action_name": "integrate_patch",
-                "provenance": "specialist",
-                "predicted_gain_pct": 0.0,
-                "params": params,
-            },
+            payload=payload,
         )
         await self.bus.record_observation(
             "coordinator",
             "observation",
             {
-                **observation,
+                **review.observation,
                 "specialist_task_id": sid,
                 "proposal_msg_id": pending.proposal_msg_id,
                 "patch_name": params["patch_name"],
+                **({"overlaps_measured": review.overlaps_measured} if review.overlaps_measured else {}),
             },
         )
         try:

@@ -34,4 +34,25 @@ def declared_targets(payload: Mapping[str, Any] | None) -> tuple[str, ...]:
     return _clean_seq(source.get("targets"))
 
 
-__all__ = ["declared_targets"]
+def declared_launch(payload: Mapping[str, Any] | None) -> tuple[dict[str, str], str]:
+    """Return the envs and server args a ``specialist_done`` payload declares its patch runs under.
+
+    Read like :func:`declared_targets`, falling back to the payload's own ``extra_envs`` and ``extra_server_args``.
+    """
+    if not payload:
+        return {}, ""
+    declared = payload.get("deliverable")
+    source: Mapping[str, Any] = declared if isinstance(declared, Mapping) else payload
+    envs = source.get("envs")
+    if not isinstance(envs, Mapping):
+        envs = payload.get("extra_envs")
+    server_args = source.get("server_args")
+    if server_args is None:
+        server_args = payload.get("extra_server_args")
+    return (
+        {str(k): str(v) for k, v in envs.items() if str(k).strip()} if isinstance(envs, Mapping) else {},
+        server_args.strip() if isinstance(server_args, str) else "",
+    )
+
+
+__all__ = ["declared_launch", "declared_targets"]

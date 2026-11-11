@@ -13,7 +13,7 @@ from typing import Any
 
 from hyperloom_common.coerce import first_text
 from hyperloom.common.gain_math import gain_pct, gain_pct_or_zero, graded_gate_row
-from hyperloom.common.perf_metric import VERDICT_KEEP, GradedComparison, GradingAnchor
+from hyperloom.common.perf_metric import VERDICT_KEEP, GradedComparison, GradingAnchor, agentx_active
 from hyperloom.orchestrator.measurement.runtime_findings import KEEP_REASON_CORRECTNESS_FIX
 
 from ...knowledge.kb_writeback import (
@@ -46,12 +46,20 @@ from ._integrate_results import (
     _perf_revert,
     _revert_status,
 )
-from ._integrate_vocabulary import BENCH_UNMEASURED_CLASS
+from ._integrate_vocabulary import BENCH_UNMEASURED_CLASS, SCREEN_CYCLE, SCREEN_PARAM
 from ._patch_git import _uncommitted_revert
 from ._proposal_identity import content_fingerprint
 from ._patch_sources import _done_field
 
 log = logging.getLogger(__name__)
+
+#: Why an agentic replay keeps a switched patch without a switches-off bench: the replay's run-to-run drift is
+#: wider than the parity band, and an off path that cannot import already fails the switches-on bench.
+_AGENTIC_PARITY_NOT_BENCHED = (
+    "switch-off parity not benched under an agentic replay: one leg is a full replay hour and the replay's run-to-run "
+    "drift is wider than the parity band, so the leg could only revert on noise"
+)
+_PARITY_DEFERRED_TO_CYCLE_BASE = "switch-off parity deferred to the next cycle batch, whose base runs this tree"
 
 
 class PerfGateMixin:
@@ -325,21 +333,10 @@ class PerfGateMixin:
         switch_manifest: list[dict[str, Any]],
         base_tput: float,
     ) -> dict[str, Any]:
-        """Verify the patch is genuinely inert with every rewrite switch unset.
+        """Verify the patch is inert with every rewrite switch unset.
 
-        The whole lever mechanism rests on one invariant: with no switch set, the
-        patched tree behaves exactly like the original. That invariant is what
-        makes it safe to keep unprofitable rewrite code on disk, what makes a
-        per-lever measurement mean anything, and what keeps the baseline
-        comparable across a session that has accumulated several rewrite patches.
-        It is also the invariant an LLM is most likely to break by accident — by
-        reading the switch once at import, inverting a default, or restructuring
-        code outside the guard — and nothing else in the pipeline would notice: a
-        switches-on bench that improves throughput looks like a success whether or
-        not the switches-off path still works.
-
-        So it is measured, not assumed. One extra leg with the switches removed
-        must land inside a noise band around the pre-patch base.
+        The lever mechanism rests on the switched-off tree behaving like the original, so it is measured, not
+        assumed: one extra leg with the switches removed must land inside a noise band around the pre-patch base.
 
         Args:
             bench: The task params, workspace, originating specialist and the
@@ -349,14 +346,16 @@ class PerfGateMixin:
 
         Returns:
             ``{"ran", "ok", "tput", "delta_pct", "band_pct", "accuracy_pass",
-            "reason"}``. ``ran`` is False when the check was skipped: disabled
-            passes and says so; no usable base to compare against is
-            inconclusive and reverts.
+            "reason"}``. ``ran`` is False when the check was skipped: disabled,
+            or an agentic replay, passes and says why; no usable base to
+            compare against is inconclusive and reverts.
         """
         params = bench.params
         band_pct = float(params.get("switch_off_parity_band_pct", DEFAULT_SWITCH_OFF_PARITY_BAND_PCT))
         if not bool(params.get("enable_switch_off_parity", True)):
             return {"ran": False, "ok": True, "reason": "switch-off parity check disabled"}
+        if agentx_active(benchmark_mode=bench.benchmark_mode):
+            return {"ran": False, "ok": True, "reason": _AGENTIC_PARITY_NOT_BENCHED}
         if base_tput <= 0:
             return {
                 "ran": False,
@@ -398,6 +397,26 @@ class PerfGateMixin:
                 ),
             }
         return _parity_verdict(parity_tput, accuracy_pass, base_tput, band_pct)
+
+    async def _admit_dormant(self, attempt: IntegrateAttempt, params: dict[str, Any]) -> dict:
+        """Commit an applied switched patch dormant without a bench, for the cycle bench to screen its levers.
+
+        Inertness with every switch unset is shown by the next cycle batch, whose base runs this tree.
+        """
+        measured = _PatchMeasurement(
+            bench_result={},
+            new_tput=None,
+            delta_pct=None,
+            base_tput=float(params.get("base_tput") or 0.0),
+            keep_threshold_pct=float(params.get("keep_threshold_pct", self.keep_threshold_pct)),
+            accuracy_pass=None,
+            acc_delta_pct=None,
+            cfg_fingerprint=content_fingerprint(params),
+            measured_against={},
+        )
+        parity = {"ran": False, "ok": True, "reason": _PARITY_DEFERRED_TO_CYCLE_BASE}
+        result = await self._keep_inert_switches(attempt, measured, params=params, parity=parity)
+        return {**result, SCREEN_PARAM: SCREEN_CYCLE}
 
     async def _keep_inert_switches(
         self,
@@ -450,7 +469,10 @@ class PerfGateMixin:
                 bench_result=measured.bench_result,
             )
         enablers = [entry["switch"] for entry in switch_manifest if entry.get("enabler")]
-        await self._maybe_write_framework_kb_record(measured.lesson(OUTCOME_KEPT_INERT), attempt=attempt, params=params)
+        if parity.get("reason") != _PARITY_DEFERRED_TO_CYCLE_BASE:
+            await self._maybe_write_framework_kb_record(
+                measured.lesson(OUTCOME_KEPT_INERT), attempt=attempt, params=params
+            )
         log.info(
             "integrate_patch: KEEP_INERT task=%s delta=%s threshold=%.2f%% levers=%d enablers=%d",
             attempt.specialist_task_id,

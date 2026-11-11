@@ -74,6 +74,7 @@ from hyperloom.inference_optimizer.grid_server_args import validate_server_args_
 from hyperloom.inference_optimizer import framework_registry
 from hyperloom.inference_optimizer.framework_registry import server_args_env_name
 from ._gpu_pin import pin_rocr_visible_devices
+from ._magpie_patcher import ensure_agentic_prefix_cache
 from ._recipe_script import launcher_overwritten_envs
 from ._server_argv import add_server_arg_unless_pinned, seal_server_argv
 from ._profile_setup import _AtomTracelensCaps, _profiler_bound_holds, _profiler_flag_value, apply_atom_profile_caps
@@ -369,6 +370,8 @@ def apply_agentx_switch(
     envs["RUN_EVAL"] = "false"
     envs["MODEL"] = str(model_path or bench.get("model") or os.environ.get("MODEL_PATH", "")).strip()
     envs["FRAMEWORK"] = framework
+    # The harness's own run-type signal, and the KV offloading it then demands off: AgentX reuses the GPU KV pool.
+    envs.update(IS_AGENTIC="1", KV_OFFLOADING="none")
     for key, value in _agentx_env.items():
         if _is_agentx_client_key(key, _agentx_env):
             envs[key] = value
@@ -426,6 +429,8 @@ def prepare_agentx_runtime(
         return None
     if os.environ.get("PYTEST_CURRENT_TEST"):
         return None
+    # Every AgentX launch path reaches this step, so the generic SGLang scripts drop ``--disable-radix-cache`` here.
+    ensure_agentic_prefix_cache(runtime_env.get("MAGPIE_PATH") or None, inferencex_path or None)
     try:
         from hyperloom.inference_optimizer.agentx.preflight import AgentXPreflightError
         from hyperloom.inference_optimizer.agentx.runtime import maybe_prepare_agentx

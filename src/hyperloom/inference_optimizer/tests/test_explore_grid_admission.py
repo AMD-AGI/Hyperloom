@@ -44,8 +44,8 @@ async def coord(session_dir) -> Coordinator:
     await c.stop()
 
 
-def _admission(c: Coordinator, params: dict[str, Any] | None):
-    return c.dispatcher.admission_denial_for_action("explore", params=params)
+async def _admission(c: Coordinator, params: dict[str, Any] | None):
+    return await c.dispatcher.admission_denial_for_action("explore", params=params)
 
 
 async def _denials(c: Coordinator) -> list[str]:
@@ -66,13 +66,13 @@ def _approved_explore(msg_id: str, **params: Any) -> PendingProposal:
 class TestWhatAdmissionAsksOfAnExplore:
     """The grid question is answered where the proposal is admitted, not where the round reads the config."""
 
-    def test_an_explore_carrying_a_grid_is_admitted(self, coord: Coordinator):
-        assert _admission(coord, {"grid": list(_GRID)}) is None
+    async def test_an_explore_carrying_a_grid_is_admitted(self, coord: Coordinator):
+        assert await _admission(coord, {"grid": list(_GRID)}) is None
 
     @pytest.mark.parametrize("params", [None, {}, {"grid": []}, {"grid": None}, {"grid": {"v1": {}}}])
-    def test_an_explore_with_nothing_to_measure_is_refused(self, coord: Coordinator, params):
+    async def test_an_explore_with_nothing_to_measure_is_refused(self, coord: Coordinator, params):
         """Every shape the round would reach ``_resolve_grid``'s ``empty_grid`` refusal with."""
-        denied = _admission(coord, params)
+        denied = await _admission(coord, params)
 
         assert denied is not None and denied.rule == EXPLORE_GRID_MISSING
 
@@ -81,39 +81,39 @@ class TestWhatAdmissionAsksOfAnExplore:
         [["tp8", "tp4"], [{"extra_server_args": "--tp 8"}], [{"name": ""}]],
         ids=["strings", "nameless_dict", "blank_name"],
     )
-    def test_a_grid_whose_rows_are_not_variants_is_refused(self, coord: Coordinator, rows):
+    async def test_a_grid_whose_rows_are_not_variants_is_refused(self, coord: Coordinator, rows):
         """The round builds variants from named dicts only; rows it would skip are nothing to measure."""
-        denied = _admission(coord, {"grid": rows})
+        denied = await _admission(coord, {"grid": rows})
 
         assert denied is not None and denied.rule == EXPLORE_GRID_MISSING
         assert f"{len(rows)} row(s)" in str(denied)
 
-    def test_the_refusal_says_what_to_send_instead(self, coord: Coordinator):
-        denied = _admission(coord, {})
+    async def test_the_refusal_says_what_to_send_instead(self, coord: Coordinator):
+        denied = await _admission(coord, {})
 
         assert _SEEDLESS_FRAMEWORK in str(denied)
         assert "params.grid" in (denied.hint or "")
 
-    def test_no_other_action_is_judged_on_a_grid(self, coord: Coordinator):
+    async def test_no_other_action_is_judged_on_a_grid(self, coord: Coordinator):
         """The gate is chained for every action, and only explore measures a grid."""
         for action in ("profile", "report", "specialist"):
-            denial = coord.dispatcher.admission_denial_for_action(action, params={})
+            denial = await coord.dispatcher.admission_denial_for_action(action, params={})
             assert denial is None or denial.rule != EXPLORE_GRID_MISSING
 
 
 class TestTheSeedSourcesThatStandInForAGrid:
     """``_resolve_grid`` fills an empty grid from the session; admission asks that same resolution."""
 
-    def test_a_framework_with_a_default_grid_needs_no_grid_of_its_own(self, coord: Coordinator):
+    async def test_a_framework_with_a_default_grid_needs_no_grid_of_its_own(self, coord: Coordinator):
         coord.shared_state.framework = "atom"
 
         assert runnable_grid_variants({}, coord.shared_state)
-        assert _admission(coord, {}) is None
+        assert await _admission(coord, {}) is None
 
-    def test_the_session_s_framework_answers_and_the_one_the_params_name_does_not(self, coord: Coordinator):
+    async def test_the_session_s_framework_answers_and_the_one_the_params_name_does_not(self, coord: Coordinator):
         """The round seeds from the framework the session materializes, so the gate judges that one."""
         assert runnable_grid_variants({"framework": "atom"}, coord.shared_state) == []
-        denied = _admission(coord, {"framework": "atom"})
+        denied = await _admission(coord, {"framework": "atom"})
 
         assert denied is not None and denied.rule == EXPLORE_GRID_MISSING
         assert _SEEDLESS_FRAMEWORK in str(denied)
@@ -121,26 +121,29 @@ class TestTheSeedSourcesThatStandInForAGrid:
     @pytest.mark.parametrize(
         "rows", [["tp8", "tp4"], [{"extra_server_args": "--tp 8"}]], ids=["strings", "nameless_dict"]
     )
-    def test_a_sent_grid_is_never_replaced_by_the_default_one(self, coord: Coordinator, rows):
+    async def test_a_sent_grid_is_never_replaced_by_the_default_one(self, coord: Coordinator, rows):
         """The round falls through to the seed grid only for an empty payload, atom or not."""
         coord.shared_state.framework = "atom"
 
         assert runnable_grid_variants({"grid": rows}, coord.shared_state) == []
-        denied = _admission(coord, {"grid": rows})
+        denied = await _admission(coord, {"grid": rows})
 
         assert denied is not None and denied.rule == EXPLORE_GRID_MISSING
 
-    def test_registered_framework_levers_are_a_grid_waiting_to_be_built(self, coord: Coordinator):
-        """Each unattributed rewrite lever becomes a variant, so the round starts without a sent grid."""
+    async def test_registered_framework_levers_are_a_grid_waiting_to_be_built(self, coord: Coordinator):
+        """A dormant patch's switches become variants one by one, so the round starts without a sent grid."""
         assert coord.shared_state.record_authored_framework_levers(
-            [{"switch": "HL_HOIST", "category": "hoist_loop_invariant"}],
+            [
+                {"switch": "HL_HOIST", "category": "hoist_loop_invariant"},
+                {"switch": "HL_FUSE", "category": "fuse_collectives"},
+            ],
             default_on=False,
         )
 
         assert runnable_grid_variants({}, coord.shared_state)
-        assert _admission(coord, {}) is None
+        assert await _admission(coord, {}) is None
 
-    def test_attributed_levers_are_spent_and_seed_nothing(self, coord: Coordinator):
+    async def test_attributed_levers_are_spent_and_seed_nothing(self, coord: Coordinator):
         coord.shared_state.record_authored_framework_levers(
             [{"switch": "HL_HOIST", "category": "hoist_loop_invariant"}],
             default_on=False,
@@ -149,7 +152,7 @@ class TestTheSeedSourcesThatStandInForAGrid:
         coord.shared_state.authored_framework_levers = rows
 
         assert runnable_grid_variants({}, coord.shared_state) == []
-        assert _admission(coord, {}) is not None
+        assert await _admission(coord, {}) is not None
 
 
 class TestBothWaysAnExploreReachesTheRegistry:

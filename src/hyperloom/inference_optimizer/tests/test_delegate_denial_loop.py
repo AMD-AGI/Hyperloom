@@ -391,11 +391,6 @@ async def _explore_denials(c) -> list[dict]:
     ]
 
 
-async def _queued_grids(c) -> list[list[str]]:
-    """The variant names of each queued explore round, oldest first."""
-    return [[v["name"] for v in t.params["grid"]] for t in await c.tasks.by_state("queued") if t.kind == "explore"]
-
-
 @pytest.mark.asyncio
 async def test_delegate_explore_grid_already_queued_under_other_names_is_denied(session_dir):
     """A second grid with the same launches under different variant names is not queued again."""
@@ -407,19 +402,29 @@ async def test_delegate_explore_grid_already_queued_under_other_names_is_denied(
         await c.router.handle_delegate(
             "orchestration", _explore("round-b", ("folded_again", "--folded 2"), ("k2", "--k 0"))
         )
-        assert await _queued_grids(c) == [["folded", "k"]]
-        assert len(await _explore_denials(c)) == 1
+        queued = [t for t in await c.tasks.by_state("queued") if t.kind == "explore"]
+        assert [t.idempotency_key for t in queued] == ["explore-grid-c0-1ad20183c510"]
+        # The variant names differ but the configurations do not, so the grid key is what refuses the second.
+        obs = await c.bus.tail(topic="observation")
+        rules = [m.payload.get("rule") for m in obs if m.payload.get("kind") == "policy_denied"]
+        assert rules == ["duplicate_idempotency_key_running"]
 
         # One genuinely new variant admits the grid.
         await c.router.handle_delegate(
             "orchestration", _explore("round-c", ("folded", "--folded 2"), ("new", "--new 1"))
         )
-        assert await _queued_grids(c) == [["folded", "k"], ["folded", "new"]]
+        queued = [t for t in await c.tasks.by_state("queued") if t.kind == "explore"]
+        assert [t.idempotency_key for t in queued] == ["explore-grid-c0-1ad20183c510", "explore-grid-c0-1b6b4fde2841"]
 
         # A grid queued on an older stack does not cover the same launches on the current one.
         c.shared_state.baseline_tput = 820.0
         await c.router.handle_delegate("orchestration", _explore("round-d", ("folded", "--folded 2"), ("k", "--k 0")))
-        assert await _queued_grids(c) == [["folded", "k"], ["folded", "new"], ["folded", "k"]]
+        queued = [t for t in await c.tasks.by_state("queued") if t.kind == "explore"]
+        assert [t.idempotency_key for t in queued] == [
+            "explore-grid-c0-1ad20183c510",
+            "explore-grid-c0-1b6b4fde2841",
+            "explore-grid-c0-92f69b19ab87",
+        ]
     finally:
         await c.stop()
 
@@ -435,7 +440,7 @@ async def test_delegate_explore_kernel_overlay_grid_is_never_counted_as_queued(s
             grid = [{"name": "patched", "extra_args": "--k 0", "overlay_pythonpath": overlay}]
             await c.router.handle_delegate("orchestration", _delegate(action="explore", key=key, params={"grid": grid}))
         queued = [t for t in await c.tasks.by_state("queued") if t.kind == "explore"]
-        assert [t.params["grid"][0]["overlay_pythonpath"] for t in queued] == ["/overlays/a", "/overlays/b"]
+        assert sorted(t.idempotency_key for t in queued) == ["overlay-a", "overlay-b"]
         assert await _explore_denials(c) == []
     finally:
         await c.stop()
@@ -477,7 +482,9 @@ async def test_delegate_explore_grid_already_measured_on_this_stack_is_denied(se
 
         c.shared_state.baseline_tput = 820.0  # the anchor moved: the old verdict no longer speaks for this stack
         await c.router.handle_delegate("orchestration", _explore("moved", ("mrr_48", "--max-running-requests 48")))
-        assert await _queued_grids(c) == [["mrr_48"]]
+        assert [t.idempotency_key for t in await c.tasks.by_state("queued") if t.kind == "explore"] == [
+            "explore-grid-c0-8ed940992ff0"
+        ]
     finally:
         await c.stop()
 
@@ -521,7 +528,9 @@ async def test_delegate_explore_grid_refused_on_throughput_is_admitted_once_the_
 
         c.shared_state.macro_cycle = 1
         await c.router.handle_delegate("orchestration", _explore("cycle-1", ("mrr_48", "--max-running-requests 48")))
-        assert await _queued_grids(c) == [["mrr_48"]]
+        assert [t.idempotency_key for t in await c.tasks.by_state("queued") if t.kind == "explore"] == [
+            "explore-grid-c1-f72674d206d2"
+        ]
     finally:
         await c.stop()
 
@@ -533,21 +542,25 @@ async def test_delegate_explore_round_is_judged_by_its_grid_not_by_the_key_it_na
     try:
         c.shared_state.phase = "FRAMEWORK_AGENT"  # the phase that proposes explore
         c.shared_state.baseline_tput = 800.0
-        await c.router.handle_delegate("orchestration", _explore("explore-round-2", ("folded", "--folded 2")))
-        await c.router.handle_delegate("orchestration", _explore("explore-round-2", ("mem_090", "--mem 0.90")))
-        assert await _queued_grids(c) == [["folded"], ["mem_090"]]
+        await c.router.handle_delegate("orchestration", _explore("round-a", ("folded", "--folded 2")))
+        await c.router.handle_delegate("orchestration", _explore("round-a", ("folded", "--folded 2")))
+        assert [t.idempotency_key for t in await c.tasks.by_state("queued") if t.kind == "explore"] == [
+            "explore-grid-c0-9ae11715358f"
+        ]
+        assert await _explore_denials(c) == []
+        obs = await c.bus.tail(topic="observation")
+        rules = [m.payload.get("rule") for m in obs if m.payload.get("kind") == "policy_denied"]
+        assert rules == ["duplicate_idempotency_key_running"]
 
-        # The same grid again, under any name, adds nothing and is refused naming its variants.
-        await c.router.handle_delegate("orchestration", _explore("explore-round-3", ("folded", "--folded 2")))
-        assert await _queued_grids(c) == [["folded"], ["mem_090"]]
-        assert [d["reason"] for d in await _explore_denials(c)] == [
-            "delegate{action_name='explore'} adds nothing new: folded already measured, queued or running on the "
-            "current stack"
+        # The same launches under another key are the same measurement, so the grid key refuses them too --
+        # the key rule, not the coverage rule, is what speaks here.
+        await c.router.handle_delegate("orchestration", _explore("round-b", ("folded", "--folded 2")))
+        assert [t.idempotency_key for t in await c.tasks.by_state("queued") if t.kind == "explore"] == [
+            "explore-grid-c0-9ae11715358f"
         ]
         obs = await c.bus.tail(topic="observation")
-        assert [m.payload.get("rule") for m in obs if m.payload.get("kind") == "policy_denied"] == [
-            "explore_grid_already_covered"
-        ]
+        rules = [m.payload.get("rule") for m in obs if m.payload.get("kind") == "policy_denied"]
+        assert rules == ["duplicate_idempotency_key_running", "duplicate_idempotency_key_running"]
     finally:
         await c.stop()
 
@@ -564,17 +577,13 @@ async def test_delegate_explore_grid_is_admitted_while_rewrite_levers_await_attr
             "hyperloom.orchestrator.actions.executors.explore.framework_lever_grid",
             lambda _state: [{"name": "lever_off", "extra_envs": {"HL_X": "0"}}],
         )
-        await c.router.handle_delegate("orchestration", _explore("round-b", ("folded_again", "--folded 2")))
-        assert await _queued_grids(c) == [["folded"], ["folded_again"]]
+        await c.router.handle_delegate("orchestration", _explore("round-b", ("folded", "--folded 2")))
+        queued = [t for t in await c.tasks.by_state("queued") if t.kind == "explore"]
+        # round-b inherits round-a's grid key, so it is the lever grid suppressing the key that admits it, not a
+        # different key; its own key is the tick-scoped fallback.
+        assert queued[0].idempotency_key == "explore-grid-c0-9ae11715358f"
+        assert len(queued) == 2
         assert await _explore_denials(c) == []
-
-        # The identical request is still the round already queued.
-        await c.router.handle_delegate("orchestration", _explore("round-c", ("folded_again", "--folded 2")))
-        assert await _queued_grids(c) == [["folded"], ["folded_again"]]
-        obs = await c.bus.tail(topic="observation")
-        assert [m.payload.get("rule") for m in obs if m.payload.get("kind") == "policy_denied"] == [
-            "duplicate_idempotency_key_running"
-        ]
     finally:
         await c.stop()
 

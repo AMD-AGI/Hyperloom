@@ -8,6 +8,7 @@ import logging as _logging
 import time
 from ..actions.executors._agentx_prefix_cache import PREFIX_CACHE_OFF_ERROR_CLASS
 from ..actions.executors.benchmark_result import is_valid_measurement
+from ..measurement.cycle_bench import STATUS_SCREENED
 from ..phases.machine_state import LifecycleMark, record_lifecycle_event
 from ..state._shared_state.attempt_audit import _AUDIT_ACTIONS
 from ..state.shared_state import ActionAttempt
@@ -151,7 +152,7 @@ class WritebackCollaborator(
             result: The task result dict; non-dict results are ignored.
             verdict: The settlement verdict.
         """
-        if not isinstance(result, dict):
+        if not isinstance(result, dict) or result.get("status") == STATUS_SCREENED:
             return
         adopted = verdict is Verdict.ADOPTED
         kind = (task.kind or "").strip()

@@ -167,11 +167,13 @@ The Coordinator validates the hint vocab and the next phase compute call
 routes the transition. Emitting this hint is the **correct, expected** move
 when FRAMEWORK_AGENT has no remaining actionable lever — it is strictly
 better than idling until the budget cap is reached, because it returns the
-unspent budget to later phases / macro-cycles. No other phase has an advance
-hint: each exits on the Coordinator gate its phase goal names, and a
-`skip_to_kernel` sent from one is refused (`escalate_hint_phase`). No hint
-ends the run: the Coordinator prices the remaining budget itself and closes
-with an honest terminal stop_reason. A hint outside the closed vocab is denied
+unspent budget to later phases / macro-cycles. Rounds still queued are levers
+not yet measured, and the advance cancels them unmeasured: a phase whose queue
+holds work is not exhausted. No other phase has an advance hint: each exits on
+the Coordinator gate its phase goal names, and a `skip_to_kernel` sent from
+one is refused (`escalate_hint_phase`). No hint ends the run: the Coordinator
+prices the remaining budget itself and closes with an honest terminal
+stop_reason. A hint outside the closed vocab is denied
 (`escalate_hint_not_in_vocab`); there is no `skip_to_explore`: there is
 one optimisation phase, and the cyclic reloop returns to it for you.
 
