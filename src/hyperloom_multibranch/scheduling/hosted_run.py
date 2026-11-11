@@ -44,7 +44,7 @@ from pathlib import Path
 from typing import Any
 
 from hyperloom_common.io import WriteOptions, atomic_write_json
-from hyperloom_common.shared_storage import ownership
+from hyperloom_common.shared_storage import child_umask, ownership
 from hyperloom.hosted.campaign import CampaignSpec, parse_campaign
 from hyperloom.hosted.host_info import GrantLimits as HostGrantLimits
 from hyperloom.hosted.host_info import HostInfo, Var
@@ -295,6 +295,28 @@ def record_session(state_dir: Path, root: Path) -> None:
     atomic_write_json(state_dir / SESSION_FILE, {"session_dir": str(root)}, options=_DURABLE)
 
 
+def share_with_the_group(root: Path) -> None:
+    """Below shared storage, run the rest of this process under the umask of a child that writes below the session
+    directory ``root`` (:func:`~hyperloom_common.shared_storage.child_umask`), so every process it starts here, the
+    commands of its local agent sandboxes among them, inherits it: what Arbor, an agent or a tool writes there with the
+    default modes stays writable by the group, whose other accounts may run the run's next leg. A remote sandbox's
+    commands run in another container and take the umask from its launcher instead. Elsewhere the umask is left as
+    it is."""
+
+    umask = child_umask(root)
+    if umask != -1:
+        os.umask(umask)
+
+
+def started_session(state_dir: Path, root: Path) -> None:
+    """Take the session just created in ``root`` as the run's, before anything is built in it: shared with the group
+    (:func:`share_with_the_group`), printed on one stdout line and named in ``session.json`` (:func:`record_session`)."""
+
+    share_with_the_group(root)
+    print(root, flush=True)
+    record_session(state_dir, root)
+
+
 def recorded_session(state_dir: Path) -> Path | None:
     """The session directory an earlier start of the run named, ``None`` when none did.
 
@@ -391,7 +413,9 @@ __all__ = [
     "refuse_unhosted_branches",
     "reported_stop_reason",
     "run_argv",
+    "share_with_the_group",
     "spec_make_before_break",
+    "started_session",
     "take_over_earlier_session",
     "toolbox_grant",
     "write_final_exit",
