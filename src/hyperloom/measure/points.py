@@ -38,6 +38,7 @@ from hyperloom.common.outside_facts import (
 from hyperloom.contracts.measurement import TestKind, TestRequest
 from hyperloom.contracts.recipe import LaunchConfig, Recipe, RecipeError
 from hyperloom.inference_optimizer import framework_registry
+from hyperloom.inference_optimizer.grid_server_args import merge_server_args
 from hyperloom.measure.compile import CompiledEnvironment, EnvironmentCompiler
 from hyperloom.measure.eval_context import check_eval_context
 from hyperloom.measure.magpie_launchers import install_launchers
@@ -224,6 +225,27 @@ def launch_carriers(config: Mapping[str, Any]) -> tuple[Mapping[str, Any], str |
     return present, None if spec is None else str(present.get(spec.extra_args_env, ""))
 
 
+#: The engine seed a measured launch runs with when neither the recipe nor the base launch names one. Unpinned, the engine
+#: draws a fresh one at every start, and under speculative decoding's rejection sampling the accept length, and with it
+#: the throughput, moves with that draw, so two cold starts of one recipe would not measure the same launch.
+MEASUREMENT_SEED = 0
+
+
+def _seeded(server_args: str, reference: Mapping[str, Any]) -> str:
+    """``server_args`` with the framework's seed option set to :data:`MEASUREMENT_SEED`, unless they or the launch
+    arguments the base ``reference`` rendering carries already name one, or the framework takes none."""
+
+    benchmark = reference.get("benchmark") or {}
+    flag = framework_registry.SEED_FLAGS.get(str(benchmark.get("framework") or "").lower())
+    if flag is None:
+        return server_args
+    _, carried = launch_carriers(reference)
+    named = {token.split("=", 1)[0].replace("_", "-") for token in f"{server_args} {carried or ''}".split()}
+    if flag in named:
+        return server_args
+    return merge_server_args(server_args, f"{flag} {MEASUREMENT_SEED}")
+
+
 def _check_removals(config: Mapping[str, Any], launch: LaunchConfig) -> None:
     """Every option the recipe removes from the launch the framework resolves must be among an AgentX point's
     removals, or Magpie would launch with it. Any other point carries its whole launch in the recipe's own arguments,
@@ -289,7 +311,7 @@ def generate_points(
             canonical,
             out_dir,
             name,
-            extra_server_args=launch.server_args,
+            extra_server_args=_seeded(launch.server_args, reference),
             extra_envs={**launch.envs, **environment.envs, **pins},
             remove_args=launch.remove_args,
         )
@@ -358,13 +380,14 @@ def generate_profile_point(
     out_dir.mkdir(parents=True, exist_ok=True)
     level = canonical.primary_concurrency
     pins = {ENV_CONC: str(level), ENV_RUN_EVAL: "false"}
-    reference = benchmark_envs(_reference(canonical, pins))
+    rendered = _reference(canonical, pins)
+    reference = benchmark_envs(rendered)
     workload = {name: str(reference[name]) for name in _PROFILE_PINNED if reference.get(name) is not None}
     config = _render(
         _profile_canonical(canonical),
         out_dir,
         "point-profile.yaml",
-        extra_server_args=launch.server_args,
+        extra_server_args=_seeded(launch.server_args, rendered),
         extra_envs={**launch.envs, **environment.envs, **workload, **pins},
         remove_args=launch.remove_args,
     )
