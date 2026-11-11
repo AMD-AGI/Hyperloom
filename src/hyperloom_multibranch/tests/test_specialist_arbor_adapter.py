@@ -16,6 +16,8 @@ import pytest
 
 from hyperloom.common.agentx_objective import AgentXObjective
 from hyperloom.common.perf_metric import GRADED_INTVTY_P50, TOTAL_TOKEN_THROUGHPUT
+from hyperloom.inference_optimizer.cli import base_launch as cli_base_launch
+from hyperloom.orchestrator.state.base_launch import FrozenBase, server_argv, server_base
 from hyperloom.measure.compile import (
     ComponentLayout,
     PackageBase,
@@ -23,6 +25,8 @@ from hyperloom.measure.compile import (
     UnsupportedComponentError,
 )
 from hyperloom_multibranch.contracts.blackboard.records import OpShares
+from hyperloom_multibranch.scheduling.session_base import freeze_session_base, served_launch
+from hyperloom_multibranch.scheduling.settings import KernelOptimizer, Workload
 from hyperloom_multibranch.specialist import arbor_adapter
 from hyperloom_multibranch.specialist.agent_manifest import REFUSED_FILE, AgentManifest
 from hyperloom_multibranch.specialist.agent_onboarding import PROFILE_FILE, make_ready, root_profile
@@ -78,7 +82,7 @@ from hyperloom_multibranch.tests.agent_rig import (
     _spec,
     _write,
 )
-from hyperloom_multibranch.tests.base_records import base_record, write_record
+from hyperloom_multibranch.tests.base_records import MODEL_ID, base_record, write_record
 from inference_suite.contracts import AgentxResult, RunStatus
 from inference_suite.contracts import Workload as LaunchWorkload
 from inference_suite.contracts.report import AGENTX_COUNT_KEYS, AGENTX_LATENCY_KEYS, AGENTX_THROUGHPUT_KEYS
@@ -839,16 +843,58 @@ def test_a_launch_file_s_client_measures_arbor_only_when_mb_gives_none(tmp_path:
     assert (own["component"]["bench_command"], own["model_name"]) == (bench_command(spec.client), "Qwen/Qwen3-14B-FP8")
 
 
-def test_an_agentx_branch_is_refused_before_arbor_starts_unless_it_is_given_the_resolved_launch(tmp_path: Path) -> None:
+def test_an_agentx_branch_served_no_launch_is_refused_before_arbor_starts(tmp_path: Path) -> None:
     checkout = _write(tmp_path / "checkout", {**CHECKOUT_FILES, OBJECTIVE_MODULE: OBJECTIVE_29C72F9})
     spec = _spec(tmp_path, framework="sglang", server_args="", workload=AGENTX_WORKLOAD, metric=GRADED_INTVTY_P50)
 
-    with pytest.raises(ArborRefused, match="--agent-launch"):
+    with pytest.raises(ArborRefused, match="served no launch to add it to"):
         arbor_manifest(spec, ArborCheckout("arbor", "abc123", checkout), BRANCH_RUN)
-    launched = replace(spec, launch=_launch_file(tmp_path, RESOLVED))
-    manifest = arbor_manifest(launched, ArborCheckout("arbor", "abc123", checkout), BRANCH_RUN)
+
+
+@pytest.fixture
+def agentx_session(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> FrozenBase:
+    """An AgentX session's frozen base, its resolution from the recipe sources standing in as :func:`base_record`."""
+
+    monkeypatch.setattr(cli_base_launch, "resolve_server_base", lambda _: base_record())
+    workload = Workload(MODEL_ID, "vllm", 2, 8, "fp8", "mi355x", KernelOptimizer.FORGE, None)
+    return freeze_session_base(tmp_path / "toolbox", workload, "")
+
+
+def test_an_agentx_arbor_given_no_launch_is_served_the_session_s_frozen_base_and_its_start_check_passes(
+    tmp_path: Path, agentx_session: FrozenBase
+) -> None:
+    checkout = _write(tmp_path / "checkout", {**CHECKOUT_FILES, OBJECTIVE_MODULE: OBJECTIVE_29C72F9})
+    served = served_launch(agentx_session, "")
+    spec = replace(
+        _spec(tmp_path, launch=served, workload=AGENTX_WORKLOAD, metric=GRADED_INTVTY_P50), server_args="", envs={}
+    )
+
+    arbor_manifest(spec, ArborCheckout("arbor", "abc123", checkout), BRANCH_RUN)
+    config = arbor_config(spec, checkout, BRANCH_RUN)
+
+    base = server_base(agentx_session.launch)
+    assert _shell_argv(config["server_flags"]) == list(server_argv(agentx_session.launch))
+    assert config["server_env"] == {arbor_adapter.ACCURACY_FLOOR_ENV: "0.5", **base.env}
+    assert config["component"]["base_launch"] == {
+        "path": str(agentx_session.path),
+        "digest": agentx_session.launch.digest(),
+    }
+    assert _arbor_start_check(config) == []
+
+
+def test_an_agentx_arbor_given_a_launch_file_is_served_it_over_the_frozen_base(
+    tmp_path: Path, agentx_session: FrozenBase
+) -> None:
+    checkout = _write(tmp_path / "checkout", {**CHECKOUT_FILES, OBJECTIVE_MODULE: OBJECTIVE_29C72F9})
+    served = served_launch(agentx_session, _launch_file(tmp_path, RESOLVED))
+    spec = _spec(
+        tmp_path, framework="sglang", server_args="", launch=served, workload=AGENTX_WORKLOAD, metric=GRADED_INTVTY_P50
+    )
+
+    manifest = arbor_manifest(spec, ArborCheckout("arbor", "abc123", checkout), BRANCH_RUN)
 
     assert manifest.config["server_flags"] == f"{RESOLVED['server_flags']} --tp-size 2"
+    assert "base_launch" not in manifest.config["component"]
 
 
 @pytest.mark.parametrize(

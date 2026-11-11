@@ -489,6 +489,7 @@ async def _peers(
     inferencex_commit: str = "",
     reference_script: str = "",
     base: BaseLaunch | None = None,
+    agent_launch: str = "/launches/arbor.json",
 ) -> AsyncIterator[_Built]:
     """The real peers of a session of ``workload`` on ``host`` in ``tmp_path`` lending ``dev_leases`` dev sandboxes,
     with the wiring their specialist sessions were built on; a branch's worktree, holding no component, is served
@@ -516,7 +517,7 @@ async def _peers(
         dev_leases,
         (),
         reference_script,
-        agent_launch="/launches/arbor.json",
+        agent_launch=agent_launch,
         inferencex_commit=inferencex_commit,
     )
     wired: list[SessionWiring] = []
@@ -776,7 +777,7 @@ async def test_a_fresh_session_reads_inferencex_at_the_commit_its_setup_names(
         assert commits == ["8a76a78e41"]
 
 
-async def test_a_reference_script_is_frozen_as_the_base_and_served_to_the_arbors_in_place_of_their_launch(
+async def test_a_reference_script_is_frozen_as_the_base_and_served_to_the_arbors(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     monkeypatch.delenv("HL_MODEL_BASE", raising=False)
@@ -785,13 +786,23 @@ async def test_a_reference_script_is_frozen_as_the_base_and_served_to_the_arbors
         "python3 -m sglang.launch_server --model-path /models/Llama-3-8B --tp 2 --chunked-prefill-size 8\n"
     )
 
-    async with _peers(tmp_path / "run", monkeypatch, WORKLOAD, freeze=False, reference_script=str(script)) as built:
+    async with _peers(
+        tmp_path / "run", monkeypatch, WORKLOAD, freeze=False, reference_script=str(script), agent_launch=""
+    ) as built:
         frozen = frozen_base(built.layout.toolbox)
         assert frozen is not None and frozen.launch.source.path == str(script)
         assert built.wiring.setup.agent_launch == str(frozen.path)
 
 
-async def test_without_a_reference_script_the_arbors_are_served_their_own_launch(built: _Built) -> None:
+async def test_without_a_launch_file_the_arbors_are_served_the_session_s_frozen_base(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    async with _peers(tmp_path, monkeypatch, WORKLOAD, agent_launch="") as built:
+        frozen = frozen_base(built.layout.toolbox)
+        assert frozen is not None and built.wiring.setup.agent_launch == str(frozen.path)
+
+
+async def test_an_arbor_launch_file_is_served_in_place_of_the_frozen_base(built: _Built) -> None:
     assert built.wiring.setup.agent_launch == "/launches/arbor.json"
 
 

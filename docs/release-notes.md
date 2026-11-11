@@ -20,6 +20,16 @@ Merged to `main` and not yet carried by a tagged release. Each entry moves
 into the [release](https://github.com/AMD-AGI/Hyperloom/releases) that ships
 it.
 
+- **An Arbor agent on an AgentX multi-branch session needs no launch flag.**
+  `hyperloom-multibranch run --autonomous-agent` now serves every Arbor the
+  session's frozen base launch, resolved from InferenceX or the framework's
+  cookbook, when neither `--agent-launch` nor `--reference-script` is given,
+  and Arbor checks its launch against that base at its start. Before, an
+  AgentX branch without one of those flags was refused before PRELUDE, and a
+  fixed-workload Arbor was served only the root recipe's flags. `--agent-launch`
+  still replaces the base. An Arbor now refuses to start when the root recipe
+  adds anything to the base, as it already did under `--reference-script`.
+
 - **A hosted multi-branch run takes its base launch as a reference script.**
   `multibranch.reference_script` in a hosted run's campaign spec names a shell
   launch script that the session freezes as its base, as `--reference-script`

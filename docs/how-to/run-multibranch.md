@@ -85,8 +85,9 @@ agent CLI the specialists run must be installed. `--measurement hosted` also nee
   (`total_throughput_gain_pct`) all read that metric. Each Arbor is given it with its bar and guards (`opt_objective`),
   which needs Arbor `29c72f9` or later.
 - **Base launch:** `--reference-script FILE`, a shell launch script or a base launch record frozen elsewhere, as for
-  `hyperloom optimize`; the session freezes it as its base, a record without reading any recipe source, and every
-  Arbor is served the frozen base. Without it the base comes from the recipe sources.
+  `hyperloom optimize`; the session freezes it as its base, a record without reading any recipe source. Without it
+  the base comes from the recipe sources. Every Arbor is served the frozen base unless `--agent-launch` gives a launch
+  file.
 - **Limits:** `--max-hours` (default 2, 0 for none), `--max-gpu-hours` and `--max-llm-usd` (0 for none),
   `--max-branches` (default 4). A negative or non-finite limit is a usage error.
 - **Concurrency:** `--max-parallel-tests` (default: as many as fit at TP), `--max-k-per-branch` (default 2),

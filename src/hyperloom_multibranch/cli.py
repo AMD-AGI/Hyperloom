@@ -42,13 +42,13 @@ kernel shares); each share then opens as a branch of its own, when it still has 
 as of any other limit, is a usage error.
 ``--agent-pack NAME`` names the pack those Arbors run instead of Arbor's serving template; a name that is not one
 directory, or one given with no agent, is a usage error, and a pack the Arbor checkout lacks is refused when the branch
-starts. ``--agent-launch FILE`` gives those Arbors the launch an AgentX recipe's adds to, as resolved from InferenceX;
-a file the adapter cannot use, an unfilled template among them, a base launch record, or one given with no agent or
-with ``--reference-script``, is a usage error. ``--reference-script FILE`` is the session's base launch, as for
+starts. Those Arbors are served the session's frozen base launch, resolved from the recipe sources or
+``--reference-script``, and check their launch against it. ``--agent-launch FILE`` serves them that launch file
+instead; a file the adapter cannot use, an unfilled template among them, a base launch record, or one given with no
+agent or with ``--reference-script``, is a usage error. ``--reference-script FILE`` is the session's base launch, as for
 ``hyperloom optimize``: a shell launch script, or a base launch record (``hyperloom-base-launch/1``) frozen elsewhere,
-which the session freezes without reading any recipe source; every Arbor is then served the frozen base and checks its
-launch against it. A file that cannot serve as a base of the session's framework is a usage error, and one on another
-topology than the workload's is refused when the session freezes it. ``--inferencex-commit SHA`` resolves a fresh
+which the session freezes without reading any recipe source. A file that cannot serve as a base of the session's
+framework is a usage error, and one on another topology than the workload's is refused when the session freezes it. ``--inferencex-commit SHA`` resolves a fresh
 session's base launch from InferenceX at that commit instead of the head of its ``main``; one that is not 7 to 40 hex
 digits is a usage error. Each ``--specialist-prompt`` file holds a direction the user
 wrote for one specialist: its branch opens at PRELUDE's root ahead of the opening batch, counted within
@@ -551,9 +551,9 @@ def _add_arbor_start_options(run: argparse.ArgumentParser) -> None:
         default=None,
         metavar=FILE_METAVAR,
         help=(
-            "For an Arbor --autonomous-agent: the launch an AgentX recipe's adds to, as resolved from InferenceX"
-            " (server_flags, server_env, model_name, client; examples/multibranch-arbor-launch). A base launch record"
-            " is given as --reference-script, whose frozen base the Arbors are served instead."
+            "For an Arbor --autonomous-agent: the launch an AgentX recipe's adds to (server_flags, server_env,"
+            " model_name, client; examples/multibranch-arbor-launch), served instead of the session's frozen base,"
+            " which the Arbors are served without it. A base launch record is given as --reference-script."
         ),
     )
     run.add_argument(

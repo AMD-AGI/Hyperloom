@@ -163,7 +163,7 @@ hyperloom-multibranch run \
   --framework vllm --model /models/Qwen3-8B --tp 1 --gpu-type mi350x --precision bf16 \
   --max-hours 3 --max-branches 2 \
   --autonomous-agent /work/mb/arbor --autonomous-agent /work/mb/arbor \
-  --agent-pack serving-m10 --agent-launch /work/mb/agent-launch.json \
+  --agent-pack serving-m10 \
   -v > mb.out 2> mb.log
 SESSION=$(head -1 mb.out)
 ```
@@ -180,8 +180,9 @@ SESSION=$(head -1 mb.out)
 measures on, and MB keeps `--tp` free cards for its own tests. On 8 GPUs at TP4 that is one Arbor; at TP1, up to
 seven, within `--max-branches`.
 
-**The launch file, `--agent-launch`.** Arbor serves the root recipe's launch and refuses an empty one. A Magpie recipe
-holds only what is added to its launch, so give Arbor the launch Magpie resolves from InferenceX at this concurrency:
+**The launch, and `--agent-launch`.** MB serves each Arbor the session's frozen base launch, resolved from InferenceX
+or the framework's cookbook (or `--reference-script`), with the root recipe's additions; Arbor checks its launch
+against that base at its start. `--agent-launch FILE` serves a launch file instead:
 
 ```json
 {
@@ -287,7 +288,7 @@ environment kept it from starting; 2 on a usage error.
 | the runner cache cannot be created | its default is `/runner-cache` | set `HYPERLOOM_RUNNER_CACHE` (2.4) |
 | PRELUDE hangs at its start | `ray.init(address="auto")` waits on a Ray head that never answers | `ray stop --force`, or `INFERENCE_OPTIMIZER_RAY_EXEC=0` (2.6) |
 | every root test fails with HTTP 400 | a base model without a chat template | serve an instruct model |
-| `run` refuses the agent before PRELUDE | an AgentX branch without the resolved launch, or a launch file the adapter cannot use | give `--agent-launch`, filled from the template (section 3) |
+| `run` refuses the agent before PRELUDE | an `--agent-launch` file the adapter cannot use | fill it from the template (section 3), or leave it out to serve the session's base |
 | an Arbor branch ends at once, `component_refused.json` | Arbor refused its config: an empty `server_flags`, a missing script, no deadline | read the reasons; most come from the launch file |
 | KEEPs that change source never land: "vllm is a new component" | `FRAMEWORK_REPO_PATH` was not set at session start | set it and start a new session (2.5) |
 | no share branch opens: "too little time left for the shares" | the map and the review took EXPLORE's time | more `--max-hours`, a quicker review, or `--agent-share-minutes 0` |
