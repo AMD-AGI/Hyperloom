@@ -18,10 +18,10 @@ The order of the checks is the point:
    the candidate: REVERT.
 4. Otherwise Arbor's own `run_gate` decides on the arm means, with the
    candidate's declared intent choosing the bar.
-5. A change that declared a log marker and never printed it did not run
-  : a KEEP without it is downgraded to REVERT.
+5. A change that declared a log marker and never printed it did not run:
+   a KEEP without it is downgraded to REVERT.
 
-Ported from an earlier gate check.
+Ported verbatim from an earlier executor's gate check.
 """
 
 from __future__ import annotations

@@ -364,8 +364,6 @@ def _check_lineage(event: LineageEvent) -> None:
         raise ValueError(f"the {INTEGRATION_BRANCH} branch moves by its merges, never by a re-root")
     if event.kind is LineageKind.PROBATION and event.branch == INTEGRATION_BRANCH:
         raise ValueError(f"the {INTEGRATION_BRANCH} branch is never held on probation")
-    if event.kind is LineageKind.REOPEN and event.branch != INTEGRATION_BRANCH:
-        raise ValueError(f"only the {INTEGRATION_BRANCH} branch is reopened, when its session resumes")
     if (event.kind is LineageKind.PROBATION) != (event.tests > 0):
         raise ValueError("a probation event, and only it, gives its branch tests, one at least")
     if event.recipe_digest is not None and event.kind is not LineageKind.ROOT:

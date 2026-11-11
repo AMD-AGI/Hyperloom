@@ -5,18 +5,20 @@
 
 from __future__ import annotations
 
+import contextlib
 import os
 import signal
 import subprocess
 import time
-from collections.abc import Callable, Iterable
+from collections.abc import Callable, Collection, Iterable
 from dataclasses import dataclass, field
 from pathlib import Path
 
 from hyperloom_common import proctree
 from hyperloom.sandbox.card_occupancy import SANDBOX_TAG_ENV
+from hyperloom.sandbox.launcher import runs_launcher
 
-__all__ = ["Leftovers", "kill_launchers", "reap_sandbox_processes", "sweep_tagged", "wait_exited"]
+__all__ = ["Leftovers", "kill_launchers", "reap_sandbox_processes", "sweep_tagged", "tag_in_use", "wait_exited"]
 
 _WINDOW_SEC = 5.0
 _POLL_SEC = 0.05
@@ -75,12 +77,38 @@ def _described(pid: int) -> str:
     return f"pid {pid} ({command}, state {state[0]})"
 
 
-def _live_descendants(root_pids: Iterable[int]) -> list[proctree.ProcessId]:
-    """Every running descendant of the launchers; zombies are already gone for our purposes."""
+def _live_descendants(root_pids: Iterable[int], held: Collection[int] = ()) -> list[proctree.ProcessId]:
+    """Every running descendant of the launchers but ``held``; zombies are already gone for our purposes."""
     found: list[proctree.ProcessId] = []
     for root in root_pids:
-        found.extend(d for d in proctree.descendants(root) if proctree.running(d[0]))
+        found.extend(d for d in proctree.descendants(root) if d[0] not in held and proctree.running(d[0]))
     return found
+
+
+def _hold_inner_launchers(root_pids: Iterable[int]) -> set[int]:
+    """Freeze every launcher below the started processes (a confined sandbox's runs inside bubblewrap) and return
+    them with the processes between them and the started ones (bubblewrap's own): those only hold the trees.
+
+    A frozen launcher keeps what its command left below it, as a launcher that was started itself does, so a command
+    that stops slowly is still in the trees when its grace ends; and held, they are not what the grace waits for.
+
+    Raises:
+        OSError: When ``/proc`` cannot be listed.
+    """
+    held: set[int] = set()
+    for root in root_pids:
+        for pid, _ in proctree.descendants(root):
+            if not runs_launcher(pid):
+                continue
+            with contextlib.suppress(ProcessLookupError):
+                os.kill(pid, signal.SIGSTOP)
+            while pid != root and pid not in held:
+                held.add(pid)
+                identity = proctree.proc_identity(pid)
+                if identity is None:
+                    break
+                pid = identity[0]
+    return held
 
 
 def _signal_until_gone(find: Callable[[], list[proctree.ProcessId]], sig: int, window_sec: float) -> Leftovers:
@@ -106,12 +134,12 @@ def _signal_until_gone(find: Callable[[], list[proctree.ProcessId]], sig: int, w
         time.sleep(_POLL_SEC)
 
 
-def _drain(root_pids: list[int], sig: int, window_sec: float) -> Leftovers:
-    """Signal descendants of the launchers until none is left, or the window ends.
+def _drain(root_pids: list[int], sig: int, window_sec: float, held: Collection[int] = ()) -> Leftovers:
+    """Signal descendants of the launchers but ``held`` until none is left, or the window ends.
 
     The launchers stay alive throughout and are subreapers, so nothing can leave the tree by detaching.
     """
-    return _signal_until_gone(lambda: _live_descendants(root_pids), sig, window_sec)
+    return _signal_until_gone(lambda: _live_descendants(root_pids, held), sig, window_sec)
 
 
 def kill_launchers(procs: list[subprocess.Popen[bytes]], *, grace_sec: float = 2.0) -> Leftovers:
@@ -119,6 +147,10 @@ def kill_launchers(procs: list[subprocess.Popen[bytes]], *, grace_sec: float = 2
 
     Order: freeze the launchers, SIGTERM the descendants and give them ``grace_sec``, SIGKILL what is
     left until a fresh scan finds nothing, and only then kill and wait for the launchers.
+
+    A launcher may run below the process that was started: a confined sandbox's runs inside bubblewrap. It is frozen
+    too, and neither it nor what lies between it and the started process (bubblewrap's own) is sent SIGTERM or waited
+    for through the grace (:func:`_hold_inner_launchers`); the SIGKILL passes end them with the rest.
 
     A frozen launcher reaps nothing, so the descendants that exited stay zombies below it, and once it is gone they are
     re-parented to its nearest subreaper. When that is this process (a child subreaper) they are waited here, so a
@@ -145,9 +177,10 @@ def kill_launchers(procs: list[subprocess.Popen[bytes]], *, grace_sec: float = 2
             continue
     tree: list[proctree.ProcessId] = []
     try:
+        held = _hold_inner_launchers(roots)
         # SIGTERM once, then wait the grace; the SIGKILL passes re-scan until empty.
-        proctree.signal_processes(_live_descendants(roots), signal.SIGTERM)
-        _drain(roots, 0, grace_sec)
+        proctree.signal_processes(_live_descendants(roots, held), signal.SIGTERM)
+        _drain(roots, 0, grace_sec, held)
         left = _drain(roots, signal.SIGKILL, _WINDOW_SEC)
         # The trees as the launchers die, the exited included: the ones to wait for once they are this process's.
         tree = [process for root in roots for process in proctree.descendants(root)]
@@ -245,3 +278,9 @@ def _still_running(process: proctree.ProcessId) -> bool:
         return False
     identity = proctree.proc_identity(pid)
     return identity is None or identity[1] == start_time
+
+
+def tag_in_use(sandbox_id: str) -> bool:
+    """Whether a running process still carries this sandbox's id in its environment; True also when ``/proc`` cannot be
+    listed to tell."""
+    return not _proc_listed() or bool(_tagged(sandbox_id))

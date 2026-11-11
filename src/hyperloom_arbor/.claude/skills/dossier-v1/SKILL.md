@@ -1,5 +1,5 @@
 ---
-name: dossier
+name: dossier-v1
 description: Find, or write if it is missing, the dossier an optimization campaign starts from, for one model, workload and GPU target. When a campaign's gains run small, it says so and ranks kernel rewrites, each written up as a kernel plan. It first looks for an existing dossier and uses it, refreshing only stale parts. A dossier covers model and framework architecture, a method-by-method reading of the served code, the workload and the CPU work it causes, the target and the baseline, a profile, which kernels run and whether better ones exist (AITER, KernelForge, kernels in the codebase that go unused), AMD's earlier optimizations, and ranked directions. Use before starting or re-basing a campaign, when a new model, framework or workload arrives, when asked what to optimize and why, or to update the dossier in rounds (code re-read, baseline, profile, directions) after a long campaign or a merge has moved the served tree.
 ---
 
@@ -12,8 +12,8 @@ its result or its time:
 
 - a knob aimed at a fused kernel that never runs;
 - a kernel-boundary win that graph capture has already amortized;
-- a nominal concurrency that puts far fewer requests in flight, and far
-  fewer rows per step, than its label;
+- a concurrency setting that puts only one or two requests in flight, at a
+  handful of rows per step, not the client's cap;
 - a profile that captures the client's warmup instead of the measured load;
 - a plan whose best possible gain sits far below its noise floor;
 - a tuned kernel table with no row for the model's shapes, so every token
@@ -23,7 +23,7 @@ Kernel usage (part 8) is in [kernels.md](kernels.md); how to write up a kernel
 rewrite, part 11's other kind of direction, is in
 [kernel-plan.md](kernel-plan.md); the dossier's skeleton is
 [template.md](template.md). Profiles come from the `profiler` skill. In an
-Arbor campaign, a pack makes this skill available with `skills: [dossier]` in
+Arbor campaign, a pack makes this skill available with `skills: [dossier-v1]` in
 its `pack.yaml`, or gets it by default if it is on Arbor's default-on list
 (`DEFAULT_ON_SKILLS` in `arbor/pack/loader.py`) and the pack does not list it
 in `opt-out-skills:`.
@@ -39,9 +39,10 @@ anything else:
    It lists `docs/dossier/*/README.md` in this repository and, when this
    repository is a submodule (Arbor inside a project), in the project around
    it. Then it lists the dossiers earlier campaigns shared,
-   `/path/to/arbor-share/projects/<project>/<user>/<campaign>/knowledge/dossier/`
+   `<share root>/projects/<project>/<user>/<campaign>/knowledge/dossier/`
    (the `knowledge-collector` skill), read in place where the share is
-   mounted and through `ssh arbor-share` elsewhere. Each comes with its
+   mounted and through ssh to the share host elsewhere (`ARBOR_SHARE_ROOT`,
+   `ARBOR_SHARE_HOST`). Each comes with its
    header: project, pins, platform, workload, date.
 2. **Match it** on model, workload (benchmark, dataset, seed, concurrencies)
    and GPU type. Another GPU type means another dossier: MI350 never stands
@@ -63,8 +64,8 @@ anything else:
    takes a node (parts 6 and 7) and the user's answers (the asks below).
    The profile run (part 7) is part of writing it, not a later step: see
    "The profile is taken while the dossier is written", below.
-   Material that is not in dossier form, such as research notes and
-   code-reading reports, is a source to write from, not a dossier.
+   Material that is not in dossier form, such as a project's research notes
+   and code-reading reports, is a source to write from, not a dossier.
 
 ## Ask the user first
 
@@ -94,14 +95,18 @@ dossier's index under "Open asks" and go on.
   and before parts 8 and 11 are written. A part 7 with a plan and no results
   leaves the dossier unwritten: parts 8 and 11 are drafts until it lands, and
   no optimization starts from them. The profiler's checks run with it; a
-  check not run is the next work, not a footnote. A dossier written whole
-  before any capture ranks part 11 by evidence instead of ceilings, and its
-  first profile re-ranks it.
+  check not run is the next work, not a footnote. Parts written before any
+  capture rank part 11 by evidence instead of ceilings, and the first profile
+  re-ranks it.
 - **Re-profile when the tree or the deployment moves.** After a KEEP, and
   after a change of flags or parallelism (expert parallelism, say), part 7 is
   stale; profile again before part 11 is re-ranked from it.
 - **Every number has a source and a label**: node or host, GPU, seed,
   concurrency, n. A number without a source is removed.
+- **A fact from knowledge search keeps its citation**, where the part uses it, exactly as `find`, `get` or `ask` gave
+  it: `<source>@<pin>:<path>#L<start>-<end>`, the pinned version that was read, never a page's path alone.
+  `arbor.dossier.check` resolves each against the registry's pins and fails one that does not resolve. In a
+  campaign that loads `knowledge:search`, it also fails a page behind search named by its path.
 - **Every part has a status**: written, partial, missing or not available,
   with what would fill it, its date, and the pins and workload it depends on.
   When one of those moves, the part is stale, and it is refreshed before a
@@ -225,7 +230,8 @@ dossier's index under "Open asks" and go on.
     long it takes, measured untraced; how much of each step the GPU sits idle
     (TraceLens's GPU timeline: busy time over the window) and whether it waits on the
     host; the client's own pacing (think time in a trace replay).
-- **From:** the client's per-request export and the server's metrics; TraceLens's kernel summary for steps; untraced timing
+- **From:** the client's per-request export and the server's metrics;
+  TraceLens's kernel summary for steps; untraced timing
   for host work, because a traced host is slower.
 - **Done when:** the distributions of rows per step and context that part 7
   profiles at are written down per operating point, and the GPU's idle share
@@ -347,11 +353,11 @@ The procedure is [kernels.md](kernels.md).
   - **The KEEPs are small:** the median of the last five KEEPs is under 3×
     the gate.
   - **The probes kill their own leads:** five or more probes in a row each
-    closed the lead it set out to build, at or below the gate.
+    closed the lead it set out to build, at or below the gate, the last one
+    killing the campaign's last big build.
   - **The board is thin:** no increment left has a measured ceiling of 3× the
-    gate, or what's left is launch-bound or already at its roofline (an
-    all-gather already at the XGMI roofline, idle time that is mostly a
-    dependency stall).
+    gate, or what's left is launch-bound or already at its roofline (a
+    collective at the XGMI roofline, idle time that is a dependency stall).
   - **Arbor's `barren_streak` has reached its notice (8).** Any KEEP resets it,
     so on its own it misses a campaign that still keeps a gate-sized change
     now and then. The first three signs don't.
@@ -367,8 +373,9 @@ The procedure is [kernels.md](kernels.md).
     plan for each of the top ones;
   - then a campaign spent on one rewrite:
     - its config sets `"space": {"levels": ["kernel"]}`;
-    - its pack raises `policy.max_consecutive_probes`, so build stages that
-      can't serve yet aren't cut off;
+    - it runs as the plan's lane (`python3 -m arbor.stages seed`), so build
+      stages that can't serve yet aren't cut off: the harness waives the LEARN
+      cap while the next item is S1–S3 (docs/quickstart-kernel.md);
     - each stage is judged by the plan's gate for it, until the last stage,
       where the campaign's own A/B gate decides.
 - **Check structural directions before ranking.** A campaign that works one
@@ -380,9 +387,55 @@ The procedure is [kernels.md](kernels.md).
     with a kernel plan, or lists it as set aside with the reason. Reasons: the
     image lacks it, the operating point doesn't favour it, it is already on,
     or its best case is below the floor.
-  - **Price it on this node,** from part 7 and numbers measured on this node
-    (the hardware skill's "Measured, not spec"), never from a gain reported
-    elsewhere.
+  - **Price it on this node,** from part 7 and the hardware skill's measured
+    table, never from a gain reported elsewhere.
+- **How many directions: the map's length.** The brief's `## Settings`, or
+  the program, names it (the config's `directions_length`). **Long is the
+  default.**
+
+  | Length | Open directions | For |
+  | --- | --- | --- |
+  | short | 4 to 6 | a quick campaign, or a narrow target |
+  | medium | 8 to 12 | one Arbor for a day or two |
+  | long (default) | 15 to 25 | a campaign over days, or a host that splits the map among several Arbors; the size of a hand-written roadmap |
+
+  Directions set aside (below the floor, killed, done) are listed as well,
+  and do not count.
+  - **Where a longer map comes from.** It comes from breadth and depth in
+    parts 3 to 9, not from splitting one change into several:
+    - **every component above the floor** in part 7 gets at least one
+      direction, not only the top few;
+    - **one direction per lever, not per component:** a component with a
+      flag, a tuned table, a dispatch rule and a fusion open has four
+      directions. Each ceiling is the share of the component's time that
+      lever can remove;
+    - **part 3's opportunity labels:** every in-path method labelled an
+      opportunity that no direction covers yet;
+    - **part 8's better kernels:** each kernel that AITER, KernelForge or the
+      codebase's unused kernels offer
+      for a served shape;
+    - **the system, not only kernels:**
+      - scheduling and batching;
+      - the host's CPU work (part 5);
+      - collectives;
+      - graph capture and launch overhead;
+      - memory and KV-cache layout;
+    - **upstream work** not in the image yet: an open PR or a newer kernel,
+      as an `upstream` lane;
+    - **the playbook's big directions** whose preconditions hold (above).
+  - **Never padding.** None of these counts toward the length:
+    - a direction without a ceiling from part 7 (or a named missing
+      measurement);
+    - two directions that change the same thing;
+    - an old direction renamed.
+
+    When the evidence supports fewer directions than the length asks, write
+    fewer. Then say at the top of part 11 how many the length asked, how many
+    the evidence supports, and which measurement would find more.
+  - **A shorter length keeps the ranking's top.** At short or medium, the
+    map holds the best-ranked open directions. Part 11 lists the rest under
+    "Beyond this map's length", ranked, so that an update round can bring
+    them in.
 - **The map: what the campaign tracks.** Every direction has a map ID,
   `m-<component>`, which stays the same across update rounds; a direction
   that changes so much it needs a new ID says which one it replaces.
@@ -391,6 +444,11 @@ The procedure is [kernels.md](kernels.md).
     `DIRECTIONS: [{"id": "m-…", "kind": "increment|rewrite", "title": "…", "rank": 1, "ceiling": "…", "status": "open"}, …]`
   - **Statuses:** open, done, killed, below_floor, or plan (a rewrite whose
     kernel plan is written). Every closed direction carries a `why`.
+  - **Never a direction that changes the weights' precision,** down or up:
+    a quantization of the weights, another checkpoint, a de-quantization.
+    The harness reverts such a change. One the dossier finds is set aside,
+    with why "changes the weight precision of record, which the host
+    forbids", and no condition to reopen it.
   - **What a parallel run needs** (optional; a map without them is read as
     before):
     - `lane`: increment, kernel-plan, architectural or upstream. By default
@@ -412,10 +470,12 @@ The procedure is [kernels.md](kernels.md).
     runs this part again (see "In the campaign, by the harness" below).
   - **Check the line before it goes in:** `python3 -m arbor.directions check`.
     With `--dossier <this dossier>` it also checks each lane's plan and
-    prints the order the dependencies allow.
+    prints the order the dependencies allow. With `--length <the map's
+    length>` it prints a NOTE when the open directions fall outside it.
 - **Done when:** each direction can become a plan whose evidence section cites
   the dossier, each rewrite has a kernel plan, every big direction from the
-  playbook that applies is carried or set aside with its reason, and the
+  playbook that applies is carried or set aside with its reason, the map's
+  open directions meet its length (or part 11 says why not), and the
   `## Map` line passes `arbor.directions check`.
 
 ### 12. Fast bench (does not block the campaign)
@@ -438,10 +498,9 @@ served code is laid out differently (a path split, a layer re-partitioned, a
 collective moved) and the step's time goes elsewhere, sometimes drastically.
 Part 7's rule (re-profile after a KEEP) keeps the profile current inside a
 campaign. It does not re-read the code or re-rank the directions, so the
-campaign goes on optimizing from a map of a tree that no longer exists. A long
-campaign can keep many changes, a new parallel path among them, and its stack
-can then be merged onto another team's that partitions a layer another way; the
-dossier it started from then describes neither tree.
+campaign goes on optimizing from a map of a tree that no longer exists. After
+a merge onto a branch that partitions a layer another way, the dossier the
+campaign started from may describe neither tree.
 
 **When.** The operator decides, on signs like these:
 
@@ -456,9 +515,9 @@ dossier it started from then describes neither tree.
 An agent that sees these signs says so in its verdict and goes on with its
 plan; it does not stop the campaign.
 
-**In the campaign, by the harness: when the map is explored.** The campaign
-does not explore aimlessly: it runs the dossier and the profile again, then
-continues like new.
+**In the campaign, by the harness: when the map is explored.** A campaign
+whose directions are all explored does not explore aimlessly: it runs the
+dossier and the profile again, then continues like new.
 - **The trigger.** When every direction of the campaign's map is closed,
   Arbor (`arbor/directions.py`) makes the next iterations this round, in the
   same session and without a STOP.
@@ -472,8 +531,8 @@ continues like new.
   naming the file, with the LEARN cap waived.
 - **What the new map starts.** A new map round, with the streak counters
   reset: the campaign carries on like new.
-- **When the new map has no open increment,** the campaign starts like a new
-  one:
+- **When the new map has no open increment,** the campaign does not stop
+  there; it starts like a new campaign:
   - **a fresh start**: the next iterations write a new dossier as a new
     campaign would, in the same session: 03.uK, the code read again whole;
     07.uK, the profile again; 10.uK; and 11.uK, a map from 03.uK and 07.uK,
@@ -543,16 +602,17 @@ measured. Then, on the served tree as it now is, in order:
      (config, tuning, framework, kernel), so a round that keeps working one
      level sees it.
 
-   The hand-off a restarted campaign reads is cut from this part. It can be
-   written by hand, as a ledger file for the round. A handed ranking can rightly
-   rework something an earlier map killed, when the kill rested on a floor that
-   the kernel under test had measured itself.
+   The hand-off a restarted campaign reads is cut from this part. A handed
+   ranking can rightly rework something an earlier map killed, when the kill
+   rested on a floor that the kernel under test had measured itself.
 5. **11.uK, the directions again**, as part 11, from 03.uK, 06.uK, 07.uK and
    10.uK, and the parts still current. A direction the campaign killed stays
    killed unless the new tree removes the reason it died or 10.uK marks it
    reopenable; the entry says which. 10.uK's counts and kills tell whether
    the increments are running out (part 11's signs); if they are, rewrites are
-   ranked first, each with a kernel plan.
+   ranked first, each with a kernel plan. The new map has the campaign's
+   length, as part 11 sets it ("How many directions"): count the directions
+   still open with the new ones.
 6. **Restart** the campaign on this tree, as a new session: its bar is 06.uK,
    its pack knowledge is re-digested from the round's parts (10.uK's hand-off
    first), and the stopped session stays as the record. After a merge, "this

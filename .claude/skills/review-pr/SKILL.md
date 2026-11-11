@@ -19,7 +19,7 @@ failure it names?** Blocking means one of four kinds, equal in weight:
 
 | Kind | What counts |
 |---|---|
-| Wrong behaviour | correctness, crash, data or precision error, compatibility break, security, performance regression |
+| Wrong behaviour | correctness, crash, data or precision error, compatibility break, security a correct run hits (R6), performance regression |
 | Ineffective | the premise does not reproduce at the merge base, or the failure the PR names still happens at the head, or a check is dropped as covered by something that decides less — rules E1-E5 |
 | Desync | an operator-observable change the description never states; a title or description that does not match the diff at the current head |
 | Contract violation | the diff breaks a rule `AGENTS.md` states outright; the finding names the bullet and, for an ownership bullet, the module in this repo that already owns the concern |
@@ -69,7 +69,7 @@ as [`references/re-review.md`](references/re-review.md) says.
 Take every row of the index atop [`rules.md`](rules.md) whose trigger matches `files.txt`, a skim of `diff.txt`, or a
 `label:` line in `meta.txt`; write the union of their ids into `$WORK/rules.txt`, one per line, and read only those
 bodies. **Never read `rules.md` whole**: a reviewer told to attend to every rule attends to none. Match rows
-generously: a row you are unsure about is taken, never dropped. V1-V8, X2 and X9 are on every list, V2 and V7 without
+generously: a row you are unsure about is taken, never dropped. V1-V8, X2, X9 and R6 are on every list, V2, V7 and R6 without
 a verdict line; on a re-review, so are the rules of earlier findings that still hold.
 
 ## Step 2 — Semantic understanding

@@ -1,16 +1,16 @@
 # Using the dossier and profiler skills
 
-A campaign plans from two skills. The `dossier` skill says where the work is and ranks it, as a map
+A campaign plans from two skills. The `dossier-v1` skill says where the work is and ranks it, as a map
 of directions. The `profiler` skill measures where GPU time goes; the dossier's profile part and
 every re-profile rest on it. The main agent follows each skill's own file
-(`.claude/skills/dossier/SKILL.md`, `.claude/skills/profiler/SKILL.md`). This page is for the
+(`.claude/skills/dossier-v1/SKILL.md`, `.claude/skills/profiler/SKILL.md`). This page is for the
 person who sets a campaign up or uses the skills by hand: how to turn them on, what to give them,
 what to read back, and whether a dossier's directions can go into a pack
 ([below](#can-the-dossiers-directions-go-into-the-pack)).
 
 ## Turning them on
 
-- **List them in the pack:** `skills: [dossier, profiler]` in `pack.yaml`. The default-on list
+- **List them in the pack:** `skills: [dossier-v1, profiler]` in `pack.yaml`. The default-on list
   (`DEFAULT_ON_SKILLS`, `arbor/pack/loader.py`) is empty, so a pack that does not list a skill does
   not have it. The serving template (`packs/serving`) lists both.
 - **The dossier skill switches on map rounds** (`arbor/directions.py`) when the workload is not
@@ -24,6 +24,14 @@ what to read back, and whether a dossier's directions can go into a pack
 - **To confirm they loaded:** the program the agent reads lists them under "Skills". The serving
   template's knowledge asks the agent to say so in its first DONE line when they are missing.
 
+## Optional architecture-performance research
+
+A pack on the dossier family may add `architecture:performance` to its `lifecycle.load`.
+Arbor runs it after dossier parts 1–5 (`dossier:discover`) and before baseline/profiling
+(parts 6–7, `dossier:measure`). Its hypotheses inform the profile plan; parts 8 and
+11 reconcile them with observed dispatch and measured bottlenecks. Existing pack
+defaults remain unchanged. This copy leaves the family out (`VENDOR.md`).
+
 ## The dossier
 
 A dossier is written once per model, workload and GPU type, then refreshed part by part. It has
@@ -31,17 +39,40 @@ eleven parts: model, system, code reading, target, workload, baseline, profile, 
 optimizations, directions and fast bench. Part 11, the directions, ends with the
 map a campaign works.
 
+### The dossier family: the same dossier, written by five skills
+
+The `dossier` family (`.claude/skills/dossier/`) splits the flat `dossier-v1` skill into skills a pack
+loads, each placed in the lifecycle's chapters by its own metadata ([packs.md](packs.md)). The dossier
+on disk is the same: the same directory, index, part numbers and file names, so existing dossiers stay
+valid.
+
+| Skill | Mode, chapter | Writes |
+|---|---|---|
+| `dossier:read` | `use`, for the iteration agent | nothing: finds the dossier, reads it, cites it |
+| `dossier:discover` | `run`, `map.discover` | the index, parts 1-5 and 10 (no GPU) |
+| `dossier:measure` | `run`, `map.measure`, after discover | parts 6, 7, 8 (and 12), on the node; completes 1 and 3 |
+| `dossier:directions` | `run`, `map.directions` | part 11, ending in the map Arbor reads |
+| `dossier:update` | `run`, `round_end` | a round's `NN.uK` parts and the new map |
+
+- **What they share:** the rules, the template and `find-dossier.sh`, in `.claude/skills/dossier/shared/`.
+- **The checker:** `python3 -m arbor.dossier.check`, its part lists in `arbor/dossier/parts.py`.
+- **A pack that uses it** loads the writers and `dossier:read` in `lifecycle.load`. Their metadata
+  places the writers as `run` skills in the map's chapters and `dossier:read` as a `use` skill of
+  `iterate`. Arbor then runs each writer in a turn of its own and checks its files.
+- **The flat skill:** `.claude/skills/dossier-v1/` stays, unchanged, for packs that name it
+  (`skills: [dossier-v1]`), for one release. Its `check-dossier.py` runs the module.
+
 ### Where dossiers are, and how one is found
 
 - **In a repository:** `docs/dossier/<model>-<workload>-<gpu>/`. `README.md` is the index, with one
   file per part (`NN-<part>.md`) and one per part per update round (`NN.uK-<part>.md`).
-- **The lookup:** `bash .claude/skills/dossier/find-dossier.sh` lists every dossier the checkout can
+- **The lookup:** `bash .claude/skills/dossier-v1/find-dossier.sh` lists every dossier the checkout can
   see, each with its header (project, pins, platform, workload, date):
   - this checkout's `docs/dossier/`, and the enclosing project's when Arbor is a submodule;
-  - the dossiers campaigns have shared,
-    `/path/to/arbor-share/projects/<project>/<user>/<campaign>/knowledge/dossier/`. These are read in
-    place where the share is mounted, and through `ssh arbor-share` elsewhere.
-    `ARBOR_DOSSIER_NO_SHARE=1` skips them.
+  - the dossiers campaigns have shared, under the collectors' share
+    (`<share>/projects/<project>/<user>/<campaign>/knowledge/dossier/`; `ARBOR_SHARE_ROOT` and
+    `ARBOR_SHARE_HOST`, [reference.md](reference.md)). These are read in place where the share is
+    mounted, and over ssh to the share's host elsewhere. `ARBOR_DOSSIER_NO_SHARE=1` skips them.
 - **A match** is the same model, workload and GPU type. Different pins or another node class make
   some parts stale; they do not make the dossier missing. Another GPU type needs another dossier.
 
@@ -71,7 +102,7 @@ What you do:
   `docs/dossier/` on the branch the campaign runs from.
 - **While it runs:**
   - The map is in `<session>/directions.json`; the dashboard shows it as a checklist.
-  - A stop that waits for the operator writes `MAP_STOP.md`.
+  - A stop that waits for a person writes `MAP_STOP.md`.
   - Never edit `directions.json`: only the harness writes it, and a hand edit is undone.
 - **After it ends:** a dossier the campaign wrote or refreshed sits in the node's Arbor checkout,
   not in the repository. Bring it back either way:
@@ -93,8 +124,8 @@ for the skill by name, for example "/dossier: look up or write the dossier for `
 **Check it before a campaign relies on it:**
 
 ```bash
-python3 .claude/skills/dossier/check-dossier.py docs/dossier/<name>               # parts 01-11 and the index
-python3 .claude/skills/dossier/check-dossier.py docs/dossier/<name> --round u2    # one update round
+python3 .claude/skills/dossier-v1/check-dossier.py docs/dossier/<name>               # parts 01-11 and the index
+python3 .claude/skills/dossier-v1/check-dossier.py docs/dossier/<name> --round u2    # one update round
 python3 -m arbor.directions check docs/dossier/<name>/11-directions.md --dossier docs/dossier/<name>
 ```
 
@@ -183,7 +214,7 @@ The agent emits that list in its first iterations, and the map starts from it.
 - **A dossier written before map rounds has no `## Map` line.** A campaign that starts from it
   writes its own map from part 11's tables. To decide the list yourself, add the line.
 
-**Several campaigns, each on its own share:** use component mode, and give each campaign a
+**Several campaigns, each on its own share:** use component mode, and give each of them a
 `component.plan` from
 `python3 -m arbor.directions split <part 11 or directions.json> --shares N --out <dir>`
 ([hosts.md](hosts.md)).
@@ -199,6 +230,7 @@ has, each kill and whether it can be reopened, the bar, the lessons.
     told to emit part 11's list, and a second list in the knowledge gives it two to choose from.
   - **Which pack:** a pack made for that model and workload, never `packs/serving`. The serving
     template is used by every host workload that has no pack of its own.
-  - **Size:** keep it short. Knowledge is in the prompt, whole, at every iteration.
+  - **Size:** keep it short. Knowledge is in the prompt, whole, at every iteration; a hand-off of
+    tens of kilobytes is already long.
   - **Edits:** an edit reaches a running campaign at its next iteration. Knowledge is read each
     time the program is rendered; it is not pinned like the validator.
