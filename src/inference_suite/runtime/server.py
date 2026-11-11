@@ -61,10 +61,12 @@ class ServerLaunch:
 
 @dataclass(frozen=True)
 class Released:
-    """What releasing the round's server left: the ``server.log`` range copied in, and a teardown that fell short."""
+    """What releasing the round's server left: the ``server.log`` range copied in, a teardown that fell short, and the
+    return code of a server the round started and reaped (``None`` for one it left running or never started)."""
 
     log_range: LogRange | None
     teardown: Stop | None
+    returncode: int | None = None
 
 
 class Server:
@@ -167,6 +169,7 @@ class ServerLifecycle:
         self._gate = RoundGate(config.deadlines, cancel, time.monotonic())
         self._spawned: Spawned | None = None
         self._teardown_stop: Stop | None = None
+        self._returncode: int | None = None
 
     @property
     def mode(self) -> LifecycleMode:
@@ -189,7 +192,7 @@ class ServerLifecycle:
         if self._spawned is not None and self.mode is LifecycleMode.OWN:
             self._teardown_stop = self._teardown()
         own_log = self.mode in (LifecycleMode.OWN, LifecycleMode.EXTERNAL)
-        return Released(None if own_log else self._copy_log(), self._teardown_stop)
+        return Released(None if own_log else self._copy_log(), self._teardown_stop, self._returncode)
 
     def _reuse(self) -> Server | Stop:
         record = ServerPidfile.read(self._pidfile)
@@ -275,7 +278,9 @@ class ServerLifecycle:
         if spawned is None:
             return None
         self._clock.mark(Phase.TEARDOWN)
-        return _settle_pidfile(self._pidfile, spawned.reap())
+        reaped = spawned.reap()
+        self._returncode = spawned.proc.returncode
+        return _settle_pidfile(self._pidfile, reaped)
 
     def _copy_log(self) -> LogRange:
         copied = _copy_range(self._log, self._log_start, _size(self._log), self._layout.server_log)

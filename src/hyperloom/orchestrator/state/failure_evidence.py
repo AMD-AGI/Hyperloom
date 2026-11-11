@@ -78,7 +78,6 @@ FAILED_STEP_ERROR_CLASSES: Mapping[FailedStep, str] = {
     FailedStep.CLIENT_OUTPUT_MISSING: BENCHMARK_REPORT_MISSING,
     FailedStep.EVAL_FAILED: FailedStep.EVAL_FAILED.value,
     FailedStep.ROUND_TIMEOUT: FailedStep.ROUND_TIMEOUT.value,
-    FailedStep.DISK_FULL: FailedStep.DISK_FULL.value,
     FailedStep.TEARDOWN_INCOMPLETE: FailedStep.TEARDOWN_INCOMPLETE.value,
 }
 
@@ -97,7 +96,7 @@ _ENVIRONMENT_ERROR_CLASSES = frozenset(
     {
         "mn_server_restart_failed",
         HOST_GPUS_UNAVAILABLE,
-        FailedStep.DISK_FULL.value,
+        "disk_full",
         FailedStep.FRAMEWORK_VERSION_TOO_OLD.value,
         FailedStep.PORT_IN_USE.value,
         FailedStep.REUSE_NOT_OWNED.value,

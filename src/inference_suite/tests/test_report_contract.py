@@ -186,7 +186,6 @@ def test_failed_step_is_a_closed_list() -> None:
         "round_timeout",
         "deadline_exhausted",
         "cancelled",
-        "disk_full",
         "teardown_incomplete",
     }
     document = _document(_report(run_status=RunStatus.FAILED, failed_step=FailedStep.SERVER_DIED, fixed=None))
@@ -300,7 +299,7 @@ def test_power_valid_is_zero_or_one() -> None:
         Report.from_document(document)
 
 
-def test_a_report_written_before_the_power_section_and_token_counts_reads_them_as_null() -> None:
+def test_a_report_without_its_power_section_or_agentx_token_counts_is_refused() -> None:
     agentx = AgentxResult(
         counts={**dict.fromkeys(AGENTX_COUNT_KEYS, 1), "input_tokens": None, "output_tokens": None},
         throughput=dict.fromkeys(AGENTX_THROUGHPUT_KEYS),
@@ -309,12 +308,13 @@ def test_a_report_written_before_the_power_section_and_token_counts_reads_them_a
         stopped_by_threshold=False,
         fast_mode=False,
     )
-    report = _report(workload_kind=WorkloadKind.AGENTX, fixed=None, agentx=agentx)
-    document = _document(report)
-    del document["power"]
-    for key in ("input_tokens", "output_tokens"):
-        del document["agentx"]["counts"][key]
-    assert Report.from_document(document) == report
+    document = _document(_report(workload_kind=WorkloadKind.AGENTX, fixed=None, agentx=agentx))
+    without_power = {key: value for key, value in document.items() if key != "power"}
+    with pytest.raises(ReportError, match="missing power"):
+        Report.from_document(without_power)
+    del document["agentx"]["counts"]["input_tokens"]
+    with pytest.raises(ReportError, match="missing input_tokens"):
+        Report.from_document(document)
 
 
 def test_gpu_monitor_block_is_read_whole_by_the_host_gpu_artifact() -> None:

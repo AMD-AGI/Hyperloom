@@ -17,6 +17,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
+from hyperloom_common.power_energy import TimedRun
 from inference_suite.contracts.config import FixedWorkload, ServerConfig, SuiteConfig
 from inference_suite.contracts.launch import ClientInvocation
 from inference_suite.contracts.layout import RunLayout
@@ -27,6 +28,7 @@ from inference_suite.runtime.process import spawn
 from inference_suite.runtime.server import Server
 from inference_suite.runtime.watch import RoundGate, Stop, wait_child
 from inference_suite.staging import CLIENT_MODULE
+from inference_suite.telemetry.kv_poll import json_number
 
 #: The OpenAI-compatible request format every served framework answers.
 CLIENT_BACKEND = "vllm"
@@ -60,6 +62,9 @@ _RESULT_KEYS: Mapping[str, str] = {
 }
 #: The client's own request-count verdict, saved beside its metrics.
 _OUTCOME_KEY = "benchmark_outcome"
+#: The client stamps its timed run after loading its tokenizer and building its prompts, and before computing its
+#: metrics and writing its result; InferenceX bounds the run's energy by these.
+_TIMED_RUN_KEYS = ("benchmark_start_time_unix", "benchmark_end_time_unix", "duration")
 
 
 @dataclass(frozen=True)
@@ -168,9 +173,18 @@ def fixed_metrics(result: Mapping[str, object]) -> FixedMetrics:
     return FixedMetrics.of(measured)
 
 
+def timed_run(result: Mapping[str, object]) -> TimedRun | None:
+    """The client's timed run from its saved result; ``None`` when the result does not stamp it."""
+    start, end, duration = (json_number(result.get(key)) for key in _TIMED_RUN_KEYS)
+    if start is None or end is None or duration is None:
+        return None
+    return TimedRun(start, end, duration)
+
+
 @dataclass(frozen=True)
 class FixedOutcome:
-    """What the fixed load did: the client as it ran, its last exit code, its metrics, and why it failed, if it did.
+    """What the fixed load did: the client as it ran, its last exit code, its metrics, its timed run (the round's
+    measured window), and why it failed, if it did.
 
     A client that exits non-zero after saving its result (its own request-failure gate) leaves both metrics and a stop.
     """
@@ -179,6 +193,7 @@ class FixedOutcome:
     returncode: int | None
     metrics: FixedMetrics | None
     stop: Stop | None
+    timed: TimedRun | None = None
 
 
 class OutputActivity:
@@ -283,7 +298,7 @@ def run_fixed(fixed_round: FixedRound) -> FixedOutcome:
         metrics = fixed_metrics(result)
     except ReportError as exc:
         return FixedOutcome(invocation, returncode, None, Stop(FailedStep.CLIENT_OUTPUT_MISSING, str(exc)))
-    return FixedOutcome(invocation, returncode, metrics, stop)
+    return FixedOutcome(invocation, returncode, metrics, stop, timed_run(result))
 
 
 __all__ = [
@@ -301,5 +316,6 @@ __all__ = [
     "fixed_metrics",
     "measured_invocation",
     "run_fixed",
+    "timed_run",
     "warmup_pass",
 ]
