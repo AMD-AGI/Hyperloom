@@ -764,6 +764,8 @@ class SuiteConfig:
             raise ConfigError(f"a {kind.value} workload sets {expected or 'no workload section'}, got {present}")
         if kind is WorkloadKind.NONE and not (self.lifecycle.mode is LifecycleMode.BOOT or self.eval.enabled):
             raise ConfigError("a round with no workload boots a server or runs eval")
+        if kind is WorkloadKind.SCRIPTABLE and self.eval.enabled:
+            raise ConfigError("a scriptable round runs no eval: its script serves no endpoint lm-eval can query")
         if self.server.golden is GoldenUse.EXCLUDE and not (kind is WorkloadKind.NONE and self.eval.enabled):
             raise ConfigError("golden exclude is the accuracy round: no workload, eval enabled")
         if self.mlperf is not None and self.mlperf.model != self.server.served_model_name:

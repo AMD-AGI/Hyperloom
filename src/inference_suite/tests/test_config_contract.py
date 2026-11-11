@@ -131,12 +131,27 @@ def test_round_trip_through_json(config):
     assert SuiteConfig.from_document(document).to_document() == document
 
 
+_SCRIPT = ScriptableWorkload(params={"XDIT_NUM_STEPS": 28, "XDIT_GUIDANCE_SCALE": 4.0})
+
+
 def test_round_trip_fixed_and_scriptable():
     fixed = _config(workload=WorkloadKind.FIXED, agentx=None, fixed=_FIXED, profile=ProfileConfig(False))
-    script = ScriptableWorkload(params={"XDIT_NUM_STEPS": 28, "XDIT_GUIDANCE_SCALE": 4.0})
-    scriptable = _config(workload=WorkloadKind.SCRIPTABLE, agentx=None, scriptable=script, profile=ProfileConfig(False))
+    scriptable = _config(
+        workload=WorkloadKind.SCRIPTABLE, agentx=None, scriptable=_SCRIPT, profile=ProfileConfig(False)
+    )
     for config in (fixed, scriptable):
         assert SuiteConfig.from_document(json.loads(json.dumps(config.to_document()))) == config
+
+
+def test_a_scriptable_round_runs_no_eval():
+    with pytest.raises(ConfigError, match="a scriptable round runs no eval"):
+        _config(
+            workload=WorkloadKind.SCRIPTABLE,
+            agentx=None,
+            scriptable=_SCRIPT,
+            profile=ProfileConfig(False),
+            eval=_eval(),
+        )
 
 
 def _mlperf_config(**changes) -> SuiteConfig:

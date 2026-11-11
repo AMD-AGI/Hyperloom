@@ -19,6 +19,7 @@ from __future__ import annotations
 import hashlib
 import importlib.metadata
 import json
+import logging
 import math
 import os
 import sys
@@ -30,6 +31,7 @@ from pathlib import Path
 
 import yaml
 
+from hyperloom_common.amd_smi import AmdSmiError
 from hyperloom_common.gpu_telemetry import (
     GpuPhase,
     PowerRecorder,
@@ -81,6 +83,7 @@ from inference_suite.profile.agentx_window import AgentxWindow
 from inference_suite.profile.fixed_window import FixedWindow
 from inference_suite.profile.inject import WindowCapture, make_trace_dirs, profiler_layer, settle_traces
 from inference_suite.pins import LM_EVAL_DISTRIBUTION
+from inference_suite.runtime.gpus import amd_smi_cards
 from inference_suite.runtime.phases import Phase, PhaseClock, PhaseListener
 from inference_suite.runtime.process import spawn
 from inference_suite.runtime.server import Server, ServerLaunch, ServerLifecycle, server_url
@@ -88,6 +91,8 @@ from inference_suite.runtime.watch import POLL_SEC, Cancel, RoundGate, Stop, wai
 from inference_suite.telemetry.kv_poll import KvMetricsPoller
 from inference_suite.telemetry.kv_record import PHASES as KV_PHASES
 from inference_suite.telemetry.kv_record import KvMetricsRecorder, KvRound
+
+log = logging.getLogger(__name__)
 
 #: The eval process's request, beside the definition it was planned from.
 EVAL_REQUEST_FILE = "request.json"
@@ -108,6 +113,7 @@ _GPU_PHASES: Mapping[Phase, GpuPhase] = {
     Phase.EVAL_END: GpuPhase.FINISHED,
     Phase.TEARDOWN: GpuPhase.TEARDOWN,
 }
+_CLIENT_PROCESS_PHASES = (Phase.MEASURED, Phase.FINISHED)
 #: The ``config_envs`` key :class:`KvMetricsPoller` derives its ``/metrics`` URL from.
 _KV_BASE_URL_KEY = "BENCHMARK_BASE_URL"
 _COUNTED_LOADS = (WorkloadKind.FIXED.value, WorkloadKind.AGENTX.value, WorkloadKind.MLPERF.value)
@@ -148,22 +154,34 @@ def _write_config(config: SuiteConfig, layout: RunLayout) -> str:
     return hashlib.sha256(data).hexdigest()
 
 
-def _gpu_listener(recorder: PowerRecorder) -> PhaseListener:
+def _gpu_listener(recorder: PowerRecorder, workload: WorkloadKind) -> PhaseListener:
+    # A fixed round's marks bracket the client process, its setup and teardown included; the recorder takes its
+    # measured window from the client's own stamps instead (_Round._run_load).
+    skipped = _CLIENT_PROCESS_PHASES if workload is WorkloadKind.FIXED else ()
+
     def hear(phase: Phase, mono: float) -> None:
-        gpu_phase = _GPU_PHASES.get(phase)
+        gpu_phase = None if phase in skipped else _GPU_PHASES.get(phase)
         if gpu_phase is not None:
             recorder.note_phase(gpu_phase, mono)
 
     return hear
 
 
+def _power_cards(config: SuiteConfig) -> tuple[int, ...]:
+    """The amd-smi cards the recorder keys the server's GPUs by; none when they cannot be named, so the energy is
+    invalid rather than read off another card."""
+    try:
+        return amd_smi_cards(config.server.gpus)
+    except AmdSmiError as exc:
+        log.warning("the round's power is not measured: %s", exc)
+        return ()
+
+
 def _recorder(config: SuiteConfig, layout: RunLayout) -> PowerRecorder | None:
     telemetry = config.telemetry.gpu
     if not telemetry.enabled:
         return None
-    scope = RecorderScope(
-        gpus=tuple(config.server.gpus), external_server=config.lifecycle.mode is LifecycleMode.EXTERNAL
-    )
+    scope = RecorderScope(gpus=_power_cards(config), external_server=config.lifecycle.mode is LifecycleMode.EXTERNAL)
     timing = RecorderTiming(fast_sec=telemetry.interval_sec)
     return PowerRecorder(output_path=str(layout.power), scope=scope, timing=timing)
 
@@ -321,7 +339,9 @@ class _Round:
         self.config = config
         self.layout = layout
         self.kv = _KvSampler(server_url(config.server), layout)
-        self.clock = PhaseClock((self.kv.hear,) if gpu is None else (self.kv.hear, _gpu_listener(gpu)))
+        self.gpu = gpu
+        listeners = (self.kv.hear,) if gpu is None else (self.kv.hear, _gpu_listener(gpu, config.workload))
+        self.clock = PhaseClock(listeners)
         self.cancel = cancel
         self.started_unix = time.time()
         self.gate = RoundGate(config.deadlines, cancel, time.monotonic())
@@ -488,6 +508,7 @@ class _Round:
             server = self.config.server
             reused = self.config.lifecycle.mode.finds_server
             self.server = ServerFacts(server.host, server.port, server.served_model_name, reused, released.log_range)
+            self.codes = replace(self.codes, server=released.returncode)
             if released.teardown is not None:
                 self.fail(released.teardown)
             if self.capture is not None:
@@ -520,6 +541,8 @@ class _Round:
             return self._loaded(outcome.returncode, outcome.result, outcome.stop)
         if workload is WorkloadKind.FIXED:
             fixed = self._run_fixed(server, prepared)
+            if self.gpu is not None and fixed.timed is not None:
+                self.gpu.note_timed_run(fixed.timed)
             return self._loaded(fixed.returncode, fixed.metrics, fixed.stop)
         return True
 

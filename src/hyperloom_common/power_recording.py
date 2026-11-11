@@ -59,7 +59,8 @@ _DIGITS = 3
 class RecorderScope:
     """Which cards the recording is about, and on which server.
 
-    ``gpus`` are the cards the round configured; ``None`` finds them by the VRAM they hold. A round against an
+    ``gpus`` are the amd-smi indices of the cards the round configured, which every sample is keyed by; ``None`` finds
+    them by the VRAM they hold. A round against an
     external server records this host but measures no energy: the load ran on cards it does not see.
     """
 
@@ -109,6 +110,7 @@ class PowerRecording:
     errors: dict[str, dict[str, Any]] = field(default_factory=dict)
     vram_total_b: dict[int, float] = field(default_factory=dict)
     cpu_counted: dict[str, float | None] = field(default_factory=dict)
+    reported_duration_s: float | None = None
 
     def intervals(self, phase: str) -> tuple[tuple[float, float], ...]:
         """Every ``(start, end)`` the recording spent in ``phase``, on the monotonic clock."""
@@ -121,7 +123,7 @@ class PowerRecording:
         if not intervals:
             return None
         start, end = intervals[0][0] + self.unix_offset, intervals[-1][1] + self.unix_offset
-        return Window(MEASURED, intervals, start, end, self.scope.window_source)
+        return Window(MEASURED, intervals, start, end, self.scope.window_source, self.reported_duration_s)
 
     def _column(self, gpu: int, column: str, intervals: Sequence[tuple[float, float]]) -> list[tuple[float, Any]]:
         index = _FAST[column]

@@ -283,16 +283,12 @@ def test_a_base_whose_entrypoint_is_not_its_framework_server_is_refused():
     assert "server.framework_python" in refusal.detail
 
 
-def test_a_launch_document_without_an_entrypoint_ran_the_base_entrypoint():
-    launch = _launch()
-    recorded = replace(launch, entrypoint=launch.base.entrypoint)
-    document = recorded.to_document()
+def test_a_launch_document_without_an_entrypoint_is_refused():
+    document = _launch().to_document()
     del document["entrypoint"]
 
-    again = Launch.from_document(json.loads(json.dumps(document)))
-    assert again == recorded
-    assert again.argv[:3] == ("python3", "-m", "sglang.launch_server")
-    assert again.digest() == document["digest"]
+    with pytest.raises(LaunchError, match="entrypoint"):
+        Launch.from_document(json.loads(json.dumps(document)))
 
 
 def test_round_trip_through_json_keeps_the_launch_and_its_digest():

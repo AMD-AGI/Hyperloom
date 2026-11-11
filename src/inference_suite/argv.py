@@ -1,10 +1,7 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""Server argv as text: JSON-preserving tokenization, flag lookup, JSON normalization and removal.
-
-The one place these semantics live; Hyperloom's ``grid_server_args`` builds its composition on them.
-"""
+"""Server argv as text: JSON-preserving tokenization, flag lookup, JSON normalization and removal."""
 
 from __future__ import annotations
 
