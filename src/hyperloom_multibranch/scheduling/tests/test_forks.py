@@ -267,6 +267,27 @@ async def test_shares_take_the_slots_their_mapping_branch_held_and_outlive_its_s
     assert {row["kind"] for row in _logged(tmp_path)} == {"share"}
 
 
+async def test_a_fork_queued_while_its_mapping_branch_maps_takes_neither_the_held_slot_nor_the_mapping_slot(
+    tmp_path: Path,
+) -> None:
+    # b01 maps for two Arbors in a session of three slots: it holds one, b02 takes the last, and b02's fork queues.
+    roster, desk = _desk(tmp_path, max_branches=3)
+    roster.hold("b01", 1)
+    roster.open(roster.next_branch_id(), origin=BranchOrigin.FIRST_BATCH, start_commit="c0", k=1)
+    fork = await desk.admit(ForkRequest("b02", "c1", "fp8 fix regresses"))
+    assert fork.status is AdmissionStatus.PENDING
+
+    first, last = [await desk.admit_share(ShareRequest("b01", "c0", "/agents/arbor", f"/s/{n}.json")) for n in (1, 2)]
+
+    assert first.status is AdmissionStatus.ACCEPTED
+    assert last.status is AdmissionStatus.PENDING
+    assert [pending.branch for pending in desk.pending()] == [last.branch, fork.branch]
+    roster.stop("b01", BranchStop(StopCause.GAVE_UP, "the map is made and handed out", CLOCK.now()))
+    desk.fill_free_slots()
+    assert [admitted.branch for admitted in desk.waiting()] == [first.branch, last.branch]
+    assert [pending.branch for pending in desk.pending()] == [fork.branch]
+
+
 async def test_a_hold_survives_a_restart_of_the_roster_and_goes_with_its_branch_s_stop(tmp_path: Path) -> None:
     roster, _desk_ = _desk(tmp_path, max_branches=3)
     roster.hold("b01", 2)

@@ -13,14 +13,18 @@ knowledge is (``sanitize_shared_knowledge``). :func:`decision_calls` reads them 
 from __future__ import annotations
 
 import json
+import logging
 import re
 from collections.abc import Mapping
 from pathlib import Path
 
 from hyperloom_common.jsonio import read_jsonl
+from hyperloom_common.shared_storage import ownership
 from hyperloom.orchestrator.knowledge.remote_recipe.sanitize import sanitize_shared_knowledge
 from hyperloom_multibranch.blackboard.local.files import encode_json, publish_once
 from hyperloom_multibranch.blackboard.rsi.archive import TreeArchive
+
+log = logging.getLogger(__name__)
 
 DECISIONS_FORMAT = "multibranch.judge-decisions"
 #: What each archived exchange keeps of the transcript's line.
@@ -45,11 +49,17 @@ def archive_decisions(transcript: Path, archive: TreeArchive, session_id: str) -
 
 def decision_calls(archive: TreeArchive, session_id: str) -> tuple[Mapping[str, object], ...]:
     """The judge's exchanges of ``session_id`` the archive keeps; none when it keeps none, or not as this module
-    writes them."""
+    writes them, and none, with a warning naming the file, its owner and its mode, when this account cannot open it."""
 
+    path = _path(archive, session_id)
     try:
-        document = json.loads(_path(archive, session_id).read_text(encoding="utf-8"))
-    except (OSError, ValueError):
+        document = json.loads(path.read_text(encoding="utf-8"))
+    except FileNotFoundError:
+        return ()
+    except OSError as exc:
+        log.warning("skipping unreadable judge decisions %s%s: %s", path, ownership(path), exc.strerror or exc)
+        return ()
+    except ValueError:
         return ()
     calls = document.get(_CALLS) if isinstance(document, dict) and document.get("format") == DECISIONS_FORMAT else ()
     return tuple(call for call in calls or () if isinstance(call, Mapping))
