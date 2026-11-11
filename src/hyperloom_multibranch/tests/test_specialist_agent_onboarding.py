@@ -4,6 +4,7 @@
 import asyncio
 import json
 import os
+import stat
 import subprocess
 import sys
 from dataclasses import replace
@@ -391,6 +392,138 @@ def test_the_docker_shim_reads_a_device_mask_the_agent_gives_as_indices_into_its
     assert visible("CUDA_VISIBLE_DEVICES", "").stdout.strip() == "0,1/5,7"
     refused = visible("ROCR_VISIBLE_DEVICES", "2")
     assert refused.returncode != 0 and "card" in refused.stderr
+
+
+# -- the agent's directory is the group's, and its checkout's config is not this host's ------------------------------
+def _mode(path: Path) -> int:
+    return stat.S_IMODE(os.lstat(path).st_mode)
+
+
+def _vendored(tmp_path: Path) -> Path:
+    """A source tree outside git: a ``0755`` package with a ``0644`` module and a ``0755`` script."""
+    tree = tmp_path / "vendored"
+    (tree / "pkg").mkdir(parents=True)
+    for name, mode in (("run.py", 0o644), ("run.sh", 0o755)):
+        (tree / "pkg" / name).write_text("x", encoding="utf-8")
+        (tree / "pkg" / name).chmod(mode)
+    for directory in (tree / "pkg", tree):
+        directory.chmod(0o755)
+    return tree
+
+
+async def _copy_under_umask_022(tree: Path, checkout: Path) -> None:
+    previous = os.umask(0o022)
+    try:
+        await fetch_source(str(tree), checkout)
+    finally:
+        os.umask(previous)
+
+
+async def test_a_clone_and_a_copy_are_the_group_s_to_write_and_the_shim_is_replaced_by_rename(tmp_path: Path) -> None:
+    tmp_path.chmod(0o2775)  # storage set up to be shared: setgid, group-writable, closed to others
+    repo, tree = _agent_repo(tmp_path), _vendored(tmp_path)
+
+    await fetch_source(str(repo), tmp_path / "agent" / "cloned")
+    await fetch_source(str(tree), tmp_path / "agent" / "copied")
+    shim = Path(agent_env(tmp_path / "agent")["PATH"].split(os.pathsep)[0]) / "docker"
+    (tmp_path / "earlier-shim").hardlink_to(shim)
+    agent_env(tmp_path / "agent")
+
+    for checkout in (tmp_path / "agent" / "cloned", tmp_path / "agent" / "copied"):
+        assert _mode(checkout) & 0o070 == 0o070, checkout
+        assert _mode(checkout / ".git" / "objects") & 0o070 == 0o070, checkout
+    assert _mode(tmp_path / "agent" / "copied" / "pkg") & 0o2070 == 0o2070
+    assert _mode(tmp_path / "agent" / "copied" / "pkg" / "run.py") & 0o060 == 0o060
+    assert _mode(tmp_path / "agent") == 0o2775 and _mode(shim.parent) == 0o2775 and _mode(shim) == 0o755
+    assert (tmp_path / "earlier-shim").stat().st_ino != shim.stat().st_ino, "replaced by rename, never written in place"
+
+
+async def test_a_copy_into_a_new_agent_directory_on_shared_storage_is_the_group_s_to_write(tmp_path: Path) -> None:
+    tmp_path.chmod(0o2775)
+    await _copy_under_umask_022(_vendored(tmp_path), tmp_path / "agent" / "copied")
+
+    assert _mode(tmp_path / "agent") == 0o2775
+    assert _mode(tmp_path / "agent" / "copied" / "pkg") == 0o2775
+    assert _mode(tmp_path / "agent" / "copied" / "pkg" / "run.py") == 0o664
+    assert _mode(tmp_path / "agent" / "copied" / "pkg" / "run.sh") == 0o775
+
+
+def _private(tmp_path: Path) -> tuple[Path, Path]:
+    """A ``0700`` directory and a ``0600`` file outside the agent's directory, the account's own."""
+    secret = tmp_path / "private"
+    secret.mkdir(mode=0o700)
+    (secret / "key").write_text("k", encoding="utf-8")
+    (secret / "key").chmod(0o600)
+    secret.chmod(0o700)
+    return secret, secret / "key"
+
+
+@pytest.mark.parametrize("shared", [True, False], ids=["shared", "private"])
+async def test_a_copy_follows_no_link_at_the_checkout_s_name(tmp_path: Path, shared: bool) -> None:
+    tmp_path.chmod(0o2775 if shared else 0o755)
+    secret, key = _private(tmp_path)
+    agent = tmp_path / "agent"
+    agent.mkdir()
+    agent.chmod(0o2775 if shared else 0o755)
+    (agent / "copied").symlink_to(secret)
+    tree = _vendored(tmp_path)
+
+    with pytest.raises(OSError):
+        await _copy_under_umask_022(tree, agent / "copied")
+
+    assert (_mode(secret), _mode(key)) == (0o700, 0o600)
+    assert sorted(path.name for path in secret.iterdir()) == ["key"]
+
+
+async def test_a_link_in_the_source_tree_is_copied_as_the_link(tmp_path: Path) -> None:
+    tmp_path.chmod(0o2775)
+    secret, key = _private(tmp_path)
+    tree = _vendored(tmp_path)
+    (tree / "pkg" / "to-dir").symlink_to(secret)
+    (tree / "pkg" / "to-file").symlink_to(key)
+    checkout = tmp_path / "agent" / "copied"
+
+    await _copy_under_umask_022(tree, checkout)
+
+    for name, target in (("to-dir", secret), ("to-file", key)):
+        assert (checkout / "pkg" / name).is_symlink() and (checkout / "pkg" / name).readlink() == target
+    assert (_mode(secret), _mode(key)) == (0o700, 0o600)
+    assert (_mode(checkout), _mode(checkout / "pkg"), _mode(checkout / "pkg" / "run.py")) == (0o2775, 0o2775, 0o664)
+
+
+async def test_a_copy_outside_shared_storage_takes_the_tree_s_modes_under_the_umask(tmp_path: Path) -> None:
+    tmp_path.chmod(0o755)
+    await _copy_under_umask_022(_vendored(tmp_path), tmp_path / "agent" / "copied")
+
+    assert _mode(tmp_path / "agent" / "copied" / "pkg") == 0o755
+    assert _mode(tmp_path / "agent" / "copied" / "pkg" / "run.py") == 0o644
+    assert _mode(tmp_path / "agent" / "copied" / "pkg" / "run.sh") == 0o755
+
+
+@pytest.mark.parametrize("umask", [0o022, 0o002], ids=oct)
+async def test_a_copy_outside_shared_storage_is_copytree_s_with_links_followed_and_modes_kept(
+    tmp_path: Path, umask: int
+) -> None:
+    tmp_path.chmod(0o755)
+    secret, key = _private(tmp_path)
+    tree = _vendored(tmp_path)
+    (tree / "pkg" / "up").symlink_to(Path("..", "..", secret.name))
+    (tree / "own").mkdir(mode=0o700)
+    (tree / "own" / "key").write_text("k", encoding="utf-8")
+    (tree / "own" / "key").chmod(0o600)
+    (tree / "own").chmod(0o700)
+    checkout = tmp_path / "agent" / "copied"
+
+    previous = os.umask(umask)
+    try:
+        await fetch_source(str(tree), checkout)
+    finally:
+        os.umask(previous)
+
+    up = checkout / "pkg" / "up"
+    assert not up.is_symlink() and (up / "key").read_text(encoding="utf-8") == "k", "the link's target is copied"
+    copied = (up, up / "key", checkout / "own", checkout / "own" / "key", checkout / "pkg" / "run.py")
+    assert [_mode(path) for path in copied] == [0o700, 0o600, 0o700, 0o600, 0o644]
 
 
 @pytest.mark.skipif(os.geteuid() != 0, reason="a checkout of another owner needs root to chown")

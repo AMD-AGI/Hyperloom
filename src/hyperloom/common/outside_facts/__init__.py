@@ -99,6 +99,9 @@ __all__ = [
     "SGLANG_IMAGE_WORKSPACE",
     "SHORT_PROMPT_CHECK",
     "SHORT_PROMPT_TOUCH",
+    "TORCH_MEMORY_SNAPSHOT_FRAME",
+    "TORCH_SYMBOLIZE_BY_LOADER",
+    "TORCH_SYMBOLIZE_MODE_ENV",
     "TRANSFORMERS_DOES_NOT_RECOGNIZE",
     "TRANSFORMERS_UNKNOWN_ARCHITECTURE",
     "TUNABLEOP_ENABLED_ENV",
@@ -184,6 +187,11 @@ PY_MODULE_NOT_FOUND_ERROR = _import_errors["module_not_found_error"]
 _graph_replay = _PACK.env_default("hip_graph_packet_capture")
 HIP_GRAPH_PACKET_CAPTURE_ENV = _graph_replay.name
 HIP_GRAPH_PACKET_CAPTURE_NODE_BY_NODE = _graph_replay.value
+
+_symbolize = _PACK.env_default("torch_symbolize_mode")
+TORCH_SYMBOLIZE_MODE_ENV = _symbolize.name
+TORCH_SYMBOLIZE_BY_LOADER = _symbolize.value
+TORCH_MEMORY_SNAPSHOT_FRAME = _PACK.pattern("torch_memory_snapshot_frame")
 
 ROCR_VISIBLE_DEVICES_ENV = _PACK.names("rocr_visible_devices", "env")["env"]
 

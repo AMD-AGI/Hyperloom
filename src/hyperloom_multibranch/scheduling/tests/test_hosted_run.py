@@ -8,8 +8,12 @@ onto ``run`` is pinned through the command in ``test_cli``."""
 from __future__ import annotations
 
 import json
+import os
 import signal
+import stat
+import subprocess
 import threading
+from collections.abc import Iterator
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
@@ -28,6 +32,7 @@ from hyperloom_multibranch.scheduling.hosted_run import (
     record_session,
     recorded_session,
     run_argv,
+    share_with_the_group,
     write_final_exit,
 )
 
@@ -97,20 +102,45 @@ def test_the_host_reads_a_final_ending_and_the_session_a_restart_finishes(tmp_pa
     assert exit_document == {"final": True, "returncode": 2, "error": "multibranch.workload is missing"}
 
 
+def _document(**multibranch: object) -> dict[str, object]:
+    return {
+        "schema": "hyperloom.campaign-spec/v1",
+        "flow": "multibranch",
+        "model": {"path": "/models/Llama-3-8B"},
+        "framework": {"name": "vllm", "image": "registry.example/vllm@sha256:" + "2" * 64},
+        "hardware": {"gpu_type": "mi355x", "tp": 1},
+        "workload": {"conc": 16, "isl": 1024, "osl": 512, "precision": "fp8"},
+        "budget": {"max_hours": 1},
+        "placement": {"profile": "hosted-gpu", "measurement": "hosted"},
+        "multibranch": {"workload": "inferencex", **multibranch},
+    }
+
+
 def _spec(**multibranch: object) -> CampaignSpec:
-    return parse_campaign(
-        {
-            "schema": "hyperloom.campaign-spec/v1",
-            "flow": "multibranch",
-            "model": {"path": "/models/Llama-3-8B"},
-            "framework": {"name": "vllm", "image": "registry.example/vllm@sha256:" + "2" * 64},
-            "hardware": {"gpu_type": "mi355x", "tp": 1},
-            "workload": {"conc": 16, "isl": 1024, "osl": 512, "precision": "fp8"},
-            "budget": {"max_hours": 1},
-            "placement": {"profile": "hosted-gpu", "measurement": "hosted"},
-            "multibranch": {"workload": "inferencex", **multibranch},
-        }
-    )
+    return parse_campaign(_document(**multibranch))
+
+
+@pytest.mark.parametrize(
+    ("launch", "named"),
+    [
+        ({"server_args": "--mem-fraction-static 0.8"}, "does not read launch.server_args:"),
+        ({"extra_env": {"AITER_BF16_FP8_MOE_BOUND": "0"}}, "does not read launch.extra_env:"),
+        ({"server_args": "--enforce-eager", "extra_env": {}}, "does not read launch.server_args or launch.extra_env:"),
+    ],
+    ids=["server-args", "extra-env", "both"],
+)
+def test_a_spec_whose_launch_a_multibranch_run_would_not_read_is_refused_naming_the_field(
+    launch: dict[str, object], named: str
+) -> None:
+    spec = parse_campaign({**_document(), "launch": launch})
+
+    with pytest.raises(HostedRefused, match=named) as refused:
+        run_argv(spec, 1.0, 1)
+    assert "its base launch is resolved from the recipe sources" in str(refused.value)
+
+
+def test_a_spec_without_a_launch_section_maps_onto_run() -> None:
+    assert "--workload=inferencex" in run_argv(_spec(), 1.0, 1)
 
 
 @pytest.mark.parametrize(
@@ -132,3 +162,42 @@ def test_the_operator_turns_make_before_break_on_or_off_in_the_spec(
 def test_a_make_before_break_that_is_not_true_or_false_is_refused(given: object) -> None:
     with pytest.raises(HostedRefused, match="multibranch.make_before_break must be true or false"):
         run_argv(_spec(make_before_break=given), 1.0, 8)
+
+
+@pytest.fixture
+def umask_022() -> Iterator[None]:
+    """This process under umask 022, the usual default, which is restored after the test."""
+    saved = os.umask(0o022)
+    try:
+        yield
+    finally:
+        os.umask(saved)
+
+
+def _made_by_a_child(directory: Path) -> tuple[int, int]:
+    """The modes of the file and the directory a child process makes in ``directory`` with the default modes."""
+    subprocess.run(["sh", "-c", "touch file && mkdir dir"], cwd=directory, check=True)
+    return stat.S_IMODE((directory / "file").stat().st_mode), stat.S_IMODE((directory / "dir").stat().st_mode)
+
+
+@pytest.mark.usefixtures("umask_022")
+def test_below_shared_storage_the_children_of_a_hosted_run_write_what_the_group_can_write(tmp_path: Path) -> None:
+    # A later leg of the run may be another account of the group: what Arbor or an agent writes there is its too.
+    root = tmp_path / "MB-session"
+    root.mkdir()
+    root.chmod(0o2775)
+
+    share_with_the_group(root)
+
+    assert _made_by_a_child(root) == (0o664, 0o2775)
+
+
+@pytest.mark.usefixtures("umask_022")
+def test_off_shared_storage_the_children_of_a_hosted_run_keep_the_umask(tmp_path: Path) -> None:
+    root = tmp_path / "MB-session"
+    root.mkdir(0o755)
+
+    share_with_the_group(root)
+
+    assert _made_by_a_child(root) == (0o644, 0o755)
+    assert os.umask(0o022) == 0o022

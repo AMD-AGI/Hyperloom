@@ -27,6 +27,7 @@ from hyperloom.measure.failures import (
     HUB_RATE_LIMITED,
     INFRA_ERROR_CLASSES,
     JIT_BUILD_TIMEOUT,
+    PROFILER_SNAPSHOT_FAILED,
     TEST_TIMEOUT_REASON,
     classify_test_failure,
 )
@@ -326,3 +327,71 @@ async def test_a_sweep_that_ran_out_of_time_is_not_rerun(kind, runs, validity) -
     assert result.validity is validity and result.failure_class is FailureClass.UNCLEAR
     assert result.failure_reason == TEST_TIMEOUT_REASON
     assert reported == [], "a timeout is held against neither node"
+
+
+class _ClassifyingExecutor(_ScriptedExecutor):
+    """Ends every attempt with what :func:`classify_test_failure` makes of ``log``, as the executors record it."""
+
+    def __init__(self, log: str) -> None:
+        super().__init__("unused")
+        self.log = log
+
+    async def run(self, job: TestJob) -> TestResult:
+        self.jobs.append(job)
+        verdict = classify_test_failure(returncode=1, logs=(self.log,))
+        infra = verdict.failure_class is FailureClass.INFRA
+        return TestResult(
+            request_id="r1",
+            validity=Validity.MEASUREMENT_FAILED if infra else Validity.CANDIDATE_FAILED,
+            failure_class=verdict.failure_class,
+            failure_reason=verdict.failure_reason,
+            sandbox=SandboxFacts(sandbox_id=f"s{job.attempt}", node_name=f"n{job.attempt}"),
+        )
+
+
+async def _profile(log: str) -> tuple[TestResult, _ClassifyingExecutor, list[str]]:
+    executor = _ClassifyingExecutor(log)
+    reported: list[str] = []
+
+    async def on_node_failure(node: str, _reason: str, _reproduced: bool) -> None:
+        reported.append(node)
+
+    runner = AttemptRunner(executor, avoid=frozenset, on_node_failure=on_node_failure, max_infra_retries=3)
+    job = _job()
+    job = replace(job, request=replace(job.request, kind=TestKind.PROFILE, purpose=Purpose.PROFILE))
+    return await runner.run(job), executor, reported
+
+
+#: A profile's server that died in the profiler's memory-snapshot dump after the capture wrote its traces.
+_SNAPSHOT_LOG = (
+    '  File "/sgl-workspace/sglang/python/sglang/srt/model_executor/runner/decode_cuda_graph_runner.py", line 872, '
+    "in _post_process_after_profile\n"
+    '    torch.cuda.memory._dump_snapshot("cuda_graph_runner_memory_usage.pickle")\n'
+    '  File "/opt/venv/lib/python3.10/site-packages/torch/cuda/memory.py", line 1059, in _dump_snapshot\n'
+    "    s = _snapshot()\n"
+    '  File "/opt/venv/lib/python3.10/site-packages/torch/cuda/memory.py", line 1043, in _snapshot\n'
+    "    return _C._cuda_memorySnapshot(None)\n"
+    "RuntimeError: stoi\n"
+    "Exception: Capture cuda graph failed: stoi\n"
+)
+
+
+async def test_a_profile_that_died_in_the_profilers_snapshot_dump_ends_unmeasured_not_against_the_candidate() -> None:
+    result, executor, reported = await _profile(_SNAPSHOT_LOG)
+
+    assert len(executor.jobs) == 1, "every sandbox of the image dies in the same dump"
+    assert result.validity is Validity.MEASUREMENT_FAILED and result.failure_class is FailureClass.INFRA
+    assert result.failure_reason == f"{PROFILER_SNAPSHOT_FAILED}: RuntimeError: stoi"
+    assert reported == [], "the image's profiler, not the node, failed"
+
+
+async def test_a_profile_whose_candidate_crashed_is_still_a_candidate_failure() -> None:
+    crash = (
+        "torch.AcceleratorError: HIP error: an illegal memory access was encountered\n"
+        "Search for `hipErrorIllegalAddress' for more information.\n"
+    )
+
+    result, executor, _ = await _profile(_SNAPSHOT_LOG + crash)
+
+    assert len(executor.jobs) == 1
+    assert result.validity is Validity.CANDIDATE_FAILED and result.failure_class is FailureClass.CANDIDATE

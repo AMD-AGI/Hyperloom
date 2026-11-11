@@ -10,8 +10,10 @@ the legacy entry validated, a multi-branch session needs ``multibranch.workload`
 ``multibranch.dev_leases`` ``--dev-leases``, each source of ``multibranch.autonomous_agents`` one
 ``--autonomous-agent``, ``multibranch.make_before_break`` (``true`` by default) ``--make-before-break`` or
 ``--no-make-before-break``, and ``placement.max_parallel_tests`` is ``--max-parallel-tests``, at most what the grant
-runs at once. The fields ``run`` has no option for -- ``objective``, ``launch``, ``options``, ``placement.profile`` and
-``placement.specialist_capacity`` -- are not read. Dev sandboxes and agents run in ``dev`` sandboxes of the grant, so
+runs at once. The fields ``run`` has no option for -- ``objective``, ``options``, ``placement.profile`` and
+``placement.specialist_capacity`` -- are not read. A spec that sets ``launch.server_args`` or ``launch.extra_env`` is
+refused rather than run without them: a multi-branch session resolves its base launch from the recipe sources, as
+``run`` does, and reads neither (:func:`run_argv`). Dev sandboxes and agents run in ``dev`` sandboxes of the grant, so
 they need its ``dev`` key and the session directory on the storage ``USER_DATA_PATH`` names, which the ``dev``
 template mounts at the same path (:func:`refuse_unhosted_branches`).
 Every test, PRELUDE's included, runs in a measurement sandbox, so the application's container needs no card:
@@ -24,30 +26,36 @@ that grace.
 The host decides from ``$HYPERLOOM_STATE_DIR/exit.json`` whether to start the run again: never once it holds
 ``final: true`` (:func:`write_final_exit`), and again when it is missing. ``session.json`` there names the session
 directory as soon as it exists (:func:`record_session`), so a start that finds it finishes that session instead of
-starting another. The two file names and their fields are the legacy entry's, ``hyperloom.hosted.entry``, which this
-package does not import: importing it loads the legacy flow's state.
+starting another, once that session got through PRELUDE; one that ended before its baseline was recorded is closed,
+which ends the measurement sandboxes it left, and the spec's session starts again. The two file names and their fields
+are the legacy entry's, ``hyperloom.hosted.entry``, which this package does not import: importing it loads the legacy
+flow's state.
 """
 
 from __future__ import annotations
 
 import json
+import logging
 import os
 import signal
 import threading
 from dataclasses import dataclass
 from datetime import datetime
-from collections.abc import Mapping
+from collections.abc import Callable, Mapping
 from pathlib import Path
 from typing import Any
 
 from hyperloom_common.io import WriteOptions, atomic_write_json
+from hyperloom_common.shared_storage import child_umask, ownership
 from hyperloom.hosted.campaign import CampaignSpec, parse_campaign
 from hyperloom.hosted.host_info import GrantLimits as HostGrantLimits
 from hyperloom.hosted.host_info import HostInfo, Var
 from hyperloom.inference_optimizer.session.paths import ENV_USER_DATA_PATH
 from hyperloom_multibranch.scheduling.budget import MB_CLOSE_GRACE_CAP_SECONDS, MB_SECONDS_PER_HOUR
 from hyperloom_multibranch.scheduling.layout import SessionLayout
+from hyperloom_multibranch.scheduling.lifecycle import PersistedRun, persisted_run, persisted_session, prelude_landed
 from hyperloom_multibranch.scheduling.settings import RunSettings
+from hyperloom_multibranch.scheduling.stops import SessionStopReason
 from hyperloom_multibranch.toolbox.hosted_leases import GrantLimits
 
 # hyperloom/hosted/entry.py EXIT_FILE and SESSION_FILE
@@ -55,8 +63,12 @@ EXIT_FILE = "exit.json"
 SESSION_FILE = "session.json"
 #: Seconds between the session's hard stop and the grant's end, for the process to write ``exit.json`` and exit.
 GRANT_MARGIN_SECONDS = 60.0
-_DURABLE = WriteOptions(fsync=True)
+#: ``exit.json`` and ``session.json`` reach the disk before their names, and are ``664``: the run's next leg, maybe
+#: another account of the group, reads ``session.json`` to finish the session it names.
+_DURABLE = WriteOptions(fsync=True, shared=True)
 _ENCODING = "utf-8"
+
+log = logging.getLogger(__name__)
 
 
 class HostedRefused(ValueError):
@@ -75,10 +87,12 @@ def run_argv(spec: CampaignSpec, max_hours: float, parallel_tests: int) -> list[
     tests at once; every value is written ``--option=value`` so that one starting with ``-`` is no option.
 
     Raises:
-        HostedRefused: When the spec lacks what a multi-branch session needs, naming each missing field.
+        HostedRefused: When the spec lacks what a multi-branch session needs, naming each missing field, or sets a
+            launch field the session would not read.
     """
 
     section = _multibranch_section(spec.multibranch)
+    _refuse_launch_fields(spec)
     values: dict[str, Any] = {
         "model": spec.model_path,
         "framework": spec.framework_name,
@@ -136,6 +150,19 @@ def _make_before_break(section: Mapping[str, Any]) -> bool | None:
     return keep
 
 
+def _refuse_launch_fields(spec: CampaignSpec) -> None:
+    given = [
+        field
+        for field, value in (("launch.server_args", spec.server_args), ("launch.extra_env", spec.extra_env))
+        if value is not None
+    ]
+    if given:
+        raise HostedRefused(
+            f"a multibranch run does not read {' or '.join(given)}: its base launch is resolved from the recipe sources"
+            " (InferenceX, the framework's cookbook, the default table), as hyperloom-multibranch run resolves it"
+        )
+
+
 def _agent_sources(sources: object) -> list[str]:
     if sources is None:
         return []
@@ -173,6 +200,21 @@ def _multibranch_section(section: object) -> dict[str, Any]:
     if not isinstance(section, dict):
         raise HostedRefused("multibranch must be an object")
     return section
+
+
+def grant_tests_that_fit(host: HostInfo, make_before_break: bool = True) -> Callable[[int], int]:
+    """How many tests of a TP the grant ``host`` holds runs at once, as the hosted toolbox runs them (``handover_for``
+    with ``make_before_break``); raises ValueError when one does not fit, ImportError without the ``hosted`` extra."""
+
+    # hosted_toolbox loads the sandbox SDK, which only the hosted extra installs.
+    from hyperloom_multibranch.toolbox.hosted_toolbox import handover_for, parallel_tests_for
+
+    grant = toolbox_grant(host.grant_limits)
+
+    def tests_that_fit(tp: int) -> int:
+        return parallel_tests_for(grant, tp, handover_for(grant, tp) if make_before_break else None)
+
+    return tests_that_fit
 
 
 def toolbox_grant(limits: HostGrantLimits | None) -> GrantLimits | None:
@@ -270,14 +312,94 @@ def record_session(state_dir: Path, root: Path) -> None:
     atomic_write_json(state_dir / SESSION_FILE, {"session_dir": str(root)}, options=_DURABLE)
 
 
-def recorded_session(state_dir: Path) -> Path | None:
-    """The session directory an earlier start of the run named, ``None`` when none did."""
+def share_with_the_group(root: Path) -> None:
+    """Below shared storage, run the rest of this process under the umask of a child that writes below the session
+    directory ``root`` (:func:`~hyperloom_common.shared_storage.child_umask`), so every process it starts here, the
+    commands of its local agent sandboxes among them, inherits it: what Arbor, an agent or a tool writes there with the
+    default modes stays writable by the group, whose other accounts may run the run's next leg. A remote sandbox's
+    commands run in another container and take the umask from its launcher instead. Elsewhere the umask is left as
+    it is."""
 
+    umask = child_umask(root)
+    if umask != -1:
+        os.umask(umask)
+
+
+def started_session(state_dir: Path, root: Path) -> None:
+    """Take the session just created in ``root`` as the run's, before anything is built in it: shared with the group
+    (:func:`share_with_the_group`), printed on one stdout line and named in ``session.json`` (:func:`record_session`)."""
+
+    share_with_the_group(root)
+    print(root, flush=True)
+    record_session(state_dir, root)
+
+
+def recorded_session(state_dir: Path) -> Path | None:
+    """The session directory an earlier start of the run named, ``None`` when none did.
+
+    Raises:
+        HostedRefused: When this account cannot read ``session.json``, naming it with its owner and mode: an earlier
+            leg of another account wrote it owner-only, and a restart would meet the same file.
+    """
+
+    path = state_dir / SESSION_FILE
     try:
-        text = (state_dir / SESSION_FILE).read_text(encoding=_ENCODING)
+        text = path.read_text(encoding=_ENCODING)
     except FileNotFoundError:
         return None
+    except PermissionError as exc:
+        raise HostedRefused(f"this account cannot read {path}{ownership(path)}: {exc.strerror}") from None
     return Path(json.loads(text)["session_dir"])
+
+
+@dataclass(frozen=True)
+class EarlierSession:
+    """The session an earlier start of the run began: ``finish``, which a restart finishes, when it got through
+    PRELUDE; ``left``, which a restart closes before it starts the spec's session again, when it committed its root
+    and ended before its baseline was recorded without closing, or was closed by such a restart; ``closed``, the
+    directory of one that closed on its own before its baseline was recorded, which ended the run; none of them when
+    there was none or it committed no root, and so started no test."""
+
+    finish: PersistedRun | None = None
+    left: PersistedRun | None = None
+    closed: Path | None = None
+
+
+def take_over_earlier_session(state_dir: Path) -> EarlierSession:
+    """The session ``session.json`` names, read back and taken over from the earlier start; raises what :func:`recorded_session` and
+    :func:`~hyperloom_multibranch.scheduling.lifecycle.persisted_run` raise. Blocks.
+
+    The host starts a run again only once its earlier start has ended, so a ``final-only`` lock that start left in the
+    session is that start's, whose pid names a process of a machine that is gone: it is removed, or the finish would be
+    refused for good. A session that is closed and started again holds no measurement this build has to read back, so
+    it may have run on another build: a restart onto a new build is how a fix reaches a run that is failing."""
+
+    previous = recorded_session(state_dir)
+    if previous is None or not SessionLayout(previous).root_recipe.is_file():
+        return EarlierSession()
+    lock = SessionLayout(previous).final_only_lock
+    if lock.is_file():
+        log.warning("removing %s, which the earlier start of this run left", lock)
+        lock.unlink(missing_ok=True)
+    if prelude_landed(previous):
+        return EarlierSession(finish=persisted_run(previous))
+    reported = reported_stop_reason(previous)
+    if reported not in (None, SessionStopReason.KILLED.value):
+        return EarlierSession(closed=previous)
+    return EarlierSession(left=persisted_session(previous))
+
+
+def close_then_start(left: PersistedRun | None, close: Callable[[PersistedRun], int], start: Callable[[], int]) -> int:
+    """Close ``left``, a session that ended before its baseline was recorded, when there is one, with ``close``
+    (``final-only``, which ends the sandboxes of the tests it left), then ``start`` the spec's session, unless a stop
+    during the close ended the run: then the close's exit code."""
+
+    if left is not None:
+        log.warning("%s ended before PRELUDE recorded its baseline: closing it, then starting again", left.layout.root)
+        closed = close(left)
+        if reported_stop_reason(left.layout.root) != left.ended.value:
+            return closed
+    return start()
 
 
 def reported_stop_reason(root: Path) -> str | None:
@@ -294,18 +416,24 @@ __all__ = [
     "EXIT_FILE",
     "GRANT_MARGIN_SECONDS",
     "SESSION_FILE",
+    "EarlierSession",
     "GrantDeadline",
     "HostedExit",
     "HostedRefused",
     "arm_grant_stop",
     "campaign_spec",
+    "close_then_start",
     "grant_deadline",
+    "grant_tests_that_fit",
     "record_session",
     "recorded_session",
     "refuse_unhosted_branches",
     "reported_stop_reason",
     "run_argv",
+    "share_with_the_group",
     "spec_make_before_break",
+    "started_session",
+    "take_over_earlier_session",
     "toolbox_grant",
     "write_final_exit",
 ]

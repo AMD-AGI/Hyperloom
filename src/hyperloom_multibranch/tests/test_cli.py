@@ -20,7 +20,10 @@ stops before the grant ends as ``hosted run`` does.
 
 from __future__ import annotations
 
+import asyncio
+import errno
 import json
+import logging
 import os
 import subprocess
 import sys
@@ -50,7 +53,7 @@ from hyperloom.common.outside_facts.image_check import (
 )
 from hyperloom.common.outside_facts.image_check_eval import Status
 from hyperloom.common.owner_scope import local_owner_scope
-from hyperloom.common.perf_metric import GRADED_INTVTY_P50
+from hyperloom.common.perf_metric import GRADED_INTVTY_P50, GRADED_OUTPUT
 from hyperloom.common.outside_facts.rule_pack import rule_pack_identity
 from hyperloom.measure import compile as compile_module
 from hyperloom.measure import points
@@ -58,19 +61,23 @@ from hyperloom.measure.compile import PackageBase
 from hyperloom.measure.points import PointError
 from hyperloom.measure.runner.cache_build import CacheBuildError
 from hyperloom_multibranch import cli
-from hyperloom_multibranch.contracts.blackboard import INTEGRATION_BRANCH
+from hyperloom_multibranch.blackboard import LocalBlackboard
+from hyperloom_multibranch.contracts.blackboard import INTEGRATION_BRANCH, Role, Writer
+from hyperloom_multibranch.contracts.blackboard.records import BaselineRecord
 from hyperloom_multibranch.contracts.toolbox import WorkloadKind
 from hyperloom_multibranch.blackboard.codec import encode
 from hyperloom_multibranch.blackboard.knowledge.reference_leads import INFERENCEX_REFERENCE
 from hyperloom_multibranch.blackboard.rsi.archive import ARCHIVE_ENV
 from hyperloom_multibranch.scheduling.budget import MB_CLOSE_GRACE_CAP_SECONDS, MB_DEFAULT_MAX_HOURS
+from hyperloom_multibranch.scheduling import hosted_run
 from hyperloom_multibranch.scheduling.hosted_run import GRANT_MARGIN_SECONDS
 from hyperloom_multibranch.scheduling.clock import Clock
 from hyperloom_multibranch.scheduling.decisions import Decision, DecisionKind, DecisionLog
 from hyperloom_multibranch.scheduling.prelude import BASELINE_ESTABLISHED
 from hyperloom_multibranch.scheduling import review
 from hyperloom_multibranch.scheduling.layout import REVIEW_DIR, SessionLayout, create_session
-from hyperloom_multibranch.scheduling.lifecycle import PersistedRun, persisted_run
+from hyperloom_multibranch.scheduling import lifecycle
+from hyperloom_multibranch.scheduling.lifecycle import PersistedRun, SessionOutcome, persisted_run
 from hyperloom_multibranch.scheduling.manifest import SessionManifest, code_version
 from hyperloom_multibranch.scheduling import local_peers
 from hyperloom_multibranch.scheduling.local_peers import AGENTX_ENV
@@ -1054,19 +1061,33 @@ def test_importing_the_command_and_the_session_loads_no_main_flow_runtime() -> N
     assert probe.stdout.strip() == "[]"
 
 
-def _ended_before_final(root: Path) -> SessionLayout:
+def _ended_before_final(root: Path, *, baseline: bool = True) -> SessionLayout:
     """A session directory as a run that ended before FINAL leaves it: the manifest of :func:`_settings`, the root
-    recipe PRELUDE committed, the decision PRELUDE recorded its baseline with, and the report CLOSE wrote with no final
-    choice in it."""
+    recipe PRELUDE committed and, unless ``baseline`` is off, the baseline the rule gate wrote on the blackboard and the
+    decision PRELUDE recorded it with, and the report CLOSE wrote with no final choice in it."""
 
     layout = SessionLayout(root)
     layout.reports.mkdir(parents=True)
     layout.prelude.mkdir(parents=True)
     _manifest(layout)
     _write(layout.root_recipe, {"components": []})
-    established = Decision(DecisionKind.PRELUDE, BASELINE_ESTABLISHED, INTEGRATION_BRANCH, {"longest_test_seconds": 60})
-    DecisionLog(layout.decisions, Clock(now=lambda: 0.0)).record(established)
+    if baseline:
+        gate = LocalBlackboard(layout.blackboard, Writer(Role.GATE, "gate"))
+        asyncio.run(gate.write_baseline(BaselineRecord("r0", {GRADED_OUTPUT: 1.0}, {}, {}, ("t1",))))
+        established = Decision(
+            DecisionKind.PRELUDE, BASELINE_ESTABLISHED, INTEGRATION_BRANCH, {"longest_test_seconds": 60}
+        )
+        DecisionLog(layout.decisions, Clock(now=lambda: 0.0)).record(established)
     _report(layout)
+    return layout
+
+
+def _killed_in_prelude(root: Path) -> SessionLayout:
+    """A session directory as a run killed with its machine in PRELUDE leaves it: the root committed, its baseline
+    test in flight and so no baseline written, and no report."""
+
+    layout = _ended_before_final(root, baseline=False)
+    layout.report.unlink()
     return layout
 
 
@@ -1436,6 +1457,20 @@ def test_a_hosted_inferencex_spec_runs_its_session_at_the_hardware_ep_it_names(
     assert on_the_command_line.workload.ep == 2
 
 
+@pytest.mark.usefixtures("ready_environment")
+def test_a_hosted_spec_with_a_launch_section_ends_for_good_naming_the_field(
+    host: Host, agent_cli: list[RunSettings]
+) -> None:
+    host.spec(launch={"extra_env": {"AITER_BF16_FP8_MOE_BOUND": "0"}})
+
+    assert cli.main(["hosted", "run"]) == cli.EXIT_USAGE
+
+    document = host.exit_document()
+    assert (document["final"], document["returncode"]) == (True, cli.EXIT_USAGE)
+    assert "a multibranch run does not read launch.extra_env" in str(document["error"])
+    assert agent_cli == [] and not any(host.workspace.iterdir())
+
+
 @pytest.mark.parametrize(
     ("name", "value", "named"),
     [
@@ -1620,6 +1655,46 @@ def test_a_runner_cache_that_cannot_be_built_ends_the_run_for_good(host: Host, m
 
 
 @pytest.mark.usefixtures("ready_environment", "agent_cli")
+def test_a_leg_that_cannot_open_a_file_of_the_run_ends_it_for_good_naming_the_file(
+    host: Host, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # An earlier leg of another account of the group, on a build before the session's records were the group's.
+    roster = tmp_path / "MB-roster.json"
+
+    def refused(*args: object) -> int:
+        raise PermissionError(errno.EACCES, "Permission denied", str(roster))
+
+    monkeypatch.setattr(cli, "run_session", refused)
+
+    assert cli.main(["hosted", "run"]) == cli.EXIT_FAILED
+
+    document = host.exit_document()
+    assert (document["final"], document["returncode"]) == (True, cli.EXIT_FAILED)
+    assert document["error"] == f"[Errno 13] Permission denied: '{roster}'"
+
+
+@pytest.mark.usefixtures("ready_environment", "agent_cli")
+def test_a_restart_that_cannot_read_the_earlier_session_ends_the_run_for_good_naming_the_file(
+    host: Host, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    # The earlier session's report, written owner-only by another account of the group, read before anything starts.
+    report = tmp_path / "MB-report.json"
+
+    def unreadable(state_dir: Path) -> object:
+        raise PermissionError(errno.EACCES, "Permission denied", str(report))
+
+    monkeypatch.setattr(cli, "take_over_earlier_session", unreadable)
+
+    assert cli.main(["hosted", "run"]) == cli.EXIT_FAILED
+
+    document = host.exit_document()
+    assert (document["final"], document["returncode"]) == (True, cli.EXIT_FAILED)
+    assert document["error"] == f"[Errno 13] Permission denied: '{report}'"
+    logged = [record.exc_info[1] for record in caplog.records if record.exc_info]
+    assert [type(exc) for exc in logged] == [PermissionError], "the traceback names where the file was met"
+
+
+@pytest.mark.usefixtures("ready_environment", "agent_cli")
 def test_a_strict_image_check_that_fails_ends_the_hosted_run_for_good_naming_it(
     host: Host, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -1686,6 +1761,222 @@ def test_a_restart_finishes_the_session_an_earlier_start_began_and_ends_the_run_
     assert agent_cli == [_settings()], "the session is finished on the settings its manifest holds, not the spec's"
     assert host.exit_document() == {"final": True, "returncode": 0, "stop_reason": "time_exhausted"}
     assert len(host.stops) == 1
+
+
+@dataclass
+class Restart:
+    """What a restart did, in order: each session it closed with ``final-only`` and each one it started."""
+
+    calls: list[tuple[str, object]]
+
+
+@pytest.fixture
+def restart(agent_binaries: None, host: Host, monkeypatch: pytest.MonkeyPatch) -> Restart:
+    """``final-only`` and ``run_session`` noted in the order they run: the close of a session writes the report a
+    CLOSE that was not stopped writes, the start of one creates its directory and names it, as the real ones do."""
+
+    done = Restart([])
+
+    def final_only(persisted: PersistedRun, peer_factory: PeerFactory, services: object) -> int:
+        done.calls.append(("final-only", persisted.layout.root))
+        _report(persisted.layout, stop_reason=persisted.ended.value, error=lifecycle.NO_BASELINE)
+        return 1
+
+    def run_session(settings: RunSettings, peer_factory: object, services: object, report_root: Callable) -> int:
+        done.calls.append(("run", settings))
+        layout = create_session(host.workspace, settings.workload.model_basename, Clock())
+        report_root(layout.root)
+        _report(layout, stop_reason="time_exhausted")
+        return 0
+
+    monkeypatch.setattr(cli, "final_only", final_only)
+    monkeypatch.setattr(cli, "run_session", run_session)
+    return done
+
+
+@pytest.mark.usefixtures("ready_environment")
+def test_a_restart_before_the_baseline_was_recorded_closes_that_session_and_starts_the_specs_again(
+    host: Host, restart: Restart, tmp_path: Path
+) -> None:
+    layout = _killed_in_prelude(tmp_path / "MB-earlier-session")
+    (host.state_dir / "session.json").write_text(json.dumps({"session_dir": str(layout.root)}), encoding="utf-8")
+
+    assert cli.main(["hosted", "run"]) == 0
+
+    assert [kind for kind, _ in restart.calls] == ["final-only", "run"], "the run goes on; it does not end in a FINAL"
+    assert restart.calls[0][1] == layout.root
+    started = restart.calls[1][1]
+    assert isinstance(started, RunSettings) and started.workload == _settings(*SPEC_RUN_ARGS).workload
+    session = Path(json.loads((host.state_dir / "session.json").read_text(encoding="utf-8"))["session_dir"])
+    assert session != layout.root and session.parent.parent == host.workspace
+    assert host.exit_document() == {"final": True, "returncode": 0, "stop_reason": "time_exhausted"}
+
+
+@pytest.mark.usefixtures("ready_environment")
+def test_a_hosted_run_shares_with_the_group_each_session_it_closes_or_starts_before_it_works_in_it(
+    host: Host, restart: Restart, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # Below shared storage the run's children write for the group (``share_with_the_group``): the next leg may be
+    # another account of it.
+    def shared(root: Path) -> None:
+        restart.calls.append(("share", root))
+
+    monkeypatch.setattr(cli, "share_with_the_group", shared)
+    monkeypatch.setattr(hosted_run, "share_with_the_group", shared)
+    layout = _killed_in_prelude(tmp_path / "MB-earlier-session")
+    (host.state_dir / "session.json").write_text(json.dumps({"session_dir": str(layout.root)}), encoding="utf-8")
+
+    assert cli.main(["hosted", "run"]) == 0
+
+    started = Path(json.loads((host.state_dir / "session.json").read_text(encoding="utf-8"))["session_dir"])
+    assert [(kind, root) for kind, root in restart.calls if kind != "run"] == [
+        ("share", layout.root),
+        ("final-only", layout.root),
+        ("share", started),
+    ]
+
+
+@pytest.mark.usefixtures("ready_environment")
+def test_a_restart_that_finishes_a_session_shares_it_with_the_group_first(
+    host: Host, agent_cli: list[RunSettings], tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    shared: list[Path] = []
+    monkeypatch.setattr(cli, "share_with_the_group", shared.append)
+    monkeypatch.setattr(hosted_run, "share_with_the_group", shared.append)
+    layout = _ended_before_final(tmp_path / "MB-20300102T030405Z-0123abcd")
+    (host.state_dir / "session.json").write_text(json.dumps({"session_dir": str(layout.root)}), encoding="utf-8")
+    host.spec(multibranch=None)
+
+    assert cli.main(["hosted", "run"]) == 0
+
+    assert shared == [layout.root]
+
+
+@pytest.mark.usefixtures("ready_environment")
+def test_a_restart_before_the_root_was_committed_starts_the_specs_session_again_at_once(
+    host: Host, restart: Restart, tmp_path: Path
+) -> None:
+    layout = _killed_in_prelude(tmp_path / "MB-earlier-session")
+    layout.root_recipe.unlink()
+    layout.manifest.unlink()
+    (host.state_dir / "session.json").write_text(json.dumps({"session_dir": str(layout.root)}), encoding="utf-8")
+
+    assert cli.main(["hosted", "run"]) == 0
+
+    assert [kind for kind, _ in restart.calls] == ["run"], "a session that rooted nothing left nothing to close"
+    assert host.exit_document() == {"final": True, "returncode": 0, "stop_reason": "time_exhausted"}
+
+
+@pytest.mark.usefixtures("ready_environment")
+def test_a_stop_while_a_restart_closes_the_session_before_its_baseline_starts_no_other(
+    host: Host, restart: Restart, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    layout = _killed_in_prelude(tmp_path / "MB-earlier-session")
+    (host.state_dir / "session.json").write_text(json.dumps({"session_dir": str(layout.root)}), encoding="utf-8")
+
+    def stopped(persisted: PersistedRun, peer_factory: PeerFactory, services: object) -> int:
+        restart.calls.append(("final-only", persisted.layout.root))
+        _report(persisted.layout, stop_reason=SessionStopReason.SIGNAL.value)
+        return 1
+
+    monkeypatch.setattr(cli, "final_only", stopped)
+
+    assert cli.main(["hosted", "run"]) == 1
+
+    assert [kind for kind, _ in restart.calls] == ["final-only"]
+    assert host.exit_document() == {"final": True, "returncode": 1, "stop_reason": "signal"}
+
+
+@pytest.mark.usefixtures("ready_environment")
+@pytest.mark.parametrize("baseline", [False, True], ids=["before-the-baseline", "after-the-baseline"])
+def test_a_restart_takes_over_the_final_only_lock_a_start_killed_while_closing_left(
+    host: Host, restart: Restart, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, baseline: bool
+) -> None:
+    root = tmp_path / "MB-earlier-session"
+    layout = _ended_before_final(root) if baseline else _killed_in_prelude(root)
+    layout.final_only_lock.write_text("4242\n", encoding="utf-8")
+    (host.state_dir / "session.json").write_text(json.dumps({"session_dir": str(layout.root)}), encoding="utf-8")
+    held: list[bool] = []
+
+    def final_only(persisted: PersistedRun, peer_factory: PeerFactory, services: object) -> int:
+        held.append(persisted.layout.final_only_lock.exists())
+        restart.calls.append(("final-only", persisted.layout.root))
+        _report(persisted.layout, stop_reason=persisted.ended.value)
+        return 1
+
+    monkeypatch.setattr(cli, "final_only", final_only)
+
+    cli.main(["hosted", "run"])
+
+    assert held == [False], "the pid in the lock is a process of the start that died; it holds nothing"
+    assert [kind for kind, _ in restart.calls] == (["final-only"] if baseline else ["final-only", "run"])
+
+
+@pytest.mark.usefixtures("ready_environment")
+def test_a_restart_onto_another_build_closes_the_session_before_its_baseline_and_starts_again(
+    host: Host, restart: Restart, tmp_path: Path
+) -> None:
+    layout = _killed_in_prelude(tmp_path / "MB-earlier-session")
+    _manifest(layout, code_version={"package": "0.0", "git_sha": "beef"})
+    (host.state_dir / "session.json").write_text(json.dumps({"session_dir": str(layout.root)}), encoding="utf-8")
+
+    assert cli.main(["hosted", "run"]) == 0
+
+    assert [kind for kind, _ in restart.calls] == ["final-only", "run"], "a fix rolled out reaches the run it is for"
+    assert host.exit_document() == {"final": True, "returncode": 0, "stop_reason": "time_exhausted"}
+
+
+@pytest.mark.usefixtures("ready_environment")
+@pytest.mark.parametrize("ended", [SessionStopReason.SIGNAL, SessionStopReason.PRELUDE_FAILED])
+def test_a_restart_over_a_session_that_closed_before_its_baseline_ends_the_run_with_its_report(
+    host: Host, restart: Restart, tmp_path: Path, ended: SessionStopReason
+) -> None:
+    layout = _killed_in_prelude(tmp_path / "MB-earlier-session")
+    _report(layout, stop_reason=ended.value, error="what CLOSE said")
+    written = layout.report.read_bytes()
+    (host.state_dir / "session.json").write_text(json.dumps({"session_dir": str(layout.root)}), encoding="utf-8")
+
+    assert cli.main(["hosted", "run"]) == cli.EXIT_FAILED
+
+    assert restart.calls == [], "the session ended the run when it closed; only its exit.json was not written"
+    assert layout.report.read_bytes() == written
+    assert host.exit_document() == {"final": True, "returncode": cli.EXIT_FAILED, "stop_reason": ended.value}
+
+
+@pytest.mark.usefixtures("ready_environment")
+def test_a_restart_over_a_session_a_restart_closed_before_it_started_again_starts_again(
+    host: Host, restart: Restart, tmp_path: Path
+) -> None:
+    layout = _killed_in_prelude(tmp_path / "MB-earlier-session")
+    _report(layout, stop_reason=SessionStopReason.KILLED.value, error=lifecycle.NO_BASELINE)
+    (host.state_dir / "session.json").write_text(json.dumps({"session_dir": str(layout.root)}), encoding="utf-8")
+
+    assert cli.main(["hosted", "run"]) == 0
+
+    assert [kind for kind, _ in restart.calls] == ["final-only", "run"]
+
+
+def test_a_final_only_takes_its_log_off_when_it_ends(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    layout = _ended_before_final(tmp_path / "MB-earlier-session")
+    layout.logs.mkdir(parents=True, exist_ok=True)
+
+    class Finishing:
+        def __init__(self, *args: object) -> None:
+            pass
+
+        async def finish(self, ended: SessionStopReason) -> SessionOutcome:
+            logging.getLogger("hyperloom_multibranch.test").warning("while it closes")
+            return SessionOutcome(ended, None, None, "no candidate")
+
+    monkeypatch.setattr(cli, "Session", Finishing)
+    handlers = list(logging.getLogger().handlers)
+
+    assert cli.final_only(persisted_run(layout.root), None, None) == 1
+    logging.getLogger("hyperloom_multibranch.test").warning("after it closed")
+
+    assert logging.getLogger().handlers == handlers
+    written = layout.scheduler_log.read_text(encoding="utf-8")
+    assert "while it closes" in written and "after it closed" not in written
 
 
 @pytest.mark.usefixtures("ready_environment")

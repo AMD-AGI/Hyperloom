@@ -17,7 +17,7 @@ from pathlib import Path
 
 import pytest
 
-from hyperloom.common.proctree import running
+from hyperloom_common.proctree import running
 from hyperloom.orchestrator.actions.executors import _server_lifecycle as sl
 from hyperloom.orchestrator.actions.executors._server_lifecycle import (
     ServerReap,

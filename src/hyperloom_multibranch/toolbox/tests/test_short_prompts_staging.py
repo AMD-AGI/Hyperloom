@@ -5,8 +5,8 @@
 
 Staging is the CPU step ``measure.short_prompts.build`` runs (the model's tokenizer and the seeded generator); the
 tokenizer here is the measure tests' one-token-per-word stand-in. A staging that fails leaves the check off with one
-warning that says why; a builder that does not stage (the hosted one, whose runners may not read this host's cache)
-keeps the old behaviour.
+warning that says why; a builder that does not stage (a hosted one whose host does not see the runner cache) keeps the
+old behaviour.
 """
 
 from __future__ import annotations

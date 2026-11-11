@@ -56,7 +56,7 @@ from functools import partial
 from pathlib import Path
 
 from hyperloom.common.outside_facts import ROCR_VISIBLE_DEVICES_ENV
-from hyperloom.common.proctree import descendants, running
+from hyperloom_common.proctree import descendants, running
 from hyperloom.common.visible_devices import GPU_MASK_ENV_NAMES
 from hyperloom.measure.compile import COMPONENT_LAYOUTS, UnsupportedComponentError, locate_installed_package
 from hyperloom.sandbox.launcher import LAUNCHER_SOURCE, StatusPipe, launcher_argv

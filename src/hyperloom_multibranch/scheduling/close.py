@@ -20,7 +20,7 @@ import asyncio
 import logging
 from dataclasses import dataclass
 
-from hyperloom_common.io import WriteOptions, atomic_write_json, atomic_write_text
+from hyperloom_common.io import SHARED, atomic_write_json, atomic_write_text
 from hyperloom_common.jsonio import read_json_strict
 from hyperloom.contracts.recipe import RecipeError
 from hyperloom_multibranch.contracts.blackboard.interfaces import BlackboardError
@@ -124,13 +124,18 @@ def _final_lines(final: FinalChoice | None) -> list[str]:
         return ["No final selection ran."]
     chosen = final.chosen
     head = f"Chosen: {chosen.label} `{chosen.commit}` on {chosen.branch}" if chosen else "Chosen: none"
-    header = "| candidate | commit | eligible | regression cases | degraded concs | error |"
-    lines = [head, f"Reason: {final.reason}", "", header, "|---|---|---|---|---|---|"]
+    header = (
+        "| candidate | commit | eligible | reproduced | gain % | refused by | waived for the root "
+        "| regression cases | degraded concs | error |"
+    )
+    lines = [head, f"Reason: {final.reason}", "", header, "|---|---|---|---|---|---|---|---|---|---|"]
     for check in final.checks:
         candidate = check.candidate
         degraded = ", ".join(str(conc) for conc in check.degraded_concs)
+        gain = "" if check.gain_pct is None else f"{check.gain_pct:.1f}"
         lines.append(
-            f"| {candidate.label} | `{candidate.commit}` | {check.eligible} | {check.regression_cases} | {degraded} "
+            f"| {candidate.label} | `{candidate.commit}` | {check.eligible} | {check.reproduced} | {gain} "
+            f"| {', '.join(check.refused_by)} | {', '.join(check.waived)} | {check.regression_cases} | {degraded} "
             f"| {check.error} |"
         )
     return lines
@@ -227,9 +232,9 @@ class Closer:
         """Write ``MB-report.json`` and ``MB-report.md``; the session writes a CLOSE it cut short through here."""
 
         session_id, isolation = self._layout.session_id, self._agent_isolation
-        atomic_write_json(self._layout.report, report_document(report, session_id, self._clock.now(), isolation))
-        markdown = report_markdown(report, session_id, isolation)
-        atomic_write_text(self._layout.report_markdown, markdown, options=WriteOptions(make_parents=True))
+        document = report_document(report, session_id, self._clock.now(), isolation)
+        atomic_write_json(self._layout.report, document, options=SHARED)
+        atomic_write_text(self._layout.report_markdown, report_markdown(report, session_id, isolation), options=SHARED)
 
 
 __all__ = ["EXPORT_FAILURES", "CloseReport", "Closer", "ended_before_final", "report_document", "report_markdown"]

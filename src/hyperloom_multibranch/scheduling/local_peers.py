@@ -400,6 +400,7 @@ def local_peers(host: MeasurementHost, sessions: SpecialistSessions, setup: Peer
         regression,
         isolation,
         built.dossier_pass,
+        leases,
     )
 
 

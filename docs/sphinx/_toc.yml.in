@@ -52,6 +52,8 @@ subtrees:
     title: Run hosted multi-branch on a new cluster
   - file: how-to/run-multibranch.md
     title: Run a multi-branch session
+  - file: how-to/multibranch-review-gate.md
+    title: Review the agent map before the Arbor branches open
 
 - caption: Reference
   entries:
