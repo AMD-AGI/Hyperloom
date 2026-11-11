@@ -27,7 +27,7 @@ import uuid
 from pathlib import Path
 from typing import Protocol
 
-from hyperloom_common.shared_storage import make_shared_dirs, parent_is_shared
+from hyperloom_common.shared_storage import make_shared_dirs, open_directory, parent_is_shared, read_directory
 from hyperloom.measure import fsafe
 from hyperloom.measure.docs import SHA256_RE
 from hyperloom.measure.manifest import RESERVED_NAMES
@@ -88,22 +88,30 @@ class DirResultArchive:
         if final.exists():
             return self._same_or_conflict(final, listing)
         make_shared_dirs(final.parent)
-        incoming = self._root / f"{_INCOMING}{uuid.uuid4().hex}"
-        incoming.mkdir(parents=True, mode=0o700)
+        dir_mode = BUNDLE_DIR_MODE if parent_is_shared(final) else None
+        incoming = f"{_INCOMING}{uuid.uuid4().hex}"
+        root_fd = open_directory(self._root)
         try:
-            _copy_listing(staging_dir, incoming, listing)
-            _fsync_tree(incoming)
+            os.mkdir(incoming, 0o700, dir_fd=root_fd)
+            top = _open_incoming(root_fd, incoming)
             try:
-                os.rename(incoming, final)
-            except OSError:
-                # Another writer stored the same key first, or the name is taken by something else.
-                if final.exists():
-                    return self._same_or_conflict(final, listing)
-                raise
+                _fill(top, staging_dir, listing, dir_mode)
+                parent_fd = open_directory(final.parent)
+                try:
+                    os.rename(incoming, final.name, src_dir_fd=root_fd, dst_dir_fd=parent_fd)
+                except OSError:
+                    # Another writer stored the same key first, or the name is taken by something else.
+                    if final.exists():
+                        return self._same_or_conflict(final, listing)
+                    raise
+                else:
+                    _fsync_at(parent_fd)
+                finally:
+                    os.close(parent_fd)
+            finally:
+                _remove_incoming(root_fd, incoming, top)
         finally:
-            shutil.rmtree(incoming, ignore_errors=True)
-        _share_bundle(final)
-        fsync_dir(final.parent)
+            os.close(root_fd)
         return os.fspath(final)
 
     def _same_or_conflict(self, final: Path, listing: dict[str, str]) -> str:
@@ -158,42 +166,90 @@ def _hash_tree(directory: Path) -> dict[str, str]:
         os.close(root_fd)
 
 
-def _copy_listing(staging_dir: Path, incoming: Path, listing: dict[str, str]) -> None:
-    """Copy each file while hashing it again, so a byte that changed after the listing never reaches the archive."""
+def _open_incoming(root_fd: int, incoming: str) -> int:
+    """The new directory ``incoming`` below ``root_fd``, opened without following a link and refused unless it is this
+    account's own and closed to everyone else: the archive's root may be a directory the group writes, so its name may
+    have been taken over since it was made. Everything stored is written through this descriptor."""
+    top = os.open(incoming, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC, dir_fd=root_fd)
+    found = os.fstat(top)
+    if found.st_uid != os.geteuid() or found.st_mode & 0o077:
+        os.close(top)
+        raise ArchiveError("the archive's incoming directory was replaced while the bundle was being stored")
+    return top
+
+
+def _fill(top: int, staging_dir: Path, listing: dict[str, str], dir_mode: int | None) -> None:
+    """Fill the directory ``top`` with the listed files and flush it, its directories given ``dir_mode`` when it is not
+    ``None``."""
+    created = _copy_listing(staging_dir, top, listing)
+    for rel in ("", *created):
+        directory = fsafe.open_dir_beneath(top, rel.split("/") if rel else [])
+        try:
+            if dir_mode is not None:
+                os.fchmod(directory, dir_mode)
+            os.fsync(directory)
+        finally:
+            os.close(directory)
+
+
+def _remove_incoming(root_fd: int, incoming: str, top: int) -> None:
+    """Remove what is left of ``incoming`` when it still names the directory open as ``top``, then close ``top``; a
+    name another account took over is left as it is."""
+    try:
+        here, opened = os.stat(incoming, dir_fd=root_fd, follow_symlinks=False), os.fstat(top)
+    except OSError:
+        return  # renamed into place, or gone
+    finally:
+        os.close(top)
+    if (here.st_dev, here.st_ino) == (opened.st_dev, opened.st_ino):
+        shutil.rmtree(os.path.join(f"/proc/self/fd/{root_fd}", incoming), ignore_errors=True)
+
+
+def _copy_listing(staging_dir: Path, incoming: int, listing: dict[str, str]) -> list[str]:
+    """Copy each file below the directory ``incoming`` while hashing it again, so a byte that changed after the listing
+    never reaches the archive; returns the directories made for them."""
+    created: list[str] = []
     root_fd = fsafe.open_root(staging_dir)
     try:
         for rel, expected in listing.items():
-            _copy_verified(root_fd, rel, expected, incoming / rel)
+            *parents, name = rel.split("/")
+            parent = fsafe.open_dir_beneath(incoming, parents, created=created)
+            try:
+                _copy_verified(root_fd, rel, expected, parent, name)
+            finally:
+                os.close(parent)
     finally:
         os.close(root_fd)
+    return created
 
 
-def _copy_verified(root_fd: int, rel: str, expected: str, target: Path) -> None:
-    """Copy ``rel`` below ``root_fd`` to a new file ``target``, refusing a copy whose bytes are not ``expected``."""
-    target.parent.mkdir(parents=True, exist_ok=True)
+def _copy_verified(root_fd: int, rel: str, expected: str, parent: int, name: str) -> None:
+    """Copy ``rel`` below ``root_fd`` to a new file ``name`` in ``parent``, refusing a copy whose bytes are not
+    ``expected``."""
     source = fsafe.open_beneath(root_fd, rel)
     digest = hashlib.sha256()
     try:
-        with open(target, "xb") as out:
+        target = fsafe.create_exclusive(parent, name)
+        try:
             for chunk in fsafe.stream(source):
                 digest.update(chunk)
-                out.write(chunk)
-            out.flush()
-            os.fsync(out.fileno())
+                fsafe.write_all(target, chunk)
+            os.fsync(target)
+            os.fchmod(target, stat.S_IRUSR | stat.S_IRGRP | stat.S_IROTH)
+        finally:
+            os.close(target)
     finally:
         os.close(source)
     if digest.hexdigest() != expected:
         raise ArchiveError(f"{rel} changed while it was being archived")
-    target.chmod(stat.S_IRUSR | stat.S_IRGRP | stat.S_IROTH)
 
 
-def _share_bundle(final: Path) -> None:
-    """Let the group read the bundle just renamed to ``final`` where the archive is shared storage. It was filled in a
-    ``0700`` directory of this account's, so nothing below it is another account's or a link."""
-    if not parent_is_shared(final):
-        return
-    for directory, _, _ in os.walk(final):
-        os.chmod(directory, BUNDLE_DIR_MODE)
+def _fsync_at(descriptor: int) -> None:
+    directory = read_directory(descriptor)
+    try:
+        os.fsync(directory)
+    finally:
+        os.close(directory)
 
 
 def fsync_dir(path: Path) -> None:
@@ -202,8 +258,3 @@ def fsync_dir(path: Path) -> None:
         os.fsync(fd)
     finally:
         os.close(fd)
-
-
-def _fsync_tree(root: Path) -> None:
-    for directory, _, _ in os.walk(root):
-        fsync_dir(Path(directory))
