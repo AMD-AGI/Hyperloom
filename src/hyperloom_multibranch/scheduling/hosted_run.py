@@ -32,6 +32,7 @@ flow's state.
 
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 import os
@@ -49,9 +50,11 @@ from hyperloom.hosted.campaign import CampaignSpec, parse_campaign
 from hyperloom.hosted.host_info import GrantLimits as HostGrantLimits
 from hyperloom.hosted.host_info import HostInfo, Var
 from hyperloom.inference_optimizer.session.paths import ENV_USER_DATA_PATH
+from hyperloom_multibranch.blackboard import LocalBlackboard
+from hyperloom_multibranch.contracts.blackboard import Role, Writer
 from hyperloom_multibranch.scheduling.budget import MB_CLOSE_GRACE_CAP_SECONDS, MB_SECONDS_PER_HOUR
 from hyperloom_multibranch.scheduling.layout import SessionLayout
-from hyperloom_multibranch.scheduling.lifecycle import PersistedRun, persisted_run, persisted_session, prelude_landed
+from hyperloom_multibranch.scheduling.lifecycle import PersistedRun, persisted_run, persisted_session, recorded_baseline
 from hyperloom_multibranch.scheduling.settings import RunSettings
 from hyperloom_multibranch.scheduling.stops import SessionStopReason
 from hyperloom_multibranch.toolbox.hosted_leases import GrantLimits
@@ -61,6 +64,8 @@ EXIT_FILE = "exit.json"
 SESSION_FILE = "session.json"
 #: Seconds between the session's hard stop and the grant's end, for the process to write ``exit.json`` and exit.
 GRANT_MARGIN_SECONDS = 60.0
+#: The blackboard writer name a restart reads the baseline as.
+RESTART_READER = "restart"
 #: ``exit.json`` and ``session.json`` reach the disk before their names, and are ``664``: the run's next leg, maybe
 #: another account of the group, reads ``session.json`` to finish the session it names.
 _DURABLE = WriteOptions(fsync=True, shared=True)
@@ -272,6 +277,13 @@ def arm_grant_stop(seconds: float) -> threading.Timer:
     return timer
 
 
+def stop_before_grant_ends(deadline: GrantDeadline) -> None:
+    """Arm this process's stop one CLOSE grace before ``deadline``'s grant ends (at once if passed; never untimed)."""
+
+    if deadline.stop_after_sec is not None:
+        arm_grant_stop(max(0.0, deadline.stop_after_sec))
+
+
 @dataclass(frozen=True)
 class HostedExit:
     """How the run ended for good: its return code, and the stop reason its session reported or why it was refused."""
@@ -363,6 +375,18 @@ def close_then_start(left: PersistedRun | None, close: Callable[[PersistedRun], 
     return start()
 
 
+def prelude_landed(root: Path) -> bool:
+    """Whether the session in ``root`` got through PRELUDE far enough for FINAL to validate it: it committed its root
+    and the rule gate wrote its baseline. A session that did not measured nothing a later start could carry on from.
+    Creates nothing. Blocks, and runs an event loop of its own."""
+
+    layout = SessionLayout(root)
+    if not layout.root_recipe.is_file():
+        return False
+    reader = LocalBlackboard(layout.blackboard, Writer(Role.OBSERVER, RESTART_READER))
+    return asyncio.run(recorded_baseline(reader)) is not None
+
+
 def reported_stop_reason(root: Path) -> str | None:
     """The stop reason the CLOSE of the session in ``root`` reported, ``None`` when it wrote no report."""
 
@@ -386,12 +410,14 @@ __all__ = [
     "close_then_start",
     "grant_deadline",
     "grant_tests_that_fit",
+    "prelude_landed",
     "record_session",
     "recorded_session",
     "refuse_unhosted_branches",
     "reported_stop_reason",
     "run_argv",
     "spec_make_before_break",
+    "stop_before_grant_ends",
     "take_over_earlier_session",
     "toolbox_grant",
     "write_final_exit",
