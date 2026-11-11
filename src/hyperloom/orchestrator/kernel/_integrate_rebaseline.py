@@ -304,6 +304,7 @@ def _integrate_rebaseline(
             "output_dir": str(workspace),
             "extra_server_args": extra_args,
             "extra_envs": dict(payload.get("extra_envs") or {}),
+            "runtime_override": payload.get("runtime_override", {}),
             "remove_args": to_str_list(payload.get("remove_args")),
             "unset_envs": to_str_list(payload.get("unset_envs")),
             "args_mode": str(payload.get("args_mode") or "append"),
