@@ -701,16 +701,23 @@ def test_the_runner_lock_is_the_one_the_sealed_runner_installs_on_that_python(py
     tree = _SRC.parent
     expected = tree / lock_file(tree, python_version)
 
-    assert staging._runner_lock(python_version) == expected
+    assert staging._runner_lock(python_version).resolve() == expected
     assert _locked_lm_eval(expected).version == LM_EVAL_VERSION
 
 
-def test_lm_eval_is_refused_outside_a_source_tree_holding_the_runner_lock(
-    pinned, install, monkeypatch, tmp_path, capsys
-):
+def test_the_package_ships_every_runner_lock_as_a_link_to_its_requirements_file() -> None:
+    package = Path(inference_suite.__file__).parent
+    shipped = {lock.name: lock for lock in package.glob("runner*.lock")}
+    owned = {lock.name: lock for lock in (_SRC.parent / "requirements").glob("runner*.lock")}
+
+    assert sorted(shipped) == sorted(owned)
+    assert all(lock.is_symlink() and lock.resolve() == owned[name] for name, lock in shipped.items())
+
+
+def test_lm_eval_is_refused_by_an_install_missing_the_runner_lock(pinned, install, monkeypatch, tmp_path, capsys):
     repo, cache = pinned
     monkeypatch.setattr(staging, "_distribution_version", {}.get)
-    monkeypatch.setattr(staging, "_SOURCE_TREE", tmp_path / "site-packages")
+    monkeypatch.setattr(staging, "_LOCK_DIR", tmp_path / "site-packages")
 
     assert _stage_cli(cache, "--source", str(repo)) == cli.EXIT_REFUSED
     err = capsys.readouterr().err
