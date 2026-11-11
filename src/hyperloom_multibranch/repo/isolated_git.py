@@ -9,8 +9,8 @@ An inherited ``GIT_*`` (``GIT_DIR`` inside a hook or ``git rebase --exec``) woul
 the system and global config could change the object format, hooks could veto a ref move, and ignore or attributes
 files could drop or hide a file's change.
 
-The session's source base, its worktrees and an agent's checkout lie where the run's sandboxes write, so their
-``.git/config``, their hooks and their ``.gitattributes`` are not the app's. Every git command of the
+The session's source base, its worktrees and an agent's checkout lie on storage that the sandboxes of the run's group
+write, so their ``.git/config``, their hooks and their ``.gitattributes`` are not the app's. Every git command of the
 app pins what :data:`~hyperloom_common.git_safety.NO_PROGRAMS` pins for the single-lineage app's git, derived from every
 config key git starts a program from, and one that reads or writes a work tree also blanks every driver program the
 config it reads defines (:func:`blank_driver_programs`), since an attributes file in the tree can apply a driver of any
@@ -77,8 +77,8 @@ def leading_options(args: Sequence[str]) -> list[str]:
 
 
 def trusting(directory: Path) -> tuple[str, str]:
-    """The ``-c`` pair that has git use the repository at ``directory`` whoever owns it (``safe.directory``): a tree may
-    have been made by another account, and no program its config names runs."""
+    """The ``-c`` pair that has git use the repository at ``directory`` whoever owns it (``safe.directory``): a tree on
+    the shared storage may have been made by another account of the group, and no program its config names runs."""
     return ("-c", f"safe.directory={os.path.realpath(directory)}")
 
 
