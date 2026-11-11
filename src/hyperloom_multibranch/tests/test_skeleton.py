@@ -2120,7 +2120,8 @@ def test_a_final_only_of_another_account_of_the_group_finishes_what_one_account_
             "the second account appended FINAL's decision to the log the first one made"
         )
         directories = [root, *(path for path in root.rglob("*") if path.is_dir() and not path.is_symlink())]
-        expected = {layout.repo: 0o3775}
+        # The repository's info and hooks are its maker's alone; only objects and refs are the group's.
+        expected = {layout.repo: 0o3775, layout.repo / "info": 0o2755, layout.repo / "hooks": 0o2755}
         assert [path for path in directories if stat.S_IMODE(path.stat().st_mode) != expected.get(path, 0o2775)] == []
         records = (layout.roster, layout.decisions, layout.judge, layout.merges, layout.root_recipe, layout.pids)
         records += (layout.report, layout.report_markdown, layout.reports / FRONTIER_LOG)
