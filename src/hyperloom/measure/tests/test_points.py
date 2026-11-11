@@ -10,7 +10,11 @@ from pathlib import Path
 import pytest
 import yaml
 
-from hyperloom.common.outside_facts import AITER_LOG_TUNED_CONFIG_ENV
+from hyperloom.common.outside_facts import (
+    AITER_LOG_TUNED_CONFIG_ENV,
+    TORCH_SYMBOLIZE_BY_LOADER,
+    TORCH_SYMBOLIZE_MODE_ENV,
+)
 from hyperloom.contracts.measurement import Purpose, TestKind, TestRequest
 from hyperloom.contracts.recipe import ConfigDelta, KernelArtifact, KernelKind, RecipeDelta
 from hyperloom.inference_optimizer.cli.benchmark_config import AgentXWorkload, write_agentx_benchmark
@@ -243,6 +247,17 @@ def test_a_profile_point_replays_graphs_node_by_node_so_the_profiler_records_eve
     assert "DEBUG_CLR_GRAPH_PACKET_CAPTURE" not in load(normal)["benchmark"]["envs"], (
         "a measured point replays as shipped"
     )
+
+
+def test_a_profile_point_names_the_c_stacks_of_its_snapshot_dump_without_addr2line(canonical, blobs, tmp_path):
+    """The graph-capture profile dumps the allocator's snapshot after the capture; addr2line's answers killed it."""
+    (profile,) = generate_profile_point(environment(blobs, tmp_path), canonical, tmp_path / "profile")
+    (normal,) = generate_points(environment(blobs, tmp_path), canonical, tmp_path / "normal")
+
+    envs = load(profile)["benchmark"]["envs"]
+    assert "--enable-profile-cuda-graph" in envs["EXTRA_SGLANG_ARGS"]
+    assert envs[TORCH_SYMBOLIZE_MODE_ENV] == TORCH_SYMBOLIZE_BY_LOADER
+    assert TORCH_SYMBOLIZE_MODE_ENV not in load(normal)["benchmark"]["envs"], "a measured point runs as shipped"
 
 
 @pytest.mark.parametrize("framework", ["sglang", "vllm", "atom"])
