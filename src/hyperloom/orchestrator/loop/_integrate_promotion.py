@@ -6,6 +6,7 @@
 from __future__ import annotations
 
 import logging
+from datetime import datetime, timezone
 from typing import Any, Mapping, NamedTuple
 
 from hyperloom_common.coerce import to_str_list
@@ -334,6 +335,8 @@ class IntegratePromotionMixin:
         kept_flag = status == "kept" and isinstance(new_tput, (int, float)) and float(new_tput) > 0
         completed_pending = self._confirmed_integrate_completion(result, task, kept_flag=kept_flag)
         changed = self._record_authored_levers(result)
+        if status == "kept_inert":
+            changed = self._record_inert_source_layer(result) or changed
         task_params = (getattr(task, "params", None) or {}) if task is not None else {}
         enablement_landing = bool(result.get("enablement") or task_params.get("enablement"))
         lifted = False
@@ -360,6 +363,29 @@ class IntegratePromotionMixin:
                 include_patches=True,
             )
         outcome.changed = changed
+
+    def _record_inert_source_layer(self, result: Mapping[str, Any]) -> bool:
+        """Record the source an inert KEEP committed, leaving the stack and ``current_best`` alone.
+
+        Later explore entries switch the code on, and the export refuses a tree no snapshot
+        covers, so the layer is kept beside the stack. It is not an adoption: on the stack it
+        would count as an unvalidated KEEP and be published as one. Only ``custom`` is handled
+        -- it is the one framework whose export reads this layer.
+        """
+        if not result.get("source_snapshot") or str(self.shared_state.framework or "").strip().lower() != "custom":
+            return False
+        specialist = str(result.get("specialist_task_id") or "")
+        self.shared_state.inert_source_layers.append(
+            {
+                "variant_name": f"{specialist}:inert" if specialist else "inert",
+                "specialist_task_id": specialist,
+                "after_stack_len": len(self.shared_state.optimization_stack or []),
+                "ts": datetime.now(timezone.utc).isoformat(),
+                "scope": "source_patch",
+                **_source_layer_handles(result),
+            }
+        )
+        return True
 
     def _record_authored_levers(self, result: Mapping[str, Any]) -> bool:
         levers = result.get("framework_levers")
