@@ -47,10 +47,11 @@ def test_a_run_dirs_accuracy_is_its_reports_eval(tmp_path):
     run_dir = _run_dir(tmp_path / "suite_run_0", _report(profile=None))
     _lm_eval_file(run_dir, 0.11)
 
-    (value,) = read_accuracy(run_dir)
+    values = read_accuracy(run_dir)
 
-    assert (value.task, value.metric, value.score) == ("gsm8k", "exact_match,strict-match", 0.94)
-    assert value.version == "lm_eval=0.4.9;gsm8k=3"
+    assert [(value.task, value.metric, value.score, value.version) for value in values] == [
+        ("gsm8k", "exact_match,strict-match", 0.94, "lm_eval=0.4.9;gsm8k=3")
+    ]
 
 
 def test_a_run_dir_that_did_not_evaluate_has_no_accuracy_even_beside_an_lm_eval_file(tmp_path):

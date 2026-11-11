@@ -392,7 +392,7 @@ def test_a_round_admits_against_the_environment_its_base_launches_with():
     rnd.grid = [GridVariant("drop_simulated_acceptance", unset_envs=["SGLANG_SIMULATE_ACC_LEN"])]
     rnd.params = {}
     rnd.ss = None
-    rnd.framework = "sglang"
+    rnd.bench = {"framework": "sglang"}
     rnd.target = BenchmarkTarget(model_path="", gpu_type="mi355x")
     rnd.yaml_envs = dict(SGLANG_SYNTHETIC_ENV)
     rnd.envs = {}

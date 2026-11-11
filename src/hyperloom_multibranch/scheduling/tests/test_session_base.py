@@ -25,7 +25,7 @@ from hyperloom_multibranch.scheduling.settings import InferenceXShape, KernelOpt
 from hyperloom_multibranch.specialist.arbor_adapter import read_launch
 from hyperloom_multibranch.tests.base_records import MODEL_ID, base_record, write_record
 from inference_suite import InferencexCommitRefused, SourceSnapshot
-from inference_suite.contracts import SourceKind
+from inference_suite.contracts import BaseLaunch, LaunchModel, SourceKind
 from inference_suite.contracts import Workload as LaunchWorkload
 from inference_suite.recipe import sources
 from inference_suite.recipe.resolve import UnreadSource
@@ -131,10 +131,17 @@ def test_an_agentx_session_no_source_serves_is_refused_and_freezes_nothing(tmp_p
     assert frozen_base(tmp_path) is None
 
 
+def _record_for(workload: Workload) -> BaseLaunch:
+    """:func:`base_launch` as resolved for ``workload``'s checkpoint, which records no hub id and so is asked for by
+    its directory name."""
+    return dataclasses.replace(base_launch(), model=LaunchModel(Path(workload.model).name))
+
+
 def test_a_reference_script_record_is_the_base_and_no_source_is_asked(tmp_path: Path, asked: list) -> None:
-    record = tmp_path / "record.json"
-    record.write_text(json.dumps(base_launch().to_document()))
     workload = replace(WORKLOAD, tp=1)
+    recorded = _record_for(workload)
+    record = tmp_path / "record.json"
+    record.write_text(json.dumps(recorded.to_document()))
 
     freeze_session_base(tmp_path / "toolbox", workload, str(record))
 
@@ -142,9 +149,18 @@ def test_a_reference_script_record_is_the_base_and_no_source_is_asked(tmp_path: 
     assert user_file.location == str(record)
     frozen = frozen_base(tmp_path / "toolbox")
     assert frozen is not None
-    assert dataclasses.replace(frozen.launch, query=base_launch().query) == dataclasses.replace(
-        base_launch(), model=dataclasses.replace(base_launch().model, path=workload.model)
+    assert dataclasses.replace(frozen.launch, query=recorded.query) == dataclasses.replace(
+        recorded, model=dataclasses.replace(recorded.model, path=workload.model)
     )
+
+
+def test_a_reference_script_record_resolved_for_another_model_is_refused(tmp_path: Path, asked: list) -> None:
+    record = tmp_path / "record.json"
+    record.write_text(json.dumps(base_launch().to_document()))
+
+    with pytest.raises(PeersUnavailable, match="resolved for model 'meta-llama/Llama-3.1-8B-Instruct'"):
+        freeze_session_base(tmp_path / "toolbox", replace(WORKLOAD, tp=1), str(record))
+    assert frozen_base(tmp_path / "toolbox") is None
 
 
 def test_a_reference_script_shell_launch_is_the_base_of_a_fixed_session(tmp_path: Path, offline: None) -> None:
@@ -159,7 +175,7 @@ def test_a_reference_script_shell_launch_is_the_base_of_a_fixed_session(tmp_path
 
 def test_a_base_on_another_topology_than_the_workloads_is_refused(tmp_path: Path, asked: list) -> None:
     record = tmp_path / "record.json"
-    record.write_text(json.dumps(base_launch().to_document()))
+    record.write_text(json.dumps(_record_for(WORKLOAD).to_document()))
 
     with pytest.raises(PeersUnavailable, match="the query asks for tp 2, the launch runs 1"):
         freeze_session_base(tmp_path / "toolbox", WORKLOAD, str(record))

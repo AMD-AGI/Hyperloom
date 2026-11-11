@@ -47,6 +47,7 @@ import math
 from collections.abc import Iterable, Mapping
 from dataclasses import dataclass, replace
 from pathlib import Path
+from typing import TYPE_CHECKING
 
 from hyperloom_multibranch.contracts.lifecycle import SpecialistLifecycle, SpecialistStatus
 from hyperloom_multibranch.contracts.blackboard import INTEGRATION_BRANCH, ConflictingWrite
@@ -74,6 +75,7 @@ from hyperloom_multibranch.scheduling.judge import (
     Judge,
     JudgeDecision,
     JudgeView,
+    dev_wait_holds,
     envelope_holds,
     held_branches,
     hold_decision,
@@ -93,6 +95,9 @@ from hyperloom_multibranch.scheduling.settle import failure_text, settled
 from hyperloom_multibranch.scheduling.similarity import BranchSimilarity
 from hyperloom_multibranch.scheduling.stops import SessionStopReason
 from hyperloom_multibranch.scheduling.widening import Widening, refill_focus
+
+if TYPE_CHECKING:
+    from hyperloom_multibranch.specialist.dev_sandbox import DevLeases
 
 logger = logging.getLogger(__name__)
 
@@ -155,8 +160,9 @@ class Steering:
     the archived sessions that progress holds, the dashboard rebuilt once the opening batch is open and after every
     later judge call, the signals of whether a branch opened now would still pay off, which running branches made
     much the same change, the events that have the judge asked at once, the specialist lifecycle, which reports
-    each running branch's specialist, the toolbox the native builds each branch's tests wait for are read from, and
-    the scheduling playbook the session plays, ``None`` for a session that plays none, with the session's manifest a
+    each running branch's specialist, the toolbox the native builds each branch's tests wait for are read from, the
+    session's dev sandboxes, whose line holds a waiting branch (``None`` when it lends none), and the scheduling
+    playbook the session plays, ``None`` for a session that plays none, with the session's manifest a
     fallback from it is recorded in."""
 
     judge: Judge
@@ -168,6 +174,7 @@ class Steering:
     events: SessionEvents
     specialists: SpecialistLifecycle
     toolbox: Toolbox
+    dev_leases: DevLeases | None
     play: PlaybookPlay | None
     manifest: Path
 
@@ -213,6 +220,7 @@ class Explorer:
         self._events = steering.events
         self._specialists = steering.specialists
         self._toolbox = steering.toolbox
+        self._dev_leases = steering.dev_leases
         self._play = steering.play
         self._manifest = steering.manifest
         self._scored: tuple[BranchProgress, ...] = ()
@@ -429,13 +437,14 @@ class Explorer:
     ) -> dict[str, HoldReason]:
         """The held branches (:func:`held_branches`), under the grace of the playbook the session plays
         (:func:`session_grace`), with those its safety envelope keeps, read off the frontier ``scored`` rows of the
-        round, where a hold of their own does not come first. A session that plays no playbook has the grace it always
+        round, and those in line for a dev sandbox, each where a hold before it does not come first. A session that plays no playbook has the grace it always
         had, and no envelope, as its rows carry no stall evidence."""
 
         snapshot = await self._blackboard.snapshot()
         rules = HoldRules(self._clock.now(), session_grace(self._play))
         held = held_branches(self._roster.entries(), snapshot.progress, snapshot.records, specialists, rules)
-        return {**envelope_holds(scored, specialists), **held}
+        waiting = self._dev_leases.waiting() if self._dev_leases is not None else ()
+        return {**dev_wait_holds(waiting, specialists), **envelope_holds(scored, specialists), **held}
 
     async def _record_probations(self, snapshot: BlackboardSnapshot, scored: Iterable[BranchProgress]) -> None:
         """Record each branch the round's stall evidence holds on probation under the stop rule the scoring read, the

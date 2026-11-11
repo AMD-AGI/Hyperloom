@@ -145,10 +145,10 @@ def test_no_published_staging_that_verifies_is_a_tool_error_and_nothing_is_stage
     runner_cache = tmp_path / "runner-cache"
     if held != "none":
         published = stage_into(runner_cache)
-    if held == "private":
-        published.rename(published.with_name(f".staging-{staging_key()}-another-host"))
-    if held == "damaged":
-        (published / "staging_manifest.json").write_bytes(STAGING_MANIFEST.replace(b"inferencex", b"other"))
+        if held == "private":
+            published.rename(published.with_name(f".staging-{staging_key()}-another-host"))
+        if held == "damaged":
+            (published / "staging_manifest.json").write_bytes(STAGING_MANIFEST.replace(b"inferencex", b"other"))
 
     with pytest.raises(ToolError, match="no published staging .* that verifies; cache_build publishes it"):
         _ensure(tmp_path)
