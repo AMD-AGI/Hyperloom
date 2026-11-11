@@ -24,6 +24,7 @@ from hyperloom_common.llm.deepseek_session import (
     DEEPSEEK_PROVIDER_ROUTE,
     DeepSeekSessionUnavailableError,
     gateway_env,
+    max_tokens_from_env,
 )
 from hyperloom_common.fs_utils import write_text_nofollow
 from hyperloom.inference_optimizer.trace.agent_trace import AgentTrace
@@ -193,7 +194,7 @@ def _mcp_rows(config_path: str | None, *, source: Mapping[str, str], protected_e
     return rows
 
 
-def _render_patch(*, model: str, instruction_bytes: int, mcp_rows: list[str]) -> str:
+def _render_patch(*, model: str, instruction_bytes: int, mcp_rows: list[str], max_tokens: int | None = None) -> str:
     """The patch overlay a specialist's headless ``dsh`` run boots with."""
     lines = [
         # The shipped headless profile enables a session-title plugin whose
@@ -218,6 +219,8 @@ def _render_patch(*, model: str, instruction_bytes: int, mcp_rows: list[str]) ->
         f"    maxBytes: {instruction_bytes + _DEFAULT_INSTRUCTION_BYTES}",
         *COMPACTION_PATCH.splitlines(),
     ]
+    if max_tokens is not None:
+        lines.extend(["- id: llm-deepseek", _PATCH_CONFIG, f"    maxTokens: {max_tokens}"])
     if mcp_rows:
         lines.append("- insert:")
         lines.extend(mcp_rows)
@@ -271,6 +274,7 @@ def build_dsh_launch(request: DshLaunchRequest, base_env: Mapping[str, str]) -> 
         )
     try:
         gateway = gateway_env(_codex_provider_resolver_overlay(base_env))
+        max_tokens = max_tokens_from_env({**os.environ, **base_env})
     except DeepSeekSessionUnavailableError as exc:
         raise SpecialistAgentUnavailableError(str(exc)) from exc
     env_additions = {
@@ -290,6 +294,7 @@ def build_dsh_launch(request: DshLaunchRequest, base_env: Mapping[str, str]) -> 
             model=request.model,
             instruction_bytes=len(instructions.encode(_ENCODING)),
             mcp_rows=mcp.rows,
+            max_tokens=max_tokens,
         ),
     )
     env_additions["DSH_HOME"] = str(home)
