@@ -69,13 +69,13 @@ _THINKING_MODE = "thinking_on"
 #: InferenceX's value for a spec-decoding or KV-offloading setting the point leaves off.
 _UNSET = "none"
 
-#: The client environment variable naming the trace corpus an AgentX replay loads (``benchmark_lib.sh``).
+#: The client environment variable naming the trace corpus an AgentX replay loads (``infx/bench/agentic/traces.py``).
 AGENTX_TRACE_ENV = "WEKA_LOADER_OVERRIDE"
-#: ``resolve_trace_source`` in ``benchmarks/benchmark_lib.sh``: the 1M-context model families replay the unfiltered
-#: 062126 corpus, every other one (an unknown prefix included) its cut to a 256k-token context.
-_FULL_CONTEXT_PREFIXES = ("dsv4", "glm5.2", "glm5.3", "minimaxm3", "kimik3")
-_FULL_TRACE = "semianalysis_cc_traces_weka_062126"
-_CONTEXT_CUT_TRACE = f"{_FULL_TRACE}_256k"
+#: ``infx/bench/agentic/traces.py`` at the client pin: the families in ``CAPPED_FAMILIES`` replay the 062126 corpus
+#: cut to a 256k-token context, every other prefix the uncapped one.
+_CAPPED_FAMILIES = ("dsr1", "qwen3.5", "qwen3.8next")
+_UNCAPPED_TRACE = "semianalysis_cc_traces_weka_062126"
+_CAPPED_TRACE = f"{_UNCAPPED_TRACE}_256k"
 
 #: What a matrix point writes into ``benchmark.env`` (InferenceX ``workload.BOUND_ENV`` for single-node points, and
 #: the workload values ``validate_recipe`` holds a recipe to); the rest of it configures the client for any point.
@@ -500,7 +500,8 @@ def model_prefixes(bundle: RepoBundle, model: str) -> list[str]:
 
 
 def agentx_trace(bundle: RepoBundle, models: Sequence[str]) -> str:
-    """The corpus InferenceX replays for the first of ``models`` its master config gives a model prefix.
+    """The corpus InferenceX replays for the first of ``models`` its master config gives a model prefix; the uncapped
+    one, as for any prefix outside the capped families, when it gives none of them one.
 
     Raises:
         RecipeSourceError: When the master config is not a mapping, or gives that model prefixes that replay
@@ -508,14 +509,12 @@ def agentx_trace(bundle: RepoBundle, models: Sequence[str]) -> str:
     """
     for model in models:
         prefixes = model_prefixes(bundle, model)
-        traces = {
-            _FULL_TRACE if prefix.startswith(_FULL_CONTEXT_PREFIXES) else _CONTEXT_CUT_TRACE for prefix in prefixes
-        }
+        traces = {_CAPPED_TRACE if prefix.startswith(_CAPPED_FAMILIES) else _UNCAPPED_TRACE for prefix in prefixes}
         if len(traces) > 1:
             raise RecipeSourceError(f"InferenceX gives {model} prefixes that replay different corpora: {prefixes}")
         if traces:
             return traces.pop()
-    return _CONTEXT_CUT_TRACE
+    return _UNCAPPED_TRACE
 
 
 def _warnings(point: InferencexPoint, query: LaunchQuery, target: int) -> tuple[str, ...]:
@@ -600,28 +599,46 @@ def _arm_point(points: Sequence[InferencexPoint], target: int) -> InferencexPoin
     return min(fitting, key=lambda point: point.conc) if fitting else None
 
 
-def served_points(query: LaunchQuery, bundle: RepoBundle) -> tuple[InferencexPoint, ...]:
+@dataclass(frozen=True)
+class ServedPoints:
+    """The points that serve a query, and why each entry of its model and framework that gives none cannot be read."""
+
+    points: tuple[InferencexPoint, ...]
+    unread: Mapping[str, str]
+
+
+def served_points(query: LaunchQuery, bundle: RepoBundle) -> ServedPoints:
     """The points of ``bundle`` that serve ``query``'s model with its framework on a board interchangeable with its own:
-    every point a snapshot must record InferenceX's selection for to answer ``query``."""
-    return tuple(
-        point
-        for point in inferencex_points(bundle)
-        if (point.model, point.framework) == (query.model_id, query.framework)
-        and boards_interchangeable(query.board, point.board)
-    )
+    every point a snapshot must record InferenceX's selection for to answer ``query``.
+
+    Only the entries of that model and framework are read, so one InferenceX cannot place does not stop the others.
+    """
+    runners = _yaml_mapping(bundle, RUNNERS)
+    points: list[InferencexPoint] = []
+    unread: dict[str, str] = {}
+    for name, entry in _yaml_mapping(bundle, MASTER).items():
+        if (entry.get("model"), entry.get("framework")) != (query.model_id, query.framework):
+            continue
+        try:
+            placed = [point for arm in _arms({name: entry}) for point in _arm_points(arm, runners)]
+        except (RecipeSourceError, KeyError) as error:
+            unread[name] = f"InferenceX's config does not place it: {error}"
+            continue
+        points += [point for point in placed if boards_interchangeable(query.board, point.board)]
+    return ServedPoints(tuple(points), unread)
 
 
 def inferencex_launches(query: LaunchQuery, snapshot: InferencexSnapshot) -> tuple[SourceLaunch, ...] | SourceMiss:
     """The launch each InferenceX arm that fits ``query`` binds at ``max(query.concurrencies)``, one per arm."""
     served = served_points(query, snapshot.bundle)
-    if not served:
+    if not served.points and not served.unread:
         return SourceMiss(
             SourceKind.INFERENCEX, f"no entry serves {query.model_id} with {query.framework} on a {query.board}"
         )
     target = max(query.concurrencies)
     arms: dict[str, list[InferencexPoint]] = {}
-    reasons: dict[str, str] = {}
-    for point in served:
+    reasons = dict(served.unread)
+    for point in served.points:
         misfit = _misfit(point, query)
         if misfit is None:
             arms.setdefault(point.arm_key, []).append(point)
@@ -653,6 +670,7 @@ __all__ = [
     "RUNNERS",
     "InferencexPoint",
     "Scenario",
+    "ServedPoints",
     "agentx_trace",
     "inferencex_launches",
     "inferencex_points",

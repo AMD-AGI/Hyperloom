@@ -5,7 +5,8 @@
 
 The caller reads the file once and hands over its bytes, whose sha256 identifies the file in the base's source. A
 shell script must launch the session's framework, fix every flag in its text, and may no longer carry
-``# hyperloom-launch-controls:``; a ``base_launch.json`` is checked against its schema and digest and must be for the session's framework.
+``# hyperloom-launch-controls:``; a ``base_launch.json`` is checked against its schema and digest, and resolving
+holds it to the session it serves.
 """
 
 from __future__ import annotations
@@ -15,7 +16,7 @@ import json
 from dataclasses import dataclass
 
 from inference_suite.contracts.base_launch import BASE_LAUNCH_SCHEMA, BaseLaunch
-from inference_suite.recipe.shell_launch import ShellLaunch, parse_shell_launch
+from inference_suite.recipe.shell_launch import ShellLaunch, ShellLaunchError, parse_shell_launch
 
 _CONTROLS_PREFIX = "# hyperloom-launch-controls:"
 
@@ -40,13 +41,13 @@ def parse_user_file(location: str, content: bytes, *, framework: str) -> UserFil
     except UnicodeDecodeError as exc:
         raise UserFileError(f"{location} is not UTF-8 text: {exc}") from exc
     if text.lstrip().startswith("{"):
-        launch: ShellLaunch | BaseLaunch = _base_launch(location, text, framework)
+        launch: ShellLaunch | BaseLaunch = _base_launch(location, text)
     else:
         launch = _shell_launch(location, text, framework)
     return UserFile(location=location, sha256=hashlib.sha256(content).hexdigest(), launch=launch)
 
 
-def _base_launch(location: str, text: str, framework: str) -> BaseLaunch:
+def _base_launch(location: str, text: str) -> BaseLaunch:
     try:
         document = json.loads(text)
     except json.JSONDecodeError as exc:
@@ -54,10 +55,7 @@ def _base_launch(location: str, text: str, framework: str) -> BaseLaunch:
     schema = document.get("schema") if isinstance(document, dict) else None
     if schema != BASE_LAUNCH_SCHEMA:
         raise UserFileError(f"{location} has schema {schema!r}; a JSON launch file must be {BASE_LAUNCH_SCHEMA!r}")
-    base = BaseLaunch.from_document(document)
-    if base.framework != framework:
-        raise UserFileError(f"{location} is a {base.framework} launch, but the session serves {framework}")
-    return base
+    return BaseLaunch.from_document(document)
 
 
 def _shell_launch(location: str, text: str, framework: str) -> ShellLaunch:
@@ -66,7 +64,10 @@ def _shell_launch(location: str, text: str, framework: str) -> ShellLaunch:
             f"{location} carries {_CONTROLS_PREFIX!r}, which a launch file no longer accepts; "
             "state the flags and exports the launch needs instead"
         )
-    launch = parse_shell_launch(text, framework=framework)
+    try:
+        launch = parse_shell_launch(text, framework=framework)
+    except ShellLaunchError as exc:
+        raise UserFileError(f"{location}: {exc}") from exc
     if not launch.has_entrypoint:
         raise UserFileError(f"{location} has no {framework} serving entrypoint")
     if launch.unresolved_flags:

@@ -5,7 +5,9 @@
 
 from __future__ import annotations
 
-from inference_suite.recipe.shell_launch import parse_shell_launch
+import pytest
+
+from inference_suite.recipe.shell_launch import ShellLaunchError, parse_shell_launch
 
 _VLLM_SCRIPT = """#!/usr/bin/env bash
 source "$(dirname "$0")/../benchmark_lib.sh"
@@ -149,3 +151,47 @@ second'
 
     assert launch.env == {"AITER_CONFIG_GEMM_BF16": "/tables/$literal file.csv", "MULTI": "first\nsecond"}
     assert launch.unresolved_env == ("DYNAMIC", "COMMAND", "DEFAULT", "CHAIN")
+
+
+def test_single_dash_options_are_read_with_their_values():
+    launch = parse_shell_launch(
+        "python3 -m atom.entrypoints.openai_server --model m/x -tp 8 --kv_cache_dtype fp8\n", framework="atom"
+    )
+
+    assert launch.args == ("-tp", "8", "--kv_cache_dtype", "fp8")
+    assert launch.model == "m/x"
+
+
+def test_a_negative_number_is_a_value_not_an_option():
+    launch = parse_shell_launch("vllm serve m/x -tp 4 --max-num-seqs -1\n", framework="vllm")
+
+    assert launch.args == ("-tp", "4", "--max-num-seqs", "-1")
+
+
+def test_a_commented_out_launch_is_not_the_launch():
+    text = "# vllm serve m/old -tp 1\n    #vllm serve m/older\nvllm serve m/x -tp 4  # tuned on mi355x\n"
+
+    launch = parse_shell_launch(text, framework="vllm")
+
+    assert (launch.model, launch.args) == ("m/x", ("-tp", "4"))
+
+
+def test_a_line_that_only_mentions_the_entrypoint_is_not_the_launch():
+    text = 'echo "starting vllm serve now"\nvllm serve m/x -tp 2\n'
+
+    assert parse_shell_launch(text, framework="vllm").args == ("-tp", "2")
+
+
+def test_flags_start_after_the_entrypoint_not_at_a_wrapper_option():
+    text = "numactl -m 0 python3 -m sglang.launch_server --model-path m/x --tp 8\n"
+
+    launch = parse_shell_launch(text, framework="sglang")
+
+    assert (launch.model, launch.args) == ("m/x", ("--tp", "8"))
+
+
+def test_a_second_launch_is_refused():
+    text = "vllm serve m/x -tp 4 &\nvllm serve m/y -tp 4 &\n"
+
+    with pytest.raises(ShellLaunchError, match="more than one vllm server"):
+        parse_shell_launch(text, framework="vllm")

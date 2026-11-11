@@ -34,9 +34,13 @@ gives the base:
 An AgentX session that no recipe and no operator launch file serves is refused.
 When a source cannot be read, a fixed session runs the default table, unless
 InferenceX is pinned (below), and an AgentX session is refused. A pinned fixed
-session no recipe serves is refused too, naming why each source missed. Repositories are read at the head of their `main` and recorded
-with that commit; the vLLM recipes site has no commit and is recorded as the
-response it was read from.
+session no recipe serves is refused too, naming why each source missed. Repositories are read at the head of their `main`. The base's
+`upstream` list records the revision of every source read, whether or not it gave
+the launch: the commit of InferenceX, the SGLang cookbook and ATOM's catalog, the
+commit of the Hugging Face model whose card was read, and, since the vLLM recipes
+site publishes no commit and its renderings carry no ETag, the URL and body sha256
+of each response it gave. `upstream` is not part of the digest, and a
+`base_launch.json` written without it reads with an empty list.
 
 To match a run made at an older InferenceX, pin it with `resolve --inferencex-commit
 <sha>`: a full sha, or a prefix of 7 or more hex digits of a commit on one of
@@ -54,12 +58,21 @@ when the commit lacks a function the resolver runs from InferenceX's own code
 lacks. To run on such a commit, resolve the base where its code was run and hand
 the frozen `base_launch.json` to `resolve --user-file`.
 
-A launch script is read, never run. It must launch the session's framework and fix
-every flag in its own text: a flag whose value names a shell variable, or a
-`# hyperloom-launch-controls:` line, is refused.
+A launch script is read, never run. It must start one server of the session's
+framework, on a line that is not a comment, and fix every flag in its own text: a
+second server, a flag whose value names a shell variable, or a
+`# hyperloom-launch-controls:` line, is refused. Options are read with one dash or
+two (`-tp 8`, `--tp 8`).
 
 A launch script, frozen base or default row that needs more GPUs than `--gpus` is
 refused, naming both counts.
+A frozen base resolved for another model, workload or framework, or for a board
+of another architecture or HBM capacity than the session's, is refused, naming both
+values.
+
+An InferenceX entry of the session's model that its config cannot place (a runner
+on no board label, a missing key) is that entry's miss; entries of other models are
+not read.
 
 A source may hold several launches for one point. The base takes the one with the
 largest TP the GPUs fit, preferring an arm that does not offload KV cache, and
@@ -209,7 +222,8 @@ Exit codes: `0` when the round completed (or nothing survived `stop`, a base was
 written, or a staging is in place); `1` when the round did not complete, or a
 process outlived `stop`; `2` when the config, query or pidfile breaks its contract,
 the run directory is not empty, no source holds a base, in which case each
-source's reason is printed to stderr, `--inferencex-commit` is refused, or a staging cannot be built or verified,
+source's reason is printed to stderr, `--inferencex-commit` is refused, a source
+answers in a form resolve cannot read (an HTML page where JSON was asked), or a staging cannot be built or verified,
 printed as `staging_missing: <reason>`.
 
 ## Run directory
