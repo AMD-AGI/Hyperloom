@@ -1567,13 +1567,13 @@ class TestATickCannotOutliveTheSessionBound:
         assert finished == [True]
 
     @pytest.mark.asyncio
-    async def test_an_active_reactor_turn_is_cancelled_at_its_total_timeout(self, coord: Coordinator):
+    async def test_an_active_reactor_turn_is_cancelled_at_its_total_timeout(self, coord: Coordinator, monkeypatch):
         coord.reactor_turn_timeout_sec = 0.03
         coord._run_deadline = Deadline.after(60.0)
         activity: list[float] = []
         cancelled = asyncio.Event()
 
-        async def _stay_active() -> None:
+        async def _stay_active(**_kwargs: Any) -> None:
             try:
                 while True:
                     activity.append(time.monotonic())
@@ -1581,23 +1581,19 @@ class TestATickCannotOutliveTheSessionBound:
             finally:
                 cancelled.set()
 
+        monkeypatch.setattr(coord.backends["orchestration"], "run", _stay_active)
         # Only a guard against hanging the suite, like the other waits in this file: what the test asserts is that
         # the turn was cancelled at its own 30 ms bound, which the assertions below read off directly. Holding this
         # to 0.2 s instead made cancellation latency on a loaded runner look like a failure of the bound.
-        await asyncio.wait_for(
-            coord.await_within_session_bound(
-                _stay_active,
-                stage="reactor:orchestration",
-            ),
-            timeout=5.0,
-        )
+        result = await asyncio.wait_for(coord.reactor_pass("orchestration"), timeout=5.0)
 
+        assert result is None
         assert cancelled.is_set()
         assert len(activity) >= 2
         assert max(activity) - min(activity) < 1.0
 
     @pytest.mark.asyncio
-    async def test_a_turn_cancelled_at_its_total_timeout_counts_as_a_crash(self, coord: Coordinator):
+    async def test_a_turn_cancelled_at_its_total_timeout_counts_as_a_crash(self, coord: Coordinator, monkeypatch):
         """Cancelling the turn lets the tick advance, which hides the wedge from the watchdog.
 
         Nothing downstream would otherwise see it, and the session would spend
@@ -1607,12 +1603,35 @@ class TestATickCannotOutliveTheSessionBound:
         coord._run_deadline = Deadline.after(60.0)
         before = coord.shared_state.recent_crash_count(window_sec=3600.0)
 
-        await asyncio.wait_for(
-            coord.await_within_session_bound(_hang_forever, stage="reactor:orchestration"),
-            timeout=0.5,
-        )
+        async def _hang(**_kwargs: Any) -> None:
+            await _hang_forever()
+
+        monkeypatch.setattr(coord.backends["orchestration"], "run", _hang)
+        await asyncio.wait_for(coord.reactor_pass("orchestration"), timeout=0.5)
 
         assert coord.shared_state.recent_crash_count(window_sec=3600.0) == before + 1
+
+    @pytest.mark.asyncio
+    async def test_intents_a_turn_routes_outlive_the_turn_bound(self, coord: Coordinator, monkeypatch):
+        """An integrate routed from a turn benchmarks for longer than any LLM turn may take."""
+        coord.reactor_turn_timeout_sec = 0.01
+        coord._run_deadline = Deadline.after(60.0)
+        routed: list[str] = []
+
+        async def _benchmark_longer_than_a_turn(agent_name: str, _intent: Intent) -> None:
+            await asyncio.sleep(0.05)
+            routed.append(agent_name)
+
+        monkeypatch.setattr(coord.router, "handle_intent", _benchmark_longer_than_a_turn)
+        await asyncio.wait_for(
+            coord.await_within_session_bound(
+                lambda: coord.reactor_pass("orchestration"),
+                stage="reactor:orchestration",
+            ),
+            timeout=5.0,
+        )
+
+        assert routed == ["orchestration"]
 
     @pytest.mark.asyncio
     async def test_a_step_the_session_bound_cut_short_is_not_a_crash(self, coord: Coordinator):
@@ -1626,12 +1645,6 @@ class TestATickCannotOutliveTheSessionBound:
         )
 
         assert coord.shared_state.recent_crash_count(window_sec=3600.0) == before
-
-    def test_all_reactor_steps_share_one_total_timeout(self, coord: Coordinator):
-        coord.reactor_turn_timeout_sec = 777.0
-        assert coord._stage_timeout_sec("advance_phase") is None
-        assert coord._stage_timeout_sec("reactor:orchestration") == 777.0
-        assert coord._stage_timeout_sec("reactor:critic") == 777.0
 
     def test_total_timeout_reads_the_coordinator_environment(self, session_dir, monkeypatch):
         monkeypatch.setenv("INFERENCE_OPTIMIZER_REACTOR_TURN_TIMEOUT_SEC", "42.5")
