@@ -27,9 +27,9 @@ Arbor looks a dossier up. The root's op shares are not the adapter's: the prefli
 The spec's ``launch`` is the launch the root recipe adds to, which an AgentX recipe holds only the additions of: the
 session's frozen base launch (:data:`BASE_LAUNCH_SCHEMA`), the one MB's gate measures every change on, or a launch file
 the operator gave (:func:`read_launch`). Without one, an AgentX branch is refused before Arbor starts, which would
-otherwise serve defaults MB does not measure. Served a base launch record, Arbor checks at its start that the launch
-it would run is the record's (``component.base_launch``, carried into its checkout), refusing before any GPU work when
-it is not; it serves with the record's entrypoint when that is not the framework's own (``component.entrypoint``).
+otherwise serve defaults MB does not measure. Served a base launch record under a root recipe that adds nothing to it,
+Arbor checks at its start that the launch it would run is the record's (``component.base_launch``, carried into its
+checkout), refusing before any GPU work when it is not; it serves with the record's entrypoint when that is not the framework's own (``component.entrypoint``).
 
 The spec's ``review`` hands Arbor's human review gate over: Arbor waits at the start of a new
 session for a person's approval unless the host says it reviewed (``component.review: "host"``, :data:`REVIEW_HOST`)
@@ -703,7 +703,8 @@ def arbor_config(spec: AgentSpec, checkout: Path, run: ArborRun) -> dict[str, An
     gate = spec.review if spec.review and has_review_gate(checkout) else ""
     if gate == REVIEW_HOST:
         component[REVIEW_KEY] = REVIEW_HOST
-    if launch.record:
+    # Arbor's start check compares its whole launch with the record, so it holds only for a root recipe that adds nothing.
+    if launch.record and not (spec.server_args or spec.remove_args or spec.envs):
         component["base_launch"] = {"path": launch.record, "digest": launch.digest}
     if launch.entrypoint and launch.entrypoint != ENTRYPOINTS.get(spec.framework):
         component["entrypoint"] = list(launch.entrypoint)

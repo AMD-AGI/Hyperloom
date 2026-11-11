@@ -1024,23 +1024,40 @@ def test_a_flag_reaches_the_server_arbor_launches_through_a_shell_as_its_words(
     assert _arbor_split(flags) == _shell_argv(flags)
 
 
-def test_arbor_s_own_start_check_passes_a_branch_served_a_record_on_the_base_and_refuses_another(
-    tmp_path: Path,
-) -> None:
+def test_arbor_s_own_start_check_passes_a_branch_served_a_record_on_the_base(tmp_path: Path) -> None:
     # The record names no served model and no client: the gate's client gives both.
     record = write_record(tmp_path / "record" / "base_launch.json")
     spec = replace(_spec(tmp_path, launch=str(record)), server_args="", envs={})
 
     config = arbor_config(spec, tmp_path / "checkout", BRANCH_RUN)
-    differs = arbor_config(replace(spec, envs={"VLLM_ROCM_USE_AITER": "0"}), tmp_path / "checkout", BRANCH_RUN)
 
     assert config["model_name"] == "Qwen/Qwen3-14B-FP8"
     assert config["component"]["bench_command"] == bench_command(spec.client)
+    assert config["component"]["base_launch"]["path"] == str(record)
     assert _arbor_start_check(config) == []
-    assert _arbor_start_check(differs) == [
-        "the launch differs from the host's base launch: the variable VLLM_ROCM_USE_AITER is 0 in Arbor's environment"
-        " and 1 in the host's"
-    ]
+
+
+@pytest.mark.parametrize(
+    "layer",
+    [
+        {"server_args": "--enable-chunked-prefill"},
+        {"server_args": "--max-num-seqs 256"},
+        {"envs": {"VLLM_ROCM_USE_AITER": "0"}},
+        {"remove_args": ("--max-num-seqs",)},
+    ],
+    ids=["new-flag", "changed-flag", "changed-env", "removed-flag"],
+)
+def test_a_branch_whose_root_recipe_adds_to_the_record_starts_without_the_base_check(
+    tmp_path: Path, layer: dict[str, object]
+) -> None:
+    # A root a Recipe KB champion was replayed onto serves more than the base; Arbor's check compares the whole launch.
+    record = write_record(tmp_path / "record" / "base_launch.json")
+    spec = replace(_spec(tmp_path, launch=str(record)), **{"server_args": "", "envs": {}, **layer})
+
+    config = arbor_config(spec, tmp_path / "checkout", BRANCH_RUN)
+
+    assert "base_launch" not in config["component"]
+    assert _arbor_start_check(config) == []
 
 
 def test_a_golden_layer_s_token_mode_is_served_to_arbor_as_the_root_runs_it(tmp_path: Path) -> None:

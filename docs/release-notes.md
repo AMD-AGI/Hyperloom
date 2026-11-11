@@ -27,8 +27,9 @@ it.
   and Arbor checks its launch against that base at its start. Before, an
   AgentX branch without one of those flags was refused before PRELUDE, and a
   fixed-workload Arbor was served only the root recipe's flags. `--agent-launch`
-  still replaces the base. An Arbor now refuses to start when the root recipe
-  adds anything to the base, as it already did under `--reference-script`.
+  still replaces the base. The start check holds only while the root recipe
+  adds nothing to the base; a branch whose root recipe does (a replayed Recipe
+  KB champion, for one) starts without it.
 - **A recipe can bound the SGLang draft its deployment runs.** A benchmark YAML
   may declare `speculative_draft_limits` (`draft_length`, `draft_tokens`,
   `topk`, each with `min` and/or `max`). An explore variant outside them is
