@@ -119,7 +119,6 @@ _UTF8 = "utf-8"
 #: A profiled round, and a repro case's server, run once with no warmup: neither is a statistic.
 _NO_WARMUP = RoundPlan(warmup_rounds=0)
 _REASON_DETAIL_CHARS = 300
-_ELIDED = " ... "
 #: What an infrastructure failure's reason keeps of what the runner or the platform said: its beginning, which names the
 #: failing step, with room for the sandbox and node it names after the runner's bounded message.
 _INFRA_DETAIL_CHARS = FAILURE_DETAIL_CHARS + 300
@@ -626,17 +625,8 @@ def _refuse_unless_measured(outcome: TestOutcome) -> None:
     verdict = classify_test_failure(returncode=outcome.returncode)
     if verdict.disposition is Disposition.STOPPED:
         raise asyncio.CancelledError(verdict.failure_reason)  # the run is stopping: the test is picked up at restart
-    detail = _both_ends((outcome.stderr or "").strip(), _REASON_DETAIL_CHARS)
+    detail = (outcome.stderr or "").strip()[-300:]
     raise MeasurementRefused(f"{verdict.failure_reason or 'unclassified end'}: {detail}".strip(": "))
-
-
-def _both_ends(text: str, limit: int) -> str:
-    """``text`` when it fits in ``limit`` characters, else its beginning and its end: the beginning names what was
-    refused (a runner's one-line refusal starts with it), the end what the backend added (the sheet's version)."""
-    if len(text) <= limit:
-        return text
-    half = (limit - len(_ELIDED)) // 2
-    return f"{text[:half]}{_ELIDED}{text[-half:]}"
 
 
 def _failure_reason(outcome: TestOutcome, failure: FailureClass | None) -> str | None:
