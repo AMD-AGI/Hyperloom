@@ -7,7 +7,7 @@ from __future__ import annotations
 
 import pytest
 
-from hyperloom_common.credential_names import is_credential_env_name
+from hyperloom_common.credential_names import is_credential_env_name, is_credential_flag
 
 
 @pytest.mark.parametrize(
@@ -22,3 +22,13 @@ def test_a_credential_name_is_one(name):
 )
 def test_a_tuning_knob_is_not_a_credential(name):
     assert not is_credential_env_name(name)
+
+
+@pytest.mark.parametrize("flag", ["--hf-token", "--api-key", "--api-key=sk", "--ssl-keyfile-password"])
+def test_a_flag_named_like_a_credential_is_one(flag):
+    assert is_credential_flag(flag)
+
+
+@pytest.mark.parametrize("flag", ["--max-num-batched-tokens", "--tokenizer-mode", "--tp", "--chunked-prefill-size"])
+def test_a_tuning_flag_is_not_a_credential(flag):
+    assert not is_credential_flag(flag)

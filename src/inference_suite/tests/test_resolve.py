@@ -55,7 +55,7 @@ from inference_suite.recipe.model import (
 from inference_suite.recipe import resolve
 from inference_suite.recipe.resolve import Miss, SourceSnapshot, UnreadSource, resolve_base
 from inference_suite.recipe.sglang_cookbook import sglang_cookbook_launches
-from inference_suite.recipe.user_file import parse_user_file
+from inference_suite.recipe.user_file import UserFileError, parse_user_file
 from inference_suite.recipe.vllm_recipes import VllmRecipesSnapshot, rendering_url
 
 _FIXTURES = Path(__file__).parent / "fixtures"
@@ -188,6 +188,31 @@ def test_a_shell_user_file_records_a_literal_credential_export_as_its_sha256_onl
         "SGLANG_MAX_NUM_BATCHED_TOKENS": "8192",
     }
     assert any("HF_TOKEN" in warning and "host" in warning for warning in base.warnings)
+
+
+@pytest.mark.parametrize(
+    ("framework", "launch", "flag"),
+    [
+        ("vllm", "vllm serve /models/m --tensor-parallel-size 4 --hf-token hf_secret", "--hf-token"),
+        ("vllm", "vllm serve /models/m --tensor-parallel-size 4 --api-key=sk-secret", "--api-key"),
+        ("vllm", "vllm serve /models/m --tensor-parallel-size 4 --api-key $VLLM_API_KEY", "--api-key"),
+        ("sglang", "python3 -m sglang.launch_server --model-path /models/m --tp 4 --api-key sk-secret", "--api-key"),
+    ],
+)
+def test_a_shell_user_file_passing_a_credential_flag_is_refused_before_the_base_records_it(framework, launch, flag):
+    with pytest.raises(UserFileError, match=f"{flag}.*export") as refused:
+        parse_user_file("launch.sh", f"{launch}\n".encode(), framework=framework)
+
+    assert "secret" not in str(refused.value)
+
+
+def test_a_shell_user_file_with_a_bare_hf_token_flag_records_it():
+    user_file = parse_user_file(
+        "launch.sh", b"vllm serve /models/m --tensor-parallel-size 8 --hf-token\n", framework="vllm"
+    )
+    base = _base(_fixed(framework="vllm"), dataclasses.replace(_snapshot(), user_file=user_file))
+
+    assert "--hf-token" in base.args
 
 
 def test_a_shell_user_file_setting_the_runner_owned_metrics_switch_is_refused():

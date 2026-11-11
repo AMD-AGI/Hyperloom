@@ -7,7 +7,7 @@ from __future__ import annotations
 
 import re
 
-__all__ = ["SENSITIVE_ENV_NAME_MARKERS", "is_credential_env_name"]
+__all__ = ["SENSITIVE_ENV_NAME_MARKERS", "is_credential_env_name", "is_credential_flag"]
 
 # Env-var name fragments whose value is masked before an env snapshot leaves this process. Shared with the Langfuse
 # session_start snapshot, which matches every marker as a substring.
@@ -44,3 +44,8 @@ def is_credential_env_name(key: object) -> bool:
     if any(marker in upper for marker in _SUBSTRING_MARKERS_EXCEPT_TOKEN):
         return True
     return bool(_TOKEN_SEGMENT_RE.search(_PER_TOKEN_SEGMENT_RE.sub("", upper)))
+
+
+def is_credential_flag(flag: str) -> bool:
+    """Whether the command-line option ``flag`` (``--api-key``, ``--hf-token=...``) is named like a credential."""
+    return is_credential_env_name(flag.lstrip("-").partition("=")[0].replace("-", "_"))
