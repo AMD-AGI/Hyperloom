@@ -43,7 +43,7 @@ from hyperloom_common.gpu_telemetry import (
 from hyperloom_common.io import atomic_write_json
 from inference_suite import framework_version, parser_check, staging
 from inference_suite.compose import Refusal, RoundFacts, compose
-from inference_suite.contracts.base_launch import DIGEST_PREFIX, BaseLaunch, EnvValue
+from inference_suite.contracts.base_launch import DIGEST_PREFIX, BaseLaunch, CredentialNotHeld, EnvValue, held_env
 from inference_suite.contracts.config import ConfigError, LifecycleMode, SuiteConfig, WorkloadKind
 from inference_suite.contracts.launch import ClientInvocation, Launch, VersionCheck
 from inference_suite.contracts.layout import POWER, RunLayout
@@ -247,20 +247,10 @@ def _changed_source_files(config: SuiteConfig) -> Stop | None:
 
 
 def _runnable_env(env: Mapping[str, EnvValue]) -> dict[str, str] | Stop:
-    """``env`` with each redacted value taken from the host, which must hold the value the base was resolved with."""
-    runnable: dict[str, str] = {}
-    for name, value in env.items():
-        if isinstance(value, str):
-            runnable[name] = value
-            continue
-        held = os.environ.get(name)
-        if held is None:
-            return Stop(FailedStep.CONFIG_INVALID, f"{name} is redacted in the base and the host holds no value of it")
-        if hashlib.sha256(held.encode()).hexdigest() != value.sha256:
-            detail = f"{name} is redacted in the base and the host's value is not the one the base was resolved with"
-            return Stop(FailedStep.CONFIG_INVALID, detail)
-        runnable[name] = held
-    return runnable
+    try:
+        return held_env(env, os.environ)
+    except CredentialNotHeld as exc:
+        return Stop(FailedStep.CONFIG_INVALID, str(exc))
 
 
 def _measured_invocation(config: SuiteConfig, client: ClientTool | AgentxTool) -> ClientInvocation | None:

@@ -430,6 +430,32 @@ class Redacted:
 EnvValue = str | Redacted
 
 
+class CredentialNotHeld(ValueError):
+    """A redacted value the host holds no value of, or another value; the message names it, never a value."""
+
+
+def held_env(env: Mapping[str, EnvValue], host: Mapping[str, str]) -> dict[str, str]:
+    """``env`` with each redacted value taken from ``host``, which must hold the value the base was resolved with.
+
+    Raises:
+        CredentialNotHeld: ``host`` holds no value of a redacted name, or another value than the resolved one.
+    """
+    held: dict[str, str] = {}
+    for name, value in env.items():
+        if isinstance(value, str):
+            held[name] = value
+            continue
+        host_value = host.get(name)
+        if host_value is None:
+            raise CredentialNotHeld(f"{name} is redacted in the base and the host holds no value of it")
+        if hashlib.sha256(host_value.encode()).hexdigest() != value.sha256:
+            raise CredentialNotHeld(
+                f"{name} is redacted in the base and the host's value is not the one the base was resolved with"
+            )
+        held[name] = host_value
+    return held
+
+
 def _env(value: object, what: str) -> dict[str, EnvValue]:
     env = dict(_FIELDS.mapping(value, what))
     _env_names(list(env), what)
@@ -799,6 +825,7 @@ __all__ = [
     "BaseLaunch",
     "BaseLaunchError",
     "ClientLaunch",
+    "CredentialNotHeld",
     "EnvValue",
     "GoldenAcceptance",
     "GoldenCurve",
@@ -817,4 +844,5 @@ __all__ = [
     "UpstreamSource",
     "VersionBasis",
     "Workload",
+    "held_env",
 ]

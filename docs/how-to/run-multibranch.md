@@ -83,10 +83,12 @@ agent CLI the specialists run must be installed. `--measurement hosted` also nee
   moves it (the same stack on GLM-5.3 TP4/EP4 gained +1.8% total per GPU at conc 4 and +7–14% at conc 8–16). The
   bar and guards are read from the code, so a resumed session judges by the current rule. The manifest records the
   objective, so a resumed session keeps it; the frontier, FINAL, the dashboard and `MB-report.md` all read that metric. A
-  `total_token_throughput` session writes no Recipe KB record: the KB partitions by workload, not objective.
+  `total_token_throughput` session writes no Recipe KB record: the KB partitions by workload, not objective. Each Arbor
+  is given the objective with its bar and guards (`opt_objective`), which needs Arbor `29c72f9` or later.
 - **Base launch:** `--reference-script FILE`, a shell launch script or a base launch record frozen elsewhere, as for
   `hyperloom optimize`; the session freezes it as its base, a record without reading any recipe source. Without it
-  the base comes from the recipe sources.
+  the base comes from the recipe sources. Every Arbor is served the frozen base unless `--agent-launch` gives a launch
+  file.
 - **Limits:** `--max-hours` (default 2, 0 for none), `--max-gpu-hours` and `--max-llm-usd` (0 for none),
   `--max-branches` (default 4). A negative or non-finite limit is a usage error.
 - **Concurrency:** `--max-parallel-tests` (default: as many as fit at TP), `--max-k-per-branch` (default 2),
@@ -98,6 +100,8 @@ agent CLI the specialists run must be installed. `--measurement hosted` also nee
 - **Third-party agents:** `--autonomous-agent SOURCE` (repeatable; a URL carrying credentials is refused),
   `--agent-directions`, `--agent-dossier-minutes`, `--agent-share-minutes`, `--agent-pack`, `--agent-launch`,
   `--agent-port`, `--stop-after-map`, `--agent-dossier`, `--no-review-gate`.
+  Each agent measures with the gate's own client: on `agentx`, the gate's replay run by
+  `python -m inference_suite run` against the agent's server, so an Arbor needs no bench variables in its launch.
 - **Scheduling playbook:** `--playbook auto|champion|challenger` (default `auto`).
 
 ## Resuming a stopped session

@@ -81,6 +81,7 @@ from hyperloom_multibranch.scheduling.local_peers import (
     LocalCards,
     MeasurementHost,
     SessionWiring,
+    attempt_timeout_sec,
     branch_sandboxes,
     load_peers,
     local_peers,
@@ -125,7 +126,7 @@ from inference_suite import SourceSnapshot
 from inference_suite.recipe.resolve import UnreadSource
 from inference_suite.contracts import BaseLaunch
 from hyperloom_multibranch.toolbox.hosted_leases import HostedBranchLease
-from hyperloom_multibranch.specialist.gate_client import GateClient
+from hyperloom_multibranch.specialist.gate_client import AgentxGateClient, GateClient
 from hyperloom_multibranch.specialist.model_sessions import ModelSessions
 from hyperloom_multibranch.specialist.prompts import RoleWorkload, role_prompt
 from hyperloom_multibranch.specialist.runtime import SessionStart, SpecialistRuntime
@@ -438,6 +439,7 @@ async def _peers(
     inferencex_commit: str = "",
     reference_script: str = "",
     base: BaseLaunch | None = None,
+    agent_launch: str = "/launches/arbor.json",
 ) -> AsyncIterator[_Built]:
     """The real peers of a session of ``workload`` on ``host`` in ``tmp_path`` lending ``dev_leases`` dev sandboxes,
     with the wiring their specialist sessions were built on; a branch's worktree, holding no component, is served
@@ -465,6 +467,7 @@ async def _peers(
         dev_leases,
         (),
         reference_script,
+        agent_launch=agent_launch,
         inferencex_commit=inferencex_commit,
     )
     wired: list[SessionWiring] = []
@@ -707,16 +710,33 @@ async def test_a_fresh_session_reads_inferencex_at_the_commit_its_setup_names(
         assert commits == ["8a76a78e41"]
 
 
-async def test_a_reference_script_is_frozen_as_the_base(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+async def test_a_reference_script_is_frozen_as_the_base_and_served_to_the_arbors(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
     monkeypatch.delenv("HL_MODEL_BASE", raising=False)
     script = tmp_path / "launch.sh"
     script.write_text(
         "python3 -m sglang.launch_server --model-path /models/Llama-3-8B --tp 2 --chunked-prefill-size 8\n"
     )
 
-    async with _peers(tmp_path / "run", monkeypatch, WORKLOAD, freeze=False, reference_script=str(script)) as built:
+    async with _peers(
+        tmp_path / "run", monkeypatch, WORKLOAD, freeze=False, reference_script=str(script), agent_launch=""
+    ) as built:
         frozen = frozen_base(built.layout.toolbox)
         assert frozen is not None and frozen.launch.source.path == str(script)
+        assert built.wiring.setup.agent_launch == str(frozen.path)
+
+
+async def test_without_a_launch_file_the_arbors_are_served_the_session_s_frozen_base(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    async with _peers(tmp_path, monkeypatch, WORKLOAD, agent_launch="") as built:
+        frozen = frozen_base(built.layout.toolbox)
+        assert frozen is not None and built.wiring.setup.agent_launch == str(frozen.path)
+
+
+async def test_an_arbor_launch_file_is_served_in_place_of_the_frozen_base(built: _Built) -> None:
+    assert built.wiring.setup.agent_launch == "/launches/arbor.json"
 
 
 async def test_the_specialists_are_wired_the_frozen_base_launch_s_server_half(built: _Built) -> None:
@@ -1018,16 +1038,51 @@ async def test_the_agents_are_given_the_reviewed_dossier_the_run_names_and_none_
     assert dossiers == [dossier]
 
 
-async def test_an_agent_of_an_agentx_session_gets_no_client(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+def _agentx_base() -> BaseLaunch:
+    """An AgentX base frozen at the workload's topology, its client env naming the corpus the replay reads."""
+
+    from hyperloom.orchestrator.actions.executors.tests.test_suite_accuracy_round import _agentx_base as agentx_base
+
+    base = agentx_base()
+    return replace(
+        base,
+        topology=replace(base.topology, tp=AGENTX.tp),
+        client=replace(base.client, env={"WEKA_LOADER_OVERRIDE": "semianalysis_cc_traces_weka_062126"}),
+    )
+
+
+async def test_an_agent_of_an_agentx_session_measures_with_the_gate_s_replay_bounded_as_one_attempt(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
     (tmp_path / "models" / "Llama-3-8B").mkdir(parents=True)
     monkeypatch.setenv("HL_MODEL_BASE", str(tmp_path / "models"))
     workload = replace(AGENTX, model="meta-llama/Llama-3-8B")
     clients = _agent_clients(monkeypatch)
 
-    async with _peers(tmp_path / "workspace", monkeypatch, workload, HOST) as built:
+    async with _peers(tmp_path / "workspace", monkeypatch, workload, HOST, base=_agentx_base()) as built:
+        verified_tool_cache(tmp_path / "tools", monkeypatch)
         model_backed_sessions(AgentCommand("claude", "claude"))(_with_agent(built.wiring))
 
-    assert clients == [None]
+    [client] = clients
+    assert isinstance(client, AgentxGateClient)
+    assert client.seconds == attempt_timeout_sec(workload)
+    assert client.config.agentx is not None and client.config.agentx.concurrency == workload.conc
+    assert client.config.server.base.path == str(built.layout.toolbox / "base_launch.json")
+
+
+async def test_an_agentx_session_whose_base_cannot_replay_refuses_its_agents_the_peers(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    (tmp_path / "models" / "Llama-3-8B").mkdir(parents=True)
+    monkeypatch.setenv("HL_MODEL_BASE", str(tmp_path / "models"))
+    workload = replace(AGENTX, model="meta-llama/Llama-3-8B")
+    _agent_clients(monkeypatch)
+    base = replace(_agentx_base(), client=replace(_agentx_base().client, env={}))
+
+    async with _peers(tmp_path / "workspace", monkeypatch, workload, HOST, base=base) as built:
+        verified_tool_cache(tmp_path / "tools", monkeypatch)
+        with pytest.raises(PeersUnavailable, match="WEKA_LOADER_OVERRIDE"):
+            model_backed_sessions(AgentCommand("claude", "claude"))(_with_agent(built.wiring))
 
 
 async def test_a_session_without_agents_reads_no_canonical(built: _Built, monkeypatch: pytest.MonkeyPatch) -> None:
