@@ -619,6 +619,21 @@ def test_spawn_without_a_server_takes_the_container_environment(
     assert [c[2] for c in calls if c[0] == "spawn"] == [("FROM=1",)]
 
 
+def test_respawn_takes_the_container_environment_when_the_server_environment_is_gone(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    calls: list = []
+    scope = _driver_scope(monkeypatch, held=False, calls=calls)
+    scope["baseline_environ"] = lambda pid, snapshot: calls.append(("env", pid, snapshot)) or []
+    scope["read_environ"] = lambda pid: ["PATH=/opt/venv/bin:/usr/bin", f"FROM={pid}"]
+    monkeypatch.setenv("HL_PIDFILE", str(tmp_path / "role.pid"))
+    monkeypatch.setenv("HL_LAUNCH_PATH", str(tmp_path / "launch.sh"))
+    monkeypatch.setenv("HL_ACTION", "restart")
+    scope["restart_remote_main"]()
+    assert json.loads(capsys.readouterr().out.strip().splitlines()[-1])["action"] == "respawn"
+    assert [c[2] for c in calls if c[0] == "spawn"] == [("PATH=/opt/venv/bin:/usr/bin", "FROM=1")]
+
+
 @pytest.mark.parametrize(("found", "expected"), [(4242, "running"), (0, "spawn")])
 def test_ensure_starts_the_server_only_when_none_runs(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path, capsys: pytest.CaptureFixture[str], found: int, expected: str

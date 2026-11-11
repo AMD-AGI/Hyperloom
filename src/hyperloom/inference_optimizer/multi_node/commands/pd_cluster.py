@@ -65,7 +65,9 @@ def _spawn_detached(launch, env):
 
 def _spawn_env(pid, pidfile):
     # The server's own environment, else the container's (PID 1): never the ssh session's.
-    return baseline_environ(pid if pid > 0 else 1, pidfile + ".environ")
+    # A server that rewrites its process title (sglang::router) can leave an empty environ behind.
+    env = baseline_environ(pid if pid > 0 else 1, pidfile + ".environ")
+    return env or read_environ(1)
 
 
 def _ppid(pid):
