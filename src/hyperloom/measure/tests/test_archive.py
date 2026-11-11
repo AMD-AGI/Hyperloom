@@ -178,3 +178,63 @@ def test_off_shared_storage_a_stored_bundle_stays_its_writers(staged, archive) -
     bundle, verified = staged
     location = Path(archive.put_bundle(REQUEST_ID, verified.manifest_sha256, bundle.staging))
     assert stat.S_IMODE(location.stat().st_mode) == 0o700
+
+
+def _swap_incoming(root: Path, replacement: Path | None, target: Path) -> None:
+    """Put ``replacement`` (a link to ``target`` when ``None``) where the writer's incoming directory is, as another
+    account of the group can below a root it writes."""
+    (incoming,) = [p for p in root.iterdir() if p.name.startswith(".incoming-")]
+    incoming.rename(root.parent / "moved-away")
+    if replacement is None:
+        incoming.symlink_to(target)
+    else:
+        replacement.rename(incoming)
+
+
+@pytest.mark.parametrize("taken_by", ["link", "directory open to others"])
+def test_an_incoming_directory_taken_over_before_it_is_opened_is_refused_and_nothing_is_written_elsewhere(
+    staged, archive, tmp_path: Path, monkeypatch, taken_by: str
+) -> None:
+    bundle, verified = staged
+    victim = tmp_path / "victim"
+    victim.mkdir(mode=0o700)
+    victim.chmod(0o700)
+    real_mkdir = os.mkdir
+
+    def mkdir_then_take_over(path, mode=0o777, *, dir_fd=None):
+        real_mkdir(path, mode, dir_fd=dir_fd)
+        if str(path).startswith(".incoming-"):
+            if taken_by == "link":
+                _swap_incoming(tmp_path / "archive", None, victim)
+            else:
+                other = tmp_path / "other"
+                other.mkdir()
+                other.chmod(0o755)
+                _swap_incoming(tmp_path / "archive", other, victim)
+
+    monkeypatch.setattr(archive_mod.os, "mkdir", mkdir_then_take_over)
+    with pytest.raises(ArchiveError):
+        archive.put_bundle(REQUEST_ID, verified.manifest_sha256, bundle.staging)
+    monkeypatch.undo()
+    assert list(victim.iterdir()) == [] and stat.S_IMODE(victim.stat().st_mode) == 0o700
+    assert not archive.bundle_dir(REQUEST_ID, verified.manifest_sha256).exists()
+
+
+def test_a_failed_store_removes_only_its_own_incoming_directory(staged, archive, tmp_path: Path, monkeypatch) -> None:
+    """The name of the writer's incoming directory may name another directory by the time a failure cleans up."""
+    bundle, verified = staged
+    precious = tmp_path / "precious"
+    precious.mkdir(mode=0o700)
+    (precious / "kept").write_text("x")
+    real = archive_mod._copy_listing
+
+    def take_over_then_fail(staging_dir, incoming, listing):
+        real(staging_dir, incoming, listing)
+        _swap_incoming(tmp_path / "archive", precious, precious)
+        raise OSError(28, "No space left on device")
+
+    monkeypatch.setattr(archive_mod, "_copy_listing", take_over_then_fail)
+    with pytest.raises(ArchiveError):
+        archive.put_bundle(REQUEST_ID, verified.manifest_sha256, bundle.staging)
+    kept = [p / "kept" for p in (tmp_path / "archive").iterdir() if p.name.startswith(".incoming-")]
+    assert [p.read_text() for p in kept] == ["x"], "the other directory now under the incoming name was removed"
