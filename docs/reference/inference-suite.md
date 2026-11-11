@@ -315,7 +315,7 @@ A round that did not complete names one `failed_step`:
 | Server | `server_exited_before_ready`, `server_silent_before_ready`, `server_boot_timeout`, `server_stalled`, `server_died` |
 | Client | `client_failed`, `client_output_missing` |
 | Eval | `eval_failed` |
-| Any | `round_timeout`, `deadline_exhausted`, `cancelled`, `disk_full`, `teardown_incomplete` |
+| Any | `round_timeout`, `deadline_exhausted`, `cancelled`, `teardown_incomplete` |
 
 Every metric key is fixed: a metric nobody measured is `null`, never `0`. An eval
 records its definition digest, and two scores compare only under one definition.
