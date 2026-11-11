@@ -326,8 +326,8 @@ class EarlierSession:
     closed: Path | None = None
 
 
-def earlier_session(state_dir: Path) -> EarlierSession:
-    """The session ``session.json`` names, read back; raises what :func:`recorded_session` and
+def take_over_earlier_session(state_dir: Path) -> EarlierSession:
+    """The session ``session.json`` names, read back and taken over from the earlier start; raises what :func:`recorded_session` and
     :func:`~hyperloom_multibranch.scheduling.lifecycle.persisted_run` raise. Blocks.
 
     The host starts a run again only once its earlier start has ended, so a ``final-only`` lock that start left in the
@@ -350,6 +350,19 @@ def earlier_session(state_dir: Path) -> EarlierSession:
     return EarlierSession(left=persisted_session(previous))
 
 
+def close_then_start(left: PersistedRun | None, close: Callable[[PersistedRun], int], start: Callable[[], int]) -> int:
+    """Close ``left``, a session that ended before its baseline was recorded, when there is one, with ``close``
+    (``final-only``, which ends the sandboxes of the tests it left), then ``start`` the spec's session, unless a stop
+    during the close ended the run: then the close's exit code."""
+
+    if left is not None:
+        log.warning("%s ended before PRELUDE recorded its baseline: closing it, then starting again", left.layout.root)
+        closed = close(left)
+        if reported_stop_reason(left.layout.root) != left.ended.value:
+            return closed
+    return start()
+
+
 def reported_stop_reason(root: Path) -> str | None:
     """The stop reason the CLOSE of the session in ``root`` reported, ``None`` when it wrote no report."""
 
@@ -370,7 +383,7 @@ __all__ = [
     "HostedRefused",
     "arm_grant_stop",
     "campaign_spec",
-    "earlier_session",
+    "close_then_start",
     "grant_deadline",
     "grant_tests_that_fit",
     "record_session",
@@ -379,6 +392,7 @@ __all__ = [
     "reported_stop_reason",
     "run_argv",
     "spec_make_before_break",
+    "take_over_earlier_session",
     "toolbox_grant",
     "write_final_exit",
 ]

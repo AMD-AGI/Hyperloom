@@ -80,10 +80,12 @@ the same path; a usage error names what is missing.
 ``hosted run`` takes no arguments: it runs the session of the campaign spec a host injected, as
 :mod:`~hyperloom_multibranch.scheduling.hosted_run` maps it onto the options of ``run``, measured in the runner
 sandboxes of the host's sandbox service (:mod:`~hyperloom_multibranch.scheduling.hosted_peers`). Started again over a
-run whose ``session.json`` names a session, it finishes that session as ``final-only`` does. It tells the host the run
-is over -- ``final: true`` in ``exit.json`` -- once CLOSE ran, and when the spec, the environment, a missing package of
-the ``hosted`` extra or the runner cache keeps a session from running, with exit code 2 for a refused spec or session
-and 1 otherwise; a crash leaves no ``exit.json``, and the host starts the run again.
+run whose ``session.json`` names a session, it finishes that session as ``final-only`` does once its PRELUDE recorded
+the baseline; before that it closes the session, ending its tests, and starts the spec's session again
+(:func:`~hyperloom_multibranch.scheduling.hosted_run.take_over_earlier_session`). It tells the host the run is over
+-- ``final: true`` in ``exit.json`` -- once CLOSE ran, and when the spec, the environment, a missing package of the
+``hosted`` extra, the runner cache or a file it cannot read keeps a session from running, with exit code 2 for a
+refused spec or session and 1 otherwise; a crash leaves no ``exit.json``, and the host starts the run again.
 ``final-only SESSION_DIR`` is the emergency recovery of a session that ended before FINAL ran, and takes nothing but
 that directory: it runs FINAL and CLOSE over what the session persisted -- the settings and the frontier policy its
 manifest holds, the branches its roster and blackboard hold -- and rewrites its report, dashboard and breakdown. It
@@ -143,7 +145,7 @@ from hyperloom_multibranch.scheduling.hosted_run import (
     HostedExit,
     arm_grant_stop,
     campaign_spec,
-    earlier_session,
+    close_then_start,
     grant_deadline,
     grant_tests_that_fit,
     record_session,
@@ -152,6 +154,7 @@ from hyperloom_multibranch.scheduling.hosted_run import (
     reported_stop_reason,
     run_argv,
     spec_make_before_break,
+    take_over_earlier_session,
     write_final_exit,
 )
 from hyperloom_multibranch.scheduling import review
@@ -1043,7 +1046,6 @@ def hosted_run() -> int:
     except ValueError as exc:
         return _not_run(host.state_dir, EXIT_USAGE, exc)
     except (EnvironmentIncomplete, PeersUnavailable, PermissionError) as exc:
-        # PermissionError: what an earlier leg of another account left is not readable here, and a restart meets it too
         return _not_run(host.state_dir, EXIT_FAILED, exc)
     except ImportError as exc:
         log.exception("hosted run: a module the session needs is not installed")
@@ -1060,36 +1062,23 @@ def hosted_run() -> int:
 
 
 def _hosted_start(host: HostInfo) -> HostedStart:
-    """A new session of the spec, or the close or finish of the one ``session.json`` names (:func:`earlier_session`);
-    raises ValueError when the spec or that session is refused, ImportError when a ``hosted`` package is missing,
-    and what :func:`ready_session` raises."""
+    """A new session of the spec, or the close or finish of the one ``session.json`` names, which the restart takes
+    over (:func:`take_over_earlier_session`); raises ValueError on a refused spec or session, ImportError when a
+    ``hosted`` package is missing, and what :func:`ready_session` raises."""
 
     deadline = grant_deadline(host, datetime.now(timezone.utc))
-    earlier = earlier_session(host.state_dir)
+    earlier = take_over_earlier_session(host.state_dir)
     if earlier.closed is not None:  # it closed with no baseline, which ended the run, and was killed before exit.json
         return HostedStart(lambda: EXIT_FAILED, deadline)
     persisted = earlier.finish
     settings = _hosted_settings(host, deadline.session_hours) if persisted is None else persisted.settings
     require_session_environment(settings, os.environ)
     ready = hosted_ready_session(host, settings.workload)
+    close = partial(final_only, peer_factory=ready.peer_factory, services=ready.services)
     if persisted is not None:
-        run = partial(final_only, persisted, ready.peer_factory, ready.services)
-    elif earlier.left is not None:
-        run = partial(_start_again, earlier.left, settings, ready, host.state_dir)
-    else:
-        run = partial(run_session, settings, ready.peer_factory, ready.services, partial(_record_root, host.state_dir))
-    return HostedStart(run, deadline)
-
-
-def _start_again(left: PersistedRun, settings: RunSettings, ready: ReadySession, state_dir: Path) -> int:
-    """Close ``left``, which ended before its baseline was recorded, with :func:`final_only`, which ends the sandboxes
-    of the tests it left, then start the spec's session on ``settings`` unless a stop during the close ended the run."""
-
-    log.warning("%s ended before PRELUDE recorded its baseline: closing it, then starting again", left.layout.root)
-    closed = final_only(left, ready.peer_factory, ready.services)
-    if reported_stop_reason(left.layout.root) != left.ended.value:
-        return closed
-    return run_session(settings, ready.peer_factory, ready.services, partial(_record_root, state_dir))
+        return HostedStart(partial(close, persisted), deadline)
+    start = partial(run_session, settings, ready.peer_factory, ready.services, partial(_record_root, host.state_dir))
+    return HostedStart(partial(close_then_start, earlier.left, close, start), deadline)
 
 
 def _stop_before_grant_ends(deadline: GrantDeadline) -> None:
@@ -1128,6 +1117,7 @@ def _record_root(state_dir: Path, root: Path) -> None:
 def _not_run(state_dir: Path, returncode: int, exc: Exception) -> int:
     """End a run no session ran in for good: a start of it again would meet what kept this one from running."""
 
+    log.error("hosted run: not served", exc_info=exc)
     print(f"{PROG}: hosted run: {exc}", file=sys.stderr)
     write_final_exit(state_dir, HostedExit(returncode, error=str(exc)))
     return returncode

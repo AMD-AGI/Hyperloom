@@ -1660,7 +1660,7 @@ def test_a_leg_that_cannot_open_a_file_of_the_run_ends_it_for_good_naming_the_fi
 
 @pytest.mark.usefixtures("ready_environment", "agent_cli")
 def test_a_restart_that_cannot_read_the_earlier_session_ends_the_run_for_good_naming_the_file(
-    host: Host, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    host: Host, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
 ) -> None:
     # The earlier session's report, written owner-only by another account of the group, read before anything starts.
     report = tmp_path / "MB-report.json"
@@ -1668,13 +1668,15 @@ def test_a_restart_that_cannot_read_the_earlier_session_ends_the_run_for_good_na
     def unreadable(state_dir: Path) -> object:
         raise PermissionError(errno.EACCES, "Permission denied", str(report))
 
-    monkeypatch.setattr(cli, "earlier_session", unreadable)
+    monkeypatch.setattr(cli, "take_over_earlier_session", unreadable)
 
     assert cli.main(["hosted", "run"]) == cli.EXIT_FAILED
 
     document = host.exit_document()
     assert (document["final"], document["returncode"]) == (True, cli.EXIT_FAILED)
     assert document["error"] == f"[Errno 13] Permission denied: '{report}'"
+    logged = [record.exc_info[1] for record in caplog.records if record.exc_info]
+    assert [type(exc) for exc in logged] == [PermissionError], "the traceback names where the file was met"
 
 
 @pytest.mark.usefixtures("ready_environment", "agent_cli")
