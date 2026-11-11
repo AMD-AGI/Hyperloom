@@ -11,14 +11,11 @@ from __future__ import annotations
 
 import asyncio
 import json
-import os
 import re
-import stat
 from collections.abc import Collection, Mapping, Sequence
 from dataclasses import dataclass, replace
 from pathlib import Path
 
-from hyperloom_common.shared_storage import open_directory, parent_is_shared
 from hyperloom.contracts.recipe import (
     PATCH_ROOT,
     ComponentPatches,
@@ -89,36 +86,6 @@ def _patch_paths(recipe: Recipe) -> set[str]:
     return {patch.path for component in recipe.components for patch in component.patches}
 
 
-#: What the next account writes in a shared repository; the rest (the config git reads, ``HEAD``) only its owner.
-_GROUP_WRITES = frozenset({"objects", "refs"})
-
-
-def _keep_settings_the_owner_s(path: Path) -> None:
-    """Take the group's write from what ``git init --shared=group`` made at ``path`` outside :data:`_GROUP_WRITES`, and
-    make ``path`` sticky: the group still makes lock files there (moving the branch ``HEAD`` names locks ``HEAD``) but
-    can no longer replace what it cannot write."""
-    top = open_directory(path)
-    try:
-        _change_mode(top, ".", add=stat.S_ISVTX)
-        for here, dirs, files, directory in os.fwalk(dir_fd=top):
-            if here == ".":
-                dirs[:] = [name for name in dirs if name not in _GROUP_WRITES]
-            else:
-                _change_mode(directory, ".", drop=stat.S_IWGRP)
-            for name in files:
-                _change_mode(directory, name, drop=stat.S_IWGRP)
-    finally:
-        os.close(top)
-
-
-def _change_mode(directory: int, name: str, *, add: int = 0, drop: int = 0) -> None:
-    entry = os.open(name, os.O_RDONLY | os.O_NOFOLLOW | os.O_CLOEXEC, dir_fd=directory)
-    try:
-        os.fchmod(entry, stat.S_IMODE(os.fstat(entry).st_mode) & ~drop | add)
-    finally:
-        os.close(entry)
-
-
 class GitExperimentRepo:
     """Writes commits with plumbing and moves a branch by compare-and-swap on its ref.
 
@@ -144,14 +111,8 @@ class GitExperimentRepo:
         self._env = git_env(**_IDENTITY, GIT_DIR=str(self._path))
 
     async def init_root(self, recipe: Recipe) -> str:
-        # Judged before the directories are made: below shared storage the run's next leg may be another account of the
-        # group, so git gives the group its objects and refs; anywhere else the repository follows the umask.
-        shared = parent_is_shared(self._path)
         await asyncio.to_thread(self._path.mkdir, parents=True)
-        group = ("--shared=group",) if shared else ()
-        await self._git(*INIT, "--bare", "--quiet", *group, f"--initial-branch={INTEGRATION_BRANCH}")
-        if shared:
-            await asyncio.to_thread(_keep_settings_the_owner_s, self._path)
+        await self._git(*INIT, "--bare", "--quiet", f"--initial-branch={INTEGRATION_BRANCH}")
         root = await self._write(recipe, (), "baseline")
         await self._git(_UPDATE_REF, _ref(INTEGRATION_BRANCH), root, _NO_COMMIT)
         return root

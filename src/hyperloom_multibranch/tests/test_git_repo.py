@@ -2,8 +2,6 @@
 # SPDX-License-Identifier: MIT
 
 import asyncio
-import os
-import stat
 import subprocess
 
 import pytest
@@ -25,8 +23,6 @@ from hyperloom.measure.compile import BlobError, LocalBlobStore
 from hyperloom_multibranch.contracts.blackboard.vocab import INTEGRATION_BRANCH
 from hyperloom_multibranch.contracts.repo import BranchMoved, ExperimentRepo
 from hyperloom_multibranch.repo.git_repo import GitExperimentRepo
-from hyperloom_multibranch.scheduling.clock import Clock
-from hyperloom_multibranch.scheduling.layout import create_session
 
 VLLM = "https://github.com/vllm-project/vllm"
 BASELINE = Recipe(
@@ -67,70 +63,6 @@ async def test_the_root_commit_holds_the_baseline_on_the_integration_branch(tmp_
 
     assert await repo.head(INTEGRATION_BRANCH) == root
     assert await repo.read_recipe(root) == BASELINE
-
-
-async def test_a_session_in_a_shared_workspace_gets_a_repository_the_group_writes(tmp_path, blobs):
-    """Through the session's own layout: under a umask that masks group write, a session created in a 2775 workspace
-    gets a repository whose objects and refs the next account of the group writes."""
-    workspace = tmp_path / "workspace"
-    workspace.mkdir()
-    workspace.chmod(0o2775)
-    old = os.umask(0o022)
-    try:
-        layout = create_session(workspace, "Llama-3-8B", Clock())
-        repo = await _rooted(layout.repo, blobs)
-        await repo.create_branch("b01", await repo.root())
-    finally:
-        os.umask(old)
-
-    for made in (layout.repo / "objects", layout.repo / "refs" / "heads"):
-        assert stat.S_IMODE(made.stat().st_mode) & stat.S_IWGRP, made
-
-
-@pytest.mark.parametrize(
-    ("parent_mode", "group_writes"), [(0o2775, True), (0o755, False), (0o2755, False)], ids=["2775", "0755", "2755"]
-)
-async def test_the_repository_is_the_group_s_to_write_only_below_shared_storage(
-    tmp_path, blobs, parent_mode, group_writes
-):
-    """Below a setgid, group-writable directory closed to others the run's next leg, maybe another account of the group,
-    writes objects and refs; anywhere else the repository follows the umask like the rest of the session."""
-    parent = tmp_path / "session"
-    parent.mkdir()
-    parent.chmod(parent_mode)
-    old = os.umask(0o022)
-    try:
-        repo = await _rooted(parent / "experiments.git", blobs)
-        await repo.create_branch("b01", await repo.root())
-    finally:
-        os.umask(old)
-
-    for made in (parent / "experiments.git" / "objects", parent / "experiments.git" / "refs" / "heads"):
-        assert bool(stat.S_IMODE(made.stat().st_mode) & stat.S_IWGRP) is group_writes, made
-
-
-async def test_below_shared_storage_the_group_reads_but_cannot_change_what_git_reads_settings_from(tmp_path, blobs):
-    """The group writes objects and refs only: the config git reads, and everything else outside objects/ and refs/,
-    is the owner's to change, and the sticky repository directory keeps the group from replacing it."""
-    parent = tmp_path / "session"
-    parent.mkdir()
-    parent.chmod(0o2775)
-    old = os.umask(0o022)
-    try:
-        repo = await _rooted(parent / "experiments.git", blobs)
-        await repo.create_branch("b01", await repo.root())
-    finally:
-        os.umask(old)
-
-    top = parent / "experiments.git"
-    assert stat.S_IMODE(top.stat().st_mode) & (stat.S_IWGRP | stat.S_ISVTX) == stat.S_IWGRP | stat.S_ISVTX
-    settings = [made for made in top.iterdir() if made.name not in ("objects", "refs")]
-    assert {made.name for made in settings} >= {"config", "HEAD"}
-    for made in settings:
-        for entry in (made, *made.rglob("*")):
-            mode = stat.S_IMODE(entry.lstat().st_mode)
-            assert not mode & stat.S_IWGRP, entry
-            assert mode & stat.S_IRGRP, entry
 
 
 async def test_a_branch_moves_only_on_its_own_commits(repo):
