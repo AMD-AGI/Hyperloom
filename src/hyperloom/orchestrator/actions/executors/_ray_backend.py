@@ -211,6 +211,7 @@ class RayExecutionBackend:
         resolved = _resolve_head_num_gpus(num_gpus)
         ensure_ray_cluster(num_gpus=resolved)
         quiet_ray_init(num_gpus=resolved)
+        _assert_gpu_resources(resolved)
         self._ensured = True
 
     def restart_local_head(self) -> None:
@@ -220,6 +221,33 @@ class RayExecutionBackend:
         self._ensured = False
         restart_local_head_with_serving_slot(num_gpus=_resolve_head_num_gpus(None))
         self._ensured = True
+
+
+def _assert_gpu_resources(num_gpus: int | None) -> None:
+    """Fail fast when the cluster this process just connected to has no GPU.
+
+    A reachable cluster proves nothing about what it can run: Ray's AMD-GPU
+    auto-detection reports zero GPUs on a rocm-sdk wheel venv, and every GPU action
+    after that is quietly infeasible until something tries to schedule one. Skipped
+    when the caller explicitly declared ``num_gpus=0``.
+
+    Raises:
+        RuntimeError: When the connected cluster reports fewer than one GPU.
+    """
+    if num_gpus == 0:
+        return
+    import ray
+
+    available = ray.cluster_resources().get("GPU", 0)
+    if available < 1:
+        raise RuntimeError(
+            "Ray cluster is reachable but reports 0 GPU(s) -- every GPU-requiring "
+            "action from here on is silently infeasible. If this is a rocm-sdk "
+            "wheel venv (no /opt/rocm), check $ROCM_PATH: Ray's AMD-GPU detector "
+            "needs it to find librocm_smi64.so, and defaults to /opt/rocm when "
+            "unset. Override with INFERENCE_OPTIMIZER_RAY_NUM_GPUS=0 if a "
+            "CPU-only cluster is actually intended."
+        )
 
 
 def _resolve_head_num_gpus(num_gpus: int | None) -> int | None:
