@@ -315,7 +315,6 @@ class DevLeases:
             raise
         finally:
             await self._offer()
-        self._leave_line(branch)
         return granted
 
     async def _granted(self, branch: str, cards: int, seconds: float, term: LeaseTerm) -> Granted:
@@ -325,17 +324,17 @@ class DevLeases:
         slot = self._slots[branch]
         try:
             lease = await self._leased(branch, cards, seconds)
+            try:
+                sandbox = self._sandboxes(branch, lease)
+            except BaseException:
+                await self._toolbox.release_branch_sandbox(lease.lease_id)
+                raise
         except BaseException:
-            del self._slots[branch]
-            raise
-        try:
-            sandbox = self._sandboxes(branch, lease)
-        except BaseException:
-            del self._slots[branch]
-            await self._toolbox.release_branch_sandbox(lease.lease_id)
+            await self._free(branch)
             raise
         now, seconds = self._clock(), min(seconds, sandbox.lifetime_s)
         self._held[branch] = _Lease(lease, sandbox, slot, now, now + seconds, now, term)
+        self._leave_line(branch)
         self._watching()
         given = len(lease.gpu_ids)
         what = (
@@ -401,8 +400,8 @@ class DevLeases:
 
     async def reclaim(self, branch: str, reason: str) -> None:
         """Take back ``branch``'s lease, if it holds one or one is starting."""
-        await self._cancel_start(branch)
         self._leave_line(branch)
+        await self._cancel_start(branch)
         if branch in self._held:
             await self._end(branch, reason)
         await self._offer()
@@ -436,6 +435,9 @@ class DevLeases:
         await asyncio.gather(pending, return_exceptions=True)
         if abandoned and branch in self._held:
             await self._end(branch, "it was abandoned while starting")
+        elif branch in self._slots and branch not in self._held:
+            # A start cancelled before its first step never ran, so never freed its slot itself.
+            await self._free(branch)
 
     async def sweep(self) -> None:
         """Take back every lease that expired, sat idle, or kept tests waiting for cards too long."""
@@ -512,6 +514,10 @@ class DevLeases:
                     f"a dev sandbox is free and held for you for {self._limits.hold_s / MINUTE:g} min: "
                     "call dev_sandbox_lease to take it",
                 )
+
+    async def _free(self, branch: str) -> None:
+        del self._slots[branch]
+        await self._offer()
 
     def _leave_line(self, branch: str) -> None:
         self._holds.pop(branch, None)
