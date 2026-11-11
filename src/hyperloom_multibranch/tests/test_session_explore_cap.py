@@ -7,7 +7,10 @@ is as it was."""
 
 from __future__ import annotations
 
+import logging
 from pathlib import Path
+
+import pytest
 
 from hyperloom_multibranch.scheduling import lifecycle
 from hyperloom_multibranch.scheduling.budget import ExploreCap, SessionBudget
@@ -71,3 +74,18 @@ async def test_a_cap_after_the_budget_s_own_explore_end_and_no_cap_leave_explore
     own = SessionBudget.from_hours(SETTINGS.max_hours, START).explore_end
     assert ends[0] == ends[1], "a cap later than the session's own end changes nothing"
     assert ends[1] <= own(START, 0.0)
+
+
+async def test_a_cap_already_past_ends_explore_at_once_says_so_and_final_still_runs(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    stage = _stage(tmp_path)
+
+    with caplog.at_level(logging.WARNING, logger=lifecycle.__name__):
+        outcome = await _run(stage, lambda _longest: START)
+
+    explore, final = _phase(stage, "explore"), _phase(stage, "final")
+    assert explore["detail"]["explore_end"] == explore["at"]  # type: ignore[index]
+    assert float(str(final["at"])) >= float(str(explore["at"]))
+    assert outcome.final is not None and outcome.final.chosen is not None
+    assert any("EXPLORE gets no time" in record.getMessage() for record in caplog.records)
