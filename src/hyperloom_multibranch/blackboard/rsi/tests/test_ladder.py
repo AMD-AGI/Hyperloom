@@ -276,6 +276,25 @@ def test_r3_crowns_a_playbook_whose_paired_sessions_beat_the_champions_by_more_t
     assert done == (f"crowned patient: {ready.reason}",) and pool.champion() == PATIENT
 
 
+def test_a_kept_agentx_trial_from_before_objectives_pairs_and_counts_as_a_p50_session(tmp_path: Path) -> None:
+    older, p50 = (
+        "workload=agentx model=m budget=240m",
+        "workload=agentx objective=p50_interactivity model=m budget=240m",
+    )
+    pool = PlaybookPool(tmp_path)
+    pool.register(PATIENT)
+    for n, (early, rate) in enumerate(REPEATS):
+        record_trial(pool, _trial(f"c{n}", H0.label, early, rate, at=n * HOUR, task=older))
+    for n in range(3):
+        record_trial(pool, _trial(f"p{n}", PATIENT.label, 1.0, 1.2, at=n * HOUR + 60, task=p50))
+
+    kept = trials(pool)
+
+    assert len(pairs(PATIENT.label, H0.label, kept)) == 3
+    assert r3(PATIENT, H0, kept).passed
+    assert ladder.measured(kept, H0.label, p50) == frozenset({"early_stops"})
+
+
 def test_a_challenger_session_pairs_once_with_the_nearest_champion_session_of_its_task() -> None:
     kept = [
         _trial("c0", H0.label, 3, 1.0, at=0.0),
