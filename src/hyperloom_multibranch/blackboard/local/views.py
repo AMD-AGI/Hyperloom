@@ -126,6 +126,9 @@ def _apply_event(
     elif event.kind is LineageKind.STOP:
         if draft is not None:
             draft.stop_reason, draft.stopped_at = event.reason, at
+    elif event.kind is LineageKind.REOPEN:
+        if draft is not None:
+            draft.stop_reason, draft.stopped_at = None, None
     elif event.kind is LineageKind.REROOT:
         if draft is not None:
             draft.head, draft.rerooted = event.commit_id, True

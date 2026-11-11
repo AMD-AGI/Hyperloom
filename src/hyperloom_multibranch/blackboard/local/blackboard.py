@@ -147,7 +147,10 @@ _LINEAGE_FIELDS: dict[LineageKind, tuple[str, ...]] = {
     LineageKind.STOP: (),
     LineageKind.REROOT: (_COMMIT_ID, _FROM_COMMIT),
     LineageKind.PROBATION: (),
+    LineageKind.REOPEN: (),
 }
+#: The events that stop a branch and take it up again; the latest of them says whether it runs.
+_STOP_TURNS = frozenset({LineageKind.STOP, LineageKind.REOPEN})
 _RECIPE_DIGEST = re.compile(re.escape(DIGEST_PREFIX) + "[0-9a-f]{64}")
 #: What a merge attempt without a test may say of itself.
 _SKIPPED_OUTCOMES = (MergeOutcome.CONFLICT_SKIPPED, MergeOutcome.ALREADY_ON_HEAD)
@@ -361,6 +364,8 @@ def _check_lineage(event: LineageEvent) -> None:
         raise ValueError(f"the {INTEGRATION_BRANCH} branch moves by its merges, never by a re-root")
     if event.kind is LineageKind.PROBATION and event.branch == INTEGRATION_BRANCH:
         raise ValueError(f"the {INTEGRATION_BRANCH} branch is never held on probation")
+    if event.kind is LineageKind.REOPEN and event.branch != INTEGRATION_BRANCH:
+        raise ValueError(f"only the {INTEGRATION_BRANCH} branch is reopened, when its session resumes")
     if (event.kind is LineageKind.PROBATION) != (event.tests > 0):
         raise ValueError("a probation event, and only it, gives its branch tests, one at least")
     if event.recipe_digest is not None and event.kind is not LineageKind.ROOT:
@@ -372,15 +377,11 @@ def _check_lineage(event: LineageEvent) -> None:
 
 
 def _new_lineage(state: BlackboardState, event: LineageEvent) -> bool:
-    """Whether ``event`` adds to the lineage, a probation once a stall; raises when its branch already started,
-    already stopped or never began."""
+    """Whether ``event`` adds to the lineage, unless :func:`_already_recorded`; raises when its branch already started,
+    never began, or does not run as the event needs (:func:`_check_running`)."""
 
     recorded = [item for item in state.lineage if item.branch == event.branch]
-    if event in recorded:
-        return False
-    if event.kind is LineageKind.PROBATION and any(
-        item.kind is LineageKind.PROBATION and item.commit_id == event.commit_id for item in recorded
-    ):
+    if _already_recorded(recorded, event):
         return False
     started = [item for item in recorded if item.kind in LINEAGE_STARTS]
     if event.kind in LINEAGE_STARTS:
@@ -388,9 +389,32 @@ def _new_lineage(state: BlackboardState, event: LineageEvent) -> bool:
             raise ConflictingWrite(f"branch {event.branch} already started with a {started[0].kind.value} event")
     elif not started:
         raise NotRecorded(f"branch {event.branch} never started")
-    elif any(item.kind is LineageKind.STOP for item in recorded):
-        raise ConflictingWrite(f"branch {event.branch} is already stopped")
+    else:
+        _check_running(recorded, event)
     return True
+
+
+def _already_recorded(recorded: list[LineageEvent], event: LineageEvent) -> bool:
+    """Whether ``recorded``, its branch's events, already holds ``event``: a stop or a reopen as the latest turn, a
+    probation as one on the same commit (once a stall), any other event at all."""
+
+    if event.kind in _STOP_TURNS:
+        turns = [item for item in recorded if item.kind in _STOP_TURNS]
+        return bool(turns) and turns[-1] == event
+    if event.kind is LineageKind.PROBATION:
+        return any(item.kind is LineageKind.PROBATION and item.commit_id == event.commit_id for item in recorded)
+    return event in recorded
+
+
+def _check_running(recorded: list[LineageEvent], event: LineageEvent) -> None:
+    """Raise unless ``event`` fits whether its started branch runs: a reopen needs it stopped, any other event running."""
+
+    turns = [item for item in recorded if item.kind in _STOP_TURNS]
+    stopped = bool(turns) and turns[-1].kind is LineageKind.STOP
+    if event.kind is LineageKind.REOPEN and not stopped:
+        raise ConflictingWrite(f"branch {event.branch} is not stopped, so it is not reopened")
+    if event.kind is not LineageKind.REOPEN and stopped:
+        raise ConflictingWrite(f"branch {event.branch} is already stopped")
 
 
 def _check_on_integration(state: BlackboardState, commit_id: str) -> None:
