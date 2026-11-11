@@ -576,7 +576,7 @@ SNAPSHOT_REASON = f"{failures.PROFILER_SNAPSHOT_FAILED}: RuntimeError: stoi"
 
 
 def test_a_profile_server_that_died_in_the_profilers_snapshot_dump_is_an_infrastructure_failure() -> None:
-    verdict = classify_test_failure(returncode=1, logs=(SNAPSHOT_LOG,))
+    verdict = classify_test_failure(returncode=1, evidence=FailureEvidence(logs=(SNAPSHOT_LOG,)))
 
     assert verdict == FailureClassification(Disposition.FAILED, FailureClass.INFRA, SNAPSHOT_REASON)
     assert not decides_test(verdict)
@@ -590,7 +590,7 @@ def test_a_snapshot_dump_failure_found_by_the_line_the_dump_left_and_not_by_the_
         if "snapshot" not in line.lower() and "_post_process_after" not in line
     )
 
-    verdict = classify_test_failure(returncode=1, logs=(capture_only,))
+    verdict = classify_test_failure(returncode=1, evidence=FailureEvidence(logs=(capture_only,)))
 
     assert verdict.failure_class is FailureClass.UNCLEAR
     assert verdict.failure_reason == "python_exception: Exception: Capture cuda graph failed: stoi"
@@ -600,7 +600,7 @@ def test_a_candidate_crash_in_a_profiles_log_stays_the_candidates() -> None:
     """A known candidate signature in the same log wins over the snapshot dump that failed after it."""
     crash = "torch.AcceleratorError: HIP error: an illegal memory access was encountered\nSearch for `hipErrorIllegalAddress'"
 
-    verdict = classify_test_failure(returncode=1, logs=(SNAPSHOT_LOG + crash,))
+    verdict = classify_test_failure(returncode=1, evidence=FailureEvidence(logs=(SNAPSHOT_LOG + crash,)))
 
     assert verdict.failure_class is FailureClass.CANDIDATE
     assert verdict.failure_reason is not None and verdict.failure_reason.startswith(failure_signature.HIP_RUNTIME_ERROR)
@@ -614,7 +614,7 @@ def test_a_candidate_crash_without_the_snapshot_dump_is_not_an_infrastructure_fa
         "RuntimeError: shape mismatch in the candidate's fused kernel\n"
     )
 
-    verdict = classify_test_failure(returncode=1, logs=(log,))
+    verdict = classify_test_failure(returncode=1, evidence=FailureEvidence(logs=(log,)))
 
     assert verdict.failure_class is FailureClass.UNCLEAR
     assert verdict.failure_reason == "python_exception: RuntimeError: shape mismatch in the candidate's fused kernel"

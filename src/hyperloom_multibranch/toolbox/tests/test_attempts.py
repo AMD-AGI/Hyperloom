@@ -339,7 +339,7 @@ class _ClassifyingExecutor(_ScriptedExecutor):
 
     async def run(self, job: TestJob) -> TestResult:
         self.jobs.append(job)
-        verdict = classify_test_failure(returncode=1, logs=(self.log,))
+        verdict = classify_test_failure(returncode=1, evidence=FailureEvidence(logs=(self.log,)))
         infra = verdict.failure_class is FailureClass.INFRA
         return TestResult(
             request_id="r1",
