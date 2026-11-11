@@ -101,14 +101,16 @@ async def test_explore_s_end_is_asked_again_while_it_runs_and_ends_explore_once_
 
     def cap(work: FinalWork) -> float:
         works.append(work)
-        return math.inf if len(works) == 1 else START
+        return math.inf if len(works) <= 3 else START
 
     outcome = await _run(stage, cap)
 
     assert outcome.stop_reason is SessionStopReason.TIME_EXHAUSTED
     phases = {str(row["reason"]): row for row in _decisions(stage) if row["kind"] == "phase"}
     explore_end = float(str(phases["explore"]["detail"]["explore_end"]))
-    assert len(works) == 2, "asked as EXPLORE opened, and once a judge interval later, which ended it"
-    assert float(str(phases["final"]["at"])) < explore_end, "FINAL started before the end EXPLORE opened with"
+    assert len(works) == 4, "asked as EXPLORE opened, then every tick until it ended EXPLORE"
+    opened, final = float(str(phases["explore"]["at"])), float(str(phases["final"]["at"]))
+    assert final < explore_end, "FINAL started before the end EXPLORE opened with"
+    assert final < opened + SETTINGS.judge_interval_seconds, "the end is asked every tick, not every judge interval"
     assert works[0].parallel == SETTINGS.caps.max_parallel_tests and works[0].test_seconds > 0
     assert outcome.final is not None and outcome.final.chosen is not None
