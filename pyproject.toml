@@ -141,6 +141,8 @@ test = [
     # framework-agent patch-authoring / isolation paths.
     "libcst>=1.0",
     "patch-ng>=1.18",
+    # The inference_suite contract tests run the `.importlinter` contracts; same pin as lint.yml.
+    "import-linter==2.15",
 ]
 # Coverage job deps: ``pip install -e ".[test,ci]"``.
 ci = [
@@ -368,6 +370,19 @@ hyperloom_multibranch = [
     "blackboard/knowledge/declarations/*.yaml",
     "blackboard/knowledge/mappings/*.yaml",
 ]
+# The runner's bootstrap entry point: install.sh <tool-cache-dir> stages the tools a round runs; the AgentX client lock;
+# the sealed runner's locks lm-eval installs from (symlinks to requirements/, which a wheel carries as files).
+inference_suite = [
+    "install.sh",
+    "agentx-client.lock",
+    "runner*.lock",
+]
+"inference_suite.recipe" = [
+    "defaults/*.yaml",
+]
+"inference_suite.load" = [
+    "scripts/*.sh",
+]
 
 [tool.pytest.ini_options]
 asyncio_mode = "auto"
@@ -384,6 +399,7 @@ testpaths = [
 pythonpath = ["src", ".", "scripts"]
 markers = [
     "targeted_build_e2e: end-to-end tests that run a real AITER compile on a ROCm host; skip with '-m \"not targeted_build_e2e\"' in CI.",
+    "upstream_sources: runs a recipe source's own code at a pinned commit fetched over the network; skip with '-m \"not upstream_sources\"' in CI.",
     "claw_policy: a sandbox contract test of the Claw sandbox service's own policy (sealed paths, signing identity, platform metadata, avoid-nodes); it runs against the local provider and a real Claw service, not against the E2B stand-in.",
     "agent_isolation: launches a real bubblewrap sandbox; skipped where the host has no bubblewrap or no user namespace for it, failed instead where HYPERLOOM_REQUIRE_ISOLATION_TESTS=1.",
 ]
@@ -399,6 +415,7 @@ source = [
     "src/kernelforge",
     "src/hyperloom_kb",
     "src/hyperloom_multibranch",
+    "src/inference_suite",
     "OOB",  # optional component; not always present in a clone
 ]
 # Omitted: tests / package boilerplate, CLI drivers, subprocess wrappers, and
@@ -449,6 +466,8 @@ omit = [
     # Local-host metrics probes (rocm-smi / nvidia-smi / ps / df / ray status).
     # InferenceX shell-script patcher (fcntl locking + benchmark_lib.sh rewrite).
     "src/hyperloom/orchestrator/actions/executors/_inferencex_patcher.py",
+    # lm-eval model class, imported only inside the eval process; CI does not install lm-eval.
+    "src/inference_suite/eval/model.py",
     # TraceLens server patcher (git apply / patch --fuzz subprocess pipeline).
     "src/hyperloom/orchestrator/actions/executors/_server_patcher.py",
     "src/hyperloom/orchestrator/actions/executors/_patch_laying.py",
@@ -538,7 +557,7 @@ fail_under = 90
 # Base trailing argv for ``pytest`` in CI; the workflow appends sharding
 # (``--splits``/``--group``) and ``-n`` from the values below.
 pytest_ci_args = [
-    "-m", "not targeted_build_e2e",
+    "-m", "not targeted_build_e2e and not upstream_sources",
     "--cov=.", "--cov-report=",
 ]
 # In-runner pytest-xdist workers per shard job (``-n auto`` yields 1 on the
@@ -765,7 +784,7 @@ exclude = ["**/*.md", "**/*.rst"]
 
 [tool.mypy]
 python_version = "3.10"
-files = ["src/hyperloom_common", "src/hyperloom"]
+files = ["src/hyperloom_common", "src/hyperloom", "src/inference_suite"]
 exclude = [
     ".*/tests/.*",
     "build",

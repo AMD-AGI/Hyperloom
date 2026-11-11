@@ -44,6 +44,9 @@
 /src/hyperloom/orchestrator/kernel/forge_fusion.py              @AMD-AGI/SaFE
 /src/hyperloom/orchestrator/actions/executors/_ray_runtime.py   @AMD-AGI/SaFE
 
+# InferenceSuite
+/src/inference_suite/                                           @AMD-AGI/SaFE
+
 # TraceLens Agent integration
 /src/hyperloom/orchestrator/trace_analysis/tracelens_analysis.py        @tsrikris @devalshahamd @AMD-AGI/SaFE
 /src/hyperloom/orchestrator/trace_analysis/tracelens_skill_runner.py    @tsrikris @devalshahamd @AMD-AGI/SaFE
