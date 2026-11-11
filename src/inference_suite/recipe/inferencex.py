@@ -69,13 +69,13 @@ _THINKING_MODE = "thinking_on"
 #: InferenceX's value for a spec-decoding or KV-offloading setting the point leaves off.
 _UNSET = "none"
 
-#: The client environment variable naming the trace corpus an AgentX replay loads (``benchmark_lib.sh``).
+#: The client environment variable naming the trace corpus an AgentX replay loads (``infx/bench/agentic/traces.py``).
 AGENTX_TRACE_ENV = "WEKA_LOADER_OVERRIDE"
-#: ``resolve_trace_source`` in ``benchmarks/benchmark_lib.sh``: the 1M-context model families replay the unfiltered
-#: 062126 corpus, every other one (an unknown prefix included) its cut to a 256k-token context.
-_FULL_CONTEXT_PREFIXES = ("dsv4", "glm5.2", "glm5.3", "minimaxm3", "kimik3")
-_FULL_TRACE = "semianalysis_cc_traces_weka_062126"
-_CONTEXT_CUT_TRACE = f"{_FULL_TRACE}_256k"
+#: ``infx/bench/agentic/traces.py`` at the client pin: the families in ``CAPPED_FAMILIES`` replay the 062126 corpus
+#: cut to a 256k-token context, every other prefix the uncapped one.
+_CAPPED_FAMILIES = ("dsr1", "qwen3.5", "qwen3.8next")
+_UNCAPPED_TRACE = "semianalysis_cc_traces_weka_062126"
+_CAPPED_TRACE = f"{_UNCAPPED_TRACE}_256k"
 
 #: What a matrix point writes into ``benchmark.env`` (InferenceX ``workload.BOUND_ENV`` for single-node points, and
 #: the workload values ``validate_recipe`` holds a recipe to); the rest of it configures the client for any point.
@@ -500,7 +500,8 @@ def model_prefixes(bundle: RepoBundle, model: str) -> list[str]:
 
 
 def agentx_trace(bundle: RepoBundle, models: Sequence[str]) -> str:
-    """The corpus InferenceX replays for the first of ``models`` its master config gives a model prefix.
+    """The corpus InferenceX replays for the first of ``models`` its master config gives a model prefix; the uncapped
+    one, as for any prefix outside the capped families, when it gives none of them one.
 
     Raises:
         RecipeSourceError: When the master config is not a mapping, or gives that model prefixes that replay
@@ -508,14 +509,12 @@ def agentx_trace(bundle: RepoBundle, models: Sequence[str]) -> str:
     """
     for model in models:
         prefixes = model_prefixes(bundle, model)
-        traces = {
-            _FULL_TRACE if prefix.startswith(_FULL_CONTEXT_PREFIXES) else _CONTEXT_CUT_TRACE for prefix in prefixes
-        }
+        traces = {_CAPPED_TRACE if prefix.startswith(_CAPPED_FAMILIES) else _UNCAPPED_TRACE for prefix in prefixes}
         if len(traces) > 1:
             raise RecipeSourceError(f"InferenceX gives {model} prefixes that replay different corpora: {prefixes}")
         if traces:
             return traces.pop()
-    return _CONTEXT_CUT_TRACE
+    return _UNCAPPED_TRACE
 
 
 def _warnings(point: InferencexPoint, query: LaunchQuery, target: int) -> tuple[str, ...]:
