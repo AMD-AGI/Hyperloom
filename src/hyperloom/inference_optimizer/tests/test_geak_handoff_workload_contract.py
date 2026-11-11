@@ -67,10 +67,11 @@ _BASIS_OF = {
 _ACCEPTED_LAUNCH = _launch(
     candidate=LaunchDelta(args_add=("--accepted-flag", "1"), env_set={"ACCEPTED_SETTING": "1"}),
 )
-#: Its flags GEAK reproduces: no topology (GEAK owns it), no structured value, no round layer.
+#: Its flags GEAK reproduces: no topology (GEAK owns it), no structured value, no round layer. The runner's engine
+#: seed is part of the measured launch: under speculative decoding the throughput moves with it.
 _ACCEPTED_FLAGS = (
     "--disable-radix-cache --context-length 65536 --accepted-flag 1 --speculative-algorithm EAGLE"
-    " --speculative-num-steps 3 --watchdog-timeout 600 --enable-metrics"
+    " --speculative-num-steps 3 --watchdog-timeout 600 --enable-metrics --random-seed 0"
 )
 
 
