@@ -184,11 +184,11 @@ it.
   recipe source. Before, a session's base was always resolved from the recipe
   sources. See [Options of `run`](how-to/run-multibranch.md#options-of-run).
 
-- **A local `hyperloom-multibranch run` or `resume` needs its model on the
-  machine.** `--model` must be a checkpoint directory, or a hub id found under
-  `HL_MODEL_BASE` or in the Hugging Face cache; otherwise `run` refuses before
-  the session directory exists, and `resume` (and its FINAL-only leg) refuses
-  a session recorded with such a model. Before, the local test's server, whose
+- **A local `hyperloom-multibranch run`, `resume` or `final-only` needs its
+  model on the machine.** `--model` must be a checkpoint directory, or a hub id
+  found under `HL_MODEL_BASE` or in the Hugging Face cache; otherwise `run`
+  refuses before the session directory exists, and `resume` and `final-only`
+  refuse a session recorded with such a model. Before, the local test's server, whose
   home is its sandbox directory, fetched the hub id from the hub.
 
 - **A hosted `hyperloom-multibranch` run publishes its own inference_suite
