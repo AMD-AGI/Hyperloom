@@ -328,3 +328,86 @@ def test_a_successful_exit_is_not_changed_by_a_bind_message_in_its_log() -> None
 )
 def test_only_a_crashed_or_refusing_server_or_a_failed_evaluation_settles_a_test(verdict, decides) -> None:
     assert decides_test(verdict) is decides
+
+
+# --- a profile whose server died in the profiler's memory-snapshot dump ------------------------------------------------
+
+#: The end of a CUDA-graph profile's server log whose rank died in the memory-snapshot dump after the capture wrote its
+#: traces (a ROCm PyTorch's addr2line symbolizer refused a line number), shortened.
+SNAPSHOT_LOG = """\
+[2026-11-10 15:03:49 TP5 EP5] Saved trace for bs=1 to /out/profile/torch_trace/graph_capture_profile/DecodeCudaGraphRunner_bs_1_rank5.json.gz
+[aiter] Registering 2820 cuda graph addresses
+[2026-11-10 15:03:52 TP5 EP5] Scheduler hit an exception: Traceback (most recent call last):
+  File "/sgl-workspace/sglang/python/sglang/srt/model_executor/runner/decode_cuda_graph_runner.py", line 513, in __init__
+    self.capture()
+  File "/sgl-workspace/sglang/python/sglang/srt/model_executor/runner/decode_cuda_graph_runner.py", line 1120, in capture
+    self._post_process_after_profile(prof)
+  File "/sgl-workspace/sglang/python/sglang/srt/model_executor/runner/decode_cuda_graph_runner.py", line 872, in _post_process_after_profile
+    torch.cuda.memory._dump_snapshot("cuda_graph_runner_memory_usage.pickle")
+  File "/opt/venv/lib/python3.10/site-packages/torch/cuda/memory.py", line 1059, in _dump_snapshot
+    s = _snapshot()
+  File "/opt/venv/lib/python3.10/site-packages/torch/cuda/memory.py", line 1043, in _snapshot
+    return _C._cuda_memorySnapshot(None)
+RuntimeError: stoi
+
+During handling of the above exception, another exception occurred:
+
+Traceback (most recent call last):
+  File "/sgl-workspace/sglang/python/sglang/srt/managers/scheduler.py", line 5950, in run_scheduler_process
+    scheduler = Scheduler(server_args, port_args)
+  File "/sgl-workspace/sglang/python/sglang/srt/model_executor/runner/decode_cuda_graph_runner.py", line 515, in __init__
+    raise Exception(
+Exception: Capture cuda graph failed: stoi
+Possible solutions:
+1. set --mem-fraction-static to a smaller value (e.g., 0.8 or 0.7)
+Open an issue on GitHub https://github.com/sgl-project/sglang/issues/new/choose
+
+
+[2026-11-10 15:03:52] Received sigquit from a child process. It usually means the child failed.
+"""
+SNAPSHOT_REASON = f"{failures.PROFILER_SNAPSHOT_FAILED}: RuntimeError: stoi"
+
+
+def test_a_profile_server_that_died_in_the_profilers_snapshot_dump_is_an_infrastructure_failure() -> None:
+    verdict = classify_test_failure(returncode=1, logs=(SNAPSHOT_LOG,))
+
+    assert verdict == FailureClassification(Disposition.FAILED, FailureClass.INFRA, SNAPSHOT_REASON)
+    assert not decides_test(verdict)
+
+
+def test_a_snapshot_dump_failure_found_by_the_line_the_dump_left_and_not_by_the_wrapper_the_server_raised() -> None:
+    """The outer ``Capture cuda graph failed`` is what any capture failure raises; only the dump's frame says whose."""
+    capture_only = "\n".join(
+        line
+        for line in SNAPSHOT_LOG.splitlines()
+        if "snapshot" not in line.lower() and "_post_process_after" not in line
+    )
+
+    verdict = classify_test_failure(returncode=1, logs=(capture_only,))
+
+    assert verdict.failure_class is FailureClass.UNCLEAR
+    assert verdict.failure_reason == "python_exception: Exception: Capture cuda graph failed: stoi"
+
+
+def test_a_candidate_crash_in_a_profiles_log_stays_the_candidates() -> None:
+    """A known candidate signature in the same log wins over the snapshot dump that failed after it."""
+    crash = "torch.AcceleratorError: HIP error: an illegal memory access was encountered\nSearch for `hipErrorIllegalAddress'"
+
+    verdict = classify_test_failure(returncode=1, logs=(SNAPSHOT_LOG + crash,))
+
+    assert verdict.failure_class is FailureClass.CANDIDATE
+    assert verdict.failure_reason is not None and verdict.failure_reason.startswith(failure_signature.HIP_RUNTIME_ERROR)
+
+
+def test_a_candidate_crash_without_the_snapshot_dump_is_not_an_infrastructure_failure() -> None:
+    log = (
+        "Traceback (most recent call last):\n"
+        '  File "/sgl-workspace/sglang/python/sglang/srt/model_executor/runner/decode_cuda_graph_runner.py", '
+        "line 1120, in capture\n    self._capture_one_stream()\n"
+        "RuntimeError: shape mismatch in the candidate's fused kernel\n"
+    )
+
+    verdict = classify_test_failure(returncode=1, logs=(log,))
+
+    assert verdict.failure_class is FailureClass.UNCLEAR
+    assert verdict.failure_reason == "python_exception: RuntimeError: shape mismatch in the candidate's fused kernel"
