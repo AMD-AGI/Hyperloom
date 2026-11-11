@@ -36,7 +36,7 @@ from hyperloom_multibranch.specialist.dev_sandbox import (
 )
 from hyperloom_multibranch.specialist.framework_guard import FrameworkGuard, GuardedPackage
 from hyperloom_multibranch.specialist.judging import NOTICE
-from hyperloom_multibranch.specialist.prompts import role_prompt
+from hyperloom_multibranch.specialist.prompts import RoleWorkload, role_prompt
 from hyperloom_multibranch.specialist.runtime import SessionCrashed, SessionStart
 from hyperloom_multibranch.specialist import worktree as worktree_module
 from hyperloom_multibranch.specialist.worktree import SourceBase
@@ -47,7 +47,7 @@ from hyperloom_multibranch.toolbox.hosted_leases import HostedBranchLease
 B1, B2 = "s1", "s2"
 MINUTE = 60.0
 LIMITS = DevLimits(read_poll_s=0.01)
-WORKLOAD = "qwen3-8b on sglang, TP 1, ISL 1024, OSL 1024, concurrency 64"
+WORKLOAD = RoleWorkload("qwen3-8b on sglang, TP 1, ISL 1024, OSL 1024, concurrency 64")
 
 
 class _Clock:

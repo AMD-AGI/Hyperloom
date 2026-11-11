@@ -20,6 +20,19 @@ Merged to `main` and not yet carried by a tagged release. Each entry moves
 into the [release](https://github.com/AMD-AGI/Hyperloom/releases) that ships
 it.
 
+- **An Arbor agent on an AgentX multi-branch session needs no launch flag.**
+  `hyperloom-multibranch run --autonomous-agent` now serves every Arbor the
+  session's frozen base launch, resolved from InferenceX or the framework's
+  cookbook, when neither `--agent-launch` nor `--reference-script` is given,
+  and Arbor checks its launch against that base at its start. Before, an
+  AgentX branch without one of those flags was refused before PRELUDE, and a
+  fixed-workload Arbor was served only the root recipe's flags. `--agent-launch`
+  still replaces the base. The start check holds only while the root recipe
+  adds nothing to the base; a branch whose root recipe does (a replayed Recipe
+  KB champion, for one) starts without it. A credential the base exports, which
+  the session froze as its sha256, is served from the host's variable of the
+  same name; a host that holds no value of it, or another one, refuses the
+  Arbor at preflight.
 - **A recipe can bound the SGLang draft its deployment runs.** A benchmark YAML
   may declare `speculative_draft_limits` (`draft_length`, `draft_tokens`,
   `topk`, each with `min` and/or `max`). An explore variant outside them is
@@ -61,6 +74,22 @@ it.
   launch had, so its baseline was not the measured configuration, and a GEAK
   result unsetting one was rejected. Credentials (`HF_TOKEN`,
   `AWS_SECRET_ACCESS_KEY`) are still never written into these artifacts.
+- **An Arbor agent on an AgentX session keeps by MB's rule and no longer
+  reads the round's numbers itself.** MB writes `component.bench_read`, so
+  Arbor's harness reads the session's objective and its guards (P50 or P90
+  interactivity, total token throughput) and the output throughput from each
+  run's `report.json` by path, averages them over replays, and books as
+  NOT_MEASURED a run whose report lacks one, or whose round did not complete,
+  stopped at the failed-request threshold, or ran in fast mode
+  (`bench_read.require`). `opt_objective` is now the structured form: the
+  objective, MB's 2% bar and each guard's noise band (`HYPERLOOM_PERF_NOISE_PCT`,
+  5% by default), and Arbor reverts a change that breaks a guard. Before, the
+  bench agent read the numbers at the paths the directives named, a partial
+  round's numbers could be kept, and Arbor kept on its pack's bar and second
+  axis. Any AgentX session now needs Arbor `29c72f9`, and one measured by MB's
+  round `1c6eef1` (`v0.9.6`, the vendored copy), or later; an older pin is
+  refused at preflight naming the commit. A P50 session on an Arbor without
+  `arbor/objective.py` is refused too, where it ran on its pack's metric.
 - **Each round records its power in one `power.json`, with energy and J per token.**
   An InferenceSuite round (and a GEAK replay) now writes `power.json` in place
   of `gpu_power.json` and `gpu_samples.csv`: every card's sysfs power,
@@ -86,7 +115,31 @@ it.
   1 s; above 1.5 s it is refused and the round samples nothing. AgentX counts
   gain `input_tokens` and `output_tokens`; a report written before reads them,
   and its `power` section, as `null`.
-- **Single-lineage AgentX keeps on a 2% P50 bar with P90 and total-throughput guards.** `hyperloom optimize` on an
+- **MB records the AgentX checkpoint's ruling on its explores.** In a
+  `hyperloom-multibranch` AgentX session graded on `p50_interactivity`, each
+  explore test is now held to the single-lineage 1800 s checkpoint against its
+  parent commit's median. By default (`HYPERLOOM_AGENTX_EARLY_STOP=shadow` for
+  MB) nothing is stopped: the result carries the ruling and `MB-report.md` gets
+  an "AgentX checkpoint" section with how many explores it would have stopped
+  and how those ended, to decide on `enforce`. With `enforce` a trailing explore
+  is stopped, not retried, and judged REGRESSED with the refusal
+  `checkpoint_trailed`. Committed candidates now record
+  `e2e_norm_intvty_p50_1800s`, the reference of their children. The mode is read
+  once at session start and kept in `MB-manifest.json`. Confirm, integration,
+  FINAL, baseline, correctness-fix and retraction tests, and sessions on
+  `total_token_throughput`, are not judged. Before, an MB explore that trailed
+  its parent ran its full 75-90 min with no early signal.
+- **MB's AgentX bar drops to 2% and its guards follow the objective.**
+  A `hyperloom-multibranch` AgentX session keeps a change on a 2% gain on its
+  objective, not 3%. Under `p50_interactivity` the guards are P90 interactivity
+  and total token throughput (new refusal `total_regressed`); under
+  `total_token_throughput` they are P90 and P50 interactivity (`p50_regressed`).
+  Output throughput no longer guards either, so `output_regressed` is no longer
+  given; it is still recorded. Arbor's directives state the session's bar and
+  guards. A resumed session judges by the new rule. Before, a real 2-3% gain
+  was refused, and a gain was held back when the replayed window's
+  output-length mix lowered output throughput.
+- **Single-lineage AgentX keeps on MB's rule.** `hyperloom optimize` on an
   AgentX replay now keeps a change on a 2% P50 interactivity gain, not 3%, with
   P90 interactivity and total token throughput inside the noise band
   (`HYPERLOOM_PERF_NOISE_PCT`). An output-throughput drop alone no longer
@@ -98,6 +151,39 @@ it.
   judges by the new rule. Before, a real 2-3% median gain was reverted, and a
   gain was reverted when the window's output-length mix lowered output
   throughput.
+- **An MB AgentX session can be graded on total token throughput.**
+  `hyperloom-multibranch run --workload agentx --agentx-objective
+  total_token_throughput` keeps a change on the round's `total_token_throughput`
+  instead of `e2e_norm_intvty_p50`; the default, `p50_interactivity`, leaves
+  existing sessions as they were. The retest and the error-rate threshold are
+  the same under either objective. The objective is
+  recorded in the manifest and kept on resume; FINAL, the dashboard and
+  `MB-report.md` name it, and the bar's refusal reads
+  `total_throughput_gain_below_threshold`. It writes no Recipe KB record
+  (`objective_not_partitioned`): the KB files AgentX records by workload, not
+  objective, so its record would sit beside the interactivity champions of the
+  same workload. Each Arbor is given the objective as its config's
+  `opt_objective` and optimizes it instead of its pack's metric; an Arbor that
+  cannot is refused at preflight. `--agentx-objective` with
+  `--workload inferencex` exits 2. Before, an operator had to patch the source
+  to grade on total throughput.
+- **An MB AgentX session's Recipe KB record carries both total throughputs.**
+  The gate now records `total_token_throughput` on each AgentX judgement, so
+  `total_throughput` and `baseline_total_throughput` are written beside the
+  interactivity gain; before, they were always left out.
+- **An Arbor agent on an AgentX session measures with the gate's own round.**
+  Its `component.bench_command` is now `python -m inference_suite run`
+  against its server, on the session's frozen base, trace corpus, seed,
+  concurrency and trace window, writing `report.json` per run; its bench phase
+  is capped at the trace window plus an hour. Before, MB gave it no client,
+  so Arbor ran its pack's `bench_agentx.sh`, which installs its own aiperf,
+  downloads the trace itself and needs bench variables (`MODEL_PREFIX`,
+  `DURATION`, `INFMAX_CONTAINER_WORKSPACE`, ...) that only a hand-written
+  `--agent-launch` file carried; with `--reference-script` it could not run at
+  all. A session whose base or staged tools cannot run that round now refuses
+  to start, naming why. **Upgrade note:** an `--agent-launch` file no longer
+  takes a `client` key, which the gate's client always overrode; a file that
+  names one is refused (`keys a launch does not: client`), so remove it.
 - **A recipe image whose tag names no framework version no longer refuses an
   older install.** For an untagged image such as
   `lmsysorg/sglang-rocm:muse-spark-open`, the version InferenceSuite assumes
@@ -107,8 +193,10 @@ it.
   with `framework_version_too_old` even when the server ran exactly the recipe's
   image. A version read from the image tag is still held.
 - **The base launch can be resolved from InferenceX at a given commit.**
-  `--inferencex-commit SHA` on `hyperloom optimize` and `python -m
-  inference_suite resolve` reads InferenceX at that commit (a full sha, or a prefix of 7 or more hex digits; a pull request's
+  `--inferencex-commit SHA` on `hyperloom optimize`, `hyperloom-multibranch
+  run` and `python -m inference_suite resolve`, and
+  `multibranch.inferencex_commit` in a hosted run's campaign spec, read
+  InferenceX at that commit (a full sha, or a prefix of 7 or more hex digits; a pull request's
   head commit included) instead of the head of `main`, so a session can match
   a CI run; `base_launch.json` records the full sha. Before, InferenceX was
   always read at `main`. The cookbooks, vLLM recipes and ATOM catalog are
@@ -117,7 +205,10 @@ it.
   (such as `acceptance_length`), is refused before the session starts,
   naming what it lacks; resolve that
   base elsewhere and pass the frozen `base_launch.json` as
-  `--reference-script`. While a commit is pinned, a fixed session never falls
+  `--reference-script`. A hosted run whose spec value is no commit ends for
+  good with exit 2, and one whose commit is refused with exit 1, as `run`
+  does; before, a hosted session that could not resolve its base crashed and
+  was started again. While a commit is pinned, a fixed session never falls
   back to the default table: a source that cannot be read (InferenceX, the
   model card, a release list, a cookbook) refuses it, naming the source and its
   error, and so does no recipe serving it, naming why each source missed. See
@@ -130,6 +221,37 @@ it.
   `amd-smi` reports none). It used to refuse any card with a nonzero
   reading, so a scheduler or an idle server elsewhere on the host blocked
   every card. See [inference-suite](reference/inference-suite.md).
+
+- **`hyperloom-multibranch run` takes the operator's base launch as
+  `--reference-script FILE`, with or without an Arbor agent.** It is the
+  file `hyperloom optimize --reference-script` takes: a shell launch script
+  or a `base_launch.json` frozen elsewhere, which the session freezes as its
+  base without reading any recipe source. Before, only a session with an
+  `--autonomous-agent` could take a base, as an `--agent-launch` record.
+  Every Arbor of such a session is served the frozen base. **Upgrade note:**
+  an `--agent-launch` that is a base launch record, or any `--agent-launch`
+  beside `--reference-script`, now exits 2; pass the record as
+  `--reference-script`. See
+  [Options of `run`](how-to/run-multibranch.md#options-of-run).
+
+- **A local `hyperloom-multibranch run`, `resume` or `final-only` needs its
+  model on the machine.** `--model` must be a checkpoint directory, or a hub id
+  found under `HL_MODEL_BASE` or in the Hugging Face cache; otherwise `run`
+  refuses before the session directory exists, and `resume` and `final-only`
+  refuse a session recorded with such a model. Before, the local test's server, whose
+  home is its sandbox directory, fetched the hub id from the hub.
+
+- **A hosted `hyperloom-multibranch` run publishes its own inference_suite
+  staging.** When it pins its runner cache entry, the run now also publishes
+  the commit's inference_suite staging into the runner cache; a staging it
+  cannot publish ends the run with exit 1 (`CacheBuildError`) before anything
+  is measured. Before, a hosted runner found only the staging a `cache_build`
+  run had published for the commit.
+
+- **Single-lineage warm start replays a recipe that only removes launch
+  options.** `hyperloom optimize` now replays a Recipe KB record whose only
+  change is `remove_args`, as an MB branch writes one. Before, such a record
+  was dropped as having nothing to replay.
 
 - **A serving round's server runs in the interpreter its framework checks
   read.** The server now starts as `<framework_python> -m sglang.launch_server`
