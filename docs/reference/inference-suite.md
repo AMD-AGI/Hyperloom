@@ -22,7 +22,9 @@ holds a launch for the session's model, board, workload, concurrency, TP and EP
 gives the base:
 
 1. the operator's own launch file (`resolve --user-file`): a shell launch script, or a
-   `base_launch.json` frozen by an earlier session;
+   `base_launch.json` frozen by an earlier session; a script's credential exports
+   (`HF_TOKEN`, `*_API_KEY`, ...) are recorded as their sha256 only, and a round
+   takes each value from its host;
 2. InferenceX's AMD single-node master entries;
 3. the framework's cookbook: the SGLang cookbook, the vLLM recipes site, or
    ATOM's catalog (fixed workloads only);

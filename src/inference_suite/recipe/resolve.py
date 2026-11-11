@@ -19,11 +19,13 @@ golden layer, which takes the draft and simulation settings out of the launch's 
 from __future__ import annotations
 
 import dataclasses
+import hashlib
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, field
 from typing import TypeVar
 
 from hyperloom_common.contract_fields import ContractFields
+from hyperloom_common.credential_names import is_credential_env_name
 from hyperloom_common.gpu_identity import AMD_GPU_BOARDS
 from inference_suite.argv import (
     SPECULATIVE_CONFIG_FLAG,
@@ -34,12 +36,14 @@ from inference_suite.argv import (
 from inference_suite.contracts.base_launch import (
     BaseLaunch,
     ClientLaunch,
+    EnvValue,
     GoldenAcceptance,
     LaunchModel,
     LaunchPoint,
     LaunchQuery,
     LaunchSource,
     PointAlternative,
+    Redacted,
     RunnerOwned,
     SourceKind,
     Topology,
@@ -328,6 +332,15 @@ def _without_runner_env(env: Mapping[str, str]) -> dict[str, str]:
     return {name: value for name, value in env.items() if name not in _RUNNER_OWNED_ENV}
 
 
+def _operator_env(env: Mapping[str, str]) -> dict[str, EnvValue]:
+    """An operator file's exports as the base records them: each credential as its sha256 alone, so the file's secret
+    stays on the host that holds it and a round takes the value from its own host."""
+    return {
+        name: Redacted(hashlib.sha256(value.encode()).hexdigest()) if is_credential_env_name(name) else value
+        for name, value in _without_runner_env(env).items()
+    }
+
+
 def _entrypoint(framework: str) -> tuple[str, ...]:
     return _carried(_ENTRYPOINTS.get(framework), f"{framework} serving entrypoint")
 
@@ -382,11 +395,17 @@ def _user_file_base(query: LaunchQuery, snapshot: SourceSnapshot, user_file: Use
         return dataclasses.replace(user_file.launch, query=query)
     shell = user_file.launch
     spelling = _carried(_TOPOLOGY.get(query.framework), f"{query.framework} topology spellings")
-    unresolved = ()
+    env = _operator_env(shell.env)
+    warnings: list[str] = []
     if shell.unresolved_env:
-        unresolved = (
+        warnings.append(
             f"{user_file.location} exports {', '.join(shell.unresolved_env)} from shell variables; "
-            "the base carries none of them",
+            "the base carries none of them"
+        )
+    if redacted := [name for name, value in env.items() if isinstance(value, Redacted)]:
+        warnings.append(
+            f"{user_file.location} exports {', '.join(redacted)}; the base records only their sha256, "
+            "so a round takes each value from its host"
         )
     return BaseLaunch(
         query=query,
@@ -400,12 +419,12 @@ def _user_file_base(query: LaunchQuery, snapshot: SourceSnapshot, user_file: Use
         model=LaunchModel(query.model_id),
         topology=spelling.read(shell.args),
         args=shell.args,
-        env=_without_runner_env(shell.env),
+        env=env,
         client=_client(_client_env(query, snapshot, {})),
         resolved_unix=snapshot.fetched_unix,
         runner_owned=_runner_owned(query.framework),
         stripped=(*shell.stripped, *_runner_env(shell.env)),
-        warnings=unresolved,
+        warnings=tuple(warnings),
     )
 
 
