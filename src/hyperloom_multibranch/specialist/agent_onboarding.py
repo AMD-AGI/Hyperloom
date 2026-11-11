@@ -26,8 +26,8 @@ The agent runs commands, not containers: a ``docker`` on its ``PATH`` (:data:`DO
 ``docker cp`` in place, for an agent written to drive a container, and refuses everything else.
 
 The agent's sandbox, this host and the next leg may be different accounts of one group, so what is made here for the
-agent is the group's below shared storage: directories ``2775``, files ``664`` and replaced by rename, the shim among
-them, and git makes the checkout under umask ``002``; elsewhere the umask decides
+agent is the group's below shared storage: directories ``2775``, files ``664`` (``775`` when executable) and replaced
+by rename, the shim among them, and git makes the checkout under umask ``002``; elsewhere the umask decides
 (:func:`~hyperloom_common.shared_storage.child_umask`). The checkout is then the agent's to write, its ``.git``
 included, so no git of this host obeys its config: no hook, fsmonitor, pager, external diff or filter driver of it runs
 (:mod:`~hyperloom_multibranch.repo.isolated_git`).
@@ -36,7 +36,6 @@ included, so no git of this host obeys its config: no hook, fsmonitor, pager, ex
 from __future__ import annotations
 
 import asyncio
-import contextlib
 import json
 import os
 import re
@@ -52,8 +51,8 @@ from typing import Protocol
 from hyperloom.sandbox import SandboxError
 from hyperloom_common.shared_storage import (
     child_umask,
+    copy_shared_file,
     make_shared_dirs,
-    parent_is_shared,
     shared_parent,
     write_shared_text,
 )
@@ -90,10 +89,10 @@ SOURCE_DIR = "src"
 ENCODING = "utf-8"
 GIT = "git"
 GIT_DIR = ".git"
-#: How :func:`_share_copy` opens a directory of the copy: to list it and ``fchmod`` it, never through a link.
-_COPIED_DIRECTORY = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC
-#: How it opens an entry of one: never through a link, and without waiting on a FIFO put there meanwhile.
-_COPIED_ENTRY = os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK | os.O_NOCTTY | os.O_CLOEXEC
+#: What a copied source tree leaves out, as a clone would.
+_NOT_COPIED = frozenset({GIT_DIR, "__pycache__"})
+#: How :func:`_copy_tree` opens the checkout it copies into: never through a link at its name.
+_NO_LINK_DIRECTORY = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC
 QUIET = "--quiet"
 REV_PARSE = "rev-parse"
 SHIM_DIR = "bin"
@@ -409,13 +408,10 @@ async def _is_repository_root(tree: Path) -> bool:
 
 
 async def _commit_tree(tree: Path, checkout: Path) -> None:
-    """Copy ``tree`` into ``checkout`` as one commit, which names the commit of the repository ``tree`` lies in, when it
-    lies in one, since that is the version of what was copied."""
+    """Copy ``tree`` into ``checkout`` (:func:`_copy_tree`) as one commit, which names the commit of the repository
+    ``tree`` lies in, when it lies in one, since that is the version of what was copied."""
 
-    make_shared_dirs(checkout.parent)
-    shutil.copytree(tree, checkout, ignore=shutil.ignore_patterns(GIT_DIR, "__pycache__"), dirs_exist_ok=True)
-    if parent_is_shared(checkout):
-        _share_copy(checkout)
+    _copy_tree(tree, checkout)
     enclosing = await _git([GIT, REV_PARSE, "HEAD"], tree)
     at = f" at {enclosing.output.strip()}" if enclosing.returncode == 0 else ""
     # Fixed identity and no signing: the host may have neither a git identity nor a signing key.
@@ -432,61 +428,53 @@ async def _commit_tree(tree: Path, checkout: Path) -> None:
             raise AttemptFailed(f"committing a copy of {tree}: {tail(done.output)}")
 
 
-def _share_copy(checkout: Path) -> None:
-    """Give what :func:`_commit_tree` copied into ``checkout`` on shared storage -- made just now by this process, with
-    the modes of the tree it copied -- group write, and its directories setgid, never through a link: the agent's
-    sandbox, maybe another account of the group, writes it, and may have put a link anywhere in it.
-
-    Each entry is changed by ``fchmod`` on a descriptor opened without following a link, below the descriptor of its
-    directory, from ``checkout`` reached as :func:`~hyperloom_common.shared_storage.open_directory` reaches it.
+def _copy_tree(tree: Path, checkout: Path) -> None:
+    """Copy ``tree`` into ``checkout`` but its ``.git`` and ``__pycache__``, by the shared-storage writers: directories
+    ``2775`` and files with their mode plus group write below shared storage, the umask's anywhere else. The agent's
+    sandbox, maybe another account of the group, writes the checkout and may have put a link anywhere in it, so none is
+    followed on the way; a link in ``tree`` is copied as the link, as a clone gives it, so that nothing outside ``tree``
+    is copied to the group.
 
     Raises:
-        OSError: ``ELOOP`` for a link at ``checkout``'s name.
+        OSError: for a link at ``checkout``'s name, ``ENOTDIR`` when it is this account's own (which
+            :func:`make_shared_dirs` follows) and ``ELOOP`` when it is another account's, as for one further on the way.
     """
 
+    make_shared_dirs(checkout)
     with shared_parent(checkout) as (parent, name, _shared):
-        top = os.open(name, _COPIED_DIRECTORY, dir_fd=parent)
-    _share_directory(top)
+        os.close(os.open(name, _NO_LINK_DIRECTORY, dir_fd=parent))
+    # Not following links, the walk lists a link to a directory among the directories, and does not go into it.
+    for directory, subdirectories, files in os.walk(tree, onerror=_raise):
+        subdirectories[:] = [name for name in subdirectories if name not in _NOT_COPIED]
+        for name in (*subdirectories, *(name for name in files if name not in _NOT_COPIED)):
+            _copy_entry(Path(directory) / name, checkout / Path(directory).relative_to(tree) / name)
 
 
-def _share_directory(directory: int) -> None:
-    """Add group write and setgid to the directory open as ``directory``, and :func:`_share_entry` each of its entries;
-    closes ``directory``."""
+def _copy_entry(source: Path, target: Path) -> None:
+    """Copy the entry ``source`` of a source tree to ``target``, a directory as a new empty one."""
 
-    try:
-        _add_mode(directory, stat.S_IWGRP | stat.S_ISGID)
-        for name in os.listdir(directory):
-            _share_entry(directory, name)
-    finally:
-        os.close(directory)
-
-
-def _share_entry(directory: int, name: str) -> None:
-    """Add group write to the regular file ``name`` of ``directory``, or share it as a directory; a link, anything
-    else, or an entry another account left that this one cannot open, is left as it is."""
-
-    kind = stat.S_IFMT(os.stat(name, dir_fd=directory, follow_symlinks=False).st_mode)
-    if kind not in (stat.S_IFDIR, stat.S_IFREG):
-        return
-    try:
-        entry = os.open(name, _COPIED_ENTRY, dir_fd=directory)  # ELOOP for a link put there meanwhile
-    except PermissionError:
-        return
-    if stat.S_ISDIR(os.fstat(entry).st_mode):
-        _share_directory(entry)
-        return
-    try:
-        _add_mode(entry, stat.S_IWGRP)
-    finally:
-        os.close(entry)
+    mode = os.lstat(source).st_mode
+    if stat.S_ISDIR(mode):
+        make_shared_dirs(target)
+    elif stat.S_ISLNK(mode):
+        _copy_link(source, target)
+    elif stat.S_ISREG(mode):
+        copy_shared_file(source, target, mode=mode & 0o777 | stat.S_IWGRP)
+    else:
+        raise shutil.SpecialFileError(f"{source} is not a file, directory or link")
 
 
-def _add_mode(descriptor: int, bits: int) -> None:
-    """Add ``bits`` to what is open as ``descriptor``; an entry an earlier attempt of another account left (``EPERM``)
-    is left as it is."""
+def _copy_link(source: Path, target: Path) -> None:
+    """Make a link to what ``source`` links to at ``target``, replacing what an earlier attempt left there by rename."""
 
-    with contextlib.suppress(PermissionError):
-        os.fchmod(descriptor, stat.S_IMODE(os.fstat(descriptor).st_mode) | bits)
+    with shared_parent(target) as (directory, name, _shared):
+        made = f".{name}.{os.getpid()}.link"
+        os.symlink(os.readlink(source), made, dir_fd=directory)
+        os.replace(made, name, src_dir_fd=directory, dst_dir_fd=directory)
+
+
+def _raise(error: OSError) -> None:
+    raise error
 
 
 async def _checkout_git(argv: list[str], checkout: Path) -> CommandResult:
