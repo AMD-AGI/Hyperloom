@@ -455,6 +455,47 @@ def _plant_programs(base_git: Path, tree: Path, ran: Path) -> None:
     (tree / ".gitattributes").write_text("* filter=own diff=own\n*.py filter=other.name\n")
 
 
+def _as_another_accounts(*trees: Path) -> None:
+    for path in (path for tree in trees for path in (tree, *tree.rglob("*"))):
+        os.lchown(path, 65534, 65534)
+
+
+@pytest.mark.skipif(os.geteuid() != 0, reason="a repository of another owner needs root to chown")
+def test_a_worktree_another_account_wrote_is_synced_and_diffed_with_no_program_of_it_run(tmp_path, base):
+    worktree = base.worktree("s1", tmp_path / "s1")
+    worktree.sync("c0", [])
+    ran = tmp_path / "ran"
+    _plant_programs(base.path / ".git", worktree.path, ran)
+    # Another account wrote the worktree, its gitfile included; the source base, its admin directories among it, is
+    # still the app's.
+    _as_another_accounts(worktree.path)
+    (worktree.path / "vllm" / "config.py").write_bytes(b"max_num_seqs = 256\n")
+
+    patch = worktree.diff("vllm")
+    worktree.sync("c1", [patch.encode()])
+
+    assert "+max_num_seqs = 256" in patch
+    assert worktree.head() == "c1"
+    assert base.worktree("s2", tmp_path / "s2").head() is None
+    assert not ran.exists(), ran.read_text()
+
+
+@pytest.mark.skipif(os.geteuid() != 0, reason="a repository of another owner needs root to chown")
+def test_a_worktree_whose_admin_directory_another_account_made_runs_no_git_at_all(tmp_path, base):
+    worktree = base.worktree("s1", tmp_path / "s1")
+    worktree.sync("c0", [])
+    ran = tmp_path / "ran"
+    _plant_programs(base.path / ".git", worktree.path, ran)
+    _as_another_accounts(base.path / ".git" / "worktrees" / "s1")
+
+    with pytest.raises(worktree_module.WorktreeError, match="not a directory owned by the app"):
+        worktree.diff("vllm")
+
+    assert not ran.exists(), ran.read_text()
+    _plain_git(worktree.path, "-c", "safe.directory=*", "add", "--all")
+    assert ran.exists(), "plain git runs what the repository's config names, so the plant is live"
+
+
 def test_no_program_a_sandbox_writes_into_the_worktree_s_repository_runs_as_the_app(tmp_path, base):
     worktree = base.worktree("s1", tmp_path / "s1")
     worktree.sync("c0", [])

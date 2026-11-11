@@ -1060,7 +1060,7 @@ def hosted_run() -> int:
 def _hosted_start(host: HostInfo) -> HostedStart:
     """A new session of the spec, or the close or finish of the one ``session.json`` names, which the restart takes
     over (:func:`take_over_earlier_session`); raises ValueError on a refused spec or session, ImportError when a
-    ``hosted`` package is missing, and what :func:`require_hosted_isolation` and :func:`ready_session` raise."""
+    ``hosted`` package is missing, and what :func:`ready_session` raises."""
 
     deadline = grant_deadline(host, datetime.now(timezone.utc))
     earlier = take_over_earlier_session(host.state_dir)
