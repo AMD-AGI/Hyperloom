@@ -299,8 +299,7 @@ class Session:
         self._context = context
         self._repo = peers.repo
         self._recipe_kb = services.recipe_kb
-        self._lifecycle = peers.lifecycle
-        self._dev_leases = peers.dev_leases
+        self._lifecycle, self._dev_leases = peers.lifecycle, peers.dev_leases
         self._branches = BranchControl(context, peers.lifecycle, peers.toolbox, peers.repo, peers.briefs)
         self._stopper = SessionStopper(context, self._branches, peers.toolbox, peers.mcp)
         self._integrator = self._build_integrator(peers.repo, checks, services)
