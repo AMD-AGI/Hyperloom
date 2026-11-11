@@ -427,7 +427,6 @@ class SourceBase:
         (git_dir / _INFO_DIR).mkdir(_OWNER_DIR, exist_ok=True)
         _write_owner_file(git_dir / _INFO_DIR / "exclude", "".join(f"{line}\n" for line in excluded), umask)
         _write_owner_file(git_dir / LINKED_PATHS, "".join(f"{prefix}\t{target}\n" for prefix, target in links), umask)
-        keep_git_files_own(git_dir)
         if shared:
             share_objects_and_refs(git_dir)
         _commit_all(self.path, BASE_BRANCH)
