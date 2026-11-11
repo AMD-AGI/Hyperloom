@@ -252,7 +252,10 @@ starts the server, replays the trace, profiles and cleans up. Hyperloom compares
 the rounds' `report.json`: a round that did not complete, or whose measurement is
 invalid, cannot supply KEEP evidence, and baseline and candidate must have the
 same workload identity. GEAK's search measurements are provisional until the
-candidate passes the same workload and Hyperloom's KEEP gate.
+candidate passes the same workload and Hyperloom's KEEP gate. GEAK searches on
+the trace the accepted round replayed: the handoff's `workload_spec` declares
+the corpus and entry count from that round's aiperf export, the session's
+concurrency and the mean request shape the round measured.
 
 The baseline, and each candidate that passes the KEEP threshold, also runs a
 GSM8K accuracy round on a server of its own. `--no-agentx-accuracy` turns it off
