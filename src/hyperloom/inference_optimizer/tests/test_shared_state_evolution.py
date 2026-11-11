@@ -172,7 +172,7 @@ def test_reset_state_backs_up_state_json(tmp_path):
     sd.mkdir()
     payload = dict(_FACT_LAYER_PAYLOAD)
     (sd / "state.json").write_text(json.dumps(payload))
-    optimizer_cli._reset_state_file(sd, framework="vllm")
+    optimizer_cli._reset_state_file(sd, SharedState(framework="vllm"))
     backups = [p for p in sd.iterdir() if p.name.startswith("state.json.preReset.")]
     assert len(backups) == 1, "exactly one pre-reset backup expected"
     loaded = SharedState.load_or_init(sd)
@@ -187,7 +187,7 @@ def test_reset_state_is_safe_when_no_state_file(tmp_path):
 
     sd = tmp_path / "session"
     sd.mkdir()
-    optimizer_cli._reset_state_file(sd, framework="vllm")
+    optimizer_cli._reset_state_file(sd, SharedState(framework="vllm"))
     assert not (sd / "state.json").exists()
 
 

@@ -15,7 +15,6 @@ from collections.abc import Mapping, Sequence
 from dataclasses import replace
 
 from hyperloom.common.perf_metric import (
-    AGENTX_KEEP_P50_THRESHOLD_PCT,
     GRADED_DURATION,
     GRADED_ERROR_RATE,
     GRADED_INTVTY,
@@ -27,6 +26,7 @@ from hyperloom_multibranch.contracts.judgement import ACCURACY_SCORE
 from hyperloom_multibranch.contracts.blackboard.interfaces import CommitQuery, GateRecords
 from hyperloom_multibranch.contracts.blackboard.records import BaselineRecord, TestRecord
 from hyperloom_multibranch.rulegate.accuracy import baseline_accuracy
+from hyperloom_multibranch.rulegate.agentx import P50_BAR_PCT
 from hyperloom_multibranch.rulegate.inferencex import DispersionThreshold, InferenceXBaseline
 from hyperloom_multibranch.rulegate.readings import UnreadableResult, agentx_reading, inferencex_reading
 
@@ -85,7 +85,7 @@ def _agentx_record(root_commit: str, reading: Mapping[str, float]) -> BaselineRe
         root_commit,
         values=dict(sorted(reading.items())),
         dispersion_pct={},
-        threshold_pct={GRADED_INTVTY_P50: AGENTX_KEEP_P50_THRESHOLD_PCT},
+        threshold_pct={GRADED_INTVTY_P50: P50_BAR_PCT},
         request_ids=(),
     )
 

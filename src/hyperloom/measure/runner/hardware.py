@@ -18,19 +18,14 @@ from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 from typing import Any
 
+from hyperloom_common.amd_smi import AmdSmiError, gpu_rows, run_amd_smi
 from hyperloom_common.gpu_identity import (
     AMD_GPU_BOARDS,
     gfx_arch_for_gpu_type,
     gpu_type_for_device_id,
     normalise_device_id,
 )
-from hyperloom.common.gpu_power_settings import (
-    GpuPowerSettingsError,
-    gpu_rows,
-    reading_matches,
-    run_amd_smi,
-    socket_power_cap_w,
-)
+from hyperloom.common.gpu_power_settings import reading_matches, socket_power_cap_w
 from hyperloom.common.rocm_smi import GpuVram, gpu_vram_usage, vram_busy
 
 __all__ = [
@@ -89,11 +84,11 @@ def _run_tool(tool: str, args: Sequence[str]) -> str | None:
 
 
 def amd_smi_or_none(args: Sequence[str]) -> str | None:
-    """The stdout of ``amd-smi <args>``, or ``None`` where :func:`~hyperloom.common.gpu_power_settings.run_amd_smi`
+    """The stdout of ``amd-smi <args>``, or ``None`` where :func:`~hyperloom_common.amd_smi.run_amd_smi`
     raises (amd-smi missing, failing or timing out): a reading the runner cannot make is recorded, not fatal."""
     try:
         return run_amd_smi(args)
-    except GpuPowerSettingsError:
+    except AmdSmiError:
         return None
 
 

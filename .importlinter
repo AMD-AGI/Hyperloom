@@ -57,8 +57,7 @@ ignore_imports =
     hyperloom.inference_optimizer.cli -> hyperloom.orchestrator.actions.executors._partition_shape
     hyperloom.inference_optimizer.cli -> hyperloom.orchestrator.actions.executors._subprocess_kill
     hyperloom.inference_optimizer.cli -> hyperloom.orchestrator.actions.executors._workload_envs
-    hyperloom.inference_optimizer.cli -> hyperloom.orchestrator.actions.executors.benchmark_backend
-    hyperloom.inference_optimizer.cli -> hyperloom.orchestrator.actions.executors.bypass_scriptable
+    hyperloom.inference_optimizer.cli -> hyperloom.orchestrator.actions.executors.explore_prefilter.declared_levers
     hyperloom.inference_optimizer.cli -> hyperloom.orchestrator.bus.resource_lock
     hyperloom.inference_optimizer.cli -> hyperloom.orchestrator.collaborator
     hyperloom.inference_optimizer.cli -> hyperloom.orchestrator.loop.coordinator
@@ -98,11 +97,9 @@ ignore_imports =
     hyperloom.inference_optimizer.cli.parser -> hyperloom.orchestrator.scoring.proposal_scorer
     hyperloom.inference_optimizer.cli.parser -> hyperloom.orchestrator.specialists.domains
     hyperloom.inference_optimizer.cli.preflight -> hyperloom.orchestrator.actions.executors._aiter_jit
-    hyperloom.inference_optimizer.cli.preflight -> hyperloom.orchestrator.actions.executors._inferencex_patcher
-    hyperloom.inference_optimizer.cli.preflight -> hyperloom.orchestrator.actions.executors._magpie_patcher
+    hyperloom.inference_optimizer.cli.preflight -> hyperloom.orchestrator.actions.executors._benchmark_interpreter
     hyperloom.inference_optimizer.cli.preflight -> hyperloom.orchestrator.actions.executors._multi_node_env
     hyperloom.inference_optimizer.cli.preflight -> hyperloom.orchestrator.actions.executors._subprocess_kill
-    hyperloom.inference_optimizer.cli.preflight -> hyperloom.orchestrator.actions.executors.benchmark_backend
     hyperloom.inference_optimizer.cli.quantization -> hyperloom.orchestrator.phases.quantization_request_handlers
     hyperloom.inference_optimizer.cli.quantization -> hyperloom.orchestrator.phases.quantization_schemes
 unmatched_ignore_imports_alerting = error
@@ -374,6 +371,8 @@ ignore_imports =
     hyperloom.**.tests.** -> **
     hyperloom_multibranch.tests.** -> **
     hyperloom_multibranch.**.tests.** -> **
+    # The AgentX checkpoint reads aiperf's per-request export with the parser the suite's timeline owns.
+    hyperloom.orchestrator.actions.executors._agentx_checkpoint -> inference_suite.telemetry.agentx_timeline
 unmatched_ignore_imports_alerting = none
 
 
@@ -419,8 +418,7 @@ ignore_imports =
     hyperloom.inference_optimizer.cli -> hyperloom.orchestrator.actions.executors._partition_shape
     hyperloom.inference_optimizer.cli -> hyperloom.orchestrator.actions.executors._subprocess_kill
     hyperloom.inference_optimizer.cli -> hyperloom.orchestrator.actions.executors._workload_envs
-    hyperloom.inference_optimizer.cli -> hyperloom.orchestrator.actions.executors.benchmark_backend
-    hyperloom.inference_optimizer.cli -> hyperloom.orchestrator.actions.executors.bypass_scriptable
+    hyperloom.inference_optimizer.cli -> hyperloom.orchestrator.actions.executors.explore_prefilter.declared_levers
     hyperloom.inference_optimizer.cli -> hyperloom.orchestrator.bus.resource_lock
     hyperloom.inference_optimizer.cli -> hyperloom.orchestrator.collaborator
     hyperloom.inference_optimizer.cli -> hyperloom.orchestrator.loop.coordinator
@@ -460,11 +458,9 @@ ignore_imports =
     hyperloom.inference_optimizer.cli.parser -> hyperloom.orchestrator.scoring.proposal_scorer
     hyperloom.inference_optimizer.cli.parser -> hyperloom.orchestrator.specialists.domains
     hyperloom.inference_optimizer.cli.preflight -> hyperloom.orchestrator.actions.executors._aiter_jit
-    hyperloom.inference_optimizer.cli.preflight -> hyperloom.orchestrator.actions.executors._inferencex_patcher
-    hyperloom.inference_optimizer.cli.preflight -> hyperloom.orchestrator.actions.executors._magpie_patcher
+    hyperloom.inference_optimizer.cli.preflight -> hyperloom.orchestrator.actions.executors._benchmark_interpreter
     hyperloom.inference_optimizer.cli.preflight -> hyperloom.orchestrator.actions.executors._multi_node_env
     hyperloom.inference_optimizer.cli.preflight -> hyperloom.orchestrator.actions.executors._subprocess_kill
-    hyperloom.inference_optimizer.cli.preflight -> hyperloom.orchestrator.actions.executors.benchmark_backend
     hyperloom.inference_optimizer.cli.quantization -> hyperloom.orchestrator.phases.quantization_request_handlers
     hyperloom.inference_optimizer.cli.quantization -> hyperloom.orchestrator.phases.quantization_schemes
     hyperloom.inference_optimizer.multi_node.commands.infera -> hyperloom.inference_optimizer.multi_node.cli
@@ -490,7 +486,6 @@ ignore_imports =
     hyperloom.orchestrator.actions.executors.target_analysis -> hyperloom.orchestrator.loop.sub_agent_runner
     hyperloom.orchestrator.actions.executors.targeted_build_executor -> hyperloom.orchestrator.loop.build_lifecycle
     hyperloom.orchestrator.actions.executors.targeted_build_executor -> hyperloom.orchestrator.loop.sub_agent_runner
-    hyperloom.orchestrator.bringup.argv_preflight -> hyperloom.orchestrator.actions.executors._benchmark_interpreter
     hyperloom.orchestrator.bus.resource_lock -> hyperloom.orchestrator.state.task_states
     hyperloom.orchestrator.enablement.build -> hyperloom.orchestrator.actions.executors._multi_node_env
     hyperloom.orchestrator.enablement.lane -> hyperloom.orchestrator.actions.executors._accuracy_gate
@@ -500,7 +495,6 @@ ignore_imports =
     hyperloom.orchestrator.enablement.params -> hyperloom.orchestrator.actions.executors._apply_feedback
     hyperloom.orchestrator.enablement.recipe.keep_probe -> hyperloom.orchestrator.actions.executors._benchmark_interpreter
     hyperloom.orchestrator.enablement.recipe.keep_probe -> hyperloom.orchestrator.actions.executors._server_argv
-    hyperloom.orchestrator.enablement.recipe.keep_probe -> hyperloom.orchestrator.actions.executors.benchmark_backend
     hyperloom.orchestrator.enablement.revalidation -> hyperloom.orchestrator.actions.executors._accuracy_gate
     hyperloom.orchestrator.enablement.setup_script -> hyperloom.orchestrator.enablement.recipe.projections
     hyperloom.orchestrator.gpu_lanes -> hyperloom.orchestrator.specialists.profile

@@ -1,7 +1,7 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""A credential is named by a marker anywhere in the name, or TOKEN as a whole segment; a tuning knob is not."""
+"""A credential is named by a marker anywhere in the name, or a word ending in TOKEN; a tuning knob is not."""
 
 from __future__ import annotations
 

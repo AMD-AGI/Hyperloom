@@ -14,7 +14,6 @@ there adds ``card_occupancy_unknown`` to the result, and another process on the 
 
 from __future__ import annotations
 
-import json
 import os
 import sys
 from pathlib import Path
@@ -23,6 +22,8 @@ from typing import Any
 from hyperloom.measure import local
 from hyperloom.measure.runner import hardware
 from hyperloom.measure.runner import run as runner_flow
+from hyperloom.measure.tests.bundle_factory import lm_eval_at_its_pin
+from hyperloom.measure.tests.run_dirs import write_run_dir
 from hyperloom.orchestrator.actions.executors import VariantResult
 from hyperloom.sandbox import card_occupancy
 from hyperloom.sandbox.card_occupancy import CardReading
@@ -32,10 +33,7 @@ WARNINGS = ["warmup_round_seed:1", "harvested_leaked_artifact:x", "warmup_round_
 
 async def fake_run_grid(*, grid: list[Any], output_root: Path, **_: Any) -> list[VariantResult]:
     name = grid[0].name
-    workspace = Path(output_root) / name / "benchmark_stub_20000101_000000"
-    workspace.mkdir(parents=True)
-    report = {"success": True, "throughput": {"output_throughput": 1234.5, "completed_requests": 8, "num_prompts": 8}}
-    (workspace / "benchmark_report.json").write_text(json.dumps(report), encoding="utf-8")
+    workspace = write_run_dir(Path(output_root) / name / "suite_run_0")
     return [
         VariantResult(
             name=name,
@@ -60,6 +58,7 @@ def main() -> int:
     root = Path(os.environ["HYPERLOOM_SANDBOX_ROOT"])
     local.run_grid = fake_run_grid  # type: ignore[assignment]
     _idle_machine()
+    sys.path.insert(0, str(lm_eval_at_its_pin(root / "lm-eval-pin")))
     return runner_flow.run(root / "in", root / "out", scratch=root / "work" / "scratch", spec_wait_sec=60)
 
 
