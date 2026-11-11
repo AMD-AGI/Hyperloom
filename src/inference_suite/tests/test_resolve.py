@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import dataclasses
 import gzip
+import hashlib
 import json
 import socket
 import subprocess
@@ -27,6 +28,7 @@ from inference_suite.contracts import (
     BaseLaunch,
     BaseLaunchError,
     LaunchQuery,
+    Redacted,
     SourceKind,
     Topology,
     VersionBasis,
@@ -168,6 +170,22 @@ def test_a_shell_user_file_wins_over_every_recipe():
     assert base.image.version_basis is VersionBasis.NOT_APPLICABLE
     assert {"--port", "HIP_VISIBLE_DEVICES"} <= set(base.stripped)
     assert base.warnings == ("launch.sh exports HF_TOKEN from shell variables; the base carries none of them",)
+
+
+def test_a_shell_user_file_records_a_literal_credential_export_as_its_sha256_only():
+    token = "hf_" + "x" * 34
+    script = (
+        f"export HF_TOKEN={token}\nexport SGLANG_MAX_NUM_BATCHED_TOKENS=8192\npython3 -m sglang.launch_server --tp 4\n"
+    ).encode()
+    user_file = parse_user_file("launch.sh", script, framework="sglang")
+    base = _base(_fixed(), dataclasses.replace(_snapshot(), user_file=user_file))
+
+    assert token not in json.dumps(base.to_document())
+    assert base.env == {
+        "HF_TOKEN": Redacted(hashlib.sha256(token.encode()).hexdigest()),
+        "SGLANG_MAX_NUM_BATCHED_TOKENS": "8192",
+    }
+    assert any("HF_TOKEN" in warning and "host" in warning for warning in base.warnings)
 
 
 def test_a_shell_user_file_setting_the_runner_owned_metrics_switch_is_refused():
