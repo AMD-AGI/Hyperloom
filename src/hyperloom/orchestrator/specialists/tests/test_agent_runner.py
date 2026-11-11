@@ -19,7 +19,7 @@ from types import SimpleNamespace
 import pytest
 
 from hyperloom.common.deadline import Deadline
-from hyperloom.common.proctree import descendants
+from hyperloom_common.proctree import descendants
 from hyperloom.orchestrator.specialists import agent_runner
 from hyperloom.orchestrator.specialists import reap_watch
 from hyperloom.orchestrator.specialists import resources
