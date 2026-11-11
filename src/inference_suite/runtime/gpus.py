@@ -96,6 +96,19 @@ def _gated_sleep(seconds: float, gate: RoundGate) -> Stop | None:
     return None
 
 
+def amd_smi_cards(gpus: Sequence[int]) -> tuple[int, ...]:
+    """The amd-smi card behind each of ``gpus`` (``HIP_VISIBLE_DEVICES`` numbers), in the same order.
+
+    Raises:
+        AmdSmiError: The card order cannot be read, or a GPU is not visible.
+    """
+    rocm_order = gpus_in_rocm_order()
+    invisible = [gpu for gpu in gpus if gpu >= len(rocm_order)]
+    if invisible:
+        raise AmdSmiError(f"GPUs {', '.join(map(str, invisible))} are not visible (the host has {len(rocm_order)})")
+    return tuple(rocm_order[gpu] for gpu in gpus)
+
+
 def await_free_gpus(gpus: Sequence[int], gate: RoundGate) -> Stop | None:
     """``None`` once ``gpus`` (``HIP_VISIBLE_DEVICES`` numbers) can take a new server; otherwise a
     ``GPUS_UNAVAILABLE`` stop naming each GPU that is held or not visible, or the stop ``gate`` trips while a held
@@ -109,4 +122,4 @@ def await_free_gpus(gpus: Sequence[int], gate: RoundGate) -> Stop | None:
     return None
 
 
-__all__ = ["RELEASE_STEP_SEC", "RELEASE_WAIT_SEC", "await_free_gpus"]
+__all__ = ["RELEASE_STEP_SEC", "RELEASE_WAIT_SEC", "amd_smi_cards", "await_free_gpus"]

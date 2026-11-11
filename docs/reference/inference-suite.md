@@ -277,7 +277,7 @@ figure is `null` and `reasons` says why:
 | `benchmark_window_not_bracketed`, `insufficient_power_samples` | A card has no sample on one side of the window. |
 | `sampling_gap_exceeded` | A card's samples across the window, its boundaries included, are more than 3 s apart. |
 | `invalid_power_sample` | A card's power did not read inside the window. |
-| `expected_gpu_count_mismatch` | A configured card holds no model or was never read. Cards outside the configured ones are sampled but never counted, so another server on them does not invalidate the round. |
+| `expected_gpu_count_mismatch` | A configured card holds no model or was never read, or the round's GPUs could not be matched to amd-smi cards. Cards outside the configured ones are sampled but never counted, so another server on them does not invalidate the round. |
 | `external_server` | The load ran on a server this host does not run; nothing local is its energy. |
 | `aborted` | The round stopped on a failed step. |
 
@@ -291,7 +291,9 @@ the same span (`accumulator_check`); beyond 5% it is the warning
 `report.json` carries the summary in its `power` section: the energy figures,
 `per_gpu_avg_power_w`, `accumulator_relative_error`,
 `power_throttle_fraction_max`, `power_valid`, `reasons` and `warnings`.
-`gpu_monitor` is derived from the same samples.
+`gpu_monitor` is derived from the same samples. `power.json`, the `power` section
+and `gpu_monitor` number cards by amd-smi index, not by the round's
+`HIP_VISIBLE_DEVICES` numbers.
 
 ## report.json
 
