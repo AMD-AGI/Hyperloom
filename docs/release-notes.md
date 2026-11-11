@@ -20,6 +20,14 @@ Merged to `main` and not yet carried by a tagged release. Each entry moves
 into the [release](https://github.com/AMD-AGI/Hyperloom/releases) that ships
 it.
 
+- **A recipe can bound the SGLang draft its deployment runs.** A benchmark YAML
+  may declare `speculative_draft_limits` (`draft_length`, `draft_tokens`,
+  `topk`, each with `min` and/or `max`). An explore variant outside them is
+  dropped before the round with reason `capability_unsupported`, and a launch
+  outside them is refused before its server boots. SGLang's
+  `--speculative-num-steps`, `--speculative-num-draft-tokens` and
+  `--speculative-eagle-topk` are now read for this check, and the
+  speculative-decoding specialist is told the bounds.
 - **Every round runs through InferenceSuite; Magpie and the `bypass` backend
   are removed.** Baseline, explore, grid, KEEP, profile and GEAK-replay rounds
   are inference_suite run directories with a `report.json`, and `failed_step`
