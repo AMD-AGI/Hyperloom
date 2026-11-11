@@ -16,6 +16,7 @@ from collections.abc import Collection, Mapping, Sequence
 from dataclasses import dataclass, replace
 from pathlib import Path
 
+from hyperloom_common.shared_storage import parent_is_shared
 from hyperloom.contracts.recipe import (
     PATCH_ROOT,
     ComponentPatches,
@@ -111,9 +112,11 @@ class GitExperimentRepo:
         self._env = git_env(**_IDENTITY, GIT_DIR=str(self._path))
 
     async def init_root(self, recipe: Recipe) -> str:
+        # Judged before the directories are made: below shared storage the run's next leg may be another account of the
+        # group, so git gives the group what it makes there; anywhere else the repository follows the umask.
+        shared = ("--shared=group",) if parent_is_shared(self._path) else ()
         await asyncio.to_thread(self._path.mkdir, parents=True)
-        # The run's next leg may be another account of the group: git gives the group what it makes there.
-        await self._git(*INIT, "--bare", "--quiet", "--shared=group", f"--initial-branch={INTEGRATION_BRANCH}")
+        await self._git(*INIT, "--bare", "--quiet", *shared, f"--initial-branch={INTEGRATION_BRANCH}")
         root = await self._write(recipe, (), "baseline")
         await self._git(_UPDATE_REF, _ref(INTEGRATION_BRANCH), root, _NO_COMMIT)
         return root
