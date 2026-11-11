@@ -410,6 +410,14 @@ def test_power_json_bounds_each_phase_by_its_mark_and_the_report_carries_its_ene
     assert [block.gpu for block in blocks] == list(range(8))
 
 
+def test_the_report_names_the_host_the_round_ran_on_as_power_json_does(rig):
+    result = run.run_round(rig.config("r1"))
+
+    document = json.loads(result.layout.power.read_text())
+    assert result.report.host == document["host"] == socket.gethostname()
+    assert json.loads(result.layout.report.read_text())["host"] == socket.gethostname()
+
+
 def test_kv_samples_cover_the_ready_server_and_carry_their_phase(rig):
     config = rig.config("r1", eval=_eval(limit=None))
     result = run.run_round(config)

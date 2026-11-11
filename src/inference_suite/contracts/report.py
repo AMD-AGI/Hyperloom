@@ -796,7 +796,9 @@ class LogRange:
         return cls(fields["start"], fields["end"])
 
 
-_SERVER_KEYS = ("host", "port", "served_model_name", "reused", "log_range")
+#: The key of a host name: the server's listen address in the server facts, the round's machine in the report.
+_HOST = "host"
+_SERVER_KEYS = (_HOST, "port", "served_model_name", "reused", "log_range")
 
 
 @dataclass(frozen=True)
@@ -841,6 +843,7 @@ REPORT_KEYS = (
     "concurrency",
     "started_unix",
     "ended_unix",
+    _HOST,
     "server",
     "gpu_monitor",
     "power",
@@ -869,7 +872,11 @@ _SECTION_TYPES: dict[str, type] = {
 
 @dataclass(frozen=True)
 class Report:
-    """One round's report. A completed round names no failed step; any other status names exactly one."""
+    """One round's report. A completed round names no failed step; any other status names exactly one.
+
+    ``host`` is the machine the round ran on, the one its ``power.json`` names (``server.host`` is the address the
+    server listens on); ``None`` in a report written before it was recorded.
+    """
 
     run_status: RunStatus
     workload_kind: WorkloadKind
@@ -882,6 +889,7 @@ class Report:
     launch_digest: str | None = None
     workload_digest: str | None = None
     concurrency: int | None = None
+    host: str | None = None
     server: ServerFacts | None = None
     gpu_monitor: tuple[GpuMonitorBlock, ...] = ()
     power: PowerSummary | None = None
@@ -914,6 +922,7 @@ class Report:
         _optional_digest(self.launch_digest, "the launch digest")
         _optional_digest(self.workload_digest, "the workload digest")
         _FIELDS.optional_integer(self.concurrency, "the concurrency", minimum=1)
+        _FIELDS.optional_text(self.host, "the round's host")
         started = _FIELDS.number(self.started_unix, "the round start")
         if _FIELDS.number(self.ended_unix, "the round end") < started:
             raise ReportError(f"the round ends at {self.ended_unix} before it starts at {started}")
@@ -956,6 +965,7 @@ class Report:
             "concurrency": self.concurrency,
             "started_unix": self.started_unix,
             "ended_unix": self.ended_unix,
+            _HOST: self.host,
             "server": None if self.server is None else self.server.to_document(),
             "gpu_monitor": [block.to_document() for block in self.gpu_monitor],
             "power": None if self.power is None else self.power.to_document(),
@@ -964,7 +974,7 @@ class Report:
 
     @classmethod
     def from_document(cls, document: object) -> Report:
-        fields = _complete(_with_unread(document, ("power",)), REPORT_KEYS, "a round report")
+        fields = _complete(_with_unread(document, ("power", _HOST)), REPORT_KEYS, "a round report")
         if fields["schema"] != REPORT_SCHEMA:
             raise ReportError(f"round report schema {fields['schema']!r} is not {REPORT_SCHEMA}")
         monitor = _FIELDS.items(fields["gpu_monitor"], "gpu_monitor")
@@ -984,6 +994,7 @@ class Report:
             concurrency=fields["concurrency"],
             started_unix=fields["started_unix"],
             ended_unix=fields["ended_unix"],
+            host=fields[_HOST],
             server=None if fields["server"] is None else ServerFacts.from_document(fields["server"]),
             gpu_monitor=tuple(GpuMonitorBlock.from_document(block) for block in monitor),
             power=None if fields["power"] is None else PowerSummary.from_document(fields["power"]),

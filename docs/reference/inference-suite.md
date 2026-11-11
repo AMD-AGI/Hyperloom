@@ -110,9 +110,11 @@ that set each flag and environment variable and what it overrode:
 3. the candidate's layer: removals, then additions;
 4. the golden layer, when the round applies it;
 5. the guard: the model path, address and GPU mask of the round;
-6. the runner's layer: the environment and floors a host needs, and the
+6. the runner's layer: the environment and floors a host needs, the
    framework's metrics switch (`--enable-metrics` for SGLang; vLLM needs none)
-   when the round samples KV telemetry;
+   when the round samples KV telemetry, and the engine seed (`--random-seed 0`
+   for SGLang, `--seed 0` for vLLM) when no earlier layer names one, so every
+   cold start of one launch samples alike;
 7. the profiler layer of a profile round.
 
 Neither the operator's nor the candidate's layer may set what the guard or the
@@ -311,6 +313,10 @@ A round that did not complete names one `failed_step`:
 | Client | `client_failed`, `client_output_missing` |
 | Eval | `eval_failed` |
 | Any | `round_timeout`, `deadline_exhausted`, `cancelled`, `disk_full`, `teardown_incomplete` |
+
+`host` names the machine the round ran on, the one `power.json` names
+(`server.host` is the address the server listens on), so two measurements of one
+launch taken on different machines can be told apart.
 
 Every metric key is fixed: a metric nobody measured is `null`, never `0`. An eval
 records its definition digest, and two scores compare only under one definition.

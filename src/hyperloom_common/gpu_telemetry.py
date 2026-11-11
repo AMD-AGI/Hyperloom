@@ -66,6 +66,7 @@ __all__ = [
     "fast_interval",
     "gpu_monitor",
     "publish_power",
+    "recording_host",
 ]
 
 DEFAULT_INTERVAL_SEC = 1.0
@@ -96,6 +97,11 @@ class GpuPhase(str, Enum):
 
 
 _PHASE_VALUES = frozenset(phase.value for phase in GpuPhase)
+
+
+def recording_host() -> str:
+    """The host a recorder runs on, as ``power.json`` names it; a round's report names the same one."""
+    return socket.gethostname()
 
 
 def fast_interval(seconds: float) -> float:
@@ -184,7 +190,7 @@ class PowerRecorder:
         self._node_files: NodeFiles | None = None
         self._cpu: tuple[str | None, tuple[CpuDomain, ...]] = (None, ())
         self._recording = PowerRecording(
-            host=socket.gethostname(),
+            host=recording_host(),
             started_unix=time.time(),
             unix_offset=time.time() - time.monotonic(),
             ended_mono=time.monotonic(),

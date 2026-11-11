@@ -20,7 +20,7 @@ from hyperloom.orchestrator.actions.executors._suite.config import RoundSettings
 from hyperloom.orchestrator.actions.executors._suite.rounds import point_server
 from inference_suite import LaunchQuery, SourceSnapshot, resolve_base
 from inference_suite.argv import argv_flag_occurrences, canonical_flag_name, normalize_argv
-from inference_suite.compose import RoundFacts, compose
+from inference_suite.compose import DEFAULT_SEED, RoundFacts, compose
 from inference_suite.contracts import (
     BaseLaunch,
     ConfigError,
@@ -34,6 +34,7 @@ from inference_suite.contracts import (
     WorkloadKind,
 )
 from inference_suite.contracts.launch import Launch, VersionCheck
+from inference_suite.frameworks import Framework, framework_facts
 from inference_suite.recipe.resolve import UnreadSource
 
 _MODEL = "/models/Qwen3-8B"
@@ -139,8 +140,11 @@ def test_the_translated_launch_is_the_base_under_the_points_server_layer(framewo
     launch = _launch(suite_config(_point(framework), base, _settings()), base)
     entry, argv, env = _LAUNCH[(framework, board)]
 
+    seed = framework_facts(Framework(framework)).server_flags.seed  # the runner pins the seed the old flow left unset
+    pinned = set() if seed is None else {(canonical_flag_name(seed), (str(DEFAULT_SEED),))}
+
     assert launch.entrypoint == entry
-    assert _flags(launch.argv[len(entry) :]) == _flags(argv)
+    assert _flags(launch.argv[len(entry) :]) == _flags(argv) | pinned
     assert dict(launch.env) == {**env, **_POINT_ENV}
 
 

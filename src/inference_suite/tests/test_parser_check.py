@@ -38,7 +38,7 @@ class ServerArgs:
         parser.add_argument("--tp", "--tensor-parallel-size", type=int)
         for flag in ("--host", "--port", "--served-model-name", "--context-length", "--json-model-override-args",
                      "--chunked-prefill-size", "--speculative-algorithm", "--speculative-num-steps",
-                     "--watchdog-timeout"):
+                     "--watchdog-timeout", "--random-seed"):
             parser.add_argument(flag)
         for switch in ("--disable-radix-cache", "--enable-metrics"):
             parser.add_argument(switch, action="store_true")

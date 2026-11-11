@@ -37,6 +37,7 @@ from hyperloom_common.gpu_telemetry import (
     RecorderTiming,
     TokenCounts,
     gpu_monitor,
+    recording_host,
 )
 from hyperloom_common.io import atomic_write_json
 from inference_suite import framework_version, parser_check, staging
@@ -599,6 +600,7 @@ class _Round:
             launch_digest=self.launch_digest,
             workload_digest=None if workload is None else _digest(workload.to_document()),
             concurrency=getattr(workload, "concurrency", None),
+            host=recording_host(),
             server=self.server,
             gpu_monitor=power.gpu_monitor,
             power=power.power,
