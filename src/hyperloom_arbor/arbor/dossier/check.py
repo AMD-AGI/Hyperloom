@@ -1,9 +1,12 @@
 #!/usr/bin/env python3
 """Check a dossier, or one of its update rounds, before calling it done.
 
-    python3 check-dossier.py <dir>                  # the dossier: README.md, parts 01-11
-    python3 check-dossier.py <dir> --round uK       # round K: 03, 06, 07, 10 and 11 .uK files
-    python3 check-dossier.py <dir> --round uK --no-index   # a round staged outside the dossier
+    python3 -m arbor.dossier.check <dir>                  # the dossier: README.md, parts 01-11
+    python3 -m arbor.dossier.check <dir> --round u3       # round u3: 03, 06, 07, 10 and 11 .u3 files
+    python3 -m arbor.dossier.check <dir> --round u3 --no-index   # a round staged outside the dossier
+
+The dossier skill's ``check-dossier.py`` runs this module from the skill's place, for packs and callers that name it
+(the dossier plugin's skills call the module).
 
 <dir> is the dossier's directory (docs/dossier/<model>-<workload>-<gpu>/), or
 for a round staged elsewhere (a campaign's <session>/reports/) that directory
@@ -30,14 +33,7 @@ import os
 import re
 import sys
 
-BASE_PARTS = {
-    "01": "model", "02": "system", "03": "code", "04": "target",
-    "05": "workload", "06": "baseline", "07": "profile", "08": "kernels",
-    "10": "history", "11": "directions",
-}
-OPTIONAL_PARTS = {"12": "fast bench"}  # the skill: may be in progress
-ROUND_PARTS = {"03": "code", "06": "baseline", "07": "profile",
-               "10": "lessons", "11": "directions"}
+from arbor.dossier.parts import BASE_PARTS, OPTIONAL_PARTS, ROUND_PARTS  # noqa: E402,F401 - the parts, in one place
 
 PLACEHOLDER = re.compile(r"<[^<>]{3,300}>")  # may span lines, as the template's do
 LABEL = re.compile(r"\*\*(Question|Status|Sources|Done when|Round \w+)\.?\*\*\.?", re.I)
@@ -95,8 +91,7 @@ def find(dirpath: str, prefix: str, name: str) -> str:
 
 
 def _arbor(name: str):
-    """arbor.<name> from the checkout this skill sits in, or None when it is not importable."""
-    sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..", "..")))
+    """arbor.<name>, or None when it is not importable."""
     try:
         return __import__(f"arbor.{name}", fromlist=[name])
     except ImportError:
@@ -140,6 +135,52 @@ def check_map(path: str, required: bool) -> dict:
     else:
         n_open = sum(1 for e in p.new_map if e["status"] == "open")
         row.update(ok=True, why=f"{len(p.new_map)} directions, {n_open} open")
+    return row
+
+
+#: Set by the driver for a campaign whose pack loads knowledge:search: its dossier cites what it took from search.
+KNOWLEDGE_LOADED = "ARBOR_KNOWLEDGE_LOADED"
+
+
+def check_citations(paths: list[str]) -> dict:
+    """The dossier's knowledge citations (``<source>@<pin>:<path>#L..``) resolve at a pinned source
+    (``arbor.knowledge.search.resolve``). A page of a source behind search named by its path, with no pin, fails in a
+    campaign that loads knowledge:search (``ARBOR_KNOWLEDGE_LOADED``) and is noted elsewhere."""
+    row = {"part": "knowledge citations", "file": os.path.dirname(paths[0]) if paths else "", "ok": True}
+    search, registry = _arbor("knowledge.search"), _arbor("knowledge.registry")
+    if search is None or registry is None:
+        row["why"] = "arbor.knowledge is not importable here: not checked"
+        return row
+    sources, _ = registry.load()
+    ids = {s.id for s in sources}
+    trees = [s.path.rstrip("/") + "/" for s in sources if s.behind_search and s.kind == "dir"]
+    seen, bad, unpinned, pins = set(), [], [], {}
+    for path in paths:
+        text = open(path, encoding="utf-8", errors="replace").read()
+        for m in search.CITE_IN_TEXT.finditer(text):
+            if m["id"] not in ids or m.group(0) in seen:
+                continue                      # another repository's citation (a commit of vLLM, say), or seen
+            seen.add(m.group(0))
+            ok, why = search.resolve(m.group(0), sources, pins)
+            if not ok:
+                bad.append(f"{m.group(0)}: {why}")
+        for tree in trees:
+            tail = tree.split("/", 2)[-1]       # "kernels/reference/": how a dossier names the tree
+            for hit in re.finditer(re.escape(tail) + r"[\w./-]+\.md", text):
+                unpinned.append(f"{os.path.basename(path)}: {hit.group(0)}")
+    strict = os.environ.get(KNOWLEDGE_LOADED) == "1"
+    notes = []
+    if bad:
+        row["ok"] = False
+        notes.append(f"{len(bad)} of {len(seen)} do not resolve: " + "; ".join(bad[:3]))
+    else:
+        notes.append(f"{len(seen)} resolve" if seen else "none")
+    if unpinned:
+        row["ok"] = row["ok"] and not strict
+        notes.append(f"{len(unpinned)} pages named by path, not cited with their pin"
+                     + ("" if strict else " (noted: this campaign does not load knowledge:search)")
+                     + ": " + "; ".join(unpinned[:3]))
+    row["why"] = "; ".join(notes)
     return row
 
 
@@ -190,6 +231,8 @@ def main() -> int:
             rows.append(r)
             rows.append(check_items(path))
         rows.append(check_map(find(a.dir, f"11.{k}", ROUND_PARTS["11"]), required=True))
+        rows.append(check_citations([r["file"] for r in rows if r.get("file", "").endswith(".md")
+                                     and os.path.isfile(r["file"])]))
         if not a.no_index:
             idx = os.path.join(a.dir, "README.md")
             listed = os.path.isfile(idx) and re.search(
@@ -210,6 +253,7 @@ def main() -> int:
         rows.append(r)
         rows.append(check_rules(find(a.dir, "04", BASE_PARTS["04"])))
         rows.append(check_map(find(a.dir, "11", BASE_PARTS["11"]), required=False))
+        rows.append(check_citations(sorted(glob.glob(os.path.join(a.dir, "*.md")))))
 
     ok = all(r["ok"] for r in rows)
     if a.json:

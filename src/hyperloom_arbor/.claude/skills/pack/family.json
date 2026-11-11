@@ -1,0 +1,6 @@
+{
+  "name": "pack",
+  "version": "1.0.0",
+  "description": "Packs, the contract a kind of campaign shares: draft a new pack and its config from the serving template (or the nearest pack), the benchmark's study and the model's dossier, for a person to review.",
+  "author": {"name": "Arbor"}
+}
