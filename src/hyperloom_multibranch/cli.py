@@ -199,7 +199,7 @@ ENCODING = "utf-8"
 FILE_METAVAR = "FILE"
 log = logging.getLogger(__name__)
 #: The GPU types a session runs on; the toolbox's environment exports the board itself as ``GPU_TYPE``.
-MAGPIE_RUNNER_GPU_TYPES = ("mi300x", "mi350x", "mi355x")
+SESSION_GPU_TYPES = ("mi300x", "mi350x", "mi355x")
 #: The options an inferencex workload requires and an agentx one refuses.
 SEQUENCE_LENGTHS = ("isl", "osl")
 #: The argparse action of an option the user may give more than once, each giving one more value.
@@ -263,7 +263,7 @@ def _add_workload_options(run: argparse.ArgumentParser) -> None:
     run.add_argument("--model", required=True, help="Model path or id.")
     run.add_argument("--framework", required=True, help="Inference framework, e.g. vllm or sglang.")
     run.add_argument(
-        "--gpu-type", required=True, type=str.lower, choices=MAGPIE_RUNNER_GPU_TYPES, help="GPU type, in any case."
+        "--gpu-type", required=True, type=str.lower, choices=SESSION_GPU_TYPES, help="GPU type, in any case."
     )
     run.add_argument("--workload", required=True, choices=[kind.value for kind in WorkloadKind], help="Workload kind.")
     run.add_argument("--tp", type=int, required=True, help="Tensor-parallel size; must fit the machine's cards.")
@@ -1172,7 +1172,7 @@ def main(argv: list[str] | None = None) -> int:
 
 
 __all__ = [
-    "MAGPIE_RUNNER_GPU_TYPES",
+    "SESSION_GPU_TYPES",
     "PROG",
     "SEQUENCE_LENGTHS",
     "EnvironmentIncomplete",
