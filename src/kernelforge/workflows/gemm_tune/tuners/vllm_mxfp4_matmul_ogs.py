@@ -43,7 +43,7 @@ def _write_hook(directory: Path) -> None:
 def _sweep_config(tuner: "VllmMxfp4MatmulOgsTuner") -> dict[str, Any]:
     ctx = tuner.ctx
     return {
-        "cases": [asdict(case) for case in cases(ctx.profile, ctx.tokens, conc=ctx.conc, thorough=ctx.thorough)],
+        "cases": [asdict(case) for case in cases(ctx.profile, ctx.token_hint or ctx.tokens, conc=ctx.conc)],
         "search_space": flag_search_space(thorough=ctx.thorough),
         "experts": ctx.profile.num_experts,
         "top_k": ctx.profile.num_experts_per_tok,

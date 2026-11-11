@@ -46,22 +46,14 @@ def _validate_row(row: Any) -> None:
         type(value) is not int or value not in _ALLOWED_FLAGS[key] for key, value in flags.items()
     ):
         raise ValueError("matmul_ogs flag row has unsupported values")
-    if not all(type(row.get(key)) is int and row[key] > 0 for key in ("n", "k", "min_m", "max_m")):
+    if not all(type(row.get(key)) is int and row[key] > 0 for key in ("m", "n", "k")):
         raise ValueError("matmul_ogs flag row has invalid dimensions")
-    if row["min_m"] > row["max_m"]:
-        raise ValueError("matmul_ogs flag row has a reversed token range")
 
 
-def _validate_nonoverlapping_rows(rows: list[dict[str, Any]]) -> None:
-    for index, row in enumerate(rows):
-        if any(
-            row["n"] == other["n"]
-            and row["k"] == other["k"]
-            and row["min_m"] <= other["max_m"]
-            and other["min_m"] <= row["max_m"]
-            for other in rows[index + 1 :]
-        ):
-            raise ValueError("matmul_ogs flag table has overlapping token ranges")
+def _validate_unique_rows(rows: list[dict[str, Any]]) -> None:
+    keys = {(row["m"], row["n"], row["k"]) for row in rows}
+    if len(keys) != len(rows):
+        raise ValueError("matmul_ogs flag table has duplicate routed shapes")
 
 
 def _read_table(path: Path) -> tuple[dict[str, Any], str]:
@@ -87,7 +79,9 @@ def _read_table(path: Path) -> tuple[dict[str, Any], str]:
         raise ValueError("matmul_ogs flag table has no measured rows")
     for row in rows:
         _validate_row(row)
-    _validate_nonoverlapping_rows(rows)
+        if row["m"] % table["top_k"] or row.get("tokens") != row["m"] // table["top_k"]:
+            raise ValueError("matmul_ogs flag row disagrees with expert routing")
+    _validate_unique_rows(rows)
     return table, hashlib.sha256(raw).hexdigest()
 
 
@@ -108,26 +102,13 @@ def _arg(args: tuple[Any, ...], kwargs: dict[str, Any], index: int, name: str) -
     return args[index] if len(args) > index else kwargs.get(name)
 
 
-def _tokens_per_expert(m: int, routing_data: Any) -> int:
-    if routing_data is None:
-        return m
-    expected = getattr(routing_data, "expected_tokens_per_expt", None)
-    if expected is not None:
-        return max(1, int(expected))
-    return max(1, m // max(1, int(getattr(routing_data, "n_expts_tot", 1))))
-
-
 def _matching_row(table: dict[str, Any], args: tuple[Any, ...], kwargs: dict[str, Any]) -> dict[str, Any] | None:
     m = _arg(args, kwargs, 5, "m")
     n = _arg(args, kwargs, 6, "n")
     k = _arg(args, kwargs, 7, "k")
     if not all(isinstance(value, int) and value > 0 for value in (m, n, k)):
         return None
-    tokens = _tokens_per_expert(m, _arg(args, kwargs, _ROUTING_ARG_INDEX, _ROUTING_ARG_NAME))
-    return next(
-        (row for row in table["rows"] if row["n"] == n and row["k"] == k and row["min_m"] <= tokens <= row["max_m"]),
-        None,
-    )
+    return next((row for row in table["rows"] if (row["m"], row["n"], row["k"]) == (m, n, k)), None)
 
 
 def _is_supported_call(module: ModuleType, args: tuple[Any, ...], kwargs: dict[str, Any]) -> bool:
@@ -157,7 +138,7 @@ def _install_module(module: ModuleType, table: dict[str, Any], table_digest: str
     if source_digest != table["opt_flags_sha256"]:
         raise RuntimeError("matmul_ogs opt_flags source differs from the tuned source")
     original = module.make_opt_flags
-    reported: set[tuple[int, int, int, int]] = set()
+    reported: set[tuple[int, int, int]] = set()
 
     def tuned_make_opt_flags(*args: Any, **kwargs: Any) -> Any:
         default = original(*args, **kwargs)
@@ -166,16 +147,16 @@ def _install_module(module: ModuleType, table: dict[str, Any], table_digest: str
         routing = _arg(args, kwargs, _ROUTING_ARG_INDEX, _ROUTING_ARG_NAME)
         if routing.n_expts_tot != table["experts"] or routing.n_expts_act != table["top_k"]:
             return default
-        if module.torch.cuda.get_device_name() != table["gpu_name"]:
-            return default
         row = _matching_row(table, args, kwargs)
         if row is None:
             return default
+        if module.torch.cuda.get_device_name() != table["gpu_name"]:
+            return default
         tuned = replace(default, **row["flags"])
-        key = (row["n"], row["k"], row["min_m"], row["max_m"])
+        key = (row["m"], row["n"], row["k"])
         if key not in reported:
             print(
-                f"HL_MATMUL_OGS_FLAGS_APPLIED sha256={table_digest} n={key[0]} k={key[1]} m={key[2]}-{key[3]}",
+                f"HL_MATMUL_OGS_FLAGS_APPLIED sha256={table_digest} m={key[0]} n={key[1]} k={key[2]}",
                 flush=True,
             )
             reported.add(key)

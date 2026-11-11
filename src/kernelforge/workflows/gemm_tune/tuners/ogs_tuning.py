@@ -13,12 +13,12 @@ from kernelforge.workflows.gemm_tune.model_analyzer import ModelProfile
 
 @dataclass(frozen=True)
 class OgsCase:
-    """One projection and token-per-expert interval to measure."""
+    """One exact routed projection shape to measure."""
 
     n: int
     k: int
-    min_m: int
-    max_m: int
+    m: int
+    tokens: int
     projection: str
 
 
@@ -31,8 +31,6 @@ _TILE_512 = 512
 _EIGHT = 8
 _DEFAULT_WARPS = 4
 _ROCM_MXFP4_ALIGNMENT = _TILE_256
-_MAX_TOKENS_PER_EXPERT = _TILE_512
-_DECODE_BUCKET_END = _TILE_128
 
 
 def _round_up(value: int, alignment: int) -> int:
@@ -52,26 +50,14 @@ def projection_shapes(profile: ModelProfile) -> tuple[tuple[int, int], tuple[int
     return (up_n, up_k), (down_n, down_k)
 
 
-def token_ranges(profile: ModelProfile, tokens: list[int], *, conc: int, thorough: bool) -> list[tuple[int, int]]:
-    """Cover decode and prefill with a bounded per-expert ladder."""
-    experts = max(1, int(profile.num_experts))
-    topk = max(1, int(profile.num_experts_per_tok))
-    observed = [ceil(int(count) * topk / experts) for count in [*tokens, conc] if int(count) > 0]
-    maximum = min(_MAX_TOKENS_PER_EXPERT, max([_DECODE_BUCKET_END, *observed]))
-    edges = (
-        [1, 2, _EIGHT, _TILE_32, _DECODE_BUCKET_END, _MAX_TOKENS_PER_EXPERT]
-        if thorough
-        else [1, 2, _EIGHT, _TILE_32, _DECODE_BUCKET_END]
-    )
-    edges = sorted({*(_edge for _edge in edges if _edge < maximum), maximum})
-    return [(1 if index == 0 else edges[index - 1] + 1, edge) for index, edge in enumerate(edges)]
-
-
-def cases(profile: ModelProfile, tokens: list[int], *, conc: int, thorough: bool) -> list[OgsCase]:
+def cases(profile: ModelProfile, tokens: list[int], *, conc: int) -> list[OgsCase]:
+    """Use only the token counts the caller supplied for the routed serving path."""
+    counts = sorted({int(count) for count in [*tokens, conc] if int(count) > 0})
+    top_k = int(profile.num_experts_per_tok)
     return [
-        OgsCase(n=n, k=k, min_m=lower, max_m=upper, projection=projection)
+        OgsCase(n=n, k=k, m=count * top_k, tokens=count, projection=projection)
         for projection, (n, k) in zip(("up", "down"), projection_shapes(profile), strict=True)
-        for lower, upper in token_ranges(profile, tokens, conc=conc, thorough=thorough)
+        for count in counts
     ]
 
 

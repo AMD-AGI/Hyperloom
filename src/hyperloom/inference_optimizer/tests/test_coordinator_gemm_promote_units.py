@@ -1267,7 +1267,7 @@ class TestKernelE2EMeasurementPromotion:
                 digest = hashlib.sha256(tuned.read_bytes()).hexdigest()
                 server_log = session_dir / "runs" / "integrate" / f"integrate-gemm_tune_{tuner_name}" / "server.log"
                 server_log.parent.mkdir(parents=True, exist_ok=True)
-                server_log.write_text(f"HL_MATMUL_OGS_FLAGS_APPLIED sha256={digest} n=6144 k=3072 m=1-2\n")
+                server_log.write_text(f"HL_MATMUL_OGS_FLAGS_APPLIED sha256={digest} m=4 n=6144 k=3072\n")
             attempt = integrate_rebaseline._integrate_rebaseline(
                 payload,
                 state,

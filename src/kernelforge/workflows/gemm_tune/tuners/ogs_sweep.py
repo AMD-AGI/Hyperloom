@@ -136,18 +136,8 @@ def _tensor(value: Any) -> Any:
 
 def _measure_case(runtime: _SweepRuntime, case: dict[str, Any], config: dict[str, Any]) -> dict[str, Any]:
     experts, top_k = config["experts"], config["top_k"]
-
-    def token_count(per_expert: int) -> int:
-        return max(1, (per_expert * experts + top_k - 1) // top_k)
-
-    call = _projection_call(runtime, case, token_count(case["max_m"]), experts, top_k)
-    small_call = (
-        _projection_call(runtime, case, token_count(case["min_m"]), experts, top_k)
-        if case["min_m"] < case["max_m"]
-        else None
-    )
+    call = _projection_call(runtime, case, case["tokens"], experts, top_k)
     expected = _tensor(call())
-    small_expected = _tensor(small_call()) if small_call is not None else None
     baseline_ms = _bench_ms(runtime.torch, call, warmup=config["warmup"], iters=config["iters"])
     best: dict[str, Any] | None = None
     failures: list[dict[str, str]] = []
@@ -157,10 +147,6 @@ def _measure_case(runtime: _SweepRuntime, case: dict[str, Any], config: dict[str
                 runtime.torch.testing.assert_close(
                     _tensor(call()), expected, rtol=_CORRECTNESS_TOLERANCE, atol=_CORRECTNESS_TOLERANCE
                 )
-                if small_call is not None:
-                    runtime.torch.testing.assert_close(
-                        _tensor(small_call()), small_expected, rtol=_CORRECTNESS_TOLERANCE, atol=_CORRECTNESS_TOLERANCE
-                    )
                 tuned_ms = _bench_ms(runtime.torch, call, warmup=config["warmup"], iters=config["iters"])
         except Exception as exc:  # noqa: BLE001 - one invalid config is recorded without losing the sweep
             traceback.print_exc()
@@ -198,7 +184,7 @@ def run(config_path: Path) -> dict[str, Any]:
         if speedup <= 1.0 + float(config["min_improvement_pct"]) / 100.0:
             continue
         rows.append(
-            {key: outcome[key] for key in ("n", "k", "min_m", "max_m")}
+            {key: outcome[key] for key in ("m", "n", "k", "tokens", "projection")}
             | {
                 "flags": best["flags"],
                 "default_ms": outcome["default_ms"],
