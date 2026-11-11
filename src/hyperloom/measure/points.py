@@ -62,7 +62,7 @@ from hyperloom.orchestrator.actions.executors import (
     materialize_benchmark_config,
 )
 from hyperloom.orchestrator.actions.executors.benchmark_backend import resolve_backend_name
-from hyperloom.orchestrator.actions.executors.magpie_agentx import enable_profile, native_config
+from hyperloom.orchestrator.actions.executors.magpie_agentx import enable_profile, native_config, recipe_base_launch
 
 _UTF8 = "utf-8"
 
@@ -231,16 +231,29 @@ def launch_carriers(config: Mapping[str, Any]) -> tuple[Mapping[str, Any], str |
 MEASUREMENT_SEED = 0
 
 
-def _seeded(server_args: str, reference: Mapping[str, Any]) -> str:
-    """``server_args`` with the framework's seed option set to :data:`MEASUREMENT_SEED`, unless they or the launch
-    arguments the base ``reference`` rendering carries already name one, or the framework takes none."""
+def _seeded(server_args: str, reference: Mapping[str, Any], canonical: CanonicalMeasurement) -> str:
+    """``server_args`` with the framework's seed option set to :data:`MEASUREMENT_SEED`, unless they, the launch
+    arguments the base ``reference`` rendering carries, or a native AgentX recipe's own argv already name one, or the
+    framework takes none.
+
+    A native AgentX recipe spells its launch in the argv Magpie resolves for it, not in the arguments Hyperloom
+    appends, and a seed appended after the recipe's own wins in the engine's argument parser. Its argv is readable
+    only from the verified launch beside its configuration (:func:`recipe_base_launch`); where there is none, the
+    recipe's seed cannot be seen, so nothing is added and the recipe keeps whatever it sets.
+    """
 
     benchmark = reference.get("benchmark") or {}
     flag = framework_registry.SEED_FLAGS.get(str(benchmark.get("framework") or "").lower())
     if flag is None:
         return server_args
     _, carried = launch_carriers(reference)
-    named = {token.split("=", 1)[0].replace("_", "-") for token in f"{server_args} {carried or ''}".split()}
+    launches = [server_args, carried or ""]
+    if canonical.agentx:
+        recipe_argv = recipe_base_launch(canonical.config_path).argv
+        if not recipe_argv:
+            return server_args
+        launches.append(" ".join(recipe_argv))
+    named = {token.split("=", 1)[0].replace("_", "-") for token in " ".join(launches).split()}
     if flag in named:
         return server_args
     return merge_server_args(server_args, f"{flag} {MEASUREMENT_SEED}")
@@ -311,7 +324,7 @@ def generate_points(
             canonical,
             out_dir,
             name,
-            extra_server_args=_seeded(launch.server_args, reference),
+            extra_server_args=_seeded(launch.server_args, reference, canonical),
             extra_envs={**launch.envs, **environment.envs, **pins},
             remove_args=launch.remove_args,
         )
@@ -387,7 +400,7 @@ def generate_profile_point(
         _profile_canonical(canonical),
         out_dir,
         "point-profile.yaml",
-        extra_server_args=_seeded(launch.server_args, rendered),
+        extra_server_args=_seeded(launch.server_args, rendered, canonical),
         extra_envs={**launch.envs, **environment.envs, **workload, **pins},
         remove_args=launch.remove_args,
     )

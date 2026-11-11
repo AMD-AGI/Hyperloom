@@ -9,7 +9,6 @@ from pathlib import Path
 
 import yaml
 
-from hyperloom.measure.points import MEASUREMENT_SEED
 from hyperloom.measure.tests._recipes import recipe_with
 from hyperloom_multibranch.contracts.toolbox import WorkloadKind
 from hyperloom_multibranch.toolbox.tests import test_planner
@@ -34,8 +33,7 @@ async def test_an_agentx_session_plans_points_through_the_agentx_launch_override
     assert [point["benchmark"]["envs"]["CONC"] for point in points] == [8, 64]
     for point in points:
         bench = point["benchmark"]
-        seed = ["--random-seed", str(MEASUREMENT_SEED)]  # pinned, since neither the request nor the base names one
-        assert bench["agentx"]["launch_overrides"]["append_args"] == ["--max-running-requests", "77", *seed]
+        assert bench["agentx"]["launch_overrides"]["append_args"] == ["--max-running-requests", "77"]
         assert bench["envs"]["RUN_EVAL"] == "false"
         assert not {"benchmark_script", "workload_spec"} & bench.keys()
         assert not {"NUM_PROMPTS", "NUM_WARMUPS", "EXTRA_SGLANG_ARGS"} & bench["envs"].keys()

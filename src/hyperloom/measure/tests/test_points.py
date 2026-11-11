@@ -47,6 +47,8 @@ from hyperloom.orchestrator.actions.executors._workload_envs import (
     materialize_benchmark_config,
     materialize_config_with_envs,
 )
+from hyperloom.inference_optimizer.agentx.report import native_launch_evidence
+from hyperloom.orchestrator.actions.executors._launch_evidence import persist_launch_evidence
 from hyperloom.orchestrator.actions.executors.magpie_agentx import enable_profile
 
 SERVER_ARGS = "--max-running-requests 77 --enable-dp-attention"
@@ -270,14 +272,14 @@ def test_a_seed_the_recipe_names_is_the_one_the_point_launches_with(canonical, b
     assert _seed_values(extra) == (["7"] if spelled.startswith("--random-seed") else []), extra
 
 
-def test_a_seed_the_base_launch_names_is_kept_and_a_framework_without_a_seed_option_gets_none():
+def test_a_seed_the_base_launch_names_is_kept_and_a_framework_without_a_seed_option_gets_none(canonical):
     base = {"benchmark": {"framework": "sglang", "envs": {"EXTRA_SGLANG_ARGS": "--tp 8 --random-seed=5"}}}
     vllm = {"benchmark": {"framework": "vllm", "envs": {"EXTRA_VLLM_ARGS": "--tp 8"}}}
     atom = {"benchmark": {"framework": "atom", "envs": {"EXTRA_ATOM_ARGS": "--tp 8"}}}
 
-    assert _seeded(SERVER_ARGS, base) == SERVER_ARGS
-    assert _seeded(SERVER_ARGS, vllm) == f"{SERVER_ARGS} --seed {MEASUREMENT_SEED}"
-    assert _seeded(SERVER_ARGS, atom) == SERVER_ARGS
+    assert _seeded(SERVER_ARGS, base, canonical) == SERVER_ARGS
+    assert _seeded(SERVER_ARGS, vllm, canonical) == f"{SERVER_ARGS} --seed {MEASUREMENT_SEED}"
+    assert _seeded(SERVER_ARGS, atom, canonical) == SERVER_ARGS
 
 
 def test_a_profile_point_replays_graphs_node_by_node_so_the_profiler_records_every_replay(canonical, blobs, tmp_path):
@@ -386,7 +388,7 @@ def test_an_agentx_point_is_what_the_main_flow_hands_magpie_for_the_recipe_and_c
     main_flow = materialize_benchmark_config(
         source,
         tmp_path / "main",
-        launch=LaunchLayer(SEEDED_ARGS, {"HSA_FORCE_FINE_GRAIN_PCIE": "1", "RUN_EVAL": "false"}),
+        launch=LaunchLayer(SERVER_ARGS, {"HSA_FORCE_FINE_GRAIN_PCIE": "1", "RUN_EVAL": "false"}),
         target=BenchmarkTarget(model_path=str(model)),
     )
     rendered = load(point)
@@ -395,8 +397,64 @@ def test_an_agentx_point_is_what_the_main_flow_hands_magpie_for_the_recipe_and_c
     assert (envs["CONC"], envs["RUN_EVAL"]) == (level, "false")
     assert not {"NUM_PROMPTS", "NUM_WARMUPS", "EXTRA_SGLANG_ARGS", "HSA_FORCE_FINE_GRAIN_PCIE"} & envs.keys()
     launch = rendered["benchmark"]["agentx"]["launch_overrides"]
-    assert launch["append_args"] == SEEDED_ARGS.split()
+    assert launch["append_args"] == SERVER_ARGS.split()
     assert launch["env"] == {"HSA_FORCE_FINE_GRAIN_PCIE": "1", AITER_LOG_TUNED_CONFIG_ENV: "1"}
+
+
+def _verified_recipe_launch(config: Path, argv: list[str]) -> None:
+    """Leave beside the AgentX ``config`` the receipt of a verified Magpie run whose recipe resolved ``argv``."""
+    launch = {"base_argv": argv, "effective_argv": argv, "effective_env": {}, "runtime_environment": {}}
+    evidence = native_launch_evidence(
+        {"agentx_metrics": {"server_launch": launch, "recipe": {"tp": 2, "ep": 1, "conc": 32}}}, config
+    )
+    persist_launch_evidence(evidence, slot=config.parent)
+
+
+def _effective_seed(argv: list[str]) -> str | None:
+    """The seed the engine's argument parser resolves from ``argv``: the last one given."""
+    seeds = [
+        token.split("=", 1)[1] if "=" in token else argv[i + 1]
+        for i, token in enumerate(argv)
+        if token.startswith("--random-seed=") or (token == "--random-seed" and i + 1 < len(argv))
+    ]
+    return seeds[-1] if seeds else None
+
+
+RECIPE_ARGV = ["--model-path", "/models/m", "--tp", "2", "--speculative-algorithm", "DFLASH"]
+
+
+@pytest.mark.parametrize(
+    ("recipe_seed", "effective"),
+    [
+        (["--random-seed", "42"], "42"),
+        (["--random-seed=42"], "42"),
+        ([], str(MEASUREMENT_SEED)),
+    ],
+    ids=["recipe-seed", "recipe-seed-equals", "recipe-without-seed"],
+)
+def test_an_agentx_point_keeps_the_seed_the_recipe_sets_in_its_own_argv(tmp_path, model, blobs, recipe_seed, effective):
+    source = agentx_source(tmp_path / "bench" / "benchmark.yaml", 32)
+    _verified_recipe_launch(source, [*RECIPE_ARGV, *recipe_seed])
+    canonical = default_canonical(
+        tmp_path / "canonical", primary_concurrency=32, config_path=source, model_path=str(model)
+    )
+    env = environment(blobs, tmp_path, delta=RecipeDelta(config=ConfigDelta(server_args=SERVER_ARGS)))
+
+    (point,) = generate_points(env, canonical, tmp_path / "points", concurrency=(8,))
+    (profile,) = generate_profile_point(env, canonical, tmp_path / "profile")
+
+    for rendered in (point, profile):
+        appended = load(rendered)["benchmark"]["agentx"]["launch_overrides"]["append_args"]
+        assert _effective_seed([*RECIPE_ARGV, *recipe_seed, *appended]) == effective, appended
+        assert appended[: len(SERVER_ARGS.split())] == SERVER_ARGS.split()
+
+
+def test_an_agentx_point_whose_recipe_launch_is_unseen_adds_no_seed(agentx_canonical, blobs, tmp_path):
+    env = environment(blobs, tmp_path, delta=RecipeDelta(config=ConfigDelta(server_args=SERVER_ARGS)))
+
+    (point,) = generate_points(env, agentx_canonical, tmp_path / "points", concurrency=(8,))
+
+    assert load(point)["benchmark"]["agentx"]["launch_overrides"]["append_args"] == SERVER_ARGS.split()
 
 
 #: An option of the launch Magpie resolves from the InferenceX recipe, which the recipe's own arguments lack.
@@ -470,7 +528,7 @@ def test_an_agentx_profile_point_is_the_main_flows_agentx_profile_of_the_recipe(
     main_flow = materialize_benchmark_config(
         source,
         tmp_path / "main",
-        launch=LaunchLayer(SEEDED_ARGS, {"RUN_EVAL": "false"}),
+        launch=LaunchLayer(SERVER_ARGS, {"RUN_EVAL": "false"}),
         target=BenchmarkTarget(model_path=str(model)),
     )
     _limit_agentx_capture(main_flow)  # the one difference: the window is sized to the result's cap
@@ -480,7 +538,7 @@ def test_an_agentx_profile_point_is_the_main_flows_agentx_profile_of_the_recipe(
     assert rendered["benchmark"]["profiler"]["torch_profiler"]["enabled"] is True
     assert rendered["benchmark"]["profiler"]["torch_profiler"]["num_steps"] == AGENTX_PROFILE_STEPS
     assert "PROFILE" not in rendered["benchmark"]["envs"]
-    assert rendered["benchmark"]["agentx"]["launch_overrides"]["append_args"] == SEEDED_ARGS.split()
+    assert rendered["benchmark"]["agentx"]["launch_overrides"]["append_args"] == SERVER_ARGS.split()
 
 
 def test_an_agentx_profile_captures_half_the_main_flows_steps_unless_its_point_names_a_count(tmp_path):

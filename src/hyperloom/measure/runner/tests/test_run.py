@@ -10,7 +10,6 @@ import hashlib
 import json
 import os
 import shutil
-import socket
 import subprocess
 import sys
 
@@ -164,7 +163,7 @@ def test_a_successful_test_leaves_a_signed_manifest_and_status_last(tmp_path, en
     assert manifest.request_id == REQUEST_ID and manifest.outcome.returncode == 0
     assert sorted(f.path for f in manifest.files) == ["farm_inventory.json", "rounds.json", "server.log"]
     assert json.loads((out / "files" / "rounds.json").read_text()) == [
-        {"point": 0, "phase": "measure", "dir": ".", "returncode": 0, "host": socket.gethostname()}
+        {"point": 0, "phase": "measure", "dir": ".", "returncode": 0}
     ]
     assert manifest.runner.sandbox_id == "sbx-1" and manifest.runner.node_name == "node-1"
     assert manifest.platform_env_changed == ("NCCL_IB_SL",)
