@@ -41,8 +41,10 @@ STOP_SIGNALS: tuple[signal.Signals, ...] = (signal.SIGINT, signal.SIGTERM, signa
 STOP_OVERRAN = "the stop overran the hard stop"
 TOOLBOX_CLOSE_OVERRAN = "the toolbox did not close in time"
 #: Clock seconds the toolbox gets to close; its close cancels its own work and releases its backend and sandboxes, so
-#: it is quick even while a specialist hangs.
-TOOLBOX_CLOSE_SECONDS = 10.0
+#: it is quick even while a specialist hangs. Ending a local sandbox reaps its processes, which takes up to 27 s when one
+#: of them outlives SIGKILL (``hyperloom.sandbox.reaper.ONE_REAP_SEC``); a local toolbox reaps its sandboxes all at once,
+#: so the close fits one reap and a margin.
+TOOLBOX_CLOSE_SECONDS = 30.0
 
 
 class SessionStopReason(str, Enum):

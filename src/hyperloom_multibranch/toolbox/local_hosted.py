@@ -365,8 +365,9 @@ class LocalOptions:
     ``HYPERLOOM_CARD_GUARD`` of the host environment, and without it the guard enforces. The runners get the same
     setting. ``card_holders`` says who holds some cards, which the pool asks before it hands a card out: the kernel's list
     of the machine unless a test of this module says otherwise; ``card_memory`` lists what the kernel has on some cards,
-    which a released lease waits on before its cards go back (:func:`~hyperloom.sandbox.card_occupancy.read_listed`
-    unless a test says otherwise). ``short_prompts`` is the staged prompt set of the
+    which a released lease and an ended test's sandbox wait on before their cards go back
+    (:func:`~hyperloom.sandbox.card_occupancy.read_listed` unless a test says otherwise). ``short_prompts`` is the
+    staged prompt set of the
     short-prompt consistency check (``acceptance.short_prompts`` of a builder that names it there says the same and must
     not differ); ``None`` takes the key in ``HYPERLOOM_SHORT_PROMPTS`` of the host environment (``off`` for no check),
     and without either the set for the session model's tokenizer, staged at the build when missing. It is read in this
@@ -692,6 +693,7 @@ def _provider(
         users=ProcessUsers(plan=plan),
     )
     provider.pool = GatedPool(cards, card_guard_of(options), read=options.card_holders)
+    provider.card_memory = options.card_memory
     return provider
 
 
