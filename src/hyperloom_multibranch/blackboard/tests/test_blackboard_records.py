@@ -209,7 +209,6 @@ async def test_each_lineage_event_has_one_writer(open_as: Open, role: Role, even
         LineageEvent(LineageKind.PROBATION, "s1"),
         LineageEvent(LineageKind.STOP, "s1", tests=4),
         LineageEvent(LineageKind.PROBATION, INTEGRATION_BRANCH, tests=4),
-        LineageEvent(LineageKind.REOPEN, "s1", reason="resumed"),
     ],
 )
 async def test_a_lineage_event_names_what_its_kind_needs(open_as: Open, event: LineageEvent) -> None:
@@ -272,6 +271,30 @@ async def test_a_resumed_session_reopens_its_stopped_integration_branch_and_stop
         LineageKind.REOPEN,
         LineageKind.STOP,
     ]
+
+
+async def test_a_resumed_session_reopens_a_branch_it_reattaches_which_takes_writes_until_stopped_again(
+    open_as: Open,
+) -> None:
+    scheduler = open_as(Role.SCHEDULER)
+    await scheduler.record_lineage(LineageEvent(LineageKind.ROOT, INTEGRATION_BRANCH, commit_id="c0"))
+    await scheduler.record_lineage(LineageEvent(LineageKind.OPEN, "b01", from_commit="c0"))
+    reopen = LineageEvent(LineageKind.REOPEN, "b01", reason="resumed after signal")
+    probation = LineageEvent(LineageKind.PROBATION, "b01", tests=2)
+    with pytest.raises(ConflictingWrite, match="not stopped"):
+        await scheduler.record_lineage(reopen)
+    await scheduler.record_lineage(LineageEvent(LineageKind.STOP, "b01", reason="signal"))
+    with pytest.raises(ConflictingWrite, match="already stopped"):
+        await scheduler.record_lineage(probation)
+
+    await scheduler.record_lineage(reopen)
+    await scheduler.record_lineage(probation)
+    running = {node.branch: node for node in (await scheduler.lineage()).branches}["b01"]
+    await scheduler.record_lineage(LineageEvent(LineageKind.STOP, "b01", reason="time_exhausted"))
+
+    stopped = {node.branch: node for node in (await scheduler.lineage()).branches}["b01"]
+    assert (running.stopped_at, running.stop_reason) == (None, None)
+    assert (stopped.stop_reason, stopped.stopped_at is not None) == ("time_exhausted", True)
 
 
 async def test_a_running_branch_is_held_on_probation_once_a_stall(open_as: Open) -> None:
