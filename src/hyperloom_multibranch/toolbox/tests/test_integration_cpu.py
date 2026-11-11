@@ -34,6 +34,7 @@ from hyperloom_multibranch.contracts.judgement import Verdict
 from hyperloom_multibranch.contracts.blackboard.vocab import INTEGRATION_BRANCH, Conclusion
 from hyperloom_multibranch.rulegate.decision import Action
 from hyperloom_multibranch.toolbox.planner import HostedPlanner
+from hyperloom_multibranch.toolbox.merge_smoke import MERGE_SMOKE_ENV
 from hyperloom_multibranch.toolbox.tests.integration_inputs import (
     IMAGE,
     PATCHED_FILE,
@@ -141,7 +142,8 @@ def _variant(root: Path, planners: list[FakeRunnerPlanner]) -> tuple[Variant, Re
 
 
 async def test_a_round_of_two_branches_through_every_module(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    set_workload_environment(monkeypatch, tmp_path)
+    # The framework here is a stand-in directory no interpreter imports, so the merge smoke could not run on it.
+    set_workload_environment(monkeypatch, tmp_path, **{MERGE_SMOKE_ENV: "off"})
     planners: list[FakeRunnerPlanner] = []
     variant, patch = _variant(tmp_path, planners)
     async with build_stack(tmp_path, variant, baseline_recipe()) as stack:
