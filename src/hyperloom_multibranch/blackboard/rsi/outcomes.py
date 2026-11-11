@@ -237,7 +237,6 @@ class OutcomePool:
         """Keep ``outcomes``, once a session; ``False`` when they were kept already."""
 
         path = self.root / f"{re.sub(r'[^A-Za-z0-9._-]+', '-', outcomes.session_id)}.json"
-        path.parent.mkdir(parents=True, exist_ok=True)
         return publish_once(path, encode_json({"format": OUTCOMES_FORMAT, "record": encode(outcomes)}))
 
     def sessions(self) -> tuple[SpecialistOutcomes, ...]:

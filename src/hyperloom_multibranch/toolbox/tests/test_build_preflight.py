@@ -20,6 +20,7 @@ import pytest
 from hyperloom_common.bwrap import BwrapProbe
 
 from hyperloom.common.agent_isolation import BwrapIsolation, NoIsolation
+from hyperloom.common.tests._id_map_helpers import HOST_MAP, ONE_ID_MAP, use_id_maps
 from hyperloom.measure.jit.native.config import BuildStoreConfigError
 from hyperloom.measure.runner.native import isolated
 from hyperloom.measure.runner.native.recipes import RECIPE_FACTORIES
@@ -253,6 +254,32 @@ def test_a_tracelens_that_is_not_importable_is_named() -> None:
 # --- the whole preflight --------------------------------------------------------------------------------------------
 
 
+_NO_BWRAP = "bubblewrap: not found on PATH"
+
+
+def _isolation_as(
+    monkeypatch: pytest.MonkeyPatch,
+    where: Path,
+    *,
+    euid: int = 0,
+    setpriv: bool = True,
+    maps: tuple[str, str | None] = (HOST_MAP, None),
+) -> Path:
+    """Have the preflight judge the account tier for real (``account_problem``) as a process of uid ``euid``, with or
+    without ``setpriv``, in a user namespace of these uid and gid maps (written under ``where``; the gid map is the uid
+    map unless given), on a host with no bubblewrap; returns the maps' directory."""
+    monkeypatch.setattr(preflight, "account_problem", isolated.account_problem)
+    monkeypatch.setattr(preflight, "compile_bwrap", lambda: NoIsolation((_NO_BWRAP,)))
+    monkeypatch.setattr(isolated.os, "geteuid", lambda: euid)
+    found = shutil.which
+    tool = "/usr/bin/setpriv" if setpriv else None
+    monkeypatch.setattr(isolated.shutil, "which", lambda name: tool if name == "setpriv" else found(name))
+    written = where / "id-maps"
+    written.mkdir(exist_ok=True)
+    use_id_maps(monkeypatch, written, *maps)
+    return written
+
+
 @pytest.fixture
 def ready(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> PreflightSite:
     """A host that is ready: root, setpriv, the image's checkout, everything open to 65534 (this interpreter and tree
@@ -325,6 +352,54 @@ def test_each_host_item_that_is_not_ready_is_refused_by_name(
 
     assert problem.startswith("native builds are configured (HYPERLOOM_BUILD_STORE) and this host is not ready")
     assert says in problem
+
+
+def test_a_host_the_build_judges_able_to_isolate_passes(
+    ready: PreflightSite, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    _isolation_as(monkeypatch, tmp_path)
+
+    build_preflight(ready)
+
+
+@pytest.mark.parametrize(
+    ("host", "says"),
+    [
+        ({"euid": 1000}, "it runs as uid 1000, not root, and only root can compile as user 65534"),
+        ({"setpriv": False}, "setpriv (util-linux) is not on PATH, and the compile runs as user 65534 through it"),
+        ({"maps": (ONE_ID_MAP, None)}, "uid 65534, gid 65534 are not mapped in this process's user namespace ({maps}/"),
+        (
+            {"maps": (HOST_MAP, ONE_ID_MAP)},
+            "gid 65534 is not mapped in this process's user namespace ({maps}/gid_map: ",
+        ),
+        (
+            {"maps": ("0 0 65534\n", HOST_MAP)},
+            "uid 65534 is not mapped in this process's user namespace ({maps}/uid_map: ",
+        ),
+    ],
+    ids=["not-root", "no-setpriv", "one-id", "gid-only", "range-ending-below-65534"],
+)
+def test_a_host_that_cannot_isolate_a_build_is_refused_naming_why_as_the_build_would(
+    ready: PreflightSite, monkeypatch: pytest.MonkeyPatch, tmp_path: Path, host: dict, says: str
+) -> None:
+    maps = _isolation_as(monkeypatch, tmp_path, **host)
+
+    problem = _refusal(ready)
+
+    assert f"it can compile neither as user 65534 ({says.format(maps=maps)}" in problem, problem
+    assert f"nor under bubblewrap ({_NO_BWRAP})" in problem, problem
+
+
+def test_a_user_namespace_map_that_cannot_be_read_is_refused_naming_the_file(
+    ready: PreflightSite, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    maps = _isolation_as(monkeypatch, tmp_path)
+    (maps / "gid_map").unlink()
+
+    problem = _refusal(ready)
+
+    unread = f"cannot read {maps / 'gid_map'}: FileNotFoundError"
+    assert f"it can compile neither as user 65534 ({unread}" in problem, problem
 
 
 def test_sources_without_the_image_commit_are_refused_naming_what_they_have(
