@@ -572,6 +572,51 @@ async def test_close_sequencer_runs_all_steps_in_order_happy_path(
     assert coord.shared_state.stop_reason == "sweep_done"
 
 
+async def _close_a_custom_session(coord, tmp_path, monkeypatch, state):
+    """Run the sequencer over a custom session and return its single_file_deliverable row."""
+    monkeypatch.setenv("HYPERLOOM_SESSION_PACKAGE_DEST", str(tmp_path / "packages"))
+    coord.shared_state.framework = "custom"
+    coord.shared_state.phase_history = [_close_phase_history_row()]
+    coord.shared_state.to_dict = lambda: state
+
+    await coord.phase_close.on_enter_close(Transition(from_phase="SWEEP", to_phase="CLOSE", reason="test", evidence={}))
+
+    rows = coord.shared_state.phase_history[-1]["evidence"]["close_steps"]
+    return next(row for row in rows if row["step"] == "single_file_deliverable")
+
+
+@pytest.mark.asyncio
+async def test_a_custom_session_declaring_no_scope_skips_the_export(coord, tmp_path, monkeypatch):
+    """``skipped``, not ``failed``: a session that asked for no export must not be judged on one.
+
+    ``failed`` is the close verdict's only input, so recording it here degrades every
+    custom campaign predating single-file mode.
+    """
+    state = {"framework": "custom", "framework_repo_path": str(tmp_path / "missing")}
+
+    export_step = await _close_a_custom_session(coord, tmp_path, monkeypatch, state)
+
+    assert export_step["status"] == "skipped"
+    assert coord.shared_state.close_sequence_done is True
+    assert not (Path(coord.phase_close.session_dir) / "reports/deployment.json").exists()
+
+
+@pytest.mark.asyncio
+async def test_custom_close_packages_an_explicit_export_refusal(coord, tmp_path, monkeypatch, workload):
+    """A refused export is shipped saying so, rather than leaving the package to imply one happened."""
+    _root, _hook, _session, state = workload
+    state["framework_repo_path"] = str(tmp_path / "missing")
+
+    export_step = await _close_a_custom_session(coord, tmp_path, monkeypatch, state)
+
+    assert export_step["status"] == "failed"
+    assert coord.shared_state.close_sequence_done is True
+    packages = list((tmp_path / "packages").rglob("*.zip"))
+    assert packages
+    with zipfile.ZipFile(packages[0]) as archive:
+        assert json.loads(archive.read("reports/deployment.json"))["status"] == "incomplete"
+
+
 @pytest.mark.asyncio
 async def test_close_sequencer_records_its_own_verdict_and_artifacts(
     coord,

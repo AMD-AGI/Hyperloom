@@ -229,6 +229,7 @@
       {"step": "report", "optional": false},
       {"step": "session_breakdown", "optional": false},
       {"step": "langfuse_flush", "optional": true},
+      {"step": "single_file_deliverable", "optional": true},
       {"step": "artifact_package", "optional": false},
       {"step": "ndjson_drain", "optional": true},
       {"step": "done", "optional": false}
