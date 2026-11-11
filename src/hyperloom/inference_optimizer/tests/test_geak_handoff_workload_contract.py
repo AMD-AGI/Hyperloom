@@ -275,8 +275,10 @@ async def test_native_handoff_reproduces_the_measured_launch_json_without_search
     config = handoff["baseline_env_spec"]["config"]
     assert config["server_launch_flags"] == _ACCEPTED_FLAGS
     framework_bin = str(Path(_ACCEPTED_LAUNCH.framework.python).parent)
-    assert config["extra_envs"].pop("PATH").startswith(framework_bin + os.pathsep)
-    assert config["extra_envs"] == {
+    extra_envs = dict(config["extra_envs"])
+    path = extra_envs.pop("PATH")
+    assert path.startswith(framework_bin + os.pathsep)
+    assert extra_envs == {
         "SGLANG_USE_AITER": "1",
         "ACCEPTED_SETTING": "1",
         "SGLANG_SIMULATE_ACC_LEN": "3.48",

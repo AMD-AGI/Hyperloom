@@ -51,12 +51,6 @@ if TYPE_CHECKING:
 
 log = logging.getLogger(__name__)
 
-#: What a round reaped by the detokenizer-stall watchdog reports: the server came up, then went silent.
-_DETOKENIZER_STALL_ERROR = (
-    "server reported ready but emitted no log output (hung engine / detokenizer stall); "
-    "reaped by the detokenizer-stall watchdog. See server.log."
-)
-
 
 async def _prepare_aiter_serving_so(extra_envs: dict[str, Any]) -> None:
     """Rebuild the serving ``.so`` before boot when the CSVs it loads name kernels it lacks.

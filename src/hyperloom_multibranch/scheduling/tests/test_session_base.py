@@ -104,7 +104,7 @@ def test_a_resumed_session_keeps_the_base_it_froze_and_reads_no_source(tmp_path:
 
 
 def test_a_session_whose_frozen_base_was_changed_after_it_froze_is_refused(tmp_path: Path, asked: list) -> None:
-    frozen = freeze_base(tmp_path / "replaced", base_launch())
+    freeze_base(tmp_path / "replaced", base_launch())
     write_base_launch(tmp_path / "replaced", dataclasses.replace(base_launch(), args=("--edited",)))
     frozen = freeze_base(tmp_path / "edited", base_launch())
     frozen.path.write_text(json.dumps({**base_launch().to_document(), "args": ["--edited"]}))

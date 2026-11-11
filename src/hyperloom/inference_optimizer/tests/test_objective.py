@@ -19,6 +19,7 @@ from hyperloom.orchestrator.loop import coordinator as coordinator_mod
 from hyperloom.orchestrator.loop.coordinator import Coordinator, RunOptions
 from hyperloom.orchestrator.state.shared_state import effective_closing_grace_sec
 from hyperloom.inference_optimizer.protocol.intent import Intent, IntentType
+from hyperloom.measure.tests.run_dirs import FIXED, write_run_dir
 from hyperloom.orchestrator.state.objective import (
     ObjectiveError,
     TargetBaselineObjective,
@@ -121,16 +122,13 @@ def test_target_tput_zero_rejected():
 
 
 # TargetBaselineObjective
+def _write_round(root, rel, tput):
+    return write_run_dir(root / rel / "suite_run_0", fixed={**FIXED, "output_throughput": tput})
+
+
 def test_target_baseline_loads_ref_tput(tmp_path):
     workspace = tmp_path / "ref-baseline"
-    workspace.mkdir()
-    (workspace / "benchmark_report.json").write_text(
-        json.dumps(
-            {
-                "throughput": {"output_throughput": 1234.5},
-            }
-        )
-    )
+    _write_round(workspace, "f6b7/measure_round", 1234.5)
     obj = TargetBaselineObjective(baseline_dir=str(workspace))
     s = SharedState(baseline_tput=1000.0, current_best={"tput": 1000.0})
     assert obj.kind() == "baseline"
@@ -149,28 +147,21 @@ def test_target_baseline_missing_dir_rejected(tmp_path):
 def test_target_baseline_missing_report_rejected(tmp_path):
     workspace = tmp_path / "empty"
     workspace.mkdir()
-    with pytest.raises(ObjectiveError, match="no benchmark_report"):
+    with pytest.raises(ObjectiveError, match="no round report"):
         TargetBaselineObjective(baseline_dir=str(workspace))
-
-
-def _write_report(root, rel, tput):
-    path = root / rel / "benchmark_report.json"
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(json.dumps({"throughput": {"output_throughput": tput}}))
-    return path
 
 
 def test_target_baseline_falls_back_to_a_warmup_only_reference(tmp_path):
     """A budget-dropped measure round leaves the warmup as the only report."""
     workspace = tmp_path / "warmup-only"
-    _write_report(workspace, "warmup_round/bench", 800.0)
+    _write_round(workspace, "f6b7/warmup_round", 800.0)
     assert TargetBaselineObjective(baseline_dir=str(workspace))._ref_tput == pytest.approx(800.0)
 
 
 def test_target_baseline_prefers_the_measured_round_over_the_warmup(tmp_path):
     workspace = tmp_path / "both"
-    _write_report(workspace, "warmup_round/bench", 800.0)
-    _write_report(workspace, "measured/bench", 1200.0)
+    _write_round(workspace, "f6b7/warmup_round", 800.0)
+    _write_round(workspace, "f6b7/measure_round", 1200.0)
     assert TargetBaselineObjective(baseline_dir=str(workspace))._ref_tput == pytest.approx(1200.0)
 
 
