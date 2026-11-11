@@ -888,9 +888,11 @@ class IntentRouter(CoordinatorCollaborator):
         await self.record_policy_denied(request.source, request.intent, denied, action_name=request.action_name)
         return None
 
-    async def _delegate_refused(self, source: str, intent: Intent, action_name: str) -> bool:
+    async def _delegate_refused(
+        self, source: str, intent: Intent, action_name: str, params: dict[str, Any] | None = None
+    ) -> bool:
         """Whether admission refuses the delegate, judged with the module group a specialist's target implies."""
-        params = intent.payload.get("params")
+        params = intent.payload.get("params") if params is None else params
         if action_name == "specialist":
             await self._coord.specialist_dispatch.assign_module_group(params or {})
         denied = await self._coord.dispatcher.admission_denial_for_action(action_name, params=params)
@@ -903,7 +905,9 @@ class IntentRouter(CoordinatorCollaborator):
         action_name = intent.payload["action_name"]
         if self._is_pruned_action(action_name):
             await self._note_pruned_advisory(source, action_name, "delegate_pruned_advisory")
-        if await self._delegate_refused(source, intent, action_name):
+        # An explore is admitted on the grid left once queued and unlaunchable variants are dropped, so it is priced
+        # on what it will run; that narrowing happens below.
+        if action_name != "explore" and await self._delegate_refused(source, intent, action_name):
             return
         # delegate explore runs variants directly (no Critic pre-review).
         payload = dict(intent.payload)
@@ -926,8 +930,9 @@ class IntentRouter(CoordinatorCollaborator):
         if not await self._prepare_specialist_dispatch(request, nested_idempotency_key):
             return
         idempotency_key = delegate_idempotency_key(request, self.shared_state, nested_idempotency_key)
-        if action_name == "explore" and not await admit_explore_grid(
-            self, request, idempotency_key, nested_idempotency_key
+        if action_name == "explore" and (
+            not await admit_explore_grid(self, request, idempotency_key, nested_idempotency_key)
+            or await self._delegate_refused(source, intent, action_name, params=params)
         ):
             return
         # The grid's attempts join its proposal row through this id, as an approved proposal's do. Added after the
