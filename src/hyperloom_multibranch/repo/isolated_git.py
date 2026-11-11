@@ -87,8 +87,10 @@ def blank_driver_programs(cwd: Path, env: Mapping[str, str], *prefix: str) -> li
     git reads in ``cwd`` under ``env`` defines, includes followed (``prefix`` are the options the command passes before
     its subcommand, which may name the repository); ``[]`` when it defines none.
 
-    The command these go to reads the config again when it starts, so a driver another account adds in between is not
-    blanked: the config is the group's to write, and this narrows what it can start to that moment.
+    The command these go to reads the config again when it starts, so a driver added in between is not blanked: in an
+    agent's checkout or workspace the agent can add one, and this narrows what it can start to that moment. In the
+    session's repositories no one else writes the config: in a shared one only the account that made it, which
+    :func:`~hyperloom_common.git_safety.check_shared_repository` checks before git runs.
 
     Raises:
         OSError: The config could not be read, or names a driver ``-c`` cannot address (its name holds ``=``).
