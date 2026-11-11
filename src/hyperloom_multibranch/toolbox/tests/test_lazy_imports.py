@@ -13,10 +13,18 @@ from __future__ import annotations
 
 import ast
 import importlib
+import importlib.util
+import sys
 from pathlib import Path
+
+import pytest
 
 PACKAGE = Path(__file__).resolve().parents[2]
 OWN_PACKAGES = ("hyperloom.", "hyperloom_multibranch.")
+#: The specialist sessions the scheduler's wiring imports when it runs, which the specialist package does not have yet.
+#: The change that adds them to the package removes them from here: once one of them is importable,
+#: ``test_not_yet_in_package_names_only_modules_that_are_absent`` fails until it is removed.
+NOT_YET_IN_PACKAGE: frozenset[str] = frozenset()
 
 
 def _type_checking(test: ast.expr) -> bool:
@@ -42,6 +50,8 @@ def _deferred_imports(path: Path) -> list[tuple[int, str, str]]:
 def _unresolved(path: Path) -> list[str]:
     missing = []
     for line, module, name in _deferred_imports(path):
+        if module in NOT_YET_IN_PACKAGE:
+            continue
         try:
             target = importlib.import_module(module)
         except ImportError as exc:
@@ -50,6 +60,22 @@ def _unresolved(path: Path) -> list[str]:
         if not hasattr(target, name) and not _is_submodule(module, name):
             missing.append(f"{path.name}:{line} imports {name} from {module}, which has no such name")
     return missing
+
+
+def _in_package_now() -> list[str]:
+    """One message for each module of ``NOT_YET_IN_PACKAGE`` that the package has by now."""
+    return [
+        f"remove {module} from NOT_YET_IN_PACKAGE: it is in the package now"
+        for module in sorted(NOT_YET_IN_PACKAGE)
+        if _exists(module)
+    ]
+
+
+def _exists(module: str) -> bool:
+    try:
+        return importlib.util.find_spec(module) is not None
+    except ModuleNotFoundError:
+        return False
 
 
 def _is_submodule(module: str, name: str) -> bool:
@@ -76,3 +102,21 @@ def test_the_scan_names_an_import_whose_name_is_gone(tmp_path: Path) -> None:
         "stale.py:2 imports no_such_name from hyperloom.orchestrator.trace_analysis.tracelens_analysis, "
         "which has no such name"
     ]
+
+
+def test_not_yet_in_package_names_only_modules_that_are_absent() -> None:
+    assert _in_package_now() == []
+
+
+def test_a_module_in_the_package_must_leave_not_yet_in_package(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(sys.modules[__name__], "NOT_YET_IN_PACKAGE", frozenset({"json"}))
+    assert _in_package_now() == ["remove json from NOT_YET_IN_PACKAGE: it is in the package now"]
+
+
+def test_an_absent_module_in_not_yet_in_package_is_skipped(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    absent = "hyperloom_multibranch.specialist.no_such_session"
+    monkeypatch.setattr(sys.modules[__name__], "NOT_YET_IN_PACKAGE", frozenset({absent}))
+    deferred = tmp_path / "deferred.py"
+    deferred.write_text(f"def run():\n    from {absent} import Session\n", encoding="utf-8")
+    assert _in_package_now() == []
+    assert _unresolved(deferred) == []

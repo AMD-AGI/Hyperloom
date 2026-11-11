@@ -15,7 +15,7 @@ import os
 import re
 import subprocess
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from enum import Enum, auto
 from pathlib import Path
 from typing import Any, NamedTuple, NoReturn
@@ -24,6 +24,7 @@ import yaml
 from inference_suite import stop
 from inference_suite.server_log import death_excerpt
 
+from hyperloom.common.deadline import Deadline
 from hyperloom_common.env import env_flag, is_truthy
 from hyperloom.common.perf_metric import GRADED_INTVTY_P50_CHECKPOINT, constraint_fields
 from hyperloom.common.env_safety import (
@@ -36,6 +37,7 @@ from ...state import failure_evidence
 from hyperloom.inference_optimizer.trace.task_progress import heartbeat_while_output_flows, report_progress
 from ..stop_attribution import (
     ORCHESTRATOR_CANCELLED_CLASS,
+    PHASE_TIME_EXHAUSTED_CLASS,
     SESSION_TIME_EXHAUSTED_CLASS,
     STOPPED_BY_THE_RUN,
     StoppedByTheRun,
@@ -79,10 +81,12 @@ from ._grid_base import (
     VARIANT_CONFIG_FILE,
     GridRound,
     GridVariant,
+    RoundError,
     failed_step_class,
     run_grid_suite_round,
     VariantResult,
     apply_variant_env,
+    argv_refusal,
     importable_overlay_dir,
     pin_xdit_tool_path,
     runnable_moe_backend_args,
@@ -368,13 +372,25 @@ class GridLaunch:
 
 @dataclass(frozen=True)
 class GridStop:
-    """When a grid must stop: session deadline and owner, a variant's expected cost, failure policy, AgentX checkpoint."""
+    """When a grid must stop: session deadline and owner, a variant's expected cost, failure policy, AgentX checkpoint.
+
+    ``phase_deadline`` bounds only a discarded warmup; a measured round completes, as a phase change awaits booking."""
 
     session_deadline_sec: float | None = None
     variant_expected_sec: float | None = None
     deadline_stop: StoppedByTheRun = STOPPED_BY_THE_RUN[SESSION_TIME_EXHAUSTED_CLASS]
     keep_going_on_failure: bool = True
     checkpoint: AgentxCheckpoint | None = None
+    phase_deadline: Deadline | None = None
+
+    def for_warmup(self) -> GridStop:
+        """This stop with the phase deadline and its owner in place of the session's when the phase ends first."""
+        phase = self.phase_deadline
+        if phase is None or (self.session_deadline_sec is not None and self.session_deadline_sec <= phase.at):
+            return self
+        return replace(
+            self, session_deadline_sec=phase.at, deadline_stop=STOPPED_BY_THE_RUN[PHASE_TIME_EXHAUSTED_CLASS]
+        )
 
 
 def lease_cards(config_path: Path, session: Path) -> int:
@@ -456,13 +472,6 @@ class _RoundProcess(NamedTuple):
     stderr: str
 
 
-class _RoundError(NamedTuple):
-    """Why a grid round measured nothing, and under which class it is recorded."""
-
-    summary: str
-    error_class: str
-
-
 def _invalid_measurement_error(
     proc: _RoundProcess,
     *,
@@ -470,17 +479,17 @@ def _invalid_measurement_error(
     death_excerpt: str,
     workspace: Any,
     slot: Any,
-) -> _RoundError:
+) -> RoundError:
     if proc.returncode != 0:
         error = death_excerpt or redact_secret_values((proc.stderr or proc.stdout)[-2000:])
         if not error.strip():
             error = redact_secret_values(_on_disk_stderr_tail(workspace, slot))
         if not error.strip():
             error = redact_secret_values(_report_errors_summary(report))
-        return _RoundError(error, failure_evidence.ROUND_NONZERO_INVALID_MEASUREMENT)
+        return RoundError(error, failure_evidence.ROUND_NONZERO_INVALID_MEASUREMENT)
     if not report:
-        return _RoundError(death_excerpt or "benchmark_report missing", failure_evidence.BENCHMARK_REPORT_MISSING)
-    return _RoundError(
+        return RoundError(death_excerpt or "benchmark_report missing", failure_evidence.BENCHMARK_REPORT_MISSING)
+    return RoundError(
         death_excerpt or "benchmark_report missing valid throughput/completed requests",
         "benchmark_report_invalid_metric",
     )
@@ -680,11 +689,7 @@ def _abort_on_round_stop(
 
 def _abandon_rest_of_grid(run: _GridRun, at: _VariantSlot) -> NoReturn:
     stop = run.stop.deadline_stop
-    raise _VariantAborted(
-        _not_run_skip_result(at.variant, stop),
-        halt=_Halt.STOP,
-        abandoned=stop,
-    )
+    raise _VariantAborted(_not_run_skip_result(at.variant, stop), halt=_Halt.STOP, abandoned=stop)
 
 
 def _warn_budget_cannot_admit(run: _GridRun, idx: int, *, rounds_left: int, spent_on: str) -> bool:
@@ -955,20 +960,22 @@ async def _warmup_throughput(
     teardown_variant_server(at.path)
     warmup_server_log = warmup_slot / "server.log"
     report_path = round_report_path(workspace)
-    warmup_error = (
+    found = argv_refusal(_measurement_server_log_path(warmup_server_log, workspace)) or RoundError(
         death_excerpt(str(warmup_server_log)) or redact_secret_values((pass_.proc.stderr or pass_.proc.stdout)[-2000:])
         if returncode != 0
-        else "warmup benchmark_report missing valid throughput/completed requests"
+        else "warmup benchmark_report missing valid throughput/completed requests",
+        "warmup_round_failed",
     )
     log.warning(
-        "grid_runner: variant %s aborted: warmup_round_failed (rc=%s): %s",
+        "grid_runner: variant %s aborted: %s (rc=%s): %s",
         _variant_tag(run, at),
+        found.error_class,
         returncode,
-        warmup_error[:200],
+        found.summary[:200],
     )
     _abort_variant(
         at,
-        _VariantFailure("warmup_round_failed", warmup_error),
+        _VariantFailure(found.error_class, found.summary),
         workspace=str(workspace) if run_ws is not None else None,
         report_path=str(report_path) if report_path.exists() else None,
         raw_result_path=measurement.get("raw_result_path"),
@@ -1014,15 +1021,8 @@ async def _restart_multi_node_server(run: _GridRun, at: _VariantSlot, rounds: _V
             unset_env=unset_envs,
         )
     except ServerRestartFailed as exc:
-        log.warning(
-            "grid_runner: variant %s aborted: mn_server_restart_failed: %s",
-            _variant_tag(run, at),
-            exc,
-        )
-        _abort_variant(
-            at,
-            _VariantFailure("mn_server_restart_failed", str(exc), f"mn_server_restart_failed: {exc}"),
-        )
+        log.warning("grid_runner: variant %s aborted: mn_server_restart_failed: %s", _variant_tag(run, at), exc)
+        _abort_variant(at, _VariantFailure("mn_server_restart_failed", str(exc), f"mn_server_restart_failed: {exc}"))
 
 
 async def _run_multi_node_warmup(run: _GridRun, at: _VariantSlot, rounds: _VariantRounds) -> None:
@@ -1049,11 +1049,7 @@ async def _run_multi_node_warmup(run: _GridRun, at: _VariantSlot, rounds: _Varia
             warmup=True,
         ),
     )
-    log.info(
-        "grid_runner: MN warmup pass done (discarded) %s rc=%s",
-        _variant_tag(run, at),
-        proc.returncode,
-    )
+    log.info("grid_runner: MN warmup pass done (discarded) %s rc=%s", _variant_tag(run, at), proc.returncode)
     stopped = stopped_by_the_run(proc.returncode)
     if stopped is not None:
         survivors = teardown_variant_server(at.path)
@@ -1142,7 +1138,7 @@ def _abort_without_workspace(
     proc = round_.proc
     returncode = proc.returncode
     server_log = at.path / "server.log"
-    found = _RoundError(
+    found = RoundError(
         death_excerpt(str(server_log))
         or (
             redact_secret_values((proc.stderr or proc.stdout)[-2000:])
@@ -1181,7 +1177,7 @@ def _abort_on_invalid_measurement(run: _GridRun, at: _VariantSlot, outcome: _Var
     workspace = outcome.measured.workspace
     report_path = round_report_path(workspace)
     server_log = at.path / "server.log"
-    found = _invalid_measurement_error(
+    found = argv_refusal(_measurement_server_log_path(server_log, workspace)) or _invalid_measurement_error(
         outcome.measured.round.proc,
         report=outcome.report,
         death_excerpt=death_excerpt(str(server_log)),
@@ -1343,7 +1339,8 @@ async def _measure_variant(run: _GridRun, at: _VariantSlot) -> VariantResult:
     # below publishes the cap this variant's rounds were held to, and every row built above publishes
     # none, because no round of this variant was ever granted time.
     at = at._replace(benchmark_timeout_sec=rounds.benchmark_timeout_sec)
-    warmup_tput = await _run_warmup_round(run, at, rounds) if rounds.auto_warmup else None
+    warm_run = run._replace(stop=run.stop.for_warmup())
+    warmup_tput = await _run_warmup_round(warm_run, at, rounds) if rounds.auto_warmup else None
     _log_variant_banner(run, at)
     await _restart_multi_node_server(run, at, rounds)
     # The restart above is a launch of its own and is under no cap, so the budget admitted at the top of the
@@ -1353,7 +1350,7 @@ async def _measure_variant(run: _GridRun, at: _VariantSlot) -> VariantResult:
         if rounds.auto_warmup:
             teardown_variant_server(at.path)
         _abandon_rest_of_grid(run, at)
-    await _run_multi_node_warmup(run, at, rounds)
+    await _run_multi_node_warmup(warm_run, at, rounds)
     round_ = await _run_measured_round(run, at, rounds)
     _refuse_reaped_round(run, at, round_)
     workspace, artifacts = _harvest_round_workspace(run, at, round_)

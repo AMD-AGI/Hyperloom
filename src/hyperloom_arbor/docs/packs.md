@@ -103,7 +103,7 @@ agent only (not the server or bench agent); a skill named in a pack must exist.
 | `serving-playbook` | the rules for serving changes, and the knob catalog the harness reads | balanced |
 | `plan` | write a round plan | a document campaign that writes one |
 | `knowledge-collector` | share and read campaign learnings | parallel-dossier |
-| `campaign-archive`, `dashboard`, `realtime-collector`, `merge-optimization-trees` | tools for the people running campaigns | none |
+| `dashboard`, `realtime-collector`, `merge-optimization-trees` | tools for the people running campaigns | none |
 
 Vendored: the profiler's tracer (`profiler/VENDOR.md` names its source and commit);
 `kernels/reference` and `hardware/reference` from KernelForge (MIT licence, `kernels/reference/LICENSE-KernelForge`).
@@ -205,7 +205,7 @@ It warns on a `SKILL.md` over 500 lines, a description Claude Code would cut, an
 | `serving-knowledge` | the serving template on the lifecycle (`serving-m10`) with knowledge search: `kernels` and `hardware`, their reference trees behind `knowledge:search`, which also searches KernelForge, KernelWiki and Arbor's notes (`arbor/knowledge/`); the sources synced at the campaign's start, the dossier's knowledge citations checked | `configs/serving-knowledge-template.json` (example) |
 | `balanced` | one large MoE model on vLLM, MI350X, TP8, 8k/1k at C32; every harness rule and five skills | its campaign's own |
 | `parallel-dossier` | parallel mode's map step | `configs/parallel/` (examples) |
-| `agentx` | an InferenceX trace replay on SGLang | `configs/agentx-glm52-mi355x.json` (the dry run's) |
+| `agentx` | an InferenceX trace replay on SGLang | its campaign's own |
 | `evolve-asm` | assembly kernel evolution (`kernel` workload), its own orchestrator | none |
 
 Other packs in the tree belong to specific campaigns and are not described here.

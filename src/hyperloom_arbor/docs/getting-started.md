@@ -27,7 +27,7 @@ From a laptop dry run to a first campaign on a GPU node.
 
 ```bash
 git clone <this repository's URL> Arbor && cd Arbor
-python3 -m arbor run --config configs/agentx-glm52-mi355x.json --dry-run
+python3 -m arbor run --config configs/serving-template.json --dry-run
 ```
 
 The dry run drives the real loop (the program, the gate, escalation, the records) on synthetic

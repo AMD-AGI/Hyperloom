@@ -273,7 +273,7 @@ class CampaignState:
         """Write session.json atomically: a temp file beside it, then a rename.
 
         Other processes read this file while a campaign runs (a parallel run's
-        coordinator, rebase_bar, the dashboards). A plain write_text lets them
+        coordinator, a launcher's rebaseline step, the dashboards). A plain write_text lets them
         see a half-written file and fail on JSONDecodeError.
         """
         p = Path(path)

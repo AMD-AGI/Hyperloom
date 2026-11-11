@@ -20,7 +20,7 @@ to the last one kept and notes the change for a revisit (arbor/execute/kept.py).
 ``GateResult.decision`` keeps emitting the legacy
 ``KEEP``/``REVERT``/``PROBE``/``INVALID`` vocabulary, derived from the
 (intent, verdict) pair. That is not a transitional shim: everything downstream
-reads it, including ``check_review_consistency.py``, which counts
+reads it, including a review-consistency check, which counts
 ``l["decision"] == "KEEP"`` straight out of ``session.json``.
 
 A pack that never declares an intent gets ``WIN`` for everything — the
@@ -125,7 +125,7 @@ class GateResult:
     # ── Legacy views ────────────────────────────────────────────────────────
     # Derived, never stored, so they cannot drift from the pair above. Kept
     # because everything downstream still reads them — including
-    # check_review_consistency.py, which counts l["decision"] == "KEEP"
+    # a review-consistency check, which counts l["decision"] == "KEEP"
     # straight out of session.json.
 
     @property

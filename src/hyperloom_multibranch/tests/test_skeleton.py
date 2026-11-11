@@ -269,6 +269,8 @@ ISOLATION = LaunchIsolation(
     False,
     ("running them as an account: HYPERLOOM_SPECIALIST_USER is not set", "bubblewrap: not found"),
 )
+#: How the peers of a ``final-only`` recovery would launch agents, which is not how the session's ran.
+RECOVERY_ISOLATION = LaunchIsolation("bwrap", "none", "bwrap", False, ("an agent sandbox runs unconfined",))
 #: The review gate pauses a session with Arbor agents for a person; these sessions open their branches without one,
 #: as ``run --no-review-gate`` does, and the review's own tests turn it on.
 SETTINGS = RunSettings(
@@ -660,10 +662,14 @@ def _stage(tmp_path: Path) -> Stage:
 
 def _recovery(stage: Stage, settings: RunSettings) -> Stage:
     """A second stage over the directory ``stage`` left, as ``final-only`` builds one: the same session directory and
-    the settings read back from its manifest, every peer fresh and no specialist script."""
+    the settings read back from its manifest, every peer fresh and no specialist script; its peers would launch
+    agents as :data:`RECOVERY_ISOLATION`, not as the session's ran."""
 
     time = VirtualClock(stage.time.now())
-    return Stage(stage.layout, time, HeldRegistry(stage.layout.pids, time), ScriptedCompletion(), [], settings=settings)
+    registry = HeldRegistry(stage.layout.pids, time)
+    return Stage(
+        stage.layout, time, registry, ScriptedCompletion(), [], settings=settings, isolation=RECOVERY_ISOLATION
+    )
 
 
 #: How long a resumed session was down, between its last decision and the resume.

@@ -714,7 +714,7 @@ class FakeRayHead:
         monkeypatch.setenv("FAKE_RAY_HEAD", "answers")
         monkeypatch.setenv("INFERENCE_OPTIMIZER_RAY_EXEC", "1")
         monkeypatch.setattr(_ray_runtime, "_HEAD_VERDICT", _ray_runtime._HeadVerdict())
-        monkeypatch.setattr(_ray_runtime, "ray_status_ok", lambda: True)
+        monkeypatch.setattr(_ray_runtime, "ray_probe", lambda timeout=None: _ray_runtime.RayProbe.UP)
 
     def answers(self, mode: str) -> None:
         """Answer every later driver connect as ``mode``.

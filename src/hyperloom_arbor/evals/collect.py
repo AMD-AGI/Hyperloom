@@ -70,8 +70,8 @@ COMPONENT_SUBAGENT = "specialist"
 #: iteration a step belongs to is recoverable from the command line even when
 #: the agent forgets its mark.
 #:
-#: The lookbehind is not paranoia: without it this matched ``aiter-7x-speedup``
-#: in a URL and invented an iteration that the run never had. AITER is
+#: The lookbehind is not paranoia: without it this would match a name like
+#: ``aiter-<N>x-speedup`` in a URL and invent an iteration the run never had. AITER is
 #: the central ROCm library in this domain, so ``aiter`` appears in nearly every
 #: session — an unbounded ``iter`` match misattributes constantly.
 #:
@@ -541,8 +541,8 @@ def build_trajectory(events: list[dict[str, Any]], parsed: dict[str, Any],
 
     # Tool calls that fired hooks but have no transcript entry are the
     # subagents'. Claude Code does not write dispatched-agent turns into the
-    # parent transcript — measured on a real run, 133 of 177 tool calls existed
-    # only in the hook stream, among them every WebSearch and WebFetch the
+    # parent transcript — most tool calls can exist only in the
+    # hook stream, among them every WebSearch and WebFetch the
     # research-protocol check is supposed to score. Reconstructing them from
     # hooks alone is the only way the specialist's work reaches the trajectory.
     transcript_tuids = {s.get("tool_use_id") for s in steps if s.get("tool_use_id")}

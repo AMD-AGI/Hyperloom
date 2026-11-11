@@ -1063,6 +1063,72 @@ async def test_runner_timeout_does_not_replay_the_settled_result(coordinator, tm
     _assert_settled_candidate_survived(c, tmp_path, revalidations)
 
 
+def _arm_unsettled_geak_dispatch(coordinator) -> None:
+    """Reach the runner with no adjudicated candidate for a timeout to retire."""
+    st = coordinator.shared_state
+    _arm_kernel_to_sweep(st)
+    st.benchmark_mode = "agentx"
+    measured_in_suite_round(st, coordinator.session_dir / "measured")
+    st.geak_result = {}
+    st.geak_pending = {}
+    coordinator.phase_kernel._record_geak_kernel_journey = lambda _result: None
+
+
+def _timeout_runner():
+    raise subprocess.TimeoutExpired(["geak_runner"], 1)
+
+
+@pytest.mark.asyncio
+async def test_outer_timeout_retains_the_classification_geak_flushed(coordinator, tmp_path, monkeypatch) -> None:
+    """A kill after GEAK wrote result.json keeps that result instead of a bare timeout."""
+    c = coordinator
+    _arm_unsettled_geak_dispatch(c)
+    flushed = {
+        "status": "no_gain",
+        "error_class": "no_gain",
+        "validation_status": "skipped_final_is_baseline",
+        "accepted_kernels": [],
+        "phase_reached": "report",
+        "error": "final bundle identical to baseline",
+    }
+    geak_dir = c.session_dir / "geak"
+    geak_dir.mkdir(exist_ok=True)
+    (geak_dir / "result.json").write_text(json.dumps(flushed), encoding="utf-8")
+    revalidations = _record_revalidations(c)
+    calls = _stub_geak_runner_call(monkeypatch, _timeout_runner)
+
+    await c.phase_kernel._run_geak_kernel_phase(from_phase="KERNEL")
+
+    assert calls == ["geak_runner"]
+    assert revalidations == []
+    recorded = c.shared_state.geak_result
+    assert recorded["status"] == "no_gain"
+    assert recorded["error_class"] == "no_gain"
+    assert recorded["validation_status"] == "skipped_final_is_baseline"
+    assert recorded["accepted_kernels"] == []
+    assert recorded["phase_reached"] == "report"
+    assert recorded["error"] == "final bundle identical to baseline"
+
+
+@pytest.mark.asyncio
+async def test_outer_timeout_without_result_json_records_an_unknown_phase(coordinator, tmp_path, monkeypatch) -> None:
+    """A kill before result.json exists is an external timeout, not an empty patch or no gain."""
+    c = coordinator
+    _arm_unsettled_geak_dispatch(c)
+    revalidations = _record_revalidations(c)
+    calls = _stub_geak_runner_call(monkeypatch, _timeout_runner)
+
+    await c.phase_kernel._run_geak_kernel_phase(from_phase="KERNEL")
+
+    assert calls == ["geak_runner"]
+    assert revalidations == []
+    recorded = c.shared_state.geak_result
+    assert recorded["status"] == "timeout"
+    assert recorded["error_class"] == "external_timeout"
+    assert recorded["phase_reached"] == "unknown"
+    assert "result.json" in recorded["error"]
+
+
 _SETTLED_GEAK_RESULT = {
     "status": "ok",
     "final_throughput_tok_s": 110.0,

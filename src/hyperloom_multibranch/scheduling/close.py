@@ -202,7 +202,7 @@ def _stop_lines(stop: StopReport) -> list[str]:
 
 
 class Closer:
-    """Runs CLOSE once; its report says how the session's agents were isolated, as ``agent_isolation`` has it."""
+    """Runs CLOSE once."""
 
     def __init__(
         self,

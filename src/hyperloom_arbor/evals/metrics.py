@@ -560,8 +560,8 @@ def compute(session_dir: Path, price_in: float | None = None,
 
     # Two different "models" are in play and conflating them is easy: the one
     # being optimized (the served model) and the one doing the optimizing (the agent's).
-    # Derived from the transcript rather than $ANTHROPIC_MODEL, which is unset
-    # on this deployment — the default is picked per-model-tier instead.
+    # Derived from the transcript rather than $ANTHROPIC_MODEL, which can be unset
+    # when the default is picked per-model-tier instead.
     driving = Counter(s["model"] for s in steps if s.get("model"))
 
     return {

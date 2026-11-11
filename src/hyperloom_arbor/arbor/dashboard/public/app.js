@@ -405,7 +405,7 @@ function render(payload) {
   // ---- node ----------------------------------------------------------------
   // The realtime collector never samples GPU nodes (a probe during a measured
   // replay perturbs it), so this panel only shows when a snapshot carries node
-  // data, as an earlier collector's did.
+  // data.
   const node = snap.node || {};
   const gpus = node.gpus || [];
   const containers = node.containers || [];

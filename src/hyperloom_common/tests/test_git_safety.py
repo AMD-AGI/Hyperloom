@@ -28,7 +28,7 @@ from pathlib import Path
 import pytest
 
 from hyperloom_common import git_safety
-from hyperloom_common.git_safety import NO_PROGRAMS, app_git, app_git_diff, trusted_admin_dir
+from hyperloom_common.git_safety import NO_PROGRAMS, app_git, app_git_diff
 
 
 def _plain_env() -> dict[str, str]:
@@ -599,12 +599,15 @@ def test_a_worktree_of_another_repository_than_the_caller_names_runs_nothing(tmp
     other.change()
 
     with pytest.raises(OSError, match="is not one of the repository"):
-        app_git(other.worktree, "add", "-A", admin=trusted_admin_dir(other.worktree, mine.base / ".git"))
+        app_git(other.worktree, "add", "-A", admin=git_safety.trusted_admin_dir(other.worktree, mine.base / ".git"))
 
     assert not other.canary.exists()
     assert (
         app_git(
-            mine.worktree, "status", "--porcelain", admin=trusted_admin_dir(mine.worktree, mine.base / ".git")
+            mine.worktree,
+            "status",
+            "--porcelain",
+            admin=git_safety.trusted_admin_dir(mine.worktree, mine.base / ".git"),
         ).returncode
         == 0
     )
@@ -616,35 +619,113 @@ def _chown_tree(root: Path, uid: int, gid: int) -> None:
         os.lchown(path, uid, gid)
 
 
-@pytest.mark.skipif(os.geteuid() != 0, reason="an admin directory of another owner needs root to chown")
-def test_an_admin_directory_another_account_made_is_trusted_only_in_a_shared_repository_of_its_group(tmp_path):
-    """Another account's admin directory is the app's only when ``common`` is a shared (setgid) git directory and the
-    entry is in that directory's group: the run's legs, accounts of one group, make the repository in turn."""
+_ROOT_ONLY = pytest.mark.skipif(os.geteuid() != 0, reason="an admin directory of another owner needs root to chown")
+_ANOTHER, _GROUP, _STRANGER = 65534, 65533, 65532
+
+
+def _repository_of_another_account(tmp_path: Path, common_mode: int) -> tuple[_Tree, Path]:
+    """A tree whose git directory another account of ``_GROUP`` made, setgid throughout, the git directory itself
+    ``common_mode``."""
     tree = _tree(tmp_path / "t")
     common = tree.base / ".git"
-    admin = common / "worktrees" / "worktree"
-    another, group, stranger = 65534, 65533, 65532
-    _chown_tree(common, another, group)
-
-    with pytest.raises(OSError, match="not a directory owned by the app"):
-        app_git(
-            tree.worktree, "status", "--porcelain", admin=trusted_admin_dir(tree.worktree, common)
-        )  # not setgid: not shared
+    _chown_tree(common, _ANOTHER, _GROUP)
     for path in (common, *common.rglob("*")):
         if path.is_dir() and not path.is_symlink():
             path.chmod(path.stat().st_mode | stat.S_ISGID)
+    common.chmod(common_mode)
+    return tree, common
+
+
+@_ROOT_ONLY
+def test_an_admin_directory_another_account_made_is_trusted_only_in_a_shared_repository_of_its_group(tmp_path):
+    """Another account's admin directory is the app's only when ``common`` is a git directory set up to be shared
+    (``2775``: setgid, group-writable, closed to others) and the entry is in that directory's group: the run's legs,
+    accounts of one group, make the repository in turn."""
+    tree, common = _repository_of_another_account(tmp_path, 0o755)
+    admin = common / "worktrees" / "worktree"
+
+    with pytest.raises(OSError, match="not a directory owned by the app"):
+        app_git(
+            tree.worktree, "status", "--porcelain", admin=git_safety.trusted_admin_dir(tree.worktree, common)
+        )  # not setgid: not shared
+    common.chmod(0o2775)
+    assert stat.S_IMODE(common.stat().st_mode) == 0o2775
     assert (
-        app_git(tree.worktree, "status", "--porcelain", admin=trusted_admin_dir(tree.worktree, common)).returncode == 0
+        app_git(
+            tree.worktree, "status", "--porcelain", admin=git_safety.trusted_admin_dir(tree.worktree, common)
+        ).returncode
+        == 0
     )
     with pytest.raises(OSError, match="not a directory owned by the app"):
         app_git(tree.worktree, "status", "--porcelain")  # no common: the uid alone
-    os.lchown(admin, another, stranger)
+    os.lchown(admin, _ANOTHER, _STRANGER)
     with pytest.raises(OSError, match="not a directory owned by the app"):
-        app_git(tree.worktree, "status", "--porcelain", admin=trusted_admin_dir(tree.worktree, common))
-    os.lchown(admin, another, group)
-    os.lchown(admin / "gitdir", another, stranger)
+        app_git(tree.worktree, "status", "--porcelain", admin=git_safety.trusted_admin_dir(tree.worktree, common))
+    os.lchown(admin, _ANOTHER, _GROUP)
+    os.lchown(admin / "gitdir", _ANOTHER, _STRANGER)
     with pytest.raises(OSError, match="not an admin dir of a linked worktree"):
-        app_git(tree.worktree, "status", "--porcelain", admin=trusted_admin_dir(tree.worktree, common))
+        app_git(tree.worktree, "status", "--porcelain", admin=git_safety.trusted_admin_dir(tree.worktree, common))
+
+
+@_ROOT_ONLY
+@pytest.mark.parametrize("common_mode", [0o2755, 0o2777], ids=oct)
+def test_a_setgid_git_directory_not_set_up_to_be_shared_trusts_no_entry_of_its_group(tmp_path, common_mode):
+    """A setgid git directory the group cannot write (``2755``), or one others can write too (``2777``), is not
+    shared storage, by the same rule that leaves git's umask alone there: an entry of its group is refused, since in
+    a setgid directory others can write an account outside the group makes entries of the group."""
+    tree, common = _repository_of_another_account(tmp_path, common_mode)
+    assert stat.S_IMODE(common.stat().st_mode) == common_mode
+
+    with pytest.raises(OSError, match="not a directory owned by the app"):
+        git_safety.trusted_admin_dir(tree.worktree, common)
+
+
+@_ROOT_ONLY
+def test_a_link_at_the_git_directory_s_own_name_is_not_a_shared_repository(tmp_path):
+    """``common`` named through a link is refused, not judged by what the link points at."""
+    tree, common = _repository_of_another_account(tmp_path, 0o2775)
+    link = tmp_path / "link"
+    link.symlink_to(common)
+
+    with pytest.raises(OSError) as raised:
+        git_safety.trusted_admin_dir(tree.worktree, link)
+    assert raised.value.errno == errno.ENOTDIR  # O_NOFOLLOW with O_DIRECTORY on a link
+
+
+def _blob_directory(data: bytes) -> str:
+    """The object directory git stores a blob of ``data`` in."""
+    return hashlib.sha1(b"blob %d\0" % len(data) + data, usedforsecurity=False).hexdigest()[:2]
+
+
+@pytest.mark.parametrize(("common_mode", "shared"), [(0o2775, True), (0o2755, False), (0o755, False)], ids=oct)
+def test_git_writes_what_the_group_can_write_only_in_a_repository_on_shared_storage(tmp_path, common_mode, shared):
+    """In a repository whose git directory is set up to be shared (setgid, group-writable, closed to others) the next
+    leg, another account of the group, writes the index and the objects after this one: git runs under the shared
+    child umask there, and under this process's anywhere else."""
+    with open("/proc/self/status", encoding="ascii") as status:
+        umask = next(int(line.split()[1], 8) for line in status if line.startswith("Umask:"))
+    assert umask & 0o020, "the test needs a umask that keeps group write off what a plain create makes"
+    tree = _tree(tmp_path / "t")
+    common = tree.base / ".git"
+    common.chmod(common_mode)
+    if common_mode & stat.S_ISGID and not common.stat().st_mode & stat.S_ISGID:
+        pytest.skip("this filesystem does not keep the setgid bit for the test user")
+    before = {path.name for path in (common / "objects").iterdir() if path.is_dir()}
+    # A blob whose object directory git has not made yet (the base commit's objects vary with its timestamp).
+    content = next(
+        data for data in (f"new = {n}\n".encode() for n in range(1000)) if _blob_directory(data) not in before
+    )
+    (tree.worktree / "new.py").write_bytes(content)
+
+    done = app_git(tree.worktree, "add", "-A", admin=git_safety.trusted_admin_dir(tree.worktree, common))
+
+    assert done.returncode == 0, done.stderr
+    made = [path for path in (common / "objects").iterdir() if path.is_dir() and path.name not in before]
+    assert common / "objects" / _blob_directory(content) in made
+    index = common / "worktrees" / tree.worktree.name / "index"
+    expected = (0o775, 0o664) if shared else (0o777 & ~umask, 0o666 & ~umask)
+    assert made and {stat.S_IMODE(path.stat().st_mode) for path in made} == {expected[0]}
+    assert stat.S_IMODE(index.stat().st_mode) == expected[1]
 
 
 def test_the_caller_s_environment_never_outranks_what_keeps_the_config_out(tmp_path):

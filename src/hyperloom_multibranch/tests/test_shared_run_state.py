@@ -211,8 +211,9 @@ def _every_writer(root: Path) -> dict[Path, int]:
 def test_outside_shared_storage_every_writer_keeps_what_it_makes_as_private_as_the_umask(
     tmp_path: Path, parent_mode: int
 ) -> None:
-    """A directory that is not setgid, group-writable and closed to others is no shared storage: there each writer
-    makes what a plain create under this umask would, never widening it."""
+    """A directory that is not setgid, group-writable and closed to others is no shared storage: there a blackboard
+    segment and a published file stay owner-only, and each other writer makes what a plain create under this umask
+    would, never widening it."""
     root = tmp_path / "root"
     root.mkdir()
     root.chmod(parent_mode)
@@ -222,9 +223,12 @@ def test_outside_shared_storage_every_writer_keeps_what_it_makes_as_private_as_t
     made = _every_writer(root)
 
     umask = _umask()
+    owner_only = {root / "segments" / "a.h.1.0000.jsonl", root / "claims" / "a.json"}
+    assert owner_only <= made.keys()
     for path, shared_mode in made.items():
         inherited = parent_mode & stat.S_ISGID if path.is_dir() else 0  # mkdir keeps a setgid parent's bit
-        assert _mode(path) == shared_mode & ~umask & 0o777 | inherited, (path, oct(_mode(path)))
+        expected = 0o600 if path in owner_only else shared_mode & ~umask & 0o777 | inherited
+        assert _mode(path) == expected, (path, oct(_mode(path)))
 
 
 def test_the_logs_a_later_leg_appends_to_are_never_opened_through_a_link_at_their_name(shared: Path) -> None:

@@ -293,9 +293,9 @@ def _failed_retest(first: Judgement, retest: TestRecord) -> Judgement:
 
 
 def _announced(record: TestRecord, judgement: Judgement, guarded: bool) -> str:
-    """The notice of a commit, a fork or a gain the moved-on branch kept from landing that the gate recorded for a
-    judged candidate, "" for any other conclusion; the same text :meth:`BranchJudge._settle` writes after the step,
-    so the one written there is not written twice."""
+    """The notice of a commit, a landed retraction, a fork or a gain the moved-on branch kept from landing that the gate
+    recorded for a judged candidate, "" for any other conclusion; the same text :meth:`BranchJudge._settle` writes
+    after the step, so the one written there is not written twice."""
     if record.landed_retraction:
         return _retracted(record.request, judgement)
     if record.conclusion in (Conclusion.COMMITTED, Conclusion.COMMITTED_WITH_REPRO):

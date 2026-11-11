@@ -81,8 +81,8 @@ def _actor_tag(step: dict[str, Any], agent_index: dict[str, int]) -> str:
     Deliberately at the front of the line and fixed-shape. The previous form
     put a `subagent` badge in the middle, after a variable-length tool name and
     before an optional duration — invisible when skimming and impossible to
-    grep reliably, which is how 1,101 subagent lines read as if they were the
-    orchestrator's.
+    grep reliably, so subagent lines can read as if they were
+    the orchestrator's.
     """
     if step.get("actor") != "subagent":
         return "MAIN "
@@ -236,8 +236,7 @@ def render(session_dir: Path, compact: bool = False) -> Path:
             "> **Note:** this model withholds reasoning text (it returns a "
             "signature and bills the tokens, but emits no text on any capture "
             "route). `THINKING` entries below show a placeholder; reasoning "
-            "*volume* is still reported in `EVAL_REPORT.md`. Models measured to "
-            "return the text: `claude-sonnet-4.6`, `claude-haiku-4.5`.\n"
+            "*volume* is still reported in `EVAL_REPORT.md`.\n"
         )
 
     iterations = sorted({s["iteration"] for s in steps if s.get("iteration") is not None})

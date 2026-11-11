@@ -415,6 +415,28 @@ def classify_failure(log_text: str) -> FailureSignature:
     )
 
 
+# --- Refused command line --------------------------------------------------
+
+#: ``<prog>: error: <message>``, the one shape argparse prints a refused command line in, with the messages argparse
+#: itself defines (``argparse.py``).
+_ARGPARSE_REFUSAL = re.compile(
+    r": error: (?:ambiguous option|" + ARGPARSE_UNRECOGNIZED_ARGUMENTS_RE + r"|the following arguments are required"
+    r"|argument \S+:|expected (?:one|at most one|at least one|\d+) arguments?|"
+    + ARGPARSE_INVALID_CHOICE
+    + r"|invalid \w+ value|ignored explicit argument|one of the arguments)"
+)
+#: A compiler's ``file.c:3:1: error: ...`` shares the ``: error:`` with argparse and names a source location first.
+_COMPILER_DIAGNOSTIC = re.compile(r":\d+(?::\d+)?: error:")
+
+
+def argparse_refusal(text: str) -> str | None:
+    """The last line in which a server's argument parser refused its own command line (an ambiguous or unknown flag)."""
+    for line in reversed(text.splitlines()):
+        if _ARGPARSE_REFUSAL.search(line) and not _COMPILER_DIAGNOSTIC.search(line):
+            return line.strip()
+    return None
+
+
 # --- Request model ---------------------------------------------------------
 
 
@@ -518,6 +540,7 @@ __all__ = [
     "UNKNOWN",
     "UNSUPPORTED_DTYPE",
     "FailureSignature",
+    "argparse_refusal",
     "classify_failure",
     "framework_unimportable_line",
     "is_targeted_build_candidate",

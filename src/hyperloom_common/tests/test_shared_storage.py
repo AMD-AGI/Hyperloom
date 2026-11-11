@@ -1005,6 +1005,10 @@ def test_a_published_file_outside_shared_storage_keeps_the_umask_and_a_link_at_i
     assert not (tmp_path / "elsewhere.json").exists(), "nothing is written through the link"
 
 
+def _open_existing_and_close(path, *flags):
+    os.close(shared_storage.open_shared_existing(path, *flags))  # closed should it open after all
+
+
 def test_a_file_cut_in_place_is_opened_only_where_it_is_and_never_through_a_link_at_its_name(tmp_path):
     shared = _setgid_parent(tmp_path / "shared")
     (shared / "log.jsonl").write_bytes(b"whole\ntorn")
@@ -1016,9 +1020,9 @@ def test_a_file_cut_in_place_is_opened_only_where_it_is_and_never_through_a_link
     finally:
         os.close(descriptor)
     with pytest.raises(OSError) as refused:
-        shared_storage.open_shared_existing(shared / "link.jsonl")
+        _open_existing_and_close(shared / "link.jsonl")
     with pytest.raises(FileNotFoundError):
-        shared_storage.open_shared_existing(shared / "missing.jsonl", os.O_RDWR | os.O_CREAT)
+        _open_existing_and_close(shared / "missing.jsonl", os.O_RDWR | os.O_CREAT)
 
     assert refused.value.errno == errno.ELOOP
     assert (shared / "log.jsonl").read_bytes() == b"whole\n"
@@ -1036,3 +1040,25 @@ def test_a_child_gets_umask_002_and_a_mode_is_kept_as_asked_only_below_shared_st
     assert shared_storage.child_umask(parent) == (shared_storage.SHARED_CHILD_UMASK if widened else -1)
     expected = 0o664 if widened else 0o664 & ~shared_storage.current_umask()
     assert shared_storage.shared_mode(parent / "missing" / "file", 0o664) == expected, "judged at the nearest existing"
+
+
+@pytest.mark.parametrize(
+    ("mode", "shared"),
+    [(0o2775, True), (0o2755, False), (0o2777, False), (0o775, False)],
+    ids=["2775", "2755", "2777", "775"],
+)
+def test_a_directory_opened_without_following_a_link_is_shared_by_the_same_rule_as_a_child_s_umask(
+    tmp_path, mode, shared
+):
+    directory = tmp_path / "directory"
+    directory.mkdir()
+    directory.chmod(mode)
+    if mode & stat.S_ISGID and not directory.stat().st_mode & stat.S_ISGID:
+        pytest.skip("this filesystem does not keep the setgid bit for the test user")
+
+    descriptor = os.open(directory, os.O_PATH | os.O_DIRECTORY | os.O_NOFOLLOW)
+    try:
+        assert shared_storage.directory_is_shared(descriptor) is shared
+    finally:
+        os.close(descriptor)
+    assert (shared_storage.child_umask(directory) == shared_storage.SHARED_CHILD_UMASK) is shared

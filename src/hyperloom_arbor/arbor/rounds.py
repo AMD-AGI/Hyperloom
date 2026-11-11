@@ -63,7 +63,7 @@ TRIGGERS = ("target", "map")
 VERDICTS = ("confirmed", "not_confirmed", "incomplete")
 
 KNOBS = {
-    "round_target_ratio": 1.40,   # the next target, over the A/B bar (calibrate_baseline.py's ratio)
+    "round_target_ratio": 1.40,   # the next target, over the A/B bar
     "round_ab_minutes": 150,      # time an A/B needs; less left before a chunk's switch hands off
     "round_ab_attempts": 3,       # incomplete A/Bs before the round end stops for the operator
 }

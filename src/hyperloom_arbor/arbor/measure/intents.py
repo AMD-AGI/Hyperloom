@@ -258,7 +258,7 @@ def tolerance(intent: Intent, measurement: dict) -> float:
 
 # ── Legacy vocabulary ───────────────────────────────────────────────────────
 # The old (claim_class, decision) pair is still written to session.json and
-# still read by everything downstream — `check_review_consistency.py` counts
+# still read by everything downstream — a review-consistency check counts
 # `l["decision"] == "KEEP"` straight out of the file, so promoting a probe to
 # KEEP would silently change the KEEP count of archived campaigns. These
 # functions are the whole compatibility surface, and they are exact.

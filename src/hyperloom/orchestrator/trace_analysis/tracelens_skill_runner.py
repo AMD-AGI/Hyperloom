@@ -37,8 +37,7 @@ from hyperloom.common.codex_session import (
 )
 from hyperloom_common.llm import llm_config
 from hyperloom.common.deepseek_task import DeepSeekTaskRequest
-from hyperloom_common.llm.llm_config import claude_sdk_env_options
-from hyperloom_common.llm.llm_config import DEFAULT_CLAUDE_MODEL, DEFAULT_CODEX_MODEL
+from hyperloom_common.llm.llm_config import DEFAULT_CLAUDE_MODEL, DEFAULT_CODEX_MODEL, claude_sdk_env_options
 from ._capture_shapes import is_capture_dir_name
 from ._literal_utils import LITERAL_EVAL_ERRORS as _LITERAL_EVAL_ERRORS
 from ._literal_utils import safe_literal_eval as _safe_literal_eval
@@ -650,10 +649,12 @@ async def _run_tracelens_skill_codex(
         codex_error = f"{type(exc).__name__}: {exc}"
         if run.log:
             run.log(f"[codex-sdk] WARNING: {codex_error}")
-    return _skill_result(run, runner="codex", label="Codex", error=codex_error or result.error)
+    return _skill_result(run, runner="codex", label="Codex", raw_text=result.text, error=codex_error or result.error)
 
 
-def _skill_result(run: _SkillRun, *, runner: str, label: str, error: str) -> TraceLensSkillRunResult:
+def _skill_result(
+    run: _SkillRun, *, runner: str, label: str, error: str, raw_text: str = ""
+) -> TraceLensSkillRunResult:
     """The run's artifacts once ``analysis.md`` exists; an agent error after it landed is metadata.
 
     Raises:
@@ -663,7 +664,8 @@ def _skill_result(run: _SkillRun, *, runner: str, label: str, error: str) -> Tra
     if not report_path.exists():
         if error:
             raise RuntimeError(f"TraceLens {label} runner failed before writing {report_path}: {error}")
-        raise RuntimeError(f"TraceLens {label} runner did not write {report_path}")
+        suffix = f"; the agent replied: {reply}" if (reply := raw_text.strip()[:1000]) else ""
+        raise RuntimeError(f"TraceLens {label} runner did not write {report_path}{suffix}")
     artifact_paths = {"tracelens_agent_report": str(report_path), "tracelens_cmd_prefix": str(run.prefix_path)}
     if error:
         artifact_paths["tracelens_agent_sdk_error"] = error
@@ -764,7 +766,7 @@ async def run_tracelens_skill(
             timeout_sec=timeout_sec,
         )
         result = await drive_tracelens_skill(session, output_dir / "analysis.md")
-        return _skill_result(run, runner="deepseek", label="DeepSeek", error=result.error)
+        return _skill_result(run, runner="deepseek", label="DeepSeek", raw_text=result.text, error=result.error)
 
     if runner == llm_config.AGENT_BACKEND_CODEX and (sdk.codex_turn_runner is not None or no_injected_sdk):
         codex_model = resolved_model or (os.environ.get("CODEX_MODEL") or "").strip() or DEFAULT_CODEX_MODEL

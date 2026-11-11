@@ -196,8 +196,8 @@ def _render_barren(campaign, state) -> str:
         # NOT a claim about what the campaign has or has not measured. The
         # design sketched two variants ("nothing has measured it" / "the last
         # measurement was iteration X"), and rendering the first against a
-        # campaign that held many denominator and census ledger entries
-        # produced a flat falsehood. A block the agent can catch lying is a
+        # campaign that holds many denominator and census ledger entries
+        # produces a flat falsehood. A block the agent can catch lying is a
         # block it discounts. Asking instead is always true, and after N landed
         # changes STALENESS is the live question anyway.
         prov = ("Name the measurement that answer rests on, and when it was "
@@ -412,11 +412,9 @@ def render_program(campaign, state, arbor_root: str | Path,
     #
     # It was parsed into Pack.description from the beginning but at first
     # never rendered. Packs had been written against the assumption that it
-    # reached the agent, so one pack's header -- its concurrency, its
-    # baseline and target, and the warning that the inherited roadmap's
-    # numbers were leads from another concurrency -- was invisible to the
-    # agent it was written for, and the distinction survived only in the
-    # config goal and a knowledge file.
+    # reached the agent, so a pack's header -- its operating point, its
+    # baseline and target -- was invisible to the
+    # agent it was written for.
     if campaign.pack.description:
         sections.append(campaign.pack.description.strip())
 

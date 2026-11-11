@@ -918,7 +918,9 @@ def test_a_hosted_session_lends_the_dev_sandboxes_of_its_grant_on_its_tp_and_run
     tmp_path: Path,
 ) -> None:
     layout = SimpleNamespace(branch_dir=lambda branch: tmp_path / "MB-branches" / branch)
-    setup = SimpleNamespace(layout=layout, workload=replace(WORKLOAD, tp=4), processes=None)
+    setup = SimpleNamespace(
+        layout=layout, workload=replace(WORKLOAD, tp=4), processes=None, agents=("https://agents.example/tuner.git",)
+    )
     worktree = SimpleNamespace(path=tmp_path / "worktree", holds=lambda component: False)
     lease = HostedBranchLease("lease-1", "b01", (0, 1, 2, 3), Path("/app/work"), {}, 4, "dev-4", 3600, object())
 
