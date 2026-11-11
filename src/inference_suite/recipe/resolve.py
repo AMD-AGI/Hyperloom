@@ -405,7 +405,7 @@ def _user_file_base(query: LaunchQuery, snapshot: SourceSnapshot, user_file: Use
     if redacted := [name for name, value in env.items() if isinstance(value, Redacted)]:
         warnings.append(
             f"{user_file.location} exports {', '.join(redacted)}; the base records only their sha256, "
-            "so a round takes each value from its host"
+            "so a round takes each value from its host, which must hold the value the file set"
         )
     return BaseLaunch(
         query=query,
