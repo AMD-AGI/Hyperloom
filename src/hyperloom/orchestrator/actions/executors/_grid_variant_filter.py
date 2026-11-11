@@ -25,7 +25,11 @@ from ._grid_base import (
 )
 from ._spec_decode_pin import SPECULATIVE_DECODING_PINNED, speculative_pin_reason
 from hyperloom.inference_optimizer.grid_server_args import compose_server_args
-from hyperloom.inference_optimizer.speculative_capability import CAPABILITY_UNSUPPORTED, speculative_capability_reason
+from hyperloom.inference_optimizer.speculative_capability import (
+    CAPABILITY_UNSUPPORTED,
+    DraftLimits,
+    speculative_capability_reason,
+)
 
 log = logging.getLogger(__name__)
 
@@ -261,12 +265,22 @@ def _fingerprint_component_matches(actual: str, expected: str) -> bool:
 
 @dataclass(frozen=True)
 class ServingStack:
-    """The framework, model, GPU and component versions a grid's variants are served on."""
+    """The framework, model, GPU and component versions a grid's variants are served on, and the draft bounds its
+    recipe declares."""
 
     framework: str
     model_path: str
     gpu_type: str = ""
     stack_fingerprint: dict | None = None
+    draft_limits: DraftLimits = DraftLimits()
+
+    @classmethod
+    def of_recipe(
+        cls, benchmark: Mapping[str, Any], *, model_path: str, gpu_type: str = "", stack_fingerprint: dict | None = None
+    ) -> ServingStack:
+        """The stack ``benchmark``'s recipe is served on: its framework, and the draft bounds it declares."""
+        framework = str(benchmark.get("framework") or "").lower()
+        return cls(framework, model_path, gpu_type, stack_fingerprint, DraftLimits.declared(benchmark))
 
 
 def _matches_unsafe_unified_attn_stack(serving: ServingStack) -> bool:
@@ -356,6 +370,7 @@ def _speculative_capability_reason(
         framework=serving.framework,
         envs={**base_envs, **(getattr(variant, "extra_envs", None) or {})},
         model_path=serving.model_path,
+        limits=serving.draft_limits,
     )
 
 
