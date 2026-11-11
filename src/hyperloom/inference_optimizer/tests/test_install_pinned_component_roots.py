@@ -1,7 +1,7 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""A rerun of the kernel-agent install follows the pinned Magpie, InferenceX and TraceLens revisions and GEAK's ref.
+"""A rerun of the kernel-agent install follows the pinned InferenceX and TraceLens revisions and GEAK's ref.
 
 Installer-managed tool paths stay out of ``.env``, so a later install cannot read them back as operator overrides.
 """
@@ -39,18 +39,14 @@ def _source_kernel_tools(tmp_path: Path, exports: dict[str, Path], then: str) ->
     return proc.stdout
 
 
-def test_magpie_and_inferencex_paths_stay_out_of_dotenv(tmp_path: Path) -> None:
+def test_the_inferencex_path_stays_out_of_dotenv(tmp_path: Path) -> None:
     dotenv = tmp_path / "repo" / ".env"
     dotenv.parent.mkdir()
-    dotenv.write_text(f"MAGPIE_PATH={tmp_path / 'old'}\nINFERENCEX_PATH={tmp_path / 'old'}\n", encoding="utf-8")
+    dotenv.write_text(f"INFERENCEX_PATH={tmp_path / 'old'}\n", encoding="utf-8")
 
-    _source_kernel_tools(
-        tmp_path, {"MAGPIE_PATH": tmp_path / "Magpie", "INFERENCEX_PATH": tmp_path / "InferenceX"}, "write_env_file"
-    )
+    _source_kernel_tools(tmp_path, {"INFERENCEX_PATH": tmp_path / "InferenceX"}, "write_env_file")
 
-    text = dotenv.read_text(encoding="utf-8")
-    assert "MAGPIE_PATH=" not in text
-    assert "INFERENCEX_PATH=" not in text
+    assert "INFERENCEX_PATH=" not in dotenv.read_text(encoding="utf-8")
 
 
 @pytest.mark.parametrize("managed", [True, False], ids=["installer-cache-checkouts", "operator-checkouts"])
@@ -139,7 +135,7 @@ def test_check_only_report_carries_the_kernel_tools_stale_keys(tmp_path: Path, s
             f"export REPO_ROOT={tmp_path} USER_DATA_PATH={tmp_path} HYPERLOOM_CACHE_DIR={cache} GEAK_REF={ref}",
             f"_script_dir={script_dir} CHECK_ONLY=1 DRY_RUN=0",
             "log() { :; }",
-            '_STALE_KEYS=("MAGPIE_REF")',
+            '_STALE_KEYS=("INFERENCEX_REF")',
             install_sh_function("install_kernel_agent_tools"),
             "install_kernel_agent_tools",
             'printf "stale: %s\\n" "${_STALE_KEYS[@]}"',
@@ -151,4 +147,4 @@ def test_check_only_report_carries_the_kernel_tools_stale_keys(tmp_path: Path, s
 
     assert proc.returncode == 0, proc.stderr
     reported = [line.removeprefix("stale: ") for line in proc.stdout.splitlines() if line.startswith("stale: ")]
-    assert reported == (["MAGPIE_REF", "TRACELENS_ROOT", "GEAK_ROOT"] if stale else ["MAGPIE_REF"])
+    assert reported == (["INFERENCEX_REF", "TRACELENS_ROOT", "GEAK_ROOT"] if stale else ["INFERENCEX_REF"])

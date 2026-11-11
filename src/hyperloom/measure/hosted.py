@@ -46,6 +46,7 @@ from hyperloom.measure.failures import (
     SANDBOX_ACQUIRE_TIMEOUT,
     Disposition,
     FailureClassification,
+    FailureEvidence,
     classify_test_failure,
 )
 from hyperloom.measure.hosted_live import LiveOutputs, finite_number
@@ -89,7 +90,8 @@ from hyperloom.measure.sandboxes import (
 )
 from hyperloom.measure.signing import SigningError, verify
 from hyperloom.measure.socket import MeasurementTimeout, RoundOutcome, TestCall, TestOutcome
-from hyperloom.measure.spec import MeasurementSpec, blob_input_path, fingerprint, spec_sha256
+from hyperloom.measure.spec import SPEC_SCHEMA, MeasurementSpec, blob_input_path, fingerprint, spec_sha256
+from inference_suite.contracts.layout import REPORT_FILE
 from hyperloom.sandbox.socket import (
     Sandbox,
     SandboxCreateFailed,
@@ -720,6 +722,8 @@ class HostedMeasurementBackend:
         text = f"{error_class}: {reported['message']}"
         if rc == HOSTED_INFRA_FAILURE_RC:  # where it failed matters for the node; a refused sheet is the sheet's
             text = f"{text} ({where(*_place(attempt.runner))})"
+        elif error_class == "spec_rejected":  # a runner of an older version names only the versions it reads
+            text = f"{text} (the sheet is {SPEC_SCHEMA})"
         outcome = _outcome(call, rc, facts=_facts_of(attempt.runner, None), stderr=text, failure=verdict)
         self._finish_record(attempt, outcome, {"verdict": error_class, "runner_status": reported})
         return outcome
@@ -1118,7 +1122,9 @@ def _failure_of(out: Any) -> FailureClassification:
         return FailureClassification(Disposition.FAILED, FailureClass(out.failure_class), out.failure_reason)
     if out.timed_out:
         return classify_test_failure(returncode=out.returncode, timed_out=True)
-    return classify_test_failure(returncode=out.returncode, logs=[out.stderr_tail, out.stdout_tail])
+    return classify_test_failure(
+        returncode=out.returncode, evidence=FailureEvidence(logs=(out.stderr_tail, out.stdout_tail))
+    )
 
 
 def _rounds_of(verified: VerifiedBundle, output: Path) -> tuple[RoundOutcome, ...]:
@@ -1145,9 +1151,7 @@ def _rounds_of(verified: VerifiedBundle, output: Path) -> tuple[RoundOutcome, ..
             # The runner's outcome is its first failed round's code, so a success over a failed round is not its own.
             raise ResultRejected(RejectReason.MANIFEST_INVALID, "a round failed under an outcome that says success")
         return rounds
-    reports = sorted(
-        path for path in listed if path.endswith("benchmark_report.json") and WARMUP_DIR not in Path(path).parts
-    )
+    reports = sorted(path for path in listed if Path(path).name == REPORT_FILE and WARMUP_DIR not in Path(path).parts)
     return tuple(RoundOutcome(0, "measure", output / Path(path).parent, returncode) for path in reports)
 
 

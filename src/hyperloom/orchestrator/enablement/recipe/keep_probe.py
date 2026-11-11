@@ -47,29 +47,27 @@ _PROBE_SCRIPT = (
 )
 
 
-def resolve_keep_interpreter(override: Mapping[str, Any] | None, *, backend_interpreter: str = "") -> str:
+def resolve_keep_interpreter(override: Mapping[str, Any] | None, *, server_python: str = "") -> str:
     """Return the interpreter the graded server ran, or ``""``.
 
     Within the override the priority is ``runtime_python_exe`` then
     ``framework_python`` -- the order ``apply_runtime_override`` itself encodes
     and the launcher reads back. An override naming neither falls back to the
-    interpreter the caller resolved, on every backend and not only on bypass: an
-    enablement that patches the framework in place never provisions a runtime,
-    so keying the fallback on the backend name would leave that topology's
-    closure permanently unobserved.
+    interpreter the caller resolved: an enablement that patches the framework in
+    place never provisions a runtime, and without the fallback that topology's
+    closure would stay unobserved.
 
     Args:
         override: The runtime override launch bound, if any.
-        backend_interpreter: The interpreter that launched the graded server
-            when the override names none. The caller resolves it -- the serving
-            framework's interpreter, which on a split-venv host is not the
-            benchmark backend's own.
+        server_python: The interpreter that launched the graded server when
+            the override names none -- the server's ``framework_python``, which
+            on a split-venv host is not the benchmark client's own.
     """
     resolved = str((override or {}).get("runtime_python_exe") or "").strip()
     resolved = resolved or str((override or {}).get("framework_python") or "").strip()
     if resolved:
         return resolved
-    return str(backend_interpreter or "").strip()
+    return str(server_python or "").strip()
 
 
 def keep_assertion_packages(
@@ -185,11 +183,11 @@ def graded_framework(params: Mapping[str, Any], materialized_config: str) -> str
     whose config declares no framework.
     """
     if materialized_config:
-        from ...actions.executors._server_argv import _benchmark_envs
+        from ...actions.executors._server_argv import config_point
 
-        declared, _envs = _benchmark_envs(materialized_config)
+        declared = config_point(materialized_config).framework.strip().lower()
         if declared:
-            return str(declared).strip().lower()
+            return declared
     from hyperloom.inference_optimizer.framework_registry import DEFAULT_FRAMEWORK
 
     return str(params.get("framework") or os.environ.get("FRAMEWORK") or DEFAULT_FRAMEWORK).strip().lower()
@@ -247,14 +245,11 @@ def probe_keep_environment(
     some runtime was provisioned is absent for exactly the topology whose
     replay most needs it. The composed launch environment is what both the
     interpreter resolution and the probe itself run under. That fallback is
-    ``_resolve_probe_python``, the
-    same resolver the accuracy probes use, and not the benchmark backend's
-    own interpreter -- on a split-venv host Magpie runs from one venv while
-    the server it launches runs from another, and recording Magpie's
-    distributions against that KEEP would be a confidently wrong closure,
-    which is worse than an absent one. The bypass backend is the one case
-    where the backend's interpreter is what launched the server, so it keeps
-    resolving through the backend.
+    ``_resolve_probe_python``, the single source of the server's
+    ``framework_python``, on every backend -- on a split-venv host the
+    benchmark client runs from one venv while the server runs from another,
+    and recording the client's distributions against that KEEP would be a
+    confidently wrong closure, which is worse than an absent one.
 
     Both the framework and the environment that fallback resolves against
     come from the accepted round's own materialized config -- the same
@@ -268,7 +263,6 @@ def probe_keep_environment(
     stage ran; their versions are the probe's observation either way.
     """
     from ...actions.executors._benchmark_interpreter import _resolve_probe_python
-    from ...actions.executors.benchmark_backend import resolve_backend_name, resolve_benchmark_interpreter
 
     provision_result = evidence.provision_result
     override: dict[str, Any] = {}
@@ -278,12 +272,7 @@ def probe_keep_environment(
         raw = params.get("runtime_override")
         override = dict(raw) if isinstance(raw, dict) else {}
     graded_env = graded_launch_env(override, materialized_config)
-    backend = resolve_backend_name()
-    if backend == "bypass":
-        fallback = resolve_benchmark_interpreter()
-    else:
-        fallback = _resolve_probe_python(framework, env=graded_env)
-    interpreter = resolve_keep_interpreter(override, backend_interpreter=fallback)
+    interpreter = resolve_keep_interpreter(override, server_python=_resolve_probe_python(framework, env=graded_env))
     provision_versions = (
         None if provision_result is None else getattr(provision_result, "installed_versions", None) or {}
     )

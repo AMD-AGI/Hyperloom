@@ -29,6 +29,10 @@ from hyperloom.orchestrator.state.task_registry import Task
 from ._geak_helpers import resume_pending, set_resume_pending
 
 
+#: What the report mapper stamps on every AgentX round it accepts as evidence.
+_AGENTX_EVIDENCE = {"valid_measurement": True, "diagnostic_only": False, "workload_identity": "agentx-workload"}
+
+
 def integrated_count(ext: dict) -> int:
     """How many of the visit's candidates the timeline shows as integrated."""
     return sum(1 for row in ext["attempts"] if (row.get("e2e") or {}).get("integrated"))
@@ -58,6 +62,7 @@ def promotion(tmp_path, monkeypatch, request):
             "e2e_norm_intvty_p50": 100.0,
             "duration_seconds": 900.0,
             "request_error_rate": 0.0,
+            **_AGENTX_EVIDENCE,
         },
         current_best={
             "action": "explore",
@@ -67,6 +72,7 @@ def promotion(tmp_path, monkeypatch, request):
             "e2e_norm_intvty_p50": 100.0,
             "duration_seconds": 900.0,
             "request_error_rate": 0.0,
+            **_AGENTX_EVIDENCE,
         },
         model_path="/models/test",
         gpu_type="mi355x",
@@ -90,6 +96,7 @@ def promotion(tmp_path, monkeypatch, request):
         "e2e_norm_intvty_p50": 100.0,
         "duration_seconds": 900.0,
         "request_error_rate": 0.0,
+        **_AGENTX_EVIDENCE,
         "validated_regimes": [{"isl": 1024, "osl": 1024, "conc": 64}],
     }
     with session_scope(tmp_path):
@@ -152,6 +159,7 @@ async def test_geak_acceptance_requires_native_retention(
         "fingerprint": "candidate",
         "duration_seconds": 900.0,
         "request_error_rate": 0.0,
+        **_AGENTX_EVIDENCE,
     }
     if fresh_intvty is not None:
         measurement.update(
@@ -405,17 +413,25 @@ def test_geak_replay_without_launch_fields_preserves_stack_controls(promotion, a
     assert best["extra_envs"] == {"SGLANG_AITER_MLA_PERSIST": "3"}
 
 
-def test_geak_replay_removal_retains_other_inherited_flags(promotion):
+def test_geak_removal_is_a_delta_that_keeps_the_other_base_flags(promotion):
+    """The promoted launch stays a delta over the base: the removal travels, the base's own flags are not copied in."""
+    from hyperloom.inference_optimizer.grid_server_args import compose_server_args
+
     coord, result, _ = promotion
-    recipe = coord.session_dir / "baseline.yaml"
-    recipe.write_text("benchmark:\n  envs:\n    EXTRA_SGLANG_ARGS: --disable-radix-cache --mem-fraction-static 0.7\n")
-    coord.shared_state.baseline_config_path = str(recipe)
     coord.shared_state.current_best["extra_server_args"] = "--chunked-prefill-size 1024"
     result["accepted_config"] = {"remove_args": ["--disable-radix-cache"]}
     assert coord.phase_kernel.promote_geak_from_candidate(result, measured_tput=120.0, overlay_loaded=False)
     best = coord.shared_state.current_best
-    assert best["extra_server_args"] == "--mem-fraction-static 0.7 --chunked-prefill-size 1024"
-    assert best["args_mode"] == "replace"
+    assert (best["extra_server_args"], best["args_mode"]) == ("--chunked-prefill-size 1024", "append")
+    assert best["remove_args"] == ["--disable-radix-cache"]
+    assert (
+        compose_server_args(
+            inherited_args="--disable-radix-cache --mem-fraction-static 0.7",
+            base_extra_args=best["extra_server_args"],
+            remove_args=best["remove_args"],
+        )
+        == "--mem-fraction-static 0.7 --chunked-prefill-size 1024"
+    )
 
 
 @pytest.mark.parametrize("returned_removals", [None, [], ["--disable-radix-cache"]])

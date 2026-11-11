@@ -195,3 +195,7 @@ def test_a_crashed_worker_of_any_lws_rank_fails_fast(tmp_path, monkeypatch: pyte
 
     assert crash is not None and "unrecognized arguments: --bogus-flag" in crash
     assert wedge is not None and "10.0.0.3" in wedge
+
+
+def test_the_multi_node_sglang_defaults_keep_the_prefix_cache_on() -> None:
+    assert "--disable-radix-cache" not in life._merge_sglang_defaults("--chunked-prefill-size 8192")

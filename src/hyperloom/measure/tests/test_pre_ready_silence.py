@@ -13,6 +13,8 @@ import pytest
 
 from hyperloom.contracts.measurement import FailureClass
 from hyperloom.measure.failures import Disposition, classify_test_failure
+from inference_suite.contracts import DEFAULT_PRE_READY_SILENCE_SEC
+
 from hyperloom.measure.boot_watch import HUNG_BEFORE_READY, PRE_READY_SILENCE_SEC, SERVER_READY_KEY, PreReadySilence
 from hyperloom.measure.returncodes import HOSTED_INFRA_FAILURE_RC
 from hyperloom.measure.runner.service import Progress
@@ -108,6 +110,10 @@ def test_the_limit_is_well_above_a_silent_aiter_build_before_ready() -> None:
     """An aiter JIT build can stay silent for minutes before the server is ready (262 s here); the bound is a multiple of
     it."""
     assert PRE_READY_SILENCE_SEC >= 3 * 262
+
+
+def test_the_application_waits_as_long_before_ready_as_the_round_it_watches() -> None:
+    assert PRE_READY_SILENCE_SEC == DEFAULT_PRE_READY_SILENCE_SEC
 
 
 def test_hung_before_ready_is_an_infrastructure_failure_a_new_sandbox_retries() -> None:
