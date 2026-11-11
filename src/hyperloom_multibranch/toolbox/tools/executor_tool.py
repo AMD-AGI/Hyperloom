@@ -15,6 +15,7 @@ from collections.abc import Awaitable, Callable, Mapping
 from pathlib import Path
 from typing import Any
 
+from hyperloom_common.shared_storage import copy_shared_file, make_shared_dirs
 from hyperloom.orchestrator.loop.sub_agent_runner import RunnerContext
 from hyperloom.orchestrator.state.shared_state import SharedState
 from hyperloom.orchestrator.state.task_registry import Task
@@ -157,8 +158,8 @@ def _copy_back(result: Mapping[str, Any], scratch: Path, workdir: Path) -> dict[
             moved[text] = text
             if source.is_file() and ":" not in source.name:
                 target = workdir / source.relative_to(scratch.resolve())
-                target.parent.mkdir(parents=True, exist_ok=True)
-                shutil.copy2(source, target)
+                make_shared_dirs(target.parent)  # the job's directory: a later leg, maybe another account, reads it
+                copy_shared_file(source, target)
                 moved[text] = str(target)
         return moved[text]
 

@@ -102,20 +102,45 @@ def test_the_host_reads_a_final_ending_and_the_session_a_restart_finishes(tmp_pa
     assert exit_document == {"final": True, "returncode": 2, "error": "multibranch.workload is missing"}
 
 
+def _document(**multibranch: object) -> dict[str, object]:
+    return {
+        "schema": "hyperloom.campaign-spec/v1",
+        "flow": "multibranch",
+        "model": {"path": "/models/Llama-3-8B"},
+        "framework": {"name": "vllm", "image": "registry.example/vllm@sha256:" + "2" * 64},
+        "hardware": {"gpu_type": "mi355x", "tp": 1},
+        "workload": {"conc": 16, "isl": 1024, "osl": 512, "precision": "fp8"},
+        "budget": {"max_hours": 1},
+        "placement": {"profile": "hosted-gpu", "measurement": "hosted"},
+        "multibranch": {"workload": "inferencex", **multibranch},
+    }
+
+
 def _spec(**multibranch: object) -> CampaignSpec:
-    return parse_campaign(
-        {
-            "schema": "hyperloom.campaign-spec/v1",
-            "flow": "multibranch",
-            "model": {"path": "/models/Llama-3-8B"},
-            "framework": {"name": "vllm", "image": "registry.example/vllm@sha256:" + "2" * 64},
-            "hardware": {"gpu_type": "mi355x", "tp": 1},
-            "workload": {"conc": 16, "isl": 1024, "osl": 512, "precision": "fp8"},
-            "budget": {"max_hours": 1},
-            "placement": {"profile": "hosted-gpu", "measurement": "hosted"},
-            "multibranch": {"workload": "inferencex", **multibranch},
-        }
-    )
+    return parse_campaign(_document(**multibranch))
+
+
+@pytest.mark.parametrize(
+    ("launch", "named"),
+    [
+        ({"server_args": "--mem-fraction-static 0.8"}, "does not read launch.server_args:"),
+        ({"extra_env": {"AITER_BF16_FP8_MOE_BOUND": "0"}}, "does not read launch.extra_env:"),
+        ({"server_args": "--enforce-eager", "extra_env": {}}, "does not read launch.server_args or launch.extra_env:"),
+    ],
+    ids=["server-args", "extra-env", "both"],
+)
+def test_a_spec_whose_launch_a_multibranch_run_would_not_read_is_refused_naming_the_field(
+    launch: dict[str, object], named: str
+) -> None:
+    spec = parse_campaign({**_document(), "launch": launch})
+
+    with pytest.raises(HostedRefused, match=named) as refused:
+        run_argv(spec, 1.0, 1)
+    assert "its base launch is resolved from the recipe sources" in str(refused.value)
+
+
+def test_a_spec_without_a_launch_section_maps_onto_run() -> None:
+    assert "--workload=inferencex" in run_argv(_spec(), 1.0, 1)
 
 
 @pytest.mark.parametrize(
