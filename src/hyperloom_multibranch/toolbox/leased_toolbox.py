@@ -206,13 +206,14 @@ def session_archive(archive: ResultArchive | None, directory: Path) -> ResultArc
 
 
 def session_stores(
-    blackboard: LocalBlackboard, directory: Path, run_id: str, builds: BuildDriver | None = None
+    blackboard: LocalBlackboard, directory: Path, run_id: str, builds: BuildDriver | None = None, scope: str = ""
 ) -> ToolboxStores:
     """The submit log and the short-prompt pool below the session directory and the blackboard as every port the toolbox
     writes to; ``builds`` drives the native build store when the host configured one (without it no test waits for a
-    build)."""
+    build). ``scope``, the session's id where ``run_id`` is a run's that may hold more than one session, keeps the
+    request ids, and so the idempotency keys of their sandboxes, of one session apart from another's."""
     return ToolboxStores(
-        log=SubmissionLog(directory / _SUBMISSIONS, run_id),
+        log=SubmissionLog(directory / _SUBMISSIONS, run_id, scope),
         short_prompt_pool=ShortPromptPool(directory / POOL_FILE),
         sink=blackboard,  # type: ignore[arg-type]
         health=blackboard,  # type: ignore[arg-type]
