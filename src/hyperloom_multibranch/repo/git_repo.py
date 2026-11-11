@@ -16,6 +16,7 @@ from collections.abc import Collection, Mapping, Sequence
 from dataclasses import dataclass, replace
 from pathlib import Path
 
+from hyperloom_common.shared_storage import make_shared_dirs, write_shared_bytes
 from hyperloom.contracts.recipe import (
     PATCH_ROOT,
     ComponentPatches,
@@ -321,8 +322,8 @@ class GitExperimentRepo:
     def _write_files(self, files: Sequence[tuple[str, str]], destination: Path) -> None:
         for path, sha256 in files:
             target = destination / path
-            target.parent.mkdir(parents=True, exist_ok=True)
-            target.write_bytes(self._blobs.get(sha256))
+            make_shared_dirs(target.parent)
+            write_shared_bytes(target, self._blobs.get(sha256))
 
     async def _land(self, branch: str, parent: str, recipe: Recipe, parents: tuple[str, ...], message: str) -> str:
         current = await self.head(branch)

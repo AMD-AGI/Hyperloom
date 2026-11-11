@@ -24,6 +24,14 @@ last attempt (:class:`ConfigRefused`): another would write the same config.
 
 The agent runs commands, not containers: a ``docker`` on its ``PATH`` (:data:`DOCKER_SHIM`) runs ``docker exec`` and
 ``docker cp`` in place, for an agent written to drive a container, and refuses everything else.
+
+The agent's sandbox, this host and the next leg may be different accounts of one group, so what is made here for the
+agent is the group's below shared storage: directories ``2775``, files ``664`` (``775`` when executable) and replaced
+by rename, the shim among them, and git makes the checkout under umask ``002``; elsewhere the umask decides
+(:func:`~hyperloom_common.shared_storage.child_umask`). Only the ``.git`` config, hooks and info of the checkout stay
+this account's (:func:`~hyperloom_multibranch.specialist.worktree.keep_git_files_own`). The checkout is then the
+agent's to write, its ``.git`` included, so no git of this host obeys its config: no hook, fsmonitor, pager, external
+diff or filter driver of it runs (:mod:`~hyperloom_multibranch.repo.isolated_git`).
 """
 
 from __future__ import annotations
@@ -33,6 +41,7 @@ import json
 import os
 import re
 import shutil
+import stat
 import subprocess
 from collections.abc import Awaitable, Callable, Mapping
 from dataclasses import dataclass, replace
@@ -41,6 +50,14 @@ from time import monotonic
 from typing import Protocol
 
 from hyperloom.sandbox import SandboxError
+from hyperloom_common.shared_storage import (
+    child_umask,
+    copy_shared_file,
+    make_shared_dirs,
+    parent_is_shared,
+    shared_parent,
+    write_shared_text,
+)
 from hyperloom_multibranch.contracts.blackboard.records import OpShares
 from hyperloom_common.git_safety import NO_PROGRAMS
 from hyperloom_multibranch.repo.isolated_git import NO_LAZY_FETCH, blank_driver_programs, leading_options, trusting
@@ -59,6 +76,7 @@ from hyperloom_multibranch.specialist.arbor_adapter import (
     refused_reasons,
 )
 from hyperloom_multibranch.specialist.runtime import PreflightFailed
+from hyperloom_multibranch.specialist.worktree import keep_git_files_own
 
 ATTEMPTS = 3
 #: How long the next attempt waits after a failed one, and the first pause after one that met the gateway down.
@@ -74,9 +92,15 @@ SOURCE_DIR = "src"
 ENCODING = "utf-8"
 GIT = "git"
 GIT_DIR = ".git"
+#: What a copied source tree leaves out, as a clone would.
+_NOT_COPIED = frozenset({GIT_DIR, "__pycache__"})
+#: How :func:`_copy_tree` opens the checkout it copies into: never through a link at its name.
+_NO_LINK_DIRECTORY = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC
 QUIET = "--quiet"
 REV_PARSE = "rev-parse"
 SHIM_DIR = "bin"
+#: The shim's mode: run by the sandbox's account, rewritten by none (a later attempt replaces it by rename).
+_SHIM_MODE = 0o755
 #: The lines of an output a failure keeps, the end of the output, where the cause usually is.
 TAIL_LINES = 20
 #: The file, in the session of an agent run as a component, that holds the op shares of the session's root profile.
@@ -262,8 +286,8 @@ async def _attempt(
     if adapted:
         config, notes = fit_keys(manifest.config, checkout)
         manifest, notes = replace(manifest, config=config), (*notes, *dossier_notes(checkout, spec.dossier))
-    (checkout / manifest.config_file).parent.mkdir(parents=True, exist_ok=True)
-    (checkout / manifest.config_file).write_text(json.dumps(manifest.config, indent=2), encoding=ENCODING)
+    make_shared_dirs((checkout / manifest.config_file).parent)
+    write_shared_text(checkout / manifest.config_file, json.dumps(manifest.config, indent=2))
     env = agent_env(agent_dir)
     await install(manifest, setup, checkout, env)
     process = await setup.sandbox.start(manifest.launch, checkout, env)
@@ -316,8 +340,8 @@ def root_profile(shares: OpShares | None, session: Path, source: str = ROOT_PROF
         "shares": dict(shares.shares),
     }
     profile = session / PROFILE_FILE
-    profile.parent.mkdir(parents=True, exist_ok=True)
-    profile.write_text(json.dumps(document, indent=2), encoding=ENCODING)
+    make_shared_dirs(profile.parent)
+    write_shared_text(profile, json.dumps(document, indent=2))
     return profile
 
 
@@ -355,7 +379,8 @@ async def fetch_source(source: str, checkout: Path) -> str:
     cloned."""
 
     tree = Path(source)
-    if not (checkout / GIT_DIR).exists() and tree.is_dir() and not await _is_repository_root(tree):
+    fetched = not (checkout / GIT_DIR).exists()
+    if fetched and tree.is_dir() and not await _is_repository_root(tree):
         await _commit_tree(tree, checkout)
     if not (checkout / GIT_DIR).exists():
         url, ref = split_source(source)
@@ -369,6 +394,8 @@ async def fetch_source(source: str, checkout: Path) -> str:
                 # Left in place, the clone would pass the next attempt on its default branch.
                 shutil.rmtree(checkout)
                 raise AttemptFailed(f"checking out {ref}: {tail(checked.output)}")
+    if fetched:
+        keep_git_files_own(checkout / GIT_DIR)
     head = await _checkout_git([GIT, REV_PARSE, "HEAD"], checkout)
     if head.returncode != 0:
         raise AttemptFailed(f"reading the commit of {checkout}: {tail(head.output)}")
@@ -387,10 +414,10 @@ async def _is_repository_root(tree: Path) -> bool:
 
 
 async def _commit_tree(tree: Path, checkout: Path) -> None:
-    """Copy ``tree`` into ``checkout`` as one commit, which names the commit of the repository ``tree`` lies in, when it
-    lies in one, since that is the version of what was copied."""
+    """Copy ``tree`` into ``checkout`` (:func:`_copy_tree`) as one commit, which names the commit of the repository
+    ``tree`` lies in, when it lies in one, since that is the version of what was copied."""
 
-    shutil.copytree(tree, checkout, ignore=shutil.ignore_patterns(GIT_DIR, "__pycache__"), dirs_exist_ok=True)
+    _copy_tree(tree, checkout)
     enclosing = await _git([GIT, REV_PARSE, "HEAD"], tree)
     at = f" at {enclosing.output.strip()}" if enclosing.returncode == 0 else ""
     # Fixed identity and no signing: the host may have neither a git identity nor a signing key.
@@ -407,17 +434,74 @@ async def _commit_tree(tree: Path, checkout: Path) -> None:
             raise AttemptFailed(f"committing a copy of {tree}: {tail(done.output)}")
 
 
+def _copy_tree(tree: Path, checkout: Path) -> None:
+    """Copy ``tree`` into ``checkout`` but its ``.git`` and ``__pycache__``.
+
+    Below shared storage, judged before ``checkout`` is made, it is copied by the shared-storage writers: directories
+    ``2775`` and files with their mode plus group write. The agent's sandbox, maybe another account of the group, writes
+    the checkout and may have put a link anywhere in it, so none is followed on the way; a link in ``tree`` is copied as
+    the link, as a clone gives it, so that nothing outside ``tree`` is copied to the group. Anywhere else only this
+    account writes the checkout, and ``copytree`` copies it: a link as its target's content, every entry with its mode.
+
+    Raises:
+        OSError: for a link at ``checkout``'s name, ``ENOTDIR`` when it is this account's own (which
+            :func:`make_shared_dirs` follows) and ``ELOOP`` when it is another account's, as for one further on the way.
+    """
+
+    shared = parent_is_shared(checkout)
+    make_shared_dirs(checkout)
+    with shared_parent(checkout) as (parent, name, _shared):
+        os.close(os.open(name, _NO_LINK_DIRECTORY, dir_fd=parent))
+    if not shared:
+        shutil.copytree(tree, checkout, ignore=shutil.ignore_patterns(*_NOT_COPIED), dirs_exist_ok=True)
+        return
+    # Not following links, the walk lists a link to a directory among the directories, and does not go into it.
+    for directory, subdirectories, files in os.walk(tree, onerror=_raise):
+        subdirectories[:] = [name for name in subdirectories if name not in _NOT_COPIED]
+        for name in (*subdirectories, *(name for name in files if name not in _NOT_COPIED)):
+            _copy_entry(Path(directory) / name, checkout / Path(directory).relative_to(tree) / name)
+
+
+def _copy_entry(source: Path, target: Path) -> None:
+    """Copy the entry ``source`` of a source tree to ``target``, a directory as a new empty one."""
+
+    mode = os.lstat(source).st_mode
+    if stat.S_ISDIR(mode):
+        make_shared_dirs(target)
+    elif stat.S_ISLNK(mode):
+        _copy_link(source, target)
+    elif stat.S_ISREG(mode):
+        copy_shared_file(source, target, mode=mode & 0o777 | stat.S_IWGRP)
+    else:
+        raise shutil.SpecialFileError(f"{source} is not a file, directory or link")
+
+
+def _copy_link(source: Path, target: Path) -> None:
+    """Make a link to what ``source`` links to at ``target``, replacing what an earlier attempt left there by rename."""
+
+    with shared_parent(target) as (directory, name, _shared):
+        made = f".{name}.{os.getpid()}.link"
+        os.symlink(os.readlink(source), made, dir_fd=directory)
+        os.replace(made, name, src_dir_fd=directory, dst_dir_fd=directory)
+
+
+def _raise(error: OSError) -> None:
+    raise error
+
+
 async def _checkout_git(argv: list[str], checkout: Path) -> CommandResult:
-    """:func:`_git` in the agent's checkout, used whoever owns it: an earlier attempt may have been another account."""
+    """:func:`_git` in the agent's checkout, used whoever owns it: an earlier attempt, or the run's earlier leg, may
+    have been another account of the group."""
 
     return await _git([argv[0], *trusting(checkout), *argv[1:]], checkout)
 
 
 async def _git(argv: list[str], cwd: Path) -> CommandResult:
-    """``argv`` (``git <args>``) in ``cwd``; no program the config of the repository there names runs, its driver
-    programs included (:mod:`~hyperloom_multibranch.repo.isolated_git`), as the agent writes that config."""
+    """``argv`` (``git <args>``) in ``cwd``, under umask ``002`` below shared storage; no program the config of the
+    repository there names runs, its driver programs included (:mod:`~hyperloom_multibranch.repo.isolated_git`), as the
+    agent writes that config."""
 
-    cwd.mkdir(parents=True, exist_ok=True)
+    make_shared_dirs(cwd)
     env = {**os.environ, **NO_LAZY_FETCH}
     try:
         blanked = await asyncio.to_thread(blank_driver_programs, cwd, env, *leading_options(argv[1:]))
@@ -432,6 +516,7 @@ async def _git(argv: list[str], cwd: Path) -> CommandResult:
         env=env,
         stdout=asyncio.subprocess.PIPE,
         stderr=asyncio.subprocess.STDOUT,
+        umask=child_umask(cwd),
     )
     output, _ = await process.communicate()
     return CommandResult(process.returncode or 0, output.decode(errors="replace"))
@@ -461,9 +546,8 @@ def agent_env(agent_dir: Path) -> dict[str, str]:
     ``PATH``."""
 
     shim = agent_dir / SHIM_DIR / "docker"
-    shim.parent.mkdir(parents=True, exist_ok=True)
-    shim.write_text(DOCKER_SHIM, encoding=ENCODING)
-    shim.chmod(0o755)
+    make_shared_dirs(shim.parent)
+    write_shared_text(shim, DOCKER_SHIM, mode=_SHIM_MODE)
     return {"PATH": f"{shim.parent}{os.pathsep}{os.environ.get('PATH', '')}"}
 
 
