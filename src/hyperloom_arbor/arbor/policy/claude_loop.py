@@ -132,7 +132,7 @@ def _build_critic_prompt(
                          f"− {accuracy.get('tolerance')} ({accuracy.get('source')})\n")
 
     # Where the records are, so the critic reads them instead of searching for them (a `find /` over network
-    # storage once ran 46 min).
+    # storage can run without end).
     paths_block = ""
     if paths and paths.get("iteration"):
         paths_block = (f"### Where the records are\n"
@@ -1904,8 +1904,8 @@ def _server_alive(config: dict) -> bool | None:
 
 def _wait_healthy(config: dict, timeout: int = 600) -> bool:
     """Wait until the server answers its health check, for at most ``timeout`` s. In component mode, stop at once when
-    the server Arbor started has died (two polls in a row), with its log's tail: a server that exits in seconds made
-    the harness wait out the whole cap (46 min under one host)."""
+    the server Arbor started has died (two polls in a row), with its log's tail: a server that exits in seconds would
+    otherwise make the harness wait out the whole cap."""
     port = config.get("port", 8888)
     health = frameworks.get(config).health_path
     deadline = time.time() + timeout

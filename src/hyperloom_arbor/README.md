@@ -38,7 +38,6 @@ or agent. A first campaign on a node: [docs/getting-started.md](docs/getting-sta
 | [docs/how-it-works.md](docs/how-it-works.md) | the loop, the agents, intents and the gate, planning, the records |
 | [docs/packs.md](docs/packs.md) | the pack format, validators, skills, the packs here, writing one |
 | [docs/dossier-and-profiler.md](docs/dossier-and-profiler.md) | using the dossier and profiler skills; whether a dossier's directions can go into a pack |
-| [docs/model-architecture-performance.md](docs/model-architecture-performance.md) | optional architecture and cache-capacity research between dossier discovery and profiling |
 | [docs/skill-integration.md](docs/skill-integration.md) | how skills fit into a campaign: the chapters, the dossier split into five skills, where a new skill joins, two skills that write the same thing, and the `arbor-dev` skills for developing Arbor |
 | [docs/skills.md](docs/skills.md) | contributing skills: runtime and development types, families under `.claude/skills/`, the lifecycle's chapters and events, the run, trigger and use modes a skill declares, checking a skill, loading it in a pack, conflicts |
 | [docs/master-worker.md](docs/master-worker.md) | a session's master and its workers: which side runs each chapter and pass, the work order and the worker report, where the split stands, and `arbor version` for callers |
@@ -46,12 +45,10 @@ or agent. A first campaign on a node: [docs/getting-started.md](docs/getting-sta
 | [docs/operations.md](docs/operations.md) | launchers, rolling chunks, parallel mode, dashboards |
 | [docs/hosts.md](docs/hosts.md) | running Arbor inside a host (component mode) |
 | [docs/who-runs-what.md](docs/who-runs-what.md) | component mode under Hyperloom's MB: which side runs each step, and the files between them |
-| [configs/README.md](configs/README.md), [evals/README.md](evals/README.md) | the configs; trajectory traces |
+| [evals/README.md](evals/README.md) | trajectory traces |
 | [CONTRIBUTING.md](CONTRIBUTING.md) | branches, tests, issues |
 
-Design records: [docs/component-mode.md](docs/component-mode.md),
-[docs/barren-and-learn-design.md](docs/barren-and-learn-design.md),
-[docs/hyperloom-upgrade-plan.md](docs/hyperloom-upgrade-plan.md).
+Design record: [docs/component-mode.md](docs/component-mode.md).
 
 ## Repository layout
 
@@ -64,13 +61,12 @@ Design records: [docs/component-mode.md](docs/component-mode.md),
 | `.claude/skills/` | skills the agents may use (dossier, profiler, kernels, hardware, ...) |
 | `docs/` | this documentation, design records, and model dossiers (`docs/dossier/`, read by the dossier skill) |
 | `evals/` | trajectory traces of campaigns |
-| `results/` | records of past campaigns |
-| `bench.py`, `install.sh`, `config.json`, `config.json.template` | tools of the retired Local Mode, still in the tree; not used by the harness |
+| `install.sh` | installs what a standalone Arbor needs (TraceLens among them) |
 
 ## Development
 
-Development happens in this repository. Work lands on `main`, one change per commit, and `main`
-takes fast-forwards only ([CONTRIBUTING.md](CONTRIBUTING.md)).
+This copy is vendored: a change is made in Arbor's own repository and the copy is taken again from a new tag
+([CONTRIBUTING.md](CONTRIBUTING.md), [VENDOR.md](VENDOR.md)).
 
 ```bash
 python3 -m pytest -q arbor/tests evals/tests

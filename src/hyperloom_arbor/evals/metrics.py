@@ -237,9 +237,9 @@ def efficiency_metrics(steps: list[dict[str, Any]],
 
     wall = _span_seconds(steps)
     # Split by actor: subagents run concurrently with the orchestrator and
-    # with each other, so summed tool time legitimately exceeds wall clock
-    # (it did: 11,987 s of tool time inside 11,923 s of wall clock). Reporting
-    # one total invites reading that as impossible rather than as parallelism.
+    # with each other, so summed tool time can legitimately exceed wall clock.
+    # Reporting one total invites reading that as impossible rather than as
+    # parallelism.
     tool_ms = sum(s.get("duration_ms") or 0 for s in tool_calls)
     tool_ms_orch = sum(s.get("duration_ms") or 0 for s in tool_calls
                        if s.get("actor") != "subagent")

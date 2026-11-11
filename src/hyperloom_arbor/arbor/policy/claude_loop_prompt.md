@@ -85,9 +85,9 @@ that is not written here is destroyed when this iteration ends.
 Emit one JSON object per line:
 
 ```
-LEDGER: {"id":"dsa-row-cap","type":"ASSUMPTION","claim":"fused indexer row cap is 48; C32 needs 192 rows so every batch above C8 falls back","falsifier":"grep the constant, log the dispatched branch at C32","gates":["dsa-metadata-fix"],"cost_est_min":15}
+LEDGER: {"id":"dsa-row-cap","type":"ASSUMPTION","claim":"fused indexer row cap is <cap>; C<conc> needs more rows, so every batch above it falls back","falsifier":"grep the constant, log the dispatched branch at C32","gates":["dsa-metadata-fix"],"cost_est_min":15}
 LEDGER: {"id":"dsa-build-c32","type":"FACT","claim":"DSA metadata build = <measured> per step at C32","evidence":"iter_<n>/eval_dsa_indexer.json","instrument":"eval_dsa_indexer.py","config_keys":["image","concurrency","max_model_len"],"status":"closed"}
-LEDGER: {"id":"draft-depth-8","type":"DEAD_END","claim":"draft depth 6-8 rejected by the pinned image","evidence":"actions/<run id>","revisit_if":"image supports deeper drafting"}
+LEDGER: {"id":"draft-depth-<n>","type":"DEAD_END","claim":"draft depth <n> rejected by the pinned image","evidence":"actions/<run id>","revisit_if":"image supports deeper drafting"}
 ```
 
 Types and what each one owes you:

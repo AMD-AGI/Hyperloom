@@ -211,9 +211,9 @@ See [reference.md](reference.md) for what makes two numbers comparable.
 > #### A short single replay can REJECT a side. It cannot accept one.
 >
 > Query-to-query variance on an agentic benchmark swamps the effects being
-> chased. Control screens of an identical config can agree closely while
-> **the same knob on the same tree, measured twice,** spreads more than twice
-> as wide: about as wide as the effects being chased.
+> chased. Control screens of an identical config can agree tightly while the
+> same knob on the same tree, measured twice, spreads almost as wide as the
+> effects being chased.
 >
 > A candidate measured twice on the identical configuration, with the same
 > request count and the same prefix-cache hit rate (so the workload is the

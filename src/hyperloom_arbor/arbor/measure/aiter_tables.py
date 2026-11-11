@@ -1,10 +1,9 @@
 """An AITER tuned table a change serves must have AITER's own columns.
 
 A change can point an ``AITER_CONFIG_*`` variable at a tuned CSV of its own (a retuned MoE or GEMM table). AITER reads
-it by the header of its shipped table for that variable, and a host may refuse it outright. Under MB, Arbor kept
-several changes whose ``AITER_CONFIG_FMOE`` table lacked the ``_tag`` column, and MB refused to import every one of
-them. So the harness checks the header against the installed AITER's before any GPU time, and refuses there, where the
-agent can still fix it.
+it by the header of its shipped table for that variable, and a host may refuse it outright. A table
+without one of AITER's columns (``_tag`` in the fused-MoE table) is refused on import. So the harness checks the
+header against the installed AITER's before any GPU time, and refuses there, where the agent can still fix it.
 
 The shipped tables, per variable, are KernelForge's ``config_files_and_merge.md``. Columns AITER fills itself when a
 table lacks them (``gfx`` from ``cu_num``; ``xbf16``, ``run_1stage``, ``ksplit`` as 0) are not required.

@@ -170,7 +170,7 @@ serving frameworks' mechanisms for its changed components, to feed hypotheses in
 As contributed, its place in a campaign ("after dossier parts 1-5, before 6-7") was prose in the dossier skill and a
 pack's knowledge; nothing ran it there.
 
-**It joined Arbor this way** (`.claude/skills/architecture/`; [its guide](model-architecture-performance.md)):
+**It joined Arbor this way** (`.claude/skills/architecture/`, which this copy leaves out):
 
 - **As a family:** `.claude/skills/architecture/`, with the skill at `performance/SKILL.md`
   (`architecture:performance`) and its references beside it.

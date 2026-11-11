@@ -12,7 +12,7 @@ objective:
   measurement:
     count: 1
     threshold_rel: 1.01
-    # How long one bench runs: a 3600 s AgentX replay with its warmup takes about 64 min. The bench turn's cap is never
+    # How long one bench runs: the replay and its warmup. The bench turn's cap is never
     # under it plus 15 min (arbor/component.py); -1 is no cap.
     bench_minutes: 75
 

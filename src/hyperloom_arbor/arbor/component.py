@@ -138,14 +138,13 @@ _SHA = re.compile(r"^[0-9a-fA-F]{7,40}$")
 PHASE_MINUTES = {"agent": 90, "server": 45, "bench": 60, "critic": 15, "correctness": 30,
                  "short_prompts": 10}
 
-# Standalone, an agent turn has a cap too (a critic's `find /` over network storage once ran 46 min,
-# and a bench agent's wait loop never ended). A backstop against a hang, not a budget: a dossier's measure turn ran up
-# to 108 min. The config's `phase_minutes` sets one (0: none); the bench's is never shorter than the config's
+# Standalone, an agent turn has a cap too (a search over network storage, or a wait loop, can run without end). A
+# backstop against a hang, not a budget: a dossier's measure turn can run long. The config's `phase_minutes` sets one (0: none); the bench's is never shorter than the config's
 # bench_timeout plus 30 min, since the bench runs inside the turn.
 STANDALONE_TURN_MINUTES = {"agent": 240, "server": 60, "bench": 90, "critic": 20}
 # A pack may declare how long its bench runs (``measurement.bench_minutes``; -1: no cap). The bench turn's default cap
-# is never under it plus this margin, in either mode: a 3600 s AgentX replay with its warmup ran 64 min against a
-# 60 min cap, so every bench was NOT MEASURED. A cap the host or config sets itself still wins.
+# is never under it plus this margin, in either mode: a replay as long as the cap, with its warmup, would outrun it,
+# and every bench would be NOT MEASURED. A cap the host or config sets itself still wins.
 DECLARED_MARGIN_MIN = 15
 
 # Every phase ends this long before the deadline, and an iteration starts only
@@ -232,7 +231,7 @@ def session_root(config) -> Path:
 
 def parse_deadline(value) -> float:
     """An absolute deadline: epoch seconds (a number or a numeric string), or ISO 8601
-    with a timezone ("2026-10-29T03:20:00Z"). ValueError otherwise: a deadline with no
+    with a timezone ("2030-01-01T00:00:00Z"). ValueError otherwise: a deadline with no
     timezone is read differently on every host."""
     if isinstance(value, bool):
         raise ValueError(f"deadline {value!r} is not a time")

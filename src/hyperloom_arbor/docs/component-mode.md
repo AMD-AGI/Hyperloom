@@ -28,7 +28,7 @@ recorded in `session.json`, and a resumed session keeps it.
 "mode": "component",
 "component": {
   "host": "hyperloom-mb",
-  "deadline": "2026-10-29T03:20:00Z",
+  "deadline": "2030-01-01T00:00:00Z",
   "seconds": 25200,
   "notes": "/abs/path/mb-integration.md",
   "bench_command": "python3 benchmark_serving.py ... --base-url http://127.0.0.1:{port} --result-dir {out}",

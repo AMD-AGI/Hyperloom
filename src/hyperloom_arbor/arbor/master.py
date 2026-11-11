@@ -155,7 +155,7 @@ def _root_baseline(campaign, state_path: Path, comp, session_dir: Path) -> None:
     """Component mode: the root's own measurement, once, before iteration 1, when the host gives no baseline_record.
 
     Without it the first iteration's measurement became the bar, with nothing to compare it to: a change that gained
-    nothing was kept as the baseline (one host's iteration 1, 49,668 against the root's 49,693). The bench is the one
+    nothing was kept as the baseline, even when it read below the root. The bench is the one
     the gate uses: the host's command read by ``component.bench_read``, else the pack's bench script. The boot and the
     bench are the run's time, within the deadline. A host that measured the root with the same client can pass its
     number as ``baseline_record`` instead (``{"mean": ...}``), and nothing is booted: ``_seed_baseline`` runs first,
