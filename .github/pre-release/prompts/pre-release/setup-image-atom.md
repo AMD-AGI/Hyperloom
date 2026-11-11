@@ -57,7 +57,7 @@ interactive questions:
 - Do **not** modify any GPU-related environment variable
   (`ROCR_VISIBLE_DEVICES`, `HIP_VISIBLE_DEVICES`, `GPUS_PER_NODE`, etc.). This
   container already exposes exactly one GPU by index; do not override device
-  visibility and do not choose GPUs via `rocm-smi`.
+  visibility and do not choose GPUs via `amd-smi`.
 - Do **not** print, echo, or copy secret values (API keys) into output or
   logs.
 - Do **not** modify `USER_DATA_PATH`.

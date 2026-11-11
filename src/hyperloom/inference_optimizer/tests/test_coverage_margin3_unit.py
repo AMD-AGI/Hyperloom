@@ -3,7 +3,7 @@
 
 from __future__ import annotations
 
-import subprocess
+import json
 import sys
 from types import SimpleNamespace
 
@@ -147,28 +147,38 @@ def test_gpu_type_resolution_env_probe_and_runner(monkeypatch) -> None:
 
 
 def test_gpu_type_autodetect_rocm_and_torch_fallback(monkeypatch) -> None:
+    from hyperloom.common import amd_smi
     from hyperloom.inference_optimizer import gpu_types
 
     class _Completed:
-        stdout = "GPU[0] : Card series: AMD Instinct MI325X"
+        def __init__(self, returncode: int = 0, stdout: str = "") -> None:
+            self.returncode = returncode
+            self.stdout = stdout
+            self.stderr = ""
 
-    def _rocm_ok(cmd, capture_output, text, timeout):
-        assert cmd == ["rocm-smi", "--showproductname"]
+    def _amd_smi_ok(cmd, capture_output, text, timeout, check):
+        assert cmd == ["amd-smi", "static", "--asic", "--json"]
         assert capture_output is True
         assert text is True
-        assert timeout == 5
-        return _Completed()
+        assert check is False
+        payload = {
+            "gpu_data": [
+                {"gpu": 0, "asic": {"market_name": "AMD Instinct MI325X", "target_graphics_version": "gfx942"}}
+            ]
+        }
+        return _Completed(stdout=json.dumps(payload))
 
-    monkeypatch.setattr(subprocess, "run", _rocm_ok)
+    monkeypatch.setattr(amd_smi.shutil, "which", lambda _n: "/opt/rocm/bin/amd-smi")
+    monkeypatch.setattr(amd_smi.subprocess, "run", _amd_smi_ok)
     assert gpu_types._autodetect_gpu_type() == "mi325x"
 
-    def _rocm_missing(*_args, **_kwargs):
-        raise FileNotFoundError("rocm-smi")
+    def _amd_smi_missing(*_args, **_kwargs):
+        raise FileNotFoundError("amd-smi")
 
     fake_torch = SimpleNamespace(
         cuda=SimpleNamespace(get_device_properties=lambda _idx: SimpleNamespace(gcnArchName="gfx950:sramecc+:xnack-"))
     )
-    monkeypatch.setattr(subprocess, "run", _rocm_missing)
+    monkeypatch.setattr(amd_smi.subprocess, "run", _amd_smi_missing)
     monkeypatch.setitem(sys.modules, "torch", fake_torch)
     assert gpu_types._autodetect_gpu_type() == "mi355x"
 

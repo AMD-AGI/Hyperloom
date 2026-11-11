@@ -118,12 +118,12 @@ def test_compiler_specialist_mentions_torch_compile_and_triton():
         assert marker.lower() in text.lower(), f"missing {marker!r}"
 
 
-def test_system_specialist_mentions_kfd_and_rocm_smi():
+def test_system_specialist_mentions_kfd_and_amd_smi():
     text = _build("system_specialist")
     for marker in (
         "system_specialist",
         "KFD",
-        "rocm-smi",
+        "amd-smi",
         "HSA_ENABLE_SDMA",
         "numactl",
     ):

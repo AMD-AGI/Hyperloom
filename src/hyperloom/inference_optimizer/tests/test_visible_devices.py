@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import pytest
 
+from hyperloom.common import amd_smi
 from hyperloom.common.visible_devices import (
     COUNTING_VISIBLE_DEVICE_VARS,
     GPU_MASK_ENV_NAMES,
@@ -21,11 +22,19 @@ from hyperloom.common.visible_devices import (
     ROCR_LEVEL_VARS,
     VISIBLE_DEVICE_VARS,
     _UNCOUNTED_VISIBLE_DEVICE_VARS,
+    detect_gpu_count,
     effective_mask_tokens,
     is_rocr_level,
     mask_tokens,
     parse_device_list,
 )
+
+
+@pytest.fixture(autouse=True)
+def _clear_visible_device_env(monkeypatch: pytest.MonkeyPatch) -> None:
+    """None of these tests may inherit a real mask from the host running the suite."""
+    for var in VISIBLE_DEVICE_VARS:
+        monkeypatch.delenv(var, raising=False)
 
 
 # --------------------------------------------------------------------------- #
@@ -127,3 +136,61 @@ def test_parse_device_list_agrees_with_effective_tokens() -> None:
         tokens = effective_mask_tokens(raw)
         assert len(ids) <= len(tokens)
         assert ids == [int(t) for t in tokens if t.lstrip("-").isdigit()]
+
+
+# --------------------------------------------------------------------------- #
+# detect_gpu_count: env masks first, then amd-smi. This path had never been
+# exercised directly before.
+# --------------------------------------------------------------------------- #
+
+
+def test_detect_gpu_count_prefers_rocr_visible_devices(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("ROCR_VISIBLE_DEVICES", "4,5")
+    monkeypatch.setattr(amd_smi, "gpu_count", lambda: (_ for _ in ()).throw(AssertionError("amd-smi must not run")))
+    assert detect_gpu_count() == 2
+
+
+def test_detect_gpu_count_rocr_wins_over_hip_and_cuda(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Precedence inside ``detect_gpu_count`` must match the chain's documented order."""
+    monkeypatch.setenv("ROCR_VISIBLE_DEVICES", "0,1,2")
+    monkeypatch.setenv("HIP_VISIBLE_DEVICES", "0")
+    monkeypatch.setenv("CUDA_VISIBLE_DEVICES", "0")
+    assert detect_gpu_count() == 3
+
+
+def test_detect_gpu_count_falls_through_an_unset_var_to_the_next_in_chain(monkeypatch: pytest.MonkeyPatch) -> None:
+    """``ROCR_VISIBLE_DEVICES`` absent (not merely empty) must defer to ``HIP_VISIBLE_DEVICES``."""
+    monkeypatch.setenv("HIP_VISIBLE_DEVICES", "0,1")
+    assert detect_gpu_count() == 2
+
+
+def test_detect_gpu_count_empty_mask_is_zero_gpus_not_a_fall_through(monkeypatch: pytest.MonkeyPatch) -> None:
+    """``ROCR_VISIBLE_DEVICES=""`` means "pinned to nothing", distinct from "unset" -- it must not defer to HIP/CUDA
+    or to amd-smi, both of which could otherwise report GPUs that this process cannot actually use."""
+    monkeypatch.setenv("ROCR_VISIBLE_DEVICES", "")
+    monkeypatch.setenv("HIP_VISIBLE_DEVICES", "0,1,2")
+    monkeypatch.setattr(amd_smi, "gpu_count", lambda: (_ for _ in ()).throw(AssertionError("amd-smi must not run")))
+    assert detect_gpu_count() == 0
+
+
+def test_detect_gpu_count_falls_back_to_amd_smi_when_no_mask_is_set(monkeypatch: pytest.MonkeyPatch) -> None:
+    """With no mask anywhere in the chain, the visible count comes from ``amd-smi list``."""
+    monkeypatch.setattr(amd_smi, "gpu_count", lambda: 3)
+    assert detect_gpu_count() == 3
+
+
+def test_detect_gpu_count_is_zero_when_amd_smi_cannot_be_probed(monkeypatch: pytest.MonkeyPatch) -> None:
+    """``amd_smi.gpu_count`` already degrades to 0 on a missing/failing amd-smi; this is that path end to end."""
+    monkeypatch.setattr(amd_smi, "gpu_count", lambda: 0)
+    assert detect_gpu_count() == 0
+
+
+def test_detect_gpu_count_env_branch_does_not_dedup_like_effective_mask_tokens(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Documents an existing inconsistency, not a recommendation: unlike :func:`effective_mask_tokens` (used
+    elsewhere in this module), the env-mask branch of ``detect_gpu_count`` counts raw comma-split tokens, so a
+    duplicated or negative ordinal inflates/deflates the count instead of being normalised first. This predates the
+    rocm-smi -> amd-smi migration (the env-mask loop was untouched by it) and is out of this phase's scope to fix;
+    recorded here only so the behavior cannot regress further unnoticed.
+    """
+    monkeypatch.setenv("ROCR_VISIBLE_DEVICES", "3,3,2")
+    assert detect_gpu_count() == 3  # effective_mask_tokens("3,3,2") would say 2

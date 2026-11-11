@@ -218,19 +218,44 @@ echo "prior_session=${PRIOR_SESSION:-none}"
 pgrep -af 'hyperloom optimize' || true
 pgrep -af 'sglang\.launch_server|sglang::|vllm\.entrypoints|vllm serve|VLLM::|Magpie' || true
 
-# VRAM — stdlib-only rocm-smi parse (must run on docker host; no hyperloom import)
+# VRAM — stdlib-only amd-smi parse (must run on docker host; no hyperloom import)
 python3 - <<'PY'
 import json, shutil, subprocess
 
 def unreadable():
     print("gpu_vram=unreadable")
 
-if not shutil.which("rocm-smi"):
+def scalar(block):
+    if isinstance(block, dict):
+        block = block.get("value")
+    if isinstance(block, bool) or not isinstance(block, (int, float)):
+        return None
+    return float(block)
+
+def mib(block):
+    value = scalar(block)
+    if value is None:
+        return None
+    unit = str(block.get("unit") or "MB").strip().upper() if isinstance(block, dict) else "MB"
+    scale = {
+        "B": 1.0 / 1024**2,
+        "KB": 1.0 / 1024,
+        "KIB": 1.0 / 1024,
+        "MB": 1.0,
+        "MIB": 1.0,
+        "GB": 1024.0,
+        "GIB": 1024.0,
+        "TB": 1024.0**2,
+        "TIB": 1024.0**2,
+    }.get(unit)
+    return value * scale if scale is not None else None
+
+if not shutil.which("amd-smi"):
     unreadable()
     raise SystemExit(0)
 try:
     proc = subprocess.run(
-        ["rocm-smi", "--showmeminfo", "vram", "--json"],
+        ["amd-smi", "metric", "--mem-usage", "--json"],
         capture_output=True,
         text=True,
         timeout=20,
@@ -246,32 +271,25 @@ try:
 except (json.JSONDecodeError, ValueError):
     unreadable()
     raise SystemExit(0)
-if not isinstance(data, dict):
+rows_in = data.get("gpu_data") if isinstance(data, dict) else data
+if not isinstance(rows_in, list):
     unreadable()
     raise SystemExit(0)
 
 rows: list[tuple[float, float]] = []
-for fields in data.values():
+for row in rows_in:
+    if not isinstance(row, dict):
+        continue
+    fields = row.get("mem_usage")
     if not isinstance(fields, dict):
         continue
-    raw: dict[str, float] = {}
-    for key, val in fields.items():
-        kl = key.lower()
-        if "vram" not in kl:
-            continue
-        if "used" in kl:
-            raw["used"] = float(val)
-        elif "total" in kl:
-            raw["total"] = float(val)
-    if not raw:
-        continue
     try:
-        used_mib = raw["used"] / 1024**2
-        total_mib = raw["total"] / 1024**2
-    except (KeyError, TypeError, ValueError):
+        used_mib = mib(fields["used_vram"])
+        total_mib = mib(fields["total_vram"])
+    except KeyError:
         unreadable()
         raise SystemExit(0)
-    if total_mib <= 0.0:
+    if used_mib is None or total_mib is None or total_mib <= 0.0:
         unreadable()
         raise SystemExit(0)
     rows.append((used_mib, total_mib))
@@ -720,7 +738,7 @@ when the file is absent, invalid, or stale.
 python3 -m hyperloom optimize \
   --model "$MODEL_PATH" \
   --framework vllm \           # sglang (default) / vllm / atom / xdit / custom
-  --gpu-type MI300X \          # or omit for rocm-smi auto-detect
+  --gpu-type MI300X \          # or omit for amd-smi static --asic auto-detect
   --model-class moe_mla \      # dense / moe_mla / moe_swa / moe_mla_nsa; categorical key for atom seed grid + framework gap token + recipe key + prompt label
   --isl 512 --osl 512 \        # workload shape — pass whatever the prompt states; omitting them uses defaults ISL=1024/OSL=1024
   --conc 64 \                  # client concurrency — pass the prompt's value; default 64
@@ -744,7 +762,7 @@ and the operator's stated value is lost:
 | Framework | `--framework` | `sglang` (default) / `vllm` / `atom` / `xdit` / `custom` — atom is single-node-only; xdit is scriptable diffusion (`img/s`, no serving server); `custom` is an operator-supplied workload and **additionally requires `--framework-path` and `--benchmark-scripts-dir`** (see below) |
 | Custom source tree | `--framework-path` | **Required for `--framework custom`.** The workload's own checkout; patches are authored against it. |
 | Custom bench scripts | `--benchmark-scripts-dir` | **Required for `--framework custom`.** Holds the entrypoint, looked up as `custom_<gpu-type>.sh`. Every knob it reads must be forwarded as `--extra-env`; the throughput unit is whatever its report declares. |
-| GPU type | `--gpu-type` | rocm-smi auto-detect when unset |
+| GPU type | `--gpu-type` | amd-smi static --asic auto-detect when unset |
 | Model class | `--model-class` | categorical key for the deterministic consumers (atom seed grid, framework-agent gap search token, recipe key, prompt label); when unset, Coordinator boot infers and persists it from model metadata or model-path family keywords. For richer advisory model context see Step 1.5 (`model_arch.json`) |
 | Input seq length | `--isl` | Pass the prompt's ISL. Default `1024` when omitted. |
 | Output seq length | `--osl` | Pass the prompt's OSL. Default `1024` when omitted. |
@@ -938,7 +956,7 @@ Two fields in each YAML are **fallback only** — the optimizer overrides
 them at runtime:
 
 - `benchmark.model` <- `--model` / `$MODEL_PATH`
-- `benchmark.runner_type` <- `--gpu-type` / `$GPU_TYPE` / rocm-smi auto-detect
+- `benchmark.runner_type` <- `--gpu-type` / `$GPU_TYPE` / amd-smi static --asic auto-detect
 
 `benchmark.benchmark_script` is deliberately NOT set in the shipped
 YAMLs. At materialize time Hyperloom pins it to
@@ -1160,8 +1178,7 @@ full env-var set, and `docs/reference/session-breakdown.md` for the emitted
 ## GPU Runner Type
 
 Pick the GPU explicitly with `--gpu-type` or `$GPU_TYPE`; without
-either, the optimizer auto-detects via `rocm-smi --showproductname`
-(falling back to `torch.cuda.get_device_properties(0).gcnArchName`).
+either, the optimizer auto-detects via `amd-smi static --asic`, using the reported market name and gfx target.
 
 ```bash
 python3 -m hyperloom optimize --gpu-type mi355x --model "$MODEL_PATH" --max-hours 2

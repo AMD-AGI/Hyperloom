@@ -233,7 +233,7 @@ the baseline benchmark fails with VRAM allocation errors.
 **Fix**:
 
 1. Confirm no zombie inference server is holding VRAM:
-   `rocm-smi --showmemuse` then kill stragglers with
+   `amd-smi metric --mem-usage` then kill stragglers with
    `pkill -f sglang.launch_server` (or `vllm`).
 2. Bump `TP` (for example, 4 → 8) so weights and KV cache fit.
 3. Lower `MAX_MODEL_LEN` to the smallest length your workload actually

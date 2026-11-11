@@ -15,44 +15,44 @@ case are covered by ``test_coverage_margin3_unit.py``'s
 
 from __future__ import annotations
 
-import subprocess
+import json
 from types import SimpleNamespace
 
 import pytest
 
+from hyperloom.common import amd_smi
 from hyperloom.inference_optimizer import gpu_types
 from hyperloom.inference_optimizer.recipe_snapshot_constants import (
     kb_hardware_slug,
     recipe_canonical_id,
 )
 
-# Verbatim `rocm-smi --showproductname` from a Ryzen AI Max+ 395 (Strix Halo).
-# The Card Series has no "AMD " prefix on this build; others print "AMD Radeon
-# 8060S Graphics", which is why the needle starts at "RADEON".
-STRIX_HALO_ROCM_SMI = """\
-============================ ROCm System Management Interface ============================
-====================================== Product Info ======================================
-GPU[0]\t\t: Card Series: \t\tRadeon 8060S Graphics
-GPU[0]\t\t: Card Model: \t\t0x1586
-GPU[0]\t\t: Card Vendor: \t\tAdvanced Micro Devices, Inc. [AMD/ATI]
-GPU[0]\t\t: Card SKU: \t\tSTRXLGEN
-GPU[0]\t\t: Subsystem ID: \t0x0124
-GPU[0]\t\t: Device Rev: \t\t0xc1
-GPU[0]\t\t: Node ID: \t\t1
-GPU[0]\t\t: GUID: \t\t11948
-GPU[0]\t\t: GFX Version: \t\tgfx1151
-==========================================================================================
-================================== End of ROCm SMI Log ===================================
-"""
+# Verbatim `amd-smi static --asic --json` from a Ryzen AI Max+ 395 (Strix Halo). market_name has no "AMD " prefix
+# on some builds, others print "AMD Radeon 8060S Graphics", which is why the needle starts at "RADEON".
+STRIX_HALO_AMD_SMI_ASIC = {
+    "gpu_data": [
+        {
+            "gpu": 0,
+            "asic": {
+                "market_name": "Radeon 8060S Graphics",
+                "vendor_id": "0x1002",
+                "device_id": "0x1586",
+                "num_compute_units": 40,
+                "target_graphics_version": "gfx1151",
+            },
+        }
+    ]
+}
 
 
 @pytest.fixture
-def stub_rocm_smi(monkeypatch):
-    """Return a callable that pins ``rocm-smi`` stdout for the probe."""
+def stub_amd_smi(monkeypatch):
+    """Return a callable that pins ``amd-smi static --asic --json`` stdout for the probe."""
 
     def _install(stdout: str):
+        monkeypatch.setattr(amd_smi.shutil, "which", lambda _n: "/opt/rocm/bin/amd-smi")
         monkeypatch.setattr(
-            subprocess,
+            amd_smi.subprocess,
             "run",
             lambda *_a, **_k: SimpleNamespace(stdout=stdout, stderr="", returncode=0),
         )
@@ -61,9 +61,11 @@ def stub_rocm_smi(monkeypatch):
 
 
 @pytest.mark.parametrize("card_series", ["Radeon 8060S Graphics", "AMD Radeon 8060S Graphics"])
-def test_probe_reads_radeon8060s_from_the_product_name(stub_rocm_smi, card_series):
+def test_probe_reads_radeon8060s_from_the_product_name(stub_amd_smi, card_series):
     """Both spellings are in the wild, so the needle must not anchor on "AMD"."""
-    stub_rocm_smi(STRIX_HALO_ROCM_SMI.replace("Radeon 8060S Graphics", card_series))
+    payload = json.loads(json.dumps(STRIX_HALO_AMD_SMI_ASIC))
+    payload["gpu_data"][0]["asic"]["market_name"] = card_series
+    stub_amd_smi(json.dumps(payload))
     assert gpu_types._autodetect_gpu_type() == "radeon8060s"
 
 
