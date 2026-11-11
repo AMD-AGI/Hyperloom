@@ -28,7 +28,7 @@ In the Hyperloom paths below, `src/hyperloom_multibranch/` is left out.
 | **The benchmark's rules** | Writes its rules into the config's `directives`, each starting `Host rule (MB)`: the workload it holds fixed and the variables it owns, how it keeps a change, its accuracy rule. | Every agent reads them. The dossier copies them into part 4's `## The benchmark's rules` table. |
 | **The optimization loop** | None. | Agent turns, its own server, the bench, GSM8K and the short-prompt check, and its own KEEP or REVERT. |
 | **A KEEP** | Imports the snapshot, tests it on its own measurement pool, judges it, lands it on the branch and merges it into integration. | Writes an atomic snapshot to `keeps/NNNN/`. |
-| **Numbers of record** | MB's toolbox: InferenceX or AgentX, through InferenceSuite. | Its own measurements decide only its own KEEPs. |
+| **Numbers of record** | MB's toolbox: InferenceX or AgentX, through inference_suite. | Its own measurements decide only its own KEEPs. |
 | **Feedback** | Rewrites `component.notes` whenever integration moves. Reads the ledger's FACT and DEAD_END records as learnings. | Reads the notes at every iteration. Writes the ledger. |
 | **Liveness** | Polls every 5 s. A stall is 30 min with no output, transcript or file write. Stops with SIGTERM, then SIGKILL after 30 s. | Writes a heartbeat every 5 min, exits within 25 s of SIGTERM, and records why it ended. |
 | **LLM** | Passes its environment on: all of it locally; in a hosted sandbox, only the gateway, proxy and CA variables. | Its agents use that environment. |
@@ -89,6 +89,10 @@ In the Hyperloom paths below, `src/hyperloom_multibranch/` is left out.
    - **The test:** on MB's measurement pool, at its operating point.
    - **The rule gate:** for InferenceX, a gain over the parent above max(0.6 %, 2× the spread), then a confirm on another node with accuracy.
    - **Landing:** a KEEP that passes is committed on the branch, and the integrator merges it into integration after its own test, confirm and regression set.
+   - **A KEEP that changes framework source** imports only if MB pinned the framework at session start.
+     - **The pin:** `FRAMEWORK_REPO_PATH` (and `VLLM_REPO_PATH` for vLLM) names a git checkout with a remote, at the commit the image's framework was built from.
+     - **Without it,** the session runs, but MB refuses every source KEEP with "vllm is a new component; give its upstream repository and commit" (`contracts/recipe.py`), and says so only in a branch note. Flag and environment KEEPs still import.
+     - **The fix needs a new session:** MB fixes the root at session start. Check the variable before the run, as a pip-installed framework has no checkout of its own.
    - **Code:** `specialist/agent_import.py`, `specialist/judging.py`, `rulegate/`, `scheduling/integrator.py`.
 10. **The end of a branch.**
     - **Arbor:** exits at its deadline.
@@ -101,19 +105,18 @@ In the Hyperloom paths below, `src/hyperloom_multibranch/` is left out.
 ## Several operating points
 
 Each concurrency is its own MB session: its own PRELUDE, Arbor(s), map from its own dossier pass, gate, integration
-and FINAL. No map is split across the points. `hyperloom-multibranch points` runs them in two stages, so no node waits
-for a person:
+and FINAL. No map is split across the points. For a review that keeps no node waiting for a person, a point runs in
+two sessions:
 
-1. **`points map`:** each point runs `run --stop-after-map`. That is PRELUDE and the map step, kept in
-   `MB-agent-map/` (the map, the dossier); then it stops with reason `mapped`. It never pauses.
-2. **The review, offline:** `points approve` or `points reject`, per point, on the points directory.
-3. **`points run`:** the approved points run with their reviewed map and dossier (`--agent-directions`,
-   `--agent-dossier`) and `--no-review-gate`.
+1. **`run --stop-after-map`:** PRELUDE and the map step, kept in `MB-agent-map/` (the map, the dossier); then it stops
+   with reason `mapped`. It never pauses.
+2. **The review, offline,** of that map and dossier.
+3. **The run:** a second session with the reviewed map and dossier (`--agent-directions`, `--agent-dossier`) and
+   `--no-review-gate`.
 
-On a shared node, each point gets its own container (`--slot`), cards and Arbor port base (`--agent-port`). Each
-point's Arbor gets its own point's `Host rule` directives. Each point ends with its own recipe; nothing merges across
-the points. The single-session review, in Hyperloom's
-docs: `docs/how-to/multibranch-review-gate.md`.
+On a shared node, each session gets its own container, cards and Arbor port base (`--agent-port`). Each point's
+Arbor gets its own point's `Host rule` directives. Each point ends with its own recipe; nothing merges across the
+points. The single-session review, in Hyperloom's docs: `docs/how-to/multibranch-review-gate.md`.
 
 ## What passes between them
 
@@ -137,7 +140,7 @@ docs: `docs/how-to/multibranch-review-gate.md`.
 
 | Arbor exits | MB |
 |---|---|
-| 0: `done`, `deadline`, `map_exhausted`, `sigterm`, `aborted` or `review_rejected` | Reads the reason, learns the ledger, settles the pending KEEP, stops the branch. |
+| 0: `done`, `deadline`, `map_exhausted`, `sigterm`, `aborted` or `review_rejected` (and, from `arbor master` and `arbor worker`, `ordered` and `reported`: [master-worker.md](master-worker.md)) | Reads the reason, learns the ledger, settles the pending KEEP, stops the branch. |
 | 0 `mapped` (the dossier pass) | Takes the map and the dossier. |
 | 2 (refused) | Never restarts it. The branch ends with the reasons from `component_refused.json`. |
 | 3 (`unreachable`), or any other non-zero | Restarts it with the same command and the same deadline. It gives up after 3 crashes in 10 min, or 2 stalls in a row. |
@@ -151,9 +154,9 @@ docs: `docs/how-to/multibranch-review-gate.md`.
 - **No merge across operating points:** each point's session ends with its own recipe. A rule that combines them
   (for example, keep a change only if no point regresses) is not built.
 - **A dropped flag of the resolved launch:** a KEEP that runs without a flag the `--agent-launch` file sets now
-  removes it, and the recipe keeps the removal (`LaunchConfig.remove_args`, `b9d65167d` and
-  after). Only on AgentX, though: there the round removes it from the resolved launch; on InferenceX such a removal is refused.
-- **No profile on CUDA-graph runs:** a branch's `component.profile` takes op shares only. On a run where TraceLens
+  removes it, and the recipe keeps the removal (`LaunchConfig.remove_args`, Hyperloom `b9d65167d` and after). Only
+  on AgentX, though: there the round applies it; on InferenceX such a removal is refused.
+- **No profile on graph-captured runs:** a branch's `component.profile` takes op shares only. On a run where TraceLens
   degraded, the branches get none, though the dossier pass got kernel shares.
 - **One Arbor without the review:** with `--no-review-gate` and no `--agent-directions`, a lone Arbor gets no
   dossier pass and makes its own dossier inside its branch.

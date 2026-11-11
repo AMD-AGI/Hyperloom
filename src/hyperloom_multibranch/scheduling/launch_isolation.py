@@ -12,7 +12,8 @@ from a chooser that path does not call:
 - an agent or dev sandbox on this host (:class:`~hyperloom_multibranch.specialist.agent_sandbox.LocalAgentSandbox`)
   runs its commands as the app's own account and asks no chooser, so it runs unconfined (:data:`SANDBOX_UNCONFINED`);
 - a test measured on this host's cards runs in a sandbox the local toolbox's provider makes, which names no account
-  for it (:class:`~hyperloom.sandbox.local.ProcessUsers`), so it runs unconfined (:data:`TESTS_UNCONFINED`).
+  for it and confines it by the runner's plan: under bubblewrap where
+  :func:`~hyperloom.sandbox.confined.local_test_isolation` gives it, else unconfined, or refused in a hosted run.
 
 A session measured in a grant's sandboxes runs its agent and dev sandboxes and its tests there (:data:`HOSTED`), not on
 this host.
@@ -36,6 +37,7 @@ from hyperloom.common.agent_isolation import (
 )
 from hyperloom.common.env_safety import RunAsError
 from hyperloom.orchestrator.specialists.launch_env import resolve_launch_isolation
+from hyperloom.sandbox.confined import local_test_isolation
 
 log = logging.getLogger(__name__)
 
@@ -43,8 +45,6 @@ log = logging.getLogger(__name__)
 HOSTED = "hosted"
 #: Why an agent or dev sandbox on this host is not isolated.
 SANDBOX_UNCONFINED = "an agent or dev sandbox on this host runs its commands as the app's own account, unconfined"
-#: Why a test on this host's cards is not isolated.
-TESTS_UNCONFINED = "a test on this host runs as the app's own account, unconfined: its provider names no account for it"
 
 
 @dataclass(frozen=True)
@@ -89,7 +89,7 @@ def launch_isolation(*, local: bool) -> LaunchIsolation:
 
     specialists, why = _specialist_isolation()
     where, here = _local_sandbox_isolation() if local else (HOSTED, ())
-    tests, test_why = _local_test_isolation() if local else (HOSTED, ())
+    tests, test_why = local_test_isolation() if local else (HOSTED, ())
     reasons = tuple(dict.fromkeys((*why, *here, *test_why)))
     return LaunchIsolation(specialists, where, tests, isolation_required(), reasons)
 
@@ -116,13 +116,6 @@ def _local_sandbox_isolation() -> tuple[str, tuple[str, ...]]:
     return NONE, (SANDBOX_UNCONFINED,)
 
 
-def _local_test_isolation() -> tuple[str, tuple[str, ...]]:
-    """How a test on this host's cards is launched, and why it is not isolated: unconfined, as the local toolbox's
-    provider names no account for its test sandboxes, in a hosted run too."""
-
-    return NONE, (TESTS_UNCONFINED,)
-
-
 def announce_launch_isolation(isolation: LaunchIsolation) -> None:
     """Say how a session launches its agents, once at its start: one WARNING when some run unconfined on this host or
     would be refused, naming which and why, else one INFO line."""
@@ -138,7 +131,6 @@ def announce_launch_isolation(isolation: LaunchIsolation) -> None:
 __all__ = [
     "HOSTED",
     "SANDBOX_UNCONFINED",
-    "TESTS_UNCONFINED",
     "LaunchIsolation",
     "announce_launch_isolation",
     "launch_isolation",

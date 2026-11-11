@@ -32,16 +32,16 @@ validator:
 workload:
   kind: document
 
-skills: [dossier, profiler, knowledge-collector]
+skills: [dossier-v1, profiler, knowledge-collector]
 
 tools:
   score: "validator/score_dossier.py"
 
 constraints:
-  - "THE DELIVERABLES ARE reports/NN.uK-<part>.md, the dossier skill's update round (.claude/skills/dossier/SKILL.md, 'Updating the dossier'); the directives say which parts this half writes. inputs/ is the evidence and is READ-ONLY: the correctness check fails any draft that changes it."
+  - "THE DELIVERABLES ARE reports/NN.uK-<part>.md, the dossier skill's update round (.claude/skills/dossier-v1/SKILL.md, 'Updating the dossier'); the directives say which parts this half writes. inputs/ is the evidence and is READ-ONLY: the correctness check fails any draft that changes it."
   - "READ BEFORE YOU WRITE: knowledge/parallel-dossier.md lists the inputs. inputs/tree/ is the round's base tree, the code part 3 reads; inputs/lanes/<lane>/ is what each lane of the last round did (outcomes, findings, artifacts); inputs/ROUND.md is the last round's record, with its drops and conflicts marked reopenable; inputs/dossier/ is the run's dossier."
   - "EVERY NUMBER CITES ITS SOURCE in the inputs: a part, a lane's iteration, a ledger id, the bar, the profile. A number no input supports is `unknown: <what would measure it>`."
   - "THE MAP IS THE ROUND'S WORK: part 11 ends in its ## Map line, with the lane fields (lane, plan, depends_on, nodes, upstream). A direction that died earlier in the run comes back only with reopens {round, why}, on 10.uK's evidence; nothing else reopens."
-  - "RUN THE CHECKS YOURSELF before DONE: python3 packs/parallel-dossier/validator/score_dossier.py <workspace>, python3 .claude/skills/dossier/check-dossier.py <workspace>/reports --round uK --no-index, python3 -m arbor.directions check <workspace>/reports/11.uK-directions.md --dossier <workspace>/reports."
+  - "RUN THE CHECKS YOURSELF before DONE: python3 packs/parallel-dossier/validator/score_dossier.py <workspace>, python3 .claude/skills/dossier-v1/check-dossier.py <workspace>/reports --round uK --no-index, python3 -m arbor.directions check <workspace>/reports/11.uK-directions.md --dossier <workspace>/reports."
   - "ONE PART OR ONE CONCERN PER ITERATION, so the critic can judge it. End with `DONE: <part>: <what changed>`. Declare CLASS: B when the score rises, A when it holds and the draft is more correct, PROBE when you only read and record LEDGER findings."
   - "THIS CAMPAIGN HAS NO NODE. Do not start a server, submit a job, ssh anywhere or run anything on a GPU; the profile is measured for you and lands in inputs/profile/ before part B."

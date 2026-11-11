@@ -19,6 +19,7 @@ from __future__ import annotations
 
 from collections import Counter
 from collections.abc import Iterable, Mapping
+from dataclasses import replace
 
 from hyperloom_multibranch.contracts.blackboard.records import QuarantineEvent
 from hyperloom_multibranch.contracts.blackboard.vocab import QuarantineAction
@@ -91,6 +92,24 @@ class Quarantine:
                 node=node, action=QuarantineAction.QUARANTINE, reason=reason, gpu_ids=tuple(sorted(gpu_ids))
             )
         )
+
+    async def return_cards(self, node: str, gpu_ids: Iterable[int], reason: str) -> None:
+        """Record cards of ``node`` that :meth:`add_cards` recorded lost as back in service.
+
+        A lift names one recorded card set exactly, so every set holding any of them is lifted whole and the rest of
+        it is recorded lost again.
+        """
+
+        back = frozenset(gpu_ids)
+        for event in await self.cards():
+            if event.node != node or back.isdisjoint(event.gpu_ids):
+                continue
+            await self._health.record_quarantine(
+                QuarantineEvent(node=node, action=QuarantineAction.LIFT, reason=reason, gpu_ids=event.gpu_ids)
+            )
+            kept = tuple(gpu for gpu in event.gpu_ids if gpu not in back)
+            if kept:
+                await self._health.record_quarantine(replace(event, gpu_ids=kept))
 
     async def lift(self, node: str, reason: str) -> bool:
         if node not in self._nodes:
