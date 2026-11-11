@@ -13,6 +13,7 @@ import stat
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Iterable, MutableMapping, Sequence
+from hyperloom_common.credential_names import env_name_spelled_by, is_credential_env_name
 from hyperloom_common.env import env_str
 from hyperloom_common.git_safety import trusted_admin_dir
 from hyperloom_common.fs_utils import rewrite_lines_nofollow
@@ -395,60 +396,10 @@ def is_secret_shaped_env_name(key: object) -> bool:
     return any(fragment in upper for fragment in _SECRET_NAME_FRAGMENTS)
 
 
-# Env-var name fragments whose value is masked before an env snapshot leaves this process. Shared with the Langfuse
-# session_start snapshot, which matches every marker as a substring.
-SENSITIVE_ENV_NAME_MARKERS: tuple[str, ...] = (
-    "SECRET",
-    "TOKEN",
-    "PASSWORD",
-    "PASSWD",
-    "PASSPHRASE",
-    "CREDENTIAL",
-    "PRIVATE_KEY",
-    "PRIVATEKEY",
-    "API_KEY",
-    "APIKEY",
-    "ACCESS_KEY",
-    "SECRET_KEY",
-    "AUTH",
-    "SIGNATURE",
-    "HEADERS",
-    "CUSTOM_HEADERS",
-)
-
-# Knobs whose names carry a credential marker in a phrase that can also name one (an auth token's cache, a header that
-# carries Authorization), matched whole in the form :func:`is_credential_name` compares.
-_CREDENTIAL_MARKED_KNOBS: frozenset[str] = frozenset(
-    {"SGLANG_CHAT_SEGMENT_TOKEN_CACHE", "SGLANG_CHAT_SEGMENT_TOKEN_CACHE_MAX_TOKENS", "ALLOWED_HEADERS"}
-)
-# As a substring TOKEN also hits counts and tokenizers (``MAX_NUM_BATCHED_TOKENS``, ``TOKENIZERS_PARALLELISM``), so it
-# names a credential only where a word ends in it (``HF_TOKEN``, ``HFTOKEN``, ``GITHUB_TOKEN_BACKUP``), and never in a
-# phrase that sizes, selects or balances tokens (``SGLANG_USE_AITER_FP8_PER_TOKEN``, ``--long-prefill-token-threshold``,
-# ``SGLANG_SIMULATE_ACC_TOKEN_MODE``, ``--prefill-delayer-token-usage-low-watermark``, ``DEEPEP_COMBINE_TOKEN_BALANCED``).
-_SUBSTRING_MARKERS_EXCEPT_TOKEN: tuple[str, ...] = tuple(m for m in SENSITIVE_ENV_NAME_MARKERS if m != "TOKEN")
-_TOKEN_WORD_END_RE = re.compile(r"TOKEN(?=_|$)")
-_TOKEN_KNOB_PHRASE_RE = re.compile(
-    r"(?:^|_)(?:PER_TOKEN|TOKEN_(?:THRESHOLD|NUM|BUDGETS?|PROB|IDS|MAP|MODE|REUSE|USAGE|BALANCED))(?=_|$)"
-)
-_KEY_LAST_SEGMENT_RE = re.compile(r"(?:^|_)KEY$")
-_CAMEL_BOUNDARY_RE = re.compile(r"(?<=[a-z0-9])(?=[A-Z])")
-
-
 def is_credential_name(name: object) -> bool:
-    """True when an env name or a flag says its value is a credential.
-
-    A flag is compared as the env name it spells (``--hf-auth`` and ``--hfAuth`` as ``HF_AUTH``), so an env and a flag
-    of the same name are never classified apart.
-    """
-    text = str(name or "").strip().lstrip("-")
-    upper = _CAMEL_BOUNDARY_RE.sub("_", text).replace("-", "_").upper()
-    if upper in BENCHMARK_SECRET_ENV_NAMES:
-        return True
-    if upper in _CREDENTIAL_MARKED_KNOBS:
-        return False
-    if any(marker in upper for marker in _SUBSTRING_MARKERS_EXCEPT_TOKEN) or _KEY_LAST_SEGMENT_RE.search(upper):
-        return True
-    return bool(_TOKEN_WORD_END_RE.search(_TOKEN_KNOB_PHRASE_RE.sub("", upper)))
+    """True when an env name or a flag says its value is a credential: one of Hyperloom's own secrets, or any name
+    :func:`~hyperloom_common.credential_names.is_credential_env_name` classifies as one."""
+    return env_name_spelled_by(name) in BENCHMARK_SECRET_ENV_NAMES or is_credential_env_name(name)
 
 
 def _is_credential_flag(word: str) -> bool:
@@ -967,7 +918,6 @@ __all__ = [
     "LAUNCH_PROVIDED_ENV_NAMES",
     "LAUNCH_PROVIDED_ENV_PREFIXES",
     "OPERATOR_EXTRA_ENV_VAR",
-    "SENSITIVE_ENV_NAME_MARKERS",
     "build_benchmark_env",
     "credential_arg_indices",
     "env_file_list_elements",
