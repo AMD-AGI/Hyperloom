@@ -379,7 +379,8 @@ def _replay(
 
     def live(now: float) -> Stop | None:
         follower.check()
-        hear(now)
+        # The follower's read can mark FINISHED after ``now``; a window closed at ``now`` would end before it.
+        hear(time.monotonic())
         return activity.check(now)
 
     child = spawn(invocation.argv, env, layout.agentx_client_log)
