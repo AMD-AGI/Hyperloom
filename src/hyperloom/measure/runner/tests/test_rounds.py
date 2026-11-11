@@ -6,7 +6,10 @@
 from __future__ import annotations
 
 import json
+import socket
 from pathlib import Path
+
+import pytest
 
 from hyperloom.contracts.measurement import AccuracyValue, SandboxFacts
 from hyperloom.measure.runner.rounds import ROUNDS_FILE, WARMUP_DIR, rounds_document, write_rounds
@@ -15,6 +18,13 @@ from hyperloom.measure.socket import RoundOutcome, TestOutcome
 
 def _outcome(*rounds: RoundOutcome) -> TestOutcome:
     return TestOutcome(0, "[]", "", rounds, SandboxFacts(sandbox_id="x"), request_id="r")
+
+
+@pytest.fixture(autouse=True)
+def host(monkeypatch: pytest.MonkeyPatch) -> str:
+    """The host the runner runs on, as the round entries name it."""
+    monkeypatch.setattr(socket, "gethostname", lambda: "gpu-host-7")
+    return "gpu-host-7"
 
 
 def test_each_round_is_listed_with_its_phase_and_a_directory_relative_to_the_files(tmp_path: Path) -> None:
@@ -26,9 +36,22 @@ def test_each_round_is_listed_with_its_phase_and_a_directory_relative_to_the_fil
         RoundOutcome(1, "accuracy", variant / "benchmark_sglang_1", 3),
     )
     assert rounds_document(outcome, files) == [
-        {"point": 0, "phase": "warmup", "dir": f"variant_00_test/{WARMUP_DIR}", "returncode": 0},
-        {"point": 0, "phase": "measure", "dir": "variant_00_test/benchmark_sglang_1", "returncode": 0},
-        {"point": 1, "phase": "accuracy", "dir": "variant_00_test/benchmark_sglang_1", "returncode": 3, "accuracy": []},
+        {"point": 0, "phase": "warmup", "dir": f"variant_00_test/{WARMUP_DIR}", "returncode": 0, "host": "gpu-host-7"},
+        {
+            "point": 0,
+            "phase": "measure",
+            "dir": "variant_00_test/benchmark_sglang_1",
+            "returncode": 0,
+            "host": "gpu-host-7",
+        },
+        {
+            "point": 1,
+            "phase": "accuracy",
+            "dir": "variant_00_test/benchmark_sglang_1",
+            "returncode": 3,
+            "host": "gpu-host-7",
+            "accuracy": [],
+        },
     ]
 
 
@@ -43,7 +66,7 @@ def test_the_file_is_written_into_the_output_files(tmp_path: Path) -> None:
     files = tmp_path / "files"
     write_rounds(files, _outcome(RoundOutcome(0, "measure", files / "a", 0)))
     assert json.loads((files / ROUNDS_FILE).read_text()) == [
-        {"point": 0, "phase": "measure", "dir": "a", "returncode": 0}
+        {"point": 0, "phase": "measure", "dir": "a", "returncode": 0, "host": "gpu-host-7"}
     ]
 
 

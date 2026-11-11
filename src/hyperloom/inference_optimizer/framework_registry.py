@@ -88,6 +88,10 @@ EXPERT_PARALLEL_FLAGS: dict[str, tuple[str, tuple[str, ...], bool]] = {
     "atom": ("--enable-expert-parallel", ("--enable-expert-parallel",), False),
 }
 
+# Server option that sets the engine's random seed. sglang draws a fresh one at
+# every start when it is not given; ATOM takes none. Frameworks absent here have none.
+SEED_FLAGS: dict[str, str] = {"sglang": "--random-seed", "vllm": "--seed"}
+
 
 def names() -> tuple[str, ...]:
     """Return the canonical tuple of supported framework names."""
