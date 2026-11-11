@@ -5,15 +5,16 @@
 ``stage`` the tools a round runs, ``publish`` them where several hosts share them.
 
 ``run --config <config.yaml> --run-dir <dir>`` runs the round into ``<dir>``, prints its ``report.json`` path and
-exits 0 when the round completed, 1 when it did not. SIGTERM and SIGINT cancel the round, which still reaps what it
-started and writes its report. ``stop --pid-dir <dir>`` prints what it reaped as JSON and exits 1 while a process
+exits 0 when the round completed, 1 when it did not; a relative path there or in the config is read below the
+caller's directory, and a relative ``model_path`` only when it names something there. SIGTERM and SIGINT cancel the
+round, which still reaps what it started and writes its report. ``stop --pid-dir <dir>`` prints what it reaped as JSON and exits 1 while a process
 outlives SIGKILL. ``resolve --query <query.json> --gpus <n> --out <base_launch.json> [--inferencex-commit <sha>]``
 reads the sources once, InferenceX at ``<sha>`` instead of the head of its ``main`` when given, and writes the base
 they give, or exits 2 naming why each source holds none, or why ``<sha>`` is refused: InferenceX has no such commit, or
-it lacks code the resolver runs. ``stage --tool-cache <dir> [--source
-<InferenceX checkout>]`` stages the pinned tools (:func:`inference_suite.staging.ensure_staged`) and prints the
+it lacks code the resolver runs, or a source breaks its own format. ``stage --tool-cache <dir> [--source
+<InferenceX repository>]`` stages the pinned tools (:func:`inference_suite.staging.ensure_staged`) and prints the
 manifest's sha256; it stages nothing into a cache that already verifies, and exits 2 with ``staging_missing`` when it
-cannot stage or the cache is damaged. ``publish --stagings <dir> [--source <InferenceX checkout>]`` publishes the
+cannot stage or the cache is damaged. ``publish --stagings <dir> [--source <InferenceX repository>]`` publishes the
 staging of the pins in force as ``<dir>/<key>`` (:func:`inference_suite.staging.publish`) and prints that directory,
 or exits 2 with ``staging_missing``. Exit 2 is also a document that breaks its contract.
 """
@@ -35,6 +36,7 @@ from inference_suite.contracts.base_launch import LaunchQuery
 from inference_suite.contracts.config import SuiteConfig
 from inference_suite.contracts.layout import RunDirError
 from inference_suite.contracts.report import FailedStep, RunStatus
+from inference_suite.recipe.model import RecipeSourceError
 from inference_suite.recipe.resolve import Miss, resolve_base
 from inference_suite.recipe.sources import InferencexCommitRefused, fetch_sources
 from inference_suite.recipe.user_file import parse_user_file
@@ -71,9 +73,44 @@ def _refused(detail: str) -> int:
 
 
 def read_config(path: Path, run_dir: Path) -> SuiteConfig:
-    """The config at ``path``, writing its round into ``run_dir``."""
+    """The config at ``path``, writing its round into ``run_dir``, its relative paths anchored at the caller's
+    directory: the server, the harness and the probes start elsewhere."""
     config = SuiteConfig.from_document(yaml.safe_load(path.read_text(encoding=_UTF8)))
-    return replace(config, paths=replace(config.paths, run_dir=str(run_dir)))
+    return _anchored(replace(config, paths=replace(config.paths, run_dir=str(run_dir))), Path.cwd())
+
+
+def _anchored(config: SuiteConfig, root: Path) -> SuiteConfig:
+    def under(path: str) -> str:
+        return str(root / path)
+
+    server = config.server
+    model_path = server.model_path
+    if (root / model_path).exists():
+        model_path = under(model_path)
+    python = server.framework_python
+    if Path(python).parent != Path():
+        python = under(python)
+    pid_dir = config.lifecycle.pid_dir
+    mlperf = config.mlperf
+    return replace(
+        config,
+        server=replace(
+            server,
+            base=replace(server.base, path=under(server.base.path)),
+            model_path=model_path,
+            framework_python=python,
+        ),
+        lifecycle=replace(config.lifecycle, pid_dir=None if pid_dir is None else under(pid_dir)),
+        paths=replace(config.paths, run_dir=under(config.paths.run_dir), tool_cache=under(config.paths.tool_cache)),
+        mlperf=None
+        if mlperf is None
+        else replace(
+            mlperf,
+            dataset=under(mlperf.dataset),
+            tokenizer=under(mlperf.tokenizer),
+            endpoints_dir=under(mlperf.endpoints_dir),
+        ),
+    )
 
 
 def _run(args: argparse.Namespace) -> int:
@@ -113,9 +150,9 @@ def _resolve(args: argparse.Namespace) -> int:
         return _refused(f"{FailedStep.CONFIG_INVALID.value}: {exc}")
     try:
         snapshot = fetch_sources(query, user_file=user_file, inferencex_commit=args.inferencex_commit)
-    except InferencexCommitRefused as exc:
+        resolved = resolve_base(query, snapshot, gpus=args.gpus)
+    except (InferencexCommitRefused, RecipeSourceError) as exc:
         return _refused(str(exc))
-    resolved = resolve_base(query, snapshot, gpus=args.gpus)
     if isinstance(resolved, Miss):
         for reason in resolved.reasons():
             print(reason, file=sys.stderr)
@@ -171,7 +208,7 @@ def _parser() -> argparse.ArgumentParser:
     stage_parser = commands.add_parser("stage", help="stage the pinned tools into a tool cache unless it holds them")
     stage_parser.add_argument("--tool-cache", type=Path, required=True, help="the tool cache rounds verify")
     stage_parser.add_argument(
-        "--source", type=Path, help="an InferenceX checkout at the pin; fetched at the pin when omitted"
+        "--source", type=Path, help="an InferenceX repository holding the pinned commit; fetched when omitted"
     )
     stage_parser.set_defaults(handler=_stage)
     publish_parser = commands.add_parser(
@@ -179,7 +216,7 @@ def _parser() -> argparse.ArgumentParser:
     )
     publish_parser.add_argument("--stagings", type=Path, required=True, help="the directory published stagings live in")
     publish_parser.add_argument(
-        "--source", type=Path, help="an InferenceX checkout at the pin; fetched at the pin when omitted"
+        "--source", type=Path, help="an InferenceX repository holding the pinned commit; fetched when omitted"
     )
     publish_parser.set_defaults(handler=_publish)
     return parser

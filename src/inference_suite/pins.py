@@ -31,8 +31,8 @@ INFERENCEX_CLIENT_COMMIT = "41cc713af82bc69204f572e03c2dd8f60485e6ac"
 INFERENCEX_TOOL = "inferencex"
 #: Where staging fetches InferenceX at its pin when it is given no checkout.
 INFERENCEX_REPO_URL = "https://github.com/SemiAnalysisAI/InferenceX.git"
-#: The lm-eval release the eval scores with, installed into the interpreter that runs rounds. The ``runner`` extra in
-#: ``pyproject.toml`` pins the same release for the sealed runner's lock.
+#: The lm-eval release the eval scores with, installed into the interpreter that runs rounds with the hashes the sealed
+#: runner's lock (``requirements/runner.lock``, compiled from the ``runner`` extra) lists for it and its dependencies.
 LM_EVAL_VERSION = "0.4.13"
 #: The distribution lm-eval installs as, read back in the interpreter the eval process runs under.
 LM_EVAL_DISTRIBUTION = "lm_eval"

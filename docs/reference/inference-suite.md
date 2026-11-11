@@ -32,9 +32,13 @@ gives the base:
 An AgentX session that no recipe and no `--reference-script` serves is refused.
 When a source cannot be read, a fixed session runs the default table, unless
 InferenceX is pinned (below), and an AgentX session is refused. A pinned fixed
-session no recipe serves is refused too, naming why each source missed. Repositories are read at the head of their `main` and recorded
-with that commit; the vLLM recipes site has no commit and is recorded as the
-response it was read from.
+session no recipe serves is refused too, naming why each source missed. Repositories are read at the head of their `main`. The base's
+`upstream` list records the revision of every source read, whether or not it gave
+the launch: the commit of InferenceX, the SGLang cookbook and ATOM's catalog, the
+commit of the Hugging Face model whose card was read, and, since the vLLM recipes
+site publishes no commit and its renderings carry no ETag, the URL and body sha256
+of each response it gave. `upstream` is not part of the digest, and a
+`base_launch.json` written without it reads with an empty list.
 
 To match a run made at an older InferenceX, pin it with `--inferencex-commit
 <sha>` (`resolve` and `hyperloom optimize` both take it): a full sha, or a prefix
@@ -53,12 +57,21 @@ when the commit lacks a function the resolver runs from InferenceX's own code
 lacks. To run on such a commit, resolve the base where its code was run and hand
 the session the frozen `base_launch.json` as `--reference-script`.
 
-A launch script is read, never run. It must launch the session's framework and fix
-every flag in its own text: a flag whose value names a shell variable, or a
-`# hyperloom-launch-controls:` line, is refused.
+A launch script is read, never run. It must start one server of the session's
+framework, on a line that is not a comment, and fix every flag in its own text: a
+second server, a flag whose value names a shell variable, or a
+`# hyperloom-launch-controls:` line, is refused. Options are read with one dash or
+two (`-tp 8`, `--tp 8`).
 
 A launch script, frozen base or default row that needs more GPUs than `--gpus` is
 refused, naming both counts.
+A frozen base resolved for another model, workload or framework, or for a board
+of another architecture or HBM capacity than the session's, is refused, naming both
+values.
+
+An InferenceX entry of the session's model that its config cannot place (a runner
+on no board label, a missing key) is that entry's miss; entries of other models are
+not read.
 
 A source may hold several launches for one point. The base takes the one with the
 largest TP the GPUs fit, preferring an arm that does not offload KV cache, and
@@ -165,7 +178,9 @@ A round fetches nothing. The InferenceX client, at the commit
 `src/inference_suite/pins.py` pins, and the AgentX harness, installed with
 `--no-deps` from `src/inference_suite/agentx-client.lock` into the relocatable
 CPython 3.12 build `pins.py` pins, are staged ahead of time into a tool cache with
-one `staging_manifest.json`. Staging patches the harness's aiperf so a reply it found no content in exports the
+one `staging_manifest.json`. InferenceX's files are read from the pinned commit's tree (`git archive`),
+never from a checkout's working tree: a `--source` checkout's local edits, untracked files and later commits are
+not staged, and a checkout that lacks the pinned commit is refused. Staging patches the harness's aiperf so a reply it found no content in exports the
 server's output token count as `error_osl`; a harness the patch does not apply to fails the staging, and a cache
 staged before the patch is staged again. Two hosts compare stagings by their normalised
 manifest: each installed package's name, version and wheel sha256, the
@@ -177,15 +192,18 @@ shared by several hosts as `<dir>/<staging key>` by rename. A round refuses with
 lists a file that is absent, changed or staged at another commit, or when an eval
 round finds no `lm_eval` installed in the Python that runs it.
 
-`install.sh <tool-cache-dir>` stages the cache at `<tool-cache-dir>` and
-pip-installs the pinned `lm_eval[api]` with its dependencies into the Python
-rounds run under (`PYTHON`, default `python3`). `check` fails with `staging_missing`
+`install.sh <tool-cache-dir>` stages the cache at `<tool-cache-dir>` and installs the pinned
+lm-eval into the Python rounds run under (`PYTHON`, default `python3`). lm-eval and its dependency tree come from the hash lock
+the sealed measurement runner installs, `requirements/runner.lock` (`runner-cpXY.lock` for a
+Python that has its own) of the Hyperloom source tree `install.sh` runs from: pip installs only
+distributions that lock pins, each matching a hash it lists, and a package installed from
+anywhere else than a source tree holding the lock refuses with `staging_missing`. `check` fails with `staging_missing`
 when the cache does not verify or that Python lacks the pinned lm-eval; `stage`
 without `--source` fetches nothing and installs lm-eval beside a cache that
 verifies. To stage or check by hand:
 
 ```bash
-python -m inference_suite.staging stage --source <InferenceX checkout> --tool-cache <dir>
+python -m inference_suite.staging stage --source <InferenceX repository> --tool-cache <dir>
 python -m inference_suite.staging stage --tool-cache <dir>
 python -m inference_suite.staging check --tool-cache <dir>
 ```
@@ -196,17 +214,18 @@ python -m inference_suite.staging check --tool-cache <dir>
 
 | Command | Behavior |
 |---|---|
-| `run --config <config.yaml> --run-dir <dir>` | Runs one round into an absent or empty directory and prints the `report.json` path. SIGTERM and SIGINT cancel the round, which still reaps what it started and writes its report. |
+| `run --config <config.yaml> --run-dir <dir>` | Runs one round into an absent or empty directory and prints the `report.json` path. A relative path, on the command line or in the config, is read below the directory `run` starts in; a relative `model_path` only when it names something there, otherwise it is a hub id. SIGTERM and SIGINT cancel the round, which still reaps what it started and writes its report. |
 | `stop --pid-dir <dir>` | Reaps the server the directory's `server.pid` records and prints `{"reaped": [...], "survivors": [...]}`. |
 | `resolve --query <query.json> --gpus <n> --out <base_launch.json> [--user-file <file>] [--inferencex-commit <sha>]` | Reads the sources once and writes the base they give, printing its digest. With `--inferencex-commit`, InferenceX is read at that commit instead of the head of its `main`. |
-| `stage --tool-cache <dir> [--source <InferenceX checkout>]` | Stages the pinned tools into the tool cache unless it holds them intact, fetching InferenceX at its pin without `--source`, and prints the manifest's sha256. |
-| `publish --stagings <dir> [--source <InferenceX checkout>]` | Publishes the staging of the pins in force as `<dir>/<staging key>`, staging it there when absent, and prints its path. |
+| `stage --tool-cache <dir> [--source <InferenceX repository>]` | Stages the pinned tools into the tool cache unless it holds them intact, fetching InferenceX at its pin without `--source`, and prints the manifest's sha256. |
+| `publish --stagings <dir> [--source <InferenceX repository>]` | Publishes the staging of the pins in force as `<dir>/<staging key>`, staging it there when absent, and prints its path. |
 
 Exit codes: `0` when the round completed (or nothing survived `stop`, a base was
 written, or a staging is in place); `1` when the round did not complete, or a
 process outlived `stop`; `2` when the config, query or pidfile breaks its contract,
 the run directory is not empty, no source holds a base, in which case each
-source's reason is printed to stderr, `--inferencex-commit` is refused, or a staging cannot be built or verified,
+source's reason is printed to stderr, `--inferencex-commit` is refused, a source
+answers in a form resolve cannot read (an HTML page where JSON was asked), or a staging cannot be built or verified,
 printed as `staging_missing: <reason>`.
 
 ## Run directory
