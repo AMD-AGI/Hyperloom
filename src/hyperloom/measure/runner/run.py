@@ -23,7 +23,7 @@ from pathlib import Path
 
 import yaml
 
-from hyperloom.common.benchmark_config import is_magpie_agentx
+from hyperloom.common.benchmark_config import BenchmarkPoint, BenchmarkPointError
 from hyperloom.common.outside_facts import ROCR_VISIBLE_DEVICES_ENV
 from hyperloom.common.outside_facts.rule_pack import rule_pack_identity
 from hyperloom.contracts.measurement import AttachmentRef, FailureClass
@@ -34,16 +34,15 @@ from hyperloom.measure.failures import (
     FOREIGN_PROCESS_ON_CARD,
     Disposition,
     FailureClassification,
+    FailureEvidence,
     classify_test_failure,
     is_disk_full,
 )
 from hyperloom.measure.local import LocalMeasurementBackend, TestCallRefused
-from hyperloom.measure.magpie_launchers import install_launchers
 from hyperloom.measure.manifest import encode_manifest, manifest_notes, ManifestFile, RESULT_SCHEMA
 from hyperloom.measure.phases import (
     BOOTSTRAP,
     ENV_REBUILD,
-    EVAL_DEPS,
     PREFLIGHT,
     RESULT_SIGNING,
     RUNNER_START,
@@ -57,8 +56,6 @@ from hyperloom.measure.jit.native.laying import NamedBuild, NativeLayError, Shee
 from hyperloom.measure.jit.session import JitCacheSession
 from hyperloom.measure.runner import hardware
 from hyperloom.measure.runner.card_watch import BEFORE_TEST, CardWatch
-from hyperloom.measure.runner.eval_deps import EVAL_DEPS_LOG, EvalDepsError, install_eval_deps
-from hyperloom.measure.runner.aiperf_patch import ReplayClientPatchError, patch_replay_client
 from hyperloom.measure.attachments import AttachmentError, place_attachments
 from hyperloom.measure.farm import (
     Farm,
@@ -87,14 +84,22 @@ from hyperloom.measure.runner.rewrite import Placement, rewrite_config
 from hyperloom.measure.runner.rounds import write_rounds
 from hyperloom.measure.runner.service import Progress, RunnerFailure, join_notes, wait_for_file, write_status
 from hyperloom.measure.runner.snapshot import SnapshotError, check_snapshot
-from hyperloom.measure.runner.tools import ToolError, ensure_inferencex, ensure_magpie
+from hyperloom.measure.runner.cache_layout import CACHE_ENV, DEFAULT_CACHE_DIR
+from hyperloom.measure.runner.tools import (
+    StagingMismatch,
+    ToolError,
+    ensure_inference_suite,
+    ensure_inferencex,
+)
 from hyperloom.measure.socket import RoundPlan, SessionFacts, TestCall
-from hyperloom.measure.spec import MeasurementSpec, fingerprint, spec_sha256
+from hyperloom.measure.spec import SPEC_SCHEMA, MeasurementSpec, fingerprint, spec_sha256
 from hyperloom.measure.surface import extract_surface
 from hyperloom.orchestrator.actions.cancel_channel import CancelScope
-from hyperloom.orchestrator.actions.executors import harvest_leaked_artifacts
+from hyperloom.orchestrator.actions.executors import TOOL_CACHE_ENV, harvest_leaked_artifacts
 from hyperloom.orchestrator.actions.executors._aiter_serving_once import build_image_own_once
 from hyperloom.sandbox.card_occupancy import card_guard, own_sandbox_processes
+from inference_suite.contracts import NormalisedManifest
+from inference_suite.frameworks import Framework, FrameworkKind, framework_facts
 
 __all__ = ["run"]
 
@@ -111,8 +116,6 @@ _KEY_ENV = "HYPERLOOM_SIGNING_KEY_FILE"
 _BOOTSTRAP_STARTED_ENV = "HYPERLOOM_BOOTSTRAP_STARTED_UNIX"
 _BOOTSTRAP_ENDED_ENV = "HYPERLOOM_BOOTSTRAP_ENDED_UNIX"
 _TIMED_OUT_RC = 124
-#: The ``procedure.benchmark_backend`` that runs a test through Magpie's launchers and its lm-eval.
-_MAGPIE = "magpie"
 
 
 @dataclass
@@ -132,6 +135,8 @@ class _Context:
     #: The directory the test's compilers write below, on this host's temporary disk; made once the sheet names the
     #: test (:func:`_compile_dir`) and removed when the run ends.
     compile: Path | None = None
+    #: The normalised manifest of the published inference_suite staging this runner ran a v2 sheet on (:func:`_prepare`).
+    staging: NormalisedManifest | None = None
 
     @property
     def files(self) -> Path:
@@ -184,14 +189,36 @@ def _parse(raw: bytes) -> MeasurementSpec:
 
 
 def _check_model(yaml_text: str, hashes: dict[str, str]) -> None:
-    model = ((yaml.safe_load(yaml_text) or {}).get("benchmark") or {}).get("model")
+    try:
+        model = BenchmarkPoint.from_document(yaml.safe_load(yaml_text), source="the sheet's point").model
+    except BenchmarkPointError as exc:
+        raise RunnerFailure(_SPEC_REJECTED, str(exc)) from exc
+    if hashes and not model:
+        raise RunnerFailure(_SPEC_REJECTED, "the sheet hashes model files but its point names no model")
     for relative, wanted in hashes.items():
         try:
-            actual = hashlib.sha256((Path(str(model)) / relative).read_bytes()).hexdigest()
+            actual = hashlib.sha256((Path(model) / relative).read_bytes()).hexdigest()
         except OSError as exc:
             raise RunnerFailure(_SPEC_REJECTED, f"model file {relative} unreadable: {exc}") from exc
         if actual != wanted:
             raise RunnerFailure(_SPEC_REJECTED, f"model file {relative} differs from the recorded hash")
+
+
+_SERVING = frozenset(item.value for item in Framework if framework_facts(item).kind is FrameworkKind.SERVING)
+
+
+def _check_runs_on_inference_suite(spec: MeasurementSpec) -> None:
+    """A sheet measures a server on inference_suite: a scriptable session writes no sheet, so a point that serves
+    nothing is refused here rather than handed to the benchmark backend."""
+    for index, point in enumerate(spec.config):
+        try:
+            framework = BenchmarkPoint.from_document(yaml.safe_load(point.yaml), source=f"point {index}").framework
+        except BenchmarkPointError as exc:
+            raise RunnerFailure(_SPEC_REJECTED, str(exc)) from exc
+        if framework.strip().lower() not in _SERVING:
+            raise RunnerFailure(
+                _SPEC_REJECTED, f"point {index}: {framework!r} serves nothing; a {SPEC_SCHEMA} sheet measures a server"
+            )
 
 
 def _check_runtime(spec: MeasurementSpec) -> None:
@@ -257,15 +284,11 @@ def _preflight(ctx: _Context, spec: MeasurementSpec, visible: list[int]):
     return facts
 
 
-def _surface_sha256(spec: MeasurementSpec, points: list[Path]) -> str:
+def _surface_sha256(points: list[Path]) -> str:
     """The hash of the measurement surface of the YAML the test will execute.
 
-    The points of a sheet differ only in what the concurrency level decides, so the first speaks for all of them. Under
-    Magpie the benchmark script a test executes is Magpie's own copy of its launcher, which the backend puts in the
-    InferenceX checkout before the first round; it is put there first so that the hash is of the file that runs.
+    The points of a sheet differ only in what the concurrency level decides, so the first speaks for all of them.
     """
-    if spec.procedure.benchmark_backend == _MAGPIE:
-        install_launchers(points)
     return extract_surface(yaml.safe_load(points[0].read_text()) or {}).sha256
 
 
@@ -273,8 +296,12 @@ def _prepare(ctx: _Context, spec: MeasurementSpec) -> tuple[list[Path], Path, Fa
     """Tools, attachments, farm and the rewritten YAML; returns the point path and the InferenceX checkout."""
     try:
         inferencex = ensure_inferencex(spec.tools.inferencex, ctx.cache)
-        if spec.procedure.benchmark_backend == _MAGPIE:
-            ctx.environ["MAGPIE_PATH"] = str(ensure_magpie(spec.tools.magpie, ctx.cache))
+        if spec.tools.staging is not None:
+            runner_cache = Path(ctx.environ.get(CACHE_ENV) or DEFAULT_CACHE_DIR)
+            staged = ensure_inference_suite(runner_cache, spec.tools.staging)
+            ctx.environ[TOOL_CACHE_ENV], ctx.staging = str(staged.tool_cache), staged.normalised
+    except StagingMismatch as exc:
+        raise RunnerFailure("preflight_mismatch", str(exc)) from exc
     except ToolError as exc:
         raise RunnerFailure(_START_FAILED, str(exc)) from exc
     try:
@@ -323,54 +350,6 @@ def _sheet_builds(spec: MeasurementSpec, environ: Mapping[str, str]) -> SheetBui
     return sheet_builds(named, store_from_environment(environ) if named else None, spec.image.digest)
 
 
-def _patch_replay_client(ctx: _Context, points: list[Path], inferencex: Path) -> None:
-    """Make the client of an AgentX test keep the output token count of a reply it found nothing in.
-
-    The patch only adds a field to the export line of a failed request, so a test it cannot be made for runs without it
-    and says so: its no-content failures are then counted but not told empty from short.
-    """
-    if not is_magpie_agentx((yaml.safe_load(points[0].read_text()) or {}).get("benchmark") or {}):
-        return
-    try:
-        patch_replay_client(inferencex)
-    except ReplayClientPatchError as exc:
-        ctx.notes.append(
-            f"the replay client was not patched to export the output token count of a failed request: {exc}"
-        )
-
-
-def _install_eval_deps(ctx: _Context, spec: MeasurementSpec, points: list[Path], inferencex: Path) -> None:
-    """Install the accuracy evaluator before the server boots, when the test evaluates through InferenceX's lm-eval.
-
-    In the round it runs on an idle server whose silence the watchdog counts, and only the round's end shows its
-    output (``measure.runner.eval_deps``). A test the evaluator cannot be installed for is not run: its accuracy round
-    could only fail the same way, later.
-    """
-    if not spec.procedure.accuracy or spec.procedure.benchmark_backend != _MAGPIE:
-        return
-    benchmark = (yaml.safe_load(points[0].read_text()) or {}).get("benchmark") or {}
-    if is_magpie_agentx(benchmark):
-        return
-    ctx.phases.begin(EVAL_DEPS)
-    try:
-        note = install_eval_deps(
-            inferencex, environ=_round_environment(ctx, spec, points), log_path=ctx.files / EVAL_DEPS_LOG
-        )
-    except EvalDepsError as exc:
-        raise RunnerFailure(_START_FAILED, str(exc)) from exc
-    if note:
-        ctx.notes.append(note)
-
-
-def _round_environment(ctx: _Context, spec: MeasurementSpec, points: list[Path]) -> dict[str, str]:
-    """The environment a round's benchmark script starts with: what the server inherits from this runner, and the
-    point's own variables over it, as Magpie sets them (upper-cased), so ``PATH`` and with it ``python3`` are the
-    round's."""
-    config = yaml.safe_load(points[0].read_text()) or {}
-    inherited = inherited_environment(ctx.environ, spec.process_env, spec.unset_envs)
-    return {**inherited, **{str(name).upper(): str(value) for name, value in server_environment(config).items()}}
-
-
 def _case_attachments(spec: MeasurementSpec) -> tuple[AttachmentRef, ...]:
     """The attachments a repro test's case is looked for in, as unpacked under ``attach/<id>/``; no other kind has any."""
     if spec.kind != "repro":
@@ -385,14 +364,12 @@ def _call(ctx: _Context, spec: MeasurementSpec, points: list[Path], inferencex: 
         rounds = RoundPlan(warmup_rounds=p.warmup_rounds, measure_rounds=p.measure_rounds)
     except ValueError as exc:
         raise RunnerFailure(_SPEC_REJECTED, str(exc)) from exc
-    ctx.environ["HYPERLOOM_BENCHMARK_BACKEND"] = p.benchmark_backend
     ctx.files.mkdir(parents=True, exist_ok=True)
     return TestCall(
         points=tuple(points),
         output_dir=ctx.files,
         timeout_sec=int(max(1, min(p.timeout_sec, remaining))),
         cwd=str(ctx.work),
-        magpie_python="",
         task_id=spec.request_id,
         kind=spec.kind,  # type: ignore[arg-type]
         prep=p.prep,  # type: ignore[arg-type]
@@ -403,11 +380,12 @@ def _call(ctx: _Context, spec: MeasurementSpec, points: list[Path], inferencex: 
         on_output=progress.touch,
         env_overrides=dict(spec.process_env),
         unset_envs=spec.unset_envs,
-        session_facts=SessionFacts((), str(inferencex), spec.tools.magpie),
+        session_facts=SessionFacts((), str(inferencex), ctx.staging, p.base_launch),
         attachments=_case_attachments(spec),
         phases=ctx.phases,
         short_prompts=p.short_prompts,
         long_context=p.long_context,
+        checkpoint=p.checkpoint,
     )
 
 
@@ -439,7 +417,7 @@ def _verdict_of(outcome) -> FailureClassification:
     if outcome.failure_class is not None and outcome.failure_reason:
         failure_class = FailureClass(getattr(outcome.failure_class, "value", outcome.failure_class))
         return FailureClassification(Disposition.FAILED, failure_class, outcome.failure_reason)
-    return classify_test_failure(returncode=outcome.returncode, logs=[outcome.stderr])
+    return classify_test_failure(returncode=outcome.returncode, evidence=FailureEvidence(logs=(outcome.stderr,)))
 
 
 def _outcome_document(outcome, timed_out: bool) -> dict:
@@ -500,6 +478,11 @@ class _Findings:
     jit_cache: dict | None = None
 
 
+def _tool_facts(ctx: _Context) -> dict[str, str | None]:
+    """What the manifest says the test ran: the sha256 of the normalised manifest of this runner's staging."""
+    return {"inference_suite_staging": None if ctx.staging is None else ctx.staging.sha256()}
+
+
 def _write_bundle(ctx: _Context, signed: _Signed, outcome: dict, found: _Findings) -> None:
     spec, raw, key = signed.spec, signed.raw, signed.key
     files, facts, changed, timing, visible = found.files, found.facts, found.changed, found.timing, found.visible
@@ -523,7 +506,7 @@ def _write_bundle(ctx: _Context, signed: _Signed, outcome: dict, found: _Finding
                 "power_cap_w": first.power_cap_w if first else None,
                 "partition_mode": first.partition_mode if first else None,
                 "hyperloom_version": _version(),
-                "magpie_commit": spec.tools.magpie,
+                **_tool_facts(ctx),
                 "inferencex_commit": spec.tools.inferencex,
                 "gpu_ids": visible,
                 "rule_pack": rule_pack_identity(),
@@ -599,7 +582,11 @@ def _own_directories(
     if raised is not None:
         ctx.notes.append(raised)
     return dataclasses.replace(
-        call, jit=session, tables_patch=patched_configs(farm), env_overrides={**call.env_overrides, **own}
+        call,
+        jit=session,
+        tables_patch=patched_configs(farm),
+        framework_changed=farm is not None,
+        env_overrides={**call.env_overrides, **own},
     )
 
 
@@ -620,6 +607,7 @@ def _run_sheet(ctx: _Context, spec_path: Path, key, progress: Progress) -> None:
     spec = _parse(raw)
     visible = _visible(ctx.environ)
     _check_model(spec.config[0].yaml, dict(spec.model_hashes))
+    _check_runs_on_inference_suite(spec)
     _check_runtime(spec)
     facts = _preflight(ctx, spec, visible)
     before = hardware.ecc_counts(visible)
@@ -627,13 +615,11 @@ def _run_sheet(ctx: _Context, spec_path: Path, key, progress: Progress) -> None:
     progress.phase("preparing")
     ctx.phases.begin(ENV_REBUILD)
     points, inferencex, farm = _prepare(ctx, spec)
-    _patch_replay_client(ctx, points, inferencex)
-    surface = _surface_sha256(spec, points)
+    surface = _surface_sha256(points)
     _build_image_own_once()
     session = _jit_session(ctx, spec, points, farm, facts)
     arch = card_arch(spec, facts[0] if facts else None)
     call = _own_directories(ctx, _call(ctx, spec, points, inferencex, progress), session, farm, arch)
-    _install_eval_deps(ctx, spec, points, inferencex)
     clear_import_notes(farm)
     ctx.cards.check(BEFORE_TEST)
     ctx.cards.enforce_guard()

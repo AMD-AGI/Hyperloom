@@ -295,7 +295,7 @@ def write_run_config(
 
 
 def discover_capture_folder(trace_input: Path, trace_files: list[Path]) -> Path | None:
-    """Find a graph-capture folder near a Magpie torch_trace input.
+    """Find a graph-capture folder near a torch_trace input.
 
     Scans the trace input directory and the first trace file's neighbourhood for
     a subdirectory whose name matches the shared capture-directory shape, so a

@@ -9,7 +9,7 @@ from __future__ import annotations
 import pytest
 
 from hyperloom.orchestrator.loop.coordinator import Coordinator
-from hyperloom.orchestrator.loop.proposals import PendingProposal
+from hyperloom.orchestrator.state.pending_proposal import PendingProposal
 from hyperloom.orchestrator.loop.verdicts import CriticRuling
 
 from .conftest import make_coordinator

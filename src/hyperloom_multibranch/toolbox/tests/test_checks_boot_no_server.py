@@ -47,21 +47,21 @@ class _Booting:
         workspace.mkdir(parents=True, exist_ok=True)
         return [VariantResult(name, "", {}, "succeeded", returncode=0, workspace=str(workspace))]
 
-    def teardown(self, **kwargs: Any) -> None:
+    def teardown(self, slot: Any) -> list[int]:
         self.teardowns += 1
         if self._live is not None:
             self._live.__exit__(None, None, None)
             self._live = None
+        return []
 
 
 def _booting(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> _Booting:
-    monkeypatch.setenv("HYPERLOOM_BENCHMARK_BACKEND", "magpie")
     booting = _Booting(tmp_path)
     port = free_port()
     monkeypatch.setattr(
         local, "resolve_lifecycle_params", lambda path: {"eligible": True, "port": port, "framework": "sglang"}
     )
-    monkeypatch.setattr(local, "teardown_lifecycle_server", booting.teardown)
+    monkeypatch.setattr(local, "teardown_variant_server", booting.teardown)
     monkeypatch.setattr(local, "run_grid", booting)
     return booting
 
@@ -91,7 +91,6 @@ def test_a_merge_test_and_a_final_test_each_boot_exactly_one_server_which_answer
         output_dir=tmp_path / "out",
         timeout_sec=900,
         cwd=str(tmp_path),
-        magpie_python="",
         task_id="t-1",
         short_prompts=plan,
     )
