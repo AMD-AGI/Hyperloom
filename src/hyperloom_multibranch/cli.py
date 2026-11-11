@@ -305,7 +305,7 @@ def _add_workload_options(run: argparse.ArgumentParser) -> None:
     """The fixed workload, spelled as ``hyperloom optimize`` spells it, and the kernel optimizer its recipes are scoped
     to."""
 
-    run.add_argument("--model", help="Model path or id.")
+    run.add_argument("--model", help="Model path, or an id found under HL_MODEL_BASE or in the Hugging Face cache.")
     run.add_argument("--framework", help="Inference framework, e.g. vllm or sglang.")
     run.add_argument("--gpu-type", type=str.lower, choices=SESSION_GPU_TYPES, help="GPU type, in any case.")
     run.add_argument("--workload", choices=[kind.value for kind in WorkloadKind], help="Workload kind.")

@@ -184,6 +184,12 @@ it.
   recipe source. Before, a session's base was always resolved from the recipe
   sources. See [Options of `run`](how-to/run-multibranch.md#options-of-run).
 
+- **A local `hyperloom-multibranch run` needs its model on the machine.**
+  `--model` must be a checkpoint directory, or a hub id found under
+  `HL_MODEL_BASE` or in the Hugging Face cache; otherwise the command refuses
+  before the session directory exists. Before, the local test's server, whose
+  home is its sandbox directory, fetched the hub id from the hub.
+
 - **A serving round's server runs in the interpreter its framework checks
   read.** The server now starts as `<framework_python> -m sglang.launch_server`
   (vLLM: `-m vllm.entrypoints.cli.main serve`; ATOM: `-m
