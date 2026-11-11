@@ -38,6 +38,7 @@ the task never varied in (:func:`measured`), which R3 could never read; authorin
 from __future__ import annotations
 
 import asyncio
+import dataclasses
 import math
 import re
 import statistics
@@ -45,6 +46,7 @@ from collections.abc import Awaitable, Callable, Mapping, Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
 
+from hyperloom.common.agentx_objective import AgentXObjective
 from hyperloom_multibranch.contracts.blackboard.vocab import CommitOrigin, LineageKind
 from hyperloom_multibranch.blackboard.codec import encode
 from hyperloom_multibranch.blackboard.knowledge.warm_start import MODEL_LABEL as MODEL
@@ -390,11 +392,20 @@ def record_trial(pool: PlaybookPool, trial: Trial) -> bool:
     return _keep(pool.root / _TRIALS, trial.session_id, TRIAL_FORMAT, trial)
 
 
+def _with_objective(task: str) -> str:
+    kind, _, rest = task.partition(" ")
+    if kind != f"{WORKLOAD}={AGENTX}" or rest.startswith(f"{OBJECTIVE}="):
+        return task
+    return " ".join([kind, f"{OBJECTIVE}={AgentXObjective.P50_INTERACTIVITY.value}", rest])
+
+
 def trials(pool: PlaybookPool) -> tuple[Trial, ...]:
-    """The trials kept beside ``pool``, of the sessions that started by the time it is read as of."""
+    """The trials kept beside ``pool``, of the sessions that started by the time it is read as of. An AgentX trial
+    kept before sessions chose an objective has none in its task and was graded on P50 interactivity, so it is read as
+    one."""
 
     return tuple(
-        item
+        dataclasses.replace(item, task=_with_objective(item.task))
         for item in published_records(pool.root / _TRIALS, Trial, TRIAL_FORMAT, "trial")
         if written_by(pool.as_of, item.started_at)
     )
