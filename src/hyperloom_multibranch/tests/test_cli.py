@@ -1928,6 +1928,46 @@ def test_a_restart_before_the_baseline_was_recorded_closes_that_session_and_star
 
 
 @pytest.mark.usefixtures("ready_environment")
+def test_a_hosted_run_shares_with_the_group_each_session_it_closes_or_starts_before_it_works_in_it(
+    host: Host, restart: Restart, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # Below shared storage the run's children write for the group (``share_with_the_group``): the next leg may be
+    # another account of it.
+    def shared(root: Path) -> None:
+        restart.calls.append(("share", root))
+
+    monkeypatch.setattr(cli, "share_with_the_group", shared)
+    monkeypatch.setattr(hosted_run, "share_with_the_group", shared)
+    layout = _killed_in_prelude(tmp_path / "MB-earlier-session")
+    (host.state_dir / "session.json").write_text(json.dumps({"session_dir": str(layout.root)}), encoding="utf-8")
+
+    assert cli.main(["hosted", "run"]) == 0
+
+    started = Path(json.loads((host.state_dir / "session.json").read_text(encoding="utf-8"))["session_dir"])
+    assert [(kind, root) for kind, root in restart.calls if kind != "run"] == [
+        ("share", layout.root),
+        ("final-only", layout.root),
+        ("share", started),
+    ]
+
+
+@pytest.mark.usefixtures("ready_environment")
+def test_a_restart_that_finishes_a_session_shares_it_with_the_group_first(
+    host: Host, agent_cli: list[RunSettings], tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    shared: list[Path] = []
+    monkeypatch.setattr(cli, "share_with_the_group", shared.append)
+    monkeypatch.setattr(hosted_run, "share_with_the_group", shared.append)
+    layout = _ended_before_final(tmp_path / "MB-20300102T030405Z-0123abcd")
+    (host.state_dir / "session.json").write_text(json.dumps({"session_dir": str(layout.root)}), encoding="utf-8")
+    host.spec(multibranch=None)
+
+    assert cli.main(["hosted", "run"]) == 0
+
+    assert shared == [layout.root]
+
+
+@pytest.mark.usefixtures("ready_environment")
 def test_a_restart_before_the_root_was_committed_starts_the_specs_session_again_at_once(
     host: Host, restart: Restart, tmp_path: Path
 ) -> None:
