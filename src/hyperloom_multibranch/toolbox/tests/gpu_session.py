@@ -33,4 +33,4 @@ def freeze_gpu_session_base(session: Path, model: str, gpu_type: str, *, tp: int
     workload = Workload(
         model, os.environ["FRAMEWORK"], tp, conc, "bf16", gpu_type.lower(), KernelOptimizer.FORGE, shape
     )
-    return freeze_session_base(session, workload)
+    return freeze_session_base(session, workload, "")

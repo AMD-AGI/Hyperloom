@@ -4,7 +4,7 @@
 # multi-branch blackboard export (multibranch.notebook.export.v1) test records -> multibranch-recipe-v1 Experiences.
 #
 # The test records the shared inference-recipe-v1 cannot hold: a change that ships a kernel artifact, and every
-# change of an AgentX session, on the interactivity objective. The multibranch-notebook-v1 mapping records the rest
+# change of an AgentX session, on the objective it is graded on. The multibranch-notebook-v1 mapping records the rest
 # from the same export, and refuses these, so no test is recorded twice. A configuration or a patch is fingerprinted
 # as multibranch-notebook-v1 fingerprints it, so the same change lands in the same Repeat Group in either schema.
 format: hyperloom-kb.collect.v2
@@ -30,9 +30,9 @@ let:
   request_id: {text: $candidate.request_id}
   replays_traces: {ne: [{text: $doc.metadata.objective}, output_throughput]}
   objective:
-    if: $replays_traces
-    then: e2e_interactivity@v1
-    else: e2e_throughput@v1
+    map: {text: $doc.metadata.objective}
+    table: {output_throughput: e2e_throughput@v1, agentx_total_throughput: e2e_total_throughput@v1}
+    default: e2e_interactivity@v1
   decision: {text: $candidate.decision}
   baseline_value: {number: $candidate.baseline_value}
   outcome_value: {number: $candidate.outcome_value}

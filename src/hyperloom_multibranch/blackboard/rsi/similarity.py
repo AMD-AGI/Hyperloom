@@ -7,7 +7,8 @@ Labels match or not; sizes (parallelism, concurrency, sequence lengths) fade wit
 still counts two thirds. A condition either side lacks is left out rather than counted as a mismatch, except the
 workload's kind (the ``workload`` label): an AgentX trace replay is graded on interactivity, a fixed-length InferenceX
 workload on throughput, so the two share nothing whatever else matches. Conditions without the label are InferenceX, as
-every session was before AgentX sessions ran.
+every session was before AgentX sessions ran. An AgentX session's conditions name its objective (the ``objective``
+label); without it, it was graded on P50 interactivity, as every AgentX session was before objectives.
 """
 
 from __future__ import annotations
@@ -16,6 +17,7 @@ import math
 from collections.abc import Mapping
 from dataclasses import dataclass, field
 
+from hyperloom.common.agentx_objective import AgentXObjective
 from hyperloom.inference_optimizer.recipe_snapshot_constants import RecipeIdentity, recipe_canonical_id
 from hyperloom_multibranch.contracts.blackboard.records import SessionProfile
 from hyperloom_multibranch.contracts.toolbox import WorkloadKind
@@ -35,6 +37,7 @@ LABEL_WEIGHTS = {
 }
 SIZE_WEIGHTS = {"tp": 1.0, "conc": 1.0, "isl": 1.0, "osl": 1.0, "ep": MINOR_WEIGHT}
 WORKLOAD = "workload"
+OBJECTIVE = "objective"
 AGENTX = WorkloadKind.AGENTX.value
 INFERENCEX = WorkloadKind.INFERENCEX.value
 #: Below this, a past session shares too little with this one to teach it anything: one matching GPU is not enough.
@@ -56,8 +59,13 @@ def task_conditions(profile: SessionProfile) -> TaskConditions:
 
     identity = experience_identity(profile)
     kind = AGENTX if profile.isl is None else INFERENCEX
+    objective = {OBJECTIVE: profile.agentx_objective.value} if kind == AGENTX else {}
     return TaskConditions(
-        labels={**{key: str(value) for key, value in identity.items() if key in LABEL_WEIGHTS}, WORKLOAD: kind},
+        labels={
+            **{key: str(value) for key, value in identity.items() if key in LABEL_WEIGHTS},
+            WORKLOAD: kind,
+            **objective,
+        },
         sizes={key: float(value) for key, value in identity.items() if key in SIZE_WEIGHTS and value is not None},
     )
 
@@ -87,6 +95,12 @@ def workload_kind(task: TaskConditions) -> str:
     """``agentx`` for an AgentX trace replay, ``inferencex`` for a fixed-length InferenceX workload."""
 
     return task.labels.get(WORKLOAD, INFERENCEX)
+
+
+def agentx_objective(task: TaskConditions) -> AgentXObjective:
+    """What an AgentX session with ``task`` was graded on."""
+
+    return AgentXObjective(task.labels.get(OBJECTIVE, AgentXObjective.P50_INTERACTIVITY.value))
 
 
 def task_similarity(first: TaskConditions, second: TaskConditions) -> float:
@@ -129,9 +143,11 @@ __all__ = [
     "INFERENCEX",
     "LABEL_WEIGHTS",
     "MIN_SIMILARITY",
+    "OBJECTIVE",
     "SIZE_WEIGHTS",
     "WORKLOAD",
     "TaskConditions",
+    "agentx_objective",
     "differing_conditions",
     "model_name",
     "task_conditions",

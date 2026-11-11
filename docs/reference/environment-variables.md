@@ -1219,7 +1219,8 @@ per-concurrency arm selection maintainers apply before submitting:
 - **REVERT** — anything short of all of that.
 
 The median bar is the P50 objective's fixed `bar_pct` in
-`hyperloom.common.agentx_objective` (2%), not `keep_threshold_pct`: it is a property of
+`hyperloom.common.agentx_objective` (2%, the same bar and guards
+`hyperloom-multibranch` applies), not `keep_threshold_pct`: it is a property of
 the objective rather than of how far into the session a round lands, so the
 decaying session threshold does not apply to it. Output throughput is recorded
 but guards nothing: it follows the replayed window's output-length mix, not the
@@ -1246,7 +1247,7 @@ scriptable frameworks (xDiT, custom) keep output-throughput grading.
 |--------------------------------|-------------------------------|---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|
 | `HYPERLOOM_PERF_METRIC`        | `intvty_v1` for AgentX, else output tput | `intvty_v1` grades E2E normalised interactivity P50 (median) as the primary objective, with the P90 slow tail and total token throughput each held as a guard. Reported in the final summary as `grading mode`. |
 | `HYPERLOOM_PERF_NOISE_PCT`     | `5.0`                         | Noise band in percent applied to the guards. A candidate whose slow tail or total token throughput sits within this band of the anchor is not considered worse on that axis; the median has its own fixed bar and is not subject to the band. The default is the top of the 1–5% run-to-run noise upstream records for this workload. An unparseable value raises `EnvValueError` naming the variable, rather than grading against a band nobody chose. |
-| `HYPERLOOM_AGENTX_EARLY_STOP`  | `enforce`                     | AgentX checkpoint after 1800 s of profiling: the round's median interactivity over the requests finished by then, against the reference's own first 1800 s. The ruling is written to `agentx_checkpoint.json` in the round's slot. `enforce` stops an explore decision round that trails by more than 2% and records it as REVERT; `shadow` only writes the ruling; `off` skips the checkpoint. Any other value raises `EnvValueError`. A reference measured without a checkpoint median is never compared. |
+| `HYPERLOOM_AGENTX_EARLY_STOP`  | `enforce`                     | AgentX checkpoint after 1800 s of profiling: the round's median interactivity over the requests finished by then, against the reference's own first 1800 s. The ruling is written to `agentx_checkpoint.json` in the round's slot. `enforce` stops an explore decision round that trails by more than 2% and records it as REVERT; `shadow` only writes the ruling; `off` skips the checkpoint. Any other value raises `EnvValueError`. A reference measured without a checkpoint median is never compared. `hyperloom-multibranch run` reads it once at session start with `shadow` as its default, keeps the mode in `MB-manifest.json`, and judges only explore tests under `p50_interactivity`; see [Run a multi-branch session](../how-to/run-multibranch.md#environment). |
 | `INFERENCE_OPTIMIZER_BASELINE_SERVER_READY_SEC` | `7200` | Initial server-boot budget written by the persistent-server lifecycle configuration helper. Actual benchmark launches synchronize this field to `INFERENCE_OPTIMIZER_BENCHMARK_TIMEOUT_SEC`; this variable is not an additional benchmark deadline or a way to extend one. Non-benchmark lifecycle callers that do not perform that synchronization retain their own boot budget. |
 
 ### MLPerf agentic backend
@@ -1371,7 +1372,7 @@ A hosted run is configured by the host that launches it. `src/hyperloom/hosted/h
 it checks them once at start-up and names **every** missing or malformed variable in one error (variable names and reasons, never
 values), so a bad input stops the run before it starts. Which variables are required depends on what the run hosts; the run, state
 and input variables are always required except for a session started by hand on a grant handed to it
-(`hyperloom-multibranch run --measurement hosted`, a command that lands with the multi-branch CLI), which needs the sandbox URLs and templates, `HYPERLOOM_SANDBOX_KEY_MEASUREMENT`,
+(`hyperloom-multibranch run --measurement hosted`), which needs the sandbox URLs and templates, `HYPERLOOM_SANDBOX_KEY_MEASUREMENT`,
 `HYPERLOOM_GRANT_LIMITS` (all four totals: a multi-branch session refuses a grant that states only some of them),
 `HYPERLOOM_RUN_CREATED_AT` and the source pair. A variable that is set is checked even when it is not
 required.

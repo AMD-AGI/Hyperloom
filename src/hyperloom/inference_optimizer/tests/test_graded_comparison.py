@@ -163,7 +163,7 @@ def test_agentx_revert_when_the_slow_tail_guard_fails(native_benchmark, monkeypa
 
 
 def test_agentx_keeps_a_median_gain_on_the_shared_two_percent_bar(native_benchmark, monkeypatch):
-    """+2.5% on the median clears the P50 bar."""
+    """+2.5% on the median clears the bar single-lineage and MB share."""
     _agentx(monkeypatch, native_benchmark)
     state = _State(current_best=_ANCHOR, baseline_tput=180.0)
     graded = resolve_graded_comparison(

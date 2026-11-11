@@ -6,8 +6,10 @@
 Every inference_suite round refuses a session that froze no base launch
 (:func:`hyperloom.orchestrator.state.base_launch.frozen_base`). A fresh session resolves its base as
 ``hyperloom optimize`` does (:func:`~hyperloom.inference_optimizer.cli.base_launch.resolve_server_base`) for its
-workload, on the cards one test runs on; a session that froze one, a resumed one, keeps it. The workload fixes the
-topology every test is sized by, so a base on another one is refused.
+workload, on the cards one test runs on, InferenceX read at the operator's commit when one is given; a session that
+froze one, a resumed one, keeps it. The operator's ``--reference-script`` is the base as it is for ``hyperloom
+optimize``: a base launch record is frozen without reading any recipe source. The workload fixes the topology every
+test is sized by, so a base on another one is refused.
 """
 
 from __future__ import annotations
@@ -26,10 +28,13 @@ if TYPE_CHECKING:
     from hyperloom.orchestrator.state.base_launch import FrozenBase
 
 
-def freeze_session_base(toolbox: Path, workload: Workload) -> FrozenBase:
-    """Freeze the base launch of a session of ``workload`` in ``toolbox`` unless it froze one, and return the frozen
-    one; raises :class:`PeersUnavailable` when the frozen one is not what the session recorded, or none can be
-    resolved."""
+def freeze_session_base(
+    toolbox: Path, workload: Workload, reference_script: str, inferencex_commit: str = ""
+) -> FrozenBase:
+    """Freeze the base launch of a session of ``workload`` in ``toolbox`` unless it froze one, resolved from the
+    operator's ``reference_script`` when one is given (``""`` for none), else from InferenceX at ``inferencex_commit``
+    (``""`` for the head of its ``main``), and return the frozen one; raises :class:`PeersUnavailable` when the frozen
+    one is not what the session recorded, or none can be resolved."""
 
     from hyperloom.inference_optimizer.cli.base_launch import BaseLaunchUnresolved, resolve_server_base
     from hyperloom.orchestrator.state.base_launch import BaseLaunchMismatch, freeze_base, frozen_base
@@ -41,13 +46,13 @@ def freeze_session_base(toolbox: Path, workload: Workload) -> FrozenBase:
     except (BaseLaunchMismatch, BaseLaunchError) as exc:
         raise PeersUnavailable(f"the session's frozen base launch cannot be read: {exc}") from exc
     try:
-        base = resolve_server_base(_session_launch(workload))
+        base = resolve_server_base(_session_launch(workload, reference_script, inferencex_commit))
     except BaseLaunchUnresolved as exc:
         raise PeersUnavailable(str(exc)) from exc
     return freeze_base(toolbox, base)
 
 
-def _session_launch(workload: Workload) -> SessionLaunch:
+def _session_launch(workload: Workload, reference_script: str, inferencex_commit: str) -> SessionLaunch:
     from hyperloom.inference_optimizer.cli.base_launch import SessionLaunch
 
     shape = workload.inferencex
@@ -64,6 +69,8 @@ def _session_launch(workload: Workload) -> SessionLaunch:
         isl=None if shape is None else shape.isl,
         osl=None if shape is None else shape.osl,
         model_display_name="" if served == workload.model else workload.model,
+        reference=reference_script,
+        inferencex_commit=inferencex_commit,
     )
 
 
