@@ -4,6 +4,7 @@
 import asyncio
 import json
 import os
+import stat
 import subprocess
 import sys
 from dataclasses import replace
@@ -391,6 +392,48 @@ def test_the_docker_shim_reads_a_device_mask_the_agent_gives_as_indices_into_its
     assert visible("CUDA_VISIBLE_DEVICES", "").stdout.strip() == "0,1/5,7"
     refused = visible("ROCR_VISIBLE_DEVICES", "2")
     assert refused.returncode != 0 and "card" in refused.stderr
+
+
+# -- the agent's directory is the group's, and its checkout's config is not this host's ------------------------------
+def _mode(path: Path) -> int:
+    return stat.S_IMODE(os.lstat(path).st_mode)
+
+
+async def test_a_clone_and_a_copy_are_the_group_s_to_write_and_the_shim_is_replaced_by_rename(tmp_path: Path) -> None:
+    tmp_path.chmod(0o2775)  # storage set up to be shared: setgid, group-writable, closed to others
+    repo = _agent_repo(tmp_path)
+    tree = tmp_path / "vendored"
+    (tree / "pkg").mkdir(parents=True)
+    (tree / "pkg" / "run.py").write_text("x", encoding="utf-8")
+    tree.chmod(0o755)
+
+    await fetch_source(str(repo), tmp_path / "agent" / "cloned")
+    await fetch_source(str(tree), tmp_path / "agent" / "copied")
+    shim = Path(agent_env(tmp_path / "agent")["PATH"].split(os.pathsep)[0]) / "docker"
+    (tmp_path / "earlier-shim").hardlink_to(shim)
+    agent_env(tmp_path / "agent")
+
+    for checkout in (tmp_path / "agent" / "cloned", tmp_path / "agent" / "copied"):
+        assert _mode(checkout) & 0o070 == 0o070, checkout
+        assert _mode(checkout / ".git" / "objects") & 0o070 == 0o070, checkout
+    assert _mode(tmp_path / "agent" / "copied" / "pkg") & 0o2070 == 0o2070
+    assert _mode(tmp_path / "agent" / "copied" / "pkg" / "run.py") & 0o060 == 0o060
+    assert _mode(tmp_path / "agent") == 0o2775 and _mode(shim.parent) == 0o2775 and _mode(shim) == 0o755
+    assert (tmp_path / "earlier-shim").stat().st_ino != shim.stat().st_ino, "replaced by rename, never written in place"
+
+
+async def test_a_copy_outside_shared_storage_keeps_the_modes_of_the_tree_it_copied(tmp_path: Path) -> None:
+    tmp_path.chmod(0o755)
+    tree = tmp_path / "vendored"
+    (tree / "pkg").mkdir(parents=True)
+    (tree / "pkg" / "run.py").write_text("x", encoding="utf-8")
+    (tree / "pkg").chmod(0o755)
+    (tree / "pkg" / "run.py").chmod(0o644)
+
+    await fetch_source(str(tree), tmp_path / "agent" / "copied")
+
+    assert _mode(tmp_path / "agent" / "copied" / "pkg") == 0o755
+    assert _mode(tmp_path / "agent" / "copied" / "pkg" / "run.py") == 0o644
 
 
 @pytest.mark.skipif(os.geteuid() != 0, reason="a checkout of another owner needs root to chown")
