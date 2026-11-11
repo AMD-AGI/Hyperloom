@@ -17,6 +17,7 @@ ends no later than the cap says, so that FINAL ends inside that limit too.
 
 from __future__ import annotations
 
+import logging
 import math
 from collections.abc import Callable
 from dataclasses import dataclass
@@ -36,9 +37,31 @@ MB_CLOSE_GRACE_FRACTION = 0.02
 
 MB_SECONDS_PER_HOUR = 3600.0
 
+logger = logging.getLogger(__name__)
+
+
+@dataclass(frozen=True)
+class FinalWork:
+    """The validation FINAL would run: ``seconds``, the wall seconds of each of its tests once, added up; ``longest``,
+    the longest of them; ``test_seconds``, one test of the workload at its primary conc (``0`` when the session
+    measured none), which an infrastructure retry repeats; and ``parallel``, how many of its tests run at once."""
+
+    seconds: float
+    longest: float
+    test_seconds: float
+    parallel: int
+
+    @property
+    def run_seconds(self) -> float:
+        """How long the tests take at the most on ``parallel`` slots of a queue that leaves no slot idle while a test
+        waits: a slot's share of every test, and the rest of the longest one, which no other slot can take over."""
+
+        return self.seconds / self.parallel + (1.0 - 1.0 / self.parallel) * self.longest
+
+
 #: The latest time, clock seconds, EXPLORE may end at for FINAL to end inside a limit the session's caller has, given
-#: the seconds of the session's longest test (``0`` when it measured none); a hosted run's grant is such a limit.
-ExploreCap = Callable[[float], float]
+#: the validation FINAL would run; a hosted run's grant is such a limit.
+ExploreCap = Callable[[FinalWork], float]
 
 
 def budget_seconds(max_hours: float) -> float:
@@ -86,8 +109,15 @@ class SessionBudget:
 
     def explore_end(self, now: float, final_test_seconds: float, cap: float = math.inf) -> float:
         """When EXPLORE ends: ``final_test_seconds`` and one CLOSE grace before the deadline, but no sooner than
-        ``now``; and no later than ``cap`` (an :data:`ExploreCap`'s answer), unless that is sooner than ``now``."""
+        ``now``; and no later than ``cap`` (an :data:`ExploreCap`'s answer), unless that is sooner than ``now``, which
+        is logged."""
 
+        if cap <= now:
+            logger.warning(
+                "EXPLORE gets no time: the session's limit leaves FINAL only what it keeps for its validation"
+                " (EXPLORE had to end %.0f s ago); FINAL validates what the session has",
+                now - cap,
+            )
         reserve = final_test_seconds + self.close_grace_seconds
         return min(self.deadline - min(reserve, self.remaining(now)), max(now, cap))
 
@@ -144,6 +174,7 @@ __all__ = [
     "MB_FINAL_SHARE",
     "MB_UNLIMITED_HOURS",
     "ExploreCap",
+    "FinalWork",
     "HardStop",
     "SessionBudget",
     "budget_seconds",

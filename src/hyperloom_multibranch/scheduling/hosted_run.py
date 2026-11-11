@@ -32,7 +32,9 @@ creation (``HYPERLOOM_RUN_CREATED_AT``), which the platform stamps when it makes
 a session's own deadline, counted from its start, can leave FINAL less of the grant than it needs. The grant's end
 (:func:`grant_end`) therefore also caps EXPLORE: it ends a FINAL reserve (:func:`final_reserve_seconds`) and a margin
 before that SIGTERM, whichever comes first of that and the end the session's budget gives it, and the tests' infra
-retries never wait past the time a test can still end by it (:attr:`GrantEnd.tests_end_by`).
+retries never wait past the time a test can still end by it (:attr:`GrantEnd.tests_end_by`). The reserve is the
+validation FINAL would run as the session stands, which grows as candidates and regression cases come, so EXPLORE's
+end is asked again while it runs.
 
 A hosted run's agents must be isolated: they run with the application's credentials in reach otherwise. Its start
 marks the process so (:func:`~hyperloom.common.agent_isolation.require_agent_isolation`), with the hosting layer's
@@ -74,7 +76,12 @@ from hyperloom.hosted.host_info import HostInfo, Var
 from hyperloom.measure.pins import ImagePinError, active_image
 from hyperloom.measure.short_prompts.staging import CACHE_ENV as RUNNER_CACHE_ENV
 from hyperloom.inference_optimizer.session.paths import ENV_USER_DATA_PATH
-from hyperloom_multibranch.scheduling.budget import MB_CLOSE_GRACE_CAP_SECONDS, MB_SECONDS_PER_HOUR, ExploreCap
+from hyperloom_multibranch.scheduling.budget import (
+    MB_CLOSE_GRACE_CAP_SECONDS,
+    MB_SECONDS_PER_HOUR,
+    ExploreCap,
+    FinalWork,
+)
 from hyperloom_multibranch.scheduling.launch_isolation import HOSTED, launch_isolation
 from hyperloom_multibranch.scheduling.layout import SessionLayout
 from hyperloom_multibranch.scheduling.lifecycle import PersistedRun, persisted_run, persisted_session, prelude_landed
@@ -91,8 +98,9 @@ EXIT_FILE = "exit.json"
 SESSION_FILE = "session.json"
 #: Seconds between the session's hard stop and the grant's end, for the process to write ``exit.json`` and exit.
 GRANT_MARGIN_SECONDS = 60.0
-#: The attempts of one validation test FINAL's reserve covers: two that meet an infrastructure failure a retry waits out
-#: (cards a process outside the test still holds, a platform with no sandbox to give), and the one that measures.
+#: The attempts of a validation test FINAL's reserve covers, once per FINAL however many tests it runs: two that meet
+#: an infrastructure failure a retry waits out (cards a process outside the test still holds, a platform with no sandbox
+#: to give), and the one that measures.
 FINAL_ATTEMPTS = 3
 #: A fresh sandbox's create and its runner's start, once, which a test measured on a warm node may not have included.
 FINAL_COLD_START_SECONDS = 300.0
@@ -429,19 +437,22 @@ def grant_deadline(host: HostInfo, now: datetime) -> GrantDeadline:
     return GrantDeadline(limits.max_runtime_sec - (now - host.run_created_at).total_seconds())
 
 
-def final_reserve_seconds(test_seconds: float) -> float:
-    """The seconds of the grant FINAL is kept, given the wall time of the session's longest test (``0`` when it measured
-    none): its wind-down from EXPLORE (:data:`FINAL_WIND_DOWN_SECONDS`), :data:`FINAL_ATTEMPTS` attempts of a test that
-    long, the infra backoff before each retry among them (:data:`~hyperloom_multibranch.toolbox.attempts.INFRA_BACKOFF_SECONDS`,
-    as :class:`~hyperloom_multibranch.toolbox.attempts.InfraBackoff` waits it) and one cold start
-    (:data:`FINAL_COLD_START_SECONDS`); no less than :data:`FINAL_RESERVE_FLOOR_SECONDS`."""
+def final_reserve_seconds(work: FinalWork) -> float:
+    """The seconds of the grant FINAL is kept for the validation ``work`` it would run: its wind-down from EXPLORE
+    (:data:`FINAL_WIND_DOWN_SECONDS`), one cold start (:data:`FINAL_COLD_START_SECONDS`), its tests queued on the slots
+    FINAL has (:attr:`~hyperloom_multibranch.scheduling.budget.FinalWork.run_seconds`), and once per FINAL the retries
+    of :data:`FINAL_ATTEMPTS`, each a test at the primary conc and the infra backoff before it
+    (:data:`~hyperloom_multibranch.toolbox.attempts.INFRA_BACKOFF_SECONDS`, as
+    :class:`~hyperloom_multibranch.toolbox.attempts.InfraBackoff` waits it); no less than
+    :data:`FINAL_RESERVE_FLOOR_SECONDS`."""
 
     # attempts loads the measurement's failure names, which load the main flow's runtime: the command imports none.
     from hyperloom_multibranch.toolbox.attempts import INFRA_BACKOFF_SECONDS
 
     waits = INFRA_BACKOFF_SECONDS
     backoff = sum(waits[min(retry, len(waits)) - 1] for retry in range(1, FINAL_ATTEMPTS)) if waits else 0.0
-    needed = FINAL_WIND_DOWN_SECONDS + FINAL_ATTEMPTS * max(test_seconds, 0.0) + backoff + FINAL_COLD_START_SECONDS
+    retries = (FINAL_ATTEMPTS - 1) * max(work.test_seconds, 0.0) + backoff
+    needed = FINAL_WIND_DOWN_SECONDS + FINAL_COLD_START_SECONDS + work.run_seconds + retries
     return max(FINAL_RESERVE_FLOOR_SECONDS, needed)
 
 
@@ -458,11 +469,11 @@ class GrantEnd:
 
         return self.at - MB_CLOSE_GRACE_CAP_SECONDS
 
-    def explore_cap(self, test_seconds: float) -> float:
-        """The latest EXPLORE may end at for FINAL to end a margin before :attr:`tests_end_by`, given the wall time of
-        the session's longest test: an :data:`~hyperloom_multibranch.scheduling.budget.ExploreCap`."""
+    def explore_cap(self, work: FinalWork) -> float:
+        """The latest EXPLORE may end at for FINAL to end a margin before :attr:`tests_end_by`, given the validation
+        ``work`` it would run: an :data:`~hyperloom_multibranch.scheduling.budget.ExploreCap`."""
 
-        return self.tests_end_by - GRANT_MARGIN_SECONDS - final_reserve_seconds(test_seconds)
+        return self.tests_end_by - GRANT_MARGIN_SECONDS - final_reserve_seconds(work)
 
 
 def grant_end(host: HostInfo) -> GrantEnd | None:

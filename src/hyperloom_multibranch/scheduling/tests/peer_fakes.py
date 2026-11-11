@@ -725,13 +725,14 @@ class FakeRegressionCheck:
     ``failures`` names, with its reason, and passes on any other, having checked the number of cases ``cases`` gives
     the base commit, none by default; ``calls`` notes every ``(base_commit, candidate_delta, sources)`` it was asked
     about. Asked for every case, it answers the same of a commit, which still carries the root's defects ``carried``
-    names, and notes the commit in ``every_case``."""
+    names, and notes the commit in ``every_case``; the runs it would still make on a commit take ``case_seconds``."""
 
     failures: Mapping[str, str] = field(default_factory=dict)
     cases: Mapping[str, int] = field(default_factory=dict)
     carried: Mapping[str, tuple[str, ...]] = field(default_factory=dict)
     calls: list[tuple[str, RecipeDelta, tuple[str, ...]]] = field(default_factory=list)
     every_case: list[str] = field(default_factory=list)
+    case_seconds: Mapping[str, tuple[float, ...]] = field(default_factory=dict)
 
     async def check(
         self, base_commit: str, candidate_delta: RecipeDelta, *, sources: tuple[str, ...]
@@ -744,6 +745,9 @@ class FakeRegressionCheck:
         self.every_case.append(commit)
         reason = self.failures.get(commit)
         return RegressionOutcome(reason is None, reason or "", self.cases.get(commit, 0), self.carried.get(commit, ()))
+
+    async def final_case_seconds(self, commits: tuple[str, ...]) -> tuple[float, ...]:
+        return tuple(seconds for commit in dict.fromkeys(commits) for seconds in self.case_seconds.get(commit, ()))
 
 
 def judged(verdict: Verdict, gain_pct: float, request_id: str, value: float) -> Judgement:

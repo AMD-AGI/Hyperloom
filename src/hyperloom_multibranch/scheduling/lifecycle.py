@@ -36,6 +36,7 @@ import logging
 import math
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, replace
+from functools import partial
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, NamedTuple
 
@@ -92,7 +93,8 @@ from hyperloom_multibranch.scheduling.agent_plans import (
     map_dealer,
 )
 from hyperloom_multibranch.scheduling.branches import BranchControl
-from hyperloom_multibranch.scheduling.budget import HardStop, SessionBudget, budget_seconds, explore_gpu_seconds
+from hyperloom_multibranch.scheduling.budget import ExploreCap, HardStop, SessionBudget, budget_seconds
+from hyperloom_multibranch.scheduling.budget import explore_gpu_seconds
 from hyperloom_multibranch.scheduling.clock import Clock
 from hyperloom_multibranch.scheduling.checkpoint_tally import CheckpointScope
 from hyperloom_multibranch.scheduling.close import CloseReport, Closer, ended_before_final
@@ -100,9 +102,9 @@ from hyperloom_multibranch.scheduling.context import SchedulerContext
 from hyperloom_multibranch.scheduling.dashboard import SessionDashboard
 from hyperloom_multibranch.scheduling.decisions import Decision, DecisionKind, DecisionLog, downtime_until
 from hyperloom_multibranch.scheduling.events import IntegrationProfiler, SessionEvents
-from hyperloom_multibranch.scheduling.explore import Explorer, ExploreWindow, Steering, integration_row
+from hyperloom_multibranch.scheduling.explore import Explorer, ExploreWindow, Steering
 from hyperloom_multibranch.scheduling.exports import CloseAuthoring, ExportServices, ExportSources, SessionExports
-from hyperloom_multibranch.scheduling.final import FinalCandidates, FinalChoice, FinalSelector, choose_candidates
+from hyperloom_multibranch.scheduling.final import FinalCandidates, FinalChoice, FinalSelector, session_candidates
 from hyperloom_multibranch.scheduling.forks import ForkDesk
 from hyperloom_multibranch.scheduling.integrator import BundlingIntegrator, Integrator, LlmPatchResolver, MergeRecords
 from hyperloom_multibranch.scheduling.judge import GRACE_KEY, Judge, session_grace
@@ -283,7 +285,7 @@ class Session:
         self._map_shares: tuple[RootShares | None] | None = None
         self._dealer: MapDealer | None = None
         self._explore_end = math.inf
-        self._explore_cap: Callable[[float], float] | None = None  # budget.ExploreCap, given by run or resume
+        self._explore_cap: ExploreCap | None = None  # given by run or resume
         peers = peer_factory(self._peer_setup(desk, services))
         context = SchedulerContext(
             self._layout,
@@ -317,7 +319,7 @@ class Session:
         self._open_llm_roles(services)
         self._similarity = BranchSimilarity(peers.repo, self._roster)
         self._events = SessionEvents(self._blackboard, self._decisions, profiler, peers.toolbox, settings.workload)
-        self._selector = FinalSelector(checks, settings.workload)
+        self._selector = FinalSelector(checks, settings.workload, final_quota(settings.caps).global_concurrency)
         self._signals = StopSignals()
         self._in_final = False
         self._image_check: ImageCheckReport | None = None
@@ -425,7 +427,7 @@ class Session:
         curator = recorded(services.author_completion, self._blackboard, UsageSource.CURATOR)
         self._curator = CloseAuthoring(curator, services.author_model)
 
-    async def run(self, explore_cap: Callable[[float], float] | None = None) -> SessionOutcome:
+    async def run(self, explore_cap: ExploreCap | None = None) -> SessionOutcome:
         """Run every phase and CLOSE; an unhandled error propagates once CLOSE has run. EXPLORE ends no later than
         ``explore_cap`` (a :data:`~.budget.ExploreCap`, a hosted run's grant's) says, when it is given.
 
@@ -476,7 +478,7 @@ class Session:
         return await self._run_and_close(work, ending, budget, hard_stop)
 
     async def resume(
-        self, ended: SessionStopReason, deadline: float, explore_cap: Callable[[float], float] | None = None
+        self, ended: SessionStopReason, deadline: float, explore_cap: ExploreCap | None = None
     ) -> SessionOutcome:
         """Continue the session an earlier run left here, which ended for ``ended`` before FINAL, with EXPLORE, FINAL
         and CLOSE and no PRELUDE (:meth:`Prelude.landed`), up to ``deadline``, which the manifest keeps: the caller
@@ -630,15 +632,10 @@ class Session:
             logger.info("the agent map was rejected at its review: %s", exc)
             return SessionOutcome(SessionStopReason.REVIEW_REJECTED, None, None, "")
         budget = self._budget or budget  # a review's pause moved the deadline
-        cap = math.inf if self._explore_cap is None else self._explore_cap(prelude.longest_root_test)
+        final_cap = partial(self._final_cap, prelude.longest_root_test)
+        cap = await final_cap()
         now = self._clock.now()
         explore_end = self._explore_end = budget.explore_end(now, prelude.longest_root_test, cap)
-        if cap <= now:
-            logger.warning(
-                "EXPLORE gets no time: the session's limit leaves FINAL only what it keeps for its validation"
-                " (EXPLORE had to end %.0f s ago); FINAL validates what the session has",
-                now - cap,
-            )
         self._phase("explore", explore_end=explore_end, **({"explore_cap": cap} if math.isfinite(cap) else {}))
         window = ExploreWindow(
             prelude.root_commit,
@@ -651,6 +648,7 @@ class Session:
             opening.agents,
             opening.plans,
             opening.map_for,
+            final_cap,
         )
         reason = await self._explorer().run(window)
         if reason is SessionStopReason.NO_MEASUREMENT_CARDS:
@@ -1102,13 +1100,15 @@ class Session:
             return ()
         return reference_leads(self._reference_dirs()[source.name], profile, source.revision)
 
+    async def _final_cap(self, test_seconds: float) -> float:
+        """:attr:`_explore_cap` of the FINAL the session would run now, one test taking ``test_seconds``."""
+
+        if self._explore_cap is None:
+            return math.inf
+        return self._explore_cap(await self._selector.planned_work(await self._final_candidates(), test_seconds))
+
     async def _final_candidates(self) -> FinalCandidates:
-        progress = await self._blackboard.progress()
-        integration = integration_row(progress)
-        if integration is None:
-            raise RuntimeError("the blackboard has no integration branch after PRELUDE recorded its root")
-        root = (await self._blackboard.baseline()).root_commit
-        return await choose_candidates(progress, integration, self._settings.workload.metric, self._repo, root)
+        return await session_candidates(self._blackboard, self._repo, self._settings.workload.metric)
 
     async def _close(self, ending: SessionOutcome, hard_stop: HardStop) -> SessionOutcome:
         if ending.stop_reason is SessionStopReason.ABORTED:
