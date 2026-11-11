@@ -26,13 +26,14 @@ from hyperloom.measure import points
 from hyperloom.measure.points import (
     AGENTX_PROFILE_STEPS,
     CANONICAL_FILE,
+    MEASUREMENT_SEED,
     PointError,
     accept_measurement,
     default_canonical,
     generate_points,
     generate_profile_point,
 )
-from hyperloom.measure.points import _limit_agentx_capture
+from hyperloom.measure.points import _limit_agentx_capture, _seeded
 from hyperloom.measure.surface import SurfaceViolation
 from hyperloom.measure.tests._recipes import IMAGE, recipe_with, sha
 from hyperloom.orchestrator.actions.executors._workload_envs import (
@@ -45,6 +46,8 @@ from hyperloom.orchestrator.actions.executors._workload_envs import (
 from hyperloom.orchestrator.actions.executors.magpie_agentx import enable_profile
 
 SERVER_ARGS = "--max-running-requests 77 --enable-dp-attention"
+#: The recipe's launch as a point runs it: with the engine seed pinned, since neither the recipe nor the base names one.
+SEEDED_ARGS = f"{SERVER_ARGS} --random-seed {MEASUREMENT_SEED}"
 
 
 @pytest.fixture(autouse=True)
@@ -235,6 +238,44 @@ def test_a_profile_point_carries_the_profiler_settings_and_the_recipes_launch(ca
     assert (envs["CONC"], envs["RUN_EVAL"]) == ("32", "false")
 
 
+def _seed_values(text: str) -> list[str]:
+    tokens = text.split()
+    return [tokens[i + 1] for i, token in enumerate(tokens[:-1]) if token == "--random-seed"]
+
+
+def test_every_point_and_the_profile_point_pin_the_engine_seed_the_recipe_leaves_unset(canonical, blobs, tmp_path):
+    env = environment(blobs, tmp_path, delta=RecipeDelta(config=ConfigDelta(server_args=SERVER_ARGS)))
+
+    points = generate_points(env, canonical, tmp_path / "points", concurrency=(8, 64))
+    (profile,) = generate_profile_point(env, canonical, tmp_path / "profile")
+
+    for point in (*points, profile):
+        extra = load(point)["benchmark"]["envs"]["EXTRA_SGLANG_ARGS"]
+        assert _seed_values(extra) == [str(MEASUREMENT_SEED)], f"{point.name} launches with a fixed seed: {extra}"
+        assert "--max-running-requests 77" in extra
+
+
+@pytest.mark.parametrize("spelled", ["--random-seed 7", "--random_seed 7"])
+def test_a_seed_the_recipe_names_is_the_one_the_point_launches_with(canonical, blobs, tmp_path, spelled):
+    delta = RecipeDelta(config=ConfigDelta(server_args=f"{SERVER_ARGS} {spelled}"))
+
+    (point,) = generate_points(environment(blobs, tmp_path, delta=delta), canonical, tmp_path / "points")
+
+    extra = load(point)["benchmark"]["envs"]["EXTRA_SGLANG_ARGS"]
+    assert spelled in extra
+    assert _seed_values(extra) == (["7"] if spelled.startswith("--random-seed") else []), extra
+
+
+def test_a_seed_the_base_launch_names_is_kept_and_a_framework_without_a_seed_option_gets_none():
+    base = {"benchmark": {"framework": "sglang", "envs": {"EXTRA_SGLANG_ARGS": "--tp 8 --random-seed=5"}}}
+    vllm = {"benchmark": {"framework": "vllm", "envs": {"EXTRA_VLLM_ARGS": "--tp 8"}}}
+    atom = {"benchmark": {"framework": "atom", "envs": {"EXTRA_ATOM_ARGS": "--tp 8"}}}
+
+    assert _seeded(SERVER_ARGS, base) == SERVER_ARGS
+    assert _seeded(SERVER_ARGS, vllm) == f"{SERVER_ARGS} --seed {MEASUREMENT_SEED}"
+    assert _seeded(SERVER_ARGS, atom) == SERVER_ARGS
+
+
 def test_a_profile_point_replays_graphs_node_by_node_so_the_profiler_records_every_replay(canonical, blobs, tmp_path):
     (profile,) = generate_profile_point(environment(blobs, tmp_path), canonical, tmp_path / "profile")
     (normal,) = generate_points(environment(blobs, tmp_path), canonical, tmp_path / "normal")
@@ -330,7 +371,7 @@ def test_an_agentx_point_is_what_the_main_flow_hands_magpie_for_the_recipe_and_c
     main_flow = materialize_benchmark_config(
         source,
         tmp_path / "main",
-        launch=LaunchLayer(SERVER_ARGS, {"HSA_FORCE_FINE_GRAIN_PCIE": "1", "RUN_EVAL": "false"}),
+        launch=LaunchLayer(SEEDED_ARGS, {"HSA_FORCE_FINE_GRAIN_PCIE": "1", "RUN_EVAL": "false"}),
         target=BenchmarkTarget(model_path=str(model)),
     )
     rendered = load(point)
@@ -339,7 +380,7 @@ def test_an_agentx_point_is_what_the_main_flow_hands_magpie_for_the_recipe_and_c
     assert (envs["CONC"], envs["RUN_EVAL"]) == (level, "false")
     assert not {"NUM_PROMPTS", "NUM_WARMUPS", "EXTRA_SGLANG_ARGS", "HSA_FORCE_FINE_GRAIN_PCIE"} & envs.keys()
     launch = rendered["benchmark"]["agentx"]["launch_overrides"]
-    assert launch["append_args"] == SERVER_ARGS.split()
+    assert launch["append_args"] == SEEDED_ARGS.split()
     assert launch["env"] == {"HSA_FORCE_FINE_GRAIN_PCIE": "1", AITER_LOG_TUNED_CONFIG_ENV: "1"}
 
 
@@ -414,7 +455,7 @@ def test_an_agentx_profile_point_is_the_main_flows_agentx_profile_of_the_recipe(
     main_flow = materialize_benchmark_config(
         source,
         tmp_path / "main",
-        launch=LaunchLayer(SERVER_ARGS, {"RUN_EVAL": "false"}),
+        launch=LaunchLayer(SEEDED_ARGS, {"RUN_EVAL": "false"}),
         target=BenchmarkTarget(model_path=str(model)),
     )
     _limit_agentx_capture(main_flow)  # the one difference: the window is sized to the result's cap
@@ -424,7 +465,7 @@ def test_an_agentx_profile_point_is_the_main_flows_agentx_profile_of_the_recipe(
     assert rendered["benchmark"]["profiler"]["torch_profiler"]["enabled"] is True
     assert rendered["benchmark"]["profiler"]["torch_profiler"]["num_steps"] == AGENTX_PROFILE_STEPS
     assert "PROFILE" not in rendered["benchmark"]["envs"]
-    assert rendered["benchmark"]["agentx"]["launch_overrides"]["append_args"] == SERVER_ARGS.split()
+    assert rendered["benchmark"]["agentx"]["launch_overrides"]["append_args"] == SEEDED_ARGS.split()
 
 
 def test_an_agentx_profile_captures_half_the_main_flows_steps_unless_its_point_names_a_count(tmp_path):
@@ -462,7 +503,7 @@ def test_an_inferencex_point_is_what_the_inferencex_renderer_hands_magpie(canoni
     expected = materialize_config_with_envs(
         default_baseline_config(),
         tmp_path / "direct",
-        launch=LaunchLayer(SERVER_ARGS, {"HSA_FORCE_FINE_GRAIN_PCIE": "1", "CONC": "8", "RUN_EVAL": "true"}),
+        launch=LaunchLayer(SEEDED_ARGS, {"HSA_FORCE_FINE_GRAIN_PCIE": "1", "CONC": "8", "RUN_EVAL": "true"}),
         target=BenchmarkTarget(model_path=str(model)),
     )
     rendered = load(point)
