@@ -841,9 +841,6 @@ def accuracy_config(
     )
 
 
-#: The tool cache ``install.sh`` stages into, below the dependency cache unless the operator names one.
-
-
 __all__ = [
     "MEASURED_SEED",
     "SERVER_HOST",
