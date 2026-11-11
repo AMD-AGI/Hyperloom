@@ -797,21 +797,15 @@ def test_arbor_s_harness_books_a_completed_round_and_not_one_mb_s_gate_refuses(t
 
 
 def test_only_an_agentx_arbor_measured_by_mb_s_round_has_its_report_read_by_path(tmp_path: Path) -> None:
-    launch = _launch_file(tmp_path, {**RESOLVED, "client": AGENTX_CLIENT})
     inferencex = _spec(tmp_path, client=AGENTX_CLIENT)
     agentx = replace(inferencex, workload=AGENTX_WORKLOAD, metric=GRADED_INTVTY_P50)
-    specs = [
-        inferencex,
-        replace(agentx, client=""),
-        replace(agentx, client="", launch=launch),
-    ]
+    specs = [inferencex, replace(agentx, client="")]
 
     components = [arbor_config(spec, tmp_path / "checkout", BRANCH_RUN)["component"] for spec in specs]
 
     assert [("bench_command" in each, "bench_read" in each) for each in components] == [
         (True, False),
         (False, False),
-        (True, False),
     ]
 
 
@@ -832,17 +826,6 @@ def test_arbor_s_accuracy_tolerance_is_the_drop_mb_s_rule_allows(tmp_path: Path)
     config = arbor_config(_spec(tmp_path), tmp_path / "checkout", BRANCH_RUN)
 
     assert config["policy"] == {"accuracy_tolerance": 0.05}
-
-
-def test_a_launch_file_s_client_measures_arbor_only_when_mb_gives_none(tmp_path: Path) -> None:
-    client = "python3 bench.py --port 8000 --result-dir /tmp/out --model served"
-    spec = _spec(tmp_path, launch=_launch_file(tmp_path, {**RESOLVED, "model_name": "", "client": client}))
-
-    given = arbor_config(replace(spec, client=""), tmp_path / "checkout", BRANCH_RUN)
-    own = arbor_config(spec, tmp_path / "checkout", BRANCH_RUN)
-
-    assert (given["component"]["bench_command"], given["model_name"]) == (bench_command(client), "served")
-    assert (own["component"]["bench_command"], own["model_name"]) == (bench_command(spec.client), "Qwen/Qwen3-14B-FP8")
 
 
 def test_an_agentx_branch_served_no_launch_is_refused_before_arbor_starts(tmp_path: Path) -> None:
@@ -908,7 +891,7 @@ def test_an_agentx_arbor_given_a_launch_file_is_served_it_over_the_frozen_base(
         ({**RESOLVED, "server_flags": "--chat-template 'a b"}, "a quote is left open"),
         ({**RESOLVED, "server_env": {"N": 1}}, "server_env is not an object of strings"),
         ({**RESOLVED, "flags": "--tp 1", "model_name": 7}, "keys a launch does not: flags; its model_name is not"),
-        ({**RESOLVED, "client": "python3 bench.py --port 8000"}, "names no --result-dir"),
+        ({**RESOLVED, "client": ""}, "keys a launch does not: client"),
     ],
     ids=[
         "unreadable",
@@ -917,7 +900,7 @@ def test_an_agentx_arbor_given_a_launch_file_is_served_it_over_the_frozen_base(
         "open-quote",
         "env-not-strings",
         "unknown-key-and-name",
-        "client-arbor-cannot-fill",
+        "a-client-the-gate-gives",
     ],
 )
 def test_a_launch_file_the_adapter_cannot_use_is_refused_with_why(tmp_path: Path, document: object, said: str) -> None:
@@ -933,7 +916,7 @@ def test_a_launch_file_the_adapter_cannot_use_is_refused_with_why(tmp_path: Path
 
 def test_the_repository_s_launch_template_has_a_launch_file_s_keys_and_is_refused_until_filled(tmp_path: Path) -> None:
     template = json.loads(TEMPLATE.read_text(encoding="utf-8"))
-    filled = {**RESOLVED, "client": "", "server_flags": f"{RESOLVED['server_flags']} --reasoning-start-str <think>"}
+    filled = {**RESOLVED, "server_flags": f"{RESOLVED['server_flags']} --reasoning-start-str <think>"}
 
     with pytest.raises(ArborRefused) as refused:
         read_launch(TEMPLATE)
@@ -975,7 +958,7 @@ def test_a_base_launch_record_is_served_as_the_gate_seeds_its_launch_with_its_go
     )
     assert launch.server_env == {"VLLM_ROCM_USE_AITER": "1", "VLLM_SIMULATE_ACC": "3"}
     assert (launch.record, launch.digest, launch.entrypoint) == (str(record), base_record().digest(), ("vllm", "serve"))
-    assert (launch.model_name, launch.client) == ("", "")
+    assert launch.model_name == ""
 
 
 def _shell_argv(flags: str) -> list[str]:

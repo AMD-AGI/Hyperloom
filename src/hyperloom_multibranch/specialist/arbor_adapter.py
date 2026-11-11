@@ -106,7 +106,7 @@ MB_DIR = "hyperloom-mb"
 PLAN_FILE = f"{MB_DIR}/plan.json"
 OUTBOX = "keeps"
 #: The keys of a launch file (:func:`read_launch`): the first two it must give, the others it may.
-LAUNCH_KEYS = ("server_flags", "server_env", "model_name", "client")
+LAUNCH_KEYS = ("server_flags", "server_env", "model_name")
 #: A placeholder of the repository's launch template still to be filled: ``<NAME>``, or a description such as ``<the
 #: name the server answers to>``. A literal tag in a real flag, ``<think>``, is neither.
 _PLACEHOLDER = re.compile(r"<(?:[A-Z_]+|[^<>]*\s[^<>]*)>")
@@ -305,13 +305,12 @@ class SplitFailed(RuntimeError):
 @dataclass(frozen=True)
 class ResolvedLaunch:
     """A server's launch as the recipe's framework resolves it: its ``server_flags`` and ``server_env``, the
-    ``model_name`` the server answers to and ``client``, the gate's client, each ``""`` when not given. The recipe's
+    ``model_name`` the server answers to, ``""`` when not given. The recipe's
     own launch is added to it, as a round adds a root recipe's ``extra_server_args`` and ``extra_envs``."""
 
     server_flags: str = ""
     server_env: Mapping[str, str] = field(default_factory=dict)
     model_name: str = ""
-    client: str = ""
     #: A base launch record's file, its digest and its entrypoint; empty for a launch file.
     record: str = ""
     digest: str = ""
@@ -322,8 +321,8 @@ def read_launch(path: Path) -> ResolvedLaunch:
     """The launch in the file ``path``, a JSON object of :data:`LAUNCH_KEYS` (the repository's
     ``examples/multibranch-arbor-launch`` has a template), or a base launch record (:func:`_read_record`); raise
     :class:`ArborRefused` with every reason it cannot be used: unreadable, a key it does not have, no ``server_flags``
-    or ones with a quote left open, a ``server_env`` that is not an object of strings, a template placeholder left
-    unfilled, or a ``client`` Arbor could not fill."""
+    or ones with a quote left open, a ``server_env`` that is not an object of strings, or a template placeholder left
+    unfilled. The gate gives every Arbor its client, so a launch names none."""
 
     try:
         document = json.loads(path.read_text(encoding=ENCODING))
@@ -349,9 +348,7 @@ def read_launch(path: Path) -> ResolvedLaunch:
         reasons.append(f"its {', '.join(unfilled)} still hold the template's placeholders: fill them in")
     if reasons:
         raise ArborRefused([f"the launch file {path}: {reason}" for reason in reasons])
-    if texts["client"]:
-        bench_command(texts["client"])
-    return ResolvedLaunch(flags, env, texts["model_name"], texts["client"])
+    return ResolvedLaunch(flags, env, texts["model_name"])
 
 
 def _read_record(path: Path, document: Mapping[str, Any]) -> ResolvedLaunch:
@@ -683,19 +680,17 @@ def arbor_config(spec: AgentSpec, checkout: Path, run: ArborRun) -> dict[str, An
     names in ``checkout`` (the serving template by default), ending by the spec's deadline, its patches made against
     its root, the integration notes read every iteration, its measurements as :func:`_bench_keys` gives them, an AgentX
     session's keep rule as its objective, and the host's plan when it gives one, which a run that stops at its map does
-    not take. A spec with a launch file is served the file's launch with the recipe's added to it, and measured by the
-    file's client when the spec has none.
+    not take. A spec with a launch file is served the file's launch with the recipe's added to it.
 
     The cards are numbered from 0, as the sandbox shows them; Arbor never masks them itself in this mode."""
 
     name = spec.pack or PACK
     pack = checkout / "packs" / name
     launch = read_launch(Path(spec.launch)) if spec.launch else ResolvedLaunch()
-    client = spec.client or launch.client
     component: dict[str, Any] = {"host": HOST, "deadline": int(spec.deadline), "root": spec.root, "outbox": OUTBOX}
     if spec.knowledge:
         component["notes"] = spec.knowledge
-    component.update(_bench_keys(spec, client))
+    component.update(_bench_keys(spec))
     if run.stop_at:
         component["stop_at"] = run.stop_at
     elif spec.plan:
@@ -719,7 +714,7 @@ def arbor_config(spec: AgentSpec, checkout: Path, run: ArborRun) -> dict[str, An
         "docker_container": "@host",
         "framework": spec.framework,
         "model_path": spec.model,
-        "model_name": launch.model_name or _client_value(client, MODEL) or spec.model,
+        "model_name": launch.model_name or _client_value(spec.client, MODEL) or spec.model,
         "tp": spec.tp,
         "server_flags": server_flags(spec, launch.server_flags),
         "server_env": {ACCURACY_FLOOR_ENV: str(DEFAULT_ENABLEMENT_ACCURACY_FLOOR), **launch.server_env, **spec.envs},
@@ -736,14 +731,14 @@ def arbor_config(spec: AgentSpec, checkout: Path, run: ArborRun) -> dict[str, An
     }
 
 
-def _bench_keys(spec: AgentSpec, client: str) -> dict[str, Any]:
-    """The component keys of how Arbor measures ``spec``'s branch: every measurement by ``client`` when there is one,
+def _bench_keys(spec: AgentSpec) -> dict[str, Any]:
+    """The component keys of how Arbor measures ``spec``'s branch: every measurement by the gate's client when it gives one,
     the report of the gate's AgentX round read by Arbor's harness (:func:`_report_keys`) when it is one that counts
     (:data:`REPORT_REQUIRE`), and its bench phase as long as one measurement by the gate's client may take."""
 
     keys: dict[str, Any] = {}
-    if client:
-        keys["bench_command"] = bench_command(client)
+    if spec.client:
+        keys["bench_command"] = bench_command(spec.client)
     if spec.client and spec.workload.get("kind") == AGENTX:
         keys["bench_read"] = {
             "file": REPORT_FILE,

@@ -178,7 +178,9 @@ it.
   `DURATION`, `INFMAX_CONTAINER_WORKSPACE`, ...) that only a hand-written
   `--agent-launch` file carried; with `--reference-script` it could not run at
   all. A session whose base or staged tools cannot run that round now refuses
-  to start, naming why.
+  to start, naming why. **Upgrade note:** an `--agent-launch` file no longer
+  takes a `client` key, which the gate's client always overrode; a file that
+  names one is refused (`keys a launch does not: client`), so remove it.
 - **A recipe image whose tag names no framework version no longer refuses an
   older install.** For an untagged image such as
   `lmsysorg/sglang-rocm:muse-spark-open`, the version InferenceSuite assumes
