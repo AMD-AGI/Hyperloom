@@ -37,9 +37,15 @@ These are set in the app container's environment.
 | `HYPERLOOM_SOURCE_SHA` | yes | The full 40-hex commit the run executes. |
 | `HYPERLOOM_RSI_ARCHIVE` | yes, for the hosted multi-branch entry | Writable directory where sessions archive their search trees for later sessions to learn from. Point every session of a deployment at the same directory to share what they learn; a private directory keeps a session's tree out of the shared archive. There is no default. |
 | `INFERENCEX_PATH` | yes, for the hosted multi-branch entry, unless `install.sh` left a checkout | A writable InferenceX checkout at the commit Hyperloom pins. Without one the session refuses to start, naming `INFERENCEX_PATH`. |
+| `HYPERLOOM_HOST_LAYER` | yes, unless `HYPERLOOM_SPECIALIST_USER` names an account the app can run agents as | The hosting layer's directory. A hosted run launches an agent under bubblewrap only with the layer's `bin/bwrap`, never one on `PATH` (the framework image may carry its own). |
 
 The model is named by the campaign spec (`model.path`), not by a variable. The app host reads the model's tokenizer
 files at that path.
+
+A hosted run starts nothing unconfined in the app container, beside its credentials: its specialists run as the account
+`HYPERLOOM_SPECIALIST_USER` names where it can be used, else under the layer's bubblewrap (`HYPERLOOM_HOST_LAYER`).
+Where neither can isolate them, the run ends before anything starts, naming both reasons (exit code 1); a bubblewrap
+that gives no answer within 10 s leaves the host to start the run again.
 
 ## Measurement sandbox template
 
