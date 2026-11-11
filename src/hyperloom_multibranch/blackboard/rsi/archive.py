@@ -51,6 +51,7 @@ from hyperloom_multibranch.contracts.blackboard.vocab import (
 )
 from hyperloom_multibranch.blackboard.codec import decode, encode
 from hyperloom_multibranch.blackboard.families import Mechanism, family_of
+from hyperloom_common.shared_storage import ownership
 from hyperloom_multibranch.blackboard.local.files import encode_json, publish_once
 from hyperloom_multibranch.blackboard.local.unfinished import hinted_gain
 from hyperloom_multibranch.blackboard.rsi.similarity import TaskConditions, task_conditions
@@ -601,14 +602,24 @@ class TreeArchive:
         if replace(held, started_at=tree.started_at) != tree:
             raise TreeConflict(f"{path} already holds another tree for session {tree.session_id}")
 
+    def holds(self, session_id: str) -> bool:
+        """Whether the archive holds a tree of session ``session_id``, whenever it was written."""
+
+        return (self.root / f"{session_id}.json").is_file()
+
     def load(self) -> list[SearchTree]:
-        """Every readable archived tree, as of ``as_of``; one this version cannot read is skipped with a warning."""
+        """Every readable archived tree, as of ``as_of``; one this version or this account cannot read is skipped with a
+        warning naming it, and its owner and mode when it could not be opened (another account of the deployment wrote
+        it owner-only)."""
 
         trees = []
         for path in sorted(self.root.glob("*.json")):
             try:
                 tree = tree_from_document(json.loads(path.read_text(encoding="utf-8")))
-            except (OSError, KeyError, TypeError, ValueError) as exc:
+            except OSError as exc:
+                log.warning("skipping unreadable search tree %s%s: %s", path, ownership(path), exc.strerror or exc)
+                continue
+            except (KeyError, TypeError, ValueError) as exc:
                 log.warning("skipping unreadable search tree %s: %s", path, exc)
                 continue
             ended = tree.started_at + tree.budget_seconds if tree.started_at is not None else None

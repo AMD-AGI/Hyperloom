@@ -15,9 +15,12 @@ from pathlib import Path
 import pytest
 
 from hyperloom.contracts.measurement import AccuracyValue
+from hyperloom.measure import signing
+from hyperloom.measure.bundle import RejectReason, ResultRejected
 from hyperloom.measure.failures import SANDBOX_ACQUIRE_TIMEOUT
-from hyperloom.measure.hosted import STOPPED_RETURNCODE, HostedStartError
+from hyperloom.measure.hosted import STOPPED_RETURNCODE, HostedMeasurementBackend, HostedStartError
 from hyperloom.measure.hosted_log import STATE_FINISHED, STATE_SENT, STATE_SUBMITTED
+from hyperloom.measure.manifest import encode_manifest
 from hyperloom.measure.returncodes import (
     HOSTED_INFRA_FAILURE_RC,
     HOSTED_RESULT_REJECTED_RC,
@@ -25,6 +28,7 @@ from hyperloom.measure.returncodes import (
     HOSTED_SPEC_REJECTED_RC,
 )
 from hyperloom.measure.spec import MeasurementSpec
+from hyperloom.measure.tests.bundle_factory import DEFAULT_FILES, manifest_document, spec_document
 from hyperloom.measure.tests.hosted_fixtures import (
     HOSTNAME,
     Rig,
@@ -311,6 +315,19 @@ def test_a_file_the_manifest_does_not_list_is_never_fetched_or_landed(rig, tmp_p
     assert not list(Path(r.record_archive("req-1")).rglob("extra.txt"))
 
 
+def test_listed_sizes_adding_up_to_more_digits_than_str_converts_are_too_large_not_a_crash() -> None:
+    key = signing.generate_private_key()
+    public = signing.public_key_pem(key)
+    document = manifest_document(DEFAULT_FILES, public)
+    for entry in document["files"]:
+        entry["size"] = int("9" * 4300)  # each as long as an integer the reader converts may be; their sum is longer
+    raw = encode_manifest(document)
+    spec = MeasurementSpec.from_document(spec_document())
+    with pytest.raises(ResultRejected) as raised:
+        HostedMeasurementBackend._signed_file_list(raw, signing.sign(raw, key).encode("ascii"), public, spec)
+    assert raised.value.reason is RejectReason.TOO_LARGE
+
+
 def test_a_signed_manifest_for_other_sheet_bytes_is_rejected(rig, tmp_path, monkeypatch) -> None:
     """The fingerprint matches (the version salt is not part of the content), but the sheet bytes differ."""
     r = rig()
@@ -511,6 +528,35 @@ def test_a_restarted_application_reattaches_instead_of_measuring_twice(rig, tmp_
     assert (record.state, record.attempt) == (STATE_FINISHED, 1) and record.extra["verified"] is True
     report = call.output_dir / "benchmark_fake_20000101_000000" / "benchmark_report.json"
     assert json.loads(report.read_text())["throughput"]["output_throughput"] == 1234.0
+
+
+@pytest.mark.parametrize("when", ["before it runs", "while it measures"])
+def test_a_restarted_application_that_withdraws_the_test_a_dead_one_left_ends_its_sandbox(rig, tmp_path, when) -> None:
+    """A session taken up again after its process died withdraws the tests it left: the sandbox still measuring is
+    closed and gives its slot back, whether the withdrawal reaches the test before or after it re-attached."""
+    r = rig()
+    call = make_call(tmp_path, point=point_yaml(tmp_path, fake_mode="hang"))
+    _crash_mid_wait(r, call)
+    left = r.backend.journal.latest("req-1")
+    assert left.sandbox_id in {info.sandbox_id for info in r.provider.find({}, role="measurement")}
+    backend = r.another_backend()
+    result: list = []
+    if when == "before it runs":
+        backend.withdraw("req-1")
+    worker = threading.Thread(target=lambda: result.append(backend.run_test(call)))
+    worker.start()
+    try:
+        if when == "while it measures":
+            deadline = time.monotonic() + 20
+            while backend.pool.active == 0 and time.monotonic() < deadline:
+                time.sleep(0.02)
+            assert backend.pool.active == 1, "the restarted application re-attached to the sandbox"
+            backend.withdraw("req-1")
+    finally:
+        worker.join(30)
+    assert not worker.is_alive() and result[0].returncode == STOPPED_RETURNCODE
+    assert left.sandbox_id not in {info.sandbox_id for info in r.provider.find({}, role="measurement")}
+    assert backend.pool.active == 0
 
 
 def test_a_restart_that_finds_no_slot_for_its_sandbox_ends_the_attempt_with_the_reason(rig, tmp_path) -> None:

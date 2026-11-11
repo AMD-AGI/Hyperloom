@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import contextlib
 import ctypes
+import enum
 import json
 import logging
 import os
@@ -25,6 +26,11 @@ log = logging.getLogger(__name__)
 # Minimum soft RLIMIT_NOFILE the Ray raylet needs to stay up.
 DEFAULT_MIN_NOFILE = 65536
 DEFAULT_RAY_STATUS_TIMEOUT_SEC = 5.0
+#: How long a head that did not answer ``ray status`` in time, or was just started, is given to answer before it is
+#: reported unreachable. A healthy head on an R9700 host needs about 5.4 s; 30 s answered without a restart there.
+DEFAULT_RAY_READY_TIMEOUT_SEC = 30.0
+_RAY_READY_POLL_INTERVAL_SEC = 1.0
+_RAY_READY_MIN_PROBE_TIMEOUT_SEC = 0.1
 DEFAULT_RAY_STOP_TIMEOUT_SEC = 30.0
 #: Wall-clock bound on the ``ray.init`` connect handshake. Registration with the
 #: raylet has no timeout of its own, so a raylet that accepts the socket and then
@@ -130,6 +136,11 @@ def _ray_status_timeout_sec() -> float:
     return _positive_float_env("HYPERLOOM_RAY_STATUS_TIMEOUT_SEC", DEFAULT_RAY_STATUS_TIMEOUT_SEC)
 
 
+def _ray_ready_timeout_sec() -> float:
+    """Return how long a head is given to answer ``ray status`` before it is reported unreachable, in seconds."""
+    return _positive_float_env("HYPERLOOM_RAY_READY_TIMEOUT_SEC", DEFAULT_RAY_READY_TIMEOUT_SEC)
+
+
 def _ray_stop_timeout_sec() -> float:
     """Return the ``ray stop --force`` timeout in seconds."""
     return _positive_float_env("HYPERLOOM_RAY_STOP_TIMEOUT_SEC", DEFAULT_RAY_STOP_TIMEOUT_SEC)
@@ -175,19 +186,47 @@ def ensure_fd_limit(min_soft: Optional[int] = None) -> Tuple[int, int]:
     return soft, hard
 
 
-def ray_status_ok() -> bool:
-    """Check whether a Ray cluster is currently reachable."""
+class RayProbe(enum.Enum):
+    """What one ``ray status`` call says about the Ray head."""
+
+    #: ``ray status`` exited 0.
+    UP = "up"
+    #: ``ray status`` exited non-zero, or there is no ``ray`` executable: no head answers.
+    DOWN = "down"
+    #: ``ray status`` did not finish in time: a head that is there but slow gives the same result as a wedged one.
+    UNKNOWN = "unknown"
+
+
+def ray_probe(timeout: Optional[float] = None) -> RayProbe:
+    """Run ``ray status`` once, bounded by ``timeout`` (default ``HYPERLOOM_RAY_STATUS_TIMEOUT_SEC``)."""
     try:
         proc = subprocess.run(
             ["ray", "status"],
             stdout=subprocess.DEVNULL,
             stderr=subprocess.DEVNULL,
             text=True,
-            timeout=_ray_status_timeout_sec(),
+            timeout=_ray_status_timeout_sec() if timeout is None else timeout,
         )
-    except (OSError, subprocess.TimeoutExpired):
-        return False
-    return proc.returncode == 0
+    except OSError:
+        return RayProbe.DOWN
+    except subprocess.TimeoutExpired:
+        return RayProbe.UNKNOWN
+    return RayProbe.UP if proc.returncode == 0 else RayProbe.DOWN
+
+
+def _wait_for_ray_head() -> RayProbe:
+    """Probe until the head answers ``ray status`` or ``HYPERLOOM_RAY_READY_TIMEOUT_SEC`` has passed.
+
+    Each probe is bounded by the time left, so a head slower than the default probe timeout still gets to answer.
+    Returns the last probe.
+    """
+    deadline = time.monotonic() + _ray_ready_timeout_sec()
+    while True:
+        state = ray_probe(timeout=max(deadline - time.monotonic(), _RAY_READY_MIN_PROBE_TIMEOUT_SEC))
+        remaining = deadline - time.monotonic()
+        if state is RayProbe.UP or remaining <= 0:
+            return state
+        time.sleep(min(_RAY_READY_POLL_INTERVAL_SEC, remaining))
 
 
 def _stop_ray_force() -> None:
@@ -220,7 +259,15 @@ def _ray_start_evidence(captured: str) -> str:
 
 def ensure_ray_cluster(num_gpus: Optional[int] = None) -> None:
     """Ensure a Ray cluster is reachable, starting a head node if needed."""
-    if ray_status_ok():
+    state = ray_probe()
+    if state is RayProbe.UNKNOWN:
+        state = _wait_for_ray_head()
+        if state is RayProbe.UNKNOWN:
+            raise RuntimeError(
+                f"the Ray head did not answer `ray status` within {_ray_ready_timeout_sec():g}s "
+                "(HYPERLOOM_RAY_READY_TIMEOUT_SEC); it was not restarted"
+            )
+    if state is RayProbe.UP:
         return
     # Clears stale Ray discovery state before the local head starts.
     _stop_ray_force()
@@ -248,7 +295,7 @@ def _start_local_head(num_gpus: Optional[int]) -> None:
         captured = sink.read().strip()
     if proc.returncode != 0:
         raise RuntimeError(f"failed to start Ray (rc={proc.returncode}); {_ray_start_evidence(captured)}")
-    if not ray_status_ok():
+    if _wait_for_ray_head() is not RayProbe.UP:
         raise RuntimeError(f"ray start exited 0 but cluster is not reachable; {_ray_start_evidence(captured)}")
 
 
@@ -392,7 +439,7 @@ def ray_head_answers_driver() -> bool:
     verdict = _HEAD_VERDICT
     with verdict.lock:
         if verdict.probe is None and not verdict.deferred:
-            if ray_status_ok():
+            if ray_probe() is not RayProbe.DOWN:
                 verdict.probe = _probe_and_report(_ray_address())
             else:
                 verdict.deferred = True

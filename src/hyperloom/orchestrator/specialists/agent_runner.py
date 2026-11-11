@@ -50,7 +50,11 @@ from hyperloom.common.deadline import Deadline
 from hyperloom.common.agent_isolation import AgentIsolation
 from hyperloom.common.env_safety import RunAsError, redact_secret_values
 from hyperloom.common.visible_devices import GPU_MASK_ENV_NAMES
-from hyperloom.inference_optimizer.session.session_paths import RESOURCES_RELATIVE_PATH
+from hyperloom.inference_optimizer.session.session_paths import (
+    CONTAINER_RECORD_KIND,
+    RESOURCES_RELATIVE_PATH,
+    SPECIALIST_RECORD_KIND,
+)
 from hyperloom_common.fs_utils import (
     append_text_nofollow,
     create_nofollow,
@@ -93,10 +97,8 @@ from .subprocess_ import (
 log = logging.getLogger(__name__)
 
 __all__ = [
-    "CONTAINER_RECORD_KIND",
     "DEFAULT_MCP_TOKEN_ENV",
     "LOST_AFTER_SEC",
-    "SPECIALIST_RECORD_KIND",
     "AgentConfigError",
     "AgentEnded",
     "AgentHandle",
@@ -116,11 +118,6 @@ __all__ = [
 #: How long a CLI may stay silent. Past it with no tool call in flight, the reap loop ends the CLI and ``poll`` reports
 #: it lost; ``poll`` also counts a beat and the session's start as life within it.
 LOST_AFTER_SEC: float = 300.0
-
-#: The ``kind`` of each line the runner appends to :data:`RESOURCES_RELATIVE_PATH`: one specialist's run, and one
-#: reading of the container.
-SPECIALIST_RECORD_KIND = "specialist_resources"
-CONTAINER_RECORD_KIND = "container_resources"
 
 #: Environment variable that carries a specialist's MCP bearer token when its endpoint names no other.
 DEFAULT_MCP_TOKEN_ENV = "HYPERLOOM_SPECIALIST_MCP_TOKEN"
