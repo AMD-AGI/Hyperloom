@@ -88,7 +88,6 @@ class FailedStep(str, Enum):
     DEADLINE_EXHAUSTED = "deadline_exhausted"
     #: -917.
     CANCELLED = "cancelled"
-    DISK_FULL = "disk_full"
     TEARDOWN_INCOMPLETE = "teardown_incomplete"
 
 
