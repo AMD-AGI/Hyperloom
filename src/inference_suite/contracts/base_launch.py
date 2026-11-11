@@ -249,6 +249,44 @@ class LaunchSource:
         )
 
 
+class UpstreamSource(str, Enum):
+    INFERENCEX = "inferencex"
+    SGLANG_COOKBOOK = "sglang_cookbook"
+    VLLM_RECIPES = "vllm_recipes"
+    ATOM_CATALOG = "atom_catalog"
+    HF_MODEL = "hf_model"
+
+
+@dataclass(frozen=True)
+class UpstreamRevision:
+    """The revision resolving read one upstream source at.
+
+    A repository or a Hugging Face model is read at a commit. The vLLM recipes site publishes none and its renderings
+    carry no ETag, so each response it gave is one revision: its URL and the sha256 of its body.
+    """
+
+    source: UpstreamSource
+    location: str
+    revision: str
+
+    def __post_init__(self) -> None:
+        source = _FIELDS.enum(UpstreamSource, self.source, "the upstream source")
+        object.__setattr__(self, "source", source)
+        _FIELDS.text(self.location, "the upstream location")
+        if source is UpstreamSource.VLLM_RECIPES:
+            _FIELDS.sha256(self.revision, "the sha256 of a vLLM recipes response")
+        else:
+            _FIELDS.matching(_COMMIT, self.revision, f"the {source.value} commit")
+
+    def to_document(self) -> dict[str, object]:
+        return {"source": self.source.value, "location": self.location, "revision": self.revision}
+
+    @classmethod
+    def from_document(cls, document: object) -> UpstreamRevision:
+        fields = _FIELDS.known(document, field_names(cls), "an upstream revision")
+        return cls(fields.get("source"), fields.get("location"), fields.get("revision"))
+
+
 @dataclass(frozen=True)
 class LaunchModel:
     """The checkpoint the base serves: its id, and the local path the runner serves it from on this host."""
@@ -580,6 +618,8 @@ class BaseLaunch:
 
     ``args`` and ``env`` hold neither runner-owned keys nor, when there is a golden layer, golden-owned ones.
     ``stripped`` names what was taken out of the source because the runner owns it; ``warnings`` are shown at launch.
+    ``upstream`` is the revision of every upstream source resolving read, the one the launch came from or not; a
+    document written before it was recorded reads with none.
 
     A scriptable base (``query.workload`` scriptable) runs its entrypoint's last word, :attr:`script`, and nothing
     else: no client, args, env or golden layer, and ``source.files`` records the script's sha256.
@@ -601,6 +641,7 @@ class BaseLaunch:
     runner_owned: RunnerOwned = field(default_factory=RunnerOwned)
     stripped: tuple[str, ...] = ()
     warnings: tuple[str, ...] = ()
+    upstream: tuple[UpstreamRevision, ...] = ()
 
     def __post_init__(self) -> None:
         _FIELDS.text(self.framework, "the framework")
@@ -707,6 +748,7 @@ class BaseLaunch:
             "stripped": list(self.stripped),
             "warnings": list(self.warnings),
             "resolved_unix": self.resolved_unix,
+            "upstream": [revision.to_document() for revision in self.upstream],
         }
 
     def to_document(self) -> dict[str, object]:
@@ -738,6 +780,9 @@ class BaseLaunch:
             runner_owned=RunnerOwned.from_document(fields.get("runner_owned", {})),
             stripped=_FIELDS.strings(fields.get("stripped", ()), "the stripped flags"),
             warnings=_FIELDS.strings(fields.get("warnings", ()), "the warnings"),
+            upstream=tuple(
+                map(UpstreamRevision.from_document, _FIELDS.items(fields.get("upstream", ()), "the upstream revisions"))
+            ),
         )
         recorded = fields.get("digest")
         if recorded != base.digest():
@@ -769,6 +814,8 @@ __all__ = [
     "SourceApi",
     "SourceKind",
     "Topology",
+    "UpstreamRevision",
+    "UpstreamSource",
     "VersionBasis",
     "Workload",
 ]

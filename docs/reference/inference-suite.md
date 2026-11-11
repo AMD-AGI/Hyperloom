@@ -32,9 +32,13 @@ gives the base:
 An AgentX session that no recipe and no operator launch file serves is refused.
 When a source cannot be read, a fixed session runs the default table, unless
 InferenceX is pinned (below), and an AgentX session is refused. A pinned fixed
-session no recipe serves is refused too, naming why each source missed. Repositories are read at the head of their `main` and recorded
-with that commit; the vLLM recipes site has no commit and is recorded as the
-response it was read from.
+session no recipe serves is refused too, naming why each source missed. Repositories are read at the head of their `main`. The base's
+`upstream` list records the revision of every source read, whether or not it gave
+the launch: the commit of InferenceX, the SGLang cookbook and ATOM's catalog, the
+commit of the Hugging Face model whose card was read, and, since the vLLM recipes
+site publishes no commit and its renderings carry no ETag, the URL and body sha256
+of each response it gave. `upstream` is not part of the digest, and a
+`base_launch.json` written without it reads with an empty list.
 
 To match a run made at an older InferenceX, pin it with `resolve --inferencex-commit
 <sha>`: a full sha, or a prefix of 7 or more hex digits of a commit on one of

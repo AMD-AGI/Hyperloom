@@ -43,6 +43,8 @@ from inference_suite.contracts.base_launch import (
     RunnerOwned,
     SourceKind,
     Topology,
+    UpstreamRevision,
+    UpstreamSource,
     Workload,
 )
 from inference_suite.golden import GOLDEN_OWNED_ENV_PREFIXES, GOLDEN_OWNED_SPEC_CONFIG_KEYS, is_golden_owned_flag
@@ -119,6 +121,7 @@ class SourceSnapshot:
     base. ``fetched_unix`` is when the snapshot was taken, and so when the base was resolved. ``unread`` names the
     source reading stopped at, when one could not be read; what it and every later source hold is missing.
     ``inferencex_pin`` is the full sha InferenceX was read at when the operator pinned it, ``""`` for its ``main``.
+    ``model_revision`` is the commit of the Hugging Face model ``base_model`` was read from, when its card was read.
     """
 
     inferencex: InferencexSnapshot | None
@@ -132,6 +135,7 @@ class SourceSnapshot:
     latest_releases: Mapping[str, str] = field(default_factory=dict)
     unread: UnreadSource | None = None
     inferencex_pin: str = ""
+    model_revision: UpstreamRevision | None = None
 
     def __post_init__(self) -> None:
         _FIELDS.integer(self.fetched_unix, "the snapshot's fetch time", minimum=0)
@@ -346,6 +350,25 @@ def _client_env(query: LaunchQuery, snapshot: SourceSnapshot, env: Mapping[str, 
     return {**env, AGENTX_TRACE_ENV: agentx_trace(bundle, models)}
 
 
+def _upstream(snapshot: SourceSnapshot) -> tuple[UpstreamRevision, ...]:
+    """The revision of every upstream source ``snapshot`` read."""
+    repos = (
+        (UpstreamSource.INFERENCEX, None if snapshot.inferencex is None else snapshot.inferencex.bundle),
+        (UpstreamSource.SGLANG_COOKBOOK, snapshot.sglang_cookbook),
+        (UpstreamSource.ATOM_CATALOG, snapshot.atom_catalog),
+    )
+    revisions = [UpstreamRevision(source, bundle.repo, bundle.commit) for source, bundle in repos if bundle is not None]
+    if snapshot.vllm_recipes is not None:
+        responses = snapshot.vllm_recipes.responses
+        revisions += [
+            UpstreamRevision(UpstreamSource.VLLM_RECIPES, url, responses[url].provenance().response_sha256)
+            for url in sorted(responses)
+        ]
+    if snapshot.model_revision is not None:
+        revisions.append(snapshot.model_revision)
+    return tuple(revisions)
+
+
 def _recipe_base(
     query: LaunchQuery, snapshot: SourceSnapshot, choice: _Choice, misses: Sequence[SourceMiss]
 ) -> BaseLaunch:
@@ -374,6 +397,7 @@ def _recipe_base(
             *_alternatives_warning(choice),
             *_golden_warning(launch),
         ),
+        upstream=_upstream(snapshot),
     )
 
 
@@ -424,6 +448,7 @@ def _user_file_base(query: LaunchQuery, snapshot: SourceSnapshot, user_file: Use
         runner_owned=_runner_owned(query.framework),
         stripped=(*shell.stripped, *_runner_env(shell.env)),
         warnings=unresolved,
+        upstream=_upstream(snapshot),
     )
 
 
@@ -459,6 +484,7 @@ def _default_base(query: LaunchQuery, snapshot: SourceSnapshot, misses: tuple[So
             *_miss_warnings(misses),
             f"{_why_default(query, snapshot)}; the default {query.framework} launch for {board.gfx} runs it",
         ),
+        upstream=_upstream(snapshot),
     )
 
 

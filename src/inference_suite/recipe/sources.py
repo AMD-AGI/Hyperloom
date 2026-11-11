@@ -37,7 +37,7 @@ from urllib.parse import quote
 from packaging.specifiers import InvalidSpecifier, SpecifierSet
 
 from inference_suite.client_env import ClientEnvError, pinned_python
-from inference_suite.contracts.base_launch import LaunchQuery, Workload
+from inference_suite.contracts.base_launch import LaunchQuery, UpstreamRevision, UpstreamSource, Workload
 from inference_suite.recipe.atom_catalog import ATOM_REPO, CATALOG, RECIPES_DIR
 from inference_suite.recipe.golden_curve import GoldenLength, GoldenRequest, golden_requests
 from inference_suite.recipe.image_version import release_version
@@ -84,6 +84,7 @@ _HTTP_TIMEOUT_S = 60
 _COMMAND_TIMEOUT_S = 900
 _OUTPUT_TAIL = 2000
 _PINNED_COMMIT = re.compile(r"[0-9a-f]{7,40}")
+_FULL_SHA = re.compile(r"[0-9a-f]{40}")
 _FULL_COMMIT_LENGTH = 40
 
 #: What the resolver below imports from InferenceX, by module: a commit that lacks any of it cannot answer.
@@ -499,17 +500,26 @@ def _with_cookbook(snapshot: SourceSnapshot, query: LaunchQuery, scratch: Path) 
     return snapshot
 
 
-def _base_model(model_id: str) -> str | None:
-    """The model's HF ``cardData.base_model`` when it names exactly one, one level up and no further."""
+def _with_model_card(snapshot: SourceSnapshot, model_id: str) -> SourceSnapshot:
+    """``snapshot`` carrying the model's HF commit and its ``cardData.base_model`` when that names exactly one, one
+    level up and no further."""
     response = fetch_response(f"{HF_MODELS_API}/{quote(model_id, safe='/')}")
     if response.status in _NO_MODEL_CARD:
-        return None
+        return snapshot
     if response.status != _OK:
         raise SourceFetchError(f"{response.url} answered {response.status}")
-    named = (response.json().get("cardData") or {}).get("base_model")
+    card = response.json()
+    commit = card.get("sha")
+    if not isinstance(commit, str) or not _FULL_SHA.fullmatch(commit):
+        raise SourceFetchError(f"{response.url} names no commit sha, got {commit!r}")
+    named = (card.get("cardData") or {}).get("base_model")
     if isinstance(named, list) and len(named) == 1:
         named = named[0]
-    return named if isinstance(named, str) and named else None
+    return dataclasses.replace(
+        snapshot,
+        base_model=named if isinstance(named, str) and named else None,
+        model_revision=UpstreamRevision(UpstreamSource.HF_MODEL, response.url, commit),
+    )
 
 
 def _version_key(version: str) -> tuple[tuple[int, ...], int]:
@@ -574,7 +584,7 @@ def _recipe_reads(
         reads.append(
             (
                 "the Hugging Face model card",
-                lambda snapshot: dataclasses.replace(snapshot, base_model=_base_model(query.model_id)),
+                lambda snapshot: _with_model_card(snapshot, query.model_id),
             )
         )
     reads += [
