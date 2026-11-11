@@ -14,7 +14,11 @@ from types import SimpleNamespace
 import pytest
 import yaml
 
-from hyperloom.orchestrator.loop._explore_delegate import _keep_launchable_variants
+from hyperloom.orchestrator.actions.executors._grid_base import TS_SKIPPED_DEDUP
+from hyperloom.orchestrator.actions.executors._proposal_identity import content_fingerprint
+from hyperloom.orchestrator.actions.executors.explore_prefilter.measured_variants import grid_fingerprints
+from hyperloom.orchestrator.loop._explore_delegate import LAUNCH_REFUSED, _keep_launchable_variants
+from hyperloom.orchestrator.state.shared_state import SharedState
 
 _MODULE = "Magpie.modes.benchmark.agentx_launch"
 _GOLDEN_REFUSAL = "Changing AgentX golden acceptance inputs requires a new resolved recipe"
@@ -95,17 +99,21 @@ def _variant(name: str, args: str) -> dict:
     return {"name": name, "extra_args": args}
 
 
-def _narrow(workspace, grid):
-    """Run the launch-contract narrowing on ``grid``; the outcome, the grid left and the observations."""
-    observations: list[dict] = []
-
+def _router(workspace, observations: list[dict]) -> SimpleNamespace:
     async def record_observation(sender, kind, payload):
         observations.append(payload)
 
-    router = SimpleNamespace(
-        shared_state=SimpleNamespace(baseline_workspace=str(workspace)),
+    return SimpleNamespace(
+        shared_state=SharedState(baseline_workspace=str(workspace)),
+        session_dir=workspace.parent,
         bus=SimpleNamespace(record_observation=record_observation),
     )
+
+
+def _narrow(workspace, grid, router=None):
+    """Run the launch-contract narrowing on ``grid``; the outcome, the grid left and the observations."""
+    observations: list[dict] = []
+    router = router or _router(workspace, observations)
     params = {"grid": list(grid)}
     admitted = asyncio.run(_keep_launchable_variants(router, "orchestration", params))
     return admitted, params["grid"], observations
@@ -123,6 +131,38 @@ def test_a_variant_changing_golden_acceptance_inputs_is_refused_with_magpies_rea
     assert observation["kind"] == "explore_variants_refused_by_launch_contract"
     assert observation["refused"] == [{"name": "spec_steps_4", "reason": _GOLDEN_REFUSAL}]
     assert "recipe" in observation["hint"]
+
+
+def test_a_refused_variant_is_decided_in_the_explore_ledger_so_it_is_not_offered_again(workspace):
+    """A refusal only the inbox hears leaves the proposal untested, so the proposal queue keeps offering it."""
+    spec = _variant("spec_steps_4", "--speculative-num-steps 4 --speculative-num-draft-tokens 5")
+    chunked = _variant("chunked_16k", "--chunked-prefill-size 16384")
+    router = _router(workspace, [])
+    state = router.shared_state
+
+    _narrow(workspace, [spec, chunked], router=router)
+
+    [row] = state.explore_search["tested"].values()
+    assert (row["name"], row["outcome"], row["reason"], row["detail"]) == (
+        "spec_steps_4",
+        TS_SKIPPED_DEDUP,
+        LAUNCH_REFUSED,
+        _GOLDEN_REFUSAL,
+    )
+    assert content_fingerprint(spec) in state.benched_fingerprints()
+    assert content_fingerprint(chunked) not in state.benched_fingerprints()
+    assert SharedState.load_or_init(workspace.parent).explore_search["tested"] == state.explore_search["tested"]
+
+
+def test_a_refusal_never_overwrites_a_measured_row(workspace):
+    spec = _variant("spec_steps_4", "--speculative-num-steps 4 --speculative-num-draft-tokens 5")
+    router = _router(workspace, [])
+    [fingerprint] = grid_fingerprints({"grid": [spec]})
+    router.shared_state.explore_search = {"tested": {fingerprint: {**spec, "outcome": "REVERT"}}}
+
+    _narrow(workspace, [spec], router=router)
+
+    assert router.shared_state.explore_search["tested"][fingerprint]["outcome"] == "REVERT"
 
 
 def test_a_grid_of_only_protected_args_is_not_enqueued(workspace):

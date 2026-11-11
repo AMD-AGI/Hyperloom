@@ -8,13 +8,16 @@ from __future__ import annotations
 import hashlib
 import json
 from collections.abc import Mapping
+from datetime import datetime, timezone
 from typing import Any
 
 from hyperloom.inference_optimizer.canonical_fingerprint import canonical_fingerprint
 
-__all__ = ["admit_explore_grid", "delegate_idempotency_key", "explore_grid_key"]
+__all__ = ["LAUNCH_REFUSED", "admit_explore_grid", "delegate_idempotency_key", "explore_grid_key"]
 
 _EXPLORE = "explore"
+#: ``reason`` of the explore ledger row a variant Magpie refused to launch gets at admission.
+LAUNCH_REFUSED = "launch_refused"
 
 
 def delegate_idempotency_key(request: Any, shared_state: Any, nested_key: str | None) -> str:
@@ -123,9 +126,12 @@ async def _keep_launchable_variants(router: Any, source: str, params: dict[str, 
     from ..actions.executors.explore import _grid_variants_from_payload
     from ..actions.executors.magpie_agentx import drop_unlaunchable_variants
 
+    proposed = list(params.get("grid") or ())
     refused = drop_unlaunchable_variants(params, router.shared_state.baseline_workspace, _grid_variants_from_payload)
     if not refused:
         return True
+    dropped = [raw for raw in proposed if not any(raw is kept for kept in params["grid"])]
+    _record_launch_refusals(router, params, dropped, [row["reason"] for row in refused])
     await _observe(
         router,
         source,
@@ -135,6 +141,34 @@ async def _keep_launchable_variants(router: Any, source: str, params: dict[str, 
         refused=refused,
     )
     return bool(params["grid"])
+
+
+def _record_launch_refusals(router: Any, params: Mapping[str, Any], variants: list[Any], reasons: list[str]) -> None:
+    """Mark the refused variants decided in the explore ledger, so the proposal queue and predictor stop offering them.
+
+    A variant the ledger already holds keeps its row, since a measurement outranks a refusal.
+    """
+    from ..actions.executors._grid_base import TS_SKIPPED_DEDUP
+    from ..actions.executors.explore_prefilter.measured_variants import grid_fingerprints
+
+    state = router.shared_state
+    known = (state.explore_search or {}).get("tested") or {}
+    now = datetime.now(timezone.utc).isoformat()
+    tested = {
+        fingerprint: {
+            **raw,
+            "fingerprint": fingerprint,
+            "outcome": TS_SKIPPED_DEDUP,
+            "reason": LAUNCH_REFUSED,
+            "detail": reason,
+            "ts": now,
+        }
+        for fingerprint, raw, reason in zip(grid_fingerprints({**params, "grid": variants}), variants, reasons)
+        if fingerprint and fingerprint not in known
+    }
+    if tested:
+        state.apply_explore_search_update({"tested": tested}, advance_round=False)
+        state.save(router.session_dir)
 
 
 async def _explore_grid_covered(router: Any, request: Any, idempotency_key: str) -> bool:
