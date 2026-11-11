@@ -85,8 +85,13 @@ extensions = [
     "rocm_docs",
     "sphinx.ext.autosummary",
     "sphinx.ext.autodoc",
+    "sphinxcontrib.mermaid",
 ]
 
 html_title = f"{project} {version_number} documentation"
 
 external_projects_current_project = "Hyperloom"
+
+# Render Mermaid fences as directives while preserving GitHub-compatible Markdown.
+myst_fence_as_directive = ["mermaid"]
+mermaid_height = "auto"
