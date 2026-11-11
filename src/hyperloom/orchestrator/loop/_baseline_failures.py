@@ -22,7 +22,7 @@ from ..actions.executors._accuracy_gate import (
     ENABLEMENT_REVALIDATION_REASON,
 )
 from ..actions.executors._agentx_prefix_cache import PREFIX_CACHE_OFF_ERROR_CLASS
-from ..actions.executors._failed_step import failed_step_error_class
+from ..actions.executors import failed_step_error_class
 from ..actions.executors._ray_serving import RAY_INFEASIBLE_MARKER
 from ..actions.executors._subprocess_kill import AGENTX_PREFLIGHT_ERROR_CLASS
 from ..actions.stop_attribution import stopped_by_the_run_class
