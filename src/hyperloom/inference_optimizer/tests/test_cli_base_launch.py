@@ -329,7 +329,7 @@ def test_an_operator_file_passing_a_credential_as_an_arg_exits_2_naming_where_ne
 
     err = _refused(session, _args(operator_tp=4, reference_script=str(script)), capsys)
 
-    assert "holds a credential in arg" in err and "through the environment" in err
+    assert "passes a credential on the launch line" in err and "export it in the environment" in err
     assert " X" not in err and "qqqq" not in err
 
 
