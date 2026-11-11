@@ -8,8 +8,12 @@ onto ``run`` is pinned through the command in ``test_cli``."""
 from __future__ import annotations
 
 import json
+import os
 import signal
+import stat
+import subprocess
 import threading
+from collections.abc import Iterator
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
@@ -28,6 +32,7 @@ from hyperloom_multibranch.scheduling.hosted_run import (
     record_session,
     recorded_session,
     run_argv,
+    share_with_the_group,
     write_final_exit,
 )
 
@@ -132,3 +137,42 @@ def test_the_operator_turns_make_before_break_on_or_off_in_the_spec(
 def test_a_make_before_break_that_is_not_true_or_false_is_refused(given: object) -> None:
     with pytest.raises(HostedRefused, match="multibranch.make_before_break must be true or false"):
         run_argv(_spec(make_before_break=given), 1.0, 8)
+
+
+@pytest.fixture
+def umask_022() -> Iterator[None]:
+    """This process under umask 022, the usual default, which is restored after the test."""
+    saved = os.umask(0o022)
+    try:
+        yield
+    finally:
+        os.umask(saved)
+
+
+def _made_by_a_child(directory: Path) -> tuple[int, int]:
+    """The modes of the file and the directory a child process makes in ``directory`` with the default modes."""
+    subprocess.run(["sh", "-c", "touch file && mkdir dir"], cwd=directory, check=True)
+    return stat.S_IMODE((directory / "file").stat().st_mode), stat.S_IMODE((directory / "dir").stat().st_mode)
+
+
+@pytest.mark.usefixtures("umask_022")
+def test_below_shared_storage_the_children_of_a_hosted_run_write_what_the_group_can_write(tmp_path: Path) -> None:
+    # A later leg of the run may be another account of the group: what Arbor or an agent writes there is its too.
+    root = tmp_path / "MB-session"
+    root.mkdir()
+    root.chmod(0o2775)
+
+    share_with_the_group(root)
+
+    assert _made_by_a_child(root) == (0o664, 0o2775)
+
+
+@pytest.mark.usefixtures("umask_022")
+def test_off_shared_storage_the_children_of_a_hosted_run_keep_the_umask(tmp_path: Path) -> None:
+    root = tmp_path / "MB-session"
+    root.mkdir(0o755)
+
+    share_with_the_group(root)
+
+    assert _made_by_a_child(root) == (0o644, 0o755)
+    assert os.umask(0o022) == 0o022

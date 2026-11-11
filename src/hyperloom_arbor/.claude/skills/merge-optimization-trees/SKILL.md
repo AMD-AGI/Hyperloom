@@ -1,6 +1,6 @@
 ---
 name: merge-optimization-trees
-description: Merge several independently-discovered optimizations (PRs, campaign trees, forks) into one measurable baseline: branch contended sites in CODE behind per-feature knobs, choose a lean default and test that set, bisect when the lean set is broken, compare contended sites pairwise, stack the winners, and bank the losers. Use when consolidating optimization PRs or Arbor campaign trees, when two trees touch the same files, or when asked which combination of optimizations to ship.
+description: "Merge several independently-discovered optimizations (PRs, campaign trees, forks) into one measurable baseline: branch contended sites in CODE behind per-feature knobs, choose a lean default and test that set, bisect when the lean set is broken, compare contended sites pairwise, stack the winners, and bank the losers. Use when consolidating optimization PRs or Arbor campaign trees, when two trees touch the same files, or when asked which combination of optimizations to ship."
 disable-model-invocation: true
 ---
 
@@ -157,14 +157,14 @@ docker exec $C python3 -c "import vllm.envs as e; print(e.VLLM_ROCM_MY_FEATURE)"
 The lean set fails as a set. Halve the ON knobs, measure, recurse into the
 failing half. `log2(N)` runs, not `N`.
 
-An illustrative sequence, several knobs, a few runs:
+An illustrative sequence:
 
 | ON set | result |
 |---|---|
-| all of them | died |
-| all but the most-suspected | died → suspicion was wrong |
+| all of them | dies |
+| all but the most-suspected | dies → the suspicion was wrong |
 | the known-active ones only | clean |
-| those + one more | died → **culprit found** |
+| those + one more | dies → **culprit found** |
 
 Note the second row. A first hypothesis can be wrong, and the bisect says so
 immediately — which is the point of bisecting rather than reasoning.
@@ -184,7 +184,7 @@ explicitly:
 
 **One failure is not evidence.** This class of fault also occurs
 intermittently on unmodified baselines. Require a repeated, arm-specific
-pattern: a death in every attempt with the culprit on, none in several
+pattern: a death in every attempt with the culprit on, and none in more
 attempts without.
 
 Keep every failed attempt's log. Move it aside rather than overwriting it —
@@ -277,7 +277,7 @@ Two legitimate shortcuts, and one that is not:
 - **Legitimate:** decline a combination with arithmetic when a feature's gate
   provably cannot fire in the configuration under test.
 - **Legitimate:** price a feature against the kernel census first. A change
-  worth 0.1% of the serving window does not need a 600-second replay to rank.
+  worth a sliver of the serving window does not need a full replay to rank.
 - **Not legitimate:** inferring a combination's result from its parts and
   booking it as measured. Predicted sums choose what to run; they are never
   the final number.
@@ -315,7 +315,7 @@ expensive option: it destroys the comparison and nobody re-derives it.
 ## Traps
 
 - **`logger.info_once` hides everything after the first call.** A marker
-  reading `knob=1 batch=<large> -> base path` does not mean "this feature never
+  reading `knob=1 batch=1024 -> base path` does not mean "this feature never
   runs here": it can run on later, smaller batches, and crash the server.
   For any knob whose behaviour depends on batch or shape, the first log line
   is the *least* informative one. Count dispatches, or log per distinct shape.

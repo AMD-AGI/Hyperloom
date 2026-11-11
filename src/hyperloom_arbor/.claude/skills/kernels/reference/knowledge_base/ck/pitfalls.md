@@ -84,7 +84,7 @@ autograd's `Function.apply` saves 7 tensors, a measurable cost per call even und
 
 ### Merged pattern (union for block_m=128) is slower
 Merging adjacent m=64 Q-block rows via `bm_64[:,:,0::2,:] | bm_64[:,:,1::2,:]`
-to create m=128 block maps doubles effective topk (~76→145 for 10% density).
+to create m=128 block maps roughly doubles effective topk (at 10% density).
 The extra K/V blocks negate the K/V reuse benefit of block_m=128.
 - RULE: Use natively-generated 128-granularity block maps, not merged m=64 maps
 - EVIDENCE: Merged pattern is consistently slower than same-density m=64

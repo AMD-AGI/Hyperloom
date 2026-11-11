@@ -1,21 +1,21 @@
 """A parallel run's configuration: one JSON file, checked once, then pinned in the store.
 
-    {"run_id": "<run id>", "store": "<campaigns>/parallel",
-     "arbor_ref": "main@<sha>", "arbor_root": "<campaigns>/Arbor-par",
-     "template_config": "configs/<config>.json",
-     "dossier_dir": "docs/dossier/<dossier>/<round>",
-     "gates": "configs/parallel/gates-c8.json", "lane_sessions": "<campaigns>/sessions",
+    {"run_id": "r1", "store": "/path/to/parallel",
+     "arbor_ref": "main@<sha>", "arbor_root": "/path/to/Arbor",
+     "template_config": "configs/<platform>/<campaign>.json",
+     "dossier_dir": "docs/dossier/<model>-<platform>/<round>",
+     "gates": "configs/parallel/gates-c8.json", "lane_sessions": "/path/to/sessions",
      "max_lanes": 4, "max_rounds": 0, "no_keep_rounds": 2,
-     "seed": {"map": ".../11.uK-directions.md", "overlay": "configs/parallel/<run id>-r01-lanes.json",
+     "seed": {"map": ".../11.uK-directions.md", "overlay": "configs/parallel/r1-r01-lanes.json",
               "bar_record": "..."},
      "image_src": {"vllm": "<the image's stock vllm/, unpacked on the host>"},
      "base_vmu": "<prefix of the base's .diff/.blobs; default the template's base_vmu>",
      "base_aiter": "<a landed_aiter.py every lane and A/B arm applies>",
      "dossier_runner": "host", "dossier": {"pack": "parallel-dossier", "iterations": {"A": 8, "B": 8}},
      "cluster": {"partition": "<partition>", "time_limit": "04:00:00", "log_dir": "...",
-                 "lane_script": "scripts/parallel/lane.sbatch",
+                 "lane_script": "<the lane's campaign launcher>",
                  "profile_script": "scripts/parallel/profile_round.sbatch",
-                 "ab_script": "scripts/parallel/ab.sbatch"},
+                 "ab_script": "<the A/B launcher>"},
      "kinds": {"kernel-plan": {"policy": {...}, "space": {...}}}}
 
 Relative paths are the Arbor checkout's (`arbor_root`). `arbor_ref` names the
@@ -47,7 +47,7 @@ def sha256_text(text: str) -> str:
 
 
 def gates_sha(gates: dict) -> str:
-    """The gates' canonical sha256: what the A/B script recomputes on the node."""
+    """The gates' canonical sha256: what the A/B launcher (``ab_script``) recomputes on the node."""
     return sha256_text(json.dumps(gates, sort_keys=True))
 
 
@@ -79,9 +79,11 @@ class ClusterCfg:
     account: str = ""
     time_limit: str = "04:00:00"
     log_dir: str = ""
-    lane_script: str = "scripts/parallel/lane.sbatch"
+    # The site's launchers, named by the run config: a lane's campaign, and the A/B. No default: the engine names
+    # no site's scripts. A run that reaches one without it stops, saying which key to set.
+    lane_script: str = ""
     profile_script: str = "scripts/parallel/profile_round.sbatch"
-    ab_script: str = "scripts/parallel/ab.sbatch"
+    ab_script: str = ""
     dossier_script: str = "scripts/parallel/dossier_round.sh"
     host: str = ""                       # ssh to a login node when the controller runs elsewhere
 
