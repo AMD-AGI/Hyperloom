@@ -1064,7 +1064,7 @@ def hosted_run() -> int:
     except ImportError as exc:
         log.exception("hosted run: a module the session needs is not installed")
         return _not_run(host.state_dir, EXIT_FAILED, exc)
-    _stop_before_grant_ends(start.deadline)
+    _stop_before_grant_ends(host)
     try:
         returncode = start.run()
     except (PeersUnavailable, ImageCheckFailed, CacheBuildError, ToolboxInputsError, PermissionError) as exc:
@@ -1098,9 +1098,11 @@ def _hosted_start(host: HostInfo) -> HostedStart:
     return HostedStart(partial(close_then_start, earlier.left, close, start), deadline)
 
 
-def _stop_before_grant_ends(deadline: GrantDeadline) -> None:
-    """Arm this process's stop one CLOSE grace before ``deadline``'s grant ends (at once if passed; never untimed)."""
+def _stop_before_grant_ends(host: HostInfo) -> None:
+    """Arm this process's stop one CLOSE grace before ``host``'s grant ends (at once if passed; never untimed). What is
+    left of the grant is read now, as the timer starts, not when the start was prepared: that took time of its own."""
 
+    deadline = grant_deadline(host, datetime.now(timezone.utc))
     if deadline.stop_after_sec is not None:
         arm_grant_stop(max(0.0, deadline.stop_after_sec))
 
@@ -1168,7 +1170,7 @@ def _start(settings: RunSettings, grant: HandedGrant | None) -> int:
         ready = ready_session(settings.workload, load_peers)
     else:
         ready = hosted_ready_session(grant.host, settings.workload)
-        _stop_before_grant_ends(grant.deadline)
+        _stop_before_grant_ends(grant.host)
     cap = None if grant is None else grant_explore_cap(grant.host)
     return run_session(settings, ready.peer_factory, ready.services, explore_cap=cap)
 

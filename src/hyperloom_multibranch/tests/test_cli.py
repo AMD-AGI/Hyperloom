@@ -1749,6 +1749,36 @@ def test_a_hosted_session_ends_a_close_grace_and_a_margin_before_the_grant_and_i
     assert host.stops == [pytest.approx(3600 - grace, abs=30)]
 
 
+class _LaterBy(datetime):
+    """``datetime`` whose ``now`` runs ``ahead`` seconds past the real one, which a test moves forward."""
+
+    ahead = 0.0
+
+    @classmethod
+    def now(cls, tz: object = None) -> datetime:  # type: ignore[override]
+        return datetime.now(tz) + timedelta(seconds=cls.ahead)  # type: ignore[arg-type]
+
+
+@pytest.mark.usefixtures("ready_environment")
+def test_the_grant_stop_counts_what_preparing_the_start_took(
+    host: Host, agent_cli: list[RunSettings], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    host.started(seconds_ago=GRANT["max_runtime_sec"] - 3600)
+    prepare = cli.hosted_ready_session
+
+    def slow_to_prepare(*args: object, **kwargs: object) -> object:
+        _LaterBy.ahead = 900.0
+        return prepare(*args, **kwargs)  # type: ignore[arg-type]
+
+    monkeypatch.setattr(_LaterBy, "ahead", 0.0)
+    monkeypatch.setattr(cli, "datetime", _LaterBy)
+    monkeypatch.setattr(cli, "hosted_ready_session", slow_to_prepare)
+
+    assert cli.main(["hosted", "run"]) == 0
+
+    assert host.stops == [pytest.approx(3600 - 900 - MB_CLOSE_GRACE_CAP_SECONDS, abs=30)]
+
+
 @pytest.mark.usefixtures("ready_environment")
 def test_a_hosted_session_ends_explore_a_final_reserve_before_the_grant_s_stop(
     host: Host, agent_cli: list[RunSettings]

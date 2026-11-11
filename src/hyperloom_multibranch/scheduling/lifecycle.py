@@ -620,7 +620,14 @@ class Session:
             return SessionOutcome(SessionStopReason.REVIEW_REJECTED, None, None, "")
         budget = self._budget or budget  # a review's pause moved the deadline
         cap = math.inf if self._explore_cap is None else self._explore_cap(prelude.longest_root_test)
-        explore_end = self._explore_end = budget.explore_end(self._clock.now(), prelude.longest_root_test, cap)
+        now = self._clock.now()
+        explore_end = self._explore_end = budget.explore_end(now, prelude.longest_root_test, cap)
+        if cap <= now:
+            logger.warning(
+                "EXPLORE gets no time: the session's limit leaves FINAL only what it keeps for its validation"
+                " (EXPLORE had to end %.0f s ago); FINAL validates what the session has",
+                now - cap,
+            )
         self._phase("explore", explore_end=explore_end, **({"explore_cap": cap} if math.isfinite(cap) else {}))
         window = ExploreWindow(
             prelude.root_commit,
