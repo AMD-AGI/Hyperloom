@@ -25,11 +25,13 @@ from types import SimpleNamespace
 import pytest
 
 from hyperloom.hosted.host_info import HostInfo, read_host_info
-from hyperloom.measure.runner.cache_build import RUNNER_TARGET_ENV, CacheBuildError, runner_wheel_target
+from hyperloom.measure.runner import cache_build
+from hyperloom.measure.runner.cache_build import RUNNER_TARGET_ENV, CacheBuildError, CacheEntry, runner_wheel_target
 import hyperloom_multibranch
 from hyperloom_common.tests.shared_accounts import Accounts, other_accounts
 from hyperloom.measure.runner.cache_layout import manifest_from_json
-from hyperloom.measure.runner.cache_layout import MANIFEST_NAME
+from hyperloom.measure.runner.cache_layout import MANIFEST_NAME, SOURCE_DIR
+from hyperloom.measure.runner.suite_publish import SuitePublishError
 from hyperloom.measure.runner.tests.bootstrap_rig import Rig, make_rig
 from hyperloom.measure.sandboxes import Handover
 from hyperloom_multibranch.scheduling import hosted_peers
@@ -96,6 +98,55 @@ def test_the_runner_cache_is_built_readable_by_the_sandbox_and_pinned_by_its_man
     assert unreadable == [], "the sandbox reads the cache as another account"
     assert _umask() == PRIVATE, "the entry's own umask is back once the cache is built"
     assert runner_cache_pin(rig.repo, rig.cache.sha, cache, TARGET) == pin, "a second run of the commit uses the entry"
+
+
+class _FakeEntry:
+    """``ensure_runner_cache`` finding the commit's entry built, and the staging publish it is followed by."""
+
+    def __init__(self, cache: Path, refusal: str = "") -> None:
+        self.entry = CacheEntry(cache / ("a" * 40), "b" * 64, reused=True)
+        self.refusal = refusal
+        self.published: list[tuple[Path, Path, int]] = []
+
+    def ensure(self, repo: Path, sha: str, cache_root: Path, options: object) -> CacheEntry:
+        return self.entry
+
+    def publish(self, source: Path, cache_root: Path) -> Path:
+        if self.refusal:
+            raise SuitePublishError(self.refusal)
+        self.published.append((source, cache_root, _umask()))
+        return cache_root / "inference-suite" / "k"
+
+
+@pytest.mark.usefixtures("private_umask")
+def test_the_pin_publishes_the_staging_of_the_entrys_own_source_readable_by_the_sandbox(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    fake = _FakeEntry(tmp_path / "runner-cache")
+    monkeypatch.setattr(cache_build, "ensure_runner_cache", fake.ensure)
+    monkeypatch.setattr(cache_build, "publish_inference_suite", fake.publish)
+
+    pin = runner_cache_pin(tmp_path / "clone", "a" * 40, tmp_path / "runner-cache", TARGET)
+
+    assert pin == "b" * 64
+    assert fake.published == [
+        (fake.entry.path / SOURCE_DIR, tmp_path / "runner-cache", hosted_peers.RUNNER_CACHE_UMASK)
+    ]
+    assert _umask() == PRIVATE
+
+
+@pytest.mark.usefixtures("private_umask")
+def test_a_staging_that_cannot_be_published_fails_the_run_as_a_cache_build_error(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    fake = _FakeEntry(tmp_path / "runner-cache", refusal="exited 2: staging_missing: offline")
+    monkeypatch.setattr(cache_build, "ensure_runner_cache", fake.ensure)
+    monkeypatch.setattr(cache_build, "publish_inference_suite", fake.publish)
+
+    with pytest.raises(CacheBuildError, match="staging_missing: offline"):
+        runner_cache_pin(tmp_path / "clone", "a" * 40, tmp_path / "runner-cache", TARGET)
+
+    assert _umask() == PRIVATE
 
 
 @pytest.mark.usefixtures("private_umask")
