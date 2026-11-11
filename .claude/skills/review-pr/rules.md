@@ -74,6 +74,7 @@ the rules listed. Rows overlap; a rule listed twice is read once.
 | touches async code, a lock, a subprocess, a poll or retry loop, a per-candidate step, a timeout or a budget | P1 P2 P3 P6 |
 | touches a metric, score, speedup or gain denominator, or a threshold compared against a number this repo did not produce | M1 M2 M3 |
 | matches or selects by name: substring, `startswith`, `fnmatch`, a first-wins loop, a dedup/grouping/sort key, or an LLM backend, model or credential choice | D5 D6 D7 |
+| touches who may write a path: `shared_storage`, `parent_is_shared`, a mode (`chmod`, `fchmod`, `S_IWGRP`, `2775`), a umask, a setgid or sticky bit, a link (`symlink`, `followlinks`), or a git directory's own files (`config`, `hooks/`, `info/`, `commondir`, `alternates`, `--shared`) | R6 |
 | runs a destructive or privileged command: `pkill`/`kill -9`/`scancel`/`docker rm`, `rmtree`/`unlink`/`move`, `git reset --hard`/`git checkout -- <path>`, `git apply`, `tar -x`/`extractall`, or a cleanup, teardown or self-heal step | R1 R2 R3 R5 |
 | imports from another package, adds an `_internal`/`_`-prefixed import, reads or writes another object's `_attr`, uses `getattr(obj, "_x")`, or adds an exemption to an import check | A1 A2 |
 | adds a string the runtime imports (`import_module`, `-m`, `"pkg.mod:attr"`), a module-level hook a higher layer sets, or an import under `if TYPE_CHECKING:` | A2 |
@@ -529,6 +530,16 @@ order itself or merely replays it; `$WORK/base.txt` for the run that must fail.
 **Not a finding when:** the archive or patch is produced in-process by this repo from content it already controls, or a validator in the same diff rejects absolute paths and `..` before the call.
 **Evidence:** `$WORK/diff.txt` for the apply/extract call and any validation added alongside it; `$WORK/testfiles.txt` for the absolute-path and `..` regression tests.
 **Report as:** `R5: <file>:<line> applies backend-produced <patch|archive> without header validation (<flag>), allowing escape to <path>`
+
+### R6 -- The accounts of one run's group are trusted; a security finding needs a correct run or an outsider
+
+**Severity:** blocking by owner decision 2026-11-11, for the three shapes in *The rule*; the shape it excludes is never a finding.
+**Fires when:** a security finding is drafted against a diff that shares storage, sets modes or a umask, follows or copies links, or lets git read files in a directory the group writes.
+**The rule:** the accounts of one run's group -- the legs of a session, its dev sandboxes, the agents it launches under them -- are trusted. A trigger that needs one of them, or an agent the run launched under one, to act deliberately against the run -- plant a link, forge or rewrite a record or git file the run reads, race a write inside a window, rename a file it trusts -- states no failure a correct run hits, and file modes cannot stop same-group sabotage. Still blocking: (1) what a correct, non-malicious run hits in its ordinary course -- a race between two honest legs, a write an honest second leg is refused; a window reached only when the run is killed between two adjacent steps is not one; (2) what an account outside the group, or input from outside the run, reaches -- downloaded content, a third-party repository, a model's output parsed as paths or applied (R5); (3) a maintainers' rule broken in the steady state -- git `config`, `hooks/` and `info/` end owner-only.
+**Seen in:** PR #2604 -- round 4's three findings each needed a group member to act: plant a link in the dossier the Arbor copy followed, forge the linked-paths record or `alternates` a bubblewrap launch reads, or race or rename the source base's git `config`. PR #2598 at fc8eeede4 -- a `commondir` another account of the group wrote in the group-writable, sticky repository top redirected the app's git to that account's clone: a real cross-account redirect, but only a hostile member writes it.
+**Not a finding when:** the trigger's actor is a group account or a run-launched agent acting on purpose. Report it under the kind it falls in when an honest second leg reaches the same effect, when the actor is outside the group, or when the end state breaks the maintainers' rule.
+**Evidence:** the finding's reproduction -- which account acted, and whether that act is one a correct run performs; `$WORK/diff.txt` for the end mode of each git file the rule names.
+**Report as:** `R6 <file>:<line> -- <correct-run sequence | outside actor | steady-state mode> reaches <effect>`
 
 ## P -- Concurrency, budgets and cost
 
