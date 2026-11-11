@@ -357,6 +357,49 @@ The declaration is the boundary, and it is enforced everywhere a change could en
 
 A workload with no declaration is unaffected; everything above continues to apply to it.
 
+### Optimize an unchanged script
+
+`hyperloom script prepare` builds that workspace around an inference script you already have, whose only integration is importing the module first and passing its model through it once:
+
+```python
+from encoder_opt import apply   # first import: accepted settings land before torch reads them
+import torch
+...
+model = apply(model)
+```
+
+```bash
+hyperloom script prepare --workspace "$WS" --script encoder.py --python /path/to/model/env/python \
+  --calibrate-autocast bfloat16 -- --frames 6   # or --error-limit 0.01; arguments after -- go to the script
+```
+
+It runs the script once with the identity module, records the calls of the object `apply` returns as references, and writes `benchmark/custom_<runner>.sh`. Each measurement then runs the script until `apply` returns, replays the recorded calls on fresh perturbed inputs with hidden held-out inputs mixed in, and compares outputs in a process that never imports the candidate. Your script needs no timing or validation code, and is never copied -- its checksum is pinned and rechecked on every measurement.
+
+Preparation refuses a script that imports the module after the GPU is initialized or after `torch._inductor`/`torch._dynamo` are loaded, naming both lines, and warns if it imports it merely after `torch`. Settings baked into the module only reach torch if the import comes first, so an import too late means the deployed result would not behave like the measured one.
+
+`--calibrate-autocast bfloat16` sets the tolerance from the model itself: "allow as much extra error as bfloat16 costs this model", measured on your model rather than guessed. `--error-limit` sets it directly instead.
+
+#### Judging an output whose shape changes
+
+By default two outputs are compared element by element, which needs them to have the same shape. Many models do not: anything that generates text stops at a different length, a detector returns however many objects passed its threshold, a transcriber returns a different number of words. A candidate that is only slightly different can produce one row fewer, and the default comparison then reports an infinite error -- not because the answer is bad, but because it cannot line the two up at all.
+
+Pass `--scorer my_scorer.py` to judge such a workload your own way. The file defines one required function and one optional one:
+
+```python
+def score(candidate, reference):
+    # How wrong the candidate is. Any number, lower being better.
+    return word_error_rate(candidate["text"], reference["text"])
+
+
+def capture(output):
+    # Optional: turn one model output into tensors the comparison can load.
+    return {"text": tokens_of(output)}
+```
+
+`capture` runs next to the model and decides what is worth keeping -- the number of detections, the transcript, whatever your `score` reads. `score` runs in the separate process that never loads the candidate, so a candidate cannot soften its own mark. Whatever units `score` returns are the units of `--error-limit` and of `--calibrate-autocast`.
+
+The file is copied into the frozen benchmark directory and its checksum recorded, so editing it after preparation stops the run rather than quietly changing what passes. Everything else is unchanged: the clock, the hidden held-out inputs, the input perturbation and the output-buffer check all still apply.
+
 ## Use the optimized model without Hyperloom
 
 On CLOSE, a custom session exports what it accepted. A single-file workload produces `deployment/hyperloom_optimize.py` with bookkeeping in `reports/deployment.json` (`kind: single_file`); a workload that declares an adapter through `hyperloom_inference.json` produces a self-contained `deployment/` with its own `inference.py` CLI, its source and assets captured, and runtime paths relocated so the directory can be moved.
