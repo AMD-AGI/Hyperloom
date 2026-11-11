@@ -17,15 +17,18 @@ import gzip
 import hashlib
 import json
 import subprocess
+from dataclasses import replace
 from functools import cache
 from pathlib import Path
 
 import pytest
+import yaml
 
 from inference_suite.contracts import LaunchQuery, SourceKind, Workload
 from inference_suite.pins import INFERENCEX_CLIENT_COMMIT, INFERENCEX_REPO_URL
 from inference_suite.recipe import inferencex
 from inference_suite.recipe.inferencex import (
+    MASTER,
     PROJECT,
     agentx_trace,
     inferencex_launches,
@@ -34,6 +37,7 @@ from inference_suite.recipe.inferencex import (
 )
 from inference_suite.recipe.model import (
     InferencexSnapshot,
+    RepoBundle,
     RecipeSourceError,
     SourceLaunch,
     SourceMiss,
@@ -319,3 +323,33 @@ def test_the_capped_families_are_inferencex_clients_at_its_pin(tmp_path: Path) -
 
     assert constants["CAPPED_FAMILIES"] == inferencex._CAPPED_FAMILIES
     assert (constants["UNCAPPED"], constants["CAPPED"]) == (inferencex._UNCAPPED_TRACE, inferencex._CAPPED_TRACE)
+
+
+def _with_entries(snapshot: InferencexSnapshot, **entries: dict) -> InferencexSnapshot:
+    """``snapshot`` with ``entries`` added to its master config, each a copy of the first DeepSeek-R1 entry."""
+    bundle = snapshot.bundle
+    master = yaml.safe_load(bundle.text(MASTER))
+    template = next(entry for entry in master.values() if entry["model"] == _DSR1)
+    master.update({name: {**template, **changes} for name, changes in entries.items()})
+    files = {**bundle.files, MASTER: yaml.safe_dump(master)}
+    return replace(snapshot, bundle=RepoBundle(bundle.repo, bundle.commit, files))
+
+
+def test_an_entry_of_another_model_that_cannot_be_placed_does_not_stop_this_one():
+    snapshot = _with_entries(_main(), drifted={"model": "org/drifted", "runner": "cluster:nowhere"})
+
+    assert _launches(_fixed(), snapshot)
+
+
+def test_an_entry_of_the_model_that_cannot_be_placed_is_its_miss():
+    snapshot = _with_entries(
+        _main(),
+        drifted={"model": "org/drifted", "runner": "cluster:nowhere"},
+        shapeless={"model": "org/drifted", "scenarios": {"fixed-seq-len": [{"isl": 8192, "osl": 1024}]}},
+    )
+
+    miss = inferencex_launches(_fixed("org/drifted"), snapshot)
+
+    assert isinstance(miss, SourceMiss)
+    assert "drifted: InferenceX's config does not place it: runner cluster:nowhere is on 0 board labels" in miss.reason
+    assert "shapeless: InferenceX's config does not place it" in miss.reason
