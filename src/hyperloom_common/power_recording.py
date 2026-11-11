@@ -59,7 +59,8 @@ _DIGITS = 3
 class RecorderScope:
     """Which cards the recording is about, and on which server.
 
-    ``gpus`` are the cards the round configured; ``None`` finds them by the VRAM they hold. A round against an
+    ``gpus`` are the amd-smi indices of the cards the round configured, which every sample is keyed by; ``None`` finds
+    them by the VRAM they hold. A round against an
     external server records this host but measures no energy: the load ran on cards it does not see.
     """
 

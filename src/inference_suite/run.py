@@ -19,6 +19,7 @@ from __future__ import annotations
 import hashlib
 import importlib.metadata
 import json
+import logging
 import math
 import os
 import sys
@@ -30,6 +31,7 @@ from pathlib import Path
 
 import yaml
 
+from hyperloom_common.amd_smi import AmdSmiError
 from hyperloom_common.gpu_telemetry import (
     GpuPhase,
     PowerRecorder,
@@ -81,6 +83,7 @@ from inference_suite.profile.agentx_window import AgentxWindow
 from inference_suite.profile.fixed_window import FixedWindow
 from inference_suite.profile.inject import WindowCapture, make_trace_dirs, profiler_layer, settle_traces
 from inference_suite.pins import LM_EVAL_DISTRIBUTION
+from inference_suite.runtime.gpus import amd_smi_cards
 from inference_suite.runtime.phases import Phase, PhaseClock, PhaseListener
 from inference_suite.runtime.process import spawn
 from inference_suite.runtime.server import Server, ServerLaunch, ServerLifecycle, server_url
@@ -88,6 +91,8 @@ from inference_suite.runtime.watch import POLL_SEC, Cancel, RoundGate, Stop, wai
 from inference_suite.telemetry.kv_poll import KvMetricsPoller
 from inference_suite.telemetry.kv_record import PHASES as KV_PHASES
 from inference_suite.telemetry.kv_record import KvMetricsRecorder, KvRound
+
+log = logging.getLogger(__name__)
 
 #: The eval process's request, beside the definition it was planned from.
 EVAL_REQUEST_FILE = "request.json"
@@ -157,13 +162,21 @@ def _gpu_listener(recorder: PowerRecorder) -> PhaseListener:
     return hear
 
 
+def _power_cards(config: SuiteConfig) -> tuple[int, ...]:
+    """The amd-smi cards the recorder keys the server's GPUs by; none when they cannot be named, so the energy is
+    invalid rather than read off another card."""
+    try:
+        return amd_smi_cards(config.server.gpus)
+    except AmdSmiError as exc:
+        log.warning("the round's power is not measured: %s", exc)
+        return ()
+
+
 def _recorder(config: SuiteConfig, layout: RunLayout) -> PowerRecorder | None:
     telemetry = config.telemetry.gpu
     if not telemetry.enabled:
         return None
-    scope = RecorderScope(
-        gpus=tuple(config.server.gpus), external_server=config.lifecycle.mode is LifecycleMode.EXTERNAL
-    )
+    scope = RecorderScope(gpus=_power_cards(config), external_server=config.lifecycle.mode is LifecycleMode.EXTERNAL)
     timing = RecorderTiming(fast_sec=telemetry.interval_sec)
     return PowerRecorder(output_path=str(layout.power), scope=scope, timing=timing)
 

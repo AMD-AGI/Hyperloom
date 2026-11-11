@@ -24,7 +24,7 @@ from pathlib import Path
 import pytest
 import yaml
 
-from hyperloom_common import gpu_telemetry
+from hyperloom_common import amd_smi, gpu_telemetry
 from hyperloom_common.gpu_telemetry import RecorderSources
 from hyperloom_common.power_sources import SysfsNode
 from hyperloom_common.tests.test_gpu_telemetry import _AmdSmi, _sysfs
@@ -69,6 +69,8 @@ from inference_suite.runtime.watch import Stop
 from inference_suite.staging import AGENTX_PYTHON, GSM8K_TASK, StagingReport
 from inference_suite.tests.test_base_launch_contract import _base
 from inference_suite.tests.test_config_contract import _AGENTX, _MLPERF, _SHA, _config, _eval
+
+_READ_AMD_SMI = amd_smi.read_amd_smi_json
 
 pytestmark = pytest.mark.skipif(not Path("/proc/net/tcp").exists(), reason="needs Linux procfs")
 
@@ -262,6 +264,8 @@ class _Rig:
             _AmdSmi(cards=8), SysfsNode(_sysfs(tmp_path / "sys", cards=8, serving=tuple(range(8))))
         )
         monkeypatch.setattr(run, "PowerRecorder", functools.partial(gpu_telemetry.PowerRecorder, sources=sources))
+        self.rocm_order = list(range(8))
+        monkeypatch.setattr(amd_smi, "read_amd_smi_json", self._amd_smi_list)
         planned = EvalPlan.invocation
         monkeypatch.setattr(
             EvalPlan,
@@ -278,6 +282,10 @@ class _Rig:
             "await_free_gpus",
             lambda gpus, gate: None if self.busy_gpus is None else Stop(FailedStep.GPUS_UNAVAILABLE, self.busy_gpus),
         )
+
+    def _amd_smi_list(self, *args):
+        assert args == ("list",)
+        return [{"gpu": card, "node_id": node} for node, card in enumerate(self.rocm_order)]
 
     def _probe(self, python, framework, env, *, cwd):
         assert env["HF_TOKEN"] == _SECRET
@@ -408,6 +416,28 @@ def test_power_json_bounds_each_phase_by_its_mark_and_the_report_carries_its_ene
     }
     blocks = result.report.gpu_monitor
     assert [block.gpu for block in blocks] == list(range(8))
+
+
+def test_the_power_scope_is_the_amd_smi_card_behind_each_hip_gpu(rig):
+    # The MI355X order test_amd_smi records: HIP GPU 0 is amd-smi card 3.
+    rig.rocm_order = [3, 0, 2, 1, 7, 4, 6, 5]
+    config = rig.config("r1")
+    result = run.run_round(replace(config, server=replace(config.server, gpus=(0, 1))))
+
+    document = json.loads(result.layout.power.read_text())
+    assert document["scope"]["gpus_configured"] == [3, 0]
+    assert result.report.power is not None and result.report.power.energy_gpus == (3, 0)
+    assert [block.gpu for block in result.report.gpu_monitor] == [3, 0]
+
+
+def test_a_round_whose_card_order_cannot_be_read_measures_no_energy(rig, monkeypatch):
+    def failing(*args):
+        raise amd_smi.AmdSmiError("amd-smi list --json exited 1 and printed nothing")
+
+    monkeypatch.setattr(amd_smi, "read_amd_smi_json", failing)
+    power = run.run_round(rig.config("r1")).report.power
+
+    assert power is not None and power.power_valid == 0 and power.energy_gpus == ()
 
 
 def test_kv_samples_cover_the_ready_server_and_carry_their_phase(rig):
@@ -645,6 +675,7 @@ def test_a_round_whose_amd_smi_fails_silently_records_the_refusal(rig, monkeypat
     (bin_dir / "amd-smi").chmod(0o755)
     monkeypatch.setenv("PATH", f"{bin_dir}:{os.environ['PATH']}")
     monkeypatch.setattr(runtime_server, "await_free_gpus", runtime_gpus.await_free_gpus)
+    monkeypatch.setattr(amd_smi, "read_amd_smi_json", _READ_AMD_SMI)
 
     report = run.run_round(rig.config("r1")).report
 
