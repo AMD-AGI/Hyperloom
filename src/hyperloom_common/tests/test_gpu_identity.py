@@ -12,6 +12,7 @@ def test_the_boards_known_by_their_name_alone_list_no_device_id():
     assert {board.product for board in AMD_GPU_BOARDS.values() if not board.device_ids} == {
         "r9600d",
         "r9700",
+        "rx9070xt",
         "radeon8060s",
     }
 

@@ -36,6 +36,18 @@ def test_radeon8060s_has_its_own_runner_and_no_framework_restriction():
     assert gpu_types._runner_framework_error("radeon8060s", "sglang") is None
 
 
+@pytest.mark.parametrize("framework", ["vllm", "sglang", "atom", "xdit", "custom"])
+def test_rx9070xt_has_no_serving_script_and_refuses_launch(capsys, framework):
+    from hyperloom.inference_optimizer.cli import _require_custom_entrypoint
+
+    assert gpu_types.gpu_runner_type("rx9070xt") == "rx9070xt"
+    assert all(f"{framework_name}_rx9070xt.sh" not in MAGPIE_BUILTIN_SCRIPTS for framework_name in ("vllm", "sglang"))
+    with pytest.raises(SystemExit) as exc_info:
+        _require_custom_entrypoint(framework, "rx9070xt")
+    assert exc_info.value.code == 2
+    assert f"Magpie runner 'rx9070xt' has no serving script for '{framework}'" in capsys.readouterr().err
+
+
 def test_server_reuse_scripts():
     assert MAGPIE_BUILTIN_SCRIPTS == {
         "vllm_mi300x.sh",
@@ -66,7 +78,17 @@ def test_the_gfx12_runner_is_validated_for_vllm_only(framework):
 def test_only_the_gfx1201_radeon_boards_pin_their_geak_identity():
     assert gpu_types.geak_identity_pin("r9700") == {"expected_target": "r9700", "expected_gfx": "gfx1201"}
     assert gpu_types.geak_identity_pin("r9600d") == {"expected_target": "r9600d", "expected_gfx": "gfx1201"}
-    for product in ("mi300x", "mi308x", "mi325x", "mi350x", "mi355x", "radeon8060s", "unknown_gpu", ""):
+    for product in (
+        "mi300x",
+        "mi308x",
+        "mi325x",
+        "mi350x",
+        "mi355x",
+        "rx9070xt",
+        "radeon8060s",
+        "unknown_gpu",
+        "",
+    ):
         assert gpu_types.geak_identity_pin(product) == {}, product
 
 

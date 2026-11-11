@@ -88,6 +88,16 @@ def test_infera_probe_parses_product_name(monkeypatch):
     assert gpu_probe.remote_autodetect_gpu_type(timeout_s=1) == "mi325x"
 
 
+def test_parse_gpu_type_normalizes_windows_style_rx_product_name():
+    assert parse_gpu_type("AMD Radeon RX 9070 XT") == "rx9070xt"
+
+
+def test_parse_gpu_type_keeps_raw_text_arch_fallback_without_guessing_gfx1201_sku():
+    assert parse_gpu_type("remote probe reports gfx942:sramecc+:xnack-") == "mi300x"
+    assert parse_gpu_type("Radeon AI PRO R9700 gfx1201") == "r9700"
+    assert parse_gpu_type("GPU arch gfx1201") is None
+
+
 def _infera_state():
     return {
         "backend": "infera",

@@ -21,12 +21,13 @@ from .external_state import build_external_state_from_env, external_service_url
 
 log = logging.getLogger(__name__)
 
-# One command that prints the product name, falling back to torch's gcnArchName (gfx942 / gfx950) when rocm-smi is
-# unavailable on PATH.
+# Print both the product name and ISA when rocm-smi is unavailable. GFX1201 is
+# shared by multiple products, so the ISA alone cannot identify the RX SKU.
 _PROBE_CMD = (
     "rocm-smi --showproductname 2>/dev/null || "
     'python3 -c "import torch;'
-    'print(torch.cuda.get_device_properties(0).gcnArchName)" 2>/dev/null'
+    'p=torch.cuda.get_device_properties(0);'
+    'print(p.name); print(p.gcnArchName)" 2>/dev/null'
 )
 
 # Ray Dashboard job terminal states (mirror multi_node.cli).

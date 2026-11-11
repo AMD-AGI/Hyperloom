@@ -52,6 +52,7 @@ _BOARD_POLICIES: dict[str, BoardPolicy] = {
     "mi355x": BoardPolicy(_MI355X_RUNNER, names_its_arch=True),
     "r9700": BoardPolicy(_GFX12_RUNNER, targeted_build_validated=False, geak_identity_pinned=True),
     "r9600d": BoardPolicy(_GFX12_RUNNER, targeted_build_validated=False, geak_identity_pinned=True),
+    "rx9070xt": BoardPolicy(MagpieRunner("rx9070xt", frozenset(), validated_frameworks=frozenset())),
     "radeon8060s": BoardPolicy(MagpieRunner("radeon8060s", frozenset())),
 }
 
@@ -114,7 +115,14 @@ def _runner_framework_error(gpu_type: str, framework: str) -> str | None:
     runner = _RUNNERS.get(runner_name)
     framework = str(framework or "").strip().lower()
     supported = runner.validated_frameworks if runner else None
-    if not framework or not supported or framework in supported:
+    if supported is None:
+        return None
+    if not supported:
+        return (
+            f"Magpie runner {runner_name!r} has no serving script for {framework!r}; "
+            f"GPU {gpu_type!r} is not supported for managed benchmarks yet"
+        )
+    if not framework or framework in supported:
         return None
     return (
         f"Magpie runner {runner_name!r} is currently validated only for "
@@ -179,7 +187,16 @@ def _autodetect_gpu_type() -> str | None:
     try:
         import torch
 
-        return parse_gpu_type(str(torch.cuda.get_device_properties(0).gcnArchName))
+        properties = torch.cuda.get_device_properties(0)
+        detected = parse_gpu_type(str(getattr(properties, "name", "")))
+        if detected:
+            return detected
+        get_device_name = getattr(torch.cuda, "get_device_name", None)
+        if callable(get_device_name):
+            detected = parse_gpu_type(str(get_device_name(0)))
+            if detected:
+                return detected
+        return parse_gpu_type(str(properties.gcnArchName))
     except (ImportError, OSError, RuntimeError, AssertionError, AttributeError):
         return None
 

@@ -117,6 +117,7 @@ AMD_GPU_BOARDS: dict[str, GpuBoard] = {
         GpuBoard("r9700", "gfx1201", 64, 32.0, 640.0, _matrix_peaks(bf16=191.0, fp8=383.0, fp32=47.8)),
         # https://www.amd.com/en/products/graphics/workstations/radeon-ai-pro/ai-9000-series/amd-radeon-ai-pro-r9600d.html
         GpuBoard("r9600d", "gfx1201", 48, 32.0, 640.0, _matrix_peaks(bf16=99.0, fp8=199.0, fp32=24.8)),
+        GpuBoard("rx9070xt", "gfx1201", 64, aliases=("AMD Radeon RX 9070 XT",)),
         # https://www.amd.com/en/products/processors/desktops/ryzen/ryzen-ai-halo/ryzen-ai-max-plus-395.html
         # Unified memory, so no fixed capacity. AMD publishes only the FP16 rate, read as BF16 too, as for every board.
         GpuBoard(
