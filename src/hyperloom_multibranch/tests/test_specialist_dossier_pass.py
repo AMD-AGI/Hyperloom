@@ -18,7 +18,7 @@ from hyperloom_multibranch.contracts.toolbox import LeaseCharge
 from hyperloom_multibranch.specialist import arbor_adapter, dossier_pass, worktree as worktree_module
 from hyperloom_multibranch.specialist.agent_spec import AgentSpec
 from hyperloom_multibranch.specialist.agent_onboarding import PROFILE_FILE
-from hyperloom_multibranch.specialist.arbor_adapter import DOSSIER_PASS, MAPPED
+from hyperloom_multibranch.specialist.arbor_adapter import ARBOR_PYTHON, DOSSIER_PASS, MAPPED
 from hyperloom_multibranch.specialist.dossier_pass import (
     DOSSIER_CHARGE,
     DOSSIER_HOLDER,
@@ -234,7 +234,7 @@ async def test_a_pass_whose_agent_writes_the_dossier_in_its_session_is_found_the
         (
             "refuse",
             60.0,
-            "it did not start: attempt 1: `python3 -m arbor run --config hyperloom-mb/dossier.json` refused",
+            f"it did not start: attempt 1: `{ARBOR_PYTHON} -m arbor run --config hyperloom-mb/dossier.json` refused",
             False,
         ),
     ],

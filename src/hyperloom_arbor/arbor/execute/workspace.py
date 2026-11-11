@@ -11,10 +11,12 @@ git revert rolls both back atomically.
 from __future__ import annotations
 
 import json
+import os
 import re
 import shlex
 import subprocess
 import sys
+import time
 from pathlib import Path
 
 ARBOR_CONFIG_RELPATH = "arbor/config.json"
@@ -27,18 +29,72 @@ HOST = "@host"
 
 
 def exec_argv(container: str, argv: list[str],
-              workdir: str | None = None) -> tuple[list[str], str | None]:
-    """The command that runs ``argv`` where the workspace lives, and its cwd."""
+              workdir: str | None = None, stdin: bool = False) -> tuple[list[str], str | None]:
+    """The command that runs ``argv`` where the workspace lives, and its cwd. ``stdin``: the command reads what it is
+    given, which ``docker exec`` passes on only with ``-i``."""
     if container == HOST:
         return list(argv), workdir
-    return ["docker", "exec", *(["-w", workdir] if workdir else []), container, *argv], None
+    return ["docker", "exec", *(["-i"] if stdin else []), *(["-w", workdir] if workdir else []), container,
+            *argv], None
 
 
 def run_in(container: str, argv: list[str], workdir: str | None = None,
            **kwargs) -> subprocess.CompletedProcess:
-    """``subprocess.run`` of ``argv`` in the container, or here for HOST."""
-    cmd, cwd = exec_argv(container, argv, workdir)
+    """``subprocess.run`` of ``argv`` in the container, or here for HOST. With ``input``, the container's command reads
+    it: without ``-i``, ``docker exec`` gives it an empty stdin (``git apply -`` then applies nothing)."""
+    cmd, cwd = exec_argv(container, argv, workdir, stdin="input" in kwargs)
     return subprocess.run(cmd, cwd=cwd, **kwargs)
+
+
+MOUNT_PROBE = ".arbor-mount-probe"
+
+
+def session_mount_problem(container: str, session_dir: str | Path, session_mount: str,
+                          tries: int = 3) -> str | None:
+    """Why the container does not see the session at ``<session_mount>/<session name>``, or None.
+
+    The bench writes ``<session_mount>/<session name>/iter_N/bench_output.json`` in the container,
+    and the harness reads ``<session>/iter_N`` here, so ``session_mount`` must be the container's
+    path of the session's parent directory. A mount of the session itself puts every file one
+    level deeper, where the harness never reads it. A token written here and read back there
+    proves the two paths are one directory; a directory that only exists there does not.
+    None too when it cannot be checked (no container, the host itself, docker not answering):
+    a broken container fails on its own soon enough.
+    """
+    if not container or container == HOST or not session_mount:
+        return None
+    session_dir = Path(session_dir)
+    probe = session_dir / MOUNT_PROBE
+    there = f"{session_mount.rstrip('/')}/{session_dir.name}/{MOUNT_PROBE}"
+    token = f"{os.getpid()}-{time.time_ns()}"
+    try:
+        probe.write_text(token)
+    except OSError:
+        return None
+    try:
+        seen = None
+        for attempt in range(tries):
+            try:
+                r = run_in(container, ["cat", there], capture_output=True, text=True, timeout=60)
+            except (OSError, subprocess.SubprocessError):
+                return None
+            if r.returncode == 0 and r.stdout.strip() == token:
+                return None
+            said = (r.stderr or "") + (r.stdout or "")
+            if r.returncode != 0 and "No such file" not in said:
+                return None                # no container, no daemon, no permission: not this check's to judge
+            seen = (r.stdout or r.stderr or "").strip()[:120]
+            if attempt + 1 < tries:
+                time.sleep(1)              # a shared filesystem can lag behind a fresh write
+        return (f"the container {container!r} does not see this session at {there.rsplit('/', 1)[0]} "
+                f"(read {seen or 'nothing'!r} there): session_mount ({session_mount!r}) must be the container's "
+                f"path of the session's parent directory, {session_dir.parent}. Otherwise the bench writes "
+                f"its results one level deeper, where the harness never reads them")
+    finally:
+        try:
+            probe.unlink()
+        except OSError:
+            pass
 
 
 def write_workspace_config(
@@ -99,9 +155,9 @@ def ensure_workspace_config(
 
     Such a revert leaves the workspace with no server_env and no server_flags
     at all. ``read_workspace_config`` returns {} on a missing file rather than
-    raising, so the next iteration would start its server on defaults --
-    without the campaign's tensor parallelism, quantization or bench duration
-    -- and report the number as a comparable measurement.
+    raising, so the next iteration would start its server on defaults -- none
+    of the campaign's parallelism, quantization or bench duration -- and report
+    the number as a comparable measurement.
 
     Called at the top of every iteration: cheap, idempotent, and it closes the
     whole class rather than the one path that produced it.
@@ -206,10 +262,10 @@ def commit(container: str, workspace: str, message: str) -> str:
     the bench measured it and the campaign booked the number.
 
     The failure: an iteration adds a tile table under `configs/` alongside a
-    tuned-tile selector in the model code, books a win, and only the selector
-    enters the commit. Once the container is gone, so is the table: the
-    selector's loader returns {} and every tile falls back to its default -- so
-    the booked best points at a tree that no archived patch can rebuild.
+    tuned-tile selector, books a win, and only the selector enters the commit.
+    Iterations later the table is gone, the selector finds no tuned tiles and
+    every tile falls back to the defaults -- so the booked best points at a tree
+    that no archived patch can rebuild.
 
     Safe here because the workspace has no submodules (checked) and
     ensure_git_excludes keeps regenerated bytecode out of the index.
@@ -239,7 +295,14 @@ def commit(container: str, workspace: str, message: str) -> str:
 
 
 def revert(container: str, workspace: str) -> None:
-    """Revert the last commit."""
+    """Revert the last commit. An empty one (a probe's, or a change made only in another editable tree,
+    arbor/execute/trees.py) has nothing to undo, which ``git revert`` refuses: its revert is an empty commit too,
+    so the history still says the iteration was reverted."""
+    r = run_in(container, ["git", "diff", "--quiet", "HEAD~1", "HEAD"], workdir=workspace, capture_output=True)
+    if r.returncode == 0:
+        subject = git(container, workspace, "log", "-1", "--format=%s")
+        git(container, workspace, "commit", "--allow-empty", "-m", f'Revert "{subject}"')
+        return
     git(container, workspace, "revert", "--no-edit", "HEAD")
 
 
@@ -262,8 +325,9 @@ def save_patch(container: str, workspace: str, out_path: str | Path) -> None:
 
 # What landed.patch carries is what the server runs, and nothing else: not the agent's probe
 # scripts under arbor/eval/ and not bytecode, which a downstream baseline would otherwise
-# have to split out by hand. Everything else under arbor/ IS served and must stay: TunableOp tables
-# (arbor/tunableop/*.csv), a tuned fused-MoE table and AITER JIT links and sources.
+# have to split out by hand. Everything else
+# under arbor/ IS served and must stay: TunableOp tables (arbor/tunableop/*.csv), a tuned
+# fused-MoE table and its AITER JIT links and sources.
 HARNESS_FILES = ("arbor/config.json",)
 # The agent's own instruments: evaluators and probes the server never imports. They still
 # carry across containers, in scratch.patch, because the agent works with them; they never
@@ -392,9 +456,9 @@ def save_landed_patch(container: str, workspace: str, out_path: str | Path,
     """Export the WHOLE served tree's diff against the campaign's root commit.
 
     The repo lives inside the container, so it dies with the container -- which
-    means every landed KEEP dies with it. A campaign that recreates the
-    container silently loses them, then measures a stock tree against a bar
-    that only the enhanced tree could reach.
+    means every landed KEEP dies with it. A recreated container silently loses
+    them, and later iterations then measure a stock tree against a bar that
+    only the enhanced tree could reach.
 
     Per-iteration patches under ``iter_N/patch.diff`` are not sufficient to
     rebuild from: a retroactively corrected verdict never archived one, and
@@ -411,9 +475,9 @@ def save_landed_patch(container: str, workspace: str, out_path: str | Path,
     not landed work: it is seeded with different content by every fresh git-init,
     so including it makes the patch fail to apply against a new repo, and `git
     apply` is atomic: that one file takes the real source changes down with it.
-    Excluding all of arbor/ would be wrong the other way: it dropped
-    a KEEP's own files there (TunableOp tables, which
-    a kept PYTORCH_TUNABLEOP_FILENAME points at), so the next container ran
+    Excluding all of arbor/ would be wrong the other way: it dropped a KEEP's
+    own files there (TunableOp tables, which a kept
+    PYTORCH_TUNABLEOP_FILENAME points at), so the next container ran
     without them. The agent's scratch goes to scratch.patch instead
     (``save_scratch_patch``), and bytecode goes nowhere.
     `--binary` so a patch is never silently lossy when a binary appears.
@@ -447,27 +511,51 @@ def recover_orphaned_commit(
     Happens when the process is killed after commit() but before state.save().
     Handles multiple stacked orphans (e.g. killed run left 2 commits).
     Returns True if any revert was performed.
+
+    An iteration already reverted is not an orphan: its ``Revert "iter-N: ..."`` commit has
+    undone it, and reverting that revert would put the change back. Earlier the walk matched
+    the revert too, so a retried iteration re-applied the change it had just undone, and the
+    tree held a patch the session recorded as reverted. The walk goes down from HEAD: a
+    revert marks its iteration undone, an ``iter-N:`` commit above the record that is not
+    undone is an orphan, and anything else ends the walk. The orphans are reverted newest
+    first, and what the recovery changed is logged.
     """
-    reverted_any = False
-    for _ in range(20):
-        try:
-            last_msg = git(container, workspace, "log", "-1", "--format=%s")
-        except RuntimeError:
+    try:
+        log = git(container, workspace, "log", "-60", "--format=%H%x09%s")
+    except RuntimeError:
+        return False
+    undone: set[int] = set()
+    orphans: list[tuple[str, str]] = []
+    for line in log.splitlines():
+        sha, _, subject = line.partition("\t")
+        m = re.match(r'Revert "iter-(\d+):', subject)
+        if m:
+            undone.add(int(m.group(1)))
+            continue
+        m = re.match(r"iter-(\d+):", subject)
+        if not m or int(m.group(1)) <= recorded_iteration:
             break
-        # Match iter-N commits AND their reverts (Revert "iter-N: ...")
-        m = re.match(r"(?:Revert \")?iter-(\d+):", last_msg)
-        if m and int(m.group(1)) > recorded_iteration:
-            print(
-                f"[arbor] Orphaned commit detected (iter-{m.group(1)} > recorded "
-                f"iter-{recorded_iteration}) — reverting: {last_msg[:60]}"
-            )
-            try:
-                git(container, workspace, "checkout", "--", ".")
-                git(container, workspace, "clean", "-fd")
-            except RuntimeError:
-                pass
-            revert(container, workspace)
-            reverted_any = True
+        if int(m.group(1)) not in undone:
+            orphans.append((sha, subject))
+    if not orphans:
+        return False
+    before = git(container, workspace, "rev-parse", "HEAD")
+    try:
+        git(container, workspace, "checkout", "--", ".")
+        git(container, workspace, "clean", "-fd")
+    except RuntimeError:
+        # A tree that cannot be cleaned is still reverted below: `git revert` refuses a dirty tree on its own, and
+        # that error is the one the caller sees.
+        pass
+    for sha, subject in orphans:
+        print(f"[arbor] Orphaned commit detected ({subject.split(':', 1)[0]} > recorded "
+              f"iter-{recorded_iteration}) — reverting: {subject[:60]}")
+        empty = run_in(container, ["git", "diff", "--quiet", f"{sha}~1", sha], workdir=workspace,
+                       capture_output=True).returncode == 0
+        if empty:
+            git(container, workspace, "commit", "--allow-empty", "-m", f'Revert "{subject}"')
         else:
-            break
-    return reverted_any
+            git(container, workspace, "revert", "--no-edit", sha)
+    print(f"[arbor] Orphan recovery changed: "
+          f"{git(container, workspace, 'diff', '--stat', before, 'HEAD').strip() or 'nothing in the tree'}")
+    return True

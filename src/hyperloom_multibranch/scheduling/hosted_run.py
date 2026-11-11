@@ -10,8 +10,10 @@ the legacy entry validated, a multi-branch session needs ``multibranch.workload`
 ``multibranch.dev_leases`` ``--dev-leases``, each source of ``multibranch.autonomous_agents`` one
 ``--autonomous-agent``, ``multibranch.make_before_break`` (``true`` by default) ``--make-before-break`` or
 ``--no-make-before-break``, and ``placement.max_parallel_tests`` is ``--max-parallel-tests``, at most what the grant
-runs at once. The fields ``run`` has no option for -- ``objective``, ``launch``, ``options``, ``placement.profile`` and
-``placement.specialist_capacity`` -- are not read. Dev sandboxes and agents run in ``dev`` sandboxes of the grant, so
+runs at once. The fields ``run`` has no option for -- ``objective``, ``options``, ``placement.profile`` and
+``placement.specialist_capacity`` -- are not read. A spec that sets ``launch.server_args`` or ``launch.extra_env`` is
+refused rather than run without them: a multi-branch session resolves its base launch from the recipe sources, as
+``run`` does, and reads neither (:func:`run_argv`). Dev sandboxes and agents run in ``dev`` sandboxes of the grant, so
 they need its ``dev`` key and the session directory on the storage ``USER_DATA_PATH`` names, which the ``dev``
 template mounts at the same path (:func:`refuse_unhosted_branches`).
 Every test, PRELUDE's included, runs in a measurement sandbox, so the application's container needs no card:
@@ -45,7 +47,7 @@ from pathlib import Path
 from typing import Any
 
 from hyperloom_common.io import WriteOptions, atomic_write_json
-from hyperloom_common.shared_storage import ownership
+from hyperloom_common.shared_storage import child_umask, ownership
 from hyperloom.hosted.campaign import CampaignSpec, parse_campaign
 from hyperloom.hosted.host_info import GrantLimits as HostGrantLimits
 from hyperloom.hosted.host_info import HostInfo, Var
@@ -90,10 +92,12 @@ def run_argv(spec: CampaignSpec, max_hours: float, parallel_tests: int) -> list[
     tests at once; every value is written ``--option=value`` so that one starting with ``-`` is no option.
 
     Raises:
-        HostedRefused: When the spec lacks what a multi-branch session needs, naming each missing field.
+        HostedRefused: When the spec lacks what a multi-branch session needs, naming each missing field, or sets a
+            launch field the session would not read.
     """
 
     section = _multibranch_section(spec.multibranch)
+    _refuse_launch_fields(spec)
     values: dict[str, Any] = {
         "model": spec.model_path,
         "framework": spec.framework_name,
@@ -149,6 +153,19 @@ def _make_before_break(section: Mapping[str, Any]) -> bool | None:
     if keep is not None and not isinstance(keep, bool):
         raise HostedRefused("multibranch.make_before_break must be true or false")
     return keep
+
+
+def _refuse_launch_fields(spec: CampaignSpec) -> None:
+    given = [
+        field
+        for field, value in (("launch.server_args", spec.server_args), ("launch.extra_env", spec.extra_env))
+        if value is not None
+    ]
+    if given:
+        raise HostedRefused(
+            f"a multibranch run does not read {' or '.join(given)}: its base launch is resolved from the recipe sources"
+            " (InferenceX, the framework's cookbook, the default table), as hyperloom-multibranch run resolves it"
+        )
 
 
 def _agent_sources(sources: object) -> list[str]:
@@ -307,6 +324,28 @@ def record_session(state_dir: Path, root: Path) -> None:
     atomic_write_json(state_dir / SESSION_FILE, {"session_dir": str(root)}, options=_DURABLE)
 
 
+def share_with_the_group(root: Path) -> None:
+    """Below shared storage, run the rest of this process under the umask of a child that writes below the session
+    directory ``root`` (:func:`~hyperloom_common.shared_storage.child_umask`), so every process it starts here, the
+    commands of its local agent sandboxes among them, inherits it: what Arbor, an agent or a tool writes there with the
+    default modes stays writable by the group, whose other accounts may run the run's next leg. A remote sandbox's
+    commands run in another container and take the umask from its launcher instead. Elsewhere the umask is left as
+    it is."""
+
+    umask = child_umask(root)
+    if umask != -1:
+        os.umask(umask)
+
+
+def started_session(state_dir: Path, root: Path) -> None:
+    """Take the session just created in ``root`` as the run's, before anything is built in it: shared with the group
+    (:func:`share_with_the_group`), printed on one stdout line and named in ``session.json`` (:func:`record_session`)."""
+
+    share_with_the_group(root)
+    print(root, flush=True)
+    record_session(state_dir, root)
+
+
 def recorded_session(state_dir: Path) -> Path | None:
     """The session directory an earlier start of the run named, ``None`` when none did.
 
@@ -416,7 +455,9 @@ __all__ = [
     "refuse_unhosted_branches",
     "reported_stop_reason",
     "run_argv",
+    "share_with_the_group",
     "spec_make_before_break",
+    "started_session",
     "stop_before_grant_ends",
     "take_over_earlier_session",
     "toolbox_grant",
