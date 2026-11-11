@@ -42,7 +42,15 @@ from inference_suite.contracts.report import FailedStep
 from inference_suite.frameworks import Framework, ServerFlags, framework_facts
 from inference_suite.golden import GOLDEN_OWNED_ENV_PREFIXES, golden_owned_settings, is_golden_owned_flag
 
-GPU_MASK_ENV = "HIP_VISIBLE_DEVICES"
+#: The mask that names the server's cards, by their machine numbers. ROCr enumerates only these, so no process of the
+#: server opens another card: under a HIP mask alone ROCr opens every GPU and keeps memory on each, which a test running
+#: beside the round on the other cards takes for a foreign holder of its own.
+GPU_MASK_ENV = "ROCR_VISIBLE_DEVICES"
+#: HIP's mask beneath it: ROCr numbers the cards it enumerates from 0, so HIP takes all of them, in that order. It must
+#: be set, since Ray (which vLLM imports at start) refuses a ROCr mask without it.
+HIP_MASK_ENV = "HIP_VISIBLE_DEVICES"
+#: Every device mask a launch's processes read; the guard sets the first two and no layer may set any.
+_DEVICE_MASK_ENVS = (GPU_MASK_ENV, HIP_MASK_ENV, "CUDA_VISIBLE_DEVICES")
 #: The engine seed a launch runs with when no layer names one. Unpinned, the engine draws a fresh one at every start,
 #: and under speculative decoding's rejection sampling the accept length, and with it the throughput, moves with that
 #: draw, so two cold starts of one recipe would not measure the same launch.
@@ -116,7 +124,7 @@ def runner_owned(base: BaseLaunch) -> RunnerOwned:
         else ()
     )
     flags = {*base.runner_owned.args, *(flag for flag in (*guard, spec.metrics_flag) if flag)}
-    return RunnerOwned(args=tuple(sorted(flags)), env=tuple(sorted({*base.runner_owned.env, GPU_MASK_ENV})))
+    return RunnerOwned(args=tuple(sorted(flags)), env=tuple(sorted({*base.runner_owned.env, *_DEVICE_MASK_ENVS})))
 
 
 def _owned(base: BaseLaunch) -> _Touch:
@@ -237,7 +245,8 @@ def _guard(server: ServerConfig, server_flags: ServerFlags) -> tuple[tuple[str, 
     args = [server_flags.model, server.model_path, server_flags.host, server.host, server_flags.port, str(server.port)]
     if server_flags.served_model_name is not None:
         args += [server_flags.served_model_name, server.served_model_name]
-    return tuple(args), {GPU_MASK_ENV: ",".join(map(str, server.gpus))}
+    masks = {GPU_MASK_ENV: ",".join(map(str, server.gpus)), HIP_MASK_ENV: ",".join(map(str, range(len(server.gpus))))}
+    return tuple(args), masks
 
 
 def compose(config: SuiteConfig, base: BaseLaunch, facts: RoundFacts) -> Launch | Refusal:
