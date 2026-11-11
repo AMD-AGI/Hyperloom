@@ -205,3 +205,15 @@ def test_throughput_samples_reads_sglang_and_vllm_lines_and_drops_non_positive()
         ]
     )
     assert throughput_samples(text) == [100.0, 200.5, 300.0]
+
+
+def test_a_death_excerpt_cut_anywhere_carries_no_surrounding_whitespace(tmp_path):
+    words = " ".join(f"word{i}" for i in range(80))
+    dead = tmp_path / "dead.log"
+    dead.write_text(f"{words}\nEngineCore failed to start {words}\n {words}\n")
+    fatal = tmp_path / "fatal.log"
+    fatal.write_text(f"EngineCore encountered a fatal error {words}\n  frame {words}\n  frame {words}\n")
+    for path in (dead, fatal):
+        for max_chars in range(40, 1200, 7):
+            excerpt = server_log.death_excerpt(str(path), max_chars=max_chars)
+            assert excerpt is not None and excerpt == excerpt.strip(), (path.name, max_chars)
