@@ -196,6 +196,23 @@ The YAML defines the workload, including positive `envs.TP` and `envs.CONC` for
 resource accounting. Conflicting CLI workload flags are rejected. Both entrypoints
 use the same materialization, execution and result-validation path.
 
+When the serving image's kernels run only some draft shapes, declare the bounds
+under `speculative_draft_limits` so a candidate outside them is refused before
+its server boots. Each of `draft_length` (`--speculative-num-steps`, vLLM's
+`num_speculative_tokens`), `draft_tokens` (`--speculative-num-draft-tokens`) and
+`topk` (`--speculative-eagle-topk`) takes a positive `min`, `max` or both:
+
+```yaml
+benchmark:
+  speculative_draft_limits:
+    draft_tokens: {max: 4}
+```
+
+A setting is judged as the candidate spells it. One the engine resolves for
+itself is not judged: with `--speculative-eagle-topk 1`, SGLang verifies
+`num_steps + 1` tokens, so bound `draft_length` too when the cap is on the
+verify window. A malformed declaration stops the session before it starts.
+
 Magpie resolves the pinned InferenceX recipe and owns server startup, replay,
 profiling and cleanup. If the model has no registered recipe, Magpie's custom-model
 resolver uses the generated or supplied configuration. For a local custom checkpoint,
