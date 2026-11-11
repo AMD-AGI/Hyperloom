@@ -68,6 +68,7 @@ from hyperloom.contracts.recipe import (
 from hyperloom.measure.compile import COMPONENT_LAYOUTS, kernel_load_env, locate_installed_package
 from hyperloom.sandbox import SandboxGone
 from hyperloom.sandbox.socket import SandboxUnavailable
+from hyperloom_common.shared_storage import make_shared_dirs, write_shared_text
 from hyperloom_multibranch.contracts.branch_log import BranchLogEntry, BranchLogType
 from hyperloom_multibranch.contracts.blackboard.records import Learning
 from hyperloom_multibranch.contracts.blackboard.records import RetractionRef, TestRecord
@@ -270,7 +271,7 @@ class KeepWatch:
             "requeued": self.requeued,
             "requeue_failures": self.requeue_failures,
         }
-        path.write_text(json.dumps(document), encoding=ENCODING)
+        write_shared_text(path, json.dumps(document))
 
 
 def _kept_from(document: dict[str, object] | None) -> KeptChange | None:
@@ -335,7 +336,7 @@ class AutonomousSession:
         ready = await make_ready(self._start.task.agent, spec, self._agent_dir, self._setup.onboarding(self._sandbox))
         self._manifest, self._process = ready.manifest, ready.process
         document = ready.manifest.to_document()
-        (self._place.workspace / MANIFEST_FILE).write_text(json.dumps(document), encoding=ENCODING)
+        write_shared_text(self._place.workspace / MANIFEST_FILE, json.dumps(document))
         await self._place.blackboard.record_agent_manifest(self._start.branch, document)
         # Every snapshot of the agent's session is one of this branch's keeps, the first among them possibly written
         # while the preflight waited for the agent to start.
@@ -356,7 +357,7 @@ class AutonomousSession:
             tables = await lay_start_tables(self._setup.repo, self._start.start_commit, kernels, directory, configs)
         except StartTableError as error:
             raise PreflightFailed([str(error)]) from error
-        self._place.workspace.mkdir(parents=True, exist_ok=True)
+        make_shared_dirs(self._place.workspace)
         save_start_tables(tables, self._place.workspace / START_TABLES_FILE)
         return tables
 
@@ -601,7 +602,7 @@ class AutonomousSession:
             "env": dict(lease.env),
             "remaining_cards": lease.remaining_cards,
         }
-        (self._place.workspace / LEASE_FILE).write_text(json.dumps(document), encoding=ENCODING)
+        write_shared_text(self._place.workspace / LEASE_FILE, json.dumps(document))
 
     async def _lease_now(self, cards: int) -> BranchLease:
         deadline = self._start.task.deadline
@@ -909,7 +910,7 @@ class AutonomousSession:
             await self._note(f"keep {kept.seq} changes nothing on the branch head")
             return
         request = TestRequest(TestKind.TEST, Purpose.EXPLORE, self._start.branch, head, delta)
-        held = "" if kept.retracts is None else await self._speed_held(kept.retracts, watch)
+        held = "" if kept.retracts is None else await self._speed_held(kept.retracts, str(kept.seq), watch)
         if kept.retracts is not None and not held:
             request = await self._retraction(request, kept.retracts, watch)
         request_id = await self._setup.toolbox.submit_test(request)
@@ -920,16 +921,16 @@ class AutonomousSession:
             gate = f"is held to the speed gate: {held}" if held else "is not held to the speed gate"
             await self._note(f"keep {kept.seq} retracts {kept.retracts}: {request_id} {gate}")
 
-    async def _speed_held(self, retraction: Retraction, watch: KeepWatch) -> str:
-        """Why the retraction is held to the speed gate, empty when it is not: it undoes the keep it names and nothing
-        else when it changes only what that keep did, and the head is the agent's state on the keep it was made on,
-        since that keep was imported and the import that first carried the named keep and every one after it landed."""
+    async def _speed_held(self, retraction: Retraction, own: str, watch: KeepWatch) -> str:
+        """Why the retraction, keep ``own`` of ``watch``, is held to the speed gate, empty when it is not: it undoes the
+        keep it names and nothing else when it changes only what that keep did, and the head is the agent's state on the
+        keep it was made on, since that keep was imported and every import from the named keep on but its own landed."""
 
         if retraction.beyond:
             return f"it also changes {retraction.beyond}"
         if str(retraction.made_on) not in watch.imported:
             return f"keep {retraction.made_on}, which it was made on, was not imported"
-        since = [request_id for seq, request_id in watch.imported.items() if int(seq) >= retraction.keep]
+        since = [request_id for seq, request_id in watch.imported.items() if int(seq) >= retraction.keep and seq != own]
         snapshot = await self._place.blackboard.snapshot()
         landed = {record.request_id for record in snapshot.records if record.conclusion in _LANDED}
         if not all(request_id in landed for request_id in since):

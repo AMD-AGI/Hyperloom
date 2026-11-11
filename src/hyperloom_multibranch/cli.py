@@ -80,10 +80,12 @@ the same path; a usage error names what is missing.
 ``hosted run`` takes no arguments: it runs the session of the campaign spec a host injected, as
 :mod:`~hyperloom_multibranch.scheduling.hosted_run` maps it onto the options of ``run``, measured in the runner
 sandboxes of the host's sandbox service (:mod:`~hyperloom_multibranch.scheduling.hosted_peers`). Started again over a
-run whose ``session.json`` names a session, it finishes that session as ``final-only`` does. It tells the host the run
-is over -- ``final: true`` in ``exit.json`` -- once CLOSE ran, and when the spec, the environment, a missing package of
-the ``hosted`` extra or the runner cache keeps a session from running, with exit code 2 for a refused spec or session
-and 1 otherwise; a crash leaves no ``exit.json``, and the host starts the run again.
+run whose ``session.json`` names a session, it finishes that session as ``final-only`` does once its PRELUDE recorded
+the baseline; before that it closes the session, ending its tests, and starts the spec's session again
+(:func:`~hyperloom_multibranch.scheduling.hosted_run.take_over_earlier_session`). It tells the host the run is over
+-- ``final: true`` in ``exit.json`` -- once CLOSE ran, and when the spec, the environment, a missing package of the
+``hosted`` extra, the runner cache or a file it cannot read keeps a session from running, with exit code 2 for a
+refused spec or session and 1 otherwise; a crash leaves no ``exit.json``, and the host starts the run again.
 ``final-only SESSION_DIR`` is the emergency recovery of a session that ended before FINAL ran, and takes nothing but
 that directory: it runs FINAL and CLOSE over what the session persisted -- the settings and the frontier policy its
 manifest holds, the branches its roster and blackboard hold -- and rewrites its report, dashboard and breakdown. It
@@ -119,6 +121,7 @@ from pathlib import Path
 
 from hyperloom.common.benchmark_config import BENCHMARK_CONFIG_ENV, benchmark_config_path
 from hyperloom_common.env import EnvValueError
+from hyperloom_common.shared_storage import open_shared_append
 from hyperloom.common.outside_facts.image_check import ImageCheckFailed, mode_from_environment
 from hyperloom.common.perf_metric import agentx_enabled
 from hyperloom.common.url_userinfo import CREDENTIALED_URL_RE
@@ -142,14 +145,17 @@ from hyperloom_multibranch.scheduling.hosted_run import (
     HostedExit,
     arm_grant_stop,
     campaign_spec,
+    close_then_start,
     grant_deadline,
-    record_session,
+    grant_tests_that_fit,
     recorded_session,
     refuse_unhosted_branches,
     reported_stop_reason,
     run_argv,
+    share_with_the_group,
     spec_make_before_break,
-    toolbox_grant,
+    started_session,
+    take_over_earlier_session,
     write_final_exit,
 )
 from hyperloom_multibranch.scheduling import review
@@ -955,13 +961,19 @@ async def _run_leg(
     clock = Clock()
     layout = persisted.layout
     print(layout.root, flush=True)
-    logging.getLogger().addHandler(_file_handler(layout.scheduler_log))
-    host = SessionHost(layout, ProcessRegistry(layout.pids, clock), clock)
-    session = Session(persisted.settings, peer_factory, host, services)
-    return (await leg(session, persisted.ended)).exit_code
+    handler = _file_handler(layout.scheduler_log)
+    logging.getLogger().addHandler(handler)
+    try:  # a hosted run that closes this session goes on to start another, which logs to its own directory
+        host = SessionHost(layout, ProcessRegistry(layout.pids, clock), clock)
+        session = Session(persisted.settings, peer_factory, host, services)
+        return (await leg(session, persisted.ended)).exit_code
+    finally:
+        logging.getLogger().removeHandler(handler)
+        handler.close()
 
 
 def _file_handler(path: Path) -> logging.Handler:
+    os.close(open_shared_append(path))  # 664: final-only of a later leg, maybe another account, appends to it
     handler = logging.FileHandler(path, encoding=ENCODING)
     handler.setFormatter(logging.Formatter(LOG_FORMAT))
     return handler
@@ -1006,21 +1018,6 @@ def hosted_runner_cache(env: Mapping[str, str]) -> Path:
     return Path(value)
 
 
-def grant_tests_that_fit(host: HostInfo, make_before_break: bool = True) -> Callable[[int], int]:
-    """How many tests of a TP the grant ``host`` holds runs at once, as the hosted toolbox runs them (``handover_for``
-    with ``make_before_break``); raises ValueError when one does not fit, ImportError without the ``hosted`` extra."""
-
-    # hosted_toolbox loads the sandbox SDK, which only the hosted extra installs.
-    from hyperloom_multibranch.toolbox.hosted_toolbox import handover_for, parallel_tests_for
-
-    grant = toolbox_grant(host.grant_limits)
-
-    def tests_that_fit(tp: int) -> int:
-        return parallel_tests_for(grant, tp, handover_for(grant, tp) if make_before_break else None)
-
-    return tests_that_fit
-
-
 def ready_session(workload: Workload, load: Callable[[Workload], PeerFactory]) -> ReadySession:
     """The peers ``load`` has for ``workload`` and the services, the Recipe KB and the RSI archive checked first;
     raises :class:`EnvironmentIncomplete` or :class:`PeersUnavailable` naming what is missing. Creates nothing."""
@@ -1049,7 +1046,7 @@ def hosted_run() -> int:
         start = _hosted_start(host)
     except ValueError as exc:
         return _not_run(host.state_dir, EXIT_USAGE, exc)
-    except (EnvironmentIncomplete, PeersUnavailable) as exc:
+    except (EnvironmentIncomplete, PeersUnavailable, PermissionError) as exc:
         return _not_run(host.state_dir, EXIT_FAILED, exc)
     except ImportError as exc:
         log.exception("hosted run: a module the session needs is not installed")
@@ -1057,7 +1054,7 @@ def hosted_run() -> int:
     _stop_before_grant_ends(start.deadline)
     try:
         returncode = start.run()
-    except (ImageCheckFailed, CacheBuildError, ToolboxInputsError) as exc:
+    except (ImageCheckFailed, CacheBuildError, ToolboxInputsError, PermissionError) as exc:
         return _not_run(host.state_dir, EXIT_FAILED, exc)
     root = recorded_session(host.state_dir)
     stop_reason = None if root is None else reported_stop_reason(root)
@@ -1066,26 +1063,29 @@ def hosted_run() -> int:
 
 
 def _hosted_start(host: HostInfo) -> HostedStart:
-    """A new session of the spec, or ``final-only`` over the session ``session.json`` names; raises ValueError when
-    the spec or that session is refused, ImportError when a package of the ``hosted`` extra is missing, and what
-    :func:`ready_session` raises."""
+    """A new session of the spec, or the close or finish of the one ``session.json`` names, which the restart takes
+    over (:func:`take_over_earlier_session`); raises ValueError on a refused spec or session, ImportError when a
+    ``hosted`` package is missing, and what :func:`ready_session` raises."""
 
     deadline = grant_deadline(host, datetime.now(timezone.utc))
-    previous = recorded_session(host.state_dir)
-    persisted = None if previous is None else persisted_run(previous)
+    earlier = take_over_earlier_session(host.state_dir)
+    if earlier.closed is not None:  # it closed with no baseline, which ended the run, and was killed before exit.json
+        return HostedStart(lambda: EXIT_FAILED, deadline)
+    persisted = earlier.finish
+    if (taken := persisted or earlier.left) is not None:
+        share_with_the_group(taken.layout.root)
     settings = _hosted_settings(host, deadline.session_hours) if persisted is None else persisted.settings
     require_session_environment(settings, os.environ)
     ready = hosted_ready_session(host, settings.workload)
+    close = partial(final_only, peer_factory=ready.peer_factory, services=ready.services)
     if persisted is not None:
-        run = partial(final_only, persisted, ready.peer_factory, ready.services)
-    else:
-        run = partial(run_session, settings, ready.peer_factory, ready.services, partial(_record_root, host.state_dir))
-    return HostedStart(run, deadline)
+        return HostedStart(partial(close, persisted), deadline)
+    start = partial(run_session, settings, ready.peer_factory, ready.services, partial(started_session, host.state_dir))
+    return HostedStart(partial(close_then_start, earlier.left, close, start), deadline)
 
 
 def _stop_before_grant_ends(deadline: GrantDeadline) -> None:
-    """Arm the stop of this process one CLOSE grace before ``deadline``'s grant ends, at once when that has passed;
-    nothing when the grant states no runtime."""
+    """Arm this process's stop one CLOSE grace before ``deadline``'s grant ends (at once if passed; never untimed)."""
 
     if deadline.stop_after_sec is not None:
         arm_grant_stop(max(0.0, deadline.stop_after_sec))
@@ -1112,14 +1112,10 @@ def _parsed_run(argv: list[str]) -> argparse.Namespace:
         raise ValueError(f"the spec does not map onto the options of run: {message}") from exc
 
 
-def _record_root(state_dir: Path, root: Path) -> None:
-    _print_root(root)
-    record_session(state_dir, root)
-
-
 def _not_run(state_dir: Path, returncode: int, exc: Exception) -> int:
     """End a run no session ran in for good: a start of it again would meet what kept this one from running."""
 
+    log.error("hosted run: not served", exc_info=exc)
     print(f"{PROG}: hosted run: {exc}", file=sys.stderr)
     write_final_exit(state_dir, HostedExit(returncode, error=str(exc)))
     return returncode

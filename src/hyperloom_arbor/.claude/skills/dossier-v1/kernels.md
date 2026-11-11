@@ -73,7 +73,8 @@ writing or tuning anything:
   (task templates), and ISA notes (operand layouts).
 
 Its pages cite AITER `b467ce342`: verify every claim against the installed
-source. This repository keeps a copy at `src/kernelforge`.
+source. The `kernels` skill carries a curated copy of these pages
+(`.claude/skills/kernels/reference/`).
 
 ## 6. Check a candidate before proposing it
 

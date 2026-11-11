@@ -117,6 +117,8 @@ class HostedToolboxInputs:
             characters, as the cache builder reported it. Given, it is passed on every ``measurement`` create
             (``HYPERLOOM_RUNNER_CACHE_MANIFEST_SHA256``) and the runner's bootstrap accepts only that manifest; without
             it the manifest vouches only for the entry it sits in.
+        session_id: The session's id when ``run_id`` is the run's, which a restart of the run that starts its session
+            again shares: it keeps the new session's request ids, and so its sandboxes, apart from the closed one's.
         sandbox_workspace: The workspace every sandbox is created in (``HYPERLOOM_SANDBOX_WORKSPACE``), sent on each
             create as ``agent-sandbox.io/workspace``. A SaFE key used directly needs it when its user is in more than
             one workspace, and a ``system-admin`` key always does; a Claw grant's key names its own, so a Claw host
@@ -140,6 +142,7 @@ class HostedToolboxInputs:
     grant_limits: Mapping[str, float] | None = None
     runner_cache_manifest_sha256: str | None = None
     sandbox_workspace: str | None = None
+    session_id: str | None = None
 
     def __post_init__(self) -> None:
         for name in _REQUIRED_TEXT:
@@ -206,17 +209,21 @@ class HostedOptions:
     profiles on host cards, and the hosted toolbox has neither. ``retry`` is how the service client repeats a control-plane
     call, ``lease_tuning`` the lifetime and waits of a branch's ``dev`` sandbox. ``short_prompts`` is the staged prompt set
     of the short-prompt consistency check (``acceptance.short_prompts`` of a builder that names it there says the same and
-    must not differ). The set is staged in the runner cache the runner template mounts, which a host may not read: the
-    option is carried as given (a key or hash that is not well formed is refused) and a runner that does not find that set
-    refuses the test, saying so, before it starts a server. ``None`` takes the key in ``HYPERLOOM_SHORT_PROMPTS`` of the
-    host environment, whose hash is read from the manifest of the entry in this host's own view of the runner cache
-    (``HYPERLOOM_RUNNER_CACHE``) and which refuses the build when it is not staged there; ``off`` there runs no check.
-    Without either the check is on with the session model's own set when this host finds it staged
-    (``short_prompts.default_short_prompts``), and off, logged, when it does not. The long-context check is found the
-    same way from ``acceptance.long_context``, ``HYPERLOOM_LONG_CONTEXT`` and ``long_context.ServedLongContext`` (the model's
-    own set at the context each test's launch serves), except that this host stages the model's own set when a test first
-    needs it and it is not staged, as the local toolbox does, when it sees the runner cache (the directory
-    ``HYPERLOOM_RUNNER_CACHE`` names exists here); a host that does not see it runs no such check and logs why. ``framework_configs`` is the directory of aiter's tuned tables
+    must not differ). The set is an entry of the runner cache the runner template mounts (``<cache>/evalsets/<key>``,
+    keyed by a hash of its generator and inputs, its prompts named by their SHA-256 in every sheet): the option is
+    carried as given (a key or hash that is not well formed is refused) and a runner that does not find that set, or finds
+    other prompts under its key, refuses the test, saying so, before it starts a server. ``None`` takes the key in
+    ``HYPERLOOM_SHORT_PROMPTS`` of the host environment, whose hash is read from the manifest of the entry in this host's
+    own view of the runner cache (``HYPERLOOM_RUNNER_CACHE``) and which refuses the build when it is not staged there;
+    ``off`` there runs no check. Without either the check is on with the session model's own set
+    (``short_prompts.default_short_prompts``). A host that sees the runner cache (the directory ``HYPERLOOM_RUNNER_CACHE``
+    names exists here, as it does for a hosted session, which builds the commit's entry there, in the directory the runner
+    sandboxes mount) stages that set there when it is missing, from the model's tokenizer, as the local toolbox does; a
+    host that does not see it stages nothing and the check is off, logged. The long-context check is found the same way
+    from ``acceptance.long_context``, ``HYPERLOOM_LONG_CONTEXT`` and ``long_context.ServedLongContext`` (the model's own
+    set at the context each test's launch serves, staged by a host that sees the runner cache when a test first plans
+    that context; a host that does not see it runs no such check and logs why).
+    ``framework_configs`` is the directory of aiter's tuned tables
     every test reads private copies of, snapshotted below ``session_dir/framework`` as the toolbox is built, where the
     runner sandboxes read it at the same path: the image's when omitted, ``""`` for none. The snapshot is named to every
     runner sandbox by ``HYPERLOOM_FRAMEWORK_SNAPSHOT`` and ``HYPERLOOM_FRAMEWORK_SESSION_SHA256``, which the runner
@@ -441,19 +448,22 @@ def _acceptance_with_prompts(
     acceptance: AcceptanceSetup, options: HostedOptions, environ: Mapping[str, str], model_dir: Path | None
 ) -> AcceptanceSetup:
     """``acceptance`` with the short-prompt set the options (else the acceptance setup, else ``HYPERLOOM_SHORT_PROMPTS``)
-    name, and the long-context set the acceptance setup (else ``HYPERLOOM_LONG_CONTEXT``, else the model's own set, which
-    this host stages when it sees the runner cache, :func:`~.long_context.sees_runner_cache`) names.
+    name, and the long-context set the acceptance setup (else ``HYPERLOOM_LONG_CONTEXT``, else the model's own set) names.
+
+    The model's own sets are staged in the runner cache when they are missing and this host sees it
+    (:func:`~.long_context.sees_runner_cache`): the runners read that directory, and nothing else puts the sets there.
 
     Raises:
         ShortPromptsNotStaged: The environment names a key that is not staged in this host's view of the runner cache.
         LongContextNotStaged: The same for the long-context check.
         ValueError: The options and the acceptance setup name different sets.
     """
+    stage = sees_runner_cache(environ)
     named = with_short_prompts(acceptance, options.short_prompts)
     if named.short_prompts is None:
-        named = with_short_prompts(named, environment_short_prompts(environ, model_dir))
+        named = with_short_prompts(named, environment_short_prompts(environ, model_dir, stage=stage))
     if named.long_context is None:
-        named = with_long_context(named, environment_long_context(environ, model_dir, stage=sees_runner_cache(environ)))
+        named = with_long_context(named, environment_long_context(environ, model_dir, stage=stage))
     return named
 
 
@@ -527,7 +537,9 @@ def build_hosted_toolbox(
         backend, directory, timeout_sec=options.timeout_sec, workload_kind=acceptance.workload_kind
     )
     toolbox = HostedToolbox(
-        session_stores(blackboard, directory, inputs.run_id, native.driver if native else None),
+        session_stores(
+            blackboard, directory, inputs.run_id, native.driver if native else None, inputs.session_id or ""
+        ),
         executor,
         acceptance,
         tools=session_tools(options.tools if options.tools is not None else (tracelens_tool(),), blackboard, directory),

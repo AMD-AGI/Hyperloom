@@ -1,6 +1,6 @@
 # FlyDSL Knowledge Base
 
-> Distilled from the upstream **ROCm/FlyDSL** GitHub repo at commit `2812676` (head of `main`, ingested 2026-05-18).
+> Distilled from the upstream **ROCm/FlyDSL** GitHub repo at commit `2812676` (head of `main` when ingested).
 > Source pinned by `source_registry.json` entry `flydsl_repo_ingest_v1`.
 > Working clone (for re-reading lines) lives at `_tmp_flydsl_src/FlyDSL/` (do not edit; delete if disk pressure).
 

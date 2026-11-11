@@ -339,6 +339,18 @@ def make_shared_dirs(path: Path, *, mode: int = SHARED_DIR_MODE) -> Path:
     return path
 
 
+def share_new_directory(directory: Path, *, mode: int = SHARED_DIR_MODE) -> None:
+    """Give a directory this process has just made (``mkdir``, ``mkdtemp``) its shared ``mode``, by ``fchmod`` on the
+    directory opened without following a link, in its parent reached as :func:`open_directory` reaches it, when that
+    parent is shared storage (:func:`parent_is_shared`); logged as in :func:`make_shared_dirs` when it does not keep
+    setgid. Anywhere else it is left as it was made; a link at its name is refused either way."""
+    with shared_parent(directory) as (parent, name, widen):
+        if widen:
+            _share(parent, name, mode, directory)
+        else:
+            os.close(os.open(name, _DIRECTORY, dir_fd=parent))  # a link at its name is refused (ELOOP)
+
+
 @contextmanager
 def shared_parent(path: Path) -> Iterator[tuple[int, str, bool]]:
     """The directory of ``path`` opened by :func:`open_directory` (``O_PATH``, closed after the block), the name of
@@ -377,6 +389,25 @@ def _new_temporary(directory: int, name: str, mode: int, flags: int = 0) -> tupl
             raise
         return descriptor, temporary
     raise FileExistsError(errno.EEXIST, "no free name for a new file beside it", name)
+
+
+def create_shared_file(path: Path) -> None:
+    """Create ``path`` empty with mode ``664`` below shared storage (:func:`parent_is_shared`), else as the umask leaves
+    ``664``; an existing file is replaced by rename, never truncated or chmodded."""
+    with shared_parent(path) as (directory, name, widen):
+        try:
+            descriptor = os.open(
+                name, _NEW_FILE, _OWNER_ONLY, dir_fd=directory
+            )  # the umask never decides it: fchmod below
+        except FileExistsError:
+            descriptor = None
+        if descriptor is not None:
+            try:
+                os.fchmod(descriptor, _final_mode(SHARED_FILE_MODE, widen))
+            finally:
+                os.close(descriptor)
+            return
+    write_shared_bytes(path, b"")
 
 
 def open_shared(path: Path, access: int, mode: int = SHARED_FILE_MODE) -> int:
@@ -623,6 +654,11 @@ def copy_shared_file(source: Path, path: Path, *, mode: int = SHARED_FILE_MODE) 
         shutil.copyfileobj(content, handle)
 
 
+def write_shared_text(path: Path, text: str, *, mode: int = SHARED_FILE_MODE) -> None:
+    """:func:`write_shared_bytes` of ``text`` as UTF-8."""
+    write_shared_bytes(path, text.encode("utf-8"), mode=mode)
+
+
 def current_umask() -> int:
     """This process's umask, read from ``/proc/self/status``: setting it to learn it would race the process's threads.
 
@@ -694,6 +730,7 @@ __all__ = [
     "child_umask",
     "copy_shared_file",
     "create_new_shared_file",
+    "create_shared_file",
     "current_umask",
     "directory_is_shared",
     "make_shared_dirs",
@@ -707,9 +744,11 @@ __all__ = [
     "ownership",
     "parent_is_shared",
     "publish_shared_bytes",
+    "share_new_directory",
     "shared_mode",
     "shared_parent",
     "setgid_warnings",
     "writable_problems",
     "write_shared_bytes",
+    "write_shared_text",
 ]

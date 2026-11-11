@@ -1,0 +1,6 @@
+{
+  "name": "benchmark",
+  "version": "1.0.0",
+  "description": "Study a benchmark once, for every campaign on it: the rules a change could break (machine-readable), its reference configuration and number, and what to measure (the official metric, the operating points, how many runs a claim needs). Written to benchmarks/<name>/ and reviewed by the benchmark's owners.",
+  "author": {"name": "Arbor"}
+}
