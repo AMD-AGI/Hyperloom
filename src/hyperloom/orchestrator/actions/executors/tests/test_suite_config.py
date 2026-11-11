@@ -69,8 +69,13 @@ _ATOM_ARGV = (
     *("-tp", "2", "--max-model-len", "8192", "--trust-remote-code", "--model", _MODEL, "--host", "127.0.0.1"),
     *("--server-port", "8888"),
 )
-#: The server environment every framework gets from ``_point``: its non-knob variables and the round's GPU mask.
-_POINT_ENV = {"PATH": "/opt/venv/bin:/usr/bin", "AITER_LOG_TUNED_CONFIG": "1", "HIP_VISIBLE_DEVICES": "4,5"}
+#: The server environment every framework gets from ``_point``: its non-knob variables and the round's GPU masks.
+_POINT_ENV = {
+    "PATH": "/opt/venv/bin:/usr/bin",
+    "AITER_LOG_TUNED_CONFIG": "1",
+    "ROCR_VISIBLE_DEVICES": "4,5",
+    "HIP_VISIBLE_DEVICES": "0,1",
+}
 #: (server command under the framework python, argv after it, server environment) per framework and board.
 _LAUNCH = {
     ("sglang", "mi300x"): (_SGLANG_ENTRY, _SGLANG_ARGV, {"SGLANG_USE_AITER": "1", "SGLANG_AITER_MLA_PERSIST": "1"}),

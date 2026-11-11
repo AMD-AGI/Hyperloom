@@ -3,12 +3,12 @@
 
 """Whether the GPUs a round starts its server on are visible to ``amd-smi`` and free of other processes.
 
-A round's GPUs are the server's ``HIP_VISIBLE_DEVICES`` numbers, which ROCm assigns in KFD node order while
+A round's GPUs are the server's ``ROCR_VISIBLE_DEVICES`` numbers, which ROCm assigns in KFD node order while
 ``amd-smi process`` indexes cards in PCI order, so each is translated to its amd-smi card before its row is read. A GPU
 another process holds would make the server fail, or worse, measure beside a foreign workload, so the round refuses
-before it spawns anything. amd-smi lists a process on every GPU it opened, and a ROCm process opens every GPU whatever
-its device mask, keeping its page tables and runtime context resident on each; so a process holds a GPU only when the
-VRAM amd-smi reports for it on that card (read per card from the process's DRM fdinfo) exceeds 1 GiB.
+before it spawns anything. amd-smi lists a process on every GPU it opened, and a ROCm process opens every GPU ROCr
+enumerates whatever its HIP mask (the round's own server runs under a ROCr mask of its GPUs), keeping its page tables
+and runtime context resident on each; so a process holds a GPU only when the VRAM amd-smi reports for it on that card (read per card from the process's DRM fdinfo) exceeds 1 GiB.
 
 A GPU that is only held is read again until its holder exits or the release window passes, since the holder is most
 likely the previous round's server still exiting; a GPU no wait can free refuses at once.
@@ -97,7 +97,7 @@ def _gated_sleep(seconds: float, gate: RoundGate) -> Stop | None:
 
 
 def amd_smi_cards(gpus: Sequence[int]) -> tuple[int, ...]:
-    """The amd-smi card behind each of ``gpus`` (``HIP_VISIBLE_DEVICES`` numbers), in the same order.
+    """The amd-smi card behind each of ``gpus`` (``ROCR_VISIBLE_DEVICES`` numbers), in the same order.
 
     Raises:
         AmdSmiError: The card order cannot be read, or a GPU is not visible.
@@ -110,7 +110,7 @@ def amd_smi_cards(gpus: Sequence[int]) -> tuple[int, ...]:
 
 
 def await_free_gpus(gpus: Sequence[int], gate: RoundGate) -> Stop | None:
-    """``None`` once ``gpus`` (``HIP_VISIBLE_DEVICES`` numbers) can take a new server; otherwise a
+    """``None`` once ``gpus`` (``ROCR_VISIBLE_DEVICES`` numbers) can take a new server; otherwise a
     ``GPUS_UNAVAILABLE`` stop naming each GPU that is held or not visible, or the stop ``gate`` trips while a held
     GPU is waited on."""
     deadline = time.monotonic() + RELEASE_WAIT_SEC
