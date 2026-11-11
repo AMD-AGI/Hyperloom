@@ -171,7 +171,7 @@ _VLLM_STYLE_EP_SWITCH = "--enable-expert-parallel"
 _FACTS: dict[Framework, FrameworkFacts] = {
     Framework.SGLANG: FrameworkFacts(
         kind=FrameworkKind.SERVING,
-        python_package="sglang",
+        python_package=Framework.SGLANG.value,
         server_flags=ServerFlags("--model-path", _HOST_FLAG, "--port", "--served-model-name", "--context-length"),
         server_command=ServerCommand(("python3", "-m", "sglang.launch_server"), ("-m", "sglang.launch_server")),
         expert_parallel=ExpertParallelFlag("--ep-size", ("--ep-size", "--expert-parallel-size", "--ep"), True),
@@ -181,7 +181,7 @@ _FACTS: dict[Framework, FrameworkFacts] = {
     ),
     Framework.VLLM: FrameworkFacts(
         kind=FrameworkKind.SERVING,
-        python_package="vllm",
+        python_package=Framework.VLLM.value,
         server_flags=ServerFlags("--model", _HOST_FLAG, "--port", "--served-model-name", "--max-model-len"),
         # The ``vllm`` console script is ``vllm.entrypoints.cli.main:main``.
         server_command=ServerCommand(("vllm", "serve"), ("-m", "vllm.entrypoints.cli.main", "serve")),
@@ -191,7 +191,7 @@ _FACTS: dict[Framework, FrameworkFacts] = {
     ),
     Framework.ATOM: FrameworkFacts(
         kind=FrameworkKind.SERVING,
-        python_package="atom",
+        python_package=Framework.ATOM.value,
         server_flags=ServerFlags("--model", _HOST_FLAG, "--server-port", None, "--max-model-len"),
         server_command=ServerCommand(
             ("python3", "-m", "atom.entrypoints.openai_server"), ("-m", "atom.entrypoints.openai_server")
