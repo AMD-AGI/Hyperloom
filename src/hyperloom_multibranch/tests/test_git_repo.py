@@ -89,6 +89,30 @@ async def test_the_repository_is_the_group_s_to_write_only_below_shared_storage(
         assert bool(stat.S_IMODE(made.stat().st_mode) & stat.S_IWGRP) is group_writes, made
 
 
+async def test_below_shared_storage_the_group_reads_but_cannot_change_what_git_reads_settings_from(tmp_path, blobs):
+    """The group writes objects and refs only: the config git reads, and everything else outside objects/ and refs/,
+    is the owner's to change, and the sticky repository directory keeps the group from replacing it."""
+    parent = tmp_path / "session"
+    parent.mkdir()
+    parent.chmod(0o2775)
+    old = os.umask(0o022)
+    try:
+        repo = await _rooted(parent / "experiments.git", blobs)
+        await repo.create_branch("b01", await repo.root())
+    finally:
+        os.umask(old)
+
+    top = parent / "experiments.git"
+    assert stat.S_IMODE(top.stat().st_mode) & (stat.S_IWGRP | stat.S_ISVTX) == stat.S_IWGRP | stat.S_ISVTX
+    settings = [made for made in top.iterdir() if made.name not in ("objects", "refs")]
+    assert {made.name for made in settings} >= {"config", "HEAD"}
+    for made in settings:
+        for entry in (made, *made.rglob("*")):
+            mode = stat.S_IMODE(entry.lstat().st_mode)
+            assert not mode & stat.S_IWGRP, entry
+            assert mode & stat.S_IRGRP, entry
+
+
 async def test_a_branch_moves_only_on_its_own_commits(repo):
     root = await repo.head(INTEGRATION_BRANCH)
     await repo.create_branch("s1", root)
