@@ -601,7 +601,9 @@ def test_an_agentx_window_longer_than_the_replay_closes_when_the_profiling_reque
     assert result.report.run_status is RunStatus.COMPLETED, result.report.failure_detail
     finished = _marks(result.layout)[Phase.FINISHED.value]
     capture = json.loads(result.layout.profile_capture.read_text())
-    assert finished <= capture["window_close_unix"] < finished + 0.15, "closed at the next poll, not after the tail"
+    # phase_marks.json holds milliseconds; rounding the close the same way keeps the order the run recorded.
+    closed = round(capture["window_close_unix"], 3)
+    assert finished <= closed < finished + 0.15, "closed at the next poll, not after the tail"
 
 
 @pytest.mark.parametrize(
