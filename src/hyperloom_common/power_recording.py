@@ -110,6 +110,7 @@ class PowerRecording:
     errors: dict[str, dict[str, Any]] = field(default_factory=dict)
     vram_total_b: dict[int, float] = field(default_factory=dict)
     cpu_counted: dict[str, float | None] = field(default_factory=dict)
+    reported_duration_s: float | None = None
 
     def intervals(self, phase: str) -> tuple[tuple[float, float], ...]:
         """Every ``(start, end)`` the recording spent in ``phase``, on the monotonic clock."""
@@ -122,7 +123,7 @@ class PowerRecording:
         if not intervals:
             return None
         start, end = intervals[0][0] + self.unix_offset, intervals[-1][1] + self.unix_offset
-        return Window(MEASURED, intervals, start, end, self.scope.window_source)
+        return Window(MEASURED, intervals, start, end, self.scope.window_source, self.reported_duration_s)
 
     def _column(self, gpu: int, column: str, intervals: Sequence[tuple[float, float]]) -> list[tuple[float, Any]]:
         index = _FAST[column]

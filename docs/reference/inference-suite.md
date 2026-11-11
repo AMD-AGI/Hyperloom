@@ -256,7 +256,11 @@ share and the share of firmware ticks each throttle accumulator counted; the
 node's and the CPU's power where read. Each phase begins at the instant its mark
 carries, not when the recorder heard it.
 
-`energy` is the measured window's, computed as InferenceX does: each configured
+`energy` is the measured window's, computed as InferenceX does. A fixed round's
+window is the client's own timed run (`benchmark_start_time_unix` to
+`benchmark_end_time_unix` in its result), so its tokenizer load, prompt
+building and result writing fall outside it; an AgentX round's is aiperf's
+profiling phase. Each configured
 card's power is interpolated at the window's boundaries and integrated by
 trapezoid, giving `total_gpu_energy_j`, `avg/p75/p90_power_w` per card and
 `avg/p75/p90_total_gpu_power_w` (time-weighted quantiles of the summed curve),
@@ -268,6 +272,7 @@ figure is `null` and `reasons` says why:
 | Reason | Meaning |
 |---|---|
 | `invalid_benchmark_window` | The round never entered its measured phase. |
+| `benchmark_duration_mismatch` | The client's stamps and the duration it timed differ by more than 0.5 s or 1%. |
 | `benchmark_window_not_bracketed`, `insufficient_power_samples` | A card has no sample on one side of the window. |
 | `sampling_gap_exceeded` | A card's samples across the window, its boundaries included, are more than 3 s apart. |
 | `invalid_power_sample` | A card's power did not read inside the window. |
