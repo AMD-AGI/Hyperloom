@@ -265,6 +265,7 @@ async def _rig(
     agent: Agent | Component = Agent(),
     *,
     clock=time.time,
+    sleep=asyncio.sleep,
     start: Recipe | None = None,
     deadline: float = 0.0,
     spend: type[AgentSpend] = AgentSpend,
@@ -309,6 +310,7 @@ async def _rig(
         rig.repo,
         "vllm",
         spend_of,
+        sleep=sleep,
         clock=clock,
         least_run_seconds=least_run,
     )
@@ -866,7 +868,12 @@ async def test_an_agent_whose_lease_is_refused_for_another_reason_fails_its_pref
 async def test_an_agent_that_waits_for_cards_past_the_time_it_needs_to_run_fails_its_preflight(
     tmp_path: Path,
 ) -> None:
-    rig = await _rig(tmp_path, deadline=time.time() + 3.0, least_run=2.0)
+    now = [0.0]
+
+    async def sleep(seconds: float) -> None:
+        now[0] += seconds
+
+    rig = await _rig(tmp_path, clock=lambda: now[0], sleep=sleep, deadline=3.0, least_run=2.0)
     rig.toolbox.cards_left = 0
 
     with pytest.raises(PreflightFailed, match="waited .* for cards.*lease_leaves_no_measurement"):
