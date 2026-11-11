@@ -47,6 +47,7 @@ from .records import (
     _BenchProcess,
     _cold_anchor_from_warmup,
     _requested_framework,
+    _should_establish_quality_ref,
     _unlaunched_round_result,
 )
 from .warm_patches import (
@@ -66,6 +67,8 @@ _BENCHMARK_REPORT_NAME = "benchmark_report.json"
 # climbed 14,202 -> 19,374 -> 22,425 tok/s across three rounds of one unchanged config, i.e. +36% into round 2 and
 # another +16% into round 3.
 _COLD_START_DELTA_WARN_PCT = 25.0
+# A depressed stock anchor can overstate every later gain, independently of a rising cold start.
+_BASELINE_DOWNWARD_DRIFT_LIMIT_PCT = 25.0
 
 
 def _cold_anchor_after_reaped_measure(warmup_result: dict[str, Any], result: dict[str, Any]) -> dict[str, Any]:
@@ -133,6 +136,46 @@ class _BenchmarkRoundsMixin:
             warm,
             measured,
         )
+
+    @staticmethod
+    def _retain_warmup_on_downward_drift(
+        warmup_result: dict[str, Any], measured_result: dict[str, Any]
+    ) -> dict[str, Any] | None:
+        """Use the higher stock round without marking a budget-dropped measure pass."""
+        warm = float(warmup_result.get("output_throughput") or 0.0)
+        measured = float(measured_result.get("output_throughput") or 0.0)
+        delta_pct = incremental_gain_pct(measured, warm) if measured > 0 else None
+        if delta_pct is None or delta_pct >= -_BASELINE_DOWNWARD_DRIFT_LIMIT_PCT:
+            return None
+        anchor = dict(warmup_result)
+        anchor["nonfatal_warnings"] = [*warmup_result.get("nonfatal_warnings", []), "baseline_downward_drift_anchor"]
+        anchor["warmup_round_tput"] = warm
+        anchor["measure_round_rejected"] = {
+            "reason": "downward_drift",
+            "output_throughput": measured,
+            "delta_pct": round(delta_pct, 2),
+            "output_dir": measured_result.get("output_dir"),
+            "workspace": measured_result.get("workspace"),
+        }
+        log.warning(
+            "baseline_executor: measured stock round fell %.1f%% below its warm-up "
+            "(%.1f -> %.1f tok/s); retaining the higher stock anchor and both round artifacts",
+            abs(delta_pct),
+            warm,
+            measured,
+        )
+        return anchor
+
+    def _finalize_stock_anchor(
+        self, attempt: BenchmarkAttempt, warmup_result: dict[str, Any], measured_result: dict[str, Any]
+    ) -> dict[str, Any]:
+        """Record a normal measured round or retain the higher stock round when it drifted down."""
+        if _should_establish_quality_ref(getattr(attempt.ctx.task, "kind", ""), attempt.params):
+            anchor = self._retain_warmup_on_downward_drift(warmup_result, measured_result)
+            if anchor is not None:
+                return anchor
+        self._record_measured_against_warmup(measured_result, warmup_result)
+        return measured_result
 
     def _settle_attempt_server_args(
         self,
@@ -423,7 +466,7 @@ class _BenchmarkRoundsMixin:
             # The gate before this pass admitted it and the run's clock took it anyway -- the pass overran what it
             # was priced at.
             return _cold_anchor_after_reaped_measure(warmup_result, result)
-        self._record_measured_against_warmup(result, warmup_result)
+        result = self._finalize_stock_anchor(attempt, warmup_result, result)
         if defer_accuracy:
             await self._settle_deferred_accuracy(attempt, output_dir, hot_round, result)
         return result
