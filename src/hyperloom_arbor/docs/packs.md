@@ -48,6 +48,7 @@ Only `knowledge/`, `validator/`, `eval/` and `tools/` belong in a pack.
 | `noise_band_pct` | 1.0 | inside this band a change is neutral |
 | `secondary_metric`, `secondary_direction`, `secondary_noise_band_pct`, `secondary_threshold_rel` | | a second axis |
 | `secondary_regression_cap_pct`, `secondary_exchange_rate` | , 1.0 | how much the second axis may lose |
+| `matched_requests` | true | a per-request second axis or band guard (p50/p90 interactivity, `e2e_norm_intvty_p50`/`_p90`) is judged on the requests the candidate and the kept tree's run both completed; `false`: on the raw readings ([how-it-works.md](how-it-works.md#intents-and-verdicts)) |
 | `correctness_regression_cap_pct` | 5.0 | what a FIX-CORRECTNESS may cost |
 | `stability_regression_cap_pct` | 3.0 | what a FIX-STABILITY may cost, its failure on record |
 | `stability_collapse_pct` | 10.0 | a cited iteration this far below the best counts as the failure |
@@ -202,6 +203,7 @@ It warns on a `SKILL.md` over 500 lines, a description Claude Code would cut, an
 | Pack | What | Config |
 |---|---|---|
 | `serving` | the serving template: `balanced`'s method for any vLLM or SGLang model; `dossier-v1` and `profiler` | `configs/serving-template.json` (example) |
+| `serving-qwen` | the serving template for a model asked through its chat template (an instruct or thinking Qwen): its correctness check runs the smoke question and GSM8K 5-shot through `/v1/chat/completions` with the chat template, where the template's raw completions prompt gets an end of sequence (such a model scores near zero on it). Every other file is the serving template's, kept equal by a test | the serving template's config, with `"pack": "serving-qwen"` and `GSM8K_MIN` from the chat-template score |
 | `serving-knowledge` | the serving template on the lifecycle (`serving-m10`) with knowledge search: `kernels` and `hardware`, their reference trees behind `knowledge:search`, which also searches KernelForge, KernelWiki and Arbor's notes (`arbor/knowledge/`); the sources synced at the campaign's start, the dossier's knowledge citations checked | `configs/serving-knowledge-template.json` (example) |
 | `balanced` | one large MoE model on vLLM, MI350X, TP8, 8k/1k at C32; every harness rule and five skills | its campaign's own |
 | `parallel-dossier` | parallel mode's map step | `configs/parallel/` (examples) |

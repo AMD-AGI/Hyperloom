@@ -156,6 +156,11 @@ def cmd_begin(args: argparse.Namespace) -> int:
         why = (session_dir / "STOP").read_text(errors="replace").strip() if (session_dir / "STOP").exists() else ""
         print(f"[arbor] Map: the campaign stops ({why or 'MAP_STOP.md'})", file=sys.stderr)
         return 0
+    if moved == "hand_back":
+        # The host's share is worked out (arbor run --exit-at-handover): the worker hands it back before an agent runs.
+        state.save(session_dir / "session.json")
+        print("[arbor] Map: every direction of the host's share is closed; the worker hands it back", file=sys.stderr)
+        return 0
     if moved == "round_end":
         # The map closed its round (arbor/rounds.py): the driver runs the A/B first.
         state.save(session_dir / "session.json")
@@ -166,6 +171,14 @@ def cmd_begin(args: argparse.Namespace) -> int:
         print("[arbor] Map: every direction closed; this iteration is a revisit", file=sys.stderr)
 
     levels = campaign.space.get("levels", [])
+    # A map round starts where its top-ranked direction works (arbor/directions.py), not at config by default.
+    key_before = state.map_tier_key
+    started = directions.start_tier(campaign, state, levels or None)
+    if started:
+        print(f"[arbor] Map: the round starts at tier {state.tier}, its top-ranked open direction's",
+              file=sys.stderr)
+    if started or state.map_tier_key != key_before:
+        state.save(session_dir / "session.json")
     escalation = state.check_escalation(levels)
     if escalation:
         state.apply_escalation(escalation)

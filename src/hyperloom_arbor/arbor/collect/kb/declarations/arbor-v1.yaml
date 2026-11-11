@@ -1,0 +1,157 @@
+# arbor-v1 (provisional name): Arbor campaigns in Hyperloom's Experience KB. One declaration for framework campaigns
+# (Arbor's harness loop on a serving pack: one Experience per iteration the gate ruled on, KEEP, REVERT, PROBE or
+# INVALID, the last gate row when there are several, as Overseer takes it) and kernel campaigns (the evolve-asm
+# orchestrator: one Experience per candidate the gate ruled on). Each field says which kind fills it; only fields
+# both kinds have are required, and the arbor-v1 mapping's require rules check what each kind must have. Kernel
+# fields are a draft not yet checked against a real evolve-asm run.
+#
+# Annotation rows (BASELINE, ESCALATE, NOTE, REBASELINE, MAP_ROUND, ROUND_END, ROUND_AB) are no Experience: each
+# stays verbatim in its owning iteration's manifest (arbor-iteration.json, a raw log), its text goes to the
+# Experience's notes, and iteration 0's BASELINE is baseline.campaign_baseline. An iteration is collected once a
+# campaign end follows it, so collecting again after a resume writes it unchanged.
+#
+# The objective and every identity field always form the repeat group; baseline.base_fingerprint and
+# change.change_fingerprint join it. Raw logs take no part in the schema_ref. A field still under review stays in
+# provenance.extra (metadata, never in a prompt, search or filter) until it is promoted by a later declaration.
+schema_version: 2
+
+objectives:
+  - id: output_throughput_per_gpu@v1
+    description: >-
+      Maximize output tokens per second per GPU on the campaign's serving benchmark, as the pack's validator/bench.sh
+      reports output_throughput in bench_output.json; a pack whose unit is tok/s/chip means the same. The reading is
+      outcome.output_throughput.
+    unit: tok/s/GPU
+    direction: higher_is_better
+  - id: total_throughput_per_gpu@v1
+    description: >-
+      Maximize total (input + output) tokens per second per GPU on the campaign's serving benchmark, as the pack's
+      validator/bench.sh reports total_throughput_per_gpu (or total_throughput with unit tok/s/GPU) in
+      bench_output.json. The reading is outcome.total_throughput_per_gpu.
+    unit: tok/s/GPU
+    direction: higher_is_better
+  - id: p50_interactivity@v1
+    description: >-
+      Maximize the median per-user decode rate on the campaign's serving benchmark (p50_interactivity in
+      bench_output.json). The reading is outcome.p50_interactivity.
+    unit: tok/s/user
+    direction: higher_is_better
+  - id: mean_interactivity@v1
+    description: >-
+      Maximize the mean per-user decode rate on the campaign's serving benchmark (mean_interactivity in
+      bench_output.json). The reading is outcome.mean_interactivity.
+    unit: tok/s/user
+    direction: higher_is_better
+  - id: weakest_us@v1
+    description: >-
+      Minimize a kernel's time on its evolve-asm task, in microseconds: the slowest of the bench's N runs
+      (weakest_us in the lineage). The reading is outcome.weakest_us. Draft.
+    unit: us
+    direction: lower_is_better
+
+identity:
+  - {name: gpu, required: true, description: "GPU model, short name, e.g. mi355x. Framework: the config's gpu_type, else the Arbor identity's third field, else the AgentX summary's hw; kernel: the task's GPU_ARCH_LIST."}
+  - {name: num_gpus, kind: number, required: true, description: "GPUs the campaign holds. Framework: the count of the config's gpu_ids; kernel: the task's gpus, one island per GPU."}
+  - {name: image, description: "Container image the iteration was measured on, by digest only (sha256:…), as the gate row's scope records it; absent rather than a tag. Framework campaigns must have it."}
+  - {name: model, description: "Model the campaign serves, the config's model_name, e.g. Qwen/Qwen3-8B. Framework."}
+  - {name: precision, description: "Weights' precision, server_env.PRECISION else the Arbor identity's fifth field, e.g. fp4. Framework."}
+  - {name: tp, kind: number, description: "Tensor parallel size, the config's tp. Framework."}
+  - {name: framework, description: "Serving framework, the config's framework, e.g. vllm, sglang. Framework."}
+  - {name: bench, description: "Benchmark, the Arbor identity's second field, e.g. agentx. Framework."}
+  - {name: conc, kind: number, description: "Concurrent requests the benchmark holds, the config's concurrency. Framework."}
+  - {name: kernel, description: "The evolve-asm task's task_id, e.g. <model>_moe_decode. Kernel; draft."}
+  - {name: op_class, description: "The task kernel's op_class, e.g. moe. Kernel; draft."}
+  - {name: kernel_lang, description: "The task kernel's kernel_lang, e.g. flydsl. Kernel; draft."}
+  - {name: shape, description: "The task kernel's primary shape, e.g. M<m>_N<n>_K<k>_E<experts>_top<k>. Kernel; draft."}
+  - {name: dtype_act, description: "Activation dtype of the primary shape, e.g. fp8_e4m3fn. Kernel; draft."}
+  - {name: dtype_w, description: "Weight dtype of the primary shape, e.g. fp4_e2m1. Kernel; draft."}
+  - {name: dtype_out, description: "Output dtype of the primary shape, e.g. bf16. Kernel; draft."}
+
+baseline:
+  - name: best_before
+    kind: number
+    description: >-
+      The bar the gate held the decision to, in the objective's unit (so no measurement role). Framework: Arbor's bar,
+      read from the campaign log's "[arbor] tier=… best=…" line, else the worker prompt's "- Best:" line, else
+      replayed from session.json lessons by CampaignState's rules (arbor/state.py). Kernel: the lineage's best_us.
+  - {name: campaign_baseline, kind: number, description: "The campaign's first measurement: session.json baseline (framework); the first measurement of the task's reference kernel (kernel)."}
+  - {name: base_tree, description: "The config's _base_tree note, present only when the campaign started from a tree other than the image's. Framework."}
+  - name: base_fingerprint
+    group: true
+    description: >-
+      What the decision was measured from. Framework: SHA-256 of canonical JSON of the launch server flags, each
+      earlier non-retracted KEEP's patch.diff SHA-256, base_tree, bench_sha256, replay_duration_s, dataset, scenario,
+      isl and osl. Kernel: the reference kernel and earlier KEEPs' sources (to be settled).
+  - {name: best_set_by, kind: number, description: "The iteration whose reading set the bar (replayed), 0 for the baseline measurement. Framework."}
+
+# Hyperloom adds reasoning, alternatives and preconditions; only reasoning is written: the ASSUMPTION and UNKNOWN
+# ledger records the iteration wrote, last row per id, each as "TYPE id [status]: claim" with its Evidence,
+# Instrument, Falsifier and Revisit if lines.
+rationale:
+  - {name: roadmap_items, many: true, description: "The […] tags at the head of the DONE line, as Overseer's Roadmap card reads them. Framework."}
+  - {name: directions, many: true, search: 2, description: "Direction ids at the head of the DONE line that the campaign's directions.json has, e.g. m-moe-experts. Framework."}
+
+change:
+  - name: summary
+    kind: text
+    role: summary
+    search: 4
+    description: >-
+      What changed. Framework: the lesson's change (the worker's DONE line), Arbor's "iteration N (agent error: …)"
+      placeholder left out (the error goes to outcome.reason); kernel: the lineage label or the island agent's stop
+      reason.
+  - name: tier
+    search: 1
+    description: >-
+      The escalation stage within the campaign. Framework: config, framework, kernel, feature (a serving campaign at
+      the kernel tier changes kernels and is still judged on its end-to-end objective); kernel: native, peer, asm,
+      crosskernel, algorithmic.
+  - {name: change_fingerprint, group: true, description: "Framework: SHA-256 of patch.diff, else of the DONE line; kernel: SHA-256 of the candidate's .s (to be settled)."}
+  - {name: intent, search: 1, description: "The lesson's intent (WIN, FIX, FIX-CORRECTNESS, FIX-STABILITY, LEARN), else the claim class through Arbor's aliases: B→WIN, A→FIX, A-CORRECTNESS→FIX-CORRECTNESS, A-STABILITY→FIX-STABILITY, PROBE→LEARN. Framework."}
+  - {name: patch, kind: file, description: "iter_N/patch.diff, the diff a KEEP committed. KEEP only. Framework."}
+  - {name: island, kind: number, description: "The candidate's island. Kernel; draft."}
+  - {name: generation, kind: number, description: "The candidate's generation. Kernel; draft."}
+  - {name: role, description: "The candidate's role within its island. Kernel; draft."}
+  - {name: source_code, kind: file, description: "The candidate's .s (IslandDB s_path). Kernel; draft."}
+  - {name: binary, kind: file, description: "The candidate's .co (IslandDB co_path). Kernel; draft."}
+  - {name: parent_id, description: "The parent candidate's id (IslandDB parent_id). Kernel; draft."}
+
+outcome:
+  - name: decision
+    role: decision
+    values: [KEEP, REVERT, PROBE, INVALID, STOP]
+    description: "The gate's decision. Framework: the gate row (KEEP, REVERT, PROBE, INVALID); kernel: the lineage (KEEP, REVERT, STOP)."
+  - {name: delta_pct, kind: number, description: "The objective's reading against best_before, in percent."}
+  - {name: reason, kind: text, description: "The gate's reason: the gate row's reason, else the campaign log's '[arbor] Gate:' line, else the agent error (framework); the lineage reason (kernel)."}
+  - name: output_throughput
+    kind: number
+    role: measurement
+    description: >-
+      Output tokens per second per GPU (bench_output.json). The measurement the KB's list summary and Repeat Group
+      statistics read for now, whatever the campaign's objective; the objective's own reading is in its own field.
+      Framework.
+  - {name: total_throughput_per_gpu, kind: number, description: "Total tokens per second per GPU (bench_output.json). Framework."}
+  - {name: p50_interactivity, kind: number, description: "Median per-user decode rate, tok/s/user (bench_output.json). Framework."}
+  - {name: p90_interactivity, kind: number, description: "90th-percentile per-user decode rate (bench_output.json). Framework."}
+  - {name: mean_interactivity, kind: number, description: "Mean per-user decode rate (bench_output.json). Framework."}
+  - {name: p50_ttft_s, kind: number, description: "Median time to first token, seconds (the AgentX summary's request_metrics.latency.ttft.p50). Framework."}
+  - {name: p90_ttft_s, kind: number, description: "90th-percentile time to first token, seconds (bench_output.json). Framework."}
+  - {name: p90_tpot_s, kind: number, description: "90th-percentile time per output token, seconds (bench_output.json). Framework."}
+  - {name: kv_cache_hit_rate, kind: number, description: "KV cache hit rate (bench_output.json kv_cache_hit_rate). Framework."}
+  - {name: booked, kind: boolean, description: "The gate row's booked: the KEEP moved the bar. Framework."}
+  - {name: frontier, kind: boolean, description: "The gate row's frontier: the KEEP traded one axis for the other. Framework."}
+  - {name: correctness_passed, kind: boolean, description: "iter_N/correctness_output.json passed. Framework."}
+  - {name: correctness_score, kind: number, description: "iter_N/correctness_output.json score. Framework."}
+  - {name: wall_s, kind: number, description: "The gate row's wall_s, the iteration's wall time in seconds. Framework."}
+  - {name: weakest_us, kind: number, description: "The lineage's weakest_us, microseconds. Kernel; draft."}
+  - {name: median_us, kind: number, description: "The lineage's median_us, microseconds. Kernel; draft."}
+  - {name: roofline_frac, kind: number, description: "The lineage's roofline_frac, 0 to 1; STOP at 0.85. Kernel; draft."}
+  - {name: vgpr, kind: number, description: "The bench's sig vgpr. Kernel; draft."}
+  - {name: barriers, kind: number, description: "The bench's sig barriers. Kernel; draft."}
+  - {name: spills, kind: number, description: "The bench's sig spills. Kernel; draft."}
+  - {name: mfma, kind: number, description: "The bench's sig mfma. Kernel; draft."}
+
+reflection:
+  - {name: findings, kind: text, many: true, search: 1.5, description: "The FACT and DEAD_END ledger records the iteration wrote, last row per id, with their evidence and instrument. Framework."}
+  - {name: critic, kind: text, description: "The critic's verdict: the campaign log's '[arbor] Critic:' line, else 'critic override: …' in the lesson's reason. Framework."}
+  - {name: tried_approaches, kind: text, many: true, description: "analysis.json tried_approaches. Kernel; draft."}

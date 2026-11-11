@@ -57,6 +57,47 @@ def _gpu_ids(value) -> list[int] | None:
     return ids or None
 
 
+def _mask(env, *names: str) -> list[int] | None | bool:
+    """The first of ``names`` set in ``env``, as a list of card numbers; None when none is set; False when it holds
+    something else (a UUID), which no number maps to."""
+    for name in names:
+        value = str(env.get(name) or "").strip()
+        if value:
+            items = [x.strip() for x in value.split(",") if x.strip()]
+            return [int(x) for x in items] if all(x.isdigit() for x in items) else False
+    return None
+
+
+def physical_gpu_ids(gpu_ids, env=None) -> list[int] | None:
+    """``gpu_ids`` as rocm-smi numbers the node's cards (``GPU[n]``), under the device masks in ``env`` (this
+    process's environment by default), which a host sets for the server; None when they cannot be mapped.
+
+    rocm-smi lists every card of the node whatever the masks. A process sees the cards ROCR_VISIBLE_DEVICES leaves,
+    numbered from 0, and HIP_VISIBLE_DEVICES (or CUDA_VISIBLE_DEVICES) picks among those. A host may give its lease
+    either way: as the cards' own numbers (they are among the cards the masks leave, and stay as they are), or as the
+    process's device numbers, from 0, which are mapped (Hyperloom's: ROCR_VISIBLE_DEVICES=2,3 with ids 0,1 is cards
+    2 and 3). Read as card numbers, a second lease on a node would read the first's cards, busy with its bench,
+    and book its candidates NOT MEASURED. Without masks the ids are the cards'."""
+    ids = _gpu_ids(gpu_ids)
+    if ids is None:
+        return None
+    import os
+    env = os.environ if env is None else env
+    outer = _mask(env, "ROCR_VISIBLE_DEVICES")
+    inner = _mask(env, "HIP_VISIBLE_DEVICES", "CUDA_VISIBLE_DEVICES")
+    if outer is None and inner is None:
+        return ids
+    if outer is False or inner is False:
+        return None
+    visible = outer if inner is None else (inner if outer is None else
+                                           [outer[i] for i in inner if 0 <= i < len(outer)])
+    if all(i in visible for i in ids):
+        return ids
+    if all(0 <= i < len(visible) for i in ids):
+        return [visible[i] for i in ids]
+    return None
+
+
 def gpu_vram_used(gpu_ids: list[int] | str | None = None) -> dict[int, int]:
     """GPU VRAM used in GB, keyed by GPU index; ``gpu_ids`` in either form a config writes."""
     gpu_ids = _gpu_ids(gpu_ids)

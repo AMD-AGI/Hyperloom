@@ -96,8 +96,12 @@ VERSION = 2
 
 KINDS = ("increment", "rewrite")
 LANES = ("increment", "kernel-plan", "architectural", "upstream")
-# The v2 fields, kept wherever a direction is copied.
-LANE_KEYS = ("lane", "plan", "depends_on", "nodes", "upstream", "reopens", "ops")
+# The v2 fields, and the tier, kept wherever a direction is copied.
+LANE_KEYS = ("lane", "plan", "depends_on", "nodes", "upstream", "reopens", "ops", "tier")
+#: The tier a direction works at, as the ladder names them (arbor/state.py's DEFAULT_LEVELS): ``config`` a flag or an
+#: environment variable, ``framework`` the served tree's source, ``kernel`` a kernel or its tuning tables, ``feature``
+#: what the stack lacks. A map round starts at its top-ranked open direction's tier (``start_tier``).
+TIERS = ("config", "framework", "kernel", "feature")
 #: A direction's ``ops``: the op names it targets, as the host's profile names them (the keys of ``shares`` in
 #: ``component.profile``), so a host matches its op shares to directions exactly.
 MAX_OPS = 40
@@ -204,6 +208,11 @@ def _entry(raw, listed: bool) -> tuple[dict | None, str | None]:
             pass
     if raw.get("ceiling") is not None:
         e["ceiling"] = str(raw["ceiling"]).strip()[:60]
+    if raw.get("tier") is not None and str(raw["tier"]).strip():
+        tier = str(raw["tier"]).strip().lower()
+        if tier not in TIERS:
+            return None, f"{did}: tier {raw['tier']!r} is not one of {', '.join(TIERS)}"
+        e["tier"] = tier
     err = _lane_fields(raw, e, did)
     return (None, err) if err else (e, None)
 
@@ -446,6 +455,45 @@ def is_lane(doc: dict | None) -> bool:
     return bool(doc) and doc.get("scope") == "lane"
 
 
+#: ``arbor run --exit-at-handover`` (arbor/driver.py), while a worker's stretch runs: a lane whose directions are all
+#: closed goes back to the host that dealt it (the worker's report, ``reported``), so it can deal the branch its next
+#: share, instead of closing (``LANE_CLOSED.json`` and a STOP). At the master's turn it closes as before.
+_HAND_BACK = [False]
+
+
+class lane_hands_back:
+    """``with directions.lane_hands_back(): ...``: a worked-out lane is handed back, not closed, inside the block."""
+
+    def __enter__(self):
+        self._old, _HAND_BACK[0] = _HAND_BACK[0], True
+        return self
+
+    def __exit__(self, *exc):
+        _HAND_BACK[0] = self._old
+        return False
+
+
+def hands_back(doc: dict | None) -> bool:
+    """True when ``doc`` is a lane worked out while a stretch hands it back (``lane_hands_back``)."""
+    return _HAND_BACK[0] and is_lane(doc) and doc.get("phase") == "active" and exhausted(doc)
+
+
+def deal_into_lane(root, doc: dict, entries: list[dict], at: int) -> list[str]:
+    """``entries`` (a host's plan) that the lane does not hold yet, added open from iteration ``at``: a host that deals
+    its map share by share relaunches a branch with its next share. The ids added."""
+    have = {d.get("id") for d in doc.get("directions") or []}
+    new = [e for e in entries if e.get("id") not in have]
+    for e in new:
+        doc["directions"].append({**e, "status": OPEN, "why": e.get("why", ""), "added_at": at, "closed_at": None,
+                                  "worked": [], "keeps": [], "flagged": False})
+    if new:
+        lane = doc.get("lane") or {}
+        lane["direction"] = f"{len(doc['directions'])} directions"
+        doc["lane"] = lane
+        save(root, doc)
+    return [e["id"] for e in new]
+
+
 def dur(seconds) -> str:
     """3h05m, 42m, 50s; an empty string when unknown."""
     if not isinstance(seconds, (int, float)) or seconds <= 0:
@@ -544,6 +592,41 @@ def current(campaign, state=None) -> dict | None:
     if is_lane(doc):
         return doc   # seeded on purpose: on whatever the pack's skills and workload
     return doc if enabled(campaign, state) else None
+
+
+def start_tier(campaign, state, levels=None) -> str | None:
+    """At a map round's start (the first map, each new round, a rewrite round, a seeded lane), the campaign starts at
+    the tier its top-ranked open direction works at: ``state.apply_map_tier``, up or down the ladder. The tier applied,
+    or None.
+
+    Once per round (``state.map_tier_key``), so a resume does not set it again and a direction ranked first later in
+    the round does not move it. Without a map, or when the top direction names no tier (or one the pack's ladder
+    lacks), the tier stays where it is. Before this, every campaign started at config, whatever its map ranked first:
+    a map led by a kernel's tables still spent its first iterations on flags.
+    """
+    doc = current(campaign, state)
+    if not doc or doc.get("phase") != "active" or not doc.get("map_round"):
+        return None
+    key = f"{doc.get('map_round')}@{doc.get('round_started_ts')}"
+    if getattr(state, "map_tier_key", "") == key:
+        return None
+    state.map_tier_key = key
+    live = [d for d in doc.get("directions") or [] if d.get("status") == OPEN]
+    if not live:
+        return None
+    pos = {d["id"]: k for k, d in enumerate(live)}
+    top = next((d for d in live if d["id"] == doc.get("rewrite")), None) or min(
+        live, key=lambda d: (d["rank"] if isinstance(d.get("rank"), int) else 999, pos[d["id"]]))
+    tier = top.get("tier")
+    if not tier:
+        return None
+    ladder = list(levels or TIERS)
+    if tier not in ladder:
+        print(f"[arbor] map: {top['id']}'s tier {tier!r} is not on this pack's ladder ({', '.join(ladder)}); the "
+              f"tier stays {state.tier}", file=sys.stderr)
+        return None
+    state.apply_map_tier(tier, top["id"], key)
+    return tier
 
 
 # ── the state of the map ──────────────────────────────────────────────────────
@@ -1165,6 +1248,9 @@ def _advance_lane(campaign, state, root: Path, doc: dict) -> str | None:
                   file=sys.stderr)
     reconcile(doc, state.lessons, knob("map_worked_flag", campaign, state))
     if exhausted(doc):
+        if _HAND_BACK[0]:
+            save(root, doc)
+            return "hand_back"
         return _lane_close(state, root, doc)
     save(root, doc)
     return None
@@ -1500,7 +1586,7 @@ def _check_lanes(dirs: list[dict], dossier: Path) -> int:
 
 # What a share keeps of a direction: what component.plan reads; status and closing fields go.
 SHARE_KEYS = ("id", "kind", "title", "why", "rank", "ceiling", "lane", "plan", "depends_on",
-              "nodes", "upstream", "ops")
+              "nodes", "upstream", "ops", "tier")
 
 
 def split(dirs: list[dict], shares: int) -> list[list[dict]]:
