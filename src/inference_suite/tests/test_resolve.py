@@ -210,6 +210,32 @@ def test_a_frozen_base_as_user_file_keeps_its_digest_under_the_new_query():
     assert base.source == frozen.source
 
 
+def _frozen_user_file(frozen: BaseLaunch) -> SourceSnapshot:
+    user_file = parse_user_file("base_launch.json", json.dumps(frozen.to_document()).encode(), framework="sglang")
+    return dataclasses.replace(_snapshot(), user_file=user_file)
+
+
+@pytest.mark.parametrize(
+    ("query", "named"),
+    [
+        (_fixed("Qwen/Qwen3-8B"), "model 'deepseek-ai/DeepSeek-R1-0528', but the session asks for 'Qwen/Qwen3-8B'"),
+        (_agentx(_DSR1), "workload 'fixed', but the session asks for 'agentx'"),
+        (_fixed(board="mi300x"), "board 'mi355x', but the session asks for 'mi300x'"),
+        (_fixed(framework="vllm"), "framework 'sglang', but the session asks for 'vllm'"),
+    ],
+)
+def test_a_frozen_base_resolved_for_another_session_is_a_miss_naming_both_values(query, named):
+    miss = _miss(query, _frozen_user_file(_base(_fixed())))
+
+    assert miss.reasons() == (f"user_file: base_launch.json was resolved for {named}",)
+
+
+def test_a_frozen_base_serves_a_board_interchangeable_with_its_own():
+    frozen = _base(_fixed())
+
+    assert _base(_fixed(board="mi350x"), _frozen_user_file(frozen)).digest() == frozen.digest()
+
+
 def test_a_shell_user_file_needing_more_gpus_than_the_session_sees_is_a_miss_naming_both():
     user_file = parse_user_file("launch.sh", b"python3 -m sglang.launch_server --tp 4\n", framework="sglang")
 

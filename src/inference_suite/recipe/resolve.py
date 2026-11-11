@@ -80,6 +80,7 @@ from inference_suite.recipe.model import (
     SourceGolden,
     SourceLaunch,
     SourceMiss,
+    boards_interchangeable,
 )
 from inference_suite.recipe.sglang_cookbook import sglang_cookbook_launches
 from inference_suite.recipe.user_file import UserFile
@@ -389,9 +390,26 @@ def _recipe_base(
     )
 
 
-def _user_file_base(query: LaunchQuery, snapshot: SourceSnapshot, user_file: UserFile) -> BaseLaunch:
+def _rebound(query: LaunchQuery, frozen: BaseLaunch, location: str) -> str | None:
+    """Why the base frozen in ``location`` cannot serve ``query``: it was resolved for another model, workload,
+    framework or a board not interchangeable with the query's."""
+    for what, was, asked in (
+        ("model", frozen.model.id, query.model_id),
+        ("workload", frozen.query.workload.value, query.workload.value),
+        ("framework", frozen.framework, query.framework),
+        ("board", frozen.query.board, query.board),
+    ):
+        if was != asked and not (what == "board" and boards_interchangeable(asked, was)):
+            return f"{location} was resolved for {what} {was!r}, but the session asks for {asked!r}"
+    return None
+
+
+def _user_file_base(query: LaunchQuery, snapshot: SourceSnapshot, user_file: UserFile) -> BaseLaunch | Miss:
     """The operator's file as the base: a frozen base as it was resolved, a shell launch as it is written."""
     if isinstance(user_file.launch, BaseLaunch):
+        rebound = _rebound(query, user_file.launch, user_file.location)
+        if rebound is not None:
+            return Miss((SourceMiss(SourceKind.USER_FILE, rebound),))
         return dataclasses.replace(user_file.launch, query=query)
     shell = user_file.launch
     spelling = _carried(_TOPOLOGY.get(query.framework), f"{query.framework} topology spellings")
