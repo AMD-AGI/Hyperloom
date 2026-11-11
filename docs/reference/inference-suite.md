@@ -173,9 +173,12 @@ shared by several hosts as `<dir>/<staging key>` by rename. A round refuses with
 lists a file that is absent, changed or staged at another commit, or when an eval
 round finds no `lm_eval` installed in the Python that runs it.
 
-`install.sh` stages the cache at `INFERENCE_SUITE_TOOL_CACHE`, which defaults to
-`inference-suite-tools` under the dependency cache, and installs the pinned
-lm-eval into the Python rounds run under. `check` fails with `staging_missing`
+`install.sh <tool-cache-dir>` stages the cache at that directory and installs the pinned
+lm-eval into the Python rounds run under. lm-eval and its dependency tree come from the hash lock
+the sealed measurement runner installs, `requirements/runner.lock` (`runner-cpXY.lock` for a
+Python that has its own) of the Hyperloom source tree `install.sh` runs from: pip installs only
+distributions that lock pins, each matching a hash it lists, and a package installed from
+anywhere else than a source tree holding the lock refuses with `staging_missing`. `check` fails with `staging_missing`
 when the cache does not verify or that Python lacks the pinned lm-eval; `stage`
 without `--source` fetches nothing and installs lm-eval beside a cache that
 verifies. To stage or check by hand:
