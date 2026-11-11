@@ -34,7 +34,7 @@ from hyperloom_common.tests.shared_accounts import Accounts, other_accounts
 from hyperloom_multibranch import cli
 from hyperloom_multibranch.blackboard.codec import encode
 from hyperloom_multibranch.scheduling import hosted_run
-from hyperloom_multibranch.scheduling.budget import MB_CLOSE_GRACE_CAP_SECONDS
+from hyperloom_multibranch.scheduling.budget import MB_CLOSE_GRACE_CAP_SECONDS, FinalWork
 from hyperloom_multibranch.scheduling.layout import SessionLayout
 from hyperloom_multibranch.scheduling.settings import RunSettings
 from hyperloom_multibranch.tests.test_cli import (  # noqa: F401 - fixtures of the hosted entry
@@ -134,8 +134,9 @@ def test_a_restart_resumes_the_session_with_explore_capped_by_the_grant_the_firs
     [cap] = EXPLORE_CAPS
     stop = created + GRANT["max_runtime_sec"] - MB_CLOSE_GRACE_CAP_SECONDS
     assert cap is not None
-    assert cap(1500.0) == pytest.approx(
-        stop - hosted_run.GRANT_MARGIN_SECONDS - hosted_run.final_reserve_seconds(1500.0), abs=1.0
+    work = FinalWork(6000.0, 4500.0, 1500.0, 1)
+    assert cap(work) == pytest.approx(
+        stop - hosted_run.GRANT_MARGIN_SECONDS - hosted_run.final_reserve_seconds(work), abs=1.0
     ), "the grant counts from the run's creation, which the restart reads as the first start did"
 
 
