@@ -394,8 +394,10 @@ class DevLeases:
         return held is not None and held.busy()
 
     def waiting(self) -> frozenset[str]:
-        """The branches in line for a lease, whether or not one is held for them now."""
-        return frozenset(self._line)
+        """The branches in line for a lease, whether or not one is held for them now; one whose held slot lapsed has
+        left the line by :meth:`_offer`'s rule, even before ``_offer`` next runs to pass the slot on."""
+        now = self._clock()
+        return frozenset(branch for branch in self._line if self._holds.get(branch, math.inf) > now)
 
     async def reclaim(self, branch: str, reason: str) -> None:
         """Take back ``branch``'s lease, if it holds one or one is starting."""
