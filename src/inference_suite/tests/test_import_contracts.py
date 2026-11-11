@@ -42,7 +42,7 @@ INTERNAL = (
     "aiperf_patch",
 )
 HOST_IMPORTERS = ("hyperloom.consumer", "hyperloom_multibranch.consumer")
-#: The cross-module imports the package design relies on.
+#: The cross-module imports the package design relies on (dev plan 2.1 and 2.3).
 PLANNED_IMPORTS: dict[str, tuple[str, ...]] = {
     SUITE: (f"{SUITE}.run", f"{SUITE}.recipe"),
     f"{SUITE}.__main__": (f"{SUITE}.cli",),
@@ -161,7 +161,7 @@ def test_upward_or_same_layer_import_breaks(tmp_path: Path, importer: str, impor
     assert "Contracts: 0 kept, 1 broken." in output, output
 
 
-#: What a host resolving a base launch imports, all of it from the package root.
+#: What a host resolving a base launch imports, all of it from the package root (dev plan 2.1 and 4.1).
 ROOT_NAMES = ("LaunchQuery", "Miss", "SourceSnapshot", "fetch_sources", "resolve_base")
 
 

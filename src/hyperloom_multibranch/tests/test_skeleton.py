@@ -29,8 +29,7 @@ from collections.abc import Awaitable, Callable, Iterator, Mapping, Sequence
 from dataclasses import dataclass, field, replace
 from datetime import datetime
 from pathlib import Path
-from types import ModuleType
-from typing import TYPE_CHECKING, Any, NoReturn
+from typing import Any, NoReturn
 
 import pytest
 
@@ -223,24 +222,12 @@ from hyperloom_multibranch.scheduling.review import (
     REVIEW_SKIPPED,
 )
 from hyperloom_multibranch.scheduling.settings import DOSSIER_MINUTES
+from hyperloom_multibranch.specialist import autonomous_session
 from hyperloom_multibranch.specialist.arbor_adapter import MAPPED, SplitFailed
 from hyperloom_multibranch.specialist.directions import DIRECTIONS
+from hyperloom_multibranch.specialist.dossier_pass import DossierOutcome, DossierPass, DossierStart
 from hyperloom_multibranch.specialist.prompts import prompt_versions
 from hyperloom_multibranch.specialist.runtime import MAX_LOSS_RESTARTS, SessionCrashed
-
-if TYPE_CHECKING:
-    from hyperloom_multibranch.specialist.dossier_pass import DossierOutcome, DossierPass, DossierStart
-
-
-def _specialist_module(name: str) -> ModuleType:
-    """The specialist package's module ``name``, which a test that maps or runs an Arbor share needs; the test is
-    skipped while the package has no such module."""
-    return pytest.importorskip(f"hyperloom_multibranch.specialist.{name}")
-
-
-def _dossier_outcome() -> type[DossierOutcome]:
-    return _specialist_module("dossier_pass").DossierOutcome
-
 
 START = 1_700_000_000.0
 CONC = 16
@@ -598,11 +585,8 @@ class Stage:
         await then(branch, head)
 
     async def run(self) -> SessionOutcome:
-        """Run the session, its image check answered by ``image_check`` instead of this environment; a session with
-        autonomous agents maps and runs them on the specialist's map and autonomous sessions."""
+        """Run the session, its image check answered by ``image_check`` instead of this environment."""
 
-        for module in ("map_session", "autonomous_session") if self.settings.agents else ():
-            _specialist_module(module)
         with self._polls_on_virtual_time() as patch:
             patch.setattr(lifecycle, "run_image_check", self.image_check)
             return await self._session().run()
@@ -1076,6 +1060,15 @@ async def test_the_agent_port_of_the_run_reaches_the_peers(tmp_path: Path) -> No
     stage._session()
 
     assert stage.setup.agent_port == 32100
+
+
+async def test_the_inferencex_commit_of_the_run_reaches_the_peers(tmp_path: Path) -> None:
+    stage = _stage(tmp_path)
+    stage.settings = replace(stage.settings, inferencex_commit="8a76a78e41")
+
+    stage._session()
+
+    assert stage.setup.inferencex_commit == "8a76a78e41"
 
 
 @pytest.mark.parametrize(("review_gate", "handed"), [(True, "host"), (False, "off")])
@@ -2375,7 +2368,6 @@ PASS_SECONDS = 600.0
 async def test_without_a_map_two_arbors_split_the_map_of_the_session_s_dossier_pass(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    outcome = _dossier_outcome()
     asked: list[tuple[str, OpShares | None]] = []
     started: list[DossierStart] = []
 
@@ -2388,7 +2380,7 @@ async def test_without_a_map_two_arbors_split_the_map_of_the_session_s_dossier_p
     async def dossier(start: DossierStart) -> DossierOutcome:
         started.append(start)
         await stage.time.sleep(PASS_SECONDS)
-        return outcome(Path("/pass/directions.json"), Path("/pass/docs/dossier/qwen3-8b"), MAPPED)
+        return DossierOutcome(Path("/pass/directions.json"), Path("/pass/docs/dossier/qwen3-8b"), MAPPED)
 
     monkeypatch.setattr(lifecycle, "agent_plans", split)
     monkeypatch.setattr(lifecycle, "arbor_agents", _two_arbors)
@@ -2431,7 +2423,6 @@ async def test_without_a_map_two_arbors_split_the_map_of_the_session_s_dossier_p
 async def test_a_dossier_pass_with_no_map_or_no_minutes_leaves_the_split_to_the_generic_map(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, minutes: float
 ) -> None:
-    outcome = _dossier_outcome()
     asked: list[str] = []
     started: list[DossierStart] = []
 
@@ -2443,7 +2434,7 @@ async def test_a_dossier_pass_with_no_map_or_no_minutes_leaves_the_split_to_the_
 
     async def dossier(start: DossierStart) -> DossierOutcome:
         started.append(start)
-        return outcome(None, None, "it refused its config: the pack has no dossier skill")
+        return DossierOutcome(None, None, "it refused its config: the pack has no dossier skill")
 
     monkeypatch.setattr(lifecycle, "agent_plans", split)
     monkeypatch.setattr(lifecycle, "arbor_agents", _two_arbors)
@@ -2481,13 +2472,12 @@ def _pass_wrote(tmp_path: Path) -> tuple[Path, Path]:
 async def test_a_run_that_stops_after_its_map_maps_one_arbor_keeps_map_and_dossier_and_opens_no_branch(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    outcome = _dossier_outcome()
     map_file, dossier = _pass_wrote(tmp_path)
     started: list[DossierStart] = []
 
     async def mapping(start: DossierStart) -> DossierOutcome:
         started.append(start)
-        return outcome(map_file, dossier, MAPPED)
+        return DossierOutcome(map_file, dossier, MAPPED)
 
     monkeypatch.setattr(lifecycle, "arbor_agents", _one_arbor)
     stage = _stage(tmp_path)
@@ -2521,12 +2511,11 @@ async def test_a_run_that_stops_after_its_map_maps_one_arbor_keeps_map_and_dossi
 async def test_a_run_that_stops_after_its_map_keeps_a_map_generated_from_the_root_when_the_pass_set_none(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    outcome = _dossier_outcome()
     generated = tmp_path / "generated-directions.json"
     generated.write_text(json.dumps({"directions": [{"id": "m-gemm"}]}))
 
     async def mapping(_start: DossierStart) -> DossierOutcome:
-        return outcome(None, None, "it set no map by its deadline and was stopped")
+        return DossierOutcome(None, None, "it set no map by its deadline and was stopped")
 
     async def generate(*_args: object) -> Path:
         return generated
@@ -2552,10 +2541,9 @@ async def test_a_run_that_stops_after_its_map_keeps_a_map_generated_from_the_roo
 async def test_a_run_that_stops_after_its_map_and_gets_none_fails_with_why_and_keeps_nothing(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    outcome = _dossier_outcome()
 
     async def mapping(_start: DossierStart) -> DossierOutcome:
-        return outcome(None, None, "it refused its config: the pack has no dossier skill")
+        return DossierOutcome(None, None, "it refused its config: the pack has no dossier skill")
 
     async def generate(*_args: object) -> Path:
         raise SplitFailed("the root has no shares to generate a map from")
@@ -2625,8 +2613,6 @@ def _review_steps(stage: Stage) -> list[str]:
 def _two_arbors_reviewed(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, read: list[str]) -> tuple[Stage, Path, Path]:
     """A session of two Arbors with the review on, whose dossier pass writes a map and a dossier; the split records
     the map's text as it reads it."""
-
-    outcome = _dossier_outcome()
     map_file, dossier = _pass_wrote(tmp_path)
 
     async def split(
@@ -2636,7 +2622,7 @@ def _two_arbors_reviewed(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, read: 
         return ("/shares/share-1.json", "/shares/share-2.json")
 
     async def mapping(_start: DossierStart) -> DossierOutcome:
-        return outcome(map_file, dossier, MAPPED)
+        return DossierOutcome(map_file, dossier, MAPPED)
 
     monkeypatch.setattr(lifecycle, "agent_plans", split)
     monkeypatch.setattr(lifecycle, "arbor_agents", _two_arbors)
@@ -2731,7 +2717,7 @@ async def test_a_review_decided_after_its_clock_ran_out_opens_no_share_and_says_
     stage, _map_file, _dossier = _two_arbors_reviewed(tmp_path, monkeypatch, read)
     stage.settings = replace(stage.settings, agent_share_minutes=2.0)
     # No margin before EXPLORE's end: a share opened at any time would run until it, so the clock is EXPLORE's alone.
-    monkeypatch.setattr(_specialist_module("autonomous_session"), "collection_margin", lambda _records, _floor: 0.0)
+    monkeypatch.setattr(autonomous_session, "collection_margin", lambda _records, _floor: 0.0)
 
     async def late() -> dict[str, Any]:
         open_by = await _open_by(stage)
@@ -2764,7 +2750,6 @@ async def test_without_the_review_gate_two_arbors_split_their_map_at_once_and_th
 async def test_with_the_review_on_one_arbor_gets_the_map_step_and_takes_the_reviewed_map_whole(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    outcome = _dossier_outcome()
     map_file, dossier = _pass_wrote(tmp_path)
     asked: list[tuple[tuple[str, ...], str]] = []
 
@@ -2775,7 +2760,7 @@ async def test_with_the_review_on_one_arbor_gets_the_map_step_and_takes_the_revi
         return ("/shares/share-1.json",)
 
     async def mapping(_start: DossierStart) -> DossierOutcome:
-        return outcome(map_file, dossier, MAPPED)
+        return DossierOutcome(map_file, dossier, MAPPED)
 
     monkeypatch.setattr(lifecycle, "agent_plans", split)
     monkeypatch.setattr(lifecycle, "arbor_agents", _one_arbor)
@@ -2827,11 +2812,10 @@ async def test_a_run_that_stops_after_its_map_does_not_pause_even_with_the_revie
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     # Its stop is the review point: the map is kept and reviewed offline, across the points.
-    outcome = _dossier_outcome()
     map_file, dossier = _pass_wrote(tmp_path)
 
     async def mapping(_start: DossierStart) -> DossierOutcome:
-        return outcome(map_file, dossier, MAPPED)
+        return DossierOutcome(map_file, dossier, MAPPED)
 
     monkeypatch.setattr(lifecycle, "arbor_agents", _one_arbor)
     stage = _stage(tmp_path)
