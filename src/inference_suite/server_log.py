@@ -3,9 +3,8 @@
 
 """What a serving framework's ``server.log`` says: ready, dead, generating, and where a round's client phases begin.
 
-The marker tables here are the only copies; a reader that needs one imports it. :class:`LogCursor` follows the
-logs a round writes beside ``server.log`` incrementally, and :func:`death_excerpt` pulls the line that names why an
-engine died.
+:class:`LogCursor` follows the logs a round writes beside ``server.log`` incrementally, and :func:`death_excerpt` pulls
+the line that names why an engine died.
 """
 
 from __future__ import annotations
