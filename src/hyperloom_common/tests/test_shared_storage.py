@@ -73,10 +73,10 @@ def test_a_new_shared_file_is_664_whatever_the_umask_and_one_already_there_is_re
     old.chmod(0o600)
     (shared / "the-old-inode").hardlink_to(old)
     _here(
-        "from hyperloom_common.shared_storage import create_shared_file, write_shared_bytes\n"
+        "from hyperloom_common.shared_storage import write_shared_bytes\n"
         "from pathlib import Path\n"
-        f"create_shared_file(Path({str(shared / 'new.log')!r}))\n"
-        f"create_shared_file(Path({str(old)!r}))\n"
+        f"write_shared_bytes(Path({str(shared / 'new.log')!r}), b'')\n"
+        f"write_shared_bytes(Path({str(old)!r}), b'')\n"
         f"write_shared_bytes(Path({str(shared / 'launch.sh')!r}), b'#!/bin/sh', mode=0o775)\n",
         umask=0o077,
     )
@@ -602,11 +602,9 @@ def _planted(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> tuple[Path, Pat
     "write",
     [
         "write_shared_bytes(target, b'theirs')",
-        "write_shared_text(target, 'theirs')",
         "copy_shared_file(source, target)",
         "os.close(open_shared_replacement(target))",
         "os.close(create_new_shared_file(target.with_name('new.json')))",
-        "create_shared_file(target.with_name('new.json'))",
         "with replace_shared_file(target) as handle: handle.write(b'theirs')",
         "make_shared_dirs(target.with_name('new'))",
         "atomic_write_json(target, {}, options=WriteOptions(shared=True, make_parents=True))",
@@ -756,7 +754,7 @@ def test_past_a_link_of_this_accounts_own_the_way_of_its_target_decides_what_is_
 
 # -- shared only where the storage is set up to be shared -----------------------------------------------------------
 _EVERY_HELPER = """
-import json, os, stat, tempfile
+import json, os, stat
 from pathlib import Path
 from hyperloom_common.io import WriteOptions, atomic_write_text
 from hyperloom_common import shared_storage as s
@@ -764,12 +762,11 @@ parent = Path({parent!r})
 s.make_shared_dirs(parent / "chain" / "a" / "b")
 s.make_shared_dirs(parent / "existing" / "below")
 s.make_shared_dirs(parent / "archive", mode=0o2770)
-s.share_new_directory(Path(tempfile.mkdtemp(prefix="made-", dir=parent)))
-s.create_shared_file(parent / "new.log")
-s.create_shared_file(parent / "old.log")
+s.write_shared_bytes(parent / "new.log", b"")
+s.write_shared_bytes(parent / "old.log", b"")
 s.write_shared_bytes(parent / "bytes", b"x")
 s.write_shared_bytes(parent / "credential", b"secret", mode=0o600)
-s.write_shared_text(parent / "text", "x")
+s.write_shared_bytes(parent / "text", b"x")
 os.close(s.open_shared_replacement(parent / "replacement.log"))
 os.close(s.create_new_shared_file(parent / "segment.jsonl"))
 s.copy_shared_file(parent / "text", parent / "copy")
@@ -789,11 +786,7 @@ def _every_helper_under(parent: Path, *, umask: int) -> dict[str, int]:
     (parent / "old.log").write_text("old")
     (parent / "old.log").chmod(0o640)
     (parent / "the-old-inode").hardlink_to(parent / "old.log")
-    modes = json.loads(_here(_EVERY_HELPER.format(parent=str(parent)), umask=umask))
-    made = [name for name in modes if name.startswith("made-")]
-    assert len(made) == 1, modes
-    modes["made"] = modes.pop(made[0])
-    return modes
+    return json.loads(_here(_EVERY_HELPER.format(parent=str(parent)), umask=umask))
 
 
 @pytest.mark.parametrize("umask", [0o022, 0o077])
@@ -813,7 +806,6 @@ def test_below_a_setgid_group_writable_directory_every_helper_widens_whatever_th
         "io": 0o2775,
         "io/a": 0o2775,
         "io/a/state.json": 0o664,
-        "made": 0o2775,
         "new.log": 0o664,
         "old.log": 0o664,
         "replacement.log": 0o664,
@@ -851,7 +843,6 @@ def test_anywhere_else_every_helper_leaves_what_it_makes_to_the_umask(tmp_path, 
         "io": directory,
         "io/a": directory,
         "io/a/state.json": 0o600,
-        "made": 0o700 | inherited,
         "new.log": file,
         "old.log": file,
         "replacement.log": file,
@@ -875,11 +866,9 @@ def test_a_link_at_the_final_name_is_refused_or_replaced_never_followed(tmp_path
     (parent / "dir-link").symlink_to(elsewhere)
     (parent / "dangling").symlink_to(tmp_path / "nowhere")
     (parent / "file-link").symlink_to(elsewhere / "file")
-    with pytest.raises(OSError):
-        shared_storage.share_new_directory(parent / "dir-link")
     with pytest.raises(FileExistsError):
         make_shared_dirs(parent / "dangling")
-    shared_storage.create_shared_file(parent / "file-link")
+    shared_storage.write_shared_bytes(parent / "file-link", b"")
     assert not (parent / "file-link").is_symlink(), "the link itself is replaced by rename"
     with shared_storage.replace_shared_file(parent / "dir-link") as handle:
         handle.write(b"x")
@@ -1000,3 +989,25 @@ def test_a_child_gets_umask_002_and_a_mode_is_kept_as_asked_only_below_shared_st
     assert shared_storage.child_umask(parent) == (shared_storage.SHARED_CHILD_UMASK if widened else -1)
     expected = 0o664 if widened else 0o664 & ~shared_storage.current_umask()
     assert shared_storage.shared_mode(parent / "missing" / "file", 0o664) == expected, "judged at the nearest existing"
+
+
+@pytest.mark.parametrize(
+    ("mode", "shared"),
+    [(0o2775, True), (0o2755, False), (0o2777, False), (0o775, False)],
+    ids=["2775", "2755", "2777", "775"],
+)
+def test_a_directory_opened_without_following_a_link_is_shared_by_the_same_rule_as_a_child_s_umask(
+    tmp_path, mode, shared
+):
+    directory = tmp_path / "directory"
+    directory.mkdir()
+    directory.chmod(mode)
+    if mode & stat.S_ISGID and not directory.stat().st_mode & stat.S_ISGID:
+        pytest.skip("this filesystem does not keep the setgid bit for the test user")
+
+    descriptor = os.open(directory, os.O_PATH | os.O_DIRECTORY | os.O_NOFOLLOW)
+    try:
+        assert shared_storage.directory_is_shared(descriptor) is shared
+    finally:
+        os.close(descriptor)
+    assert (shared_storage.child_umask(directory) == shared_storage.SHARED_CHILD_UMASK) is shared
