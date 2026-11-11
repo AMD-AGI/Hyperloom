@@ -5,12 +5,24 @@
 
 from __future__ import annotations
 
+import os
 import stat
+from collections.abc import Iterator
+from contextlib import contextmanager
 
 import pytest
 
 from hyperloom.measure.hosted import STOPPED_RETURNCODE
 from hyperloom.measure.hosted_log import STATE_FINISHED, STATE_SUBMITTED, JournalCorrupt, MeasurementJournal, Record
+
+
+@contextmanager
+def _umask(mask: int) -> Iterator[None]:
+    previous = os.umask(mask)
+    try:
+        yield
+    finally:
+        os.umask(previous)
 
 
 def _record(request_id: str = "r1", attempt: int = 1, state: str = STATE_SUBMITTED, **extra) -> Record:
@@ -71,9 +83,21 @@ def test_the_stop_code_is_the_one_the_local_flow_uses() -> None:
 
 def test_the_journal_a_restarted_leg_re_attaches_from_is_the_group_s(tmp_path) -> None:
     tmp_path.chmod(0o2775)  # storage set up to be shared: setgid, group-writable, closed to others
-    journal = MeasurementJournal(tmp_path / "hosted")
-    journal.append(_record("a", 1))
+    with _umask(0o077):  # the umask does not narrow it there
+        journal = MeasurementJournal(tmp_path / "hosted")
+        journal.append(_record("a", 1))
 
     assert stat.S_IMODE(journal.path.stat().st_mode) == 0o664
     assert stat.S_IMODE((tmp_path / "hosted").stat().st_mode) == 0o2775
     assert stat.S_IMODE((tmp_path / "hosted" / "specs").stat().st_mode) == 0o2775
+
+
+@pytest.mark.parametrize("mask", [0o022, 0o002, 0o000], ids=["umask-022", "umask-002", "umask-000"])
+def test_off_shared_storage_the_journal_stays_owner_only_whatever_the_umask(tmp_path, mask) -> None:
+    tmp_path.chmod(0o755)  # not set up to be shared
+    with _umask(mask):
+        journal = MeasurementJournal(tmp_path / "hosted")
+        journal.append(_record("a", 1))
+        journal.append(_record("a", 2))
+
+    assert stat.S_IMODE(journal.path.stat().st_mode) == 0o600
