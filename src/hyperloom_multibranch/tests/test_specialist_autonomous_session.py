@@ -7,9 +7,10 @@ import json
 import os
 import select
 import signal
+import stat
 import subprocess
 import time
-from collections.abc import Awaitable, Callable
+from collections.abc import Awaitable, Callable, Mapping
 from dataclasses import asdict, replace, dataclass, field
 from pathlib import Path
 
@@ -35,8 +36,13 @@ from hyperloom_multibranch.contracts.blackboard.records import BaselineRecord, T
 from hyperloom_multibranch.blackboard import LocalBlackboard
 from hyperloom_multibranch.blackboard.local.blackboard import LEARNING_MAX_CHARS
 from hyperloom_multibranch.blackboard.tests.factories import result
-from hyperloom_multibranch.specialist import autonomous_session, keep_requeue, worktree as worktree_module
-from hyperloom_multibranch.specialist.agent_onboarding import OnboardingSetup
+from hyperloom_multibranch.specialist import (
+    arbor_adapter,
+    autonomous_session,
+    keep_requeue,
+    worktree as worktree_module,
+)
+from hyperloom_multibranch.specialist.agent_onboarding import SHIM_DIR, OnboardingSetup
 from hyperloom_multibranch.specialist.agent_spec import AgentSpec
 from hyperloom_multibranch.specialist.agent_session import BranchPlace
 from hyperloom_multibranch.specialist.agent_manifest import AgentManifest
@@ -75,6 +81,7 @@ from hyperloom_multibranch.tests.agent_rig import (
     LocalSandbox,
     Toolbox,
     _aiter,
+    _arbor_repo,
     _replayed,
     _until,
 )
@@ -273,10 +280,11 @@ async def _rig(
     aiter: Path | None = None,
     source: Path | None = None,
     least_run: float = 0.0,
+    spec_fields: Mapping[str, object] | None = None,
 ) -> Rig:
     """A session of the agent on :data:`BRANCH`, opened at the root, or at ``start`` committed onto it the way PRELUDE
     replays a Recipe KB champion; the agent's source is ``source``, or a repository holding :data:`AGENT` and
-    :data:`COMPONENT_AGENT`."""
+    :data:`COMPONENT_AGENT`, and its spec has ``spec_fields``."""
 
     rig = await branch_rig(tmp_path, ROOT, BRANCH)
     start_commit = rig.root if start is None else await rig.repo.commit(BRANCH, rig.root, start, "champion")
@@ -298,6 +306,7 @@ async def _rig(
         return sandbox
 
     spec = AgentSpec("/models/m", "vllm", 1, "fp8", "mi355x", {}, "output_throughput", "", {}, "", (), 60.0, 31100)
+    spec = replace(spec, **(spec_fields or {}))
 
     def spend_of(roots: tuple[Path, ...], ledger: Path) -> AgentSpend:
         return spend(tmp_path / "claude", roots, ledger, BRANCH, "claude-sonnet-5-5", sandbox.usage)
@@ -1609,6 +1618,54 @@ async def test_a_preflight_makes_the_branch_s_directories_the_group_s_only_on_sh
     assert len(modes) > 4 and modes == dict.fromkeys(modes, oct(0o664 if shared else 0o644))
 
 
+def _under_git(path: Path, names: tuple[str, ...]) -> bool:
+    parts = path.parts
+    return any(parts[i] == ".git" and parts[i + 1] in names for i in range(len(parts) - 1))
+
+
+@pytest.mark.parametrize("arbor", [False, True], ids=["agent", "arbor"])
+async def test_a_preflight_below_shared_storage_leaves_the_group_write_on_all_it_made_but_git_s_own_files(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, arbor: bool
+) -> None:
+    tmp_path.chmod(0o2775)
+    previous = os.umask(0o022)
+    try:
+        given: dict[str, object] = {}
+        if arbor:
+            monkeypatch.setattr(arbor_adapter, "INSTALL", ())
+            plan, dossier = tmp_path / "plan.json", tmp_path / "dossier" / "d1"
+            plan.write_text(json.dumps({"directions": ["fuse the decode norm"]}))
+            dossier.mkdir(parents=True)
+            (dossier / "index.md").write_text("# dossier\n")
+            source = _arbor_repo(tmp_path, Component(keeps=(), tail=0.6))
+            given = {
+                "source": source,
+                "start_seconds": 0.2,
+                "spec_fields": {"plan": str(plan), "dossier": str(dossier)},
+            }
+        rig = await _rig(tmp_path, **given)
+        await rig.session.preflight()
+    finally:
+        os.umask(previous)
+    await rig.session.stop()
+
+    # Git writes every object read-only, and the docker shim is replaced by rename, never rewritten.
+    made = [
+        path
+        for path in (tmp_path / BRANCH).rglob("*")
+        if not path.is_symlink()
+        and not (path.is_file() and _under_git(path, ("objects",)))
+        and path != tmp_path / BRANCH / "session" / AGENT_DIR / SHIM_DIR / "docker"
+    ]
+    git = [path for path in made if _under_git(path, ("config", "hooks", "info"))]
+    base = tmp_path / "source" / ".git"
+    git += [base / "config", base / "info", *(base / "info").iterdir()]
+    private = [str(path) for path in made if path not in git and not path.stat().st_mode & stat.S_IWGRP]
+    widened = [str(path) for path in git if path.stat().st_mode & 0o022]
+    assert len(made) > 20 and len(git) > 6
+    assert private == [] and widened == []
+
+
 def _as_member(accounts: Accounts, uid: int, leg: Callable[[], Awaitable[None]]) -> str:
     """Run ``leg`` in a child process as ``uid`` of the accounts' group under umask ``022``: what it raised, or
     ``"finished"``."""
@@ -1636,12 +1693,22 @@ def _as_member(accounts: Accounts, uid: int, leg: Callable[[], Awaitable[None]])
 
 
 @pytest.mark.filterwarnings("ignore:This process .* is multi-threaded:DeprecationWarning")
-def test_another_account_of_the_group_resumes_a_branch_whose_files_a_first_leg_wrote_under_umask_022() -> None:
+@pytest.mark.parametrize("arbor", [False, True], ids=["agent", "arbor"])
+def test_another_account_of_the_group_resumes_a_branch_whose_files_a_first_leg_wrote_under_umask_022(
+    monkeypatch: pytest.MonkeyPatch, arbor: bool
+) -> None:
     with other_accounts() as accounts:
         tmp_path = accounts.shared_dir("run")
         blobs = LocalBlobStore(tmp_path / "blobs")
+        given: dict[str, object] = {"start": _replayed(blobs), "aiter": _aiter(tmp_path)}
+        if arbor:
+            monkeypatch.setattr(arbor_adapter, "INSTALL", ())
+            plan = tmp_path / "plan.json"
+            plan.write_text(json.dumps({"directions": ["fuse the decode norm"]}))
+            source = _arbor_repo(tmp_path, Component(keeps=(), exit=3, tail=0.6))
+            given |= {"source": source, "start_seconds": 0.2, "spec_fields": {"plan": str(plan)}}
         agent = Agent(keeps=(), exit=3, resume="exit 3")
-        rig = asyncio.run(_rig(tmp_path, agent, start=_replayed(blobs), aiter=_aiter(tmp_path)))
+        rig = asyncio.run(_rig(tmp_path, agent, **given))
 
         async def first_leg() -> None:
             # The integration head holds a kernel table, laid out below the notes, and moves once the first leg ends.
@@ -1666,6 +1733,7 @@ def test_another_account_of_the_group_resumes_a_branch_whose_files_a_first_leg_w
 
         async def resumed_leg() -> None:
             resumed = rig.restart()
+            await resumed.preflight()
             with pytest.raises(SessionCrashed, match="exited 3"):
                 await asyncio.wait_for(resumed.run(), 10)
             await resumed.stop()

@@ -14,12 +14,14 @@ against its head, a patch the toolbox applies where it applies every other.
 from __future__ import annotations
 
 import contextlib
+import errno
 import http.client
 import importlib.metadata
 import logging
 import os
 import re
 import shutil
+import stat
 import subprocess
 import tempfile
 import threading
@@ -101,6 +103,7 @@ _HEAD = "HEAD"
 _SYNCED = "refs/worktree/hyperloom/synced"
 _REV_PARSE = "rev-parse"
 _GIT_DIR = ".git"
+_INFO_DIR = "info"
 _QUIET = "--quiet"
 _DIFF = "diff"
 _CACHED = "--cached"
@@ -246,7 +249,8 @@ def _git(cwd: Path, *args: str, index: Path | None = None, common: Path | None =
     (``safe.directory``), as the leg that made it may be another account of the group. Either way no program the
     config names runs, and below shared storage git runs under umask ``002``
     (:func:`~hyperloom_common.shared_storage.child_umask`): what it makes -- a worktree, its files, the repository's
-    objects and refs -- is the group's, as the dev sandboxes and the run's next leg write it."""
+    objects and refs -- is the group's, as the dev sandboxes and the run's next leg write it, but for what
+    :func:`keep_git_files_own` keeps this account's."""
     pinned = _GIT_IDENTITY if index is None else {**_GIT_IDENTITY, "GIT_INDEX_FILE": str(index)}
     if common is not None:
         return _worktree_git(cwd, common, args, pinned)
@@ -361,9 +365,10 @@ class SourceBase:
             if native is not None:
                 self._lay_native(native.root, (package, *metas))
         git_dir = self.path / _GIT_DIR
-        (git_dir / "info").mkdir(exist_ok=True)
-        (git_dir / "info" / "exclude").write_text("".join(f"{line}\n" for line in excluded))
+        (git_dir / _INFO_DIR).mkdir(exist_ok=True)
+        (git_dir / _INFO_DIR / "exclude").write_text("".join(f"{line}\n" for line in excluded))
         (git_dir / LINKED_PATHS).write_text("".join(f"{prefix}\t{target}\n" for prefix, target in links))
+        keep_git_files_own(git_dir)
         _commit_all(self.path, BASE_BRANCH)
 
     def worktree(self, branch: str, path: Path) -> BranchWorktree:
@@ -414,6 +419,33 @@ class SourceBase:
 
 
 _DIRECTORY_FLAGS = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW
+#: What of a repository the app's git reads and obeys: never the group's to write, though git makes it under umask
+#: ``002`` below shared storage.
+OWN_GIT_ENTRIES = ("config", "hooks", _INFO_DIR)
+_NO_WRITE_BUT_OWNER = ~(stat.S_IWGRP | stat.S_IWOTH)
+
+
+def keep_git_files_own(git_dir: Path) -> None:
+    """Take the write of the group and of others from ``git_dir``'s :data:`OWN_GIT_ENTRIES` and all below them, which
+    this account just made; a link among them is left as it is, never followed."""
+    for name in OWN_GIT_ENTRIES:
+        _keep_own(git_dir / name)
+        for directory, subdirectories, files in os.walk(git_dir / name):
+            for entry in (*subdirectories, *files):
+                _keep_own(Path(directory) / entry)
+
+
+def _keep_own(path: Path) -> None:
+    try:
+        fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK | os.O_CLOEXEC)
+    except OSError as error:
+        if error.errno in (errno.ENOENT, errno.ELOOP):
+            return
+        raise
+    try:
+        os.fchmod(fd, stat.S_IMODE(os.fstat(fd).st_mode) & _NO_WRITE_BUT_OWNER)
+    finally:
+        os.close(fd)
 
 
 def _link(worktree: Path, prefix: PurePosixPath, target: str) -> None:
@@ -748,12 +780,14 @@ __all__ = [
     "SKIPPED",
     "THIRD_PARTY_COPY",
     "LINKED_PATHS",
+    "OWN_GIT_ENTRIES",
     "BranchWorktree",
     "Changes",
     "SourceBase",
     "Upstream",
     "WorktreeError",
     "installed_upstream",
+    "keep_git_files_own",
     "source_unkept",
     "linked_paths",
 ]

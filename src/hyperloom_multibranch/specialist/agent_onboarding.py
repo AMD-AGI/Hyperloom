@@ -28,9 +28,10 @@ The agent runs commands, not containers: a ``docker`` on its ``PATH`` (:data:`DO
 The agent's sandbox, this host and the next leg may be different accounts of one group, so what is made here for the
 agent is the group's below shared storage: directories ``2775``, files ``664`` (``775`` when executable) and replaced
 by rename, the shim among them, and git makes the checkout under umask ``002``; elsewhere the umask decides
-(:func:`~hyperloom_common.shared_storage.child_umask`). The checkout is then the agent's to write, its ``.git``
-included, so no git of this host obeys its config: no hook, fsmonitor, pager, external diff or filter driver of it runs
-(:mod:`~hyperloom_multibranch.repo.isolated_git`).
+(:func:`~hyperloom_common.shared_storage.child_umask`). Only the ``.git`` config, hooks and info of the checkout stay
+this account's (:func:`~hyperloom_multibranch.specialist.worktree.keep_git_files_own`). The checkout is then the
+agent's to write, its ``.git`` included, so no git of this host obeys its config: no hook, fsmonitor, pager, external
+diff or filter driver of it runs (:mod:`~hyperloom_multibranch.repo.isolated_git`).
 """
 
 from __future__ import annotations
@@ -75,6 +76,7 @@ from hyperloom_multibranch.specialist.arbor_adapter import (
     refused_reasons,
 )
 from hyperloom_multibranch.specialist.runtime import PreflightFailed
+from hyperloom_multibranch.specialist.worktree import keep_git_files_own
 
 ATTEMPTS = 3
 #: How long the next attempt waits after a failed one, and the first pause after one that met the gateway down.
@@ -377,7 +379,8 @@ async def fetch_source(source: str, checkout: Path) -> str:
     cloned."""
 
     tree = Path(source)
-    if not (checkout / GIT_DIR).exists() and tree.is_dir() and not await _is_repository_root(tree):
+    fetched = not (checkout / GIT_DIR).exists()
+    if fetched and tree.is_dir() and not await _is_repository_root(tree):
         await _commit_tree(tree, checkout)
     if not (checkout / GIT_DIR).exists():
         url, ref = split_source(source)
@@ -391,6 +394,8 @@ async def fetch_source(source: str, checkout: Path) -> str:
                 # Left in place, the clone would pass the next attempt on its default branch.
                 shutil.rmtree(checkout)
                 raise AttemptFailed(f"checking out {ref}: {tail(checked.output)}")
+    if fetched:
+        keep_git_files_own(checkout / GIT_DIR)
     head = await _checkout_git([GIT, REV_PARSE, "HEAD"], checkout)
     if head.returncode != 0:
         raise AttemptFailed(f"reading the commit of {checkout}: {tail(head.output)}")
