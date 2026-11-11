@@ -666,6 +666,12 @@ def init(address=None, **_kwargs):
 
 def shutdown():
     _note(f"shutdown {os.getpid()}")
+
+
+def cluster_resources():
+    # A head this stand-in answers for has GPUs; the zero-GPU case is covered directly
+    # in test_ray_backend_unit.
+    return {"GPU": float(os.environ.get("FAKE_RAY_GPUS", "1"))}
 """
 
 #: The ``ray.exceptions`` of :data:`_FAKE_RAY_PACKAGE`.

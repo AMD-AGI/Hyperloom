@@ -328,22 +328,30 @@ _ROCM_SDK_WHEEL_LIB_SUBDIRS: tuple[str, ...] = (
 )
 
 
-def _rocm_sdk_wheel_lib_dirs() -> list[str]:
-    """Lib dirs for TheRock's pip-packaged ROCm (``_rocm_sdk_*`` wheels).
+def _rocm_sdk_wheel_roots() -> list[Path]:
+    """Importable ``_rocm_sdk_*`` package roots, in package order.
 
     TheRock splits libraries across up to three namespace packages
     (``_rocm_sdk_core``, ``_rocm_sdk_libraries``, ``_rocm_sdk_devel``); which
-    ones are installed depends on the wheel's build profile. Each package can
-    also nest libraries under subdirs (host-math, rocm_sysdeps) the dynamic
-    loader does not search by default. Returns [] on a standard ``/opt/rocm``
-    image, where none of these packages are importable.
+    ones are installed depends on the wheel's build profile. Returns [] on a
+    standard ``/opt/rocm`` image, where none of these packages are importable.
     """
-    dirs: list[str] = []
+    roots: list[Path] = []
     for pkg in _ROCM_SDK_WHEEL_PACKAGES:
         spec = importlib.util.find_spec(pkg)
-        if not spec or not spec.origin:
-            continue
-        root = Path(spec.origin).resolve().parent
+        if spec and spec.origin:
+            roots.append(Path(spec.origin).resolve().parent)
+    return roots
+
+
+def _rocm_sdk_wheel_lib_dirs() -> list[str]:
+    """Lib dirs for TheRock's pip-packaged ROCm (``_rocm_sdk_*`` wheels).
+
+    Each package can nest libraries under subdirs (host-math, rocm_sysdeps) the
+    dynamic loader does not search by default.
+    """
+    dirs: list[str] = []
+    for root in _rocm_sdk_wheel_roots():
         for subdir in _ROCM_SDK_WHEEL_LIB_SUBDIRS:
             candidate = root / subdir
             if candidate.is_dir():
@@ -351,11 +359,33 @@ def _rocm_sdk_wheel_lib_dirs() -> list[str]:
     return dirs
 
 
+def _derive_rocm_path() -> None:
+    """Point ROCM_PATH at a wheel carrying the unversioned ``librocm_smi64.so``.
+
+    Ray's AMD-GPU detector ctypes-loads ``$ROCM_PATH/lib/librocm_smi64.so`` and
+    defaults to ``/opt/rocm``, which a wheel install never creates. The cluster then
+    comes up healthy reporting zero GPUs, and every GPU action is infeasible with no
+    error until something tries to schedule one.
+
+    The file decides, not the package: only the devel wheel ships the unversioned
+    development symlink, while core has just ``librocm_smi64.so.1``, which that load
+    does not find.
+    """
+    current = os.environ.get("ROCM_PATH", "")
+    if current and Path(current).is_dir():
+        return
+    for root in _rocm_sdk_wheel_roots():
+        if (root / "lib" / "librocm_smi64.so").is_file():
+            os.environ["ROCM_PATH"] = str(root)
+            return
+
+
 def _derive_runtime_paths() -> None:
     """Rebuild PATH / LD_LIBRARY_PATH from .env-loaded roots (replaces hyperloom.env.sh)."""
     venv = os.environ.get("VIRTUAL_ENV", "")
     if venv:
         _prepend_path("PATH", str(Path(venv) / "bin"))
+    _derive_rocm_path()
     rocm = os.environ.get("ROCM_PATH", "")
     if rocm:
         _prepend_path("PATH", str(Path(rocm) / "bin"))
