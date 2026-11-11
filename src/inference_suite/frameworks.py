@@ -1,11 +1,7 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""The inference frameworks a round can run, and the launch facts each one fixes.
-
-These are the only copy of the facts: Hyperloom's ``framework_registry`` derives its kind, package and
-expert-parallel answers from here and keeps only what is Hyperloom's own.
-"""
+"""The inference frameworks a round can run, and the launch facts each one fixes."""
 
 from __future__ import annotations
 

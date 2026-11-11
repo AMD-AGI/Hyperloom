@@ -19,8 +19,7 @@ The file manifest names bytes, some of which hold the directory the staging was 
 ``python -m inference_suite.staging stage --source <InferenceX checkout> --tool-cache <dir>`` stages; without
 ``--source`` it stages nothing and only completes a cache that already verifies. Either installs the pinned lm-eval
 into the interpreter running it. ``check --tool-cache <dir>`` reports whether a round could identify the staging: the
-cache holds the current pins intact and the interpreter running it has the pinned lm-eval. Hyperloom's ``install.sh``
-runs all three.
+cache holds the current pins intact and the interpreter running it has the pinned lm-eval.
 :func:`ensure_staged`, behind ``python -m inference_suite stage`` and this package's ``install.sh``, stages only what
 a cache lacks.
 
