@@ -27,9 +27,10 @@ A hosted run's specialists, which every launch path starts through the isolation
 (:mod:`hyperloom.common.agent_isolation`), must be isolated: unconfined, they could read the application's credentials.
 Before the installer or ``optimize`` runs, the entry marks the process so
 (:func:`~hyperloom.common.agent_isolation.require_agent_isolation`), with the hosting layer's bubblewrap, ``bin/bwrap``
-in the directory ``HYPERLOOM_HOST_LAYER`` names (the layer's ``start.sh`` names its own; :func:`layer_bwrap`), and no
-other; a host where neither an account nor that bubblewrap can isolate a specialist ends the run finally, naming why,
-and every later launch through the chooser is isolated or refused. A probe that gave no answer in time ends the leg
+in the directory ``HYPERLOOM_HOST_LAYER`` names (the layer's ``start.sh`` names its own;
+:func:`~hyperloom.common.agent_isolation.layer_bwrap`), and no other; a host where neither an account nor that
+bubblewrap can isolate a specialist ends the run finally, naming why, and every later launch through the chooser is
+isolated or refused. A probe that gave no answer in time ends the leg
 without ``exit.json``, so the host starts it again. The entry also registers the state directory, whose variable it
 removes from the environment, among the paths no agent sandbox shows
 (:data:`~hyperloom.common.confinement.PRIVATE_PATHS`). Agents started outside the chooser are not isolated by it and
@@ -66,7 +67,7 @@ from hyperloom_common.shared_storage import (
     writable_problems,
 )
 from hyperloom.common import confinement
-from hyperloom.common.agent_isolation import IsolationRefused, require_agent_isolation
+from hyperloom.common.agent_isolation import IsolationRefused, layer_bwrap, require_agent_isolation
 from hyperloom.common.owner_scope import local_owner_scope
 from hyperloom.hosted.campaign import FLOW_MULTIBRANCH, CampaignError, CampaignSpec, optimize_args, parse_campaign
 from hyperloom.hosted.host_info import HOST_ONLY_VARS, HostInfo, HostInfoError, Var, read_host_info, take_host_info
@@ -103,10 +104,6 @@ INSTALL_LOG = "install.log"
 #: ``stop_reason`` of a run ended by a stop request before it started; the coordinator's name for an operator stop.
 STOP_REQUEST_REASON = "signal"
 DEFAULT_MCP_HOST = "127.0.0.1"
-#: The hosting layer's directory, as its ``start.sh`` names it.
-HOST_LAYER_ENV = "HYPERLOOM_HOST_LAYER"
-#: The hosting layer's bubblewrap, below its directory.
-LAYER_BWRAP = Path("bin", "bwrap")
 RETURNCODE_REFUSED = 2
 ENCODING = "utf-8"
 #: Where install.sh and the run keep their runtime state; a hosted leg defaults it to the container's own disk.
@@ -222,14 +219,6 @@ def _default_runtime_dir() -> None:
     """
     if not os.environ.get(ENV_RUNTIME_DIR):
         os.environ[ENV_RUNTIME_DIR] = tempfile.mkdtemp(prefix="hyperloom-runtime-")
-
-
-def layer_bwrap(environ: Mapping[str, str]) -> str | None:
-    """The hosting layer's bubblewrap, in the directory ``environ``'s ``HYPERLOOM_HOST_LAYER`` names; ``None`` when it
-    names none. The one bubblewrap a hosted run launches agents with: the framework image may carry its own, maybe
-    setuid, ahead of the layer's on ``PATH``."""
-    layer = environ.get(HOST_LAYER_ENV, "").strip()
-    return str(Path(layer) / LAYER_BWRAP) if layer else None
 
 
 def _require_isolation(info: HostInfo) -> None:

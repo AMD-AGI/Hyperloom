@@ -21,6 +21,7 @@ from hyperloom_common import bwrap
 from hyperloom_common.bwrap import BwrapProbe
 from hyperloom_common.tests._bwrap_host import usable_bwrap
 from hyperloom.common import agent_isolation
+from hyperloom.common.agent_isolation import HOST_LAYER_ENV
 from hyperloom.common.env_safety import SPECIALIST_USER_ENV, RunAs
 from hyperloom.hosted.campaign import CampaignSpec, parse_campaign
 from hyperloom.hosted.host_info import HostInfo, read_host_info
@@ -30,13 +31,11 @@ from hyperloom_multibranch.scheduling.launch_isolation import HOSTED, LaunchIsol
 from hyperloom_multibranch.scheduling.peers import PeersUnavailable
 from hyperloom_multibranch.scheduling.hosted_run import (
     GRANT_MARGIN_SECONDS,
-    HOST_LAYER_ENV,
     GrantDeadline,
     HostedExit,
     HostedRefused,
     arm_grant_stop,
     grant_deadline,
-    layer_bwrap,
     record_session,
     recorded_session,
     require_hosted_isolation,
@@ -152,13 +151,6 @@ LAYER_BWRAP = str(LAYER / "bin" / "bwrap")
 #: An account the chooser takes, as ``HYPERLOOM_SPECIALIST_USER`` names it.
 ACCOUNT = RunAs(user="hl-specialist", uid=1500, gid=1500, groups=(1500,), home="/home/hl", drop_tool="/usr/bin/setpriv")
 DENIED = "bwrap: setting up uid map: Permission denied"
-
-
-@pytest.mark.parametrize(("value", "found"), [(" /opt/layer ", LAYER_BWRAP), ("", None), ("  ", None), (None, None)])
-def test_the_layers_bubblewrap_is_found_in_the_layer_directory_the_host_names(
-    value: str | None, found: str | None
-) -> None:
-    assert layer_bwrap({} if value is None else {HOST_LAYER_ENV: value}) == found
 
 
 class Probes:
