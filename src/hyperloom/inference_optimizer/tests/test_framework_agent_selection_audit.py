@@ -421,7 +421,7 @@ async def test_autosubmit_config_idempotent_on_existing_verdict(coord: Coordinat
 
 @pytest.mark.asyncio
 async def test_autosubmit_config_returns_when_review_in_flight(coord: Coordinator) -> None:
-    from hyperloom.orchestrator.loop.proposals import PendingProposal
+    from hyperloom.orchestrator.state.pending_proposal import PendingProposal
 
     coord.state.pending_proposals["existing"] = PendingProposal(
         proposal_msg_id="existing",
@@ -438,7 +438,7 @@ async def test_autosubmit_config_returns_when_review_in_flight(coord: Coordinato
 @pytest.mark.asyncio
 async def test_autosubmit_config_proceeds_for_a_different_specialist(coord: Coordinator) -> None:
     """The scan keys on the specialist task id, so another specialist's review does not block this one."""
-    from hyperloom.orchestrator.loop.proposals import PendingProposal
+    from hyperloom.orchestrator.state.pending_proposal import PendingProposal
 
     coord.state.pending_proposals["existing"] = PendingProposal(
         proposal_msg_id="existing",

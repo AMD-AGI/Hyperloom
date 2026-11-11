@@ -111,7 +111,7 @@ def resolve_reactor_turn_timeout_sec() -> float:
 
 if TYPE_CHECKING:
     from hyperloom.inference_optimizer.experience_kb import ExperienceKBIntegration
-    from .proposals import PendingProposal
+    from ..state.pending_proposal import PendingProposal
 
 
 def reap_orphaned_servers_best_effort(session_dir: Path, *, phase: str) -> None:
