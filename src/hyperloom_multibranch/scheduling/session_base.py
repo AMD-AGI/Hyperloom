@@ -8,8 +8,9 @@ Every inference_suite round refuses a session that froze no base launch
 ``hyperloom optimize`` does (:func:`~hyperloom.inference_optimizer.cli.base_launch.resolve_server_base`) for its
 workload, on the cards one test runs on, InferenceX read at the operator's commit when one is given; a session that
 froze one, a resumed one, keeps it. The operator's ``--reference-script`` is the base as it is for ``hyperloom
-optimize``: a base launch record is frozen without reading any recipe source. The Arbor agents of such a session are
-served the frozen base (:func:`served_launch`), the one the gate measures on. The workload fixes the topology every test is sized by, so a base on another one is refused.
+optimize``: a base launch record is frozen without reading any recipe source. The session's Arbor agents are served
+the frozen base, the one the gate measures on, unless the operator gave them a launch file (:func:`served_launch`). The
+workload fixes the topology every test is sized by, so a base on another one is refused.
 """
 
 from __future__ import annotations
@@ -52,12 +53,11 @@ def freeze_session_base(
     return freeze_base(toolbox, base)
 
 
-def served_launch(frozen: FrozenBase, reference_script: str, agent_launch: str) -> str:
-    """The launch file the session's Arbor agents are served: the session's ``frozen`` base when the operator gave a
-    ``reference_script``, which the base was frozen from or, on a resume, stands in for; else the Arbor
-    ``agent_launch`` as it is."""
+def served_launch(frozen: FrozenBase, agent_launch: str) -> str:
+    """The launch file the session's Arbor agents are served: the operator's ``agent_launch`` when one is given, else
+    the session's ``frozen`` base, however it was resolved."""
 
-    return str(frozen.path) if reference_script else agent_launch
+    return agent_launch or str(frozen.path)
 
 
 def _session_launch(workload: Workload, reference_script: str, inferencex_commit: str) -> SessionLaunch:

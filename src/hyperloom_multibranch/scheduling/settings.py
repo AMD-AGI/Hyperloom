@@ -142,7 +142,7 @@ class RunSettings:
     the directions map whose disjoint shares the Arbor agents among them work, one share each (``""`` for none; see
     :mod:`~hyperloom_multibranch.scheduling.agent_plans`), ``agent_pack`` the pack those Arbors run (``""`` for
     the adapter's default, Arbor's serving template), ``agent_launch`` the file of the launch their recipe's adds
-    to (``""`` when the recipe's is the whole launch), ``agent_dossier_minutes`` how long the dossier pass that
+    to (``""`` for the session's frozen base), ``agent_dossier_minutes`` how long the dossier pass that
     maps two or more Arbors' directions may run when no map is given (0: none, the map is generated from the root's
     shares; :mod:`~hyperloom_multibranch.specialist.dossier_pass`), ``agent_share_minutes`` the least time to their
     cutoff the share branches of a split map must have to open, and the least an agent branch whose lease is refused

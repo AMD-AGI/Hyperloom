@@ -1,13 +1,15 @@
-# The launch file of an Arbor agent on an AgentX recipe
+# The launch an Arbor agent is served
 
-An Arbor agent (`--autonomous-agent` on an Arbor checkout) is served the root recipe's launch. An AgentX recipe holds
-only what is added to its launch (`extra_server_args`, `extra_envs`): the round resolves the rest from the InferenceX recipe.
-Arbor would then serve defaults that multi-branch (MB) does not measure, so the adapter refuses an AgentX branch without
-the resolved launch. Give it with `--agent-launch FILE`, or give the session's base with `--reference-script` (below):
+An Arbor agent (`--autonomous-agent` on an Arbor checkout) is served the root recipe's launch added to the launch it
+holds only the additions of (`extra_server_args`, `extra_envs`). By default that is the session's frozen base launch,
+the one multi-branch (MB) measures every change on, resolved from the recipe sources (InferenceX, then the framework's
+cookbook) or `--reference-script`; no flag is needed:
 
 ```bash
-hyperloom-multibranch run ... --autonomous-agent <arbor> --agent-pack <pack> --agent-launch launch.json
+hyperloom-multibranch run ... --autonomous-agent <arbor> --agent-pack <pack>
 ```
+
+`--agent-launch FILE` (below) serves a launch file instead.
 
 ## A base launch record: `--reference-script`
 
@@ -22,8 +24,8 @@ The session freezes it as its base without reading any recipe source, so this is
 InferenceX runs a session. `--reference-script` also takes a shell launch script, and a session without an Arbor takes
 it the same way. A resumed session keeps the base it froze.
 
-Each Arbor is then served the session's frozen base: its args and env, its golden layer's among them, with the root
-recipe's added. Arbor gets the record as `component.base_launch`, and its entrypoint as `component.entrypoint` when it
+Each Arbor is served the session's frozen base, however it was resolved: its args and env, its golden layer's among
+them, with the root recipe's added. Arbor gets the record as `component.base_launch`, and its entrypoint as `component.entrypoint` when it
 is not the framework's own. Before any GPU work, Arbor compares the launch it would run with the record and refuses to
 start on any difference. It compares the whole launch, the root recipe's additions included, so a branch whose root
 recipe changes the base launch is refused. An Arbor older than `ba2f5a8` runs the launch without that check, and its
@@ -46,8 +48,8 @@ default) plus an hour.
 
 ## A launch file: `--agent-launch`
 
-Copy [`launch.template.json`](launch.template.json) and fill it from the InferenceX recipe the round resolves, at the workload's
-concurrency:
+A launch file replaces the frozen base as what an Arbor is served. Copy [`launch.template.json`](launch.template.json) and
+fill it at the workload's concurrency:
 
 | Key | Required | What it holds |
 | --- | --- | --- |
@@ -56,7 +58,8 @@ concurrency:
 | `model_name` | no | The name the server answers to, which the client requests. Without it, the client's `--model`, else the model's path. |
 | `client` | no | The gate's benchmark client, a command with `--port` (or `--base-url`) and `--result-dir`, or an InferenceSuite round's `--run-dir`, which the adapter makes Arbor's `component.bench_command`. MB's own client comes first, and MB gives one to every session's Arbors. |
 
-The session's base is still resolved from the recipe sources, and nothing checks the file against it.
+The session's base is still resolved from the recipe sources and is what MB measures on; nothing checks the file
+against it.
 
 A KEEP imports as what it changes from this launch, so the root's recipe gets only that change.
 

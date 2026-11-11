@@ -3,7 +3,7 @@
 
 """A session freezes the base launch its tests run on once, resolved as ``hyperloom optimize`` resolves it, and a
 resumed session keeps the one it froze; the operator's ``--reference-script`` is the base, a base launch record frozen
-without reading any recipe source, and the Arbor agents are then served the frozen base."""
+without reading any recipe source. The Arbor agents are served the frozen base unless given a launch file."""
 
 from __future__ import annotations
 
@@ -174,11 +174,11 @@ def test_a_record_is_frozen_as_the_base_without_a_source_and_arbor_is_served_the
     frozen = freeze_session_base(tmp_path / "toolbox", RECORDED, str(record))
 
     assert (frozen.launch.args, frozen.launch.golden_al) == (base_record().args, base_record().golden_al)
-    assert served_launch(frozen, str(record), "") == str(frozen.path)
+    assert served_launch(frozen, "") == str(frozen.path)
     assert read_launch(frozen.path).digest == frozen.launch.digest()
 
 
-def test_a_resumed_session_keeps_its_base_and_serves_it_for_a_reference_script(tmp_path: Path, offline: None) -> None:
+def test_a_resumed_session_keeps_its_base_and_serves_it(tmp_path: Path, offline: None) -> None:
     toolbox = tmp_path / "toolbox"
     first = freeze_session_base(toolbox, RECORDED, str(write_record(tmp_path / "first.json")))
     other = write_record(tmp_path / "other.json", base_record(env={"VLLM_ROCM_USE_AITER": "0"}))
@@ -186,16 +186,16 @@ def test_a_resumed_session_keeps_its_base_and_serves_it_for_a_reference_script(t
     resumed = freeze_session_base(toolbox, RECORDED, str(other))
 
     assert resumed.launch == first.launch
-    assert served_launch(resumed, str(other), "") == str(first.path)
+    assert served_launch(resumed, "") == str(first.path)
 
 
-def test_without_a_reference_script_the_arbor_launch_file_is_served_as_it_is(tmp_path: Path) -> None:
+def test_an_arbor_launch_file_is_served_in_place_of_the_frozen_base(tmp_path: Path) -> None:
     launch = tmp_path / "launch.json"
     launch.write_text(json.dumps({"server_flags": "--max-num-seqs 64", "server_env": {}}), encoding="utf-8")
     frozen = FrozenBase(tmp_path / "toolbox" / "base_launch.json", base_record())
 
-    assert served_launch(frozen, "", str(launch)) == str(launch)
-    assert served_launch(frozen, "", "") == ""
+    assert served_launch(frozen, str(launch)) == str(launch)
+    assert served_launch(frozen, "") == str(frozen.path)
 
 
 def test_a_fresh_session_reads_inferencex_at_the_commit_it_was_given_and_a_resumed_one_reads_nothing(

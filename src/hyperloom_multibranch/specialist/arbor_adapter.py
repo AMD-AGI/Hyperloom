@@ -24,13 +24,12 @@ Arbor looks a dossier up. The root's op shares are not the adapter's: the prefli
 ``component.profile`` for Arbor as for any agent run as a component
 (:func:`~hyperloom_multibranch.specialist.agent_onboarding.component_config`).
 
-The spec's ``launch``, a launch file (:func:`read_launch`), stands in for what MB does not carry yet: the launch an
-AgentX recipe resolves from InferenceX, of which the root recipe holds only what is added to it. Without one,
-an AgentX branch is refused before Arbor starts, which would otherwise serve defaults MB does not measure. The file
-may also be the session's frozen base launch (:data:`BASE_LAUNCH_SCHEMA`), the one MB's gate measures every change on.
-Arbor is then served its launch, and checks at its start that the launch it would run is the record's
-(``component.base_launch``, carried into its checkout), refusing before any GPU work when it is not; it serves with the
-record's entrypoint when that is not the framework's own (``component.entrypoint``).
+The spec's ``launch`` is the launch the root recipe adds to, which an AgentX recipe holds only the additions of: the
+session's frozen base launch (:data:`BASE_LAUNCH_SCHEMA`), the one MB's gate measures every change on, or a launch file
+the operator gave (:func:`read_launch`). Without one, an AgentX branch is refused before Arbor starts, which would
+otherwise serve defaults MB does not measure. Served a base launch record, Arbor checks at its start that the launch
+it would run is the record's (``component.base_launch``, carried into its checkout), refusing before any GPU work when
+it is not; it serves with the record's entrypoint when that is not the framework's own (``component.entrypoint``).
 
 The spec's ``review`` hands Arbor's human review gate over: Arbor waits at the start of a new
 session for a person's approval unless the host says it reviewed (``component.review: "host"``, :data:`REVIEW_HOST`)
@@ -796,14 +795,14 @@ def server_flags(spec: AgentSpec, resolved: str = "") -> str:
 
 def _launch_refusals(spec: AgentSpec) -> list[str]:
     """Why ``spec``'s branch cannot serve what MB measures: an AgentX recipe's launch, which holds only what the
-    round adds to the one it resolves from InferenceX, given without that launch."""
+    round adds to the session's base launch, given without the launch it adds to."""
 
     if spec.workload.get("kind") != AGENTX or spec.launch:
         return []
     return [
-        "an AgentX recipe's launch holds only what the round adds to the one it resolves from InferenceX, so Arbor would"
-        " serve defaults MB does not measure: give the resolved launch with --agent-launch, or the session's base"
-        " with --reference-script (examples/multibranch-arbor-launch)"
+        "an AgentX recipe's launch holds only what the round adds to the session's base launch, and the branch is"
+        " served no launch to add it to, so Arbor would serve defaults MB does not measure: the host serves the"
+        " session's frozen base, or the launch file given with --agent-launch"
     ]
 
 
