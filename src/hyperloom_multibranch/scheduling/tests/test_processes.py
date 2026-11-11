@@ -22,7 +22,7 @@ from pathlib import Path
 import pytest
 
 from hyperloom.common.owner_scope import local_owner_scope
-from hyperloom.common.proctree import descendants, running
+from hyperloom_common.proctree import descendants, running
 from hyperloom_multibranch.scheduling import processes
 from hyperloom_multibranch.scheduling.clock import Clock
 from hyperloom_multibranch.scheduling.processes import (
