@@ -7,8 +7,8 @@ from __future__ import annotations
 
 import asyncio
 import logging
-import time
 from pathlib import Path
+from time import monotonic
 from typing import Any
 
 from . import machine_state as _phase_state
@@ -67,7 +67,7 @@ class _ForgeControllerMixin:
                     else "no KERNEL phase budget remains for the rewrite controller"
                 ),
             }
-        started_monotonic = time.monotonic()
+        started_monotonic = monotonic()
         try:
             result = await asyncio.to_thread(
                 run_controller_subprocess,
@@ -83,5 +83,5 @@ class _ForgeControllerMixin:
             if allocation is None:
                 return {**attempt, **result}
         if allocation is not None:
-            result[_CONTROLLER_REMAINING_KEY] = max(0.0, remaining - (time.monotonic() - started_monotonic))
+            result[_CONTROLLER_REMAINING_KEY] = max(0.0, remaining - (monotonic() - started_monotonic))
         return {**attempt, **result, **{key: attempt[key] for key in _CONTROLLER_ATTEMPT_FACTS}}

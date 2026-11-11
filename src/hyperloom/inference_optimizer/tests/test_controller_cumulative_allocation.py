@@ -83,7 +83,7 @@ async def test_controller_charges_elapsed_time_even_when_invocation_fails(monkey
             return_value=result,
             side_effect=ValueError("invalid result") if failure else None,
         ),
-        patch.object(controller_attempt.time, "monotonic", side_effect=[1000, 1600]),
+        patch.object(controller_attempt, "monotonic", side_effect=[1000, 1600]),
     ):
         actual = await KernelPhase._controller_attempt_result(phase, Path("handoff"), Path("output"))
     assert actual["controller_budget_remaining_sec"] == 6600

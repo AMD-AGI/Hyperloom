@@ -4,7 +4,6 @@
 """KERNEL_AGENT phase handler for the fusion, GEMM, and GEAK lanes."""
 
 from __future__ import annotations
-import asyncio
 import hashlib
 import json
 import logging as _logging
