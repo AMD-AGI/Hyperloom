@@ -462,7 +462,7 @@ def test_install_baremetal_writes_no_credential_into_a_shared_dotenv(monkeypatch
         env_file = _kernel_env(workspace)
         env_file.parent.mkdir(mode=0o700, parents=True)
         old_block = _shell('runtime_env_emit_credential_fallback "$@"', "ANTHROPIC_API_KEY", "sk-test-old-key").stdout
-        env_file.write_text(f"#!/bin/sh\nexport MAGPIE_PATH='/opt/magpie'\n{old_block}", encoding="utf-8")
+        env_file.write_text(f"#!/bin/sh\nexport TOOL_PATH='/opt/tool'\n{old_block}", encoding="utf-8")
         env_file.chmod(0o600)
 
         proc = _run_baremetal(script, checkout, workspace, tmp, VIRTUAL_ENV="/opt/own/venv", **_BAREMETAL_CREDENTIALS)
@@ -478,7 +478,7 @@ def test_install_baremetal_writes_no_credential_into_a_shared_dotenv(monkeypatch
         assert {k: v for k, v in _credentials_in(env_file).items() if v} == _BAREMETAL_CREDENTIALS
         env_text = env_file.read_text(encoding="utf-8")
         assert "sk-test-old-key" not in env_text
-        assert env_text.startswith("#!/bin/sh\nexport MAGPIE_PATH='/opt/magpie'\n")
+        assert env_text.startswith("#!/bin/sh\nexport TOOL_PATH='/opt/tool'\n")
         assert [env_text.count(f"export {key}=") for key in _BAREMETAL_CREDENTIALS] == [1, 1, 1]
         assert "credentials kept out of" in proc.stdout
 
