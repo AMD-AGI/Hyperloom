@@ -37,7 +37,8 @@ run as the application, reading what it can: the orchestration role on Codex (th
 picks; its sandbox limits writes, not reads) or on the DeepSeek Harness, and on Claude its unconfined ``Read``; the
 TraceLens skill runner's agent (Claude with ``Bash``, Codex or DeepSeek); GEAK's agents; and kernelforge's
 (``kernel-rewrite-controller``'s forge loops, ``forge-fuse``'s author and ``gemm-tune``'s generated-tuner author). The
-reference's isolation section names the launch sites. A ``multibranch`` flow is handed to its command before this check.
+reference's isolation section names the launch sites. A ``multibranch`` flow is handed to its command before this check,
+which that command makes itself.
 """
 
 from __future__ import annotations
