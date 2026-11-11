@@ -6,7 +6,9 @@
 import asyncio
 import os
 import signal
+import stat
 import time
+from collections.abc import Iterator
 from pathlib import Path
 
 import pytest
@@ -199,3 +201,44 @@ def test_only_the_gateway_its_credentials_and_the_ca_bundle_are_forwarded():
         "GEAK_CLAUDE_MODEL": "g",
         "SSL_CERT_FILE": "/tmp/hyperloom-host/ca-bundle.pem",
     }
+
+
+@pytest.fixture
+def umask_022() -> Iterator[None]:
+    """This process, and the sandbox's commands it runs as its children, under umask 022, restored after the test."""
+    saved = os.umask(0o022)
+    try:
+        yield
+    finally:
+        os.umask(saved)
+
+
+async def _made_by_a_command(remote: RemoteAgentSandbox, cwd: Path) -> tuple[int, int, str]:
+    done = await remote.run("touch file && mkdir dir && env | grep ^HL_ || true", cwd, {}, timeout=10)
+    assert done.returncode == 0, done.output
+    modes = (stat.S_IMODE((cwd / "file").stat().st_mode), stat.S_IMODE((cwd / "dir").stat().st_mode))
+    return (*modes, done.output.strip())
+
+
+@pytest.mark.usefixtures("umask_022")
+async def test_a_command_below_shared_storage_writes_what_the_group_can_write(tmp_path):
+    # Arbor, the vendored copy too, and every agent run as commands of the sandbox, as root of another container; a
+    # later leg of the run may be another account of the group, which must write what they wrote.
+    tmp_path.chmod(0o2775)
+    (tmp_path / "sandbox").mkdir()
+    (tmp_path / "sandbox").chmod(0o2775)  # as the hosted run makes it, under the group's umask
+    remote = _remote(tmp_path)
+    cwd = remote.root / "work"
+    cwd.mkdir()
+
+    assert await _made_by_a_command(remote, cwd) == (0o664, 0o2775, "")
+
+
+@pytest.mark.usefixtures("umask_022")
+async def test_a_command_off_shared_storage_keeps_the_sandboxs_umask(tmp_path):
+    tmp_path.chmod(0o755)
+    remote = _remote(tmp_path)
+    cwd = remote.root / "work"
+    cwd.mkdir()
+
+    assert await _made_by_a_command(remote, cwd) == (0o644, 0o755, "")

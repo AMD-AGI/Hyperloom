@@ -25,7 +25,9 @@ A command runs on the sandbox's own environment with only what :func:`forwarded_
 gateway, its credentials and models, the CA bundle the hosting layer puts at the same path in both containers) and the
 sandbox's own home, Claude config, caches and a temporary directory on the sandbox's local disk, where HIP unbundles
 its code objects. Commands run as root there, as the Claude CLI accepts only in a sandbox it is told of. The platform
-sets the device mask; a mask the caller passes is dropped.
+sets the device mask; a mask the caller passes is dropped. Below shared storage a command runs under the umask of a
+child that writes there (:func:`~hyperloom_common.shared_storage.child_umask`), so the run's next leg, which may be
+another account of the group, can write what it wrote; elsewhere under the sandbox's own.
 """
 
 from __future__ import annotations
@@ -41,6 +43,7 @@ from collections.abc import Callable, Iterator, Mapping
 from dataclasses import dataclass, field
 from pathlib import Path
 
+from hyperloom_common.shared_storage import child_umask
 from hyperloom.common.visible_devices import GPU_MASK_ENV_NAMES
 from hyperloom.sandbox import RunSettings, Sandbox, SandboxGone, SandboxUnavailable
 from hyperloom_multibranch.specialist.agent_onboarding import ENCODING, CommandResult
@@ -94,7 +97,8 @@ command=$HL_COMMAND
 export PATH="${{HL_PATH_PREFIX:+$HL_PATH_PREFIX:}}$PATH"
 export PYTHONPATH="$HL_PYTHONPATH${{PYTHONPATH:+:$PYTHONPATH}}"
 root=$HL_ROOT
-unset HL_COMMAND HL_PATH_PREFIX HL_PYTHONPATH HL_ROOT
+[ -n "${{HL_UMASK:-}}" ] && umask "$HL_UMASK"
+unset HL_COMMAND HL_PATH_PREFIX HL_PYTHONPATH HL_ROOT HL_UMASK
 mkdir -p "$TMPDIR"
 if cd "$cwd" 2>>"$log"; then
   env "{MARKER}=$root" "{PROCESS_MARKER}=$root/$n" setsid bash -c "$command" >>"$log" 2>&1 </dev/null &
@@ -296,6 +300,9 @@ class RemoteAgentSandbox:
         merged["HL_PATH_PREFIX"] = os.pathsep.join(_added_path(env.get("PATH", "")))
         merged["HL_PYTHONPATH"] = os.pathsep.join(map(str, self.python_path))
         merged["HL_ROOT"] = str(self.root)
+        umask = child_umask(self.root)
+        if umask != -1:  # below shared storage: a later leg's account of the group writes what the command wrote
+            merged["HL_UMASK"] = f"{umask:03o}"
         return merged
 
     async def run(self, command: str, cwd: Path, env: Mapping[str, str], timeout: float) -> CommandResult:
