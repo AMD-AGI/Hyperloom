@@ -633,6 +633,13 @@ SAFE_ENV_KEYS = (
     "HYPERLOOM_RUNTIME_DIR",
     "KERNEL_AGENT_ENV",
     "INFERENCEX_PATH",
+    # The custom workload's frozen benchmark directory. A worker that cannot read the
+    # optimization-scope declaration sees no boundary at all, so the single-file
+    # refusals silently pass instead of firing.
+    "HYPERLOOM_BYPASS_SCRIPTS_DIR",
+    # Where the run put the Claude CLI's config; a specialist in a worker reads it there
+    # rather than under a home directory the worker may not share.
+    "CLAUDE_CONFIG_DIR",
     "ANTHROPIC_API_KEY",
     "ANTHROPIC_AUTH_TOKEN",
     "ANTHROPIC_BASE_URL",
