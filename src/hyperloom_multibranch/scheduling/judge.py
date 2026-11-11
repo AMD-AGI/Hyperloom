@@ -34,7 +34,7 @@ from dataclasses import asdict, dataclass, replace
 from enum import Enum
 from pathlib import Path
 
-from hyperloom_common.io import append_jsonl
+from hyperloom_common.io import append_shared_jsonl
 from hyperloom_common.jsonio import extract_last_json_with_key
 from hyperloom.contracts.measurement import Purpose, Validity
 from hyperloom_multibranch.contracts.lifecycle import SpecialistStatus
@@ -647,11 +647,7 @@ class Judge:
         else:
             decision = parse_decision(reply)
             error = "" if decision is not None else "the reply holds no well-formed decision object"
-        append_jsonl(
-            self.transcript,
-            {"at": self.clock.now(), "prompt": prompt, "reply": reply, "error": error},
-            make_parents=True,
-        )
+        append_shared_jsonl(self.transcript, {"at": self.clock.now(), "prompt": prompt, "reply": reply, "error": error})
         return cap_decision(decision, view) if decision is not None else None
 
 

@@ -9,7 +9,11 @@ A bundle is stored under ``<request_id>/<manifest_sha256>/``, laid out exactly a
 stored bundle, and a bundle becomes visible under its final name in one step, so a reader never sees half of one.
 
 :class:`DirResultArchive` is the local-directory implementation used by the local sandbox backend and by tests; the S3
-implementation follows the same :class:`ResultArchive` protocol.
+implementation follows the same :class:`ResultArchive` protocol. Below storage set up to be shared
+(:func:`~hyperloom_common.shared_storage.parent_is_shared`), where a later leg of a run may be another account of the
+group, the directories it makes on the way are the group's (``2775``) and the directories of a stored bundle are
+``2750``, which the group reads and only their writer changes, whatever the umask; anywhere else the umask decides and a
+bundle stays its writer's.
 """
 
 from __future__ import annotations
@@ -23,6 +27,7 @@ import uuid
 from pathlib import Path
 from typing import Protocol
 
+from hyperloom_common.shared_storage import make_shared_dirs, parent_is_shared
 from hyperloom.measure import fsafe
 from hyperloom.measure.docs import SHA256_RE
 from hyperloom.measure.manifest import RESERVED_NAMES
@@ -31,6 +36,8 @@ ARCHIVE_FAILED = "archive_failed"
 _SEGMENT_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]{0,127}")
 _INCOMING = ".incoming-"
 MANIFEST_NAME = RESERVED_NAMES[0]
+#: The directories of a stored bundle below shared storage: the group reads them, and no other account can change them.
+BUNDLE_DIR_MODE = 0o2750
 
 
 class ArchiveError(Exception):
@@ -80,7 +87,7 @@ class DirResultArchive:
     def _put(self, final: Path, staging_dir: Path, listing: dict[str, str]) -> str:
         if final.exists():
             return self._same_or_conflict(final, listing)
-        final.parent.mkdir(parents=True, exist_ok=True)
+        make_shared_dirs(final.parent)
         incoming = self._root / f"{_INCOMING}{uuid.uuid4().hex}"
         incoming.mkdir(parents=True, mode=0o700)
         try:
@@ -95,6 +102,7 @@ class DirResultArchive:
                 raise
         finally:
             shutil.rmtree(incoming, ignore_errors=True)
+        _share_bundle(final)
         fsync_dir(final.parent)
         return os.fspath(final)
 
@@ -177,6 +185,15 @@ def _copy_verified(root_fd: int, rel: str, expected: str, target: Path) -> None:
     if digest.hexdigest() != expected:
         raise ArchiveError(f"{rel} changed while it was being archived")
     target.chmod(stat.S_IRUSR | stat.S_IRGRP | stat.S_IROTH)
+
+
+def _share_bundle(final: Path) -> None:
+    """Let the group read the bundle just renamed to ``final`` where the archive is shared storage. It was filled in a
+    ``0700`` directory of this account's, so nothing below it is another account's or a link."""
+    if not parent_is_shared(final):
+        return
+    for directory, _, _ in os.walk(final):
+        os.chmod(directory, BUNDLE_DIR_MODE)
 
 
 def fsync_dir(path: Path) -> None:
