@@ -218,6 +218,10 @@ _RULES: tuple[_Rule, ...] = (
             re.compile(r"not implemented for\s+['\"]?([A-Za-z0-9_]+)['\"]?"),
             re.compile(r"\b(fp8|bfloat16|bf16|float8|e4m3|e5m2|int4|fp4)\b[^\n]*?(?:unsupported|not\s+supported)"),
             re.compile(r"(?:dtype|data type)\s+['\"]?([A-Za-z0-9_]+)['\"]?\s+(?:is\s+)?not\s+supported"),
+            # aiter's native dispatch: ``operator() not support output type: fp4x2``.
+            re.compile(
+                r"not\s+support(?:ed)?\s+(?:(?:input|output)\s+)?(?:dtype|data\s+type|type):\s*['\"]?([A-Za-z0-9_]+)"
+            ),
         ),
         confidence=0.8,
         symbol_from=_grp,

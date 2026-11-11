@@ -120,14 +120,16 @@ def _run_cleanup_confirmation(
     if getattr(args, "force", False):
         print("ERROR: cleanup confirmation cannot be combined with --force.", file=sys.stderr)
         return 2
+    from hyperloom.common.owner_scope import local_owner_scope
+
     from ..session.resume_guard import CleanupConfirmationError, confirm_scope_gone, confirm_task_stopped
 
     try:
         if scope is None:
-            result = confirm_task_stopped(session_dir, task_id=task_id, reason=reason)
+            result = confirm_task_stopped(
+                session_dir, task_id=task_id, reason=reason, current_scope=local_owner_scope()
+            )
         else:
-            from hyperloom.common.owner_scope import local_owner_scope
-
             result = confirm_scope_gone(
                 session_dir, owner_scope=scope, reason=reason, current_scope=local_owner_scope()
             )
