@@ -1,10 +1,10 @@
 """One scale for a rolling campaign's numbers, across the nodes its chunks land on.
 
 A rolling chunk measures the current tree on its own node and makes that the bar
-(the campaign launcher's rebaseline step), so the gate and the agent compare against the
-node they run on. Read in sequence, though, the bar then jumps with the node: on a slower
-node it drops, even after several KEEPs, which reads as a regression. So the scale
-is interpolated instead of jumping with the node.
+(the launcher's rebase script), so the gate and the agent compare against the node
+they run on. Read in sequence, though, the bar then jumps with the node: on a slower
+node it drops, even after several KEEPs, which reads as a regression. So the numbers
+are put on one scale instead of jumping with the node.
 
 Each REBASELINE lesson carries its step: the bar before it (the previous node's)
 over this node's reading of the same tree. The steps chain into a factor that puts

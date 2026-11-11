@@ -25,7 +25,7 @@ from hyperloom_multibranch.blackboard import LocalBlackboard
 from hyperloom_multibranch.contracts.toolbox import BranchLease, LeaseCharge, RequestRejected
 from hyperloom_multibranch.specialist.agent_onboarding import CommandResult, OnboardingSetup
 from hyperloom_multibranch.specialist.agent_spec import AgentSpec
-from hyperloom_multibranch.specialist.arbor_adapter import BRANCH_RUN
+from hyperloom_multibranch.specialist.arbor_adapter import ARBOR_PYTHON, BRANCH_RUN
 from hyperloom_multibranch.specialist.gate_client import GateClient
 from hyperloom_multibranch.toolbox.kernel_artifacts import KernelVariables
 
@@ -580,7 +580,7 @@ MAP = {
 }
 
 
-LAUNCH = f"python3 -m arbor run --config {CONFIG_FILE}"
+LAUNCH = f"{ARBOR_PYTHON} -m arbor run --config {CONFIG_FILE}"
 REASONS = ["component.plan[0]: m-attn: no title", "component mode needs a deadline"]
 
 

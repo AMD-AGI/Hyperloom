@@ -1,7 +1,8 @@
 """Realtime collector: a campaign's live state, as one JSON snapshot.
 
-Ported from an earlier campaign dashboard's collector (collector version 1), with the same top-level keys so that page can render a
-snapshot unchanged. What differs: it runs where the campaign runs, writes the
+Ported from an earlier per-cluster campaign dashboard's collector (collector
+version 1), with the same top-level keys so that page can render a snapshot
+unchanged. What differs: it runs where the campaign runs, writes the
 snapshot to a local directory, and pushes it to the share (``share.py``); it
 never samples GPU nodes (a probe during a measured replay perturbs it), and it
 takes every path as an argument instead of one cluster's layout.
@@ -91,7 +92,7 @@ def warm_chain(session: Path, lessons: list, end):
     # The first node's scale as arbor/rebaseline.py chains it, but with a warm reading on
     # both sides of each step: the last KEEP's or bar's on the old node over the new
     # node's bar. A rebased bar's warm reading is its record's replays after the
-    # container's first, which reads low (the campaign launcher's rebaseline step), unless
+    # container's first, which reads low (the launcher's bar measurement), unless
     # the record discarded a warm-up itself. Each lesson gets the factor in force after it;
     # returned: the factor now, and the best on this node, warm. The chained reading
     # can overstate the gain.
@@ -195,10 +196,10 @@ PHASE_RULES = [
     (r"^\[arbor\] Cooling down", "cooldown", "cooling down between iterations"),
     (r"^\[arbor\] roll: handing off", "handoff", "handing over to the next job"),
     # Between iterations: a chunk's start, its bar (a campaign launcher's log prefix),
-    # a round end's A/B (the round-end A/B script; the page shows the A/B's last line).
+    # a round end's A/B (the launcher's round_ab hook; the page shows the A/B's last line).
     (r"^\[chunk .* takes over", "chunk", "a new chunk starts"),
-    (r"^\[campaign\] .*(measuring the bar|\[rebase\])", "rebase", "measuring this node's bar"),
-    (r"^\[campaign\] .*driver starting", "driver", "driver starting"),
+    (r"^\[(?!arbor\])[\w.-]+\] .*(measuring the bar|\[rebase\])", "rebase", "measuring this node's bar"),
+    (r"^\[(?!arbor\])[\w.-]+\] .*driver starting", "driver", "driver starting"),
     (r"^\[(round-ab\]|arbor\] round: A/B)", "round_ab", "round-end A/B"),
 ]
 
@@ -328,7 +329,7 @@ def collect_log(session: Path, log: Path | None, errors: list[str],
 
 
 def collect_round_ab(session: Path, rt: dict | None, metric, secondary):
-    # The pending (else the last) round end's A/B (the round-end A/B script),
+    # The pending (else the last) round end's A/B (the launcher's round_ab hook),
     # attempt by attempt, oldest first: each row [round, arm, concurrency, metric,
     # secondary], or the current arm's full GSM8K as a dict; the node and verdict once
     # the attempt wrote its summary.

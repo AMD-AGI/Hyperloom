@@ -69,7 +69,7 @@ Each section describes the **general idea** — look for similar opportunities i
 - ForwardBatch.forward_mode checks — `is_decode_or_idle()` vs `is_extend()` vs `is_prefill()`
 
 **Examples:**
-- Rope+KV fusion optimized for decode shape, but was enabled for all forwards → prefill regression
+- Rope+KV fusion optimized for decode shape, but enabled for all forwards → prefill regression
   Fix: gate on `forward_batch.forward_mode.is_decode_or_idle()`.
 
 **How to find:** Profile decode and prefill separately. If a "fix" helps decode but hurts prefill (or vice versa), check whether it's properly mode-gated.
@@ -131,7 +131,7 @@ Each section describes the **general idea** — look for similar opportunities i
 
 ## Where to look in a new model
 
-When starting a campaign on a new DSA/MLA model (DSV4, Kimi-K2.5, etc.):
+When starting a campaign on a new DSA/MLA model:
 
 1. **Check Pattern 1 first** — run grep for silently-disabled features. Little reading, potentially a large gain.
 2. **Profile the decode step** — identify the top-3 ops. Don't guess.

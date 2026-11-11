@@ -1,10 +1,10 @@
-"""A directions map generated from a host's root profile, with a serving pack's roadmap as the template.
+"""A directions map generated from a host's root profile, with a serving roadmap as the template.
 
 A host that runs several Arbors from one map needs that map before its branches open. A
 dossier pass measures one (``component.stop_at: "map"``); this writes one at once, with no GPU
 time, from what the host already has after its baseline: the op shares of the root's profile,
-the file it gives Arbor as ``component.profile``: minimal directions from the host's profile,
-with a serving pack's roadmap as a template.
+the file it gives Arbor as ``component.profile``. A generated map comes either from a
+dossier-only pass or from minimal directions from the host, with a roadmap as the template.
 
 - **The minimal directions** are the profile's op families, as Hyperloom's MB reads them for its
   open areas: each op is put in the first family whose pattern its name matches
@@ -14,9 +14,10 @@ with a serving pack's roadmap as a template.
   CUDA-graph trace): the families also match hipBLASLt's Tensile GEMMs (``Cijk_``), vLLM's skinny
   GEMM (``wvSplitK``), its KV-cache write (``reshape_and_cache``) and its prefix-prefill attention
   (``_fwd_kernel``); copies and memcpys stay unmapped.
-- **The template** is a serving pack's roadmap,
-  model-independent: each family is one direction, titled as that roadmap frames the gap. The
-  small kernels (norm, RoPE, activation, elementwise) are one direction.
+- **The template** is a hand-written serving roadmap (the serving roadmap a pack's constraints
+  section holds), model-independent: each family is one direction, titled as that roadmap frames
+  the gap. The small kernels (norm, RoPE, activation, elementwise) are one direction, as its
+  fusion item has them.
 - **Rank** follows the family's share of GPU time, largest first. **Ceiling** is its Amdahl
   ceiling, the most the run could gain if the family's time went to zero (MB's
   ``amdahl_ceiling_pct``). A family under ``min_share`` percent is left out.
@@ -36,6 +37,8 @@ import json
 import re
 import sys
 from pathlib import Path
+
+from arbor.directions import MAX_OPS
 
 DEFAULT_MIN_SHARE = 2.0
 
@@ -63,7 +66,7 @@ def _boundaries(pat: str) -> str:
 
 _FAMILY_RES = tuple((name, re.compile(_boundaries(pat), re.IGNORECASE)) for name, pat in FAMILIES)
 
-# Each family's direction, framed as a serving pack's roadmap frames that gap: (id, title).
+# Each family's direction, framed as the roadmap frames that gap: (id, title).
 TEMPLATE: dict[str, tuple[str, str]] = {
     "attention": ("m-attn", "Attention: the kernel each served shape dispatches, prefill and decode, "
                             "and the metadata it builds per step (selection by shape)"),
@@ -149,23 +152,30 @@ def generate(profile: dict, min_share: float = DEFAULT_MIN_SHARE) -> tuple[list[
             "ceiling": "unbounded" if ceiling == float("inf") else f"<= {ceiling:.0f}% (Amdahl)",
             "why": (f"root profile ({source}): {totals[g]:.1f} % of GPU time in {len(groups[g])} ops; "
                     f"largest {', '.join(f'{o} {p:.1f} %' for o, p in top)}")[:400],
+            # The family's ops, as the profile names them, largest first: a host matches them exactly.
+            "ops": [o for o, _ in sorted(groups[g], key=lambda o: -o[1])][:MAX_OPS],
         })
     return directions, {"groups": totals, "unmapped": sorted(unmapped, key=lambda o: -o[1])}
 
 
-def main(argv: list[str]) -> int:
+def parser():
+    """``python3 -m arbor.directions generate``'s parser, built without parsing (arbor/cli/payload.py)."""
     import argparse
-    from arbor import component
-    from arbor.directions import _entry
     ap = argparse.ArgumentParser(prog="python3 -m arbor.directions generate",
-                                 description="A directions map from a host's root profile, with a serving "
-                                             "pack's roadmap as the template.")
+                                 description="A directions map from a host's root profile, with a "
+                                             "serving roadmap as the template.")
     ap.add_argument("--profile", required=True, help="the root profile: {unit, shares: {op: share}}")
     ap.add_argument("--out", required=True, help="the map to write: {\"directions\": [...]}")
     ap.add_argument("--min-share", type=float, default=DEFAULT_MIN_SHARE,
                     help=f"leave out an op family under this percent of GPU time ({DEFAULT_MIN_SHARE:g})")
+    return ap
+
+
+def main(argv: list[str]) -> int:
+    from arbor import component
+    from arbor.directions import _entry
     try:
-        args = ap.parse_args(argv)
+        args = parser().parse_args(argv)
     except SystemExit as exc:
         return 0 if exc.code == 0 else 2
     try:
