@@ -119,6 +119,12 @@ VLLM = "vllm"
 VLLM_TP_FLAGS = ("--tensor-parallel-size", "-tp")
 #: The interpreter Arbor runs under, the sandbox's.
 PYTHON = "python3"
+#: The file Arbor (v0.9.4 on) reads its ``ARBOR_*`` defaults from, ``~/.arbor/settings.env`` when unset or empty.
+#: Pointed at an empty file, so a local run never takes the running user's settings (an ``ARBOR_ROLL``, a review gate,
+#: an agent backend) past the preflight that refuses them in the environment.
+SETTINGS_ENV = "ARBOR_SETTINGS"
+#: :data:`PYTHON` run as Arbor: with no site settings file.
+ARBOR_PYTHON = f"env {SETTINGS_ENV}=/dev/null {PYTHON}"
 #: What Arbor needs beyond the image (its docs/getting-started.md, and the third-party modules arbor/ imports outside
 #: its tests): Python 3.11, PyYAML and the Claude agent SDK, which brings its CLI. Each is installed only when it does
 #: not import, and the last command checks that both import.
@@ -323,7 +329,7 @@ def arbor_manifest(spec: AgentSpec, checkout: ArborCheckout, run: ArborRun) -> A
         carried = path / PLAN_FILE
         carried.write_bytes(Path(component["plan"]).read_bytes())
         component["plan"] = str(carried)
-    launch = f"{PYTHON} -m arbor run --config {shlex.quote(run.config_file)}"
+    launch = f"{ARBOR_PYTHON} -m arbor run --config {shlex.quote(run.config_file)}"
     return AgentManifest.read(
         {
             "source": checkout.source,
@@ -800,12 +806,17 @@ async def generate_directions(checkout: Path, profile: Path, out: Path) -> Path:
 
 
 async def _directions(checkout: Path, written: tuple[Path, ...], *args: str) -> None:
-    """Run ``python3 -m arbor.directions`` with ``args`` in ``checkout``; raise :class:`SplitFailed` with what it
-    printed when it fails or leaves any of ``written`` unwritten."""
+    """Run ``python3 -m arbor.directions`` with ``args`` in ``checkout``, as Arbor's other commands with no site
+    settings file (:data:`SETTINGS_ENV`); raise :class:`SplitFailed` with what it printed when it fails or leaves any
+    of ``written`` unwritten."""
 
     argv = [PYTHON, "-m", "arbor.directions", *args]
     process = await asyncio.create_subprocess_exec(
-        *argv, cwd=checkout, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.STDOUT
+        *argv,
+        cwd=checkout,
+        env={**os.environ, SETTINGS_ENV: os.devnull},
+        stdout=asyncio.subprocess.PIPE,
+        stderr=asyncio.subprocess.STDOUT,
     )
     output, _ = await process.communicate()
     said = " | ".join(line.strip() for line in output.decode(errors="replace").strip().splitlines()[-_TAIL_LINES:])
@@ -819,6 +830,7 @@ async def _directions(checkout: Path, written: tuple[Path, ...], *args: str) -> 
 __all__ = [
     "ACCURACY_FLOOR_ENV",
     "ACCURACY_POLICY",
+    "ARBOR_PYTHON",
     "BLOCK_KEYS",
     "BRANCH_RUN",
     "BUILT",
@@ -838,6 +850,7 @@ __all__ = [
     "REVIEW_HOST",
     "REVIEW_KEY",
     "REVIEW_OFF",
+    "SETTINGS_ENV",
     "ArborCheckout",
     "ArborRefused",
     "ArborRun",
