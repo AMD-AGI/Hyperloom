@@ -2,7 +2,7 @@
 
 Source: Primus-Turbo `feat/mxfp8-grouped-gemm-e8m0` branch,
 `primus_turbo/hip/grouped_gemm_mxfp8/` — shipped hybrid autograd (HIP fwd +
-HIP dgrad + Triton wgrad) 2026-04-23.
+HIP dgrad + Triton wgrad).
 
 ## Result summary (MI355X, gpt_oss_20B MoE gate_up: M=65536, K=2880, N=5760, G=32 balanced)
 
@@ -133,7 +133,7 @@ on Triton.
 
 ## HIP wgrad — v0 shipped, v1 deferred
 
-### v1.3 + v1.4 + v1.5 (current state, 2026-04-24)
+### v1.3 + v1.4 + v1.5 (current state)
 
 **v1.3 — fast fp8 permute** (`_permute_fp8.py::fp8_permute_M_to_GN`):
 PyTorch's `.permute(...).contiguous()` for fp8 runs far below HBM peak; an LDS-tile

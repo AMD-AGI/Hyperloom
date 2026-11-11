@@ -2,31 +2,29 @@
 
 A throughput gate cannot see accuracy: an FP8 MoE combine can pass on its
 throughput and fail GSM8K far below its golden score, and a decode-only
-MTP setting can cut GSM8K sharply with no error and no slowdown
-(serving-playbook numerics-knobs.md §0). The packs' per-iteration correctness
-check is a floor for a broken model (a subset of the questions and a pass score), not
-a comparison with the baseline.
+MTP setting can cut GSM8K sharply with no error and no slowdown. The packs'
+per-iteration correctness check is a floor for a broken model (a subset of the
+questions and a pass score), not a comparison with the baseline.
 
 So, when the pack turns ``policy.accuracy_gate`` on and the iteration's change
 moves a knob that changes numerics (knobs.json) or the agent writes
 ``NUMERICS: yes`` for a code change, the harness runs the pack's correctness
 script again on the full GSM8K set and the gate compares its score with the
 baseline's full-set score (the config's ``baseline_record``,
-``correctness_full.score``, as the campaign's baseline script stores
+``correctness_full.score``, as the campaign's baseline launcher stores
 it) minus ``policy.accuracy_tolerance``. Without a golden score it compares
 with the pack's ``GSM8K_MIN`` and says so.
 
 Under a host there is no baseline record, and the host's own eval of the root
-reads on another scale,
-so it cannot stand in. So in component mode, before iteration 1,
+reads on another scale, so it cannot stand in. So in component mode, before iteration 1,
 the driver serves the root as initialized and runs the full set once
 (``measure_root``), into ``<session>/baseline_accuracy.json``; the gate then
 holds a numerics change to that score less the tolerance, on the same eval.
 When the root could not be measured, ``GSM8K_MIN`` stays the floor.
 
 In component mode every KEEP is held to the full set, not only a numerics one:
-a host imports what Arbor keeps, and a change the agent did not call numerics can
-still break the served model. The gate decides first without the
+a host imports what Arbor keeps, and a change the agent did not call numerics
+can still break the served model. The gate decides first without the
 eval, and only an arm it would keep pays for the set. Turning on a switch that
 an earlier KEEP landed off (arbor/measure/switches.py) calls for it in every
 mode.
@@ -59,8 +57,8 @@ ROOT_FILE = "baseline_accuracy.json"
 BASELINE_SOURCE = "the baseline's full GSM8K (baseline_record)"
 ROOT_SOURCE = "the root's full GSM8K, measured by this session"
 FLOOR_SOURCE = "GSM8K_MIN: no golden score on record"
-# What measuring the root needs before the deadline: one server boot and the full set (a small
-# model on one GPU takes minutes for each). A run with less left keeps the floor.
+# What measuring the root needs before the deadline: one server boot and the full set (an 8B
+# model at TP1 on one MI350X takes a few minutes for each). A run with less left keeps the floor.
 ROOT_NEED_S = 30 * 60
 # The full set's result beside its output (measure), which a KEEP's snapshot carries.
 ACCURACY_FILE = "accuracy.json"

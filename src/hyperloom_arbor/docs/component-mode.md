@@ -1,7 +1,7 @@
 # Component mode: Arbor inside a host
 
-Status: **slices 1 to 3 built** (decisions in §7, as built in §8), and run
-on a GPU node (`scripts/component/`).
+Status: **slices 1 to 3 built** (decisions in §7, as built in §8), and run on a GPU node
+(`scripts/component/`).
 
 Arbor has run one way so far, **standalone**: it owns a node, its container and its clock. Its
 launchers recreate the container, its harness stops any server it finds and waits for every GPU
@@ -28,8 +28,8 @@ recorded in `session.json`, and a resumed session keeps it.
 "mode": "component",
 "component": {
   "host": "hyperloom-mb",
-  "deadline": "2030-01-01T00:00:00Z",
-  "seconds": 3600,
+  "deadline": "2026-10-29T03:20:00Z",
+  "seconds": 25200,
   "notes": "/abs/path/mb-integration.md",
   "bench_command": "python3 benchmark_serving.py ... --base-url http://127.0.0.1:{port} --result-dir {out}",
   "outbox": "keeps"
@@ -132,13 +132,15 @@ manifest without either side writing host-specific code.
 1. **An exhausted map with no time left for its update round: exit 0, and say why.** Every exit
    in component mode writes `<session>/component_exit.json` first: `{reason, iteration, keeps,
    map, deadline, ts}`, with `reason` one of `deadline`, `map_exhausted` (the map is closed and
-   its update round does not fit), `done` (STOP, max iterations), `sigterm`,
-   `aborted` (the harness stopped measuring: `ABORTED.md`, its message as `detail`), and
-   `review_rejected` (a human rejected the campaign at the review gate); the same line
+   its update round does not fit), `done` (STOP, max iterations), `sigterm`, `aborted` (the
+   harness stopped measuring: `ABORTED.md`, its message as `detail`), `review_rejected` (a human
+   rejected the campaign at the review gate) and `retraction_conflict` (a KEEP the agent found
+   invalid could not be reverted: see "Retraction" below); the same line
    goes to the log and the heartbeat. A host reads why Arbor ended instead of guessing from an exit code.
-   **One exception exits non-zero** (for model gateway outages): `unreachable`, a streak that ended while the model could not be reached, exits 3 after
-   writing its record. The host resumes it as it does a crash, instead of retiring the branch; the
-   resumed run moves that `ABORTED.md` aside and starts a fresh not-measured streak.
+   **One exception exits non-zero,** for gateway outages at sites that reach the gateway through a
+   tunnel or a proxy: `unreachable`, a streak that ended while the model could not be reached, exits
+   3 after writing its record. The host resumes it as it does a crash, instead of retiring the
+   branch; the resumed run moves that `ABORTED.md` aside and starts a fresh not-measured streak.
 2. **The snapshot format was proposed to MB** before slice 2 was built, and slice 2 was built to
    change if MB objected.
 3. **Component mode refuses to start without a deadline** (`deadline` or `seconds`), and refuses
@@ -197,9 +199,29 @@ command in the prompts (`arbor/component.py`, `arbor/policy/claude_loop.py`), an
 - **`bench_command`:** `{out}` is a directory per replay (`iter_N/host_bench/`, or `run<i>/`
   under it), made empty by the harness; the bench agent reads the metric from it into
   `bench_output.json` with a fixed one-line command, and with `bench_repeats` the fixed mean
-  block aggregates, as with the pack's bench. The same command also takes the
-  pack's `secondary_metric` when the client gives it; without it, the gate would see only the primary
+  block aggregates, as with the pack's bench. The same command also takes the pack's
+  `secondary_metric` when the client gives it; without it, the gate would see only the primary
   (`secondary: None` on every KEEP).
+- **The bench runs detached.** A command the agent's CLI ends takes its children with it, and
+  one host's replays died at 30 min that way. Where step 1 is all fixed commands (the pack's
+  bench, or the host's with `bench_read`), the harness writes them to `iter_N/bench_run.sh`; the
+  agent starts it with `setsid nohup`, its output in `iter_N/bench.log` and its PID in
+  `iter_N/bench.pid`, and waits on the output or the PID. When the turn ends, a bench still
+  running is stopped with its process group, so it never loads the next server.
+- **The server after the bench.** The bench turn stops everything it started except Arbor's own
+  server (its PID file's process group; standalone, the framework's server inside the
+  container), which its agent may have restarted after a crash. Before correctness the harness
+  checks it: if the bench turn restarted a server that was the arm and is not any more (a flag
+  changed to get it up), the iteration is NOT MEASURED; if the server is gone, the harness
+  relaunches it from the live config, and NOT MEASURED only if it does not come back. Without
+  this, correctness ran with no server and the change was booked as broken. The next
+  iteration's server turn restarts the server as before.
+- **The root's baseline.** With no `baseline_record` (or one with no `mean`), the harness
+  serves the root before iteration 1 and benches it with the same bench (`bench_repeats`
+  times, the mean): that is the bar iteration 1 must clear. A host that measured the root with
+  the same client passes `baseline_record` (a file, or the record itself: `{"mean": ...}`)
+  and nothing is booted. A host bench without `bench_read` cannot be read by the harness, so
+  there iteration 1's measurement is still the bar.
 - **`component.root`** (MB's request): MB's worktree is at the branch's start
   commit with the experiment repository's history behind it, so the first commit is not what MB
   gave. A sha in `component.root` is the base of `served.patch`, the first `change.patch`,
@@ -212,8 +234,8 @@ command in the prompts (`arbor/component.py`, `arbor/policy/claude_loop.py`), an
 A second launch at each KEEP, component mode only.
 `arbor/measure/short_prompts.py`; the probe after correctness and the check after the critic in
 `arbor/policy/claude_loop.py`. Where the build settled what the design left open:
-- **What it answers:** a kernel defect that gives wrong output on short sequences in some
-  server processes and not in others, which GSM8K does not see. The design's
+- **What it answers:** a kernel defect that gives wrong output on short sequences in some server processes
+  and not in others, which GSM8K does not see. The design's
   "against the base server" was dropped: MB compared with the parent first and stopped
   (Hyperloom `b315477e5`), because exact greedy matching fires on the largest gains (fp8 KV,
   quantized GEMMs). A defect wrong in every process is one GSM8K already sees, so the check
@@ -231,20 +253,20 @@ A second launch at each KEEP, component mode only.
   health under the `server` cap, and probes again (`iter_N/short_prompts_2.json`). The
   session's first KEEP sets the floor (`<session>/short_prompts/floor.json`); a later KEEP whose
   processes differ on more prompts sent one at a time than the floor becomes REVERT, with the
-  first differing positions in the reason. The batched half is recorded and refuses nothing:
-  an unchanged tree's two boots agree on the prompts sent one at a time but can differ on the
-  batched ones in their first tokens, because which prompts share a prefill batch changes
-  between boots and that flips near-tied greedy picks; pooled, that noise can hide a small
-  single-request defect and refuse a good KEEP. The second launch's server log is kept
+  first differing positions in the reason. The batched half is recorded and refuses nothing
+  (from the GPU run): an unchanged tree's two boots never differed on the prompts sent one at a
+  time, and differed on most of the batched ones in their first tokens, because which prompts
+  share a prefill batch changes
+  between boots and that flips near-tied greedy picks; pooled, that noise hid a small
+  single-request defect and could refuse a good KEEP. The second launch's server log is kept
   as `iter_N/server_2.log`. The record is `iter_N/short_prompts_check.json`; `keep.json` gets its
   brief, and a snapshot carries the record when the check ran.
 - **What refuses nothing:** an iteration probe that did not finish (no boot is spent then), a
   second boot that does not come up, no time left, a second probe that does not finish. The
   KEEP stands and `keep.json` says why, as MB's check does; MB re-gates every KEEP.
-- **Odds and cost:** a defect that shows in a fraction p of processes makes two processes differ
-  with probability 2p(1 - p) per KEEP, and every later KEEP that carries it is another chance.
-  The cost is one server boot and two probes per KEEP (several minutes for a large model), which
-  a host should allow for in its deadline.
+- **Odds and cost:** two processes catch a one-in-three defect 4 times in 9 per KEEP, and every
+  later KEEP that carries it is another chance. The cost is one server boot and two probes per
+  KEEP (about 5 minutes for a large model at TP4), which a host should allow for in its deadline.
 
 ### The host's plan
 
@@ -278,11 +300,40 @@ share; directions an Arbor finds outside its share come back as `proposals`.
     not a document, `map_rounds` above 0), or the config is refused. A `plan` beside it is a
     config error.
 - **`component.profile`:** the host's profile file, which MB writes from the root's `OpShares`.
-  It goes into the prompt at every iteration through the same capped reader as
-  the notes (`_read_head`), and the agent profiles only what it does not cover. When MB has no
-  shares (its head profile can be refused as too large), the key is left out.
+  It goes into the prompt at every iteration through the same capped reader as the notes
+  (`_read_head`), and the agent profiles only what it does not cover. When MB has no shares (a
+  head profile refused as too large, for example), the key is left out.
 - **The agent is told what the pass is for** (`dossier_pass_block`): LEARN only, every direction
   one Arbor's work, `depends_on` only where needed (joined directions go to one Arbor), every
   direction ranked.
   - The prompt is the only guard: the gate does not refuse a change in a pass.
   - The host ignores a pass's snapshots: it splits the map and does not import the KEEPs.
+
+### Retraction
+
+A KEEP the campaign's own agent later finds invalid is taken back: for example, a KEEP whose top-k
+selection a later iteration found invalid. The host's side was agreed with Hyperloom
+([its pull request](https://github.com/AMD-AGI/Hyperloom/pull/2431)).
+
+- **The agent says so in the ledger.** A `FACT` or `DEAD_END` gains `"retracts": <the KEEP's
+  iteration>` (`arbor/ledger.py`, the prompt's ledger section). Only a measured or reproduced defect
+  retracts; a suspicion is an `ASSUMPTION`.
+- **After that iteration's verdict** (`arbor/retraction.py`, called at the end of
+  `_finalize_iteration`):
+  - **The revert:** the KEEP's `iter-N:` commits, as a REVERT verdict reverts its own, so the history
+    says `Revert "iter-N: ..."` and later snapshots' `carries` skip it.
+  - **The snapshot:** a KEEP snapshot of the reverted tree, numbered as the next KEEP, with
+    `retracts: {iteration, keep, finding}` in keep.json. It is written before the row moves the KEEP
+    count, and without the iteration's own check records, which are of its candidate, not this tree.
+  - **The row:** a KEEP row under FIX-CORRECTNESS with `retracts`, claiming no metric (`metric`
+    null, `booked` false).
+  - **The bars:** back where they stood before the retracted KEEP, replayed on one scale
+    (`retraction.bar_before`). They stay as they are when a round end's A/B came after that KEEP.
+- **No gate measures the reverted tree:** a retraction is slower by construction. The host tests it
+  for errors and consistency and does not hold it to its speed gate.
+- **A revert that does not apply** (a later KEEP builds on the change) leaves the tree as it was and
+  writes `RETRACTION_CONFLICT.md`.
+  - **The exit:** 0 with reason `retraction_conflict`, the file's first line, naming the finding, as
+    `detail`.
+  - **How MB reads it:** a finished branch, not a crash.
+  - **To run the campaign on,** remove the file.
