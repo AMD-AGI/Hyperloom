@@ -457,6 +457,35 @@ jobs:
 
   # ---------------------------------------------------------------------------
   # Combine + gate: one job per Python version. Downloads all shard artifacts
+  # ---------------------------------------------------------------------------
+  # The script-workload harness runs inside the model's own environment, so its
+  # tests need torch and skip silently without it. Its own job rather than the
+  # test matrix, which would install torch once per shard per Python version.
+  # ---------------------------------------------------------------------------
+  script-harness:
+    name: script workload harness (torch, CPU)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/setup-python@v7
+        with:
+          python-version: "3.11"
+          cache: 'pip'
+          cache-dependency-path: pyproject.toml
+
+      - name: Install dependencies
+        run: |
+          pip install --upgrade pip
+          pip install -e ".[test]"
+          # The CPU index explicitly: a bare specifier resolves to the CUDA wheel.
+          pip install torch --index-url https://download.pytorch.org/whl/cpu
+
+      - name: Run harness tests
+        run: |
+          python -m pytest src/hyperloom/inference_optimizer/tests/test_script_workload.py \
+            -v --no-header -p no:randomly
+
   # for its version, ``coverage combine``-s them, renders the Job Summary, and
   # enforces fail_under -- exactly the pre-sharding behaviour, on the merged
   # data. Also fails if any shard's pytest run failed.
