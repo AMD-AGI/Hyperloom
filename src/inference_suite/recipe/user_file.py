@@ -15,7 +15,7 @@ import json
 from dataclasses import dataclass
 
 from inference_suite.contracts.base_launch import BASE_LAUNCH_SCHEMA, BaseLaunch
-from inference_suite.recipe.shell_launch import ShellLaunch, parse_shell_launch
+from inference_suite.recipe.shell_launch import ShellLaunch, ShellLaunchError, parse_shell_launch
 
 _CONTROLS_PREFIX = "# hyperloom-launch-controls:"
 
@@ -66,7 +66,10 @@ def _shell_launch(location: str, text: str, framework: str) -> ShellLaunch:
             f"{location} carries {_CONTROLS_PREFIX!r}, which a launch file no longer accepts; "
             "state the flags and exports the launch needs instead"
         )
-    launch = parse_shell_launch(text, framework=framework)
+    try:
+        launch = parse_shell_launch(text, framework=framework)
+    except ShellLaunchError as exc:
+        raise UserFileError(f"{location}: {exc}") from exc
     if not launch.has_entrypoint:
         raise UserFileError(f"{location} has no {framework} serving entrypoint")
     if launch.unresolved_flags:

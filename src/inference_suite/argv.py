@@ -280,7 +280,7 @@ def tokenize_server_args_preserving_json(
     return normalized, tokens
 
 
-def _is_flag(token: str) -> bool:
+def is_flag(token: str) -> bool:
     """``token`` names a flag rather than carrying a value (``-tp`` does, ``-1`` does not)."""
     return token.startswith("-") and not token[1:2].isdigit() and token.strip("-") != ""
 
@@ -304,10 +304,10 @@ def argv_flag_occurrences(tokens: Sequence[str]) -> list[tuple[str, str]]:
     """:func:`flag_occurrences` of a launch already split into its argv."""
     occurrences: list[tuple[str, str]] = []
     for index, token in enumerate(tokens):
-        if not _is_flag(token):
+        if not is_flag(token):
             continue
         name, assigned, value = token.partition("=")
-        if not assigned and index + 1 < len(tokens) and not _is_flag(tokens[index + 1]):
+        if not assigned and index + 1 < len(tokens) and not is_flag(tokens[index + 1]):
             value = tokens[index + 1]
         occurrences.append((canonical_flag_name(name), value))
     return occurrences
@@ -347,7 +347,7 @@ def without_speculative_config(argv: Sequence[str]) -> list[str]:
     kept: list[str] = []
     dropping = False
     for token in argv:
-        if _is_flag(token):
+        if is_flag(token):
             name = canonical_flag_name(token.partition("=")[0])
             dropping = name == SPECULATIVE_CONFIG_FLAG or name.startswith(SPECULATIVE_CONFIG_KEY_PREFIX)
         if not dropping:
@@ -363,7 +363,7 @@ def normalize_argv(argv: Sequence[str]) -> tuple[str, ...]:
     """
     normalized: list[str] = []
     for token in argv:
-        if _is_flag(token) and "=" in token:
+        if is_flag(token) and "=" in token:
             flag, _, value = token.partition("=")
             normalized.extend((flag, reserialize_json_blobs(value)))
         else:
@@ -378,6 +378,7 @@ __all__ = [
     "canonical_flag_name",
     "compact_json_server_args",
     "flag_occurrences",
+    "is_flag",
     "json_object",
     "last_alias_value",
     "normalize_argv",

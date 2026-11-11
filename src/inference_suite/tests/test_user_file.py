@@ -119,3 +119,10 @@ def test_json_base_launch_for_another_framework_is_refused():
 def test_other_documents_are_refused(content):
     with pytest.raises(UserFileError):
         parse_user_file("launch.json", content, framework="sglang")
+
+
+def test_a_shell_file_that_starts_two_servers_is_refused():
+    content = b"vllm serve m/x -tp 4 &\nvllm serve m/y -tp 4 &\n"
+
+    with pytest.raises(UserFileError, match="launch.sh: it starts more than one vllm server"):
+        parse_user_file("launch.sh", content, framework="vllm")

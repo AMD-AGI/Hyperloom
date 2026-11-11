@@ -52,9 +52,11 @@ when the commit lacks a function the resolver runs from InferenceX's own code
 lacks. To run on such a commit, resolve the base where its code was run and hand
 the frozen `base_launch.json` to `resolve --user-file`.
 
-A launch script is read, never run. It must launch the session's framework and fix
-every flag in its own text: a flag whose value names a shell variable, or a
-`# hyperloom-launch-controls:` line, is refused.
+A launch script is read, never run. It must start one server of the session's
+framework, on a line that is not a comment, and fix every flag in its own text: a
+second server, a flag whose value names a shell variable, or a
+`# hyperloom-launch-controls:` line, is refused. Options are read with one dash or
+two (`-tp 8`, `--tp 8`).
 
 A launch script, frozen base or default row that needs more GPUs than `--gpus` is
 refused, naming both counts.

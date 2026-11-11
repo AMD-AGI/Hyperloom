@@ -1,7 +1,8 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""Lift a static launch from a shell launch script: the serving entrypoint's flags and the literal exports.
+"""Lift a static launch from a shell launch script: the flags of the one command that starts the server, and the
+literal exports.
 
 The script is read, never run. What its text alone cannot fix -- a flag whose value names a shell variable, an
 export whose value expands one -- is listed apart rather than guessed, and the caller decides whether that is an
@@ -12,18 +13,26 @@ from __future__ import annotations
 
 import re
 import shlex
-from collections.abc import Iterator
+from collections.abc import Iterator, Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
+
+from inference_suite.argv import is_flag
 
 #: Flags the runner sets for every round, so a script's own values are taken out.
 _RUNNER_OWNED_FLAGS = frozenset({"--port", "--host", "--served-model-name", "--result-dir", "--result-filename"})
 _RUNNER_OWNED_PREFIXES = ("--result-", "--served-model")
 _MODEL_FLAGS = frozenset({"--model", "--model-path"})
+#: ``python3 -m <module>`` entrypoints, by module prefix, and the frameworks whose CLI runs ``<framework> serve``.
+_ENTRY_MODULES = {"sglang": "sglang.launch_server", "atom": "atom.entrypoints"}
 _SERVE_CLIS = frozenset({"vllm", "sglang"})
 _EXPORT = re.compile(r"^\s*export\s+([A-Za-z_][A-Za-z0-9_]*)=(.*)$", re.DOTALL)
 # ``${FOO:-1}`` / ``${FOO-1}``, capturing the name and the default.
 _SELF_DEFAULT = re.compile(r"^\$\{([A-Za-z_][A-Za-z0-9_]*):?-(.*)\}$")
+
+
+class ShellLaunchError(ValueError):
+    """A script's text does not fix one launch."""
 
 
 @dataclass(frozen=True)
@@ -45,24 +54,46 @@ class ShellLaunch:
     unresolved_env: tuple[str, ...] = ()
 
 
-def entrypoint_markers(framework: str) -> tuple[str, ...]:
-    """The substrings that mark ``framework``'s serving entrypoint on a script line, the canonical one first."""
-    name = str(framework or "").strip().lower()
-    if "atom" in name:
-        return ("atom.entrypoints",)
-    if "vllm" in name:
-        return ("vllm serve",)
-    return ("sglang.launch_server", "sglang serve")
+def _entrypoint_end(tokens: Sequence[str], framework: str) -> int | None:
+    """The index just past ``framework``'s serving entrypoint when ``tokens`` run it, else None.
+
+    Matched on words, so a comment, or an ``echo`` whose quoted text names the entrypoint, runs no server.
+    """
+    module = _ENTRY_MODULES.get(framework)
+    for i, token in enumerate(tokens[:-1]):
+        following = tokens[i + 1]
+        if token == "-m" and module is not None and following.startswith(module):
+            return i + 2
+        if framework in _SERVE_CLIS and Path(token).name == framework and following == "serve":
+            return i + 2
+    return None
 
 
 def parse_shell_launch(text: str, *, framework: str) -> ShellLaunch:
-    """Lift ``framework``'s launch from the shell script ``text``."""
+    """Lift ``framework``'s launch from the shell script ``text``.
+
+    Raises:
+        ShellLaunchError: When the script starts more than one server, or a line naming the entrypoint does not parse
+            as shell words.
+    """
     env, unresolved_env = _exports(text)
-    markers = entrypoint_markers(framework)
-    line = next((line for line in _logical_lines(text) if any(m in line for m in markers)), None)
-    if line is None:
+    launch: list[str] | None = None
+    for line in _logical_lines(text):
+        if framework not in line:
+            continue
+        try:
+            tokens = shlex.split(line, comments=True)
+        except ValueError as error:
+            raise ShellLaunchError(f"a line naming {framework} does not parse as shell words: {error}") from error
+        end = _entrypoint_end(tokens, framework)
+        if end is None:
+            continue
+        if launch is not None:
+            raise ShellLaunchError(f"it starts more than one {framework} server")
+        launch = tokens[end:]
+    if launch is None:
         return ShellLaunch(has_entrypoint=False, env=env, unresolved_env=unresolved_env)
-    return _lift_entrypoint(shlex.split(line), env=env, unresolved_env=unresolved_env)
+    return _lift_entrypoint(launch, env=env, unresolved_env=unresolved_env)
 
 
 def _logical_lines(text: str) -> Iterator[str]:
@@ -94,22 +125,12 @@ def _without_redirection(tokens: list[str]) -> list[str]:
     return kept
 
 
-def _flags_start(tokens: list[str]) -> int:
-    """Index of the first token after ``python3 -m <module>`` or ``<vllm|sglang> serve``."""
-    for i, token in enumerate(tokens):
-        if token == "-m" and i + 1 < len(tokens):
-            return i + 2
-        if token == "serve" and i > 0 and Path(tokens[i - 1]).name in _SERVE_CLIS:
-            return i + 1
-    return 0
-
-
 def _flag_value(tokens: list[str], i: int) -> tuple[str | None, int]:
     """The value of the flag at ``tokens[i]`` (None when bare) and how many tokens the flag spans."""
     token = tokens[i]
     if "=" in token:
         return token.split("=", 1)[1], 1
-    if i + 1 < len(tokens) and not tokens[i + 1].startswith("-"):
+    if i + 1 < len(tokens) and not is_flag(tokens[i + 1]):
         return tokens[i + 1], 2
     return None, 1
 
@@ -124,11 +145,11 @@ def _lift_entrypoint(tokens: list[str], *, env: dict[str, str], unresolved_env: 
     args: list[str] = []
     unresolved: list[str] = []
     stripped: list[str] = []
-    i = _flags_start(tokens)
+    i = 0
     while i < len(tokens):
         token = tokens[i]
-        if not token.startswith("--"):
-            if model is None and token != "serve" and "$" not in token:
+        if not is_flag(token):
+            if model is None and "$" not in token:
                 model = token
             i += 1
             continue
@@ -214,4 +235,4 @@ def _has_shell_expansion(value: str) -> bool:
     return False
 
 
-__all__ = ["ShellLaunch", "entrypoint_markers", "parse_shell_launch"]
+__all__ = ["ShellLaunch", "ShellLaunchError", "parse_shell_launch"]
