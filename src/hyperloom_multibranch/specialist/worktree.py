@@ -372,11 +372,13 @@ class SourceBase:
         if not path.exists():
             _git(self.path, "worktree", _ADD, "-b", f"mb/{branch}", str(path), BASE_BRANCH)
         common = self.path / _GIT_DIR
-        for prefix, target in linked_paths(common):
+        links = linked_paths(common)
+        for prefix, target in links:
             _link(path, PurePosixPath(prefix), target)
         found = self._worktrees.get(path)
         if found is None:
-            made = BranchWorktree(path, self._native, self._linked(), self._admin(path, common), common=common)
+            linked = tuple(Path(target) for _prefix, target in links)
+            made = BranchWorktree(path, self._native, linked, self._admin(path, common), common=common)
             found = self._worktrees.setdefault(path, made)
         return found
 
@@ -395,13 +397,6 @@ class SourceBase:
                 error,
             )
             return None
-
-    def _linked(self) -> tuple[Path, ...]:
-        """What every worktree's links point at, read from this base's own record, never from a worktree, whose
-        ``.git`` file whoever writes the worktree decides."""
-        record = self.path / _GIT_DIR / LINKED_PATHS
-        lines = record.read_text().splitlines() if record.exists() else []
-        return tuple(Path(line.split("\t", 1)[1]) for line in lines if "\t" in line)
 
     def _lay_native(self, native: SourceRoot, laid: Sequence[SourceRoot]) -> None:
         """Copy ``native`` to its upstream path, but for what ``laid`` already put there: the package a test loads is

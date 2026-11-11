@@ -809,15 +809,9 @@ class AgentSession:
             backend=setup.command.backend,
             heartbeat_sink=self._sink(grant.heartbeat_sink),
             stdin_open=setup.command.interactive,
-            readable=self._readable(),
+            readable=self._place.worktree.linked,
             git_admin=self._place.worktree.admin,
         )
-
-    def _readable(self) -> tuple[Path, ...]:
-        """What the branch's CLI reads besides its worktree and workspace, each absolute path that exists once: the
-        files its worktree links. The launch's plan masks every credential location these show."""
-        found = self._place.worktree.linked
-        return tuple(path for path in dict.fromkeys(found) if path.is_absolute() and path.exists())
 
     def _sink(self, service: HeartbeatSink) -> HeartbeatSink:
         """Keep the launch's ``beat`` for the idle wait, and hand it on to the MCP service's sink."""

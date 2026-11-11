@@ -422,6 +422,65 @@ async def test_a_clone_and_a_copy_are_the_group_s_to_write_and_the_shim_is_repla
     assert (tmp_path / "earlier-shim").stat().st_ino != shim.stat().st_ino, "replaced by rename, never written in place"
 
 
+async def test_a_copy_into_a_new_agent_directory_on_shared_storage_is_the_group_s_to_write(tmp_path: Path) -> None:
+    tmp_path.chmod(0o2775)
+    tree = tmp_path / "vendored"
+    (tree / "pkg").mkdir(parents=True)
+    (tree / "pkg" / "run.py").write_text("x", encoding="utf-8")
+    (tree / "pkg").chmod(0o755)
+    (tree / "pkg" / "run.py").chmod(0o644)
+    previous = os.umask(0o022)
+    try:
+        await fetch_source(str(tree), tmp_path / "agent" / "copied")
+    finally:
+        os.umask(previous)
+
+    assert _mode(tmp_path / "agent") == 0o2775
+    assert _mode(tmp_path / "agent" / "copied" / "pkg") == 0o2775
+    assert _mode(tmp_path / "agent" / "copied" / "pkg" / "run.py") == 0o664
+
+
+def _private(tmp_path: Path) -> tuple[Path, Path]:
+    """A ``0700`` directory and a ``0600`` file outside the agent's directory, the account's own."""
+    secret = tmp_path / "private"
+    secret.mkdir(mode=0o700)
+    (secret / "key").write_text("k", encoding="utf-8")
+    (secret / "key").chmod(0o600)
+    secret.chmod(0o700)
+    return secret, secret / "key"
+
+
+def test_a_shared_copy_follows_no_link_at_the_checkout_s_name(tmp_path: Path) -> None:
+    tmp_path.chmod(0o2775)
+    secret, key = _private(tmp_path)
+    agent = tmp_path / "agent"
+    agent.mkdir()
+    agent.chmod(0o2775)
+    (agent / "copied").symlink_to(secret)
+
+    with pytest.raises(OSError):
+        agent_onboarding._share_copy(agent / "copied")
+
+    assert (_mode(secret), _mode(key)) == (0o700, 0o600)
+
+
+def test_a_shared_copy_leaves_a_link_inside_the_checkout_as_it_is(tmp_path: Path) -> None:
+    tmp_path.chmod(0o2775)
+    secret, key = _private(tmp_path)
+    checkout = tmp_path / "agent" / "copied"
+    (checkout / "pkg").mkdir(parents=True)
+    (checkout / "pkg" / "run.py").write_text("x", encoding="utf-8")
+    for path, mode in ((checkout / "pkg" / "run.py", 0o644), (checkout / "pkg", 0o755), (checkout, 0o755)):
+        path.chmod(mode)
+    (checkout / "pkg" / "to-dir").symlink_to(secret)
+    (checkout / "pkg" / "to-file").symlink_to(key)
+
+    agent_onboarding._share_copy(checkout)
+
+    assert (_mode(secret), _mode(key)) == (0o700, 0o600)
+    assert (_mode(checkout), _mode(checkout / "pkg"), _mode(checkout / "pkg" / "run.py")) == (0o2775, 0o2775, 0o664)
+
+
 async def test_a_copy_outside_shared_storage_keeps_the_modes_of_the_tree_it_copied(tmp_path: Path) -> None:
     tmp_path.chmod(0o755)
     tree = tmp_path / "vendored"

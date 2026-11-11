@@ -40,6 +40,7 @@ from hyperloom_multibranch.specialist.agent_manifest import AgentManifest
 from hyperloom_multibranch.specialist.autonomous_session import (
     AGENT_DIR,
     MANIFEST_FILE,
+    START_TABLES_DIR,
     AutonomousSession,
     AutonomousSetup,
     collection_margin,
@@ -1570,6 +1571,27 @@ async def test_a_stop_whose_kill_times_out_is_noted_and_the_lease_still_goes_bac
 
     assert any("the sandbox service timed out" in notice for notice in await rig.notices())
     assert rig.toolbox.released == ["L1"]
+
+
+@pytest.mark.parametrize("shared", [True, False], ids=["shared", "private"])
+@pytest.mark.parametrize("tables", [False, True], ids=["root", "kb-champion"])
+async def test_a_preflight_makes_the_branch_s_directories_the_group_s_only_on_shared_storage(
+    tmp_path: Path, shared: bool, tables: bool
+) -> None:
+    given = {"start": _replayed(LocalBlobStore(tmp_path / "blobs")), "aiter": _aiter(tmp_path)} if tables else {}
+    rig = await _rig(tmp_path, **given)
+    (tmp_path / BRANCH).chmod(0o2775 if shared else 0o755)
+    previous = os.umask(0o022)
+    try:
+        await rig.session.preflight()
+    finally:
+        os.umask(previous)
+    await rig.session.stop()
+
+    agent = tmp_path / BRANCH / "session" / AGENT_DIR
+    made = [agent.parent, agent, agent / "src", *([agent / START_TABLES_DIR] if tables else [])]
+    modes = {path.name: oct(path.stat().st_mode & 0o7777) for path in made}
+    assert modes == dict.fromkeys(modes, oct(0o2775 if shared else 0o755))
 
 
 def _spec_envs(rig: Rig) -> dict[str, str]:

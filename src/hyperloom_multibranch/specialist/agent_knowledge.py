@@ -18,6 +18,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from hyperloom.contracts.recipe import Recipe
+from hyperloom_common.shared_storage import make_shared_dirs
 from hyperloom_multibranch.contracts.blackboard.records import BlackboardSnapshot
 from hyperloom_multibranch.contracts.blackboard.vocab import INTEGRATION_BRANCH
 from hyperloom_multibranch.contracts.repo import ExperimentRepo
@@ -120,7 +121,7 @@ class IntegrationNotes:
             return False
         files = self._path.parent / FILES_DIR
         await asyncio.to_thread(shutil.rmtree, files, ignore_errors=True)
-        files.mkdir(parents=True)
+        make_shared_dirs(files)
         await self._repo.checkout(head, files)
         merged = merged_changes(await self._blackboard.snapshot(), head)
         text = render_notes(head, await self._repo.read_recipe(head), merged, files)

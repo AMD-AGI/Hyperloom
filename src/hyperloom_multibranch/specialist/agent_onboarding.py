@@ -50,7 +50,13 @@ from time import monotonic
 from typing import Protocol
 
 from hyperloom.sandbox import SandboxError
-from hyperloom_common.shared_storage import child_umask, make_shared_dirs, parent_is_shared, write_shared_text
+from hyperloom_common.shared_storage import (
+    child_umask,
+    make_shared_dirs,
+    parent_is_shared,
+    shared_parent,
+    write_shared_text,
+)
 from hyperloom_multibranch.contracts.blackboard.records import OpShares
 from hyperloom_common.git_safety import NO_PROGRAMS
 from hyperloom_multibranch.repo.isolated_git import NO_LAZY_FETCH, blank_driver_programs, leading_options, trusting
@@ -84,6 +90,10 @@ SOURCE_DIR = "src"
 ENCODING = "utf-8"
 GIT = "git"
 GIT_DIR = ".git"
+#: How :func:`_share_copy` opens a directory of the copy: to list it and ``fchmod`` it, never through a link.
+_COPIED_DIRECTORY = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC
+#: How it opens an entry of one: never through a link, and without waiting on a FIFO put there meanwhile.
+_COPIED_ENTRY = os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK | os.O_NOCTTY | os.O_CLOEXEC
 QUIET = "--quiet"
 REV_PARSE = "rev-parse"
 SHIM_DIR = "bin"
@@ -402,6 +412,7 @@ async def _commit_tree(tree: Path, checkout: Path) -> None:
     """Copy ``tree`` into ``checkout`` as one commit, which names the commit of the repository ``tree`` lies in, when it
     lies in one, since that is the version of what was copied."""
 
+    make_shared_dirs(checkout.parent)
     shutil.copytree(tree, checkout, ignore=shutil.ignore_patterns(GIT_DIR, "__pycache__"), dirs_exist_ok=True)
     if parent_is_shared(checkout):
         _share_copy(checkout)
@@ -424,22 +435,58 @@ async def _commit_tree(tree: Path, checkout: Path) -> None:
 def _share_copy(checkout: Path) -> None:
     """Give what :func:`_commit_tree` copied into ``checkout`` on shared storage -- made just now by this process, with
     the modes of the tree it copied -- group write, and its directories setgid, never through a link: the agent's
-    sandbox, maybe another account of the group, writes it."""
+    sandbox, maybe another account of the group, writes it, and may have put a link anywhere in it.
 
-    for directory, _, files in os.walk(checkout):
+    Each entry is changed by ``fchmod`` on a descriptor opened without following a link, below the descriptor of its
+    directory, from ``checkout`` reached as :func:`~hyperloom_common.shared_storage.open_directory` reaches it.
+
+    Raises:
+        OSError: ``ELOOP`` for a link at ``checkout``'s name.
+    """
+
+    with shared_parent(checkout) as (parent, name, _shared):
+        top = os.open(name, _COPIED_DIRECTORY, dir_fd=parent)
+    _share_directory(top)
+
+
+def _share_directory(directory: int) -> None:
+    """Add group write and setgid to the directory open as ``directory``, and :func:`_share_entry` each of its entries;
+    closes ``directory``."""
+
+    try:
         _add_mode(directory, stat.S_IWGRP | stat.S_ISGID)
-        for name in files:
-            _add_mode(os.path.join(directory, name), stat.S_IWGRP)
+        for name in os.listdir(directory):
+            _share_entry(directory, name)
+    finally:
+        os.close(directory)
 
 
-def _add_mode(path: str, bits: int) -> None:
-    """Add ``bits`` to the directory or regular file ``path``; a link, or an entry an earlier attempt of another account
-    left (``EPERM``), is left as it is."""
+def _share_entry(directory: int, name: str) -> None:
+    """Add group write to the regular file ``name`` of ``directory``, or share it as a directory; a link, anything
+    else, or an entry another account left that this one cannot open, is left as it is."""
 
-    mode = os.lstat(path).st_mode
-    if stat.S_ISDIR(mode) or stat.S_ISREG(mode):
-        with contextlib.suppress(PermissionError):
-            os.chmod(path, stat.S_IMODE(mode) | (bits if stat.S_ISDIR(mode) else bits & ~stat.S_ISGID))
+    kind = stat.S_IFMT(os.stat(name, dir_fd=directory, follow_symlinks=False).st_mode)
+    if kind not in (stat.S_IFDIR, stat.S_IFREG):
+        return
+    try:
+        entry = os.open(name, _COPIED_ENTRY, dir_fd=directory)  # ELOOP for a link put there meanwhile
+    except PermissionError:
+        return
+    if stat.S_ISDIR(os.fstat(entry).st_mode):
+        _share_directory(entry)
+        return
+    try:
+        _add_mode(entry, stat.S_IWGRP)
+    finally:
+        os.close(entry)
+
+
+def _add_mode(descriptor: int, bits: int) -> None:
+    """Add ``bits`` to what is open as ``descriptor``; an entry an earlier attempt of another account left (``EPERM``)
+    is left as it is."""
+
+    with contextlib.suppress(PermissionError):
+        os.fchmod(descriptor, stat.S_IMODE(os.fstat(descriptor).st_mode) | bits)
 
 
 async def _checkout_git(argv: list[str], checkout: Path) -> CommandResult:
