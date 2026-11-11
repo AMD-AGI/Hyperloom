@@ -276,11 +276,6 @@ class AgentSetup:
     branch's lease is given back when its run ends, however it ended, and when it is stopped, unless it is a long one
     with a process running, which only the branch's stop gives back. A CLI waiting on such a process, a test of its
     branch or another branch's profile of its head is woken every ``wait_wake_s``.
-
-    ``readable`` are what every specialist of the session reads besides its worktree and workspace (the session's
-    references, its model), and ``lease_area(branch)`` the directory the roots of ``branch``'s dev leases are made in;
-    where a launch runs in a bubblewrap sandbox, those that exist are shown read-only, with the files the branch's
-    worktree links and its git metadata, and another branch's leases are not.
     """
 
     command: AgentCommand
@@ -299,8 +294,6 @@ class AgentSetup:
     clock: Callable[[], float] = time.time
     dev_leases: DevLeaseHolder | None = None
     wait_wake_s: float = WAIT_WAKE_S
-    readable: tuple[Path, ...] = ()
-    lease_area: Callable[[str], Path] | None = None
 
 
 class SessionBlackboard(BranchLogStore, UsageSink, Inbox, LearningStore, AgentRecords, LineageSink, Protocol):
@@ -816,14 +809,9 @@ class AgentSession:
             backend=setup.command.backend,
             heartbeat_sink=self._sink(grant.heartbeat_sink),
             stdin_open=setup.command.interactive,
-            readable=(*setup.readable, *self._place.worktree.linked, *self._lease_area()),
+            readable=self._place.worktree.linked,
             git_admin=self._place.worktree.admin,
         )
-
-    def _lease_area(self) -> tuple[Path, ...]:
-        """The area of the branch's own dev leases, when the session has one."""
-        lease_area = self._setup.lease_area
-        return () if lease_area is None else (lease_area(self._start.branch),)
 
     def _sink(self, service: HeartbeatSink) -> HeartbeatSink:
         """Keep the launch's ``beat`` for the idle wait, and hand it on to the MCP service's sink."""
