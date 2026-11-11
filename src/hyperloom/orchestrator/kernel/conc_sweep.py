@@ -1093,6 +1093,14 @@ def _decline_before_start(
     recorder: Any, state: SharedState, optimized: _Arm | None, concs: list[int], total_budget_sec: int | None
 ) -> dict[str, Any] | None:
     """The skip envelope for a sweep whose prerequisites are unmet, or ``None`` when it can start."""
+    # Local, unlike the module-level import in ``phases/sweep.py``: at module scope this
+    # closes a cycle back through this module's own ``run_conc_sweep``.
+    from hyperloom.inference_optimizer.framework_registry import is_scriptable
+
+    # SWEEP declines these on entry; checked again here because a sweep also reaches this
+    # function by an explicit request, which does not go through that entry.
+    if is_scriptable(getattr(state, "framework", "")):
+        return _declined(recorder, "non_serving_workload")
     isl = int(getattr(state, "isl", 0) or 0)
     osl = int(getattr(state, "osl", 0) or 0)
     baseline_tput = float(getattr(state, "baseline_tput", 0.0) or 0.0)

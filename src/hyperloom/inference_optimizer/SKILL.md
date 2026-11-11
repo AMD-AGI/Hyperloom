@@ -1037,6 +1037,11 @@ wins over auto `ISL+OSL+headroom`. A comma `$CONC` value such as
 `4,16,128` is accepted for compatibility; baseline uses the first value.
 Use `--conc-sweep-concs` to override the synthetic ladder SWEEP measures (`256,128,64,32,16,8,4,2`). Native AgentX uses `HYPERLOOM_AGENTX=1` with the ordinary workload flags, or `--benchmark-config` for an AgentX workload YAML. Hyperloom archives the resolved workload as `benchmark.yaml`; CONC is fixed per session, so start a separate session to measure another concurrency.
 
+Concurrency sweeps apply only to serving workloads. For server-less PyTorch
+workloads (`custom` and `xdit`), SWEEP records `non_serving_workload` and proceeds
+to CLOSE. Optimize the declared forward-pass workload; do not propose request
+concurrency as an optimization for these models.
+
 Native AgentX supports one node and SGLang/vLLM. It rejects `--enable-conc-sweep`,
 `--isl`, `--osl`, `--profile-osl`, `--max-model-len`, `--quantize` and
 `--quantize-scheme`. `--reference-script` is its base launch, ahead of the

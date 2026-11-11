@@ -12,6 +12,7 @@ from ..state.task_registry import TERMINAL_STATES, Task, TaskSpec
 from ..state.orchestration_memory import CYCLE_DIRECTIVE_REQUEST, build_cycle_memory
 from ..collaborator import CoordinatorCollaborator
 from . import machine_state as _phase_state
+from hyperloom.inference_optimizer.framework_registry import is_scriptable
 
 if TYPE_CHECKING:
     from .machine import Transition
@@ -90,6 +91,20 @@ class SweepPhase(CoordinatorCollaborator):
             await self._coord.phase_kernel_stack.drain_pending_keep_integrates()
         # Validate the stack for positive NEEDS_REVIEW kernels.
         await self._coord.phase_kernel_stack.maybe_validate_positive_needs_review_stack()
+        if is_scriptable(state.framework):
+            # A scriptable workload runs one forward pass of the operator's own script; there
+            # is no request concurrency to sweep, so every rung would measure the same thing.
+            log.info(
+                "SWEEP entry (from=%s): %s is a non-serving workload; recording terminal skip.",
+                from_phase or "<unknown>",
+                state.framework,
+            )
+            self._record_terminal_conc_sweep(
+                "skipped",
+                "non_serving_workload",
+                auto_conc_sweep_skipped="non_serving_workload",
+            )
+            return
         if not state.conc_sweep_enabled:
             log.info(
                 "SWEEP entry (from=%s): conc_sweep disabled; recording terminal skip.",

@@ -260,6 +260,8 @@ the bundle rather than the lever.
 
 ## Other requirements
 
+**No concurrency sweep.** A scriptable workload runs one forward pass of your script, so there is no request concurrency to vary: every rung of the ladder would measure the same thing. SWEEP records a terminal skip with `non_serving_workload` rather than spending its budget on a curve whose shape means nothing.
+
 **GPU type.** `--gpu-type` accepts `mi300x`, `mi308x`, `mi325x`, `mi355x`,
 `r9700`, `r9600d` and `radeon8060s` (Strix Halo). The entrypoint name uses the board as
 given: `mi325x` looks for `custom_mi325x.sh`, not `custom_mi300x.sh`. Without the flag, Hyperloom auto-detects through
