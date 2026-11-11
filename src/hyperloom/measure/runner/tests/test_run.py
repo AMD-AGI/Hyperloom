@@ -23,7 +23,7 @@ from hyperloom.measure import signing
 from hyperloom.measure.bundle import BundleExpectation, verify_bundle
 from hyperloom.measure.compile import LocalBlobStore, PackageBase, compile_environment
 from hyperloom.measure.hosted_spec import dir_manifest_sha256
-from hyperloom.measure.manifest import RESULT_SCHEMA, ResultManifest
+from hyperloom.measure.manifest import ResultManifest
 from hyperloom.measure.pins import IMAGE_DIGEST_VAR
 from hyperloom.measure.points import default_canonical, generate_points
 from hyperloom.measure.runner import run as runner
@@ -41,7 +41,6 @@ from hyperloom.measure.tests.bundle_factory import (
     STAGING,
     base_launch,
     spec_document,
-    spec_document_v1,
     stage_into,
 )
 from hyperloom.contracts.measurement import SandboxFacts
@@ -168,7 +167,7 @@ def test_a_v2_sheet_hands_the_test_its_frozen_base_and_the_runners_own_staging_a
     tool_cache = tmp_path / "runner-cache" / "inference-suite" / staging_key()
     assert env["INFERENCE_SUITE_TOOL_CACHE"] == str(tool_cache)
     manifest = ResultManifest.from_bytes((tmp_path / "out" / "manifest.json").read_bytes())
-    assert (manifest.runner.inference_suite_staging, manifest.runner.magpie_commit) == (STAGING.sha256(), None)
+    assert manifest.runner.inference_suite_staging == STAGING.sha256()
 
 
 def test_a_v2_sheet_whose_staging_is_other_software_than_the_runners_is_a_preflight_mismatch_naming_it(
@@ -193,17 +192,13 @@ def test_a_v2_sheet_whose_staging_is_other_software_than_the_runners_is_a_prefli
 @pytest.mark.parametrize(
     ("sheet", "named"),
     [
-        (
-            lambda: _sheet() | {"schema": "hyperloom.measurement-spec/v3"},
-            ("measurement-spec/v3", "measurement-spec/v2"),
-        ),
+        (lambda: _sheet() | {"schema": "hyperloom.measurement-spec/v1"}, ("measurement-spec/v2",)),
         (
             lambda: _sheet() | {"procedure": {k: v for k, v in _sheet()["procedure"].items() if k != "base_launch"}},
             ("measurement-spec/v2", "hyperloom-base-launch/1"),
         ),
-        (spec_document_v1, ("measurement-spec/v1", "measurement-spec/v2")),
     ],
-    ids=["version the runner does not know", "v2 without its base", "v1 measured through Magpie"],
+    ids=["another version", "without its base"],
 )
 def test_a_sheet_of_another_version_or_without_its_base_is_refused_naming_both_and_runs_nothing(
     tmp_path, env, monkeypatch, sheet, named
@@ -262,7 +257,6 @@ def test_a_successful_test_leaves_a_signed_manifest_and_status_last(tmp_path, en
             spec_fingerprint=ResultManifest.from_bytes(raw).spec_fingerprint,
             spec_sha256=None,
             sandbox_id="sbx-1",
-            result_schema=RESULT_SCHEMA,
         ),
     )
     assert signing.verify(raw, (out / "manifest.sig").read_text(), signing.public_key_pem(key))

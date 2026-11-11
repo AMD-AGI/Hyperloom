@@ -11,9 +11,7 @@ deduplicates inside a campaign and compares across campaigns.
 A v2 sheet carries the session's frozen base launch whole (``procedure.base_launch``) and the application's
 inference_suite staging as its normalised manifest (``tools.inference_suite.normalised``) and that manifest's sha256
 (``tools.inference_suite.staging``); a hosted runner refuses a test whose own published staging differs from it and
-its result manifest names its own normalised sha256. A v1 sheet, written while tests
-ran through Magpie, named a Magpie commit and a benchmark backend instead; the journal and the archive keep those, so a
-v1 sheet still loads, but nothing writes one.
+its result manifest names its own normalised sha256. A sheet of any other schema is refused.
 
 The result manifest lives in :mod:`hyperloom.measure.manifest`.
 """
@@ -22,8 +20,8 @@ from __future__ import annotations
 
 import hashlib
 import re
-from collections.abc import Callable, Iterator, Mapping
-from dataclasses import dataclass, field
+from collections.abc import Iterator, Mapping
+from dataclasses import dataclass
 from typing import Any
 
 from hyperloom.common.benchmark_config import BenchmarkPoint, BenchmarkPointError
@@ -46,14 +44,11 @@ from hyperloom.measure.docs import (
     string_map,
 )
 
-SPEC_SCHEMA_V1 = "hyperloom.measurement-spec/v1"
 SPEC_SCHEMA = "hyperloom.measurement-spec/v2"
-SPEC_SCHEMAS = (SPEC_SCHEMA_V1, SPEC_SCHEMA)
 #: The most bytes the carried base launch may take as canonical JSON; a resolved base is a few KiB, and the sheet is
 #: written whole into a sandbox and journalled with every attempt.
 MAX_BASE_LAUNCH_BYTES = 64 * 1024
 _BASE_LAUNCH = "base_launch"
-_BENCHMARK_BACKEND = "benchmark_backend"
 _INFERENCEX = "inferencex"
 _INFERENCE_SUITE = "inference_suite"
 _NORMALISED = "normalised"
@@ -67,9 +62,6 @@ _SHORT_PROMPTS = "short_prompts"
 _LONG_CONTEXT = "long_context"
 _CHECKPOINT = "checkpoint"
 _RESULT_DIR = "result_dir"
-#: A key the sheet of a test that ran a greedy decode pass carried. The pass is gone and the key means nothing, but the
-#: journal keeps those sheets and a result is verified again from them, so the key is read and dropped.
-_REMOVED_DECODE_PASS = "decode_pass"
 KINDS = ("test", "profile", _ACCURACY, "repro")
 PURPOSES = tuple(purpose.value for purpose in Purpose)
 DEFAULT_MAX_TOTAL_BYTES = 4 * 1024**3
@@ -242,11 +234,10 @@ class Attachment:
 @dataclass(frozen=True)
 class ToolCommits:
     """The tools a sheet names: the InferenceX commit, and the normalised manifest of the application's inference_suite
-    staging (``staging``). A v1 sheet named a Magpie commit (``magpie``) and no staging."""
+    staging (``staging``)."""
 
     inferencex: str
     staging: NormalisedManifest | None = None
-    magpie: str | None = None
 
     @classmethod
     def parse(cls, value: Any, path: str) -> "ToolCommits":
@@ -255,16 +246,7 @@ class ToolCommits:
         r.done()
         return tools
 
-    @classmethod
-    def parse_v1(cls, value: Any, path: str) -> "ToolCommits":
-        r = Reader(value, path)
-        tools = cls(inferencex=r.section(_INFERENCEX, _commit_of), magpie=r.section("magpie", _commit_of))
-        r.done()
-        return tools
-
     def to_document(self) -> dict[str, Any]:
-        if self.magpie is not None:
-            return {"magpie": {"commit": self.magpie}, _INFERENCEX: {"commit": self.inferencex}}
         staging = (
             None
             if self.staging is None
@@ -491,8 +473,7 @@ def _base_launch(value: Any, path: str) -> BaseLaunch:
 
 @dataclass(frozen=True)
 class Procedure:
-    """How the test runs. A v2 sheet carries the session's frozen base launch (``base_launch``); a v1 sheet named the
-    backend that ran it (``benchmark_backend``) instead."""
+    """How the test runs, and the session's frozen base launch it runs on (``base_launch``)."""
 
     prep: str
     warmup_rounds: int
@@ -502,7 +483,6 @@ class Procedure:
     silence_timeout_sec: float
     deadline_unix: float
     base_launch: BaseLaunch | None = None
-    benchmark_backend: str | None = None
     short_prompts: ShortPromptPlan | None = None
     long_context: LongContextPlan | None = None
     checkpoint: CheckpointPlan | None = None
@@ -510,15 +490,22 @@ class Procedure:
     @classmethod
     def parse(cls, value: Any, path: str) -> "Procedure":
         r = Reader(value, path)
-        procedure = cls(**_procedure_fields(r), base_launch=_base_launch(r.optional(_BASE_LAUNCH), r.at(_BASE_LAUNCH)))
-        r.done()
-        return procedure
-
-    @classmethod
-    def parse_v1(cls, value: Any, path: str) -> "Procedure":
-        r = Reader(value, path)
-        procedure = cls(**_procedure_fields(r), benchmark_backend=r.choice(_BENCHMARK_BACKEND, ("magpie", "bypass")))
-        r.optional(_REMOVED_DECODE_PASS)
+        rounds = Reader(r.raw("rounds"), r.at("rounds"))
+        warmup, measure = rounds.integer("warmup", minimum=0) or 0, rounds.integer("measure", minimum=1) or 1
+        rounds.done()
+        procedure = cls(
+            prep=r.choice("prep", ("grid", "conc_sweep")) or "",
+            warmup_rounds=warmup,
+            measure_rounds=measure,
+            accuracy=r.boolean(_ACCURACY),
+            timeout_sec=r.number("timeout_sec", minimum=1) or 1.0,
+            silence_timeout_sec=r.number("silence_timeout_sec", minimum=1) or 1.0,
+            deadline_unix=r.number("deadline_unix", minimum=0) or 0.0,
+            base_launch=_base_launch(r.optional(_BASE_LAUNCH), r.at(_BASE_LAUNCH)),
+            short_prompts=_short_prompts(r.optional(_SHORT_PROMPTS), r.at(_SHORT_PROMPTS)),
+            long_context=_long_context(r.optional(_LONG_CONTEXT), r.at(_LONG_CONTEXT)),
+            checkpoint=_checkpoint(r.optional(_CHECKPOINT), r.at(_CHECKPOINT)),
+        )
         r.done()
         return procedure
 
@@ -533,8 +520,6 @@ class Procedure:
         }
         if self.base_launch is not None:
             document[_BASE_LAUNCH] = self.base_launch.to_document()
-        if self.benchmark_backend is not None:
-            document[_BENCHMARK_BACKEND] = self.benchmark_backend
         if self.short_prompts is not None:
             document[_SHORT_PROMPTS] = self.short_prompts.to_document()
         if self.long_context is not None:
@@ -542,39 +527,6 @@ class Procedure:
         if self.checkpoint is not None:
             document[_CHECKPOINT] = self.checkpoint.to_document()
         return document
-
-
-def _procedure_fields(r: Reader) -> dict[str, Any]:
-    """The fields every sheet version's procedure has."""
-    rounds = Reader(r.raw("rounds"), r.at("rounds"))
-    warmup, measure = rounds.integer("warmup", minimum=0) or 0, rounds.integer("measure", minimum=1) or 1
-    rounds.done()
-    return {
-        "prep": r.choice("prep", ("grid", "conc_sweep")) or "",
-        "warmup_rounds": warmup,
-        "measure_rounds": measure,
-        "accuracy": r.boolean(_ACCURACY),
-        "timeout_sec": r.number("timeout_sec", minimum=1) or 1.0,
-        "silence_timeout_sec": r.number("silence_timeout_sec", minimum=1) or 1.0,
-        "deadline_unix": r.number("deadline_unix", minimum=0) or 0.0,
-        "short_prompts": _short_prompts(r.optional(_SHORT_PROMPTS), r.at(_SHORT_PROMPTS)),
-        "long_context": _long_context(r.optional(_LONG_CONTEXT), r.at(_LONG_CONTEXT)),
-        "checkpoint": _checkpoint(r.optional(_CHECKPOINT), r.at(_CHECKPOINT)),
-    }
-
-
-@dataclass(frozen=True)
-class _Version:
-    """How one sheet version reads the sections that differ between versions."""
-
-    tools: Callable[[Any, str], ToolCommits]
-    procedure: Callable[[Any, str], Procedure]
-
-
-_VERSIONS = {
-    SPEC_SCHEMA_V1: _Version(ToolCommits.parse_v1, Procedure.parse_v1),
-    SPEC_SCHEMA: _Version(ToolCommits.parse, Procedure.parse),
-}
 
 
 @dataclass(frozen=True)
@@ -664,17 +616,12 @@ class MeasurementSpec:
     model_hashes: Mapping[str, str]
     procedure: Procedure
     outputs: Outputs
-    schema: str = field(default=SPEC_SCHEMA)
 
     @classmethod
     def from_document(cls, document: Any) -> "MeasurementSpec":
         r = Reader(document, "spec")
-        schema = r.text("schema") or ""
-        version = _VERSIONS.get(schema)
-        if version is None:
-            raise DocumentError(
-                f"spec.schema: {schema!r} is not a sheet version this reader knows ({', '.join(SPEC_SCHEMAS)})"
-            )
+        if r.text("schema") != SPEC_SCHEMA:
+            raise DocumentError(f"spec.schema: expected {SPEC_SCHEMA}")
         spec = cls(
             request_id=r.text("request_id") or "",
             kind=r.choice(_KIND, KINDS) or "",
@@ -686,12 +633,11 @@ class MeasurementSpec:
             process_env=string_map(r.raw("process_env"), r.at("process_env")),
             platform_env=_platform_env(r.raw("platform_env"), r.at("platform_env")),
             unset_envs=_unset_envs(r.raw("unset_envs"), r.at("unset_envs")),
-            tools=r.section("tools", version.tools),
+            tools=r.section("tools", ToolCommits.parse),
             environment=r.section("environment", Environment.parse),
             model_hashes=_model_hashes(r.raw("model_hashes"), r.at("model_hashes")),
-            procedure=r.section("procedure", version.procedure),
+            procedure=r.section("procedure", Procedure.parse),
             outputs=r.section("outputs", Outputs.parse),
-            schema=schema,
         )
         r.done()
         ids = [attachment.id for attachment in spec.attachments]
@@ -708,7 +654,7 @@ class MeasurementSpec:
 
     def to_document(self) -> dict[str, Any]:
         return {
-            "schema": self.schema,
+            "schema": SPEC_SCHEMA,
             "request_id": self.request_id,
             _KIND: self.kind,
             "meta": self.meta.to_document(),

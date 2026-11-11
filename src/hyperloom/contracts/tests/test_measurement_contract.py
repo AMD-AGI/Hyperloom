@@ -779,18 +779,3 @@ def test_round_metrics_are_named_by_the_report_fixed_key_table() -> None:
     assert graded <= set(FIXED_METRIC_KEYS)
     metrics = dict.fromkeys(FIXED_METRIC_KEYS, 1.0)
     assert _roundtrip(RoundValue("measure", 8, metrics)).metrics == metrics
-
-
-def test_a_round_recorded_from_a_magpie_benchmark_report_still_loads_with_its_metric_names() -> None:
-    """Records made before rounds read inference_suite's report.json keep Magpie's metric names; they are read as is."""
-    recorded = {
-        "phase": "measure",
-        "concurrency": 64,
-        "metrics": {"output_throughput": 5000.0, "median_ttft_ms": 120.5, "p99_itl_ms": 9.25},
-        "completed_requests": 640,
-        "failed_requests": 0,
-    }
-
-    round_value = RoundValue.from_document(recorded)
-
-    assert round_value.to_document() == recorded

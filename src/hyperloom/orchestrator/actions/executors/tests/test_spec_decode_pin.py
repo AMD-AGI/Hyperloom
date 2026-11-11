@@ -11,7 +11,7 @@ from pathlib import Path
 import pytest
 import yaml
 
-from hyperloom.inference_optimizer.agentx.report import native_launch_evidence
+from hyperloom.orchestrator.actions.executors.tests.test_native_launch_replay import native_receipt
 from hyperloom.orchestrator.actions.executors import _grid_runner as gr
 from hyperloom.orchestrator.actions.executors._grid_base import GridVariant
 from hyperloom.orchestrator.actions.executors._grid_runner import GridRecipe, _build_variant_yaml, run_grid
@@ -556,22 +556,7 @@ def _native_recipe(
     )
     config = materialize_benchmark_config(source, tmp_path / "recipe")
     argv = NATIVE_PREFIX + list(recipe_args or [])
-    persist_launch_evidence(
-        native_launch_evidence(
-            {
-                "agentx_metrics": {
-                    "server_launch": {
-                        "base_argv": argv,
-                        "effective_argv": argv,
-                        "effective_env": dict(recipe_envs or {}),
-                    },
-                    "recipe": {"tp": 1, "ep": 1, "conc": 8},
-                }
-            },
-            config,
-        ),
-        slot=config.parent,
-    )
+    persist_launch_evidence(native_receipt(config, argv, dict(recipe_envs or {})), slot=config.parent)
     return config
 
 

@@ -35,7 +35,6 @@ def _validator(name: str) -> Draft202012Validator:
 
 
 VALIDATOR = _validator("measurement_result.v2.schema.json")
-VALIDATOR_V1 = _validator("measurement_result.v1.schema.json")
 PUBLIC = signing.public_key_pem(signing.generate_private_key())
 PACK_DIGEST = "sha256:" + "ab" * 32
 
@@ -59,33 +58,16 @@ def test_a_manifest_round_trips_and_passes_the_schema() -> None:
     )
 
 
-def test_a_v2_manifest_names_the_staging_its_runner_ran_and_no_magpie_commit() -> None:
-    runner = ResultManifest.from_document(_document()).runner
-
-    assert (runner.inference_suite_staging, runner.magpie_commit) == ("e" * 64, None)
-    with pytest.raises(DocumentError, match="magpie_commit"):
-        ResultManifest.from_document(_edit(lambda d: d["runner"].update(magpie_commit="e" * 40)))
-
-
-def test_a_v1_manifest_an_archived_bundle_was_signed_with_still_loads() -> None:
-    def as_v1(document: dict[str, Any]) -> None:
-        document["schema"] = "hyperloom.measurement-result/v1"
-        del document["runner"]["inference_suite_staging"]
-        document["runner"]["magpie_commit"] = "e" * 40
-
-    document = _edit(as_v1)
-    assert list(VALIDATOR_V1.iter_errors(document)) == []
-
-    runner = ResultManifest.from_bytes(encode_manifest(document)).runner
-
-    assert (runner.magpie_commit, runner.inference_suite_staging) == ("e" * 40, None)
+def test_a_manifest_names_the_staging_its_runner_ran() -> None:
+    assert ResultManifest.from_document(_document()).runner.inference_suite_staging == "e" * 64
     with pytest.raises(DocumentError, match="inference_suite_staging"):
-        ResultManifest.from_document(_edit(lambda d: (as_v1(d), d["runner"].update(inference_suite_staging="e" * 64))))
+        ResultManifest.from_document(_edit(lambda d: d["runner"].pop("inference_suite_staging")))
 
 
-def test_a_manifest_of_a_version_no_reader_knows_is_refused_naming_the_known_ones() -> None:
-    with pytest.raises(DocumentError, match="hyperloom.measurement-result/v1, hyperloom.measurement-result/v2"):
-        ResultManifest.from_document(_edit(lambda d: d.update(schema="hyperloom.measurement-result/v3")))
+@pytest.mark.parametrize("schema", ["hyperloom.measurement-result/v1", "hyperloom.measurement-result/v3"])
+def test_a_manifest_of_another_version_is_refused_naming_the_one_the_reader_reads(schema: str) -> None:
+    with pytest.raises(DocumentError, match="expected hyperloom.measurement-result/v2"):
+        ResultManifest.from_document(_edit(lambda d: d.update(schema=schema)))
 
 
 def test_a_manifest_states_the_rule_pack_its_runner_read_and_one_from_an_older_runner_states_none() -> None:
