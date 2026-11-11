@@ -23,6 +23,8 @@ from inference_suite.contracts.base_launch import (
     SourceApi,
     SourceKind,
     Topology,
+    UpstreamRevision,
+    UpstreamSource,
     VersionBasis,
     Workload,
 )
@@ -169,6 +171,8 @@ __all__ = [
     "SuiteConfig",
     "Telemetry",
     "Topology",
+    "UpstreamRevision",
+    "UpstreamSource",
     "VersionBasis",
     "Workload",
     "WorkloadKind",

@@ -36,17 +36,20 @@ from inference_suite.contracts import (
     LaunchSource,
     SourceKind,
     Topology,
+    UpstreamRevision,
+    UpstreamSource,
     VersionBasis,
     Workload,
 )
 from inference_suite.recipe import sources
 from inference_suite.recipe.golden_curve import GoldenLength, GoldenRequest
 from inference_suite.recipe.inferencex import INFERENCEX_REPO, PROJECT, InferencexPoint, Scenario, inferencex_points
-from inference_suite.recipe.model import InferencexSelection, InferencexSnapshot, RecipeSourceError
+from inference_suite.recipe.model import ApiResponse, InferencexSelection, InferencexSnapshot, RecipeSourceError
 from inference_suite.recipe.resolve import UnreadSource
 from inference_suite.recipe.user_file import UserFile, parse_user_file
 from inference_suite import cli
 from inference_suite.recipe.sources import (
+    HF_MODELS_API,
     MAIN,
     SRT_SLURM,
     Checkout,
@@ -208,6 +211,33 @@ def test_a_source_that_cannot_be_read_is_named_and_stops_the_reading(read_infere
     assert snapshot.unread == UnreadSource("the sglang releases", "git ls-remote exited 128: could not resolve host")
     assert snapshot.inferencex == _main_fixture()
     assert snapshot.sglang_cookbook is None
+
+
+def _model_card(monkeypatch, card: dict) -> None:
+    monkeypatch.setattr(sources, "_latest_releases", lambda framework: {})
+    monkeypatch.setattr(sources, "_with_cookbook", lambda snapshot, query, scratch: snapshot)
+    monkeypatch.setattr(sources, "_with_inferencex_answers", lambda snapshot, *args: snapshot)
+    monkeypatch.setattr(sources, "fetch_response", lambda url: ApiResponse(url, 200, json.dumps(card), 1))
+
+
+def test_an_agentx_read_records_the_model_card_s_commit(read_inferencex, monkeypatch) -> None:
+    _model_card(monkeypatch, {"sha": "e" * 40, "cardData": {"base_model": "deepseek-ai/DeepSeek-R1"}})
+
+    snapshot = fetch_sources(_AGENTX_QUERY)
+
+    assert snapshot.base_model == "deepseek-ai/DeepSeek-R1"
+    assert snapshot.model_revision == UpstreamRevision(
+        UpstreamSource.HF_MODEL, f"{HF_MODELS_API}/deepseek-ai/DeepSeek-R1-0528", "e" * 40
+    )
+
+
+def test_a_model_card_naming_no_commit_is_an_unread_source(read_inferencex, monkeypatch) -> None:
+    _model_card(monkeypatch, {"cardData": {}})
+
+    snapshot = fetch_sources(_AGENTX_QUERY)
+
+    assert snapshot.unread.source == "the Hugging Face model card"
+    assert "names no commit" in snapshot.unread.reason
 
 
 def _frozen_agentx_file() -> UserFile:

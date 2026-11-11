@@ -31,6 +31,8 @@ from inference_suite.contracts import (
     Redacted,
     SourceKind,
     Topology,
+    UpstreamRevision,
+    UpstreamSource,
     VersionBasis,
     Workload,
 )
@@ -666,3 +668,33 @@ def test_vllm_short_expert_parallel_reads_the_same_topology_from_a_recipe_and_th
     assert (recipe.source.kind, default.source.kind) == (SourceKind.VLLM_RECIPES, SourceKind.DEFAULT_TABLE)
     for base in (recipe, default):
         assert base.topology == VLLM_TOPOLOGY.read(base.args) == Topology(4, 4)
+
+
+def test_a_base_records_the_revision_each_source_was_read_at():
+    model_card = UpstreamRevision(
+        UpstreamSource.HF_MODEL, "https://huggingface.co/api/models/zai-org/GLM-5.3", "d" * 40
+    )
+    snapshot = dataclasses.replace(_snapshot(), model_revision=model_card)
+
+    upstream = _base(_fixed(), snapshot).upstream
+
+    by_source = {(revision.source, revision.location): revision.revision for revision in upstream}
+    for source, bundle in (
+        (UpstreamSource.INFERENCEX, snapshot.inferencex.bundle),
+        (UpstreamSource.SGLANG_COOKBOOK, snapshot.sglang_cookbook),
+        (UpstreamSource.ATOM_CATALOG, snapshot.atom_catalog),
+    ):
+        assert by_source[(source, bundle.repo)] == bundle.commit
+    assert model_card in upstream
+    responses = snapshot.vllm_recipes.responses
+    assert {
+        location: revision
+        for (source, location), revision in by_source.items()
+        if source is UpstreamSource.VLLM_RECIPES
+    } == {url: response.provenance().response_sha256 for url, response in responses.items()}
+
+
+def test_a_frozen_base_keeps_the_revisions_it_was_resolved_at():
+    frozen = dataclasses.replace(_base(_fixed()), upstream=_base(_fixed()).upstream[:1])
+
+    assert _base(_fixed(), _frozen_user_file(frozen)).upstream == frozen.upstream
