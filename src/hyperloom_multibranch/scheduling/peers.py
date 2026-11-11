@@ -82,7 +82,7 @@ class PeerSetup:
     third-party agents the user named, each run on an autonomous branch of its own, ``reference_script`` the operator's
     launch file the session freezes as its base (``""`` for none), ``agent_pack`` the pack an
     Arbor among them runs (``""`` for the adapter's default), ``agent_launch`` the file of the launch its recipe's
-    adds to (``""`` when the recipe's is the whole launch), ``agent_port`` the first port of their port blocks,
+    adds to (``""`` for the session's frozen base), ``agent_port`` the first port of their port blocks,
     ``agent_dossier`` the dossier the run gives every agent branch with its reviewed map (``""`` for none), and
     ``agent_review`` how an Arbor's own review gate is handed over (``AgentSpec.review``: the host reviews, nobody
     does, or ``""`` for neither), ``agent_maps`` the scheduler's side of a mapping branch, ``None`` without agents, and

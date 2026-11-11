@@ -50,9 +50,8 @@ when the commit lacks a function the resolver runs from InferenceX's own code
 (for example, a commit without `acceptance_length`, `generation_role` and
 `verifier` in `infx.srt_slurm.synthetic_acceptance`); the message names what it
 lacks. To run on such a commit, resolve the base where its code was run and hand
-the session the frozen `base_launch.json` as `--reference-script` (for
-`hyperloom-multibranch run`, as `--agent-launch` beside an Arbor
-`--autonomous-agent`).
+the session the frozen `base_launch.json` as `--reference-script`
+(`hyperloom-multibranch run` takes it the same way).
 
 A launch script is read, never run. It must launch the session's framework and fix
 every flag in its own text: a flag whose value names a shell variable, or a
