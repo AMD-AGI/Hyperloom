@@ -60,6 +60,9 @@ two (`-tp 8`, `--tp 8`).
 
 A launch script, frozen base or default row that needs more GPUs than `--gpus` is
 refused, naming both counts.
+A frozen base resolved for another model, workload or framework, or for a board
+of another architecture or HBM capacity than the session's, is refused, naming both
+values.
 
 An InferenceX entry of the session's model that its config cannot place (a runner
 on no board label, a missing key) is that entry's miss; entries of other models are
