@@ -564,6 +564,60 @@ def test_remote_driver_takes_over_a_parked_launcher_child(tmp_path: Path) -> Non
             p.wait()
 
 
+def _driver_scope(monkeypatch: pytest.MonkeyPatch, *, held: bool, calls: list) -> dict:
+    driver = pd_cmds._REMOTE_DRIVER.replace("\nrestart_remote_main()\n", "\n")
+    scope: dict = {"os": os}
+    exec(driver, scope)
+    scope["_find_server"] = lambda _pidfile, _needle: 4242
+    scope["_ppid"] = lambda pid: 1
+    scope["_sid"] = lambda pid: 1 if (pid == 1 or held) else pid
+    scope["replace_process_image"] = lambda pid, argv, env_snapshot="": calls.append(("exec", pid, argv[0]))
+    scope["descendant_pids"] = lambda pid: [4243]
+    scope["_spawn_detached"] = lambda launch: calls.append(("spawn", launch)) or 5151
+    monkeypatch.setattr(os, "kill", lambda pid, sig: calls.append(("kill", pid, sig)))
+    return scope
+
+
+@pytest.mark.parametrize("held", [True, False])
+@pytest.mark.parametrize("action", ["restart", "stop"])
+def test_remote_driver_execs_in_place_only_for_the_launcher_waited_pid(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, capsys: pytest.CaptureFixture[str], held: bool, action: str
+) -> None:
+    calls: list = []
+    scope = _driver_scope(monkeypatch, held=held, calls=calls)
+    monkeypatch.setenv("HL_PIDFILE", str(tmp_path / "role.pid"))
+    monkeypatch.setenv("HL_LAUNCH_PATH", str(tmp_path / "launch.sh"))
+    monkeypatch.setenv("HL_ACTION", action)
+    scope["restart_remote_main"]()
+    result = json.loads(capsys.readouterr().out.strip().splitlines()[-1])
+    if held:
+        assert result["action"] == ("exec" if action == "restart" else "stop-exec")
+        assert [c[0] for c in calls] == ["exec"]
+    else:
+        assert result["action"] == ("respawn" if action == "restart" else "stop-kill")
+        assert ("kill", 4242, 9) in calls and ("kill", 4243, 9) in calls
+        assert not [c for c in calls if c[0] == "exec"]
+        assert [c[0] for c in calls if c[0] == "spawn"] == (["spawn"] if action == "restart" else [])
+
+
+def test_detached_spawn_logs_to_file_and_console(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    driver = pd_cmds._REMOTE_DRIVER.replace("\nrestart_remote_main()\n", "\n")
+    scope: dict = {"os": os}
+    exec(driver, scope)
+    console = tmp_path / "console"
+    console.write_text("", encoding="utf-8")
+    monkeypatch.setenv("HL_CONSOLE", str(console))
+    launch = tmp_path / "launch.sh"
+    launch.write_text("#!/bin/bash\necho hl-spawned-$$\n", encoding="utf-8")
+    pid = scope["_spawn_detached"](str(launch))
+    os.waitpid(pid, 0)
+    deadline = time.monotonic() + 5
+    while time.monotonic() < deadline and f"hl-spawned-{pid}" not in console.read_text(encoding="utf-8"):
+        time.sleep(0.05)
+    assert f"hl-spawned-{pid}" in (tmp_path / "launch.sh.log").read_text(encoding="utf-8")
+    assert f"hl-spawned-{pid}" in console.read_text(encoding="utf-8")
+
+
 def test_liveness_probe_greps_every_needle(monkeypatch: pytest.MonkeyPatch) -> None:
     fake = _FakeCli({"10.0.0.1": "HL_ALIVE\n", "10.0.0.2": "HL_ALIVE\n"})
     monkeypatch.setattr(pd_cmds, "_cli", lambda: fake)

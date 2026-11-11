@@ -40,6 +40,14 @@ from .._internal.server_args_safety import ServerArgsRejected, validate_server_a
 _REMOTE_DRIVER = r"""
 import json
 
+# Output goes to the launch log and, when writable, to the console (the container's stdout).
+_SPAWN_SH = (
+    'log="$1.log"; '
+    'if [ -w "$2" ]; then exec > >(tee -a "$log" >> "$2") 2>&1; else exec >> "$log" 2>&1; fi; '
+    'exec /bin/bash "$1"'
+)
+
+
 def _spawn_detached(launch):
     pid = os.fork()
     if pid == 0:
@@ -49,7 +57,8 @@ def _spawn_detached(launch):
         os.dup2(log_fd, 2)
         null_fd = os.open(os.devnull, os.O_RDONLY)
         os.dup2(null_fd, 0)
-        os.execv("/bin/bash", ["/bin/bash", launch])
+        console = os.environ.get("HL_CONSOLE", "/proc/1/fd/1")
+        os.execv("/bin/bash", ["/bin/bash", "-c", _SPAWN_SH, "hl-spawn", launch, console])
     return pid
 
 
@@ -69,6 +78,14 @@ def _is_parked(pid, parent, cmd):
         return False
     try:
         return _sid(pid) == _sid(1)
+    except OSError:
+        return False
+
+
+def _held_by_launcher(pid):
+    # The process PID 1 waits on: ending it ends the container, so it is only ever exec'd in place.
+    try:
+        return _ppid(pid) == 1 and _sid(pid) == _sid(1)
     except OSError:
         return False
 
@@ -116,7 +133,7 @@ def restart_remote_main():
         if pid <= 0:
             print(json.dumps({"status": "ok", "action": "stop", "pid": 0}))
             return
-        if _ppid(pid) == 1:
+        if _held_by_launcher(pid):
             replace_process_image(pid, ["/bin/sleep", "infinity"], env_snapshot=pidfile + ".environ")
             open(pidfile, "w", encoding="utf-8").write(str(pid))
             print(json.dumps({"status": "ok", "action": "stop-exec", "pid": pid}))
@@ -137,7 +154,7 @@ def restart_remote_main():
         open(pidfile, "w", encoding="utf-8").write(str(new_pid))
         print(json.dumps({"status": "ok", "action": "spawn", "pid": new_pid}))
         return
-    if _ppid(pid) == 1:
+    if _held_by_launcher(pid):
         replace_process_image(pid, ["/bin/bash", launch], env_snapshot=pidfile + ".environ")
         open(pidfile, "w", encoding="utf-8").write(str(pid))
         print(json.dumps({"status": "ok", "action": "exec", "pid": pid}))
