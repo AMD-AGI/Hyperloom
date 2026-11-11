@@ -20,6 +20,7 @@ import logging
 import os
 import re
 import shutil
+import stat
 import subprocess
 import tempfile
 import threading
@@ -40,12 +41,12 @@ from hyperloom.measure.pins import ImagePinError, active_image
 from hyperloom_multibranch.contracts.sources import NativeTree, SourceRoot, meta_sections, source_roots
 from hyperloom_common.git_safety import (
     app_git,
-    below_shared_storage,
-    own_git_admin,
-    own_worktree_admin,
-    recorded_admin_dir,
+    check_shared_repository,
+    git_dir_umask,
+    share_objects_and_refs,
     trusted_admin_dir,
 )
+from hyperloom_common.shared_storage import SHARED_CHILD_UMASK, parent_is_shared
 from hyperloom_multibranch.repo.isolated_git import (
     INIT,
     NO_EXCLUDES_FILE,
@@ -101,6 +102,7 @@ _HEAD = "HEAD"
 _SYNCED = "refs/worktree/hyperloom/synced"
 _REV_PARSE = "rev-parse"
 _GIT_DIR = ".git"
+_OWNER_DIR, _OWNER_FILE = 0o755, 0o644
 _QUIET = "--quiet"
 _DIFF = "diff"
 _CACHED = "--cached"
@@ -235,7 +237,7 @@ def source_unkept(component: str, recipe: Recipe) -> str:
     )
 
 
-def _git(cwd: Path, *args: str, index: Path | None = None, common: Path | None = None) -> str:
+def _git(cwd: Path, *args: str, index: Path | None = None, common: Path | None = None, umask: int = -1) -> str:
     """``git <args>`` in ``cwd``.
 
     With ``common``, ``cwd`` is a branch's worktree, which the agent writes, made from the repository whose git
@@ -243,11 +245,20 @@ def _git(cwd: Path, *args: str, index: Path | None = None, common: Path | None =
     directory only once it is proven the app's and ``common``'s, never against one the worktree's gitfile was pointed
     at. Otherwise ``cwd`` is the source base or an image's checkout: every driver program its config defines is blanked
     (:func:`~hyperloom_multibranch.repo.isolated_git.blank_driver_programs`) and the tree is trusted whoever owns it
-    (``safe.directory``), as an earlier leg that made it may have been another account. Either way no program the
-    config names runs."""
+    (``safe.directory``), as an earlier leg that made it may have been another account; when ``cwd`` holds a shared
+    repository (:func:`~hyperloom_common.git_safety.check_shared_repository`), what git reads besides objects and refs
+    must be its maker's alone, or nothing runs, and git is pinned to that git directory (``GIT_COMMON_DIR``) and runs
+    under the shared child umask, so the admin directory of a worktree it adds is the group's. Either way no program
+    the config names runs. ``umask`` is git's (``-1``: this process's, or the shared child umask there)."""
     pinned = _GIT_IDENTITY if index is None else {**_GIT_IDENTITY, "GIT_INDEX_FILE": str(index)}
     if common is not None:
         return _worktree_git(cwd, common, args, pinned)
+    try:
+        if _shared_git_dir(cwd):
+            pinned = {**pinned, "GIT_COMMON_DIR": str(cwd / _GIT_DIR)}
+            umask = SHARED_CHILD_UMASK if umask == -1 else umask
+    except OSError as error:
+        raise WorktreeError(f"git in {cwd} was refused: {error}") from error
     env = git_env(**pinned)
     trusted = trusting(cwd)
     try:
@@ -258,6 +269,7 @@ def _git(cwd: Path, *args: str, index: Path | None = None, common: Path | None =
         git_argv(*trusted, *_FIXED_CONFIG, *blanked, *args),
         cwd=cwd,
         env=env,
+        umask=umask,
         capture_output=True,
         timeout=GIT_TIMEOUT_S,
         check=False,
@@ -265,6 +277,20 @@ def _git(cwd: Path, *args: str, index: Path | None = None, common: Path | None =
     if done.returncode != 0:
         raise WorktreeError(f"git {args[0]} in {cwd} exited {done.returncode}: {done.stderr.decode(errors='replace')}")
     return done.stdout.decode()
+
+
+def _shared_git_dir(cwd: Path) -> bool:
+    """Whether ``cwd`` holds the git directory of a shared repository, checked before git runs there
+    (:func:`~hyperloom_common.git_safety.check_shared_repository`).
+
+    Raises:
+        OSError: It holds state another account could have written.
+    """
+    try:
+        info = (cwd / _GIT_DIR).lstat()
+    except FileNotFoundError:
+        return False
+    return stat.S_ISDIR(info.st_mode) and check_shared_repository(cwd / _GIT_DIR) is not None
 
 
 def _worktree_git(worktree: Path, common: Path, args: Sequence[str], pinned: Mapping[str, str]) -> str:
@@ -289,13 +315,25 @@ def _blanked(worktree: Path, common: Path) -> str:
     which ``app_git`` ran as empty, so a command that needs one (a required filter) fails; ``""`` when it names none."""
     try:
         admin = trusted_admin_dir(worktree, common)
-        pairs = blank_driver_programs(worktree, git_env(), "--git-dir", str(admin))
+        pairs = blank_driver_programs(
+            worktree, git_env(GIT_COMMON_DIR=str(admin.parent.parent)), "--git-dir", str(admin)
+        )
     except (OSError, subprocess.SubprocessError):
         return ""
     keys = sorted({setting.partition("=")[0] for setting in pairs[1::2]})
     if not keys:
         return ""
     return f" (the app runs no program a repository's config names; it ran these as empty: {', '.join(keys)})"
+
+
+def _write_owner_file(path: Path, text: str, umask: int) -> None:
+    """Write ``text`` to ``path``, ``0644`` as ``umask`` (:func:`~hyperloom_common.git_safety.git_dir_umask`) masks it:
+    read by the next account, written by this one alone."""
+    mode = _OWNER_FILE & ~umask
+    descriptor = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC | os.O_NOFOLLOW | os.O_CLOEXEC, mode)
+    with os.fdopen(descriptor, "w", encoding="utf-8") as written:
+        os.fchmod(descriptor, mode)
+        written.write(text)
 
 
 def _commit_all(cwd: Path, message: str) -> None:
@@ -328,8 +366,15 @@ class SourceBase:
             UnsupportedComponentError: For a component with meta trees whose upstream commit
                 :func:`installed_upstream` cannot resolve.
         """
-        self.path.mkdir(parents=True)
-        _git(self.path, *INIT, f"--initial-branch={BASE_BRANCH}")
+        # Judged before anything is made: below shared storage the run's next leg may be another account of the group,
+        # which writes the objects and refs and nothing else. The git directory is made writable by this account alone
+        # whatever the umask, and so is the base directory there, so no account renames the git directory.
+        shared = parent_is_shared(self.path)
+        umask = git_dir_umask()
+        self.path.mkdir(_OWNER_DIR, parents=True)
+        if shared:
+            self.path.chmod(0o2755)
+        _git(self.path, *INIT, *(("--shared=group",) if shared else ()), f"--initial-branch={BASE_BRANCH}", umask=umask)
         excluded = list(SKIPPED)
         links: list[tuple[str, str]] = []
         for component in components:
@@ -356,30 +401,19 @@ class SourceBase:
             if native is not None:
                 self._lay_native(native.root, (package, *metas))
         git_dir = self.path / _GIT_DIR
-        (git_dir / "info").mkdir(exist_ok=True)
-        (git_dir / "info" / "exclude").write_text("".join(f"{line}\n" for line in excluded))
-        (git_dir / LINKED_PATHS).write_text("".join(f"{prefix}\t{target}\n" for prefix, target in links))
-        own_git_admin(git_dir, bare=False)
+        (git_dir / "info").mkdir(_OWNER_DIR, exist_ok=True)
+        _write_owner_file(git_dir / "info" / "exclude", "".join(f"{line}\n" for line in excluded), umask)
+        _write_owner_file(git_dir / LINKED_PATHS, "".join(f"{prefix}\t{target}\n" for prefix, target in links), umask)
+        if shared:
+            share_objects_and_refs(git_dir)
         _commit_all(self.path, BASE_BRANCH)
 
     def worktree(self, branch: str, path: Path) -> BranchWorktree:
         """The worktree of ``branch`` at ``path``, added at the installed packages the first time; every call for
         ``path`` returns the same one, so all its callers share its :attr:`~BranchWorktree.lock`."""
-        common = self.path / _GIT_DIR
-        shared = common.is_dir() and below_shared_storage(common)
-        if shared:
-            # Git's own state stays this account's alone there: the base's config, hooks and info, and the worktree's
-            # admin directory; another account of the group writes only objects and refs.
-            own_git_admin(common, bare=False)
         if not path.exists():
             _git(self.path, "worktree", _ADD, "-b", f"mb/{branch}", str(path), BASE_BRANCH)
-        if shared:
-            try:
-                own_worktree_admin(recorded_admin_dir(self.path, path))
-            except (OSError, subprocess.SubprocessError) as error:
-                raise WorktreeError(
-                    f"the admin directory of {path} cannot be made this account's alone: {error}"
-                ) from error
+        common = self.path / _GIT_DIR
         for prefix, target in linked_paths(common):
             _link(path, PurePosixPath(prefix), target)
         return self._worktrees.setdefault(path, BranchWorktree(path, self._native, common=common))

@@ -56,41 +56,76 @@ def test_the_base_holds_the_installed_sources_at_their_upstream_paths(base):
     assert base.worktree("s1", base.path.parent / "s1").head() is None
 
 
-def _modes(*paths: Path) -> dict[str, int]:
-    return {path.name: stat.S_IMODE(path.stat().st_mode) for path in paths}
+def _mode(path: Path) -> int:
+    return stat.S_IMODE(path.lstat().st_mode)
 
 
-@pytest.mark.parametrize("mask", [0o002, 0o022], ids=["umask-002", "umask-022"])
-def test_below_shared_storage_the_base_s_and_a_worktree_s_git_state_is_the_app_s_alone(
-    tmp_path, installed, monkeypatch, mask
-):
-    """Below shared storage the base's config and info, and a branch worktree's admin directory, are writable by no
-    one but the app's uid whatever the umask, and the worktree's git still runs. Under a ``002`` umask the base's
-    directories are shared storage themselves, and git's own state there is owner-only; under ``022`` the base is
-    made ``2755``, which no other account writes, and the umask decides as before."""
+def _shared_session(tmp_path: Path) -> Path:
     session = tmp_path / "session"
     session.mkdir()
     session.chmod(0o2775)
     if not session.stat().st_mode & stat.S_ISGID:
         pytest.skip("this filesystem does not keep the setgid bit for the test user")
+    return session
+
+
+@pytest.mark.parametrize("mask", [0o002, 0o022], ids=["umask-002", "umask-022"])
+def test_below_shared_storage_the_base_shares_only_objects_and_refs(tmp_path, installed, monkeypatch, mask):
+    """Whatever the umask: the base ``2755`` and its git directory ``3775``, the config, ``info/exclude`` and the linked
+    paths ``0644`` (read by the next account, written by none), ``info`` and ``hooks`` ``2755``; the objects, refs,
+    reflogs and a worktree's admin directory the group's, and the worktree's git runs."""
+    session = _shared_session(tmp_path)
     monkeypatch.setattr(worktree_module, "locate_installed_package", lambda _layout: installed)
     base = SourceBase(session / "source")
     common = base.path / ".git"
-    admin = common / "worktrees" / "s1"
     previous = os.umask(mask)
     try:
         base.build(["vllm"])
-        built = _modes(common / "config", common / "info", common / "info" / "exclude")
         worktree = base.worktree("s1", session / "s1")
     finally:
         os.umask(previous)
 
-    modes = {**built, **_modes(admin, admin / "gitdir")}
-    if mask == 0o002:
-        assert modes == {"config": 0o600, "info": 0o700, "exclude": 0o600, "s1": 0o700, "gitdir": 0o600}
-    else:
-        assert not {name for name, mode in modes.items() if mode & 0o022}, modes
+    assert (_mode(base.path), _mode(common)) == (0o2755, 0o3775)
+    owner_s = ("config", "info", "hooks", "info/exclude", worktree_module.LINKED_PATHS)
+    assert {name: _mode(common / name) for name in owner_s} == {
+        "config": 0o644,
+        "info": 0o2755,
+        "hooks": 0o2755,
+        "info/exclude": 0o644,
+        worktree_module.LINKED_PATHS: 0o644,
+    }
+    groups = [common / "objects", common / "refs" / "heads", common / "logs", common / "worktrees" / "s1"]
+    assert {_mode(path) for path in groups} == {0o2775}
+    assert {_mode(path) for path in (common / "logs").rglob("*") if path.is_file()} == {0o664}
     assert worktree.head() is None
+
+
+def test_git_on_a_shared_base_whose_config_the_group_can_write_runs_nothing(tmp_path, installed, monkeypatch):
+    session = _shared_session(tmp_path)
+    monkeypatch.setattr(worktree_module, "locate_installed_package", lambda _layout: installed)
+    base = SourceBase(session / "source")
+    base.build(["vllm"])
+    (base.path / ".git" / "config").chmod(0o664)
+
+    with pytest.raises(worktree_module.WorktreeError, match="git's own state of a shared repository is refused"):
+        base.worktree("s1", session / "s1")
+    assert not (session / "s1").exists()
+
+
+def test_off_shared_storage_nothing_in_the_base_is_the_group_s_to_write(tmp_path, installed, monkeypatch):
+    """Off shared storage the umask decides, but git's directory is never the group's: under ``002`` the config,
+    ``info`` and its ``exclude`` keep group write off."""
+    monkeypatch.setattr(worktree_module, "locate_installed_package", lambda _layout: installed)
+    base = SourceBase(tmp_path / "source")
+    previous = os.umask(0o002)
+    try:
+        base.build(["vllm"])
+    finally:
+        os.umask(previous)
+
+    common = base.path / ".git"
+    assert {_mode(common / name) for name in ("config", "info/exclude", worktree_module.LINKED_PATHS)} == {0o644}
+    assert not _mode(common) & 0o022 and not _mode(common / "info") & 0o022
 
 
 def test_a_change_in_a_worktree_is_a_patch_the_toolbox_applies_to_the_installed_package(tmp_path, base, installed):

@@ -5,6 +5,7 @@ import asyncio
 import os
 import stat
 import subprocess
+from typing import NoReturn
 
 import pytest
 
@@ -76,23 +77,38 @@ def _session(tmp_path, mode: int):
     return session
 
 
+def _mode(path) -> int:
+    return stat.S_IMODE(path.lstat().st_mode)
+
+
 @pytest.mark.parametrize("mask", [0o002, 0o022], ids=["umask-002", "umask-022"])
-async def test_below_shared_storage_the_repository_s_config_is_the_app_s_alone(tmp_path, blobs, mask):
-    """The run's next leg may be another account of the group: the config it would have to trust is owner-only,
-    whatever the umask the repository was made under."""
+async def test_below_shared_storage_only_objects_and_refs_are_the_group_s(tmp_path, blobs, mask):
+    """Whatever the umask: the repository ``3775`` (the group makes ``HEAD.lock`` and ``packed-refs.lock`` there but
+    replaces nothing of its maker's), its config and ``HEAD`` ``0644``, ``info`` and ``hooks`` ``2755``, and the
+    objects and refs, what the next account's commit writes, ``2775``."""
     path = _session(tmp_path, 0o2775) / "experiments.git"
     previous = os.umask(mask)
     try:
         repo = await _rooted(path, blobs)
+        await repo.create_branch("b01", await repo.root())
     finally:
         os.umask(previous)
 
-    assert stat.S_IMODE((path / "config").stat().st_mode) == 0o600
+    assert _mode(path) == 0o3775
+    assert {name: _mode(path / name) for name in ("config", "HEAD", "info", "hooks")} == {
+        "config": 0o644,
+        "HEAD": 0o644,
+        "info": 0o2755,
+        "hooks": 0o2755,
+    }
+    shared = [path / "objects", *(path / "objects").iterdir(), path / "refs", path / "refs" / "heads"]
+    assert {_mode(entry) for entry in shared if entry.is_dir()} == {0o2775}
     assert await repo.read_recipe(await repo.root()) == BASELINE
 
 
-@pytest.mark.parametrize("mask", [0o002, 0o022], ids=["umask-002", "umask-022"])
-async def test_off_shared_storage_the_repository_s_config_follows_the_umask(tmp_path, blobs, mask):
+@pytest.mark.parametrize("mask", [0o002, 0o077], ids=["umask-002", "umask-077"])
+async def test_off_shared_storage_nothing_in_the_repository_is_the_group_s_to_write(tmp_path, blobs, mask):
+    """Off shared storage the umask decides, but never gives the group write: the config is ``0644`` under ``002``."""
     path = _session(tmp_path, 0o755) / "experiments.git"
     previous = os.umask(mask)
     try:
@@ -100,28 +116,41 @@ async def test_off_shared_storage_the_repository_s_config_follows_the_umask(tmp_
     finally:
         os.umask(previous)
 
-    assert stat.S_IMODE((path / "config").stat().st_mode) == 0o666 & ~mask
+    assert _mode(path / "config") == 0o666 & ~(mask | 0o022)
+    assert not _mode(path) & 0o022
 
 
-@pytest.mark.skipif(os.geteuid() != 0, reason="a config of another owner needs root to chown")
-async def test_a_leg_after_another_account_s_replaces_its_config_unread_and_reads_the_repository(tmp_path, blobs):
-    """The config an earlier leg of another account left is never read: a fresh one of this account's replaces it,
-    and the commits that leg made are read through it."""
+async def test_a_shared_repository_whose_config_the_group_can_write_starts_no_git(tmp_path, blobs, monkeypatch):
     path = _session(tmp_path, 0o2775) / "experiments.git"
-    previous = os.umask(0o002)
-    try:
-        repo = await _rooted(path, blobs)
-    finally:
-        os.umask(previous)
-    config = path / "config"
-    config.write_text(config.read_text() + "[core]\n\tbigFileThreshold = 1\n")
-    os.chown(config, 65534, 65533)
+    repo = await _rooted(path, blobs)
+    (path / "config").chmod(0o664)
 
-    later = GitExperimentRepo(path, blobs)
+    async def no_git(*argv: str, **kwargs: object) -> NoReturn:
+        raise AssertionError(f"git started: {argv}")
 
-    assert await later.read_recipe(await later.root()) == BASELINE
-    assert config.stat().st_uid == os.geteuid() and stat.S_IMODE(config.stat().st_mode) == 0o600
-    assert "bigFileThreshold" not in config.read_text()
+    monkeypatch.setattr(asyncio, "create_subprocess_exec", no_git)
+    with pytest.raises(OSError, match="git's own state of a shared repository is refused"):
+        await repo.head(INTEGRATION_BRANCH)
+
+
+async def test_every_driver_and_config_hook_the_config_names_is_blanked(tmp_path, blobs, monkeypatch):
+    """As every other git the app runs: a filter, a diff driver and a hook the config defines run as nothing."""
+    path = tmp_path / "experiments.git"
+    repo = await _rooted(path, blobs)
+    root = await repo.root()
+    for key in ("filter.own.clean", "diff.own.textconv", "hook.own.command"):
+        subprocess.run(["git", "--git-dir", str(path), "config", key, "touch ran"], check=True)
+    spawned: list[tuple[str, ...]] = []
+    spawn = asyncio.create_subprocess_exec
+
+    async def recording(*argv: str, **kwargs: object) -> object:
+        spawned.append(argv)
+        return await spawn(*argv, **kwargs)
+
+    monkeypatch.setattr(asyncio, "create_subprocess_exec", recording)
+
+    assert await repo.root() == root
+    assert {"filter.own.clean=", "diff.own.textconv=", "hook.own.enabled=false"} <= set(spawned[-1])
 
 
 async def test_a_branch_moves_only_on_its_own_commits(repo):

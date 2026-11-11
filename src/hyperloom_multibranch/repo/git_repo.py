@@ -40,8 +40,9 @@ from hyperloom.measure.compile import (
 from hyperloom_multibranch.contracts.blackboard.vocab import INTEGRATION_BRANCH
 from hyperloom_multibranch.contracts.repo import BranchMoved, BundleMerge, RepoMerge
 from hyperloom_multibranch.contracts.sources import NativeTree, SourceRoot, source_roots
-from hyperloom_common.git_safety import own_git_admin
-from hyperloom_multibranch.repo.isolated_git import INIT, git_argv, git_env
+from hyperloom_common.git_safety import check_shared_repository, git_dir_umask, share_objects_and_refs
+from hyperloom_common.shared_storage import parent_is_shared
+from hyperloom_multibranch.repo.isolated_git import INIT, blank_driver_programs, git_argv, git_env
 from hyperloom_multibranch.repo.merge import Stored, carry, stack_kernel_slot
 from hyperloom_multibranch.repo.rebase import Files
 from hyperloom_multibranch.repo.stack import ScratchBlobs, stack_files
@@ -112,8 +113,18 @@ class GitExperimentRepo:
         self._env = git_env(**_IDENTITY, GIT_DIR=str(self._path))
 
     async def init_root(self, recipe: Recipe) -> str:
-        await asyncio.to_thread(self._path.mkdir, parents=True)
-        await self._git(*INIT, "--bare", "--quiet", f"--initial-branch={INTEGRATION_BRANCH}")
+        # Judged before anything is made: below shared storage the run's next leg may be another account of the group,
+        # which writes the objects and refs and nothing else (share_objects_and_refs). Git makes the repository under
+        # a umask that masks group write whatever this process's is (git_dir_umask), so nothing else in it is ever the
+        # group's to write.
+        shared = parent_is_shared(self._path)
+        await asyncio.to_thread(self._path.mkdir, 0o755, parents=True)
+        group = ("--shared=group",) if shared else ()
+        await self._git(
+            *INIT, "--bare", "--quiet", *group, f"--initial-branch={INTEGRATION_BRANCH}", umask=git_dir_umask()
+        )
+        if shared:
+            await asyncio.to_thread(share_objects_and_refs, self._path)
         root = await self._write(recipe, (), "baseline")
         await self._git(_UPDATE_REF, _ref(INTEGRATION_BRANCH), root, _NO_COMMIT)
         return root
@@ -354,26 +365,33 @@ class GitExperimentRepo:
         resolved = await self._run("rev-parse", "--verify", "--quiet", name)
         return resolved.out if resolved.code == 0 else None
 
-    async def _git(self, *args: str, stdin: bytes | None = None) -> str:
-        completed = await self._run(*args, stdin=stdin)
+    async def _git(self, *args: str, stdin: bytes | None = None, umask: int = -1) -> str:
+        completed = await self._run(*args, stdin=stdin, umask=umask)
         if completed.code != 0:
             raise GitError(f"git {args[0]} exited {completed.code}: {completed.err}")
         return completed.out
 
-    async def _run(self, *args: str, stdin: bytes | None = None) -> _Completed:
-        """``git <args>`` on the repository. Before any command but ``init`` the repository's config is made this
-        account's alone below shared storage (:func:`~hyperloom_common.git_safety.own_git_admin`): an earlier leg may
-        have been another account of the group, whose config this one never reads.
+    async def _run(self, *args: str, stdin: bytes | None = None, umask: int = -1) -> _Completed:
+        """``git <args>`` on the repository under ``umask`` (``-1``: this process's).
+
+        Before every command but ``init``, a shared repository whose config, hooks or ``info`` another account could
+        have written is refused (:func:`~hyperloom_common.git_safety.check_shared_repository`), git is pinned to the
+        repository (``GIT_COMMON_DIR``, so a ``commondir`` names no other), and every driver program and config-defined
+        hook its config names is blanked, as for every other git the app runs.
 
         Raises:
-            OSError: The config is another account's and cannot be replaced (nothing was run).
+            OSError: The repository holds state another account could have written, or its config cannot be read to
+                blank its programs (nothing was run).
         """
+        argv, env = git_argv(*args), self._env
         if tuple(args[: len(INIT)]) != INIT:
-            own_git_admin(self._path, bare=True)
+            env = {**env, "GIT_COMMON_DIR": str(self._path)}
+            argv = git_argv(*await asyncio.to_thread(self._blanked, env), *args)
         process = await asyncio.create_subprocess_exec(
-            *git_argv(*args),
+            *argv,
             cwd=self._path,
-            env=self._env,
+            env=env,
+            umask=umask,
             stdin=asyncio.subprocess.DEVNULL if stdin is None else asyncio.subprocess.PIPE,
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
@@ -391,6 +409,14 @@ class GitExperimentRepo:
             raise GitError(f"git {args[0]} did not finish in {GIT_TIMEOUT_S:g}s")
         out, err = communicating.result()
         return _Completed(process.returncode, out.decode().strip(), err.decode(errors="replace").strip())
+
+    def _blanked(self, env: dict[str, str]) -> list[str]:
+        """The ``-c`` pairs that blank the repository's driver programs, once it is checked; none where there is no
+        repository yet, whose git fails on its own."""
+        if not self._path.is_dir():
+            return []
+        check_shared_repository(self._path)
+        return blank_driver_programs(self._path, env)
 
 
 __all__ = ["GIT_TIMEOUT_S", "RECIPE_FILE", "GitError", "GitExperimentRepo"]
