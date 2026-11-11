@@ -17,6 +17,7 @@ from collections.abc import Iterator, Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
 
+from hyperloom_common.credential_names import is_credential_flag
 from inference_suite.argv import is_flag
 
 #: Flags the runner sets for every round, so a script's own values are taken out.
@@ -73,8 +74,8 @@ def parse_shell_launch(text: str, *, framework: str) -> ShellLaunch:
     """Lift ``framework``'s launch from the shell script ``text``.
 
     Raises:
-        ShellLaunchError: When the script starts more than one server, or a line naming the entrypoint does not parse
-            as shell words.
+        ShellLaunchError: When the script starts more than one server, passes a value to a flag named like a
+            credential, or a line naming the entrypoint does not parse as shell words.
     """
     env, unresolved_env = _exports(text)
     launch: list[str] | None = None
@@ -159,6 +160,11 @@ def _lift_entrypoint(tokens: list[str], *, env: dict[str, str], unresolved_env: 
             model = model if "$" in value else value
         elif _runner_owned(name):
             stripped.append(name)
+        elif value is not None and is_credential_flag(name):
+            raise ShellLaunchError(
+                f"{name} passes a credential on the launch line, which the base would record; "
+                "export it in the environment the server reads instead"
+            )
         elif value is not None and "$" in value:
             unresolved.append(name)
         else:

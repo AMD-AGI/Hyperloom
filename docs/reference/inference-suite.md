@@ -22,7 +22,9 @@ gives the base:
 1. the operator's `--reference-script`: a shell launch script, or a
    `base_launch.json` frozen by an earlier session; a script's credential exports
    (`HF_TOKEN`, `*_API_KEY`, ...) are recorded as their sha256 only, and a round
-   takes each value from its host, which must hold the value the script set;
+   takes each value from its host, which must hold the value the script set; a
+   script that passes a value to a launch flag named like a credential
+   (`--hf-token`, `--api-key`, ...) is refused, to be exported instead;
 2. InferenceX's AMD single-node master entries;
 3. the framework's cookbook: the SGLang cookbook, the vLLM recipes site, or
    ATOM's catalog (fixed workloads only);
@@ -37,8 +39,7 @@ session no recipe serves is refused too, naming why each source missed. Reposito
 the launch: the commit of InferenceX, the SGLang cookbook and ATOM's catalog, the
 commit of the Hugging Face model whose card was read, and, since the vLLM recipes
 site publishes no commit and its renderings carry no ETag, the URL and body sha256
-of each response it gave. `upstream` is not part of the digest, and a
-`base_launch.json` written without it reads with an empty list.
+of each response it gave. `upstream` is not part of the digest.
 
 To match a run made at an older InferenceX, pin it with `--inferencex-commit
 <sha>` (`resolve` and `hyperloom optimize` both take it): a full sha, or a prefix
@@ -195,9 +196,9 @@ round finds no `lm_eval` installed in the Python that runs it.
 `install.sh <tool-cache-dir>` stages the cache at `<tool-cache-dir>` and installs the pinned
 lm-eval into the Python rounds run under (`PYTHON`, default `python3`). lm-eval and its dependency tree come from the hash lock
 the sealed measurement runner installs, `requirements/runner.lock` (`runner-cpXY.lock` for a
-Python that has its own) of the Hyperloom source tree `install.sh` runs from: pip installs only
-distributions that lock pins, each matching a hash it lists, and a package installed from
-anywhere else than a source tree holding the lock refuses with `staging_missing`. `check` fails with `staging_missing`
+Python that has its own), which `inference_suite` ships as package data: pip installs only
+distributions that lock pins, each matching a hash it lists, and an install missing the lock
+refuses with `staging_missing`. `check` fails with `staging_missing`
 when the cache does not verify or that Python lacks the pinned lm-eval; `stage`
 without `--source` fetches nothing and installs lm-eval beside a cache that
 verifies. To stage or check by hand:
