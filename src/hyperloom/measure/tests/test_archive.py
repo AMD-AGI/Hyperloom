@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import os
+import stat
 import threading
 from pathlib import Path
 
@@ -11,7 +12,7 @@ import pytest
 from hyperloom.measure.tests.bundle_factory import REQUEST_ID, flip_one_byte, make_bundle, verify_args
 
 from hyperloom.measure import archive as archive_mod
-from hyperloom.measure.archive import ARCHIVE_FAILED, ArchiveError, DirResultArchive
+from hyperloom.measure.archive import ARCHIVE_FAILED, BUNDLE_DIR_MODE, ArchiveError, DirResultArchive
 from hyperloom.measure.bundle import verify_bundle
 
 
@@ -146,3 +147,34 @@ def test_bundle_path_names_the_stored_bundle_and_refuses_a_key_nothing_is_stored
     assert verify_bundle(path, verify_args(bundle)).manifest_sha256 == verified.manifest_sha256
     with pytest.raises(ArchiveError, match="not a sha256"):
         archive.bundle_path(REQUEST_ID, "not-a-hash")
+
+
+def _modes(paths) -> set[int]:
+    return {stat.S_IMODE(path.stat().st_mode) for path in paths}
+
+
+@pytest.mark.parametrize("umask", [0o022, 0o077])
+def test_on_shared_storage_a_stored_bundle_is_the_groups_to_read_and_the_way_to_it_the_groups_to_write(
+    staged, tmp_path: Path, umask: int
+) -> None:
+    """A later leg of the run may be another account of the group: it reads the bundle, and stores its own beside it."""
+    bundle, verified = staged
+    shared = tmp_path / "toolbox"
+    shared.mkdir()
+    shared.chmod(0o2775)
+    old = os.umask(umask)
+    try:
+        location = Path(
+            DirResultArchive(shared / "archive").put_bundle(REQUEST_ID, verified.manifest_sha256, bundle.staging)
+        )
+    finally:
+        os.umask(old)
+    assert _modes((shared / "archive", location.parent)) == {0o2775}
+    assert _modes(path for path in (location, *location.rglob("*")) if path.is_dir()) == {BUNDLE_DIR_MODE}
+    assert _modes(path for path in location.rglob("*") if path.is_file()) == {0o444}
+
+
+def test_off_shared_storage_a_stored_bundle_stays_its_writers(staged, archive) -> None:
+    bundle, verified = staged
+    location = Path(archive.put_bundle(REQUEST_ID, verified.manifest_sha256, bundle.staging))
+    assert stat.S_IMODE(location.stat().st_mode) == 0o700
