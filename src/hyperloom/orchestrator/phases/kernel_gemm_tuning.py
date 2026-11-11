@@ -36,9 +36,6 @@ def _gemm_candidate_runtime(tuner_name: str, env: Mapping[str, str]) -> dict[str
     return {"pythonpath_prefix": env.get("PYTHONPATH", "").split(os.pathsep)[0]}
 
 
-
-
-
 # Last-resort location of the aiter checkout inside the standard serving container.
 _CONTAINER_AITER_CONFIG_DIR = Path("/sgl-workspace/aiter/aiter/configs")
 #: What the lane says it does while it holds this host's preflight lock (``_aiter_serving_once``), moving serving modules

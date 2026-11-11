@@ -54,10 +54,10 @@ def test_other_gpus_and_moe_models_keep_the_quantized_skip():
 
 def test_gpt_oss_projection_shapes_match_rocm_mxfp4_padding():
     assert projection_shapes(_profile()) == ((6144, 3072), (3072, 3072))
-    planned = cases(_profile(), [1, 15, 512], conc=15, thorough=False)
+    planned = cases(_profile(), [1, 15, 512], conc=15)
     assert {(case.n, case.k) for case in planned} == {(6144, 3072), (3072, 3072)}
-    assert any(case.min_m <= 2 <= case.max_m for case in planned)
-    assert any(case.min_m <= 64 <= case.max_m for case in planned)
+    assert {case.m for case in planned} == {4, 60, 2048}
+    assert {case.tokens for case in planned} == {1, 15, 512}
 
 
 def test_flag_search_space_is_bounded_and_covers_the_rdna_levers():

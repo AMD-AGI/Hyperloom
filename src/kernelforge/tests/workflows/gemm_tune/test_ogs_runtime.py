@@ -52,7 +52,7 @@ def _table(source: Path) -> dict:
         "opt_flags_sha256": hashlib.sha256(source.read_bytes()).hexdigest(),
         "experts": 32,
         "top_k": 4,
-        "rows": [{"n": 128, "k": 256, "min_m": 1, "max_m": 4, "flags": _TUNED}],
+        "rows": [{"m": 4, "n": 128, "k": 256, "tokens": 1, "flags": _TUNED}],
     }
 
 
@@ -95,6 +95,9 @@ def test_matching_bf16_mxfp4_row_applies_and_emits_one_receipt(tmp_path, capsys)
     assert module.make_opt_flags(*_call()).block_m == 16
     assert module.make_opt_flags(*_call()).xcd_swizzle == 0
     assert module.make_opt_flags(*_call("fp16")).block_m == 32
+    other_shape = list(_call())
+    other_shape[5] = 8
+    assert module.make_opt_flags(*other_shape).block_m == 32
     assert capsys.readouterr().out.count("HL_MATMUL_OGS_FLAGS_APPLIED") == 1
 
 
@@ -129,7 +132,7 @@ def test_matching_shapes_on_another_board_keep_stock_flags(tmp_path):
     assert module.make_opt_flags(*_call()).block_m == 32
 
 
-def test_table_refuses_unsupported_or_overlapping_flags(tmp_path):
+def test_table_refuses_unsupported_or_duplicate_flags(tmp_path):
     source = tmp_path / "opt_flags.py"
     source.write_text("# source")
     table = _table(source)
@@ -141,7 +144,7 @@ def test_table_refuses_unsupported_or_overlapping_flags(tmp_path):
     table["rows"][0]["flags"]["split_k"] = 1
     table["rows"].append(dict(table["rows"][0]))
     path.write_text(json.dumps(table))
-    with pytest.raises(ValueError, match="overlapping"):
+    with pytest.raises(ValueError, match="duplicate"):
         ogs_runtime._read_table(path)
 
 
@@ -150,7 +153,7 @@ def test_serving_receipt_requires_the_current_table_and_latest_server(tmp_path):
     table.write_text("{}")
     digest = hashlib.sha256(table.read_bytes()).hexdigest()
     old_log = tmp_path / "old.log"
-    old_log.write_text(f"HL_MATMUL_OGS_FLAGS_APPLIED sha256={digest} n=128 k=256 m=1-4\n")
+    old_log.write_text(f"HL_MATMUL_OGS_FLAGS_APPLIED sha256={digest} m=4 n=128 k=256\n")
     latest = tmp_path / "latest.log"
     latest.write_text("stock path\n")
 
