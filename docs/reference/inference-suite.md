@@ -41,8 +41,7 @@ session no recipe serves is refused too, naming why each source missed. Reposito
 the launch: the commit of InferenceX, the SGLang cookbook and ATOM's catalog, the
 commit of the Hugging Face model whose card was read, and, since the vLLM recipes
 site publishes no commit and its renderings carry no ETag, the URL and body sha256
-of each response it gave. `upstream` is not part of the digest, and a
-`base_launch.json` written without it reads with an empty list.
+of each response it gave. `upstream` is not part of the digest.
 
 To match a run made at an older InferenceX, pin it with `resolve --inferencex-commit
 <sha>`: a full sha, or a prefix of 7 or more hex digits of a commit on one of

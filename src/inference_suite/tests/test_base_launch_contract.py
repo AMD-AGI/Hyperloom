@@ -228,6 +228,7 @@ def test_the_c6254_p1_example_reads_with_the_fields_recorded_beside_it():
         "stripped": [],
         "warnings": [],
         "resolved_unix": 1_762_380_274,
+        "upstream": [],
     }
     document = {**p1, **beside}
     document["digest"] = _documented_digest(document)
@@ -237,7 +238,7 @@ def test_the_c6254_p1_example_reads_with_the_fields_recorded_beside_it():
     assert base.model == LaunchModel("amd/Qwen3.8-Next-MXFP4", "/data/models/Qwen3.8-Next-MXFP4")
     assert base.client.command == "inferencex --seed 7"
     assert base.runner_owned.env == tuple(p1["runner_owned"]["env"])
-    assert base.to_document() == {**document, "upstream": []}
+    assert base.to_document() == document
 
 
 def test_a_document_whose_digest_does_not_match_is_refused():
@@ -504,11 +505,12 @@ def test_upstream_revisions_round_trip_and_stay_out_of_the_digest():
     assert _base(upstream=()).digest() == _base().digest()
 
 
-def test_a_base_document_written_without_upstream_revisions_still_reads():
+def test_a_base_document_without_upstream_revisions_is_refused():
     document = _base().to_document()
     del document["upstream"]
 
-    assert BaseLaunch.from_document(document).upstream == ()
+    with pytest.raises(BaseLaunchError, match="upstream"):
+        BaseLaunch.from_document(document)
 
 
 @pytest.mark.parametrize(
