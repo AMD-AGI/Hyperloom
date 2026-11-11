@@ -23,6 +23,7 @@ from hyperloom.common.agentx_workload import is_mlperf_backend
 from hyperloom_common.env import env_bool
 from hyperloom.inference_optimizer import framework_registry
 from hyperloom.inference_optimizer.gpu_types import gpu_runner_type
+from hyperloom.inference_optimizer.speculative_capability import DraftLimits
 
 
 _SESSION_CONFIG = "benchmark.yaml"
@@ -141,6 +142,7 @@ def _validate_agentx_benchmark(benchmark: dict) -> None:
     legacy = [key for key in envs if key.startswith(("AIPERF_", "AGENTX_", "AGENTIC_"))]
     if legacy:
         raise ValueError("Use Magpie agentx configuration instead of legacy client controls: " + ", ".join(legacy))
+    DraftLimits.declared(benchmark)
 
 
 @dataclass(frozen=True)
