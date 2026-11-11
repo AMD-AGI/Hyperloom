@@ -573,7 +573,8 @@ def _driver_scope(monkeypatch: pytest.MonkeyPatch, *, held: bool, calls: list) -
     scope["_sid"] = lambda pid: 1 if (pid == 1 or held) else pid
     scope["replace_process_image"] = lambda pid, argv, env_snapshot="": calls.append(("exec", pid, argv[0]))
     scope["descendant_pids"] = lambda pid: [4243]
-    scope["_spawn_detached"] = lambda launch: calls.append(("spawn", launch)) or 5151
+    scope["baseline_environ"] = lambda pid, snapshot: calls.append(("env", pid, snapshot)) or [f"FROM={pid}"]
+    scope["_spawn_detached"] = lambda launch, env: calls.append(("spawn", launch, tuple(env))) or 5151
     monkeypatch.setattr(os, "kill", lambda pid, sig: calls.append(("kill", pid, sig)))
     return scope
 
@@ -598,6 +599,36 @@ def test_remote_driver_execs_in_place_only_for_the_launcher_waited_pid(
         assert ("kill", 4242, 9) in calls and ("kill", 4243, 9) in calls
         assert not [c for c in calls if c[0] == "exec"]
         assert [c[0] for c in calls if c[0] == "spawn"] == (["spawn"] if action == "restart" else [])
+        if action == "restart":
+            assert calls.index(("env", 4242, str(tmp_path / "role.pid") + ".environ")) < calls.index(("kill", 4242, 9))
+            assert [c[2] for c in calls if c[0] == "spawn"] == [("FROM=4242",)]
+
+
+def test_spawn_without_a_server_takes_the_container_environment(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    calls: list = []
+    scope = _driver_scope(monkeypatch, held=False, calls=calls)
+    scope["_find_server"] = lambda _pidfile, _needle: 0
+    monkeypatch.setenv("HL_PIDFILE", str(tmp_path / "role.pid"))
+    monkeypatch.setenv("HL_LAUNCH_PATH", str(tmp_path / "launch.sh"))
+    monkeypatch.setenv("HL_ACTION", "restart")
+    scope["restart_remote_main"]()
+    assert json.loads(capsys.readouterr().out.strip().splitlines()[-1])["action"] == "spawn"
+    assert ("env", 1, str(tmp_path / "role.pid") + ".environ") in calls
+    assert [c[2] for c in calls if c[0] == "spawn"] == [("FROM=1",)]
+
+
+def test_detached_spawn_runs_with_the_given_environment(tmp_path: Path) -> None:
+    driver = pd_cmds._REMOTE_DRIVER.replace("\nrestart_remote_main()\n", "\n")
+    scope: dict = {"os": os}
+    exec(driver, scope)
+    launch = tmp_path / "launch.sh"
+    launch.write_text('#!/bin/bash\necho "hl-env-$HL_TEST_MARK"\n', encoding="utf-8")
+    env = [f"PATH={os.environ['PATH']}", "HL_TEST_MARK=from-container", f"HL_CONSOLE={tmp_path / 'none'}"]
+    pid = scope["_spawn_detached"](str(launch), env)
+    os.waitpid(pid, 0)
+    assert "hl-env-from-container" in (tmp_path / "launch.sh.log").read_text(encoding="utf-8")
 
 
 def test_detached_spawn_logs_to_file_and_console(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
@@ -609,7 +640,7 @@ def test_detached_spawn_logs_to_file_and_console(monkeypatch: pytest.MonkeyPatch
     monkeypatch.setenv("HL_CONSOLE", str(console))
     launch = tmp_path / "launch.sh"
     launch.write_text("#!/bin/bash\necho hl-spawned-$$\n", encoding="utf-8")
-    pid = scope["_spawn_detached"](str(launch))
+    pid = scope["_spawn_detached"](str(launch), [f"PATH={os.environ['PATH']}"])
     os.waitpid(pid, 0)
     deadline = time.monotonic() + 5
     while time.monotonic() < deadline and f"hl-spawned-{pid}" not in console.read_text(encoding="utf-8"):

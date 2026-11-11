@@ -48,7 +48,8 @@ _SPAWN_SH = (
 )
 
 
-def _spawn_detached(launch):
+def _spawn_detached(launch, env):
+    console = os.environ.get("HL_CONSOLE", "/proc/1/fd/1")
     pid = os.fork()
     if pid == 0:
         os.setsid()
@@ -57,9 +58,14 @@ def _spawn_detached(launch):
         os.dup2(log_fd, 2)
         null_fd = os.open(os.devnull, os.O_RDONLY)
         os.dup2(null_fd, 0)
-        console = os.environ.get("HL_CONSOLE", "/proc/1/fd/1")
-        os.execv("/bin/bash", ["/bin/bash", "-c", _SPAWN_SH, "hl-spawn", launch, console])
+        environ = dict(item.split("=", 1) for item in env if "=" in item)
+        os.execve("/bin/bash", ["/bin/bash", "-c", _SPAWN_SH, "hl-spawn", launch, console], environ)
     return pid
+
+
+def _spawn_env(pid, pidfile):
+    # The server's own environment, else the container's (PID 1): never the ssh session's.
+    return baseline_environ(pid if pid > 0 else 1, pidfile + ".environ")
 
 
 def _ppid(pid):
@@ -138,6 +144,7 @@ def restart_remote_main():
             open(pidfile, "w", encoding="utf-8").write(str(pid))
             print(json.dumps({"status": "ok", "action": "stop-exec", "pid": pid}))
             return
+        _spawn_env(pid, pidfile)
         for victim in [pid] + descendant_pids(pid):
             try:
                 os.kill(victim, 9)
@@ -150,7 +157,7 @@ def restart_remote_main():
         print(json.dumps({"status": "ok", "action": "stop-kill", "pid": pid}))
         return
     if pid <= 0:
-        new_pid = _spawn_detached(launch)
+        new_pid = _spawn_detached(launch, _spawn_env(pid, pidfile))
         open(pidfile, "w", encoding="utf-8").write(str(new_pid))
         print(json.dumps({"status": "ok", "action": "spawn", "pid": new_pid}))
         return
@@ -159,12 +166,13 @@ def restart_remote_main():
         open(pidfile, "w", encoding="utf-8").write(str(pid))
         print(json.dumps({"status": "ok", "action": "exec", "pid": pid}))
         return
+    env = _spawn_env(pid, pidfile)
     for victim in [pid] + descendant_pids(pid):
         try:
             os.kill(victim, 9)
         except OSError:
             pass
-    new_pid = _spawn_detached(launch)
+    new_pid = _spawn_detached(launch, env)
     open(pidfile, "w", encoding="utf-8").write(str(new_pid))
     print(json.dumps({"status": "ok", "action": "respawn", "pid": new_pid}))
 
