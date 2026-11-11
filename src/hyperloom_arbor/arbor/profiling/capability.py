@@ -1,10 +1,9 @@
 """Ask the installed engine what it supports, instead of hardcoding field names.
 
-The failure this prevents is concrete, and it goes both ways. A campaign's
-container can hold a newer vLLM build that exposes a full torch-profiler
-schedule on ``ProfilerConfig`` — ``delay_iterations``, ``warmup_iterations``,
-``active_iterations``, ``wait_iterations``, ``max_iterations``. A vLLM source
-tree checked out elsewhere can be an older build that has only
+The failure this prevents is concrete, and it runs in both directions. One vLLM
+build exposes a full torch-profiler schedule on ``ProfilerConfig`` —
+``delay_iterations``, ``warmup_iterations``, ``active_iterations``,
+``wait_iterations``, ``max_iterations``. An older vLLM source has only
 ``delay_iterations`` and ``max_iterations``, and spells record-shapes
 ``torch_profiler_record_shapes``. A plan written against either tree breaks on
 the other: against the newer build you leave the schedule unconfigured and
