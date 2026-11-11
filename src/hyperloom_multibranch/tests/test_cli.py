@@ -52,7 +52,7 @@ from hyperloom.common.outside_facts.image_check import (
 )
 from hyperloom.common.outside_facts.image_check_eval import Status
 from hyperloom.common.owner_scope import local_owner_scope
-from hyperloom.common.perf_metric import GRADED_INTVTY_P50, GRADED_OUTPUT
+from hyperloom.common.perf_metric import GRADED_INTVTY_P50, TOTAL_TOKEN_THROUGHPUT
 from hyperloom.common.outside_facts.rule_pack import rule_pack_identity
 from hyperloom.measure import compile as compile_module
 from hyperloom.measure import points
@@ -77,10 +77,12 @@ from hyperloom_multibranch.scheduling import review
 from hyperloom_multibranch.scheduling.layout import REVIEW_DIR, SessionLayout, create_session
 from hyperloom_multibranch.scheduling import lifecycle
 from hyperloom_multibranch.scheduling.lifecycle import PersistedRun, SessionOutcome, persisted_run
-from hyperloom_multibranch.scheduling.manifest import SessionManifest, code_version
+from hyperloom_multibranch.rulegate.agentx import AgentXObjective
+from hyperloom_multibranch.scheduling.manifest import SessionManifest, code_version, read_manifest
 from hyperloom_multibranch.scheduling import local_peers
+from hyperloom.orchestrator.actions.executors import TOOL_CACHE_ENV
 from hyperloom_multibranch.scheduling.local_peers import AGENTX_ENV
-from hyperloom_multibranch.scheduling.peers import PeerFactory
+from hyperloom_multibranch.scheduling.peers import PeerFactory, PeersUnavailable
 from hyperloom_multibranch.scheduling.processes import SCHEDULER_BRANCH, ProcessRecord
 from hyperloom_multibranch.scheduling.reference import ReferenceSource
 from hyperloom_multibranch.scheduling.tests.checkouts import knowledge_checkout
@@ -95,9 +97,10 @@ from hyperloom_multibranch.scheduling.settings import (
     RunSettings,
     Workload,
 )
+from hyperloom_multibranch.scheduling.session_environment import hosted_runner_cache
 from hyperloom_multibranch.scheduling.stops import SessionStopReason
+from hyperloom_multibranch.tests.base_records import write_record
 from hyperloom_multibranch.tests.staging_rig import verified_tool_cache
-from hyperloom.orchestrator.actions.executors import TOOL_CACHE_ENV
 
 #: What the session's launcher sets to name the image the session runs on.
 IMAGE_VARS = ("HYPERLOOM_ACTIVE_IMAGE_REF", "HYPERLOOM_ACTIVE_IMAGE_DIGEST")
@@ -221,6 +224,57 @@ def test_a_run_is_served_at_the_ep_it_names_and_at_ep_1_by_default(workload: lis
     assert _settings("--ep", "8", workload=workload).workload.ep == 8
 
 
+def test_an_agentx_run_replays_the_trace_window_it_names_and_the_harness_default_otherwise() -> None:
+    assert _settings(workload=AGENTX_ARGS).workload.agentx_duration_sec is None
+    assert _settings("--agentx-duration-sec", "600", workload=AGENTX_ARGS).workload.agentx_duration_sec == 600
+
+
+def test_an_agentx_run_is_graded_on_the_objective_it_names() -> None:
+    workload = _settings("--agentx-objective", "total_token_throughput", workload=AGENTX_ARGS).workload
+
+    assert (workload.agentx_objective, workload.metric) == (
+        AgentXObjective.TOTAL_TOKEN_THROUGHPUT,
+        TOTAL_TOKEN_THROUGHPUT,
+    )
+    assert _settings(workload=AGENTX_ARGS).workload.agentx_objective is AgentXObjective.P50_INTERACTIVITY
+
+
+def test_an_inferencex_run_refuses_an_agentx_objective_naming_the_option(capsys: pytest.CaptureFixture[str]) -> None:
+    with pytest.raises(SystemExit) as exc:
+        cli.main(["run", *WORKLOAD_ARGS, "--agentx-objective", "p50_interactivity"])
+
+    assert exc.value.code == cli.EXIT_USAGE
+    assert "--agentx-objective is not taken by an inferencex workload" in capsys.readouterr().err
+
+
+def test_a_resumed_session_keeps_the_objective_its_manifest_recorded(tmp_path: Path) -> None:
+    settings = _settings("--agentx-objective", "total_token_throughput", workload=AGENTX_ARGS)
+    manifest = SessionManifest(
+        code_version=code_version(),
+        rule_pack=dict(rule_pack_identity()),
+        session_id="MB-x",
+        started_at=0.0,
+        deadline=3600.0,
+        settings=settings,
+        metric=settings.workload.metric,
+        policy_versions={},
+    )
+    manifest.write(tmp_path / "MB-manifest.json")
+
+    assert read_manifest(tmp_path / "MB-manifest.json").settings.workload.metric == TOTAL_TOKEN_THROUGHPUT
+
+
+def test_a_manifest_written_before_the_objective_was_recorded_reads_back_on_p50_interactivity(tmp_path: Path) -> None:
+    settings = _settings(workload=AGENTX_ARGS)
+    document = encode(
+        SessionManifest(code_version(), dict(rule_pack_identity()), "MB-x", 0.0, 3600.0, settings, "", {})
+    )
+    del document["settings"]["workload"]["agentx_objective"]
+    _write(tmp_path / "MB-manifest.json", document)
+
+    assert read_manifest(tmp_path / "MB-manifest.json").settings.workload.metric == GRADED_INTVTY_P50
+
+
 def test_run_help_names_the_ep_option(capsys: pytest.CaptureFixture[str]) -> None:
     with pytest.raises(SystemExit):
         cli.main(["run", "--help"])
@@ -291,6 +345,10 @@ def test_parallel_tests_default_fills_the_machine() -> None:
         ["run", *AGENTX_ARGS, "--osl", "512"],
         ["run", *AGENTX_ARGS, "--ep", "0"],
         ["run", *WORKLOAD_ARGS, "--ep", "0"],
+        ["run", *AGENTX_ARGS, "--agentx-duration-sec", "0"],
+        ["run", *WORKLOAD_ARGS, "--agentx-duration-sec", "600"],
+        ["run", *WORKLOAD_ARGS, "--agentx-objective", "total_token_throughput"],
+        ["run", *AGENTX_ARGS, "--agentx-objective", "output_throughput"],
     ],
 )
 def test_usage_errors_exit_two(argv: list[str], tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -405,6 +463,16 @@ def test_an_agent_pack_without_an_agent_or_not_one_directory_is_a_usage_error(ex
         _settings(*extra)
 
 
+def test_the_inferencex_commit_is_kept_in_lower_case_and_is_main_s_head_without_one() -> None:
+    assert _settings("--inferencex-commit", "8A76A78E41").inferencex_commit == "8a76a78e41"
+    assert _settings().inferencex_commit == ""
+
+
+def test_an_inferencex_commit_that_is_no_sha_is_a_usage_error() -> None:
+    with pytest.raises(ValueError, match="is not a commit"):
+        _settings("--inferencex-commit", "main")
+
+
 def test_the_agent_launch_file_is_kept_by_its_absolute_path(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.chdir(tmp_path)
     (tmp_path / "launch.json").write_text(json.dumps({"server_flags": "--tp 1", "server_env": {}}))
@@ -413,6 +481,51 @@ def test_the_agent_launch_file_is_kept_by_its_absolute_path(tmp_path: Path, monk
 
     assert settings.agent_launch == str(tmp_path / "launch.json")
     assert _settings("--autonomous-agent", "/agents/arbor").agent_launch == ""
+
+
+@pytest.mark.parametrize("agent", [[], ["--autonomous-agent", "/agents/arbor"]], ids=["specialists-only", "arbor"])
+@pytest.mark.parametrize(
+    "launch",
+    [
+        lambda path: write_record(path.with_suffix(".json")),
+        lambda path: path.write_text("vllm serve /models/Llama-3-8B --tensor-parallel-size 2\n") and path,
+    ],
+    ids=["record", "shell"],
+)
+def test_a_reference_script_is_kept_by_its_absolute_path_with_or_without_an_agent(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, agent: list[str], launch: Callable[[Path], Path]
+) -> None:
+    monkeypatch.chdir(tmp_path)
+    name = launch(tmp_path / "launch.sh").name
+
+    settings = _settings(*agent, "--reference-script", name)
+
+    assert settings.reference_script == str(tmp_path / name)
+    assert (settings.agent_launch, _settings(*agent).reference_script) == ("", "")
+
+
+@pytest.mark.parametrize(
+    ("content", "match"),
+    [
+        (None, "No such file"),
+        ("python3 -m sglang.launch_server --tp 2\n", "has no vllm serving entrypoint"),
+        ("vllm serve /models/Llama-3-8B --tensor-parallel-size $TP\n", "from shell variables"),
+        ('{"schema": "hyperloom-base-launch/0"}', "a JSON launch file must be"),
+        ("tampered", "base_digest_mismatch"),
+    ],
+    ids=["no-file", "other-framework", "shell-variable", "not-a-record", "tampered"],
+)
+def test_a_reference_script_that_cannot_serve_as_the_base_is_a_usage_error(
+    tmp_path: Path, content: str | None, match: str
+) -> None:
+    path = tmp_path / "launch.sh"
+    if content == "tampered":
+        write_record(path, env={"VLLM_ROCM_USE_AITER": "0"})
+    elif content is not None:
+        path.write_text(content)
+
+    with pytest.raises(ValueError, match=f"--reference-script {path} cannot serve as the base launch: .*({match})"):
+        _settings("--reference-script", str(path))
 
 
 @pytest.mark.parametrize(
@@ -681,8 +794,8 @@ def test_a_benchmark_yaml_the_operator_names_exits_two(
 @pytest.fixture
 def ready_environment(monkeypatch: pytest.MonkeyPatch, tmp_path_factory: pytest.TempPathFactory) -> None:
     """No Experience KB, no Recipe KB, the launcher's image named, the InferenceX client staged in the application's
-    tool cache, a model the price sheet lists, a writable RSI archive outside the test's workspace, and the
-    framework's package installed in the image."""
+    tool cache, a model the price sheet lists, a writable RSI archive outside the test's workspace, the framework's
+    package installed in the image, and the workloads' checkpoints under ``HL_MODEL_BASE``."""
 
     for name in ("HYPERLOOM_KB_URL", "HYPERLOOM_KB_TOKEN"):
         monkeypatch.delenv(name, raising=False)
@@ -695,6 +808,10 @@ def ready_environment(monkeypatch: pytest.MonkeyPatch, tmp_path_factory: pytest.
     monkeypatch.setenv(ARCHIVE_ENV, str(tmp_path_factory.mktemp("rsi-archive")))
     installed = PackageBase("vllm", tmp_path_factory.mktemp("site-packages") / "vllm", "vllm", "0.0.0")
     monkeypatch.setattr(compile_module, "locate_installed_package", lambda layout: installed)
+    models = tmp_path_factory.mktemp("models")
+    for name in ("Llama-3-8B", "llama"):
+        (models / name).mkdir()
+    monkeypatch.setenv("HL_MODEL_BASE", str(models))
 
 
 @pytest.fixture
@@ -1047,7 +1164,7 @@ def _ended_before_final(root: Path, *, baseline: bool = True) -> SessionLayout:
     _write(layout.root_recipe, {"components": []})
     if baseline:
         gate = LocalBlackboard(layout.blackboard, Writer(Role.GATE, "gate"))
-        asyncio.run(gate.write_baseline(BaselineRecord("r0", {GRADED_OUTPUT: 1.0}, {}, {}, ("t1",))))
+        asyncio.run(gate.write_baseline(BaselineRecord("r0", {TOTAL_TOKEN_THROUGHPUT: 1.0}, {}, {}, ("t1",))))
         established = Decision(
             DecisionKind.PRELUDE, BASELINE_ESTABLISHED, INTEGRATION_BRANCH, {"longest_test_seconds": 60}
         )
@@ -1486,6 +1603,20 @@ def test_a_hosted_spec_lends_dev_sandboxes_and_runs_agents_with_the_grants_dev_k
     assert agent_cli == [on_the_command_line]
 
 
+@pytest.mark.usefixtures("ready_environment")
+def test_a_hosted_spec_resolves_its_base_from_inferencex_at_the_commit_it_names(
+    host: Host, agent_cli: list[RunSettings], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    host.spec(multibranch={**SPEC["multibranch"], "inferencex_commit": "8A76A78E41"})
+    on_the_command_line = _settings(*SPEC_RUN_ARGS, "--inferencex-commit", "8a76a78e41")
+    monkeypatch.setattr(local_peers, "machine_cards", _no_local_cards)
+
+    assert cli.main(["hosted", "run"]) == 0
+
+    assert agent_cli == [on_the_command_line]
+    assert on_the_command_line.inferencex_commit == "8a76a78e41"
+
+
 @pytest.mark.parametrize(
     ("agents", "named"),
     [(["/agents/a"], "need HYPERLOOM_SANDBOX_KEY_DEV"), ("/agents/a", "must be a list of agent sources")],
@@ -1504,9 +1635,7 @@ def test_a_hosted_spec_whose_agents_cannot_run_ends_for_good_naming_why(
 
 
 def test_the_hosted_runner_cache_is_the_directory_the_variable_names() -> None:
-    assert cli.hosted_runner_cache({"HYPERLOOM_RUNNER_CACHE": " /data/hl/runner-cache "}) == Path(
-        "/data/hl/runner-cache"
-    )
+    assert hosted_runner_cache({"HYPERLOOM_RUNNER_CACHE": " /data/hl/runner-cache "}) == Path("/data/hl/runner-cache")
 
 
 def _no_local_cards() -> tuple[int, ...]:
@@ -1587,6 +1716,8 @@ def test_a_hosted_session_ends_a_close_grace_and_a_margin_before_the_grant_and_i
         ({"workload": {"isl": 1024, "osl": 512, "precision": "fp8"}}, "workload.conc"),
         ({"workload": {"conc": 16, "isl": 1024, "osl": 512}}, "workload.precision"),
         ({"multibranch": {"workload": "agentx"}}, "--isl is not taken by an agentx workload"),
+        ({"multibranch": {"workload": "inferencex", "inferencex_commit": "main"}}, "'main' is not a commit"),
+        ({"multibranch": {"workload": "inferencex", "inferencex_commit": 1234567}}, "must be a string"),
     ],
 )
 @pytest.mark.usefixtures("ready_environment")
@@ -1648,6 +1779,22 @@ def test_a_leg_that_cannot_open_a_file_of_the_run_ends_it_for_good_naming_the_fi
 
 
 @pytest.mark.usefixtures("ready_environment", "agent_cli")
+def test_a_hosted_session_whose_base_launch_is_refused_ends_the_run_for_good_naming_why(
+    host: Host, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    def base_refused(settings: RunSettings, peer_factory: object, services: object, report_root: Callable) -> int:
+        report_root(create_session(host.workspace, settings.workload.model_basename, Clock()).root)
+        raise PeersUnavailable("the base launch could not be resolved: InferenceX has no commit 8a76a78e41")
+
+    monkeypatch.setattr(cli, "run_session", base_refused)
+
+    assert cli.main(["hosted", "run"]) == cli.EXIT_FAILED
+
+    document = host.exit_document()
+    assert (document["final"], document["returncode"]) == (True, cli.EXIT_FAILED)
+    assert "InferenceX has no commit 8a76a78e41" in str(document["error"])
+
+
 def test_a_restart_that_cannot_read_the_earlier_session_ends_the_run_for_good_naming_the_file(
     host: Host, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
 ) -> None:
