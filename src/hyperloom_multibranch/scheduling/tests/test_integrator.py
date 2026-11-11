@@ -29,6 +29,7 @@ from hyperloom.common.perf_metric import (
     GRADED_INTVTY,
     GRADED_INTVTY_P50,
     GRADED_OUTPUT,
+    TOTAL_TOKEN_THROUGHPUT,
 )
 from hyperloom.contracts.measurement import Purpose, TestKind, TestRequest, TestResult
 from hyperloom.contracts.recipe import (
@@ -674,22 +675,27 @@ AGENTX_PARENT = {
     GRADED_OUTPUT: 1000.0,
     GRADED_ERROR_RATE: 0.0,
     GRADED_DURATION: 10.0,
+    TOTAL_TOKEN_THROUGHPUT: 5000.0,
 }
 
 
 def test_an_agentx_foundation_fix_whose_p50_falls_with_its_guards_intact_may_be_merged() -> None:
-    judged = agentx.compare({**AGENTX_PARENT, GRADED_INTVTY_P50: 50.0}, AGENTX_PARENT, "r1")
+    judged = agentx.compare(
+        {**AGENTX_PARENT, GRADED_INTVTY_P50: 50.0}, AGENTX_PARENT, "r1", agentx.AgentXObjective.P50_INTERACTIVITY
+    )
 
     assert judged.verdict is Verdict.REGRESSED and judged.accuracy is AccuracyVerdict.PASSED
     assert not_stackable_reason(judged, foundation_fix=True) == ""
 
 
 def test_an_agentx_foundation_fix_that_breaks_a_guard_is_not_stackable() -> None:
-    judged = agentx.compare({**AGENTX_PARENT, GRADED_OUTPUT: 500.0}, AGENTX_PARENT, "r1")
+    judged = agentx.compare(
+        {**AGENTX_PARENT, TOTAL_TOKEN_THROUGHPUT: 2500.0}, AGENTX_PARENT, "r1", agentx.AgentXObjective.P50_INTERACTIVITY
+    )
 
     assert judged.verdict is Verdict.REGRESSED and judged.accuracy is AccuracyVerdict.PASSED
     reason = not_stackable_reason(judged, foundation_fix=True)
-    assert reason == "a foundation fix, regressed on the integration head, refused by output_regressed"
+    assert reason == "a foundation fix, regressed on the integration head, refused by total_regressed"
 
 
 async def test_a_merge_measuring_no_throughput_stays_pending_and_merging_goes_on(

@@ -6,9 +6,12 @@
 ``run`` takes the fixed workload, spelled as ``hyperloom optimize`` spells it, the wall-clock budget and the kernel
 optimizer its recipes are scoped to, and the hard limits the judge works within. ``--workload`` names the workload
 kind: ``inferencex`` takes ``--isl`` and ``--osl``, and ``agentx`` refuses them, as the trace it replays fixes its
-requests; either takes ``--ep``, the expert-parallel size its server runs at, 1 when not given. An agentx session
-serves its model in the image ``HYPERLOOM_ACTIVE_IMAGE_REF`` names, and a ``--model`` that is a directory is recorded
-by its resolved path, which its benchmark pins. An operator environment whose ``HYPERLOOM_AGENTX`` says otherwise than
+requests; either takes ``--ep``, the expert-parallel size its server runs at, 1 when not given; ``agentx`` takes
+``--agentx-duration-sec``, the trace window its tests replay (the measuring harness's default when not given), and
+``--agentx-objective``, the axis it is graded on (``p50_interactivity`` when not given, or
+``total_token_throughput``), and ``inferencex`` refuses both. An agentx session serves its
+model in the image ``HYPERLOOM_ACTIVE_IMAGE_REF`` names, and a ``--model`` that is a directory is recorded by its
+resolved path, which its benchmark pins. An operator environment whose ``HYPERLOOM_AGENTX`` says otherwise than
 ``--workload``, or that names a benchmark YAML in ``HYPERLOOM_BENCHMARK_CONFIG``, is refused.
 ``--max-gpu-hours`` caps the GPU hours the session uses, tests' GPU time plus card time any lease holds: EXPLORE ends
 with ``gpu_hours_exhausted`` once only FINAL's share is left, and FINAL still runs.
@@ -37,15 +40,18 @@ Arbor run once on a mapping branch EXPLORE opens beside the others, for at most 
 kernel shares); each share then opens as a branch of its own, when it still has ``--agent-share-minutes`` (default 63,
 0 for always) to its cutoff, the least in which Arbor runs an iteration. A negative or non-finite value of either,
 as of any other limit, is a usage error.
-``--agent-pack NAME`` names the pack those Arbors run instead of Arbor's
-serving template; a name that is not one directory, or one given with no agent, is a usage error, and a pack the Arbor
-checkout lacks is refused when the branch starts. ``--agent-launch FILE`` gives those Arbors the launch an AgentX
-recipe's adds to, as resolved from InferenceX, which MB does not carry yet; a file the adapter cannot use, or one
-given with no agent, is a usage error. Each ``--specialist-prompt`` file holds a direction the user wrote
-for one specialist: its branch opens at PRELUDE's
-root ahead of the opening batch, counted within ``--max-branches``, its specialist sees the text in every launch
-prompt, and the judge neither stops it nor lowers its K for its first judged tests; an empty or unreadable file, or
-more files than ``--max-branches``, is a usage error.
+``--agent-pack NAME`` names the pack those Arbors run instead of Arbor's serving template; a name that is not one
+directory, or one given with no agent, is a usage error, and a pack the Arbor checkout lacks is refused when the branch
+starts. ``--agent-launch FILE`` gives those Arbors the launch an AgentX recipe's adds to, as resolved from
+InferenceX, which MB does not carry yet; a file the adapter cannot use, or one given with no agent, is a usage error. ``--reference-script FILE`` is the session's base launch, as for
+``hyperloom optimize``: a shell launch script, or a base launch record (``hyperloom-base-launch/1``) frozen elsewhere,
+which the session freezes without reading any recipe source. A file that cannot serve as a base of the session's
+framework is a usage error, and one on another topology than the workload's is refused when the session freezes it. ``--inferencex-commit SHA`` resolves a fresh
+session's base launch from InferenceX at that commit instead of the head of its ``main``; one that is not 7 to 40 hex
+digits is a usage error. Each ``--specialist-prompt`` file holds a direction the user
+wrote for one specialist: its branch opens at PRELUDE's root ahead of the opening batch, counted within
+``--max-branches``, its specialist sees the text in every launch prompt, and the judge neither stops it nor lowers its K
+for its first judged tests; an empty or unreadable file, or more files than ``--max-branches``, is a usage error.
 Each ``--reference NAME=DIR`` names a directory the specialists read as reference, such as GEAK's tuning and kernel
 knowledge: it is copied to ``MB-reference/NAME`` before PRELUDE and the commit its checkout is on is recorded in the
 manifest, so every branch reads one fixed copy and the session says which. Only an InferenceX checkout named
@@ -115,29 +121,24 @@ import logging
 import math
 import os
 import sys
-from collections.abc import Awaitable, Callable, Mapping
+from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, replace
 from datetime import datetime, timezone
 from functools import partial
 from pathlib import Path
 
-from hyperloom.common.benchmark_config import BENCHMARK_CONFIG_ENV, benchmark_config_path
-from hyperloom_common.env import EnvValueError
 from hyperloom_common.shared_storage import open_shared_append
-from hyperloom.common.outside_facts.image_check import ImageCheckFailed, mode_from_environment
-from hyperloom.common.perf_metric import agentx_enabled
+from hyperloom.common.outside_facts.image_check import ImageCheckFailed
 from hyperloom.common.url_userinfo import CREDENTIALED_URL_RE
 from hyperloom.common.workload_defaults import DEFAULT_EP
 from hyperloom.hosted.host_info import HostGroup, HostInfo, take_host_info
 from hyperloom.hosted.toolbox_inputs import ToolboxInputsError
 from hyperloom.inference_optimizer.session.paths import workspace_root
 from hyperloom.measure.runner.cache_build import CacheBuildError
-from hyperloom.measure.short_prompts.staging import CACHE_ENV as RUNNER_CACHE_ENV
-from hyperloom.orchestrator.knowledge.remote_recipe.client import RemoteRecipeClient, RemoteRecipeConfigurationError
-from hyperloom_multibranch.contracts.llm_prices import price_of
+from hyperloom.orchestrator.knowledge.remote_recipe.client import RemoteRecipeClient
 from hyperloom_multibranch.contracts.toolbox import WorkloadKind
 from hyperloom_multibranch.blackboard.knowledge.reference_leads import INFERENCEX_REFERENCE
-from hyperloom_multibranch.blackboard.rsi.archive import ARCHIVE_ENV
+from hyperloom_multibranch.rulegate.agentx import AgentXObjective
 from hyperloom_multibranch.rulegate.critic import LlmCritic, anthropic_critic
 from hyperloom_multibranch.scheduling.budget import MB_DEFAULT_MAX_HOURS
 from hyperloom_multibranch.scheduling.clock import Clock
@@ -177,18 +178,24 @@ from hyperloom_multibranch.scheduling.llm import (
     default_model,
 )
 from hyperloom_multibranch.scheduling.local_peers import (
-    AGENTX_ENV,
     load_peers,
     machine_parallel_tests,
-    specialist_model,
 )
 from hyperloom_multibranch.scheduling.peers import PeerFactory, PeersUnavailable
 from hyperloom_multibranch.scheduling.processes import ProcessRegistry, adopting_orphans
 from hyperloom_multibranch.scheduling.reference import ReferenceSource, reference_source
 from hyperloom_multibranch.scheduling.roster import RosterCaps
+from hyperloom_multibranch.scheduling.session_environment import (
+    EnvironmentIncomplete,
+    hosted_runner_cache,
+    recipe_kb_from_env,
+    require_rsi_archive,
+    require_session_environment,
+)
 from hyperloom_multibranch.scheduling.stops import SessionStopReason
 from hyperloom_multibranch.scheduling.settings import (
     AGENT_PORT,
+    DEFAULT_AGENTX_OBJECTIVE,
     DOSSIER_MINUTES,
     SHARE_MINUTES,
     InferenceXShape,
@@ -196,8 +203,11 @@ from hyperloom_multibranch.scheduling.settings import (
     PlaybookMode,
     RunSettings,
     Workload,
+    session_early_stop,
 )
 from hyperloom_multibranch.specialist.arbor_adapter import DOSSIER_INDEX, ArborRefused, read_launch
+from inference_suite import UserFileError, parse_inferencex_commit, parse_user_file
+from inference_suite.contracts import BaseLaunchError
 
 PROG = "hyperloom-multibranch"
 EXIT_FAILED = 1
@@ -229,10 +239,6 @@ HOSTED_COMMAND = "hosted"
 #: What a grant handed to ``run --measurement hosted`` must give: the sandbox service, the measurement key and
 #: templates, the grant's limits and creation time, and the source the runner cache is built from.
 HANDED_GRANT = (HostGroup.SANDBOX, HostGroup.MEASUREMENT_KEY, HostGroup.GRANT, HostGroup.SOURCE)
-
-
-class EnvironmentIncomplete(RuntimeError):
-    """The environment lacks what a session needs; the message names the variables to set."""
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -274,6 +280,27 @@ def _add_run_options(run: argparse.ArgumentParser) -> None:
     run.add_argument("-v", "--verbose", action=SWITCH, help="Log at debug level.")
 
 
+def _add_agentx_options(run: argparse.ArgumentParser) -> None:
+    """The options only an agentx workload takes."""
+
+    run.add_argument(
+        "--agentx-duration-sec",
+        type=int,
+        default=None,
+        help="Trace window of an agentx workload's tests, written as the benchmark's DURATION; refused for inferencex.",
+    )
+    run.add_argument(
+        "--agentx-objective",
+        choices=[objective.value for objective in AgentXObjective],
+        default=None,
+        help=f"Axis an agentx workload is graded on, default {DEFAULT_AGENTX_OBJECTIVE.value}: a "
+        f"{DEFAULT_AGENTX_OBJECTIVE.bar_pct:g}%% gain on it is "
+        "kept while P90 interactivity and the other axis (total token throughput, or P50 interactivity) hold within "
+        "the noise band. total_token_throughput suits a high --conc only: at a low one the trace's tool and think "
+        "time paces the lanes, so a server gain barely moves it. Refused for inferencex.",
+    )
+
+
 def _add_workload_options(run: argparse.ArgumentParser) -> None:
     """The fixed workload, spelled as ``hyperloom optimize`` spells it, and the kernel optimizer its recipes are scoped
     to."""
@@ -289,12 +316,38 @@ def _add_workload_options(run: argparse.ArgumentParser) -> None:
     run.add_argument("--conc", type=int, help="Concurrency of the primary operating point.")
     for name in SEQUENCE_LENGTHS:
         run.add_argument(f"--{name}", type=int, default=None, help="Required for inferencex; refused for agentx.")
+    _add_agentx_options(run)
     run.add_argument("--precision", help="Model precision, as hyperloom optimize spells it.")
     run.add_argument(
         "--kernel-optimizer",
         choices=[optimizer.value for optimizer in KernelOptimizer],
         default=KernelOptimizer.FORGE.value,
         help="Kernel optimizer the session's recipes are scoped to.",
+    )
+    run.add_argument(
+        "--reference-script",
+        dest="reference_script",
+        type=Path,
+        default=None,
+        metavar=FILE_METAVAR,
+        help=(
+            "The session's base launch, as for hyperloom optimize: a shell launch script, or a base launch record"
+            " (hyperloom-base-launch/1) frozen by another session, which is frozen without reading any recipe source."
+            " It wins over every recipe source; omitted, the base comes from InferenceX, then the framework's"
+            " cookbook, then the default table. Not the --reference directories the specialists read."
+        ),
+    )
+    run.add_argument(
+        "--inferencex-commit",
+        dest="inferencex_commit",
+        default="",
+        metavar="SHA",
+        help=(
+            "Resolve the session's base launch from InferenceX at this commit (a full sha, or a prefix of 7 or more hex"
+            " digits) instead of the head of its main, and record the full sha in the frozen base; the cookbooks are"
+            " still read at main. A commit InferenceX does not have, or one that lacks code the resolver runs, stops"
+            " the session before PRELUDE; a resumed session keeps its frozen base."
+        ),
     )
 
 
@@ -560,6 +613,13 @@ def _shape_errors(args: argparse.Namespace) -> list[str]:
     return missing or _positive(args, SEQUENCE_LENGTHS)
 
 
+def _agentx_only_errors(args: argparse.Namespace) -> list[str]:
+    given = [name for name in ("agentx_duration_sec", "agentx_objective") if getattr(args, name) is not None]
+    if WorkloadKind(args.workload) is WorkloadKind.INFERENCEX:
+        return [f"--{name.replace('_', '-')} is not taken by an inferencex workload" for name in given]
+    return _positive(args, tuple(name for name in given if name != "agentx_objective"))
+
+
 def _workload_shape(args: argparse.Namespace) -> InferenceXShape | None:
     if WorkloadKind(args.workload) is WorkloadKind.AGENTX:
         return None
@@ -651,6 +711,20 @@ def _agent_launch(path: Path | None, agents: list[str]) -> str:
     return str(path.absolute())
 
 
+def _reference_script(path: Path | None, framework: str) -> str:
+    """The absolute path of the operator's launch file the session freezes as its base, ``""`` without one; refused
+    when it cannot serve as a ``framework`` base: unreadable, no launch of ``framework``, a flag set from a shell
+    variable, or a record that fails its schema or digest. Its topology is checked when the session freezes it."""
+
+    if path is None:
+        return ""
+    try:
+        parse_user_file(str(path), path.read_bytes(), framework=framework)
+    except (OSError, UserFileError, BaseLaunchError) as exc:
+        raise ValueError(f"--reference-script {path} cannot serve as the base launch: {exc}") from exc
+    return str(path.absolute())
+
+
 def _stop_after_map(stop: bool, agents: list[str], directions: Path | None) -> bool:
     """Whether the session stops after its map; refused with no agent to map for, or a map already given."""
 
@@ -722,7 +796,7 @@ def settings_from(
     if missing:
         raise ValueError(f"the following arguments are required: {', '.join(missing)}")
     sizes = tuple(name for name in ("tp", "ep", "conc") if getattr(args, name) is not None)
-    errors = _shape_errors(args) + _positive(args, sizes)
+    errors = _shape_errors(args) + _agentx_only_errors(args) + _positive(args, sizes)
     errors += _limit_errors(args)
     if errors:
         raise ValueError("; ".join(errors))
@@ -737,6 +811,8 @@ def settings_from(
         KernelOptimizer(args.kernel_optimizer),
         _workload_shape(args),
         DEFAULT_EP if args.ep is None else args.ep,
+        args.agentx_duration_sec,
+        AgentXObjective(args.agentx_objective or DEFAULT_AGENTX_OBJECTIVE),
     )
     caps = RosterCaps(args.max_branches, args.max_k_per_branch, parallel)
     prompts, agents = args.specialist_prompts or [], args.agents or []
@@ -750,6 +826,7 @@ def settings_from(
         user_directions=_user_directions(prompts, caps.max_branches),
         agents=_agents(agents, caps.max_branches - len(prompts)),
         references=_references(args.references or []),
+        reference_script=_reference_script(args.reference_script, args.framework),
         dev_leases=args.dev_leases,
         playbook=PlaybookMode(args.playbook),
         make_before_break=args.make_before_break,
@@ -762,6 +839,8 @@ def settings_from(
         stop_after_map=_stop_after_map(args.stop_after_map, agents, args.agent_directions),
         agent_dossier=_agent_dossier(args.agent_dossier, args.agent_directions),
         review_gate=args.review_gate,
+        inferencex_commit=parse_inferencex_commit(args.inferencex_commit) if args.inferencex_commit else "",
+        agentx_early_stop=session_early_stop(os.environ),
     )
 
 
@@ -801,66 +880,6 @@ def _parallel_tests(args: argparse.Namespace, tests_that_fit: Callable[[int], in
     if parallel > fitting:
         raise ValueError(f"--max-parallel-tests must be at most {fitting}, the tests that run at once at TP")
     return parallel
-
-
-def require_workload_switch(workload: Workload, env: Mapping[str, str]) -> None:
-    """Raise ValueError when ``env`` sets ``HYPERLOOM_AGENTX`` to anything but what ``workload``'s kind says, or names
-    a benchmark YAML in ``HYPERLOOM_BENCHMARK_CONFIG``; the session sets both for an AgentX workload itself, so an
-    operator who set them means a workload ``--workload`` and its flags do not name."""
-
-    if benchmark_config_path(env) is not None:
-        raise ValueError(f"{BENCHMARK_CONFIG_ENV} names a workload YAML; --workload and its flags define the workload")
-    if AGENTX_ENV not in env:
-        return
-    try:
-        agentx = agentx_enabled(env)
-    except EnvValueError as exc:
-        raise ValueError(str(exc)) from exc
-    if agentx != (workload.kind is WorkloadKind.AGENTX):
-        raise ValueError(f"{AGENTX_ENV}={env[AGENTX_ENV]!r} contradicts --workload {workload.kind.value}")
-
-
-def require_priced_models(max_llm_usd: float, env: Mapping[str, str]) -> None:
-    """Raise ValueError when ``max_llm_usd`` caps the session's LLM dollars and the price sheet lists no rate for the
-    model the judge, the patch resolver and the fix critic ask or the one the specialists of ``env`` run on: their
-    calls would record tokens only, which the cap cannot count."""
-
-    if not max_llm_usd:
-        return
-    models = {"the judge's": default_model(), "the specialists'": specialist_model(env)}
-    unpriced = [f"{whose} model {model}" for whose, model in models.items() if price_of(model) is None]
-    if unpriced:
-        raise ValueError(
-            f"--max-llm-usd cannot count the dollars of {' or '.join(unpriced)}, which the price sheet does not list;"
-            " run on a listed model or without a dollar cap"
-        )
-
-
-def recipe_kb_from_env() -> RemoteRecipeClient | None:
-    """The Recipe KB client ``KB_STORE_URL`` and ``KB_STORE_TOKEN`` configure, ``None`` when neither is set; raises
-    :class:`EnvironmentIncomplete` when only one is."""
-
-    if not any(os.environ.get(name, "").strip() for name in ("KB_STORE_URL", "KB_STORE_TOKEN")):
-        return None
-    try:
-        return RemoteRecipeClient.from_env()
-    except RemoteRecipeConfigurationError as exc:
-        raise EnvironmentIncomplete(f"the Recipe KB is half configured: {exc}") from exc
-
-
-def require_rsi_archive(env: Mapping[str, str]) -> None:
-    """Raise :class:`EnvironmentIncomplete` naming ``HYPERLOOM_RSI_ARCHIVE`` when ``env`` does not set it, and unless
-    the archive it names is a writable directory. There is no default: the archive is the deployment's shared folder."""
-
-    if not env.get(ARCHIVE_ENV, "").strip():
-        raise EnvironmentIncomplete(
-            f"{ARCHIVE_ENV} is not set: name the writable shared directory the session archives its search tree in"
-        )
-    archive = Path(env[ARCHIVE_ENV].strip())
-    if not (archive.is_dir() and os.access(archive, os.W_OK)):
-        raise EnvironmentIncomplete(
-            f"the RSI archive {archive} is not a writable directory: mount it, or set {ARCHIVE_ENV} to one"
-        )
 
 
 def session_services(recipe_kb: RemoteRecipeClient | None) -> SessionServices:
@@ -978,15 +997,6 @@ def _file_handler(path: Path) -> logging.Handler:
     return handler
 
 
-def require_session_environment(settings: RunSettings, env: Mapping[str, str]) -> None:
-    """Raise ValueError when ``env`` contradicts the workload of ``settings``, cannot price its dollar cap or sets an
-    image check mode there is none of."""
-
-    require_workload_switch(settings.workload, env)
-    require_priced_models(settings.max_llm_usd, env)
-    mode_from_environment(env)
-
-
 @dataclass(frozen=True)
 class ReadySession:
     """The peers a session is built on and the services it calls out to."""
@@ -1001,20 +1011,6 @@ def hosted_ready_session(host: HostInfo, workload: Workload) -> ReadySession:
 
     inputs = PinnedToolboxInputs(host, hosted_runner_cache(os.environ))
     return ready_session(workload, partial(load_hosted_peers, inputs=inputs))
-
-
-def hosted_runner_cache(env: Mapping[str, str]) -> Path:
-    """This host's runner cache directory, which ``HYPERLOOM_RUNNER_CACHE`` must name as an absolute path; raises
-    :class:`EnvironmentIncomplete` naming the variable otherwise. Hosted sessions take no default: a cache built where
-    the measurement sandboxes do not mount it leaves them with no runner, and a sealed sandbox cannot fetch one."""
-
-    value = env.get(RUNNER_CACHE_ENV, "").strip()
-    if not value or not Path(value).is_absolute():
-        raise EnvironmentIncomplete(
-            f"{RUNNER_CACHE_ENV} is not set to an absolute path: name the directory of the runner cache on the shared"
-            " storage the measurement sandboxes mount"
-        )
-    return Path(value)
 
 
 def ready_session(workload: Workload, load: Callable[[Workload], PeerFactory]) -> ReadySession:
@@ -1053,7 +1049,7 @@ def hosted_run() -> int:
     _stop_before_grant_ends(start.deadline)
     try:
         returncode = start.run()
-    except (ImageCheckFailed, CacheBuildError, ToolboxInputsError, PermissionError) as exc:
+    except (PeersUnavailable, ImageCheckFailed, CacheBuildError, ToolboxInputsError, PermissionError) as exc:
         return _not_run(host.state_dir, EXIT_FAILED, exc)
     root = recorded_session(host.state_dir)
     stop_reason = None if root is None else reported_stop_reason(root)
@@ -1064,7 +1060,7 @@ def hosted_run() -> int:
 def _hosted_start(host: HostInfo) -> HostedStart:
     """A new session of the spec, or the close or finish of the one ``session.json`` names, which the restart takes
     over (:func:`take_over_earlier_session`); raises ValueError on a refused spec or session, ImportError when a
-    ``hosted`` package is missing, and what :func:`ready_session` raises."""
+    ``hosted`` package is missing, and what :func:`require_hosted_isolation` and :func:`ready_session` raise."""
 
     deadline = grant_deadline(host, datetime.now(timezone.utc))
     earlier = take_over_earlier_session(host.state_dir)
@@ -1212,7 +1208,6 @@ __all__ = [
     "SESSION_GPU_TYPES",
     "PROG",
     "SEQUENCE_LENGTHS",
-    "EnvironmentIncomplete",
     "HANDED_GRANT",
     "HandedGrant",
     "HostedStart",
@@ -1221,15 +1216,9 @@ __all__ = [
     "final_only",
     "grant_tests_that_fit",
     "hosted_ready_session",
-    "hosted_runner_cache",
     "hosted_run",
     "main",
-    "recipe_kb_from_env",
     "ready_session",
-    "require_priced_models",
-    "require_rsi_archive",
-    "require_session_environment",
-    "require_workload_switch",
     "resume",
     "run_session",
     "session_services",

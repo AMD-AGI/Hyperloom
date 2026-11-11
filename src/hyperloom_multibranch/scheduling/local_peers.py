@@ -24,8 +24,8 @@ runner the regression set uses and has the setup's critic review it. The runtime
 :data:`SpecialistSessions`: :func:`model_backed_sessions` runs each branch's specialist as an agent CLI in a worktree of
 its own, briefed by the session's :class:`SessionBriefs`, whose warm-start leads the session binds once PRELUDE has read
 them and which reads the repository for a replay's branch head. :func:`load_peers` reads the measurement host, checks
-the image holds the framework package those worktrees branch off and resolves that CLI first, and refuses when either
-cannot be had, so the command line fails before it creates anything.
+the workload's model is a directory here, that the image holds the framework package those worktrees branch off and
+resolves that CLI first, and refuses when any cannot be had, so the command line fails before it creates anything.
 
 On either backend a test of an AgentX workload may run for its trace window and the boot and warmup around it
 (:func:`attempt_timeout_sec`).
@@ -56,7 +56,7 @@ from hyperloom_multibranch.contracts.blackboard import Role, Writer
 from hyperloom_multibranch.contracts.blackboard.interfaces import BranchLogStore, CommitQuery
 from hyperloom_multibranch.contracts.repo import ExperimentRepo
 from hyperloom_multibranch.contracts.sources import NativeTree, SourceRoot
-from hyperloom_multibranch.contracts.toolbox import SpecialistTokens
+from hyperloom_multibranch.contracts.toolbox import SpecialistTokens, WorkloadKind
 from hyperloom_multibranch.blackboard import BriefTriggers, LocalBlackboard
 from hyperloom_multibranch.blackboard.learning_search import LEARNINGS_LOG, RetrievalLog
 from hyperloom_multibranch.blackboard.rsi.briefing import SessionBriefs
@@ -80,6 +80,7 @@ from hyperloom_multibranch.specialist.runtime import RuntimePacing, SpecialistRu
 
 if TYPE_CHECKING:
     from hyperloom_multibranch.specialist.agent_onboarding import AgentSpec
+    from hyperloom_multibranch.specialist.gate_client import GateClient
     from pathlib import Path
 
     from hyperloom.hosted.mcp_server import McpServer
@@ -125,8 +126,8 @@ class SessionWiring:
     tokens that grant a branch's specialist the MCP service's tools (a grant names the service's URL, so it is issued
     when a specialist starts), each branch's log, the session's briefs, its dev sandboxes, ``None`` when it lends
     none, the canonical configuration the toolbox rendered, which the gate's benchmark client is read from, the
-    native trees the branches edit (:func:`native_trees`) and the sandboxes autonomous agents run in, ``None`` when the
-    session runs none."""
+    native trees the branches edit (:func:`native_trees`), the sandboxes autonomous agents run in and the server half
+    of the session's frozen base launch, which every test starts from."""
 
     setup: PeerSetup
     repo: ExperimentRepo
@@ -137,7 +138,8 @@ class SessionWiring:
     dev_leases: DevLeases | None
     canonical: Path
     native: Mapping[str, NativeTree]
-    agent_sandboxes: AgentSandboxes | None
+    agent_sandboxes: AgentSandboxes
+    base: ServerBase
 
 
 #: Builds the specialist runtime's session factory, and the worktree of each branch the worktree tools serve, on a
@@ -148,29 +150,24 @@ SpecialistSessions = Callable[[SessionWiring], "ModelSessions"]
 @dataclass(frozen=True)
 class BranchSandboxes:
     """Where a session's dev sandboxes and autonomous agents run: ``dev``, the sandbox of each dev lease, which takes
-    ``dev_cards`` unless the specialist asks for others, and ``agents``, ``None`` for a session that runs none."""
+    ``dev_cards`` unless the specialist asks for others, and ``agents``."""
 
     dev: SandboxFor
     dev_cards: int
-    agents: AgentSandboxes | None
+    agents: AgentSandboxes
 
 
 def branch_sandboxes(backend: ToolboxBackend, setup: PeerSetup, worktrees: WorktreeFor) -> BranchSandboxes:
     """This machine's sandboxes when ``backend`` measures on its cards; else the ``dev`` sandboxes of the hosted
     backend's leases, which have the session's TP cards and see the session directory at the path it has here."""
 
+    from hyperloom_multibranch.specialist.agent_sessions import LocalAgentSandboxes, RemoteAgentSandboxes
     from hyperloom_multibranch.specialist.dev_sandbox import hosted_dev_sandboxes, local_dev_sandboxes
 
-    agents = _agent_sandboxes(backend, setup) if setup.agents else None
     if backend.on_this_machine:
-        return BranchSandboxes(local_dev_sandboxes(worktrees, setup.processes), 1, agents)
-    return BranchSandboxes(hosted_dev_sandboxes(worktrees, setup.layout.branch_dir), setup.workload.tp, agents)
-
-
-def _agent_sandboxes(backend: ToolboxBackend, setup: PeerSetup) -> AgentSandboxes:
-    from hyperloom_multibranch.specialist.agent_sessions import LocalAgentSandboxes, RemoteAgentSandboxes
-
-    return LocalAgentSandboxes(setup.processes) if backend.on_this_machine else RemoteAgentSandboxes()
+        return BranchSandboxes(local_dev_sandboxes(worktrees, setup.processes), 1, LocalAgentSandboxes(setup.processes))
+    dev = hosted_dev_sandboxes(worktrees, setup.layout.branch_dir)
+    return BranchSandboxes(dev, setup.workload.tp, RemoteAgentSandboxes())
 
 
 @dataclass(frozen=True)
@@ -262,14 +259,14 @@ def workload_environment(workload: Workload) -> Mapping[str, str]:
 
 def attempt_timeout_sec(workload: Workload) -> int:
     """How long one attempt of a test of ``workload`` may run on either backend: the toolbox's default for an
-    InferenceX workload, and for an AgentX one its trace window (:data:`AGENTX_TRACE_SEC`) plus what
-    the test spends outside it (:data:`AGENTX_OUTSIDE_TRACE_SEC`)."""
+    InferenceX workload, and for an AgentX one its trace window (the workload's, else :data:`AGENTX_TRACE_SEC`) plus
+    what the test spends outside it (:data:`AGENTX_OUTSIDE_TRACE_SEC`)."""
 
     from hyperloom_multibranch.toolbox.hosted_executor import DEFAULT_TEST_TIMEOUT_SEC
 
     if workload.inferencex is not None:
         return DEFAULT_TEST_TIMEOUT_SEC
-    return AGENTX_TRACE_SEC + AGENTX_OUTSIDE_TRACE_SEC
+    return (workload.agentx_duration_sec or AGENTX_TRACE_SEC) + AGENTX_OUTSIDE_TRACE_SEC
 
 
 def _export_workload(workload: Workload, toolbox_dir: Path, image_ref: str) -> None:
@@ -294,6 +291,7 @@ def _export_workload(workload: Workload, toolbox_dir: Path, image_ref: str) -> N
         conc=workload.conc,
         model_path=workload.model,
         docker_image=image_ref,
+        duration_sec=workload.agentx_duration_sec,
     )
     write_agentx_benchmark(path, benchmark)
     os.environ[BENCHMARK_CONFIG_ENV] = str(path.resolve())
@@ -301,10 +299,10 @@ def _export_workload(workload: Workload, toolbox_dir: Path, image_ref: str) -> N
 
 def workload_rule(workload: Workload, blackboard: CommitQuery) -> Rule:
     """The rule a session of ``workload`` is judged on: InferenceX throughput at the workload's conc against the
-    PRELUDE bar ``blackboard`` holds, or AgentX P50 interactivity with its guards."""
+    PRELUDE bar ``blackboard`` holds, or the AgentX objective with its guards."""
 
     if workload.inferencex is None:
-        return AgentXRule()
+        return AgentXRule(workload.agentx_objective)
     return InferenceXRule(blackboard, workload.conc)
 
 
@@ -339,9 +337,9 @@ def specialist_recall(reports: Path) -> LessonRecall:
 
 def local_peers(host: MeasurementHost, sessions: SpecialistSessions, setup: PeerSetup) -> Peers:
     """The session's peers on this machine; exports the workload into this process (:func:`_export_workload`) and
-    freezes the base launch every test runs on in ``MB-toolbox`` unless the session froze one, resolved from InferenceX
-    (:func:`~hyperloom_multibranch.scheduling.session_base.freeze_session_base`). Raises :class:`PeersUnavailable` when
-    no base launch can be frozen or the session's canonical measurement cannot be taken.
+    freezes the base launch every test runs on in ``MB-toolbox`` unless the session froze one
+    (:func:`~hyperloom_multibranch.scheduling.session_base.freeze_session_base`). Raises :class:`PeersUnavailable`
+    when no base launch can be frozen or the session's canonical measurement cannot be taken.
 
     Called on the event loop the session runs on. The toolbox is built, not started: the session starts it, and its
     close releases the backend and the sandboxes. The MCP service is started; the session stop stops it. How the
@@ -357,7 +355,8 @@ def local_peers(host: MeasurementHost, sessions: SpecialistSessions, setup: Peer
 
     layout, workload = setup.layout, setup.workload
     _export_workload(workload, layout.toolbox, host.image.ref)
-    base = server_base(freeze_session_base(layout.toolbox, workload).launch)
+    frozen = freeze_session_base(layout.toolbox, workload, setup.reference_script, setup.inferencex_commit)
+    base = server_base(frozen.launch)
     native = native_trees(os.environ)
     repo = GitExperimentRepo(layout.repo, setup.blobs, native=native)
     canonical_dir = layout.toolbox / CANONICAL_DIR
@@ -383,7 +382,7 @@ def local_peers(host: MeasurementHost, sessions: SpecialistSessions, setup: Peer
     tokens = McpSpecialistTokens(mcp)
     rendered = canonical_dir / RENDERED_CANONICAL
     wiring = SessionWiring(
-        setup, repo, tokens, runtime_blackboard, briefs, toolbox, leases, rendered, native, sandboxes.agents
+        setup, repo, tokens, runtime_blackboard, briefs, toolbox, leases, rendered, native, sandboxes.agents, base
     )
     built = sessions(wiring)
     register_worktree_tools(mcp, repo=repo, worktrees=built.worktrees)
@@ -423,6 +422,7 @@ def _toolbox(
 
     from hyperloom.measure.compile import EnvironmentCompiler
     from hyperloom.measure.hosted_spec import SpecContext
+    from hyperloom_multibranch.toolbox.agentx_checkpoint import CheckpointReferences
     from hyperloom_multibranch.toolbox.planner import HostedPlanner
     from hyperloom_multibranch.toolbox.toolbox import AcceptanceSetup
 
@@ -436,12 +436,14 @@ def _toolbox(
         blob_root=str(setup.blobs.root),
     )
     planner = HostedPlanner(compiler, canonical, layout.toolbox / POINTS_DIR)
-    return host.backend.toolbox(
-        setup,
-        LocalBlackboard(layout.blackboard, Writer(Role.TOOLBOX, TOOLBOX_WRITER)),
-        AcceptanceSetup(repo, planner, image.digest, workload_kind=workload.kind, explore_accuracy=False),
-        spec,
+    blackboard = LocalBlackboard(layout.blackboard, Writer(Role.TOOLBOX, TOOLBOX_WRITER))
+    checkpoint = None
+    if workload.kind is WorkloadKind.AGENTX:
+        checkpoint = CheckpointReferences(setup.agentx_early_stop, workload.agentx_objective, blackboard)
+    acceptance = AcceptanceSetup(
+        repo, planner, image.digest, workload_kind=workload.kind, explore_accuracy=False, checkpoint=checkpoint
     )
+    return host.backend.toolbox(setup, blackboard, acceptance, spec)
 
 
 def _specialist_briefs(setup: PeerSetup, repo: GitExperimentRepo) -> SessionBriefs:
@@ -600,7 +602,11 @@ def _specialist_role(workload: Workload) -> str:
     """The workload as the specialists' role prompt names it."""
 
     shape = workload.inferencex
-    requests = "AgentX trace replay" if shape is None else f"ISL {shape.isl}, OSL {shape.osl}"
+    requests = (
+        f"AgentX trace replay graded on {workload.agentx_objective.title} ({workload.metric})"
+        if shape is None
+        else f"ISL {shape.isl}, OSL {shape.osl}"
+    )
     return (
         f"{workload.model_basename} on {workload.framework}, {workload.precision}, TP {workload.tp}, "
         f"{requests}, concurrency {workload.conc}, {workload.gpu_type}"
@@ -614,8 +620,8 @@ AITER = "aiter"
 def model_backed_sessions(command: AgentCommand) -> SpecialistSessions:
     """Sessions that run ``command`` for every branch's specialist, in a worktree of the workload's framework, and
     each branch's third-party agent in a sandbox leased from the session's toolbox (``wiring.agent_sandboxes``), given
-    the gate's benchmark client when the session's canonical configuration names one; a session that runs no agent
-    reads no canonical.
+    the gate's benchmark client of the session's canonical configuration; a session that runs no agent reads no
+    canonical.
 
     The CLI runs on the main flow's allowlisted specialist environment, through a local AI work socket whose resource
     log is under ``MB-logs``; its worktrees branch off one source base at ``MB-source``, and each launch rebuilds the
@@ -626,17 +632,19 @@ def model_backed_sessions(command: AgentCommand) -> SpecialistSessions:
         from hyperloom.orchestrator.specialists.agent_runner import Liveness, LocalAgentRunner, build_specialist_env
         from hyperloom_multibranch.specialist.agent_session import SPECIALIST_LOST_AFTER_S, AgentSetup
         from hyperloom_multibranch.specialist.agent_sessions import AgentSessions, with_agents
-        from hyperloom_multibranch.specialist.gate_client import read_gate_client
         from hyperloom_multibranch.specialist.model_sessions import model_sessions
-        from hyperloom_multibranch.specialist.prompts import role_prompt
+        from hyperloom_multibranch.specialist.prompts import RoleWorkload, role_prompt
         from hyperloom_multibranch.specialist.worktree import SourceBase
 
         layout, workload = wiring.setup.layout, wiring.setup.workload
         agent = AgentSetup(
             command=command,
             role=role_prompt(
-                _specialist_role(workload),
+                RoleWorkload(
+                    _specialist_role(workload), workload.agentx_objective if workload.inferencex is None else None
+                ),
                 references=wiring.setup.references,
+                base=wiring.base,
                 dev_leases=wiring.dev_leases.limits.cap if wiring.dev_leases else 0,
                 native=wiring.native,
             ),
@@ -667,7 +675,7 @@ def model_backed_sessions(command: AgentCommand) -> SpecialistSessions:
             wiring.toolbox,
             wiring.repo,
             wiring.agent_sandboxes,
-            client=read_gate_client(wiring.canonical) if wiring.setup.agents else None,
+            client=_gate_client(wiring) if wiring.setup.agents else None,
             dossier=wiring.setup.agent_dossier or None,
             maps=wiring.setup.agent_maps,
             least_run_seconds=wiring.setup.agent_share_minutes * 60.0,
@@ -675,6 +683,18 @@ def model_backed_sessions(command: AgentCommand) -> SpecialistSessions:
         return with_agents(sessions, agents, branch_dir=layout.branch_dir, blackboard_for=wiring.blackboards)
 
     return build
+
+
+def _gate_client(wiring: SessionWiring) -> GateClient | None:
+    """The gate's fixed client of the session's rendered canonical configuration; ``None`` on an AgentX workload,
+    whose Arbor is measured by the client of its ``--agent-launch`` file, as the adapter reads no replay command."""
+
+    from hyperloom_multibranch.specialist.gate_client import read_gate_client
+
+    workload = wiring.setup.workload
+    if workload.inferencex is None:
+        return None
+    return read_gate_client(wiring.canonical, wiring.setup.layout.toolbox, attempt_timeout_sec(workload))
 
 
 def _sessions_over_source(
@@ -774,7 +794,24 @@ def load_peers(workload: Workload) -> PeerFactory:
     It creates nothing, so the command line calls it before the session directory exists.
     """
 
+    require_local_model(workload)
     return peers_on(measurement_host(os.environ, LocalCards(machine_cards())), workload)
+
+
+def require_local_model(workload: Workload) -> None:
+    """Check that ``workload``'s model resolves to a directory on this machine (:func:`resolve_serving_model_path`);
+    raises :class:`PeersUnavailable` naming where it was looked for otherwise. A local test's server runs with its
+    sandbox directory as its home, so a hub id finds none of this host's Hugging Face cache and is fetched from the
+    hub."""
+
+    served = resolve_serving_model_path(workload.model)
+    if not os.path.isdir(served):
+        base = os.environ.get("HL_MODEL_BASE", "")
+        raise PeersUnavailable(
+            f"the model {workload.model} is no directory on this machine (HL_MODEL_BASE={base!r}, nor in the "
+            "Hugging Face cache): pass --model the checkpoint's directory, or set HL_MODEL_BASE to the directory "
+            "holding it under its repository name"
+        )
 
 
 def peers_on(host: MeasurementHost, workload: Workload) -> PeerFactory:
@@ -798,6 +835,7 @@ __all__ = [
     "SpecialistSessions",
     "ToolboxBackend",
     "load_peers",
+    "require_local_model",
     "local_peers",
     "machine_cards",
     "machine_parallel_tests",

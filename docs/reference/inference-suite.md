@@ -37,8 +37,9 @@ with that commit; the vLLM recipes site has no commit and is recorded as the
 response it was read from.
 
 To match a run made at an older InferenceX, pin it with `--inferencex-commit
-<sha>` (`resolve` and `hyperloom optimize` both take it): a full sha, or a prefix
-of 7 or more hex digits of a commit on one of
+<sha>` (`resolve`, `hyperloom optimize` and `hyperloom-multibranch run` all take
+it, and a hosted multibranch run takes it from its campaign spec's
+`multibranch.inferencex_commit`): a full sha, or a prefix of 7 or more hex digits of a commit on one of
 InferenceX's branches or at the head of one of its refs, a pull request's
 included. The base records the full sha it read. Only InferenceX is pinned; the
 cookbooks, the vLLM recipes site and ATOM's catalog are still read at `main`. A
@@ -51,7 +52,8 @@ when the commit lacks a function the resolver runs from InferenceX's own code
 (for example, a commit without `acceptance_length`, `generation_role` and
 `verifier` in `infx.srt_slurm.synthetic_acceptance`); the message names what it
 lacks. To run on such a commit, resolve the base where its code was run and hand
-the session the frozen `base_launch.json` as `--reference-script`.
+the session the frozen `base_launch.json` as `--reference-script`
+(`hyperloom-multibranch run` takes it the same way).
 
 A launch script is read, never run. It must launch the session's framework and fix
 every flag in its own text: a flag whose value names a shell variable, or a

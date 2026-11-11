@@ -18,19 +18,19 @@ from collections.abc import AsyncIterator, Mapping
 from contextlib import asynccontextmanager
 from dataclasses import dataclass, replace
 from pathlib import Path
-from types import ModuleType, SimpleNamespace
-from typing import TYPE_CHECKING
+from types import SimpleNamespace
 
 import pytest
 import yaml
 
+from inference_suite import INFERENCEX_CLIENT_COMMIT
+from inference_suite.staging import INFERENCEX_REQUIRED
+from hyperloom.common.benchmark_config import BENCHMARK_CONFIG_ENV, benchmark_config_path, is_agentx
 from hyperloom.common import agent_isolation
 from hyperloom.common.agent_isolation import BWRAP, NONE
-from hyperloom.common.benchmark_config import BENCHMARK_CONFIG_ENV, benchmark_config_path, is_agentx
-from hyperloom.contracts.measurement import AttachmentRef, Purpose, TestKind, TestRequest
-from hyperloom.inference_optimizer.cli import base_launch as cli_base_launch
-from hyperloom.contracts.recipe import Recipe, RecipeDelta
 from hyperloom.common.env_safety import SPECIALIST_USER_ENV
+from hyperloom.contracts.measurement import AttachmentRef, Purpose, TestKind, TestRequest
+from hyperloom.contracts.recipe import Recipe, RecipeDelta
 from hyperloom_common import bwrap as bwrap_module
 from hyperloom_common.bwrap import BwrapProbe
 from hyperloom_common.env import forge_explicitly_enabled
@@ -40,15 +40,7 @@ from hyperloom.measure import compile as compile_module
 from hyperloom.measure.compile import ComponentLayout, LocalBlobStore, PackageBase, UnsupportedComponentError
 from hyperloom.measure.hosted_spec import SpecContext
 from hyperloom.measure.pins import ActiveImage
-from hyperloom.measure.runner import suite_publish
-from hyperloom.measure.runner.suite_publish import SuitePublishError
-from hyperloom.measure.tests.bundle_factory import base_launch
 from hyperloom.orchestrator.actions.executors import TOOL_CACHE_ENV
-from hyperloom.orchestrator.state.base_launch import freeze_base, frozen_base
-from hyperloom_multibranch.tests.staging_rig import verified_tool_cache
-from inference_suite import INFERENCEX_CLIENT_COMMIT, SourceSnapshot
-from inference_suite.recipe.resolve import UnreadSource
-from inference_suite.staging import INFERENCEX_REQUIRED
 from hyperloom_kb import ReadStatus
 from hyperloom_multibranch.contracts.gate import RegressionOutcome
 from hyperloom_multibranch.contracts.blackboard import INTEGRATION_BRANCH, Role, Writer
@@ -65,6 +57,7 @@ from hyperloom_multibranch.repo.git_repo import GitExperimentRepo
 from hyperloom_multibranch.rulegate.fix_case import FIX_CASE_ID, FixCase, read_case
 from hyperloom_multibranch.rulegate.gate import RuleGate
 from hyperloom_multibranch.rulegate.regression import RegressionSet
+from hyperloom_multibranch.rulegate.agentx import AgentXObjective
 from hyperloom_multibranch.rulegate.rules import AgentXRule, InferenceXRule
 from hyperloom_multibranch.rulegate.inferencex import BASELINE_TESTS
 from hyperloom_multibranch.rulegate.service import GateService
@@ -83,12 +76,14 @@ from hyperloom_multibranch.scheduling.launch_isolation import (
 )
 from hyperloom_multibranch.scheduling.local_peers import (
     AGENTX_ENV,
+    AGENTX_OUTSIDE_TRACE_SEC,
     AGENTX_TRACE_SEC,
     InferenceXCheckout,
     LocalCards,
     MeasurementHost,
     SessionWiring,
     branch_sandboxes,
+    load_peers,
     local_peers,
     machine_cards,
     machine_parallel_tests,
@@ -113,14 +108,27 @@ from hyperloom_multibranch.scheduling.settings import (
     KernelOptimizer,
     Workload,
 )
+from hyperloom_multibranch.specialist import agent_sessions as agent_sessions_module
+from hyperloom_multibranch.specialist import model_sessions as model_sessions_module
 from hyperloom_multibranch.specialist import worktree as worktree_module
 from hyperloom_multibranch.specialist.agent_session import AgentCommand, AgentSetup
+from hyperloom_multibranch.specialist.agent_sessions import LocalAgentSandboxes, RemoteAgentSandboxes
 from hyperloom_multibranch.specialist.dev_sandbox import DevLeases
 from hyperloom_multibranch.specialist.remote_sandbox import RemoteAgentSandbox
 from hyperloom_multibranch.tests.fakes import RefusingCritic
+from hyperloom_multibranch.tests.staging_rig import verified_tool_cache
+from hyperloom.inference_optimizer.cli import base_launch as cli_base_launch
+from hyperloom.measure.runner import suite_publish
+from hyperloom.measure.runner.suite_publish import SuitePublishError
+from hyperloom.measure.tests.bundle_factory import base_launch
+from hyperloom.orchestrator.state.base_launch import ServerBase, freeze_base, frozen_base, server_base
+from inference_suite import SourceSnapshot
+from inference_suite.recipe.resolve import UnreadSource
+from inference_suite.contracts import BaseLaunch
 from hyperloom_multibranch.toolbox.hosted_leases import HostedBranchLease
-from hyperloom_multibranch.specialist.gate_client import FixedGateClient
-from hyperloom_multibranch.specialist.prompts import role_prompt
+from hyperloom_multibranch.specialist.gate_client import GateClient
+from hyperloom_multibranch.specialist.model_sessions import ModelSessions
+from hyperloom_multibranch.specialist.prompts import RoleWorkload, role_prompt
 from hyperloom_multibranch.specialist.runtime import SessionStart, SpecialistRuntime
 from hyperloom_multibranch.specialist.worktree import BranchWorktree
 from hyperloom_multibranch.toolbox import local_hosted
@@ -133,25 +141,12 @@ from hyperloom_multibranch.toolbox.local_hosted import LocalHostedToolbox
 from hyperloom_multibranch.toolbox.mcp_tools import McpSpecialistTokens
 from hyperloom_multibranch.toolbox.queue import QueuePolicy
 
-if TYPE_CHECKING:
-    from hyperloom_multibranch.specialist.model_sessions import ModelSessions
-
-
-def _model_sessions() -> ModuleType:
-    """The specialist's model-backed sessions, which the wiring builds; a test that builds them is skipped while the
-    specialist package has none."""
-    return pytest.importorskip("hyperloom_multibranch.specialist.model_sessions")
-
-
-def _agent_sessions() -> ModuleType:
-    """The autonomous agents' sessions and sandboxes, which the wiring builds; skipped as :func:`_model_sessions`."""
-    return pytest.importorskip("hyperloom_multibranch.specialist.agent_sessions")
-
-
 WORKLOAD = Workload(
     "/models/Llama-3-8B", "sglang", 2, 16, "bf16", "mi355x", KernelOptimizer.FORGE, InferenceXShape(1024, 512)
 )
 AGENTX = replace(WORKLOAD, inferencex=None)
+TOTAL_AGENTX = replace(AGENTX, agentx_objective=AgentXObjective.TOTAL_TOKEN_THROUGHPUT)
+BASE = ServerBase(args="--tp-size 2 --enable-hierarchical-cache --hicache-size 180", env={"SGLANG_X": "true"})
 IMAGE = ActiveImage("registry.example/sglang:v1", "sha256:" + "2" * 64)
 LOCAL = LocalCards((0, 1, 2, 3))
 HOST = MeasurementHost(LOCAL, IMAGE, InferenceXCheckout(INFERENCEX_CLIENT_COMMIT, "/opt/tools/inferencex/client"))
@@ -238,12 +233,24 @@ def test_the_rule_follows_the_workload(tmp_path: Path) -> None:
     blackboard = LocalBlackboard(tmp_path, Writer(Role.GATE, "rule-gate"))
 
     assert workload_rule(WORKLOAD, blackboard) == InferenceXRule(blackboard, WORKLOAD.conc)
-    assert isinstance(workload_rule(AGENTX, blackboard), AgentXRule)
+    assert workload_rule(AGENTX, blackboard) == AgentXRule(AgentXObjective.P50_INTERACTIVITY)
+    assert workload_rule(TOTAL_AGENTX, blackboard) == AgentXRule(AgentXObjective.TOTAL_TOKEN_THROUGHPUT)
+
+
+def test_the_agents_are_asked_for_the_metric_the_session_is_graded_on() -> None:
+    assert (_agent_spec(AGENTX).metric, _agent_spec(TOTAL_AGENTX).metric) == (
+        "e2e_norm_intvty_p50",
+        "total_token_throughput",
+    )
 
 
 def test_the_specialists_are_told_an_agentx_workload_and_no_sequence_lengths() -> None:
     assert _specialist_role(WORKLOAD) == "Llama-3-8B on sglang, bf16, TP 2, ISL 1024, OSL 512, concurrency 16, mi355x"
-    assert _specialist_role(AGENTX) == "Llama-3-8B on sglang, bf16, TP 2, AgentX trace replay, concurrency 16, mi355x"
+    assert _specialist_role(AGENTX) == (
+        "Llama-3-8B on sglang, bf16, TP 2, AgentX trace replay graded on P50 interactivity (e2e_norm_intvty_p50), "
+        "concurrency 16, mi355x"
+    )
+    assert "graded on total token throughput (total_token_throughput)," in _specialist_role(TOTAL_AGENTX)
 
 
 def test_the_agents_spec_names_the_pack_the_session_gives_its_arbors_and_none_by_default() -> None:
@@ -284,6 +291,17 @@ def test_the_model_is_exported_as_the_directory_a_server_loads_it_from(
         "meta-llama/Llama-3-8B", "vllm", 1, 1, "fp8", "mi355x", KernelOptimizer.FORGE, InferenceXShape(1, 1)
     )
     assert workload_environment(hub_id)["MODEL_PATH"] == str(tmp_path / "Llama-3-8B")
+
+
+def test_a_model_that_resolves_to_no_local_directory_refuses_the_local_peers(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("HL_MODEL_BASE", str(tmp_path / "models"))
+    monkeypatch.setenv("HF_HUB_CACHE", str(tmp_path / "hub"))
+    hub_id = replace(AGENTX, model="amd/Muse-Spark-Open-816B-A42B-Quark-MXFP4")
+
+    with pytest.raises(PeersUnavailable, match=r"amd/Muse-Spark-Open-816B-A42B-Quark-MXFP4 .*HL_MODEL_BASE="):
+        load_peers(hub_id)
 
 
 def test_the_specialists_run_the_agent_cli_found_on_path(tmp_path: Path) -> None:
@@ -391,7 +409,7 @@ def test_a_session_nobody_names_the_image_of_refuses_the_peers() -> None:
     ],
     ids=["half-named-image", "zero-digest"],
 )
-def test_pins_that_cannot_be_read_refuse_the_peers(env: dict[str, str], named: str) -> None:
+def test_an_image_that_cannot_be_pinned_refuses_the_peers(env: dict[str, str], named: str) -> None:
     with pytest.raises(PeersUnavailable, match=named):
         measurement_host(env, LOCAL)
 
@@ -418,11 +436,14 @@ async def _peers(
     host: MeasurementHost = HOST,
     dev_leases: int = 0,
     freeze: bool = True,
+    inferencex_commit: str = "",
+    reference_script: str = "",
+    base: BaseLaunch | None = None,
 ) -> AsyncIterator[_Built]:
     """The real peers of a session of ``workload`` on ``host`` in ``tmp_path`` lending ``dev_leases`` dev sandboxes,
     with the wiring their specialist sessions were built on; a branch's worktree, holding no component, is served
-    only when the session lends dev sandboxes. The session froze a fixed base unless ``freeze`` is false. Every
-    variable the build exports is restored afterwards."""
+    only when the session lends dev sandboxes. The session froze ``base`` (a fixed one by default) unless ``freeze``
+    is false, from the operator's ``reference_script`` when one is given. Every variable the build exports is restored afterwards."""
 
     for name in (*workload_environment(workload), BENCHMARK_CONFIG_ENV):
         monkeypatch.setenv(name, "")
@@ -431,7 +452,7 @@ async def _peers(
     clock = Clock()
     layout = create_session(tmp_path, workload.model_basename, clock)
     if freeze:
-        freeze_base(layout.toolbox, base_launch())
+        freeze_base(layout.toolbox, base or base_launch())
     desk = ForkDesk(Roster(RosterCaps(1, 1, 1), layout.roster, clock), DecisionLog(layout.decisions, clock), clock)
     blobs = LocalBlobStore(layout.blobs)
     setup = PeerSetup(
@@ -444,6 +465,8 @@ async def _peers(
         {"geak": layout.reference / "geak"},
         dev_leases,
         (),
+        reference_script,
+        inferencex_commit=inferencex_commit,
     )
     wired: list[SessionWiring] = []
 
@@ -458,7 +481,7 @@ async def _peers(
                 raise AssertionError("no worktree is used here")
             return SimpleNamespace(path=tmp_path / branch, holds=lambda component: False)
 
-        return SimpleNamespace(factory=factory, worktrees=worktrees, dossier_pass=None)
+        return ModelSessions(factory, worktrees)
 
     peers = local_peers(host, sessions, setup)
     [wiring] = wired
@@ -467,66 +490,6 @@ async def _peers(
     finally:
         peers.mcp.stop()
         await peers.toolbox.close()
-
-
-@pytest.fixture(autouse=True)
-def publishes_by_name(monkeypatch: pytest.MonkeyPatch) -> None:
-    """No test here fetches the staging a local session publishes for its runners."""
-
-    monkeypatch.setattr(suite_publish, "publish_own_inference_suite", _Publishes())
-
-
-class _Publishes:
-    """Publishes the runners' staging by name only, recording the runner cache of each publish."""
-
-    def __init__(self, refusal: str = "") -> None:
-        self.caches: list[Path] = []
-        self.refusal = refusal
-
-    def __call__(self, cache_root: Path) -> Path:
-        if self.refusal:
-            raise SuitePublishError(self.refusal)
-        self.caches.append(cache_root)
-        return cache_root / "inference-suite" / "key"
-
-
-async def test_a_local_session_publishes_the_staging_its_runners_read_into_their_runner_cache(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    monkeypatch.setenv("HYPERLOOM_RUNNER_CACHE", str(tmp_path / "runner-cache"))
-    publishes = _Publishes()
-    monkeypatch.setattr(suite_publish, "publish_own_inference_suite", publishes)
-
-    async with _peers(tmp_path / "workspace", monkeypatch, WORKLOAD):
-        assert publishes.caches == [(tmp_path / "runner-cache").resolve()]
-
-
-async def test_a_local_session_whose_staging_cannot_be_published_is_refused(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    monkeypatch.setattr(suite_publish, "publish_own_inference_suite", _Publishes("exited 2: staging_missing: offline"))
-
-    with pytest.raises(PeersUnavailable, match="cannot be published: exited 2: staging_missing: offline"):
-        async with _peers(tmp_path / "workspace", monkeypatch, WORKLOAD):
-            pass
-
-
-async def test_a_fresh_session_freezes_its_base_launch_in_the_toolbox_directory_before_any_test(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    monkeypatch.delenv("HL_MODEL_BASE", raising=False)
-    queries: list[object] = []
-
-    def offline(query: object, *, user_file: object = None, inferencex_commit: str = "") -> SourceSnapshot:
-        queries.append(query)
-        return SourceSnapshot(None, 1_793_000_000, user_file=user_file, unread=UnreadSource("InferenceX", "offline"))
-
-    monkeypatch.setattr(cli_base_launch, "fetch_sources", offline)
-
-    async with _peers(tmp_path, monkeypatch, WORKLOAD, freeze=False) as built:
-        frozen = frozen_base(built.layout.toolbox)
-        assert frozen is not None and [frozen.launch.query] == queries
-        assert frozen.launch.topology.tp == WORKLOAD.tp
 
 
 @pytest.fixture
@@ -566,6 +529,10 @@ async def test_an_agentx_session_measures_the_agentx_benchmark_it_writes_for_its
             str(tmp_path / "models" / "Llama-3-8B"),
         )
         assert (str(canonical["envs"]["TP"]), str(canonical["envs"]["CONC"])) == (str(workload.tp), str(workload.conc))
+        launch, frozen = canonical["agentx"]["launch_overrides"], frozen_base(toolbox)
+        assert frozen is not None and frozen.launch.args
+        assert launch["replace_args"] is True
+        assert launch["append_args"][: len(frozen.launch.args)] == list(frozen.launch.args)
 
 
 async def test_an_agentx_session_on_a_model_directory_serves_it_at_its_ep_in_the_sessions_image(
@@ -580,6 +547,23 @@ async def test_an_agentx_session_on_a_model_directory_serves_it_at_its_ep_in_the
         benchmark = yaml.safe_load((built.layout.toolbox / "benchmark.yaml").read_text())["benchmark"]
         assert (benchmark["docker_image"], benchmark["envs"]["EP_SIZE"]) == (IMAGE.ref, 8)
         assert benchmark["envs"]["MODEL_PATH"] == str(model)
+        assert "DURATION" not in benchmark["envs"]
+
+
+async def test_an_agentx_session_replays_the_trace_window_it_names_and_its_tests_are_limited_by_it(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    model = tmp_path / "models" / "GLM-5.3"
+    model.mkdir(parents=True)
+    workload = replace(AGENTX, model=str(model), agentx_duration_sec=600)
+    given = _options_given(monkeypatch, local_hosted, "build_local_toolbox")
+
+    async with _peers(tmp_path / "workspace", monkeypatch, workload, HOST) as built:
+        canonical = yaml.safe_load((built.layout.toolbox / "canonical" / "canonical.yaml").read_text())["benchmark"]
+        assert str(canonical["envs"]["DURATION"]) == "600"
+
+    [options] = given
+    assert options.timeout_sec == 600 + AGENTX_OUTSIDE_TRACE_SEC
 
 
 def _options_given(monkeypatch: pytest.MonkeyPatch, module: object, builder: str) -> list[object]:
@@ -646,6 +630,101 @@ def test_the_specialists_recall_past_sessions_lessons_from_the_pool_beside_the_a
     recall = specialist_recall(tmp_path / "reports")
 
     assert recall.knows(lesson.lesson_id) and recall.past_revision() != ""
+
+
+@pytest.fixture(autouse=True)
+def publishes_by_name(monkeypatch: pytest.MonkeyPatch) -> None:
+    """No test here fetches the staging a local session publishes for its runners."""
+
+    monkeypatch.setattr(suite_publish, "publish_own_inference_suite", _Publishes())
+
+
+class _Publishes:
+    """Publishes the runners' staging by name only, recording the runner cache of each publish."""
+
+    def __init__(self, refusal: str = "") -> None:
+        self.caches: list[Path] = []
+        self.refusal = refusal
+
+    def __call__(self, cache_root: Path) -> Path:
+        if self.refusal:
+            raise SuitePublishError(self.refusal)
+        self.caches.append(cache_root)
+        return cache_root / "inference-suite" / "key"
+
+
+async def test_a_local_session_publishes_the_staging_its_runners_read_into_their_runner_cache(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("HYPERLOOM_RUNNER_CACHE", str(tmp_path / "runner-cache"))
+    publishes = _Publishes()
+    monkeypatch.setattr(suite_publish, "publish_own_inference_suite", publishes)
+
+    async with _peers(tmp_path / "workspace", monkeypatch, WORKLOAD):
+        assert publishes.caches == [(tmp_path / "runner-cache").resolve()]
+
+
+async def test_a_local_session_whose_staging_cannot_be_published_is_refused(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(suite_publish, "publish_own_inference_suite", _Publishes("exited 2: staging_missing: offline"))
+
+    with pytest.raises(PeersUnavailable, match="cannot be published: exited 2: staging_missing: offline"):
+        async with _peers(tmp_path, monkeypatch, WORKLOAD):
+            pass
+
+
+async def test_a_fresh_session_freezes_its_base_launch_in_the_toolbox_directory_before_any_test(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.delenv("HL_MODEL_BASE", raising=False)
+    queries: list[object] = []
+
+    def offline(query: object, *, user_file: object = None, inferencex_commit: str = "") -> SourceSnapshot:
+        queries.append(query)
+        return SourceSnapshot(None, 1_793_000_000, user_file=user_file, unread=UnreadSource("InferenceX", "offline"))
+
+    monkeypatch.setattr(cli_base_launch, "fetch_sources", offline)
+
+    async with _peers(tmp_path, monkeypatch, WORKLOAD, freeze=False) as built:
+        frozen = frozen_base(built.layout.toolbox)
+        assert frozen is not None and [frozen.launch.query] == queries
+        assert frozen.launch.topology.tp == WORKLOAD.tp
+
+
+async def test_a_fresh_session_reads_inferencex_at_the_commit_its_setup_names(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.delenv("HL_MODEL_BASE", raising=False)
+    commits: list[str] = []
+
+    def offline(query: object, *, user_file: object = None, inferencex_commit: str = "") -> SourceSnapshot:
+        commits.append(inferencex_commit)
+        return SourceSnapshot(None, 1_793_000_000, user_file=user_file, unread=UnreadSource("InferenceX", "offline"))
+
+    monkeypatch.setattr(cli_base_launch, "fetch_sources", offline)
+
+    async with _peers(tmp_path, monkeypatch, WORKLOAD, freeze=False, inferencex_commit="8a76a78e41"):
+        assert commits == ["8a76a78e41"]
+
+
+async def test_a_reference_script_is_frozen_as_the_base(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.delenv("HL_MODEL_BASE", raising=False)
+    script = tmp_path / "launch.sh"
+    script.write_text(
+        "python3 -m sglang.launch_server --model-path /models/Llama-3-8B --tp 2 --chunked-prefill-size 8\n"
+    )
+
+    async with _peers(tmp_path / "run", monkeypatch, WORKLOAD, freeze=False, reference_script=str(script)) as built:
+        frozen = frozen_base(built.layout.toolbox)
+        assert frozen is not None and frozen.launch.source.path == str(script)
+
+
+async def test_the_specialists_are_wired_the_frozen_base_launch_s_server_half(built: _Built) -> None:
+    frozen = frozen_base(built.layout.toolbox)
+
+    assert frozen is not None and built.wiring.base == server_base(frozen.launch)
+    assert built.wiring.base.args
 
 
 async def test_the_real_peers_live_inside_the_session_directory(built: _Built) -> None:
@@ -752,11 +831,8 @@ async def test_a_session_lending_dev_sandboxes_leases_the_toolbox_cards_to_a_spe
 def test_a_hosted_session_lends_the_dev_sandboxes_of_its_grant_on_its_tp_and_runs_its_agents_there(
     tmp_path: Path,
 ) -> None:
-    agent_sessions = _agent_sessions()
     layout = SimpleNamespace(branch_dir=lambda branch: tmp_path / "MB-branches" / branch)
-    setup = SimpleNamespace(
-        layout=layout, workload=replace(WORKLOAD, tp=4), processes=None, agents=("https://agents.example/tuner.git",)
-    )
+    setup = SimpleNamespace(layout=layout, workload=replace(WORKLOAD, tp=4), processes=None)
     worktree = SimpleNamespace(path=tmp_path / "worktree", holds=lambda component: False)
     lease = HostedBranchLease("lease-1", "b01", (0, 1, 2, 3), Path("/app/work"), {}, 4, "dev-4", 3600, object())
 
@@ -764,8 +840,7 @@ def test_a_hosted_session_lends_the_dev_sandboxes_of_its_grant_on_its_tp_and_run
     local = branch_sandboxes(LocalCards((0, 1)), setup, lambda branch: worktree)
 
     assert (hosted.dev_cards, local.dev_cards) == (4, 1)
-    assert isinstance(hosted.agents, agent_sessions.RemoteAgentSandboxes)
-    assert isinstance(local.agents, agent_sessions.LocalAgentSandboxes)
+    assert isinstance(hosted.agents, RemoteAgentSandboxes) and isinstance(local.agents, LocalAgentSandboxes)
     sandbox = hosted.dev("b01", lease)
     assert (
         isinstance(sandbox, RemoteAgentSandbox) and sandbox.root == tmp_path / "MB-branches" / "b01" / "dev" / "lease-1"
@@ -879,7 +954,7 @@ async def test_an_agentx_test_in_the_services_sandboxes_may_outlast_its_trace_wi
     model = tmp_path / "models" / "GLM-5.3"
     model.mkdir(parents=True)
     given = _options_given(monkeypatch, hosted_toolbox, "build_hosted_toolbox")
-    host = MeasurementHost(_service_sandboxes(monkeypatch, []), IMAGE, HOST.inferencex)
+    host = replace(HOST, backend=_service_sandboxes(monkeypatch, []))
 
     async with _peers(tmp_path / "workspace", monkeypatch, replace(AGENTX, model=str(model)), host):
         pass
@@ -888,21 +963,20 @@ async def test_an_agentx_test_in_the_services_sandboxes_may_outlast_its_trace_wi
     assert agentx.timeout_sec > max(AGENTX_TRACE_SEC, AGENTX_TEST_PAST_AN_HOUR_SEC)
 
 
-def _agent_clients(monkeypatch: pytest.MonkeyPatch) -> list[FixedGateClient | None]:
+def _agent_clients(monkeypatch: pytest.MonkeyPatch) -> list[GateClient | None]:
     """The gate's client every session's agents are built with from here on; no specialist session is built."""
 
-    model_sessions, agent_sessions = _model_sessions(), _agent_sessions()
-    clients: list[FixedGateClient | None] = []
+    clients: list[GateClient | None] = []
 
-    def agents(*args: object, client: FixedGateClient | None = None, dossier: str | None = None, **_: object) -> object:
+    def agents(*args: object, client: GateClient | None = None, dossier: str | None = None, **_: object) -> object:
         clients.append(client)
         return SimpleNamespace()
 
     def sessions(*args: object, **kwargs: object) -> ModelSessions:
-        return model_sessions.ModelSessions(lambda start: None, lambda branch: None)
+        return ModelSessions(lambda start: None, lambda branch: None)
 
-    monkeypatch.setattr(model_sessions, "model_sessions", sessions)
-    monkeypatch.setattr(agent_sessions, "AgentSessions", agents)
+    monkeypatch.setattr(model_sessions_module, "model_sessions", sessions)
+    monkeypatch.setattr(agent_sessions_module, "AgentSessions", agents)
     return clients
 
 
@@ -930,12 +1004,12 @@ async def test_the_agents_are_given_the_reviewed_dossier_the_run_names_and_none_
 ) -> None:
     dossiers: list[str | None] = []
 
-    def agents(*args: object, client: FixedGateClient | None = None, dossier: str | None = None, **_: object) -> object:
+    def agents(*args: object, client: GateClient | None = None, dossier: str | None = None, **_: object) -> object:
         dossiers.append(dossier)
         return SimpleNamespace()
 
     _agent_clients(monkeypatch)
-    monkeypatch.setattr(_agent_sessions(), "AgentSessions", agents)
+    monkeypatch.setattr(agent_sessions_module, "AgentSessions", agents)
     wiring = _with_agent(built.wiring)
 
     model_backed_sessions(AgentCommand("claude", "claude"))(
@@ -949,10 +1023,9 @@ async def test_an_agent_of_an_agentx_session_gets_no_client(tmp_path: Path, monk
     (tmp_path / "models" / "Llama-3-8B").mkdir(parents=True)
     monkeypatch.setenv("HL_MODEL_BASE", str(tmp_path / "models"))
     workload = replace(AGENTX, model="meta-llama/Llama-3-8B")
-    host = HOST
     clients = _agent_clients(monkeypatch)
 
-    async with _peers(tmp_path / "workspace", monkeypatch, workload, host) as built:
+    async with _peers(tmp_path / "workspace", monkeypatch, workload, HOST) as built:
         model_backed_sessions(AgentCommand("claude", "claude"))(_with_agent(built.wiring))
 
     assert clients == [None]
@@ -967,17 +1040,62 @@ async def test_a_session_without_agents_reads_no_canonical(built: _Built, monkey
     assert clients == [None]
 
 
-async def test_the_specialists_are_told_of_and_give_back_the_dev_sandboxes_the_session_lends(
+async def test_an_agentx_session_s_specialists_are_told_its_objective(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    model_sessions = _model_sessions()
     built: list[AgentSetup] = []
 
     def sessions(setup: AgentSetup, **_: object) -> ModelSessions:
         built.append(setup)
-        return model_sessions.ModelSessions(lambda start: None, lambda branch: None)
+        return ModelSessions(lambda start: None, lambda branch: None)
 
-    monkeypatch.setattr(model_sessions, "model_sessions", sessions)
+    monkeypatch.setattr(model_sessions_module, "model_sessions", sessions)
+    layout = SimpleNamespace(logs=tmp_path, source=tmp_path, branch_dir=lambda branch: tmp_path)
+    setup = SimpleNamespace(
+        layout=layout,
+        workload=TOTAL_AGENTX,
+        references={},
+        processes=None,
+        agents=(),
+        agent_pack="",
+        agent_launch="",
+        agent_port=AGENT_PORT,
+        agent_dossier="",
+        agent_review="",
+        agent_maps=None,
+        agent_share_minutes=SHARE_MINUTES,
+    )
+    wiring = SimpleNamespace(
+        setup=setup,
+        tokens=None,
+        repo=None,
+        briefs=SimpleNamespace(text=None),
+        toolbox=None,
+        blackboards=None,
+        dev_leases=None,
+        native={},
+        agent_sandboxes=None,
+        base=BASE,
+    )
+    model_backed_sessions(AgentCommand("claude", "claude"))(wiring)
+
+    objective = AgentXObjective.TOTAL_TOKEN_THROUGHPUT
+    assert built[0].role == role_prompt(
+        RoleWorkload(_specialist_role(TOTAL_AGENTX), objective), references={}, base=BASE
+    )
+    assert objective.description in " ".join(built[0].role.split())
+
+
+async def test_the_specialists_are_told_of_and_give_back_the_dev_sandboxes_the_session_lends(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    built: list[AgentSetup] = []
+
+    def sessions(setup: AgentSetup, **_: object) -> ModelSessions:
+        built.append(setup)
+        return ModelSessions(lambda start: None, lambda branch: None)
+
+    monkeypatch.setattr(model_sessions_module, "model_sessions", sessions)
     leases = SimpleNamespace(limits=SimpleNamespace(cap=1))
     layout = SimpleNamespace(logs=tmp_path, source=tmp_path, branch_dir=lambda branch: tmp_path)
     for held in (None, leases):
@@ -1004,13 +1122,18 @@ async def test_the_specialists_are_told_of_and_give_back_the_dev_sandboxes_the_s
             dev_leases=held,
             native={},
             agent_sandboxes=None,
+            base=BASE,
         )
         model_backed_sessions(AgentCommand("claude", "claude"))(wiring)
 
     without, lending = built
     assert (without.dev_leases, lending.dev_leases) == (None, leases)
-    assert without.role == role_prompt(_specialist_role(WORKLOAD), references={})
-    assert lending.role == role_prompt(_specialist_role(WORKLOAD), references={}, dev_leases=1) != without.role
+    assert without.role == role_prompt(RoleWorkload(_specialist_role(WORKLOAD)), references={}, base=BASE)
+    assert (
+        lending.role
+        == role_prompt(RoleWorkload(_specialist_role(WORKLOAD)), references={}, base=BASE, dev_leases=1)
+        != without.role
+    )
 
 
 def _package(root: Path, name: str, dist: str, version: str, *files: str) -> PackageBase:
@@ -1050,7 +1173,6 @@ def _git_checkout_of(root: Path) -> str:
 def test_the_specialists_source_base_holds_aiter_beside_the_framework_only_from_a_develop_install(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture, aiter: str, laid_out: list[str]
 ) -> None:
-    _agent_sessions()
     installed = {"sglang": _package(tmp_path / "site", "sglang", "sglang", "0.5.0")}
     if aiter == "develop":
         installed["aiter"] = _develop_aiter(tmp_path / "aiter-checkout")
@@ -1091,6 +1213,7 @@ def test_the_specialists_source_base_holds_aiter_beside_the_framework_only_from_
         dev_leases=None,
         native={},
         agent_sandboxes=None,
+        base=BASE,
     )
 
     model_backed_sessions(AgentCommand("claude", "claude"))(wiring)
@@ -1181,14 +1304,13 @@ def test_a_session_on_a_host_that_builds_native_code_lays_out_the_native_tree_an
         return installed[layout.import_name]
 
     monkeypatch.setattr(worktree_module, "locate_installed_package", locate)
-    model_sessions = _model_sessions()
-    real = model_sessions.model_sessions
+    real = model_sessions_module.model_sessions
 
     def sessions(setup: AgentSetup, **kwargs: object) -> ModelSessions:
         roles.append(setup.role)
         return real(setup, **kwargs)
 
-    monkeypatch.setattr(model_sessions, "model_sessions", sessions)
+    monkeypatch.setattr(model_sessions_module, "model_sessions", sessions)
     for native, source in ((native_trees(environ), "with"), (native_trees({}), "without")):
         layout = SimpleNamespace(
             logs=tmp_path / "logs", source=tmp_path / source, branch_dir=lambda branch: tmp_path / branch
@@ -1216,6 +1338,7 @@ def test_a_session_on_a_host_that_builds_native_code_lays_out_the_native_tree_an
             dev_leases=None,
             native=native,
             agent_sandboxes=None,
+            base=BASE,
         )
         model_backed_sessions(AgentCommand("claude", "claude"))(wiring)
 
@@ -1230,4 +1353,4 @@ def test_a_session_on_a_host_that_builds_native_code_lays_out_the_native_tree_an
     assert laid["without"] == ["python/sglang/__init__.py"]
     with_native, without = roles[0], roles[-1]
     assert "python/sglang/kernels/aot" in with_native and "pending_build" in with_native
-    assert without == role_prompt(_specialist_role(WORKLOAD), references={})
+    assert without == role_prompt(RoleWorkload(_specialist_role(WORKLOAD)), references={}, base=BASE)
