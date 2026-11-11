@@ -84,9 +84,10 @@ run whose ``session.json`` names a session, it finishes that session as ``final-
 the baseline, except that a FINAL that chooses a commit ends it for ``finished_after_restart`` with exit code 0; before
 that it closes the session, ending its tests, and starts the spec's session again
 (:func:`~hyperloom_multibranch.scheduling.hosted_run.take_over_earlier_session`). It tells the host the run is over
--- ``final: true`` in ``exit.json`` -- once CLOSE ran, and when the spec, the environment, a missing package of the
-``hosted`` extra, the runner cache or a file it cannot read keeps a session from running, with exit code 2 for a
-refused spec or session and 1 otherwise; a crash leaves no ``exit.json``, and the host starts the run again.
+-- ``final: true`` in ``exit.json`` -- once CLOSE ran, and when the spec, the environment, agents it cannot isolate, a
+missing package of the ``hosted`` extra, the runner cache or a file it cannot read keeps a session from running, with
+exit code 2 for a refused spec or session and 1 otherwise; a crash leaves no ``exit.json``, and the host starts the run
+again.
 ``final-only SESSION_DIR`` is the emergency recovery of a session that ended before FINAL ran, and takes nothing but
 that directory: it runs FINAL and CLOSE over what the session persisted -- the settings and the frontier policy its
 manifest holds, the branches its roster and blackboard hold -- and rewrites its report, dashboard and breakdown. It
@@ -152,6 +153,7 @@ from hyperloom_multibranch.scheduling.hosted_run import (
     recorded_session,
     refuse_unhosted_branches,
     reported_stop_reason,
+    require_hosted_isolation,
     run_argv,
     spec_make_before_break,
     stop_before_grant_ends,
@@ -1070,6 +1072,7 @@ def _hosted_start(host: HostInfo) -> HostedStart:
     over (:func:`take_over_earlier_session`); raises ValueError on a refused spec or session, ImportError when a
     ``hosted`` package is missing, and what :func:`ready_session` raises."""
 
+    require_hosted_isolation(os.environ)
     deadline = grant_deadline(host, datetime.now(timezone.utc))
     earlier = take_over_earlier_session(host.state_dir)
     if earlier.closed is not None:  # it closed with no baseline, which ended the run, and was killed before exit.json
