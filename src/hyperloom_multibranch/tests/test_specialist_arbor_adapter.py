@@ -23,6 +23,7 @@ from hyperloom_multibranch.specialist import arbor_adapter
 from hyperloom_multibranch.specialist.agent_manifest import REFUSED_FILE, AgentManifest
 from hyperloom_multibranch.specialist.agent_onboarding import PROFILE_FILE, make_ready, root_profile
 from hyperloom_multibranch.specialist.arbor_adapter import (
+    ARBOR_PYTHON,
     BRANCH_RUN,
     DOSSIER_DIR,
     DOSSIER_PASS,
@@ -357,6 +358,22 @@ def test_arbor_s_install_checks_each_import_it_needs_before_installing_it() -> N
         "python3 -c 'import claude_agent_sdk' 2>/dev/null || python3 -m pip install --quiet claude-agent-sdk",
     )
     assert "(3, 11)" in INSTALL[0] and INSTALL[-1] == "python3 -c 'import yaml, claude_agent_sdk'"
+
+
+def test_arbor_s_commands_read_no_settings_file_of_the_user_running_them(tmp_path: Path) -> None:
+    """A user's ``~/.arbor/settings.env`` would set ``ARBOR_*`` values MB's preflight refuses in the environment (a
+    roll, a review gate, another agent backend); Arbor's commands point the file at an empty one, which Arbor reads as
+    no settings, where an empty value would fall back to the user's file."""
+    assert ARBOR_PYTHON == "env ARBOR_SETTINGS=/dev/null python3"
+    shown = subprocess.run(
+        ["sh", "-c", ARBOR_PYTHON.replace(" python3", " sh -c 'echo \"$ARBOR_SETTINGS\"'")],
+        env={"PATH": os.environ["PATH"], "HOME": str(tmp_path), "ARBOR_SETTINGS": str(tmp_path / "user.env")},
+        capture_output=True,
+        text=True,
+        check=True,
+    )
+
+    assert shown.stdout.strip() == "/dev/null"
 
 
 async def test_the_root_s_op_shares_reach_arbor_s_profile_as_mb_writes_them_beside_the_adapter_s_config(
@@ -764,6 +781,22 @@ async def test_a_map_is_split_into_one_plan_per_share_by_arbor_s_command_line(tm
     assert dealt == [["m-attn", "m-allreduce"], ["m-moe"]]
     with pytest.raises(SplitFailed, match="3 independent groups for 4 shares"):
         await split_directions(checkout, map_file, 4, tmp_path / "four")
+
+
+async def test_arbor_s_directions_command_reads_no_settings_file_of_the_user_running_it(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # Arbor reads its settings file on import (``arbor/__init__.py``); this one refuses any but the empty one.
+    reads = (
+        'import os, sys\nif os.environ.get("ARBOR_SETTINGS") != "/dev/null":\n    sys.exit("read a settings file")\n'
+    )
+    checkout = _write(tmp_path / "checkout", {**CHECKOUT_FILES, "arbor/__init__.py": reads})
+    map_file = _write(tmp_path / "pass", {"directions.json": json.dumps(MAP)}) / "directions.json"
+    monkeypatch.setenv("ARBOR_SETTINGS", str(tmp_path / "user.env"))
+
+    shares = await split_directions(checkout, map_file, 2, tmp_path / "shares")
+
+    assert len(shares) == 2
 
 
 #: A real Arbor checkout to split with, when the environment names one; its split runs offline, on the standard
