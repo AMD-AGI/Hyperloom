@@ -8,6 +8,7 @@ import os
 import subprocess
 import sys
 import tempfile
+from collections.abc import Sequence
 from enum import Enum
 from pathlib import Path
 from typing import Any, Callable, NamedTuple
@@ -99,6 +100,11 @@ def list_candidate_physical_gpus() -> list[int]:
                 file=sys.stderr,
             )
     return []
+
+
+def parse_arch_gpus(text: str) -> list[int]:
+    """The physical cards an ``--arch-gpus`` value names: ``"2,5"`` is ``[2, 5]``, ``""`` no card."""
+    return [int(token) for token in text.split(",") if token.strip()]
 
 
 def single_physical_gpu_env(physical_id: int, *, base_env: dict[str, str] | None = None) -> dict[str, str]:
@@ -267,9 +273,12 @@ def _run_microbench_on_idle_gpu(
     *,
     log: Callable[[str], None],
     run_command: Callable[..., int],
+    gpus: Sequence[int] | None,
 ) -> None:
-    """Run the arch microbenchmark on the first candidate GPU its own idle gate accepts."""
-    candidates = list_candidate_physical_gpus()
+    """Run the arch microbenchmark on the first of ``gpus`` (the visible GPUs when ``None``) its own idle gate accepts."""
+    if gpus is not None and not gpus:
+        raise RuntimeError("gpu_arch_benchmark was given no card; cannot run arch microbenchmark")
+    candidates = list_candidate_physical_gpus() if gpus is None else list(gpus)
     if not candidates:
         raise RuntimeError("gpu_arch_benchmark found no GPUs; cannot run arch microbenchmark")
     cmd = [
@@ -307,7 +316,12 @@ def internal_extension_arch_json(platform: str, *, log: Callable[[str], None]) -
 
 
 def _measure_arch_spec(
-    tracelens_root: Path, platform: str, *, log: Callable[[str], None], run_command: Callable[..., int]
+    tracelens_root: Path,
+    platform: str,
+    *,
+    log: Callable[[str], None],
+    run_command: Callable[..., int],
+    gpus: Sequence[int] | None,
 ) -> Path:
     """Measure the arch spec on an idle GPU and publish it to the TraceLens arch dir once it passes the sanitizer."""
     with tempfile.TemporaryDirectory(prefix="hyperloom-arch-") as scratch:
@@ -317,7 +331,7 @@ def _measure_arch_spec(
             f"{platform} and internal extension disabled; running TraceLens "
             f"microbenchmark -> {measured}"
         )
-        _run_microbench_on_idle_gpu(tracelens_root, measured, log=log, run_command=run_command)
+        _run_microbench_on_idle_gpu(tracelens_root, measured, log=log, run_command=run_command, gpus=gpus)
         if not measured.is_file():
             raise RuntimeError(f"gpu arch microbenchmark finished but output is missing: {measured}")
         payload = json.loads(measured.read_text(encoding="utf-8"))
@@ -342,12 +356,16 @@ def populate_gpu_arch_json(
     fallback_dir: Path,
     log: Callable[[str], None],
     run_command: Callable[..., int],
+    gpus: Sequence[int] | None = None,
 ) -> ArchSpec:
     """The arch JSON roofline reads without the internal extension: bundled, else measured, else vendor peaks.
 
     A measured spec joins the TraceLens arch dir, where later sessions find it bundled. The vendor-peak spec goes to
     ``fallback_dir``, one per session, instead: the session's later runs reuse it rather than wait on the
     microbenchmark again, and the next session measures afresh rather than inherit it as bundled.
+
+    ``gpus`` are the physical cards the caller holds for the microbenchmark; it runs on no other card, and on none when
+    they are empty. ``None`` lets it pick among the visible GPUs, for a caller that shares the host with no test.
     """
     existing = resolve_arch_json_path(platform)
     if existing is not None and existing.is_file():
@@ -363,7 +381,7 @@ def populate_gpu_arch_json(
         log(f"gpu_arch_json: reusing this session's vendor-peak spec {fallback.path}")
         return fallback
     try:
-        measured = _measure_arch_spec(tracelens_root, canonical, log=log, run_command=run_command)
+        measured = _measure_arch_spec(tracelens_root, canonical, log=log, run_command=run_command, gpus=gpus)
     except (RuntimeError, subprocess.SubprocessError, OSError) as exc:
         # A microbenchmark that overruns its timeout surfaces as subprocess.TimeoutExpired, not RuntimeError, so
         # catching RuntimeError alone let the most common failure escape and killed the whole trace_analyze instead of

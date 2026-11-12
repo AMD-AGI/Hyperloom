@@ -195,6 +195,72 @@ def test_populate_gpu_arch_json_skips_busy_gpu(tmp_path: Path) -> None:
     assert spec.path == tmp_path / "TraceLens/Agent/Analysis/utils/arch/MI355X.json"
 
 
+def _measured_mi355x(cmd, *, cwd, env=None):
+    out = Path(cmd[cmd.index("--output") + 1])
+    out.parent.mkdir(parents=True, exist_ok=True)
+    out.write_text(
+        json.dumps({"name": "MI355X", "mem_bw_gbps": 8000, "max_achievable_tflops": {"matrix_bf16": 1000}}),
+        encoding="utf-8",
+    )
+    return 0
+
+
+def test_populate_measures_only_on_the_cards_the_caller_holds(tmp_path: Path) -> None:
+    """Given cards, the microbenchmark runs on them alone, never on the visible GPUs a test may hold."""
+    tried: list[str] = []
+
+    def _run_command(cmd, *, cwd, env=None):
+        tried.append(env["HIP_VISIBLE_DEVICES"])
+        return _measured_mi355x(cmd, cwd=cwd, env=env)
+
+    with (
+        patch.object(tab, "resolve_arch_json_path", return_value=None),
+        patch.object(tab, "list_candidate_physical_gpus", return_value=[0, 1, 2, 3]) as visible,
+    ):
+        spec = tab.populate_gpu_arch_json(
+            tracelens_root=tmp_path,
+            platform="MI355X",
+            fallback_dir=tmp_path / "session",
+            log=lambda _msg: None,
+            run_command=_run_command,
+            gpus=[3],
+        )
+
+    assert tried == ["3"]
+    visible.assert_not_called()
+    assert spec.source is tab.ArchSpecSource.MEASURED
+
+
+def test_populate_given_no_card_measures_nothing_and_reads_vendor_peaks(tmp_path: Path) -> None:
+    """An empty card list (the toolbox could lease none) runs no microbenchmark on any GPU."""
+    runs: list[list[str]] = []
+
+    def _run_command(cmd, *, cwd, env=None):
+        runs.append(cmd)
+        return _measured_mi355x(cmd, cwd=cwd, env=env)
+
+    with (
+        patch.object(tab, "resolve_arch_json_path", return_value=None),
+        patch.object(tab, "list_candidate_physical_gpus", return_value=[0, 1]),
+    ):
+        spec = tab.populate_gpu_arch_json(
+            tracelens_root=tmp_path,
+            platform="MI355X",
+            fallback_dir=tmp_path / "session",
+            log=lambda _msg: None,
+            run_command=_run_command,
+            gpus=[],
+        )
+
+    assert runs == []
+    assert spec == tab.ArchSpec(tmp_path / "session" / "MI355X.json", tab.ArchSpecSource.VENDOR_PEAK)
+
+
+@pytest.mark.parametrize(("text", "expected"), [("2,5", [2, 5]), ("3", [3]), ("", [])])
+def test_parse_arch_gpus(text: str, expected: list[int]) -> None:
+    assert tab.parse_arch_gpus(text) == expected
+
+
 def test_populate_skips_microbench_when_internal_extension_enabled(
     tmp_path: Path,
 ) -> None:

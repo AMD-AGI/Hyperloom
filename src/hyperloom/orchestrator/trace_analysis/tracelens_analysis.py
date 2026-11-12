@@ -31,6 +31,7 @@ from .tracelens_arch_benchmark import (
     ArchSpec,
     internal_extension_arch_json,
     normalize_platform,
+    parse_arch_gpus,
     populate_gpu_arch_json,
 )
 from .tracelens_skill_runner import (
@@ -146,6 +147,7 @@ def _gpu_arch_json(run: AnalysisRun, *, tl_root: Path, tl_internal_root: Path | 
             timeout_s=arch_benchmark_timeout_s,
             env=env,
         ),
+        gpus=run.args.arch_gpus,
     )
 
 
@@ -671,6 +673,15 @@ def _build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--model-name", default="")
     parser.add_argument("--framework", default="")
     parser.add_argument("--target-platform", default="MI355X")
+    parser.add_argument(
+        "--arch-gpus",
+        type=parse_arch_gpus,
+        default=None,
+        help=(
+            "Comma-separated physical cards the caller holds for the arch microbenchmark; empty runs it on none. "
+            "Unset, it picks among the visible GPUs."
+        ),
+    )
     _add_root_args(parser)
     _add_run_args(parser)
     # Join keys of the launching Hyperloom session's trajectory ledger; unset outside a session.

@@ -4205,6 +4205,28 @@ class TestBuildTraceAnalyzeCmd:
         )
         assert cmd[cmd.index("--route") + 1] == "non-llm"
 
+    @pytest.mark.parametrize(("gpus", "flag"), [([3], ["--arch-gpus", "3"]), ([], ["--arch-gpus", ""]), (None, [])])
+    def test_cmd_carries_the_cards_held_for_the_arch_microbenchmark(self, monkeypatch, tmp_path, gpus, flag):
+        session_dir = self._common(monkeypatch, tmp_path)
+        payload = {"trace_input": "/t/trace"} if gpus is None else {"trace_input": "/t/trace", ta.ARCH_GPUS_PARAM: gpus}
+        cmd, _steady = ta._build_trace_analyze_cmd(
+            payload,
+            ta._AnalysisRun(
+                trace_input="/t/trace",
+                workspace_path="/ws",
+                tracelens_root=Path("/tl"),
+                route=AnalysisRoute.NON_LLM,
+                scriptable=False,
+                model_name="",
+                framework="",
+                target_platform="MI355X",
+            ),
+            session_dir=session_dir,
+            workload={},
+        )
+        index = cmd.index("--arch-gpus") if "--arch-gpus" in cmd else len(cmd)
+        assert cmd[index : index + 2] == flag
+
     def test_tracelens_cmd_carries_the_ambient_trajectory_scope(self, monkeypatch, tmp_path):
         from hyperloom.inference_optimizer.trace.trajectory_trace import trajectory_scope
 
