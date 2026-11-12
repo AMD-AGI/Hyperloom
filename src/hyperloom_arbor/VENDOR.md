@@ -198,5 +198,6 @@ The tool also refuses a copy that still has any of these:
   skill, or our packs' and campaigns' names.
 
 Linting, formatting and code metrics skip this tree, as for the other vendored code (`pyproject.toml`: `[tool.ruff]`,
-`[tool.hyperloom.code_metrics]`, `[tool.bandit]`; `.pre-commit-config.yaml`'s formatting and lint hooks). Secret
-scanning (`detect-private-key`, `gitleaks`) and the licence check (`reuse`) do not.
+`[tool.hyperloom.code_metrics]`, `[tool.bandit]`; `.pre-commit-config.yaml`'s formatting and lint hooks). So does
+CodeQL (`.github/codeql/codeql-config.yml`, #2638), so no static analysis in this repository covers this tree. Secret
+scanning (`detect-private-key`, `gitleaks`) and the licence check (`reuse`) do not skip it.
