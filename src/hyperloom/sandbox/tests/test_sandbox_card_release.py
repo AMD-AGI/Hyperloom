@@ -132,12 +132,9 @@ def test_a_provider_whose_caller_sets_no_reading_never_reads_the_hosts_cards(tmp
     tree.holds(4242, 0, vram=100 << 30)
     monkeypatch.setattr(card_occupancy, "KFD_PATH", tree.kfd)
     assert card_occupancy.read_listed((0,)).held_cards() == {0}, "the host's list as the real read sees it"
-    provider = LocalSandboxProvider([LocalTemplate("dev", "dev", gpus=1)], hostname="node-a", gpus=[0])
-    try:
+    with LocalSandboxProvider([LocalTemplate("dev", "dev", gpus=1)], hostname="node-a", gpus=[0]) as provider:
         _create(provider).kill()
         assert provider.pool.free_cards() == (0,)
-    finally:
-        provider.close()
 
 
 def test_withheld_cards_freed_later_wait_for_the_card_too(make, monkeypatch) -> None:
