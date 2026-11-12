@@ -1517,7 +1517,7 @@ def _hosted_ended_before_final(root: Path, **manifest: object) -> PersistedRun:
 
 
 def test_a_hosted_restart_resumes_up_to_the_first_starts_deadline_giving_no_downtime_back(tmp_path: Path) -> None:
-    persisted = _hosted_ended_before_final(tmp_path / "MB-20260101T000000Z-0123abcd")
+    persisted = _hosted_ended_before_final(tmp_path / "session")
     before = _tree(persisted.layout.root)
 
     assert hosted_resume_deadline(persisted, 1800.0) == 3600.0
@@ -1539,7 +1539,7 @@ def test_a_hosted_restart_refuses_a_resume_it_should_finish_instead(
     stop_after_map: bool, baseline_decision: bool, now: float, error: str, tmp_path: Path
 ) -> None:
     settings = encode(replace(_settings(), stop_after_map=stop_after_map))
-    persisted = _hosted_ended_before_final(tmp_path / "MB-20260101T000000Z-0123abcd", settings=settings)
+    persisted = _hosted_ended_before_final(tmp_path / "session", settings=settings)
     if not baseline_decision:
         persisted.layout.decisions.write_text("", encoding="utf-8")
     before = _tree(persisted.layout.root)
@@ -2375,7 +2375,7 @@ def test_a_restart_that_cannot_read_the_session_before_its_baseline_leaves_it_an
     caplog: pytest.LogCaptureFixture,
     damage: str,
 ) -> None:
-    layout = _killed_in_prelude(tmp_path / "MB-20260101T000000Z-0123abcd")
+    layout = _killed_in_prelude(tmp_path / "session")
     state = SharedState.state_path(layout.toolbox)
     state.parent.mkdir(parents=True, exist_ok=True)
     state.write_text("{" if damage == "not-json" else "{}", encoding="utf-8")
@@ -2429,7 +2429,7 @@ def test_a_restart_that_cannot_read_the_session_before_its_baseline_leaves_it_an
 def test_a_restart_refused_a_file_outside_the_session_it_closes_ends_the_run(
     host: Host, restart: Restart, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    layout = _killed_in_prelude(tmp_path / "MB-20260101T000000Z-0123abcd")
+    layout = _killed_in_prelude(tmp_path / "session")
     (host.state_dir / "session.json").write_text(json.dumps({"session_dir": str(layout.root)}), encoding="utf-8")
     outside = tmp_path / "workspace-cache" / "index.json"
 
