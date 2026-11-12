@@ -46,8 +46,9 @@ measures no spec ``local``.
 
 The host decides from ``$HYPERLOOM_STATE_DIR/exit.json`` whether to start the run again: never once it holds
 ``final: true`` (:func:`write_final_exit`), and again when it is missing. ``session.json`` there names the session
-directory as soon as it exists (:func:`record_session`), so a start that finds it finishes that session instead of
-starting another, once that session got through PRELUDE; one that ended before its baseline was recorded is closed,
+directory as soon as it exists (:func:`record_session`), so a start that finds it takes that session over instead of
+starting another, once that session got through PRELUDE: resumed to its first deadline while its baseline holds, else
+finished as ``final-only`` does (:func:`hosted_restart_leg`); one that ended before its baseline was recorded is closed,
 which ends the measurement sandboxes it left, and the spec's session starts again. The two file names and their fields
 are the legacy entry's, ``hyperloom.hosted.entry``, which this package does not import: importing it loads the legacy
 flow's state.
@@ -540,11 +541,11 @@ def recorded_session(state_dir: Path) -> Path | None:
 
 @dataclass(frozen=True)
 class EarlierSession:
-    """The session an earlier start of the run began: ``finish``, which a restart finishes, when it got through
-    PRELUDE; ``left``, which a restart closes before it starts the spec's session again, when it committed its root
-    and ended before its baseline was recorded without closing, or was closed by such a restart; ``closed``, the
-    directory of one that closed on its own before its baseline was recorded, which ended the run; none of them when
-    there was none or it committed no root, and so started no test."""
+    """The session an earlier start of the run began: ``finish``, which a restart resumes or finishes
+    (:func:`hosted_restart_leg`), when it got through PRELUDE; ``left``, which a restart closes before it starts the
+    spec's session again, when it committed its root and ended before its baseline was recorded without closing, or was
+    closed by such a restart; ``closed``, the directory of one that closed on its own before its baseline was
+    recorded, which ended the run; none of them when there was none or it committed no root, and so started no test."""
 
     finish: PersistedRun | None = None
     left: PersistedRun | None = None
