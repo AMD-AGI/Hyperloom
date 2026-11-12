@@ -13,15 +13,34 @@ A role the profile has no file for reads the next place's. A named file that is 
 a branch that meant to change its instructions must not run the built-in ones unseen.
 
 **The digests** (``provenance``), on every lesson row: ``prompt_digest`` (both templates in use), ``pack_digest``
-(every file of the pack's directory), ``config_digest`` (the campaign config), ``arbor_commit``.
+(every file of the pack's directory), ``config_digest`` (the campaign config), ``arbor_commit``; and ``agent_model``,
+the model the agents are pinned to (None: the CLI's default). Beside it the row's ``agent_models`` names the models
+its turns ran on, as the CLI reported them.
 """
 
 from __future__ import annotations
 
 import hashlib
 import json
+import os
 import subprocess
 from pathlib import Path
+
+#: The variable the agents' model is pinned by (``agent_model``): the config's ``agent_model`` sets it at start.
+MODEL_ENV = "ARBOR_AGENT_MODEL"
+
+
+def agent_model(config: dict | None = None) -> str | None:
+    """The model the agents are pinned to: the config's ``agent_model``, else ``ARBOR_AGENT_MODEL``; None when neither
+    is set, and the turns run on the CLI's default model."""
+    value = (config or {}).get("agent_model") or os.environ.get(MODEL_ENV) or ""
+    return str(value).strip() or None
+
+
+def model_matches(pinned: str | None, used: str) -> bool:
+    """Whether a turn that reports ``used`` ran on the pinned model. A pin may be the full id or an alias the id
+    contains (``opus``, ``claude-opus-5-5``); with no pin, any model matches."""
+    return not pinned or pinned.lower() in str(used).lower()
 
 ROLES = ("main", "critic")
 BUILTIN = {"main": Path(__file__).parent / "policy" / "claude_loop_prompt.md",
@@ -125,7 +144,8 @@ def arbor_commit(root=None) -> str | None:
 
 
 def provenance(campaign, session_dir=None, arbor_root=None) -> dict:
-    """The four digests a lesson row carries. Never raises: a part that cannot be read is None."""
+    """The four digests a lesson row carries, and the pinned agent model. Never raises: a part that cannot be read is
+    None."""
     config = getattr(campaign, "config", None) or {}
     out: dict = {}
     try:
@@ -139,4 +159,5 @@ def provenance(campaign, session_dir=None, arbor_root=None) -> dict:
         out["pack_digest"] = None
     out["config_digest"] = config_digest(config)
     out["arbor_commit"] = arbor_commit(arbor_root)
+    out["agent_model"] = agent_model(config)
     return out

@@ -45,16 +45,15 @@ from .model_gate import (
 )
 from ..gpu_types import (
     _autodetect_gpu_type,
-    gpu_runner_type,
     _resolve_amd_gpu_type,
     _resolve_gpu_type,
-    require_runner_framework,
-    warn_family_runner,
+    require_board_framework,
 )
 from ..model_config_utils import summarize_model_config
+from .benchmark_config import bind_benchmark, configure_benchmark
 from .bootstrap import (
     LaunchInfo,
-    LaunchPlatform,
+    SettledLaunch,
     _emit_launch_info,
     constraint_budget_resume_conflict,
     resolve_launch_gpu_power,
@@ -69,8 +68,10 @@ from .bootstrap import (
     warn_without_target_gpu,
     running_plug_host,
     _seed_shared_state,
+    resolve_session_base,
     _snapshot_system_prompts,
-    agentx_state_is_stale,
+    fresh_measurement_fields,
+    measurement_state_is_stale,
     resume_gpu_power_settings,
     latency_budget_scope_error,
     parse_operator_extra_env,
@@ -172,21 +173,6 @@ _XDIT_MODEL_NAME_ENV = "XDIT_MODEL_NAME"
 def _apply_operator_supplied_paths(args: Any, framework: str) -> None:
     """Publish ``--framework-path`` / ``--benchmark-scripts-dir`` as env."""
     fatal: list[str] = []
-    if framework == "custom":
-        from hyperloom.orchestrator.actions.executors.benchmark_backend import (
-            BENCHMARK_BACKEND_ENV,
-            DEFAULT_BENCHMARK_BACKEND,
-        )
-
-        # Matches install.sh's normalisation so the two gates agree on a value like " Bypass "; anything else,
-        # including unset, is refused.
-        backend = os.environ.get(BENCHMARK_BACKEND_ENV, "").strip().lower()
-        if backend != "bypass":
-            shown = f"{backend!r}" if backend else f"unset (defaults to {DEFAULT_BENCHMARK_BACKEND!r})"
-            fatal.append(
-                f"--framework custom requires {BENCHMARK_BACKEND_ENV}=bypass; it is {shown}. "
-                "The default backend cannot run an operator-supplied script."
-            )
     for flag, value, env_name in (
         ("--framework-path", getattr(args, "framework_path", None), "FRAMEWORK_REPO_PATH"),
         (
@@ -229,7 +215,6 @@ def _apply_operator_supplied_paths(args: Any, framework: str) -> None:
 def _restore_operator_supplied_paths_from_state(args: Any, state: SharedState) -> None:
     """Re-export the session paths persisted on ``state`` when this resume omitted them."""
     from hyperloom.inference_optimizer.framework_paths import point_session_framework_root
-    from hyperloom.orchestrator.actions.executors.benchmark_backend import BENCHMARK_BACKEND_ENV
 
     cli_repo = str(getattr(args, "framework_path", None) or "").strip()
     cli_scripts = str(getattr(args, "benchmark_scripts_dir", None) or "").strip()
@@ -241,10 +226,6 @@ def _restore_operator_supplied_paths_from_state(args: Any, state: SharedState) -
         archived = str(getattr(state, "bypass_scripts_dir", "") or "").strip()
         if archived:
             os.environ["HYPERLOOM_BYPASS_SCRIPTS_DIR"] = archived
-    if not os.environ.get(BENCHMARK_BACKEND_ENV, "").strip():
-        archived = str(getattr(state, "benchmark_backend", "") or "").strip()
-        if archived:
-            os.environ[BENCHMARK_BACKEND_ENV] = archived
     if (
         not str(getattr(args, _XDIT_MODEL_NAME_ATTR, None) or "").strip()
         and not os.environ.get(_XDIT_MODEL_NAME_ENV, "").strip()
@@ -255,18 +236,16 @@ def _restore_operator_supplied_paths_from_state(args: Any, state: SharedState) -
 
 
 def _require_custom_entrypoint(framework: str, gpu_type: str | None = None) -> None:
-    """Fail at launch when the selected runner cannot serve the framework."""
-    require_runner_framework(gpu_type or "", framework)
+    """Fail at launch when the framework is not validated on the board, or a custom one has no entrypoint."""
+    require_board_framework(gpu_type or "", framework)
     if str(framework or "").strip().lower() != "custom":
         return
     from hyperloom.orchestrator.actions.executors._workload_envs import (
         apply_scriptable_runtime_defaults,
     )
-    from hyperloom.orchestrator.actions.executors.bypass_scriptable import (
+    from hyperloom.orchestrator.actions.executors.explore_prefilter.declared_levers import (
         DeclaredLeversError,
         load_declared_levers,
-        resolve_scriptable_script,
-        scriptable_script_candidates,
     )
 
     try:  # a malformed declaration must fail here, not surface later as empty_grid
@@ -276,25 +255,14 @@ def _require_custom_entrypoint(framework: str, gpu_type: str | None = None) -> N
         sys.exit(2)
 
     bench: dict[str, Any] = {"framework": "custom"}
-    envs: dict[str, Any] = {}
-    apply_scriptable_runtime_defaults(
-        bench,
-        envs,
-        gpu_type=gpu_type,
-        explicit_benchmark_script=False,
-    )
-    runner_type = str(bench.get("runner_type") or "mi355x")
-    inferencex_root = (
-        os.environ.get("INFERENCEX_PATH", "").strip() or os.environ.get("MAGPIE_INFERENCEX_PATH", "").strip()
-    )
-    script = resolve_scriptable_script("custom", runner_type, inferencex_root, bench)
-    if script is not None:
+    apply_scriptable_runtime_defaults(bench, {}, gpu_type=gpu_type, explicit_benchmark_script=False)
+    if bench.get("benchmark_script"):
         return
-    name = f"custom_{runner_type}.sh"
-    candidates = scriptable_script_candidates("custom", runner_type, inferencex_root, bench)
-    tried = "\n".join(f"  - {path}" for path in candidates) or "  (none)"
+    scripts_dir = os.environ.get("HYPERLOOM_BYPASS_SCRIPTS_DIR", "").strip()
+    expected = Path(scripts_dir) / f"custom_{bench['runner_type']}.sh"
     print(
-        f"ERROR: --framework custom could not resolve a benchmark entrypoint ({name}). Tried:\n{tried}",
+        f"ERROR: --framework custom could not resolve a benchmark entrypoint: there is no {expected}, "
+        f"and {scripts_dir or 'the scripts dir'} does not hold exactly one .sh script.",
         file=sys.stderr,
     )
     sys.exit(2)
@@ -302,13 +270,8 @@ def _require_custom_entrypoint(framework: str, gpu_type: str | None = None) -> N
 
 def _persist_operator_supplied_paths(state: SharedState) -> None:
     """Mirror the live custom-workload env back onto ``state`` for the next resume."""
-    from hyperloom.orchestrator.actions.executors.benchmark_backend import (
-        BENCHMARK_BACKEND_ENV,
-    )
-
     state.framework_repo_path = os.environ.get("FRAMEWORK_REPO_PATH", "").strip()
     state.bypass_scripts_dir = os.environ.get("HYPERLOOM_BYPASS_SCRIPTS_DIR", "").strip()
-    state.benchmark_backend = os.environ.get(BENCHMARK_BACKEND_ENV, "").strip().lower()
     state.xdit_model_name = os.environ.get(_XDIT_MODEL_NAME_ENV, "").strip()
 
 
@@ -463,11 +426,11 @@ def _acquire_session_lock_or_exit(session_dir: Path) -> SessionLock:
     return lock
 
 
-def _reset_state_file(session_dir: Path, *, framework: str) -> None:
+def _reset_state_file(session_dir: Path, state: SharedState) -> None:
     """Back up ``state.json`` to ``state.json.preReset.<unix_ts>`` and start fresh (Recipe KB untouched).
 
-    The fresh state keeps ``framework``: the session is single-framework, and
-    nothing after this point re-derives it.
+    The fresh state keeps ``framework`` and the measurement identity of *state*: the session is single-framework and
+    keeps its measurement path, nothing after this point re-derives either, and a later resume checks the latter.
     """
     state_path = session_dir / "state.json"
     if not state_path.exists():
@@ -478,11 +441,11 @@ def _reset_state_file(session_dir: Path, *, framework: str) -> None:
     except OSError as exc:
         log.warning("--reset-state: could not move %s → %s: %s", state_path, backup_path, exc)
         return
-    SharedState(framework=framework).save(session_dir)
+    SharedState(framework=state.framework, **fresh_measurement_fields(state)).save(session_dir)
     log.info(
         "--reset-state: backed up state.json to %s; session starts blank except for framework=%s.",
         backup_path.name,
-        framework,
+        state.framework,
     )
 
 
@@ -491,20 +454,6 @@ def _preflight_agentx_backend(args: argparse.Namespace) -> None:
     if not _agentx_enabled():
         return
     from hyperloom.inference_optimizer import framework_registry
-    from hyperloom.orchestrator.actions.executors.benchmark_backend import (
-        resolve_backend_name,
-    )
-
-    backend = resolve_backend_name()
-    if backend == "bypass":
-        print(
-            "ERROR: HYPERLOOM_AGENTX=1 with HYPERLOOM_BENCHMARK_BACKEND=bypass. "
-            "The bypass backend ignores benchmark_script for serving frameworks, "
-            "so AgentX would not run and the session would report synthetic "
-            "measurements as AgentX results. Pick one.",
-            file=sys.stderr,
-        )
-        raise SystemExit(2)
 
     framework = str(getattr(args, "framework", "") or "").strip().lower()
     if framework and framework_registry.is_scriptable(framework):
@@ -943,8 +892,6 @@ def _restore_platform_state(args: argparse.Namespace, state: SharedState, sessio
         print(f"  re-exported FRAMEWORK_REPO_PATH: {state.framework_repo_path}")
     if state.bypass_scripts_dir:
         print(f"  re-exported HYPERLOOM_BYPASS_SCRIPTS_DIR: {state.bypass_scripts_dir}")
-    if state.benchmark_backend:
-        print(f"  re-exported HYPERLOOM_BENCHMARK_BACKEND: {state.benchmark_backend}")
     # Feeds the IR-8 check.
     if state.nodes > 1 and int(getattr(args, "nodes", 1) or 1) <= 1:
         args.nodes = state.nodes
@@ -1020,12 +967,8 @@ def _reexport_session_identity(args: argparse.Namespace, state, session_dir: Pat
     if state.framework == "atom":
         _apply_atom_auto_tighten(args)
     if state.gpu_type:
-        runner_gpu_type = gpu_runner_type(state.gpu_type)
-        os.environ["TARGET_GPU_TYPE"] = state.gpu_type
-        os.environ["GPU_TYPE"] = runner_gpu_type
+        os.environ["TARGET_GPU_TYPE"] = os.environ["GPU_TYPE"] = state.gpu_type
         print(f"  re-exported GPU_TYPE  : {state.gpu_type}")
-        if runner_gpu_type != state.gpu_type:
-            print(f"  Magpie runner GPU_TYPE: {runner_gpu_type}")
 
 
 def _reexport_session_environment(
@@ -1217,7 +1160,7 @@ async def _resume_session(args: argparse.Namespace) -> _SessionStart:
     _resume_server_args = str(getattr(args, "server_args", "") or "").strip() or state.operator_server_args
     _resume_extra_env = parse_operator_extra_env(args) or dict(state.operator_extra_env)
     _export_operator_launch_shape(server_args=_resume_server_args, extra_env=_resume_extra_env)
-    _stale = agentx_state_is_stale(state)
+    _stale = measurement_state_is_stale(state)
     if _stale:
         print(
             f"ERROR: cannot resume this session -- {_stale}. "
@@ -1257,7 +1200,7 @@ async def _resume_session(args: argparse.Namespace) -> _SessionStart:
 
 
 def _resolve_target_gpu(args: argparse.Namespace, framework: str) -> None:
-    """Settle ``args.gpu_type`` and the Magpie runner, then refuse a board this session cannot serve."""
+    """Settle ``args.gpu_type``, then refuse a board this session cannot serve."""
     # Resolve real target GPU: probe > --gpu-type hint; probe wins to catch wrong-host typos that corrupt KB.
     user_specified = _resolve_amd_gpu_type(args.gpu_type) or ""
     if _should_remote_probe_gpu(args):
@@ -1273,19 +1216,15 @@ def _resolve_target_gpu(args: argparse.Namespace, framework: str) -> None:
         print(line, file=sys.stderr)
     if probed and not user_specified:
         print(f"GPU type        : {gpu_type} (auto-detected)")
-    runner_gpu_type = gpu_runner_type(gpu_type)
-    warn_family_runner(gpu_type, framework)
     args.gpu_type = gpu_type or None
-    if runner_gpu_type:
-        os.environ["TARGET_GPU_TYPE"] = gpu_type
-        os.environ["GPU_TYPE"] = runner_gpu_type
+    if gpu_type:
+        os.environ["TARGET_GPU_TYPE"] = os.environ["GPU_TYPE"] = gpu_type
         print(f"GPU type        : {gpu_type}")
-        print(f"Magpie runner   : {runner_gpu_type} (will inject runner_type into Magpie YAML)")
     else:
         os.environ.pop("TARGET_GPU_TYPE", None)
         os.environ.pop("GPU_TYPE", None)
-        print("GPU type        : <unset> (Magpie will auto-detect)")
-    _require_custom_entrypoint(framework, gpu_type=runner_gpu_type)
+        print("GPU type        : <unset>")
+    _require_custom_entrypoint(framework, gpu_type=gpu_type)
 
     # Runs here, not in _preflight, because the question it asks -- will provenance be able to name the ISA? -- is
     # unanswerable until args.gpu_type is final.
@@ -1293,15 +1232,15 @@ def _resolve_target_gpu(args: argparse.Namespace, framework: str) -> None:
 
 
 def _create_fresh_session(args: argparse.Namespace, *, framework: str, nodes_resolved: int) -> _SessionStart:
-    """Create and lock the session directory, then write its manifest, launch info and seeded state."""
+    """Create and lock the session directory, resolve its base launch, then write its manifest, launch info and state."""
     session_dir = make_session_dir(
         model_name=resolve_model_display_name(args), target=getattr(args, "session_dir", None)
     )
     # Single-optimizer guard: take the lock so the contract holds uniformly and the owner pid is published for the
     # session diagnostics.
     session_lock = _acquire_session_lock_or_exit(session_dir)
-    from .benchmark_config import bind_benchmark
-
+    # The base settles an open TP and EP, which the bound AgentX workload YAML records.
+    base = resolve_session_base(session_dir, args, framework=framework)
     bind_benchmark(session_dir, args)
     manifest = write_manifest(session_dir, args=args)
     _persist_install_event(args, session_dir)
@@ -1342,7 +1281,7 @@ def _create_fresh_session(args: argparse.Namespace, *, framework: str, nodes_res
         args,
         session_id=manifest["session_id"],
         framework=framework,
-        platform=LaunchPlatform(compute_partition=compute_partition, gpu_power_settings=gpu_power),
+        settled=SettledLaunch(compute_partition=compute_partition, gpu_power_settings=gpu_power, base=base),
     )
     return _SessionStart(session_dir=session_dir, session_lock=session_lock, manifest=manifest)
 
@@ -1358,7 +1297,7 @@ async def _seed_fresh_session(args: argparse.Namespace, *, nodes_resolved: int) 
             file=sys.stderr,
         )
         sys.exit(2)
-    # Re-export so subprocess executors inject the resolved model into the Magpie YAML, not its hardcoded model.
+    # Re-export so the rounds _suite.config composes serve the resolved model, not the path the operator typed.
     from hyperloom.common.model_paths import resolve_serving_model_path
 
     os.environ["MODEL_PATH"] = resolve_serving_model_path(str(args.model)) or str(args.model)
@@ -1398,7 +1337,9 @@ async def _seed_fresh_session(args: argparse.Namespace, *, nodes_resolved: int) 
     if _fw_version_for_env:
         os.environ["FRAMEWORK_VERSION"] = _fw_version_for_env
     if _agentx_enabled():
-        print(f"Workload        : AgentX replay, CONC={args.conc}; corpus and model context resolved by Magpie")
+        print(
+            f"Workload        : AgentX replay, CONC={args.conc}; corpus and model context resolved by inference_suite"
+        )
     else:
         print(
             f"Workload        : ISL={args.isl} OSL={args.osl} MAX_MODEL_LEN={max_model_len} ({max_model_len_source}) "
@@ -1704,7 +1645,7 @@ def _build_coordinator(
     os.environ["INFERENCE_OPTIMIZER_CURRENT_SESSION_DIR"] = str(session_dir)
     # --reset-state backs up state.json and starts blank, before Coordinator is constructed.
     if getattr(args, "reset_state", False):
-        _reset_state_file(session_dir, framework=state.framework)
+        _reset_state_file(session_dir, state)
 
     return Coordinator(
         session_dir,
@@ -1823,7 +1764,7 @@ async def _close_optimize_run(coordinator: Any, session_lock: Any, session_dir: 
 def main(argv: list[str] | None = None) -> int:
     """CLI entry point: parse arguments and dispatch the requested subcommand."""
     # Force line-buffering so output piped through a non-TTY sink flushes every line immediately instead of
-    # block-buffering, which would otherwise freeze the top-level log for the duration of a blocking Magpie
+    # block-buffering, which would otherwise freeze the top-level log for the duration of a blocking benchmark
     # subprocess.
     for stream in (sys.stdout, sys.stderr):
         getattr(stream, "reconfigure", lambda **_: None)(line_buffering=True)
@@ -1847,8 +1788,6 @@ def main(argv: list[str] | None = None) -> int:
             v = getattr(args, attr)
             if v and Path(v).exists():
                 setattr(args, attr, Path(v).read_text(encoding="utf-8"))
-        from .benchmark_config import configure_benchmark
-
         try:
             configure_benchmark(args)
             _load_custom_specialist_args(args)

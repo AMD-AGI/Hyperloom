@@ -7,6 +7,18 @@ Used for development, CI, the consistency check and local multi-branch runs. It 
 the same socket as a hosted provider (:mod:`hyperloom.sandbox.socket`), with
 the same sealed policy, the same ``agent-sandbox.io/`` metadata and one process group
 per runner that is reaped as a tree.
+
+The cards of a sandbox that ended go back to the pool once nothing is listed on them. Its processes are gone, but the
+kernel lists the memory of a process that ended until the driver has freed it, which for a torn-down server's ranks takes
+tens of seconds, and a card handed out before then is found held by the next test's card guard. A card that still holds
+memory is read again every second for up to :data:`CARD_RELEASE_WAIT_SEC`, on a thread of its own, and goes back as soon
+as nothing is listed on it; one still held then goes back all the same, with a warning: whether what is on it is a
+foreign holder is for the next test's card guard to say, which this wait leaves as strict as it was. Where the kernel's
+list cannot be read the cards go back at once.
+
+A provider reads nothing unless its ``card_memory`` is set: by default nothing is listed and the cards go back at once,
+so no provider looks at the host's cards unless its caller asks it to; the toolbox, which runs servers on a GPU host,
+sets :func:`~hyperloom.sandbox.card_occupancy.read_listed`.
 """
 
 from __future__ import annotations
@@ -17,13 +29,14 @@ import os
 import sys
 import tempfile
 import threading
+import time
 import uuid
-from collections.abc import Iterable, Mapping
+from collections.abc import Callable, Iterable, Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
 
 from hyperloom.common.outside_facts import ROCR_VISIBLE_DEVICES_ENV
-from hyperloom.sandbox.card_occupancy import SANDBOX_TAG_ENV
+from hyperloom.sandbox.card_occupancy import SANDBOX_TAG_ENV, CardReading
 from hyperloom.sandbox.confined import RunnerPlan, SandboxConfiner, sandbox_confiner
 from hyperloom.sandbox.gpu_pool import GpuPool
 from hyperloom.sandbox.identity import generate_signing_identity
@@ -50,7 +63,14 @@ from hyperloom.sandbox.templates import RESERVED_ENV_NAMES, LocalTemplate
 
 log = logging.getLogger(__name__)
 
-__all__ = ["LocalSandboxProvider", "LocalTemplate", "ProcessUsers", "RunnerPlan"]
+__all__ = ["CARD_RELEASE_WAIT_SEC", "LocalSandboxProvider", "LocalTemplate", "ProcessUsers", "RunnerPlan"]
+
+#: How long the cards of a sandbox that ended are read again while the kernel still lists memory on them before they go
+#: back to the pool all the same: a torn-down server's ranks kept their cards for about 25 s after the reap, and the
+#: inference suite gives a server it stopped as long.
+CARD_RELEASE_WAIT_SEC = 60.0
+_RELEASE_STEP_SEC = 1.0
+_GIB = 1 << 30
 
 
 @dataclass(frozen=True)
@@ -156,6 +176,11 @@ class LocalSandboxProvider:
         self._cards: dict[str, tuple[int, ...]] = {}
         self.quarantined: set[int] = set()
         self._withheld: dict[str, _Withheld] = {}
+        #: What the kernel lists on some cards, which an ended sandbox's cards are read with before they go back to the
+        #: pool (see the module's description): nothing unless the caller sets a reading.
+        self.card_memory: Callable[[Sequence[int]], CardReading] = nothing_listed
+        self._unread = ""
+        self._closing = threading.Event()
 
     # -- socket ------------------------------------------------------------
 
@@ -242,14 +267,19 @@ class LocalSandboxProvider:
         return sorted(found, key=lambda i: i.sandbox_id)
 
     def close(self) -> None:
-        """Kill every live sandbox and remove the provider's directory if it made one."""
+        """Kill every live sandbox, all at once so that the close takes as long as one reap, and remove the provider's
+        directory if it made one. The cards of ended sandboxes still waited on are not given back any more."""
+        self._closing.set()
         with self._cond:
             live = list(self._live.values())
-        for sandbox in live:
-            try:
-                sandbox.kill()
-            except SandboxUnavailable:
-                log.exception("closing: sandbox %s could not be reaped", sandbox.sandbox_id)
+        reaps = [
+            threading.Thread(target=_kill_on_close, args=(sandbox,), name=f"hl-close-{sandbox.sandbox_id}", daemon=True)
+            for sandbox in live
+        ]
+        for reap in reaps:
+            reap.start()
+        for reap in reaps:
+            reap.join()
         if self._owns_base:
             shutil.rmtree(self._base, ignore_errors=True)
 
@@ -390,10 +420,68 @@ class LocalSandboxProvider:
                 self.quarantined.update(cards)
                 self._withheld[sandbox.sandbox_id] = _Withheld(cards, sandbox.leftovers)
         if reaped:
+            self._return_cards(sandbox.sandbox_id, cards)
+
+    def _return_cards(self, sandbox_id: str, cards: tuple[int, ...]) -> None:
+        """Put the cards of the ended sandbox ``sandbox_id`` back in the pool: now those nothing is listed on, the others
+        once they are freed, or :data:`CARD_RELEASE_WAIT_SEC` has passed, on a thread of their own (see the module's
+        description), so the caller does not wait for them."""
+        busy = self._listed(cards)
+        self._give_back(tuple(card for card in cards if card not in busy))
+        if busy:
+            name = f"hl-card-release-{sandbox_id}"
+            threading.Thread(target=self._drain, args=(sandbox_id, busy), name=name, daemon=True).start()
+
+    def _listed(self, cards: Sequence[int]) -> dict[int, str]:
+        """The cards among ``cards`` the kernel lists a process on, each with what is listed; none when the list cannot be
+        read (said once in the log)."""
+        if not cards:
+            return {}
+        reading = self.card_memory(cards)
+        if reading.unavailable is not None:
+            if reading.unavailable != self._unread:
+                self._unread = reading.unavailable
+                log.warning(
+                    "the cards of ended sandboxes go back without a check for memory left on them: %s",
+                    reading.unavailable,
+                )
+            return {}
+        busy: dict[int, list[str]] = {}
+        for holder in reading.holders:
+            if holder.card in cards:
+                busy.setdefault(holder.card, []).append(
+                    f"kernel id {holder.pid} with {holder.vram / _GIB:.1f} GiB and {holder.queues} queues"
+                )
+        return {card: ", ".join(held) for card, held in busy.items()}
+
+    def _drain(self, sandbox_id: str, busy: dict[int, str]) -> None:
+        """Read ``busy`` again every second, giving each card back as nothing is listed on it, until all are back or
+        :data:`CARD_RELEASE_WAIT_SEC` has passed, when the rest go back with a warning; the provider's close ends the
+        wait and keeps them."""
+        deadline = time.monotonic() + CARD_RELEASE_WAIT_SEC
+        while busy and time.monotonic() < deadline:
+            if self._closing.wait(min(_RELEASE_STEP_SEC, max(0.0, deadline - time.monotonic()))):
+                return
+            still = self._listed(tuple(busy))
+            self._give_back(tuple(card for card in busy if card not in still))
+            busy = still
+        if busy:
+            log.warning(
+                "cards of ended sandbox %s still hold memory %g s after it ended; they go back to the pool and the next "
+                "test's card guard judges what is on them: %s",
+                sandbox_id,
+                CARD_RELEASE_WAIT_SEC,
+                "; ".join(f"card {card}: {what}" for card, what in sorted(busy.items())),
+            )
+            self._give_back(tuple(sorted(busy)))
+
+    def _give_back(self, cards: tuple[int, ...]) -> None:
+        if cards:
             self.pool.release(cards)
 
     def release_freed_cards(self) -> tuple[int, ...]:
-        """Put back in the pool the withheld cards of every ended sandbox nothing of which runs any more; return them.
+        """Give back the withheld cards of every ended sandbox nothing of which runs any more; return them. They are
+        back in the pool once nothing is listed on them either (see the module's description).
 
         A sandbox whose reap could not confirm it empty keeps its cards out of the pool (``quarantined``). The reap named
         what it left, each process sent SIGKILL so that it could start no other, and every process the sandbox started
@@ -411,6 +499,19 @@ class LocalSandboxProvider:
                 if self._withheld.pop(sandbox_id, None) is None:
                     continue  # another call gave them back first
                 self.quarantined.difference_update(held.cards)
-            self.pool.release(held.cards)
+            self._return_cards(sandbox_id, held.cards)
             freed.extend(held.cards)
         return tuple(sorted(freed))
+
+
+def nothing_listed(cards: Sequence[int]) -> CardReading:
+    """A provider's reading of ``cards`` unless its caller sets one: nothing listed, so the cards go back at once."""
+    del cards
+    return CardReading()
+
+
+def _kill_on_close(sandbox: LocalSandbox) -> None:
+    try:
+        sandbox.kill()
+    except SandboxUnavailable:
+        log.exception("closing: sandbox %s could not be reaped", sandbox.sandbox_id)

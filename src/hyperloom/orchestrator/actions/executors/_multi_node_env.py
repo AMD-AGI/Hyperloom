@@ -1,7 +1,8 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""Helper that bridges the multi-node CLI state into Magpie subprocesses."""
+"""Helper that bridges the multi-node CLI state into benchmark rounds: the cluster's topology and the server URL a
+client-only round measures."""
 
 from __future__ import annotations
 
@@ -21,6 +22,8 @@ from hyperloom.inference_optimizer.multi_node.state_paths import resolve_state_f
 from hyperloom.inference_optimizer.recipe_snapshot_constants import KbTopology
 
 log = logging.getLogger(__name__)
+
+_REMOTE_SERVER_ENV = "BENCHMARK_BASE_URL"
 
 
 def _read_state() -> dict[str, Any]:
@@ -201,41 +204,30 @@ def export_ray_address_to_os() -> None:
         os.environ["RAY_ADDRESS"] = addr
 
 
-def _remote_client_env(service_url: str) -> dict[str, str]:
-    """Build the multi-node Magpie client env for ``service_url``."""
-    from .benchmark_backend import resolve_benchmark_interpreter
-
-    return {
-        "MAGPIE_RUN_PHASE": "client",
-        "BENCHMARK_BASE_URL": service_url,
-        "MAGPIE_EVAL_PYTHON": resolve_benchmark_interpreter(),
-    }
+def _multi_node_service_url() -> str:
+    """The multi-node cluster's benchmark URL as this host reaches it: the hand-off's, else the state's."""
+    return external_service_url() or reachable_service_url(_read_state())
 
 
-def magpie_remote_env() -> dict[str, str]:
-    """Return env vars to inject into a Magpie ``benchmark`` subprocess."""
-    # External mode: point benchmarks at the env-provided endpoint when multi-node.
-    ext = external_service_url()
-    if ext and is_multi_node():
-        return _remote_client_env(ext)
-    if not is_multi_node():
-        return {}
+def client_only_server_url() -> str | None:
+    """The URL of the server a round measures without starting it, or ``None`` when the round serves locally.
 
-    state = _read_state()
-    service_url = reachable_service_url(state)
-    if not service_url:
-        log.warning(
-            "INFERENCE_OPTIMIZER_NODES=%s but %s has no service_url; "
-            "Magpie will try to launch a local server and likely fail. "
-            "Multi-node needs the platform's cluster hand-off: check "
-            "HYPERLOOM_MN_EXT_SERVICE_URL (or _HEAD_IP for rayjob) is set in the "
-            "environment `python -m hyperloom optimize` runs in.",
-            os.environ.get("INFERENCE_OPTIMIZER_NODES"),
-            resolve_state_file(),
-        )
-        return {}
+    Multi-node rounds measure the cluster's frontend; a single-node session measures the operator's
+    ``BENCHMARK_BASE_URL`` when one is exported.
+    """
+    if is_multi_node():
+        return _multi_node_service_url() or _warn_no_service_url()
+    return os.environ.get(_REMOTE_SERVER_ENV, "").strip() or None
 
-    return _remote_client_env(service_url)
+
+def _warn_no_service_url() -> None:
+    log.warning(
+        "INFERENCE_OPTIMIZER_NODES=%s but %s has no service_url; the round will try to launch a local server and "
+        "likely fail. Multi-node needs the platform's cluster hand-off: check HYPERLOOM_MN_EXT_SERVICE_URL (or "
+        "_HEAD_IP for rayjob) is set in the environment `python -m hyperloom optimize` runs in.",
+        os.environ.get("INFERENCE_OPTIMIZER_NODES"),
+        resolve_state_file(),
+    )
 
 
 def log_mn_banner(
@@ -274,10 +266,10 @@ def log_mn_banner(
 
 
 __all__ = [
+    "client_only_server_url",
     "export_ray_address_to_os",
     "is_multi_node",
     "log_mn_banner",
-    "magpie_remote_env",
     "ray_gcs_address_from_state",
     "resolve_kb_topology",
 ]

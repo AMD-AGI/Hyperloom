@@ -172,10 +172,19 @@ class CampaignState:
     # The kept tree's readings of a host's band guards (arbor/measure/guards.py), taken at every measured KEEP and
     # PROBE; empty without guards. An older session.json loads without it.
     guard_ref: dict[str, float] = field(default_factory=dict)
+    # The kept tree's per-request records, for guards on matched requests (arbor/measure/matched.py): the run whose
+    # bench they are (``dir``: an iteration's directory, or the root baseline's, by its name in the session) and its
+    # raw readings of the per-request metrics (``readings``), with the lesson count when it was taken (``row``): a bar
+    # row or a retraction after it retires it. Set at the root baseline and with guard_ref; empty while the kept tree's
+    # run left no records (a frozen baseline record has none).
+    request_ref: dict = field(default_factory=dict)
     iteration: int = 0
     tier: str = "config"
     null_streak: int = 0
     tier_iters: int = 0
+    # The map round whose start set the tier (arbor/directions.py, start_tier): "<round>@<its start>", so a round's
+    # start sets it once, and a resume does not set it again.
+    map_tier_key: str = ""
     probe_streak: int = 0
     probe_iters: int = 0
     invalid_streak: int = 0
@@ -312,6 +321,22 @@ class CampaignState:
             "decision": "ESCALATE",
             "change": f"forced escalation to {new_tier}",
             "tier": new_tier,
+            "ts": time.time(),
+        })
+
+    def apply_map_tier(self, tier: str, direction: str, key: str) -> None:
+        """A map round starts at the tier its top-ranked open direction works at (arbor/directions.py, start_tier):
+        up or down the ladder, its counter at zero. Escalation then runs from it as from any tier."""
+        before = self.tier
+        self.map_tier_key = key
+        self.tier = tier
+        self.tier_iters = 0
+        self.lessons.append({
+            "iteration": self.iteration,
+            "decision": "NOTE",
+            "change": (f"the map's start: tier {tier}, where its top-ranked open direction {direction} works"
+                       + (f" (was {before})" if before != tier else "")),
+            "tier": tier,
             "ts": time.time(),
         })
 

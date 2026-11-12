@@ -68,7 +68,12 @@ def main(argv: list[str] | None = None, command=None) -> int:
     host resumes, but stops our server first.
 
     ``command`` is the side to run (``_master``, ``_worker``); ``arbor run`` (``_main``) by default.
+
+    Under WSL it first warns, in one line: its clock can step back, and git can then miss an edit
+    (arbor/execute/preflight.py, ``warn_wsl``).
     """
+    from arbor.execute.preflight import warn_wsl
+    warn_wsl()
     held: dict = {}
     try:
         return (command or _main)(argv, held)
@@ -80,6 +85,11 @@ def main(argv: list[str] | None = None, command=None) -> int:
         if held.get("comp"):
             held["comp"].abort()
         raise
+    finally:
+        # The session lock (arbor/checkpoints.py), let go when the command ends: in its own process the exit would,
+        # and a caller that runs commands in its process (the tests, a host's in-process run) starts the next.
+        from arbor import checkpoints
+        checkpoints.release_session(held)
 
 
 def main_master(argv: list[str] | None = None) -> int:
@@ -123,6 +133,12 @@ def parser(prog: str = "arbor run") -> argparse.ArgumentParser:
                                  f"(also {SPLIT_ENV}=processes, as a host that launches arbor run passes it); workers: "
                                  "the master deals its map to several workers at once, one per slot of the config's "
                                  "workers block, and integrates what they kept (arbor/dealer.py)")
+        parser.add_argument("--exit-at-handover", action="store_true",
+                            help="exit at each hand-over, as arbor master and arbor worker would in turn: the master's "
+                                 "passes, then one worker stretch, then at the next master's turn the worker's report "
+                                 "(worker_report.json, role_exit.json `reported`) and exit 0. The same command "
+                                 "continues: an order still waiting for its report is worked first, else the master's "
+                                 "passes run again. For a host that deals each report (with the loop split only)")
     else:
         # The run's first start, so a time budget bounds the whole run, not each command: --split processes passes
         # it to the master; a worker takes its order's.
@@ -239,6 +255,10 @@ def _pause(s: master.Session) -> None:
 def _main(argv: list[str] | None, held: dict) -> int:
     """``arbor run``: the master and its workers, in this process (or, with ``--split processes``, as commands)."""
     args = _parse(argv)
+    if args.exit_at_handover and args.split != "loop":
+        print(f"[arbor] Run: --exit-at-handover runs the master and a worker in this process, the loop split; "
+              f"--split {args.split} hands over between commands already", file=sys.stderr)
+        return 2
     if args.split == "processes":
         return _split(argv, args)
     if args.split == "workers":
@@ -248,11 +268,55 @@ def _main(argv: list[str] | None, held: dict) -> int:
     if not isinstance(s, master.Session):
         return s
     stretch = worker.Stretch(s)
+    if getattr(args, "exit_at_handover", False):
+        return _until_handover(s, stretch)
     step = _loop(s, stretch)
     if step.kind == "return":
         return step.rc
     stretch.end(s.exit_reason, s.exit_detail)
     return master.finish(s)
+
+
+def _until_handover(s: master.Session, stretch: worker.Stretch) -> int:
+    """``arbor run --exit-at-handover``: what ``arbor master`` then ``arbor worker`` would run, in this process, until
+    the worker's stretch hands over; then its report, ``role_exit.json`` ``reported``, exit 0, for a host that deals
+    each report (its map dealer) before it runs the same command again.
+
+    The same command continues where it stopped: a work order still waiting for its report is worked first (a run
+    stopped mid-stretch); otherwise the master's passes run (the map, a round's end) until the next worker's turn,
+    whose order is written, and that stretch runs. A run that ends instead (the campaign's end, a STOP, the deadline,
+    a pause) ends as ``arbor run`` ends, a stretch in progress reported first: ``role_exit.json`` is the master's
+    ``ended``, as the last command of ``--split processes`` writes it.
+
+    Under a host's plan (``component.plan``), the share is the stretch's map: once every direction of it is closed,
+    the stretch hands it back (``reported``) instead of closing the lane, and the next run of the command takes the
+    plan's directions the session does not hold yet as its next share (``component.deal_plan``). With nothing new
+    dealt, the master's turn closes the lane and the run ends ``done``, as without the flag."""
+    dealt = component.deal_plan(s.campaign.config, s.session_dir, CampaignState.load(s.state_path).iteration + 1)
+    if dealt:
+        print(f"[arbor] Run: {dealt}")
+    order = roles.open_order(s.session_dir)
+    if order is None:
+        step = _loop(s, stretch, (lifecycle.MASTER,))
+        if step.kind == "return":
+            return step.rc
+        if step.kind != "handover":
+            roles.write_exit(s.session_dir, lifecycle.MASTER, roles.ENDED, None, s.exit_reason, s.exit_detail)
+            return master.finish(s)
+        stretch.start(step.state)
+    else:
+        stretch.resume(order)
+    from arbor import directions
+    with directions.lane_hands_back():
+        step = _loop(s, stretch, (lifecycle.WORKER,))
+    if step.kind == "return":
+        return step.rc
+    if step.kind != "handover":
+        stretch.end(s.exit_reason, s.exit_detail)      # the last stretch's report, then the campaign's end
+        roles.write_exit(s.session_dir, lifecycle.MASTER, roles.ENDED, None, s.exit_reason, s.exit_detail)
+        return master.finish(s)
+    stretch.end(*stretch.handover(step.state))
+    return master.hand_over(s, roles.REPORTED, s.session_dir / roles.REPORT_FILE)
 
 
 def _master(argv: list[str] | None, held: dict) -> int:
@@ -487,10 +551,11 @@ def _run_pass(s: master.Session, iteration: int, state: CampaignState) -> str:
     if container and workspace:
         recover_orphaned_commit(container, workspace, state.iteration)
         # The tree now is the kept one (arbor/execute/kept.py): what the harness committed since the last pass (an
-        # integration of the workers' KEEPs) is kept too.
+        # integration of the workers' KEEPs) is kept too, and an iteration the session never kept goes.
         try:
-            if kept.refresh(container, campaign.config, session_dir, iteration):
-                print("[arbor] kept tree: moved to the tree at this pass's start")
+            moved = kept.refresh(container, campaign.config, session_dir, iteration)
+            if moved:
+                print(f"[arbor] kept tree: {moved['line']}")
         except Exception as exc:   # noqa: BLE001 - the restore then goes to the older point, as it is recorded
             print(f"[arbor] WARNING: the kept tree was not refreshed: {exc}")
 
@@ -526,11 +591,12 @@ def _run_pass(s: master.Session, iteration: int, state: CampaignState) -> str:
             s.fire(decided, iteration, change=result.get("change"), metric=result.get("metric"))
         if decided == "invalid" and str(result.get("reason") or "").startswith("agent did not run"):
             s.fire("agent_failed", iteration, reason=result.get("reason"))
-        if result.get("decision") in ("STOPPED", "ROUND_END", "SKIPPED"):
+        if result.get("decision") in ("STOPPED", "ROUND_END", "SKIPPED", "HANDED_BACK"):
             # The map stopped the campaign, or ended its round, before the agent
             # ran (arbor/directions.py), or a revisit's change no longer applied
-            # (arbor/revisit.py): no iteration to time; the loop's STOP check
-            # exits, its round-end check runs the A/B, or the next revisit arms.
+            # (arbor/revisit.py), or a host's share is worked out (--exit-at-handover): no iteration to time; the
+            # loop's STOP check exits, its round-end check runs the A/B, the next revisit arms, or the worker hands
+            # its share back.
             return "again"
     except KeyboardInterrupt:
         print("\n[arbor] Interrupted — exiting.")

@@ -85,6 +85,10 @@ _INFRA_CORRECTNESS_MARKERS = (
     "offlinemodeisenabled",
     "datasetnotfounderror",
     "localentrynotfounderror",
+    # The GSM8K packs' line for an lm_eval that ended without a score (a module missing from the image, a crash): the
+    # eval failed, not the change. After a server the harness saw healthy, the lost-server probe still tells a server
+    # that died under the eval (the change's) from an eval that broke (the harness's).
+    "lm_eval produced no gsm8k score",
 )
 
 
@@ -221,6 +225,18 @@ def _correctness_is_infrastructure(error: str) -> bool:
     return any(m in e for m in _INFRA_CORRECTNESS_MARKERS)
 
 
+def lost_reason(what: str, lost: dict) -> str:
+    """The REVERT reason for a server that hung or died under the change (``lost``, the loop's ``_server_lost``)."""
+    probes = ", ".join(str(c) if c else "no answer" for c in lost.get("probe") or [])
+    why = (f"the server hung or died under this change ({what}): the harness saw it healthy this iteration, and "
+           f"one-token requests then got {probes or 'no answer'}")
+    if lost.get("alive") is False:
+        why += "; its process is gone"
+    if lost.get("signals"):
+        why += f"; its log: {lost['signals'][0]}"
+    return why
+
+
 def run_gate(
     objective: dict,
     best: float | None,
@@ -235,6 +251,8 @@ def run_gate(
     accuracy: dict | None = None,
     stability: dict | None = None,
     guards: dict | None = None,
+    lost: dict | None = None,
+    matched: dict | None = None,
 ) -> GateResult:
     """Pure gate logic. Callers provide the raw results; this decides the outcome.
 
@@ -250,7 +268,12 @@ def run_gate(
     accuracy gate is on; absent, the gate is what it was. ``stability`` is a
     FIX-STABILITY candidate's evidence (arbor/measure/stability.py): without a
     failure on record before it, the candidate is gated as a FIX. ``guards`` is a host's guards checked against the
-    kept tree (arbor/measure/guards.py): one broken is a REVERT.
+    kept tree (arbor/measure/guards.py): one broken is a REVERT. ``lost`` says the server the harness saw healthy
+    this iteration stopped answering (hung or died): then a correctness check that could not reach the model, a
+    bench that did not run and a bench with no traffic are the change's, a REVERT, not NOT MEASURED. ``matched``
+    (arbor/measure/matched.py ``compare``): a second axis that is a per-request metric with a matched reading is
+    judged on the requests both runs completed: the bar times the candidate's ratio to the kept tree on them. The
+    raw reading is still what the row books.
     """
     metric_key = objective["metric"]
     direction = objective["direction"]
@@ -271,7 +294,7 @@ def run_gate(
         why = (stability or {}).get("why") or "the harness's check did not run"
         res = run_gate(objective, best, bench_result, correctness_result, integrity_ok,
                        secondary_best=secondary_best, intent=resolve("FIX"), arm=arm, bundle=bundle,
-                       accuracy=accuracy, guards=guards)
+                       accuracy=accuracy, guards=guards, lost=lost, matched=matched)
         res.reason = f"{res.reason} [FIX-STABILITY with no failure on record ({why}): gated as a FIX]"
         return res
     # How far THIS intent may regress. For a correctness fix that is the
@@ -319,6 +342,11 @@ def run_gate(
     if not correctness_passed:
         err = correctness_result.get("error", "unknown")
         if _correctness_is_infrastructure(err):
+            # A server the harness saw healthy this iteration that answers nothing now hung or died under the
+            # change: the change's failure, as a server that never came up is.
+            if lost:
+                return GateResult(REVERT, 0.0, best, 0.0, False, True,
+                                  lost_reason(f"correctness: {err}", lost), intent)
             # The server was never reachable under the name the check used
             # (a 404 for a model path against a frontend that only knows the
             # HF name, say): no evidence about the change.
@@ -362,6 +390,9 @@ def run_gate(
             )
 
     if bench_result.get("status") != "ok":
+        if lost:
+            return GateResult(REVERT, 0.0, best, 0.0, correctness_passed, True,
+                              lost_reason(f"bench: {bench_result.get('error', 'unknown')}", lost), intent)
         return _not_measured(
             f"bench did not run ({bench_result.get('error', 'unknown')}) — "
             f"iteration NOT counted", best, intent,
@@ -386,6 +417,9 @@ def run_gate(
     if metric_value <= 0 and kind != "find_witness":
         n_ok = bench_result.get("num_requests_successful", -1)
         detail = f"num_requests_successful={n_ok}" if n_ok >= 0 else "no traffic"
+        if lost:
+            return GateResult(REVERT, 0.0, best, 0.0, correctness_passed, True,
+                              lost_reason(f"bench: {metric_key}={metric_value}, {detail}", lost), intent)
         return _not_measured(
             f"metric '{metric_key}'={metric_value} — bench returned no traffic "
             f"({detail}), iteration NOT counted", best, intent,
@@ -396,9 +430,19 @@ def run_gate(
     if not isinstance(sec_value, (int, float)) or isinstance(sec_value, bool):
         sec_value = None
 
+    # A per-request second axis on the requests both runs completed (arbor/measure/matched.py): a change that reorders
+    # which requests complete in the window moves the raw p50 without moving any request. The decision reads the bar
+    # times the candidate's matched ratio to the kept tree; the row still books the raw reading.
+    sec_for_gate, sec_match = sec_value, (matched or {}).get(sec_key) if sec_key else None
+    if (sec_match and sec_match.get("used") and sec_value is not None
+            and isinstance(secondary_best, (int, float)) and not isinstance(secondary_best, bool)):
+        sec_for_gate = secondary_best * float(sec_match["ratio"])
+    else:
+        sec_match = None
+
     pri = _measure_axis(metric_value, best, direction, threshold,
                         noise_band, metric_key)
-    sec = _measure_axis(sec_value, secondary_best, sec_direction,
+    sec = _measure_axis(sec_for_gate, secondary_best, sec_direction,
                         sec_threshold, sec_noise, sec_key)
 
     def _result(decision, reason, *, booked=False, frontier=False) -> GateResult:
@@ -431,6 +475,8 @@ def run_gate(
     both_ok = pri.ok and sec.ok
     is_frontier = (pri.gain and not sec.ok) or (sec.gain and not pri.ok)
     delta_s = f"{pri.delta:+.1f}%{sec.note()}"
+    if sec_match:
+        delta_s += f" [{sec_key} on {sec_match['n']} matched requests; raw {sec_value:g}]"
 
     # A host's guards (arbor/measure/guards.py): a KEEP the host would refuse on one of them is a REVERT here,
     # whatever the intent, with no retest.

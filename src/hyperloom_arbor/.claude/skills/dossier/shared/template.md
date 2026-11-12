@@ -155,6 +155,6 @@ apart, and says whether the increments are running out:
 status (open, done, killed, below_floor, or plan for a rewrite whose kernel plan is written) and, if closed,
 why. Check it with `python3 -m arbor.directions check`.>
 
-DIRECTIONS: [{"id": "m-<component>", "kind": "increment", "title": "<direction>", "rank": 1, "ceiling": "<x %>", "status": "open"}, ...]
+DIRECTIONS: [{"id": "m-<component>", "kind": "increment", "title": "<direction>", "rank": 1, "ceiling": "<x %>", "tier": "<config|framework|kernel|feature>", "status": "open"}, ...]
 ```
 

@@ -6,8 +6,12 @@
 from __future__ import annotations
 
 import json
+import os
 import shlex
+import stat
 from pathlib import Path
+
+import pytest
 
 from hyperloom_multibranch.scheduling.review import (
     APPROVED,
@@ -26,6 +30,26 @@ from hyperloom_multibranch.scheduling.review import (
 )
 
 NOW = 1793500000.0
+
+
+def _mode(path: Path) -> int:
+    return stat.S_IMODE(os.lstat(path).st_mode)
+
+
+@pytest.fixture(autouse=True)
+def _a_umask_that_keeps_group_write_off() -> None:
+    with open("/proc/self/status", encoding="ascii") as status:
+        umask = next(int(line.split()[1], 8) for line in status if line.startswith("Umask:"))
+    assert umask & 0o020, "the test needs a umask that keeps group write off what a plain create makes"
+
+
+@pytest.fixture
+def shared(tmp_path: Path) -> Path:
+    """``tmp_path`` set up to be shared: setgid, group-writable, closed to others."""
+    tmp_path.chmod(0o2775)
+    if not tmp_path.stat().st_mode & stat.S_ISGID:
+        pytest.skip("this filesystem does not keep the setgid bit for the test user")
+    return tmp_path
 
 
 def _map_and_dossier(tmp_path: Path) -> tuple[Path, Path]:
@@ -60,6 +84,21 @@ def test_a_request_writes_the_page_and_a_pending_state(tmp_path: Path) -> None:
     page = (directory / REVIEW_PAGE).read_text()
     assert "| `m-attn` | open | attention / decode |" in page
     assert f"review --session {session} approve" in page and "07-profile.md, README.md" in page
+
+
+def test_review_json_and_review_md_are_group_writable_so_another_account_can_decide(shared: Path) -> None:
+    map_file, dossier = _map_and_dossier(shared)
+    directory, session = shared / "session" / "MB-review", shared / "session"
+
+    request(directory, session, Reviewed(map_file, dossier, "dossier pass"), NOW)
+
+    assert _mode(directory) == 0o2775
+    assert _mode(directory / REVIEW_FILE) == 0o664
+    assert _mode(directory / REVIEW_PAGE) == 0o664
+
+    assert decide(directory, True, "alice", "looks right", NOW + 60) == []
+
+    assert _mode(directory / REVIEW_FILE) == 0o664
 
 
 async def _unslept(seconds: float) -> None:

@@ -15,7 +15,7 @@ attempts into the request's single result:
   and the quarantine already move it to another node. An infrastructure
   failure every sandbox repeats (:data:`UNRETRIED_INFRA_REASONS`) ends as ``measurement_failed`` at once, and its node
   is not reported; one it likely repeats (:data:`ONCE_RETRIED_INFRA_REASONS`: an aiter build past the watchdog, a
-  sandbox that failed before it ran) is retried once, and its node is not reported either. One that says nothing about
+  sandbox that failed before it ran, a merge smoke that could not run) is retried once, and its node is not reported either. One that says nothing about
   the node (:data:`NODE_BLAMELESS_INFRA_REASONS`: a runner that could not start, a runner lost, a Hub download refused
   for its rate limit) is retried like any other, and its node is not reported.
 * ``candidate`` failure (a known failure signature): ``candidate_failed`` at once.
@@ -60,6 +60,7 @@ from hyperloom.contracts.measurement import (
     Validity,
 )
 from hyperloom_multibranch.contracts.toolbox import WorkloadKind
+from hyperloom_multibranch.toolbox.merge_smoke import SMOKE_NOT_RUN
 
 log = logging.getLogger(__name__)
 
@@ -88,7 +89,9 @@ SANDBOX_CREATE_FAILED = "sandbox_create_failed"
 #: cache took the first build. A sandbox that failed before it ran most often failed on its template or on what the
 #: platform mounts into it, which the next sandbox meets the same way; one more sandbox (seconds, a new key) still
 #: separates that from a platform hiccup, where giving up at once would lose the test.
-ONCE_RETRIED_INFRA_REASONS: frozenset[str] = frozenset({JIT_BUILD_TIMEOUT, SANDBOX_CREATE_FAILED})
+#: A merge smoke that could not run (:data:`~.merge_smoke.SMOKE_NOT_RUN`: no interpreter, a child past its timeout) ran
+#: on this host, not on a node; one more try separates a host busy for a moment from one that cannot run it.
+ONCE_RETRIED_INFRA_REASONS: frozenset[str] = frozenset({JIT_BUILD_TIMEOUT, SANDBOX_CREATE_FAILED, SMOKE_NOT_RUN})
 #: The runner's ``error_class`` when it could not start (``hyperloom.measure.runner``).
 RUNNER_START_FAILED = "runner_start_failed"
 #: The hosted backend's ``error_class`` when it lost the sandbox (``hyperloom.measure.hosted.RUNNER_LOST``).

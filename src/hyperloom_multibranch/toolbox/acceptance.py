@@ -36,6 +36,7 @@ from hyperloom.measure.fake_gain import (
 from hyperloom.measure.surface import SurfaceViolation
 from hyperloom_multibranch.contracts.repo import ExperimentRepo
 from hyperloom_multibranch.contracts.toolbox import RequestRejected, WorkloadKind
+from hyperloom_multibranch.toolbox.agentx_checkpoint import CheckpointReferences
 from hyperloom_multibranch.toolbox.long_context import LongContextSetup, ServedLongContext, launch_served_context
 from hyperloom_multibranch.toolbox.long_context import decide as decide_long_context
 from hyperloom_multibranch.toolbox.short_prompts import (
@@ -257,6 +258,9 @@ class AcceptanceSetup:
     ``aiter_builds_missing`` says why this toolbox's tests cannot build the aiter modules a patch to aiter's ``csrc`` or
     ``hsa`` touches (its runners would refuse every attempt of such a test); with it such a candidate is refused at
     acceptance, naming the patched path. ``None`` (the default) accepts it.
+
+    ``checkpoint`` is an AgentX session's checkpoint (:mod:`.agentx_checkpoint`): the tests it judges carry it, with
+    their parent's reference. ``None`` (an InferenceX session's) judges none.
     """
 
     repo: ExperimentRepo
@@ -268,6 +272,7 @@ class AcceptanceSetup:
     long_context: LongContextSetup | ServedLongContext | None = None
     explore_accuracy: bool = True
     aiter_builds_missing: str | None = None
+    checkpoint: CheckpointReferences | None = None
 
 
 @dataclass(frozen=True)
@@ -301,6 +306,7 @@ class Acceptance:
         self._long_context = setup.long_context
         self._explore_accuracy = setup.explore_accuracy
         self._aiter_builds_missing = setup.aiter_builds_missing
+        self._checkpoint = setup.checkpoint
         self._root: tuple[str, LaunchConfig] | None = None
 
     def with_required_accuracy(self, request: TestRequest) -> TestRequest:
@@ -345,7 +351,16 @@ class Acceptance:
             _check_aiter_sources(planned, self._aiter_builds_missing)
         accepted = self._with_short_prompts(planned, recipe, candidate, request)
         setup = await self._long_context_setup(planned)
-        return Prepared(self._with_long_context(accepted, recipe, candidate, request, setup), digest)
+        accepted = self._with_long_context(accepted, recipe, candidate, request, setup)
+        return Prepared(await self._with_checkpoint(accepted, request), digest)
+
+    async def _with_checkpoint(self, accepted: object, request: TestRequest) -> object:
+        """``accepted`` with the AgentX checkpoint its measured round is held to, when it is judged and ``accepted`` can
+        carry it."""
+        if self._checkpoint is None or not isinstance(accepted, AcceptedMeasurement):
+            return accepted
+        plan = await self._checkpoint.plan(request)
+        return accepted if plan is None else replace(accepted, checkpoint=plan)
 
     def _with_short_prompts(self, accepted: object, parent: Recipe, candidate: Recipe, request: TestRequest) -> object:
         """``accepted`` with the consistency check this request runs, when it runs one and ``accepted`` can carry it: on the

@@ -44,8 +44,9 @@ from functools import lru_cache
 from pathlib import Path
 
 from hyperloom_common.bwrap import SYSTEM_ROOTS, BwrapPolicy, BwrapPolicyError, Scratch, interpreter_roots
+from hyperloom_common.credential_names import SENSITIVE_ENV_NAME_MARKERS
 
-from hyperloom.common.env_safety import SENSITIVE_ENV_NAME_MARKERS, is_secret_shaped_env_name
+from hyperloom.common.env_safety import is_secret_shaped_env_name
 
 __all__ = [
     "PRIVATE_PATHS",

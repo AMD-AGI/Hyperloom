@@ -489,6 +489,24 @@ def test_close_closes_every_measurement_sandbox_of_the_run_including_one_another
     pool.close()
 
 
+def test_close_closes_the_sandboxes_all_at_once() -> None:
+    provider = _Provider()
+    pool = _pool(provider)
+    strays = [provider.create("runner-1", role="measurement", timeout_sec=10, metadata=_THIS_RUN) for _ in range(3)]
+    # Each close ends only once every other one has begun: one after another, the first would wait for the rest in vain.
+    together = threading.Barrier(len(strays), timeout=10.0)
+    for stray in strays:
+        kill = stray.kill
+
+        def _kill(kill=kill) -> None:
+            together.wait()
+            kill()
+
+        stray.kill = _kill  # type: ignore[method-assign]
+    pool.close()
+    assert provider.live == {} and all(stray.killed == 1 for stray in strays)
+
+
 def test_a_pool_neither_counts_nor_closes_the_sandboxes_of_another_run_that_its_key_sees() -> None:
     provider = _Provider()
     other = provider.create("runner-1", role="measurement", timeout_sec=10, metadata={RUN_ID_KEY: "run-2"})

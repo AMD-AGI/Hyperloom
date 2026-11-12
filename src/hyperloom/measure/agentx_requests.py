@@ -15,11 +15,11 @@ decision and no threshold of ours. Each such request is classed by what the serv
   ``InvalidInferenceResultError``). It is ``empty`` when the server produced zero output tokens and ``short`` when it
   produced one or more.
 
-The client as released does not export an output token count for a request it counted failed. The runner patches the
-client it runs (``measure.runner.aiperf_patch``) so that the line of a reply it found nothing in carries the server's
-count as ``error_osl``: ``empty`` and ``short`` are told apart, exactly, when every no-content failure's line carries
-one. Otherwise they are not computed and the result says so (an export of a client the runner did not patch, or a reply
-that gave no count): a count that cannot be read is never written as zero.
+The client as released does not export an output token count for a request it counted failed. inference_suite's
+staging patches the client it stages so that the line of a reply it found nothing in carries the server's count as
+:data:`~inference_suite.ERROR_OSL_METRIC`: ``empty`` and ``short`` are told apart, exactly, when every no-content
+failure's line carries one. Otherwise they are not computed and the result says so (an export of an unpatched client,
+or a reply that gave no count): a count that cannot be read is never written as zero.
 """
 
 from __future__ import annotations
@@ -33,7 +33,6 @@ from typing import BinaryIO, NamedTuple
 from hyperloom.common.outside_facts import (
     AIPERF_ERROR_CLASS_KEY,
     AIPERF_ERROR_KEY,
-    AIPERF_ERROR_OUTPUT_LENGTH_METRIC,
     AIPERF_EXPORT_DIR,
     AIPERF_EXPORT_FILE,
     AIPERF_INVALID_REPLY_ERROR,
@@ -44,6 +43,7 @@ from hyperloom.common.outside_facts import (
 )
 from hyperloom.contracts.measurement import RequestClasses
 from hyperloom.measure.socket import RoundOutcome
+from inference_suite import ERROR_OSL_METRIC
 
 __all__ = ["export_files", "read_request_classes", "read_round_classes"]
 
@@ -106,7 +106,7 @@ def export_files(round_dir: Path) -> list[Path]:
 
 def _output_tokens(payload: Mapping[str, object]) -> int | None:
     metrics = payload.get(AIPERF_METRICS_KEY)
-    entry = metrics.get(AIPERF_ERROR_OUTPUT_LENGTH_METRIC) if isinstance(metrics, Mapping) else None
+    entry = metrics.get(ERROR_OSL_METRIC) if isinstance(metrics, Mapping) else None
     value = entry.get("value") if isinstance(entry, Mapping) else entry
     return value if isinstance(value, int) and not isinstance(value, bool) and value >= 0 else None
 

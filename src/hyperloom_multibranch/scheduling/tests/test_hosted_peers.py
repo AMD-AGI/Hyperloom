@@ -24,12 +24,14 @@ from types import SimpleNamespace
 
 import pytest
 
-from hyperloom.hosted.host_info import HostInfo, read_host_info
-from hyperloom.measure.runner.cache_build import RUNNER_TARGET_ENV, CacheBuildError, runner_wheel_target
+from hyperloom.hosted.host_info import GrantLimits, HostInfo, read_host_info
+from hyperloom.measure.runner import cache_build
+from hyperloom.measure.runner.cache_build import RUNNER_TARGET_ENV, CacheBuildError, CacheEntry, runner_wheel_target
 import hyperloom_multibranch
 from hyperloom_common.tests.shared_accounts import Accounts, other_accounts
 from hyperloom.measure.runner.cache_layout import manifest_from_json
-from hyperloom.measure.runner.cache_layout import MANIFEST_NAME
+from hyperloom.measure.runner.cache_layout import MANIFEST_NAME, SOURCE_DIR
+from hyperloom.measure.runner.suite_publish import SuitePublishError
 from hyperloom.measure.runner.tests.bootstrap_rig import Rig, make_rig
 from hyperloom.measure.sandboxes import Handover
 from hyperloom_multibranch.scheduling import hosted_peers
@@ -40,6 +42,7 @@ from hyperloom_multibranch.scheduling.hosted_peers import (
     runner_cache_pin,
     runner_source,
 )
+from hyperloom_multibranch.scheduling.budget import MB_CLOSE_GRACE_CAP_SECONDS
 from hyperloom_multibranch.scheduling.layout import SessionLayout
 from hyperloom_multibranch.scheduling.peers import PeerSetup, PeersUnavailable
 from hyperloom_multibranch.scheduling.settings import InferenceXShape, KernelOptimizer, RunSettings, Workload
@@ -96,6 +99,55 @@ def test_the_runner_cache_is_built_readable_by_the_sandbox_and_pinned_by_its_man
     assert unreadable == [], "the sandbox reads the cache as another account"
     assert _umask() == PRIVATE, "the entry's own umask is back once the cache is built"
     assert runner_cache_pin(rig.repo, rig.cache.sha, cache, TARGET) == pin, "a second run of the commit uses the entry"
+
+
+class _FakeEntry:
+    """``ensure_runner_cache`` finding the commit's entry built, and the staging publish it is followed by."""
+
+    def __init__(self, cache: Path, refusal: str = "") -> None:
+        self.entry = CacheEntry(cache / ("a" * 40), "b" * 64, reused=True)
+        self.refusal = refusal
+        self.published: list[tuple[Path, Path, int]] = []
+
+    def ensure(self, repo: Path, sha: str, cache_root: Path, options: object) -> CacheEntry:
+        return self.entry
+
+    def publish(self, source: Path, cache_root: Path) -> Path:
+        if self.refusal:
+            raise SuitePublishError(self.refusal)
+        self.published.append((source, cache_root, _umask()))
+        return cache_root / "inference-suite" / "k"
+
+
+@pytest.mark.usefixtures("private_umask")
+def test_the_pin_publishes_the_staging_of_the_entrys_own_source_readable_by_the_sandbox(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    fake = _FakeEntry(tmp_path / "runner-cache")
+    monkeypatch.setattr(cache_build, "ensure_runner_cache", fake.ensure)
+    monkeypatch.setattr(cache_build, "publish_inference_suite", fake.publish)
+
+    pin = runner_cache_pin(tmp_path / "clone", "a" * 40, tmp_path / "runner-cache", TARGET)
+
+    assert pin == "b" * 64
+    assert fake.published == [
+        (fake.entry.path / SOURCE_DIR, tmp_path / "runner-cache", hosted_peers.RUNNER_CACHE_UMASK)
+    ]
+    assert _umask() == PRIVATE
+
+
+@pytest.mark.usefixtures("private_umask")
+def test_a_staging_that_cannot_be_published_fails_the_run_as_a_cache_build_error(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    fake = _FakeEntry(tmp_path / "runner-cache", refusal="exited 2: staging_missing: offline")
+    monkeypatch.setattr(cache_build, "ensure_runner_cache", fake.ensure)
+    monkeypatch.setattr(cache_build, "publish_inference_suite", fake.publish)
+
+    with pytest.raises(CacheBuildError, match="staging_missing: offline"):
+        runner_cache_pin(tmp_path / "clone", "a" * 40, tmp_path / "runner-cache", TARGET)
+
+    assert _umask() == PRIVATE
 
 
 @pytest.mark.usefixtures("private_umask")
@@ -227,6 +279,22 @@ def test_every_runner_sandbox_is_pinned_to_the_runner_cache_built_from_the_sessi
     assert manifest_from_json((entry / MANIFEST_NAME).read_bytes()).target == TARGET.manifest_form(), (
         "the wheels are for the runner's interpreter the host names, not the application's"
     )
+
+
+@pytest.mark.usefixtures("wheelhouse_index")
+def test_the_toolbox_is_told_when_the_grant_needs_its_tests_ended(
+    rig: Rig, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv(RUNNER_TARGET_ENV, RUNNER_TAG)
+    layout = SessionLayout(tmp_path / "MB-session")
+    layout.root.mkdir()
+    host = _host(tmp_path, rig.repo, rig.cache.sha)
+    granted = dataclasses.replace(host, grant_limits=GrantLimits(4, 8, 100.0, 7200))
+
+    inputs = PinnedToolboxInputs(granted, tmp_path / "runner-cache")(layout, 2)
+
+    assert inputs.tests_end_by == host.run_created_at.timestamp() + 7200 - MB_CLOSE_GRACE_CAP_SECONDS
+    assert PinnedToolboxInputs(host, tmp_path / "runner-cache")(layout, 2).tests_end_by is None, "no grant runtime"
 
 
 @pytest.mark.usefixtures("wheelhouse_index")

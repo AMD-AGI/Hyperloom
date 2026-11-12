@@ -29,6 +29,7 @@ from hyperloom.measure.failures import (
     JIT_BUILD_TIMEOUT,
     PROFILER_SNAPSHOT_FAILED,
     TEST_TIMEOUT_REASON,
+    FailureEvidence,
     classify_test_failure,
 )
 from hyperloom.measure.runner.import_outcome import INERT_PATCH
@@ -201,7 +202,7 @@ async def test_another_infrastructure_failure_is_still_retried_on_other_nodes(re
 async def test_a_dataset_cache_lock_the_sandbox_may_not_take_is_not_retried_and_not_held_against_the_node() -> None:
     lock = "/x/hf/datasets/_x_hf_datasets_openai___gsm8k_main_0.0.0_e53f048.lock"
     log = f"PermissionError: [Errno 13] Permission denied: '{lock}'"
-    reason = classify_test_failure(returncode=1, logs=[log]).failure_reason
+    reason = classify_test_failure(returncode=1, evidence=FailureEvidence(logs=(log,))).failure_reason
     assert reason is not None and reason.startswith(f"{HF_CACHE_PERMISSION}: ")
     result, executor, reported = await _run(reason)
     assert len(executor.jobs) == 1 and len(result.attempts) == 1, "every sandbox shares the cache and is refused alike"
@@ -338,7 +339,7 @@ class _ClassifyingExecutor(_ScriptedExecutor):
 
     async def run(self, job: TestJob) -> TestResult:
         self.jobs.append(job)
-        verdict = classify_test_failure(returncode=1, logs=(self.log,))
+        verdict = classify_test_failure(returncode=1, evidence=FailureEvidence(logs=(self.log,)))
         infra = verdict.failure_class is FailureClass.INFRA
         return TestResult(
             request_id="r1",

@@ -2,6 +2,7 @@
 # SPDX-License-Identifier: MIT
 
 import asyncio
+import logging
 import os
 import shlex
 import subprocess
@@ -15,10 +16,16 @@ from pathlib import Path
 
 import pytest
 
+from hyperloom.common import agent_isolation
+from hyperloom.common.agent_isolation import BwrapIsolation, IsolationRefused, NoIsolation
+from hyperloom_common.bwrap import BwrapProbe
+from hyperloom_multibranch.specialist import agent_sandbox
 from hyperloom_multibranch.specialist.agent_sandbox import (
     TIMED_OUT,
     FrameworkProtection,
     LocalAgentSandbox,
+    SandboxPaths,
+    confined_env,
     mount_namespaces,
     read_only_argv,
 )
@@ -404,11 +411,12 @@ def test_pgrep_does_not_find_itself_so_a_wait_for_a_process_to_end_ends(tmp_path
 #: Leaves the caller's tree by a double fork and setsid() and drops the sandbox's marker with its environment, as
 #: `env -i` or a daemonizing server does; appends its pid to argv[1] and sleeps.
 ESCAPE = """
-import os, sys
+import os, sys, time
 if os.fork():
     os._exit(0)
 os.setsid()
 if os.fork():
+    time.sleep(0.5)
     os._exit(0)
 with open(sys.argv[1], "a") as pids:
     pids.write(f"{os.getpid()}\\n")
@@ -430,6 +438,10 @@ def _end(pids: Path) -> None:
             continue
 
 
+def _parent(pid: int) -> int:
+    return int(Path(f"/proc/{pid}/stat").read_text().rsplit(")", 1)[1].split()[1])
+
+
 def test_kill_ends_an_unmarked_grandchild_that_double_forked_and_left_the_session(tmp_path: Path) -> None:
     escape, pids = _escape(tmp_path)
 
@@ -438,7 +450,9 @@ def test_kill_ends_an_unmarked_grandchild_that_double_forked_and_left_the_sessio
         await _until(lambda: pids.exists() and pids.read_text().strip())
         escaped = int(pids.read_text())
         await _until(lambda: f"{MARKER}=".encode() not in Path(f"/proc/{escaped}/environ").read_bytes())
-        parent = int(Path(f"/proc/{escaped}/stat").read_text().rsplit(")", 1)[1].split()[1])
+        # The grandchild is reparented only once the process that forked it has exited, which ESCAPE delays.
+        await _until(lambda: _parent(escaped) == process.popen.pid)
+        parent = _parent(escaped)
         await process.kill()
         return escaped, parent, process.popen.pid
 
@@ -526,3 +540,131 @@ def test_a_read_only_framework_cannot_be_written_from_the_sandbox_and_stays_writ
     assert "Read-only file system" in done.output
     assert not (framework / "edited").exists() and (tmp_path / "beside").exists()
     (framework / "outside").touch()
+
+
+# ---- a sandbox under bubblewrap, without launching it ----------------------------------------------------------------
+
+#: A bubblewrap whose probe passed: building a sandbox's policy runs nothing.
+PROBED = BwrapProbe("/usr/bin/bwrap", (0, 13, 1), ())
+
+
+def _confined(tmp_path: Path, probe: BwrapProbe = PROBED, **paths: object) -> LocalAgentSandbox:
+    return LocalAgentSandbox(
+        cards=(4, 5),
+        python_path=(tmp_path / "worktree" / "python",),
+        root=tmp_path / "sandbox",
+        base_env={**BASE, "GH_TOKEN": "app-secret", "SGLANG_USE_AITER": "1", "LC_ALL": "C.UTF-8"},
+        isolation=BwrapIsolation(probe),
+        paths=SandboxPaths(**paths),  # type: ignore[arg-type]
+        forwarded={"ANTHROPIC_BASE_URL": "http://gateway"},
+    )
+
+
+def test_a_confined_sandbox_s_commands_start_from_its_own_environment_and_tmp(tmp_path: Path) -> None:
+    sandbox = _confined(tmp_path)
+    home = tmp_path / "sandbox" / "home"
+    try:
+        env = sandbox.env({"PATH": f"/agent/bin{os.pathsep}{BASE['PATH']}", "FOO": "bar"})
+    finally:
+        asyncio.run(sandbox.stop())
+
+    assert "GH_TOKEN" not in env and env["SGLANG_USE_AITER"] == "1" and env["LC_ALL"] == "C.UTF-8"
+    assert env["ANTHROPIC_BASE_URL"] == "http://gateway" and env["FOO"] == "bar"
+    assert (env["HOME"], env["CLAUDE_CONFIG_DIR"]) == (str(home), str(home / ".claude"))
+    assert env["TMPDIR"] == "/tmp" and sandbox.tmp == Path("/tmp") and sandbox.cache_root == Path("/tmp/cache")
+    assert env["PATH"].split(os.pathsep)[:2] == [str(tmp_path / "sandbox" / "bin"), "/agent/bin"]
+    assert not [entry for entry in env["PATH"].split(os.pathsep) if entry.startswith(str(home))], "a home's bin"
+    assert env["ROCR_VISIBLE_DEVICES"] == "4,5" and env["HIP_VISIBLE_DEVICES"] == "0,1"
+    assert (home / ".claude").is_dir()
+    assert sandbox.frameworks == FrameworkProtection(), "no mount namespace is asked for inside bubblewrap"
+
+
+def test_confined_env_keeps_what_a_command_needs_and_nothing_else_of_the_app_s(tmp_path: Path) -> None:
+    hub = tmp_path / "app" / ".cache" / "huggingface" / "hub"
+    hub.mkdir(parents=True)
+    environ = {
+        "PATH": "/usr/bin",
+        "PYTHONPATH": "/sgl-workspace/sglang/python",
+        "LANG": "C.UTF-8",
+        "LC_CTYPE": "C",
+        "MODEL_PATH": "/models/m",
+        "HOME": str(tmp_path / "app"),
+        "HIP_FORCE_DEV_KERNARG": "1",
+        "LD_LIBRARY_PATH": "/opt/rocm/lib",
+        "TRITON_CACHE_DIR": "/root/.triton/cache",
+        "GH_TOKEN": "secret",
+        "AWS_SECRET_ACCESS_KEY": "secret",
+        "KUBECONFIG": "/root/.kube/config",
+        "CLAUDE_CONFIG_DIR": "/root/.claude",
+    }
+    home = tmp_path / "home"
+
+    env = confined_env(environ, home, {"CLAUDE_CODE_OAUTH_TOKEN": "forwarded"})
+
+    assert env == {
+        "PATH": "/usr/bin",
+        "PYTHONPATH": "/sgl-workspace/sglang/python",
+        "LANG": "C.UTF-8",
+        "LC_CTYPE": "C",
+        "MODEL_PATH": "/models/m",
+        "HIP_FORCE_DEV_KERNARG": "1",
+        "LD_LIBRARY_PATH": "/opt/rocm/lib",
+        "CLAUDE_CODE_OAUTH_TOKEN": "forwarded",
+        "HF_HUB_CACHE": str(hub),
+        "HOME": str(home),
+        "CLAUDE_CONFIG_DIR": str(home / ".claude"),
+        "XDG_CACHE_HOME": str(home / ".cache"),
+        "PYTHONUSERBASE": str(home / ".local"),
+        "PIP_TARGET": str(home / "site-packages"),
+        "TRITON_CACHE_DIR": str(home / ".triton" / "cache"),
+        "IS_SANDBOX": "1",
+    }
+    assert "HF_HUB_CACHE" not in confined_env({**environ, "HF_HOME": "/hf"}, home, {}), "an HF location is kept"
+
+
+def test_a_sandbox_whose_paths_bubblewrap_cannot_bind_safely_runs_as_before_and_says_so(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    agent = tmp_path / "agent"
+    (agent / "tree").mkdir(parents=True)
+    # A readable path reached through a tree the agent writes: where it points is the agent's choice.
+    (tmp_path / "into-agent").symlink_to(agent)
+    with caplog.at_level(logging.WARNING, logger=agent_sandbox.__name__):
+        sandbox = _confined(tmp_path, writable=(agent,), readable=(tmp_path / "into-agent" / "tree",))
+
+    assert isinstance(sandbox.isolation, NoIsolation)
+    assert "is reached through a tree the agent writes" in sandbox.isolation.why
+    assert "runs unconfined, as before" in caplog.text and str(tmp_path / "sandbox") in caplog.text
+    env = sandbox.env({})
+    assert env["GH_TOKEN"] == "app-secret" and env["HOME"] == "/home/agent", "an unconfined sandbox runs as before"
+    assert Path(env["TMPDIR"]).parent == Path(tempfile.gettempdir())
+    assert not list(Path(tempfile.gettempdir()).glob("hl-agent-*")), "the refused sandbox's scratch is removed"
+
+
+def test_a_hosted_run_refuses_a_sandbox_whose_paths_bubblewrap_cannot_bind_safely(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(agent_isolation._STATE, "hosted", True)
+    monkeypatch.setattr(agent_isolation._STATE, "layer_bwrap", PROBED.path)
+    agent = tmp_path / "agent"
+    (agent / "tree").mkdir(parents=True)
+    (tmp_path / "into-agent").symlink_to(agent)
+
+    with pytest.raises(IsolationRefused, match="is reached through a tree the agent writes"):
+        _confined(tmp_path, writable=(agent,), readable=(tmp_path / "into-agent" / "tree",))
+    assert not list(Path(tempfile.gettempdir()).glob("hl-agent-*"))
+
+
+def test_an_older_bubblewrap_refuses_a_bind_below_the_sandbox_s_shared_tmp(tmp_path: Path) -> None:
+    if not str(tmp_path).startswith("/tmp/"):
+        pytest.skip(f"the test's directory {tmp_path} is not below /tmp")
+    older = replace(PROBED, version=(0, 11, 1))
+
+    refused = _confined(tmp_path, probe=older, writable=(tmp_path / "agent",))
+    accepted = _confined(tmp_path / "newer", writable=(tmp_path / "newer" / "agent",))
+    try:
+        assert isinstance(refused.isolation, NoIsolation)
+        assert "would be mounted below the agent-writable /tmp" in refused.isolation.why
+        assert isinstance(accepted.isolation, BwrapIsolation)
+    finally:
+        asyncio.run(accepted.stop())
