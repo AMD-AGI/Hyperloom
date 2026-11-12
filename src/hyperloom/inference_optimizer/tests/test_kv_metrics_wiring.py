@@ -10,17 +10,13 @@ from __future__ import annotations
 
 import json
 import math
-from pathlib import Path
 
 import pytest
 
 from hyperloom.orchestrator.actions.executors import _subprocess_kill as sk
+from inference_suite.contracts.layout import KV_METRICS
 from inference_suite.telemetry.kv_poll import KvSample
-from inference_suite.telemetry.kv_record import (
-    KV_ARTIFACT_NAME,
-    KvMetricsRecorder,
-    counter_delta,
-)
+from inference_suite.telemetry.kv_record import KvMetricsRecorder, counter_delta
 
 
 class _StubPoller:
@@ -48,7 +44,7 @@ def _sample(**kwargs) -> KvSample:
 # --------------------------------------------------------------------------
 def test_rows_are_tagged_with_the_phase_they_were_taken_in(tmp_path):
     poller = _StubPoller([_sample() for _ in range(6)])
-    rec = KvMetricsRecorder(output_path=tmp_path / KV_ARTIFACT_NAME, poller=poller, min_interval_sec=0.0)
+    rec = KvMetricsRecorder(output_path=tmp_path / KV_METRICS, poller=poller, min_interval_sec=0.0)
 
     rec.tick(0.0)
     rec.note_phase("warmup", 1.0)  # boundary reading closes boot
@@ -63,7 +59,7 @@ def test_a_boundary_reading_closes_one_phase_and_opens_the_next(tmp_path):
     """Deriving a phase total from its own first and last periodic samples
     leaves up to a full interval at each end credited to neither phase."""
     poller = _StubPoller([_sample(retract_total=_grouped(a=v)) for v in (7.0, 7.0, 9.0)])
-    rec = KvMetricsRecorder(output_path=tmp_path / KV_ARTIFACT_NAME, poller=poller, min_interval_sec=0.0)
+    rec = KvMetricsRecorder(output_path=tmp_path / KV_METRICS, poller=poller, min_interval_sec=0.0)
     rec.tick(0.0)
 
     rec.note_phase("measured", 1.0)
@@ -78,7 +74,7 @@ def test_every_row_carries_gauges_and_raw_counters(tmp_path):
     burst and a steady trickle produce the same total, and a mid-phase engine
     restart is invisible without the series."""
     poller = _StubPoller([_sample(capacity_tokens=32768.0, retract_total=_grouped(a=48.0))])
-    rec = KvMetricsRecorder(output_path=tmp_path / KV_ARTIFACT_NAME, poller=poller, min_interval_sec=0.0)
+    rec = KvMetricsRecorder(output_path=tmp_path / KV_METRICS, poller=poller, min_interval_sec=0.0)
     rec.tick(0.0)
 
     row = rec.rows()[0]
@@ -91,7 +87,7 @@ def test_scrape_interval_is_enforced_on_the_monotonic_clock(tmp_path):
     """The loop's slice shrinks below its nominal period near a deadline, so
     counting passes would sample fastest exactly when the run is most loaded."""
     poller = _StubPoller([_sample() for _ in range(5)])
-    rec = KvMetricsRecorder(output_path=tmp_path / KV_ARTIFACT_NAME, poller=poller, min_interval_sec=0.5)
+    rec = KvMetricsRecorder(output_path=tmp_path / KV_METRICS, poller=poller, min_interval_sec=0.5)
 
     rec.tick(0.0)
     rec.tick(0.1)
@@ -102,9 +98,7 @@ def test_scrape_interval_is_enforced_on_the_monotonic_clock(tmp_path):
 
 
 def test_unknown_phase_is_ignored_rather_than_raising(tmp_path):
-    rec = KvMetricsRecorder(
-        output_path=tmp_path / KV_ARTIFACT_NAME, poller=_StubPoller([_sample()]), min_interval_sec=0.0
-    )
+    rec = KvMetricsRecorder(output_path=tmp_path / KV_METRICS, poller=_StubPoller([_sample()]), min_interval_sec=0.0)
     rec.note_phase("nonsense", 1.0)
     rec.tick(2.0)
     assert rec.rows()[0]["phase"] == "boot"
@@ -115,7 +109,7 @@ def test_capacity_is_latched_from_the_first_reading_that_has_it(tmp_path):
     """Capacity is only observable while the engine is up; a round that ends
     with the server gone must still carry it."""
     poller = _StubPoller([_sample(capacity_tokens=32768.0, capacity_gb=180.0), _sample()])
-    rec = KvMetricsRecorder(output_path=tmp_path / KV_ARTIFACT_NAME, poller=poller, min_interval_sec=0.0)
+    rec = KvMetricsRecorder(output_path=tmp_path / KV_METRICS, poller=poller, min_interval_sec=0.0)
     rec.note_phase("measured", 0.0)
     rec.tick(0.0)
     rec.tick(1.0)
@@ -158,7 +152,7 @@ def test_counter_deltas_are_attributed_to_the_phase_that_earned_them(tmp_path):
     # 10; each closes one phase and opens the next, so the windows meet.
     reads = (0.0, 2.0, 5.0, 5.0, 6.0, 7.0, 7.0, 9.0, 10.0, 10.0)
     poller = _StubPoller([_sample(retract_total=_grouped(a=v)) for v in reads])
-    rec = KvMetricsRecorder(output_path=tmp_path / KV_ARTIFACT_NAME, poller=poller, min_interval_sec=0.0)
+    rec = KvMetricsRecorder(output_path=tmp_path / KV_METRICS, poller=poller, min_interval_sec=0.0)
 
     rec.note_phase("warmup", 0.0)
     rec.tick(1.0)
@@ -180,7 +174,7 @@ def test_counter_deltas_are_attributed_to_the_phase_that_earned_them(tmp_path):
 def test_measured_delta_is_none_when_no_sample_landed_there(tmp_path):
     """Not an increment of zero: nothing was ever measured."""
     poller = _StubPoller([_sample(retract_total=_grouped(a=5.0))])
-    rec = KvMetricsRecorder(output_path=tmp_path / KV_ARTIFACT_NAME, poller=poller, min_interval_sec=0.0)
+    rec = KvMetricsRecorder(output_path=tmp_path / KV_METRICS, poller=poller, min_interval_sec=0.0)
     rec.note_phase("warmup", 0.0)
     rec.tick(0.0)
 
@@ -199,7 +193,7 @@ def test_rows_and_summary_use_the_same_counter_rule(tmp_path):
     on the page says which number was computed which way."""
     shards = {"": {f'tp_rank="{i}"': 48.0 for i in range(8)}}
     poller = _StubPoller([_sample(retract_total=shards)])
-    rec = KvMetricsRecorder(output_path=tmp_path / KV_ARTIFACT_NAME, poller=poller, min_interval_sec=0.0)
+    rec = KvMetricsRecorder(output_path=tmp_path / KV_METRICS, poller=poller, min_interval_sec=0.0)
     rec.tick(0.0)
 
     assert rec.rows()[0]["retract_total"] == 48.0
@@ -208,7 +202,7 @@ def test_rows_and_summary_use_the_same_counter_rule(tmp_path):
 def test_downsampling_respects_the_cap(tmp_path):
     """Integer division gave a stride of 1 for anything under twice the cap, so
     5001 rows downsampled to 5001."""
-    rec = KvMetricsRecorder(output_path=tmp_path / KV_ARTIFACT_NAME, poller=_StubPoller([]))
+    rec = KvMetricsRecorder(output_path=tmp_path / KV_METRICS, poller=_StubPoller([]))
     rec._rows = [{"i": i} for i in range(5001)]
 
     assert len(rec.rows()) <= 5000
@@ -226,7 +220,7 @@ def test_prefix_cache_counters_are_bracketed_not_snapshotted(tmp_path):
             _sample(prefix_cache_queries=_grouped(a=1400.0), prefix_cache_hits=_grouped(a=1100.0)),
         ]
     )
-    rec = KvMetricsRecorder(output_path=tmp_path / KV_ARTIFACT_NAME, poller=poller, min_interval_sec=0.0)
+    rec = KvMetricsRecorder(output_path=tmp_path / KV_METRICS, poller=poller, min_interval_sec=0.0)
     rec.note_phase("measured", 0.0)
     rec.tick(0.0)
     rec.tick(1.0)
@@ -244,7 +238,7 @@ def test_prefix_cache_counters_add_across_independent_engines(tmp_path):
     first = {'engine="0"': {'engine="0"': 0.0}, 'engine="1"': {'engine="1"': 0.0}}
     last = {'engine="0"': {'engine="0"': 200.0}, 'engine="1"': {'engine="1"': 200.0}}
     poller = _StubPoller([_sample(prefix_cache_queries=first), _sample(prefix_cache_queries=last)])
-    rec = KvMetricsRecorder(output_path=tmp_path / KV_ARTIFACT_NAME, poller=poller, min_interval_sec=0.0)
+    rec = KvMetricsRecorder(output_path=tmp_path / KV_METRICS, poller=poller, min_interval_sec=0.0)
     rec.note_phase("measured", 0.0)
     rec.tick(0.0)
     rec.tick(1.0)
@@ -256,7 +250,7 @@ def test_prefix_cache_restart_credits_only_the_post_restart_count(tmp_path):
     poller = _StubPoller(
         [_sample(cached_tokens_total=_grouped(a=900.0)), _sample(cached_tokens_total=_grouped(a=12.0))]
     )
-    rec = KvMetricsRecorder(output_path=tmp_path / KV_ARTIFACT_NAME, poller=poller, min_interval_sec=0.0)
+    rec = KvMetricsRecorder(output_path=tmp_path / KV_METRICS, poller=poller, min_interval_sec=0.0)
     rec.note_phase("measured", 0.0)
     rec.tick(0.0)
     rec.tick(1.0)
@@ -266,7 +260,7 @@ def test_prefix_cache_restart_credits_only_the_post_restart_count(tmp_path):
 
 def test_capacity_provenance_and_series_count_reach_the_artifact(tmp_path):
     poller = _StubPoller([_sample(capacity_tokens=32768.0, capacity_derived=True, series_count=8)])
-    rec = KvMetricsRecorder(output_path=tmp_path / KV_ARTIFACT_NAME, poller=poller, min_interval_sec=0.0)
+    rec = KvMetricsRecorder(output_path=tmp_path / KV_METRICS, poller=poller, min_interval_sec=0.0)
     rec.tick(0.0)
 
     summary = rec.summary()
@@ -276,17 +270,15 @@ def test_capacity_provenance_and_series_count_reach_the_artifact(tmp_path):
 
 def test_summary_availability_is_tristate(tmp_path):
     """Never reached is not the same as reached and found quiet."""
-    unknown = KvMetricsRecorder(
-        output_path=tmp_path / KV_ARTIFACT_NAME, poller=_StubPoller([], available=None)
-    ).summary()
+    unknown = KvMetricsRecorder(output_path=tmp_path / KV_METRICS, poller=_StubPoller([], available=None)).summary()
     assert unknown["available"] is None
 
-    off = KvMetricsRecorder(output_path=tmp_path / KV_ARTIFACT_NAME, poller=_StubPoller([], available=False)).summary()
+    off = KvMetricsRecorder(output_path=tmp_path / KV_METRICS, poller=_StubPoller([], available=False)).summary()
     assert off["available"] is False
 
 
 def test_close_writes_the_artifact_and_is_idempotent(tmp_path):
-    out = tmp_path / KV_ARTIFACT_NAME
+    out = tmp_path / KV_METRICS
     poller = _StubPoller([_sample(retract_total={"": {"": 48.0}})])
     rec = KvMetricsRecorder(poller=poller, min_interval_sec=0.0, output_path=out)
     rec.tick(0.0)
@@ -302,7 +294,7 @@ def test_close_writes_the_artifact_and_is_idempotent(tmp_path):
 
 
 def test_close_never_raises_on_an_unwritable_path(tmp_path):
-    rec = KvMetricsRecorder(poller=_StubPoller([]), output_path=tmp_path / "nope" / "x" / KV_ARTIFACT_NAME)
+    rec = KvMetricsRecorder(poller=_StubPoller([]), output_path=tmp_path / "nope" / "x" / KV_METRICS)
     # Parent dirs are created by the writer; make that impossible instead.
     (tmp_path / "nope").write_text("not a directory", encoding="utf-8")
 
@@ -397,10 +389,6 @@ def test_a_failing_judge_fails_the_round():
         _watch(_DoneProc(), sk.RoundWatch(timeout=5, checkpoint=_Checkpoint(_Exploding())))
 
 
-def test_artifact_name_is_stable():
-    assert Path(KV_ARTIFACT_NAME).suffix == ".json"
-
-
 def test_artifact_is_in_the_package_globs():
     """It lives in the round workspace, which the bundle does not otherwise reach."""
     from hyperloom.inference_optimizer.breakdown.session_package import PACKAGE_GLOBS
@@ -423,7 +411,7 @@ def test_a_round_that_nobody_reached_is_still_unavailable(tmp_path):
         def sample(self):
             return None
 
-    rec = KvMetricsRecorder(poller=_GaveUp(), min_interval_sec=0, output_path=tmp_path / KV_ARTIFACT_NAME)
+    rec = KvMetricsRecorder(poller=_GaveUp(), min_interval_sec=0, output_path=tmp_path / KV_METRICS)
     rec.tick(1.0)
     payload = rec.summary()
 
@@ -536,7 +524,7 @@ def test_aiperf_aggregate_json_timeslices_are_adopted(tmp_path):
     payload = KvMetricsRecorder(
         poller=_StubPoller([]),
         min_interval_sec=0,
-        output_path=tmp_path / KV_ARTIFACT_NAME,
+        output_path=tmp_path / KV_METRICS,
     ).summary()
     assert payload["aiperf_server_metrics_path"] == str(path)
     assert payload["prefix_cache"]["prefix_cache_hits_delta_by_phase"] == {
@@ -551,7 +539,7 @@ def test_a_round_without_an_aiperf_export_keeps_the_watchdog_rows(tmp_path):
     rec = KvMetricsRecorder(
         poller=_StubPoller([_sample(active_pool_usage=0.42)]),
         min_interval_sec=0,
-        output_path=tmp_path / KV_ARTIFACT_NAME,
+        output_path=tmp_path / KV_METRICS,
     )
     rec.tick(1.0)
     payload = rec.summary()
@@ -658,9 +646,7 @@ def _now() -> float:
 def test_rows_carry_scrape_start_and_end_not_just_a_duration(tmp_path):
     """A gauge read across a 300ms window describes some instant inside it, and
     a single stamp would invite an alignment precision nobody measured."""
-    rec = KvMetricsRecorder(
-        output_path=tmp_path / KV_ARTIFACT_NAME, poller=_StubPoller([_sample()]), min_interval_sec=0
-    )
+    rec = KvMetricsRecorder(output_path=tmp_path / KV_METRICS, poller=_StubPoller([_sample()]), min_interval_sec=0)
     rec.tick(1.0)
     row = rec.summary()["samples"][0]
 
@@ -681,9 +667,7 @@ def test_the_stored_scrape_window_contains_the_real_one(tmp_path):
     import time
 
     before = time.time()
-    rec = KvMetricsRecorder(
-        output_path=tmp_path / KV_ARTIFACT_NAME, poller=_StubPoller([_sample()]), min_interval_sec=0
-    )
+    rec = KvMetricsRecorder(output_path=tmp_path / KV_METRICS, poller=_StubPoller([_sample()]), min_interval_sec=0)
     rec.tick(1.0)
     row = rec.summary()["samples"][0]
 
@@ -776,7 +760,7 @@ def test_recorder_writes_the_workload_timeline_beside_the_kv_artifact(tmp_path):
     rec = KvMetricsRecorder(
         poller=_StubPoller([_sample(ts=now + 5)]),
         min_interval_sec=0,
-        output_path=tmp_path / KV_ARTIFACT_NAME,
+        output_path=tmp_path / KV_METRICS,
     )
     rec.tick(1.0)
     payload = rec.close()
@@ -802,7 +786,7 @@ def test_a_round_without_an_aiperf_export_reports_no_timeline(tmp_path):
     rec = KvMetricsRecorder(
         poller=_StubPoller([_sample()]),
         min_interval_sec=0,
-        output_path=tmp_path / KV_ARTIFACT_NAME,
+        output_path=tmp_path / KV_METRICS,
     )
     rec.tick(1.0)
     payload = rec.close()
@@ -817,7 +801,7 @@ class _RaisingPoller(_StubPoller):
 
 
 def test_a_failing_poller_sample_propagates_from_the_scrape(tmp_path):
-    rec = KvMetricsRecorder(output_path=tmp_path / KV_ARTIFACT_NAME, poller=_RaisingPoller([]), min_interval_sec=0.0)
+    rec = KvMetricsRecorder(output_path=tmp_path / KV_METRICS, poller=_RaisingPoller([]), min_interval_sec=0.0)
 
     with pytest.raises(RuntimeError, match="sample bug"):
         rec.tick(0.0)
@@ -833,7 +817,7 @@ def test_a_failing_aiperf_read_propagates_from_the_summary(tmp_path, monkeypatch
 
     monkeypatch.setattr(kv, "server_metrics_exports", lambda _workspace: [tmp_path / "export.json"])
     monkeypatch.setattr(kv, "read_aiperf_server_metrics", _boom)
-    rec = KvMetricsRecorder(poller=_StubPoller([]), min_interval_sec=0.0, output_path=tmp_path / KV_ARTIFACT_NAME)
+    rec = KvMetricsRecorder(poller=_StubPoller([]), min_interval_sec=0.0, output_path=tmp_path / KV_METRICS)
 
     with pytest.raises(RuntimeError, match="aiperf read bug"):
         rec.summary()
@@ -846,7 +830,7 @@ def test_a_failing_timeline_build_propagates_from_the_summary(tmp_path, monkeypa
         raise RuntimeError("timeline bug")
 
     monkeypatch.setattr(kv, "find_profile_export", _boom)
-    rec = KvMetricsRecorder(poller=_StubPoller([]), min_interval_sec=0.0, output_path=tmp_path / KV_ARTIFACT_NAME)
+    rec = KvMetricsRecorder(poller=_StubPoller([]), min_interval_sec=0.0, output_path=tmp_path / KV_METRICS)
 
     with pytest.raises(RuntimeError, match="timeline bug"):
         rec.summary()

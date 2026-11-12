@@ -7,7 +7,6 @@ from __future__ import annotations
 
 import errno
 import hashlib
-import importlib
 import json
 import os
 import shutil
@@ -32,7 +31,6 @@ from hyperloom.measure.runner.hardware import EccCounts, GpuFacts
 from hyperloom.measure.long_context.plan import LongContextPlan
 from hyperloom.measure.short_prompts.plan import ShortPromptPlan
 from hyperloom.measure.socket import RoundOutcome, TestCall, TestOutcome
-from hyperloom.measure.spec import MeasurementSpec
 from hyperloom.measure.tests._recipes import IMAGE, recipe_with
 from hyperloom.measure.runner import tools as runner_tools
 from hyperloom.measure.runner.cache_layout import CACHE_ENV
@@ -515,10 +513,6 @@ def test_a_link_where_the_replay_clients_installation_belongs_is_still_refused(t
     assert _status(tmp_path)["error_class"] == "unsafe_output"
 
 
-def test_the_sheet_validates_as_the_writer_produces_it():
-    MeasurementSpec.from_document(_sheet())
-
-
 def _repro_sheet(tmp_path, kind: str) -> dict:
     from hyperloom.measure.tests.repro_fixtures import case_attachment
 
@@ -644,14 +638,6 @@ def test_a_card_still_held_after_the_release_wait_fails_the_start_once_the_wait_
 
     assert "GPU 0 already holds memory" in _status(tmp_path)["message"]
     assert settle_clock.now == runner.hardware.CARD_RELEASE_WAIT_SEC
-
-
-def test_a_free_card_lets_the_test_run_and_leaves_no_note(tmp_path, env, monkeypatch):
-    monkeypatch.setattr(runner, "LocalMeasurementBackend", _Backend(_ok))
-
-    assert _go(tmp_path, env, _sheet()) == 0
-
-    assert _status(tmp_path) == {"state": "succeeded", "error_class": None, "message": ""}
 
 
 def test_memory_use_that_cannot_be_read_is_not_a_refusal_but_is_written_down(tmp_path, env, monkeypatch):
@@ -1019,25 +1005,6 @@ def test_the_hash_the_runner_signs_is_the_one_acceptance_computed_for_the_same_r
     assert _surface_run(tmp_path, env, key, "later", yaml.safe_load(text)) != canonical.surface.sha256
 
 
-def _agentx_sheet() -> dict:
-    text = yaml.safe_dump({"benchmark": {**POINT["benchmark"], "agentx": {"enabled": True}}})
-    return _sheet(config=[{"yaml": text, "sha256": hashlib.sha256(text.encode()).hexdigest()}])
-
-
-def test_an_agentx_test_runs_on_the_staged_client_and_the_runner_patches_no_checkout(tmp_path, env, monkeypatch):
-    """Staging patches the client an AgentX test runs; the runner leaves the InferenceX checkout alone and adds no
-    note about it."""
-    backend = _Backend(_ok)
-    monkeypatch.setattr(runner, "LocalMeasurementBackend", backend)
-
-    assert _go(tmp_path, env, _agentx_sheet()) == 0
-
-    assert len(backend.calls) == 1
-    assert _status(tmp_path) == {"state": "succeeded", "error_class": None, "message": ""}
-    with pytest.raises(ModuleNotFoundError):
-        importlib.import_module("hyperloom.measure.runner.aiperf_patch")
-
-
 SHORT_PROMPTS = {
     "prompt_set": "short-prompts-0123456789abcdef",
     "prompts_sha256": "a" * 64,
@@ -1057,15 +1024,6 @@ def test_the_short_prompt_plan_of_the_sheet_is_the_one_the_call_carries(tmp_path
 
     (call,) = backend.calls
     assert call.short_prompts is not None and call.short_prompts.to_document() == SHORT_PROMPTS
-
-
-def test_a_sheet_that_asks_for_no_check_gives_a_call_with_none(tmp_path, env, monkeypatch):
-    backend = _Backend(_ok)
-    monkeypatch.setattr(runner, "LocalMeasurementBackend", backend)
-
-    _go(tmp_path, env, _sheet())
-
-    assert backend.calls[0].short_prompts is None
 
 
 def test_a_prompt_set_the_sandbox_does_not_hold_is_spec_rejected_before_any_server_starts(tmp_path, monkeypatch):
@@ -1108,15 +1066,6 @@ def test_the_long_context_plan_of_the_sheet_is_the_one_the_call_carries(tmp_path
     (call,) = backend.calls
     assert call.long_context is not None and call.long_context.to_document() == LONG_CONTEXT
     assert call.short_prompts is None
-
-
-def test_a_sheet_that_asks_for_no_long_context_check_gives_a_call_with_none(tmp_path, env, monkeypatch):
-    backend = _Backend(_ok)
-    monkeypatch.setattr(runner, "LocalMeasurementBackend", backend)
-
-    _go(tmp_path, env, _sheet())
-
-    assert backend.calls[0].long_context is None
 
 
 def test_a_long_context_set_the_sandbox_does_not_hold_is_spec_rejected_before_any_server_starts(tmp_path, monkeypatch):

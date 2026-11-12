@@ -23,6 +23,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from hyperloom_common.aiter_jit_cache import resolve_package_root
+from hyperloom_common.fs_utils import file_sha256
 from hyperloom.common.outside_facts import SGLANG_IMAGE_AITER_CONFIGS
 from hyperloom.measure.framework.tables import TableVariable, read_variables
 
@@ -34,7 +35,6 @@ __all__ = [
     "SNAPSHOT_ENV",
     "FrameworkBaseError",
     "Snapshot",
-    "file_sha256",
     "files_digest",
     "framework_envs",
     "image_configs",
@@ -61,19 +61,10 @@ _COPY = "configs"
 _MODELS = "model_configs"
 _SCHEMA = "hyperloom.framework-snapshot/v1"
 _ABSENT = "absent"
-_CHUNK = 1 << 20
 
 
 class FrameworkBaseError(Exception):
     """The session's snapshot is missing or not one this code wrote."""
-
-
-def file_sha256(path: Path) -> str:
-    digest = hashlib.sha256()
-    with path.open("rb") as handle:
-        while chunk := handle.read(_CHUNK):
-            digest.update(chunk)
-    return digest.hexdigest()
 
 
 def tree_files(root: Path) -> dict[str, str]:

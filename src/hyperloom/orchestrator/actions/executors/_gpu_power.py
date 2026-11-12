@@ -114,8 +114,6 @@ class ServerLogPhaseDriver:
                 self._recorder.note_phase(GpuPhase.WARMUP, now)
             if scan.saw_measured_begin:
                 self._recorder.note_phase(GpuPhase.MEASURED, now)
-            if scan.saw_eval_start:
-                self._recorder.note_phase(GpuPhase.EVAL, now)
 
     def _poll_logs(self) -> None:
         """:meth:`poll`, with a replay log that cannot be listed or read reported once at warning, then at debug."""

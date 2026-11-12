@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import contextlib
 import errno
+import hashlib
 import os
 import stat
 from pathlib import Path
@@ -239,3 +240,12 @@ def relative_posix(path: Path, root: Path) -> str:
         return path.resolve().relative_to(root.resolve()).as_posix()
     except (ValueError, OSError):
         return str(path)
+
+
+def file_sha256(path: Path) -> str:
+    """The SHA-256 of a file's bytes, read in chunks."""
+    digest = hashlib.sha256()
+    with path.open("rb") as handle:
+        while chunk := handle.read(1 << 20):
+            digest.update(chunk)
+    return digest.hexdigest()

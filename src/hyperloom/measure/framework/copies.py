@@ -49,7 +49,6 @@ from hyperloom.measure.framework.base import (
     SNAPSHOT_ENV,
     FrameworkBaseError,
     Snapshot,
-    file_sha256,
     files_digest,
     load_snapshot,
     restore,
@@ -60,6 +59,7 @@ from hyperloom.measure.framework.merge import MergeView
 from hyperloom.measure.framework.rows import DEFAULT_TABLE_PLACEHOLDER, RowsOnlyRefused, lay_rows_over
 from hyperloom.measure.framework.tables import AITER_VARIABLE_PREFIX
 from hyperloom.measure.socket import TestCall
+from hyperloom_common.fs_utils import file_sha256
 
 __all__ = ["PrivateFramework", "private_framework"]
 

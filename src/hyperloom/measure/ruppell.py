@@ -56,6 +56,7 @@ import yaml
 from hyperloom.common.benchmark_config import BenchmarkPoint, read_benchmark_point
 from hyperloom.common.outside_facts import HIP_GRAPH_PACKET_CAPTURE_ENV
 from hyperloom.measure.short_prompts.staging import CACHE_ENV, DEFAULT_CACHE_DIR
+from hyperloom_common.fs_utils import file_sha256
 
 __all__ = [
     "CHECK_FILE",
@@ -171,7 +172,7 @@ def tree_sha256(root: Path) -> str:
             target = os.readlink(path)
             kind, content, size = "l", hashlib.sha256(target.encode()).hexdigest(), len(target)
         else:
-            kind, content, size = "x" if info.st_mode & 0o111 else "f", _file_sha256(path), info.st_size
+            kind, content, size = "x" if info.st_mode & 0o111 else "f", file_sha256(path), info.st_size
         outer.update(f"{kind}\t{size}\t{content}\t{path.relative_to(root).as_posix()}\n".encode())
     return outer.hexdigest()
 
@@ -182,14 +183,6 @@ def _files(directory: Path) -> Iterator[Path]:
             yield from _files(Path(entry.path))
         else:
             yield Path(entry.path)
-
-
-def _file_sha256(path: Path) -> str:
-    digest = hashlib.sha256()
-    with path.open("rb") as handle:
-        for chunk in iter(lambda: handle.read(1 << 20), b""):
-            digest.update(chunk)
-    return digest.hexdigest()
 
 
 def entry_problem(entry: Path, commit: str, wanted: str) -> str:

@@ -24,7 +24,6 @@ the lock's header says how it was made.
 from __future__ import annotations
 
 import argparse
-import hashlib
 import json
 import os
 import re
@@ -37,6 +36,7 @@ from collections.abc import Iterator, Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
 
+from hyperloom_common.fs_utils import file_sha256
 from inference_suite import aiperf_patch
 from inference_suite.contracts.normalised import NormalisedManifest, PackageIdentity, canonical_name
 from inference_suite.pins import AGENTX_PYTHON_BUILD, INFERENCEX_CLIENT_COMMIT, PinnedArchive
@@ -143,14 +143,6 @@ def _run(argv: Sequence[str], what: str) -> str:
     return done.stdout
 
 
-def _sha256(path: Path) -> str:
-    digest = hashlib.sha256()
-    with path.open("rb") as handle:
-        for chunk in iter(lambda: handle.read(_CHUNK), b""):
-            digest.update(chunk)
-    return digest.hexdigest()
-
-
 def _download(url: str, destination: Path) -> None:
     # The build's mirror answers 403 to urllib's default User-Agent.
     request = urllib.request.Request(url, headers={"User-Agent": "inference-suite"})
@@ -159,7 +151,7 @@ def _download(url: str, destination: Path) -> None:
 
 
 def _checked_archive(archive: Path, build: PinnedArchive) -> None:
-    actual = _sha256(archive)
+    actual = file_sha256(archive)
     if actual != build.sha256:
         raise ClientEnvError(f"{archive} has sha256 {actual}; the interpreter build is pinned at {build.sha256}")
 
