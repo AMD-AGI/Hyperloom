@@ -6,25 +6,29 @@
 The contract: a conc sweep arm boots one server on its first rung, measures that rung on it, reuses it for every rung
 after, and every rung serves the same launch; the arm's server and an explore variant's server are reaped with
 ``stop`` on the directory their rounds shared it through, however the rounds ended; explore launches one server once
-per round and starts no variant its session or phase budget cannot fit; a specialist rebench is one round that owns its
-server on the port it reports.
+per round, starts no variant its session or phase budget cannot fit, and launches none that only restates the argv or
+environment of the session's base; a specialist rebench is one round that owns its server on the port it reports.
 """
 
 from __future__ import annotations
 
 import asyncio
 import shutil
+from dataclasses import replace
 from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
+import yaml
 
 from hyperloom.common.deadline import Deadline
+from hyperloom.inference_optimizer.session.paths import ENV_CURRENT_SESSION_DIR
 from hyperloom.inference_optimizer.tests.test_conc_sweep import _make_state
 from hyperloom.orchestrator.actions.executors import _server_lifecycle
+from hyperloom.orchestrator.actions.executors._grid_base import TS_SKIPPED_DEDUP, VariantResult
 from hyperloom.orchestrator.actions.executors._suite import rounds as suite_rounds
 from hyperloom.orchestrator.actions.executors import explore as explore_module
-from hyperloom.orchestrator.actions.executors.explore import ExploreExecutor
+from hyperloom.orchestrator.actions.executors.explore import BASELINE_NOOP, ExploreExecutor
 from hyperloom.orchestrator.actions.executors.tests.test_grid_suite_round import _HOT, suite  # noqa: F401
 from hyperloom.orchestrator.kernel import conc_sweep
 from hyperloom.orchestrator.kernel.conc_sweep import run_conc_sweep
@@ -32,7 +36,8 @@ from hyperloom.orchestrator.rehearsal import READY, LaunchAttempt, LaunchScenari
 from hyperloom.orchestrator.rehearsal import installed_clock
 from hyperloom.orchestrator.specialists.rebench import RebenchBenchmark, RebenchServer, run_specialist_rebench
 from hyperloom.orchestrator.state.shared_state import SharedState
-from inference_suite.contracts import LifecycleMode, WorkloadKind
+from hyperloom.orchestrator.state.tests._session_base import freeze_base, session_base
+from inference_suite.contracts import LifecycleMode, Workload, WorkloadKind
 from inference_suite.tests.test_compose import _launch
 
 _PORT = 30123
@@ -227,3 +232,59 @@ def test_explore_starts_no_variant_the_budget_cannot_fit(
     assert result["error_class"] == error_class
     assert "1 variant(s) went unmeasured" in result["error"]
     assert result["explore_search_update"]["tested"] == {}
+
+
+_RECIPE_ARGS = ("--mem-fraction-static", "0.8", "--chunked-prefill-size", "16384")
+_RECIPE_ENV = {"SGLANG_USE_AITER": "1", "OMP_NUM_THREADS": "1"}
+
+
+def _serve_the_recipe_base(suite: SimpleNamespace, monkeypatch, workload: Workload) -> None:
+    """Freeze a base whose recipe sets ``_RECIPE_ARGS`` and ``_RECIPE_ENV``, and bind ``suite.point`` to it."""
+    session = _session(suite)
+    monkeypatch.setenv(ENV_CURRENT_SESSION_DIR, str(session))
+    base = session_base(_RECIPE_ARGS, _RECIPE_ENV)
+    if workload is Workload.AGENTX:
+        base = replace(base, query=replace(base.query, workload=Workload.AGENTX, isl=None, osl=None))
+        document = yaml.safe_load(suite.point.read_text(encoding="utf-8"))
+        document["benchmark"]["agentx"] = {"enabled": True, "launch_overrides": {"version": 1}}
+        suite.point.write_text(yaml.safe_dump(document), encoding="utf-8")
+    freeze_base(session, base)
+
+
+@pytest.mark.parametrize("workload", [Workload.FIXED, Workload.AGENTX], ids=["fixed", "agentx"])
+def test_explore_launches_no_variant_that_only_restates_the_recipe_base(
+    monkeypatch, suite, eligible, tmp_path, workload
+):
+    """The base's own argv and env are already in effect, so restating them launches the base again.
+
+    A restatement is answered without a launch, ahead of the round or at its turn, and its ledger row says why;
+    a variant that changes one of the recipe's values still runs.
+    """
+    _serve_the_recipe_base(suite, monkeypatch, workload)
+    launched: list[str] = []
+
+    async def run_grid(*, grid, **_kw):
+        (variant,) = grid
+        launched.append(variant.name)
+        return [VariantResult(variant.name, variant.extra_server_args, dict(variant.extra_envs), status="failed")]
+
+    monkeypatch.setattr(explore_module, "run_grid", run_grid)
+    rows = [
+        {"name": "restates-recipe-env", "extra_envs": dict(_RECIPE_ENV)},
+        {"name": "changes-recipe-arg", "extra_args": "--chunked-prefill-size 8192", "extra_envs": {}},
+        {"name": "restates-recipe-args", "extra_args": " ".join(_RECIPE_ARGS), "extra_envs": {}},
+        {"name": "changes-recipe-env", "extra_envs": {"SGLANG_USE_AITER": "0"}},
+    ]
+    state = SharedState.load_or_init(_session(suite))
+    state.baseline_tput = 800.0
+
+    result, _ = _explore(monkeypatch, suite, tmp_path, rows, state)
+
+    assert launched == ["changes-recipe-arg", "changes-recipe-env"]
+    assert [(row["name"], row["reason"]) for row in result["skipped_dup"]] == [
+        ("restates-recipe-env", BASELINE_NOOP),
+        ("restates-recipe-args", BASELINE_NOOP),
+    ]
+    ledger = {row["name"]: row for row in result["explore_search_update"]["tested"].values()}
+    for name in ("restates-recipe-env", "restates-recipe-args"):
+        assert (ledger[name]["outcome"], ledger[name]["reason"]) == (TS_SKIPPED_DEDUP, BASELINE_NOOP)
