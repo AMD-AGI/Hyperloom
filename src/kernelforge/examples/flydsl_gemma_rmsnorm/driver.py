@@ -71,7 +71,7 @@ def _run_correctness(rows: int, hidden: int, mode: str, device: str) -> int:
 
     ref = _reference(x, weight)
     print(f"SNR: {_snr_db(ref, out):.2f} dB")
-    print(f"allclose: {torch.allclose(out, ref, atol=1e-2, rtol=1e-2)}")
+    print(f"allclose_diagnostic: {torch.allclose(out, ref, atol=1e-2, rtol=1e-2)}")
     _assert_no_aiter()
     return 0
 

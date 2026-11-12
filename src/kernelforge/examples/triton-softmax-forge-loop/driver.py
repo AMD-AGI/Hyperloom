@@ -56,7 +56,7 @@ def _run_correctness(rows: int, cols: int, mode: str, device: str) -> int:
     out = softmax(x)
     ref = torch.softmax(x, dim=-1)
     print(f"SNR: {_snr_db(ref, out):.2f} dB")
-    print(f"allclose: {torch.allclose(out, ref, atol=1e-2, rtol=1e-2)}")
+    print(f"allclose_diagnostic: {torch.allclose(out, ref, atol=1e-2, rtol=1e-2)}")
     return 0
 
 
@@ -74,7 +74,7 @@ def _run_correctness_suite(device: str) -> int:
         print(f"case_snr: {_case_id(rows, cols)} {snr:.2f}")
         print(f"case_allclose: {_case_id(rows, cols)} {passed}")
     print(f"SNR: {min(snr_values):.2f} dB")
-    print(f"allclose: {all(allclose_values)}")
+    print(f"allclose_diagnostic: {all(allclose_values)}")
     return 0
 
 
