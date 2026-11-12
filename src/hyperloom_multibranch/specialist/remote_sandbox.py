@@ -29,7 +29,8 @@ and a line in its log naming the cause; :meth:`RemoteProcess.output` probes for 
 :attr:`RemoteAgentSandbox.probe_seconds`.
 
 A command runs on the sandbox's own environment with only what :func:`forwarded_env` takes from this host's (the LLM
-gateway, its credentials and models, the CA bundle the hosting layer puts at the same path in both containers) and the
+gateway, its credentials and models, the CA variables naming the hosting layer's bundle, which the dev template must build
+at the same path the app container's ``start.sh`` does) and the
 sandbox's own home, Claude config, caches and a temporary directory on the sandbox's local disk, where HIP unbundles
 its code objects. Commands run as root there, as the Claude CLI accepts only in a sandbox it is told of. The platform
 sets the device mask; a mask the caller passes is dropped.
