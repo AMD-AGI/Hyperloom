@@ -405,6 +405,9 @@ inference_suite = [
 "inference_suite.load" = [
     "scripts/*.sh",
 ]
+"inference_suite.multinode" = [
+    "pd_table/*.yaml",
+]
 
 [tool.pytest.ini_options]
 asyncio_mode = "auto"
