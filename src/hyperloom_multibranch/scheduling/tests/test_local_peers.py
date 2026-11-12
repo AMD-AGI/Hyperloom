@@ -35,6 +35,7 @@ from hyperloom_common import bwrap as bwrap_module
 from hyperloom_common.bwrap import BwrapProbe
 from hyperloom_common.env import forge_explicitly_enabled
 from hyperloom.common.perf_metric import agentx_enabled
+from hyperloom.common import visible_devices
 from hyperloom.common.visible_devices import COUNTING_VISIBLE_DEVICE_VARS
 from hyperloom.measure import compile as compile_module
 from hyperloom.measure.compile import ComponentLayout, LocalBlobStore, PackageBase, UnsupportedComponentError
@@ -68,10 +69,7 @@ from hyperloom_multibranch.scheduling.hosted_peers import HostedSandboxes
 from hyperloom_multibranch.scheduling.layout import SESSION_PREFIX, SessionLayout, create_session
 from hyperloom_multibranch.scheduling import launch_isolation as launch_isolation_module
 from hyperloom_multibranch.scheduling import local_peers as local_peers_module
-from hyperloom_multibranch.scheduling.launch_isolation import (
-    HOSTED,
-    launch_isolation,
-)
+from hyperloom_multibranch.scheduling.launch_isolation import HOSTED, launch_isolation
 from hyperloom_multibranch.scheduling.local_peers import (
     AGENTX_ENV,
     AGENTX_OUTSIDE_TRACE_SEC,
@@ -89,13 +87,16 @@ from hyperloom_multibranch.scheduling.local_peers import (
     measurement_host,
     model_backed_sessions,
     native_trees,
+    render_nodes,
     require_framework_package,
     specialist_command,
     specialist_recall,
     workload_environment,
     workload_rule,
     _agent_spec,
+    _lease_area,
     _specialist_role,
+    specialist_readable,
 )
 from hyperloom_multibranch.scheduling.peers import Peers, PeerSetup, PeersUnavailable
 from hyperloom_multibranch.scheduling.processes import ProcessRegistry
@@ -112,7 +113,7 @@ from hyperloom_multibranch.specialist import model_sessions as model_sessions_mo
 from hyperloom_multibranch.specialist import worktree as worktree_module
 from hyperloom_multibranch.specialist.agent_session import AgentCommand, AgentSetup
 from hyperloom_multibranch.specialist.agent_sessions import LocalAgentSandboxes, RemoteAgentSandboxes
-from hyperloom_multibranch.specialist.dev_sandbox import DevLeases
+from hyperloom_multibranch.specialist.dev_sandbox import DEV_DIR, DevLeases
 from hyperloom_multibranch.specialist.remote_sandbox import RemoteAgentSandbox
 from hyperloom_multibranch.tests.fakes import RefusingCritic
 from hyperloom_multibranch.tests.staging_rig import verified_tool_cache
@@ -136,6 +137,7 @@ from hyperloom.sandbox.socket import Role as SandboxRole, SandboxInfo
 from hyperloom_multibranch.toolbox import hosted_toolbox
 from hyperloom_multibranch.toolbox.hosted_executor import DEFAULT_TEST_TIMEOUT_SEC
 from hyperloom_multibranch.toolbox.hosted_toolbox import HostedToolbox, HostedToolboxInputs
+from hyperloom_multibranch.toolbox.branch_leases import BranchLeases
 from hyperloom_multibranch.toolbox.local_hosted import LocalHostedToolbox
 from hyperloom_multibranch.toolbox.mcp_tools import McpSpecialistTokens
 from hyperloom_multibranch.toolbox.queue import QueuePolicy
@@ -380,6 +382,61 @@ def test_the_cards_are_the_ids_the_visible_device_mask_names(mask: str, monkeypa
     monkeypatch.setenv(mask, "6,2")
 
     assert machine_cards() == (6, 2)
+
+
+def _shown_and_held(monkeypatch: pytest.MonkeyPatch, tmp_path: Path, shown: int, held: int) -> None:
+    """No visible-device mask; ``rocm-smi`` shows ``shown`` cards and the machine holds ``held`` render nodes, beside a
+    node that is not one."""
+
+    for name in COUNTING_VISIBLE_DEVICE_VARS:
+        monkeypatch.delenv(name, raising=False)
+    monkeypatch.setattr(visible_devices, "rocm_smi_gpu_count", lambda: shown)
+    nodes = tmp_path / "dri"
+    nodes.mkdir()
+    (nodes / "card1").touch()
+    for number in range(held):
+        (nodes / f"renderD{128 + number}").touch()
+    monkeypatch.setattr(local_peers_module, "RENDER_NODE_DIR", str(nodes))
+
+
+@pytest.mark.parametrize(("shown", "held"), [(8, 8), (2, 3), (0, 0)])
+def test_without_a_mask_the_cards_are_as_many_as_rocm_smi_shows_when_the_machine_can_open_them(
+    shown: int, held: int, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _shown_and_held(monkeypatch, tmp_path, shown, held)
+
+    assert machine_cards() == tuple(range(shown))
+
+
+def test_a_container_given_fewer_cards_than_rocm_smi_shows_names_both_counts_and_the_mask_to_set(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _shown_and_held(monkeypatch, tmp_path, 8, 2)
+
+    with pytest.raises(PeersUnavailable) as refused:
+        machine_cards()
+
+    assert str(refused.value) == (
+        f"rocm-smi shows 8 cards, more than the 2 this machine can open (its render nodes, {tmp_path / 'dri'}/renderD*):"
+        " name the cards it was given in ROCR_VISIBLE_DEVICES"
+    )
+    with pytest.raises(ValueError, match="rocm-smi shows 8 cards, more than the 2 this machine can open"):
+        machine_parallel_tests(1)
+
+
+def test_a_mask_names_the_cards_whatever_render_nodes_the_machine_holds(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _shown_and_held(monkeypatch, tmp_path, 8, 0)
+    monkeypatch.setenv("ROCR_VISIBLE_DEVICES", "4,5")
+
+    assert machine_cards() == (4, 5)
+
+
+def test_a_machine_without_render_nodes_holds_none(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(local_peers_module, "RENDER_NODE_DIR", str(tmp_path / "missing"))
+
+    assert render_nodes() == 0
 
 
 @pytest.mark.parametrize("framework", ["tensorrt-llm", "sglang"])
@@ -663,6 +720,23 @@ async def test_a_local_session_publishes_the_staging_its_runners_read_into_their
 
     async with _peers(tmp_path / "workspace", monkeypatch, WORKLOAD):
         assert publishes.caches == [(tmp_path / "runner-cache").resolve()]
+
+
+@pytest.mark.parametrize("tests_end_by", [None, 1_800_000_000.0])
+def test_the_local_cards_hand_their_toolbox_the_time_every_test_must_end_by(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, tests_end_by: float | None
+) -> None:
+    monkeypatch.setenv("HYPERLOOM_RUNNER_CACHE", str(tmp_path / "runner-cache"))
+    monkeypatch.setattr(suite_publish, "publish_own_inference_suite", _Publishes())
+    built: list[object] = []
+    monkeypatch.setattr(local_hosted, "build_local_toolbox", lambda *args, options: built.append(options) or options)
+    layout = SimpleNamespace(toolbox=tmp_path / "MB-toolbox", session_id="MB-1")
+    setup = SimpleNamespace(layout=layout, workload=WORKLOAD)
+
+    LocalCards((0, 1), tests_end_by).toolbox(setup, None, None, None)  # type: ignore[arg-type]
+
+    [options] = built
+    assert options.tests_end_by == tests_end_by  # type: ignore[attr-defined]
 
 
 async def test_a_local_session_whose_staging_cannot_be_published_is_refused(
@@ -1189,6 +1263,33 @@ async def test_the_specialists_are_told_of_and_give_back_the_dev_sandboxes_the_s
         == role_prompt(RoleWorkload(_specialist_role(WORKLOAD)), references={}, base=BASE, dev_leases=1)
         != without.role
     )
+    # A hosted lease's sandbox roots in the branch's directory: the branch's specialist is shown that area alone.
+    assert without.lease_area is None and lending.lease_area is not None
+    assert lending.lease_area("s1") == tmp_path / DEV_DIR and (tmp_path / DEV_DIR).is_dir()
+
+
+def test_the_specialists_read_the_session_s_references_and_the_model_directory_it_serves(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    (tmp_path / "models" / "Llama-3-8B").mkdir(parents=True)
+    monkeypatch.setenv("HL_MODEL_BASE", str(tmp_path / "models"))
+    references = {"geak": tmp_path / "MB-reference" / "geak"}
+    served = replace(WORKLOAD, model="meta-llama/Llama-3-8B")
+    unknown = replace(WORKLOAD, model="meta-llama/Not-Here")
+
+    assert specialist_readable(references, served) == (references["geak"], tmp_path / "models" / "Llama-3-8B")
+    assert specialist_readable({}, unknown) == ()
+
+
+def test_a_local_toolbox_s_specialist_reads_its_own_holder_area_of_the_leases(tmp_path: Path) -> None:
+    toolbox = object.__new__(LocalHostedToolbox)
+    object.__setattr__(toolbox, "leases", BranchLeases(object(), tmp_path / "branch-sandboxes", 1, {}))
+    wiring = SimpleNamespace(toolbox=toolbox, dev_leases=object(), setup=None)
+
+    area = _lease_area(wiring)
+
+    assert area is not None and area("s1") == tmp_path / "branch-sandboxes" / "s1" and area("s1").is_dir()
+    assert _lease_area(SimpleNamespace(toolbox=toolbox, dev_leases=None, setup=None)) is None
 
 
 def _package(root: Path, name: str, dist: str, version: str, *files: str) -> PackageBase:

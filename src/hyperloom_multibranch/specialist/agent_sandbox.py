@@ -155,7 +155,8 @@ CLAUDE_DIR = ".claude"
 USER_BASE = ".local"
 #: Where in a confined home pip installs (``PIP_TARGET``), with every dependency an install brings: on no import path,
 #: so no inference server a command starts imports those ahead of the image's and runs other packages than the
-#: baseline it is measured against.
+#: baseline it is measured against. Arbor imports from it on its own commands alone (``ARBOR_SITE``,
+#: :mod:`~hyperloom_multibranch.specialist.arbor_adapter`).
 SITE_DIR = "site-packages"
 #: The programs a confined command may run besides those of its toolchain's trees: its shell and the agent CLIs.
 AGENT_PROGRAMS = ("bash", "claude", "codex")

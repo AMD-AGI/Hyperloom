@@ -928,7 +928,10 @@ repository records for the worktree, never the one the worktree's `.git` file na
 and runs as the app's own uid, so no ownership check tells a directory it made from the app's), the framework source
 roots, the task's model when it is a local path, the programs of the stdio MCP servers they start (each named in one
 WARNING: nothing else such a server reads is bound unless the confinement shows it), and, for an agent runner launch,
-`AgentLaunchSpec.readable`; a GPU task gets `/dev/kfd` and `/dev/dri`. The paths `HYPERLOOM_STATE_DIR`,
+`AgentLaunchSpec.readable` (a multi-branch specialist's: the session's `MB-reference/<name>` directories, the
+directory its workload's model is served from, the files its worktree links and its branch's own dev lease area,
+`branch-sandboxes/<branch>` of a local toolbox or the branch's `dev` directory of a hosted one, so it applies a Forge
+patch from its lease's root and sees no other branch's lease); a GPU task gets `/dev/kfd` and `/dev/dri`. The paths `HYPERLOOM_STATE_DIR`,
 `HYPERLOOM_BUILD_STORE` and `HYPERLOOM_BUILD_TRUST` name are masked wherever a bind would show them (a hosted run's
 entry, which takes `HYPERLOOM_STATE_DIR` out of its environment, registers its state directory so it stays masked). The `claude` CLI
 runs there only with a login in its environment: `ANTHROPIC_API_KEY`, `ANTHROPIC_AUTH_TOKEN` or
@@ -1007,16 +1010,17 @@ with `HOME`, `CLAUDE_CONFIG_DIR` and `TRITON_CACHE_DIR` of the sandbox's own (an
 branch's session directory, where its Claude CLI's transcripts are read from). A Claude CLI there logs in only through
 those variables, never the app's `~/.claude`. pip installs to `PIP_TARGET`, `site-packages` in that home, which is on
 no interpreter's import path, so no server a command starts imports what was installed, nor the dependencies an install
-brought, ahead of the image's (the image's venv takes no user install and is read-only). `AITER_JIT_DIR` and
-`FLYDSL_RUNTIME_CACHE_DIR` are aiter's defaults, its own writable tree, where the image's prebuilt JIT modules and
-FlyDSL kernels are. A sandbox whose paths bubblewrap cannot bind safely (before 0.12, nothing may be bound below the
-shared `/tmp`, so a session directory under `/tmp` cannot be) runs unconfined, as before, with a WARNING; a hosted run
-refuses it.
+brought, ahead of the image's (the image's venv takes no user install and is read-only); Arbor imports from it by
+`ARBOR_SITE`, which MB gives Arbor's own commands only. `AITER_JIT_DIR` and `FLYDSL_RUNTIME_CACHE_DIR` are aiter's
+defaults, its own writable tree, where the image's prebuilt JIT modules and FlyDSL kernels are. A sandbox whose paths
+bubblewrap cannot bind safely (before 0.12, nothing may be bound below the shared `/tmp`, so a session directory under
+`/tmp` cannot be) runs unconfined, as before, with a WARNING; a hosted run refuses it.
 
 A hosted run uses only its hosting layer's bubblewrap, by the path its entry names, never one found on `PATH` (the
-framework image may carry its own); a local run uses the `bwrap` on `PATH`. `hyperloom hosted run` names `bin/bwrap` in
-the directory `HYPERLOOM_HOST_LAYER` names (whitespace around it ignored), which the layer's `start.sh` sets to its
-own; with the variable unset, blank or relative, no launch of the run uses bubblewrap. It checks before its installer or `optimize` runs: where neither tier
+framework image may carry its own); a local run uses the `bwrap` on `PATH`. `hyperloom hosted run` and
+`hyperloom-multibranch hosted run` name `bin/bwrap` in the directory `HYPERLOOM_HOST_LAYER` names (whitespace around it
+ignored), which the layer's `start.sh` sets to its own; with the variable unset, blank or relative, no launch of the run
+uses bubblewrap. `hyperloom hosted run` checks before its installer or `optimize` runs: where neither tier
 works, the run ends with a final `exit.json` (return code 2) whose `error` names both reasons; a probe that gave no
 answer in time ends the leg without one, so the host starts it again. Where the account is chosen, it probes the layer's
 bubblewrap too: the Ray GPU actor path never starts a specialist as an account, so where that bubblewrap cannot confine
@@ -1052,6 +1056,18 @@ is only `PATH`, `HOME`, `TMPDIR` and `LC_ALL`. The build record's `isolation` en
 `bwrap+netns`. Where neither tier works, the toolbox refuses at start (`build_preflight`) and each build fails as the
 machine's, naming both reasons as its choice found them; a bubblewrap whose probe gives no answer in time is not
 refused but logged, and each build asks again.
+
+A multi-branch session records in its manifest and `MB-report.json` (`agent_isolation`) how the paths that launch its
+agents and tests start them (`hyperloom_multibranch.scheduling.launch_isolation`): its specialists as the agent runner's
+chooser gives them now (`account`, `bwrap`, else `none` with the reasons, or `refused` where they must be isolated and
+no tier can); its agent and dev sandboxes and its tests on this host as their choosers give them now (`bwrap`, else
+`none` with the reasons, or `refused` in a hosted run whose layer bubblewrap cannot sandbox them), or `hosted` when the
+grant's sandboxes run them. A sandbox whose own paths bubblewrap cannot bind safely runs as before even where the record
+says `bwrap`, which its own WARNING says. `MB-report.md` has the same as one line (`agent isolation: specialists <...>,
+sandboxes <...>, tests <...>: <reasons>`), and the session logs one WARNING at its start naming what runs unconfined. A
+multi-branch `hosted run` starts only when nothing it launches in the app container would run unconfined or be refused:
+with the layer's bubblewrap its specialists, and with `placement.measurement: local` its sandboxes and tests too, run
+under it; a spec measured there ends before anything starts while one of them would not.
 
 The tests that launch real sandboxes (marker `agent_isolation`) skip on a host without bubblewrap or a user namespace
 for it; with `HYPERLOOM_REQUIRE_ISOLATION_TESTS=1`, which CI sets after allowing unprivileged user namespaces, they
@@ -1396,7 +1412,10 @@ and input variables are always required except for a session started by hand on 
 (`hyperloom-multibranch run --measurement hosted`), which needs the sandbox URLs and templates, `HYPERLOOM_SANDBOX_KEY_MEASUREMENT`,
 `HYPERLOOM_GRANT_LIMITS` (all four totals: a multi-branch session refuses a grant that states only some of them),
 `HYPERLOOM_RUN_CREATED_AT` and the source pair. A variable that is set is checked even when it is not
-required.
+required. A multi-branch `hosted run` whose spec says `placement.measurement: local` measures on the app container's own cards:
+it needs no sandbox variable, key or source pair, and `HYPERLOOM_GRANT_LIMITS` is optional (its `max_runtime_sec`, when given,
+bounds the session together with the spec's `budget.max_hours`; see
+[Run hosted multi-branch on a new cluster](../how-to/hosted-multibranch-new-cluster.md)).
 
 | Variable | Required | Description |
 |----------|----------|-------------|
