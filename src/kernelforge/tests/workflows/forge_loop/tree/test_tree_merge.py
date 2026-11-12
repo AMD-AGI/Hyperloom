@@ -11,6 +11,7 @@ from dataclasses import replace
 from pathlib import Path
 
 from kernelforge.utils.process_reaping import ReapReport
+from kernelforge.workflows.forge_loop.iteration import fanout
 from kernelforge.workflows.forge_loop.iteration.fanout import LaneResult
 from kernelforge.workflows.forge_loop.iteration.iteration_types import IterationResult
 from kernelforge.workflows.forge_loop.policy.round_budget import FIRST_ROUND_MEASUREMENT_SEC
@@ -100,6 +101,43 @@ def test_a_change_that_does_not_apply_is_merged_by_a_session_told_which_node_run
     assert host.measured == [_source({"SMALL": 4, "LARGE": 5})] and merged.provenance == (large.commit,)
     assert _record(host)["method"] == "session"
     assert host.session_profiles == ["claude"] and merged.agent_profile_id == "claude"
+
+
+class _ReadingHost(_Host):
+    """Merge sessions that read the other node the way their plan says to, in the checkout a lane is given."""
+
+    def __init__(self, repo: Path, commit: str, lanes: Path) -> None:
+        super().__init__(repo)
+        self.read: list[str] = []
+        self._commit = commit
+        self._lanes = lanes
+
+    async def _run_sessions(self, iteration: int, sessions) -> dict[str, LaneResult]:
+        for session in sessions:
+            lane_dir = self._lanes / session.lane.lane_id
+            lane_dir.mkdir(parents=True)
+            await fanout._clone_lane(Path(session.lane.source_dir), lane_dir)
+            self.read.append(_git(lane_dir, "show", f"{self._commit}:kernel.py"))
+        return await super()._run_sessions(iteration, sessions)
+
+
+def test_a_merge_session_changes_files_only_and_reads_the_other_node_from_its_own_checkout(tmp_path):
+    """Staging a file changes git state, which the workspace guard discards a lane for -- a merge's included.
+
+    The plan names the commit to read the other node from instead, and that read works in the copy a session gets.
+    """
+    repo, tree = _tree(tmp_path, _EVEN)
+    small = _grow(repo, tree, tree.root.commit, {"SMALL": 4, "LARGE": 14})
+    large = _grow(repo, tree, tree.root.commit, {"SMALL": 15, "LARGE": 5})
+    host = _ReadingHost(repo, large.commit, tmp_path / "lanes")
+    host.session_results = [_session_writing(repo, small, {"SMALL": 4, "LARGE": 5})]
+
+    _merge(host, tree, _admitted(small, large))
+
+    (prompt,) = host.prompts
+    assert "Change files only. A git command that changes the index, HEAD or a branch" in prompt
+    assert f"`git show {large.commit}:<path>`" in prompt
+    assert host.read == [_source({"SMALL": 15, "LARGE": 5}).strip()]
 
 
 def test_a_merge_that_reproduces_a_node_is_not_measured(tmp_path):
