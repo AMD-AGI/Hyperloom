@@ -70,7 +70,7 @@ the rules listed. Rows overlap; a rule listed twice is read once.
 | touches persisted or shared state: `SCHEMA_VERSION`, `from_dict`, `CREATE TABLE`, a `record_*`/`read_*`/`seal_*` pair, `.save()`, a spec, manifest or recipe, a context manager, recovery or resume | X6 R4 P4 P5 |
 | touches a prompt, `SKILL.md`, `docs/**`, `*.md` or `*.rst` | X3 X5 |
 | adds error handling or a default: `except`, `contextlib.suppress`, `ignore_errors=True`, `.get(k, 0)`, `or {}`, an early `isinstance` guard, a noop or degraded implementation | S1 S2 S3 S4 S5 S7 S8 |
-| touches tests, or adds a large `src/` module with no matching test file | T1 T2 T3 |
+| touches tests, or adds a large `src/` module with no matching test file | T1 T2 T3 T6 |
 | touches async code, a lock, a subprocess, a poll or retry loop, a per-candidate step, a timeout or a budget | P1 P2 P3 P6 |
 | touches a metric, score, speedup or gain denominator, or a threshold compared against a number this repo did not produce | M1 M2 M3 |
 | matches or selects by name: substring, `startswith`, `fnmatch`, a first-wins loop, a dedup/grouping/sort key, or an LLM backend, model or credential choice | D5 D6 D7 |
@@ -476,6 +476,33 @@ once, which the finding has to show rather than assert.
 order itself or merely replays it; `$WORK/base.txt` for the run that must fail.
 **Report as:** `T5 <file>:<line> -- the ordering fix is covered by a test that calls <a> and
 <b> in its own order; it passes on <base sha> with the defect live`
+
+### T6 -- A test must fail when the behaviour it names breaks, not when its source text changes
+
+**Severity:** blocking, under `AGENTS.md` *Test the contract, not the plumbing*
+**Fires when:** an added or changed test reads source, prompt or doc text (`inspect.getsource`,
+`read_text` on a `.py` or `.md`, a regex over code) and asserts on its wording; or its only
+assertions are `isinstance`, `is not None`, `hasattr`, a constant the test set itself, or that
+nothing raised.
+**The rule:** such a test passes while the behaviour breaks and fails on an edit that preserves
+it. Drive the entry point and assert the observable result; for a decision, assert the outcome on
+inputs that take each branch.
+**Seen in:** PR #2072 -- at the reviewed commit `f0e98df6`,
+`src/kernelforge/tests/gemm_tune/test_tier3_runner.py:323-341` asserted that
+`inspect.getsource(cli._route)` held `demand_json` within 90 characters of `has_shapes_json=`.
+Three regressions injected into `cli.py` there -- the serving log parsed but its demand
+discarded, `has_untuned_csv` hard-coded `False`, the request's bench settings replaced by
+constants in `tune_context` -- left the gemm_tune suite exactly as green as the base.
+**Not a finding when:** the property cannot be observed at runtime and the test's docstring says
+it is a source-level rule -- T5's AST ordering check, an import boundary import-linter cannot
+express, a repo-wide banned shape such as
+`src/hyperloom/orchestrator/rehearsal/tests/test_no_falsy_budget_tests.py`; or the text is itself
+the contract: documented CLI output, a persisted field, a prompt key a parser reads.
+**Evidence:** over the changed tests at the head, then break the behaviour a hit names locally and
+confirm the test still passes:
+`H=$(sed -n 's/^head: //p' "$WORK/meta.txt"); git fetch -q origin "$H" && git grep -nE 'getsource|__doc__|\.(py|md)\b.*read_text' "$H" -- $(cat "$WORK/testfiles.txt")`
+**Report as:** `T6 <file>:<line> -- <test> asserts on <source text | isinstance>; breaking
+<behaviour> leaves it green`
 
 ---
 
