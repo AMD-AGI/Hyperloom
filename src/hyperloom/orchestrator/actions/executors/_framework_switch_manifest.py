@@ -17,6 +17,7 @@ from hyperloom.common.env_safety import (
 )
 
 from ._framework_rewrite_evidence import _CATEGORY_TAXONOMY
+from ._grid_base import TS_FAILED
 from ._integrate_vocabulary import ATTRIBUTION_CYCLE_BENCH, ATTRIBUTION_CYCLE_BROKEN, ATTRIBUTION_CYCLE_PENDING
 
 
@@ -500,10 +501,26 @@ def framework_lever_grid(shared_state: Any) -> list[dict[str, Any]]:
 
 def dormant_lever_bundle(shared_state: Any) -> dict[str, Any] | None:
     """The variant that switches every dormant lever on together, once they come from more than one patch."""
-    dormant = [row for row in _lever_rows(shared_state) if not row.get("default_on") and not _screened_out(row)]
+    broken = _solo_failed_switches(shared_state)
+    dormant = [
+        row
+        for row in _lever_rows(shared_state)
+        if not row.get("default_on") and not _screened_out(row) and row.get("switch") not in broken
+    ]
     if len(_by_patch(dormant)) < 2:
         return None
     return bundle_variant(dormant, name="fwlever_bundle")
+
+
+def _solo_failed_switches(shared_state: Any) -> set[str]:
+    """Switches whose explore round with only that switch on failed to measure; a bundle carrying one fails too."""
+    tested = ((getattr(shared_state, "explore_search", None) or {}).get("tested") or {}).values()
+    failed: set[str] = set()
+    for row in tested:
+        envs = row.get("extra_envs") if isinstance(row, dict) else None
+        if row.get("outcome") == TS_FAILED and isinstance(envs, dict) and len(envs) == 1:
+            failed.update(envs)
+    return failed
 
 
 def _screened_out(row: dict[str, Any]) -> bool:

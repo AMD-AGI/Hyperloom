@@ -1758,3 +1758,30 @@ async def test_a_bundle_screen_that_failed_is_recorded_inconclusive(tmp_path):
     levers = coord.shared_state.authored_framework_levers
     assert [(r["switch"], r["attributed_gain_pct"], r["attribution_source"]) for r in levers] == _SCREENED_ROWS
     assert coord.shared_state.cycle_bundle_screens == {"lever-bundle-c0-k": "inconclusive"}
+
+
+def _two_patch_levers():
+    state = _state()
+    state.record_authored_framework_levers([{"switch": "HL_HANGS"}], default_on=False, specialist_task_id="t-1")
+    state.record_authored_framework_levers([{"switch": "HL_FUSES"}], default_on=False, specialist_task_id="t-2")
+    return state
+
+
+def test_dormant_levers_of_two_patches_are_bundled():
+    bundle = manifest.dormant_lever_bundle(_two_patch_levers())
+
+    assert bundle is not None
+    assert set(bundle["extra_envs"]) == {"HL_HANGS", "HL_FUSES"}
+
+
+def test_a_lever_whose_solo_round_failed_is_left_out_of_the_bundle():
+    """Bundling a lever that broke the server alone only breaks the bundle round the same way."""
+    state = _two_patch_levers()
+    state.explore_search = {
+        "tested": {
+            "fp-hangs": {"name": "hangs", "outcome": "FAILED", "extra_envs": {"HL_HANGS": "1"}},
+            "fp-other": {"name": "other", "outcome": "FAILED", "extra_envs": {"HL_FUSES": "1", "HL_X": "1"}},
+        }
+    }
+
+    assert manifest.dormant_lever_bundle(state) is None
