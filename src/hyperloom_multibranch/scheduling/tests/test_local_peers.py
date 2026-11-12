@@ -531,7 +531,7 @@ async def _peers(
         def worktrees(branch: str) -> BranchWorktree:
             if not dev_leases:
                 raise AssertionError("no worktree is used here")
-            return SimpleNamespace(path=tmp_path / branch, holds=lambda component: False, linked=())
+            return SimpleNamespace(path=tmp_path / branch, holds=lambda component: False, linked=(), admin=None)
 
         return ModelSessions(factory, worktrees)
 

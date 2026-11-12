@@ -13,8 +13,8 @@ import pytest
 
 from hyperloom.common.agent_isolation import BwrapIsolation
 from hyperloom.measure.compile import PackageBase
-from hyperloom_common.bwrap import BwrapProbe, Scratch
 from hyperloom.sandbox import SandboxGone
+from hyperloom_common.bwrap import BwrapProbe, Scratch
 from hyperloom_multibranch.contracts.toolbox import BranchLease
 from hyperloom_multibranch.specialist import agent_sessions
 from hyperloom_multibranch.specialist.agent_sandbox import UNCONFINED
@@ -289,7 +289,7 @@ def test_a_hosted_agent_runs_in_its_lease_s_sandbox_found_again_by_the_lease_alo
 
 
 def test_where_bubblewrap_sandboxes_an_agent_its_sandbox_writes_its_branch_s_trees_and_keeps_its_own_claude_dir(
-    tmp_path: Path, monkeypatch
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     monkeypatch.setenv("INFERENCE_SUITE_TOOL_CACHE", str(tmp_path / "tools"))
     asked: list[object] = []
@@ -299,9 +299,14 @@ def test_where_bubblewrap_sandboxes_an_agent_its_sandbox_writes_its_branch_s_tre
         asked.append(isolation)
         return isolation
 
-    worktree = SimpleNamespace(path=tmp_path / "worktree", linked=(tmp_path / "base" / "3rdparty",))
-    for path in (worktree.path, *worktree.linked, tmp_path / "branch" / "session"):
+    git_dir, objects = tmp_path / "base" / ".git", tmp_path / "objects"
+    worktree = SimpleNamespace(
+        path=tmp_path / "worktree", linked=(tmp_path / "base" / "3rdparty",), admin=git_dir / "worktrees" / "w"
+    )
+    for path in (worktree.path, *worktree.linked, worktree.admin, git_dir / "objects" / "info", objects):
         path.mkdir(parents=True)
+    (git_dir / "objects" / "info" / "alternates").write_text(f"{objects}\n")
+    (tmp_path / "branch" / "session").mkdir(parents=True)
     place = BranchPlace(worktree, object(), tmp_path / "branch" / "session")
     sandboxes = LocalAgentSandboxes(object(), choose=choose)
     lease = BranchLease("lease-1", "a1", (6,), tmp_path / "lease-1", {}, 1)
@@ -310,8 +315,8 @@ def test_where_bubblewrap_sandboxes_an_agent_its_sandbox_writes_its_branch_s_tre
     try:
         home = place.workspace / "sandbox" / "home"
         assert sandbox.isolation is isolation and sandbox.paths.home == home
-        assert sandbox.paths.writable == (place.workspace, worktree.path)
-        assert sandbox.paths.readable == (*worktree.linked, tmp_path / "tools")
+        assert sandbox.paths.writable == (place.workspace, worktree.path, git_dir), "the agent commits in its worktree"
+        assert sandbox.paths.readable == (*worktree.linked, objects, tmp_path / "tools")
         assert sandboxes.claude_config(place) == home / ".claude" == Path(sandbox.env({})["CLAUDE_CONFIG_DIR"])
     finally:
         asyncio.run(sandbox.stop())
@@ -320,12 +325,14 @@ def test_where_bubblewrap_sandboxes_an_agent_its_sandbox_writes_its_branch_s_tre
     assert unconfined.claude_config(place) != home / ".claude"
 
 
-def test_a_bubblewrapped_agent_reads_the_staged_tools_its_gate_client_runs(tmp_path: Path, monkeypatch) -> None:
+def test_a_bubblewrapped_agent_reads_the_staged_tools_its_gate_client_runs(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
     tools = tmp_path / "inference-suite-tools"
     tools.mkdir()
     monkeypatch.setenv("INFERENCE_SUITE_TOOL_CACHE", str(tools))
     isolation = BwrapIsolation(BwrapProbe("/usr/bin/bwrap", (0, 13, 1), ()))
-    worktree = SimpleNamespace(path=tmp_path / "worktree", linked=())
+    worktree = SimpleNamespace(path=tmp_path / "worktree", linked=(), admin=None)
     worktree.path.mkdir()
     place = BranchPlace(worktree, object(), tmp_path / "branch" / "session")
     lease = BranchLease("lease-1", "a1", (6,), tmp_path / "lease-1", {}, 1)
@@ -338,3 +345,28 @@ def test_a_bubblewrapped_agent_reads_the_staged_tools_its_gate_client_runs(tmp_p
         assert str(tools) in policy.read_only and str(tools) not in policy.writable
     finally:
         asyncio.run(sandbox.stop())
+
+
+def test_an_agent_whose_sandbox_falls_back_to_unconfined_has_its_spend_read_from_the_app_s_claude_dir(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # Below /tmp, bubblewrap before 0.12 cannot bind the branch's trees: the sandbox runs unconfined, and so does its
+    # Claude CLI, which keeps its transcripts where the app's does.
+    claude = Path(tempfile.mkdtemp(prefix="hl-claude-", dir="/var/tmp"))
+    monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(claude))
+    isolation = BwrapIsolation(BwrapProbe("/usr/bin/bwrap", (0, 9, 0), ()))
+    with tempfile.TemporaryDirectory(dir="/tmp") as below_tmp:
+        area = Path(below_tmp)
+        worktree = SimpleNamespace(path=area / "worktree", linked=(), admin=None)
+        worktree.path.mkdir()
+        place = BranchPlace(worktree, object(), area / "branch" / "session")
+        sandboxes = LocalAgentSandboxes(object(), choose=lambda: isolation)
+        lease = BranchLease("lease-1", "a1", (6,), area / "lease-1", {}, 1)
+
+        sandbox = sandboxes.sandbox("a1", place, worktree.path, lease)
+        try:
+            assert not isinstance(sandbox.isolation, BwrapIsolation), "the sandbox fell back to unconfined"
+            assert sandboxes.claude_config(place) == claude
+        finally:
+            asyncio.run(sandbox.stop())
+            claude.rmdir()

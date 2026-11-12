@@ -8,7 +8,9 @@ import os
 import select
 import signal
 import stat
+import shutil
 import subprocess
+import tempfile
 import time
 from collections.abc import Awaitable, Callable, Mapping
 from dataclasses import asdict, replace, dataclass, field
@@ -16,6 +18,7 @@ from pathlib import Path
 
 import pytest
 
+from hyperloom.common.agent_isolation import BwrapIsolation
 from hyperloom.contracts.measurement import Attempt, Purpose, TestKind, TestRequest, Validity
 from hyperloom.contracts.recipe import (
     ConfigDelta,
@@ -42,7 +45,9 @@ from hyperloom_multibranch.specialist import (
     keep_requeue,
     worktree as worktree_module,
 )
-from hyperloom_multibranch.specialist.agent_onboarding import SHIM_DIR, OnboardingSetup
+from hyperloom_multibranch.specialist.agent_onboarding import SHIM_DIR, AgentSandbox, OnboardingSetup
+from hyperloom_multibranch.specialist.agent_sandbox import LocalAgentSandbox
+from hyperloom_multibranch.specialist.agent_sessions import AgentSandboxes, LocalAgentSandboxes
 from hyperloom_multibranch.specialist.agent_spec import AgentSpec
 from hyperloom_multibranch.specialist.agent_session import BranchPlace
 from hyperloom_multibranch.specialist.agent_manifest import AgentManifest
@@ -67,6 +72,7 @@ from hyperloom_multibranch.specialist.runtime import (
     SessionStart,
 )
 from hyperloom_multibranch.specialist.worktree import Upstream
+from hyperloom_common.tests._bwrap_host import usable_bwrap
 from hyperloom_common.tests.shared_accounts import Accounts, other_accounts
 from hyperloom_multibranch.tests.branch_rig import branch_rig
 from hyperloom_multibranch.tests.agent_rig import (
@@ -288,10 +294,11 @@ async def _rig(
     source: Path | None = None,
     least_run: float = 0.0,
     spec_fields: Mapping[str, object] | None = None,
+    sandboxes: AgentSandboxes | None = None,
 ) -> Rig:
     """A session of the agent on :data:`BRANCH`, opened at the root, or at ``start`` committed onto it the way PRELUDE
     replays a Recipe KB champion; the agent's source is ``source``, or a repository holding :data:`AGENT` and
-    :data:`COMPONENT_AGENT`, and its spec has ``spec_fields``."""
+    :data:`COMPONENT_AGENT`, and its spec has ``spec_fields``. Its sandbox is the rig's, or one of ``sandboxes``."""
 
     rig = await branch_rig(tmp_path, ROOT, BRANCH)
     start_commit = rig.root if start is None else await rig.repo.commit(BRANCH, rig.root, start, "champion")
@@ -308,6 +315,8 @@ async def _rig(
         return OnboardingSetup(agent_sandbox, onboard, start_seconds=start_seconds, poll_seconds=0.05)
 
     def sandbox_for(lease: BranchLease) -> LocalSandbox:
+        if sandboxes is not None:
+            return sandboxes.sandbox(BRANCH, place, worktree.path, lease)
         if lease.lease_id in sandbox.gone:
             raise SandboxGone(f"the sandbox of {lease.lease_id} ended")
         sandbox.leases.append(lease)
@@ -2027,3 +2036,64 @@ async def test_a_requeue_due_while_a_later_keep_waits_gives_way_to_it(
 
     assert len(rig.toolbox.requests) == 2 and "+max_num_seqs = 512" in rig.patch(rig.toolbox.requests[1])
     assert not any("goes once more" in note for note in await rig.notices())
+
+
+async def test_a_branch_s_end_stops_its_agent_s_sandbox(tmp_path: Path) -> None:
+    rig = await _rig(tmp_path, Agent(keeps=(), tail=30.0))
+
+    await rig.session.preflight()
+    assert rig.sandbox.stops == 0
+    await rig.session.stop()
+
+    assert rig.sandbox.stops == 1, "the branch's end stops its sandbox, ending what it holds on this host"
+
+
+@dataclass
+class _Made:
+    """A session's sandboxes on this host, each kept to be looked at."""
+
+    sandboxes: LocalAgentSandboxes
+    made: list[LocalAgentSandbox] = field(default_factory=list)
+
+    def sandbox(self, branch: str, place: BranchPlace, source: Path, lease: BranchLease) -> AgentSandbox:
+        made = self.sandboxes.sandbox(branch, place, source, lease)
+        assert isinstance(made, LocalAgentSandbox)
+        self.made.append(made)
+        return made
+
+
+@pytest.mark.agent_isolation
+async def test_under_bubblewrap_git_works_in_an_agent_s_worktree_and_the_branch_s_end_ends_its_sandbox() -> None:
+    probe = usable_bwrap()
+    # Outside /tmp: before bubblewrap 0.12 nothing may be bound below the sandbox's own /tmp.
+    area = Path(tempfile.mkdtemp(prefix="hl-agent-session-", dir="/var/tmp")).resolve()
+    try:
+        made = _Made(LocalAgentSandboxes(None, choose=lambda: BwrapIsolation(probe)))
+        rig = await _rig(area, Agent(commits=True), sandboxes=made)
+        worktree = rig.session._place.worktree.path
+
+        await rig.session.preflight()
+        running = asyncio.create_task(rig.session.run())
+        await _until(lambda: rig.toolbox.requests, "the first import")
+        await rig.toolbox_blackboard.write_result(result("r1"))
+        await _until(lambda: len(rig.toolbox.requests) == 2, "the second import")
+        await rig.toolbox_blackboard.write_result(result("r2"))
+        with pytest.raises(SessionFinished):
+            await asyncio.wait_for(running, 30)
+        [sandbox] = made.made
+        git = "git -c user.name=t -c user.email=t@t"
+        probed = await sandbox.run(
+            f"git status --short && {git} commit -q --allow-empty -m probe && git log --format=%s", worktree, {}, 60
+        )
+        confined = sandbox._confined
+        assert confined is not None and confined.holder is not None, "the agent ran confined"
+        holder, scratch = confined.holder, confined.scratch
+
+        await rig.session.stop()
+    finally:
+        shutil.rmtree(area, ignore_errors=True)
+
+    assert probed.returncode == 0, probed.output
+    assert probed.output.split()[:3] == ["probe", "k", "k"], "the agent committed each keep, and git ran confined"
+    assert not os.path.exists(f"/proc/{holder.pid}"), "the branch's end ended the sandbox's holder"
+    assert not os.path.exists(scratch.tmp) and not os.path.exists(scratch.shm), "and deleted its /tmp and /dev/shm"

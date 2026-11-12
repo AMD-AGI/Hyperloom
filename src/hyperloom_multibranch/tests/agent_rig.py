@@ -49,6 +49,7 @@ class Sandbox:
     def __init__(self, starts: list[Process], installs: tuple[int, ...] = (), keep: str = "") -> None:
         self.starts, self.installs, self.keep = starts, list(installs), keep
         self.ran: list[tuple[str, Path, Mapping[str, str]]] = []
+        self.stopped = False
 
     async def run(self, command: str, cwd: Path, env: Mapping[str, str], timeout: float) -> CommandResult:
         self.ran.append((command, cwd, env))
@@ -61,6 +62,9 @@ class Sandbox:
             (cwd / self.keep).parent.mkdir(parents=True, exist_ok=True)
             (cwd / self.keep).write_text('{"keeps": 0}', encoding="utf-8")
         return self.starts.pop(0)
+
+    async def stop(self) -> None:
+        self.stopped = True
 
 
 class Onboarder:
@@ -274,9 +278,17 @@ class LocalSandbox:
         self.gone: set[str] = set()
         self.usage = _Usage()
         self.watch_said: list[str] = []
+        self.stops = 0
+        self.processes: list[LocalProcess] = []
 
     def watched(self) -> str:
         return self.watch_said.pop(0) if self.watch_said else ""
+
+    async def stop(self) -> None:
+        """Kill every process the sandbox started, as a sandbox's stop does."""
+        self.stops += 1
+        for process in self.processes:
+            await process.kill()
 
     async def run(self, command: str, cwd: Path, env: Mapping[str, str], timeout: float) -> CommandResult:
         self.ran.append(command)
@@ -305,7 +317,8 @@ class LocalSandbox:
         )
         self.started.append(command)
         self.envs.append(dict(env))
-        return LocalProcess(process, log)
+        self.processes.append(LocalProcess(process, log))
+        return self.processes[-1]
 
 
 class Toolbox:

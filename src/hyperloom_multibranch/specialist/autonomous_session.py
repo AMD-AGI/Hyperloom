@@ -488,13 +488,13 @@ class AutonomousSession:
             await self._setup.toolbox.release_branch_sandbox(self._held().lease_id)
 
     async def stop(self) -> None:
-        """Stop the agent, then learn what its ledger gained since the last keep, which no later keep imports."""
+        """Stop the agent and its sandbox, then learn what its ledger gained since the last keep, which none imports."""
 
         self._stopped.set()
         running = self._process is not None and self._process.returncode is None
-        if self._process is not None:
+        if self._sandbox is not None:
             try:
-                await self._process.kill()
+                await self._sandbox.stop()
             except SandboxUnavailable as error:
                 log.warning("the agent of %s could not be killed: %s", self._start.branch, error)
                 await self._note(f"the agent could not be killed: {error}")
@@ -519,7 +519,7 @@ class AutonomousSession:
         sandbox: AgentSandbox | None = None
         if (self._place.workspace / LEASE_FILE).exists():
             try:
-                sandbox = self._setup.sandbox(self._held())
+                sandbox = self._sandbox = self._setup.sandbox(self._held())
                 process = await sandbox.start(command, checkout, env)
             except SandboxGone as gone:
                 await self._note(f"the agent's sandbox ended ({gone})")
@@ -542,7 +542,7 @@ class AutonomousSession:
         lease = await self._lease(self._setup.spec.tp)
         installed = False
         try:
-            sandbox = self._setup.sandbox(lease)
+            sandbox = self._sandbox = self._setup.sandbox(lease)
             await install(
                 manifest, self._setup.onboarding(sandbox), self._agent_dir / SOURCE_DIR, agent_env(self._agent_dir)
             )

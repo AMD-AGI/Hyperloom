@@ -12,6 +12,7 @@ import threading
 import time
 from collections.abc import Callable, Iterator
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
@@ -65,8 +66,9 @@ def _lease(tmp_path: Path, name: str) -> BranchLease:
 
 
 def _sandbox(tmp_path: Path, branch: str) -> LocalAgentSandbox:
+    place = SimpleNamespace(workspace=tmp_path / branch)
     sandbox = LocalAgentSandboxes(None, choose=lambda: UNCONFINED).sandbox(
-        branch, None, tmp_path, _lease(tmp_path, branch)
+        branch, place, tmp_path, _lease(tmp_path, branch)
     )
     sandbox.poll_seconds = 0.02
     sandbox.grace_seconds = 1.0
