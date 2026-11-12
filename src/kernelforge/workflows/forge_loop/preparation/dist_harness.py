@@ -29,18 +29,28 @@ operator whose outputs carry different contracts -- an exact cache record next
 to a toleranced activation -- cannot state them as one SNR, so the driver judges
 each rank's answer and the harness reports ``allclose`` from the worst rank.
 
+A case can also declare the launch structure it is measured on: ``launches``
+pins the CUDA graph one candidate call captures to that many nodes, all of them
+kernels, and ``resident`` requires every captured kernel's grid to fit on the
+GPU at once. Those are the two properties a monokernel is defined by -- one
+launch whose workgroups wait on each other -- and a candidate that splits the
+launch or outgrows the GPU is refused before it is judged or timed.
+
 Copied next to the driver during task preparation, imported as ``dist_harness``.
 """
 
 from __future__ import annotations
 
 import argparse
+import ctypes
+import functools
 import math
 import os
 import re
 import statistics
 import subprocess
 import sys
+from collections import Counter
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, field
 from typing import Any
@@ -65,6 +75,28 @@ MEASURED = [0]
 #: A judge metric's name and text value: no whitespace or colon, so a metric
 #: line can never read as the ``SNR:`` or ``allclose:`` line the loop parses.
 _METRIC_TOKEN = re.compile(r"[A-Za-z0-9_.+-]+")
+
+_KERNEL_NODE = "kernel"
+
+#: ``hipGraphNodeType`` values, by the name a refusal reports.
+_HIP_GRAPH_NODE_KINDS = {
+    0: _KERNEL_NODE,
+    1: "memcpy",
+    2: "memset",
+    3: "host",
+    4: "child_graph",
+    5: "empty",
+    6: "wait_event",
+    7: "event_record",
+    10: "mem_alloc",
+    11: "mem_free",
+}
+
+#: The occupancy queries for a runtime-API kernel's host stub and for a module function, in that order.
+_OCCUPANCY_QUERIES = (
+    "hipOccupancyMaxActiveBlocksPerMultiprocessor",
+    "hipModuleOccupancyMaxActiveBlocksPerMultiprocessor",
+)
 
 
 @dataclass(frozen=True)
@@ -99,6 +131,10 @@ class Case:
     that rank's ``Judgement``; every case of a suite has one or none does.
     ``verify_replay`` also judges the output of the last timed graph replay, for a
     candidate whose answer depends only on its inputs.
+
+    ``launches`` is how many graph nodes one candidate call must capture to, all
+    of them kernels; ``resident`` requires each of those kernels' grid to fit on
+    the GPU at once. Neither is checked unless declared.
     """
 
     case_id: str
@@ -107,6 +143,8 @@ class Case:
     reference: Callable[[RankContext, Any], Any]
     judge: Callable[[RankContext, Any, Any], Judgement] | None = None
     verify_replay: bool = False
+    launches: int | None = None
+    resident: bool = False
 
 
 class HarnessError(RuntimeError):
@@ -326,6 +364,154 @@ def _verify_replay(case: Case, context: RankContext, seed: int, replayed: Any) -
         raise HarnessError(f"case {case.case_id}: the output of its last timed graph replay fails its judge")
 
 
+@dataclass(frozen=True)
+class _GraphNode:
+    """One node of a captured candidate call: its kind and, for a kernel, its grid and residency."""
+
+    kind: str
+    ctas: int = 0
+    resident_per_cu: int | None = None
+
+
+class _Dim3(ctypes.Structure):
+    _fields_ = [("x", ctypes.c_uint32), ("y", ctypes.c_uint32), ("z", ctypes.c_uint32)]
+
+
+class _KernelNodeParams(ctypes.Structure):
+    """``hipKernelNodeParams``."""
+
+    _fields_ = [
+        ("blockDim", _Dim3),
+        ("extra", ctypes.c_void_p),
+        ("func", ctypes.c_void_p),
+        ("gridDim", _Dim3),
+        ("kernelParams", ctypes.c_void_p),
+        ("sharedMemBytes", ctypes.c_uint32),
+    ]
+
+
+@functools.cache
+def _hip_runtime() -> ctypes.CDLL:
+    """The HIP runtime torch loaded, so graph and kernel handles mean the same thing to both."""
+    with open("/proc/self/maps") as maps:
+        path = next((line.split()[-1] for line in maps if "libamdhip64" in line), "libamdhip64.so")
+    hip = ctypes.CDLL(path)
+    pointer, count = ctypes.c_void_p, ctypes.POINTER(ctypes.c_int)
+    hip.hipGraphGetNodes.argtypes = [pointer, pointer, ctypes.POINTER(ctypes.c_size_t)]
+    hip.hipGraphNodeGetType.argtypes = [pointer, count]
+    hip.hipGraphKernelNodeGetParams.argtypes = [pointer, ctypes.POINTER(_KernelNodeParams)]
+    for name in _OCCUPANCY_QUERIES:
+        getattr(hip, name).argtypes = [count, pointer, ctypes.c_int, ctypes.c_size_t]
+    return hip
+
+
+def _hip_ok(status: int, what: str) -> None:
+    if status != 0:
+        raise HarnessError(f"{what} failed with HIP error {status}")
+
+
+def _resident_per_cu(func: int, threads: int, lds_bytes: int) -> int | None:
+    """How many CTAs of a kernel one CU holds at once, or None when HIP knows no such kernel.
+
+    A graph node carries whatever handle its launch used: the host stub of a
+    runtime-API launch, or the module function of a kernel loaded from a code
+    object, which is how DSL-compiled kernels arrive. Both lookups are tried.
+    """
+    hip = _hip_runtime()
+    blocks = ctypes.c_int(0)
+    for name in _OCCUPANCY_QUERIES:
+        if getattr(hip, name)(ctypes.byref(blocks), ctypes.c_void_p(func), threads, lds_bytes) == 0:
+            return blocks.value
+    return None
+
+
+def _graph_nodes(graph: torch.cuda.CUDAGraph) -> list[_GraphNode]:
+    """Every node of a captured graph, read back from HIP."""
+    hip = _hip_runtime()
+    raw = ctypes.c_void_p(graph.raw_cuda_graph())
+    count = ctypes.c_size_t(0)
+    _hip_ok(hip.hipGraphGetNodes(raw, None, ctypes.byref(count)), "hipGraphGetNodes")
+    handles = (ctypes.c_void_p * count.value)()
+    _hip_ok(hip.hipGraphGetNodes(raw, handles, ctypes.byref(count)), "hipGraphGetNodes")
+    nodes = []
+    for handle in handles[: count.value]:
+        kind = ctypes.c_int(-1)
+        _hip_ok(hip.hipGraphNodeGetType(ctypes.c_void_p(handle), ctypes.byref(kind)), "hipGraphNodeGetType")
+        name = _HIP_GRAPH_NODE_KINDS.get(kind.value, f"type{kind.value}")
+        if name != _KERNEL_NODE:
+            nodes.append(_GraphNode(kind=name))
+            continue
+        params = _KernelNodeParams()
+        _hip_ok(
+            hip.hipGraphKernelNodeGetParams(ctypes.c_void_p(handle), ctypes.byref(params)),
+            "hipGraphKernelNodeGetParams",
+        )
+        grid, block = params.gridDim, params.blockDim
+        threads = block.x * block.y * block.z
+        nodes.append(
+            _GraphNode(
+                kind=name,
+                ctas=grid.x * grid.y * grid.z,
+                resident_per_cu=_resident_per_cu(params.func, threads, params.sharedMemBytes),
+            )
+        )
+    return nodes
+
+
+def _captured_nodes(case: Case, context: RankContext, seed: int) -> list[_GraphNode]:
+    """The graph one candidate call captures to, after a warmup call outside the capture."""
+    if torch.version.hip is None:
+        raise HarnessError("a declared launch structure is read from a HIP graph; this torch is not a ROCm build")
+    inputs = _seeded_inputs(case, context, seed)
+    case.call_candidate(context, inputs)
+    torch.cuda.synchronize()
+    graph = torch.cuda.CUDAGraph(keep_graph=True)
+    try:
+        with torch.cuda.graph(graph):
+            case.call_candidate(context, inputs)
+        return _graph_nodes(graph)
+    finally:
+        graph.reset()
+
+
+def _launch_violation(case: Case, nodes: Sequence[_GraphNode], compute_units: int) -> str | None:
+    """What a captured call breaks of the case's declared launch structure, or None."""
+    kinds = Counter(node.kind for node in nodes)
+    if case.launches is not None and (len(nodes) != case.launches or kinds[_KERNEL_NODE] != len(nodes)):
+        found = ", ".join(f"{kind} x{n}" for kind, n in sorted(kinds.items())) or "none"
+        return f"one call captured {len(nodes)} graph node(s) ({found}); the case declares {case.launches}, all kernels"
+    if not case.resident:
+        return None
+    for node in nodes:
+        if node.kind != _KERNEL_NODE:
+            continue
+        if node.resident_per_cu is None:
+            return "a captured kernel's occupancy cannot be queried, so its residency cannot be verified"
+        capacity = node.resident_per_cu * compute_units
+        if node.ctas > capacity:
+            return (
+                f"a captured kernel's grid of {node.ctas} CTAs exceeds the {capacity} that can be resident "
+                f"({node.resident_per_cu} per CU x {compute_units} CUs)"
+            )
+    return None
+
+
+def _check_launch_structure(case: Case, context: RankContext, seed: int) -> None:
+    """Refuse, on every rank together, a candidate whose call breaks the case's declared launch structure.
+
+    Every rank agrees before any of them refuses: a rank that left alone would
+    strand the others in the next collective.
+    """
+    if case.launches is None and not case.resident:
+        return
+    compute_units = torch.cuda.get_device_properties(context.device).multi_processor_count
+    violation = _launch_violation(case, _captured_nodes(case, context, seed), compute_units)
+    if violation is not None:
+        print(f"launch structure: {case.case_id} rank={context.rank}: {violation}", file=sys.stderr)
+    if not _every_rank_passes(violation is None, context):
+        raise HarnessError(f"case {case.case_id}: {violation or 'another rank broke the declared launch structure'}")
+
+
 def _bench_case(case: Case, context: RankContext, seed: int, warmup: int, iters: int) -> list[float]:
     """Time one case under graph replay, returning the slowest rank per iteration.
 
@@ -410,6 +596,7 @@ def _run_worker(cases: Sequence[Case], context: RankContext, seed: int, args: ar
     if args.bench_mode:
         for case in _select(cases, args.bench_case):
             scoped = _context_for(context, case)
+            _check_launch_structure(case, scoped, seed)
             samples = _bench_case(case, scoped, seed, args.warmup, args.iters)
             if speak:
                 for sample in samples:
@@ -418,7 +605,11 @@ def _run_worker(cases: Sequence[Case], context: RankContext, seed: int, args: ar
         return 0
 
     if cases[0].judge is not None:
-        verdicts = [_judge_case(case, _context_for(context, case), seed) for case in cases]
+        verdicts = []
+        for case in cases:
+            scoped = _context_for(context, case)
+            _check_launch_structure(case, scoped, seed)
+            verdicts.append(_judge_case(case, scoped, seed))
         if speak:
             print(f"allclose: {all(verdicts)}")
         return 0
@@ -426,6 +617,7 @@ def _run_worker(cases: Sequence[Case], context: RankContext, seed: int, args: ar
     worst = math.inf
     for case in _select(cases, ""):
         scoped = _context_for(context, case)
+        _check_launch_structure(case, scoped, seed)
         worst = min(worst, _check_case(case, scoped, seed))
     if speak:
         if worst == math.inf:

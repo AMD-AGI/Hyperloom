@@ -19,6 +19,7 @@ device binding, and any behaviour of a real NCCL/RCCL collective.
 from __future__ import annotations
 
 import math
+from types import SimpleNamespace
 
 import pytest
 
@@ -474,6 +475,86 @@ def test_a_refused_replay_releases_its_graph_before_the_teardown(solo, context, 
         dist_harness._bench_case(case, context, seed=11, warmup=2, iters=3)
 
     assert resets == [1]
+
+
+# --- a declared launch structure ---------------------------------------------
+
+
+def _kernel(ctas=256, per_cu=1):
+    return dist_harness._GraphNode(kind="kernel", ctas=ctas, resident_per_cu=per_cu)
+
+
+def test_a_call_that_captures_a_second_kernel_breaks_a_declared_single_launch():
+    violation = dist_harness._launch_violation(_case(launches=1), [_kernel(), _kernel()], compute_units=304)
+
+    assert "captured 2 graph node(s) (kernel x2)" in violation
+
+
+def test_a_copy_beside_the_one_kernel_is_not_a_single_launch():
+    """A launch that moved half its work into a memcpy has split, whatever the kernel count."""
+    nodes = [_kernel(), dist_harness._GraphNode(kind="memcpy")]
+
+    violation = dist_harness._launch_violation(_case(launches=1), nodes, compute_units=304)
+
+    assert "(kernel x1, memcpy x1)" in violation
+
+
+def test_a_grid_larger_than_the_gpu_holds_at_once_is_refused():
+    """Workgroups that wait on each other deadlock when some of them cannot be resident."""
+    violation = dist_harness._launch_violation(_case(resident=True), [_kernel(ctas=512)], compute_units=304)
+
+    assert "grid of 512 CTAs exceeds the 304 that can be resident (1 per CU x 304 CUs)" in violation
+
+
+def test_a_kernel_whose_occupancy_is_unknown_is_not_taken_as_resident():
+    violation = dist_harness._launch_violation(_case(resident=True), [_kernel(per_cu=None)], compute_units=304)
+
+    assert "cannot be verified" in violation
+
+
+def test_one_resident_launch_meets_the_declared_structure():
+    case = _case(launches=1, resident=True)
+
+    assert dist_harness._launch_violation(case, [_kernel(ctas=256)], compute_units=304) is None
+
+
+def test_a_case_that_declares_no_launch_structure_is_never_captured(solo, context, monkeypatch):
+    def _refuse(*args, **kwargs):
+        raise AssertionError("an undeclared launch structure must not be captured")
+
+    monkeypatch.setattr(dist_harness, "_captured_nodes", _refuse)
+
+    dist_harness._check_launch_structure(_case(), context, seed=11)
+
+
+def test_a_broken_launch_structure_is_refused_on_every_rank_together(solo, context, monkeypatch):
+    """A rank that refused alone would strand the others in the next collective."""
+    monkeypatch.setattr(dist_harness, "_captured_nodes", lambda case, ctx, seed: [_kernel(), _kernel()])
+    monkeypatch.setattr(
+        dist_harness.torch.cuda, "get_device_properties", lambda device: SimpleNamespace(multi_processor_count=304)
+    )
+
+    with pytest.raises(HarnessError, match="captured 2 graph node"):
+        dist_harness._check_launch_structure(_case(launches=1), context, seed=11)
+    assert solo.reductions == ["min"]
+
+
+@requires_gpu
+def test_the_captured_graph_counts_each_kernel_and_reads_its_residency(solo, context):
+    nodes = dist_harness._captured_nodes(_case(call_candidate=lambda ctx, inputs: inputs * 2 + 1.0), context, seed=11)
+
+    kernels = [node for node in nodes if node.kind == "kernel"]
+    assert len(kernels) == 2
+    assert all(node.ctas >= 1 and node.resident_per_cu >= 1 for node in kernels)
+
+
+@requires_gpu
+def test_a_judged_run_refuses_a_candidate_that_splits_its_declared_launch(solo, context, monkeypatch):
+    monkeypatch.setattr(dist_harness, "MEASURED", [0])
+    case = _case(call_candidate=lambda ctx, inputs: inputs * 2 + 0.0, judge=_exact_judge, launches=1)
+
+    with pytest.raises(HarnessError, match="captured 2 graph node"):
+        dist_harness._run_worker([case], context, 11, dist_harness._parse_args([]))
 
 
 # --- the scoring helpers -----------------------------------------------------
