@@ -17,7 +17,16 @@ from hyperloom.common.env_safety import (
 )
 
 from ._framework_rewrite_evidence import _CATEGORY_TAXONOMY
-from ._integrate_vocabulary import ATTRIBUTION_CYCLE_BENCH, ATTRIBUTION_CYCLE_BROKEN, ATTRIBUTION_CYCLE_PENDING
+from ._grid_base import TS_FAILED
+from ._integrate_vocabulary import (
+    ATTRIBUTION_CYCLE_BENCH,
+    ATTRIBUTION_CYCLE_BROKEN,
+    ATTRIBUTION_CYCLE_PENDING,
+    ATTRIBUTION_REPLAY_BROKEN,
+)
+
+#: Attribution sources of a lever whose server failed with it on; it is neither pending nor bundled again.
+_BROKEN_SOURCES = frozenset({ATTRIBUTION_CYCLE_BROKEN, ATTRIBUTION_REPLAY_BROKEN})
 
 
 log = logging.getLogger(__name__)
@@ -486,7 +495,11 @@ def framework_lever_grid(shared_state: Any) -> list[dict[str, Any]]:
     """
     rows = _lever_rows(shared_state)
     # Arms are built over every registered lever, so attribution only picks which run, never which envs they set.
-    pending = {row["switch"] for row in rows if row.get("attributed_gain_pct") is None}
+    pending = {
+        row["switch"]
+        for row in rows
+        if row.get("attributed_gain_pct") is None and row.get("attribution_source") not in _BROKEN_SOURCES
+    }
     dormant = [row for row in rows if not row.get("default_on")]
     decomposable = [row for patch in _by_patch(dormant) if len(patch) > 1 for row in patch]
     payload: list[dict[str, Any]] = []
@@ -509,10 +522,38 @@ def dormant_lever_bundle(shared_state: Any) -> dict[str, Any] | None:
 def _screened_out(row: dict[str, Any]) -> bool:
     """Whether the cycle bench screened the lever and found no gain, or no server, in it."""
     source = row.get("attribution_source")
-    if source == ATTRIBUTION_CYCLE_BROKEN:
+    if source in _BROKEN_SOURCES:
         return True
     gain = row.get("attributed_gain_pct")
     return source == ATTRIBUTION_CYCLE_BENCH and not (isinstance(gain, (int, float)) and gain > 0)
+
+
+def lever_verdict(outcome: dict[str, Any], lever_payload: list[Any], shared_state: Any, variant: Any) -> list[Any]:
+    """The lever attributions one landed non-KEEP verdict carries: measured movements, or a solo lever broken."""
+    attributions = framework_lever_attributions([outcome], lever_payload)
+    if outcome.get("outcome") == TS_FAILED:
+        attributions += solo_lever_failure(getattr(shared_state, "authored_framework_levers", None) or [], variant)
+    return attributions
+
+
+def solo_lever_failure(levers: list[dict[str, Any]], variant: Any) -> list[dict[str, Any]]:
+    """Mark the registered lever broken when ``variant``, which failed to measure, set only that switch on."""
+    envs = dict(getattr(variant, "extra_envs", None) or {})
+    other_changes = (
+        str(getattr(variant, "extra_server_args", "") or "").strip()
+        or getattr(variant, "remove_args", None)
+        or getattr(variant, "unset_envs", None)
+    )
+    if len(envs) != 1 or other_changes:
+        return []
+    ((name, value),) = envs.items()
+    for row in levers or []:
+        if not isinstance(row, dict) or str(row.get("switch") or "") != name.strip().upper():
+            continue
+        if str(value) != str(row.get("value") or DEFAULT_SWITCH_VALUE):
+            return []
+        return [{"switch": row["switch"], "gain_pct": None, "source": ATTRIBUTION_REPLAY_BROKEN}]
+    return []
 
 
 def _lever_rows(shared_state: Any) -> list[dict[str, Any]]:

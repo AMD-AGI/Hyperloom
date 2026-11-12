@@ -41,6 +41,9 @@ ATTRIBUTION_CYCLE_BENCH = "cycle_bench"
 ATTRIBUTION_CYCLE_BROKEN = "cycle_bench_broken"
 ATTRIBUTION_CYCLE_INCONCLUSIVE = "cycle_bench_inconclusive"
 
+#: Attribution source of a lever whose replay round with only that switch on failed to measure.
+ATTRIBUTION_REPLAY_BROKEN = "replay_broken"
+
 #: Where the patches this action applies came from. Every source lands through
 #: the same apply / vet / bench / KEEP-REVERT pipeline below; they differ only
 #: in how the diff is obtained and, for ``upstream_pr``, in which gate admitted

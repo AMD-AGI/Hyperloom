@@ -59,7 +59,7 @@ from ..stop_attribution import (
     variant_budget_stop,
 )
 from ._accuracy_gate import parse_eval_results
-from ._framework_switch_manifest import LEAVE_ONE_OUT, framework_lever_attributions, framework_lever_grid
+from ._framework_switch_manifest import LEAVE_ONE_OUT, framework_lever_attributions, framework_lever_grid, lever_verdict
 from .bypass_scriptable import declared_lever_payload
 from . import cycle_bench_arm as _cycle_bench
 from hyperloom.inference_optimizer.canonical_fingerprint import workload_signature
@@ -1379,7 +1379,7 @@ class _ExploreRound:
                 outcome = _outcome_row(
                     row, row["fingerprint"], str(row.get("reason") or ""), str(self.ctx.task.task_id)
                 )
-                attributions = framework_lever_attributions([outcome], self.lever_payload)
+                attributions = lever_verdict(outcome, self.lever_payload, self.ss, gv)
                 land_verdict(
                     self.ss,
                     self.session_dir,
