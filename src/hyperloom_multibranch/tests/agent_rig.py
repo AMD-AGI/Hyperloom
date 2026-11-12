@@ -105,7 +105,8 @@ ROOT = Recipe(
 #: gives the variable's value with ``table`` appended or replacing its last part, in Arbor's multi-part shape. LATEST
 #: names each keep, or the last only without ``latest_each``. ``skip`` gets no snapshot; ``stray`` is made on a commit
 #: MB never gave it; ``orphan`` on the root (``orphan_notes`` say so). It removes the last exit file, ends with ``exit``
-#: after ``tail`` s or 0 on SIGTERM, writing ``reason`` to run/component_exit.json before an exit 0 only.
+#: after ``tail`` s or 0 on SIGTERM, writing ``reason`` (and the plan's ``record`` keys) to run/component_exit.json
+#: before an exit 0 only.
 COMPONENT_AGENT = """
 import hashlib, json, os, pathlib, signal, subprocess, sys, time
 LISTED = "/sgl-workspace/aiter/aiter/configs/a8w8_tuned_gemm.csv:/arbor/workspace/tuned.csv"
@@ -119,7 +120,8 @@ outbox.mkdir(parents=True, exist_ok=True)
 
 def leave(reason, code):
     if code == 0 and reason:
-        (session / "component_exit.json").write_text(json.dumps({"reason": reason, "keeps": 0, "ts": time.time()}))
+        record = {"reason": reason, "keeps": 0, "ts": time.time(), **plan["record"]}
+        (session / "component_exit.json").write_text(json.dumps(record))
     if code == 2:
         print("component mode: docker_container must be @host", file=sys.stderr, flush=True)
     sys.exit(code)
@@ -211,6 +213,8 @@ class Component:
     tail: float = 0.3
     exit: int = 0
     reason: str = "done"
+    #: More keys of the exit record: ``outcome`` and ``detail``, as an Arbor that classes its ends writes them.
+    record: dict[str, object] = field(default_factory=dict)
     stray: int = 0
     skip: int = 0
     orphan: int = 0

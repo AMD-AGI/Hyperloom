@@ -1504,6 +1504,42 @@ async def test_an_agent_in_component_mode_that_finished_records_why(
     assert (await rig.notices())[-1] == f"{NOTICE} the agent finished its run: {said}"
 
 
+@pytest.mark.parametrize(
+    ("reason", "record", "said"),
+    [
+        (
+            "aborted",
+            {"outcome": "broken", "detail": "3 consecutive not-measured iterations. Last: bench did not run"},
+            "the agent's run broke: aborted (3 consecutive not-measured iterations. Last: bench did not run)",
+        ),
+        ("aborted", {}, "the agent's run broke: aborted"),
+        (
+            "retraction_conflict",
+            {"outcome": "needs_person", "detail": "KEEP 2's revert does not apply"},
+            "the agent's run stopped for a person to decide: retraction_conflict (KEEP 2's revert does not apply)",
+        ),
+        ("retraction_conflict", {}, "the agent's run stopped for a person to decide: retraction_conflict"),
+        ("deadline", {"outcome": "finished", "detail": ""}, "the agent finished its run: deadline"),
+        ("reported", {"outcome": "handed_over"}, "the agent finished its run: reported"),
+    ],
+)
+async def test_an_agent_whose_run_broke_or_needs_a_person_is_not_said_to_have_finished(
+    tmp_path: Path, reason: str, record: dict[str, object], said: str
+) -> None:
+    """Arbor exits 0 for a run its harness gave up on (``aborted``) and for one a person must decide
+    (``retraction_conflict``), and its exit record classes each (``outcome``). The branch's log says so, with the
+    record's detail; a record without an outcome, as an older Arbor writes it, is classed by its reason."""
+
+    rig = await _rig(tmp_path, Component(keeps=(), reason=reason, record=record, tail=0.6), start_seconds=0.2)
+
+    await rig.session.preflight()
+    with pytest.raises(SessionFinished) as ended:
+        await asyncio.wait_for(rig.session.run(), 10)
+
+    assert str(ended.value) == said
+    assert (await rig.notices())[-1] == f"{NOTICE} {said}"
+
+
 async def _imported(rig: Rig) -> TestRequest:
     """The one import of a component agent's run, once the run finished."""
     await rig.session.preflight()

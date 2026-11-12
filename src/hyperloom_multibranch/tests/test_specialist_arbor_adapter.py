@@ -37,13 +37,18 @@ from hyperloom_multibranch.specialist.arbor_adapter import (
     OBJECTIVE_KEY,
     OBJECTIVE_MODULE,
     BRANCH_RUN,
+    BROKEN,
     DOSSIER_DIR,
     DOSSIER_PASS,
+    FINISHED,
+    HANDED_OVER,
     INSTALL,
     LAUNCH_KEYS,
     MARKERS,
+    NEEDS_PERSON,
     PLAN_FILE,
     ArborCheckout,
+    ArborEnd,
     ArborRefused,
     SplitFailed,
     arbor_config,
@@ -55,6 +60,7 @@ from hyperloom_multibranch.specialist.arbor_adapter import (
     host_rules,
     is_arbor,
     link_built,
+    exit_end,
     exit_reason,
     mapped,
     read_launch,
@@ -1329,6 +1335,36 @@ def test_arbor_s_exit_reason_is_its_exit_file_s_or_what_is_wrong_with_the_file(
         path.write_text(content)
 
     assert exit_reason(path).startswith(said)
+
+
+@pytest.mark.parametrize(
+    ("record", "end"),
+    [
+        (None, ArborEnd("it wrote no exit reason")),
+        ({"reason": ""}, ArborEnd("its exit file names no reason: {'reason': ''}")),
+        ({"reason": "deadline"}, ArborEnd("deadline", FINISHED)),
+        (
+            {"reason": "aborted", "detail": " the bench did not run "},
+            ArborEnd("aborted", BROKEN, "the bench did not run"),
+        ),
+        ({"reason": "retraction_conflict"}, ArborEnd("retraction_conflict", NEEDS_PERSON)),
+        ({"reason": "mapped"}, ArborEnd("mapped", HANDED_OVER)),
+        ({"reason": "aborted", "outcome": "broken", "resumable": False, "code": 0}, ArborEnd("aborted", BROKEN)),
+        ({"reason": "later", "outcome": "needs_person", "detail": 3}, ArborEnd("later", NEEDS_PERSON)),
+    ],
+)
+def test_arbor_s_end_is_classed_by_its_exit_record_or_for_an_older_arbor_by_its_reason(
+    tmp_path: Path, record: dict[str, object] | None, end: ArborEnd
+) -> None:
+    """An Arbor that classes its ends says the outcome itself, so a reason this adapter has never seen is still read
+    right; one that does not gets the outcome of its reason, and any reason not known to break is a finished run's."""
+
+    path = tmp_path / "component_exit.json"
+    if record is not None:
+        path.write_text(json.dumps(record))
+
+    assert exit_end(path) == end
+    assert exit_reason(path) == end.reason
 
 
 async def test_a_map_is_split_into_one_plan_per_share_by_arbor_s_command_line(tmp_path: Path) -> None:
