@@ -325,6 +325,25 @@ async def test_geak_harness_replay_serves_the_measured_round_launch(
     assert outcome["validated"] is True
 
 
+@pytest.mark.parametrize("legacy", [False, True])
+def test_the_replay_takes_the_rounds_absolute_cards_from_its_rocr_mask_or_from_an_older_launchs_hip_mask(
+    tmp_path: Path, legacy: bool
+) -> None:
+    """A round names its cards under the ROCr mask and numbers them from 0 for HIP; a ``launch.json`` written before
+    that names them under the HIP mask alone. Either way the replay serves the round's own cards."""
+    launch = _launch(base=_two_card_base(), gpus=(4, 5))
+    if legacy:
+        env = tuple(entry for entry in launch.env_sources if entry.name != "ROCR_VISIBLE_DEVICES")
+        env = tuple(replace(entry, value="4,5") if entry.name == "HIP_VISIBLE_DEVICES" else entry for entry in env)
+        launch = replace(launch, env_sources=env)
+    else:
+        assert launch.env["HIP_VISIBLE_DEVICES"] == "0,1"
+
+    env = _geak_sweep._replay_serving_env(replay_env_spec(tmp_path, launch))
+
+    assert (env["GPU"], env["HIP_VISIBLE_DEVICES"], env["CUDA_VISIBLE_DEVICES"]) == ("4,5",) * 3
+
+
 @pytest.mark.asyncio
 @pytest.mark.parametrize("env_spec", [{}, {"launch_json": "missing"}, {"launch_json": "not_a_launch"}])
 async def test_a_replay_without_a_readable_launch_is_refused_before_launch(

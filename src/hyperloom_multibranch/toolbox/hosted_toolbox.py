@@ -44,6 +44,7 @@ from hyperloom_multibranch.contracts.blackboard.vocab import LeaseKind
 from hyperloom_multibranch.contracts.toolbox import BranchLease, LeaseCharge
 from hyperloom_multibranch.toolbox.attempts import DEFAULT_MAX_INFRA_RETRIES, INFRA_BACKOFF_SECONDS
 from hyperloom_multibranch.toolbox.hosted_executor import DEFAULT_TEST_TIMEOUT_SEC, HostedExecutor
+from hyperloom_multibranch.toolbox.merge_smoke import merge_smoke_from
 from hyperloom_multibranch.toolbox.hosted_leases import (
     HANDOVER_MIN_TESTS,
     DevSession,
@@ -583,6 +584,7 @@ def build_hosted_toolbox(
     executor = HostedExecutor(
         backend, directory, timeout_sec=options.timeout_sec, workload_kind=acceptance.workload_kind
     )
+    executor.smoke = merge_smoke_from(os.environ)
     toolbox = HostedToolbox(
         session_stores(
             blackboard, directory, inputs.run_id, native.driver if native else None, inputs.session_id or ""

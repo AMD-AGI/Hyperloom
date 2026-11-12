@@ -117,13 +117,15 @@ def _served_model(launch: Launch) -> str:
 def _replay_serving_env(env_spec: Mapping[str, Any]) -> dict[str, str]:
     """The serving identity of the round GEAK was handed, as that round's ``launch.json`` records it.
 
-    The round's server saw no other visibility mask than the guard's, so its GPUs are absolute card ids.
+    The round's server saw no other visibility mask than the guard's, so its GPUs are absolute card ids: under the ROCr
+    mask, or under the HIP mask of a ``launch.json`` written before the guard set a ROCr one.
     """
     launch_json = first_text(env_spec.get("launch_json"))
     if not launch_json:
         raise ValueError("missing_replay_launch")
     launch = Launch.from_document(read_json_strict(Path(launch_json)))
-    gpus = str(launch.env[GPU_MASK_ENV])
+    env = launch.env
+    gpus = str(env[GPU_MASK_ENV] if GPU_MASK_ENV in env else env["HIP_VISIBLE_DEVICES"])
     return {
         "MODEL": _served_model(launch),
         "BACKEND": launch.base.framework,
