@@ -114,20 +114,22 @@ def forge_loop_prompts(monkeypatch):
 # profiler, and the fused arm to be one call to the authored entry point; the JSON
 # object gained `eager_kernels`/`eager_matches_trace` and the rule that reads them;
 # the remaining steps are the same text renumbered 6-8.
+# The emitted-check gate correction moves only the shared driver paragraph in
+# all nine non-assembly prompts (including AVE); assembly stays byte-identical.
 _SHA256_FORGE_LOOP: dict[str, str] = {
-    "ave": "09acfdaddef501d7fd34308dc5e44b5f202695a6fc257846e80843946f8bf27a",
-    "aiter": "290f5b86300a62c682789551515fd000dfe395ad2abbea5a68a5e683588fec90",
+    "ave": "3969bcd708d0dd6a46a7ed4401dbb9984cc0faa70bd13fe50509ea4e36fda434",
+    "aiter": "fe0cfc662b64fac7fa1c4a48758366549d10b710f6aacec3a609e98277c16dfd",
     "assembly": "67ce0c680f6b603d7c656feb1f1cc1f5eaf1bf4f6afc5d9f368b0361dd4b1492",
-    "ck": "d5a880ff37bdd3a1d04d33227aa1e2a7840f7cdee9559043ce14cf40e1ca6ebd",
-    "flydsl": "659dadd861489506bd75bbc4ec9e511f050f6ee03711238fd4c8def1064e1519",
+    "ck": "f6e5a979f4f96cf200d0f9bd2e161e68a3f0698b8cf771359eac0980b142613f",
+    "flydsl": "a50aa0b1c2c4ae04b5d918149096569d16b03f7343f9a2ad88bd751b11b1c6b3",
     # The group-axis rule moved fusion alone: harness contract step 4 now forbids
     # substituting gqa_groups / num_attention_heads for n_local_groups on DSv4 wo_a
     # paths, and reminds authors that H and G are often unequal.
-    "fusion": "8bfdcc271d511faf99a3ee273817ce420c9175611944120a82de50f7e9cc22d6",
-    "gluon": "8a8a0feea8cf0d0ed9030b2557bd056a80be2abc3d9e180ec2cf7819eaea91f3",
-    "hip": "5559572e047b3c4b872cc7027acb81b2920b6815845706d0b73bdef08b1ac502",
-    "hipblaslt": "90fb6e81023fd66295411408f4993453d76330f5a27e5ea58873c38edad99be3",
-    "triton": "aebb854b4e134020cd853ef5c20e38195f2defb5444c27f98bd61c60fddaa056",
+    "fusion": "d16981d3f47519fdf7eada6899d0edf3460c3b3a166d689e6870faabb462fb8f",
+    "gluon": "0c6b20832cd9f49349b5f5974137a7a35f958820530e4237a20a3fe56899956b",
+    "hip": "662524299466f87fea4ad630c7fbf414a699a373f7635d5167c50cf1099eb48d",
+    "hipblaslt": "4dc01cdd379c6c55a9847dd6f0532853b199128a5039eb09e51227657736d4da",
+    "triton": "e32193395d0dc3ea323c29f6cfb3d82f2a96c66cb447057486a7e83fef538e89",
 }
 
 

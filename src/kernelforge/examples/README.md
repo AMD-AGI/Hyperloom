@@ -190,8 +190,20 @@ The driver runs every scored correctness case and reports the suite verdict:
 
 ```
 SNR: 62.13 dB          # preferred; forge gates on this vs the SNR threshold
-allclose: True         # optional fallback if you cannot compute an SNR
+allclose: True         # optional binding check, also usable without SNR
 ```
+
+When SNR is present, it must meet the campaign's threshold. Every emitted
+`allclose: True/False` is binding: any `False` rejects the candidate, even with
+a passing SNR. Without SNR, every reported allclose verdict must be `True`.
+Output with neither metric is invalid; non-zero driver exits always fail.
+
+Emit `allclose:` only for task-required checks using task-appropriate tolerances.
+For informational comparisons, use `allclose_diagnostic: True/False` instead;
+this label is not a correctness verdict and cannot replace SNR or a binding
+allclose check. The canonical template and the SNR-based examples use it for
+their fixed `atol=rtol=1e-2` comparison so that it does not impose a second,
+task-independent numerical tolerance.
 
 **Benchmark** — `python driver.py --warmup <n> --iters <n> --bench-mode`
 
