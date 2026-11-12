@@ -52,6 +52,7 @@ people.
 | `identity` | | a label for the campaign |
 | `goal` | | one line, the title of the program the agent reads |
 | `target` | none | a number (the metric to reach), or a dict; reaching it ends a round |
+| `agent_model` | none | the model every agent turn runs on (`claude-opus-5-5`, or an alias the CLI takes); it sets `ARBOR_AGENT_MODEL`, which pins it without the key. Unpinned, turns run on the CLI's default. Either way each lesson row records the pin in `provenance.agent_model` and the models its turns reported in `agent_models`, the checkpoint's fingerprint carries the pin, and a turn that reports another model than the pin is warned of in the log |
 | `opt_objective` | none | the metric to optimize in place of the pack's, as `--opt-objective` takes it; a host writes it here. Or the structured form, `{metric, direction, bar_pct, guards: [{metric, band_pct} or {metric, max_pct}]}`: the bar replaces `threshold_rel`, and a broken guard is a REVERT ([hosts.md](hosts.md#the-hosts-objective)). The flag and `ARBOR_OPT_OBJECTIVE` win over it |
 | `time_budget_minutes` | none | a wall clock for the session (ignored in component mode). A resume counts what the session already spent (`<session>/clock.json`, written at each iteration's start), so a session that dies and resumes still ends at its budget; to give it more, raise the budget |
 | `review_gate` | `true` | a new session waits for a human's approval before it runs anything; `ARBOR_REVIEW_GATE` and `run --[no-]review-gate` override it |
@@ -64,6 +65,7 @@ people.
 | `space.levels` | `config, framework, kernel, feature` | the tiers, in order |
 | `space.knobs` | | knobs listed for the agent |
 | `mode` | `standalone` | `standalone` or `component` ([hosts.md](hosts.md)) |
+| `callbacks` | | `{"<event>": [<command>, ...]}`: commands Arbor starts when a lifecycle event fires, in any mode (`end`, `keep`, `revert`, … as `python3 -m arbor version --json` lists under `events`). A command is a string, split as a shell would but never run by one, or a list of arguments. Each is started without waiting for it, with `ARBOR_EVENT`, `ARBOR_SESSION` and `ARBOR_EVENT_JSON` (the journal entry) in its environment, and journaled in `lifecycle.jsonl` as kind `callback`. Checked when the config loads: an unknown event or an empty or malformed command refuses the start. Under a host the component block's `callbacks` run first ([hosts.md](hosts.md)) |
 | `policy` | | overrides the pack's `policy:` ([how-it-works.md](how-it-works.md)) |
 
 **Workspace and container**
@@ -145,7 +147,9 @@ Parallel mode reads a separate run config ([operations.md](operations.md)).
 | `directions.json` | when the map changes | the map (only the harness writes it) |
 | `objective.json` | every start | what the campaign optimizes: `metric`, `direction`, `unit`, `secondary_metric`, `source` (`pack` or `opt_objective`), `asked`, `pack_metric`. A host reads it to check the run optimizes its axis |
 | `invocation.json` | every start | how the start was asked for: `command`, its effective `params`, `from_payload` (the keys a `--payload` gave), `argv`, `payload` (`path`, `sha256`, `keys`, or null), `arbor` (the version), `ts` |
-| `kept.json` | the start, KEEP, PROBE, each iteration's start | the tree a REVERT or a NOT_MEASURED iteration goes back to: the workspace's commit and each editable tree's |
+| `kept.json` | the start, KEEP, PROBE, each iteration's start | the tree a REVERT or a NOT_MEASURED iteration goes back to: the workspace's commit and each editable tree's. An iteration's start reverts what an iteration never kept left in the tree before it records |
+| `iter_N/claim.json` | the iteration's commit | the intent and change it declared, which a host's SIGTERM before the verdict books |
+| `attempts/` | a retried iteration | `iter_N.K`: what an attempt that ended without a verdict left in `iter_N/`, moved aside before the next one starts |
 | `invalids.json` | NOT_MEASURED | each NOT_MEASURED change's commits, intent and reason, and its revisit's outcome |
 | `revisit.json` | the revisit phase | the change the next iteration measures again |
 | `stages.json`, `lane_plan.md` | kernel-plan lanes | stage attempts and the pinned plan |

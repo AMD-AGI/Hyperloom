@@ -345,6 +345,10 @@ def plugin_paths(campaign, arbor_root, session_dir) -> list[str]:
 #: Where a session records its lifecycle, one JSON object a line: each chapter it enters (``kind`` ``chapter``), and,
 #: as they are wired, the events it fires. It is the feed a host follows (docs/hosts.md); callbacks build on it.
 JOURNAL = "lifecycle.jsonl"
+#: The journal's kinds of entry: a chapter entered, a skill run in it, a skill conflict decided, an event fired, an
+#: event's error, a trigger skill started or finished, a host's callback called. Each entry carries ``schema``
+#: (``arbor.event/1``, arbor/interface.py).
+KINDS: tuple[str, ...] = ("chapter", "run", "conflict", "event", "event_error", "trigger", "callback")
 
 
 def record(session_dir, kind: str, name: str, **detail) -> dict:
@@ -354,7 +358,10 @@ def record(session_dir, kind: str, name: str, **detail) -> dict:
     import time
     from pathlib import Path
 
-    entry = {"at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()), "kind": kind, "name": name, **detail}
+    from arbor.interface import EVENT_SCHEMA
+
+    entry = {"schema": EVENT_SCHEMA, "at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()), "kind": kind,
+             "name": name, **detail}
     with (Path(session_dir) / JOURNAL).open("a", encoding="utf-8") as journal:
         journal.write(json.dumps(entry) + "\n")
     return entry

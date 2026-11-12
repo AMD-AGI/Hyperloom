@@ -35,6 +35,8 @@ import os
 import threading
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, field
+from pathlib import Path
+
 from hyperloom_common.bwrap import BwrapPolicy, BwrapPolicyError, BwrapProbe, bwrap_probe
 from hyperloom_common.env import env_str
 
@@ -50,6 +52,8 @@ from hyperloom.common.env_safety import (
 __all__ = [
     "ACCOUNT",
     "BWRAP",
+    "HOST_LAYER_ENV",
+    "LAYER_BWRAP",
     "NONE",
     "RAY_ACTOR_PATH",
     "REFUSED",
@@ -68,6 +72,7 @@ __all__ = [
     "choose_sandbox_isolation",
     "choose_test_isolation",
     "isolation_required",
+    "layer_bwrap",
     "require_agent_isolation",
     "session_isolation_lines",
     "unconfined_launch",
@@ -81,6 +86,11 @@ RAY_ACTOR_PATH = "the Ray GPU actor path cannot run the specialist as another us
 SANDBOX_ACCOUNT = "an agent sandbox runs its commands as the app's own account"
 #: The account tier's reason for a local test sandbox whose provider names no account for its processes.
 TEST_ACCOUNT = "a test sandbox runs as the app's own account where its provider names none for it"
+#: The hosting layer's directory, as its ``start.sh`` names it.
+HOST_LAYER_ENV = "HYPERLOOM_HOST_LAYER"
+#: The hosting layer's bubblewrap, below its directory.
+LAYER_BWRAP = Path("bin", "bwrap")
+
 #: The bubblewrap tier's reason in a hosted run whose entry named no hosting layer bubblewrap.
 NO_LAYER_BWRAP = "bubblewrap: a hosted run launches agents only with its hosting layer's bubblewrap, and none was named"
 
@@ -324,13 +334,15 @@ def choose_agent_isolation(user: str | None = None, *, allow_account: bool = Tru
     return _unaccounted(reason, required=isolation_required(name), warn=bool(name))
 
 
-def choose_sandbox_isolation() -> BwrapIsolation | NoIsolation:
+def choose_sandbox_isolation(*, known: BwrapProbe | None = None) -> BwrapIsolation | NoIsolation:
     """How to launch an agent sandbox's commands now: bubblewrap, else unconfined, which only a hosted run refuses.
+    ``known`` as for :func:`choose_test_isolation` (a sandbox whose own paths bubblewrap cannot bind safely,
+    :class:`~hyperloom_multibranch.specialist.agent_sandbox.LocalAgentSandbox`).
 
     Raises:
         IsolationRefused: In a hosted run, where bubblewrap cannot run a sandbox.
     """
-    return _unaccounted(SANDBOX_ACCOUNT, required=_STATE.hosted, warn=False)
+    return _unaccounted(SANDBOX_ACCOUNT, required=_STATE.hosted, warn=False, known=known)
 
 
 def choose_test_isolation(*, known: BwrapProbe | None = None) -> BwrapIsolation | NoIsolation:
@@ -352,6 +364,14 @@ def bwrap_isolation() -> BwrapIsolation | NoIsolation:
     the probe gave no answer in time."""
     found = _bwrap()
     return BwrapIsolation(found) if found.ok else NoIsolation(_bwrap_reasons(found), found.transient)
+
+
+def layer_bwrap(environ: Mapping[str, str]) -> str | None:
+    """The hosting layer's bubblewrap, in the directory ``environ``'s ``HYPERLOOM_HOST_LAYER`` names; ``None`` when it
+    names none. The one bubblewrap a hosted run launches agents with (:func:`require_agent_isolation`'s ``bwrap``):
+    the framework image may carry its own, maybe setuid, ahead of the layer's on ``PATH``."""
+    layer = environ.get(HOST_LAYER_ENV, "").strip()
+    return str(Path(layer) / LAYER_BWRAP) if layer else None
 
 
 def require_agent_isolation(*, bwrap: str | None, allow_account: bool = True) -> AgentIsolation:

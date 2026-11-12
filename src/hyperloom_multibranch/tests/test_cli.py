@@ -36,6 +36,9 @@ from pathlib import Path
 import pytest
 
 from hyperloom.common.benchmark_config import BENCHMARK_CONFIG_ENV
+from hyperloom_common import bwrap as bwrap_module
+from hyperloom_common.bwrap import BwrapProbe
+from hyperloom.common import agent_isolation
 from hyperloom_common.llm.llm_config import (
     AGENT_BACKEND_CLAUDE,
     AGENT_BACKEND_CODEX,
@@ -67,9 +70,14 @@ from hyperloom_multibranch.contracts.toolbox import WorkloadKind
 from hyperloom_multibranch.blackboard.codec import encode
 from hyperloom_multibranch.blackboard.knowledge.reference_leads import INFERENCEX_REFERENCE
 from hyperloom_multibranch.blackboard.rsi.archive import ARCHIVE_ENV
-from hyperloom_multibranch.scheduling.budget import MB_CLOSE_GRACE_CAP_SECONDS, MB_DEFAULT_MAX_HOURS
+from hyperloom_multibranch.scheduling.budget import (
+    MB_CLOSE_GRACE_CAP_SECONDS,
+    MB_DEFAULT_MAX_HOURS,
+    ExploreCap,
+    FinalWork,
+)
 from hyperloom_multibranch.scheduling import hosted_run
-from hyperloom_multibranch.scheduling.hosted_run import GRANT_MARGIN_SECONDS
+from hyperloom_multibranch.scheduling.hosted_run import GRANT_MARGIN_SECONDS, final_reserve_seconds
 from hyperloom_multibranch.scheduling.clock import Clock
 from hyperloom_multibranch.scheduling.decisions import Decision, DecisionKind, DecisionLog
 from hyperloom_multibranch.scheduling.prelude import BASELINE_ESTABLISHED
@@ -859,8 +867,15 @@ def agent_cli(agent_binaries: None, monkeypatch: pytest.MonkeyPatch) -> list[Run
 
     runs: list[RunSettings] = []
 
-    def run_session(settings: RunSettings, peer_factory: PeerFactory, services: object, *report_root: object) -> int:
+    def run_session(
+        settings: RunSettings,
+        peer_factory: PeerFactory,
+        services: object,
+        report_root: object = None,
+        explore_cap: ExploreCap | None = None,
+    ) -> int:
         runs.append(settings)
+        EXPLORE_CAPS.append(explore_cap)
         return 0
 
     def final_only(
@@ -870,6 +885,7 @@ def agent_cli(agent_binaries: None, monkeypatch: pytest.MonkeyPatch) -> list[Run
         FINISHED_AS_RESTART.append(restart)
         return 0
 
+    EXPLORE_CAPS.clear()
     FINISHED_AS_RESTART.clear()
     monkeypatch.setattr(cli, "run_session", run_session)
     monkeypatch.setattr(cli, "final_only", final_only)
@@ -877,6 +893,8 @@ def agent_cli(agent_binaries: None, monkeypatch: pytest.MonkeyPatch) -> list[Run
     return runs
 
 
+#: The EXPLORE cap each session :func:`agent_cli` noted was given.
+EXPLORE_CAPS: list[ExploreCap | None] = []
 #: Whether each finish :func:`agent_cli` noted was a restart's.
 FINISHED_AS_RESTART: list[bool] = []
 
@@ -955,7 +973,7 @@ def test_a_strict_image_check_that_fails_is_refused_like_the_other_start_up_refu
     failing = FactResult("sglang.renamed-flag", "sglang", Status.FAIL, (), "the flag is gone")
     report = ImageCheckReport(ImageCheckMode.STRICT, rule_pack_identity(), "", {}, (failing,))
 
-    def session_refused(settings: RunSettings, peer_factory: PeerFactory, services: object) -> int:
+    def session_refused(settings: RunSettings, peer_factory: PeerFactory, services: object, **_: object) -> int:
         raise ImageCheckFailed(report)
 
     monkeypatch.setattr(cli, "run_session", session_refused)
@@ -1497,6 +1515,37 @@ class Host:
         self.spec_file.write_text(json.dumps({**SPEC, **sections}), encoding="utf-8")
 
 
+#: The hosting layer a host names: its bubblewrap is ``bin/bwrap`` there.
+LAYER = "/opt/layer"
+LAYER_BWRAP = f"{LAYER}/bin/bwrap"
+DENIED = "bwrap: setting up uid map: Permission denied"
+
+
+@dataclass
+class Bubblewrap:
+    """A stand-in for bubblewrap's probe: every binary passes unless ``problems`` says otherwise (``transient`` for a
+    probe that gave no answer in time); ``asked`` records each binary probed."""
+
+    problems: tuple[str, ...] = ()
+    transient: bool = False
+    asked: list[str | None] | None = None
+
+    def __call__(self, path: str | None, *_: object) -> BwrapProbe:
+        self.asked = [*(self.asked or []), path]
+        return BwrapProbe(path, (0, 13, 1), self.problems, transient=self.transient)
+
+
+@pytest.fixture(autouse=True)
+def bubblewrap(monkeypatch: pytest.MonkeyPatch) -> Bubblewrap:
+    """A process no hosted run has marked, whose bubblewrap is the stand-in: no test here launches a real sandbox."""
+
+    stand_in = Bubblewrap()
+    monkeypatch.setattr(agent_isolation, "_STATE", agent_isolation._Process())
+    monkeypatch.setattr(bwrap_module, "_PROBES", {})
+    monkeypatch.setattr(bwrap_module, "_probe", stand_in)
+    return stand_in
+
+
 @pytest.fixture
 def host(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Host:
     """The inputs a host injects into a run created ten minutes ago, the grant stop recorded rather than armed."""
@@ -1519,6 +1568,7 @@ def host(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Host:
         "HYPERLOOM_SOURCE_SHA": "c" * 40,
         "USER_DATA_PATH": str(workspace),
         "HYPERLOOM_RUNNER_CACHE": str(tmp_path / "runner-cache"),
+        "HYPERLOOM_HOST_LAYER": LAYER,
     }.items():
         monkeypatch.setenv(name, value)
     for name in ("HYPERLOOM_MCP_PORT", "HYPERLOOM_MCP_TOKEN", "HYPERLOOM_EVENTS_DIR"):
@@ -1532,7 +1582,9 @@ def _session_ending(stop_reason: str | None, returncode: int) -> Callable[..., i
     """A session that creates its directory in the workspace, reports it, and ends with ``returncode`` after a CLOSE
     that reported ``stop_reason``, or without a CLOSE when it is ``None``."""
 
-    def run_session(settings: RunSettings, peer_factory: object, services: object, report_root: Callable) -> int:
+    def run_session(
+        settings: RunSettings, peer_factory: object, services: object, report_root: Callable, *_: object
+    ) -> int:
         layout = create_session(Path(os.environ["USER_DATA_PATH"]), settings.workload.model_basename, Clock())
         report_root(layout.root)
         if stop_reason is not None:
@@ -1581,6 +1633,61 @@ def test_a_hosted_inferencex_spec_runs_its_session_at_the_hardware_ep_it_names(
 
     assert agent_cli == [on_the_command_line]
     assert on_the_command_line.workload.ep == 2
+
+
+@pytest.mark.usefixtures("ready_environment")
+def test_a_hosted_run_whose_agents_cannot_be_isolated_ends_for_good_before_anything_starts(
+    host: Host, agent_cli: list[RunSettings], bubblewrap: Bubblewrap
+) -> None:
+    bubblewrap.problems = (DENIED,)
+
+    assert cli.main(["hosted", "run"]) == cli.EXIT_FAILED
+
+    document = host.exit_document()
+    assert (document["final"], document["returncode"]) == (True, cli.EXIT_FAILED)
+    assert str(document["error"]).startswith("agents cannot be isolated on this host: ")
+    assert f"bubblewrap ({LAYER_BWRAP}, 0.13.1): {DENIED}" in str(document["error"])
+    assert set(bubblewrap.asked or ()) == {LAYER_BWRAP}, "only the hosting layer's bubblewrap is probed"
+    assert agent_cli == [] and not any(host.workspace.iterdir())
+
+
+@pytest.mark.usefixtures("ready_environment")
+def test_a_hosted_run_whose_host_names_no_layer_ends_for_good_and_probes_no_bubblewrap(
+    host: Host, agent_cli: list[RunSettings], bubblewrap: Bubblewrap, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.delenv("HYPERLOOM_HOST_LAYER")
+
+    assert cli.main(["hosted", "run"]) == cli.EXIT_FAILED
+
+    assert agent_isolation.NO_LAYER_BWRAP in str(host.exit_document()["error"])
+    assert bubblewrap.asked is None and agent_cli == []
+
+
+@pytest.mark.usefixtures("ready_environment")
+def test_a_hosted_run_whose_bubblewrap_gave_no_answer_in_time_leaves_the_host_to_start_it_again(
+    host: Host, agent_cli: list[RunSettings], bubblewrap: Bubblewrap
+) -> None:
+    bubblewrap.problems, bubblewrap.transient = (f"bubblewrap at {LAYER_BWRAP}: no answer in 10 s",), True
+
+    with pytest.raises(TimeoutError, match="no answer in 10 s"):
+        cli.main(["hosted", "run"])
+
+    assert not (host.state_dir / "exit.json").exists()
+    assert agent_cli == [] and not any(host.workspace.iterdir())
+
+
+@pytest.mark.usefixtures("ready_environment")
+def test_a_restarted_hosted_run_checks_its_agents_isolation_before_it_finishes_the_earlier_session(
+    host: Host, agent_cli: list[RunSettings], bubblewrap: Bubblewrap, tmp_path: Path
+) -> None:
+    layout = _ended_before_final(tmp_path / "MB-earlier-session")
+    (host.state_dir / "session.json").write_text(json.dumps({"session_dir": str(layout.root)}), encoding="utf-8")
+    bubblewrap.problems = (DENIED,)
+
+    assert cli.main(["hosted", "run"]) == cli.EXIT_FAILED
+
+    assert str(host.exit_document()["error"]).startswith("agents cannot be isolated on this host: ")
+    assert agent_cli == [], "the earlier session is left as it was"
 
 
 @pytest.mark.usefixtures("ready_environment")
@@ -1743,6 +1850,63 @@ def test_a_hosted_session_ends_a_close_grace_and_a_margin_before_the_grant_and_i
     assert host.stops == [pytest.approx(3600 - grace, abs=30)]
 
 
+class _LaterBy(datetime):
+    """``datetime`` whose ``now`` runs ``ahead`` seconds past the real one, which a test moves forward."""
+
+    ahead = 0.0
+
+    @classmethod
+    def now(cls, tz: object = None) -> datetime:  # type: ignore[override]
+        return datetime.now(tz) + timedelta(seconds=cls.ahead)  # type: ignore[arg-type]
+
+
+@pytest.mark.usefixtures("ready_environment")
+def test_the_grant_stop_counts_what_preparing_the_start_took(
+    host: Host, agent_cli: list[RunSettings], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    host.started(seconds_ago=GRANT["max_runtime_sec"] - 3600)
+    prepare = cli.hosted_ready_session
+
+    def slow_to_prepare(*args: object, **kwargs: object) -> object:
+        _LaterBy.ahead = 900.0
+        return prepare(*args, **kwargs)  # type: ignore[arg-type]
+
+    monkeypatch.setattr(_LaterBy, "ahead", 0.0)
+    monkeypatch.setattr(cli, "datetime", _LaterBy)
+    monkeypatch.setattr(cli, "hosted_ready_session", slow_to_prepare)
+
+    assert cli.main(["hosted", "run"]) == 0
+
+    assert host.stops == [pytest.approx(3600 - 900 - MB_CLOSE_GRACE_CAP_SECONDS, abs=30)]
+
+
+@pytest.mark.usefixtures("ready_environment")
+def test_a_hosted_session_ends_explore_a_final_reserve_before_the_grant_s_stop(
+    host: Host, agent_cli: list[RunSettings]
+) -> None:
+    created = datetime.fromisoformat(os.environ["HYPERLOOM_RUN_CREATED_AT"]).timestamp()
+
+    assert cli.main(["hosted", "run"]) == 0
+
+    stop = created + GRANT["max_runtime_sec"] - MB_CLOSE_GRACE_CAP_SECONDS
+    [cap] = EXPLORE_CAPS
+    assert cap is not None
+    for longest in (0.0, 1500.0):
+        work = FinalWork(4 * longest, 3 * longest, longest, 1)
+        assert cap(work) == pytest.approx(stop - GRANT_MARGIN_SECONDS - final_reserve_seconds(work), abs=1.0)
+
+
+@pytest.mark.usefixtures("ready_environment")
+def test_a_session_run_with_no_grant_has_no_explore_cap(
+    agent_cli: list[RunSettings], tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("USER_DATA_PATH", str(tmp_path))
+
+    assert cli.main(["run", *WORKLOAD_ARGS]) == 0
+
+    assert agent_cli == [_settings()] and EXPLORE_CAPS == [None]
+
+
 @pytest.mark.parametrize(
     ("sections", "field"),
     [
@@ -1817,7 +1981,9 @@ def test_a_leg_that_cannot_open_a_file_of_the_run_ends_it_for_good_naming_the_fi
 def test_a_hosted_session_whose_base_launch_is_refused_ends_the_run_for_good_naming_why(
     host: Host, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    def base_refused(settings: RunSettings, peer_factory: object, services: object, report_root: Callable) -> int:
+    def base_refused(
+        settings: RunSettings, peer_factory: object, services: object, report_root: Callable, *_: object
+    ) -> int:
         report_root(create_session(host.workspace, settings.workload.model_basename, Clock()).root)
         raise PeersUnavailable("the base launch could not be resolved: InferenceX has no commit 8a76a78e41")
 
@@ -1857,7 +2023,9 @@ def test_a_strict_image_check_that_fails_ends_the_hosted_run_for_good_naming_it(
     failing = FactResult("sglang.renamed-flag", "sglang", Status.FAIL, (), "the flag is gone")
     report = ImageCheckReport(ImageCheckMode.STRICT, rule_pack_identity(), "", {}, (failing,))
 
-    def session_refused(settings: RunSettings, peer_factory: object, services: object, report_root: Callable) -> int:
+    def session_refused(
+        settings: RunSettings, peer_factory: object, services: object, report_root: Callable, *_: object
+    ) -> int:
         report_root(create_session(host.workspace, settings.workload.model_basename, Clock()).root)
         raise ImageCheckFailed(report)
 
@@ -1969,7 +2137,9 @@ def restart(agent_binaries: None, host: Host, monkeypatch: pytest.MonkeyPatch) -
         _report(persisted.layout, stop_reason=persisted.ended.value, error=lifecycle.NO_BASELINE)
         return 1
 
-    def run_session(settings: RunSettings, peer_factory: object, services: object, report_root: Callable) -> int:
+    def run_session(
+        settings: RunSettings, peer_factory: object, services: object, report_root: Callable, *_: object
+    ) -> int:
         done.calls.append(("run", settings))
         layout = create_session(host.workspace, settings.workload.model_basename, Clock())
         report_root(layout.root)
@@ -2226,7 +2396,7 @@ def handed(agent_binaries: None, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     monkeypatch.setenv("HYPERLOOM_RUNNER_CACHE", str(tmp_path / "runner-cache"))
     started = Started([], [])
 
-    def run_session(settings: RunSettings, peer_factory: PeerFactory, services: object) -> int:
+    def run_session(settings: RunSettings, peer_factory: PeerFactory, services: object, **_: object) -> int:
         started.sessions.append((settings, peer_factory))
         return 0
 

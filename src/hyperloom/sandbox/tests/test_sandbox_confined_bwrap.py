@@ -164,6 +164,14 @@ def _read(sandbox: object, path: str) -> bytes:
     return found[0]
 
 
+def _text(path: Path) -> str | None:
+    """What ``path`` holds, or ``None`` while it does not exist yet."""
+    try:
+        return path.read_text()
+    except FileNotFoundError:
+        return None
+
+
 def _named(name: str) -> list[int]:
     """The running processes of this host whose argv[0] is ``name``."""
     found = []
@@ -389,6 +397,13 @@ def test_an_unsealed_sandbox_s_commands_share_one_holder_and_its_kill_ends_it(
     # Named by an argument: a Python before 3.11 renamed with ``exec -a`` cannot find its own prefix.
     sandbox.run(f"exec {python} -I -S {serve} {name}-server", background=True)
     _wait(lambda: _with_argument(f"{name}-server"))
+    confinement = sandbox._confined
+    assert confinement is not None and confinement.holder is not None
+    holder = confinement.holder
+    # A running server has not yet written its port and log: wait for the log, written last, before a command reads
+    # them. The commands' /tmp is the holder's scratch, so the test reads it from outside without starting a command.
+    log = Path(confinement.scratch.tmp) / "server.log"
+    _wait(lambda: _text(log) == "started")
     # The server's command line alone: not the launcher's, nor the shell's of the command that names it.
     server = shlex.quote(f"^[^ ]+ -I -S [^ ]+ {name}-serve[r]$")
     later = sandbox.run(
@@ -404,8 +419,7 @@ def test_an_unsealed_sandbox_s_commands_share_one_holder_and_its_kill_ends_it(
     _wait(lambda: not _with_argument(f"{name}-server"))
     sandbox.run(_bash(f"exec -a {name}-left sleep 1000"), background=True)
     _wait(lambda: _named(f"{name}-left"))
-    holder = sandbox._confined.holder if sandbox._confined else None
-    assert holder is not None
+    assert confinement.holder is holder, "the commands shared one holder"
     sandbox.kill()
 
     assert later.exit_code == 0 and later.stdout.split() == ["started", "reply", "seen", "no-private"], later

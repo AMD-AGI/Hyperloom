@@ -1,5 +1,5 @@
-"""python3 -m arbor run|master|worker|review|conflicts|restore|pause|checkpoint|iterate|version|schema|directions
-[--payload FILE]"""
+"""python3 -m arbor run|master|worker|review|conflicts|restore|pause|checkpoint|iterate|version|schema|directions|
+interface [--payload FILE]"""
 
 import sys
 
@@ -28,6 +28,7 @@ USAGE = """Usage:
   python3 -m arbor <command> --payload <file>      # the command's parameters as one JSON or YAML document
   python3 -m arbor --payload <file>                # the same, the command named in the file (command: run)
   python3 -m arbor schema [<command>] [--markdown]  # the payload's JSON Schema, from the commands' parsers
+  python3 -m arbor interface [--json]              # the host contract: ends, events, records, timing (docs/interface.md)
   python3 -m arbor --version
 Documentation: README.md and docs/ in this repository (docs/cli.md: every command's parameters)."""
 
@@ -102,6 +103,10 @@ if cmd == "schema":
 
 if cmd == "directions":
     from arbor.directions import main
+    sys.exit(main(sys.argv[2:]))
+
+if cmd == "interface":
+    from arbor.interface import main
     sys.exit(main(sys.argv[2:]))
 
 print(f"Unknown command: {cmd}", file=sys.stderr)

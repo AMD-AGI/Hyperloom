@@ -1,0 +1,15 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "arbor.event/1",
+  "title": "lifecycle.jsonl: one entry of a session's journal",
+  "description": "One JSON object a line, appended. An event's own keys follow name (session_start carries arbor, the Arbor that started; keep, revert, probe and invalid carry change and metric). A host's callbacks receive the same object.",
+  "type": "object",
+  "required": ["schema", "at", "kind", "name"],
+  "properties": {
+    "schema": {"const": "arbor.event/1"},
+    "at": {"type": "string", "description": "when, ISO 8601 UTC"},
+    "kind": {"enum": ["chapter", "run", "conflict", "event", "event_error", "trigger", "callback"]},
+    "name": {"type": "string", "description": "the chapter, skill, conflict or event"},
+    "iteration": {"type": ["integer", "null"]}
+  }
+}
