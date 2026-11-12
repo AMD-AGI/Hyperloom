@@ -34,7 +34,7 @@ from .backends import (
     _orchestration_banner,
     _resolve_orchestration_backend,
 )
-from .codex_sandbox import _check_codex_sandbox
+from .session_gates import _check_codex_sandbox, _preflight_agentx_backend
 from .model_gate import (
     _finish_model_gate,
     _preflight_context_window,
@@ -447,24 +447,6 @@ def _reset_state_file(session_dir: Path, state: SharedState) -> None:
         backup_path.name,
         state.framework,
     )
-
-
-def _preflight_agentx_backend(args: argparse.Namespace) -> None:
-    """Reject the combinations where AgentX labels work it did not do."""
-    if not _agentx_enabled():
-        return
-    from hyperloom.inference_optimizer import framework_registry
-
-    framework = str(getattr(args, "framework", "") or "").strip().lower()
-    if framework and framework_registry.is_scriptable(framework):
-        print(
-            f"ERROR: HYPERLOOM_AGENTX=1 with --framework {framework!r}, which is "
-            "scriptable. The AgentX switch only replaces the benchmark client of a "
-            "serving framework, so no trace would be replayed -- but the session "
-            "would still be labelled AgentX and run on AgentX budgets. Pick one.",
-            file=sys.stderr,
-        )
-        raise SystemExit(2)
 
 
 def _apply_default_budget(args: argparse.Namespace) -> None:
