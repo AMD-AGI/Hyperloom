@@ -50,6 +50,7 @@ from hyperloom_multibranch.tests.test_cli import (  # noqa: F401 - fixtures of t
     _settings,
     agent_binaries,
     agent_cli,
+    bubblewrap,
     eight_cards,
     host,
     ready_environment,
