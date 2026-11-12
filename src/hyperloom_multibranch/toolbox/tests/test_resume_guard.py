@@ -33,6 +33,7 @@ from hyperloom_multibranch.toolbox.resume_guard import (
     BaselineNotReusable,
     MeasuredOn,
     check_baseline_reusable,
+    check_hosted_baseline_reusable,
     infra_ended_keeps,
 )
 from hyperloom_multibranch.toolbox.submission_log import SUBMISSIONS_FILE
@@ -184,6 +185,69 @@ async def test_a_base_launch_changed_behind_the_session_s_back_is_refused(tmp_pa
     launch.write_text(launch.read_text().replace("0.8", "0.9"))
 
     assert _refusal(tmp_path).startswith("the session's frozen base launch cannot be read: ")
+
+
+def _hosted_refusal(root: Path, cards: int = len(CARDS)) -> str:
+    with pytest.raises(BaselineNotReusable) as refused:
+        check_hosted_baseline_reusable(root, cards)
+    assert "\n" not in refused.value.reason
+    return refused.value.reason
+
+
+async def test_a_hosted_restart_on_another_node_reuses_the_baseline_the_local_guard_refuses(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A rescheduled application runs on another node by design; its tests run in the grant, not there."""
+    await _baselined(tmp_path)
+    before = list(_tree(tmp_path))
+    monkeypatch.setenv("NODE_NAME", "node-b")
+
+    assert check_hosted_baseline_reusable(tmp_path, len(CARDS)) is None
+    assert _refusal(tmp_path) == "the baseline was measured with node 'node-a' and this run has 'node-b'"
+    assert list(_tree(tmp_path)) == before, "the hosted guard writes nothing either"
+
+
+@pytest.mark.parametrize("changed", ["build", "measurement_epoch", "image_digest", "cards", "base_launch_digest"])
+async def test_a_hosted_restart_onto_anything_else_its_baseline_was_measured_on_is_refused_naming_it(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, changed: str
+) -> None:
+    await _baselined(tmp_path)
+    monkeypatch.setenv("NODE_NAME", "node-b")
+    cards = len(CARDS)
+    if changed == "build":
+        ran = code_version()
+        monkeypatch.setattr(resume_guard, "code_version", lambda: CodeVersion(ran.package, "f" * 40))
+    elif changed == "measurement_epoch":
+        monkeypatch.setattr(bootstrap, "MEASUREMENT_EPOCH", bootstrap.MEASUREMENT_EPOCH + 1)
+    elif changed == "image_digest":
+        monkeypatch.setenv(IMAGE_DIGEST_VAR, OTHER_IMAGE)
+    elif changed == "cards":
+        cards = 4
+    else:
+        base = base_launch()
+        freeze_base(tmp_path, dataclasses.replace(base, args=(*base.args, "--enable-chunked-prefill")))
+
+    assert _hosted_refusal(tmp_path, cards).startswith(f"the baseline was measured with {changed} ")
+
+
+async def test_a_hosted_restart_of_a_session_that_recorded_nothing_is_refused(tmp_path: Path) -> None:
+    freeze_base(tmp_path, base_launch())
+
+    assert _hosted_refusal(tmp_path).startswith(f"{tmp_path / BASELINE_ENVIRONMENT_FILE} does not exist: ")
+
+
+async def test_a_hosted_restart_that_may_not_read_the_frozen_base_launch_is_refused_not_raised(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Another account of the group that the earlier leg's base launch is refused to: the restart finishes instead."""
+    await _baselined(tmp_path)
+
+    def refused(directory: Path) -> object:
+        raise PermissionError(13, "Permission denied", str(directory / "base_launch.json"))
+
+    monkeypatch.setattr("hyperloom.orchestrator.state.base_launch.frozen_base", refused)
+
+    assert _hosted_refusal(tmp_path).startswith("the session's frozen base launch cannot be read: ")
 
 
 async def test_a_session_whose_toolbox_recorded_nothing_is_refused(tmp_path: Path) -> None:

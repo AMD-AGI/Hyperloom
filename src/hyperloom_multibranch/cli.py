@@ -90,12 +90,11 @@ the same path; a usage error names what is missing.
 ``hosted run`` takes no arguments: it runs the session of the campaign spec a host injected, as
 :mod:`~hyperloom_multibranch.scheduling.hosted_run` maps it onto the options of ``run``, measured in the runner
 sandboxes of the host's sandbox service (:mod:`~hyperloom_multibranch.scheduling.hosted_peers`). Started again over a
-run whose ``session.json`` names a session, it finishes that session as ``final-only`` does once its PRELUDE recorded
-the baseline (a FINAL that chooses a commit ends it for ``finished_after_restart``, exit code 0), and otherwise closes
-it, ending its tests, and starts the spec's session again
-(:func:`~hyperloom_multibranch.scheduling.hosted_run.take_over_earlier_session`). It tells the host the run is over --
-``final: true`` in ``exit.json`` -- once CLOSE ran, or when the spec, the environment, agents it cannot isolate, a
-missing ``hosted`` package, the runner cache or an unreadable file keeps a session from running (exit code 2 for a
+run whose ``session.json`` names a session, it takes that session over (``hosted_restart_leg``): resumed to its first
+deadline while its baseline holds, else finished as ``final-only`` does (a FINAL that chooses ends it
+``finished_after_restart``, exit 0), or, before its baseline, closed and started again. It tells the host the run is
+over -- ``final: true`` in ``exit.json`` -- once CLOSE ran, or when the spec, the environment, agents it cannot isolate,
+a missing ``hosted`` package, the runner cache or an unreadable file keeps a session from running (exit code 2 for a
 refused spec or session, else 1); a crash leaves no ``exit.json``, and the host starts the run again.
 ``final-only SESSION_DIR`` is the emergency recovery of a session that ended before FINAL ran, and takes nothing but
 that directory: it runs FINAL and CLOSE over what the session persisted -- the settings and the frontier policy its
@@ -153,6 +152,7 @@ from hyperloom_multibranch.scheduling.hosted_run import (
     grant_deadline,
     grant_explore_cap,
     grant_tests_that_fit,
+    hosted_restart_leg,
     recorded_session,
     refuse_unhosted_branches,
     reported_stop_reason,
@@ -266,10 +266,7 @@ def build_parser() -> argparse.ArgumentParser:
     hosted_commands = hosted.add_subparsers(dest="hosted_command", required=True)
     hosted_commands.add_parser(
         "run",
-        help=(
-            "Run the session of the injected campaign spec, or finish the one an earlier start of the run began, and"
-            " tell the host in exit.json when the run is over."
-        ),
+        help="Run the injected spec's session, or resume or finish an earlier start's; exit.json says when it is over.",
     )
     return parser
 
@@ -1051,7 +1048,7 @@ class HostedStart:
 
 
 def hosted_run() -> int:
-    """``hosted run``: the session of the campaign spec the host injected, or the finish of the one an earlier start
+    """``hosted run``: the session of the injected campaign spec, or the resume or finish of the one an earlier start
     of the run began; writes ``exit.json`` with ``final: true`` once CLOSE ran or when the run cannot be served."""
 
     logging.basicConfig(level=logging.INFO, format=LOG_FORMAT)
@@ -1077,8 +1074,8 @@ def hosted_run() -> int:
 
 
 def _hosted_start(host: HostInfo) -> HostedStart:
-    """A new session of the spec, or the close or finish of the one ``session.json`` names, which the restart takes
-    over (:func:`take_over_earlier_session`); raises ValueError on a refused spec or session, ImportError when a
+    """A new session of the spec, or the close, resume or finish of the one ``session.json`` names, which the restart
+    takes over (:func:`take_over_earlier_session`); raises ValueError on a refused spec or session, ImportError when a
     ``hosted`` package is missing, and what :func:`ready_session` raises."""
 
     require_hosted_isolation(os.environ)
@@ -1092,9 +1089,10 @@ def _hosted_start(host: HostInfo) -> HostedStart:
     settings = _hosted_settings(host, deadline.session_hours) if persisted is None else persisted.settings
     require_session_environment(settings, os.environ)
     ready = hosted_ready_session(host, settings.workload)
-    close = partial(final_only, peer_factory=ready.peer_factory, services=ready.services)
     if persisted is not None:
-        return HostedStart(partial(close, persisted, restart=True), deadline)
+        leg = hosted_restart_leg(persisted, partial(final_only, restart=True), resume)
+        return HostedStart(partial(leg, persisted, ready.peer_factory, ready.services), deadline)
+    close = partial(final_only, peer_factory=ready.peer_factory, services=ready.services)
     record = partial(started_session, host.state_dir)
     start = partial(run_session, settings, ready.peer_factory, ready.services, record, grant_explore_cap(host))
     return HostedStart(partial(close_then_start, earlier.left, close, start), deadline)
