@@ -479,7 +479,8 @@ order itself or merely replays it; `$WORK/base.txt` for the run that must fail.
 
 ### T6 -- A test must fail when the behaviour it names breaks, not when its source text changes
 
-**Severity:** blocking, under `AGENTS.md` *Test the contract, not the plumbing*
+**Severity:** blocking (`AGENTS.md` *Test the contract, not the plumbing*: "tests that assert the
+current implementation and break on the next refactor").
 **Fires when:** an added or changed test reads source, prompt or doc text (`inspect.getsource`,
 `read_text` on a `.py` or `.md`, a regex over code) and asserts on its wording; or its only
 assertions are `isinstance`, `is not None`, `hasattr`, a constant the test set itself, or that
@@ -500,7 +501,7 @@ express, a repo-wide banned shape such as
 the contract: documented CLI output, a persisted field, a prompt key a parser reads.
 **Evidence:** over the changed tests at the head, then break the behaviour a hit names locally and
 confirm the test still passes:
-`H=$(sed -n 's/^head: //p' "$WORK/meta.txt"); git fetch -q origin "$H" && git grep -nE 'getsource|__doc__|\.(py|md)\b.*read_text' "$H" -- $(cat "$WORK/testfiles.txt")`
+`H=$(sed -n 's/^head: //p' "$WORK/meta.txt"); git fetch -q origin "$H" && git grep -nE 'getsource|__doc__|__file__|\.(py|md)\b.*read_text' "$H" -- $(cat "$WORK/testfiles.txt")`
 **Report as:** `T6 <file>:<line> -- <test> asserts on <source text | isinstance>; breaking
 <behaviour> leaves it green`
 
