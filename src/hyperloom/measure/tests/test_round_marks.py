@@ -15,8 +15,10 @@ import os
 from pathlib import Path
 
 import pytest
+import yaml
 
 from hyperloom.contracts.measurement import PhaseTiming
+from hyperloom.measure import round_marks
 from hyperloom.measure.phases import PhaseRecorder
 from hyperloom.measure.round_marks import (
     ROLE_BOOT,
@@ -29,8 +31,13 @@ from hyperloom.measure.round_marks import (
     RunMarks,
     boot_parts,
     read_runs,
+    profile_stall,
     round_boundaries,
+    stalled_in_profile_window,
 )
+from inference_suite.contracts import FailedStep
+from inference_suite.runtime.phases import Phase
+from inference_suite.tests import test_config_contract
 
 T0 = 1_000.0
 WINDOW = (T0, T0 + 300.0)
@@ -446,3 +453,59 @@ def test_the_server_log_in_the_run_dir_splits_the_boot_and_one_below_it_is_not_r
         "server_boot.graph_capture",
     ]
     assert [seconds for _, seconds in phases[2:4]] == [2.0, 11.5]
+
+
+def test_the_window_marks_read_are_the_ones_the_suite_writes() -> None:
+    """The names are literal here (``measure`` may not import the suite's runtime); the suite's ``Phase`` owns them."""
+    assert (round_marks._PROFILE_OPEN, round_marks._PROFILE_CLOSE, round_marks._CLIENT_FINISHED) == (
+        Phase.PROFILE_OPEN.value,
+        Phase.PROFILE_CLOSE.value,
+        Phase.FINISHED.value,
+    )
+
+
+def _window_round(directory: Path) -> Path:
+    """A round whose server went silent at 411, 11 s into a profile window opened at 400, and was ended 600 s later."""
+    marks = {"profile_open": 400.0, "finished": 1011.0, "profile_close": 1011.0}
+    document = {"phase_marks": [{"phase": phase, "ts": at, "mono": at} for phase, at in marks.items()]}
+    (directory / "phase_marks.json").write_text(json.dumps(document), encoding="utf-8")
+    config = test_config_contract._config()
+    (directory / "config.yaml").write_text(yaml.safe_dump(config.to_document(), sort_keys=False), encoding="utf-8")
+    return directory
+
+
+@pytest.mark.parametrize(
+    ("step", "log", "stall"),
+    [
+        (FailedStep.SERVER_STALLED, "INFO serving\nhandler still waiting\n\n", "handler still waiting"),
+        (FailedStep.SERVER_STALLED, None, ""),
+        (FailedStep.SERVER_DIED, "INFO serving\nhandler still waiting\n", None),
+    ],
+    ids=["stalled_quotes_its_log", "stalled_without_a_log", "died_is_no_stall"],
+)
+def test_a_profile_stall_is_a_stalled_round_in_its_window_and_names_its_server_logs_last_line(
+    tmp_path: Path, step: FailedStep, log: str | None, stall: str | None
+) -> None:
+    directory = _window_round(tmp_path)
+    if log is not None:
+        (directory / "server.log").write_text(log, encoding="utf-8")
+
+    assert profile_stall(directory, step) == stall
+
+
+@pytest.mark.parametrize(
+    "broken",
+    [{"phase_marks.json": "{not json"}, {"config.yaml": "deadlines: ["}, {"config.yaml": "deadlines: {}\n"}],
+    ids=["marks_unreadable", "config_unreadable", "config_off_contract"],
+)
+def test_a_round_whose_marks_or_config_cannot_be_read_is_not_known_to_have_stalled_in_its_window(
+    tmp_path: Path, broken: dict[str, str]
+) -> None:
+    assert stalled_in_profile_window(_window_round(tmp_path)), (
+        "the case is a stall inside the window until a file is broken"
+    )
+
+    for name, text in broken.items():
+        (tmp_path / name).write_text(text, encoding="utf-8")
+
+    assert not stalled_in_profile_window(tmp_path)

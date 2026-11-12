@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import json
 import math
+import os
 import re
 from collections.abc import Iterator, Sequence
 from dataclasses import dataclass
@@ -23,7 +24,10 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import NamedTuple
 
+import yaml
+
 from hyperloom.common.outside_facts import SGLANG_CUDA_GRAPH_CAPTURE_END
+from hyperloom.measure import log_causes
 from hyperloom.measure.boot_watch import read_ready_stamp
 from hyperloom.measure.phases import (
     ACCURACY_EVAL,
@@ -40,7 +44,7 @@ from hyperloom.measure.phases import (
     TEARDOWN,
     WARMUP,
 )
-from inference_suite.contracts import RunLayout
+from inference_suite.contracts import FailedStep, RunLayout, SuiteConfig
 
 __all__ = [
     "ROLE_BOOT",
@@ -54,6 +58,8 @@ __all__ = [
     "boot_parts",
     "read_runs",
     "round_boundaries",
+    "profile_stall",
+    "stalled_in_profile_window",
 ]
 
 #: The roles of a round's call: one that only boots the server, the warmup round of a test on a held server, one that
@@ -68,9 +74,13 @@ _ROUND_GLOB = "variant_*"
 _UTF8 = "utf-8"
 #: The phases ``kv_metrics.json`` records the instants of: the client's evaluation, and an AgentX client's own phases.
 _EVAL, _CLIENT_WARMUP, _CLIENT_MEASURED, _CLIENT_FINISHED = "eval", "warmup", "measured", "finished"
+#: The marks of a profile round's window in its ``phase_marks.json``, as inference_suite's ``Phase`` names them.
+_PROFILE_OPEN, _PROFILE_CLOSE = "profile_open", "profile_close"
 _MIB = 1 << 20
 #: A boot is in the first bytes of a server's log, and a log of a long test is large.
 _LOG_HEAD_BYTES = 8 * _MIB
+#: How much of the end of a server log is read for its last line.
+_LOG_END_BYTES = 64 * 1024
 _KV_MAX_BYTES = 64 * _MIB
 _SECONDS = r"(\d+(?:\.\d+)?)"
 _WEIGHTS_PATTERNS = (
@@ -322,3 +332,45 @@ def _boot_boundaries(run: RunMarks) -> list[Boundary]:
         boundaries.append(Boundary(name, at))
         at += seconds
     return boundaries
+
+
+def stalled_in_profile_window(run_dir: Path) -> bool:
+    """Whether the server of the round in ``run_dir``, which the round ended for its silence, went silent while the
+    round's profile window was open.
+
+    The round marks ``finished`` as the silence ends it, so the silence began the round's silence limit before that mark
+    at the latest; it began in the window when ``profile_open`` is at or before that instant and ``profile_close`` is
+    absent or after it (a window open when the round ended is closed then). A round whose marks or config cannot be read
+    is not known to have stalled there.
+    """
+    layout = RunLayout(run_dir)
+    try:
+        config = SuiteConfig.from_document(yaml.safe_load(layout.config.read_text(encoding=_UTF8)))
+        document = json.loads(layout.phase_marks.read_text(encoding=_UTF8))
+    except (OSError, ValueError, yaml.YAMLError):
+        return False
+    marks = document.get("phase_marks") if isinstance(document, dict) else None
+    instants: dict[str, float] = {}
+    for mark in marks if isinstance(marks, list) else []:
+        phase, at = (mark.get("phase"), _instant(mark.get("mono"))) if isinstance(mark, dict) else (None, None)
+        if isinstance(phase, str) and at is not None:
+            instants.setdefault(phase, at)
+    opened, finished = instants.get(_PROFILE_OPEN), instants.get(_CLIENT_FINISHED)
+    if opened is None or finished is None:
+        return False
+    began = finished - config.deadlines.silence_sec
+    closed = instants.get(_PROFILE_CLOSE)
+    return opened <= began and (closed is None or closed > began)
+
+
+def profile_stall(run_dir: Path, step: FailedStep) -> str | None:
+    """``None`` unless the round in ``run_dir`` failed at ``step`` ``server_stalled`` while its profile window was open
+    (:func:`stalled_in_profile_window`); then the last line of its server log, ``""`` when it has none."""
+    if step is not FailedStep.SERVER_STALLED or not stalled_in_profile_window(run_dir):
+        return None
+    try:
+        with RunLayout(run_dir).server_log.open("rb") as handle:
+            handle.seek(max(0, handle.seek(0, os.SEEK_END) - _LOG_END_BYTES))
+            return log_causes.last_line(handle.read().decode(_UTF8, errors="replace"))
+    except OSError:
+        return ""

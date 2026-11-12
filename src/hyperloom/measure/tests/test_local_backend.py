@@ -36,7 +36,8 @@ from hyperloom.orchestrator.actions.executors import (
     VariantResult,
 )
 from hyperloom.orchestrator.actions.executors._server_lifecycle import REUSE_PORT_DEFAULT
-from inference_suite.contracts import FailedStep, RunLayout
+from inference_suite.contracts import Deadlines, FailedStep, RunLayout
+from inference_suite.tests import test_config_contract
 
 
 def _point(directory: Path, name: str, *, conc: int = 4, run_eval: object = "false", **counts: object) -> Path:
@@ -531,6 +532,64 @@ def test_the_step_a_rounds_report_failed_at_classifies_the_test_its_logs_cannot(
     (workspace / "server.log").write_text("Traceback (most recent call last):\nRuntimeError: boom\n", encoding="utf-8")
     grid.answers["warmup"] = grid.result(
         "warmup", status="failed", returncode=1, error=step.value, server_log_path=str(workspace / "server.log")
+    )
+
+    outcome = _run(_graded_call(tmp_path))
+
+    assert (outcome.failure_class, outcome.failure_reason) == (failure_class, reason)
+
+
+#: The last line a profiled server printed before every rank hung in the kernel tracer.
+_TRACER_HANG = "queue_interposition.cpp:412 Async signal handler still waiting"
+
+
+def _stalled_profile_round(run_dir: Path, marks: dict[str, float]) -> Path:
+    """A round the suite ended ``server_stalled`` after a 600 s silence, with the phase ``marks`` (monotonic seconds)."""
+    workspace = write_run_dir(run_dir, failed_step=FailedStep.SERVER_STALLED)
+    layout = RunLayout(workspace)
+    config = test_config_contract._config(
+        deadlines=Deadlines(boot_sec=1800, round_sec=3600, eval_sec=1200, silence_sec=600)
+    )
+    layout.config.write_text(yaml.safe_dump(config.to_document(), sort_keys=False), encoding="utf-8")
+    document = {"phase_marks": [{"phase": phase, "ts": 1.7e9 + at, "mono": at} for phase, at in marks.items()]}
+    layout.phase_marks.write_text(json.dumps(document), encoding="utf-8")
+    layout.server_log.write_text(f"INFO serving\n{_TRACER_HANG}\n\n", encoding="utf-8")
+    return workspace
+
+
+@pytest.mark.parametrize(
+    ("marks", "failure_class", "reason"),
+    [
+        # The window opened at 400, the server went quiet at 411 and the round ended it 600 s later, closing the window.
+        (
+            {"ready": 0.0, "measured": 100.0, "profile_open": 400.0, "finished": 1011.0, "profile_close": 1011.0},
+            "infra",
+            f"profiler_hung: {_TRACER_HANG}",
+        ),
+        # The server went quiet at 311, before the window would have opened: no window mark.
+        ({"ready": 0.0, "measured": 100.0, "finished": 911.0}, "unclear", "server_stalled"),
+        # The window ran 400-460 and closed; the server went quiet at 511, after it.
+        (
+            {"ready": 0.0, "measured": 100.0, "profile_open": 400.0, "profile_close": 460.0, "finished": 1111.0},
+            "unclear",
+            "server_stalled",
+        ),
+        # The silence began at 390, ten seconds before the window's mark: the profiler did not start it.
+        (
+            {"ready": 0.0, "measured": 100.0, "profile_open": 400.0, "finished": 990.0, "profile_close": 990.0},
+            "unclear",
+            "server_stalled",
+        ),
+    ],
+    ids=["inside_the_window", "before_the_window", "after_the_window", "silent_before_the_window_opened"],
+)
+def test_a_server_that_stalled_with_its_profile_window_open_is_the_profilers_failure(
+    grid, server, tmp_path, marks, failure_class, reason
+):
+    """A tracer that hangs the server hangs it in every sandbox of the image; any other stall stays unclear."""
+    workspace = _stalled_profile_round(grid.tmp_path / "ws" / "warmup", marks)
+    grid.answers["warmup"] = grid.result(
+        "warmup", status="failed", returncode=1, error="server_stalled", server_log_path=str(workspace / "server.log")
     )
 
     outcome = _run(_graded_call(tmp_path))
