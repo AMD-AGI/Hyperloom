@@ -91,7 +91,8 @@ the same path; a usage error names what is missing.
 :mod:`~hyperloom_multibranch.scheduling.hosted_run` maps it onto the options of ``run``, measured in the runner
 sandboxes of the host's sandbox service (:mod:`~hyperloom_multibranch.scheduling.hosted_peers`). Started again over a
 run whose ``session.json`` names a session, it finishes that session as ``final-only`` does once its PRELUDE recorded
-the baseline; before that it closes the session, ending its tests, and starts the spec's session again
+the baseline, except that a FINAL that chooses a commit ends it for ``finished_after_restart`` with exit code 0; before
+that it closes the session, ending its tests, and starts the spec's session again
 (:func:`~hyperloom_multibranch.scheduling.hosted_run.take_over_earlier_session`). It tells the host the run is over
 -- ``final: true`` in ``exit.json`` -- once CLOSE ran, and when the spec, the environment, a missing package of the
 ``hosted`` extra, the runner cache or a file it cannot read keeps a session from running, with exit code 2 for a
@@ -148,7 +149,6 @@ from hyperloom_multibranch.scheduling.hosted_peers import PinnedToolboxInputs, l
 from hyperloom_multibranch.scheduling.hosted_run import (
     GrantDeadline,
     HostedExit,
-    arm_grant_stop,
     campaign_spec,
     close_then_start,
     grant_deadline,
@@ -160,6 +160,7 @@ from hyperloom_multibranch.scheduling.hosted_run import (
     share_with_the_group,
     spec_make_before_break,
     started_session,
+    stop_before_grant_ends,
     take_over_earlier_session,
     write_final_exit,
 )
@@ -946,11 +947,14 @@ async def _run_session(
     return (await session.run()).exit_code
 
 
-def final_only(persisted: PersistedRun, peer_factory: PeerFactory, services: SessionServices) -> int:
+def final_only(
+    persisted: PersistedRun, peer_factory: PeerFactory, services: SessionServices, *, restart: bool = False
+) -> int:
     """Run FINAL and CLOSE over the session directory ``persisted`` was read from, print it on one stdout line and
-    return the session's exit code. No session directory is created, which is why this cannot start one."""
+    return the session's exit code. No session directory is created, which is why this cannot start one. For
+    ``restart``, a hosted run's, see :meth:`Session.finish`."""
 
-    return _over_session(persisted, peer_factory, services, Session.finish)
+    return _over_session(persisted, peer_factory, services, partial(Session.finish, restart=restart))
 
 
 def resume(persisted: PersistedRun, peer_factory: PeerFactory, services: SessionServices) -> int:
@@ -1058,7 +1062,7 @@ def hosted_run() -> int:
     except ImportError as exc:
         log.exception("hosted run: a module the session needs is not installed")
         return _not_run(host.state_dir, EXIT_FAILED, exc)
-    _stop_before_grant_ends(start.deadline)
+    stop_before_grant_ends(start.deadline)
     try:
         returncode = start.run()
     except (PeersUnavailable, ImageCheckFailed, CacheBuildError, ToolboxInputsError, PermissionError) as exc:
@@ -1086,16 +1090,9 @@ def _hosted_start(host: HostInfo) -> HostedStart:
     ready = hosted_ready_session(host, settings.workload)
     close = partial(final_only, peer_factory=ready.peer_factory, services=ready.services)
     if persisted is not None:
-        return HostedStart(partial(close, persisted), deadline)
+        return HostedStart(partial(close, persisted, restart=True), deadline)
     start = partial(run_session, settings, ready.peer_factory, ready.services, partial(started_session, host.state_dir))
     return HostedStart(partial(close_then_start, earlier.left, close, start), deadline)
-
-
-def _stop_before_grant_ends(deadline: GrantDeadline) -> None:
-    """Arm this process's stop one CLOSE grace before ``deadline``'s grant ends (at once if passed; never untimed)."""
-
-    if deadline.stop_after_sec is not None:
-        arm_grant_stop(max(0.0, deadline.stop_after_sec))
 
 
 def _hosted_settings(host: HostInfo, session_hours: Callable[[float], float]) -> RunSettings:
@@ -1161,7 +1158,7 @@ def _start(settings: RunSettings, grant: HandedGrant | None) -> int:
         ready = ready_session(settings.workload, load_peers)
     else:
         ready = hosted_ready_session(grant.host, settings.workload)
-        _stop_before_grant_ends(grant.deadline)
+        stop_before_grant_ends(grant.deadline)
     return run_session(settings, ready.peer_factory, ready.services)
 
 
