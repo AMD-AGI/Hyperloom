@@ -79,7 +79,9 @@ from hyperloom_multibranch.scheduling.budget import (
 from hyperloom_multibranch.scheduling.launch_isolation import launch_isolation
 from hyperloom_multibranch.scheduling.layout import SessionLayout
 from hyperloom_multibranch.scheduling.lifecycle import PersistedRun, persisted_run, persisted_session, recorded_baseline
+from hyperloom_multibranch.scheduling.manifest import read_manifest
 from hyperloom_multibranch.scheduling.peers import PeersUnavailable
+from hyperloom_multibranch.scheduling.resumption import ResumeRefused, require_resumable
 from hyperloom_multibranch.scheduling.settings import RunSettings
 from hyperloom_multibranch.scheduling.stops import SessionStopReason
 from hyperloom_multibranch.toolbox.hosted_leases import GrantLimits
@@ -539,6 +541,27 @@ def close_then_start(left: PersistedRun | None, close: Callable[[PersistedRun], 
     return start()
 
 
+def hosted_resume_deadline(persisted: PersistedRun, now: float) -> float:
+    """The deadline a restart of the run resumes ``persisted`` up to, the ``finish`` of :func:`take_over_earlier_session`, with
+    ``cli.resume``: the one the run's first start set, so the session's budget counts from that start for
+    ``--max-hours`` as it does for ``--max-gpu-hours``, whose spend the session reads from its blackboard, and the time
+    it was down is not given back. That the earlier start is gone is the host's to know -- it starts a run again only
+    once its earlier start ended -- not the pids that start recorded in another container. Blocks.
+
+    Raises:
+        ResumeRefused: When :func:`~hyperloom_multibranch.scheduling.resumption.require_resumable` does, or ``now`` is
+            past that deadline; the restart finishes the session instead.
+    """
+
+    require_resumable(persisted)
+    deadline = read_manifest(persisted.layout.manifest).deadline
+    if now >= deadline:
+        raise ResumeRefused(
+            f"the session in {persisted.layout.root} used its budget, which ended {now - deadline:.0f} s ago"
+        )
+    return deadline
+
+
 #: What reading back an earlier session fails with when this account cannot read what it left: a file an earlier leg of
 #: another account of the group made owner-only, or one that is not the text it wrote.
 CANNOT_READ_SESSION = (PermissionError, UnicodeDecodeError, json.JSONDecodeError)
@@ -630,6 +653,7 @@ __all__ = [
     "grant_explore_cap",
     "grant_tests_end_by",
     "grant_tests_that_fit",
+    "hosted_resume_deadline",
     "prelude_landed",
     "record_session",
     "recorded_session",
