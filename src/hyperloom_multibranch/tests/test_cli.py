@@ -13,7 +13,8 @@ second recovery while it works.
 ``local``, on this container's cards with no grant, sandbox or source, on the image the measurement pins name; its
 agents are isolated with the hosting layer's bubblewrap or not run at all; it tells the host in ``exit.json`` that the
 run is over once CLOSE ran or when nothing a restart changes keeps a session from running, and leaves the host to start
-a crashed run again, which then finishes the session the first start began.
+a crashed run again, which then takes over the session the first start began: it resumes it up to its first deadline
+while its baseline holds, else finishes it as ``final-only`` does.
 
 ``run --measurement hosted`` measures in the sandboxes of a grant handed to it in the environment, without a campaign
 spec, a run id or a state directory, refuses a missing grant variable by name and what would run on this machine, and

@@ -116,7 +116,7 @@ FINAL_RESERVE_FLOOR_SECONDS = 1800.0
 #: The blackboard writer name a restart reads the baseline as.
 RESTART_READER = "restart"
 #: ``exit.json`` and ``session.json`` reach the disk before their names, and are ``664``: the run's next leg, maybe
-#: another account of the group, reads ``session.json`` to finish the session it names.
+#: another account of the group, reads ``session.json`` to take over the session it names.
 _DURABLE = WriteOptions(fsync=True, shared=True)
 _ENCODING = "utf-8"
 
