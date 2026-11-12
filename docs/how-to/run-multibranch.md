@@ -126,8 +126,8 @@ the profile and the root commit are the ones the first PRELUDE recorded.
   base launch or runner template card count than the restart would measure on, as recorded in
   `MB-toolbox/baseline-environment.json` when the first baseline test was accepted. The application's node and account
   are not compared: a reschedule changes them by design, and the tests run in the grant. The restart ends the
-  measurement sandboxes the earlier start left running in the grant before it measures anything. A hosted session
-  measured on its container's cards is finished, not resumed.
+  measurement sandboxes the earlier start left running in the grant before it measures anything, and EXPLORE ends by
+  the grant's cap as in a started session. A session file this account may not read finishes the session too.
 - **Knowledge steps:** a CLOSE of a session whose search tree the RSI archive already holds runs none of the knowledge
   steps: no RSI archive, playbook proposal or lesson curation. Each is reported `skipped` with the reason
   `an earlier CLOSE of this session archived its search tree`. This holds for every later CLOSE of that session, a
