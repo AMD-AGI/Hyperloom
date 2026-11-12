@@ -6,7 +6,9 @@
 from __future__ import annotations
 
 import ast
+import importlib.util
 import subprocess
+from collections.abc import Callable
 from fnmatch import fnmatchcase
 from pathlib import Path
 
@@ -25,9 +27,10 @@ _UNPACKAGED_ASSETS = (
     # The gemm-tune subpackage's own docs describe the source tree (how to run the tuner from a checkout), not the
     # installed package.
     "kernelforge/workflows/gemm_tune/*.md",
-    # Arbor, vendored as a source tree that runs from the checkout (hyperloom_arbor/VENDOR.md); excluded from the
-    # packages too, so none of it ships.
-    "hyperloom_arbor/*",
+    # Git's own files in the vendored Arbor (hyperloom_arbor/VENDOR.md), which ships whole otherwise: its
+    # attributes and an empty directory's keeper mean nothing outside a checkout.
+    "hyperloom_arbor/**/.gitattributes",
+    "hyperloom_arbor/**/.gitkeep",
 )
 
 try:  # tomllib is stdlib from 3.11; the ``ci`` extra pins tomli for 3.10.
@@ -170,15 +173,32 @@ def test_test_packages_are_excluded_from_distribution():
     )
 
 
+def _shipped_by_glob() -> Callable[[Path, str], bool]:
+    """``scripts/check_wheel_contents.py``'s rule for what a package-data glob ships (setuptools skips a hidden name
+    the pattern does not name), loaded from that script so the two checks cannot drift apart."""
+    assert _REPO_ROOT is not None
+    path = _REPO_ROOT / "scripts" / "check_wheel_contents.py"
+    spec = importlib.util.spec_from_file_location("check_wheel_contents", path)
+    assert spec is not None and spec.loader is not None, path
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module.shipped_by_glob
+
+
 def _declared_asset_paths() -> set[str]:
     """Every src-relative non-Python file some declaration ships."""
     assert _REPO_ROOT is not None
     cfg = _pyproject()["tool"]["setuptools"]
+    ships = _shipped_by_glob()
     declared: set[str] = set()
     for package, patterns in cfg["package-data"].items():
         package_dir = _src() / package.replace(".", "/")
         for pattern in patterns:
-            declared.update(str(match.relative_to(_src())) for match in package_dir.glob(pattern))
+            declared.update(
+                str(match.relative_to(_src()))
+                for match in package_dir.glob(pattern)
+                if ships(match.relative_to(package_dir), pattern)
+            )
     # data-files sources are repo-relative; only src/ ones matter here.
     for sources in cfg["data-files"].values():
         for source in sources:

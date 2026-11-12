@@ -73,15 +73,29 @@ def _check_no_excluded_packages(cfg: dict, names: list[str]) -> list[str]:
     return [f"{len(leaked)} entries from excluded packages shipped in the wheel, e.g. {leaked[:5]}"]
 
 
+def shipped_by_glob(relative: Path, pattern: str) -> bool:
+    """Whether setuptools ships ``relative`` (a path under the package directory) for a package-data ``pattern``
+    that matches it. Its glob skips a hidden name (one starting with ".") unless the pattern names it literally, so
+    ``arbor/**/*`` never ships ``arbor/dashboard/.gitattributes`` while ``.claude/**/*`` ships what is under
+    ``.claude``. ``pathlib``'s glob matches both, so a match it finds is a shipped file only if this holds;
+    ``test_packaging_lint.py`` applies the same rule, so the two checks agree."""
+    literal = {part for part in Path(pattern).parts if not any(char in part for char in "*?[")}
+    return all(not name.startswith(".") or name in literal for name in relative.parts)
+
+
 def _check_declared_package_data_is_present(cfg: dict, names: list[str]) -> list[str]:
-    """Every file a package-data glob matches on disk must exist in the wheel."""
+    """Every file a package-data glob matches on disk, and setuptools ships, must exist in the wheel."""
     present = set(names)
     errors: list[str] = []
     for package, patterns in cfg["tool"]["setuptools"]["package-data"].items():
         package_dir = _REPO_ROOT / "src" / package.replace(".", "/")
         for pattern in patterns:
             # ``data/**/*`` matches directories too; only files are wheel entries.
-            matches = sorted(match for match in package_dir.glob(pattern) if match.is_file())
+            matches = sorted(
+                match
+                for match in package_dir.glob(pattern)
+                if match.is_file() and shipped_by_glob(match.relative_to(package_dir), pattern)
+            )
             if not matches:
                 errors.append(f"{package}: '{pattern}' matches no file on disk (dead declaration)")
                 continue
@@ -113,6 +127,11 @@ _NON_EMPTY_TREES = {
     "kernelforge/examples/": 40,
     "kernelforge/knowledge/local_wiki/resources/": 120,
     "kernelforge/roofline_ceiling/resources/": 1,
+    # The vendored Arbor (src/hyperloom_arbor/VENDOR.md): `--autonomous-agent arbor` on a wheel install runs it, and a
+    # copy without its engine, packs or skills fails only once a branch starts.
+    "hyperloom_arbor/arbor/": 100,
+    "hyperloom_arbor/packs/": 30,
+    "hyperloom_arbor/.claude/skills/": 100,
 }
 
 
