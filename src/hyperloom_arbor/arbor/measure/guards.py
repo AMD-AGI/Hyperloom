@@ -30,8 +30,12 @@ def value(bench: dict, metric: str) -> float | None:
     return None
 
 
-def check(measurement: dict, bench: dict, ref: dict | None) -> dict | None:
-    """``{"broken", "held", "unchecked"}``, one line each, for the measurement's guards; None without guards."""
+def check(measurement: dict, bench: dict, ref: dict | None, matched: dict | None = None) -> dict | None:
+    """``{"broken", "held", "unchecked"}``, one line each, for the measurement's guards; None without guards.
+
+    ``matched`` (arbor/measure/matched.py ``compare``): a band guard on a per-request metric with a matched reading is
+    judged on the requests both runs completed, the candidate's reading over the kept tree's on them; its line gives the
+    raw readings beside it. Without one, the raw readings decide, as before."""
     guards = (measurement or {}).get("guards") or []
     if not guards:
         return None
@@ -46,6 +50,19 @@ def check(measurement: dict, bench: dict, ref: dict | None) -> dict | None:
             cap = float(g["max_pct"])
             line = f"{metric} {v:.2f} % against the {cap:g} % cap"
             (out["broken"] if v > cap else out["held"]).append(line)
+            continue
+        m = (matched or {}).get(metric) or {}
+        if m.get("used"):
+            band, r = float(g.get("band_pct") or 0.0), float(m["ratio"])
+            if g.get("direction", "max") == "min":
+                ok, change = r <= 1 + band / 100, (1 - r) * 100
+            else:
+                ok, change = r >= 1 - band / 100, (r - 1) * 100
+            kept = (ref or {}).get(metric)
+            raw = f"; raw {v:g} against {kept:g}" if isinstance(kept, (int, float)) else ""
+            line = (f"{metric} {m['candidate']:g} against the kept tree's {m['kept']:g} on {m['n']} matched requests "
+                    f"({change:+.1f} %, band {band:g} %{raw})")
+            (out["held"] if ok else out["broken"]).append(line)
             continue
         kept = (ref or {}).get(metric)
         if not isinstance(kept, (int, float)) or kept == 0:
