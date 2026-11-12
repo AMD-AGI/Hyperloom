@@ -32,24 +32,30 @@ _BACKOFF_SEC = (5.0, 10.0, 20.0, 40.0, 60.0)
 
 
 async def probe_device(timeout_sec: float = PROBE_TIMEOUT_SEC) -> DeviceFault | None:
-    """``None`` when one small kernel runs to completion on the device within ``timeout_sec``, else why it did not."""
+    """``None`` when one small kernel runs to completion on the device within ``timeout_sec``, else why it did not.
+
+    Why is a fault either stream names, or else the last line of stderr, where errors are written, and of stdout only
+    when stderr is empty. The streams are read apart because two buffered streams merged into one arrive in the order
+    their buffers were flushed, not the order they were written.
+    """
     proc = await asyncio.create_subprocess_exec(
         sys.executable,
         "-c",
         _PROBE,
         stdout=asyncio.subprocess.PIPE,
-        stderr=asyncio.subprocess.STDOUT,
+        stderr=asyncio.subprocess.PIPE,
         start_new_session=True,
     )
     try:
-        output, _ = await communicate_process_group(proc, timeout=timeout_sec)
+        stdout, stderr = await communicate_process_group(proc, timeout=timeout_sec)
     except asyncio.TimeoutError:
         return DeviceFault(DEVICE_UNRESPONSIVE, f"the probe kernel did not complete within {timeout_sec:.0f}s")
     if proc.returncode == 0:
         return None
-    text = output.decode(errors="replace").strip()
-    last_line = text.splitlines()[-1] if text else f"the probe exited with status {proc.returncode}"
-    return classify(text) or DeviceFault(DEVICE_UNRESPONSIVE, last_line)
+    errors, output = stderr.decode(errors="replace").strip(), stdout.decode(errors="replace").strip()
+    reported = (errors or output).splitlines()
+    last_line = reported[-1] if reported else f"the probe exited with status {proc.returncode}"
+    return classify(f"{errors}\n{output}") or DeviceFault(DEVICE_UNRESPONSIVE, last_line)
 
 
 async def wait_for_device_recovery(

@@ -58,10 +58,18 @@ def test_a_probe_whose_kernel_completes_reports_no_fault(monkeypatch):
     assert asyncio.run(probe_device(30.0)) is None
 
 
-def test_a_probe_that_fails_reports_its_last_line_as_an_unresponsive_device(monkeypatch):
+def test_a_probe_that_fails_reports_its_last_error_line_as_an_unresponsive_device(monkeypatch):
+    """Its stdout is flushed at exit, after the error it wrote to stderr; the error is still what it reports."""
     monkeypatch.setattr(device_health, "_PROBE", "print('loading'); raise SystemExit('hipErrorNoDevice')")
+    monkeypatch.delenv("PYTHONUNBUFFERED", raising=False)
 
     assert asyncio.run(probe_device(30.0)) == DeviceFault(DEVICE_UNRESPONSIVE, "hipErrorNoDevice")
+
+
+def test_a_probe_that_fails_writing_only_to_stdout_reports_its_last_line(monkeypatch):
+    monkeypatch.setattr(device_health, "_PROBE", "print('no device found'); raise SystemExit(1)")
+
+    assert asyncio.run(probe_device(30.0)) == DeviceFault(DEVICE_UNRESPONSIVE, "no device found")
 
 
 def test_a_probe_that_names_a_hang_reports_the_hang(monkeypatch):
