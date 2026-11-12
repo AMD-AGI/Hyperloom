@@ -701,6 +701,23 @@ def test_a_repository_made_a_partial_clone_by_its_config_fetches_nothing_behind_
 
 
 @pytest.mark.skipif(os.geteuid() != 0, reason="a repository of another owner needs root to chown")
+def test_a_repository_trusted_by_the_command_s_own_safe_directory_has_its_filter_drivers_blanked_too(tmp_path):
+    repo = tmp_path / "image-checkout"
+    subprocess.run(["git", "init", "--quiet", str(repo)], check=True)
+    ran = tmp_path / "ran"
+    with (repo / ".git" / "config").open("a") as config:
+        config.write(f'[filter "own"]\n\tclean = {_recording_filter(tmp_path, ran)}\n')
+    (repo / ".gitattributes").write_text("* filter=own\n")
+    (repo / "file").write_text("x\n")
+    for path in (repo, *repo.rglob("*")):
+        os.lchown(path, 65534, 65534)  # another owner's, as the image's checkout is: git trusts it only by -c
+
+    worktree_module._git(repo, "-c", "safe.directory=*", "add", "--all")
+
+    assert not ran.exists()
+
+
+@pytest.mark.skipif(os.geteuid() != 0, reason="a repository of another owner needs root to chown")
 def test_a_worktree_another_account_of_the_group_made_is_synced_and_diffed_with_no_program_of_it_run(
     tmp_path, installed, monkeypatch
 ):
@@ -1014,6 +1031,7 @@ def test_a_symlink_the_agent_flips_on_the_way_to_the_admin_directory_after_the_c
         point(own)
         return admin
 
+    # The worktree's git resolves its admin directory there before app_git is given it.
     monkeypatch.setattr(worktree_module, "trusted_admin_dir", check_then_flip)
 
     patch = worktree.diff("vllm")

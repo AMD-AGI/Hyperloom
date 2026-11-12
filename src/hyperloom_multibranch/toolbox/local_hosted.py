@@ -86,7 +86,7 @@ from hyperloom.sandbox.card_occupancy import (
 )
 from hyperloom.sandbox.gated_pool import GatedPool
 from hyperloom.sandbox.gpu_pool import GpuPool
-from hyperloom.sandbox.local import LocalSandboxProvider, ProcessUsers, RunnerPlan
+from hyperloom.sandbox.local import CARD_RELEASE_WAIT_SEC, LocalSandboxProvider, ProcessUsers, RunnerPlan
 from hyperloom.sandbox.rooted import open_rooted
 from hyperloom.sandbox.socket import SandboxDenied
 from hyperloom.sandbox.templates import LocalTemplate
@@ -250,9 +250,10 @@ class LocalHostedToolbox(LeasedToolbox):
         self._reported_cards |= new
 
     async def _take_back_freed_cards(self) -> None:
-        """Put back in the pool the cards of ended sandboxes nothing of which runs any more
-        (:meth:`~hyperloom.sandbox.local.LocalSandboxProvider.release_freed_cards`), lift their record in the blackboard
-        and start the tests they let run.
+        """Release the cards of ended sandboxes nothing of which runs any more
+        (:meth:`~hyperloom.sandbox.local.LocalSandboxProvider.release_freed_cards`): they go back to the pool once the
+        kernel's list shows them free, or after :data:`~hyperloom.sandbox.local.CARD_RELEASE_WAIT_SEC` at most. Lift their
+        record in the blackboard and start the tests they let run.
 
         A refused lift is not retried: the blackboard keeps the cards recorded as lost, which is read back only by a
         restart into this session, and keeps them out of the pool there.
@@ -261,7 +262,12 @@ class LocalHostedToolbox(LeasedToolbox):
         freed = frozenset(await asyncio.to_thread(self.provider.release_freed_cards))
         if not freed:
             return
-        logger.info("cards %s are back in the pool: %s", sorted(freed), FREED_CARDS_REASON)
+        logger.info(
+            "cards %s are released and go back to the pool once the kernel lists them free (up to %g s): %s",
+            sorted(freed),
+            CARD_RELEASE_WAIT_SEC,
+            FREED_CARDS_REASON,
+        )
         recorded = freed & self._reported_cards
         if recorded:
             try:
@@ -365,8 +371,9 @@ class LocalOptions:
     ``HYPERLOOM_CARD_GUARD`` of the host environment, and without it the guard enforces. The runners get the same
     setting. ``card_holders`` says who holds some cards, which the pool asks before it hands a card out: the kernel's list
     of the machine unless a test of this module says otherwise; ``card_memory`` lists what the kernel has on some cards,
-    which a released lease waits on before its cards go back (:func:`~hyperloom.sandbox.card_occupancy.read_listed`
-    unless a test says otherwise). ``short_prompts`` is the staged prompt set of the
+    which a released lease and an ended test's sandbox wait on before their cards go back
+    (:func:`~hyperloom.sandbox.card_occupancy.read_listed` unless a test says otherwise). ``short_prompts`` is the
+    staged prompt set of the
     short-prompt consistency check (``acceptance.short_prompts`` of a builder that names it there says the same and must
     not differ); ``None`` takes the key in ``HYPERLOOM_SHORT_PROMPTS`` of the host environment (``off`` for no check),
     and without either the set for the session model's tokenizer, staged at the build when missing. It is read in this
@@ -375,7 +382,11 @@ class LocalOptions:
     their template, which therefore wins over the same name in ``runner_envs``), the branches' sandboxes are not told.
     ``long_context`` is the staged prompt set of the long-context check, named, found and read the same way (``None`` takes
     the key in ``HYPERLOOM_LONG_CONTEXT``, ``off`` for no check, and without either the model's own set at the context
-    each test's launch serves).
+    each test's launch serves). ``tests_end_by`` is when every test of the session must have ended, Unix seconds, in a
+    hosted run measured on this container's cards (the grant's
+    :attr:`~hyperloom_multibranch.scheduling.hosted_run.GrantEnd.tests_end_by`): no infrastructure retry, FINAL's on
+    the integration branch included, waits past the time a test of its kind can still end by it; ``None`` for no such
+    time.
     """
 
     policy: QueuePolicy | None = None
@@ -394,6 +405,7 @@ class LocalOptions:
     card_memory: Callable[[Sequence[int]], CardReading] = read_listed
     short_prompts: ShortPromptSetup | None = None
     long_context: LongContextSetup | None = None
+    tests_end_by: float | None = None
 
 
 def card_guard_of(options: LocalOptions, environ: Mapping[str, str] | None = None) -> CardGuard:
@@ -687,6 +699,7 @@ def _provider(
         users=ProcessUsers(plan=plan),
     )
     provider.pool = GatedPool(cards, card_guard_of(options), read=options.card_holders)
+    provider.card_memory = options.card_memory
     return provider
 
 
@@ -796,6 +809,7 @@ def build_local_toolbox(
             policy=capped_policy(options.policy, parallel),
             max_infra_retries=options.max_infra_retries,
             infra_backoff_seconds=options.infra_backoff_seconds,
+            tests_end_by=options.tests_end_by,
         ),
     )
     toolbox.backend, toolbox.provider, toolbox.trace_root = backend, provider, directory
