@@ -22,15 +22,16 @@ on any node; ``pause`` stops a campaign at the next boundary; ``fork`` starts an
   - ``prompts``: the campaign config (secrets redacted), ``pack.yaml``, the agent's and critic's templates in use
     (``arbor/prompts.py``), and their digests;
   - ``dossier``: the dossier's files, which live in the Arbor checkout and are campaign state all the same;
-  - ``fingerprint`` (model, framework, image, point, pack, objective, root tree), ``bars``, and ``parent`` (a fork's
-    lineage, from ``fork.json``).
+  - ``fingerprint`` (model, framework, image, point, pack, objective, root tree, agent model), ``bars``, and
+    ``parent`` (a fork's lineage, from ``fork.json``).
 - **Never a secret:** the captured config is redacted by key and by value shape (``redact``); a tree whose patches or
   live config hold a credential-shaped value is not captured (``tree_error`` says where), so it cannot be restored.
 - **Compatibility:** a session's format is its latest checkpoint's ``session_format``, or 0 without one.
   ``version.CONTINUES["session"]`` is the range this Arbor continues; ``refusals`` refuses a session outside it at
   start, and ``restore`` and ``fork`` a checkpoint outside it.
-- **The session lock** (``session.lock``): a driver holds it shared for its life; ``create``, ``restore`` and ``fork``
-  take it exclusive, so they refuse while a driver runs on that session.
+- **The session lock** (``session.lock``): a driver holds it exclusive for its life, so one driver runs a session; a
+  second waits a minute (``HOLD_WAIT_S``), then exits 73. ``create``, ``restore`` and ``fork`` take it exclusive too,
+  so they refuse while a driver runs on that session.
 
     python3 -m arbor restore --config C [--checkpoint REF] [--force]
     python3 -m arbor pause (--config C | --session D) [--reason TEXT]
@@ -77,7 +78,7 @@ RESETTABLE = ("null_streak", "probe_streak", "tier_iters", "barren_streak", "sec
 POLICIES = ("exact", "exploratory")
 #: What the bars of a checkpoint are: the session's fields that judge the next change.
 BAR_FIELDS = ("metric_name", "metric_direction", "baseline", "best_metric", "baseline_secondary", "best_secondary",
-              "guard_ref", "tier", "iteration")
+              "guard_ref", "request_ref", "tier", "iteration")
 NAME = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$")
 
 
@@ -97,7 +98,22 @@ SECRET_VALUE = (
         r"[\"']?\s*[:=]\s*[\"']?(bearer\s+)?(?!<redacted>)[A-Za-z0-9_\-.]{16,}")),
     ("a 32-hex key beside a key name", re.compile(r"(?i)(key|token|secret)[^\n]{0,24}\b[0-9a-f]{32}\b")),
 )
+#: Known lines that look like a credential and are not one, each matched exactly: inside one, a SECRET_VALUE match is
+#: neither reported nor redacted. aiperf, the AgentX bench client, logs its dataset cache's key, a 32-hex hash of the
+#: dataset's settings (`Memory-mapped dataset cache HIT (key=<32 hex>)`); a bench agent that reads its log carries
+#: the line into the hook trace, and a KB export would then withhold the whole trace slice.
+NOT_SECRETS = (
+    re.compile(r"\bdataset cache (?:HIT|MISS) \(key=[0-9a-f]{32}\)"),
+)
 REDACTED = "<redacted>"
+
+
+def _not_secret_spans(text: str) -> list[tuple[int, int]]:
+    return [m.span() for pat in NOT_SECRETS for m in pat.finditer(text)]
+
+
+def _inside(match: re.Match, spans: list[tuple[int, int]]) -> bool:
+    return any(a <= match.start() and match.end() <= b for a, b in spans)
 
 
 def redact(value, key: str = ""):
@@ -110,16 +126,19 @@ def redact(value, key: str = ""):
         return [redact(v) for v in value]
     if isinstance(value, str):
         for _, pat in SECRET_VALUE:
-            value = pat.sub(REDACTED, value)
+            spans = _not_secret_spans(value)
+            value = pat.sub(lambda m: m.group(0) if _inside(m, spans) else REDACTED, value)
     return value
 
 
 def secrets_in(text: str) -> list[str]:
-    """What kinds of credential-shaped values ``text`` holds, with the line of each: never any of the value."""
+    """What kinds of credential-shaped values ``text`` holds, with the line of each: never any of the value. A match
+    inside a known look-alike (``NOT_SECRETS``) is not one."""
     found = []
+    spans = _not_secret_spans(text)
     for kind, pat in SECRET_VALUE:
         for m in pat.finditer(text):
-            if REDACTED not in m.group(0):
+            if REDACTED not in m.group(0) and not _inside(m, spans):
                 found.append(f"{kind} on line {text.count(chr(10), 0, m.start()) + 1}")
     return found
 
@@ -302,22 +321,69 @@ def _flock(fd: int, exclusive: bool, wait: bool) -> bool:
         return True
 
 
-def hold_session(session_dir, held: dict | None = None) -> None:
-    """A driver's share of the session lock, held until the process ends (kept open in ``held``)."""
+def _open_lock(path: Path) -> int:
+    """The session lock's file: read-write, created 0664 less the umask; read-only when it is another account's and
+    not group-writable. A host may resume a run under another account of the group, and flock takes a read-only
+    descriptor as well: refusing the open left the run unlocked (a shared hold) or crashed it (an exclusive one)."""
+    try:
+        return os.open(path, os.O_RDWR | os.O_CREAT, 0o664)
+    except PermissionError:
+        return os.open(path, os.O_RDONLY)
+
+
+#: How long a driver waits for a session another driver holds before it exits 73 (``lease_held``): the other may be
+#: ending (a rolling chunk's predecessor that has handed over, a host's restart of a driver it stopped).
+HOLD_WAIT_S = 60.0
+HOLD_POLL_S = 2.0
+
+
+def _holder(path: Path) -> str:
+    """Who holds the lock, as its holder wrote it (``host pid driver``); ``?`` when unknown."""
+    try:
+        return path.read_text(errors="replace").strip().splitlines()[-1]
+    except (OSError, IndexError):
+        return "?"
+
+
+def hold_session(session_dir, held: dict | None = None, wait_s: float | None = None) -> str | None:
+    """The session lock, exclusive, for the driver's life (kept open in ``held``): one driver per session, so two
+    never write one session at once (a host that restarts a driver whose old process still runs, two launches of one
+    config). None when it is held, or cannot be taken here (no file, a filesystem without locks: as before locks).
+    When another driver still holds it after ``wait_s`` (``HOLD_WAIT_S``), who holds it: the driver then exits 73."""
     if not session_dir:
-        return
+        return None
     path = Path(session_dir) / LOCK
     try:
         path.parent.mkdir(parents=True, exist_ok=True)
-        fd = os.open(path, os.O_RDWR | os.O_CREAT, 0o664)
+        fd = _open_lock(path)
     except OSError as exc:
         print(f"[arbor] session lock not taken ({exc})", file=sys.stderr, flush=True)
-        return
-    if _flock(fd, exclusive=False, wait=True):
-        if held is not None:
-            held.setdefault("session_lock", []).append(fd)
+        return None
+    deadline = time.monotonic() + (HOLD_WAIT_S if wait_s is None else wait_s)
+    said = False
+    while not _flock(fd, exclusive=True, wait=False):
+        if time.monotonic() >= deadline:
+            os.close(fd)
+            return _holder(path)
+        if not said:
+            print(f"[arbor] Another driver holds the session ({_holder(path)}): waiting up to "
+                  f"{(HOLD_WAIT_S if wait_s is None else wait_s):.0f} s for it to end", file=sys.stderr, flush=True)
+            said = True
+        time.sleep(HOLD_POLL_S)
+    if held is not None:
+        held.setdefault("session_lock", []).append(fd)
+    with contextlib.suppress(OSError):
+        os.ftruncate(fd, 0)
+        os.lseek(fd, 0, os.SEEK_SET)
+        os.write(fd, f"{socket.gethostname()} {os.getpid()} driver\n".encode())
+    return None
+
+
+def release_session(held: dict) -> None:
+    """The driver's session lock, let go (``driver.main``'s end; a process's exit does the same)."""
+    for fd in held.pop("session_lock", []):
         with contextlib.suppress(OSError):
-            os.write(fd, f"{socket.gethostname()} {os.getpid()} driver\n".encode())
+            os.close(fd)
 
 
 @contextlib.contextmanager
@@ -325,14 +391,10 @@ def exclusive(session_dir, what: str):
     """The session lock, exclusive, for ``what``; Refused while a driver holds it."""
     path = Path(session_dir) / LOCK
     path.parent.mkdir(parents=True, exist_ok=True)
-    fd = os.open(path, os.O_RDWR | os.O_CREAT, 0o664)
+    fd = _open_lock(path)
     try:
         if not _flock(fd, exclusive=True, wait=False):
-            try:
-                who = path.read_text(errors="replace").strip().splitlines()[-1]
-            except (OSError, IndexError):
-                who = "?"
-            raise Refused(f"{what}: a driver is running on {session_dir} ({who}); pause or stop it first")
+            raise Refused(f"{what}: a driver is running on {session_dir} ({_holder(path)}); pause or stop it first")
         yield
     finally:
         os.close(fd)
@@ -464,7 +526,13 @@ def _fingerprint(campaign, config: dict, tree: dict | None) -> dict:
             "objective": objective.get("metric") if isinstance(objective, dict) else None,
             "workload": {"concurrency": config.get("concurrency"), "num_prompts": config.get("num_prompts"),
                          "isl": env.get("ISL"), "osl": env.get("OSL")},
-            "root_tree": (tree or {}).get("root_tree")}
+            "root_tree": (tree or {}).get("root_tree"),
+            "agent_model": _agent_model(config)}
+
+
+def _agent_model(config: dict) -> str | None:
+    from arbor import prompts
+    return prompts.agent_model(config)
 
 
 def _bars(session_dir: Path) -> dict:
