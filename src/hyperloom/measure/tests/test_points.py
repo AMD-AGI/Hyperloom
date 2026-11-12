@@ -30,13 +30,14 @@ from hyperloom.measure import points
 from hyperloom.measure.points import (
     AGENTX_PROFILE_STEPS,
     CANONICAL_FILE,
+    MEASUREMENT_SEED,
     PointError,
     accept_measurement,
     default_canonical,
     generate_points,
     generate_profile_point,
 )
-from hyperloom.measure.points import _limit_agentx_capture
+from hyperloom.measure.points import _limit_agentx_capture, _seeded
 from hyperloom.measure.surface import SurfaceViolation
 from hyperloom.measure.tests._recipes import IMAGE, recipe_with, sha
 from hyperloom.orchestrator.actions.executors._workload_envs import (
@@ -54,6 +55,8 @@ from hyperloom.orchestrator.state.base_launch import server_base
 from hyperloom.orchestrator.state.tests._session_base import freeze_base
 
 SERVER_ARGS = "--max-running-requests 77 --enable-dp-attention"
+#: The recipe's launch as a point runs it: with the engine seed pinned, since neither the recipe nor the base names one.
+SEEDED_ARGS = f"{SERVER_ARGS} --random-seed {MEASUREMENT_SEED}"
 
 
 @pytest.fixture(autouse=True)
@@ -243,6 +246,44 @@ def test_a_profile_point_carries_the_profiler_settings_and_the_recipes_launch(ca
     assert (envs["CONC"], envs["RUN_EVAL"]) == ("32", "false")
 
 
+def _seed_values(text: str) -> list[str]:
+    tokens = text.split()
+    return [tokens[i + 1] for i, token in enumerate(tokens[:-1]) if token == "--random-seed"]
+
+
+def test_every_point_and_the_profile_point_pin_the_engine_seed_the_recipe_leaves_unset(canonical, blobs, tmp_path):
+    env = environment(blobs, tmp_path, delta=RecipeDelta(config=ConfigDelta(server_args=SERVER_ARGS)))
+
+    points = generate_points(env, canonical, tmp_path / "points", concurrency=(8, 64))
+    (profile,) = generate_profile_point(env, canonical, tmp_path / "profile")
+
+    for point in (*points, profile):
+        extra = load(point)["benchmark"]["envs"]["EXTRA_SGLANG_ARGS"]
+        assert _seed_values(extra) == [str(MEASUREMENT_SEED)], f"{point.name} launches with a fixed seed: {extra}"
+        assert "--max-running-requests 77" in extra
+
+
+@pytest.mark.parametrize("spelled", ["--random-seed 7", "--random_seed 7"])
+def test_a_seed_the_recipe_names_is_the_one_the_point_launches_with(canonical, blobs, tmp_path, spelled):
+    delta = RecipeDelta(config=ConfigDelta(server_args=f"{SERVER_ARGS} {spelled}"))
+
+    (point,) = generate_points(environment(blobs, tmp_path, delta=delta), canonical, tmp_path / "points")
+
+    extra = load(point)["benchmark"]["envs"]["EXTRA_SGLANG_ARGS"]
+    assert spelled in extra
+    assert _seed_values(extra) == (["7"] if spelled.startswith("--random-seed") else []), extra
+
+
+def test_a_seed_the_base_launch_names_is_kept_and_a_framework_without_a_seed_option_gets_none():
+    base = {"benchmark": {"framework": "sglang", "envs": {"EXTRA_SGLANG_ARGS": "--tp 8 --random-seed=5"}}}
+    vllm = {"benchmark": {"framework": "vllm", "envs": {"EXTRA_VLLM_ARGS": "--tp 8"}}}
+    atom = {"benchmark": {"framework": "atom", "envs": {"EXTRA_ATOM_ARGS": "--tp 8"}}}
+
+    assert _seeded(SERVER_ARGS, base) == SERVER_ARGS
+    assert _seeded(SERVER_ARGS, vllm) == f"{SERVER_ARGS} --seed {MEASUREMENT_SEED}"
+    assert _seeded(SERVER_ARGS, atom) == SERVER_ARGS
+
+
 def test_a_profile_point_replays_graphs_node_by_node_so_the_profiler_records_every_replay(canonical, blobs, tmp_path):
     (profile,) = generate_profile_point(environment(blobs, tmp_path), canonical, tmp_path / "profile")
     (normal,) = generate_points(environment(blobs, tmp_path), canonical, tmp_path / "normal")
@@ -388,7 +429,7 @@ def test_an_agentx_point_runs_on_the_sessions_frozen_base_as_the_main_flow_compo
     main_flow = materialize_benchmark_config(
         agentx_source(tmp_path / "single" / "benchmark.yaml", 32),
         tmp_path / "main",
-        launch=LaunchLayer(SERVER_ARGS, {"HSA_FORCE_FINE_GRAIN_PCIE": "1", "RUN_EVAL": "false"}),
+        launch=LaunchLayer(SEEDED_ARGS, {"HSA_FORCE_FINE_GRAIN_PCIE": "1", "RUN_EVAL": "false"}),
         target=BenchmarkTarget(model_path=str(model)),
     )
     rendered = load(point)
@@ -398,7 +439,7 @@ def test_an_agentx_point_runs_on_the_sessions_frozen_base_as_the_main_flow_compo
     assert launch["append_args"][: len(base.args)] == list(base.args)
     rendered["benchmark"]["timeout_seconds"] = 7200
     user = suite_config(rendered, base, _settings()).server.user
-    assert user.args_add == tuple(SERVER_ARGS.split())
+    assert user.args_add == tuple(SEEDED_ARGS.split())
     assert user.env_set["HSA_FORCE_FINE_GRAIN_PCIE"] == "1"
 
 
@@ -456,6 +497,61 @@ def test_an_agentx_point_on_the_frozen_base_whose_renderer_keeps_a_removed_optio
 
     with pytest.raises(PointError, match=f"the renderer did not remove launch arguments {BASE_OPTION}"):
         generate_points(environment(blobs, tmp_path, delta=delta), canonical, tmp_path / "points")
+
+
+def _effective_seed(argv: list[str]) -> str | None:
+    """The seed the engine's argument parser resolves from ``argv``: the last one given, in either spelling."""
+    seeds = []
+    for i, token in enumerate(argv):
+        name, assigned, value = token.partition("=")
+        if name.replace("_", "-") == "--random-seed" and (assigned or i + 1 < len(argv)):
+            seeds.append(value if assigned else argv[i + 1])
+    return seeds[-1] if seeds else None
+
+
+@pytest.mark.parametrize(
+    ("base_seed", "effective"),
+    [
+        (("--random-seed", "42"), "42"),
+        (("--random-seed=42",), "42"),
+        (("--random_seed", "42"), "42"),
+        ((), str(MEASUREMENT_SEED)),
+    ],
+    ids=["base-seed", "base-seed-equals", "base-seed-underscore", "base-without-seed"],
+)
+def test_an_agentx_point_on_the_frozen_base_keeps_the_seed_the_base_sets(tmp_path, model, blobs, base_seed, effective):
+    base = _agentx_base()
+    base = replace(
+        base,
+        topology=replace(base.topology, tp=2),
+        client=replace(base.client, env={"WEKA_LOADER_OVERRIDE": "corpus"}),
+        args=(*base.args, *base_seed),
+    )
+    canonical = default_canonical(
+        tmp_path / "canonical",
+        primary_concurrency=32,
+        config_path=agentx_source(tmp_path / "bench" / "benchmark.yaml", 32),
+        model_path=str(model),
+        server_base=server_base(base),
+    )
+    env = environment(blobs, tmp_path, delta=RecipeDelta(config=ConfigDelta(server_args=SERVER_ARGS)))
+
+    (point,) = generate_points(env, canonical, tmp_path / "points", concurrency=(8,))
+    (profile,) = generate_profile_point(env, canonical, tmp_path / "profile")
+
+    for rendered in (point, profile):
+        launch = load(rendered)["benchmark"]["agentx"]["launch_overrides"]
+        assert launch["replace_args"] is True
+        assert _effective_seed(launch["append_args"]) == effective, launch["append_args"]
+        assert "--max-running-requests" in launch["append_args"]
+
+
+def test_an_agentx_point_whose_recipe_launch_is_unseen_adds_no_seed(agentx_canonical, blobs, tmp_path):
+    env = environment(blobs, tmp_path, delta=RecipeDelta(config=ConfigDelta(server_args=SERVER_ARGS)))
+
+    (point,) = generate_points(env, agentx_canonical, tmp_path / "points", concurrency=(8,))
+
+    assert load(point)["benchmark"]["agentx"]["launch_overrides"]["append_args"] == SERVER_ARGS.split()
 
 
 #: An option of the launch resolved from the InferenceX recipe, which the recipe's own arguments lack.
@@ -577,7 +673,7 @@ def test_an_inferencex_point_is_what_the_inferencex_renderer_hands_the_round(can
     expected = materialize_config_with_envs(
         default_baseline_config(),
         tmp_path / "direct",
-        launch=LaunchLayer(SERVER_ARGS, {"HSA_FORCE_FINE_GRAIN_PCIE": "1", "CONC": "8", "RUN_EVAL": "true"}),
+        launch=LaunchLayer(SEEDED_ARGS, {"HSA_FORCE_FINE_GRAIN_PCIE": "1", "CONC": "8", "RUN_EVAL": "true"}),
         target=BenchmarkTarget(model_path=str(model)),
     )
     rendered = load(point)
