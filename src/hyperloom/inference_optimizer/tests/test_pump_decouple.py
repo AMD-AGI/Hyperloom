@@ -364,6 +364,101 @@ async def test_work_queued_while_the_exit_hold_still_holds_is_spawned(coord):
     baseline.gate.set()
 
 
+class _StalledTurn:
+    """Orchestration backend whose LLM call hangs until released, then answers with no intents."""
+
+    def __init__(self, backend) -> None:
+        self._backend = backend
+        self.entered = asyncio.Event()
+        self.release = asyncio.Event()
+
+    def __getattr__(self, name: str):
+        return getattr(self._backend, name)
+
+    async def run(self, prompt: str, **kwargs):
+        self.entered.set()
+        await self.release.wait()
+        return await self._backend.run(prompt, **kwargs)
+
+
+def _stall_orchestration(coord) -> _StalledTurn:
+    stalled = _StalledTurn(coord.backends["orchestration"])
+    coord.backends["orchestration"] = stalled
+    coord.dispatcher.poll_sec = 0.01
+    return stalled
+
+
+async def _until(condition, *, timeout: float = 5.0) -> None:
+    async def _poll() -> None:
+        while not condition():
+            await asyncio.sleep(0.01)
+
+    await asyncio.wait_for(_poll(), timeout=timeout)
+
+
+async def test_a_stalled_turn_does_not_hold_back_booking_or_dispatch(coord):
+    stalled = _stall_orchestration(coord)
+    finished, waiting = _Instant(), _Instant()
+    coord.sub.register_executor("finished_action", finished)
+    coord.sub.register_executor("waiting_action", waiting)
+    await _enqueue(coord, "finished_action", "finished", ["benchmark_lane"])
+    await _enqueue(coord, "waiting_action", "waiting", ["benchmark_lane"])
+
+    tick = asyncio.create_task(coord._tick_once())
+    await asyncio.wait_for(stalled.entered.wait(), timeout=5)
+    await _until(lambda: finished.calls and waiting.calls and not coord.dispatcher.has_unbooked_completions())
+
+    assert not coord.dispatcher.owes_result(finished.calls[0])
+    assert not coord.dispatcher.owes_result(waiting.calls[0])
+    assert not tick.done()
+    stalled.release.set()
+    await asyncio.wait_for(tick, timeout=5)
+
+
+async def test_the_turn_routes_only_after_the_pump_beside_it_finishes(coord):
+    stalled = _stall_orchestration(coord)
+    real_pump = coord.dispatcher.pump_dispatcher_once
+    pumping, pump_gate = asyncio.Event(), asyncio.Event()
+
+    async def gated_pump() -> None:
+        pumping.set()
+        await pump_gate.wait()
+        await real_pump()
+
+    coord.dispatcher.pump_dispatcher_once = gated_pump
+    tick = asyncio.create_task(coord._tick_once())
+    await asyncio.wait_for(pumping.wait(), timeout=5)
+    stalled.release.set()
+    await asyncio.sleep(0.05)
+
+    assert "orchestration" not in coord.shared_state.agent_last_active
+    pump_gate.set()
+    await asyncio.wait_for(tick, timeout=5)
+    assert "orchestration" in coord.shared_state.agent_last_active
+
+
+async def test_a_pump_that_raises_beside_a_turn_pauses_without_failing_the_turn(coord):
+    stalled = _stall_orchestration(coord)
+    real_pump = coord.dispatcher.pump_dispatcher_once
+    calls: list[str] = []
+
+    async def failing_pump() -> None:
+        calls.append("pump")
+        if len(calls) == 1:
+            raise RuntimeError("pump broke beside the turn")
+        await real_pump()
+
+    coord.dispatcher.pump_dispatcher_once = failing_pump
+    tick = asyncio.create_task(coord._tick_once())
+    await _until(lambda: calls)
+    await asyncio.sleep(0.05)
+
+    assert calls == ["pump"]
+    stalled.release.set()
+    await asyncio.wait_for(tick, timeout=5)
+    assert "orchestration" in coord.shared_state.agent_last_active
+
+
 async def test_the_closing_transition_releases_a_held_barrier(coord):
     async def _close_sequence(*, reason: str) -> bool:
         return True

@@ -59,6 +59,7 @@ from .signals import SignalDrain
 from .intent_router import IntentRouter
 from hyperloom.inference_optimizer.model_config_utils import infer_model_class
 from .sub_agent_runner import SubAgentRunner
+from .turn_pump import PumpBesideTurn
 from ..state.task_registry import TaskRegistry, task_dispatch_origin
 from ..collaborator import OrchestrationPrompt
 from hyperloom.inference_optimizer.trace.llm_trace import (
@@ -1046,12 +1047,13 @@ class Coordinator:
         """Run one reactor turn for ``agent_name``, route its intents, and return the turn's result.
 
         ``request`` is appended to the composed prompt; a turn that carries one may legitimately reply without
-        intents. The turn is scoped as that agent on the trajectory.
+        intents. The turn is scoped as that agent on the trajectory, and the dispatcher pumps beside its LLM call.
         """
+        pump = PumpBesideTurn(self.dispatcher, self.stop_requested)
         with trajectory_scope(component=agent_name, agent=agent_name):
-            return await self._reactor_turn(agent_name, request=request)
+            return await self._reactor_turn(agent_name, request=request, pump=pump)
 
-    async def _reactor_turn(self, agent_name: str, *, request: str = "") -> BackendTurnResult | None:
+    async def _reactor_turn(self, agent_name: str, *, request: str, pump: PumpBesideTurn) -> BackendTurnResult | None:
         """Body of :meth:`reactor_pass`."""
         backend = self.backends[agent_name]
         turn = await self.conversation.compose_turn(agent_name, backend)
@@ -1073,12 +1075,10 @@ class Coordinator:
                         agent_name, prompt=prompt, system_prompt=turn.system_prompt, tools=tools
                     )
                 )
-                result: BackendTurnResult = await backend.run(
-                    prompt=prompt,
-                    system_prompt=turn.system_prompt,
-                    tools=tools,
-                    max_turns=0,
-                )
+                async with pump:
+                    result: BackendTurnResult = await backend.run(
+                        prompt=prompt, system_prompt=turn.system_prompt, tools=tools, max_turns=0
+                    )
                 call_span.finish(**llm_call_summary(result.metadata))
         except BackendError as exc:
             if isinstance(exc, LLMCallFailed) and not backend_self_traces:
