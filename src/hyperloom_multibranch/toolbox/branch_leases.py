@@ -105,6 +105,7 @@ class BranchLeases:
         self._env = _agent_env(image_env)
         self._guard = threading.Lock()
         self._promised: dict[str, int] = {}
+        self._pausing: set[str] = set()
         self._granted: dict[str, BranchLease] = {}
         self._closed = False
         self.on_release: Callable[[], None] = _nothing
@@ -124,9 +125,12 @@ class BranchLeases:
 
     def tests_at_once(self) -> int:
         """How many tests the cards left for measurement run at once, at least one so that a toolbox which lost its
-        cards fails its tests instead of parking them."""
+        cards fails its tests instead of parking them; none while a pausing lease (see :meth:`lease`) takes the cards
+        one test needs."""
 
-        return max(1, self.capacity().measurement_cards // self.cards_per_test)
+        with self._guard:
+            by_cards = self._capacity().measurement_cards // self.cards_per_test
+            return by_cards if self._pausing else max(1, by_cards)
 
     def can_lease(self, cards: int) -> bool:
         """Whether a lease of ``cards`` would leave as many cards as one test needs, as far as the pool's size goes."""
@@ -154,6 +158,7 @@ class BranchLeases:
         *,
         charge: LeaseCharge,
         wait_sec: float | None = None,
+        pausing: bool = False,
     ) -> BranchLease:
         """Hold ``cards`` cards and a working directory for ``holder``, waiting for running tests to give cards back.
 
@@ -163,17 +168,21 @@ class BranchLeases:
         the area when omitted. ``wait_sec`` bounds the wait for cards (:func:`lease_wait`): ``None`` is
         :data:`LEASE_WAIT_SECONDS`, ``0`` takes only cards that are free now.
 
+        A ``pausing`` lease, for a short tool job, may take cards one test needs: from its promise until its release no
+        new test starts if fewer than one test's cards are left (:meth:`tests_at_once`), and the running tests keep
+        their cards until they end, so it waits for them and is not overtaken by the next.
+
         Raises:
             RequestRejected: ``lease_exists`` when the holder holds a lease, ``lease_leaves_no_measurement`` when
-                fewer than one test's cards would be left, ``invalid_request`` for fewer than one card or a
-                ``wait_sec`` that is negative or not a number.
+                fewer than one test's cards would be left and the lease is not ``pausing``, ``invalid_request`` for
+                fewer than one card or a ``wait_sec`` that is negative or not a number.
             SandboxUnavailable: When the cards were not free within the wait or the toolbox closed.
             RequestRejected, SandboxUnavailable: When the blackboard did not record the grant (see
                 :class:`~hyperloom_multibranch.toolbox.lease_ledger.LeaseLedger`); the cards go back.
         """
 
         wait = lease_wait(wait_sec, LEASE_WAIT_SECONDS)
-        self._promise(holder, cards)
+        self._promise(holder, cards, pausing=pausing)
         gpu_ids: tuple[int, ...] = ()
         try:
             gpu_ids = await self._take(cards, wait)
@@ -211,6 +220,7 @@ class BranchLeases:
             if lease is None:
                 return
             del self._promised[lease.branch_id]
+            self._pausing.discard(lease.branch_id)
             self._held_out.update(lease.gpu_ids)
         busy = self._busy(lease.gpu_ids)
         self._give_back(lease_id, [card for card in lease.gpu_ids if card not in busy])
@@ -246,12 +256,17 @@ class BranchLeases:
     def _check(self, cards: int) -> None:
         refuse_unfit_cards(cards, self._capacity().measurement_cards, self.cards_per_test)
 
-    def _promise(self, holder: str, cards: int) -> None:
+    def _promise(self, holder: str, cards: int, *, pausing: bool) -> None:
         with self._guard:
             if holder in self._promised:
                 raise RequestRejected(f"{holder!r} already holds a lease", "lease_exists")
-            self._check(cards)
+            if not pausing:
+                self._check(cards)
+            elif cards < 1:
+                raise RequestRejected(f"a lease needs at least one card, not {cards}")
             self._promised[holder] = cards
+            if pausing:
+                self._pausing.add(holder)
 
     async def _take(self, cards: int, wait: float) -> tuple[int, ...]:
         """The cards, taken as soon as they are free and no process holds them; the pool is asked at least once, whatever
@@ -352,6 +367,7 @@ class BranchLeases:
     def _forget(self, holder: str, gpu_ids: tuple[int, ...]) -> None:
         with self._guard:
             del self._promised[holder]
+            self._pausing.discard(holder)
             if gpu_ids:
                 self._provider.pool.release(gpu_ids)
         self.on_release()

@@ -58,6 +58,8 @@ UNKNOWN_GPU_ARCH = "unknown_gpu_arch"
 #: The holder prefix of a tool job's lease, as ``kernel_tune``'s.
 _HOLDER_PREFIX = "tool:"
 _ARCH_CARDS = 1
+#: Longer than any session: the arch card's lease waits until a card is free, or until the toolbox closes.
+_ARCH_LEASE_WAIT_SEC = 7 * 24 * 3600.0
 
 
 class _SharesOps:
@@ -71,9 +73,11 @@ class _ArchCard:
     """Mixin: an analysis that would measure the board's arch spec does so on one card leased for it, and on no other.
 
     The card is leased from ``leases``, the pool the measurement tests run on, held by ``tool:<job id>`` and charged to the
-    requesting branch, and released once the analysis returns. The analysis is told the card in ``arch_gpus``, which the
-    caller cannot set. With no pool, no card to spare or a refused lease it is given none, and its roofline reads vendor
-    peaks. A board with an arch spec, or a route that never measures, takes no card.
+    requesting branch, and released once the analysis returns. The lease is pausing: it waits for a card however long
+    the running tests take, and when the tests need every card no new test starts until it is released. The analysis is
+    told the card in ``arch_gpus``, which the caller cannot set. With no pool (a toolbox whose cards it does not own), or
+    a lease refused as the toolbox closes, it is given none, and its roofline reads vendor peaks. A board with an arch
+    spec, or a route that never measures, takes no card.
     """
 
     name: str
@@ -95,11 +99,18 @@ class _ArchCard:
                 self._leases.release(lease.lease_id)
 
     async def _arch_lease(self, branch: str, workdir: Path) -> BranchLease | None:
-        if self._leases is None or not self._leases.can_lease(_ARCH_CARDS):
+        if self._leases is None:
             return None
         charge = LeaseCharge(LeaseKind.TOOL_JOB, branch, self.name)
         try:
-            return await self._leases.lease(f"{_HOLDER_PREFIX}{workdir.name}", _ARCH_CARDS, workdir, charge=charge)
+            return await self._leases.lease(
+                f"{_HOLDER_PREFIX}{workdir.name}",
+                _ARCH_CARDS,
+                workdir,
+                charge=charge,
+                wait_sec=_ARCH_LEASE_WAIT_SEC,
+                pausing=True,
+            )
         except (RequestRejected, SandboxUnavailable):
             return None
 

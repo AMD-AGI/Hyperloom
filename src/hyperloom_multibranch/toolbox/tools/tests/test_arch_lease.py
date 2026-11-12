@@ -9,8 +9,10 @@ from pathlib import Path
 
 import pytest
 
+from hyperloom.sandbox.socket import SandboxUnavailable
 from hyperloom_multibranch.contracts.blackboard.vocab import LeaseKind
 from hyperloom_multibranch.contracts.toolbox import BranchLease, LeaseCharge, RequestRejected
+from hyperloom_multibranch.toolbox.branch_leases import LEASE_WAIT_SECONDS
 from hyperloom_multibranch.toolbox.tools import roofline as roofline_module
 from hyperloom_multibranch.toolbox.tools.base import ToolRequest
 from hyperloom_multibranch.toolbox.tools.roofline import ARCH_GPUS_PARAM, roofline_tool, tracelens_tool
@@ -21,21 +23,21 @@ _FREE_CARD = 3
 
 
 class PoolBesideATest:
-    """A pool whose card 0 runs a measurement test: a lease gets card 3, and records who held it and when it went back."""
+    """A pool whose card 0 runs a measurement test: a lease gets card 3, and records how it was asked for, who held it
+    and when it went back."""
 
-    def __init__(self, *, spare: bool = True, reject: bool = False) -> None:
-        self.spare = spare
-        self.reject = reject
+    def __init__(self, *, refusal: Exception | None = None) -> None:
+        self.refusal = refusal
         self.leases: list[tuple[str, int, LeaseCharge]] = []
+        self.asked: list[dict] = []
         self.released: list[str] = []
 
-    def can_lease(self, cards: int) -> bool:
-        del cards
-        return self.spare
-
-    async def lease(self, holder: str, cards: int, root: Path, *, charge: LeaseCharge) -> BranchLease:
-        if self.reject:
-            raise RequestRejected("lease_leaves_no_measurement", "no card to spare")
+    async def lease(
+        self, holder: str, cards: int, root: Path, *, charge: LeaseCharge, wait_sec: float, pausing: bool
+    ) -> BranchLease:
+        self.asked.append({"wait_sec": wait_sec, "pausing": pausing})
+        if self.refusal is not None:
+            raise self.refusal
         self.leases.append((holder, cards, charge))
         return BranchLease("lease-1", charge.branch, (_FREE_CARD,), root, {}, 1)
 
@@ -82,6 +84,21 @@ async def test_the_roofline_measures_the_board_on_a_leased_card_not_the_tests(
     assert pool.released == ["lease-1"]
 
 
+async def test_the_lease_waits_for_a_card_and_pauses_the_tests_rather_than_give_up(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _without_arch_spec(monkeypatch)
+    pool = PoolBesideATest()
+    tool = roofline_tool(pool)
+    tool._handler = RecordingHandler(pool)
+
+    await tool.run(ToolRequest("roofline", "b1", {"trace_input": "/t"}), tmp_path)
+
+    (asked,) = pool.asked
+    assert asked["pausing"] is True
+    assert asked["wait_sec"] > LEASE_WAIT_SECONDS
+
+
 async def test_a_board_with_an_arch_spec_takes_no_card(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(roofline_module, "resolve_arch_json_path", lambda _platform: tmp_path / "MI355X.json")
     pool = PoolBesideATest()
@@ -97,8 +114,12 @@ async def test_a_board_with_an_arch_spec_takes_no_card(tmp_path: Path, monkeypat
 
 @pytest.mark.parametrize(
     "pool",
-    [None, PoolBesideATest(spare=False), PoolBesideATest(reject=True)],
-    ids=["no pool", "no card to spare", "lease refused"],
+    [
+        None,
+        PoolBesideATest(refusal=SandboxUnavailable("the toolbox is closing")),
+        PoolBesideATest(refusal=RequestRejected("the blackboard did not record the grant")),
+    ],
+    ids=["no pool", "toolbox closing", "lease refused"],
 )
 async def test_without_a_leased_card_the_analysis_is_given_none(
     pool: PoolBesideATest | None, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
