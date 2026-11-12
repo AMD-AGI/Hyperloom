@@ -13,6 +13,7 @@ from typing import Any, NamedTuple
 
 from hyperloom.common.env_safety import ENV_FILE_LIST_SEP, env_file_list_elements, is_file_referencing_env_name
 from hyperloom.inference_optimizer.breakdown.recorder.warm_replay_event import SKIP_KERNEL_PREPARATION_FAILED
+from inference_suite.argv import tokenize_server_args_preserving_json
 
 from ..actions.executors.benchmark_run.warm_patches import revert_warm_kernel_patches
 from ..knowledge.remote_recipe.sanitize import HOST_ORIGIN_KEY
@@ -116,8 +117,6 @@ class _KernelLaunchOverlay(NamedTuple):
 
 def _merge_named_current_recipe_configs(owners: list[tuple[str, Mapping[str, Any]]]) -> tuple[str, dict[str, str]]:
     """Merge named config snapshots with exact duplicate conflict checks."""
-    from hyperloom.inference_optimizer.grid_server_args import tokenize_server_args_preserving_json
-
     pairs: dict[str, tuple[str, ...]] = {}
     positional = 0
     for owner, config in owners:

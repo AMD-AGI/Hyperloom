@@ -26,8 +26,9 @@ from hyperloom_multibranch.contracts.toolbox import BranchLease, LeaseCharge, Re
 from hyperloom_multibranch.specialist.agent_onboarding import CommandResult, OnboardingSetup
 from hyperloom_multibranch.specialist.agent_spec import AgentSpec
 from hyperloom_multibranch.specialist.arbor_adapter import ARBOR_PYTHON, BRANCH_RUN
-from hyperloom_multibranch.specialist.gate_client import GateClient
+from hyperloom_multibranch.specialist.gate_client import FixedGateClient
 from hyperloom_multibranch.toolbox.kernel_artifacts import KernelVariables
+from inference_suite.contracts import FixedWorkload
 
 
 class Process:
@@ -48,6 +49,7 @@ class Sandbox:
     def __init__(self, starts: list[Process], installs: tuple[int, ...] = (), keep: str = "") -> None:
         self.starts, self.installs, self.keep = starts, list(installs), keep
         self.ran: list[tuple[str, Path, Mapping[str, str]]] = []
+        self.stopped = False
 
     async def run(self, command: str, cwd: Path, env: Mapping[str, str], timeout: float) -> CommandResult:
         self.ran.append((command, cwd, env))
@@ -60,6 +62,9 @@ class Sandbox:
             (cwd / self.keep).parent.mkdir(parents=True, exist_ok=True)
             (cwd / self.keep).write_text('{"keeps": 0}', encoding="utf-8")
         return self.starts.pop(0)
+
+    async def stop(self) -> None:
+        self.stopped = True
 
 
 class Onboarder:
@@ -273,9 +278,17 @@ class LocalSandbox:
         self.gone: set[str] = set()
         self.usage = _Usage()
         self.watch_said: list[str] = []
+        self.stops = 0
+        self.processes: list[LocalProcess] = []
 
     def watched(self) -> str:
         return self.watch_said.pop(0) if self.watch_said else ""
+
+    async def stop(self) -> None:
+        """Kill every process the sandbox started, as a sandbox's stop does."""
+        self.stops += 1
+        for process in self.processes:
+            await process.kill()
 
     async def run(self, command: str, cwd: Path, env: Mapping[str, str], timeout: float) -> CommandResult:
         self.ran.append(command)
@@ -304,7 +317,8 @@ class LocalSandbox:
         )
         self.started.append(command)
         self.envs.append(dict(env))
-        return LocalProcess(process, log)
+        self.processes.append(LocalProcess(process, log))
+        return self.processes[-1]
 
 
 class Toolbox:
@@ -439,7 +453,22 @@ MODEL = "/models/Qwen3-14B-FP8"
 
 
 #: The gate's client as MB builds it; it names the model by its hub name, which the server must answer to.
-CLIENT = GateClient("/opt/InferenceX", "Qwen/Qwen3-14B-FP8", 1024, 1024, 8, 0.8, None, False)
+CLIENT = FixedGateClient(
+    "/opt/InferenceX/inferencex-e2e",
+    "Qwen/Qwen3-14B-FP8",
+    FixedWorkload(
+        concurrency=8,
+        isl=1024,
+        osl=1024,
+        random_range_ratio=0.8,
+        num_prompts=80,
+        num_warmups=16,
+        seed=0,
+        warmup_seed=1,
+        tokenizer_mode="auto",
+        trust_remote_code=False,
+    ),
+)
 
 
 PORT = 31110
@@ -554,7 +583,7 @@ def _spec(tmp_path: Path, **changes: object) -> AgentSpec:
         cards=(4, 5),
         seconds=3600.0,
         port=PORT,
-        client=CLIENT.command(PORT, tmp_path / "agent" / "mb-bench"),
+        client=CLIENT.stage(PORT, tmp_path / "agent" / "mb-bench"),
         knowledge=str(tmp_path / "agent" / "mb-integration.md"),
         deadline=DEADLINE,
         root=_git(workspace, "rev-parse", "HEAD"),

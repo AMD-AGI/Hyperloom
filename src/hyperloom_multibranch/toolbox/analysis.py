@@ -31,7 +31,7 @@ from hyperloom_multibranch.toolbox.tools.kernel_tune import KERNEL_TUNE_TOOL, LA
 from hyperloom_multibranch.toolbox.tools.op_shares import COMMIT_PARAM, PROFILE_REQUEST_PARAM
 from hyperloom_multibranch.toolbox.tools.roofline import ROOFLINE_TOOL, TRACELENS_TOOL
 from hyperloom_multibranch.toolbox.tools.tracelens_report import WORKLOAD_HINTS, split_hint
-from hyperloom_multibranch.toolbox.tools.tune_inputs import POINT_CONFIG_GLOB, read_benchmark
+from hyperloom_multibranch.toolbox.tools.tune_inputs import POINT_CONFIG_GLOB, read_point
 from hyperloom_multibranch.toolbox.tools.upstream_pr import UPSTREAM_PR_TOOL, build_search
 
 #: The ceiling of what a specialist may start; the toolbox serves those of them its registry holds, never more.
@@ -135,8 +135,8 @@ def _point_envs(path: Path, root: Path) -> Mapping[str, Any]:
             return {}
     except OSError:
         return {}
-    envs = read_benchmark(path).get("envs")
-    return envs if isinstance(envs, Mapping) else {}
+    point = read_point(path)
+    return point.envs if point is not None else {}
 
 
 def point_split_hints(point: Path, root: Path) -> dict[str, str]:

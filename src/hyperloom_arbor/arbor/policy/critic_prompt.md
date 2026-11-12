@@ -43,9 +43,15 @@ no matter what the agent called it.
 
 ## Check 3: Is the measurement real?
 
-Check `num_requests_successful` against `num_requests_total`. A high error rate
-means the number is unreliable regardless of its size. A metric from a broken
-run is a REVERT even when it looks like a win.
+Read the request accounting the harness gives under the bench output: the
+measured window's successes against the window's own total. A high error rate
+in the window means the number is unreliable regardless of its size. A metric
+from a broken run is a REVERT even when it looks like a win.
+
+A replay's warmup requests are not the measured window: never count them as
+failures. When the bench gives no window total, a gap between
+`num_requests_successful` and `num_requests_total` that is the same in every run
+is that warmup, not failures.
 
 ## Decision
 

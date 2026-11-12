@@ -60,7 +60,7 @@ from hyperloom.measure.hosted_log import STATE_FINISHED
 from hyperloom.measure.hosted_spec import SpecContext
 from hyperloom.measure.jit.key import build_surface
 from hyperloom.measure.jit.store import DirJitStore
-from hyperloom.measure.live_log import last_output
+from hyperloom.measure.live_log import last_output_below
 from hyperloom.measure.local import SUPPORTED_KINDS
 from hyperloom.measure.framework.base import (
     SESSION_SNAPSHOT_DIR,
@@ -71,7 +71,7 @@ from hyperloom.measure.framework.base import (
     load_snapshot,
 )
 from hyperloom.measure.jit.native.config import BUILD_STORE_ENV, BUILD_TRUST_ENV
-from hyperloom.measure.local_templates import image_env, local_runner_template
+from hyperloom.measure.local_templates import host_hf_env, image_env, local_runner_template
 from hyperloom.measure.rule_pack_stage import rule_pack_envs
 from hyperloom.measure.runner.jit import JIT_CACHE_ENV
 from hyperloom.measure.short_prompts.staging import CACHE_ENV as RUNNER_CACHE_ENV
@@ -86,7 +86,9 @@ from hyperloom.sandbox.card_occupancy import (
 )
 from hyperloom.sandbox.gated_pool import GatedPool
 from hyperloom.sandbox.gpu_pool import GpuPool
-from hyperloom.sandbox.local import LocalSandboxProvider, ProcessUsers, RunnerPlan
+from hyperloom.sandbox.local import CARD_RELEASE_WAIT_SEC, LocalSandboxProvider, ProcessUsers, RunnerPlan
+from hyperloom.sandbox.rooted import open_rooted
+from hyperloom.sandbox.socket import SandboxDenied
 from hyperloom.sandbox.templates import LocalTemplate
 from hyperloom_common.fs_utils import is_private_dir
 from hyperloom_multibranch.blackboard import LocalBlackboard
@@ -95,6 +97,7 @@ from hyperloom_multibranch.toolbox.attempts import DEFAULT_MAX_INFRA_RETRIES, IN
 from hyperloom_multibranch.toolbox.branch_leases import BranchLeases, CardDrain
 from hyperloom_multibranch.toolbox.build_preflight import changeable_by_others
 from hyperloom_multibranch.toolbox.hosted_executor import DEFAULT_TEST_TIMEOUT_SEC, HostedExecutor
+from hyperloom_multibranch.toolbox.merge_smoke import merge_smoke_from
 from hyperloom_multibranch.toolbox.leased_toolbox import (
     LeasedToolbox,
     capped_policy,
@@ -131,6 +134,7 @@ __all__ = [
     "host_tool_repos",
     "hub_cache",
     "private_jit_store",
+    "runner_cache_dir",
     "runner_plan",
 ]
 
@@ -141,12 +145,13 @@ JIT_STORE_ENV = "HYPERLOOM_JIT_STORE"
 #: The shared compiled-code cache below this host's temporary directory when neither the options nor the environment
 #: name one, followed by ``-<uid>``: each account on the host keeps its own.
 DEFAULT_JIT_STORE = "hyperloom-jit-store"
-#: The variables that name where a runner clones the tools its tests run (InferenceX, Magpie) from. A local runner starts
-#: from an emptied environment, so :func:`host_tool_repos` carries them from this host's.
-HOST_TOOL_REPO_ENVS: Final = ("INFERENCEX_REPO", "MAGPIE_REPO")
+#: The variables that name where a runner clones the tools its tests run (InferenceX) from. A local runner starts from an
+#: emptied environment, so :func:`host_tool_repos` carries them from this host's.
+HOST_TOOL_REPO_ENVS: Final = ("INFERENCEX_REPO",)
 #: The runner template's variables naming what a confined runner reads: the framework snapshot, the staged rule pack,
-#: the compiled-code store, the runner cache (the check sets), the native build store and its trust file, and a local
-#: InferenceX or Magpie repository.
+#: the compiled-code store, the runner cache (the check sets and the suite staging), the native build store and its trust
+#: file, and a local
+#: InferenceX repository.
 RUNNER_READS: Final = (
     SNAPSHOT_ENV,
     PACK_ENV,
@@ -168,8 +173,8 @@ _RULE_PACK = "rule-pack"
 _POLL_INTERVAL_SEC = 2.0
 LEAKED_CARDS_REASON = "sandbox processes not provably gone"
 FREED_CARDS_REASON = "nothing of the sandbox that held them runs any more"
-#: A running test's files below its sandbox's directory: a local sandbox's root is its ``fs`` directory.
-_LIVE_FILES = Path("fs") / FILES_ROOT.lstrip("/")
+#: A local sandbox's root, below its directory: a running test's files are below it at ``FILES_ROOT``.
+_ROOT = "fs"
 logger = logging.getLogger(__name__)
 
 
@@ -245,9 +250,10 @@ class LocalHostedToolbox(LeasedToolbox):
         self._reported_cards |= new
 
     async def _take_back_freed_cards(self) -> None:
-        """Put back in the pool the cards of ended sandboxes nothing of which runs any more
-        (:meth:`~hyperloom.sandbox.local.LocalSandboxProvider.release_freed_cards`), lift their record in the blackboard
-        and start the tests they let run.
+        """Release the cards of ended sandboxes nothing of which runs any more
+        (:meth:`~hyperloom.sandbox.local.LocalSandboxProvider.release_freed_cards`): they go back to the pool once the
+        kernel's list shows them free, or after :data:`~hyperloom.sandbox.local.CARD_RELEASE_WAIT_SEC` at most. Lift their
+        record in the blackboard and start the tests they let run.
 
         A refused lift is not retried: the blackboard keeps the cards recorded as lost, which is read back only by a
         restart into this session, and keeps them out of the pool there.
@@ -256,7 +262,12 @@ class LocalHostedToolbox(LeasedToolbox):
         freed = frozenset(await asyncio.to_thread(self.provider.release_freed_cards))
         if not freed:
             return
-        logger.info("cards %s are back in the pool: %s", sorted(freed), FREED_CARDS_REASON)
+        logger.info(
+            "cards %s are released and go back to the pool once the kernel lists them free (up to %g s): %s",
+            sorted(freed),
+            CARD_RELEASE_WAIT_SEC,
+            FREED_CARDS_REASON,
+        )
         recorded = freed & self._reported_cards
         if recorded:
             try:
@@ -282,10 +293,24 @@ class LocalHostedToolbox(LeasedToolbox):
         return await asyncio.to_thread(self._live_log, request_id)
 
     def _live_log(self, request_id: str) -> tuple[float, str] | None:
+        """The live log of the sandbox the backend's journal names for the test's unfinished attempt, reached from the
+        sandbox's root by a walk no link its processes made leads out of (they write ``/out``). ``None`` when there is
+        none or it cannot be read: the sandbox's processes change that tree as it is walked, and a test's progress is
+        reported without a live line rather than not at all."""
         record = self.backend.journal.latest(request_id)
         if record is None or record.state == STATE_FINISHED or not record.sandbox_id:
             return None
-        return last_output(self.sandboxes / record.sandbox_id / _LIVE_FILES, time.time())
+        try:
+            files = open_rooted(self.sandboxes / record.sandbox_id / _ROOT, FILES_ROOT, os.O_RDONLY | os.O_DIRECTORY)
+        except (OSError, SandboxDenied):
+            return None
+        try:
+            return last_output_below(files, time.time())
+        except OSError:
+            logger.debug("the live log of sandbox %s could not be read", record.sandbox_id, exc_info=True)
+            return None
+        finally:
+            os.close(files)
 
 
 def max_parallel_tests(cards: int, tp: int) -> int:
@@ -323,7 +348,7 @@ class LocalOptions:
 
     ``policy`` is the quota and priority policy; its ``global_concurrency`` is lowered to ``8 // tp`` when higher.
     ``runner_envs`` add to the image's variables the runner template carries (for example ``INFERENCEX_REPO``) and win
-    over the same name in the host's ``INFERENCEX_REPO`` and ``MAGPIE_REPO``, which the template carries when set.
+    over the same name in the host's ``INFERENCEX_REPO``, which the template carries when set.
     ``archive`` is the result archive, a directory archive below ``session_dir`` when omitted. ``python`` is the interpreter the
     runner and the measurement run with. ``timeout_sec`` is the timeout of one attempt, ``max_infra_retries`` the
     infrastructure retries per test before it ends as ``measurement_failed``, ``infra_backoff_seconds`` the wait before
@@ -346,8 +371,9 @@ class LocalOptions:
     ``HYPERLOOM_CARD_GUARD`` of the host environment, and without it the guard enforces. The runners get the same
     setting. ``card_holders`` says who holds some cards, which the pool asks before it hands a card out: the kernel's list
     of the machine unless a test of this module says otherwise; ``card_memory`` lists what the kernel has on some cards,
-    which a released lease waits on before its cards go back (:func:`~hyperloom.sandbox.card_occupancy.read_listed`
-    unless a test says otherwise). ``short_prompts`` is the staged prompt set of the
+    which a released lease and an ended test's sandbox wait on before their cards go back
+    (:func:`~hyperloom.sandbox.card_occupancy.read_listed` unless a test says otherwise). ``short_prompts`` is the
+    staged prompt set of the
     short-prompt consistency check (``acceptance.short_prompts`` of a builder that names it there says the same and must
     not differ); ``None`` takes the key in ``HYPERLOOM_SHORT_PROMPTS`` of the host environment (``off`` for no check),
     and without either the set for the session model's tokenizer, staged at the build when missing. It is read in this
@@ -356,7 +382,11 @@ class LocalOptions:
     their template, which therefore wins over the same name in ``runner_envs``), the branches' sandboxes are not told.
     ``long_context`` is the staged prompt set of the long-context check, named, found and read the same way (``None`` takes
     the key in ``HYPERLOOM_LONG_CONTEXT``, ``off`` for no check, and without either the model's own set at the context
-    each test's launch serves).
+    each test's launch serves). ``tests_end_by`` is when every test of the session must have ended, Unix seconds, in a
+    hosted run measured on this container's cards (the grant's
+    :attr:`~hyperloom_multibranch.scheduling.hosted_run.GrantEnd.tests_end_by`): no infrastructure retry, FINAL's on
+    the integration branch included, waits past the time a test of its kind can still end by it; ``None`` for no such
+    time.
     """
 
     policy: QueuePolicy | None = None
@@ -375,6 +405,7 @@ class LocalOptions:
     card_memory: Callable[[Sequence[int]], CardReading] = read_listed
     short_prompts: ShortPromptSetup | None = None
     long_context: LongContextSetup | None = None
+    tests_end_by: float | None = None
 
 
 def card_guard_of(options: LocalOptions, environ: Mapping[str, str] | None = None) -> CardGuard:
@@ -444,9 +475,9 @@ def aiter_builds_missing(runner_envs: Mapping[str, str]) -> str | None:
 def host_tool_repos(environ: Mapping[str, str] | None = None) -> dict[str, str]:
     """The variables of :data:`HOST_TOOL_REPO_ENVS` that ``environ`` (this process's by default) sets to a value.
 
-    A local runner does not inherit the host's environment, yet it clones InferenceX and Magpie from the repositories
-    these name: without them a session whose commit exists only in a local mirror fails at the runner's start. Hosted
-    (sandbox) runners get theirs from their own template and never from here.
+    A local runner does not inherit the host's environment, yet it clones InferenceX from the repository these name:
+    without them a session whose commit exists only in a local mirror fails at the runner's start. Hosted (sandbox)
+    runners get theirs from their own template and never from here.
     """
     source = os.environ if environ is None else environ
     return {name: source[name] for name in HOST_TOOL_REPO_ENVS if source.get(name, "").strip()}
@@ -610,24 +641,28 @@ def _snapshot_source(envs: Mapping[str, str]) -> tuple[Path, ...]:
 
 
 def _runner_template(session: LocalSession, options: LocalOptions) -> LocalTemplate:
-    """The runner template: the image's variables, the host's tool repositories (:func:`host_tool_repos`), ``runner_envs``
-    over both, and the variable that names the session's rule pack. ``runner_envs`` add to the image's variables, never
+    """The runner template: the image's variables, the host's Hugging Face settings
+    (:func:`~hyperloom.measure.local_templates.host_hf_env`) and tool repositories (:func:`host_tool_repos`),
+    ``runner_envs`` over them, and the variable that names the session's rule pack. ``runner_envs`` add to the image's variables, never
     replace them: without ``ROCM_PATH`` and ``LD_LIBRARY_PATH`` the runner cannot import torch on an image whose ROCm
     libraries are not in the loader's path."""
-    envs = {**image_env(), **host_tool_repos(), **(options.runner_envs or {})}
+    envs = {**image_env(), **host_hf_env(), **host_tool_repos(), **(options.runner_envs or {})}
     template = local_runner_template(f"runner-{session.tp}", gpus=session.tp, python=options.python, envs=envs)
     pack = rule_pack_envs(Path(session.session_dir) / _RULE_PACK)
     return replace(template, envs={**template.envs, **pack})
 
 
-def _shared_dirs(jit_store: Path | None, eval_sets: bool, environ: Mapping[str, str]) -> dict[str, str]:
-    """The host directories the runners are told, by the variable each reads, for the shared stores that are on: the
-    compiled-code cache, and the runner cache the check sets are read from when a check is on (made absolute: a runner
-    starts elsewhere)."""
-    named = {
-        JIT_CACHE_ENV: jit_store,
-        RUNNER_CACHE_ENV: cache_root(environ).expanduser().resolve() if eval_sets else None,
-    }
+def runner_cache_dir(environ: Mapping[str, str]) -> Path:
+    """This host's runner cache as its runners are told it, made absolute: a runner starts elsewhere. It holds the
+    inference_suite staging every test runs and the check sets."""
+    return cache_root(environ).expanduser().resolve()
+
+
+def _shared_dirs(jit_store: Path | None, environ: Mapping[str, str]) -> dict[str, str]:
+    """The host directories the runners are told, by the variable each reads, for the shared stores: the compiled-code
+    cache when it is on, and always the runner cache, which holds the inference_suite staging every test runs. The
+    runner's environment is cleared, so without it a runner reads the default cache, where nothing was published."""
+    named = {JIT_CACHE_ENV: jit_store, RUNNER_CACHE_ENV: runner_cache_dir(environ)}
     return {name: str(path) for name, path in named.items() if path is not None}
 
 
@@ -664,6 +699,7 @@ def _provider(
         users=ProcessUsers(plan=plan),
     )
     provider.pool = GatedPool(cards, card_guard_of(options), read=options.card_holders)
+    provider.card_memory = options.card_memory
     return provider
 
 
@@ -751,8 +787,7 @@ def build_local_toolbox(
         jit_store=DirJitStore(jit_root),
     )
     template = _runner_template(session, options)
-    eval_sets = acceptance.short_prompts is not None or acceptance.long_context is not None
-    shared_dirs = {**_shared_dirs(jit_root, eval_sets, os.environ), **(native.runner_envs if native else {})}
+    shared_dirs = {**_shared_dirs(jit_root, os.environ), **(native.runner_envs if native else {})}
     acceptance = replace(acceptance, aiter_builds_missing=aiter_builds_missing({**template.envs, **shared_dirs}))
     measured = _measured_template(session, template, options, shared_dirs)
     provider = _provider(session, cards, measured, options, spec.model_dir)
@@ -762,9 +797,9 @@ def build_local_toolbox(
         backend,
         directory,
         timeout_sec=options.timeout_sec,
-        magpie_python=options.python,
         workload_kind=acceptance.workload_kind,
     )
+    executor.smoke = merge_smoke_from(os.environ)
     toolbox = LocalHostedToolbox(
         session_stores(blackboard, directory, session.run_id, native.driver if native else None),
         executor,
@@ -774,6 +809,7 @@ def build_local_toolbox(
             policy=capped_policy(options.policy, parallel),
             max_infra_retries=options.max_infra_retries,
             infra_backoff_seconds=options.infra_backoff_seconds,
+            tests_end_by=options.tests_end_by,
         ),
     )
     toolbox.backend, toolbox.provider, toolbox.trace_root = backend, provider, directory

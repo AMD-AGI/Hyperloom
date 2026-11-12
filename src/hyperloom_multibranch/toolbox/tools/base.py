@@ -12,7 +12,9 @@ finished job is never silent.
 Work whose answer is the same whoever asks is started once (:meth:`ToolJobs.share`, keyed by the caller): a branch that
 asks while the job runs joins it, and the job's pointer then goes to every branch that joined; one that asks after it
 succeeded gets its pointer at once, as it is; a failed or cancelled job is not reused. The keys and their jobs are kept in
-the results directory (:mod:`.shared_jobs`), so a restarted runner shares what the one before it finished.
+the results directory (:mod:`.shared_jobs`), so a restarted runner shares what the one before it finished. That runner
+may be another account of the run's group: a job's directory is the group's (``2775`` below shared storage) and its
+result file a session file (:func:`~hyperloom.common.session_files.shared_options`).
 
 A job runs in its own cancel scope, the channel the orchestrator's subprocess helpers watch: a tool that hands its work
 to a thread (``run_with_session_kill``) has that thread end the child's process group when the job is cancelled or
@@ -32,7 +34,9 @@ from pathlib import Path
 from typing import Any, Protocol
 from urllib.parse import quote
 
+from hyperloom.common.session_files import shared_options
 from hyperloom_common.io import atomic_write_json
+from hyperloom_common.shared_storage import make_shared_dirs
 from hyperloom.orchestrator.actions.cancel_channel import CancelScope, use_cancel_scope
 from hyperloom.orchestrator.actions.executors import COOPERATIVE_REAP_BUDGET_SEC
 from hyperloom_multibranch.contracts.blackboard.records import BuildNotice, ToolResultPointer
@@ -320,7 +324,7 @@ class ToolJobs:
             job.status = JobStatus.CANCELLED
         else:
             output, error = await self._execute(job)
-        job.workdir.mkdir(parents=True, exist_ok=True)
+        make_shared_dirs(job.workdir)
         summary = self._settle(job, output, error)
         job.result = dict(output.result) if output is not None else {}
         record = {
@@ -332,7 +336,7 @@ class ToolJobs:
             "result": dict(output.result) if output is not None else None,
             "error": error or None,
         }
-        atomic_write_json(job.workdir / RESULT_FILE, record)
+        atomic_write_json(job.workdir / RESULT_FILE, record, options=shared_options(record))
         job.pointer = ToolResultPointer(
             branch=job.request.branch,
             job_id=job.job_id,
@@ -347,7 +351,7 @@ class ToolJobs:
         await self._push(job)
 
     async def _execute(self, job: _Job) -> tuple[ToolOutput | None, str]:
-        job.workdir.mkdir(parents=True, exist_ok=True)
+        make_shared_dirs(job.workdir)
         tool = self._tools[job.request.tool]
         job.inner = asyncio.get_running_loop().create_task(self._in_scope(job, tool))
         try:

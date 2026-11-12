@@ -41,8 +41,10 @@ STOP_SIGNALS: tuple[signal.Signals, ...] = (signal.SIGINT, signal.SIGTERM, signa
 STOP_OVERRAN = "the stop overran the hard stop"
 TOOLBOX_CLOSE_OVERRAN = "the toolbox did not close in time"
 #: Clock seconds the toolbox gets to close; its close cancels its own work and releases its backend and sandboxes, so
-#: it is quick even while a specialist hangs.
-TOOLBOX_CLOSE_SECONDS = 10.0
+#: it is quick even while a specialist hangs. Ending a local sandbox reaps its processes, which takes up to 27 s when one
+#: of them outlives SIGKILL (``hyperloom.sandbox.reaper.ONE_REAP_SEC``); a local toolbox reaps its sandboxes all at once,
+#: so the close fits one reap and a margin.
+TOOLBOX_CLOSE_SECONDS = 30.0
 
 
 class SessionStopReason(str, Enum):
@@ -70,6 +72,10 @@ class SessionStopReason(str, Enum):
     #: The session was killed with the machine it ran on, so it never closed and wrote no report; only the emergency
     #: ``final-only`` recovery reports it, and finishing a dead session does not make it one that ran its course.
     KILLED = "killed"
+    #: A restart of a hosted run, which its host starts again after a preemption, ran FINAL over a session an earlier
+    #: start left before FINAL and FINAL chose a commit: the run finished, after a restart, and counts as one that ran
+    #: its course. Only ``hosted run`` ends a session for it; ``final-only`` keeps the reason the session ended for.
+    FINISHED_AFTER_RESTART = "finished_after_restart"
 
 
 class StopSignals:

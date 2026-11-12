@@ -36,10 +36,16 @@ These are set in the app container's environment.
 | `HYPERLOOM_SOURCE_REPO` | yes | Where the run's Hyperloom source is fetched from: `OWNER/NAME` on GitHub, any git URL, or a local path (for example a mirror on shared storage when the app host has no GitHub egress). |
 | `HYPERLOOM_SOURCE_SHA` | yes | The full 40-hex commit the run executes. |
 | `HYPERLOOM_RSI_ARCHIVE` | yes, for the hosted multi-branch entry | Writable directory where sessions archive their search trees for later sessions to learn from. Point every session of a deployment at the same directory to share what they learn; a private directory keeps a session's tree out of the shared archive. There is no default. |
-| `INFERENCEX_PATH` | yes, for the hosted multi-branch entry, unless `install.sh` left a checkout | A writable InferenceX checkout at the commit Hyperloom pins. Without one the session refuses to start, naming `INFERENCEX_PATH`. |
+| `INFERENCE_SUITE_TOOL_CACHE` | no | The tool cache `install.sh` staged the pinned InferenceX client in. Default `inference-suite-tools` under the dependency cache. Without a staging there that verifies, the session refuses to start, naming `python -m inference_suite stage --tool-cache <dir>`. |
+| `HYPERLOOM_HOST_LAYER` | yes, unless `HYPERLOOM_SPECIALIST_USER` names an account the app can run agents as | The hosting layer's directory. A hosted run launches an agent under bubblewrap only with the layer's `bin/bwrap`, never one on `PATH` (the framework image may carry its own). |
 
 The model is named by the campaign spec (`model.path`), not by a variable. The app host reads the model's tokenizer
 files at that path.
+
+A hosted run starts nothing unconfined in the app container, beside its credentials: its specialists run as the account
+`HYPERLOOM_SPECIALIST_USER` names where it can be used, else under the layer's bubblewrap (`HYPERLOOM_HOST_LAYER`).
+Where neither can isolate them, the run ends before anything starts, naming both reasons (exit code 1); a bubblewrap
+that gives no answer within 10 s leaves the host to start the run again.
 
 ## Measurement sandbox template
 
@@ -49,11 +55,10 @@ template's values to the paths inside the sandbox.
 
 | Variable | Required | What it points at |
 | --- | --- | --- |
-| `HYPERLOOM_RUNNER_CACHE` | no | Where the template mounts the runner cache (read-only is enough). Default `/runner-cache`. It must hold the same directory the app host's `HYPERLOOM_RUNNER_CACHE` names. How the sandbox starts from it is described below the table. |
+| `HYPERLOOM_RUNNER_CACHE` | no | Where the template mounts the runner cache. Default `/runner-cache`. For a v2 sheet the runner uses the inference_suite staging `cache_build` published in `inference-suite/<staging key>/` (see [The inference_suite staging](#the-inference_suite-staging)) offline and builds none, so the whole cache can be read-only. It must hold the same directory the app host's `HYPERLOOM_RUNNER_CACHE` names. How the sandbox starts from it is described below the table. |
 | `HYPERLOOM_SOURCE_SHA`, `HYPERLOOM_RUNNER_CACHE_MANIFEST_SHA256` | set by the hosted multi-branch entry | The hosted multi-branch entry passes both on every create; the template must list them in its accepted create environment. |
 | `HYPERLOOM_FRAMEWORK_SNAPSHOT`, `HYPERLOOM_FRAMEWORK_SESSION_SHA256` | set by the hosted multi-branch entry | When the app host has the image's aiter tables, the hosted multi-branch entry snapshots them below `<session_dir>/framework` and passes both on every create; the template must list them in its accepted create environment, and the sandbox must see the session directory at the same path. Without the snapshot, a test that adds tuned rows to a default table is refused as `spec_rejected`. |
 | `INFERENCEX_REPO` | no | Where the runner fetches InferenceX (default: upstream on GitHub). A sandbox without egress needs a mirror it can read, for example a bare repository on the shared storage. |
-| `MAGPIE_REPO` | no | Where the runner fetches Magpie (default: upstream on GitHub). Same as `INFERENCEX_REPO`. |
 | `HYPERLOOM_JIT_CACHE` | no | A read-only directory of compiled kernels shared between tests. Unset: every test builds its kernels cold, which is slower but measures the same. A test that patches aiter's `csrc` or `hsa` is refused without it, because it needs its own JIT directory. |
 
 The sandbox serves the model at the path the campaign spec names, so the template must mount the model storage at
@@ -84,12 +89,40 @@ installs only those copies (`pip --no-index`), then runs the runner from the unp
 needs room for the unpacked source and the wheels. Nothing the runner or pip runs comes from the cache unchecked. A
 profile test later copies the staged ruppell tree (`<cache>/tools/ruppell-<commit>/`) and builds the copy only when it
 has the pinned digest. The prompt sets a test reads (`<cache>/evalsets/<key>/`) are data, and they are read from the
-cache again after their check. The start-up makes no network access; the runner still fetches InferenceX and Magpie
-(`INFERENCEX_REPO` and `MAGPIE_REPO` above).
+cache again after their check. The start-up makes no network access; the runner still fetches InferenceX
+(`INFERENCEX_REPO` above).
 
 With the checked step, a sandbox that does not find the entry, finds one that does not match the pin, or has no pin
 fails its start with `runner_start_failed`. An entry built before entries had `source.tar` is refused where it is built:
 the build fails with `CacheConflict`.
+
+## The session's base launch
+
+A hosted multi-branch session resolves its base launch as `hyperloom-multibranch run` does: from InferenceX
+(`multibranch.inferencex_commit` pins the commit), then the framework's cookbook, then the default table. When none of
+them gives a launch that starts on the cluster's hardware, give the launch yourself as `multibranch.reference_script`,
+the path of a shell launch script on the app host (for example on the storage `USER_DATA_PATH` is on), which the
+session freezes as its base as `--reference-script` does. It wins over every recipe source. Its literal `export
+NAME=value` lines are the server's environment, and its server command line carries the flags; the command's TP and EP
+must be the spec's `hardware.tp` and `hardware.ep`, and an export or a flag set from a shell variable is refused.
+
+```shell
+# /mnt/shared/hyperloom/launch/dsv4-flash-mi355x.sh
+export AITER_BF16_FP8_MOE_BOUND=0
+export SGLANG_USE_AITER=1
+python3 -m sglang.launch_server --model-path /mnt/shared/models/DeepSeek-V4-Flash --tp 8 --ep-size 8 \
+    --trust-remote-code --mem-fraction-static 0.8
+```
+
+```json
+"framework": {"name": "sglang", "image": "<image>"},
+"hardware": {"gpu_type": "mi355x", "tp": 8, "ep": 8},
+"multibranch": {"workload": "inferencex", "reference_script": "/mnt/shared/hyperloom/launch/dsv4-flash-mi355x.sh"}
+```
+
+A multi-branch spec does not take `launch.server_args` or `launch.extra_env`, which only flow `single` reads: a spec
+that sets either ends the run (exit code 2), naming `multibranch.reference_script`, instead of running without them. A
+script that cannot serve as the base ends the run the same way, naming why.
 
 ## Dev sandbox template
 
@@ -103,6 +136,31 @@ host's LLM gateway variables (`ANTHROPIC_*`, `OPENAI_*`) and its CA bundle varia
 paths must exist in the sandbox too. The gateway variables include its credentials, which any command in the sandbox can
 read, so give the app host a gateway key that agents' commands may see. A lease lives as long as its holder needs it,
 bounded by the grant's `max_runtime_sec`.
+
+## One node: measuring on the app container's own cards
+
+A spec with `placement.measurement: local` and `placement.profile: hosted-gpu` measures on the cards of the app
+container itself, as `hyperloom-multibranch run` does on a machine's: tests, dev sandboxes and autonomous agents all
+run in the app container, so the run needs no measurement or `dev` template, no sandbox key, no
+`HYPERLOOM_SOURCE_REPO`/`HYPERLOOM_SOURCE_SHA` for the runner cache, and no grant. `placement.measurement: local` with
+`hosted-cpu` is refused. What changes on the app host:
+
+- Give the container the node's cards. As many tests run at once as its cards hold at the spec's TP, at most
+  `placement.max_parallel_tests`.
+- Every test runs the app container's own framework, so `HYPERLOOM_ACTIVE_IMAGE_REF` and
+  `HYPERLOOM_ACTIVE_IMAGE_DIGEST` name the image the app container runs, and the spec's `framework.image` must name it by
+  that digest (`<repository>@sha256:<digest>`); any other image is refused (exit code 2), and missing pins end the run
+  (exit code 1).
+- `HYPERLOOM_GRANT_LIMITS` is optional. Without it the spec's `budget.max_hours` bounds the session; with a
+  `max_runtime_sec`, the earlier of the two does. Its other totals are not read.
+- `HYPERLOOM_RUNNER_CACHE` is still required: the session stages its prompt sets and the inference_suite staging
+  every test runs there.
+- The agent and dev sandboxes and the tests run in this container, beside the run's credentials, so the run starts only
+  where they run isolated, as the specialists must: under the layer's bubblewrap (`HYPERLOOM_HOST_LAYER`). Where it
+  cannot sandbox them, the run ends before anything starts, naming them and why (exit code 1).
+- Without a visible-device mask, the cards are as many as `rocm-smi` shows, and a container that holds fewer render
+  nodes (`/dev/dri/renderD*`) than that is refused, naming both counts: set `ROCR_VISIBLE_DEVICES` to the cards it was
+  given.
 
 ## Example: clusters with an NFS share
 
@@ -122,7 +180,6 @@ HYPERLOOM_RSI_ARCHIVE=/mnt/shared/hyperloom/rsi-archive/
 # Measurement template
 HYPERLOOM_RUNNER_CACHE=/mnt/shared/hyperloom/runner-cache
 INFERENCEX_REPO=/mnt/shared/hyperloom/mirrors/InferenceX.git
-MAGPIE_REPO=/mnt/shared/hyperloom/mirrors/Magpie.git
 ```
 
 For a measurement image on CPython 3.14 (the current `rocm/vllm` tags), set
@@ -139,11 +196,42 @@ Give `--wheel-target` explicitly. The command does not read `HYPERLOOM_RUNNER_WH
 the environment, to `HYPERLOOM_RUNNER_CACHE`), and without it the wheels are built for the builder's own interpreter. Run
 it with `umask 022` so the sandbox's account can read the entry, on a file system that supports `flock` (NFSv4 does).
 
-It prints the entry's `manifest_sha256`, the value a template pins with `HYPERLOOM_RUNNER_CACHE_MANIFEST_SHA256`.
+It prints the entry's `manifest_sha256`, the value a template pins with `HYPERLOOM_RUNNER_CACHE_MANIFEST_SHA256`,
+and the directory of the inference_suite staging it published.
 A finished entry is never modified: a build of the same commit into the same directory from a checkout whose
 `bootstrap.sh` differs (it embeds that checkout's `bootstrap.py` and `cache_layout.py`) is refused with `CacheConflict`,
 naming both `bootstrap.sh` hashes, and so is one for another wheel target, because a campaign may have pinned that
 entry's manifest. Build by hand from another checkout into a `HYPERLOOM_RUNNER_CACHE` directory of its own.
+
+### The inference_suite staging
+
+After the entry, `cache_build` publishes the commit's inference_suite staging, the AgentX client and InferenceX subset
+a v2 test's rounds run, with the commit's own `inference_suite` (`python -m inference_suite publish`). It downloads the
+pinned python-build-standalone CPython 3.12 build and the wheels of `src/inference_suite/agentx-client.lock`, each
+checked against its pinned sha256, fetches InferenceX at its pin, installs the client with `--no-deps` from those
+files alone, and patches its aiperf to export `error_osl` (a client the patch does not apply to fails the build). The builder needs egress to GitHub and PyPI; the sandbox needs none.
+
+```text
+<HYPERLOOM_RUNNER_CACHE>/inference-suite/                  2775, group of the cache (setgid)
+    <staging key>/                                         published: never written again
+        staging_manifest.json
+        inferencex/<InferenceX pin>/infx/...               the InferenceX subset
+        inferencex/<InferenceX pin>/agentx-python/         the CPython build with the client installed
+    .staging-<staging key>-<uuid>/                         a build in progress; no reader looks inside
+```
+
+The staging key is the sha256 of the InferenceX pin, the interpreter build, the client lock and the client's patch, so a
+change to any of them publishes a new directory beside the old one. Builders share the directory without a lock: each builds in its own
+`.staging-*` directory, syncs it and renames it to the key. A builder that loses the rename removes its own directory
+and uses the winner once the winner's normalised manifest (each package's name, version and wheel sha256, the
+interpreter and the InferenceX pin) is the one it built; one that differs is refused, naming the packages. A
+`.staging-*` directory left by a builder that died can be removed once no build is running.
+
+Every account that runs `cache_build` must be in the cache's group, and the cache root must be setgid in it
+(`chgrp <group> <cache> && chmod 2775 <cache>`); `inference-suite/` is then created `2775` in that group, so builders
+of different accounts can each rename into it. Run the build with `umask 022` so the sandbox's account can read the
+staging. A test whose application staging differs from the runner's published one fails with `preflight_mismatch`,
+naming each package that differs.
 
 A new cluster also needs two more things staged into the runner cache, each with its own command, run where the cache
 is written (the prompt set on a host that has the model's tokenizer files). Without the prompt set, a test that asks for

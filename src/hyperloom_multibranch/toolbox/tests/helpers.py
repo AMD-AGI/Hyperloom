@@ -6,11 +6,16 @@
 from __future__ import annotations
 
 import asyncio
+import os
+import shlex
+import stat
 import time
 from collections.abc import Awaitable, Callable
 from concurrent.futures import ThreadPoolExecutor
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from pathlib import Path
+
+import pytest
 
 from hyperloom.contracts.measurement import (
     AccuracyValue,
@@ -24,6 +29,11 @@ from hyperloom.contracts.measurement import (
     Validity,
 )
 from hyperloom.measure.surface import SurfaceViolation
+from hyperloom.measure.runner.cache_layout import CACHE_ENV
+from hyperloom.measure.tests.bundle_factory import base_launch, lm_eval_at_its_pin, stage_into
+from hyperloom.measure.tests.gpu_free_host import IDLE_CARDS_PYTHON
+from hyperloom.orchestrator.state import base_launch as state_base_launch
+from hyperloom.orchestrator.state.base_launch import freeze_base
 from hyperloom.contracts.recipe import ConfigDelta, Recipe, RecipeDelta, RecipeError
 from hyperloom_multibranch.contracts.gate import ResultUnverified
 from hyperloom_multibranch.contracts.blackboard import INTEGRATION_BRANCH, Role, Writer
@@ -203,10 +213,13 @@ def build(
     aiter_builds_missing: str | None = None,
     infra_backoff: tuple[float, ...] = (),
     sleep: Callable[[float], Awaitable[None]] | None = None,
+    tests_end_by: float | None = None,
+    kind: type[RealToolbox] = RealToolbox,
 ) -> Rig:
-    """A toolbox over a blackboard directory and a submit log under ``tmp_path``; building again over the same
-    ``tmp_path`` is a restart. ``builds`` drives the native builds a test waits for. Infrastructure retries wait
-    ``infra_backoff`` with ``sleep`` (none by default, so a retry goes at once)."""
+    """A toolbox of class ``kind`` over a blackboard directory and a submit log under ``tmp_path``; building again over
+    the same ``tmp_path`` is a restart. ``builds`` drives the native builds a test waits for. Infrastructure retries wait
+    ``infra_backoff`` with ``sleep`` (none by default, so a retry goes at once), never past one typical test before
+    ``tests_end_by``."""
 
     from hyperloom_multibranch.blackboard.tests.factories import FakeClock
 
@@ -224,13 +237,17 @@ def build(
         builds=builds,
         short_prompt_pool=short_prompt_pool,
     )
-    toolbox = RealToolbox(
+    toolbox = kind(
         stores,
         executor,
         AcceptanceSetup(repo, planner, active_image, workload_kind, aiter_builds_missing=aiter_builds_missing),
         tools=tools(blackboard) if tools else None,  # type: ignore[arg-type]
         tuning=ToolboxTuning(
-            policy=policy, clock=clock, infra_backoff_seconds=infra_backoff, sleep=sleep or asyncio.sleep
+            policy=policy,
+            clock=clock,
+            infra_backoff_seconds=infra_backoff,
+            sleep=sleep or asyncio.sleep,
+            tests_end_by=tests_end_by,
         ),
     )
     return Rig(toolbox, executor, fake, repo, blackboard, tmp_path, clock)
@@ -276,3 +293,40 @@ def lineage_blackboard(
     with ThreadPoolExecutor(1) as seeding:
         seeding.submit(asyncio.run, seed()).result()
     return LocalBlackboard(root, Writer(Role.TOOLBOX, "toolbox"), clock=clock)
+
+
+def freeze_base_at(session: Path, commit: str) -> None:
+    """Freeze the fixture base as ``session``'s with its client pinned at ``commit``, the commit of the stand-in
+    InferenceX repository a real runner checks out for the sheet."""
+    base = base_launch()
+    freeze_base(session, replace(base, client=replace(base.client, commit=commit)))
+
+
+def pin_inferencex_at(commit: str, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Pin this install's InferenceX client at ``commit``, the stand-in repository's, so a base frozen there is on the
+    pin."""
+    monkeypatch.setattr(state_base_launch, "INFERENCEX_CLIENT_COMMIT", commit)
+
+
+def pinned_runner_python(directory: Path, commit: str) -> str:
+    """An interpreter a local runner template can name, as :func:`idle_cards_python`, whose install pins the
+    InferenceX client at ``commit``: a runner reads its sheet's base through the same pin check as the application."""
+    script = directory / "pinned-runner-python"
+    code = (
+        "import runpy, sys; from hyperloom.orchestrator.state import base_launch; "
+        "base_launch.INFERENCEX_CLIENT_COMMIT = sys.argv.pop(1); "
+        f"runpy.run_module({IDLE_CARDS_PYTHON[2]!r}, run_name='__main__', alter_sys=True)"
+    )
+    script.write_text(f'#!/bin/sh\nexec {shlex.join((IDLE_CARDS_PYTHON[0], "-c", code, commit))} "$@"\n')
+    script.chmod(script.stat().st_mode | stat.S_IXUSR)
+    return str(script)
+
+
+def stage_runner_cache(tmp: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Name, as this host's runner cache, one below ``tmp`` that already holds a staging that verifies: a local toolbox
+    tells its runners this host's cache, and the stand-in InferenceX repository is not at the commit the staging pins,
+    so a runner that staged from it would refuse the staging. The runners also report lm-eval at its pin, which the
+    staging names and CI does not install: a local sandbox passes ``PYTHONPATH`` on to the runner it starts."""
+    monkeypatch.setenv(CACHE_ENV, str(stage_into(tmp / "runner-cache").parents[1]))
+    pin = str(lm_eval_at_its_pin(tmp / "lm-eval-pin"))
+    monkeypatch.setenv("PYTHONPATH", os.pathsep.join(filter(None, (pin, os.environ.get("PYTHONPATH")))))

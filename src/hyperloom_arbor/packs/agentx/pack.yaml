@@ -3,12 +3,18 @@ description: "AgentX agentic-coding inference optimization via InferenceX trace 
 
 objective:
   kind: maximize_perf
-  metric: output_throughput
+  # The InferenceX dashboard's tput/GPU: input and output tokens per second per GPU. At AgentX's long contexts the
+  # output is under 1 % of it, so a pack that gated on output_throughput optimized another number than the one reported.
+  # output_throughput stays in every bench_output.json.
+  metric: total_throughput
   direction: max
-  unit: "tok/s"
+  unit: "tok/s/GPU"
   measurement:
     count: 1
     threshold_rel: 1.01
+    # How long one bench runs: the replay and its warmup. The bench turn's cap is never
+    # under it plus 15 min (arbor/component.py); -1 is no cap.
+    bench_minutes: 75
 
 validator:
   bench: validator/bench_agentx.sh
@@ -24,11 +30,29 @@ tools:
   kv_trace_analyze: "tools/kv_trace_analyze.py"
   kv_trace_simulator: "tools/kv_trace_simulator.py"
 
+# The dossier and the map run in the lifecycle's chapters (docs/skill-integration.md), as in
+# `serving-m10`. Each writer runs in a turn of its own, and Arbor checks the files it promised:
+# `dossier:discover` (parts 1-5, 10, no GPU), `dossier:measure` (parts 6-8 on the node: the baseline,
+# the noise floor and a profile at the campaign's own operating point), `dossier:directions` (part 11
+# and the map). The iterations read the dossier (`dossier:read`) and may profile (`profiler`); a
+# round's end updates it (`dossier:update`). Without this block the pack loads no skill: no dossier,
+# no map, and no profiler. The flat `dossier-v1` wrote the whole dossier in one turn with no server,
+# and could take its profile from another operating point.
+lifecycle:
+  load: ["benchmark:study", "dossier:discover", "dossier:measure", "dossier:directions", "dossier:update",
+         "dossier:read", profiler, worker-summary]
+
+# Under a host (Hyperloom's MB), the host's rules and client stand for the benchmark's study.
+component:
+  lifecycle:
+    load: ["dossier:discover", "dossier:measure", "dossier:directions", "dossier:update", "dossier:read",
+           profiler, worker-summary]
+
 constraints:
-  - "Profile the decode step (rocprofv3) before proposing any change. A change that does not address one of the top-3 ops by GPU time will not move the AgentX metric."
+  - "Profile the decode step on the campaign's own server before proposing any change: the dossier's part 7 is that profile (the `profiler` skill), taken at the campaign's operating point; profile again (the `profiler` skill, or rocprofv3) once the served config has moved from it. A change that does not address one of the top-3 ops by GPU time will not move the AgentX metric."
   - "Profile again after every KEEP to see if the bottleneck shifted."
   - "The real work is deep: trace critical paths, edit framework source, write kernels. Knobs are warmup only — exhaust in 2-3 iterations then go deeper permanently."
-  - "Every code change must address a real hardware bottleneck confirmed by rocprofv3."
+  - "Every code change must address a real hardware bottleneck confirmed by a profile (the `profiler` skill, or rocprofv3)."
   - "Do not modify InferenceX, AIPerf, or the validator scripts — they are outside the workspace."
   - "One change at a time. Gate it before touching anything else."
   - "Before proposing any code change, search for whether another backend already solved it (the framework's other GPU paths, public kernel libraries). Port proven techniques first."

@@ -100,7 +100,6 @@ def _prepare_multi_node_state(args: argparse.Namespace) -> None:
         print(f"ERROR: cannot write multi-node state: {exc}", file=sys.stderr)
         sys.exit(2)
     os.environ["BENCHMARK_BASE_URL"] = ext_state["service_url"]
-    os.environ["MAGPIE_RUN_PHASE"] = "client"
     export_ray_address_to_os()
     # Report server *control*, not SSH specifically: rayjob restarts through the Ray dashboard with no SSH at all, so
     # keying this on SSH labelled a fully controllable rayjob cluster "benchmark-only" and gave the genuinely

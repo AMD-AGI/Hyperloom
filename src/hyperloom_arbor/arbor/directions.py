@@ -4,8 +4,9 @@ A campaign works from its dossier's part 11, a ranked list of directions, each
 with a map ID (``m-<component>``). Until now nothing tracked which of them had
 been explored: the ID was free text in DONE lines and ledger ids, and once the
 map ran out the campaign explored aimlessly until the drought notices fired.
-Once every direction is explored, the campaign runs the dossier and the profile
-again, then continues like new, with a checklist on the dashboard.
+Once every direction is explored, the campaign should not explore aimlessly,
+but run the dossier and profile again and then continue "like new", with a
+checklist on the dashboard.
 
 How it works:
 
@@ -28,8 +29,9 @@ How it works:
   current tree, and the update round begins once the A/B confirms the gain. A
   target reached with directions still open ends the round there too
   (``after_round_end``); the update round may carry them onto the next map.
-- A new map from an update round with no open increment does not stop the campaign:
-  it starts like a new campaign. A fresh start follows (``fresh``): a new dossier from the code read
+- A new map from an update round with no open increment does not stop the campaign
+  (a campaign that stopped there should have started like a new campaign
+  instead). A fresh start follows (``fresh``): a new dossier from the code read
   again whole and a new profile, the old map history. If that map has no open
   increment either, the harness takes the top planned rewrite as the next round's
   work (``rewrite``). It stops for the operator (``STOP``, ``MAP_STOP.md``) when no
@@ -57,10 +59,11 @@ no DIRECTIONS list, reopens nothing, sends a direction the agent adds to
 (stage items through ``arbor.stages``). When every item is closed it writes
 ``LANE_CLOSED.json`` and a STOP the driver obeys.
 
-    python3 -m arbor.directions check [file] [--dossier DIR]
+    python3 -m arbor.directions check [file] [--dossier DIR] [--length short|medium|long]
         validate a DIRECTIONS line or list (stdin by default); with --dossier,
         also each lane's plan (it exists, its ITEMS parse) and the order the
-        dependencies allow
+        dependencies allow; with --length, a NOTE when its open directions are
+        fewer or more than that length asks (the exit code does not change)
     python3 -m arbor.directions split MAP --shares N [--out DIR]
         a host's several Arbors from one map: its open directions in N disjoint
         shares, each a component.plan (DIR/share-K.json, or JSON on stdout);
@@ -69,7 +72,7 @@ no DIRECTIONS list, reopens nothing, sends a direction the agent adds to
         line or list (a dossier's part 11)
     python3 -m arbor.directions generate --profile PROFILE --out MAP [--min-share PCT]
         a map without a dossier pass: the host's root profile's op families, ranked
-        by share, framed by a serving pack's roadmap (arbor/mapgen.py); exit 1 when
+        by share, framed by a serving roadmap (arbor/mapgen.py); exit 1 when
         the profile cannot be used
 """
 
@@ -93,8 +96,15 @@ VERSION = 2
 
 KINDS = ("increment", "rewrite")
 LANES = ("increment", "kernel-plan", "architectural", "upstream")
-# The v2 fields, kept wherever a direction is copied.
-LANE_KEYS = ("lane", "plan", "depends_on", "nodes", "upstream", "reopens")
+# The v2 fields, and the tier, kept wherever a direction is copied.
+LANE_KEYS = ("lane", "plan", "depends_on", "nodes", "upstream", "reopens", "ops", "tier")
+#: The tier a direction works at, as the ladder names them (arbor/state.py's DEFAULT_LEVELS): ``config`` a flag or an
+#: environment variable, ``framework`` the served tree's source, ``kernel`` a kernel or its tuning tables, ``feature``
+#: what the stack lacks. A map round starts at its top-ranked open direction's tier (``start_tier``).
+TIERS = ("config", "framework", "kernel", "feature")
+#: A direction's ``ops``: the op names it targets, as the host's profile names them (the keys of ``shares`` in
+#: ``component.profile``), so a host matches its op shares to directions exactly.
+MAX_OPS = 40
 OPEN = "open"
 CLOSED = ("done", "killed", "below_floor", "plan")
 STATUSES = (OPEN,) + CLOSED
@@ -115,6 +125,33 @@ KNOBS = {
     "map_bootstrap_waiver": 2,   # LEARN-cap waiver for writing the first map
     "map_round_additions": 3,    # directions the agent may add inside a round
 }
+
+#: How many open directions a dossier's map aims at, by the config's ``directions_length``. Long is the default,
+#: because generated maps ran too short against a hand-written roadmap.
+LENGTHS = {"short": (4, 6), "medium": (8, 12), "long": (15, 25)}
+DEFAULT_LENGTH = "long"
+
+
+def length(campaign=None) -> str:
+    """The map's length: the config's ``directions_length`` (``short``, ``medium`` or ``long``), else ``long``. A
+    value that is none of the three reads as the default, and ``length_text`` says so."""
+    value = (getattr(campaign, "config", None) or {}).get("directions_length")
+    name = str(value).strip().lower() if value is not None else ""
+    return name if name in LENGTHS else DEFAULT_LENGTH
+
+
+def length_text(campaign=None) -> str:
+    """The map's length, as the program and a run skill's brief state it."""
+    name = length(campaign)
+    low, high = LENGTHS[name]
+    value = (getattr(campaign, "config", None) or {}).get("directions_length")
+    odd = (f" The config's `{value}` is not one of them, so {name} applies."
+           if value is not None and str(value).strip().lower() != name else "")
+    others = "; ".join(f"{k} {a} to {b}" for k, (a, b) in LENGTHS.items() if k != name)
+    return (f"**Map length: {name}, {low} to {high} open directions** (the config's `directions_length`; "
+            f"{others}).{odd} Directions set aside (below the floor, killed, done) are listed as well and do not "
+            "count. The dossier's directions part says how to reach the length without padding: fewer, with "
+            "what is missing named, beats a filler direction.")
 
 
 # ── parsing what the agent wrote ──────────────────────────────────────────────
@@ -171,6 +208,11 @@ def _entry(raw, listed: bool) -> tuple[dict | None, str | None]:
             pass
     if raw.get("ceiling") is not None:
         e["ceiling"] = str(raw["ceiling"]).strip()[:60]
+    if raw.get("tier") is not None and str(raw["tier"]).strip():
+        tier = str(raw["tier"]).strip().lower()
+        if tier not in TIERS:
+            return None, f"{did}: tier {raw['tier']!r} is not one of {', '.join(TIERS)}"
+        e["tier"] = tier
     err = _lane_fields(raw, e, did)
     return (None, err) if err else (e, None)
 
@@ -198,6 +240,15 @@ def _lane_fields(raw: dict, e: dict, did: str) -> str | None:
             if x not in out:
                 out.append(x)
         e["depends_on"] = out
+    if raw.get("ops") is not None:
+        names = []
+        for op in raw["ops"] if isinstance(raw["ops"], list) else [raw["ops"]]:
+            if not isinstance(op, str) or not op.strip():
+                return f"{did}: ops {op!r} is not an op name"
+            if op.strip()[:200] not in names:
+                names.append(op.strip()[:200])
+        if names:
+            e["ops"] = names[:MAX_OPS]
     if raw.get("nodes") is not None:
         n = raw["nodes"]
         if isinstance(n, bool) or not isinstance(n, int) or n < 1:
@@ -404,6 +455,45 @@ def is_lane(doc: dict | None) -> bool:
     return bool(doc) and doc.get("scope") == "lane"
 
 
+#: ``arbor run --exit-at-handover`` (arbor/driver.py), while a worker's stretch runs: a lane whose directions are all
+#: closed goes back to the host that dealt it (the worker's report, ``reported``), so it can deal the branch its next
+#: share, instead of closing (``LANE_CLOSED.json`` and a STOP). At the master's turn it closes as before.
+_HAND_BACK = [False]
+
+
+class lane_hands_back:
+    """``with directions.lane_hands_back(): ...``: a worked-out lane is handed back, not closed, inside the block."""
+
+    def __enter__(self):
+        self._old, _HAND_BACK[0] = _HAND_BACK[0], True
+        return self
+
+    def __exit__(self, *exc):
+        _HAND_BACK[0] = self._old
+        return False
+
+
+def hands_back(doc: dict | None) -> bool:
+    """True when ``doc`` is a lane worked out while a stretch hands it back (``lane_hands_back``)."""
+    return _HAND_BACK[0] and is_lane(doc) and doc.get("phase") == "active" and exhausted(doc)
+
+
+def deal_into_lane(root, doc: dict, entries: list[dict], at: int) -> list[str]:
+    """``entries`` (a host's plan) that the lane does not hold yet, added open from iteration ``at``: a host that deals
+    its map share by share relaunches a branch with its next share. The ids added."""
+    have = {d.get("id") for d in doc.get("directions") or []}
+    new = [e for e in entries if e.get("id") not in have]
+    for e in new:
+        doc["directions"].append({**e, "status": OPEN, "why": e.get("why", ""), "added_at": at, "closed_at": None,
+                                  "worked": [], "keeps": [], "flagged": False})
+    if new:
+        lane = doc.get("lane") or {}
+        lane["direction"] = f"{len(doc['directions'])} directions"
+        doc["lane"] = lane
+        save(root, doc)
+    return [e["id"] for e in new]
+
+
 def dur(seconds) -> str:
     """3h05m, 42m, 50s; an empty string when unknown."""
     if not isinstance(seconds, (int, float)) or seconds <= 0:
@@ -473,10 +563,18 @@ def knob(name: str, campaign=None, state=None) -> int:
 
 
 def enabled(campaign, state=None) -> bool:
-    """Map rounds run for a campaign whose agent has the dossier skill, outside document workloads."""
+    """Map rounds run for a campaign that maps, outside document workloads: its agent has the dossier skill, or its
+    pack loads a skill that runs in one of the map's chapters (arbor/lifecycle.py). A skill any chapter's agent may
+    use does not make a campaign map."""
     try:
+        from arbor import lifecycle
         from arbor.pack.loader import agent_skills
-        if "dossier" not in (agent_skills(campaign.pack) or []):
+        pack = campaign.pack
+        plan = lifecycle.declared(campaign)
+        if plan is not None:
+            if not any(plan.runs(c) for c in lifecycle.MAP_CHAPTERS):
+                return False
+        elif "dossier-v1" not in (agent_skills(pack) or []):
             return False
         if (getattr(campaign.pack, "workload", None) or {}).get("kind") == "document":
             return False
@@ -494,6 +592,41 @@ def current(campaign, state=None) -> dict | None:
     if is_lane(doc):
         return doc   # seeded on purpose: on whatever the pack's skills and workload
     return doc if enabled(campaign, state) else None
+
+
+def start_tier(campaign, state, levels=None) -> str | None:
+    """At a map round's start (the first map, each new round, a rewrite round, a seeded lane), the campaign starts at
+    the tier its top-ranked open direction works at: ``state.apply_map_tier``, up or down the ladder. The tier applied,
+    or None.
+
+    Once per round (``state.map_tier_key``), so a resume does not set it again and a direction ranked first later in
+    the round does not move it. Without a map, or when the top direction names no tier (or one the pack's ladder
+    lacks), the tier stays where it is. Before this, every campaign started at config, whatever its map ranked first:
+    a map led by a kernel's tables still spent its first iterations on flags.
+    """
+    doc = current(campaign, state)
+    if not doc or doc.get("phase") != "active" or not doc.get("map_round"):
+        return None
+    key = f"{doc.get('map_round')}@{doc.get('round_started_ts')}"
+    if getattr(state, "map_tier_key", "") == key:
+        return None
+    state.map_tier_key = key
+    live = [d for d in doc.get("directions") or [] if d.get("status") == OPEN]
+    if not live:
+        return None
+    pos = {d["id"]: k for k, d in enumerate(live)}
+    top = next((d for d in live if d["id"] == doc.get("rewrite")), None) or min(
+        live, key=lambda d: (d["rank"] if isinstance(d.get("rank"), int) else 999, pos[d["id"]]))
+    tier = top.get("tier")
+    if not tier:
+        return None
+    ladder = list(levels or TIERS)
+    if tier not in ladder:
+        print(f"[arbor] map: {top['id']}'s tier {tier!r} is not on this pack's ladder ({', '.join(ladder)}); the "
+              f"tier stays {state.tier}", file=sys.stderr)
+        return None
+    state.apply_map_tier(tier, top["id"], key)
+    return tier
 
 
 # ── the state of the map ──────────────────────────────────────────────────────
@@ -541,6 +674,16 @@ def reconcile(doc: dict, lessons: list[dict], flag_at: int = KNOBS["map_worked_f
     doc["unmapped_ids"] = sorted(stray, key=lambda t: -stray[t])[:10]
     doc["round_wall_s"] = round(round_wall, 1)
     return doc
+
+
+def spent(doc: dict, flag_at: int = KNOBS["map_worked_flag"]) -> list[str]:
+    """The open directions worked ``flag_at`` times since their last KEEP, by ``reconcile``'s counts."""
+    out = []
+    for d in doc.get("directions") or []:
+        last = max(d.get("keeps") or [0])
+        if d.get("status") == OPEN and sum(1 for it in d.get("worked") or [] if it > last) >= flag_at:
+            out.append(d["id"])
+    return out
 
 
 def _round_keeps(lessons, start) -> int:
@@ -662,8 +805,64 @@ def apply_output(root, output: str, iteration: int, campaign=None, state=None,
     return events
 
 
+def _start_set(campaign, state, root, doc: dict, nxt: int) -> str:
+    """The set map (``pending``) becomes the active one, its round starting at iteration ``nxt``; what follows: "" (the
+    round), "stop", "fresh" or "rewrite" (``_no_increment``)."""
+    pend = doc["pending"]
+    doc["pending"] = None
+    dirs = []
+    for e in pend["directions"]:
+        d = {"id": e["id"], "kind": e["kind"], "title": e.get("title", ""), "rank": e.get("rank"),
+             "ceiling": e.get("ceiling", ""), "status": e.get("status", OPEN), "why": e.get("why", ""),
+             "added_at": pend.get("iteration"), "worked": [], "keeps": [], "flagged": False}
+        d.update({k: e[k] for k in LANE_KEYS + ("evidence",) if k in e})
+        d["closed_at"] = pend.get("iteration") if d["status"] in CLOSED else None
+        dirs.append(d)
+    doc["map_round"] += 1
+    now = time.time()
+    doc.update(directions=dirs, round_started=nxt, phase="active", phase_iters=0, added_this_round=0,
+               round_started_ts=now, phase_started_ts=now, round_wall_s=0.0)
+    n_inc = sum(1 for d in dirs if d["kind"] == "increment" and d["status"] == OPEN)
+    n_rw = sum(1 for d in dirs if d["kind"] == "rewrite" and d["status"] == OPEN)
+    doc["map_from"], doc["rewrite"], doc["hand_edit"] = pend.get("from"), None, None
+    then = ""
+    if pend.get("from") in ("updating", "fresh") and n_inc == 0:
+        then = _no_increment(campaign, state, root, doc, pend["from"], nxt)
+        if then == "stop":
+            return then
+    if then != "fresh":
+        state.apply_map_round(
+            doc["map_round"], "start",
+            f"map round {doc['map_round']}: {len(dirs)} directions ({n_inc} open increments, "
+            f"{n_rw} open rewrites) from the {pend.get('from')} map"
+            + (f" ({pend['source']})" if pend.get("source") else "")
+            + (f"; the round carries out the rewrite {doc['rewrite']}" if then == "rewrite" else "")
+            + "; streak counters reset")
+    return then
+
+
+def activate(campaign, state) -> bool:
+    """Start a set map now, as the next pass's start would (plan 3): a master that deals its map to workers in sessions
+    of their own starts it itself, since no pass runs in its session while they work. True when the map is then active
+    with a direction open; ``state`` is the caller's to save. Never raises."""
+    try:
+        root = campaign.session_root
+        doc, err = load(root)
+        if err or not doc or is_lane(doc):
+            return False
+        if doc.get("pending") and _start_set(campaign, state, root, doc, state.iteration + 1) == "stop":
+            return False
+        reconcile(doc, state.lessons, knob("map_worked_flag", campaign, state))
+        save(root, doc)
+        return doc.get("phase") == "active" and not exhausted(doc)
+    except Exception as exc:  # noqa: BLE001 - the master's next pass moves the map as it always has
+        print(f"[arbor] map: could not start the set map ({exc}) -- left to the next pass", file=sys.stderr)
+        return False
+
+
 def advance(campaign, state, root) -> str | None:
-    """Move the map on before an iteration. "stop" when the campaign stops for the operator.
+    """Move the map on before an iteration. "stop" when the campaign stops for the operator; "round_end" when the
+    round's A/B runs first; "revisit" when every direction is closed and the iteration is a revisit (arbor/revisit.py).
 
     Never raises: a map that cannot be read or moved is reported and skipped,
     and the campaign goes on as it did before map rounds.
@@ -683,10 +882,10 @@ def advance(campaign, state, root) -> str | None:
 
         if doc["phase"] == "stopped":
             # The driver exits on STOP, so reaching here means the operator removed it.
-            # A map stopped for having nothing open resumes with a fresh start (earlier,
-            # that stop came straight after the update round).
+            # A map stopped for having nothing open resumes with a fresh start (an older
+            # driver stopped straight after the update round).
             # One stopped for writing no map in time resumes that phase, its count from
-            # zero, whatever the file holds (as after a hand edit).
+            # zero, whatever the file holds (a fresh start after a hand edit, for one).
             stop = doc.get("stop") or {}
             reason = str(stop.get("reason") or "")
             empty = stop.get("kind") == "empty" or "no open increment" in reason
@@ -704,37 +903,8 @@ def advance(campaign, state, root) -> str | None:
             state.apply_map_round(doc["map_round"], "resumed",
                                   f"the operator removed the map STOP; {doc['phase']}")
 
-        pend = doc.get("pending")
-        if pend:
-            doc["pending"] = None
-            dirs = []
-            for e in pend["directions"]:
-                d = {"id": e["id"], "kind": e["kind"], "title": e.get("title", ""), "rank": e.get("rank"),
-                     "ceiling": e.get("ceiling", ""), "status": e.get("status", OPEN), "why": e.get("why", ""),
-                     "added_at": pend.get("iteration"), "worked": [], "keeps": [], "flagged": False}
-                d.update({k: e[k] for k in LANE_KEYS + ("evidence",) if k in e})
-                d["closed_at"] = pend.get("iteration") if d["status"] in CLOSED else None
-                dirs.append(d)
-            doc["map_round"] += 1
-            now = time.time()
-            doc.update(directions=dirs, round_started=nxt, phase="active", phase_iters=0, added_this_round=0,
-                       round_started_ts=now, phase_started_ts=now, round_wall_s=0.0)
-            n_inc = sum(1 for d in dirs if d["kind"] == "increment" and d["status"] == OPEN)
-            n_rw = sum(1 for d in dirs if d["kind"] == "rewrite" and d["status"] == OPEN)
-            doc["map_from"], doc["rewrite"], doc["hand_edit"] = pend.get("from"), None, None
-            then = ""
-            if pend.get("from") in ("updating", "fresh") and n_inc == 0:
-                then = _no_increment(campaign, state, root, doc, pend["from"], nxt)
-                if then == "stop":
-                    return "stop"
-            if then != "fresh":
-                state.apply_map_round(
-                    doc["map_round"], "start",
-                    f"map round {doc['map_round']}: {len(dirs)} directions ({n_inc} open increments, "
-                    f"{n_rw} open rewrites) from the {pend.get('from')} map"
-                    + (f" ({pend['source']})" if pend.get("source") else "")
-                    + (f"; the round carries out the rewrite {doc['rewrite']}" if then == "rewrite" else "")
-                    + "; streak counters reset")
+        if doc.get("pending") and _start_set(campaign, state, root, doc, nxt) == "stop":
+            return "stop"
 
         reconcile(doc, state.lessons, flag_at)
 
@@ -751,6 +921,11 @@ def advance(campaign, state, root) -> str | None:
                                   "no round-end A/B pending; the dossier update round begins")
 
         if doc["phase"] == "active" and exhausted(doc):
+            # A revisit the master armed (arbor/revisit.py) runs first: the round closes after it.
+            from arbor import revisit
+            if revisit.hold(root, nxt):
+                save(root, doc)
+                return "revisit"
             keeps, ran, stop = _close_round(doc, state)
             if stop:
                 return _stop(campaign, state, root, doc, stop)
@@ -875,8 +1050,8 @@ def _next_rewrite(doc: dict) -> dict | None:
 def _no_increment(campaign, state, root, doc: dict, source: str, nxt: int) -> str:
     """A new map with no open increment: "fresh", "rewrite" or "stop".
 
-    Such a map starts the campaign again like a new one; then, if that finds no
-    increment either, the top planned rewrite.
+    A campaign that stopped on such a map should have started like a new campaign
+    instead; then, if that finds no increment either, the top planned rewrite.
     From an update round: a fresh start, the map just written kept as history. From a
     fresh start: the top planned rewrite opened as the round's work. Stop when none is left.
     """
@@ -1073,6 +1248,9 @@ def _advance_lane(campaign, state, root: Path, doc: dict) -> str | None:
                   file=sys.stderr)
     reconcile(doc, state.lessons, knob("map_worked_flag", campaign, state))
     if exhausted(doc):
+        if _HAND_BACK[0]:
+            save(root, doc)
+            return "hand_back"
         return _lane_close(state, root, doc)
     save(root, doc)
     return None
@@ -1175,7 +1353,8 @@ def render(doc: dict, state=None, campaign=None) -> str:
             "them). Carry over what is settled: a direction already finished, killed or below the "
             "floor gets that status and a `why`; a rewrite whose kernel plan exists is `plan`. "
             "Check the list first: `python3 -m arbor.directions check list.json`. Never write "
-            "`directions.json` yourself.\n\n"
+            "`directions.json` yourself. If part 11 is missing and you write it now: "
+            + length_text(campaign) + "\n\n"
             + ("Declare `INTENT: LEARN` with a LEDGER FACT naming the part-11 file, and do not change "
                "the served tree: the LEARN budget is waived for this." if waiver else
                "Emit it alongside this iteration's own work.")
@@ -1199,7 +1378,7 @@ def render(doc: dict, state=None, campaign=None) -> str:
             "3. **11.uK, the directions again**, from 07.uK and 10.uK, with map IDs. A killed direction "
             "stays killed unless the new tree removes the reason it died or 10.uK marks it reopenable. "
             "Rank rewrites apart; when the increments are running out, write a kernel plan for each "
-            "top rewrite.\n\n"
+            "top rewrite. " + length_text(campaign) + "\n\n"
             "03.uK is brief (what the round's KEEPs changed in the code); 06.uK cites the session's "
             "bar, with no new baseline. Each part is its own `INTENT: LEARN` iteration with a LEDGER "
             "FACT naming the file it wrote; the LEARN budget is waived for this round. The round ends "
@@ -1233,7 +1412,7 @@ def render(doc: dict, state=None, campaign=None) -> str:
             "4. **11.uK, the directions from 03.uK and 07.uK**: what this tree's code and profile offer, "
             "not the old map with new statuses. A direction the history killed stays killed unless "
             "the new tree removes the reason it died or 10.uK marks it reopenable; a planned rewrite "
-            "keeps its plan.\n\n"
+            "keeps its plan. " + length_text(campaign) + "\n\n"
             "06.uK cites the session's bar. The old map is history, not a list to carry over"
             + (f" ({past})" if past else "") + ". The fresh start ends when you emit the new map:\n\n"
             f"    {_LIST_SYNTAX}\n\n"
@@ -1243,6 +1422,12 @@ def render(doc: dict, state=None, campaign=None) -> str:
     if phase != "active":
         return ""
     dirs = doc.get("directions") or []
+    if exhausted(doc):
+        # Only a revisit holds a closed map in its round (arbor/revisit.py): its brief leads the prompt.
+        return (f"## The map — round {k}: every direction is closed\n\n"
+                "This iteration is a revisit: measure the change the brief above names, as it is. Do not reopen "
+                "or add a direction; the round closes when the revisits are done, and the dossier update round "
+                "begins.\n" + rej)
     n_closed = sum(1 for d in dirs if d.get("status") in CLOSED)
     ordered = sorted(dirs, key=lambda d: (d.get("status") in CLOSED, d.get("kind") != "increment",
                                           d.get("rank") if isinstance(d.get("rank"), int) else 999))
@@ -1304,6 +1489,13 @@ def waiver_block(doc: dict | None) -> str:
 
 def main(argv: list[str] | None = None) -> int:
     argv = list(sys.argv[1:] if argv is None else argv)
+    # generate and split take their parameters as a payload too (arbor/cli/payload.py): action, then its keys.
+    if any(a == "--payload" or a.startswith("--payload=") for a in argv):
+        from arbor.cli import payload
+        expanded = payload.run_expanded(["directions", *argv], "python3 -m arbor.directions")
+        if isinstance(expanded, int):
+            return expanded
+        argv = expanded[1:]
     if argv and argv[0] == "split":
         return _split_main(argv[1:])
     if argv and argv[0] == "generate":
@@ -1320,6 +1512,14 @@ def main(argv: list[str] | None = None) -> int:
             return 2
         dossier = Path(argv[i + 1])
         del argv[i:i + 2]
+    want = None
+    if "--length" in argv:
+        i = argv.index("--length")
+        if i + 1 >= len(argv) or argv[i + 1] not in LENGTHS:
+            print(f"--length takes one of {', '.join(LENGTHS)}")
+            return 2
+        want = argv[i + 1]
+        del argv[i:i + 2]
     text = Path(argv[1]).read_text() if len(argv) > 1 and argv[1] != "-" else sys.stdin.read()
     if not _HEAD.search(text):
         text = "DIRECTIONS: " + text
@@ -1331,11 +1531,28 @@ def main(argv: list[str] | None = None) -> int:
         kinds = ", ".join(f"{sum(1 for d in p.new_map if d['kind'] == k)} {k}s" for k in KINDS)
         print(f"OK: a map of {len(p.new_map)} directions ({kinds}); "
               f"{sum(1 for d in p.new_map if d['status'] == OPEN)} open")
+        if want is not None:
+            note = length_note(p.new_map, want)
+            if note:
+                print(note)
         if dossier is not None:
             bad = _check_lanes(p.new_map, dossier)
     for e in p.closes:
         print(f"OK: DIRECTION {e['id']} -> {e.get('status', 'added')}")
     return 1 if bad or p.errors or (p.new_map is None and not p.closes) else 0
+
+
+def length_note(dirs: list[dict], want: str) -> str:
+    """A NOTE when the map's open directions fall outside the length ``want`` asks; ``""`` when they fit."""
+    low, high = LENGTHS[want]
+    n = sum(1 for d in dirs if d.get("status") == OPEN)
+    if low <= n <= high:
+        return ""
+    side = "fewer" if n < low else "more"
+    return (f"NOTE: {n} open directions, {side} than {want} asks ({low} to {high}). "
+            + ("Look again for what parts 7 and 9 support, by the directions skill's rules; if they support no "
+               "more, say so in part 11, with what is missing." if n < low else
+               "Keep the best-ranked; set the rest aside with the reason, or ask for a longer map."))
 
 
 def _check_lanes(dirs: list[dict], dossier: Path) -> int:
@@ -1369,7 +1586,7 @@ def _check_lanes(dirs: list[dict], dossier: Path) -> int:
 
 # What a share keeps of a direction: what component.plan reads; status and closing fields go.
 SHARE_KEYS = ("id", "kind", "title", "why", "rank", "ceiling", "lane", "plan", "depends_on",
-              "nodes", "upstream")
+              "nodes", "upstream", "ops", "tier")
 
 
 def split(dirs: list[dict], shares: int) -> list[list[dict]]:
@@ -1416,6 +1633,22 @@ def split(dirs: list[dict], shares: int) -> list[list[dict]]:
     for g in order:
         out[min(range(shares), key=lambda k: (len(out[k]), k))].extend(g)
     return [[_share_entry(d, ids) for d in sorted(s, key=lambda d: pos[d["id"]])] for s in out]
+
+
+def seed_lane(root, entries: list[dict], lane: dict) -> dict:
+    """A session's map as a lane of ``entries`` (open directions in a DIRECTIONS line's form), active at once: a host's
+    plan (``component.plan``) or a worker's share of a map (a work order, arbor/roles.py). ``lane`` says whose."""
+    now = time.time()
+    doc = new_doc()
+    doc.update(scope="lane", phase="active", map_round=1, round_started=1, round_started_ts=now,
+               phase_started_ts=now,
+               lane={"run": None, "round": 1, "lane": None, "direction": f"{len(entries)} directions",
+                     "kind": None, "plan": None, "plan_sha256": None, "source": None, **lane},
+               directions=[{**e, "status": OPEN, "why": e.get("why", ""), "added_at": 1,
+                            "closed_at": None, "worked": [], "keeps": [], "flagged": False}
+                           for e in entries])
+    save(root, doc)
+    return doc
 
 
 def _share_entry(d: dict, live: set) -> dict:
@@ -1465,16 +1698,21 @@ def load_map(path) -> tuple[list[dict], list[str]]:
     return out, errors
 
 
-def _split_main(argv: list[str]) -> int:
+def split_parser():
+    """``python3 -m arbor.directions split``'s parser, built without parsing (arbor/cli/payload.py)."""
     import argparse
-    from arbor import component
     ap = argparse.ArgumentParser(prog="python3 -m arbor.directions split",
                                  description="One map's open directions in N disjoint shares, "
                                              "one component.plan each.")
     ap.add_argument("map", help="directions.json, a JSON list, or a DIRECTIONS line or list ('-': stdin)")
     ap.add_argument("--shares", type=int, required=True, help="how many Arbors")
     ap.add_argument("--out", help="write DIR/share-K.json; without it, JSON on stdout")
-    args = ap.parse_args(argv)
+    return ap
+
+
+def _split_main(argv: list[str]) -> int:
+    from arbor import component
+    args = split_parser().parse_args(argv)
     dirs, errors = load_map(args.map)
     for e in errors:
         print(f"REJECTED {e}", file=sys.stderr)

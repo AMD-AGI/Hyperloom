@@ -12,7 +12,7 @@ With two or more Arbor agents and no map given, the session runs the first Arbor
   (:mod:`~hyperloom_multibranch.scheduling.agent_plans`), and the dossier is copied into each branch's checkout.
 
 In EXPLORE a mapping branch (:mod:`map_session`) holds the pass, and its lease is charged to that branch; a session that
-stops after its map runs it before EXPLORE, held by no branch and charged to the integration branch. It writes nothing to the blackboard. Whatever ends it, its process is killed and its cards are given back. A pass that sets no map says
+stops after its map runs it before EXPLORE, held by no branch and charged to the integration branch. It writes nothing to the blackboard. Whatever ends it, its process and its sandbox are stopped and its cards are given back. A pass that sets no map says
 why (:class:`DossierOutcome`), and the session falls back to the generic map.
 """
 
@@ -154,9 +154,11 @@ async def run_dossier_pass(start: DossierStart, setup: DossierSetup) -> DossierO
     except (RequestRejected, SandboxUnavailable) as error:
         return DossierOutcome(None, None, f"no cards were leased for it: {error}")
     ready: ReadyAgent | None = None
+    sandbox: AgentSandbox | None = None
     try:
+        sandbox = setup.sandbox(lease)
         onboarding = OnboardingSetup(
-            setup.sandbox(lease),
+            sandbox,
             _arbor_only,
             run=DOSSIER_PASS,
             start_seconds=START_SECONDS,
@@ -173,6 +175,8 @@ async def run_dossier_pass(start: DossierStart, setup: DossierSetup) -> DossierO
             # Always: Arbor's top process may have exited with a server it started still on the cards.
             if ready is not None:
                 await ready.process.kill()
+            if sandbox is not None:
+                await sandbox.stop()
         except SandboxUnavailable as error:
             log.warning("the dossier pass of %s could not be killed: %s", setup.holder, error)
         finally:

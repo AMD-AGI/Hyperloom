@@ -13,7 +13,7 @@ from hyperloom.orchestrator.lever import patch_owner_phase
 
 from ..state.shared_state import SharedState
 from ._integrate_promotion import _integrate_keep_variant
-from .proposals import PendingProposal
+from ..state.pending_proposal import PendingProposal
 
 log = logging.getLogger(__name__)
 

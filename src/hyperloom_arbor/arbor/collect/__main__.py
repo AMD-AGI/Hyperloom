@@ -1,9 +1,10 @@
-"""python3 -m arbor.collect check | project | realtime | knowledge
+"""python3 -m arbor.collect check | project | realtime | knowledge | kb
 
     check      can this host reach the share and upload to it (ssh, the share root, an upload)
     project    the project, user and campaign a session would be filed under
     realtime   snapshot a campaign's live state to <out>/status.json, and push it; loops
     knowledge  stage what a campaign learned under <out>/<type>/, and push it
+    kb         store the campaign's decisions in Hyperloom's Experience KB (arbor/collect/kb/)
 
 Every command that pushes runs `check` first and, when it fails, keeps the
 local copy and says what to fix. Exit status: 0 when everything asked for was
@@ -76,8 +77,8 @@ def cmd_check(args: argparse.Namespace) -> int:
 def cmd_project(args: argparse.Namespace) -> int:
     ident = identify(args)
     share = Share()
-    print(json.dumps({**ident, "share_dir": share.campaign_dir(ident["project"], ident["user"],
-                                                               ident["campaign"])}, indent=1))
+    where = share.campaign_dir(ident["project"], ident["user"], ident["campaign"]) if share.root else None
+    print(json.dumps({**ident, "share_dir": where}, indent=1))
     return 0
 
 
@@ -161,6 +162,23 @@ def cmd_knowledge(args: argparse.Namespace) -> int:
     return 0 if ok else 1
 
 
+def cmd_kb(args: argparse.Namespace) -> int:
+    from arbor.collect import kb
+
+    session = args.session or os.environ.get("ARBOR_SESSION")
+    if not session:
+        raise ValueError("kb needs --session, or ARBOR_SESSION from a lifecycle callback")
+    out = Path(args.out) if args.out else Path(session) / "collector" / "kb"
+    summary = kb.run(Path(session), out, [Path(p) for p in args.pack_root or []],
+                     [Path(p) for p in args.campaign_log or []], dry_run=args.dry_run)
+    print(json.dumps(summary, indent=1, ensure_ascii=False))
+    for warning in summary.get("warnings") or []:
+        print(f"[collect kb] WARNING: {warning}", file=sys.stderr)
+    status = summary["collect"]["status"]
+    best = (summary.get("checks") or {}).get("final_best_metric") or {}
+    return 1 if status in ("error", "skipped") or best.get("agree") is False else 0
+
+
 def main(argv: list[str] | None = None) -> int:
     p = argparse.ArgumentParser(prog="python3 -m arbor.collect", description=__doc__,
                                 formatter_class=argparse.RawDescriptionHelpFormatter)
@@ -196,10 +214,17 @@ def main(argv: list[str] | None = None) -> int:
     k.add_argument("--profiles", action="append", help="a profile directory (repeatable; "
                    "<session>/profiles/* are always included)")
     k.add_argument("--types", help=f"comma-separated subset of {','.join(knowledge.TYPES)}")
+    b = sub.add_parser("kb", help="store the campaign's decisions in Hyperloom's Experience KB")
+    b.add_argument("--session", help="the session directory (default: ARBOR_SESSION, as a callback gets it)")
+    b.add_argument("--out", help="where the export goes (default: <session>/collector/kb)")
+    b.add_argument("--pack-root", action="append", help="a directory holding the session's pack copy (repeatable)")
+    b.add_argument("--campaign-log", action="append", help="the campaign's stdout log ([arbor] lines; repeatable, "
+                   "in order)")
+    b.add_argument("--dry-run", action="store_true", help="project and validate every record; publish nothing")
     args = p.parse_args(argv)
     try:
         return {"check": cmd_check, "project": cmd_project, "realtime": cmd_realtime,
-                "knowledge": cmd_knowledge}[args.cmd](args)
+                "knowledge": cmd_knowledge, "kb": cmd_kb}[args.cmd](args)
     except ValueError as exc:
         print(f"[collect] {exc}", file=sys.stderr)
         return 2

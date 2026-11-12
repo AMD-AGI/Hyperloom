@@ -5,10 +5,9 @@
 
 from __future__ import annotations
 
-import json
-
 import pytest
 
+from hyperloom.measure.tests.run_dirs import FIXED, write_run_dir
 from hyperloom.orchestrator.state.objective import (
     ObjectiveError,
     TargetBaselineObjective,
@@ -31,22 +30,14 @@ def test_target_tput_describe():
 
 def test_target_baseline_describe(tmp_path):
     ws = tmp_path / "ref"
-    ws.mkdir()
-    (ws / "benchmark_report.json").write_text(
-        json.dumps({"throughput": {"output_throughput": 1000.0}}),
-        encoding="utf-8",
-    )
+    write_run_dir(ws / "measure_round" / "suite_run_0", fixed={**FIXED, "output_throughput": 1000.0})
     obj = TargetBaselineObjective(baseline_dir=str(ws))
     assert "ref_tput=1000.0" in obj.describe()
 
 
 def test_target_baseline_invalid_throughput(tmp_path):
     ws = tmp_path / "ref"
-    ws.mkdir()
-    (ws / "benchmark_report.json").write_text(
-        json.dumps({"throughput": {"output_throughput": 0}}),
-        encoding="utf-8",
-    )
+    write_run_dir(ws / "measure_round" / "suite_run_0", fixed={**FIXED, "output_throughput": 0})
     with pytest.raises(ObjectiveError, match="invalid output_throughput"):
         TargetBaselineObjective(baseline_dir=str(ws))
 
@@ -58,11 +49,7 @@ def test_time_only_describe():
 
 def test_build_objective_target_dir(tmp_path):
     ws = tmp_path / "ref"
-    ws.mkdir()
-    (ws / "benchmark_report.json").write_text(
-        json.dumps({"throughput": {"output_throughput": 1234.0}}),
-        encoding="utf-8",
-    )
+    write_run_dir(ws / "measure_round" / "suite_run_0", fixed={**FIXED, "output_throughput": 1234.0})
     obj = build_objective({"MAX_HOURS": "1", "TARGET_DIR": str(ws)})
     assert isinstance(obj, TargetBaselineObjective)
 

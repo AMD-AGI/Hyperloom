@@ -88,15 +88,46 @@ The agent declares what its change is for. The intent sets how the gate judges i
 | `WIN` (the default) | a faster tree | KEEP only if the metric clears the bar |
 | `FIX` | a defect, cleanup or enabling change | KEEP when neutral; no bar |
 | `FIX-CORRECTNESS` | a correctness fix | KEEP when neutral; may cost up to `correctness_regression_cap_pct` (5 %) of the metric |
+| `FIX-STABILITY` | a fix for a hang, a stall or a lost device on the kept tree | with `FAILURE: iter-K`, an iteration since the last KEEP whose server log or row shows the failure (or whose reading collapsed), and none in its own run: may cost up to `stability_regression_cap_pct` (3 %); without that evidence, gated as a FIX |
 | `LEARN` | a probe: evidence, not a tree | KEEP as PROBE when it records findings; books nothing |
 
-Older names still parse: `CLASS: B` (WIN), `A` (FIX), `A-CORRECTNESS`, `PROBE` (LEARN).
+Older names still parse: `CLASS: B` (WIN), `A` (FIX), `A-CORRECTNESS`, `A-STABILITY`, `PROBE` (LEARN).
+
+The server log's tail after the bench is kept as `iter_N/server_end.log`, for the stability check.
 
 **Verdicts:** KEEP, REVERT and NOT_MEASURED. NOT_MEASURED means the iteration says nothing about
 the change: an integrity failure (a protected validator file changed), an arm mismatch under
 `arm_check: enforce`, an infrastructure error in correctness, a bench that did not run, or a
 missing or non-positive metric. It changes no counter except the invalid streak; three in a row
 write `ABORTED.md` and stop the campaign.
+
+A correctness check that could not judge is an infrastructure error. A pack's script always exits 0
+and writes its verdict, a wrong answer included, so one that exits non-zero, writes nothing or no
+JSON, or runs out of time is the instrument's failure: its error starts `correctness inconclusive`.
+So is a server turn whose agent never ran (its model unreachable, say) when no server came up.
+Both are NOT_MEASURED, and the lost-server probe below still tells a server that died.
+
+**A server that stops answering is the change's.** After the harness saw the server healthy in an
+iteration, a correctness check that could not reach the model, a bench that did not run or had no
+traffic, or a bench turn past its cap is followed by a one-token completion, three times 30 s. No
+answer, or only server errors (5xx), means the server hung or died under the change: a REVERT, with
+the probe's codes and the failure lines in the server's log as its reason, as a server that never
+came up is one. Any other answer (a 404 for another served name included) leaves it NOT_MEASURED.
+
+**The kept tree:** after every REVERT and every NOT_MEASURED iteration, the workspace and the
+editable trees go back to the tree last kept (the start, a KEEP or PROBE, or a commit the harness
+made between iterations), in one `Restore the kept tree ...` commit. No unmeasured change stays
+under later ones. A NOT_MEASURED iteration's change is noted in `<session>/invalids.json` first,
+for the revisit phase below.
+
+An iteration the session never kept never becomes the kept tree. When its restore never ran (a
+SIGTERM after its commit, a crash between its verdict and the restore, a restore that failed), the
+next pass's start reverts its commits, and notes a NOT_MEASURED one for the revisit; what the
+harness committed between passes stays. A host's SIGTERM books the iteration in flight with the
+intent it declared at its commit (`iter_N/claim.json`), so its change is revisited like any other.
+
+An iteration retried after an attempt that ended without a verdict reads only its own files: the
+attempt's `iter_N/` moves to `<session>/attempts/iter_N.K` first.
 
 **The bar:** the pack's `objective.measurement.threshold_rel` (1.01 by default) over the best
 booked result. A change inside the noise band (`noise_band_pct`, 1.0 % by default) is neutral:
@@ -105,6 +136,26 @@ KEEP for FIX, REVERT for WIN. The first measurement of a session is its baseline
 **A second metric** (`secondary_metric`) is judged on its own band. A gain on one axis bought with
 a loss beyond the band on the other is a **frontier point**: kept, but it moves neither bar.
 `secondary_regression_cap_pct` and `secondary_exchange_rate` can cap what the second axis may lose.
+
+**A per-request second axis or guard is read on matched requests** (`arbor/measure/matched.py`).
+A change that lets other requests finish inside the bench's window (longest-prefix-first prefill,
+another batch policy) moves a raw p50 or p90 over the window without making any request faster:
+the window holds another mix of short and long contexts. So for `p50_interactivity`,
+`p90_interactivity`, `e2e_norm_intvty_p50` and `e2e_norm_intvty_p90`:
+- **The requests:** aiperf's per-request records (`profile_export.jsonl`) of the candidate's run and
+  of the kept tree's, the measured window only, keyed by `(conversation_id, turn_index)`. The kept
+  tree's run is the root baseline's when the session measured it, then the last KEEP's or measured
+  PROBE's (`request_ref` in `session.json`).
+- **The decision:** the metric recomputed on the requests both runs completed, the candidate's over
+  the kept tree's. The second axis is judged as the bar times that ratio, a band guard on the ratio
+  against its band. The primary metric is the raw one, as before, and the row books raw values.
+- **The fallback:** the raw readings decide, as before, when fewer than 30 requests, or under half
+  the kept run's, are in common, when either run left no records (a frozen `baseline_record` has
+  none), and when a bar row (a rolling chunk's REBASELINE, a round end's A/B) or a retraction came
+  after the kept run. `measurement.matched_requests: false` turns it off.
+- **The record:** the row's `matched` has, per metric, `used`, `n`, `share`, `ratio`, the two
+  matched readings, the two raw ones (`raw`, `raw_kept`) and, when it fell back, `why`. The log
+  line is `[arbor] Matched requests: ...`.
 
 **The critic** runs on every result the gate did not revert and can only downgrade it to REVERT.
 If it fails or answers nothing it can parse, the gate's verdict stands.
@@ -129,6 +180,9 @@ booked as a REVERT of the change, not as NOT_MEASURED.
 - **Tiers** (`space.levels` in the config; default `config, framework, kernel, feature`): the
   campaign starts at the first and escalates after `config_max_iters` (3) iterations on the config
   tier, or when `null_streak` (iterations without a booked gain) reaches `escalate_null_streak` (3).
+  With a map, each map round (the first map's included) starts instead at the `tier` of its
+  top-ranked open direction, up or down the ladder, and escalates from there by the same counters;
+  a top direction with no tier leaves the tier where it is (`directions.start_tier`).
 - **LEARN budget:** at most `max_consecutive_probes` (2) LEARNs in a row; at `null_streak` 3 the
   program asks for one ("LEARN REQUIRED").
 - **Drought:** `barren_streak` counts iterations since the bar last moved. At `barren_notice` (8)
@@ -139,7 +193,7 @@ booked as a REVERT of the change, not as NOT_MEASURED.
 
 ## Planning: the dossier, the map and rounds
 
-With the `dossier` skill enabled (and a serving workload), a campaign plans before it measures
+With the `dossier-v1` skill enabled (and a serving workload), a campaign plans before it measures
 (using the skills, and giving a campaign its directions: [dossier-and-profiler.md](dossier-and-profiler.md)):
 
 1. **The dossier:** the agent finds this model's dossier in `docs/dossier/` or writes one (the
@@ -150,7 +204,12 @@ With the `dossier` skill enabled (and a serving workload), a campaign plans befo
    harness writes it, and a hand edit is undone.
 3. **Working the map:** the agent cites the direction it works in its DONE line and closes it with
    `DIRECTION: {"id": ..., "status": "done|killed|below_floor|plan", "why": ...}`.
-4. **The update round:** when every direction is closed, the next iterations re-profile, write the
+4. **The revisit phase:** when every direction is closed and the time left fits one more
+   iteration (the time budget, or a host's or a rolling job's deadline), each noted NOT_MEASURED
+   change is applied to the kept tree again and measured once, oldest first, before the round
+   closes (`arbor/revisit.py`). A probe's change, one that no longer applies, and a revisit that
+   is not measured either are not tried again; the outcome is recorded on the change's entry.
+5. **The update round:** when every direction is closed, the next iterations re-profile, write the
    lessons and re-rank the directions (LEARNs, the cap waived, at most 8). The new map starts the
    next round; a map with nothing new leads to a fresh start, then to the top planned rewrite, then
    to STOP. Two rounds in a row without a KEEP stop the campaign.
@@ -158,7 +217,8 @@ With the `dossier` skill enabled (and a serving workload), a campaign plans befo
 **Kernel plans:** a rewrite worth planning becomes a chain of stages with their own gates
 (`arbor/stages.py`): S1–S3 run as LEARN (the kernel built and proven on its own), S4 as FIX (wired
 in behind its flag, and it must KEEP), S5 needs a booked WIN. `STAGE:` lines are read only in a
-lane's map (parallel mode, or `python3 -m arbor.stages seed`).
+lane's map (parallel mode, or `python3 -m arbor.stages seed`). The steps, from a plan to the lane's
+end: [quickstart-kernel.md](quickstart-kernel.md).
 
 **Round ends and the target:** a campaign's `target` (a number, or a dict) ends a round when it is
 reached, and so does a closed map. With a round-end hook (`ARBOR_ROUND_AB`, or the config's
@@ -166,6 +226,19 @@ reached, and so does a closed map. With a round-end hook (`ARBOR_ROUND_AB`, or t
 tree: confirmed, the A/B becomes the bar and baseline, the next target is 1.40× the bar, and the
 next round starts; not confirmed, the campaign stops with `ROUND_STOP.md`. Without a hook,
 reaching the target ends the run.
+
+**The A/B for any pack:** `python3 -m arbor.ab` (`arbor/ab.py`) is a hook every campaign can use:
+`"round_ab": {"command": "python3 -m arbor.ab --config <config> --out {out} --deadline {deadline}"}`.
+- **The arms:** commits of the workspace, each served with its own `arbor/config.json`. The base is
+  the first commit, the current tree HEAD.
+- **The rounds:** a warm-up round, with the full GSM8K on the current arm, then pairs that alternate
+  which arm goes first.
+- **Confirmed:** ahead in every pair, a mean gain above the floor (the pack's band, or either arm's
+  spread), and GSM8K passed.
+- **The tree is put back** however it ends.
+- **Named trees:** `--base` and `--current` compare any two commits, as an integration does.
+
+A launcher may set a hook of its own instead, with its own packages and operating points.
 
 **The rebased bar:** when a campaign moves to another node, the launcher can rebase its bar to
 that node with a script of its own, but only for a campaign with a dossier and a map

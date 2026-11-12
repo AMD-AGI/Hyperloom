@@ -12,7 +12,7 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
-from hyperloom.orchestrator.actions.executors._agentx_timeline import (
+from inference_suite.telemetry.agentx_timeline import (
     TIMELINE_ARTIFACT_NAME,
     build_events,
     correlate_rows,
@@ -129,7 +129,7 @@ def test_records_without_usable_times_are_dropped(tmp_path):
 
 
 def test_event_stream_covers_every_layer(tmp_path):
-    """phase / trajectory / turn / request, which is the timeline that was asked for."""
+    """trajectory / turn / request, which is the timeline that was asked for."""
     records = parse_profile_export(
         _export(
             tmp_path,
@@ -140,12 +140,10 @@ def test_event_stream_covers_every_layer(tmp_path):
             ],
         )
     )
-    events, summary = build_events(records, {"measured": (BASE, BASE + 2.0)})
+    events, summary = build_events(records)
 
     kinds = {e["event"] for e in events}
     assert kinds == {
-        "phase_start",
-        "phase_end",
         "trajectory_start",
         "trajectory_end",
         "turn_start",
@@ -206,7 +204,7 @@ def test_a_request_without_ttft_emits_no_first_token_event(tmp_path):
 
 def test_request_events_are_sampled_but_the_stream_says_so(tmp_path, monkeypatch):
     """A long high-concurrency round would otherwise outweigh the whole bundle."""
-    import hyperloom.orchestrator.actions.executors._agentx_timeline as tl
+    import inference_suite.telemetry.agentx_timeline as tl
 
     monkeypatch.setattr(tl, "_MAX_REQUEST_EVENTS", 2)
     records = parse_profile_export(

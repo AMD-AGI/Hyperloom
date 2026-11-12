@@ -8,6 +8,7 @@ import stat
 import subprocess
 from dataclasses import replace
 from pathlib import Path
+from typing import NoReturn
 
 import pytest
 
@@ -55,6 +56,110 @@ def test_the_base_holds_the_installed_sources_at_their_upstream_paths(base):
     ]
     assert sorted(path.relative_to(base.path).as_posix() for path in tracked) == ["vllm/config.py", "vllm/scheduler.py"]
     assert base.worktree("s1", base.path.parent / "s1").head() is None
+
+
+def _mode(path: Path) -> int:
+    return stat.S_IMODE(path.lstat().st_mode)
+
+
+def _shared_session(tmp_path: Path) -> Path:
+    session = tmp_path / "session"
+    session.mkdir()
+    session.chmod(0o2775)
+    if not session.stat().st_mode & stat.S_ISGID:
+        pytest.skip("this filesystem does not keep the setgid bit for the test user")
+    return session
+
+
+@pytest.mark.parametrize("mask", [0o002, 0o022], ids=["umask-002", "umask-022"])
+def test_below_shared_storage_the_base_shares_only_objects_and_refs(tmp_path, installed, monkeypatch, mask):
+    """Whatever the umask: the base ``2755`` and its git directory ``3775``, the config, ``info/exclude`` and the linked
+    paths ``0644`` (read by the next account, written by none), ``info`` and ``hooks`` ``2755``; the objects, refs,
+    reflogs and a worktree's admin directory the group's, and the worktree's git runs."""
+    session = _shared_session(tmp_path)
+    monkeypatch.setattr(worktree_module, "locate_installed_package", lambda _layout: installed)
+    base = SourceBase(session / "source")
+    common = base.path / ".git"
+    previous = os.umask(mask)
+    try:
+        base.build(["vllm"])
+        worktree = base.worktree("s1", session / "s1")
+    finally:
+        os.umask(previous)
+
+    assert (_mode(base.path), _mode(common)) == (0o2755, 0o3775)
+    owner_s = ("config", "info", "hooks", "info/exclude", worktree_module.LINKED_PATHS)
+    assert {name: _mode(common / name) for name in owner_s} == {
+        "config": 0o644,
+        "info": 0o2755,
+        "hooks": 0o2755,
+        "info/exclude": 0o644,
+        worktree_module.LINKED_PATHS: 0o644,
+    }
+    groups = [common / "objects", common / "refs" / "heads", common / "logs", common / "worktrees" / "s1"]
+    assert {_mode(path) for path in groups} == {0o2775}
+    assert {_mode(path) for path in (common / "logs").rglob("*") if path.is_file()} == {0o664}
+    assert worktree.head() is None
+
+
+def test_git_on_a_shared_base_whose_config_the_group_can_write_runs_nothing(tmp_path, installed, monkeypatch):
+    session = _shared_session(tmp_path)
+    monkeypatch.setattr(worktree_module, "locate_installed_package", lambda _layout: installed)
+    base = SourceBase(session / "source")
+    base.build(["vllm"])
+    (base.path / ".git" / "config").chmod(0o664)
+
+    with pytest.raises(worktree_module.WorktreeError, match="git's own state of a shared repository is refused"):
+        base.worktree("s1", session / "s1")
+    assert not (session / "s1").exists()
+
+
+def _refusing_git(*argv: object, **kwargs: object) -> NoReturn:
+    raise AssertionError(f"git started: {argv}")
+
+
+@pytest.mark.parametrize("swap", ["objects-0755", "a-gitfile"])
+def test_below_shared_storage_a_base_not_laid_out_shared_starts_no_git(tmp_path, installed, monkeypatch, swap):
+    """What another account of the group could put at the base's path below shared storage: a repository whose objects
+    are not the group's, or a tree whose ``.git`` names one elsewhere. Neither is the session's base, and no git runs."""
+    session = _shared_session(tmp_path)
+    monkeypatch.setattr(worktree_module, "locate_installed_package", lambda _layout: installed)
+    base = SourceBase(session / "source")
+    base.build(["vllm"])
+    base.worktree("s0", session / "s0")
+    common = base.path / ".git"
+    if swap == "objects-0755":
+        (common / "objects").chmod(0o755)
+    else:
+        elsewhere = tmp_path / "elsewhere"
+        subprocess.run(["git", "init", "-q", str(elsewhere)], check=True)
+        common.rename(base.path / "moved")
+        common.write_text(f"gitdir: {elsewhere / '.git'}\n")
+
+    monkeypatch.setattr(subprocess, "run", _refusing_git)
+    with pytest.raises(worktree_module.WorktreeError, match="below shared storage"):
+        base.worktree("s1", session / "s1")
+    with pytest.raises(worktree_module.WorktreeError, match="below shared storage"):
+        base.worktree("s0", session / "s0")  # nothing the substitute records is read for a worktree already there
+    with pytest.raises(worktree_module.WorktreeError, match="below shared storage"):
+        worktree_module._git(base.path, "status", base=True)
+    assert not (session / "s1").exists()
+
+
+def test_off_shared_storage_nothing_in_the_base_is_the_group_s_to_write(tmp_path, installed, monkeypatch):
+    """Off shared storage the umask decides, but git's directory is never the group's: under ``002`` the config,
+    ``info`` and its ``exclude`` keep group write off."""
+    monkeypatch.setattr(worktree_module, "locate_installed_package", lambda _layout: installed)
+    base = SourceBase(tmp_path / "source")
+    previous = os.umask(0o002)
+    try:
+        base.build(["vllm"])
+    finally:
+        os.umask(previous)
+
+    common = base.path / ".git"
+    assert {_mode(common / name) for name in ("config", "info/exclude", worktree_module.LINKED_PATHS)} == {0o644}
+    assert not _mode(common) & 0o022 and not _mode(common / "info") & 0o022
 
 
 def test_a_change_in_a_worktree_is_a_patch_the_toolbox_applies_to_the_installed_package(tmp_path, base, installed):
@@ -463,7 +568,7 @@ def test_the_base_and_each_worktree_are_the_group_s_to_write_whatever_the_umask(
     def group_writes(path: Path) -> bool:
         return path.lstat().st_mode & 0o020 == 0o020
 
-    assert stat.S_IMODE(base.path.stat().st_mode) == 0o2775
+    assert stat.S_IMODE(base.path.stat().st_mode) == 0o2755, "only its maker renames the git directory in it"
     git_dirs = [base.path / ".git" / name for name in ("objects", "refs", "worktrees")]
     assert all(map(group_writes, git_dirs)), [oct(path.stat().st_mode) for path in git_dirs]
     assert stat.S_IMODE((branches / "s1").stat().st_mode) == 0o2775, "the branch's directory, for its dev sandboxes"
@@ -596,6 +701,23 @@ def test_a_repository_made_a_partial_clone_by_its_config_fetches_nothing_behind_
 
 
 @pytest.mark.skipif(os.geteuid() != 0, reason="a repository of another owner needs root to chown")
+def test_a_repository_trusted_by_the_command_s_own_safe_directory_has_its_filter_drivers_blanked_too(tmp_path):
+    repo = tmp_path / "image-checkout"
+    subprocess.run(["git", "init", "--quiet", str(repo)], check=True)
+    ran = tmp_path / "ran"
+    with (repo / ".git" / "config").open("a") as config:
+        config.write(f'[filter "own"]\n\tclean = {_recording_filter(tmp_path, ran)}\n')
+    (repo / ".gitattributes").write_text("* filter=own\n")
+    (repo / "file").write_text("x\n")
+    for path in (repo, *repo.rglob("*")):
+        os.lchown(path, 65534, 65534)  # another owner's, as the image's checkout is: git trusts it only by -c
+
+    worktree_module._git(repo, "-c", "safe.directory=*", "add", "--all")
+
+    assert not ran.exists()
+
+
+@pytest.mark.skipif(os.geteuid() != 0, reason="a repository of another owner needs root to chown")
 def test_a_worktree_another_account_of_the_group_made_is_synced_and_diffed_with_no_program_of_it_run(
     tmp_path, installed, monkeypatch
 ):
@@ -607,8 +729,9 @@ def test_a_worktree_another_account_of_the_group_made_is_synced_and_diffed_with_
     worktree.sync("c0", [])
     ran = tmp_path / "ran"
     _plant_programs(base.path / ".git", worktree.path, ran)
-    # The run's earlier leg, another account of the group, made the base and the worktree.
+    # The run's earlier leg, another account of the group, made the session directory, the base and the worktree.
     _as_another_accounts(base.path, worktree.path)
+    os.lchown(tmp_path, 65534, -1)
     (worktree.path / "vllm" / "config.py").write_bytes(b"max_num_seqs = 256\n")
 
     patch = worktree.diff("vllm")
@@ -908,6 +1031,7 @@ def test_a_symlink_the_agent_flips_on_the_way_to_the_admin_directory_after_the_c
         point(own)
         return admin
 
+    # The worktree's git resolves its admin directory there before app_git is given it.
     monkeypatch.setattr(worktree_module, "trusted_admin_dir", check_then_flip)
 
     patch = worktree.diff("vllm")

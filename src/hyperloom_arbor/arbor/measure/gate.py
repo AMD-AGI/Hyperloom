@@ -2,17 +2,20 @@
 
 WHAT AN ITERATION DECLARES and WHAT HAPPENS TO IT are two different things, and
 they live apart: ``arbor.measure.intents`` owns the first (WIN / FIX /
-FIX-CORRECTNESS / LEARN, one row each, chosen before the measurement) and this
-module owns the second. Every per-intent rule the gate applies is read off that
-row, so a fifth intent is a fifth row rather than a fifth branch here.
+FIX-CORRECTNESS / FIX-STABILITY / LEARN, one row each, chosen before the
+measurement) and this module owns the second. Every per-intent rule the gate
+applies is read off that row, so a new intent is a new row rather than a new
+branch here. The one input a row cannot carry is FIX-STABILITY's evidence, the
+failure on the kept tree and its absence from the candidate's run, which the
+harness reads from the logs (arbor/measure/stability.py) and passes in.
 
 Three verdicts, and only two of them touch the tree. ``NOT_MEASURED`` is the
 important one: a bench that never ran, a server that never came up, a 404 from
 the wrong wire name, a missing metric key — none of these say anything about
 the change. They used to be reported as REVERT, which discarded working code,
 incremented ``null_streak``, and drove tier escalation off manufactured
-evidence. NOT-MEASURED means the tree stands, the counters do not move, and the
-caller retries.
+evidence. NOT-MEASURED means the counters do not move; the driver puts the tree back
+to the last one kept and notes the change for a revisit (arbor/execute/kept.py).
 
 ``GateResult.decision`` keeps emitting the legacy
 ``KEEP``/``REVERT``/``PROBE``/``INVALID`` vocabulary, derived from the
@@ -77,11 +80,15 @@ _INFRA_CORRECTNESS_MARKERS = (
     "non-json",
     # An eval dataset that cannot be loaded (no egress, an offline cache without it): the
     # Hub's own errors, for a validator that reports lm_eval's log tail as it is. The packs'
-    # scripts say "correctness inconclusive" for it themselves.
+    # scripts say "correctness inconclusive" for it themselves (seen under a host).
     "couldn't reach",
     "offlinemodeisenabled",
     "datasetnotfounderror",
     "localentrynotfounderror",
+    # The GSM8K packs' line for an lm_eval that ended without a score (a module missing from the image, a crash): the
+    # eval failed, not the change. After a server the harness saw healthy, the lost-server probe still tells a server
+    # that died under the eval (the change's) from an eval that broke (the harness's).
+    "lm_eval produced no gsm8k score",
 )
 
 
@@ -98,7 +105,8 @@ class GateResult:
     # What the iteration declared it was buying. The row, not a string.
     intent: Intent = field(default_factory=lambda: resolve(None))
     # Whether the caller should `git revert` the tree. False for INVALID: the
-    # measurement failed, the change did not, so the code stays and is retried.
+    # measurement failed, not the change; the driver then restores the kept
+    # tree and notes the change for a revisit (arbor/execute/kept.py).
     revert_tree: bool = True
     # True only when the change cleared `threshold_rel` — i.e. it is a claimed
     # win, not merely worth keeping. Drives escalation, not retention.
@@ -217,6 +225,18 @@ def _correctness_is_infrastructure(error: str) -> bool:
     return any(m in e for m in _INFRA_CORRECTNESS_MARKERS)
 
 
+def lost_reason(what: str, lost: dict) -> str:
+    """The REVERT reason for a server that hung or died under the change (``lost``, the loop's ``_server_lost``)."""
+    probes = ", ".join(str(c) if c else "no answer" for c in lost.get("probe") or [])
+    why = (f"the server hung or died under this change ({what}): the harness saw it healthy this iteration, and "
+           f"one-token requests then got {probes or 'no answer'}")
+    if lost.get("alive") is False:
+        why += "; its process is gone"
+    if lost.get("signals"):
+        why += f"; its log: {lost['signals'][0]}"
+    return why
+
+
 def run_gate(
     objective: dict,
     best: float | None,
@@ -229,6 +249,10 @@ def run_gate(
     arm: dict | None = None,
     bundle: dict | None = None,
     accuracy: dict | None = None,
+    stability: dict | None = None,
+    guards: dict | None = None,
+    lost: dict | None = None,
+    matched: dict | None = None,
 ) -> GateResult:
     """Pure gate logic. Callers provide the raw results; this decides the outcome.
 
@@ -241,7 +265,15 @@ def run_gate(
     ``bundle`` is a declared bundle's check (arbor/measure/bundles.py), passed
     only when the pack allows bundles. ``accuracy`` is the full-set eval of a
     numerics change (arbor/measure/accuracy.py), passed only when the pack's
-    accuracy gate is on; absent, the gate is what it was.
+    accuracy gate is on; absent, the gate is what it was. ``stability`` is a
+    FIX-STABILITY candidate's evidence (arbor/measure/stability.py): without a
+    failure on record before it, the candidate is gated as a FIX. ``guards`` is a host's guards checked against the
+    kept tree (arbor/measure/guards.py): one broken is a REVERT. ``lost`` says the server the harness saw healthy
+    this iteration stopped answering (hung or died): then a correctness check that could not reach the model, a
+    bench that did not run and a bench with no traffic are the change's, a REVERT, not NOT MEASURED. ``matched``
+    (arbor/measure/matched.py ``compare``): a second axis that is a per-request metric with a matched reading is
+    judged on the requests both runs completed: the bar times the candidate's ratio to the kept tree on them. The
+    raw reading is still what the row books.
     """
     metric_key = objective["metric"]
     direction = objective["direction"]
@@ -257,6 +289,14 @@ def run_gate(
     sec_threshold = measurement.get("secondary_threshold_rel", threshold)
 
     intent = resolve(intent if intent is not None else claim_class)
+    # A stability fix earns its cap only with the failure on record before it: without it, it is a FIX, and says so.
+    if intent.name == "FIX-STABILITY" and not (stability or {}).get("before"):
+        why = (stability or {}).get("why") or "the harness's check did not run"
+        res = run_gate(objective, best, bench_result, correctness_result, integrity_ok,
+                       secondary_best=secondary_best, intent=resolve("FIX"), arm=arm, bundle=bundle,
+                       accuracy=accuracy, guards=guards, lost=lost, matched=matched)
+        res.reason = f"{res.reason} [FIX-STABILITY with no failure on record ({why}): gated as a FIX]"
+        return res
     # How far THIS intent may regress. For a correctness fix that is the
     # catastrophe cap, for everything else the noise band — the one thing that
     # distinguishes FIX-CORRECTNESS from FIX.
@@ -302,9 +342,14 @@ def run_gate(
     if not correctness_passed:
         err = correctness_result.get("error", "unknown")
         if _correctness_is_infrastructure(err):
-            # The server was never reachable under the name the check used.
-            # A working change can be lost to exactly this: a 404 for the
-            # model path against a frontend that only knows the HF name.
+            # A server the harness saw healthy this iteration that answers nothing now hung or died under the
+            # change: the change's failure, as a server that never came up is.
+            if lost:
+                return GateResult(REVERT, 0.0, best, 0.0, False, True,
+                                  lost_reason(f"correctness: {err}", lost), intent)
+            # The server was never reachable under the name the check used
+            # (a 404 for a model path against a frontend that only knows the
+            # HF name, say): no evidence about the change.
             return _not_measured(
                 f"correctness could not reach the model ({err}) — harness "
                 f"failure, iteration NOT counted",
@@ -345,6 +390,9 @@ def run_gate(
             )
 
     if bench_result.get("status") != "ok":
+        if lost:
+            return GateResult(REVERT, 0.0, best, 0.0, correctness_passed, True,
+                              lost_reason(f"bench: {bench_result.get('error', 'unknown')}", lost), intent)
         return _not_measured(
             f"bench did not run ({bench_result.get('error', 'unknown')}) — "
             f"iteration NOT counted", best, intent,
@@ -369,6 +417,9 @@ def run_gate(
     if metric_value <= 0 and kind != "find_witness":
         n_ok = bench_result.get("num_requests_successful", -1)
         detail = f"num_requests_successful={n_ok}" if n_ok >= 0 else "no traffic"
+        if lost:
+            return GateResult(REVERT, 0.0, best, 0.0, correctness_passed, True,
+                              lost_reason(f"bench: {metric_key}={metric_value}, {detail}", lost), intent)
         return _not_measured(
             f"metric '{metric_key}'={metric_value} — bench returned no traffic "
             f"({detail}), iteration NOT counted", best, intent,
@@ -379,9 +430,19 @@ def run_gate(
     if not isinstance(sec_value, (int, float)) or isinstance(sec_value, bool):
         sec_value = None
 
+    # A per-request second axis on the requests both runs completed (arbor/measure/matched.py): a change that reorders
+    # which requests complete in the window moves the raw p50 without moving any request. The decision reads the bar
+    # times the candidate's matched ratio to the kept tree; the row still books the raw reading.
+    sec_for_gate, sec_match = sec_value, (matched or {}).get(sec_key) if sec_key else None
+    if (sec_match and sec_match.get("used") and sec_value is not None
+            and isinstance(secondary_best, (int, float)) and not isinstance(secondary_best, bool)):
+        sec_for_gate = secondary_best * float(sec_match["ratio"])
+    else:
+        sec_match = None
+
     pri = _measure_axis(metric_value, best, direction, threshold,
                         noise_band, metric_key)
-    sec = _measure_axis(sec_value, secondary_best, sec_direction,
+    sec = _measure_axis(sec_for_gate, secondary_best, sec_direction,
                         sec_threshold, sec_noise, sec_key)
 
     def _result(decision, reason, *, booked=False, frontier=False) -> GateResult:
@@ -410,19 +471,26 @@ def run_gate(
     # A serving leaderboard is a throughput-vs-interactivity CURVE. A change
     # that buys one axis by spending the other is a new point on the
     # frontier, not a failure — a single-axis gate cannot see that and
-    # reverts it.
+    # would revert it.
     both_ok = pri.ok and sec.ok
     is_frontier = (pri.gain and not sec.ok) or (sec.gain and not pri.ok)
     delta_s = f"{pri.delta:+.1f}%{sec.note()}"
+    if sec_match:
+        delta_s += f" [{sec_key} on {sec_match['n']} matched requests; raw {sec_value:g}]"
+
+    # A host's guards (arbor/measure/guards.py): a KEEP the host would refuse on one of them is a REVERT here,
+    # whatever the intent, with no retest.
+    if guards and guards.get("broken"):
+        return _result(REVERT, f"{delta_s} — a host's guard broke: {guards['broken'][0]}")
 
     # ── Cap on what a frontier trade may spend ──────────────────────────────
     # `secondary_noise_band_pct` does NOT bound a frontier point: once the
     # primary clears `threshold_rel`, is_frontier fires and the band is never
     # consulted, so a +1% primary win could be kept at ANY secondary cost.
     # That is the right default for a genuine Pareto curve — the frontier
-    # branch exists because a single-axis gate reverts such trades — but it
-    # is unbounded, and an unbounded trade is indistinguishable from a broken
-    # measurement.
+    # branch exists because a single-axis gate cannot see one — but it is
+    # unbounded, and an unbounded trade is
+    # indistinguishable from a broken measurement.
     #
     # The budget is EARNED, not flat. A trade may spend
     #
@@ -474,18 +542,26 @@ def run_gate(
                 f"primary gain does not license an unbounded secondary loss. "
                 f"Check the draw fingerprint before re-running.")
 
-    # A correctness fix carries no performance claim on EITHER axis, so it is
-    # not judged on one and the Pareto shape never decides it. Only a
-    # catastrophe refuses it.
+    # A stability fix whose own run shows the failure it fixes has fixed nothing.
+    if intent.name == "FIX-STABILITY" and (stability or {}).get("own"):
+        return _result(REVERT, f"{delta_s} — the failure it fixes shows in its own run: "
+                               f"{stability['own'][0]}")
+
+    # A correctness or stability fix carries no performance claim on EITHER
+    # axis, so it is not judged on one and the Pareto shape never decides it.
+    # Only its cap refuses it.
     if intent.pareto_exempt:
+        what = "stability" if intent.name == "FIX-STABILITY" else "correctness"
+        cures = (f"; iter-{stability['before']['iteration']}'s failure is gone"
+                 if what == "stability" else "")
         if _within_noise(metric_value, best, direction, intent_tolerance):
             return _result(KEEP,
-                           f"correctness fix ships regardless of throughput "
-                           f"({delta_s}, cap {intent_tolerance:.1f}%)",
+                           f"{what} fix ships regardless of throughput "
+                           f"({delta_s}, cap {intent_tolerance:.1f}%{cures})",
                            booked=intent.books and pri.gain)
         return _result(REVERT,
                        f"{delta_s} — beyond the {intent_tolerance:.1f}% "
-                       f"catastrophe cap even for a correctness fix")
+                       f"cap even for a {what} fix")
 
     # A probe makes no metric claim. It only has to not leave the tree worse,
     # and a frontier trade is not "worse" — it is a different point.

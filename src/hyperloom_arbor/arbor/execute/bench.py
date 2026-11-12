@@ -11,6 +11,10 @@ import os
 import subprocess
 from pathlib import Path
 
+#: How an error from a correctness check that could not judge begins: the gate's marker for no evidence about the change
+#: (arbor/measure/gate.py), which a pack's script also writes itself (an eval dataset it cannot load).
+INCONCLUSIVE = "correctness inconclusive"
+
 
 
 def _docker_exec(
@@ -71,8 +75,8 @@ def _live_flags(config: dict) -> str:
     The consequence is larger than one KEEP: every flag-valued lever was
     unreachable. That includes ``--max-cudagraph-capture-size``, which is the
     named fix for graph eviction at the capture ceiling. A campaign cannot land
-    a flag fix through a
-    path that discards flags.
+    a flag fix through a path that
+    discards flags.
     """
     from arbor.execute.workspace import read_workspace_config
     static = str(config.get("server_flags", "") or "")
@@ -171,6 +175,11 @@ def run_correctness(
     ``cap`` (seconds) bounds it below the pack's ``bench_timeout``: component mode's
     phase cap or the time left before the host's deadline. A run that cap cuts off says
     ``capped``, so the caller books nothing instead of a failed check.
+
+    A pack's script always exits 0 and writes its verdict, a wrong answer included. So a check that could not run, exited
+    non-zero, wrote nothing, wrote no JSON or ran out of time says nothing about the change: its error starts with
+    ``INCONCLUSIVE``, which the gate reads as no evidence (and, after a server it saw healthy, asks that server for one
+    token before it blames the harness).
     """
     session_dir = Path(session_dir)
     session_dir.mkdir(parents=True, exist_ok=True)
@@ -180,7 +189,7 @@ def run_correctness(
     script = config.get("correctness_script") or ""
     if not container or not script:
         return {"passed": False, "score": 0.0,
-                "error": "config missing docker_container or correctness_script"}
+                "error": f"{INCONCLUSIVE}: the config names no docker_container or correctness_script"}
     timeout = int(config.get("bench_timeout", 600))
     capped = cap is not None and cap < timeout
     if capped:
@@ -204,20 +213,23 @@ def run_correctness(
     try:
         r = _docker_exec(container, script, env, timeout)
     except subprocess.TimeoutExpired:
-        return {"passed": False, "score": 0.0, "error": "correctness script timed out",
+        return {"passed": False, "score": 0.0,
+                "error": f"{INCONCLUSIVE}: the correctness script timed out after {timeout} s",
                 **({"capped": timeout} if capped else {})}
     except FileNotFoundError:
-        return {"passed": False, "score": 0.0, "error": "docker not found on PATH"}
+        return {"passed": False, "score": 0.0, "error": f"{INCONCLUSIVE}: docker not found on PATH"}
     if r.returncode != 0:
-        return {"passed": False, "score": 0.0, "error": r.stderr or r.stdout}
+        said = (r.stderr or r.stdout or "").strip()[-400:]
+        return {"passed": False, "score": 0.0,
+                "error": f"{INCONCLUSIVE}: the correctness script exited {r.returncode}: {said}"}
 
     ok, text = _read_output(out, container, str(out))
     if not ok:
-        return {"passed": False, "score": 0.0, "error": "correctness script did not write output"}
+        return {"passed": False, "score": 0.0, "error": f"{INCONCLUSIVE}: the correctness script wrote no output"}
     try:
         result = json.loads(text)
     except json.JSONDecodeError as e:
-        return {"passed": False, "score": 0.0, "error": f"invalid JSON: {e}"}
+        return {"passed": False, "score": 0.0, "error": f"{INCONCLUSIVE}: the correctness output is not JSON: {e}"}
 
     result.setdefault("passed", False)
     result.setdefault("score", 0.0)

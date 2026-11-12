@@ -110,9 +110,8 @@ def _describe_dep(*env_vars: str) -> dict[str, str]:
 
 
 def _build_dependencies() -> dict[str, dict[str, str]]:
-    """Provenance (path/commit/remote) for the Magpie / InferenceX trees this session executes against, so debuggers can answer "which upstream?" later."""
+    """Provenance (path/commit/remote) for the InferenceX tree this session executes against, so debuggers can answer "which upstream?" later."""
     return {
-        "magpie": _describe_dep("MAGPIE_PATH"),
         "inferencex": _describe_dep("INFERENCEX_PATH"),
     }
 
@@ -219,8 +218,8 @@ def build_manifest(
         # IR-3 soft-degrade audit.
         "kb_degraded_reason": getattr(args, "kb_degraded_reason", None),
         "pr_degraded_reason": getattr(args, "pr_degraded_reason", None),
-        # Operator-supplied reference recipe source (audit only); the resolved server_args / envs / model are
-        # authoritative in state.json.
+        # Operator-supplied reference recipe source (audit only); the resolved launch is authoritative in
+        # base_launch.json.
         "reference_script": getattr(args, "reference_script", None),
     }
 
