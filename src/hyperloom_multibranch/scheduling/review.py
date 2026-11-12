@@ -41,7 +41,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
-from hyperloom_common.io import atomic_write_json, atomic_write_text
+from hyperloom_common.shared_storage import make_shared_dirs, write_shared_text
 from hyperloom_multibranch.scheduling.layout import REVIEW_DIR
 
 REVIEW_FILE = "review.json"
@@ -145,8 +145,8 @@ def request(directory: Path, session: Path, shown: Reviewed, now: float) -> dict
     """Ask for a review of what ``shown`` names, for the session in ``session``: write ``REVIEW.md`` and a pending
     ``review.json`` in ``directory``; the state written."""
 
-    directory.mkdir(parents=True, exist_ok=True)
-    atomic_write_text(directory / REVIEW_PAGE, _page(session, shown, now))
+    make_shared_dirs(directory)
+    write_shared_text(directory / REVIEW_PAGE, _page(session, shown, now))
     state = {
         "status": PENDING,
         "requested_at_iso": _iso(now),
@@ -161,7 +161,7 @@ def request(directory: Path, session: Path, shown: Reviewed, now: float) -> dict
         "requested_digests": digests(shown.map_file, shown.dossier),
         "changed": [],
     }
-    atomic_write_json(directory / REVIEW_FILE, state)
+    _save(directory, state)
     return state
 
 
@@ -183,9 +183,15 @@ async def wait(directory: Path, sleep: Callable[[float], Awaitable[None]]) -> di
         state = load(directory)
         if state is not None and state.get("status") in (APPROVED, REJECTED):
             state["changed"] = _changed(state)
-            atomic_write_json(directory / REVIEW_FILE, state)
+            _save(directory, state)
             return state
         await sleep(POLL_SECONDS)
+
+
+def _save(directory: Path, state: Mapping[str, Any]) -> None:
+    """Write ``review.json`` through the writers a shared run's other records use (group-writable, ``664``, below
+    shared storage), so an account other than the one that wrote it can still replace it."""
+    write_shared_text(directory / REVIEW_FILE, json.dumps(state, indent=2, sort_keys=True))
 
 
 def _changed(state: Mapping[str, Any]) -> list[str]:
@@ -208,7 +214,7 @@ def decide(directory: Path, approve: bool, by: str | None, note: str, now: float
     if state.get("status") != PENDING:
         return [f"the review is already {state.get('status')}"]
     state.update(status=APPROVED if approve else REJECTED, decided_at_iso=_iso(now), by=by or _login(), note=note)
-    atomic_write_json(directory / REVIEW_FILE, state)
+    _save(directory, state)
     return []
 
 

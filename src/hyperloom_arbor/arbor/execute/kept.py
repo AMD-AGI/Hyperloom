@@ -20,6 +20,7 @@ in ``<session>/invalids.json`` first (``note_invalid``), for the revisit phase (
 from __future__ import annotations
 
 import json
+import re
 import time
 from pathlib import Path
 
@@ -70,15 +71,158 @@ def record(container: str, config: dict, session_dir: str | Path, iteration: int
 def refresh(container: str, config: dict, session_dir: str | Path, iteration: int) -> dict | None:
     """At a pass's start, before the agent's turn: the tree is the kept one then (the last verdict applied, orphans
     reverted), so a commit the harness made between passes (the master's integration of its workers' KEEPs, a
-    retraction) moves the point too. Only a record that exists moves (``ensure`` makes it); the new one, or None when
-    nothing moved."""
+    retraction) moves the point too. Only a record that exists moves (``ensure`` makes it).
+
+    An iteration the session never kept never moves it. Its commits are still in the tree when its restore never ran (a
+    SIGTERM after its commit, a crash between its verdict and the restore, a restore that failed), and an editable
+    tree keeps the commit of an iteration never booked, which the orphan walk (the workspace's only) leaves. Adopting
+    them put an unmeasured or reverted change under every later KEEP. So they are reverted (``_live``, ``_undo``), a NOT
+    MEASURED one noted for the revisit first, and what the harness committed between passes stays.
+
+    The new record, with ``line`` for the log; or None when nothing moved."""
     doc = load(session_dir)
     if not doc:
         return None
     head, tree_heads = _heads(container, config)
     if not head or (head == doc["workspace"] and tree_heads == (doc.get("trees") or {})):
         return None
-    return record(container, config, session_dir, iteration - 1, "carried", f"iteration {iteration}'s start")
+    live = _live(container, config, session_dir, doc)
+    if not live:
+        new = record(container, config, session_dir, iteration - 1, "carried", f"iteration {iteration}'s start")
+        return {**new, "line": "moved to the tree at this pass's start"} if new else None
+    names = ", ".join(str(n) for n in sorted({n for found in live.values() for n, _, _ in found}))
+    noted = _note_live(config, session_dir, live)
+    label = doc.get("label") or (f"iter-{doc['iteration']}" if doc.get("iteration") else "the start")
+    message = f"Restore the kept tree of {label} after iteration {iteration - 1} (iteration {names} never kept)"
+    kept_shas = dict(_pairs(config, doc))
+    done = [f"{_undo(container, repo, found, kept_shas[repo], message)} in {repo}" for repo, found in live.items()]
+    # The same tree as the kept point's: the point keeps its name. A tree the harness also committed to since: carried.
+    new = (record(container, config, session_dir, doc.get("iteration", 0), doc.get("verdict", "start"), label)
+           if not _moved(container, config, doc) else
+           record(container, config, session_dir, iteration - 1, "carried", f"iteration {iteration}'s start"))
+    line = (f"iteration {names} was never kept, yet its commits were still in the tree (its restore never ran): "
+            f"{'; '.join(done)}" + (f"; noted for the revisit: iteration {', '.join(map(str, noted))}" if noted else ""))
+    return {**(new or {}), "line": line}
+
+
+#: A gate row's decisions (arbor/measure/intents.py, ``legacy_decision``), and the two that keep a tree. Every other
+#: decision is an annotation (arbor/directions.py, ``ANNOTATIONS``).
+GATE_DECISIONS = ("KEEP", "PROBE", "REVERT", "INVALID")
+KEPT_DECISIONS = ("KEEP", "PROBE")
+
+_ITER = re.compile(r"iter-(\d+):")
+_REVERT_OF = re.compile(r'Revert "iter-(\d+):')
+#: How ``restore``'s commit begins: it set the tree back to the kept point, undoing every commit before it.
+_RESTORE = "Restore the kept tree of "
+
+
+def _pairs(config: dict, doc: dict) -> list[tuple[str, str]]:
+    """``(repository, kept commit)``: the workspace's, then each editable tree's the config still names."""
+    pairs = [(config.get("workspace_root", ""), doc["workspace"])]
+    return pairs + [(t, sha) for t, sha in (doc.get("trees") or {}).items() if t in _trees.paths(config)]
+
+
+def _verdicts(session_dir: str | Path) -> dict[int, dict]:
+    """Each iteration's last gate row (``directions.verdict_row``'s rule), from ``session.json``."""
+    try:
+        lessons = json.loads((Path(session_dir) / "session.json").read_text()).get("lessons") or []
+    except (OSError, ValueError, AttributeError):
+        return {}
+    return {row["iteration"]: row for row in lessons
+            if isinstance(row, dict) and isinstance(row.get("iteration"), int)
+            and row.get("decision") in GATE_DECISIONS}
+
+
+def _same_tree(container: str, repo: str, sha: str) -> bool:
+    try:
+        return _git(container, repo, "rev-parse", f"{sha}^{{tree}}") == _git(container, repo, "rev-parse", "HEAD^{tree}")
+    except RuntimeError:
+        return False
+
+
+def _moved(container: str, config: dict, doc: dict) -> bool:
+    """Whether any repository's tree differs from the kept point's."""
+    return not all(_same_tree(container, repo, sha) for repo, sha in _pairs(config, doc))
+
+
+def _live(container: str, config: dict, session_dir: str | Path, doc: dict) -> dict[str, list[tuple[int, str, str]]]:
+    """Per repository whose tree differs from the kept point's, the commits since that point of iterations the session
+    never kept that nothing has undone: ``{repo: [(iteration, sha, subject), ...]}``, oldest first.
+
+    The walk follows the repository's own line (``--first-parent``): a merged branch's commits are another session's.
+    A ``Revert "iter-N: ..."`` undoes N's commits, and ``restore``'s commit undoes every one before it. An iteration is
+    kept when its last gate row is a KEEP or a PROBE; one with no row was never booked."""
+    verdicts = _verdicts(session_dir)
+    found: dict[str, list[tuple[int, str, str]]] = {}
+    for repo, sha in _pairs(config, doc):
+        if _same_tree(container, repo, sha):
+            continue
+        try:
+            log = _git(container, repo, "log", "--reverse", "--first-parent", "--format=%H%x09%s", f"{sha}..HEAD")
+        except RuntimeError:
+            continue
+        live: list[tuple[int, str, str]] = []
+        for line in log.splitlines():
+            commit, _, subject = line.partition("\t")
+            if subject.startswith(_RESTORE):
+                live = []
+            elif m := _REVERT_OF.match(subject):
+                live = [c for c in live if c[0] != int(m.group(1))]
+            elif (m := _ITER.match(subject)) and \
+                    (verdicts.get(int(m.group(1))) or {}).get("decision") not in KEPT_DECISIONS:
+                live.append((int(m.group(1)), commit, subject))
+        if live:
+            found[repo] = live
+    return found
+
+
+def _undo(container: str, repo: str, live: list[tuple[int, str, str]], kept_sha: str, message: str) -> str:
+    """Revert ``live``'s commits in ``repo``, newest first, as the orphan walk does; what was done. A revert that does
+    not apply (a later commit touched the same lines) sets the whole tree back to the kept point instead, as
+    ``restore`` would: what the harness committed since goes too, and the log says so."""
+    _git(container, repo, "checkout", "--", ".", check=False)
+    _git(container, repo, "clean", "-fdq", check=False)
+    try:
+        for _, sha, subject in reversed(live):
+            if _git(container, repo, "diff", "--name-only", f"{sha}~1", sha):
+                _git(container, repo, "revert", "--no-edit", sha)
+            else:
+                _git(container, repo, "commit", "-q", "--allow-empty", "-m", f'Revert "{subject}"')
+        return f"reverted {', '.join(sha[:12] for _, sha, _ in live)}"
+    except RuntimeError as exc:
+        _git(container, repo, "revert", "--abort", check=False)
+        _restore_repo(container, repo, kept_sha, message)
+        why = (str(exc).strip().splitlines() or [repr(exc)])[-1][:160]
+        return f"a revert did not apply ({why}): the kept tree is back, and what the harness committed since went too"
+
+
+def _note_live(config: dict, session_dir: str | Path, live: dict[str, list[tuple[int, str, str]]]) -> list[int]:
+    """Note each NOT MEASURED iteration among ``live`` that ``invalids.json`` lacks, for the revisit, as
+    ``note_invalid`` would have; the iterations noted."""
+    verdicts = _verdicts(session_dir)
+    path = Path(session_dir) / INVALIDS
+    try:
+        doc = json.loads(path.read_text())
+    except (OSError, ValueError):
+        doc = []
+    have = {e.get("iteration") for e in doc if isinstance(e, dict)}
+    workspace = config.get("workspace_root", "")
+    commits: dict[int, dict[str, str]] = {}
+    for repo, found in live.items():
+        for n, sha, _ in found:
+            commits.setdefault(n, {})[repo] = sha        # the newest: a retried iteration's last attempt
+    noted = []
+    for n, by_repo in sorted(commits.items()):
+        row = verdicts.get(n)
+        if not row or row.get("decision") != "INVALID" or n in have:
+            continue
+        doc.append({"iteration": n, "change": row.get("change", ""), "intent": row.get("claim_class", "B"),
+                    "reason": row.get("reason", ""), "workspace": by_repo.get(workspace),
+                    "trees": {r: s for r, s in by_repo.items() if r != workspace}, "revisit": None})
+        noted.append(n)
+    if noted:
+        path.write_text(json.dumps(doc, indent=1) + "\n")
+    return noted
 
 
 START = "arbor: the tree at this start"

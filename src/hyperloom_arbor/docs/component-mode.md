@@ -90,8 +90,8 @@ On a KEEP, before `session.json` records it:
 
 ```
 <session>/keeps/0007/          written to keeps/.0007.tmp, then renamed
-  keep.json                    number, previous, iteration, metric, change, intent,
-                               root, parent, commit, ts
+  keep.json                    schema, arbor, number, previous, iteration, metric, change,
+                               intent, root, parent, commit, ts
   change.patch                 this KEEP alone: applies with `git apply` at `parent`
   served.patch                 the served tree: applies with `git apply` at `root`
   config.json                  server_flags and server_env after the KEEP
@@ -130,8 +130,8 @@ manifest without either side writing host-specific code.
 ## 7. Decisions
 
 1. **An exhausted map with no time left for its update round: exit 0, and say why.** Every exit
-   in component mode writes `<session>/component_exit.json` first: `{reason, iteration, keeps,
-   map, deadline, ts}`, with `reason` one of `deadline`, `map_exhausted` (the map is closed and
+   in component mode writes `<session>/component_exit.json` first: `{schema, reason, iteration,
+   keeps, map, deadline, ts, arbor}` ([interface.md](interface.md)), with `reason` one of `deadline`, `map_exhausted` (the map is closed and
    its update round does not fit), `done` (STOP, max iterations), `sigterm`, `aborted` (the
    harness stopped measuring: `ABORTED.md`, its message as `detail`), `review_rejected` (a human
    rejected the campaign at the review gate) and `retraction_conflict` (a KEEP the agent found
@@ -161,7 +161,7 @@ build settled what the design left open:
   `pack`, a missing or broken `pack.yaml`), and in component mode a campaign that
   `validate_campaign` rejects, or one without a `session_root`. Read errors that may pass (an
   NFS hiccup) stay crashes. Every component-mode refusal also writes
-  `<session>/component_refused.json` (`{reasons, ts}`), the one file a refusal writes, for the
+  `<session>/component_refused.json` (`{schema, reasons, ts, arbor}`), the one file a refusal writes, for the
   host to show; `Run.start` removes a stale one, as it does `component_exit.json`.
 - **Timed-out phases:** the agent, server and bench phases make the iteration NOT_MEASURED; the
   agent's uncommitted edits are discarded, so a host never reads a half-written
@@ -208,6 +208,11 @@ command in the prompts (`arbor/component.py`, `arbor/policy/claude_loop.py`), an
   agent starts it with `setsid nohup`, its output in `iter_N/bench.log` and its PID in
   `iter_N/bench.pid`, and waits on the output or the PID. When the turn ends, a bench still
   running is stopped with its process group, so it never loads the next server.
+  - **The host's command without `bench_read`** is detached too, alone: the script holds only the
+    host's command, the agent waits until its PID has ended, then reads the client's result and
+    records it as before. On by default; `ARBOR_DETACH_HOST_BENCH=0` in Arbor's environment runs
+    the command in the agent's shell instead. A host that gives `bench_read` gets the detached
+    bench whatever the variable says.
 - **The server after the bench.** The bench turn stops everything it started except Arbor's own
   server (its PID file's process group; standalone, the framework's server inside the
   container), which its agent may have restarted after a crash. Before correctness the harness
