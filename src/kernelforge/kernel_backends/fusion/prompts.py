@@ -4,6 +4,7 @@
 """System prompt for the Fusion kernel-backend agent."""
 
 from kernelforge.kernel_backends.prompt_utils import (
+    CROSS_WORKGROUP_WAITS_PROMPT,
     EDIT_SURFACE_AND_SWEEPS_PROMPT,
     context_sections_block,
 )
@@ -134,6 +135,8 @@ bf16 with fp32 accumulation is not bit-exact against an eager path that
 accumulates differently. Pre-filter on SNR (>= {DEFAULT_SNR_THRESHOLD_DB:g} dB), never on
 strict `allclose`. If you cannot reach it, the fusion is wrong — do not widen
 the tolerance.
+
+{CROSS_WORKGROUP_WAITS_PROMPT}
 
 {canonical_gate}
 

@@ -114,20 +114,24 @@ def forge_loop_prompts(monkeypatch):
 # profiler, and the fused arm to be one call to the authored entry point; the JSON
 # object gained `eager_kernels`/`eager_matches_trace` and the rule that reads them;
 # the remaining steps are the same text renumbered 6-8.
+# The cross-workgroup residency rule moved all ten: one shared prompt_utils.py
+# block placed before each backend's acceptance gate. Diffed line by line against
+# main: nine added lines in every rendering, the same block in all ten (same md5
+# over the added lines), nothing removed and nothing else moved.
 _SHA256_FORGE_LOOP: dict[str, str] = {
-    "ave": "09acfdaddef501d7fd34308dc5e44b5f202695a6fc257846e80843946f8bf27a",
-    "aiter": "290f5b86300a62c682789551515fd000dfe395ad2abbea5a68a5e683588fec90",
-    "assembly": "67ce0c680f6b603d7c656feb1f1cc1f5eaf1bf4f6afc5d9f368b0361dd4b1492",
-    "ck": "d5a880ff37bdd3a1d04d33227aa1e2a7840f7cdee9559043ce14cf40e1ca6ebd",
-    "flydsl": "659dadd861489506bd75bbc4ec9e511f050f6ee03711238fd4c8def1064e1519",
+    "ave": "bb963e7e9c5e14f5ca7ba755aedb167d2f7c4903da987fe1bd674eb47d04cb28",
+    "aiter": "b5e34c52ba73f6d1de81d68be7db15f58b0645c292b8f34dfbf3e38d877400f6",
+    "assembly": "55403bdde49af8848025777c294bbabfa7995f4b64706627c0f6ed2972d9bf29",
+    "ck": "2c77f0f6fcfed65a5ff21724f7ad98dfee8e65c9371537ce69a0435dd3cbcc97",
+    "flydsl": "62625aeb2b9e88e2de6efa0a360c8ff5626b23cda7591a52701b133e1db0e987",
     # The group-axis rule moved fusion alone: harness contract step 4 now forbids
     # substituting gqa_groups / num_attention_heads for n_local_groups on DSv4 wo_a
     # paths, and reminds authors that H and G are often unequal.
-    "fusion": "8bfdcc271d511faf99a3ee273817ce420c9175611944120a82de50f7e9cc22d6",
-    "gluon": "8a8a0feea8cf0d0ed9030b2557bd056a80be2abc3d9e180ec2cf7819eaea91f3",
-    "hip": "5559572e047b3c4b872cc7027acb81b2920b6815845706d0b73bdef08b1ac502",
-    "hipblaslt": "90fb6e81023fd66295411408f4993453d76330f5a27e5ea58873c38edad99be3",
-    "triton": "aebb854b4e134020cd853ef5c20e38195f2defb5444c27f98bd61c60fddaa056",
+    "fusion": "a8b1f2862cf0db66646847295693af47f0af22f98c7b326002b358a757f9749d",
+    "gluon": "7b6bb85b763244c8637d60176d1bf77f8c87c4b4a7b032e8e0f30d82929787c6",
+    "hip": "12af75ea100d2dcfc37620776c62fd3a712cd42f8f27e5f24390ce89b257d850",
+    "hipblaslt": "80b369e74ac7742efb567adce8bf4a0a75767d4f7bb9078efbe24e72349dfc85",
+    "triton": "ce7258f0e1c35149faf2d6b01949cabfec9abc163b861b40c7fb26d09ea8233f",
 }
 
 

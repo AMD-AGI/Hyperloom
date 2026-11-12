@@ -4,6 +4,7 @@
 """System prompt for the FlyDSL kernel-backend agent."""
 
 from kernelforge.kernel_backends.prompt_utils import (
+    CROSS_WORKGROUP_WAITS_PROMPT,
     EDIT_SURFACE_AND_SWEEPS_PROMPT,
     context_sections_block,
 )
@@ -35,6 +36,8 @@ over MFMA instruction usage, register allocation, and data movement.
    kernel is always rejected. Check numerics before chasing speed.
 5. Benchmark wall-clock; profile PMC counters when suboptimal.
 6. Decide the single next change from measured data (bottleneck axis), not intuition.
+
+{CROSS_WORKGROUP_WAITS_PROMPT}
 
 {canonical_gate}
 

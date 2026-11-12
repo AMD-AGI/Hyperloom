@@ -79,6 +79,7 @@ pick a lever → apply → re-benchmark A/B.** Paths are relative to this folder
 | "Chiplet locality / L2 reuse / tile swizzle / <1024 workgroups" | `optimization/lever_xcd_locality.md` → `optimization/lever_grid_sizing.md` |
 | "Should I fuse these two ops?" | `optimization/lever_bottleneck_class.md` (re-classify first) → `optimization/lever_fusion.md` |
 | "Wave/workgroup/grid sizing, `__launch_bounds__`, persistent kernels" | `optimization/lever_grid_sizing.md` → `optimization/lever_xcd_locality.md` |
+| "Kernel never finishes / GPU hang / Stream-K, grid barrier or flag spin across workgroups" | `optimization/lever_grid_sizing.md` (every workgroup a workgroup waits on must be resident at once) |
 | "Tune a GEMM for the live serving path" | `optimization/lever_autotune.md` → `profiling/measure_protocol.md` (validate via A/B) |
 | "Time one constant fast / sweep a dispatch literal / where do the env knobs go?" | `optimization/lever_cheap_sweeps.md` (in place for one turn — the deliverable gets the literal) → `profiling/measure_protocol.md` (noise band) |
 | "This lever needs a file I was not given / 'that means patching the framework, not this file'" | `optimization/lever_edit_surface.md` → `optimization/lever_cheap_sweeps.md` |

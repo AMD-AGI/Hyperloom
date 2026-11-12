@@ -4,6 +4,7 @@
 """System prompt for the hipBLASLt kernel-backend agent."""
 
 from kernelforge.kernel_backends.prompt_utils import (
+    CROSS_WORKGROUP_WAITS_PROMPT,
     EDIT_SURFACE_AND_SWEEPS_PROMPT,
     context_sections_block,
 )
@@ -53,6 +54,8 @@ on a remembered number; the hipBLASLt library specifics below stay in this promp
 8. DECIDE next configuration change — ONE variable at a time (data type, layout, epilogue,
    workspace size, or solution index override)
 9. Log the experiment iteration with problem spec, solution info, wall_ms, and decision
+
+{cross_workgroup_waits}
 
 {canonical_gate}
 
@@ -229,6 +232,7 @@ def build_system_prompt(
     return _SYSTEM_PROMPT_TEMPLATE.format(
         config_gpu_target=config_gpu_target,
         canonical_gate=canonical_gate,
+        cross_workgroup_waits=CROSS_WORKGROUP_WAITS_PROMPT,
         edit_surface=EDIT_SURFACE_AND_SWEEPS_PROMPT,
         context_sections=context_sections_block(knowledge_content=knowledge_content),
     )

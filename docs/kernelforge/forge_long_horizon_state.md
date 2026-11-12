@@ -87,6 +87,7 @@ and `iter`. Event types include:
 - `round_admission`
 - `round_dispatch`
 - `round_cost`
+- `device_fault`
 - `iteration_result`
 - `run_terminated`
 
@@ -435,3 +436,45 @@ is no upper limit on the score a candidate may claim. The mean of the three
 passing scores becomes the new monotonic best -- the same statistic the bar is
 set on, so the incumbent and the threshold are measured the same way. Neither raw aggregate wall time nor
 individual case regressions decide KEEP/REVERT.
+
+## GPU faults during a measurement
+
+A GPU hang (`HW Exception by GPU node-N ... GPU Hang`) makes the driver reset the
+GPU and ends every process on the machine that has a GPU open, whichever GPU
+its own work ran on. A memory access fault (`Memory access fault by GPU node-N`)
+ends only the process that caused it. The campaign process never opens the GPU:
+builds, correctness, benchmarks and the device probe run in child processes,
+so a hang ends the measurement in flight and not the campaign.
+
+Every measurement starts with the probe, a child process that runs a small
+kernel on the device. A failed probe means the device runs no work now -- after
+a reset outside any measurement, for instance, by a session's own test or a
+remeasure -- and it is waited for as below before the candidate is measured; a
+device that never recovers leaves the candidate unjudged as
+`DEVICE_UNAVAILABLE`.
+
+When the correctness suite's driver output or a failed benchmark's output names
+a hang, the measurement is not ruled on as it stands, since the process that
+reported the hang may only have shared the machine with its cause:
+
+1. The probe is repeated, backing off between tries, until its kernel
+   completes or 15 minutes have passed.
+2. Once the device runs work again, the candidate is measured once more from
+   the build onward.
+3. A candidate whose second measurement hangs the GPU too is reverted as
+   `REVERT_DEVICE_FAULT`, and its validation summary names both hangs. A clean
+   second measurement is ruled on as any other.
+
+A device that does not recover within the limit leaves the candidate unjudged
+as `DEVICE_UNAVAILABLE`. That decision is an infrastructure outcome: it carries
+no measured negative, does not count toward a relay profile's streak, and no
+later candidate is measured in the same process. The campaign stops with
+termination reason `device_unrecovered`. A memory access fault is the
+candidate's own and is ruled on by the existing labels without a second
+measurement.
+
+Each fault appends a `device_fault` event: the `phase` that found it
+(`before_measurement` or `measurement`), its `kind` (`hang`, or `unresponsive`
+when a failed probe names no fault), the GPU `node` when the output names one,
+the reported `line`, whether the device `recovered`, and, after a second
+measurement, whether it `repeated` the hang.

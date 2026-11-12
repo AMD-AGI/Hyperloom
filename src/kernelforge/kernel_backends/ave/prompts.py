@@ -5,7 +5,11 @@
 
 from __future__ import annotations
 
-from kernelforge.kernel_backends.prompt_utils import EDIT_SURFACE_AND_SWEEPS_PROMPT, context_sections_block
+from kernelforge.kernel_backends.prompt_utils import (
+    CROSS_WORKGROUP_WAITS_PROMPT,
+    EDIT_SURFACE_AND_SWEEPS_PROMPT,
+    context_sections_block,
+)
 
 
 def build_system_prompt(config_gpu_target: str, knowledge_content: str, canonical_gate: str) -> str:
@@ -19,6 +23,8 @@ Keep the canonical driver and its workload cases unchanged. Compile, run the
 correctness tests and benchmark; repair compiler diagnostics and test failures
 within the current iteration. Preserve synchronization, memory ordering, layout and
 numerical invariants. Do not replace an AveLang kernel with another DSL.
+
+{CROSS_WORKGROUP_WAITS_PROMPT}
 
 {canonical_gate}
 

@@ -392,7 +392,7 @@ def make_event(event_type: str, iteration: int, **fields: object) -> dict:
 _DEFAULT_STALL_PHASE_THRESHOLD = 3
 
 # Decisions that record an infrastructure failure rather than an attempt at the kernel.
-INFRASTRUCTURE_DECISIONS = frozenset({"API_ERROR", "ORCHESTRATION_ERROR"})
+INFRASTRUCTURE_DECISIONS = frozenset({"API_ERROR", "ORCHESTRATION_ERROR", "DEVICE_UNAVAILABLE"})
 
 
 def is_infrastructure_decision(decision: str) -> bool:

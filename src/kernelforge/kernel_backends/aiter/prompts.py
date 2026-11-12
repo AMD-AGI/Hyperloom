@@ -4,6 +4,7 @@
 """System prompt for the AITER kernel-backend agent."""
 
 from kernelforge.kernel_backends.prompt_utils import (
+    CROSS_WORKGROUP_WAITS_PROMPT,
     EDIT_SURFACE_AND_SWEEPS_PROMPT,
     context_sections_block,
 )
@@ -72,6 +73,8 @@ the `Read` tool for {config_gpu_target} instead of relying on a remembered value
    - A quick Triton prototype (for comparison)
 7. REPORT whether AITER meets the gate, or custom kernel work is needed
 
+{cross_workgroup_waits}
+
 {canonical_gate}
 
 ## Integration Checklist
@@ -132,6 +135,7 @@ def build_system_prompt(
     return _SYSTEM_PROMPT_TEMPLATE.format(
         config_gpu_target=config_gpu_target,
         canonical_gate=canonical_gate,
+        cross_workgroup_waits=CROSS_WORKGROUP_WAITS_PROMPT,
         edit_surface=EDIT_SURFACE_AND_SWEEPS_PROMPT,
         context_sections=context_sections_block(knowledge_content=knowledge_content),
     )

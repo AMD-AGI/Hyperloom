@@ -5,7 +5,7 @@
 
 from __future__ import annotations
 
-from kernelforge.kernel_backends.prompt_utils import context_sections_block
+from kernelforge.kernel_backends.prompt_utils import CROSS_WORKGROUP_WAITS_PROMPT, context_sections_block
 
 
 def build_system_prompt(config_gpu_target: str, knowledge_content: str, canonical_gate: str) -> str:
@@ -38,6 +38,8 @@ a passing average SNR or missing stability measurements cannot authorize KEEP.
 The original source is the baseline and remains selected if no candidate wins.
 Report roundtrip timing and instruction-edit gains separately. A kernel KEEP
 does not establish a model-serving gain.
+
+{CROSS_WORKGROUP_WAITS_PROMPT}
 
 {canonical_gate}
 

@@ -132,10 +132,12 @@ outcome:
       - CRASH
       - REVERT_INTEGRITY
       - REVERT_CONTENDED
+      - REVERT_DEVICE_FAULT
       - NO_CHANGES
       - API_ERROR
       - AGENT_ERROR
       - ORCHESTRATION_ERROR
+      - DEVICE_UNAVAILABLE
   - name: candidate_wall_ms
     description: >-
       The candidate's recorded wall time in milliseconds, as its meta.json records it (wall_ms): the median of three
