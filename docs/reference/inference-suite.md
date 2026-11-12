@@ -124,7 +124,8 @@ that set each flag and environment variable and what it overrode:
 2. the operator's layer: removals, then additions;
 3. the candidate's layer: removals, then additions;
 4. the golden layer, when the round applies it;
-5. the guard: the model path, address and GPU mask of the round;
+5. the guard: the model path, address and GPU masks of the round
+   (`ROCR_VISIBLE_DEVICES` the round's cards, `HIP_VISIBLE_DEVICES` `0..n-1`);
 6. the runner's layer: the environment and floors a host needs, the
    framework's metrics switch (`--enable-metrics` for SGLang; vLLM needs none)
    when the round samples KV telemetry, and the engine seed (`--random-seed 0`
@@ -163,8 +164,9 @@ A round holds its server in one of four modes:
 Before `own` or `boot` starts a server, the round refuses a port something already
 listens on (`port_in_use`) and GPUs that `amd-smi` does not list or that another
 process holds (`gpus_unavailable`, naming each GPU, its amd-smi card and its holder; a
-round's GPU numbers are `HIP_VISIBLE_DEVICES` numbers, matched to amd-smi cards through
-their KFD node). A process holds a card when `amd-smi process` reports more than 1 GiB
+round's GPU numbers are the machine's card numbers the server gets as
+`ROCR_VISIBLE_DEVICES`, matched to amd-smi cards through their KFD node; the server's
+`HIP_VISIBLE_DEVICES` numbers those cards from 0). A process holds a card when `amd-smi process` reports more than 1 GiB
 of VRAM for it there, or reports none at all: every ROCm process opens all cards and
 keeps up to a few MiB of page tables and runtime context on each, which does not count.
 Hyperloom stops
@@ -319,7 +321,7 @@ the same span (`accumulator_check`); beyond 5% it is the warning
 `power_throttle_fraction_max`, `power_valid`, `reasons` and `warnings`.
 `gpu_monitor` is derived from the same samples. `power.json`, the `power` section
 and `gpu_monitor` number cards by amd-smi index, not by the round's
-`HIP_VISIBLE_DEVICES` numbers.
+`ROCR_VISIBLE_DEVICES` numbers.
 
 ## report.json
 

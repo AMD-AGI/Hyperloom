@@ -5,7 +5,7 @@
 
 The launch the translation must produce is spelled out per framework: the base's defaults with the point's
 ``EXTRA_<FW>_ARGS`` on top, its knobs as config fields rather than server environment, and the GPUs masked by
-``HIP_VISIBLE_DEVICES``.
+``ROCR_VISIBLE_DEVICES`` (with ``HIP_VISIBLE_DEVICES`` numbering them from 0).
 """
 
 from __future__ import annotations
