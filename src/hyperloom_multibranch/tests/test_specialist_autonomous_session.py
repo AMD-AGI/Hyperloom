@@ -45,7 +45,7 @@ from hyperloom_multibranch.specialist import (
     keep_requeue,
     worktree as worktree_module,
 )
-from hyperloom_multibranch.specialist.agent_onboarding import SHIM_DIR, AgentSandbox, OnboardingSetup
+from hyperloom_multibranch.specialist.agent_onboarding import SHIM_DIR, AgentSandbox, CommandResult, OnboardingSetup
 from hyperloom_multibranch.specialist.agent_sandbox import LocalAgentSandbox
 from hyperloom_multibranch.specialist.agent_sessions import AgentSandboxes, LocalAgentSandboxes
 from hyperloom_multibranch.specialist.agent_spec import AgentSpec
@@ -708,6 +708,87 @@ async def test_a_new_sandbox_whose_install_failed_is_not_resumed_in_but_leased_a
     await asyncio.wait_for(running, 10)
     await resumed.release()
     assert rig.toolbox.released == ["L1", "L2", "L3"]
+
+
+@dataclass
+class _LeaseSandbox:
+    """The sandbox of one lease over ``of``'s local sandbox: its start raises :class:`SandboxGone` once its lease is
+    in ``of.gone``, and its stops are recorded by lease."""
+
+    of: "_PerLease"
+    lease_id: str
+
+    def watched(self) -> str:
+        return ""
+
+    async def run(self, command: str, cwd: Path, env: Mapping[str, str], timeout: float) -> CommandResult:
+        return await self.of.local.run(command, cwd, env, timeout)
+
+    async def start(self, command: str, cwd: Path, env: Mapping[str, str]) -> LocalProcess:
+        if self.lease_id in self.of.gone:
+            raise SandboxGone(f"the sandbox of {self.lease_id} ended")
+        return await self.of.local.start(command, cwd, env)
+
+    async def stop(self) -> None:
+        self.of.stopped.append(self.lease_id)
+        await self.of.local.stop()
+
+
+@dataclass
+class _PerLease:
+    """A session's sandboxes, one a lease, over one local sandbox."""
+
+    local: LocalSandbox
+    gone: set[str] = field(default_factory=set)
+    stopped: list[str] = field(default_factory=list)
+
+    def sandbox(self, branch: str, place: BranchPlace, source: Path, lease: BranchLease) -> AgentSandbox:
+        return _LeaseSandbox(self, lease.lease_id)
+
+
+async def _crashed_on_a_sandbox_that_ended(tmp_path: Path, install: str) -> tuple[Rig, _PerLease]:
+    """A rig whose agent ran in the sandbox of L1 and crashed, its run stopped, and L1's sandbox then ended."""
+
+    sandboxes = _PerLease(LocalSandbox(tmp_path / "lease-logs"))
+    agent = Agent(exit=3, resume="sleep 30", install=(install,))
+    rig = await _rig(tmp_path, agent, deadline=time.time() + 600, sandboxes=sandboxes)
+    await rig.session.preflight()
+    with pytest.raises(SessionCrashed):
+        await asyncio.wait_for(rig.session.run(), 10)
+    await rig.session.stop()
+    assert sandboxes.stopped == ["L1"]
+    sandboxes.gone.add("L1")
+    return rig, sandboxes
+
+
+async def test_a_held_sandbox_that_ended_at_the_resume_is_stopped_before_the_agent_moves_to_a_new_one(
+    tmp_path: Path,
+) -> None:
+    rig, sandboxes = await _crashed_on_a_sandbox_that_ended(tmp_path, "true installed")
+    resumed = rig.restart()
+    running = asyncio.create_task(resumed.run())
+    await _until(lambda: sandboxes.local.started[-1:] == ["sleep 30"], "the agent resumed")
+
+    assert sandboxes.stopped == ["L1", "L1"], "the ended sandbox is stopped, giving back its holder and scratch"
+    assert rig.toolbox.released == ["L1"] and len(rig.toolbox.leases) == 2
+    await resumed.stop()
+    await asyncio.wait_for(running, 10)
+    assert sandboxes.stopped == ["L1", "L1", "L2"]
+
+
+async def test_a_new_sandbox_whose_install_failed_is_stopped_before_its_lease_is_given_back(tmp_path: Path) -> None:
+    count = tmp_path / "installs"
+    # The second install, the first in the new sandbox, fails.
+    command = f"n=$(cat {count} 2>/dev/null || echo 0); echo $((n + 1)) > {count}; test $n -ne 1"
+    rig, sandboxes = await _crashed_on_a_sandbox_that_ended(tmp_path, command)
+    failed = rig.restart()
+    with pytest.raises(SessionCrashed, match="install in its new sandbox failed"):
+        await asyncio.wait_for(failed.run(), 10)
+
+    assert sandboxes.stopped == ["L1", "L1", "L2"], "the sandbox whose install failed is stopped"
+    assert rig.toolbox.released == ["L1", "L2"]
+    await failed.stop()
+    assert sandboxes.stopped == ["L1", "L1", "L2"], "and the run's stop has no sandbox left to stop again"
 
 
 async def test_a_keep_file_with_no_counter_is_one_keep_at_each_change(tmp_path: Path) -> None:
