@@ -106,7 +106,7 @@ Requirements:
 
 - Ubuntu 24.04 is the recommended host OS for bare-metal setup. vLLM 0.28.0+
   requires Ubuntu 24.04 or newer; on Ubuntu 22.04, downgrade vLLM (for example
-  ``VLLM_VERSION=0.27.1``) or use Docker mode instead.
+  ``VLLM_VERSION=0.27.1 VLLM_ROCM_VARIANT=rocm723``) or use Docker mode instead.
 - ROCm runtime and ROCm torch are already installed. ROCm 7.2.x and ROCm 10.0
   are the validated stacks; on ROCm 10.0, bare-metal vLLM is built from source.
   See {doc}`Compatibility </compatibility>` for the combination the release is
@@ -236,17 +236,21 @@ An exported value still wins. `rocm700` additionally requires Python 3.10 and
 setup fails outright on any other interpreter, because the source install would
 pull a mismatched ROCm 7.2 Triton. Any other ROCm stack derives nothing and takes
 the source install, which is a fallback rather than a validated path.
-`MAGPIE_PATH`, `INFERENCEX_PATH`, and the kernel-agent paths `TRACELENS_ROOT`,
-`GEAK_ROOT` and `GEAK_E2E_RUNNER` follow their pins and reach the runtime
-through the kernel-agent env file, not `.env`. To override a TraceLens or GEAK
-checkout persistently, write its path into `.env` yourself; the installer
-leaves a path outside its cache as written. A `TRACELENS_ROOT` or `GEAK_ROOT`
-override that does not exist is reported and replaced by the pinned checkout,
-and a `MAGPIE_PATH` that holds no Magpie package is reported and resolved from
-the installed package instead. Export `MAGPIE_PATH` or `INFERENCEX_PATH` in the
-shell to override those.
+The kernel-agent paths `TRACELENS_ROOT`, `GEAK_ROOT` and
+`GEAK_E2E_RUNNER` follow their pins and reach the runtime through the
+kernel-agent env file, not `.env`. To override a TraceLens or GEAK checkout
+persistently, write its path into `.env` yourself; the installer leaves a path
+outside its cache as written. A `TRACELENS_ROOT` or `GEAK_ROOT` override that
+does not exist is reported and replaced by the pinned checkout. Nothing clones
+InferenceX into `INFERENCEX_PATH`; an InferenceX checkout of your own exported
+there in the shell reaches the runtime the same way.
+The installer also stages the InferenceX client at the commit
+`src/inference_suite/pins.py` pins, the GSM8K task and the AgentX harness into
+`INFERENCE_SUITE_TOOL_CACHE`, which every benchmark round reads without fetching
+anything; see [Staging and pins](../reference/inference-suite.md#staging-and-pins).
 After a code update that moves a pin, `install.sh --check-only` exits non-zero
-and names each stale key (`TRACELENS_ROOT`, `GEAK_ROOT`, `MAGPIE_REF`), and the
+and names each stale key (`TRACELENS_ROOT`, `GEAK_ROOT`,
+`INFERENCE_SUITE_TOOL_CACHE`), and the
 optimizer's preflight refuses to start on a `TraceLens@<sha>` checkout that is
 not the pinned one; rerun `install.sh` to update them.
 
@@ -448,7 +452,7 @@ It is recommended that you use a ROCm image that already ships the serving
 framework, so nothing needs to be installed inside the container beyond
 Hyperloom's runtime deps. The following images are recommended:
 
-- `vllm`: `docker.io/rocm/vllm:rocm10.0.0_ubuntu24.04_py3.14_pytorch_2.12.0_vllm_0.27.0`
+- `vllm`: `docker.io/vllm/vllm-openai-rocm:v0.33.0-rocm100`
 - `sglang` MI300X: `docker.io/lmsysorg/sglang-rocm:v0.5.23-rocm10-mi30x-20261102`
 - `sglang` MI355X: `docker.io/lmsysorg/sglang-rocm:v0.5.23-rocm10-mi35x-20261102`
 
@@ -456,7 +460,7 @@ Start a long-running container from the repo root, mounting it at the same path
 so `.env`, logs, and session artifacts stay valid:
 
 ```bash
-export HYPERLOOM_IMAGE=docker.io/rocm/vllm:rocm10.0.0_ubuntu24.04_py3.14_pytorch_2.12.0_vllm_0.27.0
+export HYPERLOOM_IMAGE=docker.io/vllm/vllm-openai-rocm:v0.33.0-rocm100
 export REPO_ROOT="$(pwd -P)"
 docker run -d \
   --name "${HYPERLOOM_CONTAINER_NAME:-hyperloom-local}" \

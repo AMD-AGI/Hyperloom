@@ -11,6 +11,10 @@ from pathlib import Path
 import pytest
 
 from hyperloom_common.fs_utils import (
+    append_nofollow,
+    create_nofollow,
+    file_identity,
+    is_private_dir,
     read_bytes_nofollow,
     read_text_nofollow,
     regular_files_nofollow,
@@ -89,12 +93,22 @@ def test_listing_skips_symlinked_entries_and_a_symlinked_directory(tmp_path):
     assert list(regular_files_nofollow(tmp_path / "missing", "patches", (".patch",))) == []
 
 
-def test_the_base_itself_may_be_reached_through_a_link(tmp_path: Path):
+def test_a_link_above_the_base_is_followed_but_a_base_that_is_a_link_is_refused(tmp_path: Path):
     real = tmp_path / "real"
-    real.mkdir()
+    (real / "worktree" / "patches").mkdir(parents=True)
+    (real / "worktree" / "patches" / "a.patch").write_text("a", encoding="utf-8")
     (tmp_path / "alias").symlink_to(real)
-    write_text_nofollow(tmp_path / "alias", ("f",), "x")
-    assert (real / "f").read_text(encoding="utf-8") == "x"
+    write_text_nofollow(tmp_path / "alias" / "worktree", ("f",), "x")
+    assert (real / "worktree" / "f").read_text(encoding="utf-8") == "x"
+
+    # What an agent writing the workspace leaves: its worktree renamed, a link to another directory in its place.
+    swapped = tmp_path / "ws" / "worktree"
+    swapped.parent.mkdir()
+    swapped.symlink_to(real / "worktree")
+    with pytest.raises(OSError):
+        write_text_nofollow(swapped, ("patches", "_worktree_diff.patch"), "diff\n")
+    assert sorted(p.name for p in (real / "worktree" / "patches").iterdir()) == ["a.patch"]
+    assert list(regular_files_nofollow(swapped, "patches", (".patch",))) == []
 
 
 def test_rewriting_lines_never_follows_a_planted_staging_name(tmp_path):
@@ -183,3 +197,51 @@ def test_reading_below_a_base_refuses_a_swapped_directory_or_file(tmp_path):
         read_text_below_nofollow(base, ("d", "f"))
     with pytest.raises(OSError):
         read_text_below_nofollow(base, ("g",))
+
+
+def test_a_private_directory_is_this_accounts_own_not_a_link_and_only_it_can_write_it(tmp_path, monkeypatch):
+    mine = tmp_path / "mine"
+    mine.mkdir(mode=0o700)
+    (tmp_path / "link").symlink_to(mine)
+    (tmp_path / "file").write_text("", encoding="utf-8")
+
+    assert is_private_dir(mine)
+    assert not is_private_dir(tmp_path / "link"), "a link to one is not"
+    assert not is_private_dir(tmp_path / "file")
+    assert not is_private_dir(tmp_path / "missing")
+    for mode, private in ((0o755, True), (0o770, False), (0o707, False)):
+        mine.chmod(mode)
+        assert is_private_dir(mine) is private, oct(mode)
+    uid = os.getuid()
+    monkeypatch.setattr(os, "getuid", lambda: uid + 1)
+    assert not is_private_dir(mine), "another account's"
+
+
+def test_appending_reaches_only_the_file_created_at_the_name(tmp_path: Path):
+    with create_nofollow(tmp_path, ("process.log",)) as created:
+        created.write("from the app\n")
+        identity = file_identity(created)
+    with append_nofollow(tmp_path / "process.log", identity) as log:
+        log.write("from the agent\n")
+    assert (tmp_path / "process.log").read_text(encoding="utf-8") == "from the app\nfrom the agent\n"
+
+
+@pytest.mark.parametrize("planted", ["link", "hard-link", "fifo"])
+def test_appending_refuses_whatever_else_is_put_at_the_name_and_writes_nothing_through_it(tmp_path: Path, planted):
+    victim = tmp_path / "victim.txt"
+    victim.write_text("app's own\n", encoding="utf-8")
+    with create_nofollow(tmp_path, ("process.log",)) as created:
+        identity = file_identity(created)
+    log = tmp_path / "process.log"
+    log.unlink()
+    if planted == "link":
+        log.symlink_to(victim)
+    elif planted == "hard-link":
+        os.link(victim, log)
+    else:
+        os.mkfifo(log)
+
+    with pytest.raises(OSError):
+        append_nofollow(log, identity)
+
+    assert victim.read_text(encoding="utf-8") == "app's own\n"

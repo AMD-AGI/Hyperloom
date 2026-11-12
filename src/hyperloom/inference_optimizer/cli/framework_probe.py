@@ -66,7 +66,7 @@ def _in_container() -> bool:
 def _framework_probe_interpreters(framework: str, benchmark_python: str) -> list[str]:
     """Interpreters that may hold the serving package, deduped in probe order."""
     if framework == "atom":
-        # Magpie launches ATOM with python3 from PATH, not its benchmark client interpreter.
+        # ATOM is launched with python3 from PATH, not the benchmark client interpreter.
         python = shutil.which("python3")
         return [python] if python else []
     candidates: list[str] = []
@@ -275,7 +275,7 @@ def _missing_framework_remedy(framework: str) -> str:
         "     HYPERLOOM_RUN_MODE=docker before setup, which hands image choice\n"
         "     and container startup to the demo skill.\n"
         "\nNote: HYPERLOOM_RUN_MODE selects where Hyperloom itself runs and is\n"
-        "unrelated to Magpie's run_mode=local, which only means: do not start a\n"
+        "unrelated to the benchmark's run_mode=local, which only means: do not start a\n"
         "second container. That stays correct in both cases."
     )
 

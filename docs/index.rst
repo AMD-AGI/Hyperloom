@@ -1,6 +1,6 @@
 .. meta::
   :description: Learn how Hyperloom autonomously optimizes large language model inference on AMD GPUs — from installation and components to API reference and case studies.
-  :keywords: Hyperloom, LLM inference, AMD GPU, optimization, agentic, ROCm, GEMM tuning, kernel optimization, throughput, TraceLens, Magpie, GEAK, IntelliKit, documentation
+  :keywords: Hyperloom, LLM inference, AMD GPU, optimization, agentic, ROCm, GEMM tuning, kernel optimization, throughput, TraceLens, InferenceSuite, GEAK, IntelliKit, documentation
 
 ***********************
 Hyperloom documentation
@@ -25,12 +25,15 @@ The Hyperloom source code is hosted on GitHub at `https://github.com/AMD-AGI/Hyp
 
     * :doc:`Components </components/index>`
     * :doc:`Hyperloom optimization loop </conceptual/optimization-loop>`
+    * :doc:`Arbor in multi-branch, who runs what </conceptual/multibranch-arbor>`
 
   .. grid-item-card:: How to
 
     * :doc:`Run a Hyperloom optimization </how-to/optimize>`
     * :doc:`Optimize your own workload </how-to/optimize-custom-workload>`
     * :doc:`Quantization with AMD Quark </how-to/quantization-quark>`
+    * :doc:`Run hosted multi-branch on a new cluster </how-to/hosted-multibranch-new-cluster>`
+    * :doc:`Review the agent map before the Arbor branches open </how-to/multibranch-review-gate>`
 
   .. grid-item-card:: Reference
 
@@ -38,6 +41,7 @@ The Hyperloom source code is hosted on GitHub at `https://github.com/AMD-AGI/Hyp
     * :doc:`Environment variables </reference/environment-variables>`
     * :doc:`Authentication and credentials </reference/authentication>`
     * :doc:`Kernel optimization execution path </reference/kernel-execution-path>`
+    * :doc:`InferenceSuite benchmark rounds </reference/inference-suite>`
     * :doc:`Operations and self-hosting </reference/operations>`
     * :doc:`Upgrade guide </reference/upgrade>`
     * :doc:`Session output schema </reference/session-breakdown>`

@@ -640,6 +640,7 @@ def test_source_attempt_records_its_pair_gate_and_lifecycle_step(session_dir: Pa
             "output_throughput": 108.0,
             "delta_pct": 8.0,
             "keep_threshold_pct": 3.0,
+            "gates": [{"gate": "keep_threshold", "passed": True, "observed": 8.0, "threshold": 3.0, "reason": ""}],
             "accuracy_pass": True,
             "accuracy_value": 0.83,
             "accuracy_reference": 0.80,
@@ -1288,7 +1289,7 @@ def test_a_patch_review_lands_on_the_candidate_it_judged(session_dir: Path):
     import asyncio
 
     from hyperloom.inference_optimizer.breakdown.recorder.framework_event import ARM_SOURCE, PRODUCER_SPECIALIST
-    from hyperloom.orchestrator.loop.proposals import PendingProposal
+    from hyperloom.orchestrator.state.pending_proposal import PendingProposal
 
     coord = _coordinator(session_dir)
     coord.shared_state.phase = "FRAMEWORK_AGENT"

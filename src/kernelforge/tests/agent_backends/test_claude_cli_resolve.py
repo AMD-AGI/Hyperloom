@@ -366,6 +366,26 @@ def test_claude_probe_rejects_unsupported_model(tmp_path, monkeypatch):
         backend.probe(cwd=str(tmp_path))
 
 
+def test_claude_probe_waits_out_a_gateway_slower_than_a_minute(tmp_path, monkeypatch):
+    backend = object.__new__(ClaudeBackend)
+    backend.runtime = AgentRuntimeConfig(
+        provider="claude",
+        model="claude-opus-5",
+        executable="/usr/bin/claude",
+    )
+    monkeypatch.setattr(backend, "preflight", lambda: None)
+    answers_after_sec = 90
+
+    def slow_gateway(command, **kwargs):
+        if kwargs["timeout"] < answers_after_sec:
+            raise subprocess.TimeoutExpired(command, kwargs["timeout"])
+        return SimpleNamespace(returncode=0, stdout='{"result":"OK"}', stderr="")
+
+    monkeypatch.setattr("kernelforge.agent_backends.claude.subprocess.run", slow_gateway)
+
+    assert backend.probe(cwd=str(tmp_path)).text == "OK"
+
+
 def test_claude_hook_mapping_is_environment_independent():
     """Translate populated and empty hook attributes deterministically."""
     callback = object()

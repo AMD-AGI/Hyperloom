@@ -361,45 +361,29 @@ async def test_resume_consistency_leaves_current_best_alone(coord: Coordinator) 
 
 
 @pytest.mark.asyncio
-async def test_resume_restores_promoted_inferencex_checkout(
+async def test_resume_leaves_the_inferencex_path_of_a_state_that_recorded_an_active_checkout(
     coord: Coordinator,
     monkeypatch: pytest.MonkeyPatch,
     tmp_path,
 ) -> None:
+    """A state written before the switch names an InferenceX tree; the pinned client is inference_suite's, not that."""
+    from hyperloom.orchestrator.state.shared_state import SharedState
+
     active = tmp_path / "active-inferencex"
     (active / "benchmarks").mkdir(parents=True)
     (active / "benchmarks" / "benchmark_lib.sh").write_text("#!/bin/bash\n")
-    coord.writeback._resumed_from["is_resume"] = True
-    coord.shared_state.active_inferencex_path = str(active)
-    # setenv, not delenv: delenv of an absent name arms no undo, so the value the resume pass exports below would leak
-    # into every later test.
-    monkeypatch.setenv("INFERENCEX_PATH", "")
-
-    await coord.writeback._resume_consistency_pass()
-
-    assert os.environ["INFERENCEX_PATH"] == str(active)
-
-
-@pytest.mark.asyncio
-async def test_resume_does_not_export_a_framework_tree_as_the_inferencex_path(
-    coord: Coordinator,
-    monkeypatch: pytest.MonkeyPatch,
-    tmp_path,
-) -> None:
-    """A state written with a framework tree as the InferenceX path must not redirect every later round to it."""
     pinned = tmp_path / "InferenceX@pin"
-    framework = tmp_path / "sglang"
-    framework.mkdir()
+    state = {**coord.shared_state.to_dict(), "active_inferencex_path": str(active)}
+    (coord.session_dir / "state.json").write_text(json.dumps(state), encoding="utf-8")
+    coord.shared_state = SharedState.load_or_init(coord.session_dir)
     coord.writeback._resumed_from["is_resume"] = True
-    coord.shared_state.active_inferencex_path = str(framework)
     monkeypatch.setenv("INFERENCEX_PATH", str(pinned))
 
     report = await coord.writeback._resume_consistency_pass()
 
     assert os.environ["INFERENCEX_PATH"] == str(pinned)
-    assert coord.shared_state.active_inferencex_path == ""
-    assert {"kind": "active_inferencex_checkout_invalid", "path": str(framework)} in report["warnings"]
-    assert coord.shared_state.stop_reason != "active_inferencex_checkout_missing"
+    assert "active_inferencex_path" not in coord.shared_state.to_dict()
+    assert not any(isinstance(w, dict) and "inferencex" in str(w.get("kind")) for w in report["warnings"])
 
 
 def _source_layer_entry(
@@ -1613,6 +1597,53 @@ async def test_resume_consistency_clears_stale_pending_integrate(coord: Coordina
 
 
 @pytest.mark.asyncio
+async def test_resume_requeues_an_integrate_the_lost_environment_stopped(coord: Coordinator, monkeypatch) -> None:
+    params = {"patch_name": "spec-patch", "source_specialist_task_id": "spec-1"}
+    task, _ = await coord.tasks.create_or_return_existing(
+        TaskSpec(
+            kind="integrate_patch",
+            params=params,
+            idempotency_key="approved:integrate_patch:abc",
+            requires_lanes=["benchmark_lane", "server_lifecycle"],
+            lease_ttl_sec=900,
+            dispatch_class="llm",
+        )
+    )
+    await coord.tasks.transition(task.task_id, "running")
+    await coord.tasks.transition(
+        task.task_id,
+        "cancelled",
+        {
+            "reason": "operator_confirmed_stopped",
+            "confirmed_scope_gone": "lost-scope",
+            "cleanup_confirmed": True,
+            "outcome": {"task_id": task.task_id, "state": "cancelled", "result": {}},
+        },
+    )
+    coord.shared_state.pending_integrate = {"task_id": task.task_id, "patches": ["/tmp/p.diff"]}
+    monkeypatch.setattr(
+        coord.writeback,
+        "_resume_rollback_pending_integrate",
+        lambda pending, _gone_scope=None: {"reversed": list(pending["patches"]), "failed": []},
+    )
+    report = {"fixes": [], "warnings": []}
+
+    await coord.writeback._resume_recover_pending_integrate(report)
+
+    queued = await coord.tasks.queued()
+    assert [(t.kind, t.idempotency_key, t.params, t.requires_lanes, t.lease_ttl_sec) for t in queued] == [
+        ("integrate_patch", "approved:integrate_patch:abc-retry1", params, ["benchmark_lane", "server_lifecycle"], 900)
+    ]
+    assert [f["kind"] for f in report["fixes"]] == ["rolled_back_pending_integrate", "requeued_pending_integrate"]
+    assert report["fixes"][1] == {
+        "kind": "requeued_pending_integrate",
+        "task_id": task.task_id,
+        "requeued_task_id": queued[0].task_id,
+    }
+    assert coord.shared_state.pending_integrate == {}
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize(
     ("status", "phase", "replayed"),
     [("kept", "accepted", True), ("reverted", "restored", False)],
@@ -2806,7 +2837,7 @@ async def test_advance_phase_hint_consumed_when_it_drove_the_transition(coord: C
 
 # -- materialize_approved_proposal -----------------------------------------
 def _pending(action_name: str, payload: dict, msg_id: str = "prop-1"):
-    from hyperloom.orchestrator.loop.proposals import PendingProposal
+    from hyperloom.orchestrator.state.pending_proposal import PendingProposal
 
     return PendingProposal(
         proposal_msg_id=msg_id,
@@ -2998,6 +3029,47 @@ async def test_materialize_requeues_same_content_after_terminal_twin(coord: Coor
     assert queued[0].task_id != first.task_id
 
 
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("result", "requeued_key"),
+    [
+        ({"status": "failed", "error_class": "server_launch_failed", "error": "server exited 1"}, "-retry1"),
+        ({"status": "ok", "output_throughput": 100.0, "completed_requests": 8}, None),
+    ],
+    ids=["failed-result", "measured-result"],
+)
+async def test_a_baseline_twin_answers_a_repeat_proposal_only_once_it_measured(
+    coord: Coordinator, result: dict, requeued_key: str | None
+) -> None:
+    """The runner books every returned result ``succeeded``; whether the twin measured is in the result itself."""
+
+    async def _baseline(_ctx):
+        return dict(result)
+
+    coord.sub.register_executor("baseline", _baseline)
+    await coord.proposals.materialize_approved_proposal(_pending("baseline", {"params": {}}, msg_id="prop-s0"))
+    first = [t for t in await coord.tasks.queued() if t.kind == "baseline"][0]
+    lease = await coord.locks.acquire_many(
+        list(first.requires_lanes), holder_id=first.task_id, task_id=first.task_id, action="baseline", ttl_sec=600
+    )
+    await coord.sub.run_task(first, prebound_lease=lease)
+    assert (await coord.tasks.get(first.task_id)).state == "succeeded"
+
+    await coord.proposals.materialize_approved_proposal(_pending("baseline", {"params": {}}, msg_id="prop-s1"))
+
+    live = [t.idempotency_key for t in (*await coord.tasks.queued(), *await coord.tasks.running())]
+    tail = await coord.bus.tail(topic="observation", n=20)
+    skipped = [m.payload for m in tail if m.payload.get("kind") == "proposal_materialize_skipped"]
+    if requeued_key is None:
+        assert live == []
+        assert [(p["reason"], p["proposal_msg_id"], p["task_id"]) for p in skipped] == [
+            ("baseline_already_succeeded", "prop-s1", first.task_id)
+        ]
+    else:
+        assert live == [f"{first.idempotency_key}{requeued_key}"]
+        assert skipped == []
+
+
 # -- handle_delegate branches ----------------------------------------------
 # An explore is admitted on something to measure; these tests are about the other delegate branches,
 # not that grid, so they delegate one admission has no quarrel with.
@@ -3049,10 +3121,8 @@ async def test_handle_delegate_sequence_denied(coord: Coordinator, monkeypatch) 
 
 @pytest.mark.asyncio
 async def test_handle_delegate_duplicate_running_denied(coord: Coordinator, monkeypatch) -> None:
-    coord.shared_state.baseline_tput = 800.0
-    coord.shared_state.phase = "FRAMEWORK_AGENT"
     monkeypatch.setattr(coord.dispatcher, "_sequence_denial_for_action", lambda a: None)
-    await coord.router.handle_delegate("orchestration", _delegate("explore", "d-same"))
+    await coord.router.handle_delegate("orchestration", _delegate("baseline", "d-same", {"runs": 1}))
     recorded: list = []
 
     async def _rec(source, intent, denied, action_name=None):
@@ -3060,7 +3130,7 @@ async def test_handle_delegate_duplicate_running_denied(coord: Coordinator, monk
 
     monkeypatch.setattr(coord.router, "record_policy_denied", _rec)
     # Same key while the first task is still queued (non-terminal) -> denied.
-    await coord.router.handle_delegate("orchestration", _delegate("explore", "d-same"))
+    await coord.router.handle_delegate("orchestration", _delegate("baseline", "d-same", {"runs": 2}))
     assert [d.rule for d in recorded] == ["duplicate_idempotency_key_running"]
 
 
@@ -3092,7 +3162,7 @@ async def test_autosubmit_returns_when_verdict_exists(coord: Coordinator, monkey
 @pytest.mark.asyncio
 async def test_autosubmit_returns_when_review_in_flight(coord: Coordinator) -> None:
     from hyperloom.orchestrator.state.task_registry import Task
-    from hyperloom.orchestrator.loop.proposals import PendingProposal
+    from hyperloom.orchestrator.state.pending_proposal import PendingProposal
 
     sid = "spec-inflight"
     _make_real_patch(coord, sid)
@@ -3289,7 +3359,7 @@ async def test_pump_framework_agent_dedup_does_not_resubmit(coord: Coordinator, 
 async def test_framework_agent_reject_records_critic_denied(coord: Coordinator, monkeypatch) -> None:
     """A reject verdict on a framework_agent candidate proposal writes a critic_denied progress row."""
     monkeypatch.setattr(coord.router, "phase_framework", coord.phase_framework, raising=False)
-    from hyperloom.orchestrator.loop.proposals import PendingProposal
+    from hyperloom.orchestrator.state.pending_proposal import PendingProposal
 
     pending = PendingProposal(
         proposal_msg_id="m1",
@@ -3311,7 +3381,7 @@ async def test_framework_agent_reject_records_critic_denied(coord: Coordinator, 
 @pytest.mark.asyncio
 async def test_framework_agent_approve_routes_to_enqueue(coord: Coordinator, monkeypatch) -> None:
     """An approve verdict routes a ``direct_framework`` candidate to the raw-diff enqueue helper."""
-    from hyperloom.orchestrator.loop.proposals import PendingProposal
+    from hyperloom.orchestrator.state.pending_proposal import PendingProposal
 
     enq: list = []
 

@@ -16,7 +16,9 @@ import time
 from pathlib import Path
 from typing import IO
 
-from hyperloom.common.proctree import signal_group
+from hyperloom.common.env_safety import redact_secret_values
+from hyperloom.common.geak_checkout import resolve_e2e_runner
+from hyperloom_common.proctree import signal_group
 
 _TAIL_CHARS = 4000
 
@@ -28,37 +30,6 @@ def _tail(stream: IO[bytes]) -> str:
     return stream.read().decode("utf-8", "replace")[-_TAIL_CHARS:]
 
 
-def _resolve_runner() -> str:
-    """Resolve run_e2e.py from $GEAK_E2E_RUNNER / $GEAK_ROOT (GEAK@GEAK)."""
-    runner = os.environ.get("GEAK_E2E_RUNNER", "").strip()
-    if runner and Path(runner).is_file():
-        return runner
-    roots: list[str] = []
-    root = os.environ.get("GEAK_ROOT", "").strip()
-    if root:
-        roots.append(root)
-    cache_dir = os.environ.get("HYPERLOOM_CACHE_DIR", "").strip()
-    if cache_dir:
-        # install.sh clones GEAK per revision as <cache>/GEAK@<sha>; prefer the newest such checkout, then the bare
-        # dir.
-        pinned = sorted(
-            (p for p in Path(cache_dir).glob("GEAK@*") if p.is_dir()),
-            key=lambda p: p.stat().st_mtime if p.exists() else 0.0,
-            reverse=True,
-        )
-        roots.extend(str(p) for p in pinned)
-        roots.append(str(Path(cache_dir) / "GEAK"))
-    for root in dict.fromkeys(roots):
-        cand = Path(root) / "interface" / "run_e2e.py"
-        if cand.is_file():
-            return str(cand)
-    raise FileNotFoundError(
-        "e2e runner not found. Set GEAK_E2E_RUNNER to "
-        "<GEAK checkout>/interface/run_e2e.py (the installer exports it), "
-        "or set GEAK_ROOT/HYPERLOOM_CACHE_DIR."
-    )
-
-
 def call_geak(handoff: dict, output_dir: Path, *, timeout_s: int) -> dict:
     """Run GEAK e2e once and return the parsed result.json (+ run metadata)."""
     output_dir = Path(output_dir)
@@ -67,7 +38,7 @@ def call_geak(handoff: dict, output_dir: Path, *, timeout_s: int) -> dict:
     result_path = output_dir / "result.json"
     handoff_path.write_text(json.dumps(handoff, indent=2), encoding="utf-8")
 
-    runner = _resolve_runner()
+    runner = resolve_e2e_runner()
     cmd = [sys.executable, runner, str(handoff_path), str(result_path)]
 
     env = dict(os.environ)
@@ -145,7 +116,13 @@ def main(argv: list[str]) -> int:
             }
         )
     )
-    return 0 if out.get("status") not in ("error", None) else 1
+    if out.get("status") not in ("error", "timeout", None):
+        return 0
+    # The caller logs only the tail of this stream, so the error goes last. Both fields can carry subprocess stderr.
+    for text in (out.get("stderr_tail"), out.get("error")):
+        if text:
+            print(redact_secret_values(str(text).rstrip()), file=sys.stderr)
+    return 1
 
 
 if __name__ == "__main__":

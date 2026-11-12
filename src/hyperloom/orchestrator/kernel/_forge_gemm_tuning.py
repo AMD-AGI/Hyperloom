@@ -217,7 +217,7 @@ async def _forge_shape_sources(state: Any, run: _ForgeGemmRun) -> _ForgeShapeSou
         if tokens:
             log.info("GEMM: derived --tokens=%s from observed M in %s", tokens, run.server_log)
 
-    moe_untuned_csv, moe_key_report = _write_fmoe_untuned_csv_from_log(run.server_log, tokens, run.workspace)
+    moe_untuned_csv, moe_key_report = _write_fmoe_untuned_csv_from_log(run.server_log, run.workspace)
 
     shapes_json, untuned_csv = "", ""
     if run.framework != "vllm":

@@ -31,8 +31,8 @@ from hyperloom.common.outside_facts import (
 MISSING_MODEL_ARCH = "missing_model_arch"
 UNSUPPORTED_DTYPE = "unsupported_dtype"
 HIP_KERNEL_MISSING = "hip_kernel_missing"
-# A HIP call that failed while the program ran: a kernel faulted on an out-of-bounds address, a graph capture was
-# invalidated, a launch failed. The kernel was there and ran, so there is nothing to build; the line the log prints names
+# A HIP or HSA call that failed while the program ran: a kernel faulted on an out-of-bounds address (the ROCr queue abort
+# with an ``HSA_STATUS_ERROR_*`` status), a graph capture was invalidated, a launch failed. The kernel was there and ran, so there is nothing to build; the line the log prints names
 # the fault. Distinct from HIP_KERNEL_MISSING, whose evidence is a binary or a symbol that is absent.
 HIP_RUNTIME_ERROR = "hip_runtime_error"
 IMPORT_ERROR = "import_error"
@@ -192,7 +192,6 @@ _RULES: tuple[_Rule, ...] = (
             re.compile(HIP_NO_KERNEL_IMAGE),
             re.compile(HIP_NO_BINARY_FOR_GPU),
             re.compile(HIP_UNDEFINED_SYMBOL + r":\s*([A-Za-z0-9_:]+)"),
-            re.compile(HSA_STATUS_ERROR + r"[A-Za-z_]*"),
         ),
         confidence=0.85,
         symbol_from=_grp,
@@ -200,10 +199,15 @@ _RULES: tuple[_Rule, ...] = (
     _Rule(
         # Every other ``hipError`` token (hipErrorIllegalAddress, hipErrorStreamCaptureInvalidated, ...) reports a call
         # that failed, not a kernel that is absent. It shares the ``rocm_hip`` bridge layer with ``hip_kernel_missing``,
-        # so the ladder and the enablement rung route both alike.
+        # so the ladder and the enablement rung route both alike. A failed HSA call is the same: the ROCr runtime's queue
+        # abort (``Callback: Queue 0x... aborting with error : HSA_STATUS_ERROR_MEMORY_APERTURE_VIOLATION``) is a GPU
+        # fault while a kernel ran, so the kernel was there.
         kind=HIP_RUNTIME_ERROR,
         bridge_layer="rocm_hip",
-        patterns=(re.compile(HIP_ERROR_PREFIX + r"[A-Za-z]*"),),
+        patterns=(
+            re.compile(HIP_ERROR_PREFIX + r"[A-Za-z]*"),
+            re.compile(r"(" + HSA_STATUS_ERROR + r"[A-Z_]*)"),
+        ),
         confidence=0.85,
         symbol_from=_grp,
     ),
@@ -411,6 +415,28 @@ def classify_failure(log_text: str) -> FailureSignature:
     )
 
 
+# --- Refused command line --------------------------------------------------
+
+#: ``<prog>: error: <message>``, the one shape argparse prints a refused command line in, with the messages argparse
+#: itself defines (``argparse.py``).
+_ARGPARSE_REFUSAL = re.compile(
+    r": error: (?:ambiguous option|" + ARGPARSE_UNRECOGNIZED_ARGUMENTS_RE + r"|the following arguments are required"
+    r"|argument \S+:|expected (?:one|at most one|at least one|\d+) arguments?|"
+    + ARGPARSE_INVALID_CHOICE
+    + r"|invalid \w+ value|ignored explicit argument|one of the arguments)"
+)
+#: A compiler's ``file.c:3:1: error: ...`` shares the ``: error:`` with argparse and names a source location first.
+_COMPILER_DIAGNOSTIC = re.compile(r":\d+(?::\d+)?: error:")
+
+
+def argparse_refusal(text: str) -> str | None:
+    """The last line in which a server's argument parser refused its own command line (an ambiguous or unknown flag)."""
+    for line in reversed(text.splitlines()):
+        if _ARGPARSE_REFUSAL.search(line) and not _COMPILER_DIAGNOSTIC.search(line):
+            return line.strip()
+    return None
+
+
 # --- Request model ---------------------------------------------------------
 
 
@@ -469,6 +495,31 @@ def is_targeted_build_candidate(
     return False
 
 
+#: The exception a failed import raised, ``ImportError: message`` or ``ModuleNotFoundError: message`` after an optional
+#: log prefix. A server that skips a model whose imports fail logs ``Ignore import error when loading <module>: ...``
+#: and carries on; that line is not an exception and does not match.
+IMPORT_FAILURE_LINE = re.compile(
+    r"(?<![\w.])(?:[A-Za-z_]\w*\.)*(?:" + PY_IMPORT_ERROR + "|" + PY_MODULE_NOT_FOUND_ERROR + r"):\s*\S"
+)
+#: What inference_suite's framework probe says when the serving interpreter finds no package of the framework at all
+#: (``framework_probe.probe_install``). The probe says it as the whole detail, so it is taken only at the end of the
+#: detail, never from a line inside it.
+_PROBE_CANNOT_IMPORT = re.compile(r"\scannot import [A-Za-z_][\w.]*\s*\Z")
+
+
+def framework_unimportable_line(detail: str) -> str | None:
+    """What a failed framework probe's ``detail`` says of an import of the framework that cannot succeed: the probe's
+    own ``cannot import <package>`` answer, else the last ``ImportError``/``ModuleNotFoundError`` line; ``None`` when
+    the probe failed otherwise (it ran too long, could not start, or read no version), which says nothing of the
+    install."""
+    if _PROBE_CANNOT_IMPORT.search(detail):
+        return detail.strip()
+    for line in reversed(detail.splitlines()):
+        if IMPORT_FAILURE_LINE.search(line):
+            return line
+    return None
+
+
 __all__ = [
     "ACCURACY_BELOW_FLOOR",
     "CAPABILITY_DISABLED",
@@ -477,6 +528,7 @@ __all__ = [
     "HIP_KERNEL_MISSING",
     "HIP_RUNTIME_ERROR",
     "IMPORT_ERROR",
+    "IMPORT_FAILURE_LINE",
     "MISSING_MODEL_ARCH",
     "MISSING_WEIGHT",
     "NOT_IMPLEMENTED",
@@ -488,7 +540,9 @@ __all__ = [
     "UNKNOWN",
     "UNSUPPORTED_DTYPE",
     "FailureSignature",
+    "argparse_refusal",
     "classify_failure",
+    "framework_unimportable_line",
     "is_targeted_build_candidate",
     "runnable_decision",
 ]

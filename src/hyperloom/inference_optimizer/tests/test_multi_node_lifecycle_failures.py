@@ -271,22 +271,6 @@ def test_pd_engine_profile_stops_every_role_without_waiting_on_another(monkeypat
     assert order == ["decode", "prefill-after-decode"]
 
 
-def test_multi_node_round_skips_the_local_server_argv_preflight(monkeypatch: pytest.MonkeyPatch) -> None:
-    """The remote engine parses the argv, so the sandbox's framework never judges it."""
-    from types import SimpleNamespace
-
-    from hyperloom.orchestrator.actions.executors import _multi_node_env, magpie_agentx
-    from hyperloom.orchestrator.actions.executors.benchmark_run.launch import _BenchmarkLaunchMixin
-
-    def _must_not_run(_path: object) -> bool:
-        raise AssertionError("local argv preflight ran for a multi-node round")
-
-    monkeypatch.setattr(_multi_node_env, "is_multi_node", lambda: True)
-    monkeypatch.setattr(magpie_agentx, "native_config", _must_not_run)
-    round_ = SimpleNamespace(config_path="/nonexistent.yaml")
-    assert _BenchmarkLaunchMixin._preflight_server_argv(SimpleNamespace(), round_, 0) is None
-
-
 def test_shared_server_log_dir_defaults_to_user_data_server_logs(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.delenv("HYPERLOOM_MN_SERVER_LOG_DIR", raising=False)
     monkeypatch.setenv("USER_DATA_PATH", "/shared/hl")
@@ -471,3 +455,7 @@ def test_pd_role_traces_take_the_first_gpu_of_each_node(monkeypatch: pytest.Monk
         "decode": [str(root / "decode" / "5-TP-0.trace.json.gz"), str(root / "decode" / "5-TP-8.trace.json.gz")],
     }
     assert life.select_pd_role_traces(str(root), since) == {role: paths[0] for role, paths in by_node.items()}
+
+
+def test_the_multi_node_sglang_defaults_keep_the_prefix_cache_on() -> None:
+    assert "--disable-radix-cache" not in life._merge_sglang_defaults("--chunked-prefill-size 8192")

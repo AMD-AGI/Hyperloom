@@ -7,43 +7,32 @@ from __future__ import annotations
 
 import logging
 import sqlite3
+from pathlib import Path
 from typing import Any, Mapping
 
 from hyperloom_common.coerce import optional_positive_float, to_float
 from hyperloom_common.env import is_truthy
-from hyperloom.common.perf_metric import constraint_fields, stamp_output_per_gpu
+from hyperloom.common.benchmark_config import BenchmarkPointError, read_benchmark_point
+from hyperloom.common.gain_math import accuracy_meets_floor
+from hyperloom.common.perf_metric import constraint_fields, graded_axes_of, stamp_output_per_gpu
 from hyperloom.inference_optimizer.breakdown.recorder import enablement_event
 from hyperloom.inference_optimizer.framework_registry import server_args_env_name
 from hyperloom.inference_optimizer.session.optimization_journal import Verdict
 import yaml
 
 from ..actions.executors._accuracy_gate import (
-    BASELINE_EVAL_CONTRACT_FINGERPRINT_KEY,
+    ACCURACY_DEFINITION_DIGEST_KEY,
     BASELINE_EVAL_EVIDENCE_KEY,
     BASELINE_EVAL_FAILURE_KIND_KEY,
     BASELINE_EVAL_OBSERVED_ACCURACY_KEY,
     ENABLEMENT_REVALIDATION_REASON,
     EVAL_KIND_ACCURACY_UNAVAILABLE,
-    accuracy_meets_floor,
 )
 from ..state.round_store import FAILED
 from ._promote_outcome import _PromoteOutcome
 from ..state.task_registry import Task
 
 log = logging.getLogger(__name__)
-
-
-def _baseline_perf_axes(snapshot: Mapping[str, Any] | None) -> dict[str, Any]:
-    if not snapshot:
-        return {}
-    axes: dict[str, Any] = {
-        "total_throughput": snapshot["total_throughput"],
-        "e2e_norm_intvty_p90": snapshot["e2e_norm_intvty_p90"],
-    }
-    for name in ("input_throughput", "tpot_p90_ms", "e2e_norm_intvty_p50", "duration_seconds", "request_error_rate"):
-        if snapshot.get(name) is not None:
-            axes[name] = snapshot[name]
-    return axes
 
 
 # task.params fields fingerprinted by the self-loop guard.
@@ -72,22 +61,18 @@ _WORKLOAD_ARG_COUNTS: dict[str, str] = {
 
 
 def _parse_baseline_workload_extra(yaml_path: str) -> dict[str, Any]:
-    """Extract KB workload-tag fields from a baseline-materialized Magpie YAML."""
+    """Extract KB workload-tag fields from a baseline-materialized point YAML."""
     try:
-        with open(yaml_path, "r", encoding="utf-8") as f:
-            cfg = yaml.safe_load(f) or {}
-    except (OSError, yaml.YAMLError):
+        point = read_benchmark_point(Path(yaml_path))
+    except (OSError, BenchmarkPointError, yaml.YAMLError):
         return {}
-    out: dict[str, Any] = {}
-    bm = cfg.get("benchmark") if isinstance(cfg, dict) else None
-    if not isinstance(bm, dict):
-        return out
-    for key in ("workload_mode", "quant_scheme"):
-        value = bm.get(key)
-        if value not in (None, "", 0):
-            out[key] = value
-    envs = bm.get("envs") if isinstance(bm.get("envs"), dict) else {}
-    declared = envs.get(server_args_env_name(bm.get("framework")))
+    out: dict[str, Any] = {
+        key: value
+        for key, value in (("workload_mode", point.workload_mode), ("quant_scheme", point.quant_scheme))
+        if value
+    }
+    envs = point.envs
+    declared = envs.get(server_args_env_name(point.framework))
     tokens = declared.split() if isinstance(declared, str) else []
     for index, token in enumerate(tokens):
         out.update(_WORKLOAD_ARG_FLAGS.get(token, {}))
@@ -120,9 +105,7 @@ def _adopt_eval_trigger(state: Any, result_payload: Mapping[str, Any]) -> None:
     cfg = result_payload.get("materialized_config")
     if isinstance(cfg, str) and cfg:
         enablement.probe_config_path = cfg
-    fingerprint = result_payload.get(BASELINE_EVAL_CONTRACT_FINGERPRINT_KEY)
-    if isinstance(fingerprint, str) and fingerprint:
-        enablement.eval_contract_fingerprint = fingerprint
+    enablement.eval_definition_digest = str(result_payload.get(ACCURACY_DEFINITION_DIGEST_KEY) or "")
     incoming_kind = result_payload.get(BASELINE_EVAL_FAILURE_KIND_KEY)
     if isinstance(incoming_kind, str) and incoming_kind:
         enablement.baseline_eval_kind = incoming_kind
@@ -382,6 +365,7 @@ class BaselinePromotionMixin:
         accuracy = result.get("accuracy")
         if isinstance(accuracy, (int, float)):
             state.baseline_accuracy = float(accuracy)
+            state.baseline_accuracy_definition_digest = str(result.get(ACCURACY_DEFINITION_DIGEST_KEY) or "")
         # Persist the materialized YAML so downstream tasks reuse the exact workload contract.
         materialized = result.get("materialized_config")
         if isinstance(materialized, str) and materialized:
@@ -390,6 +374,9 @@ class BaselinePromotionMixin:
             parsed = _parse_baseline_workload_extra(materialized)
             if parsed:
                 state.baseline_workload_extra = parsed
+        corpus_shape = result.get("agentx_corpus_shape")
+        if corpus_shape:
+            state.agentx_corpus_shape = dict(corpus_shape)
         # ExploreExecutor derives the overtime kill deadline from this wall-clock.
         runtime_sec = result.get("subprocess_runtime_sec")
         if isinstance(runtime_sec, (int, float)) and runtime_sec > 0:
@@ -435,7 +422,7 @@ class BaselinePromotionMixin:
             "request_error_rate": result.get("request_error_rate"),
             "output_tput_per_gpu": result.get("output_tput_per_gpu"),
             "workspace": result.get("workspace"),
-            **_baseline_perf_axes(self.shared_state.baseline_perf),
+            **graded_axes_of(self.shared_state.baseline_perf),
         }
         self.shared_state.current_best = current_best
         # Reads the current_best just assigned, so it has to follow it.

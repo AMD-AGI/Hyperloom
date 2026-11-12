@@ -341,7 +341,6 @@ def _session(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     session.mkdir()
     monkeypatch.setenv("INFERENCE_OPTIMIZER_CURRENT_SESSION_DIR", str(session))
     monkeypatch.setenv("BENCHMARK_BASE_URL", "")  # restored by monkeypatch; the launch sets it
-    monkeypatch.setenv("MAGPIE_RUN_PHASE", "")
 
 
 def test_the_files_backend_is_the_launch_backend_when_no_flag_or_variable_says_otherwise(

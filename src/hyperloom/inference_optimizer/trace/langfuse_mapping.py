@@ -11,9 +11,10 @@ from collections.abc import Mapping
 from datetime import datetime, timedelta, timezone
 from typing import Any
 
+from hyperloom_common.credential_names import SENSITIVE_ENV_NAME_MARKERS
+
 from hyperloom.common.env_safety import (
     BENCHMARK_SECRET_ENV_NAMES,
-    SENSITIVE_ENV_NAME_MARKERS,
     is_secret_shaped_env_name,
     redact_secret_env_values,
     redact_secret_values,

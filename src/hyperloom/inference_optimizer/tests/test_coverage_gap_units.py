@@ -130,13 +130,16 @@ def test_server_lifecycle_remaining_resolution_branches(tmp_path: Path, monkeypa
     import yaml
 
     from hyperloom.orchestrator.actions.executors import _server_lifecycle as sl
-    from hyperloom.orchestrator.actions.executors import benchmark_backend as bb
-
-    monkeypatch.delenv(bb.BENCHMARK_BACKEND_ENV, raising=False)
 
     bad_yaml = tmp_path / "bad.yaml"
     bad_yaml.write_text("benchmark: [", encoding="utf-8")
     info = sl.resolve_lifecycle_params(bad_yaml)
+    assert info["eligible"] is False
+    assert "could not read" in info["reason"]
+
+    no_block = tmp_path / "no-block.yaml"
+    no_block.write_text(yaml.safe_dump({"other": {}}), encoding="utf-8")
+    info = sl.resolve_lifecycle_params(no_block)
     assert info["eligible"] is False
     assert "could not read" in info["reason"]
 

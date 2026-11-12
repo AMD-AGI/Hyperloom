@@ -5,7 +5,7 @@
 
 The sandbox contract suite covers the provider's normal behaviour against a stand-in service; this file covers what a
 stand-in cannot honestly produce: a particular status code, a server error that clears on the third try, a data plane
-that refuses with 403 or cannot be reached. The contract suite and the stand-in arrive in a later PR.
+that refuses with 403 or cannot be reached.
 """
 
 from __future__ import annotations
@@ -211,6 +211,26 @@ CREATE_FAILED_BODY = {"code": 500, "reason": "sandbox_create_failed", "message":
 #: SDK's message of joint run 4, word for word, in the same E2B error body).
 KEY_SPENT_MESSAGE = "idempotency_key_spent: sbx-00000000000000000000000000000000"
 KEY_SPENT_BODY = {"code": 410, "reason": "idempotency_key_spent", "message": KEY_SPENT_MESSAGE}
+#: Its answer to a create whose sandbox did not run within its pending limit (board sandbox-layering #2, c6505): a 503,
+#: the reason code first and the SaFE error after it.
+PENDING_TIMEOUT_MESSAGE = (
+    "pending_timeout: not running after 10m0s: workload sbx-00000000000000000000000000000000 phase Pending:"
+    " 0/16 nodes are available: 16 Insufficient amd.com/gpu"
+)
+#: Its answer to any other failed create: a 500, ``sandbox_create_failed`` and the SaFE error.
+SAFE_CREATE_FAILED_MESSAGE = "sandbox_create_failed: admission webhook denied the workload: image not allowed"
+
+
+def key_spent_message(reason: str | None) -> str:
+    """The 410 message for a replay of a key whose sandbox has ended: since c6505 the service names, after the id, the
+    reason it stored for that sandbox's end, and gives the id alone when it stored none."""
+    return KEY_SPENT_MESSAGE if reason is None else f"{KEY_SPENT_MESSAGE}: {reason}"
+
+
+def key_spent_body(reason: str | None) -> dict[str, Any]:
+    return {"code": 410, "reason": "idempotency_key_spent", "message": key_spent_message(reason)}
+
+
 #: How a gateway cuts a create that is still pending: its 180 s limit, or the service's context cancelled under it.
 GATEWAY_CUTS = [
     (504, {"code": 504, "message": "context canceled"}),
@@ -224,8 +244,12 @@ def _keys_sent(service: _Service) -> list[str]:
 
 @pytest.mark.parametrize(
     "body",
-    [CREATE_FAILED_BODY, {"code": 500, "message": "workload sbx-1 phase Failed"}],
-    ids=["sandbox_create_failed", "phase_failed"],
+    [
+        CREATE_FAILED_BODY,
+        {"code": 500, "message": "workload sbx-1 phase Failed"},
+        {"code": 500, "reason": "sandbox_create_failed", "message": SAFE_CREATE_FAILED_MESSAGE},
+    ],
+    ids=["sandbox_create_failed", "phase_failed", "safe_error"],
 )
 def test_a_create_whose_sandbox_failed_is_final_and_not_replayed(
     service: _Service, provider: E2BSandboxProvider, body: dict[str, Any]
@@ -263,6 +287,31 @@ def test_a_replay_after_a_cut_that_finds_the_sandbox_failed_stops_there(
     assert _keys_sent(service) == ["k-1", "k-1"]
 
 
+@pytest.mark.parametrize(
+    ("reason", "expected"),
+    [
+        (PENDING_TIMEOUT_MESSAGE, SandboxUnavailable),
+        (SAFE_CREATE_FAILED_MESSAGE, SandboxCreateFailed),
+        (CREATE_FAILED_MESSAGE, SandboxCreateFailed),
+        ("killed", SandboxCreateFailed),
+        (None, SandboxCreateFailed),
+    ],
+    ids=["pending_timeout", "sandbox_create_failed", "phase_failed", "killed", "id_only"],
+)
+def test_a_replay_told_its_key_is_spent_ends_as_the_stored_reason_says(
+    service: _Service, provider: E2BSandboxProvider, reason: str | None, expected: type[Exception]
+) -> None:
+    """The gateway cut the first send while its sandbox was pending, and that sandbox has ended since: the replay's 410
+    names how. A pending timeout is the 503 the cut hid, so the create is unavailable (no capacity in time), not failed;
+    a create failure is the 500 it hid; a kill, or no stored reason, leaves this create no sandbox under its key either."""
+    service.reply("POST", "/v2/sandboxes", GATEWAY_CUTS[0], (410, key_spent_body(reason)), (201, SANDBOX))
+    with pytest.raises(expected) as ended:
+        _create(provider, metadata={IDEMPOTENCY_KEY: "k-1"})
+    assert type(ended.value) is expected, "a pending timeout is no quota refusal, and a failure is not gone"
+    assert f"410: {key_spent_message(reason)}" in str(ended.value), "the service's words, its stored reason with them"
+    assert _keys_sent(service) == ["k-1", "k-1"], "the spent key is not replayed again, nor replaced"
+
+
 def test_a_key_spent_before_the_first_send_is_gone_for_the_caller_to_replace(
     service: _Service, provider: E2BSandboxProvider
 ) -> None:
@@ -270,6 +319,37 @@ def test_a_key_spent_before_the_first_send_is_gone_for_the_caller_to_replace(
     with pytest.raises(SandboxGone) as gone:
         _create(provider, metadata={IDEMPOTENCY_KEY: "k-1"})
     assert type(gone.value) is SandboxGone, "an earlier process spent the key; this create made nothing"
+    assert _keys_sent(service) == ["k-1"]
+
+
+@pytest.mark.parametrize(
+    "reason",
+    [SAFE_CREATE_FAILED_MESSAGE, CREATE_FAILED_MESSAGE, PENDING_TIMEOUT_MESSAGE, "killed"],
+    ids=["sandbox_create_failed", "phase_failed", "pending_timeout", "killed"],
+)
+def test_a_key_spent_before_the_first_send_is_gone_whatever_ended_its_sandbox(
+    service: _Service, provider: E2BSandboxProvider, reason: str
+) -> None:
+    """The spent key's code is read before the words of its stored reason: a ``sandbox_create_failed`` or ``phase
+    Failed`` there is how an earlier process's sandbox ended, not a failure of this create, which made nothing."""
+    service.reply("POST", "/v2/sandboxes", (410, key_spent_body(reason)), (201, SANDBOX))
+    with pytest.raises(SandboxGone) as gone:
+        _create(provider, metadata={IDEMPOTENCY_KEY: "k-1"})
+    assert type(gone.value) is SandboxGone, "the caller replaces a spent key; it does not end the attempt"
+    assert reason in str(gone.value)
+    assert _keys_sent(service) == ["k-1"]
+
+
+def test_a_pending_timeout_is_unavailable_and_its_key_is_not_replayed(
+    service: _Service, provider: E2BSandboxProvider
+) -> None:
+    """A 503 is not among the statuses a keyed create is replayed after, so the sandbox the next answer would give is
+    never asked for: the request count is the proof."""
+    service.reply("POST", "/v2/sandboxes", (503, {"code": 503, "message": PENDING_TIMEOUT_MESSAGE}), (201, SANDBOX))
+    with pytest.raises(SandboxUnavailable) as refused:
+        _create(provider, metadata={IDEMPOTENCY_KEY: "k-1"})
+    assert type(refused.value) is SandboxUnavailable
+    assert PENDING_TIMEOUT_MESSAGE in str(refused.value), "the SaFE error is kept"
     assert _keys_sent(service) == ["k-1"]
 
 

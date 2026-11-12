@@ -115,6 +115,17 @@ class TestTheCandidateBecomesARow:
             "err2,us,run_1stage,xbf16,flat,tflops,bw"
         )
 
+    def test_a_verified_winner_is_deployed_as_the_row_it_was_dispatched_through(self, monkeypatch, tmp_path):
+        from kernelforge.workflows.gemm_tune.tier3.referee import Judgement, PairedTiming
+
+        adapter = self._adapter(monkeypatch)
+        won = Judgement(shape=_SHAPE, best=_CAND, best_timing=PairedTiming(10.0, 5.0, 2.0))
+        lost = Judgement(shape=_SHAPE, best=_CAND, best_timing=PairedTiming(10.0, 10.0, 1.0))
+        dispatched, _, _ = adapter._candidate_csv(_SHAPE, _CAND)
+        deployed = tmp_path / MOE_TABLE
+        assert adapter.write_table([won, lost], [], deployed) == 1
+        assert deployed.read_text(encoding="utf-8") == dispatched.read_text(encoding="utf-8")
+
     def test_the_baseline_table_is_empty_not_absent(self, monkeypatch):
         # Unsetting AITER_CONFIG_FMOE would let aiter fall back to whatever
         # tuned file is installed -- on a fleet box, one we deployed. Timing a
@@ -291,6 +302,56 @@ class TestReadingBackWhatAiterServed:
         before = (aiter_log.level, list(aiter_log.handlers))
         adapter._resolved_kernels(self._emitting("nothing to see"))
         assert (aiter_log.level, list(aiter_log.handlers)) == before
+
+
+class TestOperandsFollowTheKeysActivation:
+    """The per_1x32 fp4 MoE path is served at Silu as well as SwiGLU, and is re-timed at the key's own."""
+
+    @staticmethod
+    def _aiter_with_a_recording_tuner(monkeypatch, tmp_path) -> list[object]:
+        import enum
+
+        seen: list[object] = []
+        aiter = ModuleType("aiter")
+        aiter.__file__ = str(tmp_path / "aiter" / "__init__.py")
+        aiter.ActivationType = enum.Enum("ActivationType", ["Silu", "Swiglu"])
+        aiter.QuantType = enum.Enum("QuantType", ["per_1x32"])
+        tuner = ModuleType("gemm_moe_tune")
+
+        class FmoeTuner:
+            @staticmethod
+            def generate_data_2stages(*args):
+                seen.append(args[5])
+                return {}
+
+        tuner.FmoeTuner = FmoeTuner
+        codegen = tmp_path / "csrc" / "ck_gemm_moe_2stages_codegen"
+        codegen.mkdir(parents=True)
+        (codegen / "gemm_moe_tune.py").write_text("", encoding="utf-8")
+        monkeypatch.setitem(sys.modules, "aiter", aiter)
+        monkeypatch.setitem(sys.modules, "gemm_moe_tune", tuner)
+        fake_torch = SimpleNamespace(bfloat16="bf16", float4_e2m1fn_x2="fp4x2")
+        monkeypatch.setattr(dp._FusedMoeAdapter, "_torch", staticmethod(lambda: fake_torch))
+        return seen
+
+    @pytest.mark.parametrize("activation", ["Silu", "Swiglu"])
+    def test_operands_are_built_at_the_keys_activation(self, monkeypatch, tmp_path, activation):
+        seen = self._aiter_with_a_recording_tuner(monkeypatch, tmp_path)
+        shape = "|".join(f"{k}={v}" for k, v in {**_KEY, "act_type": f"ActivationType.{activation}"}.items())
+
+        with dp._FusedMoeAdapter() as adapter:
+            assert adapter._ops(shape) is not None
+
+        assert [member.name for member in seen] == [activation]
+
+    def test_a_key_off_the_mxfp4_path_still_has_no_operands(self, monkeypatch, tmp_path):
+        seen = self._aiter_with_a_recording_tuner(monkeypatch, tmp_path)
+        shape = "|".join(f"{k}={v}" for k, v in {**_KEY, "q_type": "QuantType.per_Token"}.items())
+
+        with dp._FusedMoeAdapter() as adapter:
+            assert adapter._ops(shape) is None
+
+        assert seen == []
 
 
 class TestTheAttemptPutsTheProcessBack:

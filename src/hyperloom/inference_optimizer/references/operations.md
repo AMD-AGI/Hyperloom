@@ -8,7 +8,7 @@ optimizer session. Keep `$USER_DATA_PATH` as the workspace root and learn
 
 Credentials must already be in the shell environment: `OPENAI_API_KEY` and
 `OPENAI_BASE_URL`. Optional source-root overrides are local only:
-`INFERENCEX_PATH`, `TRACELENS_ROOT`, `TRACELENS_INTERNAL_ROOT`.
+`TRACELENS_ROOT`, `TRACELENS_INTERNAL_ROOT`.
 
 ```bash
 set -e
@@ -25,7 +25,7 @@ bash "$INSTALL_SH"
 
 `install.sh` is the only full install entrypoint. CLI preflight reads the generated
 `kernel-agent.env.sh` in-process; do not source it in the launch shell or derive
-auth aliases, GEAK paths, or InferenceX paths by hand. `runtime_env.sh` only fills
+auth aliases or GEAK paths by hand. `runtime_env.sh` only fills
 missing or empty shell values from workspace `.env`, without executing its contents.
 In Docker mode, it excludes dotenv-provided Python/venv pins but preserves explicit
 shell selections. Do not manually repair `$USER_DATA_PATH/runtime/` or
@@ -224,7 +224,7 @@ resume the optimizer.
 chooses a session for you. Take `$SESSION_DIR` from the launch-info JSON or
 the `HYPERLOOM_LAUNCH` line, never from the newest timestamp dir under
 `$USER_DATA_PATH/<model>/`. Keep `$USER_DATA_PATH` at the workspace root
-so `runtime/kernel-agent.env.sh` resolves. The named session must contain
+so the `kernel-agent.env.sh` install.sh wrote in this container resolves. The named session must contain
 `manifest.json` and `state.json`.
 
 Reuse the launch template with these diffs: drop `--model`, add

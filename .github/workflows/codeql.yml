@@ -53,4 +53,6 @@ jobs:
         with:
           languages: python
           queries: security-and-quality
+          # What a run analyses: the vendored Arbor tree is left out (codeql-config.yml says why).
+          config-file: ./.github/codeql/codeql-config.yml
       - uses: github/codeql-action/analyze@v4

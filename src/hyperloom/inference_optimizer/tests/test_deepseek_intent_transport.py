@@ -257,16 +257,17 @@ def test_an_intent_without_a_payload_key_names_the_keys_it_carried() -> None:
         decode_intent_envelope(envelope)
 
 
-async def test_a_changed_system_prompt_reopens_the_conversation(
+async def test_a_changed_system_prompt_reaches_the_next_round(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """A running conversation cannot be told about a new set of instructions."""
+    """Instructions ride a conversation's first message, and every round opens a new conversation."""
     captured = _stub_turn(monkeypatch, DeepSeekSessionResult(text=_reply("send_message", {"topic": "heartbeat"})))
     backend = _backend(tmp_path)
     await backend.run("status?", system_prompt="You are the Coordinator.")
-    assert captured["resets"] == 0
+    assert "You are the Coordinator." in captured["instructions"]
     await backend.run("status?", system_prompt="You are the Critic.")
+    assert "You are the Critic." in captured["instructions"]
     assert captured["resets"] == 1
 
 
@@ -368,6 +369,26 @@ async def test_an_effort_the_harness_lacks_is_rounded_up_to_one_it_has(
     assert captured["reasoning_effort"] == "high"
 
 
+async def test_the_runtime_compacts_at_a_quarter_of_the_model_window(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The harness compacts at 80% of a DeepSeek model's 1M-token window by default.
+
+    Every model step resends the whole conversation, so a long session carried
+    about 700K tokens on each request before it compacted once.
+    """
+    import yaml
+
+    _pin_gateway(monkeypatch)
+    captured = _capture_harness_kwargs(monkeypatch)
+    await DeepSeekSession(cwd=tmp_path, model="deepseek-v4-flash", dsh_home=tmp_path / "home").start()
+
+    (patch,) = captured["patches"]
+    rows = {row["id"]: row for row in yaml.safe_load(Path(patch).read_text(encoding="utf-8"))}
+    assert rows["compaction-basic"]["config"] == {"thresholdRatio": 0.25}
+
+
 _GATEWAY_ENV_KEYS = (
     "OPENAI_BASE_URL",
     "OPENAI_API_KEY",
@@ -434,6 +455,46 @@ def _recording_harness(monkeypatch: pytest.MonkeyPatch, **behaviour: Any) -> lis
 
 def _session(tmp_path: Path) -> DeepSeekSession:
     return DeepSeekSession(cwd=tmp_path, model="deepseek-v4-flash", dsh_home=tmp_path / "home")
+
+
+async def test_every_round_opens_a_fresh_conversation_on_the_same_runtime(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Each round's prompt carries the whole run state, so carrying the history only grows every request.
+
+    The harness resends the full conversation on every model step and compacts
+    only near the model's window, so a conversation held for a whole run grew
+    each round to hundreds of thousands of tokens. A correction is still asked
+    in the round's own conversation, because it refers to the reply just given.
+    """
+    _pin_gateway(monkeypatch)
+    sessions: list[str] = []
+    bodies: list[str] = []
+    replies = iter(
+        ["no envelope", _reply("send_message", {"topic": "heartbeat"})]
+        + [_reply("send_message", {"topic": "heartbeat"})]
+    )
+
+    def _run(self: Any, body: str, *, session_id: str) -> Any:
+        sessions.append(session_id)
+        bodies.append(body)
+        return SimpleNamespace(
+            final_response=next(replies), finish_reason="completed", events=[], session_id=session_id
+        )
+
+    instances = _recording_harness(monkeypatch, run=_run)
+    backend = _backend(tmp_path)
+
+    await backend.run("round 1", system_prompt="You are the Coordinator.")
+    await backend.run("round 2", system_prompt="You are the Coordinator.")
+    await backend.aclose()
+
+    assert len(instances) == 1
+    assert sessions[0] == sessions[1]
+    assert sessions[2] != sessions[0]
+    assert "You are the Coordinator." in bodies[0]
+    assert "You are the Coordinator." in bodies[2]
 
 
 async def test_a_timed_out_turn_is_stopped_and_the_next_one_runs_on_a_fresh_runtime(

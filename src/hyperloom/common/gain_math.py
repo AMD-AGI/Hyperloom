@@ -1,15 +1,24 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""Throughput percentage-gain helpers (``gain_math``). Stdlib-only."""
+"""The bars a candidate is accepted by: throughput percentage gains, and the accuracy bars a baseline and a candidate
+are judged against with the two checks that apply them. Stdlib-only."""
 
 from __future__ import annotations
 
+import math
 import statistics
 from typing import Any
 
 from hyperloom_common.coerce import to_float
-from hyperloom.common.perf_metric import GRADED_INTVTY, GRADED_TOTAL, graded_axes_of, holds_within_band
+from hyperloom.common.perf_metric import (
+    GRADED_INTVTY,
+    GRADED_TOTAL,
+    VERDICT_REVERT,
+    GradedComparison,
+    graded_axes_of,
+    holds_within_band,
+)
 
 
 def gain_pct(new: float | None, base: float) -> float | None:
@@ -18,6 +27,22 @@ def gain_pct(new: float | None, base: float) -> float | None:
     if coerced is None or coerced <= 0 or base <= 0:
         return None
     return (coerced - base) / base * 100.0
+
+
+def graded_gate_row(graded: GradedComparison, keep_threshold_pct: float, reason: str) -> dict[str, Any]:
+    """The gate row an attempt records for a graded verdict: the veto, the graded axes, or the output threshold.
+
+    The anchor is the reference; the floor the candidate has to clear belongs to the gate, as the tolerance does for
+    accuracy. A degraded pair fails the graded axes it could not supply.
+    """
+    on_axes = graded.graded_on_intvty or bool(graded.degrade_reason)
+    return {
+        "gate": graded.vetoed_by or ("graded_axes" if on_axes else "keep_threshold"),
+        "passed": False if graded.degrade_reason else graded.verdict != VERDICT_REVERT,
+        "observed": graded.candidate if graded.graded_on_intvty else gain_pct(graded.candidate, graded.reference),
+        "threshold": graded.reference if graded.graded_on_intvty else keep_threshold_pct,
+        "reason": reason,
+    }
 
 
 def gain_pct_or_zero(new: float, base: float) -> float:
@@ -115,8 +140,60 @@ def conc_pair_comparison(
     return rows, summary
 
 
+ACCURACY_THRESHOLD = 0.05  # allowed deviation
+
+# Upstream rejects an AgentX submission whose error rate over completed requests exceeds 10% (InferenceX
+# ``validate_agentic_result.py``). A percentage because that is aiperf's unit: ``RequestErrorRateMetric`` is declared
+# PERCENT and derives ``100.0 * errors / total``.
+AGENTX_ERROR_RATE_THRESHOLD_PCT = 10.0
+
+# Shared accuracy floor, used by BOTH the baseline eval-failure trigger and the enablement KEEP gate so the two never
+# diverge.
+DEFAULT_ENABLEMENT_ACCURACY_FLOOR = 0.5
+
+# The lm-eval metrics an eval score is read from, most preferred first; the thresholds above were set on these scores,
+# and the first task that reports one of them gives the score.
+ACCURACY_METRICS = ("exact_match,strict-match", "exact_match,flexible-extract", "exact_match,none", "acc,none")
+
+
+def finite_score(score: Any) -> float | None:
+    """Return ``score`` as a finite float, or ``None`` when unusable."""
+    if isinstance(score, bool) or not isinstance(score, (int, float)):
+        return None
+    val = float(score)
+    return val if math.isfinite(val) else None
+
+
+def accuracy_meets_floor(score: Any, floor: float) -> bool:
+    """True only when ``score`` is finite, strictly positive and ``>= floor``."""
+    val = finite_score(score)
+    if val is None or val <= 0.0:
+        return False
+    return val >= floor
+
+
+def accuracy_passed(
+    baseline_accuracy: float,
+    new_accuracy: float,
+    threshold: float = ACCURACY_THRESHOLD,
+) -> bool:
+    """Return True if accuracy drop is within tolerance."""
+    if baseline_accuracy <= 0:
+        # No baseline recorded; skip gate.
+        return True
+    drop = baseline_accuracy - new_accuracy
+    return drop <= threshold
+
+
 __all__ = [
+    "ACCURACY_METRICS",
+    "ACCURACY_THRESHOLD",
+    "AGENTX_ERROR_RATE_THRESHOLD_PCT",
+    "DEFAULT_ENABLEMENT_ACCURACY_FLOOR",
+    "accuracy_meets_floor",
+    "accuracy_passed",
     "conc_pair_comparison",
+    "finite_score",
     "gain_pct",
     "gain_pct_or_zero",
     "incremental_gain_pct",

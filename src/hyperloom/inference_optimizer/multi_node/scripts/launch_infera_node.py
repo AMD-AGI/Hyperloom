@@ -441,7 +441,7 @@ def _ray_start(role: str, leader: str, env: dict[str, str]) -> None:
 
 
 def _start_gpu_sampler(out_csv: Path, pid_file: Path) -> None:
-    """Start a detached rocm-smi sampler for this pod's GPUs: the single-node Magpie GPUMonitor's fields, streamed to
+    """Start a detached rocm-smi sampler for this pod's GPUs: the single-node GPU monitor's fields, streamed to
     ``out_csv`` on shared FS for the client to harvest."""
     import shutil
 

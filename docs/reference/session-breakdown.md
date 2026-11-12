@@ -97,6 +97,11 @@ analysis route, both removed in this release, are removed with the disposition
   `ext.actions[].profile.runs[].validate.trace_quality.aggregation_scope`: the
   trace certificate no longer selects a steady window, so its counts cover the
   whole parsed trace; `truncated` and `truncation_reason` say when they do not.
+- `roofline` event
+  `ext.actions[].profile.runs[].validate.trace_quality.production_selected_role`
+  and `production_would_analyze_split_chunk`: they compared the certified file
+  with the `bypass` route's resolver. The certificate now reads the file the
+  analysis reads, so `selected_role` answers both.
 - `steady_state.source` and `steady_state.aggregation_scope` in
   `roofline` event `ext.actions[].analysis.effective_run` and `kernel_agent`
   `trace_analyze_runs[]`: only the `bypass` route varied them.
@@ -265,8 +270,8 @@ breakdown.
 that rides along with the interactivity objective (`enabled`, `noise_pct`).
 
 An AgentX replay is ranked on the median interactivity percentile
-(`e2e_norm_intvty_p50`) with the slow tail (`e2e_norm_intvty_p90`) and output
-throughput each held as a guard; a synthetic run
+(`e2e_norm_intvty_p50`) with the slow tail (`e2e_norm_intvty_p90`) and total
+token throughput each held as a guard; a synthetic run
 is ranked on output throughput alone. Every throughput field elsewhere in this
 document is the output axis by construction, so without this block a consumer
 cannot tell the two kinds of session apart — and on the canonical corpus the
@@ -311,8 +316,8 @@ Disposition: `baseline.throughput_tok_s_per_gpu` (6.0) → `baseline.output_thro
 * `log_python_cmd`: Literal `python …` launch line scraped from logs.
 * `yaml_cmd`: `cmd:` / `command:` / `launch:` field in the
   materialised config YAML.
-* `yaml_benchmark`: Synthesised from Magpie's `benchmark.*` YAML
-  fields.
+* `yaml_benchmark`: Synthesised from the materialised config's
+  `benchmark.*` YAML fields.
 * `unknown`: None of the above; a warning is appended to
   `metadata.warnings`.
 

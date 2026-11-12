@@ -40,7 +40,7 @@ def assess_integrate_performance(
 ) -> IntegratePerformance:
     """Apply native KEEP thresholds on the shared grader's selected measurement axis."""
     # The threshold goes into the chokepoint rather than being re-applied here: on the interactivity axis the
-    # chokepoint holds the median to its own bar and pairs it with the tail and output guards, and a lane that
+    # chokepoint holds the median to its own bar and pairs it with the objective's guards, and a lane that
     # graded the gain itself would promote points those guards reject.
     graded = resolve_graded_comparison(state, measurement, keep_threshold_pct=keep_threshold_pct)
     new_tput = float(measurement.get("output_throughput") or 0.0)

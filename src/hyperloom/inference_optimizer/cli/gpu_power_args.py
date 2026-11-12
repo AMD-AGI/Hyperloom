@@ -9,7 +9,9 @@ from __future__ import annotations
 
 import argparse
 
-from hyperloom.common.gpu_power_settings import NPM_STATES, PERF_LEVELS
+from hyperloom_common.amd_smi import NPM_STATES
+
+from hyperloom.common.gpu_power_settings import PERF_LEVELS
 
 from .constraint_args import positive_watts_arg
 

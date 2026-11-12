@@ -26,17 +26,13 @@ from hyperloom.common.outside_facts.rule_pack import default_pack
 __all__ = [
     "AIPERF_ERROR_CLASS_KEY",
     "AIPERF_ERROR_KEY",
-    "AIPERF_ERROR_OUTPUT_LENGTH_METRIC",
     "AIPERF_EXPORT_DIR",
     "AIPERF_EXPORT_FILE",
     "AIPERF_INVALID_REPLY_ERROR",
     "AIPERF_METADATA_KEY",
     "AIPERF_METRICS_KEY",
-    "AIPERF_OUTPUT_LENGTH_FILE",
-    "AIPERF_PARSER_FILE",
     "AIPERF_PHASE_KEY",
     "AIPERF_PROFILING_PHASE",
-    "AIPERF_SUBMODULE",
     "AITER_DEVELOP_MODE",
     "AITER_INSTALL_MODE_FILE",
     "AITER_LOG_TUNED_CONFIG_ENV",
@@ -57,10 +53,11 @@ __all__ = [
     "DRM_VRAM_KEY",
     "ENV_CONC",
     "ENV_EP",
+    "ENV_EVAL_ONLY",
     "ENV_ISL",
-    "ENV_MAGPIE_EVAL_LIMIT",
-    "ENV_MAGPIE_EVAL_TASKS",
-    "ENV_MAGPIE_EVAL_TOKENIZED_REQUESTS",
+    "ENV_EVAL_LIMIT",
+    "ENV_EVAL_TASKS",
+    "ENV_EVAL_TOKENIZED_REQUESTS",
     "ENV_MAX_MODEL_LEN",
     "ENV_NUM_PROMPTS",
     "ENV_NUM_WARMUPS",
@@ -76,6 +73,7 @@ __all__ = [
     "HIP_NO_KERNEL_IMAGE",
     "HIP_UNDEFINED_SYMBOL",
     "HSA_STATUS_ERROR",
+    "HUB_RATE_LIMITED",
     "INITIAL_PID_NAMESPACE",
     "KFD_NODES",
     "KFD_NODE_GPU_ID",
@@ -96,6 +94,9 @@ __all__ = [
     "SGLANG_IMAGE_WORKSPACE",
     "SHORT_PROMPT_CHECK",
     "SHORT_PROMPT_TOUCH",
+    "TORCH_MEMORY_SNAPSHOT_FRAME",
+    "TORCH_SYMBOLIZE_BY_LOADER",
+    "TORCH_SYMBOLIZE_MODE_ENV",
     "TRANSFORMERS_DOES_NOT_RECOGNIZE",
     "TRANSFORMERS_UNKNOWN_ARCHITECTURE",
     "TUNABLEOP_ENABLED_ENV",
@@ -182,6 +183,11 @@ _graph_replay = _PACK.env_default("hip_graph_packet_capture")
 HIP_GRAPH_PACKET_CAPTURE_ENV = _graph_replay.name
 HIP_GRAPH_PACKET_CAPTURE_NODE_BY_NODE = _graph_replay.value
 
+_symbolize = _PACK.env_default("torch_symbolize_mode")
+TORCH_SYMBOLIZE_MODE_ENV = _symbolize.name
+TORCH_SYMBOLIZE_BY_LOADER = _symbolize.value
+TORCH_MEMORY_SNAPSHOT_FRAME = _PACK.pattern("torch_memory_snapshot_frame")
+
 ROCR_VISIBLE_DEVICES_ENV = _PACK.names("rocr_visible_devices", "env")["env"]
 
 _kfd = _PACK.names(
@@ -229,28 +235,30 @@ _inferencex = _PACK.names(
     "random_range_ratio",
     "conc",
     "run_eval",
+    "eval_only",
     "num_prompts",
     "num_warmups",
     "max_model_len",
     "tp",
     "ep",
-    "magpie_eval_tasks",
-    "magpie_eval_limit",
-    "magpie_eval_tokenized_requests",
+    "eval_tasks",
+    "eval_limit",
+    "eval_tokenized_requests",
 )
 ENV_ISL = _inferencex["isl"]
 ENV_OSL = _inferencex["osl"]
 ENV_RANDOM_RANGE_RATIO = _inferencex["random_range_ratio"]
 ENV_CONC = _inferencex["conc"]
 ENV_RUN_EVAL = _inferencex["run_eval"]
+ENV_EVAL_ONLY = _inferencex["eval_only"]
 ENV_NUM_PROMPTS = _inferencex["num_prompts"]
 ENV_NUM_WARMUPS = _inferencex["num_warmups"]
 ENV_MAX_MODEL_LEN = _inferencex["max_model_len"]
 ENV_TP = _inferencex["tp"]
 ENV_EP = _inferencex["ep"]
-ENV_MAGPIE_EVAL_TASKS = _inferencex["magpie_eval_tasks"]
-ENV_MAGPIE_EVAL_LIMIT = _inferencex["magpie_eval_limit"]
-ENV_MAGPIE_EVAL_TOKENIZED_REQUESTS = _inferencex["magpie_eval_tokenized_requests"]
+ENV_EVAL_TASKS = _inferencex["eval_tasks"]
+ENV_EVAL_LIMIT = _inferencex["eval_limit"]
+ENV_EVAL_TOKENIZED_REQUESTS = _inferencex["eval_tokenized_requests"]
 
 _aiperf_export = _PACK.names(
     "aiperf_request_export",
@@ -262,7 +270,6 @@ _aiperf_export = _PACK.names(
     "error_class",
     "phase",
     "profiling_phase",
-    "error_output_length",
 )
 AIPERF_EXPORT_DIR = _aiperf_export["dir"]
 AIPERF_EXPORT_FILE = _aiperf_export["file"]
@@ -272,14 +279,10 @@ AIPERF_ERROR_KEY = _aiperf_export["error"]
 AIPERF_ERROR_CLASS_KEY = _aiperf_export["error_class"]
 AIPERF_PHASE_KEY = _aiperf_export["phase"]
 AIPERF_PROFILING_PHASE = _aiperf_export["profiling_phase"]
-AIPERF_ERROR_OUTPUT_LENGTH_METRIC = _aiperf_export["error_output_length"]
 
 AIPERF_INVALID_REPLY_ERROR = _PACK.names("aiperf_invalid_reply", "error_class")["error_class"]
 
-_aiperf_source = _PACK.names("aiperf_source", "submodule", "parser_file", "output_length_file")
-AIPERF_SUBMODULE = _aiperf_source["submodule"]
-AIPERF_PARSER_FILE = _aiperf_source["parser_file"]
-AIPERF_OUTPUT_LENGTH_FILE = _aiperf_source["output_length_file"]
+HUB_RATE_LIMITED = _PACK.pattern("hub_rate_limited")
 
 
 def spaced(phrase: str) -> str:

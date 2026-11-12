@@ -6,11 +6,13 @@
 from __future__ import annotations
 
 import re
+import shlex
 from pathlib import Path
 
 ASSETS = Path(__file__).resolve().parents[1] / "assets"
 INSTALL_SH = ASSETS / "install.sh"
 KERNEL_TOOLS_SH = ASSETS / "install_kernel_tools.sh"
+RUNTIME_ENV_SH = ASSETS / "runtime_env.sh"
 
 # Defined by install.sh and called by the kernel-agent steps.
 _INSTALL_SH_HELPERS = ("log", "warn", "die", "run", "acquire_install_lock", "_resolve_ref_sha", "_prune_dep_cache")
@@ -32,6 +34,7 @@ def kernel_tools_preamble() -> str:
     """Shell text giving the kernel-agent steps what install.sh has set up before it sources them."""
     helpers = "\n".join(install_sh_function(name) for name in _INSTALL_SH_HELPERS)
     return (
+        f". {shlex.quote(RUNTIME_ENV_SH.as_posix())}\n"
         f"{helpers}\n"
         ': "${CHECK_ONLY:=0}"\n'
         ': "${DRY_RUN:=0}"\n'

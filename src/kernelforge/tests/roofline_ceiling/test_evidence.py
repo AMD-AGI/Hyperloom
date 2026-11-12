@@ -175,9 +175,13 @@ def _alive(pid: int) -> bool:
         return False
     try:
         state = Path(f"/proc/{pid}/stat").read_text(encoding="utf-8").rsplit(")", 1)[1].split()[0]
+    except (FileNotFoundError, ProcessLookupError):
+        # Reaped after the kill above: before the open (ENOENT) or between the open and the read (ESRCH).
+        # A host without /proc has no state to read, so the process counts as running there.
+        return not os.path.isdir("/proc")
     except OSError:
         return True
-    return state != "Z"
+    return state not in ("Z", "X")
 
 
 @pytest.mark.skipif(os.name != "posix", reason="process groups are a POSIX mechanism")

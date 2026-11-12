@@ -38,7 +38,7 @@ _BACKEND_UNHEALTHY_STOP_SEC: float = 3600.0
 # How many turns in a row one agent may answer without an intent before the session stops.
 _NO_INTENT_STOP_TURNS: int = 50
 from ..phases import machine_state as _phase_state
-from hyperloom.inference_optimizer.session.paths import db_path_for, stop_request_path
+from hyperloom.inference_optimizer.session.paths import stop_request_path
 from hyperloom.inference_optimizer.session.session_binding import bind_session
 from ..roles.agent_role import AgentRole, default_role_registry
 from ..roles.base import Backend, BackendError, BackendTurnResult, LLMCallFailed
@@ -51,13 +51,10 @@ from ..policy.custom_specialist import skips_reactor_turn
 from ..policy.gate import PolicyGate
 from ..policy.projection import serving_tp_for_policy
 from ..state.round_store import RoundStore
-from ..bus.gpu_pool import (
-    SpecialistGpuPool,
-    resolve_gpu_specialist_devices,
-    resolve_whole_machine_devices,
-)
+from ..bus.gpu_pool import SpecialistGpuPool, resolve_gpu_specialist_devices, resolve_whole_machine_devices
 from ..bus.resource_lock import SqliteLeaseBackend
 from ..state.shared_state import SharedState, effective_closing_grace_sec
+from ..state.state_file import database_target
 from .signals import SignalDrain
 from .intent_router import IntentRouter
 from hyperloom.inference_optimizer.model_config_utils import infer_model_class
@@ -114,16 +111,16 @@ def resolve_reactor_turn_timeout_sec() -> float:
 
 if TYPE_CHECKING:
     from hyperloom.inference_optimizer.experience_kb import ExperienceKBIntegration
-    from .proposals import PendingProposal
+    from ..state.pending_proposal import PendingProposal
 
 
 def reap_orphaned_servers_best_effort(session_dir: Path, *, phase: str) -> None:
-    """Reap leftover single-node serving processes via this session's pidfiles.
+    """Stop the single-node servers this session's ``server.pid`` files still record.
 
-    Runs at boot, at shutdown and on resume. Every other teardown is in-band (a wrapper's signal trap, a ``killpg`` on
-    a handle still held), so none of it runs when the owner dies without getting to; this is the backstop, and with no
-    cgroup or pid namespace the only one: the pidfile outlives its writer. Scoped to this session's own pidfiles and
-    gated on a cmdline match, so a co-located session's server and a recycled pid are never touched.
+    Runs at boot, at shutdown and on resume. Every other teardown is in-band, so none of it runs when the owner dies
+    without getting to; this is the backstop, and with no cgroup or pid namespace the only one: the pidfile outlives
+    its writer. Scoped to this session's own pidfiles, and to the incarnation and run mark each one records, so a
+    co-located session's server and a recycled pid are never touched.
     """
     try:
         from ..actions.executors._multi_node_env import is_multi_node
@@ -229,11 +226,9 @@ class Coordinator:
         self.backends = dict(backends)
         self.reactor_turn_timeout_sec = resolve_reactor_turn_timeout_sec()
 
-        # Persistence layer
-        self._open_persistence()
-
-        # Persistent session state (state.json) — load existing for resume.
+        # Persistent session state (state.json) — load existing for resume; its operator pins decide the database's mode.
         self.shared_state = SharedState.load_or_init(self.session_dir)
+        self._open_persistence()
         # Thread live SharedState into the runner so executors get it via ctx.extra.
         self.sub.shared_state = self.shared_state
         self._init_gpu_pools()
@@ -310,11 +305,11 @@ class Coordinator:
 
     def _open_persistence(self) -> None:
         """Open the session database and the bus, lease, task, cursor and sub-agent layers over it."""
-        db_path = db_path_for(self.session_dir)
+        db_path, file_mode = database_target(self.session_dir, self.shared_state)
         # The session directory can sit on a networked filesystem where WAL's
         # shared-memory mapping corrupts the database, so the mode is resolved
         # before the file is opened.
-        self.db = SqliteConnection(db_path)
+        self.db = SqliteConnection(db_path, file_mode=file_mode)
 
         self.bus = MessageBus(self.db)
         self.locks = SqliteLeaseBackend(self.db)
@@ -543,7 +538,17 @@ class Coordinator:
     def dispatcher(self):
         from .dispatcher import DispatcherCollaborator
 
-        return self._collaborator("_dispatcher", DispatcherCollaborator)
+        return self._collaborator(
+            "_dispatcher",
+            lambda coordinator: DispatcherCollaborator(
+                coordinator, refresh_admission_freeze=self._refresh_admission_freeze_unless_closing
+            ),
+        )
+
+    async def _refresh_admission_freeze_unless_closing(self) -> None:
+        # CLOSE's closing report is dispatched by the pump, which a freeze would hold back.
+        if not self.shared_state.closing_phase:
+            await self.phase_machine.refresh_admission_freeze()
 
     @property
     def writeback(self):
@@ -589,6 +594,8 @@ class Coordinator:
             await self.dispatcher.cancel_inflight_actions(reason="coordinator_stop")
         finally:
             await self.dispatcher.close_db_after_executions()
+            if self._signals is not None:  # Closed after teardown: a later SIGTERM must not kill the process mid-stop.
+                self._signals.close()
 
     def _bind_session_deadline(
         self,
@@ -679,6 +686,7 @@ class Coordinator:
                 if skips_reactor_turn(name, self.shared_state) or not self.conversation.admit_turn(name, time.time()):
                     continue
                 await self.await_within_session_bound(lambda n=name: self.reactor_pass(n), stage=f"reactor:{name}")
+            await self.phase_machine.refresh_admission_freeze()
         if not self.stop_requested():
             await self.dispatcher.pump_dispatcher_once()
         if not in_closing:
@@ -692,10 +700,7 @@ class Coordinator:
             await self.enablement_lane.pump_enablement_safely()
         # phase machine advance; runs even in_closing so CLOSE is recorded.
         try:
-            await self.await_within_session_bound(
-                self.phase_machine.advance_phase_if_needed,
-                stage="advance_phase",
-            )
+            await self.await_within_session_bound(self.phase_machine.advance_phase_if_needed, stage="advance_phase")
         except Exception as exc:
             log.exception("phase advance failed")
             self.record_exception(stage="advance_phase", exc=exc)
@@ -706,13 +711,7 @@ class Coordinator:
             self._last_maintenance_ts = now
         return in_closing
 
-    def record_exception(
-        self,
-        *,
-        stage: str,
-        exc: BaseException,
-        agent: str = "",
-    ) -> None:
+    def record_exception(self, *, stage: str, exc: BaseException, agent: str = "") -> None:
         """Record a Coordinator-side exception without killing the session."""
         self._fault_open_phase_event(stage=stage, exc=exc)
         try:
@@ -934,10 +933,7 @@ class Coordinator:
 
     async def _close_run(self, stop_reason: str, *, ticks: int, tick_failed: bool, max_minutes: float) -> str:
         """Classify the stop, persist it, and release everything the run still holds."""
-        final_signals: AbstractSet[int] = frozenset()
-        if self._signals is not None:
-            final_signals = self._signals.close()
-            self._signals = None
+        final_signals = frozenset() if self._signals is None else frozenset(self._signals.received)
         stop_reason = self._classify_stop(final_signals, pending=stop_reason)
         self._stop_classification = stop_reason
         self.shared_state.closing_phase = False

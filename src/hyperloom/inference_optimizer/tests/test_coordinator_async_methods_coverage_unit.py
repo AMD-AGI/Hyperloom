@@ -635,7 +635,9 @@ async def test_escalate_skip_to_kernel_deferred(coord: Coordinator) -> None:
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("phase", ["PRELUDE", "ENABLEMENT", "KERNEL_AGENT", "SWEEP"])
-async def test_escalate_skip_to_kernel_outside_framework_agent_is_dropped(coord: Coordinator, phase: str) -> None:
+async def test_escalate_skip_to_kernel_outside_framework_agent_is_refused_to_its_sender(
+    coord: Coordinator, phase: str
+) -> None:
     """Only the FRAMEWORK_AGENT exit reads skip_to_kernel; left pending elsewhere it would end that phase on arrival."""
     coord.shared_state.phase = phase
     await coord.router._handle_escalate_strategy_change(
@@ -643,6 +645,14 @@ async def test_escalate_skip_to_kernel_outside_framework_agent_is_dropped(coord:
         _escalate("skip_to_kernel"),
     )
     assert coord.shared_state.pending_escalate_hint == ""
+    denials = [
+        m.payload
+        for m in coord.bus.inbox_context_sync("orchestration")
+        if m.payload.get("kind") == "policy_denied" and m.payload.get("rule") == "escalate_hint_phase"
+    ]
+    assert len(denials) == 1
+    assert phase in denials[0]["reason"]
+    assert denials[0]["hint"] == f"No hint advances {phase}: the Coordinator exits it on the gate its phase goal names."
 
 
 # -- maybe_autosubmit_specialist_patches ----------------------------------
@@ -1349,118 +1359,4 @@ async def test_unpromotable_baseline_same_failure_in_prelude_with_enablement_adm
 
     await coord.writeback.handle_unpromotable_result(_baseline_task("bl-pre-1"), result)
     await coord.writeback.handle_unpromotable_result(_baseline_task("bl-pre-2"), result)
-    assert coord.shared_state.stop_reason != "baseline_failed"
-
-
-_SHARED_TAIL = (
-    "Traceback (most recent call last):\n"
-    + "  File engine.py, in run_engine_core\n    engine.step()\n" * 60
-    + "RuntimeError: engine core died unexpectedly\n"
-)
-
-
-async def _executor_nonzero_result(
-    tmp_path, monkeypatch, name: str, stderr: str, *, workspace: bool, stdout: str = ""
-) -> dict:
-    """Run one baseline round through the executor's real result builder, with only Magpie's process faked."""
-    import types
-
-    from hyperloom.orchestrator.actions.executors import baseline as bl
-    from hyperloom.orchestrator.actions.executors.benchmark_run import launch as launch_mod
-    from hyperloom.orchestrator.actions.executors.benchmark_run.records import BenchmarkAttempt
-    from hyperloom.orchestrator.loop.sub_agent_runner import RunnerContext
-
-    session = tmp_path / "session"
-    session.mkdir(exist_ok=True)
-    out = tmp_path / name
-    out.mkdir()
-    run_workspace = out / "benchmark_vllm_1" if workspace else None
-    if run_workspace is not None:
-        run_workspace.mkdir()
-    monkeypatch.setattr(launch_mod, "harvest_leaked_artifacts", lambda *a, **k: [])
-    monkeypatch.setattr(launch_mod, "snapshot_workspaces", lambda *a, **k: set())
-    monkeypatch.setattr(launch_mod, "select_run_workspace", lambda *a, **k: run_workspace)
-    monkeypatch.setattr(
-        bl, "run_with_session_kill", lambda cmd, **kw: types.SimpleNamespace(returncode=1, stdout=stdout, stderr=stderr)
-    )
-    cfg = session / "bench.yaml"
-    cfg.write_text("benchmark:\n  framework: vllm\n  model: /tmp/m\n", encoding="utf-8")
-    ex = bl.BaselineExecutor(session_dir=session, magpie_python="/usr/bin/python3")
-    return await ex._run_single_benchmark(
-        BenchmarkAttempt(
-            timeout_sec=30,
-            override_result_dir=None,
-            resolved_model="/tmp/m",
-            materialized_config_path=cfg,
-            inferencex_path="",
-            effective_extra_server_args="",
-            params={"framework": "vllm"},
-            ctx=RunnerContext(task=_baseline_task(name), lease=None, extra={}),
-        ),
-        config_path=cfg,
-        output_dir=out,
-    )
-
-
-@pytest.mark.asyncio
-@pytest.mark.parametrize("workspace", [False, True], ids=["no_workspace", "workspace_without_report"])
-async def test_baseline_executor_signs_the_whole_output_not_the_error_tail(
-    coord: Coordinator, tmp_path, monkeypatch, workspace: bool
-) -> None:
-    """Two causes that end in the same 2000+ characters share an ``error`` but not a signature, so they keep three strikes."""
-    oom = await _executor_nonzero_result(
-        tmp_path, monkeypatch, "oom", "HIP out of memory on device 3\n" + _SHARED_TAIL, workspace=workspace
-    )
-    nccl = await _executor_nonzero_result(
-        tmp_path, monkeypatch, "nccl", "NCCL watchdog timeout after 600s\n" + _SHARED_TAIL, workspace=workspace
-    )
-
-    assert oom["error_class"] == nccl["error_class"] == "subprocess_nonzero"
-    # The executor's own ``error`` is the 2000-character tail, identical for both causes.
-    assert oom["error"] == nccl["error"]
-    assert oom["output_signature"] and nccl["output_signature"]
-    assert oom["output_signature"] != nccl["output_signature"]
-
-    await coord.writeback.handle_unpromotable_result(_baseline_task("bl-tail-1"), oom)
-    await coord.writeback.handle_unpromotable_result(_baseline_task("bl-tail-2"), nccl)
-    assert coord.shared_state.baseline_failure_streak == 2
-    assert coord.shared_state.stop_reason != "baseline_failed"
-
-
-@pytest.mark.asyncio
-async def test_baseline_executor_same_output_modulo_numbers_stops_at_two(
-    coord: Coordinator, tmp_path, monkeypatch
-) -> None:
-    first = await _executor_nonzero_result(
-        tmp_path, monkeypatch, "r1", "worker pid 4121 died at 0x7f3a2c\n" + _SHARED_TAIL, workspace=False
-    )
-    second = await _executor_nonzero_result(
-        tmp_path, monkeypatch, "r2", "worker pid 977 died at 0x7f99e0\n" + _SHARED_TAIL, workspace=False
-    )
-
-    assert first["output_signature"] == second["output_signature"] != ""
-
-    coord.shared_state.enablement_mode = "off"
-    await coord.writeback.handle_unpromotable_result(_baseline_task("bl-same-1"), first)
-    assert coord.shared_state.stop_reason != "baseline_failed"
-    await coord.writeback.handle_unpromotable_result(_baseline_task("bl-same-2"), second)
-    assert coord.shared_state.stop_reason == "baseline_failed"
-
-
-@pytest.mark.asyncio
-async def test_baseline_executor_signs_stdout_as_well_as_stderr(coord: Coordinator, tmp_path, monkeypatch) -> None:
-    """The same generic stderr over different causes on stdout is two failures, not one."""
-    stderr = "RuntimeError: engine died\n"
-    oom = await _executor_nonzero_result(
-        tmp_path, monkeypatch, "oom", stderr, stdout="HIP out of memory on device 3\n", workspace=False
-    )
-    nccl = await _executor_nonzero_result(
-        tmp_path, monkeypatch, "nccl", stderr, stdout="NCCL watchdog timeout after 600s\n", workspace=False
-    )
-
-    assert oom["error"] == nccl["error"]
-    assert oom["output_signature"] != nccl["output_signature"]
-
-    await coord.writeback.handle_unpromotable_result(_baseline_task("bl-out-1"), oom)
-    await coord.writeback.handle_unpromotable_result(_baseline_task("bl-out-2"), nccl)
     assert coord.shared_state.stop_reason != "baseline_failed"

@@ -124,7 +124,7 @@ class WritebackCollaborator(
             measurement_status = result.get("measurement_status")
             if measurement_status is not None and str(measurement_status) != "succeeded":
                 return False
-            # Magpie marks a profiled replay diagnostic_only, so a native AgentX profile
+            # A profiled replay is marked diagnostic_only, so a native AgentX profile
             # is never a valid measurement. The trace is what a profile task produces, and
             # ``ProfileExecutor`` already accepts the round on this field.
             if result.get("round_succeeded") is True:

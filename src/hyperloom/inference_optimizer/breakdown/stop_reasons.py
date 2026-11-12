@@ -11,10 +11,19 @@ ARGV_INVALID = "server_argv_invalid"
 #: The host cannot run the combo (a bring-up environment-fault terminal).
 ENV_FAULT = "environment_fault"
 
+#: The benchmark harness refused to launch a baseline because the host has fewer
+#: idle GPUs than the round needs: another workload holds them, or they are not
+#: there. Also the error class of that round. No retry or framework patch changes
+#: what else runs on the host, so the run halts on the FIRST occurrence and the
+#: operator frees the GPUs the failure names before resuming.
+HOST_GPUS_UNAVAILABLE: str = "host_gpus_unavailable"
+
 # Historical reports retain these terminal reasons after the producer is retired.
 DIED_STOP_REASON = "supervisor_coordinator_died"
 WEDGED_STOP_REASON = "supervisor_tick_stalled"
 SUPERVISOR_RESTART_REASON = "supervisor_restart_requested"
+#: A resume found the session's InferenceX checkout missing; the client inference_suite pins replaced that checkout.
+INFERENCEX_CHECKOUT_MISSING_STOP_REASON = "active_inferencex_checkout_missing"
 
 #: AgentX is on but its benchmark client (aiperf) is missing or is not the
 #: pinned build, and the runtime install could not supply it. An
@@ -53,11 +62,18 @@ SUCCESS_STOP_REASONS: frozenset[str] = frozenset(
 ABORTED_STOP_REASONS: frozenset[str] = frozenset({"signal"})
 
 #: Terminals about the machine or the harness rather than the model: a host
-#: that cannot run the combo, an argv the installed parser refuses, a supervisor
-#: that found the coordinator dead or its tick wedged, or an agent's LLM backend
-#: that stopped answering.
+#: that cannot run the combo or lacks the idle GPUs it needs, an argv the
+#: installed parser refuses, a supervisor that found the coordinator dead or its
+#: tick wedged, or an agent's LLM backend that stopped answering.
 INFRASTRUCTURE_STOP_REASONS: frozenset[str] = frozenset(
-    {ENV_FAULT, ARGV_INVALID, DIED_STOP_REASON, WEDGED_STOP_REASON, BACKEND_UNHEALTHY_STOP_REASON}
+    {
+        ENV_FAULT,
+        HOST_GPUS_UNAVAILABLE,
+        ARGV_INVALID,
+        DIED_STOP_REASON,
+        WEDGED_STOP_REASON,
+        BACKEND_UNHEALTHY_STOP_REASON,
+    }
 )
 
 #: Terminals the model gate reached before the loop started. Verdicts about the
@@ -99,7 +115,7 @@ STOP_REASON_VOCAB: frozenset[str] = frozenset(
         "prelude_budget_exhausted",
         "time_exhausted_during_prelude",
         "warm_replay_rollback_failed",
-        "active_inferencex_checkout_missing",
+        INFERENCEX_CHECKOUT_MISSING_STOP_REASON,
         "sweep_done",
         "sweep_failed",
         "framework_agent_phase_done",
@@ -127,6 +143,7 @@ STOP_REASON_VOCAB: frozenset[str] = frozenset(
         # composed an argument the installed parser does not have. Classified as
         # infrastructure by ``INFRASTRUCTURE_STOP_REASONS``.
         ENV_FAULT,
+        HOST_GPUS_UNAVAILABLE,
         ARGV_INVALID,
         # The out-of-band supervisor found the coordinator's process gone; it
         # reaches a report through the terminal artifact the supervisor writes.
@@ -180,6 +197,8 @@ __all__ = [
     "BACKEND_UNHEALTHY_STOP_REASON",
     "DIED_STOP_REASON",
     "ENV_FAULT",
+    "HOST_GPUS_UNAVAILABLE",
+    "INFERENCEX_CHECKOUT_MISSING_STOP_REASON",
     "INFRASTRUCTURE_STOP_REASONS",
     "MODEL_GATE_STOP_REASONS",
     "PATCH_RECOVERY_INCOMPLETE_STOP_REASON",

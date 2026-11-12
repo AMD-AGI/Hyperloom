@@ -1,0 +1,810 @@
+# SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
+# SPDX-License-Identifier: MIT
+
+import hashlib
+import json
+from dataclasses import dataclass, field, replace
+from pathlib import Path
+
+from hyperloom.contracts.recipe import (
+    ComponentPatches,
+    KernelArtifact,
+    KernelKind,
+    LaunchConfig,
+    PatchRef,
+    Recipe,
+    apply,
+)
+from hyperloom.measure.compile import COMPONENT_LAYOUTS, LocalBlobStore, PackageBase, apply_patch_stack
+import pytest
+
+from hyperloom_multibranch.specialist.agent_import import (
+    ComponentStart,
+    KeepStores,
+    KeptChange,
+    KeptChangeError,
+    Retraction,
+    added_at,
+    import_delta,
+    read_kept_change,
+    read_snapshot,
+    with_tables,
+    without_conflicts,
+)
+from hyperloom_multibranch.repo.git_repo import GitExperimentRepo
+from hyperloom_multibranch.specialist import agent_import
+from hyperloom_multibranch.specialist.agent_import import SourceIncrement
+from hyperloom_multibranch.specialist.agent_manifest import ConfigSource
+from hyperloom_multibranch.specialist import worktree as worktree_module
+from hyperloom_multibranch.specialist.worktree import BranchWorktree, SourceBase, Upstream
+
+SGLANG = "https://github.com/sgl-project/sglang"
+PIN = "1" * 40
+OWN = PatchRef("patch/sglang/" + "e" * 64 + ".patch", "e" * 64)
+ROOT = Recipe(
+    "sha256:" + "d" * 64,
+    launch=LaunchConfig("--tp 1 --mem-fraction-static 0.8", {"SGLANG_A": "1"}),
+    components=(ComponentPatches("sglang", SGLANG, PIN, (OWN,)),),
+)
+
+
+class Store:
+    """Stores each patch under its sha256, as the experiment repository does."""
+
+    def __init__(self) -> None:
+        self.texts: dict[str, str] = {}
+
+    async def __call__(self, component: str, text: str) -> PatchRef:
+        sha256 = hashlib.sha256(text.encode()).hexdigest()
+        self.texts[sha256] = text
+        return PatchRef(f"patch/{component}/{sha256}.patch", sha256)
+
+
+async def _no_table(env: str, table: str, rows_only: bool) -> KernelArtifact:
+    raise AssertionError(f"no table was expected, got one for {env}")
+
+
+async def _from_root(imported: tuple[PatchRef, ...], cumulative: str) -> str:
+    """The increment over a head that imported nothing yet: the keep's whole patch."""
+    assert imported == (), f"the head imported nothing, got {imported}"
+    return cumulative
+
+
+def _stores(store: "Store", table=_no_table, increment: SourceIncrement = _from_root) -> KeepStores:
+    return KeepStores(store, table, increment)
+
+
+def _kept(seq: int, patch: str, args: str = ROOT.launch.server_args, envs: dict[str, str] | None = None) -> KeptChange:
+    return KeptChange(seq, patch, args, dict(ROOT.launch.envs) if envs is None else envs, summary=f"keep {seq}")
+
+
+def _started(launch: LaunchConfig, seq: int = 1, patch: str = "", summary: str = "") -> KeptChange:
+    return KeptChange(seq, patch, launch.server_args, dict(launch.envs), summary)
+
+
+def _patches(recipe: Recipe) -> tuple[PatchRef, ...]:
+    [component] = recipe.components
+    return component.patches
+
+
+async def test_the_first_keep_adds_its_patch_on_top_of_the_root_s_own() -> None:
+    store = Store()
+
+    delta = await import_delta(_kept(1, "diff A\n"), root=ROOT, head=ROOT, component="sglang", stores=_stores(store))
+
+    assert delta is not None
+    made = apply(ROOT, delta)
+    assert [store.texts.get(ref.sha256) for ref in _patches(made)] == [None, "diff A\n"]
+    assert _patches(made)[0] == OWN and made.launch == ROOT.launch
+
+
+async def test_the_agent_s_server_arguments_and_environment_replace_the_head_s() -> None:
+    kept = _kept(1, "", args="--tp 1 --kv-cache-dtype fp8_e4m3", envs={"SGLANG_B": "2"})
+
+    delta = await import_delta(kept, root=ROOT, head=ROOT, component="sglang", stores=_stores(Store()))
+
+    assert delta is not None
+    made = apply(ROOT, delta)
+    assert made.launch == LaunchConfig("--tp 1 --kv-cache-dtype fp8_e4m3", {"SGLANG_B": "2"})
+    assert _patches(made) == (OWN,)
+
+
+async def test_a_keep_with_no_source_change_and_the_head_s_launch_imports_nothing() -> None:
+    assert await import_delta(_kept(1, ""), root=ROOT, head=ROOT, component="sglang", stores=_stores(Store())) is None
+
+
+def test_a_keep_reads_the_agent_s_config_through_its_config_source() -> None:
+    source = ConfigSource("agent/config.json", "server_flags", "server_env")
+    state = {"server_flags": "--tp 1 --enable-torch-compile", "server_env": {"SGLANG_A": "0"}}
+
+    kept = read_kept_change(_started(ROOT.launch, 3, "diff\n", "fused rmsnorm"), state, source)
+
+    assert kept == KeptChange(3, "diff\n", "--tp 1 --enable-torch-compile", {"SGLANG_A": "0"}, "fused rmsnorm")
+
+
+def test_a_keep_leaves_out_the_workload_variables_the_measurement_sets_and_names_them() -> None:
+    source = ConfigSource("agent/config.json", "server_flags", "server_env")
+    state = {"server_flags": "--tp 1", "server_env": {"SGLANG_A": "0", "ISL": "1024", "osl": "1024"}}
+
+    kept = read_kept_change(_started(ROOT.launch), state, source)
+
+    assert kept.envs == {"SGLANG_A": "0"}
+    assert kept.dropped == {"ISL": "1024", "osl": "1024"}
+
+
+def test_a_keep_leaves_out_arbor_s_evaluation_settings_which_mb_gives_it() -> None:
+    source = ConfigSource("agent/config.json", "server_flags", "server_env")
+    state = {"server_flags": "--tp 1", "server_env": {"SGLANG_A": "0", "GSM8K_MIN": "0.5", "GSM8K_LIMIT": "400"}}
+
+    kept = read_kept_change(_started(ROOT.launch), state, source)
+
+    assert kept.envs == {"SGLANG_A": "0"}
+    assert kept.dropped == {"GSM8K_MIN": "0.5", "GSM8K_LIMIT": "400"}
+
+
+def test_a_keep_whose_config_the_source_cannot_read_is_refused_naming_the_file() -> None:
+    source = ConfigSource("agent/config.json", "server_flags", "server_env")
+
+    with pytest.raises(KeptChangeError, match="agent/config.json"):
+        read_kept_change(_started(ROOT.launch, patch="diff\n"), {"server_flags": "--tp 1"}, source)
+
+
+async def test_a_keep_of_a_component_new_on_the_head_names_the_upstream_its_package_was_built_from() -> None:
+    bare = Recipe("sha256:" + "d" * 64, launch=ROOT.launch)
+    upstream = Upstream(SGLANG, "2" * 40)
+
+    imported = await import_delta(
+        _kept(1, "diff A\n"), root=bare, head=bare, component="sglang", stores=_stores(Store())
+    )
+    assert imported is not None
+    delta = added_at(imported, bare, upstream)
+
+    [change] = delta.components
+    assert (change.upstream_repo, change.upstream_ref) == (SGLANG, "2" * 40)
+    [made] = apply(bare, delta).components
+    assert (made.upstream_repo, made.upstream_ref) == (SGLANG, "2" * 40)
+
+
+TABLE_ENV = "AITER_CONFIG_GEMM_A8W8_BLOCKSCALE_BPRESHUFFLE"
+
+
+def _artifact(text: str, target: str = "gemm_a8w8") -> KernelArtifact:
+    sha256 = hashlib.sha256(text.encode()).hexdigest()
+    load = {"load": {"via": "env_file", "env": TABLE_ENV}}
+    return KernelArtifact(KernelKind.GEMM, target, f"kernel/gemm/{target}/{sha256}.csv", sha256, load)
+
+
+def test_a_keep_carries_the_text_of_each_table_file_of_the_agent_s_own_as_it_was_at_the_keep(tmp_path: Path) -> None:
+    owned = tmp_path / "worktree"
+    (owned / "configs").mkdir(parents=True)
+    table = owned / "configs" / "tuned.csv"
+    table.write_text("M,N,K\n64,5120,5120\n", encoding="utf-8")
+    (tmp_path / "elsewhere.csv").write_text("M,N,K\n", encoding="utf-8")
+    envs = {
+        TABLE_ENV: str(table),
+        "AITER_CONFIG_GEMM_BF16": str(tmp_path / "elsewhere.csv"),
+        "AITER_CONFIG_FMOE": "configs/tuned.csv",
+        "SGLANG_TABLE": str(table),
+    }
+
+    kept = with_tables(_kept(1, "", envs=envs), (owned,))
+    table.write_text("rewritten after the keep\n", encoding="utf-8")
+
+    assert kept.tables == {str(table): "M,N,K\n64,5120,5120\n"}
+
+
+async def _table(env: str, table: str, rows_only: bool) -> KernelArtifact:
+    assert env == TABLE_ENV and rows_only
+    return _artifact(table)
+
+
+def _with_table(seq: int, path: str, table: str) -> KeptChange:
+    kept = _kept(seq, "", envs={**ROOT.launch.envs, TABLE_ENV: path})
+    return KeptChange(kept.seq, "", kept.server_args, kept.envs, kept.summary, {path: table})
+
+
+async def test_a_table_the_agent_keeps_in_its_workspace_is_imported_as_a_kernel_artifact_not_a_path() -> None:
+    path = "/branches/b01/worktree/tuned.csv"
+    head = Recipe(ROOT.base_image_digest, LaunchConfig(ROOT.launch.server_args, {**ROOT.launch.envs, TABLE_ENV: path}))
+
+    delta = await import_delta(
+        _with_table(1, path, "rows\n"), root=ROOT, head=head, component="sglang", stores=_stores(Store(), _table)
+    )
+
+    assert delta is not None
+    made = apply(head, delta)
+    assert made.kernels == (_artifact("rows\n"),)
+    assert TABLE_ENV not in made.launch.envs
+
+
+async def test_a_later_table_replaces_the_imported_one_and_a_keep_without_it_drops_it() -> None:
+    path, stores = "/w/tuned.csv", _stores(Store(), _table)
+    imported = await import_delta(
+        _with_table(1, path, "rows A\n"), root=ROOT, head=ROOT, component="sglang", stores=stores
+    )
+    assert imported is not None
+    head = apply(ROOT, imported)
+
+    replaced = await import_delta(
+        _with_table(2, path, "rows A+B\n"), root=ROOT, head=head, component="sglang", stores=stores
+    )
+    dropped = await import_delta(_kept(3, ""), root=ROOT, head=head, component="sglang", stores=stores)
+    same = await import_delta(_with_table(4, path, "rows A\n"), root=ROOT, head=head, component="sglang", stores=stores)
+
+    assert replaced is not None and apply(head, replaced).kernels == (_artifact("rows A+B\n"),)
+    assert dropped is not None and apply(head, dropped).kernels == ()
+    assert same is None
+
+
+def test_a_keep_reads_what_the_agent_accepted_on_top_of_its_start_from_a_result_file() -> None:
+    """An agent that reports only the flags and NAME=VALUE environment it accepted runs with them over its start."""
+
+    source = ConfigSource("result.json", "accepted_config.flags", "accepted_config.env", "checkout", adds=True)
+    state = {"accepted_config": {"flags": "--mem-fraction-static 0.9 --page-size 16", "env": f"{TABLE_ENV}=/t.csv"}}
+
+    kept = read_kept_change(_started(ROOT.launch), state, source)
+
+    assert kept.server_args == "--tp 1 --mem-fraction-static 0.9 --page-size 16"
+    assert kept.envs == {"SGLANG_A": "1", TABLE_ENV: "/t.csv"}
+
+
+def test_an_environment_string_that_is_not_name_value_words_is_refused_naming_the_file() -> None:
+    source = ConfigSource("result.json", "flags", "env", "checkout", adds=True)
+
+    with pytest.raises(KeptChangeError, match="result.json"):
+        read_kept_change(_started(ROOT.launch), {"flags": "", "env": "--not-an-assignment"}, source)
+
+
+def _listing(*paths: object) -> str:
+    image = "/sgl-workspace/aiter/aiter/configs"
+    defaults = [f"{image}/a8w8_blockscale_bpreshuffle_tuned_gemm.csv", f"{image}/model_configs/dsv3.csv"]
+    return ":".join([*defaults, *map(str, paths)])
+
+
+def test_a_variable_listing_the_image_s_tables_before_the_agent_s_own_carries_only_the_agent_s_rows(
+    tmp_path: Path,
+) -> None:
+    own, other = tmp_path / "worktree" / "a.csv", tmp_path / "agent" / "b.csv"
+    for path, rows in ((own, "1,5120,5120\n64,5120,5120\n"), (other, "64,5120,5120\n8192,5120,5120\n")):
+        path.parent.mkdir(parents=True)
+        path.write_text(f"M,N,K\n{rows}", encoding="utf-8")
+    envs = {TABLE_ENV: _listing(own, other), "AITER_CONFIG_GEMM_BF16": _listing(tmp_path / "elsewhere.csv")}
+
+    kept = with_tables(_kept(1, "", envs=envs), (own.parent, other.parent))
+
+    assert kept.tables == {envs[TABLE_ENV]: "M,N,K\n1,5120,5120\n64,5120,5120\n8192,5120,5120\n"}
+
+
+def test_tables_of_one_variable_under_other_headers_are_refused(tmp_path: Path) -> None:
+    (tmp_path / "a.csv").write_text("M,N,K\n1,1,1\n", encoding="utf-8")
+    (tmp_path / "b.csv").write_text("M,N,K,us\n1,1,1,2.0\n", encoding="utf-8")
+    envs = {TABLE_ENV: _listing(tmp_path / "a.csv", tmp_path / "b.csv")}
+
+    with pytest.raises(KeptChangeError, match="headers"):
+        with_tables(_kept(1, "", envs=envs), (tmp_path,))
+
+
+def test_a_variable_listing_only_the_image_s_tables_stays_a_launch_value(tmp_path: Path) -> None:
+    kept = with_tables(_kept(1, "", envs={TABLE_ENV: _listing()}), (tmp_path,))
+
+    assert kept.tables == {}
+
+
+ROOT_COMMIT = "a" * 40
+
+
+def _arbor_keep(outbox: Path, value: str, copied: dict[str, bytes], digests: dict[str, str] | None = None) -> None:
+    """Snapshot 1 of ``outbox`` as Arbor writes one whose ``TABLE_ENV`` is the pathsep list ``value``: each part in
+    ``copied`` copied under ``tables/<VAR>/<k>-<basename>`` in list order, the other parts in its path only."""
+
+    directory = outbox / "0001"
+    (directory / "tables" / TABLE_ENV).mkdir(parents=True)
+    files = []
+    for k, part in enumerate(value.split(":")):
+        if part not in copied:
+            continue
+        file = f"tables/{TABLE_ENV}/{k}-{Path(part).name}"
+        (directory / file).write_bytes(copied[part])
+        digest = (digests or {}).get(part, hashlib.sha256(copied[part]).hexdigest())
+        files.append({"path": part, "file": file, "sha256": digest, "bytes": len(copied[part])})
+    keep = {"number": 1, "previous": None, "root": ROOT_COMMIT, "parent": ROOT_COMMIT, "commit": "b" * 40,
+            "change": "own rows", "tables": {TABLE_ENV: {"path": value, "files": files}}}  # fmt: skip
+    (directory / "keep.json").write_text(json.dumps(keep), encoding="utf-8")
+    (directory / "change.patch").write_text("", encoding="utf-8")
+    config = {"server_flags": ROOT.launch.server_args, "server_env": {TABLE_ENV: value}}
+    (directory / "config.json").write_text(json.dumps(config), encoding="utf-8")
+
+
+def _read(outbox: Path, copies: tuple[str, ...]) -> KeptChange:
+    return read_snapshot(outbox, 1, ROOT_COMMIT, "".join, ComponentStart(ROOT.launch, {}, copies))
+
+
+def _start_files(tmp_path: Path) -> tuple[list[Path], Path, Path]:
+    """MB's private copies of the image's default tables, the start's rows and the agent's own rows, on disk."""
+
+    agent = tmp_path / "agent"
+    defaults = [agent / "start-tables" / TABLE_ENV / "a.csv", agent / "start-tables" / TABLE_ENV / "model" / "b.csv"]
+    start, own = agent / "start-tables" / "files" / "rows.csv", agent / "workspace" / "own.csv"
+    texts = ("M,N,K\n1,5120,5120\n", "M,N,K\n2,5120,5120\n", "M,N,K\n64,5120,5120\n", "M,N,K\n256,5120,5120\n")
+    for path, text in zip((*defaults, start, own), texts, strict=True):
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(text, encoding="utf-8")
+    return defaults, start, own
+
+
+def test_a_snapshot_reads_every_file_a_multi_part_aiter_value_lists_as_one_table_over_the_image_s(
+    tmp_path: Path,
+) -> None:
+    defaults, start, own = _start_files(tmp_path)
+    value = ":".join([*map(str, defaults), _listing(start, own)])
+    _arbor_keep(tmp_path / "outbox", value, {str(path): path.read_bytes() for path in (*defaults, start, own)})
+
+    kept = _read(tmp_path / "outbox", tuple(map(str, defaults)))
+
+    on_disk = with_tables(_kept(1, "", envs={TABLE_ENV: _listing(start, own)}), (tmp_path,))
+    assert kept.envs[TABLE_ENV] == value and kept.uncopied == ()
+    assert (
+        kept.tables == {value: on_disk.tables[_listing(start, own)]} == {value: "M,N,K\n64,5120,5120\n256,5120,5120\n"}
+    )
+
+
+def test_the_tables_of_a_vllm_image_s_aiter_are_the_image_s_not_the_agent_s_rows(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # In the vLLM image aiter lives in the Python's site-packages, not the SGLang workspace, and its
+    # default tables were read as the agent's own rows.
+    configs = tmp_path / "site-packages" / "aiter" / "configs"
+    monkeypatch.setattr(agent_import, "image_configs", lambda: configs)
+    defaults = [configs / "bf16_tuned_gemm.csv", configs / "model_configs" / "llama70B_bf16_tuned_gemm.csv"]
+    own = tmp_path / "worktree" / "arbor" / "aiter_tables" / "qwen3_bf16_tuned_gemm.csv"
+    texts = ("M,N,K\n1,4096,4096\n", "M,N,K\n2,4096,4096\n", "M,N,K\n8,6144,4096\n")
+    for path, text in zip((*defaults, own), texts, strict=True):
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(text, encoding="utf-8")
+    value = ":".join(map(str, (*defaults, own)))
+    _arbor_keep(tmp_path / "outbox", value, {str(path): path.read_bytes() for path in (*defaults, own)})
+
+    kept = _read(tmp_path / "outbox", ())
+
+    assert kept.envs[TABLE_ENV] == value and kept.tables == {value: "M,N,K\n8,6144,4096\n"}
+
+
+def test_a_multi_part_value_whose_copy_does_not_match_its_sha256_or_is_missing_is_refused(tmp_path: Path) -> None:
+    defaults, start, own = _start_files(tmp_path)
+    value = ":".join(map(str, (*defaults, start, own)))
+    copied = {str(path): path.read_bytes() for path in (*defaults, start, own)}
+    _arbor_keep(tmp_path / "bad", value, copied, digests={str(own): "0" * 64})
+    _arbor_keep(tmp_path / "missing", value, copied)
+    (tmp_path / "missing" / "0001" / "tables" / TABLE_ENV / "3-own.csv").unlink()
+    _arbor_keep(tmp_path / "unlisted", value, {str(path): copied[str(path)] for path in (*defaults, own)})
+
+    with pytest.raises(KeptChangeError, match="sha256"):
+        _read(tmp_path / "bad", tuple(map(str, defaults)))
+    with pytest.raises(KeptChangeError, match="cannot be read"):
+        _read(tmp_path / "missing", tuple(map(str, defaults)))
+    with pytest.raises(KeptChangeError, match=str(start)):
+        _read(tmp_path / "unlisted", tuple(map(str, defaults)))
+
+
+#: The installed ``config.py`` the source tests edit: lines far enough apart that git writes a hunk for each.
+LINES = [f"line_{number} = {number}\n" for number in range(1, 31)]
+BARE = Recipe("sha256:" + "d" * 64, launch=ROOT.launch, components=(ComponentPatches("vllm", SGLANG, PIN),))
+
+
+@dataclass
+class Source:
+    """An agent's workspace at the root of a session whose experiment repository builds on the same installed file."""
+
+    workspace: BranchWorktree
+    repo: GitExperimentRepo
+    root: str
+    root_commit: str
+    installed: PackageBase
+    blobs: LocalBlobStore
+
+    def keep(self, **lines: str) -> str:
+        """The workspace's cumulative patch once each named line holds its new text."""
+        text = [f"{name} = {lines[name]}\n" if name in lines else line for line, name in _named(LINES)]
+        (self.workspace.path / "vllm" / "config.py").write_text("".join(text))
+        return self.workspace.diff_from(self.root_commit, "vllm")
+
+    def stores(self, head: str) -> KeepStores:
+        async def increment(imported: tuple[PatchRef, ...], cumulative: str) -> str:
+            texts = [await self.repo.patch_text(head, ref.path) for ref in imported]
+            return self.workspace.diff_between(self.root_commit, texts, cumulative, "vllm")
+
+        return KeepStores(self.repo.store_patch, _no_table, increment)
+
+    async def imported(self, kept: KeptChange, branch: str, head: str) -> str:
+        """``kept`` imported against ``head`` and committed onto ``branch``, as the gate commits a gain."""
+        recipe = await self.repo.read_recipe(head)
+        delta = await import_delta(kept, root=BARE, head=recipe, component="vllm", stores=self.stores(head))
+        assert delta is not None
+        return await self.repo.commit(branch, head, apply(recipe, delta), f"keep {kept.seq}")
+
+    def config(self, recipe: Recipe) -> str:
+        stack = recipe.component("vllm")
+        assert stack is not None
+        [entry] = apply_patch_stack(stack, COMPONENT_LAYOUTS["vllm"], self.installed, self.blobs).entries
+        return self.blobs.get(entry.blob).decode()
+
+
+def _named(lines: list[str]) -> list[tuple[str, str]]:
+    return [(line, line.split(" = ")[0]) for line in lines]
+
+
+async def _source(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Source:
+    package = tmp_path / "site-packages" / "vllm"
+    package.mkdir(parents=True)
+    (package / "config.py").write_text("".join(LINES))
+    installed = PackageBase("vllm", package, None, None)
+    monkeypatch.setattr(worktree_module, "locate_installed_package", lambda _layout: installed)
+    base = SourceBase(tmp_path / "source")
+    base.build(["vllm"])
+    workspace = base.worktree("b01", tmp_path / "workspace")
+    blobs = LocalBlobStore(tmp_path / "blobs")
+    repo = GitExperimentRepo(tmp_path / "experiments.git", blobs, lambda _layout: installed)
+    root = await repo.init_root(BARE)
+    await repo.create_branch("b01", root)
+    return Source(workspace, repo, root, workspace.commit(), installed, blobs)
+
+
+def _expected(**lines: str) -> str:
+    return "".join(f"{name} = {lines[name]}\n" if name in lines else line for line, name in _named(LINES))
+
+
+async def test_a_later_keep_stacks_only_its_own_change_on_the_imports_the_head_committed(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    source = await _source(tmp_path, monkeypatch)
+    first = await source.imported(_kept(1, source.keep(line_2="20")), "b01", source.root)
+
+    second = _kept(2, source.keep(line_2="20", line_25="250"))
+    head = await source.repo.read_recipe(first)
+    delta = await import_delta(second, root=BARE, head=head, component="vllm", stores=source.stores(first))
+
+    assert delta is not None
+    [change] = delta.components
+    assert change.remove_patches == ()
+    [added] = change.add_patches
+    text = source.blobs.get(added.sha256).decode()
+    assert "+line_25 = 250" in text and "line_2 =" not in text
+    made = apply(head, delta)
+    assert made.component("vllm").patches[:-1] == head.component("vllm").patches
+    assert source.config(made) == _expected(line_2="20", line_25="250")
+
+
+async def test_a_rejected_keep_s_change_rides_in_the_next_import_against_the_head_that_never_took_it(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    source = await _source(tmp_path, monkeypatch)
+    source.keep(line_2="20")
+    second = _kept(2, source.keep(line_2="20", line_25="250"))
+
+    delta = await import_delta(second, root=BARE, head=BARE, component="vllm", stores=source.stores(source.root))
+
+    assert delta is not None
+    assert source.config(apply(BARE, delta)) == _expected(line_2="20", line_25="250")
+
+
+async def test_a_keep_the_head_already_is_imports_nothing(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    source = await _source(tmp_path, monkeypatch)
+    first = await source.imported(_kept(1, source.keep(line_2="20")), "b01", source.root)
+
+    again = _kept(2, source.keep(line_2="20"))
+    head = await source.repo.read_recipe(first)
+
+    assert await import_delta(again, root=BARE, head=head, component="vllm", stores=source.stores(first)) is None
+
+
+async def test_a_keep_carries_an_earlier_unmerged_keep_that_clashes_with_integration_as_its_one_conflict(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Integration holds b04's patch over the lines of b01's first keep, so that keep never merged.
+    A merge carries b01's lineage from the merge base, so the first keep's patch is the conflict and the second keep's
+    hunk lands beside b04's."""
+
+    source = await _source(tmp_path, monkeypatch)
+    b04_text = source.keep(line_2="2000", line_10="1000")
+    await source.repo.create_branch("b04", source.root)
+    b04 = await source.imported(_kept(1, b04_text), "b04", source.root)
+    integration = await source.repo.commit_integration(
+        source.root, (await source.repo.merge(b04, source.root)).delta, (b04,)
+    )
+    first = await source.imported(_kept(1, source.keep(line_2="20")), "b01", source.root)
+    second = await source.imported(_kept(2, source.keep(line_2="20", line_25="250")), "b01", first)
+
+    merge = await source.repo.merge(second, integration)
+
+    first_patch = (await source.repo.read_recipe(first)).components[0].patches[0].path
+    assert [conflict.path for conflict in merge.patch_conflicts] == [first_patch]
+    assert merge.carried == (first, second) and merge.replaced_patches == ()
+    merged = apply(await source.repo.read_recipe(integration), merge.delta)
+    assert source.config(merged) == _expected(line_2="2000", line_10="1000", line_25="250")
+
+
+#: A framework variable and the server flag it needs off (agent_import.FLAG_CONFLICTS).
+MONOKERNEL, REPLAYSSM = "SGLANG_ENABLE_QWEN4_MONOKERNEL", "--enable-linear-replayssm-spec"
+SPEC_LAUNCH = LaunchConfig(f"--tp 1 {REPLAYSSM} --mem-fraction-static 0.8", {})
+
+
+def test_a_keep_that_sets_a_variable_needing_a_flag_off_is_read_without_it_and_names_it() -> None:
+    source = ConfigSource("agent/config.json", "server_flags", "server_env")
+    state = {"server_flags": SPEC_LAUNCH.server_args, "server_env": {MONOKERNEL: "1"}}
+
+    kept = read_kept_change(_started(SPEC_LAUNCH), state, source)
+    off = read_kept_change(_started(SPEC_LAUNCH, 2), {**state, "server_env": {MONOKERNEL: "0"}}, source)
+    valued = without_conflicts(KeptChange(3, "", f"--tp 1 {REPLAYSSM}=true", {MONOKERNEL: "1"}))
+
+    assert (kept.server_args, kept.disabled) == ("--tp 1 --mem-fraction-static 0.8", {REPLAYSSM: f"{MONOKERNEL}=1"})
+    assert (off.server_args, off.disabled) == (SPEC_LAUNCH.server_args, {})
+    assert (valued.server_args, valued.disabled) == ("--tp 1", {REPLAYSSM: f"{MONOKERNEL}=1"})
+
+
+def test_an_arbor_snapshot_that_sets_a_variable_needing_a_flag_off_is_read_without_the_flag(tmp_path: Path) -> None:
+    directory = tmp_path / "keeps" / "0001"
+    directory.mkdir(parents=True)
+    keep = {"number": 1, "previous": None, "root": ROOT_COMMIT, "parent": ROOT_COMMIT, "commit": "b" * 40,
+            "change": "the monokernel", "tables": {}}  # fmt: skip
+    (directory / "keep.json").write_text(json.dumps(keep), encoding="utf-8")
+    (directory / "change.patch").write_text("", encoding="utf-8")
+    config = {"server_flags": SPEC_LAUNCH.server_args, "server_env": {MONOKERNEL: "1"}}
+    (directory / "config.json").write_text(json.dumps(config), encoding="utf-8")
+
+    kept = read_snapshot(tmp_path / "keeps", 1, ROOT_COMMIT, "".join, ComponentStart(SPEC_LAUNCH, {}, ()))
+
+    assert (kept.server_args, kept.envs) == ("--tp 1 --mem-fraction-static 0.8", {MONOKERNEL: "1"})
+    assert kept.disabled == {REPLAYSSM: f"{MONOKERNEL}=1"}
+
+
+async def test_a_keep_imported_without_a_conflicting_flag_takes_it_off_the_head_s_launch() -> None:
+    root = Recipe(ROOT.base_image_digest, launch=SPEC_LAUNCH, components=ROOT.components)
+    kept = without_conflicts(_kept(1, "", args=SPEC_LAUNCH.server_args, envs={MONOKERNEL: "1"}))
+
+    delta = await import_delta(kept, root=root, head=root, component="sglang", stores=_stores(Store()))
+
+    assert delta is not None and REPLAYSSM in delta.config.remove_args
+    assert apply(root, delta).launch == LaunchConfig("--tp 1 --mem-fraction-static 0.8", {MONOKERNEL: "1"})
+
+
+#: The launch a round resolves from an InferenceX recipe, and the start commit's own arguments, which add to it.
+RESOLVED_FLAGS = f"--tp 1 {REPLAYSSM} --mem-fraction-static 0.8 --disable-radix-cache"
+OWN_LAUNCH = LaunchConfig("--chunked-prefill-size 4096")
+
+
+def _resolved_snapshot(tmp_path: Path, flags: str, envs: dict[str, str]) -> KeptChange:
+    """Snapshot 1 of an Arbor MB started on ``RESOLVED_FLAGS`` with ``OWN_LAUNCH`` added, run with ``flags``."""
+
+    directory = tmp_path / "keeps" / "0001"
+    directory.mkdir(parents=True)
+    keep = {"number": 1, "previous": None, "root": ROOT_COMMIT, "parent": ROOT_COMMIT, "commit": "b" * 40,
+            "change": "a resolved flag", "tables": {}}  # fmt: skip
+    (directory / "keep.json").write_text(json.dumps(keep), encoding="utf-8")
+    (directory / "change.patch").write_text("", encoding="utf-8")
+    (directory / "config.json").write_text(json.dumps({"server_flags": flags, "server_env": envs}), encoding="utf-8")
+    start = {"server_flags": f"{RESOLVED_FLAGS} {OWN_LAUNCH.server_args}", "server_env": {}}
+    return read_snapshot(tmp_path / "keeps", 1, ROOT_COMMIT, "".join, ComponentStart(OWN_LAUNCH, start, ()))
+
+
+def test_a_flag_of_the_resolved_launch_a_keep_runs_without_is_read_as_removed(tmp_path: Path) -> None:
+    flags = f"--tp 1 {REPLAYSSM} --mem-fraction-static 0.8 {OWN_LAUNCH.server_args}"
+
+    kept = _resolved_snapshot(tmp_path, flags, {})
+
+    assert (kept.server_args, kept.removed, kept.disabled) == (OWN_LAUNCH.server_args, ("--disable-radix-cache",), {})
+
+
+def test_a_flag_of_the_resolved_launch_a_variable_needs_off_is_read_as_removed_and_named(tmp_path: Path) -> None:
+    kept = _resolved_snapshot(tmp_path, f"{RESOLVED_FLAGS} {OWN_LAUNCH.server_args}", {MONOKERNEL: "1"})
+
+    assert (kept.server_args, kept.removed) == (OWN_LAUNCH.server_args, (REPLAYSSM,))
+    assert kept.disabled == {REPLAYSSM: f"{MONOKERNEL}=1"}
+
+
+async def test_a_keep_s_removal_from_the_resolved_launch_stays_on_the_head_s_launch_once() -> None:
+    kept = replace(_kept(1, "", envs={**ROOT.launch.envs, MONOKERNEL: "1"}), removed=(REPLAYSSM,))
+
+    delta = await import_delta(kept, root=ROOT, head=ROOT, component="sglang", stores=_stores(Store()))
+    assert delta is not None
+    head = apply(ROOT, delta)
+
+    assert head.launch == LaunchConfig(ROOT.launch.server_args, kept.envs, remove_args=(REPLAYSSM,))
+    assert await import_delta(kept, root=ROOT, head=head, component="sglang", stores=_stores(Store())) is None
+
+
+def test_a_keep_s_patch_is_read_byte_for_byte_with_a_lone_carriage_return_in_an_added_file(tmp_path: Path) -> None:
+    # A server log with a progress bar, as Arbor's landed tree carries: universal newlines would split its line.
+    patch = "--- /dev/null\n+++ b/eval/server.log\n@@ -0,0 +1 @@\n+Loading 10%\r 20%\r 30%\n"
+    _arbor_keep(tmp_path, "", {})
+    (tmp_path / "0001" / "change.patch").write_bytes(patch.encode())
+    assert _read(tmp_path, ()).source_patch == patch
+
+
+async def test_a_source_only_snapshot_keeps_the_evaluation_settings_the_recipe_sets(tmp_path: Path) -> None:
+    # MB starts Arbor with the recipe's GSM8K_MIN in its config; the snapshot runs with it too.
+    launch = LaunchConfig(ROOT.launch.server_args, {**ROOT.launch.envs, "GSM8K_MIN": "0.8"})
+    recipe = replace(ROOT, launch=launch)
+    _arbor_keep(tmp_path, "", {})
+    config = {"server_flags": launch.server_args, "server_env": dict(launch.envs)}
+    (tmp_path / "0001" / "config.json").write_text(json.dumps(config), encoding="utf-8")
+    (tmp_path / "0001" / "change.patch").write_text("diff\n", encoding="utf-8")
+
+    kept = read_snapshot(tmp_path, 1, ROOT_COMMIT, "".join, ComponentStart(launch, config, ()))
+    delta = await import_delta(kept, root=recipe, head=recipe, component="sglang", stores=_stores(Store()))
+
+    assert delta is not None and delta.config.unset_envs == () and delta.config.envs == {}
+
+
+def test_a_snapshot_whose_json_nests_too_deep_to_parse_is_refused(tmp_path: Path) -> None:
+    _arbor_keep(tmp_path, "", {})
+    (tmp_path / "0001" / "config.json").write_text("[" * 200_000 + "]" * 200_000, encoding="utf-8")
+
+    with pytest.raises(KeptChangeError, match="config.json"):
+        _read(tmp_path, ())
+
+
+def test_a_snapshot_listing_a_table_file_whose_path_is_no_string_is_refused(tmp_path: Path) -> None:
+    defaults, start, own = _start_files(tmp_path)
+    value = ":".join(map(str, (*defaults, own)))
+    _arbor_keep(tmp_path / "outbox", value, {str(path): path.read_bytes() for path in (*defaults, own)})
+    keep_file = tmp_path / "outbox" / "0001" / "keep.json"
+    keep = json.loads(keep_file.read_text(encoding="utf-8"))
+    keep["tables"][TABLE_ENV]["files"][-1]["path"] = [str(own)]
+    keep_file.write_text(json.dumps(keep), encoding="utf-8")
+
+    with pytest.raises(KeptChangeError, match=TABLE_ENV):
+        _read(tmp_path / "outbox", tuple(map(str, defaults)))
+
+
+@dataclass(frozen=True)
+class Keep:
+    """One snapshot of :func:`_outbox`: the files its change sets (to :data:`GONE` to delete one), its launch, the
+    tables it lists and what its ``keep.json`` says it retracts (``None``: no ``retracts``); a ``served`` one was made
+    on the root after the commit of the keep before it was gone, its ``files`` the whole tree."""
+
+    files: dict[str, str] = field(default_factory=dict)
+    envs: dict[str, str] = field(default_factory=dict)
+    flags: str = ""
+    tables: dict[str, object] = field(default_factory=dict)
+    retracts: object = None
+    served: bool = False
+
+
+GONE = "<deleted>"
+
+
+def _outbox(tmp_path: Path, *keeps: Keep) -> Path:
+    """Snapshots 1, 2, ... of an outbox, each made on the one before."""
+
+    outbox = tmp_path / "keeps"
+    for number, kept in enumerate(keeps, start=1):
+        directory = outbox / f"{number:04d}"
+        directory.mkdir(parents=True)
+        keep = {"number": number, "previous": number - 1 or None, "root": ROOT_COMMIT,
+                "parent": ROOT_COMMIT if number == 1 or kept.served else f"{number - 1}" * 40,
+                "commit": f"{number}" * 40, "change": f"keep {number}", "tables": kept.tables}  # fmt: skip
+        if kept.served:
+            keep["notes"] = f"the commit of keep {number - 1} is gone; this change is against the root"
+        if kept.retracts is not None:
+            keep["retracts"] = kept.retracts
+        (directory / "keep.json").write_text(json.dumps(keep), encoding="utf-8")
+        patch = "".join(f"diff --git a/{name} b/{name}\n{text}\n" for name, text in kept.files.items())
+        (directory / ("served.patch" if kept.served else "change.patch")).write_text(patch, encoding="utf-8")
+        launch = {"server_flags": kept.flags, "server_env": kept.envs}
+        (directory / "config.json").write_text(json.dumps(launch), encoding="utf-8")
+    return outbox
+
+
+def _applied(patches: list[str]) -> str:
+    """What the patches of :func:`_outbox` make of the root, as one patch from it: each file as the last sets it."""
+    files: dict[str, str] = {}
+    for patch in patches:
+        for section in patch.split("diff --git a/")[1:]:
+            header, text = section.split("\n", 1)
+            files[header.split(" b/", 1)[-1]] = text
+    return "".join(f"diff --git a/{name} b/{name}\n{text}" for name, text in files.items() if text != f"{GONE}\n")
+
+
+def _read_newest(outbox: Path) -> KeptChange:
+    newest = max(int(directory.name) for directory in outbox.iterdir())
+    return read_snapshot(outbox, newest, ROOT_COMMIT, _applied, ComponentStart(LaunchConfig(""), {}, ()))
+
+
+FINDING = {"iteration": 7, "keep": 2, "finding": "iter7-agentx-283-selection-invalid"}
+TOPK = Keep({"vllm/topk.py": "v1"}, {"TOPK": "1"}, "--kv-cache-dtype fp8", {"T": {"sha256": "1" * 64}})
+
+
+def test_a_snapshot_that_undoes_only_the_keep_it_retracts_names_it_and_nothing_beyond(tmp_path: Path) -> None:
+    outbox = _outbox(
+        tmp_path,
+        Keep({"vllm/a.py": "v1"}),
+        TOPK,
+        replace(TOPK, files={"vllm/b.py": "v1"}),
+        Keep({"vllm/topk.py": GONE}, retracts=FINDING),
+    )
+
+    assert _read_newest(outbox).retracts == Retraction(7, 2, "iter7-agentx-283-selection-invalid", 3, "")
+
+
+@pytest.mark.parametrize(
+    ("retraction", "beyond"),
+    [
+        (Keep({"vllm/topk.py": GONE, "vllm/b.py": "v1"}), "vllm/b.py"),
+        (Keep({"vllm/topk.py": "v2"}), "vllm/topk.py"),
+        (Keep({"vllm/topk.py": GONE}, {"TOPK": "8"}), "TOPK"),
+        (Keep({"vllm/topk.py": GONE}, flags="--quantization fp8"), "--quantization"),
+        (Keep({"vllm/topk.py": GONE}, tables={"U": {"sha256": "2" * 64}}), "U"),
+    ],
+    ids=["another-file", "another-content", "another-value", "another-flag", "another-table"],
+)
+def test_a_snapshot_that_does_more_than_undo_the_keep_it_retracts_names_what_else_it_changes(
+    tmp_path: Path, retraction: Keep, beyond: str
+) -> None:
+    outbox = _outbox(tmp_path, Keep({"vllm/a.py": "v1"}), TOPK, replace(retraction, retracts=FINDING))
+
+    kept = _read_newest(outbox).retracts
+
+    assert kept is not None and kept.beyond == beyond
+
+
+@pytest.mark.parametrize(
+    "retracts",
+    [7, {"iteration": 7, "keep": 4}, {"iteration": "7", "keep": 4, "finding": "f"}, {**FINDING, "keep": True}],
+)
+def test_a_snapshot_whose_retraction_names_no_iteration_keep_and_finding_is_refused(
+    tmp_path: Path, retracts: object
+) -> None:
+    outbox = _outbox(tmp_path, Keep({"vllm/topk.py": "v1"}, retracts=retracts))
+
+    with pytest.raises(KeptChangeError, match="retracts"):
+        _read_newest(outbox)
+
+
+def test_a_malformed_retraction_of_an_earlier_snapshot_does_not_refuse_the_keeps_made_on_it(tmp_path: Path) -> None:
+    outbox = _outbox(tmp_path, Keep({"vllm/topk.py": "v1"}, retracts=7), Keep({"vllm/b.py": "v1"}))
+
+    assert _read_newest(outbox).retracts is None
+
+
+def test_a_retraction_of_a_keep_made_on_the_root_counts_only_what_that_keep_changed_not_its_whole_tree(
+    tmp_path: Path,
+) -> None:
+    rebased = Keep({"vllm/a.py": "v1", "vllm/topk.py": "v1"}, {"TOPK": "1"}, served=True)
+    undone = Keep({"vllm/topk.py": GONE}, retracts=FINDING)
+    also = Keep({"vllm/topk.py": GONE, "vllm/a.py": "v2"}, retracts=FINDING)
+
+    clean = _read_newest(_outbox(tmp_path / "clean", Keep({"vllm/a.py": "v1"}), rebased, undone)).retracts
+    more = _read_newest(_outbox(tmp_path / "more", Keep({"vllm/a.py": "v1"}), rebased, also)).retracts
+
+    assert clean is not None and clean.beyond == ""
+    assert more is not None and more.beyond == "vllm/a.py"
+
+
+def test_a_retraction_whose_undo_would_erase_a_later_keep_s_change_to_the_same_entry_names_it(tmp_path: Path) -> None:
+    outbox = _outbox(
+        tmp_path,
+        Keep({"vllm/a.py": "v1"}),
+        Keep({"vllm/topk.py": "v1"}, {"TOPK": "1"}),
+        Keep({"vllm/topk.py": "v2"}, {"TOPK": "1"}),
+        Keep({"vllm/topk.py": GONE}, retracts=FINDING),
+    )
+
+    retraction = _read_newest(outbox).retracts
+
+    assert retraction is not None and retraction.beyond == "vllm/topk.py"
+
+
+def test_a_retraction_of_a_keep_before_the_one_its_chain_restarts_from_is_out_of_scope(tmp_path: Path) -> None:
+    outbox = _outbox(
+        tmp_path,
+        Keep({"vllm/a.py": "v1"}),
+        Keep({"vllm/topk.py": "v1"}, {"TOPK": "1"}),
+        Keep({"vllm/a.py": "v1"}, served=True),
+        Keep({}, retracts=FINDING),
+    )
+
+    retraction = _read_newest(outbox).retracts
+
+    assert retraction is not None and retraction.beyond == "keep 2 is not among the keeps it was made on"

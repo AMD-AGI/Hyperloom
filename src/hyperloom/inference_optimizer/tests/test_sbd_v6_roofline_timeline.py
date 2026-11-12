@@ -161,14 +161,14 @@ def test_a_run_that_succeeded_still_reports_its_engine_dying(tmp_path: Path) -> 
             status="succeeded",
             disable_cuda_graph=False,
             profile_result=_profile_result(),
-            server_liveness={"pidfiles": 1, "alive": 0, "dead_with_pidfile": 1},
+            server_liveness={"reports": 1, "server_died": 1, "server_outlived_teardown": 0},
         ),
     )
     recorder.finish_failed(phase="trace_analyze", message="stopped")
 
     run = _actions(tmp_path)[0]["profile"]["runs"][0]
     assert run["status"] == "succeeded"
-    assert run["server_liveness"]["dead_with_pidfile"] == 1
+    assert run["server_liveness"]["server_died"] == 1
 
 
 def test_shape_capture_dispatch_does_not_claim_a_measured_arm(tmp_path: Path) -> None:
@@ -209,8 +209,6 @@ def _validate(**overrides: Any) -> dict[str, Any]:
         },
         "trace_dir_level": {
             "selected_role": "source",
-            "production_selected_role": "source",
-            "production_would_analyze_split_chunk": False,
             "file_count_by_role": {"source": 1, "capture_sidecar": 3, "split_chunk": 0},
             "candidates": [{"path": f"/w/t/{i}.json", "bytes": 10, "role": "source"} for i in range(40)],
             "capture_sidecar_probe": {
@@ -575,6 +573,30 @@ def test_degraded_when_attribution_folded(tmp_path: Path) -> None:
     event = _roofline_events(tmp_path)[0]
     assert event["status"] == "degraded"
     assert event["ext"]["actions"][0]["outcome"]["kernel_attribution_degraded"] is True
+
+
+@pytest.mark.parametrize(("analysis_degraded", "status"), [(True, "degraded"), (False, "succeeded")])
+def test_degraded_when_the_analysis_is_degraded(tmp_path: Path, analysis_degraded: bool, status: str) -> None:
+    recorder = _recorder(reason="kernel_followup")
+    recorder.begin()
+    recorder.finish_succeeded(
+        RooflineConclusion(
+            snapshot_id=2,
+            hot_kernel_count=3,
+            kernel_attribution_degraded=False,
+            analysis_degraded=analysis_degraded,
+            cached={"roofline_snapshot_id": 2, "analysis_md_path": "/w/reports/analysis.md"},
+            trace_path="/w/traces/a.gz",
+        )
+    )
+
+    event = _roofline_events(tmp_path)[0]
+    outcome = event["ext"]["actions"][0]["outcome"]
+    assert (event["status"], outcome["kernel_attribution_degraded"], outcome["analysis_degraded"]) == (
+        status,
+        False,
+        analysis_degraded,
+    )
 
 
 def _write_sidecar(session_dir: Path, **overrides: Any) -> str:

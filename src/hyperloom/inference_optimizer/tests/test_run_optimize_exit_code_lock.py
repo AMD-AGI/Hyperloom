@@ -91,6 +91,7 @@ def test_optimize_has_no_supervisor_launcher_hooks() -> None:
     assert "orchestrator.supervisor" not in source
 
 
+@pytest.mark.usefixtures("process_environ")
 def test_multinode_tp_exceeds_total_gpus_exits_2() -> None:
     """Gate 1: TP larger than nodes*gpus_per_node fails fast with exit code 2."""
     # nodes=2, gpus_per_node=1 -> total_gpus=2 < tp=4.
@@ -100,6 +101,7 @@ def test_multinode_tp_exceeds_total_gpus_exits_2() -> None:
     assert exc.value.code == 2
 
 
+@pytest.mark.usefixtures("process_environ")
 def test_multinode_ep_exceeds_tp_exits_2() -> None:
     """Gate 2: EP greater than TP fails fast with exit code 2."""
     # total_gpus=16 >= tp=2 so gate 1 passes; ep=4 > tp=2 trips gate 2.

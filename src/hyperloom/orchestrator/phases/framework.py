@@ -16,15 +16,15 @@ from hyperloom_common.coerce import first_str, to_list, to_mapping
 from hyperloom.inference_optimizer.session.optimization_journal import Verdict
 
 from . import machine_state as _phase_state
-from ..state.task_registry import TaskNotFound, TaskSpec
+from ..state.task_registry import Task, TaskNotFound, TaskSpec
 from ..state.shared_state import resolve_grading_anchor_tput, inject_stack_base_params
 
 if TYPE_CHECKING:
     from ..predictor.payload import PhaseBudget
     from ..predictor.view import SessionView
-    from ..state.task_registry import Task
     from .machine import Transition
-from ..loop.proposals import PendingProposal, integrate_review_in_flight, record_proposal
+from ..state.pending_proposal import PendingProposal
+from ..loop.proposals import integrate_review_in_flight, record_proposal
 from ..actions.executors import _integrate_vocabulary
 from hyperloom.common.framework_arm import LOCAL_EXPLORE_CANDIDATE_PREFIX
 from hyperloom.orchestrator.lever import LEVER_SOURCE_PATCH, LEVER_UPSTREAM_PR, patch_owner_phase

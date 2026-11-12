@@ -8,6 +8,8 @@ from __future__ import annotations
 from hyperloom.inference_optimizer.breakdown.stop_reasons import (
     AGENTX_PREFLIGHT_STOP_REASON,
     BACKEND_UNHEALTHY_STOP_REASON,
+    HOST_GPUS_UNAVAILABLE,
+    INFERENCEX_CHECKOUT_MISSING_STOP_REASON,
     PATCH_RECOVERY_INCOMPLETE_STOP_REASON,
 )
 from ..measurement.baseline_budget import BASELINE_BUDGET_STOP_EXPLANATIONS
@@ -40,6 +42,13 @@ STOP_REASON_EXPLANATIONS: dict[str, str] = {
         "The checkpoint path this run serves resolves to nothing on this host. No patch to the model or the "
         "framework source repairs that, so the run stopped instead of spending rounds authoring against the machine."
     ),
+    HOST_GPUS_UNAVAILABLE: (
+        "The benchmark harness refused to launch the baseline because this host has fewer idle GPUs than the run "
+        "needs; no server was started. The failed baseline's error (state.json last_action_failures, and the run "
+        "log) names each GPU it turned down and why, such as a running compute process. No retry or framework "
+        "patch frees a GPU another workload holds, so the run stopped on the first refusal. Stop that workload or "
+        "pin the run to idle GPUs, then resume."
+    ),
     # PRELUDE-phase early exits (before optimization begins).
     "prelude_baseline_failed": "PRELUDE baseline failed before optimization could start; see the baseline failure summary.",
     "time_exhausted_during_prelude": (
@@ -68,9 +77,9 @@ STOP_REASON_EXPLANATIONS: dict[str, str] = {
         "Warm replay rollback could not restore every Recipe/Kernel mutation; "
         "the run stopped to avoid continuing from an uncertain code state."
     ),
-    "active_inferencex_checkout_missing": (
-        "The session-authoritative InferenceX checkout is missing during "
-        "resume; the run stopped instead of falling back to a different tree."
+    INFERENCEX_CHECKOUT_MISSING_STOP_REASON: (
+        "The session-authoritative InferenceX checkout was missing during resume; the run stopped instead of "
+        "falling back to a different tree. Only sessions from before the benchmark client was pinned end this way."
     ),
     # Search / phase plateaus and completions.
     "sweep_done": "SWEEP finished the concurrency ladder.",
