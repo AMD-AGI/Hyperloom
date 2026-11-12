@@ -6,7 +6,6 @@
 from __future__ import annotations
 
 import json
-import sys
 from pathlib import Path
 
 import pytest
@@ -15,7 +14,6 @@ import yaml
 from hyperloom.inference_optimizer.framework_registry import server_args_env_name
 from hyperloom.inference_optimizer.grid_server_args import (
     compose_server_args,
-    remove_server_args,
     removals_absent_from_args,
 )
 from hyperloom.orchestrator.actions.executors import _grid_runner as gr
@@ -30,17 +28,6 @@ from hyperloom.orchestrator.actions.executors import _grid_variant_filter as vf
 
 def _variant(name: str, args: str = "", envs: dict | None = None) -> gr.GridVariant:
     return gr.GridVariant(name=name, extra_server_args=args, extra_envs=envs or {})
-
-
-def test_validate_magpie_python_override_requires_python(tmp_path):
-    py = tmp_path / "python3"
-    py.write_text("", encoding="utf-8")
-    bash = tmp_path / "bash"
-    bash.write_text("", encoding="utf-8")
-    assert gr._validate_magpie_python_override(str(py)) == str(py)
-    with pytest.raises(ValueError, match="Python interpreter"):
-        gr._validate_magpie_python_override(str(bash))
-    assert gr._validate_magpie_python_override(sys.executable).endswith(Path(sys.executable).name)
 
 
 # -- apply_compatibility_filter -------------------------------------------
@@ -241,28 +228,21 @@ def test_probe_swallows_subprocess_error(monkeypatch) -> None:
 
 
 # -- _resolve_probe_python / probe interpreter selection ------------------
-def test_resolve_probe_python_prefers_magpie_interpreter(monkeypatch) -> None:
-    # The harness interpreter is used directly; no vllm-exe resolution is tried.
-    monkeypatch.setattr(bi, "_resolve_magpie_python", lambda _env=None: "/srv/venv/bin/python")
-    monkeypatch.setattr(
-        bi.shutil, "which", lambda *_a, **_k: (_ for _ in ()).throw(AssertionError("which() should not be called"))
-    )
-    assert bi._resolve_probe_python() == "/srv/venv/bin/python"
-
-
-def test_resolve_probe_python_falls_back_to_vllm_venv(monkeypatch) -> None:
-    # magpie_python is the canonical default -> pin the venv that backs ``vllm serve``.
-    monkeypatch.setattr(bi, "_resolve_magpie_python", lambda _env=None: "/opt/venv/bin/python")
+def test_resolve_probe_python_takes_the_venv_that_backs_vllm_serve(monkeypatch) -> None:
+    monkeypatch.delenv("VLLM_VENV_ROOT", raising=False)
     monkeypatch.setattr(bi.shutil, "which", lambda name, **_k: "/other/venv/bin/vllm" if name == "vllm" else None)
     monkeypatch.setattr(bi.os.path, "exists", lambda p: p == "/other/venv/bin/python")
     assert bi._resolve_probe_python() == "/other/venv/bin/python"
 
 
-def test_resolve_probe_python_no_bare_python3_fallback(monkeypatch) -> None:
-    # With no resolvable vllm exe, fall back to the canonical magpie default — never a bare "python3".
-    monkeypatch.setattr(bi, "_resolve_magpie_python", lambda _env=None: "/opt/venv/bin/python")
-    monkeypatch.setattr(bi.shutil, "which", lambda *_a, **_k: None)
-    assert bi._resolve_probe_python() == "/opt/venv/bin/python"
+@pytest.mark.parametrize(("image", "expected"), [(True, "/opt/venv/bin/python"), (False, "/usr/bin/python3")])
+def test_resolve_probe_python_without_vllm_takes_the_images_interpreter_else_python3(
+    monkeypatch, image, expected
+) -> None:
+    monkeypatch.delenv("VLLM_VENV_ROOT", raising=False)
+    monkeypatch.setattr(bi.shutil, "which", lambda name, **_k: "/usr/bin/python3" if name == "python3" else None)
+    monkeypatch.setattr(bi.Path, "is_file", lambda self: image and str(self) == "/opt/venv/bin/python")
+    assert bi._resolve_probe_python("sglang") == expected
 
 
 def test_probe_invokes_resolved_interpreter(monkeypatch) -> None:
@@ -290,7 +270,7 @@ def test_runtime_overrides_model_precision_and_gpu_no_framework_agent(monkeypatc
     monkeypatch.setenv("PRECISION", "fp8")
     for k in ("ISL", "OSL", "MAX_MODEL_LEN", "TP", "CONC", "ROCR_VISIBLE_DEVICES"):
         monkeypatch.delenv(k, raising=False)
-    bench: dict = {}  # no framework -> benchmark_script popped
+    bench: dict = {}
     apply_runtime_benchmark_overrides(
         bench,
         model_path="/models/x",
@@ -298,16 +278,8 @@ def test_runtime_overrides_model_precision_and_gpu_no_framework_agent(monkeypatc
     )
     assert bench["model"] == "/models/x"
     assert bench["precision"] == "fp8"
-    assert bench["runner_type"] == "mi355x"
+    assert "runner_type" not in bench
     assert "benchmark_script" not in bench
-
-
-def test_runtime_overrides_framework_pins_generic_script(monkeypatch) -> None:
-    for k in ("PRECISION", "ISL", "OSL", "MAX_MODEL_LEN", "TP", "CONC", "ROCR_VISIBLE_DEVICES"):
-        monkeypatch.delenv(k, raising=False)
-    bench = {"framework": "sglang"}
-    apply_runtime_benchmark_overrides(bench, gpu_type="mi300x")
-    assert bench["benchmark_script"] == "sglang_mi300x.sh"
 
 
 def test_runtime_overrides_env_ints_and_rocr_autofill(monkeypatch) -> None:
@@ -516,37 +488,6 @@ def test_launch_keeps_what_the_persisted_recipe_strips() -> None:
     launched = compose_server_args(base_extra_args="--no-enable-prefix-caching --max-num-seqs 256")
     assert "--no-enable-prefix-caching" in launched
     assert strip_benchmark_harness_flags(launched) == "--max-num-seqs 256"
-
-
-def test_remove_server_args_accepts_multi_flag_string() -> None:
-    out = remove_server_args(
-        "--flag-a --flag-b --flag-c 3 --keep 4",
-        "--flag-a --flag-b --flag-c",
-    )
-    assert out == "--keep 4"
-
-
-def test_remove_server_args_keeps_a_sibling_json_value_parseable() -> None:
-    """Removing one flag must not corrupt a JSON-valued sibling."""
-    args = (
-        '--online_quant_config {"global_quant_config":"ptpc_fp8",'
-        '"exclude_layer":["*.mlp.gate","*expert*"]} '
-        "--no-enable-prefix-caching --tp 8"
-    )
-    out = remove_server_args(args, ["--no-enable-prefix-caching"])
-    tokens = out.split(" ")
-    assert tokens[0] == "--online_quant_config"
-    assert json.loads(tokens[1]) == {
-        "global_quant_config": "ptpc_fp8",
-        "exclude_layer": ["*.mlp.gate", "*expert*"],
-    }
-    assert tokens[2:] == ["--tp", "8"]
-
-
-def test_remove_server_args_unbalanced_brace_drops_only_its_own_flag() -> None:
-    """A stray ``}`` is not a JSON blob and must not take the tail with it."""
-    out = remove_server_args("--foo a} --tp 8 --max-num-seqs 64", ["--foo"])
-    assert out == "--tp 8 --max-num-seqs 64"
 
 
 def test_removals_absent_from_args_drops_only_what_the_args_assert() -> None:

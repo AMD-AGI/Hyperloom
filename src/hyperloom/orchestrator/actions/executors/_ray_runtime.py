@@ -5,30 +5,53 @@
 
 from __future__ import annotations
 
+import contextlib
+import ctypes
+import enum
 import json
 import logging
 import os
 import resource
+import signal
 import subprocess
 import sys
 import tempfile
 import threading
-from typing import Optional, Tuple
+import time
+from dataclasses import dataclass
+from typing import Iterator, Optional, Tuple
 
 log = logging.getLogger(__name__)
 
 # Minimum soft RLIMIT_NOFILE the Ray raylet needs to stay up.
 DEFAULT_MIN_NOFILE = 65536
 DEFAULT_RAY_STATUS_TIMEOUT_SEC = 5.0
+#: How long a head that did not answer ``ray status`` in time, or was just started, is given to answer before it is
+#: reported unreachable. A healthy head on an R9700 host needs about 5.4 s; 30 s answered without a restart there.
+DEFAULT_RAY_READY_TIMEOUT_SEC = 30.0
+_RAY_READY_POLL_INTERVAL_SEC = 1.0
+_RAY_READY_MIN_PROBE_TIMEOUT_SEC = 0.1
 DEFAULT_RAY_STOP_TIMEOUT_SEC = 30.0
 #: Wall-clock bound on the ``ray.init`` connect handshake. Registration with the
 #: raylet has no timeout of its own, so a raylet that accepts the socket and then
 #: never replies blocks the caller forever. Observed: a coordinator sat in this
-#: call for 44 minutes, holding tick 1, until the container was torn down.
+#: call for 44 minutes, holding tick 1, until the container was torn down. The
+#: bound fires only while the connect releases the GIL, and the registration does
+#: not (see ``DEFAULT_RAY_CONNECT_PROBE_TIMEOUT_SEC``).
 DEFAULT_RAY_INIT_TIMEOUT_SEC = 300.0
+#: Wall-clock bound on the driver connect this process tries in a child before it
+#: connects in-process. In Ray 2.44 the in-process connect cannot be bounded from
+#: inside: ``CCoreWorkerProcess.Initialize`` runs with the GIL held
+#: (``_raylet.pyx:3037``) and waits for the raylet's ``RegisterClientReply`` with
+#: no timeout (``core_worker.cc:285``), so no thread, timer or event loop of the
+#: process runs again until the raylet answers.
+DEFAULT_RAY_CONNECT_PROBE_TIMEOUT_SEC = 60.0
 
 # Tail of a failed `ray start` carried in the exception, bounding its length.
 _RAY_START_OUTPUT_TAIL_CHARS = 1500
+
+# Opaque room for a libc ``struct sigaction`` (152 bytes on glibc x86_64 and aarch64).
+_SIGACTION_BUFFER_BYTES = 512
 
 # Custom Ray resource declared on the single-node head so serving-family work (serving / benchmark / profile /
 # gpu_research) can hold a whole-machine ``serving_slot`` as the authoritative physical mutex.
@@ -113,6 +136,11 @@ def _ray_status_timeout_sec() -> float:
     return _positive_float_env("HYPERLOOM_RAY_STATUS_TIMEOUT_SEC", DEFAULT_RAY_STATUS_TIMEOUT_SEC)
 
 
+def _ray_ready_timeout_sec() -> float:
+    """Return how long a head is given to answer ``ray status`` before it is reported unreachable, in seconds."""
+    return _positive_float_env("HYPERLOOM_RAY_READY_TIMEOUT_SEC", DEFAULT_RAY_READY_TIMEOUT_SEC)
+
+
 def _ray_stop_timeout_sec() -> float:
     """Return the ``ray stop --force`` timeout in seconds."""
     return _positive_float_env("HYPERLOOM_RAY_STOP_TIMEOUT_SEC", DEFAULT_RAY_STOP_TIMEOUT_SEC)
@@ -121,6 +149,11 @@ def _ray_stop_timeout_sec() -> float:
 def _ray_init_timeout_sec() -> float:
     """Return the ``ray.init`` connect timeout in seconds."""
     return _positive_float_env("HYPERLOOM_RAY_INIT_TIMEOUT_SEC", DEFAULT_RAY_INIT_TIMEOUT_SEC)
+
+
+def _ray_connect_probe_timeout_sec() -> float:
+    """Return the bound on the child-process driver connect in seconds."""
+    return _positive_float_env("HYPERLOOM_RAY_CONNECT_PROBE_TIMEOUT_SEC", DEFAULT_RAY_CONNECT_PROBE_TIMEOUT_SEC)
 
 
 def ensure_fd_limit(min_soft: Optional[int] = None) -> Tuple[int, int]:
@@ -153,19 +186,47 @@ def ensure_fd_limit(min_soft: Optional[int] = None) -> Tuple[int, int]:
     return soft, hard
 
 
-def ray_status_ok() -> bool:
-    """Check whether a Ray cluster is currently reachable."""
+class RayProbe(enum.Enum):
+    """What one ``ray status`` call says about the Ray head."""
+
+    #: ``ray status`` exited 0.
+    UP = "up"
+    #: ``ray status`` exited non-zero, or there is no ``ray`` executable: no head answers.
+    DOWN = "down"
+    #: ``ray status`` did not finish in time: a head that is there but slow gives the same result as a wedged one.
+    UNKNOWN = "unknown"
+
+
+def ray_probe(timeout: Optional[float] = None) -> RayProbe:
+    """Run ``ray status`` once, bounded by ``timeout`` (default ``HYPERLOOM_RAY_STATUS_TIMEOUT_SEC``)."""
     try:
         proc = subprocess.run(
             ["ray", "status"],
             stdout=subprocess.DEVNULL,
             stderr=subprocess.DEVNULL,
             text=True,
-            timeout=_ray_status_timeout_sec(),
+            timeout=_ray_status_timeout_sec() if timeout is None else timeout,
         )
-    except (OSError, subprocess.TimeoutExpired):
-        return False
-    return proc.returncode == 0
+    except OSError:
+        return RayProbe.DOWN
+    except subprocess.TimeoutExpired:
+        return RayProbe.UNKNOWN
+    return RayProbe.UP if proc.returncode == 0 else RayProbe.DOWN
+
+
+def _wait_for_ray_head() -> RayProbe:
+    """Probe until the head answers ``ray status`` or ``HYPERLOOM_RAY_READY_TIMEOUT_SEC`` has passed.
+
+    Each probe is bounded by the time left, so a head slower than the default probe timeout still gets to answer.
+    Returns the last probe.
+    """
+    deadline = time.monotonic() + _ray_ready_timeout_sec()
+    while True:
+        state = ray_probe(timeout=max(deadline - time.monotonic(), _RAY_READY_MIN_PROBE_TIMEOUT_SEC))
+        remaining = deadline - time.monotonic()
+        if state is RayProbe.UP or remaining <= 0:
+            return state
+        time.sleep(min(_RAY_READY_POLL_INTERVAL_SEC, remaining))
 
 
 def _stop_ray_force() -> None:
@@ -198,7 +259,15 @@ def _ray_start_evidence(captured: str) -> str:
 
 def ensure_ray_cluster(num_gpus: Optional[int] = None) -> None:
     """Ensure a Ray cluster is reachable, starting a head node if needed."""
-    if ray_status_ok():
+    state = ray_probe()
+    if state is RayProbe.UNKNOWN:
+        state = _wait_for_ray_head()
+        if state is RayProbe.UNKNOWN:
+            raise RuntimeError(
+                f"the Ray head did not answer `ray status` within {_ray_ready_timeout_sec():g}s "
+                "(HYPERLOOM_RAY_READY_TIMEOUT_SEC); it was not restarted"
+            )
+    if state is RayProbe.UP:
         return
     # Clears stale Ray discovery state before the local head starts.
     _stop_ray_force()
@@ -208,6 +277,8 @@ def ensure_ray_cluster(num_gpus: Optional[int] = None) -> None:
 
 def _start_local_head(num_gpus: Optional[int]) -> None:
     """Run ``ray start --head`` and require the new cluster to be reachable."""
+    # The head started here has answered no driver yet; whatever was probed was the head it replaces.
+    forget_ray_head_verdict()
     gcs_port, iso_args = _isolated_head_port_args()
     # Dashboard bound to loopback: keeps the unauthenticated Ray Jobs endpoint off the pod network.
     cmd = ["ray", "start", "--head", f"--port={gcs_port}", "--dashboard-host=127.0.0.1"]
@@ -224,7 +295,7 @@ def _start_local_head(num_gpus: Optional[int]) -> None:
         captured = sink.read().strip()
     if proc.returncode != 0:
         raise RuntimeError(f"failed to start Ray (rc={proc.returncode}); {_ray_start_evidence(captured)}")
-    if not ray_status_ok():
+    if _wait_for_ray_head() is not RayProbe.UP:
         raise RuntimeError(f"ray start exited 0 but cluster is not reachable; {_ray_start_evidence(captured)}")
 
 
@@ -238,6 +309,174 @@ def force_restart_local_cluster(num_gpus: Optional[int] = None) -> None:
     ensure_fd_limit()
     _stop_ray_force()
     _start_local_head(num_gpus)
+
+
+def _ray_address() -> str:
+    """Return the address this process connects its Ray driver to."""
+    return os.environ.get("RAY_ADDRESS", _RAY_ADDRESS_AUTO)
+
+
+#: One driver connect and a clean disconnect, as ``quiet_ray_init`` makes in-process, in a child that can be killed.
+#: The child first has the kernel SIGKILL it when the probing process dies (``PR_SET_PDEATHSIG``, 1), and gives up if
+#: that process is already gone, so a parent killed outright mid-probe -- by a SIGTERM it does not handle, say -- does
+#: not leave a driver waiting on the head.
+_CONNECT_PROBE_SOURCE = (
+    "import ctypes, os, signal, sys\n"
+    "prctl = getattr(ctypes.CDLL(None), 'prctl', None)\n"
+    "if prctl is not None:\n"
+    "    prctl(1, signal.SIGKILL)\n"
+    "if os.getppid() != int(sys.argv[2]):\n"
+    "    sys.exit('the probing process is gone')\n"
+    "import ray\n"
+    "ray.init(address=sys.argv[1], log_to_driver=False, logging_level='error')\n"
+    "ray.shutdown()\n"
+)
+# Tail of a failed probe's output carried into its outcome.
+_CONNECT_PROBE_OUTPUT_TAIL_CHARS = 600
+
+
+class RayHeadUnresponsiveError(RuntimeError):
+    """The Ray head did not answer a driver connect probe, so this process does not connect to it in-process."""
+
+
+@dataclass(frozen=True)
+class RayConnectProbe:
+    """The outcome of one driver connect tried in a child process.
+
+    Attributes:
+        answered: The head registered the driver, or answered it with a Ray version mismatch, which the in-process
+            connect recovers from by replacing the head.
+        outcome: What the probe did, for the log.
+    """
+
+    answered: bool
+    outcome: str
+
+
+def probe_ray_connect(address: str, timeout: float) -> RayConnectProbe:
+    """Connect a throwaway driver to ``address`` in a child process and report whether the head answered in time.
+
+    The child leads a session of its own, so a probe still running when the wait ends -- at the bound, or because
+    this process was interrupted mid-wait (``KeyboardInterrupt``, the ``SystemExit`` of a signal handler) -- has its
+    whole process group SIGKILLed and is reaped, and leaves no driver behind.
+    """
+    started = time.monotonic()
+    with tempfile.TemporaryFile(mode="w+", encoding="utf-8") as sink:
+        try:
+            proc = subprocess.Popen(
+                [sys.executable, "-c", _CONNECT_PROBE_SOURCE, address, str(os.getpid())],
+                stdout=sink,
+                stderr=subprocess.STDOUT,
+                **_RAY_START_DETACH_KWARGS,
+            )
+        except OSError as exc:
+            return RayConnectProbe(False, f"could not be started: {exc!r}")
+        try:
+            returncode: Optional[int] = proc.wait(timeout=timeout)
+        except subprocess.TimeoutExpired:
+            returncode = None
+        finally:
+            # However the wait ended, a probe still running goes now, with its whole group.
+            if proc.returncode is None:
+                _kill_process_group(proc)
+        if returncode is None:
+            return RayConnectProbe(False, f"did not connect within {timeout:g}s and was killed")
+        sink.seek(0)
+        output = sink.read().strip()
+    elapsed = time.monotonic() - started
+    if returncode == 0:
+        return RayConnectProbe(True, f"connected in {elapsed:.1f}s")
+    if _is_ray_version_mismatch(output):
+        return RayConnectProbe(True, f"was answered with a Ray version mismatch in {elapsed:.1f}s")
+    tail = output[-_CONNECT_PROBE_OUTPUT_TAIL_CHARS:]
+    return RayConnectProbe(False, f"exited {returncode} after {elapsed:.1f}s: {tail}")
+
+
+def _kill_process_group(proc: subprocess.Popen) -> None:
+    """SIGKILL the process group ``proc`` leads, then reap it."""
+    with contextlib.suppress(ProcessLookupError):
+        os.killpg(proc.pid, signal.SIGKILL)
+    with contextlib.suppress(subprocess.TimeoutExpired):
+        proc.wait(timeout=_ray_stop_timeout_sec())
+
+
+class _HeadVerdict:
+    """Whether the Ray head answers a driver: probed once, then kept until :func:`forget_ray_head_verdict`."""
+
+    def __init__(self) -> None:
+        self.lock = threading.Lock()
+        self.probe: Optional[RayConnectProbe] = None
+        # No head answered ``ray status`` when routing first asked; the probe then runs before the connect, against
+        # the head ``ensure_ray_cluster`` has started by that time.
+        self.deferred = False
+
+
+_HEAD_VERDICT = _HeadVerdict()
+
+
+def forget_ray_head_verdict() -> None:
+    """Drop the verdict on the Ray head, so the next routing question or in-process connect probes it again.
+
+    Called whenever the head this process would connect to may no longer be the one probed: the backend was marked
+    unhealthy (an actor died, and a raylet reaped after an OOM can leave the head accepting drivers it never
+    registers), or this process started a head. Each of those is followed by an in-process ``ray.init``, which freezes
+    the process on a head that does not answer.
+    """
+    verdict = _HEAD_VERDICT
+    with verdict.lock:
+        verdict.probe = None
+        verdict.deferred = False
+
+
+def ray_head_answers_driver() -> bool:
+    """Whether this process may connect a Ray driver to the head, probing a running head once per verdict.
+
+    Asked when work is routed, before any lease exists, so a head that does not answer sends every caller down the
+    local path -- the one ``INFERENCE_OPTIMIZER_RAY_EXEC=0`` selects -- before anything connects in-process. With no
+    head running yet the answer is yes: this process starts one, and :func:`quiet_ray_init` probes it before
+    connecting.
+    """
+    verdict = _HEAD_VERDICT
+    with verdict.lock:
+        if verdict.probe is None and not verdict.deferred:
+            if ray_probe() is not RayProbe.DOWN:
+                verdict.probe = _probe_and_report(_ray_address())
+            else:
+                verdict.deferred = True
+        return verdict.probe is None or verdict.probe.answered
+
+
+def _refuse_unless_head_answers(address: str) -> None:
+    """Probe the head before the first in-process connect unless routing already did; raise if it did not answer."""
+    verdict = _HEAD_VERDICT
+    with verdict.lock:
+        if verdict.probe is None:
+            verdict.probe = _probe_and_report(address)
+        probe = verdict.probe
+    if not probe.answered:
+        raise RayHeadUnresponsiveError(
+            f"not connecting to the Ray head in-process: a driver connect probe {probe.outcome}"
+        )
+
+
+def _probe_and_report(address: str) -> RayConnectProbe:
+    """Probe the head at ``address`` and log the outcome: one WARNING when it did not answer."""
+    timeout = _ray_connect_probe_timeout_sec()
+    probe = probe_ray_connect(address, timeout)
+    if probe.answered:
+        log.info("Ray head at address %r answered a driver connect probe: it %s", address, probe.outcome)
+        return probe
+    log.warning(
+        "Ray head at address %r did not answer a driver: ray.init in a child process %s (bound %gs, "
+        "HYPERLOOM_RAY_CONNECT_PROBE_TIMEOUT_SEC). Not connecting in-process, where the same wait holds the GIL and "
+        "freezes this process: serving and GPU work run on the local subprocess path from here on, as "
+        "with INFERENCE_OPTIMIZER_RAY_EXEC=0. To use Ray again, run `ray stop --force` before the next session so it "
+        "starts a fresh head; to skip Ray and this probe, export INFERENCE_OPTIMIZER_RAY_EXEC=0.",
+        address,
+        probe.outcome,
+        timeout,
+    )
+    return probe
 
 
 #: Ray resource keys that describe capacity rather than something a task or actor holds.
@@ -393,7 +632,6 @@ SAFE_ENV_KEYS = (
     "USER_DATA_PATH",
     "HYPERLOOM_RUNTIME_DIR",
     "KERNEL_AGENT_ENV",
-    "MAGPIE_PATH",
     "INFERENCEX_PATH",
     "ANTHROPIC_API_KEY",
     "ANTHROPIC_AUTH_TOKEN",
@@ -439,6 +677,23 @@ def safe_runtime_env() -> dict:
     return {"env_vars": env}
 
 
+@contextlib.contextmanager
+def _sigterm_disposition_kept() -> Iterator[None]:
+    """Put the process's SIGTERM disposition back as it was before the body, from any thread.
+
+    The Ray driver core installs a crash handler on SIGTERM whose watchdog aborts the process 3s after the signal;
+    ``signal.signal`` cannot undo it off the main thread, so libc ``sigaction`` saves and restores it.
+    """
+    libc = ctypes.CDLL(None, use_errno=True)
+    saved = ctypes.create_string_buffer(_SIGACTION_BUFFER_BYTES)
+    kept = libc.sigaction(signal.SIGTERM, None, saved) == 0
+    try:
+        yield
+    finally:
+        if kept:
+            libc.sigaction(signal.SIGTERM, saved, None)
+
+
 def quiet_ray_init(num_gpus: Optional[int] = None) -> None:
     """Initialize ray while suppressing the connect banner on stdout."""
     import contextlib
@@ -456,13 +711,14 @@ def quiet_ray_init(num_gpus: Optional[int] = None) -> None:
         vanish into a buffer nobody reads. The caller suppresses the banner instead,
         around a join it always completes.
         """
-        ray.init(
-            address=address,
-            ignore_reinit_error=True,
-            log_to_driver=False,
-            logging_level="error",
-            runtime_env=runtime_env,
-        )
+        with _sigterm_disposition_kept():
+            ray.init(
+                address=address,
+                ignore_reinit_error=True,
+                log_to_driver=False,
+                logging_level="error",
+                runtime_env=runtime_env,
+            )
 
     def _init(address: str) -> None:
         """Connect under a wall-clock bound.
@@ -542,8 +798,10 @@ def quiet_ray_init(num_gpus: Optional[int] = None) -> None:
         if error is not None:
             raise error
 
+    address = _ray_address()
+    _refuse_unless_head_answers(address)
     try:
-        _init(os.environ.get("RAY_ADDRESS", _RAY_ADDRESS_AUTO))
+        _init(address)
     except Exception as exc:
         if not _is_ray_version_mismatch(str(exc)):
             raise
@@ -553,4 +811,6 @@ def quiet_ray_init(num_gpus: Optional[int] = None) -> None:
         except (RuntimeError, OSError):
             pass
         force_restart_local_cluster(num_gpus=num_gpus)
+        # The restart dropped the verdict on the old head; the new one is probed before this process connects to it.
+        _refuse_unless_head_answers(_RAY_ADDRESS_AUTO)
         _init(_RAY_ADDRESS_AUTO)

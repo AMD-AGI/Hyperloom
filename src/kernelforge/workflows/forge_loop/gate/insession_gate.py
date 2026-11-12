@@ -6,6 +6,7 @@
 from __future__ import annotations
 
 import ast
+import contextlib
 from collections.abc import Iterator, Sequence
 from dataclasses import dataclass
 import hashlib
@@ -21,7 +22,7 @@ import traceback
 from typing import Any
 
 from kernelforge.config.edit_policy import FORGE_PROTECTED_PATHS, PROTECTED_GLOBS
-from kernelforge.utils.git import git
+from kernelforge.utils.git import GitError, git, git_bytes
 from kernelforge.workflows.forge_loop.gate.gate_settings import GateMeasurement, GateScope
 from kernelforge.evaluation.jit_rebuild import JitRebuildUnavailable, force_jit_rebuild_for_changes
 from kernelforge.evaluation.scoring import (
@@ -42,9 +43,12 @@ from kernelforge.evaluation.benchmark.runner import (
 # Files the agent must NOT modify: the test harness / driver that MEASURES the kernel.
 _DEFAULT_PROTECTED_GLOBS = list(PROTECTED_GLOBS)
 
-# Tools that modify files on disk (subject to the protected-file deny + counted as edits when they target the kernel).
+# Tools that modify files on disk (subject to the protected-file deny).
 _EDIT_TOOLS = ("Edit", "Write", "MultiEdit", "NotebookEdit")
 _EDIT_TOOL_MATCHER = "|".join(_EDIT_TOOLS)
+
+# Byte <-> str error handler for git paths and symlink targets: lossless for any bytes.
+_FS_ERRORS = "surrogateescape"
 
 # Shell verbs that WRITE their path arguments (vs reading / executing them).
 _BASH_WRITE_VERBS = frozenset(
@@ -485,7 +489,7 @@ class InSessionGate:
         # Upper bound on Stop-hook blocks for unrestored harness tampering.
         self.max_stop_blocks = measurement.max_stop_blocks
 
-        # Target file set used to count edits for observability.
+        # Target file set the in-session rebuild declares.
         targets = list(scope.target_files) if scope.target_files else []
         if kernel_file:
             targets.append(kernel_file)
@@ -493,7 +497,8 @@ class InSessionGate:
         # Kept for logging/back-compat (the anchor file).
         self.kernel_abs = os.path.normpath(os.path.abspath(kernel_file)) if kernel_file else ""
 
-        # Per-session mutable state.
+        # Per-session mutable state. edit_count: implementation files the candidate changes from HEAD, as of the last
+        # stop (or session end).
         self.edit_count = 0
         self.block_count = 0
         # Harness-protection blocks only (bounded separately by max_stop_blocks), so a non-cooperating tamperer is
@@ -509,7 +514,8 @@ class InSessionGate:
         # outer loop force-REVERTs it. "validation_timeout" — full-suite correctness timed out; the outer loop
         # performs the one authoritative retry. "jit_rebuild_unavailable" — the workspace could not assert a rebuild
         # of the edited sources, so nothing was measured in-session; the candidate is untouched and the outer loop
-        # measures it itself. "gate_error" — the gate itself raised; fail OPEN.
+        # measures it itself. "no_changes" — the stop left no tracked implementation change from HEAD, so there was no
+        # candidate to measure. "gate_error" — the gate itself raised; fail OPEN.
         self.end_reason = ""
         # Real failure signals seen this session (block reasons: compile errors, "correct but not faster", …).
         self.findings: list[str] = []
@@ -554,18 +560,6 @@ class InSessionGate:
         benchmark_budget = 0 if self.correctness_only else KEEP_MEASUREMENT_COUNT * self.bench_timeout_sec
         return self.stage_timeout_sec + benchmark_budget + 120
 
-    def count_target_edits(self, cwd: str, file_changes: list[str]) -> int:
-        """Count changed tracked implementation paths outside the protected set."""
-        root = os.path.abspath(cwd or ".")
-        total = 0
-        for relative in file_changes:
-            if not relative:
-                continue
-            candidate = relative if os.path.isabs(relative) else os.path.join(root, relative)
-            if not self._is_protected(candidate):
-                total += 1
-        return total
-
     # ── hook wiring ──────────────────────────────────────────────────────────
     def make_agent_hooks(self, *, stop_check: bool = True):
         """Build provider-neutral lifecycle hooks for capable backends."""
@@ -581,13 +575,6 @@ class InSessionGate:
                     matcher="Bash",
                     callback=self._on_pre_bash,
                 ),
-            ],
-            # Count every non-protected implementation edit.
-            post_tool_use=[
-                AgentHook(
-                    matcher=_EDIT_TOOL_MATCHER,
-                    callback=self._on_edit,
-                )
             ],
             # Stop: harness protection, then canonical correctness+bench self-check.
             stop=(
@@ -658,6 +645,14 @@ class InSessionGate:
                 h.update(chunk)
         return h.hexdigest()
 
+    def _changed_implementation_paths(self) -> list[str]:
+        """Tracked implementation files changed from HEAD: the diff the outer loop calls NO_CHANGES when empty."""
+        if self.workspace_root is None:
+            raise RuntimeError("candidate diff requires a workspace")
+        names = git_bytes("diff", "--name-only", "--relative", "-z", "HEAD", "--", ".", cwd=self.workspace_root).stdout
+        paths = (str(self.workspace_root / name.decode(errors=_FS_ERRORS)) for name in names.split(b"\0") if name)
+        return [path for path in paths if not self._is_protected(path)]
+
     def _candidate_diff_sha256(self) -> str:
         """Fingerprint the exact tracked candidate measured by this gate."""
         if self.workspace_root is None:
@@ -693,7 +688,7 @@ class InSessionGate:
         mode = stat.S_IMODE(metadata.st_mode)
         try:
             if stat.S_ISLNK(metadata.st_mode):
-                content = os.readlink(path).encode(errors="surrogateescape")
+                content = os.readlink(path).encode(errors=_FS_ERRORS)
                 kind = "symlink"
             elif stat.S_ISREG(metadata.st_mode):
                 content = path.read_bytes()
@@ -749,6 +744,23 @@ class InSessionGate:
                 errors.append(state.error)
         return out, errors
 
+    def _discard_session_bytecode(self) -> None:
+        """Delete rebuildable bytecode the session added or rewrote under a protected directory.
+
+        The next import, this gate's own validation included, then compiles the protected source instead.
+        """
+        try:
+            paths = self._iter_snapshot_paths()
+        except (OSError, RuntimeError, ValueError):  # the integrity scan that follows reports the failed inventory
+            return
+        baseline = {state.path: state.digest for state in self._protected_baseline.values()}
+        FORGE_PROTECTED_PATHS.discard_rebuildable_bytecode(
+            str(path)
+            for path in paths
+            if FORGE_PROTECTED_PATHS.is_rebuildable_bytecode(path)
+            and baseline.get(path) != self._capture_protected_state(path).digest
+        )
+
     def _protected_changes(self) -> str:
         current, current_errors = self._snapshot_protected_states(
             include_baseline=True,
@@ -762,6 +774,8 @@ class InSessionGate:
         for key in sorted(set(before) | set(current)):
             old = before.get(key)
             new = current.get(key)
+            if FORGE_PROTECTED_PATHS.is_rebuildable_bytecode((new or old).path):
+                continue
             if old is None:
                 if new is not None and new.kind != "missing":
                     added.append(key)
@@ -791,9 +805,14 @@ class InSessionGate:
         return "; ".join(parts)
 
     def finalize_integrity(self) -> str:
-        """Set the final protected-integrity verdict after an agent session."""
+        """Set the final protected-integrity verdict and edit count after an agent session."""
 
+        if self.workspace_root is not None:
+            # A git that cannot answer keeps the last stop's count; the integrity scan below is what fails closed.
+            with contextlib.suppress(GitError, OSError):
+                self.edit_count = len(self._changed_implementation_paths())
         try:
+            self._discard_session_bytecode()
             reason = self._protected_changes()
         except Exception as error:  # noqa: BLE001 - isolation boundary: one session's protected-integrity scan
             reason = f"protected integrity scan failed: {type(error).__name__}: {error}"
@@ -857,7 +876,7 @@ class InSessionGate:
                 path.chmod(state.mode)
             elif state.kind == "symlink":
                 os.symlink(
-                    state.content.decode(errors="surrogateescape"),
+                    state.content.decode(errors=_FS_ERRORS),
                     path,
                 )
             elif state.kind == "directory":
@@ -1069,12 +1088,6 @@ class InSessionGate:
             )
         return {}
 
-    async def _on_edit(self, input_data: dict, tool_use_id: str | None, context: Any) -> dict:
-        # Count every implementation edit outside the protected measurement set.
-        if input_data.get("tool_name", "") in _EDIT_TOOLS and not self._is_protected(self._edited_path(input_data)):
-            self.edit_count += 1
-        return {}
-
     # ── decisions ────────────────────────────────────────────────────────────
     @staticmethod
     def _allow() -> dict:
@@ -1107,6 +1120,22 @@ class InSessionGate:
             "them before continuing; only kernel implementation files may "
             f"be modified.\n\n{protected_delta}"
         )
+
+    def _allow_unmeasured(self, error: object) -> dict:
+        """Allow a stop the workspace could not rebuild or diff; the outer loop measures the candidate itself."""
+        self.end_reason = "jit_rebuild_unavailable"
+        self.findings.append(f"In-session validation skipped; workspace unavailable: {error}")
+        self._log(f"ALLOW (rebuild unavailable: {error}; outer loop measures this candidate) edit={self.edit_count}")
+        return self._allow()
+
+    def _stop_without_candidate(self) -> dict:
+        """Allow a stop that leaves nothing changed from HEAD: there is no candidate to validate or bench."""
+        self.end_reason = "no_changes"
+        self.last_wall_ms = None
+        self.last_mean_case_speedup = None
+        self.last_bench_result = None
+        self._log("ALLOW (no tracked changes from HEAD; nothing to measure) edit=0")
+        return self._allow()
 
     def _record_insession_bench(
         self,
@@ -1213,12 +1242,7 @@ class InSessionGate:
             # The workspace, not the agent: the candidate on disk is intact, and outer canonical validation
             # asserts the rebuild itself before measuring. Blocking here would only spend turns on a failure no
             # edit can clear.
-            self.end_reason = "jit_rebuild_unavailable"
-            self.findings.append(f"In-session validation skipped; workspace unavailable: {error}")
-            self._log(
-                f"ALLOW (rebuild unavailable: {error}; outer loop measures this candidate) edit={self.edit_count}"
-            )
-            return self._allow()
+            return self._allow_unmeasured(error)
 
         # Correctness — canonical driver, same call the pipeline uses.
         corr = await test_correctness(
@@ -1258,12 +1282,21 @@ class InSessionGate:
     async def _on_stop(self, input_data: dict, tool_use_id: str | None, context: Any) -> dict:
         try:
             # Harness protection (security, first).
+            self._discard_session_bytecode()
             protected_delta = self._protected_changes()
             self.integrity_reason = protected_delta
             self.integrity_violation = bool(protected_delta)
             self.integrity_verdict = "violation" if protected_delta else "clean"
             if protected_delta:
                 return self._stop_for_protected_harness(protected_delta)
+
+            # An unchanged tree is the incumbent: benching it again could only block on noise.
+            try:
+                self.edit_count = len(self._changed_implementation_paths())
+            except (GitError, OSError) as error:
+                return self._allow_unmeasured(f"{type(error).__name__}: {error}")
+            if not self.edit_count:
+                return self._stop_without_candidate()
 
             # Budget (bounded so the gate never hangs the session). Checked before the (GPU-costly) canonical
             # validation so an exhausted session hands off immediately instead of paying for one more bench.

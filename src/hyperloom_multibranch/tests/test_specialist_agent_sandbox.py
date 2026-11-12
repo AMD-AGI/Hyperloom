@@ -1,0 +1,670 @@
+# SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
+# SPDX-License-Identifier: MIT
+
+import asyncio
+import logging
+import os
+import shlex
+import subprocess
+import sys
+import tempfile
+import time
+import uuid
+from collections.abc import Callable, Iterator, Sequence
+from dataclasses import replace
+from pathlib import Path
+
+import pytest
+
+from hyperloom.common import agent_isolation
+from hyperloom.common.agent_isolation import BwrapIsolation, IsolationRefused, NoIsolation
+from hyperloom_common.bwrap import BwrapProbe
+from hyperloom_multibranch.specialist import agent_sandbox
+from hyperloom_multibranch.specialist.agent_sandbox import (
+    TIMED_OUT,
+    FrameworkProtection,
+    LocalAgentSandbox,
+    SandboxPaths,
+    confined_env,
+    mount_namespaces,
+    read_only_argv,
+)
+from hyperloom_multibranch.specialist.agent_watch import MARKER, marked_pids, sandbox_pids
+
+BASE = {
+    "PATH": os.environ["PATH"],
+    "HOME": "/home/agent",
+    "PYTHONPATH": "/existing",
+    "HIP_VISIBLE_DEVICES": "0,1",
+    "CUDA_VISIBLE_DEVICES": "0",
+    "GPU_DEVICE_ORDINAL": "0",
+    "HSA_VISIBLE_DEVICES": "0",
+    "ROCR_VISIBLE_DEVICES": "0,1,2,3",
+}
+
+
+#: The sandboxes the running test made, stopped when it ends.
+_made: list[LocalAgentSandbox] = []
+
+
+@pytest.fixture(autouse=True)
+def _local_temp(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Iterator[None]:
+    monkeypatch.setattr(tempfile, "tempdir", str(tmp_path / "local-tmp"))
+    (tmp_path / "local-tmp").mkdir()
+    yield
+    # The watch ends a sandbox only once this process is gone, and reads which from this test's directory, which may be
+    # deleted by then: a sandbox a test does not stop would outlive the session, launchers and all.
+    made = {str(sandbox.root): sandbox for sandbox in _made}
+    _made.clear()
+    for sandbox in made.values():
+        asyncio.run(sandbox.stop())
+    left = {root: sandbox_pids(root) for root in made}
+    assert not any(pids or launchers for pids, launchers in left.values()), f"outlived the sandbox's stop: {left}"
+
+
+class _Processes:
+    def __init__(self) -> None:
+        self.adopted: list[tuple[int, str, tuple[str, ...]]] = []
+        self.forgotten: list[int] = []
+
+    def adopt(self, pid: int, *, branch: str, argv: Sequence[str]) -> object:
+        self.adopted.append((pid, branch, tuple(argv)))
+        return None
+
+    def forget(self, pid: int) -> None:
+        self.forgotten.append(pid)
+
+
+def _sandbox(tmp_path: Path, processes: _Processes | None = None, branch: str = "") -> LocalAgentSandbox:
+    sandbox = LocalAgentSandbox(
+        cards=(4, 5),
+        python_path=(tmp_path / "worktree" / "python",),
+        root=tmp_path / "sandbox",
+        base_env=BASE,
+        grace_seconds=1.0,
+        poll_seconds=0.02,
+        processes=processes,
+        branch=branch,
+    )
+    _made.append(sandbox)
+    return sandbox
+
+
+def _alive(pid: int) -> bool:
+    try:
+        state = Path(f"/proc/{pid}/stat").read_text().rsplit(")", 1)[1].split()[0]
+    except OSError:
+        return False
+    return state not in ("Z", "X")
+
+
+async def _until(predicate: Callable[[], object], seconds: float = 10.0) -> None:
+    until = time.monotonic() + seconds
+    while not predicate():
+        assert time.monotonic() < until, "timed out waiting"
+        await asyncio.sleep(0.02)
+
+
+def test_env_drops_masks_and_pins_cards_paths_and_tmpdir(tmp_path: Path) -> None:
+    sandbox = _sandbox(tmp_path)
+    shim_path = f"/agent/bin{os.pathsep}{BASE['PATH']}"
+    env = sandbox.env({"PATH": shim_path, "FOO": "bar", "HIP_VISIBLE_DEVICES": "7"})
+
+    assert not {"CUDA_VISIBLE_DEVICES", "GPU_DEVICE_ORDINAL", "HSA_VISIBLE_DEVICES"} & set(env)
+    # ROCr exposes the cards alone, so a HIP-level mask a command sets indexes into them and reaches no other card.
+    assert env["ROCR_VISIBLE_DEVICES"] == "4,5" and env["HIP_VISIBLE_DEVICES"] == "0,1"
+    # HIP unbundles its code objects in TMPDIR, which fails on a network file system such as the branch's directory.
+    assert Path(env["TMPDIR"]).parent == Path(tempfile.gettempdir()) and Path(env["TMPDIR"]).is_dir()
+    other = LocalAgentSandbox(cards=(6,), python_path=(), root=tmp_path / "other", base_env=BASE)
+    assert other.env({})["TMPDIR"] != env["TMPDIR"]
+    assert _sandbox(tmp_path).env({})["TMPDIR"] == env["TMPDIR"]
+    assert env["PYTHONPATH"] == f"{tmp_path / 'worktree' / 'python'}{os.pathsep}/existing"
+    assert env["PYTHONDONTWRITEBYTECODE"] == "1"
+    assert env["PATH"] == f"{tmp_path / 'sandbox' / 'bin'}{os.pathsep}{shim_path}"
+    assert env["FOO"] == "bar" and env["HOME"] == "/home/agent"
+
+
+def test_run_sees_the_env_in_its_own_session(tmp_path: Path) -> None:
+    done = asyncio.run(
+        _sandbox(tmp_path).run(
+            'echo "$ROCR_VISIBLE_DEVICES/$HIP_VISIBLE_DEVICES $(command -v pkill)"; ps -o sess= -p $$; echo $PPID',
+            tmp_path,
+            {},
+            5,
+        )
+    )
+
+    devices, sid, pid = done.output.split("\n")[:3]
+    assert done.returncode == 0
+    assert devices == f"4,5/0,1 {tmp_path / 'sandbox' / 'bin' / 'pkill'}"
+    assert sid.strip() == pid
+
+
+def test_run_timeout_kills_the_session(tmp_path: Path) -> None:
+    pids = tmp_path / "pids"
+
+    async def scenario() -> object:
+        return await _sandbox(tmp_path).run(f"sleep 100 & echo $! > {pids}; echo started; sleep 100", tmp_path, {}, 0.5)
+
+    done = asyncio.run(scenario())
+
+    assert done.returncode == TIMED_OUT
+    assert "started" in done.output and "timed out after 0.5 s" in done.output
+    assert not _alive(int(pids.read_text()))
+
+
+def test_a_run_that_times_out_spares_a_process_started_beside_it(tmp_path: Path) -> None:
+    async def scenario() -> tuple[int, int | None, int | None]:
+        sandbox = _sandbox(tmp_path)
+        server = await sandbox.start("echo ready; sleep 100", tmp_path, {})
+        await _until(lambda: "ready" in server.log.read_text())
+        done = await sandbox.run("sleep 100", tmp_path, {}, 0.5)
+        await asyncio.sleep(0.3)
+        alive = server.returncode
+        await sandbox.stop()
+        return done.returncode, alive, server.returncode
+
+    timed_out, while_running, after_stop = asyncio.run(scenario())
+
+    assert timed_out == TIMED_OUT
+    assert while_running is None
+    assert after_stop is not None
+    assert marked_pids(str(tmp_path / "sandbox")) == []
+
+
+def test_kill_reaches_a_grandchild_that_left_the_group(tmp_path: Path) -> None:
+    pids = tmp_path / "pids"
+    processes = _Processes()
+
+    async def scenario() -> tuple[int, int, int | None]:
+        sandbox = _sandbox(tmp_path, processes=processes, branch="b07")
+        process = await sandbox.start(
+            f"bash -c 'set -m; nohup sleep 100 >/dev/null 2>&1 & echo $! > {pids}; wait' & wait", tmp_path, {}
+        )
+        await _until(lambda: pids.exists() and pids.read_text().strip())
+        grandchild = int(pids.read_text())
+        assert os.getpgid(grandchild) != process.popen.pid
+        await process.kill()
+        return process.popen.pid, grandchild, process.returncode
+
+    leader, grandchild, returncode = asyncio.run(scenario())
+
+    assert not _alive(grandchild)
+    assert marked_pids(str(tmp_path / "sandbox")) == []
+    assert returncode is not None
+    assert processes.adopted[0][:2] == (leader, "b07")
+
+
+def test_kill_waits_the_grace_before_sigkill(tmp_path: Path) -> None:
+    async def scenario() -> float:
+        process = await _sandbox(tmp_path).start("trap '' TERM; echo ready; sleep 100 & wait", tmp_path, {})
+        await _until(lambda: "ready" in process.log.read_text())
+        began = time.monotonic()
+        await process.kill()
+        return time.monotonic() - began
+
+    assert 1.0 <= asyncio.run(scenario()) < 3.0
+
+
+def test_pkill_inside_spares_the_same_process_outside(tmp_path: Path) -> None:
+    marker = f"marker{uuid.uuid4().hex}"
+    marked_argv = [sys.executable, "-c", "import time; time.sleep(100)", marker]
+    outside = subprocess.Popen(marked_argv, start_new_session=True)
+    pids = tmp_path / "pids"
+    try:
+
+        async def scenario() -> tuple[str, int, int | None]:
+            # The agent's own commands are what pkill confines: a run is a session of its own, not the agent's.
+            process = await _sandbox(tmp_path).start(
+                f"{shlex.join(marked_argv)} & echo $! > {pids}; sleep 0.3; pkill -TERM -f {marker}; echo rc=$?; wait",
+                tmp_path,
+                {},
+            )
+            try:
+                await _until(lambda: process.returncode is not None)
+            finally:
+                await process.kill()
+            return await process.output(), int(pids.read_text()), process.returncode
+
+        output, marked, returncode = asyncio.run(scenario())
+
+        assert "rc=0" in output and returncode == 0, output
+        assert not _alive(marked)
+        assert outside.poll() is None
+    finally:
+        outside.kill()
+        outside.wait()
+
+
+def test_pkill_spares_its_caller_whose_command_line_matches(tmp_path: Path) -> None:
+    marker = f"marker{uuid.uuid4().hex}"
+    command = f'{sys.executable} -c \'import subprocess, sys; sys.exit(subprocess.call(["pkill", "-f", "{marker}"]))\''
+    done = asyncio.run(_sandbox(tmp_path).run(command, tmp_path, {}, 5))
+
+    assert done.returncode == 1, done.output
+
+
+def test_pgrep_lists_no_process_outside_the_sandbox_whatever_it_selects(tmp_path: Path) -> None:
+    sandbox = _sandbox(tmp_path)
+    done = asyncio.run(sandbox.run("pgrep -s 1 . ; echo exit=$?", tmp_path, {}, 5))
+
+    assert done.output.strip() == "exit=1"
+
+
+def test_pgrep_and_pkill_count_join_and_pick_newest_or_oldest_among_the_sandboxs_processes(tmp_path: Path) -> None:
+    marker = f"shape{uuid.uuid4().hex}"
+    argv = [sys.executable, "-c", "import time; time.sleep(100)", marker]
+    pids = tmp_path / "pids"
+    # The oldest and the newest of the host's matching processes are outside the sandbox.
+    older = subprocess.Popen(argv, start_new_session=True)
+    sleeper = f"{shlex.join(argv)} & echo $! >> {pids}; sleep 0.1"
+    newer: list[subprocess.Popen[bytes]] = []
+
+    async def scenario() -> tuple[list[int], dict[str, str], int, list[bool]]:
+        sandbox = _sandbox(tmp_path)
+        time.sleep(0.1)
+        process = await sandbox.start(f"{sleeper}; {sleeper}; sleep 100", tmp_path, {})
+        try:
+            await _until(lambda: pids.exists() and len(pids.read_text().split()) == 2)
+            await asyncio.sleep(0.1)
+            newer.append(subprocess.Popen(argv, start_new_session=True))
+            answers = {}
+            for query in ("-c", "-d,", "-n", "-o", "-cn"):
+                done = await sandbox.run(f"pgrep {query} -f {marker}", tmp_path, {}, 5)
+                answers[query] = done.output.strip()
+            nothing = await sandbox.run(f"pgrep -c -f none{marker}", tmp_path, {}, 5)
+            answers["none"] = f"{nothing.output.strip()} rc={nothing.returncode}"
+            killed = await sandbox.run(f"pkill -n -f {marker}", tmp_path, {}, 5)
+            first, second = (int(pid) for pid in pids.read_text().split())
+            await asyncio.sleep(0.5)
+            return [first, second], answers, killed.returncode, [_alive(first), _alive(second)]
+        finally:
+            await process.kill()
+
+    try:
+        (first, second), answers, killed, alive = asyncio.run(scenario())
+        assert answers["-c"] == "2"
+        assert answers["-d,"] == f"{first},{second}"
+        assert answers["-n"] == str(second) and answers["-cn"] == "1"
+        assert answers["-o"] == str(first)
+        assert answers["none"] == "0 rc=1"
+        assert killed == 0 and alive == [True, False]
+        assert older.poll() is None and newer[0].poll() is None
+    finally:
+        for outside in (older, *newer):
+            outside.kill()
+            outside.wait()
+
+
+def test_killall_kills_by_name_within_the_session(tmp_path: Path) -> None:
+    async def scenario() -> tuple[object, object]:
+        sandbox = _sandbox(tmp_path)
+        killed = await sandbox.run("sleep 100 & sleep 0.2; killall -TERM sleep; wait", tmp_path, {}, 5)
+        missing = await sandbox.run("killall nosuchprocessname", tmp_path, {}, 5)
+        return killed, missing
+
+    killed, missing = asyncio.run(scenario())
+
+    assert killed.returncode == 143 or killed.returncode == 0, killed.output
+    assert missing.returncode == 1 and "no process found" in missing.output
+
+
+def test_output_is_the_logs_tail_and_logs_are_numbered(tmp_path: Path) -> None:
+    async def scenario() -> tuple[str, int | None]:
+        sandbox = _sandbox(tmp_path)
+        await sandbox.run("true", tmp_path, {}, 5)
+        process = await sandbox.start("head -c 100000 /dev/zero | tr '\\0' a; echo; echo last-line", tmp_path, {})
+        await _until(lambda: process.returncode is not None)
+        return await process.output(), process.returncode
+
+    output, returncode = asyncio.run(scenario())
+
+    assert returncode == 0
+    assert len(output) == 64 * 1024 and output.endswith("last-line\n")
+    assert sorted(log.name for log in (tmp_path / "sandbox" / "logs").iterdir()) == ["0001-run.log", "0002-start.log"]
+    assert next(_sandbox(tmp_path)._numbers) == 3
+
+
+@pytest.mark.parametrize("tool", ["pkill", "pgrep"])
+def test_a_pattern_is_required(tmp_path: Path, tool: str) -> None:
+    done = asyncio.run(_sandbox(tmp_path).run(f"{tool} -TERM" if tool == "pkill" else tool, tmp_path, {}, 5))
+
+    assert done.returncode != 0 and "give a pattern or a selection" in done.output
+
+
+class _Late(_Processes):
+    def adopt(self, pid: int, *, branch: str, argv: Sequence[str]) -> object:
+        raise ValueError(f"{pid} ended")
+
+
+async def test_the_registry_forgets_a_launcher_that_ended_by_itself_once_a_stop_collects_it(tmp_path: Path) -> None:
+    processes = _Processes()
+    sandbox = _sandbox(tmp_path, processes, "b07")
+    process = await sandbox.start("true", tmp_path, {})
+    launcher = process.popen.pid
+
+    await _until(lambda: not _alive(launcher))
+    assert processes.forgotten == []
+    await sandbox.stop()
+
+    assert processes.forgotten == [launcher]
+    await sandbox.stop()
+    assert processes.forgotten == [launcher]
+
+
+async def test_a_command_that_ends_before_the_registry_takes_it_still_runs(tmp_path: Path) -> None:
+    sandbox = _sandbox(tmp_path, _Late(), "b07")
+
+    process = await sandbox.start("echo started", tmp_path, {})
+
+    await _until(lambda: process.returncode is not None)
+    assert "started" in await process.output()
+
+
+def _pid(path: Path) -> int | None:
+    """The pid ``echo $! > path`` wrote, or ``None`` while the shell has truncated the file and not yet written it."""
+    text = path.read_text().strip() if path.exists() else ""
+    return int(text) if text else None
+
+
+def test_a_server_started_in_a_session_of_its_own_is_still_the_sandbox_s(tmp_path: Path) -> None:
+    marker = f"server{uuid.uuid4().hex}"
+    pids = tmp_path / "pids"
+    # A Claude CLI runs each Bash command in a new session, so a server it starts leaves the agent's session.
+    serve = f"setsid {shlex.quote(sys.executable)} -c 'import time; time.sleep(100)' {marker} & echo $! > {pids}"
+
+    async def scenario() -> tuple[int, int, bool]:
+        sandbox = _sandbox(tmp_path)
+        process = await sandbox.start(f"{serve}; sleep 100", tmp_path, {})
+        await _until(lambda: _pid(pids) is not None)
+        server = _pid(pids)
+        # $! is setsid's pid before it has called setsid(), so its session moves only once it has run.
+        await _until(lambda: _alive(server) and os.getsid(server) != process.popen.pid)
+        stopped = await sandbox.run(f"pkill -f {marker}", tmp_path, {}, 10.0)
+        await _until(lambda: not _alive(server))
+        again = await sandbox.start(f"{serve}; sleep 100", tmp_path, {})
+        await _until(lambda: _pid(pids) not in (None, server))
+        second = _pid(pids)
+        await again.kill()
+        return stopped.returncode, second, _alive(second)
+
+    stopped, _second, alive = asyncio.run(scenario())
+
+    assert stopped == 0
+    assert not alive
+
+
+def test_pgrep_does_not_find_itself_so_a_wait_for_a_process_to_end_ends(tmp_path: Path) -> None:
+    marker = f"bench{uuid.uuid4().hex}"
+    # Arbor waits for its bench to end with `until ! pgrep -f validator/bench.sh`, from a model's shell command.
+    script = (
+        f"{shlex.quote(sys.executable)} -c 'import time; time.sleep(1)' {marker} & "
+        f"until ! pgrep -f {marker} >/dev/null; do sleep 0.2; done; echo ended; "
+        f"{shlex.quote(sys.executable)} -c \"import subprocess; print('rc', subprocess.run(['pgrep', '-f', 'none{marker}']).returncode)\""
+    )
+
+    done = asyncio.run(_sandbox(tmp_path).run(script, tmp_path, {}, 20))
+
+    assert "ended" in done.output and "rc 1" in done.output
+
+
+#: Leaves the caller's tree by a double fork and setsid() and drops the sandbox's marker with its environment, as
+#: `env -i` or a daemonizing server does; appends its pid to argv[1] and sleeps.
+ESCAPE = """
+import os, sys, time
+if os.fork():
+    os._exit(0)
+os.setsid()
+if os.fork():
+    time.sleep(0.5)
+    os._exit(0)
+with open(sys.argv[1], "a") as pids:
+    pids.write(f"{os.getpid()}\\n")
+os.execve("/bin/sleep", ["sleep", "60"], {})
+"""
+
+
+def _escape(tmp_path: Path) -> tuple[str, Path]:
+    script, pids = tmp_path / "escape.py", tmp_path / "pids"
+    script.write_text(ESCAPE)
+    return f"{shlex.quote(sys.executable)} {script} {pids}", pids
+
+
+def _end(pids: Path) -> None:
+    for line in pids.read_text().split() if pids.exists() else []:
+        try:
+            os.kill(int(line), 9)
+        except ProcessLookupError:
+            continue
+
+
+def _parent(pid: int) -> int:
+    return int(Path(f"/proc/{pid}/stat").read_text().rsplit(")", 1)[1].split()[1])
+
+
+def test_kill_ends_an_unmarked_grandchild_that_double_forked_and_left_the_session(tmp_path: Path) -> None:
+    escape, pids = _escape(tmp_path)
+
+    async def scenario() -> tuple[int, int, int]:
+        process = await _sandbox(tmp_path).start(f"{escape}; sleep 60", tmp_path, {})
+        await _until(lambda: pids.exists() and pids.read_text().strip())
+        escaped = int(pids.read_text())
+        await _until(lambda: f"{MARKER}=".encode() not in Path(f"/proc/{escaped}/environ").read_bytes())
+        # The grandchild is reparented only once the process that forked it has exited, which ESCAPE delays.
+        await _until(lambda: _parent(escaped) == process.popen.pid)
+        parent = _parent(escaped)
+        await process.kill()
+        return escaped, parent, process.popen.pid
+
+    try:
+        escaped, parent, launcher = asyncio.run(scenario())
+        assert not _alive(escaped)
+        assert parent == launcher
+    finally:
+        _end(pids)
+
+
+def test_stop_ends_what_a_finished_run_left_behind_outside_the_marker(tmp_path: Path) -> None:
+    escape, pids = _escape(tmp_path)
+
+    async def scenario() -> tuple[int, int, bool]:
+        sandbox = _sandbox(tmp_path)
+        done = await sandbox.run(escape, tmp_path, {}, 10)
+        await _until(lambda: pids.exists() and pids.read_text().strip())
+        escaped = int(pids.read_text())
+        alive = _alive(escaped)
+        await sandbox.stop()
+        return done.returncode, escaped, alive
+
+    try:
+        returncode, escaped, alive = asyncio.run(scenario())
+        assert returncode == 0 and alive
+        assert not _alive(escaped)
+    finally:
+        _end(pids)
+
+
+def test_a_finished_run_leaves_no_process_behind(tmp_path: Path) -> None:
+    sandbox = _sandbox(tmp_path)
+
+    done = asyncio.run(sandbox.run("exit 3", tmp_path, {}, 5))
+
+    assert done.returncode == 3
+    assert marked_pids(str(tmp_path / "sandbox")) == []
+
+
+def test_stop_leaves_no_launcher_of_the_sandbox_running(tmp_path: Path) -> None:
+    async def scenario() -> list[int]:
+        sandbox = _sandbox(tmp_path)
+        running = await sandbox.start("sleep 60", tmp_path, {})
+        ended = await sandbox.start("true", tmp_path, {})
+        await _until(lambda: ended.returncode is not None)
+        await sandbox.stop()
+        return [running.popen.pid, ended.popen.pid]
+
+    launchers = asyncio.run(scenario())
+
+    assert [pid for pid in launchers if _alive(pid)] == []
+
+
+def test_pkill_never_selects_the_sandbox_s_launchers(tmp_path: Path) -> None:
+    async def scenario() -> tuple[object, int | None]:
+        sandbox = _sandbox(tmp_path)
+        agent = await sandbox.start("sleep 60", tmp_path, {})
+        try:
+            stopped = await sandbox.run("pkill -f -- '-I -c'; echo rc=$?", tmp_path, {}, 5)
+            await asyncio.sleep(0.3)
+            return stopped, agent.returncode
+        finally:
+            await agent.kill()
+
+    stopped, returncode = asyncio.run(scenario())
+
+    assert "rc=1" in stopped.output, stopped.output
+    assert returncode is None
+
+
+def test_read_only_argv_mounts_each_path_before_running_the_command() -> None:
+    argv = read_only_argv((Path("/img/sglang"), Path("/img/vllm")), ["bash", "-c", "x"])
+    assert argv[:5] == ["unshare", "--mount", "--propagation", "private", "--"]
+    assert argv[-6:] == ["/img/sglang", "/img/vllm", "--", "bash", "-c", "x"]
+
+
+@pytest.mark.skipif(not mount_namespaces(), reason="this host gives no process a mount namespace of its own")
+def test_a_read_only_framework_cannot_be_written_from_the_sandbox_and_stays_writable_outside(tmp_path: Path) -> None:
+    framework = tmp_path / "framework"
+    framework.mkdir()
+    sandbox = replace(_sandbox(tmp_path), frameworks=FrameworkProtection(read_only=(framework,)))
+    done = asyncio.run(sandbox.run(f"touch {framework}/edited; touch {tmp_path}/beside", tmp_path, {}, 10))
+
+    assert "Read-only file system" in done.output
+    assert not (framework / "edited").exists() and (tmp_path / "beside").exists()
+    (framework / "outside").touch()
+
+
+# ---- a sandbox under bubblewrap, without launching it ----------------------------------------------------------------
+
+#: A bubblewrap whose probe passed: building a sandbox's policy runs nothing.
+PROBED = BwrapProbe("/usr/bin/bwrap", (0, 13, 1), ())
+
+
+def _confined(tmp_path: Path, probe: BwrapProbe = PROBED, **paths: object) -> LocalAgentSandbox:
+    return LocalAgentSandbox(
+        cards=(4, 5),
+        python_path=(tmp_path / "worktree" / "python",),
+        root=tmp_path / "sandbox",
+        base_env={**BASE, "GH_TOKEN": "app-secret", "SGLANG_USE_AITER": "1", "LC_ALL": "C.UTF-8"},
+        isolation=BwrapIsolation(probe),
+        paths=SandboxPaths(**paths),  # type: ignore[arg-type]
+        forwarded={"ANTHROPIC_BASE_URL": "http://gateway"},
+    )
+
+
+def test_a_confined_sandbox_s_commands_start_from_its_own_environment_and_tmp(tmp_path: Path) -> None:
+    sandbox = _confined(tmp_path)
+    home = tmp_path / "sandbox" / "home"
+    try:
+        env = sandbox.env({"PATH": f"/agent/bin{os.pathsep}{BASE['PATH']}", "FOO": "bar"})
+    finally:
+        asyncio.run(sandbox.stop())
+
+    assert "GH_TOKEN" not in env and env["SGLANG_USE_AITER"] == "1" and env["LC_ALL"] == "C.UTF-8"
+    assert env["ANTHROPIC_BASE_URL"] == "http://gateway" and env["FOO"] == "bar"
+    assert (env["HOME"], env["CLAUDE_CONFIG_DIR"]) == (str(home), str(home / ".claude"))
+    assert env["TMPDIR"] == "/tmp" and sandbox.tmp == Path("/tmp") and sandbox.cache_root == Path("/tmp/cache")
+    assert env["PATH"].split(os.pathsep)[:2] == [str(tmp_path / "sandbox" / "bin"), "/agent/bin"]
+    assert not [entry for entry in env["PATH"].split(os.pathsep) if entry.startswith(str(home))], "a home's bin"
+    assert env["ROCR_VISIBLE_DEVICES"] == "4,5" and env["HIP_VISIBLE_DEVICES"] == "0,1"
+    assert (home / ".claude").is_dir()
+    assert sandbox.frameworks == FrameworkProtection(), "no mount namespace is asked for inside bubblewrap"
+
+
+def test_confined_env_keeps_what_a_command_needs_and_nothing_else_of_the_app_s(tmp_path: Path) -> None:
+    hub = tmp_path / "app" / ".cache" / "huggingface" / "hub"
+    hub.mkdir(parents=True)
+    environ = {
+        "PATH": "/usr/bin",
+        "PYTHONPATH": "/sgl-workspace/sglang/python",
+        "LANG": "C.UTF-8",
+        "LC_CTYPE": "C",
+        "MODEL_PATH": "/models/m",
+        "HOME": str(tmp_path / "app"),
+        "HIP_FORCE_DEV_KERNARG": "1",
+        "LD_LIBRARY_PATH": "/opt/rocm/lib",
+        "TRITON_CACHE_DIR": "/root/.triton/cache",
+        "GH_TOKEN": "secret",
+        "AWS_SECRET_ACCESS_KEY": "secret",
+        "KUBECONFIG": "/root/.kube/config",
+        "CLAUDE_CONFIG_DIR": "/root/.claude",
+    }
+    home = tmp_path / "home"
+
+    env = confined_env(environ, home, {"CLAUDE_CODE_OAUTH_TOKEN": "forwarded"})
+
+    assert env == {
+        "PATH": "/usr/bin",
+        "PYTHONPATH": "/sgl-workspace/sglang/python",
+        "LANG": "C.UTF-8",
+        "LC_CTYPE": "C",
+        "MODEL_PATH": "/models/m",
+        "HIP_FORCE_DEV_KERNARG": "1",
+        "LD_LIBRARY_PATH": "/opt/rocm/lib",
+        "CLAUDE_CODE_OAUTH_TOKEN": "forwarded",
+        "HF_HUB_CACHE": str(hub),
+        "HOME": str(home),
+        "CLAUDE_CONFIG_DIR": str(home / ".claude"),
+        "XDG_CACHE_HOME": str(home / ".cache"),
+        "PYTHONUSERBASE": str(home / ".local"),
+        "PIP_TARGET": str(home / "site-packages"),
+        "TRITON_CACHE_DIR": str(home / ".triton" / "cache"),
+        "IS_SANDBOX": "1",
+    }
+    assert "HF_HUB_CACHE" not in confined_env({**environ, "HF_HOME": "/hf"}, home, {}), "an HF location is kept"
+
+
+def test_a_sandbox_whose_paths_bubblewrap_cannot_bind_safely_runs_as_before_and_says_so(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    agent = tmp_path / "agent"
+    (agent / "tree").mkdir(parents=True)
+    # A readable path reached through a tree the agent writes: where it points is the agent's choice.
+    (tmp_path / "into-agent").symlink_to(agent)
+    with caplog.at_level(logging.WARNING, logger=agent_sandbox.__name__):
+        sandbox = _confined(tmp_path, writable=(agent,), readable=(tmp_path / "into-agent" / "tree",))
+
+    assert isinstance(sandbox.isolation, NoIsolation)
+    assert "is reached through a tree the agent writes" in sandbox.isolation.why
+    assert "runs unconfined, as before" in caplog.text and str(tmp_path / "sandbox") in caplog.text
+    env = sandbox.env({})
+    assert env["GH_TOKEN"] == "app-secret" and env["HOME"] == "/home/agent", "an unconfined sandbox runs as before"
+    assert Path(env["TMPDIR"]).parent == Path(tempfile.gettempdir())
+    assert not list(Path(tempfile.gettempdir()).glob("hl-agent-*")), "the refused sandbox's scratch is removed"
+
+
+def test_a_hosted_run_refuses_a_sandbox_whose_paths_bubblewrap_cannot_bind_safely(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(agent_isolation._STATE, "hosted", True)
+    monkeypatch.setattr(agent_isolation._STATE, "layer_bwrap", PROBED.path)
+    agent = tmp_path / "agent"
+    (agent / "tree").mkdir(parents=True)
+    (tmp_path / "into-agent").symlink_to(agent)
+
+    with pytest.raises(IsolationRefused, match="is reached through a tree the agent writes"):
+        _confined(tmp_path, writable=(agent,), readable=(tmp_path / "into-agent" / "tree",))
+    assert not list(Path(tempfile.gettempdir()).glob("hl-agent-*"))
+
+
+def test_an_older_bubblewrap_refuses_a_bind_below_the_sandbox_s_shared_tmp(tmp_path: Path) -> None:
+    if not str(tmp_path).startswith("/tmp/"):
+        pytest.skip(f"the test's directory {tmp_path} is not below /tmp")
+    older = replace(PROBED, version=(0, 11, 1))
+
+    refused = _confined(tmp_path, probe=older, writable=(tmp_path / "agent",))
+    accepted = _confined(tmp_path / "newer", writable=(tmp_path / "newer" / "agent",))
+    try:
+        assert isinstance(refused.isolation, NoIsolation)
+        assert "would be mounted below the agent-writable /tmp" in refused.isolation.why
+        assert isinstance(accepted.isolation, BwrapIsolation)
+    finally:
+        asyncio.run(accepted.stop())

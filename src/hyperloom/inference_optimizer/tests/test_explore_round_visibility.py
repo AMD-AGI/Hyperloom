@@ -4,7 +4,7 @@
 """Orchestration sees what a queued or running explore round holds and how far it has got.
 
 A proposal in a round's grid is no longer waiting for a bench, so the untested queue and its backlog count leave it
-out, and the round's task line names its variants and the latest progress of each.
+out, and the round's task line, in every orchestration turn, names its variants and the latest progress of each.
 """
 
 from __future__ import annotations
@@ -121,6 +121,20 @@ async def test_a_running_round_names_its_variants_and_their_latest_progress(coor
     assert "grid_as_dispatched=['first', 'second', 'third']" in line
     assert "variants=[first: succeeded 1290.6 tok/s, second: warmup running]" in line
     assert "last_progress_age_sec=" in line
+
+
+@pytest.mark.asyncio
+async def test_every_turn_lists_a_queued_round_with_its_grid(coord):
+    task, _ = await coord.tasks.create_or_return_existing(
+        TaskSpec(kind="explore", params={"grid": [{"name": "mem_090"}]}, idempotency_key="explore:0123456789")
+    )
+
+    out = (await coord.conversation.compose_prompt("orchestration")).text
+    in_flight = out.split("=== Tasks in flight ===", 1)[1]
+    line = next(line for line in in_flight.splitlines() if task.task_id in line)
+
+    assert "queued_sec=" in line
+    assert "grid_as_dispatched=['mem_090']" in line
 
 
 @pytest.mark.asyncio

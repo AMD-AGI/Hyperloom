@@ -16,11 +16,11 @@ import pytest
 from hyperloom.inference_optimizer.trace.agent_trace import AgentTrace
 from hyperloom.orchestrator.loop.sub_agent_runner import RunnerContext
 from hyperloom.orchestrator.specialists import runner as sr
+from hyperloom.orchestrator.specialists import worktrees
+from hyperloom.orchestrator.specialists.failure_class import SpecialistFailureType, classify_specialist_failure
 from hyperloom.orchestrator.specialists.runner import (
-    SpecialistFailureType,
     SpecialistRunner,
     build_empty_specialist_done,
-    classify_specialist_failure,
 )
 from hyperloom.orchestrator.state.task_registry import Task
 
@@ -217,6 +217,15 @@ def test_write_specialist_done(tmp_path):
     assert payload["proposal_set"] == [] and "ts" in payload
 
 
+def test_write_specialist_done_scrubs_credentials(tmp_path):
+    r = _runner()
+    reason = "clone failed: Authorization: Bearer abcdefgh12345678 ghp_abcdef123456"
+    r._write_specialist_done(tmp_path, {"reason": reason, "n": 2})
+    text = (tmp_path / "specialist_done.json").read_text(encoding="utf-8")
+    assert "abcdefgh12345678" not in text and "ghp_abcdef123456" not in text
+    assert json.loads(text)["n"] == 2
+
+
 def test_write_specialist_done_atomic_leaves_no_tmp(tmp_path):
     # Final write goes through temp + os.replace; no .tmp residue, valid JSON.
     r = _runner()
@@ -237,12 +246,8 @@ def _finalize(r, tmp_path, payload, params=None):
     return result, json.loads((tmp_path / "specialist_done.json").read_text(encoding="utf-8"))
 
 
-def test_a_harvested_diff_is_the_whole_round_and_the_specialists_copy_of_it_is_not_added(tmp_path, monkeypatch):
-    patches = tmp_path / "patches"
-    patches.mkdir()
-    harvested, copy = patches / "_worktree_diff.patch", patches / "001_x.patch"
-    harvested.write_text("diff\n")
-    copy.write_text("diff\n")
+def _vetted_by_finalize(tmp_path, monkeypatch, sub_result, **prep):
+    """The patch lists ``_finalize`` hands the patch-safety gate for ``sub_result``."""
     vetted: list[list[str]] = []
 
     def _spy_vet(patches, **_kwargs):
@@ -252,8 +257,23 @@ def test_a_harvested_diff_is_the_whole_round_and_the_specialists_copy_of_it_is_n
     monkeypatch.setattr(sr._patch_safety, "vet_patches", _spy_vet)
     _runner()._finalize(
         ctx=SimpleNamespace(task=SimpleNamespace(task_id="t1", params={}), extra={}),
-        prep=sr._PreparedRun(domain=SimpleNamespace(key="serving_specialist"), gap="gap-1", workspace=tmp_path),
-        sub_result=sr.SpecialistSubprocessResult(
+        prep=sr._PreparedRun(domain=SimpleNamespace(key="serving_specialist"), gap="gap-1", workspace=tmp_path, **prep),
+        sub_result=sub_result,
+    )
+    return vetted
+
+
+def test_a_harvested_diff_is_the_whole_round_and_the_specialists_copy_of_it_is_not_added(tmp_path, monkeypatch):
+    patches = tmp_path / "patches"
+    patches.mkdir()
+    harvested, copy = patches / "_worktree_diff.patch", patches / "001_x.patch"
+    harvested.write_text("diff\n")
+    copy.write_text("diff\n")
+
+    vetted = _vetted_by_finalize(
+        tmp_path,
+        monkeypatch,
+        sr.SpecialistSubprocessResult(
             done_payload={"proposal_set": [], "summary": "s", "patches_written": [str(copy)]},
             patches=[str(harvested)],
             patch_roots={str(harvested): str(tmp_path)},
@@ -261,6 +281,25 @@ def test_a_harvested_diff_is_the_whole_round_and_the_specialists_copy_of_it_is_n
     )
 
     assert vetted == [[str(harvested)]]
+
+
+def test_a_refused_worktree_leaves_no_patch_the_specialist_claims(tmp_path, monkeypatch):
+    """A claimed path resolves through the worktree's path, which the agent may have pointed at a host directory."""
+    (tmp_path / "worktree").mkdir()
+    (tmp_path / "patches").mkdir()
+    claimed = tmp_path / "patches" / "001_x.patch"
+    claimed.write_text("diff\n")
+    refused = "worktree_refused: replaced"
+    payload = {"proposal_set": [], "summary": "s", "patches_written": [str(claimed), "creds.txt"]}
+
+    vetted = _vetted_by_finalize(
+        tmp_path,
+        monkeypatch,
+        sr.SpecialistSubprocessResult(done_payload=payload, worktree_refused=refused, error=refused),
+        worktree=tmp_path / "worktree",
+    )
+
+    assert vetted == [[]]
 
 
 def test_a_specialist_keeps_only_citations_of_experiences_its_dispatch_showed(tmp_path):
@@ -371,7 +410,7 @@ def test_maybe_setup_worktree_research_mode_skips_worktree(tmp_path):
     r = _runner(subprocess_config=cfg)
     ctx = SimpleNamespace(task=SimpleNamespace(task_id="t", params={"mode": "research"}))
     profile = resolve_specialist_profile(ctx.task.params)
-    assert r._maybe_setup_worktree(ctx, workspace=tmp_path, profile=profile) == (None, None, "")
+    assert r._maybe_setup_worktree(ctx, workspace=tmp_path, profile=profile) == (None, None, "", None)
 
 
 def test_maybe_setup_worktree_bases_on_the_framework_being_optimised(tmp_path, monkeypatch):
@@ -399,7 +438,8 @@ def test_maybe_setup_worktree_bases_on_the_framework_being_optimised(tmp_path, m
         seen["base"] = base
         return worktree_path, ""
 
-    monkeypatch.setattr(sr, "_setup_worktree", _fake_setup)
+    monkeypatch.setattr(worktrees, "_setup_worktree", _fake_setup)
+    monkeypatch.setattr(worktrees, "recorded_admin_dir", lambda base, worktree: base / "worktrees" / "w")
     ctx = SimpleNamespace(
         task=SimpleNamespace(
             task_id="t",
@@ -407,10 +447,11 @@ def test_maybe_setup_worktree_bases_on_the_framework_being_optimised(tmp_path, m
         )
     )
 
-    _wt, source, err = r._maybe_setup_worktree(ctx, workspace=tmp_path)
+    _wt, source, err, admin = r._maybe_setup_worktree(ctx, workspace=tmp_path)
 
     assert err == ""
     assert source.root == worldplay and seen["base"] == worldplay, f"specialist would patch {seen.get('base')}"
+    assert admin == worldplay / "worktrees" / "w"
 
 
 def test_maybe_setup_worktree_snapshots_a_framework_that_is_not_a_checkout(tmp_path, monkeypatch):
@@ -429,10 +470,11 @@ def test_maybe_setup_worktree_snapshots_a_framework_that_is_not_a_checkout(tmp_p
         seen["base"] = base
         return worktree_path, ""
 
-    monkeypatch.setattr(sr, "_setup_worktree", _fake_setup)
+    monkeypatch.setattr(worktrees, "_setup_worktree", _fake_setup)
+    monkeypatch.setattr(worktrees, "recorded_admin_dir", lambda base, worktree: base / "worktrees" / "w")
     ctx = SimpleNamespace(task=SimpleNamespace(task_id="t", params={"framework": "custom"}))
 
-    _wt, source, err = r._maybe_setup_worktree(ctx, workspace=tmp_path)
+    _wt, source, err, _admin = r._maybe_setup_worktree(ctx, workspace=tmp_path)
 
     assert err == ""
     assert source.root == package and not source.checkout
@@ -452,9 +494,7 @@ def test_maybe_setup_worktree_has_nothing_to_isolate_without_a_named_tree(tmp_pa
         task=SimpleNamespace(task_id="t", params={"framework": "custom", "domain": "framework_rewrite_specialist"})
     )
 
-    wt, source, err = r._maybe_setup_worktree(ctx, workspace=tmp_path)
-
-    assert (wt, source, err) == (None, None, sr.NO_GIT_FRAMEWORK_SOURCE_ROOT)
+    assert r._maybe_setup_worktree(ctx, workspace=tmp_path) == (None, None, sr.NO_GIT_FRAMEWORK_SOURCE_ROOT, None)
 
 
 def test_patch_path_within_bases_accepts_sandbox_paths(tmp_path):

@@ -1,0 +1,10 @@
+__pycache__/
+*.pyc
+
+# Local trajectory fallback (used when session_root is not host-writable)
+.arbor/
+port_forward.py
+patches/
+one_batch_patched.py
+*.local.json
+sessions/

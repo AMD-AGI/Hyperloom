@@ -1,0 +1,1252 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "arbor-cli-payload/1",
+  "title": "Arbor command payload, version 1",
+  "description": "The parameters of one Arbor command, as a JSON or YAML document: `python3 -m arbor <command> --payload FILE`, or `python3 -m arbor --payload FILE` with `command` set (`python3 -m arbor.directions --payload FILE` for directions). Each key is the flag's long name with `_` for `-`. Generated from Arbor's parsers (arbor/cli/payload.py).",
+  "type": "object",
+  "required": [
+    "arbor_payload"
+  ],
+  "properties": {
+    "arbor_payload": {
+      "const": 1,
+      "description": "the payload format's version"
+    },
+    "command": {
+      "enum": [
+        "run",
+        "master",
+        "worker",
+        "review",
+        "conflicts",
+        "restore",
+        "pause",
+        "checkpoint",
+        "iterate",
+        "version",
+        "directions"
+      ],
+      "description": "the command; may be left out when the command line names it"
+    }
+  },
+  "oneOf": [
+    {
+      "$ref": "#/$defs/run"
+    },
+    {
+      "$ref": "#/$defs/master"
+    },
+    {
+      "$ref": "#/$defs/worker"
+    },
+    {
+      "$ref": "#/$defs/review"
+    },
+    {
+      "$ref": "#/$defs/conflicts"
+    },
+    {
+      "$ref": "#/$defs/restore"
+    },
+    {
+      "$ref": "#/$defs/pause"
+    },
+    {
+      "$ref": "#/$defs/checkpoint"
+    },
+    {
+      "$ref": "#/$defs/iterate"
+    },
+    {
+      "$ref": "#/$defs/version"
+    },
+    {
+      "$ref": "#/$defs/directions"
+    }
+  ],
+  "$defs": {
+    "run": {
+      "title": "python3 -m arbor run",
+      "type": "object",
+      "allOf": [
+        {
+          "if": {
+            "not": {
+              "properties": {
+                "dry_run": {
+                  "const": true
+                }
+              },
+              "required": [
+                "dry_run"
+              ]
+            }
+          },
+          "then": {
+            "not": {
+              "anyOf": [
+                {
+                  "required": [
+                    "seed"
+                  ]
+                }
+              ]
+            }
+          }
+        }
+      ],
+      "properties": {
+        "arbor_payload": {
+          "const": 1
+        },
+        "command": {
+          "const": "run"
+        },
+        "config": {
+          "type": "string",
+          "description": "Campaign config JSON"
+        },
+        "split": {
+          "type": "string",
+          "enum": [
+            "loop",
+            "processes",
+            "workers"
+          ],
+          "$comment": "default: loop, or ARBOR_SPLIT when set",
+          "description": "loop: the master and its workers in this process (the default); processes: each side as its own command, python3 -m arbor master, then worker --order, in turn (also ARBOR_SPLIT=processes, as a host that launches arbor run passes it); workers: the master deals its map to several workers at once, one per slot of the config's workers block, and integrates what they kept (arbor/dealer.py)"
+        },
+        "exit_at_handover": {
+          "type": "boolean",
+          "default": false,
+          "description": "exit at each hand-over, as arbor master and arbor worker would in turn: the master's passes, then one worker stretch, then at the next master's turn the worker's report (worker_report.json, role_exit.json `reported`) and exit 0. The same command continues: an order still waiting for its report is worked first, else the master's passes run again. For a host that deals each report (with the loop split only)"
+        },
+        "max_iters": {
+          "type": "integer",
+          "default": 0,
+          "description": "0 = run until target or STOP file"
+        },
+        "cooldown": {
+          "type": "integer",
+          "default": 30,
+          "description": "Seconds between iterations"
+        },
+        "opt_objective": {
+          "type": "string",
+          "description": "optimize this metric in place of the pack's: a name (\"P50 interactivity\", \"total throughput\") or a bench key with its direction (\"tpot_p50:min\"). Also ARBOR_OPT_OBJECTIVE, or \"opt_objective\" in the config; arbor/objective.py"
+        },
+        "allow_pack_results": {
+          "type": "boolean",
+          "default": false,
+          "description": "accept a results/ directory inside the pack (refused by default: a pack is the contract every campaign of its kind shares, so results kept in it reach every campaign that uses the pack, where an agent may read another model's, node's or image's numbers as evidence about its own; they also grow the pack and its repository)"
+        },
+        "review_gate": {
+          "type": [
+            "boolean",
+            "null"
+          ],
+          "description": "true: --review-gate, a fresh session waits for a human's approval before it runs anything (the default; arbor/review.py); false: --no-review-gate, start without the review (also ARBOR_REVIEW_GATE=0, or \"review_gate\": false in the config); null or absent: the default"
+        },
+        "skill_conflicts": {
+          "type": "string",
+          "enum": [
+            "pause",
+            "merge"
+          ],
+          "description": "two loaded skills that write the same thing: pause for a person to decide (the default), or merge them with an agent, without a pause (also ARBOR_SKILL_CONFLICTS, or \"skill_conflicts\" in the config; arbor/conflicts.py)"
+        },
+        "dry_run": {
+          "type": "boolean",
+          "default": false,
+          "description": "the loop on synthetic numbers, with no GPU and no agent (arbor run --dry-run); it takes seed, and its own defaults for max_iters and cooldown"
+        },
+        "seed": {
+          "type": "integer",
+          "default": 42,
+          "description": "the synthetic numbers' random seed (with dry_run: true)"
+        }
+      },
+      "required": [
+        "config"
+      ],
+      "additionalProperties": false
+    },
+    "master": {
+      "title": "python3 -m arbor master",
+      "type": "object",
+      "properties": {
+        "arbor_payload": {
+          "const": 1
+        },
+        "command": {
+          "const": "master"
+        },
+        "config": {
+          "type": "string",
+          "description": "Campaign config JSON"
+        },
+        "deal": {
+          "type": "boolean",
+          "default": false,
+          "description": "the master deals its map to workers of their own (--split workers passes it): it starts the set map before handing over, and ends the campaign when the time left is the integration's reserve"
+        },
+        "max_iters": {
+          "type": "integer",
+          "default": 0,
+          "description": "0 = run until target or STOP file"
+        },
+        "cooldown": {
+          "type": "integer",
+          "default": 30,
+          "description": "Seconds between iterations"
+        },
+        "opt_objective": {
+          "type": "string",
+          "description": "optimize this metric in place of the pack's: a name (\"P50 interactivity\", \"total throughput\") or a bench key with its direction (\"tpot_p50:min\"). Also ARBOR_OPT_OBJECTIVE, or \"opt_objective\" in the config; arbor/objective.py"
+        },
+        "allow_pack_results": {
+          "type": "boolean",
+          "default": false,
+          "description": "accept a results/ directory inside the pack (refused by default: a pack is the contract every campaign of its kind shares, so results kept in it reach every campaign that uses the pack, where an agent may read another model's, node's or image's numbers as evidence about its own; they also grow the pack and its repository)"
+        },
+        "review_gate": {
+          "type": [
+            "boolean",
+            "null"
+          ],
+          "description": "true: --review-gate, a fresh session waits for a human's approval before it runs anything (the default; arbor/review.py); false: --no-review-gate, start without the review (also ARBOR_REVIEW_GATE=0, or \"review_gate\": false in the config); null or absent: the default"
+        },
+        "skill_conflicts": {
+          "type": "string",
+          "enum": [
+            "pause",
+            "merge"
+          ],
+          "description": "two loaded skills that write the same thing: pause for a person to decide (the default), or merge them with an agent, without a pause (also ARBOR_SKILL_CONFLICTS, or \"skill_conflicts\" in the config; arbor/conflicts.py)"
+        }
+      },
+      "required": [
+        "config"
+      ],
+      "additionalProperties": false
+    },
+    "worker": {
+      "title": "python3 -m arbor worker",
+      "type": "object",
+      "properties": {
+        "arbor_payload": {
+          "const": 1
+        },
+        "command": {
+          "const": "worker"
+        },
+        "order": {
+          "type": "string",
+          "description": "the work order (work_order.json) the master wrote"
+        },
+        "config": {
+          "type": "string",
+          "description": "the worker's own config (its session, workspace and node); the order's by default, in the master's session. A session of its own takes the order's directions as its map"
+        },
+        "max_iters": {
+          "type": "integer",
+          "default": 0,
+          "description": "0 = run until target or STOP file"
+        },
+        "cooldown": {
+          "type": "integer",
+          "default": 30,
+          "description": "Seconds between iterations"
+        },
+        "opt_objective": {
+          "type": "string",
+          "description": "optimize this metric in place of the pack's: a name (\"P50 interactivity\", \"total throughput\") or a bench key with its direction (\"tpot_p50:min\"). Also ARBOR_OPT_OBJECTIVE, or \"opt_objective\" in the config; arbor/objective.py"
+        },
+        "allow_pack_results": {
+          "type": "boolean",
+          "default": false,
+          "description": "accept a results/ directory inside the pack (refused by default: a pack is the contract every campaign of its kind shares, so results kept in it reach every campaign that uses the pack, where an agent may read another model's, node's or image's numbers as evidence about its own; they also grow the pack and its repository)"
+        },
+        "skill_conflicts": {
+          "type": "string",
+          "enum": [
+            "pause",
+            "merge"
+          ],
+          "description": "two loaded skills that write the same thing: pause for a person to decide (the default), or merge them with an agent, without a pause (also ARBOR_SKILL_CONFLICTS, or \"skill_conflicts\" in the config; arbor/conflicts.py)"
+        }
+      },
+      "required": [
+        "order"
+      ],
+      "additionalProperties": false
+    },
+    "review": {
+      "title": "python3 -m arbor review",
+      "type": "object",
+      "properties": {
+        "arbor_payload": {
+          "const": 1
+        },
+        "command": {
+          "const": "review"
+        },
+        "action": {
+          "type": "string",
+          "enum": [
+            "show",
+            "approve",
+            "reject"
+          ],
+          "description": "show the review, or approve or reject the campaign"
+        },
+        "session": {
+          "type": "string",
+          "description": "the campaign's session directory"
+        },
+        "config": {
+          "type": "string",
+          "description": "the campaign config (default: the one review.json names)"
+        },
+        "note": {
+          "type": "string",
+          "description": "why, for the record"
+        },
+        "by": {
+          "type": "string",
+          "description": "who decides (default: the login name)"
+        }
+      },
+      "required": [
+        "action",
+        "session"
+      ],
+      "additionalProperties": false
+    },
+    "conflicts": {
+      "title": "python3 -m arbor conflicts",
+      "type": "object",
+      "oneOf": [
+        {
+          "properties": {
+            "action": {
+              "const": "show"
+            }
+          },
+          "required": [
+            "action"
+          ],
+          "not": {
+            "anyOf": [
+              {
+                "required": [
+                  "by"
+                ]
+              },
+              {
+                "required": [
+                  "id"
+                ]
+              },
+              {
+                "required": [
+                  "keep"
+                ]
+              },
+              {
+                "required": [
+                  "note"
+                ]
+              },
+              {
+                "required": [
+                  "skill"
+                ]
+              }
+            ]
+          }
+        },
+        {
+          "properties": {
+            "action": {
+              "const": "pick"
+            }
+          },
+          "required": [
+            "action",
+            "id",
+            "skill"
+          ],
+          "not": {
+            "anyOf": [
+              {
+                "required": [
+                  "keep"
+                ]
+              }
+            ]
+          }
+        },
+        {
+          "properties": {
+            "action": {
+              "const": "merge"
+            }
+          },
+          "required": [
+            "action",
+            "id"
+          ],
+          "not": {
+            "anyOf": [
+              {
+                "required": [
+                  "skill"
+                ]
+              }
+            ]
+          }
+        }
+      ],
+      "properties": {
+        "arbor_payload": {
+          "const": 1
+        },
+        "command": {
+          "const": "conflicts"
+        },
+        "action": {
+          "enum": [
+            "show",
+            "pick",
+            "merge"
+          ],
+          "description": "the conflicts action"
+        },
+        "session": {
+          "type": "string",
+          "description": "the campaign's session directory"
+        },
+        "root": {
+          "type": "string",
+          "$comment": "default: this checkout",
+          "description": "the Arbor checkout (default: this one)"
+        },
+        "by": {
+          "type": "string",
+          "description": "who decides (default: the login name)"
+        },
+        "id": {
+          "type": "string",
+          "description": "the conflict's id, as show lists it"
+        },
+        "keep": {
+          "type": "string",
+          "description": "the skill whose name, modes and chapter the merge keeps (the first loaded)"
+        },
+        "note": {
+          "type": "string",
+          "description": "why, for the record"
+        },
+        "skill": {
+          "type": "string",
+          "description": "the skill to keep"
+        }
+      },
+      "required": [
+        "action",
+        "session"
+      ],
+      "additionalProperties": false
+    },
+    "restore": {
+      "title": "python3 -m arbor restore",
+      "type": "object",
+      "properties": {
+        "arbor_payload": {
+          "const": 1
+        },
+        "command": {
+          "const": "restore"
+        },
+        "config": {
+          "type": "string",
+          "description": "the campaign's config: its session, container and workspace"
+        },
+        "checkpoint": {
+          "type": "string",
+          "description": "the checkpoint: an iteration, a name, or latest (the default)"
+        },
+        "force": {
+          "type": "boolean",
+          "default": false,
+          "description": "restore onto another image's tree, reset a workspace that is not at its root first, and put the checkpoint's dossier in place of a different one"
+        },
+        "json": {
+          "type": "boolean",
+          "default": false,
+          "description": "what was done, as JSON"
+        }
+      },
+      "required": [
+        "config"
+      ],
+      "additionalProperties": false
+    },
+    "pause": {
+      "title": "python3 -m arbor pause",
+      "type": "object",
+      "properties": {
+        "arbor_payload": {
+          "const": 1
+        },
+        "command": {
+          "const": "pause"
+        },
+        "config": {
+          "type": "string",
+          "description": "the campaign's config"
+        },
+        "session": {
+          "type": "string",
+          "description": "the campaign's session directory"
+        },
+        "reason": {
+          "type": "string",
+          "description": "why, for the record"
+        },
+        "cancel": {
+          "type": "boolean",
+          "default": false,
+          "description": "take back a pause not yet acted on"
+        }
+      },
+      "required": [],
+      "additionalProperties": false
+    },
+    "checkpoint": {
+      "title": "python3 -m arbor checkpoint",
+      "type": "object",
+      "oneOf": [
+        {
+          "properties": {
+            "action": {
+              "const": "list"
+            }
+          },
+          "required": [
+            "action"
+          ],
+          "not": {
+            "anyOf": [
+              {
+                "required": [
+                  "all"
+                ]
+              },
+              {
+                "required": [
+                  "branch"
+                ]
+              },
+              {
+                "required": [
+                  "checkpoint"
+                ]
+              },
+              {
+                "required": [
+                  "directions"
+                ]
+              },
+              {
+                "required": [
+                  "force"
+                ]
+              },
+              {
+                "required": [
+                  "fork_policy"
+                ]
+              },
+              {
+                "required": [
+                  "name"
+                ]
+              },
+              {
+                "required": [
+                  "no_restore"
+                ]
+              },
+              {
+                "required": [
+                  "prompt_profile"
+                ]
+              },
+              {
+                "required": [
+                  "reason"
+                ]
+              },
+              {
+                "required": [
+                  "reset"
+                ]
+              },
+              {
+                "required": [
+                  "source"
+                ]
+              }
+            ]
+          }
+        },
+        {
+          "properties": {
+            "action": {
+              "const": "show"
+            }
+          },
+          "required": [
+            "action",
+            "checkpoint"
+          ],
+          "not": {
+            "anyOf": [
+              {
+                "required": [
+                  "all"
+                ]
+              },
+              {
+                "required": [
+                  "branch"
+                ]
+              },
+              {
+                "required": [
+                  "directions"
+                ]
+              },
+              {
+                "required": [
+                  "force"
+                ]
+              },
+              {
+                "required": [
+                  "fork_policy"
+                ]
+              },
+              {
+                "required": [
+                  "name"
+                ]
+              },
+              {
+                "required": [
+                  "no_restore"
+                ]
+              },
+              {
+                "required": [
+                  "prompt_profile"
+                ]
+              },
+              {
+                "required": [
+                  "reason"
+                ]
+              },
+              {
+                "required": [
+                  "reset"
+                ]
+              },
+              {
+                "required": [
+                  "source"
+                ]
+              }
+            ]
+          }
+        },
+        {
+          "properties": {
+            "action": {
+              "const": "verify"
+            }
+          },
+          "required": [
+            "action",
+            "checkpoint"
+          ],
+          "not": {
+            "anyOf": [
+              {
+                "required": [
+                  "branch"
+                ]
+              },
+              {
+                "required": [
+                  "directions"
+                ]
+              },
+              {
+                "required": [
+                  "force"
+                ]
+              },
+              {
+                "required": [
+                  "fork_policy"
+                ]
+              },
+              {
+                "required": [
+                  "name"
+                ]
+              },
+              {
+                "required": [
+                  "no_restore"
+                ]
+              },
+              {
+                "required": [
+                  "prompt_profile"
+                ]
+              },
+              {
+                "required": [
+                  "reason"
+                ]
+              },
+              {
+                "required": [
+                  "reset"
+                ]
+              },
+              {
+                "required": [
+                  "source"
+                ]
+              }
+            ]
+          }
+        },
+        {
+          "properties": {
+            "action": {
+              "const": "create"
+            }
+          },
+          "required": [
+            "action",
+            "config"
+          ],
+          "not": {
+            "anyOf": [
+              {
+                "required": [
+                  "all"
+                ]
+              },
+              {
+                "required": [
+                  "branch"
+                ]
+              },
+              {
+                "required": [
+                  "checkpoint"
+                ]
+              },
+              {
+                "required": [
+                  "directions"
+                ]
+              },
+              {
+                "required": [
+                  "force"
+                ]
+              },
+              {
+                "required": [
+                  "fork_policy"
+                ]
+              },
+              {
+                "required": [
+                  "no_restore"
+                ]
+              },
+              {
+                "required": [
+                  "prompt_profile"
+                ]
+              },
+              {
+                "required": [
+                  "reset"
+                ]
+              },
+              {
+                "required": [
+                  "session"
+                ]
+              },
+              {
+                "required": [
+                  "source"
+                ]
+              }
+            ]
+          }
+        },
+        {
+          "properties": {
+            "action": {
+              "const": "fork"
+            }
+          },
+          "required": [
+            "action",
+            "source",
+            "config"
+          ],
+          "not": {
+            "anyOf": [
+              {
+                "required": [
+                  "all"
+                ]
+              },
+              {
+                "required": [
+                  "name"
+                ]
+              },
+              {
+                "required": [
+                  "reason"
+                ]
+              },
+              {
+                "required": [
+                  "session"
+                ]
+              }
+            ]
+          }
+        }
+      ],
+      "properties": {
+        "arbor_payload": {
+          "const": 1
+        },
+        "command": {
+          "const": "checkpoint"
+        },
+        "action": {
+          "type": "string",
+          "enum": [
+            "list",
+            "show",
+            "verify",
+            "create",
+            "fork"
+          ],
+          "description": "list, show or verify a session's checkpoints, create one now, or fork a new session from one"
+        },
+        "all": {
+          "type": "boolean",
+          "default": false,
+          "description": "every checkpoint and name"
+        },
+        "branch": {
+          "type": "string",
+          "description": "the branch's id (default: the session directory's name)"
+        },
+        "checkpoint": {
+          "type": "string",
+          "description": "show: an iteration, a name, or latest; verify: an iteration, a name, or latest; fork: the parent's checkpoint: an iteration, a name, or latest"
+        },
+        "config": {
+          "type": "string",
+          "description": "list: the campaign's config; show: the campaign's config; verify: the campaign's config; create: the campaign's config; fork: the fork's config: its own session_root, container, workspace and dossier"
+        },
+        "directions": {
+          "type": "string",
+          "description": "exploratory: a map (directions.json) in place of the parent's"
+        },
+        "force": {
+          "type": "boolean",
+          "default": false,
+          "description": "share the parent's workspace or dossier, or restore onto another image's tree"
+        },
+        "fork_policy": {
+          "type": "string",
+          "enum": [
+            "exact",
+            "exploratory"
+          ],
+          "default": "exact",
+          "description": "exact (the default): bars, counters and map kept; exploratory: also --directions, --reset"
+        },
+        "name": {
+          "type": "string",
+          "description": "a name that pins it (letters, digits, . _ -)"
+        },
+        "no_restore": {
+          "type": "boolean",
+          "default": false,
+          "description": "do not restore the tree into the fork's workspace now (`arbor restore` later)"
+        },
+        "prompt_profile": {
+          "type": "string",
+          "description": "a directory with claude_loop_prompt.md and/or critic_prompt.md, copied into the fork"
+        },
+        "reason": {
+          "type": "string",
+          "description": "why, for the record"
+        },
+        "reset": {
+          "type": "string",
+          "default": [],
+          "description": "exploratory: set a scheduling counter to 0 (null_streak, probe_streak, tier_iters, barren_streak, secondary_only_streak, invalid_streak, or all); repeatable"
+        },
+        "session": {
+          "type": "string",
+          "description": "the session directory"
+        },
+        "source": {
+          "type": "string",
+          "description": "the parent: its session directory, or its config"
+        }
+      },
+      "required": [
+        "action"
+      ],
+      "additionalProperties": false
+    },
+    "iterate": {
+      "title": "python3 -m arbor iterate",
+      "type": "object",
+      "oneOf": [
+        {
+          "properties": {
+            "cmd": {
+              "const": "init"
+            }
+          },
+          "required": [
+            "cmd",
+            "config"
+          ],
+          "not": {
+            "anyOf": [
+              {
+                "required": [
+                  "branch_id"
+                ]
+              },
+              {
+                "required": [
+                  "change"
+                ]
+              },
+              {
+                "required": [
+                  "container"
+                ]
+              },
+              {
+                "required": [
+                  "hypothesis"
+                ]
+              },
+              {
+                "required": [
+                  "iter"
+                ]
+              },
+              {
+                "required": [
+                  "reported_metric"
+                ]
+              },
+              {
+                "required": [
+                  "session_dir"
+                ]
+              },
+              {
+                "required": [
+                  "tier"
+                ]
+              },
+              {
+                "required": [
+                  "workspace"
+                ]
+              }
+            ]
+          }
+        },
+        {
+          "properties": {
+            "cmd": {
+              "const": "begin"
+            }
+          },
+          "required": [
+            "cmd",
+            "config",
+            "session_dir"
+          ],
+          "not": {
+            "anyOf": [
+              {
+                "required": [
+                  "change"
+                ]
+              },
+              {
+                "required": [
+                  "container"
+                ]
+              },
+              {
+                "required": [
+                  "reported_metric"
+                ]
+              },
+              {
+                "required": [
+                  "workspace"
+                ]
+              }
+            ]
+          }
+        },
+        {
+          "properties": {
+            "cmd": {
+              "const": "gate"
+            }
+          },
+          "required": [
+            "cmd",
+            "config",
+            "session_dir",
+            "container",
+            "workspace",
+            "iter",
+            "change"
+          ],
+          "not": {
+            "anyOf": [
+              {
+                "required": [
+                  "branch_id"
+                ]
+              },
+              {
+                "required": [
+                  "hypothesis"
+                ]
+              },
+              {
+                "required": [
+                  "tier"
+                ]
+              }
+            ]
+          }
+        }
+      ],
+      "properties": {
+        "arbor_payload": {
+          "const": 1
+        },
+        "command": {
+          "const": "iterate"
+        },
+        "cmd": {
+          "enum": [
+            "init",
+            "begin",
+            "gate"
+          ],
+          "description": "the iterate action"
+        },
+        "branch_id": {
+          "type": "string",
+          "description": "the branch's id, for the session tracer's mark"
+        },
+        "change": {
+          "type": "string",
+          "description": "what the iteration changed, in one line: its commit's subject"
+        },
+        "config": {
+          "type": "string",
+          "description": "the campaign config"
+        },
+        "container": {
+          "type": "string",
+          "description": "the container the served tree runs in"
+        },
+        "hypothesis": {
+          "type": "string",
+          "description": "the iteration's hypothesis, for the session tracer's mark"
+        },
+        "iter": {
+          "type": "integer",
+          "description": "the iteration's number; begin takes the session's next when it is left out"
+        },
+        "reported_metric": {
+          "type": "number",
+          "description": "Metric value reported by the agent (skips reading bench_output.json)"
+        },
+        "session_dir": {
+          "type": "string",
+          "description": "the campaign's session directory"
+        },
+        "tier": {
+          "type": "string",
+          "description": "the escalation tier, for the session tracer's mark"
+        },
+        "workspace": {
+          "type": "string",
+          "description": "the served tree (a git repository), as the container sees it"
+        }
+      },
+      "required": [
+        "cmd"
+      ],
+      "additionalProperties": false
+    },
+    "version": {
+      "title": "python3 -m arbor version",
+      "type": "object",
+      "properties": {
+        "arbor_payload": {
+          "const": 1
+        },
+        "command": {
+          "const": "version"
+        },
+        "json": {
+          "type": "boolean",
+          "default": false,
+          "description": "everything a caller checks, as JSON"
+        }
+      },
+      "required": [],
+      "additionalProperties": false
+    },
+    "directions": {
+      "title": "python3 -m arbor.directions",
+      "type": "object",
+      "oneOf": [
+        {
+          "properties": {
+            "action": {
+              "const": "generate"
+            }
+          },
+          "required": [
+            "action",
+            "profile",
+            "out"
+          ],
+          "not": {
+            "anyOf": [
+              {
+                "required": [
+                  "map"
+                ]
+              },
+              {
+                "required": [
+                  "shares"
+                ]
+              }
+            ]
+          }
+        },
+        {
+          "properties": {
+            "action": {
+              "const": "split"
+            }
+          },
+          "required": [
+            "action",
+            "map",
+            "shares"
+          ],
+          "not": {
+            "anyOf": [
+              {
+                "required": [
+                  "min_share"
+                ]
+              },
+              {
+                "required": [
+                  "profile"
+                ]
+              }
+            ]
+          }
+        }
+      ],
+      "properties": {
+        "arbor_payload": {
+          "const": 1
+        },
+        "command": {
+          "const": "directions"
+        },
+        "action": {
+          "type": "string",
+          "enum": [
+            "generate",
+            "split"
+          ],
+          "description": "generate a map from a host's root profile, or split one map into shares"
+        },
+        "map": {
+          "type": "string",
+          "description": "directions.json, a JSON list, or a DIRECTIONS line or list ('-': stdin)"
+        },
+        "min_share": {
+          "type": "number",
+          "default": 2.0,
+          "description": "leave out an op family under this percent of GPU time (2)"
+        },
+        "out": {
+          "type": "string",
+          "description": "generate: the map to write: {\"directions\": [...]}; split: write DIR/share-K.json; without it, JSON on stdout"
+        },
+        "profile": {
+          "type": "string",
+          "description": "the root profile: {unit, shares: {op: share}}"
+        },
+        "shares": {
+          "type": "integer",
+          "description": "how many Arbors"
+        }
+      },
+      "required": [
+        "action"
+      ],
+      "additionalProperties": false
+    }
+  }
+}

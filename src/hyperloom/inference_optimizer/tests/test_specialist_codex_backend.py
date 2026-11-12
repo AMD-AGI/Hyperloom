@@ -1059,6 +1059,64 @@ async def test_ray_codex_launch_uses_replace_env_and_prompt_file_stdin(
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("exit_code", [0, 1])
+async def test_a_sandboxed_codex_runs_with_its_own_sandbox_off_in_a_single_node_ray_actor(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    exit_code: int,
+) -> None:
+    """bubblewrap is the sandbox: codex's own is off whatever is configured, and never probed; the actor's command is
+    bubblewrap's, opened by a shell that hands it the status file."""
+    from hyperloom_common.bwrap import BwrapProbe
+    from hyperloom.common.agent_isolation import BwrapIsolation
+    from hyperloom_common.proctree import REAP_MARK_ENV
+
+    _pin_provider_env(monkeypatch, _OPENAI_ONLY_ENV)
+    monkeypatch.setenv("HYPERLOOM_CODEX_SANDBOX_MODE", "workspace-write")
+    monkeypatch.setattr(sp, "probe_codex_sandbox_capability", lambda **_kwargs: pytest.fail("not probed under bwrap"))
+    bwrap = BwrapIsolation(BwrapProbe("/opt/fake/bwrap", (0, 13, 1), ()))
+    monkeypatch.setattr(sp, "resolve_launch_isolation", lambda lease: bwrap)
+    workspace = tmp_path / "workspace"
+    lease = _RecordingGpuLease(workspace)
+    monkeypatch.setattr(lease, "exit_code", lambda: exit_code)
+    result = await SpecialistSubprocessDispatcher(
+        SpecialistSubprocessConfig(
+            agent_backend=AGENT_BACKEND_CODEX,
+            codex_executable="/usr/bin/codex",
+            poll_interval_seconds=0.01,
+        )
+    ).run(
+        SpecialistSpawn(
+            task_id="ray-bwrap",
+            workspace=workspace,
+            worktree=None,
+            worktree_base=None,
+            system_prompt="ray system",
+            user_prompt="ray user prompt",
+            disallowed_tools=frozenset(),
+            gpu_ids=(0,),
+            deadline=Deadline.after(10.0),
+            gpu_lease=lease,
+        )
+    )
+
+    cmd = lease.started["cmd"]
+    codex = cmd[cmd.index("--") + 1 :]
+    if exit_code:  # bubblewrap failed and wrote no exit-code to the status file the actor's shell opened
+        assert result.exit_code is None
+        assert result.error == "specialist sandbox could not be set up: bubblewrap exited 1 before the agent started"
+    else:
+        assert result.exit_code == 0 and result.error == ""
+    assert cmd[:2] == ["/bin/sh", "-c"] and cmd[4] == "/opt/fake/bwrap"
+    assert cmd[cmd.index("--json-status-fd") + 1] == "3" and "--die-with-parent" in cmd
+    codex = codex[codex.index("/usr/bin/codex") :]  # after the relay of the sandbox's network
+    assert codex[0] == "/usr/bin/codex" and "--dangerously-bypass-approvals-and-sandbox" in codex
+    assert "--sandbox" not in codex and REAP_MARK_ENV not in lease.started["env"]
+    assert lease.started["env"]["CODEX_HOME"] == str(workspace / ".codex")
+    assert not Path(cmd[3]).parent.exists()  # the status directory went with the launch
+
+
+@pytest.mark.asyncio
 async def test_codex_mcp_config_is_translated_without_credentials_in_config_or_argv(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,

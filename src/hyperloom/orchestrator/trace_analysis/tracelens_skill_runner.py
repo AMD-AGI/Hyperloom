@@ -15,10 +15,12 @@ from __future__ import annotations
 
 import asyncio
 import ast
+import importlib.util
 import logging
 import os
 import re
 import shlex
+import sys
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Awaitable, Callable, Iterable
@@ -35,8 +37,7 @@ from hyperloom.common.codex_session import (
 )
 from hyperloom_common.llm import llm_config
 from hyperloom.common.deepseek_task import DeepSeekTaskRequest
-from hyperloom_common.llm.llm_config import claude_sdk_env_options
-from hyperloom_common.llm.llm_config import DEFAULT_CLAUDE_MODEL, DEFAULT_CODEX_MODEL
+from hyperloom_common.llm.llm_config import DEFAULT_CLAUDE_MODEL, DEFAULT_CODEX_MODEL, claude_sdk_env_options
 from ._capture_shapes import is_capture_dir_name
 from ._literal_utils import LITERAL_EVAL_ERRORS as _LITERAL_EVAL_ERRORS
 from ._literal_utils import safe_literal_eval as _safe_literal_eval
@@ -294,7 +295,7 @@ def write_run_config(
 
 
 def discover_capture_folder(trace_input: Path, trace_files: list[Path]) -> Path | None:
-    """Find a graph-capture folder near a Magpie torch_trace input.
+    """Find a graph-capture folder near a torch_trace input.
 
     Scans the trace input directory and the first trace file's neighbourhood for
     a subdirectory whose name matches the shared capture-directory shape, so a
@@ -444,18 +445,29 @@ def _import_sdk() -> tuple[Any, Any]:
             ``claude_agent_sdk``.
 
     Raises:
-        RuntimeError: If the SDK is not installed or lacks the expected
-            ``query`` / ``ClaudeAgentOptions`` attributes.
+        RuntimeError: If the SDK is not installed, fails to import, or lacks
+            the expected ``query`` / ``ClaudeAgentOptions`` attributes.
     """
     try:
         import claude_agent_sdk as sdk  # type: ignore[import-not-found]
-    except ImportError as exc:  # pragma: no cover - exercised via caller fallback
+    except ImportError as exc:
+        spec = importlib.util.find_spec("claude_agent_sdk")
+        if spec is None:
+            raise RuntimeError(
+                "claude_agent_sdk not installed; run src/hyperloom/inference_optimizer/assets/install.sh first"
+            ) from exc
         raise RuntimeError(
-            "claude_agent_sdk not installed; run src/hyperloom/inference_optimizer/assets/install.sh first"
+            f"claude_agent_sdk failed to import from {spec.origin} in {sys.executable}: {type(exc).__name__}: {exc}"
         ) from exc
     if not (hasattr(sdk, "query") and hasattr(sdk, "ClaudeAgentOptions")):
         raise RuntimeError("claude_agent_sdk missing query / ClaudeAgentOptions")
     return sdk.query, sdk.ClaudeAgentOptions
+
+
+def require_claude_sdk() -> None:
+    """Import-check the Claude Agent SDK when the resolved agent backend is Claude."""
+    if llm_config.resolve_agent_backend() == llm_config.AGENT_BACKEND_CLAUDE:
+        _import_sdk()
 
 
 def _iter_message_text(message: Any) -> Iterable[str]:
@@ -637,10 +649,12 @@ async def _run_tracelens_skill_codex(
         codex_error = f"{type(exc).__name__}: {exc}"
         if run.log:
             run.log(f"[codex-sdk] WARNING: {codex_error}")
-    return _skill_result(run, runner="codex", label="Codex", error=codex_error or result.error)
+    return _skill_result(run, runner="codex", label="Codex", raw_text=result.text, error=codex_error or result.error)
 
 
-def _skill_result(run: _SkillRun, *, runner: str, label: str, error: str) -> TraceLensSkillRunResult:
+def _skill_result(
+    run: _SkillRun, *, runner: str, label: str, error: str, raw_text: str = ""
+) -> TraceLensSkillRunResult:
     """The run's artifacts once ``analysis.md`` exists; an agent error after it landed is metadata.
 
     Raises:
@@ -650,7 +664,8 @@ def _skill_result(run: _SkillRun, *, runner: str, label: str, error: str) -> Tra
     if not report_path.exists():
         if error:
             raise RuntimeError(f"TraceLens {label} runner failed before writing {report_path}: {error}")
-        raise RuntimeError(f"TraceLens {label} runner did not write {report_path}")
+        suffix = f"; the agent replied: {reply}" if (reply := raw_text.strip()[:1000]) else ""
+        raise RuntimeError(f"TraceLens {label} runner did not write {report_path}{suffix}")
     artifact_paths = {"tracelens_agent_report": str(report_path), "tracelens_cmd_prefix": str(run.prefix_path)}
     if error:
         artifact_paths["tracelens_agent_sdk_error"] = error
@@ -751,7 +766,7 @@ async def run_tracelens_skill(
             timeout_sec=timeout_sec,
         )
         result = await drive_tracelens_skill(session, output_dir / "analysis.md")
-        return _skill_result(run, runner="deepseek", label="DeepSeek", error=result.error)
+        return _skill_result(run, runner="deepseek", label="DeepSeek", raw_text=result.text, error=result.error)
 
     if runner == llm_config.AGENT_BACKEND_CODEX and (sdk.codex_turn_runner is not None or no_injected_sdk):
         codex_model = resolved_model or (os.environ.get("CODEX_MODEL") or "").strip() or DEFAULT_CODEX_MODEL

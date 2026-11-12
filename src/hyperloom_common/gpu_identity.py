@@ -33,7 +33,7 @@ class GpuBoard:
     #: id is what the silicon is. Read from the ``amdgpu.ids`` that ships with the driver, with the variants (HF, VF)
     #: listed under their board. 0x74a2 and 0x74b6 are left out on purpose: the same id is both an MI308X and, at
     #: revision A1, an MI300X, so it names no single board and the caller falls back to the name. So is 0x7551, the
-    #: R9700 at revisions C0 and C1 (R9700S) and the R9600D at C8: the R9700 lists no id and is known by its name alone.
+    #: R9700 at revisions C0 and C1 (R9700S) and the R9600D at C8: neither lists an id and each is known by its name alone.
     #: The Radeon 8060S lists none either and is known by its name.
     device_ids: frozenset[str] = frozenset()
 
@@ -90,6 +90,19 @@ AMD_GPU_BOARDS: dict[str, GpuBoard] = {
             aliases=("AMD Instinct MI325X",),
             device_ids=frozenset({"74a5", "74b9"}),
         ),
+        # The MI355X's gfx950 die at a 2.2 GHz peak engine clock instead of 2.4, so each vendor peak is the MI355X's scaled
+        # by 2.2/2.4: AMD publishes 2.3 PF for FP16 and BF16, 4.6 PF for FP8 and 9.2 PF for FP4. The device ids are the
+        # ones ``amdgpu.ids`` lists for the board and its VF.
+        GpuBoard(
+            "mi350x",
+            "gfx950",
+            256,
+            288.0,
+            8000.0,
+            _matrix_peaks(bf16=2306.9, fp8=4613.8, fp4=9227.5, fp32=144.2),
+            aliases=("AMD Instinct MI350X",),
+            device_ids=frozenset({"75a0", "75b0"}),
+        ),
         GpuBoard(
             "mi355x",
             "gfx950",
@@ -102,6 +115,8 @@ AMD_GPU_BOARDS: dict[str, GpuBoard] = {
         ),
         # https://www.amd.com/en/products/graphics/workstations/radeon-ai-pro/ai-9000-series/amd-radeon-ai-pro-r9700.html
         GpuBoard("r9700", "gfx1201", 64, 32.0, 640.0, _matrix_peaks(bf16=191.0, fp8=383.0, fp32=47.8)),
+        # https://www.amd.com/en/products/graphics/workstations/radeon-ai-pro/ai-9000-series/amd-radeon-ai-pro-r9600d.html
+        GpuBoard("r9600d", "gfx1201", 48, 32.0, 640.0, _matrix_peaks(bf16=99.0, fp8=199.0, fp32=24.8)),
         # https://www.amd.com/en/products/processors/desktops/ryzen/ryzen-ai-halo/ryzen-ai-max-plus-395.html
         # Unified memory, so no fixed capacity. AMD publishes only the FP16 rate, read as BF16 too, as for every board.
         GpuBoard(

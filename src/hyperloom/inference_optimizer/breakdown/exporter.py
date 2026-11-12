@@ -13,6 +13,7 @@ from pathlib import Path
 from typing import Any
 
 from hyperloom_common.io import atomic_write_json, atomic_write_text
+from hyperloom.common.agent_isolation import session_isolation_lines
 from hyperloom_common.jsonio import read_json, read_json_strict
 
 from . import collectors
@@ -506,6 +507,7 @@ def write_minimal_final_report(session_dir: Path | str) -> Path:
         f"- current_best   : `{cb_action}` @ `{cb_metric_s}`",
         f"- cumul_gain     : `{state.get('cumulative_gain_validated') or 0.0:.2f}%` (validated)",
         f"- stack_entries  : `{len(state.get('optimization_stack') or [])}`",
+        *(f"- {line}" for line in session_isolation_lines()),
         "",
         "## Last action attempts",
         "",

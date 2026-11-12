@@ -1,31 +1,25 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""Reliable subprocess-tree teardown for Magpie-launched servers."""
+"""Run a subprocess in its own session under stop gates, and reap its whole tree on every exit path."""
 
 from __future__ import annotations
 
 import codecs
-import glob
 import io
 import logging
 import math
 import os
-import re
 from collections.abc import Mapping
 import subprocess
 import sys
 import threading
 import time
-from collections import deque
-from dataclasses import dataclass, field
-from pathlib import Path
-from typing import Any, Callable, NamedTuple
+from dataclasses import dataclass
+from typing import Any, Callable, Protocol
 
-from hyperloom_common.env import env_flag
-from hyperloom.common.proctree import REAP_MARK_ENV, TERM_GRACE_SEC, collect_tree, kill_tree, marked_pids
+from hyperloom_common.proctree import REAP_MARK_ENV, TERM_GRACE_SEC, collect_tree, kill_tree, marked_pids
 
-from .bypass_analysis import parse_server_log_throughput
 
 from ..cancel_channel import CancelScope, cancel_scope_listener
 
@@ -132,69 +126,12 @@ def kill_my_spawned_server(
         pass
 
 
-# Fatal server-init markers: once any appears in ``server.log`` the engine is unrecoverable within the same Magpie
-# subprocess.
-_SERVER_DEAD_MARKERS: tuple[str, ...] = (
-    # (1) runtime engine/worker bootstrap crashes
-    "WorkerProc initialization failed",
-    "EngineCore failed to start",
-    "Engine core initialization failed",
-    "Engine process failed to start",
-    "AsyncEngineDeadError",
-    "raise EngineDeadError",
-    "Failed core proc(s)",
-    # (2) config-validation-stage terminal failures (pre-engine).
-    "does not recognize this architecture",
-    "Transformers does not recognize",
-    "ValidationError for ModelConfig",
-    "are not supported for now",
-)
-
-#: Engine deaths that happen *after* the server reported ready and began
-#: serving. These are read only when building a diagnostic excerpt.
-_FATAL_ENGINE_MARKERS: tuple[str, ...] = (
-    "EngineCore encountered a fatal error",
-    "EngineCore encountered an issue",
-    "EngineDeadError",
-    "Engine core proc died",
-    "died with exit code",
-)
-
-#: A framework line's exception, named anywhere in it: these logs prefix every
-#: line with the worker pid, the level and the source location, so the exception
-#: never starts the line.
-_EXCEPTION_LINE = re.compile(r"\b[A-Za-z_][A-Za-z0-9_.]*(?:Error|Exception)\s*:")
-
-#: Lines after a fatal marker that may carry its terminating exception.
-_MARKER_WINDOW_LINES: int = 60
-
-#: Lines of preceding context a legacy bootstrap marker keeps.
-_MARKER_CONTEXT_LINES: int = 2
-
-
-# Sentinel ``returncode`` when the detokenizer-stall watchdog reaps a child that came up healthy but then produced no
-# generation progress (hung engine / detokenizer wedge).
-DETOKENIZER_STALL_RETURNCODE: int = -911
-
-# Sentinel returned when the delegated MLPerf client fails its execution preflight.
-AGENTX_PREFLIGHT_RETURNCODE: int = -912
-
-#: The ``error_class`` that sentinel must carry, wherever it is classified. Named
-#: here beside the return code because three call sites decide on it -- the grid
-#: runner, the baseline executor and the writeback stop-reason gate -- and a
-#: string literal repeated across them can drift into a class nobody handles.
-#:
-#: A missing MLPerf dependency stops the run instead of opening a framework enablement round.
+#: The ``error_class`` of an AgentX attempt whose MLPerf client fails its preflight. The baseline
+#: executor writes it and the stop-reason gate decides on it; a missing MLPerf dependency stops the
+#: run instead of opening a framework enablement round.
 AGENTX_PREFLIGHT_ERROR_CLASS: str = "agentx_preflight"
 
 # -913 is ``_ray_serving._RAY_ACTOR_DIED_RC``.
-
-# Sentinel ``returncode`` returned by the _run_magpie eval hook when the generation bounds / pathology probe cannot be
-# installed even though the target file is present and this variant runs eval.
-EVAL_PROBE_UNPATCHABLE_RETURNCODE: int = -914
-
-# Sentinel ``returncode`` when the InferenceX checkout a round would run from is not one, so no server could start.
-INFERENCEX_CHECKOUT_INVALID_RETURNCODE: int = -918
 
 # Sentinel ``returncode`` when the session wall-clock budget ran out mid-round and the tree was reaped.
 SESSION_TIME_EXHAUSTED_RETURNCODE: int = -915
@@ -205,48 +142,9 @@ SESSION_TIME_EXHAUSTED_RETURNCODE: int = -915
 # budget that is spent.
 ORCHESTRATOR_CANCELLED_RETURNCODE: int = -917
 
-# Server-ready markers: their appearance in ``server.log`` means the server has
-# finished startup and is accepting traffic. Only after one is observed does the
-# detokenizer-stall clock start. Covers the uvicorn frontend (vLLM + sglang) and
-# sglang's own ready banner.
-_SERVER_READY_MARKERS: tuple[str, ...] = (
-    "Application startup complete",
-    "Uvicorn running on",
-    # vLLM's Rust frontend (`vllm serve` with VLLM_USE_RUST_FRONTEND=1) runs no uvicorn; this is its ready line.
-    "OpenAI server is ready to accept requests",
-    "The server is fired up and ready to roll",
-)
-
-# Accuracy-eval start markers: their appearance means the benchmark phase of the run is over and the accuracy eval has
-# begun.
-_EVAL_START_MARKERS: tuple[str, ...] = (
-    "HYPERLOOM_EVAL_START",
-    "[magpie_bench_remote_compat] lm_eval cmd:",
-)
-
-# The benchmark body's own stderr: Magpie redirects it here rather than into ``server.log`` or the parent's pipe, so
-# it is both where the eval-start marker lands and the one resolved log whose growth is output of the very child this
-# module is waiting on.
-_EVAL_LOG_NAME: str = "benchmark_stderr.log"
-
-# AgentX phase boundaries. The agentic client runs a long cold-cache warmup -- close to 18 minutes on the runs measured
-# so far -- before the window under measurement opens, and mixing the two makes every KV statistic meaningless. aiperf
-# already announces its phase transitions, so these match its own text; anchored on the parenthesised phase id rather
-# than the whole line so a reword of the human-readable half does not silently stop the split.
-_AGENTX_WARMUP_BEGIN_MARKERS: tuple[str, ...] = ("(warmup) started",)
-_AGENTX_MEASURED_BEGIN_MARKERS: tuple[str, ...] = ("(profiling) started",)
-_AGENTX_MEASURED_END_MARKERS: tuple[str, ...] = ("(profiling) complete",)
-_READY_PHASE = "ready"
-
-# aiperf writes only this file: an AgentX benchmark directory has no ``benchmark_stdout.log`` / ``benchmark_stderr.log``
-# the way a synthetic one does, so the phase lines are unreachable unless it is scanned explicitly.
-_AGENTX_LOG_RELPATH: str = "aiperf_artifacts/logs/aiperf.log"
-
-# How long a round may go without any resolvable server log before it is treated as re-attached to a server an earlier
-# round booted. Such a round owns no log and no ready marker will ever appear in its scan set, so KV collection has to
-# start on some other signal or it never starts at all.
-_WARM_REUSE_PROBE_AFTER_SEC: float = 30.0
-
+# Sentinel ``returncode`` and ``error_class`` of an AgentX round its checkpoint stopped for trailing the reference.
+AGENTX_EARLY_STOP_RETURNCODE: int = -919
+AGENTX_EARLY_STOP_ERROR_CLASS: str = "agentx_early_stop"
 
 # The operator's two grants. They are the operator's to set, read from the process env and
 # validated there once by preflight, so nothing re-reads them from an env a variant composed.
@@ -402,377 +300,6 @@ class _StreamCapture:
             pass  # a closed or broken mirror stream must not stop the capture
 
 
-# Glob (relative to the watched path's directory) for nested per-run server logs Magpie writes when its wrapper
-# ignores ``$SERVER_LOG`` and emits to a ``benchmark_<framework>_<timestamp>/server.log`` subdir instead.
-_NESTED_SERVER_LOG_GLOB: str = "benchmark_*/server.log"
-
-
-def server_log_death_excerpt(path: str, *, max_chars: int = 1200) -> str | None:
-    """Return a short ``server.log`` excerpt around the first terminal engine/worker-init marker, or ``None`` when no fatal marker is present."""
-    candidates = [path]
-    try:
-        base_dir = os.path.dirname(path) or "."
-        candidates.extend(p for p in glob.glob(os.path.join(base_dir, _NESTED_SERVER_LOG_GLOB)) if p != path)
-    except OSError:
-        pass
-    for candidate in candidates:
-        excerpt = _first_marker_excerpt(candidate, max_chars=max_chars)
-        if excerpt is not None:
-            return excerpt
-    return None
-
-
-def _first_marker_excerpt(path: str, *, max_chars: int) -> str | None:
-    """Return the excerpt around the first terminal marker in ``path``.
-
-    The whole file is streamed a line at a time rather than sampled from its
-    head or tail. An engine that dies while serving logs one downstream error
-    per rejected request afterwards, so the cause sits at the head of that
-    cascade: a tail window never reaches it, and a bounded head read leaves the
-    middle of a long log unsearched. Memory stays flat either way.
-
-    Args:
-        path: Log to read.
-        max_chars: Cap on the returned excerpt.
-
-    Returns:
-        The excerpt, or ``None`` when the file cannot be read or names no
-        terminal marker.
-    """
-    before: deque[str] = deque(maxlen=_MARKER_CONTEXT_LINES)
-    try:
-        with open(path, encoding="utf-8", errors="ignore") as fh:
-            for raw in fh:
-                line = raw.rstrip("\n")
-                # Legacy first: every ``_FATAL_ENGINE_MARKERS`` entry is a
-                # substring of some line these also match -- ``EngineDeadError``
-                # of ``AsyncEngineDeadError`` -- and a legacy line must keep the
-                # legacy extraction, whose cause sits above the marker.
-                if any(marker in line for marker in _SERVER_DEAD_MARKERS):
-                    after = _read_lines(fh, _MARKER_CONTEXT_LINES)
-                    excerpt = "\n".join([*before, line, *after]).strip()
-                    return excerpt[-max_chars:] or None
-                if any(marker in line for marker in _FATAL_ENGINE_MARKERS):
-                    return _cause_first_excerpt(
-                        line.strip(), _read_lines(fh, _MARKER_WINDOW_LINES - 1), max_chars=max_chars
-                    )
-                before.append(line)
-    except OSError:
-        return None
-    return None
-
-
-def _read_lines(fh: Any, count: int) -> list[str]:
-    """Return the next ``count`` lines of ``fh``, fewer at end of file."""
-    out: list[str] = []
-    for _ in range(max(0, count)):
-        nxt = fh.readline()
-        if not nxt:
-            break
-        out.append(nxt.rstrip("\n"))
-    return out
-
-
-def _cause_first_excerpt(head: str, window: list[str], *, max_chars: int) -> str | None:
-    """Return the marker line followed by the exceptions it names, nearest first.
-
-    A post-startup engine death names its cause *below* the marker, two dozen
-    frames down. The frames carry no rule the classifier can use, and the window
-    runs past this traceback into the errors it caused downstream -- so the last
-    exception in it names a consequence (``EngineDeadError``) while the cause
-    (``HIP out of memory``) sits above that. No leading context: the line above
-    such a marker is routinely a scheduler-state dump tens of KB wide.
-    """
-    room = max_chars - len(head) - 1
-    if room <= 0:
-        return head[:max_chars] or None
-    causes: list[str] = []
-    used = 0
-    for line in window:
-        if not _EXCEPTION_LINE.search(line):
-            continue
-        text = line.strip()
-        if used + len(text) + 1 > room:
-            break
-        causes.append(text)
-        used += len(text) + 1
-    if causes:
-        return head + "\n" + "\n".join(causes)
-    rest = "\n".join(window).strip()
-    return f"{head}\n{rest[-room:]}" if rest else head[:max_chars] or None
-
-
-# Name of the stamp written beside the caller's ``server.log`` the moment the server first reports ready.
-_READY_STAMP_NAME = "server_ready_at"
-
-
-def _ready_stamp_path(server_log_path: str) -> Path:
-    """Return where a round's ready stamp lives, given its ``server.log`` path."""
-    return Path(server_log_path).parent / _READY_STAMP_NAME
-
-
-def stamp_server_ready(server_log_path: str, boot_sec: float) -> None:
-    """Record, beside ``server_log_path``, that the server just reported ready.
-
-    Two numbers, because they answer two questions and one clock cannot answer
-    both. ``boot_sec`` is how long the round took to come up, measured from spawn
-    to this moment on one ``time.monotonic()`` reading in the process that
-    spawned the child. The wall-clock instant beside it only ever says *which
-    round* the stamp belongs to.
-
-    Keeping the boot a duration is what makes it safe to read across a process
-    boundary. On the Ray path the round runs inside an actor, possibly on another
-    host; subtracting the actor's wall-clock from the driver's would charge the
-    boot for whatever the two clocks disagree by, and a positive disagreement
-    inflates the boot and makes the budget gates refuse rounds that fit. A
-    duration crosses the boundary meaning the same thing on both sides -- the
-    same reason ``session_remaining_sec`` is passed to the actor as a duration
-    rather than as a deadline.
-
-    A file is used because it crosses that boundary without widening the round's
-    return value, and the round's output directory is already how post-mortem
-    evidence gets back (the caller reads the same directory's ``server.log`` to
-    classify server deaths).
-
-    Best effort: a round whose stamp cannot be written loses a measurement, which
-    callers already have to handle, and must not lose the round.
-
-    Args:
-        server_log_path: The ``<output_dir>/server.log`` path from the caller.
-        boot_sec: Seconds from spawn to this moment, on the spawning process's
-            monotonic clock. Required rather than defaulted: a caller that
-            omitted it would write a well-formed stamp claiming the round booted
-            instantly, which reads as a whole round of benchmark and is the one
-            wrong answer the two-field format exists to make impossible.
-    """
-    try:
-        _ready_stamp_path(server_log_path).write_text(
-            f"{time.time():.3f} {max(0.0, float(boot_sec)):.3f}\n",
-            encoding="utf-8",
-        )
-    except OSError as exc:
-        log.warning("_subprocess_kill: could not stamp server-ready time (%s)", exc)
-
-
-def clear_server_ready_stamp(server_log_path: str) -> None:
-    """Drop any ready stamp an earlier round left in this output directory."""
-    try:
-        _ready_stamp_path(server_log_path).unlink(missing_ok=True)
-    except OSError as exc:
-        log.warning("_subprocess_kill: could not clear stale server-ready stamp (%s)", exc)
-
-
-def _read_ready_stamp(server_log_path: str) -> tuple[float, float] | None:
-    """Return a round's ``(ready_unix, boot_sec)``, or ``None`` when unrecorded."""
-    try:
-        fields = _ready_stamp_path(server_log_path).read_text(encoding="utf-8").split()
-        ready_unix = float(fields[0])
-        boot_sec = float(fields[1])
-    except (OSError, ValueError, IndexError):
-        return None
-    return (ready_unix, max(0.0, boot_sec)) if ready_unix > 0.0 else None
-
-
-def post_ready_runtime_sec(
-    server_log_path: str,
-    *,
-    started_unix: float,
-    runtime_sec: float,
-) -> float | None:
-    """Return how long a round ran *after* its server was ready."""
-    stamp = _read_ready_stamp(server_log_path)
-    if stamp is None or stamp[0] < started_unix:
-        return None
-    return max(0.0, min(float(runtime_sec), float(runtime_sec) - stamp[1]))
-
-
-def _resolve_scan_logs(server_log_path: str) -> list[str]:
-    """Return the log files to scan for markers, newest-nesting first."""
-    primary = Path(server_log_path)
-    out: list[str] = []
-    candidates = [primary]
-    try:
-        candidates.extend(sorted(primary.parent.glob(_NESTED_SERVER_LOG_GLOB)))
-    except OSError:
-        pass
-    for log in candidates:
-        for name in (log, log.with_name(_EVAL_LOG_NAME), log.parent / _AGENTX_LOG_RELPATH):
-            text = str(name)
-            if text not in out and name.exists():
-                out.append(text)
-    # Magpie writes its stderr into the run directory it creates under the round's (``benchmark_*/``), which is where
-    # the eval-start marker lands. Reached only through a nested ``server.log``, that stderr went unread whenever the
-    # engine logged to the round's own ``server.log`` (``SERVER_LOG``), and the accuracy eval was folded into the
-    # measured phase.
-    try:
-        nested_stderr = sorted(primary.parent.glob(f"benchmark_*/{_EVAL_LOG_NAME}"))
-    except OSError:
-        nested_stderr = []
-    out.extend(text for text in map(str, nested_stderr) if text not in out)
-    return out
-
-
-class _LogScan(NamedTuple):
-    """What one pass over the resolved logs found in the bytes appended since the last."""
-
-    saw_ready: bool
-    saw_progress: bool
-    saw_eval_start: bool
-    grew: bool
-    child_spoke: bool
-    saw_warmup_begin: bool = False
-    saw_measured_begin: bool = False
-    saw_measured_end: bool = False
-
-    def including(self, scan: "_IncrementScan", path: str, previous_offset: int) -> "_LogScan":
-        """What this pass has found once one log's increment is folded in."""
-        advanced = scan.offset > previous_offset
-        return _LogScan(
-            saw_ready=self.saw_ready or scan.saw_ready,
-            saw_progress=self.saw_progress or scan.saw_progress,
-            saw_eval_start=self.saw_eval_start or scan.saw_eval_start,
-            grew=self.grew or (advanced and scan.active),
-            child_spoke=self.child_spoke or (advanced and Path(path).name == _EVAL_LOG_NAME),
-            saw_warmup_begin=self.saw_warmup_begin or scan.saw_warmup_begin,
-            saw_measured_begin=self.saw_measured_begin or scan.saw_measured_begin,
-            saw_measured_end=self.saw_measured_end or scan.saw_measured_end,
-        )
-
-
-class _IncrementScan(NamedTuple):
-    """One log's scan result: the advanced offset, the markers seen, and the partial line to carry forward."""
-
-    offset: int
-    saw_ready: bool
-    saw_progress: bool
-    saw_eval_start: bool
-    saw_warmup_begin: bool = False
-    saw_measured_begin: bool = False
-    residual: str = ""
-    active: bool = True
-    saw_measured_end: bool = False
-
-
-#: Access lines for the endpoints monitors poll on their own tick. An HTTP front end whose engine died keeps answering
-#: them, so a log that grew only by these says nothing about whether the server is still serving.
-_HEALTH_PROBE_LINE = re.compile(r'"GET /(?:metrics|health|healthz|ping)(?:[/?][^" ]*)? HTTP/[\d.]+"')
-
-
-# Cap on the partial line carried between scans. A log that appends a very long line without a newline -- or none at
-# all -- must not let the buffer grow without bound; a marker is far shorter than this, so nothing real is lost.
-_RESIDUAL_MAX_CHARS = 8192
-
-
-def _stale_scan_log_sizes(server_log_path: str) -> dict[str, int]:
-    """Snapshot existing bytes before spawn so previous rounds cannot signal activity."""
-    sizes: dict[str, int] = {}
-    for path in _resolve_scan_logs(server_log_path):
-        candidate = Path(path)
-        try:
-            size = candidate.stat().st_size
-            sizes[path] = -1 if candidate.parent != Path(server_log_path).parent else size
-        except OSError:
-            continue
-    return sizes
-
-
-@dataclass
-class _LogCursor:
-    """Where a scan of the watched logs stopped: per path, the offset, the partial line and the file identity."""
-
-    offsets: dict[str, int] = field(default_factory=dict)
-    residuals: dict[str, str] = field(default_factory=dict)
-    identities: dict[str, tuple[int, int]] = field(default_factory=dict)
-
-    def __post_init__(self) -> None:
-        # Pinned now, so a log an earlier round had already read is seen as replaced if it is.
-        for path in self.offsets:
-            try:
-                stat = os.stat(path)
-            except OSError:
-                continue
-            self.identities[path] = (stat.st_dev, stat.st_ino)
-
-    def open_log(self, path: str) -> bool:
-        """Begin reading ``path`` from its start, reporting whether it had not been read before."""
-        if path in self.offsets:
-            return False
-        self.offsets[path] = 0
-        return True
-
-    def advance(self, server_log_path: str) -> _LogScan:
-        """Scan the bytes every watched log gained; replacing or truncating one is not activity."""
-        found = _LogScan(False, False, False, False, False)
-        for path in _resolve_scan_logs(server_log_path):
-            prev = self.offsets.get(path, 0)
-            if prev < 0:
-                continue
-            try:
-                stat = os.stat(path)
-            except OSError:
-                continue
-            identity = (stat.st_dev, stat.st_ino)
-            replaced = path in self.identities and self.identities[path] != identity
-            self.identities[path] = identity
-            if replaced or stat.st_size < prev:
-                self.offsets[path] = stat.st_size
-                self.residuals.pop(path, None)
-                continue
-            scan = _scan_server_log_increment(path, prev, self.residuals.get(path, ""))
-            self.offsets[path] = scan.offset
-            self.residuals[path] = scan.residual
-            found = found.including(scan, path, prev)
-        return found
-
-
-def _scan_server_log_increment(path: str, from_offset: int, residual: str = "") -> _IncrementScan:
-    """Incrementally scan the bytes appended to ``server.log`` since ``from_offset`` for ready / generation-progress / eval-start markers."""
-    try:
-        size = os.path.getsize(path)
-    except OSError:
-        return _IncrementScan(from_offset, False, False, False, residual=residual)
-    start = from_offset
-    carried = residual
-    if size < start:  # truncated / rotated — rescan from the top.
-        start = 0
-        carried = ""  # the bytes it belonged to are gone
-    if size <= start:  # nothing new appended
-        return _IncrementScan(start, False, False, False, residual=carried)
-    try:
-        with open(path, "rb") as fh:
-            fh.seek(start)
-            chunk = fh.read().decode("utf-8", "ignore")
-    except (OSError, ValueError):
-        return _IncrementScan(from_offset, False, False, False, residual=carried)
-    # A poll lands wherever the writer happens to be, so a marker is routinely split across two reads. Prepending the
-    # previous tail and carrying the new one forward is what makes a marker findable exactly once, whole.
-    chunk = carried + chunk
-    tail_at = chunk.rfind("\n")
-    next_residual = chunk if tail_at < 0 else chunk[tail_at + 1 :]
-    next_residual = next_residual[-_RESIDUAL_MAX_CHARS:]
-    saw_ready = any(marker in chunk for marker in _SERVER_READY_MARKERS)
-    # Progress is the rate on the periodic decode-throughput line, not the line's presence: some vLLM builds log ``Avg
-    # generation throughput: 0.0 tokens/s`` on an idle engine, and an engine goes idle precisely when the client
-    # driving it wedges, so the marker alone lets the server vouch for the client that stopped asking it for tokens.
-    saw_progress = bool(parse_server_log_throughput(chunk))
-    saw_eval_start = any(marker in chunk for marker in _EVAL_START_MARKERS)
-    saw_warmup_begin = any(marker in chunk for marker in _AGENTX_WARMUP_BEGIN_MARKERS)
-    saw_measured_begin = any(marker in chunk for marker in _AGENTX_MEASURED_BEGIN_MARKERS)
-    complete = [line for line in chunk[: tail_at + 1].splitlines() if line.strip()] if tail_at >= 0 else []
-    active = not complete or any(not _HEALTH_PROBE_LINE.search(line) for line in complete)
-    return _IncrementScan(
-        size,
-        saw_ready,
-        saw_progress,
-        saw_eval_start,
-        saw_warmup_begin,
-        saw_measured_begin,
-        residual=next_residual,
-        active=active,
-        saw_measured_end=any(marker in chunk for marker in _AGENTX_MEASURED_END_MARKERS),
-    )
-
-
 def session_deadline_to_remaining_sec(session_deadline_sec: float | None) -> float | None:
     """Convert an in-process session deadline into seconds still left on it."""
     if session_deadline_sec is None:
@@ -787,116 +314,28 @@ def session_remaining_to_deadline_sec(session_remaining_sec: float | None) -> fl
     return time.monotonic() + float(session_remaining_sec)
 
 
-# Escape hatch for a round that must not pay even the cost of one HTTP GET every couple of seconds.
-_KV_METRICS_ENV = "INFERENCE_OPTIMIZER_KV_METRICS"
+class RoundJudge(Protocol):
+    """Rules on a running round at each tick, raising :class:`AgentxCheckpointMissed` to stop it."""
+
+    def tick(self, mono: float) -> None: ...
+
+    def close(self, *, aborted: bool = False) -> None: ...
 
 
-def _build_kv_recorder(server_log_path: str | None, env: dict[str, str] | None) -> Any:
-    """Build the KV-metrics recorder for this round, or ``None`` when it is off."""
-    if not server_log_path:
-        return None
-    if not env_flag(_KV_METRICS_ENV, default=True):
-        return None
-    from ._kv_metrics import KV_ARTIFACT_NAME, AiperfProgressPoller, KvMetricsPoller, KvMetricsRecorder, KvRound
+class RoundCheckpoint(Protocol):
+    """A ruling made while the round runs, by the judge it builds when the round starts."""
 
-    workspace = Path(server_log_path).parent
-    return KvMetricsRecorder(
-        # The workspace is where the port actually lives: it is pinned in the round's materialized
-        # ``benchmark.envs.PORT``, which is never exported into the subprocess environment.
-        poller=KvMetricsPoller(config_envs=dict(env or {}), workspace=workspace),
-        # Authoritative phase boundaries when this round is an AgentX one; a no-op otherwise, since no other client
-        # publishes a progress address and the poller then never resolves a URL.
-        progress=AiperfProgressPoller(workspace),
-        kv_round=KvRound(
-            output_path=str(workspace / KV_ARTIFACT_NAME),
-            scope={
-                "server_log_path": str(server_log_path),
-                "workspace": workspace.name,
-                "run_path": _run_relative_path(workspace),
-                "session": os.path.basename(
-                    os.environ.get("INFERENCE_OPTIMIZER_CURRENT_SESSION_DIR", "").rstrip("/\\")
-                ),
-            },
-        ),
-    )
-
-
-class _RecorderFanout:
-    """Drives this round's recorders from the watchdog's single ``note_phase`` / ``tick`` / ``close`` calls.
-
-    Each recorder absorbs its own scrape and write failures; anything else it raises fails the round.
-    """
-
-    def __init__(self, recorders: list[Any], *, ready_phase: str = "measured") -> None:
-        self._recorders = recorders
-        self._ready_phase = ready_phase
-
-    def _each(self, method: str, *args: Any, **kwargs: Any) -> None:
-        for recorder in self._recorders:
-            getattr(recorder, method)(*args, **kwargs)
-
-    def note_phase(self, phase: str, mono: float) -> None:
-        self._each("note_phase", self._ready_phase if phase == _READY_PHASE else phase, mono)
-
-    def note_client_phases(self, scan: _LogScan, mono: float) -> None:
-        for seen, phase in (
-            (scan.saw_eval_start, "eval"),
-            (scan.saw_measured_end, "finished"),
-            (scan.saw_measured_begin, "measured"),
-            (scan.saw_warmup_begin, "warmup"),
-        ):
-            if seen:
-                self.note_phase(phase, mono)
-                return
-
-    def tick(self, mono: float) -> None:
-        self._each("tick", mono)
-
-    def close(self, *, aborted: bool = False) -> None:
-        """Close every recorder, then raise the first error one of them raised."""
-        first_error: Exception | None = None
-        for recorder in self._recorders:
-            try:
-                recorder.close(aborted=aborted)
-            except Exception as exc:  # noqa: BLE001 - re-raised once every recorder is closed
-                if first_error is None:
-                    first_error = exc
-        if first_error is not None:
-            raise first_error
-
-
-def _build_round_recorders(server_log_path: str | None, env: dict[str, str] | None) -> _RecorderFanout:
-    """KV metrics and measured-phase GPU power for this round, behind one recorder surface."""
-    from ._gpu_power import build_gpu_power_recorder
-    from hyperloom.common.benchmark_config import configured_benchmark, is_magpie_agentx
-
-    return _RecorderFanout(
-        [
-            recorder
-            for recorder in (_build_kv_recorder(server_log_path, env), build_gpu_power_recorder(server_log_path, env))
-            if recorder is not None
-        ],
-        ready_phase="boot" if is_magpie_agentx(configured_benchmark(env)) else "measured",
-    )
-
-
-def _run_relative_path(workspace: Path) -> str:
-    """Path of this round's workspace below ``runs/``, which is what the session breakdown keys rows by."""
-    parts = workspace.parts
-    if "runs" in parts:
-        return "/".join(parts[parts.index("runs") + 1 :])
-    return workspace.name
+    def judge(self) -> RoundJudge:
+        """The judge that rules on this round."""
 
 
 @dataclass(frozen=True)
 class RoundWatch:
-    """The stop gates the watchdog enforces on one round and the server log it watches."""
+    """The stop gates the watchdog enforces on one round."""
 
     timeout: int | float | None = None
-    server_log_path: str | None = None
-    silence_timeout_sec: float | None = None
-    server_already_ready: bool = False
     session_deadline_sec: float | None = None
+    checkpoint: RoundCheckpoint | None = None
 
 
 def run_with_session_kill(
@@ -910,9 +349,6 @@ def run_with_session_kill(
     """Run a subprocess in its own session and reap descendants, and what carries ``REAP_MARK_ENV``, on every exit path."""
     child_env = dict(os.environ if env is None else env)
     mark = child_env.get(REAP_MARK_ENV, "")
-    if watch.silence_timeout_sec is not None:
-        child_env["PYTHONUNBUFFERED"] = "1"
-    scan_offsets = _stale_scan_log_sizes(watch.server_log_path) if watch.server_log_path else {}
     proc: subprocess.Popen | None = None
     try:
         with cancel_scope_listener() as cancel_scope:
@@ -931,10 +367,9 @@ def run_with_session_kill(
             try:
                 stdout, stderr = _communicate_with_watchdog(
                     proc,
-                    _WatchedRound(watch, started_at=started_at, scan_offsets=scan_offsets),
+                    _WatchedRound(watch, started_at=started_at),
                     capture=capture,
                     cancel_scope=cancel_scope,
-                    recorders=_build_round_recorders(watch.server_log_path, child_env),
                 )
             except subprocess.TimeoutExpired as exc:
                 kill_my_spawned_server(proc, mark=mark)
@@ -991,35 +426,19 @@ class _OrchestratorCancelled(_ReapedByWatchdog):
         )
 
 
-class _ServerStalledDetected(_ReapedByWatchdog):
-    """Internal sentinel: the detokenizer-stall watchdog saw the server report ready and then produce no generation progress for the grace window."""
+class AgentxCheckpointMissed(_ReapedByWatchdog):
+    """The round's checkpoint median trailed its reference by more than the allowed drop."""
 
-    returncode = DETOKENIZER_STALL_RETURNCODE
-
-    def __init__(
-        self,
-        *,
-        grace_sec: float,
-        elapsed_sec: float,
-    ) -> None:
-        """Build the error message describing the ready-but-no-progress stall."""
-        super().__init__(
-            f"benchmark reported ready but emitted no pipe or log bytes for "
-            f"{grace_sec:.1f}s (silence timeout; "
-            f"elapsed={elapsed_sec:.1f}s)"
-        )
+    returncode = AGENTX_EARLY_STOP_RETURNCODE
+    log_level = logging.INFO
 
 
 @dataclass(frozen=True)
 class _WatchedRound:
-    """One round's watch and the log baseline it scans from.
-
-    ``started_at`` defaults to the moment the watch begins and ``scan_offsets`` to reading every log from its start.
-    """
+    """One round's watch; ``started_at`` defaults to the moment the watch begins."""
 
     watch: RoundWatch
     started_at: float | None = None
-    scan_offsets: dict[str, int] | None = None
 
     def enforce_stop_gates(self, proc: subprocess.Popen, scope: CancelScope | None, now: float, elapsed: float) -> None:
         """Raise as soon as the session budget, an orchestrator cancellation or the round cap is spent."""
@@ -1030,71 +449,24 @@ class _WatchedRound:
         if self.watch.timeout is not None and elapsed >= self.watch.timeout:
             raise subprocess.TimeoutExpired(proc.args, self.watch.timeout)
 
-    def poll_slice_sec(self, now: float, elapsed: float, silence_remaining: float | None) -> float:
+    def poll_slice_sec(self, now: float, elapsed: float) -> float:
         """How long to wait on the child before the nearest armed gate has to be re-checked."""
         hard = None if self.watch.timeout is None else self.watch.timeout - elapsed
         session = None if self.watch.session_deadline_sec is None else self.watch.session_deadline_sec - now
-        return min(sec for sec in (STOP_GATE_POLL_SECONDS, hard, session, silence_remaining) if sec is not None)
-
-
-@dataclass
-class _RoundActivity:
-    """Where a watched round's log scan stopped, when its server reported ready, and when output last arrived."""
-
-    started_at: float
-    cursor: _LogCursor
-    last_activity_at: float
-    ready: bool = False
-
-    def note_log_progress(
-        self, server_log_path: str | None, recorders: _RecorderFanout, capture: _StreamCapture, now: float
-    ) -> None:
-        """Advance the ready and last-output marks from the bytes the watched logs gained since the previous poll."""
-        if server_log_path:
-            scan = self.cursor.advance(server_log_path)
-            if scan.saw_ready and not self.ready:
-                self.ready, self.last_activity_at = True, now
-                stamp_server_ready(server_log_path, now - self.started_at)
-                recorders.note_phase(_READY_PHASE, now)
-            if scan.grew:
-                self.last_activity_at = now
-            recorders.note_client_phases(scan, now)
-            if scan.saw_progress or scan.child_spoke:
-                capture.note_output()
-        if capture.last_activity_at is not None:
-            self.last_activity_at = max(self.last_activity_at, capture.last_activity_at)
-
-    def reusing_warm_server(self, server_log_path: str | None, elapsed: float) -> bool:
-        """Whether a round found no log baseline and has since run long enough to be reusing a warm server."""
-        # Telemetry only: this guess never arms the silence gate.
-        return bool(server_log_path) and not self.cursor.offsets and elapsed >= _WARM_REUSE_PROBE_AFTER_SEC
-
-    def silence_remaining_sec(self, silence_timeout_sec: float | None, now: float) -> float | None:
-        """Seconds left in the post-ready silence window, or ``None`` while that gate is unarmed."""
-        if not self.ready or silence_timeout_sec is None:
-            return None
-        return silence_timeout_sec - (now - self.last_activity_at)
+        return min(sec for sec in (STOP_GATE_POLL_SECONDS, hard, session) if sec is not None)
 
 
 def _communicate_with_watchdog(
     proc: subprocess.Popen,
     watched: _WatchedRound,
     *,
-    recorders: _RecorderFanout,
     capture: _StreamCapture,
     cancel_scope: CancelScope | None = None,
 ) -> tuple[str, str]:
-    """Wait for exit, enforcing cancellation, session budget and explicit round caps."""
-    server_log_path = watched.watch.server_log_path
-    silence_timeout_sec = watched.watch.silence_timeout_sec
+    """Wait for exit, enforcing cancellation, session budget, explicit round caps and the round's checkpoint."""
     start = time.monotonic() if watched.started_at is None else watched.started_at
-    cursor = _LogCursor(watched.scan_offsets if watched.scan_offsets is not None else {})
-    activity = _RoundActivity(started_at=start, cursor=cursor, last_activity_at=start)
+    judge = None if watched.watch.checkpoint is None else watched.watch.checkpoint.judge()
     completed = False
-    if watched.watch.server_already_ready:
-        recorders.note_phase(_READY_PHASE, start)
-        if server_log_path:
-            stamp_server_ready(server_log_path, 0.0)
     try:
         while True:
             # An exit already observed belongs to the child, not to an expired gate.
@@ -1105,47 +477,39 @@ def _communicate_with_watchdog(
             now = time.monotonic()
             elapsed = now - start
             watched.enforce_stop_gates(proc, cancel_scope, now, elapsed)
-            activity.note_log_progress(server_log_path, recorders, capture, now)
-            server_is_live = activity.ready or watched.watch.server_already_ready
-            if server_is_live or activity.reusing_warm_server(server_log_path, elapsed):
-                recorders.tick(now)
-            silence_remaining = activity.silence_remaining_sec(silence_timeout_sec, now)
-            if silence_remaining is not None and silence_remaining <= 0:
-                raise _ServerStalledDetected(grace_sec=watched.watch.silence_timeout_sec, elapsed_sec=elapsed)
-            slice_sec = watched.poll_slice_sec(now, elapsed, silence_remaining)
+            if judge is not None:
+                judge.tick(now)
             try:
-                proc.wait(timeout=max(0.0, slice_sec))
+                proc.wait(timeout=max(0.0, watched.poll_slice_sec(now, elapsed)))
                 result = capture.finish()
                 completed = True
                 return result
             except subprocess.TimeoutExpired:
                 continue
     finally:
-        recorders.close(aborted=not completed)
+        if judge is not None:
+            judge.close(aborted=not completed)
 
 
 __all__ = [
+    "AGENTX_EARLY_STOP_ERROR_CLASS",
+    "AGENTX_EARLY_STOP_RETURNCODE",
     "AGENTX_PREFLIGHT_ERROR_CLASS",
-    "AGENTX_PREFLIGHT_RETURNCODE",
     "BENCHMARK_SILENCE_TIMEOUT_ENV",
     "BENCHMARK_TIMEOUT_ENV",
+    "AgentxCheckpointMissed",
     "COOPERATIVE_REAP_BUDGET_SEC",
-    "DETOKENIZER_STALL_RETURNCODE",
-    "EVAL_PROBE_UNPATCHABLE_RETURNCODE",
-    "INFERENCEX_CHECKOUT_INVALID_RETURNCODE",
     "ORCHESTRATOR_CANCELLED_RETURNCODE",
+    "RoundCheckpoint",
+    "RoundJudge",
     "RoundWatch",
     "SESSION_TIME_EXHAUSTED_RETURNCODE",
     "STOP_GATE_POLL_SECONDS",
-    "clear_server_ready_stamp",
     "default_benchmark_timeout_sec",
     "kill_my_spawned_server",
-    "post_ready_runtime_sec",
     "resolve_benchmark_timeouts",
     "run_with_session_kill",
-    "server_log_death_excerpt",
     "session_deadline_to_remaining_sec",
     "session_remaining_to_deadline_sec",
-    "stamp_server_ready",
     "sync_agentx_phase_wait",
 ]

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+import subprocess
 import asyncio
 import json
 import logging
@@ -19,6 +20,8 @@ from hyperloom.inference_optimizer.session.sbd_v6 import (
     read_timeline_events,
     write_timeline_event_at,
 )
+
+pytestmark = pytest.mark.usefixtures("process_environ")
 
 
 def read_timeline_event(session_dir: Path, event_type: str) -> dict | None:
@@ -283,10 +286,7 @@ def test_install_event_stays_pending_until_session_creation(tmp_path):
         event,
         args=args,
         runtime=preflight.PreflightRuntime(
-            benchmark_backend="bypass",
             benchmark_python="python",
-            magpie_python="python",
-            inferencex_path="/opt/InferenceX",
             resolved_urls=("", "https://api.openai.com/v1"),
         ),
     )
@@ -725,13 +725,12 @@ def test_timeline_writer_does_not_migrate_flat_files(tmp_path):
 
 def _stub_preflight_steps(tmp_path, monkeypatch):
     from hyperloom.inference_optimizer.cli import preflight
-    from hyperloom.orchestrator.actions.executors import benchmark_backend
+    from hyperloom.orchestrator.actions.executors import _benchmark_interpreter
 
-    inferencex = tmp_path / "InferenceX"
-    inferencex.mkdir()
-    monkeypatch.setenv("INFERENCEX_PATH", str(inferencex))
-    monkeypatch.setattr(benchmark_backend, "resolve_backend_name", lambda: "bypass")
-    monkeypatch.setattr(benchmark_backend, "resolve_benchmark_interpreter", lambda: "python")
+    monkeypatch.setattr(_benchmark_interpreter, "_resolve_probe_python", lambda *_args, **_kwargs: "python")
+    monkeypatch.setattr(
+        preflight.subprocess, "run", lambda argv, **_kwargs: subprocess.CompletedProcess(argv, 0, b"", b"")
+    )
     monkeypatch.setattr(preflight, "_provider_only_mode", lambda: "")
     monkeypatch.setattr(preflight, "_load_dotenv_fallback", lambda: None)
     monkeypatch.setattr(preflight, "_load_kernel_agent_env_fallback", lambda: None)
@@ -747,11 +746,7 @@ def _stub_preflight_steps(tmp_path, monkeypatch):
     monkeypatch.setattr(preflight, "_check_platform_tuning", lambda: None)
     monkeypatch.setattr(preflight, "_ensure_ray", lambda *_args: None)
     monkeypatch.setattr(preflight, "_ensure_bench_serving_deps", lambda *_args: None)
-    monkeypatch.setattr(preflight, "_ensure_lm_eval_dep", lambda *_args, **_kwargs: None)
     monkeypatch.setattr(preflight, "_check_serving_framework", lambda *_args: None)
-    monkeypatch.setattr(preflight.inferencex_checkout, "checkout_ok", lambda *_args, **_kwargs: True)
-    monkeypatch.setattr(preflight.inferencex_checkout, "head_sha", lambda *_args: "abc123")
-    monkeypatch.setattr(preflight, "_report_inferencex_patch_anchors", lambda *_args: True)
     monkeypatch.setattr(preflight, "_check_agent_cli", lambda: None)
     monkeypatch.setattr(preflight.shutil, "which", lambda name: f"/usr/bin/{name}")
     monkeypatch.setattr(
@@ -795,11 +790,7 @@ def test_preflight_records_install_steps_in_execution_order(tmp_path, monkeypatc
         "check_platform_tuning",
         "ensure_ray",
         "ensure_bench_serving_deps",
-        "ensure_lm_eval",
         "check_serving_framework",
-        "ensure_magpie",
-        "clone_inferencex",
-        "patch_magpie_eval_concurrency",
         "check_kernel_tuning_clis",
         "check_tracelens_cli",
         "check_tracelens_root",
@@ -809,7 +800,6 @@ def test_preflight_records_install_steps_in_execution_order(tmp_path, monkeypatc
     steps = {step["step_id"]: step for step in event["ext"]["steps"]}
     assert steps["check_kernel_tuning_clis"]["status"] == "skipped"
     assert steps["check_kernel_tuning_clis"]["skip_reason"] == "no_kernel"
-    assert steps["ensure_magpie"]["message"] == "benchmark backend is 'bypass'"
 
 
 def test_preflight_propagates_install_event_finalize_failure(tmp_path, monkeypatch):

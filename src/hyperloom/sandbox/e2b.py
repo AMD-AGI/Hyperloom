@@ -5,28 +5,36 @@
 
 It talks to any E2B-compatible service (the Claw sandbox service, or the stand-in the contract tests start) through
 ``E2B_API_URL`` and ``E2B_SANDBOX_URL``. Each role has its own API key; a key is read once into the provider, is passed
-to the SDK per call and never appears in a log line, an error message or ``repr``. The stand-in and the contract
-tests arrive in a later PR.
+to the SDK per call and never appears in a log line, an error message or ``repr``.
 
 Control-plane calls (everything except commands and files) are retried with exponential backoff while the failure is
 transient: a network error, a 5xx, a rate limit or a request timeout. A create is retried only when it carries an
 idempotency key, because only then does a replay return the same sandbox instead of a second one. Every SDK failure
 is classified into the socket exceptions; one the socket has no word for (a bad argument, say) propagates as it is.
 
-Two refusals of a create carry a meaning of their own. A 410 means the idempotency key's sandbox has ended, so the key is
-spent (``SandboxGone``). A 429 whose error message names ``grant_quota_exceeded`` means the session's quota is full
-(``SandboxQuotaExceeded``, a ``SandboxUnavailable``). The SDK keeps only the ``message`` of a 429 body, so the service
-must put that reason code in ``message``, as it does for the 503 reasons ``pending_timeout`` and ``no_capacity``; a 503
-stays a plain ``SandboxUnavailable``.
+The service puts the reason code of a refused create first in the error's ``message``, the only part of the body the
+SDK keeps:
+
+- 503 ``pending_timeout: not running after <pending>: <SaFE error>``: the sandbox did not run within the service's
+  pending limit (``SandboxUnavailable``). A 503 is not replayed on create; ``no_capacity`` and ``template_unavailable:
+  <template>`` are 503s too, each a plain ``SandboxUnavailable``.
+- 500 ``sandbox_create_failed: <SaFE error>``: any other failure of the create; a workload in the ``Failed`` phase says
+  the same. Replaying the key finds only the failed sandbox (or makes another that fails the same way), so it is final at
+  once (``SandboxCreateFailed``): a new attempt, with a new key, is the caller's to decide.
+- 410 ``idempotency_key_spent: sbx-…: <stored end reason>``: the key's sandbox has ended, and the service names how
+  (``pending_timeout: …``, ``sandbox_create_failed: …``, ``killed``), or gives the id alone when it stored no reason.
+  This code is read first: the words after it describe how the key's sandbox ended, so a ``sandbox_create_failed`` or a
+  ``phase Failed`` among them does not make the 410 a failure of this create's own first send.
+- 429 ``grant_quota_exceeded``: the session's quota is full (``SandboxQuotaExceeded``, a ``SandboxUnavailable``); a 429
+  without it is a plain rate limit.
 
 A server error is replayed only while it says nothing about the sandbox: a gateway that cut a create still pending, say,
-where the replay with the same key finds that sandbox. A failure whose message names ``sandbox_create_failed`` or a
-workload in the ``Failed`` phase says the platform made the sandbox and it failed before it ran. Replaying that key finds
-only the failed sandbox (the platform reports the key spent, or makes a new sandbox that fails the same way), so it is
-final at once (``SandboxCreateFailed``): a new attempt, with a new key, is the caller's to decide. A replay of the key
-after a cut is answered with a 410 ``idempotency_key_spent`` when the sandbox the first send made has failed meanwhile
-(the service never makes a second sandbox for a key, nor repeats the 500), so a 410 to a create's own replay is
-``SandboxCreateFailed`` too; only a 410 to the first send means a key spent before this create.
+where the replay with the same key finds that sandbox. A 410 to the first send means the key was spent before this
+create (an earlier process made its sandbox and that has ended), whatever the stored reason: ``SandboxGone``, and a new
+key makes a new sandbox. A 410 to the create's own replay means the sandbox the first send made has ended meanwhile (the
+service never makes a second sandbox for a key, nor repeats the 503 or 500), and its stored reason says how: a
+``pending_timeout`` is ``SandboxUnavailable``, as the 503 would have been; anything else is ``SandboxCreateFailed``, see
+:meth:`E2BSandboxProvider.create`.
 
 A key that may create in more than one workspace (a SaFE key used directly; a Claw grant's key names its own) must say
 which: the provider's ``workspace`` (``HYPERLOOM_SANDBOX_WORKSPACE``) is sent on every create as the metadata
@@ -102,6 +110,13 @@ _WORKSPACE_REQUIRED = re.compile(r"\bworkspace_required\b")
 #: How the service says a create's sandbox failed before it ran: its reason code, or the terminal phase of its workload.
 _CREATE_FAILED = re.compile(r"\bsandbox_create_failed\b|\bphase Failed\b")
 
+#: How the service refuses a create whose idempotency key's sandbox has ended: the code, the sandbox's id and, when it
+#: stored one, the reason that sandbox ended (``pending_timeout: …``, ``sandbox_create_failed: …``, ``killed``).
+_KEY_SPENT = re.compile(r"\bidempotency_key_spent\b(?::\s*(?P<sandbox>[^:\s]+)(?::\s*(?P<reason>.*))?)?", re.DOTALL)
+
+#: The stored reason of a sandbox that did not run within the service's pending limit, the 503 ``pending_timeout``.
+_PENDING_TIMEOUT = re.compile(r"pending_timeout\b")
+
 #: Statuses that mean the request was not processed and may succeed if repeated; a 503 means the service has no room
 #: and is not retried on create. A 501 or 505 will not change on a retry.
 _SERVER_ERROR = 500
@@ -176,6 +191,8 @@ def _classify(exc: Exception) -> _Failure | None:
     """Which socket failure an SDK exception is, or None when the socket has no word for it."""
     if isinstance(exc, e2b.FileNotFoundException):
         return _Failure.NO_FILE
+    if _KEY_SPENT.search(str(exc)):  # first: its stored reason may name sandbox_create_failed or phase Failed
+        return _Failure.GONE
     if _CREATE_FAILED.search(str(exc)):
         return _Failure.CREATE_FAILED
     if isinstance(exc, (e2b.SandboxNotFoundException, e2b.SandboxNotRunningException)):
@@ -202,7 +219,7 @@ def _is_transient(exc: Exception, *, capacity: bool) -> bool:
     """Whether the same call may succeed if repeated; ``capacity`` also counts a rate limit or a 503."""
     if isinstance(exc, (e2b.SandboxNotRunningException, e2b.SandboxUnreachableException)):
         return False
-    if _CREATE_FAILED.search(str(exc)):
+    if _KEY_SPENT.search(str(exc)) or _CREATE_FAILED.search(str(exc)):  # a spent key stays spent, whatever follows it
         return False
     if isinstance(exc, (httpx.TransportError, json.JSONDecodeError, e2b.TimeoutException)):
         return True
@@ -380,15 +397,20 @@ class E2BSandboxProvider:
             ValueError: When ``timeout_sec`` is not positive.
             SandboxDenied: No key for ``role``, or the service refused the key, template, environment or metadata. A
                 refusal for want of a workspace (``workspace_required``) says to set ``HYPERLOOM_SANDBOX_WORKSPACE``.
-            SandboxGone: The idempotency key's sandbox had ended before this create first sent the key (410); the key
-                is spent, a new key makes a new one.
-            SandboxCreateFailed: The platform made the sandbox and it failed before it ran (``sandbox_create_failed``,
-                a workload in the ``Failed`` phase); the create is not replayed. Also a 410 answering this create's
-                own replay: the service binds the key to the sandbox it made first and, once that sandbox failed,
-                answers every replay with ``idempotency_key_spent`` and the same id.
+            SandboxGone: The idempotency key's sandbox had ended before this create first sent the key (410
+                ``idempotency_key_spent``, whatever reason it names); the key is spent, a new key makes a new one.
+            SandboxCreateFailed: The create failed on the platform (``sandbox_create_failed``, a workload in the
+                ``Failed`` phase); it is not replayed. Also a 410 answering this create's own replay, unless its stored
+                reason is ``pending_timeout``: the service binds the key to the sandbox the first send made and answers
+                every replay with ``idempotency_key_spent``, that id and how the sandbox ended. A
+                ``sandbox_create_failed`` there is the 500 the cut hid; ``killed``, another reason or none (the id
+                alone) also leaves this create with no sandbox and none to come under its key, and says nothing of
+                capacity, so it ends the create the same way and a new key is the caller's to decide.
             SandboxQuotaExceeded: The session's quota is full (429 ``grant_quota_exceeded``); it clears when a running
                 sandbox ends.
-            SandboxUnavailable: No capacity (503), or the sandbox was not running within ``wait_sec``.
+            SandboxUnavailable: No capacity or the service's pending limit (503, ``pending_timeout`` among them), the
+                same ``pending_timeout`` stored as the end of the sandbox this create's replay finds spent, or the
+                sandbox was not running within ``wait_sec``.
         """
         if timeout_sec <= 0:
             raise ValueError("timeout_sec must be positive")
@@ -416,8 +438,8 @@ class E2BSandboxProvider:
         try:
             created = control.call(attempt, retry=retry, until=deadline)
         except SandboxGone as exc:
-            if sends > 1:  # this create's own sandbox ended or failed while the request was cut
-                raise SandboxCreateFailed(f"the sandbox of this create did not run: {exc}") from exc
+            if sends > 1:  # this create's own sandbox ended while the request was cut; its stored reason says how
+                raise _ended_on_replay(exc) from exc
             raise
         except SandboxDenied as exc:
             if _WORKSPACE_REQUIRED.search(str(exc)):
@@ -456,6 +478,18 @@ def _require_url(url: str, variable: str, plane: str) -> None:
             f"{variable} is not set: the sandbox service's {plane} URL is required, and the provider does not fall"
             " back to the e2b SDK's default (the public E2B service)"
         )
+
+
+def _ended_on_replay(gone: SandboxGone) -> SandboxUnavailable | SandboxCreateFailed:
+    """What a create's own replay told the key is spent raises: the reason the service stored for the sandbox the first
+    send made. A ``pending_timeout`` is the 503 the cut hid; anything else, or no reason, ends the create as failed."""
+    spent = _KEY_SPENT.search(str(gone))
+    reason = (spent.group("reason") or "") if spent else ""
+    if _PENDING_TIMEOUT.match(reason):
+        return SandboxUnavailable(
+            f"the sandbox of this create was not running within the service's pending limit: {gone}"
+        )
+    return SandboxCreateFailed(f"the sandbox of this create did not run: {gone}")
 
 
 def _no_workspace(role: Role, named: str | None, refusal: SandboxDenied) -> str:

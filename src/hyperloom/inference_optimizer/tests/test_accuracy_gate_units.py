@@ -10,6 +10,12 @@ from types import SimpleNamespace
 
 import pytest
 
+from hyperloom.common.gain_math import (
+    AGENTX_ERROR_RATE_THRESHOLD_PCT,
+    DEFAULT_ENABLEMENT_ACCURACY_FLOOR,
+    accuracy_meets_floor,
+    accuracy_passed,
+)
 from hyperloom.orchestrator.actions.executors import _accuracy_gate as ag
 from hyperloom.orchestrator.kernel import integrate_accuracy as integrate_accuracy
 
@@ -88,18 +94,18 @@ class TestParseEvalResults:
 
 class TestAccuracyPassed:
     def test_baseline_zero_skips_gate(self):
-        assert ag.accuracy_passed(0.0, 0.42) is True
-        assert ag.accuracy_passed(-0.1, 0.0) is True
+        assert accuracy_passed(0.0, 0.42) is True
+        assert accuracy_passed(-0.1, 0.0) is True
 
     def test_within_default_threshold(self):
-        assert ag.accuracy_passed(0.80, 0.76) is True
+        assert accuracy_passed(0.80, 0.76) is True
 
     def test_outside_default_threshold(self):
-        assert ag.accuracy_passed(0.80, 0.70) is False
+        assert accuracy_passed(0.80, 0.70) is False
 
     def test_custom_threshold(self):
-        assert ag.accuracy_passed(0.80, 0.70, threshold=0.11) is True
-        assert ag.accuracy_passed(0.80, 0.68, threshold=0.10) is False
+        assert accuracy_passed(0.80, 0.70, threshold=0.11) is True
+        assert accuracy_passed(0.80, 0.68, threshold=0.10) is False
 
 
 class TestRequireKernelAccuracyDefault:
@@ -119,7 +125,9 @@ class TestGradeIntegrateAccuracy:
     @staticmethod
     def _grade(monkeypatch, tmp_path, *, bench: dict, baseline: float):
 
-        return integrate_accuracy.grade_integrate_accuracy(bench, baseline_accuracy=baseline, workspace=tmp_path)
+        return integrate_accuracy.grade_integrate_accuracy(
+            bench, reference=ag.AccuracyReference(baseline, ""), workspace=tmp_path
+        )
 
     def test_accuracy_within_tolerance_does_not_block(self, monkeypatch, tmp_path):
         out = self._grade(monkeypatch, tmp_path, bench={"accuracy": 0.78}, baseline=0.80)
@@ -180,8 +188,8 @@ class TestGradeIntegrateAccuracy:
 class TestEnablementReaders:
     def test_floor_default_rejects_a_collapsed_model(self):
         """The default must be strong enough to be the only correctness authority."""
-        assert ag.DEFAULT_ENABLEMENT_ACCURACY_FLOOR > 0.0
-        assert not ag.accuracy_meets_floor(0.00076, ag.DEFAULT_ENABLEMENT_ACCURACY_FLOOR)
+        assert DEFAULT_ENABLEMENT_ACCURACY_FLOOR > 0.0
+        assert not accuracy_meets_floor(0.00076, DEFAULT_ENABLEMENT_ACCURACY_FLOOR)
 
     def test_missing_mode_is_fail_closed(self):
         """A caller that cannot supply the field has not opted in."""
@@ -226,7 +234,7 @@ class TestAccuracyValidator:
         ],
     )
     def test_meets_floor(self, score, floor, expected):
-        assert ag.accuracy_meets_floor(score, floor) is expected
+        assert accuracy_meets_floor(score, floor) is expected
 
     def test_classify(self):
         assert ag.classify_accuracy_failure(0.5, 0.2) is None
@@ -236,160 +244,94 @@ class TestAccuracyValidator:
         assert ag.classify_accuracy_failure(0.0, 0.0) == ag.EVAL_KIND_ACCURACY_BELOW_FLOOR
 
 
-def _write_minimal_bench_yaml(path, *, framework="sglang", model="/m", conc=64, isl=1024, osl=1024, run_eval="true"):
-    """Write a minimal Magpie YAML for fingerprint tests."""
-    import yaml as _yaml
-
-    cfg = {
-        "benchmark": {
-            "framework": framework,
-            "model": model,
-            "benchmark_script": f"{framework}_mi300x.sh",
-            "precision": "fp8",
-            "envs": {
-                "CONC": conc,
-                "ISL": isl,
-                "OSL": osl,
-                "TP": 8,
-                "RUN_EVAL": run_eval,
-            },
-        }
-    }
-    path.write_text(_yaml.safe_dump(cfg), encoding="utf-8")
+def _accuracy_round(slot, score):
+    """Write the lm-eval result an AgentX slot's accuracy round leaves below ``<slot>/accuracy/eval``."""
+    eval_dir = slot / ag.ACCURACY_DIR / "eval" / "model"
+    eval_dir.mkdir(parents=True)
+    (eval_dir / "results_2026.json").write_text(
+        json.dumps({"results": {"gsm8k": {"exact_match,strict-match": score}}}), encoding="utf-8"
+    )
 
 
-class TestEvalContractFingerprint:
-    def test_stable_across_calls(self, tmp_path):
-        """Same config produces the same fingerprint on repeated calls."""
-        cfg = tmp_path / "c.yaml"
-        _write_minimal_bench_yaml(cfg)
-        a = ag.eval_contract_fingerprint(config_path=cfg)
-        b = ag.eval_contract_fingerprint(config_path=cfg)
-        assert a == b and len(a) == 16
-
-    def test_workload_change_changes_fingerprint(self, tmp_path):
-        """A change to workload shape (ISL) changes the fingerprint."""
-
-        cfg1 = tmp_path / "c1.yaml"
-        cfg2 = tmp_path / "c2.yaml"
-        _write_minimal_bench_yaml(cfg1, isl=1024)
-        _write_minimal_bench_yaml(cfg2, isl=2048)
-        assert ag.eval_contract_fingerprint(config_path=cfg1) != ag.eval_contract_fingerprint(config_path=cfg2)
-
-    def test_eval_control_change_changes_fingerprint(self, tmp_path):
-        """Changing RUN_EVAL changes the fingerprint."""
-        cfg_on = tmp_path / "on.yaml"
-        cfg_off = tmp_path / "off.yaml"
-        _write_minimal_bench_yaml(cfg_on, run_eval="true")
-        _write_minimal_bench_yaml(cfg_off, run_eval="false")
-        assert ag.eval_contract_fingerprint(config_path=cfg_on) != ag.eval_contract_fingerprint(config_path=cfg_off)
-
-    def test_server_args_do_not_affect_fingerprint(self, tmp_path):
-        """Server arg changes (allowed tuning) do not change the fingerprint."""
-        import yaml as _yaml
-
-        cfg = tmp_path / "c.yaml"
-        _write_minimal_bench_yaml(cfg)
-        fp_base = ag.eval_contract_fingerprint(config_path=cfg)
-        # Add server args to YAML (different from contract fields).
-        data = _yaml.safe_load(cfg.read_text())
-        data["benchmark"]["envs"]["EXTRA_SGLANG_ARGS"] = "--some-tuning-flag"
-        cfg.write_text(_yaml.safe_dump(data))
-        fp_with_args = ag.eval_contract_fingerprint(config_path=cfg)
-        assert fp_base == fp_with_args
-
-    def test_missing_config_returns_empty_string(self):
-        """Missing config returns empty string (invalid contract sentinel)."""
-        fp = ag.eval_contract_fingerprint(config_path="/no/such/file.yaml")
-        assert fp == ""
-
-    def test_none_config_returns_empty_string(self):
-        """None config returns empty string."""
-        fp = ag.eval_contract_fingerprint(config_path=None)
-        assert fp == ""
+def _error_rate(slot, **fields):
+    ws = slot / "benchmark_x"
+    ws.mkdir()
+    (ws / "inferencex_result.json").write_text(json.dumps(fields), encoding="utf-8")
+    return slot
 
 
-class TestTheAgentXValidityGate:
-    """AgentX runs no lm-eval; the error rate upstream gates on stands in.
+class TestTheAgentXAccuracyGate:
+    """Outside MLPerf an AgentX slot is graded on the GSM8K score of its accuracy round, never on its error rate."""
 
-    ``parse_eval_results`` maps it onto the accuracy contract the same way the
-    scriptable quality gate does, and fails closed for the same reason: a run
-    that reported no rate is not comparable to one that did.
-    """
+    @pytest.fixture(autouse=True)
+    def _native_backend(self, monkeypatch):
+        monkeypatch.delenv("HYPERLOOM_AGENTIC_BACKEND", raising=False)
 
-    def _result(self, tmp_path, **fields):
-        ws = tmp_path / "benchmark_x"
-        ws.mkdir()
-        (ws / "inferencex_result.json").write_text(json.dumps(fields), encoding="utf-8")
-        return tmp_path
-
-    def test_a_rate_inside_the_threshold_passes(self, tmp_path):
-        """0.722% is what a real 6-error / 831-request session reported."""
-        ws = self._result(tmp_path, request_error_rate=0.722)
-        out = ag.parse_eval_results(ws, framework="vllm", benchmark_mode="agentx")
-        assert out["accuracy"] == 1.0
-        assert out["task"] == "agentx_error_rate"
-        assert out["error_rate"] == pytest.approx(0.722)
-
-    def test_the_threshold_is_inclusive(self, tmp_path):
-        """Upstream rejects above the threshold, so exactly at it still passes."""
-        ws = self._result(tmp_path, request_error_rate=ag.AGENTX_ERROR_RATE_THRESHOLD_PCT)
-        assert ag.parse_eval_results(ws, framework="vllm", benchmark_mode="agentx")["accuracy"] == 1.0
-
-    def test_a_rate_past_the_threshold_fails(self, tmp_path):
-        """The unit is a percentage, so 25 is 25% and well past upstream's 10%."""
-        ws = self._result(tmp_path, request_error_rate=25.0)
-        out = ag.parse_eval_results(ws, framework="vllm", benchmark_mode="agentx")
-        assert out["accuracy"] == 0.0
-        assert out["error_rate"] == pytest.approx(25.0)
-
-    def test_a_result_without_a_rate_fails_closed(self, tmp_path):
-        """Unknown is not the same as valid; scoring it as a pass is how an
-        incomparable measurement reaches the leaderboard-comparable set."""
-        ws = self._result(tmp_path, output_throughput=300.0)
-        out = ag.parse_eval_results(ws, framework="vllm", benchmark_mode="agentx")
-        assert out["accuracy"] == 0.0
-        assert out["error_rate"] is None
-
-    def test_no_result_file_at_all_fails_closed(self, tmp_path):
+    def test_the_slot_reads_the_score_its_accuracy_round_wrote(self, tmp_path):
+        _accuracy_round(tmp_path, 0.945)
         out = ag.parse_eval_results(tmp_path, framework="vllm", benchmark_mode="agentx")
-        assert out["accuracy"] == 0.0
+        assert (out["accuracy"], out["task"], out["metric"]) == (0.945, "gsm8k", "exact_match,strict-match")
 
-    def test_a_synthetic_session_never_reaches_this_gate(self, tmp_path):
-        """The mode is the only switch; the file's presence must not arm it."""
-        ws = self._result(tmp_path, request_error_rate=0.9)
-        out = ag.parse_eval_results(ws, framework="vllm")
-        assert out.get("task") != "agentx_error_rate"
+    def test_a_dropped_score_is_not_hidden_behind_a_clean_error_rate(self, tmp_path):
+        """A candidate at 0.000 against a 0.945 baseline passed while the gate read 1.0 off its error rate."""
+        _error_rate(tmp_path, request_error_rate=0.0)
+        _accuracy_round(tmp_path, 0.0)
+        assert (
+            ag.grade_accuracy(str(tmp_path), ag.AccuracyReference(0.945, ""), framework="vllm", benchmark_mode="agentx")
+            is False
+        )
+
+    def test_a_slot_without_an_accuracy_round_has_no_accuracy(self, tmp_path):
+        """The error rate no longer stands in for a score: a clean rate alone grades nothing."""
+        _error_rate(tmp_path, request_error_rate=0.0)
+        out = ag.parse_eval_results(tmp_path, framework="vllm", benchmark_mode="agentx")
         assert out["accuracy"] is None
 
-    def test_the_gate_outranks_the_scriptable_quality_gate(self, tmp_path):
-        """An AgentX run is graded on its own signal even where a gate exists."""
-        ws = self._result(tmp_path, request_error_rate=0.007)
-        (ws / "benchmark_x" / "benchmark_report.json").write_text(
+    def test_an_eval_outside_the_accuracy_round_is_not_read(self, tmp_path):
+        (tmp_path / "results.json").write_text(
+            json.dumps({"results": {"gsm8k": {"exact_match,strict-match": 0.9}}}), encoding="utf-8"
+        )
+        assert ag.parse_eval_results(tmp_path, framework="vllm", benchmark_mode="agentx")["accuracy"] is None
+
+    def test_the_round_outranks_the_scriptable_quality_gate(self, tmp_path):
+        (tmp_path / "benchmark_report.json").write_text(
             json.dumps({"quality_gate": {"passed": False}}), encoding="utf-8"
         )
-        out = ag.parse_eval_results(ws, framework="xdit", benchmark_mode="agentx")
-        assert out["task"] == "agentx_error_rate"
-        assert out["accuracy"] == 1.0
+        _accuracy_round(tmp_path, 0.9)
+        assert ag.parse_eval_results(tmp_path, framework="xdit", benchmark_mode="agentx")["accuracy"] == 0.9
+
+    def test_a_synthetic_session_never_reaches_this_gate(self, tmp_path):
+        """The mode is the only switch; the round's presence must not arm it."""
+        _error_rate(tmp_path, request_error_rate=0.9)
+        assert ag.parse_eval_results(tmp_path, framework="vllm")["accuracy"] is None
 
 
-@pytest.mark.parametrize("rate,expected", [(0.0, 1.0), (0.25, 0.0)])
-def test_public_agentx_report_reaches_correctness_gate(tmp_path, rate, expected):
-    report = {
-        "scenario": "agentx",
-        "success": True,
-        "benchmark_valid": True,
-        "publishable": True,
-        "agentx_metrics": {
-            "execution_owner": "magpie",
-            "server_launch": {"owner": "magpie"},
-            "requests": {"error_rate": rate},
-        },
-    }
-    (tmp_path / "benchmark_report.json").write_text(json.dumps(report))
-    result = ag.parse_eval_results(tmp_path, framework="vllm", benchmark_mode="agentx")
-    assert result["accuracy"] == expected
-    assert result["error_rate"] == rate * 100
+class TestTheMLPerfInlineGate:
+    """The MLPerf harness keeps grading on its inline score, admitted by the error rate."""
+
+    @pytest.fixture(autouse=True)
+    def _mlperf_backend(self, monkeypatch):
+        monkeypatch.setenv("HYPERLOOM_AGENTIC_BACKEND", "mlperf")
+
+    def test_a_scored_run_inside_the_threshold_reads_its_inline_score(self, tmp_path):
+        _error_rate(
+            tmp_path, request_error_rate=AGENTX_ERROR_RATE_THRESHOLD_PCT, accuracy_score=0.8, accuracy_missing_turns=0
+        )
+        out = ag.parse_eval_results(tmp_path, framework="vllm", benchmark_mode="agentx")
+        assert (out["accuracy"], out["task"]) == (0.8, "mlperf_agentic_inline")
+
+    @pytest.mark.parametrize(
+        "fields",
+        [{"request_error_rate": 25.0}, {}, {"request_error_rate": 0.0, "accuracy_missing_turns": 1}],
+        ids=["past_threshold", "no_rate", "unscored_turn"],
+    )
+    def test_a_run_the_harness_could_not_score_drops_to_zero(self, tmp_path, fields):
+        _error_rate(tmp_path, **{"accuracy_score": 0.8, "accuracy_missing_turns": 0, **fields})
+        assert ag.parse_eval_results(tmp_path, framework="vllm", benchmark_mode="agentx")["accuracy"] == 0.0
+
+    def test_an_accuracy_round_is_not_read(self, tmp_path):
+        _accuracy_round(tmp_path, 0.9)
+        assert ag.parse_eval_results(tmp_path, framework="vllm", benchmark_mode="agentx")["accuracy"] == 0.0
 
 
 class TestParseAgentXErrorRate:
@@ -402,11 +344,6 @@ class TestParseAgentXErrorRate:
 
     def test_reports_none_when_the_field_is_absent_or_not_a_number(self, tmp_path):
         (tmp_path / "inferencex_result.json").write_text(json.dumps({"request_error_rate": "n/a"}), encoding="utf-8")
-        assert ag.parse_agentx_error_rate(tmp_path) is None
-
-    def test_an_invalid_public_report_cannot_be_salvaged(self, tmp_path):
-        (tmp_path / "benchmark_report.json").write_text(json.dumps({"scenario": "agentx", "benchmark_valid": False}))
-        (tmp_path / "inferencex_result.json").write_text(json.dumps({"request_error_rate": 0.0}))
         assert ag.parse_agentx_error_rate(tmp_path) is None
 
     def test_an_unreadable_result_reports_none_and_warns(self, tmp_path, caplog):

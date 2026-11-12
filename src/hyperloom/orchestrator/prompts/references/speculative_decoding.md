@@ -34,29 +34,28 @@ Concretely:
   determined by the golden curve, and forcing it above golden invalidates the
   result.
 - Whether a variant may change a draft-length / gamma / method knob, or turn
-  synthetic acceptance on, depends on who owns the launch (see *Native Magpie
-  AgentX runs* below) and, on a Hyperloom-managed launch, on the base launch (see
-  *Pinned when the base simulates acceptance* below). Where a variant may use
-  synthetic acceptance — a Hyperloom-managed base with no speculative decoding —
-  its AL is looked up for the variant's own draft length; it is never carried
-  over or hand-set.
+  synthetic acceptance on, depends on the session's base launch (see *A base
+  with a golden layer owns acceptance* and *Pinned when the base simulates
+  acceptance* below). Where a variant may use synthetic acceptance — a base
+  with no speculative decoding — its AL is looked up for the variant's own
+  draft length; it is never carried over or hand-set.
 
-## Native Magpie AgentX runs: Magpie owns acceptance
+## A base with a golden layer owns acceptance
 
-On a native Magpie AgentX run the recipe and Magpie own the launch protocol,
-including acceptance and the recipe-pinned speculative-decoding inputs. Do not
-add, change or unset synthetic acceptance (a `SGLANG_SIMULATE_ACC_*` env or a
-synthetic-acceptance value), and do not change a speculative-decoding input the
-recipe pins (the golden-acceptance inputs `_validate_golden_launch` compares when
-the resolved recipe locks them). Magpie rejects, before it is benchmarked, a candidate that violates
-its protected lists or the recipe's golden-acceptance lock, and every other change
-bundled into it goes unmeasured; a change Magpie lets through is still not
-allowed by this policy.
-The exact rules are Magpie's: read `PROTECTED_ARGS`, `PROTECTED_ENV`,
-`PROTECTED_ENV_PREFIXES` and `_validate_golden_launch` in its
-`Magpie/modes/benchmark/agentx_launch.py` (the session prompt gives the installed
-path) rather than relying on a copy here. The golden-AL lookup below then only
-confirms the recipe's own cell; spend variants on other knobs.
+When the session's base launch (`<session>/base_launch.json`) carries a
+`golden_al` layer — the AL InferenceX resolved for the recipe, the args and env
+that apply it, and the curve's repo, commit and path — every round applies that
+layer above the candidate's change. A candidate that sets, changes or removes a
+key the layer owns (draft method, model and length, top-k, block size, an
+acceptance-length flag, a `SGLANG_SIMULATE_ACC_*` env, or the draft and
+acceptance keys of `--speculative-config`) is refused before it is benchmarked
+as a `serve_flag` failure naming the key, and every other change bundled into it
+goes unmeasured. The key lists are `inference_suite.golden`'s
+(`GOLDEN_OWNED_FLAGS`, `GOLDEN_OWNED_FLAG_PREFIXES`,
+`GOLDEN_OWNED_SPEC_CONFIG_KEYS`, `GOLDEN_OWNED_ENV_PREFIXES`); read them there
+rather than relying on a copy here. The golden-AL lookup below then only
+confirms the base's own cell; spend variants on other knobs. The AgentX accuracy
+round runs without this layer, so its GSM8K score is the target model's own.
 
 ## Do NOT guess the golden-AL filename from the model name
 
@@ -87,15 +86,15 @@ Apply to any framework whose recipe touches the speculative-decoding knobs:
 - **SGLang MTP/EAGLE**: `--speculative-num-steps` (the draft length, same as
   vLLM's `num_speculative_tokens`). With `--speculative-eagle-topk 1`,
   `--speculative-num-draft-tokens` is `num_steps + 1` and is **not** the
-  lookup key.
+  lookup key. A deployment's kernels can cap these below what the engine
+  accepts: when the recipe declares `speculative_draft_limits`, a draft
+  outside them is refused before it launches, so keep within them.
 - **vLLM**: `num_speculative_tokens` inside `--speculative-config` JSON, and any
   switch of `method` (eagle3 / mtp / dspark) — golden AL is keyed on method as
   well as model, so a method change invalidates the previously matched row.
 - **TensorRT-LLM / ATOM**: their respective draft-length equivalents.
 
-**Pinned when the base simulates acceptance.** This and the next two paragraphs
-apply to a Hyperloom-managed launch (any run that is not native Magpie AgentX,
-such as the MLPerf agentic backend). When the session's base launch
+**Pinned when the base simulates acceptance.** When the session's base launch
 **simulates acceptance** (`SGLANG_SIMULATE_ACC_LEN`
 is set, `--speculative-config` carries `rejection_sample_method: synthetic` or a
 `synthetic_acceptance_length`, or an acceptance-length flag such as ATOM's
@@ -104,12 +103,15 @@ acceptance are pinned: a candidate that changes the draft length, top-k, block
 size, method or draft model, or adds, changes or unsets any
 `SGLANG_SIMULATE_ACC_*` env or synthetic-acceptance value, or drops
 `--speculative-config` (a replacing argument string that omits it included), is
-refused before it is benchmarked with `error_class: speculative_decoding_pinned`.
-The lookup above then only confirms the base's own cell; spend variants on other
-knobs. A `--speculative-config` replaces the whole object, so a variant that
-changes a key that does not describe the draft (e.g. `attention_backend`) must
-restate the base's pinned keys unchanged, or set that key alone with vLLM's
-per-key form `--speculative-config.<key> <value>`, which merges over the object.
+refused before it is benchmarked as a `serve_flag` failure naming the golden-owned key.
+In an explore round that refusal comes at admission: the variant is dropped
+pre-flight and listed among the round's skipped variants, so proposing it spends
+a slot on nothing. The lookup above then only confirms the base's own cell;
+spend variants on other knobs. A `--speculative-config` replaces the whole
+object, so a variant that changes a key that does not describe the draft (e.g.
+`attention_backend`) must restate the base's pinned keys unchanged, or set that
+key alone with vLLM's per-key form `--speculative-config.<key> <value>`, which
+merges over the object.
 
 A base that **verifies a real draft** (GLM's
 `SGLANG_SIMULATE_ACC_TOKEN_MODE=real-draft-token`, Kimi's

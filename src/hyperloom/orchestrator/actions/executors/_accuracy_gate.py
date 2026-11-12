@@ -6,33 +6,46 @@
 from __future__ import annotations
 
 import glob
-import hashlib
 import json
 import logging
 import math
 import shlex
+from collections.abc import Mapping
+from dataclasses import dataclass
 from pathlib import Path
+from types import MappingProxyType
 from typing import Any
 
 import yaml
 
-from hyperloom_common.coerce import optional_positive_float
+from hyperloom.common.benchmark_config import BenchmarkPointError, read_benchmark_point
+from hyperloom.common.gain_math import (
+    ACCURACY_METRICS,
+    AGENTX_ERROR_RATE_THRESHOLD_PCT,
+    DEFAULT_ENABLEMENT_ACCURACY_FLOOR,
+    accuracy_meets_floor,
+    accuracy_passed,
+    finite_score,
+)
+from hyperloom_common.coerce import optional_positive_float, to_float
 from hyperloom_common.env import env_flag, is_truthy
 from hyperloom_common.io import safe_mtime
+from hyperloom_common.jsonio import read_json_strict
 from hyperloom.common.perf_metric import is_agentx_mode
+from inference_suite.contracts import ProbeOutcome, ReportError, RunLayout
+from inference_suite.contracts.launch import Launch
+from inference_suite.contracts.layout import REPORT_FILE
+
+from ._round_folder import BENCHMARK_REPORT_FILE, RoundFolder, is_round_folder
 
 log = logging.getLogger(__name__)
 
-ACCURACY_THRESHOLD = 0.05  # allowed deviation
-
-# Upstream rejects an AgentX submission whose error rate over completed requests exceeds 10% (InferenceX
-# ``validate_agentic_result.py``). A percentage because that is aiperf's unit: ``RequestErrorRateMetric`` is declared
-# PERCENT and derives ``100.0 * errors / total``.
-AGENTX_ERROR_RATE_THRESHOLD_PCT = 10.0
-
-# Shared accuracy floor, used by BOTH the baseline eval-failure trigger and the enablement KEEP gate so the two never
-# diverge.
-DEFAULT_ENABLEMENT_ACCURACY_FLOOR = 0.5
+#: Where in its slot an AgentX accuracy round writes its run_dir, which the gate reads the slot's score from.
+ACCURACY_DIR = "accuracy"
+#: The eval-results key naming the definition digest the score was taken under, "" outside an inference_suite round.
+EVAL_DEFINITION_DIGEST_KEY = "definition_digest"
+#: The result key a round records the definition digest of its ``accuracy`` under.
+ACCURACY_DEFINITION_DIGEST_KEY = "accuracy_definition_digest"
 
 # Enablement admission, selected by the ``--enablement`` CLI flag.
 ENABLEMENT_MODE_OFF = "off"
@@ -57,7 +70,6 @@ BASELINE_EVAL_FAILURE_KIND_KEY = "baseline_eval_failure_kind"
 BASELINE_EVAL_OBSERVED_ACCURACY_KEY = "baseline_eval_observed_accuracy"
 BASELINE_EVAL_ACCURACY_FLOOR_KEY = "baseline_eval_accuracy_floor"
 BASELINE_EVAL_EVIDENCE_KEY = "baseline_eval_evidence"
-BASELINE_EVAL_CONTRACT_FINGERPRINT_KEY = "baseline_eval_contract_fingerprint"
 
 # Distinct eval-failure kinds.
 EVAL_KIND_RUNTIME_FAILURE = "eval_runtime_failure"
@@ -71,9 +83,14 @@ EVAL_KIND_ACCURACY_UNAVAILABLE = "accuracy_unavailable"
 EVAL_KIND_ACCURACY_BELOW_FLOOR = "accuracy_below_floor"
 # The model never emitted EOS, so the eval was cut short and scored ~0.
 EVAL_KIND_GENERATION_PATHOLOGY = "eval_generation_pathology"
+# A scriptable round report without a readable ``quality_gate``: the operator's script broke its contract, which no
+# framework change can repair.
+EVAL_KIND_QUALITY_GATE_MISSING = "quality_gate_missing"
 
-# Sidecar the probe writes into ``$RESULT_DIR`` when it trips.
+# Sidecar the probe writes into ``$RESULT_DIR`` when it trips; inference_suite writes its ProbeOutcome there on every
+# eval, tripped or not.
 EVAL_PROBE_FILENAME = "hyperloom_eval_probe.json"
+_SUITE_SAMPLES_KEY = "samples_seen"
 
 # stop_reason recorded when the baseline could not produce an accuracy result even though the accuracy test was
 # expected to run.
@@ -83,10 +100,9 @@ BASELINE_ACCURACY_STOP_REASON = "baseline_accuracy_failed"
 def materialized_run_eval_disabled(config_path: Path | str) -> bool:
     """Report whether lm-eval is disabled in the materialized benchmark config."""
     try:
-        cfg = yaml.safe_load(Path(config_path).read_text(encoding="utf-8")) or {}
-    except (OSError, yaml.YAMLError):
+        envs = read_benchmark_point(Path(config_path)).envs
+    except (OSError, yaml.YAMLError, BenchmarkPointError):
         return False
-    envs = ((cfg.get("benchmark") or {}).get("envs")) or {}
     return not is_truthy(envs.get("RUN_EVAL"), default=True)
 
 
@@ -127,99 +143,14 @@ def eval_enablement_allowed(shared_state: Any) -> bool:
     return resolve_enablement_mode(shared_state) in (ENABLEMENT_MODE_EVAL, ENABLEMENT_MODE_ALL)
 
 
-def _finite_score(score: Any) -> float | None:
-    """Return ``score`` as a finite float, or ``None`` when unusable."""
-    if isinstance(score, bool) or not isinstance(score, (int, float)):
-        return None
-    val = float(score)
-    return val if math.isfinite(val) else None
-
-
-def accuracy_meets_floor(score: Any, floor: float) -> bool:
-    """True only when ``score`` is finite, strictly positive and ``>= floor``."""
-    val = _finite_score(score)
-    if val is None or val <= 0.0:
-        return False
-    return val >= floor
-
-
 def classify_accuracy_failure(score: Any, floor: float) -> str | None:
     """Classify an accuracy verdict; ``None`` means it passes the floor."""
-    val = _finite_score(score)
+    val = finite_score(score)
     if val is None:
         return EVAL_KIND_ACCURACY_UNAVAILABLE
     if val <= 0.0 or val < floor:
         return EVAL_KIND_ACCURACY_BELOW_FLOOR
     return None
-
-
-def _extract_eval_contract_fields(config_path: str | Path | None) -> dict[str, str]:
-    """Extract stable eval-contract fields from a materialized Magpie YAML."""
-    if not config_path:
-        return {}
-    try:
-        p = Path(config_path)
-        if not p.is_file():
-            return {}
-        data = yaml.safe_load(p.read_text(encoding="utf-8")) or {}
-    except (OSError, ValueError, yaml.YAMLError):
-        return {}
-
-    bench = data.get("benchmark") or {}
-    envs: dict = bench.get("envs") or {}
-
-    # Eval-contract keys in benchmark.envs; all others are excluded.
-    _EVAL_CONTRACT_ENV_KEYS = (
-        "RUN_EVAL",
-        "MAGPIE_EVAL_TASKS",
-        "MAGPIE_EVAL_LIMIT",
-        "HYPERLOOM_EVAL_PROBE",
-        "HYPERLOOM_EVAL_PROBE_MIN_SAMPLES",
-        "HYPERLOOM_EVAL_PROBE_LENGTH_RATIO",
-        "HYPERLOOM_EVAL_MAX_TOKENS",
-        "HYPERLOOM_EVAL_DERIVE_STOP",
-        "HYPERLOOM_EVAL_STOP_STRINGS",
-    )
-    # Workload-shape keys that define what is being measured.
-    _WORKLOAD_SHAPE_ENV_KEYS = (
-        "CONC",
-        "ISL",
-        "OSL",
-        "MAX_MODEL_LEN",
-        "TP",
-        "RANDOM_RANGE_RATIO",
-    )
-    contract: dict[str, str] = {
-        "framework": str(bench.get("framework") or ""),
-        "model": str(bench.get("model") or ""),
-        "benchmark_script": str(bench.get("benchmark_script") or ""),
-        "precision": str(bench.get("precision") or ""),
-    }
-    for k in _EVAL_CONTRACT_ENV_KEYS + _WORKLOAD_SHAPE_ENV_KEYS:
-        v = envs.get(k)
-        if v is not None:
-            contract[k] = str(v)
-    return contract
-
-
-def eval_contract_fingerprint(
-    *,
-    config_path: str | Path | None,
-    framework: str | None = None,
-    model: str | None = None,
-) -> str:
-    """Short stable digest of the eval contract (workload + eval definition)."""
-    contract = _extract_eval_contract_fields(config_path)
-    if not contract:
-        # Unreadable or missing config — return invalid sentinel.
-        return ""
-    # Supplement with caller-supplied framework/model when the YAML lacks them.
-    if framework and not contract.get("framework"):
-        contract["framework"] = str(framework)
-    if model and not contract.get("model"):
-        contract["model"] = str(model)
-    payload = json.dumps(contract, sort_keys=True, separators=(",", ":"), ensure_ascii=False)
-    return hashlib.sha256(payload.encode("utf-8", "replace")).hexdigest()[:16]
 
 
 def resolve_served_context(
@@ -309,32 +240,39 @@ def accuracy_keep_block(
     return False, "", True
 
 
+def _round_quality_gate(report: Path) -> object:
+    """The quality gate the report at ``report`` carries: an inference_suite round's, or a benchmark report's.
+
+    Raises:
+        OSError, ValueError: When the report cannot be read; a round report off its contract raises too.
+    """
+    if report.name == REPORT_FILE:
+        return RoundFolder.read(report.parent).measurement()["quality_gate"]
+    return json.loads(report.read_text(encoding="utf-8")).get("quality_gate")
+
+
 def parse_quality_gate(workspace: Path | str) -> dict[str, Any]:
-    """Read a scriptable (server-less) quality gate from the bench report."""
+    """Read a scriptable (server-less) quality gate from the newest round report under ``workspace``."""
     workspace = Path(workspace)
-    reports = [Path(f) for f in glob.glob(str(workspace / "**" / "benchmark_report.json"), recursive=True)]
+    reports = [Path(f) for f in glob.glob(str(workspace / "**" / BENCHMARK_REPORT_FILE), recursive=True)]
+    reports += [path for path in workspace.glob(f"**/{REPORT_FILE}") if is_round_folder(path.parent)]
     if not reports:
-        return {"quality_gate": None, "error": f"no benchmark_report.json in {workspace}"}
+        return {"quality_gate": None, "error": f"no round report in {workspace}"}
     latest = max(reports, key=lambda p: p.stat().st_mtime)
     try:
-        data = json.loads(latest.read_text(encoding="utf-8"))
-    except (json.JSONDecodeError, OSError) as exc:
-        return {"quality_gate": None, "error": f"parse error: {exc}"}
-    qg = data.get("quality_gate")
+        qg = _round_quality_gate(latest)
+    except json.JSONDecodeError as exc:
+        return {"quality_gate": None, "error": f"parse error: {exc}", "source_file": str(latest)}
     if not isinstance(qg, dict):
-        return {"quality_gate": None, "error": f"no quality_gate in {latest}"}
+        return {"quality_gate": None, "error": f"no quality_gate in {latest}", "source_file": str(latest)}
     return {"quality_gate": qg, "source_file": str(latest)}
 
 
 def _latest_agentx_result(workspace: Path | str) -> dict[str, Any] | None:
     """The newest ``inferencex_result.json`` under *workspace*, or None."""
-    from hyperloom.common.benchmark_config import configured_benchmark, is_magpie_agentx
-    from hyperloom.inference_optimizer.agentx.report import read_agentx_report
+    from hyperloom.common.benchmark_config import configured_benchmark, is_agentx
 
-    native = read_agentx_report(Path(workspace))
-    if native is not None:
-        return native
-    if is_magpie_agentx(configured_benchmark()):
+    if is_agentx(configured_benchmark()):
         return None
     results = [Path(f) for f in glob.glob(str(Path(workspace) / "**" / "inferencex_result.json"), recursive=True)]
     if not results:
@@ -366,6 +304,13 @@ def _mlperf_inline_accuracy(result: dict[str, Any] | None) -> float | None:
     return float(score)
 
 
+#: The image-quality limits a scriptable gate is judged by when its script names none (D2: the script writes raw
+#: scores). xDiT's own tolerance: optimizations that keep precision pass, gross divergence does not.
+SCRIPTABLE_QUALITY_LIMITS: Mapping[str, float] = MappingProxyType(
+    {"lpips_max": 0.15, "ssim_min": 0.85, "mse_max": 0.006}
+)
+
+
 def quality_gate_passed(
     quality_gate: dict[str, Any] | None,
     require: bool = False,
@@ -391,7 +336,7 @@ def quality_gate_passed(
     evaluated = 0
     for metric_key, limit_key, ok in checks:
         val = quality_gate.get(metric_key)
-        lim = quality_gate.get(limit_key)
+        lim = quality_gate.get(limit_key, SCRIPTABLE_QUALITY_LIMITS[limit_key])
         if isinstance(val, (int, float)) and isinstance(lim, (int, float)):
             evaluated += 1
             if not ok(float(val), float(lim)):
@@ -404,24 +349,18 @@ def quality_gate_passed(
 
 
 def _agentx_accuracy_result(workspace: Path) -> dict[str, Any]:
-    """Grade an AgentX run on the request error rate upstream gates a submission on.
+    """Grade an AgentX run on the GSM8K score its slot's accuracy round wrote, or on the MLPerf harness's inline score.
 
-    Fails closed like the scriptable gate: a run that reported no rate is not comparable, and treating that as a
-    pass is how an incomparable measurement reaches the leaderboard set.
+    Outside MLPerf the request error rate is only the measurement's validity, never a score: a slot whose accuracy
+    round did not run or left no result has no accuracy, which every gate fails closed on.
     """
-    rate = parse_agentx_error_rate(workspace)
-    passed = rate is not None and rate <= AGENTX_ERROR_RATE_THRESHOLD_PCT
-    log.info("accuracy_gate: agentx request_error_rate=%s passed=%s", rate, passed)
-
     from hyperloom.common.agentx_workload import is_mlperf_backend
 
     if not is_mlperf_backend():
-        return {
-            "accuracy": 1.0 if passed else 0.0,
-            "task": "agentx_error_rate",
-            "metric": "request_error_rate",
-            "error_rate": rate,
-        }
+        return _lm_eval_accuracy_result(RunLayout(workspace / ACCURACY_DIR).eval_dir)
+    rate = parse_agentx_error_rate(workspace)
+    passed = rate is not None and rate <= AGENTX_ERROR_RATE_THRESHOLD_PCT
+    log.info("accuracy_gate: agentx request_error_rate=%s passed=%s", rate, passed)
     # The harness scores every smoke run inline, so each KEEP is gated on that score against the baseline's, the
     # same way lm-eval accuracy is. Over the error-rate ceiling, an unscored turn or no scores.json is a drop
     # outright: 0.0, not None, which a lane without a required gate reads as "no eval ran" and skips.
@@ -439,14 +378,13 @@ def parse_eval_results(
     framework: str | None = None,
     benchmark_mode: str = "",
 ) -> dict[str, Any]:
-    """Extract accuracy score from Magpie workspace's eval output; AgentX grades on its error rate instead."""
+    """Extract the accuracy score from a workspace's eval output; AgentX reads its slot's accuracy round instead."""
     workspace = Path(workspace)
 
     from hyperloom.inference_optimizer import framework_registry
 
     scriptable = framework_registry.is_scriptable(framework)
 
-    # AgentX has no lm-eval; its correctness signal is the request error rate.
     if is_agentx_mode(benchmark_mode):
         return _agentx_accuracy_result(workspace)
 
@@ -480,6 +418,8 @@ def parse_eval_results(
             "metric": "quality_gate_passed",
             "quality_gate": None,
             "error": qg_out.get("error", "no quality_gate"),
+            "source_file": qg_out.get("source_file", ""),
+            "kind": EVAL_KIND_QUALITY_GATE_MISSING,
         }
 
     return _lm_eval_accuracy_result(workspace)
@@ -509,7 +449,7 @@ def _lm_eval_accuracy_result(workspace: Path) -> dict[str, Any]:
 
     results = data.get("results", {})
     for task_name, metrics in results.items():
-        for key in ("exact_match,strict-match", "exact_match,flexible-extract", "exact_match,none", "acc,none"):
+        for key in ACCURACY_METRICS:
             if key in metrics:
                 score = metrics[key]
                 if isinstance(score, (int, float)):
@@ -519,6 +459,7 @@ def _lm_eval_accuracy_result(workspace: Path) -> dict[str, Any]:
                         "task": task_name,
                         "metric": key,
                         "source_file": str(latest),
+                        EVAL_DEFINITION_DIGEST_KEY: _eval_definition_digest(latest),
                         # lm-eval's own wall-clock for the run; it ran inside the round's post-ready interval.
                         "eval_runtime_sec": optional_positive_float(data.get("total_evaluation_time_seconds")),
                     }
@@ -526,8 +467,26 @@ def _lm_eval_accuracy_result(workspace: Path) -> dict[str, Any]:
     return {"accuracy": None, "error": f"no recognized metric in {latest}"}
 
 
+def _eval_definition_digest(results_file: Path) -> str:
+    """The definition digest of the inference_suite round whose eval wrote ``results_file``, "" outside one."""
+    for run_dir in results_file.parents:
+        layout = RunLayout(run_dir)
+        if layout.eval_dir in results_file.parents and layout.launch.is_file():
+            return run_eval_definition_digest(run_dir)
+    return ""
+
+
+def run_eval_definition_digest(run_dir: Path) -> str:
+    """The definition digest of the eval the inference_suite round in ``run_dir`` planned, "" when it planned none."""
+    layout = RunLayout(run_dir)
+    if not layout.launch.is_file():
+        return ""
+    invocation = Launch.from_document(read_json_strict(layout.launch)).eval
+    return "" if invocation is None else invocation.definition_digest
+
+
 def read_eval_probe(workspace: Path | str) -> dict[str, Any] | None:
-    """Read the generation-pathology probe sidecar, when the probe tripped."""
+    """Read the newest generation-pathology probe sidecar below ``workspace``, when that probe tripped."""
     try:
         matches = list(Path(workspace).rglob(EVAL_PROBE_FILENAME))
     except OSError:
@@ -541,9 +500,26 @@ def read_eval_probe(workspace: Path | str) -> dict[str, Any] | None:
         record = json.loads(latest.read_text(encoding="utf-8"))
     except (json.JSONDecodeError, OSError):
         return None
+    if _SUITE_SAMPLES_KEY in record:
+        try:
+            tripped = ProbeOutcome.from_document(record).tripped
+        except ReportError:
+            return None
+        if not tripped:
+            return None
     record["kind"] = EVAL_KIND_GENERATION_PATHOLOGY
     record["source_file"] = str(latest)
     return record
+
+
+def _probe_evidence(probe: dict[str, Any]) -> str:
+    if _SUITE_SAMPLES_KEY in probe:
+        ratio = probe.get("length_ratio_observed") or 0.0
+        return f"{ratio:.0%} of {probe[_SUITE_SAMPLES_KEY]} sampled responses stopped at the length cap"
+    return (
+        f"{probe.get('cap_hits', 0)}/{probe.get('observed_samples', 0)} sampled responses stopped at the "
+        f"{probe.get('max_completion_tokens_seen', 0)}-token cap"
+    )
 
 
 def eval_probe_summary(probe: dict[str, Any] | None) -> str:
@@ -551,49 +527,86 @@ def eval_probe_summary(probe: dict[str, Any] | None) -> str:
     if not probe:
         return ""
     return (
-        f"{EVAL_KIND_GENERATION_PATHOLOGY}: {probe.get('cap_hits', 0)}/"
-        f"{probe.get('observed_samples', 0)} sampled responses stopped at the "
-        f"{probe.get('max_completion_tokens_seen', 0)}-token cap; the model never "
-        "emitted EOS, so the eval was cut short and scored ~0"
+        f"{EVAL_KIND_GENERATION_PATHOLOGY}: {_probe_evidence(probe)}; the model never emitted EOS, so the eval was "
+        "cut short and scored ~0"
     )
 
 
-def accuracy_passed(
-    baseline_accuracy: float,
-    new_accuracy: float,
-    threshold: float = ACCURACY_THRESHOLD,
-) -> bool:
-    """Return True if accuracy drop is within tolerance."""
-    if baseline_accuracy <= 0:
-        # No baseline recorded; skip gate.
-        return True
-    drop = baseline_accuracy - new_accuracy
-    return drop <= threshold
+@dataclass(frozen=True)
+class AccuracyReference:
+    """The baseline score candidates are graded against, and the eval definition digest it was taken under.
+
+    ``score`` is 0.0 when there is no baseline score; ``definition_digest`` is "" for a score no inference_suite round
+    took, which compares only with scores taken outside one too.
+    """
+
+    score: float
+    definition_digest: str
+
+    @classmethod
+    def of_baseline(cls, state: Any) -> AccuracyReference:
+        """The reference the session ``state`` measured at its baseline; no score without a state."""
+        return cls(
+            to_float(getattr(state, "baseline_accuracy", 0.0), 0.0) or 0.0,
+            str(getattr(state, "baseline_accuracy_definition_digest", "") or ""),
+        )
+
+    @classmethod
+    def of_session(cls, state: Any, params: Mapping[str, Any]) -> AccuracyReference:
+        """The baseline the session measured, else the one a proposal's ``params`` carry, which no suite round took."""
+        measured = cls.of_baseline(state)
+        if measured.score > 0:
+            return measured
+        proposed = to_float(params.get("accuracy_baseline"), 0.0) or to_float(params.get("baseline_accuracy"), 0.0)
+        return cls(proposed or 0.0, "")
+
+    def comparable(self, eval_results: Mapping[str, Any]) -> float | None:
+        """The score ``eval_results`` holds when taken under this reference's definition; ``None`` otherwise.
+
+        Scores under different eval definitions do not compare, so a score under another one is no score.
+        """
+        score = finite_score(eval_results.get("accuracy"))
+        if score is not None and self._scored_elsewhere(eval_results):
+            log.warning(
+                "accuracy_gate: score %.4f was taken under eval definition %r, the baseline's under %r; not compared",
+                score,
+                eval_results.get(EVAL_DEFINITION_DIGEST_KEY),
+                self.definition_digest,
+            )
+            return None
+        return score
+
+    def incomparable(self, eval_results: Mapping[str, Any]) -> bool:
+        """Whether ``eval_results`` holds a score this measured baseline cannot judge, taken under another definition."""
+        return (
+            self.score > 0
+            and finite_score(eval_results.get("accuracy")) is not None
+            and self._scored_elsewhere(eval_results)
+        )
+
+    def _scored_elsewhere(self, eval_results: Mapping[str, Any]) -> bool:
+        return str(eval_results.get(EVAL_DEFINITION_DIGEST_KEY) or "") != self.definition_digest
 
 
 def grade_accuracy(
     result_dir: str,
-    baseline_accuracy: Any,
+    reference: AccuracyReference,
     framework: str | None = None,
     benchmark_mode: str = "",
 ) -> bool | None:
-    """Grade a bench's accuracy against the baseline.
+    """Grade a bench's accuracy against the baseline ``reference``.
 
-    With a recorded baseline the measured drop is enforced; without one
-    (or no eval result) the check is skipped (``None``) and warned loudly.
+    With a recorded baseline the measured drop is enforced; without one, or without a score taken under the
+    baseline's eval definition, there is no verdict (``None``), warned loudly. A score under another definition is
+    not "no score": ``AccuracyReference.incomparable`` names it, and the integrate gate blocks on it.
     For scriptable frameworks (xDiT) ``parse_eval_results`` fails closed on
     a missing quality gate instead of falling back to GSM8K.
     """
-    # Accept numeric strings in addition to int/float; non-numeric / missing
-    # values fall back to 0.0 (skip).
-    try:
-        baseline_value = float(baseline_accuracy)
-    except (TypeError, ValueError):
-        baseline_value = 0.0
+    baseline_value = reference.score
     eval_results = parse_eval_results(result_dir, framework=framework, benchmark_mode=benchmark_mode)
-    new_accuracy = eval_results.get("accuracy")
+    new_accuracy = reference.comparable(eval_results)
     if new_accuracy is not None and baseline_value > 0:
-        return accuracy_passed(baseline_value, float(new_accuracy))
+        return accuracy_passed(baseline_value, new_accuracy)
     if baseline_value <= 0:
         log.warning(
             "integrate_patch: no baseline accuracy; accuracy gate skipped "
@@ -692,15 +705,15 @@ def enablement_correctness(
 
 
 __all__ = [
-    "ACCURACY_THRESHOLD",
+    "ACCURACY_DEFINITION_DIGEST_KEY",
+    "ACCURACY_DIR",
     "BASELINE_ACCURACY_STOP_REASON",
     "BASELINE_EVAL_ACCURACY_FLOOR_KEY",
-    "BASELINE_EVAL_CONTRACT_FINGERPRINT_KEY",
     "BASELINE_EVAL_EVIDENCE_KEY",
     "BASELINE_EVAL_FAILED_KEY",
     "BASELINE_EVAL_FAILURE_KIND_KEY",
     "BASELINE_EVAL_OBSERVED_ACCURACY_KEY",
-    "DEFAULT_ENABLEMENT_ACCURACY_FLOOR",
+    "AccuracyReference",
     "ENABLEMENT_MODES",
     "ENABLEMENT_MODE_ALL",
     "ENABLEMENT_REVALIDATION_REASON",
@@ -710,16 +723,14 @@ __all__ = [
     "EVAL_KIND_ACCURACY_BELOW_FLOOR",
     "EVAL_KIND_ACCURACY_UNAVAILABLE",
     "EVAL_KIND_GENERATION_PATHOLOGY",
+    "EVAL_KIND_QUALITY_GATE_MISSING",
     "EVAL_KIND_CONTEXT_TOO_SMALL",
+    "EVAL_DEFINITION_DIGEST_KEY",
     "EVAL_KIND_RUNTIME_FAILURE",
     "EVAL_PROBE_FILENAME",
-    "_extract_eval_contract_fields",
     "accuracy_keep_block",
-    "accuracy_meets_floor",
-    "accuracy_passed",
     "classify_accuracy_failure",
     "enablement_correctness",
-    "eval_contract_fingerprint",
     "eval_enablement_allowed",
     "eval_probe_summary",
     "framework_run_eval_envs",
@@ -730,6 +741,7 @@ __all__ = [
     "read_eval_probe",
     "request_baseline_accuracy_stop",
     "resolve_enablement_mode",
+    "run_eval_definition_digest",
     "resolve_served_context",
     "require_kernel_accuracy_default",
     "served_context_hosts_eval",

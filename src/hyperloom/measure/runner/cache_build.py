@@ -1,0 +1,1165 @@
+# SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
+# SPDX-License-Identifier: MIT
+
+"""Builds the runner cache of one commit (layout and meaning: :mod:`hyperloom.measure.runner.cache_layout`).
+
+It runs on a machine with egress, in the application that starts a campaign, before the first measurement request::
+
+    python -m hyperloom.measure.runner.cache_build --sha <commit> --repo <checkout> [--out <cache>] \
+        [--wheel-target cp314-manylinux_2_28_x86_64]
+
+``--out`` defaults to ``$HYPERLOOM_RUNNER_CACHE``; ``--wheel-target`` takes the tag ``$HYPERLOOM_RUNNER_WHEEL_TARGET``
+does (:func:`runner_wheel_target`) and stands for the separate options below. A build that fails fails the campaign: nothing falls back to
+installing over the network inside a sandbox. The wheels are downloaded for the interpreter and platform of the
+*framework image*, which is not the builder's own unless it is told: ``--python-version 3.10 --implementation cp
+--abi cp310 --abi abi3 --abi none`` and one ``--platform`` for every platform tag the image accepts
+(``manylinux_2_28_x86_64``, ``manylinux_2_17_x86_64``, ``manylinux2014_x86_64`` and so on down to ``manylinux1_x86_64``)
+for a CPython 3.10 image on glibc 2.28, and ``--index-url`` (or ``--find-links`` with ``--no-index``) for where they come
+from. pip does not widen a ``--platform`` to the older tags it covers, so naming only the newest one turns every pin
+published as ``manylinux2014`` into a source build. The lock's hashes are those of the files the index serves. A pin that the index
+serves only as a source distribution is built here into a wheel (the sdist's hash must be one the lock lists; the entry
+keeps the sdist in ``sdists/`` and the manifest records it); that wheel must be pure Python, because a platform wheel
+built on the builder is not a wheel for the image, and the build is refused otherwise. Reading or building a source
+distribution runs its code on the builder, so that happens only in a throwaway virtual environment, without build isolation, whose only build tools are the
+``setuptools`` (and ``wheel``) that the lock pins, installed from wheels downloaded by their lock hashes: what a source
+distribution's own build requirements name is never fetched. The lock must therefore pin ``setuptools``
+(``pip-compile --allow-unsafe`` does). The builder's pip must be 22.3 or newer (``pip --python``).
+
+- A commit is built once. The entry is made in a new temporary directory of the builder's own (``$TMPDIR``), its
+  manifest written last, then copied into a directory of its own beside the final one, its manifest copied last, and
+  that directory is renamed into place in one step, so ``<cache>/<sha>`` is either absent or complete.
+- Builders of one commit exclude each other with an exclusive ``flock`` on ``<cache>/.<sha>.flock``; the one that waits
+  finds the finished entry when it gets the lock and uses it, with no download. The lock is also what keeps two hosts that
+  share the cache directory over NFS apart (the cache's file system must support ``flock``, as NFSv4 does).
+- The builders may be different accounts of one group (the cache directory setgid in that group). What a builder makes
+  for them follows its umask with every group bit let through (``002`` for ``022``, ``007`` for ``077``): the lock file
+  (``0664``) and the cache directory. Nothing else of the cache is the group's to write, because the cache is shared
+  with whatever else that group can run: an entry is built where only its builder can reach, since the build runs code
+  from its tree (the build environment), and is copied into the cache without following or writing over anything
+  another account may have put there, writable by its builder alone (:func:`_publish`). What a builder killed while
+  copying left behind (``.<sha>.tmp-*``) is removed by the next builder of its account, and only when it is a directory
+  that builder made for itself: its own and ``0700`` (:func:`_sweep_leftovers`). Anything else of that name stays, a
+  builder of another account's included, and the entry is built beside it. Every directory and file of an entry in
+  place is readable by the group, whatever the builder's umask, so the other accounts' builders can check and use it; a
+  directory in place without the group's read is no finished entry (a builder killed just after its rename, a leftover
+  another account renamed there) and is renamed to a leftover's name and built again (:func:`_set_aside`).
+- An entry that is already there is used when it is complete and still what a build would write; one that differs is
+  never modified: the build refuses and names the difference (:class:`CacheConflict`). Its manifest file is read once,
+  the entry is checked against those bytes and the pin returned is their SHA-256, as a build returns the SHA-256 of the
+  text it wrote: never a fresh read of the cache. What the manifest records is checked against the commit, not only
+  against the entry: the same commit tree and wheel target, this builder's script, the commit's archive and source
+  made again from the clone in a directory of the builder's own (as a build makes them), whose size and hash must be
+  what the manifest records, and every wheel built from a source distribution built again (below). No builder leaves an
+  entry without its manifest in place, since one is renamed into place whole, so such an entry is a difference as well
+  and is left as it is: an account of the group may have renamed a directory of the builder's there.
+- ``<entry>/source.tar`` is the commit's ``git archive`` made with every setting that changes its bytes fixed
+  (``git -c tar.umask=0022 -c core.autocrlf=false -c core.eol=lf -c core.attributesFile=/dev/null archive --format=tar
+  <sha>``), in a throwaway repository that borrows only the objects of the builder's clone and with git's system and
+  global configuration and attributes off (:func:`_archive_source`). Only the commit and its own ``.gitattributes``
+  decide what is in it; nothing the builder's clone, configuration or environment says does, so builders whose git
+  writes ``tar`` the same way make the same bytes, and anyone with the commit can make it again and compare it with the
+  size and SHA-256 the manifest records. ``<entry>/source`` is that archive unpacked with the builder's umask
+  (``--no-same-permissions``); the builder reads the lock from it, the sandbox runs from its own copy of the archive.
+- ``<entry>/bootstrap.sh`` is this builder's start-up script (:data:`~hyperloom.measure.runner.bootstrap.BOOTSTRAP_SCRIPT`,
+  mode 0755), not the commit's, and the manifest records its SHA-256. The script embeds this builder's own
+  ``bootstrap.py`` and ``cache_layout.py``, so a builder of another Hyperloom version writes another one. An entry whose
+  manifest records another script, or none, is a difference like any other: the build refuses, names both hashes and
+  leaves the entry byte for byte as it was, because a campaign that started on it has pinned its manifest
+  (``HYPERLOOM_RUNNER_CACHE_MANIFEST_SHA256``). Builders of different versions that build one commit use separate
+  ``HYPERLOOM_RUNNER_CACHE`` directories.
+
+What the pin vouches for. A sandbox accepts only the manifest whose SHA-256 its template pins, unpacks only the
+``source.tar`` bytes of the size and hash that manifest records, reads the lock of the manifest's Python
+(:func:`~hyperloom.measure.runner.cache_layout.lock_file`) from that copy, and installs only the wheels the manifest
+lists, one for each pin of that lock (a manifest that lists a pin twice is refused, by the builder and the sandbox
+alike), each hashed against the manifest as it is copied
+(:func:`~hyperloom.measure.runner.cache_layout.stage_entry`). The builder pins a manifest only when that archive is the
+commit's own, so the runner's code and its locks are the commit's, whoever can write the cache, and so is every wheel
+downloaded for a pin, whose hash is one the commit's lock lists. A wheel built here from a source distribution is
+matched to its pin by the source distribution's hash, the one the lock lists, and a lock cannot tell that hash from a
+wheel's. So the builder pins such a wheel only when it has built it itself: on a build, from the file it downloaded; on
+reuse, from the entry's copy in ``sdists/``, which must have the hash the manifest records and be a file the commit's
+lock lists for that pin, built again offline in a directory of the builder's own with the lock's build tools (installed
+from the entry's own wheels of them, by the lock's hashes) into a wheel with the cached wheel's name, files and
+contents (:func:`_built_wheel_differences`). The files are compared as pip installs them, on any Python: each member's
+raw name (the one its headers hold), its content and whether it is executable. A cached wheel from which the zipfile
+of another Python could read other names or other members is refused before its source distribution is built: one
+with a member that has an Info-ZIP Unicode Path extra field (Python 3.12 and newer name the member by it, older ones by
+the raw name) or a zip64 field, or whose name zipfile cuts short, and one that does not end with its central directory
+and one end record, with no comment and no zip64 records (:func:`_wheel_files`). An entry that claims a source
+distribution it does not hold is refused. A wheel the lock lists, kept there as the source distribution, does not build
+under a source distribution's name (``.tar.gz``, ``.zip``): pip finds no project in it. Under a ``.whl`` name pip
+copies it as the wheel it builds, so for a pure-Python wheel the comparison decides: a cached wheel with that wheel's
+name, files and contents is reused and any other refused; it installs the same files as that wheel, a file the lock
+lists for its pin. So the pin vouches for such a wheel as what the commit's build tools make of a file the commit's
+lock lists, whoever can write the cache. A source distribution whose build does not write the same files every time
+(one that stamps a time or a path into a file) makes every reuse of its entry a :class:`CacheConflict`; build that
+commit into another cache directory.
+
+The cache must stay readable by the account the sandbox runs as: run the builder with a ``umask`` that leaves new files
+readable by others (``022``).
+
+Before the entry is renamed into place, the builder asks pip whether the requirements the sandbox installs
+(``runner-wheels.lock``) resolve for the wheel target from the entry's wheels alone (``pip install --dry-run --no-index
+--only-binary=:all:``, the sandbox's own flags), so a cache the runner could not install is refused here instead of
+failing in the sandbox. A hosted session names the runner's interpreter in ``$HYPERLOOM_RUNNER_WHEEL_TARGET``
+(:func:`runner_wheel_target`); it never builds for its own.
+
+After the entry, the command publishes the commit's inference_suite staging into ``<cache>/inference-suite/<staging
+key>/`` (:mod:`hyperloom.measure.runner.suite_publish`); a sandbox runs that staging offline and never builds one.
+
+The pins come from the lock of the target's Python (:func:`~hyperloom.measure.runner.cache_layout.lock_file`):
+``requirements/runner-cp314.lock`` for ``--python-version 3.14``, ``requirements/runner.lock`` for a version without a
+lock of its own or when no ``--python-version`` is given. A build for a Python that has its own lock must therefore name
+it (``--python-version``, or the ``cpXY`` of ``$HYPERLOOM_RUNNER_WHEEL_TARGET``).
+"""
+
+from __future__ import annotations
+
+import argparse
+import re
+import fnmatch
+import hashlib
+import importlib.metadata
+import io
+import json
+import os
+import secrets
+import shutil
+import stat
+import struct
+import subprocess
+import sys
+import tempfile
+import zipfile
+import zlib
+from collections.abc import Callable, Mapping, Sequence
+from contextlib import suppress
+from dataclasses import dataclass
+from pathlib import Path
+from typing import Any
+
+from hyperloom_common.shared_storage import make_shared_dirs, ownership
+from hyperloom.measure.runner.bootstrap import BOOTSTRAP_SCRIPT
+from hyperloom.measure.runner.suite_publish import SuitePublishError, publish_inference_suite
+from hyperloom.measure.runner.cache_build_lock import (
+    DEFAULT_LOCK_TIMEOUT_SEC,
+    CacheBuildError,
+    build_lock,
+    exclusive,
+    shared_umask,
+)
+from hyperloom.measure.runner.cache_layout import (
+    BOOTSTRAP_NAME,
+    CACHE_ENV,
+    MANIFEST_NAME,
+    SDISTS_DIR,
+    SOURCE_ARCHIVE,
+    SOURCE_DIR,
+    WHEELS_DIR,
+    CacheError,
+    FileDigest,
+    LockPin,
+    Manifest,
+    WheelEntry,
+    check_entry,
+    file_sha256,
+    is_full_commit,
+    lock_file,
+    manifest_from_json,
+    manifest_to_json,
+    parse_lock,
+    requirement_line,
+    requirements_text,
+    tree_digest,
+)
+
+__all__ = [
+    "BuildOptions",
+    "build_lock",
+    "RUNNER_TARGET_ENV",
+    "CacheBuildError",
+    "CacheConflict",
+    "CacheEntry",
+    "WheelSource",
+    "WheelTarget",
+    "RunnableEntry",
+    "ensure_runner_cache",
+    "ensure_runner_cache_with_suite",
+    "exclusive",
+    "main",
+    "runner_wheel_target",
+]
+
+_ALL_DIR_BITS = 0o2777
+#: How the cache directory is opened to put an entry in it (:func:`_publish`).
+_CACHE_FLAGS = os.O_RDONLY | os.O_DIRECTORY | os.O_CLOEXEC
+#: How a directory the builder made there is opened to fill it: never through a link.
+_DIRECTORY_FLAGS = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC
+#: How each file of an entry is made there: new, so never over a name that is there already, and never through a link.
+_NEW_FILE_FLAGS = os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW | os.O_CLOEXEC
+#: What the builder makes in the cache is its own alone until it is filled.
+_OWN_DIR_MODE, _OWN_FILE_MODE = 0o700, 0o600
+#: The permission bits an entry in place keeps of those it was built with: all but the group's and others' write.
+_ENTRY_BITS = 0o755
+#: What every directory of an entry in place has, whatever the umask it was built under, and every file the group's
+#: read (and execute where its owner has it): the other builders of the cache, other accounts of the group, read and
+#: check all of it (:func:`_reuse`). So the entry's own directory is never ``0700``, the mode by which the sweep
+#: (:func:`_sweep_leftovers`) tells a builder's unfinished copy, and a finished entry that another account of the group
+#: renames to a ``.<sha>.tmp-*`` name is never taken for one; one in place without these bits is set aside
+#: (:func:`_set_aside`).
+_ENTRY_GROUP_BITS = stat.S_IRGRP | stat.S_IXGRP
+_COPY_CHUNK = 1 << 20
+_TAIL = 2000
+_UTF8 = "utf-8"
+#: ``bootstrap.sh`` is run with ``sh`` and may be run directly: readable and executable by the sandbox's account.
+_SCRIPT_MODE = 0o755
+_BOOTSTRAP_SHA256 = hashlib.sha256(BOOTSTRAP_SCRIPT.encode(_UTF8)).hexdigest()
+#: Every setting of ``git archive`` that changes its bytes, fixed: entry modes 0644 and 0755, no line-ending conversion
+#: and no attributes file of the builder's (:func:`_archive_source` says what else it takes away).
+_ARCHIVE_CONFIG = ("tar.umask=0022", "core.autocrlf=false", "core.eol=lf", f"core.attributesFile={os.devnull}")
+_ARCHIVE_SETTINGS = tuple(part for setting in _ARCHIVE_CONFIG for part in ("-c", setting))
+#: What ``git`` reads besides the repository, switched off for the archive: system and global configuration, and the
+#: system's attributes (``/etc/gitattributes``).
+_GIT_NO_SYSTEM_OR_GLOBAL = {"GIT_CONFIG_NOSYSTEM": "1", "GIT_CONFIG_GLOBAL": os.devnull, "GIT_ATTR_NOSYSTEM": "1"}
+_GIT = "git"
+_OBJECTS = "objects"
+#: The file that names the object directories a repository borrows, relative to the repository.
+_ALTERNATES = (_OBJECTS, "info", "alternates")
+_BUILD_TOOLS = ("setuptools", "wheel")
+_NO_INDEX, _FIND_LINKS, _NO_DEPS = "--no-index", "--find-links", "--no-deps"
+_ISOLATED, _ONLY_BINARY, _REQUIRE_HASHES = "--isolated", "--only-binary=:all:", "--require-hashes"
+#: pip never asks a question and never checks for a newer pip.
+_PIP_QUIET = ("--disable-pip-version-check", "--no-input")
+#: The runner's interpreter and newest platform tag as one wheel tag, e.g. ``cp310-manylinux_2_28_x86_64``.
+RUNNER_TARGET_ENV = "HYPERLOOM_RUNNER_WHEEL_TARGET"
+_TARGET_TAG = re.compile(r"cp(?P<major>3)(?P<minor>[0-9]+)-manylinux_2_(?P<glibc>[0-9]+)_(?P<arch>x86_64|aarch64)")
+#: The legacy manylinux names of a glibc 2 minor version; pip accepts both spellings and downloads only what it is told.
+_LEGACY_MANYLINUX = {17: "manylinux2014", 12: "manylinux2010", 5: "manylinux1"}
+_OLDEST_GLIBC_MINOR = 5
+#: The first pip whose ``install --python-version`` checks ``Requires-Python`` against that version; older ones check it
+#: against the interpreter pip runs on, the builder's, which says nothing about the runner's.
+_PIP_CHECKS_TARGET_PYTHON = (24, 2)
+#: What :mod:`zipfile` raises for an archive it cannot read: damaged or cut short, of a compression it lacks, encrypted,
+#: or with a member whose name is flagged UTF-8 and is not.
+_UNREADABLE_ZIP = (zipfile.BadZipFile, zlib.error, EOFError, NotImplementedError, RuntimeError, UnicodeDecodeError)
+#: The builder's copy of a cached wheel that a reuse compares with the one it builds again.
+_CACHED_WHEEL = "cached.whl"
+#: Extra fields of a zip member that :mod:`zipfile` reads differently from one Python to another: Info-ZIP Unicode Path,
+#: whose name it takes for the member's from Python 3.12 on (when the field's checksum matches the raw name) and ignores
+#: before, and zip64, which carries sizes and offsets of its own. No wheel a Python build backend writes has either.
+_UNICODE_PATH_FIELD, _ZIP64_FIELD = 0x7075, 0x0001
+_EXTRA_FIELD = struct.Struct("<HH")
+#: The end of central directory record of a zip with no comment, and the signature of the zip64 locator that, right
+#: before it, makes :mod:`zipfile` look for zip64 records, which patch releases of one Python look for differently.
+_END_RECORD = struct.Struct("<4s4H2LH")
+_END_SIGNATURE, _ZIP64_LOCATOR_SIGNATURE, _ZIP64_LOCATOR_SIZE = b"PK\x05\x06", b"PK\x06\x07", 20
+#: Below the scratch directory of a build environment: the wheels of the build tools, and the virtual environment.
+_TOOLS_DIR, _ENV_DIR = "tools", "env"
+
+
+class CacheConflict(CacheBuildError):
+    """An entry of the commit is there and is not what a build would write; it is left as it was."""
+
+
+@dataclass(frozen=True)
+class WheelTarget:
+    """The interpreter and platform the wheels are for (``pip download``'s own; none given is the builder's)."""
+
+    python_version: str | None = None
+    implementation: str | None = None
+    abis: tuple[str, ...] = ()
+    platforms: tuple[str, ...] = ()
+
+    def manifest_form(self) -> dict[str, Any]:
+        """What the manifest records of it."""
+        return {
+            "python_version": self.python_version,
+            "implementation": self.implementation,
+            "abis": list(self.abis),
+            "platforms": list(self.platforms),
+        }
+
+    def pip_args(self) -> list[str]:
+        args = ["--python-version", self.python_version] if self.python_version else []
+        args += ["--implementation", self.implementation] if self.implementation else []
+        for flag, values in (("--abi", self.abis), ("--platform", self.platforms)):
+            args += [part for value in values for part in (flag, value)]
+        return args
+
+
+def runner_wheel_target(environ: Mapping[str, str]) -> WheelTarget:
+    """The wheel target ``$HYPERLOOM_RUNNER_WHEEL_TARGET`` names: CPython ``X.Y`` (ABIs ``cpXY``, ``abi3``, ``none``) on
+    glibc ``2.N`` of one architecture, with every platform tag that glibc accepts, newest first.
+
+    Raises:
+        CacheBuildError: When the variable is unset or not of the form ``cp310-manylinux_2_28_x86_64``: the builder's
+            own interpreter is not the runner's, so nothing defaults to it.
+    """
+    value = environ.get(RUNNER_TARGET_ENV, "").strip()
+    match = _TARGET_TAG.fullmatch(value)
+    if match is None:
+        raise CacheBuildError(
+            f"${RUNNER_TARGET_ENV} must name the runner's interpreter as cpXY-manylinux_2_N_ARCH, "
+            f"e.g. cp310-manylinux_2_28_x86_64 (got {value[:80]!r})"
+        )
+    major, minor, arch = match["major"], match["minor"], match["arch"]
+    platforms: list[str] = []
+    for glibc in range(int(match["glibc"]), _OLDEST_GLIBC_MINOR - 1, -1):
+        platforms.append(f"manylinux_2_{glibc}_{arch}")
+        if glibc in _LEGACY_MANYLINUX:
+            platforms.append(f"{_LEGACY_MANYLINUX[glibc]}_{arch}")
+    platforms += [f"linux_{arch}", "any"]
+    return WheelTarget(f"{major}.{minor}", "cp", (f"cp{major}{minor}", "abi3", "none"), tuple(platforms))
+
+
+@dataclass(frozen=True)
+class WheelSource:
+    """Where ``pip download`` looks: an index, local directories (with ``no_index``), or what pip is configured with."""
+
+    index_url: str | None = None
+    find_links: tuple[str, ...] = ()
+    no_index: bool = False
+
+    def pip_args(self) -> list[str]:
+        args = [_NO_INDEX] if self.no_index else []
+        args += ["--index-url", self.index_url] if self.index_url else []
+        return args + [part for link in self.find_links for part in (_FIND_LINKS, link)]
+
+
+@dataclass(frozen=True)
+class BuildOptions:
+    """How to build: what the wheels are for, where they come from and how long to wait for another builder."""
+
+    target: WheelTarget = WheelTarget()
+    source: WheelSource = WheelSource()
+    lock_timeout_sec: float = DEFAULT_LOCK_TIMEOUT_SEC
+
+
+@dataclass(frozen=True)
+class CacheEntry:
+    """A finished entry: its directory, the SHA-256 of its manifest file (what a host may pin) and whether this call
+    built it (``reused`` is true when it was there already)."""
+
+    path: Path
+    manifest_sha256: str
+    reused: bool
+
+
+@dataclass(frozen=True)
+class RunnableEntry:
+    """A finished entry and the inference_suite staging its runners run, published below the same cache."""
+
+    entry: CacheEntry
+    inference_suite: Path
+
+
+def _run(command: Sequence[str], what: str, env: Mapping[str, str] | None = None) -> str:
+    done = subprocess.run(command, capture_output=True, text=True, check=False, env=env)
+    if done.returncode != 0:
+        raise CacheBuildError(f"{what} failed (exit {done.returncode}): {(done.stdout + done.stderr).strip()[-_TAIL:]}")
+    return done.stdout.strip()
+
+
+def _git(repo: Path, *args: str) -> list[str]:
+    return [_GIT, "-C", str(repo), *args]
+
+
+def _commit_tree(repo: Path, sha: str) -> str:
+    """The tree object of commit ``sha`` in ``repo``, which also proves the repository has that very commit."""
+    if _run(_git(repo, "cat-file", "-t", sha), f"looking for {sha} in {repo}") != "commit":
+        raise CacheBuildError(f"{sha} is not a commit of {repo}")
+    return _run(_git(repo, "rev-parse", f"{sha}^{{tree}}"), f"reading the tree of {sha}")
+
+
+def _archive_source(repo: Path, sha: str, archive: Path) -> None:
+    """Write the ``git archive`` of commit ``sha`` of ``repo`` to ``archive``, bytes that only the commit decides.
+
+    git applies the attributes of the ``.gitattributes`` files in the commit, which are the same for everyone, but also
+    the builder's own: ``$GIT_DIR/info/attributes``, ``core.attributesFile`` (``~/.config/git/attributes`` unless set)
+    and the system's ``gitattributes``, any of which can leave files out (``export-ignore``) or rewrite them (``eol``,
+    ``filter``). So the archive is made in a new, empty repository beside ``archive`` that borrows only ``repo``'s
+    objects (``objects/info/alternates``): ``repo``'s configuration, ``info/attributes``, replace refs and grafts do not
+    apply. git runs with no ``GIT_`` variable of the builder's environment, an empty ``HOME`` and no system or global
+    configuration or attributes (:data:`_GIT_NO_SYSTEM_OR_GLOBAL`), and :data:`_ARCHIVE_SETTINGS` fixes the rest.
+    """
+    objects = Path(repo, _run(_git(repo, "rev-parse", "--git-path", _OBJECTS), f"finding the objects of {repo}"))
+    with tempfile.TemporaryDirectory(dir=archive.parent, prefix=".archive-") as scratch:
+        home, borrower = Path(scratch, "home"), Path(scratch, "repo")
+        home.mkdir()
+        env = {name: value for name, value in os.environ.items() if not name.startswith("GIT_")}
+        env.update(HOME=str(home), XDG_CONFIG_HOME=str(home), **_GIT_NO_SYSTEM_OR_GLOBAL)
+        object_format = ["--object-format=sha256"] if len(sha) == 64 else []
+        _run([_GIT, "init", "-q", "--bare", "--template=", *object_format, str(borrower)], "making a repository", env)
+        alternates = borrower.joinpath(*_ALTERNATES)
+        alternates.parent.mkdir(parents=True, exist_ok=True)
+        alternates.write_text(f"{objects.resolve()}\n", encoding=_UTF8)
+        export = [_GIT, f"--git-dir={borrower}", *_ARCHIVE_SETTINGS, "archive", "--format=tar"]
+        _run([*export, "-o", str(archive.absolute()), sha], f"exporting {sha} from {repo}", env)
+
+
+def _export_source(repo: Path, sha: str, entry: Path) -> FileDigest:
+    """Write the commit's archive as ``entry/source.tar`` (:func:`_archive_source`) and unpack it into ``entry/source``
+    with the builder's umask; the archive's size and SHA-256."""
+    archive, source = entry / SOURCE_ARCHIVE, entry / SOURCE_DIR
+    _archive_source(repo, sha, archive)
+    source.mkdir()
+    unpack = ["tar", "-x", "--no-same-owner", "--no-same-permissions", "-f", str(archive), "-C", str(source)]
+    _run(unpack, f"unpacking {sha}")
+    return FileDigest(archive.stat().st_size, file_sha256(archive))
+
+
+def _pip(*args: str, python: Path | None = None) -> list[str]:
+    """The builder's own pip, acting on the environment of ``python`` when given (``pip --python``, pip 22.3 or newer)."""
+    return [sys.executable, "-m", "pip", *(["--python", str(python)] if python else []), *args]
+
+
+def _pip_download(requirements: Path, dest: Path, extra: Sequence[str], what: str, python: Path | None = None) -> None:
+    dest.mkdir()
+    command = _pip("download", _NO_DEPS, _REQUIRE_HASHES, *_PIP_QUIET, python=python)
+    _run([*command, "--dest", str(dest), "-r", str(requirements), *extra], what)
+
+
+def _tools_lock(pins: list[LockPin], scratch: Path) -> Path:
+    """``scratch/build-tools.lock``: the build tools the lock pins (``setuptools``, and ``wheel`` when it pins one), with
+    the lock's hashes.
+
+    Raises:
+        CacheBuildError: When the lock pins no ``setuptools``.
+    """
+    tools = [pin for pin in pins if pin.name in _BUILD_TOOLS]
+    if all(pin.name != "setuptools" for pin in tools):
+        raise CacheBuildError("the lock pins no setuptools, so a source distribution in it cannot be built")
+    pinned = scratch / "build-tools.lock"
+    pinned.write_text("".join(requirement_line(pin.name, pin.version, sorted(pin.hashes)) for pin in tools), _UTF8)
+    return pinned
+
+
+def _tools_environment(pinned: Path, scratch: Path) -> Path:
+    """The interpreter of a new virtual environment in ``scratch`` that holds the build tools ``pinned`` names and
+    nothing else, installed binary-only (no source code runs) from the wheels in ``scratch/tools``, each checked by pip
+    against the hashes the lock lists."""
+    env = scratch / _ENV_DIR
+    _run([sys.executable, "-m", "venv", "--without-pip", str(env)], "creating the build environment")
+    python = env / "bin" / "python"
+    install = [_ISOLATED, "install", _NO_INDEX, _FIND_LINKS, str(scratch / _TOOLS_DIR), _ONLY_BINARY]
+    install += [_REQUIRE_HASHES, _NO_DEPS, *_PIP_QUIET, "-r", str(pinned)]
+    _run(_pip(*install, python=python), "installing the build tools the lock pins")
+    return python
+
+
+def _build_environment(pins: list[LockPin], options: BuildOptions, scratch: Path) -> Path:
+    """The build environment of a build (:func:`_tools_environment`), whose tools' wheels are downloaded by the lock's
+    hashes."""
+    pinned = _tools_lock(pins, scratch)
+    downloads = [*options.source.pip_args(), _ONLY_BINARY]
+    _pip_download(pinned, scratch / _TOOLS_DIR, downloads, "pip download of the build tools the lock pins")
+    return _tools_environment(pinned, scratch)
+
+
+def _pure_wheel(python: Path, sdist: Path, out: Path) -> Path:
+    """Build the wheel of ``sdist`` into the new directory ``out`` with ``python``'s tools, offline and without build
+    isolation, and return it.
+
+    Raises:
+        CacheBuildError: When the build fails, or makes anything but one pure-Python wheel: a platform wheel built on
+            the builder is not one for the image.
+    """
+    out.mkdir()
+    build = [_ISOLATED, "wheel", "--no-build-isolation", _NO_INDEX, _NO_DEPS, "--no-cache-dir", *_PIP_QUIET]
+    _run(_pip(*build, "-w", str(out), str(sdist), python=python), f"building a wheel from {sdist.name}")
+    made = sorted(path.name for path in out.iterdir())
+    if len(made) != 1 or not made[0].endswith("-none-any.whl"):
+        raise CacheBuildError(
+            f"{sdist.name} did not build exactly one pure-Python wheel (it built {made}): "
+            "a wheel built here is not one for the image"
+        )
+    return out / made[0]
+
+
+def _build_sdists(python: Path, wheels: Path, pins: list[LockPin]) -> dict[str, str]:
+    """Build each source distribution in ``wheels`` into the wheel that takes its place there, and move the source
+    distribution to the entry's ``sdists``; the built wheels' file names, each mapped to the file name of its source
+    distribution, whose hash must be one the lock lists."""
+    allowed = {digest for pin in pins for digest in pin.hashes}
+    sdists = wheels.parent / SDISTS_DIR
+    built: dict[str, str] = {}
+    for sdist in (path for path in sorted(wheels.iterdir()) if not path.name.endswith(".whl")):
+        if file_sha256(sdist) not in allowed:
+            raise CacheBuildError(f"{sdist.name} is not a file the lock allows")
+        with tempfile.TemporaryDirectory(dir=wheels.parent, prefix=".wheel-build-") as scratch:
+            wheel = _pure_wheel(python, sdist, Path(scratch) / "out")
+            shutil.move(wheel, wheels / wheel.name)
+        sdists.mkdir(exist_ok=True)
+        shutil.move(sdist, sdists / sdist.name)
+        built[wheel.name] = sdist.name
+    return built
+
+
+def _download_wheels(lock: Path, wheels: Path, pins: list[LockPin], options: BuildOptions) -> dict[str, str]:
+    """Download what the lock pins into ``wheels`` and build the source distributions among it, in an environment of
+    the lock's own build tools; see :func:`_wheel_entries` for the result."""
+    with tempfile.TemporaryDirectory(dir=wheels.parent, prefix=".build-env-") as scratch:
+        python = _build_environment(pins, options, Path(scratch))
+        extra = ["--no-build-isolation", *options.target.pip_args(), *options.source.pip_args()]
+        _pip_download(lock, wheels, extra, "pip download of the wheels the lock pins", python)
+        return _build_sdists(python, wheels, pins)
+
+
+def _wheel_entries(wheels: Path, pins: list[LockPin], built: Mapping[str, str]) -> tuple[WheelEntry, ...]:
+    """One entry per pin, each file matched to its pin by the hash the lock lists for it (for a built wheel, the hash of
+    the source distribution it was built from, whose file in the entry's ``sdists`` ``built`` names)."""
+    owner = {digest: pin for pin in pins for digest in pin.hashes}
+    entries: dict[tuple[str, str], WheelEntry] = {}
+    for path in sorted(wheels.iterdir()):
+        sdist = built.get(path.name, "")
+        digest, sdist_digest = file_sha256(path), file_sha256(wheels.parent / SDISTS_DIR / sdist) if sdist else ""
+        pin = owner.get(sdist_digest or digest)
+        if pin is None:
+            raise CacheBuildError(f"{path.name} is not a file the lock allows")
+        if (pin.name, pin.version) in entries:
+            raise CacheBuildError(f"two wheels for {pin.name}=={pin.version}")
+        entries[(pin.name, pin.version)] = WheelEntry(
+            pin.name, pin.version, path.name, path.stat().st_size, digest, sdist_digest, sdist
+        )
+    missing = [f"{pin.name}=={pin.version}" for pin in pins if (pin.name, pin.version) not in entries]
+    if missing:
+        raise CacheBuildError(f"no wheel was downloaded for {', '.join(missing)}")
+    return tuple(entries.values())
+
+
+def _pip_version() -> tuple[int, ...]:
+    """The builder's pip as numbers (``(24, 2)``); ``()`` when it cannot be read."""
+    try:
+        return tuple(int(part) for part in re.findall(r"[0-9]+", importlib.metadata.version("pip"))[:2])
+    except importlib.metadata.PackageNotFoundError:
+        return ()
+
+
+def _requires_python_flags(target: WheelTarget) -> list[str]:
+    """``--ignore-requires-python`` when the builder's pip would check ``Requires-Python`` against its own interpreter
+    instead of the target's (pip before 24.2): a numpy that needs Python 3.12 is no reason to refuse a 3.14 entry built
+    on 3.10. The wheel tags are checked either way, and the sandbox's pip checks ``Requires-Python`` for itself."""
+    if target.python_version and _pip_version() < _PIP_CHECKS_TARGET_PYTHON:
+        return ["--ignore-requires-python"]
+    return []
+
+
+def _check_installable(entry: Path, manifest: Manifest, target: WheelTarget) -> None:
+    """Refuse an entry whose wheels alone do not satisfy what the sandbox installs, for the target's interpreter."""
+    with tempfile.TemporaryDirectory(dir=entry, prefix=".resolve-") as scratch:
+        requirements = Path(scratch) / "runner-wheels.lock"
+        requirements.write_text(requirements_text(manifest), encoding=_UTF8)
+        install = [_ISOLATED, "install", "--dry-run", "--target", str(Path(scratch) / "site"), _NO_INDEX]
+        install += [_FIND_LINKS, str(entry / WHEELS_DIR), _ONLY_BINARY, _REQUIRE_HASHES, _NO_DEPS]
+        install += [*_PIP_QUIET, *target.pip_args(), *_requires_python_flags(target), "-r", str(requirements)]
+        interpreter = f"Python {target.python_version}" if target.python_version else "the builder's interpreter"
+        _run(_pip(*install), f"checking that the runner ({interpreter}) can install the entry's wheels")
+
+
+def _write_bootstrap(entry: Path) -> str:
+    """Write this builder's start-up script as ``entry/bootstrap.sh`` and return its SHA-256."""
+    script = entry / BOOTSTRAP_NAME
+    script.write_text(BOOTSTRAP_SCRIPT, encoding=_UTF8)
+    script.chmod(_SCRIPT_MODE)
+    return file_sha256(script)
+
+
+def _builder_problems(raw: bytes, manifest: Manifest) -> list[str]:
+    """How a finished entry's manifest, whose file holds ``raw``, differs from the one this builder writes for it."""
+    if manifest.bootstrap_sha256 != _BOOTSTRAP_SHA256:
+        recorded = f"SHA-256 {manifest.bootstrap_sha256}" if manifest.bootstrap_sha256 else "none"
+        return [
+            f"its manifest records {BOOTSTRAP_NAME} {recorded}, this builder writes {BOOTSTRAP_NAME} SHA-256 "
+            f"{_BOOTSTRAP_SHA256}: a builder of another Hyperloom version made it, and a campaign may have pinned its "
+            f"manifest; build into a separate {CACHE_ENV} directory"
+        ]
+    if raw != manifest_to_json(manifest).encode(_UTF8):
+        return ["its manifest is not the text this builder writes for what it records"]
+    return []
+
+
+def _shared_dirs(path: Path) -> Path:
+    return make_shared_dirs(path, mode=_ALL_DIR_BITS & ~shared_umask())
+
+
+def _build(repo: Path, sha: str, tree: str, final: Path, options: BuildOptions) -> CacheEntry:
+    """Make the entry in a directory of the builder's own and put it in place as ``final`` (:func:`_publish`); the
+    manifest is the last file written, and the pin returned is the SHA-256 of the text written, which the check of the
+    new entry is pinned to.
+
+    The directory is a new temporary one (``$TMPDIR``), which only this builder can enter, not one in the cache: the
+    build runs code from it (the build environment's interpreter and what it imports), and another account that can
+    write the cache must have no way to change what that is."""
+    with tempfile.TemporaryDirectory(prefix="hyperloom-runner-build-") as scratch:
+        made = Path(scratch, sha)
+        made.mkdir()
+        archive = _export_source(repo, sha, made)
+        source = made / SOURCE_DIR
+        name = lock_file(source, options.target.python_version)
+        lock = source / name
+        if not lock.is_file():
+            raise CacheBuildError(f"commit {sha} has no {name}")
+        wheels = made / WHEELS_DIR
+        pins = parse_lock(lock.read_text(encoding=_UTF8), name)
+        entries = _wheel_entries(wheels, pins, _download_wheels(lock, wheels, pins, options))
+        bootstrap = _write_bootstrap(made)
+        target = options.target.manifest_form()
+        manifest = Manifest(sha, tree, tree_digest(source), entries, target, bootstrap, archive)
+        _check_installable(made, manifest, options.target)
+        text = manifest_to_json(manifest).encode(_UTF8)
+        (made / MANIFEST_NAME).write_bytes(text)
+        pin = hashlib.sha256(text).hexdigest()
+        problems = check_entry(made, sha, pin, verify_hash=True)
+        if problems:
+            raise CacheBuildError(f"the entry just built does not verify: {'; '.join(problems[:3])}")
+        _publish(made, final)
+    return CacheEntry(final, pin, reused=False)
+
+
+def _publish(made: Path, final: Path) -> None:
+    """Copy the entry ``made`` into a new directory beside ``final`` and rename that into place in one step.
+
+    The cache directory may be writable by other accounts of its group, which may then rename what is in it and put
+    their own in its place. So nothing is written there through a name the cache resolves again: the new directory is
+    opened once (:func:`_open_new_directory`), and every directory, file and link of the entry is made new below the
+    descriptor of the directory it goes in, never through a link and never over a name that is there already
+    (:data:`_NEW_FILE_FLAGS`). Whatever another account plants, the builder writes the entry and nothing else, into
+    what it opened; what is in place is vouched for by the pin, as ever. The new directory is the builder's alone
+    (``0700``) until it is whole and renamed into place, so a builder killed at any point before the rename leaves a
+    directory the sweep removes (:func:`_sweep_leftovers`); each copy has the mode of what it copies without the group's
+    and others' write (:data:`_ENTRY_BITS`) and with the group's read (:func:`_group_readable`), the entry's own
+    directory given its mode through the descriptor after the rename, and the manifest is copied last. A builder killed
+    between the rename and that ``fchmod`` leaves an entry in place that is still ``0700``, which the next builder of
+    any account sets aside for the sweep (:func:`_set_aside`). A copy that fails
+    removes the directory it opened, through that descriptor, and nothing another account put in its place
+    (:func:`_remove_directory`)."""
+    root = os.open(final.parent, _CACHE_FLAGS)
+    pending = f".{final.name}.tmp-{os.getpid()}-{secrets.token_hex(4)}"
+    try:
+        os.mkdir(pending, _OWN_DIR_MODE, dir_fd=root)
+        directory = _open_new_directory(root, pending)
+        opened = os.fstat(directory)
+        try:
+            _copy_tree(made, directory, last=MANIFEST_NAME, keep_private=True)
+            os.rename(pending, final.name, src_dir_fd=root, dst_dir_fd=root)
+        except BaseException:
+            _remove_directory(root, pending, lambda found: os.path.samestat(found, opened))
+            raise
+        else:
+            os.fchmod(directory, _entry_mode(made))
+        finally:
+            os.close(directory)
+    finally:
+        os.close(root)
+
+
+def _private_problem(info: os.stat_result) -> str:
+    """Why ``info`` is not that of a directory the builder made in the cache for itself: a directory of its effective
+    uid with mode ``0700`` (and the setgid bit it takes from a setgid cache), so no other account can have written in
+    it; empty when it is."""
+    if not stat.S_ISDIR(info.st_mode):
+        return "it is not a directory"
+    if info.st_uid != os.geteuid():
+        return f"it is owned by uid {info.st_uid}, not by this builder's {os.geteuid()}"
+    mode = stat.S_IMODE(info.st_mode) & ~stat.S_ISGID
+    if mode != _OWN_DIR_MODE:
+        return f"its mode is {mode:04o}, not {_OWN_DIR_MODE:04o}"
+    return ""
+
+
+def _is_private(info: os.stat_result) -> bool:
+    return not _private_problem(info)
+
+
+def _open_new_directory(parent: int, name: str) -> int:
+    """The directory ``name`` that the builder has just made in the directory open as ``parent``, opened (never through
+    a link) for :func:`_copy_tree` to fill.
+
+    Raises:
+        CacheBuildError: When what the name opens is not still the builder's own, ``0700`` and empty, as made
+            (:func:`_private_problem`): another account of the group renamed it and put its own, a link or another
+            directory of the builder's in its place. Nothing is written to it.
+    """
+    try:
+        descriptor = os.open(name, _DIRECTORY_FLAGS, dir_fd=parent)
+    except OSError as exc:
+        raise CacheBuildError(f"cannot open {name}, the directory the builder has just made: {exc.strerror}") from None
+    problem = _private_problem(os.fstat(descriptor)) or ("it is not empty" if os.listdir(descriptor) else "")
+    if problem:
+        os.close(descriptor)
+        raise CacheBuildError(
+            f"{name} is not the directory the builder has just made, so nothing is written to it: {problem}"
+        )
+    return descriptor
+
+
+def _entry_mode(source: Path) -> int:
+    """The mode of an entry's own directory in place: :func:`_group_readable` of that of ``source``."""
+    return _group_readable(os.stat(source).st_mode)
+
+
+def _group_readable(mode: int) -> int:
+    """``mode`` without the group's and others' write (:data:`_ENTRY_BITS`), with the group's read, and its execute
+    where the owner has execute (every directory, an executable file): what each copy in an entry has
+    (:data:`_ENTRY_GROUP_BITS`)."""
+    kept = stat.S_IMODE(mode) & _ENTRY_BITS | stat.S_IRGRP
+    return kept | stat.S_IXGRP if kept & stat.S_IXUSR else kept
+
+
+def _copy_tree(source: Path, directory: int, last: str = "", *, keep_private: bool = False) -> None:
+    """Fill the new directory open as ``directory`` (:func:`_open_new_directory`) with a copy of what is in ``source``
+    (``last`` after the rest), then give it ``source``'s mode as :func:`_group_readable` makes it (:func:`_publish`),
+    unless ``keep_private``: the entry's own directory stays ``0700`` until it is in place.
+
+    Raises:
+        CacheBuildError: For something in ``source`` that is not a directory, a regular file or a link.
+    """
+    for entry in sorted(os.scandir(source), key=lambda item: (item.name == last, item.name)):
+        info = entry.stat(follow_symlinks=False)
+        if stat.S_ISLNK(info.st_mode):
+            os.symlink(os.readlink(entry.path), entry.name, dir_fd=directory)
+        elif stat.S_ISDIR(info.st_mode):
+            os.mkdir(entry.name, _OWN_DIR_MODE, dir_fd=directory)
+            child = _open_new_directory(directory, entry.name)
+            try:
+                _copy_tree(Path(entry.path), child)
+            finally:
+                os.close(child)
+        elif stat.S_ISREG(info.st_mode):
+            _copy_file(Path(entry.path), directory, entry.name, info.st_mode)
+        else:
+            raise CacheBuildError(f"{entry.path} is not a directory, a regular file or a link")
+    if not keep_private:
+        os.fchmod(directory, _group_readable(os.stat(source).st_mode))
+
+
+def _remove_directory(parent: int, name: str, ours: Callable[[os.stat_result], bool]) -> None:
+    """Remove the directory ``name`` of the directory open as ``parent`` when, opened without following a link, it is
+    ``ours`` by its ``fstat``: what is in it through that descriptor, never following a link, and the directory itself
+    only while ``name`` still names it. Best effort, as the cleanup after a build that did not finish is: what cannot be
+    removed stays, and the next build is made beside it."""
+    with suppress(OSError):
+        descriptor = os.open(name, _DIRECTORY_FLAGS, dir_fd=parent)
+        try:
+            found = os.fstat(descriptor)
+            if ours(found):
+                _empty(descriptor)
+                if os.path.samestat(os.stat(name, dir_fd=parent, follow_symlinks=False), found):
+                    os.rmdir(name, dir_fd=parent)
+        finally:
+            os.close(descriptor)
+
+
+def _empty(directory: int) -> None:
+    """Remove what is in the directory open as ``directory``, through descriptors and never following a link."""
+    with os.scandir(directory) as entries:
+        found = list(entries)
+    for entry in found:
+        if entry.is_dir(follow_symlinks=False):
+            child = os.open(entry.name, _DIRECTORY_FLAGS, dir_fd=directory)
+            try:
+                _empty(child)
+            finally:
+                os.close(child)
+            os.rmdir(entry.name, dir_fd=directory)
+        else:
+            os.unlink(entry.name, dir_fd=directory)
+
+
+def _sweep_leftovers(cache_root: Path, sha: str) -> None:
+    """Remove what builders of this account killed while copying an entry of ``sha`` left beside it (``.<sha>.tmp-*``,
+    :func:`_publish`): each a directory of the builder's own with mode ``0700`` when it is checked with ``lstat`` and
+    again by ``fstat`` once it is opened without following a link (:func:`_private_problem`). Another account of the
+    group can rename whatever is in the cache directory to such a name, but cannot move a directory it cannot write
+    from elsewhere into it, so that leaves only a directory a builder of this account made there for itself; anything
+    else (an entry, a directory of another account's builder, a link) is left as it is."""
+    root = os.open(cache_root, _CACHE_FLAGS)
+    try:
+        for name in fnmatch.filter(os.listdir(root), f".{sha}.tmp-*"):
+            try:
+                listed = os.stat(name, dir_fd=root, follow_symlinks=False)
+            except FileNotFoundError:
+                continue
+            if _is_private(listed):
+                _remove_directory(root, name, _is_private)
+    finally:
+        os.close(root)
+
+
+def _copy_file(source: Path, directory: int, name: str, mode: int) -> None:
+    """Copy the file ``source`` as the new file ``name`` of ``directory``, with ``mode`` as :func:`_group_readable`
+    makes it."""
+    sink = os.open(name, _NEW_FILE_FLAGS, _OWN_FILE_MODE, dir_fd=directory)
+    try:
+        with source.open("rb") as content:
+            for chunk in iter(lambda: content.read(_COPY_CHUNK), b""):
+                written = memoryview(chunk)
+                while written:
+                    written = written[os.write(sink, written) :]
+        os.fchmod(sink, _group_readable(mode))
+    finally:
+        os.close(sink)
+
+
+def _source_differences(archive: FileDigest, made: Path, manifest: Manifest) -> list[str]:
+    """How the source ``manifest`` records differs from the commit's, whose archive (of digest ``archive``) and unpacked
+    tree :func:`_export_source` made again in the builder's own directory ``made``: compared by size and hash."""
+    source = tree_digest(made / SOURCE_DIR)
+    problems: list[str] = []
+    if manifest.source_archive != archive:
+        problems.append(
+            f"its {SOURCE_ARCHIVE} is not the archive of {manifest.sha}: the manifest records "
+            f"{manifest.source_archive}, the commit's is {archive}"
+        )
+    if manifest.source != source:
+        problems.append(
+            f"its {SOURCE_DIR} is not the tree of {manifest.sha}: the manifest records {manifest.source}, not {source}"
+        )
+    return problems
+
+
+def _layout_problem(data: bytes) -> str:
+    """Why :mod:`zipfile` may find the central directory of the zip ``data`` elsewhere on another Python: it does not
+    end with an end record with no comment right after its central directory, or a zip64 locator precedes that record;
+    empty when neither."""
+    end = len(data) - _END_RECORD.size
+    signature, *_, size, offset, comment = _END_RECORD.unpack_from(data, end)
+    locator = data[end - _ZIP64_LOCATOR_SIZE : end] if end >= _ZIP64_LOCATOR_SIZE else b""
+    if signature != _END_SIGNATURE or comment or offset + size != end or locator.startswith(_ZIP64_LOCATOR_SIGNATURE):
+        return "it does not end with its central directory and one end record, with no comment and no zip64 records"
+    return ""
+
+
+def _member_problem(info: zipfile.ZipInfo) -> str:
+    """Why the member ``info`` may be installed under another name than its raw one, or read with other sizes, by the
+    :mod:`zipfile` of another Python (:data:`_UNICODE_PATH_FIELD`); empty when it cannot."""
+    extra, fields = info.extra, set[int]()
+    while len(extra) >= _EXTRA_FIELD.size:
+        kind, length = _EXTRA_FIELD.unpack_from(extra)
+        fields.add(kind)
+        extra = extra[_EXTRA_FIELD.size + length :]
+    if _UNICODE_PATH_FIELD in fields:
+        return (
+            f"its member {info.orig_filename!r} has a Unicode Path extra field, which names it for the zipfile of "
+            "Python 3.12 and newer and not for older ones"
+        )
+    if _ZIP64_FIELD in fields:
+        return f"its member {info.orig_filename!r} has a zip64 extra field"
+    if info.filename != info.orig_filename:
+        return f"its member {info.orig_filename!r} is read as {info.filename!r}"
+    return ""
+
+
+def _executable(info: zipfile.ZipInfo) -> bool:
+    """Whether pip installs the member executable: a regular file with an execute bit in its mode."""
+    mode = info.external_attr >> 16
+    return bool(mode and stat.S_ISREG(mode) and mode & 0o111)
+
+
+def _wheel_files(wheel: Path) -> list[tuple[str, str, bool]]:
+    """What pip installs from a wheel on any Python: every member's raw name (the one its headers hold), the SHA-256 of
+    its content and whether it is made executable, in name order. A zip's timestamps, member order and compression are
+    not part of it, so two builds of one source distribution compare equal when they wrote the same files.
+
+    Raises:
+        zipfile.BadZipFile: When ``wheel`` is not a zip, or the :mod:`zipfile` of another Python may read other members
+            or other names from it (:func:`_layout_problem`, :func:`_member_problem`).
+    """
+    data = wheel.read_bytes()
+    with zipfile.ZipFile(io.BytesIO(data)) as archive:
+        infos = archive.infolist()
+        problem = _layout_problem(data) or next(filter(None, map(_member_problem, infos)), "")
+        if problem:
+            raise zipfile.BadZipFile(problem)
+        return sorted(
+            (info.orig_filename, hashlib.sha256(archive.read(info)).hexdigest(), _executable(info)) for info in infos
+        )
+
+
+def _held_sdist_problems(entry: Path, wheel: WheelEntry, pin: LockPin | None, work: Path) -> list[str]:
+    """Copy the source distribution the entry holds for ``wheel`` to ``work/sdist/<its file name>`` and the wheel to
+    ``work/cached.whl``, in the new directory ``work``; why the copies are not the files the manifest records, or the
+    source distribution is not a file the commit's lock lists for ``pin``."""
+    label = f"{wheel.file} for {wheel.name}=={wheel.version}"
+    held = entry / SDISTS_DIR / wheel.sdist_file
+    if Path(wheel.sdist_file).name != wheel.sdist_file or not held.is_file():
+        return [f"{label} is recorded as built from a source distribution that the entry does not hold in {SDISTS_DIR}"]
+    sdist = work / "sdist" / wheel.sdist_file
+    sdist.parent.mkdir(parents=True)
+    shutil.copyfile(held, sdist)
+    shutil.copyfile(entry / WHEELS_DIR / wheel.file, work / _CACHED_WHEEL)
+    digest = file_sha256(sdist)
+    if digest != wheel.sdist_sha256 or pin is None or digest not in pin.hashes:
+        return [
+            f"{SDISTS_DIR}/{wheel.sdist_file} is not the source distribution of {label} that the manifest records "
+            f"and the lock lists: its SHA-256 is {digest}"
+        ]
+    if file_sha256(work / _CACHED_WHEEL) != wheel.sha256:
+        return [f"wheel {label} does not match the hash in the manifest"]
+    return []
+
+
+def _rebuilt_wheel_problems(wheel: WheelEntry, python: Path, work: Path) -> list[str]:
+    """Build the source distribution :func:`_held_sdist_problems` copied into ``work`` again; why the wheel it makes is
+    not the cached wheel's copy beside it (another name, or other files, contents or executable bits as pip reads them:
+    :func:`_wheel_files`). A cached wheel that cannot be read that way is refused before anything is built."""
+    try:
+        cached = _wheel_files(work / _CACHED_WHEEL)
+    except _UNREADABLE_ZIP as exc:
+        return [f"{wheel.file} cannot be read as a wheel: {type(exc).__name__}: {exc}"]
+    try:
+        rebuilt = _pure_wheel(python, work / "sdist" / wheel.sdist_file, work / "rebuilt")
+        made = _wheel_files(rebuilt)
+    except (CacheBuildError, *_UNREADABLE_ZIP) as exc:
+        return [f"{SDISTS_DIR}/{wheel.sdist_file} does not build {wheel.file} again: {exc}"]
+    if rebuilt.name != wheel.file:
+        return [f"{SDISTS_DIR}/{wheel.sdist_file} builds {rebuilt.name}, not {wheel.file}"]
+    if cached != made:
+        differ = sorted({name for name, *_ in set(cached) ^ set(made)})
+        return [
+            f"{wheel.file} is not the wheel its source distribution builds; the members that differ: "
+            f"{', '.join(differ[:3]) or 'one it lists twice'}"
+        ]
+    return []
+
+
+def _entry_tools(entry: Path, manifest: Manifest, pins: list[LockPin], scratch: Path) -> Path:
+    """The build environment of a reuse (:func:`_tools_environment`), with nothing downloaded: the tools are installed
+    from copies of the entry's own wheels of them, which pip checks against the lock's hashes."""
+    pinned = _tools_lock(pins, scratch)
+    tools = scratch / _TOOLS_DIR
+    tools.mkdir()
+    for wheel in manifest.wheels:
+        if wheel.name in _BUILD_TOOLS:
+            shutil.copyfile(entry / WHEELS_DIR / wheel.file, tools / Path(wheel.file).name)
+    return _tools_environment(pinned, scratch)
+
+
+def _built_wheel_differences(entry: Path, manifest: Manifest, pins: list[LockPin]) -> list[str]:
+    """How the wheels ``manifest`` records as built from a source distribution differ from what the builder makes of
+    the copy the entry keeps, each checked in a directory of the builder's own: (1) the copy must have the hash the
+    manifest records and be a file the commit's lock (``pins``) lists for that pin, before any of its code runs; (2) it
+    is built again offline with the lock's build tools, installed from the entry's wheels of them by the lock's hashes
+    (:func:`_entry_tools`); (3) the wheel that makes must have the cached wheel's name, files and contents
+    (:func:`_wheel_files`)."""
+    built = [wheel for wheel in manifest.wheels if wheel.sdist_sha256]
+    if not built:
+        return []
+    pinned = {(pin.name, pin.version): pin for pin in pins}
+    with tempfile.TemporaryDirectory(prefix="hyperloom-runner-rebuild-") as scratch:
+        work = Path(scratch)
+        held = [
+            _held_sdist_problems(entry, wheel, pinned.get((wheel.name, wheel.version)), work / str(index))
+            for index, wheel in enumerate(built)
+        ]
+        if any(held):
+            return [problem for problems in held for problem in problems]
+        try:
+            python = _entry_tools(entry, manifest, pins, work)
+        except CacheBuildError as exc:
+            return [f"the build tools of its source distributions cannot be installed from its wheels: {exc}"]
+        return [
+            problem
+            for index, wheel in enumerate(built)
+            for problem in _rebuilt_wheel_problems(wheel, python, work / str(index))
+        ]
+
+
+def _differences(repo: Path, tree: str, entry: Path, raw: bytes, options: BuildOptions) -> list[str]:
+    """How the manifest text ``raw`` of ``entry``, which agrees with it (:func:`check_entry`, so it is of the entry's
+    commit), differs from what a build of that commit would write, one line each; empty when it does not. What it
+    records is checked against the commit, not against the entry: the commit's tree, its archive and source made again
+    from ``repo`` (:func:`_source_differences`), and the wheels built from a source distribution built again against
+    that remade source's lock (:func:`_built_wheel_differences`)."""
+    manifest = manifest_from_json(raw)
+    problems: list[str] = []
+    if manifest.git_tree != tree:
+        problems.append(f"its manifest records tree {manifest.git_tree}, but the tree of {manifest.sha} is {tree}")
+    if manifest.target != options.target.manifest_form():
+        problems.append(f"its wheels are for {json.dumps(manifest.target)}, not {options.target.manifest_form()}")
+    with tempfile.TemporaryDirectory(prefix="hyperloom-runner-source-") as scratch:
+        made = Path(scratch)
+        problems += _source_differences(_export_source(repo, manifest.sha, made), made, manifest)
+        problems += _builder_problems(raw, manifest)
+        if problems:
+            return problems
+        name = lock_file(made / SOURCE_DIR, options.target.python_version)
+        pins = parse_lock((made / SOURCE_DIR / name).read_text(encoding=_UTF8), name)
+    return _built_wheel_differences(entry, manifest, pins)
+
+
+def _links(entry: Path) -> list[str]:
+    """The entry ``entry`` or any of its own files and directories (what is in it and in its wheel and source
+    distribution directories) that is a link, one line each: no builder makes one, so nothing of the entry is read
+    through one. Its source is the commit's tree, which may hold links of its own."""
+    if entry.is_symlink():
+        return [f"{entry} is a link"]
+    if not entry.is_dir():
+        return []
+    found: list[Path] = []
+    for path in sorted(entry.iterdir()):
+        if path.is_symlink():
+            found.append(path)
+        elif path.name in (WHEELS_DIR, SDISTS_DIR) and path.is_dir():
+            found += [child for child in sorted(path.iterdir()) if child.is_symlink()]
+    return [f"{path} is a link" for path in found]
+
+
+def _reuse(repo: Path, sha: str, tree: str, final: Path, options: BuildOptions) -> CacheEntry | None:
+    """The entry at ``final`` if it is what a build would write, ``None`` when there is none.
+
+    A directory in place that the group cannot read and enter (:data:`_ENTRY_GROUP_BITS`) is one no builder finished:
+    the copy of a builder killed between the rename and its ``fchmod``, a builder's unfinished copy that an account of
+    the group renamed there, or an entry of a builder from before entries were the group's to read. It is set aside
+    (:func:`_set_aside`) and the entry built again. An entry that is a link, or holds one where a builder makes a file
+    or a directory (:func:`_links`), differs and is not read; so does one with no manifest, which no builder leaves in
+    place. An entry is never written to or removed.
+    Its manifest file is read once: the entry is checked against those bytes (:func:`check_entry` pinned to their hash,
+    so a manifest written over meanwhile is refused), those bytes against the commit, its wheels built from a source
+    distribution included (:func:`_differences`), and the pin returned is their SHA-256.
+
+    Raises:
+        CacheConflict: When there is an entry and it differs.
+    """
+    if not os.path.lexists(final):
+        return None
+    info = os.lstat(final)
+    if stat.S_ISDIR(info.st_mode) and info.st_mode & _ENTRY_GROUP_BITS != _ENTRY_GROUP_BITS:
+        _set_aside(final, sha)
+        return None
+    links = _links(final)
+    if links:
+        raise CacheConflict(f"{final} is not what a build of {sha} writes, so it is left alone: {'; '.join(links[:3])}")
+    if not (final / MANIFEST_NAME).is_file():
+        raise CacheConflict(
+            f"{final} is not what a build of {sha} writes, so it is left alone: it has no {MANIFEST_NAME}, and no "
+            "builder puts an entry in place without one"
+        )
+    raw = (final / MANIFEST_NAME).read_bytes()
+    pin = hashlib.sha256(raw).hexdigest()
+    problems = check_entry(final, sha, pin, verify_hash=True) or _differences(repo, tree, final, raw, options)
+    if problems:
+        raise CacheConflict(
+            f"{final} is not what a build of {sha} writes, so it is left alone: {'; '.join(problems[:3])}"
+        )
+    return CacheEntry(final, pin, reused=True)
+
+
+def _set_aside(final: Path, sha: str) -> None:
+    """Rename the directory ``final`` to a leftover's name (``.<sha>.tmp-*``), which the sweep of its owner's builders
+    removes (:func:`_sweep_leftovers`), and sweep at once: this builder's own is removed now.
+
+    Raises:
+        CacheConflict: When it cannot be renamed (a sticky cache directory and another account's entry).
+    """
+    root = os.open(final.parent, _CACHE_FLAGS)
+    aside = f".{sha}.tmp-{os.getpid()}-{secrets.token_hex(4)}"
+    try:
+        os.rename(final.name, aside, src_dir_fd=root, dst_dir_fd=root)
+    except OSError as exc:
+        raise CacheConflict(
+            f"{final} is not what a build of {sha} writes (the group cannot read it{ownership(final)}), and it cannot "
+            f"be set aside: {exc.strerror}"
+        ) from None
+    finally:
+        os.close(root)
+    print(
+        f"runner cache: set aside {final} as {aside}: the group cannot read it, so no builder finished it",
+        file=sys.stderr,
+    )
+    _sweep_leftovers(final.parent, sha)
+
+
+def ensure_runner_cache(repo: Path, sha: str, cache_root: Path, options: BuildOptions = BuildOptions()) -> CacheEntry:
+    """The finished cache entry of commit ``sha`` below ``cache_root``, built from ``repo`` when it is not there.
+
+    Safe to call from several processes at once for the same commit: one builds, the others wait and use its entry.
+
+    Raises:
+        CacheConflict: When an entry of the commit is there and differs from what a build would write.
+        CacheBuildError: When the commit, the lock or the wheels cannot be had, or another build never finishes.
+    """
+    if not is_full_commit(sha):
+        raise CacheBuildError(f"{sha!r} is not a full lowercase commit hash")
+    tree = _commit_tree(repo, sha)
+    _shared_dirs(cache_root)
+    final = cache_root / sha
+    with exclusive(build_lock(cache_root, sha), options.lock_timeout_sec):
+        _sweep_leftovers(cache_root, sha)
+        return _reuse(repo, sha, tree, final, options) or _build(repo, sha, tree, final, options)
+
+
+def ensure_runner_cache_with_suite(
+    repo: Path, sha: str, cache_root: Path, options: BuildOptions = BuildOptions()
+) -> RunnableEntry:
+    """:func:`ensure_runner_cache`, then the commit's inference_suite staging published below ``cache_root`` by the
+    entry's own source (:func:`~hyperloom.measure.runner.suite_publish.publish_inference_suite`): a runner of the entry
+    finds its staging by the key of that source, and starts without network.
+
+    Raises:
+        CacheConflict: As :func:`ensure_runner_cache`.
+        CacheBuildError: As :func:`ensure_runner_cache`.
+        SuitePublishError: When the staging cannot be published.
+    """
+    entry = ensure_runner_cache(repo, sha, cache_root, options)
+    return RunnableEntry(entry, publish_inference_suite(entry.path / SOURCE_DIR, cache_root))
+
+
+def _repeatable(parser: argparse.ArgumentParser, flag: str, help_text: str) -> None:
+    parser.add_argument(flag, action="append", default=[], help=help_text)
+
+
+def _arguments(argv: Sequence[str] | None) -> argparse.Namespace:
+    parser = argparse.ArgumentParser(prog="hyperloom.measure.runner.cache_build", description=__doc__.split("\n")[0])
+    parser.add_argument("--sha", required=True, help="the full commit hash")
+    parser.add_argument("--repo", type=Path, required=True, help="a clone that has the commit")
+    parser.add_argument("--out", type=Path, default=os.environ.get(CACHE_ENV), help=f"the cache (default ${CACHE_ENV})")
+    parser.add_argument(
+        "--wheel-target",
+        help=f"the image's interpreter and platform as one tag, e.g. cp314-manylinux_2_28_x86_64, as ${RUNNER_TARGET_ENV} "
+        "names it; instead of --python-version, --implementation, --abi and --platform",
+    )
+    parser.add_argument("--python-version", help="the image's Python, e.g. 3.10")
+    parser.add_argument("--implementation", help="the image's implementation, e.g. cp")
+    _repeatable(parser, "--abi", "an ABI tag of the image, e.g. cp310")
+    _repeatable(parser, "--platform", "a platform tag, e.g. manylinux_2_28_x86_64")
+    parser.add_argument("--index-url", help="the package index to download from")
+    _repeatable(parser, _FIND_LINKS, "a directory or URL of wheels")
+    parser.add_argument(_NO_INDEX, action="store_true", help=f"use only {_FIND_LINKS}")
+    parser.add_argument("--lock-timeout-sec", type=float, default=DEFAULT_LOCK_TIMEOUT_SEC)
+    args = parser.parse_args(argv)
+    if args.out is None:
+        parser.error(f"--out or ${CACHE_ENV} is required")
+    if args.wheel_target and (args.python_version or args.implementation or args.abi or args.platform):
+        parser.error("--wheel-target names the whole target: give it alone, or the separate options")
+    return args
+
+
+def _target(args: argparse.Namespace) -> WheelTarget:
+    if args.wheel_target:
+        return runner_wheel_target({RUNNER_TARGET_ENV: args.wheel_target})
+    return WheelTarget(args.python_version, args.implementation, tuple(args.abi), tuple(args.platform))
+
+
+def main(argv: Sequence[str] | None = None) -> int:
+    """The command line: build the entry, publish its commit's inference_suite staging
+    (:func:`ensure_runner_cache_with_suite`), print one JSON line about both and exit
+    0, or say why not on stderr and exit 1."""
+    args = _arguments(argv)
+    try:
+        options = BuildOptions(
+            _target(args), WheelSource(args.index_url, tuple(args.find_links), args.no_index), args.lock_timeout_sec
+        )
+        runnable = ensure_runner_cache_with_suite(args.repo, args.sha, args.out, options)
+    except (CacheError, SuitePublishError, OSError) as exc:
+        print(f"runner cache not built: {exc}", file=sys.stderr)
+        return 1
+    entry = runnable.entry
+    document = {"path": str(entry.path), "manifest_sha256": entry.manifest_sha256, "reused": entry.reused}
+    print(json.dumps({**document, "inference_suite": str(runnable.inference_suite)}))
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

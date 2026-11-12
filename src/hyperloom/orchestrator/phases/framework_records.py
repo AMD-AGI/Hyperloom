@@ -13,48 +13,17 @@ from typing import TYPE_CHECKING, Any, NamedTuple
 
 from hyperloom_common.coerce import dict_rows, first_str, first_text, to_list, to_mapping
 from hyperloom.common.env_safety import redact_secret_values
-from hyperloom.inference_optimizer.grid_server_args import tokenize_server_args_preserving_json
 from hyperloom.orchestrator.lever import LEVER_SOURCE_PATCH, LEVER_UPSTREAM_PR, patch_lever_kind
 from ..actions.executors import _integrate_vocabulary
 from ..state.attempt_ledger import AttemptRow, record_attempt_row
 from ..state.failure_evidence import UNMEASURED_OUTCOMES, classify_failure_attribution
 from ..state.task_registry import TaskNotFound
+from .config_levers import config_lever_from_proposal
 
 if TYPE_CHECKING:
     from ..state.task_registry import Task
 
 log = _logging.getLogger(__name__)
-
-
-def _config_lever_from_proposal(entry: Mapping[str, Any]) -> dict[str, Any]:
-    """The server args and env overrides one lever proposal carries, dropping args Magpie cannot transport."""
-    extra_envs = {str(k).strip(): str(v) for k, v in to_mapping(entry.get("extra_envs")).items() if str(k).strip()}
-    args = entry.get("extra_args")
-    tokens = [str(a) for a in args if str(a).strip()] if isinstance(args, (list, tuple)) else []
-    if any(ch.isspace() for token in tokens for ch in token):
-        text, fault = "", "has a whitespace-bearing argv token"
-    else:
-        text, fault = (args if isinstance(args, str) else " ".join(tokens)), ""
-    parsed_args = tokenize_server_args_preserving_json(text)
-    if parsed_args is None:
-        fault = (
-            "has server args unsupported by Magpie's unquoted argv transport"
-            if isinstance(args, str)
-            else "has unparsable server args"
-        )
-    if fault:
-        log.warning(
-            "FRAMEWORK config lever %r %s; dropping the args%s",
-            entry.get("name"),
-            fault,
-            " while preserving its environment overrides" if extra_envs else "",
-        )
-        if not extra_envs:
-            return {}
-    extra_server_args = "" if parsed_args is None else parsed_args[0]
-    if not extra_server_args and not extra_envs:
-        return {}
-    return {"extra_server_args": extra_server_args, "extra_envs": extra_envs}
 
 
 def _framework_config_levers_from_done(
@@ -89,7 +58,7 @@ def _framework_config_levers_from_done(
         if not proposals:
             return {}
     for entry in proposals:
-        lever = _config_lever_from_proposal(entry) if isinstance(entry, dict) else {}
+        lever = config_lever_from_proposal(entry) if isinstance(entry, dict) else {}
         if lever:
             return lever
     return {}
@@ -344,6 +313,7 @@ def _attempt_outcome_fields(
     if attempt.status.upper() in UNMEASURED_OUTCOMES:
         attribution = classify_failure_attribution(
             error_class=first_str(result.get("error_class")),
+            framework_changed=bool(result.get(_integrate_vocabulary.RESULT_FRAMEWORK_CHANGED)),
             error_excerpt=first_str(result.get("error"))[:600],
             reason=result.get("reason"),
             explicit=result.get("failure_attribution"),
@@ -381,26 +351,14 @@ def _attempt_outcome_fields(
     }
 
 
-def _record_attempt_gates(recorder: Any, task_id: str, *, result: Mapping[str, Any], params: Mapping[str, Any]) -> None:
-    """Record the gate verdicts an attempt's measurement settled: keep threshold, accuracy, switch-off parity."""
+def _record_attempt_gates(recorder: Any, task_id: str, *, result: Mapping[str, Any]) -> None:
+    """Record the gate verdicts an attempt's measurement settled: the graded one, accuracy, switch-off parity."""
     from hyperloom.inference_optimizer.breakdown.recorder.framework_event import GateVerdict
 
-    delta_pct = result.get("delta_pct")
-    keep_threshold = result.get("keep_threshold_pct")
-    if keep_threshold is None:
-        keep_threshold = params.get("keep_threshold_pct")
     accuracy_pass = result.get("accuracy_pass")
     parity = to_mapping(result.get("switch_off_parity"))
-    verdicts: list[Any] = []
-    if isinstance(delta_pct, (int, float)) and isinstance(keep_threshold, (int, float)):
-        verdicts.append(
-            GateVerdict(
-                gate="keep_threshold",
-                passed=float(delta_pct) >= float(keep_threshold),
-                observed=delta_pct,
-                threshold=keep_threshold,
-            )
-        )
+    # The graded verdict's own row, built as explore builds it: the veto, the graded axes or the output threshold.
+    verdicts: list[Any] = [GateVerdict(**gate) for gate in dict_rows(result.get("gates"))]
     if accuracy_pass is not None:
         verdicts.append(
             GateVerdict(
@@ -485,7 +443,7 @@ def _record_source_attempt(
         **config_delta,
     )
     _record_kb_exposure(recorder, attempt.candidate_id, params)
-    _record_attempt_gates(recorder, task_id, result=result, params=params)
+    _record_attempt_gates(recorder, task_id, result=result)
     _record_step(
         coord,
         attempt.candidate_id,

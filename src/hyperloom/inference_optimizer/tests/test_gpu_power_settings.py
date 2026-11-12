@@ -10,18 +10,20 @@ import json
 import subprocess
 
 import pytest
+from hyperloom_common import amd_smi as amd_smi_module
+from hyperloom_common.amd_smi import AmdSmiError
 
 from hyperloom.common import gpu_power_settings
 from hyperloom.common.gpu_power_settings import (
     DeclaredPowerSettings,
     GpuPowerSettingsError,
     _parse_node_power,
-    _read_gpu_kfd_nodes as _real_read_gpu_kfd_nodes,
     declared_node_problems,
     declared_setting_problems,
     read_gpu_power_settings,
     read_node_power_settings,
     reading_matches,
+    socket_power_cap_w,
     visible_gpu_indices,
 )
 
@@ -55,7 +57,7 @@ def amd_smi(monkeypatch):
     """Answer every ``amd-smi`` command with *run*, :func:`_fake_run` until a test installs another."""
 
     def _install(run=_fake_run):
-        monkeypatch.setattr(gpu_power_settings.subprocess, "run", run)
+        monkeypatch.setattr(amd_smi_module.subprocess, "run", run)
 
     _install()
     return _install
@@ -77,13 +79,42 @@ def test_the_settings_are_read_from_amd_smi_json(amd_smi):
     }
 
 
+@pytest.mark.parametrize(
+    ("limit", "cap"),
+    [
+        ({"ppt0": {"socket_power_limit": {"value": 750, "unit": "W"}}}, 750.0),
+        ({"ppt": {"socket_power_limit": {"value": 750, "unit": "W"}}}, 750.0),
+        ({"socket_power_limit": {"value": 750, "unit": "W"}}, 750.0),
+        ({"power_cap": {"value": 750, "unit": "W"}}, 750.0),
+        ({"power_cap": 749.8}, 749.8),
+        ({"ppt0": {"socket_power_limit": "N/A"}, "power_cap": 750}, 750.0),
+        ({"ppt0": {"socket_power_limit": "N/A"}}, None),
+        ({}, None),
+        ("N/A", None),
+    ],
+)
+def test_the_power_cap_is_read_from_whichever_key_the_amd_smi_release_uses(limit, cap):
+    assert socket_power_cap_w(limit) == cap
+
+
 def test_a_failing_amd_smi_is_an_error_not_an_empty_reading(amd_smi):
     def _fail(cmd, **_kwargs):
         return subprocess.CompletedProcess(cmd, 2, "", "permission denied")
 
     amd_smi(_fail)
-    with pytest.raises(GpuPowerSettingsError):
+    with pytest.raises(AmdSmiError):
         read_gpu_power_settings()
+
+
+def test_a_failing_amd_smi_is_caught_where_the_declared_settings_are_checked(amd_smi, monkeypatch):
+    from hyperloom.inference_optimizer.cli.bootstrap import resolve_gpu_power_settings
+
+    amd_smi(lambda cmd, **_kwargs: subprocess.CompletedProcess(cmd, 2, "", "permission denied"))
+    monkeypatch.setenv("ROCR_VISIBLE_DEVICES", "0")
+    monkeypatch.delenv("HIP_VISIBLE_DEVICES", raising=False)
+    record, error = resolve_gpu_power_settings(DeclaredPowerSettings(power_cap_w=1000.0), nodes=1)
+    assert record == {"declared": {"power_cap_w": 1000.0}}
+    assert "cannot be checked: amd-smi static --limit --json exited 2: permission denied" in error
 
 
 def test_declared_settings_are_checked_per_card(amd_smi):
@@ -107,7 +138,7 @@ def test_an_amd_smi_without_the_node_command_is_an_error_not_a_disabled_node(amd
         return subprocess.CompletedProcess(cmd, 2, "", "invalid choice: 'node'")
 
     amd_smi(_old_amd_smi)
-    with pytest.raises(GpuPowerSettingsError, match="invalid choice"):
+    with pytest.raises(AmdSmiError, match="invalid choice"):
         read_node_power_settings()
 
 
@@ -241,7 +272,7 @@ class TestResolve:
         monkeypatch.delenv("ROCR_VISIBLE_DEVICES", raising=False)
         monkeypatch.delenv("HIP_VISIBLE_DEVICES", raising=False)
         kw.setdefault("nodes", 1)
-        monkeypatch.setattr(gpu_power_settings.subprocess, "run", _fake_run)
+        monkeypatch.setattr(amd_smi_module.subprocess, "run", _fake_run)
         if "read" in kw:
             monkeypatch.setattr(gpu_power_settings, "read_gpu_power_settings", kw.pop("read"))
         monkeypatch.setattr(gpu_power_settings, "read_node_power_settings", kw.pop("read_node", None) or _node_reader())
@@ -358,8 +389,8 @@ class TestResolve:
         assert "multi-node" in error
 
 
-#: An MI355X board as amd-smi lists it: ROCm numbers cards in KFD node order, amd-smi in PCI order, and they differ.
-_MI355X_NODES = {0: 9, 1: 11, 2: 10, 3: 8, 4: 13, 5: 15, 6: 14, 7: 12}
+#: An MI355X board's amd-smi indices in ROCm order: ROCm numbers cards in KFD node order, amd-smi in PCI order.
+_MI355X_ROCM_ORDER = [3, 0, 2, 1, 7, 4, 6, 5]
 
 
 class TestVisibleCards:
@@ -367,7 +398,7 @@ class TestVisibleCards:
 
     @pytest.fixture(autouse=True)
     def _mi355x(self, monkeypatch):
-        monkeypatch.setattr(gpu_power_settings, "_read_gpu_kfd_nodes", lambda: dict(_MI355X_NODES))
+        monkeypatch.setattr(gpu_power_settings, "gpus_in_rocm_order", lambda: list(_MI355X_ROCM_ORDER))
         for name in (
             "ROCR_VISIBLE_DEVICES",
             "HSA_VISIBLE_DEVICES",
@@ -406,7 +437,7 @@ class TestVisibleCards:
         assert visible_gpu_indices(env) == cards
 
     def test_no_mask_is_every_card_and_asks_amd_smi_nothing(self, monkeypatch):
-        monkeypatch.setattr(gpu_power_settings, "_read_gpu_kfd_nodes", lambda: pytest.fail("no mask, no amd-smi"))
+        monkeypatch.setattr(gpu_power_settings, "gpus_in_rocm_order", lambda: pytest.fail("no mask, no amd-smi"))
         assert visible_gpu_indices({}) is None
 
     @pytest.mark.parametrize(
@@ -440,20 +471,6 @@ class TestVisibleCards:
         with pytest.raises(GpuPowerSettingsError):
             visible_gpu_indices(env)
 
-    def test_the_kfd_nodes_come_from_amd_smi_list(self, monkeypatch):
-        listed = {
-            "gpu_data": [{"gpu": gpu, "bdf": "0000:00:00.0", "node_id": node} for gpu, node in _MI355X_NODES.items()]
-        }
-        monkeypatch.setattr(
-            gpu_power_settings.subprocess,
-            "run",
-            lambda cmd, **kw: subprocess.CompletedProcess(cmd, 0, json.dumps(listed), ""),
-        )
-        assert _real_read_gpu_kfd_nodes() == _MI355X_NODES
-        listed["gpu_data"][0].pop("node_id")
-        with pytest.raises(GpuPowerSettingsError, match="without its KFD node"):
-            _real_read_gpu_kfd_nodes()
-
     def test_the_assertion_checks_the_card_the_mask_names(self, monkeypatch):
         from hyperloom.inference_optimizer.cli.bootstrap import resolve_gpu_power_settings
 
@@ -478,8 +495,8 @@ class TestVisibleCards:
         monkeypatch.delenv("HYPERLOOM_GPU_POWER_SAMPLING", raising=False)
         monkeypatch.setattr("shutil.which", lambda name: "/usr/bin/amd-smi")
         log_path = str(tmp_path / "server.log")
-        assert build_gpu_power_recorder(log_path, {"ROCR_VISIBLE_DEVICES": "4,5"})._gpus == {4, 7}
-        assert build_gpu_power_recorder(log_path, {"ROCR_VISIBLE_DEVICES": "GPU-x"})._gpus is None, "every card"
+        assert build_gpu_power_recorder(log_path, {"ROCR_VISIBLE_DEVICES": "4,5"})._scope.gpus == (4, 7)
+        assert build_gpu_power_recorder(log_path, {"ROCR_VISIBLE_DEVICES": "GPU-x"})._scope.gpus is None, "every card"
 
     def test_a_per_gpu_budget_whose_cards_cannot_be_named_refuses_the_launch(self, monkeypatch, capsys):
         from types import SimpleNamespace
@@ -544,9 +561,9 @@ class TestSharedNpmNode:
                 monkeypatch.delenv(name, raising=False)
             else:
                 monkeypatch.setenv(name, value)
-        monkeypatch.setattr(gpu_power_settings, "_read_gpu_kfd_nodes", lambda: dict(_MI355X_NODES))
+        monkeypatch.setattr(gpu_power_settings, "gpus_in_rocm_order", lambda: list(_MI355X_ROCM_ORDER))
         monkeypatch.setattr(gpu_power_apply, "warn_about_orphaned_cards", lambda: None)
-        cards = {gpu: {"power_cap_w": 1400.0, "perf_level": "auto"} for gpu in _MI355X_NODES}
+        cards = {gpu: {"power_cap_w": 1400.0, "perf_level": "auto"} for gpu in _MI355X_ROCM_ORDER}
         monkeypatch.setattr(gpu_power_settings, "read_gpu_power_settings", lambda: cards)
         reader = _no_node_command if npm is None else _node_reader(npm, 8000)
         monkeypatch.setattr(gpu_power_settings, "read_node_power_settings", reader)

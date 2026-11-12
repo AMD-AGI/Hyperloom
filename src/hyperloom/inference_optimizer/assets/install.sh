@@ -11,14 +11,10 @@
 # Stack (in order):
 #   1. inference_optimizer + extras (pulls in claude_agent_sdk via
 #      pyproject `[test]` extra)
-#   2. Magpie (benchmark engine) pip-installed from MAGPIE_PACKAGE_SPEC,
-#      pinned to MAGPIE_REF (a commit SHA or tag)
-#   2b. Magpie compatibility patches (SGLang custom-tokenizer trust +
-#       eval-concurrency flag scrub); idempotent no-ops on re-run. The
-#       default MAGPIE_REF already copies benchmark scripts atomically
-#       upstream, so no benchmarker.py rewrite is applied here.
-#   3. InferenceX checkout: clone from upstream pinned to INFERENCEX_REF
-#      (a commit SHA), sets INFERENCEX_PATH for runtime
+#   2. InferenceSuite offline staging: the InferenceX client, GSM8K task and
+#      AgentX harness at the commit inference_suite.pins pins, in
+#      INFERENCE_SUITE_TOOL_CACHE
+#   3. Benchmark client and scriptable quality-gate deps in $PYTHON
 #   4. Kernel-agent tools: ray + ray-head bring-up, TraceLens, GEAK, the
 #      Claude CLI and the LLM gateway env, from the steps in the sibling
 #      install_kernel_tools.sh (sourced, not run on its own).
@@ -45,9 +41,10 @@ for _venv_bin in "${VIRTUAL_ENV:+${VIRTUAL_ENV}/bin}" /opt/venv/bin /venv/bin /o
 done
 
 # Single artefact root: everything writable defaults to $USER_DATA_PATH so
-# operators can monitor a run end-to-end by tailing one directory. Magpie
-# clone, source mirrors, and generated env / GEAK config all derive from
-# $HYPERLOOM_RUNTIME_DIR.
+# operators can monitor a run end-to-end by tailing one directory. Source
+# mirrors and GEAK config derive from $HYPERLOOM_RUNTIME_DIR; the
+# kernel-agent env file, which carries credentials, does not (see
+# runtime_env_derive_runtime_paths).
 # Removed envs: WORKSPACE_ROOT / WORKSPACE_PATH (collapsed into USER_DATA_PATH).
 _script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
@@ -166,32 +163,7 @@ EOF
   done
 }
 
-MAGPIE_REPO="${MAGPIE_REPO:-https://github.com/AMD-AGI/Magpie.git}"
-# Pin Magpie to a release commit/tag instead of the default branch. Operators can
-# re-pin with MAGPIE_REF=<tag|sha>. Must stay at or above 1eb3df69de9cb26cb5c8109e43371dd1abb9bbed
-# (Magpie PR #114), whose vLLM benchmark scripts carry the client ``--tokenizer-mode`` hook and which
-# copies benchmark scripts via ``_copy_benchmark_script_atomic``.
-# ``ensure_magpie()`` checks the installed revision unless the operator supplies a source tree.
-# tree on disk is NOT upgraded to this ref — only fresh installs and explicit reinstalls are.
-MAGPIE_REF="${MAGPIE_REF:-06b7cf6e185fdd49483a512e350cb3964ba3bf68}"
-MAGPIE_PACKAGE_SPEC="${MAGPIE_PACKAGE_SPEC:-magpie-eval @ git+${MAGPIE_REPO}@${MAGPIE_REF}}"
-
-# MAGPIE_PATH points install.sh AND the Python optimizer (cli.py /
-# _grid_runner.py / manifest.py) at Magpie's import root. When unset by the
-# operator, ensure_magpie resolves it from the pip-installed package; explicit
-# overrides remain supported for local source checkouts / debugging.
-MAGPIE_PATH_EXPLICIT=0
-if [ -n "${MAGPIE_PATH:-}" ]; then
-  MAGPIE_PATH_EXPLICIT=1
-fi
-MAGPIE_PATH="${MAGPIE_PATH:-${_open_source_root}/Magpie}"
 INFERENCEX_REPO="${INFERENCEX_REPO:-https://github.com/SemiAnalysisAI/InferenceX.git}"
-# Synthetic and MLPerf patches target this revision. Native AgentX delegates
-# InferenceX checkout selection to the pinned Magpie release. Operators can
-# re-pin synthetic runs with INFERENCEX_REF=<tag|branch|sha>.
-INFERENCEX_REF="${INFERENCEX_REF:-3d5581562f643f9bdeb8410cd924e2c70906c966}"
-_INFERENCEX_SHA="$(_resolve_ref_sha "$INFERENCEX_REPO" "$INFERENCEX_REF")"
-INFERENCEX_DEFAULT_DIR="${INFERENCEX_DEFAULT_DIR:-${_open_source_root}/InferenceX@${_INFERENCEX_SHA}}"
 
 DRY_RUN=0
 CHECK_ONLY=0
@@ -206,8 +178,9 @@ Installs:
   - inference_optimizer Python package (with claude_agent_sdk via [test])
   - langfuse SDK, but ONLY when HYPERLOOM_LANGFUSE_ENABLE is on in the
     environment / .env (opt-in live trace push; skipped otherwise)
-  - Magpie (pip-installed from MAGPIE_PACKAGE_SPEC)
-  - Clones InferenceX pinned to INFERENCEX_REF and exports INFERENCEX_PATH
+  - Stages the InferenceSuite tools (InferenceX client, GSM8K task, AgentX
+    harness) at the pinned commit into INFERENCE_SUITE_TOOL_CACHE
+  - Benchmark client deps and scriptable quality-gate deps (SSIM/LPIPS)
   - Ray + ray-head start, TraceLens, GEAK, and LLM gateway env for the kernel agent.
   - src/hyperloom/agents/framework/ is part of this editable install (PR discovery, isolation helpers).
 
@@ -217,24 +190,13 @@ Options:
   -h, --help             Show this help
 
 Env overrides:
-  REPO_ROOT, MAGPIE_REPO,
-  MAGPIE_REF (commit SHA / tag / branch the Magpie package is pinned to;
-    default is a commit that already copies benchmark scripts atomically),
-  MAGPIE_PACKAGE_SPEC, MAGPIE_PATH, INFERENCEX_REPO,
-  INFERENCEX_REF (commit SHA / tag / branch the InferenceX clone is pinned
-    to; default is a current upstream HEAD SHA),
-  INFERENCEX_DEFAULT_DIR, INFERENCEX_PATH,
+  REPO_ROOT, INFERENCEX_REPO (where the pinned InferenceX commit is fetched
+    from), INFERENCE_SUITE_TOOL_CACHE,
   PYTHON, TRACELENS_ROOT,
   TRACELENS_INTERNAL_ROOT (set to enable the optional internal extension;
     unset => open-source-only),
   USER_DATA_PATH,
-  HYPERLOOM_RUNTIME_DIR, KERNEL_AGENT_ENV, HYPERLOOM_ROOT,
-  PATCH_MAGPIE (=1; set 0 to skip the SGLang trust and eval-concurrency
-  compatibility patches in step 2b),
-  MAGPIE_EVAL_FLAG_STRICT (=1; abort when the redundant
-    --concurrent-requests eval flag cannot be removed from a Magpie
-    benchmark script. Set 0 only when GSM8K accuracy eval is not
-    required — with the flag live, every RUN_EVAL=true baseline aborts)
+  HYPERLOOM_RUNTIME_DIR, KERNEL_AGENT_ENV, HYPERLOOM_ROOT
 EOF
 }
 
@@ -252,17 +214,6 @@ log() { echo "[inference-optimizer] $*"; }
 warn() { echo "[inference-optimizer WARN] $*" >&2; }
 die() { echo "[inference-optimizer ERROR] $*" >&2; exit 1; }
 
-# Truthy/falsy test for boolean-ish env vars. Numeric `-eq` comparisons choke on
-# string values (`[ false -eq 0 ]` errors and reads as true under set -e), so a
-# user writing MAGPIE_EVAL_FLAG_STRICT=false would get the OPPOSITE of intent. Accept
-# the common spellings case-insensitively; returns success (0) when falsy.
-is_falsy() {
-  case "$(printf '%s' "${1:-}" | tr '[:upper:]' '[:lower:]')" in
-    0|false|no|off|"") return 0 ;;
-    *) return 1 ;;
-  esac
-}
-
 run() {
   log "$*"
   if [ "$DRY_RUN" -eq 0 ] && [ "$CHECK_ONLY" -eq 0 ]; then
@@ -278,7 +229,7 @@ run() {
 # through the shared `run` helper. On success the checkout has a valid HEAD at
 # $ref, so manifest.py's _git_revision_at() still resolves the pinned commit.
 # Returns non-zero (stopping at the first failed step) so callers can choose
-# fail-loud (Magpie) or fail-soft (InferenceX).
+# fail-loud or fail-soft.
 git_fetch_pinned() {
   local repo="$1" dir="$2" ref="$3" label="$4"
   if [[ "$ref" =~ ^[0-9a-fA-F]{7,40}$ ]]; then
@@ -507,7 +458,7 @@ persist_vllm_image_source_env() {
 }
 
 # Serialize concurrent installs that share one open-source checkout root
-# (Magpie / InferenceX, plus GEAK / TraceLens for the kernel agent). With no lock, two installs race and corrupt each
+# (the InferenceSuite staging fetch, plus GEAK / TraceLens for the kernel agent). With no lock, two installs race and corrupt each
 # other's half-cloned checkouts (observed: GEAK src/minisweagent/... missing,
 # repeated install failures). The lock lives in $_open_source_root (pod-local)
 # so it tracks exactly what it guards.
@@ -535,14 +486,30 @@ acquire_install_lock() {
 # configures both sides on one host.
 #
 # Loader (env wins; never overwrites a key that is already set):
-#   env > $REPO_ROOT/.env
+#   env > $REPO_ROOT/.env > $KERNEL_AGENT_ENV (credentials only, for a checkout another account can write,
+#   whose .env lends none)
 #
 # Strict mode by design: --check-only / --dry-run is the only path that
 # downgrades the die to a warn (introspection mode, no install runs).
 preflight_load_dotenv() {
+  local elsewhere
   load_dotenv_no_clobber
   if [ "${DOTENV_LOADED_COUNT:-0}" -gt 0 ]; then
     log "loaded ${DOTENV_LOADED_COUNT} missing var(s) from $REPO_ROOT/.env (env wins)"
+  fi
+  # A checkout another account can write keeps no credentials in .env: write_env_file put them in this container's
+  # kernel-agent env file alone, so a re-install here takes them from there, as preflight does.
+  elsewhere="$(runtime_env_dotenv_credentials_elsewhere "$REPO_ROOT/.env")"
+  [ -n "$elsewhere" ] || return 0
+  # load_dotenv_no_clobber took none of its credential lines: another account may have written them, and its gateway
+  # URL or headers would carry this account's key to it. Nor are they copied into the kernel-agent env file.
+  if [ "${DOTENV_SKIPPED_CREDENTIAL_COUNT:-0}" -gt 0 ]; then
+    warn "ignored ${DOTENV_SKIPPED_CREDENTIAL_COUNT} credential line(s) in $REPO_ROOT/.env, which keeps none, as ${elsewhere}"
+  fi
+  if ! runtime_env_load_kernel_agent_credentials "$KERNEL_AGENT_ENV"; then
+    warn "credentials not taken from ${KERNEL_AGENT_ENV}; export them in this shell"
+  elif [ "$RUNTIME_ENV_CREDENTIALS_LOADED" -gt 0 ]; then
+    log "loaded ${RUNTIME_ENV_CREDENTIALS_LOADED} missing credential(s) from ${KERNEL_AGENT_ENV} (env wins): $REPO_ROOT/.env keeps none, as ${elsewhere}"
   fi
 }
 
@@ -645,11 +612,18 @@ preflight_validate_credentials() {
     return 0
   fi
   missing+=("a self-consistent provider side: ANTHROPIC_BASE_URL + ANTHROPIC_API_KEY, or OPENAI_BASE_URL + OPENAI_API_KEY")
-  local env_file_status
+  local env_file_status elsewhere kernel_agent_source=""
   if [ -f "$REPO_ROOT/.env" ]; then
     env_file_status="present"
   else
     env_file_status="not found"
+  fi
+  elsewhere="$(runtime_env_dotenv_credentials_elsewhere "$REPO_ROOT/.env")"
+  if [ -n "$elsewhere" ]; then
+    kernel_agent_source="
+  - \$KERNEL_AGENT_ENV  (${KERNEL_AGENT_ENV}): .env keeps no credentials, as
+    ${elsewhere}; export them in the shell that
+    runs install.sh, once per container: a re-install in the same container finds them here."
   fi
   if [ "$CHECK_ONLY" -eq 1 ] || [ "$DRY_RUN" -eq 1 ]; then
     warn "missing credential(s): ${missing[*]} (.env=${env_file_status}); " \
@@ -663,7 +637,7 @@ preflight_validate_credentials() {
 
 Tried loading from:
   - shell environment
-  - \$REPO_ROOT/.env  (${env_file_status}: ${REPO_ROOT}/.env)
+  - \$REPO_ROOT/.env  (${env_file_status}: ${REPO_ROOT}/.env)${kernel_agent_source}
 
 Fix one of:
   1. Anthropic:
@@ -689,7 +663,7 @@ preflight_validate_credentials
 # --- 0. Resolve PYTHON ---
 # On hyperloom / sgl-workspace containers the canonical ROCm stack lives in
 # /opt/venv (preinstalled torch+rocm, sglang, vllm, aiter, sgl_kernel,
-# triton, Magpie, inference_optimizer, claude_agent_sdk, ray). Always
+# triton, inference_optimizer, claude_agent_sdk, ray). Always
 # prefer that interpreter — bare-image PYTHONs (e.g. /usr/bin/python3) on a
 # ROCm pod silently pull plain `torch` from PyPI on `pip install -e .[test]`,
 # which is the NVIDIA CUDA wheel and crashes downstream RAG / baseline
@@ -809,7 +783,8 @@ try:
     out["torch_version"] = torch.__version__
     out["hip"] = getattr(torch.version, "hip", None)
     out["cuda_str"] = getattr(torch.version, "cuda", None)
-except Exception as exc:
+except BaseException as exc:
+    # A module ``import torch`` loads may call ``sys.exit`` instead of raising.
     out["rc"] = 2
     out["error"] = type(exc).__name__ + ": " + str(exc)[:200]
 print(json.dumps(out))
@@ -827,9 +802,17 @@ PY
     warn "torch probe produced no output (PYTHON=${PYTHON})"
     return 0
   fi
-  local rc; rc="$("$PYTHON" -c "import json,sys; d=json.loads(sys.argv[1]); print(d.get('rc',0))" "$probe" 2>/dev/null || echo 0)"
+  # The verdict is the last line; modules imported by torch may print before it.
+  local probe_json; probe_json="$(printf '%s\n' "$probe" | tail -1)"
+  local rc; rc="$("$PYTHON" -c "import json,sys; d=json.loads(sys.argv[1]); print(d.get('rc',0))" "$probe_json" 2>/dev/null || echo unreadable)"
+  if [ "$rc" = "unreadable" ]; then
+    warn "torch probe did not return readable JSON (PYTHON=${PYTHON}); leaving the torch/GPU match undetermined"
+    warn "last probe line: ${probe_json}"
+    return 0
+  fi
   if [ "$rc" = "2" ]; then
-    warn "torch is NOT importable from PYTHON=${PYTHON}"
+    local probe_error; probe_error="$("$PYTHON" -c "import json,sys; print(json.loads(sys.argv[1]).get('error') or '')" "$probe_json" 2>/dev/null || echo "")"
+    warn "torch is NOT importable from PYTHON=${PYTHON}: ${probe_error}"
     warn "this pod has ROCm GPUs (rocm-smi works) -- letting pip install proceed"
     warn "would pull plain 'torch' from PyPI (= NVIDIA CUDA wheel) and break"
     warn "downstream RAG / baseline / kernel steps with 'Found no NVIDIA driver'."
@@ -843,8 +826,8 @@ PY
     warn "INFERENCE_OPTIMIZER_SKIP_TORCH_GATE=1 set; continuing despite missing torch"
     return 0
   fi
-  local hip; hip="$("$PYTHON" -c "import json,sys; d=json.loads(sys.argv[1]); print(d.get('hip') or '')" "$probe" 2>/dev/null || echo "")"
-  local tv;  tv="$("$PYTHON"  -c "import json,sys; d=json.loads(sys.argv[1]); print(d.get('torch_version') or '')" "$probe" 2>/dev/null || echo "")"
+  local hip; hip="$("$PYTHON" -c "import json,sys; d=json.loads(sys.argv[1]); print(d.get('hip') or '')" "$probe_json" 2>/dev/null || echo "")"
+  local tv;  tv="$("$PYTHON"  -c "import json,sys; d=json.loads(sys.argv[1]); print(d.get('torch_version') or '')" "$probe_json" 2>/dev/null || echo "")"
   if [ -z "$hip" ]; then
     warn "torch=${tv} in PYTHON=${PYTHON} is NOT a ROCm build (torch.version.hip is None)"
     warn "but this pod reports ROCm GPUs via rocm-smi. RAG-index / baseline / kernel"
@@ -869,14 +852,10 @@ log "HYPERLOOM_RUNTIME_DIR=${HYPERLOOM_RUNTIME_DIR}"
 log "HYPERLOOM_ROOT=${HYPERLOOM_ROOT}"
 log "open_source_root=${_open_source_root}"
 log "KERNEL_AGENT_ENV=${KERNEL_AGENT_ENV}"
-log "MAGPIE_PATH=${MAGPIE_PATH}"
 log "INFERENCEX_REPO=${INFERENCEX_REPO}"
-log "INFERENCEX_DEFAULT_DIR=${INFERENCEX_DEFAULT_DIR}"
 export USER_DATA_PATH HYPERLOOM_RUNTIME_DIR KERNEL_AGENT_ENV
-# Pre-create the writable runtime root so ensure_magpie / install_kernel_agent_tools
-# never race on missing parents (Magpie's pip install -e writes egg-info
-# under MAGPIE_PATH; the kernel-agent steps write kernel-agent.env.sh into
-# HYPERLOOM_RUNTIME_DIR).
+# Pre-create the writable roots so install_kernel_agent_tools never races on
+# missing parents.
 if [ "$DRY_RUN" -eq 0 ] && [ "$CHECK_ONLY" -eq 0 ]; then
   mkdir -p "${HYPERLOOM_RUNTIME_DIR}" "${_open_source_root}"
 fi
@@ -990,6 +969,86 @@ _check_kernelforge_ready() {
   else
     warn "openai_codex not importable; an OpenAI-only deployment cannot construct the forge codex provider"
   fi
+}
+
+# Print, one per line, the requirements the installed hyperloom-inference_optimizer
+# declares for the extra $1 (its Requires-Dist entries under `extra == "$1"`), read
+# off the distribution's own metadata so pyproject.toml stays the one place they are
+# pinned. With --unsatisfied, only those no installed distribution satisfies yet.
+# Fails when the metadata cannot be read or declares nothing for the extra.
+# REPO_ROOT is prepended to PYTHONPATH for the reason ensure_inference_optimizer
+# gives: a `pip install --target` root is not on the default sys.path.
+_installed_extra_requirements() {
+  env PYTHONPATH="${REPO_ROOT}${PYTHONPATH:+:${PYTHONPATH}}" "$PYTHON" - "$@" <<'PY'
+import sys
+from importlib.metadata import PackageNotFoundError, requires, version
+
+try:
+    from packaging.requirements import Requirement
+except ImportError:
+    from pip._vendor.packaging.requirements import Requirement
+
+extra, unsatisfied_only = sys.argv[1], "--unsatisfied" in sys.argv[2:]
+try:
+    specs = requires("hyperloom-inference_optimizer") or []
+except PackageNotFoundError:
+    raise SystemExit(1)
+
+
+def satisfied(req):
+    try:
+        installed = version(req.name)
+    except PackageNotFoundError:
+        return False
+    return not req.extras and req.specifier.contains(installed, prereleases=True)
+
+
+declared = []
+for spec in specs:
+    req = Requirement(spec)
+    if req.marker and req.marker.evaluate({"extra": extra}):
+        req.marker = None
+        declared.append(req)
+if not declared:
+    raise SystemExit(1)
+for req in declared:
+    if not (unsatisfied_only and satisfied(req)):
+        print(req)
+PY
+}
+
+# --- 1a. the `hosted` extra, on a hosted run of a packaged install ---
+# A hosted image installs the wheel with --no-deps and then runs this script, and
+# the packaged branch above installs only [llm,forge]: without this step a hosted
+# run lacks what the `hosted` extra declares (the sandbox SDK among it). The
+# trigger is HYPERLOOM_STATE_DIR, which the hosted entry
+# requires on every run and nothing else sets. A source checkout already has the
+# extra through [test], and a local packaged install never uses it, so neither
+# changes. Requirements an installed distribution already satisfies are not asked
+# for: an image that ships them (or an offline one) runs no pip at all.
+ensure_hosted_extra() {
+  if [ "$HYPERLOOM_PACKAGED_INSTALL" -ne 1 ] || [ -z "${HYPERLOOM_STATE_DIR:-}" ]; then
+    return 0
+  fi
+  local reqs
+  reqs="$(_installed_extra_requirements hosted --unsatisfied)" \
+    || die "hosted extra: could not read its requirements from the installed hyperloom-inference_optimizer metadata"
+  if [ -z "$reqs" ]; then
+    log "hosted extra: every requirement is already installed"
+    return 0
+  fi
+  if [ "$CHECK_ONLY" -eq 1 ]; then
+    warn "hosted extra: not installed: ${reqs//$'\n'/ }"
+    return 0
+  fi
+  if [ "$DRY_RUN" -eq 1 ]; then
+    log "would run: ${PYTHON} -m pip install ${reqs//$'\n'/ }"
+    return 0
+  fi
+  log "hosted extra: installing ${reqs//$'\n'/ }"
+  # shellcheck disable=SC2086 -- one requirement per line, split intended
+  "$PYTHON" -m pip install --quiet "${PIP_EXTRA[@]}" $reqs \
+    || die "hosted extra: pip install failed; hosted measurement cannot sign, create sandboxes or archive results"
 }
 
 # --- 1b. forge GEMM tuning (`kernelforge gemm-tune`) ---
@@ -1327,19 +1386,7 @@ ensure_rocprof_compute() {
     # Reading Requires-Dist off the installed metadata asks for exactly the
     # profiling dependencies and can touch nothing else.
     local reqs
-    reqs="$("$PYTHON" -c '
-from importlib.metadata import PackageNotFoundError, requires
-from packaging.requirements import Requirement
-try:
-    specs = requires("hyperloom-inference_optimizer") or []
-except PackageNotFoundError:
-    raise SystemExit(1)
-for spec in specs:
-    req = Requirement(spec)
-    if req.marker and req.marker.evaluate({"extra": "forge-profiling"}):
-        req.marker = None
-        print(str(req))
-' 2>/dev/null)" || reqs=""
+    reqs="$(_installed_extra_requirements forge-profiling 2>/dev/null)" || reqs=""
     if [ -n "$reqs" ]; then
       # shellcheck disable=SC2086 -- one requirement per line, split intended
       "$PYTHON" -m pip install --quiet "${PIP_EXTRA[@]}" $reqs \
@@ -1432,212 +1479,58 @@ for spec in specs:
   return 0
 }
 
-# --- 2. Magpie ---
-# The install state is the pip-installed package specified by
-# $MAGPIE_PACKAGE_SPEC. $MAGPIE_PATH remains exported for runtime code that
-# needs to inspect Magpie's package files (patcher / manifest / InferenceX
-# discovery); when not explicitly set, it resolves to the installed package
-# root after import.
-ensure_magpie() {
-  log "ensuring Magpie package ${MAGPIE_PACKAGE_SPEC}"
-  # An older install wrote MAGPIE_PATH into .env; one that no longer holds the package is not an override to keep.
-  if [ "$MAGPIE_PATH_EXPLICIT" -eq 1 ] && [ ! -f "${MAGPIE_PATH}/Magpie/__init__.py" ]; then
-    warn "MAGPIE_PATH=${MAGPIE_PATH} holds no Magpie package; resolving it from the installed package instead"
-    MAGPIE_PATH_EXPLICIT=0
-  fi
-  if [ "$CHECK_ONLY" -eq 1 ]; then
-    if "$PYTHON" -c "import Magpie" >/dev/null 2>&1; then
-      log "Magpie importable"
-    else
-      warn "Magpie not importable (check-only mode, skipping pip install)"
-    fi
-    if [ "$MAGPIE_PATH_EXPLICIT" -eq 0 ] && ! "$PYTHON" "${_script_dir}/check_magpie.py" "$MAGPIE_REF" >/dev/null 2>&1; then
-      _STALE_KEYS+=("MAGPIE_REF")
-    fi
-    return 0
-  fi
-  if [ "$DRY_RUN" -eq 1 ]; then
-    log "would pip install Magpie package: ${MAGPIE_PACKAGE_SPEC}"
-    return 0
-  fi
-  if [ "$DRY_RUN" -eq 0 ]; then
-    if { [ "$MAGPIE_PATH_EXPLICIT" -eq 1 ] && "$PYTHON" -c "import Magpie" >/dev/null 2>&1; } ||
-       "$PYTHON" "${_script_dir}/check_magpie.py" "$MAGPIE_REF"; then
-      log "Magpie revision already installed or explicitly supplied; skipping pip install"
-    else
-      "$PYTHON" -m pip install --quiet "${PIP_EXTRA[@]}" "$MAGPIE_PACKAGE_SPEC"
-      "$PYTHON" -c "import Magpie" >/dev/null
-      log "Magpie installed OK from ${MAGPIE_PACKAGE_SPEC}"
-    fi
-    local installed_root
-    installed_root="$("$PYTHON" - <<'PY'
-from pathlib import Path
-import Magpie
-print(Path(Magpie.__file__).resolve().parent.parent)
-PY
-)"
-    if [ "$MAGPIE_PATH_EXPLICIT" -eq 0 ]; then
-      MAGPIE_PATH="$installed_root"
-      export MAGPIE_PATH
-      log "MAGPIE_PATH resolved from installed package: ${MAGPIE_PATH}"
-    else
-      log "MAGPIE_PATH override preserved: ${MAGPIE_PATH}"
-    fi
-  fi
-}
+# --- 2. InferenceSuite offline staging (D11) ---
+#
+# A round fetches nothing: it runs the InferenceX client, GSM8K task, AgentX
+# aggregator and AgentX harness venv staged here at the commit
+# inference_suite.pins pins, and its eval under $PYTHON with the pinned lm-eval.
+# It refuses with staging_missing when the tool cache's manifest lists anything
+# absent, changed or off-pin, or $PYTHON lacks that lm-eval. A stage without
+# --source completes a cache that verifies by installing lm-eval, fetching nothing.
+INFERENCE_SUITE_TOOL_CACHE="${INFERENCE_SUITE_TOOL_CACHE:-${_open_source_root}/inference-suite-tools}"
 
-# --- 2b. Atomic-write patch for Magpie._prepare_benchmark_scripts (compat patches only) ---
-# Two gaps between the pinned Magpie/InferenceX revision and what Hyperloom
-# needs: SGLang custom-tokenizer trust gating for MAGPIE_TRUST_REMOTE_CODE=1
-# (Magpie's client call sites never forward the `trust` flag upstream), and
-# the redundant `--concurrent-requests` flag InferenceX's `run_lm_eval`
-# rejects. Magpie is invoked as a subprocess, so monkey-patching from the
-# Coordinator process does not reach it; we patch the cloned source in place
-# at install time. The patcher itself is idempotent + flock-serialised +
-# atomic-rename (see `_magpie_patcher.py`), so re-runs are O(1) no-ops.
-#
-# Override the gate via PATCH_MAGPIE=0 to skip the step entirely.
-ensure_magpie_compat_patches() {
-  if is_falsy "${PATCH_MAGPIE:-1}"; then
-    log "PATCH_MAGPIE is falsy — skipping Magpie compatibility patches"
-    return 0
-  fi
-  if [ "$DRY_RUN" -eq 1 ]; then
-    log "would apply Magpie SGLang trust + eval-concurrency compatibility patches under ${MAGPIE_PATH}"
-    return 0
-  fi
-  log "applying Magpie SGLang trust + eval-concurrency compatibility patches"
-  # Exit-code contract (read below): 0 ok · 2 remote-trust drift · 5 eval-flag survives.
-  # INFERENCEX_PATH is passed explicitly: the patcher also has to scrub the
-  # InferenceX ``benchmarks/`` copies Magpie executes and teach
-  # ``benchmark_lib.sh::run_lm_eval`` to tolerate the flag. This step therefore
-  # MUST run after ensure_inferencex has exported INFERENCEX_PATH — see the
-  # call ordering at the bottom of this script.
-  if MAGPIE_PATH="$MAGPIE_PATH" INFERENCEX_PATH="${INFERENCEX_PATH:-}" "$PYTHON" - <<'PY'
-import os, sys
-from hyperloom.orchestrator.actions.executors._magpie_patcher import (
-    magpie_scripts_patch_status,
-)
-status = magpie_scripts_patch_status(
-    os.environ["MAGPIE_PATH"],
-    os.environ.get("INFERENCEX_PATH") or None,
-)
-print(f"_magpie_patcher: remote_trust_ok={status.remote_trust_ok} "
-      f"eval_flag_ok={status.eval_flag_ok}",
-      file=sys.stderr)
-if status.ok:
-    sys.exit(0)
-if not status.remote_trust_ok:
-    sys.exit(2)
-# eval_flag_ok is False ONLY when a live `run_eval --concurrent-requests`
-# survives in a caller script AND InferenceX's run_lm_eval would reject it
-# (a defence-in-depth patch that merely could not be applied, with no live
-# flag, is NOT counted as a failure -- install-time now matches the run-time
-# ensure_eval_concurrency_compat judgement). This is the genuinely fatal case:
-# every RUN_EVAL=true baseline aborts on 'Unknown parameter'. Distinct exit so
-# install can name the failure mode.
-if not status.eval_flag_ok:
-    sys.exit(5)
-sys.exit(1)
-PY
-  then
-    log "Magpie compatibility patches OK"
-  else
-    rc=$?
-    if [ "$rc" -eq 2 ]; then
-      warn "Magpie SGLang remote trust patch did not apply. If MAGPIE_TRUST_REMOTE_CODE=1 is required for custom-code models (for example Kimi/Qwen tokenizer paths), remote benchmark clients may still fail to pass trust; review _magpie_patcher.py or set PATCH_MAGPIE=0 only if this is intentional."
-    elif [ "$rc" -eq 5 ]; then
-      # Fail-loud by default: a surviving --concurrent-requests aborts EVERY
-      # RUN_EVAL=true baseline in InferenceX's run_lm_eval arg parser, no
-      # results*.json is written, and the baseline accuracy gate then stops the
-      # whole run with `baseline_accuracy_failed`. There is no salvage: the
-      # executor deliberately does NOT fall back to RUN_EVAL=false for a genuine
-      # baseline (a throughput-only baseline cannot satisfy the accuracy gate).
-      # Set MAGPIE_EVAL_FLAG_STRICT=0 only when accuracy eval is genuinely
-      # not required for this deployment.
-      if is_falsy "${MAGPIE_EVAL_FLAG_STRICT:-1}"; then
-        warn "Magpie redundant --concurrent-requests eval flag could not be stripped from a generic benchmark script (unrecognised run_eval line); MAGPIE_EVAL_FLAG_STRICT=${MAGPIE_EVAL_FLAG_STRICT:-} (falsy), continuing anyway — RUN_EVAL=true baselines will abort on InferenceX's 'Unknown parameter: --concurrent-requests'."
-      else
-        die "Magpie redundant --concurrent-requests eval flag could not be stripped from a generic benchmark script (unrecognised run_eval line), and InferenceX's run_lm_eval could not be taught to tolerate it. Every RUN_EVAL=true baseline will abort with 'Unknown parameter: --concurrent-requests' and the run will stop with baseline_accuracy_failed. Concurrency must flow via EVAL_CONCURRENT_REQUESTS (fallback CONC), not the flag — fix the script's run_eval line or review _magpie_patcher.py. Set MAGPIE_EVAL_FLAG_STRICT=0 to downgrade to a warning if accuracy eval is not required."
-      fi
-    else
-      die "Magpie compatibility patch step failed (rc=$rc): the patcher process exited before reporting remote_trust_ok/eval_flag_ok. Check MAGPIE_PATH/INFERENCEX_PATH and review _magpie_patcher.py."
-    fi
-  fi
-}
-
-# --- 3. InferenceX checkout: fresh clone from upstream ---
-#
-# Previously this function scanned a list of shared-filesystem candidates
-# (`/shared/hyperloom/InferenceX`, `/shared/fully-local/.../InferenceX`,
-# etc.) and pointed every install at whichever it found first. That
-# multi-install / shared-checkout layout is the upstream source of the
-# concurrent-write races behind the Hyperloom #C1 script-tearing race —
-# every fresh Magpie subprocess copied its scripts on top of the same shared
-# files, while bash interpreters from neighbouring installs were `source`-ing
-# them. Cloning a per-install copy here eliminates the cross-install fan-in;
-# the pinned Magpie ref copies scripts atomically upstream.
-#
-# Policy:
-#   * INFERENCEX_PATH set and exists -> preserve verbatim. This is the
-#     dev / CI override (caller is explicitly opting out of fresh
-#     clones, e.g. iterating on a local edit).
-#   * Otherwise -> fetch INFERENCEX_REF from INFERENCEX_REPO into
-#     INFERENCEX_DEFAULT_DIR via the shared git_fetch_pinned() dance
-#     (SHA-aware shallow fetch-checkout, mirrors the GEAK pin). If a clone
-#     already exists there from a previous install we leave it as-is
-#     (idempotent re-runs) — the per-install isolation guarantee is already
-#     met, and re-cloning would just churn benchmark scripts that the Magpie
-#     patch already keeps consistent on disk.
-#   * Pinned to INFERENCEX_REF (a commit SHA by default) so a fresh install
-#     is reproducible. We still record the resolved commit into the session
-#     manifest (see manifest.py / _describe_dep) so runs stay traceable even
-#     when an operator overrides INFERENCEX_REF.
-ensure_inferencex() {
-  if [ -n "${INFERENCEX_PATH:-}" ] && [ -d "$INFERENCEX_PATH" ]; then
-    log "INFERENCEX_PATH = $INFERENCEX_PATH (preserved from env; skipping fresh clone)"
-    export INFERENCEX_PATH
-    return 0
-  fi
-  INFERENCEX_PATH="$INFERENCEX_DEFAULT_DIR"
-  if [ -d "$INFERENCEX_PATH/.git" ] || [ -d "$INFERENCEX_PATH/benchmarks" ]; then
-    log "InferenceX already cloned at ${INFERENCEX_PATH}; preserving existing checkout"
-    export INFERENCEX_PATH
+ensure_inference_suite_staging() {
+  local commit checkout sha
+  if sha="$("$PYTHON" -m inference_suite.staging check --tool-cache "$INFERENCE_SUITE_TOOL_CACHE")"; then
+    log "InferenceSuite tools staged at ${INFERENCE_SUITE_TOOL_CACHE} (manifest sha256 ${sha})"
     return 0
   fi
   if [ "$CHECK_ONLY" -eq 1 ]; then
-    warn "InferenceX not present at ${INFERENCEX_PATH} (check-only mode, skipping clone)"
+    _STALE_KEYS+=("INFERENCE_SUITE_TOOL_CACHE")
     return 0
   fi
+  commit="$("$PYTHON" -c 'from inference_suite.pins import INFERENCEX_CLIENT_COMMIT; print(INFERENCEX_CLIENT_COMMIT)')"
   if [ "$DRY_RUN" -eq 1 ]; then
-    log "would fetch InferenceX pinned to INFERENCEX_REF=${INFERENCEX_REF} from ${INFERENCEX_REPO} -> ${INFERENCEX_PATH}"
-    export INFERENCEX_PATH
+    log "would stage InferenceX ${commit} from ${INFERENCEX_REPO} into ${INFERENCE_SUITE_TOOL_CACHE}"
     return 0
   fi
-  log "cloning fresh InferenceX pinned to ${INFERENCEX_REF} from ${INFERENCEX_REPO} -> ${INFERENCEX_PATH}"
-  mkdir -p "$(dirname "$INFERENCEX_PATH")"
-  if ! git_fetch_pinned "$INFERENCEX_REPO" "$INFERENCEX_PATH" "$INFERENCEX_REF" "InferenceX"; then
-    warn "InferenceX clone failed. GSM8K eval will fail without it. Set"
-    warn "INFERENCEX_PATH to a pre-cloned tree to skip this step."
+  if sha="$("$PYTHON" -m inference_suite.staging stage --tool-cache "$INFERENCE_SUITE_TOOL_CACHE")"; then
+    log "InferenceSuite tools staged at ${INFERENCE_SUITE_TOOL_CACHE} (manifest sha256 ${sha}); installed the pinned lm-eval into ${PYTHON}"
     return 0
   fi
-  export INFERENCEX_PATH
-  log "InferenceX cloned at ${INFERENCEX_PATH} (pinned ${INFERENCEX_REF})"
+  checkout="${INFERENCE_SUITE_TOOL_CACHE}/.source-${commit}"
+  rm -rf -- "$checkout"
+  mkdir -p "$INFERENCE_SUITE_TOOL_CACHE"
+  # Fail-soft: nothing runs a round at install time, and a round on an unstaged cache
+  # refuses with staging_missing naming what is absent.
+  if ! git_fetch_pinned "$INFERENCEX_REPO" "$checkout" "$commit" "InferenceX (InferenceSuite client)"; then
+    warn "could not fetch InferenceX ${commit} from ${INFERENCEX_REPO}; InferenceSuite rounds will refuse with staging_missing"
+    return 0
+  fi
+  if ! sha="$("$PYTHON" -m inference_suite.staging stage --source "$checkout" --tool-cache "$INFERENCE_SUITE_TOOL_CACHE")"; then
+    warn "InferenceSuite staging from ${checkout} failed; InferenceSuite rounds will refuse with staging_missing"
+    return 0
+  fi
+  rm -rf -- "$checkout"
+  log "InferenceSuite tools staged at ${INFERENCE_SUITE_TOOL_CACHE} (manifest sha256 ${sha})"
 }
 
-# --- 4. InferenceX bench_serving runtime deps ---
+# --- 3. Benchmark client runtime deps ---
 #
-# `benchmark_serving.py` lives under InferenceX (not under Magpie's
-# pyproject.toml), so installing Magpie does NOT pull its client-side
-# dependencies. Without these, every Magpie variant launch dies with
-# `ModuleNotFoundError: No module named 'aiohttp'` (or transformers,
-# huggingface_hub, datasets, ...) BEFORE the sglang server is even hit.
-#
-# We install into the same $PYTHON that Magpie uses (resolved to
-# `/opt/venv/bin/python3` on Claw sandboxes via the active PATH at run
-# time). The version pins are intentionally loose: these are stable
-# client-only packages and we want to inherit whatever the container's
-# base image already has rather than forcing churn.
+# The staged InferenceX client runs under the framework interpreter ($PYTHON),
+# which the framework image does not guarantee to carry its client-side
+# imports. Pins stay loose: these are stable client-only packages, and the
+# image's own versions are kept when present.
 _BENCH_SERVING_DEPS=(
   aiohttp
   tqdm
@@ -1685,7 +1578,7 @@ ensure_bench_serving_deps() {
   log "bench_serving deps installed OK"
 }
 
-# --- 4b. Scriptable quality-gate deps (SSIM + LPIPS) ---
+# --- 3b. Scriptable quality-gate deps (SSIM + LPIPS) ---
 #
 # Every scriptable workload with a visual output computes its gate the same way
 # (LPIPS / SSIM / MSE vs a reference): xDiT does, and so does an
@@ -1793,7 +1686,7 @@ ensure_scriptable_quality_deps() {
   done
 }
 
-# --- 4c. Langfuse SDK (opt-in live trace push) ---
+# --- 3c. Langfuse SDK (opt-in live trace push) ---
 # The local reports/trace/*.jsonl ledger never needs this. Only the opt-in
 # live-Langfuse sink (HYPERLOOM_LANGFUSE_ENABLE=1) imports the SDK, and when
 # absent the emitter degrades to a silent no-op — so a run can look "fine"
@@ -1841,7 +1734,7 @@ ensure_langfuse_when_enabled() {
   fi
 }
 
-# --- 5. Kernel-agent tools ---
+# --- 4. Kernel-agent tools ---
 install_kernel_agent_tools() {
   if [ "$DRY_RUN" -eq 1 ]; then
     log "would install ray + TraceLens + GEAK + LLM gateway env"
@@ -1853,7 +1746,7 @@ install_kernel_agent_tools() {
   # A subshell keeps the steps' variables and PATH out of the steps that follow;
   # the pins it finds stale come back through a file, as its _STALE_KEYS ends with it.
   (
-    export REPO_ROOT MAGPIE_PATH HYPERLOOM_ROOT
+    export REPO_ROOT HYPERLOOM_ROOT
     [ -n "${INFERENCEX_PATH:-}" ] && export INFERENCEX_PATH
     [ -n "${TRACELENS_INTERNAL_ROOT:-}" ] && export TRACELENS_INTERNAL_ROOT
     _STALE_KEYS=()
@@ -1872,38 +1765,13 @@ install_kernel_agent_tools() {
 
 
 ensure_inference_optimizer
+ensure_hosted_extra
 ensure_forge_gemm_tune
 ensure_langfuse_when_enabled
-# Hold the install lock for the whole mirror-mutating region (Magpie /
-# InferenceX clones + the kernel-agent GEAK/TraceLens clones).
+# Hold the install lock for the whole mirror-mutating region (the
+# InferenceSuite staging fetch + the kernel-agent GEAK/TraceLens clones).
 acquire_install_lock
-# Magpie is only needed when the Magpie benchmark backend is active. The
-# bypass backend drives InferenceX directly (see benchmark_backend.py), so
-# skip the Magpie install/import and its script-patch when bypass is selected.
-# Default (unset/blank) stays magpie, preserving existing behavior.
-# Mirror Python's resolve_backend_name() normalization (strip THEN lower):
-# sed trims ONLY leading/trailing whitespace (like str.strip()), so " bypass" /
-# "bypass " skip Magpie here to match runtime, while an internal-space value
-# such as "by pass" stays != "bypass" and correctly falls through to Magpie
-# (runtime resolves such unknown values back to magpie). A blanket delete of
-# ALL whitespace would wrongly collapse "by pass" -> "bypass" and diverge.
-HYPERLOOM_BENCHMARK_BACKEND_LC="$(printf '%s' "${HYPERLOOM_BENCHMARK_BACKEND:-}" | sed -e 's/^[[:space:]]*//' -e 's/[[:space:]]*$//' | tr '[:upper:]' '[:lower:]')"
-if [ "$HYPERLOOM_BENCHMARK_BACKEND_LC" = "bypass" ]; then
-  log "benchmark backend is bypass; skipping ensure_magpie + ensure_magpie_compat_patches"
-else
-  ensure_magpie
-fi
-ensure_inferencex
-# Ordering matters: the Magpie script patch also scrubs the redundant
-# `--concurrent-requests` eval flag from the InferenceX `benchmarks/` copies
-# Magpie actually executes, and teaches `benchmark_lib.sh::run_lm_eval` to
-# tolerate it. Both need $INFERENCEX_PATH, which only ensure_inferencex exports
-# — running the patch before it silently skipped those targets and left
-# RUN_EVAL=true baselines aborting on 'Unknown parameter'.
-if [ "$HYPERLOOM_BENCHMARK_BACKEND_LC" != "bypass" ]; then
-  ensure_magpie_compat_patches
-fi
-
+ensure_inference_suite_staging
 ensure_bench_serving_deps
 ensure_scriptable_quality_deps
 activate_vllm_image_source
@@ -1922,7 +1790,7 @@ _write_specialist_secret_env_opt_in() {
     log "would append HYPERLOOM_SPECIALIST_INHERIT_SECRET_ENV=1 to ${KERNEL_AGENT_ENV}"
     return 0
   fi
-  mkdir -p "$(dirname "$KERNEL_AGENT_ENV")"
+  runtime_env_private_kernel_agent_env "$KERNEL_AGENT_ENV" write || die "kernel-agent env file not updated"
   if [ -f "$KERNEL_AGENT_ENV" ] && grep -q '^export HYPERLOOM_SPECIALIST_INHERIT_SECRET_ENV=' "$KERNEL_AGENT_ENV" 2>/dev/null; then
     sed -i 's|^export HYPERLOOM_SPECIALIST_INHERIT_SECRET_ENV=.*|export HYPERLOOM_SPECIALIST_INHERIT_SECRET_ENV=1|' "$KERNEL_AGENT_ENV"
   else
@@ -2016,7 +1884,7 @@ PY
     log "would append INFERENCE_OPTIMIZER_FRAMEWORK_SOURCE_ROOTS=$roots to ${KERNEL_AGENT_ENV}"
     return 0
   fi
-  mkdir -p "$(dirname "$KERNEL_AGENT_ENV")"
+  runtime_env_private_kernel_agent_env "$KERNEL_AGENT_ENV" write || die "kernel-agent env file not updated"
   if [ -f "$KERNEL_AGENT_ENV" ] && grep -q '^export INFERENCE_OPTIMIZER_FRAMEWORK_SOURCE_ROOTS=' "$KERNEL_AGENT_ENV" 2>/dev/null; then
     sed -i "s|^export INFERENCE_OPTIMIZER_FRAMEWORK_SOURCE_ROOTS=.*|export INFERENCE_OPTIMIZER_FRAMEWORK_SOURCE_ROOTS=${roots}|" "$KERNEL_AGENT_ENV"
   else
@@ -2032,13 +1900,13 @@ _write_specialist_secret_env_opt_in
 _probe_framework_source_roots
 pin_framework_image_baselines
 
-_prune_dep_cache "InferenceX" "Magpie"
+_prune_dep_cache "InferenceX"
 if [ "${#_STALE_KEYS[@]}" -gt 0 ]; then
   die "behind the pinned revisions: ${_STALE_KEYS[*]}. Rerun install.sh without --check-only to update them."
 fi
 log "install complete"
 log "kernel-agent env file written: ${KERNEL_AGENT_ENV}"
 log ""
-log "next step: launch python3 -m hyperloom optimize. Its preflight loads"
-log "  \$KERNEL_AGENT_ENV (or \$USER_DATA_PATH/runtime/kernel-agent.env.sh)"
-log "  and stops before the optimisation loop if that file is missing or stale."
+log "next step: launch python3 -m hyperloom optimize in this container. Its preflight"
+log "  loads \$KERNEL_AGENT_ENV (the file above) and stops before the optimisation loop"
+log "  if that file is missing or stale."

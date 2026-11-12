@@ -1,0 +1,458 @@
+# Running Arbor inside a host (component mode)
+
+A host that owns the node, its GPUs and the clock (Hyperloom's multibranch today) can run Arbor as
+a component: Arbor optimizes the worktree the host gives it, on the host's GPU lease and under the
+host's deadline, and the host gates and merges what Arbor keeps. The design, the decisions and
+what is built: [component-mode.md](component-mode.md). Tested on a GPU node with a stand-in host
+([scripts/component/](../scripts/component/README.md)), and run inside Hyperloom's MB. Which side
+runs each step of an MB session: [who-runs-what.md](who-runs-what.md).
+
+## The config
+
+An Arbor campaign config (`pack`, `identity`, `goal`, `framework`, `model_path`, `model_name`,
+`server_env`, `server_flags`, `bench_script`, `correctness_script`; [reference.md](reference.md)),
+with:
+
+```json
+"mode": "component",
+"docker_container": "@host",
+"workspace_root": "/abs/path/to/the/worktree",
+"session_root": "/abs/path/to/the/session",
+"port": 8006,
+"component": {
+  "host": "hyperloom-mb",
+  "deadline": 1893456000,
+  "notes": "/abs/path/to/merged-notes.md",
+  "bench_command": "python3 bench.py --base-url http://127.0.0.1:{port} --result-dir {out}",
+  "outbox": "keeps",
+  "root": "<the sha of the commit the worktree starts at>"
+}
+```
+
+| Key | Meaning |
+|---|---|
+| `mode` | `"component"`. The default, `"standalone"`, is Arbor owning its own node. A session keeps the mode it started in. |
+| `docker_container` | `"@host"`, required: Arbor runs the server and the bench where it runs, and never calls docker. |
+| `workspace_root` | the worktree Arbor edits and commits in: a git repository at the commit the host gave (`component.root`). |
+| `port` | the one port Arbor's server listens on. |
+| `gpu_ids` | optional: the leased cards, a string or a list: their physical numbers, or the server's device numbers under the masks the host sets (from 0; `ROCR_VISIBLE_DEVICES=2,3` with `0,1` is cards 2 and 3). Arbor reads the lease's memory before each server start through those masks. |
+| `directives` | optional: lines every agent reads in its program, at every iteration. The host's rules go here, each starting `Host rule`: what it holds fixed, what it refuses and how it judges a change. The dossier copies them into part 4's rules table (the dossier skill's `## The benchmark's rules`). |
+| `component.host` | the host's name, for the log and the agents' rules. |
+| `component.deadline` | when the run must be over: unix seconds, or ISO 8601 with a timezone (`"2030-01-01T00:00:00Z"`). |
+| `component.seconds` | or a duration in seconds from the first launch; a resume does not restart it. With both, the earlier wins; `0` means none, so `deadline` decides. |
+| `component.notes` | a file of what the host has already measured and merged. Read at every iteration; the agent never redoes what it lists (the first 20 KB go into its prompt). |
+| `component.bench_command` | the host's benchmark client, run unchanged for every measurement, with `{port}` (Arbor's server) and `{out}` (an empty directory per replay, for its results) filled in. Without it, the pack's bench. Warm the server first: the first reading after a start reads low. The agent reads the pack's metric from the client's results, and its second metric too when the pack names one (`p90_interactivity` as 1000 / p90 TPOT in ms if the client reports latencies): without it Arbor's gate is one-axis. |
+| `component.bench_read` | where the client puts each metric: `{"file": "report.json", "keys": {"e2e_norm_intvty_p50": "agentx.e2e_norm_intvty.p50", ...}}`. With it the harness reads every key by its dotted path after each replay (a fixed block the bench agent runs as given), and the agent reads nothing. A report that does not read, a path that is not a number, or no path for the objective's metric makes the iteration NOT_MEASURED; so does a missing value for a guard the map names. `require`, optional, maps dotted paths to the value each must equal, for a round the client did not complete but kept numbers for (`{"run_status": "completed", "agentx.stopped_by_threshold": false}`): a path that is not its value makes the replay NOT_MEASURED, naming what it found (`true` never equals 1). Needs `bench_command`. From interface `component` 4; `require` from Arbor `v0.9.6`. |
+| `component.outbox` | where the KEEP snapshots go, relative to the session (default `keeps`). |
+| `component.root` | the commit the host gave the worktree (a sha): every patch and snapshot is measured against it. Without it, the repository's first commit. A `root` the workspace lacks is refused. |
+| `component.plan` | optional: this campaign's share of the host's directions, when the host runs several Arbors from one set ([below](#the-hosts-plan)). A list of directions, `{"directions": [...]}`, or the path of a JSON file holding either. |
+| `component.stop_at` | optional, `"map"`: the host's dossier pass ([below](#the-dossier-pass)). The run writes the dossier and its map, and exits 0 with `mapped` once the map is set. Not with `plan`. |
+| `component.profile` | optional: the path of a file holding the host's profile of the tree (PRELUDE's op shares for Hyperloom). Read into the agent's prompt at every iteration, like `notes`; the agent cites it and profiles only what it does not cover. |
+| `component.review` | optional, `"host"`: the host reviews the campaign before it starts this run (MB pauses after its dossier pass, holding no lease), so Arbor's review gate passes at once and records that the host reviewed ([below](#launch-and-resume)). Without it, a new session waits for `python3 -m arbor review ... approve`. |
+| `component.phase_minutes` | caps on each phase, in minutes: `agent` 90, `server` 45, `bench` 60, `critic` 15, `correctness` 30, `short_prompts` 10; -1 is no cap (the deadline still bounds it). Without the host's own `bench`, its cap is never under the pack's `measurement.bench_minutes` plus 15 (`agentx`: 75, so 90). An agent, server, bench or correctness phase cut off by its cap or the deadline leaves the iteration NOT_MEASURED; a critic cut off leaves the gate's verdict standing; a short-prompt probe cut off refuses nothing. |
+| `component.base_launch` | optional, `{"path": <record>, "digest": <its digest>}`: the host's frozen base launch, a `hyperloom-base-launch/1` record (its entrypoint, `args`, `env`, `runner_owned` and `digest`). Before any GPU work, Arbor compares the base part of the launch it would run with the record and refuses to start (exit 2) on any difference, naming it. It writes `host_launch.json` in the session either way ([below](#the-hosts-base-launch)). |
+| `component.entrypoint` | optional: the server's command as a list, such as `["python3", "-m", "sglang.launch_server"]`, in place of the framework's own (`vllm serve`, `python3 -m sglang.launch_server`). The host passes its base launch's entrypoint. For vLLM, the model path follows it, as `vllm serve` takes it. |
+
+**A deadline is required:** `deadline` or `seconds`. Arbor refuses to start (exit 2) without one, or
+in any of these cases:
+- without a `session_root`;
+- with a `docker_container` other than `"@host"`;
+- with `ARBOR_ROLL=1`;
+- with a bad `component` block;
+- with a config that does not load (JSON that does not parse, no `pack`, a missing or broken
+  `pack.yaml`);
+- with a campaign that does not validate (a missing `workspace_root`, `bench_script` or
+  `correctness_script`, a broken pack, or a `results/` directory inside the pack without
+  `--allow-pack-results` on the command line, [packs.md](packs.md));
+- with an empty `server_flags`: the launch the host measures, which defaults are not;
+- when the framework's package imports but its compiled extension does not (`vllm._C`,
+  `sgl_kernel`), as in a source-only worktree: link or install the image's extension modules into
+  it. It is checked with the environment Arbor starts in, the `server_env`'s `PYTHONPATH` over it;
+  a framework that is not found at all is left to the server's launch to report.
+
+The reasons go to stderr and to `<session>/component_refused.json` (`{schema, reasons, ts, arbor}`), the only
+file a refusal writes. The next start that is not refused removes it. **Exit 2 means refused and
+nothing else does:** a crash never exits 2, so a host must not restart an exit 2, and must resume
+any other non-zero exit. The host gives Arbor the GPU masks
+(`ROCR_VISIBLE_DEVICES`, `HIP_VISIBLE_DEVICES`, `CUDA_VISIBLE_DEVICES`) and the LLM gateway's
+variables in its environment. A fresh session starts no iteration with less than about 63 minutes
+left (its first estimate is 60 minutes, plus a 180 s margin).
+
+## The host's plan
+
+A host that runs several Arbors from one set of directions gives each its share in
+`component.plan`. Each entry has the form of a `DIRECTIONS` line:
+
+```json
+"plan": [
+  {"id": "m-attn", "kind": "increment", "title": "attention decode path", "rank": 1},
+  {"id": "m-moe",  "kind": "increment", "title": "MoE GEMM tables", "rank": 2, "ceiling": "3%"}
+]
+```
+
+`id` is a map ID (`m-<component>`), `kind` is `increment` or `rewrite`, and `title` is required;
+`why`, `rank`, `ceiling` and `tier` (`config`, `framework`, `kernel` or `feature`: where the campaign
+starts when the direction ranks first) are optional. Every entry is open and every id unique, or the config is
+refused. At the first start, Arbor seeds the session's map with these directions (a resume keeps
+the map it has), and then:
+
+- works these directions and nothing else; its dossier serves them, and a `DIRECTIONS` line of its
+  own is refused;
+- closes a direction only on evidence the harness checks; a done increment needs a KEEP that cites
+  it;
+- sends a direction it finds worth working, but not on its list, to the host: `proposals` in
+  `<session>/directions.json`;
+- stops (exit 0, `done`) when every direction is closed, writing `LANE_CLOSED.json`. Under
+  `arbor run --exit-at-handover` it hands the share back instead (exit 0, `reported`, with the worker's report), and
+  the next run of the command adds the plan's directions the session does not hold yet: the host's next share. With
+  nothing new in the plan, that run closes the lane and ends `done`.
+
+Without `component.plan`, Arbor maps its own directions from its dossier, as before.
+
+## The dossier pass
+
+The map a host splits comes from one Arbor run first, the dossier pass:
+`"component": {"stop_at": "map", ...}`, on one lease, before the host opens its branches.
+
+- **What it does:** it runs the pack's dossier (LEARN iterations: read, measure, profile) and writes
+  the map. Its agent is told that this is the dossier pass, that it changes nothing in the served
+  tree, and that each direction must be one Arbor's work. Once the map is set, the pass exits 0
+  with reason `mapped`, before any iteration works the map. `component_exit.json`'s `detail` names
+  the open directions, and the map is `<session>/directions.json`. A resume whose map is already
+  set exits at once.
+- **The host's profile:** give it with `component.profile`, so the pass profiles less. Without it,
+  the pass profiles on its own lease.
+- **What it needs:** map rounds, so a pack with the `dossier-v1` skill (the serving template has it),
+  a workload other than `document`, and `map_rounds` above 0. Otherwise the config is refused
+  (exit 2).
+- **When there is no map:** a pass that writes none before its deadline exits with `deadline`, or
+  with `done` when the map step gives up (`map_fresh_max_iters`). Either way, no `mapped`.
+
+**Splitting one map into shares:**
+
+```bash
+python3 -m arbor.directions split <map> --shares 2 --out <dir>   # <dir>/share-1.json, share-2.json
+```
+
+`<map>` is a session's `directions.json`, a JSON list or `{"directions": [...]}`, or a dossier's
+part 11 (its `DIRECTIONS` list). Only open directions are split; closed ones are left out. Each
+share is a valid `component.plan`: set `component.plan` to its path.
+
+- **Dependencies:** directions joined by `depends_on` stay in one share. A dependency missing from
+  a map counts as met, so split apart, one Arbor would start what another has not finished. A
+  dependency on a closed direction is dropped.
+- **What a host may rely on:** `id`, `title`, `status` and `why`
+  keep their names and meaning in `directions.json`, in a share and in a dealt order; a change to
+  them raises the `roles` interface version (`python3 -m arbor version --json`). A set-aside
+  direction's `why` says what would reopen it. `ops`, when a direction has it, lists the op names it
+  targets as the host's profile names them (the keys of `shares` in `component.profile`; a map
+  generated from that profile gives each direction its family's ops), and travels with the
+  direction through split, deal, the work order and the report.
+- **Order:** the groups are dealt in rank order, each to the share with the fewest directions, so
+  every share starts with high-ranked work.
+- **Errors:** fewer independent groups than shares is an error (exit 1), as is a map that does
+  not validate. Without `--out`, the shares go to stdout as `{"shares": [{"directions": [...]},
+  ...]}`.
+
+**A map without a dossier pass:**
+
+```bash
+python3 -m arbor.directions generate --profile <root profile> --out <map> [--min-share 2]
+```
+
+The map at once, with no GPU time, from the root profile a host already has after its baseline:
+the file it gives Arbor as `component.profile`, `{"unit": "percent", "shares": {<op>: <share>}}`
+(shares as fractions are read as such). Split it as any map.
+- **The directions** are the profile's op families, as Hyperloom's MB reads them for its open areas:
+  attention, linear attention, MoE, dense GEMM, collectives, sampling, and the small kernels (norm,
+  RoPE, activation, elementwise) as one. Ops of no family are reported, not mapped.
+- **Kernel names map too,** for a host whose profile has no op decomposition (MB's, when TraceLens
+  degrades on a graph-captured trace, gives its kernel shares): hipBLASLt's `Cijk_` GEMMs, vLLM's
+  `wvSplitK`, `reshape_and_cache` and `_fwd_kernel` are placed as well; copies and memcpys are not.
+- **Each is framed by a hand-written serving roadmap** (`arbor/mapgen.py`), its title naming the gap
+  that roadmap names, model-independent.
+- **Rank** follows the family's share, largest first. **Ceiling** is its Amdahl ceiling, the most
+  the run could gain with the family's time at zero. A family under `--min-share` percent is left
+  out.
+- **Exit 1:** the profile cannot be used (unreadable, no shares, nothing above the cut), and nothing
+  is written. A host then runs its Arbors without shares, as without a map.
+
+The dossier pass (above) measures a better map; this one is generic and costs nothing.
+
+## The host's base launch
+
+A host that resolves one base launch per session, and freezes it, names it in `component.base_launch`. Its gate measures
+every KEEP on that base, and Arbor must start from the same one. A hand-made launch that differed from the gate's in one
+flag or one environment variable made KEEPs fail at the gate, or measured them on another base without a trace.
+
+- **When:** at the start, before the review gate, the root's accuracy run or any server. Arbor builds the launch from
+  the config alone, so the check costs no GPU time.
+- **What Arbor compares** (`arbor/base_launch.py`):
+  - **the entrypoint**, token for token. `component.entrypoint` sets Arbor's.
+  - **the flags and their values**, in any order:
+    - `--a=b` reads as `--a b`, and a JSON value compares as JSON;
+    - vLLM's spellings of the tensor-parallel size count as one flag;
+    - the flags the host or Arbor owns are left out: host, port, model path, served name, and the record's
+      `runner_owned.args`.
+  - **the environment**, every variable but the GPU masks, the pack's eval settings (`GSM8K_MIN`, `GSM8K_LIMIT`) and
+    the record's `runner_owned.env`. The golden acceptance variables are base environment like any other.
+- **A difference refuses the start:** exit 2, with each difference in `component_refused.json`. A record that does not
+  read, is not `hyperloom-base-launch/1`, or whose `digest` is not the one the host gave refuses too.
+- **`host_launch.json`** in the session holds both sides either way:
+  - Arbor's entrypoint, flags and environment, with secrets masked;
+  - the record's digest;
+  - `same`, and the differences.
+- **The digest is the host's:** it groups flag values by the framework's own parser, which Arbor's host may not have, so
+  Arbor compares the launch and leaves the digest to the host.
+- **Without the key,** nothing is checked and the launch is the framework's own, as before.
+
+## The host's objective
+
+A pack names one metric. A host that gates on another axis (an AgentX host judges KEEPs on P50 interactivity, while the
+agentx pack optimizes total throughput) would get changes it refuses and miss ones it would keep. So the host names its
+axis, and Arbor optimizes that in place of the pack's (`arbor/objective.py`):
+
+- **How the host names it:** `"opt_objective": "P50 interactivity"` in the config it writes, or `--opt-objective` on the
+  command. A name Arbor knows, a known key as written, or a key the bench writes with its direction (`"tpot_p50:min"`).
+  "P50 interactivity" is an AgentX host's axis, `e2e_norm_intvty_p50`: 1 / the median over requests of E2EL in s /
+  OSL, TTFT included, as InferenceX's harness publishes it. The decode-only one, 1000 / TPOT, is
+  `p50_interactivity`.
+- **What changes:** the program's objective, the metric the bench reads (the agentx pack's bench takes
+  `request_metrics.latency.e2e_norm_intvty` from the harness's aggregate as is; a host's client is read for the key, or
+  for the latencies it is made from), the gate and the bars. The pack's second metric, when it is the one asked, changes
+  places with the first.
+- **The host's whole rule, in the config only:** the structured form carries the bar and the guards.
+
+  ```json
+  "opt_objective": {"metric": "e2e_norm_intvty_p50", "bar_pct": 2.0,
+                    "guards": [{"metric": "e2e_norm_intvty_p90", "band_pct": 5.0},
+                               {"metric": "total_token_throughput", "band_pct": 5.0},
+                               {"metric": "request_error_rate", "max_pct": 10.0}]}
+  ```
+
+  - `bar_pct` replaces the pack's `threshold_rel`: the gain a WIN must clear.
+  - A band guard holds against the kept tree's reading: at least kept x (1 - band / 100), the other way for a metric
+    to minimize. A cap `max_pct` is absolute; `request_error_rate` comes from the request counts when the bench
+    reports those alone.
+  - **A broken guard is a REVERT,** whatever the intent, with no retest (`arbor/measure/guards.py`). The host's gate
+    still decides what it merges. The guards replace the pack's second axis, and the program names them.
+  - **A guard the bench did not report** is not checked, and the row says so.
+  - **A per-request band guard is held on matched requests** (`p50_interactivity`, `p90_interactivity`,
+    `e2e_norm_intvty_p50`, `e2e_norm_intvty_p90`): the candidate against the kept tree on the requests both runs
+    completed, from the client's `profile_export.jsonl` under `host_bench/`. A change that only changes which requests
+    finish in the window no longer breaks it. With too few requests in common, or no records, the raw readings decide;
+    the guard's line and the row's `matched` say which was used
+    ([how-it-works.md](how-it-works.md#intents-and-verdicts)).
+- **Before writing it:** `python3 -m arbor version --json` has `objective` (the config key, the flag, the keys and
+  names Arbor knows, and its `forms`) from interface `cli` 4; `forms` lists `structured` once this form is there. A pin
+  without it ignores the key, so a host refuses such a pin.
+- **After the start:** `<session>/objective.json`, written at every start: `metric`, `direction`, `threshold_rel`,
+  `guards`, `source` (`opt_objective` or `pack`), `asked`, `pack_metric`. A host that asked for an axis and finds
+  another refuses the run.
+- **What Arbor refuses at the start:** a name it cannot read, and a resume under another objective than the session
+  started on (exit 2, in `component_refused.json`).
+
+## Launch and resume
+
+```bash
+python3 -m arbor run --config <cfg>
+```
+
+The same command resumes a session that stopped (a crash, a host restart): the session, the
+deadline of the first launch and the KEEP numbering carry over. `touch <session>/STOP` ends the
+run after the iteration in flight.
+
+- **An iteration a stop left without its verdict:** a SIGTERM books it NOT MEASURED before Arbor exits. A stop Arbor
+  never saw (a kill, a crash, a lost node) leaves no row for it, so the next start books it, when it had committed its
+  change: with the intent and change it declared (`iter_<N>/claim.json`), else the subject of its `iter-<N>:` commit.
+  Its change is then taken out of the tree and revisited later, as any NOT MEASURED change is. An iteration stopped
+  before its commit (its agent still working) left nothing to measure, and runs again under its number.
+- **Another account of the host's group can resume it.** A session directory that is setgid and group-writable (a
+  shared layout: directories 2775, files 664) is the group's: the run's umask keeps group-write (002), for every file
+  it and its children write, so the next account can append to its logs and replace its records. The session lock
+  is opened read-only when it is another account's and not group-writable; it is held all the same.
+- **A host that deals each worker report** (a map dealer of its own) runs `arbor run --exit-at-handover`: the master's
+  passes and one worker stretch, then at the next master's turn the report, `role_exit.json` and the exit record
+  `reported`, exit 0. The host deals the report (a new map share, through `component.plan` or the session's map),
+  then starts the same command again: it runs the master's passes and the next stretch. An order still waiting for
+  its report (a run stopped mid-stretch) is worked first. The campaign's end exits as `arbor run` does. Under
+  `component.plan` the stretch is the plan's share: it hands back once every direction of it is closed, and the host
+  deals the next share by writing it into `component.plan` (the directions already in the session stay as they are;
+  the new ones are added open) before it starts the command again.
+
+**The review gate is on by default here too** ([how-it-works.md](how-it-works.md#before-the-first-iteration-the-review-gate)).
+A new session waits, before anything runs, for a human to run
+`python3 -m arbor review --session <session> approve` (or `reject`). While it waits, the
+deadline runs, the heartbeat stays alive with `phase: review`, SIGTERM is handled as in a run,
+and a deadline reached while waiting exits 0 with `deadline` and the detail
+`the deadline passed while awaiting review`. A rejection exits 0 with `review_rejected`. A host
+that reviews the campaign itself before it starts Arbor sets `"review": "host"` in the
+`component` block, and the gate passes at once (it holds no lease while a human reads). A host
+with no human and no review of its own turns the gate off: `"review_gate": false` in the
+config it writes, `ARBOR_REVIEW_GATE=0` in the launch environment, or `run --no-review-gate`.
+A resumed session is never gated again.
+
+## What to read back
+
+Each record below that a host reads carries `schema`, its schema's id, and `arbor`, the Arbor that wrote it; the
+schemas, the exit table and the timing are the contract, [interface.md](interface.md) (`python3 -m arbor interface
+--json`).
+
+- **The keep signal:** `<session>/session.json`, the entries of `lessons` with `"decision":
+  "KEEP"`. Their count moves by one per KEEP.
+- **The KEEP snapshot,** written whole before that count moves. `<session>/keeps/LATEST` holds the
+  newest one's number (`0007`, no newline):
+
+  ```
+  keeps/0007/
+    keep.json      schema (arbor.keep/1), arbor, number, previous (the KEEP before, null for the first), iteration,
+                   metric, change, intent, root, parent, commit, carries, ts, tables,
+                   tables_outside_workspace, outside (counts, when there are links),
+                   short_prompts (verdict, sequential, batched, differ, compared, floor, reason),
+                   left_out (each file over 10 MB kept out of both patches, with its size),
+                   notes (when previous's commit is not in the workspace: change.patch
+                   is then against root)
+    change.patch   this KEEP alone: `git apply` at `parent` (the previous KEEP's commit, or root)
+    served.patch   the whole served tree: `git apply` at `root`
+    config.json    server_flags and server_env as measured (without GPU masks)
+    tables/<VAR>/  every file an env var of that config names, its sha256 in keep.json;
+                   a `:`-separated list (aiter's tables) as tables/<VAR>/<k>-<name>,
+                   listed in order in keep.json's tables.<VAR>.files
+    outside.json   when the tree links outside itself: each link's target, sha256 and size
+    short_prompts.json  the short-prompt check, when it ran
+  ```
+
+  The patches hold the served tree only: no probes (`arbor/eval/`, `eval/` at the workspace's
+  top), logs, bytecode or `arbor/config.json`, and no file over 10 MB (named in `left_out`). A
+  `previous` that is not `number - 1` means a snapshot was not written; that `change.patch` then
+  carries both KEEPs' changes.
+- **What a KEEP carries besides its own change.**
+  - **Why it happens:** an iteration that was not measured keeps its tree, so its change rides
+    into the next KEEP. That KEEP's gate judges both together; nothing judged the earlier change
+    on its own.
+  - **`carries`** lists each such change since `parent`, oldest first:
+    `{iteration, change, commit, verdict, reason}`, with the verdict and reason from session.json.
+  - **What counts:** every `iter-N` commit that no revert undid and that changes the served tree
+    or `arbor/config.json`. It is empty when the KEEP holds its own change alone.
+  - **How to read it:** a non-empty `carries` means the KEEP's metric is the bundle's. Gate it as
+    one, or measure the carried change apart before merging it.
+- **A table variable given as a list.** A `:`-separated list, such as aiter's tables, is recorded
+  as `tables.<VAR> = {path, files}`. `path` is the whole value. `files` holds one entry per part
+  that is a file (`path`, `file`, `sha256`, `bytes`), in list order. Parts that are not files stay
+  in `path` only. A single-file value keeps the plain shape (`path`, `file`, `sha256`, `bytes`).
+  The agent is told to add to a list the host gave, never to replace it: it keeps every part in
+  order and appends its own rows file. Hyperloom gives its start tables this way.
+- **Binaries outside the tree are rebuilt, not shipped.** A tree that links to JIT modules carries
+  the links only; `outside.json` says what each served. Start the server with the KEEP's
+  `config.json` on the same image and GPU arch, and AITER rebuilds a missing module at its first
+  call. Run `python3 -m arbor.execute.outside prepare --container @host --workspace W` first, so git
+  never stages a rebuilt module, and `check --record outside.json` after.
+- **The short-prompt check.** Each measured iteration probes its live server with 64 short prompts
+  (1 to 64 tokens, 32 one at a time and 32 at once, greedy, 32 tokens), recorded in
+  `iter_N/short_prompts.json`. At a KEEP, Arbor restarts its own server on the same tree, probes
+  again and compares the two processes. Only the prompts sent one at a time gate: the first KEEP's
+  count of them that differ is the session's floor, and above it the KEEP becomes REVERT. The
+  batched half moves with the batch each boot happens to form, so it is recorded and refuses
+  nothing. A check that cannot finish refuses nothing and says why in `keep.json`. Allow one more
+  server boot per KEEP (about 5 minutes for a large model) in the deadline.
+- **The live config:** `<workspace>/arbor/config.json`, `server_flags` and `server_env`.
+- **The ledger:** `<session>/ledger.jsonl`; the `FACT` and `DEAD_END` records are what Arbor
+  learned and ruled out.
+- **The heartbeat:** `<session>/heartbeat.json` (`schema`, `ts`, `epoch`, `pid`, `iteration`, `phase`,
+  `arbor`), every 5 minutes and at every phase change.
+- **Why it ended:** `<session>/component_exit.json`, `{schema, reason, iteration, keeps, map,
+  deadline, ts, detail, arbor}`, written before every exit 0 and exit 3.
+- **Why it never started:** `<session>/component_refused.json`, `{schema, reasons, ts, arbor}`,
+  written before every exit 2 whose config names a session.
+- **The lifecycle:** `<session>/lifecycle.jsonl`, one JSON object a line (`arbor/lifecycle.py`). It
+  is the feed a host follows for where the session is.
+  - **What it records:**
+    - each chapter the session enters: `{at, kind: "chapter", name, iteration, skills}`. The names are
+      `map` (a dossier round), `round_end` (the dossier's update round) and `iterate`;
+    - each event it fires: `{at, kind: "event", name, iteration, ...}`. The events are
+      `session_start`, `iteration_start`, `keep`, `revert`, `probe`, `invalid`, `agent_failed`,
+      `map_set` (with the map's open directions), `round_end`, `stretch_end` (a worker's report is written, with
+      its path) and `end` (with the exit reason);
+    - the `run` skills' turns, and the `trigger` skills and callbacks each event started.
+  - **Callbacks** (proposed for Hyperloom; not yet agreed with it): a host can be called on an
+    event instead of reading the file.
+    - **Where:** the config's component block, `"callbacks": {"<event>": [<command>, ...]}`.
+    - **Both blocks:** a config may also carry a top-level `callbacks` block, which runs in any mode (a
+      standalone campaign's own commands). Under a host both apply, the component block's commands first.
+    - **A command** is a string or a list of arguments. It is never run by a shell.
+    - **How Arbor runs it:** without waiting, with `ARBOR_EVENT`, `ARBOR_SESSION` and
+      `ARBOR_EVENT_JSON` (the journal entry) in its environment. Each call is journaled.
+
+| Exit code | When | `reason` |
+|---|---|---|
+| 0 | the work is done: a STOP file, or `--max-iters` | `done` |
+| 0 | the next iteration would not end before the deadline | `deadline` |
+| 0 | the map is explored and its update round does not fit | `map_exhausted` |
+| 0 | SIGTERM from the host: Arbor's own server stopped, the iteration in flight booked as not measured with the intent it declared (its change reverted at the next start and revisited later), out within 25 s | `sigterm` |
+| 0 | a dossier pass (`stop_at: "map"`) has set its map | `mapped` |
+| 0 | `arbor master`: a work order is ready for a worker (`role_exit.json` names it) | `ordered` |
+| 0 | `arbor worker --order`, or `arbor run --exit-at-handover`: its report is written, the next pass being the master's; `detail` says why. When the run itself ended first, the run's own reason instead | `reported` |
+| 0 | a human rejected the campaign at the review gate, before anything ran; `detail` is who and the note | `review_rejected` |
+| 0 | STOP, or the deadline, while the review gate waited; `detail` says so | `done`, `deadline` |
+| 0 | the harness stopped measuring (`ABORTED.md`: consecutive not-measured iterations, such as a bench that never ran); `detail` is its message with the last error. Read it as broken, not finished | `aborted` |
+| 3 | the same, while the model could not be reached (`ABORTED.md` starts `# Model unreachable`): a gateway outage longer than the agents' retries. Resume it with the same command, as a crash; the resumed run moves that `ABORTED.md` aside and starts a fresh streak | `unreachable` |
+| 2 | the config is refused (above): never restart it, show `component_refused.json` | none |
+| 73 | another driver holds this session: one driver runs a session, and a second waits a minute for the first to end, then exits (`lease_held`). Make sure the other has ended, then start the same command again | none |
+| other non-zero | a crash: resume with the same command; an iteration that committed its change and got no verdict is booked NOT MEASURED at that start | none |
+
+A command line `arbor run` cannot parse (no `--config`) also exits 2, with a usage message and no
+record.
+
+## What Arbor does inside a host
+
+- **With the pack's accuracy gate on and no `baseline_record`,** a new session first serves the root
+  and runs the full GSM8K once, before iteration 1. The gate holds a numerics change to that score
+  less `policy.accuracy_tolerance`, on Arbor's own eval.
+  - **The cost:** one server boot and 1319 questions, within the deadline.
+  - **Skipped** in a dossier pass, on a resume, or with under 30 minutes left; `GSM8K_MIN` is then the
+    floor.
+  - **The record:** `<session>/baseline_accuracy.json` (`score`, or `error`), and
+    `root_accuracy` in iteration 1's row of `session.json`.
+  - **A host whose rule allows a different drop** sets `policy.accuracy_tolerance` in the config.
+- **Every KEEP is held to the full GSM8K** (since v0.9.1), not only a numerics change: a host imports
+  what Arbor keeps, and a change nobody called numerics can still break the served model.
+  - **Only an arm the gate would keep pays for it:** the gate decides without the eval first.
+  - **Below the root's score less the tolerance** the KEEP is a REVERT. The result is in the KEEP's
+    snapshot (`keep.json` `accuracy`, `by` naming "a KEEP in component mode").
+  - **Only on a GSM8K workload:** the pack's accuracy gate is on (`serving`, `balanced`), and the
+    launch does not simulate speculative acceptance. An AgentX launch does (`SGLANG_SIMULATE_ACC_*`, or
+    vLLM's `rejection_sample_method: synthetic`), so GSM8K would score the simulation; neither the
+    root's set nor any KEEP's runs there. A host can also turn it off with `policy.accuracy_gate:
+    false`.
+- **A KEEP that lands a switch that defaults off is served with it on** (S4, since v0.9.1;
+  `arbor/measure/switches.py`).
+  - **Which:** each `SWITCH: NAME=VALUE` the agent declares, and any new variable the change reads
+    that the tree did not name, which the arm leaves unset. An undeclared one refuses the KEEP.
+  - **Refused when:** the arm or the launch sets the switch on; the tree does not serve with it on;
+    the accuracy check fails with it on (the full GSM8K on a GSM8K workload, the pack's correctness
+    check on any other); a file appears in a JIT cache once that server is healthy; or its log has no
+    line naming the switch from every rank.
+  - **Not run** (no time left, an eval with no score): the KEEP stands, the switch off, as measured.
+  - **The record:** `keep.json` `switches` (`verdict`, `reasons`, `accuracy`, `jit`, `dispatch`), and
+    `<session>/switches.json`. A later change that turns the switch on is held to the accuracy gate.
+  - **For a host that turns a kept switch on itself:** read `switches.verdict` first. Only `pass`
+    means Arbor served it on and found it correct.
+- It stops only the server it launched, by the PID file in `<session>/server/`: never a pattern
+  `pkill`, never `kill -9`.
+- It never sets or passes the GPU masks: its launch drops them from `server_env`.
+- It never calls docker, and serves on its own port only.
+- It keeps every file in the workspace or the session; a KEEP whose env names a file outside the
+  workspace is flagged in its snapshot (`tables_outside_workspace`).
+- It reads no target and runs no round-end A/B: the host gates and merges.
+- An agent that cannot reach its model (a refused connection, a proxy error, a 5xx or an overloaded
+  API) is started again with backoff, for up to 15 minutes per turn (`ARBOR_AGENT_CONNECT_WAIT_S`),
+  before the iteration is booked not measured; a 4xx is not retried. Three not-measured iterations
+  in a row end the run: `unreachable` (exit 3) when the last agent could not reach its model,
+  else `aborted` (exit 0).
+- **The LLM gateway must stay reachable for a run of several hours.** Arbor rides out an outage of
+  up to 15 minutes inside one agent turn. A longer one costs not-measured iterations, and after
+  three (at least 45 minutes of waiting) Arbor exits 3. A host that resumes non-zero exits, as MB
+  does, restarts it, and the run carries on once the gateway answers. Each restart into a
+  continuing outage takes as long again, so it never fills a crash window like MB's (3 in 10
+  minutes); the deadline still ends the run. Sites that reach the gateway through a tunnel or a
+  proxy should expect several drops a week.

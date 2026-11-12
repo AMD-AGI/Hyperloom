@@ -19,7 +19,7 @@ failure it names?** Blocking means one of four kinds, equal in weight:
 
 | Kind | What counts |
 |---|---|
-| Wrong behaviour | correctness, crash, data or precision error, compatibility break, security, performance regression |
+| Wrong behaviour | correctness, crash, data or precision error, compatibility break, security a correct run hits (R6), performance regression |
 | Ineffective | the premise does not reproduce at the merge base, or the failure the PR names still happens at the head, or a check is dropped as covered by something that decides less — rules E1-E5 |
 | Desync | an operator-observable change the description never states; a title or description that does not match the diff at the current head |
 | Contract violation | the diff breaks a rule `AGENTS.md` states outright; the finding names the bullet and, for an ownership bullet, the module in this repo that already owns the concern |
@@ -55,6 +55,7 @@ as [`references/re-review.md`](references/re-review.md) says.
 | `diff.txt`, `files.txt` | the full diff against the merge base; its paths, one per line, the input to rule selection |
 | `numstat.txt`, `netlines.txt` | added, deleted, path; and E3's production total, `src/` outside `tests/`, binary rows excluded |
 | `commits.txt` | subjects, oldest first; a late commit is where a description goes stale |
+| `messages.txt` | each commit's whole message, trailers included, under a `--- <sha>` line; X9 reads it |
 | `base.txt` | merge-base sha; every "is this pre-existing" question is answered against it |
 | `ci.txt` | check runs at the current head: name, conclusion, url |
 | `comments.txt` | review and issue comments, each headed by author and time; an earlier card is settled (re-review.md), any other point already made is not repeated |
@@ -68,8 +69,8 @@ as [`references/re-review.md`](references/re-review.md) says.
 Take every row of the index atop [`rules.md`](rules.md) whose trigger matches `files.txt`, a skim of `diff.txt`, or a
 `label:` line in `meta.txt`; write the union of their ids into `$WORK/rules.txt`, one per line, and read only those
 bodies. **Never read `rules.md` whole**: a reviewer told to attend to every rule attends to none. Match rows
-generously: a row you are unsure about is taken, never dropped. V1-V8 and X2 are on every list, V2 and V7 without a
-verdict line; on a re-review, so are the rules of earlier findings that still hold.
+generously: a row you are unsure about is taken, never dropped. V1-V8, X2, X9 and R6 are on every list, V2, V7 and R6 without
+a verdict line; on a re-review, so are the rules of earlier findings that still hold.
 
 ## Step 2 — Semantic understanding
 
@@ -276,7 +277,7 @@ checked; silence is never read as clean, and an unrecorded skip is itself a revi
 
 ## Publishing
 
-Post `card.md` as `check-card.sh` passed it, in English: no Chinese, no emoji, no signature.
+Post `card.md` as `check-card.sh` passed it, in English: no Chinese, no emoji, no signature, no internal reference (X9).
 
 ```bash
 # blocking issues

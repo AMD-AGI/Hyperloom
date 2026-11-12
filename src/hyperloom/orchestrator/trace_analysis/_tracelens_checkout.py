@@ -42,16 +42,18 @@ def _resolve_tracelens_model() -> str:
     """Resolve ``ANTHROPIC_MODEL``, else ``CLAUDE_MODEL``, to the gateway's dash-form id (#574).
 
     Only the strict SAFE/LiteLLM gateway rejects the image's dot form
-    (``Claude-Opus-4.7``); for it, map to dash (``claude-opus-4-7``). Other
-    backends keep the raw id; both unset yields ``""`` (SDK default).
+    (``Claude-Opus-4.7``); for it, map a Claude id to dash (``claude-opus-4-7``).
+    That gateway serves other families under their dot form (``gpt-5.6-sol``),
+    so those keep the raw id, as do other backends; both unset yields ``""``
+    (SDK default).
 
     Returns:
-        The model id to pass to the SDK, normalized only for SAFE/LiteLLM.
+        The model id to pass to the SDK, normalized only for a Claude id on SAFE/LiteLLM.
     """
     raw = os.environ.get("ANTHROPIC_MODEL", "").strip() or os.environ.get("CLAUDE_MODEL", "").strip()
     if not raw:
         return ""
-    if not _is_safe_litellm_gateway():
+    if not _is_safe_litellm_gateway() or not raw.lower().startswith("claude"):
         return raw
     return raw.lower().replace(".", "-")
 

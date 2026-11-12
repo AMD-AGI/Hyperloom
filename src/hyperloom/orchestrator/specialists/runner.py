@@ -14,7 +14,6 @@ outcome for the audit trail.
 from __future__ import annotations
 
 import asyncio
-import enum
 import json
 import os
 import logging
@@ -34,6 +33,7 @@ from hyperloom_common.timeutil import now_iso
 
 from hyperloom.inference_optimizer.session.session_paths import fs_safe_id, runs_dir, specialist_intel_path
 from ..state.experience_citations import normalize_citations, shown_ids
+from ..state.retest_view import scrub
 from hyperloom.inference_optimizer.trace.conversation_trace import ConversationRecord, append_conversation
 from hyperloom.inference_optimizer.trace.llm_trace import LLMCallRecord, LLMCallSite, append_llm_call, new_call_id
 from hyperloom.inference_optimizer.trace.trajectory_trace import (
@@ -60,8 +60,8 @@ from .subprocess_ import (
     SpecialistSubprocessConfig,
     SpecialistSubprocessDispatcher,
     SpecialistSubprocessResult,
-    _setup_worktree,
 )
+from .worktrees import link_worktree
 from . import patch_safety as _patch_safety
 from .profile import MODE_PATCH, SpecialistProfile, resolve_specialist_profile
 from .prompt_inputs import SpecialistPromptInputs
@@ -446,6 +446,7 @@ class _PreparedRun:
     workspace: Path | None = None
     worktree: Path | None = None
     worktree_base: Path | None = None
+    worktree_admin: Path | None = None
     system_prompt: str = ""
     user_prompt: str = ""
     notes: list[str] = field(default_factory=list)
@@ -471,69 +472,6 @@ class SpecialistRunResult:
     transcript_path: str = ""
     done_path: str = ""
     notes: list[str] = field(default_factory=list)
-
-
-class SpecialistFailureType(str, enum.Enum):
-    """Coarse failure taxonomy for a finished specialist run.
-
-    Only the transient infrastructure members (``TIMEOUT`` /
-    ``STALE_HEARTBEAT`` / ``CRASH``) are retry-eligible; semantic outcomes are
-    left for the orchestrator to act on.
-    """
-
-    NONE = "none"  # succeeded
-    TIMEOUT = "timeout"  # subprocess wall-clock kill
-    STALE_HEARTBEAT = "stale_heartbeat"  # heartbeat went silent (hang)
-    CRASH = "crash"  # nonzero exit / backend error
-    NO_OUTPUT = "no_output"  # ran clean but emitted no done / empty
-    CONFIG = "config"  # unknown domain / no workspace
-    UNKNOWN = "unknown"
-
-
-def classify_specialist_failure(
-    runner_status: str,
-    error: str,
-) -> tuple[SpecialistFailureType, bool]:
-    """Map a :class:`SpecialistRunResult` ``(status, error)`` to a failure
-    type + retry-eligibility flag.
-
-    ``status == 'stale'`` marks a subprocess that died with a ``backend_error``
-    (timeout / stale-heartbeat / crash) and left nothing usable behind;
-    ``partial`` means it died the same way but a checkpoint was salvaged, so the
-    failure is reported without discarding the work; ``empty_synthesised`` means
-    it exited cleanly without a usable ``specialist_done``.
-
-    Args:
-        runner_status: The :class:`SpecialistRunResult` status string.
-        error: The associated error string (drives sub-classification).
-
-    Returns:
-        A ``(failure_type, retry_eligible)`` tuple.
-    """
-    status = (runner_status or "").strip().lower()
-    err = (error or "").strip().lower()
-    if status == "succeeded":
-        return SpecialistFailureType.NONE, False
-    if status == "partial":
-        # Salvaged work: classify the failure but never retry over it.
-        if "timeout" in err:
-            return SpecialistFailureType.TIMEOUT, False
-        if "stale_heartbeat" in err:
-            return SpecialistFailureType.STALE_HEARTBEAT, False
-        return SpecialistFailureType.CRASH, False
-    if status == "stale":
-        if "timeout" in err:
-            ftype = SpecialistFailureType.TIMEOUT
-        elif "stale_heartbeat" in err:
-            ftype = SpecialistFailureType.STALE_HEARTBEAT
-        else:
-            ftype = SpecialistFailureType.CRASH
-        return ftype, True
-    if status == "empty_synthesised":
-        if "unknown_domain" in err or "no_workspace" in err:
-            return SpecialistFailureType.CONFIG, False
-        return SpecialistFailureType.NO_OUTPUT, False
-    return SpecialistFailureType.UNKNOWN, False
 
 
 def build_empty_specialist_done(
@@ -657,7 +595,7 @@ class SpecialistRunner:
             domain = replace(domain, description=custom_specialist_description)
 
         # Worktree — created only under subprocess dispatch; surfaced via ``workspace_path``.
-        worktree, worktree_source, worktree_err = await asyncio.to_thread(
+        worktree, worktree_source, worktree_err, worktree_admin = await asyncio.to_thread(
             self._maybe_setup_worktree,
             ctx,
             workspace=workspace,
@@ -675,6 +613,7 @@ class SpecialistRunner:
             workspace=workspace,
             worktree=worktree,
             worktree_base=worktree_base,
+            worktree_admin=worktree_admin,
             notes=notes,
         )
         prep.system_prompt, prep.user_prompt = build_specialist_prompts(
@@ -956,16 +895,16 @@ class SpecialistRunner:
             agent=domain.key,
             attributes={"name": domain.key},
         ) as call_span:
-            # Ray-managed GPU execution: when the dispatcher acquired a
-            # GpuSpecialistLease, run the whole subprocess inside its num_gpus actor
-            # so any GPU command lands within Ray's assigned devices. ``None`` keeps
-            # the local path (``gpu_ids`` pinned into *_VISIBLE_DEVICES).
+            # Ray-managed GPU execution: when the dispatcher acquired a GpuSpecialistLease, run the whole subprocess
+            # inside its num_gpus actor so any GPU command lands within Ray's assigned devices. ``None`` keeps the
+            # local path (``gpu_ids`` pinned into *_VISIBLE_DEVICES). A sandbox shows the model when it is a local path.
             sub_result: SpecialistSubprocessResult = await self.subprocess_dispatcher.run(
                 SpecialistSpawn(
                     task_id=ctx.task.task_id,
                     workspace=workspace,
                     worktree=prep.worktree,
                     worktree_base=prep.worktree_base,
+                    worktree_admin=prep.worktree_admin,
                     system_prompt=prep.system_prompt,
                     user_prompt=prep.user_prompt,
                     disallowed_tools=SPECIALIST_TOOL_DENYLIST,
@@ -973,6 +912,7 @@ class SpecialistRunner:
                     deadline=deadline,
                     gpu_lease=ctx.extra.get("gpu_specialist_lease"),
                     progress_cb=ctx.extra.get("specialist_progress_cb"),
+                    readable=(Path(str((ctx.task.params or {}).get("model_path") or "")),),
                 )
             )
             call_status, call_attributes = _subprocess_call_outcome(sub_result)
@@ -1131,9 +1071,9 @@ class SpecialistRunner:
         notes: list[str] = []
         # Reconcile self-reported ``patches_written`` against the filesystem:
         # keep only claimed paths that exist on disk, then union with the scan.
-        # A harvested diff is the whole round, so a claim only restates it.
+        # Not when a harvested diff is the whole round, or the worktree was refused.
         claimed = done_payload.get("patches_written")
-        if sub_result.patch_roots or not isinstance(claimed, list):
+        if sub_result.patch_claims_ignored or not isinstance(claimed, list):
             claimed = []
         search_bases = [b for b in (prep.worktree, prep.workspace) if b is not None]
         validated: list[str] = []
@@ -1196,7 +1136,7 @@ class SpecialistRunner:
         *,
         workspace: Path | None,
         profile: SpecialistProfile | None = None,
-    ) -> tuple[Path | None, FrameworkTree | None, str]:
+    ) -> tuple[Path | None, FrameworkTree | None, str, Path | None]:
         """Provision a per-task git worktree when in subprocess mode.
 
         Blocking (``git worktree add``, 60s); call via ``asyncio.to_thread``.
@@ -1214,36 +1154,33 @@ class SpecialistRunner:
             profile: Resolved dispatch profile; non-patch mode skips worktree.
 
         Returns:
-            A ``(worktree_dir, source, error)`` tuple; ``worktree_dir`` is
-            ``None`` without a workspace or on git failure, and ``source`` is
-            the tree the worktree stands for.
+            A ``(worktree_dir, source, error, admin)`` tuple; ``worktree_dir``
+            is ``None`` without a workspace or on git failure, ``source`` is
+            the tree the worktree stands for, and ``admin`` its admin directory
+            (:func:`~.worktrees.link_worktree`).
         """
         if workspace is None:
-            return None, None, ""
+            return None, None, "", None
         if profile is not None:
             if profile.mode != MODE_PATCH:
-                return None, None, ""
+                return None, None, "", None
         preflight_error = specialist_patch_preflight_error(ctx.task.params)
         if preflight_error:
-            return None, None, preflight_error
+            return None, None, preflight_error, None
         source = _worktree_source(ctx.task.params or {})
         if source is None:
-            return None, None, ""
+            return None, None, "", None
         base = source.root
         if not source.checkout:
             if self.session_dir is None:
-                return None, source, f"{source.tree} has no checkout and no session dir to snapshot it into"
+                return None, source, f"{source.tree} has no checkout and no session dir to snapshot it into", None
             repo = self.session_dir / "tree_snapshots" / f"{fs_safe_id(str(source.tree))}.git"
             snapshot, err = snapshot_tree(source.tree, repo, refresh=not self._integrate_in_flight())
             if snapshot is None:
-                return None, source, err
+                return None, source, err, None
             base = snapshot
-        worktree_path = workspace / "worktree"
-        branch = f"specialist-{ctx.task.task_id}"
-        wt, err = _setup_worktree(base, worktree_path, branch)
-        if wt is None:
-            return None, source, err
-        return wt, source, ""
+        linked = link_worktree(base, workspace / "worktree", f"specialist-{ctx.task.task_id}")
+        return linked.path, source, linked.error, linked.admin
 
     def _integrate_in_flight(self) -> bool:
         """Whether an integrate has mutated the framework tree without deciding on it yet."""
@@ -1385,10 +1322,9 @@ class SpecialistRunner:
         workspace: Path | None,
         payload: dict[str, Any],
     ) -> None:
-        """Write the ``specialist_done.json`` artifact with a timestamp.
+        """Write the ``specialist_done.json`` artifact with a timestamp, group-readable (the retest runner reads it).
 
-        Writes atomically (temp + ``os.replace``) so partial files
-        are never read. No-ops when no workspace is configured.
+        Atomic (temp + ``os.replace``); every string is scrubbed of credentials. No-ops when no workspace is set.
 
         Args:
             workspace (Path | None): The per-task workspace directory.
@@ -1397,17 +1333,15 @@ class SpecialistRunner:
         path = self._done_path(workspace)
         if path is None:
             return
-        atomic_write_json(path, {"ts": now_iso(), **payload}, options=WriteOptions())
+        atomic_write_json(path, scrub({"ts": now_iso(), **payload}), options=WriteOptions(group_read=True))
 
 
 __all__ = [
     "NO_GIT_FRAMEWORK_SOURCE_ROOT",
     "SPECIALIST_TOOL_DENYLIST",
-    "SpecialistFailureType",
     "SpecialistRunResult",
     "SpecialistRunner",
     "SpecialistSubprocessConfig",
     "build_empty_specialist_done",
-    "classify_specialist_failure",
     "specialist_patch_preflight_error",
 ]

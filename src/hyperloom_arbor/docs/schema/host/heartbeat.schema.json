@@ -1,0 +1,20 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "arbor.heartbeat/1",
+  "title": "heartbeat.json: a component-mode run is alive",
+  "description": "Rewritten every heartbeat_s (the contract's timing) from a daemon thread, and at once at each phase boundary. A host that sees no change for long reads the phase: an agent turn can be quiet for its whole cap.",
+  "type": "object",
+  "required": ["schema", "ts", "epoch", "pid", "iteration", "phase", "arbor"],
+  "additionalProperties": false,
+  "properties": {
+    "schema": {"const": "arbor.heartbeat/1"},
+    "ts": {"type": "string", "description": "when it was written, ISO 8601"},
+    "epoch": {"type": "number", "description": "the same, in seconds"},
+    "pid": {"type": "integer", "description": "the driver's process"},
+    "iteration": {"type": ["integer", "null"]},
+    "phase": {"type": "string", "description": "start, iteration, agent, server, bench, correctness, short_prompts, critic, between, review, conflicts, or exit"},
+    "reason": {"type": "string", "description": "with phase exit: the exit record's reason"},
+    "arbor": {"type": "object", "required": ["version", "commit"], "additionalProperties": false,
+              "properties": {"version": {"type": "string"}, "commit": {"type": ["string", "null"]}}}
+  }
+}

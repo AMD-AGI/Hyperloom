@@ -1,7 +1,7 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""Benchmark result parsing shared by Magpie-backed executors, plus post-run artifact harvesting and salvage helpers."""
+"""Benchmark result parsing shared by the round executors, plus post-run artifact harvesting and salvage helpers."""
 
 from __future__ import annotations
 
@@ -15,10 +15,13 @@ import shutil
 from pathlib import Path
 from typing import Any, Callable, NamedTuple
 
+from hyperloom.common.benchmark_config import read_benchmark_point
 from hyperloom_common.coerce import first_float, first_int, to_float, to_int
 from hyperloom_common.jsonio import read_json
+from hyperloom.common.perf_metric import GRADED_INTVTY_P50_CHECKPOINT
 
 from ._gpu_metrics import gpu_metrics_from_report, write_gpu_metrics
+from ._round_folder import RoundFolder, is_round_folder
 
 log = logging.getLogger(__name__)
 
@@ -58,7 +61,7 @@ def _rescue_candidate_paths(
     *,
     subprocess_started_unix: float | None = None,
 ) -> list[Path]:
-    """Return absolute paths to known Magpie leak destinations."""
+    """Return absolute paths to known benchmark-client leak destinations."""
     candidates: list[Path] = []
     seen: set[Path] = set()
 
@@ -166,14 +169,21 @@ def _resolve_leak_roots(leak_root: Path | None = None) -> tuple[Path, ...]:
     return tuple(roots)
 
 
+def _run_workspaces(root: Path) -> list[Path]:
+    """The workspaces rounds left in ``root``: ``benchmark_*`` directories and inference_suite run_dirs."""
+    if not root.is_dir():
+        return []
+    return [p for p in root.iterdir() if p.is_dir() and (p.name.startswith("benchmark_") or is_round_folder(p))]
+
+
 def snapshot_workspaces(root: Path) -> frozenset[Path]:
-    """Return the ``benchmark_*`` workspaces present in ``root`` right now."""
-    return frozenset(p.resolve() for p in root.glob("benchmark_*") if p.is_dir())
+    """Return the round workspaces present in ``root`` right now."""
+    return frozenset(p.resolve() for p in _run_workspaces(root))
 
 
 def select_run_workspace(root: Path, *, known_before: frozenset[Path]) -> Path | None:
-    """Return the ``benchmark_*`` workspace this run created in ``root``."""
-    fresh = [p for p in root.glob("benchmark_*") if p.is_dir() and p.resolve() not in known_before]
+    """Return the round workspace this run created in ``root``."""
+    fresh = [p for p in _run_workspaces(root) if p.resolve() not in known_before]
     return max(fresh, default=None)
 
 
@@ -237,7 +247,7 @@ def harvest_leaked_artifacts(
     subprocess_started_unix: float | None = None,
     leak_root: Path | None = None,
 ) -> list[tuple[Path, Path]]:
-    """Copy known Magpie/InferenceX leak artifacts into ``destination``; a measurement runner names its own work
+    """Copy known InferenceX leak artifacts into ``destination``; a measurement runner names its own work
     directory as ``leak_root`` so that nothing another test left elsewhere is copied into its signed output."""
     harvested: list[tuple[Path, Path]] = []
     leak_roots = _resolve_leak_roots(leak_root)
@@ -278,7 +288,7 @@ def harvest_leaked_artifacts(
         harvest_mn_gpu_metrics(destination, subprocess_started_unix=subprocess_started_unix)
     except (OSError, ValueError, csv.Error) as exc:
         log.warning("benchmark_result.harvest: MN GPU-metrics harvest failed: %s", exc)
-    # Whatever wrote the round's ``gpu_monitor`` block -- Magpie on one node, the harvest above on several -- normalise
+    # Whatever wrote the round's ``gpu_monitor`` block -- the single-node monitor, or the harvest above on several -- normalise
     # it into an artifact of its own now, while the round's own workspace is the subject. Aggregating it per session
     # instead averaged baseline, explore and roofline rounds together and described none of them.
     # Best effort, and only that: the report may still be settling, in which case there is nothing to read yet and the
@@ -501,7 +511,7 @@ def harvest_mn_gpu_metrics(
     subprocess_started_unix: float | None = None,
 ) -> dict[str, Any]:
     """Fold pod-side GPU sampler CSVs into ``destination`` (multi-node only)."""
-    # Multi-node only: single-node uses Magpie's own client-side GPUMonitor, so never touch its result path.
+    # Multi-node only: a single-node round samples its own GPUs, so never touch its result path.
     # is_multi_node() is the authoritative gate (state nodes>=2 or $INFERENCE_OPTIMIZER_NODES>=2).
     from ._multi_node_env import is_multi_node, pd_topology_from_state
 
@@ -621,23 +631,21 @@ def _tag_latency_origins(
 def _round_gpu_power(
     report: dict[str, Any], workspace: Path | None, subprocess_started_unix: float | None
 ) -> dict[str, Any]:
-    """The round's measured-phase power: ``gpu_power_avg_w`` (mean per serving card) and ``gpu_power_by_gpu_w``.
+    """The round's measured-window power and energy: :data:`~._gpu_power.POWER_FIELDS`, ``gpu_power_by_gpu_w`` and
+    ``power_valid``; only the first two without a recording.
 
-    Hyperloom's own ``gpu_power.json`` wins whenever this round wrote one, including one with no reading: that round
-    was sampled and measured nothing, and substituting the report's figure would replace "unmeasured" with a number
-    from a different window. The report's ``gpu_monitor`` block -- one card, whole-process window on a single node --
-    is the fallback for the mean on rounds no recorder ran on; it reads one card, so such a round has no per-card
-    figure and any per-card or total budget treats it as unmeasured.
+    Hyperloom's own recording wins whenever this round has one, including one whose energy is invalid: that round
+    was sampled and measured nothing trustworthy, and substituting the report's figure would replace "unmeasured" with
+    a number from a different window. The report's ``gpu_monitor`` block -- one card, whole-process window on a single
+    node -- is the fallback for the mean on rounds no recorder ran on; it reads one card, so such a round has no
+    per-card figure and any per-card or total budget treats it as unmeasured.
     """
-    from ._gpu_power import read_measured_gpu_power, read_measured_gpu_power_by_gpu
+    from ._gpu_power import round_power_fields, round_power_summary
 
-    found, watts = read_measured_gpu_power(workspace, subprocess_started_unix=subprocess_started_unix)
-    return {
-        "gpu_power_avg_w": watts if found else gpu_metrics_from_report(report).get("avg_power_w"),
-        "gpu_power_by_gpu_w": read_measured_gpu_power_by_gpu(
-            workspace, subprocess_started_unix=subprocess_started_unix
-        )[1],
-    }
+    summary = round_power_summary(report, workspace, subprocess_started_unix=subprocess_started_unix)
+    if summary is not None:
+        return round_power_fields(summary)
+    return {"gpu_power_avg_w": gpu_metrics_from_report(report).get("avg_power_w"), "gpu_power_by_gpu_w": None}
 
 
 def extract_benchmark_measurement(
@@ -645,16 +653,17 @@ def extract_benchmark_measurement(
     *,
     workspace: Path | None = None,
     subprocess_started_unix: float | None = None,
-    config_path: Path | None = None,
 ) -> dict[str, Any]:
-    """Extract a normalized measurement from Magpie and InferenceX outputs.
+    """Extract a normalized measurement from an inference_suite run_dir, or from a benchmark report and InferenceX outputs.
+
+    A ``workspace`` that is an inference_suite run_dir is measured from its own report alone; ``report`` is unused.
 
     ``subprocess_started_unix`` enables an opt-in salvage pass over the
-    Magpie leak destinations (see :func:`_rescue_candidate_paths`) when the
+    benchmark-client leak destinations (see :func:`_rescue_candidate_paths`) when the
     in-workspace search fails; only leaks written after this run are adopted.
 
     Args:
-        report: The Magpie ``benchmark_report.json`` mapping, or ``None``.
+        report: The ``benchmark_report.json`` mapping, or ``None``.
         workspace: Optional task workspace scanned for raw InferenceX results
             and (as a fallback) salvageable leaks.
         subprocess_started_unix: Optional launch time enabling the mtime-gated
@@ -665,15 +674,9 @@ def extract_benchmark_measurement(
         ``nonfatal_warnings``, and the ``ttft_e2el_source`` / ``tpot_source``
         provenance labels).
     """
+    if workspace is not None and is_round_folder(workspace):
+        return _round_folder_measurement(workspace, subprocess_started_unix)
     report = report or {}
-    from hyperloom.inference_optimizer.agentx.report import agentx_measurement
-
-    from .magpie_agentx import native_config
-
-    if report.get("scenario") == "agentx" or (config_path is not None and native_config(config_path)):
-        measurement = agentx_measurement(report)
-        measurement.update(_round_gpu_power(report, workspace, subprocess_started_unix))
-        return measurement
     measurement = _measurement_from_report(report, workspace, subprocess_started_unix)
 
     origins: dict[str, str] = {}
@@ -709,10 +712,31 @@ def extract_benchmark_measurement(
     return measurement
 
 
+def _round_folder_measurement(run_dir: Path, subprocess_started_unix: float | None) -> dict[str, Any]:
+    """An inference_suite round's measurement, with the measured-window power its report's ``power`` section holds."""
+    folder = RoundFolder.read(run_dir)
+    measurement = folder.measurement()
+    measurement.update(_round_gpu_power(folder.report.to_document(), run_dir, subprocess_started_unix))
+    if folder.report.agentx is not None:
+        _add_agentx_timeline_fields(measurement, run_dir)
+    return measurement
+
+
+def _add_agentx_timeline_fields(measurement: dict[str, Any], workspace: Path | None) -> None:
+    """The checkpoint median and the replayed corpus shape, both read from the aiperf exports under ``workspace``."""
+    from hyperloom.inference_optimizer.agentx.report import measured_corpus_shape
+
+    from ._agentx_checkpoint import workspace_checkpoint_p50
+
+    measurement[GRADED_INTVTY_P50_CHECKPOINT] = workspace_checkpoint_p50(workspace)
+    if corpus_shape := measured_corpus_shape(workspace):
+        measurement["agentx_corpus_shape"] = corpus_shape
+
+
 def _measurement_from_report(
     report: dict[str, Any], workspace: Path | None, subprocess_started_unix: float | None
 ) -> dict[str, Any]:
-    """The normalized fields a Magpie ``benchmark_report.json`` supplies on its own."""
+    """The normalized fields a ``benchmark_report.json`` supplies on its own."""
     throughput = report.get("throughput") or {}
     latency = report.get("latency") or {}
     ttft = latency.get("ttft") or {}
@@ -761,7 +785,7 @@ def _salvage_from_leaked_results(
     workspace: Path,
     subprocess_started_unix: float | None,
 ) -> None:
-    """Adopt a Magpie leak written after launch as the measurement, when the in-workspace search found none."""
+    """Adopt a benchmark-client leak written after launch as the measurement, when the in-workspace search found none."""
     warnings = measurement["nonfatal_warnings"]
     for rescue_path in _rescue_candidate_paths(workspace, subprocess_started_unix=subprocess_started_unix):
         raw = read_json(rescue_path, default=None, require_dict=True)
@@ -845,8 +869,11 @@ def is_valid_measurement(result: dict[str, Any] | None) -> bool:
         return False
     if result.get("submission_valid") is False:
         return False
-    if result.get("benchmark_backend") == "magpie_agentx":
-        return result.get("benchmark_valid") is True and result.get("diagnostic_only") is False
+    # ``diagnostic_only`` comes only from a report mapper, whose verdict on the report stands.
+    if result.get("diagnostic_only") is not None and (
+        result.get("diagnostic_only") is not False or result.get("valid_measurement") is not True
+    ):
+        return False
     if _is_scriptable_measurement(result):
         # A scriptable run whose image-quality gate failed is not selectable, regardless of throughput.
         from ._accuracy_gate import quality_gate_passed
@@ -862,8 +889,8 @@ def is_valid_measurement(result: dict[str, Any] | None) -> bool:
 def round_succeeded(measurement: dict[str, Any]) -> bool:
     """Whether a round ran to the verdict its kind accepts.
 
-    A native AgentX round that Magpie marks diagnostic (a profile) is never a valid measurement: the trace it leaves is
-    what it is run for, so Magpie's own ``round_succeeded`` decides it. Any other round succeeds when it is valid.
+    A native AgentX round marked diagnostic (a profile) is never a valid measurement: the trace it leaves is what it is
+    run for, so the round's own ``round_succeeded`` decides it. Any other round succeeds when it is valid.
     """
     return measurement.get("round_succeeded", measurement.get("valid_measurement")) is True
 
@@ -909,10 +936,13 @@ def _find_server_logs(slot: Path) -> list[Path]:
     return sorted(logs, key=_size, reverse=True)
 
 
-def double_run_requested(params: dict | None) -> bool:
-    """Whether baseline double-run is enabled; defaults to True when not in params."""
+def double_run_requested(params: dict | None, config_path: Path) -> bool:
+    """Whether a discarded warmup round precedes the measured one; ``baseline_double_run`` decides, on by default,
+    except for a point measured once (an AgentX replay), which never has one."""
     from hyperloom_common.env import is_truthy
 
+    if read_benchmark_point(config_path).measured_once:
+        return False
     if params and "baseline_double_run" in params:
         return is_truthy(params["baseline_double_run"])
     return True

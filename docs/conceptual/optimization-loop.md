@@ -126,7 +126,10 @@ metadata at boot. There is no separate live `classify` action.
 
 ENABLEMENT is entered when a baseline fails and enablement is admitted
 (`--enablement` is not `off` and the run is not multi-node). It is skipped
-entirely on runs where the baseline boots on the first attempt.
+entirely on runs where the baseline boots on the first attempt. A baseline the
+harness refused to launch because the host lacked the idle GPUs it needs never
+enters it: no server started, so the run stops on the first refusal with
+`stop_reason='host_gpus_unavailable'`.
 
 Admission is controlled by `--enablement {off,launch,eval,all}`,
 defaulting to `all`. `launch` admits the boot-failure lane, `eval` the
@@ -254,54 +257,46 @@ unset.
 
 ### GPU power: measured and asserted
 
-Each round's GPU power is sampled by Hyperloom itself, with read-only
-`amd-smi metric --power --mem-usage --clock` every 2 s, only while the round is in its
-measured phase (from server ready, and from AIPerf's measured-phase line under
-AgentX, until the client exits or the eval starts). It is averaged over the
-serving cards: those in the visible-device mask that held at least 10% of VRAM
-during that phase, so a TP4 round on an unpinned eight-card host is averaged
-over its four cards. The result is the round's `gpu_power.json`, carried as
-`gpu_power_avg_w` on the measurement. A round that was sampled but had no
-serving card or no power reading stays unmeasured. The benchmark report's
+Each round's GPU power is recorded by Hyperloom itself into the round's
+`power.json` (see the InferenceSuite reference, *Power*): every card's sysfs
+power and telemetry each second for the whole round, its energy accumulator and
+every `amd-smi metric` field at each phase mark, and the node's NPM power and
+the CPU's energy counters where the node has them. The measured window (from
+server ready, and from AIPerf's measured-phase instant under AgentX, until the
+client exits or the eval starts) is integrated per configured card as
+InferenceX does, and carried on the measurement as `gpu_power_avg_w` (the
+window's energy over its duration, per card), `gpu_power_by_gpu_w`,
+`gpu_energy_j`, `gpu_power_p75_w`, `gpu_power_p90_w`, the `joules_per_*`
+figures and `power_valid`. A round whose energy is not valid (a configured card
+that held no model or was never read, a sampling gap over 3 s) stays unmeasured,
+with its reasons in the report's `power` section. The benchmark report's
 `gpu_monitor` block (`gpu_metrics.json`) is only the fallback for rounds no
-sampler ran on: on one node it reads a single card over the whole process
+recorder ran on: on one node it reads a single card over the whole process
 lifetime, boot and idle tail included.
 
-The sampler also reports how the cards ran under their power cap. Each card in
-`gpu_power.json` carries its mean graphics clock over the measured phase while
-busy (`sclk_mean_mhz`; an XCD in deep sleep, below its `min_clk`, is idle time
-and left out), its clock limit (`sclk_max_mhz`, unread when the limit changed
-during the phase), and the share of the measured phase it spent held back by its
-power limit (`power_throttle_fraction`, from the `amd-smi metric --violation`
-accumulators read as each measured window opens and closes; idle stretches in
-the phase count toward that share's whole). A window whose counters could not be
-read leaves the share unread rather than counting only the windows that were:
-every card's when the read failed (counted in `throttle_query_errors`, apart
-from the power reads' `query_errors`), one card's when it was missing from
-either end or both, or its counters went back or stopped advancing, and every
-card's when the sampler was still blocked in `amd-smi` as the round closed. A
-serving card power throttled for at least 10% of the phase is listed in
-`power_throttled_gpus`, and the round logs a warning naming each such card's
-throttled share and mean clock: its throughput was set by the power cap, not by
-its clock limit. This is only reported; nothing changes the cards.
+The recording also shows how the cards ran under their power cap. For each
+phase, `power.json` carries each card's clocks, and the share of the phase's
+firmware ticks each `amd-smi` throttle accumulator counted (`ppt` is the share
+held back by the power limit), from the full reads at the phase's two marks.
+The report's `power_throttle_fraction_max` is the largest `ppt` share among the
+configured cards over the measured window, and a card power throttled for at
+least 10% of it is logged as a warning: its throughput was set by the power
+cap, not by its clock limit. This is only reported; nothing changes the cards.
 
 Node Power Management (MI350 series) holds the node to its own limit by
 lowering every card's power, and the cards' throttle accumulators do not count
 that: on an MI350X node held to 2600 W, every card ran near 430 W against a
-1000 W cap with a `power_throttle_fraction` under 1%. So while NPM is enabled,
-each sample also reads the node's power and the limit firmware enforces on it
-(`board/node_power` and `board/cur_node_power_limit` in sysfs; amdgpu publishes
-them on one card of an XGMI hive, so on one card of an MI350 node, and on every
-card of a node without a hive), and `gpu_power.json` carries a `node` block: `limit_w`
-(unread when the limit changed during the phase), `avg_power_w`, `max_power_w`,
-`samples` and `limited_fraction`, the share of samples at 99% of the limit or
-above. A held node reads at its limit, or above it once every card is down at
-its minimum power. When that share is at least 10%, the round logs a warning
-naming the limit and the share. The block is `null` on a node without NPM or
-with it disabled. Failed reads, and a reading that reports NPM enabled with no
-limit, are counted in `node_query_errors`. Where
-the node limit equals the sum of the cards' caps (8000 W against eight 1000 W
-caps), both limits are reached together and both are reported.
+1000 W cap with a `ppt` share under 1%. So each second the recorder also reads
+the node's power and the limit firmware enforces on it (`board/node_power` and
+`board/cur_node_power_limit` in sysfs; amdgpu publishes them on one card of an
+XGMI hive, so on one card of an MI350 node, and on every card of a node without
+a hive), and each phase carries a `node` block: `avg_w`, `max_w`, `energy_j` and
+`limited_fraction`, the share of samples at 99% of the limit or above. A held
+node reads at its limit, or above it once every card is down at its minimum
+power; when that share is at least 10% of the measured window, the round logs a
+warning. With NPM disabled firmware reports both as 0, which reads as no node
+power. Where the node limit equals the sum of the cards' caps (8000 W against
+eight 1000 W caps), both limits are reached together and both are reported.
 
 The optimizer never changes power settings during a session. The power cap, the
 DPM performance level and the graphics clock's maximum (sclk) decide how much of
@@ -470,14 +465,12 @@ over-budget change; the correctness-fix route, which can KEEP a verified fix
 after that verdict reverted it, applies the same budgets itself. If the baseline itself breaks a budget, or reported no
 power, the run stops with `baseline_over_power_budget`. The reading is the
 measured-phase per-GPU figure described above, carried as `gpu_power_by_gpu_w`;
-only Hyperloom's own sampler reads every serving card, so a round it did not
-sample counts as unmeasured. So does a round in which a card that may be
-serving could not be read: one holding a model with no power reading (`N/A`, or
-a 0 W or negative socket power, which no working sensor reports), or one in
-scope (the visible-device mask, or every card `amd-smi` reported) whose VRAM was
-never read. Such cards are listed as `unread_gpus` in `gpu_power.json`, since a
-card missing from the readings would drop out of the total and escape its own
-limit. A GEAK replay boots its own server once per
+only Hyperloom's own recorder reads every serving card, so a round it did not
+record counts as unmeasured. So does a round whose energy is not valid, such as
+one in which a configured card had no power reading (a 0 W or negative socket
+power, which no working sensor reports, reads as none): such cards are listed as
+`unread_gpus`, since a card missing from the readings would drop out of the
+total and escape its own limit. A GEAK replay boots its own server once per
 replica, so its phases are read from the server logs the replay writes, with
 the same markers, and each new log counts as a fresh boot.
 
@@ -627,7 +620,7 @@ interactivity curve. The ladder is sized for the workload: powers of two
 down from 256 for a synthetic run, `1,4,8,10,14,20,28` for an agentic one,
 where a request carries orders of magnitude more prompt and the same card
 saturates far lower. Override either with `--conc-sweep-concs`. Under
-native Magpie AgentX, concurrency is fixed for the session and
+native AgentX, concurrency is fixed for the session and
 `--enable-conc-sweep` is rejected at startup. Start a separate session for each
 CONC. The independent MLPerf backend keeps its optional sweep, disabled by
 default. See the [AgentX workflow](../how-to/optimize.md#optimize-an-agentx-workload)
@@ -680,8 +673,9 @@ a resumed run.
 
 Every Orchestration turn is stateless: the Coordinator composes one
 unconditional full state projection (mission, `SharedState`, gaps,
-warm-start, scores, and the inbox events since the last turn), so the
-turn never depends on what an earlier turn happened to remember.
+warm-start, scores, the tasks in flight with each explore round's grid,
+and the inbox events since the last turn), so the turn never depends on
+what an earlier turn happened to remember.
 
 - **Cycle directive**: While SWEEP is open and another macro-cycle is
   still feasible, the Coordinator appends one handoff request to an ordinary
@@ -691,7 +685,7 @@ turn never depends on what an earlier turn happened to remember.
   entered; a turn that produced nothing usable leaves the directive empty.
 - **Context tools**: A read-only MCP surface lets the agent pull what the
   projection leaves out — finished outcomes (`get_recent_outcomes`),
-  in-flight work (`get_running_tasks`), failure packets (`get_failure` /
+  a mid-turn re-read of in-flight work (`get_running_tasks`), failure packets (`get_failure` /
   `get_variant_failures`), reference docs (`read_reference`), the raw
   `analysis.md` (`show_analysis_md`), denial history (`why_denied`) — plus
   Transports without MCP tools get the projection only.

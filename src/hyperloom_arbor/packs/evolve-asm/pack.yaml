@@ -1,0 +1,35 @@
+name: evolve-asm
+description: >
+  Multi-island ASM kernel evolution for AMD gfx950. Any kernel: FlyDSL, Triton,
+  CK, HIP, or raw .co. Runs until 85% of MAF roofline via pure hand-tuned
+  AMDGCN ASM. Tier ladder enforced in code: native params → peer lang compile →
+  hand-tuned .s → cross-kernel → algorithmic.
+
+objective:
+  kind: maximize_perf
+  metric: weakest_us
+  direction: min
+  unit: "µs"
+  measurement:
+    count: 3
+    threshold_rel: 1.005
+    noise_floor: measured
+
+validator:
+  bench: validator/bench.sh
+  correctness: validator/correctness.sh
+  protected:
+    - validator/
+
+workload:
+  kind: kernel
+
+constraints:
+  - "Run validator/correctness.sh before every bench. SNR must pass before timing is accepted."
+  - "Rebuild guard: the .co must be newer than the .s. Run patch_co.py after every .s edit."
+  - "Gate on weakest-of-3 runs (worst sample). Write all gpu_us: lines to bench_output.json."
+  - "Print sig_vgpr / sig_barriers / sig_spills / sig_mfma after every bench."
+  - "One change per iteration. Gate it before touching anything else."
+  - "End goal is always pure hand-tuned AMDGCN ASM. Languages are scaffolding."
+  - "Never declare at ceiling. Ceiling is only proven when roofline_frac >= 0.85 on weakest run."
+  - "Write DONE: <description> when finished so the harness records and gates the iteration."

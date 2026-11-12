@@ -19,11 +19,19 @@ from hyperloom_common.env import is_truthy
 from hyperloom.common.env_safety import operator_extra_env
 from hyperloom_common.gpu_identity import is_gfx_arch
 
+from hyperloom.common.failure_signature import SERVE_FLAG
+
 from ._grid_base import (
     GridVariant,
+    apply_variant_env,
 )
+from ._spec_decode_pin import speculative_pin_reason
 from hyperloom.inference_optimizer.grid_server_args import compose_server_args
-from hyperloom.inference_optimizer.speculative_capability import CAPABILITY_UNSUPPORTED, speculative_capability_reason
+from hyperloom.inference_optimizer.speculative_capability import (
+    CAPABILITY_UNSUPPORTED,
+    DraftLimits,
+    speculative_capability_reason,
+)
 
 log = logging.getLogger(__name__)
 
@@ -259,12 +267,22 @@ def _fingerprint_component_matches(actual: str, expected: str) -> bool:
 
 @dataclass(frozen=True)
 class ServingStack:
-    """The framework, model, GPU and component versions a grid's variants are served on."""
+    """The framework, model, GPU and component versions a grid's variants are served on, and the draft bounds its
+    recipe declares."""
 
     framework: str
     model_path: str
     gpu_type: str = ""
     stack_fingerprint: dict | None = None
+    draft_limits: DraftLimits = DraftLimits()
+
+    @classmethod
+    def of_recipe(
+        cls, benchmark: Mapping[str, Any], *, model_path: str, gpu_type: str = "", stack_fingerprint: dict | None = None
+    ) -> ServingStack:
+        """The stack ``benchmark``'s recipe is served on: its framework, and the draft bounds it declares."""
+        framework = str(benchmark.get("framework") or "").lower()
+        return cls(framework, model_path, gpu_type, stack_fingerprint, DraftLimits.declared(benchmark))
 
 
 def _matches_unsafe_unified_attn_stack(serving: ServingStack) -> bool:
@@ -354,6 +372,32 @@ def _speculative_capability_reason(
         framework=serving.framework,
         envs={**base_envs, **(getattr(variant, "extra_envs", None) or {})},
         model_path=serving.model_path,
+        limits=serving.draft_limits,
+    )
+
+
+def _speculative_pin_reason(
+    variant: "GridVariant", *, base_server_args: str, base_envs: Mapping[str, Any]
+) -> str | None:
+    """Why this variant moves a lever its base launch pins -- the draft, or how acceptance is simulated -- else
+    ``None``.
+
+    Composed the way the launch would be, since the pin is a property of the launch the variant would become: the
+    arguments merged or replaced as ``args_mode`` says, the environment carrying the variant's unsets and sets the
+    way :func:`apply_variant_env` applies them at launch.
+    """
+    candidate_envs = dict(base_envs)
+    apply_variant_env(candidate_envs, variant, None, None)
+    return speculative_pin_reason(
+        base_server_args,
+        base_envs,
+        compose_server_args(
+            base_extra_args=base_server_args,
+            variant_extra_args=variant.extra_server_args,
+            remove_args=variant.remove_args,
+            args_mode=variant.args_mode,
+        ),
+        candidate_envs,
     )
 
 
@@ -409,6 +453,12 @@ def apply_compatibility_filter(
         )
         if skip_reason:
             dropped.append({"name": v.name, "source": CAPABILITY_UNSUPPORTED, "reason": skip_reason})
+            continue
+        # A lever the base launch pins: the round would score it against an acceptance length that no longer
+        # describes it, so it is not a variant this base can own.
+        skip_reason = _speculative_pin_reason(v, base_server_args=base_server_args, base_envs=base_envs or {})
+        if skip_reason:
+            dropped.append({"name": v.name, "source": SERVE_FLAG, "reason": skip_reason})
             continue
         # xDiT do-not-set blacklist (env-keyed; precision lock + known crashes).
         if is_xdit:
