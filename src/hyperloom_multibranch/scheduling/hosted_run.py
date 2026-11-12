@@ -54,6 +54,7 @@ import logging
 import os
 import signal
 import threading
+import time
 from dataclasses import dataclass
 from datetime import datetime
 from functools import partial
@@ -85,6 +86,7 @@ from hyperloom_multibranch.scheduling.resumption import ResumeRefused, require_r
 from hyperloom_multibranch.scheduling.settings import RunSettings
 from hyperloom_multibranch.scheduling.stops import SessionStopReason
 from hyperloom_multibranch.toolbox.hosted_leases import GrantLimits
+from hyperloom_multibranch.toolbox.resume_guard import BaselineNotReusable, check_hosted_baseline_reusable
 
 # hyperloom/hosted/entry.py EXIT_FILE and SESSION_FILE
 EXIT_FILE = "exit.json"
@@ -562,6 +564,31 @@ def hosted_resume_deadline(persisted: PersistedRun, now: float) -> float:
     return deadline
 
 
+def hosted_restart_leg(
+    persisted: PersistedRun, finish: Callable[..., int], resume: Callable[..., int]
+) -> Callable[..., int]:
+    """What a restart of the run runs over ``persisted``, the ``finish`` of :func:`take_over_earlier_session`: ``resume``
+    (``cli.resume``) with ``deadline`` bound to :func:`hosted_resume_deadline`'s, so its budget counts from the run's
+    first start, when the session was measured in the grant's sandboxes and its baseline still measures what a test
+    measured now would (:func:`~hyperloom_multibranch.toolbox.resume_guard.check_hosted_baseline_reusable`: the same
+    build, ``MEASUREMENT_EPOCH``, image, base launch and runner template cards; not the node or the account, which a
+    reschedule changes by design); else ``finish`` (``cli.final_only``), and one warning names why. Writes nothing.
+    Blocks."""
+
+    root = persisted.layout.root
+    if not persisted.layout.runner_source.exists():  # what a session measured in the grant's sandboxes cloned
+        log.warning("hosted run: finishing %s, whose tests did not run in the grant's sandboxes", root)
+        return finish
+    try:
+        check_hosted_baseline_reusable(persisted.layout.toolbox, persisted.settings.workload.tp)
+        deadline = hosted_resume_deadline(persisted, time.time())
+    except (BaselineNotReusable, ResumeRefused) as exc:
+        log.warning("hosted run: finishing %s instead of resuming it: %s", root, exc)
+        return finish
+    log.info("hosted run: resuming %s up to the deadline its first start set", root)
+    return partial(resume, deadline=deadline)
+
+
 #: What reading back an earlier session fails with when this account cannot read what it left: a file an earlier leg of
 #: another account of the group made owner-only, or one that is not the text it wrote.
 CANNOT_READ_SESSION = (PermissionError, UnicodeDecodeError, json.JSONDecodeError)
@@ -653,6 +680,7 @@ __all__ = [
     "grant_explore_cap",
     "grant_tests_end_by",
     "grant_tests_that_fit",
+    "hosted_restart_leg",
     "hosted_resume_deadline",
     "prelude_landed",
     "record_session",
