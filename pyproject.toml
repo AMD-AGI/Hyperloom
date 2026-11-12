@@ -393,7 +393,7 @@ hyperloom_multibranch = [
     "blackboard/knowledge/mappings/*.yaml",
 ]
 # The runner's bootstrap entry point: install.sh <tool-cache-dir> stages the tools a round runs; the AgentX client lock;
-# the sealed runner's locks lm-eval installs from (symlinks to requirements/, which a wheel carries as files).
+# the sealed runner's locks lm-eval installs from (copies of requirements/'s, held equal by a test).
 inference_suite = [
     "install.sh",
     "agentx-client.lock",
