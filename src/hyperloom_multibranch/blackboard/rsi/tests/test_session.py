@@ -74,7 +74,6 @@ from hyperloom_multibranch.blackboard.rsi.session import (
     NO_PLAYBOOK_PLAYED,
     NO_RETRIEVAL_LOG,
     NO_TRANSCRIPT,
-    NO_TREES,
     SCHEDULING_REPLAY_REPORT,
     STOP_AUDIT_REPORT,
     WRITTEN,
@@ -297,6 +296,35 @@ def test_close_reruns_the_scheduling_replay_and_says_what_moved_since_the_last_c
 
 
 @pytest.mark.usefixtures("unconfigured")
+def test_a_session_stopped_before_its_baseline_writes_nothing_beside_the_archive(
+    snapshot: BlackboardSnapshot, tmp_path: Path, archived: Callable[[Path], TreeArchive]
+) -> None:
+    archive, reports = archived(tmp_path / "archive"), tmp_path / "reports"
+    assert snapshot.profile is not None
+    close_knowledge(snapshot, METRIC, targets=CloseTargets(receipts=reports / "1"))
+    played = dataclasses.replace(snapshot.fingerprints[-1], policy_versions={PLAYBOOK_KEY: H0.label})
+    stopped = dataclasses.replace(
+        snapshot,
+        profile=dataclasses.replace(snapshot.profile, session_id="sess-2"),
+        fingerprints=(*snapshot.fingerprints[:-1], played),
+        baselines=(),
+        learnings=LEARNT,
+        taken_at=snapshot.taken_at + HOUR,
+    )
+    transcript = tmp_path / "MB-judge.jsonl"
+    transcript.write_text(json.dumps({"at": START, "prompt": "view", "reply": "{}", "error": ""}) + "\n")
+    before = {path: path.read_bytes() for path in archive.root.rglob("*") if path.is_file()}
+
+    done = close_knowledge(stopped, METRIC, targets=CloseTargets(receipts=reports / "2", judge_transcript=transcript))
+
+    assert {path: path.read_bytes() for path in archive.root.rglob("*") if path.is_file()} == before
+    unarchived = CloseStep(SKIPPED, "no_profile_or_baseline")
+    assert done.archive == unarchived
+    beside = ("lessons", "lesson_standings", "playbook_trial", "scheduling_replay", "specialist_outcomes")
+    assert [done.steps()[name] for name in (*beside, "judge_decisions", "regression_cases")] == [unarchived] * 7
+
+
+@pytest.mark.usefixtures("unconfigured")
 def test_close_keeps_the_judges_exchanges_beside_the_archive_once(
     snapshot: BlackboardSnapshot, tmp_path: Path, archived: Callable[[Path], TreeArchive]
 ) -> None:
@@ -358,9 +386,10 @@ def test_each_rsi_step_of_close_says_why_it_kept_nothing_and_close_goes_on(
     assert (unprofiled.playbook_trial, unprofiled.scheduling_replay, unprofiled.judge_decisions) == (
         CloseStep(SKIPPED, NO_PROFILE),
     ) * 3
-    assert no_archive.scheduling_replay == CloseStep(SKIPPED, NO_TREES)
-    assert [step.status for step in (no_archive.playbook_trial, no_archive.judge_decisions)] == [FAILED] * 2
-    assert no_archive.specialist_outcomes.status == FAILED
+    unwritable = CloseStep(SKIPPED, "archive_unwritable")
+    assert no_archive.archive == unwritable
+    assert (no_archive.scheduling_replay, no_archive.playbook_trial, no_archive.judge_decisions) == (unwritable,) * 3
+    assert no_archive.specialist_outcomes == unwritable
     assert [step.status for step in (no_receipts.stop_audit, no_receipts.scheduling_replay)] == [FAILED] * 2
     assert no_receipts.specialist_outcomes.status == FAILED and no_receipts.playbook_trial.status == WRITTEN
 

@@ -27,6 +27,7 @@ import yaml
 import inference_suite
 from hyperloom.common.benchmark_config import is_agentx
 from hyperloom.orchestrator.actions.executors import external_agentx_config, fixed_workload, staged_tool_cache
+from hyperloom_common.shared_storage import make_shared_dirs, write_shared_text
 from inference_suite import (
     ClientPass,
     ClientTarget,
@@ -105,8 +106,8 @@ class AgentxGateClient:
             paths=replace(self.config.paths, run_dir=str(result_dir)),
         )
         path = result_dir.with_name(f"{result_dir.name}{CONFIG_SUFFIX}")
-        path.parent.mkdir(parents=True, exist_ok=True)
-        path.write_text(yaml.safe_dump(config.to_document(), sort_keys=False), encoding="utf-8")
+        make_shared_dirs(path.parent)
+        write_shared_text(path, yaml.safe_dump(config.to_document(), sort_keys=False))
         packages = Path(inference_suite.__file__).resolve().parents[1]
         argv = [sys.executable, "-m", "inference_suite", "run", "--config", str(path), "--run-dir", str(result_dir)]
         return shlex.join([f"PYTHONPATH={packages}", *argv])

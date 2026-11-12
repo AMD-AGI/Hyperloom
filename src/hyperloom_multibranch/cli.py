@@ -91,12 +91,12 @@ the same path; a usage error names what is missing.
 :mod:`~hyperloom_multibranch.scheduling.hosted_run` maps it onto the options of ``run``, measured in the runner
 sandboxes of the host's sandbox service (:mod:`~hyperloom_multibranch.scheduling.hosted_peers`). Started again over a
 run whose ``session.json`` names a session, it finishes that session as ``final-only`` does once its PRELUDE recorded
-the baseline, except that a FINAL that chooses a commit ends it for ``finished_after_restart`` with exit code 0; before
-that it closes the session, ending its tests, and starts the spec's session again
-(:func:`~hyperloom_multibranch.scheduling.hosted_run.take_over_earlier_session`). It tells the host the run is over
--- ``final: true`` in ``exit.json`` -- once CLOSE ran, and when the spec, the environment, a missing package of the
-``hosted`` extra, the runner cache or a file it cannot read keeps a session from running, with exit code 2 for a
-refused spec or session and 1 otherwise; a crash leaves no ``exit.json``, and the host starts the run again.
+the baseline (a FINAL that chooses a commit ends it for ``finished_after_restart``, exit code 0), and otherwise closes
+it, ending its tests, and starts the spec's session again
+(:func:`~hyperloom_multibranch.scheduling.hosted_run.take_over_earlier_session`). It tells the host the run is over --
+``final: true`` in ``exit.json`` -- once CLOSE ran, or when the spec, the environment, agents it cannot isolate, a
+missing ``hosted`` package, the runner cache or an unreadable file keeps a session from running (exit code 2 for a
+refused spec or session, else 1); a crash leaves no ``exit.json``, and the host starts the run again.
 ``final-only SESSION_DIR`` is the emergency recovery of a session that ended before FINAL ran, and takes nothing but
 that directory: it runs FINAL and CLOSE over what the session persisted -- the settings and the frontier policy its
 manifest holds, the branches its roster and blackboard hold -- and rewrites its report, dashboard and breakdown. It
@@ -157,6 +157,7 @@ from hyperloom_multibranch.scheduling.hosted_run import (
     recorded_session,
     refuse_unhosted_branches,
     reported_stop_reason,
+    require_hosted_isolation,
     run_argv,
     share_with_the_group,
     spec_make_before_break,
@@ -478,7 +479,7 @@ def _add_agent_options(run: argparse.ArgumentParser) -> None:
         metavar="SOURCE",
         help=(
             "A third-party agent to run end to end on one branch, a git URL (URL@ref for a ref), a local path, or"
-            f" {ARBOR_KEYWORD} for the Arbor vendored in this source checkout (src/hyperloom_arbor); repeatable, each"
+            f" {ARBOR_KEYWORD} for the Arbor vendored with Hyperloom (src/hyperloom_arbor); repeatable, each"
             " opens one branch where EXPLORE starts, within --max-branches."
         ),
     )
@@ -644,7 +645,7 @@ def _workload_model(args: argparse.Namespace) -> str:
 
 #: Schemes whose URL user is a login name rather than a credential; any other scheme's user, or a password, is one.
 SSH_SCHEMES = frozenset({"ssh", "git+ssh", "svn+ssh"})
-#: The --autonomous-agent source that names the Arbor vendored in this checkout, which a wheel does not ship.
+#: The --autonomous-agent source that names the Arbor vendored beside this package, in a checkout or a wheel install.
 ARBOR_KEYWORD = "arbor"
 VENDORED_ARBOR = Path(__file__).resolve().parent.parent / "hyperloom_arbor"
 
@@ -666,7 +667,7 @@ def _agents(sources: list[str], free: int) -> tuple[str, ...]:
     if ARBOR_KEYWORD in sources and not VENDORED_ARBOR.is_dir():
         raise ValueError(
             f"--autonomous-agent {ARBOR_KEYWORD} names the Arbor vendored at {VENDORED_ARBOR}, which this install does"
-            " not have: it is in a source checkout only; give an Arbor checkout's path or URL instead"
+            " not have; reinstall Hyperloom, or give an Arbor checkout's path or URL instead"
         )
     return tuple(str(VENDORED_ARBOR) if source == ARBOR_KEYWORD else source for source in sources)
 
@@ -803,8 +804,7 @@ def settings_from(
     """The run's settings; raises ValueError naming the invalid options. :class:`RosterCaps` checks the caps.
 
     ``tests_that_fit`` says how many tests of a TP run at once where the session measures, raising ValueError when one
-    does not fit: this machine's cards for ``run``, the grant for ``hosted run``.
-    """
+    does not fit: this machine's cards for ``run``, the grant for ``hosted run``."""
 
     missing = [f"--{name.replace('_', '-')}" for name in RUN_REQUIRED if getattr(args, name) is None]
     if missing:
@@ -930,8 +930,7 @@ def run_session(
 
     The session and its peers are built on the event loop they run on, which the specialist tools of the MCP service
     hand every toolbox call to. Whatever the session's processes orphan is reparented to this process, so the session
-    stop kills it and reports it while it runs.
-    """
+    stop kills it and reports it while it runs."""
 
     with adopting_orphans():
         return asyncio.run(_run_session(settings, peer_factory, services, report_root, explore_cap))
@@ -1084,6 +1083,7 @@ def _hosted_start(host: HostInfo) -> HostedStart:
     over (:func:`take_over_earlier_session`); raises ValueError on a refused spec or session, ImportError when a
     ``hosted`` package is missing, and what :func:`ready_session` raises."""
 
+    require_hosted_isolation(os.environ)
     deadline = grant_deadline(host, datetime.now(timezone.utc))
     earlier = take_over_earlier_session(host.state_dir)
     if earlier.closed is not None:  # it closed with no baseline, which ended the run, and was killed before exit.json

@@ -11,7 +11,10 @@ for it run, and a host's callbacks for it are called. None of them holds the ses
   - **A blocking skill** (``metadata.arbor.blocking: true``) runs to its end before the session goes on: for at most
     ``BLOCKING_TIMEOUT_S``, and no longer than the time the session has left (``budget_s``: a host's deadline, a
     time budget). With under ``BLOCKING_MIN_S`` left it is skipped, and the journal says so.
-- **Callbacks:** a host registers them in the config's component block, ``"callbacks": {"<event>": [<command>, ...]}``.
+- **Callbacks:** commands the config names for an event, ``"callbacks": {"<event>": [<command>, ...]}``.
+  - **Where:** a top-level ``callbacks`` block, read in any mode (a standalone campaign's own commands, such as
+    ``python3 -m arbor.collect kb`` at ``end``), and a host's component block, read in component mode. Under a host
+    both apply, the component block's commands first. Each block is checked when the config loads.
   - **A command** is a string (split as a shell would, never run by one) or a list of arguments.
   - **How it runs:** started without waiting for it, with ``ARBOR_EVENT``, ``ARBOR_SESSION`` and ``ARBOR_EVENT_JSON``
     (the journal entry) in its environment.
@@ -48,17 +51,17 @@ SPAWN = subprocess.Popen
 RUN = subprocess.run
 
 
-def callback_errors(callbacks: object) -> list[str]:
-    """What is wrong with a component block's ``callbacks``."""
+def callback_errors(callbacks: object, where: str = "component.callbacks") -> list[str]:
+    """What is wrong with a ``callbacks`` block; ``where`` names the block in each message."""
 
     if not isinstance(callbacks, dict):
-        return [f"component.callbacks must map events to commands: {callbacks!r}"]
+        return [f"{where} must map events to commands: {callbacks!r}"]
     errors = []
     for event, commands in callbacks.items():
         if event not in lifecycle.EVENT_NAMES:
-            errors.append(f"component.callbacks: unknown event {event!r} (events: {', '.join(lifecycle.EVENT_NAMES)})")
+            errors.append(f"{where}: unknown event {event!r} (events: {', '.join(lifecycle.EVENT_NAMES)})")
         elif not isinstance(commands, list) or not commands or not all(_argv(c) for c in commands):
-            errors.append(f"component.callbacks.{event} must be a list of commands (strings or argument lists)")
+            errors.append(f"{where}.{event} must be a list of commands (strings or argument lists)")
     return errors
 
 
@@ -74,12 +77,15 @@ def _argv(command: object) -> list[str]:
 
 
 def callbacks(config: dict, event: str) -> list[list[str]]:
-    """The host's commands for ``event``, as argument lists; ``[]`` outside component mode."""
+    """The commands for ``event``, as argument lists: the component block's (component mode only), then the
+    top-level block's (any mode)."""
 
-    if (config or {}).get("mode") != "component":
-        return []
-    block = (config.get("component") or {}).get("callbacks") or {}
-    return [argv for argv in (_argv(c) for c in block.get(event) or []) if argv]
+    config = config or {}
+    blocks = [config.get("callbacks") or {}]
+    if config.get("mode") == "component":
+        blocks.insert(0, (config.get("component") or {}).get("callbacks") or {})
+    return [argv for block in blocks if isinstance(block, dict)
+            for argv in (_argv(c) for c in block.get(event) or []) if argv]
 
 
 def fire(campaign, session_dir, arbor_root, config_path, event: str, iteration: int | None = None,

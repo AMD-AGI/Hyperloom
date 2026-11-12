@@ -1,0 +1,22 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "arbor.exit/1",
+  "title": "component_exit.json: how a component-mode run ended",
+  "description": "Written once, as the run ends, in component mode. The reason's outcome, exit code and what a host should do are the contract's exit table (python3 -m arbor interface --json).",
+  "type": "object",
+  "required": ["schema", "reason", "iteration", "keeps", "map", "deadline", "ts", "arbor"],
+  "additionalProperties": false,
+  "properties": {
+    "schema": {"const": "arbor.exit/1"},
+    "reason": {"enum": ["deadline", "map_exhausted", "done", "sigterm", "mapped", "aborted", "unreachable", "review_rejected", "ordered", "reported", "retraction_conflict", "paused"]},
+    "iteration": {"type": ["integer", "null"], "description": "the last iteration started"},
+    "keeps": {"type": "integer", "description": "the KEEPs booked in the session"},
+    "map": {"type": ["object", "null"], "description": "the map's counts (open, closed, exhausted, round, phase), or null without a map"},
+    "deadline": {"type": ["string", "null"], "description": "the host's deadline, ISO 8601"},
+    "ts": {"type": "string", "description": "when it was written, ISO 8601"},
+    "detail": {"type": "string", "description": "why, in words"},
+    "arbor": {"type": "object", "required": ["version", "commit"], "additionalProperties": false,
+              "properties": {"version": {"type": "string"}, "commit": {"type": ["string", "null"]}},
+              "description": "the Arbor that wrote it; commit null outside its own git checkout"}
+  }
+}

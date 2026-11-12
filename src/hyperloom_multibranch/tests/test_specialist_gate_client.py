@@ -6,7 +6,9 @@ replay an AgentX round sends, against an agent's server."""
 
 from __future__ import annotations
 
+import os
 import shlex
+import stat
 import sys
 from dataclasses import replace
 from pathlib import Path
@@ -169,6 +171,24 @@ def test_each_agent_s_agentx_client_measures_its_own_port(tmp_path: Path, tool_c
     )
 
     assert (first.server.port, second.server.port) == (31100, 31110)
+
+
+def test_an_agentx_client_stages_its_config_as_the_group_s_below_shared_storage(
+    tmp_path: Path, tool_cache: Path
+) -> None:
+    canonical, _ = _agentx_session(tmp_path, tool_cache)
+    client = read_gate_client(canonical, canonical.parent.parent, 4800)
+    shared = tmp_path / "shared"
+    shared.mkdir()
+    shared.chmod(0o2775)
+    previous = os.umask(0o022)
+    try:
+        config = Path(_flag(shlex.split(client.stage(31110, shared / "agent" / "mb-bench")), "--config"))
+    finally:
+        os.umask(previous)
+
+    assert stat.S_IMODE(config.parent.stat().st_mode) == 0o2775
+    assert stat.S_IMODE(config.stat().st_mode) == 0o664
 
 
 def test_an_agentx_client_is_refused_when_the_session_froze_no_base_or_staged_no_tools(

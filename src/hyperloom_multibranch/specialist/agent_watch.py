@@ -37,7 +37,7 @@ import time
 from collections.abc import Callable, Collection, Iterable, Iterator, Mapping, Sequence
 from pathlib import Path
 
-from hyperloom_common.proctree import TERM_GRACE_SEC
+from hyperloom_common.proctree import TERM_GRACE_SEC, proc_identity
 from hyperloom.common.visible_devices import ROCR_LEVEL_VARS, effective_mask_tokens
 from hyperloom.sandbox.launcher import LAUNCHER_SOURCE
 
@@ -65,15 +65,24 @@ _ZOMBIE = "Z"
 _watches: dict[int, tuple[subprocess.Popen[bytes], Path]] = {}
 #: Every sandbox a process registered, by the process, so a watch started again watches them all.
 _sandboxes: dict[int, dict[str, tuple[int, ...]]] = {}
+#: The holder of every sandbox that has one, by the process: its pid and start time, so a pid used again since is
+#: never taken for it.
+_holders: dict[int, dict[str, tuple[int, int]]] = {}
 
 
-def watch(root: Path, cards: tuple[int, ...]) -> tuple[int, Path] | None:
+def watch(root: Path, cards: tuple[int, ...], holder: int | None = None) -> tuple[int, Path] | None:
     """Have this process's watch confine the processes of the sandbox at ``root`` to ``cards`` and end them once this
-    process is gone, starting the watch when none runs for this process; what :func:`revive` returns."""
+    process is gone, starting the watch when none runs for this process; what :func:`revive` returns. ``holder`` is
+    the pid of the sandbox's holder, whose namespaces its commands share (a bubblewrap sandbox's pid 1): the watch
+    SIGKILLs it once the sandbox's processes ended, which ends the namespaces."""
 
-    _sandboxes.setdefault(os.getpid(), {})[str(root)] = cards
+    owner = os.getpid()
+    _sandboxes.setdefault(owner, {})[str(root)] = cards
+    identity = None if holder is None else proc_identity(holder)
+    if holder is not None and identity is not None:
+        _holders.setdefault(owner, {})[str(root)] = (holder, identity[1])
     ended = revive()
-    _register(_watches[os.getpid()][1], str(root), cards)
+    _register(_watches[owner][1], str(root), cards)
     return ended
 
 
@@ -100,7 +109,9 @@ def revive() -> tuple[int, Path] | None:
 def _register(registry: Path, root: str, cards: tuple[int, ...]) -> None:
     entry = registry / f"{hashlib.sha256(root.encode()).hexdigest()[:16]}.json"
     written = entry.with_suffix(".tmp")
-    written.write_text(json.dumps({"root": root, "cards": list(cards)}), encoding=_ENCODING)
+    holder = _holders.get(os.getpid(), {}).get(root)
+    document = {"root": root, "cards": list(cards), "holder": None if holder is None else list(holder)}
+    written.write_text(json.dumps(document), encoding=_ENCODING)
     written.replace(entry)
 
 
@@ -284,6 +295,19 @@ async def _end(roots: Iterable[str], grace_seconds: float) -> None:
     await asyncio.gather(*(kill_marked(root, grace_seconds, POLL_SECONDS) for root in roots))
 
 
+def _end_holders(registry: Path) -> None:
+    """SIGKILL the holder each entry of ``registry`` names, when that pid is still the process it was."""
+
+    for entry in registry.glob("*.json"):
+        try:
+            pid, started = json.loads(entry.read_text(encoding=_ENCODING)).get("holder") or (0, 0)
+        except (OSError, ValueError, TypeError, AttributeError):
+            continue
+        identity = proc_identity(pid) if pid > 0 else None
+        if identity is not None and identity[1] == started:
+            _signal([pid], signal.SIGKILL)
+
+
 def main(argv: Sequence[str]) -> int:
     """Watch the sandboxes ``argv``'s registry holds while ``argv``'s owner, this process's parent, runs or until a
     SIGTERM, then end them all and remove the registry; a watch that fails keeps it, for the traceback in
@@ -294,6 +318,7 @@ def main(argv: Sequence[str]) -> int:
     log = _Log()
     grace = STOP_GRACE_SECONDS if _watch(owner, registry, log) else GRACE_SECONDS
     asyncio.run(_end(_registered(registry, log.say), grace))
+    _end_holders(registry)
     shutil.rmtree(registry)
     return 0
 

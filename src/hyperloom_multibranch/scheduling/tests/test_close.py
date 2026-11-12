@@ -12,6 +12,7 @@ all, and only those records.
 from __future__ import annotations
 
 import asyncio
+import dataclasses
 import json
 import os
 import time
@@ -46,7 +47,7 @@ from hyperloom_multibranch.blackboard.rsi.authoring import PLAYBOOK_SYSTEM_PROMP
 from hyperloom_multibranch.blackboard.rsi.lesson_curation import NO_LESSONS
 from hyperloom_multibranch.blackboard.rsi.frontier import FrontierPolicy, FrontierScoring
 from hyperloom_multibranch.blackboard.knowledge.warm_start import PreparedReplay, WarmLead
-from hyperloom_multibranch.blackboard.rsi.session import DISABLED, WRITTEN, KnowledgeClose, close_knowledge
+from hyperloom_multibranch.blackboard.rsi.session import DISABLED, WRITTEN, CloseStep, KnowledgeClose, close_knowledge
 from hyperloom_multibranch.scheduling import mb_fakes
 from hyperloom_multibranch.blackboard.tests.factories import FakeClock
 from hyperloom_multibranch.blackboard.tests.sessions import METRIC, scripted_session
@@ -156,6 +157,19 @@ class StuckBlackboard:
     async def snapshot(self) -> BlackboardSnapshot:
         await asyncio.Event().wait()
         raise AssertionError("unreachable")
+
+
+class BeforeBaseline:
+    """The blackboard of a session stopped before PRELUDE recorded its baseline; a test double, not a placeholder."""
+
+    def __init__(self, blackboard: LocalBlackboard) -> None:
+        self.blackboard = blackboard
+
+    async def snapshot(self) -> BlackboardSnapshot:
+        return dataclasses.replace(await self.blackboard.snapshot(), baselines=())
+
+    def __getattr__(self, name: str) -> Any:
+        return getattr(self.blackboard, name)
 
 
 class ChosenRepo:
@@ -367,6 +381,26 @@ async def test_the_breakdown_spend_includes_the_close_llm_calls(
     assert author.calls and report.exports is not None
     spend = json.loads(report.exports.breakdown.read_text())["spend"]
     assert spend["llm_usd"] == pytest.approx(before + 0.11)
+
+
+async def test_a_session_stopped_before_its_baseline_asks_no_llm_and_leaves_the_archive_empty(
+    layout: SessionLayout,
+    blackboard: LocalBlackboard,
+    final: FinalRecipe,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    archive = tmp_path / "archive"
+    monkeypatch.setenv(ARCHIVE_ENV, str(archive))
+    author, curator = ScriptedCompletion(), ScriptedCompletion()
+    closer = _closer(layout, BeforeBaseline(blackboard), _clean(), final, None, author, curator)
+
+    report = await closer.close(SessionStopReason.SIGNAL, None, "", HARD_STOP)
+
+    assert report.exports is not None and author.calls == curator.calls == []
+    unarchived = CloseStep(SKIPPED, "no_profile_or_baseline")
+    assert (report.exports.knowledge.archive, report.exports.playbook, report.exports.curation) == (unarchived,) * 3
+    assert not [path for path in archive.rglob("*") if path.is_file()]
 
 
 async def test_without_a_kb_client_or_a_final_choice_the_write_back_is_recorded_as_not_made(

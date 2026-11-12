@@ -161,6 +161,7 @@ async def test_the_pass_maps_on_its_own_lease_from_the_start_commit_and_gives_th
     assert (outcome.reason, outcome.map) == (MAPPED, session / "directions.json")
     assert outcome.dossier == checkout / "docs" / "dossier" / "qwen3-8b-1k1k-c64"  # not the one Arbor ships
     assert (toolbox.leases, toolbox.charges, toolbox.released) == ([(DOSSIER_HOLDER, 1)], [DOSSIER_CHARGE], ["L1"])
+    assert setup.sandbox(toolbox.leases).stops == 1, "the pass's end stops its sandbox"
     config = json.loads((checkout / "seen-config.json").read_text())
     assert config["component"]["stop_at"] == "map" and "plan" not in config["component"]
     assert (config["workspace_root"], config["component"]["root"]) == (
