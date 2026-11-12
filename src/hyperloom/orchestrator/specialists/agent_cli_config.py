@@ -43,6 +43,9 @@ _SPECIALIST_ENV_ALLOWLIST: frozenset[str] = frozenset(
         # Session identity, so a child that reports its own spend files it under
         # the same session the parent does. Not a credential.
         "CLAW_SESSION_ID",
+        # Prompt-cache TTL (5m or 1h), so a specialist caches at the same TTL as the orchestration agent.
+        "CLAUDE_CODE_PROMPT_CACHE_TTL",
+        "CLAUDE_CODE_SUBAGENT_PROMPT_CACHE_TTL",
         "CLAUDE_CODE_USE_BEDROCK",
         "CLAUDE_CONFIG_DIR",
         "CLAUDE_MODEL",
