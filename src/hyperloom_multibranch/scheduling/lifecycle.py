@@ -277,7 +277,7 @@ class Session:
         self._prelude: PreludeResult | None = None
         self._map_shares: tuple[RootShares | None] | None = None
         self._explore_end = math.inf
-        self._explore_cap: ExploreCap | None = None  # given by run
+        self._explore_cap: ExploreCap | None = None  # given by run or resume
         peers = peer_factory(self._peer_setup(desk, services))
         context = SchedulerContext(
             self._layout,
@@ -469,16 +469,19 @@ class Session:
         work = self._no_final(ended) if candidates is None else self._final_phases(candidates, ended, restart)
         return await self._run_and_close(work, ending, budget, hard_stop)
 
-    async def resume(self, ended: SessionStopReason, deadline: float) -> SessionOutcome:
+    async def resume(
+        self, ended: SessionStopReason, deadline: float, explore_cap: ExploreCap | None = None
+    ) -> SessionOutcome:
         """Continue the session an earlier run left here, which ended for ``ended`` before FINAL, with EXPLORE, FINAL
         and CLOSE and no PRELUDE (:meth:`Prelude.landed`), up to ``deadline``, which the manifest keeps: the caller
         decides whether the time the session was down is given back
         (:func:`~hyperloom_multibranch.scheduling.resumption.deadline_after_downtime`) or not, so that its budget counts
         from the original start (:func:`~hyperloom_multibranch.scheduling.hosted_run.hosted_resume_deadline`). That run's tests are withdrawn and its
         open branches stopped, the roster and the integration branch open again, and EXPLORE opens new branches on the
-        integration head."""
+        integration head. ``explore_cap`` is :meth:`run`'s."""
 
         budget = self._resumed_budget(ended, deadline)
+        self._explore_cap = explore_cap
         self._processes.record_scheduler()
         self._image_check = await asyncio.to_thread(run_image_check)
         hard_stop = HardStop(budget, self._clock)
