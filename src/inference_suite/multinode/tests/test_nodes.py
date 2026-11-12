@@ -14,7 +14,7 @@ from inference_suite.multinode.nodes import (
     parse_node_list,
     read_node_list,
 )
-from inference_suite.multinode.record import Role
+from inference_suite.multinode.record import FrontendType, Role
 
 
 def _document(**fields):
@@ -114,3 +114,12 @@ def test_query_combines_session_and_node_list():
     assert query.router_host == "10.0.0.1" and query.transfer_backend == "mori"
     with pytest.raises(NodeListError, match="framework|runs"):
         parse_node_list(_document()).query(_session("atom"))
+
+
+def test_node_list_names_the_router_it_runs():
+    nodes = parse_node_list(_document(frontend="atomesh"))
+    assert nodes.frontend is FrontendType.ATOMESH
+    assert nodes.query(_session()).served_frontend is FrontendType.ATOMESH
+    assert parse_node_list(_document()).query(_session()).served_frontend is FrontendType.SGLANG_ROUTER
+    with pytest.raises(NodeListError, match="frontend"):
+        parse_node_list(_document(frontend="nginx"))

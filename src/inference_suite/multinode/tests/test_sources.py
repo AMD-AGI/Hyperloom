@@ -15,8 +15,8 @@ from inference_suite.multinode.inferencex import (
     lookup_candidates,
     master_candidates,
 )
-from inference_suite.multinode.query import PdQuery, RoleAsk
-from inference_suite.multinode.record import PdSourceKind
+from inference_suite.multinode.query import PdQuery, PdQueryError, RoleAsk
+from inference_suite.multinode.record import FrontendType, PdSourceKind
 from inference_suite.multinode.recipe import OperatorArgs, PdResolveError, ResolveInputs, resolve
 from inference_suite.recipe.inferencex import MASTER, RUNNERS
 from inference_suite.recipe.sources import Checkout, SourceFetchError
@@ -202,3 +202,22 @@ def test_pinned_unreadable_inferencex_is_refused():
 def test_no_source_is_refused(checkout):
     with pytest.raises(PdResolveError, match="no source serves"):
         resolve(_query(decode=3), ResolveInputs(inferencex=lambda: checkout))
+
+
+def test_inferencex_recipes_for_another_router_miss(checkout):
+    with pytest.raises(PdResolveError, match="sglang-router frontend, not atomesh"):
+        resolve(_query(frontend=FrontendType.ATOMESH), ResolveInputs(inferencex=lambda: checkout))
+
+
+def test_table_runs_the_asked_router_without_the_other_routers_args():
+    query = _query(model_id="Qwen/Qwen3.5-397B-A17B-FP8", model_path="/m/Qwen3.5-397B-A17B-FP8")
+    default = resolve(query, ResolveInputs(inferencex=_unreadable))
+    asked = resolve(replace(query, frontend=FrontendType.ATOMESH), ResolveInputs(inferencex=_unreadable))
+    assert default.frontend.type is FrontendType.SGLANG_ROUTER and default.frontend.args
+    assert (asked.frontend.type, asked.frontend.args) == (FrontendType.ATOMESH, ())
+    assert asked.prefill.args == default.prefill.args
+
+
+def test_infera_is_no_pd_router():
+    with pytest.raises(PdQueryError, match="sglang-router or atomesh"):
+        _query(frontend=FrontendType.INFERA)
