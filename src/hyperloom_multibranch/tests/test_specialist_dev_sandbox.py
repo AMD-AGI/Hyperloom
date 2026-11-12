@@ -1065,13 +1065,17 @@ async def test_a_stopped_session_keeps_a_busy_dev_lease_and_a_released_one_gives
     assert session_rig.held.reclaimed == [("unless busy", B1), ("all", B1)]
 
 
-def test_where_bubblewrap_sandboxes_an_agent_a_lease_writes_its_root_and_reads_its_worktree_and_links(tmp_path):
+def test_where_bubblewrap_sandboxes_an_agent_a_lease_writes_its_root_and_reads_its_worktree_links_and_git(tmp_path):
     asked = []
     isolation = BwrapIsolation(BwrapProbe("/usr/bin/bwrap", (0, 13, 1), ()))
+    git_dir = tmp_path / "base" / ".git"
     worktree = SimpleNamespace(
-        path=tmp_path / "worktree", linked=(tmp_path / "base" / "3rdparty",), holds=lambda _c: False
+        path=tmp_path / "worktree",
+        linked=(tmp_path / "base" / "3rdparty",),
+        admin=git_dir / "worktrees" / "worktree",
+        holds=lambda _c: False,
     )
-    for path in (worktree.path, *worktree.linked):
+    for path in (worktree.path, *worktree.linked, worktree.admin):
         path.mkdir(parents=True)
     sandboxes = local_dev_sandboxes(
         lambda branch: worktree, processes=None, limits=LIMITS, choose=lambda: asked.append(1) or isolation
@@ -1080,7 +1084,8 @@ def test_where_bubblewrap_sandboxes_an_agent_a_lease_writes_its_root_and_reads_i
     made = [sandboxes(B1, BranchLease(f"lease-{n}", B1, (0,), tmp_path / f"lease-{n}", {}, 0)) for n in (1, 2)]
     try:
         assert all(sandbox.isolation is isolation for sandbox in made)
-        assert made[0].paths.writable == () and made[0].paths.readable == (worktree.path, *worktree.linked)
+        assert made[0].paths.writable == ()
+        assert made[0].paths.readable == (worktree.path, *worktree.linked, git_dir), "git reads the worktree's repo"
         assert made[0].niceness == LIMITS.niceness and made[0].tmp == Path("/tmp")
     finally:
         for sandbox in made:

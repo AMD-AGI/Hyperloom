@@ -30,6 +30,8 @@ from pathlib import Path, PurePosixPath
 from typing import TYPE_CHECKING, Protocol
 
 from hyperloom.measure.compile import COMPONENT_LAYOUTS
+from hyperloom.orchestrator.actions.executors import staged_tool_cache
+from hyperloom.orchestrator.specialists.launch_env import worktree_git_dirs
 from hyperloom.sandbox import Sandbox, SandboxGone
 from hyperloom_multibranch.contracts.repo import ExperimentRepo
 from hyperloom_multibranch.contracts.blackboard.vocab import LeaseKind
@@ -96,10 +98,13 @@ class AgentSandboxes(Protocol):
 @dataclass(frozen=True)
 class LocalAgentSandboxes:
     """Sandboxes on this host, every process joining ``processes``. Where bubblewrap can sandbox an agent here (asked
-    once, at the first sandbox, of ``choose``), each runs in one with the lease's root, the branch's agent directory
-    and worktree writable and a home of its own in the branch's directory, where its Claude CLI keeps its transcripts,
-    the same place a hosted sandbox's are. Else each runs as before, with the image's installed frameworks protected
-    (``frameworks``, default :func:`~hyperloom_multibranch.specialist.agent_sandbox.framework_protection`).
+    once, at the first sandbox, of ``choose``), each runs in one with the lease's root, the branch's agent directory,
+    its worktree and that worktree's repository (:func:`~hyperloom.orchestrator.specialists.launch_env.worktree_git_dirs`,
+    where the agent commits) writable, the staged tools its gate client runs read-only, and a home of its own in the
+    branch's directory, where its Claude CLI keeps its transcripts, the same place a hosted sandbox's are. Else each
+    runs as before, with the image's installed frameworks protected (``frameworks``, default
+    :func:`~hyperloom_multibranch.specialist.agent_sandbox.framework_protection`). Where an agent's Claude CLI keeps
+    its transcripts is the latest sandbox's of its place to say, as a sandbox bubblewrap cannot bind runs unconfined.
 
     Raises:
         IsolationRefused: In a hosted run, where bubblewrap cannot sandbox an agent.
@@ -108,6 +113,7 @@ class LocalAgentSandboxes:
     processes: Processes
     frameworks: FrameworkProtection | None = None
     choose: Callable[[], SandboxIsolation] = sandbox_isolation
+    _made: dict[Path, LocalAgentSandbox] = field(default_factory=dict, init=False, compare=False, repr=False)
 
     @cached_property
     def isolation(self) -> SandboxIsolation:
@@ -118,28 +124,34 @@ class LocalAgentSandboxes:
         base_env = {**os.environ, **lease.env}
         if not isinstance(self.isolation, BwrapIsolation):
             frameworks = self.frameworks if self.frameworks is not None else framework_protection()
-            return LocalAgentSandbox(
+            made = LocalAgentSandbox(
                 lease.gpu_ids, (source,), lease.root, self.processes, branch, base_env, frameworks=frameworks
             )
-        paths = SandboxPaths(
-            writable=(place.workspace, place.worktree.path),
-            readable=place.worktree.linked,
-            home=place.workspace / SANDBOX_DIR / HOME_DIR,
-        )
-        return LocalAgentSandbox(
-            lease.gpu_ids,
-            (source,),
-            lease.root,
-            self.processes,
-            branch,
-            base_env,
-            isolation=self.isolation,
-            paths=paths,
-            forwarded=forwarded_env(os.environ),
-        )
+        else:
+            git = worktree_git_dirs(place.worktree.admin)
+            paths = SandboxPaths(
+                writable=(place.workspace, place.worktree.path, *git[:1]),
+                readable=(*place.worktree.linked, *git[1:], staged_tool_cache()),
+                home=place.workspace / SANDBOX_DIR / HOME_DIR,
+            )
+            made = LocalAgentSandbox(
+                lease.gpu_ids,
+                (source,),
+                lease.root,
+                self.processes,
+                branch,
+                base_env,
+                isolation=self.isolation,
+                paths=paths,
+                forwarded=forwarded_env(os.environ),
+            )
+        self._made[place.workspace] = made
+        return made
 
     def claude_config(self, place: BranchPlace) -> Path:
-        if isinstance(self.isolation, BwrapIsolation):
+        made = self._made.get(place.workspace)
+        isolation = self.isolation if made is None else made.isolation
+        if isinstance(isolation, BwrapIsolation):
             return claude_config_dir(place.workspace / SANDBOX_DIR)
         return Path(os.environ.get(CLAUDE_CONFIG_ENV) or Path.home() / DEFAULT_CLAUDE_CONFIG)
 

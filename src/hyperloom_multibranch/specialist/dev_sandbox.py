@@ -48,6 +48,7 @@ from typing import Any, Protocol
 
 from hyperloom.hosted.mcp_server import CallContext, InvalidParamsError, McpServer, ToolError
 from hyperloom.measure.compile import COMPONENT_LAYOUTS
+from hyperloom.orchestrator.specialists.launch_env import worktree_git_dirs
 from hyperloom.common.ports import DEV_SANDBOX_PORTS
 from hyperloom.sandbox.socket import SandboxUnavailable
 from hyperloom_multibranch.contracts.branch_log import BranchLogEntry, BranchLogType
@@ -699,8 +700,9 @@ def local_dev_sandboxes(
 ) -> SandboxFor:
     """Sandboxes on this host, importing the source of every component the branch's worktree holds. Where bubblewrap
     can sandbox an agent here (asked once, at the first lease, of ``choose``), each runs in one that writes the
-    lease's root only: the worktree, and what its links point at, are read-only, as the specialist edits its worktree,
-    never a lease's command. Else each runs as before, with the image's installed frameworks protected.
+    lease's root only: the worktree, what its links point at and its repository
+    (:func:`~hyperloom.orchestrator.specialists.launch_env.worktree_git_dirs`) are read-only, as the specialist edits
+    its worktree, never a lease's command. Else each runs as before, with the image's installed frameworks protected.
 
     Raises:
         IsolationRefused: In a hosted run, where bubblewrap cannot sandbox an agent.
@@ -716,7 +718,7 @@ def local_dev_sandboxes(
         sources, niceness = _sources(worktrees, branch), limits.niceness
         if isinstance(isolation, BwrapIsolation):
             worktree = worktrees(branch)
-            paths = SandboxPaths(readable=(worktree.path, *worktree.linked))
+            paths = SandboxPaths(readable=(worktree.path, *worktree.linked, *worktree_git_dirs(worktree.admin)))
             forwarded = forwarded_env(os.environ)
             return LocalAgentSandbox(
                 lease.gpu_ids,
