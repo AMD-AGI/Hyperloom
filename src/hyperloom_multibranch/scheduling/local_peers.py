@@ -660,6 +660,8 @@ def model_backed_sessions(command: AgentCommand) -> SpecialistSessions:
             repo=wiring.repo,
             briefs=wiring.briefs.text,
             dev_leases=wiring.dev_leases,
+            readable=specialist_readable(wiring.setup.references, workload),
+            lease_area=_lease_area(wiring),
         )
         open_sessions = partial(
             model_sessions,
@@ -701,6 +703,35 @@ def _gate_client(wiring: SessionWiring) -> GateClient:
         )
     except SuiteRoundRefused as exc:
         raise PeersUnavailable(f"the gate's client cannot be given to the session's agents: {exc}") from exc
+
+
+def specialist_readable(references: Mapping[str, Path], workload: Workload) -> tuple[Path, ...]:
+    """What every specialist of a session reads besides its own trees: the reference directories the session copied
+    in, and the directory its workload's model is served from when that is one here."""
+
+    from pathlib import Path
+
+    model = resolve_serving_model_path(workload.model)
+    served = (Path(os.path.abspath(model)),) if model and os.path.isdir(model) else ()
+    return (*references.values(), *served)
+
+
+def _lease_area(wiring: SessionWiring) -> Callable[[str], Path] | None:
+    """Where the roots of a branch's dev leases are made, for its specialist to read: its holder's area of this
+    machine's leases, or its directory's ``dev`` on the shared storage a hosted lease's sandbox roots in; ``None``
+    when the session lends none."""
+
+    from hyperloom_common.shared_storage import make_shared_dirs
+    from hyperloom_multibranch.specialist.dev_sandbox import DEV_DIR
+    from hyperloom_multibranch.toolbox.local_hosted import LocalHostedToolbox
+
+    if wiring.dev_leases is None:
+        return None
+    toolbox = wiring.toolbox
+    if isinstance(toolbox, LocalHostedToolbox):
+        return toolbox.leases.holder_area
+    branch_dir = wiring.setup.layout.branch_dir
+    return lambda branch: make_shared_dirs(branch_dir(branch) / DEV_DIR)
 
 
 def _sessions_over_source(

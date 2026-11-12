@@ -9,6 +9,7 @@ import stat
 import sys
 import time
 from dataclasses import dataclass, replace
+from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
@@ -231,8 +232,14 @@ async def test_a_session_that_ends_as_it_should_is_followed_by_a_fresh_one(rig):
     assert rig.worktree.head() == rig.root
 
 
-async def test_a_launch_shows_the_files_its_worktree_links_and_the_worktree_s_git(rig):
-    session = rig.session()
+async def test_a_launch_shows_the_session_s_files_its_worktree_s_links_and_git_and_its_own_lease_area(rig, tmp_path):
+    reference, model = tmp_path / "MB-reference" / "geak", tmp_path / "models" / "llama"
+    reference.mkdir(parents=True)
+    model.mkdir(parents=True)
+    areas = tmp_path / "branch-sandboxes"
+    (areas / BRANCH).mkdir(parents=True)
+    readable = (reference, model, tmp_path / "models" / "gone", Path("."))
+    session = rig.session(readable=(*readable, model), lease_area=lambda branch: areas / branch)
     running = asyncio.create_task(session.run())
     await _until(lambda: len(rig.runner.specs) == 1, "the launch")
     await session.stop()
@@ -240,9 +247,20 @@ async def test_a_launch_shows_the_files_its_worktree_links_and_the_worktree_s_gi
     await asyncio.wait_for(running, 1)
 
     spec = rig.runner.specs[0]
-    assert spec.readable == rig.worktree.linked
+    assert spec.readable == (*readable, model, *rig.worktree.linked, areas / BRANCH)
     assert spec.git_admin is not None and spec.git_admin == rig.worktree.admin
     assert (spec.git_admin / "gitdir").read_text().strip() == str(rig.worktree.path / ".git")
+
+
+async def test_a_launch_without_a_lease_area_shows_no_lease(rig):
+    session = rig.session()
+    running = asyncio.create_task(session.run())
+    await _until(lambda: len(rig.runner.specs) == 1, "the launch")
+    await session.stop()
+    rig.runner.end(1, EXITED_WELL, 1.0)
+    await asyncio.wait_for(running, 1)
+
+    assert rig.runner.specs[0].readable == rig.worktree.linked
 
 
 def _end_turn(rig, *rows) -> None:
