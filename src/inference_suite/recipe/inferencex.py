@@ -193,7 +193,7 @@ def _yaml_mapping(bundle: RepoBundle, path: str) -> Mapping[str, Any]:
     return document
 
 
-def _runner_board(runner: str, labels: Mapping[str, Sequence[str]]) -> str:
+def runner_board(runner: str, labels: Mapping[str, Sequence[str]]) -> str:
     """The board a runner label stands for: the label itself, or for a cluster label the one board label whose
     nodes include all of the cluster's."""
     if not runner.startswith(_CLUSTER):
@@ -209,7 +209,7 @@ def _runner_board(runner: str, labels: Mapping[str, Sequence[str]]) -> str:
     return boards[0]
 
 
-def _concurrencies(benchmark: Mapping[str, Any]) -> list[int]:
+def concurrencies(benchmark: Mapping[str, Any]) -> list[int]:
     """``conc-list``, else ``conc-start`` doubled up to ``conc-end``, the last step capped at it."""
     if benchmark.get("conc-list"):
         return list(benchmark["conc-list"])
@@ -271,7 +271,7 @@ def _arm_points(arm: _Arm, runners: Mapping[str, Any]) -> Iterator[InferencexPoi
     fixed = arm.scenario is Scenario.FIXED
     runner = entry["runner"]
     power_from = block if fixed else benchmark
-    for conc in _concurrencies(benchmark):
+    for conc in concurrencies(benchmark):
         yield InferencexPoint(
             entry=arm.entry_name,
             scenario=arm.scenario,
@@ -284,7 +284,7 @@ def _arm_points(arm: _Arm, runners: Mapping[str, Any]) -> Iterator[InferencexPoi
             precision=entry["precision"],
             image=entry["image"],
             runner=runner,
-            board=_runner_board(runner, runners["labels"]),
+            board=runner_board(runner, runners["labels"]),
             recipe=f"{_SINGLE_NODE_RECIPES}/{entry['srt-recipe-dir']}/{benchmark['srt-recipe']}",
             tp=benchmark["tp"],
             ep=benchmark.get("ep") or 1,
@@ -666,8 +666,10 @@ __all__ = [
     "Scenario",
     "ServedPoints",
     "agentx_trace",
+    "concurrencies",
     "inferencex_launches",
     "model_prefixes",
+    "runner_board",
     "served_points",
     "srtctl_cli_args",
 ]
