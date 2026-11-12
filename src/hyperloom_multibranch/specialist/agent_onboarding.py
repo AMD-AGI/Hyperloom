@@ -502,7 +502,7 @@ async def _checkout_git(argv: list[str], checkout: Path) -> CommandResult:
 
 async def _git(argv: list[str], cwd: Path) -> CommandResult:
     """``argv`` (``git <args>``) in ``cwd``, under umask ``002`` below shared storage; no program the config of the
-    repository there names runs, its filter drivers included (:mod:`~hyperloom_multibranch.repo.isolated_git`), as the
+    repository there names runs, its driver programs included (:mod:`~hyperloom_multibranch.repo.isolated_git`), as the
     agent writes that config."""
 
     make_shared_dirs(cwd)

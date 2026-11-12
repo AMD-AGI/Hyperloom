@@ -111,8 +111,8 @@ _HEAD = "HEAD"
 _SYNCED = "refs/worktree/hyperloom/synced"
 _REV_PARSE = "rev-parse"
 _GIT_DIR = ".git"
-_INFO_DIR = "info"
 _OWNER_DIR, _OWNER_FILE = 0o755, 0o644
+_INFO_DIR = "info"
 _QUIET = "--quiet"
 _DIFF = "diff"
 _CACHED = "--cached"
@@ -403,13 +403,13 @@ class SourceBase:
             UnsupportedComponentError: For a component with meta trees whose upstream commit
                 :func:`installed_upstream` cannot resolve.
         """
-        make_shared_dirs(self.path.parent)
         # Judged before anything is made: below shared storage the run's next leg may be another account of the group,
         # which writes the objects and refs and nothing else. The git directory is made writable by this account alone
         # whatever the umask, and so is the base directory there, so no account renames the git directory.
+        make_shared_dirs(self.path.parent)
         shared = parent_is_shared(self.path)
         umask = git_dir_umask()
-        self.path.mkdir(_OWNER_DIR, parents=True)
+        self.path.mkdir(_OWNER_DIR)
         if shared:
             self.path.chmod(0o2755)
         _git(self.path, *INIT, *(("--shared=group",) if shared else ()), f"--initial-branch={BASE_BRANCH}")

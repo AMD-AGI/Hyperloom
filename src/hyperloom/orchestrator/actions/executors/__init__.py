@@ -34,8 +34,8 @@ from ._subprocess_kill import (
 from .benchmark_result import harvest_leaked_artifacts
 from ._agentx_checkpoint import CHECKPOINT_ARTIFACT_NAME, AgentxCheckpoint
 from ._agentx_prefix_cache import PREFIX_CACHE_OFF_ERROR_CLASS, refuse_cacheless_agentx_baseline
-from ._launch_evidence import RequestedLaunch, build_launch_evidence
-from ._round_folder import RoundFolder, is_round_folder
+from ._failed_step import failed_step_error_class
+from ._round_folder import RoundFolder, is_round_folder, read_round_launch
 from ._suite.config import fixed_workload
 from ._suite.rounds import TOOL_CACHE_ENV, SuiteRoundRefused, external_agentx_config, staged_tool_cache
 from ._spec_decode_context_copy import CONTEXT_COPY_REFUSAL, context_copy_refusal
@@ -69,7 +69,6 @@ __all__ = [
     "LaunchLayer",
     "MaterializeOptions",
     "ORCHESTRATOR_CANCELLED_RETURNCODE",
-    "RequestedLaunch",
     "RoundFolder",
     "RoundWatch",
     "SESSION_TIME_EXHAUSTED_RETURNCODE",
@@ -79,19 +78,20 @@ __all__ = [
     "TargetAnalysisExecutor",
     "VariantResult",
     "baseline_executor",
-    "build_launch_evidence",
     "conc_sweep_executor",
     "content_fingerprint",
     "controls_of",
     "context_copy_refusal",
     "default_baseline_config",
     "explore_executor",
+    "failed_step_error_class",
     "external_agentx_config",
     "fixed_workload",
     "harvest_leaked_artifacts",
     "is_round_folder",
     "materialize_benchmark_config",
     "normalize_proposal",
+    "read_round_launch",
     "refuse_cacheless_agentx_baseline",
     "refuse_unpinned_speculative_change",
     "report_executor",
@@ -100,8 +100,8 @@ __all__ = [
     "run_grid_warmup_enabled",
     "run_with_session_kill",
     "session_breakdown_executor",
-    "speculative_pin_reason",
     "staged_tool_cache",
+    "speculative_pin_reason",
     "strip_visible_devices_from_config",
     "teardown_variant_server",
 ]

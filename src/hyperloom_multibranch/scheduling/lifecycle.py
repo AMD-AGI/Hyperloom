@@ -102,9 +102,9 @@ from hyperloom_multibranch.scheduling.context import SchedulerContext
 from hyperloom_multibranch.scheduling.dashboard import SessionDashboard
 from hyperloom_multibranch.scheduling.decisions import Decision, DecisionKind, DecisionLog, downtime_until
 from hyperloom_multibranch.scheduling.events import IntegrationProfiler, SessionEvents
-from hyperloom_multibranch.scheduling.explore import Explorer, ExploreWindow, Steering
+from hyperloom_multibranch.scheduling.explore import Explorer, ExploreWindow, Steering, integration_row
 from hyperloom_multibranch.scheduling.exports import CloseAuthoring, ExportServices, ExportSources, SessionExports
-from hyperloom_multibranch.scheduling.final import FinalCandidates, FinalChoice, FinalSelector, session_candidates
+from hyperloom_multibranch.scheduling.final import FinalCandidates, FinalChoice, FinalSelector, choose_candidates
 from hyperloom_multibranch.scheduling.forks import ForkDesk
 from hyperloom_multibranch.scheduling.integrator import BundlingIntegrator, Integrator, LlmPatchResolver, MergeRecords
 from hyperloom_multibranch.scheduling.judge import GRACE_KEY, Judge, session_grace
@@ -309,8 +309,7 @@ class Session:
         self._context = context
         self._repo = peers.repo
         self._recipe_kb = services.recipe_kb
-        self._lifecycle = peers.lifecycle
-        self._dev_leases = peers.dev_leases
+        self._lifecycle, self._dev_leases = peers.lifecycle, peers.dev_leases
         self._branches = BranchControl(context, peers.lifecycle, peers.toolbox, peers.repo, peers.briefs)
         self._stopper = SessionStopper(context, self._branches, peers.toolbox, peers.mcp)
         self._integrator = self._build_integrator(peers.repo, checks, services)
@@ -461,9 +460,10 @@ class Session:
 
         The candidates are read before anything else happens, so a session FINAL cannot run over is refused without a
         stop or a report being written. A session that ended before PRELUDE recorded its baseline has no candidate:
-        its unfinished tests are withdrawn and CLOSE reports :data:`NO_BASELINE` (:meth:`_no_final`). The budget is already spent, which is the state the normal path is in when
-        FINAL overruns the deadline: FINAL is unbounded and CLOSE gets one CLOSE grace from its end. The report says
-        how that session's agents were isolated, as its manifest recorded.
+        its unfinished tests are withdrawn and CLOSE reports :data:`NO_BASELINE` (:meth:`_no_final`). The budget is
+        already spent, which is the state the normal path is in when FINAL overruns the deadline: FINAL is unbounded
+        and CLOSE gets one CLOSE grace from its end. The report says how that session's agents were isolated, as its
+        manifest recorded.
         """
 
         landed = await recorded_baseline(self._blackboard) is not None
@@ -984,8 +984,8 @@ class Session:
 
     async def _no_final(self, ended: SessionStopReason) -> SessionOutcome:
         """No FINAL over a session that recorded no baseline: the toolbox takes the dead session's unfinished tests up
-        again from its submit log, which re-attaches a measurement still running, and withdraws them, so CLOSE ends
-        their sandboxes instead of leaving them to hold the grant's slots until they time out."""
+        again from its submit log, which re-attaches a measurement still running, and withdraws them (:meth:`_take_up`),
+        so CLOSE ends their sandboxes instead of leaving them to hold the grant's slots until they time out."""
 
         await self._take_up(ended)
         self._decisions.record(Decision(DecisionKind.FINAL, NO_BASELINE, detail={"chosen": None}))
@@ -1108,7 +1108,12 @@ class Session:
         return self._explore_cap(await self._selector.planned_work(await self._final_candidates(), test_seconds))
 
     async def _final_candidates(self) -> FinalCandidates:
-        return await session_candidates(self._blackboard, self._repo, self._settings.workload.metric)
+        progress = await self._blackboard.progress()
+        integration = integration_row(progress)
+        if integration is None:
+            raise RuntimeError("the blackboard has no integration branch after PRELUDE recorded its root")
+        root = (await self._blackboard.baseline()).root_commit
+        return await choose_candidates(progress, integration, self._settings.workload.metric, self._repo, root)
 
     async def _close(self, ending: SessionOutcome, hard_stop: HardStop) -> SessionOutcome:
         if ending.stop_reason is SessionStopReason.ABORTED:

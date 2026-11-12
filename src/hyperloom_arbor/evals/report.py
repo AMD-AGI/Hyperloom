@@ -5,7 +5,7 @@ points at ``reports/trace/SESSION_LOG.md`` for the narrative, so the two do not
 drift into two half-true accounts of the same run.
 
 Adherence checks print the instruction they test. A number that says
-``agent_dispatch_rate 40%`` is only actionable next to the line of
+``agent_dispatch_rate <x>%`` is only actionable next to the line of
 hyperloom-optimize.md it violates.
 """
 

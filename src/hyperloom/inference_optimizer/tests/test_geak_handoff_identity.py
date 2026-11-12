@@ -237,7 +237,7 @@ def test_env_spec_reproduces_the_measured_launch_without_the_rounds_own_layers(t
     assert (spec["launch_json"], spec["launch_digest"]) == (str(launch_json), launch.digest())
     assert shlex.split(spec["config"]["server_launch_flags"]) == [
         "--tp", "8", "--cuda-graph-max-bs", "64", "--speculative-algorithm", "EAGLE", "--speculative-num-steps", "3",
-        "--watchdog-timeout", "600", "--enable-metrics", "--random-seed", "0",
+        "--watchdog-timeout", "600", "--enable-metrics",
     ]  # fmt: skip
     assert spec["config"]["extra_envs"] == {
         "ATOM_FORCE_ATTN_TRITON": "1",
@@ -245,22 +245,6 @@ def test_env_spec_reproduces_the_measured_launch_without_the_rounds_own_layers(t
         "ACCEPTED": "1",
     }
     assert spec["config"]["unset_envs"] == ["SGLANG_USE_AITER"]
-
-
-@pytest.mark.parametrize(
-    ("user", "seed"), [(LaunchDelta(), "0"), (LaunchDelta(args_add=("--random-seed", "11")), "11")]
-)
-def test_env_spec_hands_on_the_engine_seed_the_round_measured_with(
-    tmp_path: Path, user: LaunchDelta, seed: str
-) -> None:
-    """The engine seed moves a speculative launch's throughput, so a reproduction launches with the measured one."""
-    launch = _compose_launch(user=user)
-    state = SharedState(current_best={"tput": 100.0, "optimization_stack": []})
-    _measured_in(tmp_path, state, launch)
-
-    flags = shlex.split(_writeback(tmp_path, state).build_env_spec()["config"]["server_launch_flags"])
-
-    assert [flags[i + 1] for i, token in enumerate(flags) if token == "--random-seed"] == [seed]
 
 
 def test_env_spec_hands_on_no_structured_flag_and_no_credential_or_loader_env(tmp_path: Path) -> None:

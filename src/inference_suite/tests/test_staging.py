@@ -20,6 +20,7 @@ import inference_suite
 from hyperloom_common.shared_storage import current_umask
 from inference_suite import cli, staging
 from inference_suite.contracts import FailedStep
+from inference_suite.contracts.normalised import canonical_name
 from inference_suite.pins import (
     INFERENCEX_CLIENT_COMMIT,
     INFERENCEX_TOOL,
@@ -437,7 +438,7 @@ def test_stage_without_a_source_installs_lm_eval_beside_an_intact_cache_and_stag
 
     assert staging.main(["stage", "--tool-cache", str(cache)]) == 0
     assert capsys.readouterr().out.strip() == digest
-    assert [call[:-1] for call in install.calls] == ([_lm_eval_install()] if installs else [])
+    assert install.calls == ([_lm_eval_install()] if installs else [])
     assert (cache / MANIFEST_FILE).stat().st_mtime_ns == manifest
 
 
@@ -508,7 +509,7 @@ site = Path(__file__).resolve().parents[1]
 with open(site / "pip.calls", "a") as calls:
     calls.write(" ".join(sys.argv[1:]) + "\\n")
 requirement = sys.argv[sys.argv.index("--requirement") + 1] if "--requirement" in sys.argv else None
-if requirement and Path(requirement).read_text().split()[0] == "{LM_EVAL_REQUIREMENT}":
+if requirement and "{canonical_name(LM_EVAL_DISTRIBUTION)}=={LM_EVAL_VERSION}" in Path(requirement).read_text().split():
     for old in site.glob("{LM_EVAL_DISTRIBUTION}-*.dist-info"):
         shutil.rmtree(old)
     dist = site / "{LM_EVAL_DISTRIBUTION}-{LM_EVAL_VERSION}.dist-info"
@@ -590,7 +591,7 @@ def test_install_puts_the_pinned_lm_eval_beside_an_intact_cache_without_fetching
     assert done.returncode == 0, done.stderr
     assert "FETCHED" not in done.stdout and "WARN" not in done.stdout
     assert f"manifest sha256 {digest}" in done.stdout
-    assert f"--require-hashes --constraint {staging.runner_lock()} --requirement" in (site / "pip.calls").read_text()
+    assert f"--require-hashes --requirement {staging.runner_lock()}" in (site / "pip.calls").read_text()
     assert (site / f"{LM_EVAL_DISTRIBUTION}-{LM_EVAL_VERSION}.dist-info").is_dir()
 
 
@@ -626,7 +627,7 @@ def test_install_stages_under_the_install_lock_and_installs_no_tool_checkout() -
 
 
 def _lm_eval_install() -> list[str]:
-    """The argv of an lm-eval install, its requirement file's path aside, which :func:`_lm_eval_installs` drops."""
+    """The argv of an lm-eval install."""
     return [
         sys.executable,
         "-m",
@@ -635,14 +636,13 @@ def _lm_eval_install() -> list[str]:
         "--no-input",
         "--disable-pip-version-check",
         "--require-hashes",
-        "--constraint",
-        str(staging.runner_lock()),
         "--requirement",
+        str(staging.runner_lock()),
     ]
 
 
 def _lm_eval_installs(install: _FakeInstall) -> list[list[str]]:
-    return [call[:-1] for call in install.calls if call[:-1] == _lm_eval_install()]
+    return [call for call in install.calls if call == _lm_eval_install()]
 
 
 @pytest.fixture
@@ -801,20 +801,21 @@ def _locked_lm_eval(lock: Path) -> LockPin:
     return next(pin for pin in parse_lock(lock.read_text()) if pin.name == "lm-eval")
 
 
-def test_lm_eval_installs_with_the_hashes_the_runner_lock_pins_and_its_tree_held_to_that_lock(
+def test_lm_eval_installs_from_a_requirement_file_pinning_its_whole_tree_with_hashes(
     pinned, install, monkeypatch
 ) -> None:
+    # pip before 26.1 ignores the hashes of a constraints file, so under --require-hashes every distribution the
+    # install pulls in must be a requirement carrying its own hashes.
     repo, cache = pinned
     monkeypatch.setattr(staging, "_distribution_version", {}.get)
 
     assert _stage_cli(cache, "--source", str(repo)) == cli.EXIT_OK
     assert _lm_eval_installs(install) == [_lm_eval_install()]
-    locked = _locked_lm_eval(staging.runner_lock())
-    assert locked.version == LM_EVAL_VERSION and LM_EVAL_WHEEL_SHA256 in locked.hashes
     (requirement,) = install.requirements
-    name, *hashes = requirement.split()
-    assert name == LM_EVAL_REQUIREMENT
-    assert {digest.removeprefix("--hash=sha256:") for digest in hashes} == locked.hashes
+    pins = parse_lock(requirement)
+    assert all(pin.hashes for pin in pins)
+    locked = next(pin for pin in pins if pin.name == "lm-eval")
+    assert locked.version == LM_EVAL_VERSION and LM_EVAL_WHEEL_SHA256 in locked.hashes
 
 
 @pytest.mark.parametrize("python_version", ["3.10", "3.12", "3.14", f"{sys.version_info[0]}.{sys.version_info[1]}"])
@@ -846,18 +847,6 @@ def test_lm_eval_is_refused_by_an_install_missing_the_runner_lock(pinned, instal
     assert _stage_cli(cache, "--source", str(repo)) == cli.EXIT_REFUSED
     err = capsys.readouterr().err
     assert err.startswith(f"{FailedStep.STAGING_MISSING.value}: ") and str(tmp_path / "site-packages") in err
-    assert _lm_eval_installs(install) == []
-
-
-def test_a_runner_lock_without_the_pinned_lm_eval_is_refused(pinned, install, monkeypatch, tmp_path, capsys) -> None:
-    repo, cache = pinned
-    monkeypatch.setattr(staging, "_distribution_version", {}.get)
-    monkeypatch.setattr(staging, "_LOCK_DIR", tmp_path)
-    lock = tmp_path / "runner.lock"
-    lock.write_text("lm-eval==0.4.11 \\\n    --hash=sha256:" + "c" * 64 + "\n")
-
-    assert _stage_cli(cache, "--source", str(repo)) == cli.EXIT_REFUSED
-    assert f"{lock} pins no lm-eval=={LM_EVAL_VERSION}" in capsys.readouterr().err
     assert _lm_eval_installs(install) == []
 
 

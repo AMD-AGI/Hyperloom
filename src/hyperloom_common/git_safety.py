@@ -506,11 +506,9 @@ def app_git(
 ) -> subprocess.CompletedProcess[str]:
     """Run ``git <args>`` in ``worktree`` against its trusted admin dir, never against what the worktree holds.
 
-    The admin dir is ``admin``, as the caller found it from the repository's side when given: recorded there
-    (:func:`recorded_admin_dir`), and the worktree's ``.git`` then not read at all, or the one ``.git`` names proven one
-    of the repository's (:func:`trusted_admin_dir` with its ``common``). Otherwise it is the one that ``.git`` names,
-    believed only when the app owns it (:func:`trusted_admin_dir`), which proves nothing against an agent that runs as
-    the app's uid.
+    The admin dir is ``admin``, as the caller found it from the repository's side (:func:`recorded_admin_dir`), when
+    given: the worktree's ``.git`` is then not read at all. Otherwise it is the one that ``.git`` names, believed only
+    when the app owns it (:func:`trusted_admin_dir`), which proves nothing against an agent that runs as the app's uid.
 
     No program the repository's config names runs: the ``NO_PROGRAMS`` pins, every configured driver program blanked,
     and no transport. The driver programs are read from the config just before the command, which reads it again; the
@@ -520,8 +518,10 @@ def app_git(
     made the repository, and writable by no one else: :func:`check_shared_repository` refuses one that is not, before
     git runs, whichever way ``admin`` was found. So no one else writes a driver in between. A repository nested in the
     tree is the caller's to keep out (see the module docstring). ``env`` adds variables of the caller's (an index
-    file, an identity) under the ones that keep this so. In a shared repository git runs under the shared child umask,
-    so what it makes -- objects, refs, the worktree's files -- stays the group's to write.
+    file, an identity) under the ones that keep this so. A caller that holds the repository passes
+    ``admin=trusted_admin_dir(worktree, common)`` to have the admin dir checked against it. In a shared repository git
+    runs under the shared child umask, so what it makes -- objects, refs, the worktree's files -- stays the group's to
+    write.
 
     Raises:
         OSError: The worktree's git metadata is not the app's, its shared repository holds state another account could

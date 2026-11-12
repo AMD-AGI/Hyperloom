@@ -32,6 +32,7 @@ from hyperloom.common.agent_isolation import (
     BwrapIsolation,
     IsolationRefused,
     NoIsolation,
+    choose_test_isolation,
 )
 from hyperloom.sandbox import confined, local_sandbox
 from hyperloom.sandbox.card_occupancy import SANDBOX_TAG_ENV
@@ -94,6 +95,22 @@ def _given(isolation: BwrapIsolation | NoIsolation) -> Callable[..., BwrapIsolat
     return choose
 
 
+#: The packages whose code a provider's create runs here: what they warn is the test's to check.
+_THIS_PATH = ("hyperloom.sandbox", "hyperloom.common", "hyperloom_common")
+
+
+def _warnings_of_this_path(caplog: pytest.LogCaptureFixture) -> list[str]:
+    """The warnings :data:`_THIS_PATH` logged during the test. A timer another test on this worker left running (a
+    measurement pool's kept sandbox, closed on its own thread when its keep window passes) logs into whichever test
+    runs then; its warning is not this one's."""
+    return [
+        record.getMessage()
+        for record in caplog.records
+        if record.levelno == logging.WARNING
+        and any(record.name == package or record.name.startswith(f"{package}.") for package in _THIS_PATH)
+    ]
+
+
 def _flag_pairs(argv: list[str]) -> list[tuple[str, ...]]:
     """The mounts and settings of a recorded command line before ``--``, each with its arguments."""
     arity = {
@@ -142,13 +159,15 @@ def _assert_read_only_root(pairs: list[tuple[str, ...]]) -> None:
 
 def _system_file() -> Path:
     """A regular file below ``/usr`` that no sandbox here needs: what a link in a home may resolve to."""
-    for directory in (Path("/usr/share/common-licenses"), Path("/usr/share/doc")):
-        found = (
-            sorted(p for p in directory.glob("*") if p.is_file() and not p.is_symlink()) if directory.is_dir() else []
-        )
-        if found:
-            return found[0]
-    pytest.skip("no regular file below /usr/share/common-licenses or /usr/share/doc on this host")
+    found = [
+        path
+        for directory in (Path("/usr/share/common-licenses"), Path("/usr/share/doc"))
+        if directory.is_dir()
+        for path in sorted(p for p in directory.glob("*") if p.is_file() and not p.is_symlink())
+    ]
+    if not found:
+        pytest.skip("no regular file below /usr/share/common-licenses or /usr/share/doc on this host")
+    return found[0]
 
 
 @pytest.fixture(autouse=True)
@@ -220,7 +239,7 @@ def test_a_runner_with_no_account_runs_in_bubblewrap_with_its_tree_and_key_writa
     directory = base / sandbox.sandbox_id
     fs, private = str(directory / "fs"), str(directory / "private")
     command = argv[argv.index("--") + 1 :]
-    assert sandbox.confined
+    assert sandbox._confined is not None
     assert command[:4] == [sys.executable, "-I", "-c", LAUNCHER_SOURCE], "the launcher runs inside"
     assert ("--unshare-user",) in pairs and ("--unshare-pid",) in pairs and ("--cap-drop", "ALL") in pairs
     assert ("--die-with-parent",) not in pairs, "a reap or the timeout ends the sandbox, with its grace"
@@ -265,7 +284,7 @@ def test_a_link_in_the_home_to_a_system_file_leaves_that_file_out_and_the_system
     argv = launch["argv"]
     assert isinstance(argv, list)
     pairs = _flag_pairs(argv)
-    assert sandbox.confined
+    assert sandbox._confined is not None
     assert ("--ro-bind-try", "/usr", "/usr") not in pairs, "the system tree is bound entry by entry"
     assert not [pair for pair in pairs if str(target) in pair[1:]], "the file the home links to is left out"
     _assert_read_only_root(pairs)
@@ -314,8 +333,8 @@ def test_a_kind_with_an_account_runs_as_that_account_and_never_in_bubblewrap(
     # Only the launchers: deriving a confinement runs the interpreter once to ask where it imports from.
     [(argv, kwargs)] = [(argv, kwargs) for argv, kwargs in started if LAUNCHER_SOURCE in argv]
     assert argv[:4] == [sys.executable, "-I", "-c", LAUNCHER_SOURCE] and kwargs["user"] == os.getuid()
-    assert not runner.confined and fake.launches() == [], "the account tier runs it, no bubblewrap"
-    assert dev.confined, "the kind no account is named for is confined"
+    assert runner._confined is None and fake.launches() == [], "the account tier runs it, no bubblewrap"
+    assert dev._confined is not None, "the kind no account is named for is confined"
 
 
 def test_without_a_plan_nothing_is_confined_or_chosen(
@@ -328,7 +347,7 @@ def test_without_a_plan_nothing_is_confined_or_chosen(
     provider = LocalSandboxProvider([_runner()], gpus=(0,), base_dir=area / "sandboxes")
     providers.append(provider)
     sandbox = provider.create("runner", role="measurement", timeout_sec=60, metadata={})
-    assert not sandbox.confined
+    assert sandbox._confined is None
 
 
 def test_where_bubblewrap_cannot_sandbox_a_test_tests_run_as_before_and_that_is_said_once(
@@ -356,9 +375,9 @@ def test_where_bubblewrap_cannot_sandbox_a_test_tests_run_as_before_and_that_is_
         sandbox = providers[0].create("runner", role="measurement", timeout_sec=60, metadata={})
         _wait(lambda: _log_says(sandbox, "app pid seen"))
 
-    said = [record.getMessage() for record in caplog.records if record.levelno == logging.WARNING]
+    said = _warnings_of_this_path(caplog)
     assert said == [f"{UNCONFINED_TESTS} (running them as an account: {TEST_ACCOUNT}; bubblewrap: not found on PATH)"]
-    assert not sandbox.confined, "the sandbox runs as before: its runner sees the app's processes"
+    assert sandbox._confined is None, "the sandbox runs as before: its runner sees the app's processes"
 
 
 def test_a_probe_that_gave_no_answer_in_time_leaves_only_that_launch_unconfined(
@@ -381,9 +400,11 @@ def test_a_probe_that_gave_no_answer_in_time_leaves_only_that_launch_unconfined(
         providers.append(provider)
         made = [provider.create("runner", role="measurement", timeout_sec=60, metadata={}) for _ in range(3)]
 
-    assert [sandbox.confined for sandbox in made] == [False, True, True], "a later launch is chosen for again"
+    assert [sandbox._confined is not None for sandbox in made] == [False, True, True], (
+        "a later launch is chosen for again"
+    )
     assert len(asked) == 3, "an answer that came is kept"
-    said = [record.getMessage() for record in caplog.records if record.levelno == logging.WARNING]
+    said = _warnings_of_this_path(caplog)
     assert said == [f"{UNCONFINED_TESTS} (running them as an account: {TEST_ACCOUNT}; {late.problems[0]})"]
 
 
@@ -404,7 +425,7 @@ def test_a_probe_that_answered_no_is_not_asked_again(
     providers.append(provider)
     made = [provider.create("runner", role="measurement", timeout_sec=60, metadata={}) for _ in range(2)]
 
-    assert [sandbox.confined for sandbox in made] == [False, False] and asked == [None]
+    assert [sandbox._confined is not None for sandbox in made] == [False, False] and asked == [None]
 
 
 @pytest.mark.parametrize("layer", [None, "/nonexistent/hyperloom-host/bin/bwrap"])
@@ -426,7 +447,10 @@ def test_a_hosted_run_where_bubblewrap_cannot_sandbox_a_test_refuses_the_provide
     named = agent_isolation.NO_LAYER_BWRAP if layer is None else f"bubblewrap at {layer}: No such file or directory"
     assert TEST_ACCOUNT in str(refused.value) and named in str(refused.value)
     assert made and not os.path.exists(made[0]), "the directory the refused provider made is removed"
-    assert local_test_isolation() == (REFUSED, refused.value.reasons)
+    with pytest.raises(IsolationRefused) as again:
+        choose_test_isolation()
+    assert again.value.reasons == refused.value.reasons, "the provider refuses as the chooser does"
+    assert local_test_isolation() == (REFUSED, refused.value.reasons), "and a session's record names it refused"
 
 
 def test_a_sandbox_whose_paths_cannot_be_bound_safely_runs_as_before_locally_and_is_refused_hosted(
@@ -441,7 +465,7 @@ def test_a_sandbox_whose_paths_cannot_be_bound_safely_runs_as_before_locally_and
     providers.append(provider)
     with caplog.at_level(logging.WARNING):
         sandbox = provider.create("runner", role="measurement", timeout_sec=60, metadata={})
-    assert not sandbox.confined and fake.launches() == []
+    assert sandbox._confined is None and fake.launches() == []
     assert f"{area} would expose {area / 'sandboxes'}, which only the app may reach" in caplog.text
     sandbox.kill()
 
@@ -478,7 +502,7 @@ def test_a_plan_path_that_is_a_credential_location_runs_the_sandbox_as_before_lo
     providers.append(provider)
     with caplog.at_level(logging.WARNING):
         sandbox = provider.create("runner", role="measurement", timeout_sec=60, metadata={})
-    assert not sandbox.confined and fake.launches() == []
+    assert sandbox._confined is None and fake.launches() == []
     assert f"{linked} is a credential location, which its bind would show unmasked" in caplog.text
     sandbox.kill()
 
@@ -502,7 +526,7 @@ def test_a_plan_that_refused_a_tree_runs_the_sandbox_as_before_locally_and_is_re
     providers.append(provider)
     with caplog.at_level(logging.WARNING):
         sandbox = provider.create("runner", role="measurement", timeout_sec=60, metadata={})
-    assert not sandbox.confined and fake.launches() == []
+    assert sandbox._confined is None and fake.launches() == []
     assert "runs unconfined, as before: " in caplog.text and why in caplog.text
     sandbox.kill()
 
@@ -527,7 +551,7 @@ def test_a_plan_that_would_show_the_app_s_state_runs_the_sandbox_as_before(
     with caplog.at_level(logging.WARNING):
         sandbox = provider.create("runner", role="measurement", timeout_sec=60, metadata={})
 
-    assert not sandbox.confined and fake.launches() == []
+    assert sandbox._confined is None and fake.launches() == []
     assert f"{app} would expose {state}, which only the app may reach" in caplog.text
 
 
@@ -552,10 +576,10 @@ def test_an_older_bubblewrap_gives_a_sealed_runner_below_tmp_a_fresh_tmp_and_run
             made.close()
         shutil.rmtree(base, ignore_errors=True)
 
-    assert runner.confined and ("--tmpfs", "/tmp") in pairs
+    assert runner._confined is not None and ("--tmpfs", "/tmp") in pairs
     assert not [pair for pair in pairs if pair[-1] == "/tmp" and pair[0] == "--bind"]
     assert [pair for pair in pairs if pair[-1] == "/dev/shm" and pair[0] == "--bind"], "/dev/shm is still its own"
-    assert not dev.confined, "commands share the bound /tmp, below which 0.11.1 binds nothing"
+    assert dev._confined is None, "commands share the bound /tmp, below which 0.11.1 binds nothing"
 
 
 def test_a_bubblewrap_that_cannot_set_the_sandbox_up_is_the_runner_s_exit(
@@ -602,7 +626,7 @@ def test_a_command_whose_holder_cannot_be_had_is_refused_and_never_runs_unconfin
         sandbox.run("touch ran")
     with pytest.raises(SandboxUnavailable, match="bubblewrap cannot start the process"):
         sandbox.run("touch ran-in-background", background=True)
-    assert sandbox.confined and fake.launches() == []
+    assert sandbox._confined is not None and fake.launches() == []
     assert not (sandbox.fs / "work" / "ran").exists() and not (sandbox.fs / "work" / "ran-in-background").exists()
 
 
@@ -630,16 +654,22 @@ def test_a_runner_whose_policy_bubblewrap_must_not_launch_is_refused_and_never_r
     assert provider.pool.free_cards() == (0,), "the refused create gave its card back"
 
 
-def test_how_a_local_test_is_launched_is_named_with_why(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_how_a_local_test_is_launched_is_chosen_and_named_with_why(monkeypatch: pytest.MonkeyPatch) -> None:
     ok = BwrapProbe("/usr/bin/bwrap", (0, 13, 1), ())
     denied = BwrapProbe("/usr/bin/bwrap", (0, 11, 1), ("bwrap: setting up uid map: Permission denied",))
     monkeypatch.setattr(agent_isolation, "bwrap_probe", lambda _path: ok)
+    assert isinstance(choose_test_isolation(), BwrapIsolation)
     assert local_test_isolation() == (BWRAP, ())
     monkeypatch.setattr(agent_isolation, "bwrap_probe", lambda _path: denied)
-    how, why = local_test_isolation()
-    assert how == NONE and why == (
+    found = choose_test_isolation()
+    why = (
         f"running them as an account: {TEST_ACCOUNT}",
         "bubblewrap (/usr/bin/bwrap, 0.11.1): bwrap: setting up uid map: Permission denied",
     )
+    assert isinstance(found, NoIsolation) and found.reasons == why
+    assert local_test_isolation() == (NONE, why)
     monkeypatch.setattr(agent_isolation, "_STATE", agent_isolation._Process(hosted=True, layer_bwrap="/usr/bin/bwrap"))
-    assert local_test_isolation() == (REFUSED, why)
+    with pytest.raises(IsolationRefused) as refused:
+        choose_test_isolation()
+    assert refused.value.reasons == why
+    assert local_test_isolation() == (REFUSED, why), "never raises: the record names the refusal"

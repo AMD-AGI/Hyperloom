@@ -13,7 +13,6 @@ import pytest
 from hyperloom.common.perf_metric import constraint_fields, constraint_veto_reason
 from hyperloom.common.round_measurement import round_measurement
 from hyperloom.common.tests.test_round_measurement import _agentx, _agentx_result
-from hyperloom.inference_optimizer.agentx.report import agentx_measurement
 from hyperloom.orchestrator.actions.executors.benchmark_result import is_valid_measurement
 from inference_suite.contracts import ProfileResult
 
@@ -67,24 +66,3 @@ def test_the_veto_reads_the_fields_every_carrier_copies() -> None:
 )
 def test_a_session_that_is_not_an_agentx_replay_is_not_judged(session: dict[str, str]) -> None:
     assert constraint_veto_reason(_invalid(), _state(_valid(), **session)) == ""
-
-
-_V1_LAUNCH = {"effective_argv": ["python3", "-m", "sglang.launch_server"], "effective_env": {}}
-
-
-def _v1(**report: object) -> dict[str, Any]:
-    metrics = {"execution_owner": "magpie", "server_launch": _V1_LAUNCH, "recipe": {"tp": 8}, "mode": "canonical"}
-    metrics["requests"] = {"successful": 90, "error_rate": 0.0}
-    metrics["throughput"] = {"output_tokens_per_second": 900.0, "total_tokens_per_second": 9000.0}
-    flags = {"success": True, "benchmark_valid": True, "publishable": True, **report}
-    return agentx_measurement({"scenario": "agentx", **flags, "agentx_metrics": metrics})
-
-
-def test_a_v1_archive_is_judged_by_its_own_reader() -> None:
-    valid = _v1()
-    state = _state(valid, agentx_backend="inferencex")
-    assert constraint_veto_reason(valid, state) == ""
-    assert is_valid_measurement(valid) is True
-    unpublishable = _v1(publishable=False)
-    assert constraint_veto_reason(unpublishable, state) == "agentx_evidence_invalid"
-    assert is_valid_measurement(unpublishable) is False

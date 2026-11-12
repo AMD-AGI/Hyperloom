@@ -3,16 +3,13 @@
 
 """Native AgentX contracts through real CLI, materialization and result boundaries."""
 
-from copy import deepcopy
 import json
 from pathlib import Path
-from types import SimpleNamespace
 
 import pytest
 import yaml
 
 from hyperloom.common.benchmark_config import BENCHMARK_CONFIG_ENV
-from hyperloom.common.perf_metric import constraint_veto_reason, graded_axes_of
 from hyperloom.inference_optimizer.cli.benchmark_config import bind_benchmark, configure_benchmark
 from hyperloom.inference_optimizer.cli.parser import _build_parser
 from hyperloom.orchestrator.actions.executors import _server_patcher
@@ -22,10 +19,6 @@ from hyperloom.orchestrator.actions.executors._workload_envs import (
     prepare_grid_benchmark_config,
     BenchmarkTarget,
     LaunchLayer,
-)
-from hyperloom.orchestrator.actions.executors.benchmark_result import (
-    extract_benchmark_measurement,
-    is_valid_measurement,
 )
 from hyperloom.orchestrator.actions.executors.agentx_point import bind_source_evidence, enable_profile
 from hyperloom.inference_optimizer.session.paths import ENV_CURRENT_SESSION_DIR
@@ -257,105 +250,7 @@ def test_source_evidence_is_taken_after_application_and_survives_materialization
     assert load_benchmark(next_round)["agentx"]["launch_overrides"]["source_files"] == evidence
 
 
-@pytest.fixture
-def report():
-    return {
-        "scenario": "agentx",
-        "success": True,
-        "benchmark_valid": True,
-        "publishable": True,
-        "framework": "sglang",
-        "model": "Qwen/Qwen3-0.6B",
-        "agentx_metrics": {
-            "mode": "canonical",
-            "execution_owner": "magpie",
-            "server_launch": {
-                "effective_argv": ["python3", "-m", "sglang.launch_server", "--model-path", "Qwen/Qwen3-0.6B"],
-                "effective_env": {},
-            },
-            "scenario_type": "agentic",
-            "dataset": "fixed-corpus",
-            "recipe": {"tp": 1, "ep": 1, "conc": 8, "model": "Qwen/Qwen3-0.6B"},
-            "requests": {"total": 100, "successful": 100, "error_rate": 0.0},
-            "throughput": {
-                "output_tokens_per_second": 50.0,
-                "total_tokens_per_second": 100.0,
-                "duration_seconds": 3600,
-            },
-            "latency_seconds": {"e2e_norm_intvty": {"p50": 25.0, "p90": 10.0}, "ttft": {"p50": 0.2}},
-        },
-    }
-
-
-@pytest.mark.parametrize(
-    "watts,started,veto",
-    [
-        (800.0, 1000.0, ""),
-        (950.0, 1000.0, "power_budget_exceeded"),
-        (None, 1000.0, "power_unmeasured"),
-        (800.0, 500.0, "power_unmeasured"),
-    ],
-)
-def test_native_power_reaches_baseline_and_keep_budgets(report, tmp_path, watts, started, veto):
-    from hyperloom.orchestrator.measurement.baseline_budget import baseline_budget_stop_reason
-
-    workspace = tmp_path / "benchmark_sglang_round"
-    workspace.mkdir()
-    valid = watts is not None
-    energy = {
-        "window": {"duration_s": 10.0},
-        "per_gpu": {"0": {"integral_j": None if watts is None else watts * 10.0}},
-        "avg_power_w": watts,
-        "power_valid": int(valid),
-        "reasons": [] if valid else ["sampling_gap_exceeded"],
-    }
-    (tmp_path / "power.json").write_text(
-        json.dumps({"started_unix": started, "scope": {"energy_gpus": [0], "serving_gpus": [0]}, "energy": energy})
-    )
-    report["gpu_monitor"] = {"sample_count": 10, "power_watts": {"avg": 100.0}}
-    measurement = extract_benchmark_measurement(report, workspace=workspace, subprocess_started_unix=1000.0)
-    state = SimpleNamespace(
-        benchmark_mode="agentx",
-        agentx_backend="inferencex",
-        baseline_perf=graded_axes_of(measurement),
-        power_budget_w=900.0,
-    )
-    assert constraint_veto_reason(measurement, state) == veto
-    assert baseline_budget_stop_reason(state, measurement) == ("baseline_over_power_budget" if veto else "")
-    if watts is not None and started == 1000.0:
-        assert measurement["gpu_power_avg_w"] == watts
-        assert measurement["gpu_power_by_gpu_w"] == {"0": watts}
-
-
-def test_public_metrics_and_identity_reach_keep_guards(report):
-    measured = extract_benchmark_measurement(report)
-    assert measured["e2e_norm_intvty_p50"] == 25
-    assert measured["ttft_p50_ms"] == 200
-    state = SimpleNamespace(
-        benchmark_mode="agentx", agentx_backend="inferencex", baseline_perf=graded_axes_of(measured)
-    )
-    assert constraint_veto_reason(measured, state) == ""
-    changed = deepcopy(report)
-    changed["agentx_metrics"]["recipe"]["conc"] = 16
-    assert constraint_veto_reason(extract_benchmark_measurement(changed), state) == "agentx_workload_mismatch"
-
-
-def test_the_report_verdict_reaches_the_measurement_only_as_valid_measurement(report):
-    measured = extract_benchmark_measurement(report)
-    assert measured["valid_measurement"] is True
-    assert "benchmark_valid" not in measured
-
-
-@pytest.mark.parametrize("key", ["success", "benchmark_valid", "publishable"])
-def test_rejected_report_cannot_be_salvaged(report, key, tmp_path):
-    report[key] = False
-    (tmp_path / "results.json").write_text('{"output_throughput": 9000, "completed": 100}')
-    measured = extract_benchmark_measurement(report, workspace=tmp_path)
-    assert not is_valid_measurement(measured)
-    assert measured["output_throughput"] == 50
-
-
-def test_profile_uses_same_workload_and_is_never_keep_evidence(source, tmp_path, report, monkeypatch):
+def test_profile_uses_same_workload(source, tmp_path, monkeypatch):
     monkeypatch.setenv("HYPERLOOM_ENABLE_PATCH", "0")
     monkeypatch.setattr(_server_patcher, "resolve_sglang_shape_mode", lambda: "patched")
     monkeypatch.delenv("PROFILE_OSL", raising=False)
@@ -379,23 +274,6 @@ def test_profile_uses_same_workload_and_is_never_keep_evidence(source, tmp_path,
         "num_steps": 5,
         "num_profiles": 1,
     }
-    report["agentx_metrics"]["diagnostic_only"] = True
-    measured = extract_benchmark_measurement(report)
-    assert measured["round_succeeded"] is True
-    assert not is_valid_measurement(measured)
-    assert constraint_veto_reason(measured, SimpleNamespace(benchmark_mode="agentx", agentx_backend="inferencex")) == (
-        "agentx_evidence_invalid"
-    )
-
-
-@pytest.mark.parametrize(
-    "report", [None, {}, {"success": True, "throughput": {"output_throughput": 9000, "completed": 100}}]
-)
-def test_native_missing_report_cannot_salvage_synthetic_results(source, tmp_path, report):
-    (tmp_path / "results.json").write_text('{"output_throughput": 9000, "completed": 100}')
-    measured = extract_benchmark_measurement(report, workspace=tmp_path, config_path=source)
-    assert measured["benchmark_backend"] == "magpie_agentx"
-    assert not is_valid_measurement(measured)
 
 
 # vLLM server args of CI workloads (capture-size lists shortened): Hyperloom writes a JSON value as one unquoted token.
@@ -411,7 +289,7 @@ _CI_JSON_ARGS = {
         '--attention-config {"mla_prefill_backend":"ROCM_AITER_FA"} --max-num-seqs 8 '
         '--compilation-config {"mode":3,"cudagraph_mode":"FULL_AND_PIECEWISE","max_cudagraph_capture_size":48,'
         '"custom_ops":["+fused_rms_norm_gated"],"cudagraph_capture_sizes":[2,3,4,5,6,7,8,16,32,48]} '
-        '--speculative-config {"model":"/shared_nfs/chenluo/models/Kimi-K3-DSpark","num_speculative_tokens":5,'
+        '--speculative-config {"model":"/models/Kimi-K3-DSpark","num_speculative_tokens":5,'
         '"method":"dspark","attention_backend":"ROCM_AITER_MLA","kv_cache_dtype":"fp8",'
         '"draft_sample_method":"probabilistic","rejection_sample_method":"block"}'
     ),
@@ -420,7 +298,7 @@ _CI_JSON_ARGS = {
         '--compilation-config {"cudagraph_mode":"FULL_DECODE_ONLY","cudagraph_capture_sizes":[1,2,4,8,16,32,64,128]} '
         '--attention-backend ROCM_AITER_UNIFIED_ATTN --attention-config {"indexer_kv_dtype":"fp8"} '
         '--default-chat-template-kwargs {"thinking_mode":"enabled"} --max-num-seqs 64 '
-        '--speculative-config {"method":"eagle3","model":"/shared_nfs/hyperloom/models/MiniMax-M3-EAGLE3-GQA",'
+        '--speculative-config {"method":"eagle3","model":"/models/MiniMax-M3-EAGLE3-GQA",'
         '"num_speculative_tokens":3,"attention_backend":"ROCM_AITER_UNIFIED_ATTN","rejection_sample_method":"synthetic",'
         '"synthetic_acceptance_length":2.78}'
     ),
@@ -565,6 +443,41 @@ def test_a_native_variant_drafting_without_a_kernel_is_refused_before_it_is_writ
         GridRecipe(base_yaml_path=base), GridVariant("spec_64", runnable, {}), output_subdir=tmp_path / "runnable"
     )
     assert load_benchmark(candidate)["agentx"]["launch_overrides"]["append_args"] == runnable.split(" ")
+
+
+def test_a_native_variant_outside_the_recipes_draft_bounds_is_refused_before_it_is_written(source, tmp_path):
+    from hyperloom.inference_optimizer.speculative_capability import CAPABILITY_UNSUPPORTED, DRAFT_LIMITS_KEY
+
+    config = yaml.safe_load(source.read_text())
+    config["benchmark"][DRAFT_LIMITS_KEY] = {"draft_tokens": {"max": 4}}
+    source.write_text(yaml.safe_dump(config))
+    base = materialize_benchmark_config(source, tmp_path / "base")
+    # The declaration survives materialization, so the round and every variant built from it judge against it.
+    assert load_benchmark(base)[DRAFT_LIMITS_KEY] == {"draft_tokens": {"max": 4}}
+    output_subdir = tmp_path / "candidate"
+    with pytest.raises(ValueError) as refused:
+        _build_variant_yaml(
+            GridRecipe(base_yaml_path=base),
+            GridVariant("spec_steps5", "--speculative-num-steps 5 --speculative-num-draft-tokens 6", {}),
+            output_subdir=output_subdir,
+        )
+    assert refused.value.error_class == CAPABILITY_UNSUPPORTED
+    assert "at most 4" in str(refused.value) and "spells 6" in str(refused.value)
+    assert not list(output_subdir.rglob("config.yaml"))
+    within = "--speculative-num-steps 3 --speculative-num-draft-tokens 4"
+    candidate = _build_variant_yaml(
+        GridRecipe(base_yaml_path=base), GridVariant("spec_steps3", within, {}), output_subdir=tmp_path / "within"
+    )
+    assert load_benchmark(candidate)["agentx"]["launch_overrides"]["append_args"] == within.split(" ")
+
+
+def test_a_malformed_draft_bound_stops_the_session_before_it_starts(source):
+    config = yaml.safe_load(source.read_text())
+    config["benchmark"]["speculative_draft_limits"] = {"draft_tokens": {"max": 0}}
+    source.write_text(yaml.safe_dump(config))
+    args = _build_parser().parse_args(["optimize", "--benchmark-config", str(source)])
+    with pytest.raises(ValueError, match="draft_tokens.max must be a positive integer"):
+        configure_benchmark(args)
 
 
 def test_a_native_variant_is_judged_at_the_tensor_parallel_size_its_launch_carries(vllm_source, tmp_path):

@@ -60,7 +60,7 @@ def profiler_layer(config: SuiteConfig, framework: Framework) -> LaunchDelta | N
     """
     if not config.profile.enabled:
         return None
-    trace_dir = str(RunLayout(Path(config.paths.run_dir)).profile_torch_trace.absolute())
+    trace_dir = str(RunLayout(Path(config.paths.run_dir)).profile_torch_trace)
     if framework is Framework.SGLANG:
         return LaunchDelta(env_set={SGLANG_PROFILER_DIR_ENV: trace_dir})
     if framework is Framework.VLLM:

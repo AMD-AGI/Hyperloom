@@ -269,8 +269,8 @@ def _check_base(point: _Point, base: BaseLaunch) -> None:
             raise ConfigError(f"the point runs {name} {point.integer(name)}, its base runs {value}")
 
 
-def _user_args(point: _Point) -> tuple[tuple[str, ...], tuple[str, ...]]:
-    """The point's server args as the user layer adds them, and the base flags the launcher would have dropped."""
+def _user_args(point: _Point) -> tuple[str, ...]:
+    """The point's server args as the user layer runs them, less the flags sglang's launcher drops for another."""
     # The launcher expands the variable unquoted, so the shell splits it on whitespace and nothing else.
     extra = tuple((point.text(extra_args_env(point.framework.value)) or "").split())
     flags = {name for name, _ in argv_flag_occurrences(extra)}
@@ -279,8 +279,10 @@ def _user_args(point: _Point) -> tuple[tuple[str, ...], tuple[str, ...]]:
     if point.framework in _LAUNCHER_CONTEXT_LENGTH and canonical_flag_name(context_flag) not in flags:
         added = (context_flag, str(point.integer(ENV_MAX_MODEL_LEN, _LAUNCHER_MAX_MODEL_LEN)))
     conflicts = _LAUNCHER_CONFLICTS.get(point.framework, ())
-    removed = tuple(drop for need, drop in conflicts if canonical_flag_name(need) in flags)
-    return (*added, *extra), removed
+    dropped = [drop for need, drop in conflicts if canonical_flag_name(need) in flags]
+    if dropped:
+        extra = tuple(remove_server_args(" ".join(extra), dropped).split())
+    return (*added, *extra)
 
 
 def _gpus(point: _Point, cards: int) -> tuple[int, ...]:
@@ -319,11 +321,19 @@ def _measuring_external(settings: RoundSettings) -> RoundSettings:
     return replace(settings, lifecycle=Lifecycle(LifecycleMode.EXTERNAL), telemetry=telemetry)
 
 
-def _user_layer(point: _Point) -> LaunchDelta:
-    args_add, args_remove = _user_args(point)
+def _user_layer(point: _Point, base: BaseLaunch) -> LaunchDelta:
+    """The point's launch as a layer over ``base``.
+
+    A point carries the base it was seeded with, less what the round took out of it, so a base flag its args no
+    longer name and a base variable it no longer sets are removed; the base's redacted values were never seeded.
+    """
+    args_add = _user_args(point)
+    ran = {name for name, _ in argv_flag_occurrences(args_add)}
+    dropped = tuple(f"--{name}" for name in _flag_groups(base.args) if name not in ran)
     env = {name: value for name, value in point.envs.items() if name not in _CONSUMED_ENV}
     env.pop(extra_args_env(point.framework.value), None)
-    return LaunchDelta(args_add=args_add, args_remove=args_remove, env_set=env)
+    unset = tuple(sorted(name for name, value in base.env.items() if isinstance(value, str) and name not in point.envs))
+    return LaunchDelta(args_add=args_add, args_remove=dropped, env_set=env, env_unset=unset)
 
 
 def _server(
@@ -638,7 +648,7 @@ def _mlperf_config(
     if served_model is None:
         raise ConfigError(f"the MLPerf point sets no {_MLPERF_ENV['model']}")
     server_point = _mlperf_server_point(point)
-    server = _server(server_point, base, settings, None, _user_layer(server_point))
+    server = _server(server_point, base, settings, None, _user_layer(server_point, base))
     return SuiteConfig(
         server=replace(server, served_model_name=served_model),
         workload=WorkloadKind.NONE if workload is None else WorkloadKind.MLPERF,
@@ -724,7 +734,7 @@ def suite_config(document: Mapping[str, object], base: BaseLaunch, settings: Rou
     unloaded = boot_only or point.flag(ENV_EVAL_ONLY, default=False)
     held = settings if external is None else _measuring_external(settings)
     return SuiteConfig(
-        server=_server(point, base, settings, external, _user_layer(point)),
+        server=_server(point, base, settings, external, _user_layer(point, base)),
         workload=WorkloadKind.NONE if unloaded else WorkloadKind.FIXED,
         fixed=None if unloaded else _fixed(point),
         profile=ProfileConfig(enabled=False) if unloaded else _fixed_profile(bench, point),
@@ -839,9 +849,6 @@ def accuracy_config(
         deadlines=_deadlines(point, settings),
         paths=settings.paths,
     )
-
-
-#: The tool cache ``install.sh`` stages into, below the dependency cache unless the operator names one.
 
 
 __all__ = [

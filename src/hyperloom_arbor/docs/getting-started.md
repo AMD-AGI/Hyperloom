@@ -5,6 +5,9 @@ From a laptop dry run to a first campaign on a GPU node.
 ## What you need
 
 - **Linux** (or WSL) and **Python 3.10 or newer**: the harness uses POSIX calls. (3.10 is what serving images ship.)
+  WSL is fine for a dry run and the tests; run campaigns on native Linux. Under WSL the clock can step back, and git
+  compares file times to the second, so an agent's edit can go unseen; `arbor run`, `master` and `worker` print a
+  warning there.
 - **Python packages:** `pyyaml` (every command) and `claude-agent-sdk` (to run agents; it brings
   its own Claude CLI). Arbor has no requirements file yet:
 
@@ -26,7 +29,7 @@ From a laptop dry run to a first campaign on a GPU node.
 ## 1. A dry run (no GPU)
 
 ```bash
-git clone <this repository's URL> Arbor && cd Arbor
+cd src/hyperloom_arbor        # this copy runs from its own root (VENDOR.md)
 python3 -m arbor run --config configs/serving-template.json --dry-run
 ```
 

@@ -102,7 +102,6 @@ def _report(**overrides: object) -> Report:
         launch_digest=_DIGEST,
         workload_digest=_DIGEST,
         concurrency=64,
-        host="gpu-host-7",
         server=ServerFacts("127.0.0.1", 30000, "glm", reused=False, log_range=LogRange(0, 4096)),
         gpu_monitor=(_block(0), _block(1)),
         fixed=FixedMetrics.of({"output_throughput": 1234.5, "completed_requests": 640}),
@@ -300,7 +299,7 @@ def test_power_valid_is_zero_or_one() -> None:
         Report.from_document(document)
 
 
-def test_a_report_written_before_the_power_section_and_token_counts_reads_them_as_null() -> None:
+def test_a_report_without_its_power_section_or_agentx_token_counts_is_refused() -> None:
     agentx = AgentxResult(
         counts={**dict.fromkeys(AGENTX_COUNT_KEYS, 1), "input_tokens": None, "output_tokens": None},
         throughput=dict.fromkeys(AGENTX_THROUGHPUT_KEYS),
@@ -309,23 +308,13 @@ def test_a_report_written_before_the_power_section_and_token_counts_reads_them_a
         stopped_by_threshold=False,
         fast_mode=False,
     )
-    report = _report(workload_kind=WorkloadKind.AGENTX, fixed=None, agentx=agentx)
-    document = _document(report)
-    del document["power"]
-    for key in ("input_tokens", "output_tokens"):
-        del document["agentx"]["counts"][key]
-    assert Report.from_document(document) == report
-
-
-def test_the_host_the_round_ran_on_round_trips_and_an_older_report_reads_it_as_null() -> None:
-    report = _report()
-    document = _document(report)
-    assert document["host"] == "gpu-host-7"
-    assert Report.from_document(document).host == "gpu-host-7"
-    del document["host"]
-    assert Report.from_document(document) == replace(report, host=None)
-    with pytest.raises(ReportError, match="host"):
-        _report(host="")
+    document = _document(_report(workload_kind=WorkloadKind.AGENTX, fixed=None, agentx=agentx))
+    without_power = {key: value for key, value in document.items() if key != "power"}
+    with pytest.raises(ReportError, match="missing power"):
+        Report.from_document(without_power)
+    del document["agentx"]["counts"]["input_tokens"]
+    with pytest.raises(ReportError, match="missing input_tokens"):
+        Report.from_document(document)
 
 
 def test_gpu_monitor_block_is_read_whole_by_the_host_gpu_artifact() -> None:

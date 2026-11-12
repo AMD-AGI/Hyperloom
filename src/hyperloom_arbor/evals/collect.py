@@ -75,10 +75,10 @@ COMPONENT_SUBAGENT = "specialist"
 #: the central ROCm library in this domain, so ``aiter`` appears in nearly every
 #: session — an unbounded ``iter`` match misattributes constantly.
 #:
-#: The leading ``/`` is the second half of the same lesson: a subagent ran
-#: ``echo "=== iter_0 / baseline ==="`` and this invented an iteration 0 holding
-#: one step, which dragged the agent-dispatch rate below 100 % and made the
-#: report show a protocol violation that never happened. Only a path segment is
+#: The leading ``/`` is the second half of the same lesson: a banner a subagent
+#: echoes, such as ``=== iter_<n> / baseline ===``, would invent an iteration
+#: holding one step, which lowers the agent-dispatch rate and makes the report
+#: show a protocol violation that never happened. Only a path segment is
 #: evidence of an iteration; prose is not.
 _ITER_RE = re.compile(r"/iter[_-]?(\d+)")
 

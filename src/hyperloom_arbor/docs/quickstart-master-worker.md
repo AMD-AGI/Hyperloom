@@ -60,7 +60,7 @@ set -a; . ~/.arbor/gateway.env; set +a
 ```
 
 - **Source it in the shell that starts Arbor.** The cluster launchers do the same.
-- **A gateway that does not answer:** Arbor then tries `localhost:9101`, `9100` and `9102` at import.
+- **A gateway that does not answer:** Arbor then tries a local gateway proxy at import, if one listens.
 - **Never commit the file.** Rotate a token that shows up in a log or a transcript.
 
 ### 1.5 The serving container

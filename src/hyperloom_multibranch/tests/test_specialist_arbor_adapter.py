@@ -15,6 +15,7 @@ from pathlib import Path
 import pytest
 
 from hyperloom.common.agentx_objective import AgentXObjective
+from hyperloom.common.launch_credentials import redact_credential_env
 from hyperloom.common.perf_metric import GRADED_INTVTY_P50, TOTAL_TOKEN_THROUGHPUT
 from hyperloom.inference_optimizer.cli import base_launch as cli_base_launch
 from hyperloom.orchestrator.state.base_launch import FrozenBase, server_argv, server_base
@@ -29,6 +30,7 @@ from hyperloom_multibranch.scheduling.session_base import freeze_session_base, s
 from hyperloom_multibranch.scheduling.settings import KernelOptimizer, Workload
 from hyperloom_multibranch.specialist import arbor_adapter
 from hyperloom_multibranch.specialist.agent_manifest import REFUSED_FILE, AgentManifest
+from hyperloom_multibranch.specialist.agent_spec import AgentSpec
 from hyperloom_multibranch.specialist.agent_onboarding import PROFILE_FILE, make_ready, root_profile
 from hyperloom_multibranch.specialist.arbor_adapter import (
     ARBOR_PYTHON,
@@ -83,7 +85,7 @@ from hyperloom_multibranch.tests.agent_rig import (
     _write,
 )
 from hyperloom_multibranch.tests.base_records import MODEL_ID, base_record, write_record
-from inference_suite.contracts import AgentxResult, RunStatus
+from inference_suite.contracts import AgentxResult, Redacted, RunStatus
 from inference_suite.contracts import Workload as LaunchWorkload
 from inference_suite.contracts.report import AGENTX_COUNT_KEYS, AGENTX_LATENCY_KEYS, AGENTX_THROUGHPUT_KEYS
 
@@ -795,21 +797,15 @@ def test_arbor_s_harness_books_a_completed_round_and_not_one_mb_s_gate_refuses(t
 
 
 def test_only_an_agentx_arbor_measured_by_mb_s_round_has_its_report_read_by_path(tmp_path: Path) -> None:
-    launch = _launch_file(tmp_path, {**RESOLVED, "client": AGENTX_CLIENT})
     inferencex = _spec(tmp_path, client=AGENTX_CLIENT)
     agentx = replace(inferencex, workload=AGENTX_WORKLOAD, metric=GRADED_INTVTY_P50)
-    specs = [
-        inferencex,
-        replace(agentx, client=""),
-        replace(agentx, client="", launch=launch),
-    ]
+    specs = [inferencex, replace(agentx, client="")]
 
     components = [arbor_config(spec, tmp_path / "checkout", BRANCH_RUN)["component"] for spec in specs]
 
     assert [("bench_command" in each, "bench_read" in each) for each in components] == [
         (True, False),
         (False, False),
-        (True, False),
     ]
 
 
@@ -830,17 +826,6 @@ def test_arbor_s_accuracy_tolerance_is_the_drop_mb_s_rule_allows(tmp_path: Path)
     config = arbor_config(_spec(tmp_path), tmp_path / "checkout", BRANCH_RUN)
 
     assert config["policy"] == {"accuracy_tolerance": 0.05}
-
-
-def test_a_launch_file_s_client_measures_arbor_only_when_mb_gives_none(tmp_path: Path) -> None:
-    client = "python3 bench.py --port 8000 --result-dir /tmp/out --model served"
-    spec = _spec(tmp_path, launch=_launch_file(tmp_path, {**RESOLVED, "model_name": "", "client": client}))
-
-    given = arbor_config(replace(spec, client=""), tmp_path / "checkout", BRANCH_RUN)
-    own = arbor_config(spec, tmp_path / "checkout", BRANCH_RUN)
-
-    assert (given["component"]["bench_command"], given["model_name"]) == (bench_command(client), "served")
-    assert (own["component"]["bench_command"], own["model_name"]) == (bench_command(spec.client), "Qwen/Qwen3-14B-FP8")
 
 
 def test_an_agentx_branch_served_no_launch_is_refused_before_arbor_starts(tmp_path: Path) -> None:
@@ -882,6 +867,60 @@ def test_an_agentx_arbor_given_no_launch_is_served_the_session_s_frozen_base_and
     assert _arbor_start_check(config) == []
 
 
+#: A credential a reference script exports, which the session freezes as its sha256.
+_TOKEN = "hf_frozen_token_value"
+
+
+@pytest.fixture
+def credential_session(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> FrozenBase:
+    """An AgentX session whose base exports ``HF_TOKEN``, frozen as the session freezes a resolved base."""
+
+    exported = base_record(env={**base_record().env, "HF_TOKEN": _TOKEN})
+    monkeypatch.setattr(cli_base_launch, "resolve_server_base", lambda _: redact_credential_env(exported))
+    workload = Workload(MODEL_ID, "vllm", 2, 8, "fp8", "mi355x", KernelOptimizer.FORGE, None)
+    return freeze_session_base(tmp_path / "toolbox", workload, "")
+
+
+def _credential_spec(tmp_path: Path, frozen: FrozenBase) -> AgentSpec:
+    served = served_launch(frozen, "")
+    return replace(
+        _spec(tmp_path, launch=served, workload=AGENTX_WORKLOAD, metric=GRADED_INTVTY_P50), server_args="", envs={}
+    )
+
+
+def test_a_frozen_base_s_credential_is_served_to_arbor_from_the_host_and_its_start_check_passes(
+    tmp_path: Path, credential_session: FrozenBase, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("HF_TOKEN", _TOKEN)
+
+    config = arbor_config(_credential_spec(tmp_path, credential_session), tmp_path / "checkout", BRANCH_RUN)
+
+    assert isinstance(credential_session.launch.env["HF_TOKEN"], Redacted)
+    assert config["server_env"]["HF_TOKEN"] == _TOKEN
+    assert config["component"]["base_launch"]["path"] == str(credential_session.path)
+    assert _arbor_start_check(config) == []
+
+
+@pytest.mark.parametrize(
+    ("held", "said"),
+    [
+        (None, "the host holds no value of it"),
+        ("hf_another_token", "the host's value is not the one the base was resolved with"),
+    ],
+    ids=["unset", "another-value"],
+)
+def test_a_frozen_base_s_credential_the_host_does_not_hold_is_refused_before_arbor_starts(
+    tmp_path: Path, credential_session: FrozenBase, monkeypatch: pytest.MonkeyPatch, held: str | None, said: str
+) -> None:
+    if held is None:
+        monkeypatch.delenv("HF_TOKEN", raising=False)
+    else:
+        monkeypatch.setenv("HF_TOKEN", held)
+
+    with pytest.raises(ArborRefused, match=f"HF_TOKEN is redacted in the base and {said}"):
+        arbor_config(_credential_spec(tmp_path, credential_session), tmp_path / "checkout", BRANCH_RUN)
+
+
 def test_an_agentx_arbor_given_a_launch_file_is_served_it_over_the_frozen_base(
     tmp_path: Path, agentx_session: FrozenBase
 ) -> None:
@@ -906,7 +945,7 @@ def test_an_agentx_arbor_given_a_launch_file_is_served_it_over_the_frozen_base(
         ({**RESOLVED, "server_flags": "--chat-template 'a b"}, "a quote is left open"),
         ({**RESOLVED, "server_env": {"N": 1}}, "server_env is not an object of strings"),
         ({**RESOLVED, "flags": "--tp 1", "model_name": 7}, "keys a launch does not: flags; its model_name is not"),
-        ({**RESOLVED, "client": "python3 bench.py --port 8000"}, "names no --result-dir"),
+        ({**RESOLVED, "client": ""}, "keys a launch does not: client"),
     ],
     ids=[
         "unreadable",
@@ -915,7 +954,7 @@ def test_an_agentx_arbor_given_a_launch_file_is_served_it_over_the_frozen_base(
         "open-quote",
         "env-not-strings",
         "unknown-key-and-name",
-        "client-arbor-cannot-fill",
+        "a-client-the-gate-gives",
     ],
 )
 def test_a_launch_file_the_adapter_cannot_use_is_refused_with_why(tmp_path: Path, document: object, said: str) -> None:
@@ -931,7 +970,7 @@ def test_a_launch_file_the_adapter_cannot_use_is_refused_with_why(tmp_path: Path
 
 def test_the_repository_s_launch_template_has_a_launch_file_s_keys_and_is_refused_until_filled(tmp_path: Path) -> None:
     template = json.loads(TEMPLATE.read_text(encoding="utf-8"))
-    filled = {**RESOLVED, "client": "", "server_flags": f"{RESOLVED['server_flags']} --reasoning-start-str <think>"}
+    filled = {**RESOLVED, "server_flags": f"{RESOLVED['server_flags']} --reasoning-start-str <think>"}
 
     with pytest.raises(ArborRefused) as refused:
         read_launch(TEMPLATE)
@@ -973,7 +1012,7 @@ def test_a_base_launch_record_is_served_as_the_gate_seeds_its_launch_with_its_go
     )
     assert launch.server_env == {"VLLM_ROCM_USE_AITER": "1", "VLLM_SIMULATE_ACC": "3"}
     assert (launch.record, launch.digest, launch.entrypoint) == (str(record), base_record().digest(), ("vllm", "serve"))
-    assert (launch.model_name, launch.client) == ("", "")
+    assert launch.model_name == ""
 
 
 def _shell_argv(flags: str) -> list[str]:
@@ -1022,23 +1061,40 @@ def test_a_flag_reaches_the_server_arbor_launches_through_a_shell_as_its_words(
     assert _arbor_split(flags) == _shell_argv(flags)
 
 
-def test_arbor_s_own_start_check_passes_a_branch_served_a_record_on_the_base_and_refuses_another(
-    tmp_path: Path,
-) -> None:
+def test_arbor_s_own_start_check_passes_a_branch_served_a_record_on_the_base(tmp_path: Path) -> None:
     # The record names no served model and no client: the gate's client gives both.
     record = write_record(tmp_path / "record" / "base_launch.json")
     spec = replace(_spec(tmp_path, launch=str(record)), server_args="", envs={})
 
     config = arbor_config(spec, tmp_path / "checkout", BRANCH_RUN)
-    differs = arbor_config(replace(spec, envs={"VLLM_ROCM_USE_AITER": "0"}), tmp_path / "checkout", BRANCH_RUN)
 
     assert config["model_name"] == "Qwen/Qwen3-14B-FP8"
     assert config["component"]["bench_command"] == bench_command(spec.client)
+    assert config["component"]["base_launch"]["path"] == str(record)
     assert _arbor_start_check(config) == []
-    assert _arbor_start_check(differs) == [
-        "the launch differs from the host's base launch: the variable VLLM_ROCM_USE_AITER is 0 in Arbor's environment"
-        " and 1 in the host's"
-    ]
+
+
+@pytest.mark.parametrize(
+    "layer",
+    [
+        {"server_args": "--enable-chunked-prefill"},
+        {"server_args": "--max-num-seqs 256"},
+        {"envs": {"VLLM_ROCM_USE_AITER": "0"}},
+        {"remove_args": ("--max-num-seqs",)},
+    ],
+    ids=["new-flag", "changed-flag", "changed-env", "removed-flag"],
+)
+def test_a_branch_whose_root_recipe_adds_to_the_record_starts_without_the_base_check(
+    tmp_path: Path, layer: dict[str, object]
+) -> None:
+    # A root a Recipe KB champion was replayed onto serves more than the base; Arbor's check compares the whole launch.
+    record = write_record(tmp_path / "record" / "base_launch.json")
+    spec = replace(_spec(tmp_path, launch=str(record)), **{"server_args": "", "envs": {}, **layer})
+
+    config = arbor_config(spec, tmp_path / "checkout", BRANCH_RUN)
+
+    assert "base_launch" not in config["component"]
+    assert _arbor_start_check(config) == []
 
 
 def test_a_golden_layer_s_token_mode_is_served_to_arbor_as_the_root_runs_it(tmp_path: Path) -> None:

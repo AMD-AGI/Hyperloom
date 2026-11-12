@@ -303,12 +303,6 @@ def _arm_points(arm: _Arm, runners: Mapping[str, Any]) -> Iterator[InferencexPoi
         )
 
 
-def inferencex_points(bundle: RepoBundle) -> tuple[InferencexPoint, ...]:
-    """Every fixed-sequence and AgentX point of the single-node entries in InferenceX's AMD master config."""
-    runners = _yaml_mapping(bundle, RUNNERS)
-    return tuple(point for arm in _arms(_yaml_mapping(bundle, MASTER)) for point in _arm_points(arm, runners))
-
-
 def srtctl_cli_args(engine: str, config: Mapping[str, Any]) -> tuple[str, ...]:
     """srtctl's ``_config_to_cli_args`` for ``engine``: keys sorted, ``True`` a bare flag, ``False`` and ``None``
     left out, a list one flag with several values. ATOM keeps its mixed spelling; the others take ``_`` as ``-``."""
@@ -673,7 +667,6 @@ __all__ = [
     "ServedPoints",
     "agentx_trace",
     "inferencex_launches",
-    "inferencex_points",
     "model_prefixes",
     "served_points",
     "srtctl_cli_args",

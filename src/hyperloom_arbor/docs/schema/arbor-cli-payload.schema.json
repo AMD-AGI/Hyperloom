@@ -116,6 +116,11 @@
           "$comment": "default: loop, or ARBOR_SPLIT when set",
           "description": "loop: the master and its workers in this process (the default); processes: each side as its own command, python3 -m arbor master, then worker --order, in turn (also ARBOR_SPLIT=processes, as a host that launches arbor run passes it); workers: the master deals its map to several workers at once, one per slot of the config's workers block, and integrates what they kept (arbor/dealer.py)"
         },
+        "exit_at_handover": {
+          "type": "boolean",
+          "default": false,
+          "description": "exit at each hand-over, as arbor master and arbor worker would in turn: the master's passes, then one worker stretch, then at the next master's turn the worker's report (worker_report.json, role_exit.json `reported`) and exit 0. The same command continues: an order still waiting for its report is worked first, else the master's passes run again. For a host that deals each report (with the loop split only)"
+        },
         "max_iters": {
           "type": "integer",
           "default": 0,

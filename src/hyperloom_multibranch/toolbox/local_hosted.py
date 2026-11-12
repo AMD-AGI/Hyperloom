@@ -150,8 +150,8 @@ DEFAULT_JIT_STORE = "hyperloom-jit-store"
 #: emptied environment, so :func:`host_tool_repos` carries them from this host's.
 HOST_TOOL_REPO_ENVS: Final = ("INFERENCEX_REPO",)
 #: The runner template's variables naming what a confined runner reads: the framework snapshot, the staged rule pack,
-#: the compiled-code store, the runner cache (the inference_suite staging every test runs and the check sets), the
-#: native build store and its trust file, and a local InferenceX repository.
+#: the compiled-code store, the runner cache (the check sets and the suite staging), the native build store and its trust
+#: file, and a local InferenceX repository.
 RUNNER_READS: Final = (
     SNAPSHOT_ENV,
     PACK_ENV,

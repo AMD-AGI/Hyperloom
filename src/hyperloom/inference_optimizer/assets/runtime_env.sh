@@ -549,7 +549,7 @@ runtime_env_dotenv_lent() {
 # lends, besides, only the names and values runtime_env_dotenv_lent allows: every other line is skipped, its name (never
 # its value) in DOTENV_REFUSED_KEYS and in one warning on stderr, so another account's LD_PRELOAD, NODE_OPTIONS,
 # PYTHONPATH, HTTPS_PROXY, GEAK_REPO or OPENAI_BASE_URL never reaches this account's shell. A private .env is read as before: install_kernel_tools.sh and
-# install_baremetal.sh themselves keep names there (PYTHONPATH, MAGPIE_PYTHON, TRACELENS_INTERNAL_ROOT, TL_EXTENSION)
+# install_baremetal.sh themselves keep names there (PYTHONPATH, VLLM_PYTHON, TRACELENS_INTERNAL_ROOT, TL_EXTENSION)
 # that preflight's list does not carry and the documented shell flows read back. Preflight's copy of both skips is in
 # _load_dotenv_fallback in cli/preflight_env.py.
 load_dotenv_no_clobber() {

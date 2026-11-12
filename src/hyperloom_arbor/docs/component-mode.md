@@ -28,8 +28,8 @@ recorded in `session.json`, and a resumed session keeps it.
 "mode": "component",
 "component": {
   "host": "hyperloom-mb",
-  "deadline": "2026-10-29T03:20:00Z",
-  "seconds": 25200,
+  "deadline": "2030-01-01T00:00:00Z",
+  "seconds": 3600,
   "notes": "/abs/path/mb-integration.md",
   "bench_command": "python3 benchmark_serving.py ... --base-url http://127.0.0.1:{port} --result-dir {out}",
   "outbox": "keeps"
@@ -90,8 +90,8 @@ On a KEEP, before `session.json` records it:
 
 ```
 <session>/keeps/0007/          written to keeps/.0007.tmp, then renamed
-  keep.json                    number, previous, iteration, metric, change, intent,
-                               root, parent, commit, ts
+  keep.json                    schema, arbor, number, previous, iteration, metric, change,
+                               intent, root, parent, commit, ts
   change.patch                 this KEEP alone: applies with `git apply` at `parent`
   served.patch                 the served tree: applies with `git apply` at `root`
   config.json                  server_flags and server_env after the KEEP
@@ -130,8 +130,8 @@ manifest without either side writing host-specific code.
 ## 7. Decisions
 
 1. **An exhausted map with no time left for its update round: exit 0, and say why.** Every exit
-   in component mode writes `<session>/component_exit.json` first: `{reason, iteration, keeps,
-   map, deadline, ts}`, with `reason` one of `deadline`, `map_exhausted` (the map is closed and
+   in component mode writes `<session>/component_exit.json` first: `{schema, reason, iteration,
+   keeps, map, deadline, ts, arbor}` ([interface.md](interface.md)), with `reason` one of `deadline`, `map_exhausted` (the map is closed and
    its update round does not fit), `done` (STOP, max iterations), `sigterm`, `aborted` (the
    harness stopped measuring: `ABORTED.md`, its message as `detail`), `review_rejected` (a human
    rejected the campaign at the review gate) and `retraction_conflict` (a KEEP the agent found
@@ -161,7 +161,7 @@ build settled what the design left open:
   `pack`, a missing or broken `pack.yaml`), and in component mode a campaign that
   `validate_campaign` rejects, or one without a `session_root`. Read errors that may pass (an
   NFS hiccup) stay crashes. Every component-mode refusal also writes
-  `<session>/component_refused.json` (`{reasons, ts}`), the one file a refusal writes, for the
+  `<session>/component_refused.json` (`{schema, reasons, ts, arbor}`), the one file a refusal writes, for the
   host to show; `Run.start` removes a stale one, as it does `component_exit.json`.
 - **Timed-out phases:** the agent, server and bench phases make the iteration NOT_MEASURED; the
   agent's uncommitted edits are discarded, so a host never reads a half-written
@@ -202,12 +202,17 @@ command in the prompts (`arbor/component.py`, `arbor/policy/claude_loop.py`), an
   block aggregates, as with the pack's bench. The same command also takes the pack's
   `secondary_metric` when the client gives it; without it, the gate would see only the primary
   (`secondary: None` on every KEEP).
-- **The bench runs detached.** A command the agent's CLI ends takes its children with it, and
-  one host's replays died at 30 min that way. Where step 1 is all fixed commands (the pack's
+- **The bench runs detached.** A command the agent's CLI ends takes its children with it, a
+  long replay among them. Where step 1 is all fixed commands (the pack's
   bench, or the host's with `bench_read`), the harness writes them to `iter_N/bench_run.sh`; the
   agent starts it with `setsid nohup`, its output in `iter_N/bench.log` and its PID in
   `iter_N/bench.pid`, and waits on the output or the PID. When the turn ends, a bench still
   running is stopped with its process group, so it never loads the next server.
+  - **The host's command without `bench_read`** is detached too, alone: the script holds only the
+    host's command, the agent waits until its PID has ended, then reads the client's result and
+    records it as before. On by default; `ARBOR_DETACH_HOST_BENCH=0` in Arbor's environment runs
+    the command in the agent's shell instead. A host that gives `bench_read` gets the detached
+    bench whatever the variable says.
 - **The server after the bench.** The bench turn stops everything it started except Arbor's own
   server (its PID file's process group; standalone, the framework's server inside the
   container), which its agent may have restarted after a crash. Before correctness the harness
@@ -253,20 +258,19 @@ A second launch at each KEEP, component mode only.
   health under the `server` cap, and probes again (`iter_N/short_prompts_2.json`). The
   session's first KEEP sets the floor (`<session>/short_prompts/floor.json`); a later KEEP whose
   processes differ on more prompts sent one at a time than the floor becomes REVERT, with the
-  first differing positions in the reason. The batched half is recorded and refuses nothing
-  (from the GPU run): an unchanged tree's two boots never differed on the prompts sent one at a
-  time, and differed on most of the batched ones in their first tokens, because which prompts
-  share a prefill batch changes
-  between boots and that flips near-tied greedy picks; pooled, that noise hid a small
-  single-request defect and could refuse a good KEEP. The second launch's server log is kept
+  first differing positions in the reason. The batched half is recorded and refuses nothing:
+  an unchanged tree's two boots agree on the prompts sent one at a time but can differ on the
+  batched ones in their first tokens, because which prompts share a prefill batch changes
+  between boots and that flips near-tied greedy picks; pooled, that noise can hide a small
+  single-request defect and refuse a good KEEP. The second launch's server log is kept
   as `iter_N/server_2.log`. The record is `iter_N/short_prompts_check.json`; `keep.json` gets its
   brief, and a snapshot carries the record when the check ran.
 - **What refuses nothing:** an iteration probe that did not finish (no boot is spent then), a
   second boot that does not come up, no time left, a second probe that does not finish. The
   KEEP stands and `keep.json` says why, as MB's check does; MB re-gates every KEEP.
-- **Odds and cost:** two processes catch a one-in-three defect 4 times in 9 per KEEP, and every
-  later KEEP that carries it is another chance. The cost is one server boot and two probes per
-  KEEP (about 5 minutes for a large model at TP4), which a host should allow for in its deadline.
+- **Odds and cost:** two processes catch a defect that shows in only some processes part of the
+  time, and every later KEEP that carries it is another chance. The cost is one server boot and
+  two probes per KEEP, which a host should allow for in its deadline.
 
 ### The host's plan
 

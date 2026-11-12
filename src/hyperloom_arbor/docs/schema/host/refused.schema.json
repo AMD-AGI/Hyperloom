@@ -1,0 +1,16 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "arbor.refused/1",
+  "title": "component_refused.json: why a component-mode start was refused (exit 2)",
+  "description": "The next start that is not refused removes it. A refused start never runs again unchanged.",
+  "type": "object",
+  "required": ["schema", "reasons", "ts", "arbor"],
+  "additionalProperties": false,
+  "properties": {
+    "schema": {"const": "arbor.refused/1"},
+    "reasons": {"type": "array", "items": {"type": "string"}, "minItems": 1},
+    "ts": {"type": "string", "description": "when it was written, ISO 8601"},
+    "arbor": {"type": "object", "required": ["version", "commit"], "additionalProperties": false,
+              "properties": {"version": {"type": "string"}, "commit": {"type": ["string", "null"]}}}
+  }
+}

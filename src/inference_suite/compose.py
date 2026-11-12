@@ -5,8 +5,7 @@
 
 The order is fixed: base, user removals, user additions, candidate removals, candidate additions, the golden layer (when
 the round applies it), the guard (the round's model path, address and GPU mask), the runner's layer (with the
-framework's metrics flag when the round scrapes ``/metrics``, and the engine seed :data:`DEFAULT_SEED` when no earlier
-layer names one), then the profiler layer of a profile round. A layer's
+framework's metrics flag when the round scrapes ``/metrics``), then the profiler layer of a profile round. A layer's
 flag beats every earlier group of the same flag; a later alias of it wins only because the engine applies the last
 one. Neither the user nor the candidate may set what the guard or the runner owns, nor, under a golden layer, what
 golden owns; such a layer is refused, not overridden, so the refusal names whose layer it was.
@@ -51,10 +50,6 @@ GPU_MASK_ENV = "ROCR_VISIBLE_DEVICES"
 HIP_MASK_ENV = "HIP_VISIBLE_DEVICES"
 #: Every device mask a launch's processes read; the guard sets the first two and no layer may set any.
 _DEVICE_MASK_ENVS = (GPU_MASK_ENV, HIP_MASK_ENV, "CUDA_VISIBLE_DEVICES")
-#: The engine seed a launch runs with when no layer names one. Unpinned, the engine draws a fresh one at every start,
-#: and under speculative decoding's rejection sampling the accept length, and with it the throughput, moves with that
-#: draw, so two cold starts of one recipe would not measure the same launch.
-DEFAULT_SEED = 0
 
 
 @dataclass(frozen=True)
@@ -218,11 +213,6 @@ class _Composer:
         if metrics_flag is not None:
             self.add_args((metrics_flag,), LayerSource.RUNNER)
 
-    def default_arg(self, flag: str | None, value: str) -> None:
-        """Set ``flag`` to ``value`` as the runner's when the framework takes it and no layer so far names it."""
-        if flag is not None and not any(_named(arg, canonical_flag_name(flag)) for arg in self.args):
-            self.args.append(LaunchArg(flag, (value,), LayerSource.RUNNER))
-
 
 def _named(arg: LaunchArg, name: str) -> bool:
     return canonical_flag_name(arg.flag) == name
@@ -286,7 +276,6 @@ def compose(config: SuiteConfig, base: BaseLaunch, facts: RoundFacts) -> Launch 
     composer.add_args(guard_args, LayerSource.GUARD)
     composer.set_env(guard_env, LayerSource.GUARD)
     composer.apply_runner(server.runner, spec.metrics_flag if config.telemetry.kv else None)
-    composer.default_arg(server_flags.seed, str(DEFAULT_SEED))
     if facts.profiler is not None:
         composer.apply_delta(facts.profiler, LayerSource.PROFILE)
 
@@ -312,4 +301,4 @@ def compose(config: SuiteConfig, base: BaseLaunch, facts: RoundFacts) -> Launch 
     )
 
 
-__all__ = ["DEFAULT_SEED", "GPU_MASK_ENV", "Refusal", "RoundFacts", "compose", "runner_owned"]
+__all__ = ["GPU_MASK_ENV", "Refusal", "RoundFacts", "compose", "runner_owned"]

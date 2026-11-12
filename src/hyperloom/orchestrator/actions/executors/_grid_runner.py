@@ -303,7 +303,6 @@ async def _settled_measurement(
     workspace: Path,
     *,
     subprocess_started_unix: float | None,
-    config_path: Path | None = None,
     settle_seconds: float = REPORT_SETTLE_SECONDS,
     poll_seconds: float = REPORT_SETTLE_POLL_SECONDS,
 ) -> tuple[dict[str, Any] | None, dict[str, Any]]:
@@ -317,7 +316,6 @@ async def _settled_measurement(
         report = _parse_report(workspace)
         measurement = extract_benchmark_measurement(
             report,
-            config_path=config_path,
             workspace=workspace,
             subprocess_started_unix=subprocess_started_unix,
         )
@@ -938,14 +936,12 @@ async def _warmup_throughput(
     if run_ws is not None:
         _, measurement = await _settled_measurement(
             workspace,
-            config_path=rounds.cfg_path,
             subprocess_started_unix=pass_.started_unix,
             settle_seconds=REPORT_SETTLE_SECONDS if returncode == 0 else 0.0,
         )
     else:
         measurement = extract_benchmark_measurement(
             None,
-            config_path=rounds.cfg_path,
             workspace=workspace,
             subprocess_started_unix=pass_.started_unix,
         )
@@ -1213,7 +1209,6 @@ def _abort_on_invalid_measurement(run: _GridRun, at: _VariantSlot, outcome: _Var
 async def _variant_row(run: _GridRun, at: _VariantSlot, measured: _MeasuredVariant) -> VariantResult:
     report, measurement = await _settled_measurement(
         measured.workspace,
-        config_path=measured.rounds.cfg_path,
         subprocess_started_unix=measured.round.started_unix,
         settle_seconds=0.0 if run.launch.evaluation_only else REPORT_SETTLE_SECONDS,  # no throughput to wait for
     )
@@ -1306,7 +1301,6 @@ def _measured_row(at: _VariantSlot, outcome: _VariantOutcome) -> VariantResult:
         completed_requests=measurement.get("completed_requests"),
         duration_seconds=measurement.get("duration_seconds"),
         ttft_mean_ms=measurement.get("ttft_mean_ms"),
-        benchmark_backend=measurement.get("benchmark_backend"),
         **constraint_fields(measurement),
         tpot_mean_ms=measurement.get("tpot_mean_ms"),
         input_throughput=measurement.get("input_throughput"),
@@ -1667,9 +1661,7 @@ def _build_variant_yaml(
         apply_runtime_override(envs, _rt_override)
     refuse_unpinned_speculative_change(base_args, base_envs, combined, envs)
     # ``envs`` is the launch's environment, TP included; the AgentX branch meets it in ``materialize_variant``.
-    speculative_capability.refuse_unrunnable_speculative_stack(
-        combined, framework=point.framework, envs=envs, model_path=target.model_path
-    )
+    speculative_capability.refuse_unrunnable_speculative_stack(combined, bench, envs=envs, model_path=target.model_path)
 
     pin_xdit_tool_path(envs, point.framework)
 

@@ -1063,12 +1063,12 @@ async def test_runner_timeout_does_not_replay_the_settled_result(coordinator, tm
     _assert_settled_candidate_survived(c, tmp_path, revalidations)
 
 
-def _arm_unsettled_geak_dispatch(coordinator) -> None:
+def _arm_unsettled_geak_dispatch(coordinator, tmp_path) -> None:
     """Reach the runner with no adjudicated candidate for a timeout to retire."""
     st = coordinator.shared_state
     _arm_kernel_to_sweep(st)
     st.benchmark_mode = "agentx"
-    measured_in_suite_round(st, coordinator.session_dir / "measured")
+    measured_in_suite_round(st, tmp_path / "measured")
     st.geak_result = {}
     st.geak_pending = {}
     coordinator.phase_kernel._record_geak_kernel_journey = lambda _result: None
@@ -1082,7 +1082,7 @@ def _timeout_runner():
 async def test_outer_timeout_retains_the_classification_geak_flushed(coordinator, tmp_path, monkeypatch) -> None:
     """A kill after GEAK wrote result.json keeps that result instead of a bare timeout."""
     c = coordinator
-    _arm_unsettled_geak_dispatch(c)
+    _arm_unsettled_geak_dispatch(c, tmp_path)
     flushed = {
         "status": "no_gain",
         "error_class": "no_gain",
@@ -1114,7 +1114,7 @@ async def test_outer_timeout_retains_the_classification_geak_flushed(coordinator
 async def test_outer_timeout_without_result_json_records_an_unknown_phase(coordinator, tmp_path, monkeypatch) -> None:
     """A kill before result.json exists is an external timeout, not an empty patch or no gain."""
     c = coordinator
-    _arm_unsettled_geak_dispatch(c)
+    _arm_unsettled_geak_dispatch(c, tmp_path)
     revalidations = _record_revalidations(c)
     calls = _stub_geak_runner_call(monkeypatch, _timeout_runner)
 

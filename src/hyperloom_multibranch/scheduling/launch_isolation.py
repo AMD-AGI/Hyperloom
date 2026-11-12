@@ -10,10 +10,12 @@ the path that launches it, never from a chooser that path does not call:
 - a specialist is started by the agent runner as
   :func:`~hyperloom.orchestrator.specialists.launch_env.resolve_launch_isolation` chooses, the function the runner
   calls: as an account, under bubblewrap, unconfined, or not at all where it must be isolated and cannot be;
-- an agent or dev sandbox on this host runs its commands under bubblewrap where
-  :func:`~hyperloom.common.agent_isolation.choose_sandbox_isolation`, the function it calls, gives it, else unconfined;
-- a test measured on this host's cards runs under bubblewrap where
-  :func:`~hyperloom.sandbox.confined.local_test_isolation` gives it, else unconfined.
+- an agent or dev sandbox on this host (:class:`~hyperloom_multibranch.specialist.agent_sandbox.LocalAgentSandbox`)
+  runs its commands under bubblewrap where :func:`~hyperloom.common.agent_isolation.choose_sandbox_isolation`, the
+  function its factory calls, gives it, else unconfined;
+- a test measured on this host's cards runs in a sandbox the local toolbox's provider makes, which names no account
+  for it and confines it by the runner's plan: under bubblewrap where
+  :func:`~hyperloom.sandbox.confined.local_test_isolation` gives it, else unconfined, or refused in a hosted run.
 
 A session measured in a grant's sandboxes runs its agent and dev sandboxes and its tests there (:data:`HOSTED`), not on
 this host.

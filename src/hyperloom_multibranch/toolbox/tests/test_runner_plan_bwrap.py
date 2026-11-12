@@ -105,18 +105,15 @@ def _read_in_sandbox(plan: RunnerPlan, session: Path, reads: dict[str, str]) -> 
         sealed=True,
         signing=True,
     )
-    provider = LocalSandboxProvider([template], base_dir=session / "sandboxes", users=ProcessUsers(plan=plan))
-    try:
+    with LocalSandboxProvider([template], base_dir=session / "sandboxes", users=ProcessUsers(plan=plan)) as provider:
         sandbox = provider.create("runner", role="measurement", timeout_sec=120, metadata={})
         until = time.monotonic() + 60
         while True:
             try:
-                return sandbox.confined, json.loads(sandbox.read_file("/out/seen.json"))
+                return sandbox._confined is not None, json.loads(sandbox.read_file("/out/seen.json"))
             except FileNotFoundError:
                 assert time.monotonic() < until, "the test never wrote what it read"
                 time.sleep(0.05)
-    finally:
-        provider.close()
 
 
 def _refused_twice(
@@ -126,17 +123,14 @@ def _refused_twice(
     template = LocalTemplate(
         "runner", "measurement", command=(sys.executable, "-c", "import time; time.sleep(600)"), sealed=True
     )
-    provider = LocalSandboxProvider([template], base_dir=session / "sandboxes", users=ProcessUsers(plan=plan))
-    try:
+    with LocalSandboxProvider([template], base_dir=session / "sandboxes", users=ProcessUsers(plan=plan)) as provider:
         with caplog.at_level(logging.WARNING):
             sandbox = provider.create("runner", role="measurement", timeout_sec=120, metadata={})
         sandbox.kill()
         monkeypatch.setattr(agent_isolation, "_STATE", agent_isolation._Process(hosted=True, layer_bwrap=bwrap))
         with pytest.raises(SandboxDenied, match="must run confined") as refused:
             provider.create("runner", role="measurement", timeout_sec=120, metadata={})
-    finally:
-        provider.close()
-    return sandbox.confined, str(refused.value)
+    return sandbox._confined is not None, str(refused.value)
 
 
 def test_a_model_linking_into_the_home_shows_its_test_what_the_links_name_and_none_of_the_home_s_logins(

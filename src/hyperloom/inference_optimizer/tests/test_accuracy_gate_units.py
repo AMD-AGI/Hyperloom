@@ -273,8 +273,7 @@ class TestTheAgentXAccuracyGate:
         assert (out["accuracy"], out["task"], out["metric"]) == (0.945, "gsm8k", "exact_match,strict-match")
 
     def test_a_dropped_score_is_not_hidden_behind_a_clean_error_rate(self, tmp_path):
-        """#155 c5075: a candidate at 0.000 against a 0.945 baseline passed while the gate read 1.0 off its error
-        rate."""
+        """A candidate at 0.000 against a 0.945 baseline passed while the gate read 1.0 off its error rate."""
         _error_rate(tmp_path, request_error_rate=0.0)
         _accuracy_round(tmp_path, 0.0)
         assert (
@@ -345,11 +344,6 @@ class TestParseAgentXErrorRate:
 
     def test_reports_none_when_the_field_is_absent_or_not_a_number(self, tmp_path):
         (tmp_path / "inferencex_result.json").write_text(json.dumps({"request_error_rate": "n/a"}), encoding="utf-8")
-        assert ag.parse_agentx_error_rate(tmp_path) is None
-
-    def test_an_invalid_public_report_cannot_be_salvaged(self, tmp_path):
-        (tmp_path / "benchmark_report.json").write_text(json.dumps({"scenario": "agentx", "benchmark_valid": False}))
-        (tmp_path / "inferencex_result.json").write_text(json.dumps({"request_error_rate": 0.0}))
         assert ag.parse_agentx_error_rate(tmp_path) is None
 
     def test_an_unreadable_result_reports_none_and_warns(self, tmp_path, caplog):

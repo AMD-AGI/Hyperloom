@@ -74,9 +74,9 @@ SERVER_DECODE = (
 )
 
 
-def benchmark_stderr() -> str:
-    """The benchmark's stderr as a refused evaluation leaves it: the refusal, then the cascade, then the exit line."""
-    return EVAL_HEAD + CASCADE * CASCADE_BLOCKS + EVAL_TAIL
+def eval_stderr() -> str:
+    """The evaluation's stderr as a refused evaluation leaves it: the refusal, then the cascade."""
+    return EVAL_HEAD + CASCADE * CASCADE_BLOCKS
 
 
 def server_log() -> str:

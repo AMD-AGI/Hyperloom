@@ -19,7 +19,6 @@ from __future__ import annotations
 import asyncio
 import functools
 import hashlib
-import json
 import logging
 import math
 import re
@@ -112,8 +111,6 @@ DEFAULT_TEST_TIMEOUT_SEC = 3600
 TEST_SILENCE_TIMEOUT_SEC = 600.0
 #: Where a test's landed files go, below the session directory: ``tests/<request_id>/attempt-<n>``.
 OUTPUTS_DIR = "tests"
-#: The report an archived v1 bundle's round left; a v2 round is an inference_suite run_dir.
-_V1_REPORT = "benchmark_report.json"
 _MANIFEST = "manifest.json"
 _UNFINISHED = (STATE_SUBMITTED, STATE_SENT)
 _SWEEP = "conc_sweep"
@@ -340,7 +337,7 @@ class HostedExecutor:
         audit = self._audit(request_id, record, call) if record is not None else {}
         if failure is None and not audit:
             raise MeasurementRefused("the result is not recorded as a verified bundle of this sandbox")
-        refusal = self._cacheless_baseline(request, accepted, outcome) if failure is None else ""
+        refusal = self._cacheless_baseline(request, outcome) if failure is None else ""
         if refusal:
             failure = FailureClass.CANDIDATE
         finished = self._clock()
@@ -432,7 +429,7 @@ class HostedExecutor:
             raise MeasurementRefused(PROFILE_WITHOUT_STEPS)
         return location
 
-    def _cacheless_baseline(self, request: TestRequest, accepted: AcceptedMeasurement, outcome: TestOutcome) -> str:
+    def _cacheless_baseline(self, request: TestRequest, outcome: TestOutcome) -> str:
         """Why an AgentX baseline measured with the prefix cache off is refused, or ``""`` (main's #1884).
 
         Every candidate is graded against the baseline, so a cold-cache one would credit the cache itself as a gain.
@@ -440,10 +437,10 @@ class HostedExecutor:
         if self._workload is not WorkloadKind.AGENTX or request.purpose is not Purpose.BASELINE:
             return ""
         for item in outcome.rounds:
-            if item.phase != _MEASURE or item.point >= len(accepted.points):
+            if item.phase != _MEASURE:
                 continue
             try:
-                reason = baseline_prefix_cache_refusal(accepted.points[item.point], Path(item.output_dir))
+                reason = baseline_prefix_cache_refusal(Path(item.output_dir))
             except RoundUnreadable as exc:
                 raise MeasurementRefused(f"the verified baseline round is unreadable: {exc}") from None
             if reason:
@@ -752,17 +749,6 @@ def _concurrency_in(text: str) -> int | None:
     return value if value >= 1 else None
 
 
-def _v1_report_of(directory: Path) -> dict[str, Any] | None:
-    for path in sorted(Path(directory).rglob(_V1_REPORT)) if Path(directory).is_dir() else []:
-        try:
-            document = json.loads(path.read_text(encoding=_UTF8))
-        except (OSError, ValueError):
-            continue
-        if isinstance(document, dict):
-            return document
-    return None
-
-
 def _metrics_of(measurement: Mapping[str, Any]) -> dict[str, float]:
     return {
         key: float(value)
@@ -832,15 +818,13 @@ def _round_values_at(rounds: tuple[RoundOutcome, ...], concurrencies: tuple[int 
 
 
 def _round_measurement(round_dir: Path) -> dict[str, Any] | None:
-    """A run_dir's measurement from its report, an archived v1 round's from its ``benchmark_report.json``; ``None``
-    when the round left no readable report."""
-    if is_round_folder(round_dir):
-        try:
-            return extract_benchmark_measurement(None, workspace=round_dir)
-        except (OSError, ValueError):
-            return None
-    report = _v1_report_of(round_dir)
-    return None if report is None else extract_benchmark_measurement(report, workspace=round_dir)
+    """A run_dir's measurement from its report; ``None`` when the round left no readable one."""
+    if not is_round_folder(round_dir):
+        return None
+    try:
+        return extract_benchmark_measurement(None, workspace=round_dir)
+    except (OSError, ValueError):
+        return None
 
 
 def _round_value(phase: str, round_dir: Path, concurrency: int | None) -> RoundValue | None:

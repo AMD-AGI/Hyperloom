@@ -11,9 +11,12 @@ from __future__ import annotations
 import dataclasses
 import json
 import logging
+import os
 import signal
+import stat
+import subprocess
 import threading
-from collections.abc import Callable
+from collections.abc import Callable, Iterator
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
@@ -23,28 +26,28 @@ from hyperloom_common import bwrap
 from hyperloom_common.bwrap import BwrapProbe
 from hyperloom_common.tests._bwrap_host import usable_bwrap
 from hyperloom.common import agent_isolation
+from hyperloom.common.agent_isolation import HOST_LAYER_ENV
 from hyperloom.common.env_safety import SPECIALIST_USER_ENV, RunAs
 from hyperloom.hosted.campaign import CampaignSpec, parse_campaign
 from hyperloom.hosted.host_info import HostInfo, read_host_info
-from hyperloom_multibranch.scheduling import launch_isolation as launch_isolation_module
+from hyperloom_multibranch.scheduling import hosted_run as hosted_run_module
 from hyperloom_multibranch.scheduling.budget import MB_CLOSE_GRACE_CAP_SECONDS
 from hyperloom_multibranch.scheduling.hosted_run import (
     GRANT_MARGIN_SECONDS,
-    HOST_LAYER_ENV,
     GrantDeadline,
     HostedExit,
     HostedRefused,
     arm_grant_stop,
     grant_deadline,
-    layer_bwrap,
     record_session,
     recorded_session,
     require_hosted_isolation,
     require_local_image,
     run_argv,
+    share_with_the_group,
     write_final_exit,
 )
-from hyperloom_multibranch.scheduling.launch_isolation import LaunchIsolation, launch_isolation
+from hyperloom_multibranch.scheduling.launch_isolation import HOSTED, LaunchIsolation, launch_isolation
 from hyperloom_multibranch.scheduling.peers import PeersUnavailable
 
 CREATED = datetime(2026, 10, 28, 12, 0, tzinfo=timezone.utc)
@@ -153,6 +156,10 @@ def test_an_inferencex_spec_runs_its_session_at_the_hardware_ep_it_names() -> No
     assert {"--workload=inferencex", "--tp=8", "--ep=8"} <= set(argv)
 
 
+def test_a_spec_without_a_launch_section_maps_onto_run() -> None:
+    assert "--workload=inferencex" in run_argv(_spec("hosted"), 1.0, 1)
+
+
 def test_a_spec_gives_its_base_launch_as_the_reference_script_of_run() -> None:
     spec = _spec("hosted", multibranch={"workload": "inferencex", "reference_script": "/data/launch.sh"})
 
@@ -218,13 +225,6 @@ def test_a_spec_measured_here_without_the_pins_is_refused_naming_what_is_missing
 
 def test_a_spec_measured_in_the_grants_sandboxes_is_not_held_to_this_containers_image() -> None:
     require_local_image(_spec("hosted", "registry.example/vllm:v1"), {})
-
-
-@pytest.mark.parametrize(("value", "found"), [(" /opt/layer ", LAYER_BWRAP), ("", None), ("  ", None), (None, None)])
-def test_the_layers_bubblewrap_is_found_in_the_layer_directory_the_host_names(
-    value: str | None, found: str | None
-) -> None:
-    assert layer_bwrap({} if value is None else {HOST_LAYER_ENV: value}) == found
 
 
 class Probes:
@@ -300,6 +300,25 @@ def test_a_hosted_run_measured_in_the_grants_sandboxes_needs_only_its_specialist
 
     require_hosted_isolation(_spec("hosted"), {HOST_LAYER_ENV: str(LAYER)})
 
+    assert launch_isolation(local=False) == LaunchIsolation(agent_isolation.ACCOUNT, HOSTED, HOSTED, True, ())
+
+
+@pytest.mark.usefixtures("account")
+def test_a_hosted_run_whose_runner_would_start_its_specialists_unconfined_is_refused_naming_them(
+    probes: Callable[..., Probes], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    probes({LAYER_BWRAP: ()})
+    unconfined = LaunchIsolation(agent_isolation.NONE, HOSTED, HOSTED, True, ("the runner asks no chooser",))
+    monkeypatch.setattr(hosted_run_module, "launch_isolation", lambda *, local: unconfined)
+
+    with pytest.raises(PeersUnavailable) as refused:
+        require_hosted_isolation(_spec("hosted"), {HOST_LAYER_ENV: str(LAYER)})
+
+    assert str(refused.value) == (
+        "a hosted run launches nothing unconfined beside its credentials, and here specialists run unconfined on this"
+        " host (the runner asks no chooser)"
+    )
+
 
 @pytest.mark.usefixtures("account")
 def test_a_hosted_run_measured_here_is_refused_while_its_layers_bubblewrap_cannot_sandbox_its_sandboxes_and_tests(
@@ -325,7 +344,7 @@ def test_a_hosted_run_with_no_account_starts_with_its_specialists_under_the_laye
 
     require_hosted_isolation(_spec(measurement), {HOST_LAYER_ENV: str(LAYER)})
 
-    here = agent_isolation.BWRAP if measurement == "local" else launch_isolation_module.HOSTED
+    here = agent_isolation.BWRAP if measurement == "local" else HOSTED
     assert launch_isolation(local=measurement == "local") == LaunchIsolation(
         agent_isolation.BWRAP, here, here, True, ()
     )
@@ -431,6 +450,24 @@ def test_a_hosted_run_whose_layer_has_no_bubblewrap_is_refused_naming_it(
 
 @pytest.mark.agent_isolation
 @pytest.mark.usefixtures("unmarked")
+def test_a_hosted_run_with_no_account_and_a_real_layer_bubblewrap_starts_its_specialists_under_it(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    real = usable_bwrap()
+    layer = _layer(tmp_path, str(real.path))
+    monkeypatch.setenv("PATH", f"{tmp_path / 'image-bin'}:/usr/bin:/bin")
+
+    require_hosted_isolation(_spec("hosted"), {HOST_LAYER_ENV: str(layer)})
+
+    assert launch_isolation(local=False) == LaunchIsolation(agent_isolation.BWRAP, HOSTED, HOSTED, True, ())
+    later = agent_isolation.choose_sandbox_isolation()
+    assert isinstance(later, agent_isolation.BwrapIsolation), later
+    version = ".".join(map(str, real.version or ()))
+    assert later.shown == f"{version} {layer / 'bin' / 'bwrap'}"
+
+
+@pytest.mark.agent_isolation
+@pytest.mark.usefixtures("unmarked")
 def test_a_hosted_run_with_no_account_and_a_real_layer_bubblewrap_measures_here_with_every_launch_under_it(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -466,3 +503,42 @@ def test_a_make_before_break_that_is_not_true_or_false_is_refused(given: object)
     spec = dataclasses.replace(_spec("hosted"), multibranch={"workload": "inferencex", "make_before_break": given})
     with pytest.raises(HostedRefused, match="multibranch.make_before_break must be true or false"):
         run_argv(spec, 1.0, 8)
+
+
+@pytest.fixture
+def umask_022() -> Iterator[None]:
+    """This process under umask 022, the usual default, which is restored after the test."""
+    saved = os.umask(0o022)
+    try:
+        yield
+    finally:
+        os.umask(saved)
+
+
+def _made_by_a_child(directory: Path) -> tuple[int, int]:
+    """The modes of the file and the directory a child process makes in ``directory`` with the default modes."""
+    subprocess.run(["sh", "-c", "touch file && mkdir dir"], cwd=directory, check=True)
+    return stat.S_IMODE((directory / "file").stat().st_mode), stat.S_IMODE((directory / "dir").stat().st_mode)
+
+
+@pytest.mark.usefixtures("umask_022")
+def test_below_shared_storage_the_children_of_a_hosted_run_write_what_the_group_can_write(tmp_path: Path) -> None:
+    # A later leg of the run may be another account of the group: what Arbor or an agent writes there is its too.
+    root = tmp_path / "MB-session"
+    root.mkdir()
+    root.chmod(0o2775)
+
+    share_with_the_group(root)
+
+    assert _made_by_a_child(root) == (0o664, 0o2775)
+
+
+@pytest.mark.usefixtures("umask_022")
+def test_off_shared_storage_the_children_of_a_hosted_run_keep_the_umask(tmp_path: Path) -> None:
+    root = tmp_path / "MB-session"
+    root.mkdir(0o755)
+
+    share_with_the_group(root)
+
+    assert _made_by_a_child(root) == (0o644, 0o755)
+    assert os.umask(0o022) == 0o022

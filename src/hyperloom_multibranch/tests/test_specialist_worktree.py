@@ -454,6 +454,45 @@ def test_the_base_and_each_worktree_are_the_group_s_to_write_whatever_the_umask(
     assert [stat.S_IMODE(path.lstat().st_mode) for path in linked] == [0o2775, 0o2775]
 
 
+def test_the_base_and_each_worktree_are_the_group_s_to_write_whatever_the_umask(tmp_path, installed, monkeypatch):
+    with open("/proc/self/status", encoding="ascii") as status:
+        umask = next(int(line.split()[1], 8) for line in status if line.startswith("Umask:"))
+    assert umask & 0o020, "the test needs a umask that keeps group write off what a plain create makes"
+    monkeypatch.setattr(worktree_module, "locate_installed_package", lambda _layout: installed)
+    tmp_path.chmod(0o2775)  # the session directory: storage set up to be shared
+    branches = tmp_path / "MB-branches"
+    branches.mkdir()
+    branches.chmod(0o2775)
+    base = SourceBase(tmp_path / "MB-source")
+    base.build(["vllm"])
+    target = tmp_path / "installed.so"
+    target.write_bytes(b"\x7fELF")
+    with (base.path / ".git" / worktree_module.LINKED_PATHS).open("a") as links:
+        links.write(f"vllm/deep/inner/_ext.abi3.so\t{target}\n")
+
+    worktree = base.worktree("s1", branches / "s1" / "worktree")
+    worktree.sync("c0", [])
+    objects = base.path / ".git" / "objects"
+    before = {path for path in objects.iterdir() if path.is_dir()}
+    (worktree.path / "vllm" / "fresh.py").write_bytes(b"fresh = 1\n")
+    worktree.sync("c1", [worktree.diff("vllm").encode()])
+
+    def group_writes(path: Path) -> bool:
+        return path.lstat().st_mode & 0o020 == 0o020
+
+    assert stat.S_IMODE(base.path.stat().st_mode) == 0o2755, "only its maker renames the git directory in it"
+    git_dirs = [base.path / ".git" / name for name in ("objects", "refs", "worktrees")]
+    assert all(map(group_writes, git_dirs)), [oct(path.stat().st_mode) for path in git_dirs]
+    assert stat.S_IMODE((branches / "s1").stat().st_mode) == 0o2775, "the branch's directory, for its dev sandboxes"
+    assert group_writes(worktree.path) and group_writes(worktree.path / "vllm" / "config.py")
+    # What the worktree's own git made on the sync: the commit's object directories and the file its patch created.
+    made = {path for path in objects.iterdir() if path.is_dir()} - before
+    assert made and all(map(group_writes, made)), [oct(path.stat().st_mode) for path in made]
+    assert group_writes(worktree.path / "vllm" / "fresh.py")
+    linked = [worktree.path / "vllm" / "deep", worktree.path / "vllm" / "deep" / "inner"]
+    assert [stat.S_IMODE(path.lstat().st_mode) for path in linked] == [0o2775, 0o2775]
+
+
 def _recording_filter(where: Path, ran: Path) -> Path:
     """A program that notes it ran in ``ran`` and passes its input through, as a filter or a text conversion would."""
     program = where / "recording-filter"
@@ -602,7 +641,7 @@ def test_a_worktree_another_account_of_the_group_made_is_synced_and_diffed_with_
     worktree.sync("c0", [])
     ran = tmp_path / "ran"
     _plant_programs(base.path / ".git", worktree.path, ran)
-    # The run's earlier leg, another account of the group, made the session, the base and the worktree.
+    # The run's earlier leg, another account of the group, made the session directory, the base and the worktree.
     _as_another_accounts(base.path, worktree.path)
     os.lchown(tmp_path, 65534, -1)
     (worktree.path / "vllm" / "config.py").write_bytes(b"max_num_seqs = 256\n")

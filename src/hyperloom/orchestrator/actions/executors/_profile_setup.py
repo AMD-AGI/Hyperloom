@@ -24,7 +24,6 @@ from types import MappingProxyType
 from typing import Any, Mapping, NamedTuple
 
 from hyperloom_common.env import env_bool, env_flag, is_truthy
-from hyperloom.common.outside_facts import TORCH_SYMBOLIZE_BY_LOADER, TORCH_SYMBOLIZE_MODE_ENV
 from hyperloom.common.workload_defaults import DEFAULT_CONC, DEFAULT_OSL
 from hyperloom.inference_optimizer.model_config_utils import model_is_gemma2
 from hyperloom.inference_optimizer.runtime_environment import prepend_launch_path
@@ -637,9 +636,6 @@ _SGLANG_ANNOTATION_ENV = MappingProxyType(
     dict.fromkeys(("SGLANG_PROFILE_WITH_STACK", "SGLANG_PROFILE_RECORD_SHAPES", "SGLANG_GRAPH_BATCH_CAPTURE"), _TRUE)
 )
 _SGLANG_GRAPH_PROFILE_FLAG = "--enable-profile-cuda-graph"
-#: What the graph-capture profile adds with its flag: the flag dumps the allocator's memory snapshot after the capture,
-#: and PyTorch's default addr2line symbolizer can kill the server there (``RuntimeError: stoi``); dladdr cannot.
-_SGLANG_GRAPH_PROFILE_ENV = MappingProxyType({TORCH_SYMBOLIZE_MODE_ENV: TORCH_SYMBOLIZE_BY_LOADER})
 _SGLANG_EAGER_FLAG = "--disable-cuda-graph"
 
 
@@ -694,11 +690,8 @@ def _agentx_profile_layer(
         )
     if not annotated:
         return LaunchDelta()
-    if _graph_disabled(user, base):
-        return LaunchDelta(env_set=_SGLANG_ANNOTATION_ENV)
-    return LaunchDelta(
-        args_add=(_SGLANG_GRAPH_PROFILE_FLAG,), env_set={**_SGLANG_ANNOTATION_ENV, **_SGLANG_GRAPH_PROFILE_ENV}
-    )
+    graph = () if _graph_disabled(user, base) else (_SGLANG_GRAPH_PROFILE_FLAG,)
+    return LaunchDelta(args_add=graph, env_set=_SGLANG_ANNOTATION_ENV)
 
 
 def profiled_server(server: ServerConfig, bench: Mapping[str, Any], base: BaseLaunch) -> ServerConfig:

@@ -1,7 +1,7 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""KV-cache readings sampled from the engine's ``/metrics`` endpoint, and aiperf's phase timeline.
+"""KV-cache readings sampled from the engine's ``/metrics`` endpoint, and aiperf's phases.
 
 The engine is the only thing that knows how full its KV pool is, and until now nothing read it: a run could spend its
 whole budget retracting requests and the breakdown would show only "throughput low". This module is the reader; the
@@ -28,26 +28,18 @@ import http.client
 import json
 import logging
 import math
-import os
-import re
 import time
 import urllib.error
-import urllib.parse
 import urllib.request
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
-
-import yaml
 
 
 log = logging.getLogger(__name__)
 
 
 __all__ = [
-    "AIPERF_PHASE_NAMES",
-    "DEFAULT_METRICS_PORT",
-    "AiperfProgressPoller",
     "KvMetricsPoller",
     "KvSample",
     "RUNNING_REQUEST_GAUGES",
@@ -58,18 +50,11 @@ __all__ = [
     "parse_prometheus_text",
     "read_aiperf_phases",
     "read_aiperf_server_metrics",
-    "resolve_metrics_url",
-    "resolve_metrics_port",
     "running_requests",
     "sample_from_families",
     "server_metrics_exports",
 ]
 
-
-#: Port the persistent server binds when ``benchmark.envs.PORT`` is unset. Mirrors
-#: ``_server_lifecycle.REUSE_PORT_DEFAULT``; duplicated rather than imported because that module imports
-#: ``_subprocess_kill``, which is where this one gets wired in.
-DEFAULT_METRICS_PORT = 8888
 
 #: Scrape timeout. Deliberately well under the 0.5s poll interval of the loop this runs inside: a slow endpoint must not
 #: stretch the interval that the stall and soft-deadline gates are measured on. The engine is on loopback, so anything
@@ -85,16 +70,6 @@ _NS_PER_SEC = 1e9
 #: corporate host routes a loopback scrape through an external proxy: wrong by construction, and slow enough that the
 #: blocking call visibly delays the watchdog loop it runs inside.
 _OPENER = urllib.request.build_opener(urllib.request.ProxyHandler({}))
-
-#: How much of a server log to read when hunting for the bound-port banner. It is logged during startup and these logs
-#: grow to megabytes on shared storage, so reading the head is both sufficient and the difference between a cheap check
-#: and a slow one.
-_SERVER_LOG_HEAD_BYTES = 262144
-
-#: A log line is a bind announcement when it is about the server coming up and carries a URL with a port. Split in two
-#: so neither half has to be exact: the hint tolerates a reworded banner, and the URL is what actually carries the port.
-_SERVER_BIND_HINT = re.compile(r"\b(?:server|uvicorn|listening|running)\b", re.IGNORECASE)
-_SERVER_BIND_URL = re.compile(r"https?://[^\s/:]+:(\d+)")
 
 #: Consecutive failures after which the poller stops trying. A server that never exposes ``/metrics`` (SGLang without
 #: ``--enable-metrics``) would otherwise pay a connection refusal every couple of seconds for the whole round.
@@ -202,9 +177,9 @@ _SERVER_METRICS_RELPATHS = (
 
 #: aiperf's ``CreditPhase`` name for its warmup.
 _AIPERF_WARMUP = "warmup"
-#: aiperf's ``CreditPhase`` values, mapped onto ours, for both the export and the progress API. It has no notion of the
-#: accuracy eval or of boot, which is why the live path and the log markers still own those.
-AIPERF_PHASE_NAMES = {_AIPERF_WARMUP: "warmup", "profiling": "measured"}
+#: aiperf's ``CreditPhase`` values in its server-metrics export, mapped onto ours. It has no notion of the accuracy eval
+#: or of boot, which is why the round's own scrapes still own those.
+_AIPERF_PHASE_NAMES = {_AIPERF_WARMUP: "warmup", "profiling": "measured"}
 
 
 def families_from_aiperf_record(metrics: Any) -> ParsedFamilies:
@@ -274,11 +249,11 @@ def _phase_blocks(payload: dict[str, Any]) -> list[tuple[str, dict[str, Any], tu
     blocks: list[tuple[str, dict[str, Any], tuple[int, int]]] = []
     warmup = payload.get("warmup_metrics")
     if isinstance(warmup, dict):
-        blocks.append((AIPERF_PHASE_NAMES[_AIPERF_WARMUP], warmup, window(_AIPERF_WARMUP)))
+        blocks.append((_AIPERF_PHASE_NAMES[_AIPERF_WARMUP], warmup, window(_AIPERF_WARMUP)))
     measured = payload.get("metrics")
     if isinstance(measured, dict):
         metrics_phase = str(payload.get("metrics_phase") or "").lower()
-        blocks.append((AIPERF_PHASE_NAMES.get(metrics_phase, "measured"), measured, window(metrics_phase)))
+        blocks.append((_AIPERF_PHASE_NAMES.get(metrics_phase, "measured"), measured, window(metrics_phase)))
     return blocks
 
 
@@ -643,149 +618,8 @@ def sample_from_families(
     )
 
 
-def _port_value(raw: Any) -> int | None:
-    """One PORT reading as a usable port number, or ``None``."""
-    if raw in (None, ""):
-        return None
-    try:
-        port = int(str(raw).strip())
-    except (TypeError, ValueError):
-        return None
-    return port if port > 0 else None
-
-
-def port_from_server_log(workspace: Any) -> int | None:
-    """Read the port the server actually bound out of its own log.
-
-    The last resort before the default, and the only source that is right by construction: it is what the server said
-    it was listening on. Needed because the port is not always pinned anywhere else -- on an AgentX round the config
-    carries no ``PORT`` at all and vLLM falls back to its own 8000, while the synthetic path pins 8888. A default can
-    only ever match one of those.
-    """
-    try:
-        root = Path(workspace)
-        for pattern in ("server.log", "*/server.log"):
-            for candidate in sorted(root.glob(pattern)):
-                port = _logged_bind_port(candidate)
-                if port is not None:
-                    return port
-    except OSError:
-        return None
-    return None
-
-
-def _logged_bind_port(candidate: Path) -> int | None:
-    """The first usable port a server log's head announces binding to, or ``None``."""
-    # The banner is near the top; a served round's log grows to megabytes and is on shared storage.
-    with candidate.open(encoding=_ENCODING, errors=_DECODE_ERRORS) as handle:
-        head = handle.read(_SERVER_LOG_HEAD_BYTES)
-    for line in head.splitlines():
-        # Matched on what the line is about rather than on its exact wording. The observed builds say
-        # "Starting vLLM server on http://0.0.0.0:8000"; older ones and SGLang say "Uvicorn running on".
-        # A list of phrasings misses the next build's wording, so the test is the combination -- a
-        # line announcing the server, carrying a URL with a port.
-        if not _SERVER_BIND_HINT.search(line):
-            continue
-        match = _SERVER_BIND_URL.search(line)
-        port = _port_value(match.group(1)) if match else None
-        if port is not None:
-            return port
-    return None
-
-
-def port_from_workspace(workspace: Any) -> int | None:
-    """Read ``benchmark.envs.PORT`` out of the round's materialized config.
-
-    This is the only place the port is reliably written. The subprocess environment does not carry it -- the port is
-    pinned in the round's YAML, not exported to the parent -- so resolving from the environment alone lands
-    on the default and scrapes a port nothing is listening on. Observed on a real session: two of three rounds bound an
-    ephemeral 34407 while collection sat on 8888 and recorded the engine as unavailable, and the one round that worked
-    did so only because it happened to bind the default.
-    """
-    try:
-        root = Path(workspace)
-        # The round's own config first, then the benchmark's copy, which only exists once the client has started.
-        for pattern in ("*.yaml", "*/config.yaml"):
-            for candidate in sorted(root.glob(pattern)):
-                try:
-                    payload = yaml.safe_load(candidate.read_text(encoding=_ENCODING))
-                except (OSError, ValueError, yaml.YAMLError):
-                    continue
-                if not isinstance(payload, dict):
-                    continue
-                envs = (
-                    (payload.get("benchmark") or {}).get("envs") if isinstance(payload.get("benchmark"), dict) else None
-                )
-                port = _port_value(envs.get("PORT")) if isinstance(envs, dict) else None
-                if port is not None:
-                    return port
-    except OSError:
-        return None
-    return None
-
-
-def port_from_server_command(workspace: Any) -> int | None:
-    """Read ``--port`` from the command that launched the serving process.
-
-    AgentX vLLM rounds do not pin ``benchmark.envs.PORT`` and the Rust frontend
-    does not emit the Python API server's bind banner.  The materialized command
-    is therefore the only durable authority for those rounds.
-    """
-    try:
-        root = Path(workspace)
-        for pattern in ("vllm_command.txt", "*/vllm_command.txt"):
-            for candidate in sorted(root.glob(pattern)):
-                text = candidate.read_text(encoding=_ENCODING, errors=_DECODE_ERRORS)
-                match = re.search(r"(?:^|\s)--port(?:=|\s+)(\d+)(?:\s|$)", text)
-                port = _port_value(match.group(1)) if match else None
-                if port is not None:
-                    return port
-    except OSError:
-        return None
-    return None
-
-
-def resolve_metrics_port(config_envs: dict[str, Any] | None = None, workspace: Any = None) -> int:
-    """Resolve the port the engine serves ``/metrics`` on.
-
-    A ``PORT`` in the caller's env is an operator pin and wins. Then the round's own evidence: its materialized
-    ``benchmark.envs.PORT`` (an ephemeral port assigned per session, never exported into the subprocess env), the port
-    the server logged at bind, and the ``--port`` of the command that launched it. Only then a ``PORT`` in the ambient
-    env, and the default last, which is only ever right by coincidence.
-    """
-    port = _port_value((config_envs or {}).get("PORT"))
-    if port is not None:
-        return port
-    if workspace is not None:
-        for probe in (port_from_workspace, port_from_server_log, port_from_server_command):
-            port = probe(workspace)
-            if port is not None:
-                return port
-    port = _port_value(os.environ.get("PORT"))
-    if port is not None:
-        return port
-    return DEFAULT_METRICS_PORT
-
-
-def resolve_metrics_url(config_envs: dict[str, Any] | None = None) -> str | None:
-    """Resolve a remote serving endpoint to its Prometheus metrics URL."""
-    raw = str((config_envs or {}).get("BENCHMARK_BASE_URL") or "").strip()
-    if not raw:
-        return None
-    try:
-        parsed = urllib.parse.urlsplit(raw)
-    except ValueError:
-        return None
-    if parsed.scheme not in {"http", "https"} or not parsed.netloc:
-        return None
-    return urllib.parse.urlunsplit((parsed.scheme, parsed.netloc, "/metrics", "", ""))
-
-
 class KvMetricsPoller:
     """Scrapes one engine's ``/metrics``, degrading quietly when it cannot.
-
-    Built to sit inside the executors' existing 0.5s watchdog loop rather than in a process of its own: a sampler racing
-    the engine for CPU would show up in the very latency numbers the round exists to measure.
 
     Availability is tri-state and sticky. Until the first successful scrape the poller is ``unknown``; a scrape that
     lands makes it available for good; a run of consecutive failures parks it as unavailable and it stops issuing
@@ -793,43 +627,14 @@ class KvMetricsPoller:
     mid-round.
     """
 
-    def __init__(
-        self,
-        *,
-        port: int | None = None,
-        config_envs: dict[str, Any] | None = None,
-        workspace: Any = None,
-    ) -> None:
-        """Bind the poller to an endpoint without contacting it, or yet resolving it.
-
-        The port is resolved on first use rather than here, because the most reliable source for it -- the line the
-        server logs when it binds -- does not exist when the recorder is built. By the first scrape it does: ticking is
-        gated on the ready marker, which the server writes after that line.
-        """
-        self._explicit_port = int(port) if port else None
-        self._config_envs = dict(config_envs or {})
-        self._remote_url = resolve_metrics_url(self._config_envs)
-        self._port_workspace = workspace
-        self._port: int | None = None
+    def __init__(self, url: str) -> None:
+        """Bind the poller to the engine's ``/metrics`` ``url`` without contacting it."""
+        self.url = url
         self._failures = 0
         self._succeeded = False
         self._gave_up = False
         self._warned = False
         self._first_attempt_mono: float | None = None
-
-    @property
-    def port(self) -> int:
-        """Port the engine serves ``/metrics`` on, resolved once on first use."""
-        if self._port is None:
-            self._port = self._explicit_port or resolve_metrics_port(self._config_envs, self._port_workspace)
-        return self._port
-
-    @property
-    def url(self) -> str:
-        """Endpoint this poller scrapes."""
-        if self._explicit_port is None and self._remote_url is not None:
-            return self._remote_url
-        return f"http://127.0.0.1:{self.port}/metrics"
 
     @property
     def available(self) -> bool | None:
@@ -863,8 +668,8 @@ class KvMetricsPoller:
                     self._warned = True
                     log.info(
                         "kv_metrics: %s unreachable after %d attempts over %.0fs (%s); KV metrics "
-                        "recorded as unavailable for this round. Check the port against the round's "
-                        "benchmark.envs.PORT; SGLang also needs --enable-metrics (vLLM exposes it by default).",
+                        "recorded as unavailable for this round. SGLang needs --enable-metrics (vLLM exposes it "
+                        "by default).",
                         self.url,
                         self._failures,
                         waited,
@@ -882,11 +687,6 @@ class KvMetricsPoller:
             return None
         sample = sample_from_families(parse_prometheus_text(body))
         return sample if sample.has_readings() else None
-
-
-#: Address file ``aiperf_client.sh`` publishes so this process can find the progress API. Searched under the round's own
-#: directory first, then one level down, matching how the watchdog resolves a nested benchmark's logs.
-_PROGRESS_ADDRESS_RELPATHS = ("aiperf_artifacts/progress_api.json", "*/aiperf_artifacts/progress_api.json")
 
 
 def json_number(raw: Any) -> float | None:
@@ -910,66 +710,3 @@ def read_aiperf_phases(url: str) -> dict[str, Any] | None:
         payload = json.loads(response.read().decode(_ENCODING, _DECODE_ERRORS))
     phases = payload.get("phases") if isinstance(payload, dict) else None
     return phases if isinstance(phases, dict) else None
-
-
-class AiperfProgressPoller:
-    """Reads AIPerf's phase timeline from its local progress API.
-
-    This is the authority on when a phase actually began. The alternative -- and what the recorder falls back to -- is
-    grepping ``aiperf.log`` for a human-readable line, which aiperf writes after the transition and the watchdog then
-    reads on its next pass. Those two lags land squarely on the boundary, so warmup traffic gets counted as measured.
-
-    Everything here degrades to ``None``: the endpoint only exists when the round is an AgentX one whose client managed
-    to publish an address, and a round that cannot reach it must still produce KV metrics.
-    """
-
-    def __init__(self, workspace: Any) -> None:
-        """Bind to a round's directory without reading anything from it."""
-        self._workspace = workspace
-        self.url: str | None = None
-        self._resolved = False
-        self._failures = 0
-        self._succeeded = False
-        self._gave_up = False
-
-    def _resolve_url(self) -> str | None:
-        """Find the published address, once the client has written it.
-
-        Resolution is retried until it succeeds because the address file appears when the benchmark client starts, which
-        is after the server is up and therefore after the first scrapes have already happened.
-        """
-        if self.url is not None:
-            return self.url
-        try:
-            root = Path(self._workspace)
-            for pattern in _PROGRESS_ADDRESS_RELPATHS:
-                for candidate in sorted(root.glob(pattern)):
-                    payload = json.loads(candidate.read_text(encoding=_ENCODING))
-                    url = payload.get("url") if isinstance(payload, dict) else None
-                    if isinstance(url, str) and url.startswith("http"):
-                        self.url = url
-                        return url
-        except (OSError, ValueError, TypeError):
-            return None
-        return None
-
-    def poll(self) -> dict[str, Any] | None:
-        """Return the raw ``phases`` mapping, or ``None`` when it cannot be read."""
-        if self._gave_up:
-            return None
-        url = self._resolve_url()
-        if url is None:
-            return None
-        try:
-            phases = read_aiperf_phases(url)
-        except (urllib.error.URLError, http.client.HTTPException, OSError, ValueError) as exc:
-            self._failures += 1
-            # Only give up on an endpoint that never worked. One that answered before and is failing now is an aiperf
-            # that has exited, and the timeline already collected is still the authority for this round.
-            if self._failures >= _MAX_CONSECUTIVE_FAILURES and not self._succeeded:
-                self._gave_up = True
-                log.debug("kv_metrics: aiperf progress API unreachable at %s (%s)", url, exc)
-            return None
-        self._failures = 0
-        self._succeeded = True
-        return phases

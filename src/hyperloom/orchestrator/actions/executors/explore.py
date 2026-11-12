@@ -698,6 +698,7 @@ class _ExploreRound:
         self.config_path = _materialized_round_config(params, output_root, self.target, grading)
         _anchor_the_params(params, self.ss)
         self.point = _round_point(self.config_path)
+        self.bench = yaml.safe_load(self.config_path.read_text(encoding="utf-8"))["benchmark"]
         self.framework = self.point.framework.lower()
         self.yaml_envs = dict(self.point.envs)
         self.base_args = str(params.get("base_extra_args") or "").strip()
@@ -893,8 +894,8 @@ class _ExploreRound:
         # xDiT do-not-set list, plus flags the model class does not support.
         runnable, incompatible = apply_compatibility_filter(
             runnable,
-            serving=ServingStack(
-                framework=self.framework,
+            serving=ServingStack.of_recipe(
+                self.bench,
                 model_path=self.target.model_path,
                 gpu_type=self.target.gpu_type or str(getattr(self.ss, "gpu_type", "") or ""),
                 stack_fingerprint=getattr(self.ss, "stack_fingerprint_meta", None),

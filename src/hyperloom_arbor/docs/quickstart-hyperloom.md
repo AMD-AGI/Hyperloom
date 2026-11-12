@@ -145,8 +145,8 @@ it, or set `INFERENCE_OPTIMIZER_RAY_EXEC=0`.
 
 | `--autonomous-agent` | Runs | Use it for |
 | --- | --- | --- |
-| `arbor` | the copy in Hyperloom, `src/hyperloom_arbor`: Arbor `v0.9.2`, packs `serving` and `agentx` | the release; nothing to fetch |
-| a path to an Arbor checkout | that checkout, copied into the session | today's Arbor: `serving-m10`, the master and worker commands, fixes since `v0.9.2` |
+| `arbor` | the copy in Hyperloom, `src/hyperloom_arbor`: the Arbor release `VENDOR.md` names, with its packs | the release; nothing to fetch |
+| a path to an Arbor checkout | that checkout, copied into the session | another Arbor than the release |
 | a git URL, `URL@ref` | that ref, fetched once | the same, pinned to a ref; give credentials in the environment, never in the URL |
 
 - **Give the source once per Arbor:** each `--autonomous-agent` opens one Arbor branch.

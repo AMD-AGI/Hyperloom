@@ -39,12 +39,11 @@ from hyperloom_common.gpu_telemetry import (
     RecorderTiming,
     TokenCounts,
     gpu_monitor,
-    recording_host,
 )
 from hyperloom_common.io import atomic_write_json
 from inference_suite import framework_version, parser_check, staging
 from inference_suite.compose import Refusal, RoundFacts, compose
-from inference_suite.contracts.base_launch import DIGEST_PREFIX, BaseLaunch, EnvValue
+from inference_suite.contracts.base_launch import DIGEST_PREFIX, BaseLaunch, CredentialNotHeld, EnvValue, held_env
 from inference_suite.contracts.config import ConfigError, LifecycleMode, SuiteConfig, WorkloadKind
 from inference_suite.contracts.launch import ClientInvocation, Launch, VersionCheck
 from inference_suite.contracts.layout import POWER, RunLayout
@@ -91,7 +90,7 @@ from inference_suite.runtime.server import Server, ServerLaunch, ServerLifecycle
 from inference_suite.runtime.watch import POLL_SEC, Cancel, RoundGate, Stop, wait_child
 from inference_suite.telemetry.kv_poll import KvMetricsPoller
 from inference_suite.telemetry.kv_record import PHASES as KV_PHASES
-from inference_suite.telemetry.kv_record import KvMetricsRecorder, KvRound
+from inference_suite.telemetry.kv_record import KvMetricsRecorder
 
 log = logging.getLogger(__name__)
 
@@ -115,8 +114,6 @@ _GPU_PHASES: Mapping[Phase, GpuPhase] = {
     Phase.TEARDOWN: GpuPhase.TEARDOWN,
 }
 _CLIENT_PROCESS_PHASES = (Phase.MEASURED, Phase.FINISHED)
-#: The ``config_envs`` key :class:`KvMetricsPoller` derives its ``/metrics`` URL from.
-_KV_BASE_URL_KEY = "BENCHMARK_BASE_URL"
 _COUNTED_LOADS = (WorkloadKind.FIXED.value, WorkloadKind.AGENTX.value, WorkloadKind.MLPERF.value)
 _UTF8 = "utf-8"
 
@@ -250,20 +247,10 @@ def _changed_source_files(config: SuiteConfig) -> Stop | None:
 
 
 def _runnable_env(env: Mapping[str, EnvValue]) -> dict[str, str] | Stop:
-    """``env`` with each redacted value taken from the host, which must hold the value the base was resolved with."""
-    runnable: dict[str, str] = {}
-    for name, value in env.items():
-        if isinstance(value, str):
-            runnable[name] = value
-            continue
-        held = os.environ.get(name)
-        if held is None:
-            return Stop(FailedStep.CONFIG_INVALID, f"{name} is redacted in the base and the host holds no value of it")
-        if hashlib.sha256(held.encode()).hexdigest() != value.sha256:
-            detail = f"{name} is redacted in the base and the host's value is not the one the base was resolved with"
-            return Stop(FailedStep.CONFIG_INVALID, detail)
-        runnable[name] = held
-    return runnable
+    try:
+        return held_env(env, os.environ)
+    except CredentialNotHeld as exc:
+        return Stop(FailedStep.CONFIG_INVALID, str(exc))
 
 
 def _measured_invocation(config: SuiteConfig, client: ClientTool | AgentxTool) -> ClientInvocation | None:
@@ -297,8 +284,7 @@ class _KvSampler:
     """
 
     def __init__(self, base_url: str, layout: RunLayout) -> None:
-        poller = KvMetricsPoller(config_envs={_KV_BASE_URL_KEY: base_url})
-        self._recorder = KvMetricsRecorder(poller=poller, kv_round=KvRound(output_path=str(layout.kv_metrics)))
+        self._recorder = KvMetricsRecorder(poller=KvMetricsPoller(f"{base_url}/metrics"), output_path=layout.kv_metrics)
         self._lock = threading.Lock()
         self._done = threading.Event()
         self._thread: threading.Thread | None = None
@@ -623,7 +609,6 @@ class _Round:
             launch_digest=self.launch_digest,
             workload_digest=None if workload is None else _digest(workload.to_document()),
             concurrency=getattr(workload, "concurrency", None),
-            host=recording_host(),
             server=self.server,
             gpu_monitor=power.gpu_monitor,
             power=power.power,
@@ -697,8 +682,45 @@ def _eval_result(layout: RunLayout, plan: EvalPlan, task: str) -> EvalResult | S
         return Stop(FailedStep.EVAL_FAILED, f"the eval output in {layout.eval_dir} cannot be read: {exc!r}")
 
 
+def _anchored(config: SuiteConfig, root: Path) -> SuiteConfig:
+    """``config`` with its relative paths below ``root``: the server, the harness and the probes start elsewhere."""
+
+    def under(path: str) -> str:
+        return str(root / path)
+
+    server = config.server
+    model_path = server.model_path
+    if (root / model_path).exists():
+        model_path = under(model_path)
+    python = server.framework_python
+    if Path(python).parent != Path():
+        python = under(python)
+    pid_dir = config.lifecycle.pid_dir
+    mlperf = config.mlperf
+    return replace(
+        config,
+        server=replace(
+            server,
+            base=replace(server.base, path=under(server.base.path)),
+            model_path=model_path,
+            framework_python=python,
+        ),
+        lifecycle=replace(config.lifecycle, pid_dir=None if pid_dir is None else under(pid_dir)),
+        paths=replace(config.paths, run_dir=under(config.paths.run_dir), tool_cache=under(config.paths.tool_cache)),
+        mlperf=None
+        if mlperf is None
+        else replace(
+            mlperf,
+            dataset=under(mlperf.dataset),
+            tokenizer=under(mlperf.tokenizer),
+            endpoints_dir=under(mlperf.endpoints_dir),
+        ),
+    )
+
+
 def run_round(config: SuiteConfig, *, cancel: Cancel = _not_cancelled) -> RoundResult:
-    """Run the one round ``config`` describes into its run_dir, which must be absent or empty.
+    """Run the one round ``config`` describes into its run_dir, which must be absent or empty. A relative path in
+    ``config`` names a path below the caller's working directory.
 
     ``cancel`` is asked at every poll; a non-empty answer stops the round, reaps what it started, and is the report's
     failure detail.
@@ -706,6 +728,7 @@ def run_round(config: SuiteConfig, *, cancel: Cancel = _not_cancelled) -> RoundR
     Raises:
         RunDirError: The run_dir already holds something.
     """
+    config = _anchored(config, Path.cwd())
     layout = RunLayout(Path(config.paths.run_dir))
     layout.claim()
     config_sha256 = _write_config(config, layout)

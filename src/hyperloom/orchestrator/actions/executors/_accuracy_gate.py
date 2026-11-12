@@ -271,11 +271,7 @@ def parse_quality_gate(workspace: Path | str) -> dict[str, Any]:
 def _latest_agentx_result(workspace: Path | str) -> dict[str, Any] | None:
     """The newest ``inferencex_result.json`` under *workspace*, or None."""
     from hyperloom.common.benchmark_config import configured_benchmark, is_agentx
-    from hyperloom.inference_optimizer.agentx.report import read_agentx_report
 
-    native = read_agentx_report(Path(workspace))
-    if native is not None:
-        return native
     if is_agentx(configured_benchmark()):
         return None
     results = [Path(f) for f in glob.glob(str(Path(workspace) / "**" / "inferencex_result.json"), recursive=True)]
@@ -570,16 +566,26 @@ class AccuracyReference:
         Scores under different eval definitions do not compare, so a score under another one is no score.
         """
         score = finite_score(eval_results.get("accuracy"))
-        digest = str(eval_results.get(EVAL_DEFINITION_DIGEST_KEY) or "")
-        if score is not None and digest != self.definition_digest:
+        if score is not None and self._scored_elsewhere(eval_results):
             log.warning(
                 "accuracy_gate: score %.4f was taken under eval definition %r, the baseline's under %r; not compared",
                 score,
-                digest,
+                eval_results.get(EVAL_DEFINITION_DIGEST_KEY),
                 self.definition_digest,
             )
             return None
         return score
+
+    def incomparable(self, eval_results: Mapping[str, Any]) -> bool:
+        """Whether ``eval_results`` holds a score this measured baseline cannot judge, taken under another definition."""
+        return (
+            self.score > 0
+            and finite_score(eval_results.get("accuracy")) is not None
+            and self._scored_elsewhere(eval_results)
+        )
+
+    def _scored_elsewhere(self, eval_results: Mapping[str, Any]) -> bool:
+        return str(eval_results.get(EVAL_DEFINITION_DIGEST_KEY) or "") != self.definition_digest
 
 
 def grade_accuracy(
@@ -591,7 +597,8 @@ def grade_accuracy(
     """Grade a bench's accuracy against the baseline ``reference``.
 
     With a recorded baseline the measured drop is enforced; without one, or without a score taken under the
-    baseline's eval definition, the check is skipped (``None``) and warned loudly.
+    baseline's eval definition, there is no verdict (``None``), warned loudly. A score under another definition is
+    not "no score": ``AccuracyReference.incomparable`` names it, and the integrate gate blocks on it.
     For scriptable frameworks (xDiT) ``parse_eval_results`` fails closed on
     a missing quality gate instead of falling back to GSM8K.
     """

@@ -21,8 +21,6 @@ from inference_suite.golden import (
 
 from hyperloom.common.failure_signature import SERVE_FLAG
 
-#: The ``source`` a grid filter records for a variant it drops because it moves a pinned speculative lever.
-SPECULATIVE_DECODING_PINNED = "speculative_decoding_pinned"
 _SIMULATED_LENGTH_ENV = "SGLANG_SIMULATE_ACC_LEN"
 _SYNTHETIC_REJECTION = f"--{SPECULATIVE_CONFIG_FLAG}.rejection_sample_method"
 _SYNTHETIC_LENGTH = f"--{SPECULATIVE_CONFIG_FLAG}.synthetic_acceptance_length"
@@ -119,7 +117,6 @@ def refuse_unpinned_speculative_change(
 
 
 __all__ = [
-    "SPECULATIVE_DECODING_PINNED",
     "SpeculativeDecodingPinnedError",
     "refuse_unpinned_speculative_change",
     "speculative_pin_reason",

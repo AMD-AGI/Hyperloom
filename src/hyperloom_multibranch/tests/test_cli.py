@@ -87,9 +87,9 @@ from hyperloom_multibranch.scheduling import hosted_peers
 from hyperloom_multibranch.scheduling import hosted_run as hosted_run_module
 from hyperloom_multibranch.scheduling.hosted_run import (
     GRANT_MARGIN_SECONDS,
-    earlier_session,
     final_reserve_seconds,
     hosted_resume_deadline,
+    take_over_earlier_session,
 )
 from hyperloom_multibranch.scheduling.clock import Clock
 from hyperloom_multibranch.scheduling.decisions import Decision, DecisionKind, DecisionLog
@@ -1587,7 +1587,7 @@ def _hosted_ended_before_final(root: Path, **manifest: object) -> PersistedRun:
     state_dir = root.parent / "state"
     state_dir.mkdir()
     (state_dir / "session.json").write_text(json.dumps({"session_dir": str(root)}), encoding="utf-8")
-    persisted = earlier_session(state_dir).finish
+    persisted = take_over_earlier_session(state_dir).finish
     assert persisted is not None
     return persisted
 
@@ -1697,7 +1697,7 @@ def host(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Host:
     for name in ("HYPERLOOM_MCP_PORT", "HYPERLOOM_MCP_TOKEN", "HYPERLOOM_EVENTS_DIR"):
         monkeypatch.delenv(name, raising=False)
     given.started(seconds_ago=600)
-    monkeypatch.setattr(cli, "arm_grant_stop", given.stops.append)
+    monkeypatch.setattr(hosted_run_module, "arm_grant_stop", given.stops.append)
     return given
 
 
@@ -1798,6 +1798,20 @@ def test_a_hosted_spec_resolves_its_base_from_inferencex_at_the_commit_it_names(
 
     assert agent_cli == [on_the_command_line]
     assert on_the_command_line.inferencex_commit == "8a76a78e41"
+
+
+@pytest.mark.usefixtures("ready_environment")
+def test_a_hosted_inferencex_spec_runs_its_session_at_the_hardware_ep_it_names(
+    host: Host, agent_cli: list[RunSettings], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    host.spec(hardware={"gpu_type": "mi300x", "tp": 2, "ep": 2})
+    on_the_command_line = _settings(*SPEC_RUN_ARGS, "--ep", "2")
+    monkeypatch.setattr(local_peers, "machine_cards", _no_local_cards)
+
+    assert cli.main(["hosted", "run"]) == 0
+
+    assert agent_cli == [on_the_command_line]
+    assert on_the_command_line.workload.ep == 2
 
 
 @pytest.mark.usefixtures("ready_environment")
@@ -2150,6 +2164,22 @@ def test_a_restart_finishes_the_session_an_earlier_start_began_and_ends_the_run_
     assert len(host.stops) == 1
 
 
+@pytest.mark.usefixtures("ready_environment")
+def test_a_restart_that_finishes_a_session_shares_it_with_the_group_first(
+    host: Host, agent_cli: list[RunSettings], tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    shared: list[Path] = []
+    monkeypatch.setattr(cli, "share_with_the_group", shared.append)
+    monkeypatch.setattr(hosted_run_module, "share_with_the_group", shared.append)
+    layout = _ended_before_final(tmp_path / "MB-20260101T000000Z-0123abcd")
+    (host.state_dir / "session.json").write_text(json.dumps({"session_dir": str(layout.root)}), encoding="utf-8")
+    host.spec(multibranch=None)
+
+    assert cli.main(["hosted", "run"]) == 0
+
+    assert shared == [layout.root]
+
+
 @pytest.mark.usefixtures("ready_environment", "agent_binaries")
 @pytest.mark.parametrize(
     ("chose", "returncode", "stop_reason"),
@@ -2391,6 +2421,26 @@ def test_a_restart_refused_a_file_outside_the_session_it_closes_ends_the_run(
     assert str(outside) in document["error"]
 
 
+def test_a_restart_that_cannot_read_the_earlier_session_ends_the_run_for_good_naming_the_file(
+    host: Host, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    # The earlier session's report, written owner-only by another account of the group, read before anything starts.
+    report = tmp_path / "MB-report.json"
+
+    def unreadable(state_dir: Path) -> object:
+        raise PermissionError(errno.EACCES, "Permission denied", str(report))
+
+    monkeypatch.setattr(cli, "take_over_earlier_session", unreadable)
+
+    assert cli.main(["hosted", "run"]) == cli.EXIT_FAILED
+
+    document = host.exit_document()
+    assert (document["final"], document["returncode"]) == (True, cli.EXIT_FAILED)
+    assert document["error"] == f"[Errno 13] Permission denied: '{report}'"
+    logged = [record.exc_info[1] for record in caplog.records if record.exc_info]
+    assert [type(exc) for exc in logged] == [PermissionError], "the traceback names where the file was met"
+
+
 @pytest.mark.usefixtures("ready_environment")
 @pytest.mark.parametrize("ended", [SessionStopReason.SIGNAL, SessionStopReason.PRELUDE_FAILED])
 def test_a_restart_over_a_session_that_closed_before_its_baseline_ends_the_run_with_its_report(
@@ -2419,6 +2469,30 @@ def test_a_restart_over_a_session_a_restart_closed_before_it_started_again_start
     assert cli.main(["hosted", "run"]) == 0
 
     assert [kind for kind, _ in restart.calls] == ["final-only", "run"]
+
+
+@pytest.mark.usefixtures("ready_environment")
+def test_a_hosted_run_shares_with_the_group_each_session_it_closes_or_starts_before_it_works_in_it(
+    host: Host, restart: Restart, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # Below shared storage the run's children write for the group (``share_with_the_group``): the next leg may be
+    # another account of it.
+    def shared(root: Path) -> None:
+        restart.calls.append(("share", root))
+
+    monkeypatch.setattr(cli, "share_with_the_group", shared)
+    monkeypatch.setattr(hosted_run_module, "share_with_the_group", shared)
+    layout = _killed_in_prelude(tmp_path / "MB-20260101T000000Z-0123abcd")
+    (host.state_dir / "session.json").write_text(json.dumps({"session_dir": str(layout.root)}), encoding="utf-8")
+
+    assert cli.main(["hosted", "run"]) == 0
+
+    started = Path(json.loads((host.state_dir / "session.json").read_text(encoding="utf-8"))["session_dir"])
+    assert [(kind, root) for kind, root in restart.calls if kind != "run"] == [
+        ("share", layout.root),
+        ("final-only", layout.root),
+        ("share", started),
+    ]
 
 
 def test_a_final_only_takes_its_log_off_when_it_ends(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -2639,6 +2713,20 @@ def test_a_hosted_run_whose_agents_cannot_be_isolated_ends_for_good_before_anyth
 
 
 @pytest.mark.usefixtures("ready_environment")
+def test_a_restarted_hosted_run_checks_its_agents_isolation_before_it_finishes_the_earlier_session(
+    host: Host, agent_cli: list[RunSettings], bubblewrap: Bubblewrap, tmp_path: Path
+) -> None:
+    layout = _ended_before_final(tmp_path / "MB-20260101T000000Z-0123abcd")
+    (host.state_dir / "session.json").write_text(json.dumps({"session_dir": str(layout.root)}), encoding="utf-8")
+    bubblewrap.problems = (DENIED,)
+
+    assert cli.main(["hosted", "run"]) == cli.EXIT_FAILED
+
+    assert str(host.exit_document()["error"]).startswith("agents cannot be isolated on this host: ")
+    assert agent_cli == [], "the earlier session is left as it was"
+
+
+@pytest.mark.usefixtures("ready_environment")
 def test_a_hosted_run_whose_host_names_no_layer_ends_for_good_and_probes_no_bubblewrap(
     host: Host, agent_cli: list[RunSettings], bubblewrap: Bubblewrap, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -2740,7 +2828,7 @@ def handed(agent_binaries: None, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
         return 0
 
     monkeypatch.setattr(cli, "run_session", run_session)
-    monkeypatch.setattr(cli, "arm_grant_stop", started.stops.append)
+    monkeypatch.setattr(hosted_run_module, "arm_grant_stop", started.stops.append)
     monkeypatch.setattr(local_peers, "machine_cards", _no_local_cards)
     return started
 

@@ -22,7 +22,9 @@ gives the base:
 1. the operator's `--reference-script`: a shell launch script, or a
    `base_launch.json` frozen by an earlier session; a script's credential exports
    (`HF_TOKEN`, `*_API_KEY`, ...) are recorded as their sha256 only, and a round
-   takes each value from its host, which must hold the value the script set;
+   takes each value from its host, which must hold the value the script set; a
+   script that passes a value to a launch flag named like a credential
+   (`--hf-token`, `--api-key`, ...) is refused, to be exported instead;
 2. InferenceX's AMD single-node master entries;
 3. the framework's cookbook: the SGLang cookbook, the vLLM recipes site, or
    ATOM's catalog (fixed workloads only);
@@ -37,8 +39,7 @@ session no recipe serves is refused too, naming why each source missed. Reposito
 the launch: the commit of InferenceX, the SGLang cookbook and ATOM's catalog, the
 commit of the Hugging Face model whose card was read, and, since the vLLM recipes
 site publishes no commit and its renderings carry no ETag, the URL and body sha256
-of each response it gave. `upstream` is not part of the digest, and a
-`base_launch.json` written without it reads with an empty list.
+of each response it gave. `upstream` is not part of the digest.
 
 To match a run made at an older InferenceX, pin it with `--inferencex-commit
 <sha>` (`resolve`, `hyperloom optimize` and `hyperloom-multibranch run` all take
@@ -126,11 +127,9 @@ that set each flag and environment variable and what it overrode:
 4. the golden layer, when the round applies it;
 5. the guard: the model path, address and GPU masks of the round
    (`ROCR_VISIBLE_DEVICES` the round's cards, `HIP_VISIBLE_DEVICES` `0..n-1`);
-6. the runner's layer: the environment and floors a host needs, the
+6. the runner's layer: the environment and floors a host needs, and the
    framework's metrics switch (`--enable-metrics` for SGLang; vLLM needs none)
-   when the round samples KV telemetry, and the engine seed (`--random-seed 0`
-   for SGLang, `--seed 0` for vLLM) when no earlier layer names one, so every
-   cold start of one launch samples alike;
+   when the round samples KV telemetry;
 7. the profiler layer of a profile round.
 
 Neither the operator's nor the candidate's layer may set what the guard or the
@@ -343,10 +342,6 @@ A round that did not complete names one `failed_step`:
 | Client | `client_failed`, `client_output_missing` |
 | Eval | `eval_failed` |
 | Any | `round_timeout`, `deadline_exhausted`, `cancelled`, `teardown_incomplete` |
-
-`host` names the machine the round ran on, the one `power.json` names
-(`server.host` is the address the server listens on), so two measurements of one
-launch taken on different machines can be told apart.
 
 Every metric key is fixed: a metric nobody measured is `null`, never `0`. An eval
 records its definition digest, and two scores compare only under one definition.

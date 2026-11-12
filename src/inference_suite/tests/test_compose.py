@@ -11,7 +11,7 @@ from dataclasses import replace
 
 import pytest
 
-from inference_suite.compose import DEFAULT_SEED, GPU_MASK_ENV, Refusal, RoundFacts, compose, runner_owned
+from inference_suite.compose import GPU_MASK_ENV, Refusal, RoundFacts, compose, runner_owned
 from inference_suite.contracts import FailedStep, GoldenUse, LaunchDelta, RunnerLayer
 from inference_suite.contracts.launch import (
     LAUNCH_SCHEMA,
@@ -84,7 +84,6 @@ def test_layers_apply_in_the_fixed_order():
         ("--served-model-name", ("glm",), "guard", ()),
         ("--watchdog-timeout", ("600",), "runner", ("candidate",)),
         ("--enable-metrics", (), "runner", ()),
-        ("--random-seed", (str(DEFAULT_SEED),), "runner", ()),
     ]
     assert launch.removed == (Removal("--disable-radix-cache", LayerSource.CANDIDATE),)
     assert launch.argv[:3] == ("/opt/venv/bin/python", "-m", "sglang.launch_server")
@@ -231,39 +230,6 @@ def test_vllm_serves_its_metrics_without_a_flag():
     assert _kv_launch("vllm", kv=True).argv == _kv_launch("vllm", kv=False).argv
 
 
-def _seeds(launch: Launch) -> list[tuple[str, tuple[str, ...], str]]:
-    return [(arg.flag, arg.values, arg.source.value) for arg in launch.args if "seed" in arg.flag]
-
-
-@pytest.mark.parametrize(
-    "framework, entrypoint, flag",
-    [("sglang", ("python3", "-m", "sglang.launch_server"), "--random-seed"), ("vllm", ("vllm", "serve"), "--seed")],
-)
-def test_the_runner_pins_the_engine_seed_no_layer_names(framework, entrypoint, flag):
-    base = _base(framework=framework, entrypoint=entrypoint, args=("--tensor-parallel-size", "8"))
-    launch = _launch(base)
-
-    assert _seeds(launch) == [(flag, (str(DEFAULT_SEED),), "runner")]
-    assert launch.argv[launch.argv.index(flag) + 1] == str(DEFAULT_SEED)
-
-
-@pytest.mark.parametrize(
-    "layer",
-    [
-        {"base": _base(args=("--tp", "8", "--random-seed", "11"))},
-        {"user": LaunchDelta(args_add=("--random-seed", "11"))},
-        {"candidate": LaunchDelta(args_add=("--random_seed=11",))},
-    ],
-    ids=["base", "user", "candidate"],
-)
-def test_a_seed_a_layer_names_is_kept_and_the_runner_adds_none(layer):
-    launch = _launch(**layer)
-
-    assert [values for _, values, _ in _seeds(launch)] == [("11",)]
-    assert "runner" not in {source for _, _, source in _seeds(launch)}
-    assert str(DEFAULT_SEED) not in [launch.argv[i + 1] for i, token in enumerate(launch.argv) if "seed" in token]
-
-
 def test_a_base_with_another_digest_is_refused():
     refusal = compose(_config(base_digest="sha256:" + "0" * 64), _base(), _FACTS)
 
@@ -317,16 +283,12 @@ def test_a_base_whose_entrypoint_is_not_its_framework_server_is_refused():
     assert "server.framework_python" in refusal.detail
 
 
-def test_a_launch_document_without_an_entrypoint_ran_the_base_entrypoint():
-    launch = _launch()
-    recorded = replace(launch, entrypoint=launch.base.entrypoint)
-    document = recorded.to_document()
+def test_a_launch_document_without_an_entrypoint_is_refused():
+    document = _launch().to_document()
     del document["entrypoint"]
 
-    again = Launch.from_document(json.loads(json.dumps(document)))
-    assert again == recorded
-    assert again.argv[:3] == ("python3", "-m", "sglang.launch_server")
-    assert again.digest() == document["digest"]
+    with pytest.raises(LaunchError, match="entrypoint"):
+        Launch.from_document(json.loads(json.dumps(document)))
 
 
 def test_round_trip_through_json_keeps_the_launch_and_its_digest():

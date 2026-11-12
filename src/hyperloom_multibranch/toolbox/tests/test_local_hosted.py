@@ -423,6 +423,284 @@ def test_the_hub_cache_is_the_one_the_environment_names_and_only_where_it_exists
     assert hub_cache(environ) == (None if expected is None else Path(expected.format(root=tmp_path)))
 
 
+def _app_environ(monkeypatch: pytest.MonkeyPatch, environ: dict[str, str]) -> None:
+    """This process's environment is ``environ`` and ``PATH`` alone: the plan reads the app's homes, credential
+    locations and hub cache from the process, the one place the masks read them from."""
+    for name in list(os.environ):
+        if name != "PATH":
+            monkeypatch.delenv(name)
+    for name, value in environ.items():
+        monkeypatch.setenv(name, value)
+
+
+def test_the_runner_plan_names_what_a_runner_reads_and_never_the_session_whole(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A confined runner reads its interpreter, the trees its template's variables name, the model with what its links
+    point into, and the hub cache; a repository named by URL and the image's own settings name nothing it binds."""
+    session, blobs, hf = tmp_path / "session", tmp_path / "hf" / "hub" / "models--m" / "blobs", tmp_path / "hf"
+    model = hf / "hub" / "models--m" / "snapshots" / "abc"
+    model.mkdir(parents=True)
+    blobs.mkdir(parents=True)
+    (blobs / "weights-blob").write_text("weights")
+    (model / "weights").symlink_to("../../blobs/weights-blob")
+    envs = {
+        "HYPERLOOM_FRAMEWORK_SNAPSHOT": str(session / "framework"),
+        PACK_ENV: str(session / "rule-pack" / "pack.yaml"),
+        "HYPERLOOM_JIT_CACHE": "/tmp/hyperloom-jit-store-0",
+        "HYPERLOOM_RUNNER_CACHE": "/runner-cache",
+        "HYPERLOOM_BUILD_STORE": "/stores/build",
+        "HYPERLOOM_BUILD_TRUST": "/stores/trust.json",
+        "INFERENCEX_REPO": "file:///mirrors/inferencex.git",
+        "ROCM_PATH": "/opt/rocm",
+    }
+    _app_environ(monkeypatch, {"HF_HOME": str(hf)})
+    plan = runner_plan(session, model, envs, "/usr/bin/python3")
+
+    assert plan.readable == (
+        Path("/usr/bin/python3"),
+        session / "framework",
+        session / "rule-pack" / "pack.yaml",
+        Path("/tmp/hyperloom-jit-store-0"),
+        Path("/runner-cache"),
+        Path("/stores/build"),
+        Path("/stores/trust.json"),
+        Path("/mirrors/inferencex.git"),
+        model,
+        blobs,
+        hf / "hub",
+    )
+    assert plan.app_only == (session,)
+
+
+def test_a_model_entry_linking_out_of_the_hub_binds_what_it_links_to_and_never_the_directory_it_is_in(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A link to a file or directory in the home binds that file or directory, never the home with every login in it,
+    and a link to a directory elsewhere never binds that directory's parent."""
+    home, data, model = tmp_path / "home", tmp_path / "data", tmp_path / "model"
+    (home / "tokdir").mkdir(parents=True)
+    (home / "config.json").write_text("{}")
+    (data / "weights").mkdir(parents=True)
+    model.mkdir()
+    (model / "config.json").symlink_to(home / "config.json")
+    (model / "tokenizer").symlink_to(home / "tokdir")
+    (model / "weights").symlink_to(data / "weights")
+    _app_environ(monkeypatch, {"HOME": str(home)})
+    plan = runner_plan(tmp_path / "session", model, {}, "/usr/bin/python3")
+
+    linked = set(plan.readable) - {Path("/usr/bin/python3"), model}
+    assert linked == {home / "config.json", home / "tokdir", data / "weights"}, plan.readable
+    assert plan.refused == ()
+
+
+_HIDDEN = "a hidden entry of a home where tools keep their logins"
+
+
+@pytest.mark.parametrize(
+    ("name", "target", "environ", "why"),
+    [
+        ("keys", "home/.ssh", {}, f"in {{root}}/home/.ssh, {_HIDDEN}"),
+        ("c", "home/.claude", {}, f"in {{root}}/home/.claude, {_HIDDEN}"),
+        ("conf", "home/.config", {}, f"in {{root}}/home/.config, {_HIDDEN}"),
+        ("a", "home/.aws", {}, f"in {{root}}/home/.aws, {_HIDDEN}"),
+        ("n", "home/.netrc", {}, f"in {{root}}/home/.netrc, {_HIDDEN}"),
+        ("id", "home/.ssh/id_rsa", {}, f"in {{root}}/home/.ssh, {_HIDDEN}"),
+        ("h", "home", {}, "a credential location"),
+        ("n", "logins/netrc", {"NETRC": "{root}/logins/netrc"}, "a credential location"),
+        ("gh", "xdg/gh", {"XDG_CONFIG_HOME": "{root}/xdg"}, "below the credential location {root}/xdg"),
+    ],
+)
+def test_a_model_entry_linking_into_a_credential_location_binds_nothing_and_the_plan_says_why(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, name: str, target: str, environ: dict[str, str], why: str
+) -> None:
+    """A mask hides a credential location below a bound path, never one the bound path is in: a link to the home's
+    ``.ssh``, ``.claude``, ``.config``, ``.aws`` or ``.netrc``, to the home, to a login file a variable names, or below
+    a credential directory a variable names, binds nothing. The plan says why, so its tests never run confined with it;
+    the model's other links bind as before."""
+    root = tmp_path.resolve()
+    home, model = root / "home", root / "model"
+    for path in ("home/.ssh/id_rsa", "home/.claude/.credentials.json", "home/.config/gh/hosts.yml", "home/.aws/x"):
+        (root / path).parent.mkdir(parents=True, exist_ok=True)
+        (root / path).write_text("SECRET")
+    for path in ("home/.netrc", "logins/netrc", "xdg/gh/hosts.yml", "home/tokdir/tok.json"):
+        (root / path).parent.mkdir(parents=True, exist_ok=True)
+        (root / path).write_text("SECRET" if "tokdir" not in path else "tokenizer")
+    model.mkdir()
+    (model / name).symlink_to(root / target)
+    (model / "tokenizer").symlink_to(home / "tokdir")
+    named = {"HOME": str(home), **{key: value.format(root=root) for key, value in environ.items()}}
+    _app_environ(monkeypatch, named)
+    plan = runner_plan(root / "session", model, {}, "/usr/bin/python3")
+
+    assert plan.readable == (Path("/usr/bin/python3"), model, home / "tokdir")
+    assert plan.refused == (
+        f"{model / name} links to {root / target}, {why.format(root=root)}, which its bind would show unmasked",
+    )
+
+
+def test_a_model_in_the_hub_cache_below_the_home_binds_its_blobs_and_the_hub(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The default hub cache is in the home's ``.cache``, which the plan binds anyway: a snapshot's links to their
+    blobs, and a model elsewhere linking into the hub, bind as they do anywhere else."""
+    home = tmp_path.resolve() / "home"
+    hub = home / ".cache" / "huggingface" / "hub"
+    blobs, snapshot = hub / "models--m" / "blobs", hub / "models--m" / "snapshots" / "abc"
+    blobs.mkdir(parents=True)
+    snapshot.mkdir(parents=True)
+    (blobs / "w").write_text("weights")
+    (snapshot / "weights").symlink_to("../../blobs/w")
+    elsewhere = tmp_path.resolve() / "model"
+    elsewhere.mkdir()
+    (elsewhere / "weights").symlink_to(blobs / "w")
+    _app_environ(monkeypatch, {"HOME": str(home)})
+    for model in (snapshot, elsewhere):
+        plan = runner_plan(tmp_path / "session", model, {}, "/usr/bin/python3")
+
+        assert plan.refused == ()
+        assert plan.readable == (Path("/usr/bin/python3"), model, blobs, hub)
+
+
+#: A hub cache that is the home's parent, which the plan reads whole, masking the home in it.
+_HUB_ABOVE = {"HOME": "{root}/hp/home", "HF_HUB_CACHE": "{root}/hp"}
+#: A hub cache in a hidden entry of the home, its Hugging Face login beside its blobs.
+_HUB_HIDDEN = {"HOME": "{root}/home2", "HF_HOME": "{root}/home2/.hf", "HF_HUB_CACHE": "{root}/home2/.hf"}
+
+
+def _link_area(root: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
+    """Homes with logins and a tokenizer beside them: the app's (the default hub cache in its ``.cache``), the
+    runner's, the passwd entry's (``pw``, made this process's), one below a hub cache and one with a hub cache in its
+    ``.hf``; a runner ``CLAUDE_CONFIG_DIR``; links to the app home's ``.ssh`` and tokenizer through a link
+    (``hop/a``, ``hop/tok``) and through a directory link (``hop/d``). Returns the model directory, empty."""
+    for path in (
+        "home/.ssh/id_rsa",
+        "home/tokdir/tok.json",
+        "home/.cache/pip/creds",
+        "home/.cache/huggingface/hub/models--m/blobs/w",
+        "rhome/.ssh/id_rsa",
+        "rhome/tokdir/tok.json",
+        "rcc/sub/creds",
+        "pw/.ssh/id_rsa",
+        "pw/tokdir/tok.json",
+        "hp/home/.ssh/id_rsa",
+        "hp/home/tokdir/tok.json",
+        "home2/.hf/token",
+        "home2/.hf/models--m/blobs/w",
+    ):
+        (root / path).parent.mkdir(parents=True, exist_ok=True)
+        (root / path).write_text(path)
+    hop = root / "hop"
+    hop.mkdir()
+    (hop / "b").symlink_to(root / "home" / ".ssh")
+    (hop / "a").symlink_to(hop / "b")
+    (hop / "d").symlink_to(root / "home" / ".ssh")
+    (hop / "tok").symlink_to(root / "home" / "tokdir")
+    monkeypatch.setattr(local_hosted, "_passwd_home", lambda: root / "pw")
+    monkeypatch.setattr(confinement, "_passwd_home", lambda: root / "pw")
+    model = root / "model"
+    model.mkdir()
+    return model
+
+
+def _named(values: dict[str, str], root: Path) -> dict[str, str]:
+    return {name: value.format(root=root) for name, value in values.items()}
+
+
+@pytest.mark.parametrize(
+    ("link", "named", "envs", "tree", "why"),
+    [
+        ("hop/a", {}, {}, "home/.ssh", f"in {{root}}/home/.ssh, {_HIDDEN}"),
+        ("hop/d/id_rsa", {}, {}, "home/.ssh/id_rsa", f"in {{root}}/home/.ssh, {_HIDDEN}"),
+        ("rcc/sub", {}, {"CLAUDE_CONFIG_DIR": "{root}/rcc"}, "rcc/sub", "below the credential location {root}/rcc"),
+        ("rhome/.ssh", {}, {"HOME": "{root}/rhome"}, "rhome/.ssh", f"in {{root}}/rhome/.ssh, {_HIDDEN}"),
+        ("pw/.ssh", {}, {}, "pw/.ssh", f"in {{root}}/pw/.ssh, {_HIDDEN}"),
+        ("home/.cache/pip", {}, {}, "home/.cache/pip", f"in {{root}}/home/.cache, {_HIDDEN}"),
+        ("hp/home/.ssh", _HUB_ABOVE, {}, "hp/home/.ssh", f"in {{root}}/hp/home/.ssh, {_HIDDEN}"),
+        ("home2/.hf/token", _HUB_HIDDEN, {}, "home2/.hf/token", "a credential location"),
+    ],
+    ids=[
+        "link-to-link",
+        "directory-link",
+        "runner-claude",
+        "runner-home",
+        "passwd-home",
+        "beside-hub",
+        "hub-above",
+        "login-in-hub",
+    ],
+)
+def test_a_model_link_into_a_credential_location_binds_nothing_however_it_gets_there(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    link: str,
+    named: dict[str, str],
+    envs: dict[str, str],
+    tree: str,
+    why: str,
+) -> None:
+    """A link is judged by where it ends, through links to links and directory links; the runner's credential
+    locations and home and the passwd entry's home count as the app's do; and a tree the plan reads whole excuses a
+    link only from a credential location it is in: one above it (a hub cache that is the home's parent) masks the
+    location, which the link's bind would open up, and a login in a hub cache stays a login."""
+    root = tmp_path.resolve()
+    model = _link_area(root, monkeypatch)
+    (model / "x").symlink_to(root / link)
+    (model / "tokenizer").symlink_to(root / "hop" / "tok")
+    _app_environ(monkeypatch, {"HOME": str(root / "home"), **_named(named, root)})
+    plan = runner_plan(root / "session", model, _named(envs, root), "/usr/bin/python3")
+
+    reason = f"{model / 'x'} links to {root / tree}, {why.format(root=root)}, which its bind would show unmasked"
+    assert plan.refused == (reason,)
+    assert root / tree not in plan.readable and root / "home" / "tokdir" in plan.readable
+
+
+@pytest.mark.parametrize(
+    ("link", "named", "envs", "tree"),
+    [
+        ("hop/tok", {}, {}, "home/tokdir"),
+        ("rhome/tokdir", {}, {"HOME": "{root}/rhome"}, "rhome/tokdir"),
+        ("pw/tokdir", {}, {}, "pw/tokdir"),
+        ("home/.cache/huggingface/hub/models--m/blobs/w", {}, {}, "home/.cache/huggingface/hub/models--m/blobs"),
+        ("hp/home/tokdir", _HUB_ABOVE, {}, "hp/home/tokdir"),
+        ("home2/.hf/models--m/blobs/w", _HUB_HIDDEN, {}, "home2/.hf/models--m/blobs"),
+    ],
+    ids=["link-to-link", "runner-home", "passwd-home", "default-hub", "hub-above", "hub-in-hidden-entry"],
+)
+def test_a_model_link_to_a_home_s_other_entries_or_into_a_hub_cache_in_a_home_binds_what_it_links_to(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, link: str, named: dict[str, str], envs: dict[str, str], tree: str
+) -> None:
+    """Every home's entries but its hidden ones (the app's, the runner's, the passwd entry's) may be linked to, and a
+    hub cache's blobs in a home's hidden entry, whose masks the plan's read of the hub cache opens up anyway."""
+    root = tmp_path.resolve()
+    model = _link_area(root, monkeypatch)
+    (model / "x").symlink_to(root / link)
+    _app_environ(monkeypatch, {"HOME": str(root / "home"), **_named(named, root)})
+    plan = runner_plan(root / "session", model, _named(envs, root), "/usr/bin/python3")
+
+    assert plan.refused == ()
+    assert root / tree in plan.readable, plan.readable
+
+
+@pytest.mark.parametrize(
+    ("named", "expected"),
+    [
+        ({"HF_HUB_CACHE": "{root}/own-hub", "HF_HOME": "{root}/hf"}, "{root}/own-hub"),
+        ({"HF_HOME": "{root}/hf", "XDG_CACHE_HOME": "{root}/xdg"}, "{root}/hf/hub"),
+        ({"XDG_CACHE_HOME": "{root}/xdg", "HOME": "{root}/home"}, "{root}/xdg/huggingface/hub"),
+        ({"HOME": "{root}/home"}, "{root}/home/.cache/huggingface/hub"),
+        ({"HOME": "{root}/nowhere"}, None),
+    ],
+)
+def test_the_hub_cache_is_the_one_the_environment_names_and_only_where_it_exists(
+    tmp_path: Path, named: dict[str, str], expected: str | None
+) -> None:
+    for hub in ("own-hub", "hf/hub", "xdg/huggingface/hub", "home/.cache/huggingface/hub"):
+        (tmp_path / hub).mkdir(parents=True)
+    environ = {name: value.format(root=tmp_path) for name, value in named.items()}
+    assert hub_cache(environ) == (None if expected is None else Path(expected.format(root=tmp_path)))
+
+
 def _write(path: Path, text: str, written: float) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(text)
@@ -677,7 +955,7 @@ async def test_the_toolbox_s_test_sandboxes_run_in_bubblewrap_where_it_can_sandb
     toolbox = _toolbox_of(blackboard, tmp_path, tmp_path / "session", "0" * 40)
     try:
         sandbox = toolbox.provider.create("runner-1", role="measurement", timeout_sec=60, metadata={})
-        confined = sandbox.confined
+        confined = sandbox._confined is not None
         sandbox.kill()
     finally:
         await toolbox.close()

@@ -252,7 +252,27 @@ starts the server, replays the trace, profiles and cleans up. Hyperloom compares
 the rounds' `report.json`: a round that did not complete, or whose measurement is
 invalid, cannot supply KEEP evidence, and baseline and candidate must have the
 same workload identity. GEAK's search measurements are provisional until the
-candidate passes the same workload and Hyperloom's KEEP gate.
+candidate passes the same workload and Hyperloom's KEEP gate. GEAK searches on
+the trace the accepted round replayed: the handoff's `workload_spec` declares
+the corpus and entry count from that round's aiperf export, the session's
+concurrency and the mean request shape the round measured.
+
+When the serving image's kernels run only some draft shapes, declare the bounds
+under `speculative_draft_limits` so a candidate outside them is refused before
+its server boots. Each of `draft_length` (`--speculative-num-steps`, vLLM's
+`num_speculative_tokens`), `draft_tokens` (`--speculative-num-draft-tokens`) and
+`topk` (`--speculative-eagle-topk`) takes a positive `min`, `max` or both:
+
+```yaml
+benchmark:
+  speculative_draft_limits:
+    draft_tokens: {max: 4}
+```
+
+A setting is judged as the candidate spells it. One the engine resolves for
+itself is not judged: with `--speculative-eagle-topk 1`, SGLang verifies
+`num_steps + 1` tokens, so bound `draft_length` too when the cap is on the
+verify window. A malformed declaration stops the session before it starts.
 
 The baseline, and each candidate that passes the KEEP threshold, also runs a
 GSM8K accuracy round on a server of its own. `--no-agentx-accuracy` turns it off

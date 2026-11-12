@@ -161,13 +161,12 @@ class RunSettings:
     recipe sources; :mod:`~hyperloom_multibranch.scheduling.session_base`).
     ``dev_leases`` is how many dev sandboxes the session lends its specialists at once; 0 lends none. ``playbook`` says
     which scheduling playbook the session plays. ``inferencex_commit`` is the commit a fresh session's base launch reads
-    InferenceX at (``""`` for the head of its ``main``). ``make_before_break`` has a hosted session keep a finished
-    test's sandbox until the next test's runs, so that the cluster does not give its node to another job between two
-    tests, where the grant fits at least three tests at once; it runs one test fewer at once there. Off, every test the
-    grant fits runs at once and each sandbox is closed when its test ends. A session measured on this machine ignores
-    it. ``agentx_early_stop`` is how the AgentX checkpoint treats an explore that trails its parent
-    (``toolbox.agentx_checkpoint``): recorded only by default; the manifest keeps it, so a resumed session judges as it
-    began."""
+    InferenceX at (``""`` for the head of its ``main``). ``agentx_early_stop`` is how the AgentX checkpoint treats an
+    explore that trails its parent (``toolbox.agentx_checkpoint``): recorded only by default; the manifest keeps it,
+    so a resumed session judges as it began. ``make_before_break`` has a hosted session keep a finished test's
+    sandbox until the next test's runs, so that the cluster does not give its node to another job between two tests,
+    where the grant fits at least three tests at once; it runs one test fewer at once there. Off, every test the grant
+    fits runs at once and each sandbox is closed when its test ends. A session measured on this machine ignores it."""
 
     workload: Workload
     max_hours: float

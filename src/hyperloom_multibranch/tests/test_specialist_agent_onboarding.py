@@ -491,33 +491,6 @@ async def test_a_link_in_the_source_tree_is_copied_as_the_link(tmp_path: Path) -
     assert (_mode(checkout), _mode(checkout / "pkg"), _mode(checkout / "pkg" / "run.py")) == (0o2775, 0o2775, 0o664)
 
 
-async def test_no_program_the_agent_writes_into_its_checkout_s_config_runs_as_this_host(tmp_path: Path) -> None:
-    checkout = tmp_path / "agent" / "src"
-    await fetch_source(str(_agent_repo(tmp_path)), checkout)
-    ran = tmp_path / "ran"
-    program = tmp_path / "recording-filter"
-    program.write_text(f"#!/bin/sh\necho ran >> {ran}\ncat\n")
-    program.chmod(0o755)
-    hook = tmp_path / "hook"
-    hook.write_text(f"#!/bin/sh\necho ran >> {ran}\n")
-    hook.chmod(0o755)
-    with (checkout / ".git" / "config").open("a") as config:
-        config.write(
-            f'[filter "own"]\n\tclean = {program}\n\tsmudge = {program}\n'
-            f"[core]\n\tfsmonitor = {hook}\n\thooksPath = {tmp_path}\n"
-        )
-    (tmp_path / "post-checkout").write_text(f"#!/bin/sh\necho ran >> {ran}\n")
-    (tmp_path / "post-checkout").chmod(0o755)
-    (checkout / ".gitattributes").write_text("* filter=own\n")
-    (checkout / "README.md").write_text("changed\n")
-
-    for argv in (["git", "status", "--porcelain"], ["git", "add", "--all"], ["git", "checkout", "--", "README.md"]):
-        done = await agent_onboarding._git(argv, checkout)
-        assert done.returncode == 0, done.output
-
-    assert not ran.exists(), ran.read_text()
-
-
 async def test_a_copy_outside_shared_storage_takes_the_tree_s_modes_under_the_umask(tmp_path: Path) -> None:
     tmp_path.chmod(0o755)
     await _copy_under_umask_022(_vendored(tmp_path), tmp_path / "agent" / "copied")
@@ -585,6 +558,33 @@ async def test_a_checkout_whose_commit_cannot_be_read_fails_the_attempt_naming_i
 
     with pytest.raises(AttemptFailed, match=f"reading the commit of {checkout}"):
         await fetch_source(str(_agent_repo(tmp_path)), checkout)
+
+
+async def test_no_program_the_agent_writes_into_its_checkout_s_config_runs_as_this_host(tmp_path: Path) -> None:
+    checkout = tmp_path / "agent" / "src"
+    await fetch_source(str(_agent_repo(tmp_path)), checkout)
+    ran = tmp_path / "ran"
+    program = tmp_path / "recording-filter"
+    program.write_text(f"#!/bin/sh\necho ran >> {ran}\ncat\n")
+    program.chmod(0o755)
+    hook = tmp_path / "hook"
+    hook.write_text(f"#!/bin/sh\necho ran >> {ran}\n")
+    hook.chmod(0o755)
+    with (checkout / ".git" / "config").open("a") as config:
+        config.write(
+            f'[filter "own"]\n\tclean = {program}\n\tsmudge = {program}\n'
+            f"[core]\n\tfsmonitor = {hook}\n\thooksPath = {tmp_path}\n"
+        )
+    (tmp_path / "post-checkout").write_text(f"#!/bin/sh\necho ran >> {ran}\n")
+    (tmp_path / "post-checkout").chmod(0o755)
+    (checkout / ".gitattributes").write_text("* filter=own\n")
+    (checkout / "README.md").write_text("changed\n")
+
+    for argv in (["git", "status", "--porcelain"], ["git", "add", "--all"], ["git", "checkout", "--", "README.md"]):
+        done = await agent_onboarding._git(argv, checkout)
+        assert done.returncode == 0, done.output
+
+    assert not ran.exists(), ran.read_text()
 
 
 async def test_a_checkout_its_agent_made_a_partial_clone_fetches_nothing_behind_this_host_s_git(tmp_path: Path) -> None:

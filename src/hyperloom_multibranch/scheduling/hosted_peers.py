@@ -178,16 +178,17 @@ def _git(argv: list[str], doing: str, env: dict[str, str] | None = None) -> None
 @dataclass(frozen=True)
 class PinnedToolboxInputs:
     """The toolbox's inputs of a hosted session: what ``host`` gave, every runner sandbox pinned to the runner cache
-    entry below ``cache_root`` of the commit the run executes, built from the session's clone of it, its tests to end
-    by the stop of ``host``'s grant (:func:`~hyperloom_multibranch.scheduling.hosted_run.grant_tests_end_by`)."""
+    entry below ``cache_root`` of the commit the run executes, built from a private copy of the session's clone of it,
+    its tests to end by the stop of ``host``'s grant
+    (:func:`~hyperloom_multibranch.scheduling.hosted_run.grant_tests_end_by`)."""
 
     host: HostInfo
     cache_root: Path
 
     def __call__(self, layout: SessionLayout, tp: int) -> HostedToolboxInputs:
         """Raises :class:`~hyperloom.hosted.toolbox_inputs.ToolboxInputsError` naming what the host did not give, and
-        :class:`CacheBuildError` when the commit, its runner cache entry or its staging cannot be had, or when
-        ``$HYPERLOOM_RUNNER_WHEEL_TARGET`` does not name the runner's interpreter."""
+        :class:`CacheBuildError` when the commit, its runner cache entry or its staging cannot be had, the clone does not
+        hold the commit whole, or when ``$HYPERLOOM_RUNNER_WHEEL_TARGET`` does not name the runner's interpreter."""
 
         from hyperloom.hosted.toolbox_inputs import hosted_toolbox_inputs
         from hyperloom_multibranch.toolbox.hosted_toolbox import HostedToolboxInputs

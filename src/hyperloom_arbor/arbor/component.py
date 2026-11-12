@@ -62,6 +62,10 @@ import time
 from datetime import datetime, timezone
 from pathlib import Path
 
+# Each record a host reads says what it is and which Arbor wrote it (arbor/interface.py, docs/schema/host/).
+from arbor.interface import EXIT_SCHEMA, HEARTBEAT_SCHEMA, KEEP_SCHEMA, REFUSED_SCHEMA
+from arbor.version import provenance
+
 STANDALONE = "standalone"
 COMPONENT = "component"
 MODES = (STANDALONE, COMPONENT)
@@ -82,6 +86,9 @@ STATE_FILE = "component.json"        # {mode, host, first_start, deadline_epoch,
 EXIT_FILE = "component_exit.json"    # why the run ended
 REFUSED_FILE = "component_refused.json"   # why it never started (exit 2): {reasons, ts}
 HEARTBEAT_FILE = "heartbeat.json"
+# iter_N/claim.json: the intent and change the iteration declared, written at its commit, so a SIGTERM before its
+# verdict books what it was (``Run.terminated``).
+CLAIM_FILE = "claim.json"
 SERVER_DIR = "server"              # <session>/server/server.pid and server.log
 PID_NAME = "server.pid"
 LOG_NAME = "server.log"
@@ -138,14 +145,13 @@ _SHA = re.compile(r"^[0-9a-fA-F]{7,40}$")
 PHASE_MINUTES = {"agent": 90, "server": 45, "bench": 60, "critic": 15, "correctness": 30,
                  "short_prompts": 10}
 
-# Standalone, an agent turn has a cap too (a critic's `find /` over network storage once ran 46 min,
-# and a bench agent's wait loop never ended). A backstop against a hang, not a budget: a dossier's measure turn ran up
-# to 108 min. The config's `phase_minutes` sets one (0: none); the bench's is never shorter than the config's
+# Standalone, an agent turn has a cap too (a search over network storage, or a wait loop, can run without end). A
+# backstop against a hang, not a budget: a dossier's measure turn can run long. The config's `phase_minutes` sets one (0: none); the bench's is never shorter than the config's
 # bench_timeout plus 30 min, since the bench runs inside the turn.
 STANDALONE_TURN_MINUTES = {"agent": 240, "server": 60, "bench": 90, "critic": 20}
 # A pack may declare how long its bench runs (``measurement.bench_minutes``; -1: no cap). The bench turn's default cap
-# is never under it plus this margin, in either mode: a 3600 s AgentX replay with its warmup ran 64 min against a
-# 60 min cap, so every bench was NOT MEASURED. A cap the host or config sets itself still wins.
+# is never under it plus this margin, in either mode: a replay as long as the cap, with its warmup, would outrun it,
+# and every bench would be NOT MEASURED. A cap the host or config sets itself still wins.
 DECLARED_MARGIN_MIN = 15
 
 # Every phase ends this long before the deadline, and an iteration starts only
@@ -232,7 +238,7 @@ def session_root(config) -> Path:
 
 def parse_deadline(value) -> float:
     """An absolute deadline: epoch seconds (a number or a numeric string), or ISO 8601
-    with a timezone ("2026-10-29T03:20:00Z"). ValueError otherwise: a deadline with no
+    with a timezone ("2030-01-01T00:00:00Z"). ValueError otherwise: a deadline with no
     timezone is read differently on every host."""
     if isinstance(value, bool):
         raise ValueError(f"deadline {value!r} is not a time")
@@ -266,21 +272,25 @@ def _seconds(b: dict):
 
 
 def config_errors(config) -> list[str]:
-    """What is wrong with a config's mode and its component block; [] when nothing is.
+    """What is wrong with a config's mode, its top-level callbacks and its component block; [] when nothing is.
 
-    A standalone config is checked for its mode alone: a "component" block beside it
+    A standalone config is checked for its mode and its top-level callbacks: a "component" block beside it
     is ignored, as any key standalone does not read is.
     """
     config = getattr(config, "config", config) or {}
     mode = mode_of(config)
     if mode not in MODES:
         return [f"unknown mode {config.get('mode')!r} (one of {', '.join(MODES)})"]
+    top = []
+    if config.get("callbacks") is not None:
+        from arbor import triggers
+        top = triggers.callback_errors(config["callbacks"], "callbacks")
     if mode != COMPONENT:
-        return []
+        return top
     raw = config.get("component", {})
     if not isinstance(raw, dict):
-        return [f"\"component\" must be an object, not {type(raw).__name__}"]
-    errors = []
+        return top + [f"\"component\" must be an object, not {type(raw).__name__}"]
+    errors = list(top)
     for k in sorted(set(raw) - set(BLOCK_KEYS)):
         errors.append(f"component.{k} is not a component-mode key ({', '.join(BLOCK_KEYS)})")
     for k in ("host", "notes", "bench_command", "outbox", "profile"):
@@ -446,7 +456,8 @@ def refuse(reasons: list[str], config=None, session_dir=None) -> int:
             and mode_of(config) == COMPONENT):
         try:
             _write_json(Path(session_dir) / REFUSED_FILE,
-                        {"reasons": list(reasons), "ts": iso(time.time())})
+                        {"schema": REFUSED_SCHEMA, "reasons": list(reasons), "ts": iso(time.time()),
+                         "arbor": provenance()})
         except OSError as exc:
             print(f"[arbor] could not write {REFUSED_FILE}: {exc}", file=sys.stderr, flush=True)
     return EXIT_REFUSED
@@ -539,6 +550,24 @@ def seed_plan(config, session_dir) -> str | None:
                                             "source": "component.plan"})
     return (f"the host's plan: this campaign works {len(entries)} directions "
             f"({', '.join(e['id'] for e in entries)}) and nothing else")
+
+
+def deal_plan(config, session_dir, at: int) -> str | None:
+    """``arbor run --exit-at-handover``: the directions of ``component.plan`` the session's lane does not hold yet,
+    added open from iteration ``at``. A host that deals its map share by share relaunches the branch with its next
+    share as the plan; without the flag a resume keeps the plan it started with (``seed_plan``). What was done, for
+    the log; None when nothing was added."""
+    from arbor import directions
+    if not is_component(config):
+        return None
+    entries, errors = plan_entries(config)
+    if errors or not entries:
+        return None
+    doc, _ = directions.load(session_dir)
+    if not directions.is_lane(doc) or doc.get("phase") != "active":
+        return None
+    added = directions.deal_into_lane(Path(session_dir), doc, entries, at)
+    return f"the host's plan: {len(added)} directions dealt to this session ({', '.join(added)})" if added else None
 
 
 # ── the deadline ───────────────────────────────────────────────────────────────
@@ -685,7 +714,8 @@ def exit_record(session_dir, reason: str, iteration: int | None = None,
     session = Path(session_dir)
     raw = _read_json(session / "session.json") or {}
     lessons = raw.get("lessons") if isinstance(raw.get("lessons"), list) else []
-    rec = {"reason": reason,
+    rec = {"schema": EXIT_SCHEMA,
+           "reason": reason,
            "iteration": iteration if iteration is not None else raw.get("iteration", 0),
            "keeps": keep_count(lessons),
            "map": map_counts(session),
@@ -693,11 +723,13 @@ def exit_record(session_dir, reason: str, iteration: int | None = None,
            "ts": iso(time.time() if now is None else now)}
     if detail:
         rec["detail"] = detail
+    rec["arbor"] = provenance()
     try:
         _write_json(session / EXIT_FILE, rec)
     except OSError as exc:
         say(f"could not write {EXIT_FILE}: {exc}")
-    say("exit " + json.dumps(rec))
+    # The log line a host or a person greps stays as it was: the record without its schema id and provenance.
+    say("exit " + json.dumps({k: v for k, v in rec.items() if k not in ("schema", "arbor")}))
     if _heartbeat is not None:
         _heartbeat.set(phase="exit", reason=reason)
     return rec
@@ -720,7 +752,8 @@ class Heartbeat:
     def write(self) -> None:
         with self._lock:
             now = time.time()
-            doc = {"ts": iso(now), "epoch": round(now, 1), "pid": os.getpid(), **self.doc}
+            doc = {"schema": HEARTBEAT_SCHEMA, "ts": iso(now), "epoch": round(now, 1), "pid": os.getpid(), **self.doc,
+                   "arbor": provenance()}
             try:
                 _write_json(self.path, doc)
             except OSError:
@@ -1296,10 +1329,10 @@ def snapshot_keep(config, session_dir, *, container: str, workspace: str, number
         tables, outside = _copy_tables(env, workspace, tmp, label=label)
         lessons = (_read_json(Path(session_dir) / "session.json") or {}).get("lessons")
         carries = carried_changes(container, workspace, parent, commit, iteration, lessons, spec)
-        doc = {"number": number, "previous": previous, "iteration": iteration, "metric": metric,
-               "change": change, "intent": intent, "root": root, "parent": parent,
+        doc = {"schema": KEEP_SCHEMA, "number": number, "previous": previous, "iteration": iteration,
+               "metric": metric, "change": change, "intent": intent, "root": root, "parent": parent,
                "commit": commit, "carries": carries, "ts": iso(now), "tables": tables,
-               "tables_outside_workspace": outside}
+               "tables_outside_workspace": outside, "arbor": provenance()}
         if retracts is not None:
             doc["retracts"] = dict(retracts)
         # The links the served tree makes outside itself, and how they are rebuilt
@@ -1399,6 +1432,7 @@ class Run:
         if time_budget is not None:
             log(f"time_budget_minutes={time_budget} is ignored: the deadline is the clock")
         log("the target, round ends and the round-end A/B are off: the host gates and merges")
+        provenance()        # read now: the exit record a SIGTERM handler writes must not wait on git
         self.heartbeat = Heartbeat(self.session, self.heartbeat_s).start()
         _heartbeat = self.heartbeat
         if threading.current_thread() is threading.main_thread():
@@ -1484,18 +1518,23 @@ class Run:
 
     def terminated(self) -> int:
         """After SIGTERM has unwound the driver: book the iteration in flight as NOT
-        MEASURED (once), wait briefly for our server's group, and exit 0."""
+        MEASURED (once), wait briefly for our server's group, and exit 0.
+
+        It is booked with the intent and change it declared at its commit (``CLAIM_FILE``), so the revisit measures a
+        committed change again, as it does any NOT MEASURED one. Booked as a PROBE before, it was never revisited."""
         state_path = self.session / "session.json"
         if self.iteration is not None:
             try:
                 from arbor.state import CampaignState
                 state = CampaignState.load(state_path)
                 if state.iteration < self.iteration:
+                    claim = _read_json(self.session / f"iter_{self.iteration}" / CLAIM_FILE) or {}
                     state.iteration_started = self.iteration_started or 0.0
                     state.record_invalid(
-                        iteration=self.iteration, change=f"iteration {self.iteration} (stopped by the host)",
+                        iteration=self.iteration,
+                        change=str(claim.get("change") or f"iteration {self.iteration} (stopped by the host)"),
                         tier=state.tier, reason="SIGTERM from the host: the iteration did not finish",
-                        claim_class="PROBE", findings=[])
+                        claim_class=str(claim.get("claim_class") or "B"), findings=[])
                     state.save(state_path)
             except Exception as exc:  # noqa: BLE001
                 log(f"could not record iteration {self.iteration} as not measured: {exc}")

@@ -22,7 +22,7 @@ from ..actions.executors._accuracy_gate import (
     ENABLEMENT_REVALIDATION_REASON,
 )
 from ..actions.executors._agentx_prefix_cache import PREFIX_CACHE_OFF_ERROR_CLASS
-from ..actions.executors._failed_step import failed_step_error_class
+from ..actions.executors import failed_step_error_class
 from ..actions.executors._ray_serving import RAY_INFEASIBLE_MARKER
 from ..actions.executors._subprocess_kill import AGENTX_PREFLIGHT_ERROR_CLASS
 from ..actions.stop_attribution import stopped_by_the_run_class
@@ -62,10 +62,10 @@ _STOPS_ON_FIRST_OCCURRENCE: dict[str, str] = {
     # The server booted and measured a cold cache. The next attempt launches the same server and no framework patch
     # changes the operator's flag; ``_authorable_launch_log`` keeps it out of enablement.
     PREFIX_CACHE_OFF_ERROR_CLASS: _BASELINE_FAILED_STOP_REASON,
-    # The benchmark client, or the harness after serving its whole protocol, refused the result. The next
-    # attempt runs the same client over the same workload, so it is refused the same way.
+    # The harness refused the result after the round served its whole protocol. The next attempt runs the same
+    # harness over the same workload, so it is refused the same way. ``client_failed`` stays on the streak: the suite
+    # names any nonzero client exit so, a transient refusal of a download included.
     ROUND_NONZERO_INVALID_MEASUREMENT: _BASELINE_FAILED_STOP_REASON,
-    FailedStep.CLIENT_FAILED.value: _BASELINE_FAILED_STOP_REASON,
     # Refused before spawn: the host lacks the idle GPUs the round needs. Only the operator can free them.
     HOST_GPUS_UNAVAILABLE: HOST_GPUS_UNAVAILABLE,
 }

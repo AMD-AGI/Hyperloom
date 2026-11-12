@@ -25,10 +25,10 @@ from .kernel_round_budget import rebench_round_sec
 from hyperloom_common.env import env_float, env_int
 from hyperloom_common.jsonio import read_json
 from hyperloom.common.benchmark_config import BenchmarkPoint, BenchmarkPointError, read_benchmark_point
+from hyperloom.inference_optimizer.agentx.report import replayed_trace
 from inference_suite import CLIENT_ROOT_ENV, CLIENT_SCRIPT, inferencex_root
-from ..actions.executors._round_folder import read_round_launch
-from ..actions.executors._suite.rounds import staged_tool_cache
-from ..actions.executors._workload_envs import geak_metric_axis
+from ..actions.executors import read_round_launch, staged_tool_cache
+from ..actions.executors._workload_envs import geak_grading_fields, geak_metric_axis
 from ..bus.message_bus import Message
 from ..kernel.geak_config import _geak_has_accepted_kernel
 from ..kernel.lane_budget import INSUFFICIENT_BUDGET
@@ -80,36 +80,6 @@ def _with_framework_on_path(env_spec: dict[str, Any]) -> dict[str, Any]:
     path = os.pathsep.join(part for part in (str(Path(launch.framework.python).parent), os.environ.get("PATH")) if part)
     config = env_spec["config"]
     return {**env_spec, "config": {**config, "extra_envs": {**config["extra_envs"], "PATH": path}}}
-
-
-def _served_replay_result(path: str, root: Path) -> dict[str, Any] | None:
-    """The orchestrator's own replay result at ``path``, or ``None`` when it is not a served measurement."""
-    # GEAK's own results are not the orchestrator's baseline, and the
-    # overlay probe is not a served measurement. Match path COMPONENTS
-    # below the runs root, never the whole string: a substring test
-    # excludes every result the moment an ancestor directory happens
-    # to contain "geak" (a campaign rooted at .../hlgeak_24h_run/ hits
-    # this), which silently degrades the shape to the 1024 default
-    # this method exists to replace.
-    try:
-        rel_parts = Path(path).relative_to(root).parts
-    except ValueError:
-        return None
-    if "geak" in rel_parts or "_baseline_source_overlay" in rel_parts:
-        return None
-    try:
-        raw = json.loads(Path(path).read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError, TypeError, ValueError):
-        return None
-    if not isinstance(raw, dict):
-        return None
-    completed = int(raw.get("completed") or 0)
-    tin = int(raw.get("total_input_tokens") or 0)
-    tout = int(raw.get("total_output_tokens") or 0)
-    tput = float(raw.get("output_throughput") or 0.0)
-    if completed <= 0 or tin <= 0 or tout <= 0 or tput <= 0:
-        return None
-    return raw
 
 
 def _observed_identity_digest(declared: str, flags: str, server_identity: Mapping[str, Any]) -> str:
@@ -193,64 +163,6 @@ class _GeakDispatchMixin:
             except (OSError, BenchmarkPointError, yaml.YAMLError):
                 log.warning("recipe: could not read %r", recipe_path, exc_info=True)
         return _NO_RECIPE
-
-    def _observed_replay_shape(self, target_tput: float) -> dict[str, Any]:
-        """Measure the trace replay's real sequence shape from OUR OWN baseline.
-
-        The AgentX handoff's ``workload.isl/osl`` are the CLI's synthetic
-        defaults (1024/1024) because a trace replay has no single ISL -- the
-        corpus spans roughly 89k at p50 past 500k at p99. GEAK does not measure
-        with them (the aiperf client ignores them outright), but the KERNEL
-        agents still read them as the analytic serving call model when they
-        synthesize GEMM/attention shapes. Left at 1024 they aim two orders of
-        magnitude below the load, so the search tunes a regime nobody serves.
-
-        Rather than hardcode corpus percentiles, derive the average shape from
-        the baseline result THIS run already measured: the canonical result
-        records ``total_input_tokens``/``total_output_tokens`` over ``completed``
-        requests. That keeps the number sourced from a measurement instead of a
-        constant that silently rots when the corpus is re-pinned.
-
-        Returns ``{}`` whenever no usable result is on disk, so an unmeasurable
-        run degrades to today's behavior rather than to a fabricated shape.
-        """
-        try:
-            import glob as _glob
-
-            from hyperloom.inference_optimizer.session.session_paths import runs_root
-
-            root = runs_root(self.session_dir)
-            best: tuple[float, dict[str, Any], str] | None = None
-            for rp in _glob.glob(str(Path(root) / "**" / "inferencex_result.json"), recursive=True):
-                raw = _served_replay_result(rp, root)
-                if raw is None:
-                    continue
-                tput = float(raw["output_throughput"])
-                # Prefer the result whose throughput IS the baseline we handed
-                # over, so the shape describes the same measurement.
-                err = abs(tput - target_tput) / target_tput if target_tput > 0 else 1.0
-                if best is None or err < best[0]:
-                    best = (err, raw, rp)
-            if best is None:
-                return {}
-            err, raw, path = best
-            completed = int(raw["completed"])
-            isl = int(round(int(raw["total_input_tokens"]) / completed))
-            osl = int(round(int(raw["total_output_tokens"]) / completed))
-            if isl <= 0 or osl <= 0:
-                return {}
-            return {
-                "observed_isl": isl,
-                "observed_osl": osl,
-                "observed_requests": completed,
-                "observed_source": path,
-                # 1.0 => no baseline throughput to match against, so this is the
-                # best available replay result rather than a confirmed same-run one.
-                "observed_tput_match_err": round(err, 6),
-            }
-        except (OverflowError, TypeError, ValueError):
-            log.warning("workload_spec: could not derive observed replay shape", exc_info=True)
-            return {}
 
     def _geak_timeouts(self) -> tuple[int, int, bool]:
         """Resolve the GEAK e2e timeouts from the live run budget."""
@@ -491,19 +403,23 @@ class _GeakDispatchMixin:
         # GEAK selects its client and its measurement protocol from the kind.
         if not agentx:
             return {"kind": _SYNTHETIC_WORKLOAD}
-        # Give the kernel agents the shape they must actually optimize for;
-        # absence leaves GEAK on the handoff's synthetic isl/osl.
-        observed = self._observed_replay_shape(float(self.shared_state.baseline_tput or 0.0))
-        if not observed:
-            return {**spec, "kind": _AGENTX_WORKLOAD}
-        log.info(
-            "workload_spec: observed replay shape isl=%d osl=%d over %d requests (%s)",
-            observed["observed_isl"],
-            observed["observed_osl"],
-            observed["observed_requests"],
-            observed["observed_source"],
-        )
-        return {**spec, **observed, "kind": _AGENTX_WORKLOAD}
+        state = self.shared_state
+        session = {"concurrency": int(state.conc or 0), **geak_grading_fields(state.grading or None)}
+        if spec:
+            # Only an MLPerf AgentX recipe carries a spec; it names the graded workload and its client.
+            return {**spec, **session}
+        workspace = str(state.current_best_measurement.get("benchmark_workspace") or "")
+        # GEAK keeps its own default for each field left out, so a trace it is not told about is its default corpus.
+        replayed = replayed_trace(Path(workspace) if workspace else None)
+        if replayed:
+            log.info(
+                "workload_spec: the accepted round replayed %s (%d entries)",
+                replayed["corpus"],
+                replayed["num_entries"],
+            )
+        else:
+            log.warning("workload_spec: no aiperf export under %r names a corpus; GEAK replays its default", workspace)
+        return {**replayed, **session, "kind": _AGENTX_WORKLOAD}
 
     def _geak_session_fields(self, *, agentx: bool) -> dict[str, Any]:
         state = self.shared_state

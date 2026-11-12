@@ -910,7 +910,9 @@ agent runner). Agents started elsewhere run as the app and can read what it can,
   runs only with `--quantize` and `HYPERLOOM_QUANTIZE_ENABLED` set; no hosted spec field sets `--quantize`.
 
 The critic and the one-shot Claude calls start no agent with tools. A hosted run whose spec's `flow` is `multibranch`
-is handed to `hyperloom-multibranch` before the entry's isolation check (below).
+is handed to `hyperloom-multibranch` before the entry's isolation check (below); `hyperloom-multibranch hosted run`
+makes the same check at its start, with the same layer bubblewrap, and also ends the run, naming which and why, when
+the agent runner would start its specialists unconfined or refuse them.
 
 **Specialists in a bubblewrap sandbox** (`orchestrator/specialists/launch_env.py`; the dispatcher, its Ray GPU actor
 path and the agent runner) write their workspace and worktree, and a private `/tmp` and `/dev/shm` (directories of

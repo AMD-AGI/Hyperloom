@@ -36,7 +36,6 @@ from hyperloom.measure.sandboxes import (
     RUN_ID_KEY,
     Handover,
 )
-from hyperloom.measure.short_prompts.staging import CACHE_ENV as RUNNER_CACHE_ENV
 from hyperloom.sandbox.e2b import E2BSandboxProvider, RetryPolicy
 from hyperloom.sandbox.node import node_name
 from hyperloom.sandbox.socket import Role, SandboxError, SandboxProvider
@@ -66,7 +65,7 @@ from hyperloom_multibranch.toolbox.leased_toolbox import (
 from hyperloom_multibranch.toolbox.queue import QueuePolicy
 from hyperloom_multibranch.toolbox.resume_guard import MeasuredOn
 from hyperloom_multibranch.toolbox.native_builds import native_builds, with_native_plan
-from hyperloom_multibranch.toolbox.long_context import environment_long_context
+from hyperloom_multibranch.toolbox.long_context import environment_long_context, sees_runner_cache
 from hyperloom_multibranch.toolbox.short_prompts import ShortPromptSetup, environment_short_prompts
 from hyperloom_multibranch.toolbox.tools import AsyncTool, tracelens_tool
 from hyperloom_multibranch.toolbox.toolbox import AcceptanceSetup, ToolboxTuning
@@ -82,7 +81,6 @@ __all__ = [
     "build_hosted_toolbox",
     "handover_for",
     "parallel_tests_for",
-    "stages_prompt_sets",
 ]
 
 #: The roles of the template list (``HYPERLOOM_SANDBOX_TEMPLATES``) the toolbox reads, named as the grant names them;
@@ -230,12 +228,14 @@ class HostedOptions:
     ``HYPERLOOM_SHORT_PROMPTS`` of the host environment, whose hash is read from the manifest of the entry in this host's
     own view of the runner cache (``HYPERLOOM_RUNNER_CACHE``) and which refuses the build when it is not staged there;
     ``off`` there runs no check. Without either the check is on with the session model's own set
-    (``short_prompts.default_short_prompts``). A host that names its runner cache in ``HYPERLOOM_RUNNER_CACHE`` (a hosted
-    session must: it builds the commit's entry there, in the directory the runner sandboxes mount) stages that set there
-    when it is missing, from the model's tokenizer, as the local builder does; a host that names none stages nothing and
-    the check is off, logged. The long-context check is found the same way from ``acceptance.long_context``,
-    ``HYPERLOOM_LONG_CONTEXT`` and ``long_context.ServedLongContext`` (the model's own set at the context each test's
-    launch serves, staged when a test first plans that context). ``framework_configs`` is the directory of aiter's tuned tables
+    (``short_prompts.default_short_prompts``). A host that sees the runner cache (the directory ``HYPERLOOM_RUNNER_CACHE``
+    names exists here, as it does for a hosted session, which builds the commit's entry there, in the directory the runner
+    sandboxes mount) stages that set there when it is missing, from the model's tokenizer, as the local toolbox does; a
+    host that does not see it stages nothing and the check is off, logged. The long-context check is found the same way
+    from ``acceptance.long_context``, ``HYPERLOOM_LONG_CONTEXT`` and ``long_context.ServedLongContext`` (the model's own
+    set at the context each test's launch serves, staged by a host that sees the runner cache when a test first plans
+    that context; a host that does not see it runs no such check and logs why).
+    ``framework_configs`` is the directory of aiter's tuned tables
     every test reads private copies of, snapshotted below ``session_dir/framework`` as the toolbox is built, where the
     runner sandboxes read it at the same path: the image's when omitted, ``""`` for none. The snapshot is named to every
     runner sandbox by ``HYPERLOOM_FRAMEWORK_SNAPSHOT`` and ``HYPERLOOM_FRAMEWORK_SESSION_SHA256``, which the runner
@@ -498,31 +498,21 @@ def _acceptance_with_prompts(
     """``acceptance`` with the short-prompt set the options (else the acceptance setup, else ``HYPERLOOM_SHORT_PROMPTS``)
     name, and the long-context set the acceptance setup (else ``HYPERLOOM_LONG_CONTEXT``, else the model's own set) names.
 
-    The model's own sets are staged in the runner cache ``HYPERLOOM_RUNNER_CACHE`` names when they are missing
-    (:func:`stages_prompt_sets`): the runners read that directory, and nothing else puts the sets there.
+    The model's own sets are staged in the runner cache when they are missing and this host sees it
+    (:func:`~.long_context.sees_runner_cache`): the runners read that directory, and nothing else puts the sets there.
 
     Raises:
         ShortPromptsNotStaged: The environment names a key that is not staged in this host's view of the runner cache.
         LongContextNotStaged: The same for the long-context check.
         ValueError: The options and the acceptance setup name different sets.
     """
-    stage = stages_prompt_sets(environ)
+    stage = sees_runner_cache(environ)
     named = with_short_prompts(acceptance, options.short_prompts)
     if named.short_prompts is None:
         named = with_short_prompts(named, environment_short_prompts(environ, model_dir, stage=stage))
     if named.long_context is None:
         named = with_long_context(named, environment_long_context(environ, model_dir, stage=stage))
     return named
-
-
-def stages_prompt_sets(environ: Mapping[str, str]) -> bool:
-    """Whether a hosted toolbox stages the model's prompt sets in the runner cache: when ``HYPERLOOM_RUNNER_CACHE`` names
-    it as an absolute path, the directory a hosted session builds the commit's entry in and the runner sandboxes mount.
-
-    Without it the default (``/runner-cache``) is where a sandbox mounts the cache, not a directory of this host, and
-    nothing is staged there."""
-    value = environ.get(RUNNER_CACHE_ENV, "").strip()
-    return bool(value) and Path(value).is_absolute()
 
 
 def build_hosted_toolbox(

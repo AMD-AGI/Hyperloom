@@ -153,6 +153,7 @@ def test_the_logs_a_later_leg_appends_to_are_the_group_s(shared: Path) -> None:
     ):
         assert _mode(appended) == 0o664, appended
     assert _mode(tmp_path / "segments") == 0o2775
+    assert _mode(tmp_path / "toolbox") == 0o2775
     assert complete_lines(tmp_path / "toolbox" / "submissions.jsonl") == ['{"type": "accepted"}']
 
 

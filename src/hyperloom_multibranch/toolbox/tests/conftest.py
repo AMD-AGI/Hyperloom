@@ -14,7 +14,7 @@ from pathlib import Path
 import pytest
 
 from hyperloom.common import confinement
-from hyperloom.measure.tests.gpu_free_host import (  # noqa: F401  (autouse fixtures)
+from hyperloom.measure.tests.gpu_free_host import (  # noqa: F401
     USES_REAL_GPUS_FLAG,
     idle_card_list,
     machine_without_readable_gpus,

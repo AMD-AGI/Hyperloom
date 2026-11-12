@@ -9,16 +9,9 @@ missing reading to zero.
 There are two collectors, and the artifact says which one produced its rows in ``sample_source``. On an AgentX round
 aiperf is already scraping the same endpoint for its own purposes, so its export is adopted wholesale: it samples on a
 tighter cadence, takes a reading at each phase boundary of its own accord, and stamps every record with the phase from
-the process that owns the transition -- which removes the boundary lag rather than correcting for it. Everything else
--- synthetic benchmarks, the accuracy eval, boot, and any round killed before aiperf flushed -- has no such export, and
-is covered by scraping from the watchdog loop.
-
-Phase attribution has two sources, and the artifact always says which one it used. Preferred is aiperf's progress API,
-whose ``phases.<name>.start_ns`` is stamped when the phase actually begins; the fallback is the ``aiperf.log`` line the
-watchdog greps for, which is written after the transition and read on the next poll. Both lags land on the boundary, so
-under the fallback the samples either side of it are systematically credited to the phase that just ended. When the
-authoritative stamps are available the rows are re-labelled and the counter windows re-bracketed from them at close --
-which is why every row carries its raw per-series counters, and not just a phase-level first/last pair.
+the process that owns the transition. Everything else -- synthetic benchmarks, the accuracy eval, boot, and any round
+killed before aiperf flushed -- has no such export, and is covered by the round's own scrapes, each tagged with the
+phase the round's phase clock last marked (``phase_source``).
 
 Below the phase, the workload timeline comes from aiperf's per-request export; see :mod:`.agentx_timeline`. That gives
 each row the trajectories, turns and requests in flight during its scrape window, and writes the event stream beside
@@ -35,17 +28,23 @@ import logging
 import math
 import os
 import time
-from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
+from hyperloom_common.io import atomic_write_json
+
+from .agentx_timeline import (
+    TIMELINE_ARTIFACT_NAME,
+    build_events,
+    correlate_rows,
+    find_profile_export,
+    parse_profile_export,
+    write_timeline,
+)
 from .kv_poll import (
-    AIPERF_PHASE_NAMES,
-    AiperfProgressPoller,
     KvMetricsPoller,
     KvSample,
     aggregate_series,
-    json_number,
     read_aiperf_server_metrics,
     server_metrics_exports,
 )
@@ -58,7 +57,6 @@ __all__ = [
     "KV_ARTIFACT_NAME",
     "PHASES",
     "KvMetricsRecorder",
-    "KvRound",
     "counter_delta",
 ]
 
@@ -67,14 +65,13 @@ __all__ = [
 KV_ARTIFACT_NAME = "kv_metrics.json"
 
 _BOOT = "boot"
-_EVAL = "eval"
 #: The one phase whose numbers may be compared against another round's.
 _COMPARABLE_PHASE = "measured"
 #: Collection phases. An engine process outlives the window that is actually being measured by a wide margin, and mixing
 #: them makes every statistic meaningless: ``boot`` has no traffic at all, ``warmup`` runs a deliberately cold cache,
 #: and ``eval`` drives accuracy traffic whose shape has nothing to do with the throughput benchmark. Only ``measured``
 #: may enter a comparison.
-PHASES = (_BOOT, "warmup", _COMPARABLE_PHASE, "finished", _EVAL)
+PHASES = (_BOOT, "warmup", _COMPARABLE_PHASE, "finished", "eval")
 
 #: Row cap before stride downsampling, mirroring ``_MN_GPU_SAMPLE_CAP``. A three-hour round at the scrape interval below
 #: lands well over this.
@@ -93,19 +90,9 @@ _CLOCK_STEPS_PER_SEC = 10**_CLOCK_DIGITS
 _SCRAPE_INTERVAL_ENV = "INFERENCE_OPTIMIZER_KV_SCRAPE_INTERVAL_SEC"
 _DEFAULT_SCRAPE_INTERVAL_SEC = 2.0
 
-#: Interval used while aiperf is scraping the same endpoint. Not zero: a sparse series is what remains if aiperf turns
-#: out to have collected nothing, and an artifact with a coarse trace beats one with no rows at all.
-_SUSPENDED_SCRAPE_INTERVAL_SEC = 60.0
-
-#: Where the AgentX client puts its artifacts. The directory is created before the server boots, so its presence is the
-#: earliest signal that aiperf owns the scraping for this round.
-_AIPERF_ARTIFACT_DIRS = ("aiperf_artifacts", "*/aiperf_artifacts")
-
-
-#: How far an authoritative timestamp may sit from this process's clock before it is rejected. Wide, because it is only
-#: meant to catch a clock domain that is not the Unix epoch at all -- a monotonic ``start_ns`` is off by decades, not by
-#: hours -- rather than to police skew.
-_PROGRESS_CLOCK_SANITY_SEC = 86400.0
+#: The live rows' phase comes from the round's phase clock, which marks each transition as the round makes it.
+_PHASE_MARKS_SOURCE = "phase_marks"
+_AIPERF_SOURCE = "aiperf_server_metrics"
 
 
 def resolve_scrape_interval_sec() -> float:
@@ -139,50 +126,23 @@ def counter_delta(first: dict[str, dict[str, float]], last: dict[str, dict[str, 
     return aggregate_series(deltas) or 0.0
 
 
-@dataclass(frozen=True)
-class KvRound:
-    """The round a KV recorder collects for: where its artifact goes, its directory and the scope it records."""
-
-    output_path: str | None = None
-    workspace: Any = None
-    scope: dict[str, Any] | None = None
-
-
 class KvMetricsRecorder:
     """Collects phase-tagged KV samples for one benchmark round.
 
     Owns everything stateful about collection so the watchdog loop it hangs off keeps a single call per pass and one
-    ``finally``. Like the poller, a failed scrape costs the round one sample: the pollers treat connection and truncated-response errors as a miss.
+    ``finally``. Like the poller, a failed scrape costs the round one sample: connection and truncated-response errors
+    are a miss.
 
-    The phase machine is driven by markers the loop already detects, plus aiperf's own phase lines under AgentX. It is
-    never inferred from elapsed time, because the boundaries move by tens of minutes between rounds -- an AgentX warmup
-    alone was measured at nearly 18 of them.
+    The phase is the one the round's phase clock last marked. It is never inferred from elapsed time, because the
+    boundaries move by tens of minutes between rounds -- an AgentX warmup alone was measured at nearly 18 of them.
     """
 
-    def __init__(
-        self,
-        *,
-        poller: KvMetricsPoller,
-        kv_round: KvRound = KvRound(),
-        min_interval_sec: float | None = None,
-        progress: AiperfProgressPoller | None = None,
-    ) -> None:
-        """Prepare a recorder without contacting anything."""
+    def __init__(self, *, poller: KvMetricsPoller, output_path: Path, min_interval_sec: float | None = None) -> None:
+        """Prepare a recorder without contacting anything; aiperf's exports are read beside ``output_path``."""
         self._poller = poller
-        self._output_path = kv_round.output_path
-        # The round's own directory, which is where both aiperf's export and our artifacts live. Derived from the
-        # output path when not given, so the two can never point at different rounds.
-        self._workspace = (
-            kv_round.workspace
-            if kv_round.workspace is not None
-            else (Path(kv_round.output_path).parent if kv_round.output_path else None)
-        )
-        self._scope = dict(kv_round.scope or {})
+        self._output_path = output_path
+        self._workspace = output_path.parent
         self._min_interval = resolve_scrape_interval_sec() if min_interval_sec is None else float(min_interval_sec)
-        self._progress = progress
-        self._phase_timeline: dict[str, dict[str, Any]] = {}
-        # Tri-state: unknown until the round directory is first looked at.
-        self._aiperf_present: bool | None = None
         self._phase = _BOOT
         self._rows: list[dict[str, Any]] = []
         self._last_scrape_mono: float | None = None
@@ -213,33 +173,9 @@ class KvMetricsRecorder:
         """Scrape if the interval has elapsed, tagging the sample with the phase."""
         if self._closed:
             return
-        interval = _SUSPENDED_SCRAPE_INTERVAL_SEC if self._aiperf_owns_scraping() else self._min_interval
-        if self._last_scrape_mono is not None and (mono - self._last_scrape_mono) < interval:
+        if self._last_scrape_mono is not None and (mono - self._last_scrape_mono) < self._min_interval:
             return
         self._scrape(mono)
-
-    def _aiperf_owns_scraping(self) -> bool:
-        """Whether aiperf is scraping this engine, making our own polling redundant.
-
-        On an AgentX round aiperf scrapes the same endpoint on its own schedule and its records replace ours at close,
-        so polling at the full rate only doubles the load on the engine to produce rows that get discarded. Backing off
-        rather than stopping outright keeps a coarse trace: if aiperf turns out to have collected nothing -- disabled,
-        crashed, killed before it flushed -- a sparse series is a far better artifact than an empty one, which is
-        exactly the failure this collector already shipped once.
-
-        The eval phase is excluded because aiperf has exited by then, so that window is ours alone.
-        """
-        if self._phase == _EVAL:
-            return False
-        if self._aiperf_present is None and self._workspace is not None:
-            try:
-                root = Path(self._workspace)
-                self._aiperf_present = any(
-                    candidate.is_dir() for pattern in _AIPERF_ARTIFACT_DIRS for candidate in root.glob(pattern)
-                )
-            except OSError:
-                self._aiperf_present = False
-        return bool(self._aiperf_present)
 
     def _scrape(self, mono: float) -> KvSample | None:
         """Take one reading unconditionally, timing the round trip.
@@ -250,9 +186,6 @@ class KvMetricsRecorder:
         measured.
         """
         self._last_scrape_mono = mono
-        # Polled first, and regardless of whether the engine answers: the phase timeline is what makes any of the rows
-        # comparable, and an engine that is briefly unreachable must not cost us the boundary.
-        workload = self._poll_progress()
         start_mono = time.monotonic()
         start_unix = time.time()
         sample = self._poller.sample()
@@ -274,44 +207,10 @@ class KvMetricsRecorder:
                 "scrape_end_mono": round(end_mono, _CLOCK_DIGITS),
                 "scrape_sec": round(elapsed, 4),
             },
-            workload=workload,
         )
         return sample
 
-    def _poll_progress(self) -> dict[str, Any] | None:
-        """Fold one progress reading into the timeline and return the phase in flight.
-
-        The timeline accumulates rather than replaces: aiperf drops a phase from its report once the next one begins, so
-        keeping only the latest response would lose the warmup boundary the moment profiling starts.
-        """
-        if self._progress is None:
-            return None
-        phases = self._progress.poll()
-        if not phases:
-            return None
-        active: dict[str, Any] | None = None
-        active_start = -1.0
-        for name, stats in phases.items():
-            if not isinstance(stats, dict):
-                continue
-            self._phase_timeline.setdefault(name, {}).update(stats)
-            start_ns = json_number(stats.get("start_ns"))
-            if start_ns is None or stats.get("requests_end_ns") is not None:
-                continue
-            if start_ns > active_start:
-                active_start = start_ns
-                # Timestamps live in the timeline; a row only needs to say which phase it fell in and how much work was
-                # in flight, which is the granularity aiperf actually exposes.
-                active = {"aiperf_phase": name, "stats": {k: v for k, v in stats.items() if not k.endswith("_ns")}}
-        return active
-
-    def _absorb(
-        self,
-        sample: KvSample,
-        *,
-        timing: dict[str, float] | None = None,
-        workload: dict[str, Any] | None = None,
-    ) -> None:
+    def _absorb(self, sample: KvSample, *, timing: dict[str, float] | None = None) -> None:
         """Fold one sample into the row buffer and the counter windows."""
         # Pool capacity is only observable while the engine is up; latch the first non-null reading so the artifact
         # still carries it after a round that ended with the server gone.
@@ -339,8 +238,6 @@ class KvMetricsRecorder:
             "mono": round(sample.mono, _CLOCK_DIGITS),
             **(timing or {"scrape_sec": 0.0}),
         }
-        if workload is not None:
-            row["workload"] = workload
         self._rows.append(
             {
                 **row,
@@ -410,8 +307,7 @@ class KvMetricsRecorder:
 
         aiperf drives the AgentX workload, so on those rounds it is the better source in every way that matters: it
         scrapes the same endpoint on a tighter cadence, takes its own reading at each phase boundary, and stamps each
-        record with the phase from the process that owns the transition -- so there is no boundary lag to correct and
-        nothing to re-attribute afterwards.
+        record with the phase from the process that owns the transition, so there is no boundary lag.
 
         Only the window aiperf covers is replaced. It starts after the server is up and exits before the accuracy eval,
         so readings outside that span -- boot, and the whole eval phase -- are ours and are kept. Inside it, its
@@ -419,8 +315,6 @@ class KvMetricsRecorder:
         different instants would let a window bracket across both and credit an increment to whichever was sampled
         either side of it. Across the boundary there is no such risk, because the two sets are disjoint in time.
         """
-        if self._workspace is None:
-            return None
         export = None
         records = []
         for candidate in server_metrics_exports(self._workspace):
@@ -463,79 +357,11 @@ class KvMetricsRecorder:
         self._rebuild_counter_windows()
         return str(export)
 
-    def _authoritative_bounds(self) -> dict[str, tuple[float, float | None]] | None:
-        """Phase windows in Unix seconds, from aiperf's own stamps, or ``None`` when unusable.
-
-        ``start_ns`` is rejected rather than trusted blindly when it does not land near this process's wall clock. The
-        API reports nanoseconds but does not say from which epoch, and a monotonic reading would silently place every
-        boundary in 1970 and re-attribute the whole round to one phase.
-        """
-        if not self._phase_timeline:
-            return None
-        now = time.time()
-        bounds: dict[str, tuple[float, float | None]] = {}
-        for name, stats in self._phase_timeline.items():
-            phase = AIPERF_PHASE_NAMES.get(name)
-            start_ns = json_number(stats.get("start_ns"))
-            if phase is None or start_ns is None or start_ns <= 0:
-                continue
-            start = start_ns / 1e9
-            if abs(start - now) > _PROGRESS_CLOCK_SANITY_SEC:
-                return None
-            end_ns = json_number(stats.get("requests_end_ns"))
-            end = end_ns / 1e9 if end_ns and end_ns > 0 else None
-            if end is not None and end < start:
-                return None
-            bounds[phase] = (start, end)
-        return bounds or None
-
-    def _reattribute_phases(self) -> dict[str, Any]:
-        """Re-label rows from the authoritative timeline, reporting what was used.
-
-        Re-labelling after the fact is what makes the boundary exact. A row is stamped with whatever phase the watchdog
-        believed at the time, and the watchdog only learns of a transition once aiperf has written a log line and the
-        next poll has read it -- so the rows straddling a boundary are systematically attributed to the phase that just
-        ended. The stamps say when the phase actually began, so the correction is applied to the stored rows.
-
-        ``eval`` is never overwritten. It is the accuracy run, which aiperf has no part in and no opinion about.
-        """
-        bounds = self._authoritative_bounds()
-        if bounds is None:
-            return {"phase_source": "log_markers", "phase_timeline": self._phase_timeline or None}
-        # Latest-starting window wins, so a row inside profiling is not also claimed by warmup, whose end the API leaves
-        # null until its requests drain.
-        ordered = sorted(bounds.items(), key=lambda item: item[1][0], reverse=True)
-        moved = 0
-        for row in self._rows:
-            if row.get("phase") == _EVAL:
-                continue
-            ts = json_number(row.get("ts"))
-            if ts is None:
-                continue
-            for phase, (start, end) in ordered:
-                if ts >= start and (end is None or ts <= end):
-                    if row["phase"] != phase:
-                        row["phase"] = phase
-                        moved += 1
-                    break
-        self._rebuild_counter_windows()
-        return {
-            "phase_source": "aiperf_progress_api",
-            "phase_timeline": self._phase_timeline,
-            "phase_bounds_unix": {p: {"start": s, "requests_end": e} for p, (s, e) in bounds.items()},
-            "rows_reattributed": moved,
-        }
-
     def _rebuild_counter_windows(self) -> None:
-        """Re-bracket every counter from the re-attributed rows.
-
-        Re-labelling the rows alone would leave the phase totals wrong, which is the whole point of the exercise: the
-        windows were closed when the watchdog *noticed* a transition, so the increments earned in the lag were already
-        booked to the phase that had ended. Every row carries its raw per-series counters precisely so the windows can
-        be rebuilt from them once the true boundary is known.
+        """Re-bracket every counter from the rows, in time order.
 
         Adjacent phases share the snapshot at their boundary -- the reading that closes one opens the next -- so this
-        keeps the gap-free property the boundary scrapes give, rather than trading it for accuracy.
+        keeps the gap-free property the boundary scrapes give.
         """
         ordered = [r for r in self._rows if isinstance(r.get("counters_by_series"), dict)]
         if not ordered:
@@ -570,28 +396,17 @@ class KvMetricsRecorder:
         default export level, so every AgentX round already has one. A round that has none -- any synthetic benchmark,
         or an AgentX round killed before aiperf flushed -- simply reports ``None``.
         """
-        if self._workspace is None:
-            return None
-        from .agentx_timeline import (
-            TIMELINE_ARTIFACT_NAME,
-            build_events,
-            correlate_rows,
-            find_profile_export,
-            parse_profile_export,
-            write_timeline,
-        )
-
         export = find_profile_export(self._workspace)
         if export is None:
             return None
         records = parse_profile_export(export)
         if not records:
             return None
-        events, summary = build_events(records, self._authoritative_bounds())
+        events, summary = build_events(records)
         # Correlation runs over every record, so the counts on a row stay exact even when the event stream above
         # had to be sampled.
         summary["rows_correlated"] = correlate_rows(self._rows, records)
-        path = Path(self._workspace) / TIMELINE_ARTIFACT_NAME
+        path = self._workspace / TIMELINE_ARTIFACT_NAME
         summary["path"] = path.name if write_timeline(path, events) else None
         summary["source"] = str(export)
         return summary
@@ -607,37 +422,25 @@ class KvMetricsRecorder:
 
     def summary(self, *, aborted: bool = False) -> dict[str, Any]:
         """Build the artifact payload."""
-        # Before attribution, because adopting aiperf's rows replaces the very rows attribution would re-label -- and
-        # makes re-labelling unnecessary, since those rows already carry the phase aiperf stamped at collection time.
         adopted = self._adopt_aiperf_samples()
-        attribution = (
-            {"phase_source": "aiperf_server_metrics", "phase_timeline": self._phase_timeline or None}
-            if adopted
-            else self._reattribute_phases()
-        )
-        # After attribution, so the phase events in the timeline are the same boundaries the rows were labelled by.
+        source = _AIPERF_SOURCE if adopted else None
         workload = self._build_workload_timeline()
         retract_measured, retract_by_phase = self._counter_deltas("retract")
         preempt_measured, preempt_by_phase = self._counter_deltas("preempt")
         return {
-            **attribution,
+            "phase_source": source or _PHASE_MARKS_SOURCE,
             "workload_timeline": workload,
             "schema_version": 1,
             "source": "metrics",
             # Which collector produced the rows. The two differ in cadence and in how the phase was decided, so a
             # consumer comparing rounds has to be able to tell them apart.
-            "sample_source": "aiperf_server_metrics" if adopted else "watchdog_scrape",
+            "sample_source": source or "watchdog_scrape",
             "aiperf_server_metrics_path": adopted,
             "url": self._poller.url,
-            # Whether this round obtained readings at all, by whichever collector -- not whether the watchdog's own
-            # poller reached the endpoint. Once aiperf's records are adopted the poller may legitimately never succeed
-            # (it backs off to a minute, and on a containerised round the engine's port need not be reachable from
-            # where the watchdog runs) while aiperf, in there with it, collects the whole round. Reporting the poller's
-            # view alone put ``available: false`` on an artifact carrying 1656 samples, and the breakdown folds this
-            # field into a session-level "no round ever reached the endpoint".
+            # Whether this round obtained readings at all, by whichever collector: aiperf can collect a round whose
+            # engine port the round's own poller never reached.
             "available": True if adopted else self._poller.available,
             "aborted": bool(aborted),
-            "scope": self._scope,
             "capacity_tokens": self._capacity_tokens,
             "capacity_derived": self._capacity_derived,
             "capacity_gb": self._capacity_gb,
@@ -656,7 +459,7 @@ class KvMetricsRecorder:
         }
 
     def close(self, *, aborted: bool = False) -> dict[str, Any]:
-        """Finish collection and write the artifact when a path was given.
+        """Finish collection and write the artifact.
 
         Idempotent: the loop's ``finally`` may run after a caller has already closed explicitly.
         """
@@ -665,16 +468,11 @@ class KvMetricsRecorder:
         if not self._closed:
             self._scrape(time.monotonic())
         payload = self.summary(aborted=aborted)
-        if self._closed or not self._output_path:
-            self._closed = True
+        if self._closed:
             return payload
         self._closed = True
         try:
-            from pathlib import Path
-
-            from hyperloom_common.io import atomic_write_json
-
-            atomic_write_json(Path(self._output_path), payload)
+            atomic_write_json(self._output_path, payload)
         except (OSError, TypeError, ValueError):
             # Warning, not debug. Not failing the round is the requirement; being quiet about it is not. A round that
             # collected samples and then dropped them on the floor looks identical afterwards to one that never

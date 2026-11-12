@@ -70,7 +70,7 @@ PRELUDE reads warm-start leads from and CLOSE writes the final recipe back to is
 names must be set and a writable directory (no path is assumed: each deployment names its own shared folder); a
 session's runners read the inference_suite staging from ``HYPERLOOM_RUNNER_CACHE``, this host's directory of the runner
 cache, which a session measured in hosted sandboxes must set and one on this machine's cards takes as ``/runner-cache``
-when unset; the image the session runs on must be named by both
+when unset and publishes the staging into once the session directory exists; the image the session runs on must be named by both
 ``HYPERLOOM_ACTIVE_IMAGE_REF`` and ``HYPERLOOM_ACTIVE_IMAGE_DIGEST``; the application's inference_suite tool cache
 must hold a staging of the InferenceX client that verifies; the framework's package must be installed in the image;
 and the agent CLI the specialists run must be installed. A canonical measurement that cannot be taken fails the command
@@ -90,14 +90,16 @@ the same path; a usage error names what is missing.
 ``hosted run`` takes no arguments: it runs the session of the campaign spec a host injected, as
 :mod:`~hyperloom_multibranch.scheduling.hosted_run` maps it onto the options of ``run``, measured in the runner
 sandboxes of the host's sandbox service (:mod:`~hyperloom_multibranch.scheduling.hosted_peers`) or on this container's
-cards, as the spec says. Started again over a run whose ``session.json`` names a session, it resumes that session to
-its first deadline where its baseline still holds, else finishes it as ``final-only`` does (``hosted_restart_leg``),
-except that a finish whose FINAL chooses a commit ends for ``finished_after_restart`` with exit code 0, as the restart
-completed the run, and one that chooses nothing or fails keeps the reason the session ended for and fails. It
-tells the host the run is over -- ``final: true`` in ``exit.json`` -- once CLOSE ran, and when the spec, the
-environment, agents it cannot isolate, a missing package of the ``hosted`` extra or the runner cache keeps a session
-from running, with exit code 2 for a refused spec or session and 1 otherwise; a crash leaves no ``exit.json``, and the
-host starts the run again. Each command says at start how agents are isolated; manifest and report record it.
+cards, as the spec says. Started again over a run whose ``session.json`` names a session, it takes that session over
+(:func:`~hyperloom_multibranch.scheduling.hosted_run.take_over_earlier_session`): it resumes it to its first deadline
+where its baseline still holds, else finishes it as ``final-only`` does (``hosted_restart_leg``), except that a finish
+whose FINAL chooses a commit ends for ``finished_after_restart`` with exit code 0, as the restart completed the run,
+and one that chooses nothing or fails keeps the reason the session ended for and fails; one that ended before its
+PRELUDE recorded the baseline is closed, ending its tests, and the spec's session starts again. It tells the host the
+run is over -- ``final: true`` in ``exit.json`` -- once CLOSE ran, or when the spec, the environment, agents it cannot
+isolate, a missing ``hosted`` package, the runner cache or an unreadable file keeps a session from running (exit code
+2 for a refused spec or session, else 1); a crash leaves no ``exit.json``, and the host starts the run again. Each
+command says at start how agents are isolated; manifest and report record it.
 ``final-only SESSION_DIR`` is the emergency recovery of a session that ended before FINAL ran, and takes nothing but
 that directory: it runs FINAL and CLOSE over what the session persisted -- the settings and the frontier policy its
 manifest holds, the branches its roster and blackboard hold -- and rewrites its report, dashboard and breakdown. It
@@ -150,23 +152,24 @@ from hyperloom_multibranch.scheduling.hosted_peers import PinnedToolboxInputs, l
 from hyperloom_multibranch.scheduling.hosted_run import (
     GrantDeadline,
     HostedExit,
-    arm_grant_stop,
     campaign_spec,
     close_before_starting_again,
-    earlier_session,
     grant_deadline,
     grant_explore_cap,
     grant_tests_that_fit,
     hosted_restart_leg,
     hosted_storage,
-    record_session,
     recorded_session,
     refuse_unhosted_branches,
     reported_stop_reason,
     require_hosted_isolation,
     require_local_image,
     run_argv,
+    share_with_the_group,
     spec_make_before_break,
+    started_session,
+    stop_before_grant_ends,
+    take_over_earlier_session,
     write_final_exit,
 )
 from hyperloom_multibranch.scheduling import review
@@ -231,7 +234,7 @@ ENCODING = "utf-8"
 FILE_METAVAR = "FILE"
 log = logging.getLogger(__name__)
 #: The GPU types a session runs on; the toolbox's environment exports the board itself as ``GPU_TYPE``.
-MAGPIE_RUNNER_GPU_TYPES = ("mi300x", "mi350x", "mi355x")
+SESSION_GPU_TYPES = ("mi300x", "mi350x", "mi355x")
 #: The options ``run`` requires unless it is given ``--resume``, by their argparse names.
 RUN_REQUIRED = ("model", "framework", "gpu_type", "workload", "tp", "conc", "precision")
 #: The options an inferencex workload requires and an agentx one refuses.
@@ -312,9 +315,9 @@ def _add_workload_options(run: argparse.ArgumentParser) -> None:
     """The fixed workload, spelled as ``hyperloom optimize`` spells it, and the kernel optimizer its recipes are scoped
     to."""
 
-    run.add_argument("--model", help="Model path or id.")
+    run.add_argument("--model", help="Model path, or an id found under HL_MODEL_BASE or in the Hugging Face cache.")
     run.add_argument("--framework", help="Inference framework, e.g. vllm or sglang.")
-    run.add_argument("--gpu-type", type=str.lower, choices=MAGPIE_RUNNER_GPU_TYPES, help="GPU type, in any case.")
+    run.add_argument("--gpu-type", type=str.lower, choices=SESSION_GPU_TYPES, help="GPU type, in any case.")
     run.add_argument("--workload", choices=[kind.value for kind in WorkloadKind], help="Workload kind.")
     run.add_argument("--tp", type=int, help="Tensor-parallel size; must fit the machine's cards.")
     run.add_argument(
@@ -480,7 +483,7 @@ def _add_agent_options(run: argparse.ArgumentParser) -> None:
         metavar="SOURCE",
         help=(
             "A third-party agent to run end to end on one branch, a git URL (URL@ref for a ref), a local path, or"
-            f" {ARBOR_KEYWORD} for the Arbor vendored in this source checkout (src/hyperloom_arbor); repeatable, each"
+            f" {ARBOR_KEYWORD} for the Arbor vendored with Hyperloom (src/hyperloom_arbor); repeatable, each"
             " opens one branch where EXPLORE starts, within --max-branches."
         ),
     )
@@ -646,7 +649,7 @@ def _workload_model(args: argparse.Namespace) -> str:
 
 #: Schemes whose URL user is a login name rather than a credential; any other scheme's user, or a password, is one.
 SSH_SCHEMES = frozenset({"ssh", "git+ssh", "svn+ssh"})
-#: The --autonomous-agent source that names the Arbor vendored in this checkout, which a wheel does not ship.
+#: The --autonomous-agent source that names the Arbor vendored beside this package, in a checkout or a wheel install.
 ARBOR_KEYWORD = "arbor"
 VENDORED_ARBOR = Path(__file__).resolve().parent.parent / "hyperloom_arbor"
 
@@ -668,7 +671,7 @@ def _agents(sources: list[str], free: int) -> tuple[str, ...]:
     if ARBOR_KEYWORD in sources and not VENDORED_ARBOR.is_dir():
         raise ValueError(
             f"--autonomous-agent {ARBOR_KEYWORD} names the Arbor vendored at {VENDORED_ARBOR}, which this install does"
-            " not have: it is in a source checkout only; give an Arbor checkout's path or URL instead"
+            " not have; reinstall Hyperloom, or give an Arbor checkout's path or URL instead"
         )
     return tuple(str(VENDORED_ARBOR) if source == ARBOR_KEYWORD else source for source in sources)
 
@@ -805,8 +808,7 @@ def settings_from(
     """The run's settings; raises ValueError naming the invalid options. :class:`RosterCaps` checks the caps.
 
     ``tests_that_fit`` says how many tests of a TP run at once where the session measures, raising ValueError when one
-    does not fit: this machine's cards for ``run``, the grant for ``hosted run``.
-    """
+    does not fit: this machine's cards for ``run``, the grant for ``hosted run``."""
 
     missing = [f"--{name.replace('_', '-')}" for name in RUN_REQUIRED if getattr(args, name) is None]
     if missing:
@@ -932,8 +934,7 @@ def run_session(
 
     The session and its peers are built on the event loop they run on, which the specialist tools of the MCP service
     hand every toolbox call to. Whatever the session's processes orphan is reparented to this process, so the session
-    stop kills it and reports it while it runs.
-    """
+    stop kills it and reports it while it runs."""
 
     with adopting_orphans():
         return asyncio.run(_run_session(settings, peer_factory, services, report_root, explore_cap))
@@ -962,9 +963,7 @@ def final_only(
     return the session's exit code. No session directory is created, which is why this cannot start one. For
     ``restart``, a hosted run's, see :meth:`Session.finish`."""
 
-    return _over_session(
-        persisted, peer_factory, services, lambda session, ended: session.finish(ended, restart=restart)
-    )
+    return _over_session(persisted, peer_factory, services, partial(Session.finish, restart=restart))
 
 
 def resume(
@@ -1078,7 +1077,7 @@ def hosted_run() -> int:
         start = _hosted_start(host)
     except ValueError as exc:
         return _not_run(host.state_dir, EXIT_USAGE, exc)
-    except (EnvironmentIncomplete, PeersUnavailable) as exc:
+    except (EnvironmentIncomplete, PeersUnavailable, PermissionError) as exc:
         return _not_run(host.state_dir, EXIT_FAILED, exc)
     except ImportError as exc:
         log.exception("hosted run: a module the session needs is not installed")
@@ -1095,18 +1094,21 @@ def hosted_run() -> int:
 
 
 def _hosted_start(host: HostInfo) -> HostedStart:
-    """A new session of the spec, or the close, resume or finish of the one ``session.json`` names; raises ValueError
-    when the spec or that session is refused, ImportError when a ``hosted`` package is missing, and what
-    :func:`require_hosted_isolation` and :func:`ready_session` raise."""
+    """A new session of the spec, or the close, resume or finish of the one ``session.json`` names, which the restart
+    takes over (:func:`take_over_earlier_session`); raises ValueError when the spec or that session is refused,
+    ImportError when a ``hosted`` package is missing, and what :func:`require_hosted_isolation` and
+    :func:`ready_session` raise."""
 
     deadline = grant_deadline(host, datetime.now(timezone.utc))
     spec = campaign_spec(host)
     require_hosted_isolation(spec, os.environ)
     require_local_image(spec, os.environ)
-    earlier = earlier_session(host.state_dir)
+    earlier = take_over_earlier_session(host.state_dir)
     if earlier.closed is not None:  # it closed with no baseline, which ended the run, and was killed before exit.json
         return HostedStart(lambda: EXIT_FAILED)
     persisted = earlier.finish
+    if (taken := persisted or earlier.left) is not None:
+        share_with_the_group(taken.layout.root)
     settings = _hosted_settings(host, spec, deadline.session_hours) if persisted is None else persisted.settings
     require_session_environment(settings, os.environ)
     ready = hosted_ready_session(host, settings.workload, local=spec.measurement == MEASUREMENT_LOCAL)
@@ -1117,7 +1119,7 @@ def _hosted_start(host: HostInfo) -> HostedStart:
     elif earlier.left is not None:
         run = partial(_start_again, earlier.left, settings, ready, host)
     else:
-        record = partial(_record_root, host.state_dir)
+        record = partial(started_session, host.state_dir)
         run = partial(run_session, settings, ready.peer_factory, ready.services, record, grant_explore_cap(host))
     return HostedStart(run)
 
@@ -1129,17 +1131,15 @@ def _start_again(left: PersistedRun, settings: RunSettings, ready: ReadySession,
     ended = close_before_starting_again(partial(final_only, left, ready.peer_factory, ready.services), left)
     if ended is not None:
         return ended
-    record = partial(_record_root, host.state_dir)
+    record = partial(started_session, host.state_dir)
     return run_session(settings, ready.peer_factory, ready.services, record, grant_explore_cap(host))
 
 
 def _stop_before_grant_ends(host: HostInfo) -> None:
-    """Arm this process's stop one CLOSE grace before ``host``'s grant ends (at once if passed; never untimed). What is
+    """Arm this process's stop one CLOSE grace before ``host``'s grant ends (:func:`stop_before_grant_ends`). What is
     left of the grant is read now, as the timer starts, not when the start was prepared: that took time of its own."""
 
-    deadline = grant_deadline(host, datetime.now(timezone.utc))
-    if deadline.stop_after_sec is not None:
-        arm_grant_stop(max(0.0, deadline.stop_after_sec))
+    stop_before_grant_ends(grant_deadline(host, datetime.now(timezone.utc)))
 
 
 def _hosted_settings(host: HostInfo, spec: CampaignSpec, session_hours: Callable[[float], float]) -> RunSettings:
@@ -1164,14 +1164,10 @@ def _parsed_run(argv: list[str]) -> argparse.Namespace:
         raise ValueError(f"the spec does not map onto the options of run: {message}") from exc
 
 
-def _record_root(state_dir: Path, root: Path) -> None:
-    _print_root(root)
-    record_session(state_dir, root)
-
-
 def _not_run(state_dir: Path, returncode: int, exc: Exception) -> int:
     """End a run that cannot be served for good: a start of it again would meet what kept this one from running."""
 
+    log.error("hosted run: not served", exc_info=exc)
     print(f"{PROG}: hosted run: {exc}", file=sys.stderr)
     write_final_exit(state_dir, HostedExit(returncode, error=str(exc)))
     return returncode
@@ -1266,7 +1262,7 @@ def main(argv: list[str] | None = None) -> int:
 
 
 __all__ = [
-    "MAGPIE_RUNNER_GPU_TYPES",
+    "SESSION_GPU_TYPES",
     "PROG",
     "SEQUENCE_LENGTHS",
     "HANDED_GRANT",

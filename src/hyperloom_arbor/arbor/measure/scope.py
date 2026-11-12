@@ -117,7 +117,7 @@ def short_image(image: str | None) -> str:
 
 
 def describe(scope: dict | None) -> str:
-    """``image 58cb6b8618bd, C32, ISL 8192, OSL 1024, TP8``; the parts that are known."""
+    """``image <id>, C<conc>, ISL <n>, OSL <n>, TP<n>``; the parts that are known."""
     s = scope or {}
     parts = []
     if s.get("image"):

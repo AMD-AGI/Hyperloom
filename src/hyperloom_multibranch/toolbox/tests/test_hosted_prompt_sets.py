@@ -4,8 +4,8 @@
 """A hosted toolbox's tests run the short-prompt and long-context checks with the session model's own prompt sets.
 
 A hosted session's host names its runner cache in ``HYPERLOOM_RUNNER_CACHE``: it builds the commit's entry there, in the
-directory the runner sandboxes mount (maybe at another path). The hosted toolbox stages the model's sets there when they
-are missing, as the local one does: ``<cache>/evalsets/<key>``, the key a hash of the generator and its inputs (the
+directory the runner sandboxes mount (maybe at another path). A hosted toolbox that sees that directory stages the
+model's sets there when they are missing, as the local one does: ``<cache>/evalsets/<key>``, the key a hash of the generator and its inputs (the
 tokenizer's file hashes, the seed, the long-context length) and the prompts named by their SHA-256 in every sheet. The
 backend here is the hosted one over the local sandbox provider; the stand-in runner reads the sets with the runner's own
 check of the call (``fake_reads_prompt_sets``), in the cache its template names, and lists what it read in the bundle.
@@ -41,8 +41,13 @@ from hyperloom_multibranch.contracts.blackboard import Role, Writer
 from hyperloom_multibranch.contracts.toolbox import WorkloadKind
 from hyperloom_multibranch.toolbox import hosted_toolbox, long_context, short_prompts
 from hyperloom_multibranch.toolbox.hosted_executor import HostedExecutor
-from hyperloom_multibranch.toolbox.hosted_toolbox import HostedOptions, stages_prompt_sets
-from hyperloom_multibranch.toolbox.long_context import LONG_CONTEXT_ENV, LongContextSetup, ServedLongContext
+from hyperloom_multibranch.toolbox.hosted_toolbox import HostedOptions
+from hyperloom_multibranch.toolbox.long_context import (
+    LONG_CONTEXT_ENV,
+    LongContextSetup,
+    ServedLongContext,
+    sees_runner_cache,
+)
 from hyperloom_multibranch.toolbox.short_prompts import MODEL_PATH_ENV, SHORT_PROMPTS_ENV
 from hyperloom_multibranch.toolbox.submission_log import SubmissionLog
 from hyperloom_multibranch.toolbox.tests.helpers import IMAGE, FakeRepo, req
@@ -85,12 +90,12 @@ def host(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Host:
     (model / "tokenizer.json").write_bytes(b'{"model": "hosted"}')
     (model / "config.json").write_text(json.dumps({"max_position_embeddings": _MODEL_LIMIT}), encoding="utf-8")
     cache = tmp_path / "shared" / "runner-cache"
+    cache.mkdir(parents=True)
     return Host(model, cache, {CACHE_ENV: str(cache), MODEL_PATH_ENV: str(model)})
 
 
 def _sandbox_view(tmp_path: Path, host: Host) -> Path:
     """The runner cache as the runner sandboxes mount it: the host's directory, at a path of their own."""
-    host.cache.mkdir(parents=True, exist_ok=True)
     view = tmp_path / "sandbox-mount"
     view.symlink_to(host.cache, target_is_directory=True)
     return view
@@ -224,13 +229,14 @@ async def test_a_set_whose_prompts_changed_in_the_cache_refuses_the_test_and_say
     assert "is not what its manifest recorded" in reason
 
 
-@pytest.mark.parametrize("named", [None, "", "runner-cache"], ids=["unset", "blank", "relative"])
-def test_a_host_that_names_no_runner_cache_stages_nothing_and_says_why_the_check_is_off(
-    tmp_path: Path, host: Host, caplog: pytest.LogCaptureFixture, monkeypatch: pytest.MonkeyPatch, named: str | None
+@pytest.mark.parametrize("named", ["missing", "runner-cache"], ids=["absent", "relative-absent"])
+def test_a_host_that_does_not_see_the_runner_cache_stages_nothing_and_says_why_the_check_is_off(
+    tmp_path: Path, host: Host, caplog: pytest.LogCaptureFixture, monkeypatch: pytest.MonkeyPatch, named: str
 ) -> None:
-    """Without it the default is where a sandbox mounts the cache, not a directory of this host."""
+    """What this host would stage where it does not see the cache would be where no runner reads it."""
     monkeypatch.chdir(tmp_path)
-    environ = {MODEL_PATH_ENV: str(host.model), **({} if named is None else {CACHE_ENV: named})}
+    cache = str(tmp_path / named) if named == "missing" else named
+    environ = {MODEL_PATH_ENV: str(host.model), CACHE_ENV: cache}
 
     with caplog.at_level(logging.WARNING, logger=short_prompts.__name__):
         acceptance = hosted_toolbox._acceptance_with_prompts(
@@ -240,11 +246,19 @@ def test_a_host_that_names_no_runner_cache_stages_nothing_and_says_why_the_check
             None,
         )
 
-    assert not stages_prompt_sets(environ)
+    assert not sees_runner_cache(environ)
     assert acceptance.short_prompts is None and "the toolbox does not stage it" in caplog.text
-    assert not (tmp_path / "runner-cache").exists()
+    assert not (tmp_path / named).exists()
 
 
-def test_a_host_that_names_its_runner_cache_stages_there() -> None:
-    assert stages_prompt_sets({CACHE_ENV: "/shared/hyperloom/runner-cache"})
-    assert stages_prompt_sets({CACHE_ENV: " /shared/hyperloom/runner-cache "})
+def test_a_host_that_sees_its_runner_cache_stages_the_short_prompt_set_there(tmp_path: Path, host: Host) -> None:
+    acceptance = hosted_toolbox._acceptance_with_prompts(
+        AcceptanceSetup(FakeRepo(), PointPlanner(tmp_path / "p.yaml"), IMAGE, WorkloadKind.AGENTX),
+        HostedOptions(),
+        host.environ,
+        None,
+    )
+
+    assert sees_runner_cache(host.environ)
+    assert acceptance.short_prompts is not None
+    assert (host.cache / EVALSETS_DIR / acceptance.short_prompts.prompt_set / DATA_DIR / PROMPTS_FILE).is_file()

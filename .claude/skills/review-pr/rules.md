@@ -74,6 +74,7 @@ the rules listed. Rows overlap; a rule listed twice is read once.
 | touches async code, a lock, a subprocess, a poll or retry loop, a per-candidate step, a timeout or a budget | P1 P2 P3 P6 |
 | touches a metric, score, speedup or gain denominator, or a threshold compared against a number this repo did not produce | M1 M2 M3 |
 | matches or selects by name: substring, `startswith`, `fnmatch`, a first-wins loop, a dedup/grouping/sort key, or an LLM backend, model or credential choice | D5 D6 D7 |
+| touches who may write a path: `shared_storage`, `parent_is_shared`, a mode (`chmod`, `fchmod`, `S_IWGRP`, `2775`), a umask, a setgid or sticky bit, a link (`symlink`, `followlinks`), or a git directory's own files (`config`, `hooks/`, `info/`, `commondir`, `alternates`, `--shared`) | R6 |
 | runs a destructive or privileged command: `pkill`/`kill -9`/`scancel`/`docker rm`, `rmtree`/`unlink`/`move`, `git reset --hard`/`git checkout -- <path>`, `git apply`, `tar -x`/`extractall`, or a cleanup, teardown or self-heal step | R1 R2 R3 R5 |
 | imports from another package, adds an `_internal`/`_`-prefixed import, reads or writes another object's `_attr`, uses `getattr(obj, "_x")`, or adds an exemption to an import check | A1 A2 |
 | adds a string the runtime imports (`import_module`, `-m`, `"pkg.mod:attr"`), a module-level hook a higher layer sets, or an import under `if TYPE_CHECKING:` | A2 |
@@ -359,7 +360,7 @@ opened for stays live.
 ### X7 -- An external-component pin moves in all four places at once
 
 **Severity:** blocking
-**Fires when:** an added or deleted line matches `(VLLM|SGLANG|ATOM|AITER|TRACELENS|MAGPIE|GEAK)_(VERSION|REF|SHA|COMMIT)`, or `files.txt` touches `**/framework_registry.py`, `assets/install*.sh` or `docs/compatibility.rst`.
+**Fires when:** an added or deleted line matches `(VLLM|SGLANG|ATOM|AITER|TRACELENS|GEAK)_(VERSION|REF|SHA|COMMIT)`, or `files.txt` touches `**/framework_registry.py`, `assets/install*.sh` or `docs/compatibility.rst`.
 **The rule:** A component pin lives in code, in `docs/compatibility.rst` and in the install scripts, and all three move together, stated in the description, with the platform gate travelling with the bump. The pin must be an immutable tag or commit rather than a branch name or branch head, and a commit is preferred where the compatibility doc records the tag as known-insufficient. A quoted previous value is verified against the merge base rather than taken from the description, and a fix derives from the value effective at runtime rather than from the old constant.
 **Seen in:** PR #768 -- the description's "previous value" was 120 min while `origin/main` had 130, and the fix was written against the stale constant instead of the budget actually forwarded to the child.
 **Not a finding when:** the pin is only referenced in one place in the head tree (grep confirms no compatibility-doc or install-script mention), or the bump is confined to a test fixture.
@@ -529,6 +530,16 @@ order itself or merely replays it; `$WORK/base.txt` for the run that must fail.
 **Not a finding when:** the archive or patch is produced in-process by this repo from content it already controls, or a validator in the same diff rejects absolute paths and `..` before the call.
 **Evidence:** `$WORK/diff.txt` for the apply/extract call and any validation added alongside it; `$WORK/testfiles.txt` for the absolute-path and `..` regression tests.
 **Report as:** `R5: <file>:<line> applies backend-produced <patch|archive> without header validation (<flag>), allowing escape to <path>`
+
+### R6 -- A security finding is blocking only when a correct run hits it
+
+**Severity:** blocking only in the shape *The rule* keeps, by owner decision 2026-11-11; every other security shape is never a finding.
+**Fires when:** a security finding is drafted against a diff that shares storage, sets modes or a umask, follows or copies links, or lets git read files in a directory the group writes.
+**The rule:** security on this repository means what X9 and the static gates (gitleaks, bandit, CodeQL) cover -- no credential, sensitive term or internal host, path or reference in what the repository ships or prints -- and what a correct, non-malicious run hits in its ordinary course, e.g. a race between two honest legs or a write an honest second leg is refused. Nothing else is a security finding. A trigger that needs someone to act against the run is the environment's, not the diff's: an account of the run's group or an agent it launched planting a link, forging or rewriting a record or git file, racing a write or renaming a file the run trusts; an account outside the group; hostile outside input. So is a window reached only when the run is killed between two adjacent steps. File modes cannot stop an account that may write, and hardening against it does not converge.
+**Seen in:** PR #2604 -- four rounds, the last with three findings that each needed a group member to act: plant a link in the dossier the Arbor copy followed, forge the linked-paths record or `alternates` a bubblewrap launch reads, or race or rename the source base's git `config`. PR #2598 at fc8eeede4 -- a `commondir` another account of the group wrote in the repository top redirected the app's git to its own clone.
+**Not a finding when:** the reproduction needs any actor other than the run itself, or a kill between two adjacent steps.
+**Evidence:** the finding's reproduction -- which actor acted, and whether a correct run performs that act.
+**Report as:** `R6 <file>:<line> -- <correct-run sequence> reaches <effect>`
 
 ## P -- Concurrency, budgets and cost
 

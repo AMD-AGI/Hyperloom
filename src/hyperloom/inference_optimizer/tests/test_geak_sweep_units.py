@@ -367,6 +367,28 @@ async def test_a_replay_without_a_readable_launch_is_refused_before_launch(
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("env_spec", [{}, {"launch_json": "missing"}, {"launch_json": "not_a_launch"}])
+async def test_a_replay_without_a_readable_launch_is_refused_before_launch(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, env_spec: dict[str, str]
+) -> None:
+    (tmp_path / "not_a_launch").write_text("{}", encoding="utf-8")
+    env_spec = {key: str(tmp_path / value) for key, value in env_spec.items()}
+
+    def _must_not_launch(*_args: Any, **_kwargs: Any) -> Any:
+        pytest.fail("a replay with no serving identity must not launch")
+
+    monkeypatch.setattr(_geak_sweep.subprocess, "run", _must_not_launch)
+    result = await sweep_via_geak(
+        result={"bench_script": str(_bench_script(tmp_path)), "accepted_config": {}},
+        spec=GeakSweepSpec(conc_values=[1], isl_osl_configs=["16:16"], variant_timeout_sec=30),
+        output_root=tmp_path / "sweep",
+        env_spec=env_spec,
+    )
+
+    assert (result["status"], result["error_class"]) == ("failed", "invalid_replay_identity")
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize("bench_client", ["auto", "native", "inferencex"])
 async def test_geak_replay_uses_existing_client_contract(
     tmp_path: Path,

@@ -56,7 +56,8 @@ fill it at the workload's concurrency:
 | `server_flags` | yes | The server arguments, with the recipe's `override_c<CONC>` applied. The root recipe's `extra_server_args` are added after them, and the adapter adds SGLang's TP and EP sizes when neither sets them. |
 | `server_env` | yes | The server's environment, as an object of strings: the recipe's variables, its golden `SGLANG_SIMULATE_ACC_*` among them. The root recipe's `extra_envs` and its start tables are set over them. |
 | `model_name` | no | The name the server answers to, which the client requests. Without it, the client's `--model`, else the model's path. |
-| `client` | no | The gate's benchmark client, a command with `--port` (or `--base-url`) and `--result-dir`, or an InferenceSuite round's `--run-dir`, which the adapter makes Arbor's `component.bench_command`. MB's own client comes first, and MB gives one to every session's Arbors. |
+
+MB gives every Arbor the gate's client as its bench command, so the file names none; a `client` key is refused.
 
 The session's base is still resolved from the recipe sources and is what MB measures on; nothing checks the file
 against it.

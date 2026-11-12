@@ -290,8 +290,9 @@ unmatched_ignore_imports_alerting = none
 name = the multi-branch modules build on its contracts, never the reverse
 type = layers
 # Each module implements the protocols contracts declares for its peers, so the contracts sit below all of them.
+# A parenthesised layer is optional: it is not on main yet.
 layers =
-    hyperloom_multibranch.cli : hyperloom_multibranch.scheduling : hyperloom_multibranch.specialist : hyperloom_multibranch.blackboard : hyperloom_multibranch.rulegate : hyperloom_multibranch.repo : hyperloom_multibranch.toolbox
+    hyperloom_multibranch.cli : hyperloom_multibranch.scheduling : (hyperloom_multibranch.specialist) : (hyperloom_multibranch.blackboard) : (hyperloom_multibranch.rulegate) : (hyperloom_multibranch.repo) : (hyperloom_multibranch.toolbox)
     hyperloom_multibranch.contracts
 
 
@@ -379,21 +380,21 @@ unmatched_ignore_imports_alerting = none
 name = inference_suite modules depend downward only, and modules of one layer not on each other
 type = layers
 # Full module names rather than `containers`, so each layer is also a package unit of the
-# code-metrics design checks. A parenthesised layer is optional: it is not on main yet.
+# code-metrics design checks.
 layers =
-    (inference_suite.__main__)
-    (inference_suite.cli)
-    (inference_suite.run)
-    (inference_suite.load) | (inference_suite.eval) | (inference_suite.profile)
-    (inference_suite.runtime)
-    (inference_suite.telemetry)
-    (inference_suite.compose)
-    (inference_suite.recipe) | (inference_suite.parser_check) | (inference_suite.framework_version)
-    (inference_suite.framework_probe) | (inference_suite.staging)
-    (inference_suite.client_env)
-    (inference_suite.contracts) | (inference_suite.aiperf_patch)
-    (inference_suite.golden) | (inference_suite.frameworks) | (inference_suite.pins) | (inference_suite.server_log)
-    (inference_suite.argv)
+    inference_suite.__main__
+    inference_suite.cli
+    inference_suite.run
+    inference_suite.load | inference_suite.eval | inference_suite.profile
+    inference_suite.runtime
+    inference_suite.telemetry
+    inference_suite.compose
+    inference_suite.recipe | inference_suite.parser_check | inference_suite.framework_version
+    inference_suite.framework_probe | inference_suite.staging
+    inference_suite.client_env
+    inference_suite.contracts | inference_suite.aiperf_patch
+    inference_suite.golden | inference_suite.frameworks | inference_suite.pins | inference_suite.server_log
+    inference_suite.argv
 
 
 [importlinter:contract:acyclic]

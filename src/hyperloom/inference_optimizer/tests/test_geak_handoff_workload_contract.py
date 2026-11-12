@@ -14,6 +14,7 @@ import pytest
 import yaml
 
 from hyperloom.orchestrator.actions.executors._server_lifecycle import GpuHandoff
+from hyperloom.orchestrator.actions.executors._workload_envs import build_agentx_workload_spec, geak_grading_fields
 from hyperloom.orchestrator.loop.coordinator import Coordinator
 from hyperloom.orchestrator.state.shared_state import SharedState
 
@@ -67,11 +68,10 @@ _BASIS_OF = {
 _ACCEPTED_LAUNCH = _launch(
     candidate=LaunchDelta(args_add=("--accepted-flag", "1"), env_set={"ACCEPTED_SETTING": "1"}),
 )
-#: Its flags GEAK reproduces: no topology (GEAK owns it), no structured value, no round layer. The runner's engine
-#: seed is part of the measured launch: under speculative decoding the throughput moves with it.
+#: Its flags GEAK reproduces: no topology (GEAK owns it), no structured value, no round layer.
 _ACCEPTED_FLAGS = (
     "--disable-radix-cache --context-length 65536 --accepted-flag 1 --speculative-algorithm EAGLE"
-    " --speculative-num-steps 3 --watchdog-timeout 600 --enable-metrics --random-seed 0"
+    " --speculative-num-steps 3 --watchdog-timeout 600 --enable-metrics"
 )
 
 
@@ -243,6 +243,48 @@ async def test_native_handoff_keeps_supported_schema_and_seeds_geaks_own_launche
 
 
 @pytest.mark.asyncio
+async def test_an_agentx_handoff_declares_the_trace_the_accepted_round_replayed(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    coord = _coord(tmp_path)
+    artifacts = tmp_path / "accepted_run" / "client" / "aiperf_artifacts"
+    artifacts.mkdir(parents=True)
+    dataset = {"loader": "semianalysis_cc_traces_weka_062126", "num_dataset_entries": 393}
+    (artifacts / "profile_export_aiperf.json").write_text(json.dumps({"metadata": {"dataset": dataset}}))
+
+    spec = (await _handoff(coord, monkeypatch))["workload_spec"]
+
+    assert (spec["kind"], spec["corpus"], spec["canonical_corpus"]) == (
+        "agentx_trace_replay",
+        "semianalysis_cc_traces_weka_062126",
+        "semianalysis_cc_traces_weka_062126",
+    )
+    assert (spec["num_entries"], spec["canonical_num_entries"], spec["concurrency"]) == (393, 393, 6)
+    assert spec["metric_basis"] == geak_grading_fields(None)["metric_basis"]
+
+
+@pytest.mark.asyncio
+async def test_an_mlperf_agentx_handoff_keeps_the_graded_mlperf_workload(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """GEAK picks its client from the kind, so an MLPerf session must not be handed the trace-replay one."""
+    coord = _coord(tmp_path)
+    recipe = Path(coord.shared_state.baseline_config_path)
+    document = yaml.safe_load(recipe.read_text(encoding="utf-8"))
+    mlperf = build_agentx_workload_spec(document["benchmark"]["envs"], env={"CONC": "6"})
+    document["benchmark"]["workload_spec"] = mlperf
+    recipe.write_text(yaml.safe_dump(document), encoding="utf-8")
+
+    spec = (await _handoff(coord, monkeypatch))["workload_spec"]
+
+    assert {key: spec[key] for key in ("kind", "client", "scenario", "corpus", "num_entries")} == {
+        key: mlperf[key] for key in ("kind", "client", "scenario", "corpus", "num_entries")
+    }
+    assert spec["kind"] == "agentx_mlperf_agentic"
+    assert spec["concurrency"] == 6
+
+
+@pytest.mark.asyncio
 async def test_native_handoff_reproduces_the_measured_launch_json_without_searching_server_logs(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -254,8 +296,10 @@ async def test_native_handoff_reproduces_the_measured_launch_json_without_search
     config = handoff["baseline_env_spec"]["config"]
     assert config["server_launch_flags"] == _ACCEPTED_FLAGS
     framework_bin = str(Path(_ACCEPTED_LAUNCH.framework.python).parent)
-    assert config["extra_envs"].pop("PATH").startswith(framework_bin + os.pathsep)
-    assert config["extra_envs"] == {
+    extra_envs = dict(config["extra_envs"])
+    path = extra_envs.pop("PATH")
+    assert path.startswith(framework_bin + os.pathsep)
+    assert extra_envs == {
         "SGLANG_USE_AITER": "1",
         "ACCEPTED_SETTING": "1",
         "SGLANG_SIMULATE_ACC_LEN": "3.48",
@@ -316,7 +360,7 @@ async def test_agentx_geak_metric_aligned_result_is_only_a_proposal_proxy(
     handoff = json.loads((tmp_path / "geak" / "handoff.json").read_text(encoding="utf-8"))
     [captured_env] = launches
     assert (handoff["e2e_metric"], captured_env["E2E_METRIC"]) == (expected_metric, expected_metric)
-    assert handoff["workload_spec"] == {"kind": "agentx_trace_replay"}
+    assert handoff["workload_spec"] == {"kind": "agentx_trace_replay", "concurrency": 6, **geak_grading_fields(None)}
     assert "INFERENCEX_BENCH_SERVING" not in captured_env
     assert handoff["same_config_reference_status"] == "unverified"
     assert handoff["same_config_reference_verification_status"] == "unverified_workload"

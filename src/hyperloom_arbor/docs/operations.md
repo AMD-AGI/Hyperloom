@@ -72,7 +72,7 @@ time limit, scripts). State lives under `<store>/<run_id>/`. Tested on fakes onl
 A session writes a checkpoint at every pass boundary (`arbor/checkpoints.py`): after each pass and after a round end.
 A failure is printed and never stops the run; `"checkpoints": false` in the config turns them off. On a checkpoint
 you can continue a campaign on another node (`restore`), stop it cleanly and continue it later (`pause`), or start
-new branches from it (`fork`).
+new branches from it (`fork`). [quickstart-checkpoints.md](quickstart-checkpoints.md) walks through each.
 
 **What a checkpoint holds** (`<session>/checkpoints/NNNN.json`, `arbor.checkpoint/2`, the checkpoint after iteration
 NNNN):

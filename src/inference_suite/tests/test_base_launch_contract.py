@@ -169,8 +169,8 @@ def _documented_digest(document: dict) -> str:
     return "sha256:" + hashlib.sha256(canonical.encode()).hexdigest()
 
 
-def test_the_c6254_p1_example_reads_with_the_fields_recorded_beside_it():
-    p1 = {
+def test_a_hand_written_base_with_a_model_path_and_a_client_command_reads_and_round_trips():
+    written = {
         "schema": "hyperloom-base-launch/1",
         "source": {
             "kind": "inferencex",
@@ -205,17 +205,17 @@ def test_the_c6254_p1_example_reads_with_the_fields_recorded_beside_it():
             "isl": None,
             "osl": None,
         },
-        "source": {**p1["source"], "api": None, "path": None, "locator": None, "strategy": None, "tools": {}},
+        "source": {**written["source"], "api": None, "path": None, "locator": None, "strategy": None, "tools": {}},
         "point": {"conc": 12, "exact": True, "alternatives": []},
         "image": {
-            **p1["image"],
+            **written["image"],
             "framework_version": "0.5.23",
             "version_basis": "assumed_latest",
             "assumed_release": "v0.5.23",
         },
         "topology": {"tp": 1, "ep": 1},
         "golden_al": {
-            **p1["golden_al"],
+            **written["golden_al"],
             "thinking_mode": "thinking_on",
             "spec_method": "EAGLE",
             "draft_model": None,
@@ -224,20 +224,21 @@ def test_the_c6254_p1_example_reads_with_the_fields_recorded_beside_it():
             "args": [],
             "env": {},
         },
-        "client": {"tool": "inferencex", "commit": _COMMIT, "args": ["--seed", "7"], "env": {}, **p1["client"]},
+        "client": {"tool": "inferencex", "commit": _COMMIT, "args": ["--seed", "7"], "env": {}, **written["client"]},
         "stripped": [],
         "warnings": [],
         "resolved_unix": 1_762_380_274,
+        "upstream": [],
     }
-    document = {**p1, **beside}
+    document = {**written, **beside}
     document["digest"] = _documented_digest(document)
 
     base = BaseLaunch.from_document(document)
 
     assert base.model == LaunchModel("amd/Qwen3.8-Next-MXFP4", "/data/models/Qwen3.8-Next-MXFP4")
     assert base.client.command == "inferencex --seed 7"
-    assert base.runner_owned.env == tuple(p1["runner_owned"]["env"])
-    assert base.to_document() == {**document, "upstream": []}
+    assert base.runner_owned.env == tuple(written["runner_owned"]["env"])
+    assert base.to_document() == document
 
 
 def test_a_document_whose_digest_does_not_match_is_refused():
@@ -504,11 +505,12 @@ def test_upstream_revisions_round_trip_and_stay_out_of_the_digest():
     assert _base(upstream=()).digest() == _base().digest()
 
 
-def test_a_base_document_written_without_upstream_revisions_still_reads():
+def test_a_base_document_without_upstream_revisions_is_refused():
     document = _base().to_document()
     del document["upstream"]
 
-    assert BaseLaunch.from_document(document).upstream == ()
+    with pytest.raises(BaseLaunchError, match="upstream"):
+        BaseLaunch.from_document(document)
 
 
 @pytest.mark.parametrize(

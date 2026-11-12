@@ -190,14 +190,15 @@ def _refuse_unrunnable_speculative_launch(benchmark: Mapping[str, Any], *, model
     check the env-composed launches get.
 
     Raises:
-        SpeculativeCapabilityUnsupportedError: When the launch drafts with a kernel the stack does not ship.
+        SpeculativeCapabilityUnsupportedError: When the launch drafts with a kernel the stack does not ship, or outside
+            the draft bounds the recipe declares.
     """
     from hyperloom.inference_optimizer.speculative_capability import refuse_unrunnable_speculative_stack
 
     launch = (benchmark.get("agentx") or {}).get("launch_overrides") or {}
     refuse_unrunnable_speculative_stack(
         _inherited_server_args(list(launch.get("append_args", []))),
-        framework=str(benchmark.get("framework") or ""),
+        benchmark,
         # launch_server.sh reads TP from the launch environment, which a round layers over the workload's.
         envs=_launch_envs(benchmark, launch),
         model_path=model_path or "",

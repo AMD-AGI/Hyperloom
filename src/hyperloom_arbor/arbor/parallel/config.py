@@ -6,7 +6,7 @@
      "dossier_dir": "docs/dossier/<model>-<platform>/<round>",
      "gates": "configs/parallel/gates-c8.json", "lane_sessions": "/path/to/sessions",
      "max_lanes": 4, "max_rounds": 0, "no_keep_rounds": 2,
-     "seed": {"map": ".../11.u4-directions.md", "overlay": "configs/parallel/r1-r01-lanes.json",
+     "seed": {"map": ".../11.uK-directions.md", "overlay": "configs/parallel/r1-r01-lanes.json",
               "bar_record": "..."},
      "image_src": {"vllm": "<the image's stock vllm/, unpacked on the host>"},
      "base_vmu": "<prefix of the base's .diff/.blobs; default the template's base_vmu>",

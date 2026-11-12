@@ -432,14 +432,6 @@ def test_power_json_bounds_each_phase_by_its_mark_and_the_report_carries_its_ene
     assert [block.gpu for block in blocks] == list(range(8))
 
 
-def test_the_report_names_the_host_the_round_ran_on_as_power_json_does(rig):
-    result = run.run_round(rig.config("r1"))
-
-    document = json.loads(result.layout.power.read_text())
-    assert result.report.host == document["host"] == socket.gethostname()
-    assert json.loads(result.layout.report.read_text())["host"] == socket.gethostname()
-
-
 def test_a_fixed_client_whose_timed_run_disagrees_with_its_duration_invalidates_the_energy(rig, monkeypatch):
     monkeypatch.setenv("FAKE_CLIENT_DURATION_SKEW", "2.0")
     config = rig.config("r1")
@@ -480,6 +472,8 @@ def test_kv_samples_cover_the_ready_server_and_carry_their_phase(rig):
     assert launch.client is not None and launch.client.argv[launch.client.argv.index("--base-url") + 1] == base_url
     kv = json.loads(result.layout.kv_metrics.read_text())
     assert kv["url"] == base_url + "/metrics" and kv["available"] is True and not kv["aborted"]
+    assert (kv["phase_source"], kv["sample_source"]) == ("phase_marks", "watchdog_scrape")
+    assert not {"phase_timeline", "scope"} & set(kv)
     phases = {row["phase"] for row in kv["samples"]}
     assert {Phase.WARMUP.value, Phase.MEASURED.value, Phase.FINISHED.value, Phase.EVAL.value} <= phases
     assert all(row["capacity_tokens"] == 4096 for row in kv["samples"])
@@ -607,7 +601,9 @@ def test_an_agentx_window_longer_than_the_replay_closes_when_the_profiling_reque
     assert result.report.run_status is RunStatus.COMPLETED, result.report.failure_detail
     finished = _marks(result.layout)[Phase.FINISHED.value]
     capture = json.loads(result.layout.profile_capture.read_text())
-    assert finished <= capture["window_close_unix"] < finished + 0.15, "closed at the next poll, not after the tail"
+    # phase_marks.json holds milliseconds; rounding the close the same way keeps the order the run recorded.
+    closed = round(capture["window_close_unix"], 3)
+    assert finished <= closed < finished + 0.15, "closed at the next poll, not after the tail"
 
 
 @pytest.mark.parametrize(
@@ -666,6 +662,66 @@ def test_an_mlperf_round_runs_the_harness_against_its_own_server_and_maps_its_re
     marks = _marks(layout)
     assert marks[Phase.MEASURED.value] < marks[Phase.FINISHED.value]
     assert not layout.server_pid.exists(), "the round owns its server and takes it down"
+
+
+def _relative_to(config: SuiteConfig, root: Path) -> SuiteConfig:
+    def below(path: str) -> str:
+        return str(Path(path).relative_to(root))
+
+    server = replace(
+        config.server,
+        base=replace(config.server.base, path=below(config.server.base.path)),
+        framework_python=below(config.server.framework_python),
+    )
+    mlperf = config.mlperf and replace(
+        config.mlperf,
+        endpoints_dir=below(config.mlperf.endpoints_dir),
+        tokenizer=below(config.mlperf.tokenizer),
+        dataset=below(config.mlperf.dataset),
+    )
+    paths = replace(config.paths, run_dir=below(config.paths.run_dir), tool_cache=below(config.paths.tool_cache))
+    return replace(config, server=server, paths=paths, mlperf=mlperf)
+
+
+def test_an_mlperf_round_given_relative_paths_reads_and_writes_them_below_the_callers_directory(rig, monkeypatch):
+    monkeypatch.chdir(rig.tmp)
+    (rig.tmp / "bin").mkdir()
+    rig.framework_python = rig.framework_python.rename(rig.tmp / "bin" / "python")
+    config = _mlperf_config(rig, "runs/r1", monkeypatch)
+    config = replace(config, server=replace(config.server, framework_python=str(rig.framework_python)))
+
+    result = run.run_round(_relative_to(config, rig.tmp))
+
+    assert result.report.run_status is RunStatus.COMPLETED, result.report.failure_detail
+    assert result.layout.root == rig.tmp / "runs" / "r1"
+    assert list(result.layout.mlperf_artifacts.iterdir())
+    assert not (rig.tmp / "endpoints" / "runs").exists()
+    recorded = yaml.safe_load(result.layout.config.read_text())
+    assert recorded["paths"]["tool_cache"] == str(rig.tools)
+    assert recorded["server"]["base"]["path"] == str(rig.base_path)
+    assert recorded["server"]["framework_python"] == str(rig.framework_python)
+    assert recorded["mlperf"]["endpoints_dir"] == str(rig.tmp / "endpoints")
+    assert (recorded["mlperf"]["dataset"], recorded["mlperf"]["tokenizer"]) == (
+        str(rig.tmp / "agentic_combined_v6.jsonl"),
+        str(rig.tmp / "tokenizer"),
+    )
+
+
+@pytest.mark.parametrize(
+    ("model_path", "served"),
+    [("models/GLM-5.3", "{tmp}/models/GLM-5.3"), ("zai-org/GLM-5.3", "zai-org/GLM-5.3"), ("/m/GLM", "/m/GLM")],
+)
+def test_a_round_anchors_a_relative_model_directory_and_keeps_a_hub_id_or_an_absolute_path(
+    rig, monkeypatch, model_path, served
+):
+    monkeypatch.chdir(rig.tmp)
+    (rig.tmp / "models" / "GLM-5.3").mkdir(parents=True)
+    config = rig.config("r1")
+    config = replace(config, server=replace(config.server, model_path=model_path))
+
+    recorded = yaml.safe_load(run.run_round(config).layout.config.read_text())
+
+    assert recorded["server"]["model_path"] == served.format(tmp=rig.tmp)
 
 
 def test_a_failing_mlperf_harness_fails_the_round_as_its_client(rig, monkeypatch):
@@ -823,6 +879,15 @@ def test_a_cancelled_round_stops_and_reaps_its_server(rig):
     assert (report.run_status, report.failed_step) == (RunStatus.STOPPED, FailedStep.CANCELLED)
     assert report.failure_detail == "the operator cancelled"
     assert not RunLayout(rig.tmp / "r1").server_pid.exists()
+
+
+def test_a_boot_round_writes_a_relative_pid_dir_below_the_callers_directory(rig, monkeypatch):
+    monkeypatch.chdir(rig.tmp)
+    boot = rig.config("boot", workload=WorkloadKind.NONE, fixed=None, lifecycle=Lifecycle(LifecycleMode.BOOT, "pids"))
+
+    assert run.run_round(boot).report.run_status is RunStatus.COMPLETED
+    assert (rig.tmp / "pids" / "server.pid").exists()
+    assert not runtime_server.stop(rig.tmp / "pids").survivors
 
 
 def test_a_reuse_round_runs_on_the_server_a_boot_round_left_and_the_cli_stops_it(rig):

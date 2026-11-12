@@ -430,6 +430,32 @@ class Redacted:
 EnvValue = str | Redacted
 
 
+class CredentialNotHeld(ValueError):
+    """A redacted value the host holds no value of, or another value; the message names it, never a value."""
+
+
+def held_env(env: Mapping[str, EnvValue], host: Mapping[str, str]) -> dict[str, str]:
+    """``env`` with each redacted value taken from ``host``, which must hold the value the base was resolved with.
+
+    Raises:
+        CredentialNotHeld: ``host`` holds no value of a redacted name, or another value than the resolved one.
+    """
+    held: dict[str, str] = {}
+    for name, value in env.items():
+        if isinstance(value, str):
+            held[name] = value
+            continue
+        host_value = host.get(name)
+        if host_value is None:
+            raise CredentialNotHeld(f"{name} is redacted in the base and the host holds no value of it")
+        if hashlib.sha256(host_value.encode()).hexdigest() != value.sha256:
+            raise CredentialNotHeld(
+                f"{name} is redacted in the base and the host's value is not the one the base was resolved with"
+            )
+        held[name] = host_value
+    return held
+
+
 def _env(value: object, what: str) -> dict[str, EnvValue]:
     env = dict(_FIELDS.mapping(value, what))
     _env_names(list(env), what)
@@ -618,8 +644,7 @@ class BaseLaunch:
 
     ``args`` and ``env`` hold neither runner-owned keys nor, when there is a golden layer, golden-owned ones.
     ``stripped`` names what was taken out of the source because the runner owns it; ``warnings`` are shown at launch.
-    ``upstream`` is the revision of every upstream source resolving read, the one the launch came from or not; a
-    document written before it was recorded reads with none.
+    ``upstream`` is the revision of every upstream source resolving read, the one the launch came from or not.
 
     A scriptable base (``query.workload`` scriptable) runs its entrypoint's last word, :attr:`script`, and nothing
     else: no client, args, env or golden layer, and ``source.files`` records the script's sha256.
@@ -781,7 +806,7 @@ class BaseLaunch:
             stripped=_FIELDS.strings(fields.get("stripped", ()), "the stripped flags"),
             warnings=_FIELDS.strings(fields.get("warnings", ()), "the warnings"),
             upstream=tuple(
-                map(UpstreamRevision.from_document, _FIELDS.items(fields.get("upstream", ()), "the upstream revisions"))
+                map(UpstreamRevision.from_document, _FIELDS.items(fields.get("upstream"), "the upstream revisions"))
             ),
         )
         recorded = fields.get("digest")
@@ -800,6 +825,7 @@ __all__ = [
     "BaseLaunch",
     "BaseLaunchError",
     "ClientLaunch",
+    "CredentialNotHeld",
     "EnvValue",
     "GoldenAcceptance",
     "GoldenCurve",
@@ -818,4 +844,5 @@ __all__ = [
     "UpstreamSource",
     "VersionBasis",
     "Workload",
+    "held_env",
 ]

@@ -14,7 +14,7 @@ dossier-only pass or from minimal directions from the host, with a roadmap as th
   CUDA-graph trace): the families also match hipBLASLt's Tensile GEMMs (``Cijk_``), vLLM's skinny
   GEMM (``wvSplitK``), its KV-cache write (``reshape_and_cache``) and its prefix-prefill attention
   (``_fwd_kernel``); copies and memcpys stay unmapped.
-- **The template** is a hand-written serving roadmap (the "v2 roadmap" a pack's constraints
+- **The template** is a hand-written serving roadmap (the serving roadmap a pack's constraints
   section holds), model-independent: each family is one direction, titled as that roadmap frames
   the gap. The small kernels (norm, RoPE, activation, elementwise) are one direction, as its
   fusion item has them.

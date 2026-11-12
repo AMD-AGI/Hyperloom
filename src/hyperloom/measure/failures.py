@@ -32,6 +32,7 @@ from hyperloom.common.failure_signature import (
     HIP_RUNTIME_ERROR,
     IMPORT_ERROR,
     SERVE_FLAG,
+    FailureSignature,
     classify_failure,
     framework_unimportable_line,
 )
@@ -104,6 +105,10 @@ HF_CACHE_PERMISSION = "hf_cache_permission"
 #: sandboxes: ``hyperloom_multibranch.toolbox.attempts`` ends the test with it.
 SANDBOX_ACQUIRE_TIMEOUT = "sandbox_acquire_timeout"
 
+#: The AgentX checkpoint stopped the measured round for trailing its reference by more than the allowed drop
+#: (``measure.checkpoint``): a ruling on the candidate, never retried. The ruling itself is in the round's slot.
+AGENTX_EARLY_STOP = "agentx_early_stop"
+
 #: The server died in the memory-snapshot dump SGLang's CUDA-graph profile runs after the capture
 #: (``torch.cuda.memory._dump_snapshot``; on a ROCm PyTorch ``RuntimeError: stoi`` from its addr2line symbolizer). Only a
 #: profile's ``--enable-profile-cuda-graph`` runs that dump, and it fails on what the image's PyTorch makes of the stacks it
@@ -111,10 +116,6 @@ SANDBOX_ACQUIRE_TIMEOUT = "sandbox_acquire_timeout"
 #: sandbox of the image repeats (``hyperloom_multibranch.toolbox.attempts`` ends the test with it at once). The reason is
 #: ``<this>: <the exception the dump raised>``.
 PROFILER_SNAPSHOT_FAILED = "profiler_snapshot_failed"
-
-#: The AgentX checkpoint stopped the measured round for trailing its reference by more than the allowed drop
-#: (``measure.checkpoint``): a ruling on the candidate, never retried. The ruling itself is in the round's slot.
-AGENTX_EARLY_STOP = "agentx_early_stop"
 
 #: ``error_class`` values a runner, the hosted backend or the platform reports that are not about the candidate.
 INFRA_ERROR_CLASSES: frozenset[str] = frozenset(
@@ -310,7 +311,7 @@ def classify_test_failure(
     by_step = _from_step(reported, evidence.framework_changed) if reported else None
     if by_step is not None:
         return by_step
-    named = _named_by_logs(text, parts)
+    named = _named_by_logs(text, parts, eval_failed=step is FailedStep.EVAL_FAILED)
     if named is not None:
         return named
     if returncode == SERVER_BOOT_TIMEOUT_RC or step is FailedStep.SERVER_BOOT_TIMEOUT:
@@ -366,11 +367,12 @@ def _framework_unimportable(detail: str, changed: bool) -> FailureClassification
     return _infra(f"{FRAMEWORK_UNIMPORTABLE_REASON}: {line}")
 
 
-def _named_by_logs(text: str, parts: list[str]) -> FailureClassification | None:
+def _named_by_logs(text: str, parts: list[str], *, eval_failed: bool = False) -> FailureClassification | None:
     """The verdict a log gives by itself: a port taken, a known signature, a refused command line, a profile's snapshot
     dump that failed; else ``None``.
 
-    ``text`` is the logs ``parts`` joined.
+    ``text`` is the logs ``parts`` joined. ``eval_failed`` is a round report's ``eval_failed``, which states what the
+    ``run_eval failed`` line of the signature table states: the evaluation itself ended the test.
     """
     if _PORT_IN_USE.search(text):
         return _infra(PORT_IN_USE_REASON)
@@ -389,6 +391,8 @@ def _named_by_logs(text: str, parts: list[str]) -> FailureClassification | None:
     if hang:
         return _infra(f"{JIT_BUILD_TIMEOUT}: {hang}")
     signature = classify_failure(text)
+    if eval_failed and not signature.is_actionable:
+        signature = FailureSignature(kind=EVAL_RUNTIME_FAILURE)
     if signature.kind == EVAL_RUNTIME_FAILURE:
         refusal = log_causes.bad_request(text)
         if refusal:

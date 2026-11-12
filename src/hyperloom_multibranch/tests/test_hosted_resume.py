@@ -250,7 +250,7 @@ def restart_leg(state_dir: str, image: list[str]) -> dict[str, object]:
 
     os.environ.update(zip(IMAGE_VARS, image))
     os.environ["NODE_NAME"] = "rescheduled-node"
-    persisted = hosted_run.earlier_session(Path(state_dir)).finish
+    persisted = hosted_run.take_over_earlier_session(Path(state_dir)).finish
     assert persisted is not None
     leg = hosted_run.hosted_restart_leg(persisted, cli.final_only, cli.resume)
     if leg is cli.final_only:

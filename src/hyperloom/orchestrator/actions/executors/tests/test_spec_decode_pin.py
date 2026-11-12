@@ -11,7 +11,7 @@ from pathlib import Path
 import pytest
 import yaml
 
-from hyperloom.inference_optimizer.agentx.report import native_launch_evidence
+from hyperloom.orchestrator.actions.executors.tests.test_native_launch_replay import native_receipt
 from hyperloom.orchestrator.actions.executors import _grid_runner as gr
 from hyperloom.orchestrator.actions.executors._grid_base import GridVariant
 from hyperloom.orchestrator.actions.executors._grid_runner import GridRecipe, _build_variant_yaml, run_grid
@@ -24,7 +24,6 @@ from hyperloom.orchestrator.actions.executors._workload_envs import (
 )
 from hyperloom.common.failure_signature import SERVE_FLAG
 from hyperloom.orchestrator.actions.executors._spec_decode_pin import (
-    SPECULATIVE_DECODING_PINNED,
     SpeculativeDecodingPinnedError,
     refuse_unpinned_speculative_change,
     speculative_pin_reason,
@@ -330,8 +329,8 @@ def test_a_round_does_not_admit_a_variant_that_moves_a_lever_the_base_pins(frame
     """The proposal is refused where it is admitted, so the round keeps the slot rather than losing it at launch."""
     kept, dropped = _admission(variant, framework=framework, base_args=base_args, base_envs=base_envs)
     assert not kept
-    assert [(d["name"], d["source"]) for d in dropped] == [("v", SPECULATIVE_DECODING_PINNED)]
-    assert dropped[0]["reason"].startswith(f"{SERVE_FLAG}: golden-owned ")
+    assert [(d["name"], d["source"]) for d in dropped] == [("v", SERVE_FLAG)]
+    assert SERVE_FLAG in dropped[0]["reason"]
 
 
 @pytest.mark.parametrize(
@@ -393,7 +392,7 @@ def test_a_round_admits_against_the_environment_its_base_launches_with():
     rnd.grid = [GridVariant("drop_simulated_acceptance", unset_envs=["SGLANG_SIMULATE_ACC_LEN"])]
     rnd.params = {}
     rnd.ss = None
-    rnd.framework = "sglang"
+    rnd.bench = {"framework": "sglang"}
     rnd.target = BenchmarkTarget(model_path="", gpu_type="mi355x")
     rnd.yaml_envs = dict(SGLANG_SYNTHETIC_ENV)
     rnd.envs = {}
@@ -529,7 +528,9 @@ async def test_a_variant_touching_golden_fails_as_serve_flag_naming_the_key(tmp_
 
 
 def _native_recipe(
-    tmp_path: Path, recipe_args: list[str] | None = None, recipe_envs: dict[str, str | None] | None = None
+    tmp_path: Path,
+    recipe_args: list[str] | None = None,
+    recipe_envs: dict[str, str | None] | None = None,
 ) -> Path:
     """A native recipe as a verified session leaves it: the resolved workload and the launch receipt beside it.
 
@@ -555,22 +556,7 @@ def _native_recipe(
     )
     config = materialize_benchmark_config(source, tmp_path / "recipe")
     argv = NATIVE_PREFIX + list(recipe_args or [])
-    persist_launch_evidence(
-        native_launch_evidence(
-            {
-                "agentx_metrics": {
-                    "server_launch": {
-                        "base_argv": argv,
-                        "effective_argv": argv,
-                        "effective_env": dict(recipe_envs or {}),
-                    },
-                    "recipe": {"tp": 1, "ep": 1, "conc": 8},
-                }
-            },
-            config,
-        ),
-        slot=config.parent,
-    )
+    persist_launch_evidence(native_receipt(config, argv, dict(recipe_envs or {})), slot=config.parent)
     return config
 
 

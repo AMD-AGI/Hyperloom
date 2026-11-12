@@ -197,6 +197,7 @@ def test_the_workload_reaches_the_renderer_as_hyperloom_optimize_exports_it(monk
         "FRAMEWORK": "sglang",
         "MODEL_PATH": "/models/Llama-3-8B",
         "TP": "2",
+        "EP": "1",
         "ISL": "1024",
         "OSL": "512",
         "PRECISION": "bf16",
@@ -204,6 +205,11 @@ def test_the_workload_reaches_the_renderer_as_hyperloom_optimize_exports_it(monk
         "TARGET_GPU_TYPE": "mi355x",
         "KERNEL_OPT_BACKEND_ORDER": "forge",
     }
+
+
+def test_an_inferencex_workload_at_an_ep_reaches_the_renderer_at_that_ep(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.delenv("HL_MODEL_BASE", raising=False)
+    assert workload_environment(replace(WORKLOAD, ep=8))["EP"] == "8"
 
 
 def test_an_mi350x_is_exported_as_itself(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -986,7 +992,7 @@ async def test_a_hosted_session_measures_in_the_services_sandboxes_under_its_too
 @pytest.mark.parametrize(
     ("problems", "launched", "level", "said_first"),
     [
-        ((), BWRAP, logging.INFO, "agent isolation: specialists bwrap, sandboxes bwrap, tests bwrap"),
+        ((), BWRAP, logging.INFO, f"agent isolation: specialists {BWRAP}, sandboxes {BWRAP}, tests {BWRAP}"),
         (
             ("bwrap: not found",),
             NONE,

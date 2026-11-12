@@ -27,18 +27,43 @@ it.
   and Arbor checks its launch against that base at its start. Before, an
   AgentX branch without one of those flags was refused before PRELUDE, and a
   fixed-workload Arbor was served only the root recipe's flags. `--agent-launch`
-  still replaces the base. An Arbor now refuses to start when the root recipe
-  adds anything to the base, as it already did under `--reference-script`.
-
-- **A hosted multi-branch run takes its base launch as a reference script.**
-  `multibranch.reference_script` in a hosted run's campaign spec names a shell
-  launch script that the session freezes as its base, as `--reference-script`
-  does for `hyperloom-multibranch run`: its `export NAME=value` lines are the
-  server's environment, so a model whose recipe base cannot start on the
-  hardware without an extra setting can run hosted. A multi-branch spec that
-  sets `launch.server_args` or `launch.extra_env` is now refused with exit
-  code 2, naming `multibranch.reference_script`. Before, the hosted run had no
-  way to take a launch script, and it ran without those two fields, silently.
+  still replaces the base. The start check holds only while the root recipe
+  adds nothing to the base; a branch whose root recipe does (a replayed Recipe
+  KB champion, for one) starts without it. A credential the base exports, which
+  the session froze as its sha256, is served from the host's variable of the
+  same name; a host that holds no value of it, or another one, refuses the
+  Arbor at preflight.
+- **A recipe can bound the SGLang draft its deployment runs.** A benchmark YAML
+  may declare `speculative_draft_limits` (`draft_length`, `draft_tokens`,
+  `topk`, each with `min` and/or `max`). An explore variant outside them is
+  dropped before the round with reason `capability_unsupported`, and a launch
+  outside them is refused before its server boots. SGLang's
+  `--speculative-num-steps`, `--speculative-num-draft-tokens` and
+  `--speculative-eagle-topk` are now read for this check, and the
+  speculative-decoding specialist is told the bounds.
+- **Every round runs through InferenceSuite; Magpie and the `bypass` backend
+  are removed.** Baseline, explore, grid, KEEP, profile and GEAK-replay rounds
+  are inference_suite run directories with a `report.json`, and `failed_step`
+  follows the step it names. Magpie is no longer installed or imported, and
+  nothing clones InferenceX: `install.sh` stages the pinned client into
+  `INFERENCE_SUITE_TOOL_CACHE`. `MAGPIE_*`, `HYPERLOOM_BENCHMARK_BACKEND` and
+  `INFERENCEX_REF` are no longer read; `MAGPIE_EVAL_LIMIT` is now
+  `HYPERLOOM_EVAL_LIMIT`. **Upgrade note:** hosted measurement sheets and
+  result manifests are v2 and nothing reads v1 ones any more: a session
+  started before this change cannot be resumed, nor its accepted results
+  verified again. Build the runner cache (`cache_build`) for the new commit
+  before starting hosted sessions on it; a runner whose published staging
+  differs from the sheet's refuses with `preflight_mismatch`.
+- **Native AgentX accuracy is a GSM8K round.** The baseline, and each
+  candidate that clears the KEEP bar, runs GSM8K on a server of its own,
+  graded like any lm-eval score; `--no-agentx-accuracy` turns it off. The
+  request error rate is no longer an accuracy score, only the measurement's
+  validity. The MLPerf backend still grades on its inline score.
+- **A custom workload's quality gate may carry raw scores alone.** A
+  `quality_gate` without `passed` is judged against the limits it names, else
+  `lpips` 0.15, `ssim` 0.85 and `mse` 0.006; before, such a gate failed. A
+  baseline whose report carries no `quality_gate` now stops the run with
+  `baseline_accuracy_failed` instead of rejecting every candidate.
 - **A GEAK or Forge reproduction of the measured launch keeps settings whose
   names contain `TOKEN`.** The GEAK handoff's `baseline_env_spec`, the Forge
   handoff's serving context and the reference launch script now carry launch
@@ -134,12 +159,12 @@ it.
   the same under either objective. The objective is
   recorded in the manifest and kept on resume; FINAL, the dashboard and
   `MB-report.md` name it, and the bar's refusal reads
-  `total_throughput_gain_below_threshold`. Its Recipe KB record carries
-  `total_throughput_gain_pct`, not `interactivity_gain_pct`, and does not
-  replace an interactivity champion. Each Arbor is given the objective as its
-  config's `opt_objective` and optimizes it instead of its pack's metric; an
-  Arbor that cannot is refused at preflight.
-  `--agentx-objective` with
+  `total_throughput_gain_below_threshold`. It writes no Recipe KB record
+  (`objective_not_partitioned`): the KB files AgentX records by workload, not
+  objective, so its record would sit beside the interactivity champions of the
+  same workload. Each Arbor is given the objective as its config's
+  `opt_objective` and optimizes it instead of its pack's metric; an Arbor that
+  cannot is refused at preflight. `--agentx-objective` with
   `--workload inferencex` exits 2. Before, an operator had to patch the source
   to grade on total throughput.
 - **An MB AgentX session's Recipe KB record carries both total throughputs.**
@@ -156,7 +181,9 @@ it.
   `DURATION`, `INFMAX_CONTAINER_WORKSPACE`, ...) that only a hand-written
   `--agent-launch` file carried; with `--reference-script` it could not run at
   all. A session whose base or staged tools cannot run that round now refuses
-  to start, naming why.
+  to start, naming why. **Upgrade note:** an `--agent-launch` file no longer
+  takes a `client` key, which the gate's client always overrode; a file that
+  names one is refused (`keys a launch does not: client`), so remove it.
 - **A recipe image whose tag names no framework version no longer refuses an
   older install.** For an untagged image such as
   `lmsysorg/sglang-rocm:muse-spark-open`, the version InferenceSuite assumes
@@ -207,6 +234,25 @@ it.
   `--reference-script`. See
   [Options of `run`](how-to/run-multibranch.md#options-of-run).
 
+- **A local `hyperloom-multibranch run`, `resume` or `final-only` needs its
+  model on the machine.** `--model` must be a checkpoint directory, or a hub id
+  found under `HL_MODEL_BASE` or in the Hugging Face cache; otherwise `run`
+  refuses before the session directory exists, and `resume` and `final-only`
+  refuse a session recorded with such a model. Before, the local test's server, whose
+  home is its sandbox directory, fetched the hub id from the hub.
+
+- **A hosted `hyperloom-multibranch` run publishes its own inference_suite
+  staging.** When it pins its runner cache entry, the run now also publishes
+  the commit's inference_suite staging into the runner cache; a staging it
+  cannot publish ends the run with exit 1 (`CacheBuildError`) before anything
+  is measured. Before, a hosted runner found only the staging a `cache_build`
+  run had published for the commit.
+
+- **Single-lineage warm start replays a recipe that only removes launch
+  options.** `hyperloom optimize` now replays a Recipe KB record whose only
+  change is `remove_args`, as an MB branch writes one. Before, such a record
+  was dropped as having nothing to replay.
+
 - **A serving round's server runs in the interpreter its framework checks
   read.** The server now starts as `<framework_python> -m sglang.launch_server`
   (vLLM: `-m vllm.entrypoints.cli.main serve`; ATOM: `-m
@@ -249,8 +295,8 @@ it.
   `synthetic_acceptance_length`, `SGLANG_SIMULATE_ACC_LEN`), its draft and its
   simulated acceptance are pinned: a proposal that changes, removes or unsets
   one of them, or that declares an acceptance length on a base that verifies a
-  real draft, is now refused by the round's pre-flight filter with reason
-  `speculative_decoding_pinned` and listed in the round's skipped variants,
+  real draft, is now refused by the round's pre-flight filter as a `serve_flag`
+  failure naming the golden-owned key and listed in the round's skipped variants,
   where before it was admitted and then failed as the launch was materialized,
   having already taken a variant slot. The refusal at materialization stays as
   the backstop for launches the filter does not compose.

@@ -54,6 +54,7 @@ split: loop
 | --- | --- | --- | --- | --- | --- |
 | `config` | `--config` | string |  | yes | Campaign config JSON |
 | `split` | `--split` | `loop` \| `processes` \| `workers` | loop, or ARBOR_SPLIT when set |  | loop: the master and its workers in this process (the default); processes: each side as its own command, python3 -m arbor master, then worker --order, in turn (also ARBOR_SPLIT=processes, as a host that launches arbor run passes it); workers: the master deals its map to several workers at once, one per slot of the config's workers block, and integrates what they kept (arbor/dealer.py) |
+| `exit_at_handover` | `--exit-at-handover` | boolean | `false` |  | exit at each hand-over, as arbor master and arbor worker would in turn: the master's passes, then one worker stretch, then at the next master's turn the worker's report (worker_report.json, role_exit.json `reported`) and exit 0. The same command continues: an order still waiting for its report is worked first, else the master's passes run again. For a host that deals each report (with the loop split only) |
 | `max_iters` | `--max-iters` | integer | `0` |  | 0 = run until target or STOP file |
 | `cooldown` | `--cooldown` | integer | `30` |  | Seconds between iterations |
 | `opt_objective` | `--opt-objective` | string |  |  | optimize this metric in place of the pack's: a name ("P50 interactivity", "total throughput") or a bench key with its direction ("tpot_p50:min"). Also ARBOR_OPT_OBJECTIVE, or "opt_objective" in the config; arbor/objective.py |

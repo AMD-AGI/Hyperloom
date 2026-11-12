@@ -63,7 +63,7 @@ from hyperloom.measure.long_context.prompts import GENERATOR, PromptSetError
 from hyperloom.measure.long_context.resolve import StagedSet, staged_set
 from hyperloom.measure.long_context.staging import KEY_PREFIX
 from hyperloom.measure.points import launch_carriers
-from hyperloom.measure.short_prompts.staging import EVALSETS_DIR, cache_root, entry_key
+from hyperloom.measure.short_prompts.staging import CACHE_ENV, EVALSETS_DIR, cache_root, entry_key
 from hyperloom_multibranch.toolbox.submission_log import LogEntry
 from hyperloom_multibranch.toolbox.short_prompts import (
     MODEL_PATH_ENV,
@@ -86,6 +86,7 @@ __all__ = [
     "launch_served_context",
     "long_context_of",
     "rederive",
+    "sees_runner_cache",
     "staged_long_context",
     "with_root_reading",
 ]
@@ -223,6 +224,26 @@ def launch_served_context(point: Path) -> int | None:
     except (OSError, yaml.YAMLError, BenchmarkPointError):
         return None
     return served_by(*carriers)
+
+
+def sees_runner_cache(environ: Mapping[str, str]) -> bool:
+    """Whether this host sees the runner cache the runners read: the directory ``HYPERLOOM_RUNNER_CACHE`` in ``environ``
+    names (else the sandbox mount point) exists here. A hosted toolbox stages the model's own set only then: anywhere
+    else what it staged would be where no runner reads it. ``False`` is logged when ``HYPERLOOM_LONG_CONTEXT`` names no
+    set, since the model's own set then can be neither found nor staged."""
+    root = cache_root(environ)
+    if root.is_dir():
+        return True
+    if environ.get(LONG_CONTEXT_ENV, "").strip():
+        return False
+    _LOG.warning(
+        "long-context check: this host does not see the runner cache %s, so the model's own prompt set can be neither "
+        "found nor staged here; name a staged set in %s, or set %s to this host's view of the cache",
+        root,
+        LONG_CONTEXT_ENV,
+        CACHE_ENV,
+    )
+    return False
 
 
 def environment_long_context(

@@ -129,7 +129,7 @@ def test_records_without_usable_times_are_dropped(tmp_path):
 
 
 def test_event_stream_covers_every_layer(tmp_path):
-    """phase / trajectory / turn / request, which is the timeline that was asked for."""
+    """trajectory / turn / request, which is the timeline that was asked for."""
     records = parse_profile_export(
         _export(
             tmp_path,
@@ -140,12 +140,10 @@ def test_event_stream_covers_every_layer(tmp_path):
             ],
         )
     )
-    events, summary = build_events(records, {"measured": (BASE, BASE + 2.0)})
+    events, summary = build_events(records)
 
     kinds = {e["event"] for e in events}
     assert kinds == {
-        "phase_start",
-        "phase_end",
         "trajectory_start",
         "trajectory_end",
         "turn_start",

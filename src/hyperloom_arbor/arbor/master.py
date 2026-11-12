@@ -29,7 +29,8 @@ from pathlib import Path
 
 import yaml
 
-from arbor import component, conflicts, directions, lifecycle, retraction, review, revisit, roles, rounds, triggers
+from arbor import (component, conflicts, directions, lifecycle, retraction, review, revisit, roles, rounds, triggers,
+                   version)
 from arbor.cli.iterate import _find_arbor_root, cmd_init
 from arbor.pack import load_campaign, validate_campaign, validate_pack
 from arbor.pack.loader import PACK_RESULTS_CONCERNS, PACK_RESULTS_DIR, PACK_RESULTS_FLAG
@@ -63,11 +64,9 @@ def _resolve_target(target, metric: str):
     """Resolve a campaign `target` to a number, or None if it carries none.
 
     A config may express `target` either as a bare number or as a dict of
-    documented reference points — e.g. a campaign may record
-    ``{"_source": ..., "output_tok_per_chip": <number>, "gap_pct": <number>}``.
-    Comparing `best_metric >= <dict>` raises TypeError, which killed the loop
-    on the first iteration that had a metric to compare (iteration 1 was safe
-    only because best_metric was still None).
+    documented reference points (``{"_source": ..., "<metric>": <number>}``).
+    Comparing `best_metric >= <dict>` raises TypeError, so the dict is resolved
+    to the metric's number first.
     """
     if target is None or isinstance(target, bool):
         return None
@@ -98,7 +97,7 @@ def _aborted_detail(session_dir: Path) -> str:
     """ABORTED.md's message (the streak and the last not-measured reason), for the exit record.
 
     A host has to tell a broken harness from a finished run: an abort recorded as `done`
-    read as a normal end under a host (in a gateway outage).
+    would read as a normal end under a host.
     """
     try:
         text = (session_dir / "ABORTED.md").read_text()
@@ -157,7 +156,7 @@ def _root_baseline(campaign, state_path: Path, comp, session_dir: Path) -> None:
     """Component mode: the root's own measurement, once, before iteration 1, when the host gives no baseline_record.
 
     Without it the first iteration's measurement became the bar, with nothing to compare it to: a change that gained
-    nothing was kept as the baseline (one host's iteration 1, 49,668 against the root's 49,693). The bench is the one
+    nothing was kept as the baseline, even when it read below the root. The bench is the one
     the gate uses: the host's command read by ``component.bench_read``, else the pack's bench script. The boot and the
     bench are the run's time, within the deadline. A host that measured the root with the same client can pass its
     number as ``baseline_record`` instead (``{"mean": ...}``), and nothing is booted: ``_seed_baseline`` runs first,
@@ -236,11 +235,104 @@ def _root_baseline(campaign, state_path: Path, comp, session_dir: Path) -> None:
         state.secondary_name = secondary
         state.secondary_direction = meas.get("secondary_direction", "max")
         state.baseline_secondary = state.best_secondary = float(sum(secs) / len(secs))
+    # The root's per-request records, so iteration 1's guards and second axis compare matched requests too.
+    means = {m: sum(v) / len(v) for m in claude_loop._matched_metrics(meas)
+             if (v := [r[m] for r in ok if _number(r.get(m))])}
+    state.request_ref = claude_loop._request_ref(out, means, meas, len(state.lessons))
     state.iteration_notes["root_baseline"] = {"metric": metric, "value": value, "replays": len(ok),
                                               "runs": [r[metric] for r in ok]}
     state.save(state_path)
     print(f"[arbor] Root baseline: {metric}={value:.3f} over {len(ok)} replay(s)"
           + (f", {secondary}={state.baseline_secondary:.3f}" if secs else "") + ": the bar for iteration 1")
+
+
+def _group_umask(session_dir) -> bool:
+    """Under a group's shared storage, write what the group can read and write: the umask loses its group-write bit
+    when the session directory is setgid and group-writable (a host's shared layout: directories 2775, files 664).
+
+    A host may resume a run under another account of the same group. That account appends to the session's logs
+    (``ledger.jsonl``, ``lifecycle.jsonl``, the trace) and replaces its files, and a file written 644 refuses it.
+    Every child (the agents, the server, the bench) inherits the umask. True when it was changed."""
+    import stat
+    try:
+        mode = os.stat(session_dir).st_mode
+    except OSError:
+        return False
+    if not (mode & stat.S_ISGID and mode & stat.S_IWGRP):
+        return False
+    old = os.umask(0)
+    os.umask(old & ~0o020)
+    if old & 0o020:
+        print(f"[arbor] The session directory is a group's (setgid, group-writable): umask {old:03o} -> "
+              f"{old & ~0o020:03o}, so another account of the group can continue the run")
+    return bool(old & 0o020)
+
+
+def _book_unfinished(campaign, session_dir: Path, state_path: Path) -> int | None:
+    """A run stopped between an iteration's start and its verdict without a SIGTERM (a kill, a crash, a lost node)
+    left no row for it: the next start books it NOT MEASURED, with the intent and change it declared at its commit
+    (``component.CLAIM_FILE``, as a host's SIGTERM books it), so it is neither lost nor its number reused. Its commit
+    is then reverted by the pass's kept-tree refresh and noted for the revisit, as every NOT MEASURED change is.
+
+    Only an iteration that committed its change: a pass that stopped before (its agent still working, a STOP found
+    at its start) leaves no change to measure, and runs again under the same number. The iteration booked, or None."""
+    import calendar
+
+    started = lifecycle.last(session_dir, "event", "iteration_start") or {}
+    n = started.get("iteration")
+    if not isinstance(n, int) or isinstance(n, bool) or not state_path.exists():
+        return None
+    state = CampaignState.load(state_path)
+    if n <= state.iteration or any(r.get("iteration") == n for r in state.lessons):
+        return None
+    claim = {}
+    try:
+        claim = json.loads((Path(session_dir) / f"iter_{n}" / component.CLAIM_FILE).read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        pass
+    change = str(claim.get("change") or "") if isinstance(claim, dict) else ""
+    cfg = campaign.config
+    if not change and cfg.get("docker_container") and cfg.get("workspace_root"):
+        # Killed between the commit and its claim: the workspace's log names the change.
+        try:
+            from arbor.execute.workspace import git
+            log = git(cfg["docker_container"], cfg["workspace_root"], "log", "-30", "--format=%s")
+        except Exception:  # noqa: BLE001 - a workspace that cannot be read books nothing
+            log = ""
+        change = next((line.split(":", 1)[1].strip() for line in log.splitlines()
+                       if line.startswith(f"iter-{n}:")), "")
+    if not change:
+        return None
+    try:
+        state.iteration_started = calendar.timegm(time.strptime(started.get("at", ""), "%Y-%m-%dT%H:%M:%SZ"))
+    except (TypeError, ValueError):
+        pass
+    state.record_invalid(
+        iteration=n, change=change[:200], tier=state.tier, findings=[],
+        claim_class=str((claim or {}).get("claim_class") or "B"),
+        reason=f"the run stopped before iteration {n}'s verdict (no SIGTERM: a kill, a crash or a lost node), and "
+               f"the session was started again")
+    state.save(state_path)
+    print(f"[arbor] Iteration {n} never got its verdict: booked NOT MEASURED ({change[:120]})")
+    return n
+
+
+def _agent_model_line(config: dict) -> str | None:
+    """The agents' model at start: the config's ``agent_model`` pins it for every turn (through ``ARBOR_AGENT_MODEL``,
+    which the turns read), else that variable, else the CLI's default. Said once, and recorded on every lesson row
+    (arbor/prompts.py); before, which model ran was only in the transcripts."""
+    from arbor import prompts
+    pinned = str(config.get("agent_model") or "").strip()
+    if pinned:
+        os.environ[prompts.MODEL_ENV] = pinned
+        print(f"[arbor] Agent model: {pinned} (the config's agent_model, for every turn)")
+    elif os.environ.get(prompts.MODEL_ENV, "").strip():
+        pinned = os.environ[prompts.MODEL_ENV].strip()
+        print(f"[arbor] Agent model: {pinned} ({prompts.MODEL_ENV}, for every turn)")
+    else:
+        print("[arbor] Agent model: not pinned (the CLI's default); each lesson row records the models its turns "
+              "ran on")
+    return pinned or None
 
 
 def _number(v) -> bool:
@@ -478,6 +570,7 @@ def prepare(args: argparse.Namespace, held: dict) -> Session | int:
     except (*component.UNLOADABLE, yaml.YAMLError) as exc:
         return component.refuse_unloadable(config_path, exc)
     session_dir = campaign.session_root
+    _group_umask(session_dir)
     if args.allow_pack_results and (campaign.pack.pack_dir / PACK_RESULTS_DIR).is_dir():
         print(f"[arbor] WARNING: {PACK_RESULTS_FLAG}: keeping {campaign.pack.pack_dir / PACK_RESULTS_DIR}/ "
               f"inside the pack. {PACK_RESULTS_CONCERNS[0].upper()}{PACK_RESULTS_CONCERNS[1:]}.",
@@ -537,6 +630,16 @@ def prepare(args: argparse.Namespace, held: dict) -> Session | int:
             refused.append(problem)
     if refused:
         return component.refuse(refused, campaign.config, session_dir)
+    # One driver per session (arbor/checkpoints.py): the session lock, exclusive, once the config is accepted (a refusal
+    # touches nothing but its record) and before the session's own records are written. A second driver waits a minute
+    # for one that is ending (a rolling chunk's predecessor, a host's restart), then exits 73, lease_held; checkpoint
+    # create, restore and fork refuse while a driver holds it.
+    holder = checkpoints.hold_session(session_dir, held)
+    if holder is not None:
+        from arbor.cluster import handoff
+        print(f"[arbor] Another driver holds this session ({holder}): exit {handoff.EXIT_LEASE_HELD}. Start the "
+              f"same command again once it has ended.", file=sys.stderr, flush=True)
+        return handoff.EXIT_LEASE_HELD
     # What this campaign optimizes, for a host to check before it trusts the run (arbor/objective.py).
     if session_dir:
         try:
@@ -680,6 +783,7 @@ def prepare(args: argparse.Namespace, held: dict) -> Session | int:
     start_time = started or (time.time() - spent)
     if spent:
         print(f"[arbor] Resumed: {spent / 60:.0f} min of the time budget already spent ({CLOCK_FILE})")
+    _agent_model_line(campaign.config)
     metric_name = campaign.pack.objective.get("metric", "")
     config_target = _resolve_target(campaign.config.get("target"), metric_name)
     _seed_baseline(state_path, campaign, campaign.pack.objective.get("direction", "max"))
@@ -729,8 +833,8 @@ def prepare(args: argparse.Namespace, held: dict) -> Session | int:
     print(f"[arbor] Stop: touch {session_dir}/STOP")
     print(f"[arbor] Pause: python3 -m arbor pause --session {session_dir}")
     print()
-    # The session lock, shared (arbor/checkpoints.py): checkpoint create, restore and fork refuse while it is held.
-    checkpoints.hold_session(session_dir, held)
+    # The session lock is held since the start (above): an iteration the last driver left without its verdict is booked.
+    _book_unfinished(campaign, session_dir, state_path)
     paused = session_dir / checkpoints.PAUSED
     if paused.is_file() and state_path.exists():
         try:
@@ -744,7 +848,7 @@ def prepare(args: argparse.Namespace, held: dict) -> Session | int:
                 session_dir=session_dir, state_path=state_path, roll=roll, comp=comp, start_time=start_time,
                 metric_name=metric_name, config_target=config_target, direction=direction,
                 time_budget=time_budget, unit=unit, exit_reason=exit_reason, exit_detail=exit_detail)
-    s.fire("session_start", mode=campaign.mode)
+    s.fire("session_start", mode=campaign.mode, arbor=version.provenance())   # which Arbor this start runs
     return s
 
 

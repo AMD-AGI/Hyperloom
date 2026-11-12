@@ -57,6 +57,7 @@ from hyperloom.hosted.mcp_server import MIN_TOKEN_LENGTH, McpServer, McpServerCo
 from hyperloom.measure.tests.gpu_free_host import TEST_SCRATCH_ENV
 from hyperloom.measure.versions import socket_versions
 from hyperloom_multibranch.contracts.fork import AdmissionStatus, ForkAdmission, ForkRequest, RepairRequest
+from hyperloom_multibranch.contracts.gate import RegressionOutcome
 from hyperloom_multibranch.contracts.intent import Intent, IntentLayer
 from hyperloom_multibranch.contracts.judgement import AccuracyVerdict, Judgement, Verdict
 from hyperloom_multibranch.contracts.lifecycle import BranchTask
@@ -1936,6 +1937,29 @@ async def test_a_hosted_restart_whose_final_is_stopped_still_fails(tmp_path: Pat
     assert json.loads(stage.layout.report.read_text())["stop_reason"] == SessionStopReason.SIGNAL.value
 
 
+class FailingRegressionSet(FakeRegressionCheck):
+    """A regression set every commit fails, so FINAL finds no eligible candidate and chooses nothing."""
+
+    async def check_every_case(self, commit: str) -> RegressionOutcome:
+        self.every_case.append(commit)
+        return RegressionOutcome(False, "every case failed", 1)
+
+
+async def test_a_hosted_restart_whose_final_chooses_nothing_keeps_the_reason_the_session_ended_for(
+    tmp_path: Path,
+) -> None:
+    stage, persisted = await _killed_before_final(tmp_path)
+    recovery = _recovery(stage, persisted.settings)
+    recovery.regression = FailingRegressionSet()
+
+    outcome = await recovery.finish(persisted.ended, restart=True)
+
+    assert recovery.regression.every_case, "FINAL checked the candidates"
+    assert outcome.final is not None and outcome.final.chosen is None
+    assert (outcome.stop_reason, outcome.exit_code) == (SessionStopReason.KILLED, 1)
+    assert json.loads(stage.layout.report.read_text())["stop_reason"] == SessionStopReason.KILLED.value
+
+
 async def test_a_hosted_restart_whose_final_fails_reports_the_reason_the_session_ended_for(tmp_path: Path) -> None:
     stage, persisted = await _killed_before_final(tmp_path)
     recovery = _recovery(stage, persisted.settings)
@@ -2114,7 +2138,8 @@ def test_a_final_only_of_another_account_of_the_group_finishes_what_one_account_
         assert (finished["stop_reason"], finished["exit_code"]) == (SessionStopReason.TIME_EXHAUSTED.value, 0)
         root = Path(str(left["root"]))
         layout = SessionLayout(root)
-        assert json.loads(layout.report.read_text())["final"]["chosen"]["commit"] == finished["chosen"] is not None
+        assert finished["chosen"] is not None
+        assert json.loads(layout.report.read_text())["final"]["chosen"]["commit"] == finished["chosen"]
         assert (layout.report.stat().st_uid, layout.decisions.stat().st_uid) == (accounts.second, accounts.first)
         assert [row["kind"] for row in read_jsonl(layout.decisions)].count("final") == 1, (
             "the second account appended FINAL's decision to the log the first one made"

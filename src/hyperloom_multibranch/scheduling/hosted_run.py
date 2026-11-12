@@ -38,17 +38,19 @@ end is asked again while it runs.
 
 A hosted run's agents must be isolated: they run with the application's credentials in reach otherwise. Its start
 marks the process so (:func:`~hyperloom.common.agent_isolation.require_agent_isolation`), with the hosting layer's
-bubblewrap, ``bin/bwrap`` in the directory ``HYPERLOOM_HOST_LAYER`` names (:func:`layer_bwrap`), and no other, and
-refuses a run that would launch anything unconfined on this host, as the path that launches it would
-(:func:`require_hosted_isolation`): with ``local``, its agent and dev sandboxes and its tests run here, so a host where
-they run unconfined measures no spec ``local``.
+bubblewrap, ``bin/bwrap`` in the directory ``HYPERLOOM_HOST_LAYER`` names
+(:func:`~hyperloom.common.agent_isolation.layer_bwrap`), and no other, and refuses a run that would launch anything
+unconfined on this host, as the path that launches it would (:func:`require_hosted_isolation`): its specialists run
+here; with ``local``, its agent and dev sandboxes and its tests run here too, so a host where they run unconfined
+measures no spec ``local``.
 
 The host decides from ``$HYPERLOOM_STATE_DIR/exit.json`` whether to start the run again: never once it holds
 ``final: true`` (:func:`write_final_exit`), and again when it is missing. ``session.json`` there names the session
 directory as soon as it exists (:func:`record_session`), so a start that finds it finishes that session instead of
 starting another, once that session got through PRELUDE; one that ended before its baseline was recorded is closed,
-which ends the measurement sandboxes it left, and the spec's session starts again. The two file names and their fields are the legacy entry's, ``hyperloom.hosted.entry``, which this
-package does not import: importing it loads the legacy flow's state.
+which ends the measurement sandboxes it left, and the spec's session starts again. The two file names and their fields
+are the legacy entry's, ``hyperloom.hosted.entry``, which this package does not import: importing it loads the legacy
+flow's state.
 """
 
 from __future__ import annotations
@@ -68,8 +70,14 @@ from pathlib import Path
 from typing import Any
 
 from hyperloom_common.io import WriteOptions, atomic_write_json
-from hyperloom_common.shared_storage import make_shared_dirs, ownership, setgid_warnings, writable_problems
-from hyperloom.common.agent_isolation import IsolationRefused, require_agent_isolation
+from hyperloom_common.shared_storage import (
+    child_umask,
+    make_shared_dirs,
+    ownership,
+    setgid_warnings,
+    writable_problems,
+)
+from hyperloom.common.agent_isolation import IsolationRefused, layer_bwrap, require_agent_isolation
 from hyperloom.hosted.campaign import MEASUREMENT_LOCAL, CampaignSpec, parse_campaign
 from hyperloom.hosted.host_info import GrantLimits as HostGrantLimits
 from hyperloom.hosted.host_info import HostInfo, Var
@@ -109,10 +117,6 @@ FINAL_COLD_START_SECONDS = 300.0
 FINAL_WIND_DOWN_SECONDS = 600.0
 #: FINAL's reserve at the least, and all of it while the session has measured no test.
 FINAL_RESERVE_FLOOR_SECONDS = 1800.0
-#: The hosting layer's directory, as the hosted start names it.
-HOST_LAYER_ENV = "HYPERLOOM_HOST_LAYER"
-#: The hosting layer's bubblewrap, below its directory.
-LAYER_BWRAP = Path("bin", "bwrap")
 #: ``exit.json`` and ``session.json`` reach the disk before their names, and are ``664``: the run's next leg, maybe
 #: another account of the group, reads ``session.json`` to finish the session it names.
 _DURABLE = WriteOptions(fsync=True, shared=True)
@@ -170,7 +174,7 @@ def run_argv(spec: CampaignSpec, max_hours: float, parallel_tests: int) -> list[
 
     Raises:
         HostedRefused: When the spec lacks what a multi-branch session needs, naming each missing field, or sets a
-            field the session would not read.
+            launch field the session would not read.
     """
 
     section = _multibranch_section(spec.multibranch)
@@ -316,21 +320,13 @@ def require_local_image(spec: CampaignSpec, env: Mapping[str, str]) -> None:
         )
 
 
-def layer_bwrap(env: Mapping[str, str]) -> str | None:
-    """The hosting layer's bubblewrap, in the directory ``env``'s ``HYPERLOOM_HOST_LAYER`` names; ``None`` when it
-    names none. The one bubblewrap a hosted run launches agents with: the framework image may carry its own, maybe
-    setuid, ahead of the layer's on ``PATH``."""
-
-    layer = env.get(HOST_LAYER_ENV, "").strip()
-    return str(Path(layer) / LAYER_BWRAP) if layer else None
-
-
 def require_hosted_isolation(spec: CampaignSpec, env: Mapping[str, str]) -> None:
     """Mark this process as a hosted run's, whose agents must be isolated, with the hosting layer's bubblewrap
-    (:func:`layer_bwrap`) and no other, and refuse now a run that would launch one unconfined on this host, as the path
-    that launches it would (:func:`~hyperloom_multibranch.scheduling.launch_isolation.launch_isolation`): its
-    specialists always, and the agent and dev sandboxes and the tests of a spec measured on this container's cards,
-    which then run here (in the grant's sandboxes otherwise).
+    (:func:`~hyperloom.common.agent_isolation.layer_bwrap`) and no other, and refuse now a run that would launch one
+    unconfined on this host, as the path that launches it would
+    (:func:`~hyperloom_multibranch.scheduling.launch_isolation.launch_isolation`): its specialists always, and the
+    agent and dev sandboxes and the tests of a spec measured on this container's cards, which then run here (in the
+    grant's sandboxes otherwise).
 
     Raises:
         PeersUnavailable: A launch on this host would run unconfined or be refused, naming which and why; the run ends
@@ -358,10 +354,8 @@ def _multibranch_section(section: object) -> dict[str, Any]:
 
 
 def grant_tests_that_fit(host: HostInfo, make_before_break: bool = True) -> Callable[[int], int]:
-    """How many tests of a TP the grant ``host`` holds runs at once, as the hosted toolbox runs them: with
-    ``make_before_break``, one fewer than the grant fits where a finished test's sandbox is kept for the next (where the
-    grant fits at least three); raises ValueError when one does not fit, and ImportError when the ``hosted`` extra is
-    not installed."""
+    """How many tests of a TP the grant ``host`` holds runs at once, as the hosted toolbox runs them (``handover_for``
+    with ``make_before_break``); raises ValueError when one does not fit, ImportError without the ``hosted`` extra."""
 
     # hosted_toolbox loads the sandbox SDK, which only the hosted extra installs.
     from hyperloom_multibranch.toolbox.hosted_toolbox import handover_for, parallel_tests_for
@@ -509,6 +503,13 @@ def arm_grant_stop(seconds: float) -> threading.Timer:
     return timer
 
 
+def stop_before_grant_ends(deadline: GrantDeadline) -> None:
+    """Arm this process's stop one CLOSE grace before ``deadline``'s grant ends (at once if passed; never untimed)."""
+
+    if deadline.stop_after_sec is not None:
+        arm_grant_stop(max(0.0, deadline.stop_after_sec))
+
+
 @dataclass(frozen=True)
 class HostedExit:
     """How the run ended for good: its return code, and the stop reason its session reported or why it was refused."""
@@ -530,6 +531,28 @@ def record_session(state_dir: Path, root: Path) -> None:
     """Name the run's session directory in ``session.json``, for the host and for a restart."""
 
     atomic_write_json(state_dir / SESSION_FILE, {"session_dir": str(root)}, options=_DURABLE)
+
+
+def share_with_the_group(root: Path) -> None:
+    """Below shared storage, run the rest of this process under the umask of a child that writes below the session
+    directory ``root`` (:func:`~hyperloom_common.shared_storage.child_umask`), so every process it starts here, the
+    commands of its local agent sandboxes among them, inherits it: what Arbor, an agent or a tool writes there with the
+    default modes stays writable by the group, whose other accounts may run the run's next leg. A remote sandbox's
+    commands run in another container and take the umask from its launcher instead. Elsewhere the umask is left as
+    it is."""
+
+    umask = child_umask(root)
+    if umask != -1:
+        os.umask(umask)
+
+
+def started_session(state_dir: Path, root: Path) -> None:
+    """Take the session just created in ``root`` as the run's, before anything is built in it: shared with the group
+    (:func:`share_with_the_group`), printed on one stdout line and named in ``session.json`` (:func:`record_session`)."""
+
+    share_with_the_group(root)
+    print(root, flush=True)
+    record_session(state_dir, root)
 
 
 def recorded_session(state_dir: Path) -> Path | None:
@@ -563,8 +586,8 @@ class EarlierSession:
     closed: Path | None = None
 
 
-def earlier_session(state_dir: Path) -> EarlierSession:
-    """The session ``session.json`` names, read back; raises what :func:`recorded_session` and
+def take_over_earlier_session(state_dir: Path) -> EarlierSession:
+    """The session ``session.json`` names, read back and taken over from the earlier start; raises what :func:`recorded_session` and
     :func:`~hyperloom_multibranch.scheduling.lifecycle.persisted_run` raise. Blocks.
 
     The host starts a run again only once its earlier start has ended, so a ``final-only`` lock that start left in the
@@ -588,7 +611,7 @@ def earlier_session(state_dir: Path) -> EarlierSession:
 
 
 def hosted_resume_deadline(persisted: PersistedRun, now: float) -> float:
-    """The deadline a restart of the run resumes ``persisted`` up to, the ``finish`` of :func:`earlier_session`, with
+    """The deadline a restart of the run resumes ``persisted`` up to, the ``finish`` of :func:`take_over_earlier_session`, with
     ``cli.resume``: the one the run's first start set, so the session's budget counts from that start for
     ``--max-hours`` as it does for ``--max-gpu-hours``, whose spend the session reads from its blackboard, and the time
     it was down is not given back. That the earlier start is gone is the host's to know -- it starts a run again only
@@ -614,7 +637,7 @@ def hosted_restart_leg(
     resume: Callable[..., int],
     explore_cap: ExploreCap | None = None,
 ) -> Callable[..., int]:
-    """What a restart of the run runs over ``persisted``, the ``finish`` of :func:`earlier_session`: ``resume``
+    """What a restart of the run runs over ``persisted``, the ``finish`` of :func:`take_over_earlier_session`: ``resume``
     (``cli.resume``) with ``deadline`` bound to :func:`hosted_resume_deadline`'s, so its budget counts from the run's
     first start, and ``explore_cap`` to ``explore_cap`` (the grant's, :func:`grant_explore_cap`), when the session was measured in the grant's sandboxes and its baseline still measures what a test
     measured now would (:func:`~hyperloom_multibranch.toolbox.resume_guard.check_hosted_baseline_reusable`: the same
@@ -702,8 +725,6 @@ __all__ = [
     "FINAL_RESERVE_FLOOR_SECONDS",
     "FINAL_WIND_DOWN_SECONDS",
     "GRANT_MARGIN_SECONDS",
-    "HOST_LAYER_ENV",
-    "LAYER_BWRAP",
     "SESSION_FILE",
     "EarlierSession",
     "GrantDeadline",
@@ -713,7 +734,6 @@ __all__ = [
     "arm_grant_stop",
     "campaign_spec",
     "close_before_starting_again",
-    "earlier_session",
     "final_reserve_seconds",
     "grant_deadline",
     "grant_end",
@@ -731,8 +751,11 @@ __all__ = [
     "require_hosted_isolation",
     "require_local_image",
     "run_argv",
+    "share_with_the_group",
     "spec_make_before_break",
+    "started_session",
     "storage_problems",
+    "take_over_earlier_session",
     "toolbox_grant",
     "write_final_exit",
 ]

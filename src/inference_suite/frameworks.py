@@ -65,7 +65,6 @@ class ServerFlags:
     """The flags that carry a round's runtime facts to the server; ``None`` when the server takes no such flag.
 
     ``context_length`` sets the context the server serves; without it the server serves the model's native one.
-    ``seed`` sets the engine's random seed; ``None`` when the server takes none.
     """
 
     model: str
@@ -73,7 +72,6 @@ class ServerFlags:
     port: str
     served_model_name: str | None
     context_length: str
-    seed: str | None = None
 
 
 @dataclass(frozen=True)
@@ -170,9 +168,7 @@ _FACTS: dict[Framework, FrameworkFacts] = {
     Framework.SGLANG: FrameworkFacts(
         kind=FrameworkKind.SERVING,
         python_package=Framework.SGLANG.value,
-        server_flags=ServerFlags(
-            "--model-path", _HOST_FLAG, "--port", "--served-model-name", "--context-length", seed="--random-seed"
-        ),
+        server_flags=ServerFlags("--model-path", _HOST_FLAG, "--port", "--served-model-name", "--context-length"),
         server_command=ServerCommand(("python3", "-m", "sglang.launch_server"), ("-m", "sglang.launch_server")),
         expert_parallel=ExpertParallelFlag("--ep-size", ("--ep-size", "--expert-parallel-size", "--ep"), True),
         data_parallel=DataParallelFlag(("--data-parallel-size", "--dp-size"), shares_tp=("--enable-dp-attention",)),
@@ -182,9 +178,7 @@ _FACTS: dict[Framework, FrameworkFacts] = {
     Framework.VLLM: FrameworkFacts(
         kind=FrameworkKind.SERVING,
         python_package=Framework.VLLM.value,
-        server_flags=ServerFlags(
-            "--model", _HOST_FLAG, "--port", "--served-model-name", "--max-model-len", seed="--seed"
-        ),
+        server_flags=ServerFlags("--model", _HOST_FLAG, "--port", "--served-model-name", "--max-model-len"),
         # The ``vllm`` console script is ``vllm.entrypoints.cli.main:main``.
         server_command=ServerCommand(("vllm", "serve"), ("-m", "vllm.entrypoints.cli.main", "serve")),
         expert_parallel=ExpertParallelFlag(_VLLM_STYLE_EP_SWITCH, (_VLLM_STYLE_EP_SWITCH, "-ep"), False),

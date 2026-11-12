@@ -15,12 +15,19 @@ from dataclasses import replace
 from pathlib import Path
 
 import pytest
+import yaml
 
 from hyperloom.orchestrator.actions.executors._suite.config import RoundSettings, fixed_workload, suite_config
 from hyperloom.orchestrator.actions.executors._suite.rounds import point_server
+from hyperloom.orchestrator.actions.executors._workload_envs import (
+    BenchmarkTarget,
+    LaunchLayer,
+    materialize_config_with_envs,
+)
+from hyperloom.orchestrator.state.tests._session_base import freeze_base
 from inference_suite import LaunchQuery, SourceSnapshot, resolve_base
 from inference_suite.argv import argv_flag_occurrences, canonical_flag_name, normalize_argv
-from inference_suite.compose import DEFAULT_SEED, RoundFacts, compose
+from inference_suite.compose import RoundFacts, compose
 from inference_suite.contracts import (
     BaseLaunch,
     ConfigError,
@@ -34,7 +41,6 @@ from inference_suite.contracts import (
     WorkloadKind,
 )
 from inference_suite.contracts.launch import Launch, VersionCheck
-from inference_suite.frameworks import Framework, framework_facts
 from inference_suite.recipe.resolve import UnreadSource
 
 _MODEL = "/models/Qwen3-8B"
@@ -103,6 +109,16 @@ def _point(framework: str, **envs: str) -> dict:
     }
 
 
+def _seeded(point: dict, base: BaseLaunch) -> dict:
+    """``point`` as the main flow writes it: the base's args below its own, the base's variables under its own."""
+    envs = point["benchmark"]["envs"]
+    name = _EXTRA[point["benchmark"]["framework"]][0]
+    envs[name] = " ".join((*base.args, envs.get(name, "")))
+    for variable, value in base.env.items():
+        envs.setdefault(variable, value)
+    return point
+
+
 def _base(framework: str, board: str = "mi355x", tp: int = 2) -> BaseLaunch:
     snapshot = SourceSnapshot(None, 1_793_000_000, unread=UnreadSource("InferenceX", "offline"))
     query = LaunchQuery(_MODEL_ID, framework, board, Workload.FIXED, (64,), isl=1024, osl=1024, tp=tp)
@@ -142,14 +158,11 @@ def _flags(argv: tuple[str, ...]) -> set[tuple[str, tuple[str, ...]]]:
 @pytest.mark.parametrize(("framework", "board"), sorted(_LAUNCH))
 def test_the_translated_launch_is_the_base_under_the_points_server_layer(framework: str, board: str) -> None:
     base = _base(framework, board)
-    launch = _launch(suite_config(_point(framework), base, _settings()), base)
+    launch = _launch(suite_config(_seeded(_point(framework), base), base, _settings()), base)
     entry, argv, env = _LAUNCH[(framework, board)]
 
-    seed = framework_facts(Framework(framework)).server_flags.seed  # the runner pins the seed the old flow left unset
-    pinned = set() if seed is None else {(canonical_flag_name(seed), (str(DEFAULT_SEED),))}
-
     assert launch.entrypoint == entry
-    assert _flags(launch.argv[len(entry) :]) == _flags(argv) | pinned
+    assert _flags(launch.argv[len(entry) :]) == _flags(argv)
     assert dict(launch.env) == {**env, **_POINT_ENV}
 
 
@@ -239,7 +252,7 @@ def test_a_mask_narrower_than_the_launch_is_refused() -> None:
 def test_hierarchical_cache_drops_a_base_radix_cache_switch_as_sglangs_launcher_does() -> None:
     base = _base("sglang")
     base = replace(base, args=(*base.args, "--disable-radix-cache"))
-    point = _point("sglang", EXTRA_SGLANG_ARGS="--context-length 8192 --enable-hierarchical-cache")
+    point = _seeded(_point("sglang", EXTRA_SGLANG_ARGS="--context-length 8192 --enable-hierarchical-cache"), base)
     launch = _launch(suite_config(point, base, _settings()), base)
 
     assert "--disable-radix-cache" not in launch.argv
@@ -476,3 +489,44 @@ def test_the_points_rocr_mask_is_the_servers_gpus_and_its_fill_record_stays_out_
 
     assert server.gpus == (6, 7)
     assert "HYPERLOOM_ROCR_AUTOFILL" not in server.user.env_set
+
+
+@pytest.mark.parametrize(
+    ("layer", "gone", "kept"),
+    [
+        (LaunchLayer(remove_args=["--mem-fraction-static"]), "mem-fraction-static", "trust-remote-code"),
+        (
+            LaunchLayer(extra_server_args="--trust-remote-code --tensor-parallel-size 2", args_mode="replace"),
+            "mem-fraction-static",
+            "tensor-parallel-size",
+        ),
+    ],
+    ids=["remove_args", "args_mode_replace"],
+)
+def test_a_point_that_drops_a_base_flag_launches_without_it(tmp_path, monkeypatch, layer, gone, kept) -> None:
+    launch = _materialized_launch(tmp_path, monkeypatch, layer)
+    flags = {name for name, _ in _flags(launch.argv[len(launch.entrypoint) :])}
+
+    assert (gone in flags, kept in flags) == (False, True)
+
+
+def test_a_point_that_unsets_a_base_variable_launches_without_it(tmp_path, monkeypatch) -> None:
+    launch = _materialized_launch(tmp_path, monkeypatch, LaunchLayer(unset_envs=["SGLANG_USE_AITER"]))
+
+    assert "SGLANG_USE_AITER" not in dict(launch.env)
+
+
+def _materialized_launch(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, layer: LaunchLayer) -> Launch:
+    """The launch a round composes from a point the main flow materialized on the session's frozen base."""
+    session = tmp_path / "session"
+    base = freeze_base(session, _base("sglang"))
+    monkeypatch.setenv("INFERENCE_OPTIMIZER_CURRENT_SESSION_DIR", str(session))
+    monkeypatch.delenv("INFERENCE_OPTIMIZER_SERVER_ARGS", raising=False)
+    recipe = _point("sglang")
+    del recipe["benchmark"]["envs"]["EXTRA_SGLANG_ARGS"]
+    source = tmp_path / "recipe.yaml"
+    source.write_text(yaml.safe_dump(recipe), encoding="utf-8")
+    point = materialize_config_with_envs(
+        source, tmp_path / "point", launch=layer, target=BenchmarkTarget(model_path=_MODEL)
+    )
+    return _launch(suite_config(yaml.safe_load(point.read_text(encoding="utf-8")), base, _settings()), base)

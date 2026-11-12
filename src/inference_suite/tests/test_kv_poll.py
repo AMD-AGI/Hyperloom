@@ -12,14 +12,14 @@ from __future__ import annotations
 import pytest
 
 from inference_suite.telemetry.kv_poll import (
-    DEFAULT_METRICS_PORT,
     KvMetricsPoller,
     aggregate_series,
     canonical_label_key,
     parse_prometheus_text,
-    resolve_metrics_port,
     sample_from_families,
 )
+
+_URL = "http://127.0.0.1:1/metrics"
 
 
 # Captured from a saturated SGLang 0.5.17 server. The two retract names differ
@@ -293,15 +293,6 @@ def test_canonical_label_key_is_order_independent():
     assert canonical_label_key({}) == ""
 
 
-def test_port_resolution_prefers_config_over_env(monkeypatch):
-    monkeypatch.setenv("PORT", "9999")
-    assert resolve_metrics_port({"PORT": 31234}) == 31234
-    assert resolve_metrics_port({}) == 9999
-    monkeypatch.delenv("PORT", raising=False)
-    assert resolve_metrics_port({}) == DEFAULT_METRICS_PORT
-    assert resolve_metrics_port({"PORT": "not-a-port"}) == DEFAULT_METRICS_PORT
-
-
 def test_poller_availability_is_tristate_and_gives_up(monkeypatch):
     """Unknown until proven; parked once an engine shows it has metrics off.
 
@@ -313,7 +304,7 @@ def test_poller_availability_is_tristate_and_gives_up(monkeypatch):
 
     from inference_suite.telemetry.kv_poll import _GIVE_UP_GRACE_SEC
 
-    poller = KvMetricsPoller(port=1)
+    poller = KvMetricsPoller(_URL)
     assert poller.available is None
 
     def _boom(*_args, **_kwargs):
@@ -345,12 +336,11 @@ def test_poller_availability_is_tristate_and_gives_up(monkeypatch):
     assert poller.fetch() is None
 
 
-def test_a_truncated_response_is_a_missed_scrape_for_both_pollers(monkeypatch, tmp_path):
+def test_a_truncated_response_is_a_missed_scrape(monkeypatch):
     """An engine killed mid-response must cost the round one sample, not the artifact."""
     import http.client
 
     from inference_suite.telemetry import kv_poll
-    from inference_suite.telemetry.kv_poll import AiperfProgressPoller
 
     class _Truncated:
         def open(self, *_args, **_kwargs):
@@ -358,25 +348,20 @@ def test_a_truncated_response_is_a_missed_scrape_for_both_pollers(monkeypatch, t
 
     monkeypatch.setattr(kv_poll, "_OPENER", _Truncated())
 
-    kv_poller = KvMetricsPoller(port=1)
+    kv_poller = KvMetricsPoller(_URL)
     assert kv_poller.fetch() is None
     assert kv_poller._failures == 1
 
-    progress_poller = AiperfProgressPoller(tmp_path)
-    progress_poller.url = "http://127.0.0.1:1"
-    assert progress_poller.poll() is None
-    assert progress_poller._failures == 1
-
 
 def test_poller_sample_returns_none_when_endpoint_has_no_kv(monkeypatch):
-    poller = KvMetricsPoller(port=1)
+    poller = KvMetricsPoller(_URL)
     monkeypatch.setattr(poller, "fetch", lambda: "python_gc_objects_collected_total 12.0\n")
 
     assert poller.sample() is None
 
 
 def test_poller_sample_normalises_a_good_scrape(monkeypatch):
-    poller = KvMetricsPoller(port=1)
+    poller = KvMetricsPoller(_URL)
     monkeypatch.setattr(poller, "fetch", lambda: SGLANG_METRICS)
 
     sample = poller.sample()

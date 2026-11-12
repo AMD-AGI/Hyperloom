@@ -174,9 +174,9 @@ before the Arbor branches open </how-to/multibranch-review-gate>`.
 - **A dropped flag of the resolved launch:** a KEEP that runs without a flag the `--agent-launch` file sets now
   removes it, and the recipe keeps the removal (`LaunchConfig.remove_args`, `b9d65167d` and
   after). Only on AgentX, though: there the round removes it from the launch it resolves; on InferenceX such a removal is refused.
-- **A served base checks the whole launch:** an Arbor served the session's frozen base (any session without
-  `--agent-launch`) refuses to start when the root recipe adds anything to that base's launch, since its check
-  compares the whole launch with the base.
+- **A served base is checked only under an empty root recipe:** Arbor's start check compares its whole launch with
+  the session's frozen base, so a branch whose root recipe adds to that launch (a Recipe KB champion PRELUDE
+  replayed, for one) starts without the check.
 - **One Arbor without the review:** with `--no-review-gate` and no `--agent-directions`, a lone Arbor gets no
   dossier pass and makes its own dossier inside its branch.
 - **Arbor does not cap the error rate:** the round's `report.json` has request counts but no error rate under MB's

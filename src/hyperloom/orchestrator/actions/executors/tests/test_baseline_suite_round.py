@@ -4,8 +4,9 @@
 """A baseline whose session froze a base runs its rounds on inference_suite, played here by ``ScriptedRounds``.
 
 The contract: each round writes its own run_dir with ``launch.json`` below the round's directory, the cold-start pair
-boots one server the measured round reuses and the attempt reaps it with ``stop`` on its slot, and a failed step maps
-to its error class.
+boots one server the measured round reuses and the attempt reaps it with ``stop`` on its slot, a failed step maps
+to its error class, and a round the budget cannot pay for -- or a PRELUDE retry past the optimization reserve -- boots
+nothing.
 """
 
 from __future__ import annotations
@@ -29,6 +30,8 @@ from hyperloom.orchestrator.actions.executors.tests.test_suite_config import _MO
 from hyperloom.orchestrator.rehearsal import READY, STAGE_FAILED, LaunchAttempt, LaunchScenario, ScriptedRounds
 from hyperloom.orchestrator.rehearsal import VirtualClock
 from hyperloom.orchestrator.rehearsal.scenario import ScenarioError
+from hyperloom.orchestrator.actions.stop_attribution import SESSION_TIME_EXHAUSTED_CLASS
+from hyperloom.orchestrator.phases.machine_state import RETRY_PAST_THE_RESERVE
 from hyperloom.orchestrator.state.failure_evidence import ARGV_INVALID, SERVER_INIT_DEAD
 from inference_suite.runtime.process import Reaped
 from inference_suite.contracts import FailedStep, LifecycleMode, RunLayout, WorkloadKind
@@ -80,13 +83,15 @@ class _ThroughputOnly(BaselineExecutor):
     runs_accuracy_eval = False
 
 
-def _play(monkeypatch, suite: SimpleNamespace, *attempts: LaunchAttempt, **params) -> tuple[dict, ScriptedRounds]:
+def _play(
+    monkeypatch, suite: SimpleNamespace, *attempts: LaunchAttempt, state: object = None, **params
+) -> tuple[dict, ScriptedRounds]:
     rounds = ScriptedRounds(scenario=LaunchScenario(attempts=attempts), clock=VirtualClock(), launch=_launch())
     monkeypatch.setattr(suite_rounds, "run_round", rounds.run_round)
     executor = _ThroughputOnly(
         default_config_path=suite.point,
         session_dir=suite.session,
-        shared_state=SimpleNamespace(session_budget_usable_sec=lambda: None),
+        shared_state=state or SimpleNamespace(session_budget_usable_sec=lambda: None),
     )
     task = SimpleNamespace(
         task_id="t-baseline", params={"output_dir": str(suite.ws), "timeout_sec": 10, "gpu_type": "mi300x", **params}
@@ -233,3 +238,76 @@ def test_an_agentx_baseline_is_measured_once_on_a_server_it_owns(monkeypatch, su
 
     assert [(config.workload, config.lifecycle.mode) for config in played] == [(WorkloadKind.AGENTX, LifecycleMode.OWN)]
     assert not (suite.ws / "warmup_round").exists()
+
+
+# A measured workload: a 900s cold round of which 550s was the benchmark, a 400s hot pass, so one more variant costs
+# 350s of boot plus 400s.
+_ROUND_SEC = 900.0
+_ONE_MORE_SEC = 750.0
+
+
+def _prelude(*, usable_sec: float, max_minutes: float = 0.0, leg_failures: int = 0) -> SimpleNamespace:
+    return SimpleNamespace(
+        phase="PRELUDE",
+        max_minutes=max_minutes,
+        baseline_failures_this_leg=leg_failures,
+        baseline_runtime_sec=_ROUND_SEC,
+        baseline_post_ready_runtime_sec=550.0,
+        baseline_warm_runtime_sec=400.0,
+        session_budget_usable_sec=lambda: usable_sec,
+    )
+
+
+@pytest.mark.parametrize("usable_sec", [_ROUND_SEC + _ONE_MORE_SEC - 1.0, _ROUND_SEC - 1.0])
+def test_a_round_the_session_cannot_pay_for_with_a_use_after_it_boots_nothing(monkeypatch, suite, usable_sec):
+    result, rounds = _play(
+        monkeypatch,
+        suite,
+        LaunchAttempt(outcome=READY, metrics=_HOT),
+        state=_prelude(usable_sec=usable_sec),
+        baseline_double_run=False,
+    )
+
+    assert not rounds.calls, "GPU time was spent on a round the session cannot finish"
+    assert result["status"] == "failed"
+    assert result["error_class"] == SESSION_TIME_EXHAUSTED_CLASS
+    shortfall = result["budget_shortfall"]
+    assert shortfall["round_sec"] == pytest.approx(_ROUND_SEC)
+    assert shortfall["one_more_measurement_sec"] == pytest.approx(_ONE_MORE_SEC)
+    assert shortfall["expected_cost_sec"] == pytest.approx(_ROUND_SEC + _ONE_MORE_SEC)
+
+
+def test_a_round_the_session_can_pay_for_with_a_use_after_it_is_measured(monkeypatch, suite):
+    result, rounds = _play(
+        monkeypatch,
+        suite,
+        LaunchAttempt(outcome=READY, metrics=_HOT),
+        state=_prelude(usable_sec=_ROUND_SEC + _ONE_MORE_SEC + 60.0),
+        baseline_double_run=False,
+    )
+
+    assert result["status"] == "succeeded", result
+    assert len(rounds.calls) == 1
+
+
+@pytest.mark.parametrize(("leg_failures", "refused"), [(1, True), (0, False)])
+def test_a_prelude_retry_past_the_optimization_reserve_is_refused_before_ignition(
+    monkeypatch, suite, leg_failures, refused
+):
+    """Twelve hours with 14718.5s left sits below the 21600s reserve: a retry is refused, a first round is not."""
+    state = _prelude(usable_sec=14_718.5, max_minutes=720, leg_failures=leg_failures)
+
+    result, rounds = _play(
+        monkeypatch, suite, LaunchAttempt(outcome=READY, metrics=_HOT), state=state, baseline_double_run=False
+    )
+
+    if not refused:
+        assert result["status"] == "succeeded", result
+        return
+    assert not rounds.calls
+    assert result["error_class"] == SESSION_TIME_EXHAUSTED_CLASS
+    shortfall = result["budget_shortfall"]
+    assert shortfall["reason"] == RETRY_PAST_THE_RESERVE
+    assert shortfall["baseline_failures_this_leg"] == 1
+    assert shortfall["affordable_sec"] == 0.0
+    assert shortfall["bound"] == "optimization_reserve"

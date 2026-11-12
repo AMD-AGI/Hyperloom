@@ -31,6 +31,7 @@ from hyperloom.common.agent_isolation import (
     AgentIsolation,
     BwrapIsolation,
     IsolationRefused,
+    HOST_LAYER_ENV,
     NoIsolation,
 )
 from hyperloom.common.env_safety import SPECIALIST_USER_ENV, RunAs, RunAsError
@@ -38,11 +39,10 @@ from hyperloom.hosted.campaign import parse_campaign
 from hyperloom.measure.local_templates import local_runner_template
 from hyperloom.orchestrator.specialists import agent_runner
 from hyperloom.orchestrator.specialists.launch_env import LaunchPlace, prepare_launch, resolve_launch_isolation
-from hyperloom.sandbox.confined import RunnerPlan
-from hyperloom.sandbox.local import LocalSandboxProvider, ProcessUsers
+from hyperloom.sandbox.card_occupancy import CardGuard
 from hyperloom_multibranch.contracts.toolbox import BranchLease
 from hyperloom_multibranch.scheduling import launch_isolation as launch_isolation_module
-from hyperloom_multibranch.scheduling.hosted_run import HOST_LAYER_ENV, require_hosted_isolation
+from hyperloom_multibranch.scheduling.hosted_run import require_hosted_isolation
 from hyperloom_multibranch.scheduling.launch_isolation import (
     HOSTED,
     LaunchIsolation,
@@ -53,6 +53,8 @@ from hyperloom_multibranch.scheduling.local_peers import LocalCards, branch_sand
 from hyperloom_multibranch.scheduling.peers import PeersUnavailable
 from hyperloom_multibranch.specialist import agent_watch, dev_sandbox
 from hyperloom_multibranch.specialist.agent_sandbox import FrameworkProtection
+from hyperloom_multibranch.toolbox import local_hosted
+from hyperloom_multibranch.toolbox.local_hosted import LocalOptions
 
 ACCOUNT_RUN_AS = RunAs(user="hl-specialist", uid=1500, gid=1500, groups=(1500,), home="/home/hl", drop_tool="setpriv")
 LAYER_PROBE = BwrapProbe("/opt/layer/bin/bwrap", (0, 13, 1), ())
@@ -168,9 +170,9 @@ def test_sandboxes_and_tests_on_this_hosts_cards_are_recorded_unconfined_naming_
 
     isolation = launch_isolation(local=True)
 
-    assert isolation == LaunchIsolation(ACCOUNT, NONE, NONE, False, (*SANDBOX_WHY, TEST_WHY[0]))
+    assert isolation == LaunchIsolation(ACCOUNT, NONE, NONE, False, (*SANDBOX_WHY, *TEST_WHY[:1]))
     assert isolation.problems() == (
-        f"agent and dev sandboxes and tests run unconfined on this host ({SANDBOX_WHY[0]}; no bwrap; {TEST_WHY[0]})"
+        f"agent and dev sandboxes and tests run unconfined on this host ({'; '.join((*SANDBOX_WHY, TEST_WHY[0]))})"
     )
 
 
@@ -297,13 +299,15 @@ async def test_the_record_of_the_sandboxes_is_what_a_dev_command_on_this_host_re
 
 
 def test_the_record_of_the_tests_is_what_a_test_sandbox_on_this_host_reaches(tmp_path: Path) -> None:
-    """A measurement sandbox made as the local toolbox makes one starts its command: unconfined, it reads this
-    process's environment, and the record must say so; confined, it cannot, and the record must not."""
+    """A measurement sandbox made by the provider the local toolbox makes starts its command: unconfined, it reads
+    this process's environment, and the record must say so; confined, it cannot, and the record must not."""
 
     line = REACHES.format(pid=os.getpid())
     probe = ("/bin/sh", "-c", f'({line}) > "$HYPERLOOM_SANDBOX_ROOT/out/reached"')
     template = replace(local_runner_template("runner-1", gpus=0), command=probe)
-    provider = LocalSandboxProvider([template], base_dir=tmp_path / "sandboxes", users=ProcessUsers(plan=RunnerPlan()))
+    session: Any = SimpleNamespace(session_dir=str(tmp_path / "session"), hostname="node-1")
+    options = LocalOptions(framework_configs="", card_guard=CardGuard.OBSERVE)
+    provider = local_hosted._provider(session, (0,), template, options, None)
     sandbox = provider.create(template.name, role="measurement", timeout_sec=60, metadata={})
     try:
         process, status = sandbox._startup  # type: ignore[attr-defined]
