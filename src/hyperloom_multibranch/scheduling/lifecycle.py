@@ -23,7 +23,7 @@ A session that ended before FINAL, killed with its machine before CLOSE included
 and taken up again by :meth:`Session.finish`, which runs FINAL and CLOSE alone on a budget that is already spent,
 carrying the stop reason that session ended with: the roster and the branches are the ones that session persisted,
 and only its report, dashboard and breakdown are written again. One that ended before PRELUDE recorded its baseline
-(:func:`prelude_landed`) has no candidate: the finish withdraws its unfinished tests and CLOSE reports why nothing was
+(:func:`recorded_baseline`) has no candidate: the finish withdraws its unfinished tests and CLOSE reports why nothing was
 chosen. One whose PRELUDE recorded its baseline can be continued instead, without PRELUDE, by :meth:`Session.resume`
 (:func:`resumable_run`).
 """
@@ -198,14 +198,13 @@ COMPLETED_REASONS = frozenset(
         SessionStopReason.GPU_HOURS_EXHAUSTED,
         SessionStopReason.LLM_BUDGET_EXHAUSTED,
         SessionStopReason.JUDGE_STOPPED,
+        SessionStopReason.FINISHED_AFTER_RESTART,
     }
 )
 CUT_SHORT = "CLOSE was cut short after a stop signal"
 NO_CARDS_LEFT = "the toolbox has fewer usable cards than one test needs, so FINAL could not run"
 #: Why FINAL over a session that ended before its baseline was recorded chose nothing.
 NO_BASELINE = "no candidate: the session ended before PRELUDE recorded its baseline, so FINAL had nothing to validate"
-#: The blackboard writer name a restart reads the baseline as.
-RESTART_READER = "restart"
 #: Why a session that was to stop after its map kept none.
 NO_ARBOR_TO_MAP = "no map: no agent named is an Arbor whose directions could be mapped"
 NO_MAP = "no map: the dossier pass set none and none could be generated from the root's shares"
@@ -445,12 +444,13 @@ class Session:
         aborted = SessionOutcome(SessionStopReason.ABORTED, None, None, "")
         return await self._run_and_close(self._phases(budget), aborted, budget, hard_stop)
 
-    async def finish(self, ended: SessionStopReason) -> SessionOutcome:
+    async def finish(self, ended: SessionStopReason, *, restart: bool = False) -> SessionOutcome:
         """Run FINAL and CLOSE over the directory a session that ended for ``ended`` before FINAL left behind, and
         report as that session would have; the manifest and the blackboard that session wrote are this one's input, so
         this opens no session of its own and only its report, dashboard and breakdown are written again. It ends for
         ``ended`` however FINAL goes: the session did not run its course, and a FINAL run after the fact does not
-        make it so.
+        make it so; except that for the ``restart`` of a hosted run, which its host starts again after a preemption, a
+        FINAL that chose ends it for ``finished_after_restart`` when ``ended`` is not in :data:`COMPLETED_REASONS`.
 
         The candidates are read before anything else happens, so a session FINAL cannot run over is refused without a
         stop or a report being written. A session that ended before PRELUDE recorded its baseline has no candidate:
@@ -468,7 +468,7 @@ class Session:
         self._in_final = True
         hard_stop = HardStop(budget, self._clock)
         ending = SessionOutcome(ended, None, None, "")
-        work = self._no_final(ended) if candidates is None else self._final_phases(candidates, ended)
+        work = self._no_final(ended) if candidates is None else self._final_phases(candidates, ended, restart)
         return await self._run_and_close(work, ending, budget, hard_stop)
 
     async def resume(self, ended: SessionStopReason) -> SessionOutcome:
@@ -901,9 +901,11 @@ class Session:
         self._decisions.record(Decision(DecisionKind.PRELUDE, DOSSIER_ENDED, INTEGRATION_BRANCH, ended))
         return outcome
 
-    async def _final_phases(self, candidates: FinalCandidates, ended: SessionStopReason) -> SessionOutcome:
+    async def _final_phases(
+        self, candidates: FinalCandidates, ended: SessionStopReason, restart: bool
+    ) -> SessionOutcome:
         """FINAL alone over ``candidates``, inside the phases coroutine, so a failure still goes through CLOSE and
-        leaves a report.
+        leaves a report; for ``restart`` see :meth:`finish`.
 
         The toolbox takes the dead session's unfinished tests up again from its submit log when it starts, and they
         belong to branches that are over: they are withdrawn, and the quota then admits FINAL's validation alone.
@@ -911,7 +913,11 @@ class Session:
 
         await self._take_up(ended)
         await self._toolbox.set_policy(final_quota(self._settings.caps))
-        return await self._final(candidates, ended)
+        outcome = await self._final(candidates, ended)
+        chose = outcome.final is not None and outcome.final.chosen is not None
+        if restart and chose and ended not in COMPLETED_REASONS:
+            return replace(outcome, stop_reason=SessionStopReason.FINISHED_AFTER_RESTART)
+        return outcome
 
     async def _no_final(self, ended: SessionStopReason) -> SessionOutcome:
         """No FINAL over a session that recorded no baseline: the toolbox takes the dead session's unfinished tests up
@@ -1141,18 +1147,6 @@ async def recorded_baseline(blackboard: LocalBlackboard) -> BaselineRecord | Non
         return None
 
 
-def prelude_landed(root: Path) -> bool:
-    """Whether the session in ``root`` got through PRELUDE far enough for FINAL to validate it: it committed its root
-    and the rule gate wrote its baseline. A session that did not measured nothing a later start could carry on from.
-    Creates nothing. Blocks, and runs an event loop of its own."""
-
-    layout = SessionLayout(root)
-    if not layout.root_recipe.is_file():
-        return False
-    reader = LocalBlackboard(layout.blackboard, Writer(Role.OBSERVER, RESTART_READER))
-    return asyncio.run(recorded_baseline(reader)) is not None
-
-
 def _checkpoint_scope(settings: RunSettings) -> CheckpointScope | None:
     """The AgentX checkpoint the session ran under; an InferenceX session has none."""
     workload = settings.workload
@@ -1224,7 +1218,6 @@ __all__ = [
     "SessionServices",
     "persisted_run",
     "persisted_session",
-    "prelude_landed",
     "recorded_baseline",
     "resumable_run",
 ]
