@@ -20,6 +20,19 @@ Merged to `main` and not yet carried by a tagged release. Each entry moves
 into the [release](https://github.com/AMD-AGI/Hyperloom/releases) that ships
 it.
 
+- **A GPU hang is pinned only on the forge-loop candidate that causes it.**
+  When a measurement's output names a GPU hang (`HW Exception by GPU node-N`),
+  forge-loop waits up to 15 minutes for the device to run work again and
+  measures the candidate once more. A candidate that hangs the GPU in both
+  measurements is reverted as `REVERT_DEVICE_FAULT`; one that measures cleanly
+  the second time is ruled on that measurement. A device that does not recover
+  leaves the candidate unjudged as `DEVICE_UNAVAILABLE` and stops the campaign
+  with `device_unrecovered`. Each hang is recorded as a `device_fault` event.
+  Before, the hang was ruled on as a validation or benchmark failure of
+  whichever candidate was being measured when it happened. The grid-sizing
+  method card and the FlyDSL backend prompt now require every workgroup a
+  kernel waits on to be resident at once: a workgroup waiting on one that
+  cannot be scheduled deadlocks the kernel and hangs the GPU.
 - **An Arbor agent on an AgentX multi-branch session needs no launch flag.**
   `hyperloom-multibranch run --autonomous-agent` now serves every Arbor the
   session's frozen base launch, resolved from InferenceX or the framework's
