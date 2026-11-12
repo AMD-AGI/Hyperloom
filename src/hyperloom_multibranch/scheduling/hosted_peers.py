@@ -37,6 +37,7 @@ from typing import TYPE_CHECKING, ClassVar
 
 from hyperloom.measure.runner.cache_build import CacheBuildError, WheelTarget, runner_wheel_target
 from hyperloom_multibranch.repo.isolated_git import INIT, git_argv, git_env
+from hyperloom_multibranch.scheduling.hosted_run import grant_tests_end_by
 from hyperloom_multibranch.scheduling.layout import SessionLayout
 from hyperloom_multibranch.scheduling.local_peers import attempt_timeout_sec, measurement_host, peers_on
 from hyperloom_multibranch.scheduling.peers import PeerFactory, PeerSetup
@@ -167,7 +168,8 @@ def _git(argv: list[str], doing: str, env: dict[str, str] | None = None) -> None
 @dataclass(frozen=True)
 class PinnedToolboxInputs:
     """The toolbox's inputs of a hosted session: what ``host`` gave, every runner sandbox pinned to the runner cache
-    entry below ``cache_root`` of the commit the run executes, built from a private copy of the session's clone of it."""
+    entry below ``cache_root`` of the commit the run executes, built from a private copy of the session's clone of it,
+    its tests to end by the stop of ``host``'s grant (:func:`~hyperloom_multibranch.scheduling.hosted_run.grant_tests_end_by`)."""
 
     host: HostInfo
     cache_root: Path
@@ -189,6 +191,7 @@ class PinnedToolboxInputs:
         with tempfile.TemporaryDirectory(prefix="hyperloom-runner-source-") as private:
             copy = private_copy(source, Path(private), sha)
             pin = runner_cache_pin(copy, sha, self.cache_root, runner_wheel_target(os.environ))
+        given["tests_end_by"] = grant_tests_end_by(self.host)
         return HostedToolboxInputs(**given, runner_cache_manifest_sha256=pin)  # type: ignore[arg-type]
 
 

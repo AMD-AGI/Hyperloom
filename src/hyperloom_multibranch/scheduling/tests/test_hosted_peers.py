@@ -24,7 +24,7 @@ from types import SimpleNamespace
 
 import pytest
 
-from hyperloom.hosted.host_info import HostInfo, read_host_info
+from hyperloom.hosted.host_info import GrantLimits, HostInfo, read_host_info
 from hyperloom.measure.runner import cache_build
 from hyperloom.measure.runner.cache_build import RUNNER_TARGET_ENV, CacheBuildError, CacheEntry, runner_wheel_target
 import hyperloom_multibranch
@@ -42,6 +42,7 @@ from hyperloom_multibranch.scheduling.hosted_peers import (
     runner_cache_pin,
     runner_source,
 )
+from hyperloom_multibranch.scheduling.budget import MB_CLOSE_GRACE_CAP_SECONDS
 from hyperloom_multibranch.scheduling.layout import SessionLayout
 from hyperloom_multibranch.scheduling.peers import PeerSetup, PeersUnavailable
 from hyperloom_multibranch.scheduling.settings import InferenceXShape, KernelOptimizer, RunSettings, Workload
@@ -278,6 +279,22 @@ def test_every_runner_sandbox_is_pinned_to_the_runner_cache_built_from_the_sessi
     assert manifest_from_json((entry / MANIFEST_NAME).read_bytes()).target == TARGET.manifest_form(), (
         "the wheels are for the runner's interpreter the host names, not the application's"
     )
+
+
+@pytest.mark.usefixtures("wheelhouse_index")
+def test_the_toolbox_is_told_when_the_grant_needs_its_tests_ended(
+    rig: Rig, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv(RUNNER_TARGET_ENV, RUNNER_TAG)
+    layout = SessionLayout(tmp_path / "MB-session")
+    layout.root.mkdir()
+    host = _host(tmp_path, rig.repo, rig.cache.sha)
+    granted = dataclasses.replace(host, grant_limits=GrantLimits(4, 8, 100.0, 7200))
+
+    inputs = PinnedToolboxInputs(granted, tmp_path / "runner-cache")(layout, 2)
+
+    assert inputs.tests_end_by == host.run_created_at.timestamp() + 7200 - MB_CLOSE_GRACE_CAP_SECONDS
+    assert PinnedToolboxInputs(host, tmp_path / "runner-cache")(layout, 2).tests_end_by is None, "no grant runtime"
 
 
 @pytest.mark.usefixtures("wheelhouse_index")

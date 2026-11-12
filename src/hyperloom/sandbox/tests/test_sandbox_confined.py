@@ -95,6 +95,22 @@ def _given(isolation: BwrapIsolation | NoIsolation) -> Callable[..., BwrapIsolat
     return choose
 
 
+#: The packages whose code a provider's create runs here: what they warn is the test's to check.
+_THIS_PATH = ("hyperloom.sandbox", "hyperloom.common", "hyperloom_common")
+
+
+def _warnings_of_this_path(caplog: pytest.LogCaptureFixture) -> list[str]:
+    """The warnings :data:`_THIS_PATH` logged during the test. A timer another test on this worker left running (a
+    measurement pool's kept sandbox, closed on its own thread when its keep window passes) logs into whichever test
+    runs then; its warning is not this one's."""
+    return [
+        record.getMessage()
+        for record in caplog.records
+        if record.levelno == logging.WARNING
+        and any(record.name == package or record.name.startswith(f"{package}.") for package in _THIS_PATH)
+    ]
+
+
 def _flag_pairs(argv: list[str]) -> list[tuple[str, ...]]:
     """The mounts and settings of a recorded command line before ``--``, each with its arguments."""
     arity = {
@@ -359,7 +375,7 @@ def test_where_bubblewrap_cannot_sandbox_a_test_tests_run_as_before_and_that_is_
         sandbox = providers[0].create("runner", role="measurement", timeout_sec=60, metadata={})
         _wait(lambda: _log_says(sandbox, "app pid seen"))
 
-    said = [record.getMessage() for record in caplog.records if record.levelno == logging.WARNING]
+    said = _warnings_of_this_path(caplog)
     assert said == [f"{UNCONFINED_TESTS} (running them as an account: {TEST_ACCOUNT}; bubblewrap: not found on PATH)"]
     assert sandbox._confined is None, "the sandbox runs as before: its runner sees the app's processes"
 
@@ -388,7 +404,7 @@ def test_a_probe_that_gave_no_answer_in_time_leaves_only_that_launch_unconfined(
         "a later launch is chosen for again"
     )
     assert len(asked) == 3, "an answer that came is kept"
-    said = [record.getMessage() for record in caplog.records if record.levelno == logging.WARNING]
+    said = _warnings_of_this_path(caplog)
     assert said == [f"{UNCONFINED_TESTS} (running them as an account: {TEST_ACCOUNT}; {late.problems[0]})"]
 
 
