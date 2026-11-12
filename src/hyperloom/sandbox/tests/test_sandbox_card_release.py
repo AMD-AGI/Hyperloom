@@ -22,12 +22,13 @@ from collections.abc import Callable, Sequence
 
 import pytest
 
-from hyperloom.sandbox import local, local_sandbox, reaper
+from hyperloom.sandbox import card_occupancy, local, local_sandbox, reaper
 from hyperloom.sandbox.card_occupancy import METHOD_CENSUS, CardGuard, CardReading, Holder
 from hyperloom.sandbox.gated_pool import CardsHeld, GatedPool
 from hyperloom.sandbox.local import LocalSandboxProvider, LocalTemplate
 from hyperloom.sandbox.local_sandbox import LocalSandbox
 from hyperloom.sandbox.socket import CreateOptions, SandboxUnavailable
+from hyperloom.sandbox.tests.kernel_tree import KernelTree
 
 _SERVER_RANK = Holder(0, 4242, "", int(106.5 * (1 << 30)), 0)
 
@@ -122,6 +123,21 @@ def test_cards_go_back_at_once_where_nothing_is_listed_or_the_list_cannot_be_rea
         provider = make(read)
         _create(provider).kill()
         assert provider.pool.free_cards() == (0,)
+
+
+def test_a_provider_whose_caller_sets_no_reading_never_reads_the_hosts_cards(tmp_path, monkeypatch) -> None:
+    """The kernel's list says card 0 is held, as on a GPU host where another job runs: a provider left as built does not
+    read it, and its card goes back at once."""
+    tree = KernelTree(tmp_path)
+    tree.holds(4242, 0, vram=100 << 30)
+    monkeypatch.setattr(card_occupancy, "KFD_PATH", tree.kfd)
+    assert card_occupancy.read_listed((0,)).held_cards() == {0}, "the host's list as the real read sees it"
+    provider = LocalSandboxProvider([LocalTemplate("dev", "dev", gpus=1)], hostname="node-a", gpus=[0])
+    try:
+        _create(provider).kill()
+        assert provider.pool.free_cards() == (0,)
+    finally:
+        provider.close()
 
 
 def test_withheld_cards_freed_later_wait_for_the_card_too(make, monkeypatch) -> None:
