@@ -178,7 +178,8 @@ def _suite_round_failure(
     """The failed result of an inference_suite round: the step it stopped at, or a load that measured nothing."""
     step = measurement.get("failed_step")
     if step is not None:
-        error_class, error = failed_step_error_class(FailedStep(step)), measurement.get("failure_detail") or step
+        error = measurement.get("failure_detail") or step
+        error_class = failed_step_error_class(FailedStep(step), error)
     else:
         error_class, error = "invalid_measurement", "the round report holds no positive throughput and served requests"
     report_path = round_report_path(finished.workspace)

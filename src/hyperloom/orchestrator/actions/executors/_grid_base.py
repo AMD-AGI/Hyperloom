@@ -175,7 +175,7 @@ def _stopped_by_checkpoint(round_: GridRound) -> bool:
 def failed_step_class(measurement: Mapping[str, Any]) -> str | None:
     """The error class of the step a run_dir's round failed at, or ``None`` for a round that failed at no step."""
     step = measurement.get("failed_step")
-    return None if step is None else failed_step_error_class(FailedStep(step))
+    return None if step is None else failed_step_error_class(FailedStep(step), measurement.get("failure_detail") or "")
 
 
 @dataclass
