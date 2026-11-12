@@ -91,13 +91,12 @@ the same path; a usage error names what is missing.
 :mod:`~hyperloom_multibranch.scheduling.hosted_run` maps it onto the options of ``run``, measured in the runner
 sandboxes of the host's sandbox service (:mod:`~hyperloom_multibranch.scheduling.hosted_peers`). Started again over a
 run whose ``session.json`` names a session, it finishes that session as ``final-only`` does once its PRELUDE recorded
-the baseline, except that a FINAL that chooses a commit ends it for ``finished_after_restart`` with exit code 0; before
-that it closes the session, ending its tests, and starts the spec's session again
-(:func:`~hyperloom_multibranch.scheduling.hosted_run.take_over_earlier_session`). It tells the host the run is over
--- ``final: true`` in ``exit.json`` -- once CLOSE ran, and when the spec, the environment, agents it cannot isolate, a
-missing package of the ``hosted`` extra, the runner cache or a file it cannot read keeps a session from running, with
-exit code 2 for a refused spec or session and 1 otherwise; a crash leaves no ``exit.json``, and the host starts the run
-again.
+the baseline (a FINAL that chooses a commit ends it for ``finished_after_restart``, exit code 0), and otherwise closes
+it, ending its tests, and starts the spec's session again
+(:func:`~hyperloom_multibranch.scheduling.hosted_run.take_over_earlier_session`). It tells the host the run is over --
+``final: true`` in ``exit.json`` -- once CLOSE ran, or when the spec, the environment, agents it cannot isolate, a
+missing ``hosted`` package, the runner cache or an unreadable file keeps a session from running (exit code 2 for a
+refused spec or session, else 1); a crash leaves no ``exit.json``, and the host starts the run again.
 ``final-only SESSION_DIR`` is the emergency recovery of a session that ended before FINAL ran, and takes nothing but
 that directory: it runs FINAL and CLOSE over what the session persisted -- the settings and the frontier policy its
 manifest holds, the branches its roster and blackboard hold -- and rewrites its report, dashboard and breakdown. It
@@ -804,8 +803,7 @@ def settings_from(
     """The run's settings; raises ValueError naming the invalid options. :class:`RosterCaps` checks the caps.
 
     ``tests_that_fit`` says how many tests of a TP run at once where the session measures, raising ValueError when one
-    does not fit: this machine's cards for ``run``, the grant for ``hosted run``.
-    """
+    does not fit: this machine's cards for ``run``, the grant for ``hosted run``."""
 
     missing = [f"--{name.replace('_', '-')}" for name in RUN_REQUIRED if getattr(args, name) is None]
     if missing:
@@ -930,8 +928,7 @@ def run_session(
 
     The session and its peers are built on the event loop they run on, which the specialist tools of the MCP service
     hand every toolbox call to. Whatever the session's processes orphan is reparented to this process, so the session
-    stop kills it and reports it while it runs.
-    """
+    stop kills it and reports it while it runs."""
 
     with adopting_orphans():
         return asyncio.run(_run_session(settings, peer_factory, services, report_root))
