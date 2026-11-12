@@ -642,8 +642,7 @@ def _workload_model(args: argparse.Namespace) -> str:
 
 #: Schemes whose URL user is a login name rather than a credential; any other scheme's user, or a password, is one.
 SSH_SCHEMES = frozenset({"ssh", "git+ssh", "svn+ssh"})
-#: The --autonomous-agent source that names the Arbor vendored with Hyperloom: beside this package in a checkout's
-#: src/ and in a wheel install's site-packages alike (pyproject.toml ships it as package data).
+#: The --autonomous-agent source that names the Arbor vendored beside this package, in a checkout or a wheel install.
 ARBOR_KEYWORD = "arbor"
 VENDORED_ARBOR = Path(__file__).resolve().parent.parent / "hyperloom_arbor"
 
@@ -665,8 +664,7 @@ def _agents(sources: list[str], free: int) -> tuple[str, ...]:
     if ARBOR_KEYWORD in sources and not VENDORED_ARBOR.is_dir():
         raise ValueError(
             f"--autonomous-agent {ARBOR_KEYWORD} names the Arbor vendored at {VENDORED_ARBOR}, which this install does"
-            " not have (an install from before it shipped in the wheel?); reinstall Hyperloom, or give an Arbor"
-            " checkout's path or URL instead"
+            " not have; reinstall Hyperloom, or give an Arbor checkout's path or URL instead"
         )
     return tuple(str(VENDORED_ARBOR) if source == ARBOR_KEYWORD else source for source in sources)
 
