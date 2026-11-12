@@ -268,6 +268,11 @@ def _merge_plan(merge: _Merge) -> str:
             f"Both grew from {merge.ancestor}. This node's change since then is at {merge.records / 'base.diff'}; the "
             f"other node's is at {merge.records / 'source.diff'}.",
             "",
+            "Change files only. A git command that changes the index, HEAD or a branch -- `git checkout <commit> -- "
+            "<path>`, `git apply --index`, `git add`, `git stash`, `git merge`, `git cherry-pick`, `git reset`, "
+            "`git commit` -- makes the loop discard everything this session wrote. Read the other node's version of a "
+            f"file with `git show {source.commit}:<path>`.",
+            "",
             f"- This node: {_described(base)}",
             f"- The other node: {_described(source)}",
             "",
