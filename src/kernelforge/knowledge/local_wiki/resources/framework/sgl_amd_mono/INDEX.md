@@ -2,7 +2,7 @@
 title: sgl-amd-mono knowledge map — monokernels for SGLang on AMD Instinct
 kind: index
 scope: framework/sgl_amd_mono
-updated: 2026-11-09
+updated: 2026-11-12
 pinned_source: sgl-project/sgl-amd-mono@219f40be
 ---
 
@@ -19,6 +19,21 @@ and each model's spec, forward and launches. Every launch it ships today is buil
 A monokernel campaign is a forge-loop task on the `mono` kernel backend, which forge also infers for
 sources under the `sgl_amd_mono/` package. Its KEEP rests on the repository's own tests, declared in
 the task's `config.yaml`; the driver's verdict is only the pre-filter.
+
+## Rules for code inside sgl-amd-mono
+These hold for a launch that lives in the repository. A task outside it that only imports the device
+runtime (`sgl_amd_mono.common`) reads the runtime cards — `overall/device_runtime.md`,
+`overall/isa_portability.md`, `skills/` — and takes its contract from its own task statement.
+- The spec is the task, not the candidate: never loosen a `Numerics` bound, widen a `DeviceLimits`,
+  accept another `Feature`, or drop a disable reason to make a candidate pass. A `BITWISE` output stays
+  bit-identical; a `TOLERANCE` output stays inside the spec's own bounds.
+- Refuse, do not fall back: a configuration the launch cannot serve is refused by the spec, with its
+  reason, before the server starts. No silent fallback, host-side retry or host sync inside a step the
+  spec routes; the step stays capturable in a CUDA graph.
+- A module that reads SGLang internals declares each name in `SGLANG_READS`;
+  `test/unit/test_contract.py` fails on an undeclared or renamed one.
+- `sgl_amd_mono/common/` is shared by every model's launches. Prefer a change local to the model; a
+  change to `common/` keeps every other spec's kernels compiling and correct on the ISAs they serve.
 
 ## Reading order
 1. `overall/repo_layout.md` — packages, how a served step reaches a launch, the three test tiers.
