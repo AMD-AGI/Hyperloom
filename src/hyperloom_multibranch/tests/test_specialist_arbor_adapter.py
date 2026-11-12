@@ -45,11 +45,13 @@ from hyperloom_multibranch.specialist.arbor_adapter import (
     PLAN_FILE,
     ArborCheckout,
     ArborRefused,
+    SplitFailed,
     arbor_config,
     arbor_manifest,
     bench_command,
     carry_dossier,
     dossier_notes,
+    generate_directions,
     host_rules,
     is_arbor,
     link_built,
@@ -58,8 +60,8 @@ from hyperloom_multibranch.specialist.arbor_adapter import (
     read_launch,
     refusals,
     refused_reasons,
+    split_directions,
 )
-from hyperloom_multibranch.specialist.arbor_map import SplitFailed, generate_directions, split_directions
 from hyperloom_multibranch.specialist.runtime import PreflightFailed
 from hyperloom_multibranch.specialist.worktree import SKIPPED
 from hyperloom_multibranch.tests.agent_rig import (

@@ -20,7 +20,6 @@ from __future__ import annotations
 import asyncio
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
-from pathlib import Path
 
 from hyperloom_multibranch.specialist.dossier_pass import DossierOutcome, DossierStart
 from hyperloom_multibranch.specialist.runtime import SessionFinished, SessionStart
@@ -28,16 +27,12 @@ from hyperloom_multibranch.specialist.runtime import SessionFinished, SessionSta
 
 @dataclass(frozen=True)
 class MapCalls:
-    """The scheduler's side of the session's Arbor map: ``start(source, start_commit, deadline)``, the dossier pass of
-    the Arbor ``source`` a mapping branch runs by ``deadline``, ``None`` to run none; ``split(branch, start_commit,
-    map_for, outcome)``, which hands the map out to the Arbor agents ``map_for`` (``outcome`` ``None`` when no pass ran)
-    and says how; ``deal(branch, agent, plan, report)``, which the run of the Arbor ``agent`` on ``plan`` calls with its
-    worker ``report`` when it hands its share back (exits ``reported``), before it finishes: the slot of
-    ``branch`` is dealt the next order of the map, and it says how."""
+    """The scheduler's side of a mapping branch: ``start(source, start_commit, deadline)``, the dossier pass of the
+    Arbor ``source`` to run by ``deadline``, ``None`` to run none; ``split(branch, start_commit, map_for, outcome)``,
+    which hands the map out to the Arbor agents ``map_for`` (``outcome`` ``None`` when no pass ran) and says how."""
 
     start: Callable[[str, str, float], Awaitable[DossierStart | None]]
     split: Callable[[str, str, tuple[str, ...], DossierOutcome | None], Awaitable[str]]
-    deal: Callable[[str, str, str, Path], Awaitable[str]]
 
 
 class MapSession:

@@ -6,7 +6,7 @@
 The user names one directions map with ``--agent-directions``: the open directions of an Arbor dossier map, or a list
 written by hand, in the form Arbor's ``component.plan`` reads. Two Arbor agents given the whole map would work the
 same directions. Split, each works its own. Before the agent branches open, each agent source is fetched once, and the
-map is split by Arbor's own command line (:func:`~hyperloom_multibranch.specialist.arbor_map.split_directions`)
+map is split by Arbor's own command line (:func:`~hyperloom_multibranch.specialist.arbor_adapter.split_directions`)
 into as many disjoint shares as there are Arbor agents, one each, in the order the user named them. Any other agent
 gets none: only Arbor reads a plan.
 
@@ -15,7 +15,7 @@ Without a map, two or more Arbor agents split the map of the dossier pass
 (:mod:`~hyperloom_multibranch.specialist.map_session`), which the session passes here as the map once the pass ends and
 opens a share branch for each share. The dossier pass is the default, and it runs on a branch, so no other branch waits
 for it. When the pass gives none, they split one Arbor generates from the root's shares, PRELUDE's profile, with no GPU
-time (:func:`~hyperloom_multibranch.specialist.arbor_map.generate_directions`): one direction per op family, ranked
+time (:func:`~hyperloom_multibranch.specialist.arbor_adapter.generate_directions`): one direction per op family, ranked
 by its share. Those shares are the root's op shares (:mod:`~hyperloom_multibranch.scheduling.root_shares`), kernel
 names where the toolbox ranked kernels, and ``shares_source`` says where they came from. A single Arbor gets none and
 maps its own directions, which its dossier measures better.
@@ -24,23 +24,12 @@ A map that cannot be split, or generated, leaves every branch without a share, a
 a source that cannot be fetched, no Arbor among the agents, fewer independent directions than Arbor agents, or a root
 with no shares Arbor can use.
 
-The session keeps the map it split (:class:`MapDealer`) for Arbor's master to deal from. An Arbor worker that hands its
-share back (it exits ``reported``, its report's ``ended`` saying why) gives the scheduler its worker report as its run
-ends; the master folds every report so far into the map and deals the slot the worker frees its next order, at most
-:data:`DEAL_SIZE` open directions that no report settled and no running worker holds, a direction reported back open
-by two workers never again (:func:`~hyperloom_multibranch.specialist.arbor_map.deal_order`). The scheduler asks the fork desk for a share
-branch on that order, which takes the slot once the worker's branch has stopped and its cards are back. An empty order
-asks for none, and the slot goes to the judge's refill. A worker's order stays held until it reports, or until the
-fork desk rejects the branch asked on it.
-
 A session that stops after its map (``--stop-after-map``) maps for one Arbor too, splits nothing, and keeps the map and
 the dossier beside it for a person to review (:func:`keep_map`); the run after the review is given them back.
 """
 
 from __future__ import annotations
 
-import asyncio
-import json
 import logging
 import shutil
 from collections.abc import Mapping
@@ -54,22 +43,12 @@ from hyperloom_multibranch.specialist.agent_onboarding import (
     fetch_source,
     root_profile,
 )
-from hyperloom_multibranch.specialist.arbor_adapter import is_arbor
-from hyperloom_multibranch.specialist.arbor_map import (
-    DealRequest,
-    SplitFailed,
-    deal_order,
-    generate_directions,
-    split_directions,
-)
+from hyperloom_multibranch.specialist.arbor_adapter import SplitFailed, generate_directions, is_arbor, split_directions
 
 logger = logging.getLogger(__name__)
 
 SOURCES_DIR = "sources"
 SHARES_DIR = "shares"
-ORDERS_DIR = "orders"
-#: The most directions one order deals a freed slot: a small share at a time, by rank.
-DEAL_SIZE = 2
 #: The map generated from the root's op shares, beside the profile it was generated from.
 GENERATED_MAP = "generated-directions.json"
 #: The fewest Arbor agents a generated map is split for; one Arbor maps its own directions.
@@ -91,10 +70,6 @@ KEPT_SUMMARY = "agent-map.json"
 #: The ``PRELUDE`` decision of a session that stops after its map, naming the summary :func:`keep_map` wrote, and what
 #: made the map it kept.
 MAP_KEPT = "agent map: kept for review"
-#: The ``SHARE`` decision of each deal the scheduler asks of Arbor's master for the slot a reporting worker frees.
-DEALT = "agent map: next order dealt"
-NOTHING_TO_DEAL = "agent map: nothing left to deal"
-NO_DEAL = "agent map: no order dealt"
 MADE_BY_PASS = "dossier pass"
 MADE_BY_SHARES = "generated from the root's shares"
 
@@ -159,77 +134,13 @@ async def _split(arbor: Path, map_file: Path, shares: int, work_dir: Path) -> tu
 
 async def generated_map(arbor: Path, root_shares: OpShares | None, source: str, work_dir: Path) -> Path:
     """The map the Arbor checkout ``arbor`` generates in ``work_dir`` from ``root_shares``, which came from
-    ``source``; raise :class:`~hyperloom_multibranch.specialist.arbor_map.SplitFailed` when there are none to
+    ``source``; raise :class:`~hyperloom_multibranch.specialist.arbor_adapter.SplitFailed` when there are none to
     generate it from or Arbor cannot."""
 
     profile = root_profile(root_shares, work_dir, source)
     if profile is None:
         raise SplitFailed("the root has no shares to generate a map from")
     return await generate_directions(arbor, profile, work_dir / GENERATED_MAP)
-
-
-class MapDealer:
-    """The session's split map, which Arbor's master deals from: the orders dealt and not yet reported on, and the
-    reports the workers handed back, every one of them passed to every later deal so that the map stays folded. Deals
-    run one at a time, so that each holds every order dealt before it."""
-
-    def __init__(self, map_file: Path, dealt: tuple[str, ...], work_dir: Path) -> None:
-        self.map_file = map_file
-        self._held = [Path(plan) for plan in dealt]
-        self._reports: list[Path] = []
-        self._orders = 0
-        self._out = work_dir / ORDERS_DIR
-        self._dealing = asyncio.Lock()
-
-    def hand_back(self, plan: str, report: Path) -> None:
-        """Take the ``report`` of the worker that held ``plan``, which no longer holds it."""
-
-        self.release(plan)
-        self._reports.append(report)
-
-    def release(self, plan: str) -> None:
-        """Hold ``plan``, a share or an order, no longer: no branch runs it."""
-
-        self._held = [order for order in self._held if order != Path(plan)]
-
-    async def deal(self, arbor: Path) -> Path | None:
-        """Have the master of the Arbor checkout ``arbor`` fold every report handed back into the map and deal the next
-        order, held from then on; its path, or ``None`` when no open direction is left to deal. Raise
-        :class:`~hyperloom_multibranch.specialist.arbor_map.SplitFailed` when Arbor cannot deal."""
-
-        async with self._dealing:
-            self._out.mkdir(parents=True, exist_ok=True)
-            self._orders += 1
-            order = self._out / f"order-{self._orders}.json"
-            request = DealRequest(self.map_file, tuple(self._reports), tuple(self._held), order, DEAL_SIZE)
-            await deal_order(arbor, request)
-            if not _directions_in(order):
-                return None
-            self._held.append(order)
-            return order
-
-
-def map_dealer(map_file: str, plans: tuple[str, ...], work_dir: Path) -> MapDealer | None:
-    """The dealer of the map :func:`agent_plans` split into ``plans`` under ``work_dir``: ``map_file``, or the map it
-    generated without one; ``None`` when no share was dealt."""
-
-    dealt = tuple(plan for plan in plans if plan)
-    if not dealt:
-        return None
-    return MapDealer(Path(map_file) if map_file else work_dir / GENERATED_MAP, dealt, work_dir)
-
-
-def _directions_in(order: Path) -> int:
-    """How many directions the order file ``order`` deals; raise ``SplitFailed`` when it cannot be read."""
-
-    try:
-        document = json.loads(order.read_text(encoding="utf-8"))
-    except (OSError, ValueError) as exc:
-        raise SplitFailed(f"the order {order} cannot be read: {exc}") from exc
-    directions = document.get("directions") if isinstance(document, dict) else None
-    if not isinstance(directions, list):
-        raise SplitFailed(f'the order {order} has no "directions" list')
-    return len(directions)
 
 
 def keep_map(target: Path, map_file: Path, dossier: Path | None, made: Mapping[str, object]) -> Path:

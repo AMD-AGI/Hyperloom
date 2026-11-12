@@ -17,9 +17,8 @@ a refusal, this side's or Arbor's own, fails the preflight at once.
 
 The spec's ``plan``, the file of the branch's share of the session's directions, becomes ``component.plan``. Those
 shares come from one map, which Arbor's dossier pass writes on one lease before the branches open
-(:data:`DOSSIER_PASS`, its end read by :func:`mapped`) or Arbor generates from the root's profile with no GPU time,
-split and dealt by Arbor's own command lines
-(:mod:`~hyperloom_multibranch.specialist.arbor_map`); the scheduling calls these.
+(:data:`DOSSIER_PASS`, its end read by :func:`mapped`) or Arbor generates from the root's profile with no GPU time
+(:func:`generate_directions`), split by Arbor's own command line (:func:`split_directions`); the scheduling calls these.
 The dossier the pass wrote (:func:`pass_dossier`) is copied into each branch's checkout (:func:`carry_dossier`), where
 Arbor looks a dossier up. The root's op shares are not the adapter's: the preflight sets
 ``component.profile`` for Arbor as for any agent run as a component
@@ -44,6 +43,7 @@ pin (:data:`KEY_SINCE`); an input it can run without (:data:`OPTIONAL_KEYS`) is 
 from __future__ import annotations
 
 import ast
+import asyncio
 import json
 import math
 import os
@@ -291,6 +291,8 @@ BENCH_PHASE = "bench"
 _SHA = re.compile(r"[0-9a-fA-F]{7,40}")
 #: A word of nothing but these is a shell operator, carried as it stands.
 _OPERATORS = frozenset("();<>|&")
+#: The lines of a command's output a failure keeps, its end.
+_TAIL_LINES = 20
 #: The built files of an installed package, its compiled extensions among them: the source base's (:data:`SKIPPED`)
 #: but its bytecode, which Python writes again.
 BUILT = tuple(pattern for pattern in SKIPPED if pattern.startswith("*.") and pattern not in ("*.pyc", "*.pyo"))
@@ -302,6 +304,10 @@ class ArborRefused(ValueError):
     def __init__(self, reasons: list[str]) -> None:
         super().__init__("; ".join(reasons))
         self.reasons = tuple(reasons)
+
+
+class SplitFailed(RuntimeError):
+    """Arbor could not generate a map, or split one into shares; the message says what it printed."""
 
 
 @dataclass(frozen=True)
@@ -1141,6 +1147,48 @@ def mapped(session: Path) -> bool:
     return exit_reason(session / EXIT_FILE) == MAPPED
 
 
+async def split_directions(checkout: Path, map_file: Path, shares: int, out: Path) -> tuple[Path, ...]:
+    """Split the open directions of ``map_file`` into ``shares`` disjoint plans in ``out``, with Arbor's own command
+    line in ``checkout``; the plan files, in order, each a ``component.plan``. Raise :class:`SplitFailed` with what
+    Arbor printed when it cannot: a map with fewer independent groups than shares, or one that does not validate."""
+
+    paths = tuple(out / f"share-{number}.json" for number in range(1, shares + 1))
+    await _directions(checkout, paths, "split", str(map_file), "--shares", str(shares), "--out", str(out))
+    return paths
+
+
+async def generate_directions(checkout: Path, profile: Path, out: Path) -> Path:
+    """A map generated from the root profile ``profile``, the file ``component.profile`` names, by Arbor's own
+    command line in ``checkout``, with no GPU time: one open direction per op family, ranked by its share. Written to
+    ``out``, which :func:`split_directions` splits as any map. Raise :class:`SplitFailed` with what Arbor printed when
+    it cannot: a profile with no share above its cut, or an Arbor older than ``generate``."""
+
+    await _directions(checkout, (out,), "generate", "--profile", str(profile), "--out", str(out))
+    return out
+
+
+async def _directions(checkout: Path, written: tuple[Path, ...], *args: str) -> None:
+    """Run ``python3 -m arbor.directions`` with ``args`` in ``checkout``, as Arbor's other commands with no site
+    settings file (:data:`SETTINGS_ENV`); raise :class:`SplitFailed` with what it printed when it fails or leaves any
+    of ``written`` unwritten."""
+
+    argv = [PYTHON, "-m", "arbor.directions", *args]
+    process = await asyncio.create_subprocess_exec(
+        *argv,
+        cwd=checkout,
+        env={**os.environ, SETTINGS_ENV: os.devnull},
+        stdout=asyncio.subprocess.PIPE,
+        stderr=asyncio.subprocess.STDOUT,
+    )
+    output, _ = await process.communicate()
+    said = " | ".join(line.strip() for line in output.decode(errors="replace").strip().splitlines()[-_TAIL_LINES:])
+    if process.returncode != 0:
+        raise SplitFailed(f"`{shlex.join(argv)}` exited {process.returncode}: {said}")
+    missing = [path.name for path in written if not path.is_file()]
+    if missing:
+        raise SplitFailed(f"`{shlex.join(argv)}` wrote no {', '.join(missing)}: {said}")
+
+
 __all__ = [
     "ACCURACY_FLOOR_ENV",
     "ACCURACY_POLICY",
@@ -1161,7 +1209,6 @@ __all__ = [
     "MAP_FILE",
     "MAPPED",
     "MARKERS",
-    "PYTHON",
     "REVIEW_GATE_KEY",
     "REVIEW_HOST",
     "REVIEW_KEY",
@@ -1173,12 +1220,14 @@ __all__ = [
     "ArborRefused",
     "ArborRun",
     "ResolvedLaunch",
+    "SplitFailed",
     "arbor_config",
     "arbor_manifest",
     "bench_command",
     "carry_dossier",
     "dossier_notes",
     "exit_reason",
+    "generate_directions",
     "has_review_gate",
     "host_rules",
     "is_arbor",
@@ -1190,4 +1239,5 @@ __all__ = [
     "refused_reasons",
     "served_config",
     "server_flags",
+    "split_directions",
 ]

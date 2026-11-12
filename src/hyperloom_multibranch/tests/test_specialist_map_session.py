@@ -38,11 +38,8 @@ class Scheduler:
         self.split.append((branch, start_commit, map_for, outcome))
         return "2 share branches asked"
 
-    async def dealt(self, branch: str, agent: str, plan: str, report: Path) -> str:
-        raise AssertionError("a mapping branch hands no share back")
-
     def calls(self) -> MapCalls:
-        return MapCalls(self.start, self.handed, self.dealt)
+        return MapCalls(self.start, self.handed)
 
 
 async def test_the_pass_of_the_first_arbor_runs_and_its_map_is_handed_out_before_the_run_finishes() -> None:
