@@ -64,9 +64,10 @@ agent CLI the specialists run must be installed. `--measurement hosted` also nee
 Before a test that carries patches is given a sandbox or cards, its toolbox byte-compiles every Python file the patch
 stack changes and imports each patched component on CPU, with no GPU visible (the merge smoke). A file that does not
 compile, or an import that fails on a name or attribute a patched module lacks (one patch removing a name another
-patched file imports), fails the test as the candidate's (`merge_smoke`). Every other import failure, which a missing
-GPU could cause (a device probe that finds no GPU, a name the image defines only where a GPU is seen, a missing module,
-a `NameError`), is logged and not judged, and the test is measured. A smoke that cannot run is an infrastructure failure
+patched file imports), fails the test as the candidate's (`merge_smoke`), whatever the reason the name is missing: a
+patched module that defines a name only under a device check is judged too, since such a stack fails on any other
+device as well. Every other import failure (a device probe that finds no GPU, a name an unpatched module defines only
+where a GPU is seen, a missing module, a `NameError`) is logged and not judged, and the test is measured. A smoke that cannot run is an infrastructure failure
 (`smoke_not_run`), retried once. `HYPERLOOM_MERGE_SMOKE=off` in the session's environment turns it off; any
 value but `on`, `off` or empty is refused when the toolbox is built.
 

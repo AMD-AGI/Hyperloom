@@ -1510,9 +1510,10 @@ Before a test that carries patches is given a sandbox or cards, the multi-branch
 every Python file the test's patch stack changes and imports each patched component on CPU, with every GPU hidden and the
 point's server variables set. A file that does not compile, or, while the image's own copy imports, an `ImportError`
 (not `ModuleNotFoundError`) for a name a patched module lacks or an `AttributeError` raised on a patched module, fails
-the test as the candidate's (`merge_smoke`); any other import failure (a `NameError`, a missing module, a name or
-attribute an unpatched module or value lacks), which a missing GPU could cause, is logged and the test is measured as
-usual. A smoke that cannot run is the
+the test as the candidate's (`merge_smoke`), whatever the reason the name is missing (a patched module that defines a
+name only under a device check is judged too, since such a stack fails on any other device as well); any other import
+failure (a `NameError`, a missing module, a name or attribute an unpatched module or value lacks) is logged and the test
+is measured as usual. A smoke that cannot run is the
 infrastructure failure `smoke_not_run`, retried once.
 
 | Variable | Default | Description |

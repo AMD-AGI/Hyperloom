@@ -26,11 +26,13 @@ timed out or died) raises :class:`SmokeNotRun`, which the executor reports as an
 (``smoke_not_run``), so an environment fault never bars a good commit. A module the image's own copy cannot import
 either here (a framework that needs a GPU to import) is not judged: the test goes on to be measured as before.
 
-Only an error that a missing GPU cannot cause is judged, since the image's own copy never runs the patch's new lines and
-so cannot clear one: a ``SyntaxError`` in a file the stack patched; an ``ImportError`` (not a ``ModuleNotFoundError``)
-for a name a patched module lacks (its ``path`` is a file the stack patched); an ``AttributeError`` raised on a patched
-module object. This is the catch the smoke is for: one patch removes or renames a name that another patched file
-imports. Anything else (a ``NameError``, a missing module, a name or attribute an unpatched module or value lacks, such
+What is judged is an error the patched files raise about each other, since the image's own copy never runs the patch's
+new lines and so cannot clear one: a ``SyntaxError`` in a file the stack patched; an ``ImportError`` (not a
+``ModuleNotFoundError``) for a name a patched module lacks (its ``path`` is a file the stack patched); an
+``AttributeError`` raised on a patched module object. This is the catch the smoke is for: one patch removes or renames a
+name that another patched file imports. Such an error is judged whatever the reason the name is missing, including a
+patched module that defines it only under a device check; a stack like that fails on any other device as well. Anything
+else (a ``NameError``, a missing module, a name or attribute an unpatched module or value lacks, such
 as one the image defines only where a GPU is seen or a device query that returns ``None``, a ``RuntimeError`` of a
 device probe, a ``KeyError`` of a variable the host lacks) is logged and not judged, and the test goes on to its
 sandbox. The import child gets every variable the point launches its server with, over the host's environment, still
