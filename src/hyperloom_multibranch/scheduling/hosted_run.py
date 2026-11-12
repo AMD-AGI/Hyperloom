@@ -24,6 +24,13 @@ The grant bounds the session in time (:func:`grant_deadline`): its budget ends o
 grant does, and the process is sent SIGTERM one CLOSE grace before the grant ends, which ends FINAL and leaves CLOSE
 that grace.
 
+A hosted run's agents must be isolated: they run with the application's credentials in reach otherwise. Its start
+marks the process so (:func:`~hyperloom.common.agent_isolation.require_agent_isolation`), with the hosting layer's
+bubblewrap, ``bin/bwrap`` in the directory ``HYPERLOOM_HOST_LAYER`` names
+(:func:`~hyperloom.common.agent_isolation.layer_bwrap`), and no other, and refuses a run that would launch anything
+unconfined on this host, as the path that launches it would (:func:`require_hosted_isolation`): its specialists run
+here, its agent and dev sandboxes and its tests in the grant's sandboxes.
+
 The host decides from ``$HYPERLOOM_STATE_DIR/exit.json`` whether to start the run again: never once it holds
 ``final: true`` (:func:`write_final_exit`), and again when it is missing. ``session.json`` there names the session
 directory as soon as it exists (:func:`record_session`), so a start that finds it finishes that session instead of
@@ -49,6 +56,7 @@ from typing import Any
 
 from hyperloom_common.io import WriteOptions, atomic_write_json
 from hyperloom_common.shared_storage import child_umask, ownership
+from hyperloom.common.agent_isolation import IsolationRefused, layer_bwrap, require_agent_isolation
 from hyperloom.hosted.campaign import CampaignSpec, parse_campaign
 from hyperloom.hosted.host_info import GrantLimits as HostGrantLimits
 from hyperloom.hosted.host_info import HostInfo, Var
@@ -56,8 +64,10 @@ from hyperloom.inference_optimizer.session.paths import ENV_USER_DATA_PATH
 from hyperloom_multibranch.blackboard import LocalBlackboard
 from hyperloom_multibranch.contracts.blackboard import Role, Writer
 from hyperloom_multibranch.scheduling.budget import MB_CLOSE_GRACE_CAP_SECONDS, MB_SECONDS_PER_HOUR
+from hyperloom_multibranch.scheduling.launch_isolation import launch_isolation
 from hyperloom_multibranch.scheduling.layout import SessionLayout
 from hyperloom_multibranch.scheduling.lifecycle import PersistedRun, persisted_run, persisted_session, recorded_baseline
+from hyperloom_multibranch.scheduling.peers import PeersUnavailable
 from hyperloom_multibranch.scheduling.settings import RunSettings
 from hyperloom_multibranch.scheduling.stops import SessionStopReason
 from hyperloom_multibranch.toolbox.hosted_leases import GrantLimits
@@ -205,6 +215,30 @@ def refuse_unhosted_branches(settings: RunSettings, host: HostInfo, env: Mapping
         raise HostedRefused(
             f"dev sandboxes and autonomous agents run in the grant's dev sandboxes and need {', '.join(missing)}"
         )
+
+
+def require_hosted_isolation(env: Mapping[str, str]) -> None:
+    """Mark this process as a hosted run's, whose agents must be isolated, with the hosting layer's bubblewrap
+    (:func:`~hyperloom.common.agent_isolation.layer_bwrap`) and no other, and refuse now a run that would launch one
+    unconfined on this host, as the path that launches it would
+    (:func:`~hyperloom_multibranch.scheduling.launch_isolation.launch_isolation`): its specialists; its agent and dev
+    sandboxes and its tests run in the grant's sandboxes.
+
+    Raises:
+        PeersUnavailable: A launch on this host would run unconfined or be refused, naming which and why; the run ends
+            for good.
+        TimeoutError: Bubblewrap gave no answer in time; a later start of the run may find it.
+    """
+
+    try:
+        require_agent_isolation(bwrap=layer_bwrap(env))
+    except IsolationRefused as refused:
+        if refused.transient:
+            raise TimeoutError(str(refused)) from refused
+        raise PeersUnavailable(str(refused)) from refused
+    problems = launch_isolation(local=False).problems()
+    if problems:
+        raise PeersUnavailable(f"a hosted run launches nothing unconfined beside its credentials, and here {problems}")
 
 
 def _multibranch_section(section: object) -> dict[str, Any]:
@@ -462,6 +496,7 @@ __all__ = [
     "recorded_session",
     "refuse_unhosted_branches",
     "reported_stop_reason",
+    "require_hosted_isolation",
     "run_argv",
     "share_with_the_group",
     "spec_make_before_break",

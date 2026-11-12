@@ -19,6 +19,7 @@ from hyperloom_common.bwrap import BwrapPolicy, BwrapProbe
 
 from hyperloom.common import agent_isolation
 from hyperloom.common.agent_isolation import (
+    HOST_LAYER_ENV,
     NO_LAYER_BWRAP,
     RAY_ACTOR_PATH,
     SANDBOX_ACCOUNT,
@@ -35,6 +36,7 @@ from hyperloom.common.agent_isolation import (
     choose_sandbox_isolation,
     choose_test_isolation,
     isolation_required,
+    layer_bwrap,
     require_agent_isolation,
     session_isolation_lines,
     unconfined_launch,
@@ -591,3 +593,12 @@ def test_a_mark_with_a_secret_shaped_name_never_reaches_the_command_line(tree):
         BwrapIsolation(ON_PATH).launch(
             ["true"], BwrapPolicy(read_only=(str(tree),)), {"GH_TOKEN": "x"}, marks=("GH_TOKEN",)
         )
+
+
+@pytest.mark.parametrize(
+    ("value", "found"), [(" /opt/layer ", "/opt/layer/bin/bwrap"), ("", None), ("  ", None), (None, None)]
+)
+def test_the_layers_bubblewrap_is_found_in_the_layer_directory_the_host_names(
+    value: str | None, found: str | None
+) -> None:
+    assert layer_bwrap({} if value is None else {HOST_LAYER_ENV: value}) == found

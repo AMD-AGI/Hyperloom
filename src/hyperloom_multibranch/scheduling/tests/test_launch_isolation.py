@@ -31,11 +31,12 @@ from hyperloom.common.agent_isolation import (
     AgentIsolation,
     BwrapIsolation,
     IsolationRefused,
+    HOST_LAYER_ENV,
     NoIsolation,
+    layer_bwrap,
     require_agent_isolation,
 )
 from hyperloom.common.env_safety import SPECIALIST_USER_ENV, RunAs, RunAsError
-from hyperloom.hosted.entry import HOST_LAYER_ENV, layer_bwrap
 from hyperloom.measure.local_templates import local_runner_template
 from hyperloom.orchestrator.specialists import agent_runner
 from hyperloom.orchestrator.specialists.launch_env import LaunchPlace, prepare_launch, resolve_launch_isolation
