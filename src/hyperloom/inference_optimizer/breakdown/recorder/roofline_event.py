@@ -465,10 +465,11 @@ class RooflineRequest:
 class ProfileRunOutcome:
     """How one profile attempt ended.
 
-    ``server_liveness`` is the post-attempt process-level probe. A run whose
-    trace exported completely and whose engine then died is indistinguishable
-    from a clean run by the result dict alone, so the row carries the process
-    outcome next to the wall clock rather than leaving it to be inferred.
+    ``server_liveness`` is what the attempt's round reports say of its server.
+    A run whose trace exported completely and whose engine then died is
+    indistinguishable from a clean run by the result dict alone, so the row
+    carries the server's fate next to the wall clock rather than leaving it to
+    be inferred.
 
     ``instrumentation`` is which patchers ran on this attempt and what they
     returned. It is stored on the run row rather than folded into ``validate``

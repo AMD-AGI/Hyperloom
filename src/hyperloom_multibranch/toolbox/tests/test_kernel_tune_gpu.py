@@ -30,11 +30,9 @@ from hyperloom.contracts.recipe import KernelKind
 from hyperloom.measure.framework.base import DEFAULT_CONFIGS
 from hyperloom.measure.framework.rows import lay_rows_over
 from hyperloom.measure.tests.hosted_fixtures import spec_context
-from hyperloom_multibranch.contracts.blackboard import Role, Writer
 from hyperloom_multibranch.contracts.toolbox import MeasurementCapacity, WorkloadKind
-from hyperloom_multibranch.blackboard import LocalBlackboard
 from hyperloom_multibranch.toolbox.local_hosted import LocalOptions, LocalSession, build_local_toolbox
-from hyperloom_multibranch.toolbox.tests.helpers import IMAGE, FakeRepo
+from hyperloom_multibranch.toolbox.tests.helpers import IMAGE, FakeRepo, lineage_blackboard
 from hyperloom_multibranch.toolbox.tests.kernel_tune_rig import (
     ENV,
     SERVER_LOG,
@@ -73,7 +71,7 @@ def untuned_log() -> str:
 async def test_the_real_tuner_tunes_two_untuned_shapes_on_the_leased_card_and_the_rows_are_checked() -> None:
     session = Path(OUT) / "session"
     session.mkdir()
-    blackboard = LocalBlackboard(session / "blackboard", Writer(Role.TOOLBOX, "toolbox"))
+    blackboard = lineage_blackboard(session / "blackboard")
     box = build_local_toolbox(
         LocalSession(session, "kernel-tune", [CARD, CARD + 1000], tp=1),
         blackboard,

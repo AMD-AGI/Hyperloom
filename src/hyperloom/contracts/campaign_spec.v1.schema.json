@@ -76,7 +76,7 @@
       "required": ["profile"],
       "properties": {
         "profile": {"enum": ["hosted-gpu", "hosted-cpu"]},
-        "measurement": {"enum": ["local", "hosted"], "description": "Default: local for flow single, hosted for flow multibranch. Flow single accepts only local."},
+        "measurement": {"enum": ["local", "hosted"], "description": "Default: local for flow single, hosted for flow multibranch. Flow single accepts only local; flow multibranch accepts local (measured on the application container's own cards) only with profile hosted-gpu."},
         "max_parallel_tests": {"type": "integer", "minimum": 1, "default": 8},
         "specialist_capacity": {"type": "integer", "minimum": 0}
       }

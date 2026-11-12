@@ -3,14 +3,16 @@
 
 """How a session's launches on this host are isolated, as the path that makes each one makes it.
 
-A session's manifest and report say how its agents ran, so each kind is read from the path that launches it, never
-from a chooser that path does not call:
+A session's manifest and report say how its agents ran, and a hosted run refuses to start one unconfined beside its
+credentials (:func:`~hyperloom_multibranch.scheduling.hosted_run.require_hosted_isolation`), so each kind is read from
+the path that launches it, never from a chooser that path does not call:
 
 - a specialist is started by the agent runner as
   :func:`~hyperloom.orchestrator.specialists.launch_env.resolve_launch_isolation` chooses, the function the runner
   calls: as an account, under bubblewrap, unconfined, or not at all where it must be isolated and cannot be;
 - an agent or dev sandbox on this host (:class:`~hyperloom_multibranch.specialist.agent_sandbox.LocalAgentSandbox`)
-  runs its commands as the app's own account and asks no chooser, so it runs unconfined (:data:`SANDBOX_UNCONFINED`);
+  runs its commands under bubblewrap where :func:`~hyperloom.common.agent_isolation.choose_sandbox_isolation`, the
+  function its factory calls, gives it, else unconfined;
 - a test measured on this host's cards runs in a sandbox the local toolbox's provider makes, which names no account
   for it and confines it by the runner's plan: under bubblewrap where
   :func:`~hyperloom.sandbox.confined.local_test_isolation` gives it, else unconfined, or refused in a hosted run.
@@ -33,6 +35,7 @@ from hyperloom.common.agent_isolation import (
     AccountIsolation,
     BwrapIsolation,
     IsolationRefused,
+    choose_sandbox_isolation,
     isolation_required,
 )
 from hyperloom.common.env_safety import RunAsError
@@ -43,8 +46,6 @@ log = logging.getLogger(__name__)
 
 #: A launch made in a grant's sandboxes, not on this host.
 HOSTED = "hosted"
-#: Why an agent or dev sandbox on this host is not isolated.
-SANDBOX_UNCONFINED = "an agent or dev sandbox on this host runs its commands as the app's own account, unconfined"
 
 
 @dataclass(frozen=True)
@@ -110,10 +111,13 @@ def _specialist_isolation() -> tuple[str, tuple[str, ...]]:
 
 
 def _local_sandbox_isolation() -> tuple[str, tuple[str, ...]]:
-    """How an agent or dev sandbox on this host is launched, and why it is not isolated: unconfined, as its launch
-    path asks no chooser, in a hosted run too."""
+    """How an agent or dev sandbox on this host is launched now, and why it is not isolated."""
 
-    return NONE, (SANDBOX_UNCONFINED,)
+    try:
+        found = choose_sandbox_isolation()
+    except IsolationRefused as refused:
+        return REFUSED, refused.reasons
+    return (BWRAP, ()) if isinstance(found, BwrapIsolation) else (NONE, found.reasons)
 
 
 def announce_launch_isolation(isolation: LaunchIsolation) -> None:
@@ -130,7 +134,6 @@ def announce_launch_isolation(isolation: LaunchIsolation) -> None:
 
 __all__ = [
     "HOSTED",
-    "SANDBOX_UNCONFINED",
     "LaunchIsolation",
     "announce_launch_isolation",
     "launch_isolation",

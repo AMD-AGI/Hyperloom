@@ -401,6 +401,15 @@ def copy_cache(rig: Rig, destination: Path) -> CacheRef:
     return CacheRef(destination, rig.cache.sha)
 
 
+#: The commit's own ``python -m inference_suite publish``, which ``cache_build`` runs after the entry: it names the
+#: directory it would publish and stages nothing.
+_SUITE_MAIN = (
+    "import os, sys\n"
+    "stagings = sys.argv[sys.argv.index('--stagings') + 1]\n"
+    "print(os.path.join(stagings, 'published'))\n"
+)
+
+
 def make_rig(root: Path) -> Rig:
     """Build the rig below the new directory ``root``."""
     wheelhouse = root / "wheelhouse"
@@ -430,6 +439,10 @@ def make_rig(root: Path) -> Rig:
     for package in (runner.parent.parent, runner.parent, runner):
         (package / "__init__.py").write_text("")
     (runner / "__main__.py").write_text(_RUNNER_MAIN)
+    suite = repo / "src" / "inference_suite"
+    suite.mkdir()
+    (suite / "__init__.py").write_text("")
+    (suite / "__main__.py").write_text(_SUITE_MAIN)
     (repo / "requirements").mkdir()
     (repo / "requirements" / "runner.lock").write_text(
         lock_text(

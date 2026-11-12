@@ -1,0 +1,13 @@
+# SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
+# SPDX-License-Identifier: MIT
+
+# What a CodeQL run analyses, once codeql.yml has decided to run (its own paths-ignore is the
+# documentation-only list, which decides only whether a run starts at all).
+#
+# The vendored Arbor tree is left out: it is taken whole from an Arbor release tag
+# (src/hyperloom_arbor/VENDOR.md) and is not this repository's code to fix here; its alerts are
+# Arbor's, and a change to it is made in Arbor and vendored again.
+name: Hyperloom CodeQL config
+
+paths-ignore:
+  - src/hyperloom_arbor

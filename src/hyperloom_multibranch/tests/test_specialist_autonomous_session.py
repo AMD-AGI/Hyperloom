@@ -8,7 +8,9 @@ import os
 import select
 import signal
 import stat
+import shutil
 import subprocess
+import tempfile
 import time
 from collections.abc import Awaitable, Callable, Mapping
 from dataclasses import asdict, replace, dataclass, field
@@ -16,6 +18,7 @@ from pathlib import Path
 
 import pytest
 
+from hyperloom.common.agent_isolation import BwrapIsolation
 from hyperloom.contracts.measurement import Attempt, Purpose, TestKind, TestRequest, Validity
 from hyperloom.contracts.recipe import (
     ConfigDelta,
@@ -42,7 +45,9 @@ from hyperloom_multibranch.specialist import (
     keep_requeue,
     worktree as worktree_module,
 )
-from hyperloom_multibranch.specialist.agent_onboarding import SHIM_DIR, OnboardingSetup
+from hyperloom_multibranch.specialist.agent_onboarding import SHIM_DIR, AgentSandbox, CommandResult, OnboardingSetup
+from hyperloom_multibranch.specialist.agent_sandbox import LocalAgentSandbox
+from hyperloom_multibranch.specialist.agent_sessions import AgentSandboxes, LocalAgentSandboxes
 from hyperloom_multibranch.specialist.agent_spec import AgentSpec
 from hyperloom_multibranch.specialist.agent_session import BranchPlace
 from hyperloom_multibranch.specialist.agent_manifest import AgentManifest
@@ -50,6 +55,7 @@ from hyperloom_multibranch.specialist.autonomous_session import (
     AGENT_DIR,
     MANIFEST_FILE,
     START_TABLES_DIR,
+    WATCH_FILE,
     AutonomousSession,
     AutonomousSetup,
     collection_margin,
@@ -66,6 +72,7 @@ from hyperloom_multibranch.specialist.runtime import (
     SessionStart,
 )
 from hyperloom_multibranch.specialist.worktree import Upstream
+from hyperloom_common.tests._bwrap_host import usable_bwrap
 from hyperloom_common.tests.shared_accounts import Accounts, other_accounts
 from hyperloom_multibranch.tests.branch_rig import branch_rig
 from hyperloom_multibranch.tests.agent_rig import (
@@ -92,6 +99,8 @@ from hyperloom_multibranch.tests.agent_rig import (
 #: after ``tail`` more seconds of silence. With ``table`` it also writes that kernel table, for the keep, to its workspace's tuned.csv,
 #: or to ``table_at`` in its checkout. It reports ``envs`` as NAME=VALUE words in run/result.json, as GEAK does.
 #: Before each keep it appends that keep's entries of ``ledger`` to its ledger, run/ledger.jsonl, as Arbor does.
+#: With a keep file, it keeps nothing until ``after`` exists, the session's watch file: the preflight reads the keep
+#: file's baseline once the agent started, and a keep made before that read would be taken for one it had before.
 AGENT = """
 import json, pathlib, subprocess, sys, time
 config = json.loads(pathlib.Path("campaign.json").read_text())
@@ -99,6 +108,9 @@ workspace = pathlib.Path(config["workspace"])
 state = pathlib.Path("run/state.json")
 state.parent.mkdir(exist_ok=True)
 state.write_text(json.dumps({"keeps": [], "note": ""}))
+until = time.time() + 10
+while config["after"] and not pathlib.Path(config["after"]).exists() and time.time() < until:
+    time.sleep(0.01)
 for step, seqs in enumerate(config["keeps"], start=1):
     time.sleep(config["gap"])
     (workspace / "vllm" / "config.py").write_text(f"max_num_seqs = {seqs}\\n")
@@ -183,7 +195,7 @@ def _given(agent: Agent | Component, prompt: str) -> Agent | Component:
     return replace(agent, envs=given, started=started)
 
 
-def _manifest(workspace: str, agent: Agent | Component) -> str:
+def _manifest(workspace: str, agent: Agent | Component, after: str = "") -> str:
     if isinstance(agent, Component):
         return _component_manifest(workspace, agent)
     plan = {"keeps": list(agent.keeps), "gap": agent.gap, "tail": agent.tail, "exit": agent.exit, "busy": agent.busy}
@@ -201,6 +213,7 @@ def _manifest(workspace: str, agent: Agent | Component) -> str:
                 "table": agent.table,
                 "table_at": agent.table_at,
                 "ledger": [list(entries) for entries in agent.ledger],
+                "after": after if agent.keep is not None else "",
                 **plan,
             },
             "launch": "python3 agent.py",
@@ -281,25 +294,29 @@ async def _rig(
     source: Path | None = None,
     least_run: float = 0.0,
     spec_fields: Mapping[str, object] | None = None,
+    sandboxes: AgentSandboxes | None = None,
 ) -> Rig:
     """A session of the agent on :data:`BRANCH`, opened at the root, or at ``start`` committed onto it the way PRELUDE
     replays a Recipe KB champion; the agent's source is ``source``, or a repository holding :data:`AGENT` and
-    :data:`COMPONENT_AGENT`, and its spec has ``spec_fields``."""
+    :data:`COMPONENT_AGENT`, and its spec has ``spec_fields``. Its sandbox is the rig's, or one of ``sandboxes``."""
 
     rig = await branch_rig(tmp_path, ROOT, BRANCH)
     start_commit = rig.root if start is None else await rig.repo.commit(BRANCH, rig.root, start, "champion")
     toolbox_blackboard = LocalBlackboard(tmp_path / "blackboard", Writer(Role.TOOLBOX, "toolbox"))
     worktree = rig.base.worktree(BRANCH, tmp_path / BRANCH / "agent-workspace")
     sandbox, toolbox = LocalSandbox(tmp_path / "logs"), Toolbox(toolbox_blackboard)
+    session = tmp_path / BRANCH / "session"
 
     async def onboard(checkout: Path, prompt: str) -> str:
         sandbox.prompts.append(prompt)
-        return _manifest(str(worktree.path), _given(agent, prompt))
+        return _manifest(str(worktree.path), _given(agent, prompt), str(session / WATCH_FILE))
 
     def onboarding(agent_sandbox) -> OnboardingSetup:
         return OnboardingSetup(agent_sandbox, onboard, start_seconds=start_seconds, poll_seconds=0.05)
 
     def sandbox_for(lease: BranchLease) -> LocalSandbox:
+        if sandboxes is not None:
+            return sandboxes.sandbox(BRANCH, place, worktree.path, lease)
         if lease.lease_id in sandbox.gone:
             raise SandboxGone(f"the sandbox of {lease.lease_id} ended")
         sandbox.leases.append(lease)
@@ -325,7 +342,7 @@ async def _rig(
     )
     if aiter is not None:
         setup = replace(setup, aiter_configs=aiter)
-    place = BranchPlace(worktree, rig.blackboard, tmp_path / BRANCH / "session")
+    place = BranchPlace(worktree, rig.blackboard, session)
     agent_source = str(source or _agent_repo(tmp_path))
     start = SessionStart(BRANCH, start_commit, 1, BranchTask(agent=agent_source, deadline=deadline))
 
@@ -691,6 +708,87 @@ async def test_a_new_sandbox_whose_install_failed_is_not_resumed_in_but_leased_a
     await asyncio.wait_for(running, 10)
     await resumed.release()
     assert rig.toolbox.released == ["L1", "L2", "L3"]
+
+
+@dataclass
+class _LeaseSandbox:
+    """The sandbox of one lease over ``of``'s local sandbox: its start raises :class:`SandboxGone` once its lease is
+    in ``of.gone``, and its stops are recorded by lease."""
+
+    of: "_PerLease"
+    lease_id: str
+
+    def watched(self) -> str:
+        return ""
+
+    async def run(self, command: str, cwd: Path, env: Mapping[str, str], timeout: float) -> CommandResult:
+        return await self.of.local.run(command, cwd, env, timeout)
+
+    async def start(self, command: str, cwd: Path, env: Mapping[str, str]) -> LocalProcess:
+        if self.lease_id in self.of.gone:
+            raise SandboxGone(f"the sandbox of {self.lease_id} ended")
+        return await self.of.local.start(command, cwd, env)
+
+    async def stop(self) -> None:
+        self.of.stopped.append(self.lease_id)
+        await self.of.local.stop()
+
+
+@dataclass
+class _PerLease:
+    """A session's sandboxes, one a lease, over one local sandbox."""
+
+    local: LocalSandbox
+    gone: set[str] = field(default_factory=set)
+    stopped: list[str] = field(default_factory=list)
+
+    def sandbox(self, branch: str, place: BranchPlace, source: Path, lease: BranchLease) -> AgentSandbox:
+        return _LeaseSandbox(self, lease.lease_id)
+
+
+async def _crashed_on_a_sandbox_that_ended(tmp_path: Path, install: str) -> tuple[Rig, _PerLease]:
+    """A rig whose agent ran in the sandbox of L1 and crashed, its run stopped, and L1's sandbox then ended."""
+
+    sandboxes = _PerLease(LocalSandbox(tmp_path / "lease-logs"))
+    agent = Agent(exit=3, resume="sleep 30", install=(install,))
+    rig = await _rig(tmp_path, agent, deadline=time.time() + 600, sandboxes=sandboxes)
+    await rig.session.preflight()
+    with pytest.raises(SessionCrashed):
+        await asyncio.wait_for(rig.session.run(), 10)
+    await rig.session.stop()
+    assert sandboxes.stopped == ["L1"]
+    sandboxes.gone.add("L1")
+    return rig, sandboxes
+
+
+async def test_a_held_sandbox_that_ended_at_the_resume_is_stopped_before_the_agent_moves_to_a_new_one(
+    tmp_path: Path,
+) -> None:
+    rig, sandboxes = await _crashed_on_a_sandbox_that_ended(tmp_path, "true installed")
+    resumed = rig.restart()
+    running = asyncio.create_task(resumed.run())
+    await _until(lambda: sandboxes.local.started[-1:] == ["sleep 30"], "the agent resumed")
+
+    assert sandboxes.stopped == ["L1", "L1"], "the ended sandbox is stopped, giving back its holder and scratch"
+    assert rig.toolbox.released == ["L1"] and len(rig.toolbox.leases) == 2
+    await resumed.stop()
+    await asyncio.wait_for(running, 10)
+    assert sandboxes.stopped == ["L1", "L1", "L2"]
+
+
+async def test_a_new_sandbox_whose_install_failed_is_stopped_before_its_lease_is_given_back(tmp_path: Path) -> None:
+    count = tmp_path / "installs"
+    # The second install, the first in the new sandbox, fails.
+    command = f"n=$(cat {count} 2>/dev/null || echo 0); echo $((n + 1)) > {count}; test $n -ne 1"
+    rig, sandboxes = await _crashed_on_a_sandbox_that_ended(tmp_path, command)
+    failed = rig.restart()
+    with pytest.raises(SessionCrashed, match="install in its new sandbox failed"):
+        await asyncio.wait_for(failed.run(), 10)
+
+    assert sandboxes.stopped == ["L1", "L1", "L2"], "the sandbox whose install failed is stopped"
+    assert rig.toolbox.released == ["L1", "L2"]
+    await failed.stop()
+    assert sandboxes.stopped == ["L1", "L1", "L2"], "and the run's stop has no sandbox left to stop again"
 
 
 async def test_a_keep_file_with_no_counter_is_one_keep_at_each_change(tmp_path: Path) -> None:
@@ -2019,3 +2117,64 @@ async def test_a_requeue_due_while_a_later_keep_waits_gives_way_to_it(
 
     assert len(rig.toolbox.requests) == 2 and "+max_num_seqs = 512" in rig.patch(rig.toolbox.requests[1])
     assert not any("goes once more" in note for note in await rig.notices())
+
+
+async def test_a_branch_s_end_stops_its_agent_s_sandbox(tmp_path: Path) -> None:
+    rig = await _rig(tmp_path, Agent(keeps=(), tail=30.0))
+
+    await rig.session.preflight()
+    assert rig.sandbox.stops == 0
+    await rig.session.stop()
+
+    assert rig.sandbox.stops == 1, "the branch's end stops its sandbox, ending what it holds on this host"
+
+
+@dataclass
+class _Made:
+    """A session's sandboxes on this host, each kept to be looked at."""
+
+    sandboxes: LocalAgentSandboxes
+    made: list[LocalAgentSandbox] = field(default_factory=list)
+
+    def sandbox(self, branch: str, place: BranchPlace, source: Path, lease: BranchLease) -> AgentSandbox:
+        made = self.sandboxes.sandbox(branch, place, source, lease)
+        assert isinstance(made, LocalAgentSandbox)
+        self.made.append(made)
+        return made
+
+
+@pytest.mark.agent_isolation
+async def test_under_bubblewrap_git_works_in_an_agent_s_worktree_and_the_branch_s_end_ends_its_sandbox() -> None:
+    probe = usable_bwrap()
+    # Outside /tmp: before bubblewrap 0.12 nothing may be bound below the sandbox's own /tmp.
+    area = Path(tempfile.mkdtemp(prefix="hl-agent-session-", dir="/var/tmp")).resolve()
+    try:
+        made = _Made(LocalAgentSandboxes(None, choose=lambda: BwrapIsolation(probe)))
+        rig = await _rig(area, Agent(commits=True), sandboxes=made)
+        worktree = rig.session._place.worktree.path
+
+        await rig.session.preflight()
+        running = asyncio.create_task(rig.session.run())
+        await _until(lambda: rig.toolbox.requests, "the first import")
+        await rig.toolbox_blackboard.write_result(result("r1"))
+        await _until(lambda: len(rig.toolbox.requests) == 2, "the second import")
+        await rig.toolbox_blackboard.write_result(result("r2"))
+        with pytest.raises(SessionFinished):
+            await asyncio.wait_for(running, 30)
+        [sandbox] = made.made
+        git = "git -c user.name=t -c user.email=t@t"
+        probed = await sandbox.run(
+            f"git status --short && {git} commit -q --allow-empty -m probe && git log --format=%s", worktree, {}, 60
+        )
+        confined = sandbox._confined
+        assert confined is not None and confined.holder is not None, "the agent ran confined"
+        holder, scratch = confined.holder, confined.scratch
+
+        await rig.session.stop()
+    finally:
+        shutil.rmtree(area, ignore_errors=True)
+
+    assert probed.returncode == 0, probed.output
+    assert probed.output.split()[:3] == ["probe", "k", "k"], "the agent committed each keep, and git ran confined"
+    assert not os.path.exists(f"/proc/{holder.pid}"), "the branch's end ended the sandbox's holder"
+    assert not os.path.exists(scratch.tmp) and not os.path.exists(scratch.shm), "and deleted its /tmp and /dev/shm"

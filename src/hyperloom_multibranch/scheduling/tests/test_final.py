@@ -32,6 +32,7 @@ from hyperloom_multibranch.blackboard import LocalBlackboard
 from hyperloom_multibranch.repo.git_repo import GitExperimentRepo
 from hyperloom_multibranch.rulegate.gate import RuleGate
 from hyperloom_multibranch.rulegate.inferencex import BASELINE_TESTS, DROPPED_REQUESTS, GAIN_BELOW_THRESHOLD
+from hyperloom_multibranch.rulegate.agentx import AgentXObjective
 from hyperloom_multibranch.rulegate.rules import AgentXRule, InferenceXRule
 from hyperloom_multibranch.rulegate.service import GateService
 from hyperloom_multibranch.scheduling.final import (
@@ -209,7 +210,7 @@ class AgentXRefusingGate(GateService):
     the accuracy gate passes every test."""
 
     def __init__(self, blackboard: LocalBlackboard, toolbox: RecordingToolbox, refused_by: tuple[str, ...]) -> None:
-        super().__init__(blackboard, toolbox, AgentXRule(), toolbox)
+        super().__init__(blackboard, toolbox, AgentXRule(AgentXObjective.P50_INTERACTIVITY), toolbox)
         self.refused_by = refused_by
 
     async def compare(self, request_id: str) -> Judgement:
@@ -279,7 +280,7 @@ class Bench:
         return FinalCandidates(integration, replace(BRANCH, commit=self.commits["c7"]) if both else None)
 
     def selector(self, workload: Workload = WORKLOAD) -> FinalSelector:
-        return FinalSelector(SessionChecks(self.tests, self.gate, self.regression), workload)
+        return FinalSelector(SessionChecks(self.tests, self.gate, self.regression), workload, 1)
 
     def fail(self, tag: str, fate: Fate, kind: TestKind | None = None) -> None:
         """Every FINAL test of ``tag``'s commit (of ``kind`` when given) ends in ``fate``."""

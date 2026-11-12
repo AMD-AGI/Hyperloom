@@ -1,12 +1,11 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""PendingProposal and the Critic-approved path: materializing an approved proposal into a dispatched task."""
+"""The Critic-approved path: recording a proposal and materializing an approved one into a dispatched task."""
 
 from __future__ import annotations
 import hashlib
 import json
-from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, Mapping
 from hyperloom_common.coerce import to_float
 from hyperloom.common.framework_arm import is_upstream_pr_prescreen
@@ -23,6 +22,7 @@ from ..state.task_registry import TERMINAL_STATES, Task, TaskSpec, create_on_fre
 from ..collaborator import CoordinatorCollaborator
 from ._explore_grid import explore_grid_denial
 from ._integrate_promotion import _confirmed_task_outcome
+from ..state.pending_proposal import PendingProposal
 
 if TYPE_CHECKING:
     from .coordinator import Coordinator
@@ -30,19 +30,6 @@ if TYPE_CHECKING:
 import logging as _logging
 
 log = _logging.getLogger(__name__)
-
-
-@dataclass
-class PendingProposal:
-    """A propose_action intent waiting for Critic Review."""
-
-    proposal_msg_id: str
-    from_agent: str
-    action_name: str
-    predicted_gain_pct: float
-    payload: dict[str, Any]
-    #: The task this proposal materialized into, once the Critic approved it.
-    task_id: str | None = None
 
 
 def integrate_review_in_flight(pending_proposals: Mapping[str, PendingProposal], specialist_task_id: str) -> bool:

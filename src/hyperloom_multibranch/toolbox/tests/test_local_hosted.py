@@ -10,6 +10,8 @@ import importlib.util
 import json
 import logging
 import os
+import shutil
+import threading
 import time
 from dataclasses import replace
 from pathlib import Path
@@ -19,21 +21,23 @@ from typing import Any
 import pytest
 
 from hyperloom.common import confinement
+from hyperloom.common.outside_facts import ENV_CONC, ENV_ISL, ENV_NUM_PROMPTS, ENV_NUM_WARMUPS, ENV_OSL
 from hyperloom.common.outside_facts.rule_pack import PACK_ENV, load_pack
-from hyperloom.contracts.measurement import FailureClass, TestResult, Validity
+from hyperloom.contracts.measurement import FailureClass, Purpose, TestResult, Validity
 from hyperloom.measure.archive import DirResultArchive
 from hyperloom.measure.framework.base import FRAMEWORK_BASE_FILE, SNAPSHOT_ENV, load_snapshot, take_snapshot
 from hyperloom.measure.hosted_log import STATE_FINISHED, STATE_SENT, MeasurementJournal, Record
+from hyperloom.measure import live_log
 from hyperloom.measure.live_log import last_output
 from hyperloom.measure.runner.tools import ToolError, ensure_inferencex
 from hyperloom.measure.tests.framework_fixtures import make_framework
-from hyperloom.measure.tests.gpu_free_host import idle_cards_python
 from hyperloom.measure.tests.hosted_fixtures import spec_context
 from hyperloom.measure.tests.rule_pack_fixtures import identity_of, other_pack, reading_pack  # noqa: F401
 from hyperloom.measure.tests.test_hosted_real_runner import _git_repo, _point
 from hyperloom.sandbox.local import LocalSandboxProvider
 from hyperloom_common.tests._bwrap_host import usable_bwrap
 from hyperloom_multibranch.contracts.blackboard import Role, Writer
+from hyperloom_multibranch.contracts.blackboard.vocab import INTEGRATION_BRANCH
 from hyperloom_multibranch.blackboard import LocalBlackboard
 from hyperloom_multibranch.contracts.toolbox import WorkloadKind
 from hyperloom_multibranch.toolbox import local_hosted
@@ -50,7 +54,16 @@ from hyperloom_multibranch.toolbox.local_hosted import (
 )
 from hyperloom_multibranch.toolbox.toolbox import AcceptanceSetup
 from hyperloom_multibranch.toolbox.queue import QueuePolicy
-from hyperloom_multibranch.toolbox.tests.helpers import IMAGE, FakeRepo, req, lineage_blackboard
+from hyperloom_multibranch.toolbox.tests.helpers import (
+    IMAGE,
+    FakeRepo,
+    freeze_base_at,
+    lineage_blackboard,
+    pin_inferencex_at,
+    pinned_runner_python,
+    req,
+    stage_runner_cache,
+)
 from hyperloom_multibranch.toolbox.tests.test_hosted_executor import PointPlanner
 
 
@@ -87,37 +100,42 @@ def test_runner_envs_add_to_the_image_variables_rather_than_replace_them(
 
 
 def test_the_host_tool_repositories_reach_the_runner_template(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    """A local runner starts from an emptied environment, so the repositories it clones InferenceX and Magpie from are
-    carried from the host's: both when the host sets both."""
+    """A local runner starts from an emptied environment, so the repository it clones InferenceX from is carried from
+    the host's."""
     monkeypatch.setenv("INFERENCEX_REPO", "/mirrors/inferencex.git")
-    monkeypatch.setenv("MAGPIE_REPO", "/mirrors/magpie.git")
     template = _runner_template(LocalSession(tmp_path, "run-1", [0]), LocalOptions())
     assert template.envs["INFERENCEX_REPO"] == "/mirrors/inferencex.git"
-    assert template.envs["MAGPIE_REPO"] == "/mirrors/magpie.git"
 
 
 def test_runner_envs_win_over_the_host_tool_repositories(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("INFERENCEX_REPO", "/mirrors/inferencex.git")
-    monkeypatch.setenv("MAGPIE_REPO", "/mirrors/magpie.git")
     options = LocalOptions(runner_envs={"INFERENCEX_REPO": "/explicit/inferencex"})
     template = _runner_template(LocalSession(tmp_path, "run-1", [0]), options)
     assert template.envs["INFERENCEX_REPO"] == "/explicit/inferencex"
-    assert template.envs["MAGPIE_REPO"] == "/mirrors/magpie.git", "the name runner_envs does not give is the host's"
 
 
 def test_a_host_tool_repository_that_is_not_set_is_not_in_the_runner_template(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    monkeypatch.delenv("INFERENCEX_REPO", raising=False)
-    monkeypatch.setenv("MAGPIE_REPO", "  ")
+    monkeypatch.setenv("INFERENCEX_REPO", "  ")
     template = _runner_template(LocalSession(tmp_path, "run-1", [0]), LocalOptions())
-    assert "INFERENCEX_REPO" not in template.envs, "unset is absent, not empty"
-    assert "MAGPIE_REPO" not in template.envs, "a blank value is absent too"
+    assert "INFERENCEX_REPO" not in template.envs, "a blank value is absent, not empty"
+
+
+def test_the_host_hugging_face_settings_reach_the_runner_template(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A draft model named by repo id resolves in the host's Hugging Face cache; the runner's own home has none."""
+    monkeypatch.setenv("HF_HOME", "/data/hf")
+    monkeypatch.setenv("HF_HUB_OFFLINE", "1")
+    template = _runner_template(LocalSession(tmp_path, "run-1", [0]), LocalOptions())
+    assert template.envs["HF_HOME"] == "/data/hf"
+    assert template.envs["HF_HUB_OFFLINE"] == "1"
 
 
 def test_only_the_named_tool_repositories_are_taken_from_the_host() -> None:
-    environ = {"INFERENCEX_REPO": "/a", "MAGPIE_REPO": "/b", "GITHUB_TOKEN": "t", "INFERENCEX_REF": "main"}
-    assert host_tool_repos(environ) == {"INFERENCEX_REPO": "/a", "MAGPIE_REPO": "/b"}
+    environ = {"INFERENCEX_REPO": "/a", "OTHER_REPO": "/b", "GITHUB_TOKEN": "t", "INFERENCEX_REF": "main"}
+    assert host_tool_repos(environ) == {"INFERENCEX_REPO": "/a"}
     assert host_tool_repos({}) == {}
 
 
@@ -161,7 +179,6 @@ def test_the_runner_plan_names_what_a_runner_reads_and_never_the_session_whole(
         "HYPERLOOM_BUILD_STORE": "/stores/build",
         "HYPERLOOM_BUILD_TRUST": "/stores/trust.json",
         "INFERENCEX_REPO": "file:///mirrors/inferencex.git",
-        "MAGPIE_REPO": "https://github.com/AMD-AGI/Magpie.git",
         "ROCM_PATH": "/opt/rocm",
     }
     _app_environ(monkeypatch, {"HF_HOME": str(hf)})
@@ -433,15 +450,101 @@ def test_the_live_output_is_read_from_the_sandbox_of_the_unfinished_attempt(tmp_
     toolbox = LocalHostedToolbox.__new__(LocalHostedToolbox)
     journal = MeasurementJournal(tmp_path / "hosted")
     toolbox.backend, toolbox.sandboxes = SimpleNamespace(journal=journal), tmp_path / "sandboxes"  # type: ignore[assignment]
-    _write(
-        tmp_path / "sandboxes" / "lsb-1" / "fs" / "out" / "files" / "v" / "server.log", "decode batch\n", time.time()
-    )
+    written = time.time()
+    _write(tmp_path / "sandboxes" / "lsb-1" / "fs" / "out" / "files" / "v" / "server.log", "decode batch\n", written)
     assert toolbox._live_log("r1") is None
     journal.append(Record("r1", 1, STATE_SENT, "lsb-1", "tests/r1/attempt-1", "r1", {}))
     output = toolbox._live_log("r1")
-    assert output is not None and output[1] == "decode batch" and 0.0 <= output[0] < 60.0
+    read = time.time()
+    assert output is not None and output[1] == "decode batch", output
+    assert 0.0 <= output[0] <= read - written + 1e-6, "its age is the time since it was written, as of the reading"
     journal.append(Record("r1", 1, STATE_FINISHED, "lsb-1", "tests/r1/attempt-1", "r1", {}))
     assert toolbox._live_log("r1") is None
+
+
+def _toolbox_reading(tmp_path: Path) -> tuple[LocalHostedToolbox, Path]:
+    """A toolbox whose test ``r1`` runs in sandbox ``lsb-1``, and that sandbox's ``files`` directory."""
+    toolbox = LocalHostedToolbox.__new__(LocalHostedToolbox)
+    journal = MeasurementJournal(tmp_path / "hosted")
+    toolbox.backend, toolbox.sandboxes = SimpleNamespace(journal=journal), tmp_path / "sandboxes"  # type: ignore[assignment]
+    journal.append(Record("r1", 1, STATE_SENT, "lsb-1", "tests/r1/attempt-1", "r1", {}))
+    files = tmp_path / "sandboxes" / "lsb-1" / "fs" / "out" / "files"
+    files.mkdir(parents=True)
+    return toolbox, files
+
+
+def test_a_directory_the_sandbox_swaps_for_a_pipe_as_the_live_log_is_read_is_skipped_never_waited_on(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The sandbox's processes may put a pipe where the walk listed a directory, before it opens it: the read neither
+    waits for a writer of the pipe (which would hold the agent's progress call) nor fails, and still shows the log
+    beside it."""
+    toolbox, files = _toolbox_reading(tmp_path)
+    (files / "sub").mkdir()
+    _write(files / "server.log", "the line\n", time.time())
+    listed = live_log._listed
+    swapped: list[str] = []
+
+    def swapping(directory: int) -> tuple[list[str], list[str]]:
+        found = listed(directory)
+        if "sub" in found[1] and not swapped:
+            swapped.append("sub")
+            (files / "sub").rmdir()
+            os.mkfifo(files / "sub")
+        return found
+
+    monkeypatch.setattr(live_log, "_listed", swapping)
+    read: dict[str, object] = {}
+    reader = threading.Thread(target=lambda: read.update(output=toolbox._live_log("r1")), daemon=True)
+    reader.start()
+    reader.join(10)
+    if reader.is_alive():
+        os.close(os.open(files / "sub", os.O_WRONLY | os.O_NONBLOCK))  # lets the reader go
+        reader.join(10)
+        pytest.fail("the live log's read waited on a pipe the sandbox put where a directory was")
+    output = read["output"]
+    assert swapped and isinstance(output, tuple) and output[1] == "the line", read
+
+
+def test_a_live_log_that_cannot_be_read_is_no_live_line_never_a_failed_progress_call(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    toolbox, files = _toolbox_reading(tmp_path)
+    _write(files / "server.log", "the line\n", time.time())
+
+    def failing(dir_fd: int, now: float) -> None:
+        raise NotADirectoryError(20, "Not a directory")
+
+    monkeypatch.setattr(local_hosted, "last_output_below", failing)
+    with caplog.at_level(logging.DEBUG, logger=local_hosted.__name__):
+        assert toolbox._live_log("r1") is None
+    assert "the live log of sandbox lsb-1 could not be read" in caplog.text
+
+
+@pytest.mark.parametrize("linked", ["out", "out/files", "out/files/v"])
+def test_the_live_output_is_never_read_through_a_link_the_sandbox_made_out_of_its_root(
+    tmp_path: Path, linked: str
+) -> None:
+    """The sandbox's processes write ``/out``: a link there, at any depth, to a directory of the app's never shows the
+    app a log in it; a log the sandbox wrote in its own tree still shows."""
+    toolbox = LocalHostedToolbox.__new__(LocalHostedToolbox)
+    journal = MeasurementJournal(tmp_path / "hosted")
+    toolbox.backend, toolbox.sandboxes = SimpleNamespace(journal=journal), tmp_path / "sandboxes"  # type: ignore[assignment]
+    journal.append(Record("r1", 1, STATE_SENT, "lsb-1", "tests/r1/attempt-1", "r1", {}))
+    fs, app = tmp_path / "sandboxes" / "lsb-1" / "fs", tmp_path / "app"
+    written = time.time()
+    _write(fs / "out" / "files" / "own" / "server.log", "the sandbox's own line\n", written - 100)
+    for below in ("files/v", "v", ""):
+        _write(app / below / "server.log", "SECRET line of the app's\n", written)
+    target = {"out": app, "out/files": app / "files", "out/files/v": app / "v"}[linked]
+    if (fs / linked).is_dir():
+        shutil.rmtree(fs / linked)
+    (fs / linked).symlink_to(target)
+
+    output = toolbox._live_log("r1")
+    assert output is None or "SECRET" not in output[1], output
+    if linked == "out/files/v":
+        assert output is not None and output[1] == "the sandbox's own line"
 
 
 def test_a_runner_reads_the_shared_tables_its_framework_snapshot_was_taken_from_and_none_without_one(
@@ -462,13 +565,16 @@ def test_a_runner_reads_the_shared_tables_its_framework_snapshot_was_taken_from_
 
 
 def _require_tool_checkout(repo: Path, commit: str, home: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    """The precondition of the end-to-end test: the runner can check the stand-in repository out as it runs it.
+    """The precondition of the end-to-end test: the runner can check the stand-in repository out as it runs it, finds
+    a staging that verifies in this host's runner cache, and this install pins it.
 
     The runner fetches the tools by hash under an empty home, like a sandbox. Where that fails (no usable ``git``, a
     refused local fetch) the test would otherwise show only ``measurement_failed``, so it fails here and says why.
     """
     monkeypatch.setenv("INFERENCEX_REPO", str(repo))
     monkeypatch.setenv("HOME", str(home))
+    stage_runner_cache(home.parent, monkeypatch)
+    pin_inferencex_at(commit, monkeypatch)
     try:
         ensure_inferencex(commit, home / "cache")
     except ToolError as error:
@@ -477,19 +583,22 @@ def _require_tool_checkout(repo: Path, commit: str, home: Path, monkeypatch: pyt
         )
 
 
+#: The fixed workload a round's suite config is built from; a point without it fails as ``yaml_build_error``.
+_SHAPE = {ENV_CONC: "8", ENV_ISL: "128", ENV_OSL: "128", ENV_NUM_PROMPTS: "8", ENV_NUM_WARMUPS: "1"}
+
+
 def _toolbox_of(
     blackboard: LocalBlackboard, tmp_path: Path, session: Path, commit: str, **extra: Any
 ) -> LocalHostedToolbox:
+    freeze_base_at(session, commit)
     return build_local_toolbox(
         LocalSession(session, "run-1", range(8)),
         blackboard,
-        AcceptanceSetup(FakeRepo(), PointPlanner(_point(tmp_path)), IMAGE, WorkloadKind.AGENTX),
-        spec_context(
-            tmp_path, inferencex_commit=commit, benchmark_backend="bypass", blob_root=str(session / "hosted" / "blobs")
-        ),
+        AcceptanceSetup(FakeRepo(), PointPlanner(_point(tmp_path, **_SHAPE)), IMAGE, WorkloadKind.AGENTX),
+        spec_context(tmp_path, blob_root=str(session / "hosted" / "blobs")),
         options=LocalOptions(
             policy=QueuePolicy(per_branch_k=2, global_concurrency=64),
-            python=idle_cards_python(tmp_path),
+            python=pinned_runner_python(tmp_path, commit),
             poll_interval_sec=0.1,
             timeout_sec=120,
             **extra,
@@ -498,11 +607,12 @@ def _toolbox_of(
 
 
 async def test_a_runner_that_cannot_start_says_why_and_leaves_no_log_traceback(
-    tmp_path: Path, caplog: pytest.LogCaptureFixture
+    tmp_path: Path, caplog: pytest.LogCaptureFixture, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """The runner fails before it writes ``out/files``: the result carries its message and saving logs stays quiet."""
     repo = tmp_path / "inferencex"
     commit = _git_repo(repo)
+    pin_inferencex_at(commit, monkeypatch)
     session = tmp_path / "session"
     blackboard = LocalBlackboard(tmp_path / "blackboard", Writer(Role.TOOLBOX, "toolbox"))
     envs = {"INFERENCEX_REPO": str(repo) + "-missing"}
@@ -526,6 +636,21 @@ async def test_a_runner_that_cannot_start_says_why_and_leaves_no_log_traceback(
         assert "could not be saved" not in caplog.text, "a runner with no out/files has no logs: that is not a warning"
     finally:
         await toolbox.close()
+
+
+@pytest.mark.parametrize("tests_end_by", [None, 1_800_000_000.0])
+async def test_final_s_retries_on_the_integration_branch_wait_no_later_than_the_time_the_tests_must_end_by(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, tests_end_by: float | None
+) -> None:
+    """A hosted run measured on this container's cards hands the grant's ``tests_end_by`` here: the integration branch
+    has no exploration end, so it is the only time that keeps FINAL's infrastructure retries inside the grant."""
+    commit = "0" * 40
+    pin_inferencex_at(commit, monkeypatch)
+    blackboard = LocalBlackboard(tmp_path / "blackboard", Writer(Role.TOOLBOX, "toolbox"))
+    toolbox = _toolbox_of(blackboard, tmp_path, tmp_path / "session", commit, tests_end_by=tests_end_by)
+    await toolbox.close()
+
+    assert toolbox._latest_retry_start(req(INTEGRATION_BRANCH, purpose=Purpose.FINAL)) == tests_end_by
 
 
 @pytest.mark.agent_isolation
@@ -555,7 +680,9 @@ async def test_the_factory_builds_a_toolbox_that_runs_a_test_end_to_end(
     _require_tool_checkout(repo, commit, tmp_path / "home", monkeypatch)
     session = tmp_path / "session"
     blackboard = LocalBlackboard(tmp_path / "blackboard", Writer(Role.TOOLBOX, "toolbox"))
-    toolbox = _toolbox_of(blackboard, tmp_path, session, commit, runner_envs={"INFERENCEX_REPO": str(repo)})
+    toolbox = _toolbox_of(
+        blackboard, tmp_path, session, commit, runner_envs={"INFERENCEX_REPO": str(repo)}, max_infra_retries=0
+    )
     try:
         assert toolbox._queue.policy.global_concurrency == 8, "the policy is held to 8 / TP"
         await toolbox.start()
@@ -566,13 +693,11 @@ async def test_the_factory_builds_a_toolbox_that_runs_a_test_end_to_end(
         result = TestResult.from_document(entry.outcome["result"])
         # No GPU here, so the shipped runner cannot serve a model: what this proves is the wiring. The real runner
         # started from the local template, signed a bundle, the backend verified it, and the toolbox took the cause
-        # the server log names, quoted (no sglang module) as the candidate's failure, did not rerun it and wrote it to the
-        # blackboard.
-        assert result.validity is Validity.CANDIDATE_FAILED and result.failure_class is FailureClass.CANDIDATE
-        assert result.failure_reason is not None and result.failure_reason.startswith("import_error: ")
-        assert "No module named 'sglang'" in result.failure_reason, (
-            "the reason quotes the line the server log ends with"
-        )
+        # the suite's framework probe names, quoted (no sglang package in an image the test did not rebuild) as the
+        # environment's failure and wrote it to the blackboard.
+        assert result.validity is Validity.MEASUREMENT_FAILED and result.failure_class is FailureClass.INFRA
+        assert result.failure_reason is not None and "framework_unimportable: " in result.failure_reason
+        assert "cannot import sglang" in result.failure_reason, "the reason quotes the probe's failure_detail"
         assert len(result.attempts) == 1 and result.manifest_sha256, result
         sandboxes = {rec.sandbox_id for rec in toolbox.backend.journal.records() if rec.request_id == request_id}
         assert len(sandboxes) == 1

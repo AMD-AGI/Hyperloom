@@ -14,34 +14,40 @@ here and a test together; the test sends a minimal example through the real enfo
 
 from __future__ import annotations
 
-import json
+import shlex
 from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-import yaml
-
-from hyperloom.common.benchmark_config import is_magpie_agentx
+from hyperloom.common.launch_log_evidence import observed_server_config_from_log
 from hyperloom.contracts.recipe import LaunchConfig
-from hyperloom.inference_optimizer.agentx.report import agentx_measurement, native_launch_evidence
 from hyperloom.orchestrator.actions.executors import (
     PREFIX_CACHE_OFF_ERROR_CLASS,
     CONTEXT_COPY_REFUSAL,
-    SPECULATIVE_DECODING_PINNED,
-    RequestedLaunch,
+    RoundFolder,
     SpeculativeDecodingPinnedError,
-    build_launch_evidence,
     context_copy_refusal,
+    is_round_folder,
     refuse_cacheless_agentx_baseline,
     refuse_unpinned_speculative_change,
 )
+
+#: The ``RequestRejected`` code a candidate is refused under when it changes the draft or simulated acceptance its
+#: parent pins; main's grid records the same refusal as a candidate ``serve_flag`` failure.
+SPECULATIVE_DECODING_PINNED = "speculative_decoding_pinned"
+
+
+class RoundUnreadable(ValueError):
+    """An inference_suite round whose report or launch breaks its contract: no measurement to judge."""
+
 
 __all__ = [
     "CONTEXT_COPY_REFUSAL",
     "PREFIX_CACHE_OFF_ERROR_CLASS",
     "FAKE_GAINS",
     "FakeGain",
+    "RoundUnreadable",
     "SPECULATIVE_DECODING_PINNED",
     "baseline_prefix_cache_refusal",
     "launch_context_copy_refusal",
@@ -76,38 +82,37 @@ def _server_log(round_dir: Path) -> str | None:
     return str(found[-1]) if found else None
 
 
-def _own_report(round_dir: Path) -> dict[str, Any]:
-    """The round's own AgentX ``benchmark_report.json``, the file main's grid runner reads from a round's workspace.
-
-    A warm-up round's report below it is another round's, and a landing that writes files in manifest order makes it
-    the newest one there; ``{}`` when the round has no AgentX report that parses.
-    """
-    try:
-        report = json.loads((round_dir / "benchmark_report.json").read_text(encoding="utf-8"))
-    except (OSError, ValueError):
-        return {}
-    return report if isinstance(report, dict) and report.get("scenario") == "agentx" else {}
-
-
-def baseline_prefix_cache_refusal(point: Path, round_dir: Path) -> str:
+def baseline_prefix_cache_refusal(round_dir: Path) -> str:
     """Why an AgentX baseline round served with the prefix cache off may not end ``succeeded``, or ``""``.
 
-    ``point`` is the measurement point the round ran and ``round_dir`` the directory it landed in; the launch evidence
-    is built from both the way main's baseline and grid executors build it, and main's #1884 check reads it. An AgentX
-    point's launch is the one Magpie reports it ran (``native_launch_evidence`` over the round's own report); a round
-    with no valid AgentX report has no launch to read and is left alone, since it is not the succeeded round main
-    checks. Any other point's launch is read from its own server args.
+    ``round_dir`` is the inference_suite run_dir the round landed in; main's #1884 check reads the launch its
+    ``launch.json`` records. A round ``round_measurement`` does not call a valid measurement is not the succeeded round
+    main checks, and is left alone. A run_dir whose report or launch breaks its contract, or a directory that is no
+    run_dir, raises :class:`RoundUnreadable`.
     """
-    log = _server_log(round_dir)
-    if is_magpie_agentx(yaml.safe_load(point.read_text(encoding="utf-8"))["benchmark"]):
-        measurement = agentx_measurement(_own_report(round_dir))
-        if not measurement["valid_measurement"]:
-            return ""
-        evidence = native_launch_evidence(measurement, point, actual_server_log=log)
-    else:
-        evidence = build_launch_evidence(
-            RequestedLaunch(config_path=point, framework=""), actual_server_log=log, slot=round_dir
-        )
+    if not is_round_folder(round_dir):
+        raise RoundUnreadable(f"{round_dir}: not an inference_suite run_dir")
+    return _suite_round_refusal(round_dir, _server_log(round_dir))
+
+
+def _suite_round_refusal(run_dir: Path, log: str | None) -> str:
+    try:
+        folder = RoundFolder.read(run_dir)
+    except (OSError, ValueError) as error:
+        raise RoundUnreadable(f"{run_dir}: {error}") from error
+    if folder.launch is None or not folder.measurement()["valid_measurement"]:
+        return ""
+    framework = folder.launch.framework.name.value
+    return _cacheless_refusal(
+        {
+            "framework": framework,
+            "requested_server_args": shlex.join(folder.launch.argv),
+            "observed_server_config": observed_server_config_from_log(log, framework) if log else {},
+        }
+    )
+
+
+def _cacheless_refusal(evidence: dict[str, Any]) -> str:
     measured: dict[str, Any] = {"status": "succeeded", "launch_evidence": evidence}
     refuse_cacheless_agentx_baseline(measured)
     return str(measured.get("error") or "") if measured["status"] != "succeeded" else ""
@@ -133,7 +138,7 @@ FAKE_GAINS = (
         where="acceptance",
     ),
     FakeGain(
-        name="speculative_decoding_pinned",
+        name=SPECULATIVE_DECODING_PINNED,
         shows_as="Changing a draft whose acceptance length the parent simulates moves the number without a real draft.",
         refusal_code=SPECULATIVE_DECODING_PINNED,
         check=pinned_speculative_refusal,

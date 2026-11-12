@@ -143,7 +143,7 @@ stays stranded the integration branch, and every branch you open from it, goes o
 before stopping such a branch, whose head holds the gain the integration head lacks.
 bottleneck_moved: the profile of the integration head taken after it moved found its largest op changed, or that op's
 share fell by more than {MB_BOTTLENECK_SHIFT_PP} percentage points: branches still speeding up the previous largest op
-have less to gain, and a branch you open now is briefed on the new profile unless you name its focus.
+have less to gain, and a branch you open now without a focus is briefed from the new profile as above.
 The integration branch's profile_running is true while that profile runs: its PROFILE test holds one of the
 integration branch's K slots, so merge tests wait for it while that K is 1; size the integration branch's K with it.
 environment_changed: the toolbox quarantined a measurement node after an infrastructure failure (gpu_ids is empty for

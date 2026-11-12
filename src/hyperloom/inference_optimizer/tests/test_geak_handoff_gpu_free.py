@@ -5,8 +5,6 @@
 
 from __future__ import annotations
 
-import subprocess
-import sys
 import time
 from pathlib import Path
 from types import SimpleNamespace
@@ -24,12 +22,11 @@ from hyperloom.orchestrator.actions.executors._gpu_pin import (
 
 IDLE = GpuVram(used_mib=300.0, total_mib=288000.0)
 HELD = GpuVram(used_mib=281000.0, total_mib=288000.0)
-HOLDER = "pgid=274559 python3 -m sglang.launch_server"
 
 
 @pytest.fixture
 def host(monkeypatch):
-    """Script the VRAM readings; record the reap, the sleeps and the holder scan."""
+    """Script the VRAM readings; record the reap and the sleeps."""
     state = SimpleNamespace(readings=[], reaped=[], reap_calls=[], probes=0, sleeps=[])
 
     def _reap(session_dir):
@@ -43,7 +40,6 @@ def host(monkeypatch):
     monkeypatch.setattr(sl, "reap_orphaned_servers", _reap)
     monkeypatch.setattr(sl.rocm_smi, "gpu_vram_usage", _probe)
     monkeypatch.setattr(sl, "time", SimpleNamespace(monotonic=time.monotonic, sleep=state.sleeps.append))
-    monkeypatch.setattr(sl, "_serving_process_groups", lambda: [HOLDER])
     return state
 
 
@@ -67,14 +63,25 @@ def test_waits_for_a_reaped_server_vram_to_drain(host, tmp_path):
     assert host.sleeps == [sl._GPU_FREE_POLL_SECONDS] * 2
 
 
-def test_names_the_cards_still_held_at_the_deadline_and_who_holds_them(host, tmp_path):
+def test_names_the_cards_still_held_at_the_deadline_and_the_pidfiles_the_reap_kept(host, tmp_path):
+    kept = tmp_path / "runs" / "baseline" / "r1"
+    kept.mkdir(parents=True)
+    (kept / "server.pid").write_text("{}", encoding="utf-8")
+    (tmp_path / "runs" / "grid").mkdir()
     host.readings = [[HELD, IDLE]]
 
     gpus = sl.free_gpus_for_handoff(tmp_path, [0, 1], timeout_sec=0)
 
     assert gpus.busy == [(0, HELD.used_mib, HELD.total_mib)]
-    assert gpus.holders == [HOLDER]
+    assert gpus.holders == [str(kept)]
     assert gpus.unverified == ""
+
+
+def test_busy_cards_with_no_pidfile_left_name_no_holder(host, tmp_path):
+    """A process outside this session's pidfiles is not named: the reap never owned it."""
+    host.readings = [[HELD]]
+
+    assert sl.free_gpus_for_handoff(tmp_path, [0], timeout_sec=0).holders == []
 
 
 def test_only_the_named_cards_count(host, tmp_path):
@@ -109,46 +116,6 @@ def test_a_card_rocm_smi_does_not_report_is_unverified(host, tmp_path):
 
     assert gpus.busy == []
     assert "does not cover cards [0, 5]" in gpus.unverified
-
-
-def _spawn_server_lookalike(*flags: str) -> subprocess.Popen:
-    proc = subprocess.Popen(
-        [sys.executable, "-c", "import time; time.sleep(120)", "sglang.launch_server", *flags],
-        stdout=subprocess.DEVNULL,
-        stderr=subprocess.DEVNULL,
-        start_new_session=True,
-    )
-    deadline = time.time() + 5.0
-    while "sglang.launch_server" not in sl._pid_cmdline(proc.pid):
-        if time.time() >= deadline:
-            raise AssertionError("lookalike never exec'd")
-        time.sleep(0.02)
-    return proc
-
-
-def test_holders_name_each_serving_process_group_once_by_its_program(monkeypatch):
-    monkeypatch.setattr(sl, "_HOLDERS_REPORTED", 10_000)
-    server = _spawn_server_lookalike("--api-key", "hunter2", "--port", "30000")
-    try:
-        ours = [line for line in sl._serving_process_groups() if line.startswith(f"pgid={server.pid} ")]
-
-        assert len(ours) == 1
-        assert ours[0].endswith(" sglang.launch_server")
-        assert "hunter2" not in ours[0]
-    finally:
-        server.kill()
-        server.wait(timeout=5)
-
-
-def test_holders_are_capped(monkeypatch):
-    monkeypatch.setattr(sl, "_HOLDERS_REPORTED", 1)
-    servers = [_spawn_server_lookalike() for _ in range(2)]
-    try:
-        assert len(sl._serving_process_groups()) == 1
-    finally:
-        for server in servers:
-            server.kill()
-            server.wait(timeout=5)
 
 
 @pytest.mark.parametrize(

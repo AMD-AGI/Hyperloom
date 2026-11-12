@@ -13,6 +13,8 @@ from types import SimpleNamespace
 
 import pytest
 
+from inference_suite.argv import flag_occurrences
+
 from hyperloom.orchestrator.actions.executors._grid_runner import GridVariant, GridRecipe
 from hyperloom.orchestrator.actions.executors._proposal_identity import BaseControls, effective_fingerprint
 from hyperloom.orchestrator.actions.executors._server_lifecycle import GpuHandoff
@@ -21,8 +23,11 @@ from hyperloom.orchestrator.actions.executors._subprocess_kill import run_with_s
 from hyperloom.orchestrator.phases import machine_state as ps
 from hyperloom.orchestrator.state.shared_state import ESCALATE_HINT_SKIP_TO_SWEEP
 
+from hyperloom.orchestrator.state.tests._session_base import freeze_session_base
+from inference_suite import runner_owned
+
 from .conftest import make_mock_critic_coordinator
-from ._geak_helpers import forbid_geak_launch, stop_geak_before_launch
+from ._geak_helpers import forbid_geak_launch, measured_in_suite_round, stop_geak_before_launch
 from hyperloom.orchestrator.state.task_registry import TaskSpec
 from hyperloom.orchestrator.actions.executors._workload_envs import BenchmarkTarget, LaunchLayer
 
@@ -70,6 +75,8 @@ async def test_agentx_direct_dispatch_fallback_refuses_geak_replay(coordinator, 
     st = c.shared_state
     _arm_kernel_to_sweep(st)
     st.benchmark_mode = "agentx"
+    st.agentx_backend = "mlperf"
+    measured_in_suite_round(st, tmp_path / "measured")
     st.baseline_tput = 100.0
     st.current_best = {"action": "explore", "tput": 120.0}
     st.cumulative_gain_validated = 20.0
@@ -334,7 +341,9 @@ async def test_geak_launch_controls_reach_materialized_rebench(
     monkeypatch.setattr(explore, "run_grid", capture_grid)
     monkeypatch.setattr(explore, "effective_fingerprint", observe_fingerprint)
     monkeypatch.setattr(explore, "maybe_serving_lease", lambda **_kwargs: None)
-    monkeypatch.setattr(explore, "teardown_lifecycle_server", lambda **_kwargs: None)
+    monkeypatch.setattr(explore, "teardown_variant_server", lambda *_args: [])
+    # One cold decision round, so the single capture is the materialized rebench.
+    monkeypatch.setattr(explore, "resolve_lifecycle_params", lambda _path: {"eligible": False})
     result = await ExploreExecutor(session_dir=coordinator.session_dir)(
         SimpleNamespace(task=task, extra={"shared_state": state})
     )
@@ -689,6 +698,64 @@ def test_geak_config_is_judged_on_the_launch_it_produces(coordinator, accepted_f
         assert params["grid"][0]["provenance"] == "geak_revalidate"
 
 
+_MEASURED = "--tp 8 --same-config --enable-metrics"
+
+
+def test_geak_revalidation_leaves_runner_owned_keys_to_the_runner(coordinator, session_dir) -> None:
+    """GEAK reports the launch it measured, runner flags included; a candidate layer setting them is refused."""
+    base = freeze_session_base(session_dir)
+    st = coordinator.shared_state
+    st.baseline_tput = 100.0
+    st.current_best = {"action": "explore", "tput": 110.0, "extra_server_args": "--same-config", "extra_envs": {}}
+    st.current_best_measurement = {"resolved_server_launch_flags": _MEASURED}
+    st.geak_result = {
+        "status": "ok",
+        "accepted_config": {
+            "flags": f"{_MEASURED} --attention-backend aiter --port 30000 --enable_metrics",
+            "env_map": {"SGLANG_USE_AITER": "1", "HIP_VISIBLE_DEVICES": "3"},
+            "args_mode": "replace",
+        },
+    }
+
+    params = coordinator.writeback.geak_rebench_params(reason="geak_e2e_win")
+
+    row = params["grid"][0]
+    owned = runner_owned(base)
+    assert row["extra_args"] == "--tp 8 --same-config --attention-backend aiter"
+    assert row["extra_envs"] == {"SGLANG_USE_AITER": "1"}
+    assert not {name for name, _ in flag_occurrences(row["extra_args"])} & owned.flags()
+
+
+def test_a_geak_candidate_records_the_launch_the_runner_can_replay(coordinator, session_dir) -> None:
+    freeze_session_base(session_dir)
+    coordinator.shared_state.baseline_tput = 100.0
+    result = {
+        "status": "ok",
+        "final_throughput_tok_s": 120.0,
+        "accepted_config": {"flags": _MEASURED, "env_map": {"HIP_VISIBLE_DEVICES": "3"}, "args_mode": "replace"},
+    }
+
+    assert coordinator.phase_kernel._record_geak_candidate(result)
+
+    pending = coordinator.shared_state.geak_pending
+    assert (pending["accepted_flags"], pending["accepted_envs"]) == ("--tp 8 --same-config", {})
+
+
+def test_a_geak_config_restating_the_measured_launch_settles(coordinator, session_dir) -> None:
+    """The measured launch and GEAK's copy of it both carry the runner's flags; neither is a change to the launch."""
+    freeze_session_base(session_dir)
+    st = coordinator.shared_state
+    st.baseline_tput = 100.0
+    st.current_best = {"action": "explore", "tput": 110.0, "extra_server_args": "--same-config", "extra_envs": {}}
+    st.current_best_measurement = {"resolved_server_launch_flags": _MEASURED}
+    st.geak_result = {"status": "ok", "accepted_config": {"flags": _MEASURED, "env_map": {}, "args_mode": "replace"}}
+
+    assert coordinator.writeback.geak_rebench_params(reason="geak_e2e_win") == {
+        "skipped": True,
+        "reason": "geak_no_material",
+    }
+
+
 @pytest.mark.asyncio
 async def test_no_material_drop_does_not_claim_the_stack_was_revalidated(coordinator, monkeypatch) -> None:
     """Dropping a candidate is not a revalidation of the stack behind it.
@@ -900,6 +967,7 @@ def _arm_settled_candidate(coordinator, tmp_path) -> dict:
     st = coordinator.shared_state
     _arm_kernel_to_sweep(st)
     st.benchmark_mode = "agentx"
+    measured_in_suite_round(st, tmp_path / "measured")
     st.baseline_tput = 100.0
     settled = {
         "status": "ok",
@@ -995,11 +1063,12 @@ async def test_runner_timeout_does_not_replay_the_settled_result(coordinator, tm
     _assert_settled_candidate_survived(c, tmp_path, revalidations)
 
 
-def _arm_unsettled_geak_dispatch(coordinator) -> None:
+def _arm_unsettled_geak_dispatch(coordinator, tmp_path) -> None:
     """Reach the runner with no adjudicated candidate for a timeout to retire."""
     st = coordinator.shared_state
     _arm_kernel_to_sweep(st)
     st.benchmark_mode = "agentx"
+    measured_in_suite_round(st, tmp_path / "measured")
     st.geak_result = {}
     st.geak_pending = {}
     coordinator.phase_kernel._record_geak_kernel_journey = lambda _result: None
@@ -1013,7 +1082,7 @@ def _timeout_runner():
 async def test_outer_timeout_retains_the_classification_geak_flushed(coordinator, tmp_path, monkeypatch) -> None:
     """A kill after GEAK wrote result.json keeps that result instead of a bare timeout."""
     c = coordinator
-    _arm_unsettled_geak_dispatch(c)
+    _arm_unsettled_geak_dispatch(c, tmp_path)
     flushed = {
         "status": "no_gain",
         "error_class": "no_gain",
@@ -1045,7 +1114,7 @@ async def test_outer_timeout_retains_the_classification_geak_flushed(coordinator
 async def test_outer_timeout_without_result_json_records_an_unknown_phase(coordinator, tmp_path, monkeypatch) -> None:
     """A kill before result.json exists is an external timeout, not an empty patch or no gain."""
     c = coordinator
-    _arm_unsettled_geak_dispatch(c)
+    _arm_unsettled_geak_dispatch(c, tmp_path)
     revalidations = _record_revalidations(c)
     calls = _stub_geak_runner_call(monkeypatch, _timeout_runner)
 
@@ -1099,6 +1168,8 @@ async def test_crash_recovery_still_promotes_new_evidence(coordinator, tmp_path,
     st = c.shared_state
     _arm_kernel_to_sweep(st)
     st.benchmark_mode = "agentx"
+    st.agentx_backend = "mlperf"
+    measured_in_suite_round(st, tmp_path / "measured")
     st.baseline_tput = 100.0
     geak_dir = tmp_path / "geak"
     geak_dir.mkdir()
@@ -1269,17 +1340,15 @@ async def test_internal_stack_rebench_preserves_baseline_script(
 
     monkeypatch.setattr("hyperloom.orchestrator.actions.executors.explore.run_grid", capture_grid)
     monkeypatch.setattr("hyperloom.orchestrator.actions.executors.explore.maybe_serving_lease", lambda **_kwargs: None)
-    monkeypatch.setattr(
-        "hyperloom.orchestrator.actions.executors.explore.teardown_lifecycle_server", lambda **_kwargs: None
-    )
+    monkeypatch.setattr("hyperloom.orchestrator.actions.executors.explore.teardown_variant_server", lambda *_args: [])
     await ExploreExecutor(session_dir=coordinator.session_dir)(
         SimpleNamespace(task=task, extra={"shared_state": state})
     )
 
     assert len(calls) == 1
     assert calls[0][1]["benchmark_script"] == "sglang_custom.sh"
-    assert calls[0][1]["runner_type"] == "mi355x"
-    assert calls[0][0]["launch"].server_lifecycle is None
+    assert "runner_type" not in calls[0][1]
+    assert calls[0][0]["launch"].server_lifecycle is not None
 
 
 @pytest.mark.asyncio
@@ -1318,13 +1387,13 @@ async def test_invalid_handoff_configuration_never_launches_geak(coordinator, mo
 
 @pytest.mark.asyncio
 async def test_native_geak_proxy_refusal_is_not_an_invalid_env_spec(coordinator, monkeypatch):
-    """A native-AgentX proposal refusing an unverified Magpie launch is its own fault, not a serialization one.
+    """A native-AgentX proposal refusing a round without launch.json is its own fault, not a serialization one.
 
     ``invalid_env_spec`` names exactly one failure: the accepted launch configuration could not be
     serialized. A refusal raised further down the handoff build must reach the caller instead of being
     relabelled as one.
     """
-    refusal = "Native AgentX GEAK proposals require a Magpie-verified server launch"
+    refusal = "Native AgentX GEAK proposals require the measured round's launch.json"
 
     def refuse(*_args, **_kwargs):
         raise ValueError(refusal)
@@ -1518,6 +1587,7 @@ async def test_crash_recovery_does_not_replay_a_refused_candidate(coordinator, t
     st = c.shared_state
     _arm_kernel_to_sweep(st)
     st.benchmark_mode = "agentx"
+    measured_in_suite_round(st, tmp_path / "measured")
     st.baseline_tput = 100.0
     st.current_best = {"action": "explore", "tput": 120.0, "extra_server_args": "--incumbent", "extra_envs": {}}
     result = {
@@ -1568,6 +1638,7 @@ async def test_crash_recovery_retries_a_transiently_failed_revalidation(coordina
     st = c.shared_state
     _arm_kernel_to_sweep(st)
     st.benchmark_mode = "agentx"
+    measured_in_suite_round(st, tmp_path / "measured")
     st.baseline_tput = 100.0
     result = {
         "status": "ok",

@@ -26,12 +26,13 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
+from hyperloom.common.benchmark_config import BenchmarkPoint
 from hyperloom.common.outside_facts import (
     ENV_CONC,
     ENV_ISL,
-    ENV_MAGPIE_EVAL_LIMIT,
-    ENV_MAGPIE_EVAL_TASKS,
-    ENV_MAGPIE_EVAL_TOKENIZED_REQUESTS,
+    ENV_EVAL_LIMIT,
+    ENV_EVAL_TASKS,
+    ENV_EVAL_TOKENIZED_REQUESTS,
     ENV_NUM_PROMPTS,
     ENV_NUM_WARMUPS,
     ENV_OSL,
@@ -47,9 +48,9 @@ SURFACE_ENV_KEYS: tuple[str, ...] = (
     ENV_ISL,
     ENV_OSL,
     ENV_RANDOM_RANGE_RATIO,
-    ENV_MAGPIE_EVAL_TASKS,
-    ENV_MAGPIE_EVAL_LIMIT,
-    ENV_MAGPIE_EVAL_TOKENIZED_REQUESTS,
+    ENV_EVAL_TASKS,
+    ENV_EVAL_LIMIT,
+    ENV_EVAL_TOKENIZED_REQUESTS,
 )
 #: Request counts that follow from the concurrency level; compared per point, not hashed.
 POINT_ENV_KEYS: tuple[str, ...] = (ENV_NUM_PROMPTS, ENV_NUM_WARMUPS)
@@ -128,24 +129,16 @@ class MeasurementSurface:
         }
 
 
-def _benchmark(config: Mapping[str, Any]) -> Mapping[str, Any]:
-    bench = config.get("benchmark")
-    return bench if isinstance(bench, Mapping) else {}
-
-
-def benchmark_envs(config: Mapping[str, Any]) -> Mapping[str, Any]:
-    envs = _benchmark(config).get("envs")
-    return envs if isinstance(envs, Mapping) else {}
-
-
 def extract_surface(config: Mapping[str, Any]) -> MeasurementSurface:
-    """The surface fields of a materialized Magpie configuration, with the script and model files hashed.
+    """The surface fields of a materialized point configuration, with the script and model files hashed.
 
     The model files are those of the directory the server loads: an AgentX configuration names it in ``envs.MODEL_PATH``
     and keeps the model's identity in ``benchmark.model``; any other names the directory in ``benchmark.model``.
     """
 
-    bench, envs = _benchmark(config), benchmark_envs(config)
+    envs = BenchmarkPoint.from_document(config).envs
+    # Spelled from the raw block: BenchmarkPoint's text fields fold falsy values to "", which would move the hash.
+    bench = config["benchmark"]
     fields: dict[str, str | None] = {f"benchmark.{key}": _text(bench.get(key)) for key in SURFACE_BENCH_KEYS}
     fields.update({f"envs.{key}": _text(envs.get(key)) for key in SURFACE_ENV_KEYS})
     script, root = _text(bench.get("benchmark_script")), _text(bench.get("inferencex_path"))
@@ -160,7 +153,7 @@ def extract_surface(config: Mapping[str, Any]) -> MeasurementSurface:
 def point_values(config: Mapping[str, Any]) -> dict[str, str | None]:
     """The request counts of one point, which follow from its concurrency."""
 
-    envs = benchmark_envs(config)
+    envs = BenchmarkPoint.from_document(config).envs
     return {key: _text(envs.get(key)) for key in POINT_ENV_KEYS}
 
 
@@ -201,7 +194,7 @@ def check_point(
 ) -> None:
     """Hold one point to its request: concurrency, ``RUN_EVAL`` and the canonical request counts for it."""
 
-    envs = benchmark_envs(config)
+    envs = BenchmarkPoint.from_document(config).envs
     expected = {ENV_CONC: str(concurrency), ENV_RUN_EVAL: "true" if accuracy else "false", **reference}
     wrong = {key: (want, _text(envs.get(key))) for key, want in expected.items() if _text(envs.get(key)) != want}
     if wrong:
@@ -218,7 +211,6 @@ __all__ = [
     "SURFACE_ENV_KEYS",
     "MeasurementSurface",
     "SurfaceViolation",
-    "benchmark_envs",
     "check_launch_envs",
     "check_point",
     "check_surface",

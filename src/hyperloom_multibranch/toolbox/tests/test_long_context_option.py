@@ -67,7 +67,7 @@ async def test_a_toolbox_built_without_a_set_runs_no_check_even_for_a_request_th
     toolbox, branch_env = await _built(tmp_path)
 
     assert toolbox._acceptance._long_context is None
-    assert CACHE_ENV not in _runner_env(toolbox) and CACHE_ENV not in branch_env
+    assert CACHE_ENV not in branch_env
     assert await _planned(toolbox, long_context_check=True) is None
 
 
@@ -228,22 +228,6 @@ async def test_a_hosted_toolbox_that_sees_the_runner_cache_stages_the_models_set
     setup = source.at(None)  # type: ignore[union-attr]
     assert setup is not None and setup.length == LENGTH and (cache / "evalsets" / setup.prompt_set).is_dir()
     assert source.at(None) == setup and lengths == [LENGTH], "staged once, then found"  # type: ignore[union-attr]
-
-
-async def test_a_hosted_toolbox_that_does_not_see_the_runner_cache_stages_nothing_and_says_so(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
-) -> None:
-    cache, model = tmp_path / "cache", _model(tmp_path)
-    monkeypatch.setenv(CACHE_ENV, str(cache))
-    monkeypatch.setenv(MODEL_PATH_ENV, str(model))
-    lengths = _staged_with_test_tokenizer(monkeypatch)
-    (tmp_path / "hosted").mkdir()
-
-    with caplog.at_level("WARNING"):
-        source = _hosted(tmp_path / "hosted")._acceptance._long_context
-
-    assert f"does not see the runner cache {cache}" in caplog.text
-    assert source.at(None) is None and lengths == [] and not cache.exists()  # type: ignore[union-attr]
 
 
 async def test_the_local_toolbox_stages_the_models_set_when_a_test_first_needs_it(

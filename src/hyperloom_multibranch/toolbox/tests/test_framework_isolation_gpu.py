@@ -11,8 +11,9 @@ same file (row count and sha256) after both, and each test's signed ``framework_
 session's base. What the write-back did is printed (``PROBE``): whether the server read the variable at all (a server
 that does not has nothing to rewrite) and which files in the test's private copies were rewritten.
 
-Needs what ``test_toolbox_kinds_gpu`` needs (``HL_GPU_MODEL``, ``HL_GPU_INFERENCEX``, ``HL_GPU_OUT``, ``HL_GPU_CARDS``)
-and the image's aiter tables at ``/sgl-workspace``; anywhere else the module is skipped.
+Needs what ``test_toolbox_kinds_gpu`` needs (``HL_GPU_MODEL``, ``HL_GPU_INFERENCEX`` holding
+``inference_suite.pins.INFERENCEX_CLIENT_COMMIT``, ``HL_GPU_OUT``, ``HL_GPU_CARDS``) and the image's aiter tables at
+``/sgl-workspace``; anywhere else the module is skipped.
 """
 
 from __future__ import annotations
@@ -51,6 +52,7 @@ from hyperloom_multibranch.toolbox.tests.test_toolbox_kinds_gpu import (  # noqa
 VARIABLE = "AITER_CONFIG_GEMM_BF16"
 SHARED = Path(DEFAULT_CONFIGS) / "bf16_tuned_gemm.csv"
 SERVER_SAW = ("duplicate shape", "Updated files", "tuned config")
+USES_REAL_GPUS = True  # keep the host's amd-smi and rocm-smi: see hyperloom.measure.tests.gpu_free_host
 pytestmark = [
     pytestmark,
     pytest.mark.skipif(not SHARED.is_file(), reason=f"needs the image's aiter table {SHARED}"),
@@ -155,7 +157,6 @@ def _aiter_test(root: Path, name: str, table: Path) -> Path:
         output_dir=root / "out" / name,
         timeout_sec=900,
         cwd=str(root),
-        magpie_python="",
         task_id=name,
     )
     LocalMeasurementBackend().run_test(call)

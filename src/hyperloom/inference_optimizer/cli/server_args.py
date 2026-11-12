@@ -10,7 +10,8 @@ import os
 import re
 import shlex
 
-from ..grid_server_args import compact_json_server_args
+from inference_suite.argv import compact_json_server_args
+
 from ..model_config_utils import _load_model_max_position_embeddings
 
 

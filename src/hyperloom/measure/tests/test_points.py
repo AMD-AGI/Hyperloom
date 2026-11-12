@@ -4,7 +4,7 @@
 from __future__ import annotations
 
 import json
-import shutil
+from dataclasses import replace
 from pathlib import Path
 
 import pytest
@@ -30,13 +30,14 @@ from hyperloom.measure import points
 from hyperloom.measure.points import (
     AGENTX_PROFILE_STEPS,
     CANONICAL_FILE,
+    MEASUREMENT_SEED,
     PointError,
     accept_measurement,
     default_canonical,
     generate_points,
     generate_profile_point,
 )
-from hyperloom.measure.points import _limit_agentx_capture
+from hyperloom.measure.points import _limit_agentx_capture, _seeded
 from hyperloom.measure.surface import SurfaceViolation
 from hyperloom.measure.tests._recipes import IMAGE, recipe_with, sha
 from hyperloom.orchestrator.actions.executors._workload_envs import (
@@ -46,9 +47,16 @@ from hyperloom.orchestrator.actions.executors._workload_envs import (
     materialize_benchmark_config,
     materialize_config_with_envs,
 )
-from hyperloom.orchestrator.actions.executors.magpie_agentx import enable_profile
+from hyperloom.orchestrator.actions.executors._suite.config import suite_config
+from hyperloom.orchestrator.actions.executors.agentx_point import enable_profile
+from hyperloom.orchestrator.actions.executors.tests.test_suite_accuracy_round import _agentx_base
+from hyperloom.orchestrator.actions.executors.tests.test_suite_config import _settings
+from hyperloom.orchestrator.state.base_launch import server_base
+from hyperloom.orchestrator.state.tests._session_base import freeze_base
 
 SERVER_ARGS = "--max-running-requests 77 --enable-dp-attention"
+#: The recipe's launch as a point runs it: with the engine seed pinned, since neither the recipe nor the base names one.
+SEEDED_ARGS = f"{SERVER_ARGS} --random-seed {MEASUREMENT_SEED}"
 
 
 @pytest.fixture(autouse=True)
@@ -69,15 +77,14 @@ def clean_process_env(monkeypatch, tmp_path):
     ):
         monkeypatch.delenv(name, raising=False)
     for name in (
-        "MAGPIE_EVAL_TASKS",
-        "MAGPIE_EVAL_LIMIT",
-        "MAGPIE_EVAL_TOKENIZED_REQUESTS",
+        "HYPERLOOM_EVAL_TASKS",
+        "HYPERLOOM_EVAL_LIMIT",
+        "HYPERLOOM_EVAL_TOKENIZED_REQUESTS",
         "INFERENCE_OPTIMIZER_SERVER_ARGS",
     ):
         monkeypatch.delenv(name, raising=False)
     monkeypatch.setenv("FRAMEWORK", "sglang")
     monkeypatch.setenv("USER_DATA_PATH", str(tmp_path / "userdata"))
-    monkeypatch.setenv("INFERENCE_OPTIMIZER_DISABLE_TP_CLAMP", "1")
 
 
 @pytest.fixture()
@@ -160,7 +167,7 @@ def test_kernel_table_reaches_the_yaml_as_an_attachment_placeholder(canonical, b
     assert value == "${HL_ATTACH:" + env.attachments[0].id + "}"
 
 
-@pytest.mark.parametrize("name", ["ISL", "MAGPIE_EVAL_LIMIT", "RUN_EVAL", "NUM_PROMPTS"])
+@pytest.mark.parametrize("name", ["ISL", "HYPERLOOM_EVAL_LIMIT", "RUN_EVAL", "NUM_PROMPTS"])
 def test_recipe_that_sets_a_workload_or_eval_variable_is_refused_before_rendering(canonical, blobs, tmp_path, name):
     delta = RecipeDelta(config=ConfigDelta(envs={name: "1"}))
     env = environment(blobs, tmp_path, delta=delta)
@@ -170,7 +177,7 @@ def test_recipe_that_sets_a_workload_or_eval_variable_is_refused_before_renderin
     assert not list((tmp_path / "points").glob("*.yaml"))
 
 
-@pytest.mark.parametrize(("name", "value"), [("ISL", "16"), ("MAGPIE_EVAL_LIMIT", "5"), ("OSL", "8")])
+@pytest.mark.parametrize(("name", "value"), [("ISL", "16"), ("HYPERLOOM_EVAL_LIMIT", "5"), ("OSL", "8")])
 def test_a_point_whose_surface_drifted_from_the_canonical_one_is_refused(
     canonical, blobs, tmp_path, monkeypatch, name, value
 ):
@@ -237,6 +244,44 @@ def test_a_profile_point_carries_the_profiler_settings_and_the_recipes_launch(ca
     assert "--max-running-requests 77" in envs["EXTRA_SGLANG_ARGS"], "the profile runs the candidate's launch"
     assert envs["HSA_FORCE_FINE_GRAIN_PCIE"] == "1"
     assert (envs["CONC"], envs["RUN_EVAL"]) == ("32", "false")
+
+
+def _seed_values(text: str) -> list[str]:
+    tokens = text.split()
+    return [tokens[i + 1] for i, token in enumerate(tokens[:-1]) if token == "--random-seed"]
+
+
+def test_every_point_and_the_profile_point_pin_the_engine_seed_the_recipe_leaves_unset(canonical, blobs, tmp_path):
+    env = environment(blobs, tmp_path, delta=RecipeDelta(config=ConfigDelta(server_args=SERVER_ARGS)))
+
+    points = generate_points(env, canonical, tmp_path / "points", concurrency=(8, 64))
+    (profile,) = generate_profile_point(env, canonical, tmp_path / "profile")
+
+    for point in (*points, profile):
+        extra = load(point)["benchmark"]["envs"]["EXTRA_SGLANG_ARGS"]
+        assert _seed_values(extra) == [str(MEASUREMENT_SEED)], f"{point.name} launches with a fixed seed: {extra}"
+        assert "--max-running-requests 77" in extra
+
+
+@pytest.mark.parametrize("spelled", ["--random-seed 7", "--random_seed 7"])
+def test_a_seed_the_recipe_names_is_the_one_the_point_launches_with(canonical, blobs, tmp_path, spelled):
+    delta = RecipeDelta(config=ConfigDelta(server_args=f"{SERVER_ARGS} {spelled}"))
+
+    (point,) = generate_points(environment(blobs, tmp_path, delta=delta), canonical, tmp_path / "points")
+
+    extra = load(point)["benchmark"]["envs"]["EXTRA_SGLANG_ARGS"]
+    assert spelled in extra
+    assert _seed_values(extra) == (["7"] if spelled.startswith("--random-seed") else []), extra
+
+
+def test_a_seed_the_base_launch_names_is_kept_and_a_framework_without_a_seed_option_gets_none():
+    base = {"benchmark": {"framework": "sglang", "envs": {"EXTRA_SGLANG_ARGS": "--tp 8 --random-seed=5"}}}
+    vllm = {"benchmark": {"framework": "vllm", "envs": {"EXTRA_VLLM_ARGS": "--tp 8"}}}
+    atom = {"benchmark": {"framework": "atom", "envs": {"EXTRA_ATOM_ARGS": "--tp 8"}}}
+
+    assert _seeded(SERVER_ARGS, base) == SERVER_ARGS
+    assert _seeded(SERVER_ARGS, vllm) == f"{SERVER_ARGS} --seed {MEASUREMENT_SEED}"
+    assert _seeded(SERVER_ARGS, atom) == SERVER_ARGS
 
 
 def test_a_profile_point_replays_graphs_node_by_node_so_the_profiler_records_every_replay(canonical, blobs, tmp_path):
@@ -333,7 +378,7 @@ def test_an_agentx_canonical_is_what_the_main_flow_renders_for_the_workload(tmp_
 
 
 @pytest.mark.parametrize("level", [8, 64])
-def test_an_agentx_point_is_what_the_main_flow_hands_magpie_for_the_recipe_and_concurrency(
+def test_an_agentx_point_is_what_the_main_flow_hands_the_round_for_the_recipe_and_concurrency(
     agentx_canonical, blobs, tmp_path, model, level
 ):
     delta = RecipeDelta(config=ConfigDelta(server_args=SERVER_ARGS, envs={"HSA_FORCE_FINE_GRAIN_PCIE": "1"}))
@@ -358,7 +403,158 @@ def test_an_agentx_point_is_what_the_main_flow_hands_magpie_for_the_recipe_and_c
     assert launch["env"] == {"HSA_FORCE_FINE_GRAIN_PCIE": "1", AITER_LOG_TUNED_CONFIG_ENV: "1"}
 
 
-#: An option of the launch Magpie resolves from the InferenceX recipe, which the recipe's own arguments lack.
+def test_an_agentx_point_runs_on_the_sessions_frozen_base_as_the_main_flow_composes_it(
+    tmp_path, model, blobs, monkeypatch
+):
+    base = _agentx_base()
+    base = replace(
+        base,
+        topology=replace(base.topology, tp=2),
+        client=replace(base.client, env={"WEKA_LOADER_OVERRIDE": "corpus"}),
+    )
+    session = tmp_path / "session"
+    freeze_base(session, base)
+    canonical = default_canonical(
+        tmp_path / "canonical",
+        primary_concurrency=32,
+        config_path=agentx_source(tmp_path / "bench" / "benchmark.yaml", 32),
+        model_path=str(model),
+        server_base=server_base(base),
+    )
+    delta = RecipeDelta(config=ConfigDelta(server_args=SERVER_ARGS, envs={"HSA_FORCE_FINE_GRAIN_PCIE": "1"}))
+
+    (point,) = generate_points(environment(blobs, tmp_path, delta=delta), canonical, tmp_path / "points")
+
+    monkeypatch.setenv("INFERENCE_OPTIMIZER_CURRENT_SESSION_DIR", str(session))
+    main_flow = materialize_benchmark_config(
+        agentx_source(tmp_path / "single" / "benchmark.yaml", 32),
+        tmp_path / "main",
+        launch=LaunchLayer(SEEDED_ARGS, {"HSA_FORCE_FINE_GRAIN_PCIE": "1", "RUN_EVAL": "false"}),
+        target=BenchmarkTarget(model_path=str(model)),
+    )
+    rendered = load(point)
+    assert rendered == load(main_flow)
+    launch = rendered["benchmark"]["agentx"]["launch_overrides"]
+    assert launch["replace_args"] is True
+    assert launch["append_args"][: len(base.args)] == list(base.args)
+    rendered["benchmark"]["timeout_seconds"] = 7200
+    user = suite_config(rendered, base, _settings()).server.user
+    assert user.args_add == tuple(SEEDED_ARGS.split())
+    assert user.env_set["HSA_FORCE_FINE_GRAIN_PCIE"] == "1"
+
+
+#: A base option an AgentX recipe turns off, the way an Arbor KEEP drops a default feature.
+BASE_OPTION = "--enable-dp-attention"
+
+
+def _canonical_on_a_base_with(option, tmp_path, model):
+    base = _agentx_base()
+    base = replace(
+        base,
+        topology=replace(base.topology, tp=2),
+        client=replace(base.client, env={"WEKA_LOADER_OVERRIDE": "corpus"}),
+        args=(*base.args, option, "--mem-fraction-static", "0.8"),
+    )
+    canonical = default_canonical(
+        tmp_path / "canonical",
+        primary_concurrency=32,
+        config_path=agentx_source(tmp_path / "bench" / "benchmark.yaml", 32),
+        model_path=str(model),
+        server_base=server_base(base),
+    )
+    return base, canonical
+
+
+def test_an_agentx_point_on_the_frozen_base_drops_a_base_option_the_recipe_removes(tmp_path, model, blobs):
+    base, canonical = _canonical_on_a_base_with(BASE_OPTION, tmp_path, model)
+    delta = RecipeDelta(config=ConfigDelta(remove_args=(BASE_OPTION,)))
+
+    (point,) = generate_points(environment(blobs, tmp_path, delta=delta), canonical, tmp_path / "points")
+
+    rendered = load(point)
+    launch = rendered["benchmark"]["agentx"]["launch_overrides"]
+    assert BASE_OPTION not in launch["append_args"]
+    assert "--mem-fraction-static" in launch["append_args"]
+    rendered["benchmark"]["timeout_seconds"] = 7200
+    assert suite_config(rendered, base, _settings()).server.user.args_remove == (BASE_OPTION,)
+
+
+def test_an_agentx_point_on_the_frozen_base_whose_renderer_keeps_a_removed_option_is_refused(
+    tmp_path, model, blobs, monkeypatch
+):
+    _base, canonical = _canonical_on_a_base_with(BASE_OPTION, tmp_path, model)
+    rendered = points.materialize_benchmark_config
+
+    def keeping(*args, **kwargs):
+        path = rendered(*args, **kwargs)
+        config = load(path)
+        config["benchmark"]["agentx"]["launch_overrides"]["append_args"].append("--enable_dp_attention")
+        path.write_text(yaml.safe_dump(config, sort_keys=False))
+        return path
+
+    monkeypatch.setattr(points, "materialize_benchmark_config", keeping)
+    delta = RecipeDelta(config=ConfigDelta(remove_args=(BASE_OPTION,)))
+
+    with pytest.raises(PointError, match=f"the renderer did not remove launch arguments {BASE_OPTION}"):
+        generate_points(environment(blobs, tmp_path, delta=delta), canonical, tmp_path / "points")
+
+
+def _effective_seed(argv: list[str]) -> str | None:
+    """The seed the engine's argument parser resolves from ``argv``: the last one given, in either spelling."""
+    seeds = []
+    for i, token in enumerate(argv):
+        name, assigned, value = token.partition("=")
+        if name.replace("_", "-") == "--random-seed" and (assigned or i + 1 < len(argv)):
+            seeds.append(value if assigned else argv[i + 1])
+    return seeds[-1] if seeds else None
+
+
+@pytest.mark.parametrize(
+    ("base_seed", "effective"),
+    [
+        (("--random-seed", "42"), "42"),
+        (("--random-seed=42",), "42"),
+        (("--random_seed", "42"), "42"),
+        ((), str(MEASUREMENT_SEED)),
+    ],
+    ids=["base-seed", "base-seed-equals", "base-seed-underscore", "base-without-seed"],
+)
+def test_an_agentx_point_on_the_frozen_base_keeps_the_seed_the_base_sets(tmp_path, model, blobs, base_seed, effective):
+    base = _agentx_base()
+    base = replace(
+        base,
+        topology=replace(base.topology, tp=2),
+        client=replace(base.client, env={"WEKA_LOADER_OVERRIDE": "corpus"}),
+        args=(*base.args, *base_seed),
+    )
+    canonical = default_canonical(
+        tmp_path / "canonical",
+        primary_concurrency=32,
+        config_path=agentx_source(tmp_path / "bench" / "benchmark.yaml", 32),
+        model_path=str(model),
+        server_base=server_base(base),
+    )
+    env = environment(blobs, tmp_path, delta=RecipeDelta(config=ConfigDelta(server_args=SERVER_ARGS)))
+
+    (point,) = generate_points(env, canonical, tmp_path / "points", concurrency=(8,))
+    (profile,) = generate_profile_point(env, canonical, tmp_path / "profile")
+
+    for rendered in (point, profile):
+        launch = load(rendered)["benchmark"]["agentx"]["launch_overrides"]
+        assert launch["replace_args"] is True
+        assert _effective_seed(launch["append_args"]) == effective, launch["append_args"]
+        assert "--max-running-requests" in launch["append_args"]
+
+
+def test_an_agentx_point_whose_recipe_launch_is_unseen_adds_no_seed(agentx_canonical, blobs, tmp_path):
+    env = environment(blobs, tmp_path, delta=RecipeDelta(config=ConfigDelta(server_args=SERVER_ARGS)))
+
+    (point,) = generate_points(env, agentx_canonical, tmp_path / "points", concurrency=(8,))
+
+    assert load(point)["benchmark"]["agentx"]["launch_overrides"]["append_args"] == SERVER_ARGS.split()
+
+
+#: An option of the launch resolved from the InferenceX recipe, which the recipe's own arguments lack.
 RESOLVED_OPTION = "--enable-linear-replayssm-spec"
 
 
@@ -379,7 +575,7 @@ def test_a_point_that_resolves_no_launch_of_its_own_refuses_a_removal_it_cannot_
     delta = RecipeDelta(config=ConfigDelta(remove_args=(RESOLVED_OPTION,)))
     env = environment(blobs, tmp_path, delta=delta)
 
-    with pytest.raises(PointError, match=f"only a Magpie AgentX point .* so {RESOLVED_OPTION} would stay"):
+    with pytest.raises(PointError, match=f"only an AgentX point .* so {RESOLVED_OPTION} would stay"):
         generate_points(env, canonical, tmp_path / "points")
 
 
@@ -468,7 +664,7 @@ def test_acceptance_generates_the_agentx_profile_point_for_a_profile_request(age
     assert load(point)["benchmark"]["profiler"]["torch_profiler"]["enabled"] is True
 
 
-def test_an_inferencex_point_is_what_the_inferencex_renderer_hands_magpie(canonical, blobs, tmp_path, model):
+def test_an_inferencex_point_is_what_the_inferencex_renderer_hands_the_round(canonical, blobs, tmp_path, model):
     delta = RecipeDelta(config=ConfigDelta(server_args=SERVER_ARGS, envs={"HSA_FORCE_FINE_GRAIN_PCIE": "1"}))
     env = environment(blobs, tmp_path, delta=delta)
 
@@ -477,7 +673,7 @@ def test_an_inferencex_point_is_what_the_inferencex_renderer_hands_magpie(canoni
     expected = materialize_config_with_envs(
         default_baseline_config(),
         tmp_path / "direct",
-        launch=LaunchLayer(SERVER_ARGS, {"HSA_FORCE_FINE_GRAIN_PCIE": "1", "CONC": "8", "RUN_EVAL": "true"}),
+        launch=LaunchLayer(SEEDED_ARGS, {"HSA_FORCE_FINE_GRAIN_PCIE": "1", "CONC": "8", "RUN_EVAL": "true"}),
         target=BenchmarkTarget(model_path=str(model)),
     )
     rendered = load(point)
@@ -485,28 +681,12 @@ def test_an_inferencex_point_is_what_the_inferencex_renderer_hands_magpie(canoni
     assert rendered["benchmark"]["envs"]["RUN_EVAL"] == "true" and "NUM_PROMPTS" in rendered["benchmark"]["envs"]
 
 
-# --- the launcher on a cold InferenceX checkout ---------------------------------------------------------------------
-
-LAUNCHER = "sglang_mi355x.sh"
-MAGPIE_LAUNCHER = b"magpie launcher\n"
-
-
-@pytest.fixture()
-def magpie(tmp_path, monkeypatch):
-    """The Magpie the session runs, which ships the launcher; the process names no checkout of its own."""
-
-    shipped = tmp_path / "magpie" / "Magpie" / "scripts" / "benchmark"
-    shipped.mkdir(parents=True)
-    (shipped / LAUNCHER).write_bytes(MAGPIE_LAUNCHER)
-    monkeypatch.setenv("MAGPIE_PATH", str(tmp_path / "magpie"))
-    for name in ("INFERENCEX_PATH", "HYPERLOOM_BENCHMARK_BACKEND"):
-        monkeypatch.delenv(name, raising=False)
-    return shipped / LAUNCHER
+# --- a canonical names no benchmark script --------------------------------------------------------------------------
 
 
 @pytest.fixture()
 def cold_checkout(tmp_path):
-    """A fresh InferenceX cache: the pinned commit does not track the launcher, so it is not in the tree yet."""
+    """A fresh InferenceX cache with its benchmark library and no launcher."""
 
     benchmarks = tmp_path / "InferenceX" / "benchmarks"
     benchmarks.mkdir(parents=True)
@@ -515,7 +695,7 @@ def cold_checkout(tmp_path):
 
 
 def cold_canonical(tmp_path, model, checkout):
-    """The canonical measurement as a session takes it at start, on the runner type that names the launcher."""
+    """The canonical measurement as a session takes it at start."""
 
     return default_canonical(
         tmp_path / "canonical",
@@ -527,71 +707,10 @@ def cold_canonical(tmp_path, model, checkout):
     )
 
 
-def magpie_first_benchmark(launcher: Path, checkout: Path) -> Path:
-    """What Magpie does when its first benchmark starts: it copies the launchers it ships into the checkout."""
+@pytest.mark.parametrize("checkout", ["InferenceX", "not-a-checkout"])
+def test_a_canonical_names_no_benchmark_script_so_none_is_hashed(tmp_path, model, cold_checkout, checkout):
+    """inference_suite drives load itself, so a point names no benchmark script whatever the checkout holds."""
 
-    placed = checkout / "benchmarks" / LAUNCHER
-    shutil.copy2(launcher, placed)
-    return placed
-
-
-def test_a_baseline_test_on_a_cold_checkout_has_the_surface_the_canonical_took_at_session_start(
-    tmp_path, model, magpie, cold_checkout, blobs
-):
-    canonical = cold_canonical(tmp_path, model, cold_checkout)
-    magpie_first_benchmark(magpie, cold_checkout)
-
-    (point,) = generate_points(environment(blobs, tmp_path), canonical, tmp_path / "points")
-
-    assert load(point)["benchmark"]["benchmark_script"] == LAUNCHER
-    assert canonical.surface.fields["benchmark_script_sha256"] == sha(MAGPIE_LAUNCHER)
-
-
-def test_the_launcher_a_candidate_changed_in_the_checkout_is_still_a_surface_mismatch(
-    tmp_path, model, magpie, cold_checkout, blobs
-):
-    canonical = cold_canonical(tmp_path, model, cold_checkout)
-    placed = magpie_first_benchmark(magpie, cold_checkout)
-    placed.write_bytes(b"magpie launcher\nexport SGLANG_FAST=1\n")
-
-    with pytest.raises(SurfaceViolation, match=rf"benchmark_script_sha256: canonical '{sha(MAGPIE_LAUNCHER)}', test '"):
-        generate_points(environment(blobs, tmp_path), canonical, tmp_path / "points")
-
-
-def test_a_launcher_that_is_nowhere_refuses_the_canonical_instead_of_recording_none(
-    tmp_path, model, magpie, cold_checkout
-):
-    magpie.unlink()
-
-    with pytest.raises(PointError, match=rf"{LAUNCHER}.*{cold_checkout.name}.*no such file"):
-        cold_canonical(tmp_path, model, cold_checkout)
-
-
-def test_a_launcher_the_pinned_commit_tracks_is_hashed_as_it_is_when_magpie_ships_none(
-    tmp_path, model, magpie, cold_checkout
-):
-    magpie.unlink()
-    (cold_checkout / "benchmarks" / LAUNCHER).write_bytes(b"tracked launcher\n")
-
-    canonical = cold_canonical(tmp_path, model, cold_checkout)
-
-    assert canonical.surface.fields["benchmark_script_sha256"] == sha(b"tracked launcher\n")
-
-
-def test_the_bypass_backend_never_has_magpie_copy_a_launcher_so_the_checkout_is_left_as_it_is(
-    tmp_path, model, magpie, cold_checkout, monkeypatch
-):
-    monkeypatch.setenv("HYPERLOOM_BENCHMARK_BACKEND", "bypass")
-
-    canonical = cold_canonical(tmp_path, model, cold_checkout)
-
-    assert canonical.surface.fields["benchmark_script_sha256"] is None
-    assert not (cold_checkout / "benchmarks" / LAUNCHER).exists()
-
-
-def test_a_checkout_with_nowhere_to_put_the_launcher_is_left_to_the_host_check(tmp_path, model, magpie):
-    """A test cannot see a launcher there either, and the host refuses a tree without the benchmark library."""
-
-    canonical = cold_canonical(tmp_path, model, tmp_path / "not-a-checkout")
+    canonical = cold_canonical(tmp_path, model, tmp_path / checkout)
 
     assert canonical.surface.fields["benchmark_script_sha256"] is None

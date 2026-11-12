@@ -70,7 +70,7 @@ the rules listed. Rows overlap; a rule listed twice is read once.
 | touches persisted or shared state: `SCHEMA_VERSION`, `from_dict`, `CREATE TABLE`, a `record_*`/`read_*`/`seal_*` pair, `.save()`, a spec, manifest or recipe, a context manager, recovery or resume | X6 R4 P4 P5 |
 | touches a prompt, `SKILL.md`, `docs/**`, `*.md` or `*.rst` | X3 X5 |
 | adds error handling or a default: `except`, `contextlib.suppress`, `ignore_errors=True`, `.get(k, 0)`, `or {}`, an early `isinstance` guard, a noop or degraded implementation | S1 S2 S3 S4 S5 S7 S8 |
-| touches tests, or adds a large `src/` module with no matching test file | T1 T2 T3 |
+| touches tests, or adds a large `src/` module with no matching test file | T1 T2 T3 T6 |
 | touches async code, a lock, a subprocess, a poll or retry loop, a per-candidate step, a timeout or a budget | P1 P2 P3 P6 |
 | touches a metric, score, speedup or gain denominator, or a threshold compared against a number this repo did not produce | M1 M2 M3 |
 | matches or selects by name: substring, `startswith`, `fnmatch`, a first-wins loop, a dedup/grouping/sort key, or an LLM backend, model or credential choice | D5 D6 D7 |
@@ -360,7 +360,7 @@ opened for stays live.
 ### X7 -- An external-component pin moves in all four places at once
 
 **Severity:** blocking
-**Fires when:** an added or deleted line matches `(VLLM|SGLANG|ATOM|AITER|TRACELENS|MAGPIE|GEAK)_(VERSION|REF|SHA|COMMIT)`, or `files.txt` touches `**/framework_registry.py`, `assets/install*.sh` or `docs/compatibility.rst`.
+**Fires when:** an added or deleted line matches `(VLLM|SGLANG|ATOM|AITER|TRACELENS|GEAK)_(VERSION|REF|SHA|COMMIT)`, or `files.txt` touches `**/framework_registry.py`, `assets/install*.sh` or `docs/compatibility.rst`.
 **The rule:** A component pin lives in code, in `docs/compatibility.rst` and in the install scripts, and all three move together, stated in the description, with the platform gate travelling with the bump. The pin must be an immutable tag or commit rather than a branch name or branch head, and a commit is preferred where the compatibility doc records the tag as known-insufficient. A quoted previous value is verified against the merge base rather than taken from the description, and a fix derives from the value effective at runtime rather than from the old constant.
 **Seen in:** PR #768 -- the description's "previous value" was 120 min while `origin/main` had 130, and the fix was written against the stale constant instead of the budget actually forwarded to the child.
 **Not a finding when:** the pin is only referenced in one place in the head tree (grep confirms no compatibility-doc or install-script mention), or the bump is confined to a test fixture.
@@ -476,6 +476,34 @@ once, which the finding has to show rather than assert.
 order itself or merely replays it; `$WORK/base.txt` for the run that must fail.
 **Report as:** `T5 <file>:<line> -- the ordering fix is covered by a test that calls <a> and
 <b> in its own order; it passes on <base sha> with the defect live`
+
+### T6 -- A test must fail when the behaviour it names breaks, not when its source text changes
+
+**Severity:** blocking (`AGENTS.md` *Test the contract, not the plumbing*: "tests that assert the
+current implementation and break on the next refactor").
+**Fires when:** an added or changed test reads source, prompt or doc text (`inspect.getsource`,
+`read_text` on a `.py` or `.md`, a regex over code) and asserts on its wording; or its only
+assertions are `isinstance`, `is not None`, `hasattr`, a constant the test set itself, or that
+nothing raised.
+**The rule:** such a test passes while the behaviour breaks and fails on an edit that preserves
+it. Drive the entry point and assert the observable result; for a decision, assert the outcome on
+inputs that take each branch.
+**Seen in:** PR #2072 -- at the reviewed commit `f0e98df6`,
+`src/kernelforge/tests/gemm_tune/test_tier3_runner.py:323-341` asserted that
+`inspect.getsource(cli._route)` held `demand_json` within 90 characters of `has_shapes_json=`.
+Three regressions injected into `cli.py` there -- the serving log parsed but its demand
+discarded, `has_untuned_csv` hard-coded `False`, the request's bench settings replaced by
+constants in `tune_context` -- left the gemm_tune suite exactly as green as the base.
+**Not a finding when:** the property cannot be observed at runtime and the test's docstring says
+it is a source-level rule -- T5's AST ordering check, an import boundary import-linter cannot
+express, a repo-wide banned shape such as
+`src/hyperloom/orchestrator/rehearsal/tests/test_no_falsy_budget_tests.py`; or the text is itself
+the contract: documented CLI output, a persisted field, a prompt key a parser reads.
+**Evidence:** over the changed tests at the head, then break the behaviour a hit names locally and
+confirm the test still passes:
+`H=$(sed -n 's/^head: //p' "$WORK/meta.txt"); git fetch -q origin "$H" && git grep -nE 'getsource|__doc__|__file__|\.(py|md)\b.*read_text' "$H" -- $(cat "$WORK/testfiles.txt")`
+**Report as:** `T6 <file>:<line> -- <test> asserts on <source text | isinstance>; breaking
+<behaviour> leaves it green`
 
 ---
 
@@ -1140,7 +1168,7 @@ that a shape defect causes is still blocking, under the C or S rule it breaks, n
 **Fires when:** blocking: (i) the diff adds, in a business package, a new business-agnostic helper of a kind the shared layer already hosts (file io beside `hyperloom_common/io.py`, JSON io beside `hyperloom_common/jsonio.py`, process-group handling beside `hyperloom_common/proctree.py`, timestamps beside `hyperloom_common/timeutil.py`); (ii) the diff introduces a business concept -- a framework, model, backend or phase name, constant or import -- into a business-agnostic module: one under `hyperloom_common/` or `hyperloom/common/` whose existing functions name no business concept (`io.py`, `jsonio.py`, `proctree.py`, `timeutil.py`, `fs_utils.py`, `coerce.py`), or one whose name says utility. A shared-layer module already named for one business concept (`framework_arm.py`, `llm_config.py`, `model_paths.py`, `workload_defaults.py`) is not one, and adding to its own concept does not fire. Advisory: the diff adds a business rule -- a business constant or threshold, an import of a business module, a function whose job is a business decision (benchmark timeouts, server readiness, recipe or KEEP handling) -- to a module whose name says utility (`*_utils.py`, `io.py`, `jsonio.py`, `timeutil.py`, `proctree.py`, `_subprocess_kill.py`) and whose other functions are generic, so the module now holds two jobs; or adds, in a business package, a second caller-facing copy of a stdlib-only generic helper (atomic write, JSON io, stat, hashing, process group, retry, timestamp, truncation) that has no owner yet.
 **The rule:** code that would read the same in any project is a utility, and a utility has one home: `hyperloom_common` when `hyperloom` and `kernelforge` both need it, `hyperloom.common` when only the optimizer does. A generic helper that gets its second caller moves there, not beside the first caller, because a utility parked in an upper-layer business package forces every lower-layer reuser into an upward import (A2). The converse holds too: once a module named for a mechanism also knows benchmark timeouts and server-log markers, it is a business module with a misleading name, and lower layers that need the business half end up importing a "utility" module from the orchestrator. Lift the generic half into `common`, and give the business half a module named for its job, at the lowest layer that needs it.
 **Seen in:** PR #1611 -- "move the unified-diff parser out of the framework agent ... The canonical location is now common/ since the module has no framework-agent imports" (`hyperloom_common/unified_diff.py`). PR #1655 -- "common/github_urls.py: new module with public repo_slug() extracted from sources/_shared._repo_slug. The function was a pure GitHub-URL parser with no dependency on the PR-source backend layer". `orchestrator/actions/executors/_subprocess_kill.py` -- named for process killing, it holds `_subprocess_kill.py::kill_my_spawned_server` next to `::resolve_benchmark_timeouts`, `::server_log_death_excerpt` and `::stamp_server_ready`, and imports `_subprocess_kill.py::parse_server_log_throughput` from `.bypass_analysis`. `inference_optimizer/cli/preflight.py::_emit_preflight_diagnostics` and `inference_optimizer/cli/__init__.py::_run_optimize` import the business function `resolve_benchmark_timeouts` upward out of it. PR #1348 (`orchestrator/kernel/gemm_shape_coverage.py::_safe_mtime`) and PR #1408 (`orchestrator/kernel/controller_submit.py::_read_json`) added copies beside `hyperloom_common/io.py::safe_mtime` and `hyperloom_common/jsonio.py::read_json` -- the D10 half, cited to show the drift this rule prevents.
-**Not a finding when:** the helper must run standalone on a remote node or be injected as source text (`multi_node/scripts/`, `assets/host_probe/`, patcher payloads); the local version has a different contract and its name says so (`orchestrator/actions/executors/_magpie_patcher.py::atomic_write_text` adds a log prefix and returns bool); the helper's semantics depend on business constants; it is a private three-line helper with a single caller and no `common` equivalent; the module is named for one business mechanism and every function serves it (`enablement/runtime/build_utils.py`); the business word appears only in a message or docstring.
+**Not a finding when:** the helper must run standalone on a remote node or be injected as source text (`multi_node/scripts/`, `assets/host_probe/`, patcher payloads); the local version has a different contract and its name says so (the deleted Magpie script patcher's `atomic_write_text` added a log prefix and returned bool); the helper's semantics depend on business constants; it is a private three-line helper with a single caller and no `common` equivalent; the module is named for one business mechanism and every function serves it (`enablement/runtime/build_utils.py`); the business word appears only in a message or docstring.
 **Evidence:** `$WORK/diff.txt` for the added function or import; `git grep` over `src/hyperloom_common` and `src/hyperloom/common` for an existing export of the same shape; the module's other importers for which layer needs it.
 **Report as:** `A3 <file>:<line> -- <generic helper|business code> in <utility|business> module <module>; move <name> to <common module|module named for its job>`
 

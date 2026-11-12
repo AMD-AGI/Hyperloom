@@ -79,6 +79,7 @@ from hyperloom_multibranch.toolbox.hosted_toolbox import (
     parallel_tests_for,
 )
 from hyperloom_multibranch.toolbox.queue import QueuePolicy
+from hyperloom_multibranch.toolbox.resume_guard import MeasuredOn
 from hyperloom_multibranch.toolbox.tests.helpers import IMAGE, FakeRepo, req, lineage_blackboard
 from hyperloom_multibranch.toolbox.tests.test_hosted_executor import PointPlanner
 from hyperloom_multibranch.toolbox.toolbox import AcceptanceSetup
@@ -333,7 +334,15 @@ _REQUIRED_FIELDS = (
     "sandbox_templates",
     "source_sha",
 )
-_OPTIONAL_FIELDS = ("tp", "dev_key", "grant_limits", "runner_cache_manifest_sha256", "sandbox_workspace", "session_id")
+_OPTIONAL_FIELDS = (
+    "tp",
+    "dev_key",
+    "grant_limits",
+    "runner_cache_manifest_sha256",
+    "sandbox_workspace",
+    "session_id",
+    "tests_end_by",
+)
 
 
 def test_a_plain_dict_with_exactly_the_field_names_builds_the_inputs(tmp_path: Path) -> None:
@@ -351,6 +360,7 @@ def test_a_plain_dict_with_exactly_the_field_names_builds_the_inputs(tmp_path: P
         "runner_cache_manifest_sha256": _MANIFEST,
         "sandbox_workspace": "workspace-a",
         "session_id": "MB-session",
+        "tests_end_by": 1_800_000_000.0,
     }
     assert set(plain) == {*_REQUIRED_FIELDS, *_OPTIONAL_FIELDS}
     inputs = HostedToolboxInputs(**plain)
@@ -377,6 +387,15 @@ def test_a_plain_dict_without_the_newer_keys_still_builds_the_inputs(tmp_path: P
         assert getattr(inputs, name) == {"tp": 1}.get(name), f"{name} falls back to its default"
     pinned = {} if "runner_cache_manifest_sha256" in left_out else {MANIFEST_PIN_ENV: _MANIFEST}
     assert inputs.create_envs() == {SOURCE_SHA_ENV: _SOURCE_SHA, **pinned}
+
+
+@pytest.mark.parametrize("tests_end_by", [None, 1_800_000_000.0])
+def test_the_toolbox_s_retries_wait_no_later_than_the_time_its_tests_must_end_by(
+    tmp_path: Path, tests_end_by: float | None
+) -> None:
+    toolbox = _toolbox(None, tmp_path, tests_end_by=tests_end_by)
+
+    assert toolbox._tests_end_by == tests_end_by
 
 
 def test_a_refused_manifest_digest_is_never_in_the_message(tmp_path: Path) -> None:
@@ -426,6 +445,19 @@ async def test_the_toolbox_is_built_from_the_inputs(tmp_path: Path) -> None:
     )
     assert toolbox.analysis_tools == (TRACELENS_TOOL,), "kernel_tune and roofline are the local toolbox's"
     assert not toolbox.single_node
+
+
+def test_the_toolbox_records_its_baseline_on_the_runner_templates_cards_and_the_sessions_image(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """What a hosted restart compares (:func:`~hyperloom_multibranch.toolbox.resume_guard.check_hosted_baseline_reusable`):
+    the cards of the runner template the tests run on, not of the application's node; and the run every sandbox of the
+    toolbox carries."""
+    monkeypatch.setenv("NODE_NAME", "app-node")
+    toolbox = _toolbox(None, tmp_path, tp=2)
+
+    assert toolbox.measured_on == MeasuredOn(tmp_path / "session", "app-node", spec_context(tmp_path).image_digest, 2)
+    assert toolbox.run_id == "run-1"
 
 
 def test_every_runner_sandbox_is_named_the_sessions_snapshot_of_the_framework_tables(tmp_path: Path) -> None:

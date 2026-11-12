@@ -19,7 +19,7 @@ from typing import Any, NamedTuple
 
 from hyperloom.common.outside_facts import CONTEXT_LENGTH_FLAGS, ENV_MAX_MODEL_LEN
 from hyperloom.contracts.recipe import RecipeError
-from hyperloom.inference_optimizer.grid_server_args import tokenize_server_args_preserving_json
+from inference_suite.argv import tokenize_server_args_preserving_json
 
 #: The point variable InferenceX derives the evaluation's ``max_length`` from.
 EVAL_CONTEXT_ENV = ENV_MAX_MODEL_LEN

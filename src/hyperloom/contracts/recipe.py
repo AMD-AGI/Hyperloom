@@ -11,8 +11,10 @@ Recipe KB columns, so a final recipe is written back without translation:
 * ``components``: per component, an ordered patch stack against a fixed upstream commit (the ``patch`` column);
 * ``kernels``: the kernel artifacts it loads (the ``kernel`` column).
 
-``base_image_digest`` names the image everything starts from. ``runtime_snapshot``, when set, names the image the
-enablement flow built on it, with its setup commands and component builds done, so a recipe never replays them.
+``base_image_digest`` names the image everything starts from; ``base``, when set, names the frozen base launch
+(``base_launch.json``) that ``launch`` is a change of, so the same change over two bases makes two recipes.
+``runtime_snapshot``, when set, names the image the enablement flow built on it, with its setup commands and component
+builds done, so a recipe never replays them.
 ``unexpressed`` names what the measured environment had that the recipe cannot say (a kept patch outside a component
 checkout, setup commands, ...); a recipe that names anything there does not rebuild what was measured.
 
@@ -34,10 +36,11 @@ from pathlib import PurePosixPath
 from hyperloom.inference_optimizer.grid_server_args import (
     compose_server_args,
     dedupe_extra_server_args,
-    removal_option_names,
-    tokenize_server_args_preserving_json,
     validate_server_args_shell_safe,
 )
+from hyperloom_common.contract_fields import ContractFields
+from inference_suite.argv import removal_option_names, tokenize_server_args_preserving_json
+from inference_suite.contracts import SourceKind
 
 RECIPE_SCHEMA_VERSION = 1
 PATCH_ROOT = "patch"
@@ -45,6 +48,7 @@ KERNEL_ROOT = "kernel"
 DIGEST_PREFIX = "sha256:"
 
 _SHA256 = re.compile(r"[0-9a-f]{64}")
+_BASE_DIGEST = re.compile(rf"{DIGEST_PREFIX}[0-9a-f]{{64}}")
 _COMMIT = re.compile(r"[0-9a-f]{40}(?:[0-9a-f]{24})?")
 _IMAGE = re.compile(r"(?:[a-z0-9][a-z0-9._/:-]*@)?sha256:[0-9a-f]{64}")
 _COMPONENT = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]{0,63}")
@@ -96,17 +100,15 @@ class KernelKind(str, Enum):
 
 # --- validation --------------------------------------------------------------------------------------------------
 
-
-def _matching(pattern: re.Pattern[str], value: object, what: str) -> str:
-    if not isinstance(value, str) or not pattern.fullmatch(value):
-        raise RecipeError(f"{what} must match {pattern.pattern}, got {value!r}")
-    return value
-
-
-def _text(value: object, what: str) -> str:
-    if not isinstance(value, str) or not value.strip() or value != value.strip():
-        raise RecipeError(f"{what} must be a non-empty string without surrounding whitespace, got {value!r}")
-    return value
+_FIELDS = ContractFields(RecipeError)
+_matching = _FIELDS.matching
+_text = _FIELDS.text
+_string_map = _FIELDS.string_map
+_strings = _FIELDS.strings
+_items = _FIELDS.items
+_mapping = _FIELDS.mapping
+_known = _FIELDS.known
+_unique = _FIELDS.unique
 
 
 def _path(value: object, root: str) -> str:
@@ -136,18 +138,6 @@ def _env_names(names: Iterable[object]) -> None:
             raise RecipeError(f"{name} carries framework arguments; put them in the server arguments")
 
 
-def _string_map(value: object, what: str) -> Mapping[str, str]:
-    if not isinstance(value, Mapping) or not all(isinstance(k, str) and isinstance(v, str) for k, v in value.items()):
-        raise RecipeError(f"{what} must map strings to strings, got {value!r}")
-    return value
-
-
-def _strings(value: object, what: str) -> tuple[str, ...]:
-    if isinstance(value, str) or not isinstance(value, Sequence) or not all(isinstance(item, str) for item in value):
-        raise RecipeError(f"{what} must be a list of strings, got {value!r}")
-    return tuple(value)
-
-
 def _option_names(names: Sequence[str], what: str) -> tuple[str, ...]:
     """``names`` as bare long options, sorted and each once, so one launch has one digest."""
 
@@ -157,36 +147,6 @@ def _option_names(names: Sequence[str], what: str) -> tuple[str, ...]:
     if list(names) != sorted(set(names)):
         raise RecipeError(f"{what} must be sorted and unique, got {list(names)!r}")
     return tuple(names)
-
-
-def _items(value: object, what: str) -> tuple[object, ...]:
-    if isinstance(value, (str, bytes)) or not isinstance(value, Sequence):
-        raise RecipeError(f"{what} must be a list, got {value!r}")
-    return tuple(value)
-
-
-def _mapping(value: object, what: str) -> Mapping[str, object]:
-    if not isinstance(value, Mapping):
-        raise RecipeError(f"{what} must be an object, got {value!r}")
-    return value
-
-
-def _known(value: object, keys: tuple[str, ...], what: str) -> Mapping[str, object]:
-    """``value`` as a mapping of ``keys`` only: a key a writer misspelt would otherwise drop its change unseen."""
-
-    fields = _mapping(value, what)
-    unknown = sorted(str(key) for key in fields if key not in keys)
-    if unknown:
-        plural = "s" if len(unknown) > 1 else ""
-        named = ", ".join(repr(key) for key in unknown)
-        raise RecipeError(f"unknown key{plural} {named} in {what}; known: {', '.join(keys)}")
-    return fields
-
-
-def _unique(values: Sequence[object], what: str) -> None:
-    duplicates = sorted({str(value) for value in values if values.count(value) > 1})
-    if duplicates:
-        raise RecipeError(f"duplicate {what}: {', '.join(duplicates)}")
 
 
 def _unexpressed(entries: tuple[str, ...]) -> None:
@@ -225,8 +185,8 @@ def _digest(document: Mapping[str, object]) -> str:
 @dataclass(frozen=True)
 class LaunchConfig:
     """Server arguments in the shell form the launcher takes, the extra environment variables, and ``remove_args``:
-    the long options, by name, removed from the launch the framework resolves before these arguments are added (a
-    Magpie AgentX recipe's, from InferenceX), so a change that turns off an option of that launch stays off. Its
+    the long options, by name, removed from the launch the framework resolves before these arguments are added (an
+    AgentX recipe's, from InferenceX), so a change that turns off an option of that launch stays off. Its
     document carries ``remove_args`` only when there are any, so a launch without them keeps its digest."""
 
     server_args: str = ""
@@ -371,8 +331,29 @@ class KernelArtifact:
 
 
 @dataclass(frozen=True)
+class RecipeBase:
+    """The frozen base launch a recipe's launch is a change of: its ``base_launch.json`` digest and source kind."""
+
+    digest: str
+    source: SourceKind
+
+    def __post_init__(self) -> None:
+        _matching(_BASE_DIGEST, self.digest, "the base launch digest")
+        object.__setattr__(self, "source", _FIELDS.enum(SourceKind, self.source, "the base launch source"))
+
+    def to_document(self) -> dict[str, object]:
+        return {"digest": self.digest, "source": self.source.value}
+
+    @classmethod
+    def from_document(cls, document: object) -> RecipeBase:
+        fields = _known(document, ("digest", "source"), "a recipe base")
+        return cls(digest=fields.get("digest"), source=fields.get("source"))
+
+
+@dataclass(frozen=True)
 class Recipe:
-    """Everything one serving environment is rebuilt from; :meth:`digest` is its identity."""
+    """Everything one serving environment is rebuilt from; :meth:`digest` is its identity. A recipe without a
+    ``base`` predates the frozen base launch; its document carries ``base`` only when set, so it keeps its digest."""
 
     base_image_digest: str
     launch: LaunchConfig = field(default_factory=LaunchConfig)
@@ -381,6 +362,7 @@ class Recipe:
     runtime_snapshot: str | None = None
     schema_version: int = RECIPE_SCHEMA_VERSION
     unexpressed: tuple[str, ...] = ()
+    base: RecipeBase | None = None
 
     def __post_init__(self) -> None:
         _matching(_IMAGE, self.base_image_digest, "the base image digest")
@@ -413,6 +395,8 @@ class Recipe:
         }
         if self.unexpressed:
             document["unexpressed"] = list(self.unexpressed)
+        if self.base is not None:
+            document["base"] = self.base.to_document()
         return document
 
     @classmethod
@@ -426,6 +410,7 @@ class Recipe:
             components=tuple(map(ComponentPatches.from_document, _items(fields.get(_COMPONENTS, ()), _COMPONENTS))),
             kernels=tuple(map(KernelArtifact.from_document, _items(fields.get("kernels", ()), "kernels"))),
             unexpressed=_strings(fields.get("unexpressed", ()), "unexpressed"),
+            base=None if fields.get("base") is None else RecipeBase.from_document(fields["base"]),
         )
 
     def digest(self) -> str:
@@ -602,7 +587,7 @@ def _apply_config(launch: LaunchConfig, delta: ConfigDelta) -> LaunchConfig:
     """``launch`` changed by ``delta``. A removal of an option the launch's own arguments lack is one of the resolved
     launch's, kept in ``remove_args``, unless the delta gives ``launch_remove_args`` whole; an option the new arguments
     set again leaves it. Such a removal is kept by name: one scoped to a value (``--x=v``) removes ``--x`` whatever
-    the resolved launch sets it to, as Magpie removes by name only."""
+    the resolved launch sets it to, as the launch removes by name only."""
 
     args = dedupe_extra_server_args(
         compose_server_args(
@@ -766,6 +751,7 @@ class RecipeDiff:
     kernels_only_in_first: frozenset[str]
     kernels_only_in_second: frozenset[str]
     base_image_changed: bool
+    base_launch_changed: bool = False
     unexpressed_only_in_first: frozenset[str] = frozenset()
     unexpressed_only_in_second: frozenset[str] = frozenset()
 
@@ -791,6 +777,7 @@ class RecipeDiff:
             or self.kernels_only_in_first
             or self.kernels_only_in_second
             or self.base_image_changed
+            or self.base_launch_changed
             or self.unexpressed_only_in_first
             or self.unexpressed_only_in_second
         )
@@ -813,6 +800,7 @@ def diff(first: Recipe, second: Recipe) -> RecipeDiff:
         kernels_only_in_second=frozenset(second_kernels - first_kernels),
         base_image_changed=(first.base_image_digest, first.runtime_snapshot)
         != (second.base_image_digest, second.runtime_snapshot),
+        base_launch_changed=first.base != second.base,
         unexpressed_only_in_first=frozenset(first.unexpressed) - frozenset(second.unexpressed),
         unexpressed_only_in_second=frozenset(second.unexpressed) - frozenset(first.unexpressed),
     )

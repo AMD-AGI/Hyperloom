@@ -1,26 +1,27 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""Attempt setup, server-argv preflight and the measured round's result of ``BenchmarkRunExecutor``."""
+"""Attempt setup and the measured round's result of ``BenchmarkRunExecutor``."""
 
 from __future__ import annotations
 
 import asyncio
 import logging
 import os
-import subprocess
 import time
+from collections.abc import Sequence
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 from hyperloom_common.env import is_truthy
-from hyperloom_common.jsonio import read_json
 from hyperloom.common.model_paths import resolve_session_model_path
 from hyperloom.common.perf_metric import agentx_active
+from hyperloom.common.env_safety import redact_secret_values
 from hyperloom.inference_optimizer.breakdown.recorder.baseline_event import BaselineInvocation
+from hyperloom.inference_optimizer.trace.task_progress import heartbeat_while_output_flows
+from inference_suite.contracts import FailedStep, LifecycleMode
 from .._grid_runner import sanitize_result_dir, sanitize_script_name
 from .._launch_evidence import RequestedLaunch, build_launch_evidence, persist_measurement_evidence
-from .._subprocess_kill import DETOKENIZER_STALL_RETURNCODE, clear_server_ready_stamp
 from .._workload_envs import (
     BenchmarkTarget,
     FrameworkScriptMismatchError,
@@ -30,12 +31,12 @@ from .._workload_envs import (
 )
 from ..benchmark_result import (
     extract_benchmark_measurement,
-    harvest_leaked_artifacts,
-    select_run_workspace,
-    snapshot_workspaces,
 )
-from ..magpie_agentx import ServerArgvInvalidError
-from .bringup import _boot_failure, open_bringup_attempt, read_bringup_log, server_child_elapsed_sec
+from .._failed_step import failed_step_error_class
+from .._round_folder import RoundFolder, round_report_path
+from .._suite.rounds import SuiteRound, SuiteRoundRefused, SuiteRoute, deadline_unix, round_lifecycle, run_suite_round
+from ..agentx_point import ServerArgvInvalidError
+from .bringup import open_bringup_attempt, read_bringup_log, server_child_elapsed_sec
 from .records import (
     _BENCHMARK_MODE_ATTR,
     BenchmarkAttempt,
@@ -43,21 +44,12 @@ from .records import (
     _BenchProcess,
     _round_post_ready_sec,
     _should_establish_quality_ref,
-    _stopped_round_result,
 )
-from .rounds import _BENCHMARK_REPORT_NAME
 
 if TYPE_CHECKING:
-    from ....bringup.argv_preflight import ArgvVerdict
     from ....loop.sub_agent_runner import RunnerContext
 
 log = logging.getLogger(__name__)
-
-#: What a round reaped by the detokenizer-stall watchdog reports: the server came up, then went silent.
-_DETOKENIZER_STALL_ERROR = (
-    "server reported ready but emitted no log output (hung engine / detokenizer stall); "
-    "reaped by the detokenizer-stall watchdog. See server.log."
-)
 
 
 async def _prepare_aiter_serving_so(extra_envs: dict[str, Any]) -> None:
@@ -125,14 +117,9 @@ def _attach_baseline_launch_evidence(
     workspace = Path(str(result.get("workspace") or "")) if result.get("workspace") else None
     actual_log = _measurement_server_log_path(output_dir / "server.log", workspace, slot=output_dir)
     result["server_log_path"] = actual_log or ""
-    if result.get("benchmark_backend") == "magpie_agentx":
-        from hyperloom.inference_optimizer.agentx.report import native_launch_evidence
-
-        evidence = native_launch_evidence(result, config_path, actual_server_log=actual_log)
-    else:
-        evidence = build_launch_evidence(
-            RequestedLaunch(config_path, framework), actual_server_log=actual_log, slot=output_dir
-        )
+    evidence = build_launch_evidence(
+        RequestedLaunch(config_path, framework), actual_server_log=actual_log, slot=output_dir
+    )
     result["launch_evidence"] = evidence
     result["launch_evidence_path"] = persist_measurement_evidence(
         evidence, actual_server_log=actual_log, slot=output_dir
@@ -164,7 +151,7 @@ def _attempt_target(params: dict[str, Any], resolved_model: str, override_script
     """The model, GPU type and benchmark script the attempt's config targets."""
     return BenchmarkTarget(
         model_path=resolved_model,
-        # gpu_type: task.params > $GPU_TYPE (cli.py canonicalizes mi325x->mi300x).
+        # gpu_type: task.params > $GPU_TYPE.
         gpu_type=str(params.get("gpu_type") or "").strip().lower() or os.environ.get("GPU_TYPE", "").strip().lower(),
         benchmark_script=override_script,
     )
@@ -185,8 +172,34 @@ def _attempt_options(ctx: RunnerContext, shared_state: Any, drop_moe_runner_back
     )
 
 
+def _suite_round_failure(
+    round_: _BenchmarkRound, finished: _BenchProcess, measurement: dict[str, Any], warnings: list[str]
+) -> dict[str, Any]:
+    """The failed result of an inference_suite round: the step it stopped at, or a load that measured nothing."""
+    step = measurement.get("failed_step")
+    if step is not None:
+        error_class, error = failed_step_error_class(FailedStep(step)), measurement.get("failure_detail") or step
+    else:
+        error_class, error = "invalid_measurement", "the round report holds no positive throughput and served requests"
+    report_path = round_report_path(finished.workspace)
+    return {
+        "status": "failed",
+        "error_class": error_class,
+        "error": redact_secret_values(error),
+        "returncode": finished.returncode,
+        "run_status": measurement.get("run_status"),
+        "output_dir": str(round_.output_dir),
+        "workspace": str(finished.workspace),
+        "report_path": str(report_path),
+        "subprocess_runtime_sec": round(finished.runtime_sec, 2),
+        "boot_observation_path": finished.boot_observation_ref,
+        "nonfatal_warnings": warnings,
+        **round_.capture_meta,
+    }
+
+
 class _BenchmarkLaunchMixin:
-    """Attempt setup, server-argv preflight and the measured round's result of a benchmark run."""
+    """Attempt setup and the measured round's result of a benchmark run."""
 
     async def _run_once(
         self,
@@ -231,7 +244,7 @@ class _BenchmarkLaunchMixin:
             )
         except (FrameworkScriptMismatchError, ServerArgvInvalidError) as exc:
             return _attempt_failure(getattr(exc, "error_class", "framework_script_mismatch"), exc, output_dir)
-        from ..magpie_agentx import activate_runtime
+        from ..agentx_point import activate_runtime
 
         activate_runtime(config_path, params.get("runtime_override") or {})
         # Report the invocation now, with the config final and the server not
@@ -281,99 +294,6 @@ class _BenchmarkLaunchMixin:
             base_extra_envs["RUN_EVAL"] = "false"
         return base_extra_envs
 
-    def _preflight_server_argv(self, round_: _BenchmarkRound, attempt: int) -> dict[str, Any] | None:
-        """Ask the installed framework's parser about this round's argv.
-
-        Args:
-            round_: The round about to launch; its capture_meta is echoed onto a refusal.
-            attempt: This attempt's index within the round slot.
-
-        Returns:
-            dict | None: A terminal failure result when the argv is refused;
-            ``None`` when the round may proceed -- including every unavailable
-            verdict, which must never cost a round.
-        """
-        from ..magpie_agentx import native_config
-
-        if native_config(round_.config_path):
-            return None
-        from ....bringup import check_server_argv
-        from ....bringup.argv_preflight import OK, PARSED_AFTER_DROP, UNAVAILABLE, ArgvRepair
-        from .._server_argv import config_launch_env, config_server_argv, reseal_config_argv
-
-        sealed = config_server_argv(round_.config_path)
-        if not sealed.tokenized or not sealed.argv:
-            return None
-
-        effective_launch_env = config_launch_env(round_.config_path, round_.env)
-        probe_argv = sealed.argv
-        if round_.framework.strip().lower() == "vllm" and effective_launch_env.get("PROFILE") == "1":
-            probe_argv = (
-                "--profiler-config.profiler",
-                "torch",
-                "--profiler-config.torch_profiler_dir",
-                str(round_.output_dir / "torch_trace"),
-                *probe_argv,
-            )
-
-        # ``_resolve_shared_state`` is typed loosely and callers inject partial
-        # doubles, so the round's repair ledger may not be present at all.
-        enablement = getattr(self._resolve_shared_state(), "enablement", None)
-        spent: list[str] = enablement.argv_repairs if enablement is not None else []
-        verdict = check_server_argv(
-            framework=round_.framework,
-            argv=probe_argv,
-            text=sealed.text,
-            launch_env=effective_launch_env,
-            repair=ArgvRepair(
-                digest=sealed.digest,
-                spent=spent,
-            ),
-        )
-
-        if verdict.status == UNAVAILABLE:
-            log.info(
-                "argv preflight unavailable (%s): %s; the launch remains the only verdict",
-                verdict.reason,
-                verdict.detail,
-            )
-            return None
-        if verdict.status == OK:
-            if verdict.reason == PARSED_AFTER_DROP:
-                reseal_config_argv(round_.config_path, verdict.text)
-                if verdict.repaired_digest:
-                    spent.append(verdict.repaired_digest)
-                round_.capture_meta["server_argv_dropped"] = list(verdict.dropped)
-            return None
-        return self._argv_refusal(round_, attempt, verdict)
-
-    def _argv_refusal(self, round_: _BenchmarkRound, attempt: int, verdict: ArgvVerdict) -> dict[str, Any]:
-        """Record the boot observation of a refused server argv and return the round's terminal failure."""
-        from ....bringup import ARGV_INVALID, argv_invalid_observation, write_boot_observation
-
-        observation = argv_invalid_observation(verdict, session_dir=self.session_dir)
-        round_.capture_meta["boot_observation_path"] = write_boot_observation(
-            observation,
-            session_dir=self.session_dir,
-            output_dir=round_.output_dir,
-            attempt=attempt,
-        )
-        excerpt = observation.excerpt
-        log.error(
-            "argv preflight: %s refused the server argv (%s); not launching",
-            round_.framework or "the framework",
-            verdict.reason,
-        )
-        return {
-            "status": "failed",
-            "error_class": ARGV_INVALID,
-            "error": f"{round_.framework or 'framework'} rejected the server argv ({verdict.reason}): {verdict.detail}",
-            "output_dir": str(round_.output_dir),
-            "enablement_launch_log": excerpt.text if excerpt is not None else "",
-            "server_argv": list(verdict.argv),
-            **round_.capture_meta,
-        }
-
     async def _restart_multi_node_server(
         self,
         round_: _BenchmarkRound,
@@ -386,20 +306,20 @@ class _BenchmarkLaunchMixin:
         if round_.ctx_extra.get("mn_round_restarted"):
             return None
         try:
-            # Merge the reference base UNDER the per-task args (last-wins) so a multi-node per-round restart
-            # carries the same reference flags the single-node materialized YAML does.
+            # Merge the session base UNDER the per-task args (last-wins) so a multi-node per-round restart
+            # carries the same base flags the single-node materialized YAML does.
             from hyperloom.inference_optimizer.grid_server_args import merge_server_args
-            from .._workload_envs import resolve_reference_launch
+            from hyperloom.orchestrator.state.base_launch import session_server_base
 
-            ref_args, ref_envs, _ = resolve_reference_launch()
+            server_base = session_server_base()
             # Fold in the operator ``--server-args`` (``INFERENCE_OPTIMIZER_SERVER_ARGS``).
             operator_args = os.environ.get("INFERENCE_OPTIMIZER_SERVER_ARGS", "").strip()
-            base = ref_args
+            base = server_base.args
             if operator_args:
                 base = merge_server_args(base, operator_args) if base else operator_args
             # Base on ``server_args`` (carries the one-shot cuda-graph eager-fallback flag when armed) so the MN
             # per-round restart keeps that fallback too.
-            env = {str(key): str(value) for key, value in ref_envs.items()}
+            env = dict(server_base.env)
             # PD knobs auto-resolved by the helper from $PD_* env, falling back to state.json.
             await restart_server_for_round(
                 RoundServer.from_env(
@@ -416,88 +336,83 @@ class _BenchmarkLaunchMixin:
             }
         return None
 
-    async def _measured_round_result(self, round_: _BenchmarkRound, round_warnings: list[str]) -> dict[str, Any]:
-        from .._multi_node_env import is_multi_node
+    async def _suite_round_result(
+        self, round_: _BenchmarkRound, route: SuiteRoute, *, warmup: bool, warnings: Sequence[str] = ()
+    ) -> dict[str, Any]:
+        """Run ``round_`` on inference_suite and read the run_dir it wrote into the round's result.
 
-        workspaces_before = snapshot_workspaces(round_.output_dir)
-        started_unix = time.time()
-        # Anchor the Magpie parent process cwd to the per-task output_dir.
-        round_.output_dir.mkdir(parents=True, exist_ok=True)
-        # A reused output_dir may still hold a previous attempt's server.log, whose terminal init markers would be
-        # read as this attempt's, and the ready stamp beside it would make this attempt's boot look like it never
-        # happened.
-        server_log = round_.output_dir / "server.log"
+        ``warnings`` are what the passes before this round left for its result to carry.
+        """
+        # A lone round owns its server; a cold-start warmup boots the one the rounds after it reuse.
+        mode = (
+            LifecycleMode.REUSE if round_.server_already_ready else LifecycleMode.BOOT if warmup else LifecycleMode.OWN
+        )
+        request = SuiteRound(
+            config_path=round_.config_path,
+            round_dir=round_.output_dir,
+            lifecycle=round_lifecycle(round_.output_dir, mode),
+            warmup=warmup,
+            deadline_unix=deadline_unix(round_.session_deadline_sec),
+            serving_lease=round_.serving_lease,
+        )
         attempt_index = open_bringup_attempt(round_.output_dir)
-        clear_server_ready_stamp(str(server_log))
-        refusal = self._preflight_server_argv(round_, attempt_index)
-        if refusal is not None:
-            return refusal
-        ready = bool(round_.server_already_ready or round_.ctx_extra.get("server_already_ready") or is_multi_node())
-        if self.benchmark_watchdog and not ready:
-            from .._aiter_jit import sweep_stale_aiter_locks_if_dead
-
-            if deleted := (await asyncio.to_thread(sweep_stale_aiter_locks_if_dead)).get("deleted"):
-                log.warning("baseline_executor: reaped %d orphaned aiter JIT lock(s) before server launch", deleted)
+        started_unix = time.time()
         try:
-            finished = await self._launch_benchmark(round_, started_unix, server_ready=ready)
-        except subprocess.TimeoutExpired as exc:
-            # A reaped timeout carries no wrapper streams; the server log is the whole of the evidence.
-            await asyncio.to_thread(self._record_bringup, round_, attempt_index, workspaces_before)
-            reaped = {"error_class": "timeout", "error": f"baseline benchmark exceeded {round_.timeout_sec}s: {exc}"}
-            return self._reaped_round_failure(
-                round_.output_dir, workspaces_before, started_unix, {**reaped, **round_.capture_meta}
+            async with heartbeat_while_output_flows(unit="baseline_round", label="benchmark") as activity:
+                ran = await asyncio.to_thread(run_suite_round, route, request, on_poll=activity.note)
+        except SuiteRoundRefused as exc:
+            log.error("baseline_executor: round refused before it ran: %s", exc)
+            return _attempt_failure(exc.error_class, exc, round_.output_dir) | round_.capture_meta
+        layout = ran.layout
+        if ran.report.failed_step is FailedStep.FLAG_UNKNOWN:
+            self._record_argv_refusal(round_, attempt_index, ran.report.failure_detail or "")
+        else:
+            await asyncio.to_thread(
+                self._observe_bringup, round_, attempt_index, layout.server_log, ran.report.failure_detail or ""
             )
-        server_log_text = await asyncio.to_thread(
-            self._record_bringup, round_, attempt_index, workspaces_before, finished.stderr, finished.stdout
+        RoundFolder.read(layout.root).write_gpu_metrics(round_.output_dir)
+        measurement = extract_benchmark_measurement(None, workspace=layout.root, subprocess_started_unix=started_unix)
+        finished = _BenchProcess(
+            returncode=0 if ran.report.failed_step is None else 1,
+            stdout="",
+            stderr="",
+            runtime_sec=max(0.0, time.time() - started_unix),
+            started_unix=started_unix,
+            boot_observation_ref=round_.capture_meta["boot_observation_path"],
+            workspace=layout.root,
         )
-        boot_ref = round_.capture_meta["boot_observation_path"]
-        finished = finished._replace(server_log_text=server_log_text, boot_observation_ref=boot_ref)
-        stopped = _stopped_round_result(
-            finished.returncode,
-            round_label="measured round",
-            runtime_sec=finished.runtime_sec,
-            output_dir=round_.output_dir,
-            capture_meta=round_.capture_meta,
-        )
-        if stopped is not None:
-            return stopped
-        # Detokenizer-stall watchdog reap: the server came up healthy but went silent for the stall grace window
-        # (hung engine / wedged detokenizer).
-        if finished.returncode == DETOKENIZER_STALL_RETURNCODE:
-            log.warning(
-                "baseline_executor: detokenizer-stall watchdog reaped run "
-                "(server ready but log went silent); error_class=detokenizer_stall."
-            )
-            reaped = {
-                "error_class": "detokenizer_stall",
-                "returncode": finished.returncode,
-                "error": _DETOKENIZER_STALL_ERROR,
-                "subprocess_runtime_sec": round(finished.runtime_sec, 2),
-            }
-            return self._reaped_round_failure(
-                round_.output_dir, workspaces_before, started_unix, {**reaped, **round_.capture_meta}
-            )
-        # Read the server log back before the harvest below: harvesting can copy a leaked ``server.log`` into
-        # ``output_dir`` and change what this classification sees.
-        boot = _boot_failure(finished, server_log)
-        workspace = select_run_workspace(round_.output_dir, known_before=workspaces_before)
-        return await self._round_result_from_workspace(
-            round_, finished._replace(workspace=workspace), boot, round_warnings
-        )
+        # The run_dir is where this round's server log, ready stamp and eval results are.
+        ran_round = round_._replace(result_dir=layout.root, watchdog_server_log=str(layout.server_log))
+        warnings = [*warnings, *(measurement.pop("nonfatal_warnings", []) or [])]
+        if ran.report.failed_step is not None or not self._measurement_succeeded(measurement):
+            return _suite_round_failure(ran_round, finished, measurement, warnings)
+        result = await self._succeeded_round_result(ran_round, finished, measurement, warnings)
+        self._stamp_round_quality(ran_round, result, measurement, warnings)
+        return result
 
-    def _record_bringup(
+    def _record_argv_refusal(self, round_: _BenchmarkRound, attempt_index: int, detail: str) -> None:
+        """Record the parser's refusal at the parse rung, where enablement reads it as a terminal no patch repairs."""
+        from ....bringup import argv_invalid_observation, write_boot_observation
+
+        round_.capture_meta["boot_observation_path"] = write_boot_observation(
+            argv_invalid_observation(detail, session_dir=self.session_dir),
+            session_dir=self.session_dir,
+            output_dir=round_.output_dir,
+            attempt=attempt_index,
+        )
+        round_.capture_meta["boot_observation_degraded"] = ""
+
+    def _observe_bringup(
         self,
         round_: _BenchmarkRound,
         attempt_index: int,
-        workspaces_before: Any,
+        log_path: Path,
         wrapper_stderr: str = "",
         wrapper_stdout: str = "",
     ) -> str:
+        """Classify the round's bring-up from its server log, record the observation, and return the log read."""
         from ....bringup import observe_bringup, write_boot_observation
 
-        # Magpie writes the server log into the workspace it creates, not to $SERVER_LOG.
-        workspace = select_run_workspace(round_.output_dir, known_before=workspaces_before)
-        log_path = workspace / "server.log" if workspace is not None else round_.output_dir / "server.log"
         read = read_bringup_log(log_path)
         verdict = observe_bringup(
             server_log=read.text,
@@ -515,58 +430,15 @@ class _BenchmarkLaunchMixin:
         round_.capture_meta["boot_observation_degraded"] = read.degraded
         return read.text
 
-    @staticmethod
-    def _reaped_round_failure(
-        output_dir: Path,
-        workspaces_before: Any,
-        started_unix: float,
-        fields: dict[str, Any],
-    ) -> dict[str, Any]:
-        destination = select_run_workspace(output_dir, known_before=workspaces_before) or output_dir
-        harvested = harvest_leaked_artifacts(destination, subprocess_started_unix=started_unix)
-        return {
-            "status": "failed",
-            "output_dir": str(output_dir),
-            "harvested_artifacts": [str(dst) for _, dst in harvested],
-            "nonfatal_warnings": [f"harvested_leaked_artifact:{src}" for src, _ in harvested],
-            **fields,
-        }
-
-    async def _round_result_from_workspace(
+    async def _succeeded_round_result(
         self,
         round_: _BenchmarkRound,
         finished: _BenchProcess,
-        boot: tuple[str, str] | None,
-        round_warnings: list[str],
+        measurement: dict[str, Any],
+        warnings: list[str],
     ) -> dict[str, Any]:
-        workspace = finished.workspace
-        # Always-on artifact harvest: copy wrapper-side leaks into the task workspace so failure-path diagnostics
-        # survive; mtime gating rejects stale prior-run leaks.
-        harvested = harvest_leaked_artifacts(
-            workspace if workspace is not None else round_.output_dir,
-            subprocess_started_unix=finished.started_unix,
-        )
-        if harvested:
-            log.info(
-                "baseline_executor: harvested %d leaked artifact(s) into workspace: %s",
-                len(harvested),
-                ", ".join(str(src.name) for src, _ in harvested),
-            )
-        if workspace is None:
-            return self._no_workspace_failure(round_, finished, boot, harvested)
-        report_path = workspace / _BENCHMARK_REPORT_NAME
-        report = read_json(report_path, None, require_dict=True)
-        measurement = extract_benchmark_measurement(
-            report,
-            config_path=round_.config_path,
-            workspace=workspace,
-            subprocess_started_unix=finished.started_unix,
-        )
-        warnings = round_warnings + list(measurement.pop("nonfatal_warnings", []) or [])
-        warnings.extend(f"harvested_leaked_artifact:{src}" for src, _ in harvested)
-        failure = self._failed_round_result(round_, finished, boot, measurement, warnings)
-        if failure is not None:
-            return failure
+        """The result of a round that measured, with the launch evidence of the server it measured attached."""
+        report_path = round_report_path(finished.workspace)
         result = {
             "status": "succeeded",
             **measurement,
@@ -575,14 +447,14 @@ class _BenchmarkLaunchMixin:
             "output_dir": str(round_.output_dir),
             "result_dir": str(round_.result_dir),
             "report_path": str(report_path) if report_path.exists() else None,
-            "workspace": str(workspace),
+            "workspace": str(finished.workspace),
             # Materialized YAML for THIS baseline.
             "materialized_config": str(round_.materialized_config_path),
-            # Magpie subprocess wall-clock (success path only).
+            # The round's wall-clock (success path only).
             "subprocess_runtime_sec": round(finished.runtime_sec, 2),
             # That wall-clock after the boot: the benchmark, and the accuracy eval when this round ran one.
             "post_ready_runtime_sec": _round_post_ready_sec(
-                round_.watchdog_server_log,
+                None if round_.watchdog_server_log is None else Path(round_.watchdog_server_log).parent,
                 started_unix=finished.started_unix,
                 runtime_sec=finished.runtime_sec,
             ),
@@ -599,5 +471,4 @@ class _BenchmarkLaunchMixin:
             output_dir=round_.output_dir,
             framework=round_.framework,
         )
-        self._stamp_round_quality(round_, result, report, warnings)
         return result

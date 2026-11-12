@@ -77,6 +77,17 @@ jobs:
       - name: Check wheel contents
         run: python scripts/check_wheel_contents.py "${{ steps.build.outputs.wheel }}"
 
+      - name: Arbor runs from the installed wheel
+        # `--autonomous-agent arbor` names the Arbor vendored beside hyperloom_multibranch (src/hyperloom_arbor/
+        # VENDOR.md), and MB copies it into a session and runs `python -m arbor` there. A dry run reads its packs,
+        # skills and program with no GPU, server or agent; PyYAML is the one import it needs.
+        run: |
+          pip install "PyYAML>=6.0"
+          pip install --no-deps --target "$RUNNER_TEMP/site" "${{ steps.build.outputs.wheel }}"
+          cp -r "$RUNNER_TEMP/site/hyperloom_arbor" "$RUNNER_TEMP/arbor-session"
+          cd "$RUNNER_TEMP/arbor-session"
+          ARBOR_SETTINGS=/dev/null python -m arbor run --config configs/serving-template.json --dry-run
+
       - name: Advisory notice on setuptools deprecations
         # Advisory only: setuptools adds deprecations over time and this job does
         # not pin an upper bound, so hard-failing here would break on upgrades.

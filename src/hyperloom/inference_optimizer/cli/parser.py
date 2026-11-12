@@ -13,6 +13,7 @@ from typing import NoReturn
 from .constraint_args import add_constraint_arguments
 from .gpu_power_args import add_gpu_power_arguments
 from .optimize_args import (
+    add_base_launch_arguments,
     add_cluster_arguments,
     add_conc_sweep_arguments,
     add_critic_arguments,
@@ -303,7 +304,7 @@ def _add_parallelism_arguments(opt: argparse.ArgumentParser) -> None:
         "--conc",
         type=_positive_int_arg,
         default=None,
-        help="Magpie client concurrency cap (max in-flight requests). "
+        help="Benchmark client concurrency cap (max in-flight requests). "
         "Pass `--conc N` directly from the prompt. Use "
         f"--conc-sweep-concs for a concurrency ladder. Default: {DEFAULT_CONC}.",
     )
@@ -315,7 +316,7 @@ def _add_parallelism_arguments(opt: argparse.ArgumentParser) -> None:
         help="Explicit server-facing MAX_MODEL_LEN. Resolution: "
         "--max-model-len > $MAX_MODEL_LEN > auto(ISL+OSL+headroom, "
         "clamped to native context). Explicit values must fit the known native context and are "
-        "exported into the materialized Magpie YAML.",
+        "exported into the materialized point YAML.",
     )
     opt.add_argument(
         "--server-args",
@@ -323,7 +324,7 @@ def _add_parallelism_arguments(opt: argparse.ArgumentParser) -> None:
         type=str,
         default="",
         help="Framework server args to apply in every phase. Routed through "
-        "the framework-specific EXTRA_*_ARGS env in Magpie YAMLs "
+        "the framework-specific EXTRA_*_ARGS env in point YAMLs "
         "(EXTRA_VLLM_ARGS / EXTRA_SGLANG_ARGS / EXTRA_ATOM_ARGS). "
         'Example: --server-args "--kv-cache-dtype fp8_e4m3 '
         '--gpu-memory-utilization 0.85".',
@@ -558,6 +559,7 @@ def _build_parser() -> argparse.ArgumentParser:
     add_pd_role_arguments(opt)
     _add_budget_arguments(opt)
     add_workload_arguments(opt)
+    add_base_launch_arguments(opt)
     add_target_arguments(opt)
     add_constraint_arguments(opt)
     add_gpu_power_arguments(opt)

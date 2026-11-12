@@ -38,11 +38,13 @@ from functools import partial
 
 from hyperloom.contracts.measurement import Purpose, TestKind, TestResult, Validity
 from hyperloom_multibranch.contracts.gate import NotMeasured
-from hyperloom_multibranch.contracts.blackboard import INTEGRATION_BRANCH
+from hyperloom_multibranch.contracts.blackboard import INTEGRATION_BRANCH, Blackboard
 from hyperloom_multibranch.contracts.blackboard.records import BranchProgress
 from hyperloom_multibranch.contracts.repo import ExperimentRepo
 from hyperloom_multibranch.contracts.toolbox import RequestRejected, TestWithdrawn
 from hyperloom_multibranch.blackboard.changes import same_recipe
+from hyperloom_multibranch.scheduling.budget import FinalWork
+from hyperloom_multibranch.scheduling.explore import integration_row
 from hyperloom_multibranch.scheduling.integrator import defects_beyond_gain
 from hyperloom_multibranch.scheduling.requests import SessionChecks, integration_test_request, together
 from hyperloom_multibranch.scheduling.settings import Workload
@@ -130,6 +132,17 @@ async def choose_candidates(
         INTEGRATION_LABEL, INTEGRATION_BRANCH, head, integration.head_value.get(metric), head == root
     )
     return FinalCandidates(candidate, await _best_of_its_own(ranked, head, repo))
+
+
+async def session_candidates(blackboard: Blackboard, repo: ExperimentRepo, metric: str) -> FinalCandidates:
+    """:func:`choose_candidates` over every branch ``blackboard`` holds progress of, against the session's root."""
+
+    progress = await blackboard.progress()
+    integration = integration_row(progress)
+    if integration is None:
+        raise RuntimeError("the blackboard has no integration branch after PRELUDE recorded its root")
+    root = (await blackboard.baseline()).root_commit
+    return await choose_candidates(progress, integration, metric, repo, root)
 
 
 async def _best_of_its_own(
@@ -298,14 +311,16 @@ class _Reproduction:
 
 
 class FinalSelector:
-    """Validates the candidates through the toolbox, the rule gate and the regression set."""
+    """Validates the candidates through the toolbox, the rule gate and the regression set, ``parallel`` tests at
+    once."""
 
-    def __init__(self, checks: SessionChecks, workload: Workload) -> None:
+    def __init__(self, checks: SessionChecks, workload: Workload, parallel: int) -> None:
         self._tests = checks.tests
         self._gate = checks.gate
         self._regression = checks.regression
         self._workload = workload
         self._metric = workload.metric
+        self._parallel = parallel
 
     async def select(self, candidates: FinalCandidates) -> FinalChoice:
         """Validate every candidate concurrently and pick one, however long the validation runs: no clock bounds it,
@@ -316,6 +331,19 @@ class FinalSelector:
         if self._workload.final_concs == (self._workload.conc,):
             return replace(choice, reason=f"{choice.reason}; {PRIMARY_POINT_ONLY}")
         return choice
+
+    async def planned_work(self, candidates: FinalCandidates, test_seconds: float) -> FinalWork:
+        """What :meth:`select` would run to validate ``candidates``, ``parallel`` tests at once, one attempt of
+        each, given ``test_seconds``, one test at the primary conc: for each candidate its sweep, a test per conc of
+        :attr:`~hyperloom_multibranch.scheduling.settings.Workload.final_concs`, and its reproduction, and the
+        regression runs still to make (:meth:`~hyperloom_multibranch.contracts.gate.RegressionCheck.final_case_seconds`),
+        a run of another session's case as long as one test."""
+
+        sweep = len(self._workload.final_concs) * test_seconds
+        tests = [sweep, test_seconds] * len(candidates.each)
+        commits = tuple(each.commit for each in candidates.each)
+        tests.extend(await self._regression.final_case_seconds(commits, test_seconds))
+        return FinalWork(sum(tests), max(tests), test_seconds, self._parallel)
 
     async def _validated(self, candidate: FinalCandidate) -> CandidateCheck:
         try:
@@ -401,5 +429,6 @@ __all__ = [
     "FinalSelector",
     "choose_candidates",
     "pick_final",
+    "session_candidates",
     "sweep_curve",
 ]

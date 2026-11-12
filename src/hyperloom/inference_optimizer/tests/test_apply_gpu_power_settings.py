@@ -17,7 +17,10 @@ from types import SimpleNamespace
 
 import pytest
 
-from hyperloom.common import gpu_power_control, gpu_power_settings
+from hyperloom_common import amd_smi
+from hyperloom_common.amd_smi import AmdSmiError
+
+from hyperloom.common import gpu_power_control
 from hyperloom.common.gpu_power_control import (
     GPU_POWER_LEDGER_DIR,
     PowerSettingsLease,
@@ -79,7 +82,7 @@ def _install(monkeypatch, ledger, *, observed=None, vram=None, mask=_MASK, smi=N
     monkeypatch.setattr(gpu_power_apply, "read_resident_vram_mb", lambda: resident)
     monkeypatch.setattr(gpu_power_apply, "visible_gpu_indices", lambda: mask)
     monkeypatch.setattr(gpu_power_apply, "GPU_POWER_LEDGER_DIR", ledger)
-    monkeypatch.setattr(gpu_power_settings.subprocess, "run", smi)
+    monkeypatch.setattr(amd_smi.subprocess, "run", smi)
     return smi
 
 
@@ -104,8 +107,8 @@ class TestSetCommands:
         assert ["set", "-g", "4", "-l", "AUTO"] in commands
 
     def test_apply_raises_on_a_failed_set(self, monkeypatch):
-        monkeypatch.setattr(gpu_power_settings.subprocess, "run", _AmdSmi(fail_on="ppt0"))
-        with pytest.raises(GpuPowerSettingsError, match="permission denied"):
+        monkeypatch.setattr(amd_smi.subprocess, "run", _AmdSmi(fail_on="ppt0"))
+        with pytest.raises(AmdSmiError, match="permission denied"):
             apply_gpu_power_settings({4: {"power_cap_w": 1000}})
 
     def test_a_failure_names_amd_smis_reason_not_its_traceback(self, monkeypatch):
@@ -113,13 +116,13 @@ class TestSetCommands:
             err = "Traceback (most recent call last):\n  ...\nPermissionError: Command requires elevation\n"
             return subprocess.CompletedProcess(argv, 1, stdout="", stderr=err)
 
-        monkeypatch.setattr(gpu_power_settings.subprocess, "run", _traceback)
-        with pytest.raises(GpuPowerSettingsError, match=r"exited 1: PermissionError: Command requires elevation$"):
+        monkeypatch.setattr(amd_smi.subprocess, "run", _traceback)
+        with pytest.raises(AmdSmiError, match=r"exited 1: PermissionError: Command requires elevation$"):
             apply_gpu_power_settings({4: {"power_cap_w": 1000}})
 
     def test_restore_attempts_every_card_even_after_one_fails(self, monkeypatch):
         smi = _AmdSmi(fail_on="1400")
-        monkeypatch.setattr(gpu_power_settings.subprocess, "run", smi)
+        monkeypatch.setattr(amd_smi.subprocess, "run", smi)
         problems = restore_gpu_power_settings({4: {"power_cap_w": 1400}, 5: {"power_cap_w": 1300}})
         assert len(problems) == 1
         assert len(smi.calls) == 2

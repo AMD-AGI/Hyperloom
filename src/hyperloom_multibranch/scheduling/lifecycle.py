@@ -23,9 +23,9 @@ A session that ended before FINAL, killed with its machine before CLOSE included
 and taken up again by :meth:`Session.finish`, which runs FINAL and CLOSE alone on a budget that is already spent,
 carrying the stop reason that session ended with: the roster and the branches are the ones that session persisted,
 and only its report, dashboard and breakdown are written again. One that ended before PRELUDE recorded its baseline
-(:func:`prelude_landed`) has no candidate: the finish withdraws its unfinished tests and CLOSE reports why nothing was
+(:func:`recorded_baseline`) has no candidate: the finish withdraws its unfinished tests and CLOSE reports why nothing was
 chosen. One whose PRELUDE recorded its baseline can be continued instead, without PRELUDE, by :meth:`Session.resume`
-(:func:`resumable_run`).
+(:mod:`~hyperloom_multibranch.scheduling.resumption`).
 """
 
 from __future__ import annotations
@@ -36,10 +36,10 @@ import logging
 import math
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, replace
+from functools import partial
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, NamedTuple
 
-from hyperloom_common.jsonio import read_jsonl
 from hyperloom.common.outside_facts.image_check import ImageCheckReport, run_image_check
 from hyperloom.common.outside_facts.rule_pack import rule_pack_identity
 from hyperloom.measure.compile import LocalBlobStore
@@ -52,6 +52,7 @@ from hyperloom_multibranch.contracts.blackboard.records import BaselineRecord, L
 from hyperloom_multibranch.contracts.blackboard.records import SessionProfile
 from hyperloom_multibranch.contracts.blackboard.vocab import LineageKind, UsageSource
 from hyperloom_multibranch.contracts.repo import ExperimentRepo
+from hyperloom_multibranch.contracts.toolbox import WorkloadKind
 from hyperloom_multibranch.blackboard import LocalBlackboard
 from hyperloom_multibranch.blackboard.codec import encode
 from hyperloom_multibranch.blackboard.knowledge.reference_leads import (
@@ -88,16 +89,18 @@ from hyperloom_multibranch.scheduling.agent_plans import (
     keep_map,
 )
 from hyperloom_multibranch.scheduling.branches import BranchControl
-from hyperloom_multibranch.scheduling.budget import HardStop, SessionBudget, budget_seconds, explore_gpu_seconds
+from hyperloom_multibranch.scheduling.budget import ExploreCap, HardStop, SessionBudget, budget_seconds
+from hyperloom_multibranch.scheduling.budget import explore_gpu_seconds
 from hyperloom_multibranch.scheduling.clock import Clock
+from hyperloom_multibranch.scheduling.checkpoint_tally import CheckpointScope
 from hyperloom_multibranch.scheduling.close import CloseReport, Closer, ended_before_final
 from hyperloom_multibranch.scheduling.context import SchedulerContext
 from hyperloom_multibranch.scheduling.dashboard import SessionDashboard
-from hyperloom_multibranch.scheduling.decisions import Decision, DecisionKind, DecisionLog
+from hyperloom_multibranch.scheduling.decisions import Decision, DecisionKind, DecisionLog, downtime_until
 from hyperloom_multibranch.scheduling.events import IntegrationProfiler, SessionEvents
-from hyperloom_multibranch.scheduling.explore import Explorer, ExploreWindow, Steering, integration_row
+from hyperloom_multibranch.scheduling.explore import Explorer, ExploreWindow, Steering
 from hyperloom_multibranch.scheduling.exports import CloseAuthoring, ExportServices, ExportSources, SessionExports
-from hyperloom_multibranch.scheduling.final import FinalCandidates, FinalChoice, FinalSelector, choose_candidates
+from hyperloom_multibranch.scheduling.final import FinalCandidates, FinalChoice, FinalSelector, session_candidates
 from hyperloom_multibranch.scheduling.forks import ForkDesk
 from hyperloom_multibranch.scheduling.integrator import BundlingIntegrator, Integrator, LlmPatchResolver, MergeRecords
 from hyperloom_multibranch.scheduling.judge import GRACE_KEY, Judge, session_grace
@@ -117,7 +120,6 @@ from hyperloom_multibranch.scheduling.peers import PeerFactory, Peers, PeerSetup
 from hyperloom_multibranch.scheduling.policy import SCHEDULING_POLICY, policy_version
 from hyperloom_multibranch.scheduling.prelude import (
     Prelude,
-    baseline_decision,
     PreludeFailed,
     PreludeResult,
     PreludeServices,
@@ -194,14 +196,13 @@ COMPLETED_REASONS = frozenset(
         SessionStopReason.GPU_HOURS_EXHAUSTED,
         SessionStopReason.LLM_BUDGET_EXHAUSTED,
         SessionStopReason.JUDGE_STOPPED,
+        SessionStopReason.FINISHED_AFTER_RESTART,
     }
 )
 CUT_SHORT = "CLOSE was cut short after a stop signal"
 NO_CARDS_LEFT = "the toolbox has fewer usable cards than one test needs, so FINAL could not run"
 #: Why FINAL over a session that ended before its baseline was recorded chose nothing.
 NO_BASELINE = "no candidate: the session ended before PRELUDE recorded its baseline, so FINAL had nothing to validate"
-#: The blackboard writer name a restart reads the baseline as.
-RESTART_READER = "restart"
 #: Why a session that was to stop after its map kept none.
 NO_ARBOR_TO_MAP = "no map: no agent named is an Arbor whose directions could be mapped"
 NO_MAP = "no map: the dossier pass set none and none could be generated from the root's shares"
@@ -276,6 +277,7 @@ class Session:
         self._prelude: PreludeResult | None = None
         self._map_shares: tuple[RootShares | None] | None = None
         self._explore_end = math.inf
+        self._explore_cap: ExploreCap | None = None  # given by run or resume
         peers = peer_factory(self._peer_setup(desk, services))
         context = SchedulerContext(
             self._layout,
@@ -308,7 +310,7 @@ class Session:
         self._open_llm_roles(services)
         self._similarity = BranchSimilarity(peers.repo, self._roster)
         self._events = SessionEvents(self._blackboard, self._decisions, profiler, peers.toolbox, settings.workload)
-        self._selector = FinalSelector(checks, settings.workload)
+        self._selector = FinalSelector(checks, settings.workload, final_quota(settings.caps).global_concurrency)
         self._signals = StopSignals()
         self._in_final = False
         self._image_check: ImageCheckReport | None = None
@@ -341,6 +343,7 @@ class Session:
             self._reference_dirs(),
             settings.dev_leases,
             settings.agents,
+            settings.reference_script,
             settings.agent_pack,
             settings.agent_launch,
             settings.agent_port,
@@ -349,6 +352,8 @@ class Session:
             REVIEW_HOST if settings.review_gate else REVIEW_OFF,
             maps,
             settings.agent_share_minutes,
+            settings.inferencex_commit,
+            settings.agentx_early_stop,
             make_before_break=settings.make_before_break,
         )
 
@@ -413,8 +418,9 @@ class Session:
         curator = recorded(services.author_completion, self._blackboard, UsageSource.CURATOR)
         self._curator = CloseAuthoring(curator, services.author_model)
 
-    async def run(self) -> SessionOutcome:
-        """Run every phase and CLOSE; an unhandled error propagates once CLOSE has run.
+    async def run(self, explore_cap: ExploreCap | None = None) -> SessionOutcome:
+        """Run every phase and CLOSE; an unhandled error propagates once CLOSE has run. EXPLORE ends no later than
+        ``explore_cap`` (a :data:`~.budget.ExploreCap`, a hosted run's grant's) says, when it is given.
 
         The scheduler records itself before the first phase, so the directory says the session is running from the
         start and a recovery over it is refused while it is. The image check then compares the rule pack's outside
@@ -426,6 +432,7 @@ class Session:
         """
 
         budget = SessionBudget.from_hours(self._settings.max_hours, self._clock.now())
+        self._explore_cap = explore_cap
         self._processes.record_scheduler()
         image_check = await asyncio.to_thread(run_image_check)
         self._image_check = image_check
@@ -435,12 +442,13 @@ class Session:
         aborted = SessionOutcome(SessionStopReason.ABORTED, None, None, "")
         return await self._run_and_close(self._phases(budget), aborted, budget, hard_stop)
 
-    async def finish(self, ended: SessionStopReason) -> SessionOutcome:
+    async def finish(self, ended: SessionStopReason, *, restart: bool = False) -> SessionOutcome:
         """Run FINAL and CLOSE over the directory a session that ended for ``ended`` before FINAL left behind, and
         report as that session would have; the manifest and the blackboard that session wrote are this one's input, so
         this opens no session of its own and only its report, dashboard and breakdown are written again. It ends for
         ``ended`` however FINAL goes: the session did not run its course, and a FINAL run after the fact does not
-        make it so.
+        make it so; except that for the ``restart`` of a hosted run, which its host starts again after a preemption, a
+        FINAL that chose ends it for ``finished_after_restart`` when ``ended`` is not in :data:`COMPLETED_REASONS`.
 
         The candidates are read before anything else happens, so a session FINAL cannot run over is refused without a
         stop or a report being written. A session that ended before PRELUDE recorded its baseline has no candidate:
@@ -458,29 +466,34 @@ class Session:
         self._in_final = True
         hard_stop = HardStop(budget, self._clock)
         ending = SessionOutcome(ended, None, None, "")
-        work = self._no_final(ended) if candidates is None else self._final_phases(candidates, ended)
+        work = self._no_final(ended) if candidates is None else self._final_phases(candidates, ended, restart)
         return await self._run_and_close(work, ending, budget, hard_stop)
 
-    async def resume(self, ended: SessionStopReason) -> SessionOutcome:
+    async def resume(
+        self, ended: SessionStopReason, deadline: float, explore_cap: ExploreCap | None = None
+    ) -> SessionOutcome:
         """Continue the session an earlier run left here, which ended for ``ended`` before FINAL, with EXPLORE, FINAL
-        and CLOSE and no PRELUDE (:meth:`Prelude.landed`). The deadline moves by the time since the last decision that
-        run recorded, kept in the manifest. That run's tests are withdrawn and its open branches stopped, the roster
-        and the integration branch open again, and EXPLORE opens new branches on the integration head."""
+        and CLOSE and no PRELUDE (:meth:`Prelude.landed`), up to ``deadline``, which the manifest keeps: the caller
+        decides whether the time the session was down is given back
+        (:func:`~hyperloom_multibranch.scheduling.resumption.deadline_after_downtime`) or not, so that its budget counts
+        from the original start (:func:`~hyperloom_multibranch.scheduling.hosted_run.hosted_resume_deadline`). That run's tests are withdrawn and its
+        open branches stopped, the roster and the integration branch open again, and EXPLORE opens new branches on the
+        integration head. ``explore_cap`` is :meth:`run`'s."""
 
-        budget = self._resumed_budget(ended)
+        budget = self._resumed_budget(ended, deadline)
+        self._explore_cap = explore_cap
         self._processes.record_scheduler()
         self._image_check = await asyncio.to_thread(run_image_check)
         hard_stop = HardStop(budget, self._clock)
         aborted = SessionOutcome(SessionStopReason.ABORTED, None, None, "")
         return await self._run_and_close(self._resumed_phases(budget, ended), aborted, budget, hard_stop)
 
-    def _resumed_budget(self, ended: SessionStopReason) -> SessionBudget:
-        """The session's budget moved by its downtime, written to the manifest and recorded as a ``resume`` phase."""
+    def _resumed_budget(self, ended: SessionStopReason, deadline: float) -> SessionBudget:
+        """The session's budget up to ``deadline``, written to the manifest and recorded as a ``resume`` phase with the
+        time the session was down."""
 
         manifest = read_manifest(self._layout.manifest)
-        stopped_at = float(read_jsonl(self._layout.decisions)[-1]["at"])
-        downtime = max(self._clock.now() - stopped_at, 0.0)
-        deadline = manifest.deadline + downtime
+        downtime = downtime_until(self._layout.decisions, self._clock.now())
         replace(manifest, deadline=deadline).write(self._layout.manifest)
         self._phase("resume", ended=ended.value, downtime_seconds=downtime, deadline=deadline)
         return SessionBudget(manifest.started_at, deadline - manifest.started_at)
@@ -611,8 +624,11 @@ class Session:
             logger.info("the agent map was rejected at its review: %s", exc)
             return SessionOutcome(SessionStopReason.REVIEW_REJECTED, None, None, "")
         budget = self._budget or budget  # a review's pause moved the deadline
-        explore_end = self._explore_end = budget.explore_end(self._clock.now(), prelude.longest_root_test)
-        self._phase("explore", explore_end=explore_end)
+        final_cap = partial(self._final_cap, prelude.longest_root_test)
+        cap = await final_cap()
+        now = self._clock.now()
+        explore_end = self._explore_end = budget.explore_end(now, prelude.longest_root_test, cap)
+        self._phase("explore", explore_end=explore_end, **({"explore_cap": cap} if math.isfinite(cap) else {}))
         window = ExploreWindow(
             prelude.root_commit,
             prelude.start_commit,
@@ -624,6 +640,7 @@ class Session:
             opening.agents,
             opening.plans,
             opening.map_for,
+            final_cap,
         )
         reason = await self._explorer().run(window)
         if reason is SessionStopReason.NO_MEASUREMENT_CARDS:
@@ -887,9 +904,11 @@ class Session:
         self._decisions.record(Decision(DecisionKind.PRELUDE, DOSSIER_ENDED, INTEGRATION_BRANCH, ended))
         return outcome
 
-    async def _final_phases(self, candidates: FinalCandidates, ended: SessionStopReason) -> SessionOutcome:
+    async def _final_phases(
+        self, candidates: FinalCandidates, ended: SessionStopReason, restart: bool
+    ) -> SessionOutcome:
         """FINAL alone over ``candidates``, inside the phases coroutine, so a failure still goes through CLOSE and
-        leaves a report.
+        leaves a report; for ``restart`` see :meth:`finish`.
 
         The toolbox takes the dead session's unfinished tests up again from its submit log when it starts, and they
         belong to branches that are over: they are withdrawn, and the quota then admits FINAL's validation alone.
@@ -897,7 +916,11 @@ class Session:
 
         await self._take_up(ended)
         await self._toolbox.set_policy(final_quota(self._settings.caps))
-        return await self._final(candidates, ended)
+        outcome = await self._final(candidates, ended)
+        chose = outcome.final is not None and outcome.final.chosen is not None
+        if restart and chose and ended not in COMPLETED_REASONS:
+            return replace(outcome, stop_reason=SessionStopReason.FINISHED_AFTER_RESTART)
+        return outcome
 
     async def _no_final(self, ended: SessionStopReason) -> SessionOutcome:
         """No FINAL over a session that recorded no baseline: the toolbox takes the dead session's unfinished tests up
@@ -977,7 +1000,13 @@ class Session:
     def _closer(self) -> Closer:
         dashboard = self._dashboard(self._scoring())
         sources = ExportSources(
-            self._blackboard, self._repo, self._blobs, dashboard, self._image_check, self._briefs.warm
+            self._blackboard,
+            self._repo,
+            self._blobs,
+            dashboard,
+            self._image_check,
+            self._briefs.warm,
+            _checkpoint_scope(self._settings),
         )
         services = ExportServices(self._recipe_kb, self._author, self._curator)
         closing = SessionExports(self._layout, sources, self._metric, self._budget_seconds, services)
@@ -1011,13 +1040,15 @@ class Session:
             return ()
         return reference_leads(self._reference_dirs()[source.name], profile, source.revision)
 
+    async def _final_cap(self, test_seconds: float) -> float:
+        """:attr:`_explore_cap` of the FINAL the session would run now, one test taking ``test_seconds``."""
+
+        if self._explore_cap is None:
+            return math.inf
+        return self._explore_cap(await self._selector.planned_work(await self._final_candidates(), test_seconds))
+
     async def _final_candidates(self) -> FinalCandidates:
-        progress = await self._blackboard.progress()
-        integration = integration_row(progress)
-        if integration is None:
-            raise RuntimeError("the blackboard has no integration branch after PRELUDE recorded its root")
-        root = (await self._blackboard.baseline()).root_commit
-        return await choose_candidates(progress, integration, self._settings.workload.metric, self._repo, root)
+        return await session_candidates(self._blackboard, self._repo, self._settings.workload.metric)
 
     async def _close(self, ending: SessionOutcome, hard_stop: HardStop) -> SessionOutcome:
         if ending.stop_reason is SessionStopReason.ABORTED:
@@ -1119,16 +1150,12 @@ async def recorded_baseline(blackboard: LocalBlackboard) -> BaselineRecord | Non
         return None
 
 
-def prelude_landed(root: Path) -> bool:
-    """Whether the session in ``root`` got through PRELUDE far enough for FINAL to validate it: it committed its root
-    and the rule gate wrote its baseline. A session that did not measured nothing a later start could carry on from.
-    Creates nothing. Blocks, and runs an event loop of its own."""
-
-    layout = SessionLayout(root)
-    if not layout.root_recipe.is_file():
-        return False
-    reader = LocalBlackboard(layout.blackboard, Writer(Role.OBSERVER, RESTART_READER))
-    return asyncio.run(recorded_baseline(reader)) is not None
+def _checkpoint_scope(settings: RunSettings) -> CheckpointScope | None:
+    """The AgentX checkpoint the session ran under; an InferenceX session has none."""
+    workload = settings.workload
+    if workload.kind is not WorkloadKind.AGENTX:
+        return None
+    return CheckpointScope(settings.agentx_early_stop, workload.agentx_objective)
 
 
 def persisted_run(root: Path) -> PersistedRun:
@@ -1162,25 +1189,6 @@ def persisted_session(root: Path) -> PersistedRun:
     return PersistedRun(layout, manifest.settings, ended_before_final(layout))
 
 
-def resumable_run(root: Path) -> PersistedRun:
-    """:func:`persisted_run` for :meth:`Session.resume`; raises ValueError too when PRELUDE recorded no baseline, the
-    session was measured in a grant's sandboxes, which a resume does not lease again, or it was to stop once its map
-    was made. Writes nothing."""
-
-    persisted = persisted_run(root)
-    layout = persisted.layout
-    if baseline_decision(read_jsonl(layout.decisions)) is None:
-        raise ValueError(f"the session in {root} recorded no baseline to resume from; start a new session")
-    if layout.runner_source.exists():
-        raise ValueError(
-            f"the session in {root} was measured in a grant's sandboxes and a resume measures on this machine's cards;"
-            " start a new session"
-        )
-    if persisted.settings.stop_after_map:
-        raise ValueError(f"the session in {root} was to stop once its map was made, so it has no EXPLORE to resume")
-    return persisted
-
-
 __all__ = [
     "COMPLETED_REASONS",
     "JUDGE_PROMPT_KEY",
@@ -1194,7 +1202,5 @@ __all__ = [
     "SessionServices",
     "persisted_run",
     "persisted_session",
-    "prelude_landed",
     "recorded_baseline",
-    "resumable_run",
 ]

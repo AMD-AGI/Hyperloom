@@ -17,7 +17,7 @@ from __future__ import annotations
 
 import re
 
-from hyperloom.common.failure_signature import argparse_refusal
+from hyperloom.common.failure_signature import IMPORT_FAILURE_LINE, argparse_refusal
 from hyperloom.common.outside_facts import (
     HIP_ERROR_PREFIX,
     HIP_NO_BINARY_FOR_GPU,
@@ -25,8 +25,6 @@ from hyperloom.common.outside_facts import (
     HIP_UNDEFINED_SYMBOL,
     HSA_STATUS_ERROR,
     HUB_RATE_LIMITED,
-    PY_IMPORT_ERROR,
-    PY_MODULE_NOT_FOUND_ERROR,
     TORCH_MEMORY_SNAPSHOT_FRAME,
 )
 
@@ -44,13 +42,6 @@ _BAD_REQUEST = re.compile(
 #: The lm_eval client's own report of a refused request carries the server's message, which names the cause.
 _REFUSAL_MESSAGE = re.compile(r"API request failed|[\"']message[\"']\s*:")
 
-#: The exception a failed import raised, ``ImportError: message`` or ``ModuleNotFoundError: message`` after an optional
-#: log prefix. A server that skips a model whose imports fail logs ``Ignore import error when loading <module>: ...``
-#: and carries on; that line is not an exception and does not match.
-_IMPORT_FAILURE = re.compile(
-    r"(?<![\w.])(?:[A-Za-z_]\w*\.)*(?:" + PY_IMPORT_ERROR + "|" + PY_MODULE_NOT_FOUND_ERROR + r"):\s*\S"
-)
-
 #: What a missing compiled kernel prints: an extension that references a symbol nothing defines, or a GPU binary built for
 #: another device. Nothing else a HIP call reports belongs here, nor a failed HSA call: the ROCr queue abort that names an
 #: ``HSA_STATUS_ERROR_*`` status is a kernel that ran and faulted.
@@ -62,7 +53,7 @@ _MISSING_KERNEL = re.compile("|".join((HIP_UNDEFINED_SYMBOL, HIP_NO_KERNEL_IMAGE
 #: library print them.
 _DISK_FULL = re.compile(r"\[Errno (?:28|122)\]|No space left on device|Disk quota exceeded", re.IGNORECASE)
 _WATCHDOG_TIMEOUT = re.compile(r"watchdog timeout", re.IGNORECASE)
-#: A ``git`` command the benchmark client ran to fetch its own dependencies (Magpie's per-test ``submodule update`` of
+#: A ``git`` command the benchmark client ran to fetch its own dependencies (a per-test ``submodule update`` of
 #: the replay client) that timed out: ``subprocess.TimeoutExpired: Command ['git', ...] timed out after N seconds``.
 _GIT_FETCH_TIMEOUT = re.compile(r"TimeoutExpired: Command \[['\"]git['\"],.*\] timed out after")
 _HUB_RATE_LIMITED = re.compile(HUB_RATE_LIMITED)
@@ -135,7 +126,7 @@ def bad_request(text: str) -> str | None:
 
 def import_error(text: str) -> str | None:
     """The ``ImportError``/``ModuleNotFoundError`` line a failed import ended the server with."""
-    return _last_matching(text, lambda line: bool(_IMPORT_FAILURE.search(line)))
+    return _last_matching(text, lambda line: bool(IMPORT_FAILURE_LINE.search(line)))
 
 
 def python_exception(text: str) -> str | None:

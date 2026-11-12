@@ -17,7 +17,7 @@ from hyperloom_multibranch.contracts.judgement import ACCURACY_SCORE, AccuracyVe
 from hyperloom_multibranch.contracts.blackboard.records import BaselineRecord, TestRecord
 from hyperloom_multibranch.blackboard.tests.factories import intent, request, result
 from hyperloom_multibranch.rulegate.decision import Action, decide
-from hyperloom_multibranch.rulegate.agentx import P50_BELOW_THRESHOLD
+from hyperloom_multibranch.rulegate.agentx import P50_BELOW_THRESHOLD, AgentXObjective
 from hyperloom_multibranch.rulegate.inferencex import DROPPED_REQUESTS, GAIN_BELOW_THRESHOLD, LONG_CONTEXT_DROPPED
 from hyperloom_multibranch.rulegate.readings import UnreadableResult
 from hyperloom_multibranch.rulegate.rules import (
@@ -42,7 +42,7 @@ def _measured(metrics: dict[str, float]) -> TestRecord:
     ids=["clean", "erroring", "unreported"],
 )
 async def test_an_agentx_run_is_accurate_while_its_error_rate_stays_within_the_bar(metrics, passes):
-    assert await AgentXRule().accuracy_passes(_measured(metrics)) is passes
+    assert await AgentXRule(AgentXObjective.P50_INTERACTIVITY).accuracy_passes(_measured(metrics)) is passes
 
 
 def _unscored(purpose: Purpose, accuracy: bool) -> TestRecord:
@@ -171,7 +171,9 @@ async def test_an_agentx_candidate_is_refused_nothing_on_its_short_prompt_check(
     record = _measured({GRADED_ERROR_RATE: 0.0})
     record = replace(record, result=replace(record.result, short_prompt_consistency=short_prompt_check(0, 9, 0)))
 
-    judgement = await AgentXRule().first(record, {GRADED_INTVTY_P50: 40.0, GRADED_ERROR_RATE: 0.0})
+    judgement = await AgentXRule(AgentXObjective.P50_INTERACTIVITY).first(
+        record, {GRADED_INTVTY_P50: 40.0, GRADED_ERROR_RATE: 0.0}
+    )
 
     assert SHORT_PROMPTS_INCONSISTENT not in judgement.refused_by
     assert record.result.short_prompt_consistency.inconsistency == 9, "the check stays on the test's result"
@@ -202,12 +204,20 @@ def _refused(verdict: Verdict, accuracy: AccuracyVerdict, *refused_by: str) -> J
     [
         (InferenceXRule(None, 64), _refused(Verdict.REGRESSED, AccuracyVerdict.PASSED, GAIN_BELOW_THRESHOLD), True),
         (InferenceXRule(None, 64), _refused(Verdict.FLAT, AccuracyVerdict.PASSED, GAIN_BELOW_THRESHOLD), True),
-        (AgentXRule(), _refused(Verdict.REGRESSED, AccuracyVerdict.PASSED, "p90_regressed", P50_BELOW_THRESHOLD), True),
+        (
+            AgentXRule(AgentXObjective.P50_INTERACTIVITY),
+            _refused(Verdict.REGRESSED, AccuracyVerdict.PASSED, "p90_regressed", P50_BELOW_THRESHOLD),
+            True,
+        ),
         (InferenceXRule(None, 64), _refused(Verdict.REGRESSED, AccuracyVerdict.FAILED, GAIN_BELOW_THRESHOLD), False),
         (InferenceXRule(None, 64), _refused(Verdict.REGRESSED, AccuracyVerdict.NOT_MEASURED), False),
         (InferenceXRule(None, 64), _refused(Verdict.REGRESSED, AccuracyVerdict.PASSED, LONG_CONTEXT_DROPPED), False),
         (InferenceXRule(None, 64), _refused(Verdict.REGRESSED, AccuracyVerdict.PASSED, DROPPED_REQUESTS), False),
-        (AgentXRule(), _refused(Verdict.REGRESSED, AccuracyVerdict.PASSED, "extra_failed_requests"), False),
+        (
+            AgentXRule(AgentXObjective.P50_INTERACTIVITY),
+            _refused(Verdict.REGRESSED, AccuracyVerdict.PASSED, "extra_failed_requests"),
+            False,
+        ),
         (InferenceXRule(None, 64), _refused(Verdict.NEEDS_CONFIRM, AccuracyVerdict.PASSED), False),
     ],
     ids=[
@@ -229,7 +239,9 @@ def test_a_retraction_lands_when_only_the_speed_gates_refused_it_on_passed_accur
 def test_an_agentx_retraction_whose_long_context_check_drops_does_not_land():
     slower = _refused(Verdict.REGRESSED, AccuracyVerdict.PASSED, P50_BELOW_THRESHOLD)
 
-    assert not lands_as_retraction(_checked(96.0, None, long_context=_long_context(57)), slower, AgentXRule())
+    assert not lands_as_retraction(
+        _checked(96.0, None, long_context=_long_context(57)), slower, AgentXRule(AgentXObjective.P50_INTERACTIVITY)
+    )
 
 
 def _retraction_record(check, long_context, forced: bool = True) -> TestRecord:
@@ -264,4 +276,4 @@ def test_a_test_counts_as_a_retraction_only_when_both_forced_checks_ran_to_the_e
     ids=["checks-incomplete", "checks-not-forced"],
 )
 def test_an_agentx_retraction_counts_with_its_checks_incomplete_since_an_agentx_test_cannot_run_them(record, counts):
-    assert retracts(record, AgentXRule()) is counts
+    assert retracts(record, AgentXRule(AgentXObjective.P50_INTERACTIVITY)) is counts

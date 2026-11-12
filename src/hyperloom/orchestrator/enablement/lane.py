@@ -852,7 +852,7 @@ def _archive_round(state: Any, res: dict[str, Any], session_dir: str | Path, att
                 state.enablement,
                 framework=state.framework or os.environ.get("FRAMEWORK") or "sglang",
                 target=ServingTarget(
-                    model=os.environ.get("MODEL_PATH") or state.model_path or state.reference_model,
+                    model=os.environ.get("MODEL_PATH") or state.model_path,
                     tp=state.tp or None,
                     max_model_len=state.max_model_len or None,
                     gpu_type=state.gpu_type or os.environ.get("GPU_TYPE") or None,

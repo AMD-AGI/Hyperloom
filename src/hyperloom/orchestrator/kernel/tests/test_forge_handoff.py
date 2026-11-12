@@ -90,10 +90,12 @@ def test_write_forge_handoff_records_context_and_absolute_evidence_paths(tmp_pat
                 "extra_server_args": "--enable-torch-compile",
                 "extra_envs": {
                     "SAFE_SETTING": "1",
+                    "SGLANG_SIMULATE_ACC_TOKEN_MODE": "1",
                     "SERVICE_API_KEY": "must-not-be-written",
+                    "GITHUB_TOKEN": "must-not-be-written",
                 },
             },
-            "launch_recipe": str(tmp_path / "recipe.yaml"),
+            "launch_json": str(tmp_path / "run" / "launch.json"),
         },
     )
 
@@ -105,10 +107,12 @@ def test_write_forge_handoff_records_context_and_absolute_evidence_paths(tmp_pat
     assert "example/model" in workload
     assert "Tensor parallelism:** `8`" in workload
     assert "--tp 8 --mem-fraction-static 0.9" in serving
+    assert f"Launch record:** `{(tmp_path / 'run' / 'launch.json').resolve()}`" in serving
     assert "--enable-torch-compile" in serving
     assert "PROFILE_ENV=enabled" in serving
     assert "SAFE_SETTING=1" in serving
-    assert "SERVICE_API_KEY" not in serving
+    assert "SGLANG_SIMULATE_ACC_TOKEN_MODE=1" in serving
+    assert "SERVICE_API_KEY" not in serving and "GITHUB_TOKEN" not in serving
     assert str(raw_trace.resolve()) in evidence
     assert str(analysis_md.resolve()) in evidence
     assert str(candidates.resolve()) in evidence

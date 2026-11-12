@@ -12,8 +12,8 @@ learnings go nowhere while the session runs on no Experience KB, see
 outcomes next to the chosen commit's recipe and how FINAL chose it; once the search tree is archived, the scheduler's
 LLM proposes one change to the scheduling playbook into the pool beside the archive (:func:`author_playbook`) and
 curates the RSI lesson pool the knowledge steps published the session's learnings to (:func:`curate_lessons`), steps
-that never stop CLOSE. A later CLOSE of a session whose earlier CLOSE archived its tree (:func:`archived_before`), a
-resumed session's or a ``final-only``'s, runs none of these steps and reports each as :data:`ARCHIVED_BEFORE`; ``session_breakdown.json``, which also counts how the merges went and how each met a
+that never stop CLOSE; a CLOSE whose knowledge steps archived no tree asks neither. A later CLOSE of a session whose
+earlier CLOSE archived its tree (:func:`archived_before`), a resumed session's or a ``final-only``'s, runs none of these steps and reports each as :data:`ARCHIVED_BEFORE`; ``session_breakdown.json``, which also counts how the merges went and how each met a
 conflicting patch from the integrator's merge log, the knowledge steps' receipts and :data:`IMAGE_CHECK_FILE`, the
 whole image check the session ran before its first phase, land in ``MB-reports/``, and the dashboard is rebuilt a last
 time with the queue the stop left.
@@ -52,7 +52,7 @@ from hyperloom_multibranch.blackboard.knowledge.recipe_writeback import SKIPPED,
 from hyperloom_multibranch.blackboard.knowledge.warm_start import WarmLead
 from hyperloom_multibranch.blackboard.rsi.authoring import author_playbook
 from hyperloom_multibranch.blackboard.rsi.lesson_curation import curate_lessons
-from hyperloom_multibranch.blackboard.rsi.archive import TreeArchive
+from hyperloom_multibranch.blackboard.rsi.archive import ARCHIVED, TreeArchive
 from hyperloom_multibranch.blackboard.rsi.archive import SKIPPED as STEP_SKIPPED
 from hyperloom_multibranch.blackboard.rsi.session import CloseStep, KnowledgeClose
 from hyperloom_multibranch.scheduling.dashboard import SessionDashboard
@@ -60,6 +60,7 @@ from hyperloom_multibranch.scheduling.final import FinalChoice
 from hyperloom_multibranch.scheduling.integrator import ConflictLoss
 from hyperloom_multibranch.scheduling.layout import SessionLayout
 from hyperloom_multibranch.contracts.llm import Completion
+from hyperloom_multibranch.scheduling.checkpoint_tally import CheckpointScope, CheckpointTally, checkpoint_tally
 from hyperloom_multibranch.scheduling.manifest import read_manifest
 from hyperloom_multibranch.scheduling.mb_fakes import mb_fake_close_knowledge
 
@@ -147,7 +148,8 @@ def _merge_statistics(merge_log: Sequence[Mapping[str, Any]]) -> dict[str, objec
 @dataclass(frozen=True)
 class CloseExports:
     """What CLOSE handed on: the Recipe KB write-back, the knowledge steps, the proposed change to the scheduling
-    playbook, the breakdown file, the dashboard files, and the curation of the RSI lesson pool."""
+    playbook, the breakdown file, the dashboard files, the curation of the RSI lesson pool, and what the AgentX
+    checkpoint did (``None`` in an InferenceX session)."""
 
     kb_write_back: RemoteWriteResult
     knowledge: KnowledgeClose
@@ -155,6 +157,7 @@ class CloseExports:
     breakdown: Path
     dashboard: DashboardFiles
     curation: CloseStep
+    checkpoint: CheckpointTally | None = None
 
     def knowledge_steps(self) -> dict[str, CloseStep]:
         """The knowledge steps, the playbook's step and the curation: the steps the CLOSE report lists."""
@@ -181,8 +184,9 @@ class CloseAuthoring:
 class ExportSources:
     """What CLOSE exports from: the scheduler's blackboard handle, the repository and the blob store that hold the
     chosen commit's recipe and its files, the session's dashboard, the image check it ran before its first phase,
-    ``None`` for a FINAL and CLOSE over a session that ended before FINAL, which run none, and PRELUDE's warm-start
-    leads, none for a session that stopped before them."""
+    ``None`` for a FINAL and CLOSE over a session that ended before FINAL, which run none, PRELUDE's warm-start
+    leads, none for a session that stopped before them, and an AgentX session's checkpoint (``None`` in an InferenceX
+    session)."""
 
     blackboard: Blackboard
     repo: ExperimentRepo
@@ -190,6 +194,7 @@ class ExportSources:
     dashboard: SessionDashboard
     image_check: ImageCheckReport | None
     warm_leads: tuple[WarmLead, ...]
+    checkpoint: CheckpointScope | None = None
 
 
 @dataclass(frozen=True)
@@ -228,6 +233,7 @@ class SessionExports:
         self._dashboard = sources.dashboard
         self._image_check = sources.image_check
         self._warm_leads = sources.warm_leads
+        self._checkpoint = sources.checkpoint
         self._metric = metric
         self._budget_seconds = budget_seconds
 
@@ -252,8 +258,12 @@ class SessionExports:
                 layout=self._layout,
                 cross_image=_cross_image(self._warm_leads),
             )
-            playbook = await author_playbook(snapshot, self._ask_author, model=self._author.model)
-            curation = await self._curate(snapshot)
+            if knowledge.archive.status == ARCHIVED:
+                playbook = await author_playbook(snapshot, self._ask_author, model=self._author.model)
+                curation = await self._curate(snapshot)
+            else:
+                # An unarchived tree leaves the author nothing to propose from and the curator no lesson of the session.
+                playbook = curation = CloseStep(STEP_SKIPPED, knowledge.archive.reason)
         # The playbook author and the curator record their LLM spend after the first snapshot, so the breakdown reads a
         # fresh one, or ``spend.llm_usd`` would miss CLOSE's own calls.
         snapshot = await self._blackboard.snapshot()
@@ -278,7 +288,8 @@ class SessionExports:
         )
         breakdown = write_breakdown(self._layout.reports, document)
         dashboard = await self._dashboard.write(queue)
-        return CloseExports(kb_write_back, knowledge, playbook, breakdown, dashboard, curation)
+        checkpoint = None if self._checkpoint is None else checkpoint_tally(snapshot, self._checkpoint)
+        return CloseExports(kb_write_back, knowledge, playbook, breakdown, dashboard, curation, checkpoint)
 
     async def _ask_author(self, system: str, user: str) -> str:
         return (await self._author.completion(system, user)).text

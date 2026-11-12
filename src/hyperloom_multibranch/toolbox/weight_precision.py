@@ -55,7 +55,7 @@ from itertools import islice
 from typing import NamedTuple
 
 from hyperloom.contracts.recipe import REMOVED, LaunchConfig
-from hyperloom.inference_optimizer.grid_server_args import tokenize_server_args_preserving_json
+from inference_suite.argv import tokenize_server_args_preserving_json
 
 #: The launch flags that set the served weights' precision, by the name a change is reported under, each with its
 #: spellings: the quantization method, its config and parameter file, ATOM's online quantization, the weights' dtype,

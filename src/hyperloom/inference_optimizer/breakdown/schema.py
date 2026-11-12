@@ -134,10 +134,9 @@ class V6MetadataLangfuse(TypedDict, total=False):
 class V6GradedAxes(TypedDict, total=False):
     """The axes an AgentX measurement is ranked and reported on.
 
-    ``e2e_norm_intvty_p50`` is the objective. Its guards are the tail and ``output_throughput``; the latter is not a
-    member because the chip count divides both sides of that ratio, so ``output_tput_per_gpu`` -- the frontier's y
-    axis, which is a member -- reproduces the guard exactly. The latency percentiles are the detail view: reported,
-    never graded. ``total_throughput`` is reported for continuity and enters no verdict.
+    ``e2e_norm_intvty_p50`` is the objective. Its guards are the tail and ``total_throughput``
+    (``hyperloom.common.agentx_objective``). ``output_tput_per_gpu`` is reported and enters no verdict. The latency
+    percentiles are the detail view: reported, never graded.
 
     ``duration_seconds`` and ``request_error_rate`` are the comparability inputs. A pair is graded only when both
     replayed a window of the same length and the candidate's error rate exceeds its anchor's by no more than

@@ -20,6 +20,7 @@ from hyperloom.contracts.measurement import Purpose, TestKind, TestRequest
 from hyperloom.contracts.recipe import ConfigDelta, Recipe, RecipeDelta
 from hyperloom.hosted.mcp_server import MIN_TOKEN_LENGTH, McpServer, McpServerConfig
 from hyperloom.measure.compile import LocalBlobStore
+from hyperloom.sandbox.reaper import ONE_REAP_SEC
 from hyperloom_multibranch.contracts.fork import AdmissionStatus, ForkRequest
 from hyperloom_multibranch.contracts.lifecycle import SpecialistStatus
 from hyperloom_multibranch.contracts.blackboard import INTEGRATION_BRANCH, Role, Writer
@@ -46,7 +47,13 @@ from hyperloom_multibranch.scheduling.roster import (
     RosterFull,
     StopCause,
 )
-from hyperloom_multibranch.scheduling.stops import STOP_OVERRAN, SessionStopper, SessionStopReason, StopSignals
+from hyperloom_multibranch.scheduling.stops import (
+    STOP_OVERRAN,
+    TOOLBOX_CLOSE_SECONDS,
+    SessionStopper,
+    SessionStopReason,
+    StopSignals,
+)
 from hyperloom_multibranch.scheduling.tests.peer_fakes import (
     BASE_IMAGE_DIGEST,
     SPECIALIST_POLL_SECONDS,
@@ -65,6 +72,11 @@ SHORT_GRACE = 0.3
 JUDGE_STOP = BranchStop(StopCause.JUDGE, "no headroom", NOW - 1)
 
 _CHANGE = RecipeDelta(config=ConfigDelta(server_args="--max-num-seqs 256"))  # an explore must change something
+
+
+def test_the_toolbox_close_fits_one_sandbox_reap() -> None:
+    # A local toolbox reaps its sandboxes all at once on close, so the close needs as long as one reap, and a margin.
+    assert TOOLBOX_CLOSE_SECONDS > ONE_REAP_SEC
 
 
 def test_the_stop_of_a_gave_up_branch_names_the_counts_the_runtime_kept() -> None:

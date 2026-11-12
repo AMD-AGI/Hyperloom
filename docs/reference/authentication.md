@@ -126,8 +126,8 @@ choices among values Hyperloom ships, each with one of its listed values:
 `FRAMEWORK` (`atom`, `custom`, `sglang`, `vllm`, `xdit`), `HF_HUB_OFFLINE` and
 `HF_DATASETS_OFFLINE` (`0`, `1`), `HYPERLOOM_RUN_MODE` (`baremetal`, `docker`),
 `HYPERLOOM_LLM_MODE` (`anthropic`, `deepseek`, `openai`),
-`HYPERLOOM_FRAMEWORK_ENV` (`isolated`, `shared`), `HYPERLOOM_BENCHMARK_BACKEND`
-(`bypass`, `magpie`) and `HYPERLOOM_DOTENV_CREDENTIALS` (`kernel-agent-env`).
+`HYPERLOOM_FRAMEWORK_ENV` (`isolated`, `shared`) and `HYPERLOOM_DOTENV_CREDENTIALS`
+(`kernel-agent-env`).
 Every other line is skipped: the loader and interpreter variables (`LD_PRELOAD`,
 `PYTHONPATH`, `NODE_OPTIONS`, `BASH_ENV`, ...), the proxies, what an install
 fetches or runs (`GEAK_REPO`, `GEAK_REF`, `VLLM_ROCM_INDEX`, the `*_REPO` names,
@@ -316,8 +316,8 @@ side is a second provider rather than part of the same gateway credential.
 ## Path environment
 
 These are *not* secrets. You normally do not hand-export
-`INFERENCEX_PATH` or `TRACELENS_ROOT` — `install.sh` and its chained
-kernel-agent installer clone and pin the open-source checkouts when missing.
+`TRACELENS_ROOT` or `INFERENCE_SUITE_TOOL_CACHE` — `install.sh` and its chained
+kernel-agent installer clone, stage and pin the open-source tools when missing.
 Runtime paths are persisted into `.env` by the installer; the CLI preflight
 loads them and derives `PATH` / `LD_LIBRARY_PATH` from `ROCM_PATH` /
 `VIRTUAL_ENV` / `VLLM_VENV_ROOT` at launch, so no separate file needs sourcing.
@@ -342,11 +342,11 @@ explicit path pointing at a missing directory fails preflight.
 
 | Variable                     | Set by operator? | Default / auto-clone target                                | Description                                                                                                         |
 |------------------------------|------------------|------------------------------------------------------------|---------------------------------------------------------------------------------------------------------------------|
-| `HYPERLOOM_CACHE_DIR`        | rarely           | `$REPO_ROOT/.cache`                                        | Writable, repo-local root for open-source deps (TraceLens, InferenceX, GEAK), cloned per revision as `<name>@<sha>`. |
-| `INFERENCEX_PATH`            | optional override | `${HYPERLOOM_CACHE_DIR:-$REPO_ROOT/.cache}/InferenceX@<sha>` | [SemiAnalysisAI/InferenceX](https://github.com/SemiAnalysisAI/InferenceX) for baseline and target analysis; the inference_optimizer installer (`src/hyperloom/inference_optimizer/assets/install.sh`) clones it when unset. |
+| `HYPERLOOM_CACHE_DIR`        | rarely           | `$REPO_ROOT/.cache`                                        | Writable, repo-local root for open-source deps: TraceLens and GEAK, cloned per revision as `<name>@<sha>`, and the InferenceSuite tool cache. |
+| `INFERENCEX_PATH`            | optional         | unset                                                      | An [SemiAnalysisAI/InferenceX](https://github.com/SemiAnalysisAI/InferenceX) checkout of your own, read for reference launch scripts. Benchmark rounds run the client staged in `INFERENCE_SUITE_TOOL_CACHE` instead; nothing clones it. |
 | `TRACELENS_ROOT`             | optional override | `${HYPERLOOM_CACHE_DIR:-$REPO_ROOT/.cache}/TraceLens@<sha>` | [AMD-AGI/TraceLens](https://github.com/AMD-AGI/TraceLens) for profiling and kernel detection; the kernel-agent installer clones and pins it when unset. |
 | `TRACELENS_INTERNAL_ROOT`    | optional         | unset (MAF measured on-device)                             | Optional internal TraceLens extension that backfills MAF without an on-device benchmark. When unset, Hyperloom measures MAF on an idle GPU (microbenchmark) — roofline gap / MI355+ MAF analysis is still produced, just measured locally. Hyperloom never clones it. |
-| `MAGPIE_PATH`                | optional override | Resolved from installed `Magpie` package                  | Magpie package root for benchmark wrappers and patch inspection. `install.sh` pip-installs Magpie from `MAGPIE_PACKAGE_SPEC` when it is not importable. |
+| `INFERENCE_SUITE_TOOL_CACHE` | rarely            | `${HYPERLOOM_CACHE_DIR:-$REPO_ROOT/.cache}/inference-suite-tools`| Tool cache holding the pinned InferenceX client, GSM8K task and AgentX harness that every benchmark round reads; `install.sh` stages it.                |
 
 ---
 
