@@ -12,6 +12,8 @@ from pathlib import Path
 from types import MappingProxyType
 from typing import Protocol
 
+from hyperloom_common.platform import is_windows
+
 # Backend selection env var.
 BENCHMARK_BACKEND_ENV = "HYPERLOOM_BENCHMARK_BACKEND"
 DEFAULT_BENCHMARK_BACKEND = "magpie"
@@ -131,26 +133,30 @@ class BypassBackend:
         output_dir: Path,
     ) -> list[str]:
         """Return the bypass runner argv mirroring Magpie's flags."""
+        # Forward-slash spelling keeps argv stable across OSes (identical on POSIX;
+        # backslashes elsewhere arrive unescaped as list argv, not shell text).
         return [
             python_exe,
             "-m",
             "hyperloom.orchestrator.actions.executors.bypass_runner",
             "benchmark",
             "--benchmark-config",
-            str(config_path),
+            config_path.as_posix(),
             "--output-dir",
-            str(output_dir),
+            output_dir.as_posix(),
             "--run-mode",
             "local",
         ]
 
 
 def resolve_backend_name() -> str:
-    """Resolve the active backend name from the environment."""
+    """Resolve the active backend name: an explicit choice, else the OS default."""
     raw = (os.environ.get(BENCHMARK_BACKEND_ENV) or "").strip().lower()
-    if not raw or raw not in KNOWN_BENCHMARK_BACKENDS:
-        return DEFAULT_BENCHMARK_BACKEND
-    return raw
+    if raw in KNOWN_BENCHMARK_BACKENDS:
+        return raw
+    if is_windows():
+        return "bypass"
+    return DEFAULT_BENCHMARK_BACKEND
 
 
 def resolve_backend() -> BenchmarkBackend:

@@ -1,0 +1,20 @@
+diff --git a/vllm/model_executor/model_loader/weight_utils.py b/vllm/model_executor/model_loader/weight_utils.py
+index 37023d3..2ea3d9f 100644
+--- a/vllm/model_executor/model_loader/weight_utils.py
++++ b/vllm/model_executor/model_loader/weight_utils.py
+@@ -513,8 +513,14 @@ def download_weights_from_hf(
+         # so we only have to call snapshot_download once.
+         try:
+             fs = HfFileSystem()
++            # HfFileSystem is an fsspec impl: its paths are POSIX-style repo paths, but
++            # os.path.join uses the OS separator, so on Windows `join(repo, "")` appends
++            # a backslash ("Qwen/Qwen2.5-...Int4\") and HfFileSystem rejects it with
++            # "Invalid HF URI". Repo paths must stay forward-slashed.
++            repo_path = (model_name_or_path + "/" + subfolder) if subfolder \
++                else model_name_or_path
+             file_list = fs.ls(
+-                os.path.join(model_name_or_path, subfolder or ""),
++                repo_path,
+                 detail=False,
+                 revision=revision,
+             )

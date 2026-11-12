@@ -12,7 +12,10 @@ from __future__ import annotations
 
 import random
 import socket
+import subprocess
 from pathlib import Path
+
+from hyperloom_common.platform import is_windows
 
 __all__ = ["DEV_SANDBOX_PORTS", "RAY_WORKER_PORTS", "pick_server_port"]
 
@@ -28,6 +31,27 @@ _EPHEMERAL_RANGE = Path("/proc/sys/net/ipv4/ip_local_port_range")
 #: Lowest port offered; keeps clear of the well-known and commonly configured service ports below it.
 _LOWEST_SERVER_PORT = 10000
 _BIND_ATTEMPTS = 64
+#: Windows' own default dynamic range, used when ``netsh`` cannot be read.
+_WINDOWS_EPHEMERAL_START = 49152
+
+
+def _ephemeral_start() -> int:
+    """The first port of this host's ephemeral range, whichever host this is."""
+    if not is_windows():
+        return int(_EPHEMERAL_RANGE.read_text(encoding="utf-8").split()[0])
+    try:
+        completed = subprocess.run(
+            ["netsh", "int", "ipv4", "show", "dynamicport", "tcp"],
+            capture_output=True,
+            text=True,
+            timeout=10,
+        )
+        for line in completed.stdout.splitlines():
+            if "Start Port" in line:
+                return int(line.split(":", 1)[1].strip())
+    except (OSError, subprocess.SubprocessError, ValueError, IndexError):
+        pass
+    return _WINDOWS_EPHEMERAL_START
 
 
 def pick_server_port() -> int:
@@ -36,7 +60,7 @@ def pick_server_port() -> int:
     Raises:
         OSError: When the host leaves no such port, or none of the sampled ones can be bound.
     """
-    ephemeral_start = int(_EPHEMERAL_RANGE.read_text(encoding="utf-8").split()[0])
+    ephemeral_start = _ephemeral_start()
     candidates = [
         port
         for port in range(_LOWEST_SERVER_PORT, ephemeral_start)
@@ -45,8 +69,8 @@ def pick_server_port() -> int:
     if not candidates:
         raise OSError(
             f"no server port in {_LOWEST_SERVER_PORT}-{ephemeral_start - 1} below the ephemeral range "
-            f"({_EPHEMERAL_RANGE}) outside the dev-sandbox {DEV_SANDBOX_PORTS.start}-{DEV_SANDBOX_PORTS.stop - 1} "
-            f"and Ray worker {RAY_WORKER_PORTS.start}-{RAY_WORKER_PORTS.stop - 1} ports"
+            f"(starting {ephemeral_start}) outside the dev-sandbox {DEV_SANDBOX_PORTS.start}-"
+            f"{DEV_SANDBOX_PORTS.stop - 1} and Ray worker {RAY_WORKER_PORTS.start}-{RAY_WORKER_PORTS.stop - 1} ports"
         )
     sampled = random.sample(candidates, min(_BIND_ATTEMPTS, len(candidates)))
     for port in sampled:

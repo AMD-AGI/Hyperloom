@@ -1,0 +1,109 @@
+diff --git a/vllm/entrypoints/launcher.py b/vllm/entrypoints/launcher.py
+index 8caeb80..eac138a 100644
+--- a/vllm/entrypoints/launcher.py
++++ b/vllm/entrypoints/launcher.py
+@@ -4,6 +4,7 @@
+ import asyncio
+ import signal
+ import socket
++import sys
+ from functools import partial
+ from typing import Any
+ 
+@@ -100,8 +101,12 @@ async def serve_http(
+     async def dummy_shutdown() -> None:
+         pass
+ 
+-    loop.add_signal_handler(signal.SIGINT, signal_handler)
+-    loop.add_signal_handler(signal.SIGTERM, signal_handler)
++    if sys.platform == "win32":
++        signal.signal(signal.SIGINT, lambda *_: signal_handler())
++        signal.signal(signal.SIGTERM, lambda *_: signal_handler())
++    else:
++        loop.add_signal_handler(signal.SIGINT, signal_handler)
++        loop.add_signal_handler(signal.SIGTERM, signal_handler)
+ 
+     async def handle_shutdown() -> None:
+         await shutdown_event.wait()
+diff --git a/vllm/entrypoints/openai/api_server.py b/vllm/entrypoints/openai/api_server.py
+index 2b9bba9..c7d7067 100644
+--- a/vllm/entrypoints/openai/api_server.py
++++ b/vllm/entrypoints/openai/api_server.py
+@@ -494,7 +494,8 @@ def create_server_socket(addr: tuple[str, int]) -> socket.socket:
+ 
+     sock = socket.socket(family=family, type=socket.SOCK_STREAM)
+     sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+-    sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEPORT, 1)
++    if hasattr(socket, "SO_REUSEPORT"):
++        sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEPORT, 1)
+     sock.bind(addr)
+ 
+     return sock
+diff --git a/vllm/v1/engine/utils.py b/vllm/v1/engine/utils.py
+index 90ec47e..2f60ee7 100644
+--- a/vllm/v1/engine/utils.py
++++ b/vllm/v1/engine/utils.py
+@@ -3,6 +3,7 @@
+ 
+ import contextlib
+ import os
++import sys
+ import threading
+ import weakref
+ from collections.abc import Callable, Iterator
+@@ -1030,13 +1031,25 @@ def wait_for_engine_startup(
+         and not parallel_config.data_parallel_external_lb
+     )
+ 
+-    if proc_manager is not None:
++    if proc_manager is not None and sys.platform != "win32":
+         for sentinel in proc_manager.sentinels():
+             poller.register(sentinel, zmq.POLLIN)
+-    if coord_process is not None:
++    if coord_process is not None and sys.platform != "win32":
+         poller.register(coord_process.sentinel, zmq.POLLIN)
+     while any(conn_pending) or any(start_pending):
+-        events = poller.poll(STARTUP_POLL_PERIOD_MS)
++        events = poller.poll(
++            100 if sys.platform == "win32" else STARTUP_POLL_PERIOD_MS
++        )
++        if sys.platform == "win32":
++            finished = proc_manager.finished_procs() if proc_manager else {}
++            if coord_process is not None and coord_process.exitcode is not None:
++                finished[coord_process.name] = coord_process.exitcode
++            if finished:
++                raise RuntimeError(
++                    "Engine core initialization failed. "
++                    "See root cause above. "
++                    f"Failed core proc(s): {finished}"
++                )
+         if not events:
+             if any(conn_pending):
+                 logger.debug(
+diff --git a/vllm/v1/utils.py b/vllm/v1/utils.py
+index 1aa36b1..9826795 100644
+--- a/vllm/v1/utils.py
++++ b/vllm/v1/utils.py
+@@ -3,6 +3,7 @@
+ import argparse
+ import contextlib
+ import multiprocessing
++import sys
+ import time
+ import weakref
+ from collections.abc import Callable, Sequence
+@@ -151,11 +152,9 @@ def get_engine_client_zmq_addr(local_only: bool, host: str, port: int = 0) -> st
+     Otherwise, the provided host and port will be used to construct a TCP
+     address (port == 0 means assign an available port)."""
+ 
+-    return (
+-        get_open_zmq_ipc_path()
+-        if local_only
+-        else (get_tcp_uri(host, port or get_open_port()))
+-    )
++    if local_only and sys.platform != "win32":
++        return get_open_zmq_ipc_path()
++    return get_tcp_uri(host, port or get_open_port())
+ 
+ 
+ class APIServerProcessManager:

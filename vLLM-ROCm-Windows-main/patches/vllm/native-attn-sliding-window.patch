@@ -1,0 +1,120 @@
+diff --git a/csrc/attention/attention_kernels.cuh b/csrc/attention/attention_kernels.cuh
+index 052ff16..566c199 100644
+--- a/csrc/attention/attention_kernels.cuh
++++ b/csrc/attention/attention_kernels.cuh
+@@ -102,7 +102,8 @@ __device__ void paged_attention_kernel(
+     const int q_stride, const int kv_block_stride, const int kv_head_stride,
+     const float* k_scale, const float* v_scale, const int tp_rank,
+     const int blocksparse_local_blocks, const int blocksparse_vert_stride,
+-    const int blocksparse_block_size, const int blocksparse_head_sliding_step) {
++    const int blocksparse_block_size, const int blocksparse_head_sliding_step,
++    const int sliding_window) {
+   const int seq_idx = blockIdx.y;
+   const int partition_idx = blockIdx.z;
+   const int max_num_partitions = gridDim.z;
+@@ -294,10 +295,19 @@ __device__ void paged_attention_kernel(
+       if (thread_group_offset == 0) {
+         // Store the partial reductions to shared memory.
+         // NOTE(woosuk): It is required to zero out the masked logits.
+-        const bool mask = token_idx >= seq_len;
+-        logits[token_idx - start_token_idx] = mask ? 0.f : qk;
++        const bool oob = token_idx >= seq_len;
++        // Sliding-window mask. Decode query is at position seq_len-1; drop keys
++        // whose distance from the query is >= window. Matches vLLM's Triton path
++        // `where((context_len - seq_offset) < SLIDING_WINDOW, S, -inf)`
++        // (context_len == seq_len-1). -FLT_MAX -> exp() == 0 -> excluded from
++        // both the softmax normalizer and the V accumulation. sliding_window<=0
++        // disables it (full attention, original behavior).
++        const bool sw_mask =
++            (sliding_window > 0) && ((seq_len - 1 - token_idx) >= sliding_window);
++        logits[token_idx - start_token_idx] =
++            oob ? 0.f : (sw_mask ? -FLT_MAX : qk);
+         // Update the max value.
+-        qk_max = mask ? qk_max : fmaxf(qk_max, qk);
++        qk_max = (oob || sw_mask) ? qk_max : fmaxf(qk_max, qk);
+       }
+     }
+   }
+@@ -510,7 +520,8 @@ __global__ void paged_attention_v1_kernel(
+     const int q_stride, const int kv_block_stride, const int kv_head_stride,
+     const float* k_scale, const float* v_scale, const int tp_rank,
+     const int blocksparse_local_blocks, const int blocksparse_vert_stride,
+-    const int blocksparse_block_size, const int blocksparse_head_sliding_step) {
++    const int blocksparse_block_size, const int blocksparse_head_sliding_step,
++    const int sliding_window) {
+   paged_attention_kernel<scalar_t, cache_t, HEAD_SIZE, BLOCK_SIZE, NUM_THREADS,
+                          KV_DTYPE, IS_BLOCK_SPARSE>(
+       /* exp_sums */ nullptr, /* max_logits */ nullptr, out, q, k_cache,
+@@ -518,7 +529,7 @@ __global__ void paged_attention_v1_kernel(
+       max_num_blocks_per_seq, alibi_slopes, q_stride, kv_block_stride,
+       kv_head_stride, k_scale, v_scale, tp_rank, blocksparse_local_blocks,
+       blocksparse_vert_stride, blocksparse_block_size,
+-      blocksparse_head_sliding_step);
++      blocksparse_head_sliding_step, sliding_window);
+ }
+ 
+ // Grid: (num_heads, num_seqs, max_num_partitions).
+@@ -553,7 +564,7 @@ __global__ void paged_attention_v2_kernel(
+       block_tables, seq_lens, max_num_blocks_per_seq, alibi_slopes, q_stride,
+       kv_block_stride, kv_head_stride, k_scale, v_scale, tp_rank,
+       blocksparse_local_blocks, blocksparse_vert_stride, blocksparse_block_size,
+-      blocksparse_head_sliding_step);
++      blocksparse_head_sliding_step, /* sliding_window */ 0);
+ }
+ 
+ // Grid: (num_heads, num_seqs).
+diff --git a/csrc/attention/paged_attention_v1.cu b/csrc/attention/paged_attention_v1.cu
+index 307300e..72e97ec 100644
+--- a/csrc/attention/paged_attention_v1.cu
++++ b/csrc/attention/paged_attention_v1.cu
+@@ -37,7 +37,7 @@
+           alibi_slopes_ptr, q_stride, kv_block_stride, kv_head_stride,      \
+           k_scale_ptr, v_scale_ptr, tp_rank, blocksparse_local_blocks,      \
+           blocksparse_vert_stride, blocksparse_block_size,                  \
+-          blocksparse_head_sliding_step);
++          blocksparse_head_sliding_step, sliding_window);
+ 
+ // TODO(woosuk): Tune NUM_THREADS.
+ template <typename T, typename CACHE_T, int BLOCK_SIZE,
+@@ -50,7 +50,8 @@ void paged_attention_v1_launcher(
+     const std::optional<torch::Tensor>& alibi_slopes, torch::Tensor& k_scale,
+     torch::Tensor& v_scale, const int tp_rank,
+     const int blocksparse_local_blocks, const int blocksparse_vert_stride,
+-    const int blocksparse_block_size, const int blocksparse_head_sliding_step) {
++    const int blocksparse_block_size, const int blocksparse_head_sliding_step,
++    const int sliding_window) {
+   int num_seqs = query.size(0);
+   int num_heads = query.size(1);
+   int head_size = query.size(2);
+@@ -130,7 +131,7 @@ void paged_attention_v1_launcher(
+       out, query, key_cache, value_cache, num_kv_heads, scale, block_tables, \
+       seq_lens, max_seq_len, alibi_slopes, k_scale, v_scale, tp_rank,        \
+       blocksparse_local_blocks, blocksparse_vert_stride,                     \
+-      blocksparse_block_size, blocksparse_head_sliding_step);
++      blocksparse_block_size, blocksparse_head_sliding_step, sliding_window);
+ 
+ #define CALL_V1_LAUNCHER_SPARSITY(T, CACHE_T, BLOCK_SIZE, IS_FP8_KV_CACHE) \
+   if (is_block_sparse) {                                                   \
+@@ -174,7 +175,8 @@ void paged_attention_v1(
+     torch::Tensor& v_scale, const int64_t tp_rank,
+     const int64_t blocksparse_local_blocks,
+     const int64_t blocksparse_vert_stride, const int64_t blocksparse_block_size,
+-    const int64_t blocksparse_head_sliding_step) {
++    const int64_t blocksparse_head_sliding_step,
++    const int64_t sliding_window) {
+   const bool is_block_sparse = (blocksparse_vert_stride > 1);
+ 
+   DISPATCH_BY_KV_CACHE_DTYPE(query.dtype(), kv_cache_dtype,
+diff --git a/csrc/ops.h b/csrc/ops.h
+index 5087df0..1b40129 100644
+--- a/csrc/ops.h
++++ b/csrc/ops.h
+@@ -39,7 +39,7 @@ void paged_attention_v1(
+     torch::Tensor& v_scale, const int64_t tp_rank,
+     const int64_t blocksparse_local_blocks,
+     const int64_t blocksparse_vert_stride, const int64_t blocksparse_block_size,
+-    const int64_t blocksparse_head_sliding_step);
++    const int64_t blocksparse_head_sliding_step, const int64_t sliding_window);
+ 
+ void paged_attention_v2(
+     torch::Tensor& out, torch::Tensor& exp_sums, torch::Tensor& max_logits,

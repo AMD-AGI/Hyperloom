@@ -1,0 +1,18 @@
+[build-system]
+requires = ["setuptools>=77,<81", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "vllm-windows-rocm"
+version = "0.0.1"
+description = "Out-of-tree vLLM platform plugin for native Windows + AMD ROCm (RDNA3 / gfx1100)"
+requires-python = ">=3.10"
+
+# vLLM discovers platform backends via this entry-point group; an out-of-tree
+# plugin wins over the built-in cuda/rocm/cpu detectors. register() returns the
+# platform class qualname (or None to stay inactive).
+[project.entry-points."vllm.platform_plugins"]
+windows_rocm = "vllm_windows_rocm:register"
+
+[tool.setuptools]
+packages = ["vllm_windows_rocm"]

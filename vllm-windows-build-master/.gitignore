@@ -1,0 +1,44 @@
+# vLLM source tree (cloned in build.bat)
+vllm-source/
+
+# Python build artefacts
+__pycache__/
+*.pyc
+*.pyo
+*.egg-info/
+.pytest_cache/
+
+# Logs
+*.log
+
+# Virtual environments
+venv/
+env/
+.venv/
+
+# Portable Python install (from install.bat)
+python/
+
+# Pre-built wheels (uploaded to GitHub Releases instead)
+dist/
+dist-v2/
+dist-v3/
+dist-v4/
+dist-v5/
+dist-v6/
+dist-v7/
+dist-v0.23.0/
+dist-v0.24.0/
+*.whl
+
+# Local config
+.vllm_config.json
+.claude/
+
+# Model storage
+models/
+
+# Test output
+test_*_output.log
+test_*.log
+

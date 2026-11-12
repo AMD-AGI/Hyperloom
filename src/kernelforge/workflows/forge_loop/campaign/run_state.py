@@ -6,7 +6,11 @@
 from __future__ import annotations
 
 import collections
-import fcntl
+
+try:
+    import fcntl
+except ImportError:  # pragma: no cover - Windows has no flock.
+    fcntl = None  # type: ignore[assignment]
 import json
 import logging
 import math
@@ -634,7 +638,8 @@ class WorkspaceLock:
         lock_file = open(self.path, "a+")
         try:
             try:
-                fcntl.flock(lock_file.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+                if fcntl is not None:
+                    fcntl.flock(lock_file.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
             except BlockingIOError as e:
                 raise WorkspaceLockError(f"workspace is already in use: {self.path.parent.parent}") from e
             lock_file.seek(0)
@@ -651,7 +656,8 @@ class WorkspaceLock:
         if self._file is None:
             return
         try:
-            fcntl.flock(self._file.fileno(), fcntl.LOCK_UN)
+            if fcntl is not None:
+                fcntl.flock(self._file.fileno(), fcntl.LOCK_UN)
         finally:
             self._file.close()
             self._file = None

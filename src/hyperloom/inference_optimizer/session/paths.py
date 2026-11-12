@@ -6,12 +6,14 @@
 from __future__ import annotations
 
 import errno
+import getpass
 import json
 import logging
 import os
 import hashlib
 import re
 import stat
+import tempfile
 from datetime import datetime, timezone
 from pathlib import Path
 from uuid import uuid4
@@ -293,6 +295,18 @@ def session_ledger_key(session_dir: Path) -> str:
     return f"{re.sub(r'[^A-Za-z0-9_.-]', '_', ident)[:40]}-{hashlib.sha256(ident.encode()).hexdigest()[:16]}"
 
 
+def _account_ledger_base() -> Path:
+    """Where this account's own ledgers live when no directory is named: per-user temp, suffixed by account.
+
+    The euid-tagged ``/tmp`` directory has no Windows meaning; the per-user temp carries the account's own ACLs
+    instead, and the account tag is its logon name, sanitized the way session keys are.
+    """
+    if os.name == "posix":
+        return Path(os.environ.get("TMPDIR") or "/tmp") / f"{PRIVATE_DB_DIR_PREFIX}{os.geteuid()}"
+    tag = re.sub(r"[^A-Za-z0-9_.-]", "_", getpass.getuser())
+    return Path(tempfile.gettempdir()) / f"{PRIVATE_DB_DIR_PREFIX}{tag}"
+
+
 def private_db_path_for(session_dir: Path) -> Path:
     """Return the path of this account's own coordinator database for a session, outside the session directory (see
     :data:`PRIVATE_DB_DIR_PREFIX`, :data:`ENV_LEDGER_DIR` and :func:`session_ledger_key`); nothing is made there.
@@ -300,7 +314,7 @@ def private_db_path_for(session_dir: Path) -> Path:
     Raises:
         ValueError: When ``HYPERLOOM_LEDGER_DIR`` is not an absolute path.
     """
-    ledgers = named_ledger_dir() or Path(os.environ.get("TMPDIR") or "/tmp") / f"{PRIVATE_DB_DIR_PREFIX}{os.geteuid()}"
+    ledgers = named_ledger_dir() or _account_ledger_base()
     return ledgers / session_ledger_key(session_dir) / "coordinator.db"
 
 
@@ -317,6 +331,11 @@ def private_db_exists(session_dir: Path) -> bool:
         info = os.lstat(private_db_path_for(session_dir))
     except OSError:
         return False
+    if os.name != "posix":
+        # No uid to compare; the ledger base is already per-account, so refuse only a link standing at the end.
+        return stat.S_ISREG(info.st_mode) and not (
+            stat.S_ISLNK(info.st_mode) or getattr(info, "st_file_attributes", 0) & stat.FILE_ATTRIBUTE_REPARSE_POINT
+        )
     return stat.S_ISREG(info.st_mode) and info.st_uid == os.geteuid()
 
 

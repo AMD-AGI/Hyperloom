@@ -1,0 +1,46 @@
+diff --git a/vllm/model_executor/models/gemma4.py b/vllm/model_executor/models/gemma4.py
+index 0618954..14eddb4 100644
+--- a/vllm/model_executor/models/gemma4.py
++++ b/vllm/model_executor/models/gemma4.py
+@@ -1567,21 +1567,37 @@ class Gemma4ForCausalLM(
+                 # No transpose needed: checkpoint orientation already
+                 # matches FusedMoE's expected layout.
+                 if "moe.gate_up_proj" in name and weight.dim() == 3:
++                    # compressed-tensors pack-quantized checkpoints glue the
++                    # quant suffix onto the proj name with an underscore
++                    # ("gate_up_proj_packed"/"_scale"); rewrite to the canonical
++                    # dotted form ("gate_proj.weight_packed"/".weight_scale")
++                    # that expert_params_mapping (weight_name "experts.{id}.{proj}.")
++                    # expects. Leave bare/".weight" (unquantized) names untouched.
++                    suffix = name.split("gate_up_proj", 1)[1]
++                    new_suffix = ".weight" + suffix if suffix in (
++                        "_packed", "_scale") else suffix
+                     num_experts = weight.size(0)
+                     intermediate_size = weight.size(1) // 2
+                     for expert_id in range(num_experts):
+                         gate_weight = weight[expert_id, :intermediate_size, :]
+                         up_weight = weight[expert_id, intermediate_size:, :]
+                         base = name.replace("moe.", f"moe.experts.{expert_id}.")
+-                        yield base.replace("gate_up_proj", "gate_proj"), gate_weight
+-                        yield base.replace("gate_up_proj", "up_proj"), up_weight
++                        base = base.replace(f"gate_up_proj{suffix}", "")
++                        yield f"{base}gate_proj{new_suffix}", gate_weight
++                        yield f"{base}up_proj{new_suffix}", up_weight
+                     continue
+ 
+                 if "moe.down_proj" in name and weight.dim() == 3:
++                    # Same suffix normalization as gate_up (see above): map the
++                    # underscore-glued quant suffix to the canonical dotted form.
++                    suffix = name.split("down_proj", 1)[1]
++                    new_suffix = ".weight" + suffix if suffix in (
++                        "_packed", "_scale") else suffix
+                     num_experts = weight.size(0)
+                     for expert_id in range(num_experts):
+-                        expert_name = name.replace("moe.", f"moe.experts.{expert_id}.")
+-                        yield expert_name, weight[expert_id]
++                        base = name.replace("moe.", f"moe.experts.{expert_id}.")
++                        base = base.replace(f"down_proj{suffix}", "")
++                        yield f"{base}down_proj{new_suffix}", weight[expert_id]
+                     continue
+ 
+                 # k_eq_v layers: checkpoint has k_proj but no v_proj.

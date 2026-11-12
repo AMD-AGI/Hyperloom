@@ -5,10 +5,17 @@
 
 from __future__ import annotations
 
-import grp
 import os
-import pwd
 import shutil
+
+try:
+    import grp
+except ImportError:  # pragma: no cover - Windows has no Unix group database.
+    grp = None  # type: ignore[assignment]
+try:
+    import pwd
+except ImportError:  # pragma: no cover - Windows has no Unix user database.
+    pwd = None  # type: ignore[assignment]
 import stat
 from dataclasses import dataclass
 from pathlib import Path
@@ -862,6 +869,10 @@ def resolve_run_as(user: str | None) -> RunAs | None:
     name = (user or "").strip()
     if not name:
         return None
+    if pwd is None or grp is None or not hasattr(os, "geteuid") or not hasattr(os, "getgrouplist"):
+        raise RunAsError(
+            f"{SPECIALIST_USER_ENV}={name!r}: user demotion needs a POSIX user/group database; not supported on this platform"
+        )
     try:
         entry = pwd.getpwnam(name)
     except KeyError:
@@ -917,7 +928,10 @@ def missing_launch_capabilities() -> list[str]:
         status = Path("/proc/self/status").read_text(encoding="utf-8")
         effective = next(int(line.split()[1], 16) for line in status.splitlines() if line.startswith("CapEff:"))
     except (OSError, StopIteration, ValueError, IndexError):
-        return [] if os.geteuid() == 0 else list(_CAPABILITIES)
+        geteuid = getattr(os, "geteuid", None)
+        if callable(geteuid):
+            return [] if geteuid() == 0 else list(_CAPABILITIES)
+        return list(_CAPABILITIES)
     return missing_capabilities(effective)
 
 

@@ -1,0 +1,43 @@
+diff --git a/vllm/v1/attention/backends/triton_attn.py b/vllm/v1/attention/backends/triton_attn.py
+index 6d967b5..f971579 100644
+--- a/vllm/v1/attention/backends/triton_attn.py
++++ b/vllm/v1/attention/backends/triton_attn.py
+@@ -594,16 +594,28 @@ class TritonAttentionImpl(AttentionImpl):
+             # triton kernel does not support uint8 kv_cache
+             #  (because some explicit casts (e.g. float8_e4m3fnuz)
+             #   are not supported)
+-        triton_reshape_and_cache_flash(
+-            key,
+-            value,
+-            key_cache,
+-            value_cache,
+-            slot_mapping,
+-            self.kv_cache_dtype,
+-            layer._k_scale,
+-            layer._v_scale,
+-        )
++        # Prefer the native HIP reshape_and_cache_flash (torch.ops._C_cache_ops, built 1:1 from
++        # csrc/cache_kernels.cu) over the Triton fallback when present -- one HIP launch instead of a
++        # Triton launch on the per-token KV write. Identical signature. Not for fp8 caches: the
++        # Windows build of that extension has no ENABLE_FP8, so its fp8 scaled_convert is a stub
++        # (assert(false) / zeros); the Triton kernel quantizes correctly.
++        if (not self.kv_cache_dtype.startswith("fp8")
++                and hasattr(torch.ops, "_C_cache_ops")
++                and hasattr(torch.ops._C_cache_ops, "reshape_and_cache_flash")):
++            torch.ops._C_cache_ops.reshape_and_cache_flash(
++                key, value, key_cache, value_cache, slot_mapping,
++                self.kv_cache_dtype, layer._k_scale, layer._v_scale)
++        else:
++            triton_reshape_and_cache_flash(
++                key,
++                value,
++                key_cache,
++                value_cache,
++                slot_mapping,
++                self.kv_cache_dtype,
++                layer._k_scale,
++                layer._v_scale,
++            )
+ 
+     def fused_rope_kvcache_supported(self):
+         return rocm_aiter_ops.is_enabled()

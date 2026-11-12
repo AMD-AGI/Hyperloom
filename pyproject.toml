@@ -371,6 +371,9 @@ hyperloom_multibranch = [
 
 [tool.pytest.ini_options]
 asyncio_mode = "auto"
+# Keep the current fixture loop scope explicitly: future pytest-asyncio defaults this to "function",
+# which would change shared-loop behavior. Revisit deliberately, not by upgrade surprise.
+asyncio_default_fixture_loop_scope = "fixture-scope"
 # One recursive glob covers every per-package tests/ dir under src/ --
 # hyperloom and kernelforge alike.
 # ``scripts/tests`` is listed separately because the operator scripts sit

@@ -18,8 +18,10 @@ from typing import Any, NamedTuple
 
 import yaml
 
+from hyperloom_common import winproc
 from hyperloom_common.coerce import to_float, to_int
 from hyperloom_common.env import is_truthy
+from hyperloom_common.platform import is_windows
 from hyperloom.common.env_safety import build_benchmark_env
 from hyperloom.common.outside_facts import ENV_EVAL_ONLY
 
@@ -257,7 +259,9 @@ class _Round:
         """Write the pid/meta files a later round needs to recognise and reuse this server."""
         try:
             pgid = os.getpgid(proc.pid)
-        except OSError:
+        except (AttributeError, OSError):
+            # Windows has no process group to record: the pid itself is what the
+            # teardown walks with ``taskkill /T``.
             pgid = proc.pid
         bypass_engine.write_lifecycle_files(
             pid_dir,
@@ -495,6 +499,7 @@ def _launch_server(cmd: list[str], env: dict[str, str], server_log: Path) -> sub
         stdout=log_fh,
         stderr=subprocess.STDOUT,
         start_new_session=True,
+        creationflags=winproc.spawn_flags(),
     )
     # Stash the log handle on the proc so _terminate_server can close it; the child holds its own dup'd fd, so closing
     # ours does not truncate the log.
@@ -503,23 +508,36 @@ def _launch_server(cmd: list[str], env: dict[str, str], server_log: Path) -> sub
 
 
 def _terminate_server(proc: subprocess.Popen | None) -> None:
-    """Best-effort teardown of the server process group."""
+    """Best-effort teardown of the server process group.
+
+    Windows has no SIGTERM: the ask is ``taskkill /T`` without ``/F`` (which reaches only
+    processes with a window), the wait follows, and the forced pass ends whatever ignored it.
+    """
     if proc is None:
         return
-    try:
-        os.killpg(os.getpgid(proc.pid), signal.SIGTERM)
-    except (ProcessLookupError, PermissionError, OSError):
+    if is_windows():
+        winproc.terminate_tree(proc.pid, force=False)
         try:
-            proc.terminate()
-        except OSError:
+            proc.wait(timeout=30)
+            return
+        except subprocess.TimeoutExpired:
             pass
-    try:
-        proc.wait(timeout=30)
-    except subprocess.TimeoutExpired:
+        winproc.terminate_tree(proc.pid, force=True)
+    else:
         try:
-            os.killpg(os.getpgid(proc.pid), signal.SIGKILL)
+            os.killpg(os.getpgid(proc.pid), signal.SIGTERM)
         except (ProcessLookupError, PermissionError, OSError):
-            pass
+            try:
+                proc.terminate()
+            except OSError:
+                pass
+        try:
+            proc.wait(timeout=30)
+        except subprocess.TimeoutExpired:
+            try:
+                os.killpg(os.getpgid(proc.pid), signal.SIGKILL)
+            except (ProcessLookupError, PermissionError, OSError):
+                pass
     # Close the server.log handle opened by _launch_server (the child kept its own dup'd fd) so repeated lifecycle
     # rounds don't leak file descriptors.
     log_fh = getattr(proc, "_bypass_log_fh", None)

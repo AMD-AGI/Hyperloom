@@ -20,7 +20,11 @@ serialize nothing at all.
 from __future__ import annotations
 
 from collections.abc import Iterator
-import fcntl
+
+try:
+    import fcntl
+except ImportError:  # pragma: no cover - Windows has no flock.
+    fcntl = None  # type: ignore[assignment]
 import functools
 import os
 import re
@@ -243,6 +247,8 @@ def acquire_repo_lock(repo: str) -> RepoLock | None:
         os.chmod(lock_path, 0o600)
     except OSError:
         return None
+    if fcntl is None:  # No advisory locking on Windows; hold the open file as the lock.
+        return RepoLock(fh)
     try:
         fcntl.flock(fh.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
     except OSError:
@@ -255,10 +261,11 @@ def release_repo_lock(lock: RepoLock | None) -> None:
     """Release + close the in-place repo lock (best-effort, idempotent)."""
     if lock is None or lock.released:
         return
-    try:
-        fcntl.flock(lock.fd, fcntl.LOCK_UN)
-    except OSError:
-        pass
+    if fcntl is not None:
+        try:
+            fcntl.flock(lock.fd, fcntl.LOCK_UN)
+        except OSError:
+            pass
     try:
         lock.close()
     except OSError:

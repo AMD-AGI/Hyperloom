@@ -173,14 +173,16 @@ def _apply_operator_supplied_paths(args: Any, framework: str) -> None:
     if framework == "custom":
         from hyperloom.orchestrator.actions.executors.benchmark_backend import (
             BENCHMARK_BACKEND_ENV,
-            DEFAULT_BENCHMARK_BACKEND,
+            resolve_backend_name,
         )
 
-        # Matches install.sh's normalisation so the two gates agree on a value like " Bypass "; anything else,
-        # including unset, is refused.
-        backend = os.environ.get(BENCHMARK_BACKEND_ENV, "").strip().lower()
+        # The gate reads the effective backend (an explicit choice, else the OS default), so Windows — whose
+        # default is already bypass — passes without setting it. Matches install.sh's normalisation so the two
+        # gates agree on a value like " Bypass "; anything else, including unset on Linux, is refused.
+        backend = resolve_backend_name()
         if backend != "bypass":
-            shown = f"{backend!r}" if backend else f"unset (defaults to {DEFAULT_BENCHMARK_BACKEND!r})"
+            raw = os.environ.get(BENCHMARK_BACKEND_ENV, "").strip()
+            shown = f"{raw!r}" if raw else f"unset (defaults to {backend!r})"
             fatal.append(
                 f"--framework custom requires {BENCHMARK_BACKEND_ENV}=bypass; it is {shown}. "
                 "The default backend cannot run an operator-supplied script."

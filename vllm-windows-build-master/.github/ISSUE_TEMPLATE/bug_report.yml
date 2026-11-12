@@ -1,0 +1,50 @@
+name: Bug report
+description: Report an installation, startup, or inference problem on Windows
+title: "[Bug] "
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Check the [release selection guide](https://github.com/aivrar/vllm-windows-build/blob/master/docs/releases.md) and [troubleshooting](https://github.com/aivrar/vllm-windows-build/blob/master/docs/troubleshooting.md). Please remove tokens, passwords, and private paths from logs before posting.
+  - type: input
+    id: release
+    attributes:
+      label: Release tag or commit
+      description: Include the exact release tag, branch commit, or source build revision.
+      placeholder: v0.29.0-win-cu132-py314
+    validations:
+      required: true
+  - type: textarea
+    id: environment
+    attributes:
+      label: Hardware and software
+      description: GPU and VRAM, NVIDIA driver, Windows version, Python version, and PyTorch/CUDA version.
+      placeholder: "RTX 5090 32 GB; driver 616.92; Windows 11; Python 3.14.2; Torch 2.13.0+cu132"
+    validations:
+      required: true
+  - type: input
+    id: model
+    attributes:
+      label: Model (if applicable)
+      description: Model ID or local path, revision, and quantization format.
+  - type: textarea
+    id: steps
+    attributes:
+      label: Command and steps to reproduce
+      description: Include the exact install or launch command and what you did before the problem appeared.
+    validations:
+      required: true
+  - type: textarea
+    id: result
+    attributes:
+      label: Expected and actual result
+      description: State what you expected and what happened instead.
+    validations:
+      required: true
+  - type: textarea
+    id: logs
+    attributes:
+      label: First relevant error or traceback
+      description: Include the first failure and a few surrounding lines. Redact credentials and private data.
+      render: text

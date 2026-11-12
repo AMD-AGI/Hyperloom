@@ -11,6 +11,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING
 
 from hyperloom_common.env import env_flag
+from hyperloom_common.platform import is_windows
 from hyperloom.common.env_safety import scrub_benchmark_process_env
 from hyperloom.common.visible_devices import hip_mask_within_rocr
 
@@ -32,13 +33,16 @@ _RAY_OWNED_VISIBLE_DEVICE_VARS = (
 def ray_exec_enabled() -> bool:
     """Whether serving and ``needs_gpu`` specialist work runs through the Ray backend.
 
-    Multi-node is always OFF. On single-node ``INFERENCE_OPTIMIZER_RAY_EXEC`` decides when set; otherwise it is ON,
-    and OFF under pytest. ON also needs a Ray head that answers a driver (``ray_head_answers_driver``): one that does
-    not turns this OFF, as if the flag were ``0``, until the head is probed again after a reconnect or a head start.
+    Multi-node is always OFF. On single-node ``INFERENCE_OPTIMIZER_RAY_EXEC`` decides when set; otherwise it is ON
+    on POSIX and OFF on Windows (Ray's head lifecycle needs POSIX process groups), and OFF under pytest. ON also
+    needs a Ray head that answers a driver (``ray_head_answers_driver``): one that does not turns this OFF, as if
+    the flag were ``0``, until the head is probed again after a reconnect or a head start.
     """
     from ._multi_node_env import is_multi_node
 
     if is_multi_node():
+        return False
+    if is_windows() and "INFERENCE_OPTIMIZER_RAY_EXEC" not in os.environ:
         return False
     if not env_flag("INFERENCE_OPTIMIZER_RAY_EXEC", default=not os.environ.get("PYTEST_CURRENT_TEST")):
         return False

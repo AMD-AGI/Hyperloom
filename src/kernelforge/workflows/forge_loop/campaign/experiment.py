@@ -6,7 +6,11 @@
 from __future__ import annotations
 
 import contextlib
-import fcntl
+
+try:
+    import fcntl
+except ImportError:  # pragma: no cover - Windows has no flock.
+    fcntl = None  # type: ignore[assignment]
 import hashlib
 import json
 import re
@@ -74,22 +78,26 @@ class ExperimentTracker:
     def _experiment_lock(self, experiment_id: str):
         lock_path = self.dir / f".experiment.{experiment_id}.lock"
         with open(lock_path, "a") as lock_file:
-            fcntl.flock(lock_file.fileno(), fcntl.LOCK_EX)
+            if fcntl is not None:
+                fcntl.flock(lock_file.fileno(), fcntl.LOCK_EX)
             try:
                 yield
             finally:
-                fcntl.flock(lock_file.fileno(), fcntl.LOCK_UN)
+                if fcntl is not None:
+                    fcntl.flock(lock_file.fileno(), fcntl.LOCK_UN)
 
     @contextlib.contextmanager
     def _campaign_lock(self, campaign_id: str):
         lock_id = hashlib.sha256(campaign_id.encode("utf-8")).hexdigest()
         lock_path = self.dir / f".campaign.{lock_id}.lock"
         with open(lock_path, "a") as lock_file:
-            fcntl.flock(lock_file.fileno(), fcntl.LOCK_EX)
+            if fcntl is not None:
+                fcntl.flock(lock_file.fileno(), fcntl.LOCK_EX)
             try:
                 yield
             finally:
-                fcntl.flock(lock_file.fileno(), fcntl.LOCK_UN)
+                if fcntl is not None:
+                    fcntl.flock(lock_file.fileno(), fcntl.LOCK_UN)
 
     def _find_segment(self, campaign_id: str, segment_index: int) -> Experiment | None:
         for path in self.dir.glob("*.json"):

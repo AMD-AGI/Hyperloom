@@ -43,14 +43,19 @@ log = logging.getLogger(__name__)
 SHARED_DIR_MODE = 0o2775
 SHARED_FILE_MODE = 0o664
 
-_DIRECTORY = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC
+#: `os` open flags missing on Windows: 0 there, so the same expressions build on both platforms.
+_O_DIRECTORY = getattr(os, "O_DIRECTORY", 0)
+_O_NOFOLLOW = getattr(os, "O_NOFOLLOW", 0)
+_O_CLOEXEC = getattr(os, "O_CLOEXEC", 0)
+
+_DIRECTORY = os.O_RDONLY | _O_DIRECTORY | _O_NOFOLLOW | _O_CLOEXEC
 #: How each directory of a path is opened on the way (:func:`open_directory`): only to name what is below it, which
 #: needs no read permission (a home directory may be ``0711``), and never through a link.
-_WAY = os.O_PATH | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC
+_WAY = getattr(os, "O_PATH", os.O_RDONLY) | _O_DIRECTORY | _O_NOFOLLOW | _O_CLOEXEC
 #: How a link on the way is opened to check whose it is and read it (:meth:`_Walk.follow`).
-_LINK = os.O_PATH | os.O_NOFOLLOW | os.O_CLOEXEC
-_NEW_FILE = os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW | os.O_CLOEXEC
-_APPEND = os.O_WRONLY | os.O_APPEND | os.O_NOFOLLOW | os.O_CLOEXEC
+_LINK = getattr(os, "O_PATH", os.O_RDONLY) | _O_NOFOLLOW | _O_CLOEXEC
+_NEW_FILE = os.O_WRONLY | os.O_CREAT | os.O_EXCL | _O_NOFOLLOW | _O_CLOEXEC
+_APPEND = os.O_WRONLY | os.O_APPEND | _O_NOFOLLOW | _O_CLOEXEC
 _PROBE_PREFIX = ".hl-writable-"
 #: What a new file is made with, before ``fchmod`` gives it its mode: the umask never decides it.
 _OWNER_ONLY = 0o600
@@ -313,17 +318,44 @@ def _share(parent: int, name: str, mode: int, directory: Path) -> None:
         )
 
 
+def _make_plain_dirs(path: Path) -> None:
+    """Create each missing directory of ``path`` without following a link, for platforms without ``dir_fd``.
+
+    The link-safe walk of :func:`open_directory` needs ``O_PATH`` descriptors and ``dir_fd``-relative opens, neither
+    of which Windows has (a directory cannot be opened at all), so the walk cannot start there. This keeps its
+    refusal contract instead -- a link where a directory belongs is ``ELOOP``, anything else ``ENOTDIR`` -- and
+    leaves modes to inherited ACLs: setgid, group membership and umask masking have no Windows meaning.
+    """
+    current = Path(path.parts[0])
+    for part in path.parts[1:]:
+        nxt = current / part
+        try:
+            info = os.lstat(nxt)
+        except FileNotFoundError:
+            os.mkdir(nxt)
+            current = nxt
+            continue
+        if stat.S_ISLNK(info.st_mode) or getattr(info, "st_file_attributes", 0) & stat.FILE_ATTRIBUTE_REPARSE_POINT:
+            raise FileExistsError(errno.ELOOP, os.strerror(errno.ELOOP), str(nxt))
+        if not stat.S_ISDIR(info.st_mode):
+            raise NotADirectoryError(errno.ENOTDIR, os.strerror(errno.ENOTDIR), str(nxt))
+        current = nxt
+
+
 def make_shared_dirs(path: Path, *, mode: int = SHARED_DIR_MODE) -> Path:
     """Create each missing directory of ``path`` with ``mode`` (default ``2775``) and return ``path``.
 
     The way is walked as :func:`open_directory` walks it, so a link a member of the group put there is never followed,
     and nothing is made at the missing target of a link (``FileExistsError``, as ``mkdir`` refuses it). Below shared
     storage (:func:`parent_is_shared`, judged once, at the nearest directory that exists) the mode is set by ``fchmod``
-    on each new directory, so the umask never decides it; the group comes from a setgid parent. Anywhere else ``mode``
+    on each new directory, so the umask never decides it; the group comes from a setgid parent.     Anywhere else ``mode``
     is only asked of ``mkdir``, which masks it with the umask. An existing directory is left as it is. A new shared
     directory that did not keep the setgid bit (this account is not in its group, which a setgid parent gave it) is
     logged: what is made below it takes this account's group, which the next account may not share.
     """
+    if os.name != "posix":
+        _make_plain_dirs(Path(path))
+        return path
     os.close(open_directory(path, make=mode))
     return path
 
@@ -376,7 +408,15 @@ def open_shared(path: Path, access: int, mode: int = SHARED_FILE_MODE) -> int:
     It is reached through its parent as :func:`open_directory` reaches it, and never through a link. A file that exists
     is opened as it is, never truncated, chmodded or replaced by rename: a lock or a log that another process holds open
     would be left on an unlinked inode. Another account's ``0600`` file therefore raises ``PermissionError``.
+
+    On Windows there are no directory descriptors and no ``dir_fd``-relative opens, so a missing file is created
+    exclusively by name and an existing one is opened as-is; modes and link-chasing are the OS ACLs' job.
     """
+    if os.name != "posix":
+        try:
+            return os.open(path, access | os.O_CREAT | os.O_EXCL, mode)
+        except FileExistsError:
+            return os.open(path, access)
     with shared_parent(path) as (directory, name, widen):
         try:
             descriptor = os.open(
@@ -411,7 +451,15 @@ def write_shared_bytes(
     """Write ``data`` to a new file beside ``path`` and rename it over ``path``: the file is then this account's,
     whoever owned the one it replaced. Below shared storage (:func:`parent_is_shared`) the file has ``mode`` whatever
     the umask; anywhere else ``private_mode`` when given, else ``mode`` masked by the umask. ``flush`` says what is
-    flushed to disk; a flush that fails raises its ``OSError``."""
+    flushed to disk; a flush that fails raises its ``OSError``.
+
+    On Windows there are no directory descriptors and no ``dir_fd``-relative opens, so the temp file is made by
+    name in the same directory and renamed over the target, which is atomic on NTFS too. Modes and link-chasing
+    are the OS ACLs' job, as for a plain write; the directory flush is skipped, since directories cannot be fsynced.
+    """
+    if os.name != "posix":
+        _write_plain_shared_bytes(path, data, flush=flush)
+        return
     with shared_parent(path) as (directory, name, widen):
         if widen or private_mode is None:
             private_mode = _final_mode(mode, widen)
@@ -433,6 +481,23 @@ def write_shared_bytes(
                 os.fsync(flushed)
             finally:
                 os.close(flushed)
+
+
+def _write_plain_shared_bytes(path: Path, data: bytes, *, flush: Flush) -> None:
+    """The Windows half of :func:`write_shared_bytes`: temp file beside the target, renamed over it."""
+    parent = Path(path).parent
+    fd, temporary = tempfile.mkstemp(prefix=f".{Path(path).name}.", suffix=_TEMPORARY_SUFFIX, dir=parent)
+    try:
+        with os.fdopen(fd, "wb") as handle:
+            handle.write(data)
+            if flush.file:
+                handle.flush()
+                os.fsync(handle.fileno())
+        os.replace(temporary, path)
+    except BaseException:
+        with suppress(OSError):
+            os.unlink(temporary)
+        raise
 
 
 def open_shared_replacement(path: Path, *, mode: int = SHARED_FILE_MODE) -> int:

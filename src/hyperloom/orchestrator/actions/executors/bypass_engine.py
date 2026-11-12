@@ -171,7 +171,8 @@ class ClientRun:
 def build_client_command(run: ClientRun) -> list[str]:
     """Build the InferenceX benchmark client argv."""
     conc = run.conc
-    bench_py = str(Path(run.inferencex_root) / "utils" / "bench_serving" / "benchmark_serving.py")
+    # Forward-slash spelling: identical on POSIX, and a stable argv contract on Windows.
+    bench_py = (Path(run.inferencex_root) / "utils" / "bench_serving" / "benchmark_serving.py").as_posix()
     prompts = run.num_prompts if run.num_prompts is not None else (conc if run.profile else conc * 10)
     warmups = run.num_warmups if run.num_warmups is not None else 2 * conc
     cmd = [

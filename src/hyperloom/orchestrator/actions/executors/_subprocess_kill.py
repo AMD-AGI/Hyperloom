@@ -22,7 +22,9 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Callable, NamedTuple, Protocol
 
+from hyperloom_common import winproc
 from hyperloom_common.env import env_flag
+from hyperloom_common.platform import is_windows
 from hyperloom.common.proctree import REAP_MARK_ENV, TERM_GRACE_SEC, collect_tree, kill_tree, marked_pids
 
 from .bypass_analysis import parse_server_log_throughput
@@ -74,6 +76,15 @@ def kill_my_spawned_server(
     if proc.poll() is not None:
         if marked:
             kill_tree(collect_tree(marked), grace_sec=grace_seconds, confirm_sec=grace_seconds)
+        return
+    if is_windows():
+        # A console server is ended by forcing its tree: ``terminate()`` alone leaves the
+        # engine ranks it started alive, still holding VRAM.
+        kill_tree(collect_tree([proc.pid, *marked]), grace_sec=grace_seconds, confirm_sec=grace_seconds)
+        try:
+            proc.wait(timeout=_REAP_COLLECT_SECONDS)
+        except (subprocess.TimeoutExpired, OSError):
+            pass
         return
     if os.name != "posix":
         _terminate_single_process(proc, grace_seconds)
@@ -978,6 +989,7 @@ def run_with_session_kill(
                 env=child_env,
                 cwd=cwd,
                 start_new_session=True,
+                creationflags=winproc.spawn_flags(),
             )
             capture = _StreamCapture(proc, on_output=on_output)
             capture.start()

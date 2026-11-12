@@ -1,0 +1,1026 @@
+diff --git a/CMakeLists.txt b/CMakeLists.txt
+index 65df275..f320d54 100644
+--- a/CMakeLists.txt
++++ b/CMakeLists.txt
+@@ -64,7 +64,7 @@ set(TORCH_SUPPORTED_VERSION_ROCM "2.10.0")
+ # `VLLM_PYTHON_EXECUTABLE` and is one of the supported versions.
+ #
+ if (VLLM_PYTHON_EXECUTABLE)
+-  find_python_from_executable(${VLLM_PYTHON_EXECUTABLE} "${PYTHON_SUPPORTED_VERSIONS}")
++  find_python_from_executable("${VLLM_PYTHON_EXECUTABLE}" "${PYTHON_SUPPORTED_VERSIONS}")
+ else()
+   message(FATAL_ERROR
+     "Please set VLLM_PYTHON_EXECUTABLE to the path of the desired python version"
+@@ -82,6 +82,16 @@ if (CUDA_FOUND AND NOT NVCC_EXECUTABLE)
+     message(FATAL_ERROR "nvcc not found")
+ endif()
+ 
++#
++# Force CUDA toolkit to match CUDA_HOME to avoid version mismatch when
++# multiple CUDA versions are installed.
++#
++if(DEFINED ENV{CUDA_HOME})
++  set(CUDA_TOOLKIT_ROOT_DIR "$ENV{CUDA_HOME}" CACHE PATH "" FORCE)
++  set(CUDAToolkit_ROOT "$ENV{CUDA_HOME}" CACHE PATH "" FORCE)
++  set(CUDA_BIN_PATH "$ENV{CUDA_HOME}" CACHE PATH "" FORCE)
++endif()
++
+ #
+ # Import torch cmake configuration.
+ # Torch also imports CUDA (and partially HIP) languages with some customizations,
+@@ -198,9 +208,21 @@ endif()
+ # Set CUDA include flags for CXX compiler.
+ #
+ if(VLLM_GPU_LANG STREQUAL "CUDA")
+-  set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -I${CUDA_TOOLKIT_ROOT_DIR}/include")
+-  if(CUDA_VERSION VERSION_GREATER_EQUAL 13.0)
+-    set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -I${CUDA_TOOLKIT_ROOT_DIR}/include/cccl")
++  if(MSVC)
++    # MSVC needs explicit CUDA include path for host compiler
++    set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} \"-I${CUDA_TOOLKIT_ROOT_DIR}/include\"")
++    add_compile_definitions(_CRT_DECLARE_NONSTDC_NAMES=1)
++    # Tell torch headers we're building with CUDA (activates Windows
++    # workaround in compiled_autograd.h for CCCL 'std' ambiguity)
++    add_compile_definitions(USE_CUDA)
++    # Use standard conforming preprocessor for correct variadic macro handling
++    set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} /Zc:preprocessor")
++    set(CMAKE_CUDA_FLAGS "${CMAKE_CUDA_FLAGS} -Xcompiler=/Zc:preprocessor")
++  else()
++    set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -I${CUDA_TOOLKIT_ROOT_DIR}/include")
++    if(CUDA_VERSION VERSION_GREATER_EQUAL 13.0)
++      set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -I${CUDA_TOOLKIT_ROOT_DIR}/include/cccl")
++    endif()
+   endif()
+ endif()
+ 
+@@ -977,6 +999,7 @@ define_extension_target(
+   ARCHITECTURES ${VLLM_GPU_ARCHES}
+   INCLUDE_DIRECTORIES ${CUTLASS_INCLUDE_DIR}
+   INCLUDE_DIRECTORIES ${CUTLASS_TOOLS_UTIL_INCLUDE_DIR}
++  LIBRARIES CUDA::cublas
+   USE_SABI 3
+   WITH_SOABI)
+ 
+@@ -1161,6 +1184,7 @@ define_extension_target(
+   ARCHITECTURES ${VLLM_GPU_ARCHES}
+   INCLUDE_DIRECTORIES ${CUTLASS_INCLUDE_DIR}
+   INCLUDE_DIRECTORIES ${CUTLASS_TOOLS_UTIL_INCLUDE_DIR}
++  LIBRARIES CUDA::cublas
+   USE_SABI 3
+   WITH_SOABI)
+ 
+diff --git a/cmake/utils.cmake b/cmake/utils.cmake
+index bdb2ba7..75eca62 100644
+--- a/cmake/utils.cmake
++++ b/cmake/utils.cmake
+@@ -3,7 +3,7 @@
+ # `EXECUTABLE` and is one of the `SUPPORTED_VERSIONS`.
+ #
+ macro (find_python_from_executable EXECUTABLE SUPPORTED_VERSIONS)
+-  file(REAL_PATH ${EXECUTABLE} EXECUTABLE)
++  file(REAL_PATH "${EXECUTABLE}" EXECUTABLE)
+   set(Python_EXECUTABLE ${EXECUTABLE})
+   find_package(Python COMPONENTS Interpreter Development.Module Development.SABIModule)
+   if (NOT Python_FOUND)
+diff --git a/csrc/attention/merge_attn_states.cu b/csrc/attention/merge_attn_states.cu
+index 27d1e99..f7ecc23 100644
+--- a/csrc/attention/merge_attn_states.cu
++++ b/csrc/attention/merge_attn_states.cu
+@@ -7,6 +7,10 @@
+ #include "attention_dtypes.h"
+ #include "attention_utils.cuh"
+ 
++#ifdef _MSC_VER
++typedef unsigned int uint;
++#endif
++
+ namespace vllm {
+ 
+ // Implements section 2.2 of https://www.arxiv.org/pdf/2501.01005
+@@ -45,8 +49,8 @@ __global__ void merge_attn_states_kernel(
+ 
+   float p_lse = prefix_lse[head_idx * num_tokens + token_idx];
+   float s_lse = suffix_lse[head_idx * num_tokens + token_idx];
+-  p_lse = std::isinf(p_lse) ? -std::numeric_limits<float>::infinity() : p_lse;
+-  s_lse = std::isinf(s_lse) ? -std::numeric_limits<float>::infinity() : s_lse;
++  p_lse = isinf(p_lse) ? -std::numeric_limits<float>::infinity() : p_lse;
++  s_lse = isinf(s_lse) ? -std::numeric_limits<float>::infinity() : s_lse;
+ 
+   const float max_lse = fmaxf(p_lse, s_lse);
+ 
+@@ -58,7 +62,7 @@ __global__ void merge_attn_states_kernel(
+      prefix_output (expected to be all zeros) and prefix_lse (-inf) to fix
+      this problem.
+   */
+-  if (std::isinf(max_lse)) {
++  if (isinf(max_lse)) {
+     if (pack_offset < head_size) {
+       // Pack 128b load
+       pack_128b_t p_out_pack = reinterpret_cast<const pack_128b_t*>(
+diff --git a/csrc/core/math.hpp b/csrc/core/math.hpp
+index 6764e1f..c6345f7 100644
+--- a/csrc/core/math.hpp
++++ b/csrc/core/math.hpp
+@@ -5,7 +5,13 @@
+ 
+ inline constexpr uint32_t next_pow_2(uint32_t const num) {
+   if (num <= 1) return num;
+-  return 1 << (CHAR_BIT * sizeof(num) - __builtin_clz(num - 1));
++  uint32_t v = num - 1;
++  v |= v >> 1;
++  v |= v >> 2;
++  v |= v >> 4;
++  v |= v >> 8;
++  v |= v >> 16;
++  return v + 1;
+ }
+ 
+ template <typename A, typename B>
+diff --git a/csrc/cumem_allocator.cpp b/csrc/cumem_allocator.cpp
+index 58ce8f7..5203819 100644
+--- a/csrc/cumem_allocator.cpp
++++ b/csrc/cumem_allocator.cpp
+@@ -1,6 +1,10 @@
+ // A CUDAPluggableAllocator based on cumem* APIs.
+ // Important: allocation size, CUdeviceptr and CUmemGenericAllocationHandle*
+ // need to be unsigned long long
++#ifdef _MSC_VER
++#include <BaseTsd.h>
++typedef SSIZE_T ssize_t;
++#endif
+ #include <iostream>
+ 
+ #include "cumem_allocator_compat.h"
+diff --git a/csrc/fused_qknorm_rope_kernel.cu b/csrc/fused_qknorm_rope_kernel.cu
+index a51e1a3..1314c98 100644
+--- a/csrc/fused_qknorm_rope_kernel.cu
++++ b/csrc/fused_qknorm_rope_kernel.cu
+@@ -18,6 +18,10 @@
+ #include <cuda_runtime.h>
+ #include <type_traits>
+ 
++#ifdef _MSC_VER
++typedef unsigned int uint;
++#endif
++
+ #include <torch/cuda.h>
+ #include <c10/cuda/CUDAGuard.h>
+ 
+diff --git a/csrc/mamba/mamba_ssm/selective_scan_fwd.cu b/csrc/mamba/mamba_ssm/selective_scan_fwd.cu
+index d852a0e..a89210b 100644
+--- a/csrc/mamba/mamba_ssm/selective_scan_fwd.cu
++++ b/csrc/mamba/mamba_ssm/selective_scan_fwd.cu
+@@ -391,35 +391,53 @@ void selective_scan_fwd_kernel(SSMParamsBase params) {
+     }
+ }
+ 
+-template<int kNThreads, int kNItems, typename input_t, typename weight_t, typename state_t>
+-void selective_scan_fwd_launch(SSMParamsBase &params, cudaStream_t stream) {
+-    // Only kNRows == 1 is tested for now, which ofc doesn't differ from previously when we had each block
+-    // processing 1 row.
++// Helper to avoid nested BOOL_SWITCH lambdas: MSVC doesn't propagate
++// constexpr through lambda captures, so template args must be real constants.
++template<int kNThreads, int kNItems, typename input_t, typename weight_t, typename state_t,
++         bool kIsEvenLen, bool kHasZ, bool kVarlen>
++void selective_scan_fwd_dispatch(SSMParamsBase &params, cudaStream_t stream) {
+     constexpr int kNRows = 1;
+-    // kIsVariableB, kIsVariableC and kHasZ are all set to True to reduce binary size
+     constexpr bool kIsVariableB = true;
+     constexpr bool kIsVariableC = true;
+-    BOOL_SWITCH(params.seqlen % (kNThreads * kNItems) == 0, kIsEvenLen, [&] {
+-        BOOL_SWITCH(params.z_ptr != nullptr , kHasZ, [&] {
+-            BOOL_SWITCH(params.query_start_loc_ptr != nullptr , kVarlen, [&] {
+-                using Ktraits = Selective_Scan_fwd_kernel_traits<kNThreads, kNItems, kNRows, kIsEvenLen, kIsVariableB, kIsVariableC, kHasZ,  kVarlen, input_t, weight_t, state_t>;
+-                constexpr int kSmemSize = Ktraits::kSmemSize + kNRows * MAX_DSTATE * sizeof(typename Ktraits::scan_t);
+-                dim3 grid(params.batch, params.dim / kNRows);
+-                auto kernel = &selective_scan_fwd_kernel<Ktraits>;
+-                if (kSmemSize >= 48 * 1024) {
+-#ifdef USE_ROCM
+-                    C10_HIP_CHECK(hipFuncSetAttribute(
+-                        reinterpret_cast<const void*>(kernel), hipFuncAttributeMaxDynamicSharedMemorySize, kSmemSize));
+-#else
+-                    C10_CUDA_CHECK(cudaFuncSetAttribute(
+-                        kernel, cudaFuncAttributeMaxDynamicSharedMemorySize, kSmemSize));
+-#endif
+-                }
+-                kernel<<<grid, Ktraits::kNThreads, kSmemSize, stream>>>(params);
+-                C10_CUDA_KERNEL_LAUNCH_CHECK();
+-            });
+-        });
+-    });
++    using Ktraits = Selective_Scan_fwd_kernel_traits<kNThreads, kNItems, kNRows, kIsEvenLen, kIsVariableB, kIsVariableC, kHasZ, kVarlen, input_t, weight_t, state_t>;
++    constexpr int kSmemSize = Ktraits::kSmemSize + kNRows * MAX_DSTATE * sizeof(typename Ktraits::scan_t);
++    dim3 grid(params.batch, params.dim / kNRows);
++    auto kernel = &selective_scan_fwd_kernel<Ktraits>;
++    if (kSmemSize >= 48 * 1024) {
++        C10_CUDA_CHECK(cudaFuncSetAttribute(
++            kernel, cudaFuncAttributeMaxDynamicSharedMemorySize, kSmemSize));
++    }
++    kernel<<<grid, Ktraits::kNThreads, kSmemSize, stream>>>(params);
++    C10_CUDA_KERNEL_LAUNCH_CHECK();
++}
++
++template<int kNThreads, int kNItems, typename input_t, typename weight_t, typename state_t>
++void selective_scan_fwd_launch(SSMParamsBase &params, cudaStream_t stream) {
++    const bool isEvenLen = params.seqlen % (kNThreads * kNItems) == 0;
++    const bool hasZ = params.z_ptr != nullptr;
++    const bool varlen = params.query_start_loc_ptr != nullptr;
++
++    #define DISPATCH_SSM(el, hz, vl) \
++        selective_scan_fwd_dispatch<kNThreads, kNItems, input_t, weight_t, state_t, el, hz, vl>(params, stream)
++
++    if (isEvenLen) {
++        if (hasZ) {
++            if (varlen) DISPATCH_SSM(true, true, true);
++            else        DISPATCH_SSM(true, true, false);
++        } else {
++            if (varlen) DISPATCH_SSM(true, false, true);
++            else        DISPATCH_SSM(true, false, false);
++        }
++    } else {
++        if (hasZ) {
++            if (varlen) DISPATCH_SSM(false, true, true);
++            else        DISPATCH_SSM(false, true, false);
++        } else {
++            if (varlen) DISPATCH_SSM(false, false, true);
++            else        DISPATCH_SSM(false, false, false);
++        }
++    }
++    #undef DISPATCH_SSM
+ }
+ 
+ template<typename input_t, typename weight_t, typename state_t>
+diff --git a/csrc/moe/grouped_topk_kernels.cu b/csrc/moe/grouped_topk_kernels.cu
+index 6a4dad3..2277813 100644
+--- a/csrc/moe/grouped_topk_kernels.cu
++++ b/csrc/moe/grouped_topk_kernels.cu
+@@ -683,11 +683,11 @@ __global__ void grouped_topk_fused_small_expert_count_kernel(
+ #endif
+   // declare shared memory structure
+   // number of experts is bounded by number of threads
+-  __shared__ float __attribute((aligned(128))) smemScoreSigmoid[MaxNumExperts];
+-  __shared__ float __attribute((aligned(128))) smemScoreBias[MaxNumExperts];
++  __shared__ float __align__(128) smemScoreSigmoid[MaxNumExperts];
++  __shared__ float __align__(128) smemScoreBias[MaxNumExperts];
+   // number of expert groups is bounded by number of warps
+   int constexpr NumWarps = MaxNumExperts / WARP_SIZE;
+-  __shared__ float __attribute((aligned(128))) smemGroupScores[NumWarps];
++  __shared__ float __align__(128) smemGroupScores[NumWarps];
+ 
+   // needed for warp reduce
+   auto block = cg::this_thread_block();
+@@ -795,9 +795,9 @@ __global__ void grouped_topk_fused_small_expert_count_kernel(
+     int constexpr NumExpertWarps = (MaxNumExperts - 1) / MaxNumExpertsUnit + 1;
+     int constexpr NumInterTopK = NumExpertWarps * MaxNumTopExperts;
+     __shared__ float
+-        __attribute((aligned(128))) smemInterTopScores[NumInterTopK];
++        __align__(128) smemInterTopScores[NumInterTopK];
+     __shared__ int32_t
+-        __attribute((aligned(128))) smemInterTopExperts[NumInterTopK];
++        __align__(128) smemInterTopExperts[NumInterTopK];
+     if (warpIdx < NumExpertWarps) {
+       int offset = warpIdx * WARP_SIZE * MaxNumTopGroups;
+ #pragma unroll
+diff --git a/csrc/moe/marlin_moe_wna16/generate_kernels.py b/csrc/moe/marlin_moe_wna16/generate_kernels.py
+index 52f2667..6c3ea60 100644
+--- a/csrc/moe/marlin_moe_wna16/generate_kernels.py
++++ b/csrc/moe/marlin_moe_wna16/generate_kernels.py
+@@ -155,10 +155,12 @@ QUANT_CONFIGS = [
+ 
+ def remove_old_kernels():
+     for filename in glob.glob(os.path.dirname(__file__) + "/*kernel_*.cu"):
+-        subprocess.call(["rm", "-f", filename])
++        if os.path.exists(filename):
++            os.remove(filename)
+ 
+     filename = os.path.dirname(__file__) + "/kernel_selector.h"
+-    subprocess.call(["rm", "-f", filename])
++    if os.path.exists(filename):
++        os.remove(filename)
+ 
+ 
+ def generate_new_kernels():
+@@ -252,10 +254,9 @@ def generate_new_kernels():
+                 ]
+                 conditions = " && ".join(conditions)
+ 
+-                if kernel_selector_str == FILE_HEAD_COMMENT:
+-                    kernel_selector_str += f"if ({conditions})\n  kernel = "
+-                else:
+-                    kernel_selector_str += f"else if ({conditions})\n  kernel = "
++                # Always use flat 'if' (not 'else if') to avoid MSVC
++                # C1061 "blocks nested too deeply" with 700+ branches.
++                kernel_selector_str += f"if ({conditions})\n  kernel = "
+ 
+                 kernel_template2 = (
+                     "Marlin<{{a_type_id}}, {{b_type_id}}, {{c_type_id}}, "
+@@ -292,7 +293,7 @@ def generate_new_kernels():
+ 
+     if not SUPPORT_FP8 and kernel_selector_str != FILE_HEAD_COMMENT:
+         kernel_selector_str += (
+-            "else if (a_type == vllm::kFE4M3fn)\n"
++            "if (a_type == vllm::kFE4M3fn)\n"
+             "  TORCH_CHECK(false, "
+             '"marlin kernel with fp8 activation is not built.");'
+         )
+diff --git a/csrc/quantization/activation_kernels.cu b/csrc/quantization/activation_kernels.cu
+index 0c3bcf3..c565353 100644
+--- a/csrc/quantization/activation_kernels.cu
++++ b/csrc/quantization/activation_kernels.cu
+@@ -216,9 +216,9 @@ constexpr __nv_bfloat16 get_fp8_max() {
+   static_assert(std::is_same_v<T, c10::Float8_e4m3fn> ||
+                 std::is_same_v<T, c10::Float8_e4m3fnuz>);
+   if constexpr (std::is_same_v<T, c10::Float8_e4m3fn>) {
+-    return __nv_bfloat16(__nv_bfloat16_raw{.x = 17376});
++    return __nv_bfloat16(__nv_bfloat16_raw{17376});
+   } else {
+-    return __nv_bfloat16(__nv_bfloat16_raw{.x = 17264});
++    return __nv_bfloat16(__nv_bfloat16_raw{17264});
+   }
+ }
+ 
+@@ -227,9 +227,9 @@ constexpr __nv_bfloat16 get_fp8_min() {
+   static_assert(std::is_same_v<T, c10::Float8_e4m3fn> ||
+                 std::is_same_v<T, c10::Float8_e4m3fnuz>);
+   if constexpr (std::is_same_v<T, c10::Float8_e4m3fn>) {
+-    return __nv_bfloat16(__nv_bfloat16_raw{.x = 50144});
++    return __nv_bfloat16(__nv_bfloat16_raw{50144});
+   } else {
+-    return __nv_bfloat16(__nv_bfloat16_raw{.x = 50032});
++    return __nv_bfloat16(__nv_bfloat16_raw{50032});
+   }
+ }
+ 
+@@ -299,7 +299,7 @@ __global__ void silu_mul_fp8_quant_deep_gemm_kernel(
+   static constexpr int COMPUTE_STAGE_SIZE = 2 * GROUP_SIZE / 4;
+   static constexpr int COMPUTE_STAGE_MOD = COMPUTE_STAGE_SIZE * NUM_STAGES;
+ 
+-  extern __shared__ __align__(16) __int128_t smem_128[];
++  extern __shared__ __align__(16) int4 smem_128[];
+ 
+   int* s_expert_offsets =
+       reinterpret_cast<int*>(smem_128 + (SMEM_SIZE_BYTES_Y / 16));
+@@ -307,7 +307,7 @@ __global__ void silu_mul_fp8_quant_deep_gemm_kernel(
+   static constexpr __nv_bfloat16 fp8_min = get_fp8_min<fp8_type>();
+   static constexpr __nv_bfloat16 fp8_max = get_fp8_max<fp8_type>();
+   // We assign EPS with it's 16-bit unsigned counterpart to allow constexpr.
+-  static constexpr __nv_bfloat16 EPS = (__nv_bfloat16_raw{.x = 11996});
++  static constexpr __nv_bfloat16 EPS = (__nv_bfloat16_raw{11996});
+   int tid = threadIdx.x;
+   int warp_id = tid >> 5;
+   int lane_id = tid & 0x1f;
+@@ -351,8 +351,8 @@ __global__ void silu_mul_fp8_quant_deep_gemm_kernel(
+   // updiv(n_tokens, NUM_PARALLEL_TOKENS) for better scheduling.
+ 
+   // Each warp will get space to store its hidden dim for gate and up.
+-  __int128_t* s_hidden_load = smem_128 + warp_id * ((2 * 128 / 8) * NUM_STAGES);
+-  __int128_t* smem_load_ptr = s_hidden_load + lane_id;
++  int4* s_hidden_load = smem_128 + warp_id * ((2 * 128 / 8) * NUM_STAGES);
++  int4* smem_load_ptr = s_hidden_load + lane_id;
+ 
+   const __nv_bfloat16 fp8_inv = __hdiv(__float2bfloat16(1.f), fp8_max);
+ 
+@@ -360,11 +360,11 @@ __global__ void silu_mul_fp8_quant_deep_gemm_kernel(
+   int32_t load_stage_offset{};
+   const __nv_bfloat16 one_bf16 = __float2bfloat16_rn(1.f);
+ 
+-  __int64_t* smem_compute_ptr = reinterpret_cast<__int64_t*>(smem_128) +
++  int64_t* smem_compute_ptr = reinterpret_cast<int64_t*>(smem_128) +
+                                 warp_id * (2 * (GROUP_SIZE / 4) * NUM_STAGES) +
+                                 lane_id;
+-  __int64_t* s_gate64_ptr = smem_compute_ptr;
+-  __int64_t* s_up64_ptr = smem_compute_ptr + GROUP_SIZE / 4;
++  int64_t* s_gate64_ptr = smem_compute_ptr;
++  int64_t* s_up64_ptr = smem_compute_ptr + GROUP_SIZE / 4;
+ 
+   int tokens_lower, tokens_upper;
+ 
+@@ -391,10 +391,10 @@ __global__ void silu_mul_fp8_quant_deep_gemm_kernel(
+   const Idx_t gate_warp_offset =
+       warp_id * ((stride_i_h * H) / (8 * NUM_WARPS)) + (lane_id & 0b1111);
+ 
+-  const __int128_t* input_128_ptr =
+-      reinterpret_cast<const __int128_t*>(_input) + gate_warp_offset +
++  const int4* input_128_ptr =
++      reinterpret_cast<const int4*>(_input) + gate_warp_offset +
+       ((lane_id < 16) ? 0 : ((H * stride_i_h) / 8));
+-  __int128_t* load_ptr = const_cast<__int128_t*>(input_128_ptr + base_i);
++  int4* load_ptr = const_cast<int4*>(input_128_ptr + base_i);
+ 
+   auto token_offset = token_id - expert_offset;
+ 
+@@ -433,15 +433,15 @@ __global__ void silu_mul_fp8_quant_deep_gemm_kernel(
+ 
+         base_i = expert_id * (stride_i_e / 8);
+         token_offset = 0;
+-        load_ptr = const_cast<__int128_t*>(input_128_ptr + base_i);
++        load_ptr = const_cast<int4*>(input_128_ptr + base_i);
+       } else {
+         // We remain within the same expert, so just
+-        // move by H/4 __int128_t (2 * H/8).
++        // move by H/4 int4 (2 * H/8).
+         base_i += stride_yq_t / 4;
+         token_offset++;
+       }
+ 
+-      load_ptr = const_cast<__int128_t*>(input_128_ptr + base_i);
++      load_ptr = const_cast<int4*>(input_128_ptr + base_i);
+ 
+       auto smem_load_ptr_staged = smem_load_ptr + load_stage_offset;
+ 
+@@ -495,15 +495,15 @@ __global__ void silu_mul_fp8_quant_deep_gemm_kernel(
+       __syncthreads();
+       load_and_advance_y_pred();
+ 
+-      __int64_t* gate64_ptr = s_gate64_ptr + compute_pipeline_offset_64;
+-      __int64_t* up64_ptr = s_up64_ptr + compute_pipeline_offset_64;
++      int64_t* gate64_ptr = s_gate64_ptr + compute_pipeline_offset_64;
++      int64_t* up64_ptr = s_up64_ptr + compute_pipeline_offset_64;
+ 
+       // COMPUTE_STAGE_SIZE/MOD must also be constexpr!
+       compute_pipeline_offset_64 += COMPUTE_STAGE_SIZE;
+       compute_pipeline_offset_64 %= COMPUTE_STAGE_MOD;
+ 
+-      __int64_t gate64 = *gate64_ptr;
+-      __int64_t up64 = *up64_ptr;
++      int64_t gate64 = *gate64_ptr;
++      int64_t up64 = *up64_ptr;
+ 
+       // Compute
+       __nv_bfloat162 res[2];
+diff --git a/csrc/quantization/awq/gemm_kernels.cu b/csrc/quantization/awq/gemm_kernels.cu
+index 53c4767..06fdb42 100644
+--- a/csrc/quantization/awq/gemm_kernels.cu
++++ b/csrc/quantization/awq/gemm_kernels.cu
+@@ -176,7 +176,7 @@ __global__ void __launch_bounds__(64)
+     for (int k_0_1 = 0; k_0_1 < 2; ++k_0_1) {
+       {
+         unsigned int addr;
+-        __asm__ __volatile__(
++        asm volatile(
+             "{ .reg .u64 addr; cvta.to.shared.u64 addr, %1; cvt.u32.u64 %0, "
+             "addr; }\n"
+             : "=r"(addr)
+@@ -184,7 +184,7 @@ __global__ void __launch_bounds__(64)
+                           (((((int)threadIdx.x) & 15) * 40) +
+                            ((((int)threadIdx.x) >> 4) * 8)))));
+ 
+-        __asm__ __volatile__(
++        asm volatile(
+             "ldmatrix.sync.aligned.m8n8.x4.shared.b16"
+             "{%0, %1, %2, %3}, [%4];\n"
+             : "=r"(((unsigned*)(A_shared_warp + 0))[0]),
+@@ -197,7 +197,7 @@ __global__ void __launch_bounds__(64)
+       for (int ax1_0 = 0; ax1_0 < N / 32; ++ax1_0) {
+         {
+           unsigned int addr;
+-          __asm__ __volatile__(
++          asm volatile(
+               "{ .reg .u64 addr; cvta.to.shared.u64 addr, %1; cvt.u32.u64 %0, "
+               "addr; }\n"
+               : "=r"(addr)
+@@ -206,7 +206,7 @@ __global__ void __launch_bounds__(64)
+                                          (ax1_0 * 16))])) +
+                             (((((int)threadIdx.x) & 15) * (N + 8)) +
+                              ((((int)threadIdx.x) >> 4) * 8)))));
+-          __asm__ __volatile__(
++          asm volatile(
+               "ldmatrix.sync.aligned.m8n8.x4.trans.shared.b16"
+               "{%0, %1, %2, %3}, [%4];\n"
+               : "=r"(((unsigned*)(B_shared_warp + (ax1_0 * 8)))[0]),
+@@ -219,7 +219,7 @@ __global__ void __launch_bounds__(64)
+       for (int j_0_4 = 0; j_0_4 < N / 32; ++j_0_4) {
+   #if defined(__CUDA_ARCH__) && __CUDA_ARCH__ == 750
+         {
+-          __asm__ __volatile__(
++          asm volatile(
+               "mma.sync.aligned.m16n8k8.row.col.f32.f16.f16.f32"
+               "{%0, %1, %2, %3}, {%4, %5}, {%6}, {%7, %8, %9, %10};\n"
+               : "=f"(((float*)(C_warp + (j_0_4 * 8)))[0]),
+@@ -236,7 +236,7 @@ __global__ void __launch_bounds__(64)
+         }
+ 
+         {
+-          __asm__ __volatile__(
++          asm volatile(
+               "mma.sync.aligned.m16n8k8.row.col.f32.f16.f16.f32"
+               "{%0, %1, %2, %3}, {%4, %5}, {%6}, {%7, %8, %9, %10};\n"
+               : "=f"(((float*)(C_warp + ((j_0_4 * 8) + 4)))[0]),
+@@ -253,7 +253,7 @@ __global__ void __launch_bounds__(64)
+         }
+ 
+         {
+-          __asm__ __volatile__(
++          asm volatile(
+               "mma.sync.aligned.m16n8k8.row.col.f32.f16.f16.f32"
+               "{%0, %1, %2, %3}, {%4, %5}, {%6}, {%7, %8, %9, %10};\n"
+               : "=f"(((float*)(C_warp + (j_0_4 * 8)))[0]),
+@@ -270,7 +270,7 @@ __global__ void __launch_bounds__(64)
+         }
+ 
+         {
+-          __asm__ __volatile__(
++          asm volatile(
+               "mma.sync.aligned.m16n8k8.row.col.f32.f16.f16.f32"
+               "{%0, %1, %2, %3}, {%4, %5}, {%6}, {%7, %8, %9, %10};\n"
+               : "=f"(((float*)(C_warp + ((j_0_4 * 8) + 4)))[0]),
+@@ -287,7 +287,7 @@ __global__ void __launch_bounds__(64)
+         }
+   #else
+         {
+-          __asm__ __volatile__(
++          asm volatile(
+               "mma.sync.aligned.m16n8k16.row.col.f32.f16.f16.f32"
+               "{%0, %1, %2, %3}, {%4, %5, %6, %7}, {%8, %9}, {%10, %11, %12, "
+               "%13};\n"
+@@ -308,7 +308,7 @@ __global__ void __launch_bounds__(64)
+         }
+ 
+         {
+-          __asm__ __volatile__(
++          asm volatile(
+               "mma.sync.aligned.m16n8k16.row.col.f32.f16.f16.f32"
+               "{%0, %1, %2, %3}, {%4, %5, %6, %7}, {%8, %9}, {%10, %11, %12, "
+               "%13};\n"
+diff --git a/csrc/quantization/fused_kernels/layernorm_utils.cuh b/csrc/quantization/fused_kernels/layernorm_utils.cuh
+index edf4024..244aebd 100644
+--- a/csrc/quantization/fused_kernels/layernorm_utils.cuh
++++ b/csrc/quantization/fused_kernels/layernorm_utils.cuh
+@@ -76,7 +76,7 @@ __device__ void compute_dynamic_per_token_scales(
+     int32_t const hidden_size, scalar_t const* __restrict__ residual = nullptr,
+     int32_t const group_size = 0, int64_t outer_scale_stride = 1) {
+   float block_absmax_val_maybe = 0.0f;
+-  constexpr scalar_out_t qmax{quant_type_max_v<scalar_out_t>};
++  constexpr scalar_out_t qmax{quant_type_max_v<scalar_out_t>()};
+   __syncthreads();
+   if (group_size > 0) {
+     __shared__ float s_max_vals[1024];
+@@ -290,7 +290,7 @@ __device__ void compute_dynamic_per_token_scales(
+     float const rms, float const* __restrict__ scale_ub,
+     int32_t const hidden_size, scalar_t const* __restrict__ residual = nullptr,
+     int64_t outer_scale_stride = 1) {
+-  constexpr scalar_out_t qmax{quant_type_max_v<scalar_out_t>};
++  constexpr scalar_out_t qmax{quant_type_max_v<scalar_out_t>()};
+ 
+   const int VEC_SIZE = 4;
+   float block_absmax_val_maybe = 0.0f;
+diff --git a/csrc/quantization/fused_kernels/quant_conversions.cuh b/csrc/quantization/fused_kernels/quant_conversions.cuh
+index 2b1eb1d..f8b8ad5 100644
+--- a/csrc/quantization/fused_kernels/quant_conversions.cuh
++++ b/csrc/quantization/fused_kernels/quant_conversions.cuh
+@@ -40,7 +40,7 @@ static __device__ __forceinline__ int8_t float_to_int8_rn(float const x) {
+ template <typename fp8_type>
+ static __device__ __forceinline__ fp8_type float_to_fp8(float const x) {
+   float const r =
+-      fmax(-quant_type_max_v<fp8_type>, fmin(x, quant_type_max_v<fp8_type>));
++      fmax(-quant_type_max_v<fp8_type>(), fmin(x, quant_type_max_v<fp8_type>()));
+   return static_cast<fp8_type>(r);
+ }
+ 
+diff --git a/csrc/quantization/gptq_allspark/allspark_qgemm_w8a16.cu b/csrc/quantization/gptq_allspark/allspark_qgemm_w8a16.cu
+index e306ff0..49e407a 100644
+--- a/csrc/quantization/gptq_allspark/allspark_qgemm_w8a16.cu
++++ b/csrc/quantization/gptq_allspark/allspark_qgemm_w8a16.cu
+@@ -210,7 +210,7 @@ struct ComputeTile_W8A16_PerC_MtilexNtilex32_multistage_SM8x_SplitK {
+   static constexpr int WARP_CNT = BLOCK / WARP_SIZE;
+   static constexpr int WARP_NTILE = Ntile / WARP_CNT;
+   static constexpr int WARP_NITER = WARP_NTILE / 8;  // hmma16816
+-  static_assert(WARP_NTILE == 32 or WARP_NTILE == 64,
++  static_assert(WARP_NTILE == 32 || WARP_NTILE == 64,
+                 "now only support WARP_NTILE = 32 or 64!");
+ 
+   __device__ ComputeTile_W8A16_PerC_MtilexNtilex32_multistage_SM8x_SplitK(
+diff --git a/csrc/quantization/marlin/generate_kernels.py b/csrc/quantization/marlin/generate_kernels.py
+index 5ecbc6a..58eaf39 100644
+--- a/csrc/quantization/marlin/generate_kernels.py
++++ b/csrc/quantization/marlin/generate_kernels.py
+@@ -155,10 +155,12 @@ QUANT_CONFIGS = [
+ 
+ def remove_old_kernels():
+     for filename in glob.glob(os.path.dirname(__file__) + "/*kernel_*.cu"):
+-        subprocess.call(["rm", "-f", filename])
++        if os.path.exists(filename):
++            os.remove(filename)
+ 
+     filename = os.path.dirname(__file__) + "/kernel_selector.h"
+-    subprocess.call(["rm", "-f", filename])
++    if os.path.exists(filename):
++        os.remove(filename)
+ 
+ 
+ def generate_new_kernels():
+@@ -253,10 +255,9 @@ def generate_new_kernels():
+                 ]
+                 conditions = " && ".join(conditions)
+ 
+-                if kernel_selector_str == FILE_HEAD_COMMENT:
+-                    kernel_selector_str += f"if ({conditions})\n  kernel = "
+-                else:
+-                    kernel_selector_str += f"else if ({conditions})\n  kernel = "
++                # Always use flat 'if' (not 'else if') to avoid MSVC
++                # C1061 "blocks nested too deeply" with 700+ branches.
++                kernel_selector_str += f"if ({conditions})\n  kernel = "
+ 
+                 kernel_template2 = (
+                     "Marlin<{{a_type_id}}, {{b_type_id}}, {{c_type_id}}, "
+@@ -293,7 +294,7 @@ def generate_new_kernels():
+ 
+     if not SUPPORT_FP8 and kernel_selector_str != FILE_HEAD_COMMENT:
+         kernel_selector_str += (
+-            "else if (a_type == vllm::kFE4M3fn)\n"
++            "if (a_type == vllm::kFE4M3fn)\n"
+             "  TORCH_CHECK(false, "
+             '"marlin kernel with fp8 activation is not built.");'
+         )
+diff --git a/csrc/quantization/utils.cuh b/csrc/quantization/utils.cuh
+index 73055a1..bcf0342 100644
+--- a/csrc/quantization/utils.cuh
++++ b/csrc/quantization/utils.cuh
+@@ -37,9 +37,12 @@ struct quant_type_max<c10::Float8_e4m3fnuz> {
+   }
+ };
+ 
++// Function template instead of variable template: MSVC nvcc can't apply
++// __host__/__device__ attributes to variable templates.
+ template <typename T>
+-MAYBE_HOST_DEVICE static constexpr T quant_type_max_v =
+-    quant_type_max<T>::val();
++MAYBE_HOST_DEVICE static inline constexpr T quant_type_max_v() {
++    return quant_type_max<T>::val();
++}
+ 
+ template <typename T,
+           typename = std::enable_if_t<std::is_same_v<T, c10::Float8_e4m3fn> ||
+@@ -47,7 +50,7 @@ template <typename T,
+                                       std::is_same_v<T, int8_t>>>
+ struct min_scaling_factor {
+   C10_DEVICE C10_ALWAYS_INLINE static float val() {
+-    return 1.0f / (quant_type_max_v<T> * 512.0f);
++    return 1.0f / (quant_type_max_v<T>() * 512.0f);
+   }
+ };
+ 
+diff --git a/csrc/quantization/w8a8/fp8/common.cu b/csrc/quantization/w8a8/fp8/common.cu
+index d07cdd5..b3164bc 100644
+--- a/csrc/quantization/w8a8/fp8/common.cu
++++ b/csrc/quantization/w8a8/fp8/common.cu
+@@ -112,7 +112,7 @@ __global__ void segmented_max_reduction_strided(
+ 
+   // thread 0 updates global scale (per-tensor) atomically.
+   if (tid == 0) {
+-    atomicMaxFloat(scale, cache[0] / quant_type_max_v<fp8_type>);
++    atomicMaxFloat(scale, cache[0] / quant_type_max_v<fp8_type>());
+   }
+ }
+ 
+@@ -165,7 +165,7 @@ __global__ void dynamic_per_token_scaled_fp8_quant_kernel_strided(
+   __shared__ float token_scale;
+   if (tid == 0) {
+     token_scale = scale_ub ? fminf(block_max, *scale_ub) : block_max;
+-    token_scale = fmaxf(token_scale / quant_type_max_v<fp8_type>,
++    token_scale = fmaxf(token_scale / quant_type_max_v<fp8_type>(),
+                         min_scaling_factor<fp8_type>::val());
+     scale[token_idx] = token_scale;
+   }
+diff --git a/csrc/quantization/w8a8/fp8/common.cuh b/csrc/quantization/w8a8/fp8/common.cuh
+index 7838f21..5fe2223 100644
+--- a/csrc/quantization/w8a8/fp8/common.cuh
++++ b/csrc/quantization/w8a8/fp8/common.cuh
+@@ -48,7 +48,7 @@ __device__ __forceinline__ fp8_type scaled_fp8_conversion(float const val,
+   }
+ 
+   float r =
+-      fmaxf(-quant_type_max_v<fp8_type>, fminf(x, quant_type_max_v<fp8_type>));
++      fmaxf(-quant_type_max_v<fp8_type>(), fminf(x, quant_type_max_v<fp8_type>()));
+ #ifndef USE_ROCM
+   // Use hardware cvt instruction for fp8 on nvidia
+   // Currently only support fp8_type = c10::Float8_e4m3fn
+diff --git a/csrc/topk.cu b/csrc/topk.cu
+index a7850f5..d1a1b34 100644
+--- a/csrc/topk.cu
++++ b/csrc/topk.cu
+@@ -318,13 +318,13 @@ FastTopKParams get_params(
+     indices_ptr = indices.data_ptr<int32_t>();
+   }
+ 
+-  return FastTopKParams{
+-      .input = score.data_ptr<float>(),
+-      .row_starts = row_starts_ptr,
+-      .indices = indices_ptr,
+-      .lengths = lengths.data_ptr<int32_t>(),
+-      .input_stride = score.stride(0),
+-  };
++  FastTopKParams params;
++  params.input = score.data_ptr<float>();
++  params.row_starts = row_starts_ptr;
++  params.indices = indices_ptr;
++  params.lengths = lengths.data_ptr<int32_t>();
++  params.input_stride = score.stride(0);
++  return params;
+ }
+ 
+ template <auto* kernel_func, size_t smem_bytes>
+diff --git a/requirements/cuda.txt b/requirements/cuda.txt
+index 2dd380d..c17a604 100644
+--- a/requirements/cuda.txt
++++ b/requirements/cuda.txt
+@@ -9,12 +9,10 @@ torch==2.10.0
+ torchaudio==2.10.0
+ # These must be updated alongside torch
+ torchvision==0.25.0 # Required for phi3v processor. See https://github.com/pytorch/vision?tab=readme-ov-file#installation for corresponding version
+-# FlashInfer should be updated together with the Dockerfile
+-flashinfer-python==0.6.4
+-# Cap nvidia-cudnn-frontend (transitive dep of flashinfer) due to
+-# breaking changes in 1.19.0
+-nvidia-cudnn-frontend>=1.13.0,<1.19.0
++# FlashInfer removed for Windows build (not available on Windows)
++# flashinfer-python==0.6.4
++# nvidia-cudnn-frontend>=1.13.0,<1.19.0
+ 
+-# QuACK and Cutlass DSL for FA4 (cute-DSL implementation)
+-nvidia-cutlass-dsl>=4.4.0.dev1
+-quack-kernels>=0.2.7
++# QuACK and Cutlass DSL for FA4 - commented out for Windows build
++# nvidia-cutlass-dsl>=4.4.0.dev1
++# quack-kernels>=0.2.7
+diff --git a/setup.py b/setup.py
+index 556a511..9ceb6d2 100644
+--- a/setup.py
++++ b/setup.py
+@@ -45,13 +45,22 @@ if sys.platform.startswith("darwin") and VLLM_TARGET_DEVICE != "cpu":
+     logger.warning("VLLM_TARGET_DEVICE automatically set to `cpu` due to macOS")
+     VLLM_TARGET_DEVICE = "cpu"
+ elif not (sys.platform.startswith("linux") or sys.platform.startswith("darwin")):
+-    logger.warning(
+-        "vLLM only supports Linux platform (including WSL) and MacOS."
+-        "Building on %s, "
+-        "so vLLM may not be able to run correctly",
+-        sys.platform,
+-    )
+-    VLLM_TARGET_DEVICE = "empty"
++    # Allow Windows builds when VLLM_TARGET_DEVICE is explicitly set
++    if os.getenv("VLLM_TARGET_DEVICE") == "cuda":
++        logger.warning(
++            "Building on %s with forced CUDA target. "
++            "This is experimental and may not fully work.",
++            sys.platform,
++        )
++        VLLM_TARGET_DEVICE = "cuda"
++    else:
++        logger.warning(
++            "vLLM only supports Linux platform (including WSL) and MacOS."
++            "Building on %s, "
++            "so vLLM may not be able to run correctly",
++            sys.platform,
++        )
++        VLLM_TARGET_DEVICE = "empty"
+ elif sys.platform.startswith("linux") and os.getenv("VLLM_TARGET_DEVICE") is None:
+     if torch.version.hip is not None:
+         VLLM_TARGET_DEVICE = "rocm"
+@@ -250,11 +259,13 @@ class cmake_build_ext(build_ext):
+ 
+         # Pass the python executable to cmake so it can find an exact
+         # match.
+-        cmake_args += ["-DVLLM_PYTHON_EXECUTABLE={}".format(sys.executable)]
++        cmake_args += ["-DVLLM_PYTHON_EXECUTABLE={}".format(
++            sys.executable.replace("\\", "/"))]
+ 
+         # Pass the python path to cmake so it can reuse the build dependencies
+         # on subsequent calls to python.
+-        cmake_args += ["-DVLLM_PYTHON_PATH={}".format(":".join(sys.path))]
++        cmake_args += ["-DVLLM_PYTHON_PATH={}".format(
++            ":".join(p.replace("\\", "/") for p in sys.path))]
+ 
+         # Override the base directory for FetchContent downloads to $ROOT/.deps
+         # This allows sharing dependencies between profiles,
+@@ -262,7 +273,8 @@ class cmake_build_ext(build_ext):
+         # To override this, set the FETCHCONTENT_BASE_DIR environment variable.
+         fc_base_dir = os.path.join(ROOT_DIR, ".deps")
+         fc_base_dir = os.environ.get("FETCHCONTENT_BASE_DIR", fc_base_dir)
+-        cmake_args += ["-DFETCHCONTENT_BASE_DIR={}".format(fc_base_dir)]
++        cmake_args += ["-DFETCHCONTENT_BASE_DIR={}".format(
++            fc_base_dir.replace("\\", "/"))]
+ 
+         #
+         # Setup parallelism and build tool
+@@ -283,7 +295,9 @@ class cmake_build_ext(build_ext):
+             build_tool = []
+         # Make sure we use the nvcc from CUDA_HOME
+         if _is_cuda() and CUDA_HOME is not None:
+-            cmake_args += [f"-DCMAKE_CUDA_COMPILER={CUDA_HOME}/bin/nvcc"]
++            cuda_home_fwd = CUDA_HOME.replace("\\", "/")
++            nvcc_name = "nvcc.exe" if sys.platform == "win32" else "nvcc"
++            cmake_args += [f"-DCMAKE_CUDA_COMPILER={cuda_home_fwd}/bin/{nvcc_name}"]
+         elif _is_hip() and ROCM_HOME is not None:
+             cmake_args += [f"-DROCM_PATH={ROCM_HOME}"]
+ 
+@@ -973,6 +987,7 @@ if _is_cuda():
+     ext_modules.append(CMakeExtension(name="vllm.vllm_flash_attn._vllm_fa2_C"))
+     if envs.VLLM_USE_PRECOMPILED or (
+         CUDA_HOME and get_nvcc_cuda_version() >= Version("12.3")
++        and sys.platform != "win32"  # FA3 has MSVC-incompatible macro constructs
+     ):
+         # FA3 requires CUDA 12.3 or later
+         ext_modules.append(CMakeExtension(name="vllm.vllm_flash_attn._vllm_fa3_C"))
+diff --git a/vllm/distributed/parallel_state.py b/vllm/distributed/parallel_state.py
+index fc554bd..6e6625b 100644
+--- a/vllm/distributed/parallel_state.py
++++ b/vllm/distributed/parallel_state.py
+@@ -25,7 +25,10 @@ If you only need to use the distributed environment without model/pipeline
+ 
+ import contextlib
+ import gc
++import os
+ import pickle
++import sys
++import tempfile
+ import weakref
+ from collections import namedtuple
+ from collections.abc import Callable
+@@ -59,6 +62,17 @@ if TYPE_CHECKING:
+     from vllm.distributed.stateless_coordinator import StatelessGroupCoordinator
+ 
+ 
++def _get_cpu_backend() -> str:
++    """Get the CPU communication backend for the current platform.
++    Gloo transport (TCP/UV) is not compiled in PyTorch Windows builds,
++    so we use the 'fake' backend for single-GPU operation on Windows."""
++    if sys.platform == "win32":
++        # Importing FakeProcessGroup registers the 'fake' backend
++        from torch.testing._internal.distributed.fake_pg import FakeProcessGroup  # noqa: F401
++        return "fake"
++    return "gloo"
++
++
+ @dataclass
+ class GraphCaptureContext:
+     stream: torch.cuda.Stream
+@@ -338,8 +352,10 @@ class GroupCoordinator:
+             )
+             # a group with `gloo` backend, to allow direct coordination between
+             # processes through the CPU.
++            cpu_backend = _get_cpu_backend()
+             with suppress_stdout():
+-                cpu_group = torch.distributed.new_group(ranks, backend="gloo")
++                cpu_group = torch.distributed.new_group(
++                    ranks, backend=cpu_backend)
+             if self.rank in ranks:
+                 self.ranks = ranks
+                 self.world_size = len(ranks)
+@@ -1403,22 +1419,38 @@ def init_distributed_environment(
+             "distributed environment"
+         )
+         if not torch.distributed.is_backend_available(backend):
++            cpu_backend = _get_cpu_backend()
+             logger.warning(
+-                "Distributed backend %s is not available; falling back to gloo.",
++                "Distributed backend %s is not available; falling back to %s.",
+                 backend,
++                cpu_backend,
+             )
+-            assert torch.distributed.is_gloo_available(), (
+-                "Fallback Gloo backend is not available."
+-            )
+-            backend = "gloo"
++            backend = cpu_backend
+         # this backend is used for WORLD
+-        torch.distributed.init_process_group(
+-            backend=backend,
+-            init_method=distributed_init_method,
+-            world_size=world_size,
+-            rank=rank,
+-            timeout=timeout,
+-        )
++        if sys.platform == "win32" and backend == "fake":
++            # Gloo transport is broken on Windows PyTorch builds; use
++            # fake backend with FileStore for single-GPU operation.
++            store_path = os.path.join(
++                tempfile.gettempdir(),
++                f"vllm_dist_store_{os.getpid()}")
++            if os.path.exists(store_path):
++                os.remove(store_path)
++            store = torch.distributed.FileStore(store_path, world_size)
++            torch.distributed.init_process_group(
++                backend=backend,
++                store=store,
++                world_size=world_size,
++                rank=rank,
++                timeout=timeout,
++            )
++        else:
++            torch.distributed.init_process_group(
++                backend=backend,
++                init_method=distributed_init_method,
++                world_size=world_size,
++                rank=rank,
++                timeout=timeout,
++            )
+         if enable_elastic_ep:
+             tp_pp_cpu_group = torch.distributed.new_group(
+                 backend="gloo", timeout=timeout
+diff --git a/vllm/entrypoints/openai/api_server.py b/vllm/entrypoints/openai/api_server.py
+index d76a744..7acfa67 100644
+--- a/vllm/entrypoints/openai/api_server.py
++++ b/vllm/entrypoints/openai/api_server.py
+@@ -386,7 +386,8 @@ def create_server_socket(addr: tuple[str, int]) -> socket.socket:
+ 
+     sock = socket.socket(family=family, type=socket.SOCK_STREAM)
+     sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+-    sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEPORT, 1)
++    if hasattr(socket, 'SO_REUSEPORT'):
++        sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEPORT, 1)
+     sock.bind(addr)
+ 
+     return sock
+diff --git a/vllm/model_executor/layers/fused_moe/routed_experts_capturer.py b/vllm/model_executor/layers/fused_moe/routed_experts_capturer.py
+index b061b3d..554cf27 100644
+--- a/vllm/model_executor/layers/fused_moe/routed_experts_capturer.py
++++ b/vllm/model_executor/layers/fused_moe/routed_experts_capturer.py
+@@ -5,12 +5,15 @@
+ 
+ from __future__ import annotations
+ 
+-import fcntl
+ import logging
+ import os
++import sys
+ import tempfile
+ from collections.abc import Generator
+ from contextlib import contextmanager
++
++if sys.platform != "win32":
++    import fcntl
+ from multiprocessing import shared_memory
+ from unittest.mock import patch
+ 
+@@ -37,12 +40,21 @@ _global_experts_reader: RoutedExpertsReader | None = None
+ @contextmanager
+ def _file_lock(lock_file: str, mode: str = "wb+") -> Generator[None, None, None]:
+     """Context manager for file-based locking."""
+-    with open(lock_file, mode) as fp:
+-        fcntl.flock(fp, fcntl.LOCK_EX)
+-        try:
+-            yield
+-        finally:
+-            fcntl.flock(fp, fcntl.LOCK_UN)
++    if sys.platform == "win32":
++        import msvcrt
++        with open(lock_file, mode) as fp:
++            msvcrt.locking(fp.fileno(), msvcrt.LK_LOCK, 1)
++            try:
++                yield
++            finally:
++                msvcrt.locking(fp.fileno(), msvcrt.LK_UNLCK, 1)
++    else:
++        with open(lock_file, mode) as fp:
++            fcntl.flock(fp, fcntl.LOCK_EX)
++            try:
++                yield
++            finally:
++                fcntl.flock(fp, fcntl.LOCK_UN)
+ 
+ 
+ def _create_or_attach_shared_memory(
+diff --git a/vllm/utils/network_utils.py b/vllm/utils/network_utils.py
+index 7d01533..c4f61f4 100644
+--- a/vllm/utils/network_utils.py
++++ b/vllm/utils/network_utils.py
+@@ -139,6 +139,10 @@ def get_tcp_uri(ip: str, port: int) -> str:
+ 
+ 
+ def get_open_zmq_ipc_path() -> str:
++    if sys.platform == "win32":
++        # IPC transport is not supported on Windows, use TCP instead
++        from vllm.utils.network_utils import get_open_port
++        return f"tcp://127.0.0.1:{get_open_port()}"
+     base_rpc_path = envs.VLLM_RPC_BASE_PATH
+     return f"ipc://{base_rpc_path}/{uuid4()}"
+ 
+diff --git a/vllm/utils/system_utils.py b/vllm/utils/system_utils.py
+index 4bd5388..2a4198f 100644
+--- a/vllm/utils/system_utils.py
++++ b/vllm/utils/system_utils.py
+@@ -173,6 +173,8 @@ def get_mp_context():
+     # of whether spawn was already set.
+     _sync_visible_devices_env_vars()
+     mp_method = envs.VLLM_WORKER_MULTIPROC_METHOD
++    if sys.platform == "win32":
++        mp_method = "spawn"  # Windows only supports spawn
+     return multiprocessing.get_context(mp_method)
+ 
+ 
+diff --git a/vllm/v1/engine/core_client.py b/vllm/v1/engine/core_client.py
+index 7e1f1cf..ef3f801 100644
+--- a/vllm/v1/engine/core_client.py
++++ b/vllm/v1/engine/core_client.py
+@@ -95,6 +95,10 @@ class EngineCoreClient(ABC):
+             )
+ 
+         if multiprocess_mode and not asyncio_mode:
++            if sys.platform == "win32":
++                # Windows doesn't support fork or IPC sockets reliably,
++                # fall back to in-process engine core
++                return InprocClient(vllm_config, executor_class, log_stats)
+             return SyncMPClient(vllm_config, executor_class, log_stats)
+ 
+         return InprocClient(vllm_config, executor_class, log_stats)

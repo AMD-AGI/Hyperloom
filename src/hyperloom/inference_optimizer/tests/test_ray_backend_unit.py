@@ -19,7 +19,8 @@ from typing import Any
 import pytest
 import yaml
 
-from hyperloom.common.proctree import REAP_MARK_ENV
+from hyperloom_common import winproc
+from hyperloom.common.proctree import REAP_MARK_ENV, running
 from hyperloom.orchestrator.actions.executors import _ray_backend as rb
 from hyperloom.orchestrator.actions.executors import _ray_runtime as rr
 from hyperloom.orchestrator.actions.executors import _ray_serving as rs
@@ -277,19 +278,23 @@ class _FakeRay:
 
 # ── ManagedServerProcess reap invariant (real subprocess) ────────────────────
 def _pid_alive(pid: int) -> bool:
-    try:
-        os.kill(pid, 0)
-    except ProcessLookupError:
-        return False
-    except PermissionError:
-        return True
-    return True
+    """Whether ``pid`` still runs, by the same liveness the reaper itself uses.
+
+    ``os.kill(pid, 0)`` cannot answer this on Windows: there it *terminates* the process
+    with exit code 0 instead of probing it, so the check would both lie and reap.
+    """
+    return running(pid)
+
+
+def _sleeper(seconds: float) -> list[str]:
+    """A command that stays up long enough to be observed and then leaves on its own."""
+    return [sys.executable, "-c", f"import time; time.sleep({seconds})"]
 
 
 def test_managed_process_start_and_reap():
     """A supervised process is reaped on stop() — no detached GPU-proc escape."""
     mgr = ManagedServerProcess()
-    pid = mgr.start(["sleep", "30"])
+    pid = mgr.start(_sleeper(30))
     try:
         assert mgr.is_alive()
         assert mgr.pid() == pid
@@ -304,6 +309,7 @@ def test_managed_process_start_and_reap():
     assert not _pid_alive(pid), "supervised process must not survive stop()"
 
 
+@pytest.mark.skipif(os.name != "posix", reason="prctl PR_SET_PDEATHSIG is a Linux mechanism")
 def test_pdeathsig_arms_a_trappable_signal(tmp_path: Path):
     """The parent-death signal must be SIGTERM, never SIGKILL.
 
@@ -330,6 +336,7 @@ def test_pdeathsig_arms_a_trappable_signal(tmp_path: Path):
     assert log_path.read_text(encoding="utf-8").strip() == str(int(signal.SIGTERM))
 
 
+@pytest.mark.skipif(os.name != "posix", reason="setsid, SIGTERM traps and process groups are POSIX")
 def test_owner_death_still_reaps_the_wrappers_setsid_server(tmp_path: Path):
     """An abrupt owner death leaves no server behind.
 
@@ -719,10 +726,14 @@ class _OrphaningRound(_FakeMethod):
         self.spawned: subprocess.Popen | None = None
 
     def remote(self, *a, **kw):
-        self.spawned = subprocess.Popen(["sleep", "60"], env=a[0].env, start_new_session=True)
+        self.spawned = subprocess.Popen(_sleeper(60), env=a[0].env, start_new_session=True)
         return super().remote(*a, **kw)
 
 
+@pytest.mark.skipif(
+    os.name != "posix",
+    reason="an actor-death round is found by its mark in /proc/<pid>/environ; Windows needs a job-object registry",
+)
 @pytest.mark.parametrize("error_name", ["RayActorError", "OutOfMemoryError"])
 def test_a_round_left_running_by_a_dead_actor_is_stopped_before_the_lease_reports(
     monkeypatch: pytest.MonkeyPatch, error_name: str
@@ -762,7 +773,8 @@ def test_a_server_a_round_leaves_running_outlives_the_round(monkeypatch: pytest.
     lease._actor.run_blocking = _RunsTheRound(None)
     pidfile = tmp_path / "server.pid"
     launch = (
-        "import subprocess; p = subprocess.Popen(['sleep', '60'], start_new_session=True); "
+        "import subprocess, sys; p = subprocess.Popen([sys.executable, '-c', 'import time; time.sleep(60)'], "
+        "start_new_session=True); "
         f"open({str(pidfile)!r}, 'w').write(str(p.pid))"
     )
     env = {k: v for k, v in os.environ.items() if k != REAP_MARK_ENV}
@@ -773,11 +785,9 @@ def test_a_server_a_round_leaves_running_outlives_the_round(monkeypatch: pytest.
     try:
         time.sleep(0.5)
         assert rc == 0
-        stat = Path(f"/proc/{server}/stat")
-        assert stat.exists() and stat.read_text().split()[2] != "Z", "the round's teardown reaped the server"
+        assert running(server), "the round's teardown reaped the server"
     finally:
-        with suppress(ProcessLookupError):
-            os.kill(server, signal.SIGKILL)
+        winproc.terminate_tree(server, force=True)
 
 
 def test_serving_lease_actor_death_marks_ray_backend_unhealthy(monkeypatch: pytest.MonkeyPatch):
@@ -1804,12 +1814,12 @@ def test_gpu_specialist_lease_close_kills_live_actor(monkeypatch: pytest.MonkeyP
 
 
 def test_ray_exec_enabled_unset_single_node_true(monkeypatch: pytest.MonkeyPatch, tmp_path: Path):
-    """Env unset + not-under-pytest + single-node -> True (production default)."""
+    """Env unset + not-under-pytest + single-node -> True on POSIX, False on Windows."""
     monkeypatch.delenv("INFERENCE_OPTIMIZER_RAY_EXEC", raising=False)
     monkeypatch.delenv("PYTEST_CURRENT_TEST", raising=False)  # bypass the pytest gate
     monkeypatch.setenv("INFERENCE_OPTIMIZER_NODES", "1")
     monkeypatch.setenv("MULTI_NODE_STATE_FILE", str(tmp_path / "nope.json"))
-    assert rb.ray_exec_enabled() is True
+    assert rb.ray_exec_enabled() is (os.name == "posix")
 
 
 def test_strip_visible_devices_write_error_returns_src(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
@@ -1843,7 +1853,7 @@ def test_releasing_a_lease_reaps_the_served_process(serving_lease_on_a_ray_doubl
     """``ray.kill`` skips ``__ray_terminate__``, so the actor must be asked first."""
     lease = serving_lease_on_a_ray_double
     lease.ensure()
-    pid = lease._actor.start.remote(rs.ActorLaunch(["sleep", "60"])).result(timeout=10)
+    pid = lease._actor.start.remote(rs.ActorLaunch(_sleeper(60))).result(timeout=10)
     assert _pid_alive(pid)
 
     lease.close()
@@ -1873,7 +1883,7 @@ def test_releasing_a_specialist_lease_reaps_its_subprocess(monkeypatch: pytest.M
     monkeypatch.setattr(rb, "get_ray_backend", lambda: SimpleNamespace(ensure=lambda **_kw: None))
 
     lease = rs.GpuSpecialistLease(num_gpus=1)
-    lease.start_async(rs.ActorLaunch(["sleep", "60"]))
+    lease.start_async(rs.ActorLaunch(_sleeper(60)))
     deadline = time.time() + 10.0
     pid: int | None = None
     while time.time() < deadline and pid is None:

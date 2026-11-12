@@ -16,6 +16,7 @@ from typing import Any, NamedTuple
 
 import yaml
 
+from hyperloom_common.platform import is_windows
 from hyperloom.common import rocm_smi
 from hyperloom.common.agentx_workload import AGENTX_SERVER_PIDFILE
 from hyperloom.common.env_safety import redact_secret_values
@@ -193,12 +194,34 @@ def teardown_lifecycle_server(
                 framework,
                 port,
             )
+    elif server_pid is not None and is_windows() and running(server_pid):
+        # No group to signal and no /proc cmdline to check against pid reuse: the recorded
+        # pid stays the tree's root, and ``taskkill /T`` walks whatever it started. The pidfile
+        # is removed below either way, so a recycled pid is never signalled twice.
+        _terminate_windows_tree(server_pid)
+        log.info(
+            "server_lifecycle teardown — reaped persistent server pid=%d (%s:%d)",
+            server_pid,
+            framework,
+            port,
+        )
     for p in (pid_file, meta_file):
         try:
             p.unlink()
         except OSError:
             # Already gone or unremovable; teardown must not raise.
             pass
+
+
+def _terminate_windows_tree(pid: int) -> bool:
+    """Ask the recorded server's tree to close, then force what outlives the grace; return whether it is gone."""
+    from hyperloom_common import winproc
+
+    winproc.terminate_tree(pid, force=False)
+    if _group_gone_within(pid, TERM_GRACE_SEC):
+        return True
+    winproc.terminate_tree(pid, force=True)
+    return _group_gone_within(pid, _KILL_CONFIRM_SECONDS)
 
 
 def _terminate_group(pgid: int) -> bool:

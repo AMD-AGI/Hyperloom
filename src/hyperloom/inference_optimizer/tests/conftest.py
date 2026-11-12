@@ -25,6 +25,12 @@ from hyperloom.orchestrator.tests._fixtures import (  # noqa: F401
 
 
 @pytest.fixture(autouse=True)
+def _isolate_ambient_port(monkeypatch):
+    """Pin tests to the configured port: ambient ``PORT`` overrides it by design."""
+    monkeypatch.delenv("PORT", raising=False)
+
+
+@pytest.fixture(autouse=True)
 def _restore_recording_session_binding():
     """Undo any recording-session binding a test leaves behind.
 
@@ -639,9 +645,15 @@ def init(address=None, **_kwargs):
         daemon = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(3600)"])
         _note(f"daemon {daemon.pid}")
     if mode == "gilhold":
-        # Waiting the way Ray's registration does: in native code with the GIL held, so no other thread of the
-        # process runs until it returns. Bounded, so a test that connects to it in-process fails instead of hanging.
-        ctypes.PyDLL(None).sleep(int(os.environ.get("FAKE_RAY_GIL_HOLD_SEC", "3600")))
+        # Waiting the way Ray's registration does: bounded, so a test that connects to it in-process fails instead
+        # of hanging. On POSIX the wait is in native code with the GIL held, so no other thread of the process runs
+        # until it returns; Windows has no libc to hold it with, and an unbounded sleep blocks the connecting thread
+        # just the same, which is the state these tests observe.
+        hold = int(os.environ.get("FAKE_RAY_GIL_HOLD_SEC", "3600"))
+        if os.name == "posix":
+            ctypes.PyDLL(None).sleep(hold)
+        else:
+            time.sleep(hold)
         return
     while mode == "silent":
         time.sleep(3600)
@@ -666,6 +678,38 @@ _FAKE_RAY_CLI = """#!/bin/sh
 echo "$*" >> "$FAKE_RAY_CLI_LOG"
 """
 
+#: The same contract where the sh script cannot run: a ``.bat`` ``shutil.which`` resolves on Windows.
+_FAKE_RAY_CLI_BAT = """@echo off
+echo %*>> "%FAKE_RAY_CLI_LOG%"
+"""
+
+
+class _WindowsRayCliShim:
+    """The ``subprocess`` module as ``_ray_runtime`` sees it on Windows: ``ray`` argv are answered, not executed.
+
+    Windows cannot execute the fixture's extensionless ``bin/ray`` sh script, and process creation only resolves
+    ``.exe`` for a bare command, so ``ray start`` would escape the fixture: with real Ray installed the stub
+    ``ray`` package first on ``PYTHONPATH`` shadows it and ``ray.scripts`` fails to import; without real Ray the
+    spawn fails outright. Logging the arguments and exiting zero in-process keeps the hermetic fake head hermetic;
+    every other spawn delegates to the real module.
+    """
+
+    def __getattr__(self, name: str):
+        import subprocess
+
+        return getattr(subprocess, name)
+
+    def run(self, cmd, **kwargs):
+        import os
+        import subprocess
+
+        argv = [str(part) for part in cmd]
+        if argv and Path(argv[0]).name.lower() in ("ray", "ray.bat", "ray.cmd", "ray.exe"):
+            with open(os.environ["FAKE_RAY_CLI_LOG"], "a", encoding="utf-8") as log:
+                log.write(" ".join(argv[1:]) + "\n")
+            return subprocess.CompletedProcess(cmd, 0)
+        return subprocess.run(cmd, **kwargs)
+
 
 class FakeRayHead:
     """A Ray head as a driver sees it: a stand-in ``ray`` package on the child ``PYTHONPATH``, and a ``ray`` CLI.
@@ -689,6 +733,11 @@ class FakeRayHead:
         cli.parent.mkdir()
         cli.write_text(_FAKE_RAY_CLI, encoding="utf-8")
         cli.chmod(0o755)
+        if os.name != "posix":
+            # The sh script is neither resolved nor executable by Windows process creation; the ``.bat`` keeps
+            # ``shutil.which("ray")`` hermetic, and the shim below answers the argv the runtime spawns.
+            (root / "bin" / "ray.bat").write_text(_FAKE_RAY_CLI_BAT, encoding="utf-8")
+            monkeypatch.setattr(_ray_runtime, "subprocess", _WindowsRayCliShim())
         self._log = root / "ray_calls.log"
         self._log.touch()
         self._cli_log = root / "ray_cli.log"

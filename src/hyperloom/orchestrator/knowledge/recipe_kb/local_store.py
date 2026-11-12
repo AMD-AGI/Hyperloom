@@ -5,7 +5,10 @@
 
 from __future__ import annotations
 
-import fcntl
+try:
+    import fcntl
+except ImportError:  # pragma: no cover - Windows has no flock.
+    fcntl = None  # type: ignore[assignment]
 import json
 import logging
 import os
@@ -137,7 +140,8 @@ class _CidLock:
         try:
             make_shared_dirs(self.path.parent)
             self._fd = open_shared(self.path, os.O_RDWR)
-            fcntl.flock(self._fd, fcntl.LOCK_EX)
+            if fcntl is not None:
+                fcntl.flock(self._fd, fcntl.LOCK_EX)
         except BaseException:
             if self._fd is not None:
                 try:
@@ -154,7 +158,8 @@ class _CidLock:
         """Release the file lock then the process mutex."""
         if self._fd is not None:
             try:
-                fcntl.flock(self._fd, fcntl.LOCK_UN)
+                if fcntl is not None:
+                    fcntl.flock(self._fd, fcntl.LOCK_UN)
             finally:
                 try:
                     os.close(self._fd)

@@ -1,0 +1,69 @@
+diff --git a/include/cutlass/cuda_host_adapter.hpp b/include/cutlass/cuda_host_adapter.hpp
+index 8cf41c1b..1a4e7e07 100644
+--- a/include/cutlass/cuda_host_adapter.hpp
++++ b/include/cutlass/cuda_host_adapter.hpp
+@@ -405,10 +405,10 @@ public:
+ 
+   /// Fills a buffer in Global Memory with a byte sequence copied from host memory
+   template<class FillValueType>
+-  CUTLASS_HOST_DEVICE
++  CUTLASS_HOST
+   Status memsetDevice(
+       void* destination,
+-      FillValueType fill_value, 
++      FillValueType fill_value,
+       size_t count,
+       cudaStream_t stream) const {
+     return this->memsetDeviceImpl(
+diff --git a/include/cutlass/gemm/kernel/sm100_gemm_array_tma_warpspecialized_mma_transform.hpp b/include/cutlass/gemm/kernel/sm100_gemm_array_tma_warpspecialized_mma_transform.hpp
+index 83ae76ac..ab0405da 100644
+--- a/include/cutlass/gemm/kernel/sm100_gemm_array_tma_warpspecialized_mma_transform.hpp
++++ b/include/cutlass/gemm/kernel/sm100_gemm_array_tma_warpspecialized_mma_transform.hpp
+@@ -479,7 +479,7 @@ public:
+     return grid_shape;
+   }
+ 
+-  static constexpr
++  static
+   dim3
+   get_block_shape() {
+     return dim3(MaxThreadsPerBlock, 1, 1);
+diff --git a/include/cutlass/gemm/kernel/sm100_sparse_gemm_tma_warpspecialized.hpp b/include/cutlass/gemm/kernel/sm100_sparse_gemm_tma_warpspecialized.hpp
+index d87ac8f7..2401ecea 100644
+--- a/include/cutlass/gemm/kernel/sm100_sparse_gemm_tma_warpspecialized.hpp
++++ b/include/cutlass/gemm/kernel/sm100_sparse_gemm_tma_warpspecialized.hpp
+@@ -442,7 +442,7 @@ public:
+         params.hw_info);
+   }
+ 
+-  static constexpr
++  static
+   dim3
+   get_block_shape() {
+     return dim3(MaxThreadsPerBlock, 1, 1);
+diff --git a/include/cutlass/gemm/kernel/sm103_blockscaled_gemm_array_tma_warpspecialized.hpp b/include/cutlass/gemm/kernel/sm103_blockscaled_gemm_array_tma_warpspecialized.hpp
+index 7416f417..204bd88a 100644
+--- a/include/cutlass/gemm/kernel/sm103_blockscaled_gemm_array_tma_warpspecialized.hpp
++++ b/include/cutlass/gemm/kernel/sm103_blockscaled_gemm_array_tma_warpspecialized.hpp
+@@ -486,7 +486,7 @@ public:
+     return grid_shape;
+   }
+ 
+-  static constexpr
++  static
+   dim3
+   get_block_shape() {
+     return dim3(MaxThreadsPerBlock, 1, 1);
+diff --git a/include/cutlass/gemm/kernel/sm103_blockscaled_gemm_tma_warpspecialized.hpp b/include/cutlass/gemm/kernel/sm103_blockscaled_gemm_tma_warpspecialized.hpp
+index 455464e6..4d0b31b8 100644
+--- a/include/cutlass/gemm/kernel/sm103_blockscaled_gemm_tma_warpspecialized.hpp
++++ b/include/cutlass/gemm/kernel/sm103_blockscaled_gemm_tma_warpspecialized.hpp
+@@ -400,7 +400,7 @@ public:
+         params.hw_info);
+   }
+ 
+-  static constexpr
++  static
+   dim3
+   get_block_shape() {
+     return dim3(MaxThreadsPerBlock, 1, 1);
