@@ -60,6 +60,14 @@ async def _held(blackboard: LocalBlackboard, branch: str) -> float:
     return row.held_card_seconds
 
 
+async def test_a_test_sandboxs_cards_are_read_with_the_toolboxs_card_memory(local: Make) -> None:
+    """The toolbox is the caller that reads what the kernel lists on an ended test sandbox's cards: the provider's own
+    default reads nothing."""
+    listing = Listing()
+    box = await local(cards=2, card_memory=listing)
+    assert box.provider.card_memory is listing
+
+
 async def test_a_lease_charges_its_branch_from_the_grant_until_each_card_is_back_in_the_pool(
     local: Make, tmp_path: Path
 ) -> None:
