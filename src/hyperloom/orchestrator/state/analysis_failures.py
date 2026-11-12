@@ -21,6 +21,8 @@ from typing import Any
 
 from hyperloom_common.timeutil import now_iso
 
+from .failure_evidence import ENGINE_EXECUTE_TIMEOUT
+
 log = logging.getLogger(__name__)
 
 #: Task param carrying the identity of the recipe a roofline profiles.
@@ -59,6 +61,8 @@ def recurring_failure_class(result: Mapping[str, Any]) -> str:
         return _TRACE_SPLIT
     if _ANALYSIS_TIMEOUT_CLASS in classes:
         return _TIMEOUT_FAILURE
+    if ENGINE_EXECUTE_TIMEOUT in classes:
+        return ENGINE_EXECUTE_TIMEOUT
     return ""
 
 

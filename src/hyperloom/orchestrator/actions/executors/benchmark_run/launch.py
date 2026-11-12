@@ -33,6 +33,7 @@ from ..benchmark_result import (
     extract_benchmark_measurement,
 )
 from .._failed_step import failed_step_error_class
+from ....state.failure_evidence import with_failure_hint
 from .._round_folder import RoundFolder, round_report_path
 from .._suite.rounds import SuiteRound, SuiteRoundRefused, SuiteRoute, deadline_unix, round_lifecycle, run_suite_round
 from ..agentx_point import ServerArgvInvalidError
@@ -178,7 +179,9 @@ def _suite_round_failure(
     """The failed result of an inference_suite round: the step it stopped at, or a load that measured nothing."""
     step = measurement.get("failed_step")
     if step is not None:
-        error_class, error = failed_step_error_class(FailedStep(step)), measurement.get("failure_detail") or step
+        detail = measurement.get("failure_detail") or ""
+        error_class = failed_step_error_class(FailedStep(step), detail)
+        error = with_failure_hint(error_class, detail or step)
     else:
         error_class, error = "invalid_measurement", "the round report holds no positive throughput and served requests"
     report_path = round_report_path(finished.workspace)

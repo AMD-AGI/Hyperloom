@@ -7,7 +7,7 @@ from __future__ import annotations
 
 from inference_suite.contracts import FailedStep
 
-from ...state.failure_evidence import FAILED_STEP_ERROR_CLASSES
+from ...state.failure_evidence import FAILED_STEP_ERROR_CLASSES, server_death_class
 from ..stop_attribution import ORCHESTRATOR_CANCELLED_CLASS, SESSION_TIME_EXHAUSTED_CLASS
 
 # The failed steps whose class an action module owns; every other step is mapped in ``failure_evidence``. A round
@@ -19,8 +19,14 @@ _ACTION_OWNED_STEP_CLASSES: dict[FailedStep, str] = {
 }
 
 
-def failed_step_error_class(step: FailedStep) -> str:
-    """Return the ``error_class`` a round that failed at ``step`` is recorded under."""
+def failed_step_error_class(step: FailedStep, detail: str = "") -> str:
+    """Return the ``error_class`` a round that failed at ``step`` is recorded under.
+
+    ``detail`` is the report's ``failure_detail``: for a server that died after it was ready it is the death
+    excerpt, which tells one way of dying while serving from the others.
+    """
+    if step is FailedStep.SERVER_DIED:
+        return server_death_class(detail)
     return _ACTION_OWNED_STEP_CLASSES.get(step) or FAILED_STEP_ERROR_CLASSES[step]
 
 
