@@ -177,6 +177,10 @@ class AgentSandbox(Protocol):
         """Start the watch confining the sandbox's processes again when it ended; what to say of it, empty when it
         runs."""
 
+    async def stop(self) -> None:
+        """Kill every process of the sandbox and give back what it holds on its host besides its lease: a confined
+        local sandbox's holder and private ``/tmp`` and ``/dev/shm``. Its user calls it once done with it."""
+
 
 #: Asks the onboarding model ``prompt`` with the agent's checkout as its working directory; its answer.
 Onboard = Callable[[Path, str], Awaitable[str]]

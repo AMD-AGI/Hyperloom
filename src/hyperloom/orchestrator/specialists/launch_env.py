@@ -715,7 +715,7 @@ def specialist_confinement(place: LaunchPlace, argv0: str, env: Mapping[str, str
     given = bedrock_files(env)
     readable = [
         *toolchain_paths(env, argv0, writable=writable),
-        *_git_dirs(place.git_admin),
+        *worktree_git_dirs(place.git_admin),
         *_readable_extras(place),
         *given,
     ]
@@ -744,11 +744,12 @@ def _readable_extras(place: LaunchPlace) -> list[Path]:
     ]
 
 
-def _git_dirs(admin: Path | None) -> tuple[Path, ...]:
-    """What git in a linked worktree whose admin directory is ``admin`` reads besides the tree: its repository's git
-    directory, which holds ``admin``, and the object stores its ``alternates`` file names. Nothing without ``admin``:
-    where the agent runs as the app's uid, the directory the worktree's ``.git`` names may be one it made, ownership
-    and all, so that file decides nothing here."""
+def worktree_git_dirs(admin: Path | None) -> tuple[Path, ...]:
+    """What git in a linked worktree whose admin directory is ``admin`` reads besides the tree: first its repository's
+    git directory, which holds ``admin`` (what a commit writes), then the object stores its ``alternates`` file names.
+    Every sandbox that runs git in a worktree binds these. Nothing without ``admin``: where the agent runs as the
+    app's uid, the directory the worktree's ``.git`` names may be one it made, ownership and all, so that file decides
+    nothing here."""
     if admin is None:
         return ()
     common = admin.parent.parent
