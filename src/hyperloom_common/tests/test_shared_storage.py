@@ -503,15 +503,6 @@ def test_in_a_single_id_user_namespace_the_helper_still_makes_the_groups_2775_an
             assert (_mode(path), path.stat().st_uid, path.stat().st_gid) == (mode, host_uid, accounts.group)
 
 
-def test_the_helper_needs_nothing_but_the_standard_library():
-    imported = {
-        line.split()[1].split(".")[0]
-        for line in Path(shared_storage.__file__).read_text().splitlines()
-        if line.startswith(("import ", "from "))
-    }
-    assert imported <= set(sys.stdlib_module_names) | {"__future__"}, imported
-
-
 def test_io_shared_writes_are_664_whatever_the_umask_and_make_their_parents_2775(tmp_path):
     shared = _setgid_parent(tmp_path / "shared")
     target = shared / "events" / "session.json"

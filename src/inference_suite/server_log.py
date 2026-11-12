@@ -1,7 +1,7 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""What a serving framework's ``server.log`` says: ready, dead, generating, and where a round's client phases begin.
+"""What a serving framework's ``server.log`` says: ready, dead, and where a round's client phases begin.
 
 :class:`LogCursor` follows the logs a round writes beside ``server.log`` incrementally, and :func:`death_excerpt` pulls
 the line that names why an engine died.
@@ -65,14 +65,8 @@ READY_MARKERS: tuple[str, ...] = (
     "The server is fired up and ready to roll",
 )
 
-# Accuracy-eval start markers: their appearance means the benchmark phase of the run is over and the accuracy eval has
-# begun.
-_EVAL_START_MARKERS: tuple[str, ...] = ("HYPERLOOM_EVAL_START",)
-
-# The benchmark body's own stderr, beside ``server.log`` rather than in it or the parent's pipe, so
-# it is both where the eval-start marker lands and the one resolved log whose growth is output of the very child this
-# round is waiting on.
-_EVAL_LOG_NAME: str = "benchmark_stderr.log"
+# The benchmark body's own stderr, beside ``server.log`` rather than in it or the parent's pipe.
+_BENCHMARK_LOG_NAME: str = "benchmark_stderr.log"
 
 # AgentX phase boundaries. The agentic client runs a long cold-cache warmup -- close to 18 minutes on the runs measured
 # so far -- before the window under measurement opens, and mixing the two makes every KV statistic meaningless. aiperf
@@ -80,35 +74,10 @@ _EVAL_LOG_NAME: str = "benchmark_stderr.log"
 # than the whole line so a reword of the human-readable half does not silently stop the split.
 _AGENTX_WARMUP_BEGIN_MARKERS: tuple[str, ...] = ("(warmup) started",)
 _AGENTX_MEASURED_BEGIN_MARKERS: tuple[str, ...] = ("(profiling) started",)
-_AGENTX_MEASURED_END_MARKERS: tuple[str, ...] = ("(profiling) complete",)
 
 # aiperf writes only this file: an AgentX benchmark directory has no ``benchmark_stdout.log`` / ``benchmark_stderr.log``
 # the way a synthetic one does, so the phase lines are unreachable unless it is scanned explicitly.
 _AGENTX_LOG_RELPATH: str = "aiperf_artifacts/logs/aiperf.log"
-
-
-# sglang: "Decode batch. ... gen throughput (token/s): 1234.5" vllm: "Avg generation throughput: 1234.5 tokens/s"
-_THROUGHPUT_PATTERNS = (
-    re.compile(r"gen throughput \(token/s\):\s*([0-9]+(?:\.[0-9]+)?)", re.IGNORECASE),
-    re.compile(r"Avg generation throughput:\s*([0-9]+(?:\.[0-9]+)?)", re.IGNORECASE),
-)
-
-
-def throughput_samples(text: str) -> list[float]:
-    """Every positive periodic generation-throughput sample in ``text``."""
-    samples: list[float] = []
-    for line in text.splitlines():
-        for pattern in _THROUGHPUT_PATTERNS:
-            match = pattern.search(line)
-            if match:
-                try:
-                    value = float(match.group(1))
-                except ValueError:
-                    continue
-                if value > 0:
-                    samples.append(value)
-                break
-    return samples
 
 
 _SERVER_LOG_NAME: str = "server.log"
@@ -197,7 +166,7 @@ def _cause_first_excerpt(head: str, window: list[str], *, max_chars: int) -> str
 def _resolve_scan_logs(server_log_path: str) -> list[str]:
     """Return the log files to scan for markers: the server log, the benchmark body's stderr and the AgentX log."""
     primary = Path(server_log_path)
-    names = (primary, primary.with_name(_EVAL_LOG_NAME), primary.parent / _AGENTX_LOG_RELPATH)
+    names = (primary, primary.with_name(_BENCHMARK_LOG_NAME), primary.parent / _AGENTX_LOG_RELPATH)
     return [str(name) for name in names if name.exists()]
 
 
@@ -205,28 +174,20 @@ class LogScan(NamedTuple):
     """What one pass over the resolved logs found in the bytes appended since the last."""
 
     saw_ready: bool
-    saw_progress: bool
-    saw_eval_start: bool
     grew: bool
-    child_spoke: bool
     saw_warmup_begin: bool = False
     saw_measured_begin: bool = False
-    saw_measured_end: bool = False
     #: The last whole line a server log gained in this pass, ``None`` when none gained one.
     server_line: str | None = None
 
-    def including(self, scan: "_IncrementScan", path: str, previous_offset: int) -> "LogScan":
+    def including(self, scan: "_IncrementScan", previous_offset: int) -> "LogScan":
         """What this pass has found once one log's increment is folded in."""
         advanced = scan.offset > previous_offset
         return LogScan(
             saw_ready=self.saw_ready or scan.saw_ready,
-            saw_progress=self.saw_progress or scan.saw_progress,
-            saw_eval_start=self.saw_eval_start or scan.saw_eval_start,
             grew=self.grew or (advanced and scan.active),
-            child_spoke=self.child_spoke or (advanced and Path(path).name == _EVAL_LOG_NAME),
             saw_warmup_begin=self.saw_warmup_begin or scan.saw_warmup_begin,
             saw_measured_begin=self.saw_measured_begin or scan.saw_measured_begin,
-            saw_measured_end=self.saw_measured_end or scan.saw_measured_end,
             server_line=self.server_line,
         )
 
@@ -236,13 +197,10 @@ class _IncrementScan(NamedTuple):
 
     offset: int
     saw_ready: bool
-    saw_progress: bool
-    saw_eval_start: bool
     saw_warmup_begin: bool = False
     saw_measured_begin: bool = False
     residual: str = ""
     active: bool = True
-    saw_measured_end: bool = False
     #: The last whole line with text that the increment holds, other than a health probe's access line (a monitor's poll
     #: is answered while the engine builds), ``None`` when it holds none.
     last_line: str | None = None
@@ -256,19 +214,6 @@ _HEALTH_PROBE_LINE = re.compile(r'"GET /(?:metrics|health|healthz|ping)(?:[/?][^
 # Cap on the partial line carried between scans. A log that appends a very long line without a newline -- or none at
 # all -- must not let the buffer grow without bound; a marker is far shorter than this, so nothing real is lost.
 _RESIDUAL_MAX_CHARS = 8192
-
-
-def round_start_offsets(server_log_path: str) -> dict[str, int]:
-    """Snapshot existing bytes before spawn so previous rounds cannot signal activity."""
-    sizes: dict[str, int] = {}
-    for path in _resolve_scan_logs(server_log_path):
-        candidate = Path(path)
-        try:
-            size = candidate.stat().st_size
-            sizes[path] = -1 if candidate.parent != Path(server_log_path).parent else size
-        except OSError:
-            continue
-    return sizes
 
 
 @dataclass
@@ -297,11 +242,9 @@ class LogCursor:
 
     def advance(self, server_log_path: str) -> LogScan:
         """Scan the bytes every watched log gained; replacing or truncating one is not activity."""
-        found = LogScan(False, False, False, False, False)
+        found = LogScan(False, False)
         for path in _resolve_scan_logs(server_log_path):
             prev = self.offsets.get(path, 0)
-            if prev < 0:
-                continue
             try:
                 stat = os.stat(path)
             except OSError:
@@ -316,31 +259,31 @@ class LogCursor:
             scan = _scan_increment(path, prev, self.residuals.get(path, ""))
             self.offsets[path] = scan.offset
             self.residuals[path] = scan.residual
-            found = found.including(scan, path, prev)
+            found = found.including(scan, prev)
             if scan.last_line is not None and (path == server_log_path or Path(path).name == _SERVER_LOG_NAME):
                 found = found._replace(server_line=scan.last_line)
         return found
 
 
 def _scan_increment(path: str, from_offset: int, residual: str = "") -> _IncrementScan:
-    """Incrementally scan the bytes appended to ``server.log`` since ``from_offset`` for ready / generation-progress / eval-start markers."""
+    """Incrementally scan the bytes appended to ``server.log`` since ``from_offset`` for ready / AgentX phase markers."""
     try:
         size = os.path.getsize(path)
     except OSError:
-        return _IncrementScan(from_offset, False, False, False, residual=residual)
+        return _IncrementScan(from_offset, False, residual=residual)
     start = from_offset
     carried = residual
     if size < start:  # truncated / rotated — rescan from the top.
         start = 0
         carried = ""  # the bytes it belonged to are gone
     if size <= start:  # nothing new appended
-        return _IncrementScan(start, False, False, False, residual=carried)
+        return _IncrementScan(start, False, residual=carried)
     try:
         with open(path, "rb") as fh:
             fh.seek(start)
             chunk = fh.read().decode("utf-8", "ignore")
     except (OSError, ValueError):
-        return _IncrementScan(from_offset, False, False, False, residual=carried)
+        return _IncrementScan(from_offset, False, residual=carried)
     # A poll lands wherever the writer happens to be, so a marker is routinely split across two reads. Prepending the
     # previous tail and carrying the new one forward is what makes a marker findable exactly once, whole.
     chunk = carried + chunk
@@ -348,11 +291,6 @@ def _scan_increment(path: str, from_offset: int, residual: str = "") -> _Increme
     next_residual = chunk if tail_at < 0 else chunk[tail_at + 1 :]
     next_residual = next_residual[-_RESIDUAL_MAX_CHARS:]
     saw_ready = any(marker in chunk for marker in READY_MARKERS)
-    # Progress is the rate on the periodic decode-throughput line, not the line's presence: some vLLM builds log ``Avg
-    # generation throughput: 0.0 tokens/s`` on an idle engine, and an engine goes idle precisely when the client
-    # driving it wedges, so the marker alone lets the server vouch for the client that stopped asking it for tokens.
-    saw_progress = bool(throughput_samples(chunk))
-    saw_eval_start = any(marker in chunk for marker in _EVAL_START_MARKERS)
     saw_warmup_begin = any(marker in chunk for marker in _AGENTX_WARMUP_BEGIN_MARKERS)
     saw_measured_begin = any(marker in chunk for marker in _AGENTX_MEASURED_BEGIN_MARKERS)
     complete = [line for line in chunk[: tail_at + 1].splitlines() if line.strip()] if tail_at >= 0 else []
@@ -361,13 +299,10 @@ def _scan_increment(path: str, from_offset: int, residual: str = "") -> _Increme
     return _IncrementScan(
         size,
         saw_ready,
-        saw_progress,
-        saw_eval_start,
         saw_warmup_begin,
         saw_measured_begin,
         residual=next_residual,
         active=active,
-        saw_measured_end=any(marker in chunk for marker in _AGENTX_MEASURED_END_MARKERS),
         last_line=spoken[-1] if spoken else None,
     )
 
@@ -377,6 +312,4 @@ __all__ = [
     "LogCursor",
     "LogScan",
     "death_excerpt",
-    "round_start_offsets",
-    "throughput_samples",
 ]

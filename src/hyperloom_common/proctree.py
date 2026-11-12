@@ -38,7 +38,6 @@ __all__ = [
     "descendants",
     "group_members",
     "kill_tree",
-    "leader_exited",
     "marked_pids",
     "proc_identity",
     "process_uids",
@@ -196,26 +195,6 @@ def running(pid: int) -> bool:
     if not fields:
         return False
     return fields[0] not in _EXITED_STATES or _threads_left(pid)
-
-
-def leader_exited(pid: int) -> bool:
-    """Whether ``/proc/<pid>/stat`` shows ``pid``'s thread-group leader exited, whatever its other threads do.
-
-    :func:`running` still counts a process whose leader has exited while another thread of it runs, but that leader's
-    ``/proc/<pid>/cmdline`` reads empty, so a caller that tells a process by its command line asks this as well.
-
-    Args:
-        pid: The process to inspect.
-
-    Returns:
-        bool: True when the leader's state is exited; False when it is not, and when the pid is gone or its stat cannot
-        be read, which :func:`running` answers.
-    """
-    try:
-        fields = _stat_fields(pid)
-    except OSError:
-        return False
-    return bool(fields) and fields[0] in _EXITED_STATES
 
 
 def _threads_left(pid: int) -> bool:
