@@ -17,6 +17,7 @@ from enum import Enum
 from pathlib import Path
 
 from hyperloom_common.io import append_shared_jsonl
+from hyperloom_common.jsonio import read_jsonl
 from hyperloom_multibranch.blackboard.codec import encode
 from hyperloom_multibranch.scheduling.clock import Clock
 
@@ -67,4 +68,10 @@ class DecisionLog:
         )
 
 
-__all__ = ["Decision", "DecisionKind", "DecisionLog"]
+def downtime_until(path: Path, now: float) -> float:
+    """The seconds from the last decision the log at ``path`` holds to ``now``: how long its session was down."""
+
+    return max(now - float(read_jsonl(path)[-1]["at"]), 0.0)
+
+
+__all__ = ["Decision", "DecisionKind", "DecisionLog", "downtime_until"]
