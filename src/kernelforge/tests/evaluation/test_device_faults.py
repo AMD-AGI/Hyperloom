@@ -7,7 +7,7 @@ from __future__ import annotations
 
 import pytest
 
-from kernelforge.evaluation.device_faults import DEVICE_HANG, MEMORY_FAULT, classify
+from kernelforge.evaluation.device_faults import DEVICE_HANG, DEVICE_UNRESPONSIVE, MEMORY_FAULT, DeviceFault, classify
 
 HANG = "HW Exception by GPU node-2 (Agent handle: 0x5dac2f79a5b0) reason :GPU Hang"
 MEMORY = "Memory access fault by GPU node-3 (Agent handle: 0x55a1) on address 0x7f0000. Reason: Page not present."
@@ -27,6 +27,11 @@ def test_a_memory_access_fault_is_told_apart_from_a_hang():
 
 def test_a_hang_outranks_a_memory_access_fault_reported_beside_it():
     assert classify(f"{MEMORY}\n{HANG}").kind == DEVICE_HANG
+
+
+def test_a_fault_names_its_gpu_node_only_when_it_has_one():
+    assert DeviceFault(DEVICE_UNRESPONSIVE, "hipErrorNoDevice").describe() == "unresponsive: hipErrorNoDevice"
+    assert DeviceFault(DEVICE_HANG, "reason :GPU Hang", node=2).describe() == "hang on GPU node-2: reason :GPU Hang"
 
 
 @pytest.mark.parametrize(

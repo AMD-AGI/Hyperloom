@@ -442,7 +442,7 @@ class CampaignMixin:
         if self.device_unavailable is not None:
             self.termination_reason = "device_unrecovered"
             print(
-                f"\nDEVICE UNAVAILABLE: the GPU ran no work within {RECOVERY_TIMEOUT_SEC / 60:.0f} minutes of a hang, "
+                f"\nDEVICE UNAVAILABLE: the GPU ran no work within {RECOVERY_TIMEOUT_SEC / 60:.0f} minutes, "
                 f"so no further measurement can be trusted; stopping. {self.device_unavailable.describe()}"
             )
             return True, None

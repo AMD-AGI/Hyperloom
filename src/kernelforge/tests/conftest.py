@@ -83,6 +83,16 @@ def _refuse(target: object, how: str) -> None:
 
 
 @pytest.fixture(autouse=True)
+def _no_test_probes_a_real_gpu(monkeypatch):
+    """The check before every forge-loop measurement finds the GPU running work; no test waits on real hardware."""
+
+    async def runs_work(*_args, **_kwargs):
+        return None
+
+    monkeypatch.setattr("kernelforge.workflows.forge_loop.iteration.attempt_verdict.probe_device", runs_work)
+
+
+@pytest.fixture(autouse=True)
 def _no_writes_under_site_packages(monkeypatch):
     """Fail any test that writes, creates or deletes inside the package."""
     real_open = builtins.open

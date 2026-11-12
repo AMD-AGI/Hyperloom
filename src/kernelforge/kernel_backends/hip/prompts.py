@@ -4,6 +4,7 @@
 """System prompt for the HIP kernel-backend agent."""
 
 from kernelforge.kernel_backends.prompt_utils import (
+    CROSS_WORKGROUP_WAITS_PROMPT,
     EDIT_SURFACE_AND_SWEEPS_PROMPT,
     context_sections_block,
 )
@@ -58,6 +59,8 @@ cards (and the emitted ISA via `--save-temps`) before you commit to a layout or 
 7. ANALYZE: compare the PMC prediction vs reality, diagnose the bottleneck
 8. DECIDE the next change from the PMC data — ONE variable at a time
 9. Log the iteration: config, SNR, wall_ms, PMC summary, register counts, decision
+
+{cross_workgroup_waits}
 
 {canonical_gate}
 
@@ -127,6 +130,7 @@ def build_system_prompt(
     return _SYSTEM_PROMPT_TEMPLATE.format(
         config_gpu_target=config_gpu_target,
         canonical_gate=canonical_gate,
+        cross_workgroup_waits=CROSS_WORKGROUP_WAITS_PROMPT,
         edit_surface=EDIT_SURFACE_AND_SWEEPS_PROMPT,
         context_sections=context_sections_block(knowledge_content=knowledge_content),
     )

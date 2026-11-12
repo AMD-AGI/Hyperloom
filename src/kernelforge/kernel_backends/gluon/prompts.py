@@ -4,6 +4,7 @@
 """System prompt for the Gluon kernel-backend agent."""
 
 from kernelforge.kernel_backends.prompt_utils import (
+    CROSS_WORKGROUP_WAITS_PROMPT,
     EDIT_SURFACE_AND_SWEEPS_PROMPT,
     context_sections_block,
 )
@@ -57,6 +58,8 @@ not.
    they are large. The workflow is shared with Triton — same backend, same dump.
 8. Watch register pressure at every rung. It is the constraint that binds, and a
    change several rungs back is what spends it.
+
+{cross_workgroup_waits}
 
 {canonical_gate}
 
@@ -155,6 +158,7 @@ def build_system_prompt(
     return _SYSTEM_PROMPT_TEMPLATE.format(
         config_gpu_target=config_gpu_target,
         canonical_gate=canonical_gate,
+        cross_workgroup_waits=CROSS_WORKGROUP_WAITS_PROMPT,
         edit_surface=EDIT_SURFACE_AND_SWEEPS_PROMPT,
         context_sections=context_sections_block(knowledge_content=knowledge_content),
     )
