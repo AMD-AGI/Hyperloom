@@ -324,13 +324,15 @@ def choose_agent_isolation(user: str | None = None, *, allow_account: bool = Tru
     return _unaccounted(reason, required=isolation_required(name), warn=bool(name))
 
 
-def choose_sandbox_isolation() -> BwrapIsolation | NoIsolation:
+def choose_sandbox_isolation(*, known: BwrapProbe | None = None) -> BwrapIsolation | NoIsolation:
     """How to launch an agent sandbox's commands now: bubblewrap, else unconfined, which only a hosted run refuses.
+    ``known`` as for :func:`choose_test_isolation` (a sandbox whose own paths bubblewrap cannot bind safely,
+    :class:`~hyperloom_multibranch.specialist.agent_sandbox.LocalAgentSandbox`).
 
     Raises:
         IsolationRefused: In a hosted run, where bubblewrap cannot run a sandbox.
     """
-    return _unaccounted(SANDBOX_ACCOUNT, required=_STATE.hosted, warn=False)
+    return _unaccounted(SANDBOX_ACCOUNT, required=_STATE.hosted, warn=False, known=known)
 
 
 def choose_test_isolation(*, known: BwrapProbe | None = None) -> BwrapIsolation | NoIsolation:

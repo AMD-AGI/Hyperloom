@@ -992,6 +992,25 @@ unconfined although start-up found bubblewrap usable (its probe gave no answer i
 `claude` CLI with no login in its environment) logs that WARNING itself, once per process, and the report adds
 `agent isolation: N agent launches ran unconfined: <reasons>`.
 
+A multi-branch session's local agent sandboxes (autonomous branches, the dossier pass, dev leases) run every command
+of one sandbox in one bubblewrap sandbox whose user and pid namespaces all its commands share, so a server one command
+starts is seen, signalled and stopped by a later one (`pkill`, or its PID file against the sandbox's own `/proc`). They
+share the sandbox's private `/tmp` and full-size `/dev/shm`, each command has its own IPC namespace (System V IPC does
+not outlive a command; POSIX shared memory in `/dev/shm` does), and the network is the app's. A command writes the
+lease's root and, for an agent, its directory and worktree (a dev lease's worktree and what its links point at are
+read-only); the image's installed frameworks are read-only but aiter, which writes its JIT modules and tuning files
+beside itself. Its environment is not the app's: the search paths, locale, models, the image's own settings and the
+LLM gateway with its credentials (`ANTHROPIC_*`, `OPENAI_*`, `CLAUDE_CODE_OAUTH_TOKEN`, the proxies and CA bundle),
+with `HOME`, `CLAUDE_CONFIG_DIR` and `TRITON_CACHE_DIR` of the sandbox's own (an agent's home is `sandbox/home` in its
+branch's session directory, where its Claude CLI's transcripts are read from). A Claude CLI there logs in only through
+those variables, never the app's `~/.claude`. pip installs to `PIP_TARGET`, `site-packages` in that home, which is on
+no interpreter's import path, so no server a command starts imports what was installed, nor the dependencies an install
+brought, ahead of the image's (the image's venv takes no user install and is read-only). `AITER_JIT_DIR` and
+`FLYDSL_RUNTIME_CACHE_DIR` are aiter's defaults, its own writable tree, where the image's prebuilt JIT modules and
+FlyDSL kernels are. A sandbox whose paths bubblewrap cannot bind safely (before 0.12, nothing may be bound below the
+shared `/tmp`, so a session directory under `/tmp` cannot be) runs unconfined, as before, with a WARNING; a hosted run
+refuses it.
+
 A hosted run uses only its hosting layer's bubblewrap, by the path its entry names, never one found on `PATH` (the
 framework image may carry its own); a local run uses the `bwrap` on `PATH`. `hyperloom hosted run` names `bin/bwrap` in
 the directory `HYPERLOOM_HOST_LAYER` names (whitespace around it ignored), which the layer's `start.sh` sets to its
