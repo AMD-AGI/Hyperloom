@@ -26,7 +26,6 @@ from typing import Any
 
 import pytest
 
-import hyperloom_multibranch
 from hyperloom.inference_optimizer.cli import bootstrap
 from hyperloom.measure.tests.bundle_factory import base_launch
 from hyperloom.orchestrator.state.base_launch import freeze_base
@@ -256,7 +255,7 @@ def restart_leg(state_dir: str, image: list[str]) -> dict[str, object]:
 
 
 def _as_account(accounts: Accounts, uid: int, call: str) -> dict[str, object]:
-    source = Path(hyperloom_multibranch.__file__).parents[1]
+    source = Path(cli.__file__).parents[1]
     code = (
         f"import json, sys, tempfile\nsys.path.insert(0, {str(source)!r})\n"
         "os.environ['MPLCONFIGDIR'] = tempfile.mkdtemp()  # this account has no home of its own\n"
@@ -269,7 +268,7 @@ def _as_account(accounts: Accounts, uid: int, call: str) -> dict[str, object]:
 @pytest.mark.parametrize("image", [IMAGE[1], "sha256:" + "3" * 64], ids=["same-image", "another-image"])
 def test_a_restart_as_another_account_of_the_group_resumes_what_one_account_preempted(image: str) -> None:
     with other_accounts() as accounts:
-        source = Path(hyperloom_multibranch.__file__).parents[1]
+        source = Path(cli.__file__).parents[1]
         if any(not directory.stat().st_mode & stat.S_IXOTH for directory in (source, *source.parents)):
             pytest.skip(f"another account cannot reach this checkout's {source}")
         if accounts.python != sys.executable:
