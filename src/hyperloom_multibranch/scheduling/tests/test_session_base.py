@@ -82,6 +82,16 @@ def test_a_fresh_session_freezes_the_base_resolved_for_its_workload_in_the_toolb
     assert frozen.launch.model.path == WORKLOAD.model and frozen.launch.topology.tp == WORKLOAD.tp
 
 
+def test_an_inferencex_session_at_an_ep_freezes_a_base_whose_server_runs_that_ep(tmp_path: Path, asked: list) -> None:
+    freeze_session_base(tmp_path, replace(WORKLOAD, ep=2), "")
+
+    [(query, _)] = asked
+    assert (query.workload, query.tp, query.ep) == (LaunchWorkload.FIXED, 2, 2)
+    frozen = frozen_base(tmp_path)
+    assert frozen is not None and frozen.launch.topology.ep == 2
+    assert "--ep-size 2" in " ".join(frozen.launch.args)
+
+
 def test_a_hub_id_the_model_base_resolves_is_asked_for_by_that_id_and_served_from_the_directory(
     tmp_path: Path, asked: list, monkeypatch: pytest.MonkeyPatch
 ) -> None:

@@ -50,6 +50,7 @@ from hyperloom_multibranch.specialist.autonomous_session import (
     AGENT_DIR,
     MANIFEST_FILE,
     START_TABLES_DIR,
+    WATCH_FILE,
     AutonomousSession,
     AutonomousSetup,
     collection_margin,
@@ -92,6 +93,8 @@ from hyperloom_multibranch.tests.agent_rig import (
 #: after ``tail`` more seconds of silence. With ``table`` it also writes that kernel table, for the keep, to its workspace's tuned.csv,
 #: or to ``table_at`` in its checkout. It reports ``envs`` as NAME=VALUE words in run/result.json, as GEAK does.
 #: Before each keep it appends that keep's entries of ``ledger`` to its ledger, run/ledger.jsonl, as Arbor does.
+#: With a keep file, it keeps nothing until ``after`` exists, the session's watch file: the preflight reads the keep
+#: file's baseline once the agent started, and a keep made before that read would be taken for one it had before.
 AGENT = """
 import json, pathlib, subprocess, sys, time
 config = json.loads(pathlib.Path("campaign.json").read_text())
@@ -99,6 +102,9 @@ workspace = pathlib.Path(config["workspace"])
 state = pathlib.Path("run/state.json")
 state.parent.mkdir(exist_ok=True)
 state.write_text(json.dumps({"keeps": [], "note": ""}))
+until = time.time() + 10
+while config["after"] and not pathlib.Path(config["after"]).exists() and time.time() < until:
+    time.sleep(0.01)
 for step, seqs in enumerate(config["keeps"], start=1):
     time.sleep(config["gap"])
     (workspace / "vllm" / "config.py").write_text(f"max_num_seqs = {seqs}\\n")
@@ -183,7 +189,7 @@ def _given(agent: Agent | Component, prompt: str) -> Agent | Component:
     return replace(agent, envs=given, started=started)
 
 
-def _manifest(workspace: str, agent: Agent | Component) -> str:
+def _manifest(workspace: str, agent: Agent | Component, after: str = "") -> str:
     if isinstance(agent, Component):
         return _component_manifest(workspace, agent)
     plan = {"keeps": list(agent.keeps), "gap": agent.gap, "tail": agent.tail, "exit": agent.exit, "busy": agent.busy}
@@ -201,6 +207,7 @@ def _manifest(workspace: str, agent: Agent | Component) -> str:
                 "table": agent.table,
                 "table_at": agent.table_at,
                 "ledger": [list(entries) for entries in agent.ledger],
+                "after": after if agent.keep is not None else "",
                 **plan,
             },
             "launch": "python3 agent.py",
@@ -291,10 +298,11 @@ async def _rig(
     toolbox_blackboard = LocalBlackboard(tmp_path / "blackboard", Writer(Role.TOOLBOX, "toolbox"))
     worktree = rig.base.worktree(BRANCH, tmp_path / BRANCH / "agent-workspace")
     sandbox, toolbox = LocalSandbox(tmp_path / "logs"), Toolbox(toolbox_blackboard)
+    session = tmp_path / BRANCH / "session"
 
     async def onboard(checkout: Path, prompt: str) -> str:
         sandbox.prompts.append(prompt)
-        return _manifest(str(worktree.path), _given(agent, prompt))
+        return _manifest(str(worktree.path), _given(agent, prompt), str(session / WATCH_FILE))
 
     def onboarding(agent_sandbox) -> OnboardingSetup:
         return OnboardingSetup(agent_sandbox, onboard, start_seconds=start_seconds, poll_seconds=0.05)
@@ -325,7 +333,7 @@ async def _rig(
     )
     if aiter is not None:
         setup = replace(setup, aiter_configs=aiter)
-    place = BranchPlace(worktree, rig.blackboard, tmp_path / BRANCH / "session")
+    place = BranchPlace(worktree, rig.blackboard, session)
     agent_source = str(source or _agent_repo(tmp_path))
     start = SessionStart(BRANCH, start_commit, 1, BranchTask(agent=agent_source, deadline=deadline))
 

@@ -109,6 +109,17 @@ NO_TREES = "no_archived_tree"
 NO_TRANSCRIPT = "no_judge_transcript"
 NO_CASE = "no_case_registered"
 NO_BLOBS = "no_blob_store"
+#: The steps of :class:`KnowledgeClose` that write beside the archive, which a session the archive holds no search tree
+#: of skips.
+_BESIDE_THE_ARCHIVE = (
+    "lessons",
+    "lesson_standings",
+    "playbook_trial",
+    "scheduling_replay",
+    "specialist_outcomes",
+    "judge_decisions",
+    "regression_cases",
+)
 #: What a step raises when its target or its input lets it down; CLOSE records it and goes on.
 STEP_ERRORS = (LookupError, OSError, RuntimeError, ValueError)
 
@@ -396,12 +407,38 @@ def close_knowledge(
     read nothing from it. ``cross_image`` names, by canonical id, the Recipe KB champions PRELUDE prepared from
     another image than the session's, whose replays the archived tree marks. The scheduling replay runs before the
     playbook trial is settled, so a CLOSE settles its trials on the standing it wrote itself, not on an earlier one.
+    A session the configured archive holds no search tree of, one stopped before its baseline among them, writes nothing
+    beside the archive: each of those steps is skipped for the archive step's reason.
     """
 
     archive = TreeArchive.from_env()
+    published = _kb_steps(snapshot, metric, targets)
+    archived = _archived(snapshot, metric, archive, budget_seconds=budget_seconds, cross_image=cross_image)
+    stop_audit = _audited(snapshot, metric, targets.receipt(STOP_AUDIT_REPORT))
+    profile = snapshot.profile
+    if archive is not None and profile is not None and not archive.holds(profile.session_id):
+        beside = dict.fromkeys(_BESIDE_THE_ARCHIVE, CloseStep(SKIPPED, archived.reason))
+        return KnowledgeClose(**published, archive=archived, stop_audit=stop_audit, **beside)
     lesson_pool = LessonPool.beside(archive) if archive is not None else None
     return KnowledgeClose(
-        experiences=_published(
+        **published,
+        archive=archived,
+        lessons=_lessons(snapshot, lesson_pool),
+        lesson_standings=_standings(snapshot, lesson_pool, targets.receipt(LEARNINGS_LOG)),
+        stop_audit=stop_audit,
+        scheduling_replay=_replayed(snapshot, archive, targets.receipt(SCHEDULING_REPLAY_REPORT)),
+        playbook_trial=_trialled(snapshot, metric, archive, budget_seconds=budget_seconds),
+        specialist_outcomes=_outcomes(snapshot, archive, targets.receipts),
+        judge_decisions=_decided(snapshot, archive, targets.judge_transcript),
+        regression_cases=_pooled_cases(snapshot, archive, targets.blobs),
+    )
+
+
+def _kb_steps(snapshot: BlackboardSnapshot, metric: str, targets: CloseTargets) -> dict[str, CloseStep]:
+    """The Experience KB steps, by their fields of :class:`KnowledgeClose`."""
+
+    return {
+        "experiences": _published(
             "publish the Experiences",
             partial(
                 publish_experiences,
@@ -411,18 +448,11 @@ def close_knowledge(
                 receipt=targets.receipt(EXPERIENCE_RECEIPT),
             ),
         ),
-        learnings=_published(
+        "learnings": _published(
             "publish the learnings",
             partial(publish_learnings, snapshot, kb=targets.learning_kb, receipt=targets.receipt(LEARNING_RECEIPT)),
         ),
-        archive=_archived(
-            snapshot,
-            metric,
-            archive,
-            budget_seconds=budget_seconds,
-            cross_image=cross_image,
-        ),
-        multibranch_experiences=_published(
+        "multibranch_experiences": _published(
             "publish the Experiences under the blackboard's own declaration",
             partial(
                 publish_multibranch_experiences,
@@ -432,15 +462,7 @@ def close_knowledge(
                 receipt=targets.receipt(MULTIBRANCH_RECEIPT),
             ),
         ),
-        lessons=_lessons(snapshot, lesson_pool),
-        lesson_standings=_standings(snapshot, lesson_pool, targets.receipt(LEARNINGS_LOG)),
-        stop_audit=_audited(snapshot, metric, targets.receipt(STOP_AUDIT_REPORT)),
-        scheduling_replay=_replayed(snapshot, archive, targets.receipt(SCHEDULING_REPLAY_REPORT)),
-        playbook_trial=_trialled(snapshot, metric, archive, budget_seconds=budget_seconds),
-        specialist_outcomes=_outcomes(snapshot, archive, targets.receipts),
-        judge_decisions=_decided(snapshot, archive, targets.judge_transcript),
-        regression_cases=_pooled_cases(snapshot, archive, targets.blobs),
-    )
+    }
 
 
 def _lessons(snapshot: BlackboardSnapshot, pool: LessonPool | None) -> CloseStep:

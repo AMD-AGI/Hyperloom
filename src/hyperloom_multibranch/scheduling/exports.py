@@ -12,8 +12,8 @@ learnings go nowhere while the session runs on no Experience KB, see
 outcomes next to the chosen commit's recipe and how FINAL chose it; once the search tree is archived, the scheduler's
 LLM proposes one change to the scheduling playbook into the pool beside the archive (:func:`author_playbook`) and
 curates the RSI lesson pool the knowledge steps published the session's learnings to (:func:`curate_lessons`), steps
-that never stop CLOSE. A later CLOSE of a session whose earlier CLOSE archived its tree (:func:`archived_before`), a
-resumed session's or a ``final-only``'s, runs none of these steps and reports each as :data:`ARCHIVED_BEFORE`; ``session_breakdown.json``, which also counts how the merges went and how each met a
+that never stop CLOSE; a CLOSE whose knowledge steps archived no tree asks neither. A later CLOSE of a session whose
+earlier CLOSE archived its tree (:func:`archived_before`), a resumed session's or a ``final-only``'s, runs none of these steps and reports each as :data:`ARCHIVED_BEFORE`; ``session_breakdown.json``, which also counts how the merges went and how each met a
 conflicting patch from the integrator's merge log, the knowledge steps' receipts and :data:`IMAGE_CHECK_FILE`, the
 whole image check the session ran before its first phase, land in ``MB-reports/``, and the dashboard is rebuilt a last
 time with the queue the stop left.
@@ -52,7 +52,7 @@ from hyperloom_multibranch.blackboard.knowledge.recipe_writeback import SKIPPED,
 from hyperloom_multibranch.blackboard.knowledge.warm_start import WarmLead
 from hyperloom_multibranch.blackboard.rsi.authoring import author_playbook
 from hyperloom_multibranch.blackboard.rsi.lesson_curation import curate_lessons
-from hyperloom_multibranch.blackboard.rsi.archive import TreeArchive
+from hyperloom_multibranch.blackboard.rsi.archive import ARCHIVED, TreeArchive
 from hyperloom_multibranch.blackboard.rsi.archive import SKIPPED as STEP_SKIPPED
 from hyperloom_multibranch.blackboard.rsi.session import CloseStep, KnowledgeClose
 from hyperloom_multibranch.scheduling.dashboard import SessionDashboard
@@ -258,8 +258,12 @@ class SessionExports:
                 layout=self._layout,
                 cross_image=_cross_image(self._warm_leads),
             )
-            playbook = await author_playbook(snapshot, self._ask_author, model=self._author.model)
-            curation = await self._curate(snapshot)
+            if knowledge.archive.status == ARCHIVED:
+                playbook = await author_playbook(snapshot, self._ask_author, model=self._author.model)
+                curation = await self._curate(snapshot)
+            else:
+                # An unarchived tree leaves the author nothing to propose from and the curator no lesson of the session.
+                playbook = curation = CloseStep(STEP_SKIPPED, knowledge.archive.reason)
         # The playbook author and the curator record their LLM spend after the first snapshot, so the breakdown reads a
         # fresh one, or ``spend.llm_usd`` would miss CLOSE's own calls.
         snapshot = await self._blackboard.snapshot()

@@ -120,6 +120,12 @@ def _spec(**multibranch: object) -> CampaignSpec:
     return parse_campaign(_document(**multibranch))
 
 
+def test_an_inferencex_spec_runs_its_session_at_the_hardware_ep_it_names() -> None:
+    spec = parse_campaign({**_document(), "hardware": {"gpu_type": "mi355x", "tp": 8, "ep": 8}})
+
+    assert {"--workload=inferencex", "--tp=8", "--ep=8"} <= set(run_argv(spec, 1.0, 1))
+
+
 @pytest.mark.parametrize(
     ("launch", "named"),
     [

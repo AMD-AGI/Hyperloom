@@ -142,6 +142,9 @@ class _Processes:
     def adopt(self, pid, *, branch, argv):
         self.adopted.append(branch)
 
+    def forget(self, pid):
+        pass
+
 
 async def _until(condition, what: str, explain) -> None:
     for _ in range(1200):
