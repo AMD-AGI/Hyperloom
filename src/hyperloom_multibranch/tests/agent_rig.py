@@ -279,12 +279,16 @@ class LocalSandbox:
         self.usage = _Usage()
         self.watch_said: list[str] = []
         self.stops = 0
+        self.processes: list[LocalProcess] = []
 
     def watched(self) -> str:
         return self.watch_said.pop(0) if self.watch_said else ""
 
     async def stop(self) -> None:
+        """Kill every process the sandbox started, as a sandbox's stop does."""
         self.stops += 1
+        for process in self.processes:
+            await process.kill()
 
     async def run(self, command: str, cwd: Path, env: Mapping[str, str], timeout: float) -> CommandResult:
         self.ran.append(command)
@@ -313,7 +317,8 @@ class LocalSandbox:
         )
         self.started.append(command)
         self.envs.append(dict(env))
-        return LocalProcess(process, log)
+        self.processes.append(LocalProcess(process, log))
+        return self.processes[-1]
 
 
 class Toolbox:

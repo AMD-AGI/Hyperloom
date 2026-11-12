@@ -489,20 +489,16 @@ class AutonomousSession:
             await self._setup.toolbox.release_branch_sandbox(self._held().lease_id)
 
     async def stop(self) -> None:
-        """Stop the agent and its sandbox, then learn what its ledger gained since the last keep, which no later keep
-        imports."""
+        """Stop the agent and its sandbox, then learn what its ledger gained since the last keep, which none imports."""
 
         self._stopped.set()
         running = self._process is not None and self._process.returncode is None
-        sandbox, self._sandbox = self._sandbox, None
-        try:
-            if self._process is not None:
-                await self._process.kill()
-            if sandbox is not None:
-                await sandbox.stop()
-        except SandboxUnavailable as error:
-            log.warning("the agent of %s could not be killed: %s", self._start.branch, error)
-            await self._note(f"the agent could not be killed: {error}")
+        if self._sandbox is not None:
+            try:
+                await self._sandbox.stop()
+            except SandboxUnavailable as error:
+                log.warning("the agent of %s could not be killed: %s", self._start.branch, error)
+                await self._note(f"the agent could not be killed: {error}")
         if running and self._manifest is not None and self._manifest.snapshots is not None:
             await self._note(f"the agent stopped: {self._exit_reason(self._manifest)}")
         watch_file = self._place.workspace / WATCH_FILE
@@ -525,7 +521,7 @@ class AutonomousSession:
         sandbox: AgentSandbox | None = None
         if (self._place.workspace / LEASE_FILE).exists():
             try:
-                sandbox = self._setup.sandbox(self._held())
+                sandbox = self._sandbox = self._setup.sandbox(self._held())
                 process = await sandbox.start(command, checkout, env)
             except SandboxGone as gone:
                 await self._note(f"the agent's sandbox ended ({gone})")
@@ -547,9 +543,8 @@ class AutonomousSession:
         await self._note("the agent is installed in a new sandbox and resumed")
         lease = await self._lease(self._setup.spec.tp)
         installed = False
-        sandbox: AgentSandbox | None = None
         try:
-            sandbox = self._setup.sandbox(lease)
+            sandbox = self._sandbox = self._setup.sandbox(lease)
             await install(
                 manifest, self._setup.onboarding(sandbox), self._agent_dir / SOURCE_DIR, agent_env(self._agent_dir)
             )
@@ -558,17 +553,9 @@ class AutonomousSession:
             raise SessionCrashed(f"the agent's install in its new sandbox failed: {failed}") from failed
         finally:
             if not installed:
-                await asyncio.shield(self._given_back(sandbox, lease))
+                await asyncio.shield(self._setup.toolbox.release_branch_sandbox(lease.lease_id))
         self._hold(lease)
         return sandbox
-
-    async def _given_back(self, sandbox: AgentSandbox | None, lease: BranchLease) -> None:
-        """Stop ``sandbox``, when one was made, and give its ``lease`` back."""
-        try:
-            if sandbox is not None:
-                await sandbox.stop()
-        finally:
-            await self._setup.toolbox.release_branch_sandbox(lease.lease_id)
 
     async def _lease(self, cards: int) -> BranchLease:
         """Lease ``cards`` for the branch's sandbox, for as long as is left until the branch's deadline.
