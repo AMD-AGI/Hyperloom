@@ -10,6 +10,8 @@ import importlib.util
 import json
 import logging
 import os
+import shutil
+import threading
 import time
 from dataclasses import replace
 from pathlib import Path
@@ -25,6 +27,7 @@ from hyperloom.contracts.measurement import FailureClass, TestResult, Validity
 from hyperloom.measure.archive import DirResultArchive
 from hyperloom.measure.framework.base import FRAMEWORK_BASE_FILE, SNAPSHOT_ENV, load_snapshot, take_snapshot
 from hyperloom.measure.hosted_log import STATE_FINISHED, STATE_SENT, MeasurementJournal, Record
+from hyperloom.measure import live_log
 from hyperloom.measure.live_log import last_output
 from hyperloom.measure.runner.tools import ToolError, ensure_inferencex
 from hyperloom.measure.tests.framework_fixtures import make_framework
@@ -446,15 +449,101 @@ def test_the_live_output_is_read_from_the_sandbox_of_the_unfinished_attempt(tmp_
     toolbox = LocalHostedToolbox.__new__(LocalHostedToolbox)
     journal = MeasurementJournal(tmp_path / "hosted")
     toolbox.backend, toolbox.sandboxes = SimpleNamespace(journal=journal), tmp_path / "sandboxes"  # type: ignore[assignment]
-    _write(
-        tmp_path / "sandboxes" / "lsb-1" / "fs" / "out" / "files" / "v" / "server.log", "decode batch\n", time.time()
-    )
+    written = time.time()
+    _write(tmp_path / "sandboxes" / "lsb-1" / "fs" / "out" / "files" / "v" / "server.log", "decode batch\n", written)
     assert toolbox._live_log("r1") is None
     journal.append(Record("r1", 1, STATE_SENT, "lsb-1", "tests/r1/attempt-1", "r1", {}))
     output = toolbox._live_log("r1")
-    assert output is not None and output[1] == "decode batch" and 0.0 <= output[0] < 60.0
+    read = time.time()
+    assert output is not None and output[1] == "decode batch", output
+    assert 0.0 <= output[0] <= read - written + 1e-6, "its age is the time since it was written, as of the reading"
     journal.append(Record("r1", 1, STATE_FINISHED, "lsb-1", "tests/r1/attempt-1", "r1", {}))
     assert toolbox._live_log("r1") is None
+
+
+def _toolbox_reading(tmp_path: Path) -> tuple[LocalHostedToolbox, Path]:
+    """A toolbox whose test ``r1`` runs in sandbox ``lsb-1``, and that sandbox's ``files`` directory."""
+    toolbox = LocalHostedToolbox.__new__(LocalHostedToolbox)
+    journal = MeasurementJournal(tmp_path / "hosted")
+    toolbox.backend, toolbox.sandboxes = SimpleNamespace(journal=journal), tmp_path / "sandboxes"  # type: ignore[assignment]
+    journal.append(Record("r1", 1, STATE_SENT, "lsb-1", "tests/r1/attempt-1", "r1", {}))
+    files = tmp_path / "sandboxes" / "lsb-1" / "fs" / "out" / "files"
+    files.mkdir(parents=True)
+    return toolbox, files
+
+
+def test_a_directory_the_sandbox_swaps_for_a_pipe_as_the_live_log_is_read_is_skipped_never_waited_on(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The sandbox's processes may put a pipe where the walk listed a directory, before it opens it: the read neither
+    waits for a writer of the pipe (which would hold the agent's progress call) nor fails, and still shows the log
+    beside it."""
+    toolbox, files = _toolbox_reading(tmp_path)
+    (files / "sub").mkdir()
+    _write(files / "server.log", "the line\n", time.time())
+    listed = live_log._listed
+    swapped: list[str] = []
+
+    def swapping(directory: int) -> tuple[list[str], list[str]]:
+        found = listed(directory)
+        if "sub" in found[1] and not swapped:
+            swapped.append("sub")
+            (files / "sub").rmdir()
+            os.mkfifo(files / "sub")
+        return found
+
+    monkeypatch.setattr(live_log, "_listed", swapping)
+    read: dict[str, object] = {}
+    reader = threading.Thread(target=lambda: read.update(output=toolbox._live_log("r1")), daemon=True)
+    reader.start()
+    reader.join(10)
+    if reader.is_alive():
+        os.close(os.open(files / "sub", os.O_WRONLY | os.O_NONBLOCK))  # lets the reader go
+        reader.join(10)
+        pytest.fail("the live log's read waited on a pipe the sandbox put where a directory was")
+    output = read["output"]
+    assert swapped and isinstance(output, tuple) and output[1] == "the line", read
+
+
+def test_a_live_log_that_cannot_be_read_is_no_live_line_never_a_failed_progress_call(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    toolbox, files = _toolbox_reading(tmp_path)
+    _write(files / "server.log", "the line\n", time.time())
+
+    def failing(dir_fd: int, now: float) -> None:
+        raise NotADirectoryError(20, "Not a directory")
+
+    monkeypatch.setattr(local_hosted, "last_output_below", failing)
+    with caplog.at_level(logging.DEBUG, logger=local_hosted.__name__):
+        assert toolbox._live_log("r1") is None
+    assert "the live log of sandbox lsb-1 could not be read" in caplog.text
+
+
+@pytest.mark.parametrize("linked", ["out", "out/files", "out/files/v"])
+def test_the_live_output_is_never_read_through_a_link_the_sandbox_made_out_of_its_root(
+    tmp_path: Path, linked: str
+) -> None:
+    """The sandbox's processes write ``/out``: a link there, at any depth, to a directory of the app's never shows the
+    app a log in it; a log the sandbox wrote in its own tree still shows."""
+    toolbox = LocalHostedToolbox.__new__(LocalHostedToolbox)
+    journal = MeasurementJournal(tmp_path / "hosted")
+    toolbox.backend, toolbox.sandboxes = SimpleNamespace(journal=journal), tmp_path / "sandboxes"  # type: ignore[assignment]
+    journal.append(Record("r1", 1, STATE_SENT, "lsb-1", "tests/r1/attempt-1", "r1", {}))
+    fs, app = tmp_path / "sandboxes" / "lsb-1" / "fs", tmp_path / "app"
+    written = time.time()
+    _write(fs / "out" / "files" / "own" / "server.log", "the sandbox's own line\n", written - 100)
+    for below in ("files/v", "v", ""):
+        _write(app / below / "server.log", "SECRET line of the app's\n", written)
+    target = {"out": app, "out/files": app / "files", "out/files/v": app / "v"}[linked]
+    if (fs / linked).is_dir():
+        shutil.rmtree(fs / linked)
+    (fs / linked).symlink_to(target)
+
+    output = toolbox._live_log("r1")
+    assert output is None or "SECRET" not in output[1], output
+    if linked == "out/files/v":
+        assert output is not None and output[1] == "the sandbox's own line"
 
 
 def test_a_runner_reads_the_shared_tables_its_framework_snapshot_was_taken_from_and_none_without_one(

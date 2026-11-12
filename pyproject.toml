@@ -243,11 +243,22 @@ exclude = [
     # (``actions/executors/launch_backend.py``) ships as normal.
     "hyperloom.orchestrator.rehearsal",
     "hyperloom.orchestrator.rehearsal.*",
-    # Arbor, vendored as a source tree (src/hyperloom_arbor/VENDOR.md): it runs from
-    # the checkout as `python -m arbor` in its own root, so its `arbor` package is
-    # never imported as `hyperloom_arbor.arbor` and does not ship in the wheel.
-    "hyperloom_arbor",
-    "hyperloom_arbor.*",
+    # Arbor, vendored (src/hyperloom_arbor/VENDOR.md): it runs as `python -m arbor`
+    # from its own root, never as `hyperloom_arbor.*` modules, so its trees stay out
+    # of namespace discovery and ship as package data below, as KernelForge's
+    # examples do. `hyperloom_arbor` itself stays a package, to own that data.
+    "hyperloom_arbor.arbor",
+    "hyperloom_arbor.arbor.*",
+    "hyperloom_arbor.configs",
+    "hyperloom_arbor.configs.*",
+    "hyperloom_arbor.docs",
+    "hyperloom_arbor.docs.*",
+    "hyperloom_arbor.evals",
+    "hyperloom_arbor.evals.*",
+    "hyperloom_arbor.packs",
+    "hyperloom_arbor.packs.*",
+    "hyperloom_arbor.scripts",
+    "hyperloom_arbor.scripts.*",
 ]
 
 [tool.setuptools.data-files]
@@ -361,13 +372,28 @@ hyperloom_kb = [
     "declarations/*.yaml",
     "mappings/*.yaml",
 ]
+# Arbor, vendored at a release tag (src/hyperloom_arbor/VENDOR.md), whole: `--autonomous-agent arbor` names this
+# tree, and MB copies it into a session and runs `python -m arbor` from that copy's root, so a wheel install has the
+# same Arbor as a checkout. Git's own files (.gitattributes, .gitignore, .gitkeep) do not ship.
+hyperloom_arbor = [
+    "*.md",
+    "LICENSE",
+    "install.sh",
+    ".claude/**/*",
+    "arbor/**/*",
+    "configs/**/*",
+    "docs/**/*",
+    "evals/**/*",
+    "packs/**/*",
+    "scripts/**/*",
+]
 hyperloom_multibranch = [
     "contracts/llm_prices.json",
     "blackboard/knowledge/declarations/*.yaml",
     "blackboard/knowledge/mappings/*.yaml",
 ]
 # The runner's bootstrap entry point: install.sh <tool-cache-dir> stages the tools a round runs; the AgentX client lock;
-# the sealed runner's locks lm-eval installs from (symlinks to requirements/, which a wheel carries as files).
+# the sealed runner's locks lm-eval installs from (copies of requirements/'s, held equal by a test).
 inference_suite = [
     "install.sh",
     "agentx-client.lock",

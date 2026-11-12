@@ -3,14 +3,52 @@
 from __future__ import annotations
 
 import os
+import platform
 import shutil
 import signal
 import subprocess
+import sys
 import time
 from pathlib import Path
 
 from arbor import frameworks
 from arbor.execute.watch import gpu_vram_used
+
+# ── WSL ───────────────────────────────────────────────────────────────────────
+
+#: Why Arbor warns under WSL. Its clock can step back (by a fraction of a second, over and over), and git,
+#: as Linux distributions build it, compares file times to the second: an edit of the same size made within a second of
+#: git's last look at the file then matches git's snapshot of it, and the iteration is booked "no changes" while the
+#: edit stays in the tree. A clock that only moves forward, as native Linux keeps it, is safe. The suite guards against
+#: it itself (arbor/tests/conftest.py).
+WSL_WARNING = ("running under WSL ({kernel}): its clock can step back, and git compares file times to the second, so "
+               "an edit of the same size made within a second of git's last look at the file can go unseen (booked "
+               "\"no changes\"). Run campaigns on native Linux.")
+YELLOW, RESET = "\033[1;33m", "\033[0m"
+
+
+def wsl_kernel() -> str | None:
+    """The kernel's release when Arbor runs under WSL (it names Microsoft), else None. A container on WSL runs on the
+    same kernel, so it says so too."""
+    release = platform.uname().release
+    return release if "microsoft" in release.lower() else None
+
+
+def warn_wsl(stream=None) -> bool:
+    """Print ``WSL_WARNING`` as one line under WSL, in yellow on a terminal (``NO_COLOR`` set: never; ``FORCE_COLOR``
+    set: always, a log file included). True when it printed."""
+    kernel = wsl_kernel()
+    if not kernel:
+        return False
+    stream = stream or sys.stdout
+    line = f"[arbor] WARNING: {WSL_WARNING.format(kernel=kernel)}"
+    try:
+        tty = stream.isatty()
+    except (AttributeError, ValueError):
+        tty = False
+    color = not os.environ.get("NO_COLOR") and (bool(os.environ.get("FORCE_COLOR")) or tty)
+    print(f"{YELLOW}{line}{RESET}" if color else line, file=stream, flush=True)
+    return True
 
 
 def stage_weights(

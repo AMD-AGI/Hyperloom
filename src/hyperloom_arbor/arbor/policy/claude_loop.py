@@ -389,6 +389,21 @@ CONNECT_BACKOFF_S = (30.0, 60.0, 120.0, 240.0, 300.0)
 # The model name on the assistant message the CLI writes for a failed API call.
 SYNTHETIC_MODEL = "<synthetic>"
 
+#: The models this iteration's turns ran on, as the CLI reported them (each assistant message names its model):
+#: the iteration's lesson row carries the list as ``agent_models``. A new list per iteration (``_new_turn_models``).
+_TURN_MODELS: list[str] = []
+
+
+def _new_turn_models() -> list[str]:
+    global _TURN_MODELS
+    _TURN_MODELS = []
+    return _TURN_MODELS
+
+
+def _note_model(model: str) -> None:
+    if model not in _TURN_MODELS:
+        _TURN_MODELS.append(model)
+
 # The last agent start's connection failure, or None once a turn has reached its model. When the
 # not-measured streak ends the run, it says whether the model could be reached (_write_aborted).
 _unreachable: str | None = None
@@ -482,6 +497,10 @@ async def _run_claude_once(prompt: str, cwd: str, allowed_tools: list[str],
     # processes are listed now, and what is new when the turn ends is stopped there.
     box = turns.CONTAINER if label not in turns.KEPT else None
     before = await asyncio.to_thread(turns.container_procs, box) if box else None
+    # The agents' model, when the config pins one (`agent_model`, arbor/prompts.py); else the CLI's default.
+    from arbor import prompts as _prompts
+    pinned = _prompts.agent_model()
+    pin = pinned if pinned and "model" in getattr(ClaudeAgentOptions, "__dataclass_fields__", {}) else None
     options = ClaudeAgentOptions(
         cwd=cwd,
         allowed_tools=allowed_tools,
@@ -491,13 +510,22 @@ async def _run_claude_once(prompt: str, cwd: str, allowed_tools: list[str],
         **({"add_dirs": [str(d) for d in dirs]} if dirs else {}),
         **({"disallowed_tools": deny} if deny else {}),
         **({"env": {turns.TURN_ENV: tag}} if tagged else {}),
+        **({"model": pin} if pin else {}),
     )
 
     text_parts: list[str] = []
     sdk_errors: list[str] = []   # the CLI's own error results, e.g. "API Error: ..."
+    warned: set[str] = set()
 
     try:
         async for message in query(prompt=prompt, options=options):
+            used = getattr(message, "model", None)
+            if isinstance(used, str) and used and used != SYNTHETIC_MODEL:
+                _note_model(used)
+                if not _prompts.model_matches(pinned, used) and used not in warned:
+                    warned.add(used)
+                    print(f"[arbor] WARNING: the {label} turn ran on {used}, not the pinned agent_model {pinned}",
+                          file=sys.stderr, flush=True)
             if skills and getattr(message, "subtype", None) == "init":
                 # The SDK's own account of what loaded, checked once per run.
                 # Its list is every skill the CLI discovered (the project's
@@ -943,8 +971,12 @@ def _finalize_iteration(
     iter_start_ts: float = 0.0,
     arm: dict | None = None,
     scope: dict | None = None,
+    served_healthy: bool = False,
 ) -> dict:
     """Integrity, gate, critic, record. Shared by the full and read-only paths.
+
+    ``served_healthy``: the harness saw this iteration's server answer its health check (the full path), so a server
+    that answers nothing after a failure hung or died under the change (``_server_lost``).
 
     Order matters: the GATE decides first, mechanically, using the claim class.
     The critic runs second and may only downgrade. Previously the critic was the
@@ -1088,12 +1120,29 @@ def _finalize_iteration(
     # Checked against the kept tree's readings; the row carries what held, broke or went unchecked.
     from arbor.measure import guards as _guards
     measurement_block = campaign.pack.objective.get("measurement", {})
-    guard_check = (_guards.check(measurement_block, bench_output, state.guard_ref)
+    # Per-request guard metrics on the requests both runs completed (arbor/measure/matched.py), for the guards and
+    # the second axis; the row carries what was used and why.
+    match = _matched_readings(state, session_dir_p, iter_dir, bench_output, measurement_block)
+    if match:
+        state.iteration_notes["matched"] = match
+        print("[arbor] Matched requests: " + "; ".join(
+            f"{k} {v['ratio']:.4f} of the kept tree's on {v['n']}" if v.get("used") else f"{k} raw ({v.get('why')})"
+            for k, v in match.items()), file=sys.stderr, flush=True)
+    guard_check = (_guards.check(measurement_block, bench_output, state.guard_ref, match)
                    if bench_output.get("status") == "ok" else None)
     if guard_check:
         state.iteration_notes["guards"] = guard_check
         print("[arbor] Guards: " + "; ".join(
             f"{kind} {', '.join(lines)}" for kind, lines in guard_check.items() if lines), file=sys.stderr, flush=True)
+
+    # ── A server that stopped answering under the change ─────────────────────
+    # After a failure a lost server explains, the harness asks it for one token: no answer from a server it saw
+    # healthy this iteration is the change's (a REVERT), not the harness's (NOT MEASURED).
+    lost = (_server_lost(campaign.config, container, bench_output, correctness,
+                         campaign.pack.objective.get("metric", "output_throughput"),
+                         campaign.pack.objective.get("measurement", {})) if served and served_healthy else None)
+    if lost:
+        state.iteration_notes["server_lost"] = lost
 
     def decide(acc: dict | None):
         return run_gate(
@@ -1106,6 +1155,8 @@ def _finalize_iteration(
             accuracy=acc,
             stability=stability,
             guards=guard_check,
+            matched=match,
+            lost=lost,
         )
 
     # ── Accuracy (arbor/measure/accuracy.py) ────────────────────────────────
@@ -1354,6 +1405,7 @@ def _finalize_iteration(
         # advance.
         # The kept tree's readings of a host's guards (arbor/measure/guards.py), for the next candidate.
         state.guard_ref = {**state.guard_ref, **_guards.reading(measurement_block, bench_output)}
+        state.request_ref = _request_ref(iter_dir, bench_output, measurement_block, len(state.lessons))
         state.record_keep(
             iteration=iteration, metric=metric_value,
             change=change, tier=state.tier,
@@ -1367,6 +1419,7 @@ def _finalize_iteration(
         # instrument, a ledger entry — is exactly what we want to keep.
         if bench_output.get("status") == "ok":
             state.guard_ref = {**state.guard_ref, **_guards.reading(measurement_block, bench_output)}
+            state.request_ref = _request_ref(iter_dir, bench_output, measurement_block, len(state.lessons))
         state.record_probe(
             iteration=iteration, change=change, tier=state.tier,
             findings=finding_ids, reason=reason, metric=metric_value,
@@ -1611,6 +1664,29 @@ def _aiter_table_problems(container: str, workspace: str, session_dir=None, iter
 HELD_GB = 10
 
 
+_UNMAPPED: set = set()
+
+
+def _lease_vram(config: dict, gpu_ids) -> dict[int, int]:
+    """The GB each card Arbor's server may use holds, by the card's number (rocm-smi's): standalone, ``gpu_ids`` (every
+    card without them); under a host, only the leased cards, ``gpu_ids`` through the host's device masks
+    (``watch.physical_gpu_ids``), and none without a lease or when they cannot be mapped (said once)."""
+    from arbor.execute import watch
+    if not component.is_component(config):
+        return watch.gpu_vram_used(gpu_ids)
+    if not gpu_ids:
+        return {}
+    cards = watch.physical_gpu_ids(gpu_ids)
+    if cards is None:
+        if str(gpu_ids) not in _UNMAPPED:
+            _UNMAPPED.add(str(gpu_ids))
+            print(f"[arbor] The lease's GPUs {gpu_ids} cannot be mapped to the node's cards through the host's masks "
+                  f"(ROCR_VISIBLE_DEVICES, HIP_VISIBLE_DEVICES): their memory is not read before a server start",
+                  file=sys.stderr, flush=True)
+        return {}
+    return watch.gpu_vram_used(cards)
+
+
 def _lease_held(config: dict, container: str, gpu_ids) -> str:
     """Why the server cannot start now, with ours stopped: the cards another process holds, or the host memory a
     server pins (``server_host_memory_gb``, a CPU KV offload) that is not available; ``""`` when it can start.
@@ -1618,22 +1694,72 @@ def _lease_held(config: dict, container: str, gpu_ids) -> str:
     Under a host only the leased cards are read (``gpu_ids``): the others are the host's. A reading that cannot be
     taken holds nothing, as before this check. Why it exists: under a host, processes left on the lease held most of
     each card's memory, and every server start failed for hours."""
-    from arbor.execute.watch import gpu_vram_used
     held = []
-    if gpu_ids or not component.is_component(config):
-        try:
-            vram = gpu_vram_used(gpu_ids)
-        except Exception:
-            vram = {}
-        cards = {gpu: gb for gpu, gb in vram.items() if gb >= HELD_GB}
-        if cards:
-            held.append("GPU " + ", ".join(f"{g} holds {gb} GB" for g, gb in sorted(cards.items())))
+    try:
+        vram = _lease_vram(config, gpu_ids)
+    except Exception:
+        vram = {}
+    cards = {gpu: gb for gpu, gb in vram.items() if gb >= HELD_GB}
+    if cards:
+        held.append("GPU " + ", ".join(f"{g} holds {gb} GB" for g, gb in sorted(cards.items())))
     need = config.get("server_host_memory_gb")
     if need:
         available = _mem_available_gb(container)
         if available is not None and available < float(need):
             held.append(f"host memory: {available:.0f} GB available, the server pins {float(need):.0f} GB")
     return "; ".join(held)
+
+
+#: After Arbor stops its own server, the cards may take minutes to come back: a large model's server unloads slowly
+#: (much of its memory still resident minutes after the stop), and a candidate started meanwhile is lost as NOT
+#: MEASURED. So the release is waited on while it makes progress: the memory still falling, or Arbor's own server
+#: still exiting. Memory that stops falling for LEASE_STALL_S is another process's. Never past LEASE_RELEASE_CAP_S,
+#: nor the server phase's time.
+LEASE_RELEASE_CAP_S = 900
+LEASE_STALL_S = 120
+LEASE_POLL_S = 10
+
+
+def _held_reading(config: dict, container: str, gpu_ids) -> float:
+    """One number that falls as a stopped server lets go: the GB its cards hold, less the host memory available."""
+    total = 0.0
+    try:
+        total += sum(gb for gb in _lease_vram(config, gpu_ids).values() if gb >= HELD_GB)
+    except Exception:
+        pass
+    if config.get("server_host_memory_gb"):
+        total -= _mem_available_gb(container) or 0.0
+    return total
+
+
+def _lease_held_after_stop(config: dict, container: str, gpu_ids) -> str:
+    """``_lease_held`` once the server Arbor just stopped has given its cards back, or has stopped giving them back:
+    ``""`` as soon as nothing is held; else waited on while the reading falls or Arbor's own server still runs, and the
+    reason once it has not moved for LEASE_STALL_S, or at the cap."""
+    held = _lease_held(config, container, gpu_ids)
+    if not held:
+        return ""
+    cap = LEASE_RELEASE_CAP_S
+    phase = component.phase_seconds(config, "server")
+    if phase is not None:
+        cap = max(0.0, min(cap, phase))
+    start = last_move = time.monotonic()
+    last = _held_reading(config, container, gpu_ids)
+    print(f"[arbor] The cards are not free yet ({held}): waiting while the stopped server lets go "
+          f"(up to {cap / 60:.0f} min)", file=sys.stderr, flush=True)
+    while time.monotonic() - start < cap:
+        time.sleep(LEASE_POLL_S)
+        held = _lease_held(config, container, gpu_ids)
+        if not held:
+            print(f"[arbor] The cards are free after {time.monotonic() - start:.0f} s", file=sys.stderr, flush=True)
+            return ""
+        now = _held_reading(config, container, gpu_ids)
+        if now < last - 1.0 or _server_alive(config):
+            last_move = time.monotonic()
+        last = min(last, now)
+        if time.monotonic() - last_move >= LEASE_STALL_S:
+            break
+    return held
 
 
 def _mem_available_gb(container: str) -> float | None:
@@ -1881,6 +2007,146 @@ def _after_bench(state, config: dict, container: str, iter_dir, arm: dict | None
     if not back:
         return after, True, "the server was gone after the bench and did not come back for the checks after it"
     return after, True, ""
+
+
+#: The test for a server that stopped answering (_server_lost): a one-token completion, LOST_TRIES times, each with
+#: LOST_TIMEOUT_S, LOST_GAP_S apart. Not a health check: a hung engine's HTTP front end can still pass `/health`.
+LOST_TRIES, LOST_TIMEOUT_S, LOST_GAP_S = 3, 30, 10
+#: The answers that mean no server: none at all (0), or a server error.
+LOST_CODES = (0, 500, 502, 503, 504)
+
+
+def _one_token(config: dict) -> int:
+    """The HTTP status of a one-token completion on the served model; 0 when nothing answers in LOST_TIMEOUT_S."""
+    body = json.dumps({"model": config.get("model_name") or config.get("model_path") or "", "prompt": "Hello",
+                       "max_tokens": 1})
+    try:
+        r = subprocess.run(["curl", "-s", "-o", "/dev/null", "-w", "%{http_code}", "-m", str(LOST_TIMEOUT_S),
+                            "-H", "Content-Type: application/json", "-d", body,
+                            f"http://localhost:{config.get('port', 8888)}/v1/completions"],
+                           capture_output=True, text=True, timeout=LOST_TIMEOUT_S + 15)
+        return int((r.stdout or "").strip() or 0)
+    except (subprocess.TimeoutExpired, OSError, ValueError):
+        return 0
+
+
+def _matched_metrics(measurement: dict) -> list[str]:
+    """The per-request metrics the gate reads beside the primary: the second axis and the band guards'."""
+    from arbor.measure import matched
+    keys = [measurement.get("secondary_metric")] + [g.get("metric") for g in measurement.get("guards") or []
+                                                     if "band_pct" in g]
+    return [k for k in dict.fromkeys(keys) if k in matched.METRICS]
+
+
+def _matched_readings(state, session_dir_p: Path, iter_dir, bench_output: dict, measurement: dict) -> dict | None:
+    """The candidate's per-request guard metrics on the requests it and the kept tree's run both completed
+    (arbor/measure/matched.py), each with the raw readings beside them (``raw``, ``raw_kept``); None when nothing is
+    matched (no such metric, no bench, or the pack's ``matched_requests: false``). Never raises: records that cannot be
+    read leave the raw reading to decide, and say why."""
+    if bench_output.get("status") != "ok" or measurement.get("matched_requests") is False:
+        return None
+    metrics = _matched_metrics(measurement)
+    if not metrics:
+        return None
+    ref = state.request_ref or {}
+    from arbor.measure import matched
+    moved = _bar_moved_since(state.lessons, ref)
+    if not ref.get("dir"):
+        out = {m: {"used": False, "why": "the kept tree's run left no per-request records"} for m in metrics}
+    elif moved:
+        out = {m: {"used": False, "why": f"the bar moved since the kept tree's run ({moved}): its records may be "
+                                         f"another node's or another tree's"} for m in metrics}
+    else:
+        try:
+            out = matched.compare(metrics, matched.read(iter_dir), matched.read(Path(session_dir_p) / ref["dir"]))
+        except Exception as e:  # noqa: BLE001 - evidence for a guard, never a crash of the gate
+            out = {m: {"used": False, "why": f"per-request records unreadable: {str(e)[:160]}"} for m in metrics}
+    for m, row in out.items():
+        row["raw"], row["raw_kept"] = bench_output.get(m), (ref.get("readings") or {}).get(m)
+    return out
+
+
+#: Rows after which the kept tree's records no longer stand for the bar: one that sets it on another reading (a rolling
+#: chunk's node, a round end's A/B) and a KEEP taken back (``retracts``), which changes the tree.
+_BAR_ROWS = ("BASELINE", "REBASELINE", "ROUND_AB")
+
+
+def _bar_moved_since(lessons: list, ref: dict) -> str:
+    """The row, if any, that moved the bar after the kept tree's records were taken (``ref["row"]``, the lesson count
+    then): its decision, or "a retraction"; "" when none did."""
+    for row in (lessons or [])[int((ref or {}).get("row") or 0):]:
+        if isinstance(row, dict) and row.get("retracts"):
+            return "a retraction"
+        if isinstance(row, dict) and row.get("decision") in _BAR_ROWS:
+            return str(row["decision"])
+    return ""
+
+
+def _request_ref(run_dir, bench_output: dict, measurement: dict, rows: int) -> dict:
+    """The kept tree's per-request reference (``state.request_ref``): ``run_dir``, an iteration's directory or the root
+    baseline's, by its name in the session, when its bench left per-request records, with its raw readings of the
+    matched metrics and ``rows``, the session's lesson count when it was taken; ``{}`` when it left none, so a later
+    candidate is never matched against an older tree's run."""
+    from arbor.measure import matched
+    metrics = _matched_metrics(measurement)
+    if not metrics or not matched.find(run_dir):
+        return {}
+    return {"dir": Path(run_dir).name, "row": int(rows),
+            "readings": {m: bench_output[m] for m in metrics
+                         if isinstance(bench_output.get(m), (int, float)) and not isinstance(bench_output.get(m), bool)}}
+
+
+def _server_lost(config: dict, container: str, bench_output: dict, correctness: dict | None,
+                 metric_key: str, measurement: dict | None = None, timed_out: bool = False) -> dict | None:
+    """Whether the server the harness saw healthy this iteration hung or died under the change (a switch that hangs
+    the server is otherwise booked NOT MEASURED, as the harness's failure, every time it is tried).
+
+    Asked only after a failure a lost server explains: a correctness check that could not reach the model, a bench
+    that did not run or had no traffic, a bench turn past its cap (``timed_out``). Every path here comes after the
+    harness's own health check passed. Then a one-token completion, LOST_TRIES times: any answer but LOST_CODES (a
+    404 for another served name included) means the server answers, and the iteration stays NOT MEASURED. None, or
+    the evidence: ``probe`` (the codes), ``alive`` (component mode: its PID; else None), ``signals`` (the stability
+    check's failure lines in its log)."""
+    from arbor.measure import gate as _gate
+    from arbor.measure import stability as _stability
+    if bench_output.get("status") == "skipped":
+        return None
+    value = bench_output.get(metric_key)
+    no_traffic = isinstance(value, (int, float)) and not isinstance(value, bool) and value <= 0
+    unreachable = correctness is not None and not correctness.get("passed") and \
+        _gate._correctness_is_infrastructure(str(correctness.get("error") or ""))
+    if not (timed_out or unreachable or bench_output.get("status") != "ok" or no_traffic):
+        return None
+    codes: list[int] = []
+    for k in range(LOST_TRIES):
+        code = _one_token(config)
+        codes.append(code)
+        if code not in LOST_CODES:
+            return None
+        if k + 1 < LOST_TRIES:
+            time.sleep(LOST_GAP_S)
+    try:
+        log = _server_log_tail(config, container, 2000)
+    except Exception:  # noqa: BLE001 - evidence, never a verdict
+        log = ""
+    lost = {"probe": codes, "alive": _server_alive(config),
+            "signals": _stability.found(log, _stability.signals(measurement))}
+    print(f"[arbor] The server stopped answering under this change: one-token requests got {codes}"
+          + (f"; its log: {lost['signals'][0]}" if lost["signals"] else ""), file=sys.stderr, flush=True)
+    return lost
+
+
+def _lost_revert(state, session_dir_p: Path, iteration: int, change: str, container: str, workspace: str,
+                 config: dict, reason: str, lost: dict) -> dict:
+    """Book a REVERT for a server that hung or died under the change before the gate could run (a bench turn past
+    its cap), as a server that never came up is booked: the server stopped, the tree reverted."""
+    print(f"[arbor] REVERT — {reason}", file=sys.stderr, flush=True)
+    _stop_server(config, container, config.get("gpu_ids"))
+    state.iteration_notes["server_lost"] = lost
+    state.record_revert(iteration=iteration, metric=0.0, change=change, tier=state.tier, reason=reason)
+    state.save(session_dir_p / "session.json")
+    _safe_revert(container, workspace, config)
+    return {"iteration": iteration, "decision": "REVERT", "metric": 0.0, "change": change, "reason": reason}
 
 
 def _server_alive(config: dict) -> bool | None:
@@ -2319,6 +2585,47 @@ def _detach_bench(iter_dir, run_block: str) -> str:
             f"   still runs, `kill -0 $(cat {shlex.quote(str(pid))})`.\n\n")
 
 
+#: ``<session>/attempts/``: an earlier attempt of an iteration that ended without a verdict, moved out of ``iter_N/``.
+#: No ``iter_*`` scan reads it.
+ATTEMPTS_DIR = "attempts"
+
+
+def _set_aside_earlier_attempt(session_dir_p: Path, iter_dir: Path, iteration: int) -> Path | None:
+    """Move what an earlier attempt of ``iteration`` left in ``iter_dir`` to ``<session>/attempts/iter_N.K``.
+
+    An iteration's number is used again when its attempt ended without a verdict (the driver died, or Arbor's own code
+    raised). Its files stayed in ``iter_N/``, and the next attempt read them as its own: a bench output the new attempt
+    never wrote was booked as the new change's number. So the files go aside first, kept as evidence, and a detached
+    bench that attempt left running is stopped. ``None`` when there was nothing to move."""
+    try:
+        if not iter_dir.is_dir() or not any(iter_dir.iterdir()):
+            return None
+    except OSError:
+        return None
+    root = session_dir_p / ATTEMPTS_DIR
+    root.mkdir(parents=True, exist_ok=True)
+    k = 1
+    while (root / f"iter_{iteration}.{k}").exists():
+        k += 1
+    dest = root / f"iter_{iteration}.{k}"
+    iter_dir.rename(dest)
+    _stop_detached_bench(dest)
+    print(f"[arbor] iter_{iteration}/ held an earlier attempt of this iteration that ended without a verdict: moved to "
+          f"{ATTEMPTS_DIR}/{dest.name}, so this attempt reads only its own files", file=sys.stderr, flush=True)
+    return dest
+
+
+#: A host's bench command without ``component.bench_read`` runs detached too, the agent reading its result once its
+#: process has ended. On by default: in the agent's shell, a host's replay that outlasts the CLI's 30-minute limit on
+#: a command is cut off. ``ARBOR_DETACH_HOST_BENCH=0`` runs it in the agent's shell, as before. A
+#: host that gives ``bench_read`` gets the detached bench whatever this says.
+DETACH_HOST_BENCH_ENV = "ARBOR_DETACH_HOST_BENCH"
+
+
+def _detaches_host_bench() -> bool:
+    return os.environ.get(DETACH_HOST_BENCH_ENV, "1").strip() != "0"
+
+
 def _stop_detached_bench(iter_dir) -> None:
     """Stop the detached bench's process group if it still runs (a turn cut off at its cap, or ended early)."""
     import signal
@@ -2337,7 +2644,7 @@ def _stop_detached_bench(iter_dir) -> None:
 
 def _host_bench_steps(command: str, port, iter_dir, bench_output_path: str,
                       metric_key: str, repeats: int, secondary_key: str | None = None,
-                      read: dict | None = None) -> str:
+                      read: dict | None = None, detached: bool = False) -> str:
     """The bench agent's step 1 in component mode when the host gives its bench command.
 
     The host's client, with ``{port}`` and ``{out}`` filled and nothing else changed,
@@ -2351,6 +2658,9 @@ def _host_bench_steps(command: str, port, iter_dir, bench_output_path: str,
 
     With ``read`` (``component.bench_read``) nothing is read by the agent: after each replay
     it runs a fixed block that takes every key from the report by its path.
+
+    ``detached`` (without ``read``): the replays go into ``iter_N/bench_run.sh``, which the agent starts detached
+    (``_detach_bench``), and it reads and records the results once the script has ended (``DETACH_HOST_BENCH_ENV``).
     """
     base = Path(iter_dir) / "host_bench"
     outs = [base] if repeats <= 1 else [base / f"run{i}" for i in range(1, repeats + 1)]
@@ -2394,16 +2704,19 @@ def _host_bench_steps(command: str, port, iter_dir, bench_output_path: str,
             f"   script: the host ranks what you keep with this client, and a number from any\n"
             f"   other client is not comparable to its gate.\n")
     runs = "".join(f"   {component.fill_bench(command, port, d)}\n" for d in outs)
+    start = _detach_bench(iter_dir, f"```bash\n{runs}   ```\n") if detached else None
+    after = "When the script has ended (step 2), it has written" if detached else "It writes"
     # A first metric the client gives as a latency (an objective asked as "P50 interactivity", arbor/objective.py).
     how_first = SECONDARY_FROM_LATENCY.get(metric_key)
     reports = "the value the host's client reports for it" + (
         f",\n   or {how_first} when it reports that instead" if how_first else "")
     if repeats <= 1:
         return (
-            f"1. Run the host's bench command:\n"
-            f"   ```bash\n{runs}   ```\n"
+            (start + "   The script runs the host's bench command.\n" if detached else
+             f"1. Run the host's bench command:\n"
+             f"   ```bash\n{runs}   ```\n")
             + rule +
-            f"   It writes its results under `{outs[0]}`. Read `{metric_key}` from them ({reports})\n"
+            f"   {after} its results under `{outs[0]}`. Read `{metric_key}` from them ({reports})\n"
             f"   and record it, with this command as it is:\n"
             f"   ```bash\n"
             f"   {record} <value> {bench_output_path}{sec_arg}\n"
@@ -2411,11 +2724,14 @@ def _host_bench_steps(command: str, port, iter_dir, bench_output_path: str,
             + second + "\n"
         )
     return (
-        f"1. Run the host's bench command {repeats} times, one replay per line, and aggregate:\n"
-        f"   ```bash\n{runs}   ```\n"
+        (start + f"   The script runs the host's bench command {repeats} times, one replay after another.\n"
+         if detached else
+         f"1. Run the host's bench command {repeats} times, one replay per line, and aggregate:\n"
+         f"   ```bash\n{runs}   ```\n")
         + rule +
-        f"   Each replay writes its results under its own directory (`{outs[0]}`, ...). After\n"
-        f"   replay i, read its `{metric_key}` ({reports}) and\n"
+        f"   Each replay writes its results under its own directory (`{outs[0]}`, ...). "
+        + (f"When the script\n   has ended (step 2), for each replay i, read its `{metric_key}` ({reports}) and\n"
+           if detached else f"After\n   replay i, read its `{metric_key}` ({reports}) and\n") +
         f"   record it, with this command as it is:\n"
         f"   ```bash\n"
         f"   {record} <value> {bench_output_path}.run<i>{sec_arg}\n"
@@ -2456,6 +2772,7 @@ def run_iteration(
     port = config.get("port", 8888)
 
     iter_dir = session_dir_p / f"iter_{iteration}"
+    _set_aside_earlier_attempt(session_dir_p, iter_dir, iteration)
     iter_dir.mkdir(parents=True, exist_ok=True)
 
     # Standalone in a container: what a turn starts there is stopped when it ends (arbor/execute/turns.py).
@@ -2549,6 +2866,8 @@ def run_iteration(
     # (arbor/prompts.py), so a verdict after a fork or a prompt change names the instructions it ran under.
     from arbor import prompts as _prompts
     state.iteration_notes["provenance"] = _prompts.provenance(campaign, session_dir_p, arbor_root)
+    # And the models its turns run on, filled in as they run (_run_claude_once): the row says what ran, pinned or not.
+    state.iteration_notes["agent_models"] = _new_turn_models()
     # The map stopped the campaign in cmd_begin (arbor/directions.py): no agent
     # runs, and the driver's STOP check ends the loop.
     if (session_dir_p / "STOP").exists():
@@ -2565,6 +2884,11 @@ def run_iteration(
         return {"iteration": iteration, "decision": "ROUND_END", "metric": None,
                 "change": (_rounds.pending(session_dir_p) or {}).get("detail", "")}
     from arbor import directions as _directions
+    if _directions.hands_back(_directions.load(session_dir_p)[0]):
+        print(f"[arbor] the host's share is worked out -- not running iteration {iteration}: the worker hands it back",
+              file=sys.stderr, flush=True)
+        return {"iteration": iteration, "decision": "HANDED_BACK", "metric": None,
+                "change": "every direction of the host's share is closed"}
     map_doc = _directions.current(campaign, state)
     applied_escalation = state.tier if state.tier != pre_begin_state.tier else None
     program = render_program(campaign, state, arbor_root, escalation=applied_escalation,
@@ -2723,6 +3047,14 @@ def run_iteration(
         done = _trees.commit(container, trees_changed, f"iter-{iteration}: {change}", iter_dir)
         print(f"[arbor] Committed in {', '.join(f'{t} {s[:12]}' for t, s in done.items())}",
               file=sys.stderr, flush=True)
+    # What a host's SIGTERM books if it lands before the verdict (component.Run.terminated): the declared intent and
+    # change, not a guess.
+    try:
+        iter_dir.mkdir(parents=True, exist_ok=True)
+        (iter_dir / component.CLAIM_FILE).write_text(
+            json.dumps({"iteration": iteration, "claim_class": claim_class, "change": change, "workspace": sha}) + "\n")
+    except OSError as exc:
+        print(f"[arbor] WARNING: {component.CLAIM_FILE} not written: {exc}", file=sys.stderr, flush=True)
 
     # ── Step 3a: the weights' precision is the campaign's ───────────────────
     # A hard rule, before any GPU time: a change that sets another weight precision is another model's entry.
@@ -2824,7 +3156,7 @@ def run_iteration(
     _stop_server(config, container, gpu_ids, graceful_wait=15, vram_check_timeout=120)
     # A card another process holds fails the start whatever the change is: not measured, and the change stays in the
     # tree to be measured later, instead of a REVERT that drops it.
-    held = _lease_held(config, container, gpu_ids)
+    held = _lease_held_after_stop(config, container, gpu_ids)
     if held:
         return _not_measured(state, session_dir_p, iteration, change,
                              f"the server cannot start: {held} (another process, not this change)", claim_class)
@@ -2880,6 +3212,7 @@ def run_iteration(
     )
 
     print(f"[arbor] Agent starting server...", file=sys.stderr, flush=True)
+    server_error: Exception | None = None     # the server turn's agent could not run (its model unreachable, say)
     try:
         server_output = _run_phase(
             _run_claude(server_prompt, arbor_root,
@@ -2893,14 +3226,14 @@ def run_iteration(
         _stop_server(config, container, gpu_ids)
         return _not_measured(state, session_dir_p, iteration, change, str(e), claim_class)
     except Exception as e:
-        server_output = ""
+        server_output, server_error = "", e
         print(f"[arbor] Server agent error: {e}", file=sys.stderr, flush=True)
 
     reason = _server_failure(server_output)   # a verdict line, not a mention
     if reason is not None:
         print(f"[arbor] Server agent gave up: {reason}", file=sys.stderr, flush=True)
         _stop_server(config, container, gpu_ids)
-        held = _lease_held(config, container, gpu_ids)
+        held = _lease_held_after_stop(config, container, gpu_ids)
         if held:
             return _not_measured(state, session_dir_p, iteration, change,
                                  f"server failed with its cards held: {held} ({reason[:200]})", claim_class)
@@ -2920,10 +3253,16 @@ def run_iteration(
         reason = f"server not healthy after agent startup. Log: {tail.strip()[-500:]}"
         print(f"[arbor] {reason}", file=sys.stderr, flush=True)
         _stop_server(config, container, gpu_ids)
-        held = _lease_held(config, container, gpu_ids)
+        held = _lease_held_after_stop(config, container, gpu_ids)
         if held:
             return _not_measured(state, session_dir_p, iteration, change,
                                  f"server not healthy with its cards held: {held}", claim_class)
+        # No server came up because the turn that starts it never ran (its agent could not reach its model, or its
+        # CLI failed): nothing is known about the change, as when the main agent's turn cannot run.
+        if server_error is not None:
+            return _not_measured(state, session_dir_p, iteration, change,
+                                 f"the server turn's agent did not run ({str(server_error)[:300]}), and no server came "
+                                 f"up: nothing is known about this change", claim_class)
         state.record_revert(
             iteration=iteration, metric=0.0,
             change=change, tier=state.tier,
@@ -3050,24 +3389,34 @@ def run_iteration(
     # tokens otherwise). Without one, the pack's bench, as standalone runs it.
     bench_line = f"Bench script: `{bench_script}`\n"
     host_bench = component.bench_command(config) if comp else None
+    host_read = component.bench_read(config) if host_bench else None
+    # Without bench_read the agent reads the host's result itself, so only the host's command is detached
+    # (DETACH_HOST_BENCH_ENV), and the agent's wait ends when it has ended.
+    reads_after = bool(host_bench) and not host_read and _detaches_host_bench()
     if host_bench:
         bench_line = "Bench: the host's own command (step 1), not the pack's bench script\n"
         run_block = _host_bench_steps(
             host_bench, port, iter_dir, bench_output_path, metric_key, bench_repeats,
             campaign.pack.objective.get("measurement", {}).get("secondary_metric"),
-            read=component.bench_read(config))
+            read=host_read, detached=reads_after)
     # Component mode: the bench runs as a child of the agent's shell, so a command the CLI ends takes it along (a
     # long replay dies with it). Where step 1 is all fixed commands (the pack's bench, or the host's with
-    # bench_read), they go into a script the agent starts detached; the agent then only waits.
-    detached = comp and (not host_bench or bool(component.bench_read(config)))
+    # bench_read), they go into a script the agent starts detached; the agent then only waits. The host's command
+    # without bench_read is detached alone (reads_after), and the agent reads its result once the script has ended.
+    detached = comp and (not host_bench or bool(host_read))
     out_q = shlex.quote(str(iter_dir / "bench_output.json"))
     wait_cmd = f"until [ -s {out_q} ]; do sleep 30; done; echo DONE"
+    waits_for = "the bench has written its output"
     if detached:
         run_block = _detach_bench(iter_dir, run_block)
+    if detached or reads_after:
         pid_q = shlex.quote(str(iter_dir / "bench.pid"))
-        wait_cmd = (f"until [ -s {out_q} ] || {{ [ -s {pid_q} ] && ! kill -0 \"$(cat {pid_q})\" 2>/dev/null; }}; "
-                    f"do sleep 30; done; echo DONE")
+        gone = f"[ -s {pid_q} ] && ! kill -0 \"$(cat {pid_q})\" 2>/dev/null"
+        wait_cmd = (f"until [ -s {out_q} ] || {{ {gone}; }}; do sleep 30; done; echo DONE" if detached else
+                    f"until {gone}; do sleep 30; done; echo DONE")
         watch = f"tail -5 {shlex.quote(str(iter_dir / 'bench.log'))}"
+    if reads_after:
+        waits_for = "the bench's script has ended (then read and record its result, as step 1 says)"
     bench_prompt = (
         f"Run the bench and report the metric. The server is healthy on port {port}.\n\n"
         + head + bench_line +
@@ -3078,7 +3427,7 @@ def run_iteration(
         + run_block
         + f"2. Wait for the bench with the **Monitor** tool, not Bash: a Bash `sleep` is refused, and a loop in\n"
         f"   Bash asks for an approval no one can give in this headless turn. Give Monitor a command that ends\n"
-        f"   when the bench has written its output, for example:\n"
+        f"   when {waits_for}, for example:\n"
         f"   ```bash\n"
         f"   {wait_cmd}\n"
         f"   ```\n"
@@ -3090,7 +3439,8 @@ def run_iteration(
         f"3. If the server crashes during the bench (ServerDisconnectedError, SIGQUIT, OOM in log):\n"
         f"   - Fix the root cause (reduce a memory-heavy flag, adjust config)\n"
         + restart +
-        (f"   - Re-run the bench: step 1's line again\n\n" if detached else f"   - Re-run the bench\n\n") +
+        (f"   - Re-run the bench: step 1's line again\n\n" if detached or reads_after
+         else f"   - Re-run the bench\n\n") +
         f"4. When done, read the output and report the metric:\n"
         f"   ```bash\n"
         f"   cat {bench_output_path}\n"
@@ -3114,8 +3464,15 @@ def run_iteration(
             "bench", config, done=iter_dir / "bench_output.json", floor_minutes=_meas.get("bench_minutes"),
         )
     except component.PhaseTimeout as e:
-        # Component mode: a bench cut off by its cap or the deadline measured nothing
-        # that can be booked, even if a replay finished.
+        # A bench cut off by its cap or the deadline measured nothing that can be booked,
+        # even if a replay finished. Unless the server stopped answering under the change:
+        # a hung bench runs to its cap, and that is the change's failure.
+        lost = _server_lost(config, container, {"status": "failed", "error": str(e)}, None, metric_key,
+                            _meas, timed_out=True)
+        if lost:
+            from arbor.measure.gate import lost_reason
+            return _lost_revert(state, session_dir_p, iteration, change, container, workspace, config,
+                                lost_reason(f"bench: {e}", lost), lost)
         return _not_measured(state, session_dir_p, iteration, change, str(e), claim_class)
     except Exception as e:
         bench_agent_output = ""
@@ -3213,5 +3570,5 @@ def run_iteration(
         iter_dir=iter_dir, session_dir_p=session_dir_p, arbor_root=arbor_root,
         bench_output=bench_output, correctness=correctness,
         change=change, claim_class=claim_class, agent_output=agent_output,
-        iter_start_ts=iter_start_ts, arm=arm, scope=scope,
+        iter_start_ts=iter_start_ts, arm=arm, scope=scope, served_healthy=True,
     )

@@ -35,6 +35,7 @@ or agent. A first campaign on a node: [docs/getting-started.md](docs/getting-sta
 | [docs/quickstart-hyperloom.md](docs/quickstart-hyperloom.md) | Arbor inside Hyperloom's multi-branch mode: the container, the venv and the environment MB needs, which Arbor runs, the flags of `run`, the map's review, two-stage runs, and what goes wrong |
 | [docs/quickstart-skills.md](docs/quickstart-skills.md) | a new skill from idea to campaign: where it takes part, its layout and header, checking it, loading it in a pack, seeing it run |
 | [docs/quickstart-kernel.md](docs/quickstart-kernel.md) | kernel work: a rewrite's plan, checked, then run as one campaign's kernel-plan lane, stage by stage to a booked gain; what the harness checks at each stage, and what goes wrong |
+| [docs/quickstart-checkpoints.md](docs/quickstart-checkpoints.md) | checkpoints: pause a campaign and continue it, carry it to another node, fork it to try another prompt or map from the same point; under a host, and what goes wrong |
 | [docs/how-it-works.md](docs/how-it-works.md) | the loop, the agents, intents and the gate, planning, the records |
 | [docs/packs.md](docs/packs.md) | the pack format, validators, skills, the packs here, writing one |
 | [docs/dossier-and-profiler.md](docs/dossier-and-profiler.md) | using the dossier and profiler skills; whether a dossier's directions can go into a pack |
@@ -44,6 +45,7 @@ or agent. A first campaign on a node: [docs/getting-started.md](docs/getting-sta
 | [docs/reference.md](docs/reference.md) | the command line, every config key, environment variables, the session layout |
 | [docs/operations.md](docs/operations.md) | launchers, rolling chunks, parallel mode, dashboards |
 | [docs/hosts.md](docs/hosts.md) | running Arbor inside a host (component mode) |
+| [docs/interface.md](docs/interface.md) | the host contract, generated from the code (`arbor interface --json`): how each run ends and what a host does, the events, each record's schema, the timing |
 | [docs/who-runs-what.md](docs/who-runs-what.md) | component mode under Hyperloom's MB: which side runs each step, and the files between them |
 | [evals/README.md](evals/README.md) | trajectory traces |
 | [CONTRIBUTING.md](CONTRIBUTING.md) | branches, tests, issues |
