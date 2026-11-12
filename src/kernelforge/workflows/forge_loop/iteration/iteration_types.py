@@ -17,6 +17,11 @@ from kernelforge.workflows.forge_loop.campaign.run_state import IterationVerdict
 from kernelforge.workflows.forge_loop.search.search_actors import SearchActorPool
 
 
+#: ``validation_outcome`` of a candidate that hung the GPU in both of its measurements.
+DEVICE_FAULT_OUTCOME = "device_fault"
+#: ``validation_outcome`` of a measurement the GPU hung during and did not recover from in time.
+DEVICE_UNAVAILABLE_OUTCOME = "device_unavailable"
+
 # How far a KEEP has to improve a case's measured time before that case counts as one the KEEP's configuration was
 # chosen for.
 CONFIG_COVERAGE_MIN_MOVE_RATIO = 0.01
@@ -342,11 +347,15 @@ def _decision_label(result: IterationResult) -> str:
         return DecisionLabel.REVERT_INTEGRITY.value
     if result.workspace_contention:
         return DecisionLabel.REVERT_CONTENDED.value
+    if result.validation_outcome == DEVICE_UNAVAILABLE_OUTCOME:
+        return DecisionLabel.DEVICE_UNAVAILABLE.value
     if result.crashed:
         return DecisionLabel.CRASH.value
     if not result.validation_passed:
         if (result.validation_summary or "").startswith("BUILD FAILED"):
             return DecisionLabel.BUILD_FAILED.value
+        if result.validation_outcome == DEVICE_FAULT_OUTCOME:
+            return DecisionLabel.REVERT_DEVICE_FAULT.value
         if result.validation_outcome == "timeout":
             return DecisionLabel.REVERT_VALIDATION_TIMEOUT.value
         if result.validation_outcome in {"driver_error", "invalid_result"}:

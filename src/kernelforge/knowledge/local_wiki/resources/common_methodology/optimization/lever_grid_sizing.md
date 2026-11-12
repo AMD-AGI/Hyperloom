@@ -75,6 +75,14 @@ Buys: amortized launch overhead, resident weights/state, **explicit tile→XCD m
 static partition reintroduces the tail imbalance you were trying to remove. Use an atomic work queue
 or Stream-K.
 
+**Every workgroup a workgroup waits on must be resident at the same time.** Spinning on a flag, a
+grid-wide barrier, a last-arriver reduction that waits for its peers: each needs the whole grid on the
+device at once. Launch no more workgroups than the device holds concurrently at the kernel's actual
+occupancy (CU count × workgroups per CU, set by its VGPR and LDS use), or split the work into two
+launches — partials, then a reduction kernel. A waiting workgroup that holds the slot its peer needs
+never finishes: the kernel deadlocks, the driver resets the GPU, and every process on the machine that
+has a GPU open is terminated. Run every self-test of such a kernel under `timeout`.
+
 ## Prefill vs decode
 
 | | Prefill (large M) | Decode (M = 1..8) |
@@ -93,6 +101,7 @@ or Stream-K.
 | Grid | arithmetic | ≥1024 workgroups, tile count `% 8 == 0` |
 | Idle CUs | `rocprof-compute` per-CU occupancy / wavefront launch count | no idle dies or CUs |
 | No spills from launch bounds | ISA VGPR count vs your target, scratch traffic | none |
+| Cross-workgroup waits | grid vs CU count × workgroups per CU at the ISA's VGPR / LDS use | grid ≤ resident capacity |
 | A/B | `num_warps ∈ {4,8}`; persistent vs non-persistent for decode | keep fastest |
 
 ## Expected magnitude
@@ -108,6 +117,7 @@ well-filled kernel: usually **<10%**.
 | Reduction math wrong / mask asserts | wave32 assumption from CUDA | all lane math is **64-wide** |
 | Spills appeared after adding `__launch_bounds__` | bound set below actual block size | match it to the real block size |
 | Persistent kernel has a long tail | naive static tile partition | atomic work queue or Stream-K |
+| Kernel never finishes; GPU reset kills every GPU process on the machine | a workgroup waits on one that cannot become resident | grid ≤ resident capacity, or two launches |
 | Grid ≥1024 but one XCD lags | tile count not a multiple of 8 | `lever_xcd_locality.md` |
 | Tuned for 304 CUs | MI300X value hardcoded | query the device |
 

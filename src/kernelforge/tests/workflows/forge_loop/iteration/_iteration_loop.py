@@ -23,13 +23,13 @@ from kernelforge.tests.conftest import patch_iteration_name, silence_jit_rebuild
 _AMPLE_BUDGET_SEC = 12 * 3600.0
 
 
-def _initialize_workspace(tmp_path, monkeypatch):
+def _initialize_workspace(tmp_path, monkeypatch, *, driver_source="pass\n"):
     workspace = tmp_path / "workspace"
     workspace.mkdir()
     kernel = workspace / "kernel.py"
     driver = workspace / "driver.py"
     kernel.write_text("def kernel():\n    return 1\n")
-    driver.write_text("pass\n")
+    driver.write_text(driver_source)
     subprocess.run(["git", "init"], cwd=workspace, check=True, capture_output=True)
     subprocess.run(
         ["git", "config", "user.name", "KernelForge Tests"],
@@ -60,8 +60,9 @@ def _make_loop(
     session_count=1,
     resume=False,
     baseline_case_times=None,
+    driver_source="pass\n",
 ):
-    workspace, kernel, driver = _initialize_workspace(tmp_path, monkeypatch)
+    workspace, kernel, driver = _initialize_workspace(tmp_path, monkeypatch, driver_source=driver_source)
 
     config = IterationConfig(
         kernel_file=str(kernel),
@@ -215,6 +216,7 @@ def _measurement_loop(monkeypatch, benchmark_result, workspace_dir="."):
     # charged to nothing -- which is also what a drain iteration does.
     loop._round_started_at = None
     loop._round_measurement_sec = 0.0
+    loop.device_unavailable = None
     return loop, benchmark_calls
 
 

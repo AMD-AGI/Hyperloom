@@ -54,7 +54,7 @@ row in a permitted data file are all edits *inside* the permitted set.
 | `lever_loop_form.md` | **precondition for the two above** | shape-static trip count + addresses, the `while`/indirect-load signature, gather → static range + mask, why 2–4× more nominal work ran ~2× faster |
 | `lever_coalescing.md` | bandwidth-bound | 128-bit `dwordx4`, alignment, lane mapping, grid-stride, coalescing ≠ bank conflicts |
 | `lever_xcd_locality.md` | bandwidth-bound (re-fetch) | 8 XCDs × 32 CU, per-XCD L2, ≥1024 workgroups, 8-multiple tiles, swizzled CTA order, the 512 B stride cliff |
-| `lever_grid_sizing.md` | latency / occupancy-bound | wave64, `num_warps`, `__launch_bounds__`, **256 CUs**, split-K for decode, persistent kernels |
+| `lever_grid_sizing.md` | latency / occupancy-bound | wave64, `num_warps`, `__launch_bounds__`, **256 CUs**, split-K for decode, persistent kernels, **cross-workgroup waits need the whole grid resident** |
 | `lever_fusion.md` | bandwidth-bound; launch-bound | traffic fusion vs launch fusion, donors, when NOT to fuse, `launch_bound_share` and the 0.13 graph discount |
 | `lever_cheap_sweeps.md` | stage 5 | `FORGE_SWEEP_<NAME>` + `sweep_const:` echo, one bench command per data point, joint sweeps, collapse to the literal before the turn ends |
 | `lever_autotune.md` | stage 5 | only aiter's per-shape DB reaches the live path; capture → race → deploy → **prove engagement**; the 10-tuple key |

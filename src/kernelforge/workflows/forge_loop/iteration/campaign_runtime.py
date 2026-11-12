@@ -11,6 +11,8 @@ import subprocess
 import time
 from pathlib import Path
 
+from kernelforge.evaluation.device_faults import DeviceFault
+from kernelforge.evaluation.device_health import RECOVERY_TIMEOUT_SEC
 from kernelforge.workflows.forge_loop.campaign.archive import CandidateArchive
 from kernelforge.workflows.forge_loop.iteration.device_hazard import DeviceHazard, DeviceHazardLog
 from kernelforge.workflows.forge_loop.memory.experience import ExperienceLedger
@@ -437,6 +439,13 @@ class CampaignMixin:
             self.termination_reason = "force_stop"
             print("\nFORCE STOP: .stop file detected — remove it and --resume to continue")
             return True, None
+        if self.device_unavailable is not None:
+            self.termination_reason = "device_unrecovered"
+            print(
+                f"\nDEVICE UNAVAILABLE: the GPU ran no work within {RECOVERY_TIMEOUT_SEC / 60:.0f} minutes of a hang, "
+                f"so no further measurement can be trusted; stopping. {self.device_unavailable.describe()}"
+            )
+            return True, None
         hazard: DeviceHazard | None = self.device_hazard.recheck(iteration)
         if hazard is not None and hazard.exhausted:
             self.termination_reason = "device_contended"
@@ -455,6 +464,7 @@ class CampaignMixin:
         self.start_time = time.time()
         self.results = []
         self._usage = usage
+        self.device_unavailable: DeviceFault | None = None
 
         # Safety net: if the kernel is an aiter HIP kernel, force it to recompile from the current source
         # (AITER_REBUILD) so the agent's edits are never silently ignored via aiter's prebuilt in-tree .so.

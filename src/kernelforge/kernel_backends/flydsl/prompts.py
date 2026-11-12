@@ -36,6 +36,15 @@ over MFMA instruction usage, register allocation, and data movement.
 5. Benchmark wall-clock; profile PMC counters when suboptimal.
 6. Decide the single next change from measured data (bottleneck axis), not intuition.
 
+## Kernels whose workgroups wait on each other
+
+Spinning on a flag, a grid-wide barrier, a last-arriver reduction: a workgroup that waits on another
+needs every workgroup it waits on resident at the same time. Launch no more workgroups than the device
+holds concurrently at the kernel's occupancy, or split the work into two launches. Otherwise the kernel
+deadlocks, the driver resets the GPU, and every process on the machine that has a GPU open is
+terminated. Run every self-test of such a kernel under `timeout`; `lever_grid_sizing.md` has the
+capacity arithmetic.
+
 {canonical_gate}
 
 ## Knowledge — READ on demand, do NOT guess

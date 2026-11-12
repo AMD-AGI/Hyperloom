@@ -70,6 +70,7 @@ _LABELS_WITHOUT_A_MEASURED_NEGATIVE = frozenset(
         DecisionLabel.API_ERROR.value,
         DecisionLabel.AGENT_ERROR.value,
         DecisionLabel.ORCHESTRATION_ERROR.value,
+        DecisionLabel.DEVICE_UNAVAILABLE.value,
     }
 )
 

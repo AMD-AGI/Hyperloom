@@ -507,6 +507,7 @@ class CandidateArchive:
         "REVERT_VALIDATION": "wrong",  # failed correctness
         "REVERT_VALIDATION_TIMEOUT": "validation-timeout",
         "REVERT_VALIDATION_ERROR": "validation-error",
+        "REVERT_DEVICE_FAULT": "hung-gpu",
         "BUILD_FAILED": "build-fail",
         "CRASH": "crash",  # raised an exception during the iteration
     }
