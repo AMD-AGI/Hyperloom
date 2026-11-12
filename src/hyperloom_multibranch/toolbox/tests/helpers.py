@@ -213,10 +213,12 @@ def build(
     aiter_builds_missing: str | None = None,
     infra_backoff: tuple[float, ...] = (),
     sleep: Callable[[float], Awaitable[None]] | None = None,
+    tests_end_by: float | None = None,
 ) -> Rig:
     """A toolbox over a blackboard directory and a submit log under ``tmp_path``; building again over the same
     ``tmp_path`` is a restart. ``builds`` drives the native builds a test waits for. Infrastructure retries wait
-    ``infra_backoff`` with ``sleep`` (none by default, so a retry goes at once)."""
+    ``infra_backoff`` with ``sleep`` (none by default, so a retry goes at once), never past one typical test before
+    ``tests_end_by``."""
 
     from hyperloom_multibranch.blackboard.tests.factories import FakeClock
 
@@ -240,7 +242,11 @@ def build(
         AcceptanceSetup(repo, planner, active_image, workload_kind, aiter_builds_missing=aiter_builds_missing),
         tools=tools(blackboard) if tools else None,  # type: ignore[arg-type]
         tuning=ToolboxTuning(
-            policy=policy, clock=clock, infra_backoff_seconds=infra_backoff, sleep=sleep or asyncio.sleep
+            policy=policy,
+            clock=clock,
+            infra_backoff_seconds=infra_backoff,
+            sleep=sleep or asyncio.sleep,
+            tests_end_by=tests_end_by,
         ),
     )
     return Rig(toolbox, executor, fake, repo, blackboard, tmp_path, clock)

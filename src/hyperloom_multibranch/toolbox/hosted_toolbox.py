@@ -119,6 +119,10 @@ class HostedToolboxInputs:
             it the manifest vouches only for the entry it sits in.
         session_id: The session's id when ``run_id`` is the run's, which a restart of the run that starts its session
             again shares: it keeps the new session's request ids, and so its sandboxes, apart from the closed one's.
+        tests_end_by: When every test of the session must have ended, Unix seconds: the grant's end less what the
+            session keeps after its last test, which the session works out
+            (:attr:`~hyperloom_multibranch.scheduling.hosted_run.GrantEnd.tests_end_by`). An infrastructure retry never
+            waits past one typical test before it (:class:`~.toolbox.ToolboxTuning`). ``None``: no such time.
         sandbox_workspace: The workspace every sandbox is created in (``HYPERLOOM_SANDBOX_WORKSPACE``), sent on each
             create as ``agent-sandbox.io/workspace``. A SaFE key used directly needs it when its user is in more than
             one workspace, and a ``system-admin`` key always does; a Claw grant's key names its own, so a Claw host
@@ -143,6 +147,7 @@ class HostedToolboxInputs:
     runner_cache_manifest_sha256: str | None = None
     sandbox_workspace: str | None = None
     session_id: str | None = None
+    tests_end_by: float | None = None
 
     def __post_init__(self) -> None:
         for name in _REQUIRED_TEXT:
@@ -547,6 +552,7 @@ def build_hosted_toolbox(
             policy=capped_policy(options.policy, parallel),
             max_infra_retries=options.max_infra_retries,
             infra_backoff_seconds=options.infra_backoff_seconds,
+            tests_end_by=inputs.tests_end_by,
         ),
     )
     toolbox.backend, toolbox.provider, toolbox.trace_root, toolbox.blobs = backend, provider, directory, spec.blobs

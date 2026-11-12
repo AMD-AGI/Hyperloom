@@ -106,6 +106,13 @@ class RegressionCheck(Protocol):
         A case that reproduces there and on the root too is a defect of the root, named in ``carried``; one that
         reproduces there but not on the root, or ends without a verdict, fails it as it fails :meth:`check`."""
 
+    async def final_case_seconds(self, commits: tuple[str, ...], pooled_seconds: float) -> tuple[float, ...]:
+        """The wall seconds of each run :meth:`check_every_case` would still make on each of ``commits`` and on the
+        root, which reruns a case one of them reproduced; each commit once, and each run as long as the case's own
+        repro test took. A case whose verdict on a commit's recipe is known already runs there again nowhere. A case
+        of other sessions not yet run on the root runs there first and then as a case of the root, each run taking
+        ``pooled_seconds``, since no record of this session says how long it takes."""
+
 
 __all__ = [
     "NotMeasured",

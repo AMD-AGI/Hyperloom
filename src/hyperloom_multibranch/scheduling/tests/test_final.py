@@ -280,7 +280,7 @@ class Bench:
         return FinalCandidates(integration, replace(BRANCH, commit=self.commits["c7"]) if both else None)
 
     def selector(self, workload: Workload = WORKLOAD) -> FinalSelector:
-        return FinalSelector(SessionChecks(self.tests, self.gate, self.regression), workload)
+        return FinalSelector(SessionChecks(self.tests, self.gate, self.regression), workload, 1)
 
     def fail(self, tag: str, fate: Fate, kind: TestKind | None = None) -> None:
         """Every FINAL test of ``tag``'s commit (of ``kind`` when given) ends in ``fate``."""
