@@ -570,15 +570,16 @@ def hosted_restart_leg(
     resume: Callable[..., int],
     explore_cap: ExploreCap | None = None,
 ) -> Callable[..., int]:
-    """What a restart of the run runs over ``persisted``, the ``finish`` of :func:`take_over_earlier_session`: ``resume``
-    (``cli.resume``) with ``deadline`` bound to :func:`hosted_resume_deadline`'s, so its budget counts from the run's
-    first start, and ``explore_cap`` to ``explore_cap`` (the grant's, :func:`grant_explore_cap`), when the session was measured in the grant's sandboxes and its baseline still measures what a test
-    measured now would (:func:`~hyperloom_multibranch.toolbox.resume_guard.check_hosted_baseline_reusable`: the same
-    build, ``MEASUREMENT_EPOCH``, image, base launch and runner template cards; not the node or the account, which a
+    """What a restart of the run runs over ``persisted``, the ``finish`` of :func:`take_over_earlier_session`:
+    ``resume`` (``cli.resume``) with ``until`` bound to :func:`hosted_resume_deadline`'s, so its budget counts
+    from the run's first start, and ``cap`` to ``explore_cap`` (the grant's, :func:`grant_explore_cap`), when the
+    session was measured in the grant's sandboxes and its baseline still measures what a test measured now would
+    (:func:`~hyperloom_multibranch.toolbox.resume_guard.check_hosted_baseline_reusable`: the same build,
+    ``MEASUREMENT_EPOCH``, image, base launch and runner template cards; not the node or the account, which a
     reschedule changes by design); else ``finish`` (``cli.final_only``), and one warning names why. A file of the
-    session this account cannot read (:data:`CANNOT_READ_SESSION`) is such a why: the finish then meets it and ends the
-    run as it did before there was a resume, rather than this start crashing with no ``exit.json`` for the host to
-    start again. Writes nothing. Blocks."""
+    session this account cannot read (:data:`CANNOT_READ_SESSION`) is such a why: the finish then meets it and ends
+    the run as it did before there was a resume, rather than this start crashing with no ``exit.json`` for the host
+    to start again. Writes nothing. Blocks."""
 
     root = persisted.layout.root
     if not persisted.layout.runner_source.exists():  # what a session measured in the grant's sandboxes cloned
@@ -591,7 +592,7 @@ def hosted_restart_leg(
         log.warning("hosted run: finishing %s instead of resuming it: %s", root, exc)
         return finish
     log.info("hosted run: resuming %s up to the deadline its first start set", root)
-    return partial(resume, deadline=deadline, explore_cap=explore_cap)
+    return partial(resume, until=deadline, cap=explore_cap)
 
 
 #: What reading back an earlier session fails with when this account cannot read what it left: a file an earlier leg of

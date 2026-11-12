@@ -251,7 +251,7 @@ def restart_leg(state_dir: str, image: list[str]) -> dict[str, object]:
     if leg is cli.final_only:
         return {"leg": "final_only", "deadline": None}
     assert isinstance(leg, partial) and leg.func is cli.resume
-    return {"leg": "resume", "deadline": leg.keywords["deadline"]}
+    return {"leg": "resume", "deadline": leg.keywords["until"]}
 
 
 def _as_account(accounts: Accounts, uid: int, call: str) -> dict[str, object]:

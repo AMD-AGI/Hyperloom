@@ -959,17 +959,11 @@ def final_only(
 
 
 def resume(
-    persisted: PersistedRun,
-    peer_factory: PeerFactory,
-    services: SessionServices,
-    deadline: float,
-    explore_cap: ExploreCap | None = None,
+    persisted: PersistedRun, peer_factory: PeerFactory, services: SessionServices, until: float, cap: ExploreCap | None
 ) -> int:
-    """:func:`final_only` running :meth:`Session.resume` up to ``deadline`` and ``explore_cap``, not :meth:`Session.finish`."""
+    """:func:`final_only` running :meth:`Session.resume` up to the deadline ``until`` with EXPLORE capped by ``cap``."""
 
-    return _over_session(
-        persisted, peer_factory, services, lambda session, ended: session.resume(ended, deadline, explore_cap)
-    )
+    return _over_session(persisted, peer_factory, services, lambda session, ended: session.resume(ended, until, cap))
 
 
 #: What a run over a session directory runs on the session it builds there, given how that session ended.
@@ -1224,7 +1218,7 @@ def main(argv: list[str] | None = None) -> int:
             if args.command == FINAL_ONLY_COMMAND:
                 return final_only(persisted, ready.peer_factory, ready.services)
             deadline = deadline_after_downtime(persisted.layout, Clock().now())
-            return resume(persisted, ready.peer_factory, ready.services, deadline)
+            return resume(persisted, ready.peer_factory, ready.services, deadline, None)
         return _start(settings, grant)
     except (EnvironmentIncomplete, PeersUnavailable, ImageCheckFailed, CacheBuildError, ToolboxInputsError) as exc:
         print(f"{PROG}: cannot run a session, {exc}", file=sys.stderr)

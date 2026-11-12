@@ -897,12 +897,12 @@ def agent_cli(agent_binaries: None, monkeypatch: pytest.MonkeyPatch) -> list[Run
         persisted: PersistedRun,
         peer_factory: PeerFactory,
         services: object,
-        deadline: float,
-        explore_cap: ExploreCap | None = None,
+        until: float,
+        cap: ExploreCap | None,
     ) -> int:
         runs.append(persisted.settings)
-        RESUMED_TO.append(deadline)
-        EXPLORE_CAPS.append(explore_cap)
+        RESUMED_TO.append(until)
+        EXPLORE_CAPS.append(cap)
         return 0
 
     EXPLORE_CAPS.clear()
@@ -1373,7 +1373,7 @@ def test_a_final_only_holds_the_session_against_a_second_one_and_releases_it(
     async def while_it_runs(run: PersistedRun, peer_factory: object, services: object, leg: object) -> int:
         assert layout.final_only_lock.read_text(encoding="utf-8") == f"{os.getpid()}\n"
         assert cli.final_only(run, peer_factory, services) == cli.EXIT_USAGE
-        assert cli.resume(run, peer_factory, services, 3600.0) == cli.EXIT_USAGE
+        assert cli.resume(run, peer_factory, services, 3600.0, None) == cli.EXIT_USAGE
         return 0
 
     monkeypatch.setattr(cli, "_run_leg", while_it_runs)
