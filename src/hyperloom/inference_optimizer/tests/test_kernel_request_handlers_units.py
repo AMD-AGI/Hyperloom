@@ -1048,7 +1048,7 @@ class TestForgeGemmHelperCoverage:
 
         assert forge_lane_budget._forge_fusion_timeout_sec() == 7200
 
-    async def _fusion_input_payload(self, tmp_path, monkeypatch, *, max_minutes):
+    async def _fusion_input_payload(self, tmp_path, monkeypatch, *, max_minutes, fusion_findings=()):
         """Run the fusion lane against a faked forge runner and return the payload it was handed."""
         trace_dir = tmp_path / "trace"
         trace_dir.mkdir()
@@ -1057,6 +1057,7 @@ class TestForgeGemmHelperCoverage:
             framework="sglang",
             model_path="/models/zaya",
             last_profile_trace=str(trace_dir),
+            last_trace_analyze={"fusion_findings": list(fusion_findings)},
             max_minutes=max_minutes,
         )
         state.save(tmp_path)
@@ -1084,6 +1085,28 @@ class TestForgeGemmHelperCoverage:
 
         assert "max_recipes" not in payload
         assert payload["timeout"] == forge_lane_budget._forge_fusion_timeout_sec()
+
+    async def test_tracelens_fusion_findings_reach_llm_discovery_as_hints(self, tmp_path, monkeypatch):
+        finding = {
+            "kind": "add_norm",
+            "operation": "Unfused Add + RMSNorm in `DecoderLayer`",
+            "projected_e2e_pct": 2.4,
+            "members": [{"kernel_names": ["add_kernel"], "kernel_launcher_path": "modeling.py(88): forward"}],
+        }
+
+        payload = await self._fusion_input_payload(tmp_path, monkeypatch, max_minutes=120, fusion_findings=[finding])
+
+        assert payload["discover_mode"] == "llm"
+        hints = tmp_path / "runs" / "fusion" / "fusion_task" / "fusion_hints.json"
+        assert payload["fusion_hints"] == str(hints)
+        assert json.loads(hints.read_text(encoding="utf-8")) == [finding]
+
+    async def test_no_fusion_findings_sends_no_hints(self, tmp_path, monkeypatch):
+        payload = await self._fusion_input_payload(tmp_path, monkeypatch, max_minutes=120)
+
+        assert payload["discover_mode"] == "llm"
+        assert payload["fusion_hints"] == ""
+        assert not (tmp_path / "runs" / "fusion" / "fusion_task" / "fusion_hints.json").exists()
 
     def test_forge_fusion_timeout_infinite_env_falls_back(self, monkeypatch):
         monkeypatch.setenv("FORGE_FUSION_TIMEOUT", "inf")

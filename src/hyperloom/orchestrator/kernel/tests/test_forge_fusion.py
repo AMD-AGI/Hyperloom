@@ -89,6 +89,16 @@ def test_build_cmd_forwards_session_serve_args(tmp_path):
     assert cmd[cmd.index("--max-model-len") + 1] == "13312"
 
 
+def test_build_cmd_forwards_fusion_hints_only_when_written(tmp_path):
+    payload = _payload(tmp_path)
+    assert "--fusion-hints" not in forge_fusion._build_cmd(payload)
+
+    payload["fusion_hints"] = str(tmp_path / "fusion_hints.json")
+    cmd = forge_fusion._build_cmd(payload)
+    assert cmd[cmd.index("--fusion-hints") + 1] == str(tmp_path / "fusion_hints.json")
+    assert cmd[cmd.index("--discover") + 1] == "llm"
+
+
 def test_author_env_adds_stability_defaults(monkeypatch):
     for name in (
         "ANTHROPIC_BASE_URL",
