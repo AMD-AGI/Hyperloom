@@ -142,6 +142,45 @@ async def test_phase_expiry_drains_running_measurement_without_cancelling_it(coo
     cancel.assert_not_awaited()
 
 
+async def _idle_reactor_pass(name: str, **_kwargs) -> None:
+    return None
+
+
+async def _discovery_rounds(coord) -> list:
+    return [t for t in await coord.tasks.with_key_prefix("specialist", "candidate-discovery:") if t.params]
+
+
+async def test_an_open_framework_phase_dispatches_candidate_discovery_from_its_pump(coord):
+    coord.reactor_pass = _idle_reactor_pass
+    coord.shared_state.phase_budget_pct.pop("FRAMEWORK_AGENT")
+
+    await coord._tick_once()
+
+    assert coord.shared_state.phase == "FRAMEWORK_AGENT"
+    assert [t.state for t in await _discovery_rounds(coord)] == ["queued"]
+
+
+async def test_a_held_exit_dispatches_nothing_its_drain_would_cancel(coord):
+    coord.reactor_pass = _idle_reactor_pass
+    task = await _operator_task(coord)
+    await coord.tasks.transition(task.task_id, "running")
+
+    for _ in range(3):
+        await coord._tick_once()
+
+    assert coord.shared_state.phase == "FRAMEWORK_AGENT"
+    assert coord.dispatcher.admission_frozen
+    assert await coord.tasks.queued() == []
+    assert await coord.tasks.by_state("cancelled") == []
+    assert await _discovery_rounds(coord) == []
+    await coord.tasks.transition(task.task_id, "succeeded")
+
+    await coord.phase_machine.advance_phase_if_needed()
+
+    assert coord.shared_state.phase == "KERNEL_AGENT"
+    assert coord.shared_state.phase_history[-1]["reason"] == "optimize_phase_budget_exhausted"
+
+
 @pytest.mark.parametrize("hint", HINTS)
 @pytest.mark.parametrize(
     "override,reason", [({"stop_reason": "signal"}, "signal"), ({"closing_phase": True}, "time_exhausted")]

@@ -36,7 +36,7 @@ def _round(*names: str) -> dict[str, Any]:
     }
 
 
-def _phase(*, phase="FRAMEWORK_AGENT", rounds=(), queued=(), running=(), frozen=False, paused=False):
+def _phase(*, phase="FRAMEWORK_AGENT", rounds=(), queued=(), running=(), paused=False):
     from hyperloom.orchestrator.phases.framework import FrameworkPhase
     from hyperloom.orchestrator.state.shared_state import SharedState
 
@@ -47,7 +47,6 @@ def _phase(*, phase="FRAMEWORK_AGENT", rounds=(), queued=(), running=(), frozen=
     state.baseline_benchmark_script = "bench.sh"
     state.specialist_rounds = list(rounds)
     dispatcher = SimpleNamespace(
-        admission_frozen=frozen,
         dispatch_paused_for_phase_budget=lambda: paused,
         registry_lanes_ttl=lambda kind: (["benchmark_lane"], 1800),
     )
@@ -102,7 +101,6 @@ async def test_no_enqueue_when_it_must_not_run():
         _phase(rounds=[_round("x")], queued=[explore]),
         _phase(rounds=[_round("x")], running=[explore]),
         _phase(rounds=[_round("x")], phase="ENABLEMENT"),
-        _phase(rounds=[_round("x")], frozen=True),
         _phase(rounds=[_round("x")], paused=True),
         _phase(rounds=[]),
     ]
