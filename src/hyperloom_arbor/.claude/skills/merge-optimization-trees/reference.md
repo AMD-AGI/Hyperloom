@@ -1,7 +1,9 @@
 # Reference: measurement discipline for knob comparisons
 
-Detail behind steps 5–8 of [SKILL.md](SKILL.md). This file covers only what makes two knob states comparable; where GPUs
-are, the storage policy and container permissions are the cluster's own rules.
+Detail behind steps 5–8 of [SKILL.md](SKILL.md). The cluster-level rules
+(where GPUs are, storage policy, container permissions) belong to the project
+that runs the campaign; this file covers only what makes two knob states
+comparable.
 
 ## Every operating point, always
 
@@ -28,9 +30,8 @@ own output directory so their aggregate files cannot overwrite each other.
 ## Warm up before every measured run
 
 The first replay against a fresh server pays cold JIT compilation, tuned-config
-resolution, and an empty prefix cache. On back-to-back replays on one server
-instance, the cold first replay is a **low outlier**: including it widens the
-run-to-run spread considerably.
+resolution, and an empty prefix cache. The cold first replay is a **low
+outlier**: including it widens the run-to-run spread considerably.
 
 This matters more in a knob sweep than anywhere else, because each knob state
 usually gets a fresh server — so **every measurement is a cold first replay**
@@ -111,7 +112,7 @@ it a campaign can be wasted.
 This is the single most misleading instrument in the set. A marker reading
 
 ```
-my feature: knob=1 batch=<large> -> base path
+my feature: knob=1 batch=1024 -> base path
 ```
 
 says only what the first call did. It does not mean "this feature declines at
@@ -137,15 +138,15 @@ When a set of knobs fails as a set, halving the ON set finds the culprit in
   absent. A bisect step that silently did not apply points at the wrong half.
 - **One failure is not evidence.** This class of fault also occurs
   intermittently on unmodified baselines. Require a repeated, arm-specific
-  pattern — a death in every attempt with the culprit on against none in
-  several attempts without is a pattern; one death is an anecdote.
+  pattern — a death in every attempt with the culprit on against none in more
+  attempts without is a pattern; one death is an anecdote.
 - **Preserve every failed attempt.** Move its directory aside rather than
   letting the next run overwrite it; a server log is the only record of why a
   run died, and it is gone as soon as the next server starts.
 
-Expect the first hypothesis to be wrong. The most-suspected knob can be cleared
-early in the bisect, and the culprit can be one that had been dismissed as
-"inert at this operating point".
+Expect the first hypothesis to be wrong. The bisect can clear the
+most-suspected knob, and the culprit can be one dismissed as "inert at this
+operating point".
 
 ## Prove "one tree, environment only"
 
@@ -179,8 +180,8 @@ one profile, not one run per pair, and it is how a combination can be declined
 with arithmetic before it is ever measured.
 
 Price each feature as a percentage of the serving window from that census. A
-feature worth 0.1% of the window does not need a 600-second replay to rank,
-and should not be allowed to consume one.
+feature worth a sliver of the window does not need a full replay to rank, and
+should not be allowed to consume one.
 
 ## The record each merge leaves
 

@@ -20,13 +20,15 @@ from hyperloom.contracts.measurement import AttachmentRef, TestRequest
 from hyperloom.contracts.recipe import ComponentPatches, KernelArtifact, KernelKind, LaunchConfig, Recipe
 from hyperloom.measure.compile import LocalBlobStore
 from hyperloom.measure.surface import SurfaceViolation, check_launch_envs
+from hyperloom_common.shared_storage import child_umask
 from hyperloom_multibranch.blackboard import LocalBlackboard
 from hyperloom_multibranch.contracts.toolbox import BranchLease, LeaseCharge, RequestRejected
 from hyperloom_multibranch.specialist.agent_onboarding import CommandResult, OnboardingSetup
 from hyperloom_multibranch.specialist.agent_spec import AgentSpec
-from hyperloom_multibranch.specialist.arbor_adapter import BRANCH_RUN
-from hyperloom_multibranch.specialist.gate_client import GateClient
+from hyperloom_multibranch.specialist.arbor_adapter import ARBOR_PYTHON, BRANCH_RUN
+from hyperloom_multibranch.specialist.gate_client import FixedGateClient
 from hyperloom_multibranch.toolbox.kernel_artifacts import KernelVariables
+from inference_suite.contracts import FixedWorkload
 
 
 class Process:
@@ -262,7 +264,8 @@ class LocalProcess:
 
 
 class LocalSandbox:
-    """Runs commands as local processes, each in a process group of its own."""
+    """Runs commands as local processes, each in a process group of its own, under umask ``002`` below shared storage
+    as a sandbox's launcher runs them."""
 
     def __init__(self, logs: Path) -> None:
         self._logs, self.started, self.envs, self.leases, self.prompts = logs, [], [], [], []
@@ -277,7 +280,15 @@ class LocalSandbox:
 
     async def run(self, command: str, cwd: Path, env: Mapping[str, str], timeout: float) -> CommandResult:
         self.ran.append(command)
-        done = subprocess.run(command, shell=True, cwd=cwd, env={**os.environ, **env}, capture_output=True, text=True)
+        done = subprocess.run(
+            command,
+            shell=True,
+            cwd=cwd,
+            env={**os.environ, **env},
+            capture_output=True,
+            text=True,
+            umask=child_umask(cwd),
+        )
         return CommandResult(done.returncode, done.stdout + done.stderr)
 
     async def start(self, command: str, cwd: Path, env: Mapping[str, str]) -> LocalProcess:
@@ -290,6 +301,7 @@ class LocalSandbox:
             stdout=log.open("w"),
             stderr=subprocess.STDOUT,
             start_new_session=True,
+            umask=child_umask(cwd),
         )
         self.started.append(command)
         self.envs.append(dict(env))
@@ -428,7 +440,22 @@ MODEL = "/models/Qwen3-14B-FP8"
 
 
 #: The gate's client as MB builds it; it names the model by its hub name, which the server must answer to.
-CLIENT = GateClient("/opt/InferenceX", "Qwen/Qwen3-14B-FP8", 1024, 1024, 8, 0.8, None, False)
+CLIENT = FixedGateClient(
+    "/opt/InferenceX/inferencex-e2e",
+    "Qwen/Qwen3-14B-FP8",
+    FixedWorkload(
+        concurrency=8,
+        isl=1024,
+        osl=1024,
+        random_range_ratio=0.8,
+        num_prompts=80,
+        num_warmups=16,
+        seed=0,
+        warmup_seed=1,
+        tokenizer_mode="auto",
+        trust_remote_code=False,
+    ),
+)
 
 
 PORT = 31110
@@ -543,7 +570,7 @@ def _spec(tmp_path: Path, **changes: object) -> AgentSpec:
         cards=(4, 5),
         seconds=3600.0,
         port=PORT,
-        client=CLIENT.command(PORT, tmp_path / "agent" / "mb-bench"),
+        client=CLIENT.stage(PORT, tmp_path / "agent" / "mb-bench"),
         knowledge=str(tmp_path / "agent" / "mb-integration.md"),
         deadline=DEADLINE,
         root=_git(workspace, "rev-parse", "HEAD"),
@@ -569,7 +596,7 @@ MAP = {
 }
 
 
-LAUNCH = f"python3 -m arbor run --config {CONFIG_FILE}"
+LAUNCH = f"{ARBOR_PYTHON} -m arbor run --config {CONFIG_FILE}"
 REASONS = ["component.plan[0]: m-attn: no title", "component mode needs a deadline"]
 
 

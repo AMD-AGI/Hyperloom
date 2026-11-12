@@ -19,11 +19,13 @@ from pathlib import Path
 from typing import Any, Literal, Protocol
 
 from hyperloom.contracts.measurement import AccuracyValue, AttachmentRef, FailureClass, PhaseTiming, SandboxFacts
+from hyperloom.measure.checkpoint import CheckpointPlan
 from hyperloom.measure.jit.session import JitCacheSession
 from hyperloom.measure.phases import PhaseRecorder
 from hyperloom.measure.long_context.plan import LongContextPlan
 from hyperloom.orchestrator.actions.cancel_channel import CancelScope
 from hyperloom.measure.short_prompts.plan import ShortPromptPlan
+from inference_suite.contracts import BaseLaunch, NormalisedManifest
 
 __all__ = [
     "EnvironmentRef",
@@ -98,11 +100,16 @@ class EnvironmentRef:
 
 @dataclass(frozen=True)
 class SessionFacts:
-    """Session-level facts the old flow keeps in its state and a runner takes from the instruction sheet."""
+    """Session-level facts the old flow keeps in its state and a runner takes from the instruction sheet.
+
+    ``staging`` is the normalised manifest of the inference_suite staging the test's rounds run, and ``base_launch`` the
+    session's frozen base, which the test's own session directory is given so its rounds run on inference_suite.
+    """
 
     reference_unset_envs: tuple[str, ...] = ()
     inferencex_path: str | None = None
-    magpie_commit: str | None = None
+    staging: NormalisedManifest | None = None
+    base_launch: BaseLaunch | None = None
 
 
 @dataclass(frozen=True)
@@ -115,7 +122,6 @@ class TestCall:
     output_dir: Path
     timeout_sec: int
     cwd: str
-    magpie_python: str
     task_id: str
     kind: Kind = "test"
     prep: Prep = "grid"
@@ -152,6 +158,12 @@ class TestCall:
     #: ``None`` for one the patch deletes (``measure.farm.patched_configs``). The test's private copies of the tables
     #: (``measure.framework.copies``) carry them, so the server reads, and builds its modules from, the patched tables.
     tables_patch: Mapping[str, Path | None] = field(default_factory=dict)
+    #: The AgentX checkpoint the test's measured round is held to; ``None`` judges no round. Whoever builds the call
+    #: decides it (``measure.checkpoint``); a warmup, an evaluation or a sweep round is never judged.
+    checkpoint: CheckpointPlan | None = None
+    #: Whether the points put a rebuilt framework (a farm, ``measure.farm``) first on the server's import path. Whoever
+    #: laid the farm sets it; a serving interpreter that cannot import its framework is the candidate's failure only then.
+    framework_changed: bool = False
     #: Ends the test when cancelled, as its boot limit does: the backend's own cancellation, which a caller that watches the
     #: test from beside it (the runner's card watch) passes in. ``None`` gives the backend one of its own; a caller that
     #: published a cancel scope of its own owns the cancellation, and this one is not used.

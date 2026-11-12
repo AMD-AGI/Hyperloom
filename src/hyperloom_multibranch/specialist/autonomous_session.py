@@ -68,6 +68,7 @@ from hyperloom.contracts.recipe import (
 from hyperloom.measure.compile import COMPONENT_LAYOUTS, kernel_load_env, locate_installed_package
 from hyperloom.sandbox import SandboxGone
 from hyperloom.sandbox.socket import SandboxUnavailable
+from hyperloom_common.shared_storage import make_shared_dirs, write_shared_text
 from hyperloom_multibranch.contracts.branch_log import BranchLogEntry, BranchLogType
 from hyperloom_multibranch.contracts.blackboard.records import Learning
 from hyperloom_multibranch.contracts.blackboard.records import RetractionRef, TestRecord
@@ -89,6 +90,7 @@ from hyperloom_multibranch.specialist.agent_import import (
     with_tables,
     read_kept_change,
 )
+from hyperloom_multibranch.blackboard.local.agent_manifest import sanitized_manifest
 from hyperloom_multibranch.blackboard.local.blackboard import LEARNING_MAX_CHARS
 from hyperloom_multibranch.specialist.agent_knowledge import NOTES_FILE, IntegrationNotes
 from hyperloom_multibranch.specialist.agent_manifest import WORKSPACE, AgentManifest, LedgerSource, read_field
@@ -107,7 +109,7 @@ from hyperloom_multibranch.specialist.agent_onboarding import (
 )
 from hyperloom_multibranch.specialist.agent_session import BranchPlace
 from hyperloom_multibranch.specialist.agent_spend import AgentSpend, newest_write
-from hyperloom_multibranch.specialist.arbor_adapter import EXIT_REFUSED, exit_reason, refused_reasons
+from hyperloom_multibranch.specialist.arbor_adapter import EXIT_REFUSED, exit_reason, refused_reasons, served_config
 from hyperloom_multibranch.specialist.dev_sandbox import MINUTE, TOO_MANY
 from hyperloom_multibranch.rulegate.rules import RETRACTION_ID
 from hyperloom_multibranch.specialist.judging import NOTICE
@@ -270,7 +272,7 @@ class KeepWatch:
             "requeued": self.requeued,
             "requeue_failures": self.requeue_failures,
         }
-        path.write_text(json.dumps(document), encoding=ENCODING)
+        write_shared_text(path, json.dumps(document))
 
 
 def _kept_from(document: dict[str, object] | None) -> KeptChange | None:
@@ -334,8 +336,8 @@ class AutonomousSession:
         self._sandbox = self._setup.sandbox(lease)
         ready = await make_ready(self._start.task.agent, spec, self._agent_dir, self._setup.onboarding(self._sandbox))
         self._manifest, self._process = ready.manifest, ready.process
-        document = ready.manifest.to_document()
-        (self._place.workspace / MANIFEST_FILE).write_text(json.dumps(document), encoding=ENCODING)
+        document = sanitized_manifest(ready.manifest.to_document())
+        write_shared_text(self._place.workspace / MANIFEST_FILE, json.dumps(document))
         await self._place.blackboard.record_agent_manifest(self._start.branch, document)
         # Every snapshot of the agent's session is one of this branch's keeps, the first among them possibly written
         # while the preflight waited for the agent to start.
@@ -356,7 +358,7 @@ class AutonomousSession:
             tables = await lay_start_tables(self._setup.repo, self._start.start_commit, kernels, directory, configs)
         except StartTableError as error:
             raise PreflightFailed([str(error)]) from error
-        self._place.workspace.mkdir(parents=True, exist_ok=True)
+        make_shared_dirs(self._place.workspace)
         save_start_tables(tables, self._place.workspace / START_TABLES_FILE)
         return tables
 
@@ -512,7 +514,8 @@ class AutonomousSession:
         if self._manifest is not None and self._process is not None and self._sandbox is not None:
             return self._manifest, self._process, self._sandbox
         document = json.loads((self._place.workspace / MANIFEST_FILE).read_text(encoding=ENCODING))
-        manifest = AgentManifest.read(document)
+        stored = AgentManifest.read(document)
+        manifest = replace(stored, config=served_config(stored.config, self._setup.spec))
         command = manifest.resume or manifest.launch
         checkout, env = self._agent_dir / SOURCE_DIR, agent_env(self._agent_dir)
         sandbox: AgentSandbox | None = None
@@ -601,7 +604,7 @@ class AutonomousSession:
             "env": dict(lease.env),
             "remaining_cards": lease.remaining_cards,
         }
-        (self._place.workspace / LEASE_FILE).write_text(json.dumps(document), encoding=ENCODING)
+        write_shared_text(self._place.workspace / LEASE_FILE, json.dumps(document))
 
     async def _lease_now(self, cards: int) -> BranchLease:
         deadline = self._start.task.deadline

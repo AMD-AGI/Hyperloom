@@ -28,7 +28,7 @@ Some framework settings cannot run together, which an agent need not know: a kee
 :data:`FLAG_CONFLICTS` is read with each server flag the variable needs off removed, each named in
 :attr:`KeptChange.disabled`, so the gate's server does not inherit it from the head's launch and fail.
 
-A flag of the launch the framework resolves (a Magpie AgentX recipe's, which the start commit's own arguments add to)
+A flag of the launch the framework resolves (an AgentX recipe's, which the start commit's own arguments add to)
 that a keep runs without, or that a variable of it needs off, is read into :attr:`KeptChange.removed`: the recipe's
 own arguments cannot drop it, so the import removes it from the resolved launch (``LaunchConfig.remove_args``).
 """

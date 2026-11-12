@@ -13,63 +13,6 @@ from pathlib import Path
 from typing import IO, Callable, Iterator, Sequence
 
 
-# Mounts that can be revoked mid-run: a process whose cwd lives on one sees relative-path writes fail with ENOENT
-# after a flap, so callers place anything they must keep writing to on local disk instead.
-_NETWORK_FS_TYPES: frozenset[str] = frozenset(
-    {
-        "nfs",
-        "nfs4",
-        "cifs",
-        "smb3",
-        "lustre",
-        "glusterfs",
-        "ceph",
-        "fuse.weka",
-        "wekafs",
-        "wekafsgw",
-        "fuse.juicefs",
-        "fuse.s3fs",
-        "fuse.sshfs",
-        "9p",
-    }
-)
-
-
-def _path_fstype(path: str) -> str:
-    """Return the filesystem type backing ``path`` per ``/proc/mounts``."""
-    try:
-        rp = os.path.realpath(path)
-    except OSError:
-        return ""
-    best_mp = ""
-    best_type = ""
-    try:
-        with open("/proc/mounts", encoding="utf-8") as fh:
-            for line in fh:
-                parts = line.split()
-                if len(parts) < 3:
-                    continue
-                # /proc/mounts octal-escapes spaces in the mountpoint.
-                try:
-                    mp = parts[1].encode("latin-1").decode("unicode_escape")
-                except (UnicodeDecodeError, UnicodeEncodeError):
-                    mp = parts[1]
-                fstype = parts[2]
-                norm = mp.rstrip("/") or "/"
-                is_under = norm == "/" or rp == norm or rp.startswith(norm + "/")
-                if is_under and len(norm) >= len(best_mp):
-                    best_mp = norm
-                    best_type = fstype
-    except OSError:
-        return ""
-    return best_type
-
-
-def is_network_fs(path: str) -> bool:
-    """True when ``path`` is backed by a revocable network filesystem."""
-    return _path_fstype(path).lower() in _NETWORK_FS_TYPES
-
-
 def is_private_dir(directory: Path | str) -> bool:
     """Whether ``directory`` is a directory of this user's, not a link, that its group and others cannot write: in a
     temporary directory every account shares, no other unprivileged account can have made it or put an entry in it.

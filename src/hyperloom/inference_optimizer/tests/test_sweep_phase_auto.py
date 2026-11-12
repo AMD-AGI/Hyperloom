@@ -531,8 +531,7 @@ async def test_stack_validation_preserves_actual_measurement(
         "duration_seconds": 900.0,
         "request_error_rate": 0.0,
         "completed_requests": 64,
-        "benchmark_backend": "magpie_agentx" if agentx else "synthetic",
-        "benchmark_valid": submission_valid,
+        "valid_measurement": not agentx or submission_valid is True,
         "diagnostic_only": False,
         "workload_identity": "fixed-workload",
         "submission_invalid_reasons": ["scenario_constraint"] if submission_valid is False else [],
@@ -1407,7 +1406,7 @@ async def test_stack_validation_accuracy_regression_downgrades_to_needs_review(
 
     seen: dict[str, object] = {}
 
-    def _fake_accuracy_gate(bench_result, *, baseline_accuracy, workspace, server_args=""):
+    def _fake_accuracy_gate(bench_result, *, reference, workspace, server_args=""):
         # The lane must hand the gate the args the bench server ran under, or a context too small to host an eval
         # reads as a broken eval.
         seen["server_args"] = server_args

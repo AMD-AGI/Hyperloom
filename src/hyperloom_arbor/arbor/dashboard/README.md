@@ -56,8 +56,8 @@ their output, and serves it.
 
 ## Ported from an earlier dashboard
 
-The source is an earlier campaign dashboard, which served earlier
-campaigns. Kept: the page and its panels, the snapshot's keys (`arbor.collect`'s realtime
+The source is an earlier per-cluster campaign dashboard.
+Kept: the page and its panels, the snapshot's keys (`arbor.collect`'s realtime
 collector writes the same ones), the server's caching, and its rules:
 
 - **The collector never raises.** Every section records its own failure in

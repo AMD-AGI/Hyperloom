@@ -1,9 +1,11 @@
 # Lines in this copy that disagree with the hardware skill
 
-Checked 2026-10-20 by a grep of every copied file for `304`, `32 banks`, `32-bank` and `5.3 TB/s`,
-then for `96 KB`, `TF32`, FNUZ and `f8f6f4` near gfx942. Where a line here and the hardware skill
-(`.claude/skills/hardware/SKILL.md`) disagree, the hardware skill is right. KernelForge's files stay
-as copied; apply the correction when you read them.
+Checked by a grep of every copied file for `304`, `32 banks`, `32-bank` and `5.3 TB/s`, then for
+`96 KB`, `TF32`, FNUZ and `f8f6f4` near gfx942. `hip_api_reference.md`'s hardware table was added
+later, after a knowledge search's reader flagged its LDS figure. Where a line here and the hardware
+skill (`.claude/skills/hardware/SKILL.md`) disagree, the hardware skill is right. KernelForge's files stay
+as copied; apply the correction when you read them. Knowledge search (`knowledge:search`) shows each correction
+beside the lines it corrects.
 
 ## Wrong for gfx950 (MI350X/MI355X)
 
@@ -12,7 +14,10 @@ as copied; apply the correction when you read them.
 | `local_knowledge/framework/aiter/operators/fused_moe_grouped_gemm/tuning.md:25` | align-and-sort `BLOCK_M` decides "how tightly per-expert tiles pack the 304 CUs"; the page covers gfx942, gfx950 and gfx1250 | 304 CUs is MI300X; MI350X/MI355X have 256 (8 XCDs × 32), and AITER's `cu_num` is 256 there |
 | same file, `:65` | `ksplit` "to reach ≥1024 tiles across 304 CUs" | 256 CUs on gfx950 |
 | same file, `:68` | "per-expert tiles total should give ≈ k·304 blocks" | ≈ k·256 on gfx950 |
-| `knowledge_base/flydsl/gemm_optimization.md:326` | worked FP8 GEMM example, no arch named: "158 GB/s (well below HBM peak 5.3 TB/s)" | 5.3 TB/s is MI300X's spec; gfx950: 8.0 TB/s spec (hardware skill); measure achievable bandwidth on the node |
+| `knowledge_base/hip/hip_api_reference.md:164` | the gfx950 hardware table: "LDS per CU: 256 KB (CDNA4), 128 KB (CDNA3)" | 160 KiB on gfx950 and 64 KiB on gfx942 (hardware skill, quick facts) |
+| same file, `:168` | "L1 cache: 16 KB per CU" | 32 KiB per CU, 128 B lines, on gfx950 and gfx942 (`hardware/reference/cdna4_mi350/memory.md:30`) |
+| same file, `:170` | "XCDs: 32 (gfx950), 8 CUs per XCD" | 8 XCDs of 32 CUs (256) on gfx950 |
+| `knowledge_base/flydsl/gemm_optimization.md:326` | worked FP8 GEMM example, no arch named: "158 GB/s (well below HBM peak 5.3 TB/s)" | 5.3 TB/s is MI300X's spec; gfx950: 8.0 TB/s spec (hardware skill); measure what the node achieves before pricing against it |
 | `knowledge_base/flydsl/gemm_optimization.md:322` | same example: "LDS = … 16 KB (well under 64 KB)" | 64 KiB is gfx942's LDS; gfx950 has 160 KiB per CU |
 
 No copied page says gfx950 has 32 LDS banks. The page that did, `knowledge_base/shared/gpu_arch_gfx950.md`
@@ -24,7 +29,7 @@ No copied page says gfx950 has 32 LDS banks. The page that did, `knowledge_base/
 | --- | --- | --- |
 | `knowledge_base/ck/ck_playbook.md:3096`, `:3139` | "96 KB LDS per CU (gfx940)"; "96 KB LDS retained — same as gfx90a". The same file says 64 KB at `:347` | MI300X (gfx942): 64 KiB LDS per CU, 32 banks (`hardware/reference/cdna3_mi300/memory_hierarchy.md:30`) |
 | `knowledge_base/ck/ck_playbook.md:3147` | "gfx950 inherits gfx942's scaled MFMA — same `_f8f6f4` family" | gfx942 has no FP4, FP6 or block-scaled MFMA; the scaled `f8f6f4` MFMA is new in gfx950 (`hardware/reference/cdna3_mi300/matrix_core.md:41`) |
-| `knowledge_base/aiter/backend_dispatch.md:158` | gfx942 row: FP8 "OCP + FNUZ", MXFP4 "Yes" | gfx942's FP8 is FNUZ in hardware, and it has no FP4 matrix instructions; AITER's MXFP4 W4A4 is rejected on gfx942, where `--moe-backend auto` picks W4A16 (`serving-playbook/image-manifest.md` A4) |
+| `knowledge_base/aiter/backend_dispatch.md:158` | gfx942 row: FP8 "OCP + FNUZ", MXFP4 "Yes" | gfx942's FP8 is FNUZ in hardware, and it has no FP4 matrix instructions; AITER's MXFP4 W4A4 is rejected on gfx942, where `--moe-backend auto` picks W4A16 |
 | `knowledge_base/ck/ck_playbook.md:2031` | CK's CMake gate "TF32 = gfx942+" | reads as including gfx950, which has no TF32 (hardware SKILL.md, quick facts); a build-gate statement, so check CK's `CMakeLists.txt` before relying on it |
 
 ## Hits that are correct (checked, no action)

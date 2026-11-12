@@ -17,7 +17,7 @@ from __future__ import annotations
 
 import re
 
-from hyperloom.common.failure_signature import argparse_refusal
+from hyperloom.common.failure_signature import IMPORT_FAILURE_LINE, argparse_refusal
 from hyperloom.common.outside_facts import (
     HIP_ERROR_PREFIX,
     HIP_NO_BINARY_FOR_GPU,
@@ -25,8 +25,7 @@ from hyperloom.common.outside_facts import (
     HIP_UNDEFINED_SYMBOL,
     HSA_STATUS_ERROR,
     HUB_RATE_LIMITED,
-    PY_IMPORT_ERROR,
-    PY_MODULE_NOT_FOUND_ERROR,
+    TORCH_MEMORY_SNAPSHOT_FRAME,
 )
 
 #: A cause line longer than this is cut, so a reason stays one readable line.
@@ -43,13 +42,6 @@ _BAD_REQUEST = re.compile(
 #: The lm_eval client's own report of a refused request carries the server's message, which names the cause.
 _REFUSAL_MESSAGE = re.compile(r"API request failed|[\"']message[\"']\s*:")
 
-#: The exception a failed import raised, ``ImportError: message`` or ``ModuleNotFoundError: message`` after an optional
-#: log prefix. A server that skips a model whose imports fail logs ``Ignore import error when loading <module>: ...``
-#: and carries on; that line is not an exception and does not match.
-_IMPORT_FAILURE = re.compile(
-    r"(?<![\w.])(?:[A-Za-z_]\w*\.)*(?:" + PY_IMPORT_ERROR + "|" + PY_MODULE_NOT_FOUND_ERROR + r"):\s*\S"
-)
-
 #: What a missing compiled kernel prints: an extension that references a symbol nothing defines, or a GPU binary built for
 #: another device. Nothing else a HIP call reports belongs here, nor a failed HSA call: the ROCr queue abort that names an
 #: ``HSA_STATUS_ERROR_*`` status is a kernel that ran and faulted.
@@ -61,7 +53,7 @@ _MISSING_KERNEL = re.compile("|".join((HIP_UNDEFINED_SYMBOL, HIP_NO_KERNEL_IMAGE
 #: library print them.
 _DISK_FULL = re.compile(r"\[Errno (?:28|122)\]|No space left on device|Disk quota exceeded", re.IGNORECASE)
 _WATCHDOG_TIMEOUT = re.compile(r"watchdog timeout", re.IGNORECASE)
-#: A ``git`` command the benchmark client ran to fetch its own dependencies (Magpie's per-test ``submodule update`` of
+#: A ``git`` command the benchmark client ran to fetch its own dependencies (a per-test ``submodule update`` of
 #: the replay client) that timed out: ``subprocess.TimeoutExpired: Command ['git', ...] timed out after N seconds``.
 _GIT_FETCH_TIMEOUT = re.compile(r"TimeoutExpired: Command \[['\"]git['\"],.*\] timed out after")
 _HUB_RATE_LIMITED = re.compile(HUB_RATE_LIMITED)
@@ -93,6 +85,8 @@ _HSA_STATUS_TOKEN = re.compile(HSA_STATUS_ERROR + r"[A-Z_]*")
 #: ``SomeError: message`` after an optional log prefix, or a bare ``SomeError`` on a line of its own.
 _EXCEPTION_WITH_MESSAGE = re.compile(r"(?<![\w.])((?:[A-Za-z_]\w*\.)*(?:[A-Z]\w*)?(?:Error|Exception)):\s*\S")
 _EXCEPTION_ALONE = re.compile(r"^\s*(?:[A-Za-z_]\w*\.)*(?:[A-Z]\w*)?(?:Error|Exception)\s*$")
+#: A frame of the allocator's memory-snapshot dump SGLang's CUDA-graph profile runs after the capture.
+_SNAPSHOT_FRAME = re.compile(TORCH_MEMORY_SNAPSHOT_FRAME)
 
 
 def one_line(text: str) -> str:
@@ -132,12 +126,30 @@ def bad_request(text: str) -> str | None:
 
 def import_error(text: str) -> str | None:
     """The ``ImportError``/``ModuleNotFoundError`` line a failed import ended the server with."""
-    return _last_matching(text, lambda line: bool(_IMPORT_FAILURE.search(line)))
+    return _last_matching(text, lambda line: bool(IMPORT_FAILURE_LINE.search(line)))
 
 
 def python_exception(text: str) -> str | None:
     """The last ``SomeError: message`` line of a traceback or of a logged exception."""
     return _last_matching(text, lambda line: bool(_EXCEPTION_WITH_MESSAGE.search(line) or _EXCEPTION_ALONE.match(line)))
+
+
+def profiler_snapshot_failure(text: str) -> str | None:
+    """The exception a traceback through the profiler's memory-snapshot dump ended on: the first unindented line after a
+    frame of the dump, when that line is an exception (``RuntimeError: stoi``); ``None`` when no such traceback is in
+    ``text``. Lines of another process written into the traceback leave it unread rather than misread."""
+    lines = text.splitlines()
+    found = None
+    for index, line in enumerate(lines):
+        if not _SNAPSHOT_FRAME.search(line):
+            continue
+        for after in lines[index + 1 :]:
+            if not after.strip() or after[:1].isspace():
+                continue
+            if _EXCEPTION_WITH_MESSAGE.search(after) or _EXCEPTION_ALONE.match(after):
+                found = one_line(after)
+            break
+    return found
 
 
 def git_fetch_timeout(text: str) -> str | None:

@@ -15,7 +15,7 @@ from __future__ import annotations
 import pytest
 
 from hyperloom.measure import log_causes
-from hyperloom.measure.failures import FailureClass, classify_test_failure
+from hyperloom.measure.failures import FailureClass, FailureEvidence, classify_test_failure
 from hyperloom.measure.tests import eval_refusal_logs
 
 ARGPARSE_LOG = (
@@ -111,7 +111,7 @@ PLAIN_LOG = "INFO server booted\nINFO request finished in 3.1s\nsegfault somewhe
 
 
 def _classify(*logs: str, returncode: int = 1):
-    verdict = classify_test_failure(returncode=returncode, logs=list(logs))
+    verdict = classify_test_failure(returncode=returncode, evidence=FailureEvidence(logs=logs))
     return verdict.failure_class, verdict.failure_reason
 
 
@@ -290,12 +290,6 @@ def test_a_cause_line_is_one_bounded_line() -> None:
     assert len(reason) <= len("serve_flag: ") + log_causes.CAUSE_CHARS
 
 
-def test_a_stalled_server_keeps_its_reason_when_its_log_holds_an_exception() -> None:
-    verdict = classify_test_failure(returncode=-911, logs=[PYTHON_EXCEPTION_LOG])
-
-    assert (verdict.failure_class, verdict.failure_reason) == (FailureClass.UNCLEAR, "server_stalled")
-
-
 @pytest.mark.parametrize(
     ("reader", "log", "expected"),
     [
@@ -310,3 +304,31 @@ def test_a_stalled_server_keeps_its_reason_when_its_log_holds_an_exception() -> 
 def test_each_reader_returns_the_line_that_names_the_cause_and_none_for_a_plain_log(reader, log, expected) -> None:
     assert expected in (reader(log) or "")
     assert reader(PLAIN_LOG) is None
+
+
+def test_the_snapshot_failure_is_the_exception_the_dumps_traceback_ended_on() -> None:
+    log = (
+        '  File "/venv/torch/cuda/memory.py", line 1059, in _dump_snapshot\n'
+        "    s = _snapshot()\n"
+        "    return _C._cuda_memorySnapshot(None)\n"
+        "RuntimeError: stoi\n"
+        "Exception: Capture cuda graph failed: stoi\n"
+    )
+
+    assert log_causes.profiler_snapshot_failure(log) == "RuntimeError: stoi"
+
+
+def test_a_line_of_another_process_inside_the_dumps_traceback_leaves_it_unread() -> None:
+    log = (
+        '  File "/venv/torch/cuda/memory.py", line 1059, in _dump_snapshot\n'
+        "[aiter] Registering 2820 cuda graph addresses\n"
+        "RuntimeError: stoi\n"
+    )
+
+    assert log_causes.profiler_snapshot_failure(log) is None
+
+
+def test_a_log_without_the_dump_has_no_snapshot_failure() -> None:
+    log = "Memory Usage is saved to cuda_graph_runner_memory_usage.pickle\nRuntimeError: stoi\n"
+
+    assert log_causes.profiler_snapshot_failure(log) is None

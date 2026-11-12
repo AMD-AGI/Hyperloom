@@ -8,17 +8,64 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
+import logging
 import os
 import shlex
 from pathlib import Path
 from typing import Any, Mapping
 
 from hyperloom_common.coerce import to_str_list
+from hyperloom.common.env_safety import is_allowed_external_env_key
 from hyperloom.common.launch_log_evidence import launch_argv_from_log, observed_server_identity_from_log
 from hyperloom.inference_optimizer.grid_server_args import merge_cumulative_extra_server_args
+from inference_suite.contracts.launch import Launch, LayerSource
+from inference_suite.contracts.layout import RunLayout
 
+from ..actions.executors import read_round_launch
 from ..kernel.geak_config import _geak_overlay_digest
 from ._keep_patch_column import _source_snapshot_layers
+
+log = logging.getLogger(__name__)
+
+#: The layers of a round's launch that describe that round's runtime (model path, address, GPU mask, profiler), not
+#: the configuration a consumer reproduces on its own server.
+_ROUND_LAYERS = frozenset({LayerSource.GUARD, LayerSource.PROFILE})
+#: The runner's environment (its overlay path, its reap mark) belongs to the process that ran the round as well.
+_ROUND_ENV_LAYERS = _ROUND_LAYERS | {LayerSource.RUNNER}
+
+
+def _measured_launch(measurement: Mapping[str, Any]) -> Launch | None:
+    """The launch the run_dir ``measurement`` was taken in records; ``None`` for a round that left no ``launch.json``."""
+    workspace = str(measurement.get("benchmark_workspace") or "").strip()
+    return read_round_launch(Path(workspace)) if workspace else None
+
+
+def _reproduced_flags(launch: Launch) -> str:
+    args = [arg for arg in launch.args if arg.source not in _ROUND_LAYERS]
+    # GEAK re-renders structured values shell-quoted and its native launchers expand the args unquoted, so a JSON or
+    # list value would reach the server with its quotes and fail to parse.
+    structured = [arg for arg in args if any(value[:1] in ("[", "{") for value in arg.values)]
+    if structured:
+        log.info("launch: structured-value flags not forwarded: %s", " ".join(arg.flag for arg in structured))
+    return shlex.join(token for arg in args if arg not in structured for token in arg.tokens())
+
+
+def _reproduced_env(launch: Launch) -> dict[str, str]:
+    # A redacted value is recorded only by digest. Credential, loader and path names are env_safety's to refuse: they
+    # would be written into the handoff verbatim, or displace the overlay the env spec carries.
+    env = {
+        entry.name: entry.value
+        for entry in launch.env_sources
+        if entry.source not in _ROUND_ENV_LAYERS and isinstance(entry.value, str)
+    }
+    refused = sorted(name for name in env if not is_allowed_external_env_key(name))
+    if refused:
+        log.info("launch: credential, loader or path env not forwarded: %s", " ".join(refused))
+    return {name: value for name, value in env.items() if name not in refused}
+
+
+def _removed_env(launch: Launch) -> list[str]:
+    return [removal.name for removal in launch.removed if not removal.name.startswith("-")]
 
 
 class LaunchIdentityMixin:
@@ -28,12 +75,9 @@ class LaunchIdentityMixin:
     def _handoff_launch_identity(env_spec: Mapping[str, Any]) -> str:
         """Return a stable identity for the complete GEAK baseline launch."""
         config = env_spec.get("config") if isinstance(env_spec.get("config"), Mapping) else {}
-        # The recipe PATH is deliberately excluded: a baseline re-run repoints
-        # ``baseline_config_path`` at a new timestamped YAML without re-stamping
-        # current_best, so hashing the path drops the same-config reference for a
-        # byte-identical recipe. The digest already carries the recipe content.
+        # The launch.json path is excluded: the digest already carries what it records.
         payload = {
-            "base_launch_recipe_digest": str(env_spec.get("base_launch_recipe_digest") or ""),
+            "launch_digest": str(env_spec.get("launch_digest") or ""),
             "extra_server_args": str(config.get("extra_server_args") or ""),
             "extra_envs": dict(config.get("extra_envs") or {}),
             "server_launch_flags": str(config.get("server_launch_flags") or ""),
@@ -41,29 +85,26 @@ class LaunchIdentityMixin:
             "overlay_pythonpath": str(env_spec.get("overlay_pythonpath") or ""),
             "overlay_digest": str(env_spec.get("overlay_digest") or ""),
         }
-        # Keep legacy identities unchanged for launches with default controls.
+        # Keep legacy identities unchanged for launches with default controls and no frozen base.
         for key in ("remove_args", "unset_envs"):
             values = sorted(set(to_str_list(config.get(key))))
             if values:
                 payload[key] = values
         if str(config.get("args_mode") or "").strip().lower() == "replace":
             payload["args_mode"] = "replace"
+        if base_launch_digest := str(env_spec.get("base_launch_digest") or ""):
+            payload["base_launch_digest"] = base_launch_digest
         encoded = json.dumps(payload, sort_keys=True, separators=(",", ":")).encode("utf-8")
         return f"sha256:{hashlib.sha256(encoded).hexdigest()}"
-
-    @staticmethod
-    def _launch_recipe_digest(path: str) -> str:
-        """Hash the recipe content so an in-place recipe edit invalidates tput."""
-        try:
-            return hashlib.sha256(Path(path).read_bytes()).hexdigest()
-        except OSError:
-            return ""
 
     def _measurement_launch_flags(self, measurement: Mapping[str, Any]) -> str:
         """Read resolved launch flags only from the promoted measurement's evidence."""
         existing = str(measurement.get("resolved_server_launch_flags") or "").strip()
         if existing:
             return existing
+        launch = _measured_launch(measurement)
+        if launch is not None:
+            return _reproduced_flags(launch)
         evidence = measurement.get("launch_evidence")
         if isinstance(evidence, Mapping):
             observed = str(evidence.get("observed_server_launch_flags") or "").strip()
@@ -289,7 +330,6 @@ class LaunchIdentityMixin:
         *,
         measurement: Mapping[str, Any] | None = None,
         server_launch_flags: str | None = None,
-        server_launch_envs: Mapping[str, str] | None = None,
     ) -> dict[str, Any]:
         """Fully-reproducible descriptor of ``current_best``'s launch environment.
 
@@ -302,7 +342,10 @@ class LaunchIdentityMixin:
             (see :mod:`source_snapshot`) that reconstructs the patched framework
             tree independent of the mutable live checkout.
           * ``overlay_pythonpath`` — the authored-kernel overlay prefix.
-          * ``base_launch_recipe`` — the baseline Magpie recipe to launch from.
+          * ``launch_json`` and ``launch_digest`` — the ``launch.json`` of the round ``current_best`` was
+            measured in, and its digest; empty when that round left none.
+          * ``base_launch_digest`` — the digest of the session's frozen ``base_launch.json``, which the
+            ``config`` delta applies to.
 
         This is the single source of truth the GEAK handoff forwards so the
         baseline ref is materialized from the SAME layers as ``current_best``
@@ -311,23 +354,27 @@ class LaunchIdentityMixin:
         cb = self.shared_state.current_best
         materialized = self.current_best_launch_config()
         # ``extra_server_args`` remains the current_best delta; ``extra_envs`` is the
-        # current_best delta layered over any recipe launch environment (see below).
+        # current_best delta layered over the measured round's environment (see below).
         # Full engine flags must come from the same promoted measurement, not a
         # search over historical benchmarks with a similar throughput.
         if not isinstance(measurement, Mapping):
             measurement = self.shared_state.current_best_measurement
         if server_launch_flags is None:
             server_launch_flags = self._measurement_launch_flags(measurement)
-        recipe_path = str(self.shared_state.baseline_config_path or "")
+        launch = _measured_launch(measurement)
         env_spec = {
             "schema_version": 1,
             "config": {
                 "extra_server_args": materialized.get("extra_server_args") or "",
-                # A launch-time environment the recipe applied itself sits under
-                # the current_best delta, which wins on a shared name.
-                "extra_envs": {**dict(server_launch_envs or {}), **dict(materialized.get("extra_envs") or {})},
+                # The measured round's environment sits under the current_best delta, which wins on a shared name.
+                "extra_envs": {
+                    **(_reproduced_env(launch) if launch else {}),
+                    **dict(materialized.get("extra_envs") or {}),
+                },
                 "remove_args": list(materialized["remove_args"]),
-                "unset_envs": list(materialized["unset_envs"]),
+                "unset_envs": list(
+                    dict.fromkeys([*materialized["unset_envs"], *(_removed_env(launch) if launch else ())])
+                ),
                 "args_mode": materialized["args_mode"],
                 # Authoritative, COMPLETE engine flags (run-specific stripped);
                 # when unavailable, args_mode governs recipe inheritance.
@@ -339,10 +386,9 @@ class LaunchIdentityMixin:
             "source_snapshots": _source_snapshot_layers(cb.get("optimization_stack")),
             "overlay_pythonpath": materialized.get("final_overlay") or "",
             "overlay_digest": _geak_overlay_digest(str(materialized.get("final_overlay") or "")),
-            "base_launch_recipe": recipe_path,
-            "base_launch_recipe_digest": self._launch_recipe_digest(recipe_path),
-            # Backward-compatible alias for existing GEAK v2 consumers.
-            "launch_recipe": recipe_path,
+            "launch_json": str(RunLayout(Path(measurement["benchmark_workspace"])).launch) if launch else "",
+            "launch_digest": launch.digest() if launch else "",
+            "base_launch_digest": self.shared_state.base_launch_digest,
             # Additive evidence record. Consumers can distinguish a captured
             # launch from a declaration resolved without a new CLI line.
             "measurement_evidence": dict(measurement.get("launch_evidence") or {}),

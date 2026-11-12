@@ -60,7 +60,7 @@ The following variables configure filesystem paths for Hyperloom's runtime depen
 | Variable                                  | Required             | Default                                                            | Description                                                                                                                                                                          |
 |-------------------------------------------|----------------------|--------------------------------------------------------------------|--------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|
 | `REPO_ROOT`                               | No (recommended)     | `$(pwd)`                           | This Hyperloom checkout. Used to locate `.env`, skills, scripts. Falls back to the current working directory when unset.                                                                                                                     |
-| `INFERENCEX_PATH`                         | Conditional          | Auto-cloned by `install.sh`                                    | Path to the SemiAnalysisAI/InferenceX repo, used by baseline / target analysis. `install.sh` clones it when unset; only required if that auto-clone fails.                                                                                                                                          |
+| `INFERENCEX_PATH`                         | No                   | Unset                                                              | An InferenceX checkout of your own. The research scout reads reference launch scripts under its `benchmarks/single_node/`, and the session manifest records its commit. Benchmark rounds do not read it: they run the InferenceX client `install.sh` stages under `INFERENCE_SUITE_TOOL_CACHE`. Nothing clones it. |
 | `TRACELENS_ROOT`                          | No (installer auto-clones) | `${HYPER`<br>`LOOM_CA`<br>`CHE_DIR:-`<br>`$REPO_ROOT`<br>`/.cache}/Tr`<br>`aceLens@<resolved-sha>` (auto-clone of `AMD-AGI/TraceLens` pinned to a fixed SHA) | `src/hyperloom/inference_optimizer/assets/install_kernel_tools.sh` clones the public repo into the repo-local cache root when unset. Export it to opt into a pre-existing checkout you maintain — that is an explicit operator override and skips both the clone and the SHA pin. |
 | `GEAK_CLAUDE_BIN`                          | No (installer auto-resolves) | `$(command -v claude)` after the installer has put the Claude Code CLI on `PATH`; written to `kernel-agent.env.sh` | Pins the Claude Code binary the GEAK SDK path uses to the same CLI the specialists run, so `claude_agent_sdk` doesn't fall back to its older bundled CLI. Hyperloom's own agents also run it when `HYPERLOOM_CLAUDE_CLI_PATH` is unset. |
 | `HYPERLOOM_`<br>`CLAUDE_CLI_PATH`         | No | Unset | The Claude Code binary Hyperloom's agents run: the in-process backend and subprocess specialists alike. When unset they run `GEAK_CLAUDE_BIN`, then `claude` on `PATH`; the in-process backend leaves the choice to `claude_agent_sdk` only when none is found. |
@@ -71,11 +71,11 @@ The following variables configure filesystem paths for Hyperloom's runtime depen
 | `HYPERLOOM_`<br>`DOTENV_`<br>`CREDENTIALS` | No (written by the installer) | Unset | `kernel-agent-env` in a checkout's `.env` from which `install.sh` kept the Anthropic-side credentials (`ANTHROPIC_BASE_URL`, `ANTHROPIC_API_KEY`, `ANTHROPIC_CUSTOM_HEADERS`, `CLAUDE_CODE_OAUTH_TOKEN`) because another account can write it: the checkout directory (judged where it resolves to; for root, the account that owns it counts as its own) or `.env` is writable by its group or others, belongs to another account, or `.env` is a link, as a source directory bind-mounted from shared storage is. Such a `.env` carries none of them, since that account could read or rewrite them there: `install.sh` writes them into `KERNEL_AGENT_ENV` alone and removes any left in `.env`, with every other line such a `.env` does not lend (`.env` is rebuilt as a new mode-0600 file of the account that ran `install.sh`, holding only the lent assignments written afresh as `NAME=VALUE`, with no comment or blank line of the old file, and renamed over it; a link to a file is replaced, never written through, and a link to anything else removed). `install.sh` and preflight skip every credential line in such a `.env`, retired spellings included, and take the credentials from the shell, then `KERNEL_AGENT_ENV`. The line, which is no secret, keeps that so after `install.sh` has replaced a `.env` another account could write, in a directory of this account's, with one of this account's own; the next install of that now-private checkout persists the credentials in `.env` as before and removes the line. See [A checkout another account can write](authentication.md#a-checkout-another-account-can-write). |
 | `INFERENCE_`<br>`OPTIMI`<br>`ZER_CU`<br>`RRENT_S`<br>`ESSION_DIR` | No (set by CLI) | Set at session boot | Absolute path to the active session directory. Written by the CLI when a session starts and inherited by every benchmark subprocess; session-path resolution prefers it over scanning `USER_DATA_PATH`. Do not set by hand. |
 | `HYPERLOOM_ROOT`                          | No                   | `$HYPER`<br>`LOOM_R`<br>`UNTIME_`<br>`DIR/sou`<br>`rce-mirrors`                            | Legacy source-mirror root kept for compatibility. Current open-source dependency checkouts default to the repo-local cache root (`${HYPER`<br>`LOOM_CA`<br>`CHE_DIR:-`<br>`$REPO_ROOT`<br>`/.cache}`), not this path. |
-| `HYPERLOOM`<br>`_CACHE_`<br>`DIR`                          | No                   | `$REPO_ROOT`<br>`/.cache`                      | Writable, repo-local base for auto-cloned open-source deps (TraceLens, Magpie, etc.), cloned per revision as `<name>@<sha>`. Not under `$TMPDIR` so a reaper cannot wipe it mid-run. |
+| `HYPERLOOM`<br>`_CACHE_`<br>`DIR`                          | No                   | `$REPO_ROOT`<br>`/.cache`                      | Writable, repo-local base for auto-cloned open-source deps (TraceLens, GEAK, etc.), cloned per revision as `<name>@<sha>`. Not under `$TMPDIR` so a reaper cannot wipe it mid-run. |
 | `KERNELFORGE`<br>`_PROJECT_`<br>`ROOT`              | No                   | `$USER_DATA_PATH/kernelforge`, else `~/.cache/hyperloom/kernelforge` | Writable root for forge's own state and for resource-tree overrides. Holds the learned knowledge base (`knowledge_base/<backend>/learned/`), the tuning DB, postmortems and `forge_experiments/`. An `examples/` directory placed here overrides the copy packaged inside `kernelforge`, which is the supported way to try a task without editing site-packages. Must be writable: it deliberately never resolves to the installed package directory or to the cwd. **This is the replacement for the removed `FORGE_PATH`**, which nothing reads any more — a stale `FORGE_PATH` is still forwarded (the `FORGE_` prefix is on the dotenv allowlist) and then ignored. |
 | `SKIP_FORGE`<br>`_PROFILING`               | No                   | Unset (the extra is installed) | Set to `1` to make `install.sh` skip `pip install -e "$REPO_ROOT[forge-profiling]"`. That extra is rocprof-compute's own dependency set (~20 wheels, including the exact `kaleido==0.2.1` / `astunparse==1.6.2` pins ROCm 7.2.x requires); without it forge's profiler degrades to the lightweight PMC path instead of System Speed-of-Light + roofline. Installed by default on purpose — the previous gate made this a silent skip on every pod. |
 | `ROCPC_VENV`                               | No                   | `/opt/rocprof-compute-venv` | Private venv that rocprof-compute's analyze mode runs in, created by `install.sh` from the tool's own `requirements.txt` so its exact pins cannot displace the serving image's numpy and pandas. `rocpc_profile.py` derives the same path. Without the venv, analyze degrades and profiling still collects. |
-| `MAGPIE_PATH`                              | No                   | Resolved from installed `Magpie` package unless explicitly set                               | Magpie package root for benchmark wrappers and patch inspection.                                                                                                                                            |
+| `INFERENCE_SUITE_TOOL_CACHE`               | No                   | `${HYPERLOOM_CACHE_DIR:-$REPO_ROOT/.cache}`<br>`/inference-suite-tools`                                               | Tool cache `install.sh` stages the pinned InferenceX client, GSM8K task and AgentX harness into; every benchmark round reads it and fetches nothing. See [Staging and pins](inference-suite.md#staging-and-pins). |
 | `HYPERLOOM_`<br>`RULE_PACK` | No | Unset (the pack shipped with the package) | Path to the rule pack, the YAML file that states the facts about projects outside this repository (aiter, SGLang, vLLM, PyTorch, the HIP runtime, argparse, Transformers, InferenceX log markers and variable names) that `hyperloom.common.outside_facts` binds for its readers. Read once, at the first import of `hyperloom.common.outside_facts` in each process. An empty or blank value raises `RulePackError`; unset it to read the shipped pack. A path that cannot be read, or a pack that fails validation, fails the import of every reader (`visible_devices`, `failure_signature`, ...) with the file and the entry named; nothing falls back to the shipped pack. A relative path resolves against each process's own working directory. Child processes inherit the variable, so a value that is valid on the host but names a file that is missing in a sandbox or container makes every process there fail at import. |
 | `HYPERLOOM_`<br>`IMAGE_CHECK` | No | `warn` | What `run_image_check` (in `hyperloom.common.outside_facts.image_check`), which checks the rule pack's facts against the environment once before a session measures anything, does with a fact that does not hold there: `warn` logs one warning naming each failing fact, its project and why, and goes on; `strict` also raises `ImageCheckFailed`, so the session stops before it spends anything; `off` checks nothing and asks the environment for nothing. Surrounding space and case are ignored; any other value raises `ValueError` naming the accepted ones. `python -m hyperloom.common.outside_facts.image_check` does not read it: the command line always checks, records `strict` in its report and exits 1 when a fact fails. |
 | `INFERENCE_`<br>`OPTIMI`<br>`ZER_SES`<br>`SION_DIR` | No (multi-node) | Unset | Last-resort session root for multi-node crash-log collection. Point it at one session dir, never at `$USER_DATA_PATH`. |
@@ -110,11 +110,14 @@ when `--gpu-type` is omitted.
   (refused on a scriptable one, which runs no server to sample), and
   `--max-per-gpu-power-w GPU_ID W` (repeatable) adds a limit for one card; the
   per-GPU limits must add up to no more than the total. That power is sampled
-  by Hyperloom over the measured phase into each round's `gpu_power.json`;
+  by Hyperloom over the measured window into each round's `power.json`;
   `HYPERLOOM_GPU_POWER_SAMPLING=0` turns the sampler off (the round then falls
   back to the benchmark report's reading, and either power budget is refused at
   launch, since it could not be measured) and `HYPERLOOM_GPU_POWER_INTERVAL_S`
-  sets its cadence (default 2 s, minimum 0.5 s).
+  sets the cadence of its sysfs reads (default 1 s; below 0.5 s it is raised to
+  0.5 s; above 1.5 s it is refused and the round samples nothing, since a late
+  read can put two samples two intervals apart and a gap over 3 s invalidates the
+  window's energy).
 - **GPU power settings:** `--gpu-power-cap-w`, `--gpu-perf-level`,
   `--gpu-sclk-max-mhz`. By default asserted: set them with `amd-smi set` before
   launch; the session refuses to start or resume if a card it uses differs, and
@@ -183,7 +186,7 @@ throughput-only measurement.
 |----------|---------|-------------|
 | `HYPERLOOM_QUALITY_REF`<br>`HYPERLOOM_QUALITY_REF_WRITE` | Derived under the session dir | The scriptable quality gate's reference artifact: `_WRITE` establishes it on the baseline, the other compares against it on every later candidate. What the artifact holds is the workload's own business — xDiT stores an image, an operator-supplied `custom` workload stores whatever its script compares. Also emitted as `XDIT_QUALITY_REF` / `XDIT_QUALITY_REF_WRITE` for bench scripts written before the rename; either name is read, both are written. |
 | `INFERENCE_OPTIMIZER`<br>`_REQUIRE_KERNEL`<br>`_ACCURACY` | On | Gates the `KEEP` for a kernel patch integrated by the kernel lane. Set to `0` / `false` / `no` / `off` to fall back to a throughput-only `KEEP`. Disable only when the eval lane is known-broken: this gate is what stops a faster-but-wrong kernel from being kept. |
-| `MAGPIE_EVAL_LIMIT` | Unset (full task set) | Caps the number of eval problems (`lm_eval --limit`). Useful for smoke runs; see the noise caveat below before using it on a run whose `KEEP` decisions matter. |
+| `HYPERLOOM_EVAL_LIMIT` | Unset (full task set) | Caps the number of eval problems (`lm_eval --limit`). Useful for smoke runs; see the noise caveat below before using it on a run whose `KEEP` decisions matter. |
 
 The tolerance is deliberately **not** an env knob: `ACCURACY_THRESHOLD` in
 `src/hyperloom/common/gain_math.py` is a fixed
@@ -193,7 +196,7 @@ baseline accuracy.
 Note that the score is measured once per candidate, not averaged over repeats.
 On a full GSM8K run (1319 problems) the 5-point tolerance sits several standard
 errors away from the baseline, so single-run noise does not trip it. Capping the
-eval with a small `MAGPIE_EVAL_LIMIT` shrinks that margin sharply and can make
+eval with a small `HYPERLOOM_EVAL_LIMIT` shrinks that margin sharply and can make
 the gate noise-sensitive — prefer the full task set whenever a gate decision
 depends on the result.
 
@@ -201,42 +204,39 @@ depends on the result.
 
 InferenceX runs lm-eval with `max_tokens=min(16384, ctx-4096)`, so a sample that
 does not converge spends that entire budget, and 1319 of them can consume the
-whole baseline timeout. Every generation request is therefore capped, and the
-terminators the model declares are supplied with it — lm-eval carries a single
-`eos_string` and its concurrent request path does not send even that one, so a
-model like Qwen3, which declares `eos_token_id` `[151645, 151643]`, would
-otherwise run with no end-of-turn stop condition at all.
+whole baseline timeout. Every generation is therefore given at most
+`HYPERLOOM_EVAL_MAX_TOKENS` tokens, and never more than the served context
+leaves after 4096 tokens of prompt room (half the context when it is no larger);
+a launch whose context is unknown is refused with `eval_context_too_short`. Generation also stops on every
+terminator the model's `generation_config.json` and `tokenizer_config.json`
+declare — lm-eval's concurrent request path sends none, so a model like Qwen3,
+which declares `eos_token_id` `[151645, 151643]`, would otherwise run with no
+end-of-turn stop condition at all. The task's own stop strings keep their place
+ahead of the model's, since its answer extraction depends on them, and the first
+four are sent; stop token ids have no such limit.
 
-Both are applied inside the eval process rather than passed in, which is what
-keeps them equal across the baseline and candidate arms. **That symmetry is the
-whole point**: the gate compares a *difference* of two scores, so a bound or a
-terminator that reaches only one arm biases the verdict instead of merely
-limiting it. Prefer leaving these alone; if you do change one, change it for the
-whole session rather than a single round.
+A truncation probe counts the generations cut at the token limit. Once their
+share reaches the probe's ratio after its minimum samples, every remaining
+generation is answered empty instead of being sent, so a model that does not
+terminate scores near 0 instead of running the eval out. The round's
+`eval/hyperloom_eval_probe.json` records whether it tripped, how many samples it
+saw and the share cut; check it before concluding a score is low for any other
+reason.
 
-Each run reports what it applied, to stderr as `HYPERLOOM_EVAL_BOUNDS_SUMMARY`
-and to `hyperloom_eval_bounds.json` in the result dir, including how many
-generations hit the ceiling. Check `truncated` there before concluding a score
-is low for any other reason.
+All of these are part of the eval's definition, which keeps them equal across the
+baseline and candidate arms. **That symmetry is the whole point**: the gate
+compares a *difference* of two scores, so a bound that reaches only one arm biases
+the verdict instead of merely limiting it. Prefer leaving these alone; if you do
+change one, change it for the whole session rather than a single round. They are
+read from the benchmark point's environment (`--extra-env`); a number that does not
+parse refuses the round.
 
 | Variable | Default | Description |
 |----------|---------|-------------|
-| `HYPERLOOM_EVAL_MAX_TOKENS` | `4096` | Per-request generation ceiling. Never raises a lower ceiling a task already asked for. `0` disables the cap and restores the full upstream budget — a degenerate model then costs the whole timeout again. An unparseable value falls back to the default rather than to "unbounded". |
-| `HYPERLOOM_EVAL_DERIVE_STOP` | On | Whether to read the model's `generation_config.json` / `tokenizer_config.json` for its terminators. Resolution is cache-only and never downloads, so an uncached repo id simply derives nothing. Set to `0` / `false` / `no` / `off` to reproduce an upstream number exactly, or for a server that rejects `stop_token_ids` (vLLM and SGLang both accept it). |
-| `HYPERLOOM_EVAL_STOP_STRINGS` | Unset (derived) | Explicit terminators, separated by ASCII unit separator `0x1f` — commas and newlines are themselves legitimate stop strings. Outranks the derived values; use it when a checkpoint's metadata is absent or wrong. |
-
-Set explicit terminators like this, quoting so the separator is a real `0x1f`
-byte:
-
-```bash
-export HYPERLOOM_EVAL_STOP_STRINGS=$'<|im_end|>\x1f<|endoftext|>'
-```
-
-Upstream keeps at most four stop strings, and the task's own `until` list is what
-its answer extraction depends on, so that list is never displaced: an explicit
-`HYPERLOOM_EVAL_STOP_STRINGS` goes first, the task's list next, and derived
-terminators last. Derived token ids travel separately as `stop_token_ids`, which
-has no such limit, so nothing is lost on a server that supports it.
+| `HYPERLOOM_EVAL_MAX_TOKENS` | `4096` | Per-generation token ceiling, a positive integer. |
+| `HYPERLOOM_EVAL_PROBE` | On | Set to `0` / `false` / `no` / `off` to let every generation run to its ceiling. |
+| `HYPERLOOM_EVAL_PROBE_MIN_SAMPLES` | `128` | Generations the probe counts before it may trip. |
+| `HYPERLOOM_EVAL_PROBE_LENGTH_RATIO` | `0.75` | Share of generations cut at the ceiling that trips the probe. |
 
 ---
 
@@ -532,13 +532,22 @@ result, and restores the card's entry mode on the way out.
 
 ```bash
 # what it would do, nothing set
-python3 scripts/partition_mode_sweep.py --benchmark-config bench.yaml --dry-run
+python3 scripts/partition_mode_sweep.py --suite-config round.yaml --dry-run
 
 # sweep every mode the card reports, skipping any that cannot hold the workload
 python3 scripts/partition_mode_sweep.py \
-    --benchmark-config bench.yaml --output-dir /shared/sweep \
+    --suite-config round.yaml --output-dir /shared/sweep \
     --per-stream-gib 20.7 --sudo
 ```
+
+Each partition runs the `--suite-config` inference_suite round (`inference-suite-config/1`)
+into its own run_dir, on that partition's HIP device and on the config's port plus the
+partition index, with GPU telemetry off because `amd-smi` indices are not HIP indices.
+The config must serve on one GPU, own its server, not profile, and not let the server
+inherit a GPU mask; anything else is refused before the card is touched. A
+`--benchmark-command` must leave an inference_suite run_dir at `{run_dir}`: every
+partition is measured from its `report.json`, and a round that is not a valid
+measurement leaves its mode unmeasured.
 
 The fan-out is the point rather than a detail: a benchmark that loads one
 partition and ignores the rest measures a fraction of the card, which makes
@@ -669,10 +678,7 @@ operator may later explicitly use `--resume-from` on the same session.
 Historical stop reasons remain interpretable and are not restart requests.
 
 `PYTHONUNBUFFERED=1` affects Python output only, not shell/native buffering or
-upstream subprocess capture. Active logs do not prove useful progress. The
-Magpie streaming fix is local-only and unpublished; the installed dependency pin
-must not be assumed to include it, and this policy is not evidence of a validated
-end-to-end run.
+upstream subprocess capture. Active logs do not prove useful progress.
 
 Profile, KernelForge, GEAK, LLM-call, and SGLang's own watchdog budgets are separate
 from these benchmark limits and retain their existing contracts.
@@ -1196,8 +1202,8 @@ output tokens per request, so output-only grading optimises about 1% of the
 token budget, and a variant can lift decode tok/s while degrading user-perceived
 latency with no visible cost.
 
-`HYPERLOOM_AGENTX=1` (native YAML generated from Hyperloom flags), or an explicit
-Magpie AgentX YAML passed with `--benchmark-config`, adopts the 2-D grading shape InferenceX uses. Upstream
+`HYPERLOOM_AGENTX=1` (workload YAML generated from Hyperloom flags), or an explicit
+AgentX YAML passed with `--benchmark-config`, adopts the 2-D grading shape InferenceX uses. Upstream
 sweeps a concurrency ladder, keeps TTFT / ITL / TPOT percentiles separately, and
 publishes a **Pareto frontier** with E2E normalised interactivity as the x-axis
 and token throughput per chip as the y-axis. It never collapses the axes into one
@@ -1208,17 +1214,19 @@ throughput moves along the frontier rather than violating a rule.
 Hyperloom's local KEEP rule (fixed concurrency, no ladder) approximates the
 per-concurrency arm selection maintainers apply before submitting:
 
-- **KEEP** — E2E normalised interactivity P50 (median) gain ≥ 3%, **and** the P90
-  slow tail and output throughput each no worse than the noise band, **and** the
+- **KEEP** — E2E normalised interactivity P50 (median) gain ≥ 2%, **and** the P90
+  slow tail and total token throughput each no worse than the noise band, **and** the
   pair is comparable: benchmark windows within 5% of each other and no more failed
   requests than the anchor.
 - **REVERT** — anything short of all of that.
 
-The median bar is the fixed `AGENTX_KEEP_P50_THRESHOLD_PCT` (3%), not
-`keep_threshold_pct`: it is a property of the objective rather than of how far
-into the session a round lands, so the decaying session threshold does not apply
-to it. Total token throughput no longer participates in the verdict — on this
-corpus it is almost entirely prefill, so it cannot see an output collapse.
+The median bar is the P50 objective's fixed `bar_pct` in
+`hyperloom.common.agentx_objective` (2%, the same bar and guards
+`hyperloom-multibranch` applies), not `keep_threshold_pct`: it is a property of
+the objective rather than of how far into the session a round lands, so the
+decaying session threshold does not apply to it. Output throughput is recorded
+but guards nothing: it follows the replayed window's output-length mix, not the
+server.
 
 Hyperloom reads `e2e_norm_intvty_p90` from the accepted `current_best` for both
 grading and advisory comparison. This is aiperf's summary **P10** of the
@@ -1232,25 +1240,30 @@ TTFT is included in E2EL, unlike per-user `1/ITL`; on a ~114k-prompt replay TTFT
 is most of what a user waits for so grading on `1/ITL` would miss it.
 
 Default-on for AgentX runs, explicit opt-in via `HYPERLOOM_PERF_METRIC=intvty_v1`
-otherwise. Any AgentX signal turns it on: `HYPERLOOM_AGENTX=1`, the bound Magpie YAML, or
+otherwise. Any AgentX signal turns it on: `HYPERLOOM_AGENTX=1`, the bound AgentX YAML, or
 `benchmark_mode=agentx` stamped at seed — so a round in a subprocess that never
 inherited the env var still grades on the agentic axis. Serving frameworks only;
 scriptable frameworks (xDiT, custom) keep output-throughput grading.
 
 | Variable                       | Default                       | Description                                                                                                                                                                                       |
 |--------------------------------|-------------------------------|---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|
-| `HYPERLOOM_PERF_METRIC`        | `intvty_v1` for Magpie AgentX, else output tput | `intvty_v1` grades E2E normalised interactivity P50 (median) as the primary objective, with the P90 slow tail and output throughput each held as a guard. Reported in the final summary as `grading mode`. |
-| `HYPERLOOM_PERF_NOISE_PCT`     | `5.0`                         | Noise band in percent applied to the guards. A candidate whose slow tail or output throughput sits within this band of the anchor is not considered worse on that axis; the median has its own fixed bar and is not subject to the band. The default is the top of the 1–5% run-to-run noise upstream records for this workload. An unparseable value raises `EnvValueError` naming the variable, rather than grading against a band nobody chose. |
-| `HYPERLOOM_AGENTX_EARLY_STOP`  | `enforce`                     | AgentX checkpoint after 1800 s of profiling: the round's median interactivity over the requests finished by then, against the reference's own first 1800 s. The ruling is written to `agentx_checkpoint.json` in the round's slot. `enforce` stops an explore decision round that trails by more than 2% and records it as REVERT; `shadow` only writes the ruling; `off` skips the checkpoint. Any other value raises `EnvValueError`. A reference measured without a checkpoint median is never compared. |
+| `HYPERLOOM_PERF_METRIC`        | `intvty_v1` for AgentX, else output tput | `intvty_v1` grades E2E normalised interactivity P50 (median) as the primary objective, with the P90 slow tail and total token throughput each held as a guard. Reported in the final summary as `grading mode`. |
+| `HYPERLOOM_PERF_NOISE_PCT`     | `5.0`                         | Noise band in percent applied to the guards. A candidate whose slow tail or total token throughput sits within this band of the anchor is not considered worse on that axis; the median has its own fixed bar and is not subject to the band. The default is the top of the 1–5% run-to-run noise upstream records for this workload. An unparseable value raises `EnvValueError` naming the variable, rather than grading against a band nobody chose. |
+| `HYPERLOOM_AGENTX_EARLY_STOP`  | `enforce`                     | AgentX checkpoint after 1800 s of profiling: the round's median interactivity over the requests finished by then, against the reference's own first 1800 s. The ruling is written to `agentx_checkpoint.json` in the round's slot. `enforce` stops an explore decision round that trails by more than 2% and records it as REVERT; `shadow` only writes the ruling; `off` skips the checkpoint. Any other value raises `EnvValueError`. A reference measured without a checkpoint median is never compared. `hyperloom-multibranch run` reads it once at session start with `shadow` as its default, keeps the mode in `MB-manifest.json`, and judges only explore tests under `p50_interactivity`; see [Run a multi-branch session](../how-to/run-multibranch.md#environment). |
 | `INFERENCE_OPTIMIZER_BASELINE_SERVER_READY_SEC` | `7200` | Initial server-boot budget written by the persistent-server lifecycle configuration helper. Actual benchmark launches synchronize this field to `INFERENCE_OPTIMIZER_BENCHMARK_TIMEOUT_SEC`; this variable is not an additional benchmark deadline or a way to extend one. Non-benchmark lifecycle callers that do not perform that synchronization retain their own boot budget. |
 
 ### MLPerf agentic backend
 
-`HYPERLOOM_AGENTIC_BACKEND=mlperf` (with `HYPERLOOM_AGENTX=1`) keeps Magpie's
-server lifecycle and swaps the AgentX client for the MLCommons
-`inference-endpoint` harness (`utility/run_agentic.sh`), replaying
-`agentic_combined_v6` trajectories instead of aiperf Weka traces. The backend is
-recorded at seed; resuming a session under the other backend is refused.
+`HYPERLOOM_AGENTIC_BACKEND=mlperf` (with `HYPERLOOM_AGENTX=1`) swaps the
+AgentX client for the MLCommons `inference-endpoint` harness
+(`utility/run_agentic.sh`), replaying `agentic_combined_v6` trajectories instead
+of aiperf Weka traces. Each round runs on inference_suite: it serves the
+session's frozen base launch (golden layer included) and runs the harness from
+`MLPERF_ENDPOINTS_DIR` as the round's load, then maps the harness's
+`result_summary.json` and `scores.json` into the run directory's
+`client/inferencex_result.json`. A session that froze no base launch is refused
+at preflight. The backend is recorded at seed; resuming a session under the
+other backend is refused.
 
 The harness publishes no per-request OSL/E2EL series, so MLPerf sessions grade
 on **output throughput** (`HYPERLOOM_PERF_METRIC` is not honoured here) and gate
@@ -1267,13 +1280,12 @@ submission is not run by Hyperloom: run `run_agentic.sh full` and upstream
 The AgentX switch pins `PORT=30000`, `MLPERF_AGENTIC_MODEL=kimi-k3` and
 `--served-model-name kimi-k3`, and settles `MLPERF_AGENTIC_FLOW`,
 `AGENTIC_NUM_TRAJECTORIES` and `AGENTIC_CONCURRENCY` (from the round's `CONC`)
-into the recipe. The client refuses to start if port 30000 is already
-answering, checks that the listener belongs to the server it booted, and checks
-`/v1/models` lists `kimi-k3`.
+into the recipe. The round's server serves under `kimi-k3`, the name the
+harness requests, on the round's `PORT`, which the harness is given.
 
 | Variable | Default | Description |
 |---|---|---|
-| `HYPERLOOM_AGENTIC_BACKEND` | — | `mlperf` selects the separate MLPerf client together with `HYPERLOOM_AGENTX=1`. Otherwise `HYPERLOOM_AGENTX=1` selects native Magpie AgentX; an explicit Magpie AgentX YAML also selects it. |
+| `HYPERLOOM_AGENTIC_BACKEND` | — | `mlperf` selects the separate MLPerf client together with `HYPERLOOM_AGENTX=1`. Otherwise `HYPERLOOM_AGENTX=1` selects native AgentX; an explicit AgentX YAML also selects it. |
 | `MLPERF_ENDPOINTS_DIR` | `/opt/mlperf-endpoints` | Checkout of `mlcommons/endpoints` holding `utility/run_agentic.sh`. Checked at preflight. |
 | `AGENTIC_DATASET_PATH` | — (required) | Path to `agentic_combined_v6.jsonl`. Checked at preflight; its stem is recorded as the corpus. |
 | `MLPERF_TOKENIZER_DIR` | — (required) | Kimi-K3 fast-tokenizer directory the harness counts tokens with. Checked at preflight. |
@@ -1287,15 +1299,15 @@ defaults to `trajectories × 26 s × 2 + 1800 s` (26 s per trajectory measured o
 8×MI355X at concurrency 16, doubled for a cold first round, plus boot), and never
 below the stock 7800 s: about 9600 s for smoke and 33,700 s for `full`.
 
-With `HYPERLOOM_AGENTX=1`, Hyperloom generates and archives the native Magpie YAML
+With `HYPERLOOM_AGENTX=1`, Hyperloom generates and archives the AgentX workload YAML
 from its ordinary workload flags. `--docker-image` supplies an explicit serving
 image identity, required for custom models.
 
 Canonical replay warms up 11 requests per lane plus one probe before it opens its
 fixed profiling window, so its round grows with the concurrency being measured
-while the window does not. That shape is Magpie's, at the ref native AgentX pins
-it to (see [Magpie](../components/magpie.md)); Hyperloom composes only `CONC`, and
-the numbers below have to be re-measured when the pin moves. With
+while the window does not. That shape is fixed by `CANON_WARMUP_PER_LANE` and
+`CANON_PROFILING_WINDOW_SEC` in `hyperloom.common.agentx_workload`; Hyperloom
+composes only `CONC`, and the numbers below have to be re-measured when either moves. With
 `INFERENCE_OPTIMIZER_BENCHMARK_TIMEOUT_SEC` unset and a `CONC` pinned, the cap
 defaults to `(11 × CONC + 1) × 20 s + 3640 s + 300 s + 1800 s` (20 s per warmup
 request, sized to the slowest rung of one 8×MI355X sweep -- 18.8 s at `CONC` 20 --
@@ -1312,17 +1324,14 @@ refuses (`HYPERLOOM_AGENTX=maybe`) is recorded as failed with error class
 `benchmark_cap_error` and the sweep carries on with the next rung.
 
 Native AgentX profiling shares TraceLens patch and kernel-shape-tool preparation with
-fixed-sequence profiling. Configure capture steps, count, delay and interval through
-`benchmark.profiler.torch_profiler` (`num_steps`, `num_profiles`, `start_seconds`,
-`interval_seconds`). The diagnostic copy preserves those settings and explicit
-`detailed_annotations`. When profiling is enabled, a missing capture setting becomes
-one capture of 256 steps, starting 300 seconds after measurement, with a 900-second
-interval. A missing `detailed_annotations` becomes true, and false when the TraceLens
-runtime patch was attempted and did not apply: Magpie probes the server whenever the field
-is true and refuses to launch when the server lacks it.
-Hyperloom adds the shape-tool environment through `agentx.launch_overrides` while
-preserving the server's runtime paths. Magpie owns profiling flags, starts after replay
-reaches measurement, and manages capture/flush. Each window remains a separate TraceLens input.
+fixed-sequence profiling. Configure capture steps and delay through
+`benchmark.profiler.torch_profiler` (`num_steps`, `start_seconds`); a missing setting
+becomes one capture of 256 steps, starting 300 seconds after measurement. A profile round
+captures one window, so a YAML whose `num_profiles` is not 1 is refused when the session
+starts. A profile round adds the profiler layer and the shape-tool
+environment to the round's launch, preserving the server's runtime paths, and opens its
+capture window once the replay reaches measurement. InferenceSuite owns the profiler
+flags and the capture and flush; each window remains a separate TraceLens input.
 Profile reports are diagnostic only and cannot supply KEEP evidence.
 See [Optimize an AgentX workload](../how-to/optimize.md#optimize-an-agentx-workload).
 
@@ -1365,7 +1374,7 @@ A hosted run is configured by the host that launches it. `src/hyperloom/hosted/h
 it checks them once at start-up and names **every** missing or malformed variable in one error (variable names and reasons, never
 values), so a bad input stops the run before it starts. Which variables are required depends on what the run hosts; the run, state
 and input variables are always required except for a session started by hand on a grant handed to it
-(`hyperloom-multibranch run --measurement hosted`, a command that lands with the multi-branch CLI), which needs the sandbox URLs and templates, `HYPERLOOM_SANDBOX_KEY_MEASUREMENT`,
+(`hyperloom-multibranch run --measurement hosted`), which needs the sandbox URLs and templates, `HYPERLOOM_SANDBOX_KEY_MEASUREMENT`,
 `HYPERLOOM_GRANT_LIMITS` (all four totals: a multi-branch session refuses a grant that states only some of them),
 `HYPERLOOM_RUN_CREATED_AT` and the source pair. A variable that is set is checked even when it is not
 required.

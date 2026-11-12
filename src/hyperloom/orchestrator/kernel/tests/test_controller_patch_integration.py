@@ -40,6 +40,10 @@ _GIT_IDENTITY = {
 }
 
 
+#: What the report mapper stamps on every AgentX round it accepts as evidence.
+_AGENTX_EVIDENCE = {"valid_measurement": True, "diagnostic_only": False, "workload_identity": "agentx-workload"}
+
+
 @pytest.fixture(autouse=True)
 def _grading_follows_the_session(monkeypatch: pytest.MonkeyPatch) -> None:
     """Grade on the session's own ``benchmark_mode``, not on the shell's."""
@@ -1441,6 +1445,7 @@ async def test_a_keep_carries_the_axes_of_the_measurement_it_was_graded_on(
                 "e2e_norm_intvty_p50": 40.0,
                 "duration_seconds": 900.0,
                 "request_error_rate": 0.0,
+                **_AGENTX_EVIDENCE,
                 "ttft_mean_ms": 55.0,
             },
         }
@@ -1460,6 +1465,7 @@ async def test_a_keep_carries_the_axes_of_the_measurement_it_was_graded_on(
         "e2e_norm_intvty_p50": 30.0,
         "duration_seconds": 900.0,
         "request_error_rate": 0.0,
+        **_AGENTX_EVIDENCE,
         "ttft_mean_ms": 90.0,
     }
 
@@ -1519,6 +1525,7 @@ async def test_an_agentx_keep_validates_its_gain_on_the_axis_it_was_graded_on(
                 "e2e_norm_intvty_p50": 42.0,
                 "duration_seconds": 900.0,
                 "request_error_rate": 0.0,
+                **_AGENTX_EVIDENCE,
             },
         }
 
@@ -1535,6 +1542,7 @@ async def test_an_agentx_keep_validates_its_gain_on_the_axis_it_was_graded_on(
         "e2e_norm_intvty_p50": 30.0,
         "duration_seconds": 900.0,
         "request_error_rate": 0.0,
+        **_AGENTX_EVIDENCE,
     }
     state.current_best = {
         "action": "baseline",
@@ -1546,6 +1554,7 @@ async def test_an_agentx_keep_validates_its_gain_on_the_axis_it_was_graded_on(
         "e2e_norm_intvty_p50": 30.0,
         "duration_seconds": 900.0,
         "request_error_rate": 0.0,
+        **_AGENTX_EVIDENCE,
     }
 
     summary = await _integrate(
@@ -1602,6 +1611,7 @@ async def test_a_keep_measured_below_the_anchor_does_not_lower_current_best(
                 "e2e_norm_intvty_p50": 30.0,
                 "duration_seconds": 900.0,
                 "request_error_rate": 0.0,
+                **_AGENTX_EVIDENCE,
             },
         }
 
@@ -1620,6 +1630,7 @@ async def test_a_keep_measured_below_the_anchor_does_not_lower_current_best(
         "e2e_norm_intvty_p50": 40.0,
         "duration_seconds": 900.0,
         "request_error_rate": 0.0,
+        **_AGENTX_EVIDENCE,
     }
 
     summary = await _integrate(

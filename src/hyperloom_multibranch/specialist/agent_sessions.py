@@ -210,12 +210,14 @@ class AgentSessions:
 
     def _placed(self, holder: str, place: BranchPlace) -> AgentSpec:
         """The session's spec with ``holder``'s port block, which it keeps for the session, and the gate's client
-        aimed at its first port."""
+        aimed at its first port, staged in ``place``, with how long one measurement by it may take."""
 
         index = self._taken.setdefault(holder, len(self._taken))
         port = self.spec.port + index * PORTS_PER_AGENT
-        client = "" if self.client is None else self.client.command(port, place.workspace / AGENT_DIR / BENCH_DIR)
-        return replace(self.spec, port=port, client=client)
+        if self.client is None:
+            return replace(self.spec, port=port)
+        client = self.client.stage(port, place.workspace / AGENT_DIR / BENCH_DIR)
+        return replace(self.spec, port=port, client=client, client_seconds=self.client.seconds)
 
     def _sandbox(self, holder: str, place: BranchPlace) -> Callable[[BranchLease], AgentSandbox]:
         """The sandbox of a lease for ``holder`` in ``place``, the framework's source in its worktree imported first."""

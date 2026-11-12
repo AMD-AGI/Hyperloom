@@ -5,12 +5,7 @@
 
 from __future__ import annotations
 
-from hyperloom.orchestrator.bringup.argv_preflight import (
-    ARGV_INVALID,
-    argv_invalid_observation,
-    check_server_argv,
-    is_argv_invalid,
-)
+from hyperloom.orchestrator.bringup.argv_refusal import ARGV_INVALID, argv_invalid_observation, is_argv_invalid
 from hyperloom.orchestrator.bringup.env_preflight import (
     ENV_FAULT,
     EnvVerdict,
@@ -41,7 +36,6 @@ __all__ = [
     "EnvVerdict",
     "argv_invalid_observation",
     "check_environment",
-    "check_server_argv",
     "is_argv_invalid",
     "load_boot_observation",
     "observation_summary",

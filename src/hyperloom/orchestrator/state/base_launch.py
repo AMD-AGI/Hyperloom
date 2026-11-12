@@ -1,0 +1,149 @@
+# SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
+# SPDX-License-Identifier: MIT
+
+"""The one reader of the session's frozen base launch for the orchestrator.
+
+Every round's server starts from the base: its argv sits below the round's own args (last wins) and its environment
+below the round's envs. The base comes from ``base_launch.json`` and must be the one ``SharedState`` recorded by digest;
+a session that froze no base (a scriptable workload) starts from nothing. A round runs the client this install
+stages, which is keyed by the InferenceX pin, so a base whose client names another commit is refused rather than
+measured with one client and signed with the other.
+"""
+
+from __future__ import annotations
+
+from collections.abc import Mapping
+from dataclasses import dataclass, field
+from pathlib import Path
+from types import MappingProxyType
+
+from hyperloom.inference_optimizer.session.base_launch import base_launch_path, read_base_launch, write_base_launch
+from hyperloom.inference_optimizer.session.paths import session_dir
+from inference_suite import INFERENCEX_CLIENT_COMMIT, runner_owned
+from inference_suite.contracts import BaseLaunch, RunnerOwned
+
+from .shared_state import SharedState
+
+
+class BaseLaunchMismatch(RuntimeError):
+    """``base_launch.json`` is not the base the session recorded, or its client is off the InferenceX pin."""
+
+
+@dataclass(frozen=True)
+class ServerBase:
+    """The server half of the base, its golden layer last: argv as one string and the environment a launch may set.
+
+    A redacted value is a credential the runner fills from its host and stays in ``base_launch.json``; every other
+    setting is served as the base holds it, which the freeze already held to what a launch may take from a source.
+    """
+
+    args: str = ""
+    env: Mapping[str, str] = field(default_factory=lambda: MappingProxyType({}))
+
+
+def server_argv(base: BaseLaunch) -> tuple[str, ...]:
+    """The server argv of ``base`` word by word, its golden layer last."""
+    golden = base.golden_al
+    return (*base.args, *golden.args) if golden is not None else base.args
+
+
+def server_base(base: BaseLaunch) -> ServerBase:
+    """The server half of ``base`` as a launch is seeded with: its argv and its environment but the redacted values."""
+    golden = base.golden_al
+    args = server_argv(base)
+    layers = {**base.env, **golden.env} if golden is not None else base.env
+    env = {name: value for name, value in layers.items() if isinstance(value, str)}
+    return ServerBase(args=" ".join(args), env=MappingProxyType(env))
+
+
+@dataclass(frozen=True)
+class FrozenBase:
+    """The session's base launch and the file it is frozen in, which a suite config names by path and digest."""
+
+    path: Path
+    launch: BaseLaunch
+
+
+def frozen_session_base() -> FrozenBase | None:
+    """The current session's frozen base, ``None`` when it froze none.
+
+    Raises:
+        BaseLaunchMismatch: The file and the digest the session recorded disagree, or the base's client is off the
+            InferenceX pin.
+    """
+    return frozen_base(session_dir())
+
+
+def frozen_base(session: Path) -> FrozenBase | None:
+    """The frozen base of the session at ``session``, ``None`` when it froze none.
+
+    Raises:
+        BaseLaunchMismatch: The file and the digest the session recorded disagree, or the base's client is off the
+            InferenceX pin.
+    """
+    recorded = SharedState.load_or_init(session).base_launch_digest
+    base = read_base_launch(session)
+    found = base.digest() if base is not None else ""
+    if found != recorded:
+        raise BaseLaunchMismatch(
+            f"{base_launch_path(session)} has digest {found or '(no file)'} but the session recorded "
+            f"{recorded or '(none)'}; the session's base launch changed after it was frozen"
+        )
+    if base is not None and base.client is not None and base.client.commit != INFERENCEX_CLIENT_COMMIT:
+        raise BaseLaunchMismatch(
+            f"{base_launch_path(session)} was frozen with the InferenceX client at {base.client.commit}, but this "
+            f"install pins {INFERENCEX_CLIENT_COMMIT}; start a new session to measure with the pinned client"
+        )
+    return None if base is None else FrozenBase(base_launch_path(session), base)
+
+
+def freeze_base(session: Path, base: BaseLaunch) -> FrozenBase:
+    """Freeze ``base`` as the base of the session at ``session``: its ``base_launch.json`` and the digest its state
+    records, so :func:`frozen_base` reads it back."""
+    path = write_base_launch(session, base)
+    state = SharedState.load_or_init(session)
+    state.base_launch_digest = base.digest()
+    state.save(session)
+    return FrozenBase(path, base)
+
+
+def session_cards(session: Path, tp: int) -> int:
+    """The GPUs a launch at ``tp`` of the session at ``session`` occupies: its frozen base's cards, ``tp`` when it
+    froze none.
+
+    Raises:
+        BaseLaunchMismatch: As :func:`frozen_base`.
+    """
+    frozen = frozen_base(session)
+    return tp if frozen is None else frozen.launch.cards
+
+
+def session_runner_owned(session: Path) -> RunnerOwned:
+    """What the runner sets on every round of the session at ``session``, nothing when it froze no base.
+
+    Raises:
+        BaseLaunchMismatch: As :func:`frozen_base`.
+    """
+    frozen = frozen_base(session)
+    return RunnerOwned() if frozen is None else runner_owned(frozen.launch)
+
+
+def session_server_base() -> ServerBase:
+    """The current session's server base; raises :class:`BaseLaunchMismatch` when the file and the state disagree."""
+    frozen = frozen_session_base()
+    return ServerBase() if frozen is None else server_base(frozen.launch)
+
+
+__all__ = [
+    "BaseLaunchMismatch",
+    "FrozenBase",
+    "ServerBase",
+    "freeze_base",
+    "frozen_base",
+    "frozen_session_base",
+    "server_argv",
+    "server_base",
+    "session_cards",
+    "session_runner_owned",
+    "session_server_base",
+]

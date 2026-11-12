@@ -82,3 +82,44 @@ path = [
 precedence = "override"
 SPDX-FileCopyrightText = "2026 Advanced Micro Devices, Inc."
 SPDX-License-Identifier = "Apache-2.0"
+
+# Snapshots recorded from InferenceX (configs, recipes and golden curves, and what its code answered for them), which
+# the InferenceX recipe source is tested against.
+[[annotations]]
+path = "src/inference_suite/tests/fixtures/inferencex/**"
+precedence = "override"
+SPDX-FileCopyrightText = "2025 SemiAnalysis LLC, Advanced Micro Devices, NVIDIA CORPORATION"
+SPDX-License-Identifier = "Apache-2.0"
+
+# A snapshot of the sglang cookbook (deployment configs, AgentX launches and pages), which the sglang cookbook recipe
+# source is tested against.
+[[annotations]]
+path = "src/inference_suite/tests/fixtures/sglang/**"
+precedence = "override"
+SPDX-FileCopyrightText = "2023-2026 SGLang Team"
+SPDX-License-Identifier = "Apache-2.0"
+
+# Responses of the vLLM recipes site (recipes.vllm.ai), which the vLLM recipes source is tested against.
+[[annotations]]
+path = "src/inference_suite/tests/fixtures/vllm_recipes/**"
+precedence = "override"
+SPDX-FileCopyrightText = "2025-2026 vLLM Team"
+SPDX-License-Identifier = "Apache-2.0"
+
+# A snapshot of ATOM (benchmark catalogs and recipe pages), which the ATOM recipe source is tested against.
+[[annotations]]
+path = "src/inference_suite/tests/fixtures/atom/**"
+precedence = "override"
+SPDX-FileCopyrightText = "Advanced Micro Devices, Inc."
+SPDX-License-Identifier = "MIT"
+
+# This repository's weight-precision check, which Arbor carries as a copy (src/hyperloom_arbor/VENDOR.md): the toolbox's
+# module, and the shim of what it imports from Hyperloom. MIT, as this repository, and as their own headers say.
+[[annotations]]
+path = [
+    "src/hyperloom_arbor/arbor/measure/weight_precision.py",
+    "src/hyperloom_arbor/arbor/measure/_hyperloom_shim.py",
+]
+precedence = "override"
+SPDX-FileCopyrightText = "2026 Advanced Micro Devices, Inc."
+SPDX-License-Identifier = "MIT"

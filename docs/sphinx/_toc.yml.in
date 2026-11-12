@@ -29,8 +29,6 @@ subtrees:
     - entries:
       - url: https://rocm.docs.amd.com/projects/intellikit/en/latest/
         title: IntelliKit
-      - url: https://rocm.docs.amd.com/projects/magpie/en/latest
-        title: Magpie
       - url: https://rocm.docs.amd.com/projects/tracelens/en/latest/
         title: TraceLens
       - url: https://rocm.docs.amd.com/projects/geak/en/latest/
@@ -39,6 +37,8 @@ subtrees:
         title: AgentKernelArena
   - file: conceptual/optimization-loop.md
     title: Hyperloom optimization loop
+  - file: conceptual/multibranch-arbor.md
+    title: Arbor in multi-branch, who runs what
 
 - caption: How to
   entries:
@@ -52,6 +52,8 @@ subtrees:
     title: Run hosted multi-branch on a new cluster
   - file: how-to/run-multibranch.md
     title: Run a multi-branch session
+  - file: how-to/multibranch-review-gate.md
+    title: Review the agent map before the Arbor branches open
 
 - caption: Reference
   entries:
@@ -63,6 +65,8 @@ subtrees:
     title: Authentication and credentials
   - file: reference/kernel-execution-path.md
     title: Kernel optimization execution path
+  - file: reference/inference-suite.md
+    title: InferenceSuite benchmark rounds
   - file: reference/operations.md
     title: Operations and self-hosting
   - file: reference/upgrade.md

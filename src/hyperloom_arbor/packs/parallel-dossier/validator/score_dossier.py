@@ -26,7 +26,7 @@ import os
 import sys
 from pathlib import Path
 
-CHECK = Path(__file__).resolve().parents[3] / ".claude" / "skills" / "dossier" / "check-dossier.py"
+CHECK = Path(__file__).resolve().parents[3] / ".claude" / "skills" / "dossier-v1" / "check-dossier.py"
 
 
 def _checker():
