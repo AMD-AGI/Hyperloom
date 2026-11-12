@@ -9,6 +9,10 @@ from dataclasses import dataclass
 
 from inference_suite.contracts.base_launch import Workload
 from inference_suite.frameworks import Framework
+from inference_suite.multinode.record import FrontendType
+
+#: The router each framework serves through when the session names none.
+DEFAULT_FRONTEND = {Framework.SGLANG: FrontendType.SGLANG_ROUTER, Framework.ATOM: FrontendType.ATOMESH}
 
 
 class PdQueryError(ValueError):
@@ -37,8 +41,8 @@ class RoleAsk:
 @dataclass(frozen=True)
 class PdQuery:
     """A PD session: ``model_id`` as InferenceX names it, ``model_path`` the engines load, the board and GPUs per
-    node of every host, the workload (with its sequence shape when fixed), its concurrencies, both roles and the
-    router host (empty when the platform runs the router)."""
+    node of every host, the workload (with its sequence shape when fixed), its concurrencies, both roles, the
+    router host (empty when the platform runs the router) and the router it runs (``None`` for the framework's)."""
 
     model_id: str
     model_path: str
@@ -53,6 +57,7 @@ class PdQuery:
     isl: int | None = None
     osl: int | None = None
     transfer_backend: str = ""
+    frontend: FrontendType | None = None
 
     def __post_init__(self) -> None:
         if self.framework not in (Framework.SGLANG, Framework.ATOM):
@@ -65,6 +70,8 @@ class PdQuery:
             raise PdQueryError(f"gpus_per_node must be a positive integer, got {self.gpus_per_node!r}")
         if not self.concurrencies or not all(isinstance(c, int) and c >= 1 for c in self.concurrencies):
             raise PdQueryError(f"a PD session needs positive concurrencies, got {self.concurrencies!r}")
+        if self.frontend not in (None, *DEFAULT_FRONTEND.values()):
+            raise PdQueryError(f"a PD session serves through sglang-router or atomesh, not {self.frontend.value}")
         fixed = self.workload is Workload.FIXED
         if (self.isl is not None and self.osl is not None) != fixed:
             raise PdQueryError("a fixed workload names its isl and osl, and an AgentX one neither")
@@ -75,8 +82,13 @@ class PdQuery:
         return self.model_path.rstrip("/").rsplit("/", 1)[-1]
 
     @property
+    def served_frontend(self) -> FrontendType:
+        """The router the session runs: the one it names, else the framework's."""
+        return self.frontend or DEFAULT_FRONTEND[self.framework]
+
+    @property
     def target_concurrency(self) -> int:
         return max(self.concurrencies)
 
 
-__all__ = ["PdQuery", "PdQueryError", "RoleAsk"]
+__all__ = ["DEFAULT_FRONTEND", "PdQuery", "PdQueryError", "RoleAsk"]

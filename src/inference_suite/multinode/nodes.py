@@ -4,9 +4,9 @@
 """The node list: the one input of a PD session, a JSON document in ``HYPERLOOM_MN_NODE_LIST``.
 
 It names the framework and model, the cluster's service and engine URLs, the router, prefill and decode hosts, the
-GPUs per node, SSH access (the key by path only), the KV transfer backend, the topology and args the operator fixed,
-and how the launcher starts processes: ``direct`` over SSH, or ``in_place`` into the process a platform launcher
-waits on. Every key is checked; an unknown one is refused.
+GPUs per node, SSH access (the key by path only), the KV transfer backend, the router it runs, the topology and args
+the operator fixed, and how the launcher starts processes: ``direct`` over SSH, or ``in_place`` into the process a
+platform launcher waits on. Every key is checked; an unknown one is refused.
 """
 
 from __future__ import annotations
@@ -22,7 +22,7 @@ from urllib.parse import urlsplit
 from inference_suite.contracts.base_launch import LaunchQuery
 from inference_suite.frameworks import Framework
 from inference_suite.multinode.query import PdQuery, RoleAsk
-from inference_suite.multinode.record import Role
+from inference_suite.multinode.record import FrontendType, Role
 from inference_suite.multinode.recipe import OperatorArgs
 
 NODE_LIST_ENV = "HYPERLOOM_MN_NODE_LIST"
@@ -31,7 +31,7 @@ _REQUIRED = ("framework", "model", "service_url", "router", "prefill", "decode",
 _KEYS = (
     frozenset(_REQUIRED)
     | {"prefill_url", "decode_url", "ssh", "transfer_backend", "topology", "launch_mode"}
-    | {"config"}
+    | {"config", "frontend"}
 )
 _SSH_KEYS = frozenset({"port", "user", "key_file", "known_hosts_file"})
 _TOPOLOGY_KEYS = frozenset({"tp", "ep", "dp_attention"})
@@ -89,6 +89,7 @@ class NodeList:
     topology: Mapping[Role, RoleTopology] = field(default_factory=dict)
     launch_mode: LaunchMode = LaunchMode.DIRECT
     operator: OperatorArgs = field(default_factory=OperatorArgs)
+    frontend: FrontendType | None = None
 
     def hosts(self, role: Role) -> tuple[str, ...]:
         return self.prefill if role is Role.PREFILL else self.decode
@@ -119,6 +120,7 @@ class NodeList:
             isl=session.isl,
             osl=session.osl,
             transfer_backend=self.transfer_backend,
+            frontend=self.frontend,
         )
 
 
@@ -265,6 +267,7 @@ def parse_node_list(document: Any) -> NodeList:
         topology={Role(key): _role_topology(value, Role(key)) for key, value in topology.items()},
         launch_mode=_enum(LaunchMode, fields.get("launch_mode", LaunchMode.DIRECT.value), "launch_mode"),
         operator=_operator(fields["config"]) if fields.get("config") is not None else OperatorArgs(),
+        frontend=_enum(FrontendType, fields["frontend"], "frontend") if fields.get("frontend") else None,
     )
 
 

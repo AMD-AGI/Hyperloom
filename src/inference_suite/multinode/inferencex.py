@@ -34,7 +34,6 @@ NVIDIA_MASTER = f"{PROJECT}/configs/nvidia-master.yaml"
 #: What a PD resolution checks out of InferenceX.
 CHECKOUT_DIRECTORIES = (f"{PROJECT}/configs", MULTI_NODE_RECIPES)
 _SCENARIO_OF = {Workload.FIXED: Scenario.FIXED, Workload.AGENTX: Scenario.AGENTIC}
-_FRONTEND_OF = {Framework.SGLANG: "sglang-router", Framework.ATOM: "atomesh"}
 _AGENTX_SHAPE = "agentx"
 _NO_SPEC = "none"
 _ZIP_SELECTOR = re.compile(r"(zip_override_[\w-]+)\[(\d+)\]")
@@ -205,8 +204,9 @@ def _engine(recipe: Mapping[str, Any]) -> str:
     return str(engine.get("type") if isinstance(engine, Mapping) else engine)
 
 
-def _unported(recipe: Mapping[str, Any], framework: Framework) -> str | None:
-    """What of a recipe the PD launcher cannot reproduce, or ``None``."""
+def _unported(recipe: Mapping[str, Any], query: PdQuery) -> str | None:
+    """What of a recipe the PD launcher cannot reproduce on the query's cluster, or ``None``."""
+    framework, served = query.framework, query.served_frontend.value
     roles = recipe.get("roles") or {}
     if set(roles) != {Role.PREFILL.value, Role.DECODE.value}:
         return f"it runs roles {sorted(roles)}, not prefill and decode"
@@ -214,8 +214,8 @@ def _unported(recipe: Mapping[str, Any], framework: Framework) -> str | None:
     if engines != {framework.value}:
         return f"it runs engine {sorted(engines)}, not {framework.value}"
     frontend = recipe.get("frontend") or {}
-    if frontend.get("type") != _FRONTEND_OF[framework]:
-        return f"it serves through the {frontend.get('type')} frontend, not {_FRONTEND_OF[framework]}"
+    if frontend.get("type") != served:
+        return f"it serves through the {frontend.get('type')} frontend, not {served}"
     if frontend.get("enable_multiple_frontends"):
         return "it runs several frontends"
     for extra in ("setup_script", "services"):
@@ -304,7 +304,7 @@ def _row_candidate(query: PdQuery, checkout: Checkout, master_row: _MasterRow) -
     file, _, selector = str(row["srt-recipe"]).partition(":")
     path = f"{MULTI_NODE_RECIPES}/{entry['srt-recipe-dir']}/{file}"
     recipe = expand_variants(_yaml(checkout, path), selector)[0][1]
-    unported = _unported(recipe, query.framework)
+    unported = _unported(recipe, query)
     if unported is not None:
         return unported
     return Candidate(
@@ -392,7 +392,7 @@ def _lookup_candidate(query: PdQuery, path: str, selector: str, recipe: Mapping[
     gpu_type = str((recipe.get("resources") or {}).get("gpu_type") or "")
     if gpu_type.lower() != query.board.lower():
         return f"it is for {gpu_type}, not {query.board}"
-    unported = _unported(recipe, query.framework)
+    unported = _unported(recipe, query)
     if unported is not None:
         return unported
     if query.workload is Workload.FIXED and _speculative(recipe):

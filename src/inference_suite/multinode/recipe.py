@@ -24,10 +24,9 @@ from inference_suite.multinode.inferencex import (
     lookup_candidates,
     master_candidates,
 )
-from inference_suite.multinode.query import PdQuery, RoleAsk
+from inference_suite.multinode.query import DEFAULT_FRONTEND, PdQuery, RoleAsk
 from inference_suite.multinode.record import (
     Frontend,
-    FrontendType,
     PdLaunch,
     PdSource,
     PdSourceKind,
@@ -43,7 +42,6 @@ from inference_suite.recipe.sources import Checkout, SourceFetchError
 #: The KV transfer backend of a launch no source names one for, by framework.
 DEFAULT_TRANSFER_BACKEND = {Framework.SGLANG: "mori", Framework.ATOM: "mooncake"}
 _TRUST_REMOTE_CODE = "--trust-remote-code"
-_FRONTEND_OF = {Framework.SGLANG: FrontendType.SGLANG_ROUTER, Framework.ATOM: FrontendType.ATOMESH}
 #: The router flags the PD launcher sets, in canonical spelling.
 ROUTER_OWNED = frozenset({"host", "port", "pd-disaggregation", "prefill", "decode", "worker-urls"})
 
@@ -147,7 +145,7 @@ def _assemble(query: PdQuery, bound: _Bound) -> PdLaunch:
         transfer_backend=backend,
         prefill=roles[Role.PREFILL],
         decode=roles[Role.DECODE],
-        frontend=Frontend(_FRONTEND_OF[query.framework], query.router_host, _router_args(bound.router_args)),
+        frontend=Frontend(query.served_frontend, query.router_host, _router_args(bound.router_args)),
     )
 
 
@@ -255,7 +253,8 @@ def _table(query: PdQuery, warnings: Sequence[str]) -> PdLaunch:
             f"no InferenceX recipe serves {query.model_id}; the PD default table's {hit.key} row runs",
         ),
     )
-    return _assemble(query, _Bound(rendered, fits, hit.router_args, "", source))
+    router = hit.router_args if query.served_frontend is DEFAULT_FRONTEND[query.framework] else ()
+    return _assemble(query, _Bound(rendered, fits, router, "", source))
 
 
 def _inferencex(query: PdQuery, inputs: ResolveInputs, misses: list[str], warnings: list[str]) -> PdLaunch | None:
