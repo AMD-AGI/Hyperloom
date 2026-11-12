@@ -419,6 +419,11 @@ async def restart_server_for_round(
             "restart_server_for_round: external service URL (benchmark-only, no SSH control); skipping server restart"
         )
         return
+    from hyperloom.inference_optimizer.multi_node.pd_session import is_pd_state
+
+    if is_pd_state(_read_state()):
+        await _restart_pd_round(server, extra_env=extra_env, unset_env=unset_env, torch_profiler_dir=torch_profiler_dir)
+        return
 
     round_args = _resolve_round_args(server)
     fw, mdl, tp_int, ep_int = round_args
@@ -455,11 +460,7 @@ async def restart_server_for_round(
     settings = _read_restart_settings()
 
     async with _get_restart_lock():
-        if torch_profiler_dir:
-            try:
-                Path(torch_profiler_dir).mkdir(parents=True, exist_ok=True)
-            except OSError as exc:
-                raise ServerRestartFailed(f"cannot mkdir torch_profiler_dir {torch_profiler_dir!r}: {exc}") from exc
+        _ensure_profiler_dir(torch_profiler_dir)
         with _restart_env_scope(extra_env, unset_env, torch_profiler_dir):
             from ._server_patcher import resolve_sglang_patch_set
 
@@ -507,6 +508,50 @@ async def restart_server_for_round(
                     raise ServerRestartFailed(f"post-launch /health wait raised: {exc!r}") from exc
 
             await _restart_with_reclaim_retry(_restart_and_wait, force_full_restart)
+
+
+def _ensure_profiler_dir(torch_profiler_dir: str) -> None:
+    """Create the round's torch profiler directory when one is named."""
+    if not torch_profiler_dir:
+        return
+    try:
+        Path(torch_profiler_dir).mkdir(parents=True, exist_ok=True)
+    except OSError as exc:
+        raise ServerRestartFailed(f"cannot mkdir torch_profiler_dir {torch_profiler_dir!r}: {exc}") from exc
+
+
+async def _restart_pd_round(
+    server: RoundServer,
+    *,
+    extra_env: dict[str, str] | None,
+    unset_env: list[str] | tuple[str, ...] | set[str] | None,
+    torch_profiler_dir: str,
+) -> None:
+    """Restart a PD session's cluster with the round's args over its frozen launch; both roles get them."""
+    from hyperloom.inference_optimizer.multi_node.cli import restart_pd_round
+    from hyperloom.inference_optimizer.multi_node.pd_session import PdSessionError
+
+    try:
+        validate_server_args(server.extra_server_args, context="restart_server_for_round")
+    except ServerArgsRejected as exc:
+        raise ServerRestartFailed(str(exc)) from exc
+    settings = _read_restart_settings()
+    log.info("restart_server_for_round: PD cluster, round args=%r", server.extra_server_args)
+    async with _get_restart_lock():
+        _ensure_profiler_dir(torch_profiler_dir)
+        with _restart_env_scope(extra_env, unset_env, torch_profiler_dir):
+            try:
+                await asyncio.to_thread(restart_pd_round, server.extra_server_args, settings.poll_timeout_s)
+            except PdSessionError as exc:
+                raise ServerRestartFailed(str(exc)) from exc
+
+
+def pd_engines_lost_reason() -> str:
+    """Why a PD session's engines no longer run (``""`` when they do, or the session is not PD)."""
+    from hyperloom.inference_optimizer.multi_node.pd_session import engines_lost, is_pd_state
+
+    state = _read_state()
+    return engines_lost(state) if is_pd_state(state) else ""
 
 
 def _log_restart_plan(round_args: tuple[str, str, int, int], pd: dict, extra_args: str, trace_dir: str) -> None:

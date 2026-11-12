@@ -8,7 +8,10 @@ from __future__ import annotations
 import argparse
 import os
 import sys
+from pathlib import Path
 from typing import Any
+
+from inference_suite.contracts.base_launch import LaunchQuery
 
 from ..multi_node import TopologyHandoffError, topology_file_overlay
 
@@ -47,26 +50,101 @@ def _resolve_gpus_per_node(args: argparse.Namespace) -> int:
     return int(from_file) if from_file else 8
 
 
+def _hand_off_node_list() -> Any:
+    """The PD node list handed over, or ``None``; a malformed one exits 2."""
+    from ..multi_node.pd_session import handed_node_list
+
+    try:
+        return handed_node_list()
+    except TopologyHandoffError as exc:
+        print(f"ERROR: {exc}", file=sys.stderr)
+        raise SystemExit(2) from exc
+
+
+def _default_mn_backend() -> str:
+    """The backend a node list's frontend names, else rayjob."""
+    from ..multi_node.pd_session import node_list_backend
+
+    nodes = _hand_off_node_list()
+    return node_list_backend(nodes) if nodes is not None else "rayjob"
+
+
 def _resolve_mn_backend(args: argparse.Namespace) -> str:
-    """Multi-node backend selector: --mn-backend > $TOPOLOGY_HANDOFF_FILE backend > $INFERENCE_OPTIMIZER_MN_BACKEND > rayjob."""
+    """Multi-node backend selector: --mn-backend > $TOPOLOGY_HANDOFF_FILE backend > $INFERENCE_OPTIMIZER_MN_BACKEND >
+    the node list's frontend > rayjob."""
+    from ..multi_node.pd_session import PD_BACKENDS
+
     from_file = (_topology_file_overlay() or {}).get("INFERENCE_OPTIMIZER_MN_BACKEND", "")
     backend = (
         (getattr(args, "mn_backend", None) or "").strip()
         or from_file
         or os.environ.get("INFERENCE_OPTIMIZER_MN_BACKEND", "").strip()
         or os.environ.get("MN_BACKEND", "").strip()
-        or "rayjob"
+        or _default_mn_backend()
     ).lower()
-    if backend not in ("rayjob", "infera"):
+    choices = ("rayjob", "infera", *PD_BACKENDS)
+    if backend not in choices:
         print(
-            f"ERROR: --mn-backend must be 'rayjob' or 'infera', got {backend!r}",
+            f"ERROR: --mn-backend must be one of {', '.join(choices)}, got {backend!r}",
             file=sys.stderr,
         )
         sys.exit(2)
     return backend
 
 
-def _prepare_multi_node_state(args: argparse.Namespace) -> None:
+def is_pd_session(args: argparse.Namespace) -> bool:
+    """Whether a ``--nodes >= 2`` run serves a PD-disaggregated node-list cluster."""
+    from ..multi_node.pd_session import PD_BACKENDS
+
+    return int(getattr(args, "nodes", 1) or 1) >= 2 and _resolve_mn_backend(args) in PD_BACKENDS
+
+
+def freeze_pd_session_launch(
+    session_dir: Path, args: argparse.Namespace, session: LaunchQuery, inferencex_commit: str = ""
+) -> None:
+    """Resolve a fresh PD session's launch on the handed-over node list and freeze it in ``session_dir``; exits 2
+    when the session is not disaggregated, no node list is handed over, or no source serves the session."""
+    from ..multi_node.pd_session import PdSessionError, freeze_launch
+
+    if os.environ.get("PD_MODE", "").strip().lower() != "disaggregated":
+        _exit_refused(
+            f"--mn-backend {_resolve_mn_backend(args)} serves prefill/decode only; pass --pd-mode disaggregated"
+        )
+    nodes = _hand_off_node_list()
+    if nodes is None:
+        _exit_refused(f"--mn-backend {_resolve_mn_backend(args)} needs the HYPERLOOM_MN_NODE_LIST hand-off")
+    try:
+        launch = freeze_launch(session_dir, session, nodes, inferencex_commit)
+    except PdSessionError as exc:
+        _exit_refused(str(exc))
+    print(f"multi-node: froze the PD launch {launch.digest()} from {launch.source}")
+
+
+def _exit_refused(problem: str) -> None:
+    """Print ``problem`` and exit 2."""
+    print(f"ERROR: {problem}", file=sys.stderr)
+    sys.exit(2)
+
+
+def _bind_pd_launch(ext_state: dict[str, Any], session_dir: Path | None) -> None:
+    """Record the session's frozen PD launch in ``ext_state``; exits 2 when it is missing or not the one frozen."""
+    from inference_suite.multinode import RECORD_NAME
+
+    from ..multi_node._internal.external_state import load_multi_node_state
+    from ..multi_node.pd_session import PD_DIGEST_KEY, PD_LAUNCH_KEY, PdSessionError, verified_launch
+
+    if session_dir is None:
+        _exit_refused("a PD session binds its frozen launch to a session directory, and none is open")
+    frozen = str(load_multi_node_state().get(PD_DIGEST_KEY) or "")
+    try:
+        launch = verified_launch(session_dir / RECORD_NAME, frozen)
+    except PdSessionError as exc:
+        _exit_refused(str(exc))
+    ext_state[PD_LAUNCH_KEY] = str(session_dir / RECORD_NAME)
+    ext_state[PD_DIGEST_KEY] = launch.digest()
+
+
+def _prepare_multi_node_state(args: argparse.Namespace, session_dir: Path | None = None) -> None:
     """Adopt the platform-provisioned cluster for a ``--nodes >= 2`` run."""
     nodes = max(1, int(args.nodes))
     if nodes < 2:
@@ -94,6 +172,8 @@ def _prepare_multi_node_state(args: argparse.Namespace) -> None:
     ext_state = build_external_state_from_env()
     ext_state["backend"] = _resolve_mn_backend(args)
     _reject_unusable_backend(ext_state)
+    if is_pd_session(args):
+        _bind_pd_launch(ext_state, session_dir)
     try:
         _save_state(ext_state)
     except OSError as exc:
@@ -134,7 +214,10 @@ def _prepare_multi_node_state(args: argparse.Namespace) -> None:
 def _reject_unusable_backend(ext_state: dict[str, Any]) -> None:
     """Exit 2 when the selected backend cannot control this hand-off; flag a benchmark-only rayjob."""
     from ..multi_node._internal.external_state import external_has_ssh_control
+    from ..multi_node.pd_session import PD_BACKENDS
 
+    if ext_state["backend"] in PD_BACKENDS and not ext_state.get("router_pod_ip"):
+        _exit_refused(f"--mn-backend {ext_state['backend']} needs the HYPERLOOM_MN_NODE_LIST hand-off of a PD cluster")
     if ext_state["backend"] == "infera" and not external_has_ssh_control():
         print(
             "ERROR: the infera backend requires SSH control. Set "
