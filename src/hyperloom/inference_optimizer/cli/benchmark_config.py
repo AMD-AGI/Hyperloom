@@ -20,6 +20,8 @@ from hyperloom.common.benchmark_config import (
     is_agentx,
 )
 from hyperloom.common.agentx_workload import is_mlperf_backend
+from hyperloom.common.session_files import shared_options
+from hyperloom_common.io import atomic_write_text
 from hyperloom_common.env import env_bool
 from hyperloom.inference_optimizer import framework_registry
 from hyperloom.inference_optimizer.speculative_capability import DraftLimits
@@ -167,7 +169,8 @@ class AgentXWorkload:
 
 
 def write_agentx_benchmark(target: Path, workload: AgentXWorkload) -> None:
-    """Write ``workload`` to ``target`` in the public AgentX workload schema."""
+    """Write ``workload`` to ``target`` in the public AgentX workload schema, ``664`` below shared storage unless it
+    holds a credential."""
     benchmark: dict[str, Any] = {
         "framework": workload.framework,
         "model": workload.model,
@@ -184,7 +187,10 @@ def write_agentx_benchmark(target: Path, workload: AgentXWorkload) -> None:
     if workload.docker_image:
         benchmark["docker_image"] = workload.docker_image
     _validate_agentx_benchmark(benchmark)
-    target.write_text(yaml.safe_dump({"benchmark": benchmark}, sort_keys=False), encoding="utf-8")
+    # replaced, never written in place: a later leg of the session may be another account of the group
+    atomic_write_text(
+        target, yaml.safe_dump({"benchmark": benchmark}, sort_keys=False), options=shared_options(benchmark)
+    )
 
 
 def bind_benchmark(session_dir: Path, args: argparse.Namespace) -> None:

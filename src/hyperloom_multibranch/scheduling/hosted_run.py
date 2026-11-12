@@ -46,8 +46,9 @@ measures no spec ``local``.
 
 The host decides from ``$HYPERLOOM_STATE_DIR/exit.json`` whether to start the run again: never once it holds
 ``final: true`` (:func:`write_final_exit`), and again when it is missing. ``session.json`` there names the session
-directory as soon as it exists (:func:`record_session`), so a start that finds it finishes that session instead of
-starting another, once that session got through PRELUDE; one that ended before its baseline was recorded is closed,
+directory as soon as it exists (:func:`record_session`), so a start that finds it takes that session over instead of
+starting another, once that session got through PRELUDE: resumed to its first deadline while its baseline holds, else
+finished as ``final-only`` does (:func:`hosted_restart_leg`); one that ended before its baseline was recorded is closed,
 which ends the measurement sandboxes it left, and the spec's session starts again. The two file names and their fields
 are the legacy entry's, ``hyperloom.hosted.entry``, which this package does not import: importing it loads the legacy
 flow's state.
@@ -61,8 +62,10 @@ import logging
 import os
 import signal
 import threading
+import time
 from dataclasses import dataclass
 from datetime import datetime
+from functools import partial
 from collections.abc import Callable, Mapping
 from pathlib import Path
 from typing import Any
@@ -86,10 +89,13 @@ from hyperloom_multibranch.scheduling.budget import (
 from hyperloom_multibranch.scheduling.launch_isolation import launch_isolation
 from hyperloom_multibranch.scheduling.layout import SessionLayout
 from hyperloom_multibranch.scheduling.lifecycle import PersistedRun, persisted_run, persisted_session, recorded_baseline
+from hyperloom_multibranch.scheduling.manifest import read_manifest
 from hyperloom_multibranch.scheduling.peers import PeersUnavailable
+from hyperloom_multibranch.scheduling.resumption import ResumeRefused, require_resumable
 from hyperloom_multibranch.scheduling.settings import RunSettings
 from hyperloom_multibranch.scheduling.stops import SessionStopReason
 from hyperloom_multibranch.toolbox.hosted_leases import GrantLimits
+from hyperloom_multibranch.toolbox.resume_guard import BaselineNotReusable, check_hosted_baseline_reusable
 
 # hyperloom/hosted/entry.py EXIT_FILE and SESSION_FILE
 EXIT_FILE = "exit.json"
@@ -535,11 +541,11 @@ def recorded_session(state_dir: Path) -> Path | None:
 
 @dataclass(frozen=True)
 class EarlierSession:
-    """The session an earlier start of the run began: ``finish``, which a restart finishes, when it got through
-    PRELUDE; ``left``, which a restart closes before it starts the spec's session again, when it committed its root
-    and ended before its baseline was recorded without closing, or was closed by such a restart; ``closed``, the
-    directory of one that closed on its own before its baseline was recorded, which ended the run; none of them when
-    there was none or it committed no root, and so started no test."""
+    """The session an earlier start of the run began: ``finish``, which a restart resumes or finishes
+    (:func:`hosted_restart_leg`), when it got through PRELUDE; ``left``, which a restart closes before it starts the
+    spec's session again, when it committed its root and ended before its baseline was recorded without closing, or was
+    closed by such a restart; ``closed``, the directory of one that closed on its own before its baseline was
+    recorded, which ended the run; none of them when there was none or it committed no root, and so started no test."""
 
     finish: PersistedRun | None = None
     left: PersistedRun | None = None
@@ -572,15 +578,109 @@ def take_over_earlier_session(state_dir: Path) -> EarlierSession:
 
 def close_then_start(left: PersistedRun | None, close: Callable[[PersistedRun], int], start: Callable[[], int]) -> int:
     """Close ``left``, a session that ended before its baseline was recorded, when there is one, with ``close``
-    (``final-only``, which ends the sandboxes of the tests it left), then ``start`` the spec's session, unless a stop
-    during the close ended the run: then the close's exit code."""
+    (``final-only``, which ends the sandboxes of the tests it left; :func:`close_before_starting_again`), then ``start``
+    the spec's session, unless a stop during the close ended the run: then the close's exit code."""
 
-    if left is not None:
-        log.warning("%s ended before PRELUDE recorded its baseline: closing it, then starting again", left.layout.root)
-        closed = close(left)
-        if reported_stop_reason(left.layout.root) != left.ended.value:
-            return closed
+    if left is not None and (ended := close_before_starting_again(partial(close, left), left)) is not None:
+        return ended
     return start()
+
+
+def hosted_resume_deadline(persisted: PersistedRun, now: float) -> float:
+    """The deadline a restart of the run resumes ``persisted`` up to, the ``finish`` of :func:`take_over_earlier_session`, with
+    ``cli.resume``: the one the run's first start set, so the session's budget counts from that start for
+    ``--max-hours`` as it does for ``--max-gpu-hours``, whose spend the session reads from its blackboard, and the time
+    it was down is not given back. That the earlier start is gone is the host's to know -- it starts a run again only
+    once its earlier start ended -- not the pids that start recorded in another container. Blocks.
+
+    Raises:
+        ResumeRefused: When :func:`~hyperloom_multibranch.scheduling.resumption.require_resumable` does, or ``now`` is
+            past that deadline; the restart finishes the session instead.
+    """
+
+    require_resumable(persisted)
+    deadline = read_manifest(persisted.layout.manifest).deadline
+    if now >= deadline:
+        raise ResumeRefused(
+            f"the session in {persisted.layout.root} used its budget, which ended {now - deadline:.0f} s ago"
+        )
+    return deadline
+
+
+def hosted_restart_leg(
+    persisted: PersistedRun,
+    finish: Callable[..., int],
+    resume: Callable[..., int],
+    explore_cap: ExploreCap | None = None,
+) -> Callable[..., int]:
+    """What a restart of the run runs over ``persisted``, the ``finish`` of :func:`take_over_earlier_session`:
+    ``resume`` (``cli.resume``) with ``until`` bound to :func:`hosted_resume_deadline`'s, so its budget counts
+    from the run's first start, and ``cap`` to ``explore_cap`` (the grant's, :func:`grant_explore_cap`), when the
+    session was measured in the grant's sandboxes and its baseline still measures what a test measured now would
+    (:func:`~hyperloom_multibranch.toolbox.resume_guard.check_hosted_baseline_reusable`: the same build,
+    ``MEASUREMENT_EPOCH``, image, base launch and runner template cards; not the node or the account, which a
+    reschedule changes by design); else ``finish`` (``cli.final_only``), and one warning names why. A file of the
+    session this account cannot read (:data:`CANNOT_READ_SESSION`) is such a why: the finish then meets it and ends
+    the run as it did before there was a resume, rather than this start crashing with no ``exit.json`` for the host
+    to start again. Writes nothing. Blocks."""
+
+    root = persisted.layout.root
+    if not persisted.layout.runner_source.exists():  # what a session measured in the grant's sandboxes cloned
+        log.warning("hosted run: finishing %s, whose tests did not run in the grant's sandboxes", root)
+        return finish
+    try:
+        check_hosted_baseline_reusable(persisted.layout.toolbox, persisted.settings.workload.tp)
+        deadline = hosted_resume_deadline(persisted, time.time())
+    except (BaselineNotReusable, ResumeRefused, *CANNOT_READ_SESSION) as exc:
+        log.warning("hosted run: finishing %s instead of resuming it: %s", root, exc)
+        return finish
+    log.info("hosted run: resuming %s up to the deadline its first start set", root)
+    return partial(resume, until=deadline, cap=explore_cap)
+
+
+#: What reading back an earlier session fails with when this account cannot read what it left: a file an earlier leg of
+#: another account of the group made owner-only, or one that is not the text it wrote.
+CANNOT_READ_SESSION = (PermissionError, UnicodeDecodeError, json.JSONDecodeError)
+
+
+def close_before_starting_again(close: Callable[[], int], left: PersistedRun) -> int | None:
+    """Close ``left``, which ended before PRELUDE recorded its baseline, with ``close`` (which ends the sandboxes of the
+    tests it left) before the run starts the spec's session again: the exit code the run ends with when a stop during
+    the close ended it, else ``None``. A close that cannot read ``left`` (:data:`CANNOT_READ_SESSION`, and for a file
+    the OS refuses, one inside ``left``'s directory) leaves it as it is, one warning names the file and why, and
+    ``None`` says the run goes on with a new session in a directory of its own, as that session measured nothing a
+    restart carries on from. A file outside that directory the OS refuses is not the earlier session's to skip: it
+    raises, and ends the run as before."""
+
+    root = left.layout.root
+    log.warning("%s ended before PRELUDE recorded its baseline: closing it, then starting again", root)
+    try:
+        closed = close()
+    except CANNOT_READ_SESSION as exc:
+        if not _names_a_file_of(root, exc):
+            raise
+        log.warning("cannot read %s to close it, so it is left as it is and a new session starts: %s", root, _why(exc))
+        return None
+    return None if reported_stop_reason(root) == left.ended.value else closed
+
+
+def _names_a_file_of(root: Path, exc: BaseException) -> bool:
+    """Whether ``exc`` is about what the session in ``root`` left: a refused file inside ``root``, or text that is not
+    what was written (which names no file)."""
+
+    if not isinstance(exc, OSError):
+        return True
+    return exc.filename is not None and Path(os.path.abspath(os.fsdecode(exc.filename))).is_relative_to(
+        os.path.abspath(root)
+    )
+
+
+def _why(exc: BaseException) -> str:
+    """The file an error names, with its owner and mode, and the reason; else the error."""
+
+    if isinstance(exc, OSError) and exc.filename:
+        return f"{exc.filename}{ownership(Path(exc.filename))}: {exc.strerror}"
+    return f"{type(exc).__name__}: {exc}"
 
 
 def prelude_landed(root: Path) -> bool:
@@ -606,6 +706,7 @@ def reported_stop_reason(root: Path) -> str | None:
 
 
 __all__ = [
+    "CANNOT_READ_SESSION",
     "EXIT_FILE",
     "FINAL_ATTEMPTS",
     "FINAL_COLD_START_SECONDS",
@@ -620,6 +721,7 @@ __all__ = [
     "HostedRefused",
     "arm_grant_stop",
     "campaign_spec",
+    "close_before_starting_again",
     "close_then_start",
     "final_reserve_seconds",
     "grant_deadline",
@@ -627,6 +729,8 @@ __all__ = [
     "grant_explore_cap",
     "grant_tests_end_by",
     "grant_tests_that_fit",
+    "hosted_restart_leg",
+    "hosted_resume_deadline",
     "prelude_landed",
     "record_session",
     "recorded_session",

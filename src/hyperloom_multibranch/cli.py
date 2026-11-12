@@ -90,13 +90,12 @@ the same path; a usage error names what is missing.
 ``hosted run`` takes no arguments: it runs the session of the campaign spec a host injected, as
 :mod:`~hyperloom_multibranch.scheduling.hosted_run` maps it onto the options of ``run``, measured in the runner
 sandboxes of the host's sandbox service (:mod:`~hyperloom_multibranch.scheduling.hosted_peers`) or on this container's
-cards, as the spec says. Started again over a run whose ``session.json`` names a session, it finishes that session as
-``final-only`` does once its PRELUDE recorded the baseline (a FINAL that chooses a commit ends it for
-``finished_after_restart``, exit code 0), and otherwise closes it, ending its tests, and starts the spec's session again
-(:func:`~hyperloom_multibranch.scheduling.hosted_run.take_over_earlier_session`). It tells the host the run is over --
-``final: true`` in ``exit.json`` -- once CLOSE ran, or when the spec, the environment, agents it cannot isolate, a
-missing ``hosted`` package, the runner cache or an unreadable file keeps a session from running (exit code 2 for a
-refused spec or session, else 1); a crash leaves no ``exit.json``, and the host starts the run again.
+cards, as the spec says. Started again over a run whose ``session.json`` names a session, it takes it over
+(``hosted_restart_leg``): resumed to its first deadline while its baseline holds, else finished as ``final-only`` does
+(a FINAL that chooses ends it ``finished_after_restart``, exit 0), or, before its baseline, closed and started again.
+It tells the host the run is over -- ``final: true`` in ``exit.json`` -- once CLOSE ran, or when the spec, the
+environment, agents it cannot isolate, a missing ``hosted`` package, the runner cache or an unreadable file keeps a
+session from running (exit 2 for a refused spec or session, else 1); a crash leaves no ``exit.json`` and is restarted.
 ``final-only SESSION_DIR`` is the emergency recovery of a session that ended before FINAL ran, and takes nothing but
 that directory: it runs FINAL and CLOSE over what the session persisted -- the settings and the frontier policy its
 manifest holds, the branches its roster and blackboard hold -- and rewrites its report, dashboard and breakdown. It
@@ -107,10 +106,9 @@ search tree the session's own CLOSE archived is left as it was. It is refused wi
 nothing, when the directory is no session that ran, ran on another build than this one, committed no root, is still
 running -- any process ``MB-pids.jsonl`` records, the scheduler included, still alive in this environment -- already
 chose in FINAL, or has another ``final-only`` running over it.
-``run --resume SESSION_DIR`` continues such a session in its directory on its manifest's settings, taking no other
-option but ``-v``: no PRELUDE, new branches on the integration head, and the deadline moved by the time it was down
-(:meth:`~hyperloom_multibranch.scheduling.lifecycle.Session.resume`). It is refused, holds the lock and archives as
-``final-only`` does, and is refused too for a session with no baseline or run with ``--stop-after-map``.
+``run --resume SESSION_DIR`` continues such a session on its manifest's settings and no option but ``-v``: no PRELUDE,
+new branches on the integration head, the deadline moved by the time it was down. It is refused, holds the lock and
+archives as ``final-only`` does, and is refused too as :func:`resumable_run` says.
 """
 
 from __future__ import annotations
@@ -155,6 +153,7 @@ from hyperloom_multibranch.scheduling.hosted_run import (
     grant_deadline,
     grant_explore_cap,
     grant_tests_that_fit,
+    hosted_restart_leg,
     recorded_session,
     refuse_unhosted_branches,
     reported_stop_reason,
@@ -177,7 +176,6 @@ from hyperloom_multibranch.scheduling.lifecycle import (
     SessionOutcome,
     SessionServices,
     persisted_run,
-    resumable_run,
 )
 from hyperloom_multibranch.scheduling.llm import (
     MB_RESOLVER_MAX_TOKENS,
@@ -192,6 +190,7 @@ from hyperloom_multibranch.scheduling.local_peers import (
 from hyperloom_multibranch.scheduling.peers import PeerFactory, PeersUnavailable
 from hyperloom_multibranch.scheduling.processes import ProcessRegistry, adopting_orphans
 from hyperloom_multibranch.scheduling.reference import ReferenceSource, reference_source
+from hyperloom_multibranch.scheduling.resumption import deadline_after_downtime, resumable_run
 from hyperloom_multibranch.scheduling.roster import RosterCaps
 from hyperloom_multibranch.scheduling.session_environment import (
     EnvironmentIncomplete,
@@ -269,10 +268,7 @@ def build_parser() -> argparse.ArgumentParser:
     hosted_commands = hosted.add_subparsers(dest="hosted_command", required=True)
     hosted_commands.add_parser(
         "run",
-        help=(
-            "Run the session of the injected campaign spec, or finish the one an earlier start of the run began, and"
-            " tell the host in exit.json when the run is over."
-        ),
+        help="Run the injected spec's session, or resume or finish an earlier start's; exit.json says when it is over.",
     )
     return parser
 
@@ -964,11 +960,12 @@ def final_only(
     return _over_session(persisted, peer_factory, services, partial(Session.finish, restart=restart))
 
 
-def resume(persisted: PersistedRun, peer_factory: PeerFactory, services: SessionServices) -> int:
-    """Continue the session in the directory ``persisted`` was read from (:meth:`Session.resume`), print it on one
-    stdout line and return the session's exit code."""
+def resume(
+    persisted: PersistedRun, peer_factory: PeerFactory, services: SessionServices, until: float, cap: ExploreCap | None
+) -> int:
+    """:func:`final_only` running :meth:`Session.resume` up to the deadline ``until`` with EXPLORE capped by ``cap``."""
 
-    return _over_session(persisted, peer_factory, services, Session.resume)
+    return _over_session(persisted, peer_factory, services, lambda session, ended: session.resume(ended, until, cap))
 
 
 #: What a run over a session directory runs on the session it builds there, given how that session ended.
@@ -1056,7 +1053,7 @@ class HostedStart:
 
 
 def hosted_run() -> int:
-    """``hosted run``: the session of the campaign spec the host injected, or the finish of the one an earlier start
+    """``hosted run``: the session of the injected campaign spec, or the resume or finish of the one an earlier start
     of the run began; writes ``exit.json`` with ``final: true`` once CLOSE ran or when the run cannot be served."""
 
     logging.basicConfig(level=logging.INFO, format=LOG_FORMAT)
@@ -1082,8 +1079,8 @@ def hosted_run() -> int:
 
 
 def _hosted_start(host: HostInfo) -> HostedStart:
-    """A new session of the spec, or the close or finish of the one ``session.json`` names, which the restart takes
-    over (:func:`take_over_earlier_session`), measured where the spec says; raises ValueError on a refused spec or
+    """A new session of the spec, or the close, resume or finish of the one ``session.json`` names, which the restart
+    takes over (:func:`take_over_earlier_session`), measured where the spec says; raises ValueError on a refused spec or
     session, ImportError when a ``hosted`` package is missing, and what :func:`require_hosted_isolation` and
     :func:`ready_session` raise."""
 
@@ -1100,9 +1097,10 @@ def _hosted_start(host: HostInfo) -> HostedStart:
     settings = _hosted_settings(host, spec, deadline.session_hours) if persisted is None else persisted.settings
     require_session_environment(settings, os.environ)
     ready = hosted_ready_session(host, settings.workload, local=spec.measurement == MEASUREMENT_LOCAL)
-    close = partial(final_only, peer_factory=ready.peer_factory, services=ready.services)
     if persisted is not None:
-        return HostedStart(partial(close, persisted, restart=True))
+        leg = hosted_restart_leg(persisted, partial(final_only, restart=True), resume, grant_explore_cap(host))
+        return HostedStart(partial(leg, persisted, ready.peer_factory, ready.services))
+    close = partial(final_only, peer_factory=ready.peer_factory, services=ready.services)
     record = partial(started_session, host.state_dir)
     start = partial(run_session, settings, ready.peer_factory, ready.services, record, grant_explore_cap(host))
     return HostedStart(partial(close_then_start, earlier.left, close, start))
@@ -1224,8 +1222,10 @@ def main(argv: list[str] | None = None) -> int:
     try:
         if persisted is not None:
             ready = ready_session(settings.workload, load_peers)
-            leg = final_only if args.command == FINAL_ONLY_COMMAND else resume
-            return leg(persisted, ready.peer_factory, ready.services)
+            if args.command == FINAL_ONLY_COMMAND:
+                return final_only(persisted, ready.peer_factory, ready.services)
+            deadline = deadline_after_downtime(persisted.layout, Clock().now())
+            return resume(persisted, ready.peer_factory, ready.services, deadline, None)
         return _start(settings, grant)
     except (EnvironmentIncomplete, PeersUnavailable, ImageCheckFailed, CacheBuildError, ToolboxInputsError) as exc:
         print(f"{PROG}: cannot run a session, {exc}", file=sys.stderr)

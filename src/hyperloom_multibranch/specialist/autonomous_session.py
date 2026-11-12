@@ -73,7 +73,7 @@ from hyperloom_multibranch.contracts.branch_log import BranchLogEntry, BranchLog
 from hyperloom_multibranch.contracts.blackboard.records import Learning
 from hyperloom_multibranch.contracts.blackboard.records import RetractionRef, TestRecord
 from hyperloom_multibranch.contracts.blackboard.interfaces import UnknownRequest
-from hyperloom_multibranch.contracts.blackboard.vocab import Conclusion, LearningKind, LeaseKind
+from hyperloom_multibranch.contracts.blackboard.vocab import Conclusion, LeaseKind
 from hyperloom_multibranch.contracts.repo import ExperimentRepo
 from hyperloom_multibranch.contracts.toolbox import Backpressure, BranchLease, LeaseCharge, RequestRejected
 from hyperloom_multibranch.specialist.agent_import import (
@@ -91,8 +91,8 @@ from hyperloom_multibranch.specialist.agent_import import (
     read_kept_change,
 )
 from hyperloom_multibranch.blackboard.local.agent_manifest import sanitized_manifest
-from hyperloom_multibranch.blackboard.local.blackboard import LEARNING_MAX_CHARS
 from hyperloom_multibranch.specialist.agent_knowledge import NOTES_FILE, IntegrationNotes
+from hyperloom_multibranch.specialist.agent_ledger import read_findings
 from hyperloom_multibranch.specialist.agent_manifest import WORKSPACE, AgentManifest, LedgerSource, read_field
 from hyperloom_multibranch.specialist.agent_onboarding import (
     AgentProcess,
@@ -493,12 +493,7 @@ class AutonomousSession:
 
         self._stopped.set()
         running = self._process is not None and self._process.returncode is None
-        if self._sandbox is not None:
-            try:
-                await self._sandbox.stop()
-            except SandboxUnavailable as error:
-                log.warning("the agent of %s could not be killed: %s", self._start.branch, error)
-                await self._note(f"the agent could not be killed: {error}")
+        await self._dropped()
         if running and self._manifest is not None and self._manifest.snapshots is not None:
             await self._note(f"the agent stopped: {self._exit_reason(self._manifest)}")
         watch_file = self._place.workspace / WATCH_FILE
@@ -506,6 +501,18 @@ class AutonomousSession:
             watch = KeepWatch.load(watch_file)
             await self._learn(self._manifest.ledger, watch)
             watch.save(watch_file)
+
+    async def _dropped(self) -> None:
+        """Stop the sandbox the agent runs in, its holder and scratch with it, when there is one; a sandbox whose agent
+        could not be killed is noted. The agent has no sandbox after."""
+
+        sandbox, self._sandbox = self._sandbox, None
+        if sandbox is not None:
+            try:
+                await sandbox.stop()
+            except SandboxUnavailable as error:
+                log.warning("the agent of %s could not be killed: %s", self._start.branch, error)
+                await self._note(f"the agent could not be killed: {error}")
 
     async def _running(self) -> tuple[AgentManifest, AgentProcess, AgentSandbox]:
         """The agent preflight started, or, in a run after a crash, the agent resumed by the stored manifest, and the
@@ -525,6 +532,7 @@ class AutonomousSession:
                 process = await sandbox.start(command, checkout, env)
             except SandboxGone as gone:
                 await self._note(f"the agent's sandbox ended ({gone})")
+                await self._dropped()
                 await self.release()
                 (self._place.workspace / LEASE_FILE).unlink()
                 sandbox = None
@@ -553,9 +561,15 @@ class AutonomousSession:
             raise SessionCrashed(f"the agent's install in its new sandbox failed: {failed}") from failed
         finally:
             if not installed:
-                await asyncio.shield(self._setup.toolbox.release_branch_sandbox(lease.lease_id))
+                await asyncio.shield(self._given_back(lease))
         self._hold(lease)
         return sandbox
+
+    async def _given_back(self, lease: BranchLease) -> None:
+        """Stop the sandbox of ``lease``, whose install failed, then give the lease back."""
+
+        await self._dropped()
+        await self._setup.toolbox.release_branch_sandbox(lease.lease_id)
 
     async def _lease(self, cards: int) -> BranchLease:
         """Lease ``cards`` for the branch's sandbox, for as long as is left until the branch's deadline.
@@ -1063,40 +1077,6 @@ class AutonomousSession:
         await self._place.blackboard.append_branch_log(entry)
 
 
-@dataclass(frozen=True)
-class Finding:
-    """One finding of an agent's ledger, as the learning it becomes: ``content`` names the agent's kind and id."""
-
-    id: str
-    kind: LearningKind
-    content: str
-
-
-def read_findings(path: Path, ledger: LedgerSource) -> list[Finding]:
-    """The findings of the kinds ``ledger`` maps that the ledger at ``path`` holds, each in its latest version, in the
-    order they first appear; a line the agent is still writing is left for the next read."""
-
-    try:
-        lines = path.read_text(encoding=ENCODING).splitlines()
-    except FileNotFoundError:
-        return []
-    latest: dict[str, Finding | None] = {}
-    for line in lines:
-        try:
-            entry = json.loads(line)
-        except json.JSONDecodeError:
-            continue
-        if not isinstance(entry, dict) or not isinstance(entry.get(ledger.id), str):
-            continue
-        kind, text = entry.get(ledger.kind), entry.get(ledger.text)
-        content = " ".join(f"{kind} {entry[ledger.id]}: {text}".split())
-        if len(content) > LEARNING_MAX_CHARS:
-            content = content[: LEARNING_MAX_CHARS - 1] + "\u2026"
-        fits = kind in ledger.kinds and isinstance(text, str)
-        latest[entry[ledger.id]] = Finding(entry[ledger.id], ledger.kinds[kind], content) if fits else None
-    return [finding for finding in latest.values() if finding is not None]
-
-
 def _without_refused(kept: KeptChange, launch: LaunchConfig, watch: KeepWatch) -> KeptChange:
     """``kept`` with each launch entry the toolbox refused before, and that it still runs with, set back to ``launch``'s."""
 
@@ -1192,9 +1172,7 @@ __all__ = [
     "WATCH_FILE",
     "AutonomousSession",
     "AutonomousSetup",
-    "Finding",
     "KeepWatch",
-    "read_findings",
     "run_seconds",
     "without_file",
 ]
