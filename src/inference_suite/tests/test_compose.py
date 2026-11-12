@@ -359,3 +359,27 @@ def test_a_launch_that_held_an_assumed_version_before_it_was_exempt_still_reads(
 def _assumed_config():
     server = _config().server
     return _config(server=replace(server, base=replace(server.base, digest=_ASSUMED_BASE.digest())))
+
+
+def test_the_guard_masks_the_servers_cards_for_rocr_and_numbers_them_from_zero_for_hip():
+    """ROCr opens every GPU it enumerates, whatever HIP's mask, and keeps memory on each: a server under a HIP mask
+    alone would hold every card of the machine, a parallel test's included. So the guard selects the cards for ROCr,
+    by their machine numbers, and HIP takes all of what ROCr then numbers from 0."""
+    launch = _launch(gpus=(4, 5, 6, 7))
+
+    assert launch.env["ROCR_VISIBLE_DEVICES"] == "4,5,6,7"
+    assert launch.env["HIP_VISIBLE_DEVICES"] == "0,1,2,3"
+    assert "CUDA_VISIBLE_DEVICES" not in launch.env
+    assert launch.env[GPU_MASK_ENV] == "4,5,6,7"
+    guard = {entry.name for entry in launch.env_sources if entry.source is LayerSource.GUARD}
+    assert {"ROCR_VISIBLE_DEVICES", "HIP_VISIBLE_DEVICES"} <= guard
+
+
+@pytest.mark.parametrize("name", ["ROCR_VISIBLE_DEVICES", "HIP_VISIBLE_DEVICES", "CUDA_VISIBLE_DEVICES"])
+@pytest.mark.parametrize("layer", ["user", "candidate"])
+def test_no_layer_may_set_a_device_mask_beside_the_guards(name, layer):
+    refusal = _refusal(**{layer: LaunchDelta(env_set={name: "0"})})
+
+    assert (refusal.step, refusal.source) == (FailedStep.CONFIG_INVALID, LayerSource(layer))
+    assert name in refusal.detail
+    assert name in runner_owned(_base()).env
