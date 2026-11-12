@@ -1,24 +1,21 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""What a resumed session may take over from the toolbox of its earlier leg: the baseline, and the keeps infra ended.
+"""Whether a resumed session may take over the baseline the toolbox of its earlier leg measured.
 
 A resume skips PRELUDE and judges every new test against the baseline the earlier leg measured, so that baseline must
 still measure what a new test measures. The toolbox records, when it accepts the session's first baseline test, what
 that test is measured on (:class:`MeasurementEnvironment`): the build, ``MEASUREMENT_EPOCH``, the node, the image digest,
 the card pool and the digest of the frozen base launch, in :data:`BASELINE_ENVIRONMENT_FILE` in its own session
-directory. The record is written once and never replaced. :func:`check_baseline_reusable` compares it with what a
-toolbox started now in the same directory would measure on, and raises :class:`BaselineNotReusable` with a one-line
-reason when anything differs or the record cannot say (a session from before the record, or one whose record lacks a
-field). It reads only: it takes no lock and writes nothing.
+directory. The record is written once and never replaced.
 
 A hosted session's tests run in the grant's sandboxes, not on the node of the application that submits them, and a
 restart of a hosted run reschedules that application onto another node, often as another account of the run's group.
-:func:`check_hosted_baseline_reusable` is the guard of that restart: it compares everything but the node
-(:data:`HOSTED_COMPARED`), with the card count of the runner template the session's tests run on in place of a pool.
-
-:func:`infra_ended_keeps` reads the toolbox's submit log for the keeps whose test the infrastructure ended before
-anything was measured, so the resume can submit them again; it reads only as well.
+:func:`check_hosted_baseline_reusable` is the guard of that restart: it compares the record with what a toolbox started
+now in the same directory would measure on, everything but the node (:data:`HOSTED_COMPARED`), with the card count of
+the runner template the session's tests run on in place of a pool, and raises :class:`BaselineNotReusable` with a
+one-line reason when anything differs or the record cannot say (a session from before the record, or one whose record
+lacks a field). It reads only: it takes no lock and writes nothing.
 """
 
 from __future__ import annotations
@@ -29,12 +26,9 @@ from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
 
-from hyperloom.contracts.measurement import Purpose, TestKind, TestRequest, TestResult, Validity
 from hyperloom_common.jsonio import read_json_strict
 from hyperloom_common.shared_storage import SHARED_FILE_MODE, publish_shared_bytes
-from hyperloom_multibranch.contracts.blackboard import INTEGRATION_BRANCH
 from hyperloom_multibranch.contracts.build import CodeVersion, code_version
-from hyperloom_multibranch.toolbox.submission_log import SUBMISSIONS_FILE, LogEntry, logged_entries
 
 #: The record of what the session's baseline was measured on, in the toolbox's session directory.
 BASELINE_ENVIRONMENT_FILE = "baseline-environment.json"
@@ -80,7 +74,7 @@ HOSTED_COMPARED = tuple(name for name in RECORDED_FIELDS if name != "node")
 
 @dataclass(frozen=True)
 class MeasuredOn:
-    """What a local toolbox knows of where its tests run; :meth:`record` adds the rest and writes the record.
+    """What a toolbox knows of where its tests run; :meth:`record` adds the rest and writes the record.
 
     ``toolbox_dir`` is the toolbox's session directory, where the base launch is frozen and the record is written.
     """
@@ -117,26 +111,6 @@ class MeasuredOn:
         return publish_shared_bytes(path, text.encode("utf-8"), mode=SHARED_FILE_MODE, make_parents=True)
 
 
-def check_baseline_reusable(toolbox_dir: Path, cards: Sequence[int]) -> None:
-    """Refuse a resume whose baseline was measured on something else than what the session would measure on now.
-
-    ``toolbox_dir`` is the toolbox's session directory of the session (``SessionLayout.toolbox``), ``cards`` the card
-    pool the resumed session hands its toolbox (``machine_cards()``). The record is compared with this build, the current
-    ``MEASUREMENT_EPOCH``, this node, the image this process names (``HYPERLOOM_ACTIVE_IMAGE_REF`` and
-    ``HYPERLOOM_ACTIVE_IMAGE_DIGEST``), the count of ``cards`` and the base launch the toolbox would launch from now (the
-    one frozen in ``toolbox_dir``, read and checked as a start reads it). Reads only; takes no lock and writes nothing.
-    Blocks, on git among others.
-
-    Raises:
-        BaselineNotReusable: With a one-line reason: the record is missing or unreadable, lacks a field, or differs from
-            now on any of them.
-    """
-
-    from hyperloom.sandbox.node import node_name
-
-    _compare(_recorded(toolbox_dir), _environment_now(toolbox_dir, node_name(), len(cards)), RECORDED_FIELDS)
-
-
 def check_hosted_baseline_reusable(toolbox_dir: Path, cards: int) -> None:
     """Refuse the resume of a hosted session whose baseline was measured on something else than what its tests would be
     measured on now; the guard of a hosted restart, which may run on another node and as another account of the run's
@@ -144,8 +118,9 @@ def check_hosted_baseline_reusable(toolbox_dir: Path, cards: int) -> None:
 
     ``toolbox_dir`` is the session's ``SessionLayout.toolbox``, ``cards`` the card count of the runner template the
     resumed session's tests run on (its TP). The record is compared with this build, the current ``MEASUREMENT_EPOCH``,
-    the image this process names, ``cards`` and the frozen base launch, as :func:`check_baseline_reusable` does, and
-    never with the node (:data:`HOSTED_COMPARED`). Reads only; takes no lock and writes nothing. Blocks.
+    the image this process names (``HYPERLOOM_ACTIVE_IMAGE_REF`` and ``HYPERLOOM_ACTIVE_IMAGE_DIGEST``), ``cards`` and
+    the base launch the toolbox would launch from now (the one frozen in ``toolbox_dir``, read and checked as a start
+    reads it), and never with the node (:data:`HOSTED_COMPARED`). Reads only; takes no lock and writes nothing. Blocks.
 
     Raises:
         BaselineNotReusable: With a one-line reason: the record is missing or unreadable, lacks a field, differs from
@@ -166,78 +141,6 @@ def _compare(recorded: Mapping[str, object], now: MeasurementEnvironment, fields
             was, is_now = _build_text(was), _build_text(dataclasses.asdict(is_now))
         if was != is_now:
             raise BaselineNotReusable(f"the baseline was measured with {name} {was!r} and this run has {is_now!r}")
-
-
-@dataclass(frozen=True)
-class KeepRef:
-    """A keep whose test the infrastructure ended before it measured anything.
-
-    ``branch_id`` is the branch that kept it, ``commit`` the commit in ``MB-repo`` the keep was measured against (its
-    request's parent), ``request_id`` the test, ``reason`` why it ended and ``request`` the test as it was submitted.
-    """
-
-    branch_id: str
-    commit: str
-    request_id: str
-    reason: str
-    request: TestRequest
-
-
-def infra_ended_keeps(toolbox_dir: Path) -> list[KeepRef]:
-    """The keeps in the submit log of the toolbox's session directory ``toolbox_dir`` whose last test ended
-    ``measurement_failed`` with no measured round, in the order they were submitted; none when there is no log.
-
-    A keep is how a branch's change is measured: a ``test`` of purpose ``explore`` on a branch other than the
-    integration branch. The log does not say which kind of branch submitted it, so the keeps of every branch are
-    returned and the caller keeps those of the branches it requeues. A keep submitted again, the same change on the same
-    branch against the same commit, is judged by its last test. A test that is still waiting, was withdrawn, or whose
-    submit failed is no keep that ended. Reads only. Blocks.
-
-    Raises:
-        OSError: The log cannot be read.
-        ValueError: A line of the log is no entry a replay reads.
-    """
-
-    path = toolbox_dir / SUBMISSIONS_FILE
-    if not path.exists():
-        return []
-    last: dict[tuple[str, str, str], tuple[LogEntry, TestRequest]] = {}
-    for entry in logged_entries(path):
-        if entry.aborted or not _is_keep(entry):
-            continue
-        request = TestRequest.from_document(entry.request)
-        last[(entry.branch, request.parent_commit, request.delta.fingerprint())] = (entry, request)
-    keeps = []
-    for entry, request in last.values():
-        result = _infra_ended(entry)
-        if result is not None:
-            ended = result.failure_class.value if result.failure_class is not None else "unclassified"
-            keeps.append(
-                KeepRef(
-                    entry.branch, request.parent_commit, entry.request_id, f"{ended}: {result.failure_reason}", request
-                )
-            )
-    return keeps
-
-
-def _is_keep(entry: LogEntry) -> bool:
-    request = entry.request
-    return (
-        request.get("kind") == TestKind.TEST.value
-        and request.get("purpose") == Purpose.EXPLORE.value
-        and entry.branch != INTEGRATION_BRANCH
-    )
-
-
-def _infra_ended(entry: LogEntry) -> TestResult | None:
-    """The result of ``entry`` when it ended ``measurement_failed`` with no measured round, else ``None``."""
-
-    if entry.outcome is None or "result" not in entry.outcome:
-        return None
-    result = TestResult.from_document(entry.outcome["result"])
-    if result.validity is not Validity.MEASUREMENT_FAILED:
-        return None
-    return None if any(round_.phase == "measure" for round_ in result.rounds) else result
 
 
 def _recorded(toolbox_dir: Path) -> Mapping[str, object]:
@@ -301,10 +204,7 @@ __all__ = [
     "HOSTED_COMPARED",
     "RECORDED_FIELDS",
     "BaselineNotReusable",
-    "KeepRef",
     "MeasuredOn",
     "MeasurementEnvironment",
-    "check_baseline_reusable",
     "check_hosted_baseline_reusable",
-    "infra_ended_keeps",
 ]
