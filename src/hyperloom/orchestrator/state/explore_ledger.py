@@ -38,5 +38,7 @@ def land_verdict(
     """
     shared_state.apply_explore_search_update(update, advance_round=False)
     for attribution in attributions:
-        shared_state.record_framework_lever_attribution(attribution["switch"], gain_pct=attribution["gain_pct"])
+        shared_state.record_framework_lever_attribution(
+            attribution["switch"], gain_pct=attribution["gain_pct"], source=str(attribution.get("source") or "")
+        )
     shared_state.save(session_dir)

@@ -1758,3 +1758,88 @@ async def test_a_bundle_screen_that_failed_is_recorded_inconclusive(tmp_path):
     levers = coord.shared_state.authored_framework_levers
     assert [(r["switch"], r["attributed_gain_pct"], r["attribution_source"]) for r in levers] == _SCREENED_ROWS
     assert coord.shared_state.cycle_bundle_screens == {"lever-bundle-c0-k": "inconclusive"}
+
+
+def _two_patch_levers():
+    state = _state()
+    state.record_authored_framework_levers([{"switch": "HL_HANGS"}], default_on=False, specialist_task_id="t-1")
+    state.record_authored_framework_levers([{"switch": "HL_FUSES"}], default_on=False, specialist_task_id="t-2")
+    return state
+
+
+def _variant(envs, extra_server_args=""):
+    from types import SimpleNamespace
+
+    return SimpleNamespace(extra_envs=envs, extra_server_args=extra_server_args, remove_args=[], unset_envs=[])
+
+
+def test_a_failed_round_with_only_one_lever_on_marks_that_lever_broken():
+    from hyperloom.orchestrator.actions.executors._integrate_vocabulary import ATTRIBUTION_REPLAY_BROKEN
+
+    levers = _two_patch_levers().authored_framework_levers
+
+    assert manifest.solo_lever_failure(levers, _variant({"hl_hangs": "1"})) == [
+        {"switch": "HL_HANGS", "gain_pct": None, "source": ATTRIBUTION_REPLAY_BROKEN}
+    ]
+
+
+@pytest.mark.parametrize(
+    ("envs", "extra_server_args"),
+    [
+        ({"HL_HANGS": "1", "HL_FUSES": "1"}, ""),
+        ({"HL_HANGS": "1"}, "--x 1"),
+        ({"HL_HANGS": "0"}, ""),
+        ({"HL_UNKNOWN": "1"}, ""),
+    ],
+    ids=["two-levers", "extra-args", "switched-off", "unregistered"],
+)
+def test_a_failed_round_that_is_not_one_lever_alone_blames_no_lever(envs, extra_server_args):
+    variant = _variant(envs, extra_server_args)
+    assert manifest.solo_lever_failure(_two_patch_levers().authored_framework_levers, variant) == []
+
+
+def test_a_broken_lever_is_neither_bundled_nor_pending():
+    """A lever that broke the server alone only breaks a bundle round the same way, and is not worth re-running."""
+    from hyperloom.orchestrator.actions.executors._integrate_vocabulary import ATTRIBUTION_REPLAY_BROKEN
+
+    state = _two_patch_levers()
+    assert manifest.dormant_lever_bundle(state) is not None
+
+    state.record_framework_lever_attribution("HL_HANGS", gain_pct=None, source=ATTRIBUTION_REPLAY_BROKEN)
+
+    assert manifest.dormant_lever_bundle(state) is None
+    assert all("HL_HANGS" not in v.get("extra_envs", {}) for v in manifest.framework_lever_grid(state))
+
+
+def test_a_landed_verdict_keeps_the_attribution_source(tmp_path):
+    from hyperloom.orchestrator.actions.executors._integrate_vocabulary import ATTRIBUTION_REPLAY_BROKEN
+    from hyperloom.orchestrator.state.explore_ledger import land_verdict
+
+    state = _two_patch_levers()
+    attribution = {"switch": "HL_HANGS", "gain_pct": None, "source": ATTRIBUTION_REPLAY_BROKEN}
+
+    land_verdict(state, tmp_path, {"tested": {}}, [attribution])
+
+    (row,) = [r for r in state.authored_framework_levers if r["switch"] == "HL_HANGS"]
+    assert row["attribution_source"] == ATTRIBUTION_REPLAY_BROKEN
+
+
+def test_an_explore_round_that_fails_with_one_lever_on_records_it_broken(tmp_path):
+    from types import SimpleNamespace
+
+    from hyperloom.orchestrator.actions.executors._grid_base import TS_FAILED, GridVariant
+    from hyperloom.orchestrator.actions.executors._integrate_vocabulary import ATTRIBUTION_REPLAY_BROKEN
+    from hyperloom.orchestrator.actions.executors.explore import _ExploreRound
+
+    state = _two_patch_levers()
+    round_ = _ExploreRound.__new__(_ExploreRound)
+    round_.tested, round_.rejected, round_.losers, round_.lever_payload = {}, [], [], []
+    round_.ss, round_.session_dir = state, tmp_path
+    round_.ctx = SimpleNamespace(task=SimpleNamespace(task_id="t-explore"))
+    gv = GridVariant(name="hangs", extra_envs={"HL_HANGS": "1"})
+
+    round_._record(gv, {"fingerprint": "fp-hangs", "name": "hangs", "outcome": TS_FAILED, "reason": "watchdog"})
+
+    (row,) = [r for r in state.authored_framework_levers if r["switch"] == "HL_HANGS"]
+    assert row["attribution_source"] == ATTRIBUTION_REPLAY_BROKEN
+    assert manifest.dormant_lever_bundle(state) is None
