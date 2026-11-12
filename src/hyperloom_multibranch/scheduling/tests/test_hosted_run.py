@@ -2,11 +2,13 @@
 # SPDX-License-Identifier: MIT
 
 """What a hosted run reads from the host and writes back: the grant's bound on the session's time, the stop the
-grant's end sends, the files that tell the host whether to start the run again, and the isolation its agents must
-have. The mapping of the spec onto ``run`` is pinned through the command in ``test_cli``."""
+grant's end sends, the files that tell the host whether to start the run again, the image a spec measured on this
+container's cards must name, and the isolation its agents must have. The mapping of the spec onto ``run`` is pinned
+through the command in ``test_cli``."""
 
 from __future__ import annotations
 
+import dataclasses
 import json
 import logging
 import os
@@ -30,8 +32,6 @@ from hyperloom.hosted.campaign import CampaignSpec, parse_campaign
 from hyperloom.hosted.host_info import HostInfo, read_host_info
 from hyperloom_multibranch.scheduling import hosted_run as hosted_run_module
 from hyperloom_multibranch.scheduling.budget import MB_CLOSE_GRACE_CAP_SECONDS
-from hyperloom_multibranch.scheduling.launch_isolation import HOSTED, LaunchIsolation, launch_isolation
-from hyperloom_multibranch.scheduling.peers import PeersUnavailable
 from hyperloom_multibranch.scheduling.hosted_run import (
     GRANT_MARGIN_SECONDS,
     GrantDeadline,
@@ -42,12 +42,44 @@ from hyperloom_multibranch.scheduling.hosted_run import (
     record_session,
     recorded_session,
     require_hosted_isolation,
+    require_local_image,
     run_argv,
     share_with_the_group,
     write_final_exit,
 )
+from hyperloom_multibranch.scheduling.launch_isolation import HOSTED, LaunchIsolation, launch_isolation
+from hyperloom_multibranch.scheduling.peers import PeersUnavailable
 
 CREATED = datetime(2026, 10, 28, 12, 0, tzinfo=timezone.utc)
+DIGEST = "sha256:" + "2" * 64
+#: The measurement pins of a container that runs the image ``registry.example/vllm:v1`` at :data:`DIGEST`.
+PINS = {"HYPERLOOM_ACTIVE_IMAGE_REF": "registry.example/vllm:v1", "HYPERLOOM_ACTIVE_IMAGE_DIGEST": DIGEST}
+LAYER = Path("/opt/layer")
+LAYER_BWRAP = str(LAYER / "bin" / "bwrap")
+ACCOUNT = RunAs(user="hl-specialist", uid=1500, gid=1500, groups=(1500,), home="/home/hl", drop_tool="/usr/bin/setpriv")
+DENIED = "bwrap: setting up uid map: Permission denied"
+
+
+def _spec(
+    measurement: str,
+    image: str = f"registry.example/vllm@{DIGEST}",
+    hardware: dict[str, int] | None = None,
+    **sections: dict[str, object],
+) -> CampaignSpec:
+    return parse_campaign(
+        {
+            "schema": "hyperloom.campaign-spec/v1",
+            "flow": "multibranch",
+            "model": {"path": "/models/Llama-3-8B"},
+            "framework": {"name": "vllm", "image": image},
+            "hardware": {"gpu_type": "mi355x", "tp": 1, **(hardware or {})},
+            "workload": {"conc": 16, "isl": 1024, "osl": 512, "precision": "fp8"},
+            "budget": {"max_hours": 1},
+            "placement": {"profile": "hosted-gpu", "measurement": measurement},
+            "multibranch": {"workload": "inferencex"},
+            **sections,
+        }
+    )
 
 
 def _host(tmp_path: Path, **grant: int) -> HostInfo:
@@ -113,28 +145,34 @@ def test_the_host_reads_a_final_ending_and_the_session_a_restart_finishes(tmp_pa
     assert exit_document == {"final": True, "returncode": 2, "error": "multibranch.workload is missing"}
 
 
-def _document(**multibranch: object) -> dict[str, object]:
-    return {
-        "schema": "hyperloom.campaign-spec/v1",
-        "flow": "multibranch",
-        "model": {"path": "/models/Llama-3-8B"},
-        "framework": {"name": "vllm", "image": "registry.example/vllm@sha256:" + "2" * 64},
-        "hardware": {"gpu_type": "mi355x", "tp": 1},
-        "workload": {"conc": 16, "isl": 1024, "osl": 512, "precision": "fp8"},
-        "budget": {"max_hours": 1},
-        "placement": {"profile": "hosted-gpu", "measurement": "hosted"},
-        "multibranch": {"workload": "inferencex", **multibranch},
-    }
-
-
-def _spec(**multibranch: object) -> CampaignSpec:
-    return parse_campaign(_document(**multibranch))
+@pytest.mark.parametrize("measurement", ["local", "hosted"])
+def test_the_run_command_line_says_where_the_spec_measures(measurement: str) -> None:
+    assert f"--measurement={measurement}" in run_argv(_spec(measurement), 1.0, 8)
 
 
 def test_an_inferencex_spec_runs_its_session_at_the_hardware_ep_it_names() -> None:
-    spec = parse_campaign({**_document(), "hardware": {"gpu_type": "mi355x", "tp": 8, "ep": 8}})
+    argv = run_argv(_spec("hosted", hardware={"tp": 8, "ep": 8}), 1.0, 1)
 
-    assert {"--workload=inferencex", "--tp=8", "--ep=8"} <= set(run_argv(spec, 1.0, 1))
+    assert {"--workload=inferencex", "--tp=8", "--ep=8"} <= set(argv)
+
+
+def test_a_spec_without_a_launch_section_maps_onto_run() -> None:
+    assert "--workload=inferencex" in run_argv(_spec("hosted"), 1.0, 1)
+
+
+def test_a_spec_gives_its_base_launch_as_the_reference_script_of_run() -> None:
+    spec = _spec("hosted", multibranch={"workload": "inferencex", "reference_script": "/data/launch.sh"})
+
+    assert "--reference-script=/data/launch.sh" in run_argv(spec, 1.0, 1)
+    assert not any(arg.startswith("--reference-script") for arg in run_argv(_spec("hosted"), 1.0, 1))
+
+
+@pytest.mark.parametrize("path", [7, ["/data/launch.sh"], "", "  "])
+def test_a_reference_script_that_is_no_path_is_refused_naming_the_field(path: object) -> None:
+    spec = _spec("hosted", multibranch={"workload": "inferencex", "reference_script": path})
+
+    with pytest.raises(HostedRefused, match="multibranch.reference_script must be the path of a launch script"):
+        run_argv(spec, 1.0, 1)
 
 
 @pytest.mark.parametrize(
@@ -146,46 +184,47 @@ def test_an_inferencex_spec_runs_its_session_at_the_hardware_ep_it_names() -> No
     ],
     ids=["server-args", "extra-env", "both"],
 )
-def test_a_spec_whose_launch_a_multibranch_run_would_not_read_is_refused_naming_the_field(
+def test_a_spec_whose_launch_a_multibranch_run_would_not_read_is_refused_pointing_at_the_reference_script(
     launch: dict[str, object], named: str
 ) -> None:
-    spec = parse_campaign({**_document(), "launch": launch})
+    spec = _spec("hosted", launch=launch, multibranch={"workload": "inferencex", "reference_script": "/data/l.sh"})
 
     with pytest.raises(HostedRefused, match=named) as refused:
         run_argv(spec, 1.0, 1)
-    assert "its base launch is resolved from the recipe sources" in str(refused.value)
-
-
-def test_a_spec_without_a_launch_section_maps_onto_run() -> None:
-    assert "--workload=inferencex" in run_argv(_spec(), 1.0, 1)
+    assert "give the base launch as multibranch.reference_script" in str(refused.value)
 
 
 @pytest.mark.parametrize(
-    ("given", "switches"),
-    [
-        ({}, []),  # run's default: on
-        ({"make_before_break": True}, ["--make-before-break"]),
-        ({"make_before_break": False}, ["--no-make-before-break"]),
-    ],
+    "image",
+    [f"registry.example/vllm@{DIGEST}", f"registry.example/vllm:v1@{DIGEST}", f"mirror.example/any/name@{DIGEST}"],
 )
-def test_the_operator_turns_make_before_break_on_or_off_in_the_spec(
-    given: dict[str, bool], switches: list[str]
-) -> None:
-    argv = run_argv(_spec(**given), 1.0, 8)
-    assert [arg for arg in argv if arg.endswith("make-before-break")] == switches
+def test_a_spec_measured_here_names_the_image_this_container_runs_by_its_digest(image: str) -> None:
+    require_local_image(_spec("local", image), PINS)
 
 
-@pytest.mark.parametrize("given", ["false", 0, 1])
-def test_a_make_before_break_that_is_not_true_or_false_is_refused(given: object) -> None:
-    with pytest.raises(HostedRefused, match="multibranch.make_before_break must be true or false"):
-        run_argv(_spec(make_before_break=given), 1.0, 8)
+@pytest.mark.parametrize(
+    "image",
+    ["submitted.example/vllm:v1", f"submitted.example/vllm@sha256:{'3' * 64}", f"submitted.example/vllm@{DIGEST}0"],
+    ids=["by-tag", "another-digest", "a-longer-digest"],
+)
+def test_a_spec_measured_here_on_another_image_is_refused_naming_the_one_this_container_runs(image: str) -> None:
+    with pytest.raises(HostedRefused) as refused:
+        require_local_image(_spec("local", image), PINS)
+
+    assert str(refused.value) == (
+        f"placement.measurement 'local' measures the image this container runs, registry.example/vllm:v1 at {DIGEST}:"
+        " framework.image must name it by that digest"
+    )
+    assert image not in str(refused.value), "a string the submitter wrote is not echoed"
 
 
-LAYER = Path("/opt/layer")
-LAYER_BWRAP = str(LAYER / "bin" / "bwrap")
-#: An account the chooser takes, as ``HYPERLOOM_SPECIALIST_USER`` names it.
-ACCOUNT = RunAs(user="hl-specialist", uid=1500, gid=1500, groups=(1500,), home="/home/hl", drop_tool="/usr/bin/setpriv")
-DENIED = "bwrap: setting up uid map: Permission denied"
+def test_a_spec_measured_here_without_the_pins_is_refused_naming_what_is_missing() -> None:
+    with pytest.raises(PeersUnavailable, match="HYPERLOOM_ACTIVE_IMAGE_DIGEST not set"):
+        require_local_image(_spec("local"), {"HYPERLOOM_ACTIVE_IMAGE_REF": "registry.example/vllm:v1"})
+
+
+def test_a_spec_measured_in_the_grants_sandboxes_is_not_held_to_this_containers_image() -> None:
+    require_local_image(_spec("hosted", "registry.example/vllm:v1"), {})
 
 
 class Probes:
@@ -242,7 +281,7 @@ def test_a_hosted_run_marks_its_process_with_the_layers_bubblewrap_and_no_other(
     probed = probes({LAYER_BWRAP: ()})
 
     with caplog.at_level(logging.INFO):
-        require_hosted_isolation({HOST_LAYER_ENV: str(LAYER)})
+        require_hosted_isolation(_spec("hosted"), {HOST_LAYER_ENV: str(LAYER)})
 
     assert caplog.records == [], "the session says how it launches its agents once, when its peers are built"
     assert probed.asked == [LAYER_BWRAP], "the account is chosen, and the layer's bubblewrap probed for the Ray path"
@@ -254,32 +293,84 @@ def test_a_hosted_run_marks_its_process_with_the_layers_bubblewrap_and_no_other(
 
 
 @pytest.mark.usefixtures("account")
-def test_a_hosted_run_with_an_account_needs_only_its_specialists_isolated_here(probes: Callable[..., Probes]) -> None:
+def test_a_hosted_run_measured_in_the_grants_sandboxes_needs_only_its_specialists_isolated_here(
+    probes: Callable[..., Probes],
+) -> None:
     probes({LAYER_BWRAP: (DENIED,)})
 
-    require_hosted_isolation({HOST_LAYER_ENV: str(LAYER)})
+    require_hosted_isolation(_spec("hosted"), {HOST_LAYER_ENV: str(LAYER)})
 
     assert launch_isolation(local=False) == LaunchIsolation(agent_isolation.ACCOUNT, HOSTED, HOSTED, True, ())
 
 
-def test_a_hosted_run_with_no_account_starts_with_its_specialists_under_the_layers_bubblewrap(
+@pytest.mark.usefixtures("account")
+def test_a_hosted_run_whose_runner_would_start_its_specialists_unconfined_is_refused_naming_them(
+    probes: Callable[..., Probes], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    probes({LAYER_BWRAP: ()})
+    unconfined = LaunchIsolation(agent_isolation.NONE, HOSTED, HOSTED, True, ("the runner asks no chooser",))
+    monkeypatch.setattr(hosted_run_module, "launch_isolation", lambda *, local: unconfined)
+
+    with pytest.raises(PeersUnavailable) as refused:
+        require_hosted_isolation(_spec("hosted"), {HOST_LAYER_ENV: str(LAYER)})
+
+    assert str(refused.value) == (
+        "a hosted run launches nothing unconfined beside its credentials, and here specialists run unconfined on this"
+        " host (the runner asks no chooser)"
+    )
+
+
+@pytest.mark.usefixtures("account")
+def test_a_hosted_run_measured_here_is_refused_while_its_layers_bubblewrap_cannot_sandbox_its_sandboxes_and_tests(
     probes: Callable[..., Probes],
+) -> None:
+    probes({LAYER_BWRAP: (DENIED,)})
+
+    with pytest.raises(PeersUnavailable) as refused:
+        require_hosted_isolation(_spec("local"), {HOST_LAYER_ENV: str(LAYER)})
+
+    assert str(refused.value) == (
+        "a hosted run launches nothing unconfined beside its credentials, and here agent and dev sandboxes and tests"
+        f" will be refused (running them as an account: {agent_isolation.SANDBOX_ACCOUNT};"
+        f" bubblewrap ({LAYER_BWRAP}, 0.13.1): {DENIED}; running them as an account: {agent_isolation.TEST_ACCOUNT})"
+    )
+
+
+@pytest.mark.parametrize("measurement", ["local", "hosted"])
+def test_a_hosted_run_with_no_account_starts_with_its_specialists_under_the_layers_bubblewrap(
+    measurement: str, probes: Callable[..., Probes]
 ) -> None:
     probed = probes({LAYER_BWRAP: ()})
 
-    require_hosted_isolation({HOST_LAYER_ENV: str(LAYER)})
+    require_hosted_isolation(_spec(measurement), {HOST_LAYER_ENV: str(LAYER)})
 
-    assert launch_isolation(local=False) == LaunchIsolation(agent_isolation.BWRAP, HOSTED, HOSTED, True, ())
+    here = agent_isolation.BWRAP if measurement == "local" else HOSTED
+    assert launch_isolation(local=measurement == "local") == LaunchIsolation(
+        agent_isolation.BWRAP, here, here, True, ()
+    )
     assert set(probed.asked) == {LAYER_BWRAP}, "the runner's chooser takes the layer's bubblewrap for the specialists"
 
 
+@pytest.mark.usefixtures("account")
+def test_a_hosted_run_measured_here_starts_once_every_launch_here_is_isolated(probes: Callable[..., Probes]) -> None:
+    probed = probes({LAYER_BWRAP: ()})
+
+    require_hosted_isolation(_spec("local"), {HOST_LAYER_ENV: str(LAYER)})
+
+    assert launch_isolation(local=True) == LaunchIsolation(
+        agent_isolation.ACCOUNT, agent_isolation.BWRAP, agent_isolation.BWRAP, True, ()
+    )
+    assert set(probed.asked) == {LAYER_BWRAP}, "the sandboxes and tests here use the layer's bubblewrap"
+
+
+@pytest.mark.parametrize("measurement", ["local", "hosted"])
 def test_a_hosted_run_whose_host_names_no_layer_is_refused_and_probes_no_bubblewrap(
-    probes: Callable[..., Probes],
+    measurement: str, probes: Callable[..., Probes]
 ) -> None:
     probed = probes({LAYER_BWRAP: ()})
 
     with pytest.raises(PeersUnavailable) as refused:
-        require_hosted_isolation({})
+        require_hosted_isolation(_spec(measurement), {})
 
     assert str(refused.value) == (
         f"agents cannot be isolated on this host: running them as an account: {SPECIALIST_USER_ENV} is not set; "
@@ -294,28 +385,11 @@ def test_a_hosted_run_where_no_tier_can_isolate_a_specialist_is_refused_naming_b
     probes({LAYER_BWRAP: (DENIED,)})
 
     with pytest.raises(PeersUnavailable) as refused:
-        require_hosted_isolation({HOST_LAYER_ENV: str(LAYER)})
+        require_hosted_isolation(_spec("hosted"), {HOST_LAYER_ENV: str(LAYER)})
 
     assert str(refused.value) == (
         f"agents cannot be isolated on this host: running them as an account: {SPECIALIST_USER_ENV} is not set; "
         f"bubblewrap ({LAYER_BWRAP}, 0.13.1): {DENIED}"
-    )
-
-
-@pytest.mark.usefixtures("account")
-def test_a_hosted_run_whose_runner_would_start_its_specialists_unconfined_is_refused_naming_them(
-    probes: Callable[..., Probes], monkeypatch: pytest.MonkeyPatch
-) -> None:
-    probes({LAYER_BWRAP: ()})
-    unconfined = LaunchIsolation(agent_isolation.NONE, HOSTED, HOSTED, True, ("the runner asks no chooser",))
-    monkeypatch.setattr(hosted_run_module, "launch_isolation", lambda *, local: unconfined)
-
-    with pytest.raises(PeersUnavailable) as refused:
-        require_hosted_isolation({HOST_LAYER_ENV: str(LAYER)})
-
-    assert str(refused.value) == (
-        "a hosted run launches nothing unconfined beside its credentials, and here specialists run unconfined on this"
-        " host (the runner asks no chooser)"
     )
 
 
@@ -325,7 +399,7 @@ def test_a_bubblewrap_that_gives_no_answer_in_time_leaves_the_run_to_be_started_
     probes({LAYER_BWRAP: (f"bubblewrap at {LAYER_BWRAP}: no answer in 10 s",)}, transient=True)
 
     with pytest.raises(TimeoutError, match="no answer in 10 s"):
-        require_hosted_isolation({HOST_LAYER_ENV: str(LAYER)})
+        require_hosted_isolation(_spec("local"), {HOST_LAYER_ENV: str(LAYER)})
 
 
 def _layer(tmp_path: Path, bwrap_target: str | None) -> Path:
@@ -344,17 +418,16 @@ def _layer(tmp_path: Path, bwrap_target: str | None) -> Path:
 
 
 @pytest.mark.agent_isolation
-@pytest.mark.usefixtures("unmarked")
-def test_a_hosted_run_with_no_account_and_a_real_layer_bubblewrap_starts_its_specialists_under_it(
+@pytest.mark.usefixtures("account")
+def test_a_hosted_runs_later_launches_use_a_real_layer_bubblewrap_and_never_the_one_on_path(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     real = usable_bwrap()
     layer = _layer(tmp_path, str(real.path))
     monkeypatch.setenv("PATH", f"{tmp_path / 'image-bin'}:/usr/bin:/bin")
 
-    require_hosted_isolation({HOST_LAYER_ENV: str(layer)})
+    require_hosted_isolation(_spec("hosted"), {HOST_LAYER_ENV: str(layer)})
 
-    assert launch_isolation(local=False) == LaunchIsolation(agent_isolation.BWRAP, HOSTED, HOSTED, True, ())
     later = agent_isolation.choose_sandbox_isolation()
     assert isinstance(later, agent_isolation.BwrapIsolation), later
     version = ".".join(map(str, real.version or ()))
@@ -369,10 +442,67 @@ def test_a_hosted_run_whose_layer_has_no_bubblewrap_is_refused_naming_it(
     monkeypatch.setenv("PATH", f"{tmp_path / 'image-bin'}:/usr/bin:/bin")
 
     with pytest.raises(PeersUnavailable) as refused:
-        require_hosted_isolation({HOST_LAYER_ENV: str(layer)})
+        require_hosted_isolation(_spec("local"), {HOST_LAYER_ENV: str(layer)})
 
     assert f"bubblewrap at {layer / 'bin' / 'bwrap'}: No such file or directory" in str(refused.value)
     assert "not the layer bubblewrap" not in str(refused.value)
+
+
+@pytest.mark.agent_isolation
+@pytest.mark.usefixtures("unmarked")
+def test_a_hosted_run_with_no_account_and_a_real_layer_bubblewrap_starts_its_specialists_under_it(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    real = usable_bwrap()
+    layer = _layer(tmp_path, str(real.path))
+    monkeypatch.setenv("PATH", f"{tmp_path / 'image-bin'}:/usr/bin:/bin")
+
+    require_hosted_isolation(_spec("hosted"), {HOST_LAYER_ENV: str(layer)})
+
+    assert launch_isolation(local=False) == LaunchIsolation(agent_isolation.BWRAP, HOSTED, HOSTED, True, ())
+    later = agent_isolation.choose_sandbox_isolation()
+    assert isinstance(later, agent_isolation.BwrapIsolation), later
+    version = ".".join(map(str, real.version or ()))
+    assert later.shown == f"{version} {layer / 'bin' / 'bwrap'}"
+
+
+@pytest.mark.agent_isolation
+@pytest.mark.usefixtures("unmarked")
+def test_a_hosted_run_with_no_account_and_a_real_layer_bubblewrap_measures_here_with_every_launch_under_it(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    real = usable_bwrap()
+    layer = _layer(tmp_path, str(real.path))
+    monkeypatch.setenv("PATH", f"{tmp_path / 'image-bin'}:/usr/bin:/bin")
+
+    require_hosted_isolation(_spec("local"), {HOST_LAYER_ENV: str(layer)})
+
+    assert launch_isolation(local=True) == LaunchIsolation(
+        agent_isolation.BWRAP, agent_isolation.BWRAP, agent_isolation.BWRAP, True, ()
+    )
+
+
+@pytest.mark.parametrize(
+    ("given", "switches"),
+    [
+        ({}, []),  # run's default: on
+        ({"make_before_break": True}, ["--make-before-break"]),
+        ({"make_before_break": False}, ["--no-make-before-break"]),
+    ],
+)
+def test_the_operator_turns_make_before_break_on_or_off_in_the_spec(
+    given: dict[str, bool], switches: list[str]
+) -> None:
+    spec = dataclasses.replace(_spec("hosted"), multibranch={"workload": "inferencex", **given})
+    argv = run_argv(spec, 1.0, 8)
+    assert [arg for arg in argv if arg.endswith("make-before-break")] == switches
+
+
+@pytest.mark.parametrize("given", ["false", 0, 1])
+def test_a_make_before_break_that_is_not_true_or_false_is_refused(given: object) -> None:
+    spec = dataclasses.replace(_spec("hosted"), multibranch={"workload": "inferencex", "make_before_break": given})
+    with pytest.raises(HostedRefused, match="multibranch.make_before_break must be true or false"):
+        run_argv(spec, 1.0, 8)
 
 
 @pytest.fixture

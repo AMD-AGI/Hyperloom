@@ -42,11 +42,6 @@ These are set in the app container's environment.
 The model is named by the campaign spec (`model.path`), not by a variable. The app host reads the model's tokenizer
 files at that path.
 
-A multi-branch spec resolves its base launch from the recipe sources (InferenceX, the framework's cookbook, the default
-table), as `hyperloom-multibranch run` does, and does not read `launch.server_args` or `launch.extra_env`, which only
-flow `single` reads: a spec that sets either ends the run (exit code 2), naming the field, instead of running without
-it.
-
 A hosted run starts nothing unconfined in the app container, beside its credentials: its specialists run as the account
 `HYPERLOOM_SPECIALIST_USER` names where it can be used, else under the layer's bubblewrap (`HYPERLOOM_HOST_LAYER`).
 Where neither can isolate them, the run ends before anything starts, naming both reasons (exit code 1); a bubblewrap
@@ -101,6 +96,34 @@ With the checked step, a sandbox that does not find the entry, finds one that do
 fails its start with `runner_start_failed`. An entry built before entries had `source.tar` is refused where it is built:
 the build fails with `CacheConflict`.
 
+## The session's base launch
+
+A hosted multi-branch session resolves its base launch as `hyperloom-multibranch run` does: from InferenceX
+(`multibranch.inferencex_commit` pins the commit), then the framework's cookbook, then the default table. When none of
+them gives a launch that starts on the cluster's hardware, give the launch yourself as `multibranch.reference_script`,
+the path of a shell launch script on the app host (for example on the storage `USER_DATA_PATH` is on), which the
+session freezes as its base as `--reference-script` does. It wins over every recipe source. Its literal `export
+NAME=value` lines are the server's environment, and its server command line carries the flags; the command's TP and EP
+must be the spec's `hardware.tp` and `hardware.ep`, and an export or a flag set from a shell variable is refused.
+
+```shell
+# /mnt/shared/hyperloom/launch/dsv4-flash-mi355x.sh
+export AITER_BF16_FP8_MOE_BOUND=0
+export SGLANG_USE_AITER=1
+python3 -m sglang.launch_server --model-path /mnt/shared/models/DeepSeek-V4-Flash --tp 8 --ep-size 8 \
+    --trust-remote-code --mem-fraction-static 0.8
+```
+
+```json
+"framework": {"name": "sglang", "image": "<image>"},
+"hardware": {"gpu_type": "mi355x", "tp": 8, "ep": 8},
+"multibranch": {"workload": "inferencex", "reference_script": "/mnt/shared/hyperloom/launch/dsv4-flash-mi355x.sh"}
+```
+
+A multi-branch spec does not take `launch.server_args` or `launch.extra_env`, which only flow `single` reads: a spec
+that sets either ends the run (exit code 2), naming `multibranch.reference_script`, instead of running without them. A
+script that cannot serve as the base ends the run the same way, naming why.
+
 ## Dev sandbox template
 
 Only a session that lends dev sandboxes (`multibranch.dev_leases`, `--dev-leases`) or runs autonomous agents
@@ -113,6 +136,31 @@ host's LLM gateway variables (`ANTHROPIC_*`, `OPENAI_*`) and its CA bundle varia
 paths must exist in the sandbox too. The gateway variables include its credentials, which any command in the sandbox can
 read, so give the app host a gateway key that agents' commands may see. A lease lives as long as its holder needs it,
 bounded by the grant's `max_runtime_sec`.
+
+## One node: measuring on the app container's own cards
+
+A spec with `placement.measurement: local` and `placement.profile: hosted-gpu` measures on the cards of the app
+container itself, as `hyperloom-multibranch run` does on a machine's: tests, dev sandboxes and autonomous agents all
+run in the app container, so the run needs no measurement or `dev` template, no sandbox key, no
+`HYPERLOOM_SOURCE_REPO`/`HYPERLOOM_SOURCE_SHA` for the runner cache, and no grant. `placement.measurement: local` with
+`hosted-cpu` is refused. What changes on the app host:
+
+- Give the container the node's cards. As many tests run at once as its cards hold at the spec's TP, at most
+  `placement.max_parallel_tests`.
+- Every test runs the app container's own framework, so `HYPERLOOM_ACTIVE_IMAGE_REF` and
+  `HYPERLOOM_ACTIVE_IMAGE_DIGEST` name the image the app container runs, and the spec's `framework.image` must name it by
+  that digest (`<repository>@sha256:<digest>`); any other image is refused (exit code 2), and missing pins end the run
+  (exit code 1).
+- `HYPERLOOM_GRANT_LIMITS` is optional. Without it the spec's `budget.max_hours` bounds the session; with a
+  `max_runtime_sec`, the earlier of the two does. Its other totals are not read.
+- `HYPERLOOM_RUNNER_CACHE` is still required: the session stages its prompt sets and the inference_suite staging
+  every test runs there.
+- The agent and dev sandboxes and the tests run in this container, beside the run's credentials, so the run starts only
+  where they run isolated, as the specialists must: under the layer's bubblewrap (`HYPERLOOM_HOST_LAYER`). Where it
+  cannot sandbox them, the run ends before anything starts, naming them and why (exit code 1).
+- Without a visible-device mask, the cards are as many as `rocm-smi` shows, and a container that holds fewer render
+  nodes (`/dev/dri/renderD*`) than that is refused, naming both counts: set `ROCR_VISIBLE_DEVICES` to the cards it was
+  given.
 
 ## Example: clusters with an NFS share
 
