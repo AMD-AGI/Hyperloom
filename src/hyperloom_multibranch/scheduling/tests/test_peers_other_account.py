@@ -22,6 +22,7 @@ import pytest
 
 import hyperloom_multibranch
 from hyperloom.common.benchmark_config import BENCHMARK_CONFIG_ENV
+from hyperloom.inference_optimizer.session.paths import ENV_CURRENT_SESSION_DIR
 from hyperloom.measure.archive import BUNDLE_DIR_MODE, DirResultArchive
 from hyperloom.measure.bundle import LANDED_DIR_MODE, LANDED_FILE_MODE, materialize, verify_bundle
 from hyperloom.measure.compile import LocalBlobStore
@@ -61,7 +62,14 @@ def build_peers(workspace: str, root: str | None, agentx: bool) -> dict[str, str
     does; a new session in ``workspace`` that froze its base launch when ``root`` is ``None``. Its directory."""
 
     workload = _workload(agentx)
-    for name in (*workload_environment(workload), BENCHMARK_CONFIG_ENV, "GPU_TYPE", "HYPERLOOM_KB_URL"):
+    # what an earlier test of the same worker pinned is no leg's, nor the session directory it left set
+    for name in (
+        *workload_environment(workload),
+        BENCHMARK_CONFIG_ENV,
+        ENV_CURRENT_SESSION_DIR,
+        "GPU_TYPE",
+        "HYPERLOOM_KB_URL",
+    ):
         os.environ.pop(name, None)
     os.environ["HL_MODEL_BASE"] = str(Path(workspace) / "models")
     suite_publish.publish_own_inference_suite = _Publishes()  # no staging is fetched here
