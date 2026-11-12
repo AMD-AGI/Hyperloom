@@ -8,7 +8,8 @@ A round's GPUs are the server's ``ROCR_VISIBLE_DEVICES`` numbers, which ROCm ass
 another process holds would make the server fail, or worse, measure beside a foreign workload, so the round refuses
 before it spawns anything. amd-smi lists a process on every GPU it opened, and a ROCm process opens every GPU ROCr
 enumerates whatever its HIP mask (the round's own server runs under a ROCr mask of its GPUs), keeping its page tables
-and runtime context resident on each; so a process holds a GPU only when the VRAM amd-smi reports for it on that card (read per card from the process's DRM fdinfo) exceeds 1 GiB.
+and runtime context resident on each; so a process holds a GPU only when the VRAM amd-smi reports for it on that card
+(read per card from the process's DRM fdinfo) exceeds 1 GiB.
 
 A GPU that is only held is read again until its holder exits or the release window passes, since the holder is most
 likely the previous round's server still exiting; a GPU no wait can free refuses at once.
