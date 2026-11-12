@@ -12,6 +12,7 @@ from contextlib import suppress
 from pathlib import Path
 from typing import Any
 
+from hyperloom.common.tracelens_report import fusion_findings
 from hyperloom_common.coerce import to_int
 from hyperloom_common.timeutil import now_iso
 
@@ -186,6 +187,7 @@ class _RooflineStateMixin:
             "trace_health_warnings": [dict(e) for e in warning_rows if isinstance(e, dict) and e.get("code")],
             "analysis_md_path": str(analysis_md_path),
             "analysis_md_text": analysis_md_text,
+            "fusion_findings": fusion_findings(analysis_md_path) if analysis_md_path else [],
             "roofline_snapshot_id": to_int(recorded.get("roofline_snapshot_id"), 0) + 1,
             "roofline_baseline_gain_at_snapshot": float(self.cumulative_gain_validated),
             "ts": now_iso(),
