@@ -121,6 +121,13 @@ from kernelforge.workflows.forge_fusion.request import (
             help="Full GPU kernel name, exactly as the trace spells it. Fusion is then built around "
             "this kernel and its trace neighbours instead of a ranked guess; implies --discover anchored.",
         ),
+        click.option(
+            "--fusion-hints",
+            "fusion_hints",
+            default="",
+            help="JSON list of unfused kernel runs another profiler flagged (e.g. TraceLens). 'llm' discovery shows "
+            "them to the model as advisory leads to verify; they never pick the recipe. Requires --discover llm.",
+        ),
     ),
     option_group(
         "stages",

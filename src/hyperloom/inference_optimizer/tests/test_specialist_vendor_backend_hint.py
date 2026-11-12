@@ -6,9 +6,9 @@
 from __future__ import annotations
 
 from hyperloom.orchestrator.specialists.prompt_inputs import SpecialistPromptInputs
-from hyperloom.orchestrator.prompts.specialist_prompt_builder import (
-    _section_roofline_evidence,
-    _vendor_substitution_candidates,
+from hyperloom.orchestrator.prompts.roofline_evidence_section import (
+    roofline_evidence_section,
+    vendor_substitution_candidates,
 )
 from hyperloom.orchestrator.specialists.domains import get_domain
 
@@ -39,7 +39,7 @@ def _sdpa_row(gpu_pct: float = 29.8) -> dict:
 
 def test_hot_aten_op_is_a_substitution_candidate():
     """A material ``aten::`` op is surfaced with its call site."""
-    rows = _vendor_substitution_candidates([_sdpa_row()])
+    rows = vendor_substitution_candidates([_sdpa_row()])
     assert len(rows) == 1
     assert rows[0]["name"] == "aten::_scaled_dot_product_flash_attention"
     assert "attention.py" in rows[0]["source_file"]
@@ -54,7 +54,7 @@ def test_immaterial_ops_are_not_candidates():
         "gpu_pct": 1.66,
         "source_file": "hyvideo/models/transformers/modules/attention.py(243)",
     }
-    assert _vendor_substitution_candidates([glue]) == []
+    assert vendor_substitution_candidates([glue]) == []
 
 
 def test_non_aten_kernels_are_not_candidates():
@@ -66,12 +66,12 @@ def test_non_aten_kernels_are_not_candidates():
         "gpu_pct": 40.0,
         "source_file": "/sgl-workspace/aiter/aiter/ops/mha.py",
     }
-    assert _vendor_substitution_candidates([row]) == []
+    assert vendor_substitution_candidates([row]) == []
 
 
 def test_candidates_are_ordered_by_gpu_share():
     """The largest share leads, so the specialist reads the biggest lever first."""
-    rows = _vendor_substitution_candidates(
+    rows = vendor_substitution_candidates(
         [
             {"name": "aten::addmm", "gpu_pct": 6.0, "kernel_category": "GEMM", "source_file": "a.py"},
             _sdpa_row(29.8),
@@ -85,7 +85,7 @@ def test_candidates_are_ordered_by_gpu_share():
 
 def test_section_renders_substitution_directive():
     """The rendered section states the rule, names the op, and points at the install roots."""
-    text = "\n".join(_section_roofline_evidence(_inp([_sdpa_row()])))
+    text = "\n".join(roofline_evidence_section(_inp([_sdpa_row()])))
 
     assert "aten::_scaled_dot_product_flash_attention" in text
     assert "29.80%" in text
@@ -99,7 +99,7 @@ def test_section_renders_substitution_directive():
 def test_section_omits_directive_without_candidates():
     """No material ATen op → no directive, so the section stays evidence-only."""
     text = "\n".join(
-        _section_roofline_evidence(_inp([{"name": "fmha_v3_fwd_kernel", "gpu_pct": 40.0, "source_file": "x.py"}]))
+        roofline_evidence_section(_inp([{"name": "fmha_v3_fwd_kernel", "gpu_pct": 40.0, "source_file": "x.py"}]))
     )
     assert "call site" not in text.lower()
 
@@ -111,5 +111,5 @@ def test_section_still_renders_none_when_no_evidence():
         gap_canonical_id="local_explore",
         roofline_evidence={},
     )
-    text = "\n".join(_section_roofline_evidence(inp))
+    text = "\n".join(roofline_evidence_section(inp))
     assert "(none" in text
