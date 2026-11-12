@@ -1033,7 +1033,7 @@ def hosted_ready_session(host: HostInfo, workload: Workload, *, local: bool = Fa
 
     cache = hosted_runner_cache(os.environ)
     load = local_grant_peers(host) if local else partial(load_hosted_peers, inputs=PinnedToolboxInputs(host, cache))
-    return ready_session(workload, load, **hosted_storage(host, cache))
+    return ready_session(workload, load, **hosted_storage(cache))
 
 
 def ready_session(workload: Workload, load: Callable[[Workload], PeerFactory], **storage: Path) -> ReadySession:

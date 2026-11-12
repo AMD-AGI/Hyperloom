@@ -2891,7 +2891,7 @@ def test_a_hosted_run_names_every_shared_directory_it_cannot_write_in_one_messag
     assert cli.main(["run", *WORKLOAD_ARGS, "--measurement", "hosted"]) == cli.EXIT_FAILED
 
     [line] = [line for line in capsys.readouterr().err.splitlines() if "cannot write the shared storage" in line]
-    assert f"HYPERLOOM_EVENTS_DIR {blocker / 'events'}: ENOTDIR" in line
+    assert "HYPERLOOM_EVENTS_DIR" not in line, "a multi-branch session never writes the events directory"
     assert f"HYPERLOOM_RUNNER_CACHE {blocker / 'runner-cache'}: ENOTDIR" in line
     assert f"{ARCHIVE_ENV} {tmp_path / 'no-such-archive'}: ENOENT" in line
     assert not handed.sessions
@@ -2905,9 +2905,11 @@ def test_a_hosted_run_makes_the_shared_directories_it_writes_2775_when_they_are_
     parent = tmp_path / "shared"
     parent.mkdir()
     parent.chmod(0o2775 if shared else 0o755)  # set up to be shared, or a plain directory
-    made = {"HYPERLOOM_EVENTS_DIR": parent / "run" / "events", "HYPERLOOM_RUNNER_CACHE": parent / "runner-cache"}
+    made = {"HYPERLOOM_RUNNER_CACHE": parent / "runner-cache"}
     for name, directory in made.items():
         monkeypatch.setenv(name, str(directory))
+    events = parent / "run" / "events"
+    monkeypatch.setenv("HYPERLOOM_EVENTS_DIR", str(events))
 
     assert cli.main(["run", *WORKLOAD_ARGS, "--measurement", "hosted"]) == 0
 
@@ -2915,22 +2917,23 @@ def test_a_hosted_run_makes_the_shared_directories_it_writes_2775_when_they_are_
     for name, directory in made.items():
         mode = stat.S_IMODE(directory.stat().st_mode)
         assert mode == (0o2775 if shared else 0o2775 & ~current_umask() & 0o777), (name, oct(mode))
+    assert not events.parent.exists(), "a multi-branch session never writes the events directory"
 
 
 @pytest.mark.usefixtures("ready_environment")
 def test_a_hosted_run_warns_of_a_shared_directory_that_is_not_setgid_and_starts(
     handed: Started, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
 ) -> None:
-    events = tmp_path / "events"
-    events.mkdir()
-    events.chmod(0o775)
-    monkeypatch.setenv("HYPERLOOM_EVENTS_DIR", str(events))
+    cache = tmp_path / "runner-cache"
+    cache.mkdir()
+    cache.chmod(0o775)
+    monkeypatch.setenv("HYPERLOOM_RUNNER_CACHE", str(cache))
 
     with caplog.at_level(logging.WARNING):
         assert cli.main(["run", *WORKLOAD_ARGS, "--measurement", "hosted"]) == 0
 
     assert handed.sessions
-    assert f"HYPERLOOM_EVENTS_DIR {events} is not setgid" in caplog.text
+    assert f"HYPERLOOM_RUNNER_CACHE {cache} is not setgid" in caplog.text
 
 
 @pytest.mark.usefixtures("ready_environment")

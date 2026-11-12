@@ -49,10 +49,10 @@ that gives no answer within 10 s leaves the host to start the run again.
 
 Each leg of a run may be another host account of one group. The entry checks `HYPERLOOM_STATE_DIR` and
 `USER_DATA_PATH` before it hands over (see the table above); before a session starts,
-`hyperloom-multibranch hosted run` then makes `HYPERLOOM_EVENTS_DIR` (or `events/` in the state directory) and
-`HYPERLOOM_RUNNER_CACHE` mode `2775` when they are missing, creates and removes a file in each of them and in
-`HYPERLOOM_RSI_ARCHIVE`, and ends the run with one message naming every one it cannot write, with its errno, owner and
-mode. One that is not setgid is a warning: what a leg makes there takes that leg's group.
+`hyperloom-multibranch hosted run` then makes `HYPERLOOM_RUNNER_CACHE` mode `2775` when it is missing, creates and
+removes a file in it and in `HYPERLOOM_RSI_ARCHIVE`, and ends the run with one message naming every one it cannot
+write, with its errno, owner and mode. One that is not setgid is a warning: what a leg makes there takes that leg's
+group.
 
 ## Measurement sandbox template
 

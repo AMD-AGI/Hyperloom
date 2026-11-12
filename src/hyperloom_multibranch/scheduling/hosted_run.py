@@ -129,15 +129,14 @@ class HostedRefused(ValueError):
     """The run cannot be served as the host gave it, and a restart would not change that; names the field."""
 
 
-def hosted_storage(host: HostInfo, runner_cache: Path) -> dict[str, Path]:
+def hosted_storage(runner_cache: Path) -> dict[str, Path]:
     """The shared directories a hosted session writes in that the hosted entry does not check before it hands over,
-    each by the variable that names it: ``host``'s events directory and ``runner_cache``. An earlier leg of the run,
-    maybe another account of the group, may have made them; each is made ``2775`` when missing, as the session would
-    make it, and one that cannot be made is left for the write check of
+    each by the variable that names it: ``runner_cache``. An earlier leg of the run, maybe another account of the group,
+    may have made it; it is made ``2775`` when missing, as the session would make it, and one that cannot be made is
+    left for the write check of
     :func:`~hyperloom_multibranch.scheduling.session_environment.require_writable_storage` to name."""
 
-    dirs = {Var.EVENTS_DIR: host.events_dir} if host.events_dir is not None else {}
-    dirs[RUNNER_CACHE_ENV] = runner_cache
+    dirs = {RUNNER_CACHE_ENV: runner_cache}
     for directory in dirs.values():
         with contextlib.suppress(OSError):  # one that cannot be made is named by the write check
             make_shared_dirs(directory)
