@@ -16,7 +16,10 @@ blocked by the system, so no change is ever accepted without measured evidence.
    cannot be silently benchmarked against old code.
 2. **SNR pre-filter** — run the correctness driver; a change must clear the
    signal-to-noise threshold (default 30 dB), or report `allclose: True` from a
-   driver that judges each output itself, before it can be benchmarked.
+   driver that judges each output itself, before it can be benchmarked. A
+   multi-rank driver can also declare the launch structure a case is measured on
+   (`launches`, `resident`): a candidate whose call captures to anything else, or
+   whose grid cannot be resident on the GPU, is refused here.
 3. **Benchmark** — measure wall-clock and kernel time (median over iterations).
 4. **Register check** — read the candidate's VGPR usage from the build and record
    it with the measurements. Hardware counters are not read per candidate: the

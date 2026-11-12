@@ -98,15 +98,20 @@ FlyDSL compile call. It can follow a source-language campaign as an optional sec
 {doc}`Assembly candidates </kernelforge/how-to/assembly>` for the compiler,
 launcher, and measurement contract.
 
-To optimize a monokernel in [sgl-amd-mono](https://github.com/sgl-project/sgl-amd-mono),
-use `--kernel-backend mono` on a checkout of that repository; forge also infers it for
-sources under the `sgl_amd_mono/` package. The workspace root must carry a `config.yaml`
-whose `compile_command` and `correctness_command` run the repository's own tests for the
-launch. Forge runs them on every candidate it would otherwise keep, and refuses the
-candidate when the file is missing. A tensor-parallel launch is measured by a multi-rank
-driver inside `dist_harness` (`--nproc-per-node`). When one SNR cannot state the launch's
-contract, such as an output that must stay bitwise next to a toleranced one, each case
-brings a `judge`, and `verify_replay=True` also judges the last timed graph replay.
+To optimize a monokernel, such as one in
+[sgl-amd-mono](https://github.com/sgl-project/sgl-amd-mono), use `--kernel-backend mono`;
+forge also infers it for sources under the `sgl_amd_mono/` package. The workspace root
+must carry a `config.yaml` whose `compile_command` and `correctness_command` run the
+task's own tests for the launch. Forge runs them on every candidate it would otherwise
+keep, and refuses the candidate when the file is missing. A tensor-parallel launch is
+measured by a multi-rank driver inside `dist_harness` (`--nproc-per-node`). When one SNR
+cannot state the launch's contract, such as an output that must stay bitwise next to a
+toleranced one, each case brings a `judge`, and `verify_replay=True` also judges the last
+timed graph replay. A case also declares the launch structure it is measured on:
+`launches=1` refuses a candidate whose call captures to anything but one kernel, and
+`resident=True` one whose grid cannot be resident on the GPU at once, before the case is
+judged or timed. The example `src/kernelforge/examples/mono-qwen3-seam-gfx942-forge-loop/`
+puts these together for a FlyDSL monokernel on 4 x MI300X.
 
 Before the first iteration, the loop checks the driver against the contract it
 enforces at run time and repairs it if needed. When that fails the run aborts

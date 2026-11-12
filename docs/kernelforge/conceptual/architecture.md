@@ -49,7 +49,7 @@ the kernel the loop is editing.
 | `hipblaslt` | Dense GEMM via hipBLASLt: TensileLite solutions, FP8, fused epilogues |
 | `fusion` | Decode-path kernel fusion for sglang and vLLM: CUDA-graph-safe Triton kernels |
 | `ave` | [AveLang](https://github.com/causalflow-ai/avelang) GPU kernels: register tiling, LDS layouts, memory access and synchronization |
-| `mono` | [sgl-amd-mono](https://github.com/sgl-project/sgl-amd-mono) monokernels: persistent whole-span launches, in-kernel TP collectives, judged by the repository's own tests |
+| `mono` | Monokernels, such as [sgl-amd-mono](https://github.com/sgl-project/sgl-amd-mono)'s: persistent whole-span launches, in-kernel TP collectives, judged by the task's own tests |
 
 ## The measurement surface
 
