@@ -19,18 +19,22 @@ any candidate test alike):
    host's cards if it were left set), writes no bytecode, launches no server and is stopped at
    :attr:`MergeSmoke.timeout_sec`.
 
-A file that does not compile, or a module whose import fails with an error only the patch can cause while the image's
-own copy imports, is the candidate's error: :meth:`MergeSmoke.check` returns its first line, and the executor ends the test as a candidate failure with the
-reason ``merge_smoke``. A check that cannot run (no interpreter, a blob missing, a farm that cannot be laid, a child that
+A file that does not compile, or a module whose import fails with an error judged below while the image's own copy
+imports, is the candidate's error: :meth:`MergeSmoke.check` returns its first line, and the executor ends the test as a
+candidate failure with the reason ``merge_smoke``. A check that cannot run (no interpreter, a blob missing, a farm that cannot be laid, a child that
 timed out or died) raises :class:`SmokeNotRun`, which the executor reports as an infrastructure failure
 (``smoke_not_run``), so an environment fault never bars a good commit. A module the image's own copy cannot import
 either here (a framework that needs a GPU to import) is not judged: the test goes on to be measured as before.
 
-Only the errors the smoke's own environment cannot cause are judged: a ``SyntaxError``, or an ``ImportError``,
-``ModuleNotFoundError``, ``NameError`` or ``AttributeError`` raised from a file the stack patched. Any other failure (a
-``RuntimeError`` of a device probe that finds no GPU, a ``KeyError`` of a variable the host lacks, an error raised inside
-an unpatched module) is logged and not judged, and the test goes on to its sandbox. The import child gets every
-variable the point launches its server with, over the host's environment, still with every GPU hidden.
+Only an error that a missing GPU cannot cause is judged, since the image's own copy never runs the patch's new lines and
+so cannot clear one: a ``SyntaxError`` in a file the stack patched; an ``ImportError`` (not a ``ModuleNotFoundError``)
+for a name a patched module lacks (its ``path`` is a file the stack patched); an ``AttributeError`` raised on a patched
+module object. This is the catch the smoke is for: one patch removes or renames a name that another patched file
+imports. Anything else (a ``NameError``, a missing module, a name or attribute an unpatched module or value lacks, such
+as one the image defines only where a GPU is seen or a device query that returns ``None``, a ``RuntimeError`` of a
+device probe, a ``KeyError`` of a variable the host lacks) is logged and not judged, and the test goes on to its
+sandbox. The import child gets every variable the point launches its server with, over the host's environment, still
+with every GPU hidden.
 
 Not checked: native and kernel sources (``.cu``, ``.hip``, Triton's JIT), anything that fails only at run time, and the
 modules a top-level import does not reach. A runtime root (a stack whose native build the test waits for) has its
@@ -111,10 +115,10 @@ with open(out, 'w') as handle:
     json.dump({'error': error}, handle)
 """
 #: Imports each module of ``argv[1]`` (``modules``) and writes the first that fails, with where it was raised and whether
-#: it is one the smoke judges, or none, to ``argv[2]``. Judged: a ``SyntaxError`` in, or an ``ImportError`` (with
-#: ``ModuleNotFoundError``), ``NameError`` or ``AttributeError`` whose raising frame is in, one of ``patched`` (the
-#: farm's paths of the files the stack changes). The raising frame is the last of the traceback outside the import
-#: machinery's own frozen frames.
+#: it is one the smoke judges, or none, to ``argv[2]``. ``patched`` holds the farm's paths of the files the stack changes;
+#: judged: a ``SyntaxError`` in one of them, an ``ImportError`` that is not a ``ModuleNotFoundError`` whose ``path`` (the
+#: module lacking the name) is one of them, or an ``AttributeError`` raised on a module object whose file is one of them.
+#: Where it was raised is the last frame of the traceback outside the import machinery's own frozen frames.
 _IMPORT = """\
 import importlib, json, os, sys, traceback
 argument, out = json.load(open(sys.argv[1])), sys.argv[2]
@@ -131,8 +135,15 @@ for module in argument['modules']:
             filename, lineno = frames[-1].filename, frames[-1].lineno
         else:
             filename, lineno = '', None
-        kinds = (SyntaxError, ImportError, NameError, AttributeError)
-        judged = bool(filename) and isinstance(exc, kinds) and os.path.normpath(filename) in patched
+        if isinstance(exc, SyntaxError):
+            lacking = filename
+        elif isinstance(exc, ImportError) and not isinstance(exc, ModuleNotFoundError):
+            lacking = exc.path
+        elif isinstance(exc, AttributeError) and type(getattr(exc, 'obj', None)) is type(sys):
+            lacking = getattr(exc.obj, '__file__', None)
+        else:
+            lacking = None
+        judged = isinstance(lacking, str) and bool(lacking) and os.path.normpath(lacking) in patched
         where = '%s:%s' % (filename, lineno) if filename else ''
         error = {'module': module, 'error': '%s: %s' % (type(exc).__name__, exc), 'where': where, 'judged': judged}
         break
@@ -239,8 +250,10 @@ class MergeSmoke:
         failed = self._child(_IMPORT_STEP, python, argument, work, _smoke_env(os.environ, patched_envs))
         if not failed:
             return None
-        where = str(failed.get("where") or "").removeprefix(f"{farm.site}{os.sep}")
-        return self._verdict(python, environment, {**failed, "where": where}, work, image_env)
+        site = f"{farm.site}{os.sep}"
+        where = str(failed.get("where") or "").removeprefix(site)
+        error = str(failed.get("error")).replace(site, "")
+        return self._verdict(python, environment, {**failed, "where": where, "error": error}, work, image_env)
 
     def _verdict(
         self,
@@ -276,7 +289,7 @@ class MergeSmoke:
         """Why the failed import ``failed`` says nothing about the candidate, or ``None`` when it does."""
         if not failed.get("judged"):
             where = failed.get("where") or "no frame"
-            return f"the error (at {where}) is not one only the patch can cause, the smoke seeing no GPU"
+            return f"the error (at {where}) is not a name or attribute a patched module lacks, which no GPU could cause"
         native = [root.import_name for root in environment.roots if root.kind == _RUNTIME]
         if native:
             return f"the native stacks {', '.join(native)} are not laid until their builds are ready"

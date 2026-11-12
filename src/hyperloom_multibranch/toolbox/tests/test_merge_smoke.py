@@ -104,6 +104,12 @@ def _check(tmp_path: Path, framework: Framework, *stack: dict[str, tuple[str, st
 #: The stack's first patch breaks ``srt/a.py``; the merge's own change, the second, touches ``srt/b.py`` only.
 BROKEN_FIRST = {"srt/a.py": (OLD_A, "def f(:\n    return 1\n")}
 MERGE_OWN = {"srt/b.py": (OLD_B, "y = 2\n")}
+#: The catch the smoke is for: one patch renames ``b``'s ``y``, another makes the imported ``a`` import it.
+REMOVES_Y = {"srt/b.py": (OLD_B, "z = 1\n")}
+IMPORTS_Y = {"srt/a.py": (OLD_A, "from sglang.srt.b import y\n")}
+REMOVED_Y_ERROR = (
+    "import sglang: ImportError: cannot import name 'y' from 'sglang.srt.b' (sglang/srt/b.py) (sglang/srt/a.py:1)"
+)
 
 
 def test_a_syntax_error_anywhere_in_the_stack_is_the_first_error_line(tmp_path: Path, framework: Framework) -> None:
@@ -111,9 +117,10 @@ def test_a_syntax_error_anywhere_in_the_stack_is_the_first_error_line(tmp_path: 
     assert error is not None and error.startswith("sglang/srt/a.py:1: SyntaxError: "), error
 
 
-def test_an_import_time_error_names_the_module_and_where_it_failed(tmp_path: Path, framework: Framework) -> None:
-    error = _check(tmp_path, framework, {"srt/a.py": (OLD_A, "VALUE = undefined_name\n")}, MERGE_OWN)
-    assert error == "import sglang: NameError: name 'undefined_name' is not defined (sglang/srt/a.py:1)"
+def test_a_name_one_patch_removes_and_another_imports_is_judged(tmp_path: Path, framework: Framework) -> None:
+    """The error names the module, the patched module that lacks the name and where it was imported, all relative to
+    the farm."""
+    assert _check(tmp_path, framework, REMOVES_Y, IMPORTS_Y) == REMOVED_Y_ERROR
 
 
 def test_a_good_stack_passes_and_writes_no_bytecode_into_the_image(tmp_path: Path, framework: Framework) -> None:
@@ -130,9 +137,9 @@ def test_the_import_sees_no_gpu(tmp_path: Path, framework: Framework, monkeypatc
         "seen = tuple(os.environ.get(name) for name in"
         " ('ROCR_VISIBLE_DEVICES', 'HIP_VISIBLE_DEVICES', 'CUDA_VISIBLE_DEVICES'))\n"
         "if seen != ('', '', ''):\n"
-        "    gpu_visible\n"
+        "    from sglang.srt.b import gpu_visible\n"
     )
-    assert _check(tmp_path, framework, {"srt/a.py": (OLD_A, probe)}) is None
+    assert _check(tmp_path, framework, {"srt/a.py": (OLD_A, probe)}, MERGE_OWN) is None
 
 
 #: A per-arch table chosen by a device probe at import, which raises where no GPU is seen.
@@ -159,28 +166,48 @@ def test_the_import_gets_the_point_s_server_environment_with_no_gpu(tmp_path: Pa
     probe = (
         "import os\n"
         "if os.environ.get('NEW_KNOB') != '7':\n"
-        "    knob_not_passed\n"
+        "    from sglang.srt.b import knob_not_passed\n"
         "if os.environ.get('HIP_VISIBLE_DEVICES') != '':\n"
-        "    gpu_visible\n"
+        "    from sglang.srt.b import gpu_visible\n"
     )
-    environment = _environment(tmp_path, framework, {"srt/a.py": (OLD_A, probe)})
+    environment = _environment(tmp_path, framework, {"srt/a.py": (OLD_A, probe)}, MERGE_OWN)
     smoke = MergeSmoke(default_python=framework.python)
     with_knob = _point_with(tmp_path, {"NEW_KNOB": "7", "HIP_VISIBLE_DEVICES": "3"})
     assert smoke.check(environment, (with_knob,)) is None
     without = _point_with(tmp_path, {"HIP_VISIBLE_DEVICES": "3"})
     error = smoke.check(environment, (without,))
-    assert error is not None and "NameError: name 'knob_not_passed'" in error, error
+    assert error is not None and "ImportError: cannot import name 'knob_not_passed'" in error, error
 
 
-def test_a_missing_module_a_patched_file_imports_is_judged(tmp_path: Path, framework: Framework) -> None:
-    error = _check(tmp_path, framework, {"srt/a.py": (OLD_A, "import hl_no_such_module\n")})
-    assert error == "import sglang: ModuleNotFoundError: No module named 'hl_no_such_module' (sglang/srt/a.py:1)"
+def test_an_attribute_a_patch_removes_from_a_patched_module_is_judged(tmp_path: Path, framework: Framework) -> None:
+    uses_y = {"srt/a.py": (OLD_A, "import sglang.srt.b as b_module\nVALUE = b_module.y\n")}
+    error = _check(tmp_path, framework, REMOVES_Y, uses_y)
+    assert error == "import sglang: AttributeError: module 'sglang.srt.b' has no attribute 'y' (sglang/srt/a.py:2)"
 
 
-def test_an_attribute_error_in_a_patched_file_is_judged(tmp_path: Path, framework: Framework) -> None:
-    error = _check(tmp_path, framework, {"srt/a.py": (OLD_A, "import os\nos.no_such_attribute\n")})
-    assert error is not None and error.startswith("import sglang: AttributeError: "), error
-    assert error.endswith("(sglang/srt/a.py:2)"), error
+#: A module of the image that defines ``fast_op`` only where a GPU is seen.
+GPU_ONLY_OPS = "import os\nif os.environ.get('HIP_VISIBLE_DEVICES'):\n    def fast_op():\n        return 1\n"
+#: A device-capability query of the image that answers ``None`` where no GPU is seen.
+NO_DEVICE_CAP = "def cap():\n    return None\n"
+
+
+@pytest.mark.parametrize(
+    "patched_a",
+    [
+        pytest.param("from sglang.srt.ops import fast_op\n", id="gpu-only-name-of-an-unpatched-module"),
+        pytest.param("from sglang.srt.cap import cap\nMAJOR = cap().major\n", id="attribute-of-a-none-capability"),
+        pytest.param("import os\nos.no_such_attribute\n", id="attribute-of-an-unpatched-module"),
+        pytest.param("VALUE = undefined_name\n", id="name-error"),
+        pytest.param("import hl_no_such_module\n", id="missing-module"),
+    ],
+)
+def test_an_error_a_missing_gpu_could_cause_is_not_judged(tmp_path: Path, patched_a: str) -> None:
+    """The image's own copy imports, and never runs the patch's line, so only the rule can keep these unjudged: a name
+    or attribute an unpatched module or value lacks, a ``NameError`` or a missing module may all come from the smoke
+    seeing no GPU."""
+    files = {**IMAGE_FILES, "srt/ops.py": GPU_ONLY_OPS, "srt/cap.py": NO_DEVICE_CAP}
+    framework = _framework(tmp_path / "framework", files)
+    assert _check(tmp_path, framework, {"srt/a.py": (OLD_A, patched_a)}, MERGE_OWN) is None
 
 
 def test_an_import_error_raised_in_an_unpatched_module_is_not_judged(tmp_path: Path) -> None:
@@ -198,7 +225,12 @@ def test_an_import_the_image_fails_too_is_not_judged(tmp_path: Path) -> None:
     init = "from sglang.srt import b\nfrom sglang.srt import a\n"
     files = {**IMAGE_FILES, "__init__.py": init, "srt/a.py": "import os\nos.environ['HL_NO_SUCH_VARIABLE']\n"}
     framework = _framework(tmp_path / "framework", files)
-    assert _check(tmp_path, framework, {"srt/b.py": (OLD_B, "y = undefined_name\n")}) is None
+    judged = {"srt/b.py": (OLD_B, "y = 2\nfrom sglang.srt.b import undefined_name\n")}
+    alone = tmp_path / "alone"
+    alone.mkdir()
+    error = _check(alone, _framework(alone / "framework", {**IMAGE_FILES, "__init__.py": init}), judged)
+    assert error is not None and "cannot import name 'undefined_name'" in error, "judged where the image imports"
+    assert _check(tmp_path, framework, judged) is None
 
 
 def test_a_missing_interpreter_is_not_run(tmp_path: Path, framework: Framework) -> None:
@@ -311,12 +343,10 @@ async def test_a_broken_stack_fails_as_the_candidate_and_no_sandbox_is_asked_for
 
 
 async def test_an_import_error_fails_as_the_candidate(tmp_path: Path, framework: Framework) -> None:
-    environment = _environment(tmp_path, framework, {"srt/a.py": (OLD_A, "VALUE = undefined_name\n")})
+    environment = _environment(tmp_path, framework, REMOVES_Y, IMPORTS_Y)
     result, backend, _ = await _through_toolbox(tmp_path, environment, MergeSmoke(default_python=framework.python))
     assert result.validity is Validity.CANDIDATE_FAILED and backend.calls == 0
-    assert result.failure_reason == (
-        f"{MERGE_SMOKE}: import sglang: NameError: name 'undefined_name' is not defined (sglang/srt/a.py:1)"
-    )
+    assert result.failure_reason == f"{MERGE_SMOKE}: {REMOVED_Y_ERROR}"
 
 
 async def test_a_device_probe_with_no_gpu_goes_on_to_its_measurement(tmp_path: Path, framework: Framework) -> None:
@@ -384,14 +414,13 @@ def test_the_smoke_runs_in_a_directory_of_its_own(
 
 def test_an_import_a_native_stack_s_package_may_answer_is_not_judged(tmp_path: Path) -> None:
     """A stack that also patches a native component (a ``runtime`` root, whose package is not laid until its build is
-    ready): the patched framework may import what that package adds, which the image's copy lacks, so its import
-    failing says nothing about the candidate."""
+    ready): the patched framework may need what that package adds, which the farm lacks, so even a judged import
+    failure says nothing about the candidate."""
     framework = _framework(tmp_path / "framework", IMAGE_FILES)
     kernels = Path(framework.package).parent / "kern"
     kernels.mkdir()
     (kernels / "__init__.py").write_text("OLD = 1\n")
-    caller = {"__init__.py": (INIT, "from kern import NEW\n" + INIT)}
-    environment = _environment(tmp_path, framework, caller)
+    environment = _environment(tmp_path, framework, REMOVES_Y, IMPORTS_Y)
     blob = LocalBlobStore(environment.blob_root).put(b"OLD = 1\nNEW = 2\n")
     native = EnvEntry("__init__.py", "upsert", blob, "100644")
     runtime = EnvRoot("kern", "kern", "kern", "0.0.1", (native,), kind="runtime")
@@ -399,5 +428,4 @@ def test_an_import_a_native_stack_s_package_may_answer_is_not_judged(tmp_path: P
     point = point_yaml(tmp_path, "smoke-point.yaml")
     assert MergeSmoke(default_python=framework.python).check(with_native, (point,)) is None
     # Without the native stack the same import failure is the candidate's.
-    error = MergeSmoke(default_python=framework.python).check(environment, (point,))
-    assert error is not None and error.startswith("import sglang: ImportError: cannot import name 'NEW'"), error
+    assert MergeSmoke(default_python=framework.python).check(environment, (point,)) == REMOVED_Y_ERROR
