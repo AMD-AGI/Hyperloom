@@ -429,7 +429,9 @@ class BenchmarkRunExecutor(_BaselineAccuracyMixin, _BenchmarkLaunchMixin, _Bench
         warm_rc: int | None = None
         try:
             warm_dir.mkdir(parents=True, exist_ok=True)
-            warm_cmd = [str(warm_dir) if c == str(round_.output_dir) else c for c in round_.cmd]
+            # Path equality, not string equality: a backend may spell the same directory with forward slashes
+            # (stable argv on Windows), which never equals its backslash spelling as text.
+            warm_cmd = [str(warm_dir) if Path(c) == round_.output_dir else c for c in round_.cmd]
             warm_env = dict(round_.env)
             # The pass runs on the server the measured pass reuses, so it must not send the measured prompts.
             apply_benchmark_round_seed(round_.config_path, warm_env, warmup=True)

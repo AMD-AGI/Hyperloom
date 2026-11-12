@@ -98,6 +98,10 @@ _WRITE_BY_OTHERS = stat.S_IWGRP | stat.S_IWOTH
 #: The mode of the directories made for a private database and of the files in them.
 _OWNER_DIRECTORY = stat.S_IRWXU
 _OWNER_FILE = stat.S_IRUSR | stat.S_IWUSR
+#: `os` open flags missing on Windows: 0 there, so the same expressions build on both platforms.
+_O_NOFOLLOW = getattr(os, "O_NOFOLLOW", 0)
+_O_NONBLOCK = getattr(os, "O_NONBLOCK", 0)
+_O_CLOEXEC = getattr(os, "O_CLOEXEC", 0)
 
 
 class DatabaseNotPrivate(PermissionError):
@@ -138,7 +142,7 @@ def _make_database_file(db_path: Path, file_mode: int) -> None:
     for suffix in _SIDE_FILES:
         side = db_path.with_name(db_path.name + suffix)
         try:
-            descriptor = os.open(side, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK | os.O_CLOEXEC)
+            descriptor = os.open(side, os.O_RDONLY | _O_NOFOLLOW | _O_NONBLOCK | _O_CLOEXEC)
         except FileNotFoundError:
             continue
         except OSError as exc:

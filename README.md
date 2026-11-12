@@ -1,6 +1,6 @@
 # ROCm Hyperloom-RX9000series
 
-This fork tracks RX 9000-series compatibility work for ROCm Hyperloom, focused on bringing RX 9070 XT (`gfx1201`) into GPU identification and compatibility reporting while retaining the upstream optimization workflow. The card is detected, but managed benchmarks are refused until a matching Magpie serving runner is available. See the [RX 9070 XT compatibility notes](docs/compatibility.rst#rx-9070-xt).
+This fork tracks RX 9000-series compatibility work for ROCm Hyperloom, focused on bringing RX 9070 XT (`gfx1201`) into GPU identification and compatibility reporting while retaining the upstream optimization workflow. The card is detected with board facts (16 GB, 640 GB/s, dense bf16 195 / fp8 389 / fp32 48.7 TFLOPS) and reuses the validated gfx12 vLLM runner. See the [RX 9070 XT compatibility notes](docs/compatibility.rst#rx-9070-xt).
 
 # ROCm Hyperloom
 
@@ -127,7 +127,7 @@ the knowledge base are described further in
 | Feature | Options |
 |------|-------|
 | Workload | Text generation, image generation, and custom / scriptable pipelines |
-| Platform | MI300X, MI325X, MI355X; RX 9070 XT (GFX1201, experimental; end-to-end not validated) |
+| Platform | MI300X, MI325X, MI355X; RX 9070 XT (GFX1201, vLLM-only via gfx12 runner; end-to-end not validated) |
 | Framework | SGLang, vLLM, xDiT |
 | Kernel language | HIP, Triton, FlyDSL |
 | Kernel backends | GEAK, KernelForge |

@@ -30,7 +30,12 @@ then build the modules themselves.
 from __future__ import annotations
 
 import errno
-import fcntl
+import tempfile
+
+try:
+    import fcntl
+except ImportError:  # pragma: no cover - Windows has no flock.
+    fcntl = None  # type: ignore[assignment]
 import json
 import logging
 import os
@@ -58,10 +63,16 @@ __all__ = [
 
 log = logging.getLogger(__name__)
 
-#: This host's own disk: the lock and the record of attempts must never sit on a mount other hosts share.
-HOST_DIR = Path("/tmp/hyperloom-aiter-serving")
+#: This host's own disk: the lock and the record of attempts must never sit on a mount other hosts share. On
+#: Windows ``/tmp`` is a drive-root directory an unprivileged account cannot make; the per-user temp carries the
+#: account's own ACLs instead, which is what the privacy check below asks of it.
+HOST_DIR = (
+    Path("/tmp/hyperloom-aiter-serving")
+    if os.name == "posix"
+    else Path(tempfile.gettempdir()) / "hyperloom-aiter-serving"
+)
 _LOCK, _ATTEMPTS = "preflight.lock", "attempts.json"
-_LOCK_FLAGS = os.O_RDWR | os.O_CREAT | os.O_NOFOLLOW | os.O_CLOEXEC
+_LOCK_FLAGS = os.O_RDWR | os.O_CREAT | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_CLOEXEC", 0)
 _HOLDER_BYTES = 4096
 _UTF8 = "utf-8"
 _T = TypeVar("_T")
@@ -177,6 +188,8 @@ class _HostLock:
 
     def doing(self, what: str) -> None:
         """Say what the holder is doing, for a preflight that waits."""
+        if fcntl is None:
+            return  # no flock, so no waiter to tell; os.pwrite is POSIX-only too.
         said = json.dumps({"pid": os.getpid(), "since": _now(), "doing": what}).encode(_UTF8)
         try:
             os.ftruncate(self.descriptor, 0)
@@ -241,6 +254,8 @@ def _open_lock(path: Path) -> int:
 
 
 def _wait_for(descriptor: int, path: Path, doing: str) -> None:
+    if fcntl is None:
+        return  # no cross-process lock on Windows; the attempts record still keeps a build to once per container.
     try:
         fcntl.flock(descriptor, fcntl.LOCK_EX | fcntl.LOCK_NB)
         return

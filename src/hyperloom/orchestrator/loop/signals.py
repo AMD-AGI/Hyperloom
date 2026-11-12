@@ -17,8 +17,10 @@ log = logging.getLogger(__name__)
 
 __all__ = ["SignalDrain"]
 
-#: Signals that ask the coordinator to stop.
-STOP_SIGNALS: tuple[int, ...] = (signal.SIGINT, signal.SIGTERM, signal.SIGHUP)
+#: Signals that ask the coordinator to stop; SIGHUP exists only on POSIX.
+STOP_SIGNALS: tuple[int, ...] = (signal.SIGINT, signal.SIGTERM) + (
+    (signal.SIGHUP,) if hasattr(signal, "SIGHUP") else ()
+)
 
 #: How often the loop puts back a handler that native code replaced behind the interpreter's back. Ray's core worker
 #: installs abseil's failure handler over SIGTERM when it connects, which aborts the process 3 s after a SIGTERM, and

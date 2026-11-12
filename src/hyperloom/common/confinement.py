@@ -32,7 +32,11 @@ import ast
 import json
 import logging
 import os
-import pwd
+
+try:
+    import pwd
+except ImportError:  # pragma: no cover - Windows has no Unix user database.
+    pwd = None  # type: ignore[assignment]
 import re
 import shutil
 import subprocess
@@ -452,9 +456,11 @@ def _absolute_entries(value: str) -> Iterator[Path]:
 
 
 def _passwd_home() -> Path | None:
+    if pwd is None or not hasattr(os, "geteuid"):
+        return Path.home() if hasattr(Path, "home") else None
     try:
         return Path(pwd.getpwuid(os.geteuid()).pw_dir)
-    except KeyError:
+    except (KeyError, OSError, AttributeError):
         return None
 
 

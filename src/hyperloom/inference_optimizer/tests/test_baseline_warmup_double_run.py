@@ -1753,8 +1753,12 @@ def test_a_native_agentx_warmup_keeps_its_seed(tmp_path, monkeypatch):
     assert env == {}
 
 
-def test_baseline_single_round_when_script_not_builtin(tmp_path):
+def test_baseline_single_round_when_script_not_builtin(tmp_path, monkeypatch):
     """A non-builtin benchmark script falls back to one round even with double-run on."""
+    from hyperloom.orchestrator.actions.executors.benchmark_backend import BENCHMARK_BACKEND_ENV
+
+    # The builtin-script rule is the Magpie backend's: pin it, since other backends do not run Magpie scripts.
+    monkeypatch.setenv(BENCHMARK_BACKEND_ENV, "magpie")
     base = tmp_path / "base.yaml"
     _write_yaml(base, framework="vllm")
     output_dir = tmp_path / "ws"

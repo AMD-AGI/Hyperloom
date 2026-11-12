@@ -379,7 +379,9 @@ class BwrapPolicy:
         return _Mount(path, (_RO_BIND_TRY, path, path))
 
 
-_DIRECTORY_FLAGS = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC
+_DIRECTORY_FLAGS = (
+    os.O_RDONLY | getattr(os, "O_DIRECTORY", 0) | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_CLOEXEC", 0)
+)
 
 
 def _unlock_directory(name: str, parent: int) -> int:

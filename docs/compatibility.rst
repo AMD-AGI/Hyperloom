@@ -47,7 +47,8 @@ The following table lists the minimum requirements for running Hyperloom.
 +=====================+========================================================+
 | AMD Instinct™ GPU   | MI300X, MI325X, MI355X                                 |
 +---------------------+--------------------------------------------------------+
-| AMD Radeon™ GPU     | Radeon AI PRO R9700 (gfx1201), vLLM only               |
+| AMD Radeon™ GPU     | Radeon AI PRO R9700 (gfx1201), vLLM only; RX 9070 XT   |
+|                       | (gfx1201) via the same gfx12 runner, vLLM only         |
 +---------------------+--------------------------------------------------------+
 | Operating System    | Ubuntu 24.04 (recommended); Ubuntu 22.04 (legacy)      |
 +---------------------+--------------------------------------------------------+
@@ -73,10 +74,27 @@ Triton on it. These are GPU runtime/toolchain capabilities, not a claim that
 Hyperloom's full serving and optimization loop is supported on native Windows.
 
 Hyperloom's installers and managed benchmark lifecycle are Linux-oriented
-(Bash, Linux ROCm paths, Ray and Magpie). Native Windows end-to-end support is
-not yet validated. Foundational RX 9070 XT SKU and GFX1201 routing are in place,
-but an RX-specific managed benchmark runner, calibrated roofline data and a
-real-hardware optimization campaign remain outstanding.
+(Bash, Linux ROCm paths, Ray and Magpie). On native Windows ``hyperloom_common.platform.is_windows()``
+routes to the tailored alternatives, and an explicit ``HYPERLOOM_BENCHMARK_BACKEND`` or
+``INFERENCE_OPTIMIZER_RAY_EXEC`` choice always wins over the OS default, so the Linux natives
+are untouched in behaviour.
+
+Windows process control is ``hyperloom_common.winproc``: ``taskkill /T`` walks the live parent
+chain for a tree kill, ``GetExitCodeProcess`` answers liveness, and a job object armed with
+``JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE`` ties a child's lifetime to its owner the way
+``PR_SET_PDEATHSIG`` does on Linux. ``hyperloom.common.proctree`` delegates to it, so a server,
+a Ray served round and a Ray connect probe are reaped on both hosts. The Ray connect probe runs
+on Windows without ``prctl``, and the Ray serving lease's ``stop()`` confirms teardown there.
+
+Still Linux-only and unchanged: the Magpie ``.sh`` benchmark scripts (external component), the
+``ray start`` head's fd-limit preflight, and finding a round orphaned by a dead actor through
+``/proc/<pid>/environ``, which needs a job-object registry on Windows. Linux-only tests carry a
+``skipif`` naming the mechanism. A full end-to-end optimization campaign on native Windows is
+not yet validated. The RX 9070 XT SKU, its 16 GB / 640 GB/s board facts and
+GFX1201 routing are in place, and it reuses the validated gfx12 vLLM runner
+(``runner_type: gfx12``, ``vllm_gfx12.sh``); other frameworks exit 2 at launch.
+Calibrated max-achievable roofline numbers and a real-hardware optimization
+campaign on the RX 9070 XT remain outstanding.
 
 See AMD's `ROCm on Windows system requirements`_ and `ROCm on Windows 7.2.0
 release notes`_.

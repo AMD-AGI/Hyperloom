@@ -1,0 +1,17 @@
+diff --git a/vllm/model_executor/kernels/linear/mixed_precision/conch.py b/vllm/model_executor/kernels/linear/mixed_precision/conch.py
+index 34dad01..b8a1ad3 100644
+--- a/vllm/model_executor/kernels/linear/mixed_precision/conch.py
++++ b/vllm/model_executor/kernels/linear/mixed_precision/conch.py
+@@ -17,7 +17,11 @@ _CONCH_SUPPORTED_WEIGHT_TYPES: Final = [
+     scalar_types.uint4b8,
+     scalar_types.uint8b128,
+ ]
+-_CONCH_SUPPORTED_GROUP_SIZES: Final = [-1, 128]
++# conch's Triton kernel applies ONE scale per block_k tile (block_k == 64), so it is only
++# numerically correct for group_size >= 64 (verified: gs 128/64 rel_err ~3e-3, gs 32 ~0.96
++# WRONG). 64 is safe to add to the original [-1, 128]; smaller group sizes (e.g. gemma4 AWQ
++# group_size 32) must go to the dequant fallback kernel instead.
++_CONCH_SUPPORTED_GROUP_SIZES: Final = [-1, 64, 128]
+ 
+ 
+ class ConchLinearKernel(MPLinearKernel):

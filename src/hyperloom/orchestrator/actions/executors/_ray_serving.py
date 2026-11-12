@@ -15,6 +15,7 @@ import uuid
 from dataclasses import dataclass, field, replace
 from typing import TYPE_CHECKING, Any, NoReturn
 
+from hyperloom_common import winproc
 from hyperloom_common.fs_utils import append_nofollow
 from hyperloom.common.proctree import TERM_GRACE_SEC, collect_tree, kill_tree, marked_pids
 from hyperloom.common.visible_devices import COUNTING_VISIBLE_DEVICE_VARS
@@ -343,7 +344,9 @@ class ManagedServerProcess:
                     start_new_session=True,
                     preexec_fn=_pdeathsig_preexec,
                 )
-            else:  # pragma: no cover - non-posix fallback
+            else:
+                # Windows: no session to start; a new process group keeps a Ctrl-C aimed at
+                # this process off the server, and the tree is reaped through ``taskkill``.
                 self._proc = subprocess.Popen(
                     cmd,
                     env=env,
@@ -351,6 +354,7 @@ class ManagedServerProcess:
                     stdin=stdin,
                     stdout=stdout,
                     stderr=subprocess.STDOUT,
+                    creationflags=winproc.spawn_flags(),
                 )
         finally:
             # Popen has transferred the descriptors to the child before it returns.
@@ -381,16 +385,14 @@ class ManagedServerProcess:
     def stop(self, *, grace_seconds: float = TERM_GRACE_SEC) -> bool:
         """Confirm teardown of the enumerated live tree before dropping its handle."""
         from hyperloom.common.proctree import collect_tree, kill_tree
-        from ._subprocess_kill import kill_my_spawned_server
 
         proc = self._proc
         if proc is None:
             return True
-        if os.name != "posix":
-            kill_my_spawned_server(proc, grace_seconds=grace_seconds)
-            return False
         if proc.poll() is not None:
-            # Detached descendants can outlive both the root and its old process group.
+            # Detached descendants can outlive both the root and its old process group,
+            # and nothing enumerates them once the root is gone (procfs on Linux,
+            # ``taskkill /T``'s parent chain on Windows).
             return False
         try:
             tree = collect_tree([proc.pid])

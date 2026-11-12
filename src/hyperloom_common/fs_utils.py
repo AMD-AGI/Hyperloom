@@ -77,18 +77,28 @@ def is_private_dir(directory: Path | str) -> bool:
     For local temporary directories only. On shared storage another account of the group may own a directory this one
     must write, and in a user namespace it shows as the overflow id: ask
     :func:`~hyperloom_common.shared_storage.writable_problems` there.
+
+    On Windows there is no uid and no group/other mode bits: a directory counts as private when it is not a link
+    (a reparse point covers symlinks, junctions and mounts) under a directory the OS ACLs to this account, such as
+    its profile or per-user temp -- which is what the lock directories that ask are.
     """
     try:
         info = os.lstat(directory)
     except OSError:
         return False
+    if os.name != "posix":
+        return (
+            stat.S_ISDIR(info.st_mode)
+            and not stat.S_ISLNK(info.st_mode)
+            and not getattr(info, "st_file_attributes", 0) & stat.FILE_ATTRIBUTE_REPARSE_POINT
+        )
     return (
         stat.S_ISDIR(info.st_mode) and info.st_uid == os.getuid() and not info.st_mode & (stat.S_IWGRP | stat.S_IWOTH)
     )
 
 
 _PRIVATE_MODE = 0o600
-_DIR_FLAGS = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC
+_DIR_FLAGS = os.O_RDONLY | getattr(os, "O_DIRECTORY", 0) | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_CLOEXEC", 0)
 
 
 def _open_below(base: Path, parts: Sequence[str], *, create: bool) -> int:

@@ -10,7 +10,12 @@ import ctypes
 import json
 import logging
 import os
-import resource
+
+try:
+    import resource
+except ImportError:  # pragma: no cover - Windows has no rlimit API.
+    resource = None  # type: ignore[assignment]
+import shutil
 import signal
 import subprocess
 import sys
@@ -19,6 +24,9 @@ import threading
 import time
 from dataclasses import dataclass
 from typing import Iterator, Optional, Tuple
+
+from hyperloom_common import winproc
+from hyperloom_common.platform import is_windows
 
 log = logging.getLogger(__name__)
 
@@ -147,6 +155,8 @@ def _ray_connect_probe_timeout_sec() -> float:
 
 def ensure_fd_limit(min_soft: Optional[int] = None) -> Tuple[int, int]:
     """Raise this process's RLIMIT_NOFILE soft limit before Ray starts."""
+    if resource is None:  # pragma: no cover - no fd limits on Windows.
+        return -1, -1
     if min_soft is None:
         min_soft = _min_nofile_target()
     inf = resource.RLIM_INFINITY
@@ -208,7 +218,13 @@ def _stop_ray_force() -> None:
 #: session, process group and stdio. Left in the caller's group they make a shell that tracks background jobs by
 #: process group (an agent's sandbox bash) see the caller as still running long after it returned, and an inherited
 #: pipe keeps that shell's output stream open. A new session plus non-pipe stdio detaches them the way a daemon is.
-_RAY_START_DETACH_KWARGS = {"stdin": subprocess.DEVNULL, "start_new_session": True}
+#: How ``ray start`` is detached: its daemons outlive the call, so the shell it runs under must not be signalled
+#: with this process. ``start_new_session`` is POSIX; Windows names the same intent with a creation flag.
+_RAY_START_DETACH_KWARGS = {
+    "stdin": subprocess.DEVNULL,
+    "start_new_session": True,
+    "creationflags": winproc.spawn_flags(),
+}
 
 
 def _ray_start_evidence(captured: str) -> str:
@@ -233,6 +249,11 @@ def _start_local_head(num_gpus: Optional[int]) -> None:
     # The head started here has answered no driver yet; whatever was probed was the head it replaces.
     forget_ray_head_verdict()
     gcs_port, iso_args = _isolated_head_port_args()
+    if shutil.which("ray") is None:
+        raise RuntimeError(
+            "the 'ray' CLI is not on PATH, so a head cannot be started; install Ray into the benchmark "
+            "interpreter (`python -m pip install ray`) or point INFERENCE_OPTIMIZER_RAY_EXEC=0 at the local path"
+        )
     # Dashboard bound to loopback: keeps the unauthenticated Ray Jobs endpoint off the pod network.
     cmd = ["ray", "start", "--head", f"--port={gcs_port}", "--dashboard-host=127.0.0.1"]
     if num_gpus is not None:
@@ -274,10 +295,10 @@ def _ray_address() -> str:
 #: that process is already gone, so a parent killed outright mid-probe -- by a SIGTERM it does not handle, say -- does
 #: not leave a driver waiting on the head.
 _CONNECT_PROBE_SOURCE = (
-    "import ctypes, os, signal, sys\n"
-    "prctl = getattr(ctypes.CDLL(None), 'prctl', None)\n"
-    "if prctl is not None:\n"
-    "    prctl(1, signal.SIGKILL)\n"
+    "import os, sys\n"
+    "if sys.platform == 'linux':\n"
+    "    import ctypes, signal\n"
+    "    ctypes.CDLL(None).prctl(1, signal.SIGKILL)\n"
     "if os.getppid() != int(sys.argv[2]):\n"
     "    sys.exit('the probing process is gone')\n"
     "import ray\n"
@@ -324,6 +345,7 @@ def probe_ray_connect(address: str, timeout: float) -> RayConnectProbe:
             )
         except OSError as exc:
             return RayConnectProbe(False, f"could not be started: {exc!r}")
+        _own_probe(proc.pid)
         try:
             returncode: Optional[int] = proc.wait(timeout=timeout)
         except subprocess.TimeoutExpired:
@@ -332,6 +354,7 @@ def probe_ray_connect(address: str, timeout: float) -> RayConnectProbe:
             # However the wait ended, a probe still running goes now, with its whole group.
             if proc.returncode is None:
                 _kill_process_group(proc)
+            _disown_probe(proc.pid)
         if returncode is None:
             return RayConnectProbe(False, f"did not connect within {timeout:g}s and was killed")
         sink.seek(0)
@@ -346,11 +369,43 @@ def probe_ray_connect(address: str, timeout: float) -> RayConnectProbe:
 
 
 def _kill_process_group(proc: subprocess.Popen) -> None:
-    """SIGKILL the process group ``proc`` leads, then reap it."""
-    with contextlib.suppress(ProcessLookupError):
-        os.killpg(proc.pid, signal.SIGKILL)
+    """End the process group ``proc`` leads, then reap it.
+
+    Windows has no group to signal: ``taskkill /T`` walks the probe's parent chain
+    instead, which reaches the same driver and anything it started.
+    """
+    if is_windows():
+        winproc.terminate_tree(proc.pid, force=True)
+    else:
+        with contextlib.suppress(ProcessLookupError):
+            os.killpg(proc.pid, signal.SIGKILL)
     with contextlib.suppress(subprocess.TimeoutExpired):
         proc.wait(timeout=_ray_stop_timeout_sec())
+
+
+#: The job objects holding probes, by pid. Each must stay referenced: dropping one closes
+#: its handle, and the kill-on-close limit then ends the probe -- which is exactly how a
+#: probe whose parent is killed outright is made to die with it, as ``PR_SET_PDEATHSIG``
+#: does on Linux.
+_PROBE_JOBS: dict[int, winproc.OwnedJob] = {}
+
+
+def _own_probe(pid: int) -> None:
+    """Tie the probe's lifetime to this process, where the host has a way to."""
+    if not is_windows():
+        return
+    job = winproc.OwnedJob()
+    if job.armed and job.assign(pid):
+        _PROBE_JOBS[pid] = job
+        return
+    job.close()
+
+
+def _disown_probe(pid: int) -> None:
+    """Drop the probe's job once it is gone either way; closing the handle ends it."""
+    job = _PROBE_JOBS.pop(pid, None)
+    if job is not None:
+        job.close()
 
 
 class _HeadVerdict:
@@ -637,7 +692,13 @@ def _sigterm_disposition_kept() -> Iterator[None]:
 
     The Ray driver core installs a crash handler on SIGTERM whose watchdog aborts the process 3s after the signal;
     ``signal.signal`` cannot undo it off the main thread, so libc ``sigaction`` saves and restores it.
+
+    A no-op on Windows, which has neither that handler nor ``sigaction``: there is nothing
+    to put back.
     """
+    if os.name != "posix":
+        yield
+        return
     libc = ctypes.CDLL(None, use_errno=True)
     saved = ctypes.create_string_buffer(_SIGACTION_BUFFER_BYTES)
     kept = libc.sigaction(signal.SIGTERM, None, saved) == 0

@@ -16,7 +16,11 @@ the boot id retires a record written before a reboot, which reset the card.
 from __future__ import annotations
 
 import contextlib
-import fcntl
+
+try:
+    import fcntl
+except ImportError:  # pragma: no cover - Windows has no flock.
+    fcntl = None  # type: ignore[assignment]
 import json
 import os
 import socket
@@ -188,7 +192,8 @@ def _lock_exclusive(fd: int) -> None:
     deadline = time.monotonic() + _LOCK_WAIT_SEC
     while True:
         try:
-            fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            if fcntl is not None:
+                fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
             return
         except BlockingIOError:
             if time.monotonic() >= deadline:
@@ -275,7 +280,8 @@ class PowerSettingsLease:
         """Drop the locks. Idempotent."""
         for fd in self._fds.values():
             try:
-                fcntl.flock(fd, fcntl.LOCK_UN)
+                if fcntl is not None:
+                    fcntl.flock(fd, fcntl.LOCK_UN)
             finally:
                 os.close(fd)
         self._fds.clear()
@@ -323,7 +329,8 @@ def orphaned_power_records(directory: Path | str, gpus: set[int] | None = None) 
             continue
         try:
             try:
-                fcntl.flock(fd, fcntl.LOCK_SH | fcntl.LOCK_NB)
+                if fcntl is not None:
+                    fcntl.flock(fd, fcntl.LOCK_SH | fcntl.LOCK_NB)
             except BlockingIOError:
                 continue
             record = _read_record(fd)

@@ -23,6 +23,7 @@ from pathlib import Path
 
 import pytest
 
+from hyperloom.common.proctree import running as proctree_running
 from hyperloom.orchestrator.actions.executors import _ray_backend as rb
 from hyperloom.orchestrator.actions.executors import _ray_runtime as rr
 from hyperloom.orchestrator.actions.executors import _ray_serving as rs
@@ -43,6 +44,8 @@ _FROZEN_SEC = 5.0
 
 def _running(pid: int) -> bool:
     """Whether ``pid`` is a live process; a zombie is not."""
+    if os.name != "posix":
+        return proctree_running(pid)
     try:
         stat = Path(f"/proc/{pid}/stat").read_text(encoding="utf-8")
     except FileNotFoundError:
@@ -64,7 +67,13 @@ def _warnings(caplog: pytest.LogCaptureFixture) -> list[str]:
 
 
 def _group_members(pgid: int) -> list[int]:
-    """The live processes, zombies aside, whose process group is ``pgid``."""
+    """The live processes, zombies aside, whose process group is ``pgid``.
+
+    A process group is a POSIX concept; Windows has none to enumerate, and the callers
+    assert separately that each process they started is gone.
+    """
+    if os.name != "posix":
+        return []
     members = []
     for entry in os.listdir("/proc"):
         if not entry.isdigit():
@@ -321,6 +330,10 @@ def test_the_head_that_replaces_a_mismatched_one_is_probed_before_the_retry(
     assert rb.ray_exec_enabled() is False
 
 
+@pytest.mark.skipif(
+    sys.platform == "win32",
+    reason="needs shared_storage's O_PATH link-safe walk from /, which has no Windows equivalent",
+)
 @pytest.mark.asyncio
 async def test_a_gpu_specialist_keeps_the_route_it_was_admitted_on_when_the_head_stops_answering_meanwhile(
     wedgeable_head: FakeRayHead, tmp_path: Path, monkeypatch: pytest.MonkeyPatch

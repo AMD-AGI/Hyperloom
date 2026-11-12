@@ -1,7 +1,12 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""Enumerate a process tree from procfs, signal it, and confirm it is gone."""
+"""Enumerate a process tree from procfs, signal it, and confirm it is gone.
+
+On Windows there is no procfs and no process group, so the tree is the one ``taskkill
+/T`` walks and liveness comes from an opened process handle;
+:mod:`hyperloom_common.winproc` owns both, and every function here keeps its POSIX meaning.
+"""
 
 from __future__ import annotations
 
@@ -12,6 +17,9 @@ import time
 from collections.abc import Iterable
 from dataclasses import dataclass
 from pathlib import Path
+
+from hyperloom_common import winproc
+from hyperloom_common.platform import is_windows
 
 log = logging.getLogger(__name__)
 
@@ -119,6 +127,9 @@ def descendants(root_pid: int) -> list[ProcessId]:
     Raises:
         OSError: When ``/proc`` cannot be listed.
     """
+    if is_windows():
+        # No parentage to read: ``taskkill /T`` walks the chain when the kill lands.
+        return []
     children: dict[int, list[ProcessId]] = {}
     for entry in _PROC.iterdir():
         if not entry.name.isdigit():
@@ -186,6 +197,8 @@ def running(pid: int) -> bool:
     Returns:
         bool: True when the process exists and has not been torn down.
     """
+    if is_windows():
+        return winproc.pid_alive(pid)
     if not _exists(pid):
         return False
     try:
@@ -211,6 +224,8 @@ def leader_exited(pid: int) -> bool:
         bool: True when the leader's state is exited; False when it is not, and when the pid is gone or its stat cannot
         be read, which :func:`running` answers.
     """
+    if is_windows():
+        return False
     try:
         fields = _stat_fields(pid)
     except OSError:
@@ -240,6 +255,8 @@ def _threads_left(pid: int) -> bool:
 
 def _exists(pid: int) -> bool:
     """Whether a signal can find ``pid``; someone else's process exists too, whether or not it may be signalled."""
+    if is_windows():
+        return winproc.pid_alive(pid)
     try:
         os.kill(pid, 0)
     except ProcessLookupError:
@@ -402,6 +419,10 @@ def collect_tree(pids: Iterable[int]) -> Tree:
     """
     roots = {int(pid) for pid in pids if int(pid) > 0}
     roots.discard(os.getpid())
+    if is_windows():
+        # No parentage to enumerate: the members are the roots, and ``taskkill /T``
+        # reaches what they started when the kill lands.
+        return Tree(tuple((root, 0) for root in sorted(roots)), (), frozenset(roots))
     posix = os.name == "posix"
     own_group = os.getpgid(0) if posix else -1
     members: list[ProcessId] = []
@@ -465,8 +486,26 @@ def kill_tree(
         bool: True when nothing enumerated is left, False when something
         outlived both signals.
     """
+    if is_windows():
+        return _kill_tree_windows(tree, grace_sec=grace_sec, confirm_sec=confirm_sec)
     for sig, window in ((signal.SIGTERM, grace_sec), (signal.SIGKILL, confirm_sec)):
         signal_tree(tree, sig)
+        if _wait_gone(tree, window):
+            return True
+    return False
+
+
+def _kill_tree_windows(tree: Tree, *, grace_sec: float, confirm_sec: float) -> bool:
+    """Ask each root's tree to close, then force what outlives the grace.
+
+    Windows has no catchable termination signal, so the ask only reaches a process with a window; a console server
+    ignores it and the forced pass is what ends it. The tree is walked once per root because ``taskkill /T`` resolves
+    parentage at the moment it runs.
+    """
+    for force, window in ((False, grace_sec), (True, confirm_sec)):
+        for root in sorted(tree.roots):
+            if winproc.pid_alive(root):
+                winproc.terminate_tree(root, force=force)
         if _wait_gone(tree, window):
             return True
     return False

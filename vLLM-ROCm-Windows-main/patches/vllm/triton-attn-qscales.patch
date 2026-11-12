@@ -1,0 +1,23 @@
+diff --git a/vllm/v1/attention/backends/triton_attn.py b/vllm/v1/attention/backends/triton_attn.py
+index 6d967b5..9054a92 100644
+--- a/vllm/v1/attention/backends/triton_attn.py
++++ b/vllm/v1/attention/backends/triton_attn.py
+@@ -476,9 +476,15 @@ class TritonAttentionImpl(AttentionImpl):
+             if key_cache.dtype != self.fp8_dtype:
+                 key_cache = key_cache.view(self.fp8_dtype)
+                 value_cache = value_cache.view(self.fp8_dtype)
+-            assert layer._q_scale_float == 1.0, (
+-                "A non 1.0 q_scale is not currently supported."
+-            )
++            # q_scale is only meaningful when the query itself is stored in fp8
++            # (layer.query_quant present, flash-attn/flashinfer fp8-Q paths).
++            # This backend always reads Q in its native dtype and never
++            # descales it, so a non-1.0 q_scale (e.g. produced by
++            # --calculate-kv-scales, which also calibrates Q for those other
++            # backends) is harmless here and must not be rejected.
++            assert getattr(layer, "query_quant", None) is None or (
++                layer._q_scale_float == 1.0
++            ), "A non 1.0 q_scale is not currently supported."
+ 
+         cu_seqlens_q = attn_metadata.query_start_loc
+         seqused_k = attn_metadata.seq_lens

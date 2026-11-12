@@ -8,6 +8,7 @@ from __future__ import annotations
 import dataclasses
 import json
 import subprocess
+import sys
 import types
 from pathlib import Path
 
@@ -640,7 +641,7 @@ def test_boot_only_round_persists_the_server_without_terminating_it(tmp_path, mo
     monkeypatch.setattr(bypass_runner, "_terminate_server", lambda proc: terminated.__setitem__("called", True))
     monkeypatch.setattr(bypass_engine, "server_health_ok", lambda *a, **k: False)
     monkeypatch.setattr(bypass_engine, "wait_for_server_ready", lambda *a, **k: True)
-    monkeypatch.setattr(bypass_runner.os, "getpgid", lambda pid: pid)
+    monkeypatch.setattr(bypass_runner.os, "getpgid", lambda pid: pid, raising=False)
 
     rc = bypass_runner.run_benchmark(cfg_path, tmp_path / "out")
     assert rc == 0
@@ -759,7 +760,7 @@ def test_yaml_lifecycle_first_round_persists(tmp_path, monkeypatch, framework):
     )
     monkeypatch.setattr(bypass_engine, "wait_for_server_ready", lambda *a, **k: True)
     monkeypatch.setattr(bypass_engine, "server_health_ok", lambda *a, **k: False)  # no server yet
-    monkeypatch.setattr(bypass_runner.os, "getpgid", lambda pid: pid)
+    monkeypatch.setattr(bypass_runner.os, "getpgid", lambda pid: pid, raising=False)
     _fake_client_run(monkeypatch)
 
     rc = bypass_runner.run_benchmark(cfg_path, tmp_path / "out")
@@ -825,7 +826,7 @@ class _BootRound:
             )
         monkeypatch.setattr(bypass_engine, "server_health_ok", lambda *a, **k: server_up)
         monkeypatch.setattr(bypass_engine, "wait_for_server_ready", lambda *a, **k: True)
-        monkeypatch.setattr(bypass_runner.os, "getpgid", lambda pid: pid)
+        monkeypatch.setattr(bypass_runner.os, "getpgid", lambda pid: pid, raising=False)
         monkeypatch.setattr(bypass_runner, "_launch_server", self._launch_server)
         monkeypatch.setattr(bypass_runner, "_terminate_server", lambda proc: None)
         monkeypatch.setattr(bypass_runner, "_ensure_eval_deps", lambda python_exe: None)
@@ -996,7 +997,7 @@ def test_lifecycle_server_ready_timeout_honored(tmp_path, monkeypatch):
     monkeypatch.setattr(bypass_runner, "_terminate_server", lambda proc: None)
     monkeypatch.setattr(bypass_engine, "wait_for_server_ready", fake_wait)
     monkeypatch.setattr(bypass_engine, "server_health_ok", lambda *a, **k: False)  # no server yet
-    monkeypatch.setattr(bypass_runner.os, "getpgid", lambda pid: pid)
+    monkeypatch.setattr(bypass_runner.os, "getpgid", lambda pid: pid, raising=False)
     _fake_client_run(monkeypatch)
 
     rc = bypass_runner.run_benchmark(cfg_path, tmp_path / "out")
@@ -1156,6 +1157,7 @@ def _write_xdit_cfg(tmp_path, inferencex, **bench_extra):
     return cfg_path
 
 
+@pytest.mark.skipif(sys.platform == "win32", reason="scriptable bench scripts are bash; Windows carries no sh")
 def test_scriptable_run_end_to_end(tmp_path, monkeypatch):
     """xdit scriptable run produces a report carrying quality_gate; eval maps it."""
     from hyperloom.orchestrator.actions.executors._accuracy_gate import parse_eval_results
@@ -1193,6 +1195,7 @@ def test_scriptable_run_end_to_end(tmp_path, monkeypatch):
     assert out["accuracy"] == 1.0
 
 
+@pytest.mark.skipif(sys.platform == "win32", reason="scriptable bench scripts are bash; Windows carries no sh")
 def test_scriptable_profile_passthrough(tmp_path, monkeypatch):
     """torch_profiler.enabled=true must reach the scriptable script as PROFILE=1."""
 
@@ -1230,6 +1233,7 @@ def test_scriptable_profile_passthrough(tmp_path, monkeypatch):
     assert (ws / "torch_trace").is_dir()
 
 
+@pytest.mark.skipif(sys.platform == "win32", reason="scriptable bench scripts are bash; Windows carries no sh")
 def test_scriptable_profile_disabled_by_default(tmp_path, monkeypatch):
     """Without torch_profiler, the scriptable script sees no PROFILE=1."""
 
@@ -1728,6 +1732,9 @@ def test_client_takes_the_round_seed_from_the_env(tmp_path, monkeypatch, round_s
     assert seed == expected
 
 
+@pytest.mark.skipif(
+    sys.platform == "win32", reason="POSIX killpg escalation; Windows asks/walks the tree via taskkill instead"
+)
 def test_terminate_server_fallback_kill_and_closes_log(monkeypatch):
     """SIGTERM failure falls back to terminate; wait failure escalates to SIGKILL."""
 
@@ -1758,8 +1765,8 @@ def test_terminate_server_fallback_kill_and_closes_log(monkeypatch):
         if sig == bypass_runner.signal.SIGTERM:
             raise OSError("missing process group")
 
-    monkeypatch.setattr(bypass_runner.os, "getpgid", lambda pid: 456)
-    monkeypatch.setattr(bypass_runner.os, "killpg", fake_killpg)
+    monkeypatch.setattr(bypass_runner.os, "getpgid", lambda pid: 456, raising=False)
+    monkeypatch.setattr(bypass_runner.os, "killpg", fake_killpg, raising=False)
 
     bypass_runner._terminate_server(proc)
     assert proc.terminated is True
@@ -1767,6 +1774,9 @@ def test_terminate_server_fallback_kill_and_closes_log(monkeypatch):
     assert proc._bypass_log_fh.closed is True
 
 
+@pytest.mark.skipif(
+    sys.platform == "win32", reason="POSIX killpg escalation; Windows asks/walks the tree via taskkill instead"
+)
 def test_terminate_server_wait_failure_other_than_timeout_propagates(monkeypatch):
     """Only a wait timeout escalates to SIGKILL; any other failure is a bug."""
 
@@ -1779,11 +1789,47 @@ def test_terminate_server_wait_failure_other_than_timeout_propagates(monkeypatch
         def wait(self, timeout=None):
             raise RuntimeError("wait broke")
 
-    monkeypatch.setattr(bypass_runner.os, "getpgid", lambda pid: 456)
-    monkeypatch.setattr(bypass_runner.os, "killpg", lambda pgid, sig: None)
+    monkeypatch.setattr(bypass_runner.os, "getpgid", lambda pid: 456, raising=False)
+    monkeypatch.setattr(bypass_runner.os, "killpg", lambda pgid, sig: None, raising=False)
 
     with pytest.raises(RuntimeError, match="wait broke"):
         bypass_runner._terminate_server(_Proc())
+
+
+@pytest.mark.skipif(
+    sys.platform != "win32", reason="Windows ask/wait/force teardown; POSIX pins the killpg escalation above"
+)
+def test_terminate_server_windows_asks_then_forces_the_tree(monkeypatch):
+    """Windows has no SIGTERM: _terminate_server asks via taskkill /T, waits, then forces."""
+
+    class _Log:
+        closed = False
+
+        def close(self):
+            self.closed = True
+
+    class _Proc:
+        pid = 123
+
+        def __init__(self):
+            self._bypass_log_fh = _Log()
+            self.waits = 0
+
+        def wait(self, timeout=None):
+            self.waits += 1
+            if self.waits == 1:
+                raise subprocess.TimeoutExpired(cmd="server", timeout=timeout)
+            return 0
+
+    calls = []
+    monkeypatch.setattr(
+        bypass_runner.winproc, "terminate_tree", lambda pid, *, force: calls.append((pid, force)) or True
+    )
+
+    proc = _Proc()
+    bypass_runner._terminate_server(proc)
+    assert calls == [(123, False), (123, True)]
+    assert proc._bypass_log_fh.closed is True
 
 
 def test_tokenize_extra_args_falls_back_on_bad_quoting():
@@ -1854,7 +1900,7 @@ def test_boot_only_round_pgid_oserror_falls_back_to_pid(tmp_path, monkeypatch):
     monkeypatch.setattr(bypass_runner, "_terminate_server", lambda proc: None)
     monkeypatch.setattr(bypass_engine, "server_health_ok", lambda *a, **k: False)
     monkeypatch.setattr(bypass_engine, "wait_for_server_ready", lambda *a, **k: True)
-    monkeypatch.setattr(bypass_runner.os, "getpgid", raise_oserror)
+    monkeypatch.setattr(bypass_runner.os, "getpgid", raise_oserror, raising=False)
 
     rc = bypass_runner.run_benchmark(cfg_path, tmp_path / "out")
     assert rc == 0
@@ -1960,7 +2006,7 @@ def test_lifecycle_all_boot_cleanup_tears_down_server(tmp_path, monkeypatch):
     )
     monkeypatch.setattr(bypass_engine, "server_health_ok", lambda *a, **k: False)  # BOOT
     monkeypatch.setattr(bypass_engine, "wait_for_server_ready", lambda *a, **k: True)
-    monkeypatch.setattr(bypass_runner.os, "getpgid", lambda pid: pid)
+    monkeypatch.setattr(bypass_runner.os, "getpgid", lambda pid: pid, raising=False)
 
     import hyperloom.orchestrator.actions.executors._server_lifecycle as sl
 

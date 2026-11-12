@@ -1,0 +1,18 @@
+vLLM-ROCm-Windows
+Copyright 2026 ThePie88
+https://github.com/ThePie88/vLLM-ROCm-Windows
+
+This product includes software developed by ThePie88: the Windows ROCm platform
+plugin (windows_rocm_plugin/), the native HIP and Triton kernels and their build
+harnesses (experiments/), the toolchain resolvers (tools/), and the benchmark and
+correctness harnesses (run/).
+
+Redistribution of this software, in source or binary form, with or without
+modification, must retain the attribution above, in accordance with section 4 of
+the Apache License, Version 2.0.
+
+This project is a plugin for, and contains patches against, vLLM
+(https://github.com/vllm-project/vllm), Copyright the vLLM team, licensed under
+the Apache License, Version 2.0. Those portions remain subject to their own
+copyright and notices. Files under patches/vllm/ contain vLLM source and are not
+covered by the copyright above.

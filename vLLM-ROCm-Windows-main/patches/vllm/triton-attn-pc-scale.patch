@@ -1,0 +1,221 @@
+diff --git a/vllm/v1/attention/ops/triton_reshape_and_cache_flash.py b/vllm/v1/attention/ops/triton_reshape_and_cache_flash.py
+index c5c9a9c..bf9c0be 100644
+--- a/vllm/v1/attention/ops/triton_reshape_and_cache_flash.py
++++ b/vllm/v1/attention/ops/triton_reshape_and_cache_flash.py
+@@ -16,6 +16,7 @@ def reshape_and_cache_kernel_flash(
+     slot_mapping_ptr,  # [num_tokens]
+     k_scale,  # float32
+     v_scale,  # float32
++    k_scale_channel,  # [num_heads * head_size] float32, or None
+     # strides
+     key_stride: tl.int64,
+     value_stride: tl.int64,
+@@ -31,6 +32,7 @@ def reshape_and_cache_kernel_flash(
+     USE_HEAD_MAJOR_LAYOUT: tl.constexpr,
+     # FP8 flags
+     FP8_KV_CACHE: tl.constexpr,
++    HAS_K_SCALE_CHANNEL: tl.constexpr,
+     # tune parameters
+     TILE_SIZE: tl.constexpr,
+ ):
+@@ -80,7 +82,19 @@ def reshape_and_cache_kernel_flash(
+     if FP8_KV_CACHE:
+         # tl.store will do the correct implicit cast to fp8,
+         # based on the key_cache_ptr.dtype.element_ty
+-        key_tile = key_load if key_load.dtype.is_fp8() else key_load / tl.load(k_scale)
++        if key_load.dtype.is_fp8():
++            key_tile = key_load
++        else:
++            # tile_pos enumerates (head, dim) in natural order, so the
++            # per-(head, channel) scale is a flat load at the same index.
++            s = tl.load(k_scale)
++            if HAS_K_SCALE_CHANNEL:
++                s = s * tl.load(
++                    k_scale_channel + tile_pos,
++                    mask=tile_pos < (num_heads * head_size),
++                    other=1.0,
++                )
++            key_tile = key_load / s
+     else:
+         key_tile = key_load
+ 
+@@ -122,6 +136,7 @@ def triton_reshape_and_cache_flash(
+     kv_cache_dtype: str,  # "auto", "fp8"
+     k_scale: torch.Tensor,  # float32
+     v_scale: torch.Tensor,  # float32
++    k_scale_channel: torch.Tensor | None = None,  # [num_heads, head_size]
+ ):
+     num_heads = key.shape[1]
+     head_size = key.shape[2]
+@@ -202,6 +217,7 @@ def triton_reshape_and_cache_flash(
+         slot_mapping_ptr=slot_mapping,
+         k_scale=k_scale,
+         v_scale=v_scale,
++        k_scale_channel=k_scale_channel,
+         # strides
+         key_stride=key_stride,
+         value_stride=value_stride,
+@@ -217,6 +233,7 @@ def triton_reshape_and_cache_flash(
+         USE_HEAD_MAJOR_LAYOUT=use_head_major_layout,
+         # FP8 flags
+         FP8_KV_CACHE=FP8_KV_CACHE,
++        HAS_K_SCALE_CHANNEL=k_scale_channel is not None,
+         # autotune parameters
+         TILE_SIZE=TILE_SIZE,
+         num_warps=num_warps,
+diff --git a/vllm/v1/attention/ops/triton_unified_attention.py b/vllm/v1/attention/ops/triton_unified_attention.py
+index ca5d0e3..311574e 100644
+--- a/vllm/v1/attention/ops/triton_unified_attention.py
++++ b/vllm/v1/attention/ops/triton_unified_attention.py
+@@ -70,6 +70,7 @@ def kernel_unified_attention_2d(
+     k_scale,  # float32
+     v_scale,  # float32
+     out_scale,  # float32
++    k_descale_channel,  # [num_kv_heads, head_size] float32, or None
+     softcap,  # float32
+     num_query_heads: tl.constexpr,  # int
+     num_queries_per_kv: tl.constexpr,  # int
+@@ -88,6 +89,7 @@ def kernel_unified_attention_2d(
+     USE_QQ_BIAS: tl.constexpr,  # bool
+     USE_SOFTCAP: tl.constexpr,  # bool
+     USE_SINKS: tl.constexpr,  # bool
++    USE_PC_K_SCALE: tl.constexpr,  # bool
+     SLIDING_WINDOW: tl.constexpr,  # int
+     USE_MM_PREFIX: tl.constexpr,  # bool
+     MAX_MM_RANGES: tl.constexpr,  # int
+@@ -130,6 +132,15 @@ def kernel_unified_attention_2d(
+     offs_m = tl.arange(0, BLOCK_M)
+     offs_d = tl.arange(0, HEAD_SIZE_PADDED)
+     offs_t = tl.arange(0, TILE_SIZE)
++
++    # per-(kv head, channel) K descale, loop-invariant; 1.0 when unused
++    pc_k_scale = tl.full([HEAD_SIZE_PADDED], 1.0, dtype=tl.float32)
++    if USE_PC_K_SCALE:
++        pc_k_scale = tl.load(
++            k_descale_channel + kv_head_idx * HEAD_SIZE + offs_d,
++            mask=offs_d < HEAD_SIZE,
++            other=1.0,
++        ).to(tl.float32)
+     query_pos = q_block_local_idx * BLOCK_Q + offs_m // num_queries_per_kv
+ 
+     query_offset_0 = cur_batch_in_all_start_index + query_pos
+@@ -263,7 +274,9 @@ def kernel_unified_attention_2d(
+             if Q.dtype.is_fp8():
+                 K = K_load
+             else:
+-                K = (K_load.to(tl.float32) * tl.load(k_scale)).to(Q.dtype)
++                K = (K_load.to(tl.float32) * tl.load(k_scale) * pc_k_scale[:, None]).to(
++                    Q.dtype
++                )
+         else:
+             K = K_load
+ 
+@@ -421,6 +434,7 @@ def kernel_unified_attention_3d(
+     k_scale,  # float32
+     v_scale,  # float32
+     softcap,  # float32
++    k_descale_channel,  # [num_kv_heads, head_size] float32, or None
+     num_query_heads: tl.constexpr,  # int
+     num_queries_per_kv: tl.constexpr,  # int
+     block_table_stride: tl.int64,  # int
+@@ -436,6 +450,7 @@ def kernel_unified_attention_3d(
+     USE_QQ_BIAS: tl.constexpr,  # bool
+     USE_SOFTCAP: tl.constexpr,  # bool
+     USE_SINKS: tl.constexpr,  # bool
++    USE_PC_K_SCALE: tl.constexpr,  # bool
+     SLIDING_WINDOW: tl.constexpr,  # int
+     stride_k_cache_0: tl.int64,  # int
+     stride_k_cache_1: tl.int64,  # int
+@@ -489,6 +504,15 @@ def kernel_unified_attention_3d(
+     offs_t = tl.arange(0, TILE_SIZE)
+     query_pos = q_block_local_idx * BLOCK_Q + offs_m // num_queries_per_kv
+ 
++    # per-(kv head, channel) K descale, loop-invariant; 1.0 when unused
++    pc_k_scale = tl.full([HEAD_SIZE_PADDED], 1.0, dtype=tl.float32)
++    if USE_PC_K_SCALE:
++        pc_k_scale = tl.load(
++            k_descale_channel + kv_head_idx * HEAD_SIZE + offs_d,
++            mask=offs_d < HEAD_SIZE,
++            other=1.0,
++        ).to(tl.float32)
++
+     query_offset_0 = cur_batch_in_all_start_index + query_pos
+     query_offset_1 = kv_head_idx * num_queries_per_kv + offs_m % num_queries_per_kv
+     query_offset = (
+@@ -618,7 +642,9 @@ def kernel_unified_attention_3d(
+             if Q.dtype.is_fp8():
+                 K = K_load
+             else:
+-                K = (K_load.to(tl.float32) * tl.load(k_scale)).to(Q.dtype)
++                K = (K_load.to(tl.float32) * tl.load(k_scale) * pc_k_scale[:, None]).to(
++                    Q.dtype
++                )
+         else:
+             K = K_load
+ 
+@@ -898,6 +924,9 @@ def unified_attention(
+     q_descale,
+     k_descale,
+     v_descale,
++    # Optional per-(kv head, channel) K descale [num_kv_heads, head_size]
++    # (issue #28: fp8 K stored as residual / per-channel scale)
++    k_descale_channel=None,
+     seq_threshold_3D=None,
+     num_par_softmax_segments=None,
+     softmax_segm_output=None,
+@@ -1005,6 +1034,7 @@ def unified_attention(
+             k_scale=k_descale,
+             v_scale=v_descale,
+             out_scale=1 / output_scale if output_scale is not None else 1.0,
++            k_descale_channel=k_descale_channel,
+             softcap=softcap,
+             num_query_heads=num_query_heads,
+             num_queries_per_kv=num_queries_per_kv,
+@@ -1023,6 +1053,7 @@ def unified_attention(
+             USE_QQ_BIAS=use_qq_bias,
+             USE_SOFTCAP=(softcap > 0),
+             USE_SINKS=(sinks is not None),
++            USE_PC_K_SCALE=(k_descale_channel is not None),
+             USE_MM_PREFIX=use_mm_prefix,
+             MAX_MM_RANGES=max_mm_ranges,
+             mm_prefix_range_ptr=mm_prefix_range,
+@@ -1059,6 +1090,7 @@ def unified_attention(
+             scale=softmax_scale,
+             k_scale=k_descale,
+             v_scale=v_descale,
++            k_descale_channel=k_descale_channel,
+             softcap=softcap,
+             num_query_heads=num_query_heads,
+             num_queries_per_kv=num_queries_per_kv,
+@@ -1075,6 +1107,7 @@ def unified_attention(
+             USE_QQ_BIAS=use_qq_bias,
+             USE_SOFTCAP=(softcap > 0),
+             USE_SINKS=(sinks is not None),
++            USE_PC_K_SCALE=(k_descale_channel is not None),
+             USE_MM_PREFIX=use_mm_prefix,
+             MAX_MM_RANGES=max_mm_ranges,
+             mm_prefix_range_ptr=mm_prefix_range,
+diff --git a/vllm/v1/attention/backends/triton_attn.py b/vllm/v1/attention/backends/triton_attn.py
+index de0ac57..aa8cf4e 100644
+--- a/vllm/v1/attention/backends/triton_attn.py
++++ b/vllm/v1/attention/backends/triton_attn.py
+@@ -520,6 +520,9 @@ class TritonAttentionImpl(AttentionImpl):
+             q_descale=None,  # Not supported
+             k_descale=layer._k_scale.expand(descale_shape),
+             v_descale=layer._v_scale.expand(descale_shape),
++            # Issue #28: per-(kv head, channel) descale of the fp8 K residual,
++            # stashed on the layer by the kv_offsets plugin (None by default).
++            k_descale_channel=getattr(layer, "_kv_k_pc_scale", None),
+             seq_threshold_3D=seq_threshold_3D,
+             num_par_softmax_segments=num_par_softmax_segments,
+             softmax_segm_output=softmax_segm_output,
+@@ -621,6 +624,9 @@ class TritonAttentionImpl(AttentionImpl):
+                 self.kv_cache_dtype,
+                 layer._k_scale,
+                 layer._v_scale,
++                # Issue #28: per-(kv head, channel) scale of the fp8 K
++                # residual, stashed on the layer by kv_offsets (None default).
++                k_scale_channel=getattr(layer, "_kv_k_pc_scale", None),
+             )
+ 
+     def fused_rope_kvcache_supported(self):

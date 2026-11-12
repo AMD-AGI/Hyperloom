@@ -29,7 +29,7 @@ RECIPE = {
 def test_known_archs_get_their_marketing_name():
     assert _arch_phrase("gfx950") == "AMD MI355X (gfx950)"
     assert _arch_phrase("gfx942") == "AMD MI300X/MI325X (gfx942)"
-    assert _arch_phrase("gfx1201") == "AMD Radeon RX 9070 XT (gfx1201)"
+    assert _arch_phrase("gfx1201") == "AMD Radeon AI PRO R9700 / RX 9070 XT (gfx1201)"
 
 
 def test_an_unrecognised_arch_is_still_named_exactly():

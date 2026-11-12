@@ -58,7 +58,7 @@ _LABELS = {POWER_CAP_W: "power cap", PERF_LEVEL: "perf level"}
 #: Starting perf levels a perf-level restore cannot bring back: determinism's clock soft-max is set with
 #: ``amd-smi set -d``, and manual carries clock limits an operator tuned by hand, which setting a level resets.
 _UNRESTORABLE_LEVELS = (_DETERMINISM, PERF_LEVEL_MANUAL)
-_RESTORE_SIGNALS = (signal.SIGTERM, signal.SIGHUP)
+_RESTORE_SIGNALS = (signal.SIGTERM,) + ((signal.SIGHUP,) if hasattr(signal, "SIGHUP") else ())
 
 
 def _session_gpus(observed: Mapping[int, Any], mask: set[int] | None) -> set[int]:

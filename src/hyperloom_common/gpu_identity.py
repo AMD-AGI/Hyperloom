@@ -56,6 +56,11 @@ def _matrix_peaks(*, bf16: float, fp8: float, fp32: float, fp4: float | None = N
 
 _MI300X_PEAKS = _matrix_peaks(bf16=1307.4, fp8=2614.9, fp32=163.4)
 
+#: The gfx arch the R9700, R9600D and RX 9070 XT rows below all name.
+_GFX1201 = "gfx1201"
+#: The memory bandwidth those three boards all publish.
+_GFX1201_HBM_BW_GBPS = 640.0
+
 AMD_GPU_BOARDS: dict[str, GpuBoard] = {
     board.product: board
     for board in (
@@ -114,10 +119,20 @@ AMD_GPU_BOARDS: dict[str, GpuBoard] = {
             device_ids=frozenset({"75a3", "75b3"}),
         ),
         # https://www.amd.com/en/products/graphics/workstations/radeon-ai-pro/ai-9000-series/amd-radeon-ai-pro-r9700.html
-        GpuBoard("r9700", "gfx1201", 64, 32.0, 640.0, _matrix_peaks(bf16=191.0, fp8=383.0, fp32=47.8)),
+        GpuBoard("r9700", _GFX1201, 64, 32.0, _GFX1201_HBM_BW_GBPS, _matrix_peaks(bf16=191.0, fp8=383.0, fp32=47.8)),
         # https://www.amd.com/en/products/graphics/workstations/radeon-ai-pro/ai-9000-series/amd-radeon-ai-pro-r9600d.html
-        GpuBoard("r9600d", "gfx1201", 48, 32.0, 640.0, _matrix_peaks(bf16=99.0, fp8=199.0, fp32=24.8)),
-        GpuBoard("rx9070xt", "gfx1201", 64, aliases=("AMD Radeon RX 9070 XT",)),
+        GpuBoard("r9600d", _GFX1201, 48, 32.0, _GFX1201_HBM_BW_GBPS, _matrix_peaks(bf16=99.0, fp8=199.0, fp32=24.8)),
+        # https://www.amd.com/en/products/graphics/desktops/radeon/9000-series/amd-radeon-rx-9070xt.html
+        # Dense matrix peaks (sparse is 2x); known by product name alone like the other gfx1201 boards.
+        GpuBoard(
+            "rx9070xt",
+            _GFX1201,
+            64,
+            16.0,
+            _GFX1201_HBM_BW_GBPS,
+            _matrix_peaks(bf16=195.0, fp8=389.0, fp32=48.7),
+            aliases=("AMD Radeon RX 9070 XT",),
+        ),
         # https://www.amd.com/en/products/processors/desktops/ryzen/ryzen-ai-halo/ryzen-ai-max-plus-395.html
         # Unified memory, so no fixed capacity. AMD publishes only the FP16 rate, read as BF16 too, as for every board.
         GpuBoard(

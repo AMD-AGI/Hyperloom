@@ -15,11 +15,22 @@ from hyperloom.inference_optimizer.cli import preflight as preflight_mod
 def test_backend_resolution_controls_magpie_need(monkeypatch):
     # Default + magpie -> Magpie needed; bypass -> not needed.
     monkeypatch.delenv(bb.BENCHMARK_BACKEND_ENV, raising=False)
+    monkeypatch.setattr(bb, "is_windows", lambda: False)
     assert bb.resolve_backend_name() == "magpie"
     monkeypatch.setenv(bb.BENCHMARK_BACKEND_ENV, "bypass")
     assert bb.resolve_backend_name() == "bypass"
     # Unknown typos normalize to magpie so preflight still installs Magpie.
     monkeypatch.setenv(bb.BENCHMARK_BACKEND_ENV, "magpiee")
+    assert bb.resolve_backend_name() == "magpie"
+
+
+def test_windows_default_backend_is_bypass_unless_chosen(monkeypatch):
+    """Windows routes to the tailored bypass backend; an explicit choice still wins."""
+    monkeypatch.delenv(bb.BENCHMARK_BACKEND_ENV, raising=False)
+    monkeypatch.setattr(bb, "is_windows", lambda: True)
+    assert bb.resolve_backend_name() == "bypass"
+    assert bb.resolve_backend().name == "bypass"
+    monkeypatch.setenv(bb.BENCHMARK_BACKEND_ENV, "magpie")
     assert bb.resolve_backend_name() == "magpie"
 
 
@@ -138,6 +149,8 @@ def test_lifecycle_magpie_default_unchanged(tmp_path, monkeypatch):
     from hyperloom.orchestrator.actions.executors import _server_lifecycle as sl
 
     monkeypatch.delenv(bb.BENCHMARK_BACKEND_ENV, raising=False)
+    # The magpie default is POSIX: Windows resolves `bypass`, whose eligibility these tests do not cover.
+    monkeypatch.setattr(bb, "is_windows", lambda: False)
     cfg = {
         "benchmark": {
             "framework": "vllm",
@@ -156,16 +169,15 @@ def test_lifecycle_magpie_default_unchanged(tmp_path, monkeypatch):
 def test_lifecycle_port_is_below_the_ephemeral_range(tmp_path, monkeypatch):
     """The persistent server binds minutes after its port is picked; an ephemeral one is taken by then."""
     import yaml
-    from pathlib import Path
 
-    from hyperloom.common.ports import DEV_SANDBOX_PORTS, RAY_WORKER_PORTS
+    from hyperloom.common.ports import DEV_SANDBOX_PORTS, RAY_WORKER_PORTS, _ephemeral_start
     from hyperloom.orchestrator.actions.executors import _server_lifecycle as sl
 
     monkeypatch.delenv(bb.BENCHMARK_BACKEND_ENV, raising=False)
     cfg = {"benchmark": {"framework": "vllm", "benchmark_script": "vllm_mi300x.sh", "envs": {"PORT": 8888}}}
     cfg_path = tmp_path / "cfg.yaml"
     cfg_path.write_text(yaml.safe_dump(cfg), encoding="utf-8")
-    ephemeral_start = int(Path("/proc/sys/net/ipv4/ip_local_port_range").read_text(encoding="utf-8").split()[0])
+    ephemeral_start = _ephemeral_start()
 
     port = sl.resolve_lifecycle_params(cfg_path)["port"]
 
@@ -203,6 +215,9 @@ def test_lifecycle_magpie_non_builtin_ineligible(tmp_path, monkeypatch):
     from hyperloom.orchestrator.actions.executors import _server_lifecycle as sl
 
     monkeypatch.delenv(bb.BENCHMARK_BACKEND_ENV, raising=False)
+    # The magpie default is POSIX: Windows resolves `bypass`, and its scripts are not
+    # built-ins either way.
+    monkeypatch.setattr(bb, "is_windows", lambda: False)
     cfg = {
         "benchmark": {
             "framework": "vllm",

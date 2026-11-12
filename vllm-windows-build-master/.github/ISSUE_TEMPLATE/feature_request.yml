@@ -1,0 +1,27 @@
+name: Feature or documentation request
+description: Suggest a capability, supported configuration, or clearer guidance
+labels: ["enhancement"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Please check the [release guide](https://github.com/aivrar/vllm-windows-build/blob/master/docs/releases.md) and [wiki](https://github.com/aivrar/vllm-windows-build/wiki) before filing. Requests for a model or GPU should include the exact model format and hardware.
+  - type: textarea
+    id: need
+    attributes:
+      label: What do you need?
+      description: Describe the behavior or documentation you would like to see.
+    validations:
+      required: true
+  - type: textarea
+    id: use_case
+    attributes:
+      label: Why is this useful?
+      description: Give a concrete example of what you are trying to do and what currently blocks you.
+    validations:
+      required: true
+  - type: input
+    id: setup
+    attributes:
+      label: Relevant release, model, or GPU
+      description: Include these details when the request depends on a particular configuration.
