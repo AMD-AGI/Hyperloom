@@ -383,7 +383,7 @@ def _should_remote_probe_gpu(args: argparse.Namespace) -> bool:
     if int(getattr(args, "nodes", 1) or 1) < 2:
         return False
     backend = (getattr(args, "mn_backend", None) or "rayjob").strip().lower()
-    return backend in ("rayjob", "infera")
+    return backend in ("rayjob", "infera", "atomesh", "sglangrouter")
 
 
 def _apply_atom_auto_tighten(args: argparse.Namespace) -> None:
@@ -1583,7 +1583,7 @@ async def _open_knowledge_plane(
 
     bind_state_file_to_session(session_dir)
     if nodes_resolved >= 2:
-        await asyncio.to_thread(_prepare_multi_node_state, args)
+        await asyncio.to_thread(_prepare_multi_node_state, args, session_dir)
     return knowledge_plane
 
 

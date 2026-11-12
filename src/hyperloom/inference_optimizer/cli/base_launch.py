@@ -230,6 +230,26 @@ def resolve_server_base(launch: SessionLaunch) -> BaseLaunch:
     return _frozen_form(dataclasses.replace(found, model=dataclasses.replace(found.model, path=launch.model_path)))
 
 
+def server_session(
+    args: argparse.Namespace, *, framework: str, benchmark_mode: str, concurrencies: Sequence[int]
+) -> SessionLaunch:
+    """The command line's server session: an AgentX trace replay, else a fixed workload."""
+    replay = is_agentx_mode(benchmark_mode) and not is_mlperf_backend()
+    workload = Workload.AGENTX if replay else Workload.FIXED
+    return _session_launch(args, framework=framework, workload=workload, concurrencies=concurrencies)
+
+
+def server_session_query(
+    args: argparse.Namespace, *, framework: str, benchmark_mode: str, concurrencies: Sequence[int]
+) -> tuple[LaunchQuery, str]:
+    """The command line's server-session query and the InferenceX commit it reads; exits 2 when it is malformed."""
+    launch = server_session(args, framework=framework, benchmark_mode=benchmark_mode, concurrencies=concurrencies)
+    try:
+        return launch.query(), launch.inferencex_commit
+    except BaseLaunchError as exc:
+        _refuse(f"the session's query is malformed: {exc}")
+
+
 def resolve_base_launch(
     args: argparse.Namespace,
     session_dir: Path,
@@ -254,9 +274,7 @@ def resolve_base_launch(
         except BaseLaunchError as exc:
             _refuse(f"the scriptable base could not be frozen: {exc}")
         return _freeze(args, session_dir, script_base)
-    replay = is_agentx_mode(benchmark_mode) and not is_mlperf_backend()
-    workload = Workload.AGENTX if replay else Workload.FIXED
-    launch = _session_launch(args, framework=framework, workload=workload, concurrencies=concurrencies)
+    launch = server_session(args, framework=framework, benchmark_mode=benchmark_mode, concurrencies=concurrencies)
     try:
         base = resolve_server_base(launch)
     except BaseLaunchUnresolved as exc:
@@ -290,4 +308,11 @@ def _freeze(args: argparse.Namespace, session_dir: Path, base: BaseLaunch) -> Ba
     return base
 
 
-__all__ = ["BaseLaunchUnresolved", "SessionLaunch", "resolve_base_launch", "resolve_server_base"]
+__all__ = [
+    "BaseLaunchUnresolved",
+    "SessionLaunch",
+    "resolve_base_launch",
+    "resolve_server_base",
+    "server_session",
+    "server_session_query",
+]

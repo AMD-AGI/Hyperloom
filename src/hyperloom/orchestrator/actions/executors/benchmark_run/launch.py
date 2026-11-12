@@ -126,6 +126,17 @@ def _attach_baseline_launch_evidence(
     )
 
 
+def _pd_session() -> bool:
+    """Whether this run serves a PD-disaggregated node-list cluster."""
+    from .._multi_node_env import _read_state, is_multi_node
+
+    if not is_multi_node():
+        return False
+    from hyperloom.inference_optimizer.multi_node.pd_session import is_pd_state
+
+    return is_pd_state(_read_state())
+
+
 def _attempt_failure(error_class: str, exc: Exception, output_dir: Path) -> dict[str, Any]:
     """The failed result of an attempt refused before any round ran."""
     return {
@@ -313,7 +324,8 @@ class _BenchmarkLaunchMixin:
 
             server_base = session_server_base()
             # Fold in the operator ``--server-args`` (``INFERENCE_OPTIMIZER_SERVER_ARGS``).
-            operator_args = os.environ.get("INFERENCE_OPTIMIZER_SERVER_ARGS", "").strip()
+            # A PD session froze the operator's args in its launch; a round carries only its own.
+            operator_args = "" if _pd_session() else os.environ.get("INFERENCE_OPTIMIZER_SERVER_ARGS", "").strip()
             base = server_base.args
             if operator_args:
                 base = merge_server_args(base, operator_args) if base else operator_args
@@ -370,6 +382,16 @@ class _BenchmarkLaunchMixin:
             await asyncio.to_thread(
                 self._observe_bringup, round_, attempt_index, layout.server_log, ran.report.failure_detail or ""
             )
+        lost = await self._multi_node_engines_lost()
+        if lost:
+            log.warning("baseline_executor: %s; error_class=mn_engine_lost.", lost)
+            return {
+                "status": "failed",
+                "error_class": "mn_engine_lost",
+                "error": lost,
+                "output_dir": str(round_.output_dir),
+                **round_.capture_meta,
+            }
         RoundFolder.read(layout.root).write_gpu_metrics(round_.output_dir)
         measurement = extract_benchmark_measurement(None, workspace=layout.root, subprocess_started_unix=started_unix)
         finished = _BenchProcess(
@@ -389,6 +411,17 @@ class _BenchmarkLaunchMixin:
         result = await self._succeeded_round_result(ran_round, finished, measurement, warnings)
         self._stamp_round_quality(ran_round, result, measurement, warnings)
         return result
+
+    @staticmethod
+    async def _multi_node_engines_lost() -> str:
+        """Why a multi-node round's engines are gone (replaced or exited), or ``""`` when they run."""
+        from .._multi_node_env import is_multi_node
+
+        if not is_multi_node():
+            return ""
+        from .._multi_node_server_lifecycle import pd_engines_lost_reason
+
+        return await asyncio.to_thread(pd_engines_lost_reason)
 
     def _record_argv_refusal(self, round_: _BenchmarkRound, attempt_index: int, detail: str) -> None:
         """Record the parser's refusal at the parse rung, where enablement reads it as a terminal no patch repairs."""

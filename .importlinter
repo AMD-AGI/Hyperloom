@@ -369,6 +369,7 @@ forbidden_modules =
     inference_suite.multinode.record
     inference_suite.multinode.remote_driver
     inference_suite.multinode.render
+    inference_suite.multinode.session
     inference_suite.multinode.ssh
     inference_suite.multinode.table
     inference_suite.parser_check

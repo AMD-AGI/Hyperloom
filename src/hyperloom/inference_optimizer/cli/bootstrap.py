@@ -44,7 +44,7 @@ from hyperloom.common.workload_defaults import (
 )
 from ..session.paths import _SESSION_SKELETON
 from ..session.base_launch import shared_state_fields
-from .base_launch import resolve_base_launch
+from .base_launch import resolve_base_launch, server_session_query
 from .executors import _build_specialist_executor, _register_executors
 from .model_gate import _load_model_arch, _load_model_config_tags
 from ..model_config_utils import summarize_model_config
@@ -831,16 +831,28 @@ def _benchmark_mode() -> str:
     return _AGENTX_MODE if _agentx_enabled() else _SYNTHETIC_MODE
 
 
-def resolve_session_base(session_dir: Path, args: argparse.Namespace, *, framework: str) -> BaseLaunch:
-    """Resolve a fresh session's base launch; it settles the TP and EP the manifest and the seeded state record."""
+def resolve_session_base(session_dir: Path, args: argparse.Namespace, *, framework: str) -> BaseLaunch | None:
+    """Resolve a fresh session's base launch; it settles the TP and EP the manifest and the seeded state record.
+
+    A PD session has no single-node base: it freezes its PD launch instead and returns ``None``.
+    """
+    from .multi_node import freeze_pd_session_launch, is_pd_session
+
     benchmark_mode = _benchmark_mode()
     sweep = _parse_conc_sweep_concs(args, benchmark_mode) if _conc_sweep_enabled(args, benchmark_mode) else []
+    concurrencies = (int(args.conc), *sweep)
+    if is_pd_session(args):
+        query, inferencex_commit = server_session_query(
+            args, framework=framework, benchmark_mode=benchmark_mode, concurrencies=concurrencies
+        )
+        freeze_pd_session_launch(session_dir, args, query, inferencex_commit)
+        return None
     return resolve_base_launch(
         args,
         session_dir,
         framework=framework,
         benchmark_mode=benchmark_mode,
-        concurrencies=(int(args.conc), *sweep),
+        concurrencies=concurrencies,
     )
 
 

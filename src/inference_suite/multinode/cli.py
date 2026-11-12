@@ -18,21 +18,19 @@ import json
 import os
 import shlex
 import sys
-import tempfile
 from collections.abc import Mapping
 from pathlib import Path
 from typing import Any
 
 from inference_suite.contracts.base_launch import LaunchQuery
 from inference_suite.multinode.commands import CommandError
-from inference_suite.multinode.inferencex import CHECKOUT_DIRECTORIES
-from inference_suite.multinode.launch import Cluster, LaunchError, LaunchOptions, restart, start, stop
-from inference_suite.multinode.nodes import NodeList, NodeListError, read_node_list
-from inference_suite.multinode.recipe import PdResolveError, ResolveInputs, resolve
-from inference_suite.multinode.record import RECORD_NAME, PdLaunch, PdRecordError, Role, read_record, write_record
-from inference_suite.multinode.ssh import SshClient, SshError
-from inference_suite.recipe.inferencex import INFERENCEX_REPO
-from inference_suite.recipe.sources import SourceFetchError, checkout_commit, checkout_main
+from inference_suite.multinode.launch import LaunchError, LaunchOptions, restart, start, stop
+from inference_suite.multinode.nodes import NodeListError, read_node_list
+from inference_suite.multinode.recipe import PdResolveError
+from inference_suite.multinode.record import RECORD_NAME, PdRecordError, Role, read_record, write_record
+from inference_suite.multinode.session import cluster_of, placed_launch, resolve_session
+from inference_suite.multinode.ssh import SshError
+from inference_suite.recipe.sources import SourceFetchError
 
 SESSION_DIR_ENV = "INFERENCE_OPTIMIZER_CURRENT_SESSION_DIR"
 EXIT_OK = 0
@@ -54,38 +52,14 @@ def _refused(detail: object) -> int:
 def _resolve(args: argparse.Namespace) -> int:
     try:
         nodes = read_node_list(os.environ)
-        query = nodes.query(LaunchQuery.from_document(json.loads(args.query.read_text(encoding="utf-8"))))
+        session = LaunchQuery.from_document(json.loads(args.query.read_text(encoding="utf-8")))
         replay = read_record(args.replay) if args.replay else None
-        with tempfile.TemporaryDirectory(prefix="pd-inferencex-") as scratch:
-            into = Path(scratch) / "InferenceX"
-            commit = args.inferencex_commit
-
-            def fetch() -> Any:
-                if commit:
-                    return checkout_commit(INFERENCEX_REPO, commit, CHECKOUT_DIRECTORIES, into)
-                return checkout_main(INFERENCEX_REPO, CHECKOUT_DIRECTORIES, into)
-
-            inputs = ResolveInputs(operator=nodes.operator, replay=replay, inferencex=fetch, pinned=bool(commit))
-            launch = resolve(query, inputs)
+        launch = resolve_session(session, nodes, replay, args.inferencex_commit)
         write_record(launch, args.out)
     except _REFUSED as error:
         return _refused(error)
     print(launch.digest())
     return EXIT_OK
-
-
-def _cluster(nodes: NodeList, record: Path) -> Cluster:
-    """The cluster of ``nodes``, host keys pinned in the node list's known_hosts file or beside ``record``."""
-    if nodes.ssh is None:
-        raise NodeListError("the node list names no SSH access")
-    known = Path(nodes.ssh.known_hosts_file) if nodes.ssh.known_hosts_file else record.parent / "known_hosts"
-    return Cluster(nodes=nodes, client=SshClient(nodes.ssh, known))
-
-
-def _launch(nodes: NodeList, record: Path) -> PdLaunch:
-    """The launch at ``record`` on the node list's hosts."""
-    launch = read_record(record)
-    return launch.with_hosts(nodes.hosts(Role.PREFILL), nodes.hosts(Role.DECODE), nodes.router)
 
 
 def _options(args: argparse.Namespace) -> LaunchOptions:
@@ -102,8 +76,8 @@ def _run(args: argparse.Namespace) -> int:
     """Start, restart or stop the launch at ``--record``."""
     try:
         nodes = read_node_list(os.environ)
-        cluster = _cluster(nodes, args.record)
-        launch = _launch(nodes, args.record)
+        cluster = cluster_of(nodes, args.record)
+        launch = placed_launch(nodes, args.record)
         if args.action == "stop":
             stop(launch, cluster, _options(args))
             return EXIT_OK
