@@ -249,7 +249,7 @@ class DispatcherCollaborator(DeadHolderAccountingMixin, CoordinatorCollaborator)
         while self._completion_queue:
             task, result = self._completion_queue.popleft()
             count += 1
-            await self.reap_dispatched_task(task, result)
+            await self._book_completion(task, result)
         return count
 
     def registry_lanes_ttl(self, kind: str) -> tuple[list[str], int]:
@@ -424,8 +424,8 @@ class DispatcherCollaborator(DeadHolderAccountingMixin, CoordinatorCollaborator)
         store failures, because a self-heal that raises would stop the pump it
         exists to keep running:
 
-        * a running row whose holder PID is dead, so its lanes free and the task
-          fails while it is still retry-eligible, this same tick;
+        * a running row whose holder PID is dead, or one of this process whose lease ran out while its executor
+          went quiet, so the task fails while it is still retry-eligible, this same tick;
         * the failure that reclaim implies, charged once;
         * the lane leases that holder still held;
         * an ``integrate_patch`` row cancelled at dispatch whose critic verdict
@@ -433,13 +433,7 @@ class DispatcherCollaborator(DeadHolderAccountingMixin, CoordinatorCollaborator)
         """
         dead_tasks: list[str] = []
         try:
-            dead_tasks = await self.tasks.reclaim_dead_running(reason="dead_holder_pump")
-            if dead_tasks:
-                log.warning(
-                    "dispatcher: reclaimed %d running task(s) with dead holders: %s",
-                    len(dead_tasks),
-                    ", ".join(t[:12] for t in dead_tasks),
-                )
+            dead_tasks = await self._reclaim_ended_running()
         except (sqlite3.Error, ValueError):
             log.exception("dispatcher: dead-running task reclaim failed")
         dead_tasks.extend(self._coord.reconciler.take_failed_tasks())

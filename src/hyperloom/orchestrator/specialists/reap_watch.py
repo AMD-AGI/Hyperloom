@@ -17,6 +17,9 @@ from .dsh_launch import dsh_home
 
 PROCESS_LOG_NAME = "process.log"
 
+#: How long the agent CLI may write nothing and still count as working: :func:`cli_alive`'s window as the reaper reads it.
+ACTIVITY_WINDOW_SEC: float = 900.0
+
 #: How long before its last output a child may have started and still count as the tool call that output announced.
 _SPAWN_SLACK_SEC: float = 0.5
 
@@ -81,6 +84,16 @@ def cli_alive(workspace: Path, cli_pid: int, *, window_sec: float, now_unix: flo
     if newest is None:
         return False
     return max(0.0, now_unix - newest) <= window_sec or tool_in_flight(cli_pid, newest)
+
+
+def went_quiet(workspace: Path, *, now_unix: float) -> bool:
+    """Whether the specialist in ``workspace`` has shown no activity (:func:`specialist_activity_paths`) for longer
+    than :data:`ACTIVITY_WINDOW_SEC`; one that never wrote any has gone quiet too.
+
+    Read from outside the reaper, so it cannot tell a CLI waiting on a tool it started (:func:`tool_in_flight`).
+    """
+    newest = newest_activity(specialist_activity_paths(workspace))
+    return newest is None or now_unix - newest > ACTIVITY_WINDOW_SEC
 
 
 def last_activity(path: Path) -> float | None:
