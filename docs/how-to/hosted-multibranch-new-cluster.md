@@ -35,7 +35,7 @@ These are set in the app container's environment.
 | `HYPERLOOM_RUNNER_WHEEL_TARGET` | yes, for the hosted multi-branch entry | The measurement image's interpreter and platform, for example `cp310-manylinux_2_28_x86_64`, or `cp314-manylinux_2_28_x86_64` for the Python 3.14 `rocm/vllm` images. The hosted multi-branch entry reads it and builds the runner cache's wheels for it, not for the app container, from the lock of that Python: `requirements/runner-cp314.lock` for `cp314`, `requirements/runner.lock` for the others. An entry holds the wheels of one Python, so deployments whose images run different Pythons need different `HYPERLOOM_RUNNER_CACHE` directories; a sandbox whose interpreter is not the entry's fails its start with `runner_start_failed`. A build by hand passes the tag as `--wheel-target` (see the example at the end). |
 | `HYPERLOOM_SOURCE_REPO` | yes | Where the run's Hyperloom source is fetched from: `OWNER/NAME` on GitHub, any git URL, or a local path (for example a mirror on shared storage when the app host has no GitHub egress). |
 | `HYPERLOOM_SOURCE_SHA` | yes | The full 40-hex commit the run executes. |
-| `HYPERLOOM_RSI_ARCHIVE` | yes, for the hosted multi-branch entry | Writable directory where sessions archive their search trees for later sessions to learn from. Point every session of a deployment at the same directory to share what they learn; a private directory keeps a session's tree out of the shared archive. There is no default. |
+| `HYPERLOOM_RSI_ARCHIVE` | yes, for the hosted multi-branch entry | Writable directory where sessions archive their search trees for later sessions to learn from. Point every session of a deployment at the same directory to share what they learn; a private directory keeps a session's tree out of the shared archive. There is no default. When the sessions may be different host accounts of one group, make it a directory of that group with the setgid bit (`chmod 2775`). |
 | `INFERENCE_SUITE_TOOL_CACHE` | no | The tool cache `install.sh` staged the pinned InferenceX client in. Default `inference-suite-tools` under the dependency cache. Without a staging there that verifies, the session refuses to start, naming `python -m inference_suite stage --tool-cache <dir>`. |
 | `HYPERLOOM_HOST_LAYER` | yes, unless `HYPERLOOM_SPECIALIST_USER` names an account the app can run agents as | The hosting layer's directory. A hosted run launches an agent under bubblewrap only with the layer's `bin/bwrap`, never one on `PATH` (the framework image may carry its own). |
 
@@ -46,6 +46,13 @@ A hosted run starts nothing unconfined in the app container, beside its credenti
 `HYPERLOOM_SPECIALIST_USER` names where it can be used, else under the layer's bubblewrap (`HYPERLOOM_HOST_LAYER`).
 Where neither can isolate them, the run ends before anything starts, naming both reasons (exit code 1); a bubblewrap
 that gives no answer within 10 s leaves the host to start the run again.
+
+Each leg of a run may be another host account of one group. The entry checks `HYPERLOOM_STATE_DIR` and
+`USER_DATA_PATH` before it hands over (see the table above); before a session starts,
+`hyperloom-multibranch hosted run` then makes `HYPERLOOM_EVENTS_DIR` (or `events/` in the state directory) and
+`HYPERLOOM_RUNNER_CACHE` mode `2775` when they are missing, creates and removes a file in each of them and in
+`HYPERLOOM_RSI_ARCHIVE`, and ends the run with one message naming every one it cannot write, with its errno, owner and
+mode. One that is not setgid is a warning: what a leg makes there takes that leg's group.
 
 ## Measurement sandbox template
 

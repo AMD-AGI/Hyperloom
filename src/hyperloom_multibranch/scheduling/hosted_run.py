@@ -57,6 +57,7 @@ flow's state.
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import json
 import logging
 import os
@@ -71,12 +72,13 @@ from pathlib import Path
 from typing import Any
 
 from hyperloom_common.io import WriteOptions, atomic_write_json
-from hyperloom_common.shared_storage import child_umask, ownership
+from hyperloom_common.shared_storage import child_umask, make_shared_dirs, ownership
 from hyperloom.common.agent_isolation import IsolationRefused, layer_bwrap, require_agent_isolation
 from hyperloom.hosted.campaign import MEASUREMENT_LOCAL, CampaignSpec, parse_campaign
 from hyperloom.hosted.host_info import GrantLimits as HostGrantLimits
 from hyperloom.hosted.host_info import HostInfo, Var
 from hyperloom.measure.pins import ImagePinError, active_image
+from hyperloom.measure.short_prompts.staging import CACHE_ENV as RUNNER_CACHE_ENV
 from hyperloom.inference_optimizer.session.paths import ENV_USER_DATA_PATH
 from hyperloom_multibranch.blackboard import LocalBlackboard
 from hyperloom_multibranch.contracts.blackboard import Role, Writer
@@ -125,6 +127,21 @@ log = logging.getLogger(__name__)
 
 class HostedRefused(ValueError):
     """The run cannot be served as the host gave it, and a restart would not change that; names the field."""
+
+
+def hosted_storage(host: HostInfo, runner_cache: Path) -> dict[str, Path]:
+    """The shared directories a hosted session writes in that the hosted entry does not check before it hands over,
+    each by the variable that names it: ``host``'s events directory and ``runner_cache``. An earlier leg of the run,
+    maybe another account of the group, may have made them; each is made ``2775`` when missing, as the session would
+    make it, and one that cannot be made is left for the write check of
+    :func:`~hyperloom_multibranch.scheduling.session_environment.require_writable_storage` to name."""
+
+    dirs = {Var.EVENTS_DIR: host.events_dir} if host.events_dir is not None else {}
+    dirs[RUNNER_CACHE_ENV] = runner_cache
+    for directory in dirs.values():
+        with contextlib.suppress(OSError):  # one that cannot be made is named by the write check
+            make_shared_dirs(directory)
+    return dirs
 
 
 def campaign_spec(host: HostInfo) -> CampaignSpec:
@@ -731,6 +748,7 @@ __all__ = [
     "grant_tests_that_fit",
     "hosted_restart_leg",
     "hosted_resume_deadline",
+    "hosted_storage",
     "prelude_landed",
     "record_session",
     "recorded_session",
