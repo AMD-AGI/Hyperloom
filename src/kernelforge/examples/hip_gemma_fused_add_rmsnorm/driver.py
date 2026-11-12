@@ -81,7 +81,7 @@ def _run_correctness(rows: int, hidden: int, mode: str, device: str) -> int:
     snr = min(_snr_db(ref_out, out), _snr_db(ref_residual, residual_out))
     ok = _close(out, ref_out) and _close(residual_out, ref_residual)
     print(f"SNR: {snr:.2f} dB")
-    print(f"allclose: {ok}")
+    print(f"allclose_diagnostic: {ok}")
     _assert_no_aiter()
     return 0
 

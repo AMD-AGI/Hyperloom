@@ -79,7 +79,7 @@ def _run_correctness(rows: int, cols: int, mode: str, device: str) -> int:
     got_deq = _dequantize(out, scale)
 
     print(f"SNR: {_snr_db(ref_deq, got_deq):.2f} dB")
-    print(f"allclose: {torch.allclose(got_deq, ref_deq, atol=1e-2, rtol=1e-2)}")
+    print(f"allclose_diagnostic: {torch.allclose(got_deq, ref_deq, atol=1e-2, rtol=1e-2)}")
     _assert_no_aiter()
     return 0
 
