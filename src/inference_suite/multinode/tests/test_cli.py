@@ -1,12 +1,12 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
+import argparse
 import json
 from dataclasses import replace
 
 import pytest
 
-from inference_suite.cli import main
 from inference_suite.contracts.base_launch import LaunchQuery, Workload
 from inference_suite.frameworks import Framework
 from inference_suite.multinode import cli
@@ -44,6 +44,13 @@ _LAUNCH = PdLaunch(
     decode=RoleLaunch(("old-d",), 1, 8),
     frontend=Frontend(FrontendType.SGLANG_ROUTER, "old-r", ()),
 )
+
+
+def main(argv):
+    parser = argparse.ArgumentParser()
+    cli.add_commands(parser.add_subparsers(dest="command", required=True))
+    args = parser.parse_args(argv)
+    return args.handler(args)
 
 
 @pytest.fixture
