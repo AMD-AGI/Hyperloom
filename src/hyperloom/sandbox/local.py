@@ -15,6 +15,10 @@ memory is read again every second for up to :data:`CARD_RELEASE_WAIT_SEC`, on a 
 as nothing is listed on it; one still held then goes back all the same, with a warning: whether what is on it is a
 foreign holder is for the next test's card guard to say, which this wait leaves as strict as it was. Where the kernel's
 list cannot be read the cards go back at once.
+
+A provider reads nothing unless its ``card_memory`` is set: by default nothing is listed and the cards go back at once,
+so no provider looks at the host's cards unless its caller asks it to; the toolbox, which runs servers on a GPU host,
+sets :func:`~hyperloom.sandbox.card_occupancy.read_listed`.
 """
 
 from __future__ import annotations
@@ -32,7 +36,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from hyperloom.common.outside_facts import ROCR_VISIBLE_DEVICES_ENV
-from hyperloom.sandbox.card_occupancy import SANDBOX_TAG_ENV, CardReading, read_listed
+from hyperloom.sandbox.card_occupancy import SANDBOX_TAG_ENV, CardReading
 from hyperloom.sandbox.confined import RunnerPlan, SandboxConfiner, sandbox_confiner
 from hyperloom.sandbox.gpu_pool import GpuPool
 from hyperloom.sandbox.identity import generate_signing_identity
@@ -173,8 +177,8 @@ class LocalSandboxProvider:
         self.quarantined: set[int] = set()
         self._withheld: dict[str, _Withheld] = {}
         #: What the kernel lists on some cards, which an ended sandbox's cards are read with before they go back to the
-        #: pool (see the module's description).
-        self.card_memory: Callable[[Sequence[int]], CardReading] = read_listed
+        #: pool (see the module's description): nothing unless the caller sets a reading.
+        self.card_memory: Callable[[Sequence[int]], CardReading] = nothing_listed
         self._unread = ""
         self._closing = threading.Event()
 
@@ -498,6 +502,12 @@ class LocalSandboxProvider:
             self._return_cards(sandbox_id, held.cards)
             freed.extend(held.cards)
         return tuple(sorted(freed))
+
+
+def nothing_listed(cards: Sequence[int]) -> CardReading:
+    """A provider's reading of ``cards`` unless its caller sets one: nothing listed, so the cards go back at once."""
+    del cards
+    return CardReading()
 
 
 def _kill_on_close(sandbox: LocalSandbox) -> None:

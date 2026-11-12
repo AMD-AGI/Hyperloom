@@ -86,7 +86,7 @@ from hyperloom.sandbox.card_occupancy import (
 )
 from hyperloom.sandbox.gated_pool import GatedPool
 from hyperloom.sandbox.gpu_pool import GpuPool
-from hyperloom.sandbox.local import LocalSandboxProvider, ProcessUsers, RunnerPlan
+from hyperloom.sandbox.local import CARD_RELEASE_WAIT_SEC, LocalSandboxProvider, ProcessUsers, RunnerPlan
 from hyperloom.sandbox.rooted import open_rooted
 from hyperloom.sandbox.socket import SandboxDenied
 from hyperloom.sandbox.templates import LocalTemplate
@@ -250,9 +250,10 @@ class LocalHostedToolbox(LeasedToolbox):
         self._reported_cards |= new
 
     async def _take_back_freed_cards(self) -> None:
-        """Put back in the pool the cards of ended sandboxes nothing of which runs any more
-        (:meth:`~hyperloom.sandbox.local.LocalSandboxProvider.release_freed_cards`), lift their record in the blackboard
-        and start the tests they let run.
+        """Release the cards of ended sandboxes nothing of which runs any more
+        (:meth:`~hyperloom.sandbox.local.LocalSandboxProvider.release_freed_cards`): they go back to the pool once the
+        kernel's list shows them free, or after :data:`~hyperloom.sandbox.local.CARD_RELEASE_WAIT_SEC` at most. Lift their
+        record in the blackboard and start the tests they let run.
 
         A refused lift is not retried: the blackboard keeps the cards recorded as lost, which is read back only by a
         restart into this session, and keeps them out of the pool there.
@@ -261,7 +262,12 @@ class LocalHostedToolbox(LeasedToolbox):
         freed = frozenset(await asyncio.to_thread(self.provider.release_freed_cards))
         if not freed:
             return
-        logger.info("cards %s are back in the pool: %s", sorted(freed), FREED_CARDS_REASON)
+        logger.info(
+            "cards %s are released and go back to the pool once the kernel lists them free (up to %g s): %s",
+            sorted(freed),
+            CARD_RELEASE_WAIT_SEC,
+            FREED_CARDS_REASON,
+        )
         recorded = freed & self._reported_cards
         if recorded:
             try:
