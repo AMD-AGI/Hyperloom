@@ -565,11 +565,14 @@ def hosted_resume_deadline(persisted: PersistedRun, now: float) -> float:
 
 
 def hosted_restart_leg(
-    persisted: PersistedRun, finish: Callable[..., int], resume: Callable[..., int]
+    persisted: PersistedRun,
+    finish: Callable[..., int],
+    resume: Callable[..., int],
+    explore_cap: ExploreCap | None = None,
 ) -> Callable[..., int]:
     """What a restart of the run runs over ``persisted``, the ``finish`` of :func:`take_over_earlier_session`: ``resume``
     (``cli.resume``) with ``deadline`` bound to :func:`hosted_resume_deadline`'s, so its budget counts from the run's
-    first start, when the session was measured in the grant's sandboxes and its baseline still measures what a test
+    first start, and ``explore_cap`` to ``explore_cap`` (the grant's, :func:`grant_explore_cap`), when the session was measured in the grant's sandboxes and its baseline still measures what a test
     measured now would (:func:`~hyperloom_multibranch.toolbox.resume_guard.check_hosted_baseline_reusable`: the same
     build, ``MEASUREMENT_EPOCH``, image, base launch and runner template cards; not the node or the account, which a
     reschedule changes by design); else ``finish`` (``cli.final_only``), and one warning names why. A file of the
@@ -588,7 +591,7 @@ def hosted_restart_leg(
         log.warning("hosted run: finishing %s instead of resuming it: %s", root, exc)
         return finish
     log.info("hosted run: resuming %s up to the deadline its first start set", root)
-    return partial(resume, deadline=deadline)
+    return partial(resume, deadline=deadline, explore_cap=explore_cap)
 
 
 #: What reading back an earlier session fails with when this account cannot read what it left: a file an earlier leg of

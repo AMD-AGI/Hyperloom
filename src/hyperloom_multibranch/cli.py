@@ -958,10 +958,18 @@ def final_only(
     return _over_session(persisted, peer_factory, services, partial(Session.finish, restart=restart))
 
 
-def resume(persisted: PersistedRun, peer_factory: PeerFactory, services: SessionServices, deadline: float) -> int:
-    """:func:`final_only` running :meth:`Session.resume` up to ``deadline`` instead of :meth:`Session.finish`."""
+def resume(
+    persisted: PersistedRun,
+    peer_factory: PeerFactory,
+    services: SessionServices,
+    deadline: float,
+    explore_cap: ExploreCap | None = None,
+) -> int:
+    """:func:`final_only` running :meth:`Session.resume` up to ``deadline`` and ``explore_cap``, not :meth:`Session.finish`."""
 
-    return _over_session(persisted, peer_factory, services, lambda session, ended: session.resume(ended, deadline))
+    return _over_session(
+        persisted, peer_factory, services, lambda session, ended: session.resume(ended, deadline, explore_cap)
+    )
 
 
 #: What a run over a session directory runs on the session it builds there, given how that session ended.
@@ -1090,7 +1098,7 @@ def _hosted_start(host: HostInfo) -> HostedStart:
     require_session_environment(settings, os.environ)
     ready = hosted_ready_session(host, settings.workload)
     if persisted is not None:
-        leg = hosted_restart_leg(persisted, partial(final_only, restart=True), resume)
+        leg = hosted_restart_leg(persisted, partial(final_only, restart=True), resume, grant_explore_cap(host))
         return HostedStart(partial(leg, persisted, ready.peer_factory, ready.services), deadline)
     close = partial(final_only, peer_factory=ready.peer_factory, services=ready.services)
     record = partial(started_session, host.state_dir)

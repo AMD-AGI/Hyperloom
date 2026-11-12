@@ -893,9 +893,16 @@ def agent_cli(agent_binaries: None, monkeypatch: pytest.MonkeyPatch) -> list[Run
         FINISHED_AS_RESTART.append(restart)
         return 0
 
-    def resume(persisted: PersistedRun, peer_factory: PeerFactory, services: object, deadline: float) -> int:
+    def resume(
+        persisted: PersistedRun,
+        peer_factory: PeerFactory,
+        services: object,
+        deadline: float,
+        explore_cap: ExploreCap | None = None,
+    ) -> int:
         runs.append(persisted.settings)
         RESUMED_TO.append(deadline)
+        EXPLORE_CAPS.append(explore_cap)
         return 0
 
     EXPLORE_CAPS.clear()

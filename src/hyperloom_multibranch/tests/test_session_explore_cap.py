@@ -7,6 +7,7 @@ runs, and a session without one is as it was."""
 
 from __future__ import annotations
 
+import asyncio
 import logging
 import math
 from pathlib import Path
@@ -15,8 +16,9 @@ import pytest
 
 from hyperloom_multibranch.scheduling import budget, lifecycle
 from hyperloom_multibranch.scheduling.budget import ExploreCap, FinalWork, SessionBudget
+from hyperloom_multibranch.scheduling.resumption import deadline_after_downtime, resumable_run
 from hyperloom_multibranch.scheduling.stops import SessionStopReason
-from hyperloom_multibranch.tests.test_skeleton import SETTINGS, START, Stage, _decisions, _stage
+from hyperloom_multibranch.tests.test_skeleton import SETTINGS, START, Stage, _decisions, _resumed, _signalling, _stage
 
 
 async def _run(stage: Stage, cap: ExploreCap | None) -> lifecycle.SessionOutcome:
@@ -114,3 +116,28 @@ async def test_explore_s_end_is_asked_again_while_it_runs_and_ends_explore_once_
     assert final < opened + SETTINGS.judge_interval_seconds, "the end is asked every tick, not every judge interval"
     assert works[0].parallel == SETTINGS.caps.max_parallel_tests and works[0].test_seconds > 0
     assert outcome.final is not None and outcome.final.chosen is not None
+
+
+async def test_a_resumed_session_ends_explore_at_the_cap_it_is_given_and_final_still_runs(tmp_path: Path) -> None:
+    stage = _stage(tmp_path)
+    stage.steps = _signalling(stage)
+    await stage.run()
+    persisted = await asyncio.to_thread(resumable_run, stage.layout.root)
+    resumed = _resumed(stage, persisted.settings)
+    asked: list[FinalWork] = []
+
+    def cap(work: FinalWork) -> float:
+        asked.append(work)
+        return START
+
+    with resumed._polls_on_virtual_time() as patch:
+        patch.setattr(lifecycle, "run_image_check", resumed.image_check)
+        deadline = deadline_after_downtime(resumed.layout, resumed.time.now())
+        outcome = await resumed._session().resume(persisted.ended, deadline, cap)
+
+    assert asked and asked[0].test_seconds > 0.0, "the resume asks the cap with the longest root test"
+    explores = [row for row in _decisions(stage) if row["kind"] == "phase" and row["reason"] == "explore"]
+    resumed_explore = explores[-1]
+    assert len(explores) == 2 and resumed_explore["detail"]["explore_cap"] == START  # type: ignore[index]
+    assert resumed_explore["detail"]["explore_end"] == resumed_explore["at"]  # type: ignore[index]
+    assert outcome.final is not None
