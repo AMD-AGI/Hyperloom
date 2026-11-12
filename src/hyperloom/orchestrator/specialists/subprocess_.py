@@ -482,7 +482,7 @@ class SpecialistSubprocessDispatcher:
                 self._confirm_cancel_teardown(request, proc)
                 raise
             finally:
-                await asyncio.to_thread(self._reap_marked, launch.reap_mark, prepared)
+                await prepared.sweep_marked(launch.reap_mark, task_id=request.task_id)
                 prepared.release()
                 if log_fh is not None:
                     log_fh.close()
@@ -678,13 +678,6 @@ class SpecialistSubprocessDispatcher:
             worktree_refused=refused,
             error=outcome["error"],
         )
-
-    @staticmethod
-    def _reap_marked(mark: str, prepared: PreparedLaunch) -> None:
-        """End every process that inherited this launch's reap mark, including one re-parented after the CLI exited."""
-        pids = prepared.marked_pids(mark)
-        if pids and not kill_tree(collect_tree(pids)):
-            log.warning("specialist reap: marked processes %s outlived SIGKILL", pids)
 
     def _confirm_cancel_teardown(self, request: SpecialistSpawn, proc: Any) -> None:
         """Tear a cancelled specialist down, raising ``ExecutionCleanupUnconfirmed`` unless teardown is confirmed."""

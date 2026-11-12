@@ -28,6 +28,7 @@ when the actor does (``--die-with-parent``).
 
 from __future__ import annotations
 
+import asyncio
 import functools
 import logging
 import os
@@ -58,7 +59,9 @@ from hyperloom.common.env_safety import RunAs
 from hyperloom_common.proctree import (
     REAP_MARK_ENV,
     TERM_GRACE_SEC,
+    collect_tree,
     descendants,
+    kill_tree,
     marked_pids,
     proc_identity,
     process_uids,
@@ -78,6 +81,9 @@ _AITER_JIT_ENV = "INFERENCE_OPTIMIZER_AITER_JIT_DIR"
 _MCP_FLAG = "--mcp-config"
 _CACHE_DIR = ".cache"
 _AITER_JIT_DIR = "aiter_jit"
+
+#: How long a reaped specialist's result waits on the sweep for processes its launch left behind.
+STRAGGLER_SWEEP_BOUND_SEC: float = 60.0
 
 #: The device nodes a GPU specialist's sandbox binds, where the host has them.
 GPU_DEVICES = (Path("/dev/kfd"), Path("/dev/dri"))
@@ -551,6 +557,29 @@ class PreparedLaunch:
         if isinstance(self.isolation, AccountIsolation):
             return marked_pids_as(self.isolation.run_as, mark)
         return marked_pids(REAP_MARK_ENV, mark)
+
+    def reap_marked(self, mark: str) -> None:
+        """End every process that inherited the launch's reap mark ``mark``, one re-parented after the CLI exited
+        included."""
+        pids = self.marked_pids(mark)
+        if pids and not kill_tree(collect_tree(pids)):
+            log.warning("specialist reap: marked processes %s outlived SIGKILL", pids)
+
+    async def sweep_marked(self, mark: str, *, task_id: str) -> None:
+        """:meth:`reap_marked` on a thread for up to :data:`STRAGGLER_SWEEP_BOUND_SEC`, then go on without it.
+
+        The sweep reads every process's environment, and a read of ``/proc/<pid>/environ`` waits on that process's
+        memory-map lock, so one process stuck in the kernel stalls it for as long as it stays stuck. A survivor of the
+        sweep is only logged, so the sweep may not keep the specialist's result from being collected.
+        """
+        try:
+            await asyncio.wait_for(asyncio.to_thread(self.reap_marked, mark), STRAGGLER_SWEEP_BOUND_SEC)
+        except asyncio.TimeoutError:
+            log.warning(
+                "specialist %s: the sweep for processes its launch left behind outlasted %.0fs; going on without it",
+                task_id,
+                STRAGGLER_SWEEP_BOUND_SEC,
+            )
 
     def release(self) -> None:
         """Close the status and the sandbox's network, and remove its scratch with what the agent left in it."""

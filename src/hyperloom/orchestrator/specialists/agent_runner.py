@@ -810,7 +810,7 @@ class LocalAgentRunner:
         has detached."""
         self._ensure_dead(session)
         try:
-            self._dispatcher._reap_marked(session.reap_mark, session.prepared)
+            session.prepared.reap_marked(session.reap_mark)
         finally:
             session.prepared.release()
 
