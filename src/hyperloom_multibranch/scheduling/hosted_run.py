@@ -7,35 +7,42 @@ The campaign spec maps onto the options of ``run`` (:func:`run_argv`), so a host
 of :class:`~hyperloom_multibranch.scheduling.settings.RunSettings` a command-line session is. Besides the common part
 the legacy entry validated, a multi-branch session needs ``multibranch.workload`` (``--workload``),
 ``workload.conc`` and ``workload.precision``; ``multibranch.inferencex_commit`` is ``--inferencex-commit``,
-``multibranch.max_branches`` ``--max-branches``,
+``multibranch.reference_script`` ``--reference-script``, ``multibranch.max_branches`` ``--max-branches``,
 ``multibranch.dev_leases`` ``--dev-leases``, each source of ``multibranch.autonomous_agents`` one
 ``--autonomous-agent``, ``multibranch.make_before_break`` (``true`` by default) ``--make-before-break`` or
-``--no-make-before-break``, and ``placement.max_parallel_tests`` is ``--max-parallel-tests``, at most what the grant
-runs at once. The fields ``run`` has no option for -- ``objective``, ``options``, ``placement.profile`` and
-``placement.specialist_capacity`` -- are not read. A spec that sets ``launch.server_args`` or ``launch.extra_env`` is
-refused rather than run without them: a multi-branch session resolves its base launch from the recipe sources, as
-``run`` does, and reads neither (:func:`run_argv`). Dev sandboxes and agents run in ``dev`` sandboxes of the grant, so
-they need its ``dev`` key and the session directory on the storage ``USER_DATA_PATH`` names, which the ``dev``
-template mounts at the same path (:func:`refuse_unhosted_branches`).
-Every test, PRELUDE's included, runs in a measurement sandbox, so the application's container needs no card:
-``hosted-cpu`` serves as ``hosted-gpu`` does.
+``--no-make-before-break``, ``placement.measurement`` is ``--measurement``, and ``placement.max_parallel_tests`` is
+``--max-parallel-tests``, at most what runs at once where the session measures. The fields ``run`` has no option for --
+``objective``, ``options``, ``placement.profile`` and ``placement.specialist_capacity`` -- are not read. A spec that
+sets ``launch.server_args`` or ``launch.extra_env`` is refused rather than run without them: a multi-branch session's
+base launch, its flags and its environment, is the shell script ``multibranch.reference_script`` names.
 
-The grant bounds the session in time (:func:`grant_deadline`): its budget ends one CLOSE grace and a margin before the
+With ``placement.measurement`` ``hosted`` (the default), every test, PRELUDE's included, runs in a measurement sandbox
+of the grant, so the application's container needs no card: ``hosted-cpu`` serves as ``hosted-gpu`` does. Dev
+sandboxes and agents run in ``dev`` sandboxes of the grant, so they need its ``dev`` key and the session directory on
+the storage ``USER_DATA_PATH`` names, which the ``dev`` template mounts at the same path
+(:func:`refuse_unhosted_branches`). With ``local``, which the spec allows only for ``hosted-gpu``, the tests, the dev
+sandboxes and the agents run in the application's container on its own cards, as ``run`` does on a machine's, and the
+run needs no sandbox of the grant, nor a grant: its framework is the image this container runs, so ``framework.image``
+must name the image the measurement pins name, by its digest (:func:`require_local_image`).
+
+A grant bounds the session in time (:func:`grant_deadline`): its budget ends one CLOSE grace and a margin before the
 grant does, and the process is sent SIGTERM one CLOSE grace before the grant ends, which ends FINAL and leaves CLOSE
-that grace. The grant's runtime counts from the run's creation (``HYPERLOOM_RUN_CREATED_AT``), which the platform
-stamps when it makes the run, before this process starts, so a session's own deadline, counted from its start, can
-leave FINAL less of the grant than it needs. The grant's end (:func:`grant_end`) therefore also caps EXPLORE: it ends a
-FINAL reserve (:func:`final_reserve_seconds`) and a margin before that SIGTERM, whichever comes first of that and the
-end the session's budget gives it, and the tests' infra retries never wait past the time a test can still end by it
-(:attr:`GrantEnd.tests_end_by`). The reserve is the validation FINAL would run as the session stands, which grows as
-candidates and regression cases come, so EXPLORE's end is asked again while it runs.
+that grace. Without a grant the spec's ``budget.max_hours`` alone bounds it. The grant's runtime counts from the run's
+creation (``HYPERLOOM_RUN_CREATED_AT``), which the platform stamps when it makes the run, before this process starts, so
+a session's own deadline, counted from its start, can leave FINAL less of the grant than it needs. The grant's end
+(:func:`grant_end`) therefore also caps EXPLORE: it ends a FINAL reserve (:func:`final_reserve_seconds`) and a margin
+before that SIGTERM, whichever comes first of that and the end the session's budget gives it, and the tests' infra
+retries never wait past the time a test can still end by it (:attr:`GrantEnd.tests_end_by`). The reserve is the
+validation FINAL would run as the session stands, which grows as candidates and regression cases come, so EXPLORE's
+end is asked again while it runs.
 
 A hosted run's agents must be isolated: they run with the application's credentials in reach otherwise. Its start
 marks the process so (:func:`~hyperloom.common.agent_isolation.require_agent_isolation`), with the hosting layer's
 bubblewrap, ``bin/bwrap`` in the directory ``HYPERLOOM_HOST_LAYER`` names
 (:func:`~hyperloom.common.agent_isolation.layer_bwrap`), and no other, and refuses a run that would launch anything
 unconfined on this host, as the path that launches it would (:func:`require_hosted_isolation`): its specialists run
-here, its agent and dev sandboxes and its tests in the grant's sandboxes.
+here; with ``local``, its agent and dev sandboxes and its tests run here too, so a host where they run unconfined
+measures no spec ``local``.
 
 The host decides from ``$HYPERLOOM_STATE_DIR/exit.json`` whether to start the run again: never once it holds
 ``final: true`` (:func:`write_final_exit`), and again when it is missing. ``session.json`` there names the session
@@ -65,9 +72,10 @@ from typing import Any
 from hyperloom_common.io import WriteOptions, atomic_write_json
 from hyperloom_common.shared_storage import child_umask, ownership
 from hyperloom.common.agent_isolation import IsolationRefused, layer_bwrap, require_agent_isolation
-from hyperloom.hosted.campaign import CampaignSpec, parse_campaign
+from hyperloom.hosted.campaign import MEASUREMENT_LOCAL, CampaignSpec, parse_campaign
 from hyperloom.hosted.host_info import GrantLimits as HostGrantLimits
 from hyperloom.hosted.host_info import HostInfo, Var
+from hyperloom.measure.pins import ImagePinError, active_image
 from hyperloom.inference_optimizer.session.paths import ENV_USER_DATA_PATH
 from hyperloom_multibranch.blackboard import LocalBlackboard
 from hyperloom_multibranch.contracts.blackboard import Role, Writer
@@ -154,12 +162,14 @@ def run_argv(spec: CampaignSpec, max_hours: float, parallel_tests: int) -> list[
         "osl": spec.osl,
         "ep": spec.ep,
         "inferencex-commit": _inferencex_commit(section.get("inferencex_commit")),
+        "reference-script": _reference_script(section.get("reference_script")),
         "max-hours": max_hours,
         "max-gpu-hours": spec.max_gpu_hours,
         "max-llm-usd": spec.max_llm_usd,
         "max-branches": section.get("max_branches"),
         "dev-leases": section.get("dev_leases"),
         "max-parallel-tests": min(spec.max_parallel_tests, parallel_tests),
+        "measurement": spec.measurement,
     }
     agents = [f"--autonomous-agent={source}" for source in _agent_sources(section.get("autonomous_agents"))]
     switches = _switches(section)
@@ -200,6 +210,12 @@ def _inferencex_commit(commit: object) -> str | None:
     return commit
 
 
+def _reference_script(path: object) -> str | None:
+    if path is not None and (not isinstance(path, str) or not path.strip()):
+        raise HostedRefused("multibranch.reference_script must be the path of a launch script")
+    return path
+
+
 def _refuse_launch_fields(spec: CampaignSpec) -> None:
     given = [
         field
@@ -208,8 +224,9 @@ def _refuse_launch_fields(spec: CampaignSpec) -> None:
     ]
     if given:
         raise HostedRefused(
-            f"a multibranch run does not read {' or '.join(given)}: its base launch is resolved from the recipe sources"
-            " (InferenceX, the framework's cookbook, the default table), as hyperloom-multibranch run resolves it"
+            f"a multibranch run does not read {' or '.join(given)}: give the base launch as"
+            " multibranch.reference_script, a shell launch script whose 'export NAME=value' lines set its environment"
+            " and whose server command carries its flags"
         )
 
 
@@ -244,12 +261,37 @@ def refuse_unhosted_branches(settings: RunSettings, host: HostInfo, env: Mapping
         )
 
 
-def require_hosted_isolation(env: Mapping[str, str]) -> None:
+def require_local_image(spec: CampaignSpec, env: Mapping[str, str]) -> None:
+    """Refuse a spec measured on this container's cards whose ``framework.image`` does not name, by its digest, the
+    image ``env``'s measurement pins name: every test runs this container's own framework, so the session measures
+    the image it runs, whatever the spec asks for. Nothing in a container states the image it runs, so the pins, which
+    its deployment sets, are what the spec is held to. A spec measured in the grant's sandboxes is not looked at.
+
+    Raises:
+        PeersUnavailable: When the pins cannot be read.
+        HostedRefused: When ``framework.image`` is not that image by that digest.
+    """
+
+    if spec.measurement != MEASUREMENT_LOCAL:
+        return
+    try:
+        image = active_image(env)
+    except ImagePinError as exc:
+        raise PeersUnavailable(f"the measurement pins cannot be read: {exc}") from exc
+    if not spec.framework_image.endswith(f"@{image.digest}"):
+        raise HostedRefused(
+            f"placement.measurement 'local' measures the image this container runs, {image.ref} at {image.digest}:"
+            " framework.image must name it by that digest"
+        )
+
+
+def require_hosted_isolation(spec: CampaignSpec, env: Mapping[str, str]) -> None:
     """Mark this process as a hosted run's, whose agents must be isolated, with the hosting layer's bubblewrap
     (:func:`~hyperloom.common.agent_isolation.layer_bwrap`) and no other, and refuse now a run that would launch one
     unconfined on this host, as the path that launches it would
-    (:func:`~hyperloom_multibranch.scheduling.launch_isolation.launch_isolation`): its specialists; its agent and dev
-    sandboxes and its tests run in the grant's sandboxes.
+    (:func:`~hyperloom_multibranch.scheduling.launch_isolation.launch_isolation`): its specialists always, and the
+    agent and dev sandboxes and the tests of a spec measured on this container's cards, which then run here (in the
+    grant's sandboxes otherwise).
 
     Raises:
         PeersUnavailable: A launch on this host would run unconfined or be refused, naming which and why; the run ends
@@ -263,7 +305,7 @@ def require_hosted_isolation(env: Mapping[str, str]) -> None:
         if refused.transient:
             raise TimeoutError(str(refused)) from refused
         raise PeersUnavailable(str(refused)) from refused
-    problems = launch_isolation(local=False).problems()
+    problems = launch_isolation(local=spec.measurement == MEASUREMENT_LOCAL).problems()
     if problems:
         raise PeersUnavailable(f"a hosted run launches nothing unconfined beside its credentials, and here {problems}")
 
@@ -694,6 +736,7 @@ __all__ = [
     "refuse_unhosted_branches",
     "reported_stop_reason",
     "require_hosted_isolation",
+    "require_local_image",
     "run_argv",
     "share_with_the_group",
     "spec_make_before_break",

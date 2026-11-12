@@ -109,6 +109,8 @@ POINTS_DIR = "points"
 BENCHMARK_FILE = "benchmark.yaml"
 #: A claim's lease on the specialist tools: the runtime renews it every 10 minutes.
 CLAIM_TTL_SECONDS = 1800.0
+#: Where a machine's render nodes are, one ``renderD*`` for every card a process there can open.
+RENDER_NODE_DIR = "/dev/dri"
 #: The switch the main flow and the measurement renderer read an AgentX workload from
 #: (``hyperloom.common.perf_metric.agentx_enabled``).
 AGENTX_ENV = "HYPERLOOM_AGENTX"
@@ -195,9 +197,12 @@ class ToolboxBackend(Protocol):
 class LocalCards:
     """Tests run in local sandboxes on these cards of this machine, their sandboxes, archive and submit log under
     ``MB-toolbox``. The runners read the inference_suite staging from this host's runner cache, where it is published
-    before the toolbox is built; one already published is verified and kept."""
+    before the toolbox is built; one already published is verified and kept. ``tests_end_by`` is when every test must
+    have ended, Unix seconds, in a hosted run measured on these cards (the grant's
+    :attr:`~hyperloom_multibranch.scheduling.hosted_run.GrantEnd.tests_end_by`), ``None`` without a grant end."""
 
     cards: tuple[int, ...]
+    tests_end_by: float | None = None
     on_this_machine: ClassVar[bool] = True
 
     def toolbox(
@@ -220,7 +225,11 @@ class LocalCards:
         session = LocalSession(layout.toolbox, layout.session_id, self.cards, setup.workload.tp)
         # The tests read private copies of the tables of the aiter this machine's servers import (a vLLM image's
         # site-packages, not an SGLang image's workspace), or a keep that adds rows to a default table is refused.
-        options = LocalOptions(timeout_sec=attempt_timeout_sec(setup.workload), framework_configs=str(image_configs()))
+        options = LocalOptions(
+            timeout_sec=attempt_timeout_sec(setup.workload),
+            framework_configs=str(image_configs()),
+            tests_end_by=self.tests_end_by,
+        )
         return build_local_toolbox(session, blackboard, acceptance, spec, options=options)
 
 
@@ -504,9 +513,24 @@ def _lend_dev_sandboxes(
     return leases
 
 
+def render_nodes() -> int:
+    """How many render nodes, ``renderD*`` in :data:`RENDER_NODE_DIR`, this machine holds: one for every card a
+    process here can open, so a container a device plugin gave some of a node's cards holds theirs alone."""
+
+    from pathlib import Path
+
+    try:
+        return sum(1 for node in Path(RENDER_NODE_DIR).iterdir() if node.name.startswith("renderD"))
+    except OSError:
+        return 0
+
+
 def machine_cards() -> tuple[int, ...]:
     """The cards of this machine the session may use: the absolute ids the first visible-device mask set names, or,
-    when none is set, as many as ``rocm-smi`` shows from card 0; none when neither shows any.
+    when none is set, as many as ``rocm-smi`` shows from card 0; none when neither shows any. Raises
+    :class:`PeersUnavailable` when ``rocm-smi`` shows more cards than this machine holds render nodes
+    (:func:`render_nodes`): in a container given some of a node's cards it shows them all, and a test leased one it
+    was not given could not open it.
 
     The ids are absolute because every sandbox's ``ROCR_VISIBLE_DEVICES`` is set to its leased cards in place of the
     mask this process runs under; a mask of device UUIDs names no id, so it leaves no card. The main flow resolves its
@@ -519,7 +543,13 @@ def machine_cards() -> tuple[int, ...]:
         mask = os.environ.get(name)
         if mask is not None:
             return tuple(parse_device_list(mask))
-    return tuple(range(detect_gpu_count()))
+    shown, nodes = detect_gpu_count(), render_nodes()
+    if shown > nodes:
+        raise PeersUnavailable(
+            f"rocm-smi shows {shown} cards, more than the {nodes} this machine can open (its render nodes,"
+            f" {RENDER_NODE_DIR}/renderD*): name the cards it was given in ROCR_VISIBLE_DEVICES"
+        )
+    return tuple(range(shown))
 
 
 def measurement_host(env: Mapping[str, str], backend: ToolboxBackend) -> MeasurementHost:
@@ -554,11 +584,15 @@ def staged_client() -> InferenceXCheckout:
 
 def machine_parallel_tests(tp: int) -> int:
     """How many tests of ``tp`` cards the local toolbox runs at once on this machine's cards; raises ``ValueError``
-    when a test of ``tp`` cards does not fit on them."""
+    when a test of ``tp`` cards does not fit on them, or its cards cannot be told (:func:`machine_cards`)."""
 
     from hyperloom_multibranch.toolbox.local_hosted import max_parallel_tests
 
-    return max_parallel_tests(len(machine_cards()), tp)
+    try:
+        cards = machine_cards()
+    except PeersUnavailable as exc:
+        raise ValueError(str(exc)) from exc
+    return max_parallel_tests(len(cards), tp)
 
 
 def specialist_model(env: Mapping[str, str]) -> str:
@@ -660,6 +694,8 @@ def model_backed_sessions(command: AgentCommand) -> SpecialistSessions:
             repo=wiring.repo,
             briefs=wiring.briefs.text,
             dev_leases=wiring.dev_leases,
+            readable=specialist_readable(wiring.setup.references, workload),
+            lease_area=_lease_area(wiring),
         )
         open_sessions = partial(
             model_sessions,
@@ -701,6 +737,35 @@ def _gate_client(wiring: SessionWiring) -> GateClient:
         )
     except SuiteRoundRefused as exc:
         raise PeersUnavailable(f"the gate's client cannot be given to the session's agents: {exc}") from exc
+
+
+def specialist_readable(references: Mapping[str, Path], workload: Workload) -> tuple[Path, ...]:
+    """What every specialist of a session reads besides its own trees: the reference directories the session copied
+    in, and the directory its workload's model is served from when that is one here."""
+
+    from pathlib import Path
+
+    model = resolve_serving_model_path(workload.model)
+    served = (Path(os.path.abspath(model)),) if model and os.path.isdir(model) else ()
+    return (*references.values(), *served)
+
+
+def _lease_area(wiring: SessionWiring) -> Callable[[str], Path] | None:
+    """Where the roots of a branch's dev leases are made, for its specialist to read: its holder's area of this
+    machine's leases, or its directory's ``dev`` on the shared storage a hosted lease's sandbox roots in; ``None``
+    when the session lends none."""
+
+    from hyperloom_common.shared_storage import make_shared_dirs
+    from hyperloom_multibranch.specialist.dev_sandbox import DEV_DIR
+    from hyperloom_multibranch.toolbox.local_hosted import LocalHostedToolbox
+
+    if wiring.dev_leases is None:
+        return None
+    toolbox = wiring.toolbox
+    if isinstance(toolbox, LocalHostedToolbox):
+        return toolbox.leases.holder_area
+    branch_dir = wiring.setup.layout.branch_dir
+    return lambda branch: make_shared_dirs(branch_dir(branch) / DEV_DIR)
 
 
 def _sessions_over_source(
@@ -793,15 +858,15 @@ def _agent_spec(
     )
 
 
-def load_peers(workload: Workload) -> PeerFactory:
-    """The factory of the real peers of a session of ``workload`` whose tests run on this machine's cards; raises
-    :class:`PeersUnavailable` when this machine cannot run them.
+def load_peers(workload: Workload, *, tests_end_by: float | None = None) -> PeerFactory:
+    """The factory of the real peers of a session of ``workload`` whose tests run on this machine's cards, ending by
+    ``tests_end_by`` (:class:`LocalCards`); raises :class:`PeersUnavailable` when this machine cannot run them.
 
     It creates nothing, so the command line calls it before the session directory exists.
     """
 
     require_local_model(workload)
-    return peers_on(measurement_host(os.environ, LocalCards(machine_cards())), workload)
+    return peers_on(measurement_host(os.environ, LocalCards(machine_cards(), tests_end_by)), workload)
 
 
 def require_local_model(workload: Workload) -> None:
@@ -837,6 +902,7 @@ __all__ = [
     "InferenceXCheckout",
     "LocalCards",
     "MeasurementHost",
+    "RENDER_NODE_DIR",
     "SessionWiring",
     "SpecialistSessions",
     "ToolboxBackend",
@@ -848,6 +914,7 @@ __all__ = [
     "measurement_host",
     "model_backed_sessions",
     "peers_on",
+    "render_nodes",
     "require_framework_package",
     "specialist_command",
     "specialist_model",

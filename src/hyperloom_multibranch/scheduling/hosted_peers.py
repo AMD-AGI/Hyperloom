@@ -32,6 +32,7 @@ import subprocess
 import tempfile
 from collections.abc import Callable
 from dataclasses import dataclass
+from functools import partial
 from pathlib import Path
 from typing import TYPE_CHECKING, ClassVar
 
@@ -39,7 +40,7 @@ from hyperloom.measure.runner.cache_build import CacheBuildError, WheelTarget, r
 from hyperloom_multibranch.repo.isolated_git import INIT, git_argv, git_env
 from hyperloom_multibranch.scheduling.hosted_run import grant_tests_end_by
 from hyperloom_multibranch.scheduling.layout import SessionLayout
-from hyperloom_multibranch.scheduling.local_peers import attempt_timeout_sec, measurement_host, peers_on
+from hyperloom_multibranch.scheduling.local_peers import attempt_timeout_sec, load_peers, measurement_host, peers_on
 from hyperloom_multibranch.scheduling.peers import PeerFactory, PeerSetup
 from hyperloom_multibranch.scheduling.settings import Workload
 
@@ -94,6 +95,15 @@ def load_hosted_peers(workload: Workload, inputs: ToolboxInputsFor) -> PeerFacto
     :func:`~hyperloom_multibranch.scheduling.local_peers.load_peers` does, for the same reasons. Creates nothing."""
 
     return peers_on(measurement_host(os.environ, HostedSandboxes(inputs)), workload)
+
+
+def local_grant_peers(host: HostInfo) -> Callable[[Workload], PeerFactory]:
+    """:func:`~hyperloom_multibranch.scheduling.local_peers.load_peers` of a hosted session measured on this
+    container's cards (``placement.measurement`` ``local``): its tests, FINAL's infrastructure retries included, end by
+    the stop of ``host``'s grant (:func:`~hyperloom_multibranch.scheduling.hosted_run.grant_tests_end_by`), as they do
+    in the grant's sandboxes (:class:`PinnedToolboxInputs`)."""
+
+    return partial(load_peers, tests_end_by=grant_tests_end_by(host))
 
 
 def runner_cache_pin(source: Path, sha: str, cache_root: Path, target: WheelTarget) -> str:
@@ -169,16 +179,16 @@ def _git(argv: list[str], doing: str, env: dict[str, str] | None = None) -> None
 class PinnedToolboxInputs:
     """The toolbox's inputs of a hosted session: what ``host`` gave, every runner sandbox pinned to the runner cache
     entry below ``cache_root`` of the commit the run executes, built from a private copy of the session's clone of it,
-    its tests to end by the stop of ``host``'s grant (:func:`~hyperloom_multibranch.scheduling.hosted_run.grant_tests_end_by`)."""
+    its tests to end by the stop of ``host``'s grant
+    (:func:`~hyperloom_multibranch.scheduling.hosted_run.grant_tests_end_by`)."""
 
     host: HostInfo
     cache_root: Path
 
     def __call__(self, layout: SessionLayout, tp: int) -> HostedToolboxInputs:
         """Raises :class:`~hyperloom.hosted.toolbox_inputs.ToolboxInputsError` naming what the host did not give, and
-        :class:`CacheBuildError` when the commit, its runner cache entry or its staging cannot be had, the clone does not hold the commit
-        whole, or when
-        ``$HYPERLOOM_RUNNER_WHEEL_TARGET`` does not name the runner's interpreter."""
+        :class:`CacheBuildError` when the commit, its runner cache entry or its staging cannot be had, the clone does not
+        hold the commit whole, or when ``$HYPERLOOM_RUNNER_WHEEL_TARGET`` does not name the runner's interpreter."""
 
         from hyperloom.hosted.toolbox_inputs import hosted_toolbox_inputs
         from hyperloom_multibranch.toolbox.hosted_toolbox import HostedToolboxInputs
@@ -238,6 +248,7 @@ __all__ = [
     "PinnedToolboxInputs",
     "ToolboxInputsFor",
     "load_hosted_peers",
+    "local_grant_peers",
     "private_copy",
     "runner_cache_pin",
     "runner_source",
