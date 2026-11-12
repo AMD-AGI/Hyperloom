@@ -181,6 +181,14 @@ dossier's index under "Open asks" and go on.
     class, function or line is there. A report copied without opening the
     source can claim a missing capability the code already has, and it then
     becomes a ranked direction.
+  - **Read every side of a platform branch.** Wherever the served path
+    branches on the platform or the device (`if is_hip()`, `_is_cuda`,
+    `current_platform.is_rocm()`, a backend chosen by device), read every
+    branch, not only the one this campaign runs, and compare their
+    implementations. Note what another branch does that this one does not: a
+    fusion skipped, a slower fallback kernel, a feature turned off, a step that
+    does nothing here. Record each with its call site, as a candidate for the
+    map.
   - **Write the part after the readers return**, not while one is still out.
   - **A partial part lists every area above it did not read**, not some of
     them.
@@ -441,9 +449,17 @@ The procedure is [kernels.md](kernels.md).
   that changes so much it needs a new ID says which one it replaces.
   - **The `## Map` block.** The part ends with one, holding the exact line an
     Arbor campaign reads (`arbor/directions.py`):
-    `DIRECTIONS: [{"id": "m-…", "kind": "increment|rewrite", "title": "…", "rank": 1, "ceiling": "…", "status": "open"}, …]`
+    `DIRECTIONS: [{"id": "m-…", "kind": "increment|rewrite", "title": "…", "rank": 1, "ceiling": "…", "tier": "config|framework|kernel|feature", "status": "open"}, …]`
   - **Statuses:** open, done, killed, below_floor, or plan (a rewrite whose
     kernel plan is written). Every closed direction carries a `why`.
+  - **`tier`:** the level the direction works at, one of `config` (a flag or an
+    environment variable), `framework` (a change to the served tree's source),
+    `kernel` (a kernel or its tuning tables) or `feature` (something the stack
+    lacks). Give every open direction its tier. Each map round starts at the
+    tier of its top-ranked open direction, so a map led by a kernel's tables no
+    longer spends the round's first iterations on flags; the ladder escalates
+    from there as before. A map whose top direction has no tier leaves the
+    tier where it is.
   - **Never a direction that changes the weights' precision,** down or up:
     a quantization of the weights, another checkpoint, a de-quantization.
     The harness reverts such a change. One the dossier finds is set aside,

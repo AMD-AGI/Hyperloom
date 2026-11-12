@@ -60,7 +60,7 @@ from hyperloom.measure.hosted_log import STATE_FINISHED
 from hyperloom.measure.hosted_spec import SpecContext
 from hyperloom.measure.jit.key import build_surface
 from hyperloom.measure.jit.store import DirJitStore
-from hyperloom.measure.live_log import last_output
+from hyperloom.measure.live_log import last_output_below
 from hyperloom.measure.local import SUPPORTED_KINDS
 from hyperloom.measure.framework.base import (
     SESSION_SNAPSHOT_DIR,
@@ -87,6 +87,8 @@ from hyperloom.sandbox.card_occupancy import (
 from hyperloom.sandbox.gated_pool import GatedPool
 from hyperloom.sandbox.gpu_pool import GpuPool
 from hyperloom.sandbox.local import LocalSandboxProvider, ProcessUsers, RunnerPlan
+from hyperloom.sandbox.rooted import open_rooted
+from hyperloom.sandbox.socket import SandboxDenied
 from hyperloom.sandbox.templates import LocalTemplate
 from hyperloom_common.fs_utils import is_private_dir
 from hyperloom_multibranch.blackboard import LocalBlackboard
@@ -170,8 +172,8 @@ _RULE_PACK = "rule-pack"
 _POLL_INTERVAL_SEC = 2.0
 LEAKED_CARDS_REASON = "sandbox processes not provably gone"
 FREED_CARDS_REASON = "nothing of the sandbox that held them runs any more"
-#: A running test's files below its sandbox's directory: a local sandbox's root is its ``fs`` directory.
-_LIVE_FILES = Path("fs") / FILES_ROOT.lstrip("/")
+#: A local sandbox's root, below its directory: a running test's files are below it at ``FILES_ROOT``.
+_ROOT = "fs"
 logger = logging.getLogger(__name__)
 
 
@@ -284,10 +286,24 @@ class LocalHostedToolbox(LeasedToolbox):
         return await asyncio.to_thread(self._live_log, request_id)
 
     def _live_log(self, request_id: str) -> tuple[float, str] | None:
+        """The live log of the sandbox the backend's journal names for the test's unfinished attempt, reached from the
+        sandbox's root by a walk no link its processes made leads out of (they write ``/out``). ``None`` when there is
+        none or it cannot be read: the sandbox's processes change that tree as it is walked, and a test's progress is
+        reported without a live line rather than not at all."""
         record = self.backend.journal.latest(request_id)
         if record is None or record.state == STATE_FINISHED or not record.sandbox_id:
             return None
-        return last_output(self.sandboxes / record.sandbox_id / _LIVE_FILES, time.time())
+        try:
+            files = open_rooted(self.sandboxes / record.sandbox_id / _ROOT, FILES_ROOT, os.O_RDONLY | os.O_DIRECTORY)
+        except (OSError, SandboxDenied):
+            return None
+        try:
+            return last_output_below(files, time.time())
+        except OSError:
+            logger.debug("the live log of sandbox %s could not be read", record.sandbox_id, exc_info=True)
+            return None
+        finally:
+            os.close(files)
 
 
 def max_parallel_tests(cards: int, tp: int) -> int:

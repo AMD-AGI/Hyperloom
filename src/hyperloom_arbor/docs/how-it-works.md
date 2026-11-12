@@ -101,11 +101,33 @@ the change: an integrity failure (a protected validator file changed), an arm mi
 missing or non-positive metric. It changes no counter except the invalid streak; three in a row
 write `ABORTED.md` and stop the campaign.
 
+A correctness check that could not judge is an infrastructure error. A pack's script always exits 0
+and writes its verdict, a wrong answer included, so one that exits non-zero, writes nothing or no
+JSON, or runs out of time is the instrument's failure: its error starts `correctness inconclusive`.
+So is a server turn whose agent never ran (its model unreachable, say) when no server came up.
+Both are NOT_MEASURED, and the lost-server probe below still tells a server that died.
+
+**A server that stops answering is the change's.** After the harness saw the server healthy in an
+iteration, a correctness check that could not reach the model, a bench that did not run or had no
+traffic, or a bench turn past its cap is followed by a one-token completion, three times 30 s. No
+answer, or only server errors (5xx), means the server hung or died under the change: a REVERT, with
+the probe's codes and the failure lines in the server's log as its reason, as a server that never
+came up is one. Any other answer (a 404 for another served name included) leaves it NOT_MEASURED.
+
 **The kept tree:** after every REVERT and every NOT_MEASURED iteration, the workspace and the
 editable trees go back to the tree last kept (the start, a KEEP or PROBE, or a commit the harness
 made between iterations), in one `Restore the kept tree ...` commit. No unmeasured change stays
 under later ones. A NOT_MEASURED iteration's change is noted in `<session>/invalids.json` first,
 for the revisit phase below.
+
+An iteration the session never kept never becomes the kept tree. When its restore never ran (a
+SIGTERM after its commit, a crash between its verdict and the restore, a restore that failed), the
+next pass's start reverts its commits, and notes a NOT_MEASURED one for the revisit; what the
+harness committed between passes stays. A host's SIGTERM books the iteration in flight with the
+intent it declared at its commit (`iter_N/claim.json`), so its change is revisited like any other.
+
+An iteration retried after an attempt that ended without a verdict reads only its own files: the
+attempt's `iter_N/` moves to `<session>/attempts/iter_N.K` first.
 
 **The bar:** the pack's `objective.measurement.threshold_rel` (1.01 by default) over the best
 booked result. A change inside the noise band (`noise_band_pct`, 1.0 % by default) is neutral:
@@ -114,6 +136,26 @@ KEEP for FIX, REVERT for WIN. The first measurement of a session is its baseline
 **A second metric** (`secondary_metric`) is judged on its own band. A gain on one axis bought with
 a loss beyond the band on the other is a **frontier point**: kept, but it moves neither bar.
 `secondary_regression_cap_pct` and `secondary_exchange_rate` can cap what the second axis may lose.
+
+**A per-request second axis or guard is read on matched requests** (`arbor/measure/matched.py`).
+A change that lets other requests finish inside the bench's window (longest-prefix-first prefill,
+another batch policy) moves a raw p50 or p90 over the window without making any request faster:
+the window holds another mix of short and long contexts. So for `p50_interactivity`,
+`p90_interactivity`, `e2e_norm_intvty_p50` and `e2e_norm_intvty_p90`:
+- **The requests:** aiperf's per-request records (`profile_export.jsonl`) of the candidate's run and
+  of the kept tree's, the measured window only, keyed by `(conversation_id, turn_index)`. The kept
+  tree's run is the root baseline's when the session measured it, then the last KEEP's or measured
+  PROBE's (`request_ref` in `session.json`).
+- **The decision:** the metric recomputed on the requests both runs completed, the candidate's over
+  the kept tree's. The second axis is judged as the bar times that ratio, a band guard on the ratio
+  against its band. The primary metric is the raw one, as before, and the row books raw values.
+- **The fallback:** the raw readings decide, as before, when fewer than 30 requests, or under half
+  the kept run's, are in common, when either run left no records (a frozen `baseline_record` has
+  none), and when a bar row (a rolling chunk's REBASELINE, a round end's A/B) or a retraction came
+  after the kept run. `measurement.matched_requests: false` turns it off.
+- **The record:** the row's `matched` has, per metric, `used`, `n`, `share`, `ratio`, the two
+  matched readings, the two raw ones (`raw`, `raw_kept`) and, when it fell back, `why`. The log
+  line is `[arbor] Matched requests: ...`.
 
 **The critic** runs on every result the gate did not revert and can only downgrade it to REVERT.
 If it fails or answers nothing it can parse, the gate's verdict stands.
@@ -138,6 +180,9 @@ booked as a REVERT of the change, not as NOT_MEASURED.
 - **Tiers** (`space.levels` in the config; default `config, framework, kernel, feature`): the
   campaign starts at the first and escalates after `config_max_iters` (3) iterations on the config
   tier, or when `null_streak` (iterations without a booked gain) reaches `escalate_null_streak` (3).
+  With a map, each map round (the first map's included) starts instead at the `tier` of its
+  top-ranked open direction, up or down the ladder, and escalates from there by the same counters;
+  a top direction with no tier leaves the tier where it is (`directions.start_tier`).
 - **LEARN budget:** at most `max_consecutive_probes` (2) LEARNs in a row; at `null_streak` 3 the
   program asks for one ("LEARN REQUIRED").
 - **Drought:** `barren_streak` counts iterations since the bar last moved. At `barren_notice` (8)

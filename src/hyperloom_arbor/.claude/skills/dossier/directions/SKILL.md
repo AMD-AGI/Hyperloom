@@ -147,7 +147,7 @@ campaign's map from it, and a dossier pass ends there. Check it first:
   that changes so much it needs a new ID says which one it replaces.
   - **The `## Map` block.** The part ends with one, holding the exact line an
     Arbor campaign reads (`arbor/directions.py`):
-    `DIRECTIONS: [{"id": "m-…", "kind": "increment|rewrite", "title": "…", "rank": 1, "ceiling": "…", "status": "open"}, …]`
+    `DIRECTIONS: [{"id": "m-…", "kind": "increment|rewrite", "title": "…", "rank": 1, "ceiling": "…", "tier": "config|framework|kernel|feature", "status": "open"}, …]`
   - **Statuses:** open, done, killed, below_floor, or plan (a rewrite whose
     kernel plan is written). Every closed direction carries a `why`. A
     direction set aside says in its `why` what would reopen it (a measurement,
@@ -157,6 +157,14 @@ campaign's map from it, and a dossier pass ends there. Check it first:
     names them: the keys of `shares` in the host's `component.profile`, else
     part 7's op names. A host matches its op shares to directions by them, so
     give them when part 7 names the ops.
+  - **`tier`:** the level the direction works at, one of `config` (a flag or an
+    environment variable), `framework` (a change to the served tree's source),
+    `kernel` (a kernel or its tuning tables) or `feature` (something the stack
+    lacks). Give every open direction its tier. Each map round starts at the
+    tier of its top-ranked open direction, so a map led by a kernel's tables no
+    longer spends the round's first iterations on flags; the ladder escalates
+    from there as before. A map whose top direction has no tier leaves the
+    tier where it is.
   - **What a parallel run needs** (optional; a map without them is read as
     before):
     - `lane`: increment, kernel-plan, architectural or upstream. By default

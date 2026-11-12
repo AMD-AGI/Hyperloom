@@ -1,0 +1,119 @@
+format: hyperloom-kb.collect.v2
+description: >-
+  Arbor campaigns, one Experience per decision Arbor's gate made, from the document `python3 -m arbor.collect kb`
+  writes from a session directory (arbor-kb-export.v1): the bar the decision was held to, what changed and the
+  hypotheses recorded before it, the gate's decision and readings, the facts and dead ends recorded after it, and,
+  as raw logs, every file an Overseer view of the campaign is rebuilt from.
+declaration: ../declarations/arbor-v1.yaml
+producer:
+  name: arbor
+  # This mapping's version label, copied to provenance.producer_version; it names no Arbor release
+  # (provenance.extra.commit does, when the session records it).
+  version: "1"
+  snapshot_version: arbor-kb-export.v1
+
+# A patch or kernel names offsets and keys the configuration screen would read as credential assignments.
+code_fields:
+  - change.patch
+  - change.source_code
+
+skip:
+  - reason: >-
+      The session could not be read as an Arbor campaign: the export needs a session.json with lessons; read_error
+      in the exported document says what it found.
+    when: {present: $doc.session.read_error}
+
+units:
+  - each: $doc.units
+    as: unit
+
+unit_id: {text: $unit.unit_id}
+
+require:
+  - reason: >-
+      No campaign end follows this decision yet, so what it owns can still grow; a collection after the campaign
+      ends (or after a resume ends) writes it.
+    check: {absent: $unit.excluded}
+  - reason: >-
+      The campaign's metric is not an objective arbor-v1 declares (output_throughput, total_throughput_per_gpu or
+      total_throughput in tok/s/GPU, p50_interactivity, mean_interactivity, weakest_us).
+    check: {present: $unit.objective}
+  - reason: A framework campaign whose workload_kind is not serving is not collected.
+    check: {any: [{ne: [$unit.kind, framework]}, {eq: [$unit.workload_kind, serving]}]}
+  - reason: >-
+      A framework record must have identity image (a digest), model, precision, framework and bench.
+    check:
+      any:
+        - {ne: [$unit.kind, framework]}
+        - all:
+            - {present: $unit.identity.image}
+            - {present: $unit.identity.model}
+            - {present: $unit.identity.precision}
+            - {present: $unit.identity.framework}
+            - {present: $unit.identity.bench}
+  - reason: A kernel record must have identity kernel.
+    check: {any: [{ne: [$unit.kind, kernel]}, {present: $unit.identity.kernel}]}
+
+experience:
+  run_id: {token: $unit.run_id}
+  seq: {integer: $unit.seq}
+  created_at: {text: $unit.created_at}
+  completed_at: {text: $unit.completed_at}
+  objective: {text: $unit.objective}
+  identity: {compact: $unit.identity}
+  baseline:
+    best_before: {number: $unit.baseline.best_before}
+    campaign_baseline: {number: $unit.baseline.campaign_baseline}
+    base_tree: {text: $unit.baseline.base_tree}
+    base_fingerprint: {text: $unit.baseline.base_fingerprint}
+    best_set_by: {number: $unit.baseline.best_set_by}
+  rationale:
+    reasoning: {text: $unit.rationale.reasoning}
+    roadmap_items: $unit.rationale.roadmap_items
+    directions: $unit.rationale.directions
+  change:
+    summary: {text: $unit.change.summary}
+    tier: {text: $unit.change.tier}
+    change_fingerprint: {text: $unit.change.change_fingerprint}
+    intent: {text: $unit.change.intent}
+    patch: $unit.change.patch
+    island: {number: $unit.change.island}
+    generation: {number: $unit.change.generation}
+    role: {text: $unit.change.role}
+    source_code: $unit.change.source_code
+    binary: $unit.change.binary
+    parent_id: {text: $unit.change.parent_id}
+  outcome:
+    decision: {text: $unit.outcome.decision}
+    delta_pct: {number: $unit.outcome.delta_pct}
+    reason: {text: $unit.outcome.reason}
+    output_throughput: {number: $unit.outcome.output_throughput}
+    total_throughput_per_gpu: {number: $unit.outcome.total_throughput_per_gpu}
+    p50_interactivity: {number: $unit.outcome.p50_interactivity}
+    p90_interactivity: {number: $unit.outcome.p90_interactivity}
+    mean_interactivity: {number: $unit.outcome.mean_interactivity}
+    p50_ttft_s: {number: $unit.outcome.p50_ttft_s}
+    p90_ttft_s: {number: $unit.outcome.p90_ttft_s}
+    p90_tpot_s: {number: $unit.outcome.p90_tpot_s}
+    kv_cache_hit_rate: {number: $unit.outcome.kv_cache_hit_rate}
+    booked: $unit.outcome.booked
+    frontier: $unit.outcome.frontier
+    correctness_passed: $unit.outcome.correctness_passed
+    correctness_score: {number: $unit.outcome.correctness_score}
+    wall_s: {number: $unit.outcome.wall_s}
+    weakest_us: {number: $unit.outcome.weakest_us}
+    median_us: {number: $unit.outcome.median_us}
+    roofline_frac: {number: $unit.outcome.roofline_frac}
+    vgpr: {number: $unit.outcome.vgpr}
+    barriers: {number: $unit.outcome.barriers}
+    spills: {number: $unit.outcome.spills}
+    mfma: {number: $unit.outcome.mfma}
+  reflection:
+    findings: $unit.reflection.findings
+    critic: {text: $unit.reflection.critic}
+    tried_approaches: $unit.reflection.tried_approaches
+  notes: $unit.notes
+  raw_logs: $unit.raw_logs
+  provenance:
+    source_ref: {text: $unit.provenance.source_ref}
+    extra: {compact: $unit.provenance.extra}
