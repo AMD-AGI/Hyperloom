@@ -11,6 +11,19 @@ def context_sections_block(*, knowledge_content: str) -> str:
     return f"\n<knowledge>\n{knowledge_content}\n</knowledge>"
 
 
+# Resident in every backend's prompt rather than left to the knowledge maps: a kernel that breaks it hangs the GPU,
+# which ends every process on the machine that has a GPU open.
+CROSS_WORKGROUP_WAITS_PROMPT = """\
+## Kernels whose workgroups wait on each other
+
+Spinning on a flag, a grid-wide barrier, a last-arriver reduction: a workgroup that waits on another
+needs every workgroup it waits on resident at the same time. Launch no more workgroups than the device
+holds concurrently at the kernel's occupancy, or split the work into two launches. Otherwise the kernel
+deadlocks, the driver resets the GPU, and every process on the machine that has a GPU open is
+terminated. Run every self-test of such a kernel under `timeout`; `lever_grid_sizing.md` has the
+capacity arithmetic."""
+
+
 # Always-resident pointer to the two shared method cards under ``local_knowledge/common_methodology/optimization/``.
 EDIT_SURFACE_AND_SWEEPS_PROMPT = """\
 ## Edit surface & cheap sweeps (shared cards — read before pricing a direction)

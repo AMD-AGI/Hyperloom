@@ -16,7 +16,7 @@ from kernelforge.evaluation.benchmark.runner import BenchRun, measure_wallclock
 from kernelforge.evaluation.correctness.canonical import accept_candidate
 from kernelforge.evaluation.correctness.pipeline import run_validation_pipeline
 from kernelforge.evaluation.device_faults import DEVICE_HANG, DeviceFault, classify
-from kernelforge.evaluation.device_health import RECOVERY_TIMEOUT_SEC, wait_for_device_recovery
+from kernelforge.evaluation.device_health import RECOVERY_TIMEOUT_SEC, probe_device, wait_for_device_recovery
 from kernelforge.evaluation.profiling.registers import check_registers
 from kernelforge.evaluation.scoring import KEEP_MEASUREMENT_COUNT, runs_task_suite_acceptance
 from kernelforge.workflows.forge_loop.iteration.iteration_types import (
@@ -64,6 +64,11 @@ def _defer_termination_signals(enabled: bool):
             os.kill(os.getpid(), pending[0])
 
 
+#: ``phase`` of a ``device_fault`` event: found by the check before a measurement, or reported by the measurement.
+_BEFORE_MEASUREMENT = "before_measurement"
+_DURING_MEASUREMENT = "measurement"
+
+
 def _device_hang(result: IterationResult) -> DeviceFault | None:
     """The GPU hang a measurement's failure output reports, if it reports one."""
     fault = classify(result.error_output)
@@ -78,7 +83,7 @@ def _device_unavailable_result(iteration: int, fault: DeviceFault) -> IterationR
         validation_passed=False,
         validation_summary=(
             f"DEVICE UNAVAILABLE: the GPU ran no work within {RECOVERY_TIMEOUT_SEC / 60:.0f} minutes "
-            f"of a hang ({fault.describe()})"
+            f"({fault.describe()})"
         ),
         validation_outcome=DEVICE_UNAVAILABLE_OUTCOME,
         error_output=fault.line,
@@ -96,12 +101,13 @@ class AttemptVerdictMixin:
         *,
         benchmark_measurement: dict | None = None,
     ) -> IterationResult:
-        """Execute a single build→validate→bench→canonical→decide iteration, measuring once more after a GPU hang.
+        """Execute a single build→validate→bench→canonical→decide iteration on a GPU that runs work, measuring once
+        more after a GPU hang.
 
         Once the GPU has failed to recover, no candidate is measured on it again: what such a measurement reported
         would be the device's failure filed against the candidate.
         """
-        if self.device_unavailable is not None:
+        if self.device_unavailable is not None or not await self._device_ready(iteration):
             return _device_unavailable_result(iteration, self.device_unavailable)
         started = time.time()
         result = await self._measure_attempt(iteration, benchmark_measurement)
@@ -109,6 +115,22 @@ class AttemptVerdictMixin:
         if fault is None:
             return result
         return replace(await self._settle_device_hang(iteration, fault), duration_sec=time.time() - started)
+
+    async def _device_ready(self, iteration: int) -> bool:
+        """Whether the GPU runs work before this measurement, once it has been waited for when it does not.
+
+        A reset outside any measurement -- a session's own test that hung the GPU, or a remeasure that did -- would
+        otherwise fail this candidate's measurement for the device's reason.
+        """
+        fault = await probe_device()
+        if fault is None:
+            return True
+        print(f"  [device] before measuring: {fault.describe()}; waiting for the GPU to run work again")
+        recovered = await wait_for_device_recovery()
+        self._record_device_fault(iteration, fault, phase=_BEFORE_MEASUREMENT, recovered=recovered)
+        if not recovered:
+            self.device_unavailable = fault
+        return recovered
 
     async def _settle_device_hang(self, iteration: int, fault: DeviceFault) -> IterationResult:
         """Wait for the GPU, measure the candidate again, and pin the hang on it only when it hangs the GPU again.
@@ -119,12 +141,14 @@ class AttemptVerdictMixin:
         print(f"  [device] {fault.describe()}; waiting for the GPU to run work again")
         if not await wait_for_device_recovery():
             self.device_unavailable = fault
-            self._record_device_fault(iteration, fault, recovered=False, repeated=False)
+            self._record_device_fault(iteration, fault, phase=_DURING_MEASUREMENT, recovered=False)
             return _device_unavailable_result(iteration, fault)
         print("  [device] the GPU runs work again; measuring the candidate once more")
         retry = await self._measure_attempt(iteration, None)
         repeated = _device_hang(retry)
-        self._record_device_fault(iteration, fault, recovered=True, repeated=repeated is not None)
+        self._record_device_fault(
+            iteration, fault, phase=_DURING_MEASUREMENT, recovered=True, repeated=repeated is not None
+        )
         if repeated is None:
             return retry
         return replace(
@@ -138,11 +162,14 @@ class AttemptVerdictMixin:
             ),
         )
 
-    def _record_device_fault(self, iteration: int, fault: DeviceFault, *, recovered: bool, repeated: bool) -> None:
+    def _record_device_fault(
+        self, iteration: int, fault: DeviceFault, *, phase: str, recovered: bool, repeated: bool | None = None
+    ) -> None:
         self.state_store.append_event(
             make_event(
                 "device_fault",
                 iteration,
+                phase=phase,
                 kind=fault.kind,
                 node=fault.node,
                 line=fault.line,

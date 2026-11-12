@@ -27,12 +27,15 @@ it.
   measurements is reverted as `REVERT_DEVICE_FAULT`; one that measures cleanly
   the second time is ruled on that measurement. A device that does not recover
   leaves the candidate unjudged as `DEVICE_UNAVAILABLE` and stops the campaign
-  with `device_unrecovered`. Each hang is recorded as a `device_fault` event.
-  Before, the hang was ruled on as a validation or benchmark failure of
-  whichever candidate was being measured when it happened. The grid-sizing
-  method card and the FlyDSL backend prompt now require every workgroup a
-  kernel waits on to be resident at once: a workgroup waiting on one that
-  cannot be scheduled deadlocks the kernel and hangs the GPU.
+  with `device_unrecovered`. Every measurement first runs a small kernel on
+  the device from a child process and waits the same way when it fails, so a
+  reset outside any measurement is not filed against the next candidate. Each
+  fault is recorded as a `device_fault` event. Before, a hang was ruled on as
+  a validation or benchmark failure of whichever candidate was being measured
+  when it happened. The grid-sizing method card and every kernel backend's
+  prompt now require every workgroup a kernel waits on to be resident at
+  once: a workgroup waiting on one that cannot be scheduled deadlocks the
+  kernel and hangs the GPU.
 - **An Arbor agent on an AgentX multi-branch session needs no launch flag.**
   `hyperloom-multibranch run --autonomous-agent` now serves every Arbor the
   session's frozen base launch, resolved from InferenceX or the framework's

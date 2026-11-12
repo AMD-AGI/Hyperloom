@@ -1,7 +1,7 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""A GPU hang during a measurement: waiting for the device, measuring once more, and whom the hang is pinned on."""
+"""A GPU that runs no work before a measurement, or hangs during one: waiting for it, and whom a hang is pinned on."""
 
 from __future__ import annotations
 
@@ -10,7 +10,7 @@ from pathlib import Path
 from types import SimpleNamespace
 
 from kernelforge.evaluation.correctness.pipeline import ValidationReport, ValidationResult
-from kernelforge.evaluation.device_faults import DEVICE_HANG
+from kernelforge.evaluation.device_faults import DEVICE_HANG, DEVICE_UNRESPONSIVE, DeviceFault
 from kernelforge.tests.conftest import patch_iteration_name
 from kernelforge.tests.workflows.forge_loop.iteration._iteration_loop import (
     _make_loop,
@@ -24,6 +24,7 @@ from kernelforge.workflows.forge_loop.iteration.iteration_types import _decision
 
 HANG = "HW Exception by GPU node-2 (Agent handle: 0x5dac2f79a5b0) reason :GPU Hang"
 MEMORY = "Memory access fault by GPU node-2 (Agent handle: 0x55a1) on address 0x7f0000. Reason: Page not present."
+_UNRESPONSIVE = DeviceFault(DEVICE_UNRESPONSIVE, "hipErrorNoDevice")
 
 
 def _measured(candidate_ms=1.0 / 1.05):
@@ -53,10 +54,13 @@ def _validation(output=""):
     )
 
 
-def _loop(monkeypatch, *, benches, validations=None, recovers=True):
-    """A loop whose measurements report ``benches`` and ``validations`` in turn, on a GPU that ``recovers`` or not."""
+def _loop(monkeypatch, *, benches, validations=None, recovers=True, before=()):
+    """A loop whose measurements report ``benches`` and ``validations`` in turn, on a GPU that ``recovers`` or not.
+
+    ``before`` is what the checks before measurements find, in turn, once the GPU runs work.
+    """
     loop, bench_calls = _measurement_loop(monkeypatch, _measured())
-    benches, validations = iter(benches), iter(validations or [])
+    benches, validations, before = iter(benches), iter(validations or []), iter(before)
     waits, events = [], []
 
     async def bench(_run, **kwargs):
@@ -66,12 +70,16 @@ def _loop(monkeypatch, *, benches, validations=None, recovers=True):
     async def validate(**_kwargs):
         return next(validations, _validation())
 
+    async def probe_device():
+        return next(before, None)
+
     async def wait_for_device_recovery():
         waits.append(recovers)
         return recovers
 
     patch_iteration_name(monkeypatch, "measure_wallclock", bench)
     monkeypatch.setattr(attempt_verdict, "run_validation_pipeline", validate)
+    monkeypatch.setattr(attempt_verdict, "probe_device", probe_device)
     monkeypatch.setattr(attempt_verdict, "wait_for_device_recovery", wait_for_device_recovery)
     loop.state_store = SimpleNamespace(append_event=events.append)
     return loop, bench_calls, waits, events
@@ -85,8 +93,8 @@ def test_a_hang_the_candidate_does_not_repeat_is_ruled_on_by_the_clean_measureme
 
     assert _decision_label(result) == "KEEP"
     assert (len(bench_calls), waits) == (2, [True])
-    assert [(e["type"], e["kind"], e["node"], e["recovered"], e["repeated"]) for e in events] == [
-        ("device_fault", DEVICE_HANG, 2, True, False)
+    assert [(e["type"], e["phase"], e["kind"], e["node"], e["recovered"], e["repeated"]) for e in events] == [
+        ("device_fault", "measurement", DEVICE_HANG, 2, True, False)
     ]
 
 
@@ -129,7 +137,29 @@ def test_a_gpu_that_does_not_recover_leaves_the_candidate_unjudged(monkeypatch):
     assert _decision_label(result) == "DEVICE_UNAVAILABLE"
     assert len(bench_calls) == 1
     assert loop.device_unavailable.line == HANG
-    assert [(e["recovered"], e["repeated"]) for e in events] == [(False, False)]
+    # No second measurement ran, so the event says nothing about whether one would have hung.
+    assert [(e["phase"], e["recovered"], "repeated" in e) for e in events] == [("measurement", False, False)]
+
+
+def test_a_gpu_that_runs_no_work_before_the_measurement_is_waited_for_first(monkeypatch):
+    """A reset outside any measurement would otherwise fail the next candidate's for the device's reason."""
+    loop, bench_calls, waits, events = _loop(monkeypatch, benches=[_measured()], before=[_UNRESPONSIVE])
+
+    result = asyncio.run(loop.run_one_iteration(1))
+
+    assert _decision_label(result) == "KEEP"
+    assert (len(bench_calls), waits) == (1, [True])
+    assert [(e["phase"], e["kind"], e["recovered"]) for e in events] == [("before_measurement", "unresponsive", True)]
+
+
+def test_a_gpu_that_never_runs_work_before_the_measurement_measures_nothing(monkeypatch):
+    loop, bench_calls, _waits, events = _loop(monkeypatch, benches=[], before=[_UNRESPONSIVE], recovers=False)
+
+    result = asyncio.run(loop.run_one_iteration(1))
+
+    assert _decision_label(result) == "DEVICE_UNAVAILABLE"
+    assert bench_calls == [] and loop.device_unavailable == _UNRESPONSIVE
+    assert [(e["phase"], e["recovered"]) for e in events] == [("before_measurement", False)]
 
 
 def test_no_candidate_is_measured_on_a_gpu_that_did_not_recover(monkeypatch):

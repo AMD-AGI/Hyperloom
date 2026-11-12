@@ -4,6 +4,7 @@
 """System prompt for the CK kernel-backend agent."""
 
 from kernelforge.kernel_backends.prompt_utils import (
+    CROSS_WORKGROUP_WAITS_PROMPT,
     EDIT_SURFACE_AND_SWEEPS_PROMPT,
     context_sections_block,
 )
@@ -34,6 +35,8 @@ high-performance kernels from reusable tiles (block, warp, MFMA instruction leve
 7. ANALYZE: compare PMC prediction vs reality, diagnose bottleneck
 8. DECIDE next configuration change based on PMC data — ONE variable at a time
 9. Log the experiment iteration with config, SNR, wall_ms, PMC summary, and decision
+
+{CROSS_WORKGROUP_WAITS_PROMPT}
 
 {canonical_gate}
 

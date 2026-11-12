@@ -4,6 +4,7 @@
 """System prompt for the Triton kernel-backend agent."""
 
 from kernelforge.kernel_backends.prompt_utils import (
+    CROSS_WORKGROUP_WAITS_PROMPT,
     EDIT_SURFACE_AND_SWEEPS_PROMPT,
     context_sections_block,
 )
@@ -32,6 +33,8 @@ code generation, plus `@triton.autotune` for configuration search.
 8. PROFILE PMC if you need it to decide the next change
 9. CHECK register pressure — reduce num_stages/num_warps if spilling
 10. Log experiment: config, SNR, wall_ms, diagnosis
+
+{cross_workgroup_waits}
 
 {canonical_gate}
 
@@ -139,6 +142,7 @@ def build_system_prompt(
     return _SYSTEM_PROMPT_TEMPLATE.format(
         config_gpu_target=config_gpu_target,
         canonical_gate=canonical_gate,
+        cross_workgroup_waits=CROSS_WORKGROUP_WAITS_PROMPT,
         edit_surface=EDIT_SURFACE_AND_SWEEPS_PROMPT,
         context_sections=context_sections_block(knowledge_content=knowledge_content),
     )

@@ -19,6 +19,7 @@ import pytest
 
 from kernelforge.tests.workflows.forge_loop.iteration._iteration_loop import _make_loop, _unused_supervisor
 from kernelforge.workflows.forge_loop.campaign.run_state import LoopStateStore
+from kernelforge.workflows.forge_loop.iteration import attempt_verdict
 from kernelforge.workflows.forge_loop.iteration import runner as runner_module
 
 GPU_RUNTIME_LIBRARIES = ("libamdhip64", "libhsa-runtime64")
@@ -72,8 +73,13 @@ def _gpu_runtime_held() -> dict[str, list[str]]:
     return {"libraries": sorted(libraries), "descriptors": sorted(descriptors)}
 
 
+async def _runs_work():
+    return None
+
+
 def main(tmp_path: Path) -> None:
     with pytest.MonkeyPatch.context() as monkeypatch:
+        monkeypatch.setattr(attempt_verdict, "probe_device", _runs_work)
         loop, workspace = _make_loop(tmp_path, monkeypatch, session_count=2, driver_source=DRIVER)
         asyncio.run(loop.run(runner_module.LoopAgents(agent_fn=_agent, supervisor_fn=_unused_supervisor)))
     decisions = [
