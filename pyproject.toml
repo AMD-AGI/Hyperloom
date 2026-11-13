@@ -302,6 +302,9 @@ hyperloom = [
     "contracts/*.schema.json",
     # The reference rule pack a session reads when HYPERLOOM_RULE_PACK names no other; importing outside_facts fails without it.
     "common/outside_facts/packs/*.yaml",
+    # Starting kernels, drivers and briefs primus_forge copies into a KernelForge task.
+    "orchestrator/trace_analysis/primus_forge_assets/*.py",
+    "orchestrator/trace_analysis/primus_forge_assets/*.md",
 ]
 "hyperloom.inference_optimizer" = [
     "SKILL.md",
