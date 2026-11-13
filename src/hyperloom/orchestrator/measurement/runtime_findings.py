@@ -28,6 +28,8 @@ RUNTIME_FINDINGS_FILE = "runtime_findings.json"
 #: Largest throughput drop a verified correctness fix may cost and still KEEP.
 CORRECTNESS_FIX_MAX_DROP_PCT = 3.0
 KEEP_REASON_CORRECTNESS_FIX = "correctness_fix"
+#: KEEP reason for the first ahead-of-time export, kept on correctness rather than throughput.
+KEEP_REASON_EXPORT_LANDED = "export_landed"
 #: Rules whose resolution may justify a correctness-fix KEEP; each names a concrete, checkable cause.
 CORRECTNESS_FIX_RULES = frozenset(
     {
