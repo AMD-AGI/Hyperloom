@@ -35,6 +35,7 @@ from hyperloom_multibranch.rulegate.readings import (
     inferencex_reading,
     unscored_reading,
 )
+from hyperloom_multibranch.toolbox.long_context import agentx_gated
 
 
 #: The attachment id of a test that undoes a change its own agent found invalid, a file saying which.
@@ -116,7 +117,9 @@ class InferenceXRule(Rule):
 
 @dataclass(frozen=True)
 class AgentXRule(Rule):
-    """The session's ``objective`` with its guards; the error rate the run reports is its accuracy.
+    """The session's ``objective`` with its guards. A test the long-context check gates (:func:`agentx_gated`: a merge's,
+    FINAL's) is accurate on that check, and a drop regresses it with no retest; any other test on the error rate the run
+    reports.
 
     The bar is fixed rather than drawn from the root's spread, so one root test anchors the parent values. A test
     takes 75 to 90 minutes, too long to spend on a confirm the judgement may not need.
@@ -125,7 +128,7 @@ class AgentXRule(Rule):
     objective: agentx.AgentXObjective
     accuracy_round = False
     speed_gates = agentx.SPEED_GATES
-    # An AgentX test holds no server for them (BenchmarkPoint.holds_accuracy_checks), so both checks end incomplete.
+    # An AgentX explore holds no server for them (BenchmarkPoint.holds_accuracy_checks), so both checks end incomplete.
     runs_consistency_checks = False
     baseline_tests = 1
     min_baselines = 1
@@ -141,12 +144,17 @@ class AgentXRule(Rule):
         ruling = _result(record).agentx_checkpoint
         if ruling is not None and ruling.stopped:
             return agentx.trailed(ruling, record.request_id, self.objective)
-        return agentx.compare(self._reading(record), parent, record.request_id, self.objective)
+        judgement = agentx.compare(self._reading(record), parent, record.request_id, self.objective)
+        if agentx_gated(record.request):
+            return agentx.held_to_long_context(judgement, _result(record).long_context)
+        return judgement
 
     async def retest(self, first: Judgement, record: TestRecord, parent: Mapping[str, float]) -> Judgement:
         return agentx.confirm(first, self._reading(record), parent, record.request_id, self.objective)
 
     async def accuracy_passes(self, record: TestRecord) -> bool:
+        if agentx_gated(record.request):
+            return agentx.long_context_accuracy(_result(record).long_context) is AccuracyVerdict.PASSED
         return agentx_accuracy_ok(self._reading(record).get(GRADED_ERROR_RATE))
 
     def _reading(self, record: TestRecord) -> dict[str, float]:
@@ -184,7 +192,7 @@ def lands_as_retraction(record: TestRecord, judgement: Judgement, rule: Rule) ->
     construction, so only the rule's errors, guards and accuracy, and a consistency check that ran, hold it back. Under
     a rule whose tests cannot run the consistency checks (AgentX) none ran, so consistency is not tested. A final verdict whose every refusal is one of the
     rule's speed gates, on measurements whose accuracy passed, and a long-context check that shows no drop, which the
-    AgentX rule does not read for any other test."""
+    AgentX rule reads otherwise only on the tests it gates on it."""
     final = judgement.verdict in (Verdict.FLAT, Verdict.REGRESSED)
     passed = judgement.accuracy is AccuracyVerdict.PASSED
     long_context = _result(record).long_context

@@ -65,7 +65,7 @@ class SessionGate(Protocol):
         gain with it, and a caller whose test needs no confirm withdraws it."""
 
     async def accuracy_passes(self, request_id: str) -> bool:
-        """Whether the test clears the accuracy gate every commit clears."""
+        """Whether the test clears the accuracy gate the rule holds its purpose to."""
 
     async def speed_gates(self) -> frozenset[str]:
         """The refusals of the session's rule that say only that a candidate is not faster than its parent."""
