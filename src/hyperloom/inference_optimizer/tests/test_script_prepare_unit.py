@@ -17,6 +17,7 @@ import sys
 
 import pytest
 
+from hyperloom.common.optimization_scope import aoti_config
 from hyperloom.inference_optimizer import script_workload as sw
 
 
@@ -348,3 +349,178 @@ def test_check_refuses_a_module_outside_the_workspace(tmp_path, capsys):
 
 def test_check_is_reachable_as_a_subcommand(tmp_path):
     assert sw.main(["check", "--workspace", str(_prepared(tmp_path))]) == 0
+
+
+# --- --aoti ---------------------------------------------------------------------------
+
+
+def _module_file(tmp_path: Path) -> Path:
+    """The editable module the scope names; aoti_config refuses a scope whose file is absent."""
+    module_file = tmp_path / "ws" / "optimization" / "model_run_opt.py"
+    module_file.parent.mkdir(parents=True, exist_ok=True)
+    module_file.write_text("def apply(model):\n    return model\n")
+    return module_file
+
+
+def _scope_of(tmp_path: Path, aoti=None) -> dict:
+    args = _args(tmp_path)
+    args.aoti = aoti
+    benchmark = tmp_path / "bench"
+    sw._write_benchmark(benchmark, _module_file(tmp_path), args)
+    return json.loads((benchmark / "optimization_scope.json").read_text())
+
+
+def test_without_the_flag_the_scope_stays_at_schema_1(tmp_path):
+    scope = _scope_of(tmp_path)
+    assert scope["schema_version"] == 1 and "aoti" not in scope
+
+
+def test_the_skeleton_declares_an_export_at_schema_2(tmp_path):
+    scope = _scope_of(tmp_path, aoti=True)
+    assert scope["schema_version"] == 2
+    assert scope["aoti"]["enabled"] is True and scope["aoti"]["pin_all_others"] is True
+
+
+def test_the_skeleton_blocks_a_launch_until_it_is_filled_in(tmp_path):
+    """The placeholders are the point: a skeleton that validated would run an unchosen range."""
+    args = _args(tmp_path)
+    args.aoti = True
+    benchmark = tmp_path / "bench"
+    sw._write_benchmark(benchmark, _module_file(tmp_path), args)
+
+    with pytest.raises(ValueError, match="input must be a non-empty string"):
+        aoti_config(str(benchmark))
+
+
+def test_a_skeleton_with_no_dynamic_dims_is_valid(tmp_path):
+    """Replacing the example entry with [] is how an operator says every shape is fixed."""
+    benchmark = tmp_path / "bench"
+    args = _args(tmp_path)
+    args.aoti = True
+    sw._write_benchmark(benchmark, _module_file(tmp_path), args)
+    scope_path = benchmark / "optimization_scope.json"
+    scope = json.loads(scope_path.read_text())
+    scope["aoti"]["dynamic_dims"] = []
+    scope_path.write_text(json.dumps(scope))
+
+    config = aoti_config(str(benchmark))
+    assert config.enabled and config.dynamic_dims == ()
+
+
+def _declaration(tmp_path: Path, **overrides) -> Path:
+    block = {
+        "enabled": True,
+        "pin_all_others": True,
+        "dynamic_dims": [{"input": "input_ids", "dim": 1, "min": 310, "max": 512, "derivation": "sequence length T"}],
+        **overrides,
+    }
+    path = tmp_path / "aoti_scope.json"
+    path.write_text(json.dumps(block))
+    return path
+
+
+def test_a_declaration_file_is_merged_and_the_version_bumped(tmp_path):
+    scope = _scope_of(tmp_path, aoti=str(_declaration(tmp_path)))
+
+    assert scope["schema_version"] == 2
+    assert scope["aoti"]["dynamic_dims"][0]["input"] == "input_ids"
+
+
+def test_a_declaration_file_is_pinned_by_digest(tmp_path):
+    """The declaration the run used stays reproducible, like the script and the scorer."""
+    declaration = _declaration(tmp_path)
+    args = _args(tmp_path)
+    args.aoti = str(declaration)
+    benchmark = tmp_path / "bench"
+    sw._write_benchmark(benchmark, _module_file(tmp_path), args)
+
+    config = json.loads((benchmark / "script_workload.json").read_text())
+    assert config["aoti_sha256"] == hashlib.sha256(declaration.read_bytes()).hexdigest()
+
+
+def test_a_declaration_file_must_say_whether_it_is_enabled(tmp_path):
+    """Defaulting it would mean 'export' here and 'inert' for the same block pasted in by hand."""
+    block = json.loads(_declaration(tmp_path).read_text())
+    del block["enabled"]
+    path = tmp_path / "no_enabled.json"
+    path.write_text(json.dumps(block))
+
+    with pytest.raises(SystemExit, match="must say whether it is enabled"):
+        sw._aoti_block(str(path))
+
+
+def test_a_malformed_declaration_file_fails_at_prepare(tmp_path):
+    path = tmp_path / "broken.json"
+    path.write_text("{not json")
+
+    with pytest.raises(SystemExit, match="broken.json"):
+        sw._aoti_block(str(path))
+
+
+def test_a_declaration_file_holding_a_list_is_refused(tmp_path):
+    path = tmp_path / "list.json"
+    path.write_text("[]")
+
+    with pytest.raises(SystemExit, match="JSON object"):
+        sw._aoti_block(str(path))
+
+
+def test_a_bad_field_in_a_declaration_file_fails_before_any_budget_is_spent(tmp_path):
+    benchmark = tmp_path / "bench"
+    args = _args(tmp_path)
+    args.aoti = str(
+        _declaration(tmp_path, dynamic_dims=[{"input": "x", "dim": 1, "min": 9, "max": 2, "derivation": "d"}])
+    )
+    sw._write_benchmark(benchmark, _module_file(tmp_path), args)
+
+    with pytest.raises(SystemExit, match="requires min < max"):
+        sw._validate_aoti(benchmark)
+
+
+# --- the recorded-input listing -------------------------------------------------------
+
+
+def test_the_listing_reports_a_varying_axis_as_observed(tmp_path):
+    report = {"calls": 4, "inputs": [{"name": "input_ids", "shape": [1, 317], "varies": {"1": [310, 512]}}]}
+
+    listing = sw._recorded_inputs(report, tmp_path)
+
+    assert "Inputs recorded (4 calls)" in listing
+    assert "input_ids" in listing and "axis 1: observed 310 to 512" in listing
+    assert "script check" in listing
+
+
+def test_the_listing_suggests_nothing_when_no_axis_varied(tmp_path):
+    """prepare reports what it recorded; which axes are meant to vary is the operator's call."""
+    report = {"calls": 4, "inputs": [{"name": "input_ids", "shape": [1, 317], "varies": {}}]}
+
+    listing = sw._recorded_inputs(report, tmp_path)
+
+    assert "Nothing varied across the recorded calls" in listing
+    assert "317" in listing
+
+
+def test_check_names_each_placeholder_the_skeleton_left(tmp_path, capsys):
+    """The listing an operator works from after --aoti, rather than one field per launch attempt."""
+    workspace = _prepared(tmp_path)
+    scope_path = workspace / "benchmark" / "optimization_scope.json"
+    scope = json.loads(scope_path.read_text())
+    scope["schema_version"] = 2
+    scope["aoti"] = dict(sw._AOTI_SKELETON)
+    scope_path.write_text(json.dumps(scope))
+
+    assert sw.check(workspace) == 1
+    err = capsys.readouterr().err
+    assert "dynamic_dims[0].input is still the placeholder" in err
+    assert "dynamic_dims[0].derivation is still the placeholder" in err
+
+
+def test_check_passes_a_filled_in_declaration(tmp_path):
+    workspace = _prepared(tmp_path)
+    scope_path = workspace / "benchmark" / "optimization_scope.json"
+    scope = json.loads(scope_path.read_text())
+    scope["schema_version"] = 2
+    scope["aoti"] = json.loads(_declaration(tmp_path).read_text())
+    scope_path.write_text(json.dumps(scope))
+
+    assert sw.check(workspace) == 0

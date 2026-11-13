@@ -22,7 +22,7 @@ import subprocess
 import sys
 
 from hyperloom.common.interpreter_roots import foreign_interpreter_roots
-from hyperloom.common.optimization_scope import optimization_scope
+from hyperloom.common.optimization_scope import aoti_config, optimization_scope
 
 from .session.paths import asset_root
 
@@ -31,6 +31,11 @@ _CONFIG = "script_workload.json"
 _SCORER = "scorer.py"
 # The two directories a prepared workspace holds.
 _BENCHMARK, _OPTIMIZATION = "benchmark", "optimization"
+_SCOPE = "optimization_scope.json"
+# The --aoti flag, its dest on the parsed arguments, and the block it writes into the scope.
+_AOTI = "aoti"
+# One export attempt writes about this much into TMPDIR; see the AOTI section of the how-to.
+_EXPORT_BUILD_GB = 10
 _IDENTITY = '''"""Optimizations for {script}; the identity until Hyperloom accepts a change."""
 
 
@@ -43,6 +48,67 @@ def _tolerance(args: argparse.Namespace) -> dict:
     if args.error_limit is not None:
         return {"limit": args.error_limit}
     return {"autocast": args.calibrate_autocast, "headroom": args.headroom, "floor": args.floor}
+
+
+# Written by --aoti with nulls the operator must replace. Deliberately invalid: the launch
+# refuses while a placeholder remains, which is the point -- a skeleton that passed would run
+# a campaign against a range nobody chose. Valid JSON, so every reader still parses it and the
+# validator can name the offending field.
+_AOTI_SKELETON = {
+    "_comment": (
+        "Declare what must stay dynamic. If every input is fixed, replace dynamic_dims with []. "
+        "A range is fixed into the compiled model for good: an input outside it fails in "
+        "production. The agent may not change it."
+    ),
+    "enabled": True,
+    "pin_all_others": True,
+    "dynamic_dims": [
+        {
+            "_comment": (
+                "input: the name as your script spells it (listed by prepare); dim: 0-indexed "
+                "axis; min and max: inclusive; derivation: how you measured the range"
+            ),
+            "input": None,
+            "dim": None,
+            "min": None,
+            "max": None,
+            "derivation": None,
+        }
+    ],
+}
+
+
+def _aoti_block(declared: object) -> tuple[dict | None, str | None]:
+    """The ``aoti`` block to write and the digest of the file it came from.
+
+    ``--aoti`` alone writes the skeleton unvalidated. ``--aoti FILE`` validates now, so a
+    typo costs seconds instead of surfacing at the first round of an unattended run.
+    """
+    if declared is None:
+        return None, None
+    if declared is True:
+        return dict(_AOTI_SKELETON), None
+    path = Path(str(declared))
+    try:
+        body = path.read_bytes()
+        block = json.loads(body)
+    except (OSError, ValueError) as exc:
+        raise SystemExit(f"--aoti {path}: {exc}") from exc
+    if not isinstance(block, dict):
+        raise SystemExit(f"--aoti {path}: the file must hold the aoti block as a JSON object")
+    # Required rather than defaulted: aoti_config defaults it to false, so a file without it
+    # would mean "export" here and "inert" when the same block is pasted into the scope by hand.
+    if "enabled" not in block:
+        raise SystemExit(f"--aoti {path}: the declaration must say whether it is enabled")
+    return block, hashlib.sha256(body).hexdigest()
+
+
+def _validate_aoti(benchmark: Path) -> None:
+    """Fail prepare on a declaration the campaign would reject, naming the field."""
+    try:
+        aoti_config(str(benchmark))
+    except ValueError as exc:
+        raise SystemExit(f"the declaration in --aoti is not usable: {exc}") from exc
 
 
 def _copy_scorer(benchmark: Path, scorer: Path | None) -> str | None:
@@ -75,11 +141,16 @@ def _write_benchmark(benchmark: Path, module_file: Path, args: argparse.Namespac
         "tolerance": _tolerance(args),
         "scorer_sha256": _copy_scorer(benchmark, args.scorer),
     }
+    aoti, digest = _aoti_block(getattr(args, _AOTI, None))
+    if digest:
+        config["aoti_sha256"] = digest
     (benchmark / _CONFIG).write_text(json.dumps(config, indent=2) + "\n")
-    # Schema 1: ``function`` is read whatever the version, and 2 only gates the aoti block,
-    # which a prepared script workspace does not declare. An operator adding one edits both.
-    scope = {"schema_version": 1, "file": str(module_file), "function": args.function}
-    (benchmark / "optimization_scope.json").write_text(json.dumps(scope, indent=2) + "\n")
+    # Schema 1 unless an export is declared: ``function`` is read whatever the version, and 2
+    # only gates the aoti block. An operator adding one by hand edits both.
+    scope = {"schema_version": 2 if aoti else 1, "file": str(module_file), "function": args.function}
+    if aoti:
+        scope[_AOTI] = aoti
+    (benchmark / _SCOPE).write_text(json.dumps(scope, indent=2) + "\n")
     # Not custom_<arch>.sh: prepare runs the model once and never learns the board, so any
     # architecture in the name would be a guess. The launcher's documented fallback takes the
     # directory's only .sh, and a prepared benchmark directory holds exactly this one.
@@ -144,6 +215,29 @@ def _recorded_summary(report: dict, args: argparse.Namespace) -> str:
     return f"Recorded {report['calls']} calls; error limits {report['rel_l2_limits']} ({units}{calibrated})"
 
 
+def _recorded_inputs(report: dict, workspace: Path) -> str:
+    """List what the recorded calls fed the model, so the operator names axes from evidence.
+
+    Observed sizes are reported as observed and never written into the skeleton: the
+    recorded calls show the sizes that happened to be exercised, not the sizes that are
+    meant to vary. Only the operator knows the latter.
+    """
+    inputs = report.get("inputs", [])
+    lines = [f"Inputs recorded ({report.get('calls', 0)} calls):"]
+    varied = False
+    for entry in inputs:
+        shape = "(" + ", ".join(str(size) for size in entry["shape"]) + ")"
+        notes = []
+        for axis, (low, high) in sorted(entry["varies"].items()):
+            notes.append(f"axis {axis}: observed {low} to {high}")
+            varied = True
+        lines.append(f"  {entry['name']:<24} {shape:<18} {'; '.join(notes)}".rstrip())
+    if not varied:
+        lines.append("Nothing varied across the recorded calls, so no range is suggested.")
+    lines.append(f"Fill in benchmark/{_SCOPE}, then run: hyperloom script check --workspace {workspace}")
+    return "\n".join(lines)
+
+
 def prepare(args: argparse.Namespace) -> Path:
     """Create the workspace and record the references; refuse to touch an existing one."""
     workspace = args.workspace.resolve()
@@ -156,6 +250,8 @@ def prepare(args: argparse.Namespace) -> Path:
     try:
         _init_module(root, module_file, args)
         _write_benchmark(benchmark, module_file, args)
+        if isinstance(getattr(args, _AOTI, None), str):
+            _validate_aoti(benchmark)
         report = _record(benchmark, args)
         _check_import_order(report["import_order"], args)
         prepared = True
@@ -163,6 +259,8 @@ def prepare(args: argparse.Namespace) -> Path:
         if not prepared:
             _discard_partial_workspace(workspace)
     print(_recorded_summary(report, args))
+    if getattr(args, _AOTI, None) is True:
+        print(_recorded_inputs(report, workspace))
     return workspace
 
 
@@ -175,6 +273,15 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument("--method", default="__call__", help="method of the returned object that runs the model")
     parser.add_argument("--python", default=sys.executable, help="interpreter of the model's environment")
     parser.add_argument("--cwd", type=Path, default=Path.cwd(), help="directory the script is run from")
+    parser.add_argument(
+        "--aoti",
+        nargs="?",
+        const=True,
+        metavar="FILE",
+        help="declare that the deliverable must be an ahead-of-time compiled package. Alone, writes a "
+        "skeleton declaration to fill in and lists the inputs recorded; with a file, merges that "
+        "declaration and validates it now",
+    )
     parser.add_argument(
         "--scorer",
         type=Path,
@@ -270,10 +377,56 @@ def _check_scope(benchmark: Path, workspace: Path) -> list[str]:
     except ValueError as exc:
         return [str(exc)]
     if scope is None:
-        return [f"{benchmark} holds no optimization_scope.json"]
+        return [f"{benchmark} holds no {_SCOPE}"]
     if scope.file.parent != workspace / _OPTIMIZATION:
         return [f"the optimization module is outside this workspace: {scope.file}"]
     return []
+
+
+def _placeholders(benchmark: Path) -> list[str]:
+    """Skeleton fields nobody filled in; they read as a valid block to anything but the validator."""
+    try:
+        scope = json.loads((benchmark / _SCOPE).read_text())
+    except (OSError, ValueError):
+        return []
+    return [
+        f"aoti.dynamic_dims[{index}].{key} is still the placeholder --aoti wrote"
+        for index, entry in enumerate(scope.get(_AOTI, {}).get("dynamic_dims", []))
+        if isinstance(entry, dict)
+        for key, value in sorted(entry.items())
+        if value is None
+    ]
+
+
+def _check_aoti(benchmark: Path) -> list[str]:
+    """Validate the declaration exactly as the campaign's own gate will."""
+    placeholders = _placeholders(benchmark)
+    if placeholders:
+        return placeholders
+    try:
+        aoti_config(str(benchmark))
+    except ValueError as exc:
+        return [str(exc)]
+    return []
+
+
+def _export_warnings(benchmark: Path) -> list[str]:
+    """Host conditions an export needs, reported but never fatal: a workspace may be prepared elsewhere."""
+    try:
+        config = aoti_config(str(benchmark))
+    except ValueError:
+        return []
+    if config is None or not config.enabled:
+        return []
+    warnings = []
+    tmpdir = Path(os.environ.get("TMPDIR") or "/tmp")
+    free_gb = shutil.disk_usage(tmpdir).free / 1e9 if tmpdir.is_dir() else 0
+    if free_gb < _EXPORT_BUILD_GB:
+        warnings.append(f"TMPDIR={tmpdir} has {free_gb:.0f} GB free; one export attempt writes about 10 GB")
+    rocm = Path(os.environ.get("ROCM_PATH") or "/opt/rocm")
+    if not (rocm / "include" / "hip" / "hip_runtime.h").is_file():
+        warnings.append(f"no ROCm development headers under {rocm}; building an export needs them")
+    return warnings
 
 
 def check(workspace: Path) -> int:
@@ -289,7 +442,10 @@ def check(workspace: Path) -> int:
         *_check_recorded_paths(workload),
         *_check_entrypoint(benchmark),
         *_check_scope(benchmark, workspace.resolve()),
+        *_check_aoti(benchmark),
     ]
+    for warning in _export_warnings(benchmark):
+        print(f"  warning: {warning}", file=sys.stderr)
     for problem in problems:
         print(f"  {problem}", file=sys.stderr)
     if problems:

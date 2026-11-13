@@ -60,6 +60,7 @@ RECORD = "record"
 MEASURE = "measure"
 INPUTS_DIR = "inputs"
 REFERENCES_DIR = "references"
+INPUTS_SUMMARY = "input_summary.json"
 OUT_DIR = "out"
 OUTPUTS_FILE = "outputs.pt"
 PERTURBATION = 1e-2
@@ -87,6 +88,43 @@ def _leaves(value) -> list[torch.Tensor]:
     leaves: list[torch.Tensor] = []
     _map_tensors(value, lambda tensor: leaves.append(tensor) or tensor)
     return leaves
+
+
+def _named_shapes(value, prefix: str) -> list[tuple[str, tuple]]:
+    """Every tensor's shape under the name the script spells it: a kwarg or dict key, else an index."""
+    if isinstance(value, torch.Tensor):
+        return [(prefix or "<positional>", tuple(value.shape))]
+    if isinstance(value, dict):
+        return [
+            pair
+            for key, item in value.items()
+            for pair in _named_shapes(item, f"{prefix}.{key}" if prefix else str(key))
+        ]
+    if isinstance(value, (list, tuple)):
+        return [pair for index, item in enumerate(value) for pair in _named_shapes(item, f"{prefix}[{index}]")]
+    return []
+
+
+def _input_summary(calls: list[dict]) -> list[dict]:
+    """What the recorded calls fed the model: one entry per input tensor, with the axes that varied.
+
+    `script prepare --aoti` prints this so an operator naming a dynamic dimension works from
+    what the model was actually given, rather than guessing at the wrapper's argument names.
+    """
+    seen: dict[str, list[tuple]] = {}
+    for call in calls:
+        for name, shape in [*_named_shapes(list(call["args"]), "args"), *_named_shapes(call["kwargs"], "")]:
+            seen.setdefault(name, []).append(shape)
+    summary = []
+    for name, shapes in seen.items():
+        varies = {}
+        if len({len(shape) for shape in shapes}) == 1:
+            for axis in range(len(shapes[0])):
+                sizes = sorted({shape[axis] for shape in shapes})
+                if len(sizes) > 1:
+                    varies[str(axis)] = [sizes[0], sizes[-1]]
+        summary.append({"name": name, "shape": list(shapes[0]), "varies": varies})
+    return summary
 
 
 def _snapshot(value):
@@ -304,6 +342,7 @@ def _finish_recording(recorder: _Recorder, config: dict, out: Path) -> None:
         ]
 
     references = {"recorded": [call.pop("output") for call in calls], "held_out": held_out_outputs()}
+    (out / INPUTS_SUMMARY).write_text(json.dumps(_input_summary(calls)) + "\n")
     (out / INPUTS_DIR).mkdir()
     (out / REFERENCES_DIR).mkdir()
     torch.save(calls, out / INPUTS_DIR / "calls.pt")
@@ -628,7 +667,8 @@ def record(directory: Path) -> dict:
     limits = _limits(config["tolerance"], store / REFERENCES_DIR)
     (store / REFERENCES_DIR / "limits.json").write_text(json.dumps(limits) + "\n")
     import_order = json.loads((store / "import_order.json").read_text())
-    return {"calls": len(limits), "rel_l2_limits": limits, "import_order": import_order}
+    inputs = json.loads((store / INPUTS_SUMMARY).read_text())
+    return {"calls": len(limits), "rel_l2_limits": limits, "import_order": import_order, "inputs": inputs}
 
 
 def _gate(errors: dict, limits: list[float], measurement: dict, timed_fraction: float) -> dict:
