@@ -29,9 +29,9 @@ _rank: dict = {}
 
 
 def _state(ctx: dh.RankContext) -> dict:
-    """Built once per rank: the peer buffer (exchanged over a gloo group), the layer, the warmed
-    runner, and the linear SGLang dispatches o_proj to. The launch's and the reference's modules
-    import here: the process that re-executes under torchrun never uses them."""
+    """Built once per rank, after checking SGLang's o_proj path: the peer buffer (exchanged over a
+    gloo group), the layer and the warmed runner. The launch's and the reference's modules import
+    here: the process that re-executes under torchrun never uses them."""
     if not _rank:
         import reference
         from runner import SeamRunner
@@ -40,15 +40,14 @@ def _state(ctx: dh.RankContext) -> dict:
 
         from qwen3_seam import seam
 
+        reference.check_sglang_path()
         peer = PeerBuffer(seam.peer_bytes(TP), dist.new_group(backend="gloo"), ctx.rank, TP, ctx.device)
         weights = random_layer(TP, ctx.rank, ctx.device, WEIGHT_SEED)
         runner = SeamRunner(
             TP, ctx.rank, peer.local, peer.addresses, ctx.device, sorted({*CHECK_WIDTHS, *BENCH_WIDTHS})
         )
         runner.warm(weights, torch.cuda.get_device_properties(ctx.device).multi_processor_count)
-        _rank.update(
-            seam=seam, reference=reference, peer=peer, weights=weights, runner=runner, linear=reference.o_proj_linear()
-        )
+        _rank.update(seam=seam, reference=reference, peer=peer, weights=weights, runner=runner)
     return _rank
 
 
@@ -70,7 +69,7 @@ def _candidate(ctx: dh.RankContext, inputs):
 
 def _reference(ctx: dh.RankContext, inputs):
     state = _state(ctx)
-    return state["reference"].seam(state["linear"], *inputs, state["weights"])
+    return state["reference"].seam(*inputs, state["weights"])
 
 
 def _judge(ctx: dh.RankContext, got, want) -> dh.Judgement:

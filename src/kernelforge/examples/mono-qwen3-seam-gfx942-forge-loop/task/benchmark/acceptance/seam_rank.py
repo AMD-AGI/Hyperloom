@@ -29,6 +29,7 @@ import torch.distributed as dist  # noqa: E402
 from judge import judge  # noqa: E402
 from ranks import (  # noqa: E402
     BACK_TO_BACK,
+    BACK_TO_BACK_SEEDS,
     BACK_TO_BACK_WIDTH,
     FAULT_WIDTH,
     LAUNCHES_UNDER_FAULT,
@@ -90,21 +91,21 @@ class Rank:
 
 def parity(widths: tuple[int, ...]) -> None:
     me = Rank("nccl", widths)
-    linear = reference.o_proj_linear()
+    reference.check_sglang_path()
     for s in widths:
         inputs = [me.inputs(s, seed) for seed in (1, 2)]
         got = [me.launch(x) for x in inputs]
         for call, (x, answer) in enumerate(zip(inputs, got, strict=True), start=1):
-            me.verdict(answer, reference.seam(linear, *x, me.weights), check="parity", width=s, call=call)
+            me.verdict(answer, reference.seam(*x, me.weights), check="parity", width=s, call=call)
     me.finish()
 
 
 def replay() -> None:
     me = Rank("nccl", (*REPLAY_WIDTHS, BACK_TO_BACK_WIDTH))
-    linear = reference.o_proj_linear()
+    reference.check_sglang_path()
 
     inputs = {s: me.inputs(s, 10 + s) for s in REPLAY_WIDTHS}
-    want = {s: reference.seam(linear, *inputs[s], me.weights) for s in REPLAY_WIDTHS}
+    want = {s: reference.seam(*inputs[s], me.weights) for s in REPLAY_WIDTHS}
     graphs, outs = {}, {}
     for s in REPLAY_WIDTHS:
         graphs[s] = torch.cuda.CUDAGraph()
@@ -118,14 +119,14 @@ def replay() -> None:
         for s in REPLAY_WIDTHS:
             me.verdict(outs[s], want[s], check="graph", round=round_, width=s)
 
-    pair = [me.inputs(BACK_TO_BACK_WIDTH, seed) for seed in (31, 32)]
-    pair_want = [reference.seam(linear, *x, me.weights) for x in pair]
+    turns = [me.inputs(BACK_TO_BACK_WIDTH, seed) for seed in BACK_TO_BACK_SEEDS]
+    turns_want = [reference.seam(*x, me.weights) for x in turns]
     torch.cuda.synchronize()
     start = int(me.runner.epoch[0]) & 0xFFFFFFFF
-    got = [me.launch(pair[i % 2]) for i in range(BACK_TO_BACK)]
+    got = [me.launch(turns[i % len(turns)]) for i in range(BACK_TO_BACK)]
     torch.cuda.synchronize()
     for i, answer in enumerate(got):
-        me.verdict(answer, pair_want[i % 2], check="back_to_back", launch=i)
+        me.verdict(answer, turns_want[i % len(turns)], check="back_to_back", launch=i)
     moved = ((int(me.runner.epoch[0]) & 0xFFFFFFFF) - start) % 2**32
     report(rank=me.rank, passed=moved == BACK_TO_BACK, check="epoch", moved=moved)
 
@@ -133,10 +134,10 @@ def replay() -> None:
     me.runner.set_epoch(WRAP_FROM)
     torch.cuda.synchronize()
     dist.barrier()
-    got = [me.launch(pair[i % 2]) for i in range(WRAP_LAUNCHES)]
+    got = [me.launch(turns[i % len(turns)]) for i in range(WRAP_LAUNCHES)]
     torch.cuda.synchronize()
     for i, answer in enumerate(got):
-        me.verdict(answer, pair_want[i % 2], check="wrap", launch=i, epoch=(WRAP_FROM + i) % 2**32)
+        me.verdict(answer, turns_want[i % len(turns)], check="wrap", launch=i, epoch=(WRAP_FROM + i) % 2**32)
     after = int(me.runner.epoch[0]) & 0xFFFFFFFF
     report(rank=me.rank, passed=after == (WRAP_FROM + WRAP_LAUNCHES) % 2**32, check="wrap_epoch", epoch=after)
     me.finish()

@@ -22,9 +22,11 @@ WORKER = Path(__file__).with_name("seam_rank.py")
 REPLAY_WIDTHS = (1, 4, 16)
 REPLAY_ORDER = (1, 4, 16, 16, 4, 1, 4, 1, 16)
 REPLAY_ROUNDS = 3
-# launches issued back to back, two inputs alternating
+# launches issued back to back, three inputs in turn: a mailbox half still holds the launch two
+# before, so that launch's answer must not be the current one
 BACK_TO_BACK = 24
 BACK_TO_BACK_WIDTH = 8
+BACK_TO_BACK_SEEDS = (31, 32, 33)
 # launches from the epoch below, across its wrap to 0
 WRAP_FROM = 2**32 - 3
 WRAP_LAUNCHES = 6
