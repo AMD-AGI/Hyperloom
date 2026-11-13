@@ -259,16 +259,16 @@ class CardReading:
 
     def _crowded(self, own: OwnProcesses) -> tuple[Intrusion, ...]:
         """Cards with a holder of memory that is not the test's own. The kernel's ids cannot be matched, so the holders are
-        counted against the test's processes with memory on the card's render node (:meth:`_render_users`, the same ones
-        the record names as the test's): those are one resident, the server's launcher and every process under it
-        included, and every holder beyond them is not the test's. One holder is allowed when none of them is seen."""
+        counted against the test's own render clients on the card (:meth:`_own_clients`): each is one holder the kernel
+        may list for the test, the server's launcher and every process under it included, and every holder beyond them
+        is not the test's. One holder is allowed when none of them is seen."""
         found = []
         for card in sorted(self.held_cards()):
             resident = [holder for holder in self.holders if holder.card == card and _has_memory(holder)]
             if len(resident) <= 1:
                 continue
             users = self._render_users(card, own)
-            if len(resident) <= max(1, len({user.pid for user in users if user.own})):
+            if len(resident) <= max(1, self._own_clients(card, own)):
                 continue
             named = ", ".join(f"host pid {h.pid} with {h.vram / _GIB:.1f} GiB" for h in resident)
             found.append(
@@ -279,6 +279,20 @@ class CardReading:
                 )
             )
         return tuple(found)
+
+    def _own_clients(self, card: int, own: OwnProcesses) -> int:
+        """How many open DRM files with more than almost no memory on ``card``'s render node are the test's: any of their
+        processes is ``own``'s. Each once, however many processes share it: a child forked after its parent opened the
+        GPU shares the parent's file, and the kernel lists no holder of its own for it."""
+        if self.method != METHOD_CENSUS_FDINFO:
+            return 0
+        return sum(
+            1
+            for client in self.render_clients
+            if client.card == card
+            and client.vram > NEGLIGIBLE_VRAM
+            and any(own.owns(pid) for pid, _ in client.processes)
+        )
 
     def _render_users(self, card: int, own: OwnProcesses) -> tuple[_RenderUser, ...]:
         """The processes of this container with more than almost no memory (:data:`NEGLIGIBLE_VRAM`) on ``card``'s render

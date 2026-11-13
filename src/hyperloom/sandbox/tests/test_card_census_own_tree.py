@@ -124,13 +124,45 @@ def test_another_rounds_launcher_on_this_rounds_card_is_not_this_rounds_own_and_
 
 
 def test_a_second_rank_of_the_tests_server_on_the_card_is_still_part_of_one_resident(tmp_path: Path) -> None:
-    """A second rank of the same server (a descendant of the launcher) with memory on the card too: three residents, all
-    the test's own, still one."""
+    """A second rank of the same server (a descendant of the launcher) with its own open DRM file and memory on the card
+    too: three residents against three own render clients, all the test's, still one."""
     tree = _pod(tmp_path)
     own = _own_round(tree)
     tree.process(642891, parent=641919, command=("sglang::scheduler_TP1_EP1",))
     tree.holds(3658437, _CARD, vram=1 << 30, queues=1)
     tree.renders(642891, _CARD, kib=1 << 20)
+
+    reading = read_holders([_CARD], kfd=tree.kfd, procfs=tree.procfs)
+
+    assert _keys(reading, own) == []
+
+
+def test_a_child_sharing_its_parents_render_file_adds_no_allowance_and_a_foreign_holder_still_crowds_the_card(
+    tmp_path: Path,
+) -> None:
+    """A child the rank forked after opening the GPU shares the rank's open DRM file and has no holder of its own in the
+    kernel's list: the test's own render clients are still two, so a process outside the pod with memory and queues on
+    the card is a third resident."""
+    tree = _pod(tmp_path)
+    own = _own_round(tree)
+    tree.process(642999, parent=642890, command=("python3", "-c", "worker"))
+    tree.renders(642999, _CARD, kib=_RANK_POD_KIB, client="642890-3")
+    tree.holds(3700001, _CARD, vram=_FOREIGN_VRAM, queues=2)
+
+    reading = read_holders([_CARD], kfd=tree.kfd, procfs=tree.procfs)
+
+    assert [c.processes for c in reading.render_clients if c.card == _CARD and len(c.processes) > 1] == [
+        ((642890, "sglang::scheduler_TP0_EP0"), (642999, "python3 -c worker"))
+    ]
+    assert _keys(reading, own) == [("crowded", _CARD)]
+
+
+def test_a_child_sharing_its_parents_render_file_alone_leaves_the_card_clean(tmp_path: Path) -> None:
+    """The same forked child without a foreign holder: two kernel holders, two own render clients."""
+    tree = _pod(tmp_path)
+    own = _own_round(tree)
+    tree.process(642999, parent=642890, command=("python3", "-c", "worker"))
+    tree.renders(642999, _CARD, kib=_RANK_POD_KIB, client="642890-3")
 
     reading = read_holders([_CARD], kfd=tree.kfd, procfs=tree.procfs)
 
