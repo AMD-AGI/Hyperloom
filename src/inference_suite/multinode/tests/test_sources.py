@@ -146,6 +146,18 @@ def test_lookup_finds_variants_no_master_entry_names(checkout):
     assert all(c.kind is PdSourceKind.INFERENCEX_LOOKUP and c.warnings for c in found.found)
 
 
+def test_a_bare_repo_name_finds_the_master_row_inferencex_names_it_by(checkout):
+    found = master_candidates(_query(model_id="M"), checkout)
+    assert [c.entry for c in found.found] == ["m-fp8-mi355x-sglang-disagg[0]"]
+    assert "InferenceX names M org/M" in found.found[0].warnings
+
+
+def test_a_bare_repo_name_finds_the_lookup_recipes(checkout):
+    found = lookup_candidates(_query(decode=2, model_id="m"), checkout)
+    assert [c.locator for c in found.found] == ["zip_override_1p2d[0]", "zip_override_1p2d[1]"]
+    assert all("InferenceX names m org/M" in c.warnings for c in found.found)
+
+
 def test_resolve_prefers_master_and_strips_runner_owned(checkout):
     launch = resolve(_query(), ResolveInputs(inferencex=lambda: checkout))
     assert launch.source.kind is PdSourceKind.INFERENCEX_MASTER
