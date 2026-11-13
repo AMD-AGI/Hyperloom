@@ -13,8 +13,11 @@ prompt length that weights the prefill window is what the server computed of a r
 The mean prompt tokens per request are the baseline's input throughput x duration / completed requests, its output tokens
 per request the same of its output throughput (each figure the mean over its measured rounds, as the baseline records
 it). The hit rate is the share of the prompt tokens the server looked up in its prefix cache that it found there, summed
-over the measured phase of each measuring round the baseline tests landed (``kv_metrics.json``, vLLM's
-``prefix_cache_queries`` and ``prefix_cache_hits`` counters). A baseline whose rounds record no such split (SGLang counts
+over the measured phase of each measuring round the baseline tests landed (the ``kv_metrics.json`` in the round's
+inference_suite run_dir, vLLM's ``prefix_cache_queries`` and ``prefix_cache_hits`` counters). The measuring rounds are
+the ones the runner's ``rounds.json`` lists in the ``measure`` phase; a test landed without that list is read from the
+grid's layout, every run_dir of a variant slot other than a held test's warm-up and evaluation slots (a warm-up run
+nested in a slot sits a level further down, in ``warmup_round/``, and is not one of the slot's run_dirs). A baseline whose rounds record no such split (SGLang counts
 the tokens it found, not those it looked up) is weighted by the mean prompt tokens per request, which counts the cached
 prefix as prefill work, and the source says so. A baseline without these figures gives no lengths, and the mix stays
 degraded: a length is never guessed.
@@ -29,11 +32,17 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from hyperloom.common.perf_metric import GRADED_DURATION, GRADED_OUTPUT
+from hyperloom.measure.round_marks import ROLE_EVAL, ROLE_MEASURE, ROLE_WARMUP
+from hyperloom.measure.runner.rounds import ROUNDS_FILE
+from hyperloom.orchestrator.actions.executors._grid_runner import variant_slot
+from hyperloom.orchestrator.actions.executors._round_folder import is_round_folder
 from hyperloom_multibranch.toolbox.tools.phase_mix import MEASURED_ISL_KEY, MEASURED_OSL_KEY, MEASURED_SOURCE_KEY
-from inference_suite.contracts.layout import KV_METRICS
+from inference_suite.contracts import RunLayout
 
-#: The KV-cache record of each measuring round in a test's landed directory; a warm-up round's lies a level further down.
-ROUND_KV_METRICS_GLOB = f"variant_*/{KV_METRICS}"
+#: The variant slots ``run_grid`` makes in a test's landed directory (:func:`variant_slot`).
+_SLOT_GLOB = "variant_*"
+#: The slots of a held test's rounds that do not measure: its warm-up round's and its evaluation round's.
+_UNMEASURED_SLOTS = frozenset(variant_slot(Path(), 0, role).name for role in (ROLE_WARMUP, ROLE_EVAL))
 #: The baseline's mean prompt tokens per second and completed requests, as its measured rounds report them.
 INPUT_THROUGHPUT, COMPLETED_REQUESTS = "input_throughput", "completed_requests"
 #: Where ``kv_metrics.json`` keeps the prefix-cache counters' increments over the round's measured phase.
@@ -68,14 +77,48 @@ def _round_counts(path: Path) -> PrefixCacheReading | None:
     return PrefixCacheReading(float(counts[0]), float(counts[1]))
 
 
+def _listed_run_dirs(landed: Path, listing: Path) -> list[Path]:
+    """The run_dirs of the measuring rounds the runner's ``listing`` names, inside ``landed``; none when it is unreadable."""
+    try:
+        if listing.stat().st_size > _KV_MAX_BYTES:
+            return []
+        entries = json.loads(listing.read_text(encoding=_ENCODING))
+    except (OSError, ValueError):
+        return []
+    root, found = landed.resolve(), []
+    for entry in entries if isinstance(entries, list) else ():
+        if not isinstance(entry, dict) or entry.get("phase") != ROLE_MEASURE or not isinstance(entry.get("dir"), str):
+            continue
+        run_dir = (landed / entry["dir"]).resolve()
+        if run_dir.is_relative_to(root) and run_dir not in found:
+            found.append(run_dir)
+    return found
+
+
+def _laid_out_run_dirs(landed: Path) -> list[Path]:
+    """The run_dirs of the measuring rounds in the grid's layout below ``landed``, for a test landed without a listing."""
+    slots = [slot for slot in sorted(landed.glob(_SLOT_GLOB)) if slot.name not in _UNMEASURED_SLOTS and slot.is_dir()]
+    return [run_dir for slot in slots for run_dir in sorted(slot.iterdir()) if is_round_folder(run_dir)]
+
+
+def measuring_run_dirs(landed: Path) -> list[Path]:
+    """The inference_suite run_dirs of the measuring rounds of the test landed in ``landed``: those its ``rounds.json``
+    lists in the ``measure`` phase, else those of its variant slots that measure."""
+    try:
+        listing = landed / ROUNDS_FILE
+        return _listed_run_dirs(landed, listing) if listing.is_file() else _laid_out_run_dirs(landed)
+    except OSError:
+        return []
+
+
 def prefix_cache_reading(landed: Iterable[Path]) -> PrefixCacheReading | None:
-    """The prefix-cache counts of every measuring round below the ``landed`` test directories that records them, summed;
+    """The prefix-cache counts of every measuring round of the ``landed`` test directories that records them, summed;
     ``None`` when none does, or when the sums are no split of the prompt (no lookup, a hit past it, no token computed)."""
     rounds = [
         counts
         for directory in landed
-        for path in sorted(directory.glob(ROUND_KV_METRICS_GLOB))
-        if (counts := _round_counts(path)) is not None
+        for run_dir in measuring_run_dirs(directory)
+        if (counts := _round_counts(RunLayout(run_dir).kv_metrics)) is not None
     ]
     queried, hit = math.fsum(c.queried for c in rounds), math.fsum(c.hit for c in rounds)
     return PrefixCacheReading(queried, hit) if 0 <= hit < queried else None
@@ -114,5 +157,6 @@ def baseline_lengths(values: Mapping[str, float], cache: PrefixCacheReading | No
 __all__ = [
     "PrefixCacheReading",
     "baseline_lengths",
+    "measuring_run_dirs",
     "prefix_cache_reading",
 ]
