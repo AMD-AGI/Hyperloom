@@ -6,7 +6,14 @@ from dataclasses import replace
 import pytest
 
 from hyperloom.common.gain_math import ACCURACY_METRICS, AGENTX_ERROR_RATE_THRESHOLD_PCT
-from hyperloom.common.perf_metric import GRADED_ERROR_RATE, GRADED_INTVTY_P50, GRADED_OUTPUT
+from hyperloom.common.perf_metric import (
+    GRADED_DURATION,
+    GRADED_ERROR_RATE,
+    GRADED_INTVTY,
+    GRADED_INTVTY_P50,
+    GRADED_OUTPUT,
+    TOTAL_TOKEN_THROUGHPUT,
+)
 from hyperloom.contracts.long_context import (
     LongContextResult,
     LongContextRoot,
@@ -277,3 +284,86 @@ def test_a_test_counts_as_a_retraction_only_when_both_forced_checks_ran_to_the_e
 )
 def test_an_agentx_retraction_counts_with_its_checks_incomplete_since_an_agentx_test_cannot_run_them(record, counts):
     assert retracts(record, AgentXRule(AgentXObjective.P50_INTERACTIVITY)) is counts
+
+
+AGENTX_PARENT = {
+    GRADED_INTVTY_P50: 100.0,
+    GRADED_INTVTY: 80.0,
+    GRADED_DURATION: 600.0,
+    GRADED_ERROR_RATE: 0.2,
+    TOTAL_TOKEN_THROUGHPUT: 5000.0,
+}
+#: A P50 gain past the bar with its P90 guard broken beyond any noise band: a gain held back for a retest.
+GUARD_BROKEN = {GRADED_INTVTY_P50: 106.0, GRADED_INTVTY: 60.0}
+
+
+def _agentx_test(purpose, long_context, *, changes=None, request_id="r1", retest_of=None) -> TestRecord:
+    """An AgentX test whose P50 clears the bar over ``AGENTX_PARENT`` unless ``changes`` say otherwise."""
+    asked = replace(request(request_id, intent("s1", "c0")), purpose=purpose, retest_of=retest_of)
+    rounds = (RoundValue("measure", 8, {**AGENTX_PARENT, GRADED_INTVTY_P50: 104.0, **(changes or {})}),)
+    return TestRecord(asked, replace(result(request_id), rounds=rounds, long_context=long_context))
+
+
+@pytest.mark.parametrize("purpose", [Purpose.INTEGRATION, Purpose.FINAL])
+@pytest.mark.parametrize(
+    ("check", "accuracy"),
+    [
+        (_long_context(64), AccuracyVerdict.PASSED),
+        (_long_context(58), AccuracyVerdict.PASSED),
+        (_long_context(57), AccuracyVerdict.FAILED),
+        (_long_context(63, errored=1), AccuracyVerdict.NOT_MEASURED),
+        (_long_context(64, root=None), AccuracyVerdict.NOT_MEASURED),
+        (_long_context(64, sha="b" * 64), AccuracyVerdict.NOT_MEASURED),
+        (None, AccuracyVerdict.NOT_MEASURED),
+    ],
+    ids=["clean", "at-the-bar", "below-the-bar", "incomplete", "no-root-reading", "another-prompt-set", "no-check"],
+)
+async def test_an_agentx_merge_or_final_test_passes_accuracy_only_on_a_complete_long_context_check_without_a_drop(
+    purpose, check, accuracy
+):
+    rule = AgentXRule(AgentXObjective.P50_INTERACTIVITY)
+    record = _agentx_test(purpose, check)
+
+    assert (await rule.first(record, AGENTX_PARENT)).accuracy is accuracy
+    assert await rule.accuracy_passes(record) is (accuracy is AccuracyVerdict.PASSED)
+
+
+@pytest.mark.parametrize(
+    ("changes", "refused_by"),
+    [(None, (LONG_CONTEXT_DROPPED,)), (GUARD_BROKEN, ("p90_regressed", LONG_CONTEXT_DROPPED))],
+    ids=["gain", "gain-held-by-a-guard"],
+)
+async def test_an_agentx_merge_test_whose_long_context_check_drops_regresses_with_no_retest(changes, refused_by):
+    record = _agentx_test(Purpose.INTEGRATION, _long_context(57), changes=changes)
+
+    judgement = await AgentXRule(AgentXObjective.P50_INTERACTIVITY).first(record, AGENTX_PARENT)
+
+    assert (judgement.verdict, judgement.refused_by) == (Verdict.REGRESSED, refused_by)
+
+
+async def test_an_agentx_explore_is_held_to_its_error_rate_whatever_its_long_context_check_shows():
+    record = _agentx_test(Purpose.EXPLORE, _long_context(57))
+
+    judgement = await AgentXRule(AgentXObjective.P50_INTERACTIVITY).first(record, AGENTX_PARENT)
+
+    assert (judgement.verdict, judgement.accuracy, judgement.refused_by) == (
+        Verdict.IMPROVED,
+        AccuracyVerdict.PASSED,
+        (),
+    )
+
+
+@pytest.mark.parametrize(
+    ("check", "accuracy"),
+    [(_long_context(64), AccuracyVerdict.PASSED), (_long_context(63, errored=1), AccuracyVerdict.NOT_MEASURED)],
+    ids=["checked", "check-incomplete"],
+)
+async def test_the_retest_of_an_agentx_merge_test_keeps_the_accuracy_its_long_context_check_gave(check, accuracy):
+    rule = AgentXRule(AgentXObjective.P50_INTERACTIVITY)
+    first = await rule.first(_agentx_test(Purpose.INTEGRATION, check, changes=GUARD_BROKEN), AGENTX_PARENT)
+    assert (first.verdict, first.accuracy) == (Verdict.NEEDS_CONFIRM, accuracy)
+
+    retest = _agentx_test(Purpose.CONFIRM, None, changes=GUARD_BROKEN, request_id="r2", retest_of="r1")
+    settled = await rule.retest(first, retest, AGENTX_PARENT)
+
+    assert (settled.verdict, settled.accuracy) == (Verdict.BLOCKED, accuracy)

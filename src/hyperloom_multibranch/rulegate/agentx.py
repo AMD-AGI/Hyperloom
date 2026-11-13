@@ -2,12 +2,13 @@
 # SPDX-License-Identifier: MIT
 
 """The AgentX rule: a bar on the session's objective, P50 interactivity unless the session names total token
-throughput, and the objective's two guards, retested only when they block a gain."""
+throughput, and the objective's two guards, retested only when they block a gain. A test the long-context check gates
+(a merge's, FINAL's) is accurate on that check; any other on its request error rate."""
 
 from __future__ import annotations
 
 from collections.abc import Mapping
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 
 from hyperloom.common.agentx_objective import (
     BELOW_THRESHOLD,
@@ -31,9 +32,11 @@ from hyperloom.common.perf_metric import (
     holds_within_band,
     incomparability_reason,
 )
+from hyperloom.contracts.long_context import LONG_CONTEXT_COMPLETE, LongContextResult, refuses
 from hyperloom.contracts.measurement import AgentxCheckpointRuling
 from hyperloom_multibranch.contracts.judgement import AccuracyVerdict, Judgement, Verdict
 from hyperloom_multibranch.rulegate.accuracy import agentx_accuracy_ok
+from hyperloom_multibranch.rulegate.inferencex import LONG_CONTEXT_DROPPED
 from hyperloom_multibranch.rulegate.readings import GRADED_SHORT_REQUESTS
 
 #: The refusal of a candidate the AgentX checkpoint stopped: its ``gain_pct`` is the checkpoint's, over the first
@@ -166,6 +169,31 @@ def trailed(ruling: AgentxCheckpointRuling, request_id: str, objective: AgentXOb
     )
 
 
+def long_context_accuracy(check: LongContextResult | None) -> AccuracyVerdict:
+    """The accuracy of a test the long-context check gates: failed on a drop below the root's reading beyond the check's
+    noise, passed on a complete check on the root's prompt set without one, and not measured otherwise."""
+    root = None if check is None else check.root
+    if refuses(check, root):
+        return AccuracyVerdict.FAILED
+    graded = (
+        check is not None
+        and root is not None
+        and check.status == LONG_CONTEXT_COMPLETE
+        and check.prompt_set_sha256 == root.prompt_set_sha256
+    )
+    return AccuracyVerdict.PASSED if graded else AccuracyVerdict.NOT_MEASURED
+
+
+def held_to_long_context(judgement: Judgement, check: LongContextResult | None) -> Judgement:
+    """``judgement`` with the accuracy of the long-context check that gates its test; a drop regresses it, so no retest
+    is asked for it."""
+    accuracy = long_context_accuracy(check)
+    if accuracy is AccuracyVerdict.FAILED:
+        refused_by = (*judgement.refused_by, LONG_CONTEXT_DROPPED)
+        return replace(judgement, verdict=Verdict.REGRESSED, accuracy=accuracy, refused_by=refused_by)
+    return replace(judgement, accuracy=accuracy)
+
+
 def partial_window(judgement: Judgement) -> bool:
     """Whether ``judgement``'s gain covers the checkpoint's window only, not a full measurement."""
     return CHECKPOINT_TRAILED in judgement.refused_by
@@ -179,10 +207,16 @@ def confirm(
     objective: AgentXObjective,
 ) -> Judgement:
     """Settles a gain on ``objective`` held back by a defect: blocked when the retest shows the gain and a defect again,
-    so the specialist diagnoses it for a repair; inconclusive, and only recorded, when it does not."""
+    so the specialist diagnoses it for a repair; inconclusive, and only recorded, when it does not. A first measurement
+    whose accuracy was not measured stays so: the retest runs no long-context check."""
     if first.verdict is not Verdict.NEEDS_CONFIRM:
         raise ValueError(f"only a provisional judgement is retested, not a {first.verdict.value} one")
     reading = _read(retest, parent, objective)
+    accuracy = (
+        first.accuracy
+        if first.accuracy is AccuracyVerdict.NOT_MEASURED
+        else AccuracyVerdict.measured(first.accuracy is AccuracyVerdict.PASSED and reading.accuracy_ok)
+    )
     recorded = {
         key: (value + first.recorded_value[key]) / 2.0
         for key, value in _recorded(retest).items()
@@ -194,7 +228,7 @@ def confirm(
         objective.bar_pct,
         (*first.request_ids, request_id),
         recorded,
-        AccuracyVerdict.measured(first.accuracy is not AccuracyVerdict.FAILED and reading.accuracy_ok),
+        accuracy,
         tuple(dict.fromkeys((*first.refused_by, *reading.refused_by))),
     )
 
@@ -209,6 +243,8 @@ __all__ = [
     "Guard",
     "compare",
     "confirm",
+    "held_to_long_context",
+    "long_context_accuracy",
     "partial_window",
     "trailed",
 ]
