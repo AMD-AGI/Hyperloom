@@ -39,11 +39,22 @@ _TRAJECTORY_STATUS: dict[str, str] = {
     "cancelled": STATUS_CANCELLED,
 }
 
+_FAILED = "failed"
+
 # Progress notes a task's ``history`` retains, oldest dropped first.
 _MAX_PROGRESS_NOTES = 120
 _DISPATCH_CLASSES = frozenset({"llm", "coordinator", "inline"})
 _QUEUED_SQL = "SELECT * FROM tasks WHERE state='queued' ORDER BY created_at ASC"
 _RUNNING_SQL = "SELECT * FROM tasks WHERE state='running' ORDER BY updated_at ASC"
+_LEASED_RUNNING_SQL = (
+    "SELECT t.task_id, t.kind, l.pid, l.owner_scope, l.expires_at, "
+    "(SELECT 1 FROM gpu_leases g WHERE g.task_id = t.task_id LIMIT 1) AS holds_gpu "
+    "FROM tasks t JOIN leases l ON l.task_id = t.task_id WHERE t.state='running'"
+)
+_RUNNING_TASK_LEASES_SQL = (
+    "SELECT t.history, l.pid, l.owner_scope, l.expires_at "
+    "FROM tasks t JOIN leases l ON l.task_id = t.task_id WHERE t.task_id=? AND t.state='running'"
+)
 
 
 @dataclass(frozen=True)
@@ -380,6 +391,16 @@ def _cancel_queued_row(cur: Any, task_id: str, history_json: str, *, now: str, r
     )
 
 
+def _fail_running_row(cur: Any, task_id: str, history_json: str, evidence: dict[str, Any], now: str) -> None:
+    """Move one running row to ``failed`` with ``evidence`` inside the caller's transaction."""
+    history = json.loads(history_json)
+    history.append({"from": "running", "to": _FAILED, "ts": now, "evidence": evidence})
+    cur.execute(
+        "UPDATE tasks SET state='failed', history=?, updated_at=? WHERE task_id=?",
+        (json.dumps(history), now, task_id),
+    )
+
+
 class TaskRegistry:
     """State machine + persistence layer for delegated tasks."""
 
@@ -579,25 +600,49 @@ class TaskRegistry:
                 if not all(SqliteLeaseBackend.holder_is_dead(row) for row in rows):
                     continue
                 pid = int(rows[0]["pid"])
-                history_json = rows[0]["history"]
-                history = json.loads(history_json)
-                history.append(
-                    {
-                        "from": "running",
-                        "to": "failed",
-                        "ts": ts_now,
-                        "evidence": {"reason": reason, "dead_pid": pid},
-                    }
-                )
-                cur.execute(
-                    "UPDATE tasks SET state='failed', history=?, updated_at=? WHERE task_id=?",
-                    (json.dumps(history), ts_now, task_id),
-                )
+                _fail_running_row(cur, task_id, rows[0]["history"], {"reason": reason, "dead_pid": pid}, ts_now)
                 reclaimed.append(task_id)
                 reclaimed_rows.append((task_id, rows[0]["kind"], pid))
         for task_id, kind, pid in reclaimed_rows:
-            _record_task_state(task_id, kind, "failed", reason=reason, dead_pid=pid)
+            _record_task_state(task_id, kind, _FAILED, reason=reason, dead_pid=pid)
         return reclaimed
+
+    async def reclaim_lapsed_running(
+        self, *, quiet: Callable[[str, str], bool], now_unix: float, reason: str
+    ) -> list[str]:
+        """Fail the running tasks this process executes whose lease ran out unrenewed and whose executor ``quiet``
+        ``(task_id, kind)`` says has stopped showing life, and give their lanes back.
+
+        A task holding GPU cards is left to the operator, as :meth:`SqliteLeaseBackend.reap_dead_holders` leaves it.
+        ``quiet`` may read the filesystem, so it is asked outside the transaction, which fails a row only while it is
+        still running and no lease of it has been renewed since.
+        """
+        rows = await self.db.fetchall(_LEASED_RUNNING_SQL)
+        holders: dict[str, list] = {}
+        for row in rows:
+            holders.setdefault(row["task_id"], []).append(row)
+        candidates = [
+            (task_id, rows[0]["kind"])
+            for task_id, rows in holders.items()
+            if not any(row["holds_gpu"] for row in rows)
+            and all(SqliteLeaseBackend.lapsed_in_process(row, now_unix=now_unix) for row in rows)
+        ]
+        lapsed = [(task_id, kind) for task_id, kind in candidates if quiet(task_id, kind)]
+        reclaimed: list[tuple[str, str]] = []
+        async with self.db.transaction() as cur:
+            ts_now = now_iso()
+            for task_id, kind in lapsed:
+                cur.execute(_RUNNING_TASK_LEASES_SQL, (task_id,))
+                leased = cur.fetchall()
+                if not leased or not all(SqliteLeaseBackend.lapsed_in_process(r, now_unix=now_unix) for r in leased):
+                    continue
+                evidence = {"reason": reason, "lease_expired_at": max(str(r["expires_at"]) for r in leased)}
+                _fail_running_row(cur, task_id, leased[0]["history"], evidence, ts_now)
+                cur.execute("DELETE FROM leases WHERE task_id=?", (task_id,))
+                reclaimed.append((task_id, kind))
+        for task_id, kind in reclaimed:
+            _record_task_state(task_id, kind, _FAILED, reason=reason)
+        return [task_id for task_id, _kind in reclaimed]
 
     async def cancel_family(
         self,

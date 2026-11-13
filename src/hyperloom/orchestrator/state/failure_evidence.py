@@ -47,6 +47,16 @@ SUBPROCESS_NONZERO: str = "subprocess_nonzero"
 # The error class of a round that exited nonzero and left no usable measurement behind.
 ROUND_NONZERO_INVALID_MEASUREMENT: str = "round_nonzero_invalid_measurement"
 SERVER_INIT_DEAD: str = "server_init_dead"
+SERVER_DIED: str = FailedStep.SERVER_DIED.value
+# A server that was serving until vLLM's engine gave up waiting on one model step (``RPC call to <method> timed out``
+# from its multiproc executor); a worker stalled mid-step rather than the boot failing.
+ENGINE_EXECUTE_TIMEOUT: str = "engine_execute_timeout"
+ENGINE_EXECUTE_TIMEOUT_HINT: str = (
+    "hint: the server was serving when one model step outran VLLM_EXECUTE_MODEL_TIMEOUT_SECONDS (300s unless the "
+    "launch sets it) and vLLM shut the engine down; the 'No available shared memory broadcast block' lines before it "
+    "are the workers stalling. The same launch stalls the same way: raise VLLM_EXECUTE_MODEL_TIMEOUT_SECONDS only when "
+    "the step is genuinely that slow, otherwise find what the step waits on."
+)
 DETOKENIZER_STALL: str = "detokenizer_stall"
 BENCHMARK_REPORT_MISSING: str = "benchmark_report_missing"
 YAML_BUILD_ERROR: str = "yaml_build_error"
@@ -73,7 +83,7 @@ FAILED_STEP_ERROR_CLASSES: Mapping[FailedStep, str] = {
     FailedStep.SERVER_SILENT_BEFORE_READY: FailedStep.SERVER_SILENT_BEFORE_READY.value,
     FailedStep.SERVER_BOOT_TIMEOUT: FailedStep.SERVER_BOOT_TIMEOUT.value,
     FailedStep.SERVER_STALLED: DETOKENIZER_STALL,
-    FailedStep.SERVER_DIED: FailedStep.SERVER_DIED.value,
+    FailedStep.SERVER_DIED: SERVER_DIED,
     FailedStep.CLIENT_FAILED: FailedStep.CLIENT_FAILED.value,
     FailedStep.CLIENT_OUTPUT_MISSING: BENCHMARK_REPORT_MISSING,
     FailedStep.EVAL_FAILED: FailedStep.EVAL_FAILED.value,
@@ -137,6 +147,8 @@ _SERVER_DEATH_EVIDENCE_RE = re.compile(
     r"exited\s+(?:before\s+becoming\s+healthy|during\s+its\s+health\s+check)|ray_actor_error",
     re.IGNORECASE,
 )
+# What vLLM's multiproc executor raises when its workers return nothing for one call within the timeout.
+_EXECUTE_RPC_TIMEOUT_RE = re.compile(r"RPC call to \w+ timed out")
 _CANDIDATE_EVIDENCE_RE = re.compile(
     r"unrecogni[sz]ed\s+(?:argument|option)"
     r"|unknown\s+(?:argument|option)"
@@ -192,6 +204,16 @@ _SIGNATURE_VOLATILE_RE = re.compile(r"0x[0-9a-f]+|[0-9a-f]{8,}|\d+")
 _SIGNED_FAILURE_CLASSES = frozenset(
     {SUBPROCESS_NONZERO, ROUND_NONZERO_INVALID_MEASUREMENT, FailedStep.CLIENT_FAILED.value}
 )
+
+
+def server_death_class(detail: str) -> str:
+    """The class of a server that died after it was ready, as the death excerpt in ``detail`` names it."""
+    return ENGINE_EXECUTE_TIMEOUT if _EXECUTE_RPC_TIMEOUT_RE.search(detail) else SERVER_DIED
+
+
+def with_failure_hint(error_class: str, error: str) -> str:
+    """``error``, followed by what a failure of ``error_class`` needs said that its excerpt does not say."""
+    return f"{error}\n{ENGINE_EXECUTE_TIMEOUT_HINT}" if error_class == ENGINE_EXECUTE_TIMEOUT else error
 
 
 def tail_excerpt(value: Any, *, limit: int = 1200) -> str | None:
@@ -268,7 +290,8 @@ def classify_root_cause_type(error_class: str, error_text: str) -> str:
     merely mentions a worker or NCCL is startup chatter, so neither is a crash:
     without evidence of a process dying the answer is ``unknown``, which leaves
     the excerpt as the headline rather than replacing it with a diagnosis the
-    run then acts on.
+    run then acts on. A server that died after it was ready died serving, however
+    its log names the engine core, so it is never ``engine_core_init``.
     """
     blob = f"{error_class} {error_text}".lower()
     if error_class == "kv_cache_oom" or any(m in blob for m in KV_CACHE_OOM_MARKERS):
@@ -277,6 +300,10 @@ def classify_root_cause_type(error_class: str, error_text: str) -> str:
         return "oom"
     if error_class == "timeout" or "benchmark exceeded" in blob:
         return "benchmark_timeout"
+    if error_class == ENGINE_EXECUTE_TIMEOUT:
+        return ENGINE_EXECUTE_TIMEOUT
+    if error_class == SERVER_DIED:
+        return "engine_runtime_death"
     if (
         error_class == SERVER_INIT_DEAD
         or "engine core" in blob

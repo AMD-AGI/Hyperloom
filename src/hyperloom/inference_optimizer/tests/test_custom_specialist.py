@@ -702,7 +702,6 @@ def _framework(*, rounds, queued=(), running=(), phase_done=False):
     state.specialist_rounds = list(rounds)
     state.framework_agent_phase_done = phase_done
     dispatcher = SimpleNamespace(
-        admission_frozen=False,
         dispatch_paused_for_phase_budget=lambda: False,
         registry_lanes_ttl=lambda kind: (["benchmark_lane"], 1800),
     )

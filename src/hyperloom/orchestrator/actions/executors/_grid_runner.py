@@ -1181,7 +1181,7 @@ def _abort_on_invalid_measurement(run: _GridRun, at: _VariantSlot, outcome: _Var
         slot=at.path,
     )
     if (step_class := failed_step_class(outcome.measurement)) is not None:
-        found = found._replace(error_class=step_class)
+        found = RoundError(failure_evidence.with_failure_hint(step_class, found.summary), step_class)
     log.warning(
         "grid_runner: variant %s aborted: %s (rc=%s): %s",
         _variant_tag(run, at),

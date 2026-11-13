@@ -157,11 +157,11 @@ async def test_accounting_is_idempotent_per_task(session_dir):
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize(("result_owed", "streak"), [(False, 1), (True, 0)])
-async def test_a_reaped_discovery_round_settles_once(session_dir, monkeypatch, result_owed, streak):
+@pytest.mark.parametrize("result_owed", [False, True])
+async def test_a_reaped_discovery_round_settles_once(session_dir, monkeypatch, result_owed):
     """An orphaned discovery round settles as failed, or the pump re-fetches it as in flight for the whole phase.
 
-    A round whose execution still owes a result is left to the reap of that result.
+    It settles at the reclaim even while an execution still owes a result: a late result is dropped, not booked.
     """
     c = Coordinator(session_dir, backends=_silent_backends())
     monkeypatch.setattr(c.dispatcher, "owes_result", lambda _task_id: result_owed)
@@ -173,8 +173,113 @@ async def test_a_reaped_discovery_round_settles_once(session_dir, monkeypatch, r
             params={"candidate_discovery": True, "domain": "candidate_discovery_specialist"},
         )
         await c.dispatcher.pump_dispatcher_once()
+        await c.dispatcher.pump_dispatcher_once()
         assert (await c.tasks.get(task.task_id)).state == "failed"
-        assert c.shared_state.framework_agent_discover_failures == streak
+        assert c.shared_state.framework_agent_discover_failures == 1
+    finally:
+        await c.stop()
+
+
+async def _running_task_leased_by_this_process(
+    coord: Coordinator, *, key: str, kind: str = "specialist", expires_at: str = "2026-01-01T00:00:00+00:00"
+):
+    """Create a running task whose research_lane lease this very process holds, expiring at ``expires_at``."""
+    import os
+
+    task, _ = await coord.tasks.create_or_return_existing(TaskSpec(kind=kind, params={}, idempotency_key=key))
+    await coord.tasks.transition(task.task_id, "running")
+    coord.db.raw.execute(
+        "INSERT INTO leases(lane, holder_id, task_id, action, pid, acquired_at, expires_at, owner_scope)"
+        " VALUES (?,?,?,?,?,?,?,?)",
+        (
+            "research_lane",
+            task.task_id,
+            task.task_id,
+            kind,
+            os.getpid(),
+            "2026-01-01T00:00:00+00:00",
+            expires_at,
+            "test-node",
+        ),
+    )
+    coord.db.raw.commit()
+    return task
+
+
+def _lease_rows(coord: Coordinator, task_id: str) -> list[str]:
+    return [row[0] for row in coord.db.raw.execute("SELECT lane FROM leases WHERE task_id=?", (task_id,))]
+
+
+@pytest.mark.asyncio
+async def test_a_quiet_specialist_of_this_process_whose_lease_ran_out_is_failed_and_frees_its_lane(session_dir):
+    """The holder pid is the coordinator's own, so no pid probe can find it dead; its lease and its CLI's silence do."""
+    c = Coordinator(session_dir, backends=_silent_backends())
+    try:
+        task = await _running_task_leased_by_this_process(c, key="spec-quiet")
+        await c.dispatcher.pump_dispatcher_once()
+        row = await c.tasks.get(task.task_id)
+        assert row.state == "failed"
+        assert row.history[-1]["evidence"] == {
+            "reason": "lapsed_lease_pump",
+            "lease_expired_at": "2026-01-01T00:00:00+00:00",
+        }
+        assert _lease_rows(c, task.task_id) == []
+        assert await c.tasks.running() == []
+        assert c.dispatcher.has_unbooked_completions() is False
+    finally:
+        await c.stop()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("alive_because", ["lease_still_valid", "cli_still_writing", "holds_gpu", "not_a_specialist"])
+async def test_an_execution_of_this_process_that_still_shows_life_is_left_running(session_dir, alive_because):
+    import time
+
+    from hyperloom.inference_optimizer.session.session_paths import runs_dir
+
+    c = Coordinator(session_dir, backends=_silent_backends())
+    try:
+        task = await _running_task_leased_by_this_process(
+            c,
+            key=f"spec-{alive_because}",
+            kind="baseline" if alive_because == "not_a_specialist" else "specialist",
+            expires_at="2099-12-31T23:59:59+00:00"
+            if alive_because == "lease_still_valid"
+            else "2026-01-01T00:00:00+00:00",
+        )
+        if alive_because == "cli_still_writing":
+            workspace = runs_dir(c.session_dir, "specialist", task.task_id)
+            workspace.mkdir(parents=True, exist_ok=True)
+            (workspace / "process.log").write_text("{}\n")
+            assert time.time() - (workspace / "process.log").stat().st_mtime < 60
+        if alive_because == "holds_gpu":
+            c.db.raw.execute("INSERT INTO gpu_leases(gpu_id, holder_id, task_id) VALUES (0, ?, ?)", (task.task_id,) * 2)
+            c.db.raw.commit()
+        await c.dispatcher.pump_dispatcher_once()
+        assert (await c.tasks.get(task.task_id)).state == "running"
+        assert _lease_rows(c, task.task_id) == ["research_lane"]
+    finally:
+        await c.stop()
+
+
+@pytest.mark.asyncio
+async def test_a_late_result_of_a_reclaimed_task_is_not_counted(session_dir, monkeypatch):
+    c = Coordinator(session_dir, backends=_silent_backends())
+    booked: list[str] = []
+
+    async def book(task, result):
+        booked.append(task.task_id)
+
+    monkeypatch.setattr(c.dispatcher, "reap_dispatched_task", book)
+    try:
+        task = await _running_task_leased_by_this_process(c, key="spec-late")
+        await c.dispatcher.pump_dispatcher_once()
+        late = SubAgentResult(task_id=task.task_id, state="succeeded", result={"runner_status": "succeeded"})
+        await c.dispatcher._queue_completion(task, late)
+        await c.dispatcher.pump_dispatcher_once()
+        assert booked == []
+        assert (await c.tasks.get(task.task_id)).state == "failed"
+        assert c.dispatcher.has_unbooked_completions() is False
     finally:
         await c.stop()
 

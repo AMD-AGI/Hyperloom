@@ -528,16 +528,30 @@ class SqliteLeaseBackend:
             return True
         return True
 
+    @staticmethod
+    def _local_pid(row) -> int:
+        """The holder pid of a row acquired in this process's boot, PID namespace and container; 0 for any other."""
+        if not same_environment(row["owner_scope"], local_owner_scope()):
+            return 0
+        try:
+            return int(row["pid"] or 0)
+        except (TypeError, ValueError):
+            return 0
+
     @classmethod
     def holder_is_dead(cls, row) -> bool:
         """Accept only an absent PID observed in its recorded local PID domain."""
-        if not same_environment(row["owner_scope"], local_owner_scope()):
-            return False
-        try:
-            pid = int(row["pid"] or 0)
-        except (TypeError, ValueError):
-            return False
+        pid = cls._local_pid(row)
         return pid > 0 and not cls._pid_alive(pid)
+
+    @classmethod
+    def lapsed_in_process(cls, row, *, now_unix: float) -> bool:
+        """Whether a row is held by this very process and its lease ran out without being renewed.
+
+        :meth:`holder_is_dead` can never refute such a holder -- the pid it records is the one asking -- so the
+        expiry the row was granted is what tells an execution of this process that outlived its time.
+        """
+        return cls._local_pid(row) == os.getpid() and str(row["expires_at"]) < _lease_iso(now_unix)
 
     async def reap_dead_holders(self) -> list[dict]:
         """Release leases whose local holder process is confirmed absent."""

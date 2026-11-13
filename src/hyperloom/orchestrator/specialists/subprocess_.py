@@ -86,7 +86,7 @@ from .launch_env import (
     stage_mcp_config,
 )
 from .dsh_launch import DshLaunchRequest, build_dsh_launch, remove_dsh_profiles, resolve_dsh_executable
-from .reap_watch import PROCESS_LOG_NAME, ReapWatch, cli_alive
+from .reap_watch import ACTIVITY_WINDOW_SEC, PROCESS_LOG_NAME, ReapWatch, cli_alive
 from .trace_harvest import harvest_agent_trace
 from ..actions.cancel_channel import CancelScope, cancel_scope_listener, current_cancel_scope
 from hyperloom_common.git_safety import app_git_diff
@@ -150,7 +150,7 @@ class SpecialistSubprocessConfig:
     poll_interval_seconds: float = 5.0
     """How often the reaper polls done.json / process exit / heartbeat."""
 
-    heartbeat_stale_seconds: float = 900.0
+    heartbeat_stale_seconds: float = ACTIVITY_WINDOW_SEC
     """Liveness window for the CLI's output, as :func:`~hyperloom.orchestrator.specialists.reap_watch.cli_alive` reads it.
 
     Longer than the agent CLI's own API request timeout (600 s for Claude Code), after which it logs a retry, so a CLI
@@ -483,7 +483,7 @@ class SpecialistSubprocessDispatcher:
                 self._confirm_cancel_teardown(request, proc)
                 raise
             finally:
-                await asyncio.to_thread(self._reap_marked, launch.reap_mark, prepared)
+                await prepared.sweep_marked(launch.reap_mark, task_id=request.task_id)
                 prepared.release()
                 if log_fh is not None:
                     log_fh.close()
@@ -679,13 +679,6 @@ class SpecialistSubprocessDispatcher:
             worktree_refused=refused,
             error=outcome["error"],
         )
-
-    @staticmethod
-    def _reap_marked(mark: str, prepared: PreparedLaunch) -> None:
-        """End every process that inherited this launch's reap mark, including one re-parented after the CLI exited."""
-        pids = prepared.marked_pids(mark)
-        if pids and not kill_tree(collect_tree(pids)):
-            log.warning("specialist reap: marked processes %s outlived SIGKILL", pids)
 
     def _confirm_cancel_teardown(self, request: SpecialistSpawn, proc: Any) -> None:
         """Tear a cancelled specialist down, raising ``ExecutionCleanupUnconfirmed`` unless teardown is confirmed."""

@@ -87,7 +87,6 @@ async def _auto_bench_grid(state: SharedState) -> list[dict[str, Any]]:
 
     tasks = SimpleNamespace(queued=_none, running=_none, create_or_return_existing=_create)
     dispatcher = SimpleNamespace(
-        admission_frozen=False,
         dispatch_paused_for_phase_budget=lambda: False,
         registry_lanes_ttl=lambda kind: (["benchmark_lane"], 1800),
     )
