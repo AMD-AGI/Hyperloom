@@ -9,8 +9,9 @@ wherever it is read. The classes drive different follow-ups in the tool layer:
 * ``infra``: nothing about the candidate was learned; retry in a fresh sandbox, write no negative result;
 * ``candidate``: the log carries a known failure signature, the server refused its own command line, or it did not
   become ready within its boot limit; record a negative result;
-* ``unclear``: non-zero with no known signature, a stalled server, or a timeout; rerun once in a fresh sandbox. The reason still names
-  what the log says (a refused evaluation request, a Python exception) when it says anything.
+* ``unclear``: non-zero with no known signature, a stalled server, or a timeout; rerun once in a fresh sandbox. The
+  reason still names what the log says (a refused evaluation request, a Python exception) when it says anything. A
+  profile's server that stalled with its profile window open is no candidate's doing: :data:`PROFILER_HUNG`, ``infra``.
 
 A refused instruction sheet or a rejected result bundle is none of these. It is a program error (or a tampered result),
 so it gets no failure class at all: calling it ``candidate`` would write a false negative, and calling it ``unclear`` or
@@ -116,6 +117,15 @@ AGENTX_EARLY_STOP = "agentx_early_stop"
 #: sandbox of the image repeats (``hyperloom_multibranch.toolbox.attempts`` ends the test with it at once). The reason is
 #: ``<this>: <the exception the dump raised>``.
 PROFILER_SNAPSHOT_FAILED = "profiler_snapshot_failed"
+
+#: The server of a profile round went silent while the round's profile window was open, and the round ended it for that
+#: silence (``FailedStep.SERVER_STALLED``). The profiler hung the server: on an image whose kernel tracer hangs the
+#: framework, every sandbox of that image hangs the same way at the same point, and the candidate, whose measurement runs
+#: without the profiler, is not what failed. An infrastructure failure every sandbox repeats
+#: (``hyperloom_multibranch.toolbox.attempts`` ends the test with it at once). The reason is ``<this>: <the server log's
+#: last line>`` when the log has one. A stall before the window opened, or after it closed, stays ``server_stalled``, and
+#: so does one whose only sign is an unanswered ``/start_profile``: the window sends it whatever the server is doing.
+PROFILER_HUNG = "profiler_hung"
 
 #: ``error_class`` values a runner, the hosted backend or the platform reports that are not about the candidate.
 INFRA_ERROR_CLASSES: frozenset[str] = frozenset(
@@ -252,6 +262,9 @@ class StepFailure:
 
     step: FailedStep
     detail: str = ""
+    #: ``None`` unless the round stalled while its profile window was open; then the last line of its server log, ``""``
+    #: when it has none.
+    profile_stall: str | None = None
 
 
 @dataclass(frozen=True)
@@ -347,6 +360,9 @@ def _from_step(reported: StepFailure, framework_changed: bool) -> FailureClassif
     """The verdict the step a round failed at gives by itself; ``None`` leaves it to the logs."""
     if reported.step is FailedStep.FRAMEWORK_VERSION_UNKNOWN:
         return _framework_unimportable(reported.detail.strip(), framework_changed)
+    if reported.step is FailedStep.SERVER_STALLED and reported.profile_stall is not None:
+        line = reported.profile_stall
+        return _infra(f"{PROFILER_HUNG}: {line}" if line else PROFILER_HUNG)
     if reported.step not in _FAILED_STEP_VERDICTS:
         return None
     failure_class, reason = _FAILED_STEP_VERDICTS[reported.step]
