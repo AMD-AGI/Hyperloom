@@ -866,7 +866,8 @@ def host_rules(spec: AgentSpec) -> list[str]:
     ]
     if kind == AGENTX:
         rules.append(
-            f"{HOST_RULE}: accuracy: the request error rate stays at or under {AGENTX_ERROR_RATE_THRESHOLD_PCT:g}%."
+            f"{HOST_RULE}: accuracy: the request error rate stays at or under {AGENTX_ERROR_RATE_THRESHOLD_PCT:g}%; a"
+            " change whose answers on MB's long-context check drop below the root's is never merged."
         )
     else:
         rules.append(
