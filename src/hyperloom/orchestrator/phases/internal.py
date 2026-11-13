@@ -11,11 +11,18 @@ from typing import Any
 
 from hyperloom_common.env import env_bool
 
+from ..measurement.runtime_findings import fix_finding_id_refusal
 from ..state.task_registry import Task, TaskSpec
 from ..collaborator import CoordinatorCollaborator
 from . import machine_state as _phase_state
 
 log = _logging.getLogger(__name__)
+
+
+def _bridge_finding(cand: dict[str, Any]) -> str:
+    """The runtime finding a bridge candidate would clear, or empty when it names none a correctness fix can claim."""
+    finding = str(cand.get("resolves_finding") or "").strip()
+    return "" if not finding or fix_finding_id_refusal(finding) else finding
 
 
 def _bridge_symptom(cand: dict[str, Any], predicate_file: str, why: str) -> str:
@@ -24,6 +31,9 @@ def _bridge_symptom(cand: dict[str, Any], predicate_file: str, why: str) -> str:
     parts = [
         f"Un-bridged switch in {predicate_file}" + (f" ({predicate_name})" if predicate_name else "") + f": {why}",
     ]
+    finding = _bridge_finding(cand)
+    if finding:
+        parts.append(f"Clears runtime finding {finding}.")
     consequence = str(cand.get("consequence") or "").strip()
     if consequence:
         parts.append(f"Consequence: {consequence}")

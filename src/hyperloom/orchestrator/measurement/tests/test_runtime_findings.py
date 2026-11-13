@@ -14,8 +14,8 @@ from hyperloom.orchestrator.measurement.runtime_findings import (
 )
 
 
-def _write(tmp_path: Path, text: str) -> str:
-    path = tmp_path / "server.log"
+def _write(tmp_path: Path, text: str, name: str = "server.log") -> str:
+    path = tmp_path / name
     path.write_text(text, encoding="utf-8")
     return str(path)
 
@@ -170,6 +170,51 @@ def test_sglang_capability_and_adjusted_settings(tmp_path):
     assert "vllm.unknown_env" not in _statuses(report)
 
 
+SGLANG_GATED_LOG = (
+    "[2026-11-02 21:05:22] HIP shared experts fusion is validated only for TP4 and TP8. "
+    "Shared experts fusion optimization is disabled.\n"
+    "[2026-11-02 21:05:48] Config does not support fused shared expert(s). "
+    "Shared experts fusion optimization is disabled.\n"
+    "[2026-11-02 21:05:56] DSA KPool metadata fusion unsupported for this platform/geometry; "
+    "retaining ordinary metadata\n"
+    "[2026-11-02 21:05:57 TP0] Overlap scheduler is disabled because of using eagle speculative decoding.\n"
+)
+
+
+def test_sglang_gate_messages_name_the_gate_not_the_shared_disable_line_or_a_forced_disable(tmp_path):
+    report = scan_server_log(_write(tmp_path, SGLANG_GATED_LOG), "sglang")
+
+    assert _detected(report) == [
+        ("feature_disabled", "DSA KPool metadata fusion", 1),
+        ("feature_disabled", "HIP shared experts fusion", 1),
+        ("feature_disabled", "Shared experts fusion", 1),
+    ]
+
+
+def test_clearing_the_gate_resolves_it_while_another_path_stays_disabled(tmp_path):
+    before = scan_server_log(_write(tmp_path, SGLANG_GATED_LOG), "sglang")
+    fused = SGLANG_GATED_LOG.replace(
+        "HIP shared experts fusion is validated only for TP4 and TP8. Shared experts fusion optimization is disabled.",
+        "Shared experts fusion optimization enabled.",
+    )
+    after = scan_server_log(_write(tmp_path, fused, "after.log"), "sglang")
+
+    assert correctness_fix_refusal(before, after, "feature_disabled:HIP shared experts fusion") == ""
+    assert correctness_fix_refusal(before, after, "feature_disabled:Shared experts fusion") == (
+        "feature_disabled:Shared experts fusion is still detected on the candidate run"
+    )
+
+
+def test_disabled_patterns_ignore_lowercase_and_plural_mentions(tmp_path):
+    log = (
+        "torchcodec is unavailable; video audio-track detection and audio decoding are disabled\n"
+        "[2026-11-02 21:05:22] the prefix cache is disabled\n"
+    )
+    report = scan_server_log(_write(tmp_path, log), "sglang")
+
+    assert _statuses(report)["feature_disabled"] == "not_detected"
+
+
 SGLANG_COMM_LOG = (
     "[2026-09-10 14:31:35 TP3] [AR] All-reduce call path: NCCL (custom AR disabled)\n"
     "[2026-09-10 14:31:35 TP4] [AR] All-reduce call path: NCCL (custom AR disabled)\n"
@@ -250,13 +295,13 @@ def test_render_lists_detected_then_clear_then_unknown(tmp_path):
 
     assert out.splitlines() == [
         f"runtime findings for {log} [vllm]",
-        "- detected [perf_path] aiter.tuned_miss aiter_tuned_config x2: [aiter] shape is M:64, N:7168, K:2048, "
+        "- detected [perf_path] aiter.tuned_miss:aiter_tuned_config x2: [aiter] shape is M:64, N:7168, K:2048, "
         "not found tuned config in /tmp/bf16_tuned_gemm.csv, will use default",
-        "- detected [perf_path] feature_disabled fuse_rope_kvcache x2: (EngineCore_DP0 pid=12) WARNING 10-09 "
+        "- detected [perf_path] feature_disabled:fuse_rope_kvcache x2: (EngineCore_DP0 pid=12) WARNING 10-09 "
         "12:00:01 [compilation.py:1183] fuse_rope_kvcache is enabled, but splitting_ops is None and Inductor "
         "graph partition is not enabled.Disabling fuse_rope_kvcache.Please either set splitting_ops to an empty "
         "list []or set use_inductor_graph_partition to True to enabl",
-        "- detected [correctness] vllm.unknown_env VLLM_MOE_N_SPLIT_SCHEDULE x1: (APIServer pid=11) WARNING "
+        "- detected [correctness] vllm.unknown_env:VLLM_MOE_N_SPLIT_SCHEDULE x1: (APIServer pid=11) WARNING "
         "10-09 12:00:00 [interface.py:1461] Unknown vLLM environment variable detected: VLLM_MOE_N_SPLIT_SCHEDULE",
         "- not_detected: capability_disabled, engine_adjusted, runtime.traceback",
     ]
@@ -302,7 +347,7 @@ def test_baseline_writes_runtime_findings(tmp_path):
 
     out = render_runtime_findings(result)
     assert out.splitlines()[1:] == [
-        "- detected [correctness] vllm.unknown_env VLLM_FOO x1: Unknown vLLM environment variable detected: VLLM_FOO",
+        "- detected [correctness] vllm.unknown_env:VLLM_FOO x1: Unknown vLLM environment variable detected: VLLM_FOO",
         "- not_detected: feature_disabled, capability_disabled, engine_adjusted, aiter.tuned_miss, runtime.traceback",
     ]
 
@@ -319,7 +364,7 @@ def test_agentx_baseline_writes_runtime_findings(tmp_path):
     )
 
     out = render_runtime_findings(result)
-    assert out.splitlines()[1].startswith("- detected [perf_path] comm.custom_ar_disabled custom_all_reduce x1: ")
+    assert out.splitlines()[1].startswith("- detected [perf_path] comm.custom_ar_disabled:custom_all_reduce x1: ")
 
 
 def _report(*findings: tuple[str, str, str, str]) -> dict:
