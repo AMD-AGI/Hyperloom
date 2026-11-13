@@ -81,6 +81,31 @@ def format_diagnosis(entry: dict[str, Any]) -> str:
     return "  " + " ".join(parts) if parts else ""
 
 
+def role_trace_text(role_trace: Any) -> str:
+    """Render a ``{role: summary}`` PD TraceLens map: top kernels with GPU share, and trace warnings."""
+    if not isinstance(role_trace, dict) or not role_trace:
+        return ""
+    parts: list[str] = []
+    for role in ("prefill", "decode"):
+        summary = role_trace.get(role)
+        if not isinstance(summary, dict):
+            continue
+        if summary.get("status") != "ok":
+            parts.append(f"{role}: analysis_failed({_flatten_for_prompt(str(summary.get('error') or ''))[:60]})")
+            continue
+        kernels = []
+        for kernel in summary.get("top") or []:
+            pct = kernel.get("gpu_pct")
+            pct_s = f" {pct:.1f}%" if _is_measurement(pct) else ""
+            category = f"/{kernel['category']}" if kernel.get("category") else ""
+            bound = f"/{kernel['bound']}" if kernel.get("bound") else ""
+            kernels.append(f"{_flatten_for_prompt(str(kernel.get('name') or '?'))[:48]}{category}{bound}{pct_s}")
+        warnings = summary.get("warnings") or []
+        warn_s = f" warn={','.join(str(w) for w in warnings)}" if warnings else ""
+        parts.append(f"{role}: {'; '.join(kernels) or '(no hot kernels)'}{warn_s}")
+    return " | ".join(parts)
+
+
 def format_anchors(entry: dict[str, Any]) -> str:
     """The row's artifact anchors, dropped lowest-value-first until they fit the width budget."""
     labelled = (

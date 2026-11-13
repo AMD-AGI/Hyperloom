@@ -197,5 +197,124 @@ def test_a_crashed_worker_of_any_lws_rank_fails_fast(tmp_path, monkeypatch: pyte
     assert wedge is not None and "10.0.0.3" in wedge
 
 
+def test_profiling_round_restart_enables_graph_capture_profiling(monkeypatch: pytest.MonkeyPatch, tmp_path) -> None:
+    import yaml
+
+    from hyperloom.orchestrator.actions.executors import profile
+
+    monkeypatch.setenv("FRAMEWORK", "sglang")
+    shipped = yaml.safe_load(profile._default_profile_config().read_text(encoding="utf-8"))["benchmark"]["envs"]
+    calls: list[tuple[life.RoundServer, dict]] = []
+
+    async def _restart(server, **kwargs):
+        calls.append((server, kwargs))
+
+    monkeypatch.setattr(life, "restart_server_for_round", _restart)
+
+    assert (
+        asyncio.run(profile._restart_round_server({"extra_server_args": "--context-length 11264"}, str(tmp_path)))
+        is None
+    )
+    assert (
+        asyncio.run(profile._restart_round_server({"extra_server_args": "--disable-cuda-graph"}, str(tmp_path))) is None
+    )
+
+    graph, eager = calls
+    assert graph[0].extra_server_args.split() == ["--context-length", "11264", "--enable-profile-cuda-graph"]
+    assert graph[1]["torch_profiler_dir"] == str(tmp_path)
+    assert graph[1]["extra_env"] == {
+        key: str(shipped[key])
+        for key in (
+            "SGLANG_GRAPH_BATCH_CAPTURE",
+            "DEBUG_CLR_GRAPH_PACKET_CAPTURE",
+            "DEBUG_HIP_GRAPH_SEGMENT_SCHEDULING",
+            "DEBUG_HIP_GRAPH_CLASSIC_PATH",
+        )
+    }
+    assert eager[0].extra_server_args == "--disable-cuda-graph"
+
+
+@pytest.mark.parametrize(
+    ("state", "skipped"),
+    [
+        ({"profile_trace_shared": False, "profile_trace_share_error": "engine host d0: cannot read"}, True),
+        ({"profile_trace_shared": True}, False),
+        ({}, False),
+    ],
+    ids=["not-shared", "shared", "unprobed"],
+)
+def test_profile_is_skipped_when_the_trace_dir_is_not_shared(
+    monkeypatch: pytest.MonkeyPatch, tmp_path, state: dict, skipped: bool
+) -> None:
+    from hyperloom.orchestrator.actions.executors import _multi_node_env, profile
+
+    monkeypatch.setattr(_multi_node_env, "_read_state", lambda: dict(state))
+
+    refusal = profile._unshared_trace_dir_refusal(str(tmp_path))
+
+    if skipped:
+        assert refusal["status"] == "failed"
+        assert refusal["error_class"] == profile.PROFILE_TRACE_NOT_SHARED
+        assert "engine host d0: cannot read" in refusal["error"]
+    else:
+        assert refusal is None
+
+
+def test_pd_role_traces_are_kept_when_the_trace_filesystem_clock_lags(
+    monkeypatch: pytest.MonkeyPatch, tmp_path
+) -> None:
+    import os
+    import time
+
+    from hyperloom.orchestrator.actions.executors import profile
+
+    monkeypatch.setattr(life, "_read_state", dict)
+    root = tmp_path / "torch_trace"
+    client_now = time.time() + 1260
+    round_start = profile._trace_fs_round_start(str(root), client_now)
+    for role in life.PD_PROFILE_ROLES:
+        (root / role).mkdir(parents=True)
+        (root / role / "2-TP-0.trace.json.gz").write_bytes(b"new")
+    stale = root / "decode" / "1-TP-0.trace.json.gz"
+    stale.write_bytes(b"stale-and-heavier")
+    os.utime(stale, (round_start - 600, round_start - 600))
+
+    result: dict = {}
+    profile._record_mn_round_traces(result, str(root), round_start)
+
+    assert result["role_traces"] == {
+        "prefill": str(root / "prefill" / "2-TP-0.trace.json.gz"),
+        "decode": str(root / "decode" / "2-TP-0.trace.json.gz"),
+    }
+    assert result["main_trace_path"] == result["role_traces"]["decode"]
+
+
+def test_pd_role_traces_take_the_first_gpu_of_each_node(monkeypatch: pytest.MonkeyPatch, tmp_path) -> None:
+    import os
+
+    root = tmp_path / "torch_trace"
+    (root / "decode").mkdir(parents=True)
+    (root / "prefill").mkdir(parents=True)
+    for rank in range(16):
+        (root / "decode" / f"5-TP-{rank}.trace.json.gz").write_bytes(b"x" * (100 if rank == 3 else 10))
+    for rank in range(8):
+        older = root / "decode" / f"4-TP-{rank}.trace.json.gz"
+        older.write_bytes(b"x")
+        os.utime(older, (older.stat().st_mtime - 60, older.stat().st_mtime - 60))
+        (root / "prefill" / f"7-TP-{rank}-DECODE.trace.json.gz").write_bytes(b"x" * 50)
+        (root / "prefill" / f"7-TP-{rank}-EXTEND.trace.json.gz").write_bytes(b"x")
+    pods = [{"podIP": "10.0.0.1"}, {"podIP": "10.0.0.2"}]
+    monkeypatch.setattr(life, "_read_state", lambda: {"decode_pods": pods, "prefill_pods": pods[:1]})
+
+    since = min(p.stat().st_mtime for p in (root / "decode").iterdir()) - 1
+    by_node = life.select_pd_node_traces(str(root), since)
+
+    assert by_node == {
+        "prefill": [str(root / "prefill" / "7-TP-0-EXTEND.trace.json.gz")],
+        "decode": [str(root / "decode" / "5-TP-0.trace.json.gz"), str(root / "decode" / "5-TP-8.trace.json.gz")],
+    }
+    assert life.select_pd_role_traces(str(root), since) == {role: paths[0] for role, paths in by_node.items()}
+
+
 def test_the_multi_node_sglang_defaults_keep_the_prefix_cache_on() -> None:
     assert "--disable-radix-cache" not in life._merge_sglang_defaults("--chunked-prefill-size 8192")

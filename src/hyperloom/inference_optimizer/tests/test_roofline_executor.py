@@ -362,6 +362,24 @@ async def test_profile_failed_with_trace_continues_to_trace_analyze(tmp_path):
 
 
 @pytest.mark.asyncio
+async def test_unshared_trace_dir_stops_later_automatic_profiles(tmp_path):
+    state = _state()
+    unshared = {
+        "status": "failed",
+        "error_class": "profile_trace_not_shared",
+        "error": "multi-node profile trace dir /t is not shared with the engine pods: decode pod 10.0.0.2: ssh failed",
+    }
+
+    p1, p2 = _patch_subs(unshared, AssertionError("trace_analyze must not run without trace"))
+    executor = RooflineExecutor(shared_state=state)
+    with p1, p2:
+        result = await executor(_ctx(tmp_path))
+
+    assert result["status"] == "failed"
+    assert state.gpu_trace_unsupported_reason == unshared["error"]
+
+
+@pytest.mark.asyncio
 async def test_profile_failed_without_trace_never_calls_trace_analyze(tmp_path):
     """failed + no trace fields must stay profile_failed, never analyze a trace."""
     state = _state()
