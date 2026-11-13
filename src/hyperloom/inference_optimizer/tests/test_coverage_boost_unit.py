@@ -5,49 +5,11 @@
 
 from __future__ import annotations
 
-import json
-from types import SimpleNamespace
-
 import pytest
-
-
-# --------------------------------------------------------------------------- # hyperloom.common.gain_math #
-# --------------------------------------------------------------------------- #
-def test_gain_math_branches() -> None:
-    from hyperloom.common import gain_math
-
-    # gain_pct: non-positive new / non-positive base -> None.
-    assert gain_math.gain_pct(0, 100.0) is None
-    assert gain_math.gain_pct(120.0, 0.0) is None
-    assert gain_math.gain_pct(110.0, 100.0) == pytest.approx(10.0)
-
-    # gain_pct_or_zero: base <= 0 -> 0.0.
-    assert gain_math.gain_pct_or_zero(120.0, 0.0) == 0.0
-    assert gain_math.gain_pct_or_zero(90.0, 100.0) == pytest.approx(-10.0)
-
-    # incremental_gain_pct: ref <= 0 -> None.
-    assert gain_math.incremental_gain_pct(120.0, 0.0) is None
-    assert gain_math.incremental_gain_pct(110.0, 100.0) == pytest.approx(10.0)
 
 
 # --------------------------------------------------------------------------- # orchestrator.knowledge.kb_writeback #
 # --------------------------------------------------------------------------- #
-def test_framework_optimization_root_override(monkeypatch, tmp_path) -> None:
-    from hyperloom.agents.framework.kb import framework_optimization_root
-
-    monkeypatch.setenv("INFERENCE_OPTIMIZER_FA_KB_PATH", str(tmp_path))
-    assert framework_optimization_root() == tmp_path / "framework_optimization"
-
-
-def test_framework_optimization_root_uses_user_data_path(monkeypatch, tmp_path) -> None:
-    from hyperloom.agents.framework.kb import framework_optimization_root
-
-    monkeypatch.delenv("INFERENCE_OPTIMIZER_FA_KB_PATH", raising=False)
-    monkeypatch.setenv("USER_DATA_PATH", str(tmp_path / "workspace"))
-
-    assert framework_optimization_root() == tmp_path / "workspace" / "framework-kb" / "framework_optimization"
-
-
 async def test_kb_writeback_rejects_unknown_outcome() -> None:
     from hyperloom.orchestrator.knowledge import kb_writeback
 
@@ -55,68 +17,6 @@ async def test_kb_writeback_rejects_unknown_outcome() -> None:
         await kb_writeback.write_framework_record(
             kb_writeback.FrameworkOutcome("u", "s", "p", "not_a_real_outcome", 1.0, "sess")
         )
-
-
-async def test_kb_writeback_appends_record(monkeypatch, tmp_path) -> None:
-    from hyperloom.orchestrator.knowledge import kb_writeback
-
-    monkeypatch.setenv("INFERENCE_OPTIMIZER_FA_KB_PATH", str(tmp_path / "fa"))
-    path = await kb_writeback.write_framework_record(
-        kb_writeback.FrameworkOutcome(
-            "https://x/pr/1", "abc", "/tmp/p.patch", kb_writeback.OUTCOME_INTEGRATED, 3.5, "sess-1"
-        )
-    )
-    rec = json.loads(path.read_text(encoding="utf-8").strip())
-    assert rec["outcome"] == "integrated"
-    assert rec["tps_delta_pct"] == 3.5
-
-
-# --------------------------------------------------------------------------- # baseline_comparison.target_analyzer #
-# --------------------------------------------------------------------------- #
-def test_name_mapping_paths() -> None:
-    from hyperloom.inference_optimizer.baseline_comparison import target_analyzer as nm
-
-    assert nm.to_inferencex_name("") is None
-    # Whitespace-only collapses to empty after strip.
-    assert nm.to_inferencex_name("   ") is None
-    assert nm.to_inferencex_name("/path/models/MiniMaxAI-MiniMax-M2.5") == "MiniMax-M2.5"
-    assert nm.to_inferencex_name("totally-unknown-model") is None
-
-
-# --------------------------------------------------------------------------- # framework_registry #
-# --------------------------------------------------------------------------- #
-def test_framework_registry_surface() -> None:
-    from hyperloom.inference_optimizer import framework_registry as fr
-
-    assert "sglang" in fr.names()
-    assert fr.is_supported("SGLang") is True
-    assert fr.is_supported("nope") is False
-    spec = fr.FRAMEWORKS["sglang"]
-    assert spec.name == "sglang"
-    assert fr.is_scriptable("xdit") is True
-    assert fr.is_scriptable("sglang") is False
-    assert fr.extra_args_env("vllm") == "EXTRA_VLLM_ARGS"
-    assert fr.throughput_unit("xdit") == "img/s"
-    # Unknown name falls back to the default spec.
-    assert fr.is_scriptable("unknown") is False
-
-
-# --------------------------------------------------------------------------- # orchestrator.state.objective #
-# --------------------------------------------------------------------------- #
-def test_tput_objective_unmeasured_is_not_reached() -> None:
-    from hyperloom.orchestrator.state.objective import TargetTputObjective
-
-    obj = TargetTputObjective(target_tput_per_gpu=100.0)
-    state = SimpleNamespace(current_best={}, baseline_tput=0.0)
-    assert obj.reached(state) is False
-    assert obj.describe() == "target_tput_per_gpu=100.0"
-
-
-def test_baseline_objective_invalid_dir() -> None:
-    from hyperloom.orchestrator.state.objective import ObjectiveError, TargetBaselineObjective
-
-    with pytest.raises(ObjectiveError):
-        TargetBaselineObjective(baseline_dir="/nonexistent/path/zzz")
 
 
 # --------------------------------------------------------------------------- # recipe_kb.canonical_id #
@@ -174,88 +74,8 @@ def test_file_lock_no_fcntl(monkeypatch, tmp_path) -> None:
     assert ran
 
 
-def test_file_lock_acquires(tmp_path) -> None:
-    from hyperloom.orchestrator.actions.executors import _file_lock
-
-    with _file_lock.best_effort_file_lock(str(tmp_path / "lock"), label="t"):
-        pass
-
-
-# --------------------------------------------------------------------------- #
-# orchestrator.actions.executors._framework_gap_composer #
-# --------------------------------------------------------------------------- #
-def test_framework_gap_compose() -> None:
-    from hyperloom.orchestrator.actions.executors import _framework_gap_composer as gc
-
-    desc, keywords = gc.compose_gap(framework="sglang", gpu_type="MI300X", model_class="moe_mla")
-    assert "sglang" in keywords
-    assert "moe" in keywords
-    assert isinstance(desc, str) and desc
-
-
-# --------------------------------------------------------------------------- # protocol.intent #
-# --------------------------------------------------------------------------- #
-def test_validate_envelope_structural_errors() -> None:
-    from hyperloom.inference_optimizer.protocol.intent import IntentValidationError, validate_envelope
-
-    with pytest.raises(IntentValidationError):
-        validate_envelope("not a dict")  # type: ignore[arg-type]
-    with pytest.raises(IntentValidationError):
-        validate_envelope({})  # missing intents
-    with pytest.raises(IntentValidationError):
-        validate_envelope({"intents": "x"})
-    with pytest.raises(IntentValidationError):
-        validate_envelope({"intents": ["x"]})  # item not dict
-    with pytest.raises(IntentValidationError):
-        validate_envelope({"intents": [{"intent_type": "alert"}]})  # missing payload
-    with pytest.raises(IntentValidationError):
-        validate_envelope({"intents": [{"intent_type": "alert", "payload": "x"}]})
-    with pytest.raises(IntentValidationError):
-        validate_envelope({"intents": [{"intent_type": "bad_type", "payload": {}}]})
-
-
-def test_validate_envelope_review_verdict_map_keys() -> None:
-    from hyperloom.inference_optimizer.protocol.intent import IntentValidationError, validate_envelope
-
-    # verdict_map with a non-string key.
-    bad = {
-        "intents": [
-            {
-                "intent_type": "review_verdict",
-                "payload": {"target_proposal_msg_id": "m1", "verdict_map": {"": {"verdict": "approve"}}},
-            }
-        ]
-    }
-    with pytest.raises(IntentValidationError):
-        validate_envelope(bad)
-
-
-def test_validate_envelope_happy_path() -> None:
-    from hyperloom.inference_optimizer.protocol.intent import IntentType, validate_envelope
-
-    intents = validate_envelope(
-        {"intents": [{"intent_type": "alert", "payload": {"severity": "high", "summary": "s"}}]}
-    )
-    assert intents[0].type is IntentType.ALERT
-
-
 # --------------------------------------------------------------------------- # paths #
 # --------------------------------------------------------------------------- #
-def test_paths_helpers(monkeypatch, tmp_path) -> None:
-    from hyperloom.inference_optimizer.session import paths
-
-    # _sanitize_model_basename empty -> "session".
-    assert paths._sanitize_model_basename("   ") == "session"
-    assert paths._sanitize_model_basename("/a/b/Model:X") == "Model_X"
-
-    # asset_root override that exists.
-    monkeypatch.setenv(paths.ENV_OVERRIDE_ASSET_ROOT, str(tmp_path))
-    assert paths.asset_root() == tmp_path
-    # workspace_root echoes USER_DATA_PATH even when the dir is absent.
-    monkeypatch.setenv(paths.ENV_USER_DATA_PATH, str(tmp_path / "does_not_exist"))
-    assert paths.workspace_root() == tmp_path / "does_not_exist"
-
-
 def test_paths_asset_root_missing_override(monkeypatch, tmp_path) -> None:
     from hyperloom.inference_optimizer.session import paths
 

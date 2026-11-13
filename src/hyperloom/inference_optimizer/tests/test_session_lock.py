@@ -178,36 +178,43 @@ def test_pid_alive_edge_cases(monkeypatch):
     assert _pid_alive(12345) is False
 
 
-def test_read_owner_fd_empty_and_malformed(tmp_path):
-    """_read_owner_fd handles blank / non-JSON / non-dict bodies and OSError."""
-    lock_path = session_paths.optimizer_lock_path(tmp_path)
-    lock_path.parent.mkdir(parents=True, exist_ok=True)
-
-    lock_path.write_text("", encoding="utf-8")
-    fd = os.open(lock_path, os.O_RDWR)
+@pytest.mark.skipif(
+    session_lock.fcntl is None,
+    reason="flock-based mutual exclusion requires POSIX fcntl",
+)
+@pytest.mark.parametrize("body", ["", "garbage }{", '["not", "a", "dict"]'], ids=["blank", "not-json", "not-a-dict"])
+def test_a_contended_lock_whose_owner_cannot_be_parsed_is_still_refused(tmp_path, body):
+    """The refusal names no owner rather than failing on a lock body it cannot parse."""
+    held = SessionLock(tmp_path)
+    held.acquire()
     try:
-        assert SessionLock._read_owner_fd(fd) is None
+        session_paths.optimizer_lock_path(tmp_path).write_text(body, encoding="utf-8")
+        with pytest.raises(SessionAlreadyRunning) as exc:
+            SessionLock(tmp_path).acquire()
+        assert exc.value.owner == {}
+        assert "held by" not in str(exc.value)
     finally:
-        os.close(fd)
+        held.release()
 
-    lock_path.write_text("garbage }{", encoding="utf-8")
-    fd = os.open(lock_path, os.O_RDWR)
+
+@pytest.mark.skipif(
+    session_lock.fcntl is None,
+    reason="flock-based mutual exclusion requires POSIX fcntl",
+)
+def test_a_contended_lock_whose_body_cannot_be_read_is_still_refused(tmp_path, monkeypatch):
+    held = SessionLock(tmp_path)
+    held.acquire()
     try:
-        assert SessionLock._read_owner_fd(fd) is None
-    finally:
-        os.close(fd)
 
-    lock_path.write_text('["not", "a", "dict"]', encoding="utf-8")
-    fd = os.open(lock_path, os.O_RDWR)
-    try:
-        assert SessionLock._read_owner_fd(fd) is None
-    finally:
-        os.close(fd)
+        def raise_eio(_fd, _size):
+            raise OSError(errno.EIO, "io error")
 
-    # A closed fd triggers the OSError branch.
-    fd2 = os.open(lock_path, os.O_RDWR)
-    os.close(fd2)
-    assert SessionLock._read_owner_fd(fd2) is None
+        monkeypatch.setattr(session_lock.os, "read", raise_eio)
+        with pytest.raises(SessionAlreadyRunning) as exc:
+            SessionLock(tmp_path).acquire()
+        assert exc.value.owner == {}
+    finally:
+        held.release()
 
 
 @pytest.mark.skipif(
