@@ -5,15 +5,20 @@
 
 from __future__ import annotations
 
-import json
+import logging
 import os
 import re
 import subprocess
-import urllib.request
 import uuid
 from pathlib import Path
 
+import httpx
+
+from hyperloom_common.llm.llm_config import LLMConfigError, get_anthropic_client
+
 from ._io_utils import append_log
+
+log = logging.getLogger(__name__)
 
 
 ARCH_BENCHMARK_TIMEOUT_ENV = "TRACELENS_ARCH_BENCHMARK_TIMEOUT_SEC"
@@ -41,28 +46,20 @@ def _is_safe_litellm_gateway() -> bool:
     return any(m in base_url for m in markers)
 
 
-def _gateway_models_url() -> str:
-    """The ``/v1/models`` URL of the gateway the SDK targets, whichever of ``…/llm-proxy`` or ``…/llm-proxy/v1`` is set."""
-    base = (os.environ.get("ANTHROPIC_BASE_URL", "") or os.environ.get("OPENAI_BASE_URL", "")).strip().rstrip("/")
-    if base.endswith("/v1"):
-        base = base[: -len("/v1")]
-    return f"{base}/v1/models"
-
-
 def _fetch_gateway_model_ids() -> set[str]:
-    """The lower-cased model ids the gateway lists; empty when it has no list or cannot be reached."""
-    key = (
-        os.environ.get("ANTHROPIC_API_KEY", "")
-        or os.environ.get("ANTHROPIC_AUTH_TOKEN", "")
-        or os.environ.get("OPENAI_API_KEY", "")
-    ).strip()
-    request = urllib.request.Request(
-        _gateway_models_url(), headers={"Authorization": f"Bearer {key}", "x-api-key": key}
-    )
+    """The lower-cased model ids the gateway lists; empty, with a warning, when it cannot be asked.
+
+    The request goes out through the same client as every other Anthropic call, so it carries the
+    gateway's credential and its ``ANTHROPIC_CUSTOM_HEADERS``.
+    """
     try:
-        with urllib.request.urlopen(request, timeout=10) as response:
-            rows = json.load(response).get("data", [])
-    except (OSError, ValueError, AttributeError):
+        with get_anthropic_client(timeout=10.0) as client:  # type: ignore[attr-defined]
+            path = "models" if str(client.base_url).rstrip("/").endswith("/v1") else "v1/models"
+            response = client.get(path)
+            response.raise_for_status()
+            rows = response.json().get("data", [])
+    except (LLMConfigError, httpx.HTTPError, ValueError, AttributeError) as exc:
+        log.warning("tracelens: could not read the gateway's model list (%r); the model id is sent unchanged", exc)
         return set()
     return {str(row["id"]).lower() for row in rows if isinstance(row, dict) and row.get("id")}
 

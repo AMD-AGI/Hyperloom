@@ -6,9 +6,13 @@
 from __future__ import annotations
 
 
+import httpx
 import pytest
 
 from hyperloom.orchestrator.trace_analysis import _tracelens_checkout
+
+
+_REAL_FETCH = _tracelens_checkout._fetch_gateway_model_ids
 
 
 @pytest.fixture(scope="module")
@@ -20,7 +24,16 @@ def tl_module():
 
 @pytest.fixture(autouse=True)
 def _clear_gateway_env(monkeypatch):
-    for k in ("ANTHROPIC_MODEL", "CLAUDE_MODEL", "ANTHROPIC_BASE_URL", "OPENAI_BASE_URL", "LLM_GATEWAY_KEY"):
+    for k in (
+        "ANTHROPIC_MODEL",
+        "CLAUDE_MODEL",
+        "ANTHROPIC_BASE_URL",
+        "OPENAI_BASE_URL",
+        "LLM_GATEWAY_KEY",
+        "ANTHROPIC_API_KEY",
+        "ANTHROPIC_AUTH_TOKEN",
+        "ANTHROPIC_CUSTOM_HEADERS",
+    ):
         monkeypatch.delenv(k, raising=False)
 
 
@@ -164,3 +177,71 @@ def test_gateway_that_lists_no_models_gets_the_id_unchanged(tl_module, monkeypat
     _use_safe_gateway(monkeypatch)
     monkeypatch.setenv("ANTHROPIC_MODEL", "claude-opus-5.5")
     assert tl_module._resolve_tracelens_model() == "claude-opus-5.5"
+
+
+def _gateway_answers(monkeypatch, handler):
+    """Route the gateway client's HTTP calls to ``handler`` instead of the network."""
+    real_client = httpx.Client
+
+    class _Client(real_client):
+        def __init__(self, **kwargs):
+            super().__init__(transport=httpx.MockTransport(handler), **kwargs)
+
+    monkeypatch.setattr(httpx, "Client", _Client)
+
+
+def test_model_list_request_carries_the_gateway_headers(monkeypatch):
+    """AMD's gateway rejects a call without its subscription header, which only ``ANTHROPIC_CUSTOM_HEADERS`` holds."""
+    monkeypatch.setattr(_tracelens_checkout, "_fetch_gateway_model_ids", _REAL_FETCH)
+    monkeypatch.setenv("ANTHROPIC_BASE_URL", "https://gw.example.invalid/api/v1/llm-proxy")
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-test")
+    monkeypatch.setenv("ANTHROPIC_CUSTOM_HEADERS", "Ocp-Apim-Subscription-Key: sub-test")
+    seen = []
+
+    def handler(request):
+        seen.append(request)
+        return httpx.Response(200, json={"data": [{"id": "Claude-Opus-5.5"}, {"id": "claude-opus-4-7"}]})
+
+    _gateway_answers(monkeypatch, handler)
+
+    assert _tracelens_checkout._fetch_gateway_model_ids() == {"claude-opus-5.5", "claude-opus-4-7"}
+    (request,) = seen
+    assert request.url.path == "/api/v1/llm-proxy/v1/models"
+    assert request.headers["Ocp-Apim-Subscription-Key"] == "sub-test"
+    assert request.headers["x-api-key"] == "sk-test"
+
+
+def test_model_list_url_does_not_double_a_version_segment(monkeypatch):
+    monkeypatch.setattr(_tracelens_checkout, "_fetch_gateway_model_ids", _REAL_FETCH)
+    monkeypatch.setenv("ANTHROPIC_BASE_URL", "https://gw.example.invalid/api/v1/llm-proxy/v1")
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-test")
+    paths = []
+
+    def handler(request):
+        paths.append(request.url.path)
+        return httpx.Response(200, json={"data": []})
+
+    _gateway_answers(monkeypatch, handler)
+    _tracelens_checkout._fetch_gateway_model_ids()
+    assert paths == ["/api/v1/llm-proxy/v1/models"]
+
+
+def test_a_gateway_that_refuses_the_model_list_is_logged_and_gives_no_ids(monkeypatch, caplog):
+    monkeypatch.setattr(_tracelens_checkout, "_fetch_gateway_model_ids", _REAL_FETCH)
+    monkeypatch.setenv("ANTHROPIC_BASE_URL", "https://gw.example.invalid/api/v1/llm-proxy")
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-test")
+    _gateway_answers(monkeypatch, lambda request: httpx.Response(401, json={"error": "no subscription key"}))
+
+    with caplog.at_level("WARNING"):
+        assert _tracelens_checkout._fetch_gateway_model_ids() == set()
+    assert "model list" in caplog.text
+    assert "401" in caplog.text
+
+
+def test_a_missing_credential_is_logged_and_gives_no_ids(monkeypatch, caplog):
+    monkeypatch.setattr(_tracelens_checkout, "_fetch_gateway_model_ids", _REAL_FETCH)
+    monkeypatch.setenv("ANTHROPIC_BASE_URL", "https://gw.example.invalid/api/v1/llm-proxy")
+
+    with caplog.at_level("WARNING"):
+        assert _tracelens_checkout._fetch_gateway_model_ids() == set()
+    assert "model list" in caplog.text
