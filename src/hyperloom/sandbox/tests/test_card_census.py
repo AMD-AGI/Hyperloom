@@ -328,27 +328,25 @@ def _test_server(tree: KernelTree, pids: list[int]) -> OwnProcesses:
     return OwnProcesses(frozenset({100}), procfs=tree.procfs)
 
 
-def test_a_helper_of_the_tests_server_with_memory_is_part_of_its_one_resident_and_a_strangers_pair_is_named_each(
+def test_a_second_holder_with_memory_is_crowded_even_when_the_tests_own_and_the_record_names_each_one(
     pod: KernelTree,
 ) -> None:
-    """The server and a helper of it with memory of its own on the card: both are the test's, so they are one resident and
-    the card is not crowded. The same pair read for a round they do not belong to is two residents, and the record names
-    both processes on the render node as not that round's."""
+    """The server and a helper of it with memory of its own on the card: one holder with memory per card is allowed, so
+    the card is crowded, and the record names both of the test's processes on the render node."""
     own = _test_server(pod, [101, 102])
     pod.holds(3001, _CARD, vram=_SERVER_VRAM, queues=6)
     pod.holds(3002, _CARD, vram=_HELPER_VRAM, queues=0)
     pod.renders(101, _CARD, kib=_SERVER_VRAM // 1024)
     pod.renders(102, _CARD, kib=_HELPER_VRAM // 1024)
 
-    assert _read(pod).intrusions(own, before_test=False) == ()
-    found = _read(pod).intrusions(OwnProcesses(frozenset({999}), procfs=pod.procfs), before_test=False)
+    found = _read(pod).intrusions(own, before_test=False)
 
     assert [i.key for i in found] == [("crowded", _CARD)]
     assert found[0].what == (
         "2 processes with memory on card 5 at once (host pid 3001 with 200.0 GiB, host pid 3002 with 0.5 GiB); "
         "this container's processes with memory on its render node: "
-        "pid 101 (not the test) with 200.0 GiB: python3 -m server --rank=101; "
-        "pid 102 (not the test) with 0.5 GiB: python3 -m server --rank=102"
+        "pid 101 (the test) with 200.0 GiB: python3 -m server --rank=101; "
+        "pid 102 (the test) with 0.5 GiB: python3 -m server --rank=102"
     )
 
 
