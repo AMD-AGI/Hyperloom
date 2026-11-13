@@ -27,12 +27,15 @@ from hyperloom.measure.failures import (
     HUB_RATE_LIMITED,
     INFRA_ERROR_CLASSES,
     JIT_BUILD_TIMEOUT,
+    PROFILER_HUNG,
     PROFILER_SNAPSHOT_FAILED,
     TEST_TIMEOUT_REASON,
     FailureEvidence,
+    StepFailure,
     classify_test_failure,
 )
 from hyperloom.measure.runner.import_outcome import INERT_PATCH
+from inference_suite.contracts import FailedStep
 from hyperloom_multibranch.toolbox.attempts import (
     CAPACITY_UNAVAILABLE,
     NODE_BLAMELESS_INFRA_REASONS,
@@ -331,15 +334,19 @@ async def test_a_sweep_that_ran_out_of_time_is_not_rerun(kind, runs, validity) -
 
 
 class _ClassifyingExecutor(_ScriptedExecutor):
-    """Ends every attempt with what :func:`classify_test_failure` makes of ``log``, as the executors record it."""
+    """Ends every attempt with what :func:`classify_test_failure` makes of ``log`` and the step ``step`` names, as the
+    executors record it."""
 
-    def __init__(self, log: str) -> None:
+    def __init__(self, log: str, step: StepFailure | None = None) -> None:
         super().__init__("unused")
         self.log = log
+        self.step = step
 
     async def run(self, job: TestJob) -> TestResult:
         self.jobs.append(job)
-        verdict = classify_test_failure(returncode=1, evidence=FailureEvidence(logs=(self.log,)))
+        verdict = classify_test_failure(
+            returncode=1, evidence=FailureEvidence(logs=(self.log,), step_failure=self.step)
+        )
         infra = verdict.failure_class is FailureClass.INFRA
         return TestResult(
             request_id="r1",
@@ -350,8 +357,8 @@ class _ClassifyingExecutor(_ScriptedExecutor):
         )
 
 
-async def _profile(log: str) -> tuple[TestResult, _ClassifyingExecutor, list[str]]:
-    executor = _ClassifyingExecutor(log)
+async def _profile(log: str, step: StepFailure | None = None) -> tuple[TestResult, _ClassifyingExecutor, list[str]]:
+    executor = _ClassifyingExecutor(log, step)
     reported: list[str] = []
 
     async def on_node_failure(node: str, _reason: str, _reproduced: bool) -> None:
@@ -384,6 +391,29 @@ async def test_a_profile_that_died_in_the_profilers_snapshot_dump_ends_unmeasure
     assert result.validity is Validity.MEASUREMENT_FAILED and result.failure_class is FailureClass.INFRA
     assert result.failure_reason == f"{PROFILER_SNAPSHOT_FAILED}: RuntimeError: stoi"
     assert reported == [], "the image's profiler, not the node, failed"
+
+
+_TRACER_HANG = "queue_interposition.cpp:412 Async signal handler still waiting"
+_SILENT = "no server log or client output for 600.4s"
+
+
+async def test_a_profile_whose_server_stalled_inside_its_window_is_not_retried_and_ends_unmeasured() -> None:
+    """The tracer hangs the server at the same point in every sandbox of the image; a retry only holds the cards again."""
+    stall = StepFailure(FailedStep.SERVER_STALLED, _SILENT, profile_stall=_TRACER_HANG)
+
+    result, executor, reported = await _profile("", stall)
+
+    assert len(executor.jobs) == 1, "a hang in the profile window is not retried"
+    assert result.validity is Validity.MEASUREMENT_FAILED and result.failure_class is FailureClass.INFRA
+    assert result.failure_reason == f"{PROFILER_HUNG}: {_TRACER_HANG}"
+    assert reported == [], "the image's profiler, not the node, hung the server"
+
+
+async def test_a_profile_whose_server_stalled_outside_its_window_is_still_rerun_once() -> None:
+    result, executor, _ = await _profile("", StepFailure(FailedStep.SERVER_STALLED, _SILENT))
+
+    assert len(executor.jobs) == 2, "a stall the profiler did not start is unclear: one rerun"
+    assert result.failure_class is FailureClass.UNCLEAR and result.failure_reason == "server_stalled"
 
 
 async def test_a_profile_whose_candidate_crashed_is_still_a_candidate_failure() -> None:
