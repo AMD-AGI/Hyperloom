@@ -22,7 +22,7 @@ from hyperloom.contracts.measurement import Purpose
 from hyperloom.measure.long_context import build as build_module
 from hyperloom.measure.long_context.build import build_entry
 from hyperloom.measure.long_context.plan import LongContextPlan
-from hyperloom.measure.long_context.rounds import run_long_context
+from hyperloom.measure.long_context.rounds import CheckServer, run_long_context
 from hyperloom.measure.long_context.staging import load_prompt_set
 from hyperloom.measure.long_context.tests.support import FakeServer, encode
 from hyperloom.measure.points import AcceptedMeasurement
@@ -114,7 +114,7 @@ def _checked(plan: LongContextPlan, point: Path, session: _Session, out: Path): 
     """The check of ``plan`` run as the runner runs it: the set read from the cache, the served context from the point."""
     prompts = load_prompt_set(plan, session.environ)
     with FakeServer() as fake:
-        asyncio.run(run_long_context(plan, prompts, _Host(fake), out, served_context=launch_served_context(point)))
+        asyncio.run(run_long_context(plan, prompts, _Host(fake), out, server=CheckServer(launch_served_context(point))))
     return long_context_of(plan, out)
 
 

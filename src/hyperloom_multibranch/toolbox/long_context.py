@@ -26,7 +26,8 @@ named set is used whatever the launch serves; one built longer than the launch s
 the reason. A set that is asked for, or found and not readable, is refused, never run without.
 
 *What is recorded.* :func:`long_context_of` reads the landed ``outputs.json``, grades every answer by substring match and
-states scores and outcomes (``LongContextResult``); it never says pass or fail. A prompt that errored or never ran counts as
+states scores and outcomes (``LongContextResult``), and which server answered (``server``: the test's held server, or
+the real-acceptance server an AgentX test with a golden layer boots for the check); it never says pass or fail. A prompt that errored or never ran counts as
 not passed and makes the check ``incomplete``, which never blocks. The toolbox adds the root's reading (``root``) when the
 test ends; ``hyperloom.contracts.long_context.refuses`` is the bar the rule gate applies to them.
 """
@@ -381,6 +382,7 @@ def _result(plan: LongContextPlan, found: OutputsFile) -> LongContextResult:
         trigger=plan.trigger,
         outputs=f"{LONG_CONTEXT_DIR}/{OUTPUTS_FILE}",
         bound=plan.bound,
+        server=found.server,
     )
 
 

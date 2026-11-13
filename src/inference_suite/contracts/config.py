@@ -47,6 +47,9 @@ class GoldenUse(str, Enum):
     APPLY = "apply"
     #: The D9 accuracy round: the base's golden layer is left out so eval scores the target model's own text.
     EXCLUDE = "exclude"
+    #: The server a check of the model's own text runs on: the golden layer with its acceptance simulation taken out
+    #: (``inference_suite.golden.real_acceptance``), so the draft stays and the target model accepts what it accepts.
+    REAL_ACCEPTANCE = "real_acceptance"
 
 
 class WorkloadKind(str, Enum):
@@ -768,6 +771,8 @@ class SuiteConfig:
             raise ConfigError("a scriptable round runs no eval: its script serves no endpoint lm-eval can query")
         if self.server.golden is GoldenUse.EXCLUDE and not (kind is WorkloadKind.NONE and self.eval.enabled):
             raise ConfigError("golden exclude is the accuracy round: no workload, eval enabled")
+        if self.server.golden is GoldenUse.REAL_ACCEPTANCE and kind is not WorkloadKind.NONE:
+            raise ConfigError("golden real_acceptance serves a check after the measured rounds, so it runs no workload")
         if self.mlperf is not None and self.mlperf.model != self.server.served_model_name:
             raise ConfigError(
                 f"the MLPerf harness requests {self.mlperf.model!r}, the server serves {self.server.served_model_name!r}"
@@ -784,8 +789,10 @@ class SuiteConfig:
             raise ConfigError(
                 f"base_digest_mismatch: the config names {self.server.base.digest}, the base gives {base.digest()}"
             )
-        if self.server.golden is GoldenUse.EXCLUDE and base.golden_al is None:
-            raise ConfigError("golden exclude needs a base with a golden layer, and this base has none")
+        if self.server.golden is not GoldenUse.APPLY and base.golden_al is None:
+            raise ConfigError(
+                f"golden {self.server.golden.value} needs a base with a golden layer, and this base has none"
+            )
         expected = _BASE_WORKLOAD.get(self.workload)
         if expected is not None and base.query.workload is not expected:
             raise ConfigError(
