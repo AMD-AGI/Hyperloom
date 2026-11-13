@@ -50,7 +50,7 @@ def _setup(cache: Path) -> LongContextSetup:
 
 
 async def _built(tmp_path: Path, **options: object) -> tuple[LocalHostedToolbox, dict[str, str]]:
-    """A toolbox of an InferenceX campaign (an AgentX one runs no long-context check) built with ``options``."""
+    """A toolbox of an InferenceX campaign (an AgentX one checks only the tests its gate reads) built with ``options``."""
     inferencex = replace(_acceptance(tmp_path), workload_kind=WorkloadKind.INFERENCEX)
     return await _built_agentx(tmp_path, inferencex, **options)
 
