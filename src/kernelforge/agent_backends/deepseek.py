@@ -27,7 +27,6 @@ from hyperloom_common.llm.deepseek_session import (
     HarnessLaunch,
     child_environment,
     load_harness_sdk,
-    max_tokens_from_env,
     normalize_run_result,
     sdk_failures,
     start_harness,
@@ -281,7 +280,6 @@ class DeepSeekHarnessBackend:
         with _as_forge_unavailable():
             sdk = load_harness_sdk()
             env = child_environment(spec.env, self._permission_mode(spec))
-            max_tokens = max_tokens_from_env(env)
         try:
             launch = HarnessLaunch(
                 dsh_home=self._harness_home(),
@@ -291,9 +289,9 @@ class DeepSeekHarnessBackend:
                 env=env,
                 request_timeout_sec=float(spec.timeout_sec or self.runtime.timeout_sec),
                 initialize_timeout_sec=float(self.runtime.options.get("initialize_timeout_sec", 120)),
-                max_tokens=max_tokens,
             )
-            return start_harness(sdk, launch)
+            with _as_forge_unavailable():
+                return start_harness(sdk, launch)
         except sdk_failures() as exc:
             raise DeepSeekHarnessUnavailableError(f"DeepSeek Harness initialization failed: {exc}") from exc
 

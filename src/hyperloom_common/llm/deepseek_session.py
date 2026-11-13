@@ -182,15 +182,16 @@ class HarnessLaunch:
     env: Mapping[str, str]
     request_timeout_sec: float
     initialize_timeout_sec: float = _INITIALIZE_TIMEOUT_SEC
-    max_tokens: int | None = None
 
 
 def start_harness(sdk: Any, launch: HarnessLaunch) -> Any:
     """Construct a harness and run its handshake, stopping the runtime if the handshake fails.
 
     Construction is lazy in the SDK, so only the handshake proves the binary
-    runs and the model and effort are accepted.
+    runs and the model and effort are accepted. The output-token cap comes from
+    ``launch.env``, so every caller that starts a runtime applies it.
     """
+    max_tokens = max_tokens_from_env(launch.env)
     workspace = str(launch.cwd)
     launch.dsh_home.mkdir(parents=True, exist_ok=True)
     compaction_patch = launch.dsh_home / _COMPACTION_PATCH_NAME
@@ -205,7 +206,7 @@ def start_harness(sdk: Any, launch: HarnessLaunch) -> Any:
         provider=DEEPSEEK_PROVIDER_ROUTE,
         model=launch.model,
         reasoning_effort=launch.reasoning_effort,
-        max_tokens=launch.max_tokens,
+        max_tokens=max_tokens,
         env=dict(launch.env),
         initialize_timeout_seconds=launch.initialize_timeout_sec,
         request_timeout_seconds=launch.request_timeout_sec,
@@ -383,7 +384,6 @@ class DeepSeekSession:
                 reasoning_effort=harness_reasoning_effort(self.reasoning_effort or DEFAULT_REASONING_EFFORT),
                 env=child_env,
                 request_timeout_sec=self.request_timeout_sec,
-                max_tokens=max_tokens_from_env(child_env),
             ),
         )
 

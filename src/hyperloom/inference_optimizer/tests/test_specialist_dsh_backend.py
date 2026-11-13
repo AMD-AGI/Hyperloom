@@ -493,9 +493,8 @@ def test_the_output_token_cap_is_passed_to_the_harness_runtime(tmp_path: Path) -
             cwd=tmp_path,
             model="claude-opus-5.5",
             reasoning_effort="high",
-            env={},
+            env={"HYPERLOOM_DSH_MAX_TOKENS": "64000"},
             request_timeout_sec=30.0,
-            max_tokens=64000,
         ),
     )
 
