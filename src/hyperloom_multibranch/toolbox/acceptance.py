@@ -37,7 +37,13 @@ from hyperloom.measure.surface import SurfaceViolation
 from hyperloom_multibranch.contracts.repo import ExperimentRepo
 from hyperloom_multibranch.contracts.toolbox import RequestRejected, WorkloadKind
 from hyperloom_multibranch.toolbox.agentx_checkpoint import CheckpointReferences
-from hyperloom_multibranch.toolbox.long_context import LongContextSetup, ServedLongContext, launch_served_context
+from hyperloom_multibranch.toolbox.long_context import (
+    LongContextSetup,
+    ServedLongContext,
+    agentx_gated,
+    decide_agentx,
+    launch_served_context,
+)
 from hyperloom_multibranch.toolbox.long_context import decide as decide_long_context
 from hyperloom_multibranch.toolbox.short_prompts import (
     ShortPromptSetup,
@@ -246,7 +252,8 @@ class AcceptanceSetup:
     ``long_context`` is the staged prompt set of the long-context check, which runs under the short-prompt check's lever
     list and always purposes, or when a request sets ``long_context_check``; ``None`` runs none. A
     :class:`~.long_context.ServedLongContext` gives each test the model's own set at the context its planned launch serves.
-    An AgentX campaign runs no long-context check: its tests' servers are not held up past their rounds for one.
+    An AgentX campaign runs it on the tests its gate reads instead (``long_context.decide_agentx``): BASELINE, every
+    integration merge TEST and FINAL's reproduction TEST; EXPLORE and CONFIRM tests run none.
 
     ``explore_accuracy`` off leaves the accuracy evaluation (GSM8K) out of a plain ``explore`` test (one that does not
     force the consistency check), whose accepted request then records ``accuracy=False``: the check was skipped, and the
@@ -350,7 +357,7 @@ class Acceptance:
         if not replay:
             _check_aiter_sources(planned, self._aiter_builds_missing)
         accepted = self._with_short_prompts(planned, recipe, candidate, request)
-        setup = await self._long_context_setup(planned)
+        setup = await self._long_context_setup(planned, request)
         accepted = self._with_long_context(accepted, recipe, candidate, request, setup)
         return Prepared(await self._with_checkpoint(accepted, request), digest)
 
@@ -372,12 +379,12 @@ class Acceptance:
             else accepted
         )
 
-    async def _long_context_setup(self, planned: object) -> LongContextSetup | None:
+    async def _long_context_setup(self, planned: object, request: TestRequest) -> LongContextSetup | None:
         """The prompt set a test planned as ``planned`` would run the long-context check with: the named one, or the
         model's own at the context the planned launch serves (read, and staged, in a worker thread: staging builds the
-        prompts with the model's tokenizer). An AgentX test gets none: its server is not held up for the check."""
+        prompts with the model's tokenizer). An AgentX test its gate does not read gets none, and stages nothing."""
         source = self._long_context
-        if self._workload is WorkloadKind.AGENTX:
+        if self._workload is WorkloadKind.AGENTX and not agentx_gated(request):
             return None
         if not isinstance(source, ServedLongContext):
             return source
@@ -389,7 +396,10 @@ class Acceptance:
         self, accepted: object, parent: Recipe, candidate: Recipe, request: TestRequest, setup: LongContextSetup | None
     ) -> object:
         """``accepted`` with the long-context check this request runs, when it runs one and ``accepted`` can carry it."""
-        plan = decide_long_context(request, parent, candidate, setup, self._patch_files)
+        if self._workload is WorkloadKind.AGENTX:
+            plan = decide_agentx(request, setup)
+        else:
+            plan = decide_long_context(request, parent, candidate, setup, self._patch_files)
         return (
             replace(accepted, long_context=plan)
             if plan is not None and isinstance(accepted, AcceptedMeasurement)
