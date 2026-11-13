@@ -4,7 +4,7 @@
 """Compose a round's launch from its frozen base and the config's layers.
 
 The order is fixed: base, user removals, user additions, candidate removals, candidate additions, the golden layer (when
-the round applies it), the guard (the round's model path, address and GPU mask), the runner's layer (with the
+the round applies it, or applies it less its acceptance simulation: ``real_acceptance``), the guard (the round's model path, address and GPU mask), the runner's layer (with the
 framework's metrics flag when the round scrapes ``/metrics``), then the profiler layer of a profile round. A layer's
 flag beats every earlier group of the same flag; a later alias of it wins only because the engine applies the last
 one. Neither the user nor the candidate may set what the guard or the runner owns, nor, under a golden layer, what
@@ -39,7 +39,12 @@ from inference_suite.contracts.launch import (
 )
 from inference_suite.contracts.report import FailedStep
 from inference_suite.frameworks import Framework, ServerFlags, framework_facts
-from inference_suite.golden import GOLDEN_OWNED_ENV_PREFIXES, golden_owned_settings, is_golden_owned_flag
+from inference_suite.golden import (
+    GOLDEN_OWNED_ENV_PREFIXES,
+    golden_owned_settings,
+    is_golden_owned_flag,
+    real_acceptance,
+)
 
 #: The mask that names the server's cards, by their machine numbers. ROCr enumerates only these, so no process of the
 #: server opens another card: under a HIP mask alone ROCr opens every GPU and keeps memory on each, which a test running
@@ -239,6 +244,16 @@ def _guard(server: ServerConfig, server_flags: ServerFlags) -> tuple[tuple[str, 
     return tuple(args), masks
 
 
+def _golden_layer(use: GoldenUse, base: BaseLaunch) -> tuple[tuple[str, ...], Mapping[str, str]] | None:
+    """The golden layer's args and env as the round's golden ``use`` applies them on ``base``; ``None`` for none."""
+    golden = base.golden_al
+    if golden is None or use is GoldenUse.EXCLUDE:
+        return None
+    if use is GoldenUse.REAL_ACCEPTANCE:
+        return real_acceptance(golden.args, golden.env)
+    return golden.args, golden.env
+
+
 def compose(config: SuiteConfig, base: BaseLaunch, facts: RoundFacts) -> Launch | Refusal:
     """The launch ``config`` runs on ``base``, or why none can run.
 
@@ -269,9 +284,10 @@ def compose(config: SuiteConfig, base: BaseLaunch, facts: RoundFacts) -> Launch 
     composer = _Composer(base)
     composer.apply_delta(server.user, LayerSource.USER)
     composer.apply_delta(server.candidate, LayerSource.CANDIDATE)
-    if server.golden is GoldenUse.APPLY and base.golden_al is not None:
-        composer.add_args(base.golden_al.args, LayerSource.GOLDEN)
-        composer.set_env(base.golden_al.env, LayerSource.GOLDEN)
+    golden = _golden_layer(server.golden, base)
+    if golden is not None:
+        composer.add_args(golden[0], LayerSource.GOLDEN)
+        composer.set_env(golden[1], LayerSource.GOLDEN)
     guard_args, guard_env = _guard(server, server_flags)
     composer.add_args(guard_args, LayerSource.GUARD)
     composer.set_env(guard_env, LayerSource.GUARD)

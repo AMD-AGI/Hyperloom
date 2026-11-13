@@ -309,7 +309,8 @@ class Launch:
 
     ``entrypoint`` is the server command before its flags: the framework's server module under the framework python
     the round probed, not the base's ``PATH`` spelling. ``golden`` is the golden layer when the round applied it; such
-    a launch forces acceptance, so its output is not the target model's own text.
+    a launch forces acceptance, so its output is not the target model's own text. A ``real_acceptance`` launch applied
+    the golden layer less its simulation: its draft is the golden one, its output the target model's own.
     """
 
     base: BaseLaunch
@@ -330,8 +331,8 @@ class Launch:
         if not _FIELDS.string_tuple(self.entrypoint, "the launch entrypoint") or not all(self.entrypoint):
             raise LaunchError(f"the launch entrypoint must be non-empty words, got {self.entrypoint!r}")
         object.__setattr__(self, "golden_use", _FIELDS.enum(GoldenUse, self.golden_use, "the golden use"))
-        if self.golden_use is GoldenUse.EXCLUDE and self.base.golden_al is None:
-            raise LaunchError("golden exclude needs a base with a golden layer")
+        if self.golden_use is not GoldenUse.APPLY and self.base.golden_al is None:
+            raise LaunchError(f"golden {self.golden_use.value} needs a base with a golden layer")
         _FIELDS.unique([entry.name for entry in self.env_sources], "launch env names")
         if self.framework.name.value != self.base.framework:
             raise LaunchError(f"the launch runs {self.framework.name.value}, its base {self.base.framework}")

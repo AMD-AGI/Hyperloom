@@ -12,7 +12,9 @@
 * one arm of a concurrency sweep boots the inference server once and benches the levels from high to low on it, the
   way ``conc_sweep`` does; a graded arm then evaluates once on that server. An arm whose levels must not share a
   server (``BenchmarkPoint.sweeps_on_cold_servers``), or whose server the lifecycle cannot hold, boots one per level;
-* accuracy is the ``RUN_EVAL`` switch in the point's own YAML, which must say what the caller asked for.
+* accuracy is the ``RUN_EVAL`` switch in the point's own YAML, which must say what the caller asked for;
+* an AgentX test's planned long-context check runs after its measured round, on that server, or with a golden layer on a
+  check server booted on its cards once it is down: the measured launch less the acceptance simulation, torn down after.
 
 Nothing in the old flow changes: this file only calls what ``orchestrator.actions.executors`` exports.
 """
@@ -35,7 +37,7 @@ from pathlib import Path
 from typing import Any
 
 import yaml
-from inference_suite.contracts import FailedStep, RunLayout
+from inference_suite.contracts import FailedStep
 
 from hyperloom.common.benchmark_config import BenchmarkPoint, BenchmarkPointError, read_benchmark_point
 from hyperloom_common.env import is_truthy
@@ -48,6 +50,7 @@ from hyperloom.common.outside_facts import (
     ENV_TP,
     ROCR_VISIBLE_DEVICES_ENV,
 )
+from hyperloom.contracts.long_context import LONG_CONTEXT_HELD, LONG_CONTEXT_REAL_ACCEPTANCE
 from hyperloom.contracts.measurement import PhaseTiming, SandboxFacts
 from hyperloom.measure.attachments import AttachmentError, place_attachments, substitute
 from hyperloom.measure.accuracy import read_accuracy
@@ -114,6 +117,7 @@ from hyperloom.measure.socket import MeasurementTimeout, RoundOutcome, TestCall,
 from hyperloom.measure.spec import Attachment
 from hyperloom.measure.spec import EnvRoot as SpecEnvRoot
 from hyperloom.orchestrator.actions.executors import (
+    CHECK_SERVER_ENVS,
     ORCHESTRATOR_CANCELLED_RETURNCODE,
     SESSION_TIME_EXHAUSTED_RETURNCODE,
     RoundFolder,
@@ -144,12 +148,6 @@ _STOP_RETURNCODES = {
 }
 _BOOT_ONLY_NOTE = "server_lifecycle_boot_only"
 _OUTPUT_POLL_SEC = 5.0
-_LOG_TAIL_CHARS = 64 * 1024
-#: How far back a log is searched for the refusal of an evaluation request, in blocks that overlap by a line's length.
-_MIB = 1 << 20
-_REFUSAL_SCAN_CHARS = 16 * _MIB
-_REFUSAL_BLOCK_CHARS = _MIB
-_REFUSAL_BLOCK_OVERLAP_CHARS = 4096
 _ACCURACY = "accuracy"
 _UTF8 = "utf-8"
 _PROFILE = "profile"
@@ -189,7 +187,10 @@ _WARMUP_DISCARDED = "run_grid_warmup_discarded_first"
 _CHECK_SKIPPED = "short_prompt_check skipped: test failed"
 _LONG_CONTEXT_SKIPPED = "long_context_check skipped: test failed"
 _NOT_HELD = "the test's server was not held up for the check (its framework's lifecycle cannot hold one)"
-_NOT_CHECKED = "the test's server was not held up for the check (an AgentX test runs no accuracy check)"
+_NOT_CHECKED = "the test's server was not held up for the check (an AgentX test holds no server for it)"
+#: The boot round of an AgentX test's real-acceptance check server, and what its check records when it did not come up.
+_CHECK_SERVER = "check_server"
+_CHECK_SERVER_FAILED = "check server did not start: {why}"
 _WARMUP_TPUT = "warmup_round_tput"
 
 
@@ -221,6 +222,8 @@ class _Run:
     phases: PhaseRecorder = field(default_factory=PhaseRecorder)
     #: What the accuracy checks left on the test's own server before its teardown; ``None`` until they ran there.
     held: HeldAnswers | None = None
+    #: Whether the long-context check wrote its outputs on a server (or why a check server gave none).
+    long_context_ran: bool = False
     #: The ruppell that traces the test's server (a profile's); ``None`` when it runs untraced.
     traced: ruppell.Tracer | None = None
 
@@ -622,11 +625,13 @@ def _free_port_for(point: Path, server_lifecycle: dict[str, Any] | None) -> Iter
         yield pinned
 
 
-async def _grid(run: _Run, point: int, name: str, **launch: Any) -> VariantResult:
-    """One ``run_grid`` call for the point at index ``point``: ``launch`` its GridLaunch, and its base_extra_envs."""
+async def _grid(run: _Run, point: int, name: str, *, watch_boot: bool = True, **launch: Any) -> VariantResult:
+    """One ``run_grid`` call for the point at index ``point``: ``launch`` its GridLaunch, and its base_extra_envs. A boot
+    not ``watch_boot`` is bounded by its round's own boot deadline alone, so its timeout never cancels the test."""
     call, envs = run.call, launch.pop("base_extra_envs", None)
     launch.setdefault("warmup_round", name == _WARMUP)  # the held warmup draws its own prompts (_held_rounds)
-    with _free_port_for(call.points[point], launch.get("server_lifecycle")) as base_yaml, _booting(run, point, launch):
+    watched = _booting(run, point, launch) if watch_boot else contextlib.nullcontext()
+    with _free_port_for(call.points[point], launch.get("server_lifecycle")) as base_yaml, watched:
         started = time.time()
         results = await run_grid(
             grid=[GridVariant(name, unset_envs=run.unset_envs)],
@@ -683,6 +688,20 @@ def _checks_held(call: TestCall) -> bool:
     return planned and _point(call.points[0]).holds_accuracy_checks
 
 
+def _agentx_check_server(call: TestCall) -> str | None:
+    """The server an AgentX test's planned long-context check asks (``None`` for no such check): its measured one, or a
+    real-acceptance one when the session base has a golden layer, whose measured text is not the model's own."""
+    if call.long_context is None or call.kind != _TEST or not _point(call.points[0]).agentx:
+        return None
+    base = None if call.session_facts is None else call.session_facts.base_launch
+    return LONG_CONTEXT_HELD if base is None or base.golden_al is None else LONG_CONTEXT_REAL_ACCEPTANCE
+
+
+def _stays_up(call: TestCall) -> bool:
+    """Whether the test's last round leaves its server up for a check it holds or an AgentX check on that server."""
+    return _checks_held(call) or _agentx_check_server(call) == LONG_CONTEXT_HELD
+
+
 async def _held_rounds(run: _Run, lifecycle: _Lifecycle, warm: bool) -> None:
     """The warmup bench when ``warm``, the measured bench and, for a graded test, the evaluation (``_evaluate``), on one
     server; then the accuracy checks on it (``_checks_held``). A bench that followed the evaluation started on the KV pool it left full, and
@@ -697,7 +716,7 @@ async def _held_rounds(run: _Run, lifecycle: _Lifecycle, warm: bool) -> None:
             run,
             0,
             _TEST,
-            server_lifecycle=lifecycle.settings(cleanup=not (run.call.accuracy or _checks_held(run.call))),
+            server_lifecycle=lifecycle.settings(cleanup=not (run.call.accuracy or _stays_up(run.call))),
             server_already_ready=warm,
             base_extra_envs=bench_envs,
             warmup_before_measure=False,
@@ -705,6 +724,7 @@ async def _held_rounds(run: _Run, lifecycle: _Lifecycle, warm: bool) -> None:
         run.add(0, measured)
         await _evaluate(run, lifecycle, 0)
         await _held_checks(run, lifecycle)
+        await _agentx_long_context(run, lifecycle)
     finally:
         lifecycle.teardown()
 
@@ -721,7 +741,7 @@ async def _evaluate(run: _Run, lifecycle: _Lifecycle, point: int) -> None:
     """A graded test's evaluation from the point at index ``point``, after its last bench, on the server it left up;
     none after a failed bench or a stop. One that fails fails the test's accuracy, never a bench's reading."""
     if run.call.accuracy and run.stopped_rc is None and not _test_failed(run):
-        held = lifecycle.settings(cleanup=not _checks_held(run.call))
+        held = lifecycle.settings(cleanup=not _stays_up(run.call))
         launch = {"server_already_ready": True, "warmup_before_measure": False, "evaluation_only": True}
         run.evaluation = await _grid(run, point, _EVAL, server_lifecycle=held, base_extra_envs=_EVAL_ENVS, **launch)
         run.add(point, run.evaluation)
@@ -732,10 +752,51 @@ async def _held_checks(run: _Run, lifecycle: _Lifecycle) -> None:
     call = run.call
     if not _checks_held(call) or run.stopped_rc is not None or _test_failed(run):
         return
-    serving = Serving(f"http://127.0.0.1:{lifecycle.port}", _model_of(call))
+    run.held = await _ask_held(run, lifecycle, _held_checks_of(call))
+
+
+async def _ask_held(run: _Run, lifecycle: _Lifecycle, checks: HeldChecks) -> HeldAnswers:
+    """Ask ``checks`` of the server up on the lifecycle's port; the flush's note goes on the test."""
+    serving = Serving(f"http://127.0.0.1:{lifecycle.port}", _model_of(run.call))
     server = HeldServer(serving, lifecycle.framework, lambda: run.stopped_rc is not None)
-    run.held = await run_held_checks(_held_checks_of(call), server, run.phases)
-    run.notes.append(run.held.flush)
+    held = await run_held_checks(checks, server, run.phases)
+    run.notes.append(held.flush)
+    run.long_context_ran = checks.long_context is not None
+    return held
+
+
+async def _agentx_long_context(run: _Run, lifecycle: _Lifecycle) -> None:
+    """An AgentX test's long-context check, after its measured round; none for a test that failed or is stopping.
+
+    Without a golden layer it asks the measured server, which that round left up. With one, the measured server is down
+    by now, and a check server boots on the same cards, port and pid directory from the measured launch less the golden
+    layer's acceptance simulation (``CHECK_SERVER_ENVS``), bounded by the point's boot timeout; one that does not come up,
+    a stop of the run included, makes the check ``incomplete`` with why and never fails the measured test. The
+    short-prompt check stays unheld either way.
+    """
+    server = _agentx_check_server(run.call)
+    if server is None or run.stopped_rc is not None or _test_failed(run):
+        return
+    checks = dataclasses.replace(_held_checks_of(run.call), short_prompts=None, server=server)
+    if server == LONG_CONTEXT_HELD:
+        await _ask_held(run, lifecycle, checks)
+        return
+    boot = await _grid(
+        run,
+        0,
+        _CHECK_SERVER,
+        watch_boot=False,
+        server_lifecycle=lifecycle.settings(cleanup=False),
+        base_extra_envs=dict(CHECK_SERVER_ENVS),
+        warmup_before_measure=False,
+        lifecycle_boot_only=True,
+    )
+    if _is_failure(boot):
+        why = (boot.error or boot.error_class or "its boot round failed").strip()
+        run.long_context_ran = True
+        await long_context_unheld(checks, _CHECK_SERVER_FAILED.format(why=why))
+        return
+    await _ask_held(run, lifecycle, checks)
 
 
 def _runner_of(call: TestCall) -> Callable[[_Run], Awaitable[None]]:
@@ -941,7 +1002,7 @@ async def _short_prompts(run: _Run) -> None:
 
 async def _long_context_unheld(run: _Run) -> None:
     """The long-context check of a test whose server was not held up for it (one that was ran it there)."""
-    if run.held is None:
+    if not run.long_context_ran:
         await long_context_unheld(_held_checks_of(run.call), _unheld_reason(run.call))
 
 
@@ -1089,42 +1150,6 @@ def _rounds(run: _Run, point: int, result: VariantResult) -> list[RoundOutcome]:
     return rounds
 
 
-def _read_tail(path: str | None) -> str:
-    if not path:
-        return ""
-    try:
-        with open(path, "rb") as handle:
-            handle.seek(0, os.SEEK_END)
-            handle.seek(max(0, handle.tell() - _LOG_TAIL_CHARS))
-            return handle.read().decode(_UTF8, errors="replace")
-    except OSError:
-        return ""
-
-
-def _read_refusal(path: Path) -> str:
-    """The last refusal of an evaluation request the log at ``path`` holds wherever it is in the log, else ``""``.
-
-    The evaluation client prints a refusal when it happens and, once its retries are spent, one traceback for each
-    request that gave up, thousands of them: the tail of the log is those tracebacks and the refusal sits far above.
-    """
-    try:
-        with open(path, "rb") as handle:
-            end = handle.seek(0, os.SEEK_END)
-            floor = max(0, end - _REFUSAL_SCAN_CHARS)
-            while end > floor:
-                start = max(floor, end - _REFUSAL_BLOCK_CHARS)
-                handle.seek(start)
-                block = handle.read(end - start).decode(_UTF8, errors="replace")
-                # The block starts mid-line unless it starts the file; the overlap of the next block holds that line whole.
-                found = log_causes.bad_request(block if start == 0 else block.partition("\n")[2])
-                if found:
-                    return found
-                end = start + _REFUSAL_BLOCK_OVERLAP_CHARS if start > floor else floor
-    except OSError:
-        return ""
-    return ""
-
-
 def _image_digest(call: TestCall) -> str | None:
     environment = call.environment
     return getattr(environment, "image_digest", None) or getattr(environment, "base_image_digest", None)
@@ -1151,40 +1176,12 @@ def _clean_returncode(run: _Run) -> int:
     return HOSTED_INFRA_FAILURE_RC if run.case_failed else int(run.traceless)
 
 
-def _failure_logs(failing: list[VariantResult]) -> list[str]:
-    """The tails of the server log and of the client's and the evaluation's stderr of every result with a failed round.
-
-    The launcher's pipe seldom holds the cause: the server prints a refused flag or a crash into ``server.log``, and the
-    client or the evaluation prints a refused request into its own stderr in the round's run_dir.
-    """
-    logs: list[str] = []
-    for result in failing:
-        if result.server_log_path:
-            logs.append(_read_tail(result.server_log_path))
-        if result.workspace:
-            layout = RunLayout(Path(result.workspace))
-            stderr_logs = [layout.client_stderr, layout.eval_stderr]
-            logs.extend(_read_tail(str(path)) for path in stderr_logs)
-            logs.extend(_read_refusal(path) for path in stderr_logs)
-    return logs
-
-
-def _client_logs(failing: list[VariantResult]) -> list[str]:
-    """The tails of the AgentX replay client's own log in the run_dir of every result with a failed round.
-
-    The round's report names only the client's exit code; what the client was refused is in this log alone.
-    """
-    return [
-        _read_tail(str(RunLayout(Path(result.workspace)).agentx_client_log)) for result in failing if result.workspace
-    ]
-
-
 def _boot_timeout_detail(run: _Run, failing: list[VariantResult]) -> str:
     """What the boot guard saw when it ended the test, or ``""`` when it did not: the limit, the time aiter's module builds
     were left out of it, and where the log stopped."""
     if run.boot is None or run.boot.expired_after is None or run.stopped_rc != ORCHESTRATOR_CANCELLED_RETURNCODE:
         return ""
-    logs = [_read_tail(result.server_log_path) for result in failing]
+    logs = [log_causes.log_tail(result.server_log_path) for result in failing]
     ends = log_causes.last_line(next((text for text in logs if text), ""))
     detail = f"the server was not ready within {run.boot.expired_after:.0f}s"
     if run.boot.building_sec > 0:
@@ -1223,8 +1220,8 @@ def _ended(run: _Run) -> _Ended:
     returncode = failed[0].returncode if failed else _clean_returncode(run)
     stderr = "\n".join([*(result.error for _, result in run.results if result.error), *notes])
     evidence = FailureEvidence(
-        logs=(stderr, *_failure_logs(failing)),
-        client_logs=tuple(_client_logs(failing)),
+        logs=(stderr, *log_causes.failure_logs(failing)),
+        client_logs=tuple(log_causes.client_logs(failing)),
         detail=detail,
         step_failure=_step_failure(failing),
         unrun=_unrun(failing),
