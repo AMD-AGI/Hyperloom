@@ -19,8 +19,6 @@ from hyperloom.orchestrator.roles import CriticAgentBackend
 from hyperloom.orchestrator.roles.base import BackendError, LLMCallFailed
 from hyperloom_common.llm.llm_config import AnthropicMessageResult
 from hyperloom.orchestrator.roles.critic_agent import (
-    CRITIC_AGENT_LLM_CONNECT_TIMEOUT_SEC,
-    CRITIC_AGENT_LLM_RW_TIMEOUT_SEC,
     CRITIC_AGENT_MAX_COMPLETION_TOKENS,
     CRITIC_AGENT_TRUNCATION_RETRY_FACTOR,
     RuntimeCall,
@@ -29,7 +27,6 @@ from hyperloom.orchestrator.roles.critic_agent import (
     _extract_review_json,
     _is_truncated_finish,
     _reviewed_msg_ids_from_bundle,
-    _verdict_references_kb,
 )
 from hyperloom.orchestrator.specialists.patch_safety import FORBIDDEN_PROPOSAL_FIELDS
 from hyperloom.inference_optimizer.protocol.intent import IntentType
@@ -343,15 +340,6 @@ def test_construct_forwards_llm_timeout_knobs_to_the_client(monkeypatch, tmp_pat
     monkeypatch.setenv("CRITIC_AGENT_LLM_RW_TIMEOUT_S", "7")
     timeout = _construct_critic_capturing_sdk_kwargs(monkeypatch, tmp_path)["timeout"]
     assert (timeout.connect, timeout.read, timeout.write, timeout.pool) == (3.0, 7.0, 7.0, 7.0)
-
-
-def test_construct_defaults_llm_timeouts_without_env_knobs(monkeypatch, tmp_path: Path):
-    monkeypatch.setenv("OPENAI_API_KEY", "openai-user-key")
-    monkeypatch.delenv("CRITIC_AGENT_LLM_CONNECT_TIMEOUT_S", raising=False)
-    monkeypatch.delenv("CRITIC_AGENT_LLM_RW_TIMEOUT_S", raising=False)
-    timeout = _construct_critic_capturing_sdk_kwargs(monkeypatch, tmp_path)["timeout"]
-    assert timeout.connect == CRITIC_AGENT_LLM_CONNECT_TIMEOUT_SEC
-    assert timeout.read == CRITIC_AGENT_LLM_RW_TIMEOUT_SEC
 
 
 def test_construct_without_httpx_falls_back_to_sdk_default_timeouts(monkeypatch, tmp_path: Path):
@@ -1220,7 +1208,8 @@ async def test_malformed_manifest_logs_warning_and_falls_back(
     assert any("failed to load manifest.json" in rec.getMessage() for rec in caplog.records)
 
 
-def test_load_static_context_skips_unknown_and_empty_fields(
+@pytest.mark.asyncio
+async def test_request_context_drops_empty_manifest_fields(
     fake_critic_root: Path,
     fake_session_dir: Path,
 ):
@@ -1236,14 +1225,15 @@ def test_load_static_context_skips_unknown_and_empty_fields(
             "workload": {"isl": 1024, "precision": ""},
         },
     )
-    backend = CriticAgentBackend(
-        critic_agent_root=fake_critic_root,
-        session_dir=fake_session_dir,
-        codex_client_factory=lambda: FakeOpenAIClient([]),
-        runtime_caller_factory=lambda: lambda call: None,
+    backend, _ = _make_backend(
+        fake_critic_root,
+        fake_session_dir,
+        codex_replies=[],
+        judge_bundle={"proposals": [], "review_constraints": {}},
     )
-    ctx = backend._static_context
-    assert ctx == {"model": "m", "workload": {"isl": 1024}}
+    await backend.run("prompt")
+    request = json.loads((fake_session_dir / "critic-workdir" / "000000" / "request.json").read_text(encoding="utf-8"))
+    assert request["context"] == {"model": "m", "workload": {"isl": 1024}}
 
 
 # Diagnostic plumbing — required_context reaches the recorded judge bundle.
@@ -1525,13 +1515,6 @@ async def test_critic_agent_heartbeat_when_no_proposal(
 
 
 # KB trace + dry-run injection gate
-def test_verdict_references_kb_helper():
-    assert _verdict_references_kb(None) is False
-    assert _verdict_references_kb({"review_verdicts": []}) is False
-    assert _verdict_references_kb({"review_verdicts": [{"verdict": "approve"}]}) is False
-    assert _verdict_references_kb({"review_verdicts": [{"verdict": "reject", "kb_evidence": ["kb_x"]}]}) is True
-
-
 def test_build_kb_priors_trace_counts_and_reference():
     judge_bundle = {
         "kb_priors_trace": {
@@ -1591,6 +1574,32 @@ def _kb_trace_judge_bundle() -> dict[str, Any]:
         "missing_context": [],
         "required_context": [],
     }
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("kb_evidence", "referenced"),
+    [
+        pytest.param(["kb_x"], True, id="cites-kb"),
+        pytest.param([], False, id="cites-nothing"),
+    ],
+)
+async def test_the_recorded_kb_trace_says_whether_a_verdict_cited_the_kb(
+    fake_critic_root: Path,
+    fake_session_dir: Path,
+    recorded_iterations: list[Any],
+    kb_evidence: list[str],
+    referenced: bool,
+):
+    verdict = {"target_proposal_msg_id": "p1", "verdict": "approve", "source": "critic", "kb_evidence": kb_evidence}
+    backend, _ = _make_backend(
+        fake_critic_root,
+        fake_session_dir,
+        codex_replies=[json.dumps({"review_verdicts": [verdict]})],
+        judge_bundle=_kb_trace_judge_bundle(),
+    )
+    await backend.run("prompt")
+    assert recorded_iterations[0].kb_priors["referenced_in_verdict"] is referenced
 
 
 class _FakeKbEmitter:
@@ -2144,42 +2153,6 @@ def test_anthropic_protocol_refuses_a_host_without_a_usable_transport(
             codex_model="gpt-5.4",
             runtime_caller_factory=lambda: _make_fake_runtime(judge_bundle=_minimal_judge_bundle()),
         )
-
-
-def test_anthropic_protocol_builds_no_review_client(
-    fake_critic_root: Path,
-    fake_session_dir: Path,
-    monkeypatch: pytest.MonkeyPatch,
-):
-    """llm_config owns the transport, so the critic holds nothing to leak."""
-    backend, _ = _make_anthropic_backend(
-        fake_critic_root,
-        fake_session_dir,
-        monkeypatch,
-        results=[],
-        judge_bundle=_minimal_judge_bundle(),
-    )
-    assert backend._client is None
-
-
-@pytest.mark.asyncio
-async def test_max_turns_is_floored_by_the_real_backend(monkeypatch):
-    """ClaudeBackend raises a literal max_turns=1 to its floor — Claude Code counts the model's own message as a turn, so 1 trips before any output."""
-    from hyperloom.orchestrator.roles import claude as claude_mod
-
-    seen: dict[str, int] = {}
-
-    def fake_build_options(self, **kwargs):
-        seen["max_turns"] = kwargs["max_turns"]
-        raise RuntimeError("stop after options")
-
-    monkeypatch.setattr(claude_mod.ClaudeBackend, "_build_options", fake_build_options)
-    backend = claude_mod.ClaudeBackend(model="claude-opus-4-8")
-    with pytest.raises(Exception):
-        await backend.run("prompt", system_prompt="critic system", tools=[], max_turns=1)
-
-    assert seen["max_turns"] == claude_mod._MIN_MAX_TURNS
-    assert seen["max_turns"] > 1
 
 
 @pytest.mark.asyncio

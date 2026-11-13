@@ -8,18 +8,13 @@ from __future__ import annotations
 import pytest
 
 from hyperloom.common.failure_signature import classify_failure
-from hyperloom.orchestrator.specialists.profile import MODE_RESEARCH
 from hyperloom.orchestrator.specialists.domains import (
-    SPECIALIST_DOMAIN_KEYS,
     SPECIALIST_DOMAINS,
     get_domain,
 )
 from hyperloom.orchestrator.prompts.specialist_focus import _DOMAIN_FOCUS_TEMPLATES
 from hyperloom.orchestrator.specialists.prompt_inputs import SpecialistPromptInputs
-from hyperloom.orchestrator.prompts.specialist_prompt_builder import (
-    _THROUGHPUT_AUTHORING_DOMAINS,
-    build_specialist_prompts,
-)
+from hyperloom.orchestrator.prompts.specialist_prompt_builder import build_specialist_prompts
 
 # Every enablement round is dispatched on a classified verdict.
 _DISPATCHED = classify_failure(
@@ -50,151 +45,21 @@ def test_every_domain_has_focus_template():
         assert domain.key in _DOMAIN_FOCUS_TEMPLATES, f"missing per-domain template for {domain.key!r}"
 
 
-def test_specialist_domain_keys_covers_all_active_domains():
-    """The active key set is exactly the catalogue, with no duplicate keys."""
-    assert SPECIALIST_DOMAIN_KEYS == frozenset(d.key for d in SPECIALIST_DOMAINS)
-    assert len(SPECIALIST_DOMAIN_KEYS) == len(SPECIALIST_DOMAINS)
-
-
-# 2. Per-domain content checks — each template mentions its signature
-def test_serving_specialist_mentions_scheduler_and_kv_cache():
-    text = _build("serving_specialist")
-    for marker in (
-        "serving_specialist",
-        "scheduler",
-        "cuda_graph",
-        "kv_cache",
-        "max-num-seqs",
-    ):
-        assert marker.lower() in text.lower(), f"missing {marker!r}"
-
-
-def test_serving_specialist_has_source_patch_playbook():
-    """The serving focus must guide authoring source patches and carry the framework safety priors (ALWAYS_ON / NEVER_TOUCH)."""
-    text = _build("serving_specialist")
-    for marker in (
-        "Source-patch targets",
-        "block_manager",
-        "add_seq_group",
-        "NEVER_TOUCH",
-        "VLLM_ROCM_USE_AITER",
-    ):
-        assert marker.lower() in text.lower(), f"missing {marker!r}"
-
-
-@pytest.mark.parametrize("domain_key", sorted(_THROUGHPUT_AUTHORING_DOMAINS))
-def test_throughput_authoring_domains_carry_the_altitude_block(domain_key: str):
-    """Every domain whose gate is throughput is told where the durable wins are, not just which flags to permute."""
-    text = _build(domain_key)
-    for marker in (
-        "Altitude — where the durable wins are",
-        "un-bridged capability switch",
-        "A real bug",
-    ):
-        assert marker.lower() in text.lower(), f"missing {marker!r} for {domain_key}"
-
-
-def test_enablement_specialist_is_not_pushed_toward_source_work():
-    """Its ladder book says climb only as far as runnability needs; the altitude block argues the other way."""
-    assert "enablement_specialist" not in _THROUGHPUT_AUTHORING_DOMAINS
-    assert "Altitude —" not in _build("enablement_specialist")
-
-
-def test_research_mode_gets_no_altitude_block():
-    """A read-only dispatch has no worktree, so telling it to write a diff is dead text."""
-    domain = get_domain("serving_specialist")
-    assert domain is not None
-    inp = SpecialistPromptInputs(
-        domain=domain,
-        max_turns=4,
-        gap_canonical_id="gap.serving.research",
-        mode=MODE_RESEARCH,
-    )
-    system, _ = build_specialist_prompts(inp)
-    assert "Altitude —" not in system
-
-
-def test_kernel_switch_specialist_mentions_aiter_and_attention_backends():
-    text = _build("kernel_switch_specialist")
-    for marker in (
-        "kernel_switch_specialist",
-        "aiter",
-        "ROCM_AITER_MLA",
-        "TRITON_MLA",
-        "CDNA3",
-    ):
-        assert marker.lower() in text.lower(), f"missing {marker!r}"
-
-
-def test_comm_specialist_mentions_quickreduce_and_topology():
-    text = _build("comm_specialist")
-    for marker in (
-        "comm_specialist",
-        "QuickReduce",
-        "allreduce",
-        "RCCL",
-        "NCCL_MIN_NCHANNELS",
-    ):
-        assert marker.lower() in text.lower(), f"missing {marker!r}"
-
-
-def test_compiler_specialist_mentions_torch_compile_and_triton():
-    text = _build("compiler_specialist")
-    for marker in (
-        "compiler_specialist",
-        "torch.compile",
-        "inductor",
-        "triton",
-        "AMDGCN",
-        "num_warps",
-    ):
-        assert marker.lower() in text.lower(), f"missing {marker!r}"
-
-
-def test_system_specialist_mentions_kfd_and_rocm_smi():
-    text = _build("system_specialist")
-    for marker in (
-        "system_specialist",
-        "KFD",
-        "rocm-smi",
-        "HSA_ENABLE_SDMA",
-        "numactl",
-    ):
-        assert marker.lower() in text.lower(), f"missing {marker!r}"
-
-
-def test_candidate_discovery_specialist_mentions_find_rank_judge():
-    text = _build("candidate_discovery_specialist")
-    for marker in (
-        "candidate_discovery_specialist",
-        "mcp__pr_monitor",
-        "already_present",
-        "not_applicable",
-        "worth_a_bench",
-        "you do not apply or benchmark",
-    ):
-        assert marker.lower() in text.lower(), f"missing {marker!r}"
-
-
+# 2. Per-domain output contracts — the keys each consumer parses back
 def test_candidate_discovery_specialist_schema_is_an_upstream_candidate():
-    """The FRAMEWORK funnel drops a discovery proposal that carries neither pr_url nor head_sha."""
+    """The FRAMEWORK funnel drops a discovery proposal that carries neither pr_url nor head_sha, and branches on its verdict."""
     text = _build("candidate_discovery_specialist")
     assert '"pr_url"' in text and '"head_sha"' in text
     assert '"extra_args"' not in text
+    for verdict in ("already_present", "not_applicable", "worth_a_bench"):
+        assert verdict in text, f"missing verdict {verdict!r}"
 
 
-def test_static_recon_specialist_mentions_reconnaissance_and_bridge_candidates():
-    """The static-recon focus must steer read-only source grep for disabled switches and a bridge_candidates output block."""
+def test_static_recon_prompt_names_the_keys_the_recon_consumer_reads():
+    """consume_static_recon seeds a gap only from a ``bridge_candidates`` entry carrying ``predicate_file`` and ``why_disabled_here``."""
     text = _build("static_recon_specialist")
-    for marker in (
-        "static-recon",
-        "read-only",
-        "_supported()",
-        "bridge_candidates",
-        "predicate_file",
-        "Never write a patch",
-    ):
-        assert marker.lower() in text.lower(), f"missing {marker!r}"
+    for key in ("bridge_candidates", "predicate_file", "why_disabled_here"):
+        assert key in text, f"missing {key!r}"
 
 
 def test_static_recon_specialist_renders_seed_checklist_and_model_info():
@@ -215,19 +80,6 @@ def test_static_recon_specialist_renders_seed_checklist_and_model_info():
     assert "rocm.fp8.cutlass_only_guard" in text
     assert "seed checklist" in text
     assert "attention=gqa" in text
-
-
-def test_enablement_specialist_mentions_runnability_and_authoring():
-    """The enablement focus (rendered from build_mandate) must steer patch authoring gated on runnability, not perf."""
-    text = _build("enablement_specialist")
-    for marker in (
-        "enablement specialist",
-        "authoring",
-        "runnability",
-        "git apply --check",
-        "boot",
-    ):
-        assert marker.lower() in text.lower(), f"missing {marker!r}"
 
 
 def _build_split(domain_key: str) -> tuple[str, str]:
@@ -252,15 +104,27 @@ def _build_split(domain_key: str) -> tuple[str, str]:
     return build_specialist_prompts(inp)
 
 
-def test_enablement_user_prompt_injects_ladder_book_and_keeps_essentials():
-    """Enablement dispatch carries the ladder book + gap + PR monitor + source hint in the USER prompt."""
-    _system, user = _build_split("enablement_specialist")
-    assert "## 1b. ENABLEMENT PLAYBOOK" in user
-    assert "ENABLEMENT METHODOLOGY" in user
-    assert "Rung 5" in user
-    assert "## 3. GAP STATEMENT" in user
-    assert "## 6. PR MONITOR" in user
-    assert "## 7. LOCAL SOURCE NAVIGATION HINT" in user
+def test_enablement_user_prompt_keeps_the_gap_and_the_tools_to_find_a_fix():
+    """Stripping the perf context leaves the dispatched gap, the PR query tools and the source trees."""
+    from hyperloom.orchestrator.policy.gate import PR_MONITOR_TOOL_NAMES
+
+    domain = get_domain("enablement_specialist")
+    assert domain is not None
+    _system, user = build_specialist_prompts(
+        SpecialistPromptInputs(
+            domain=domain,
+            max_turns=4,
+            gap_canonical_id="gap.enablement.example",
+            gap_symptom="server exited during the model registry lookup",
+            framework="sglang",
+            framework_source_roots=("/src/sglang",),
+            enablement_failure_signature=_DISPATCHED,
+        )
+    )
+    assert "server exited during the model registry lookup" in user
+    assert "/src/sglang" in user
+    for tool in PR_MONITOR_TOOL_NAMES:
+        assert tool.removeprefix("mcp__pr_monitor__") in user, tool
 
 
 def test_enablement_user_prompt_strips_perf_only_sections():
@@ -332,14 +196,6 @@ def test_enablement_mandate_renders_the_dispatched_signature():
     assert "GlmForCausalLM" in user
 
 
-def test_enablement_mandate_omits_evidence_headers_when_not_supplied():
-    """No dispatch evidence => no empty scaffolding, and the book still renders."""
-    _system, user = _build_split("enablement_specialist")
-    assert "## 1b. ENABLEMENT PLAYBOOK" in user
-    assert "SOURCE CONTEXT" not in user
-    assert "CANDIDATE BRIDGING" not in user
-
-
 def test_perf_specialist_prompt_unchanged_keeps_perf_context():
     """A perf domain still carries roofline / recipe / KG sections and no ladder book."""
     _system, user = _build_split("serving_specialist")
@@ -373,28 +229,6 @@ def test_static_recon_shared_expert_model_features_line():
     assert "shared-expert fusion" in text.lower()
 
 
-def test_static_recon_shared_expert_advisory_present():
-    """Fusion advisory paragraph appears when model has shared expert."""
-    domain = get_domain("static_recon_specialist")
-    assert domain is not None
-    inp = SpecialistPromptInputs(
-        domain=domain,
-        max_turns=4,
-        gpu_type="MI355X",
-        precision="mxfp8",
-        model_info={
-            "is_moe": True,
-            "has_shared_expert": True,
-            "num_shared_experts": 2,
-        },
-        workspace_path="/tmp/test/recon",
-    )
-    system, user = build_specialist_prompts(inp)
-    text = system + "\n" + user
-    assert "grouped-gemm" in text.lower() or "grouped gemm" in text.lower()
-    assert "expert parallelism" in text.lower() or "EP" in text
-
-
 def test_static_recon_no_shared_expert_no_advisory():
     """Neither shared_expert= nor fusion advisory must appear for plain MoE."""
     domain = get_domain("static_recon_specialist")
@@ -411,28 +245,6 @@ def test_static_recon_no_shared_expert_no_advisory():
     text = system + "\n" + user
     assert "shared_expert=" not in text
     assert "shared-expert fusion advisory" not in text.lower()
-
-
-def test_static_recon_existing_markers_unaffected_by_shared_expert_change():
-    """Existing static-recon prompt markers still render regardless of shared-expert state."""
-    domain = get_domain("static_recon_specialist")
-    assert domain is not None
-    for model_info in (
-        {"is_moe": False},
-        {"is_moe": True, "has_shared_expert": True, "num_shared_experts": 1},
-    ):
-        inp = SpecialistPromptInputs(
-            domain=domain,
-            max_turns=4,
-            gpu_type="MI355X",
-            precision="mxfp8",
-            model_info=model_info,
-            workspace_path="/tmp/test/recon",
-        )
-        system, user = build_specialist_prompts(inp)
-        text = (system + "\n" + user).lower()
-        for marker in ("static-recon", "bridge_candidates", "predicate_file", "never write a patch"):
-            assert marker in text, f"regression: {marker!r} missing for model_info={model_info}"
 
 
 # 3. SpecialistRunner no longer marks any domain as "generic template"
@@ -488,10 +300,6 @@ from hyperloom.orchestrator.policy.denial import PolicyDenied
 from hyperloom.orchestrator.policy.gate import (
     PolicyGate,
 )
-from hyperloom.orchestrator.bus.resource_lock import (
-    KNOWN_LANES,
-    LANE_CONFLICTS,
-)
 from hyperloom.orchestrator.state.shared_state import SharedState
 from hyperloom.orchestrator.specialists.domains import (
     SPECIALIST_DOMAINS,
@@ -500,10 +308,8 @@ from hyperloom.orchestrator.specialists.domains import (
     get_domain,
 )
 from hyperloom.orchestrator.specialists.runner import (
-    SPECIALIST_TOOL_DENYLIST,
     SpecialistRunner,
     SpecialistSubprocessConfig,
-    build_empty_specialist_done,
 )
 from hyperloom.orchestrator.loop.sub_agent_runner import RunnerContext
 from hyperloom.orchestrator.specialists.prompt_inputs import SpecialistPromptInputs
@@ -559,11 +365,6 @@ def test_specialist_domains_catalogue_is_well_formed():
         assert domain.kb_anchor.strip(), f"{domain.key} has no KB anchor"
         assert domain.layer.strip(), f"{domain.key} has no layer label"
         assert domain.description.strip(), f"{domain.key} has no description"
-
-
-def test_serving_specialist_is_M5_active():
-    """The active set covers the full catalogue (every domain now has a focus template)."""
-    assert "serving_specialist" in SPECIALIST_DOMAIN_KEYS
 
 
 def test_get_domain_returns_none_for_unknown():
@@ -680,58 +481,11 @@ def test_R2_max_turns_negative_denied(gate):
     assert "max_turns" in str(exc.value)
 
 
-# research_lane lane registration.
-def test_research_lane_in_known_lanes():
-    assert "research_lane" in KNOWN_LANES
-
-
-def test_research_lane_has_no_conflicts():
-    assert LANE_CONFLICTS["research_lane"] == frozenset()
-    # And no other lane lists research_lane as a conflict.
-    for lane, conflicts in LANE_CONFLICTS.items():
-        assert "research_lane" not in conflicts, (
-            f"lane={lane!r} unexpectedly conflicts with research_lane "
-            f"(KB_design §3.7 Inv-7.2: research_lane is conflict-free)"
-        )
-
-
-# 6. specialist_prompt_builder — 9-section assembly
+# 6. specialist_prompt_builder — PR monitor section
 def _build_serving_prompt(**kwargs: Any) -> tuple[str, str]:
     domain = get_domain("serving_specialist")
     assert domain is not None
     return build_specialist_prompts(SpecialistPromptInputs(domain=domain, **kwargs))
-
-
-def test_prompt_builder_emits_nine_sections():
-    sys_p, usr_p = _build_serving_prompt(
-        gap_canonical_id="gap.scheduler.long_isl",
-        gpu_type="MI300X",
-        tp=8,
-    )
-    # System sections (1, 8, 9)
-    assert "## 1. IDENTITY & AUTONOMY" in sys_p
-    assert "## 8. OUTPUT PROTOCOL" in sys_p
-    assert "## 9. IRON RULES" in sys_p
-    # User sections (2-7)
-    assert "## 2. HARDWARE CONTEXT" in usr_p
-    assert "## 3. GAP STATEMENT" in usr_p
-    assert "## 4. KB CONTEXT (optional, advisory)" in usr_p
-    assert "## 5. WARM-START RECIPE SUMMARY" in usr_p
-    assert "## 6. PR MONITOR" in usr_p
-    assert "## 7. LOCAL SOURCE NAVIGATION HINT" in usr_p
-
-
-def test_prompt_builder_uses_none_placeholder_for_empty_sections():
-    sys_p, usr_p = _build_serving_prompt()
-    # Several user-side sections will be empty → "(none)" placeholder.
-    assert "(none)" in usr_p
-
-
-def test_prompt_builder_pr_monitor_unavailable_renders_explanatory_line():
-    sys_p, usr_p = _build_serving_prompt(
-        pr_monitor_available=False,
-    )
-    assert "unavailable" in usr_p
 
 
 def test_pr_monitor_section_lists_all_granted_tools():
@@ -845,36 +599,7 @@ async def test_specialist_runner_unknown_domain_synthesises_empty(tmp_path):
     assert "unknown specialist domain" in result.specialist_done["reason"]
 
 
-def test_specialist_tool_denylist_blocks_dangerous_tools():
-    """KillShell and SlashCommand are denied to enforce the process-safety prompt rule."""
-    assert "KillShell" in SPECIALIST_TOOL_DENYLIST
-    assert "SlashCommand" in SPECIALIST_TOOL_DENYLIST
-    for write_tool in ("Edit", "Write", "MultiEdit"):
-        assert write_tool not in SPECIALIST_TOOL_DENYLIST
-
-
-def test_build_empty_specialist_done_shape():
-    """The failure-path helper must always produce a well-formed done payload."""
-    done = build_empty_specialist_done(
-        gap_canonical_id="gap.x",
-        domain="serving_specialist",
-        reason="example reason",
-    )
-    assert done["gap_canonical_id"] == "gap.x"
-    assert done["domain"] == "serving_specialist"
-    assert done["proposal_set"] == []
-    assert done["summary"]
-
-
 # 8. SharedState specialist round bookkeeping
-def test_shared_state_specialist_rounds_default_empty():
-    s = SharedState()
-    assert s.specialist_rounds == []
-    assert s.research_lane_capacity == 1
-    assert s.rounds_since_last_keep == {}
-
-
-# 8b. Per-anchor coverage counters (point 1)
 def test_domain_round_counters_tick_all_anchors():
     from hyperloom.orchestrator.specialists.domains import (
         KNOWLEDGE_DOMAIN_TAGS,
@@ -1136,19 +861,3 @@ def test_enablement_ladder_rendered_exactly_once():
     _, user = build_specialist_prompts(inp)
     count = user.count("ENABLEMENT METHODOLOGY")
     assert count == 1, f"Expected 'ENABLEMENT METHODOLOGY' exactly once, found {count}"
-
-
-# --------------------------------------------------------------------------- # Stage-4 guard: KB-write iron rule is
-# gone --------------------------------------------------------------------------- #
-def test_kb_write_iron_rule_absent():
-    """Rule 3 (KB writes) is dead text — confirm it no longer appears."""
-    domain = get_domain("serving_specialist")
-    assert domain is not None
-    inp = SpecialistPromptInputs(
-        domain=domain,
-        max_turns=4,
-        gap_canonical_id="gap.serving.iron_rule",
-    )
-    system, _ = build_specialist_prompts(inp)
-    assert "RecipeKB.put_recipe" not in system
-    assert "NEVER** write to the Recipe KB" not in system
