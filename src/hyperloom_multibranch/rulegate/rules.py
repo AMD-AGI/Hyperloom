@@ -20,6 +20,7 @@ from hyperloom.contracts.measurement import Purpose, TestKind, TestRequest, Test
 from hyperloom_multibranch.contracts.judgement import AccuracyVerdict, Judgement, Verdict
 from hyperloom_multibranch.contracts.blackboard.interfaces import CommitQuery, GateRecords
 from hyperloom_multibranch.contracts.blackboard.records import BaselineRecord, TestRecord
+from hyperloom_multibranch.contracts.toolbox import agentx_gated
 from hyperloom_multibranch.rulegate import agentx, inferencex
 from hyperloom_multibranch.rulegate.accuracy import agentx_accuracy_ok, inferencex_accuracy_ok
 from hyperloom_multibranch.rulegate.baseline import (
@@ -35,7 +36,6 @@ from hyperloom_multibranch.rulegate.readings import (
     inferencex_reading,
     unscored_reading,
 )
-from hyperloom_multibranch.toolbox.long_context import agentx_gated
 
 
 #: The attachment id of a test that undoes a change its own agent found invalid, a file saying which.

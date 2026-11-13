@@ -852,7 +852,6 @@ def host_rules(spec: AgentSpec) -> list[str]:
     the variables it owns, how it keeps a change, its accuracy rule and, when the spec says why, that no source change
     can be kept. MB refuses or rejects a change that breaks one, whatever Arbor measured; the dossier lists them among
     the benchmark's rules."""
-
     point = ", ".join(f"{key} {value}" for key, value in _operating_point(spec.workload).items())
     owned = ", ".join(sorted({*SURFACE_ENV_KEYS, *POINT_ENV_KEYS, *REQUEST_ENV_KEYS}))
     kind = str(spec.workload.get("kind") or "the session's workload")
