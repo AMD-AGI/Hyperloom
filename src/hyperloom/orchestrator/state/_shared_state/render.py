@@ -525,6 +525,14 @@ class _RenderMixin:
             f"last_profile_status={self.last_profile_status or '(none)'}",
             f"last_profile_args='{self.last_profile_args}'",
             f"last_trace_analyze={self._format_trace_analyze_blob(self.last_trace_analyze)}",
+            *(
+                [
+                    "last_trace_analyze_by_role(PD prefill/decode engines)="
+                    f"{variant_line.role_trace_text(self.last_trace_analyze_by_role)}"
+                ]
+                if self.last_trace_analyze_by_role
+                else []
+            ),
             f"profiler_digest={self._format_profiler_digest()}",
             # Full TraceLens analysis.md.
             f"analysis_md={self._format_analysis_md_pointer()}",

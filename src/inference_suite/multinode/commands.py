@@ -82,6 +82,14 @@ def worker_hosts(role: RoleLaunch) -> list[tuple[str, ...]]:
     return [role.hosts[index : index + span] for index in range(0, len(role.hosts), span)]
 
 
+def engine_urls(launch: PdLaunch, nodes: NodeList) -> dict[str, list[str]]:
+    """The HTTP base URL of every engine worker per role: its first host on the role's engine port."""
+    return {
+        role.value: [f"http://{hosts[0]}:{engine_port(nodes, role)}" for hosts in worker_hosts(launch.role(role))]
+        for role in (Role.PREFILL, Role.DECODE)
+    }
+
+
 def _context_args(framework: Framework, context_length: int | None) -> list[str]:
     if context_length is None:
         return []
@@ -194,6 +202,7 @@ __all__ = [
     "cluster_commands",
     "engine_commands",
     "engine_port",
+    "engine_urls",
     "process_needle",
     "router_command",
     "worker_hosts",
