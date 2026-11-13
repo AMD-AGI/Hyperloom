@@ -729,9 +729,11 @@ def patch(name):
     return f"diff --git a/{name} b/{name}\n--- a/{name}\n+++ b/{name}\n@@ -1 +1 @@\n-old\n+new\n"
 
 
-def declare(bench, hook, schema_version=1):
-    """Rewrite the scope declaration."""
+def declare(bench, hook, aoti=None, schema_version=2):
+    """Rewrite the scope declaration, optionally carrying an aoti block."""
     scope = {"schema_version": schema_version, "file": str(hook)}
+    if aoti is not None:
+        scope["aoti"] = aoti
     (bench / "optimization_scope.json").write_text(json.dumps(scope))
 
 
