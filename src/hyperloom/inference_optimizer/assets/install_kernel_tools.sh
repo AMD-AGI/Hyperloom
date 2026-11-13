@@ -42,6 +42,20 @@ _compose_pythonpath() {
 # including one install.sh loaded from .env.
 PYTHONPATH="$(_compose_pythonpath "${REPO_ROOT:-}" "${PYTHONPATH:-}")"
 INFERENCEX_PATH="${INFERENCEX_PATH:-}"
+
+# Ray's AMD-GPU detector needs ROCM_PATH to find librocm_smi64.so, and defaults to
+# /opt/rocm -- which a rocm-sdk wheel venv never populates, silently leaving Ray
+# reporting 0 GPUs. No-op on a system ROCm install or an operator-set ROCM_PATH.
+_resolve_rocm_path() {
+  if [ -n "${ROCM_PATH:-}" ]; then
+    printf '%s' "$ROCM_PATH"
+    return 0
+  fi
+  local root
+  root="$("$PYTHON" -m rocm_sdk path --root 2>/dev/null)" || return 0
+  [ -n "$root" ] && [ -d "$root" ] && printf '%s' "$root"
+}
+ROCM_PATH="$(_resolve_rocm_path)"
 # TraceLens base repo is required; the internal extension is OPTIONAL.
 #   1. AMD-AGI/TraceLens          -> $TRACELENS_ROOT  (base: skills, patches, CLI, analysis orchestrator)
 #   2. TraceLens-internal -> $TRACELENS_INTERNAL_ROOT (optional rehydration module)
@@ -956,6 +970,7 @@ write_env_file() {
     [ -n "${KERNEL_AGENT_ENV:-}" ] && echo "export KERNEL_AGENT_ENV='${KERNEL_AGENT_ENV}'"
     [ -n "${PYTHONPATH:-}" ] && echo "export PYTHONPATH='${PYTHONPATH}'"
     [ -n "${INFERENCEX_PATH:-}" ] && echo "export INFERENCEX_PATH='${INFERENCEX_PATH}'"
+    [ -n "${ROCM_PATH:-}" ] && echo "export ROCM_PATH='${ROCM_PATH}'"
     # The kernel-agent drives Claude Code, so only the Anthropic side is
     # exported here; gateway/OpenAI credentials are never persisted.
     [ -n "${_anthropic_url}" ] && _emit_credential_fallback ANTHROPIC_BASE_URL "${_anthropic_url}"
@@ -1045,6 +1060,7 @@ write_env_file() {
   remove_derived_dotenv_path KERNEL_AGENT_ENV /runtime/kernel-agent.env.sh
   remove_derived_dotenv_path HYPERLOOM_ROOT /runtime/source-mirrors
   [ -n "${PYTHONPATH:-}" ] && upsert_dotenv_var PYTHONPATH "$PYTHONPATH"
+  [ -n "${ROCM_PATH:-}" ] && upsert_dotenv_var ROCM_PATH "$ROCM_PATH"
   remove_dotenv_var INFERENCEX_PATH
   # Persist each provider's own canonical vars (write when present, clear when
   # absent) so an operator's .env creds survive a re-install. Never cross-write

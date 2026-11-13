@@ -276,7 +276,8 @@ def write_run_config(
         trace_path (Path): The trace to analyse.
         platform (str): The target platform name.
         analysis_mode (str): ``"default"`` or ``"inference"``.
-        capture_folder (Path | None): Graph-capture folder; omitted when ``None``.
+        capture_folder (Path | None): Graph-capture folder; omitted when ``None``. TraceLens accepts one only
+            under ``"inference"``, and refusing the rest here is what reports an operator's wrong ``--capture-folder``.
 
     Returns:
         Path: The path of the written ``run.yaml``.

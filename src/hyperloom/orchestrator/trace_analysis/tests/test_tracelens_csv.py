@@ -10,6 +10,7 @@ import json
 import subprocess
 import sys
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import patch
 
 import pytest
@@ -1193,6 +1194,22 @@ def test_write_run_config_names_the_one_standalone_job(tmp_path, framework, capt
     assert job["trace_path"] == str(trace.resolve())
     assert job["platform"] == "MI300X"
     assert job.get("capture_folder") == (str(capture_dir.resolve()) if capture else None)
+
+
+@pytest.mark.parametrize(
+    ("framework", "discovered"),
+    [("vllm", True), ("custom", False)],
+)
+def test_a_capture_folder_is_discovered_only_for_the_mode_that_reads_one(tmp_path, framework, discovered):
+    """A custom profile has a capture_traces/ folder too, and naming it outside inference mode is refused."""
+    trace = tmp_path / "rank_0.trace.json.gz"
+    trace.touch()
+    (tmp_path / "capture_traces").mkdir()
+    run = SimpleNamespace(args=SimpleNamespace(capture_folder=None, framework=framework), run_meta={})
+
+    found = tla._discovered_capture_folder(run, tmp_path, trace)
+
+    assert (found is not None) is discovered
 
 
 def test_124_run_tracelens_skill_uses_sdk_and_artifacts(tmp_path):

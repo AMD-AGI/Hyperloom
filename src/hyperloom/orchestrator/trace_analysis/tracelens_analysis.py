@@ -901,6 +901,13 @@ def _split_steady_state(run: AnalysisRun, job: TraceSplitJob) -> Path:
     return cli_trace_path
 
 
+def _discovered_capture_folder(run: AnalysisRun, trace_input: Path, analysis_trace_path: Path) -> Path | None:
+    """The capture folder beside the analysed trace, for the one analysis mode that reads one."""
+    if tracelens_analysis_mode(run.args.framework) != "inference":
+        return None
+    return discover_capture_folder(trace_input, [analysis_trace_path])
+
+
 def _resolve_capture_folder(run: AnalysisRun, trace_input: Path, analysis_trace_path: Path) -> Path | None:
     """Resolve the graph-capture folder TraceLens inference graph replay analysis reads, noting the step."""
     capture_folder: Path | None = (
@@ -909,7 +916,10 @@ def _resolve_capture_folder(run: AnalysisRun, trace_input: Path, analysis_trace_
         # The analysed trace, not the leading candidate: the helper looks
         # for capture_traces/ beside the file it is given, and after a
         # cross-directory promotion those are different places.
-        else discover_capture_folder(trace_input, [analysis_trace_path])
+        # Discovery only in inference mode: a custom profile has a capture_traces/ folder
+        # too, and naming it in any other mode is a config TraceLens refuses. An operator
+        # who passed --capture-folder still gets that refusal, which is the point of it.
+        else _discovered_capture_folder(run, trace_input, analysis_trace_path)
     )
     if capture_folder:
         note_step(
