@@ -487,6 +487,33 @@ def test_a_stalled_server_is_unclear_and_does_not_settle_the_test_whatever_its_l
     assert not decides_test(verdict)
 
 
+@pytest.mark.parametrize(
+    ("last_line", "reason"),
+    [
+        ("Async signal handler still waiting", "profiler_hung: Async signal handler still waiting"),
+        ("", "profiler_hung"),
+    ],
+    ids=["quotes_the_log", "empty_log"],
+)
+def test_a_server_that_stalled_with_its_profile_window_open_is_an_infrastructure_failure_whatever_its_log_says(
+    last_line: str, reason: str
+) -> None:
+    stall = StepFailure(FailedStep.SERVER_STALLED, profile_stall=last_line)
+
+    verdict = classify_test_failure(returncode=1, evidence=FailureEvidence(logs=(TRACEBACK_LOG,), step_failure=stall))
+
+    assert (verdict.failure_class, verdict.failure_reason) == (FailureClass.INFRA, reason)
+    assert not decides_test(verdict)
+
+
+def test_a_profile_stall_named_beside_another_step_does_not_turn_it_into_the_profilers_failure() -> None:
+    stall = StepFailure(FailedStep.PORT_IN_USE, profile_stall="handler still waiting")
+
+    verdict = classify_test_failure(returncode=1, evidence=FailureEvidence(step_failure=stall))
+
+    assert (verdict.failure_class, verdict.failure_reason) == (FailureClass.INFRA, "port_in_use")
+
+
 def test_a_boot_timeout_step_yields_to_a_cause_its_log_names_as_its_return_code_does() -> None:
     verdict = classify_test_failure(
         returncode=1,
