@@ -108,6 +108,12 @@ UNDEFINED_SYMBOL_LOG = (
     "ImportError: /opt/sgl-kernel/common_ops.so: undefined symbol: _ZN4aiter8fmha_fwdEv\n"
 )
 PLAIN_LOG = "INFO server booted\nINFO request finished in 3.1s\nsegfault somewhere\n"
+#: SGLang 0.5.23 logs this line at every start and serves on: the parenthesised ImportError is a message, not a raise.
+RESPONSES_API_SKIPPED_LOG = (
+    "[2000-01-01 00:00:00] OpenAI Responses API (/v1/responses) disabled: OpenAIServingResponses init failed "
+    "(ImportError: cannot import name 'ResponseFunctionShellToolCall' from 'openai.types.responses' "
+    "(/opt/venv/lib/python3.12/site-packages/openai/types/responses/__init__.py))\n"
+)
 
 
 def _classify(*logs: str, returncode: int = 1):
@@ -215,6 +221,23 @@ def test_an_import_the_server_skipped_on_purpose_is_not_the_cause() -> None:
     skipped = "\n".join(FASTSAFETENSORS_LOG.splitlines()[:3]) + "\n"
 
     assert _classify(skipped) == (FailureClass.UNCLEAR, "no_known_signature")
+
+
+def test_an_import_error_a_log_line_quotes_is_not_the_cause_of_a_crash_after_it() -> None:
+    log = RESPONSES_API_SKIPPED_LOG + (
+        "[2000-01-01 00:00:00 TP0] Scheduler hit an exception: Traceback (most recent call last):\n"
+        "    os.rename(tmp_dir, final_dir)\n"
+        "PermissionError: [Errno 13] Permission denied: '/cache/jit/tmp' -> '/cache/jit/final'\n"
+    )
+
+    assert _classify(log) == (
+        FailureClass.UNCLEAR,
+        "python_exception: PermissionError: [Errno 13] Permission denied: '/cache/jit/tmp' -> '/cache/jit/final'",
+    )
+
+
+def test_an_import_error_a_log_line_quotes_names_no_exception() -> None:
+    assert _classify(RESPONSES_API_SKIPPED_LOG + PLAIN_LOG) == (FailureClass.UNCLEAR, "no_known_signature")
 
 
 def test_a_failed_import_with_no_message_still_ends_as_the_bare_kind() -> None:
