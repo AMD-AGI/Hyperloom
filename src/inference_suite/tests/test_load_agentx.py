@@ -300,19 +300,20 @@ def test_listeners_hear_the_finished_mark_before_the_export_is_aggregated(tmp_pa
 
 
 def test_client_output_while_a_listener_blocks_past_the_silence_bound_is_not_a_stall(tmp_path, harness, monkeypatch):
-    monkeypatch.setenv("FAKE_PACE", "1.0 2.5")
-    deadlines = replace(_DEADLINES, silence_sec=2.0)
+    monkeypatch.setenv("FAKE_PACE", "0.6 5.1")
+    deadlines = replace(_DEADLINES, silence_sec=3.0)
     log = tmp_path / "server.log"
     log.write_text("")
     now = time.monotonic()
     server = Server("http://127.0.0.1:30000", True, ServerWatch(log, 0, deadlines, now), lambda: True)
     agentx_round = AgentxRound(_config(tmp_path), harness, server, RoundGate(deadlines, lambda: "", now), PhaseClock())
-    blocked: list[float] = []
+    polls: list[float] = []
 
     def stop_profile(now: float) -> None:
-        if not blocked:
-            blocked.append(now)
-            time.sleep(2.5)
+        # A window closes past the measured mark, never on the first poll, whose output check counts as activity anyway.
+        polls.append(now)
+        if len(polls) == 2:
+            time.sleep(3.5)
 
     outcome = run_agentx(replace(agentx_round, listeners=(stop_profile,)))
     assert outcome.stop is None and outcome.returncode == 0, outcome.stop
