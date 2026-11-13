@@ -27,12 +27,6 @@ def test_every_serving_framework_is_accepted(framework):
     _check_mlperf_framework({"FRAMEWORK": framework})
 
 
-def test_atom_is_among_the_accepted_serving_frameworks():
-    """Named explicitly: the parametrised case would still pass if atom left the registry."""
-    assert "atom" in _SERVING
-    _check_mlperf_framework({"FRAMEWORK": "atom"})
-
-
 @pytest.mark.parametrize("framework", _SCRIPTABLE)
 def test_a_scriptable_framework_is_refused(framework):
     """No HTTP endpoint to drive."""

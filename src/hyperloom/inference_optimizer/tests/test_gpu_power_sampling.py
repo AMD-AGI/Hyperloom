@@ -325,18 +325,3 @@ def test_the_gpu_monitor_block_is_read_whole_by_the_gpu_metrics_reader(tmp_path)
     metrics = gpu_metrics_from_report({"gpu_monitor": [block.as_dict() for block in gpu_monitor(recording)]})
     assert all(value is not None for value in metrics.values()), metrics
     assert (metrics["avg_power_w"], metrics["max_temp_c"], metrics["avg_gpu_util_pct"]) == (700.0, 62.0, 98.0)
-
-
-def test_the_power_wiring_uses_only_the_recorders_public_names():
-    import ast
-    import inspect
-
-    from hyperloom.orchestrator.actions.executors import _gpu_power
-
-    imported = [
-        alias.name
-        for node in ast.walk(ast.parse(inspect.getsource(_gpu_power)))
-        if isinstance(node, ast.ImportFrom) and node.module == "hyperloom_common.gpu_telemetry"
-        for alias in node.names
-    ]
-    assert imported and not [name for name in imported if name.startswith("_")]

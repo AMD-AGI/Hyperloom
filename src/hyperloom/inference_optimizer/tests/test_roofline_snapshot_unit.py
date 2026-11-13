@@ -25,34 +25,22 @@ _EXEC_MD = """\
 """
 
 
-# ---- small parsers ----
-
-
-def test_parse_pct():
-    assert rs._parse_pct("28.78%") == 28.78
-    assert rs._parse_pct("1,234.5") == 1234.5
-    assert rs._parse_pct(None) is None
-    assert rs._parse_pct("n/a") is None
-
-
-def test_parse_executive_table_skips_header():
-    rows = rs._parse_executive_table(_EXEC_MD)
-    assert rows["Compute %"] == "70.5%"
-    assert "Metric" not in rows
-
-
-def test_parse_top_bottleneck():
-    assert rs._parse_top_bottleneck("MoE_fused (28.78%)") == "MoE_fused"
-    assert rs._parse_top_bottleneck(None) is None
-    assert rs._parse_top_bottleneck("   ") is None
-
-
 # ---- extract_workload_summary ----
 
 
 def test_extract_workload_summary_missing(tmp_path):
     out = rs.extract_workload_summary(tmp_path / "no.md")
     assert out["compute_pct"] is None
+
+
+def test_extract_workload_summary_reads_only_the_number_a_cell_holds(tmp_path):
+    """A cell with no number is missing, not zero; a thousands separator does not cut the number short."""
+    md = tmp_path / "analysis.md"
+    md.write_text("| Compute % | n/a |\n| Idle % | 1,234.5 |\n", encoding="utf-8")
+    out = rs.extract_workload_summary(md)
+    assert out["compute_pct"] is None
+    assert out["idle_pct"] == 1234.5
+    assert out["top_bottleneck"] is None
 
 
 def test_extract_workload_summary_full(tmp_path):
@@ -226,16 +214,6 @@ def test_within_roofline_pct():
     assert rs.within_roofline_pct(peak=100, achieved=80) == 80.0
 
 
-def test_clamp_within_splits_ratio_and_gap():
-    assert rs._clamp_within(None) == (None, None)
-    assert rs._clamp_within(80.0) == (80.0, 20.0)
-
-
-def test_clamp_within_caps_overshoot():
-    """Beating the modelled ceiling caps ``within`` instead of reporting a negative gap."""
-    assert rs._clamp_within(rs.within_roofline_pct(peak=100, achieved=120)) == (100.0, 0.0)
-
-
 def test_build_roofline_snapshot_reports_ceiling_overshoot():
     snap = rs.build_roofline_snapshot(
         snapshot_id=1,
@@ -348,14 +326,6 @@ def test_build_roofline_snapshot_with_analysis(tmp_path):
     assert snap["top_kernel"]["name"] == "k"
 
 
-# ---- _num_delta ----
-
-
-def test_num_delta():
-    assert rs._num_delta(10.0, 7.0) == 3.0
-    assert rs._num_delta(None, 1.0) is None
-
-
 # ---- build_roofline_comparison_from_history ----
 
 
@@ -373,13 +343,14 @@ def test_comparison_from_history_single():
 
 def test_comparison_from_history_before_after():
     snaps = [
-        {"snapshot_id": 1, "compute_pct": 50.0, "top_kernel": {"efficiency_pct": 40.0}},
+        {"snapshot_id": 1, "compute_pct": 50.0, "idle_pct": 5.0, "top_kernel": {"efficiency_pct": 40.0}},
         {"snapshot_id": 2, "compute_pct": 60.0, "top_kernel": {"efficiency_pct": 55.0}},
     ]
     out = rs.build_roofline_comparison_from_history(snaps)
     assert out["mode"] == "before_after"
     assert out["delta"]["compute_pct"] == 10.0
     assert out["delta"]["top_kernel_efficiency_pct"] == 15.0
+    assert out["delta"]["idle_pct"] is None
     assert out["ceilings_comparable"] is True
 
 
@@ -420,17 +391,6 @@ def test_comparison_withholds_saturation_delta_across_moved_ceiling():
 
 
 # ---- formatters ----
-
-
-def test_fmt_helpers():
-    assert rs._fmt_delta(None) == "—"
-    assert rs._fmt_delta(1.2) == "+1.2"
-    assert rs._fmt_delta(-1.0) == "-1.0"
-    assert rs._fmt_tput(None) == "—"
-    assert rs._fmt_tput(0) == "—"
-    assert rs._fmt_tput(12.34) == "12.3 tok/s"
-    assert rs._fmt_pct_cell(None) == "—"
-    assert rs._fmt_pct_cell(50.0) == "50.0%"
 
 
 def test_format_table_single_snapshot():
@@ -485,6 +445,7 @@ def test_format_table_before_after():
     assert "| Metric | Base | Opt | Δ |" in body
     assert "+10.0" in body
     assert "`a`" in body and "`b`" in body
+    assert "| Achieved output_throughput | — | — | — |" in body
     assert "single-source ceiling" in body
 
 

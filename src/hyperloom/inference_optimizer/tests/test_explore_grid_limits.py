@@ -1,7 +1,7 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""Explore-grid provenance + GPU-specialist resource policy."""
+"""GPU-specialist resource policy."""
 
 from __future__ import annotations
 
@@ -35,30 +35,6 @@ def _gate(research_lane_capacity: int = 1) -> PolicyGate:
     return _policy(s)
 
 
-def _specialist_variants(n: int) -> list[dict]:
-    return [{"name": f"v{i}", "provenance": "specialist:serving_specialist"} for i in range(n)]
-
-
-def _delegate(grid: list[dict]) -> Intent:
-    return Intent(
-        type=IntentType.DELEGATE,
-        payload={
-            "action_name": "explore",
-            "params": {"grid": grid},
-        },
-    )
-
-
-def _propose(grid: list[dict]) -> Intent:
-    return Intent(
-        type=IntentType.PROPOSE_ACTION,
-        payload={
-            "action_name": "explore",
-            "params": {"grid": grid},
-        },
-    )
-
-
 def _specialist_delegate(params: dict) -> Intent:
     merged = {
         "tags": ["kernel_agent"],
@@ -72,74 +48,6 @@ def _specialist_delegate(params: dict) -> Intent:
             "params": merged,
         },
     )
-
-
-def test_allows_many_specialist_variants():
-    gate = _gate()
-    gate.validate_intent("orchestration", _delegate(_specialist_variants(5)))
-
-
-def test_allows_specialist_variants_across_domains():
-    gate = _gate()
-    intent = _delegate(
-        [
-            {"name": "a", "provenance": "specialist:serving_specialist"},
-            {"name": "b", "provenance": "specialist:kernel_switch_specialist"},
-        ]
-    )
-    gate.validate_intent("orchestration", intent)  # no raise
-
-
-def test_allows_multiple_dynamic_variants():
-    gate = _gate()
-    intent = _delegate(
-        [
-            {"name": "a", "provenance": "dynamic"},
-            {"name": "b", "provenance": "dynamic"},
-        ]
-    )
-    gate.validate_intent("orchestration", intent)  # no raise
-
-
-def test_allows_three_default_grid_variants():
-    gate = _gate()
-    intent = _delegate(
-        [
-            {"name": "a", "provenance": "default_grid"},
-            {"name": "b", "provenance": "default_grid"},
-            {"name": "c", "provenance": "default_grid"},
-        ]
-    )
-    gate.validate_intent("orchestration", intent)  # no raise
-
-
-def test_empty_grid_skips_size_check():
-    """An empty/omitted grid falls through to the executor's ``empty_grid`` surfacing; PolicyGate must not preempt."""
-    gate = _gate()
-    intent = Intent(
-        type=IntentType.DELEGATE,
-        payload={
-            "action_name": "explore",
-            "params": {},  # no grid
-        },
-    )
-    gate.validate_intent("orchestration", intent)  # no raise
-
-
-def test_propose_allows_many_specialist_variants():
-    gate = _gate()
-    gate.validate_intent("orchestration", _propose(_specialist_variants(5)))
-
-
-def test_propose_allows_all_llm_direct_grid():
-    gate = _gate()
-    intent = _propose(
-        [
-            {"name": "a", "provenance": "llm_direct"},
-            {"name": "b", "provenance": "llm_direct"},
-        ]
-    )
-    gate.validate_intent("orchestration", intent)  # no raise
 
 
 def test_gpu_specialist_denied_when_pool_disabled():

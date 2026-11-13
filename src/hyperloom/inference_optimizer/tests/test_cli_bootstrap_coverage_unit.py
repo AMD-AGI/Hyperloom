@@ -4,6 +4,7 @@
 
 from __future__ import annotations
 
+import json
 from pathlib import Path
 
 from hyperloom.inference_optimizer.cli import bootstrap as cb
@@ -67,30 +68,27 @@ def test_seed_applies_new_workload_defaults_when_unset(
     assert state.ep == 1
 
 
-def test_seed_passes_raw_model_path_to_model_arch_guard(
+def test_seed_keeps_the_model_arch_of_an_hf_cache_snapshot_launch(
     tmp_path: Path,
     monkeypatch,
 ) -> None:
-    """Regression for #930: the stale guard needs the raw ``--model`` path so an HF cache ``models--org--repo/snapshots/<hash>`` launch can recover the repo name; passing only the collapsed identity loses it."""
-    captured: dict[str, tuple] = {}
-
-    def _spy(*args, **_kwargs):
-        captured["args"] = args
-        return {}
-
+    """Regression for #930: an HF cache ``models--org--repo/snapshots/<hash>`` launch collapses the model identity to
+    the hash, so the stale guard accepts the session's profile only by recovering the repo name from the raw ``--model``
+    path."""
     monkeypatch.setattr(cb, "_load_model_config_tags", lambda _p: {})
-    monkeypatch.setattr(cb, "_load_model_arch", _spy)
     from hyperloom.common import visible_devices
     from hyperloom.orchestrator.policy import gate as policy
 
     monkeypatch.setattr(visible_devices, "detect_gpu_count", lambda: 8)
     monkeypatch.setattr(policy, "research_lane_ceiling", lambda: 16)
+    profile = {"model_name": "Qwen2.5-7B-Instruct", "attention": "GQA"}
+    (tmp_path / "model_arch.json").write_text(json.dumps(profile), encoding="utf-8")
 
     raw = (
         "/root/.cache/huggingface/hub/models--Qwen--Qwen2.5-7B-Instruct/"
         "snapshots/a09a35458c702b33eeacc393d103063234e8bc28"
     )
-    cb._seed_shared_state(
+    state = cb._seed_shared_state(
         tmp_path,
         _args(model=raw),
         session_id="s-raw",
@@ -98,7 +96,7 @@ def test_seed_passes_raw_model_path_to_model_arch_guard(
         settled=cb.SettledLaunch(compute_partition={}, gpu_power_settings={}, base=None),
     )
 
-    assert captured["args"][2] == raw
+    assert state.model_arch == profile
 
 
 # _detect_checkpoint_precision tests
