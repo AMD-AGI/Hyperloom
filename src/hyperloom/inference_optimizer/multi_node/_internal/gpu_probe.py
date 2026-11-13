@@ -42,7 +42,7 @@ def remote_autodetect_gpu_type(*, timeout_s: int = 60) -> str | None:
     try:
         if backend == "rayjob":
             return _probe_via_ray_head(state, timeout_s=timeout_s)
-        if backend == "infera":
+        if backend in ("infera", "atomesh", "sglangrouter"):
             return _probe_via_infera_ssh(state, timeout_s=timeout_s)
         log.warning("remote GPU probe: unsupported backend %r", backend)
     except (httpx.HTTPError, OSError, RuntimeError, subprocess.TimeoutExpired) as exc:

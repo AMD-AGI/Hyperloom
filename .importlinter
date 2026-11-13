@@ -342,7 +342,8 @@ unmatched_ignore_imports_alerting = none
 [importlinter:contract:is-public-interface]
 name = hyperloom uses inference_suite only through its public modules
 type = forbidden
-# The public surface is the package root, contracts, argv, golden, server_log and frameworks.
+# The public surface is the package root, contracts, argv, golden, server_log, frameworks and the
+# multinode package root.
 # Every other module can move without breaking an importer. Plain names, not `.**`: a forbidden
 # module covers its descendants, and `.**` would leave the package module itself importable.
 source_modules =
@@ -358,6 +359,19 @@ forbidden_modules =
     inference_suite.framework_probe
     inference_suite.framework_version
     inference_suite.load
+    inference_suite.multinode.cli
+    inference_suite.multinode.commands
+    inference_suite.multinode.inferencex
+    inference_suite.multinode.launch
+    inference_suite.multinode.nodes
+    inference_suite.multinode.query
+    inference_suite.multinode.recipe
+    inference_suite.multinode.record
+    inference_suite.multinode.remote_driver
+    inference_suite.multinode.render
+    inference_suite.multinode.session
+    inference_suite.multinode.ssh
+    inference_suite.multinode.table
     inference_suite.parser_check
     inference_suite.pins
     inference_suite.profile
@@ -384,7 +398,7 @@ type = layers
 layers =
     inference_suite.__main__
     inference_suite.cli
-    inference_suite.run
+    inference_suite.run | inference_suite.multinode
     inference_suite.load | inference_suite.eval | inference_suite.profile
     inference_suite.runtime
     inference_suite.telemetry

@@ -16,7 +16,8 @@ it lacks code the resolver runs, or a source breaks its own format. ``stage --to
 manifest's sha256; it stages nothing into a cache that already verifies, and exits 2 with ``staging_missing`` when it
 cannot stage or the cache is damaged. ``publish --stagings <dir> [--source <InferenceX repository>]`` publishes the
 staging of the pins in force as ``<dir>/<key>`` (:func:`inference_suite.staging.publish`) and prints that directory,
-or exits 2 with ``staging_missing``. Exit 2 is also a document that breaks its contract.
+or exits 2 with ``staging_missing``. Exit 2 is also a document that breaks its contract. ``multinode`` resolves and
+runs a multi-node PD launch (:mod:`inference_suite.multinode.cli`).
 """
 
 from __future__ import annotations
@@ -36,6 +37,7 @@ from inference_suite.contracts.base_launch import LaunchQuery
 from inference_suite.contracts.config import SuiteConfig
 from inference_suite.contracts.layout import RunDirError
 from inference_suite.contracts.report import FailedStep, RunStatus
+from inference_suite.multinode.cli import add_commands as add_multinode_commands
 from inference_suite.recipe.model import RecipeSourceError
 from inference_suite.recipe.resolve import Miss, resolve_base
 from inference_suite.recipe.sources import InferencexCommitRefused, fetch_sources
@@ -184,6 +186,7 @@ def _parser() -> argparse.ArgumentParser:
         "--source", type=Path, help="an InferenceX repository holding the pinned commit; fetched when omitted"
     )
     publish_parser.set_defaults(handler=_publish)
+    add_multinode_commands(commands)
     return parser
 
 
