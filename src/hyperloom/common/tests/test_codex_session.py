@@ -776,6 +776,7 @@ def test_run_codex_turn_denies_approvals_and_scopes_writes(tmp_path, monkeypatch
 
     overrides = record["config"].kwargs["config_overrides"]
     assert "features.memories=false" in overrides
+    assert 'web_search="disabled"' in overrides
     assert _override_value(overrides, "sandbox_workspace_write.writable_roots") == f'["{output.resolve()}"]'
 
 
