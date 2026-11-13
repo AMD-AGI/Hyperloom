@@ -43,6 +43,7 @@ def profile_environment(monkeypatch):
         monkeypatch.delenv(name, raising=False)
     monkeypatch.setattr(_server_patcher, "ensure_vllm_patched_for_tracelens", lambda *checkout: _PATCHED)
     monkeypatch.setattr(_server_patcher, "ensure_sglang_patched_for_tracelens", lambda: _PATCHED)
+    monkeypatch.setattr(_server_patcher, "resolve_sglang_gc_patch_needed", lambda: True)
 
 
 def _fixed_profile(framework: str) -> dict:
@@ -294,6 +295,23 @@ def test_native_profile_drops_annotations_when_the_patch_did_not_apply(tmp_path,
     native = load_benchmark(path)
     assert native["envs"]["HYPERLOOM_PROFILE_DEGRADED_REASON"] == "tracelens_runtime_patch_unavailable"
     assert native["profiler"]["torch_profiler"]["detailed_annotations"] is False
+
+
+def test_sglang_past_the_gc_range_is_not_checked_for_the_graph_capture_patch(monkeypatch):
+    """SGLang 0.5.22 carries the capture tags upstream, so the profile neither looks for the patch nor marks it unavailable."""
+    from hyperloom.orchestrator.actions.executors._profile_setup import patch_for_profile
+
+    def _checked():
+        raise AssertionError("the graph-capture patch was looked for on SGLang 0.5.22")
+
+    monkeypatch.setattr(_server_patcher, "resolve_sglang_shape_mode", lambda: "sitecustomize")
+    monkeypatch.setattr(_server_patcher, "resolve_sglang_gc_patch_needed", lambda: False)
+    monkeypatch.setattr(_server_patcher, "ensure_sglang_patched_for_tracelens", _checked)
+    envs: dict = {}
+    patch = patch_for_profile(envs, "sglang")
+    assert patch.sitecustomize is True and patch.annotations is True and patch.site is None
+    assert envs["HYPERLOOM_TRACELENS_PATCH_STATUS"] == "not_attempted"
+    assert "HYPERLOOM_PROFILE_DEGRADED_REASON" not in envs
 
 
 @pytest.mark.parametrize(("laid", "detailed"), [(None, False), (_PATCHED, True)])

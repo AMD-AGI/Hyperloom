@@ -25,7 +25,8 @@ from hyperloom_multibranch.toolbox.tools.upstream_pr import UPSTREAM_PR_TOOL, Up
 def all_tools() -> tuple[AsyncTool, ...]:
     """Every tool of this package that needs nothing from the toolbox, for the runner that serves them.
 
-    ``kernel_tune`` is not among them: it leases a card from the toolbox's pool (:func:`kernel_tune_tool`).
+    ``kernel_tune`` is not among them: it leases a card from the toolbox's pool (:func:`kernel_tune_tool`). With no pool,
+    ``roofline`` and ``tracelens`` measure no board's arch spec and read vendor peaks for a board TraceLens has none for.
     """
     return (
         profile_tool(),

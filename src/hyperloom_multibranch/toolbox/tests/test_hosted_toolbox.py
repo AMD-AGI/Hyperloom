@@ -43,6 +43,7 @@ from hyperloom.sandbox.e2b import E2BSandboxProvider, RetryPolicy
 from hyperloom.sandbox.socket import (
     IDEMPOTENCY_KEY,
     NODE_NAME_KEY,
+    PENDING_TIMEOUT_KEY,
     SIGNING_PUBLIC_KEY,
     WORKSPACE_KEY,
     CreateOptions,
@@ -649,7 +650,8 @@ def test_the_hosts_workspace_goes_with_every_create_of_the_toolbox(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, named: dict[str, str], sent: dict[str, str]
 ) -> None:
     """``HYPERLOOM_SANDBOX_WORKSPACE`` of a SaFE key used directly, read by the host entry, is the workspace of the
-    ``measurement`` and ``dev`` creates; a Claw host sets none and the creates carry their own metadata."""
+    ``measurement`` and ``dev`` creates; a Claw host sets none and the creates carry their own metadata (and the
+    pending limit every create of the provider names, its wait)."""
     env = {
         "E2B_API_URL": "http://service.invalid",
         "E2B_SANDBOX_URL": "http://sandboxes.invalid",
@@ -676,7 +678,7 @@ def test_the_hosts_workspace_goes_with_every_create_of_the_toolbox(
     for role in ("measurement", "dev"):
         with pytest.raises(_Sent):
             toolbox.provider.create("t", role=role, timeout_sec=60, metadata={"k": "v"})
-    assert seen == [{"k": "v", **sent}] * 2
+    assert seen == [{"k": "v", **sent, PENDING_TIMEOUT_KEY: "60"}] * 2
 
 
 def test_runner_is_the_older_name_of_the_measurement_role(tmp_path: Path) -> None:

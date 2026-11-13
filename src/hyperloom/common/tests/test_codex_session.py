@@ -780,6 +780,61 @@ def test_run_codex_turn_denies_approvals_and_scopes_writes(tmp_path, monkeypatch
     assert _override_value(overrides, "sandbox_workspace_write.writable_roots") == f'["{output.resolve()}"]'
 
 
+def test_codex_session_keeps_the_shell_tool_by_default(tmp_path, monkeypatch):
+    """Specialists run commands, so a session carries Codex's shell unless it opts out."""
+    record = _install_fake_sdk(monkeypatch)
+
+    _use_gateway_env(monkeypatch)
+    asyncio.run(
+        cs.run_codex_turn(
+            request=cs.CodexTurnRequest(prompt="p", timeout_sec=30.0),
+            config=cs.CodexSessionConfig(cwd=tmp_path, model="m"),
+            developer_instructions="i",
+        )
+    )
+
+    overrides = record["config"].kwargs["config_overrides"]
+    assert not any(override.startswith("features.shell_tool") for override in overrides)
+
+
+def test_codex_session_withholds_the_shell_tool_when_configured(tmp_path, monkeypatch):
+    """``shell_tool=False`` removes ``exec_command`` and ``write_stdin`` from the model's tool list."""
+    record = _install_fake_sdk(monkeypatch)
+
+    _use_gateway_env(monkeypatch)
+    asyncio.run(
+        cs.run_codex_turn(
+            request=cs.CodexTurnRequest(prompt="p", timeout_sec=30.0),
+            config=cs.CodexSessionConfig(cwd=tmp_path, model="m", shell_tool=False),
+            developer_instructions="i",
+        )
+    )
+
+    overrides = record["config"].kwargs["config_overrides"]
+    assert _override_value(overrides, "features.shell_tool") == "false"
+
+
+def test_codex_session_opens_a_new_thread_after_a_timed_out_turn(tmp_path, monkeypatch):
+    """An interrupted turn must not be resumed by the next turn on the same thread."""
+    record = _install_fake_sdk(monkeypatch, hang=True)
+
+    _use_gateway_env(monkeypatch, HYPERLOOM_RUNTIME_DIR=str(tmp_path / "runtime"))
+
+    async def _run() -> None:
+        async with cs.CodexSession(
+            cs.CodexSessionConfig(cwd=tmp_path, model="m"),
+            developer_instructions="i",
+        ) as session:
+            for _ in range(2):
+                with pytest.raises(cs.CodexSessionTimeoutError):
+                    await session.turn(cs.CodexTurnRequest("tick", timeout_sec=0.05))
+
+    asyncio.run(_run())
+
+    assert record["thread_start_calls"] == 2
+    assert len(set(record["turn_threads"])) == 2
+
+
 def test_run_codex_turn_keeps_literal_headers_only_in_the_child_environment(tmp_path, monkeypatch):
     """Resolved header values must never enter app-server launch arguments."""
     record = _install_fake_sdk(monkeypatch)
