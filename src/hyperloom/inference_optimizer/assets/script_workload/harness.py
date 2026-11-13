@@ -396,6 +396,19 @@ def _chunk_passes(calls, passes: int) -> int:
     return max(1, min(passes, INPUT_POOL_BYTES // max(1, per_pass)))
 
 
+def _aoti_evidence():
+    """The export-counting shim when this run armed it, else ``None``.
+
+    Not a Hyperloom import: ``sitecustomize`` puts it on ``sys.path`` only for a run that
+    declared an export, and this file runs in the model's own environment.
+    """
+    try:
+        import hl_aoti_evidence
+    except ImportError:
+        return None
+    return hl_aoti_evidence
+
+
 def _timed_passes(entry, calls, held_out, config):
     """Time every pass on fresh inputs, generated per chunk outside the parent-visible timed sections."""
     rng = random.Random(os.urandom(16))
@@ -405,15 +418,20 @@ def _timed_passes(entry, calls, held_out, config):
     chunk = _chunk_passes(calls, passes)
     held_out_outputs = [[None] * len(variants) for variants in held_out]
     latencies = []
+    evidence = _aoti_evidence()
     for first in range(0, passes, chunk):
         pool = [_pass_inputs(calls, held_out, schedule, p) for p in range(first, min(first + chunk, passes))]
         kept = []
         _synchronize()
         _send_mark("start")
+        if evidence is not None:
+            evidence.timed_window(True)
         for pass_index, inputs in enumerate(pool, start=first):
             elapsed = 0.0
             for index, call in enumerate(calls):
                 _synchronize()
+                if evidence is not None:
+                    evidence.note_boundary_call()  # before the clock: counting is cheap, not free
                 start = time.perf_counter()
                 output = _invoke(entry, call, inputs[index])
                 _synchronize()
@@ -423,6 +441,8 @@ def _timed_passes(entry, calls, held_out, config):
                     # output buffer would otherwise collapse the chunk's samples onto the last.
                     kept.append((index, schedule[(pass_index, index)], _snapshot(output)))
             latencies.append(elapsed * MS_PER_S)
+        if evidence is not None:
+            evidence.timed_window(False)
         _send_mark("stop")
         for index, variant, output in kept:
             held_out_outputs[index][variant] = _capture(output)

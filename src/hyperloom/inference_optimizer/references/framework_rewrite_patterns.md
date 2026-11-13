@@ -403,6 +403,12 @@ usually telling you about the compiler rather than the model; a targeted
 - **Clone the result before returning it.** A loaded package writes into static
   output buffers, so the next call overwrites what the last one returned. See
   *Clone an output you did not allocate this call* under **Pitfalls**.
+- **The package has to run on every timed call, not once.** Hyperloom counts calls into
+  the loaded package over the timed region and compares them against the harness's own
+  calls at the module boundary; fewer means something else served the rest, and the
+  candidate is refused whatever it measured. Loading the package to check it works and
+  then returning the eager model, or dispatching to the package for one shape only, both
+  fail this. If the package cannot serve a call, that is a finding to report.
 - **The accuracy gate must run against the artifact**, never against the Python model
   that produced it. Export involves wrapper code, patched methods and custom ops, all
   of which can be wrong in ways tracing does not catch.

@@ -343,6 +343,20 @@ def test_an_aoti_block_at_schema_1_is_refused(tmp_path: Path, monkeypatch: pytes
         aoti_config()
 
 
+def test_the_launch_refuses_an_aoti_block_at_schema_1(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """The one caller that does not swallow the error, so the operator hears about it before any budget is spent."""
+    module = tmp_path / "hyperloom_optimize.py"
+    module.write_text(_HOOK, encoding="utf-8")
+    (tmp_path / "optimization_scope.json").write_text(
+        json.dumps({"schema_version": 1, "file": str(module), "aoti": {"enabled": True}}), encoding="utf-8"
+    )
+    monkeypatch.setenv("HYPERLOOM_BYPASS_SCRIPTS_DIR", str(tmp_path))
+    monkeypatch.setenv("FRAMEWORK_REPO_PATH", str(tmp_path))
+
+    with pytest.raises(ValueError, match="schema_version 2"):
+        enforce_custom_scope("custom")
+
+
 def test_a_schema_1_declaration_without_a_block_declares_no_export(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -399,6 +413,14 @@ def test_a_malformed_export_block_is_refused(
     _declare_aoti(tmp_path, monkeypatch, aoti)
     with pytest.raises(ValueError, match=message):
         aoti_config()
+
+
+def test_the_launch_refuses_a_malformed_export_block(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Nothing else reports it: every other caller of aoti_config swallows the error."""
+    module = _declare_aoti(tmp_path, monkeypatch, {"enabled": "yes"})
+    monkeypatch.setenv("FRAMEWORK_REPO_PATH", str(module.parent))
+    with pytest.raises(ValueError, match="aoti.enabled must be a boolean"):
+        enforce_custom_scope("custom")
 
 
 def test_a_declared_export_adds_its_bounds_to_the_agent_instructions(
