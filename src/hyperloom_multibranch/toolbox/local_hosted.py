@@ -355,7 +355,8 @@ class LocalOptions:
     each one after a failure that is not the node's (:class:`~.attempts.InfraBackoff`) and ``poll_interval_sec`` how
     often the backend polls a runner for its result. ``tools`` are the asynchronous tools ``start_analysis``
     may reach; ``None``
-    is the local set: TraceLens, the roofline of a profile test's trace (``non-llm`` analysis, no card and no model), the
+    is the local set: TraceLens, the roofline of a profile test's trace (``non-llm`` analysis, no model, and a leased card
+    only to measure a board TraceLens has no arch spec for), the
     upstream PR search (GitHub is asked from this process, never from a sandbox) and ``kernel_tune`` when the pool can spare a
     card for it without leaving fewer than one test needs (it leases the card from the pool the branches' sandboxes lease
     from). The orchestrator's own roofline profiles on a host card outside the card leases, so it is not offered.
@@ -705,14 +706,14 @@ def _provider(
 
 def _local_tools(leases: BranchLeases, options: LocalOptions) -> Sequence[AsyncTool]:
     """What ``options`` serves: its own tools, or TraceLens, the roofline, the upstream PR search and the tuner, which is
-    served only where a card can be spared for it. The first three need no card: they read a trace that is already there, or
-    ask GitHub from this process."""
+    served only where a card can be spared for it. The first three read a trace that is already there, or ask GitHub from
+    this process; TraceLens and the roofline lease a card from ``leases`` only to measure a board's arch spec."""
     if options.tools is not None:
         return options.tools
     tuner = (
         (kernel_tune_tool(leases, Path(options.framework_configs or image_configs())),) if leases.can_lease(1) else ()
     )
-    return (tracelens_tool(), roofline_tool(), UpstreamPrSearch(), *tuner)
+    return (tracelens_tool(leases), roofline_tool(leases), UpstreamPrSearch(), *tuner)
 
 
 def _accepting_local_kinds(acceptance: AcceptanceSetup) -> AcceptanceSetup:
