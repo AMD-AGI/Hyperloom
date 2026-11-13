@@ -1,8 +1,10 @@
 # Acceptance suite of the Qwen3 seam monokernel task (TP4 on gfx942). forge-loop runs it, from the
 # workspace root, before it keeps a candidate.
 compile_command:
-  - python3 -m pytest -q -p no:cacheprovider test/test_seam_compile.py
+  - python3 -m pytest -q -p no:cacheprovider benchmark/acceptance/test_seam_compile.py
 correctness_command:
-  - python3 -m pytest -q -p no:cacheprovider test/test_seam_parity.py test/test_seam_failstop.py test/test_seam_replay.py
+  - >-
+    python3 -m pytest -q -p no:cacheprovider benchmark/acceptance/test_seam_parity.py
+    benchmark/acceptance/test_seam_failstop.py benchmark/acceptance/test_seam_replay.py
 compile_timeout: 900
 correctness_timeout: 3600

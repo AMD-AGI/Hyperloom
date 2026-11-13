@@ -163,12 +163,14 @@ def test_a_set_error_word_fails():
     assert metrics["errors"] == "0-1-0"
 
 
-# --- test/ranks.py: the four ranks of a test, each its own process ---
+# --- benchmark/acceptance/ranks.py: the four ranks of a test, each its own process ---
+
+ACCEPTANCE = "benchmark/acceptance"
 
 
 def _fake_ranks(monkeypatch, tmp_path, body: str):
     """``ranks`` with a stand-in rank script, so each rank's exit and output are the test's to choose."""
-    ranks = _load("ranks", "test")
+    ranks = _load("ranks", ACCEPTANCE)
     worker = tmp_path / "rank.py"
     worker.write_text("import os, sys, time\nrank = int(os.environ['RANK'])\n" + textwrap.dedent(body))
     monkeypatch.setattr(ranks, "WORKER", worker)
@@ -215,19 +217,19 @@ def test_the_acceptance_suite_runs_the_task_tests():
         assert isinstance(suite[f"{step}_timeout"], int) and suite[f"{step}_timeout"] > 0
         for command in commands:
             for word in shlex.split(command):
-                if word.startswith("test/"):
+                if word.startswith(f"{ACCEPTANCE}/"):
                     assert TASK.joinpath(word).is_file(), f"{step}: {word} does not exist"
     named = " ".join(suite["compile_command"] + suite["correctness_command"])
-    for test in sorted(TASK.joinpath("test").glob("test_*.py")):
-        assert f"test/{test.name}" in named, f"{test.name} is in no acceptance command"
+    for test in sorted(TASK.joinpath(ACCEPTANCE).glob("test_*.py")):
+        assert f"{ACCEPTANCE}/{test.name}" in named, f"{test.name} is in no acceptance command"
 
 
-def test_the_protected_directories_take_the_singular_names():
-    """The repository's pytest collects every ``src/**/tests`` (these tests need four GPUs), and its
-    ``.gitignore`` drops every ``benchmarks/``; forge protects the singular names too."""
-    for name in ("test", "benchmark"):
-        assert TASK.joinpath(name).is_dir()
-        assert not TASK.joinpath(f"{name}s").exists()
+def test_the_whole_task_ships_and_is_tracked():
+    """The wheel leaves out every ``test``, ``tests`` and ``testing`` directory, and the repository's
+    ``.gitignore`` drops every ``benchmarks/``: a task directory of either name would reach no user."""
+    dropped = {"test", "tests", "testing", "benchmarks"}
+    found = [str(path.relative_to(TASK)) for path in TASK.rglob("*") if path.is_dir() and path.name in dropped]
+    assert found == []
 
 
 def test_run_example_parses():
