@@ -51,7 +51,7 @@ def _resolve_gpus_per_node(args: argparse.Namespace) -> int:
 
 
 def _hand_off_node_list() -> Any:
-    """The PD node list handed over, or ``None``; a malformed one exits 2."""
+    """The node list handed over, or ``None``; a malformed one exits 2."""
     from ..multi_node.pd_session import handed_node_list
 
     try:
@@ -93,31 +93,37 @@ def _resolve_mn_backend(args: argparse.Namespace) -> str:
 
 
 def is_pd_session(args: argparse.Namespace) -> bool:
-    """Whether a ``--nodes >= 2`` run serves a PD-disaggregated node-list cluster."""
-    from ..multi_node.pd_session import PD_BACKENDS
+    """Whether a ``--nodes >= 2`` run serves a node-list cluster the suite launches: an atomesh or sglangrouter one,
+    or an Infera one handed over as a node list."""
+    from ..multi_node.pd_session import INFERA, PD_BACKENDS
 
-    return int(getattr(args, "nodes", 1) or 1) >= 2 and _resolve_mn_backend(args) in PD_BACKENDS
+    if int(getattr(args, "nodes", 1) or 1) < 2:
+        return False
+    backend = _resolve_mn_backend(args)
+    return backend in PD_BACKENDS or (backend == INFERA and _hand_off_node_list() is not None)
 
 
 def freeze_pd_session_launch(
     session_dir: Path, args: argparse.Namespace, session: LaunchQuery, inferencex_commit: str = ""
 ) -> None:
-    """Resolve a fresh PD session's launch on the handed-over node list and freeze it in ``session_dir``; exits 2
-    when the session is not disaggregated, no node list is handed over, or no source serves the session."""
+    """Resolve a fresh node-list session's launch on the handed-over cluster and freeze it in ``session_dir``; exits 2
+    when no node list is handed over, the session's ``--pd-mode`` is not the node list's mode, or no source serves
+    the session."""
     from ..multi_node.pd_session import PdSessionError, freeze_launch
 
-    if os.environ.get("PD_MODE", "").strip().lower() != "disaggregated":
-        _exit_refused(
-            f"--mn-backend {_resolve_mn_backend(args)} serves prefill/decode only; pass --pd-mode disaggregated"
-        )
     nodes = _hand_off_node_list()
     if nodes is None:
         _exit_refused(f"--mn-backend {_resolve_mn_backend(args)} needs the HYPERLOOM_MN_NODE_LIST hand-off")
+    pd_mode = (os.environ.get("PD_MODE", "") or "aggregated").strip().lower()
+    if pd_mode != nodes.mode.value:
+        _exit_refused(
+            f"the handed-over cluster is {nodes.mode.value}, the session {pd_mode}; pass --pd-mode {nodes.mode.value}"
+        )
     try:
         launch = freeze_launch(session_dir, session, nodes, inferencex_commit)
     except PdSessionError as exc:
         _exit_refused(str(exc))
-    print(f"multi-node: froze the PD launch {launch.digest()} from {launch.source}")
+    print(f"multi-node: froze the {launch.mode.value} launch {launch.digest()} from {launch.source}")
 
 
 def _exit_refused(problem: str) -> None:

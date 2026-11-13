@@ -24,7 +24,7 @@ import yaml
 from inference_suite.contracts.base_launch import Workload
 from inference_suite.frameworks import Framework
 from inference_suite.multinode.query import PdQuery, RoleAsk
-from inference_suite.multinode.record import PdSourceKind, Role
+from inference_suite.multinode.record import PD_ROLES, PdSourceKind, Role
 from inference_suite.recipe.inferencex import MASTER, PROJECT, RUNNERS, Scenario, concurrencies, runner_board
 from inference_suite.recipe.model import RecipeSourceError, boards_interchangeable
 from inference_suite.recipe.sources import Checkout
@@ -192,8 +192,8 @@ def _misfit(ask: RoleAsk, fit: RoleFit, gpus_per_node: int) -> str | None:
 
 
 def _roles_misfit(query: PdQuery, fits: Mapping[Role, RoleFit]) -> str | None:
-    for role in Role:
-        misfit = _misfit(query.prefill if role is Role.PREFILL else query.decode, fits[role], query.gpus_per_node)
+    for role in PD_ROLES:
+        misfit = _misfit(query.roles[role], fits[role], query.gpus_per_node)
         if misfit is not None:
             return f"{role.value}: {misfit}"
     return None
@@ -246,7 +246,7 @@ def _speculative(recipe: Mapping[str, Any]) -> bool:
 
 def _row_fits(row: Mapping[str, Any]) -> dict[Role, RoleFit]:
     fits = {}
-    for role in Role:
+    for role in PD_ROLES:
         side = row[role.value]
         tp = int(side["tp"])
         fits[role] = RoleFit(int(side["num-worker"]), tp, int(side.get("ep") or 1), bool(side.get("dp-attn")), tp)
@@ -398,7 +398,7 @@ def _lookup_candidate(query: PdQuery, path: str, selector: str, recipe: Mapping[
     if query.workload is Workload.FIXED and _speculative(recipe):
         return "it drafts speculatively, and a fixed workload runs no speculative decoding"
     roles = recipe["roles"]
-    fits = {role: recipe_fit(roles[role.value], query.framework) for role in Role}
+    fits = {role: recipe_fit(roles[role.value], query.framework) for role in PD_ROLES}
     misfit = _roles_misfit(query, fits)
     if misfit is not None:
         return misfit

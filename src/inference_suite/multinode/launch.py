@@ -1,10 +1,11 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""Start, restart and stop a frozen PD launch on the hosts of a node list over SSH.
+"""Start, restart and stop a frozen multi-node launch on the hosts of a node list over SSH.
 
 Engines start first; the router starts once every worker answers ``/health`` from here, and the launch is up once
-the router and the node list's service URL answer too. An engine process that dies on the way fails the launch with
+the router and the node list's service URL answer too. A launch behind the platform's Infera frontend starts no
+router and is up once the service URL answers. An engine process that dies on the way fails the launch with
 its log tail. Each engine waits for the GPUs to be released by the previous one and closes the device handles it
 inherited. SGLang's ``--help`` is probed once per launch: flags from a non-operator source that the engine does not
 list are dropped, and ``--cuda-graph-bs`` / ``--cuda-graph-max-bs`` move to their decode spelling on an engine that
@@ -36,6 +37,8 @@ from inference_suite.multinode.commands import (
     cluster_commands,
     engine_port,
     process_needle,
+    router_command,
+    runs_router,
     worker_hosts,
 )
 from inference_suite.multinode.nodes import LaunchMode, NodeList
@@ -221,7 +224,7 @@ def check_env(env: Mapping[str, str]) -> dict[str, str]:
 
 
 def probe_engine_flags(launch: PdLaunch, cluster: Cluster, timeout: int) -> frozenset[str]:
-    """The canonical flags the first prefill host's ``sglang.launch_server --help`` lists; empty for ATOM or when
+    """The canonical flags the first engine host's ``sglang.launch_server --help`` lists; empty for ATOM or when
     the probe lists nothing."""
     if launch.framework is not Framework.SGLANG:
         return frozenset()
@@ -232,7 +235,7 @@ def probe_engine_flags(launch: PdLaunch, cluster: Cluster, timeout: int) -> froz
             "python3 -m sglang.launch_server --help 2>/dev/null | grep -oE -- '--[a-z][a-z0-9_-]*' | sort -u",
         ]
     )
-    result = cluster.client.run(launch.prefill.hosts[0], script, timeout)
+    result = cluster.client.run(launch.role(launch.served_roles[0]).hosts[0], script, timeout)
     return frozenset(group_flag([line.strip()]) for line in result.stdout.splitlines() if line.startswith("--"))
 
 
@@ -258,9 +261,8 @@ def fit_to_engine(launch: PdLaunch, flags: frozenset[str]) -> PdLaunch:
     """``launch`` with each role fitted to an engine listing ``flags``; unchanged when ``flags`` is empty."""
     if not flags:
         return launch
-    prefill = _fit_role(Role.PREFILL, launch.prefill, flags, launch.source.kind)
-    decode = _fit_role(Role.DECODE, launch.decode, flags, launch.source.kind)
-    return replace(launch, prefill=prefill, decode=decode)
+    kind = launch.source.kind
+    return launch.with_roles({role: _fit_role(role, launch.role(role), flags, kind) for role in launch.served_roles})
 
 
 def replace_flags(args: Sequence[str], overrides: Sequence[str]) -> tuple[str, ...]:
@@ -271,23 +273,24 @@ def replace_flags(args: Sequence[str], overrides: Sequence[str]) -> tuple[str, .
 
 
 def with_overrides(launch: PdLaunch, overrides: Mapping[str, Sequence[str]]) -> PdLaunch:
-    """``launch`` with per-role (``prefill``, ``decode``, ``router``) flag overrides.
+    """``launch`` with flag overrides of each role it runs (``prefill`` and ``decode``, or ``worker``) and of the
+    ``router``.
 
     Raises:
-        LaunchError: an override sets a flag the launcher owns, or names no role.
+        LaunchError: an override sets a flag the launcher owns, or names no role of the launch.
     """
-    unknown = set(overrides) - {Role.PREFILL.value, Role.DECODE.value, ROUTER}
+    unknown = set(overrides) - {*(role.value for role in launch.served_roles), ROUTER}
     if unknown:
         raise LaunchError(f"overrides name no role: {sorted(unknown)}")
     roles = {}
-    for role in Role:
+    for role in launch.served_roles:
         given = list(overrides.get(role.value, ()))
         owned = render_role(launch.framework, given, {}).stripped
         if owned:
             raise LaunchError(f"the launcher sets {list(owned)}; they cannot be overridden on {role.value}")
-        roles[role.value] = replace(launch.role(role), args=replace_flags(launch.role(role).args, given))
+        roles[role] = replace(launch.role(role), args=replace_flags(launch.role(role).args, given))
     frontend = replace(launch.frontend, args=replace_flags(launch.frontend.args, list(overrides.get(ROUTER, ()))))
-    return replace(launch, frontend=frontend, **roles)
+    return replace(launch.with_roles(roles), frontend=frontend)
 
 
 def _health_urls(launch: PdLaunch, nodes: NodeList, role: Role) -> list[str]:
@@ -300,12 +303,15 @@ def _log_tail(cluster: Cluster, command: HostCommand, timeout: int) -> str:
     return result.stdout.strip()
 
 
+def _engine_commands(launch: PdLaunch, nodes: NodeList) -> list[HostCommand]:
+    """Every engine host's command, in launch order."""
+    return [command for command in cluster_commands(launch, nodes) if command.role != ROUTER]
+
+
 def engines_gone(launch: PdLaunch, cluster: Cluster, timeout: int = 30) -> list[HostCommand]:
     """The engine hosts whose launched server no longer runs (a restarted container lost it, or it exited)."""
     gone = []
-    for command in cluster_commands(launch, cluster.nodes):
-        if command.role == ROUTER:
-            continue
+    for command in _engine_commands(launch, cluster.nodes):
         needle = process_needle(command.role, launch.framework, launch.frontend.type)
         patterns = " ".join(f"-e {shlex.quote(part)}" for part in needle.split("|"))
         script = (
@@ -347,17 +353,18 @@ def start(launch: PdLaunch, cluster: Cluster, options: LaunchOptions) -> PdLaunc
     """
     env = check_env(options.extra_env)
     fitted = fit_to_engine(launch, probe_engine_flags(launch, cluster, options.ssh_timeout_s))
-    commands = cluster_commands(fitted, cluster.nodes)
-    for command in commands[:-1]:
+    for command in _engine_commands(fitted, cluster.nodes):
         role_env = {**fitted.role(Role(command.role)).env, **env}
         script = launch_script(command, role_env, fitted.framework, options.log_dir)
         _drive(cluster, command, script, fitted, options.ssh_timeout_s)
-    engines = [*_health_urls(fitted, cluster.nodes, Role.PREFILL), *_health_urls(fitted, cluster.nodes, Role.DECODE)]
+    engines = [url for role in fitted.served_roles for url in _health_urls(fitted, cluster.nodes, role)]
     _await(engines, fitted, cluster, options)
-    router = commands[-1]
-    _drive(cluster, router, launch_script(router, env, fitted.framework, ""), fitted, options.ssh_timeout_s)
-    service = cluster.nodes.service_url.rstrip("/")
-    _await([f"http://{router.host}:{ROUTER_PORT}/health", f"{service}/health"], fitted, cluster, options)
+    service = [f"{cluster.nodes.service_url.rstrip('/')}/health"]
+    if runs_router(fitted):
+        router = router_command(fitted, cluster.nodes)
+        _drive(cluster, router, launch_script(router, env, fitted.framework, ""), fitted, options.ssh_timeout_s)
+        service.insert(0, f"http://{router.host}:{ROUTER_PORT}/health")
+    _await(service, fitted, cluster, options)
     return fitted
 
 
@@ -370,8 +377,8 @@ def restart(
 
 def stop(launch: PdLaunch, cluster: Cluster, options: LaunchOptions) -> None:
     """Stop the router, then every engine; a server the container launcher waits on is parked, not killed."""
-    commands = cluster_commands(launch, cluster.nodes)
-    for command in [commands[-1], *commands[:-1]]:
+    routers = [router_command(launch, cluster.nodes)] if runs_router(launch) else []
+    for command in [*routers, *_engine_commands(launch, cluster.nodes)]:
         _drive(cluster, command, "", launch, options.ssh_timeout_s)
 
 

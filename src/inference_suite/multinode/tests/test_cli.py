@@ -18,6 +18,7 @@ from inference_suite.multinode.record import (
     PdLaunch,
     PdSource,
     PdSourceKind,
+    Role,
     RoleLaunch,
     read_record,
     write_record,
@@ -40,8 +41,7 @@ _LAUNCH = PdLaunch(
     served_model_name="org/M",
     context_length=2048,
     transfer_backend="mori",
-    prefill=RoleLaunch(("old-p",), 1, 8, args=("--a", "1")),
-    decode=RoleLaunch(("old-d",), 1, 8),
+    roles={Role.PREFILL: RoleLaunch(("old-p",), 1, 8, args=("--a", "1")), Role.DECODE: RoleLaunch(("old-d",), 1, 8)},
     frontend=Frontend(FrontendType.SGLANG_ROUTER, "old-r", ()),
 )
 
@@ -77,7 +77,7 @@ def test_start_runs_on_the_node_list_hosts_and_records_what_ran(record, monkeypa
 
     def fake_start(launch, cluster, options):
         seen.update(launch=launch, known=cluster.client.known_hosts, env=options.extra_env)
-        return replace(launch, prefill=replace(launch.prefill, stripped=("unsupported --x",)))
+        return launch.with_roles({Role.PREFILL: replace(launch.prefill, stripped=("unsupported --x",))})
 
     monkeypatch.setattr(cli, "start", fake_start)
     assert main(["multinode", "start", "--record", str(record), "--env", "A=b=c"]) == 0

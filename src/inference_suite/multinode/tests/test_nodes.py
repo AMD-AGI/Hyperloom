@@ -14,7 +14,7 @@ from inference_suite.multinode.nodes import (
     parse_node_list,
     read_node_list,
 )
-from inference_suite.multinode.record import FrontendType, Role
+from inference_suite.multinode.record import FrontendType, PdMode, Role
 
 
 def _document(**fields):
@@ -123,3 +123,65 @@ def test_node_list_names_the_router_it_runs():
     assert parse_node_list(_document()).query(_session()).served_frontend is FrontendType.SGLANG_ROUTER
     with pytest.raises(NodeListError, match="frontend"):
         parse_node_list(_document(frontend="nginx"))
+
+
+def _aggregated(**fields):
+    aggregated = {
+        "mode": "aggregated",
+        "prefill": None,
+        "decode": None,
+        "prefill_url": None,
+        "decode_url": None,
+        "worker": [{"host": "10.0.0.5"}, {"host": "10.0.0.6"}],
+        "topology": {"worker": {"tp": 16}},
+        "config": {"worker_args": "--w 1"},
+    }
+    return _document(**{**aggregated, **fields})
+
+
+def test_aggregated_node_list_names_worker_hosts():
+    nodes = parse_node_list(_aggregated())
+    assert nodes.mode is PdMode.AGGREGATED and nodes.roles == (Role.WORKER,)
+    assert nodes.worker == ("10.0.0.5", "10.0.0.6") and nodes.prefill == () and nodes.decode == ()
+    assert nodes.operator.worker == ("--w", "1") and nodes.topology[Role.WORKER].tp == 16
+    query = nodes.query(_session())
+    assert query.mode is PdMode.AGGREGATED and query.roles[Role.WORKER].hosts == nodes.worker
+
+
+@pytest.mark.parametrize(
+    ("fields", "match"),
+    [
+        ({"prefill": [{"host": "10.0.0.2"}]}, "aggregated node list names no prefill"),
+        ({"worker": None}, "lacks"),
+        ({"config": {"prefill_args": "--a"}}, "unknown keys"),
+        ({"topology": {"decode": {}}}, "unknown keys"),
+        ({"worker": [{"host": "10.0.0.5"}, {"host": "10.0.0.5"}]}, "twice"),
+        ({"mode": "mixed"}, "mode"),
+    ],
+)
+def test_invalid_aggregated_node_list_is_refused(fields, match):
+    with pytest.raises(NodeListError, match=match):
+        parse_node_list(_aggregated(**fields))
+
+
+def test_a_disaggregated_node_list_names_no_workers():
+    with pytest.raises(NodeListError, match="disaggregated node list names no worker"):
+        parse_node_list(_document(worker=[{"host": "10.0.0.9"}]))
+    with pytest.raises(NodeListError, match="unknown keys"):
+        parse_node_list(_document(config={"worker_args": "--w"}))
+
+
+def test_infera_frontend_needs_no_router_host():
+    nodes = parse_node_list(_aggregated(frontend="infera", router=None))
+    assert nodes.frontend is FrontendType.INFERA and nodes.router == ""
+    with pytest.raises(NodeListError, match="lacks"):
+        parse_node_list(_aggregated(router=None))
+    with pytest.raises(NodeListError, match="does not serve through the infera frontend"):
+        parse_node_list(_aggregated(frontend="infera", framework="atom"))
+
+
+def test_a_host_entry_names_its_own_ssh_port():
+    nodes = parse_node_list(_document(decode=[{"host": "10.0.0.3", "ssh_port": 25042}, {"host": "10.0.0.4"}]))
+    assert nodes.ssh.port_of("10.0.0.3") == 25042 and nodes.ssh.port_of("10.0.0.4") == 25032
+    with pytest.raises(NodeListError, match="ssh_port"):
+        parse_node_list(_document(decode=[{"host": "10.0.0.3", "ssh_port": 0}]))

@@ -1,18 +1,24 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""What a PD session asks resolution for: the model, framework, board, workload and each role's hosts."""
+"""What a multi-node session asks resolution for: the model, framework, board, workload, mode and each role's hosts."""
 
 from __future__ import annotations
 
+from collections.abc import Mapping
 from dataclasses import dataclass
 
 from inference_suite.contracts.base_launch import Workload
 from inference_suite.frameworks import Framework
-from inference_suite.multinode.record import FrontendType
+from inference_suite.multinode.record import MODE_ROLES, FrontendType, PdMode, Role
 
 #: The router each framework serves through when the session names none.
 DEFAULT_FRONTEND = {Framework.SGLANG: FrontendType.SGLANG_ROUTER, Framework.ATOM: FrontendType.ATOMESH}
+#: The frontends a session may name, by framework.
+SERVED_FRONTENDS = {
+    Framework.SGLANG: (FrontendType.SGLANG_ROUTER, FrontendType.ATOMESH, FrontendType.INFERA),
+    Framework.ATOM: (FrontendType.SGLANG_ROUTER, FrontendType.ATOMESH),
+}
 
 
 class PdQueryError(ValueError):
@@ -40,9 +46,10 @@ class RoleAsk:
 
 @dataclass(frozen=True)
 class PdQuery:
-    """A PD session: ``model_id`` as InferenceX names it, ``model_path`` the engines load, the board and GPUs per
-    node of every host, the workload (with its sequence shape when fixed), its concurrencies, both roles, the
-    router host (empty when the platform runs the router) and the router it runs (``None`` for the framework's)."""
+    """A multi-node session: ``model_id`` as InferenceX names it, ``model_path`` the engines load, the board and GPUs
+    per node of every host, the workload (with its sequence shape when fixed), its concurrencies, the ask of each role
+    of its mode, the router host (empty when the platform runs the router) and the router it runs (``None`` for the
+    framework's)."""
 
     model_id: str
     model_path: str
@@ -51,13 +58,13 @@ class PdQuery:
     gpus_per_node: int
     workload: Workload
     concurrencies: tuple[int, ...]
-    prefill: RoleAsk
-    decode: RoleAsk
+    roles: Mapping[Role, RoleAsk]
     router_host: str = ""
     isl: int | None = None
     osl: int | None = None
     transfer_backend: str = ""
     frontend: FrontendType | None = None
+    mode: PdMode = PdMode.DISAGGREGATED
 
     def __post_init__(self) -> None:
         if self.framework not in (Framework.SGLANG, Framework.ATOM):
@@ -70,11 +77,24 @@ class PdQuery:
             raise PdQueryError(f"gpus_per_node must be a positive integer, got {self.gpus_per_node!r}")
         if not self.concurrencies or not all(isinstance(c, int) and c >= 1 for c in self.concurrencies):
             raise PdQueryError(f"a PD session needs positive concurrencies, got {self.concurrencies!r}")
-        if self.frontend not in (None, *DEFAULT_FRONTEND.values()):
-            raise PdQueryError(f"a PD session serves through sglang-router or atomesh, not {self.frontend.value}")
+        if self.frontend not in (None, *SERVED_FRONTENDS[self.framework]):
+            served = ", ".join(frontend.value for frontend in SERVED_FRONTENDS[self.framework])
+            raise PdQueryError(f"a {self.framework.value} session serves through {served}, not {self.frontend.value}")
+        if set(self.roles) != set(MODE_ROLES[self.mode]):
+            raise PdQueryError(f"a {self.mode.value} session asks for {[role.value for role in MODE_ROLES[self.mode]]}")
         fixed = self.workload is Workload.FIXED
         if (self.isl is not None and self.osl is not None) != fixed:
             raise PdQueryError("a fixed workload names its isl and osl, and an AgentX one neither")
+
+    @property
+    def prefill(self) -> RoleAsk:
+        """The prefill ask of a disaggregated query."""
+        return self.roles[Role.PREFILL]
+
+    @property
+    def decode(self) -> RoleAsk:
+        """The decode ask of a disaggregated query."""
+        return self.roles[Role.DECODE]
 
     @property
     def model_name(self) -> str:
@@ -91,4 +111,4 @@ class PdQuery:
         return max(self.concurrencies)
 
 
-__all__ = ["DEFAULT_FRONTEND", "PdQuery", "PdQueryError", "RoleAsk"]
+__all__ = ["DEFAULT_FRONTEND", "SERVED_FRONTENDS", "PdQuery", "PdQueryError", "RoleAsk"]

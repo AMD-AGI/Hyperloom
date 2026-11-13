@@ -1,12 +1,14 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""The node list: the one input of a PD session, a JSON document in ``HYPERLOOM_MN_NODE_LIST``.
+"""The node list: the one input of a multi-node session, a JSON document in ``HYPERLOOM_MN_NODE_LIST``.
 
-It names the framework and model, the cluster's service and engine URLs, the router, prefill and decode hosts, the
-GPUs per node, SSH access (the key by path only), the KV transfer backend, the router it runs, the topology and args
-the operator fixed, and how the launcher starts processes: ``direct`` over SSH, or ``in_place`` into the process a
-platform launcher waits on. Every key is checked; an unknown one is refused.
+It names the framework and model, the cluster's service and engine URLs, the serving mode, the router host and the
+hosts of each role of the mode (prefill and decode when disaggregated, worker when aggregated), the GPUs per node, SSH
+access (the key by path only, a host entry's own ``ssh_port`` over the shared one), the KV transfer backend, the
+frontend it runs, the topology and args the operator fixed, and how the launcher starts processes: ``direct`` over
+SSH, or ``in_place`` into the process a platform launcher waits on. The router host is optional for the ``infera``
+frontend, which the platform runs. Every key is checked; an unknown one is refused.
 """
 
 from __future__ import annotations
@@ -14,29 +16,32 @@ from __future__ import annotations
 import json
 import shlex
 from collections.abc import Mapping
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from enum import Enum
 from typing import Any
 from urllib.parse import urlsplit
 
 from inference_suite.contracts.base_launch import LaunchQuery
 from inference_suite.frameworks import Framework
-from inference_suite.multinode.query import PdQuery, RoleAsk
-from inference_suite.multinode.record import FrontendType, Role
+from inference_suite.multinode.query import SERVED_FRONTENDS, PdQuery, RoleAsk
+from inference_suite.multinode.record import MODE_ROLES, FrontendType, PdMode, Role
 from inference_suite.multinode.recipe import OperatorArgs
 
 NODE_LIST_ENV = "HYPERLOOM_MN_NODE_LIST"
 _FRAMEWORKS = {Framework.SGLANG.value: Framework.SGLANG, Framework.ATOM.value: Framework.ATOM}
-_REQUIRED = ("framework", "model", "service_url", "router", "prefill", "decode", "gpus_per_node")
+_ROUTER = "router"
+_SSH_PORT = "ssh_port"
+_REQUIRED = ("framework", "model", "service_url", "gpus_per_node")
 _KEYS = (
     frozenset(_REQUIRED)
+    | {_ROUTER, "mode", *(role.value for role in Role)}
     | {"prefill_url", "decode_url", "ssh", "transfer_backend", "topology", "launch_mode"}
     | {"config", "frontend"}
 )
 _SSH_KEYS = frozenset({"port", "user", "key_file", "known_hosts_file"})
 _TOPOLOGY_KEYS = frozenset({"tp", "ep", "dp_attention"})
-_CONFIG_KEYS = frozenset({"prefill_args", "decode_args", "router_args"})
-_HOST_KEYS = frozenset({"host"})
+_ROUTER_ARGS = "router_args"
+_HOST_KEYS = frozenset({"host", _SSH_PORT})
 _HTTP = ("http://", "https://")
 _MAX_PORT = 65535
 
@@ -54,12 +59,18 @@ class LaunchMode(str, Enum):
 
 @dataclass(frozen=True)
 class SshAccess:
-    """How the launcher reaches every host: port, user, the private key's path and an optional known_hosts file."""
+    """How the launcher reaches every host: port, user, the private key's path, an optional known_hosts file and
+    the hosts whose sshd listens on a port of its own."""
 
     port: int
     user: str
     key_file: str
     known_hosts_file: str = ""
+    host_ports: Mapping[str, int] = field(default_factory=dict)
+
+    def port_of(self, host: str) -> int:
+        """The port ``host``'s sshd listens on."""
+        return self.host_ports.get(host, self.port)
 
 
 @dataclass(frozen=True)
@@ -82,6 +93,8 @@ class NodeList:
     prefill: tuple[str, ...]
     decode: tuple[str, ...]
     gpus_per_node: int
+    mode: PdMode = PdMode.DISAGGREGATED
+    worker: tuple[str, ...] = ()
     prefill_url: str = ""
     decode_url: str = ""
     ssh: SshAccess | None = None
@@ -91,11 +104,20 @@ class NodeList:
     operator: OperatorArgs = field(default_factory=OperatorArgs)
     frontend: FrontendType | None = None
 
+    @property
+    def roles(self) -> tuple[Role, ...]:
+        """The roles the node list's mode runs."""
+        return MODE_ROLES[self.mode]
+
     def hosts(self, role: Role) -> tuple[str, ...]:
-        return self.prefill if role is Role.PREFILL else self.decode
+        return {Role.PREFILL: self.prefill, Role.DECODE: self.decode, Role.WORKER: self.worker}[role]
+
+    def role_hosts(self) -> dict[Role, tuple[str, ...]]:
+        """The hosts of each role of the mode."""
+        return {role: self.hosts(role) for role in self.roles}
 
     def query(self, session: LaunchQuery) -> PdQuery:
-        """The PD query of this cluster for ``session``, whose framework must be the node list's.
+        """The query of this cluster for ``session``, whose framework must be the node list's.
 
         Raises:
             NodeListError: the session runs another framework.
@@ -103,7 +125,7 @@ class NodeList:
         if session.framework != self.framework.value:
             raise NodeListError(f"the session runs {session.framework}, the node list {self.framework.value}")
         asks = {}
-        for role in Role:
+        for role in self.roles:
             fixed = self.topology.get(role, RoleTopology())
             asks[role] = RoleAsk(self.hosts(role), fixed.tp, fixed.ep, fixed.dp_attention)
         return PdQuery(
@@ -114,13 +136,13 @@ class NodeList:
             gpus_per_node=self.gpus_per_node,
             workload=session.workload,
             concurrencies=session.concurrencies,
-            prefill=asks[Role.PREFILL],
-            decode=asks[Role.DECODE],
+            roles=asks,
             router_host=self.router,
             isl=session.isl,
             osl=session.osl,
             transfer_backend=self.transfer_backend,
             frontend=self.frontend,
+            mode=self.mode,
         )
 
 
@@ -163,6 +185,17 @@ def _hosts(value: Any, role: Role) -> tuple[str, ...]:
     if len(set(hosts)) != len(hosts):
         raise NodeListError(f"{role.value} names a host twice: {list(hosts)}")
     return hosts
+
+
+def _host_ports(fields: Mapping[str, Any]) -> dict[str, int]:
+    """The SSH port of every host entry that names its own."""
+    ports: dict[str, int] = {}
+    for key in (_ROUTER, *(role.value for role in Role)):
+        entries = fields.get(key)
+        for entry in [entries] if isinstance(entries, Mapping) else entries or []:
+            if isinstance(entry, Mapping) and entry.get(_SSH_PORT) is not None:
+                ports[str(entry.get("host"))] = _integer(entry[_SSH_PORT], f"{key}'s {_SSH_PORT}", _MAX_PORT)
+    return ports
 
 
 def _ssh(value: Any) -> SshAccess:
@@ -208,12 +241,16 @@ def _args(value: Any, what: str) -> tuple[str, ...]:
         raise NodeListError(f"{what} is not shell-tokenizable: {error}") from error
 
 
-def _operator(value: Any) -> OperatorArgs:
-    fields = _mapping(value, "config", _CONFIG_KEYS)
+def _operator(value: Any, mode: PdMode) -> OperatorArgs:
+    """The operator's args of ``config``, which names the args of the mode's roles and the router's only."""
+    keys = {f"{role.value}_args": role for role in MODE_ROLES[mode]}
+    fields = _mapping(value, "config", frozenset({*keys, _ROUTER_ARGS}))
+    given = {role: _args(fields.get(key), f"config.{key}") for key, role in keys.items()}
     return OperatorArgs(
-        prefill=_args(fields.get("prefill_args"), "config.prefill_args"),
-        decode=_args(fields.get("decode_args"), "config.decode_args"),
-        router=_args(fields.get("router_args"), "config.router_args"),
+        prefill=given.get(Role.PREFILL, ()),
+        decode=given.get(Role.DECODE, ()),
+        worker=given.get(Role.WORKER, ()),
+        router=_args(fields.get(_ROUTER_ARGS), f"config.{_ROUTER_ARGS}"),
     )
 
 
@@ -234,40 +271,69 @@ def _optional_url(fields: Mapping[str, Any], key: str) -> str:
     return _url(fields[key], key) if fields.get(key) else ""
 
 
+def _frontend(fields: Mapping[str, Any], framework: Framework) -> FrontendType | None:
+    """The frontend the node list names, refused when ``framework`` does not serve through it."""
+    if not fields.get("frontend"):
+        return None
+    frontend: FrontendType = _enum(FrontendType, fields["frontend"], "frontend")
+    if frontend not in SERVED_FRONTENDS[framework]:
+        raise NodeListError(f"framework {framework.value} does not serve through the {frontend.value} frontend")
+    return frontend
+
+
+def _role_hosts(fields: Mapping[str, Any], mode: PdMode) -> dict[Role, tuple[str, ...]]:
+    """The hosts of each role of ``mode``, refused when another role names hosts or two roles share one."""
+    for role in Role:
+        if role not in MODE_ROLES[mode] and fields.get(role.value) is not None:
+            raise NodeListError(f"a {mode.value} node list names no {role.value} hosts")
+    hosts = {role: _hosts(fields[role.value], role) for role in MODE_ROLES[mode]}
+    every = [host for role_hosts in hosts.values() for host in role_hosts]
+    shared = sorted({host for host in every if every.count(host) > 1})
+    if shared:
+        raise NodeListError(f"{' and '.join(role.value for role in hosts)} share hosts {shared}")
+    return hosts
+
+
 def parse_node_list(document: Any) -> NodeList:
     """The node list ``document`` states.
 
     Raises:
-        NodeListError: a key is missing, unknown or of the wrong kind, or the roles share a host.
+        NodeListError: a key is missing, unknown or of the wrong kind, a role the mode does not run names hosts, or
+            the roles share a host.
     """
     fields = _mapping(document, "the node list", _KEYS)
-    missing = [key for key in _REQUIRED if key not in fields]
+    mode = _enum(PdMode, fields.get("mode", PdMode.DISAGGREGATED.value), "mode")
+    frontend = _frontend(fields, _framework(fields.get("framework"))) if "framework" in fields else None
+    required = (*_REQUIRED, *(() if frontend is FrontendType.INFERA else (_ROUTER,)))
+    missing = [key for key in (*required, *(role.value for role in MODE_ROLES[mode])) if key not in fields]
     if missing:
         raise NodeListError(f"the node list lacks {missing}")
-    prefill, decode = _hosts(fields["prefill"], Role.PREFILL), _hosts(fields["decode"], Role.DECODE)
-    router = _host(fields["router"], "router")
-    shared = sorted(set(prefill) & set(decode))
-    if shared:
-        raise NodeListError(f"prefill and decode share hosts {shared}")
-    topology = _mapping(fields.get("topology") or {}, "topology", frozenset(role.value for role in Role))
+    framework = _framework(fields["framework"])
+    hosts = _role_hosts(fields, mode)
+    router = _host(fields[_ROUTER], _ROUTER) if fields.get(_ROUTER) is not None else ""
+    topology = _mapping(fields.get("topology") or {}, "topology", frozenset(role.value for role in MODE_ROLES[mode]))
+    ssh = _ssh(fields["ssh"]) if fields.get("ssh") is not None else None
+    ports = _host_ports(fields)
     return NodeList(
-        framework=_framework(fields["framework"]),
+        framework=framework,
         model=_text(fields["model"], "model"),
         service_url=_url(fields["service_url"], "service_url"),
         router=router,
-        prefill=prefill,
-        decode=decode,
+        prefill=hosts.get(Role.PREFILL, ()),
+        decode=hosts.get(Role.DECODE, ()),
         gpus_per_node=_integer(fields["gpus_per_node"], "gpus_per_node"),
+        mode=mode,
+        worker=hosts.get(Role.WORKER, ()),
         prefill_url=_optional_url(fields, "prefill_url"),
         decode_url=_optional_url(fields, "decode_url"),
-        ssh=_ssh(fields["ssh"]) if fields.get("ssh") is not None else None,
+        ssh=replace(ssh, host_ports=ports) if ssh is not None else None,
         transfer_backend=_text(fields["transfer_backend"], "transfer_backend")
         if fields.get("transfer_backend")
         else "",
         topology={Role(key): _role_topology(value, Role(key)) for key, value in topology.items()},
         launch_mode=_enum(LaunchMode, fields.get("launch_mode", LaunchMode.DIRECT.value), "launch_mode"),
-        operator=_operator(fields["config"]) if fields.get("config") is not None else OperatorArgs(),
-        frontend=_enum(FrontendType, fields["frontend"], "frontend") if fields.get("frontend") else None,
+        operator=_operator(fields["config"], mode) if fields.get("config") is not None else OperatorArgs(),
+        frontend=frontend,
     )
 
 

@@ -1,12 +1,13 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""``pd_launch.json``: the PD launch a session resolved once, frozen for every round and every resume.
+"""``pd_launch.json``: the multi-node launch a session resolved once, frozen for every round and every resume.
 
-The record holds what each role runs (hosts, topology, args, env, the runner-owned keys taken out of its source),
-the router, the KV transfer backend and where the launch came from. Its digest covers the roles' launch, the
-frontend and the transfer backend, not the hosts, so a resume refuses a record whose launch was changed. No
-credential or key path is part of it.
+The record holds the serving mode (prefill/decode disaggregated, or aggregated workers), what each role runs (hosts,
+topology, args, env, the runner-owned keys taken out of its source), the router, the KV transfer backend and where
+the launch came from. Its digest covers the mode, the roles' launch, the frontend and the transfer backend, not the
+hosts, so a resume refuses a record whose launch was changed. Documents of the previous schema, which are all
+disaggregated, still read. No credential or key path is part of it.
 """
 
 from __future__ import annotations
@@ -21,7 +22,9 @@ from typing import Any
 
 from inference_suite.frameworks import Framework
 
-SCHEMA = "inference-suite-pd-launch/1"
+SCHEMA = "inference-suite-pd-launch/2"
+#: The schema before the serving mode was recorded; its documents are disaggregated.
+SCHEMA_V1 = "inference-suite-pd-launch/1"
 RECORD_NAME = "pd_launch.json"
 _UTF8 = "utf-8"
 
@@ -41,6 +44,8 @@ class PdSourceKind(str, Enum):
     INFERENCEX_LOOKUP = "inferencex-lookup"
     #: A row of the PD default table.
     PD_TABLE = "pd-table"
+    #: The single-node base launch the suite resolves, run by every aggregated worker.
+    BASE_LAUNCH = "base-launch"
 
 
 class FrontendType(str, Enum):
@@ -52,6 +57,20 @@ class FrontendType(str, Enum):
 class Role(str, Enum):
     PREFILL = "prefill"
     DECODE = "decode"
+    WORKER = "worker"
+
+
+class PdMode(str, Enum):
+    #: Prefill and decode run on engines of their own, the KV cache transferred between them.
+    DISAGGREGATED = "disaggregated"
+    #: Every worker serves whole requests.
+    AGGREGATED = "aggregated"
+
+
+#: The roles of a disaggregated launch.
+PD_ROLES = (Role.PREFILL, Role.DECODE)
+#: The roles each mode runs, in launch order.
+MODE_ROLES = {PdMode.DISAGGREGATED: PD_ROLES, PdMode.AGGREGATED: (Role.WORKER,)}
 
 
 @dataclass(frozen=True)
@@ -169,8 +188,9 @@ class Frontend:
 
 @dataclass(frozen=True)
 class PdLaunch:
-    """A resolved PD launch: the framework, the model path and the name it is served as, the context the engines
-    serve (``None`` for the engine's own), the KV transfer backend, both roles, the frontend and its source."""
+    """A resolved multi-node launch: the framework, the model path and the name it is served as, the context the
+    engines serve (``None`` for the engine's own), the KV transfer backend, the serving mode, each role of the mode,
+    the frontend and its source."""
 
     source: PdSource
     framework: Framework
@@ -178,26 +198,51 @@ class PdLaunch:
     served_model_name: str
     context_length: int | None
     transfer_backend: str
-    prefill: RoleLaunch
-    decode: RoleLaunch
+    roles: Mapping[Role, RoleLaunch]
     frontend: Frontend
+    mode: PdMode = PdMode.DISAGGREGATED
+
+    def __post_init__(self) -> None:
+        """Refuse roles other than those of the mode."""
+        if set(self.roles) != set(MODE_ROLES[self.mode]):
+            named = sorted(role.value for role in self.roles)
+            raise PdRecordError(
+                f"a {self.mode.value} launch runs {[r.value for r in MODE_ROLES[self.mode]]}, not {named}"
+            )
+
+    @property
+    def served_roles(self) -> tuple[Role, ...]:
+        """The roles the launch runs, in launch order."""
+        return MODE_ROLES[self.mode]
+
+    @property
+    def prefill(self) -> RoleLaunch:
+        """The prefill role of a disaggregated launch."""
+        return self.roles[Role.PREFILL]
+
+    @property
+    def decode(self) -> RoleLaunch:
+        """The decode role of a disaggregated launch."""
+        return self.roles[Role.DECODE]
 
     def role(self, role: Role) -> RoleLaunch:
-        return self.prefill if role is Role.PREFILL else self.decode
+        return self.roles[role]
 
-    def digest(self) -> str:
-        """The sha256 of the launch: the model, its served name and context, the roles but their hosts, the frontend
-        but its host, the transfer backend."""
-        launch = {
+    def _launch_fields(self) -> dict[str, Any]:
+        """The digested fields every schema shares: the model, its served name and context, the transfer backend,
+        the roles but their hosts and the frontend but its host."""
+        return {
             "model": self.model,
             "served_model_name": self.served_model_name,
             "context_length": self.context_length,
             "transfer_backend": self.transfer_backend,
-            "roles": {role.value: self.role(role).launch_document() for role in Role},
+            "roles": {role.value: self.role(role).launch_document() for role in self.served_roles},
             "frontend": self.frontend.launch_document(),
         }
-        canonical = json.dumps(launch, sort_keys=True, separators=(",", ":"))
-        return f"sha256:{hashlib.sha256(canonical.encode(_UTF8)).hexdigest()}"
+
+    def digest(self) -> str:
+        """The sha256 of the launch: the mode and every digested field."""
+        return _digest({**self._launch_fields(), "mode": self.mode.value})
 
     def to_document(self) -> dict[str, Any]:
         return {
@@ -208,7 +253,8 @@ class PdLaunch:
             "served_model_name": self.served_model_name,
             "context_length": self.context_length,
             "transfer_backend": self.transfer_backend,
-            "roles": {role.value: self.role(role).to_document() for role in Role},
+            "mode": self.mode.value,
+            "roles": {role.value: self.role(role).to_document() for role in self.served_roles},
             "frontend": self.frontend.to_document(),
             "digest": self.digest(),
         }
@@ -217,8 +263,12 @@ class PdLaunch:
     def from_document(cls, document: Any) -> PdLaunch:
         """The launch ``document`` records, refused when its schema or digest does not hold."""
         fields = _mapping(document, "a PD launch")
-        if fields.get("schema") != SCHEMA:
-            raise PdRecordError(f"a PD launch has schema {fields.get('schema')!r}, not {SCHEMA}")
+        schema = fields.get("schema")
+        if schema not in (SCHEMA, SCHEMA_V1):
+            raise PdRecordError(f"a PD launch has schema {schema!r}, not {SCHEMA}")
+        mode = PdMode.DISAGGREGATED
+        if schema == SCHEMA:
+            mode = _enum(PdMode, fields.get("mode"), "a PD launch's mode")
         roles = _mapping(fields.get("roles"), "a PD launch's roles")
         launch = cls(
             source=PdSource.from_document(fields.get("source")),
@@ -227,22 +277,32 @@ class PdLaunch:
             served_model_name=_text(fields.get("served_model_name"), "a PD launch's served model name"),
             context_length=_optional_integer(fields.get("context_length"), "a PD launch's context length"),
             transfer_backend=_text(fields.get("transfer_backend", ""), "a PD launch's transfer backend"),
-            prefill=RoleLaunch.from_document(roles.get(Role.PREFILL.value), "the prefill role"),
-            decode=RoleLaunch.from_document(roles.get(Role.DECODE.value), "the decode role"),
+            roles={
+                role: RoleLaunch.from_document(roles.get(role.value), f"the {role.value} role")
+                for role in MODE_ROLES[mode]
+            },
             frontend=Frontend.from_document(fields.get("frontend")),
+            mode=mode,
         )
-        if fields.get("digest") != launch.digest():
+        recorded = launch.digest() if schema == SCHEMA else _digest(launch._launch_fields())
+        if fields.get("digest") != recorded:
             raise PdRecordError(f"a PD launch's digest {fields.get('digest')!r} is not that of its launch")
         return launch
 
-    def with_hosts(self, prefill: Sequence[str], decode: Sequence[str], router: str) -> PdLaunch:
-        """The same launch on other hosts: the digest does not change."""
-        return replace(
-            self,
-            prefill=replace(self.prefill, hosts=tuple(prefill)),
-            decode=replace(self.decode, hosts=tuple(decode)),
-            frontend=replace(self.frontend, host=router),
-        )
+    def with_roles(self, roles: Mapping[Role, RoleLaunch]) -> PdLaunch:
+        """The same launch with the roles of ``roles`` replaced."""
+        return replace(self, roles={**self.roles, **roles})
+
+    def with_hosts(self, hosts: Mapping[Role, Sequence[str]], router: str) -> PdLaunch:
+        """The same launch on other hosts, by role: the digest does not change."""
+        roles = {role: replace(self.role(role), hosts=tuple(hosts[role])) for role in self.served_roles}
+        return replace(self.with_roles(roles), frontend=replace(self.frontend, host=router))
+
+
+def _digest(launch: Mapping[str, Any]) -> str:
+    """The sha256 of ``launch`` in canonical JSON."""
+    canonical = json.dumps(launch, sort_keys=True, separators=(",", ":"))
+    return f"sha256:{hashlib.sha256(canonical.encode(_UTF8)).hexdigest()}"
 
 
 def write_record(launch: PdLaunch, path: Path) -> str:
@@ -315,11 +375,15 @@ def _enum(kind: type[Enum], value: Any, what: str) -> Any:
 
 
 __all__ = [
+    "MODE_ROLES",
+    "PD_ROLES",
     "RECORD_NAME",
     "SCHEMA",
+    "SCHEMA_V1",
     "Frontend",
     "FrontendType",
     "PdLaunch",
+    "PdMode",
     "PdRecordError",
     "PdSource",
     "PdSourceKind",

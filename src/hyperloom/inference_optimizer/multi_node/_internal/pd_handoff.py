@@ -1,24 +1,26 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""The PD-disaggregated cluster the platform hands over as a node list, and the multi-node state it describes."""
+"""The cluster the platform hands over as a node list (PD-disaggregated or aggregated), and the multi-node state it
+describes."""
 
 from __future__ import annotations
 
 import os
 from typing import Any
 
-from inference_suite.multinode import NODE_LIST_ENV, NodeList, NodeListError, read_node_list
+from inference_suite.multinode import NODE_LIST_ENV, NodeList, NodeListError, Role, read_node_list
 
 from .topology_file import TopologyHandoffError
 
 ATOMESH = "atomesh"
 SGLANGROUTER = "sglangrouter"
+INFERA = "infera"
 PD_BACKENDS = (ATOMESH, SGLANGROUTER)
+#: The multi-node state key that marks a node-list cluster.
+NODE_LIST_KEY = "node_list"
 
-_PREFILL = "prefill"
-_DECODE = "decode"
-_FRONTEND_BACKEND = {"atomesh": ATOMESH, "sglang-router": SGLANGROUTER}
+_FRONTEND_BACKEND = {"atomesh": ATOMESH, "sglang-router": SGLANGROUTER, "infera": INFERA}
 _FRAMEWORK_BACKEND = {"atom": ATOMESH, "sglang": SGLANGROUTER}
 
 
@@ -37,44 +39,50 @@ def handed_node_list() -> NodeList | None:
 
 
 def node_list_backend(nodes: NodeList) -> str:
-    """The PD backend a node list's frontend, else its framework, names."""
+    """The backend a node list's frontend, else its framework, names."""
     if nodes.frontend is not None:
         return _FRONTEND_BACKEND[nodes.frontend.value]
     return _FRAMEWORK_BACKEND[nodes.framework.value]
 
 
 def is_pd_state(state: dict[str, Any]) -> bool:
-    """Whether a multi-node state describes a PD-disaggregated node-list cluster."""
-    return str(state.get("backend") or "") in PD_BACKENDS
+    """Whether a multi-node state describes a node-list cluster the suite launches: an atomesh or sglangrouter one,
+    or an Infera one handed over as a node list."""
+    backend = str(state.get("backend") or "")
+    return backend in PD_BACKENDS or (backend == INFERA and state.get(NODE_LIST_KEY) is True)
 
 
-def _pods(hosts: tuple[str, ...], role: str, ssh_port: int) -> list[dict[str, Any]]:
+def _pods(nodes: NodeList, role: str) -> list[dict[str, Any]]:
     """SSH targets of one role's hosts."""
+    hosts = nodes.hosts(Role(role))
     return [
-        {"podIP": host, "podId": f"external-{role}-{index}", "role": role, "lwsIndex": index, "sshPort": ssh_port}
+        {
+            "podIP": host,
+            "podId": f"external-{role}-{index}",
+            "role": role,
+            "lwsIndex": index,
+            "sshPort": nodes.ssh.port_of(host) if nodes.ssh else 0,
+        }
         for index, host in enumerate(hosts)
     ]
 
 
 def pd_state(nodes: NodeList, backend: str) -> dict[str, Any]:
     """The multi-node state of a node-list cluster served by ``backend``."""
-    prefill, decode = nodes.prefill, nodes.decode
+    prefill, decode, worker = nodes.prefill, nodes.decode, nodes.worker
     ssh_port = nodes.ssh.port if nodes.ssh else 0
     state: dict[str, Any] = {
         "backend": backend,
         "external": True,
+        NODE_LIST_KEY: True,
         "service_url": nodes.service_url,
-        "nodes": len(set(prefill + decode)),
+        "nodes": len(set(prefill + decode + worker)),
         "gpus_per_node": nodes.gpus_per_node,
-        "pd_mode": "disaggregated",
+        "pd_mode": nodes.mode.value,
         "ssh_port": ssh_port,
         "router_pod_ip": nodes.router,
-        "prefill_pod_ips": list(prefill),
-        "prefill_pods": _pods(prefill, _PREFILL, ssh_port),
-        "decode_pod_ips": list(decode),
-        "decode_pods": _pods(decode, _DECODE, ssh_port),
-        "worker_pod_ips": [],
-        "worker_pods": [],
+        **{f"{role.value}_pod_ips": list(nodes.hosts(role)) for role in Role},
+        **{f"{role.value}_pods": _pods(nodes, role.value) for role in Role},
         "pd_prefill_nodes": len(prefill),
         "pd_decode_nodes": len(decode),
     }
@@ -89,4 +97,4 @@ def pd_state(nodes: NodeList, backend: str) -> dict[str, Any]:
     return state
 
 
-__all__ = ["PD_BACKENDS", "handed_node_list", "is_pd_state", "node_list_backend", "pd_state"]
+__all__ = ["INFERA", "NODE_LIST_KEY", "PD_BACKENDS", "handed_node_list", "is_pd_state", "node_list_backend", "pd_state"]
