@@ -60,11 +60,14 @@ need four GPUs.
 `reference.py` uses only SGLang, aiter and torch, on the ops SGLang reaches on this container with
 `SGLANG_USE_AITER=1`:
 
-- **o_proj**: whatever SGLang's `dispatch_w8a8_block_fp8_linear` returns for 128x128 blocks, required
-  to be `aiter_w8a8_block_fp8_linear`: `aiter_per1x128_quant`, then aiter's Triton
-  `gemm_a8w8_blockscale`. At TP4 (N 5120, K 1280) it runs the default gfx942 config: 128x128x128
-  tiles, 16x16 MFMA, kpack 2. `reference.py` refuses to run if SGLang would dispatch elsewhere,
-  including when `SGLANG_AITER_GFX942_BLOCKSCALE_USE_CK` is set.
+- **o_proj**: SGLang's `aiter_w8a8_block_fp8_linear`, which its `dispatch_w8a8_block_fp8_linear`
+  must return for 128x128 blocks (`reference.py` refuses to run otherwise), called with
+  `SGLANG_AITER_GFX942_BLOCKSCALE_USE_CK=0`: `aiter_per1x128_quant`, then aiter's Triton
+  `gemm_a8w8_blockscale`. At TP4 (N 5120, K 1280) that GEMM runs its default gfx942 config:
+  128x128x128 tiles, 16x16 MFMA, kpack 2. SGLang's own default on gfx942 is aiter's CK
+  `gemm_a8w8_blockscale` (the setting defaults to on), which the launch does not reproduce bit for
+  bit: on this example's random layers, 3e-5 to 1.3e-4 of `res_out`'s elements differ between the two
+  paths, most by one or two bf16 steps, a few near zero by up to 128.
 - **all-reduce**: the four partials summed in rank order in f32 and rounded once. SGLang's custom
   all-reduce has no single order on gfx942: its LL kernel, which serves 1 to 5 rows at TP4, starts
   each rank's sum from that rank's own partial, so the ranks can disagree by a bf16 step. The task

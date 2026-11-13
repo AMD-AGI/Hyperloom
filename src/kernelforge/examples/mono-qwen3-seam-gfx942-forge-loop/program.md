@@ -16,8 +16,10 @@ Per rank, once per decoder layer, from the attention output to the input of the 
 | out | `res_out` [S, 5120] bf16, the residual after attention; `x` [S, 5120] bf16, the post-attention RMSNorm |
 | weights | o_proj [5120, 1280] e4m3fnuz with 128x128 block scales [40, 10] fp32; norm weight [5120] bf16 |
 
-SGLang runs this in four launches on this container: `aiter_per1x128_quant`, aiter's Triton
-`gemm_a8w8_blockscale`, the custom all-reduce, and `aiter.rmsnorm2d_fwd_with_add`. The task's launch
+SGLang runs this in four launches on this container: `aiter_per1x128_quant`, aiter's
+`gemm_a8w8_blockscale`, the custom all-reduce, and `aiter.rmsnorm2d_fwd_with_add`. The contract
+follows the Triton GEMM SGLang runs with `SGLANG_AITER_GFX942_BLOCKSCALE_USE_CK=0` (its default
+there is aiter's CK GEMM, whose bits differ on a few elements). The task's launch
 runs all of it in one, which is only possible with in-kernel waits: the all-reduce crosses GPUs and
 the norm needs a whole row, whose columns other CTAs computed.
 

@@ -1,8 +1,8 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""SGLang's path through the seam on gfx942, on the launch's tensors: the block-FP8 linear SGLang
-dispatches o_proj to, the all-reduce's numerics, and the fused add + RMSNorm SGLang calls."""
+"""SGLang's path through the seam on gfx942, on the launch's tensors: SGLang's aiter block-FP8 linear
+with its Triton GEMM, the all-reduce's numerics, and the fused add + RMSNorm SGLang calls."""
 
 import aiter
 import torch
@@ -14,15 +14,19 @@ EPS = 1e-6  # Qwen3's rms_norm_eps
 WEIGHT_BLOCK = [128, 128]
 
 
-def o_proj_linear():
-    """The function SGLang's dispatch picks for a 128x128 block-FP8 linear, refused unless it is the
-    aiter path whose numerics the launch reproduces (per-1x128 quant, then Triton's blockscale GEMM)."""
+def check_sglang_path() -> None:
+    """Refuse a container where SGLang would not run o_proj through aiter's block-FP8 linear."""
     linear = fp8_utils.dispatch_w8a8_block_fp8_linear(WEIGHT_BLOCK)
     if linear is not fp8_utils.aiter_w8a8_block_fp8_linear:
-        raise RuntimeError(f"SGLang dispatches a block-FP8 linear to {linear}; the task reproduces the aiter path")
-    if envs.SGLANG_AITER_GFX942_BLOCKSCALE_USE_CK.get():
-        raise RuntimeError("SGLANG_AITER_GFX942_BLOCKSCALE_USE_CK moves o_proj off the Triton GEMM the task reproduces")
-    return linear
+        raise RuntimeError(f"SGLang dispatches a block-FP8 linear to {linear}; the task reproduces aiter's")
+
+
+def o_proj(attn: torch.Tensor, weights) -> torch.Tensor:
+    """This rank's o_proj partial: aiter's per-1x128 quant, then its Triton blockscale GEMM, which is
+    SGLang's linear with ``SGLANG_AITER_GFX942_BLOCKSCALE_USE_CK=0``. Without that setting SGLang on
+    gfx942 runs aiter's CK GEMM, whose bits the launch does not reproduce (the example's README)."""
+    with envs.SGLANG_AITER_GFX942_BLOCKSCALE_USE_CK.override(False):
+        return fp8_utils.aiter_w8a8_block_fp8_linear(attn, weights.wo, WEIGHT_BLOCK, weights.wos)
 
 
 def all_reduce(partial: torch.Tensor) -> torch.Tensor:
@@ -47,7 +51,6 @@ def add_rmsnorm(
     return x, res_out
 
 
-def seam(linear, attn: torch.Tensor, residual: torch.Tensor, weights) -> tuple[torch.Tensor, torch.Tensor]:
+def seam(attn: torch.Tensor, residual: torch.Tensor, weights) -> tuple[torch.Tensor, torch.Tensor]:
     """(x, res_out) for this rank's attention output ``attn`` and the replicated ``residual``."""
-    partial = linear(attn, weights.wo, WEIGHT_BLOCK, weights.wos)
-    return add_rmsnorm(all_reduce(partial), residual, weights.norm_w)
+    return add_rmsnorm(all_reduce(o_proj(attn, weights)), residual, weights.norm_w)
