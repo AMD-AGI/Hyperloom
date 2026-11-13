@@ -26,10 +26,18 @@ from kernelforge.workflows.forge_loop.bootstrap.preparation import (
 from kernelforge.workflows.forge_loop.bootstrap.reporter import _Implementer, _RunReporter
 from kernelforge.workflows.forge_loop.bootstrap.request import (
     ForgeLoopRequest,
+    LoopShape,
     SpecialistProbeOptions,
     validate_roofline_target,
 )
 from kernelforge.workflows.forge_loop.bootstrap.run_context import _ForgeDeadline, _ForgeRun
+from kernelforge.workflows.forge_loop.bootstrap.search_strategy import (
+    loop_class_for,
+    require_lanes_for,
+    require_relay_mode_for,
+    requested_relay_mode,
+    requested_strategy,
+)
 from kernelforge.workflows.forge_loop.bootstrap.session_budget import _forge_session_timeout_sec, _is_long_horizon
 from kernelforge.workflows.forge_loop.bootstrap.warm_start import _read_kb_warm_start, _WarmStart
 from kernelforge.agent_backends.runtime import agent_runtime
@@ -44,7 +52,7 @@ if TYPE_CHECKING:
     from kernelforge.workflows.forge_loop.bootstrap.relay import SearchActorStartup
     from kernelforge.workflows.forge_loop.campaign.campaign_config import CampaignConfig, CampaignConfigStore
     from kernelforge.workflows.forge_loop.campaign.campaign_setup import CampaignResolution
-    from kernelforge.workflows.forge_loop.iteration.iteration_types import IterationConfig
+    from kernelforge.workflows.forge_loop.iteration.iteration_types import IterationConfig, LoopAgents
     from kernelforge.workflows.forge_loop.iteration.runner import IterationLoop
     from kernelforge.workflows.forge_loop.roles.agent import ImplementerSetup
     from kernelforge.roofline_ceiling.standalone import AnalystAgent
@@ -146,13 +154,18 @@ def _profile_timeout_override(env_timeout, profile_timeout_sec: int) -> int:
     return override
 
 
-def _reject_incompatible_loop_options(*, producer: str) -> None:
+def _reject_incompatible_loop_options(*, producer: str, loop_shape: LoopShape, resume: bool) -> None:
     """Refuse an option combination the loop cannot honour, before anything is set up."""
     if producer:
         from kernelforge.knowledge.kb_store.identity.kernel_recipe import KERNEL_RECIPE_PRODUCERS
 
         if producer not in KERNEL_RECIPE_PRODUCERS:
             raise ForgeLoopUsageError(f"--producer must be one of: {', '.join(sorted(KERNEL_RECIPE_PRODUCERS))}")
+    if loop_shape.search_strategy is not None:
+        require_lanes_for(requested_strategy(loop_shape), loop_shape.lanes)
+    # A resume that names no strategy is checked against the one it was created with, once that is read.
+    if loop_shape.relay_mode is not None and (loop_shape.search_strategy is not None or not resume):
+        require_relay_mode_for(requested_strategy(loop_shape), requested_relay_mode(loop_shape))
 
 
 def _resumed_profile_id(state_path: Path) -> str:
@@ -271,6 +284,8 @@ def _resolve_campaign(request: ForgeLoopRequest, workspace: Path, agent_relay) -
                 bench_repeat=request.loop_shape.bench_repeat,
                 commit_new_paths=tuple(request.loop_shape.commit_new_paths),
                 agent_relay=agent_relay,
+                search_strategy=requested_strategy(request.loop_shape).value,
+                relay_mode=requested_relay_mode(request.loop_shape).value,
             ),
             resume=request.resume,
             prepare_task=request.prepare_task,
@@ -365,12 +380,11 @@ def _persist_prepared_campaign(run: _ForgeRun, workspace: Path, program_text: st
 
 
 def _build_loop_runner(run: _ForgeRun, source_files: list[str], session_timeout_sec: int) -> IterationLoop:
-    """Construct the IterationLoop, refusing a resume whose stored state it cannot continue."""
-    from kernelforge.workflows.forge_loop.iteration.runner import IterationLoop
+    """Construct the loop the campaign's search strategy runs, refusing a resume whose stored state it cannot continue."""
     from kernelforge.roofline_ceiling.standalone import AnalystAgent
 
     request = run.request
-    loop_runner = IterationLoop(
+    loop_runner = loop_class_for(request.loop_shape, run.campaign)(
         run.iter_config,
         run.tracker,
         run.config,
@@ -465,7 +479,9 @@ def run_forge_loop(request: ForgeLoopRequest, *, publish_result: Callable[[dict]
     except ValueError as exc:
         raise ForgeLoopError(str(exc)) from exc
 
-    _reject_incompatible_loop_options(producer=request.knowledge.producer)
+    _reject_incompatible_loop_options(
+        producer=request.knowledge.producer, loop_shape=request.loop_shape, resume=request.resume
+    )
 
     from kernelforge.workflows.forge_loop.campaign.run_state import WorkspaceLock, WorkspaceLockError
 
@@ -527,15 +543,16 @@ def _run_campaign(inputs: _RunInputs) -> dict:
 
 def _open_campaign(inputs: _RunInputs) -> _OpenedCampaign:
     """Resolve the campaign this run creates or resumes, and the agent overrides its sessions start from."""
-    from kernelforge.workflows.forge_loop.bootstrap.relay import resolve_relay_policy
+    from kernelforge.workflows.forge_loop.bootstrap.relay import campaign_relay_policy
     from kernelforge.workflows.forge_loop.campaign.campaign_config import CampaignConfigStore
 
     request, workspace = inputs.request, inputs.workspace
     campaign_store = CampaignConfigStore(str(workspace))
     _check_workspace_matches_resume(resume=request.resume, campaign_store=campaign_store)
     overrides = agent_runtime_overrides(request.agent)
-    requested_relay_policy = resolve_relay_policy(
-        Config.from_env(workspace=str(workspace), knowledge_config=inputs.knowledge_config, **overrides)
+    requested_relay_policy = campaign_relay_policy(
+        Config.from_env(workspace=str(workspace), knowledge_config=inputs.knowledge_config, **overrides),
+        requested_relay_mode(request.loop_shape),
     )
     return _OpenedCampaign(
         store=campaign_store,
@@ -579,6 +596,7 @@ def _agent_session(inputs: _RunInputs, opened: _OpenedCampaign) -> _AgentSession
 
 def _iteration_config(inputs: _RunInputs, campaign: CampaignConfig) -> IterationConfig:
     """The loop's configuration: the campaign's task and measurement semantics, and this invocation's budget."""
+    from kernelforge.workflows.forge_loop.campaign.campaign_config import RelayMode
     from kernelforge.workflows.forge_loop.iteration.iteration_types import IterationConfig
 
     request, workspace, deadline = inputs.request, inputs.workspace, inputs.deadline
@@ -609,6 +627,7 @@ def _iteration_config(inputs: _RunInputs, campaign: CampaignConfig) -> Iteration
         bench_repeat=campaign.bench_repeat,
         lanes=request.loop_shape.lanes,
         merge_stacking=request.loop_shape.merge_stacking,
+        split_relay=RelayMode(campaign.relay_mode) is RelayMode.SPLIT,
         # New files a KEEP may carry; a REVERT removes exactly the same set. From the campaign, so a resumed session
         # can still ship or remove the new file an earlier session was configured to.
         commit_new_paths=list(campaign.commit_new_paths),
@@ -737,6 +756,7 @@ def _start_actors(
 ) -> SearchActorStartup:
     """Start the search actors of every relay member that can run, resuming on the profile the last session used."""
     from kernelforge.workflows.forge_loop.bootstrap.relay import SearchActorBuildContext, start_search_actors
+    from kernelforge.workflows.forge_loop.campaign.campaign_config import SearchStrategy
 
     request, iter_config = run.request, run.iter_config
     actor_builder = SearchActorBuildContext(
@@ -744,6 +764,7 @@ def _start_actors(
         setup=plan.setup,
         lane_binding=LaneBinding(iter_config.workspace_dir, iter_config.driver_script, plan.source_files),
         lanes=request.loop_shape.lanes,
+        search_strategy=SearchStrategy(run.campaign.search_strategy),
         program_md=iter_config.program_md,
         specialist_definitions=plan.specialist_definitions,
         critic_enabled=plan.critic_enabled,
@@ -766,7 +787,7 @@ def _search(
     run: _ForgeRun, loop_runner: IterationLoop, session: _AgentSession, actors: SearchActorStartup, plan: _SearchPlan
 ) -> _RunReporter:
     """Run the loop to its end with the actors that started, and return the reporter of its result."""
-    from kernelforge.workflows.forge_loop.iteration.iteration_types import LoopAgents, LoopCallbacks
+    from kernelforge.workflows.forge_loop.iteration.iteration_types import LoopCallbacks
     from kernelforge.workflows.forge_loop.roles.analysis import make_analysis_agent_service
 
     start_bundle = actors.start_bundle
@@ -796,12 +817,10 @@ def _search(
     )
     asyncio.run(
         loop_runner.run(
-            LoopAgents(
-                agent_fn=start_bundle.agent_fn,
-                agent_factory=start_bundle.agent_factory if run.request.loop_shape.lanes > 1 else None,
+            _loop_agents(
+                start_bundle,
+                lanes=run.request.loop_shape.lanes,
                 analysis_service=analysis_service,
-                orchestration_service=start_bundle.orchestration_service,
-                supervisor_fn=start_bundle.supervisor_fn,
                 search_actors=actors.loop_search_actors,
             ),
             callbacks=LoopCallbacks(
@@ -813,6 +832,24 @@ def _search(
         )
     )
     return reporter
+
+
+def _loop_agents(start_bundle, *, lanes: int, analysis_service, search_actors) -> LoopAgents:
+    """What the loop drives, taken from the actor the session starts on; ``search_actors`` lets it switch actors."""
+    from kernelforge.workflows.forge_loop.iteration.iteration_types import LoopAgents
+
+    return LoopAgents(
+        agent_fn=start_bundle.agent_fn,
+        agent_factory=start_bundle.agent_factory if lanes > 1 else None,
+        analysis_service=analysis_service,
+        orchestration_service=start_bundle.orchestration_service,
+        supervisor_fn=start_bundle.supervisor_fn,
+        search_actors=search_actors,
+        # Without relay the loop's iterations receive no actor bundle, so a tree campaign's planning factory and slot
+        # selector come from the start actor here.
+        orchestration_factory=start_bundle.orchestration_factory,
+        slot_selector=start_bundle.slot_selector,
+    )
 
 
 def _publish(run: _ForgeRun, loop_runner: IterationLoop, reporter: _RunReporter) -> dict:

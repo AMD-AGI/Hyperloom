@@ -42,11 +42,18 @@ _TICK_SEC = 0.1
 
 @dataclass(frozen=True)
 class OptimizeOptions:
-    """The nested forge-loop's branch, supervisor backend and Analysis timeout."""
+    """The nested forge-loop's branch, supervisor backend, Analysis timeout, lanes, search strategy and relay mode.
+
+    ``lanes``, ``search_strategy`` and ``relay_mode`` are None when the caller did not ask, and the nested loop then
+    uses its own defaults.
+    """
 
     git_branch: str = "forge-rewrite-optimize"
     supervisor_backend: str = "codex"
     profile_timeout_sec: int = 1800
+    lanes: int | None = None
+    search_strategy: str | None = None
+    relay_mode: str | None = None
 
 
 @dataclass(frozen=True)
@@ -326,6 +333,13 @@ def _forge_loop_cmd(
         "--roofline-ceiling",
         "on" if request.roofline_ceiling else "off",
     )
+    return cmd + _optional_loop_args(config, request, baseline_json)
+
+
+def _optional_loop_args(config: Config, request: OptimizeRequest, baseline_json: str) -> list[str]:
+    """The forge-loop options this rewrite spells only when it has a value for them."""
+    options = request.options
+    cmd: list[str] = []
     if baseline_json:
         cmd += ["--baseline-json", baseline_json]
     if config.gpu_type:
@@ -339,6 +353,12 @@ def _forge_loop_cmd(
         cmd += ["--model", config.agent_model]
     if request.permission_mode:
         cmd += ["--permission-mode", request.permission_mode]
+    if options.lanes is not None:
+        cmd += ["--lanes", str(options.lanes)]
+    if options.search_strategy is not None:
+        cmd += ["--search-strategy", options.search_strategy]
+    if options.relay_mode is not None:
+        cmd += ["--relay-mode", options.relay_mode]
     return cmd
 
 

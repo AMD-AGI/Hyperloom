@@ -56,6 +56,51 @@ class PartitionAnswer(AgentAnswer):
     cross_cutting_move: CrossCuttingMoveAnswer
 
 
+def assigned_partition_answer_model(case_ids: tuple[str, ...]) -> type[AgentAnswer]:
+    """The partition of a round whose lanes are already decided: one attempt per assignment, aimed at scored cases."""
+    lane = create_model(
+        "AssignedLaneAnswer",
+        __base__=AgentAnswer,
+        ground=(
+            str,
+            Field(
+                description=(
+                    "The files, functions and mechanisms this lane expects to change; another lane may change them "
+                    "too. Empty only when the lane is unplannable."
+                )
+            ),
+        ),
+        approach=(
+            str,
+            Field(description="How this lane goes about its assignment, and how that differs from the other lanes."),
+        ),
+        focus_cases=(
+            list[Literal[case_ids]],
+            Field(description="The scored cases this lane is aimed at; empty when it is aimed at every case."),
+        ),
+        reason=(str, Field(description="Why this is one session's worth of work.")),
+        fallback=(
+            str,
+            Field(description="The smaller change the lane lands if its main step does not converge; empty for none."),
+        ),
+        unplannable=(
+            str,
+            Field(
+                description=(
+                    "Why the supplied evidence cannot serve this lane's assignment at all, with its ground left "
+                    "empty; empty when the lane is planned."
+                )
+            ),
+        ),
+    )
+    return create_model(
+        "AssignedPartitionAnswer",
+        __base__=AgentAnswer,
+        lanes=(list[lane], Field(description="One lane per assignment, in the order of the assignments.")),
+        cross_cutting_move=(CrossCuttingMoveAnswer, Field(description="The largest move and the lane that tries it.")),
+    )
+
+
 def dispatch_answer_model(role_ids: tuple[str, ...], case_ids: tuple[str, ...]) -> type[AgentAnswer]:
     """The specialist assignments one round's dispatch asks for, naming only the roles registered and the cases scored."""
     assignment = create_model(

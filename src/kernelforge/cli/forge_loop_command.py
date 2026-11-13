@@ -11,6 +11,9 @@ import click
 
 from kernelforge.cli.option_groups import option_group
 from kernelforge.cli.options import (
+    LANE_COUNTS,
+    RELAY_MODES,
+    SEARCH_STRATEGIES,
     _agent_runtime_options,
     _gpu_options,
     _roofline_ceiling_option,
@@ -190,7 +193,7 @@ ANALYSIS_TIMEOUT_SEC = 7200
         click.option(
             "--lanes",
             default=3,
-            type=click.IntRange(min=1, max=8),
+            type=LANE_COUNTS,
             help="Implementer lanes per round. Above 1 the round's analysis is "
             "partitioned into that many non-overlapping plans, each run "
             "concurrently in its own workspace copy, and each candidate is "
@@ -201,7 +204,8 @@ ANALYSIS_TIMEOUT_SEC = 7200
             "returns fewer when the evidence supports fewer. Above 1 "
             "needs a provider that declares session_env and is refused on "
             "one that does not; a provider without stop_hooks runs and is "
-            "warned, because it can waste a round but not misreport one.",
+            "warned, because it can waste a round but not misreport one. "
+            "Under --search-strategy tree it is how many nodes a round may expand, and must be 2 or more.",
         ),
         click.option(
             "--merge-stacking/--no-merge-stacking",
@@ -211,7 +215,7 @@ ANALYSIS_TIMEOUT_SEC = 7200
             "together, chosen for winning on different cases. Costs a "
             "measurement but no Implementer session. Default on; this "
             "applies at every --lanes setting, so turn it off to compare "
-            "against a run that predates it.",
+            "against a run that predates it. A tree campaign stacks its own nodes instead.",
         ),
         click.option(
             "--bench-repeat",
@@ -235,6 +239,29 @@ ANALYSIS_TIMEOUT_SEC = 7200
             "never admitted however they are spelled. Immutable per "
             "campaign: it is snapshotted into campaign_config.json and "
             "read back on --resume.",
+        ),
+        click.option(
+            "--search-strategy",
+            type=SEARCH_STRATEGIES,
+            default=None,
+            help="How each iteration chooses what it builds on. 'linear' (the default for a fresh campaign) builds "
+            "every round on the current best. 'tree' keeps every measured correct candidate as a node of a search "
+            "tree, and each round a read-only selector chooses up to --lanes nodes to expand -- continuing a route, "
+            "opening a new one, or carrying gains from one node onto another -- each planned and implemented in its "
+            "own checkout of its node; the round's best node that clears the KEEP bar is published. Immutable per "
+            "campaign: snapshotted into campaign_config.json, and a --resume may only repeat it.",
+        ),
+        click.option(
+            "--relay-mode",
+            type=RELAY_MODES,
+            default=None,
+            help="How the model relay uses its Agent profiles (one per provider whose line passes the startup "
+            "check). 'handoff' (the default for a fresh campaign) runs one profile at a time and hands the search "
+            "to another at a blockage. 'split' needs --search-strategy tree: every round's slots are split across "
+            "the profiles that can run, in turn, each slot planned and implemented on its own profile, and the "
+            "selector is told which profile each slot position runs on. 'off' builds no relay: the campaign runs "
+            "the configured provider alone and probes no other. Immutable per campaign: snapshotted into "
+            "campaign_config.json, and a --resume may only repeat it.",
         ),
     ),
     _roofline_ceiling_option(

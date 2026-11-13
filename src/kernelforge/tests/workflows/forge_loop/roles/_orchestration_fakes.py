@@ -6,6 +6,7 @@
 from __future__ import annotations
 
 import json
+from dataclasses import replace
 
 from kernelforge.agent_backends import AgentRunResult
 from kernelforge.workflows.forge_loop.roles.contracts import (
@@ -201,6 +202,18 @@ def _partition(*grounds: str) -> str:
 
 GROUND_A = "chunk_intra.py: the MFMA issue schedule"
 GROUND_B = "chunk.py: the scale stream's staging"
+GROUND_C = "chunk_post.py: the epilogue's store"
+
+ASSIGNMENTS = (
+    'DEEPEN direction d001 "MFMA schedule": take its next step.',
+    "BRANCH: open a new direction at this node (none opened here).",
+    'BRANCH: open a new direction at this node, materially different from d001 "MFMA schedule".',
+)
+
+
+def _assigned(count: int) -> OrchestrationContext:
+    """A round whose caller already decided its ``count`` lanes."""
+    return replace(_context(), lane_assignments=ASSIGNMENTS[:count])
 
 
 JOINT_GROUND = "chunk_intra.py: the BLOCK_H tile and the num_warps/waves_per_eu/num_stages the launch passes with it"
@@ -213,6 +226,25 @@ def _partition_lanes(lanes: list[dict], move: dict | None = None) -> str:
 
 def _lane(ground: str, **extra) -> dict:
     return {"ground": ground, "reason": "one session's worth", "joint": False, "fallback": "", **extra}
+
+
+def _assigned_lane(
+    ground: str, *, approach: str = "", focus_cases: tuple[str, ...] = (), unplannable: str = ""
+) -> dict:
+    """One lane of an assigned round's partition: its ground, what sets it apart, and whether evidence can serve it."""
+    return {
+        "ground": ground,
+        "approach": approach,
+        "focus_cases": list(focus_cases),
+        "reason": "one session's worth",
+        "fallback": "",
+        "unplannable": unplannable,
+    }
+
+
+def _assigned_partition(*grounds: str) -> str:
+    """The partition of an assigned round that grounds every lane it returns."""
+    return _partition_lanes([_assigned_lane(ground) for ground in grounds])
 
 
 def _single_lane_service() -> OrchestrationService:

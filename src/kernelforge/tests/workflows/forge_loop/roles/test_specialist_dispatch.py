@@ -16,7 +16,11 @@ from pydantic import ValidationError
 
 from kernelforge.agent_backends import AgentProviderUnavailableError, AgentRunResult
 from kernelforge.workflows.forge_loop.roles.contracts import EvidenceRef
-from kernelforge.workflows.forge_loop.roles.orchestration import OrchestrationAgent, OrchestrationInfrastructureError
+from kernelforge.workflows.forge_loop.roles.orchestration import (
+    LINE_HISTORY_EVIDENCE,
+    OrchestrationAgent,
+    OrchestrationInfrastructureError,
+)
 from kernelforge.workflows.forge_loop.roles.plan_requests import dispatch_answer_model
 from kernelforge.workflows.forge_loop.roles import specialists as specialists_module
 from kernelforge.workflows.forge_loop.roles.specialists import (
@@ -51,6 +55,22 @@ async def test_dispatch_framework_binds_real_evidence_paths() -> None:
     evidence_paths = {reference.path for reference in plan.assignments[0].evidence_refs}
     assert "case:case-a" in evidence_paths
     assert "analysis/abc123/profiles/case-a/summary.json" in evidence_paths
+
+
+@pytest.mark.asyncio
+async def test_every_specialist_reads_the_line_history_of_a_tree_start() -> None:
+    line = EvidenceRef(kind=LINE_HISTORY_EVIDENCE, path="tree_rounds/iter_002/line_abc123.md", summary="Its line.")
+    agent = OrchestrationAgent(
+        backend=_StaticBackend(_dispatch_payload(both_roles=True)),
+        timeout_sec=1,
+        max_turns=2,
+        min_assignments=1,
+    )
+
+    plan = await agent.plan_dispatch(replace(_context(), evidence_refs=(line,)), _definitions())
+
+    assert [assignment.role_id for assignment in plan.assignments] == ["memory", "compute"]
+    assert all(line in assignment.evidence_refs for assignment in plan.assignments)
 
 
 def test_the_dispatch_answer_names_only_the_registered_roles_and_scored_cases() -> None:
@@ -120,7 +140,7 @@ def test_the_deadline_is_stated_before_the_probe_section_that_relies_on_it() -> 
     """The probe text says "your own session"; that clock must come first."""
     setup = specialists_module._ProbeSetup(
         enabled=True,
-        config=SpecialistProbeConfig(scratch_root="/tmp/probe-scratch"),
+        config=SpecialistProbeConfig(scratch_root="/tmp/probe-scratch", device_lock="/tmp/device.lock"),
         workspace="/tmp/workspace",
         scratch_dir=Path("/tmp/probe-scratch/memory-0"),
         ledger_path=Path("/tmp/probe-scratch/memory-0/ledger.jsonl"),

@@ -141,10 +141,16 @@ class RelayRuntimeMixin:
                 return replacement, "relay_profile_unavailable"
             if not search_actors.has_bundle(relay.active_profile_id):
                 raise RuntimeError(f"no Agent profile can run: {relay.active_profile_id} has no search actor")
-        if not relay_blockage_reached(relay, threshold=search_actors.blockage_threshold):
+        if not self._switches_profile_at_blockage() or not relay_blockage_reached(
+            relay, threshold=search_actors.blockage_threshold
+        ):
             return None, ""
         intervention = select_relay_intervention(relay, profiles=search_actors.profiles, availability=availability)
         return intervention, "relay_blockage_detected"
+
+    def _switches_profile_at_blockage(self) -> bool:
+        """Whether a search blockage hands the next iteration to another profile."""
+        return True
 
     def _prepare_search_actor(self, iteration: int, search_actors: SearchActorPool) -> SearchActorBundle:
         """Select and durably switch the complete search actor at a clean boundary."""
@@ -242,8 +248,13 @@ class RelayRuntimeMixin:
             apply_relay_keep(relay)
         else:
             apply_relay_search_outcome(relay, decision=decision_label, producer_profile_id=result.agent_profile_id)
-        if decision_label == "API_ERROR" and result.agent_profile_id:
-            self._profiles_to_recheck = self._profiles_to_recheck | {result.agent_profile_id}
+        if decision_label == "API_ERROR":
+            self._check_profile_again(result.agent_profile_id)
+
+    def _check_profile_again(self, profile_id: str) -> None:
+        """Have the next iteration boundary re-run one profile's startup check."""
+        if profile_id:
+            self._profiles_to_recheck = self._profiles_to_recheck | {profile_id}
 
     def _bind_session_producer(self, session_sink: dict, profile_id: str) -> None:
         """Record the producer and the relay window it ran in, before the outcome can reset that window."""

@@ -11,6 +11,7 @@ import kernelforge.agent_backends.registry as registry
 from kernelforge.workflows.forge_loop.bootstrap.relay import (
     SearchActorBuildContext,
     build_search_actor_pool,
+    campaign_relay_policy,
     probe_agent_profiles,
     resolve_relay_policy,
     resolve_session_relay,
@@ -26,6 +27,7 @@ from kernelforge.workflows.forge_loop.search.agent_relay import (
     StartPreference,
     select_start_profile,
 )
+from kernelforge.workflows.forge_loop.campaign.campaign_config import RelayMode, SearchStrategy
 from kernelforge.workflows.forge_loop.search.search_actors import SearchActorBundle
 
 
@@ -180,6 +182,15 @@ def test_a_campaign_without_relay_has_no_session_relay(tmp_path):
     assert resolve_session_relay(None, Config(workspace=str(tmp_path), agent_backend="claude")) is None
 
 
+def test_a_campaign_whose_relay_is_off_records_no_relay_policy_and_so_probes_no_other_provider(tmp_path):
+    config = Config(workspace=str(tmp_path), agent_backend="claude", agent_model="claude-opus-5")
+
+    assert campaign_relay_policy(config, RelayMode.OFF) is None
+    assert resolve_session_relay(campaign_relay_policy(config, RelayMode.OFF), config) is None
+    assert campaign_relay_policy(config, RelayMode.HANDOFF) == resolve_relay_policy(config)
+    assert campaign_relay_policy(config, RelayMode.SPLIT) == resolve_relay_policy(config)
+
+
 @dataclass(frozen=True)
 class _Session:
     agent_backend: str = ""
@@ -227,6 +238,7 @@ def test_supervisor_backend_flag_is_honoured(monkeypatch, tmp_path, relay, super
         setup=_Setup(),
         lane_binding=None,
         lanes=1,
+        search_strategy=SearchStrategy.LINEAR,
         program_md="",
         specialist_definitions={},
         critic_enabled=False,
@@ -238,6 +250,39 @@ def test_supervisor_backend_flag_is_honoured(monkeypatch, tmp_path, relay, super
 
     assert captured["backend"] == provider
     assert captured["config"].agent_model == model
+
+
+@pytest.mark.parametrize("strategy", [SearchStrategy.LINEAR, SearchStrategy.TREE])
+def test_only_a_tree_campaign_builds_a_slot_selector_on_the_profile_s_own_model(monkeypatch, tmp_path, strategy):
+    from kernelforge.agent_backends import registry
+    from kernelforge.workflows.forge_loop.roles.slot_selector import SlotSelector
+
+    _capture_supervisor(monkeypatch)
+    runtimes = []
+
+    def create_backend(runtime, **_kwargs):
+        runtimes.append(runtime)
+        return SimpleNamespace(runtime=runtime)
+
+    monkeypatch.setattr(registry, "create_registered_backend", create_backend)
+    builder = SearchActorBuildContext(
+        config=Config(workspace=str(tmp_path), agent_backend="claude", agent_model="claude-opus-5"),
+        setup=_Setup(),
+        lane_binding=None,
+        lanes=2,
+        search_strategy=strategy,
+        program_md="",
+        specialist_definitions={},
+        critic_enabled=False,
+    )
+
+    bundle = builder.build(AgentProfile("claude", "claude", "claude-opus-5", "max"))
+
+    if strategy is SearchStrategy.LINEAR:
+        assert bundle.slot_selector is None and runtimes == []
+    else:
+        assert isinstance(bundle.slot_selector, SlotSelector)
+        assert [(runtime.provider, runtime.model) for runtime in runtimes] == [("claude", "claude-opus-5")]
 
 
 def test_executable_override_stays_with_the_primary_provider(tmp_path):

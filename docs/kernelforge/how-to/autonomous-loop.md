@@ -178,6 +178,89 @@ hands it to another Agent profile (see *Model relay* below), or the supervisor
 injects fresh directions when no other profile is available, rather than
 self-terminating on plateau.
 
+## Tree search
+
+`--search-strategy tree` (with `--lanes 2` or more) keeps every candidate that
+measures correct -- faster than what it was built on or not -- as a node of a
+search tree, and lets each iteration expand several nodes at once. A fresh
+campaign first measures its starting point, the tree's root, in the root's own
+worktree as every node is measured; a root that does not measure correct ends
+the campaign. One iteration is one round:
+
+1. A read-only slot selector, on the active Agent profile, reads the tree's
+   facts: every node with its score, parent and per-case wins and losses
+   against the published best beyond noise; every direction (a named route
+   opened at a node) with its hypothesis, expected ceiling and attempts; the
+   time left; and its own earlier rounds. It may inspect nodes with read-only
+   git. It names up to `--lanes` slots: `DEEPEN` continues a direction from one
+   of its nodes, `BRANCH` opens a new direction at a node (the planners there
+   choose it; a hint from the selector must be adopted or refuted with
+   evidence), and `PORT` carries gains measured on one node onto another. It
+   may also ask for nodes to be re-measured and close or reopen directions.
+   Only the legal part of its answer is kept; an answer with nothing legal in
+   it continues the published best's own direction.
+2. Every start node is planned in a detached worktree of its own commit, beside
+   the workspace in `<workspace>.tree-starts/`, all starts side by side, with
+   one planned lane per slot: the specialists probe that node's code, and the
+   Plan Critic reviews that node's plans. The planners at a start read its
+   line rather than the campaign's lessons: the path from the root to it and
+   the attempts made from that path, written to
+   `tree_rounds/iter_NNN/line_<commit>.md` with each one's plan and records,
+   and the line's latest Implementer record. A start with a `BRANCH` slot is
+   planned with every specialist role. The lanes of one start are materially
+   different attempts, which may change the same code: the round planner gives
+   each lane an approach, and may aim a lane at some of the scored cases when
+   the evidence shows different cases limited by different things. A `PORT`
+   slot is planned by the framework from the two nodes' diff.
+3. One Implementer lane per slot runs on a copy of its start's worktree, and is
+   asked for its record of what it tried before the copy is removed: the
+   slot's `lesson.md`, or `lesson_missing.txt` saying why there is none. A lane
+   aimed at some cases is told which, and that it can time one of them alone by
+   adding `--bench-case <case_id>` to the driver's bench-mode command while it
+   iterates.
+4. Each candidate is validated and benchmarked, one at a time on the shared
+   device, in its start's worktree. A correct one is committed there and kept
+   as a node under `refs/forge/nodes/`; each direction has a branch
+   `<git_branch>-dNNN` at its best node.
+5. The round's new nodes are merged. The base is the round's best node that
+   cleared the published best's KEEP bar, else its best node. Every other new
+   node that runs some case faster than the base beyond its own noise, and the
+   published best when the base does not descend from it, is merged onto the
+   base, best first: its change since the two nodes' common ancestor is applied
+   when it applies, and otherwise an Implementer session merges the two from
+   both changes and the per-case times, so that each case runs on the faster
+   implementation. A merge that measures correct is a node under its base, and
+   one that scores higher than its base is the base of the next merge. Merges
+   that did not land are listed to the next round's selector as candidates for
+   `PORT`. A merge session runs only while the campaign's remaining time pays
+   for it and still leaves the publication's measurement.
+6. The round's best node that cleared the published best's KEEP bar, a merge
+   included, is staged in the campaign workspace and measured there once more,
+   a measurement that joins the node's own whether it KEEPs or not; a KEEP
+   commits it on the campaign branch, which is therefore the chain of
+   published bests.
+
+A node keeps every measurement of its code -- the one that admitted it, each
+re-measure the selector asks for, and its publication's -- as score samples and
+each case's time in every bench run. Its score is the mean of its samples, and
+the per-case medians and spreads that the facts and the merges read are
+computed from all of its runs.
+
+The tree is `forge_experiments/search_tree.json`, saved as each node is
+added; each round's selection is `forge_experiments/tree_selection/iter_NNN.md`,
+and its plans, diffs, measurements and each slot's Implementer record are under
+`forge_experiments/tree_rounds/iter_NNN/`, each merge's under `merge_KK/`
+there. Under `--relay-mode split` (see *Model relay* below) every slot is
+planned and implemented on its own profile, and a start whose slots run on
+several profiles is planned once per profile, its records under
+`start_<commit>_<profile>/`. A tree campaign has no Supervisor and does not run
+the linear loop's merge stacking of archived candidates. A round in which a lane or a merge
+session leaves the device held measures nothing after it, publishes nothing,
+and is recorded as `REVERT_CONTENDED`. A tree campaign refuses a workspace with
+untracked, unignored files a worktree would not see. On `--resume`, the slots
+of a round a killed session left open are recorded as lost, unless the slot's
+node was already added, and the campaign continues.
+
 ## Round admission
 
 A round is what the loop buys when it plans: orchestration, the lane sessions it
@@ -281,8 +364,9 @@ exception summary. Apply decisions remain separate in `reference_reason`.
 
 ## Model relay
 
-Every new campaign relays its search between Agent profiles: one profile per
-auto-selectable provider (`claude` runs Claude Code, `codex` runs Codex), the
+Every new campaign not created with `--relay-mode off` relays its search between
+Agent profiles: one profile per auto-selectable provider (`claude` runs Claude
+Code, `codex` runs Codex), the
 `--agent-backend` provider first as the primary. `deepseek` (the DeepSeek
 Harness) is not auto-selectable: it joins the relay only as the primary, when
 the campaign starts on it through `--agent-backend deepseek`,
@@ -296,6 +380,11 @@ default model.
 `--resume` as well. An `--agent-backend` (or `FORGE_AGENT_BACKEND`) that differs
 from the campaign's primary is refused on resume; leave it unset to keep the
 campaign's primary.
+
+A campaign created with `--relay-mode off` has no relay: it records no relay
+policy, runs the configured provider alone, probes no other provider, and a
+blockage runs the supervisor below. Use it to keep a campaign on one model
+whatever other providers the environment could reach.
 
 Before the first iteration, every profile's exact provider and model is checked
 once, with one minimal model call per profile. Like the rest of the campaign
@@ -323,6 +412,18 @@ switch replaces the complete search actor (orchestration, specialists, Plan
 Critic and Implementer) at the next clean iteration boundary and forces the next
 round to diversify. With both `claude` and `codex` available, the search
 therefore alternates between them at every blockage until a KEEP.
+
+A tree campaign created with `--relay-mode split` runs every available profile
+in every round instead. The round's slot positions take the profiles that pass
+the startup check in turn, starting one profile further along each round, so
+with `claude` and `codex` each plans and implements half of the expansions. The
+selector, on the active profile, is told which profile each slot position runs
+on before it answers; the round's merge sessions run on the active profile too.
+Every node and attempt records the profile it ran on, and the selector's facts
+show it. No blockage hands the search over. A profile whose session ran out of
+API retries, or whose planning failed on infrastructure, is checked again at
+the next round boundary, and while it is unavailable its slots go to the
+profiles that remain.
 
 A session starts on the profile a resumed campaign was running, else the
 primary, else the `--agent-fallback-provider` member, else any available member.

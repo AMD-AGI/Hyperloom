@@ -118,6 +118,9 @@ class IterationConfig:
     lanes: int = 1
     # Whether a stalled search may spend an iteration measuring two archived rejected gains applied together.
     merge_stacking: bool = True
+    # Whether each tree round's slots are split across the Agent profiles that can run, rather than all running on the
+    # active one (``--relay-mode split``).
+    split_relay: bool = False
     # Ranks the driver self-launches (via torchrun) for a collective task. >1 switches profiling to the per-rank
     # backend, because wrapping the outer process would only profile the launcher, which runs no kernel.
     nproc_per_node: int = 1
@@ -148,6 +151,10 @@ class LoopAgents:
     supervisor_fn: Any = None
     # Every relay profile's search actor; when set, the loop selects among them and the four above are its start actor.
     search_actors: SearchActorPool | None = None
+    # Builds a further planning service for the active profile, for planning units that run side by side.
+    orchestration_factory: Any = None
+    # The read-only agent that names a tree round's slots; None outside a tree campaign.
+    slot_selector: Any = None
 
 
 @dataclass(frozen=True)
@@ -169,6 +176,8 @@ def _with_search_actor(agents: LoopAgents, bundle) -> LoopAgents:
         agent_factory=bundle.agent_factory,
         orchestration_service=bundle.orchestration_service,
         supervisor_fn=bundle.supervisor_fn,
+        orchestration_factory=bundle.orchestration_factory,
+        slot_selector=bundle.slot_selector,
     )
 
 
@@ -187,6 +196,17 @@ class _IterationSupply:
     hazard: Any
     queued_lane: Any
     fan_out_plan: HeldRound | None
+
+
+@dataclass(frozen=True)
+class IterationTurn:
+    """What the loop has settled about one iteration before its search runs."""
+
+    iteration: int
+    actors: LoopAgents
+    digest: str
+    hazard: Any
+    round_lanes: int
 
 
 @dataclass(frozen=True)

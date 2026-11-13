@@ -12,6 +12,7 @@ import math
 import os
 import re
 from dataclasses import asdict, dataclass, field, fields
+from enum import Enum
 from pathlib import Path
 
 from kernelforge.utils.git import git
@@ -42,6 +43,28 @@ _SHA256_RE = re.compile(r"[0-9a-f]{64}")
 log = logging.getLogger(__name__)
 
 _FALLBACK_KERNEL_BACKEND = "flydsl"
+
+
+class SearchStrategy(str, Enum):
+    """How a campaign chooses what each iteration builds on."""
+
+    LINEAR = "linear"
+    TREE = "tree"
+
+
+class RelayMode(str, Enum):
+    """How a campaign's model relay uses its Agent profiles."""
+
+    # One profile at a time, handed to another at a search blockage.
+    HANDOFF = "handoff"
+    # Every profile at once: each tree round's slots are split across the profiles that can run.
+    SPLIT = "split"
+    # No relay: the campaign records no relay policy and runs its configured provider alone.
+    OFF = "off"
+
+
+# Fields a campaign written before they existed may lack, and the value such a campaign ran with.
+_FIELDS_OLDER_CAMPAIGNS_LACK = {"search_strategy": SearchStrategy.LINEAR.value, "relay_mode": RelayMode.HANDOFF.value}
 
 
 @dataclass(frozen=True)
@@ -76,6 +99,8 @@ class CampaignConfig:
     # ``IterationConfig.commit_new_paths``).
     commit_new_paths: list[str] = field(default_factory=list)
     agent_relay: AgentRelayPolicy | None = None
+    search_strategy: str = SearchStrategy.LINEAR.value
+    relay_mode: str = RelayMode.HANDOFF.value
 
     def to_dict(self) -> dict:
         return asdict(self)
@@ -85,6 +110,7 @@ class CampaignConfig:
         """Rebuild a campaign from exactly the fields this code writes."""
         if not isinstance(payload, dict):
             raise ValueError("campaign config must be a JSON object")
+        payload = {**_FIELDS_OLDER_CAMPAIGNS_LACK, **payload}
         expected_fields = {item.name for item in fields(cls)}
         unknown_fields = set(payload) - expected_fields
         if unknown_fields:
@@ -121,24 +147,40 @@ class CampaignConfig:
             agent_relay=(
                 AgentRelayPolicy.from_dict(payload["agent_relay"]) if payload["agent_relay"] is not None else None
             ),
+            search_strategy=SearchStrategy(payload["search_strategy"]).value,
+            relay_mode=RelayMode(payload["relay_mode"]).value,
         )
-        if config.nproc_per_node < 1:
-            raise ValueError("campaign nproc_per_node must be positive")
-        if config.bench_repeat < 1:
-            raise ValueError("campaign bench_repeat must be positive")
-        if config.program_md_path and not config.program_md_sha256:
-            raise ValueError("campaign program context digest is missing")
-        if config.program_md_sha256 and not config.program_md_path:
-            raise ValueError("campaign program context path is missing")
-        if not _SHA256_RE.fullmatch(config.driver_sha256):
-            raise ValueError("campaign canonical driver digest is missing or invalid")
-        if not math.isfinite(config.snr_threshold) or config.snr_threshold <= 0:
-            raise ValueError("campaign SNR threshold must be a positive finite float")
-        if not _SHA256_RE.fullmatch(config.implementation_signature):
-            raise ValueError("campaign pristine implementation signature is missing or invalid")
-        if hash_implementation_identity(config.implementation_identity) != config.implementation_signature:
-            raise ValueError("campaign pristine implementation identity does not match its signature")
+        _validate_campaign(config)
         return config
+
+
+def _validate_campaign(config: CampaignConfig) -> None:
+    """Refuse a campaign whose recorded measurement contract is incomplete or inconsistent."""
+    if config.nproc_per_node < 1:
+        raise ValueError("campaign nproc_per_node must be positive")
+    if config.bench_repeat < 1:
+        raise ValueError("campaign bench_repeat must be positive")
+    if config.program_md_path and not config.program_md_sha256:
+        raise ValueError("campaign program context digest is missing")
+    if config.program_md_sha256 and not config.program_md_path:
+        raise ValueError("campaign program context path is missing")
+    if not _SHA256_RE.fullmatch(config.driver_sha256):
+        raise ValueError("campaign canonical driver digest is missing or invalid")
+    if not math.isfinite(config.snr_threshold) or config.snr_threshold <= 0:
+        raise ValueError("campaign SNR threshold must be a positive finite float")
+    if not _SHA256_RE.fullmatch(config.implementation_signature):
+        raise ValueError("campaign pristine implementation signature is missing or invalid")
+    if hash_implementation_identity(config.implementation_identity) != config.implementation_signature:
+        raise ValueError("campaign pristine implementation identity does not match its signature")
+    _require_relay_mode_fits(config.search_strategy, config.relay_mode, config.agent_relay)
+
+
+def _require_relay_mode_fits(search_strategy: str, relay_mode: str, agent_relay: AgentRelayPolicy | None) -> None:
+    mode = RelayMode(relay_mode)
+    if mode is RelayMode.SPLIT and SearchStrategy(search_strategy) is not SearchStrategy.TREE:
+        raise ValueError("a campaign whose relay mode is split needs the tree search strategy")
+    if mode is RelayMode.OFF and agent_relay is not None:
+        raise ValueError("a campaign whose relay mode is off records no model relay policy")
 
 
 def derive_campaign_implementation_contract(
@@ -457,6 +499,8 @@ class CampaignInputs:
     commit_new_paths: tuple[str, ...] = ()
     # The Agent profiles a blockage may relay between, fixed when the campaign is created.
     agent_relay: AgentRelayPolicy | None = None
+    search_strategy: str = SearchStrategy.LINEAR.value
+    relay_mode: str = RelayMode.HANDOFF.value
 
 
 def _normalized_sources(workspace: Path, kernel: str, source_files: str) -> list[str]:
@@ -526,6 +570,7 @@ def create_campaign_config(
     base_commit: str | None = None,
 ) -> CampaignConfig:
     """Resolve and normalize all immutable inputs for a fresh campaign."""
+    _require_relay_mode_fits(inputs.search_strategy, inputs.relay_mode, inputs.agent_relay)
     workspace = Path(workspace_dir).resolve()
     kernel_path = _relative_file(workspace, inputs.kernel, "kernel")
     driver_path = _driver_reference(workspace, inputs.driver)
@@ -559,9 +604,7 @@ def create_campaign_config(
         target_functions=resolved_targets,
     )
     program_md_sha256 = _program_md_sha256(inputs.program_md_file)
-    resolved_snr_threshold = float(inputs.snr_threshold)
-    if not math.isfinite(resolved_snr_threshold) or resolved_snr_threshold <= 0:
-        raise ValueError("SNR threshold must be a positive finite float")
+    resolved_snr_threshold = _positive_snr_threshold(inputs.snr_threshold)
     return CampaignConfig(
         kernel_path=kernel_path,
         driver_path=driver_path,
@@ -586,4 +629,13 @@ def create_campaign_config(
         bench_repeat=max(1, int(inputs.bench_repeat)),
         commit_new_paths=normalize_commit_new_paths(list(inputs.commit_new_paths)),
         agent_relay=inputs.agent_relay,
+        search_strategy=SearchStrategy(inputs.search_strategy).value,
+        relay_mode=RelayMode(inputs.relay_mode).value,
     )
+
+
+def _positive_snr_threshold(value: float) -> float:
+    threshold = float(value)
+    if not math.isfinite(threshold) or threshold <= 0:
+        raise ValueError("SNR threshold must be a positive finite float")
+    return threshold

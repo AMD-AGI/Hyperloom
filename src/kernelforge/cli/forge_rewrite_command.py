@@ -11,10 +11,24 @@ from dataclasses import dataclass
 import click
 
 from kernelforge.cli.option_groups import option_group
-from kernelforge.cli.options import _gpu_options, _roofline_ceiling_option, _validate_max_hours
+from kernelforge.cli.options import (
+    LANE_COUNTS,
+    RELAY_MODES,
+    SEARCH_STRATEGIES,
+    _gpu_options,
+    _roofline_ceiling_option,
+    _validate_max_hours,
+)
 from kernelforge.config import CeilingSwitch, Config, GpuOptions, KnowledgeConfig
 from kernelforge.evaluation.scoring import DEFAULT_SNR_THRESHOLD_DB
 from kernelforge.workflows.flydsl_rewrite.optimize import OptimizeOptions
+from kernelforge.workflows.forge_loop.api import (
+    ForgeLoopUsageError,
+    RelayMode,
+    SearchStrategy,
+    require_lanes_for,
+    require_relay_mode_for,
+)
 from kernelforge.workflows.flydsl_rewrite.request import ApplybackSwitch, RewriteBudget, RewriteWorkspace
 
 
@@ -118,6 +132,37 @@ class RewriteRequest:
     optimize: OptimizeOptions
     roofline_ceiling: CeilingSwitch
     result_json: str | None
+
+
+def _require_nested_loop_shape(optimize: OptimizeOptions) -> None:
+    """Refuse a nested loop shape the fresh nested campaign would refuse, before PORT spends its share of the budget."""
+    strategy = SearchStrategy(optimize.search_strategy or SearchStrategy.LINEAR.value)
+    try:
+        if optimize.search_strategy is not None and optimize.lanes is not None:
+            require_lanes_for(strategy, optimize.lanes)
+        if optimize.relay_mode is not None:
+            require_relay_mode_for(strategy, RelayMode(optimize.relay_mode))
+    except ForgeLoopUsageError as error:
+        raise click.UsageError(str(error)) from error
+
+
+def _rewrite_config(request: RewriteRequest) -> Config:
+    """The runtime configuration of one rewrite: its GPU, its port model and its rewrite KB."""
+    overrides = _gpu_overrides(request.gpu)
+    if request.port.model:
+        # Config exposes the model as ``agent_model`` (from_env keys on it); a bare ``model`` override is silently
+        # ignored.
+        overrides["agent_model"] = request.port.model
+    # A disabled KB must not validate ambient remote credentials.
+    try:
+        rewrite_knowledge_config = KnowledgeConfig.from_env(mode="local" if not request.rewrite_kb else None)
+    except ValueError as exc:
+        raise click.ClickException(str(exc)) from exc
+    return Config.from_env(
+        workspace=request.workspace.workspace_dir,
+        knowledge_config=rewrite_knowledge_config,
+        **overrides,
+    )
 
 
 @click.command("forge-rewrite-by-flydsl")
@@ -303,6 +348,24 @@ class RewriteRequest:
             type=int,
             help="OPTIMIZE: ceiling for the complete Analysis Agent workflow",
         ),
+        click.option(
+            "--lanes",
+            default=None,
+            type=LANE_COUNTS,
+            help="OPTIMIZE: the nested forge-loop's --lanes. Omitted, it uses its own default.",
+        ),
+        click.option(
+            "--search-strategy",
+            default=None,
+            type=SEARCH_STRATEGIES,
+            help="OPTIMIZE: the nested forge-loop's --search-strategy. Omitted, it searches linearly.",
+        ),
+        click.option(
+            "--relay-mode",
+            default=None,
+            type=RELAY_MODES,
+            help="OPTIMIZE: the nested forge-loop's --relay-mode. Omitted, it relays by handoff.",
+        ),
     ),
     _roofline_ceiling_option(
         "OPTIMIZE: passed to the nested forge-loop unchanged. 'off' (default) "
@@ -318,22 +381,8 @@ def forge_rewrite(request: RewriteRequest):
     import os
     import re as _re
 
-    overrides = _gpu_overrides(request.gpu)
-    if request.port.model:
-        # Config exposes the model as ``agent_model`` (from_env keys on it); a bare ``model`` override is silently
-        # ignored.
-        overrides["agent_model"] = request.port.model
-    rewrite_kb_enabled = bool(request.rewrite_kb)
-    # A disabled KB must not validate ambient remote credentials.
-    try:
-        rewrite_knowledge_config = KnowledgeConfig.from_env(mode="local" if not rewrite_kb_enabled else None)
-    except ValueError as exc:
-        raise click.ClickException(str(exc)) from exc
-    config = Config.from_env(
-        workspace=request.workspace.workspace_dir,
-        knowledge_config=rewrite_knowledge_config,
-        **overrides,
-    )
+    _require_nested_loop_shape(request.optimize)
+    config = _rewrite_config(request)
 
     description = request.description
     targets = [t.strip() for t in _re.split(r"[,\n]", description.target_functions) if t.strip()]
@@ -370,7 +419,7 @@ def forge_rewrite(request: RewriteRequest):
         roofline_ceiling=request.roofline_ceiling.enabled,
         applyback=request.applyback,
         applyback_import_modules=request.applyback_target.applyback_import_modules,
-        rewrite_kb_enabled=rewrite_kb_enabled,
+        rewrite_kb_enabled=bool(request.rewrite_kb),
         flydsl_kernel_name=description.flydsl_kernel_name,
         max_port_attempts=request.port.max_port_attempts,
         permission_mode=request.port.permission_mode,

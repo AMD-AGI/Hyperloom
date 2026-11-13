@@ -28,6 +28,7 @@ from kernelforge.workflows.forge_loop.search.agent_relay import (
 from kernelforge.workflows.forge_loop.campaign.run_state import RunState
 from kernelforge.workflows.forge_loop.iteration.runner import IterationLoop
 from kernelforge.workflows.forge_loop.search.search_actors import SearchActorBundle, SearchActorPool
+from kernelforge.workflows.forge_loop.tree.search_loop import TreeSearchLoop
 
 
 def _profiles() -> tuple[AgentProfile, ...]:
@@ -298,9 +299,9 @@ class _StateStore:
         self.saved.append(state.to_dict())
 
 
-def _loop_for_boundary(tmp_path, *, streak: int) -> IterationLoop:
-    loop = object.__new__(IterationLoop)
-    loop.ic = SimpleNamespace(workspace_dir=str(tmp_path))
+def _loop_for_boundary(tmp_path, *, streak: int, loop_class=IterationLoop, split_relay: bool = False) -> IterationLoop:
+    loop = object.__new__(loop_class)
+    loop.ic = SimpleNamespace(workspace_dir=str(tmp_path), split_relay=split_relay)
     loop.run_state = RunState()
     loop.run_state.agent_relay = AgentRelayState(
         active_profile_id="claude_opus",
@@ -351,6 +352,20 @@ def test_iteration_boundary_switches_before_the_next_actor_runs(tmp_path):
     assert loop.monitor.no_improve_streak == 0
     assert loop.state_store.saved
     assert loop.state_store.events[-1]["type"] == "relay_profile_switched"
+
+
+@pytest.mark.parametrize(("split_relay", "active"), [(False, "codex_gpt"), (True, "claude_opus")])
+def test_a_tree_campaign_hands_the_search_over_at_a_blockage_only_when_it_relays_by_handoff(
+    tmp_path, split_relay, active
+):
+    """A split relay already runs every profile each round, so a blockage has no other profile to hand it to."""
+    loop = _loop_for_boundary(tmp_path, streak=3, loop_class=TreeSearchLoop, split_relay=split_relay)
+    pool = _search_actor_pool()
+    loop._search_actors = pool
+
+    bundle = loop._prepare_search_actor(4, pool)
+
+    assert bundle.profile.profile_id == active == loop.run_state.agent_relay.active_profile_id
 
 
 def test_iteration_boundary_uses_supervisor_when_no_alternate_is_available(tmp_path):
