@@ -45,6 +45,7 @@ from hyperloom.measure.failures import (
     FOREIGN_PROCESS_ON_CARD,
     HUB_RATE_LIMITED,
     JIT_BUILD_TIMEOUT,
+    PROFILER_HUNG,
     PROFILER_SNAPSHOT_FAILED,
     RUNNER_START_TIMEOUT,
     SANDBOX_ACQUIRE_TIMEOUT,
@@ -77,9 +78,12 @@ INFRA_BACKOFF_SECONDS: tuple[float, ...] = (60.0, 120.0, 240.0)
 #: wait on the same sandboxes: the test ends with what held it instead. A Hugging Face cache that refused the test
 #: (``HF_CACHE_PERMISSION``) is a volume every sandbox mounts alike, so every sandbox is refused the same way. A profile
 #: whose server died in the profiler's memory-snapshot dump (``PROFILER_SNAPSHOT_FAILED``) dies there in every sandbox of
-#: the image, and says nothing of the candidate.
+#: the image, and says nothing of the candidate. A profile whose server went silent with its profile window open
+#: (``PROFILER_HUNG``) hangs again at the same point on the same image; a retry only holds the cards for another silence
+#: limit, or meets them still held by the hung server's ranks. The failed profile tells the session its backend cannot
+#: profile, so it asks for none again.
 UNRETRIED_INFRA_REASONS: frozenset[str] = frozenset(
-    {INERT_PATCH, SANDBOX_ACQUIRE_TIMEOUT, HF_CACHE_PERMISSION, PROFILER_SNAPSHOT_FAILED}
+    {INERT_PATCH, SANDBOX_ACQUIRE_TIMEOUT, HF_CACHE_PERMISSION, PROFILER_SNAPSHOT_FAILED, PROFILER_HUNG}
 )
 #: The hosted backend's ``error_class`` when the platform made the sandbox and it failed before it ran
 #: (``hyperloom.measure.hosted.SANDBOX_CREATE_FAILED``).
