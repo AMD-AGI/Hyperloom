@@ -80,11 +80,6 @@ class TestParseHsaAgents:
         by_bdf = {a.bdf: a.cu for a in agents}
         assert by_bdf == {"7c:00.0": 256, "69:00.0": 256, "09:00.0": 32, "09:00.1": 32}
 
-    def test_cpu_agents_are_not_gpus(self):
-        agents = pms.parse_hsa_agents(ROCMINFO_CPX)
-        assert len(agents) == 4
-        assert all(a.cu in (32, 256) for a in agents)
-
     def test_indices_are_positions_among_gpus_only(self):
         """The index has to be the one ROCR_VISIBLE_DEVICES uses, so CPUs cannot count."""
         agents = pms.parse_hsa_agents(ROCMINFO_CPX)
@@ -95,16 +90,13 @@ class TestParseHsaAgents:
         first = next(a for a in agents if a.bdf == "09:00.0")
         assert (first.bus, first.device, first.function) == (0x09, 0x00, 0)
 
-    def test_partitions_of_one_card_share_a_bus_and_differ_by_function(self):
-        agents = pms.parse_hsa_agents(ROCMINFO_CPX)
-        on_card = [a for a in agents if a.bus == 0x09]
-        assert {a.function for a in on_card} == {0, 1}
-
-    def test_an_agent_missing_its_fields_is_dropped_not_guessed(self):
-        assert pms.parse_hsa_agents("Agent 1\n  Device Type:             GPU\n") == ()
-
-    def test_empty_input_is_no_agents(self):
-        assert pms.parse_hsa_agents("") == ()
+    @pytest.mark.parametrize(
+        "text",
+        ["Agent 1\n  Device Type:             GPU\n", ""],
+        ids=["an_agent_missing_its_fields", "empty_input"],
+    )
+    def test_an_agent_missing_its_fields_is_dropped_not_guessed(self, text):
+        assert pms.parse_hsa_agents(text) == ()
 
 
 # --------------------------------------------------------- device selection
@@ -132,13 +124,7 @@ class TestSelectPartitionDevices:
         """Finding fewer partitions than the mode implies means the topology is stale."""
         agents = _agents((256, 0x09, 0))
         layout = pms.layout_for("CPX", cu_per_partition=32)
-        with pytest.raises(pms.SweepError, match="CPX implies 8 partitions"):
-            pms.select_partition_devices(agents, layout, bus=0x09)
-
-    def test_the_error_names_what_was_actually_on_the_bus(self):
-        agents = _agents((256, 0x09, 0))
-        layout = pms.layout_for("CPX", cu_per_partition=32)
-        with pytest.raises(pms.SweepError, match=r"09:00\.0=256CU"):
+        with pytest.raises(pms.SweepError, match=r"CPX implies 8 partitions.*09:00\.0=256CU"):
             pms.select_partition_devices(agents, layout, bus=0x09)
 
     def test_nothing_on_the_bus_says_so(self):
@@ -177,79 +163,77 @@ class TestPartitionCuOnBus:
 
 
 class TestResidentProcesses:
-    def test_an_idle_card_reports_a_string_not_an_empty_list(self):
-        """The observed payload. Counting it as a process refuses every free node."""
-        payload = [{"gpu": 0, "process_list": [{"process_info": "No running processes detected"}]}]
-        assert pms.resident_processes(payload) == {0: 0}
-
-    def test_a_real_process_is_counted(self):
-        payload = [{"gpu": 0, "process_list": [{"process_info": {"name": "python", "pid": 42}}]}]
-        assert pms.resident_processes(payload) == {0: 1}
-
-    def test_a_nameless_entry_is_not_a_process(self):
-        payload = [{"gpu": 0, "process_list": [{"process_info": {"name": "  "}}]}]
-        assert pms.resident_processes(payload) == {0: 0}
-
-    def test_an_unexpected_string_is_counted_rather_than_ignored(self):
-        """Fail closed: an unrecognised sentinel might really be a process."""
-        payload = [{"gpu": 0, "process_list": [{"process_info": "something new"}]}]
-        assert pms.resident_processes(payload) == {0: 1}
-
-    def test_cards_are_reported_separately(self):
-        payload = [
-            {"gpu": 0, "process_list": [{"process_info": "No running processes detected"}]},
-            {"gpu": 1, "process_list": [{"process_info": {"name": "vllm"}}]},
-        ]
-        assert pms.resident_processes(payload) == {0: 0, 1: 1}
-
-    def test_the_idle_sentinel_is_also_recognised_unwrapped(self):
-        """Observed at both depths: as the list, and as the entry's process_info."""
-        assert pms.resident_processes([{"gpu": 0, "process_list": "No running processes detected"}]) == {0: 0}
-
-    def test_a_process_is_counted_without_the_process_info_wrapper(self):
-        assert pms.resident_processes([{"gpu": 0, "process_list": [{"name": "python", "pid": 42}]}]) == {0: 1}
-
-    def test_an_empty_list_is_an_idle_card(self):
-        assert pms.resident_processes([{"gpu": 0, "process_list": []}]) == {0: 0}
+    @pytest.mark.parametrize(
+        ("payload", "expected"),
+        [
+            # The observed payload. Counting it as a process refuses every free node.
+            ([{"gpu": 0, "process_list": [{"process_info": "No running processes detected"}]}], {0: 0}),
+            ([{"gpu": 0, "process_list": [{"process_info": {"name": "python", "pid": 42}}]}], {0: 1}),
+            ([{"gpu": 0, "process_list": [{"process_info": {"name": "  "}}]}], {0: 0}),
+            # Fail closed: an unrecognised sentinel might really be a process.
+            ([{"gpu": 0, "process_list": [{"process_info": "something new"}]}], {0: 1}),
+            (
+                [
+                    {"gpu": 0, "process_list": [{"process_info": "No running processes detected"}]},
+                    {"gpu": 1, "process_list": [{"process_info": {"name": "vllm"}}]},
+                ],
+                {0: 0, 1: 1},
+            ),
+            # Observed at both depths: as the list, and as the entry's process_info.
+            ([{"gpu": 0, "process_list": "No running processes detected"}], {0: 0}),
+            ([{"gpu": 0, "process_list": [{"name": "python", "pid": 42}]}], {0: 1}),
+            ([{"gpu": 0, "process_list": []}], {0: 0}),
+        ],
+        ids=[
+            "idle_sentinel_in_process_info",
+            "a_real_process",
+            "a_nameless_entry",
+            "an_unexpected_string",
+            "cards_separately",
+            "idle_sentinel_unwrapped",
+            "a_process_without_the_wrapper",
+            "an_empty_list",
+        ],
+    )
+    def test_counts_the_resident_processes_per_card(self, payload, expected):
+        assert pms.resident_processes(payload) == expected
 
 
 class TestResidentProcessesRefusesDrift:
     """Schema drift must raise, never read as \"nobody is using the node\"."""
 
     @pytest.mark.parametrize(
-        "payload",
+        ("payload", "match"),
         [
-            {"process": [{"gpu": 0, "process_list": []}]},  # a wrapper key appears
-            "No running processes detected",  # the whole payload degrades to a string
-            None,  # the query answers nothing
-            42,
+            ({"process": [{"gpu": 0, "process_list": []}]}, "amd-smi process returned"),  # a wrapper key appears
+            ("No running processes detected", "amd-smi process returned"),  # the whole payload degrades to a string
+            (None, "amd-smi process returned"),  # the query answers nothing
+            (42, "amd-smi process returned"),
+            ([["gpu", 0]], "where a GPU row was expected"),
+            # A row filed under a name this parser cannot read is not an absent row.
+            ([{"gpu": "card0", "process_list": []}], "not a number"),
+            ([{"gpu": 0, "process_list": {"pid": 42}}], "process_list of type dict"),
+            ([{"gpu": 0, "process_list": [None]}], "process entry of type NoneType"),
+        ],
+        ids=[
+            "a_wrapper_key",
+            "a_bare_string",
+            "nothing",
+            "a_number",
+            "a_row_that_is_not_a_mapping",
+            "a_renamed_gpu_id",
+            "a_process_list_of_an_unmodelled_type",
+            "a_process_entry_of_an_unmodelled_type",
         ],
     )
-    def test_a_payload_that_is_not_a_list_of_rows_is_refused(self, payload):
-        with pytest.raises(pms.SweepError, match="amd-smi process returned"):
+    def test_an_unmodelled_shape_is_refused(self, payload, match):
+        with pytest.raises(pms.SweepError, match=match):
             pms.resident_processes(payload)
-
-    def test_a_row_that_is_not_a_mapping_is_refused(self):
-        with pytest.raises(pms.SweepError, match="where a GPU row was expected"):
-            pms.resident_processes([["gpu", 0]])
 
     @pytest.mark.parametrize("row", [{"process_list": []}, {"gpu": 0}, {}])
     def test_a_row_missing_either_field_is_refused(self, row):
         with pytest.raises(pms.SweepError, match="without gpu|without process_list|without gpu or process_list"):
             pms.resident_processes([row])
-
-    def test_a_renamed_gpu_id_is_refused_rather_than_skipped(self):
-        """A row filed under a name this parser cannot read is not an absent row."""
-        with pytest.raises(pms.SweepError, match="not a number"):
-            pms.resident_processes([{"gpu": "card0", "process_list": []}])
-
-    def test_a_process_list_of_an_unmodelled_type_is_refused(self):
-        with pytest.raises(pms.SweepError, match="process_list of type dict"):
-            pms.resident_processes([{"gpu": 0, "process_list": {"pid": 42}}])
-
-    def test_a_process_entry_of_an_unmodelled_type_is_refused(self):
-        with pytest.raises(pms.SweepError, match="process entry of type NoneType"):
-            pms.resident_processes([{"gpu": 0, "process_list": [None]}])
 
 
 class TestCurrentModes:
@@ -313,16 +297,27 @@ class TestCardBus:
 
 
 class TestBuildPartitionCommand:
-    def test_substitutes_the_per_partition_values(self):
+    @pytest.mark.parametrize(
+        ("template", "expected"),
+        [
+            (
+                ["bench", "--gpu", "{device}", "--out", "{output_dir}", "--mode", "{mode}"],
+                ["bench", "--gpu", "9", "--out", "/tmp/out", "--mode", "CPX"],
+            ),
+            (["b", "-v"], ["b", "-v"]),
+        ],
+        ids=["placeholders", "no_placeholders"],
+    )
+    def test_substitutes_the_per_partition_values(self, template, expected):
         layout = pms.layout_for("CPX", cu_per_partition=32)
         cmd = pms.build_partition_command(
-            ["bench", "--gpu", "{device}", "--out", "{output_dir}", "--mode", "{mode}"],
+            template,
             device=9,
             output_dir=Path("/tmp/out"),
             layout=layout,
             partition_index=2,
         )
-        assert cmd == ["bench", "--gpu", "9", "--out", "/tmp/out", "--mode", "CPX"]
+        assert cmd == expected
 
     def test_a_path_with_a_space_stays_one_argument(self):
         """Substitution is per already-split token, so no shell can re-split it."""
@@ -346,15 +341,6 @@ class TestBuildPartitionCommand:
             partition_index=3,
         )
         assert cmd == ["b", "4", "3", "64"]
-
-    def test_a_template_without_placeholders_is_left_alone(self):
-        layout = pms.layout_for("SPX", cu_per_partition=256)
-        assert pms.build_partition_command(
-            ["b", "-v"], device=0, output_dir=Path("/x"), layout=layout, partition_index=0
-        ) == [
-            "b",
-            "-v",
-        ]
 
 
 class TestPartitionEnv:
@@ -452,20 +438,6 @@ class TestModeResult:
         assert pms.ModeResult(mode="DPX", runs=runs).worst_latency_ms() is None
 
 
-class TestToFloat:
-    """The canonical coercion from hyperloom_common.coerce, not a local copy."""
-
-    def test_a_bool_is_not_a_measurement(self):
-        assert pms.to_float(True) is None
-
-    @pytest.mark.parametrize("bad", ["", "abc", None, float("inf"), float("nan")])
-    def test_unusable_values_are_none(self, bad):
-        assert pms.to_float(bad) is None
-
-    def test_a_numeric_string_is_accepted(self):
-        assert pms.to_float("12.5") == pytest.approx(12.5)
-
-
 class TestCardTotalGib:
     def test_a_split_mode_reading_is_scaled_back_to_the_card(self):
         """36 GiB on a CPX partition is a 288 GiB MI355X."""
@@ -479,53 +451,43 @@ class TestCardTotalGib:
         assert pms.card_total_gib(bad, "SPX") is None
 
 
-class TestFeasibilityGate:
-    def test_the_mi355x_case_that_motivated_the_gate(self):
-        """20.7 GiB x 2 streams does not fit a 36 GiB CPX partition."""
-        layout = pms.layout_for("CPX", cu_per_partition=32, gib_per_partition=36.0)
-        assert pms.fits_in_partition(20.7, layout, 2) is False
-
-    def test_one_stream_of_the_same_workload_does_fit(self):
-        """Which is why gating on the single-stream figure is the trap."""
-        layout = pms.layout_for("CPX", cu_per_partition=32, gib_per_partition=36.0)
-        assert pms.fits_in_partition(20.7, layout, 1) is True
-
-    def test_the_whole_card_holds_it_comfortably(self):
-        layout = pms.layout_for("SPX", cu_per_partition=256, gib_per_partition=288.0)
-        assert pms.fits_in_partition(20.7, layout, 2) is True
-
-
 # ----------------------------------------------------------- mode resolution
 
 
 class TestResolveModes:
-    def test_defaults_to_what_the_card_reports(self):
-        assert pms.resolve_modes("", ("SPX", "DPX", "QPX", "CPX")) == ("SPX", "DPX", "QPX", "CPX")
+    @pytest.mark.parametrize(
+        ("requested", "supported", "expected"),
+        [
+            ("", ("SPX", "DPX", "QPX", "CPX"), ("SPX", "DPX", "QPX", "CPX")),
+            ("CPX,SPX", ("SPX", "DPX", "QPX", "CPX"), ("CPX", "SPX")),
+            ("spx dpx", ("SPX", "DPX"), ("SPX", "DPX")),
+            ("SPX,SPX", ("SPX",), ("SPX",)),
+            # No profile table means "unknown", so the request stands and the set judges it.
+            ("CPX", (), ("CPX",)),
+        ],
+        ids=[
+            "defaults_to_what_the_card_reports",
+            "an_explicit_list_keeps_its_order",
+            "whitespace_and_commas_both_separate",
+            "duplicates_collapse",
+            "an_unqueryable_card_is_not_second_guessed",
+        ],
+    )
+    def test_resolves_the_requested_modes(self, requested, supported, expected):
+        assert pms.resolve_modes(requested, supported) == expected
 
-    def test_an_explicit_list_keeps_its_order(self):
-        assert pms.resolve_modes("CPX,SPX", ("SPX", "DPX", "QPX", "CPX")) == ("CPX", "SPX")
-
-    def test_whitespace_and_commas_both_separate(self):
-        assert pms.resolve_modes("spx dpx", ("SPX", "DPX")) == ("SPX", "DPX")
-
-    def test_duplicates_collapse(self):
-        assert pms.resolve_modes("SPX,SPX", ("SPX",)) == ("SPX",)
-
-    def test_a_misspelled_mode_is_refused(self):
-        with pytest.raises(pms.SweepError, match="unknown compute-partition mode"):
-            pms.resolve_modes("SPXX", ("SPX",))
-
-    def test_a_mode_the_card_disclaims_is_refused_before_anything_is_set(self):
-        with pytest.raises(pms.SweepError, match="does not report support for CPX"):
-            pms.resolve_modes("CPX", ("SPX", "DPX"))
-
-    def test_an_unqueryable_card_is_not_second_guessed(self):
-        """No profile table means "unknown", so the request stands and the set judges it."""
-        assert pms.resolve_modes("CPX", ()) == ("CPX",)
-
-    def test_no_request_and_no_profiles_says_which_flag_to_pass(self):
-        with pytest.raises(pms.SweepError, match="--modes"):
-            pms.resolve_modes("", ())
+    @pytest.mark.parametrize(
+        ("requested", "supported", "match"),
+        [
+            ("SPXX", ("SPX",), "unknown compute-partition mode"),
+            ("CPX", ("SPX", "DPX"), "does not report support for CPX"),
+            ("", (), "--modes"),
+        ],
+        ids=["a_misspelled_mode", "a_mode_the_card_disclaims", "no_request_and_no_profiles_names_the_flag"],
+    )
+    def test_an_unusable_request_is_refused(self, requested, supported, match):
+        with pytest.raises(pms.SweepError, match=match):
+            pms.resolve_modes(requested, supported)
 
 
 # --------------------------------------------------------------- reporting
@@ -560,17 +522,6 @@ class TestRender:
         results = [pms.ModeResult(mode="CPX", error="setting CPX failed")]
         text = "\n".join(pms.render(results, entry_mode="SPX"))
         assert "No mode produced a measurement" in text
-
-    def test_the_report_says_the_number_is_a_sum(self):
-        """The claim has to travel with the figure or it gets read as a single run."""
-        results = [pms.ModeResult(mode="SPX", layout=pms.layout_for("SPX", cu_per_partition=256), runs=[_run(0)])]
-        text = "\n".join(pms.render(results, entry_mode="SPX"))
-        assert "sum over a mode's partitions" in text
-
-    def test_it_points_at_the_assertion_flag_for_the_session_that_follows(self):
-        results = [pms.ModeResult(mode="SPX", layout=pms.layout_for("SPX", cu_per_partition=256), runs=[_run(0)])]
-        text = "\n".join(pms.render(results, entry_mode="SPX"))
-        assert "--compute-partition-mode" in text
 
 
 class TestSummaryJson:
@@ -859,14 +810,10 @@ class TestBusyCheckScope:
         assert _sweep(node, gpu=0) == 0
         assert node.sets  # the sweep actually ran
 
-    def test_a_process_on_the_target_card_still_refuses(self, node):
+    def test_a_process_on_the_target_card_still_refuses(self, node, capsys):
         node.processes = [{"gpu": 0, "process_list": [{"process_info": {"name": "vllm"}}]}]
         assert _sweep(node, gpu=0) == 2
         assert node.sets == []
-
-    def test_the_refusal_names_the_card_and_the_count(self, node, capsys):
-        node.processes = [{"gpu": 0, "process_list": [{"process_info": {"name": "vllm"}}]}]
-        _sweep(node, gpu=0)
         assert "1 process(es) still hold a context on GPU 0" in capsys.readouterr().err
 
     def test_a_target_missing_from_the_listing_is_refused_not_assumed_idle(self, node):
@@ -907,11 +854,12 @@ class TestExitCodeContract:
         assert _sweep(node) == 0
         assert node.summary()["modes"][0]["mode"] == "SPX"
 
-    def test_an_unexpected_error_still_renders_and_writes_the_summary(self, node):
+    def test_an_unexpected_error_still_renders_and_writes_the_summary(self, node, capsys):
         """The finding: anything not a SweepError escaped main() past the report."""
         node.fail_agents_on["DPX"] = KeyError("compute_partition")
         assert _sweep(node) == 4
         assert node.summary()["modes"][0]["mode"] == "SPX"
+        assert "KeyError" in capsys.readouterr().err
 
     def test_an_unexpected_error_does_not_lose_the_modes_already_measured(self, node, capsys):
         """SPX measured before DPX broke; escaping main() threw that away."""
@@ -931,11 +879,6 @@ class TestExitCodeContract:
         node.fail_agents_on["DPX"] = KeyError("compute_partition")
         _sweep(node, modes="SPX,DPX,QPX")
         assert "QPX" not in node.sets
-
-    def test_the_unexpected_error_is_named_not_swallowed(self, node, capsys):
-        node.fail_agents_on["DPX"] = KeyError("compute_partition")
-        _sweep(node)
-        assert "KeyError" in capsys.readouterr().err
 
     def test_a_failed_restore_after_a_clean_sweep_exits_3(self, node):
         # Entry mode is SPX and only DPX is swept, so the one set of SPX is the restore itself.

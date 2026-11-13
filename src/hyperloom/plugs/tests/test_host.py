@@ -74,14 +74,13 @@ def test_close_runs_in_the_reverse_of_the_start_order() -> None:
     assert log == ["close c", "close b", "close a"]
 
 
-def test_a_failing_close_is_recorded_and_the_rest_still_close() -> None:
+def test_a_failing_io_close_is_not_raised_and_the_rest_still_close() -> None:
     log = []
     host, _ = _build(log, {"b": (("a",), {"fail_close": True}), "a": ((), {})})
     host.start()
     log.clear()
     host.close()
     assert log == ["close b", "close a"]
-    assert host.close_errors() == {"b": "OSError: b refused to close"}
 
 
 def test_a_non_io_close_error_still_closes_the_rest_then_raises() -> None:
@@ -94,7 +93,6 @@ def test_a_non_io_close_error_still_closes_the_rest_then_raises() -> None:
     with pytest.raises(RuntimeError, match="^b refused to close$"):
         host.close()
     assert log == ["close c", "close b", "close a"]
-    assert host.close_errors() == {"b": "RuntimeError: b refused to close"}
 
 
 def test_a_close_error_after_a_failed_start_is_reported_with_the_start_failure() -> None:

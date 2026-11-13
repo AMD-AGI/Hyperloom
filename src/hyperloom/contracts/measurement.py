@@ -132,13 +132,11 @@ class Purpose(str, Enum):
 
 
 class Validity(str, Enum):
-    """Whether a test measured the candidate; ``SUCCESS`` and ``CANDIDATE_FAILURE`` are the blackboard's older names."""
+    """Whether a test measured the candidate."""
 
     SUCCEEDED = "succeeded"
     CANDIDATE_FAILED = "candidate_failed"
     MEASUREMENT_FAILED = "measurement_failed"
-    SUCCESS = SUCCEEDED
-    CANDIDATE_FAILURE = CANDIDATE_FAILED
 
 
 class FailureClass(str, Enum):
@@ -279,12 +277,6 @@ class TestRequest:
         return self.branch_id
 
     @property
-    def accuracy_rounds(self) -> bool:
-        """The blackboard's name for ``accuracy``."""
-
-        return self.accuracy
-
-    @property
     def action_fingerprint(self) -> str:
         return self.delta.fingerprint()
 
@@ -400,12 +392,6 @@ class SandboxFacts:
         """The blackboard's name for ``node_name``."""
 
         return self.node_name
-
-    @property
-    def power_cap_watts(self) -> float | None:
-        """The blackboard's name for ``power_cap_w``."""
-
-        return self.power_cap_w
 
     def to_document(self) -> dict[str, object]:
         return {

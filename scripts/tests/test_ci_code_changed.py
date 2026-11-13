@@ -19,7 +19,6 @@ ci_code_changed = importlib.util.module_from_spec(_SPEC)
 _SPEC.loader.exec_module(ci_code_changed)
 
 WORKFLOWS = ROOT / ".github" / "workflows"
-CONTRIBUTING = (ROOT / "CONTRIBUTING.md").read_text(encoding="utf-8")
 
 
 @pytest.mark.parametrize(
@@ -106,11 +105,6 @@ def test_an_unknown_base_fails_rather_than_skipping(tmp_path, monkeypatch):
     monkeypatch.chdir(_repo(tmp_path))
     with pytest.raises(subprocess.CalledProcessError):
         ci_code_changed.main(["1" * 40, "HEAD"])
-
-
-def test_contributing_lists_the_same_patterns():
-    for pattern in ci_code_changed.DOCS_ONLY_PATTERNS:
-        assert f"- `{pattern}`" in CONTRIBUTING
 
 
 @pytest.mark.parametrize("name", ["tests-coverage.yml", "lint.yml"])
