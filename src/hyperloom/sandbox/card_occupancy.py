@@ -319,7 +319,8 @@ class CardReading:
             parent
             for parent in holding
             if any(
-                parent not in pids and any(_descends_from(own.procfs, pid, parent) for pid in pids) for pids in clients
+                parent not in pids and any(_descends(own.procfs, pid, frozenset({parent})) for pid in pids)
+                for pids in clients
             )
         )
 
@@ -379,15 +380,17 @@ def _has_memory(holder: Holder) -> bool:
     return holder.vram > NEGLIGIBLE_VRAM or (holder.vram > 0 and holder.queues > 0)
 
 
-def _descends_from(procfs: Path, pid: int, ancestor: int) -> bool:
-    """Whether ``ancestor`` is a parent of ``pid``, however far up."""
+def _descends(procfs: Path, pid: int, roots: frozenset[int]) -> bool:
+    """Whether ``pid`` is one of ``roots`` or under one of them, however deep."""
     seen: set[int] = set()
-    stat = _stat(procfs, pid)
-    while stat is not None and stat[1] > 1 and stat[1] not in seen:
-        if stat[1] == ancestor:
+    while pid > 1 and pid not in seen:
+        if pid in roots:
             return True
-        seen.add(stat[1])
-        stat = _stat(procfs, stat[1])
+        seen.add(pid)
+        stat = _stat(procfs, pid)
+        if stat is None:
+            return False
+        pid = stat[1]
     return False
 
 
@@ -406,19 +409,7 @@ class OwnProcesses:
     procfs: Path = PROC_PATH
 
     def owns(self, pid: int) -> bool:
-        return self._descends(pid) or self._tagged(pid)
-
-    def _descends(self, pid: int) -> bool:
-        seen: set[int] = set()
-        while pid > 1 and pid not in seen:
-            if pid in self.roots:
-                return True
-            seen.add(pid)
-            stat = _stat(self.procfs, pid)
-            if stat is None:
-                return False
-            pid = stat[1]
-        return False
+        return _descends(self.procfs, pid, self.roots) or self._tagged(pid)
 
     def _tagged(self, pid: int) -> bool:
         if not self.tag:

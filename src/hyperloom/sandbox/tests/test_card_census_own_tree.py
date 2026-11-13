@@ -1,7 +1,10 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""A test's own process tree is one resident of a card, however many of its processes hold memory there.
+"""A test's own process tree may have one holder with memory on a card, and a second only in a launcher's place.
+
+Each launcher of the test (a process of the test that holds memory and started one that holds its own) has one place,
+for a holder with no more than :data:`LAUNCHER_VRAM` on a card where the launcher holds memory on the render node.
 
 The fixtures are shaped like what a GPU pod with a pid namespace of its own reads while a TP4 server runs: the kernel lists
 the server's launcher (``python -m sglang.launch_server``, the parent of every rank) with 0.7 GiB on the first rank's card
@@ -69,9 +72,7 @@ def _keys(reading: CardReading, own: OwnProcesses) -> list[tuple[str | int, ...]
     return [i.key for i in reading.intrusions(own, before_test=False)]
 
 
-def test_the_launcher_and_its_first_rank_both_the_tests_own_are_one_resident_and_the_card_is_clean(
-    tmp_path: Path,
-) -> None:
+def test_the_launcher_and_its_first_rank_both_the_tests_own_leave_the_card_clean(tmp_path: Path) -> None:
     tree = _pod(tmp_path)
     own = _own_round(tree)
 
@@ -286,8 +287,8 @@ def test_a_child_sharing_its_parents_render_file_adds_no_allowance_and_a_foreign
     tmp_path: Path,
 ) -> None:
     """A child the rank forked after opening the GPU shares the rank's open DRM file and has no holder of its own in the
-    kernel's list: the test's own render clients are still two, so a process outside the pod with memory and queues on
-    the card is a third resident."""
+    kernel's list: the card still has the rank and the launcher beside it, so a process outside the pod with memory and
+    queues on it is a third holder, one more than a card may have."""
     tree = _pod(tmp_path)
     own = _own_round(tree)
     tree.process(642999, parent=642890, command=("python3", "-c", "worker"))
@@ -316,7 +317,7 @@ def test_a_rank_whose_forked_child_shares_its_render_files_is_not_a_launcher(tmp
 
 
 def test_a_child_sharing_its_parents_render_file_alone_leaves_the_card_clean(tmp_path: Path) -> None:
-    """The same forked child without a foreign holder: two kernel holders, two own render clients."""
+    """The same forked child without a foreign holder: the card has only the rank and the launcher beside it."""
     tree = _pod(tmp_path)
     own = _own_round(tree)
     tree.process(642999, parent=642890, command=("python3", "-c", "worker"))
