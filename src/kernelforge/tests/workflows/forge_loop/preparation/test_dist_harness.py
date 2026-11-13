@@ -548,6 +548,53 @@ def test_the_captured_graph_counts_each_kernel_and_reads_its_residency(solo, con
     assert all(node.ctas >= 1 and node.resident_per_cu >= 1 for node in kernels)
 
 
+def test_a_lookup_that_does_not_know_the_kernel_leaves_no_hip_error(monkeypatch):
+    """torch reports HIP's last error as its own after its next kernel launch."""
+    calls = []
+
+    class _Hip:
+        def hipOccupancyMaxActiveBlocksPerMultiprocessor(self, blocks, func, threads, lds_bytes):
+            calls.append("runtime query")
+            return 98  # hipErrorInvalidDeviceFunction: the handle is a module function
+
+        def hipModuleOccupancyMaxActiveBlocksPerMultiprocessor(self, blocks, func, threads, lds_bytes):
+            calls.append("module query")
+            blocks._obj.value = 2
+            return 0
+
+        def hipGetLastError(self):
+            calls.append("error cleared")
+            return 98
+
+    monkeypatch.setattr(dist_harness, "_hip_runtime", _Hip)
+
+    assert dist_harness._resident_per_cu(0x1234, 512, 0) == 2
+    assert calls == ["runtime query", "error cleared", "module query"]
+
+
+@requires_gpu
+def test_a_module_kernel_is_read_without_leaving_a_hip_error(solo, context):
+    """A DSL kernel arrives as a module function, which the runtime-API lookup does not know."""
+    triton = pytest.importorskip("triton")
+    tl = pytest.importorskip("triton.language")
+
+    @triton.jit
+    def add_one(x, n, block: tl.constexpr):
+        offsets = tl.program_id(0) * block + tl.arange(0, block)
+        tl.store(x + offsets, tl.load(x + offsets, mask=offsets < n) + 1, mask=offsets < n)
+
+    def call(ctx, inputs):
+        add_one[(1,)](inputs, inputs.numel(), block=1024)
+        return inputs
+
+    nodes = dist_harness._captured_nodes(_case(call_candidate=call), context, seed=11)
+
+    assert [node.kind for node in nodes] == ["kernel"]
+    assert nodes[0].resident_per_cu >= 1
+    torch.ones(4, device=context.device).add_(1)
+    torch.cuda.synchronize()
+
+
 @requires_gpu
 def test_a_judged_run_refuses_a_candidate_that_splits_its_declared_launch(solo, context, monkeypatch):
     monkeypatch.setattr(dist_harness, "MEASURED", [0])
