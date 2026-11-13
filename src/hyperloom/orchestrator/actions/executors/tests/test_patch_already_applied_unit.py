@@ -17,10 +17,7 @@ from hyperloom.orchestrator.actions.executors import _integrate_bench as integra
 from hyperloom.orchestrator.actions.executors import _patch_git as patch_git
 from hyperloom.orchestrator.actions.executors import integrate_patch as ip
 from hyperloom.orchestrator.actions.executors._apply_feedback import PatchApplyResult, PresenceCheck
-from hyperloom.orchestrator.actions.executors._nogit_patch import (
-    _apply_patch_no_git,
-    _reverse_applies_cleanly,
-)
+from hyperloom.orchestrator.actions.executors._nogit_patch import _apply_patch_no_git
 from hyperloom.orchestrator.loop.sub_agent_runner import RunnerContext
 from hyperloom.orchestrator.state.shared_state import SharedState
 from hyperloom.orchestrator.state.task_registry import Task
@@ -100,28 +97,6 @@ def workspace(tmp_path):
     return src, patches, tmp_path / "backups"
 
 
-def test_nogit_superset_then_subset_is_a_noop(workspace):
-    """Subset after superset succeeds with no backups; both edits survive."""
-    src, patches, backups = workspace
-    sup = _patch(patches, "superset.patch", _SUPERSET)
-    sub = _patch(patches, "subset.patch", _SUBSET)
-
-    first = _apply_patch_no_git(src, sup, backups, seq_offset=0)
-    assert first.ok, first.error
-    assert first.backups, "superset should have backed up the files it changed"
-    assert first.present_by is None
-
-    second = _apply_patch_no_git(src, sub, backups, seq_offset=len(first.backups))
-    assert second.ok, second.error
-    assert second.feedback is None
-    assert second.present_by is PresenceCheck.PATCH_REVERSE_DRY_RUN
-    # The no-op owns no backups — the patch that made the edits owns them, so a revert restores the tree exactly once.
-    assert second.backups == []
-
-    assert "new_alpha" in (src / "mod" / "alpha.py").read_text(encoding="utf-8")
-    assert "new_beta" in (src / "mod" / "beta.py").read_text(encoding="utf-8")
-
-
 def test_nogit_subset_then_superset_fails_closed(workspace):
     """The reverse order is only *partly* satisfied, so it must fail, not no-op."""
     src, patches, backups = workspace
@@ -139,29 +114,6 @@ def test_nogit_subset_then_superset_fails_closed(workspace):
     assert "old_beta" in (src / "mod" / "beta.py").read_text(encoding="utf-8")
 
 
-def test_nogit_partial_overlap_still_fails(workspace):
-    """A patch only *partly* present is a real failure, not a no-op."""
-    src, patches, backups = workspace
-    sup = _patch(patches, "superset.patch", _SUPERSET)
-    assert _apply_patch_no_git(src, sup, backups, seq_offset=0).ok
-    # Undo only beta, leaving alpha applied -> superset is half-present.
-    (src / "mod" / "beta.py").write_text("header\nold_beta\nfooter\n", encoding="utf-8")
-
-    assert not _reverse_applies_cleanly(src, sup)
-
-
-def test_nogit_unrelated_patch_still_fails(workspace):
-    """A patch that genuinely does not apply keeps failing with feedback."""
-    src, patches, backups = workspace
-    bad = _patch(patches, "bad.patch", _UNRELATED)
-
-    result = _apply_patch_no_git(src, bad, backups, seq_offset=0)
-    assert not result.ok
-    assert "failed at all strip levels" in result.error
-    assert result.feedback is not None
-    assert result.backups == []
-
-
 def _git_tree(root: Path) -> None:
     """Initialise ``root`` as a committed git work tree."""
     subprocess.run(["git", "init", "-q", str(root)], check=True)
@@ -174,41 +126,6 @@ def _git_tree(root: Path) -> None:
 def _git(root: Path, *args: str) -> str:
     """Run git in ``root`` and return its stdout."""
     return subprocess.run(["git", "-C", str(root), *args], check=True, capture_output=True, text=True).stdout
-
-
-def test_git_channel_superset_then_subset_is_a_noop(tmp_path):
-    """The git channel resolves the same ambiguity via ``git apply -R --check``."""
-    src = tmp_path / "src"
-    _tree(src)
-    _git_tree(src)
-    patches = tmp_path / "patches"
-    patches.mkdir()
-    sup = _patch(patches, "superset.patch", _SUPERSET)
-    sub = _patch(patches, "subset.patch", _SUBSET)
-
-    first = patch_git._git_apply_collect_feedback(src, sup)
-    assert first.ok, first.error
-    assert first.present_by is None
-    second = patch_git._git_apply_collect_feedback(src, sub)
-    assert second.ok, second.error
-    assert second.feedback is None
-    assert second.present_by is PresenceCheck.GIT_REVERSE_APPLY
-    assert "new_alpha" in (src / "mod" / "alpha.py").read_text(encoding="utf-8")
-
-
-def test_git_channel_unrelated_patch_still_fails(tmp_path):
-    """A non-applying patch still fails on the git channel, with feedback."""
-    src = tmp_path / "src"
-    _tree(src)
-    _git_tree(src)
-    patches = tmp_path / "patches"
-    patches.mkdir()
-    bad = _patch(patches, "bad.patch", _UNRELATED)
-
-    result = patch_git._git_apply_collect_feedback(src, bad)
-    assert not result.ok
-    assert result.feedback is not None
-    assert result.present_by is None
 
 
 _CHANNEL_CHECKS = [(True, PresenceCheck.GIT_REVERSE_APPLY), (False, PresenceCheck.PATCH_REVERSE_DRY_RUN)]
@@ -234,6 +151,42 @@ def _settle(root: Path, git_tree: bool, message: str) -> None:
     """Commit the tree's current state when it is a git checkout."""
     if git_tree:
         git_commit_all(root, message)
+
+
+@pytest.mark.parametrize(("git_tree", "check"), _CHANNEL_CHECKS, ids=["git", "nogit"])
+def test_superset_then_subset_is_a_noop(tmp_path, git_tree, check):
+    """Subset after superset succeeds with no backups; both edits survive."""
+    src = _channel_tree(tmp_path, git_tree)
+    sup = _patch(tmp_path, "superset.patch", _SUPERSET)
+    sub = _patch(tmp_path, "subset.patch", _SUBSET)
+
+    first = _apply_one(git_tree, src, sup, tmp_path / "bak")
+    assert first.ok, first.error
+    assert first.present_by is None
+
+    second = _apply_one(git_tree, src, sub, tmp_path / "bak")
+    assert second.ok, second.error
+    assert second.feedback is None
+    assert second.present_by is check
+    # The no-op owns no backups — the patch that made the edits owns them, so a revert restores the tree exactly once.
+    assert second.backups == []
+
+    assert "new_alpha" in (src / "mod" / "alpha.py").read_text(encoding="utf-8")
+    assert "new_beta" in (src / "mod" / "beta.py").read_text(encoding="utf-8")
+
+
+@pytest.mark.parametrize("git_tree", [True, False], ids=["git", "nogit"])
+def test_unrelated_patch_still_fails(tmp_path, git_tree):
+    """A patch that genuinely does not apply keeps failing with feedback."""
+    src = _channel_tree(tmp_path, git_tree)
+    bad = _patch(tmp_path, "bad.patch", _UNRELATED)
+
+    result = _apply_one(git_tree, src, bad, tmp_path / "bak")
+
+    assert not result.ok
+    assert result.feedback is not None
+    assert result.present_by is None
+    assert result.backups == []
 
 
 # What ``git format-patch`` puts before the diff.

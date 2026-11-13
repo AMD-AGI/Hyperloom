@@ -9,8 +9,11 @@ from types import SimpleNamespace
 
 import pytest
 
-from hyperloom.orchestrator.loop.intent_router import IntentRouter
+from hyperloom.inference_optimizer.protocol.intent import Intent, IntentType
+from hyperloom.orchestrator.kernel.request_handlers import KERNEL_REQUEST_HANDLERS
+from hyperloom.orchestrator.loop.coordinator import Coordinator
 from hyperloom.orchestrator.phases.kernel import KernelPhase
+from hyperloom.orchestrator.roles import MockBackend, MockCriticBackend, ScriptedPlan
 from hyperloom.orchestrator.state.analysis_failures import remember_trace_failure, remembered_trace_failure
 from hyperloom.orchestrator.state.shared_state import SharedState
 
@@ -113,14 +116,37 @@ def test_the_kernel_request_cache_serves_the_remembered_failure_without_running_
     assert kernel.cached_kernel_request("trace_analyze", {"trace_input": "/runs/roofline/other/torch_trace"}) is None
 
 
-def test_the_router_remembers_a_failed_analysis_and_caches_a_successful_one():
-    state = _state()
-    router = IntentRouter(SimpleNamespace(shared_state=state))
+def _silent_backends() -> dict[str, object]:
+    silent = ScriptedPlan(
+        turns=[], default_intent=Intent(type=IntentType.SEND_MESSAGE, payload={"topic": "heartbeat", "body_md": "ok"})
+    )
+    return {"orchestration": MockBackend(silent, name="orch"), "critic": MockCriticBackend()}
 
-    router._record_trace_analyze_outcome({"trace_input": TRACE}, SPLIT_FAILURE)
-    assert remembered_trace_failure(state, {"trace_input": TRACE}) is not None
 
-    other = "/runs/roofline/other/torch_trace"
-    router._record_trace_analyze_outcome({"trace_input": other}, {"status": "ok", "hot_kernels": []})
-    assert remembered_trace_failure(state, {"trace_input": other}) is None
-    assert state.last_trace_analyze
+@pytest.mark.asyncio
+async def test_a_failed_analysis_requested_again_is_answered_without_rerunning_it(tmp_path, monkeypatch):
+    monkeypatch.setenv("USER_DATA_PATH", str(tmp_path / "user_data"))
+    analysed: list[str] = []
+
+    async def failing_analysis(payload, *, session_dir):
+        analysed.append(payload["trace_input"])
+        return dict(SPLIT_FAILURE)
+
+    monkeypatch.setitem(KERNEL_REQUEST_HANDLERS, "trace_analyze", failing_analysis)
+    session_dir = tmp_path / "session"
+    session_dir.mkdir()
+    trace = str(session_dir / "torch_trace")
+    coordinator = Coordinator(session_dir, backends=_silent_backends())
+    request = Intent(
+        type=IntentType.REQUEST,
+        payload={"target_agent": "kernel_agent", "kind": "trace_analyze", "params": {"trace_input": trace}},
+    )
+    try:
+        await coordinator.router.handle_intent("orchestration", request)
+        await coordinator.router.handle_intent("orchestration", request)
+        latest = (await coordinator.bus.tail(1, to_agent="orchestration", topic="response"))[0]
+    finally:
+        await coordinator.stop()
+
+    assert analysed == [trace]
+    assert latest.payload["result"]["error_class"] == "trace_analysis_failure_remembered"
