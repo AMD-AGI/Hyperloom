@@ -56,7 +56,14 @@ from hyperloom_multibranch.contracts.blackboard.records import LeaseEnd, LeaseSt
 from hyperloom_multibranch.contracts.blackboard.vocab import LeaseEndReason, LeaseKind
 from hyperloom_multibranch.contracts.blackboard.interfaces import SnapshotQuery
 from hyperloom_multibranch.contracts.repo import ExperimentRepo, RepoMerge
-from hyperloom_multibranch.contracts.toolbox import BranchLease, CancelOutcome, LeaseCharge, QueueState, RequestRejected
+from hyperloom_multibranch.contracts.toolbox import (
+    BranchLease,
+    CancelOutcome,
+    LeaseCharge,
+    QueueState,
+    RequestRejected,
+    WorkloadKind,
+)
 from hyperloom_multibranch.repo.git_repo import RECIPE_FILE, GitExperimentRepo
 from hyperloom_multibranch.rulegate import baseline as rulegate_baseline
 from hyperloom_multibranch.rulegate import rules as rulegate_rules
@@ -557,7 +564,7 @@ class RecordingToolbox(FakeToolbox):
     session directory, so a second toolbox over that directory hands out request ids where the first one left off;
     without one it goes with the toolbox. ``repo`` is the bench's experiment repository, which acceptance reads each
     parent's recipe from as the real toolbox does, so a delta onto a head that already pins a component is accepted
-    without naming its upstream again.
+    without naming its upstream again. ``workload`` is the campaign's workload kind.
     """
 
     def __init__(
@@ -569,6 +576,7 @@ class RecordingToolbox(FakeToolbox):
         log: Path | None = None,
         *,
         repo: ExperimentRepo,
+        workload: WorkloadKind = WorkloadKind.INFERENCEX,
     ):
         quiet = NoiseModel(node_bias_median=0.0, node_bias_p90=0.0, test_noise_sigma=0.0)
         config = FakeToolboxConfig(
@@ -578,7 +586,8 @@ class RecordingToolbox(FakeToolbox):
             main_concurrency=(conc,),
             image_digest=BASE_IMAGE_DIGEST,
         )
-        super().__init__(config, blackboard=blackboard, wiring=FakeWiring(records=blackboard, log_path=log, repo=repo))
+        wiring = FakeWiring(records=blackboard, log_path=log, repo=repo, workload_kind=workload)
+        super().__init__(config, blackboard=blackboard, wiring=wiring)
         self.serving = False
         self.policies: list[QueuePolicy] = []
         self.cancelled: list[str] = []
