@@ -104,12 +104,16 @@ host make "latest" pick the wrong run.
 
 Inputs that stay outside `$USER_DATA_PATH` by design (read-only sources
 or warm-start caches): **TraceLens** — `$TRACELENS_ROOT` (default
-`${HYPERLOOM_CACHE_DIR:-$REPO_ROOT/.cache}/TraceLens`; when unset,
-`src/hyperloom/inference_optimizer/assets/install.sh` clones
-[AMD-AGI/TraceLens](https://github.com/AMD-AGI/TraceLens) there and pins
-it to a fixed SHA. A pre-existing checkout you maintain is only used as
-an explicit operator override — export `TRACELENS_ROOT=<path>` to opt
-in, which skips both the clone and the SHA pin) with an **optional**
+`${HYPERLOOM_CACHE_DIR:-$REPO_ROOT/.cache}/TraceLens@<SHA>`, where `<SHA>` is
+the pinned TraceLens commit). When `TRACELENS_ROOT` is unset, points to a
+managed `TraceLens@*` path directly under the cache root, or does not exist,
+`src/hyperloom/inference_optimizer/assets/install.sh` uses the managed
+[AMD-AGI/TraceLens](https://github.com/AMD-AGI/TraceLens) checkout at that default
+path, cloning it if needed and aligning it to the pinned SHA.
+An existing checkout outside the managed cache paths
+is only used as an explicit operator override — export `TRACELENS_ROOT=<path>`
+to opt in, which skips both the clone and the SHA pin but retains checkout
+completeness checks. TraceLens supports an **optional**
 internal
 extension at `$TRACELENS_INTERNAL_ROOT` (no default; internal users set
 it to their own existing checkout to opt in,
