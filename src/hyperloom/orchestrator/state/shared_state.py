@@ -572,6 +572,8 @@ class SharedState(_RenderMixin, GapsStateMixin, _PhaseStateMixin, _RooflineState
     # Roofline-v2 trace-analyze cache written by record_trace_analyze. roofline_snapshot_id is a property derived from
     # this dict.
     last_trace_analyze: dict[str, Any] = field(default_factory=dict)
+    # PD cluster only: compact TraceLens summary per role ("prefill" / "decode") from the latest roofline.
+    last_trace_analyze_by_role: dict[str, Any] = field(default_factory=dict)
     # Append-only compact roofline snapshots for report.py; capped at ``_ROOFLINE_SNAPSHOTS_CAP`` (snapshot #1 always retained as the report's baseline anchor).
     roofline_snapshots: list[dict[str, Any]] = field(default_factory=list)
     # Outer roofline failure counter; bumped on fail, reset on success.

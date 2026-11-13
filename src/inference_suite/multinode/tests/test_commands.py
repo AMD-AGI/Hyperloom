@@ -12,6 +12,7 @@ from inference_suite.multinode.commands import (
     IB_DEVICE_TAIL,
     CommandError,
     cluster_commands,
+    engine_urls,
     process_needle,
     router_command,
 )
@@ -98,6 +99,13 @@ def test_in_place_router_reaches_role_services():
     argv = _argv(commands[-1])
     assert "http://pre:8010" in argv and "http://dec:8020" in argv
     assert _argv(commands[0])[_argv(commands[0]).index("--port") + 1] == "8010"
+
+
+def test_engine_urls_name_each_worker_head_on_its_role_port():
+    nodes = _nodes(launch_mode="in_place", prefill_url="http://pre:8010", decode_url="http://dec:8020")
+    assert engine_urls(_launch(), nodes) == {"prefill": ["http://p0:8010"], "decode": ["http://d0:8020"]}
+    two_workers = _launch().with_roles({Role.DECODE: RoleLaunch(("d0", "d1"), 2, 8)})
+    assert engine_urls(two_workers, _nodes())["decode"] == ["http://d0:8000", "http://d1:8000"]
 
 
 def test_atom_spans_hosts_with_data_parallelism():
