@@ -89,7 +89,7 @@ from inference_suite.frameworks import Framework, FrameworkKind, framework_facts
 
 from .._gpu_pin import ROCR_AUTOFILL_ENV
 from .._workload_envs import QUALITY_REF_ENVS
-from .custom_workload import enforce_custom_scope
+from .custom_workload import custom_workload, enforce_custom_scope
 from .._profile_setup import (
     _DELAY_ITERATIONS,
     _MAX_ITERATIONS,
@@ -695,15 +695,19 @@ def _scriptable_config(
     """
     if boot_only or settings.lifecycle.mode is not LifecycleMode.OWN:
         raise ConfigError("a scriptable point runs no server, so its round neither boots one nor reuses one")
+    framework = point.framework.value
     try:
-        enforce_custom_scope(point.framework.value)
+        enforce_custom_scope(framework)
     except ValueError as exc:
         raise ConfigError(f"the custom point's optimization scope does not hold: {exc}") from exc
+    profile = bool(torch_profiler(bench).get("enabled"))
     return SuiteConfig(
         server=_server(point, base, settings, None, LaunchDelta()),
         workload=WorkloadKind.SCRIPTABLE,
-        scriptable=scriptable_workload(bench, point.envs),
-        profile=ProfileConfig(enabled=bool(torch_profiler(bench).get("enabled"))),
+        scriptable=custom_workload(
+            scriptable_workload(bench, point.envs), framework, settings.paths.run_dir, profile=profile
+        ),
+        profile=ProfileConfig(enabled=profile),
         eval=_eval(point, enabled=False),
         telemetry=settings.telemetry,
         lifecycle=settings.lifecycle,

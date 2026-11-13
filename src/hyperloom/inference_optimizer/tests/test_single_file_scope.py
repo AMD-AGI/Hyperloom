@@ -317,6 +317,14 @@ def test_a_malformed_export_block_is_refused(
         aoti_config()
 
 
+def test_the_launch_refuses_a_malformed_export_block(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Nothing else reports it: every other caller of aoti_config swallows the error."""
+    module = _declare_aoti(tmp_path, monkeypatch, {"enabled": "yes"})
+    monkeypatch.setenv("FRAMEWORK_REPO_PATH", str(module.parent))
+    with pytest.raises(ValueError, match="aoti.enabled must be a boolean"):
+        enforce_custom_scope("custom")
+
+
 def test_a_declared_export_adds_its_bounds_to_the_agent_instructions(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
