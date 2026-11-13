@@ -30,6 +30,11 @@ from hyperloom_common.llm.token_usage import uncached_input_tokens
 # Name Codex records the gateway under in its own TOML config.
 CODEX_PROVIDER_NAME = "hyperloom"
 
+# Config overrides every Codex run carries. ``features.memories=false`` keeps a run from carrying state between
+# tasks. ``web_search="disabled"`` withholds Codex's hosted web_search tool: a gateway cannot replay its server-side
+# tool results, so the request after a search fails with a 400 and the run crashes.
+CODEX_BASE_OVERRIDES = ("features.memories=false", 'web_search="disabled"')
+
 _CLIENT_NAME = "hyperloom"
 _CLIENT_TITLE = "Hyperloom"
 
@@ -598,7 +603,7 @@ class CodexSession:
             sandbox_mode=resolved_sandbox_mode,
         )
         config_overrides = (
-            "features.memories=false",
+            *CODEX_BASE_OVERRIDES,
             *provider_config.overrides,
             *_writable_root_overrides(self.config.writable_roots),
         )
@@ -727,6 +732,7 @@ async def run_codex_turn(
 
 
 __all__ = [
+    "CODEX_BASE_OVERRIDES",
     "CODEX_PROVIDER_NAME",
     "CODEX_SANDBOX_MODES",
     "CODEX_SANDBOX_MODE_ENV",

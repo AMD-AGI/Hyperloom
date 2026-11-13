@@ -25,6 +25,11 @@ from hyperloom.common.outside_facts import (
     spaced,
 )
 
+#: Where an exception names itself on its own line: not inside a word, after a dot, or in parentheses, which is how a
+#: logger quotes an error it caught and carried on from (``init failed (ImportError: ...)``).
+EXCEPTION_NAME_START = r"(?<![\w.(])"
+_EXCEPTION_START = EXCEPTION_NAME_START + r"(?:[A-Za-z_]\w*\.)*"
+
 
 # --- Failure kinds ---------------------------------------------------------
 
@@ -312,8 +317,12 @@ _RULES: tuple[_Rule, ...] = (
         kind=IMPORT_ERROR,
         bridge_layer="build",
         patterns=(
-            re.compile(PY_MODULE_NOT_FOUND_ERROR + r":\s*No module named\s+['\"]([A-Za-z0-9_.]+)['\"]"),
-            re.compile(PY_IMPORT_ERROR + r":\s*(?:cannot import name\s+['\"]?([A-Za-z0-9_]+)['\"]?)?"),
+            re.compile(
+                _EXCEPTION_START + PY_MODULE_NOT_FOUND_ERROR + r":\s*No module named\s+['\"]([A-Za-z0-9_.]+)['\"]"
+            ),
+            re.compile(
+                _EXCEPTION_START + PY_IMPORT_ERROR + r":\s*(?:cannot import name\s+['\"]?([A-Za-z0-9_]+)['\"]?)?"
+            ),
         ),
         confidence=0.7,
         symbol_from=_grp,
@@ -499,7 +508,7 @@ def is_targeted_build_candidate(
 #: log prefix. A server that skips a model whose imports fail logs ``Ignore import error when loading <module>: ...``
 #: and carries on; that line is not an exception and does not match.
 IMPORT_FAILURE_LINE = re.compile(
-    r"(?<![\w.])(?:[A-Za-z_]\w*\.)*(?:" + PY_IMPORT_ERROR + "|" + PY_MODULE_NOT_FOUND_ERROR + r"):\s*\S"
+    _EXCEPTION_START + r"(?:" + PY_IMPORT_ERROR + "|" + PY_MODULE_NOT_FOUND_ERROR + r"):\s*\S"
 )
 #: What inference_suite's framework probe says when the serving interpreter finds no package of the framework at all
 #: (``framework_probe.probe_install``). The probe says it as the whole detail, so it is taken only at the end of the
@@ -525,6 +534,7 @@ __all__ = [
     "CAPABILITY_DISABLED",
     "EVAL_GENERATION_PATHOLOGY",
     "EVAL_RUNTIME_FAILURE",
+    "EXCEPTION_NAME_START",
     "HIP_KERNEL_MISSING",
     "HIP_RUNTIME_ERROR",
     "IMPORT_ERROR",
