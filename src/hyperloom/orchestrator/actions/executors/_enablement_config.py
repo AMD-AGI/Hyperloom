@@ -163,13 +163,7 @@ def _parse_framework_switches(
     raw = params.get(_switch_manifest.MANIFEST_KEY) or _done_field(done_payload, _switch_manifest.MANIFEST_KEY)
     if not raw:
         return []
-    # Env the benchmark already defines is reserved: a "switch" colliding with it
-    # would be toggled by unrelated configuration rather than by the lever.
-    reserved: set[str] = set()
-    for source in (params.get("base_extra_envs"), params.get("extra_envs")):
-        if isinstance(source, dict):
-            reserved.update(str(k).strip().upper() for k in source)
-    manifest, problems = _switch_manifest.parse_manifest(raw, reserved_env=reserved)
+    manifest, problems = _switch_manifest.parse_manifest(raw, reserved_env=_switch_manifest.reserved_env(params))
     if manifest and not patch_paths:
         # A manifest without a patch describes switches that gate code which was
         # never delivered. Setting them would be a no-op, and registering them as
@@ -191,6 +185,17 @@ def _parse_framework_switches(
             _switch_manifest.summarize(manifest, problems),
         )
     return manifest
+
+
+def _parse_tunable_settings(
+    *, params: dict[str, Any], done_payload: dict[str, Any] | None, patch_paths: list[Path]
+) -> list[dict[str, Any]]:
+    """The tunable settings this round's patches expose, from the task params or the done payload; none without a
+    patch, since a setting with no code reading it tunes nothing."""
+    if not patch_paths:
+        return []
+    raw = params.get(_switch_manifest.SETTINGS_KEY) or _done_field(done_payload, _switch_manifest.SETTINGS_KEY)
+    return _switch_manifest.parse_settings(raw, reserved=_switch_manifest.reserved_env(params))
 
 
 _FRAMEWORK_KB_PROVENANCE_PREFIX = "specialist:serving:framework"

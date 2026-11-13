@@ -19,7 +19,7 @@ from hyperloom_common.timeutil import now_iso
 
 from . import _framework_switch_manifest as _switch_manifest
 from ._apply_feedback import ApplyFeedback
-from ._enablement_config import _parse_framework_switches
+from ._enablement_config import _parse_framework_switches, _parse_tunable_settings
 from ._grid_runner import session_grid_bounds
 from ._integrate_attempt import IntegrateAttempt
 from ._integrate_refusals import _FIX_ACCURACY_UNAVAILABLE, _derive_lane, _preflight_missing_targets
@@ -125,6 +125,7 @@ class _Deliverable:
     launch_controls: dict[str, Any]
     dropped_env_overrides: list[str]
     switch_manifest: list[dict[str, Any]]
+    tunable_settings: list[dict[str, Any]]
     artifact_specs: list[_ArtifactSpec]
     artifact_resolve_errors: list[str]
     artifact_runtime_errors: list[str]
@@ -176,6 +177,7 @@ class _Deliverable:
             launch_controls=controls_of(normalize_proposal(params)),
             dropped_env_overrides=dropped,
             switch_manifest=switch_manifest,
+            tunable_settings=_parse_tunable_settings(params=params, done_payload=done_payload, patch_paths=patch_paths),
             artifact_specs=artifact_specs,
             artifact_resolve_errors=artifact_resolve_errors,
             artifact_runtime_errors=_validate_aiter_gemm_artifacts(artifact_specs, gpu_type=gpu_type),
@@ -413,5 +415,6 @@ def _kept_patch(
         **measured.envelope(),
         "workspace": str(attempt.output_root),
         "framework_root": str(attempt.framework_root or ""),
+        "tunable_settings": attempt.tunable_settings,
         **fields,
     }
