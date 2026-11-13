@@ -23,6 +23,7 @@ import sys
 
 from hyperloom.common.interpreter_roots import foreign_interpreter_roots
 from hyperloom.common.optimization_scope import aoti_config, optimization_scope
+from hyperloom.common.reexec import ReexecRoots
 
 from .session.paths import asset_root
 
@@ -459,6 +460,23 @@ def _check_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="hyperloom script check", description=check.__doc__)
     parser.add_argument("--workspace", type=Path, required=True)
     return parser
+
+
+def reexec_roots(argv: list[str]) -> ReexecRoots:
+    """What ``script prepare`` writes and reads, from its own flags (see :mod:`hyperloom.common.reexec`)."""
+    if argv[:1] != ["prepare"] or {"-h", "--help"} & set(argv):
+        return ReexecRoots()
+    try:
+        args, _ = _parser().parse_known_args(argv[1:])
+    except SystemExit:
+        # Malformed; the strict parse inside the sandbox is what reports it.
+        return ReexecRoots()
+    readonly = (
+        args.script.resolve().parent,
+        args.cwd.resolve(),
+        *foreign_interpreter_roots(Path(_interpreter(args.python))),
+    )
+    return ReexecRoots(writable=(args.workspace.resolve(),), readonly=readonly)
 
 
 def main(argv: list[str] | None = None) -> int:
