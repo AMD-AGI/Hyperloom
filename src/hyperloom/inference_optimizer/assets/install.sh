@@ -1479,6 +1479,31 @@ ensure_rocprof_compute() {
   return 0
 }
 
+# --- 1d. bubblewrap for Codex's workspace-write sandbox ---
+# Codex orchestration refuses to run without a working bwrap and never falls
+# back to bypass; the stock vllm/sglang ROCm images ship none. Fail-soft: Claude
+# and bypass deployments do not need it, and preflight gates the Codex case.
+ensure_bubblewrap() {
+  if command -v bwrap >/dev/null 2>&1; then
+    log "bubblewrap already present at $(command -v bwrap)"
+  elif [ "$CHECK_ONLY" -eq 1 ]; then
+    warn "bubblewrap not found (check-only; would install it). Codex workspace-write orchestration cannot start without it."
+  elif [ "$DRY_RUN" -eq 1 ]; then
+    log "would run: apt-get install -y --no-install-recommends bubblewrap"
+  elif ! command -v apt-get >/dev/null 2>&1; then
+    warn "bubblewrap: apt-get unavailable and bwrap not found; Codex workspace-write orchestration cannot start. Install bubblewrap in the image."
+  else
+    log "installing bubblewrap via apt"
+    export DEBIAN_FRONTEND=noninteractive
+    if ! apt-get install -y --no-install-recommends bubblewrap >/dev/null 2>&1; then
+      apt-get update -qq >/dev/null 2>&1 || true
+      apt-get install -y --no-install-recommends bubblewrap >/dev/null 2>&1 \
+        || warn "bubblewrap: apt install failed (needs root and a reachable mirror); Codex workspace-write orchestration cannot start."
+    fi
+  fi
+  return 0
+}
+
 # --- 2. InferenceSuite offline staging (D11) ---
 #
 # A round fetches nothing: it runs the InferenceX client, GSM8K task, AgentX
@@ -1777,6 +1802,7 @@ ensure_scriptable_quality_deps
 activate_vllm_image_source
 install_kernel_agent_tools
 persist_vllm_image_source_env
+ensure_bubblewrap
 # rocprof-compute + pandas<3 pin runs LAST — strictly AFTER every pip-installing
 # step (install_kernel_agent_tools included; nothing below installs packages). This makes
 # the pandas<3 pin the final word (no later `pip install` can re-pull pandas>=3)
