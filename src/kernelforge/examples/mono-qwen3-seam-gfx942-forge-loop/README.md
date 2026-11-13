@@ -21,20 +21,23 @@ mono-qwen3-seam-gfx942-forge-loop/
 └── task/                         # copied into a fresh git workspace
     ├── config.yaml               # the acceptance suite forge-loop runs before a KEEP
     ├── qwen3_seam/seam.py        # the launch: the only editable code
-    ├── benchmark/forge_mono/
-    │   ├── driver.py             # dist_harness cases at TP4 (dist_harness.py is copied beside it)
-    │   ├── runner.py             # buffers, compile, residency, one launch per call
-    │   ├── weights.py            # a random layer as SGLang holds it on gfx942
-    │   ├── reference.py          # SGLang's path on the launch's tensors
-    │   ├── judge.py              # how an answer is held to the reference
-    │   └── contract.py           # the pinned runtime, the static rules on qwen3_seam/
-    └── test/                     # compile, parity, fail-stop, replay (4 GPUs)
+    └── benchmark/
+        ├── forge_mono/
+        │   ├── driver.py         # dist_harness cases at TP4 (dist_harness.py is copied beside it)
+        │   ├── runner.py         # buffers, compile, residency, one launch per call
+        │   ├── weights.py        # a random layer as SGLang holds it on gfx942
+        │   ├── reference.py      # SGLang's path on the launch's tensors
+        │   ├── judge.py          # how an answer is held to the reference
+        │   └── contract.py       # the pinned runtime, the static rules on qwen3_seam/
+        └── acceptance/           # compile, parity, fail-stop, replay (4 GPUs)
 ```
 
-forge-loop may edit any tracked file outside its protected paths, and add files. `benchmark/`,
-`test/` and `config.yaml` are protected, so `qwen3_seam/` is all an agent can change. Both
-directories take forge's singular protected names: the repository ignores every `benchmarks/`
-(run artifacts), and its pytest collects every `src/**/tests`, while these tests need four GPUs.
+forge-loop may edit any tracked file outside its protected paths, and add files. `benchmark/` and
+`config.yaml` are protected, so `qwen3_seam/` is all an agent can change. The acceptance suite
+lives under `benchmark/` rather than in a `test/` directory, so that it ships with the example:
+the wheel leaves out every `test`, `tests` and `testing` directory, the repository ignores every
+`benchmarks/` (run artifacts), and its pytest collects every `src/**/tests`, while these tests
+need four GPUs.
 
 ## What a candidate must meet
 
@@ -44,10 +47,11 @@ directories take forge's singular protected names: the repository ignores every 
   so `dist_harness` captures a call and refuses anything but a single kernel node whose grid fits the
   GPU at once;
 - **guarded waits only**: `contract.py` refuses `while`, `s_sleep`, `_spin` and `spin_until` in
-  `qwen3_seam/`, and `test/test_seam_failstop.py` stalls each wait and removes a rank, requiring every
-  rank to stop within the deadline;
+  `qwen3_seam/`, and `benchmark/acceptance/test_seam_failstop.py` stalls each wait and removes a
+  rank, requiring every rank to stop within the deadline;
 - **a fresh tag per launch**: parity over two back-to-back calls, the last timed graph replay, and
-  `test/test_seam_replay.py` (interleaved widths, back-to-back launches, the epoch's wrap);
+  `benchmark/acceptance/test_seam_replay.py` (interleaved widths, back-to-back launches, the
+  epoch's wrap);
 - **numerics** (`judge.py`): `res_out` bit for bit, `x` within one bf16 step on at most 0.1% of its
   elements, the guard's error words clear.
 

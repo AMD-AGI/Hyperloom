@@ -57,7 +57,8 @@ Every candidate is held to all of the following; a breach is refused before it i
    `peer_bytes(tp)`, `scratch_bytes(s)`.
 4. **Runtime.** `sgl_amd_mono.common` from the installed sgl-amd-mono at `b10f3b7`, used as a library.
 5. **Scope.** Only `qwen3_seam/` is editable: `seam.py` and modules added beside it.
-   `benchmark/`, `test/` and `config.yaml` are protected.
+   `benchmark/` (the driver, the runner, the reference, the judge and the acceptance suite) and
+   `config.yaml` are protected.
 
 ## gfx942
 
@@ -86,7 +87,8 @@ normalize one row; CTAs 160-239 have no work. Known room:
   per call and an `allclose:` verdict.
 - `python3 benchmark/forge_mono/driver.py --bench-mode`: `case_ms:` at 1, 4, 8 and 16 rows.
 - `python3 benchmark/forge_mono/driver.py --profile-run`: three calls of the first case, for a profiler.
-- `python3 -m pytest -q test/test_seam_compile.py`: every width compiles and its grid is resident.
+- `python3 -m pytest -q benchmark/acceptance/test_seam_compile.py`: every width compiles and its grid
+  is resident.
   `config.yaml` lists the whole acceptance suite.
 
 ## Report

@@ -6,5 +6,5 @@
 import sys
 from pathlib import Path
 
-TASK = Path(__file__).resolve().parents[1]
+TASK = Path(__file__).resolve().parents[2]
 sys.path[:0] = [str(TASK), str(TASK / "benchmark" / "forge_mono")]
