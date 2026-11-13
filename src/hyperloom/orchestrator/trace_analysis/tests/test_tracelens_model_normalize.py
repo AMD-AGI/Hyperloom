@@ -40,7 +40,7 @@ def _clear_gateway_env(monkeypatch):
 @pytest.fixture(autouse=True)
 def _no_gateway_model_list(monkeypatch):
     """No test reaches a real gateway: the model list is unavailable unless a test supplies one."""
-    monkeypatch.setattr(_tracelens_checkout, "_fetch_gateway_model_ids", lambda: set())
+    monkeypatch.setattr(_tracelens_checkout, "_fetch_gateway_model_ids", set)
 
 
 def _serve_models(monkeypatch, *ids):
