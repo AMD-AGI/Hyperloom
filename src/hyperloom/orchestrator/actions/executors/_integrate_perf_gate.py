@@ -14,7 +14,10 @@ from typing import Any
 from hyperloom_common.coerce import first_text
 from hyperloom.common.gain_math import gain_pct, gain_pct_or_zero, graded_gate_row
 from hyperloom.common.perf_metric import VERDICT_KEEP, GradedComparison, GradingAnchor
-from hyperloom.orchestrator.measurement.runtime_findings import KEEP_REASON_CORRECTNESS_FIX
+from hyperloom.orchestrator.measurement.runtime_findings import (
+    KEEP_REASON_CORRECTNESS_FIX,
+    KEEP_REASON_EXPORT_LANDED,
+)
 
 from ...knowledge.kb_writeback import (
     OUTCOME_INTEGRATED,
@@ -82,6 +85,13 @@ class PerfGateMixin:
             await self._run_patch_accuracy_round(attempt, params, bench_result, gate_evidence)
         verdict = _weigh_gate(attempt, params, bench_result, gate_evidence, throughput)
         measured = verdict.measured
+        if verdict.export_regression and shared_state is not None:
+            # Counted here rather than on the KEEP path: the refusal turns exactly the
+            # rounds this figure describes into REVERTs, so leaving it to
+            # ``_record_export_gate`` -- which only sees KEEPs -- would report zero
+            # attempts for a run that spent every round failing to export. The two cannot
+            # double-count: a refused candidate never reaches promotion as a KEEP.
+            shared_state.export_attempts += 1
 
         switch_manifest: list[dict[str, Any]] = list(attempt.switch_manifest)
 
@@ -139,6 +149,7 @@ class PerfGateMixin:
             verdict.accuracy_reason,
             f"correctness fix {verdict.fix_finding} refused: {'; '.join(fix_refusals)}" if fix_refusals else "",
             eval_probe_summary(gate_evidence.get("eval_probe")),
+            verdict.export_regression,
         )
         return _perf_revert(
             attempt,
@@ -182,6 +193,9 @@ class PerfGateMixin:
         if verdict.correctness_fix:
             reason = f"correctness fix {fix_finding} verified at {_fix_axis(verdict.graded)} delta {measured.delta_pct:+.2f}%"
             keep_reason, resolves_finding = KEEP_REASON_CORRECTNESS_FIX, fix_finding
+        elif verdict.export_landing:
+            reason = f"first ahead-of-time export accepted on correctness at delta {measured.delta_pct:+.2f}%"
+            keep_reason, resolves_finding = KEEP_REASON_EXPORT_LANDED, ""
         else:
             reason = f"throughput delta {measured.delta_pct:+.2f}% >= {measured.keep_threshold_pct:.2f}%"
             keep_reason, resolves_finding = "", ""
@@ -537,6 +551,140 @@ class _GateVerdict:
     fix_finding: str
     fix_refusals: list[str]
     correctness_fix: bool
+    export_landing: bool = False
+    export_regression: str = ""
+
+
+def _export_regression_refusal(shared_state: Any, workspace: str) -> str:
+    """Why a candidate whose benchmark did not export cannot KEEP.
+
+    An eager module is not a slower deliverable, it is not a deliverable: the operator
+    declared ``aoti.enabled``, so a configuration that does not export has nothing to
+    ship. It is refused on that ground alone, whatever its throughput, and whatever holds
+    the slot keeps it.
+
+    Applied from the first round, not only once an export has landed. ``current_best`` is
+    what the run reports and what it ships, so letting an eager candidate occupy it means
+    every figure afterwards describes a path the deployment never takes. After a landing
+    it also stops the loss that would otherwise be the *expected* outcome: the first
+    export is accepted on correctness alone precisely because it is usually slower than
+    eager, so the next eager candidate would beat it honestly and take the slot back.
+
+    The cost is that a KEEP is the only thing this lane accumulates -- a kept patch stays
+    in the tree for the next specialist, a reverted one does not -- so a model needing
+    several rounds of work before it can export has no way to bank the intermediate
+    steps. Observed runs landed their export on the first or second patch, so the risk is
+    currently hypothetical; see the upstreaming plan's open items for the fix if a model
+    turns out to need it.
+
+    Absent counters stay asymmetric, because that is about what the evidence can prove
+    rather than about policy. Before the first landing they cannot be told apart from a
+    harness that was never instrumented, so they are not read as a verdict. The landing
+    settles it -- that KEEP is proof the shim runs and writes -- so counters going missing
+    afterwards are a harness regression and the conservative reading is to refuse.
+    """
+    from ...framework.optimization_scope import aoti_config
+    from ...measurement.aoti_evidence import read_evidence
+
+    if shared_state is None:
+        return ""
+    try:
+        config = aoti_config()
+    except ValueError:
+        return ""
+    if config is None or not config.enabled:
+        return ""
+    landed = bool(getattr(shared_state, "export_landed", False))
+    tail = "an eager module is not a deliverable under aoti.enabled"
+    if not workspace:
+        if not landed:
+            return ""
+        return f"this candidate's benchmark reported no workspace, so it cannot be shown to export; {tail}"
+    evidence = read_evidence(workspace)
+    if not evidence.observed:
+        if not landed:
+            # Indistinguishable from a harness that was never instrumented, and refusing
+            # on it would revert every candidate for the rest of the campaign.
+            return ""
+        return (
+            f"no run counters under {workspace!r}: the start-up shim did not run, so this candidate "
+            f"cannot be shown to export. An export has already landed, which proves the shim works, "
+            f"so their absence is a harness regression rather than an unknown; {tail}"
+        )
+    if evidence.exported:
+        return ""
+    if not landed:
+        return (
+            f"this candidate's benchmark did not export "
+            f"(compiled={evidence.compiled} loaded={evidence.loaded} invoked=0 across "
+            f"{evidence.processes} process(es)); {tail}"
+        )
+    return (
+        f"the accepted configuration exports and this one does not "
+        f"(compiled={evidence.compiled} loaded={evidence.loaded} invoked=0 across "
+        f"{evidence.processes} process(es)); {tail}"
+    )
+
+
+def _export_landing_keep(
+    *,
+    shared_state: Any,
+    graded: Any,
+    delta_pct: float | None,
+    accuracy_pass: bool | None,
+    acc_block: bool,
+    workspace: str = "",
+) -> bool:
+    """Whether a correct-but-slower first export should KEEP anyway.
+
+    An eager configuration is not a deliverable once ``aoti.enabled`` is declared, so the
+    first export is accepted on correctness and becomes the grading anchor; phase two
+    then measures export against export with no further special casing. Without this the
+    export gate deadlocks: the module exports, loses on throughput, is reverted, and the
+    gate it was supposed to open stays shut for the whole campaign.
+
+    Throughput is the *only* thing waived. The refusals mirror ``_correctness_fix_refusals``,
+    the sibling carve-out: an operator's latency or power budget is a declared constraint,
+    not a preference, and an unverified or incomparable measurement is not evidence that
+    the export is correct.
+
+    Args:
+        workspace: The graded leg's own run directory, not the attempt's ``output_root``.
+            ``read_evidence`` sums every process below the path it is given, and the task
+            root holds more than the candidate: the switch-off parity leg runs the same
+            patch with the switches *unset*, so it reports ``invoked=0`` by design, and
+            the root is keyed by task id and reused, so an earlier attempt's counters are
+            still sitting there. Either would waive throughput for a module that never
+            exported.
+    """
+    # Imported here, not at module scope: the measurement and framework packages reach
+    # back into this one.
+    from ...framework.optimization_scope import aoti_config
+    from ...measurement.aoti_evidence import read_evidence
+
+    if not isinstance(delta_pct, (int, float)):
+        return False
+    if not getattr(graded, "comparable", False) or getattr(graded, "veto_reason", ""):
+        return False
+    # None means no verdict was recorded, which is not the same as passing.
+    if acc_block or accuracy_pass is not True:
+        return False
+    if shared_state is None or bool(getattr(shared_state, "export_landed", False)):
+        return False
+    try:
+        config = aoti_config()
+    except ValueError:
+        return False
+    if config is None or not config.enabled:
+        return False
+    # The run's counters, not the module's source -- the same evidence that opens the
+    # gate. A module that names the entry points in the ``except`` arm of a fallback to
+    # eager parses exactly like one that exports, and would otherwise have its throughput
+    # waived every round: the KEEP lands, the counters still read invoked=0 so the gate
+    # stays shut, and the next round waives a slower module again.
+    if not workspace:
+        return False
+    return read_evidence(workspace).exported
 
 
 def _weigh_gate(
@@ -577,6 +725,22 @@ def _weigh_gate(
         ) + _fix_accuracy_refusals(accuracy_pass)
         if not fix_refusals:
             gate_pass = correctness_fix = True
+    export_landing = False
+    if not gate_pass and not correctness_fix:
+        export_landing = _export_landing_keep(
+            shared_state=shared_state,
+            graded=graded,
+            delta_pct=delta_pct,
+            accuracy_pass=accuracy_pass,
+            acc_block=acc_block,
+            workspace=str(bench_result.get("workspace") or ""),
+        )
+        gate_pass = gate_pass or export_landing
+    # Vetoes everything above it, including a correctness fix: a fix that gives up the
+    # export has not fixed the thing this run exists to produce.
+    export_regression = _export_regression_refusal(shared_state, str(bench_result.get("workspace") or ""))
+    if export_regression:
+        gate_pass = correctness_fix = export_landing = False
     measured = _PatchMeasurement(
         bench_result=bench_result,
         new_tput=bench_result.get("output_throughput"),
@@ -603,6 +767,8 @@ def _weigh_gate(
         fix_finding=fix_finding,
         fix_refusals=fix_refusals,
         correctness_fix=correctness_fix,
+        export_landing=export_landing,
+        export_regression=export_regression,
     )
 
 
