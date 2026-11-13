@@ -122,24 +122,19 @@ def test_a_keep_reads_the_agent_s_config_through_its_config_source() -> None:
     assert kept == KeptChange(3, "diff\n", "--tp 1 --enable-torch-compile", {"SGLANG_A": "0"}, "fused rmsnorm")
 
 
-def test_a_keep_leaves_out_the_workload_variables_the_measurement_sets_and_names_them() -> None:
+@pytest.mark.parametrize(
+    "owned",
+    [{"ISL": "1024", "osl": "1024"}, {"GSM8K_MIN": "0.5", "GSM8K_LIMIT": "400"}],
+    ids=["workload-variables-the-measurement-sets", "arbor-evaluation-settings-mb-gives-it"],
+)
+def test_a_keep_leaves_out_the_variables_mb_sets_itself_and_names_them(owned: dict[str, str]) -> None:
     source = ConfigSource("agent/config.json", "server_flags", "server_env")
-    state = {"server_flags": "--tp 1", "server_env": {"SGLANG_A": "0", "ISL": "1024", "osl": "1024"}}
+    state = {"server_flags": "--tp 1", "server_env": {"SGLANG_A": "0", **owned}}
 
     kept = read_kept_change(_started(ROOT.launch), state, source)
 
     assert kept.envs == {"SGLANG_A": "0"}
-    assert kept.dropped == {"ISL": "1024", "osl": "1024"}
-
-
-def test_a_keep_leaves_out_arbor_s_evaluation_settings_which_mb_gives_it() -> None:
-    source = ConfigSource("agent/config.json", "server_flags", "server_env")
-    state = {"server_flags": "--tp 1", "server_env": {"SGLANG_A": "0", "GSM8K_MIN": "0.5", "GSM8K_LIMIT": "400"}}
-
-    kept = read_kept_change(_started(ROOT.launch), state, source)
-
-    assert kept.envs == {"SGLANG_A": "0"}
-    assert kept.dropped == {"GSM8K_MIN": "0.5", "GSM8K_LIMIT": "400"}
+    assert kept.dropped == owned
 
 
 def test_a_keep_whose_config_the_source_cannot_read_is_refused_naming_the_file() -> None:

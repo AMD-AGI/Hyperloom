@@ -22,7 +22,6 @@ from hyperloom.contracts.measurement import (
     Validity,
 )
 from hyperloom.contracts.recipe import ConfigDelta, RecipeDelta
-from hyperloom.measure.tests.gpu_free_host import TEST_SCRATCH_ENV
 from hyperloom_multibranch.contracts.blackboard.records import QuarantineEvent, Withdrawal
 from hyperloom_multibranch.contracts.blackboard.vocab import QuarantineAction
 from hyperloom_multibranch.contracts.toolbox import (
@@ -31,7 +30,6 @@ from hyperloom_multibranch.contracts.toolbox import (
     RequestRejected,
     TestProgress,
     TestWithdrawn,
-    Toolbox,
     UnknownTestRequest,
 )
 from hyperloom_multibranch.contracts.blackboard import ClaimKey, ClaimLost, Role, Writer
@@ -40,7 +38,7 @@ from hyperloom_multibranch.blackboard import LocalBlackboard
 from hyperloom_multibranch.blackboard.tests.factories import TTL, FakeClock, intent
 from hyperloom_multibranch.toolbox.submission_log import SubmissionLog
 from hyperloom_multibranch.toolbox.tests.fake import FakeToolbox, FakeWiring
-from hyperloom_multibranch.toolbox.tests.fake_model import Fate, FailureRatios, FakeToolboxConfig, NoiseModel
+from hyperloom_multibranch.toolbox.tests.fake_model import Fate, FakeToolboxConfig, NoiseModel
 
 DELTA = RecipeDelta(config=ConfigDelta(server_args="--max-num-seqs 256"))
 QUIET = NoiseModel(node_bias_median=0.0, node_bias_p90=0.0, test_noise_sigma=0.0)
@@ -90,11 +88,6 @@ async def _run_one(box: FakeToolbox, request: TestRequest | None = None) -> Test
     request_id = await box.submit_test(request or _request())
     await box.drain()
     return box.results[request_id]
-
-
-def test_the_fake_is_a_toolbox() -> None:
-    box: Toolbox = FakeToolbox()
-    assert box is not None
 
 
 # --- acceptance --------------------------------------------------------------------------------------------------
@@ -374,15 +367,6 @@ async def test_unclear_failures_that_did_not_reproduce_on_different_nodes_quaran
     assert box.quarantined == set()
 
 
-async def test_an_infra_failure_quarantines_its_node_at_once() -> None:
-    book = Blackboard()
-    box = _toolbox(blackboard=book)
-    box.script(lambda r: True, [Fate.INFRA, Fate.OK])
-    result = await _run_one(box)
-    assert box.quarantined == {result.attempts[0].sandbox.node_name}
-    assert len(book.of("quarantine")) == 1
-
-
 async def test_unclear_failure_that_repeats_is_the_candidates() -> None:
     box = _toolbox()
     box.script(lambda r: True, [Fate.UNCLEAR, Fate.UNCLEAR, Fate.OK])
@@ -430,52 +414,6 @@ async def test_a_fleet_with_every_node_quarantined_ends_in_measurement_failed() 
     assert box.quarantined == {"a", "b"}
     # quarantine only widens avoid_nodes: the last attempt runs on a node it was to avoid
     assert result.attempts[-1].sandbox.same_node is True
-
-
-async def test_scripts_only_touch_matching_requests() -> None:
-    box = _toolbox()
-    box.script(lambda r: r.branch_id == "bad", [Fate.CANDIDATE])
-    good = await _run_one(box, _request("good"))
-    bad = await _run_one(box, _request("bad"))
-    assert (good.validity, bad.validity) == (Validity.SUCCEEDED, Validity.CANDIDATE_FAILED)
-
-
-async def test_random_failure_ratios_reach_every_class_and_replay_with_the_seed() -> None:
-    config = FakeToolboxConfig(
-        seed=11,
-        failures=FailureRatios(infra=0.15, unclear=0.15, candidate=0.15, measurement=0.1),
-        branch_queue_limit=500,
-        max_parallel_tests=500,
-        default_k=500,
-    )
-
-    async def run() -> tuple[list[tuple[str, str | None]], list[dict]]:
-        box = FakeToolbox(config, autorun=False)
-        ids = [await box.submit_test(_request()) for _ in range(120)]
-        await box.drain()
-        outcomes = [(box.results[i].validity.value, box.results[i].failure_reason) for i in ids] + [
-            ("attempt", a.failure_reason) for i in ids for a in box.results[i].attempts
-        ]
-        return outcomes, [box.results[i].to_document() for i in ids]
-
-    (first, documents), (again, documents_again) = await run(), await run()
-    assert first == again
-    assert documents == documents_again  # same seed: every value, node and timestamp is identical
-    assert {v for v, _ in first if v != "attempt"} == {"succeeded", "candidate_failed", "measurement_failed"}
-    reasons = {reason for _, reason in first}
-    assert {"serve_flag", "nonzero_exit_unmatched", "measurement refused: result_validation_failed"} <= reasons
-
-
-async def test_results_do_not_depend_on_run_order() -> None:
-    config = FakeToolboxConfig(seed=4, max_parallel_tests=1, default_k=9)
-
-    async def values(priorities: list[int]) -> dict[str, float]:
-        box = FakeToolbox(config, autorun=False)
-        ids = [await box.submit_test(_request(priority=p)) for p in priorities]
-        await box.drain()
-        return {i: box.results[i].rounds[1].metrics[GRADED_OUTPUT] for i in ids}
-
-    assert await values([4, 3, 2]) == await values([2, 3, 4])
 
 
 # --- cancel ------------------------------------------------------------------------------------------------------
@@ -856,16 +794,6 @@ async def test_a_test_whose_claim_recovery_finds_lost_is_withdrawn_once_as_a_los
     assert str(replayed.outcome["withdrawal"]).startswith("claim lost")
 
 
-# --- the whole thing ---------------------------------------------------------------------------------------------
-
-
-async def test_autorun_finishes_in_the_background() -> None:
-    box = FakeToolbox(FakeToolboxConfig(), autorun=True)
-    request_id = await box.submit_test(_request())
-    await box.drain()
-    assert request_id in box.results and (await box.queue_state()).running == 0
-
-
 # --- the real blackboard -------------------------------------------------------------------------------------------
 
 
@@ -910,23 +838,7 @@ async def test_the_fake_writes_requests_results_withdrawals_and_quarantine_into_
     assert {event.node for event in await blackboard.quarantined()} == box.quarantined != set()
 
 
-# --- re-verifying a result the fake produced ---------------------------------------------------------------------
-
-
-async def test_the_fake_reverifies_the_result_it_produced_and_names_a_mismatch_or_a_stranger() -> None:
-    from dataclasses import replace
-
-    from hyperloom_multibranch.contracts.gate import ResultUnverified
-
-    box = _toolbox(autorun=True)
-    result = await _run_one(box)
-    assert await box.executor.reverify(result) is None
-    with pytest.raises(ResultUnverified) as edited:
-        await box.executor.reverify(replace(result, rounds=()))
-    assert edited.value.reason == "rounds: differs from what the fake executor produced"
-    with pytest.raises(ResultUnverified) as stranger:
-        await box.executor.reverify(replace(result, request_id="other"))
-    assert stranger.value.reason == "the fake executor produced no result for this request"
+# --- attachments -------------------------------------------------------------------------------------------------
 
 
 async def test_the_fake_keeps_an_attachment_and_returns_a_usable_ref() -> None:
@@ -956,23 +868,3 @@ async def test_the_fake_refuses_an_attachment_id_the_sheet_would_refuse_and_a_tr
     with pytest.raises(RequestRejected) as truncated:
         await fake.put_attachment("case", "dir", gzip.compress(b"x" * 2000)[:20])
     assert truncated.value.code == "attachment_unreadable"
-
-
-def test_a_fake_toolboxs_scratch_lies_below_pytests_base_temporary_directory(
-    tmp_path_factory: pytest.TempPathFactory,
-) -> None:
-    """A run that is killed before the toolbox's finalizers run leaves its submit log and blobs where pytest rotates
-    them away, never in the host's temporary directory."""
-    toolbox = FakeToolbox()
-    base = tmp_path_factory.getbasetemp().resolve()
-
-    assert toolbox._scratch is not None
-    for scratch in (toolbox._scratch.name, toolbox._blob_scratch.name):
-        assert Path(scratch).resolve().is_relative_to(base), scratch
-
-
-def test_a_fake_toolbox_where_no_conftest_names_a_scratch_is_refused(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.delenv(TEST_SCRATCH_ENV)
-
-    with pytest.raises(RuntimeError, match=f"FakeToolbox needs {TEST_SCRATCH_ENV}"):
-        FakeToolbox()

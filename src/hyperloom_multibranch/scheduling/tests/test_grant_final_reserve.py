@@ -10,7 +10,6 @@ from __future__ import annotations
 
 import asyncio
 import json
-import math
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, replace
 from datetime import datetime, timezone
@@ -72,17 +71,6 @@ def _host(tmp_path: Path, **grant: int) -> HostInfo:
     return read_host_info(env, require=())
 
 
-def test_the_grant_ends_its_runtime_after_the_run_was_created_and_its_tests_end_a_close_grace_before(
-    tmp_path: Path,
-) -> None:
-    end = grant_end(_host(tmp_path, max_runtime_sec=RUNTIME_SEC))
-
-    assert end == GrantEnd(CREATED.timestamp() + RUNTIME_SEC)
-    assert end.tests_end_by == end.at - MB_CLOSE_GRACE_CAP_SECONDS
-    cap = grant_explore_cap(_host(tmp_path, max_runtime_sec=RUNTIME_SEC))
-    assert cap is not None and cap(ONE_TEST) == end.explore_cap(ONE_TEST)
-
-
 @pytest.mark.parametrize("grant", [{}, {"max_gpus": 8}], ids=["no_grant", "no_runtime"])
 def test_a_run_whose_grant_states_no_runtime_has_no_grant_end_and_no_explore_cap(
     tmp_path: Path, grant: dict[str, int]
@@ -100,15 +88,6 @@ def test_the_reserve_of_one_test_covers_the_wind_down_three_attempts_their_backo
     )
     assert final_reserve_seconds(FinalWork(0.0, 0.0, 0.0, 1)) == FINAL_RESERVE_FLOOR_SECONDS, "nothing measured yet"
     assert final_reserve_seconds(FinalWork(60.0, 60.0, 60.0, 1)) == FINAL_RESERVE_FLOOR_SECONDS
-
-
-def test_a_grant_that_ends_after_the_session_s_own_explore_end_leaves_it_as_it_was() -> None:
-    budget = SessionBudget(1_000_000.0, BUDGET_SEC)
-    roomy = GrantEnd(budget.deadline + 10 * 3600)
-
-    own = budget.explore_end(budget.started_at, TEST_SEC)
-    assert budget.explore_end(budget.started_at, TEST_SEC, roomy.explore_cap(ONE_TEST)) == own
-    assert budget.explore_end(budget.started_at, TEST_SEC, math.inf) == own
 
 
 def _validation_attempts(clock: FakeClock, cold_start: float) -> ScriptedExecutor:

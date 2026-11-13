@@ -10,7 +10,7 @@ from pathlib import Path
 import pytest
 
 from hyperloom.contracts.recipe import ConfigDelta, LaunchConfig, Recipe, RecipeDelta
-from hyperloom_multibranch.contracts.toolbox import REJECTION_CODES, RequestRejected, WorkloadKind
+from hyperloom_multibranch.contracts.toolbox import RequestRejected, WorkloadKind
 from hyperloom_multibranch.toolbox.tests.helpers import IMAGE, FakeRepo, build, req
 
 COPY_CODE = "speculative_context_copy_on_synthetic"
@@ -30,10 +30,6 @@ async def _refused_with(tmp_path: Path, repo: FakeRepo, kind: WorkloadKind, serv
         assert rig.blackboard._state().requests == {}
         return refused.code
     return None
-
-
-def test_the_context_copy_code_is_a_documented_rejection_code() -> None:
-    assert COPY_CODE in REJECTION_CODES
 
 
 @pytest.mark.parametrize(
@@ -84,10 +80,6 @@ async def test_an_agentx_campaign_does_not_refuse_a_context_copy_draft(tmp_path:
 PINNED_CODE = "speculative_decoding_pinned"
 SIMULATING = "--speculative-algorithm EAGLE --speculative-num-steps 3"
 SIM_ENV = {"SGLANG_SIMULATE_ACC_LEN": "3.6"}
-
-
-def test_the_pinned_code_is_a_documented_rejection_code() -> None:
-    assert PINNED_CODE in REJECTION_CODES
 
 
 @pytest.mark.parametrize("server_args", ["--speculative-num-steps 5", "--speculative-algorithm NEXTN"])

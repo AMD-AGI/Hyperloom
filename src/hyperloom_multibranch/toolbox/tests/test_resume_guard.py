@@ -70,9 +70,9 @@ async def _baselined(root: Path) -> Rig:
     return rig
 
 
-def _refusal(root: Path, cards: tuple[int, ...] = CARDS) -> str:
+def _refusal(root: Path, cards: int = len(CARDS)) -> str:
     with pytest.raises(BaselineNotReusable) as refused:
-        check_hosted_baseline_reusable(root, len(cards))
+        check_hosted_baseline_reusable(root, cards)
     assert "\n" not in refused.value.reason
     return refused.value.reason
 
@@ -150,7 +150,7 @@ async def test_an_image_this_run_cannot_name_is_refused(tmp_path: Path, monkeypa
 async def test_another_card_count_is_refused(tmp_path: Path) -> None:
     await _baselined(tmp_path)
 
-    assert _refusal(tmp_path, CARDS[:4]) == "the baseline was measured with cards 8 and this run has 4"
+    assert _refusal(tmp_path, 4) == "the baseline was measured with cards 8 and this run has 4"
 
 
 async def test_another_base_launch_is_refused(tmp_path: Path) -> None:
@@ -170,13 +170,6 @@ async def test_a_base_launch_changed_behind_the_session_s_back_is_refused(tmp_pa
     launch.write_text(launch.read_text().replace("0.8", "0.9"))
 
     assert _refusal(tmp_path).startswith("the session's frozen base launch cannot be read: ")
-
-
-def _hosted_refusal(root: Path, cards: int = len(CARDS)) -> str:
-    with pytest.raises(BaselineNotReusable) as refused:
-        check_hosted_baseline_reusable(root, cards)
-    assert "\n" not in refused.value.reason
-    return refused.value.reason
 
 
 async def test_a_hosted_restart_on_another_node_reuses_the_baseline(
@@ -211,13 +204,7 @@ async def test_a_hosted_restart_onto_anything_else_its_baseline_was_measured_on_
         base = base_launch()
         freeze_base(tmp_path, dataclasses.replace(base, args=(*base.args, "--enable-chunked-prefill")))
 
-    assert _hosted_refusal(tmp_path, cards).startswith(f"the baseline was measured with {changed} ")
-
-
-async def test_a_hosted_restart_of_a_session_that_recorded_nothing_is_refused(tmp_path: Path) -> None:
-    freeze_base(tmp_path, base_launch())
-
-    assert _hosted_refusal(tmp_path).startswith(f"{tmp_path / BASELINE_ENVIRONMENT_FILE} does not exist: ")
+    assert _refusal(tmp_path, cards).startswith(f"the baseline was measured with {changed} ")
 
 
 async def test_a_hosted_restart_that_may_not_read_the_frozen_base_launch_is_refused_not_raised(
@@ -231,7 +218,7 @@ async def test_a_hosted_restart_that_may_not_read_the_frozen_base_launch_is_refu
 
     monkeypatch.setattr("hyperloom.orchestrator.state.base_launch.frozen_base", refused)
 
-    assert _hosted_refusal(tmp_path).startswith("the session's frozen base launch cannot be read: ")
+    assert _refusal(tmp_path).startswith("the session's frozen base launch cannot be read: ")
 
 
 async def test_a_session_whose_toolbox_recorded_nothing_is_refused(tmp_path: Path) -> None:

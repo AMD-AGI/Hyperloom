@@ -345,26 +345,29 @@ def test_a_check_restores_around_files_a_running_writer_removes_meanwhile(
     (vllm / "tmpdir0" / "deep" / "x.py").write_text("")
     (vllm / "a_tmp.py").write_text("")
     (vllm / "models" / "qwen3.py").write_text("FUSED\n")
-    walk = framework_guard._Tree.walk
+    real = os.walk
 
-    def racing(root: Path, generated: tuple[str, ...]) -> framework_guard._Tree:
-        tree = walk(root, generated)
+    def racing(top, onerror=None, **kwargs):
+        yield from real(top, onerror=onerror, **kwargs)
         # A writer's tmp+rename and cleanup land between the walk and the restore.
         shutil.rmtree(vllm / "tmpdir0")
         (vllm / "a_tmp.py").unlink()
         (vllm / "models" / "llama.py").unlink()
-        return tree
 
-    monkeypatch.setattr(framework_guard._Tree, "walk", staticmethod(racing))
+    monkeypatch.setattr(framework_guard.os, "walk", racing)
     restored = guard.check()
-    assert restored is not None and f"changed {vllm}/models/qwen3.py" in restored.paths
+    assert restored is not None
+    assert {f"changed {vllm}/models/qwen3.py", f"removed {vllm}/models/llama.py"} <= set(restored.paths)
     assert (vllm / "models" / "qwen3.py").read_text() == ORIGINAL
     assert (vllm / "models" / "llama.py").read_text() == ORIGINAL
 
 
-def test_a_walk_survives_a_directory_removed_under_it(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+def test_a_check_survives_a_directory_removed_under_its_walk(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     vllm = _vllm(tmp_path)
+    guard = FrameworkGuard((GuardedPackage("vllm", vllm),))
+    assert guard.check() is None
     (vllm / "tmpdir0").mkdir()
+    (vllm / "models" / "qwen3.py").write_text("FUSED\n")
     real = os.walk
 
     def walk(top, onerror=None, **kwargs):
@@ -374,5 +377,6 @@ def test_a_walk_survives_a_directory_removed_under_it(tmp_path: Path, monkeypatc
                 shutil.rmtree(vllm / "tmpdir0")
 
     monkeypatch.setattr(framework_guard.os, "walk", walk)
-    tree = framework_guard._Tree.walk(vllm, ())
-    assert "models/qwen3.py" in tree.files
+    restored = guard.check()
+    assert restored is not None and restored.paths == (f"changed {vllm}/models/qwen3.py",)
+    assert (vllm / "models" / "qwen3.py").read_text() == ORIGINAL

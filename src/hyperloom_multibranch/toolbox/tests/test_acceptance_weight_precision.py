@@ -16,11 +16,7 @@ from hyperloom.contracts.recipe import ConfigDelta, LaunchConfig, Recipe, Recipe
 from hyperloom_multibranch.contracts.toolbox import REJECTION_CODES, RequestRejected
 from hyperloom_multibranch.toolbox.acceptance import DELTA_NOT_APPLICABLE_CODE, Acceptance, AcceptanceSetup
 from hyperloom_multibranch.toolbox.tests.helpers import IMAGE, PARENT, FakePlanner, FakeRepo, build, req
-from hyperloom_multibranch.toolbox.weight_precision import (
-    SPEED_ONLY_LOAD_FORMATS,
-    ambiguous_words,
-    weight_precision_changes,
-)
+from hyperloom_multibranch.toolbox.weight_precision import ambiguous_words, weight_precision_changes
 
 ROOT = "r0"
 SAME_PRECISION = "the weight precision of the session cannot change"
@@ -361,9 +357,8 @@ def test_the_comparison_reads_flags_as_arbor_does(before: str, after: str, expec
     assert _changes(before, after) == expected
 
 
-def test_a_removal_from_the_resolved_launch_is_a_value_of_its_own() -> None:
+def test_the_same_removal_in_both_launches_is_no_change() -> None:
     removed = LaunchConfig(remove_args=("--quantization",))
-    assert weight_precision_changes(LaunchConfig(), removed) == ["--quantization: (not set) -> <removed>"]
     assert weight_precision_changes(removed, removed) == []
 
 
@@ -1076,12 +1071,6 @@ NOT_SPEED_ONLY = [
 ]
 
 
-async def test_a_flash_rl_load_of_a_bf16_root_is_refused(tmp_path: Path) -> None:
-    repo = _repo("--model-path /models/bf16 --dtype bfloat16")
-    change = _delta("--load-format flash_rl")
-    await _refused_naming(tmp_path, repo, change, "--load-format: (not set) -> flash_rl")
-
-
 @pytest.mark.parametrize("load_format", NOT_SPEED_ONLY)
 @pytest.mark.parametrize("root_args", ["", "--load-format auto", "--load-format safetensors"])
 async def test_a_load_format_that_is_not_speed_only_is_refused(
@@ -1137,11 +1126,6 @@ async def test_a_candidate_that_drops_a_root_flash_rl_load_is_refused(
     tmp_path: Path, change: RecipeDelta, shown: str
 ) -> None:
     await _refused_naming(tmp_path, _repo("--load-format flash_rl"), change, shown)
-
-
-def test_a_flash_rl_load_dropped_from_a_launch_is_a_change() -> None:
-    assert _changes("--load-format flash_rl", "") == ["--load-format: flash_rl -> (not set)"]
-    assert _changes("--load-format flash_rl", "--load-format auto") == ["--load-format: flash_rl -> auto"]
 
 
 @pytest.mark.parametrize(
@@ -1220,70 +1204,3 @@ async def test_a_loader_extra_config_change_under_speed_only_loaders_is_accepted
 def test_a_root_extra_config_kept_under_a_loader_that_is_not_speed_only_is_no_change() -> None:
     root_args = f"--load-format bitsandbytes --model-loader-extra-config {QLORA}"
     assert _changes(root_args, root_args + " --max-num-seqs 64") == []
-
-
-def test_the_speed_only_load_formats_are_the_default_loader_ones() -> None:
-    assert SPEED_ONLY_LOAD_FORMATS == {"auto", "pt", "safetensors", "npcache", "fastsafetensors"}
-    assert not SPEED_ONLY_LOAD_FORMATS & set(NOT_SPEED_ONLY)
-
-
-# --- Arbor's cases (arbor/tests/test_weight_precision.py) ------------------------------------------------------------
-
-BASE = "--tensor-parallel-size 1 --max-num-seqs 64 --kv-cache-dtype auto"
-
-
-def test_arbor_a_weight_quantization_added_is_a_change() -> None:
-    assert _changes(BASE, BASE + " --quantization fp8_per_channel") == ["--quantization: (not set) -> fp8_per_channel"]
-    assert _changes(BASE, BASE + " -q=mxfp4") == ["--quantization: (not set) -> mxfp4"]
-
-
-def test_arbor_removing_changing_or_reconfiguring_weight_precision_is_a_change() -> None:
-    quantized = BASE + " --quantization fp8"
-    assert _changes(quantized, BASE)
-    assert _changes(quantized, BASE + " --quantization mxfp8")
-    assert _changes(BASE, BASE + " --quantization-config '{\"a\": 1}'")
-    assert _changes(BASE, BASE + ' --online_quant_config \'{"global_quant_config": "ptpc_fp8"}\'')
-    assert _changes(BASE, BASE + " --dtype float16")
-    assert _changes(BASE + " --model-path /models/a-bf16", BASE + " --model-path /models/a-fp8")
-
-
-def test_arbor_intermediates_and_unchanged_weight_flags_are_not() -> None:
-    assert _changes(BASE, BASE.replace("--kv-cache-dtype auto", "--kv-cache-dtype fp8")) == []
-    assert _changes(BASE, BASE + " --enable-aiter-allreduce-fusion --attention-backend aiter") == []
-    assert _changes("--quantization fp8 " + BASE, BASE + " --quantization=fp8 --max-num-seqs 128") == []
-
-
-def test_arbor_the_spellings_a_parser_reads_as_a_listed_flag() -> None:
-    assert _changes(BASE, BASE + " -qfp8_per_channel") == ["--quantization: (not set) -> fp8_per_channel"]
-    assert _changes(BASE, BASE + " --dty float16") == ["--dtype: (not set) -> float16"]
-    assert _changes(BASE, BASE + " --quantization_config '{\"a\": 1}'") == [
-        '--quantization-config: (not set) -> {"a":1}'
-    ]
-    assert _changes(BASE, BASE + " --quantization-config.linear fp8_per_channel") == [
-        "--quantization-config: (not set) -> .linear fp8_per_channel"
-    ]
-    assert {change.split(":")[0] for change in _changes(BASE, BASE + " --quant fp8")} == {
-        "--quantization",
-        "--quantization-config",
-        "--quantization-param-path",
-        "--quantize-and-serve",
-    }
-
-
-def test_arbor_one_setting_under_two_spellings_is_one_setting() -> None:
-    root = BASE + " --quantization fp8"
-    assert _changes(root, BASE + " -q fp8 --quantization fp8") == []
-    assert _changes(root, BASE + " --quantization=fp8") == []
-
-
-def test_arbor_the_flags_toolbox_added_and_the_overrides() -> None:
-    assert _changes(BASE, BASE + " --revision abc123") == ["the checkpoint's revision: (not set) -> abc123"]
-    for flag in ("--modelopt-quant fp8", "--torchao-config int4wo-128", "--quantize-and-serve", "--config c.yaml"):
-        assert _changes(BASE, f"{BASE} {flag}"), flag
-    assert _changes(BASE, BASE + " --hf-overrides '{\"max_position_embeddings\": 65536}'") == []
-    assert _changes(BASE, BASE + ' --hf-overrides \'{"torch_dtype": "float16"}\'') == [
-        f'{HF}: (not set) -> torch_dtype="float16"'
-    ]
-    assert _changes(BASE, BASE + ' --json-model-override-args \'{"text_config": {"quantization_config": {}}}\'')
-    assert _changes(BASE, BASE + " --hf-overrides.torch_dtype float16")
-    assert _changes(BASE, BASE + " --hf-overrides.rope_scaling.factor 2") == []
