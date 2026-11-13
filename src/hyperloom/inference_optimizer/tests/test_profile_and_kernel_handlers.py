@@ -40,9 +40,7 @@ from hyperloom.orchestrator.actions.executors.profile import (
     _record_workspace_traces,
     _sanitize_profile_server_args,
     _trace_files_for_dir,
-    _trace_size_bytes,
 )
-from hyperloom.orchestrator.trace_analysis._trace_rank import select_primary_trace
 from hyperloom.orchestrator.trace_analysis._trace_rank import trace_rank as _trace_rank
 from inference_suite.contracts import RunLayout
 from hyperloom.orchestrator.roles import (
@@ -3575,90 +3573,6 @@ def test_trace_files_for_dir_orders_by_size_not_name(tmp_path):
 )
 def test_trace_rank_supports_framework_naming(relative_path, rank):
     assert _trace_rank(Path(relative_path)) == rank
-
-
-def test_agentx_primary_trace_prefers_rank_zero_over_merged(tmp_path):
-    trace_dir = tmp_path / "torch_trace"
-    trace_dir.mkdir()
-    merged = trace_dir / "merged-177.trace.json.gz"
-    rank_zero_warmup = trace_dir / "100-TP-0-WARMUP.trace.json.gz"
-    rank_zero = trace_dir / "900-TP-0-DECODE.trace.json.gz"
-    rank_one = trace_dir / "177-TP-1-DECODE.trace.json.gz"
-    merged.write_bytes(b"merged")
-    rank_zero_warmup.write_bytes(b"x")
-    rank_zero.write_bytes(b"x" * 100)
-    rank_one.write_bytes(b"rank-one")
-
-    selected = select_primary_trace(
-        [rank_zero_warmup, merged, rank_one, rank_zero],
-        file_size=_trace_size_bytes,
-        tensor_parallel_size=2,
-    )
-
-    assert selected == rank_zero
-
-
-def test_agentx_primary_trace_does_not_fall_back_to_multi_rank_merge(tmp_path):
-    trace_dir = tmp_path / "torch_trace"
-    merged = trace_dir / "merged-177.trace.json.gz"
-
-    assert (
-        select_primary_trace(
-            [merged],
-            file_size=_trace_size_bytes,
-            tensor_parallel_size=8,
-        )
-        is None
-    )
-
-
-def test_agentx_single_unranked_trace_is_safe_without_tp_environment(tmp_path):
-    trace_dir = tmp_path / "torch_trace"
-    trace = trace_dir / "worker.pt.trace.json.gz"
-
-    assert (
-        select_primary_trace(
-            [trace],
-            file_size=_trace_size_bytes,
-            tensor_parallel_size=None,
-        )
-        == trace
-    )
-
-
-@pytest.mark.parametrize(
-    "trace_name",
-    [
-        "worker-rank-3.pt.trace.json.gz",
-        "worker.pt.trace.json.gz",
-    ],
-)
-def test_agentx_tp8_does_not_substitute_only_non_primary_trace(tmp_path, trace_name):
-    trace_dir = tmp_path / "torch_trace"
-    trace = trace_dir / trace_name
-
-    assert (
-        select_primary_trace(
-            [trace],
-            file_size=_trace_size_bytes,
-            tensor_parallel_size=8,
-        )
-        is None
-    )
-
-
-def test_agentx_tp1_can_use_single_merged_trace_as_compatibility_fallback(tmp_path):
-    trace_dir = tmp_path / "torch_trace"
-    merged = trace_dir / "merged-177.trace.json.gz"
-
-    assert (
-        select_primary_trace(
-            [merged],
-            file_size=_trace_size_bytes,
-            tensor_parallel_size=1,
-        )
-        == merged
-    )
 
 
 def test_trace_files_for_dir_survives_an_ancestor_named_trace_split(tmp_path):

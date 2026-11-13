@@ -372,27 +372,6 @@ class TestForgeGemmHelperCoverage:
 
         assert serving_log_evidence.resolve_forge_server_log(state, tmp_path) == str(baseline / "server.log")
 
-    def test_resolve_forge_shapes_reads_artifact_paths_dict(self, tmp_path):
-        state = SharedState()
-        shapes = tmp_path / "gemm_shapes.json"
-        shapes.write_text(json.dumps({"shapes": [{"m": 1, "n": 2, "k": 3}]}), encoding="utf-8")
-        state.last_trace_analyze = {"artifact_paths": {"gemm_shapes_json": str(shapes)}}
-
-        assert forge_shapes._resolve_forge_shapes(_fresh_profile(state)) == str(shapes)
-
-    def test_resolve_forge_shapes_skips_incompatible_candidate(self, tmp_path):
-        state = SharedState()
-        bad = tmp_path / "bad.json"
-        bad.write_text(json.dumps([{"only": "noMNK"}]), encoding="utf-8")
-        state.last_trace_analyze = {"shapes_json": str(bad)}
-
-        assert forge_shapes._resolve_forge_shapes(_fresh_profile(state)) == ""
-
-    def test_is_forge_compatible_shapes_json_rejects_non_dict_sample(self, tmp_path):
-        bad = tmp_path / "bad.json"
-        bad.write_text(json.dumps([123, 456]), encoding="utf-8")
-        assert forge_shapes._is_forge_compatible_shapes_json(bad) is False
-
     @staticmethod
     def _write_aiter_csv(session_dir: Path, hash_id: str, fname: str, rows: str) -> Path:
         cfg = session_dir / "runs" / "specialist" / hash_id / "worktree" / "aiter" / "configs"
@@ -503,21 +482,6 @@ class TestForgeGemmHelperCoverage:
         assert forge_gemm_probe._derive_gemm_skip_reason(None) == ""
         assert forge_gemm_probe._derive_gemm_skip_reason([]) == ""
 
-    def test_resolve_forge_shapes_returns_empty_for_non_dict_trace(self):
-        state = SharedState()
-        state.last_trace_analyze = ["not", "a", "dict"]
-        assert forge_shapes._resolve_forge_shapes(_fresh_profile(state)) == ""
-
-    def test_resolve_forge_shapes_finds_file_beside_candidates(self, tmp_path):
-        state = SharedState()
-        candidates = tmp_path / "candidates.json"
-        candidates.write_text("[]", encoding="utf-8")
-        shapes = tmp_path / "shapes.json"
-        shapes.write_text(json.dumps([{"M": 1, "N": 2, "K": 3}]), encoding="utf-8")
-        state.last_trace_analyze = {"candidates_path": str(candidates)}
-
-        assert forge_shapes._resolve_forge_shapes(_fresh_profile(state)) == str(shapes)
-
     def test_forge_fusion_skip_guard_ignores_warm_replay_fusion_flags(self):
         state = SharedState(
             current_best={
@@ -569,29 +533,6 @@ class TestForgeGemmHelperCoverage:
         empty_dir.mkdir()
         state.last_profile_trace = str(empty_dir)
         assert forge_fusion_run._resolve_fusion_decode_trace(state) == ""
-
-    def test_forge_fusion_available_probes_the_fusion_subpackage(self, monkeypatch):
-        probed: list[str] = []
-
-        def spec(name):
-            probed.append(name)
-            return object()
-
-        monkeypatch.setattr(importlib.util, "find_spec", spec)
-        assert forge_fusion_run._forge_fusion_available() is True
-        # Probing kernelforge alone would pass on a KernelForge predating the fusion absorption and only fail once the
-        # subprocess rejected forge-fuse.
-        assert probed == ["kernelforge.workflows.forge_fusion"]
-
-        monkeypatch.setattr(importlib.util, "find_spec", lambda _name: None)
-        assert forge_fusion_run._forge_fusion_available() is False
-
-    def test_forge_fusion_available_survives_an_unimportable_parent(self, monkeypatch):
-        def boom(_name):
-            raise ModuleNotFoundError("kernelforge")
-
-        monkeypatch.setattr(importlib.util, "find_spec", boom)
-        assert forge_fusion_run._forge_fusion_available() is False
 
     def test_materialize_unified_patch_snapshot(self, tmp_path):
         repo = tmp_path / "repo"
@@ -803,10 +744,6 @@ class TestForgeGemmHelperCoverage:
         )
         state.save(tmp_path)
 
-        def _should_not_check_available():
-            raise AssertionError("forge-fusion availability should not be checked")
-
-        monkeypatch.setattr(forge_fusion_run, "_forge_fusion_available", _should_not_check_available)
         result = await forge_fusion_run.run_fusion_handler({}, session_dir=tmp_path)
 
         assert result["status"] == "complete"
@@ -1012,7 +949,6 @@ class TestForgeGemmHelperCoverage:
             monkeypatch,
             {**_OPENAI_ONLY_ENV, "CODEX_MODEL": "gpt-fusion"},
         )
-        monkeypatch.setattr(forge_fusion_run, "_forge_fusion_available", lambda: True)
         calls: list[dict] = []
 
         async def _fake_run_forge_fusion(args):
@@ -1062,7 +998,6 @@ class TestForgeGemmHelperCoverage:
         )
         state.save(tmp_path)
         _pin_fusion_provider_env(monkeypatch, {**_OPENAI_ONLY_ENV, "CODEX_MODEL": "gpt-fusion"})
-        monkeypatch.setattr(forge_fusion_run, "_forge_fusion_available", lambda: True)
         calls: list[dict] = []
 
         async def _fake_run_forge_fusion(args):
@@ -1124,7 +1059,6 @@ class TestForgeGemmHelperCoverage:
         ).save(tmp_path)
         _pin_fusion_provider_env(monkeypatch, _ANTHROPIC_ONLY_ENV)
         monkeypatch.setenv("FORGE_FUSION_TIMEOUT", "not-an-int")
-        monkeypatch.setattr(forge_fusion_run, "_forge_fusion_available", lambda: True)
         calls: list[dict] = []
 
         async def _fake_run_forge_fusion(args):
@@ -1153,7 +1087,6 @@ class TestForgeGemmHelperCoverage:
         monkeypatch.delenv("FORGE_FUSION_TIMEOUT", raising=False)
         # Pinned: a live clock would tick between the split and the assertion.
         monkeypatch.setattr(SharedState, "remaining_minutes", lambda _self, **_kw: 600.0)
-        monkeypatch.setattr(forge_fusion_run, "_forge_fusion_available", lambda: True)
         calls: list[dict] = []
 
         async def _fake_run_forge_fusion(args):
@@ -1169,14 +1102,7 @@ class TestForgeGemmHelperCoverage:
 
     @pytest.mark.asyncio
     async def test_run_forge_fusion_failure_branches(self, tmp_path, monkeypatch):
-        state = SharedState(framework="sglang", model_path="/models/zaya")
-        state.save(tmp_path)
-        monkeypatch.setattr(forge_fusion_run, "_forge_fusion_available", lambda: False)
-        not_found = await forge_fusion_run.run_fusion_handler({}, session_dir=tmp_path)
-        assert not_found["error_class"] == "forge_fusion_not_found"
-
-        monkeypatch.setattr(forge_fusion_run, "_forge_fusion_available", lambda: True)
-        state.model_path = ""
+        state = SharedState(framework="sglang", model_path="")
         state.save(tmp_path)
         monkeypatch.delenv("MODEL_PATH", raising=False)
         missing_model = await forge_fusion_run.run_fusion_handler({}, session_dir=tmp_path)
@@ -1198,7 +1124,6 @@ class TestForgeGemmHelperCoverage:
             last_profile_trace=str(trace),
         ).save(tmp_path)
         _pin_fusion_provider_env(monkeypatch, _ANTHROPIC_ONLY_ENV)
-        monkeypatch.setattr(forge_fusion_run, "_forge_fusion_available", lambda: True)
 
         async def _timeout(cmd, *, timeout_sec, **_kwargs):
             raise subprocess.TimeoutExpired(cmd, timeout_sec)
@@ -1230,7 +1155,6 @@ class TestForgeGemmHelperCoverage:
             max_model_len=13312,
         ).save(tmp_path)
         _pin_fusion_provider_env(monkeypatch, _ANTHROPIC_ONLY_ENV)
-        monkeypatch.setattr(forge_fusion_run, "_forge_fusion_available", lambda: True)
         calls: list[dict] = []
 
         async def _fake_run_forge_fusion(args):
@@ -1255,7 +1179,6 @@ class TestForgeGemmHelperCoverage:
             last_profile_trace=str(trace),
         ).save(tmp_path)
         _pin_fusion_provider_env(monkeypatch, _ANTHROPIC_ONLY_ENV)
-        monkeypatch.setattr(forge_fusion_run, "_forge_fusion_available", lambda: True)
 
         async def _timeout(cmd, *, timeout_sec, **_kwargs):
             workspace = tmp_path / "runs" / "fusion" / "kernel_entry_fusion"
@@ -1940,8 +1863,19 @@ class TestForgeGemmHelperCoverage:
                 }
             )
         )
-        profile_shapes = tmp_path / "profile_shapes.json"
-        profile_shapes.write_text(json.dumps([{"M": 1024, "N": 34816, "K": 5120}]))
+        candidates = tmp_path / "kernel_candidates.json"
+        candidates.write_text(
+            json.dumps(
+                {
+                    "hot_kernels": [
+                        {
+                            "name": "aiter::gemm_a8w8_blockscale",
+                            "input_shapes": [{"shape": "(1024,5120) fp8<br>(34816,5120) fp8"}],
+                        }
+                    ]
+                }
+            )
+        )
         specialist_csv = tmp_path / "a8w8_blockscale_untuned_gemm.csv"
         specialist_csv.write_text("M,N,K\n4096,34816,5120\n")
         state = SharedState(
@@ -1952,7 +1886,7 @@ class TestForgeGemmHelperCoverage:
             tp=1,
             conc=64,
             last_profile_status="succeeded",
-            last_trace_analyze={"shapes_json": str(profile_shapes)},
+            last_trace_analyze={"candidates_path": str(candidates)},
         )
         state.last_profile_workload = state.profile_workload_context()
         if source == "stale_profile":
@@ -3573,34 +3507,6 @@ class TestRunGemmTuningHandler:
         assert data["precision"] == "bf16"
         assert data["quant_type"] == "auto"
 
-    def test_forge_shapes_json_schema_validation(self, tmp_path):
-        good = tmp_path / "good_shapes.json"
-        good.write_text(json.dumps({"shapes": [{"M": 1, "N": 2, "K": 3}]}))
-        bad_empty = tmp_path / "bad_empty.json"
-        bad_empty.write_text(json.dumps({"shapes": []}))
-        bad_trace_shape = tmp_path / "bad_trace_shape.json"
-        bad_trace_shape.write_text(json.dumps([{"shape": [1, 2, 3]}]))
-
-        assert forge_shapes._is_forge_compatible_shapes_json(good) is True
-        assert forge_shapes._is_forge_compatible_shapes_json(bad_empty) is False
-        assert forge_shapes._is_forge_compatible_shapes_json(bad_trace_shape) is False
-        assert forge_shapes._is_forge_compatible_shapes_json(tmp_path / "missing.json") is False
-
-    def test_resolve_forge_shapes_prefers_compatible_artifact(self, tmp_path):
-        session_dir = tmp_path / "session"
-        shapes = tmp_path / "shapes.json"
-        shapes.write_text(json.dumps([{"m": 4, "n": 5, "k": 6}]))
-        bad = tmp_path / "bad.json"
-        bad.write_text(json.dumps([{"shape": [1, 2, 3]}]))
-
-        state = SharedState()
-        state.last_trace_analyze = {
-            "shapes_json": str(bad),
-            "artifact_paths": {"gemm_shapes_json": str(shapes)},
-        }
-
-        assert forge_shapes._resolve_forge_shapes(_fresh_profile(state)) == str(shapes)
-
     @pytest.mark.parametrize(
         "quant_type",
         [
@@ -3871,56 +3777,15 @@ class TestRunGemmTuningHandler:
         assert out, f"separator {sep!r} was not recognised"
         assert json.loads(Path(out).read_text(encoding="utf-8")) == [{"M": 1024, "N": 34816, "K": 5120}]
 
-    def test_resolve_forge_shapes_prefers_scoped_candidates_over_untyped_artifact(self, tmp_path):
-        """A pre-rendered shapes artifact carries no dtype, so it must not win over candidates that were actually scoped to the tuned precision."""
-        session_dir = tmp_path / "session"
-        session_dir.mkdir()
-        artifact = tmp_path / "shapes.json"  # recorded from the BF16 head
-        artifact.write_text(json.dumps([{"M": 64, "N": 256, "K": 3072}]), encoding="utf-8")
+    def test_resolve_forge_shapes_scopes_candidates_to_the_tuned_precision(self, tmp_path):
+        """The BF16 router shapes the trace also carries do not reach an FP8 tuner."""
         candidates = tmp_path / "kernel_candidates.json"
-        candidates.write_text(
-            json.dumps(
-                {
-                    "hot_kernels": [
-                        {
-                            "name": "aiter::gemm_a8w8_blockscale_ck",
-                            "input_shapes": [
-                                {"call_num": 360, "shape": "(64,3072) fp8"},
-                                {"call_num": 360, "shape": "(8704,3072) fp8"},
-                            ],
-                        },
-                        {
-                            "name": "vllm::rocm_unquantized_gemm",
-                            "input_shapes": [
-                                {"call_num": 1440, "shape": "(64,3072) bf16"},
-                                {"call_num": 1440, "shape": "(256,3072) bf16"},
-                            ],
-                        },
-                    ]
-                }
-            ),
-            encoding="utf-8",
-        )
-        state = SharedState(
-            last_trace_analyze={
-                "shapes_json": str(artifact),
-                "candidates_path": str(candidates),
-            }
-        )
+        self._mixed_dtype_candidates(candidates)
+        state = SharedState(last_trace_analyze={"candidates_path": str(candidates)})
 
         resolved = forge_shapes._resolve_forge_shapes(_fresh_profile(state), precision="fp8")
 
         assert json.loads(Path(resolved).read_text(encoding="utf-8")) == [{"M": 64, "N": 8704, "K": 3072}]
-
-    def test_resolve_forge_shapes_still_uses_artifact_when_unscoped(self, tmp_path):
-        """Without a precision to scope by, the explicit artifact keeps priority."""
-        session_dir = tmp_path / "session"
-        session_dir.mkdir()
-        artifact = tmp_path / "shapes.json"
-        artifact.write_text(json.dumps([{"M": 64, "N": 256, "K": 3072}]), encoding="utf-8")
-        state = SharedState(last_trace_analyze={"shapes_json": str(artifact)})
-
-        assert forge_shapes._resolve_forge_shapes(_fresh_profile(state)) == str(artifact)
 
 
 # _default_kernel_batch_parallel — adaptive batch fanout scaling with visible GPUs. _resolve_candidate_id /
@@ -4405,7 +4270,6 @@ async def test_a_bounded_phase_that_cannot_fund_a_lane_skips_it_without_launchin
     monkeypatch.setattr(SharedState, "remaining_minutes", lambda _self, **_kw: 4.0)
     _pin_fusion_provider_env(monkeypatch, _ANTHROPIC_ONLY_ENV)
     monkeypatch.setattr(forge_gemm_tuning, "_forge_gemm_tune_available", lambda: True)
-    monkeypatch.setattr(forge_fusion_run, "_forge_fusion_available", lambda: True)
     monkeypatch.setattr(forge_lane_budget, "_gemm_router_targets", lambda **_kwargs: (("fmoe_ck", 600),))
     launched: list[object] = []
 

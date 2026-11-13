@@ -135,7 +135,6 @@ def test_stream_capture_tees_partial_output_before_child_exit(monkeypatch, strea
             assert activity.wait(5), "partial bytes never registered as output activity"
             assert mirrored.wait(5), "output without a newline was not mirrored before EOF"
             assert proc.poll() is None, "the child must still be waiting for the parent"
-            assert capture.last_activity_at is not None
             assert sink.getvalue() == "A"
             proc.stdin.write(b"x")
             proc.stdin.flush()

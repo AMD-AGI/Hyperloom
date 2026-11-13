@@ -356,10 +356,7 @@ class FrameworkPhase(_AuthoredOutcomeMixin, _CandidateDiscoveryMixin, ProposalBe
                 ),
             },
             "source": {
-                "no_keep_streak_threshold": overrides.get(
-                    "framework_no_keep_streak",
-                    _phase_state.DEFAULT_FRAMEWORK_PLATEAU_NO_KEEP_STREAK,
-                ),
+                "no_keep_streak_threshold": _phase_state.DEFAULT_FRAMEWORK_PLATEAU_NO_KEEP_STREAK,
                 "discovery_retry_limit": DISCOVER_FAILURE_RETRY_LIMIT,
             },
         }

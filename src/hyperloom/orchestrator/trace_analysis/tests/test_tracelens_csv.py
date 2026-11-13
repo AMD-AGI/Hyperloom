@@ -26,7 +26,6 @@ from hyperloom.orchestrator.trace_analysis._perf_report_analysis import PerfRepo
 from hyperloom.orchestrator.trace_analysis import _trace_gates as trace_gates
 from hyperloom.orchestrator.trace_analysis import _trace_inputs as trace_inputs
 from hyperloom.orchestrator.trace_analysis import _trace_shapes as trace_shapes
-from hyperloom.orchestrator.trace_analysis import _trace_split as trace_split
 from hyperloom.orchestrator.trace_analysis import _capture_shapes as capture_shapes
 from hyperloom.orchestrator.trace_analysis import _idle_gate as idle_gate
 from hyperloom.orchestrator.trace_analysis import _task_group_contract as task_group_contract
@@ -3645,37 +3644,6 @@ def test_build_audit_summary_includes_task_groups():
         subject=analysis_reports.AuditSubject(trace_input="/tmp/x.json.gz"),
     )
     assert summary["task_group_count"] == 1
-
-
-# _default_workspace_path — USER_DATA_PATH rollout for TraceLens ; locks the fallback precedence.
-def test_default_workspace_path_prefers_user_data_path(monkeypatch):
-    """USER_DATA_PATH wins over both WORKSPACE_PATH and the hard-coded default."""
-    monkeypatch.setenv("USER_DATA_PATH", "/some/user/data")
-    monkeypatch.setenv("WORKSPACE_PATH", "/some/legacy/workspace")
-    assert trace_split._default_workspace_path() == "/some/user/data"
-
-
-def test_default_workspace_path_falls_back_to_workspace_path(monkeypatch):
-    """When USER_DATA_PATH is unset, WORKSPACE_PATH is honoured (backwards compat)."""
-    monkeypatch.delenv("USER_DATA_PATH", raising=False)
-    monkeypatch.setenv("WORKSPACE_PATH", "/legacy/workspace")
-    assert trace_split._default_workspace_path() == "/legacy/workspace"
-
-
-def test_default_workspace_path_final_fallback_to_hyperloom_default(monkeypatch):
-    """No envs set → delegates to session.paths, which adapts to the host."""
-    from hyperloom.inference_optimizer.session import paths as session_paths
-
-    monkeypatch.delenv("USER_DATA_PATH", raising=False)
-    monkeypatch.delenv("WORKSPACE_PATH", raising=False)
-    assert trace_split._default_workspace_path() == str(session_paths.default_workspace_root())
-
-
-def test_default_workspace_path_treats_empty_user_data_path_as_unset(monkeypatch):
-    """An empty USER_DATA_PATH must not shadow a real WORKSPACE_PATH; ``or`` semantics."""
-    monkeypatch.setenv("USER_DATA_PATH", "")
-    monkeypatch.setenv("WORKSPACE_PATH", "/legacy/workspace")
-    assert trace_split._default_workspace_path() == "/legacy/workspace"
 
 
 # Idle-% sanity gate on the Executive Summary.

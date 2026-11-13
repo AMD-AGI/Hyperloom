@@ -294,11 +294,7 @@ class IntegratePromotionMixin:
         pending = self.shared_state.pending_integrate
         task_id = str(getattr(task, "task_id", "") or "")
         matches = isinstance(pending, dict) and bool(task_id) and pending.get("task_id") == task_id
-        failed = (
-            result.get("error_class") == "integrate_restore_incomplete"
-            or bool(result.get("recovery_errors"))
-            or bool(result.get("stash_restore_error"))
-        )
+        failed = result.get("error_class") == "integrate_restore_incomplete" or bool(result.get("recovery_errors"))
         if not matches and not failed:
             return None
         recovery = pending.get("recovery") if matches else None
@@ -316,8 +312,7 @@ class IntegratePromotionMixin:
         self.shared_state.save(self.session_dir)
         raise IntegrateRecoveryIncomplete(
             f"integrate recovery is incomplete or inconsistent for task={task_id!r}: "
-            f"phase={phase!r}, status={status!r}, errors={result.get('recovery_errors')!r}, "
-            f"stash_restore_error={result.get('stash_restore_error')!r}"
+            f"phase={phase!r}, status={status!r}, errors={result.get('recovery_errors')!r}"
         )
 
     async def _promote_integrate_patch(

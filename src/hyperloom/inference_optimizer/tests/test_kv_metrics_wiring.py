@@ -358,8 +358,6 @@ class _HangingProc:
 class _Capture:
     """A capture holding what the child wrote, with no pipe activity of its own."""
 
-    last_activity_at = None
-
     def finish(self):
         return ("out", "err")
 

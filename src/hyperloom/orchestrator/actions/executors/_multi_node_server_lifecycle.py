@@ -888,11 +888,7 @@ def _collect_worker_server_logs(state: dict, reason: str) -> None:
 
     from hyperloom.inference_optimizer.multi_node import INFERA_POD_LOG_FILE
 
-    sess = (
-        os.environ.get("INFERENCE_OPTIMIZER_CURRENT_SESSION_DIR")
-        or os.environ.get("INFERENCE_OPTIMIZER_SESSION_DIR")
-        or ""
-    )
+    sess = os.environ.get("INFERENCE_OPTIMIZER_CURRENT_SESSION_DIR", "")
     if not sess:
         return
     out_dir = os.path.join(sess, "server_logs")

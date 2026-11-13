@@ -12,9 +12,9 @@ from unittest.mock import patch
 import pytest
 
 from hyperloom.orchestrator.actions.executors import roofline as roofline_mod
+from hyperloom.orchestrator.actions.executors.profile import profile_trace_path
 from hyperloom.orchestrator.actions.executors.roofline import (
     RooflineExecutor,
-    _extract_trace_path,
     _fail,
     _gpu_trace_unsupported_reason,
 )
@@ -459,7 +459,7 @@ async def test_deterministic_capture_failures_are_not_retried(tmp_path, reason):
 
 @pytest.mark.asyncio
 async def test_profile_no_trace_path(tmp_path):
-    """Profile succeeded but result lacks main_trace_path / trace_files."""
+    """Profile succeeded but result has no main_trace_path."""
     state = _state()
     ctx = _ctx(tmp_path)
     profile_bad = {"status": "succeeded", "output_throughput": 110.0}
@@ -741,37 +741,30 @@ async def test_trace_analyze_returns_non_dict(tmp_path):
     assert "non-dict" in result["error"]
 
 
-def test_extract_trace_path_prefers_main_trace_path():
+def test_profile_trace_path_prefers_main_trace_path():
     r = {
         "main_trace_path": "/main.gz",
         "trace_files": ["/alt-0.gz", "/alt-1.gz"],
     }
-    assert _extract_trace_path(r) == "/main.gz"
+    assert profile_trace_path(r) == "/main.gz"
 
 
-def test_extract_trace_path_falls_back_to_first_trace_file():
-    r = {"trace_files": ["/first.gz", "/second.gz"]}
-    assert _extract_trace_path(r) == "/first.gz"
-
-
-def test_extract_trace_path_refuses_explicitly_unready_trace():
+def test_profile_trace_path_refuses_explicitly_unready_trace():
     r = {
         "trace_input_ready": False,
         "main_trace_path": "/merged.gz",
         "trace_files": ["/merged.gz"],
     }
-    assert _extract_trace_path(r) == ""
+    assert profile_trace_path(r) == ""
 
 
-def test_extract_trace_path_empty_when_both_missing():
-    assert _extract_trace_path({}) == ""
-    assert _extract_trace_path({"trace_files": []}) == ""
-    assert _extract_trace_path({"trace_files": [None]}) == ""
+def test_profile_trace_path_is_empty_without_main_trace_path():
+    assert profile_trace_path({}) == ""
 
 
-def test_extract_trace_path_handles_non_dict():
-    assert _extract_trace_path(None) == ""  # type: ignore[arg-type]
-    assert _extract_trace_path("garbage") == ""  # type: ignore[arg-type]
+def test_profile_trace_path_handles_non_dict():
+    assert profile_trace_path(None) == ""
+    assert profile_trace_path("garbage") == ""
 
 
 def test_fail_helper_constructs_canonical_shape():

@@ -65,7 +65,6 @@ def test_extract_launch_log_empty_on_none_or_blank():
 @pytest.mark.parametrize(
     "payload, err_class",
     [
-        ({"error": "bad --flag"}, "fast_exit_arg_error"),
         ({"error": "pinned dependency missing"}, AGENTX_PREFLIGHT_ERROR_CLASS),
         ({"error": f"{RAY_INFEASIBLE_MARKER}: cluster has 0 GPU(s), 8 requested"}, "subprocess_nonzero"),
         ({"error": "GPU 0: held by pid 4242 (python3)"}, HOST_GPUS_UNAVAILABLE),
