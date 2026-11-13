@@ -273,6 +273,12 @@ def replace_flags(args: Sequence[str], overrides: Sequence[str]) -> tuple[str, .
     return (*kept, *overrides)
 
 
+def split_launcher_flags(framework: Framework, args: Sequence[str]) -> tuple[tuple[str, ...], tuple[str, ...]]:
+    """``args`` without the flags the launcher owns, and the owned flags taken out."""
+    rendered = render_role(framework, args, {})
+    return rendered.args, rendered.stripped
+
+
 def with_overrides(launch: PdLaunch, overrides: Mapping[str, Sequence[str]]) -> PdLaunch:
     """``launch`` with flag overrides of each role it runs (``prefill`` and ``decode``, or ``worker``) and of the
     ``router``.
@@ -396,6 +402,7 @@ __all__ = [
     "probe_engine_flags",
     "replace_flags",
     "restart",
+    "split_launcher_flags",
     "start",
     "stop",
     "with_overrides",

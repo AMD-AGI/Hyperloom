@@ -14,6 +14,7 @@ from inference_suite.multinode.launch import (
     engines_gone,
     replace_flags,
     restart,
+    split_launcher_flags,
     start,
     stop,
 )
@@ -60,6 +61,7 @@ __all__ = [
     "resolve",
     "resolve_session",
     "restart",
+    "split_launcher_flags",
     "start",
     "stop",
     "write_record",

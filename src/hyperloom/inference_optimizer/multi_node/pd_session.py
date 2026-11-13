@@ -6,6 +6,7 @@ rounds."""
 
 from __future__ import annotations
 
+import logging
 import os
 import re
 import shlex
@@ -36,11 +37,14 @@ from inference_suite.multinode import (
     replace_flags,
     resolve_session,
     restart,
+    split_launcher_flags,
     stop,
     write_record,
 )
 
 from ._internal.pd_handoff import INFERA, PD_BACKENDS, handed_node_list, is_pd_state, node_list_backend, pd_state
+
+log = logging.getLogger(__name__)
 
 PD_LAUNCH_KEY = "pd_launch"
 PD_DIGEST_KEY = "pd_launch_digest"
@@ -163,11 +167,23 @@ def restart_round(state: dict[str, Any], shared_args: str, options: LaunchOption
             os.environ.get(DECODE_EXTRA_ENV, ""),
             mode=session.launch.mode,
         )
-        ran = restart(session.launch, overrides, session.cluster, options)
+        ran = restart(session.launch, _without_launcher_flags(session.launch, overrides), session.cluster, options)
         write_record(ran, session.record.with_name(RAN_RECORD_NAME))
     except _SUITE_ERRORS as exc:
         raise PdSessionError(f"the PD cluster did not come up: {exc}") from exc
     return ran
+
+
+def _without_launcher_flags(launch: PdLaunch, overrides: Mapping[str, list[str]]) -> dict[str, list[str]]:
+    """``overrides`` less the flags the launcher owns, which the frozen launch keeps; logs what each role dropped."""
+    kept: dict[str, list[str]] = {}
+    for role, args in overrides.items():
+        role_args, dropped = split_launcher_flags(launch.framework, args)
+        if dropped:
+            log.warning("pd round: %s keeps the frozen launch's %s; the round's values are dropped", role, dropped)
+        if role_args:
+            kept[role] = list(role_args)
+    return kept
 
 
 def stop_cluster(state: dict[str, Any]) -> None:
