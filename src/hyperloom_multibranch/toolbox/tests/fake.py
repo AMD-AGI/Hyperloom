@@ -26,6 +26,7 @@ from pathlib import Path
 from typing import Protocol
 
 from hyperloom.contracts.measurement import TestKind, TestRequest, TestResult, Validity
+from hyperloom.contracts.tests.long_context_checks import long_context_check
 from hyperloom.contracts.recipe import Recipe
 from hyperloom.measure.compile import LocalBlobStore
 from hyperloom.measure.tests.gpu_free_host import required_scratch_root
@@ -40,6 +41,7 @@ from hyperloom_multibranch.contracts.toolbox import (
 )
 from hyperloom_multibranch.contracts.gate import ResultUnverified
 from hyperloom_multibranch.toolbox.attempts import MeasurementRefused, TestJob, carries_request_classes
+from hyperloom_multibranch.toolbox.long_context import agentx_gated
 from hyperloom_multibranch.toolbox.tests.fake_model import (
     AttemptOutcome,
     AttemptConstraints,
@@ -140,6 +142,9 @@ class _NoPlanner:
         return None
 
 
+#: The prompts of the long-context check a gated AgentX test records, every one of them passed.
+_LONG_CONTEXT_PROMPTS = 16
+
 _MEASURED_FIELDS = (
     "validity",
     "rounds",
@@ -157,7 +162,8 @@ class FakeExecutor:
 
     A drawn measurement failure is a :class:`MeasurementRefused`, as the hosted executor raises it for a rejected spec
     or a result that fails verification. ``gate`` holds attempts back until it is set (``autorun=False``). A result of
-    an AgentX ``workload`` counts the failed requests of its measured rounds by class, as the hosted executor's does.
+    an AgentX ``workload`` counts the failed requests of its measured rounds by class, as the hosted executor's does,
+    and one of a test its gate reads (``long_context.agentx_gated``) records a long-context check that passed.
     """
 
     def __init__(
@@ -220,6 +226,7 @@ class FakeExecutor:
         classes = (
             classes_of_rounds(outcome.rounds) if carries_request_classes(self._workload, request, validity) else ()
         )
+        checked = measured and self._workload is WorkloadKind.AGENTX and agentx_gated(request)
         return TestResult(
             request_id=request_id,
             validity=validity,
@@ -239,6 +246,7 @@ class FakeExecutor:
             profile_location=f"tests/{request_id}/profile" if measured and request.kind is TestKind.PROFILE else "",
             cold_start_seconds=self.config.attempt_seconds,
             request_classes=classes,
+            long_context=long_context_check(_LONG_CONTEXT_PROMPTS, _LONG_CONTEXT_PROMPTS) if checked else None,
         )
 
     @staticmethod
