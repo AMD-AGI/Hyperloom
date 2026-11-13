@@ -1,61 +1,47 @@
-"""The GEMM e2e validator must not do its file I/O on the event loop."""
+# SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
+# SPDX-License-Identifier: MIT
+
+"""The GEMM e2e validator runs its fused-MoE probe and its coverage replay off the event loop."""
 
 from __future__ import annotations
 
-import inspect
-import re
+import threading
 
-from hyperloom.orchestrator.phases import kernel as kernel_mod
+import pytest
 
-
-# The validator delegates the apply-blocker checks to a helper it awaits, so the offload contract is read across
-# both: a probe moved out of the loop body is still on the event loop unless it is wrapped there too.
-_ON_THE_LOOP = (
-    kernel_mod.KernelPhase._validate_gemm_tuning_e2e,
-    kernel_mod.KernelPhase._gemm_apply_blockers,
-)
+from hyperloom.orchestrator.kernel import request_handlers
+from hyperloom.orchestrator.loop.coordinator import Coordinator
+from hyperloom.orchestrator.phases.kernel import KernelPhase
+from hyperloom.orchestrator.state.shared_state import SharedState
 
 
-def _validator_source() -> str:
-    return "".join(inspect.getsource(fn) for fn in _ON_THE_LOOP)
+@pytest.mark.asyncio
+async def test_the_fused_moe_probe_and_the_coverage_replay_run_off_the_event_loop(tmp_path, monkeypatch):
+    """Both read a whole server.log (~17MB on the fleet); run on the loop, they stall every other coroutine."""
+    threads: dict[str, list[int]] = {}
 
+    def _probe(self):
+        threads.setdefault("fused_moe_probe", []).append(threading.get_ident())
+        return False
 
-def test_the_validator_is_still_a_coroutine():
-    # The whole premise: if it ever becomes sync, it is not on the loop and these assertions are measuring nothing.
-    for fn in _ON_THE_LOOP:
-        assert inspect.iscoroutinefunction(fn), fn
+    def _coverage(self, tuner_name, envs):
+        threads.setdefault("coverage_replay", []).append(threading.get_ident())
 
+    async def _integrate(payload, *, session_dir):
+        return {"decision": "REVERT", "new_tput": 90.0, "gain_pct": -10.0}
 
-def test_the_blocker_helper_is_reached_from_the_validator():
-    """The helper only carries the contract while the validator actually awaits it."""
-    assert re.search(
-        r"await\s+self\._gemm_apply_blockers\(",
-        inspect.getsource(kernel_mod.KernelPhase._validate_gemm_tuning_e2e),
-    )
+    monkeypatch.setattr(KernelPhase, "_runtime_uses_aiter_fused_moe", _probe)
+    monkeypatch.setattr(KernelPhase, "_gemm_tuned_config_coverage", _coverage)
+    monkeypatch.setattr(request_handlers, "integrate_handler", _integrate)
+    coord = Coordinator.__new__(Coordinator)
+    coord.session_dir = tmp_path
+    coord.shared_state = SharedState(baseline_tput=100.0, framework="vllm")
+    result = {"candidates": [{"tuner": "vllm_moe_triton", "env": {"VLLM_TUNED_CONFIG_FOLDER": str(tmp_path)}}]}
 
+    await coord.phase_kernel._validate_gemm_tuning_e2e(result)
 
-def test_the_fused_moe_probe_runs_off_the_loop():
-    src = _validator_source()
-    assert "self._runtime_uses_aiter_fused_moe" in src
-    assert re.search(
-        r"await\s+asyncio\.to_thread\(\s*\n?\s*self\._runtime_uses_aiter_fused_moe",
-        src,
-    ), src
-
-
-def test_the_coverage_replay_runs_off_the_loop():
-    src = _validator_source()
-    assert "self._gemm_tuned_config_coverage" in src
-    assert re.search(
-        r"await\s+asyncio\.to_thread\(\s*self\._gemm_tuned_config_coverage\s*,",
-        src,
-    ), src
-
-
-def test_neither_is_also_called_bare():
-    """A ``to_thread`` wrap elsewhere does not excuse a second inline call."""
-    src = _validator_source()
-    for name in ("_runtime_uses_aiter_fused_moe", "_gemm_tuned_config_coverage"):
-        # A bare call is the attribute immediately followed by "(" -- the to_thread form passes the bound method as an
-        # argument instead, so it is followed by "," or ")".
-        assert not re.search(rf"self\.{name}\s*\(", src), f"{name} is called inline"
+    loop_thread = threading.get_ident()
+    assert {helper: [ident == loop_thread for ident in idents] for helper, idents in threads.items()} == {
+        "fused_moe_probe": [False],
+        "coverage_replay": [False],
+    }
