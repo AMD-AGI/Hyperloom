@@ -20,11 +20,12 @@ import os
 import re
 from collections.abc import Iterable
 from pathlib import Path
-from typing import Protocol
+from typing import TYPE_CHECKING
 
 from inference_suite.contracts import RunLayout
 
 from hyperloom.common.failure_signature import IMPORT_FAILURE_LINE, argparse_refusal
+
 from hyperloom.common.outside_facts import (
     HIP_ERROR_PREFIX,
     HIP_NO_BINARY_FOR_GPU,
@@ -34,6 +35,9 @@ from hyperloom.common.outside_facts import (
     HUB_RATE_LIMITED,
     TORCH_MEMORY_SNAPSHOT_FRAME,
 )
+
+if TYPE_CHECKING:
+    from hyperloom.orchestrator.actions.executors import VariantResult
 
 #: A cause line longer than this is cut, so a reason stays one readable line.
 CAUSE_CHARS = 300
@@ -245,16 +249,6 @@ _REFUSAL_BLOCK_OVERLAP_CHARS = 4096
 _UTF8 = "utf-8"
 
 
-class RoundLogs(Protocol):
-    """Where a round's logs are: its server log and its run_dir (a grid round's ``VariantResult``)."""
-
-    @property
-    def server_log_path(self) -> str | None: ...
-
-    @property
-    def workspace(self) -> str | None: ...
-
-
 def log_tail(path: str | None) -> str:
     """The last ``LOG_TAIL_CHARS`` of the log at ``path``; ``""`` for none or one that cannot be read."""
     if not path:
@@ -292,7 +286,7 @@ def last_refusal(path: Path) -> str:
     return ""
 
 
-def failure_logs(failing: Iterable[RoundLogs]) -> list[str]:
+def failure_logs(failing: Iterable[VariantResult]) -> list[str]:
     """The tails of the server log and of the client's and the evaluation's stderr of every result with a failed round.
 
     The launcher's pipe seldom holds the cause: the server prints a refused flag or a crash into ``server.log``, and the
@@ -310,7 +304,7 @@ def failure_logs(failing: Iterable[RoundLogs]) -> list[str]:
     return logs
 
 
-def client_logs(failing: Iterable[RoundLogs]) -> list[str]:
+def client_logs(failing: Iterable[VariantResult]) -> list[str]:
     """The tails of the AgentX replay client's own log in the run_dir of every result with a failed round.
 
     The round's report names only the client's exit code; what the client was refused is in this log alone.
