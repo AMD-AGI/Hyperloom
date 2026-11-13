@@ -1463,6 +1463,18 @@ bounds the session together with the spec's `budget.max_hours`; see
 | `HYPERLOOM_SOURCE_REPO`<br>`HYPERLOOM_SOURCE_SHA` | When the run starts measurement sandboxes (the application bootstrap always needs them) | The repository (`OWNER/NAME` or a git URL, no whitespace) and the full lowercase 40-hex commit id of the version the run executes; the sandbox runners fetch the same version. Checked when set; removed from the environment once read (the bootstrap script has already used them). |
 | `NODE_NAME`<br>`CLAW_SESSION_ID` | No | Physical node name and session id, read when set. |
 
+### Confining the whole run (`HYPERLOOM_REEXEC*`)
+
+A different thing from the `HYPERLOOM_SANDBOX_*` block above, which configures the hosted measurement-sandbox service. These re-execute the operator's own `hyperloom` process inside bubblewrap, bounding what the *run* can touch; the per-agent sandboxes still apply inside it, and nest.
+
+| Variable | Required | Meaning |
+|---|---|---|
+| `HYPERLOOM_REEXEC` | No | `off` (default) or `bwrap`. Any other value refuses the run rather than leaving it unconfined. Must be exported in the real environment: the `.env` is read after the re-exec, so it cannot request or disable one. |
+| `HYPERLOOM_REEXEC_WRITABLE`<br>`HYPERLOOM_REEXEC_READONLY` | No | `os.pathsep`-separated paths bound writable / read-only, beside the ones the sub-command derives from its own flags. Republished with the derived set so the in-sandbox check covers both. |
+| `HYPERLOOM_REEXEC_TMP` | No | An existing directory to take the sandbox's `/tmp` from; the host's `/tmp` when unset. Worth setting when `/tmp` is a small partition — an AOTInductor build unpacks its package there on every load. |
+| `HYPERLOOM_REEXEC_BWRAP` | No | The bubblewrap to use, when the one first on `PATH` is not the one wanted. A host that installs a `bwrap` wrapper for something else — an IDE's own sandbox — leaves it ahead of `/usr/bin/bwrap`, and the probe then judges the wrapper. The refusal names the binary it probed and points here. |
+| `HYPERLOOM_REEXEC_ACTIVE` | Set by the sandbox | Marks the process inside, so the second pass verifies the binds instead of re-execing again. Not read by agents. |
+
 Once read, every host-only input above is removed from the process environment (`take_host_info`), so a child process started
 without an explicit `env=` does not inherit it; `HostInfo` holds the values and code passes them on. `NODE_NAME` and `CLAW_SESSION_ID`
 stay, because other code reads them. The sandbox keys, the MCP token and the archive credentials are held in an object that prints as

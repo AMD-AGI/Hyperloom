@@ -18,6 +18,7 @@ from pathlib import Path
 from typing import Any
 
 from hyperloom_common.llm import llm_config
+from hyperloom.common.reexec import ReexecRoots
 from hyperloom_common.env import EnvValueError, env_bool
 from hyperloom.common import agent_isolation
 from hyperloom.common.gpu_partition import PartitionModel
@@ -157,6 +158,35 @@ from .preflight import (
 def _orchestration_rules_fragment_path() -> Path:
     """Path to the rules-only ``orchestration.md`` fragment consumed by ``prompt_builder``."""
     return asset_system_prompts_dir() / "orchestration.md"
+
+
+def reexec_roots(argv: list[str]) -> ReexecRoots:
+    """What an ``optimize`` run writes and reads, from its own flags (see :mod:`hyperloom.common.reexec`)."""
+    from ..script_workload import benchmark_inputs
+    from ..session.paths import workspace_root
+
+    if {"-h", "--help"} & set(argv):
+        return ReexecRoots()
+    try:
+        args, _ = _build_parser().parse_known_args(argv)
+    except SystemExit:
+        # Malformed; the strict parse inside the sandbox is what reports it.
+        return ReexecRoots()
+    if getattr(args, "command", "") != "optimize":
+        return ReexecRoots()
+    writable = [workspace_root().absolute()]
+    framework_path = args.framework_path or os.environ.get("FRAMEWORK_REPO_PATH", "").strip()
+    if framework_path:
+        writable.append(Path(framework_path).expanduser().resolve())
+    readonly: list[Path] = []
+    if args.model and Path(args.model).expanduser().exists():
+        model = Path(args.model).expanduser().resolve()
+        readonly.append(model if model.is_dir() else model.parent)
+    scripts = args.benchmark_scripts_dir or os.environ.get("HYPERLOOM_BYPASS_SCRIPTS_DIR", "").strip()
+    if scripts:
+        benchmark = Path(scripts).expanduser().resolve()
+        readonly += [benchmark, *benchmark_inputs(benchmark)]
+    return ReexecRoots(writable=tuple(writable), readonly=tuple(readonly))
 
 
 def _normalise_framework_name(value: str | None) -> str:
