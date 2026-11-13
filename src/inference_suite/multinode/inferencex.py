@@ -25,7 +25,15 @@ from inference_suite.contracts.base_launch import Workload
 from inference_suite.frameworks import Framework
 from inference_suite.multinode.query import PdQuery, RoleAsk
 from inference_suite.multinode.record import PD_ROLES, PdSourceKind, Role
-from inference_suite.recipe.inferencex import MASTER, PROJECT, RUNNERS, Scenario, concurrencies, runner_board
+from inference_suite.recipe.inferencex import (
+    MASTER,
+    PROJECT,
+    RUNNERS,
+    Scenario,
+    concurrencies,
+    master_model,
+    runner_board,
+)
 from inference_suite.recipe.model import RecipeSourceError, boards_interchangeable
 from inference_suite.recipe.sources import Checkout
 
@@ -276,10 +284,11 @@ def _master_rows(query: PdQuery, master: Mapping[str, Any]) -> Iterator[_MasterR
     """Every row of the query's scenario in the multi-node disaggregated entries of its model and framework."""
     frameworks = {query.framework.value, f"{query.framework.value}-disagg"}
     scenario = _SCENARIO_OF[query.workload].value
+    model, _ = master_model(query.model_id, [master])
     for name, entry in master.items():
         if not (entry.get("multinode") and entry.get("disagg")):
             continue
-        if entry.get("model") != query.model_id or entry.get("framework") not in frameworks:
+        if entry.get("model") != model or entry.get("framework") not in frameworks:
             continue
         for block in (entry.get("scenarios") or {}).get(scenario) or ():
             for index, row in enumerate(block.get("search-space") or ()):
@@ -324,8 +333,9 @@ def master_candidates(query: PdQuery, checkout: Checkout) -> Candidates:
     """The master rows that serve ``query``, in entry then row order, on a board interchangeable with its own."""
     master = _yaml(checkout, MASTER)
     labels = _yaml(checkout, RUNNERS).get("labels") or {}
+    _, note = master_model(query.model_id, [master])
     found: list[Candidate] = []
-    misses: list[str] = []
+    misses: list[str] = [note] if note else []
     for master_row in _master_rows(query, master):
         arm = master_row.arm
         try:
@@ -342,7 +352,7 @@ def master_candidates(query: PdQuery, checkout: Checkout) -> Candidates:
             continue
         if board != query.board:
             candidate = _with_warning(candidate, f"InferenceX tuned {arm} on {board}, not {query.board}")
-        found.append(candidate)
+        found.append(_with_warning(candidate, note) if note else candidate)
     return Candidates(tuple(found), tuple(misses))
 
 
@@ -366,12 +376,13 @@ def _named_recipes(master: Mapping[str, Any]) -> set[str]:
 def _lookup_dirs(query: PdQuery, checkout: Checkout, masters: Sequence[Mapping[str, Any]]) -> list[str]:
     """The workload directories of the query's model, framework and board: ``<board>-<precision>`` and its suffixed
     siblings (``-mtp``) for every model prefix and precision the master configs give the model."""
+    model, _ = master_model(query.model_id, masters)
     labels = sorted(
         {
             (str(entry["model-prefix"]), str(entry["precision"]))
             for master in masters
             for entry in master.values()
-            if entry.get("model") == query.model_id and "model-prefix" in entry and "precision" in entry
+            if entry.get("model") == model and "model-prefix" in entry and "precision" in entry
         }
     )
     if query.workload is Workload.FIXED and query.isl is not None and query.osl is not None:
@@ -420,8 +431,9 @@ def lookup_candidates(query: PdQuery, checkout: Checkout) -> Candidates:
     if (checkout.root / NVIDIA_MASTER).is_file():
         masters.append(_yaml(checkout, NVIDIA_MASTER))
     named = set().union(*(_named_recipes(master) for master in masters))
+    _, note = master_model(query.model_id, masters)
     found: list[Candidate] = []
-    misses: list[str] = []
+    misses: list[str] = [note] if note else []
     for directory in _lookup_dirs(query, checkout, masters):
         for path in checkout.paths(directory, ".yaml", nested=False):
             for selector, recipe in expand_variants(_yaml(checkout, path)):
@@ -431,7 +443,7 @@ def lookup_candidates(query: PdQuery, checkout: Checkout) -> Candidates:
                 if isinstance(candidate, str):
                     misses.append(f"{path}:{selector}: {candidate}")
                 else:
-                    found.append(candidate)
+                    found.append(_with_warning(candidate, note) if note else candidate)
     return Candidates(tuple(found), tuple(misses))
 
 
