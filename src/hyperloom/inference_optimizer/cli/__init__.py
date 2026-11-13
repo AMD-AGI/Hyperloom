@@ -491,6 +491,32 @@ def _apply_default_budget(args: argparse.Namespace) -> None:
         )
 
 
+def _check_export_gate_budget(args: argparse.Namespace, phase_budget_pct: dict[str, float]) -> None:
+    """Warn when the export gate cannot afford two patch specialists.
+
+    The judgment lives in ``machine_state.export_gate_budget_shortfall`` -- it is phase
+    budget policy, not a CLI concern. Advisory only: a short deliberate run is the
+    operator's call to make.
+    """
+    from hyperloom.orchestrator.phases.machine_state import export_gate_budget_shortfall
+
+    # --extend-hours lands in session state, not args, so fold it in here or a resumed
+    # run is judged on the leg it started with.
+    hours = float(getattr(args, "max_hours", 0.0) or 0.0) + float(getattr(args, "extend_hours", 0.0) or 0.0)
+    short = export_gate_budget_shortfall(hours, phase_budget_pct)
+    if short is None:
+        return
+    print(
+        f"Preflight: WARNING - aoti.enabled is declared, so nothing is scored until the export "
+        f"lands. FRAMEWORK_AGENT has {short['framework_min']:.0f} min ({hours:g}h x "
+        f"{short['pct']:.2f}) and a patch specialist needs {short['specialist_min']:.0f} min, so "
+        f"this run affords {int(short['affords'])}. Two is the minimum that allows one failure "
+        f"and one fix: --phase-budget-framework-pct {short['needed_pct']:.2f} at this budget, or "
+        f"raise --max-hours.",
+        file=sys.stderr,
+    )
+
+
 def _build_phase_budget_pct(args: argparse.Namespace) -> dict[str, float]:
     """Map ``--*-pct`` CLI flags to a ``phase -> pct`` override dict.
 
@@ -1650,12 +1676,15 @@ def _build_coordinator(
     if getattr(args, "reset_state", False):
         _reset_state_file(session_dir, state)
 
+    phase_budget_pct = _build_phase_budget_pct(args)
+    _check_export_gate_budget(args, phase_budget_pct)
+
     return Coordinator(
         session_dir,
         backends=backends,
         settings=CoordinatorSettings(
             model_class=getattr(args, "model_class", None) or os.environ.get("MODEL_CLASS", ""),
-            phase_budget_pct=_build_phase_budget_pct(args),
+            phase_budget_pct=phase_budget_pct,
         ),
         advisory=AdvisoryServices(
             # KnowledgePlane facade (None when --degraded-pr).

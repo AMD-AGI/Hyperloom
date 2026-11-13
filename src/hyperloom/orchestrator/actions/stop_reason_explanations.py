@@ -33,6 +33,14 @@ STOP_REASON_EXPLANATIONS: dict[str, str] = {
     "custom": "A caller-supplied stop condition fired.",
     "unknown": "No specific stop reason was recorded (e.g. a terminal session was resumed); treat as unclassified.",
     "baseline_failed": "Baseline never produced a valid measurement; see the failure summary / server log.",
+    "export_never_landed": (
+        "This workload declared aoti.enabled, but the run closed without a KEEP whose module "
+        "compiles an AOTInductor package, so the ahead-of-time export never landed. See "
+        "ungated_close_reason for what actually ended the run and export_attempts for how many "
+        "integrate rounds went by without one. Common causes: the framework-agent phase budget "
+        "fits too few patch specialists (raise --phase-budget-framework-pct), or the model has a "
+        "tracing blocker torch.export cannot get past."
+    ),
     "server_argv_invalid": (
         "The composed server argv was refused before any server was launched: the installed framework's parser "
         "rejected a flag, or Hyperloom could not split the args into argv tokens intact. Nothing in the framework "

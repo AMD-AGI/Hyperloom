@@ -173,6 +173,71 @@ def _build_failure_summary(
     return summary
 
 
+def _export_gate_stop_reason(state: Any) -> str:
+    """Name an unlanded ahead-of-time export, whatever else ended the run.
+
+    Overrides every other terminal, so a short run, budget exhaustion and wall-clock
+    expiry all report it rather than reading as an ordinary closeout: without an
+    export there is no shippable artifact, which is the fact that matters most.
+
+    Keyed on whether the *accepted* module exports, not on whether one ever landed. The
+    two part only when the harness breaks -- the integrate gate refuses a candidate that
+    cannot be shown to export -- and in that case what ships is what matters.
+    """
+    from ...framework.optimization_scope import aoti_config
+
+    try:
+        config = aoti_config()
+    except ValueError:
+        return ""
+    if config is None or not config.enabled:
+        return ""
+    if bool(getattr(state, "current_best_exports", False)):
+        return ""
+    return "export_never_landed"
+
+
+def export_gate_summary_line(state: Any) -> str:
+    """One summary line saying whether the declared ahead-of-time export landed.
+
+    A landed export can still show a negative headline gain, measured against an eager
+    path this workload cannot ship, so the gain figure alone misreads. Empty unless
+    ``aoti.enabled``, and empty on an unreadable declaration -- the gate itself already
+    fails closed on that, and a summary line is not where to surface it.
+    """
+    from ...framework.optimization_scope import aoti_config
+
+    try:
+        config = aoti_config()
+    except ValueError:
+        return ""
+    if config is None or not config.enabled:
+        return ""
+    if not getattr(state, "current_best_exports", False):
+        if getattr(state, "export_landed", False):
+            # Only reachable through a broken harness: the integrate gate refuses a
+            # candidate that cannot be shown to export. Points at the shim rather than
+            # at an optimization outcome, because that is what went wrong.
+            return (
+                "  aoti_export          : NOT IN THE ARTIFACT -- an export landed earlier but the "
+                "accepted module cannot be shown to export; the start-up counters are missing, so "
+                "treat this as a broken harness and re-run"
+            )
+        attempts = int(getattr(state, "export_attempts", 0) or 0)
+        return (
+            f"  aoti_export          : NEVER LANDED after {attempts} integrate round(s) -- "
+            f"no shippable artifact was produced, whatever else this run kept"
+        )
+    gain = float(getattr(state, "cumulative_gain_validated", 0.0) or 0.0)
+    tail = (
+        "the artifact is faster than the eager path it replaces"
+        if gain > 0
+        else "it is still behind the eager path, which this workload does not ship; "
+        "optimizing the export is what further budget buys"
+    )
+    return f"  aoti_export          : landed -- {tail}"
+
+
 def _explain_stop_reason(stop_reason, state=None):
     """Return a human-readable explanation for a terminal ``stop_reason``."""
     reason = str(stop_reason or "").strip()
@@ -274,14 +339,17 @@ def _build_summary_dict(
     stop_reason = str(getattr(state, "stop_reason", "") or "").strip()
     if not stop_reason and getattr(state, "closing_phase", False):
         stop_reason = "time_exhausted"
+    export_gate_reason = _export_gate_stop_reason(state)
     summary: dict[str, Any] = {
         "session_id": state.session_id,
         "model_name": state.model_name,
         "model_path": state.model_path,
         "model_class": state.model_class,
         "framework": getattr(state, "framework", "") or "",
-        "stop_reason": stop_reason,
-        "stop_reason_explanation": _explain_stop_reason(stop_reason, state),
+        "stop_reason": export_gate_reason or stop_reason,
+        "stop_reason_explanation": _explain_stop_reason(export_gate_reason or stop_reason, state),
+        # The terminal the run would have reported, kept so the override hides nothing.
+        **({"ungated_close_reason": stop_reason} if export_gate_reason else {}),
         "baseline_tput": state.baseline_tput,
         "baseline_perf": dict(getattr(state, "baseline_perf", None) or {}),
         # Read back by the graded-axes section: the persisted AgentX marker outlives the shell, so a report rendered
