@@ -8,6 +8,7 @@ import os
 import subprocess
 import sys
 import tempfile
+from collections.abc import Sequence
 from enum import Enum
 from pathlib import Path
 from typing import Any, Callable, NamedTuple
@@ -28,6 +29,8 @@ except ImportError:
 
 MICROBENCH_WARMUP = 20
 MICROBENCH_REP = 50
+#: The TraceLens-internal checkout whose extension backfills MAF, so that no microbenchmark runs (opt-in).
+INTERNAL_ROOT_ENV = "TRACELENS_INTERNAL_ROOT"
 #: Exit status of ``TraceLens.PerfModel.benchmarking.microbench`` when its idle gate rejects the GPU.
 _MICROBENCH_BUSY_EXIT = 2
 
@@ -99,6 +102,11 @@ def list_candidate_physical_gpus() -> list[int]:
                 file=sys.stderr,
             )
     return []
+
+
+def parse_arch_gpus(text: str) -> list[int]:
+    """The physical cards an ``--arch-gpus`` value names: ``"2,5"`` is ``[2, 5]``, ``""`` no card."""
+    return [int(token) for token in text.split(",") if token.strip()]
 
 
 def single_physical_gpu_env(physical_id: int, *, base_env: dict[str, str] | None = None) -> dict[str, str]:
@@ -261,15 +269,24 @@ def _sanitize_measured_arch_spec(
         )
 
 
+class Microbench(NamedTuple):
+    """How the arch microbenchmark runs: ``run_command(cmd, *, cwd, env)`` runs it and returns its exit code, on the
+    first of ``gpus`` its own idle gate accepts. ``gpus`` are the physical cards the caller holds for it: it runs on no
+    other card, and on none when they are empty. ``None`` lets it pick among the visible GPUs, for a caller that shares
+    the host with no test."""
+
+    run_command: Callable[..., int]
+    gpus: Sequence[int] | None = None
+
+
 def _run_microbench_on_idle_gpu(
-    tracelens_root: Path,
-    out_path: Path,
-    *,
-    log: Callable[[str], None],
-    run_command: Callable[..., int],
+    tracelens_root: Path, out_path: Path, *, log: Callable[[str], None], microbench: Microbench
 ) -> None:
-    """Run the arch microbenchmark on the first candidate GPU its own idle gate accepts."""
-    candidates = list_candidate_physical_gpus()
+    """Run the arch microbenchmark on the first card of ``microbench`` its own idle gate accepts."""
+    gpus = microbench.gpus
+    if gpus is not None and not gpus:
+        raise RuntimeError("gpu_arch_benchmark was given no card; cannot run arch microbenchmark")
+    candidates = list_candidate_physical_gpus() if gpus is None else list(gpus)
     if not candidates:
         raise RuntimeError("gpu_arch_benchmark found no GPUs; cannot run arch microbenchmark")
     cmd = [
@@ -286,7 +303,7 @@ def _run_microbench_on_idle_gpu(
         str(out_path),
     ]
     for physical_id in candidates:
-        rc = run_command(cmd, cwd=tracelens_root, env=single_physical_gpu_env(physical_id))
+        rc = microbench.run_command(cmd, cwd=tracelens_root, env=single_physical_gpu_env(physical_id))
         if rc == 0:
             log(f"gpu_arch_json: microbenchmark ran on GPU {physical_id}")
             return
@@ -294,6 +311,20 @@ def _run_microbench_on_idle_gpu(
             raise RuntimeError(f"gpu arch microbenchmark failed with exit code {rc}; see log for details")
         log(f"gpu_arch_json: GPU {physical_id} is busy; trying the next candidate")
     raise RuntimeError(f"gpu_arch_benchmark found no unoccupied GPU among {candidates}")
+
+
+def internal_extension_root(raw: str) -> Path | None:
+    """The TraceLens-internal checkout ``raw`` names (``TRACELENS_INTERNAL_ROOT``); ``None`` when it is empty or not
+    there, and the analysis runs open-source only."""
+    text = raw.strip()
+    return Path(text) if text and Path(text).exists() else None
+
+
+def measures_arch_spec(platform: str, internal_root: Path | None) -> bool:
+    """Whether the analysis runs the arch microbenchmark, on a card, to resolve ``platform``'s arch spec: never under the
+    internal extension (:func:`internal_extension_arch_json`), and otherwise only when TraceLens has no spec for the
+    board (:func:`populate_gpu_arch_json`)."""
+    return internal_root is None and resolve_arch_json_path(platform) is None
 
 
 def internal_extension_arch_json(platform: str, *, log: Callable[[str], None]) -> ArchSpec | None:
@@ -307,7 +338,7 @@ def internal_extension_arch_json(platform: str, *, log: Callable[[str], None]) -
 
 
 def _measure_arch_spec(
-    tracelens_root: Path, platform: str, *, log: Callable[[str], None], run_command: Callable[..., int]
+    tracelens_root: Path, platform: str, *, log: Callable[[str], None], microbench: Microbench
 ) -> Path:
     """Measure the arch spec on an idle GPU and publish it to the TraceLens arch dir once it passes the sanitizer."""
     with tempfile.TemporaryDirectory(prefix="hyperloom-arch-") as scratch:
@@ -317,7 +348,7 @@ def _measure_arch_spec(
             f"{platform} and internal extension disabled; running TraceLens "
             f"microbenchmark -> {measured}"
         )
-        _run_microbench_on_idle_gpu(tracelens_root, measured, log=log, run_command=run_command)
+        _run_microbench_on_idle_gpu(tracelens_root, measured, log=log, microbench=microbench)
         if not measured.is_file():
             raise RuntimeError(f"gpu arch microbenchmark finished but output is missing: {measured}")
         payload = json.loads(measured.read_text(encoding="utf-8"))
@@ -341,13 +372,14 @@ def populate_gpu_arch_json(
     platform: str,
     fallback_dir: Path,
     log: Callable[[str], None],
-    run_command: Callable[..., int],
+    microbench: Microbench,
 ) -> ArchSpec:
     """The arch JSON roofline reads without the internal extension: bundled, else measured, else vendor peaks.
 
     A measured spec joins the TraceLens arch dir, where later sessions find it bundled. The vendor-peak spec goes to
     ``fallback_dir``, one per session, instead: the session's later runs reuse it rather than wait on the
-    microbenchmark again, and the next session measures afresh rather than inherit it as bundled.
+    microbenchmark again, and the next session measures afresh rather than inherit it as bundled. ``microbench`` says
+    how the microbenchmark runs and on which cards.
     """
     existing = resolve_arch_json_path(platform)
     if existing is not None and existing.is_file():
@@ -363,7 +395,7 @@ def populate_gpu_arch_json(
         log(f"gpu_arch_json: reusing this session's vendor-peak spec {fallback.path}")
         return fallback
     try:
-        measured = _measure_arch_spec(tracelens_root, canonical, log=log, run_command=run_command)
+        measured = _measure_arch_spec(tracelens_root, canonical, log=log, microbench=microbench)
     except (RuntimeError, subprocess.SubprocessError, OSError) as exc:
         # A microbenchmark that overruns its timeout surfaces as subprocess.TimeoutExpired, not RuntimeError, so
         # catching RuntimeError alone let the most common failure escape and killed the whole trace_analyze instead of

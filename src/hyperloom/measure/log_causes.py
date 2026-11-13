@@ -17,7 +17,7 @@ from __future__ import annotations
 
 import re
 
-from hyperloom.common.failure_signature import IMPORT_FAILURE_LINE, argparse_refusal
+from hyperloom.common.failure_signature import EXCEPTION_NAME_START, IMPORT_FAILURE_LINE, argparse_refusal
 from hyperloom.common.outside_facts import (
     HIP_ERROR_PREFIX,
     HIP_NO_BINARY_FOR_GPU,
@@ -83,7 +83,9 @@ _HIP_ERROR_TOKEN = re.compile(HIP_ERROR_PREFIX + r"[A-Za-z]+")
 _HSA_STATUS_TOKEN = re.compile(HSA_STATUS_ERROR + r"[A-Z_]*")
 
 #: ``SomeError: message`` after an optional log prefix, or a bare ``SomeError`` on a line of its own.
-_EXCEPTION_WITH_MESSAGE = re.compile(r"(?<![\w.])((?:[A-Za-z_]\w*\.)*(?:[A-Z]\w*)?(?:Error|Exception)):\s*\S")
+_EXCEPTION_WITH_MESSAGE = re.compile(
+    EXCEPTION_NAME_START + r"((?:[A-Za-z_]\w*\.)*(?:[A-Z]\w*)?(?:Error|Exception)):\s*\S"
+)
 _EXCEPTION_ALONE = re.compile(r"^\s*(?:[A-Za-z_]\w*\.)*(?:[A-Z]\w*)?(?:Error|Exception)\s*$")
 #: A frame of the allocator's memory-snapshot dump SGLang's CUDA-graph profile runs after the capture.
 _SNAPSHOT_FRAME = re.compile(TORCH_MEMORY_SNAPSHOT_FRAME)

@@ -23,7 +23,12 @@ from kernelforge.config.resources import resource_path
 
 from .author import _arch_phrase
 from .diagnose import LAUNCH_BOUND_CATEGORIES, _load_trace_events, categories_in_text, categorize_kernel_name
-from .discovery_prompt import DISCOVERY_PROMPT_TEMPLATE
+from .discovery_prompt import (
+    DISCOVERY_PROMPT_TEMPLATE,
+    render_boundary_lines,
+    render_fusion_hints,
+    render_operator_lines,
+)
 from .llm_failure import (
     API_ERROR,
     DEFAULT_ATTEMPTS,
@@ -70,20 +75,22 @@ class DiscoveryTarget:
 
 @dataclass(frozen=True)
 class DiscoveryEvidence:
-    """The runtime evidence a discovery prompt cites: diagnosis, hot kernels, fusion boundaries, known operators."""
+    """The evidence a discovery prompt cites: diagnosis, hot kernels, fusion boundaries, known operators, profiler hints."""
 
     diagnosis: Diagnosis
     hot_kernels: list[dict[str, Any]]
     ordered_boundaries: Optional[list[dict[str, Any]]] = None
     existing_operator_hints: Optional[list[dict[str, str]]] = None
+    fusion_hints: Sequence[dict[str, Any]] = ()
 
 
 @dataclass(frozen=True)
 class DiscoveryPrompting:
-    """How many fusions discovery asks for, and the operator-knowledge corpus its hints come from."""
+    """How many fusions discovery asks for, the operator-knowledge corpus its hints come from, and profiler hints."""
 
     max_fusions: Optional[int] = None
     knowledge_root: str | Path | None = None
+    fusion_hints: Sequence[dict[str, Any]] = ()
 
 
 @dataclass(frozen=True)
@@ -748,43 +755,9 @@ def build_discovery_prompt(
         for k in hot_kernels
     )
 
-    def boundary_avg_us(boundary: dict[str, Any]) -> float:
-        if "avg_chain_us" in boundary:
-            return float(boundary["avg_chain_us"])
-        return float(boundary.get("total_us", 0.0)) / max(1, int(boundary["count"]))
-
-    def boundary_line(boundary: dict[str, Any]) -> str:
-        line = (
-            "  - "
-            f"{boundary['signature']} "
-            f"(repeats={boundary['count']}, "
-            f"avg-chain={boundary_avg_us(boundary):.1f}us, "
-            f"kind={boundary['boundary_kind']}, "
-            f"removable-launches<={boundary['launches_removed_upper_bound']})"
-        )
-        # The trailing compute kernel proves adjacency but is not fusable, so the fusable span is spelled out to keep
-        # the proposed chain from swallowing the attention (or other compute) kernel it feeds.
-        fusable = boundary.get("fusable_categories")
-        terminal = str(boundary.get("terminal_compute") or "")
-        if fusable:
-            line += f"\n    fusable-span={' -> '.join(fusable)}"
-        if terminal:
-            line += (
-                f"\n    NOTE: fuse the prologue only; do NOT include the terminal {terminal} kernel in the fused chain."
-            )
-        line += f"\n    kernels: {' | '.join(boundary.get('kernels', []))[:500]}"
-        return line
-
-    boundary_lines = "\n".join(boundary_line(boundary) for boundary in (evidence.ordered_boundaries or []))
-
-    def operator_line(hint: dict[str, Any]) -> str:
-        score = hint.get("score")
-        score_text = f" score={float(score):.1f}" if score is not None else ""
-        return f"  - `{hint['operator']}` ({hint['path']}){score_text}: {hint['evidence']}"
-
-    operator_lines = "\n".join(operator_line(hint) for hint in (evidence.existing_operator_hints or []))
     dom = ", ".join(diagnosis.dominant_categories)
     return DISCOVERY_PROMPT_TEMPLATE.format(
+        fusion_hints_block=render_fusion_hints(evidence.fusion_hints),
         framework=framework,
         model_type=model_type,
         arch_phrase=_arch_phrase(target.gpu_arch),
@@ -793,8 +766,8 @@ def build_discovery_prompt(
         hot_lines=hot_lines,
         dom=dom,
         shapes=shapes,
-        boundary_lines=boundary_lines or "  - none",
-        operator_lines=operator_lines or "  - none found",
+        boundary_lines=render_boundary_lines(evidence.ordered_boundaries) or "  - none",
+        operator_lines=render_operator_lines(evidence.existing_operator_hints) or "  - none found",
         read_verb=read_verb,
         max_fusions=max_fusions,
         fusion_constraints=fusion_constraints(repo_scope=repo_scope),
@@ -1402,7 +1375,7 @@ def discover_recipes(
     llm_fn: LlmFn,
     prompting: DiscoveryPrompting = DiscoveryPrompting(),
 ) -> list[Recipe]:
-    """LLM-autonomous discovery: propose fusible chains from the trace + source."""
+    """LLM-autonomous discovery: propose fusible chains from the trace + source, citing advisory profiler hints."""
     source_file, repo_scope = target.source_file, target.repo_scope
     if not diagnosis.is_candidate:
         return []
@@ -1431,6 +1404,7 @@ def discover_recipes(
             hot_kernels=hot,
             ordered_boundaries=ordered_boundaries,
             existing_operator_hints=existing_operator_hints,
+            fusion_hints=prompting.fusion_hints,
         ),
         _resolve_max_fusions(prompting.max_fusions),
     )

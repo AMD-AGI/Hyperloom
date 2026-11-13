@@ -41,6 +41,30 @@ def test_caches_analysis_md_full_text(tmp_path: Path) -> None:
     assert "Top Operations" in cached["analysis_md_text"]
 
 
+def test_records_the_fusion_findings_of_the_json_beside_the_md(tmp_path: Path) -> None:
+    analysis_md = tmp_path / "analysis.md"
+    analysis_md.write_text("# Executive Summary\n", encoding="utf-8")
+    fusion = {
+        "operation": "Unfused Add + RMSNorm in `DecoderLayer`",
+        "kind": "add_norm",
+        "members": [{"kernel_name": ["add_kernel"], "kernel_launcher_path": "modeling.py(88): forward"}],
+        "impact": {"mid": 2.4},
+    }
+    (tmp_path / "analysis.json").write_text(json.dumps({"fusion_optimizations": [fusion]}), encoding="utf-8")
+
+    state = SharedState()
+    state.record_trace_analyze(_payload(tmp_path / "trace.json"), _result_with_report(analysis_md))
+
+    assert state.last_trace_analyze["fusion_findings"] == [
+        {
+            "kind": "add_norm",
+            "operation": "Unfused Add + RMSNorm in `DecoderLayer`",
+            "projected_e2e_pct": 2.4,
+            "members": [{"kernel_names": ["add_kernel"], "kernel_launcher_path": "modeling.py(88): forward"}],
+        }
+    ]
+
+
 def test_missing_trace_report_path_yields_empty_text() -> None:
     """No ``trace_report_path`` field → ``analysis_md_text`` is ``""``."""
     state = SharedState()
@@ -51,6 +75,7 @@ def test_missing_trace_report_path_yields_empty_text() -> None:
     cached = state.last_trace_analyze
     assert cached["analysis_md_path"] == ""
     assert cached["analysis_md_text"] == ""
+    assert cached["fusion_findings"] == []
 
 
 def test_unreadable_analysis_md_degrades_silently(tmp_path: Path) -> None:

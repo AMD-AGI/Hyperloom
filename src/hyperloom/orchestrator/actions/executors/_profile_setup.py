@@ -457,6 +457,7 @@ def patch_for_profile(envs: dict[str, Any], framework: str, *, vllm_checkout: Pa
     from hyperloom.orchestrator.actions.executors._server_patcher import (
         ensure_sglang_patched_for_tracelens,
         ensure_vllm_patched_for_tracelens,
+        resolve_sglang_gc_patch_needed,
         resolve_sglang_shape_mode,
     )
 
@@ -465,6 +466,8 @@ def patch_for_profile(envs: dict[str, Any], framework: str, *, vllm_checkout: Pa
     sitecustomize = is_sglang and resolve_sglang_shape_mode() == "sitecustomize"
     write_tracelens_patch_status(envs, attempted=False, patched=False, fw=framework)
     if is_atom or not _tracelens_patch_enabled():
+        return ProfilePatch(False, sitecustomize, None, True)
+    if sitecustomize and not resolve_sglang_gc_patch_needed():
         return ProfilePatch(False, sitecustomize, None, True)
     if "vllm" in framework:
         patched = ensure_vllm_patched_for_tracelens(vllm_checkout)
