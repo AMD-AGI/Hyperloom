@@ -8,6 +8,8 @@ from __future__ import annotations
 
 import pytest
 
+from hyperloom.orchestrator.trace_analysis import _tracelens_checkout
+
 
 @pytest.fixture(scope="module")
 def tl_module():
@@ -22,12 +24,23 @@ def _clear_gateway_env(monkeypatch):
         monkeypatch.delenv(k, raising=False)
 
 
+@pytest.fixture(autouse=True)
+def _no_gateway_model_list(monkeypatch):
+    """No test reaches a real gateway: the model list is unavailable unless a test supplies one."""
+    monkeypatch.setattr(_tracelens_checkout, "_fetch_gateway_model_ids", lambda: set())
+
+
+def _serve_models(monkeypatch, *ids):
+    monkeypatch.setattr(_tracelens_checkout, "_fetch_gateway_model_ids", lambda: {i.lower() for i in ids})
+
+
 def _use_safe_gateway(monkeypatch):
     monkeypatch.setenv("OPENAI_BASE_URL", "https://gw.example.invalid/api/v1/llm-proxy/v1")
 
 
 def test_dot_form_opus_normalized_on_safe(tl_module, monkeypatch):
     _use_safe_gateway(monkeypatch)
+    _serve_models(monkeypatch, "claude-opus-4-7")
     monkeypatch.setenv("ANTHROPIC_MODEL", "Claude-Opus-4.7")
     assert tl_module._resolve_tracelens_model() == "claude-opus-4-7"
 
@@ -36,6 +49,7 @@ def test_unmarked_gateway_host_needs_an_explicit_marker(tl_module, monkeypatch):
     """A retired credential name no longer stands in for gateway detection."""
     monkeypatch.setenv("OPENAI_BASE_URL", "https://internal.example.invalid/api/v1")
     monkeypatch.setenv("LLM_GATEWAY_KEY", "ak-test")
+    _serve_models(monkeypatch, "claude-opus-4-7")
     monkeypatch.setenv("ANTHROPIC_MODEL", "Claude-Opus-4.7")
     assert tl_module._resolve_tracelens_model() == "Claude-Opus-4.7"
 
@@ -65,6 +79,7 @@ def test_non_safe_gateway_leaves_dot_form_untouched(tl_module, monkeypatch):
 
 def test_claude_model_backs_an_unset_anthropic_model(tl_module, monkeypatch):
     _use_safe_gateway(monkeypatch)
+    _serve_models(monkeypatch, "claude-opus-4-7", "claude-sonnet-4-5")
     monkeypatch.setenv("CLAUDE_MODEL", "Claude-Opus-4.7")
     assert tl_module._resolve_tracelens_model() == "claude-opus-4-7"
 
@@ -97,5 +112,55 @@ def test_no_gateway_env_leaves_dot_form_untouched(tl_module, monkeypatch):
 def test_self_hosted_litellm_base_url_is_treated_as_gateway(tl_module, monkeypatch):
     # Any 'litellm' host is treated as the strict gateway and normalized.
     monkeypatch.setenv("OPENAI_BASE_URL", "https://litellm.internal.example.com/v1")
+    _serve_models(monkeypatch, "claude-opus-4-7")
     monkeypatch.setenv("ANTHROPIC_MODEL", "Claude-Opus-4.7")
     assert tl_module._resolve_tracelens_model() == "claude-opus-4-7"
+
+
+def test_id_the_gateway_lists_is_sent_as_is(tl_module, monkeypatch):
+    """The project1 gateway lists Opus 5.5 in dot form and rejects ``claude-opus-5-5``."""
+    _use_safe_gateway(monkeypatch)
+    _serve_models(monkeypatch, "claude-opus-5.5", "claude-opus-4-7")
+    monkeypatch.setenv("ANTHROPIC_MODEL", "claude-opus-5.5")
+    assert tl_module._resolve_tracelens_model() == "claude-opus-5.5"
+
+
+def test_dash_id_the_gateway_lists_is_sent_as_is(tl_module, monkeypatch):
+    _use_safe_gateway(monkeypatch)
+    _serve_models(monkeypatch, "claude-opus-5.5", "claude-opus-4-7")
+    monkeypatch.setenv("ANTHROPIC_MODEL", "claude-opus-4-7")
+    assert tl_module._resolve_tracelens_model() == "claude-opus-4-7"
+
+
+def test_listed_id_is_matched_without_regard_to_case(tl_module, monkeypatch):
+    _use_safe_gateway(monkeypatch)
+    _serve_models(monkeypatch, "claude-opus-5.5")
+    monkeypatch.setenv("ANTHROPIC_MODEL", "Claude-Opus-5.5")
+    assert tl_module._resolve_tracelens_model() == "claude-opus-5.5"
+
+
+def test_unlisted_dot_id_is_swapped_to_the_dash_id_the_gateway_lists(tl_module, monkeypatch):
+    _use_safe_gateway(monkeypatch)
+    _serve_models(monkeypatch, "claude-opus-4-7")
+    monkeypatch.setenv("ANTHROPIC_MODEL", "Claude-Opus-4.7")
+    assert tl_module._resolve_tracelens_model() == "claude-opus-4-7"
+
+
+def test_unlisted_dash_id_is_swapped_to_the_dot_id_the_gateway_lists(tl_module, monkeypatch):
+    _use_safe_gateway(monkeypatch)
+    _serve_models(monkeypatch, "claude-opus-5.5")
+    monkeypatch.setenv("ANTHROPIC_MODEL", "claude-opus-5-5")
+    assert tl_module._resolve_tracelens_model() == "claude-opus-5.5"
+
+
+def test_id_in_neither_form_is_sent_unchanged(tl_module, monkeypatch):
+    _use_safe_gateway(monkeypatch)
+    _serve_models(monkeypatch, "claude-opus-5.5")
+    monkeypatch.setenv("ANTHROPIC_MODEL", "claude-haiku-9.9")
+    assert tl_module._resolve_tracelens_model() == "claude-haiku-9.9"
+
+
+def test_gateway_that_lists_no_models_gets_the_id_unchanged(tl_module, monkeypatch):
+    _use_safe_gateway(monkeypatch)
+    monkeypatch.setenv("ANTHROPIC_MODEL", "claude-opus-5.5")
+    assert tl_module._resolve_tracelens_model() == "claude-opus-5.5"
