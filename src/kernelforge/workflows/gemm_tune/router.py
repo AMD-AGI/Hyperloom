@@ -39,12 +39,12 @@ class TunerSpec:
 # Kernel signature patterns indicating 1-stage ASM (from server log)
 _1STAGE_PATTERN = re.compile(r"using 1stage default", re.IGNORECASE)
 
-# Architectures that cannot run FP4/MXFP4 GEMM (aiter requires gfx950).
 # How many runtime lookups a table has to have missed before its owner is worth booking time for. Same number as
 # tier3's DEFAULT_MIN_MISSES, read off the same demand report.
 DEMAND_MIN_MISSES = 25
 
-_FP4_UNSUPPORTED_GFX = {"gfx942", "gfx1201"}
+# AITER's FP4/MXFP4 path is qualified on gfx950; unresolved targets retain the router's fail-open contract.
+_FP4_SUPPORTED_GFX = "gfx950"
 
 _FP4_SKIP_REASON = "FP4/MXFP4 GEMM unsupported on {gfx_arch} (aiter requires gfx950)"
 
@@ -75,8 +75,8 @@ def _resolve_gfx_arch(gpu_type: str) -> str:
 
 
 def _fp4_unsupported_on(gfx_arch: str) -> bool:
-    """True if FP4/MXFP4 GEMM is known to be unsupported on this gfx arch."""
-    return gfx_arch in _FP4_UNSUPPORTED_GFX
+    """Return whether a known arch lacks the qualified AITER FP4/MXFP4 path."""
+    return bool(gfx_arch) and gfx_arch != _FP4_SUPPORTED_GFX
 
 
 def moe_stage_coverage(log_path: str | None) -> dict[str, Any]:
