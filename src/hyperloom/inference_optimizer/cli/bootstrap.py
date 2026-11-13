@@ -834,7 +834,8 @@ def _benchmark_mode() -> str:
 def resolve_session_base(session_dir: Path, args: argparse.Namespace, *, framework: str) -> BaseLaunch | None:
     """Resolve a fresh session's base launch; it settles the TP and EP the manifest and the seeded state record.
 
-    A PD session has no single-node base: it freezes its PD launch instead and returns ``None``.
+    A PD session has no single-node base: it freezes its PD launch and returns the client base its rounds measure it
+    with.
     """
     from .multi_node import freeze_pd_session_launch, is_pd_session
 
@@ -845,8 +846,7 @@ def resolve_session_base(session_dir: Path, args: argparse.Namespace, *, framewo
         query, inferencex_commit = server_session_query(
             args, framework=framework, benchmark_mode=benchmark_mode, concurrencies=concurrencies
         )
-        freeze_pd_session_launch(session_dir, args, query, inferencex_commit)
-        return None
+        return freeze_pd_session_launch(session_dir, args, query, inferencex_commit)
     return resolve_base_launch(
         args,
         session_dir,

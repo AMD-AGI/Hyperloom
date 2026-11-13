@@ -11,7 +11,7 @@ import sys
 from pathlib import Path
 from typing import Any
 
-from inference_suite.contracts.base_launch import LaunchQuery
+from inference_suite.contracts.base_launch import BaseLaunch, LaunchQuery
 
 from ..multi_node import TopologyHandoffError, topology_file_overlay
 
@@ -105,11 +105,14 @@ def is_pd_session(args: argparse.Namespace) -> bool:
 
 def freeze_pd_session_launch(
     session_dir: Path, args: argparse.Namespace, session: LaunchQuery, inferencex_commit: str = ""
-) -> None:
-    """Resolve a fresh node-list session's launch on the handed-over cluster and freeze it in ``session_dir``; exits 2
-    when no node list is handed over, the session's ``--pd-mode`` is not the node list's mode, or no source serves
-    the session."""
+) -> BaseLaunch:
+    """Resolve a fresh node-list session's launch on the handed-over cluster and freeze it in ``session_dir``, with the
+    client base its rounds measure it with, at whose topology the session then runs; exits 2 when no node list is
+    handed over, the session's ``--pd-mode`` is not the node list's mode, or no source serves the session."""
+    from inference_suite.multinode import client_base
+
     from ..multi_node.pd_session import PdSessionError, freeze_launch
+    from ..session.base_launch import write_base_launch
 
     nodes = _hand_off_node_list()
     if nodes is None:
@@ -124,6 +127,11 @@ def freeze_pd_session_launch(
     except PdSessionError as exc:
         _exit_refused(str(exc))
     print(f"multi-node: froze the {launch.mode.value} launch {launch.digest()} from {launch.source}")
+    base = client_base(launch, session)
+    write_base_launch(session_dir, base)
+    args.tp, args.ep = base.topology.tp, base.topology.ep
+    os.environ["TP"], os.environ["EP"] = str(base.topology.tp), str(base.topology.ep)
+    return base
 
 
 def _exit_refused(problem: str) -> None:

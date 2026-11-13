@@ -25,6 +25,7 @@ from hyperloom.inference_optimizer.multi_node import cli as mn_cli
 from hyperloom.inference_optimizer.multi_node import pd_session
 from hyperloom.inference_optimizer.multi_node._internal import external_state as ext
 from hyperloom.orchestrator.actions.executors import _multi_node_server_lifecycle as lifecycle
+from hyperloom.inference_optimizer.session.base_launch import read_base_launch
 
 _NODES = {
     "framework": "sglang",
@@ -109,6 +110,20 @@ def test_a_single_node_session_still_resolves_its_base(session: Path, monkeypatc
     monkeypatch.setattr(bootstrap, "resolve_base_launch", lambda *a, **k: "base")
     args = argparse.Namespace(nodes=1, mn_backend=None, conc=64, enable_conc_sweep=False)
     assert bootstrap.resolve_session_base(session, args, framework="sglang") == "base"
+
+
+def test_a_frozen_pd_session_gives_its_rounds_a_client_base(session: Path, monkeypatch) -> None:
+    for name in ("TP", "EP"):
+        monkeypatch.setenv(name, "1")
+    base = cli_mn.freeze_pd_session_launch(session, _args(), _SESSION)
+    assert read_base_launch(session) == base
+    assert (base.framework, base.topology.tp, base.args, dict(base.env)) == ("sglang", 8, (), {})
+    assert base.client is not None
+
+
+def test_a_node_list_session_has_server_control_whatever_backend_it_names(session: Path, monkeypatch) -> None:
+    monkeypatch.setenv("INFERENCE_OPTIMIZER_MN_BACKEND", "sglangrouter")
+    assert ext.external_has_server_control()
 
 
 def test_adoption_records_the_frozen_launch_and_its_digest(session: Path) -> None:
