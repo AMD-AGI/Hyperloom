@@ -7,18 +7,36 @@ from __future__ import annotations
 
 import dataclasses
 import tempfile
+import time
 from pathlib import Path
 
-from inference_suite.contracts.base_launch import BaseLaunch, LaunchQuery
+from inference_suite.contracts.base_launch import (
+    BaseLaunch,
+    ClientLaunch,
+    LaunchModel,
+    LaunchPoint,
+    LaunchQuery,
+    LaunchSource,
+    SourceKind,
+    Topology,
+)
+from inference_suite.frameworks import Framework
 from inference_suite.multinode.inferencex import CHECKOUT_DIRECTORIES
 from inference_suite.multinode.launch import Cluster
 from inference_suite.multinode.nodes import NodeList, NodeListError, RoleTopology
 from inference_suite.multinode.recipe import ResolveInputs, resolve
-from inference_suite.multinode.record import PdLaunch, Role, read_record
+from inference_suite.multinode.record import PdLaunch, PdMode, PdSourceKind, Role, read_record
 from inference_suite.multinode.ssh import SshClient
+from inference_suite.pins import INFERENCEX_CLIENT_COMMIT, INFERENCEX_TOOL
+from inference_suite.recipe.image_version import NO_RECIPE_IMAGE
 from inference_suite.recipe.inferencex import INFERENCEX_REPO
+from inference_suite.recipe.model import ATOM_ENTRYPOINT, SGLANG_ENTRYPOINT, VLLM_ENTRYPOINT
 from inference_suite.recipe.resolve import Miss, resolve_base
 from inference_suite.recipe.sources import Checkout, checkout_commit, checkout_main, fetch_sources
+
+_ENTRYPOINTS = {Framework.SGLANG: SGLANG_ENTRYPOINT, Framework.VLLM: VLLM_ENTRYPOINT, Framework.ATOM: ATOM_ENTRYPOINT}
+#: The PD sources an operator wrote; every other one is read from a table or recipe tree.
+_OPERATOR_SOURCES = frozenset({PdSourceKind.OPERATOR, PdSourceKind.REPLAY})
 
 
 def worker_base(session: LaunchQuery, nodes: NodeList, inferencex_commit: str = "") -> BaseLaunch | Miss:
@@ -59,6 +77,27 @@ def resolve_session(
         return resolve(nodes.query(session), inputs)
 
 
+def client_base(launch: PdLaunch, session: LaunchQuery) -> BaseLaunch:
+    """The base a round's client measures ``launch`` with: its framework, model and serving role's topology, and the
+    pinned InferenceX client. It carries no server layer, since the cluster serves ``launch`` itself."""
+    role = launch.role(Role.WORKER if launch.mode is PdMode.AGGREGATED else Role.DECODE)
+    kind = SourceKind.USER_FILE if launch.source.kind in _OPERATOR_SOURCES else SourceKind.DEFAULT_TABLE
+    return BaseLaunch(
+        query=dataclasses.replace(session, tp=None, ep=None),
+        source=LaunchSource(kind=kind, strategy=f"{launch.source.kind.value} {launch.digest()}"),
+        point=LaunchPoint(conc=session.concurrencies[0], exact=True),
+        image=NO_RECIPE_IMAGE,
+        framework=launch.framework.value,
+        entrypoint=_ENTRYPOINTS[launch.framework],
+        model=LaunchModel(session.model_id, launch.model),
+        topology=Topology(tp=role.tp, ep=role.ep),
+        args=(),
+        env={},
+        client=ClientLaunch(tool=INFERENCEX_TOOL, commit=INFERENCEX_CLIENT_COMMIT),
+        resolved_unix=int(time.time()),
+    )
+
+
 def cluster_of(nodes: NodeList, record: Path) -> Cluster:
     """The cluster of ``nodes``, host keys pinned in the node list's known_hosts file or beside ``record``.
 
@@ -83,4 +122,4 @@ def placed_launch(nodes: NodeList, record: Path) -> PdLaunch:
     return launch.with_hosts(nodes.role_hosts(), nodes.router)
 
 
-__all__ = ["cluster_of", "placed_launch", "resolve_session", "worker_base"]
+__all__ = ["client_base", "cluster_of", "placed_launch", "resolve_session", "worker_base"]

@@ -28,7 +28,7 @@ from inference_suite.multinode.record import (
     read_record,
     write_record,
 )
-from inference_suite.multinode.session import cluster_of, placed_launch, resolve_session
+from inference_suite.multinode.session import client_base, cluster_of, placed_launch, resolve_session
 from inference_suite.multinode.ssh import SshClient, SshError
 
 __all__ = [
@@ -36,6 +36,7 @@ __all__ = [
     "engines_gone",
     "replace_flags",
     "placed_launch",
+    "client_base",
     "cluster_of",
     "NODE_LIST_ENV",
     "RECORD_NAME",

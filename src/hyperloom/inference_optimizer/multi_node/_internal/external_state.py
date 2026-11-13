@@ -13,6 +13,8 @@ import re
 from pathlib import Path
 from typing import Any
 
+from inference_suite.multinode import NODE_LIST_ENV
+
 from ..state_paths import resolve_state_file, state_file_safe_to_read
 from .infera_support import ssh_role_port_offset
 from .ssh_client import DEFAULT_SSH_PORT
@@ -256,9 +258,12 @@ def external_has_server_control() -> bool:
     """True when external mode can restart servers (SSH for infera, head IP for rayjob)."""
     if not external_service_url():
         return False
+    get = handoff_lookup()
+    if get(NODE_LIST_ENV).strip():
+        return external_has_ssh_control()
     if external_has_ssh_control():
         return True
-    return bool(handoff_lookup()("HYPERLOOM_MN_EXT_HEAD_IP").strip())
+    return bool(get("HYPERLOOM_MN_EXT_HEAD_IP").strip())
 
 
 def _read_state_file(path: Path) -> dict[str, Any]:
