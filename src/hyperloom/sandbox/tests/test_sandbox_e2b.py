@@ -28,6 +28,7 @@ from hyperloom.sandbox import CreateOptions, OutputSinks, RunSettings
 from hyperloom.sandbox.e2b import E2BSandboxProvider, RetryPolicy, _LineSink
 from hyperloom.sandbox.socket import (
     IDEMPOTENCY_KEY,
+    PENDING_TIMEOUT_KEY,
     WORKSPACE_KEY,
     SandboxCreateFailed,
     SandboxDenied,
@@ -167,7 +168,7 @@ def test_create_sends_the_request_with_the_roles_key(service: _Service, provider
     [call] = service.calls("POST", "/v2/sandboxes")
     assert call.headers["x-api-key"] == KEY_DEV
     assert (call.body["templateID"], call.body["timeout"]) == ("dev", 90)
-    assert (call.body["metadata"], call.body["envVars"]) == ({"a": "b"}, {"X": "1"})
+    assert (call.body["metadata"], call.body["envVars"]) == ({"a": "b", PENDING_TIMEOUT_KEY: "5"}, {"X": "1"})
     measurement = provider.create("dev", role="measurement", timeout_sec=60, metadata={})
     assert measurement.sandbox_id == "sbx-1"
     assert service.calls("POST", "/v2/sandboxes")[-1].headers["x-api-key"] == KEY_MEASUREMENT
@@ -187,7 +188,9 @@ def test_create_sends_the_request_with_the_roles_key(service: _Service, provider
 def test_a_refused_create_is_one_of_the_socket_failures_and_not_replayed(
     service: _Service, provider: E2BSandboxProvider, status: int, expected: type[Exception]
 ) -> None:
-    service.reply("POST", "/v2/sandboxes", (status, {"code": status, "message": "pending_timeout"}))
+    """The words ``pending_timeout`` make only a 503 the service's pending limit; a 503 of no capacity is final."""
+    said = "no_capacity" if status == 503 else "pending_timeout"
+    service.reply("POST", "/v2/sandboxes", (status, {"code": status, "message": said}))
     with pytest.raises(expected) as refused:
         _create(provider)
     assert type(refused.value) is expected, "none of these is a quota refusal"
@@ -290,20 +293,19 @@ def test_a_replay_after_a_cut_that_finds_the_sandbox_failed_stops_there(
 @pytest.mark.parametrize(
     ("reason", "expected"),
     [
-        (PENDING_TIMEOUT_MESSAGE, SandboxUnavailable),
         (SAFE_CREATE_FAILED_MESSAGE, SandboxCreateFailed),
         (CREATE_FAILED_MESSAGE, SandboxCreateFailed),
         ("killed", SandboxCreateFailed),
         (None, SandboxCreateFailed),
     ],
-    ids=["pending_timeout", "sandbox_create_failed", "phase_failed", "killed", "id_only"],
+    ids=["sandbox_create_failed", "phase_failed", "killed", "id_only"],
 )
 def test_a_replay_told_its_key_is_spent_ends_as_the_stored_reason_says(
     service: _Service, provider: E2BSandboxProvider, reason: str | None, expected: type[Exception]
 ) -> None:
     """The gateway cut the first send while its sandbox was pending, and that sandbox has ended since: the replay's 410
-    names how. A pending timeout is the 503 the cut hid, so the create is unavailable (no capacity in time), not failed;
-    a create failure is the 500 it hid; a kill, or no stored reason, leaves this create no sandbox under its key either."""
+    names how. A create failure is the 500 the cut hid; a kill, or no stored reason, leaves this create no sandbox under
+    its key either. (A pending timeout is asked for again under a fresh key, see below.)"""
     service.reply("POST", "/v2/sandboxes", GATEWAY_CUTS[0], (410, key_spent_body(reason)), (201, SANDBOX))
     with pytest.raises(expected) as ended:
         _create(provider, metadata={IDEMPOTENCY_KEY: "k-1"})
@@ -324,8 +326,8 @@ def test_a_key_spent_before_the_first_send_is_gone_for_the_caller_to_replace(
 
 @pytest.mark.parametrize(
     "reason",
-    [SAFE_CREATE_FAILED_MESSAGE, CREATE_FAILED_MESSAGE, PENDING_TIMEOUT_MESSAGE, "killed"],
-    ids=["sandbox_create_failed", "phase_failed", "pending_timeout", "killed"],
+    [SAFE_CREATE_FAILED_MESSAGE, CREATE_FAILED_MESSAGE, "killed"],
+    ids=["sandbox_create_failed", "phase_failed", "killed"],
 )
 def test_a_key_spent_before_the_first_send_is_gone_whatever_ended_its_sandbox(
     service: _Service, provider: E2BSandboxProvider, reason: str
@@ -340,17 +342,98 @@ def test_a_key_spent_before_the_first_send_is_gone_whatever_ended_its_sandbox(
     assert _keys_sent(service) == ["k-1"]
 
 
-def test_a_pending_timeout_is_unavailable_and_its_key_is_not_replayed(
+def _pending_timeouts_sent(service: _Service) -> list[str]:
+    return [call.body["metadata"][PENDING_TIMEOUT_KEY] for call in service.calls("POST", "/v2/sandboxes")]
+
+
+PENDING_TIMEOUT_REFUSAL = (503, {"code": 503, "message": PENDING_TIMEOUT_MESSAGE})
+
+
+@pytest.mark.parametrize(
+    ("wait_sec", "sent"),
+    [(5, "5"), (5.9, "5"), (0.3, "1"), (1800, "1800"), (86400, "86400"), (90000, "86400")],
+    ids=["whole", "floored", "at_least_one", "measurement_wait", "at_most_a_day", "clamped_to_a_day"],
+)
+def test_every_create_tells_the_service_its_wait_as_the_pending_timeout(
+    service: _Service, provider: E2BSandboxProvider, wait_sec: float, sent: str
+) -> None:
+    """Whole seconds, so the service gives up on a queued sandbox no later than the create stops waiting for it, within
+    the 1 to 86400 the service accepts (it refuses any other value)."""
+    service.reply("POST", "/v2/sandboxes", (201, SANDBOX))
+    given = {IDEMPOTENCY_KEY: "k-1"}
+    _create(provider, metadata=given, options=CreateOptions(wait_sec=wait_sec))
+    assert _pending_timeouts_sent(service) == [sent]
+    assert given == {IDEMPOTENCY_KEY: "k-1"}, "the caller's mapping is not changed"
+
+
+def test_a_pending_timeout_the_caller_names_wins_on_every_send(service: _Service, provider: E2BSandboxProvider) -> None:
+    service.reply("POST", "/v2/sandboxes", PENDING_TIMEOUT_REFUSAL, (201, SANDBOX))
+    sb = _create(provider, metadata={IDEMPOTENCY_KEY: "k-1", PENDING_TIMEOUT_KEY: "42"})
+    assert sb.sandbox_id == "sbx-1"
+    assert _pending_timeouts_sent(service) == ["42", "42"]
+
+
+def test_a_pending_timeout_is_asked_again_under_a_fresh_key(service: _Service, provider: E2BSandboxProvider) -> None:
+    """The service deleted the sandbox: replaying its key would only be told the key is spent, so each new send carries
+    the next key, and tells the service the wait that is left."""
+    service.reply("POST", "/v2/sandboxes", PENDING_TIMEOUT_REFUSAL, PENDING_TIMEOUT_REFUSAL, (201, SANDBOX))
+    sb = _create(provider, metadata={IDEMPOTENCY_KEY: "k-1"}, options=CreateOptions(wait_sec=5))
+    assert sb.sandbox_id == "sbx-1"
+    assert _keys_sent(service) == ["k-1", "k-1:p1", "k-1:p2"]
+    first, *later = (int(sent) for sent in _pending_timeouts_sent(service))
+    assert first == 5
+    assert all(1 <= sent <= 4 for sent in later), "a later send waits only what is left"
+
+
+def test_a_pending_timeout_of_a_create_without_a_key_is_asked_again_without_one(
     service: _Service, provider: E2BSandboxProvider
 ) -> None:
-    """A 503 is not among the statuses a keyed create is replayed after, so the sandbox the next answer would give is
-    never asked for: the request count is the proof."""
-    service.reply("POST", "/v2/sandboxes", (503, {"code": 503, "message": PENDING_TIMEOUT_MESSAGE}), (201, SANDBOX))
+    service.reply("POST", "/v2/sandboxes", PENDING_TIMEOUT_REFUSAL, (201, SANDBOX))
+    sb = _create(provider, metadata={"a": "b"}, options=CreateOptions(wait_sec=5))
+    assert sb.sandbox_id == "sbx-1"
+    assert [IDEMPOTENCY_KEY in call.body["metadata"] for call in service.calls("POST", "/v2/sandboxes")] == [
+        False,
+        False,
+    ]
+
+
+@pytest.mark.parametrize(
+    "answers",
+    [
+        [(410, key_spent_body(PENDING_TIMEOUT_MESSAGE))],
+        [GATEWAY_CUTS[0], (410, key_spent_body(PENDING_TIMEOUT_MESSAGE))],
+    ],
+    ids=["spent_before_the_first_send", "spent_while_the_first_send_was_cut"],
+)
+def test_a_key_spent_at_the_pending_limit_is_replaced_by_a_fresh_key(
+    service: _Service, provider: E2BSandboxProvider, answers: list[tuple[int, Any]]
+) -> None:
+    """Whether an earlier process or this create's own first send queued the key's sandbox, the 410 says the service
+    deleted it for want of room in time: neither gone for the caller to replace nor a failure, the next key is asked."""
+    service.reply("POST", "/v2/sandboxes", *answers, (201, SANDBOX))
+    sb = _create(provider, metadata={IDEMPOTENCY_KEY: "k-1"}, options=CreateOptions(wait_sec=5))
+    assert sb.sandbox_id == "sbx-1"
+    assert _keys_sent(service) == ["k-1"] * len(answers) + ["k-1:p1"], "the spent key is never sent again"
+
+
+@pytest.mark.parametrize(
+    "answer",
+    [PENDING_TIMEOUT_REFUSAL, (410, key_spent_body(PENDING_TIMEOUT_MESSAGE))],
+    ids=["refused_at_the_pending_limit", "key_spent_at_the_pending_limit"],
+)
+def test_a_pending_timeout_that_outlasts_the_wait_is_unavailable_with_its_reason(
+    service: _Service, provider: E2BSandboxProvider, answer: tuple[int, Any]
+) -> None:
+    service.reply("POST", "/v2/sandboxes", answer)
+    started = time.monotonic()
     with pytest.raises(SandboxUnavailable) as refused:
-        _create(provider, metadata={IDEMPOTENCY_KEY: "k-1"})
-    assert type(refused.value) is SandboxUnavailable
-    assert PENDING_TIMEOUT_MESSAGE in str(refused.value), "the SaFE error is kept"
-    assert _keys_sent(service) == ["k-1"]
+        _create(provider, metadata={IDEMPOTENCY_KEY: "k-1"}, options=CreateOptions(wait_sec=0.3))
+    assert time.monotonic() - started < 2.0, "the wait bounds the fresh keys"
+    assert type(refused.value) is SandboxUnavailable, "no capacity in time: neither denied, gone nor failed"
+    assert PENDING_TIMEOUT_MESSAGE in str(refused.value), "the service's reason is kept"
+    keys = _keys_sent(service)
+    assert len(keys) > 1, "a fresh key was asked for while the wait lasted"
+    assert keys == ["k-1"] + [f"k-1:p{n}" for n in range(1, len(keys))], "no key is sent twice"
 
 
 def test_a_503_on_create_is_final_even_with_an_idempotency_key(service: _Service, provider: E2BSandboxProvider) -> None:
@@ -398,8 +481,8 @@ def test_a_429_over_the_grant_quota_is_back_pressure_and_not_replayed(
     ("status", "body"),
     [
         (429, {"code": 429, "message": "slow down"}),
-        (503, {"code": 503, "message": "pending_timeout"}),
         (503, {"code": 503, "message": "no_capacity"}),
+        (503, {"code": 503, "message": "template_unavailable: dev"}),
     ],
 )
 def test_a_rate_limit_or_no_capacity_is_not_quota_back_pressure(
@@ -587,9 +670,9 @@ def test_the_workspace_goes_with_every_create_and_a_workspace_the_caller_names_w
     provider.create("dev", role="measurement", timeout_sec=60, metadata={IDEMPOTENCY_KEY: "k-1"})
     provider.create("dev", role="dev", timeout_sec=60, metadata={WORKSPACE_KEY: "other"})
     assert [call.body["metadata"] for call in service.calls("POST", "/v2/sandboxes")] == [
-        {"a": "b", WORKSPACE_KEY: WORKSPACE},
-        {IDEMPOTENCY_KEY: "k-1", WORKSPACE_KEY: WORKSPACE},
-        {WORKSPACE_KEY: "other"},
+        {"a": "b", WORKSPACE_KEY: WORKSPACE, PENDING_TIMEOUT_KEY: "60"},
+        {IDEMPOTENCY_KEY: "k-1", WORKSPACE_KEY: WORKSPACE, PENDING_TIMEOUT_KEY: "60"},
+        {WORKSPACE_KEY: "other", PENDING_TIMEOUT_KEY: "60"},
     ]
     assert given == {"a": "b"}, "the caller's mapping is not changed"
 
@@ -611,7 +694,7 @@ def test_from_environ_sends_a_workspace_only_when_the_variable_names_one(
     service.reply("POST", "/v2/sandboxes", (201, SANDBOX))
     _create(provider, metadata={"a": "b"})
     [call] = service.calls("POST", "/v2/sandboxes")
-    assert call.body["metadata"] == sent
+    assert call.body["metadata"] == {**sent, PENDING_TIMEOUT_KEY: "60"}
 
 
 def test_a_blank_workspace_is_refused() -> None:
