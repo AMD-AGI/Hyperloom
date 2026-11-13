@@ -226,19 +226,6 @@ INSTALL = (
 )
 #: Arbor's exit code for a config it refuses, and only for that; its session's refusal file says why.
 EXIT_REFUSED = 2
-#: How Arbor classes the end of a run that exited 0, as the ``outcome`` of its exit record says (its host interface,
-#: 2.3 on): the run ended as it should; it handed its next step on; its harness stopped itself, so what it kept stands
-#: but it did not finish; or it stopped for a person to decide.
-FINISHED, HANDED_OVER, BROKEN, NEEDS_PERSON = "finished", "handed_over", "broken", "needs_person"
-#: The outcome of each exit reason, for a record that names none, as an Arbor before that interface writes it. A
-#: reason not listed is a finished run's.
-REASON_OUTCOMES = {
-    "aborted": BROKEN,
-    "retraction_conflict": NEEDS_PERSON,
-    "mapped": HANDED_OVER,
-    "ordered": HANDED_OVER,
-    "reported": HANDED_OVER,
-}
 #: The exit reason of a dossier pass that set its map, and the map's file in its session.
 MAPPED = "mapped"
 MAP_FILE = "directions.json"
@@ -1139,41 +1126,18 @@ def refused_reasons(path: Path) -> str:
     return "; ".join(str(reason) for reason in reasons if str(reason).strip())
 
 
-@dataclass(frozen=True)
-class ArborEnd:
-    """How Arbor says a run that exited 0 ended, as its exit file has it: the ``reason`` (else what is wrong with the
-    file), the ``outcome`` Arbor classes it as (:data:`FINISHED`, :data:`HANDED_OVER`, :data:`BROKEN` or
-    :data:`NEEDS_PERSON`; ``""`` when the file gives no reason) and the record's ``detail``."""
-
-    reason: str
-    outcome: str = ""
-    detail: str = ""
-
-
-def exit_end(path: Path) -> ArborEnd:
-    """How Arbor says its run ended, as the exit file at ``path`` it writes before an exit 0 has it. The outcome is
-    the record's own; a record without one, as an older Arbor writes it, gets its reason's (:data:`REASON_OUTCOMES`)."""
-
-    try:
-        document = json.loads(path.read_text(encoding=ENCODING))
-    except FileNotFoundError:
-        return ArborEnd("it wrote no exit reason")
-    except (OSError, ValueError) as error:
-        return ArborEnd(f"its exit reason cannot be read: {error}")
-    reason = document.get("reason") if isinstance(document, dict) else None
-    if not isinstance(reason, str) or not reason:
-        return ArborEnd(f"its exit file names no reason: {document!r}")
-    outcome, detail = document.get("outcome"), document.get("detail")
-    if not isinstance(outcome, str) or not outcome:
-        outcome = REASON_OUTCOMES.get(reason, FINISHED)
-    return ArborEnd(reason, outcome, detail.strip() if isinstance(detail, str) else "")
-
-
 def exit_reason(path: Path) -> str:
     """Why Arbor says its run ended, as the exit file at ``path`` it writes before an exit 0 has it; else what is
     wrong with that file."""
 
-    return exit_end(path).reason
+    try:
+        document = json.loads(path.read_text(encoding=ENCODING))
+    except FileNotFoundError:
+        return "it wrote no exit reason"
+    except (OSError, ValueError) as error:
+        return f"its exit reason cannot be read: {error}"
+    reason = document.get("reason") if isinstance(document, dict) else None
+    return reason if isinstance(reason, str) and reason else f"its exit file names no reason: {document!r}"
 
 
 def mapped(session: Path) -> bool:
@@ -1230,7 +1194,6 @@ __all__ = [
     "ACCURACY_POLICY",
     "ARBOR_PYTHON",
     "BASE_LAUNCH_FILE",
-    "BROKEN",
     "BLOCK_KEYS",
     "BRANCH_RUN",
     "BUILT",
@@ -1239,10 +1202,6 @@ __all__ = [
     "DOSSIER_PASS",
     "EVAL_ENVS",
     "EXIT_REFUSED",
-    "FINISHED",
-    "HANDED_OVER",
-    "NEEDS_PERSON",
-    "REASON_OUTCOMES",
     "HOST_RULE",
     "INSTALL",
     "LAUNCH_KEYS",
@@ -1258,7 +1217,6 @@ __all__ = [
     "SITE_ENV",
     "SITE_SINCE",
     "ArborCheckout",
-    "ArborEnd",
     "ArborRefused",
     "ArborRun",
     "ResolvedLaunch",
@@ -1268,7 +1226,6 @@ __all__ = [
     "bench_command",
     "carry_dossier",
     "dossier_notes",
-    "exit_end",
     "exit_reason",
     "generate_directions",
     "has_review_gate",

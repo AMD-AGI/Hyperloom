@@ -109,15 +109,8 @@ from hyperloom_multibranch.specialist.agent_onboarding import (
 )
 from hyperloom_multibranch.specialist.agent_session import BranchPlace
 from hyperloom_multibranch.specialist.agent_spend import AgentSpend, newest_write
-from hyperloom_multibranch.specialist.arbor_adapter import (
-    BROKEN,
-    EXIT_REFUSED,
-    NEEDS_PERSON,
-    ArborEnd,
-    exit_end,
-    refused_reasons,
-    served_config,
-)
+from hyperloom_multibranch.specialist.arbor_adapter import EXIT_REFUSED, exit_reason, refused_reasons, served_config
+from hyperloom_multibranch.specialist.arbor_end import exit_end
 from hyperloom_multibranch.specialist.dev_sandbox import MINUTE, TOO_MANY
 from hyperloom_multibranch.rulegate.rules import RETRACTION_ID
 from hyperloom_multibranch.specialist.judging import NOTICE
@@ -654,7 +647,7 @@ class AutonomousSession:
 
     async def _ended(self, manifest: AgentManifest, process: AgentProcess, watch: KeepWatch) -> None:
         """End the run of an agent that exited: for good when it refused its config, a crash when it failed, else once
-        what it kept last settled, saying whether it finished, broke or stopped for a person, as its exit file says."""
+        what it kept last settled."""
 
         if process.returncode == EXIT_REFUSED and manifest.snapshots is not None:
             why = refused_reasons(self._agent_dir / SOURCE_DIR / manifest.snapshots_refused)
@@ -663,7 +656,9 @@ class AutonomousSession:
             raise SessionRefused(refused)
         if process.returncode != 0:
             raise SessionCrashed(f"the agent exited {process.returncode}: {tail(await process.output())}")
-        end = self._exit_end(manifest) if manifest.snapshots is not None else None
+        end = (
+            exit_end(self._agent_dir / SOURCE_DIR / manifest.snapshots_exit) if manifest.snapshots is not None else None
+        )
         if not manifest.signals_keeps:
             await self._take(manifest, watch, watch.seq + 1)
         await self._learn(manifest.ledger, watch)
@@ -672,15 +667,12 @@ class AutonomousSession:
         ):
             await self._submit(manifest, watch)
             await self._pause()
-        finished = _ended_as(end)
+        finished = end.said() if end is not None else "the agent finished its run"
         await self._note(finished)
         raise SessionFinished(finished)
 
-    def _exit_end(self, manifest: AgentManifest) -> ArborEnd:
-        return exit_end(self._agent_dir / SOURCE_DIR / manifest.snapshots_exit)
-
     def _exit_reason(self, manifest: AgentManifest) -> str:
-        return self._exit_end(manifest).reason
+        return exit_reason(self._agent_dir / SOURCE_DIR / manifest.snapshots_exit)
 
     async def _observe(self, manifest: AgentManifest, watch: KeepWatch) -> None:
         """Read the agent's state the moment its keep file shows a new keep: by the time an import can go, the agent
@@ -1086,21 +1078,6 @@ class AutonomousSession:
     async def _note(self, content: str) -> None:
         entry = BranchLogEntry(self._start.branch, BranchLogType.RESULT, f"{NOTICE} {content}")
         await self._place.blackboard.append_branch_log(entry)
-
-
-def _ended_as(end: ArborEnd | None) -> str:
-    """What a branch's log says of an agent's run that exited 0: that it finished, with its exit reason, unless its
-    exit file classes the end otherwise. A run whose harness stopped itself broke, and one that stopped for a person
-    to decide did not finish either: each is said so, with the record's detail, which says what to look at."""
-
-    if end is None:
-        return "the agent finished its run"
-    why = f"{end.reason} ({end.detail})" if end.detail else end.reason
-    if end.outcome == BROKEN:
-        return f"the agent's run broke: {why}"
-    if end.outcome == NEEDS_PERSON:
-        return f"the agent's run stopped for a person to decide: {why}"
-    return f"the agent finished its run: {end.reason}"
 
 
 def _without_refused(kept: KeptChange, launch: LaunchConfig, watch: KeepWatch) -> KeptChange:
