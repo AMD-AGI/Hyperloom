@@ -123,7 +123,8 @@ PROFILER_SNAPSHOT_FAILED = "profiler_snapshot_failed"
 #: framework, every sandbox of that image hangs the same way at the same point, and the candidate, whose measurement runs
 #: without the profiler, is not what failed. An infrastructure failure every sandbox repeats
 #: (``hyperloom_multibranch.toolbox.attempts`` ends the test with it at once). The reason is ``<this>: <the server log's
-#: last line>`` when the log has one. A stall before the window opened, or after it closed, stays ``server_stalled``.
+#: last line>`` when the log has one. A stall before the window opened, or after it closed, stays ``server_stalled``, and
+#: so does one whose only sign is an unanswered ``/start_profile``: the window sends it whatever the server is doing.
 PROFILER_HUNG = "profiler_hung"
 
 #: ``error_class`` values a runner, the hosted backend or the platform reports that are not about the candidate.
