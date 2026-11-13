@@ -626,18 +626,10 @@ def _restore_live_tree(backups: list[dict[str, Any]]) -> None:
 
 
 def _clear_python_kernel_caches(target: Path) -> dict[str, Any]:
-    """Clear Python / Triton / Inductor caches around a Python patch.
+    """Invalidate Python/compiler artifacts, including vLLM graphs referencing Triton.
 
-    Removes ``__pycache__`` dirs near the target plus the well-known Triton and
-    torch-inductor cache directories so a re-import recompiles the patched
-    kernel.
-
-    Args:
-        target (Path): The patched Python source file.
-
-    Returns:
-        dict[str, Any]: ``{"status": "ok", "removed": [...]}`` listing the
-            paths that were removed.
+    Resolve vLLM's root from VLLM_CACHE_ROOT, then XDG_CACHE_HOME, then HOME.
+    Return the removed paths; filesystem removal remains best-effort.
     """
     removed: list[str] = []
 
@@ -660,10 +652,14 @@ def _clear_python_kernel_caches(target: Path) -> dict[str, Any]:
         remove_path(cache_dir)
 
     home = Path(os.environ.get("HOME", "~")).expanduser()
+    home_cache = home / ".cache"
+    cache_root = Path(os.environ.get("XDG_CACHE_HOME", str(home_cache)))
+    vllm_cache_root = Path(os.environ.get("VLLM_CACHE_ROOT", str(cache_root / "vllm"))).expanduser()
     for path in (
         home / ".triton" / "cache",
-        home / ".cache" / "triton",
-        home / ".cache" / "torch" / "inductor",
+        home_cache / "triton",
+        home_cache / "torch" / "inductor",
+        vllm_cache_root / "torch_compile_cache",
     ):
         if path.exists():
             remove_path(path)
