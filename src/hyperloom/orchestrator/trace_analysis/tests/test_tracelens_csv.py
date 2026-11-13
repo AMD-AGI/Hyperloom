@@ -1195,6 +1195,23 @@ def test_write_run_config_names_the_one_standalone_job(tmp_path, framework, capt
     assert job.get("capture_folder") == (str(capture_dir.resolve()) if capture else None)
 
 
+def test_write_run_config_drops_a_capture_folder_outside_inference_mode(tmp_path):
+    trace = tmp_path / "trace.json.gz"
+    trace.touch()
+    capture_dir = tmp_path / "capture_traces"
+    capture_dir.mkdir()
+
+    path = tlr.write_run_config(
+        output_dir=tmp_path,
+        trace_path=trace,
+        platform="MI300X",
+        analysis_mode=tracelens_analysis_mode("custom"),
+        capture_folder=capture_dir,
+    )
+
+    assert "capture_folder" not in yaml.safe_load(path.read_text(encoding="utf-8"))["jobs"][0]
+
+
 def test_124_run_tracelens_skill_uses_sdk_and_artifacts(tmp_path):
     import asyncio
     from dataclasses import dataclass
