@@ -440,6 +440,29 @@ def test_a_cut_off_dsh_session_log_still_yields_its_complete_records(tmp_path: P
     assert trace.response == "DONE"
 
 
+@pytest.mark.parametrize("version", [3, 4, 5])
+def test_a_session_log_of_any_schema_version_is_read(tmp_path: Path, version: int) -> None:
+    """The harness names its log for its schema version; a newer harness must not read as zero spend."""
+    home = tmp_path / ".dsh"
+    _write_session_log(home / "sessions" / "ws" / "session-0" / f"session.v{version}.jsonl", _ROOT_SESSION)
+
+    trace = parse_dsh_session_trace(home)
+    assert trace.usage is not None
+    assert trace.usage["output_tokens"] == 67 + 3
+    assert trace.response == "DONE"
+
+
+def test_a_session_left_in_two_schema_versions_is_counted_once(tmp_path: Path) -> None:
+    home = tmp_path / ".dsh"
+    session = home / "sessions" / "ws" / "session-0"
+    _write_session_log(session / "session.v3.jsonl", _ROOT_SESSION)
+    _write_session_log(session / "session.v4.jsonl", _ROOT_SESSION)
+
+    trace = parse_dsh_session_trace(home)
+    assert trace.usage is not None
+    assert trace.usage["output_tokens"] == 67 + 3
+
+
 def test_a_dsh_run_without_a_session_log_is_reported_not_read_as_zero_spend(tmp_path: Path) -> None:
     trace = parse_dsh_session_trace(tmp_path / ".dsh")
     assert trace.usage is None
