@@ -426,6 +426,81 @@ def test_mcp_servers_become_dsh_client_rows_without_their_secrets(
     assert {header_ref[1], env_ref[1]} == {f"process.env.{name}" for name in private}
 
 
+def _dsh_request(tmp_path: Path) -> dsh_launch.DshLaunchRequest:
+    return dsh_launch.DshLaunchRequest(
+        executable="/usr/bin/dsh",
+        model="claude-opus-5.5",
+        mcp_config_path=None,
+        workspace=tmp_path / "workspace",
+        system_prompt="sys",
+        user_prompt="usr",
+    )
+
+
+def test_the_output_token_cap_reaches_the_dsh_specialist_patch(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """A routed model whose output limit is below the harness default needs the cap on every request."""
+    _pin_provider_env(monkeypatch, _OPENAI_ENV)
+    monkeypatch.setenv("HYPERLOOM_DSH_MAX_TOKENS", "64000")
+
+    launch = dsh_launch.build_dsh_launch(_dsh_request(tmp_path), dict(_OPENAI_ENV))
+
+    patch = Path(launch.cmd[launch.cmd.index("--patch") + 1]).read_text(encoding="utf-8")
+    assert _patch_rows(patch)["llm-deepseek"]["config"] == {"maxTokens": 64000}
+
+
+def test_the_dsh_specialist_patch_keeps_the_harness_default_cap_when_none_is_set(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _pin_provider_env(monkeypatch, _OPENAI_ENV)
+    monkeypatch.delenv("HYPERLOOM_DSH_MAX_TOKENS", raising=False)
+
+    launch = dsh_launch.build_dsh_launch(_dsh_request(tmp_path), dict(_OPENAI_ENV))
+
+    patch = Path(launch.cmd[launch.cmd.index("--patch") + 1]).read_text(encoding="utf-8")
+    assert "llm-deepseek" not in _patch_rows(patch)
+
+
+@pytest.mark.parametrize("raw", ["0", "-5", "many"])
+def test_an_invalid_output_token_cap_fails_the_dsh_task(
+    raw: str, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _pin_provider_env(monkeypatch, _OPENAI_ENV)
+    monkeypatch.setenv("HYPERLOOM_DSH_MAX_TOKENS", raw)
+
+    with pytest.raises(SpecialistAgentUnavailableError, match="HYPERLOOM_DSH_MAX_TOKENS"):
+        dsh_launch.build_dsh_launch(_dsh_request(tmp_path), dict(_OPENAI_ENV))
+
+
+def test_the_output_token_cap_is_passed_to_the_harness_runtime(tmp_path: Path) -> None:
+    from hyperloom_common.llm import deepseek_session
+
+    seen: dict[str, Any] = {}
+
+    class _Harness:
+        def __init__(self, **kwargs: Any) -> None:
+            seen.update(kwargs)
+
+        def start(self) -> None:
+            return None
+
+    class _Sdk:
+        DeepSeekHarness = _Harness
+
+    deepseek_session.start_harness(
+        _Sdk(),
+        deepseek_session.HarnessLaunch(
+            dsh_home=tmp_path / "home",
+            cwd=tmp_path,
+            model="claude-opus-5.5",
+            reasoning_effort="high",
+            env={"HYPERLOOM_DSH_MAX_TOKENS": "64000"},
+            request_timeout_sec=30.0,
+        ),
+    )
+
+    assert seen["max_tokens"] == 64000
+
+
 def test_a_cut_off_dsh_session_log_still_yields_its_complete_records(tmp_path: Path) -> None:
     """A reaped run leaves a half-written final line; the records before it are still the run's."""
     home = tmp_path / ".dsh"
