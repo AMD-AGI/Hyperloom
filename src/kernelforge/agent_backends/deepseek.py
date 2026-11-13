@@ -290,7 +290,8 @@ class DeepSeekHarnessBackend:
                 request_timeout_sec=float(spec.timeout_sec or self.runtime.timeout_sec),
                 initialize_timeout_sec=float(self.runtime.options.get("initialize_timeout_sec", 120)),
             )
-            return start_harness(sdk, launch)
+            with _as_forge_unavailable():
+                return start_harness(sdk, launch)
         except sdk_failures() as exc:
             raise DeepSeekHarnessUnavailableError(f"DeepSeek Harness initialization failed: {exc}") from exc
 
