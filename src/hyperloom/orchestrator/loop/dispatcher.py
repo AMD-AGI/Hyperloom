@@ -1180,6 +1180,14 @@ class DispatcherCollaborator(DeadHolderAccountingMixin, CoordinatorCollaborator)
             ``None``.
         """
         action = str(action_name or "").strip()
+        if self.shared_state.stop_reason:
+            return None
+        # Consulted for every action, not only the sequence set below: the gate covers
+        # sweep, profile and roofline, none of which are sequence actions, and a gate
+        # reachable only through that set would silently deny explore alone.
+        gate = self._export_gate_denial_for_action(action)
+        if gate is not None:
+            return gate
         sequence_actions = {
             "target_analysis",
             "baseline",
@@ -1189,8 +1197,6 @@ class DispatcherCollaborator(DeadHolderAccountingMixin, CoordinatorCollaborator)
         }
         if action not in sequence_actions:
             return None
-        if self.shared_state.stop_reason:
-            return None
         if self.shared_state.baseline_tput <= 0 and action not in {"baseline", "target_analysis"}:
             return PolicyDenied(
                 f"action={action!r} denied: baseline must run first",
@@ -1198,6 +1204,48 @@ class DispatcherCollaborator(DeadHolderAccountingMixin, CoordinatorCollaborator)
                 hint="propose/delegate `baseline` until baseline_tput > 0",
             )
         return None
+
+    def _export_gate_denial_for_action(self, action: str) -> PolicyDenied | None:
+        """Refuse search actions until the declared ahead-of-time export lands.
+
+        Inert unless the operator declared ``aoti.enabled``. While the accepted module
+        does not export, a search action spends budget optimizing a path the deliverable
+        will not take.
+
+        Keyed on whether ``current_best`` exports *now*, not on whether an export ever
+        landed. ``_export_regression_refusal`` normally keeps those the same by reverting
+        any candidate that cannot be shown to export; this is the fail-closed backstop for
+        the lane that bypasses it, where an enablement round keeps on bring-up rather than
+        throughput. Search is no more useful on an eager best than before the first export.
+        """
+        if action not in {"explore", "sweep", "profile", "roofline"}:
+            return None
+        if self.shared_state.current_best_exports:
+            return None
+        from hyperloom.common.optimization_scope import aoti_config
+
+        try:
+            config = aoti_config()
+        except ValueError:
+            # Unreadable mid-apply, or malformed. Hold the gate rather than admitting
+            # search on a transient: a false denial costs one tick, a false admission
+            # spends the budget the gate exists to protect.
+            return self._export_gate_denied(action, "the optimization scope is unreadable")
+        if config is None or not config.enabled:
+            return None
+        if self.shared_state.export_landed:
+            return self._export_gate_denied(
+                action, "an export landed but the accepted module no longer exports; its run counters are missing"
+            )
+        return self._export_gate_denied(action, "ahead-of-time export has not landed yet")
+
+    @staticmethod
+    def _export_gate_denied(action: str, why: str) -> PolicyDenied:
+        return PolicyDenied(
+            f"action={action!r} denied: {why}",
+            rule="export_gate",
+            hint="land the whole-model torch.export + aoti_compile_and_package first; no eager fallback",
+        )
 
     def admission_cost_minutes(self, action_name: str) -> float:
         """What a catalogued action is admitted at, priced on this session's measured baseline round once one exists."""

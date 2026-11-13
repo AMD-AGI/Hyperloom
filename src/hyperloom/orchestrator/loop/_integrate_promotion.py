@@ -15,7 +15,7 @@ from hyperloom.inference_optimizer.session.optimization_journal import Verdict
 
 from ..actions.executors._integrate_vocabulary import KEEP_STATUSES
 from ..measurement.integrate_performance import integrate_measurement_fields
-from ..measurement.runtime_findings import KEEP_REASON_CORRECTNESS_FIX
+from ..measurement.runtime_findings import KEEP_REASON_CORRECTNESS_FIX, KEEP_REASON_EXPORT_LANDED
 from ..state.task_registry import Task
 from ._keep_patch_column import _is_patch_column_keep, _lever_for_keep, _source_layer_handles
 from .launch_controls import LAUNCH_CONTROL_KEYS
@@ -169,6 +169,25 @@ def _kept_launch_controls(result: Mapping[str, Any], measurement: Mapping[str, A
     return {**controls, "extra_server_args": launched, "effective_extra_server_args": launched}
 
 
+def _keep_on_correctness_fields(result: Mapping[str, Any]) -> dict[str, Any]:
+    """The extra KEEP fields for a landing the integrate gate bounded rather than a gain.
+
+    A verified correctness fix is one. So is the first export: it is kept on correctness
+    too, and becomes the grading anchor, so what follows is measured against the exported
+    path rather than the eager one it replaced. Neither is attributable to a gain.
+    """
+    reason = result.get("keep_reason")
+    if reason == KEEP_REASON_CORRECTNESS_FIX:
+        return {
+            "keep_reason": KEEP_REASON_CORRECTNESS_FIX,
+            "resolves_finding": str(result.get("resolves_finding") or ""),
+            "attribution_eligible": False,
+        }
+    if reason == KEEP_REASON_EXPORT_LANDED:
+        return {"keep_reason": KEEP_REASON_EXPORT_LANDED, "attribution_eligible": False}
+    return {}
+
+
 def _integrate_keep_origin(
     result: Mapping[str, Any], task_params: Mapping[str, Any], source_phase: str
 ) -> dict[str, Any]:
@@ -191,11 +210,7 @@ def _integrate_keep_origin(
         fields["framework_agent_authoring"] = True
     if result.get("enablement") or task_params.get("enablement"):
         fields["recipe_publishable"] = False
-    # A verified correctness fix was bounded by the integrate gate, not by a gain.
-    if result.get("keep_reason") == KEEP_REASON_CORRECTNESS_FIX:
-        fields["keep_reason"] = KEEP_REASON_CORRECTNESS_FIX
-        fields["resolves_finding"] = str(result.get("resolves_finding") or "")
-        fields["attribution_eligible"] = False
+    fields.update(_keep_on_correctness_fields(result))
     return fields
 
 
@@ -339,9 +354,7 @@ class IntegratePromotionMixin:
         new_tput = measurement.get("output_throughput", result.get("output_throughput"))
         kept_flag = status == "kept" and isinstance(new_tput, (int, float)) and float(new_tput) > 0
         completed_pending = self._confirmed_integrate_completion(result, task, kept_flag=kept_flag)
-        changed = self._record_authored_levers(result)
-        if status == _KEPT_INERT:
-            changed = self._record_inert_source_layer(result) or changed
+        changed = self._record_keep_bookkeeping(result, kept_flag=kept_flag, measurement=measurement, status=status)
         task_params = (getattr(task, "params", None) or {}) if task is not None else {}
         enablement_landing = bool(result.get("enablement") or task_params.get("enablement"))
         lifted = False
@@ -368,6 +381,109 @@ class IntegratePromotionMixin:
                 include_patches=True,
             )
         outcome.changed = changed
+
+    def _record_keep_bookkeeping(
+        self, result: Mapping[str, Any], *, kept_flag: bool, measurement: Mapping[str, Any], status: str
+    ) -> bool:
+        """Record what this integrate changed outside the stack; True when any of it moved state."""
+        changed = self._record_authored_levers(result)
+        if self._record_export_gate(kept_flag=kept_flag, workspace=str(measurement.get("workspace") or "")):
+            changed = True
+        if status == _KEPT_INERT and self._record_inert_source_layer(result):
+            changed = True
+        return changed
+
+    def _record_export_gate(self, *, kept_flag: bool, workspace: str = "") -> bool:
+        """Judge whether the module this KEEP accepted really exported.
+
+        Inert unless ``aoti.enabled``. The evidence is the run's own call counters, not
+        its source: a module that mentions the AOTI entry points in a helper nobody
+        calls, in a dead branch, or in the ``except`` arm of a fallback to eager parses
+        the same as one that exports, and benchmarks just as happily. Counting the calls
+        separates them -- see ``measurement.aoti_evidence``.
+
+        Every KEEP is judged, not just the ones before the first landing: ``current_best``
+        moves whenever a KEEP lands, so "does the deliverable export?" has a fresh answer
+        each time and is recorded as one in ``current_best_exports``.
+
+        Losing an export is prevented rather than recorded -- ``_export_regression_refusal``
+        reverts any candidate that cannot be shown to export, so an accepted export keeps
+        the slot. This stays a judgement rather than an assertion because an enablement
+        round keeps through a lane that never reaches that gate; if one lands eager, the
+        dispatcher closing the gate is the right outcome, not a crash.
+
+        ``export_landed`` stays one-way, and only the first-export throughput waiver reads
+        it. Keeping the two apart matters: a flag that reopened when the gate closed would
+        re-arm that waiver, and a slow export waived back in could trade the slot with
+        eager indefinitely.
+
+        There is no source-reading fallback. A promotion judges a benchmark that just ran
+        under this build, so its counters are always present -- including on a resumed
+        session, whose next KEEP is a fresh run.
+
+        ``export_attempts`` counts rounds that cleared their gate without exporting. Most
+        are now counted by ``_gate_perf``, where ``_export_regression_refusal`` turns them
+        into REVERTs before they reach here; this increment covers the lane that bypasses
+        that gate, where an enablement round keeps on bring-up rather than throughput. An
+        ordinary REVERT is still not an export attempt -- it is a candidate that failed on
+        its own merits -- and counting one would read as progress toward an export.
+
+        Returns whether it mutated state, so the caller persists it; a failed attempt is
+        the one this counter exists to record, and that path has no other reason to save.
+        """
+        from hyperloom.common.optimization_scope import aoti_config
+
+        try:
+            config = aoti_config()
+        except ValueError:
+            return False
+        if config is None or not config.enabled:
+            return False
+        if not kept_flag:
+            return False
+        exported = self._keep_really_exported(workspace)
+        changed = exported != self.shared_state.current_best_exports
+        self.shared_state.current_best_exports = exported
+        if exported:
+            if not self.shared_state.export_landed:
+                self.shared_state.export_landed = True
+                changed = True
+            return changed
+        self.shared_state.export_attempts += 1
+        return True
+
+    def _keep_really_exported(self, workspace: str) -> bool:
+        """Whether this KEEP's benchmark ran an exported module.
+
+        ``workspace`` is the graded leg's own run directory -- ``bench_result``'s, not the
+        verdict's. The verdict names the attempt's task root, under which ``read_evidence``
+        would also sum the switch-off parity leg, which runs this same patch with the
+        switches *unset* and reports ``invoked=0`` by design, and any counters an earlier
+        attempt left there: the root is keyed by task id and reused. Either opens the gate
+        for a module that never exported. The parity leg is the live one here -- it runs
+        after the perf gate reads, but before this does.
+        """
+        from ..measurement.aoti_evidence import read_evidence
+
+        evidence = read_evidence(workspace) if workspace else None
+        if evidence is None or not evidence.observed:
+            # The counters are armed for every run of an aoti workload, so their absence
+            # is a broken harness, not a verdict -- most likely the start-up shim never
+            # loaded. Hold the gate and say which it is.
+            log.warning(
+                "export gate: no run counters under %r; the start-up shim did not run, "
+                "so this KEEP cannot be judged and the gate stays shut",
+                workspace or "<no workspace>",
+            )
+            return False
+        if not evidence.exported:
+            log.info(
+                "export gate: KEEP did not export (compiled=%d loaded=%d invoked=0 across %d process(es))",
+                evidence.compiled,
+                evidence.loaded,
+                evidence.processes,
+            )
+        return evidence.exported
 
     def _record_inert_source_layer(self, result: Mapping[str, Any]) -> bool:
         """Record the source an inert KEEP committed, leaving the stack and ``current_best`` alone.

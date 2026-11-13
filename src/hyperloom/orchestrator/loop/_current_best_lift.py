@@ -21,7 +21,7 @@ from hyperloom.orchestrator.lever import FRAMEWORK_STACK_ACTION, lever_kind_for_
 from hyperloom.plugs import progress as _progress
 
 from ..framework.artifacts import candidate_key
-from ..measurement.runtime_findings import KEEP_REASON_CORRECTNESS_FIX
+from ..measurement.runtime_findings import KEEP_REASON_CORRECTNESS_FIX, KEEP_REASON_EXPORT_LANDED
 from ..source_snapshot import report_missing_source_snapshot
 from ..state.shared_state import resolve_graded_comparison
 from .launch_controls import kept_launch_controls
@@ -264,7 +264,11 @@ class CurrentBestLiftMixin:
             )
             _progress.warn("winner_vetoed", f"{task_kind} winner refused by {graded.vetoed_by}: {graded.veto_reason}")
             return True
-        correctness_fix = bv.get("keep_reason") == KEEP_REASON_CORRECTNESS_FIX
+        # A verified correctness fix, and the first export (an eager reference is not a
+        # deliverable), were already bounded by the integrate gate: neither has to beat
+        # the anchor to be recorded. Without the lift nothing snapshots the hook, and the
+        # deployment export then has no module to ship.
+        correctness_fix = bv.get("keep_reason") in (KEEP_REASON_CORRECTNESS_FIX, KEEP_REASON_EXPORT_LANDED)
         if graded.graded_on_intvty and graded.verdict != VERDICT_KEEP and not correctness_fix:
             log.info(
                 "current_best held: %s winner refused by %s, intvty %.1f->%.1f tput %.1f->%.1f",
