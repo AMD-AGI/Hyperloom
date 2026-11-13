@@ -11,6 +11,7 @@ from typing import Any
 
 from hyperloom_common.env import env_bool
 
+from ..state.gaps import STATIC_RECON_GAP_PREFIX
 from ..state.task_registry import Task, TaskSpec
 from ..collaborator import CoordinatorCollaborator
 from . import machine_state as _phase_state
@@ -43,7 +44,7 @@ def _bridge_candidate_gap(cand: dict[str, Any], idx: int) -> dict[str, Any] | No
     raw_id = str(cand.get("id") or f"cand{idx}").strip() or f"cand{idx}"
     slug = "".join(c if (c.isalnum() or c in "._-") else "_" for c in raw_id)[:80]
     return {
-        "canonical_id": f"gap.static_recon.{slug}",
+        "canonical_id": f"{STATIC_RECON_GAP_PREFIX}{slug}",
         "symptom": _bridge_symptom(cand, predicate_file, why),
         "layer": "static_recon",
         "severity": "medium",
@@ -195,7 +196,7 @@ class InternalTasksPhase(CoordinatorCollaborator):
         params: dict[str, Any] = {
             "domain": "static_recon_specialist",
             "source_phase": str(state.phase or "PRELUDE").strip().upper(),
-            "gap_canonical_id": f"gap.static_recon.{slug}",
+            "gap_canonical_id": f"{STATIC_RECON_GAP_PREFIX}{slug}",
             "gap_symptom": (
                 "Grep the framework source for un-bridged capability switches "
                 "(predicates that silently disable a faster path for this "
