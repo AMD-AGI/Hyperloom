@@ -685,6 +685,12 @@ class SharedState(_RenderMixin, GapsStateMixin, _PhaseStateMixin, _RooflineState
     rounds_since_last_keep: dict[str, int] = field(default_factory=dict)
     # Patch verdict ledger keyed by review subject (a specialist task_id, or a candidate id for a PR pre-screen); Critic must approve/advise before PolicyGate allows the integrate_patch delegate.
     specialist_patch_verdicts: dict[str, str] = field(default_factory=dict)
+    # Export gate (only when optimization_scope declares aoti.enabled). Whether the *currently accepted* module exported, judged from the run counters of each KEEP that can take the slot. The dispatcher admits only export work while it is False. After the first landing it does not go True->False: lift_to_current_best refuses, from every lane, a winner that cannot be shown to export -- including one whose counters are missing -- so a landed export keeps the slot, and a KEEP the lift refuses does not re-judge it either. A session resumed from state written before that rule can still carry True here with False below; the dispatcher reads that combination as an unexplained loss and holds the gate shut.
+    current_best_exports: bool = False
+    # Whether an export has *ever* landed. One-way by design, and read only by the first-export throughput waiver: an eager configuration is not a deliverable, so the first export is accepted on correctness alone. Once one has landed there is an exporting anchor to grade against and the waiver must never apply again -- which is why this is separate from current_best_exports.
+    export_landed: bool = False
+    # Integrate rounds that passed without the export landing. Reporting only, deliberately not a terminal cap: the export error is not captured, so N attempts cannot distinguish N blockers from one blocker N times.
+    export_attempts: int = 0
     # Intervention-mix ledger ({change_type∈{config,code_patch,config_attempt,code_patch_attempt}}); Robustness detects config-only loops.
     intervention_mix: list[dict[str, Any]] = field(default_factory=list)
     # Research scout bookkeeping; master switch ``--no-research-scout``; seen_pr_ids shared with FRAMEWORK to avoid re-mining.
