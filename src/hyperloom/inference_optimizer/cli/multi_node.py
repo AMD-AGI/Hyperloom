@@ -10,7 +10,7 @@ import os
 import sys
 from typing import Any
 
-from ..multi_node import TopologyHandoffError, topology_file_overlay
+from ..multi_node import TopologyHandoffError, normalize_mn_backend, topology_file_overlay
 
 
 def _topology_file_overlay() -> dict[str, str] | None:
@@ -50,16 +50,16 @@ def _resolve_gpus_per_node(args: argparse.Namespace) -> int:
 def _resolve_mn_backend(args: argparse.Namespace) -> str:
     """Multi-node backend selector: --mn-backend > $TOPOLOGY_HANDOFF_FILE backend > $INFERENCE_OPTIMIZER_MN_BACKEND > rayjob."""
     from_file = (_topology_file_overlay() or {}).get("INFERENCE_OPTIMIZER_MN_BACKEND", "")
-    backend = (
+    backend = normalize_mn_backend(
         (getattr(args, "mn_backend", None) or "").strip()
         or from_file
         or os.environ.get("INFERENCE_OPTIMIZER_MN_BACKEND", "").strip()
         or os.environ.get("MN_BACKEND", "").strip()
         or "rayjob"
-    ).lower()
-    if backend not in ("rayjob", "infera"):
+    )
+    if backend not in ("rayjob", "infera", "atomesh", "sglangrouter"):
         print(
-            f"ERROR: --mn-backend must be 'rayjob' or 'infera', got {backend!r}",
+            f"ERROR: --mn-backend must be 'rayjob', 'infera', 'atomesh', or 'sglangrouter', got {backend!r}",
             file=sys.stderr,
         )
         sys.exit(2)
@@ -76,6 +76,7 @@ def _prepare_multi_node_state(args: argparse.Namespace) -> None:
         build_external_state_from_env,
         external_has_server_control,
         external_has_ssh_control,
+        handoff_lookup,
     )
     from ..multi_node.cli import _save_state
     from hyperloom.orchestrator.actions.executors._multi_node_env import export_ray_address_to_os
@@ -93,6 +94,27 @@ def _prepare_multi_node_state(args: argparse.Namespace) -> None:
 
     ext_state = build_external_state_from_env()
     ext_state["backend"] = _resolve_mn_backend(args)
+    if ext_state["backend"] in ("atomesh", "sglangrouter"):
+        from ..multi_node._internal.pd_cluster import stamp_pd_cluster
+
+        if (os.environ.get("PD_MODE", "") or "").strip().lower() != "disaggregated":
+            print(
+                f"ERROR: --mn-backend {ext_state['backend']} requires --pd-mode disaggregated.",
+                file=sys.stderr,
+            )
+            sys.exit(2)
+        _settle_pd_baseline_args(ext_state)
+        stamp_pd_cluster(ext_state, handoff_lookup())
+        os.environ["HYPERLOOM_MN_WORKER_PORT"] = "8000"
+        from ..multi_node.commands.pd_cluster import record_profile_dir_share
+
+        share_error = record_profile_dir_share(ext_state)
+        if share_error:
+            print(
+                f"WARNING: profile trace dir {ext_state.get('profile_trace') or '<unset>'} is not shared with the "
+                f"engine pods ({share_error}); profiling will be skipped for this session.",
+                file=sys.stderr,
+            )
     _reject_unusable_backend(ext_state)
     try:
         _save_state(ext_state)
@@ -108,7 +130,8 @@ def _prepare_multi_node_state(args: argparse.Namespace) -> None:
     has_control = external_has_server_control()
     print(
         "multi-node: adopted the platform-provisioned cluster. "
-        f"url={ext_state['service_url']} prefill={ext_state['prefill_pod_ips']} "
+        f"url={ext_state['service_url']} router={ext_state.get('router_pod_ips') or []} "
+        f"prefill={ext_state['prefill_pod_ips']} "
         f"decode={ext_state['decode_pod_ips']} worker={ext_state['worker_pod_ips']} "
         f"server_control={'yes' if has_control else 'no (benchmark-only)'} "
         f"ssh_control={'yes' if external_has_ssh_control() else 'no'}"
@@ -119,15 +142,40 @@ def _prepare_multi_node_state(args: argparse.Namespace) -> None:
         print(
             "WARNING: no server control -- per-round restarts will be skipped, so every "
             "candidate config measures the SAME unchanged server and the reported gains "
-            "are meaningless. Set HYPERLOOM_MN_EXT_HEAD_IP (rayjob) or "
+            "are meaningless. Set HYPERLOOM_MN_EXT_HEAD_IP (rayjob), "
             "HYPERLOOM_MN_EXT_SSH_KEY plus one of _PREFILL_IPS / _DECODE_IPS / _WORKER_IPS "
-            "(infera) to tune. Continuing in benchmark-only mode.",
+            "(infera), or HYPERLOOM_MN_EXT_SSH_KEY, _SSH_PORT, _PREFILL_IPS and "
+            "_DECODE_IPS (atom, sglangrouter; _ROUTER_IPS for the router) to tune. "
+            "Continuing in benchmark-only mode.",
             file=sys.stderr,
         )
     _prepare_adopted_cluster(
         args,
         str(ext_state["backend"]),
         head_ip=str(ext_state.get("head_pod_ip") or ""),
+    )
+
+
+def _settle_pd_baseline_args(ext_state: dict[str, Any]) -> None:
+    """Resolve atom/sglangrouter baseline args (manual > magpie > InferenceX); exit 2 when none applies."""
+    from ..multi_node._internal.baseline_args import (
+        BaselineArgsMissing,
+        export_baseline_args,
+        record_baseline_args,
+        resolve_baseline_args,
+    )
+    from ..multi_node._internal.pd_cluster import previous_cluster_state
+
+    try:
+        choice = resolve_baseline_args(previous=previous_cluster_state(ext_state))
+    except BaselineArgsMissing as exc:
+        print(f"ERROR: {exc}", file=sys.stderr)
+        sys.exit(2)
+    export_baseline_args(choice)
+    record_baseline_args(ext_state, choice)
+    print(
+        f"multi-node: baseline args source={choice.source} ({choice.detail}) "
+        f"prefill={choice.prefill!r} decode={choice.decode!r}"
     )
 
 

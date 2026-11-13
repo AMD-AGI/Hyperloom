@@ -135,6 +135,21 @@ def test_external_pod_ssh_ports_follow_the_lws_ordinal(
     ]
 
 
+def test_infera_router_ips_are_frontend_ssh_targets(
+    _external_env: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The frontend's sshd sits past the decode stride, so it never shares a port with a GPU role."""
+    monkeypatch.setenv("HYPERLOOM_MN_EXT_SSH_PORT", "2222")
+    monkeypatch.setenv("HYPERLOOM_MN_EXT_ROUTER_IPS", "10.0.0.9")
+
+    state = ext.build_external_state_from_env()
+
+    assert state["router_pod_ips"] == ["10.0.0.9"]
+    assert [(p["role"], p["podIP"], p["sshPort"]) for p in state["router_pods"]] == [("router", "10.0.0.9", 2242)]
+    assert state["nodes"] == 2
+
+
 def test_external_aggregated_worker_ports_follow_the_lws_ordinal(
     _external_env: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -370,6 +385,25 @@ def test_pd_leg_urls_carry_over_within_the_same_handoff(_external_env: Path) -> 
 
     assert state["pd_prefill_url"] == "http://10.32.17.187:30000"
     assert state["pd_decode_url"] == "http://10.32.17.185:30001"
+
+
+def test_baseline_record_and_engine_flags_carry_over_within_the_same_handoff(_external_env: Path) -> None:
+    """The restart path reads the session baseline and the probed engine flags back from disk."""
+    _write_disk_state(
+        baseline_args_source="inferencex",
+        baseline_prefill_args="--load-balance-method round_robin",
+        baseline_decode_args="--prefill-round-robin-balance",
+        baseline_transfer_backend="mori",
+        engine_cli_flags=["--load-balance-method"],
+    )
+
+    state = ext.load_multi_node_state()
+
+    assert state["baseline_args_source"] == "inferencex"
+    assert state["baseline_prefill_args"] == "--load-balance-method round_robin"
+    assert state["baseline_decode_args"] == "--prefill-round-robin-balance"
+    assert state["baseline_transfer_backend"] == "mori"
+    assert state["engine_cli_flags"] == ["--load-balance-method"]
 
 
 def test_pd_leg_urls_are_dropped_when_the_cluster_was_replaced(_external_env: Path) -> None:

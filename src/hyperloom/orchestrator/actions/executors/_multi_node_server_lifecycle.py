@@ -10,6 +10,7 @@ import asyncio
 import json
 import logging
 import os
+import re
 import shlex
 import subprocess
 from contextlib import contextmanager
@@ -17,6 +18,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Awaitable, Callable, Iterator, Mapping
 
+from hyperloom_common.io import safe_mtime
 from hyperloom_common.timeutil import format_exc_brief
 from hyperloom_common.env import EnvValueError, env_flag
 from hyperloom.inference_optimizer import multi_node
@@ -98,12 +100,12 @@ _POLL_INTERVAL_S = 6
 _SGLANG_DEFAULT_TOKENS: tuple[tuple[str, str], ...] = (("--mem-fraction-static", "--mem-fraction-static=0.75"),)
 
 
-def _merge_sglang_defaults(extra_args: str) -> str:
-    """Append the sglang launcher's default args that the user did not already set."""
+def _merge_sglang_defaults(extra_args: str, role_args: str = "") -> str:
+    """Append the sglang launcher's default args that neither the shared args nor the per-role args already set."""
     user = (extra_args or "").strip()
     parts = [user] if user else []
     for flag_name, default_token in _SGLANG_DEFAULT_TOKENS:
-        if flag_name in user:
+        if flag_name in user or flag_name in (role_args or ""):
             continue
         parts.append(default_token)
     return " ".join(p for p in parts if p)
@@ -437,7 +439,10 @@ async def restart_server_for_round(
         )
 
     # Apply the sglang launcher's default args only for sglang (vllm has its own).
-    extra_server_args = _merge_sglang_defaults(server.extra_server_args) if fw == "sglang" else server.extra_server_args
+    role_args = f"{pd.get('pd_prefill_extra_args') or ''} {pd.get('pd_decode_extra_args') or ''}"
+    extra_server_args = (
+        _merge_sglang_defaults(server.extra_server_args, role_args) if fw == "sglang" else server.extra_server_args
+    )
 
     # Compute-bound profile override (multi-node only; already gated by the is_multi_node() no-op above).
     if os.environ.get(_COMPUTE_BOUND_PROFILE_ENV, "").strip() == "1":
@@ -577,6 +582,12 @@ async def _restart_with_reclaim_retry(restart_and_wait: Callable[..., Awaitable[
 # Infera frontend profiling API (infera.server --enable-profiling).
 
 
+def _is_pd_disaggregated(state: dict) -> bool:
+    """Whether the multi-node state records a PD-disaggregated launch."""
+    mode = str(state.get("last_restart_pd_mode") or state.get("pd_mode") or "").strip().lower()
+    return mode == "disaggregated"
+
+
 async def trigger_infera_engine_profile(
     action: str,
     body: dict | None = None,
@@ -602,6 +613,9 @@ async def trigger_infera_engine_profile(
     route = "start" if action == "start" else "stop"
     url = f"{service_url}/v1/admin/profile/{route}"
     payload = dict(body or {}) if action == "start" else {}
+    if _is_pd_disaggregated(state):
+        # PD workers were launched with a per-role SGLANG_TORCH_PROFILER_DIR; a shared output_dir would merge them.
+        payload.pop("output_dir", None)
     if action == "start":
         client_timeout = 30.0
     else:
@@ -617,6 +631,135 @@ async def trigger_infera_engine_profile(
             )
         except _httpx.HTTPError as exc:
             log.warning("infera profile %s -> %s failed (%s); continuing", route, url, exc)
+
+
+PD_PROFILE_ROLES = ("prefill", "decode")
+
+
+def pd_role_trace_dir(root: str, role: str) -> str:
+    """Return the per-role torch trace dir under a profiling round's trace root."""
+    return str(Path(root) / role)
+
+
+_RANK_TRACE_RE = re.compile(r"\A(?P<batch>.+)-TP-(?P<rank>\d+)(?:-(?P<stage>[A-Z]+))?\.trace\.json\.gz\Z")
+_ROLE_STAGE = {"prefill": "EXTEND", "decode": "DECODE"}
+
+
+def _role_node_count(state: Mapping[str, Any], role: str) -> int:
+    """Number of nodes (pods) serving ``role``; one when the state lists none."""
+    pods = [pod for pod in (state.get(f"{role}_pods") or []) if isinstance(pod, dict)]
+    return max(1, len(pods))
+
+
+def _first_gpu_traces(paths: list[Path], role: str, nodes: int) -> list[str]:
+    """The first GPU's trace of each node from the newest batch in ``paths``; the heaviest file when none is per-rank.
+
+    SGLang numbers TP ranks across a role's nodes, so node ``n`` starts at rank ``n * ranks_per_node``. A stage-split
+    trace prefers the role's own stage.
+    """
+    batches: dict[str, dict[int, dict[str, Path]]] = {}
+    newest: dict[str, float] = {}
+    for path in paths:
+        match = _RANK_TRACE_RE.match(path.name)
+        if match is None:
+            continue
+        batch = match["batch"]
+        batches.setdefault(batch, {}).setdefault(int(match["rank"]), {})[match["stage"] or ""] = path
+        newest[batch] = max(newest.get(batch, 0.0), safe_mtime(path))
+    if not batches:
+        return [str(max(paths, key=lambda p: (p.stat().st_size, p.name)))] if paths else []
+    ranks = batches[max(newest, key=lambda batch: newest[batch])]
+    per_node = -(-(max(ranks) + 1) // nodes)
+    picks: list[str] = []
+    for node in range(nodes):
+        stages = ranks.get(node * per_node)
+        if stages:
+            picks.append(str(stages.get(_ROLE_STAGE.get(role, "")) or stages.get("") or sorted(stages.values())[0]))
+    return picks
+
+
+def select_pd_node_traces(root: str, since_unix: float) -> dict[str, list[str]]:
+    """Return, per PD role, the first GPU's trace of each node written since ``since_unix`` under ``<root>/<role>``."""
+    state = _read_state() or {}
+    selected: dict[str, list[str]] = {}
+    for role in PD_PROFILE_ROLES:
+        fresh = [
+            path
+            for path in Path(pd_role_trace_dir(root, role)).glob("*.trace.json.gz")
+            if path.is_file() and safe_mtime(path) >= since_unix
+        ]
+        picks = _first_gpu_traces(fresh, role, _role_node_count(state, role))
+        if picks:
+            selected[role] = picks
+    return selected
+
+
+def select_pd_role_traces(root: str, since_unix: float) -> dict[str, str]:
+    """Return each PD role's first-node trace from :func:`select_pd_node_traces`."""
+    return {role: paths[0] for role, paths in select_pd_node_traces(root, since_unix).items()}
+
+
+async def trigger_pd_engine_profile(action: str, body: dict | None = None) -> None:
+    """POST /start_profile or /stop_profile on every atomesh/sglangrouter prefill and decode pod.
+
+    The router does not write GPU traces. Each engine listens on its pod's
+    ``enginePort``, else the worker port. A role with no pods in state is reached through
+    ``HYPERLOOM_MN_EXT_<ROLE>_URL``. A start sends ``output_dir`` and ``with_stack``
+    (``HYPERLOOM_MN_PROFILE_WITH_STACK``, default off); step-window fields crash
+    disaggregated SGLang.
+    """
+    if not is_multi_node():
+        return
+    state = _read_state() or {}
+    if str(state.get("backend") or "").strip().lower() not in ("atomesh", "sglangrouter"):
+        return
+    port = str(os.environ.get("HYPERLOOM_MN_WORKER_PORT", "8000") or "8000").strip() or "8000"
+    targets: list[tuple[str, str]] = []
+    for role in PD_PROFILE_ROLES:
+        role_pods = [pod for pod in (state.get(f"{role}_pods") or []) if isinstance(pod, dict) and pod.get("podIP")]
+        targets.extend((role, f"http://{pod['podIP']}:{pod.get('enginePort') or port}") for pod in role_pods)
+        engine_url = os.environ.get(f"HYPERLOOM_MN_EXT_{role.upper()}_URL", "").strip().rstrip("/")
+        if not role_pods and engine_url:
+            targets.append((role, engine_url))
+    if not targets:
+        log.warning("trigger_pd_engine_profile(%s): no prefill/decode pods or engine URLs", action)
+        return
+    try:
+        import httpx as _httpx
+    except ImportError:  # pragma: no cover
+        log.warning("httpx unavailable; cannot trigger pd-cluster profiling")
+        return
+    route = "start_profile" if action == "start" else "stop_profile"
+    output_dir = str((body or {}).get("output_dir") or "").strip() if action == "start" else ""
+    with_stack = os.environ.get("HYPERLOOM_MN_PROFILE_WITH_STACK", "").strip().lower() in ("1", "true", "yes", "on")
+    if action == "start":
+        client_timeout = 30.0
+    else:
+        client_timeout = float(os.environ.get("HYPERLOOM_MN_STOP_PROFILE_TIMEOUT_S", "600") or 600)
+
+    async def _post(client: Any, role: str, base_url: str) -> None:
+        """Send ``route`` to one engine; a transport error is logged, not raised."""
+        url = f"{base_url}/{route}"
+        payload: dict = {}
+        if output_dir:
+            # Each role writes under <output_dir>/<role> so its traces stay attributable.
+            role_dir = pd_role_trace_dir(output_dir, role)
+            try:
+                Path(role_dir).mkdir(parents=True, exist_ok=True)
+            except OSError as exc:
+                log.debug("pd-cluster profile: cannot mkdir %s: %s", role_dir, exc)
+            payload["output_dir"] = role_dir
+        if action == "start":
+            payload["with_stack"] = with_stack
+        try:
+            resp = await client.post(url, json=payload)
+            log.info("pd-cluster profile %s %s -> %s HTTP %d", role, route, url, resp.status_code)
+        except _httpx.HTTPError as exc:
+            log.warning("pd-cluster profile %s -> %s failed (%s); continuing", route, url, exc)
+
+    # stop_profile returns after the trace export; engines start and stop together so each records the same window.
+    async with _httpx.AsyncClient(timeout=client_timeout) as client:
+        await asyncio.gather(*(_post(client, role, base_url) for role, base_url in targets))
 
 
 async def _probe_health(client: Any, health_url: str) -> tuple[bool, str]:
@@ -730,19 +873,45 @@ def _worker_startup_crashed(tail: str) -> str | None:
     return None
 
 
-def _worker_health_targets(state: dict) -> list[tuple[str, str, str]]:
-    seen: set[str] = set()
-    targets: list[tuple[str, str, str]] = []
+def _worker_health_targets(state: dict, default_port: int) -> list[tuple[str, str, int]]:
+    """``(role, ip, port)`` per worker; a pod's ``enginePort`` overrides ``default_port``."""
+    seen: set[tuple[str, int]] = set()
+    targets: list[tuple[str, str, int]] = []
     for role_key in ("prefill_pods", "decode_pods", "worker_pods"):
         for pod in state.get(role_key) or []:
             if not isinstance(pod, dict):
                 continue
             ip = str(pod.get("podIP") or "").strip()
-            if not ip or ip in seen:
+            port = int(pod.get("enginePort") or default_port)
+            if not ip or (ip, port) in seen:
                 continue
-            seen.add(ip)
-            targets.append((role_key.replace("_pods", ""), ip, str(pod.get("podId") or ip)))
+            seen.add((ip, port))
+            targets.append((role_key.replace("_pods", ""), ip, port))
     return targets
+
+
+def _pd_engines_not_running(state: dict) -> list[str]:
+    """Atom/sglangrouter engine pods whose launched server is gone; empty for other backends."""
+    if str(state.get("backend") or "").strip().lower() not in ("atomesh", "sglangrouter"):
+        return []
+    from hyperloom.inference_optimizer.multi_node.commands.pd_cluster import engines_not_running
+
+    return engines_not_running(state)
+
+
+def pd_engines_lost_reason() -> str | None:
+    """Why the atomesh/sglangrouter engines launched for this round no longer serve it, or None when they do."""
+    gone = _pd_engines_not_running(_read_state() or {})
+    return _pd_launch_lost_reason(gone) if gone else None
+
+
+def _pd_launch_lost_reason(gone: list[str]) -> str:
+    return (
+        "launched engine exited on "
+        + str(gone)
+        + "; the container restarted with its platform entrypoint, so /health no longer reflects this round's "
+        "launch args (the engine's error is in the pod's previous container log)"
+    )
 
 
 def _worker_fastfail_reason(
@@ -789,11 +958,13 @@ async def _wait_for_workers_ready_async(settings: RestartSettings, timeout_s: in
     import httpx as _httpx
 
     port = settings.worker_port
-    targets = _worker_health_targets(_read_state())
+    state = _read_state()
+    targets = _worker_health_targets(state, port)
     if not targets:
         return
     started = _t.monotonic()
     ready: set[str] = set()
+    launch_checked = False
     # Detokenizer-wedge fast-fail: bail early on a wedged worker instead of burning the full timeout.
     wedge_grace = settings.worker_wedge_grace_s
     fastfail = env_flag("HYPERLOOM_MN_WORKER_WEDGE_FASTFAIL", default=True)
@@ -804,17 +975,24 @@ async def _wait_for_workers_ready_async(settings: RestartSettings, timeout_s: in
     async with _httpx.AsyncClient(timeout=10.0) as client:
         while True:
             elapsed = int(_t.monotonic() - started)
-            for role, ip, _pid in targets:
+            for role, ip, worker_port in targets:
                 if ip in ready:
                     continue
                 try:
-                    resp = await client.get("http://" + ip + ":" + str(port) + "/health")
+                    resp = await client.get("http://" + ip + ":" + str(worker_port) + "/health")
                 except _httpx.HTTPError:
                     continue
                 if resp.status_code == 200:
                     ready.add(ip)
                     log.info("worker /health OK (%s %s) after %ds [%d/%d]", role, ip, elapsed, len(ready), len(targets))
             pending = [ip for _r, ip, _p in targets if ip not in ready]
+            # A pod that restarted its container serves its platform entrypoint: check once past the crash grace
+            # and again before declaring the workers ready.
+            if not pending or (not launch_checked and elapsed > crash_grace):
+                launch_checked = True
+                gone = await asyncio.to_thread(_pd_engines_not_running, state)
+                if gone:
+                    raise ServerRestartFailed(_pd_launch_lost_reason(gone))
             if not pending:
                 log.info(
                     "all %d worker(s) /health-ready after %ds; proceeding to frontend probe", len(targets), elapsed
@@ -842,7 +1020,10 @@ async def _wait_for_workers_ready_async(settings: RestartSettings, timeout_s: in
 
 
 def _shared_server_log_dir() -> str:
-    shared = os.path.expandvars(os.environ.get("HYPERLOOM_MN_SERVER_LOG_DIR", "").strip())
+    """Shared-FS dir the pods write server logs to; same default the SSH env forwarder applies."""
+    shared = os.path.expandvars(
+        os.environ.get("HYPERLOOM_MN_SERVER_LOG_DIR", "").strip() or "$USER_DATA_PATH/server_logs"
+    )
     return shared if shared.startswith("/") and "$" not in shared else ""
 
 
@@ -1059,7 +1240,7 @@ async def _wait_for_server_health_async(settings: RestartSettings, timeout_s: in
     # actually serve traffic (Infera registers models in /v1/models before the worker is ready to accept requests;
     # this causes the first benchmark to get 503 "Model temporarily unavailable" for every request, surfacing as
     # `completed=0` -> `baseline_failed`).
-    wait_model_ready = str(state.get("backend") or "").strip().lower() == "infera"
+    wait_model_ready = str(state.get("backend") or "").strip().lower() in ("infera", "atomesh", "sglangrouter")
     wait = _ServingWait(settings, base, timeout_s)
     async with _httpx.AsyncClient(timeout=15.0) as client:
         while True:

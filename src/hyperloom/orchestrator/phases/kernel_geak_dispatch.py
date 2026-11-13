@@ -274,7 +274,9 @@ class _GeakDispatchMixin:
             benchmark_mode=str(self.shared_state.benchmark_mode or ""),
             grading=self.shared_state.grading or None,
         )
-        runner_env = {**os.environ, **client_env}
+        from hyperloom.inference_optimizer.multi_node.state_paths import multi_node_state_env
+
+        runner_env = {**os.environ, **client_env, **multi_node_state_env()}
         runner_env["E2E_METRIC"] = metric
         runner_env[REAP_MARK_ENV] = uuid.uuid4().hex
         # Only injection point needed for the whole GEAK chain: geak_runner and run_e2e both hand their full

@@ -14,6 +14,7 @@ import subprocess
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
+from urllib.parse import urlsplit
 
 from .._internal import infera_support
 from .._internal.env_safety import filter_forward_env
@@ -129,11 +130,14 @@ def _infera_fanout_launch(
     *,
     label: str,
     options: _FanoutOptions,
+    role: str = "",
 ) -> tuple[int, list[dict]]:
-    """Ship + run launch_infera_node.py on each GPU pod over SSH."""
+    """Ship + run launch_infera_node.py on each GPU pod over SSH; a PD ``role`` gets its own torch profiler subdir."""
     poll_timeout = options.poll_timeout
     script = _mn_cli._read_bundled_pod_python_script("launch_infera_node.py", _mn_cli._LAUNCHER_DEPS)
     forward_env = _collect_forward_env()
+    if role and forward_env.get("SGLANG_TORCH_PROFILER_DIR"):
+        forward_env["SGLANG_TORCH_PROFILER_DIR"] = str(Path(forward_env["SGLANG_TORCH_PROFILER_DIR"]) / role)
     if forward_env:
         info(f"{label}: forwarding {len(forward_env)} tuning env vars to SSH child")
     results: list[dict] = []
@@ -327,7 +331,7 @@ def _infera_launch_pd_groups(
             f"nnodes={rnnodes} pods={len(targets)} kv={kv} extra={rextra!r}"
         )
         rc, all_results[role] = _infera_fanout_launch(
-            state, launch_args, list(targets), label=f"restart-{role}", options=fanout
+            state, launch_args, list(targets), label=f"restart-{role}", options=fanout, role=role
         )
         rc_total = rc_total or rc
     # Persist inferred PD topology so resume fast-path and KB keys match launch.
@@ -378,6 +382,41 @@ def _record_last_restart(state: dict[str, Any], args: argparse.Namespace, framew
     state["last_restart_forward_env"] = _mn_cli.per_round_forward_overrides()
 
 
+def _infera_ensure_frontend(state: dict[str, Any], model: str, timeout: int) -> tuple[int, list[dict]]:
+    """Start the frontend on each router pod that has none running; a running frontend is left as is."""
+    from .pd_cluster import ensure_payload
+
+    port = urlsplit(str(state.get("service_url") or "")).port or 8000
+    command = (
+        f"python3 -m {infera_support.INFERA_FRONTEND_NEEDLE} --host 0.0.0.0 --port {port} "
+        f"--router-tokenizer-path {shlex.quote(model)}"
+    )
+    payload = ensure_payload("router", command, infera_support.INFERA_FRONTEND_NEEDLE)
+    rc_total = 0
+    results: list[dict] = []
+    for target in infera_support.role_ssh_targets(state, "router"):
+        ip = str(target["podIP"])
+        ssh_port = int(target.get("sshPort") or 0)
+        info(f"ensure-frontend: ssh -> {ip}:{ssh_port}")
+        try:
+            cp = _mn_cli._infera_ssh_bash_with_env(state, ip, payload, timeout=timeout, port=ssh_port)
+        except subprocess.TimeoutExpired:
+            results.append({"podIP": ip, "sshPort": ssh_port, "rc": 124, "error": "timeout"})
+            rc_total = 1
+            continue
+        rec = {
+            "podIP": ip,
+            "sshPort": ssh_port,
+            "rc": cp.returncode,
+            "summary": _mn_cli._extract_pod_json(cp.stdout or ""),
+        }
+        if cp.returncode != 0:
+            rec["stderr"] = (cp.stderr or "")[-1500:]
+            rc_total = 1
+        results.append(rec)
+    return rc_total, results
+
+
 def _infera_restart_server(args: argparse.Namespace) -> int:
     """Infera restart: SSH fan-out launch_infera_node.py to every worker pod."""
     state = _infera_require_state()
@@ -420,18 +459,21 @@ def _infera_restart_server(args: argparse.Namespace) -> int:
                 f"infera resume: same config (framework={framework} model={args.model} "
                 f"tp={args.tp} pd_mode={pd_mode}) and all pods alive; skipping kill+launch"
             )
+            rc, frontend = _infera_ensure_frontend(state, args.model, probe_timeout)
             print(
                 json.dumps(
-                    {"backend": "infera", "pd_mode": pd_mode, "rc": 0, "resumed": True},
+                    {"backend": "infera", "pd_mode": pd_mode, "rc": rc, "resumed": True, "router": frontend},
                     indent=2,
                 )
             )
-            return 0
+            return 0 if rc == 0 else 1
 
     if pd_mode == "disaggregated":
         rc_total, all_results = _infera_launch_pd_groups(state, args, framework, kv, fanout)
     else:
         rc_total, all_results = _infera_launch_workers(state, args, framework, fanout)
+    rc, all_results["router"] = _infera_ensure_frontend(state, args.model, fanout.poll_timeout)
+    rc_total = rc_total or rc
 
     _record_last_restart(state, args, framework, pd_mode)
     _mn_cli._save_state(state)

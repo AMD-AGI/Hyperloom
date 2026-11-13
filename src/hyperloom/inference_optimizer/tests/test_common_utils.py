@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import subprocess
 import sys
 from pathlib import Path
@@ -585,6 +586,43 @@ def test_infera_restart_and_kill_paths(monkeypatch: pytest.MonkeyPatch) -> None:
     assert fanout_calls[-1] == ("kill", ["10.0.1.0", "10.0.1.1"])
 
 
+@pytest.mark.parametrize("resumed", [False, True])
+def test_infera_restart_ensures_the_frontend(monkeypatch: pytest.MonkeyPatch, resumed: bool) -> None:
+    import hyperloom.inference_optimizer.multi_node.commands.infera as inf
+
+    state = {
+        "backend": "infera",
+        "framework": "sglang",
+        "nodes": 1,
+        "service_url": "http://wl.ns.svc.cluster.local:21234",
+        "worker_pod_ips": ["10.0.1.0"],
+        "router_pod_ips": ["10.0.0.9"],
+        "router_pods": [{"podIP": "10.0.0.9", "role": "router", "sshPort": 2242}],
+        "ssh_key_path": "/tmp/k",
+        "ssh_port": 2222,
+    }
+    monkeypatch.setattr(inf, "_infera_require_state", lambda: dict(state))
+    monkeypatch.setattr(inf._mn_cli, "_save_state", lambda payload: None)
+    monkeypatch.setattr(inf, "_infera_fanout_launch", lambda *a, **kw: (0, [{"ok": True}]))
+    monkeypatch.setattr(inf, "_infera_restart_config_matches", lambda *a, **kw: resumed)
+    monkeypatch.setattr(inf, "_infera_servers_alive", lambda *a, **kw: resumed)
+    sent: list = []
+    monkeypatch.setattr(
+        inf._mn_cli,
+        "_infera_ssh_bash_with_env",
+        lambda st, ip, script, timeout, port: (
+            sent.append((ip, port, script))
+            or subprocess.CompletedProcess([], 0, stdout='{"status": "ok", "action": "running"}', stderr="")
+        ),
+    )
+
+    assert inf._infera_restart_server(_restart_args()) == 0
+    assert [(ip, port) for ip, port, _ in sent] == [("10.0.0.9", 2242)]
+    script = sent[0][2]
+    assert "export HL_ACTION=ensure" in script
+    assert "python3 -m infera.server --host 0.0.0.0 --port 21234 --router-tokenizer-path /models/m" in script
+
+
 def test_infera_node_ops_apply_and_revert(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     import hyperloom.inference_optimizer.multi_node.commands.infera as inf
 
@@ -1110,6 +1148,7 @@ def test_multi_node_state_paths_resolution_and_binding(monkeypatch: pytest.Monke
     from hyperloom.inference_optimizer.session.paths import ENV_CURRENT_SESSION_DIR
 
     monkeypatch.delenv("MULTI_NODE_STATE_FILE", raising=False)
+    monkeypatch.delenv("MULTI_NODE_STATE", raising=False)
     monkeypatch.delenv(ENV_CURRENT_SESSION_DIR, raising=False)
     with pytest.raises(RuntimeError, match="cannot resolve"):
         state_paths.resolve_state_file()
@@ -1119,6 +1158,7 @@ def test_multi_node_state_paths_resolution_and_binding(monkeypatch: pytest.Monke
     assert state_paths.resolve_state_file() == explicit
 
     monkeypatch.delenv("MULTI_NODE_STATE_FILE", raising=False)
+    monkeypatch.delenv("MULTI_NODE_STATE", raising=False)
     session = tmp_path / "session"
     monkeypatch.setenv(ENV_CURRENT_SESSION_DIR, str(session))
     assert state_paths.resolve_state_file() == session / "runtime" / "multi_node_state.json"
@@ -1137,6 +1177,7 @@ def test_multi_node_state_paths_resolution_and_binding(monkeypatch: pytest.Monke
     assert bound == session / "runtime" / "multi_node_state.json"
     assert not bound.exists()
     assert state_paths.resolve_state_file() == bound
+    assert os.environ["MULTI_NODE_STATE"] == str(bound)
     assert bound.parent.stat().st_mode & 0o777 == 0o700
 
 

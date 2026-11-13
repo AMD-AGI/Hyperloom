@@ -370,6 +370,16 @@ class _BenchmarkLaunchMixin:
             await asyncio.to_thread(
                 self._observe_bringup, round_, attempt_index, layout.server_log, ran.report.failure_detail or ""
             )
+        lost = await self._multi_node_engines_lost()
+        if lost:
+            log.warning("baseline_executor: %s; error_class=mn_engine_lost.", lost)
+            return {
+                "status": "failed",
+                "error_class": "mn_engine_lost",
+                "error": lost,
+                "output_dir": str(round_.output_dir),
+                **round_.capture_meta,
+            }
         RoundFolder.read(layout.root).write_gpu_metrics(round_.output_dir)
         measurement = extract_benchmark_measurement(None, workspace=layout.root, subprocess_started_unix=started_unix)
         finished = _BenchProcess(
@@ -389,6 +399,17 @@ class _BenchmarkLaunchMixin:
         result = await self._succeeded_round_result(ran_round, finished, measurement, warnings)
         self._stamp_round_quality(ran_round, result, measurement, warnings)
         return result
+
+    @staticmethod
+    async def _multi_node_engines_lost() -> str | None:
+        """Why a multi-node round's engines are gone (replaced or exited), or None when they run or the run is single-node."""
+        from .._multi_node_env import is_multi_node
+
+        if not is_multi_node():
+            return None
+        from .._multi_node_server_lifecycle import pd_engines_lost_reason
+
+        return await asyncio.to_thread(pd_engines_lost_reason)
 
     def _record_argv_refusal(self, round_: _BenchmarkRound, attempt_index: int, detail: str) -> None:
         """Record the parser's refusal at the parse rung, where enablement reads it as a terminal no patch repairs."""
