@@ -174,6 +174,16 @@ def test_a_round_restarts_over_the_frozen_launch_and_decode_keeps_its_mem_fracti
     assert read_record(session / RECORD_NAME).digest() == ext.load_multi_node_state()[pd_session.PD_DIGEST_KEY]
 
 
+def test_a_round_drops_the_flags_the_launcher_owns(session: Path, monkeypatch) -> None:
+    _adopt(session)
+    seen: dict = {}
+    monkeypatch.setattr(pd_session, "restart", _fake_restart(seen))
+    round_args = "--context-length 11264 --watchdog-timeout 1800"
+    asyncio.run(lifecycle.restart_server_for_round(lifecycle.RoundServer(round_args)))
+    for role in ("prefill", "decode"):
+        assert seen["overrides"][role] == ["--watchdog-timeout", "1800"]
+
+
 def test_a_failed_restart_is_a_failed_round(session: Path, monkeypatch) -> None:
     _adopt(session)
 
