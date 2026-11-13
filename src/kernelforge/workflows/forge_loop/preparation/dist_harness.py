@@ -422,6 +422,9 @@ def _resident_per_cu(func: int, threads: int, lds_bytes: int) -> int | None:
     for name in _OCCUPANCY_QUERIES:
         if getattr(hip, name)(ctypes.byref(blocks), ctypes.c_void_p(func), threads, lds_bytes) == 0:
             return blocks.value
+        # A lookup that does not know the handle leaves it as HIP's last error, which torch
+        # reports as its own after its next kernel launch.
+        hip.hipGetLastError()
     return None
 
 
