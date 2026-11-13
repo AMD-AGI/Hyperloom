@@ -20,6 +20,29 @@ Merged to `main` and not yet carried by a tagged release. Each entry moves
 into the [release](https://github.com/AMD-AGI/Hyperloom/releases) that ships
 it.
 
+- **`forge-loop --kernel-backend mono` optimizes monokernels and keeps a
+  candidate only when the task's own tests pass.** A monokernel is one
+  persistent launch whose workgroups wait on each other, across GPUs too, such
+  as sgl-amd-mono's. The backend is also inferred for sources under the
+  `sgl_amd_mono/` package. Its prompt states the rules any monokernel task is
+  held to: one launch per call, a resident grid, every wait guarded, a fresh tag
+  per launch, the task's numerical contract. Its campaigns read the new
+  `framework/sgl_amd_mono/` knowledge (also served to any campaign on that
+  package's sources), which adds the rules for code inside that repository,
+  such as the `MonoSpec` contract a candidate must not move, and the
+  `lever_monokernel.md` card. Like assembly, a candidate that clears the driver
+  must then pass the workspace's `compile_command` and `correctness_command`,
+  and a workspace without a `config.yaml` keeps nothing. A multi-rank driver
+  whose outputs carry different contracts gives each `dist_harness` case a
+  `judge`: the run prints `allclose` from the worst rank and each rank's metrics
+  as `judge:` lines, and `verify_replay=True` refuses to report a time when the
+  last timed graph replay fails its judge. A case can also declare its launch
+  structure: `launches=N` refuses a candidate whose call does not capture to
+  exactly N kernel launches, and `resident=True` one whose grid cannot be
+  resident on the GPU, before the case is judged or timed. The example
+  `mono-qwen3-seam-gfx942-forge-loop` runs a campaign on a FlyDSL monokernel for
+  Qwen3-14B-FP8 on 4 x MI300X.
+
 - **An Arbor agent on an AgentX multi-branch session needs no launch flag.**
   `hyperloom-multibranch run --autonomous-agent` now serves every Arbor the
   session's frozen base launch, resolved from InferenceX or the framework's

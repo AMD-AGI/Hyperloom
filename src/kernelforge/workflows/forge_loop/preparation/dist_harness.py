@@ -24,19 +24,35 @@ parity calls, because this module reseeds between them rather than trusting
 ``build_inputs`` to vary. And no barrier can land inside the timed region,
 because the driver never sees the timed region at all.
 
+The verdict is the worst rank's SNR unless every case brings a ``judge``: an
+operator whose outputs carry different contracts -- an exact cache record next
+to a toleranced activation -- cannot state them as one SNR, so the driver judges
+each rank's answer and the harness reports ``allclose`` from the worst rank.
+
+A case can also declare the launch structure it is measured on: ``launches``
+pins the CUDA graph one candidate call captures to that many nodes, all of them
+kernels, and ``resident`` requires every captured kernel's grid to fit on the
+GPU at once. Those are the two properties a monokernel is defined by -- one
+launch whose workgroups wait on each other -- and a candidate that splits the
+launch or outgrows the GPU is refused before it is judged or timed.
+
 Copied next to the driver during task preparation, imported as ``dist_harness``.
 """
 
 from __future__ import annotations
 
 import argparse
+import ctypes
+import functools
 import math
 import os
+import re
 import statistics
 import subprocess
 import sys
-from collections.abc import Callable, Sequence
-from dataclasses import dataclass
+from collections import Counter
+from collections.abc import Callable, Mapping, Sequence
+from dataclasses import dataclass, field
 from typing import Any
 
 import torch
@@ -56,6 +72,32 @@ _REPLAY_WARMUP = 3
 #: what the probe checks instead of re-deriving the properties from the run.
 MEASURED = [0]
 
+#: A judge metric's name and text value: no whitespace or colon, so a metric
+#: line can never read as the ``SNR:`` or ``allclose:`` line the loop parses.
+_METRIC_TOKEN = re.compile(r"[A-Za-z0-9_.+-]+")
+
+_KERNEL_NODE = "kernel"
+
+#: ``hipGraphNodeType`` values, by the name a refusal reports.
+_HIP_GRAPH_NODE_KINDS = {
+    0: _KERNEL_NODE,
+    1: "memcpy",
+    2: "memset",
+    3: "host",
+    4: "child_graph",
+    5: "empty",
+    6: "wait_event",
+    7: "event_record",
+    10: "mem_alloc",
+    11: "mem_free",
+}
+
+#: The occupancy queries for a runtime-API kernel's host stub and for a module function, in that order.
+_OCCUPANCY_QUERIES = (
+    "hipOccupancyMaxActiveBlocksPerMultiprocessor",
+    "hipModuleOccupancyMaxActiveBlocksPerMultiprocessor",
+)
+
 
 @dataclass(frozen=True)
 class RankContext:
@@ -69,6 +111,14 @@ class RankContext:
 
 
 @dataclass(frozen=True)
+class Judgement:
+    """One rank's verdict on one candidate answer, and the numbers it rests on."""
+
+    passed: bool
+    metrics: Mapping[str, float | int | str] = field(default_factory=dict)
+
+
+@dataclass(frozen=True)
 class Case:
     """One measurable shape, and the three operator-specific callables for it.
 
@@ -76,12 +126,25 @@ class Case:
     collective. It is the one requirement here that this module cannot enforce:
     a single-GPU reference is still a function that returns a tensor, and a
     candidate that quietly drops a rank's contribution matches it.
+
+    ``judge`` compares one rank's candidate answer with its reference and returns
+    that rank's ``Judgement``; every case of a suite has one or none does.
+    ``verify_replay`` also judges the output of the last timed graph replay, for a
+    candidate whose answer depends only on its inputs.
+
+    ``launches`` is how many graph nodes one candidate call must capture to, all
+    of them kernels; ``resident`` requires each of those kernels' grid to fit on
+    the GPU at once. Neither is checked unless declared.
     """
 
     case_id: str
     build_inputs: Callable[[RankContext], Any]
     call_candidate: Callable[[RankContext, Any], Any]
     reference: Callable[[RankContext, Any], Any]
+    judge: Callable[[RankContext, Any, Any], Judgement] | None = None
+    verify_replay: bool = False
+    launches: int | None = None
+    resident: bool = False
 
 
 class HarnessError(RuntimeError):
@@ -217,8 +280,21 @@ def _slowest_across_ranks(value: float, context: RankContext) -> float:
     return float(tensor.item())
 
 
-def _check_case(case: Case, context: RankContext, seed: int) -> float:
-    """Validate the candidate over two back-to-back calls, and return worst SNR.
+def _every_rank_passes(passed: bool, context: RankContext) -> bool:
+    """Whether the verdict holds on every rank, because one wrong rank is a wrong collective."""
+    return _worst_across_ranks(1.0 if passed else 0.0, context) == 1.0
+
+
+@dataclass(frozen=True)
+class _Answer:
+    """One candidate call's answer and the reference it is held to."""
+
+    got: Any
+    want: Any
+
+
+def _parity_answers(case: Case, context: RankContext, seed: int) -> list[_Answer]:
+    """The candidate's answers over two back-to-back calls, each with its reference.
 
     Both candidate calls are issued before either is compared. A compiled
     collective usually writes into a registered scratch buffer, so a second call
@@ -239,8 +315,204 @@ def _check_case(case: Case, context: RankContext, seed: int) -> float:
     first_want = case.reference(context, _seeded_inputs(case, context, seed))
     second_want = case.reference(context, _seeded_inputs(case, context, seed + _PARITY_SEED_STRIDE))
     torch.cuda.synchronize()
-    local = min(_snr_db(first_got, first_want), _snr_db(second_got, second_want))
+    return [_Answer(first_got, first_want), _Answer(second_got, second_want)]
+
+
+def _check_case(case: Case, context: RankContext, seed: int) -> float:
+    """Validate the candidate over two back-to-back calls, and return worst SNR."""
+    local = min(_snr_db(answer.got, answer.want) for answer in _parity_answers(case, context, seed))
     return _worst_across_ranks(local, context)
+
+
+def _format_metrics(metrics: Mapping[str, float | int | str]) -> str:
+    """The metrics as ``name=value`` fields, refusing a name or value that is not a plain token."""
+    fields = []
+    for name, value in metrics.items():
+        text = f"{value:.6g}" if isinstance(value, float) else str(value)
+        if not (_METRIC_TOKEN.fullmatch(name) and _METRIC_TOKEN.fullmatch(text)):
+            raise HarnessError(f"judge metric {name}={value!r} is not a plain token (letters, digits, '_.+-')")
+        fields.append(f"{name}={text}")
+    return " ".join(fields)
+
+
+def _report_judgement(case_id: str, answer: str, verdict: Judgement, context: RankContext) -> None:
+    """Print one rank's verdict: rank 0's on stdout, any other failing rank's on stderr."""
+    line = f"judge: {case_id} {answer} rank={context.rank} passed={verdict.passed} {_format_metrics(verdict.metrics)}"
+    if context.rank == 0:
+        print(line.rstrip())
+    elif not verdict.passed:
+        print(line.rstrip(), file=sys.stderr)
+
+
+def _judge_case(case: Case, context: RankContext, seed: int) -> bool:
+    """Judge the candidate over two back-to-back calls; True when every rank passes both."""
+    passed = True
+    for index, answer in enumerate(_parity_answers(case, context, seed), start=1):
+        verdict = case.judge(context, answer.got, answer.want)
+        _report_judgement(case.case_id, f"call{index}", verdict, context)
+        passed = passed and verdict.passed
+    return _every_rank_passes(passed, context)
+
+
+def _verify_replay(case: Case, context: RankContext, seed: int, replayed: Any) -> None:
+    """Refuse to report a case whose last timed replay no longer produces the answer."""
+    torch.cuda.synchronize()
+    verdict = case.judge(context, replayed, case.reference(context, _seeded_inputs(case, context, seed)))
+    if not verdict.passed:
+        _report_judgement(case.case_id, "replay", verdict, context)
+    if not _every_rank_passes(verdict.passed, context):
+        raise HarnessError(f"case {case.case_id}: the output of its last timed graph replay fails its judge")
+
+
+@dataclass(frozen=True)
+class _GraphNode:
+    """One node of a captured candidate call: its kind and, for a kernel, its grid and residency."""
+
+    kind: str
+    ctas: int = 0
+    resident_per_cu: int | None = None
+
+
+class _Dim3(ctypes.Structure):
+    _fields_ = [("x", ctypes.c_uint32), ("y", ctypes.c_uint32), ("z", ctypes.c_uint32)]
+
+
+class _KernelNodeParams(ctypes.Structure):
+    """``hipKernelNodeParams``."""
+
+    _fields_ = [
+        ("blockDim", _Dim3),
+        ("extra", ctypes.c_void_p),
+        ("func", ctypes.c_void_p),
+        ("gridDim", _Dim3),
+        ("kernelParams", ctypes.c_void_p),
+        ("sharedMemBytes", ctypes.c_uint32),
+    ]
+
+
+@functools.cache
+def _hip_runtime() -> ctypes.CDLL:
+    """The HIP runtime torch loaded, so graph and kernel handles mean the same thing to both."""
+    with open("/proc/self/maps") as maps:
+        path = next((line.split()[-1] for line in maps if "libamdhip64" in line), "libamdhip64.so")
+    hip = ctypes.CDLL(path)
+    pointer, count = ctypes.c_void_p, ctypes.POINTER(ctypes.c_int)
+    hip.hipGraphGetNodes.argtypes = [pointer, pointer, ctypes.POINTER(ctypes.c_size_t)]
+    hip.hipGraphNodeGetType.argtypes = [pointer, count]
+    hip.hipGraphKernelNodeGetParams.argtypes = [pointer, ctypes.POINTER(_KernelNodeParams)]
+    for name in _OCCUPANCY_QUERIES:
+        getattr(hip, name).argtypes = [count, pointer, ctypes.c_int, ctypes.c_size_t]
+    return hip
+
+
+def _hip_ok(status: int, what: str) -> None:
+    if status != 0:
+        raise HarnessError(f"{what} failed with HIP error {status}")
+
+
+def _resident_per_cu(func: int, threads: int, lds_bytes: int) -> int | None:
+    """How many CTAs of a kernel one CU holds at once, or None when HIP knows no such kernel.
+
+    A graph node carries whatever handle its launch used: the host stub of a
+    runtime-API launch, or the module function of a kernel loaded from a code
+    object, which is how DSL-compiled kernels arrive. Both lookups are tried.
+    """
+    hip = _hip_runtime()
+    blocks = ctypes.c_int(0)
+    for name in _OCCUPANCY_QUERIES:
+        if getattr(hip, name)(ctypes.byref(blocks), ctypes.c_void_p(func), threads, lds_bytes) == 0:
+            return blocks.value
+        # A lookup that does not know the handle leaves it as HIP's last error, which torch
+        # reports as its own after its next kernel launch.
+        hip.hipGetLastError()
+    return None
+
+
+def _graph_nodes(graph: torch.cuda.CUDAGraph) -> list[_GraphNode]:
+    """Every node of a captured graph, read back from HIP."""
+    hip = _hip_runtime()
+    raw = ctypes.c_void_p(graph.raw_cuda_graph())
+    count = ctypes.c_size_t(0)
+    _hip_ok(hip.hipGraphGetNodes(raw, None, ctypes.byref(count)), "hipGraphGetNodes")
+    handles = (ctypes.c_void_p * count.value)()
+    _hip_ok(hip.hipGraphGetNodes(raw, handles, ctypes.byref(count)), "hipGraphGetNodes")
+    nodes = []
+    for handle in handles[: count.value]:
+        kind = ctypes.c_int(-1)
+        _hip_ok(hip.hipGraphNodeGetType(ctypes.c_void_p(handle), ctypes.byref(kind)), "hipGraphNodeGetType")
+        name = _HIP_GRAPH_NODE_KINDS.get(kind.value, f"type{kind.value}")
+        if name != _KERNEL_NODE:
+            nodes.append(_GraphNode(kind=name))
+            continue
+        params = _KernelNodeParams()
+        _hip_ok(
+            hip.hipGraphKernelNodeGetParams(ctypes.c_void_p(handle), ctypes.byref(params)),
+            "hipGraphKernelNodeGetParams",
+        )
+        grid, block = params.gridDim, params.blockDim
+        threads = block.x * block.y * block.z
+        nodes.append(
+            _GraphNode(
+                kind=name,
+                ctas=grid.x * grid.y * grid.z,
+                resident_per_cu=_resident_per_cu(params.func, threads, params.sharedMemBytes),
+            )
+        )
+    return nodes
+
+
+def _captured_nodes(case: Case, context: RankContext, seed: int) -> list[_GraphNode]:
+    """The graph one candidate call captures to, after a warmup call outside the capture."""
+    if torch.version.hip is None:
+        raise HarnessError("a declared launch structure is read from a HIP graph; this torch is not a ROCm build")
+    inputs = _seeded_inputs(case, context, seed)
+    case.call_candidate(context, inputs)
+    torch.cuda.synchronize()
+    graph = torch.cuda.CUDAGraph(keep_graph=True)
+    try:
+        with torch.cuda.graph(graph):
+            case.call_candidate(context, inputs)
+        return _graph_nodes(graph)
+    finally:
+        graph.reset()
+
+
+def _launch_violation(case: Case, nodes: Sequence[_GraphNode], compute_units: int) -> str | None:
+    """What a captured call breaks of the case's declared launch structure, or None."""
+    kinds = Counter(node.kind for node in nodes)
+    if case.launches is not None and (len(nodes) != case.launches or kinds[_KERNEL_NODE] != len(nodes)):
+        found = ", ".join(f"{kind} x{n}" for kind, n in sorted(kinds.items())) or "none"
+        return f"one call captured {len(nodes)} graph node(s) ({found}); the case declares {case.launches}, all kernels"
+    if not case.resident:
+        return None
+    for node in nodes:
+        if node.kind != _KERNEL_NODE:
+            continue
+        if node.resident_per_cu is None:
+            return "a captured kernel's occupancy cannot be queried, so its residency cannot be verified"
+        capacity = node.resident_per_cu * compute_units
+        if node.ctas > capacity:
+            return (
+                f"a captured kernel's grid of {node.ctas} CTAs exceeds the {capacity} that can be resident "
+                f"({node.resident_per_cu} per CU x {compute_units} CUs)"
+            )
+    return None
+
+
+def _check_launch_structure(case: Case, context: RankContext, seed: int) -> None:
+    """Refuse, on every rank together, a candidate whose call breaks the case's declared launch structure.
+
+    Every rank agrees before any of them refuses: a rank that left alone would
+    strand the others in the next collective.
+    """
+    if case.launches is None and not case.resident:
+        return
+    compute_units = torch.cuda.get_device_properties(context.device).multi_processor_count
+    violation = _launch_violation(case, _captured_nodes(case, context, seed), compute_units)
+    if violation is not None:
+        print(f"launch structure: {case.case_id} rank={context.rank}: {violation}", file=sys.stderr)
+    if not _every_rank_passes(violation is None, context):
+        raise HarnessError(f"case {case.case_id}: {violation or 'another rank broke the declared launch structure'}")
 
 
 def _bench_case(case: Case, context: RankContext, seed: int, warmup: int, iters: int) -> list[float]:
@@ -254,8 +526,8 @@ def _bench_case(case: Case, context: RankContext, seed: int, warmup: int, iters:
     """
     inputs = _seeded_inputs(case, context, seed)
 
-    def step() -> None:
-        case.call_candidate(context, inputs)
+    def step() -> Any:
+        return case.call_candidate(context, inputs)
 
     side = torch.cuda.Stream()
     side.wait_stream(torch.cuda.current_stream())
@@ -266,24 +538,31 @@ def _bench_case(case: Case, context: RankContext, seed: int, warmup: int, iters:
     torch.cuda.synchronize()
 
     graph = torch.cuda.CUDAGraph()
-    with torch.cuda.graph(graph):
-        step()
-    for _ in range(_REPLAY_WARMUP):
-        graph.replay()
-    torch.cuda.synchronize()
-
-    dist.barrier()
-
-    start = torch.cuda.Event(enable_timing=True)
-    end = torch.cuda.Event(enable_timing=True)
-    samples: list[float] = []
-    for _ in range(iters):
-        start.record()
-        graph.replay()
-        end.record()
+    try:
+        with torch.cuda.graph(graph):
+            replayed = step()
+        for _ in range(_REPLAY_WARMUP):
+            graph.replay()
         torch.cuda.synchronize()
-        samples.append(_slowest_across_ranks(start.elapsed_time(end), context))
-    return samples
+
+        dist.barrier()
+
+        start = torch.cuda.Event(enable_timing=True)
+        end = torch.cuda.Event(enable_timing=True)
+        samples: list[float] = []
+        for _ in range(iters):
+            start.record()
+            graph.replay()
+            end.record()
+            torch.cuda.synchronize()
+            samples.append(_slowest_across_ranks(start.elapsed_time(end), context))
+        if case.verify_replay:
+            _verify_replay(case, context, seed, replayed)
+        return samples
+    finally:
+        # Released before any error reaches run()'s teardown: destroying the
+        # process group while a graph holding a captured collective is alive hangs.
+        graph.reset()
 
 
 def _select(cases: Sequence[Case], case_id: str) -> list[Case]:
@@ -320,6 +599,7 @@ def _run_worker(cases: Sequence[Case], context: RankContext, seed: int, args: ar
     if args.bench_mode:
         for case in _select(cases, args.bench_case):
             scoped = _context_for(context, case)
+            _check_launch_structure(case, scoped, seed)
             samples = _bench_case(case, scoped, seed, args.warmup, args.iters)
             if speak:
                 for sample in samples:
@@ -327,9 +607,20 @@ def _run_worker(cases: Sequence[Case], context: RankContext, seed: int, args: ar
                 print(f"case_ms: {case.case_id} {statistics.median(samples):.6f}")
         return 0
 
+    if cases[0].judge is not None:
+        verdicts = []
+        for case in cases:
+            scoped = _context_for(context, case)
+            _check_launch_structure(case, scoped, seed)
+            verdicts.append(_judge_case(case, scoped, seed))
+        if speak:
+            print(f"allclose: {all(verdicts)}")
+        return 0
+
     worst = math.inf
     for case in _select(cases, ""):
         scoped = _context_for(context, case)
+        _check_launch_structure(case, scoped, seed)
         worst = min(worst, _check_case(case, scoped, seed))
     if speak:
         if worst == math.inf:
@@ -337,6 +628,16 @@ def _run_worker(cases: Sequence[Case], context: RankContext, seed: int, args: ar
         else:
             print(f"SNR: {worst:.2f} dB")
     return 0
+
+
+def _refuse_an_inconsistent_suite(cases: Sequence[Case]) -> None:
+    """A suite reports one kind of verdict, and a replay is verified with the case's own judge."""
+    judged = {case.judge is not None for case in cases}
+    if len(judged) > 1:
+        raise HarnessError("every case has a judge or none does: a suite reports allclose or SNR, not both")
+    for case in cases:
+        if case.verify_replay and case.judge is None:
+            raise HarnessError(f"case {case.case_id} sets verify_replay but has no judge to verify the replay with")
 
 
 def run(cases: Sequence[Case], *, world_size: int, seed: int = 1234, argv: Sequence[str] | None = None) -> int:
@@ -349,6 +650,7 @@ def run(cases: Sequence[Case], *, world_size: int, seed: int = 1234, argv: Seque
         raise HarnessError(f"dist_harness measures collectives; world_size {world_size} needs no harness")
     if not cases:
         raise HarnessError("no cases to measure")
+    _refuse_an_inconsistent_suite(cases)
     passthrough = list(argv) if argv is not None else sys.argv[1:]
     if os.environ.get("LOCAL_RANK") is None:
         return _relaunch_under_torchrun(world_size, passthrough)
@@ -367,6 +669,7 @@ def run(cases: Sequence[Case], *, world_size: int, seed: int = 1234, argv: Seque
 __all__ = [
     "Case",
     "HarnessError",
+    "Judgement",
     "RankContext",
     "run",
 ]
