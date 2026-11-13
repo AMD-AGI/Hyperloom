@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
 import time
 from dataclasses import replace
@@ -267,6 +268,36 @@ def test_analysis_attempt_limit_persists_across_resume(tmp_path) -> None:
         match="2/2",
     ):
         resumed.begin()
+
+
+@pytest.mark.parametrize("gpu_target", ["gfx942", "gfx950"])
+async def test_mi_analysis_prompt_matches_main(tmp_path, gpu_target) -> None:
+    workspace, kernel, driver = _workspace(tmp_path)
+    backend = _BundleBackend()
+    service = _service(tmp_path, backend)
+    context = replace(_context(workspace), gpu_target=gpu_target)
+
+    await service.ensure_bundle(context, sources=AnalysisSources(str(kernel), str(driver), [str(kernel)]))
+
+    prompt = backend.specs[0].system_prompt.replace(str(tmp_path), "<TMP>")
+    assert hashlib.sha256(prompt.encode()).hexdigest() == (
+        "2503aa5891706bfcc4e93e88060f38746cc7016623ce5f3c70f11d4392ee37b8"
+    )
+
+
+async def test_rdna_analysis_prompt_uses_rocprofv3_first(tmp_path) -> None:
+    workspace, kernel, driver = _workspace(tmp_path)
+    backend = _BundleBackend()
+    service = _service(tmp_path, backend)
+    context = replace(_context(workspace), gpu_target="gfx1201")
+
+    await service.ensure_bundle(context, sources=AnalysisSources(str(kernel), str(driver), [str(kernel)]))
+
+    prompt = backend.specs[0].system_prompt
+    assert "Use rocprofv3 kernel tracing first" in prompt
+    assert "unsupported counters as unknown" in prompt
+    assert "Prefer the supplied absolute rocpc_profile.py" not in prompt
+    assert "The exact profiling reference for this session is" not in prompt
 
 
 async def test_analysis_agent_publishes_multi_case_bundle(tmp_path) -> None:

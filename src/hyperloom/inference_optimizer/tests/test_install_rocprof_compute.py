@@ -76,6 +76,12 @@ def _fake_python(tmp_path: Path) -> Path:
     """Stub ``$PYTHON``."""
     pip_marker = tmp_path / PIP_MARKER
     body = f"""#!/usr/bin/env bash
+case "${{1:-}}" in
+  */kernelforge/gpu_guidance.py)
+    [ -f "$1" ] || exit 1
+    [ "${{2:-}}" = "gfx1201" ] && echo rocprofv3 || echo rocprof-compute
+    exit 0 ;;
+esac
 if [ "${{1:-}}" = "-m" ] && [ "${{2:-}}" = "pip" ]; then
   echo "$*" >> "{pip_marker}"
   exit ${{PIP_RC:-0}}
@@ -166,6 +172,8 @@ def _run(
     tool_requirements: bool = True,
     venv_rc: int = 0,
     aqlprofile: str = "none",
+    gpu_arch: str = "",
+    script_dir: str | None = None,
 ) -> dict:
     """Run the extracted rocprof-compute functions under set -euo pipefail."""
     tmp_path.mkdir(parents=True, exist_ok=True)  # callers may pass a subdir
@@ -220,9 +228,11 @@ die() {{ echo "[die] $*"; exit 1; }}
 CHECK_ONLY={check_only}
 DRY_RUN={dry_run}
 PYTHON="{fake_py}"
+_script_dir="{script_dir if script_dir is not None else IO_INSTALL.parent}"
 PIP_EXTRA=()
 REPO_ROOT="{repo_root if repo_root is not None else REPO_ROOT}"
 export ROCM_PATH="{rocm_root}"
+export HYPERLOOM_GFX_ARCH="{gpu_arch}"
 export PANDAS_STATE="{pandas_state}"
 export PIP_RC="{pip_rc}"
 export PIP_FIXES="{1 if pip_fixes else 0}"
@@ -349,6 +359,26 @@ def test_installs_the_forge_profiling_extra(tmp_path: Path) -> None:
     assert r["rc"] == 0 and r["reached_end"], r["out"]
     assert r["extra_installed"], f"the forge-profiling extra must be installed:\n{r['pip_calls']}"
     assert any("[forge-profiling]" in call for call in r["pip_calls"]), r["pip_calls"]
+
+
+def test_r9700_uses_rocprofv3_without_rocprof_compute_install(tmp_path: Path) -> None:
+    r = _run(tmp_path, gpu_arch="gfx1201")
+    assert r["rc"] == 0 and r["reached_end"], r["out"]
+    assert "rocprofv3 for kernel tracing" in r["out"]
+    assert not r["pip_called"] and not r["apt_called"]
+
+
+def test_missing_gpu_guidance_file_keeps_the_existing_rocprof_compute_install(tmp_path: Path) -> None:
+    r = _run(
+        tmp_path,
+        gpu_arch="gfx1201",
+        script_dir=str(tmp_path / "missing-assets"),
+        tool_present=True,
+        pandas_state="v2",
+    )
+    assert r["rc"] == 0 and r["reached_end"], r["out"]
+    assert r["extra_installed"]
+    assert "rocprofv3 for kernel tracing" not in r["out"]
 
 
 def test_forge_profiling_extra_is_installed_editable(tmp_path: Path) -> None:

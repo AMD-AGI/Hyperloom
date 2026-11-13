@@ -7,6 +7,7 @@ from kernelforge.kernel_backends.prompt_utils import (
     EDIT_SURFACE_AND_SWEEPS_PROMPT,
     context_sections_block,
 )
+from kernelforge.gpu_guidance import target_guidance
 
 
 _SYSTEM_PROMPT_TEMPLATE = """\
@@ -37,22 +38,16 @@ code generation, plus `@triton.autotune` for configuration search.
 
 ## Hardware & ISA facts — READ from the knowledge base, do NOT trust memorized numbers
 
-Triton-on-AMD facts (wavefront=64 math, `tl.dot`→MFMA mapping and which MFMA shape
-wins, num_warps/num_stages guidance, buffer-load and epilogue knobs, fp8 FNUZ/OCP,
-LDS/occupancy budgets) live in the `<knowledge>` maps below. Load the relevant card
-with the `Read` tool for {config_gpu_target} instead of relying on a remembered value:
+{hardware_intro}
 - Triton authoring levers (knobs, patterns, pitfalls, ISA verify) → `languages/triton/`
   (`skills/optimize/triton_levers/`, `API_docs/`)
-- Wavefront / MFMA / LDS / occupancy hardware facts → `hardware/`
-- Bottleneck classification & numerics → `common_methodology/`
-Memorized tile sizes and knob defaults drift between archs and Triton versions —
-confirm against these cards (and the AMDGCN dump) before trusting a config.
+{hardware_pointer}
 
 ## Autotune Strategy
 
 1. Start with a focused config set (5-8 configs), not exhaustive
 2. Include configs that vary ONE parameter each from baseline
-3. Seed with a CDNA-sane starting config from the `languages/triton/` knobs/patterns
+3. Seed with a {autotune_seed} starting config from the `languages/triton/` knobs/patterns
    cards (do NOT carry NVIDIA defaults like `num_warps=8` — see the KB for why)
 4. Use `key=[...]` to re-tune when problem shape changes
 5. Clear cache (`rm -rf ~/.triton/cache/`) after major source changes
@@ -93,7 +88,7 @@ problem Triton's compiler cannot see past, and the answer is one level down in
 the SAME language family, not a different backend: Gluon is Triton's low-level
 dialect — same Python frontend, same lowering, same JIT cache, same launch and
 `@triton.autotune` surface — that hands you the tile layouts, the software
-pipeline, the register budget and the MFMA itself, which Triton's compiler owns
+pipeline, the register budget and the {matrix_instruction}, which Triton's compiler owns
 and no knob steers.
 
 You may do this yourself — it is an edit to the kernel, not a change of project.
@@ -110,8 +105,8 @@ loses to a tuned Triton kernel and nothing will be kept.
 ## When to Stop
 - Gate met → STOP, report GREEN
 - Autotune converges (top 3 configs within 2%) → done tuning *in Triton*; if
-  MFMA utilization is still low, that is the Gluon signal above, not a stop
-- PMC shows compute-bound with good MFMA utilization → AT HARDWARE LIMIT
+  {utilization} utilization is still low, that is the Gluon signal above, not a stop
+- PMC shows compute-bound with good {utilization} utilization → AT HARDWARE LIMIT
 - If you need control Triton's knobs cannot reach → drop to Gluon (same
   toolchain, see above); suggest CK or FlyDSL only when the case for leaving the
   Triton toolchain entirely is the real one
@@ -136,9 +131,31 @@ def build_system_prompt(
     knowledge_content: str,
     canonical_gate: str,
 ) -> str:
+    guidance = target_guidance(config_gpu_target)
+    hardware_intro = (
+        guidance.hardware_intro.format(gpu_target=config_gpu_target)
+        if guidance
+        else "Triton-on-AMD facts (wavefront=64 math, `tl.dot`→MFMA mapping and which MFMA shape\n"
+        "wins, num_warps/num_stages guidance, buffer-load and epilogue knobs, fp8 FNUZ/OCP,\n"
+        "LDS/occupancy budgets) live in the `<knowledge>` maps below. Load the relevant card\n"
+        f"with the `Read` tool for {config_gpu_target} instead of relying on a remembered value:"
+    )
+    hardware_pointer = (
+        guidance.hardware_pointer
+        if guidance
+        else "- Wavefront / MFMA / LDS / occupancy hardware facts → `hardware/`\n"
+        "- Bottleneck classification & numerics → `common_methodology/`\n"
+        "Memorized tile sizes and knob defaults drift between archs and Triton versions —\n"
+        "confirm against these cards (and the AMDGCN dump) before trusting a config."
+    )
     return _SYSTEM_PROMPT_TEMPLATE.format(
         config_gpu_target=config_gpu_target,
         canonical_gate=canonical_gate,
         edit_surface=EDIT_SURFACE_AND_SWEEPS_PROMPT,
         context_sections=context_sections_block(knowledge_content=knowledge_content),
+        hardware_intro=hardware_intro,
+        hardware_pointer=hardware_pointer,
+        autotune_seed=guidance.autotune_seed if guidance else "CDNA-sane",
+        matrix_instruction=guidance.matrix_instruction if guidance else "MFMA itself",
+        utilization=guidance.utilization if guidance else "MFMA",
     )

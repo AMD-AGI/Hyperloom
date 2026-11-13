@@ -1,12 +1,12 @@
 ---
-title: MI350X / MI355X hardware — knowledge map
+title: AMD GPU hardware — knowledge map
 kind: index
 scope: hardware
-gens: [gfx950]
+gens: [gfx950, gfx1201]
 updated: 2026-08-28
 ---
 
-# MI350X / MI355X hardware — knowledge map
+# AMD GPU hardware — knowledge map
 
 Entry index for `hardware/`. Backend-neutral facts about the metal: what the chip is, what the numbers
 are, and what each subsystem does to a kernel.
@@ -14,13 +14,16 @@ are, and what each subsystem does to a kernel.
 > **Convention (KernelForge standard):** a knowledge folder that contains an `INDEX.md` is navigated
 > **through this file** — load it whole.
 
-## Scope: gfx950 only
+## Scope
+
+The MI350 cards below cover gfx950. The R9700 card covers gfx1201 hardware
+facts and profiling. Use only the card for the verified target.
 
 Target parts are **MI350X** (air, 1000 W) and **MI355X** (liquid, 1400 W), CDNA4, ISA **gfx950**.
 
-**Earlier generations are not covered** — no CDNA1 (gfx908), CDNA2 (gfx90a), or **CDNA3 (gfx942 /
+**Other generations are not covered** — no CDNA1 (gfx908), CDNA2 (gfx90a), or **CDNA3 (gfx942 /
 MI300X / MI325X)** cards, and no cross-generation comparison tables. If you are targeting MI300X, the
-numbers here are wrong for you; use AMD's CDNA3 documentation instead. CDNA3 appears only as
+gfx950 numbers here are wrong for you; use AMD's CDNA3 documentation instead. CDNA3 appears only as
 *porting warnings* ("that value is MI300X's — here it is X").
 
 ## Layout — one flat folder, one file per subsystem
@@ -30,6 +33,7 @@ for its subsystem, so a single Read answers a question end to end.
 
 | File | Subsystem |
 |---|---|
+| **`r9700.md`** | **gfx1201 only** — wave32, WMMA, rocprofv3 tracing |
 | **`mi350_overview.md`** | **START HERE** — one-screen cheat sheet, peak tables, roofline ridges, topology, the four porting deltas |
 | `mi350_execution.md` | wave64, SIMD/CU hierarchy, VGPR/AGPR file, occupancy formula + worked examples |
 | `mi350_matrix_core.md` | MFMA model, shape/cycle table, per-lane registers, block-scaled MFMA, capability list |
@@ -40,7 +44,7 @@ for its subsystem, so a single Read answers a question end to end.
 | `mi350_isa.md` | gfx950 target/toolchain, changed instruction families, **the disassembly checklist** |
 | `mi350_clocks.md` | MI350X vs MI355X, sustained clock, and what that does to measurements |
 
-## Constants you will look up most
+## MI350 constants (gfx950 only)
 
 | | |
 |---|---|
@@ -51,7 +55,7 @@ for its subsystem, so a single Read answers a question end to end.
 | FP8 is **OCP**, not FNUZ | **TF32 removed** |
 | `global_load_lds` up to **128 b/lane** | `mfma_16x16` over `32x32`; ≥1024 WGs; 8-multiple tiles |
 
-## Portable golden rules
+## MI350 golden rules (gfx950 only)
 
 - **wave64 everywhere** — all divergence/shuffle/ballot/reduction math is mod 64, never 32.
 - **`mfma_16x16` beats `mfma_32x32`** at equal peak — 4 C-registers/lane vs 16.
@@ -68,6 +72,7 @@ for its subsystem, so a single Read answers a question end to end.
 
 | Task / symptom | Read |
 |---|---|
+| R9700 wave32, WMMA, or profiler tracing (gfx1201) | `r9700.md` |
 | Orient me on the chip / one-screen cheat sheet | `mi350_overview.md` |
 | Peak numbers, roofline ridge, FLOP·TOPS math | `mi350_overview.md` |
 | Write / tune a GEMM (MFMA) | `mi350_matrix_core.md` → `mi350_lds.md` → `mi350_execution.md` |

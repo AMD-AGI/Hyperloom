@@ -5,7 +5,11 @@
 
 from __future__ import annotations
 
-PROFILED_SYSTEM_PROMPT = """\
+from pathlib import Path
+
+from kernelforge.gpu_guidance import profiler_for_target
+
+_PROFILED_SYSTEM_PROMPT_TEMPLATE = """\
 You are the single Analysis Agent for one immutable canonical kernel. Complete
 the entire source, case, profiling, interpretation, potential, direction, and
 summary workflow in this one session. Do not stop after planning or after one
@@ -34,20 +38,15 @@ Markdown-first output contract:
 - Resume useful Markdown and raw evidence already present in staging instead of
   regenerating it.
 
-The profiling reference has already been copied into the staging tools
-directory. Inspect that exact file; do not search the filesystem for another
-copy. If it does not fit this driver, create a separate adapter in staging/tools.
+{reference_guidance}
 You may use other
 profilers, compiler IR, ISA, register, occupancy, cache, or roofline tools when
 useful. Preserve raw evidence and record every command in commands.jsonl.
 
 Profiler safety contract:
 - Never invoke rocprofv3 --pmc with an ad-hoc or oversized counter list.
-- Prefer the supplied absolute rocpc_profile.py reference.
-- If rocprof-compute is unavailable, its dependency preflight fails, or its
-  collection cannot isolate the target kernel, fall back to rocprofv3
-  kernel-trace plus small hardware-compatible PMC groups. Record why the
-  fallback was selected.
+- {profiler_instruction}
+{profiler_fallback}
 - If raw PMC is necessary, run one hardware-compatible counter group per
   rocprofv3 process and use a separate output directory for every pass.
 - Every profiler command must have a finite timeout.
@@ -79,6 +78,45 @@ Case grouping contract:
 Finish the useful analysis in this session. Prefer a complete report, but return
 PARTIAL evidence rather than spending turns repairing optional output formats.
 """
+
+PROFILED_SYSTEM_PROMPT = _PROFILED_SYSTEM_PROMPT_TEMPLATE.format(
+    reference_guidance=(
+        "The profiling reference has already been copied into the staging tools\n"
+        "directory. Inspect that exact file; do not search the filesystem for another\n"
+        "copy. If it does not fit this driver, create a separate adapter in staging/tools."
+    ),
+    profiler_instruction="Prefer the supplied absolute rocpc_profile.py reference.",
+    profiler_fallback=(
+        "- If rocprof-compute is unavailable, its dependency preflight fails, or its\n"
+        "  collection cannot isolate the target kernel, fall back to rocprofv3\n"
+        "  kernel-trace plus small hardware-compatible PMC groups. Record why the\n"
+        "  fallback was selected."
+    ),
+)
+
+RDNA_PROFILED_SYSTEM_PROMPT = _PROFILED_SYSTEM_PROMPT_TEMPLATE.format(
+    reference_guidance="Use rocprofv3 kernel tracing for this target. Inspect the hardware card and supported counter list.",
+    profiler_instruction="Use rocprofv3 kernel tracing first; record unsupported counters as unknown.",
+    profiler_fallback="- Collect only small supported PMC groups when tracing alone cannot answer the question.",
+)
+
+
+def profiled_system_prompt_for_target(gpu_target: str) -> str:
+    """Select the profiled Analysis Agent prompt for the target's profiler."""
+    return RDNA_PROFILED_SYSTEM_PROMPT if profiler_for_target(gpu_target) == "rocprofv3" else PROFILED_SYSTEM_PROMPT
+
+
+def profiling_reference_note(reference_script: Path, gpu_target: str) -> str:
+    """Point non-RDNA agents at the staged rocprof-compute reference."""
+    if profiler_for_target(gpu_target) == "rocprofv3":
+        return ""
+    return (
+        "\nThe exact profiling reference for this session is:\n"
+        f"    {reference_script}\n"
+        "It already exists inside staging. Use it directly and never search "
+        "the root filesystem for another copy.\n"
+    )
+
 
 STATIC_SYSTEM_PROMPT = """\
 You are the single Analysis Agent for one immutable canonical kernel. Complete
