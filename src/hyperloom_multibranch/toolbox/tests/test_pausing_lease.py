@@ -15,6 +15,7 @@ import pytest
 
 from hyperloom.sandbox.card_occupancy import CardReading
 from hyperloom.sandbox.gpu_pool import GpuPool
+from hyperloom.sandbox.socket import SandboxUnavailable
 from hyperloom_multibranch.contracts.blackboard.vocab import LeaseKind
 from hyperloom_multibranch.contracts.toolbox import LeaseCharge, RequestRejected
 from hyperloom_multibranch.toolbox.branch_leases import BranchLeases, CardDrain
@@ -49,7 +50,7 @@ async def test_a_pausing_lease_waits_for_the_test_on_every_card_and_holds_back_t
     test_cards = pool.acquire(2, 0.0)
     assert leases.tests_at_once() == 1
 
-    lease = asyncio.create_task(leases.lease("tool:job-1", 1, charge=_CHARGE, wait_sec=30, pausing=True))
+    lease = asyncio.create_task(leases.lease_pausing("tool:job-1", 1, charge=_CHARGE))
     await asyncio.sleep(0.3)
     assert not lease.done()
     assert leases.tests_at_once() == 0
@@ -76,18 +77,34 @@ async def test_a_lease_that_is_not_pausing_is_still_refused_when_it_leaves_no_te
 async def test_a_pausing_lease_beside_room_for_tests_leaves_them_running(tmp_path: Path) -> None:
     leases, _pool = _leases(tmp_path, cards=4, cards_per_test=1)
 
-    held = await leases.lease("tool:job-1", 1, charge=_CHARGE, wait_sec=0, pausing=True)
+    held = await leases.lease_pausing("tool:job-1", 1, charge=_CHARGE)
 
     assert leases.tests_at_once() == 3
     leases.release(held.lease_id)
     assert leases.tests_at_once() == 4
 
 
-async def test_a_pausing_lease_that_never_got_its_card_stops_pausing(tmp_path: Path) -> None:
+async def test_a_pausing_lease_cancelled_before_its_card_stops_pausing(tmp_path: Path) -> None:
     leases, pool = _leases(tmp_path, cards=2, cards_per_test=2)
     pool.acquire(2, 0.0)
+    lease = asyncio.create_task(leases.lease_pausing("tool:job-1", 1, charge=_CHARGE))
+    await asyncio.sleep(0.3)
+    assert leases.tests_at_once() == 0
 
-    with pytest.raises(Exception, match="not freed"):
-        await leases.lease("tool:job-1", 1, charge=_CHARGE, wait_sec=0.3, pausing=True)
+    lease.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await lease
 
     assert leases.tests_at_once() == 1
+
+
+async def test_a_pausing_lease_waiting_as_the_toolbox_closes_is_refused(tmp_path: Path) -> None:
+    leases, pool = _leases(tmp_path, cards=2, cards_per_test=2)
+    pool.acquire(2, 0.0)
+    lease = asyncio.create_task(leases.lease_pausing("tool:job-1", 1, charge=_CHARGE))
+    await asyncio.sleep(0.3)
+
+    leases.close()
+
+    with pytest.raises(SandboxUnavailable, match="closing"):
+        await asyncio.wait_for(lease, 5)

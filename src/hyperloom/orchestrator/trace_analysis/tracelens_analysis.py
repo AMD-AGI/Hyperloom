@@ -29,6 +29,7 @@ from hyperloom.inference_optimizer.framework_paths import (
 
 from .tracelens_arch_benchmark import (
     ArchSpec,
+    Microbench,
     internal_extension_arch_json,
     normalize_platform,
     parse_arch_gpus,
@@ -140,14 +141,16 @@ def _gpu_arch_json(run: AnalysisRun, *, tl_root: Path, tl_internal_root: Path | 
         platform=run.args.target_platform,
         fallback_dir=run.session_runs_dir / "gpu_arch",
         log=lambda msg: append_log(log_path, msg),
-        run_command=lambda cmd, *, cwd, env=None: run_command(
-            cmd,
-            cwd=cwd,
-            log_path=log_path,
-            timeout_s=arch_benchmark_timeout_s,
-            env=env,
+        microbench=Microbench(
+            lambda cmd, *, cwd, env=None: run_command(
+                cmd,
+                cwd=cwd,
+                log_path=log_path,
+                timeout_s=arch_benchmark_timeout_s,
+                env=env,
+            ),
+            run.args.arch_gpus,
         ),
-        gpus=run.args.arch_gpus,
     )
 
 

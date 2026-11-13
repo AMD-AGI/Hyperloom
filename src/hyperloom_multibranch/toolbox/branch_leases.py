@@ -68,6 +68,14 @@ _GIB = 1 << 30
 
 
 @dataclass(frozen=True)
+class _Terms:
+    """How a lease waits: ``wait`` seconds for its cards, and whether it holds back new tests (``pausing``)."""
+
+    wait: float
+    pausing: bool = False
+
+
+@dataclass(frozen=True)
 class CardDrain:
     """How a released lease's cards are waited on (see the module's description): ``read`` lists what the kernel has on
     some cards, ``drain_sec`` and ``recheck_sec`` are :data:`CARD_DRAIN_SEC` and :data:`CARD_RECHECK_SEC` unless a test
@@ -125,8 +133,8 @@ class BranchLeases:
 
     def tests_at_once(self) -> int:
         """How many tests the cards left for measurement run at once, at least one so that a toolbox which lost its
-        cards fails its tests instead of parking them; none while a pausing lease (see :meth:`lease`) takes the cards
-        one test needs."""
+        cards fails its tests instead of parking them; none while a pausing lease (:meth:`lease_pausing`) takes the
+        cards one test needs."""
 
         with self._guard:
             by_cards = self._capacity().measurement_cards // self.cards_per_test
@@ -158,7 +166,6 @@ class BranchLeases:
         *,
         charge: LeaseCharge,
         wait_sec: float | None = None,
-        pausing: bool = False,
     ) -> BranchLease:
         """Hold ``cards`` cards and a working directory for ``holder``, waiting for running tests to give cards back.
 
@@ -168,24 +175,40 @@ class BranchLeases:
         the area when omitted. ``wait_sec`` bounds the wait for cards (:func:`lease_wait`): ``None`` is
         :data:`LEASE_WAIT_SECONDS`, ``0`` takes only cards that are free now.
 
-        A ``pausing`` lease, for a short tool job, may take cards one test needs: from its promise until its release no
-        new test starts if fewer than one test's cards are left (:meth:`tests_at_once`), and the running tests keep
-        their cards until they end, so it waits for them and is not overtaken by the next.
-
         Raises:
             RequestRejected: ``lease_exists`` when the holder holds a lease, ``lease_leaves_no_measurement`` when
-                fewer than one test's cards would be left and the lease is not ``pausing``, ``invalid_request`` for
-                fewer than one card or a ``wait_sec`` that is negative or not a number.
+                fewer than one test's cards would be left, ``invalid_request`` for fewer than one card or a
+                ``wait_sec`` that is negative or not a number.
             SandboxUnavailable: When the cards were not free within the wait or the toolbox closed.
             RequestRejected, SandboxUnavailable: When the blackboard did not record the grant (see
                 :class:`~hyperloom_multibranch.toolbox.lease_ledger.LeaseLedger`); the cards go back.
         """
 
-        wait = lease_wait(wait_sec, LEASE_WAIT_SECONDS)
-        self._promise(holder, cards, pausing=pausing)
+        return await self._lease(holder, cards, root, charge, _Terms(lease_wait(wait_sec, LEASE_WAIT_SECONDS)))
+
+    async def lease_pausing(
+        self, holder: str, cards: int, root: Path | None = None, *, charge: LeaseCharge
+    ) -> BranchLease:
+        """Lease ``cards`` cards to ``holder`` as :meth:`lease` does, for a short tool job that may take cards one test
+        needs: from the request until the release no new test starts if fewer than one test's cards are left
+        (:meth:`tests_at_once`), and the running tests keep their cards until they end, so the lease waits for them and
+        is not overtaken by the next. It waits until the cards are free or the toolbox closes.
+
+        Raises:
+            RequestRejected: ``lease_exists`` when the holder holds a lease, ``invalid_request`` for fewer than one card.
+            SandboxUnavailable: When the toolbox closed.
+            RequestRejected, SandboxUnavailable: When the blackboard did not record the grant; the cards go back.
+        """
+
+        return await self._lease(holder, cards, root, charge, _Terms(math.inf, pausing=True))
+
+    async def _lease(
+        self, holder: str, cards: int, root: Path | None, charge: LeaseCharge, terms: _Terms
+    ) -> BranchLease:
+        self._promise(holder, cards, pausing=terms.pausing)
         gpu_ids: tuple[int, ...] = ()
         try:
-            gpu_ids = await self._take(cards, wait)
+            gpu_ids = await self._take(cards, terms.wait)
             lease = self._grant(holder, gpu_ids, root)
             start = LeaseStart(
                 lease_id=lease.lease_id,

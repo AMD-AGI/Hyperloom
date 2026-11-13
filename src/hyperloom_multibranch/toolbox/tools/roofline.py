@@ -58,8 +58,6 @@ UNKNOWN_GPU_ARCH = "unknown_gpu_arch"
 #: The holder prefix of a tool job's lease, as ``kernel_tune``'s.
 _HOLDER_PREFIX = "tool:"
 _ARCH_CARDS = 1
-#: Longer than any session: the arch card's lease waits until a card is free, or until the toolbox closes.
-_ARCH_LEASE_WAIT_SEC = 7 * 24 * 3600.0
 
 
 class _SharesOps:
@@ -73,8 +71,9 @@ class _ArchCard:
     """Mixin: an analysis that would measure the board's arch spec does so on one card leased for it, and on no other.
 
     The card is leased from ``leases``, the pool the measurement tests run on, held by ``tool:<job id>`` and charged to the
-    requesting branch, and released once the analysis returns. The lease is pausing: it waits for a card however long
-    the running tests take, and when the tests need every card no new test starts until it is released. The analysis is
+    requesting branch, and released once the analysis returns. The lease is pausing (``lease_pausing``): it waits for a
+    card however long the running tests take, and when the tests need every card no new test starts until it is
+    released. The analysis is
     told the card in ``arch_gpus``, which the caller cannot set. With no pool (a toolbox whose cards it does not own), or
     a lease refused as the toolbox closes, it is given none, and its roofline reads vendor peaks. A board with an arch
     spec, or a route that never measures, takes no card.
@@ -103,13 +102,8 @@ class _ArchCard:
             return None
         charge = LeaseCharge(LeaseKind.TOOL_JOB, branch, self.name)
         try:
-            return await self._leases.lease(
-                f"{_HOLDER_PREFIX}{workdir.name}",
-                _ARCH_CARDS,
-                workdir,
-                charge=charge,
-                wait_sec=_ARCH_LEASE_WAIT_SEC,
-                pausing=True,
+            return await self._leases.lease_pausing(
+                f"{_HOLDER_PREFIX}{workdir.name}", _ARCH_CARDS, workdir, charge=charge
             )
         except (RequestRejected, SandboxUnavailable):
             return None

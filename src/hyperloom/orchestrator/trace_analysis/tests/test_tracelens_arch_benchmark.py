@@ -100,7 +100,7 @@ def test_populate_gpu_arch_json_uses_bundled_spec(tmp_path: Path) -> None:
             platform="MI300X",
             fallback_dir=tmp_path / "session",
             log=lambda _msg: None,
-            run_command=lambda *_a, **_k: 0,
+            microbench=tab.Microbench(lambda *_a, **_k: 0),
         )
     assert spec == tab.ArchSpec(bundled, tab.ArchSpecSource.BUNDLED)
     assert spec.health_warning("MI300X") is None
@@ -145,7 +145,7 @@ def test_populate_gpu_arch_json_runs_microbench_when_missing(
             platform="MI355X",
             fallback_dir=tmp_path / "session",
             log=lambda _msg: None,
-            run_command=_run_command,
+            microbench=tab.Microbench(_run_command),
         )
 
     path = tmp_path / "TraceLens/Agent/Analysis/utils/arch/MI355X.json"
@@ -188,7 +188,7 @@ def test_populate_gpu_arch_json_skips_busy_gpu(tmp_path: Path) -> None:
             platform="MI355X",
             fallback_dir=tmp_path / "session",
             log=lambda _msg: None,
-            run_command=_run_command,
+            microbench=tab.Microbench(_run_command),
         )
 
     assert tried == ["4", "5"]
@@ -222,8 +222,7 @@ def test_populate_measures_only_on_the_cards_the_caller_holds(tmp_path: Path) ->
             platform="MI355X",
             fallback_dir=tmp_path / "session",
             log=lambda _msg: None,
-            run_command=_run_command,
-            gpus=[3],
+            microbench=tab.Microbench(_run_command, [3]),
         )
 
     assert tried == ["3"]
@@ -248,8 +247,7 @@ def test_populate_given_no_card_measures_nothing_and_reads_vendor_peaks(tmp_path
             platform="MI355X",
             fallback_dir=tmp_path / "session",
             log=lambda _msg: None,
-            run_command=_run_command,
-            gpus=[],
+            microbench=tab.Microbench(_run_command, []),
         )
 
     assert runs == []
@@ -307,7 +305,7 @@ def test_populate_external_raises_on_microbench_failure(
                 platform="MI355X",
                 fallback_dir=tmp_path / "session",
                 log=lambda _msg: None,
-                run_command=lambda *_a, **_k: 7,
+                microbench=tab.Microbench(lambda *_a, **_k: 7),
             )
 
 
@@ -323,7 +321,11 @@ def test_populate_falls_back_to_vendor_peaks_in_the_session_not_the_checkout(tmp
 
     def _populate() -> tab.ArchSpec:
         return tab.populate_gpu_arch_json(
-            tracelens_root=checkout, platform="MI355X", fallback_dir=session, log=lambda _msg: None, run_command=_busy
+            tracelens_root=checkout,
+            platform="MI355X",
+            fallback_dir=session,
+            log=lambda _msg: None,
+            microbench=tab.Microbench(_busy),
         )
 
     with (
@@ -368,7 +370,7 @@ def test_a_rejected_measurement_never_reaches_the_checkout(tmp_path: Path) -> No
             platform="MI355X",
             fallback_dir=tmp_path / "session",
             log=lambda _msg: None,
-            run_command=_run_command,
+            microbench=tab.Microbench(_run_command),
         )
 
     assert spec.source is tab.ArchSpecSource.VENDOR_PEAK
@@ -398,7 +400,7 @@ def test_a_vendor_peak_spec_left_in_the_checkout_is_measured_over(tmp_path: Path
             platform="MI355X",
             fallback_dir=tmp_path / "session",
             log=lambda _msg: None,
-            run_command=_run_command,
+            microbench=tab.Microbench(_run_command),
         )
         assert tab.resolve_arch_json_path("MI355X") == planted
 
