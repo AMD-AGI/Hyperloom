@@ -381,6 +381,9 @@ def test_an_agentx_role_tells_its_objective_bar_and_guards(monkeypatch, objectiv
     assert f"a {objective.title} gain bought with {guards[0].name} or {guards[1].name}" in role
     assert "output throughput" not in role and "dropped_requests" not in role
     assert "spread of the baseline measurements" not in role
+    assert "The accuracy gate is the request error rate on your branch" in role
+    assert "FINAL check the change's long-context answers against the root's" in role
+    assert "(long_context_dropped) keeps it out with no retest" in role
 
 
 def test_the_two_agentx_objectives_tell_what_moves_them():

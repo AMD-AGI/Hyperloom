@@ -706,6 +706,7 @@ def test_arbor_is_given_mb_s_rules_as_directives_the_dossier_copies(
     assert "at least 0.5" in accuracy and "at most 0.05" in accuracy
     assert "the root it measures itself" in accuracy
     assert len(agentx_rules) == 3 and "error rate stays at or under 10%" in agentx_rules[2]
+    assert "long-context check drop below the root's is never merged" in agentx_rules[2]
     assert not [rule for rule in agentx_rules if "agentx." in rule or "run_status" in rule], "bench_read holds both"
     total = host_rules(replace(agentx, metric=TOTAL_TOKEN_THROUGHPUT))
     assert "e2e_norm_intvty_p90 and e2e_norm_intvty_p50 within 5%" in total[1] and "output" not in total[1]
