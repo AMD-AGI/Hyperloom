@@ -8,6 +8,7 @@ from __future__ import annotations
 import contextlib
 import json
 import logging
+import re
 from pathlib import Path
 from typing import Any
 
@@ -22,8 +23,10 @@ from .parse_usage import _json_objects, _summarize_tool_input, normalize_usage
 log = logging.getLogger(__name__)
 
 # Every session the run opened, the root and each subagent's, under the run's ``DSH_HOME``. The launch's patch turns
-# off the log's compression, which is the harness's default and is not a format external readers may rely on.
-_SESSION_LOG_GLOB = "sessions/*/*/session.v3.jsonl"
+# off the log's compression, which is the harness's default and is not a format external readers may rely on. The
+# harness names the log for its schema version; a session directory holding several is read from its newest.
+_SESSION_LOG_GLOB = "sessions/*/*/session.v*.jsonl"
+_SESSION_LOG_VERSION = re.compile(r"session\.v(\d+)\.jsonl")
 
 _REASONING_KEY = "reasoning_output_tokens"
 _ASSISTANT_MESSAGE = "assistant/message"
@@ -41,6 +44,19 @@ _TOOL_NAMES: dict[str, str] = {
     "web_search": "WebSearch",
     "write": "Write",
 }
+
+
+def _newest_session_logs(home: Path) -> list[Path]:
+    """One log per session directory under ``home``: the highest schema version it holds, never a link."""
+    newest: dict[Path, tuple[int, Path]] = {}
+    for path in home.glob(_SESSION_LOG_GLOB):
+        match = _SESSION_LOG_VERSION.fullmatch(path.name)
+        if match is None or path.is_symlink() or not path.resolve().is_relative_to(home):
+            continue
+        version = int(match.group(1))
+        if path.parent not in newest or version > newest[path.parent][0]:
+            newest[path.parent] = (version, path)
+    return sorted(path for _, path in newest.values())
 
 
 def _session_records(home: Path, path: Path) -> list[dict[str, Any]]:
@@ -109,7 +125,7 @@ def parse_dsh_session_trace(dsh_home: str | Path) -> AgentTrace:
     error = ""
     home = Path(dsh_home).resolve()
     # The account that ran dsh owns this tree: read only what really sits under it, never what a link points to.
-    paths = sorted(p for p in home.glob(_SESSION_LOG_GLOB) if not p.is_symlink() and p.resolve().is_relative_to(home))
+    paths = _newest_session_logs(home)
     for path in paths:
         records = _session_records(home, path)
         steps += [usage for usage in map(step_usage, records) if usage]

@@ -37,6 +37,7 @@ from typing import Any, Mapping, Sequence
 
 from hyperloom.common.agent_cli import resolve_codex_executable
 from hyperloom.common.codex_session import (
+    CODEX_BASE_OVERRIDES,
     CodexSessionError,
     probe_codex_sandbox_capability,
     resolve_codex_provider_config,
@@ -909,9 +910,7 @@ class SpecialistSubprocessDispatcher:
         cmd.extend(["-C", str(worktree or workspace)])
         for extra_dir in writable_dirs[1:]:
             cmd.extend(["--add-dir", extra_dir])
-        # ``features.memories=false`` matches the SDK session: a specialist must
-        # not carry state between tasks.
-        for override in ("features.memories=false", *overrides):
+        for override in (*CODEX_BASE_OVERRIDES, *overrides):
             cmd.extend(["-c", override])
         if cfg.model:
             cmd.extend(["-m", cfg.model])

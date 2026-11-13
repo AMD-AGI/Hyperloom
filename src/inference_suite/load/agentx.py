@@ -381,7 +381,8 @@ def _replay(
         follower.check()
         # The follower's read can mark FINISHED after ``now``; a window closed at ``now`` would end before it.
         hear(time.monotonic())
-        return activity.check(now)
+        # A listener can block for minutes (/stop_profile answers once the trace is written): date output after it.
+        return activity.check(time.monotonic())
 
     child = spawn(invocation.argv, env, layout.agentx_client_log)
     ended = wait_child(child, agentx_round.gate, live)
