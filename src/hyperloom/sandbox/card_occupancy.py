@@ -22,9 +22,11 @@ which nobody holds the cards: its reading is ``denied`` (the card guard calls it
 
 In a container with a pid namespace of its own the kernel names processes by their id in the host's namespace, and those
 cannot be matched to what the container sees. The probe then does not name whose a holder is: it counts. Before a test
-starts nothing may hold a card, so any holder is foreign. While it runs, a test's server is the one process with memory on
-each of its cards, so a second one is foreign; a holder with almost no memory (:data:`NEGLIGIBLE_VRAM`) and no queue, such as
-a server's launcher that only initialised the GPU, is not counted. Memory on a card that no process the container sees
+starts nothing may hold a card, so any holder is foreign. While it runs, the test's own processes are one resident of each
+of its cards, however many of them hold memory there (a server's launcher beside its first rank): a card is crowded when it
+has more holders with memory than the test has processes with memory on its render node, and one in any case; a holder
+with almost no memory (:data:`NEGLIGIBLE_VRAM`) and no queue, such as a server's launcher that only initialised the GPU,
+is not counted. Memory on a card that no process the container sees
 accounts for is foreign as well (:mod:`hyperloom.sandbox.drm_fdinfo`). Processes that only opened the interface hold
 nothing and are not counted.
 """
@@ -230,8 +232,9 @@ class CardReading:
         self, own: OwnProcesses, *, before_test: bool, accounted: frozenset[tuple[int, int]] = frozenset()
     ) -> tuple[Intrusion, ...]:
         """What on the cards is not the test's: holders that are not ``own``'s when ids could be matched; otherwise any
-        holder before the test starts, and while it runs a card with more than one process holding memory on it (see
-        :func:`_has_memory`) or with memory no process this reader sees accounts for, unless every holder of memory on
+        holder before the test starts, and while it runs a card with a process holding memory on it (see
+        :func:`_has_memory`) beyond the test's own (see :meth:`_crowded`) or with memory no process this reader sees
+        accounts for, unless every holder of memory on
         that card is among ``accounted`` (``(card, kernel id)`` pairs an earlier look found accounted for, see
         :meth:`accounted_holders`)."""
         if self.method == METHOD_PID_MATCH:
@@ -255,36 +258,53 @@ class CardReading:
         )
 
     def _crowded(self, own: OwnProcesses) -> tuple[Intrusion, ...]:
+        """Cards with a holder of memory that is not the test's own. The kernel's ids cannot be matched, so the holders are
+        counted against the test's processes with memory on the card's render node (:meth:`_render_users`, the same ones
+        the record names as the test's): those are one resident, the server's launcher and every process under it
+        included, and every holder beyond them is not the test's. One holder is allowed when none of them is seen."""
         found = []
         for card in sorted(self.held_cards()):
             resident = [holder for holder in self.holders if holder.card == card and _has_memory(holder)]
-            if len(resident) > 1:
-                named = ", ".join(f"host pid {h.pid} with {h.vram / _GIB:.1f} GiB" for h in resident)
-                found.append(
-                    Intrusion(
-                        ("crowded", card),
-                        f"{len(resident)} processes with memory on card {card} at once ({named}); "
-                        f"{self._render_users(card, own)}",
-                    )
+            if len(resident) <= 1:
+                continue
+            users = self._render_users(card, own)
+            if len(resident) <= max(1, len({user.pid for user in users if user.own})):
+                continue
+            named = ", ".join(f"host pid {h.pid} with {h.vram / _GIB:.1f} GiB" for h in resident)
+            found.append(
+                Intrusion(
+                    ("crowded", card),
+                    f"{len(resident)} processes with memory on card {card} at once ({named}); "
+                    f"{self._describe_render_users(users)}",
                 )
+            )
         return tuple(found)
 
-    def _render_users(self, card: int, own: OwnProcesses) -> str:
-        """Who of this container has more than almost no memory (:data:`NEGLIGIBLE_VRAM`) on ``card``'s render node,
-        each with its id, command and memory, for the record of a crowded card; or why that could not be read."""
+    def _render_users(self, card: int, own: OwnProcesses) -> tuple[_RenderUser, ...]:
+        """The processes of this container with more than almost no memory (:data:`NEGLIGIBLE_VRAM`) on ``card``'s render
+        node, each marked whether it is ``own``'s; none when the descriptors were not read."""
         if self.method != METHOD_CENSUS_FDINFO:
-            gap = f" ({self.accounting_gap})" if self.accounting_gap else ""
-            return f"the render node's descriptors were not read{gap}"
-        users = [
-            f"pid {pid} ({'the test' if own.owns(pid) else 'not the test'}) with {client.vram / _GIB:.1f} GiB"
-            + (f": {command[:_DETAIL_COMMAND_CHARS]}" if command else "")
+            return ()
+        return tuple(
+            _RenderUser(pid, command, client.vram, own.owns(pid))
             for client in self.render_clients
             if client.card == card and client.vram > NEGLIGIBLE_VRAM
             for pid, command in client.processes
-        ]
+        )
+
+    def _describe_render_users(self, users: Sequence[_RenderUser]) -> str:
+        """``users``, each with its id, whether it is the test's, its memory and command, for the record of a crowded card;
+        or why there are none."""
+        if self.method != METHOD_CENSUS_FDINFO:
+            gap = f" ({self.accounting_gap})" if self.accounting_gap else ""
+            return f"the render node's descriptors were not read{gap}"
         if not users:
             return "no process of this container has memory on its render node"
-        return "this container's processes with memory on its render node: " + "; ".join(users)
+        return "this container's processes with memory on its render node: " + "; ".join(
+            f"pid {user.pid} ({'the test' if user.own else 'not the test'}) with {user.vram / _GIB:.1f} GiB"
+            + (f": {user.command[:_DETAIL_COMMAND_CHARS]}" if user.command else "")
+            for user in users
+        )
 
     def _unexplained(self, accounted: frozenset[tuple[int, int]]) -> tuple[Intrusion, ...]:
         found = []
@@ -298,6 +318,16 @@ class CardReading:
                     )
                 )
         return tuple(found)
+
+
+class _RenderUser(NamedTuple):
+    """A process of this container with memory on a card's render node: its id here, command and memory, and whether it
+    is the test's own."""
+
+    pid: int
+    command: str
+    vram: int
+    own: bool
 
 
 def _has_memory(holder: Holder) -> bool:
