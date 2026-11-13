@@ -65,6 +65,7 @@ from hyperloom.measure.long_context.resolve import StagedSet, staged_set
 from hyperloom.measure.long_context.staging import KEY_PREFIX
 from hyperloom.measure.points import launch_carriers
 from hyperloom.measure.short_prompts.staging import CACHE_ENV, EVALSETS_DIR, cache_root, entry_key
+from hyperloom_multibranch.contracts.toolbox import AGENTX_GATED_PURPOSES, agentx_gated
 from hyperloom_multibranch.toolbox.submission_log import LogEntry
 from hyperloom_multibranch.toolbox.short_prompts import (
     MODEL_PATH_ENV,
@@ -105,9 +106,6 @@ _NOT_STAGED = "long-context check off: the model's prompt set %s is not staged i
 
 _CHECKED_KINDS = (TestKind.TEST, TestKind.SWEEP)
 _FORCED = "request long_context_check"
-#: The purposes an AgentX campaign gates on the check, each a TEST: the root's reference reading, every integration merge
-#: test, and FINAL's reproduction test (the FINAL sweep is not gated: one check per candidate).
-AGENTX_GATED_PURPOSES = frozenset({Purpose.BASELINE, Purpose.INTEGRATION, Purpose.FINAL})
 _AGENTX_GATE = "agentx gate: purpose {purpose}"
 _MAX_FAILED_SHOWN = 3
 #: What a check records that its bundle cannot show: why it ran, and the root's reading, made from other tests' bundles.
@@ -323,11 +321,6 @@ def decide_agentx(request: TestRequest, setup: LongContextSetup | None) -> LongC
         return None
     trigger = (_AGENTX_GATE.format(purpose=request.purpose.value),)
     return LongContextPlan(setup.prompt_set, setup.prompts_sha256, setup.length, trigger=trigger, bound=setup.bound)
-
-
-def agentx_gated(request: TestRequest) -> bool:
-    """Whether an AgentX campaign gates ``request`` on the check: a TEST of a purpose in ``AGENTX_GATED_PURPOSES``."""
-    return request.kind is TestKind.TEST and request.purpose in AGENTX_GATED_PURPOSES
 
 
 # --- what is recorded ----------------------------------------------------------------------------------------------

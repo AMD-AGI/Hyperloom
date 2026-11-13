@@ -24,7 +24,14 @@ from enum import Enum
 from pathlib import Path
 from typing import Literal, Protocol
 
-from hyperloom.contracts.measurement import PRIORITY_HIGHEST, PRIORITY_LOWEST, AttachmentRef, TestRequest
+from hyperloom.contracts.measurement import (
+    PRIORITY_HIGHEST,
+    PRIORITY_LOWEST,
+    AttachmentRef,
+    Purpose,
+    TestKind,
+    TestRequest,
+)
 from hyperloom.contracts.recipe import KernelArtifact, KernelKind
 from hyperloom_multibranch.contracts.blackboard.interfaces import NodeHealth, TestRecordSink
 from hyperloom_multibranch.contracts.blackboard.vocab import LeaseKind
@@ -112,6 +119,18 @@ class WorkloadKind(str, Enum):
 
     INFERENCEX = "inferencex"  # fixed workload: the rule gate refuses a result without an accuracy score
     AGENTX = "agentx"  # accuracy is a separate ``accuracy`` test after a positive result
+
+
+#: The purposes an AgentX campaign gates on the long-context check, each a TEST: the root's reference reading, every
+#: integration merge test, and FINAL's reproduction test (the FINAL sweep is not gated: one check per candidate). The
+#: toolbox runs the check on exactly these, and the rule gate holds exactly these to it.
+AGENTX_GATED_PURPOSES = frozenset({Purpose.BASELINE, Purpose.INTEGRATION, Purpose.FINAL})
+
+
+def agentx_gated(request: TestRequest) -> bool:
+    """Whether an AgentX campaign gates ``request`` on the long-context check: a TEST of a purpose in
+    ``AGENTX_GATED_PURPOSES``."""
+    return request.kind is TestKind.TEST and request.purpose in AGENTX_GATED_PURPOSES
 
 
 class CancelOutcome(str, Enum):
@@ -347,6 +366,7 @@ class Toolbox(Protocol):
 
 
 __all__ = [
+    "AGENTX_GATED_PURPOSES",
     "SCOPE_HOST",
     "SCOPE_SPECIALIST",
     "REJECTION_CODES",
@@ -369,4 +389,5 @@ __all__ = [
     "ToolboxError",
     "UnknownTestRequest",
     "WorkloadKind",
+    "agentx_gated",
 ]
