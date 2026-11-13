@@ -1051,6 +1051,7 @@ def _force_sitecustomize_shape_mode(monkeypatch):
     from hyperloom.orchestrator.actions.executors import _server_patcher
 
     monkeypatch.setattr(_server_patcher, "resolve_sglang_shape_mode", lambda: "sitecustomize")
+    monkeypatch.setattr(_server_patcher, "resolve_sglang_gc_patch_needed", lambda: True)
 
 
 def test_sitecustomize_profile_records_successful_gc_patch(tmp_path, monkeypatch):
