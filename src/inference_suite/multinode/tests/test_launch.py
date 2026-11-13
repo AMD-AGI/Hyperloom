@@ -127,6 +127,16 @@ def test_start_runs_engines_before_the_router(tmp_path):
     assert ran.prefill.stripped == ("unsupported --cuda-graph-bs",)
 
 
+def test_role_env_reaches_only_its_engine_role(tmp_path):
+    hosts = FakeHosts()
+    options = replace(_OPTIONS, extra_env={"SHARED": "1"}, role_env={"decode": {"ROLE_DIR": "/t/decode"}})
+    start(_launch(), _cluster(tmp_path, hosts), options)
+    scripts = {host: stdin for kind, host, stdin in hosts.calls if kind == "ssh" and "HL_ACTION=restart" in stdin}
+    assert "export ROLE_DIR=/t/decode" in scripts["d0"]
+    assert "ROLE_DIR" not in scripts["p0"] and "ROLE_DIR" not in scripts["r0"]
+    assert all("export SHARED=1" in script for script in scripts.values())
+
+
 def test_operator_flags_are_kept_when_the_engine_does_not_list_them():
     fitted = fit_to_engine(_launch(PdSourceKind.OPERATOR), frozenset({"cuda-graph-bs-decode"}))
     assert "--retired-flag" in fitted.decode.args

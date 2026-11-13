@@ -428,7 +428,8 @@ def _build_trace_analyze_cmd(
     if scriptable:
         steady_state_mode = "generic"
     else:
-        cmd += _split_llm_flags(payload, workload)
+        if payload.get("split_llm_inference", True):
+            cmd += _split_llm_flags(payload, workload)
         steady_state_mode = str(
             payload.get("steady_state_mode") or os.environ.get("INFERENCE_OPTIMIZER_STEADY_STATE_MODE", "")
         ).strip()

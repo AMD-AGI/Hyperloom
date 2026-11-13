@@ -34,9 +34,8 @@ from inference_suite.multinode.commands import (
     ROUTER_PORT,
     HostCommand,
     cluster_commands,
-    engine_port,
+    engine_urls,
     process_needle,
-    worker_hosts,
 )
 from inference_suite.multinode.nodes import LaunchMode, NodeList
 from inference_suite.multinode.record import PdLaunch, PdSourceKind, Role, RoleLaunch
@@ -83,9 +82,11 @@ class Cluster:
 
 @dataclass(frozen=True)
 class LaunchOptions:
-    """What every host's server additionally gets, where engines tee their logs, and how long to wait."""
+    """What every host's server additionally gets (``role_env`` per engine role, over ``extra_env``), where engines
+    tee their logs, and how long to wait."""
 
     extra_env: Mapping[str, str] = field(default_factory=dict)
+    role_env: Mapping[str, Mapping[str, str]] = field(default_factory=dict)
     log_dir: str = ""
     ssh_timeout_s: int = 180
     ready_timeout_s: int = 1800
@@ -291,8 +292,7 @@ def with_overrides(launch: PdLaunch, overrides: Mapping[str, Sequence[str]]) -> 
 
 
 def _health_urls(launch: PdLaunch, nodes: NodeList, role: Role) -> list[str]:
-    port = engine_port(nodes, role)
-    return [f"http://{hosts[0]}:{port}/health" for hosts in worker_hosts(launch.role(role))]
+    return [f"{url}/health" for url in engine_urls(launch, nodes)[role.value]]
 
 
 def _log_tail(cluster: Cluster, command: HostCommand, timeout: int) -> str:
@@ -349,7 +349,7 @@ def start(launch: PdLaunch, cluster: Cluster, options: LaunchOptions) -> PdLaunc
     fitted = fit_to_engine(launch, probe_engine_flags(launch, cluster, options.ssh_timeout_s))
     commands = cluster_commands(fitted, cluster.nodes)
     for command in commands[:-1]:
-        role_env = {**fitted.role(Role(command.role)).env, **env}
+        role_env = {**fitted.role(Role(command.role)).env, **env, **check_env(options.role_env.get(command.role, {}))}
         script = launch_script(command, role_env, fitted.framework, options.log_dir)
         _drive(cluster, command, script, fitted, options.ssh_timeout_s)
     engines = [*_health_urls(fitted, cluster.nodes, Role.PREFILL), *_health_urls(fitted, cluster.nodes, Role.DECODE)]

@@ -8,6 +8,7 @@ from __future__ import annotations
 import os
 import re
 import shlex
+import uuid
 from collections.abc import Mapping
 from pathlib import Path
 from typing import Any, NamedTuple
@@ -26,6 +27,7 @@ from inference_suite.multinode import (
     PdResolveError,
     SshError,
     cluster_of,
+    engine_urls,
     engines_gone,
     placed_launch,
     read_record,
@@ -45,6 +47,10 @@ RAN_RECORD_NAME = "pd_launch.ran.json"
 PREFILL_EXTRA_ENV = "PD_PREFILL_EXTRA_ARGS"
 DECODE_EXTRA_ENV = "PD_DECODE_EXTRA_ARGS"
 SERVER_LOG_DIR_ENV = "HYPERLOOM_MN_SERVER_LOG_DIR"
+PROFILER_DIR_ENV = "SGLANG_TORCH_PROFILER_DIR"
+TRACE_SHARED_KEY = "profile_trace_shared"
+TRACE_SHARE_ERROR_KEY = "profile_trace_share_error"
+TRACE_SHARE_PROBE_TIMEOUT_S = 30
 
 _PREFILL = "prefill"
 _DECODE = "decode"
@@ -95,14 +101,19 @@ def round_overrides(shared: str, prefill: str = "", decode: str = "") -> dict[st
 
 def launch_options(forward_env: Mapping[str, str], ready_timeout_s: int) -> LaunchOptions:
     """The options a round runs with: ``forward_env`` exported to every engine (shell-safe keys the runner does not
-    reserve), its server-log directory shared by the engines."""
+    reserve), its server-log directory shared by the engines, and its torch profiler directory narrowed to
+    ``<dir>/<role>`` for each engine role (the router gets none)."""
     env = {
         key: value
         for key, value in forward_env.items()
         if _ENV_KEY.fullmatch(key) and not key.startswith(_RESERVED_ENV_PREFIX)
     }
     log_dir = env.pop(SERVER_LOG_DIR_ENV, "")
-    return LaunchOptions(extra_env=env, log_dir=log_dir, ready_timeout_s=ready_timeout_s)
+    profiler_dir = env.pop(PROFILER_DIR_ENV, "").rstrip("/")
+    role_env = (
+        {role: {PROFILER_DIR_ENV: f"{profiler_dir}/{role}"} for role in (_PREFILL, _DECODE)} if profiler_dir else {}
+    )
+    return LaunchOptions(extra_env=env, role_env=role_env, log_dir=log_dir, ready_timeout_s=ready_timeout_s)
 
 
 class _SessionCluster(NamedTuple):
@@ -160,6 +171,64 @@ def stop_cluster(state: dict[str, Any]) -> None:
         raise PdSessionError(f"the PD cluster could not be stopped: {exc}") from exc
 
 
+def session_engine_urls(state: dict[str, Any]) -> dict[str, list[str]]:
+    """The HTTP base URL of every prefill and decode engine worker, as the frozen launch is placed on the node list.
+
+    Raises:
+        PdSessionError: no node list is handed over, or the frozen launch cannot be verified or placed.
+    """
+    try:
+        session = _session_cluster(state)
+        return engine_urls(session.launch, session.cluster.nodes)
+    except (*_SUITE_ERRORS, ValueError) as exc:
+        raise PdSessionError(f"the PD engines cannot be placed: {exc}") from exc
+
+
+def _host_reads_marker(cluster: Cluster, host: str, marker: Path, token: str) -> str:
+    """``""`` when ``host`` reads ``token`` from ``marker`` over SSH, else why it does not."""
+    result = cluster.client.run(host, f"cat {shlex.quote(str(marker))}", TRACE_SHARE_PROBE_TIMEOUT_S)
+    if result.returncode != 0:
+        detail = result.stderr.strip()[-200:]
+        return f"engine host {host}: cannot read {marker} (rc={result.returncode}) {detail}".strip()
+    if result.stdout.strip() != token:
+        return f"engine host {host}: {marker} is a different file there"
+    return ""
+
+
+def probe_trace_share(state: dict[str, Any], trace_root: Path) -> str:
+    """``""`` when every prefill and decode host reads a marker written here under ``trace_root``, else why not."""
+    token = uuid.uuid4().hex
+    marker = trace_root / f".share_probe-{token}"
+    try:
+        trace_root.mkdir(parents=True, exist_ok=True)
+        marker.write_text(token, encoding="utf-8")
+    except OSError as exc:
+        return f"cannot write {marker}: {exc}"
+    try:
+        session = _session_cluster(state)
+        for host in dict.fromkeys((*session.launch.prefill.hosts, *session.launch.decode.hosts)):
+            reason = _host_reads_marker(session.cluster, host, marker, token)
+            if reason:
+                return reason
+    except (*_SUITE_ERRORS, PdSessionError) as exc:
+        return f"the engine hosts cannot be probed: {exc}"
+    finally:
+        marker.unlink(missing_ok=True)
+    return ""
+
+
+def record_trace_share(state: dict[str, Any], trace_root: Path) -> str:
+    """Record on ``state`` whether the engine hosts share ``trace_root`` (:func:`probe_trace_share`); returns why
+    not (``""`` when shared)."""
+    reason = probe_trace_share(state, trace_root)
+    state[TRACE_SHARED_KEY] = not reason
+    if reason:
+        state[TRACE_SHARE_ERROR_KEY] = reason
+    else:
+        state.pop(TRACE_SHARE_ERROR_KEY, None)
+    return reason
+
+
 def engines_lost(state: dict[str, Any]) -> str:
     """Why the session's engines are no longer served (``""`` when every one still runs, or none can be checked)."""
     try:
@@ -176,7 +245,10 @@ __all__ = [
     "PD_DIGEST_KEY",
     "PD_LAUNCH_KEY",
     "PREFILL_EXTRA_ENV",
+    "PROFILER_DIR_ENV",
     "RAN_RECORD_NAME",
+    "TRACE_SHARED_KEY",
+    "TRACE_SHARE_ERROR_KEY",
     "PdSessionError",
     "engines_lost",
     "freeze_launch",
@@ -185,8 +257,11 @@ __all__ = [
     "launch_options",
     "node_list_backend",
     "pd_state",
+    "probe_trace_share",
+    "record_trace_share",
     "restart_round",
     "round_overrides",
+    "session_engine_urls",
     "stop_cluster",
     "verified_launch",
 ]
