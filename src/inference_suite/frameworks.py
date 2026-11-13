@@ -118,15 +118,28 @@ class FrameworkFacts:
         return tp * (1 if self.data_parallel is None else self.data_parallel.replicas(args))
 
 
-# vLLM 0.30 moved the serve parser from ``entrypoints.openai`` to ``entrypoints.launchers``.
+# vLLM 0.30 moved the serve parser from ``entrypoints.openai`` to ``entrypoints.launchers``, and 0.32 nightlies moved
+# it on to ``entrypoints.common``; newest first, so an install that keeps an older module beside it reads the one
+# ``vllm serve`` imports.
+_VLLM_PARSER_MODULES = (
+    "vllm.entrypoints.common.cli_args",
+    "vllm.entrypoints.launchers.cli_args",
+    "vllm.entrypoints.openai.cli_args",
+)
 _VLLM_PARSER_SOURCE = (
     "def _build_parser():\n"
-    "    try:\n"
-    "        from vllm.entrypoints.launchers.cli_args import make_arg_parser\n"
-    "    except ModuleNotFoundError as exc:\n"
-    "        if exc.name not in ('vllm.entrypoints.launchers', 'vllm.entrypoints.launchers.cli_args'):\n"
-    "            raise\n"
-    "        from vllm.entrypoints.openai.cli_args import make_arg_parser\n"
+    "    import importlib\n"
+    f"    for module in {_VLLM_PARSER_MODULES!r}:\n"
+    "        try:\n"
+    "            make_arg_parser = importlib.import_module(module).make_arg_parser\n"
+    "        except ModuleNotFoundError as exc:\n"
+    "            if exc.name not in (module, module.rpartition('.')[0]):\n"
+    "                raise\n"
+    "            missing = exc\n"
+    "            continue\n"
+    "        break\n"
+    "    else:\n"
+    "        raise missing\n"
     "    try:\n"
     "        from vllm.utils.argparse_utils import FlexibleArgumentParser\n"
     "    except ImportError:\n"

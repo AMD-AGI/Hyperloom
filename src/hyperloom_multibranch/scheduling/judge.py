@@ -28,6 +28,7 @@ and names them in the decision.
 from __future__ import annotations
 
 import json
+import logging
 from collections import Counter
 from collections.abc import Iterable, Mapping
 from dataclasses import asdict, dataclass, replace
@@ -65,6 +66,8 @@ from hyperloom_multibranch.scheduling.roster import (
 )
 from hyperloom_multibranch.scheduling.similarity import SimilarBranch
 from hyperloom_multibranch.scheduling.widening import WideningSignals
+
+logger = logging.getLogger(__name__)
 
 _KEY_OPEN = "open"
 _KEY_OPEN_K = "open_k"
@@ -647,6 +650,8 @@ class Judge:
         else:
             decision = parse_decision(reply)
             error = "" if decision is not None else "the reply holds no well-formed decision object"
+        if error:
+            logger.warning("the judge gave no decision: %s", error)
         append_shared_jsonl(self.transcript, {"at": self.clock.now(), "prompt": prompt, "reply": reply, "error": error})
         return cap_decision(decision, view) if decision is not None else None
 

@@ -12,11 +12,14 @@ from __future__ import annotations
 
 import json
 import os
+import urllib.error
 from pathlib import Path
 
 import pytest
+import yaml
 
 from hyperloom.contracts.measurement import PhaseTiming
+from hyperloom.measure import round_marks
 from hyperloom.measure.phases import PhaseRecorder
 from hyperloom.measure.round_marks import (
     ROLE_BOOT,
@@ -29,8 +32,14 @@ from hyperloom.measure.round_marks import (
     RunMarks,
     boot_parts,
     read_runs,
+    profile_stall,
     round_boundaries,
+    stalled_in_profile_window,
 )
+from inference_suite.contracts import FailedStep
+from inference_suite.profile.inject import START_PROFILE_PATH, STOP_PROFILE_PATH
+from inference_suite.runtime.phases import Phase
+from inference_suite.tests import test_config_contract
 
 T0 = 1_000.0
 WINDOW = (T0, T0 + 300.0)
@@ -75,11 +84,11 @@ def _phases(boundaries: list[Boundary], window: tuple[float, float] = WINDOW) ->
 
 def _shape(role: str = ROLE_MEASURE, **overrides: object) -> RoundShape:
     fields: dict[str, object] = {"agentx": False, "reuses_server": False, "failed": False}
-    return RoundShape(role, **{**fields, **overrides})  # type: ignore[arg-type]
+    return RoundShape(role, **{**fields, **overrides})
 
 
 def _run(**fields: object) -> RunMarks:
-    return RunMarks(Path("/nowhere"), **{"ready": T0 + 90.0, **fields})  # type: ignore[arg-type]
+    return RunMarks(Path("/nowhere"), **{"ready": T0 + 90.0, **fields})
 
 
 # -- reading the marks --------------------------------------------------------------------------------------------
@@ -446,3 +455,109 @@ def test_the_server_log_in_the_run_dir_splits_the_boot_and_one_below_it_is_not_r
         "server_boot.graph_capture",
     ]
     assert [seconds for _, seconds in phases[2:4]] == [2.0, 11.5]
+
+
+def test_the_window_marks_read_are_the_ones_the_suite_writes() -> None:
+    """The names are literal here (``measure`` may not import the suite's runtime); the suite's ``Phase`` owns them."""
+    assert (round_marks._PROFILE_OPEN, round_marks._PROFILE_CLOSE, round_marks._CLIENT_FINISHED) == (
+        Phase.PROFILE_OPEN.value,
+        Phase.PROFILE_CLOSE.value,
+        Phase.FINISHED.value,
+    )
+
+
+def test_the_window_request_read_is_the_one_the_suite_sends_and_words() -> None:
+    """The path is literal here (``measure`` may not import the suite's profile package), and so is how urllib words a
+    request the server answered with an error status."""
+    refused = urllib.error.HTTPError(STOP_PROFILE_PATH, 400, "Bad Request", None, None)
+
+    assert round_marks._STOP_PROFILE == STOP_PROFILE_PATH
+    assert str(refused).startswith(round_marks._ANSWERED_WITH_STATUS)
+
+
+def _agentx_round(directory: Path, capture: str) -> Path:
+    """An AgentX round whose window opened at 400 and closed at 700, ended 1302 by a 600 s silence, with ``capture`` as
+    its ``profile/capture.json``: the marks alone place the silence after the window."""
+    marks = {"measured": 100.0, "profile_open": 400.0, "profile_close": 700.0, "finished": 1302.0}
+    document = {"phase_marks": [{"phase": phase, "ts": at, "mono": at} for phase, at in marks.items()]}
+    (directory / "phase_marks.json").write_text(json.dumps(document), encoding="utf-8")
+    config = test_config_contract._config()
+    (directory / "config.yaml").write_text(yaml.safe_dump(config.to_document(), sort_keys=False), encoding="utf-8")
+    (directory / "profile").mkdir()
+    (directory / "profile" / "capture.json").write_text(capture, encoding="utf-8")
+    return directory
+
+
+@pytest.mark.parametrize(
+    ("capture", "stalled"),
+    [
+        (json.dumps({"error": "/stop_profile: <urlopen error timed out>"}), True),
+        # The window sends /start_profile whatever the server is doing: unanswered, it places no stall.
+        (json.dumps({"error": f"{START_PROFILE_PATH}: timed out"}), False),
+        (json.dumps({"error": None}), False),
+        (json.dumps({"error": "/stop_profile: HTTP Error 400: Bad Request"}), False),
+        (json.dumps({"error": "something else: timed out"}), False),
+        ("{not json", False),
+        ("[]", False),
+    ],
+    ids=[
+        "stop_unanswered",
+        "start_unanswered_is_not_read",
+        "both_answered",
+        "stop_refused",
+        "not_a_window_request",
+        "capture_unreadable",
+        "capture_off_contract",
+    ],
+)
+def test_a_window_request_the_server_never_answered_places_the_stall_in_the_window(
+    tmp_path: Path, capture: str, stalled: bool
+) -> None:
+    assert stalled_in_profile_window(_agentx_round(tmp_path, capture)) is stalled
+
+
+def _window_round(directory: Path) -> Path:
+    """A round whose server went silent at 411, 11 s into a profile window opened at 400, and was ended 600 s later."""
+    marks = {"profile_open": 400.0, "finished": 1011.0, "profile_close": 1011.0}
+    document = {"phase_marks": [{"phase": phase, "ts": at, "mono": at} for phase, at in marks.items()]}
+    (directory / "phase_marks.json").write_text(json.dumps(document), encoding="utf-8")
+    config = test_config_contract._config()
+    (directory / "config.yaml").write_text(yaml.safe_dump(config.to_document(), sort_keys=False), encoding="utf-8")
+    return directory
+
+
+@pytest.mark.parametrize(
+    ("step", "log", "stall"),
+    [
+        (FailedStep.SERVER_STALLED, "INFO serving\nhandler still waiting\n\n", "handler still waiting"),
+        (FailedStep.SERVER_STALLED, None, ""),
+        (FailedStep.SERVER_DIED, "INFO serving\nhandler still waiting\n", None),
+    ],
+    ids=["stalled_quotes_its_log", "stalled_without_a_log", "died_is_no_stall"],
+)
+def test_a_profile_stall_is_a_stalled_round_in_its_window_and_names_its_server_logs_last_line(
+    tmp_path: Path, step: FailedStep, log: str | None, stall: str | None
+) -> None:
+    directory = _window_round(tmp_path)
+    if log is not None:
+        (directory / "server.log").write_text(log, encoding="utf-8")
+
+    assert profile_stall(directory, step) == stall
+
+
+@pytest.mark.parametrize(
+    "broken",
+    [{"phase_marks.json": "{not json"}, {"config.yaml": "deadlines: ["}, {"config.yaml": "deadlines: {}\n"}],
+    ids=["marks_unreadable", "config_unreadable", "config_off_contract"],
+)
+def test_a_round_whose_marks_or_config_cannot_be_read_is_not_known_to_have_stalled_in_its_window(
+    tmp_path: Path, broken: dict[str, str]
+) -> None:
+    assert stalled_in_profile_window(_window_round(tmp_path)), (
+        "the case is a stall inside the window until a file is broken"
+    )
+
+    for name, text in broken.items():
+        (tmp_path / name).write_text(text, encoding="utf-8")
+
+    assert not stalled_in_profile_window(tmp_path)
