@@ -54,6 +54,7 @@ TUNER_ENV_VARS = {
     "a4w4_blockscale": "AITER_CONFIG_GEMM_A4W4",
     "sglang_dense_bf16": "AITER_CONFIG_GEMM_BF16",
     "vllm_moe_triton": "VLLM_TUNED_CONFIG_FOLDER",
+    "vllm_mxfp4_matmul_ogs": "HYPERLOOM_MATMUL_OGS_FLAGS",
     "vllm_dense_tunableop": "PYTORCH_TUNABLEOP_FILENAME",
 }
 

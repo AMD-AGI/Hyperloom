@@ -25,6 +25,16 @@ from ..kernel import kernel_decisions
 from ..kernel.lane_budget import INSUFFICIENT_BUDGET
 
 log = logging.getLogger(__name__)
+_OGS_TUNER = "vllm_mxfp4_matmul_ogs"
+_VLLM_MOE_TRITON_TUNER = "vllm_moe_triton"
+
+
+def _gemm_candidate_runtime(tuner_name: str, env: Mapping[str, str]) -> dict[str, str]:
+    """Startup runtime needed to activate a tuner's saved candidate."""
+    if tuner_name not in ("vllm_dense_tunableop", _OGS_TUNER):
+        return {}
+    return {"pythonpath_prefix": env.get("PYTHONPATH", "").split(os.pathsep)[0]}
+
 
 # Last-resort location of the aiter checkout inside the standard serving container.
 _CONTAINER_AITER_CONFIG_DIR = Path("/sgl-workspace/aiter/aiter/configs")
@@ -404,6 +414,7 @@ class _GemmTuningMixin:
                     "paired_reference": reference,
                     "extra_server_args": str(recipe.get("extra_server_args") or ""),
                     "extra_envs": envs,
+                    "runtime_override": {"pythonpath_prefix": overlay} if overlay else {},
                     "remove_args": recipe.get("remove_args", []),
                     "unset_envs": recipe.get("unset_envs", []),
                     "args_mode": recipe.get("args_mode", "append"),
@@ -439,6 +450,11 @@ class _GemmTuningMixin:
         envs: dict[str, str],
     ) -> dict[str, Any] | None:
         """Did the tuned table reach the server's merge list and get read?"""
+        if tuner_name == _OGS_TUNER:
+            from kernelforge.workflows.gemm_tune.tuners.ogs_runtime import FLAGS_ENV
+            from ..kernel.ogs_delivery import verify_ogs_apply
+
+            return verify_ogs_apply(_integrate_server_logs(self.session_dir, tuner_name), envs.get(FLAGS_ENV, ""))
         csv_paths = [value for key, value in envs.items() if key.startswith("AITER_CONFIG")]
         if not csv_paths or tuner_name == "fmoe_ck":
             return None
@@ -750,6 +766,7 @@ class _GemmTuningMixin:
                     "env_var": env_var,
                     "env_value": env_value,
                     "envs": envs,
+                    **({"artifact_path": str(row["artifact_path"])} if row.get("artifact_path") else {}),
                     "micro_speedup": to_float(row.get("best_micro_speedup")) or 1.0,
                 }
             )
@@ -771,12 +788,16 @@ class _GemmTuningMixin:
     def _gemm_candidate_skip_reason(self, tuner_name: str, *, triton_moe_inert: bool) -> str:
         from hyperloom.inference_optimizer.model_config_utils import model_supports_aiter_ck_fused_moe
 
-        if tuner_name == "vllm_moe_triton" and triton_moe_inert:
+        if tuner_name in (_VLLM_MOE_TRITON_TUNER, _OGS_TUNER) and triton_moe_inert:
+            artifact = (
+                "VLLM_TUNED_CONFIG_FOLDER" if tuner_name == _VLLM_MOE_TRITON_TUNER else "HYPERLOOM_MATMUL_OGS_FLAGS"
+            )
             log.warning(
                 "gemm E2E: skipping %s -- the server dispatches MoE through "
-                "aiter, which never reads VLLM_TUNED_CONFIG_FOLDER, so the tuned "
+                "aiter, which never reads %s, so the tuned "
                 "Triton config cannot take effect",
                 tuner_name,
+                artifact,
             )
             return "aiter_moe_runtime_triton_config_inert"
         # fmoe_ck is only meaningful with --moe-runner-backend aiter, and aiter's CK fused-MoE rejects a
@@ -829,6 +850,7 @@ class _GemmTuningMixin:
             "model_path": resolve_session_model_path(state_model_path=str(self.shared_state.model_path or "")),
             "extra_server_args": self._gemm_candidate_server_args(tuner_name),
             "extra_envs": test_envs,
+            "runtime_override": _gemm_candidate_runtime(tuner_name, test_envs),
             "keep_threshold_pct": 1.0,
             "mode": "env_only",
         }
@@ -975,7 +997,7 @@ class _GemmTuningMixin:
         backend = _first_text(result, "backend").strip().lower() or "forge"
         tuner_name = cand["tuner"]
         tput, gain_pct = _integrate_tput_and_gain(verdict)
-        tuned_file = _candidate_tuned_file(env, cand["env_var"])
+        tuned_file = cand.get("artifact_path") or _candidate_tuned_file(env, cand["env_var"])
         lifted = self._coord.writeback.lift_to_current_best(
             "gemm_tuning",
             tput,
@@ -983,6 +1005,7 @@ class _GemmTuningMixin:
                 "name": f"{backend}_{tuner_name}",
                 "candidate_extra_server_args": self._gemm_candidate_server_args(tuner_name),
                 "extra_envs": dict(env),
+                "final_overlay": _gemm_candidate_runtime(tuner_name, env).get("pythonpath_prefix", ""),
                 "source_phase": "KERNEL_AGENT",
                 **integrate_measurement_fields(verdict.get("bench_result") or verdict),
             },
@@ -1098,9 +1121,9 @@ class _GemmTuningMixin:
         accepted_measurement: dict[str, Any] = {}
         # ``_runtime_uses_aiter_fused_moe`` resolves the serving log -- which now byte-scans the whole runs/ tree for
         # aiter evidence -- and then reads it whole, ~17MB on the fleet.
-        triton_moe_inert = any(c.get("tuner") == "vllm_moe_triton" for c in candidates) and await asyncio.to_thread(
-            self._runtime_uses_aiter_fused_moe
-        )
+        triton_moe_inert = any(
+            c.get("tuner") in (_VLLM_MOE_TRITON_TUNER, _OGS_TUNER) for c in candidates
+        ) and await asyncio.to_thread(self._runtime_uses_aiter_fused_moe)
         for cand in candidates:
             tuner_name = cand["tuner"]
             env, refusal = self._screened_candidate_envs(cand, triton_moe_inert=triton_moe_inert)
