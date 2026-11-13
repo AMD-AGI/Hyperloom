@@ -21,6 +21,8 @@ import shutil
 import subprocess
 import sys
 
+from hyperloom.common.reexec import ReexecRoots, foreign_interpreter_roots
+
 from .session.paths import asset_root
 
 _HARNESS = "harness.py"
@@ -201,6 +203,40 @@ def _parser() -> argparse.ArgumentParser:
 def _interpreter(python: str) -> str:
     """Absolute, unresolved: a venv's bin/python must keep naming the venv."""
     return os.path.abspath(shutil.which(python) or python)
+
+
+def benchmark_inputs(benchmark: Path) -> tuple[Path, ...]:
+    """What a prepared benchmark reads outside itself: the script, its working directory, its interpreter."""
+    config = benchmark / _CONFIG
+    if not config.is_file():
+        return ()
+    try:
+        workload = json.loads(config.read_text())
+        return (
+            Path(workload["script"]).parent,
+            Path(workload["cwd"]),
+            *foreign_interpreter_roots(Path(workload["python"])),
+        )
+    except (OSError, ValueError, KeyError):
+        # A config the sandbox cannot read names nothing; the prepared run reports it.
+        return ()
+
+
+def reexec_roots(argv: list[str]) -> ReexecRoots:
+    """What ``script prepare`` writes and reads, from its own flags (see :mod:`hyperloom.common.reexec`)."""
+    if argv[:1] != ["prepare"] or {"-h", "--help"} & set(argv):
+        return ReexecRoots()
+    try:
+        args, _ = _parser().parse_known_args(argv[1:])
+    except SystemExit:
+        # Malformed; the strict parse inside the sandbox is what reports it.
+        return ReexecRoots()
+    readonly = (
+        args.script.resolve().parent,
+        args.cwd.resolve(),
+        *foreign_interpreter_roots(Path(_interpreter(args.python))),
+    )
+    return ReexecRoots(writable=(args.workspace.resolve(),), readonly=readonly)
 
 
 def main(argv: list[str] | None = None) -> int:
