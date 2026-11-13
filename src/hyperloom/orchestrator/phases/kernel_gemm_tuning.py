@@ -26,6 +26,14 @@ from ..kernel.lane_budget import INSUFFICIENT_BUDGET
 
 log = logging.getLogger(__name__)
 
+
+def _gemm_candidate_runtime(tuner_name: str, env: Mapping[str, str]) -> dict[str, str]:
+    """Startup runtime needed to activate a tuner's saved candidate."""
+    if tuner_name != "vllm_dense_tunableop":
+        return {}
+    return {"pythonpath_prefix": env.get("PYTHONPATH", "").split(os.pathsep)[0]}
+
+
 # Last-resort location of the aiter checkout inside the standard serving container.
 _CONTAINER_AITER_CONFIG_DIR = Path("/sgl-workspace/aiter/aiter/configs")
 #: What the lane says it does while it holds this host's preflight lock (``_aiter_serving_once``), moving serving modules
@@ -404,6 +412,7 @@ class _GemmTuningMixin:
                     "paired_reference": reference,
                     "extra_server_args": str(recipe.get("extra_server_args") or ""),
                     "extra_envs": envs,
+                    "runtime_override": {"pythonpath_prefix": overlay} if overlay else {},
                     "remove_args": recipe.get("remove_args", []),
                     "unset_envs": recipe.get("unset_envs", []),
                     "args_mode": recipe.get("args_mode", "append"),
@@ -829,6 +838,7 @@ class _GemmTuningMixin:
             "model_path": resolve_session_model_path(state_model_path=str(self.shared_state.model_path or "")),
             "extra_server_args": self._gemm_candidate_server_args(tuner_name),
             "extra_envs": test_envs,
+            "runtime_override": _gemm_candidate_runtime(tuner_name, test_envs),
             "keep_threshold_pct": 1.0,
             "mode": "env_only",
         }
@@ -983,6 +993,7 @@ class _GemmTuningMixin:
                 "name": f"{backend}_{tuner_name}",
                 "candidate_extra_server_args": self._gemm_candidate_server_args(tuner_name),
                 "extra_envs": dict(env),
+                "final_overlay": _gemm_candidate_runtime(tuner_name, env).get("pythonpath_prefix", ""),
                 "source_phase": "KERNEL_AGENT",
                 **integrate_measurement_fields(verdict.get("bench_result") or verdict),
             },
