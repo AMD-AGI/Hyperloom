@@ -77,9 +77,17 @@ _EVAL, _CLIENT_WARMUP, _CLIENT_MEASURED, _CLIENT_FINISHED = "eval", "warmup", "m
 #: The marks of a profile round's window in its ``phase_marks.json``, as inference_suite's ``Phase`` names them.
 _PROFILE_OPEN, _PROFILE_CLOSE = "profile_open", "profile_close"
 #: The control requests a profile window sends its server, as inference_suite's ``profile.inject`` names them.
-_WINDOW_REQUESTS = ("/start_profile", "/stop_profile")
+_START_PROFILE, _STOP_PROFILE = "/start_profile", "/stop_profile"
+_WINDOW_REQUESTS = (_START_PROFILE, _STOP_PROFILE)
 #: How urllib words the error of a request the server answered with an error status.
 _ANSWERED_WITH_STATUS = "HTTP Error "
+#: How the suite's silence gate words the stall it ends a round for (``inference_suite.runtime.watch``): the seconds
+#: from the server's last output, its log's or the client's, to the poll that ended the round.
+_STALL_DETAIL = re.compile(r"no server log or client output for (\d+(?:\.\d+)?)s")
+#: How long before an AgentX window's ``/start_profile`` went out the server may have last been heard and still count as
+#: talking then. A server serving the replay writes its log, and the replay its own, every few seconds; the round sees
+#: that output only at its polls, and the instant it ends the round is marked once the client has been reaped.
+_TALKING_SLACK_SEC = 10.0
 _MIB = 1 << 20
 #: A boot is in the first bytes of a server's log, and a log of a long test is large.
 _LOG_HEAD_BYTES = 8 * _MIB
@@ -342,29 +350,31 @@ def stalled_in_profile_window(run_dir: Path) -> bool:
     """Whether the server of the round in ``run_dir``, which the round ended for its silence, went silent while the
     round's profile window was open.
 
-    It did when the window's ``/start_profile`` or ``/stop_profile`` went unanswered (``profile/capture.json`` records
-    that request as ``<path>: <error>``; one the server answered with an error status was answered). An AgentX window
-    sends them from the round's poll and waits up to ten minutes for an answer, so its marks place no silence; a fixed
-    load's window does not record its ``/stop_profile`` answer, so for it the marks decide. The round marks ``finished``
-    as the silence ends it, so the silence began the round's silence limit before that mark at the latest; it began in
-    the window when ``profile_open`` is at or before that instant and ``profile_close`` is absent or after it (a window
-    open when the round ended is closed then). A round whose capture, marks or config cannot be read is not known to
-    have stalled there.
+    An AgentX window sends its ``/start_profile`` and ``/stop_profile`` from the round's poll and waits up to ten minutes
+    for an answer, so its marks place no silence; ``profile/capture.json`` records a request the server never answered
+    as ``<path>: <error>`` (one the server answered with an error status was answered). An unanswered ``/stop_profile``
+    went out inside the opened window: the stall is in it. An unanswered ``/start_profile`` is the window's only when the
+    server was still talking as it went out, which the round's own clock places: the request went out
+    ``agentx_open_after_sec`` after the ``measured`` mark, and the server was last heard the silence the round's
+    ``report.json`` states before the ``finished`` mark; a server last heard more than :data:`_TALKING_SLACK_SEC` before the request had gone
+    silent before the window. A fixed load's window does not record its ``/stop_profile`` answer, so for it the marks
+    decide. The round marks ``finished`` as the silence ends it, so the silence began the round's silence limit before
+    that mark at the latest; it began in the window when ``profile_open`` is at or before that instant and
+    ``profile_close`` is absent or after it (a window open when the round ended is closed then). A round whose capture,
+    marks or config cannot be read is not known to have stalled there, nor is an unanswered ``/start_profile`` of a round
+    whose report states no silence.
     """
     layout = RunLayout(run_dir)
-    if _window_request_unanswered(layout):
+    unanswered = _unanswered_window_request(layout)
+    if unanswered == _STOP_PROFILE:
         return True
     try:
         config = SuiteConfig.from_document(yaml.safe_load(layout.config.read_text(encoding=_UTF8)))
-        document = json.loads(layout.phase_marks.read_text(encoding=_UTF8))
+        instants = _first_instants(json.loads(layout.phase_marks.read_text(encoding=_UTF8)))
     except (OSError, ValueError, yaml.YAMLError):
         return False
-    marks = document.get("phase_marks") if isinstance(document, dict) else None
-    instants: dict[str, float] = {}
-    for mark in marks if isinstance(marks, list) else []:
-        phase, at = (mark.get("phase"), _instant(mark.get("mono"))) if isinstance(mark, dict) else (None, None)
-        if isinstance(phase, str) and at is not None:
-            instants.setdefault(phase, at)
+    if unanswered == _START_PROFILE:
+        return _talking_when_window_started(instants, config.profile.agentx_open_after_sec, _failure_detail(layout))
     opened, finished = instants.get(_PROFILE_OPEN), instants.get(_CLIENT_FINISHED)
     if opened is None or finished is None:
         return False
@@ -373,17 +383,49 @@ def stalled_in_profile_window(run_dir: Path) -> bool:
     return opened <= began and (closed is None or closed > began)
 
 
-def _window_request_unanswered(layout: RunLayout) -> bool:
-    """Whether the round's ``profile/capture.json`` records a window control request its server never answered."""
+def _first_instants(document: object) -> dict[str, float]:
+    """The first monotonic instant of each phase a ``phase_marks.json`` document marks."""
+    marks = document.get("phase_marks") if isinstance(document, dict) else None
+    instants: dict[str, float] = {}
+    for mark in marks if isinstance(marks, list) else []:
+        phase, at = (mark.get("phase"), _instant(mark.get("mono"))) if isinstance(mark, dict) else (None, None)
+        if isinstance(phase, str) and at is not None:
+            instants.setdefault(phase, at)
+    return instants
+
+
+def _talking_when_window_started(instants: dict[str, float], open_after: float | None, detail: str) -> bool:
+    """Whether the server was still heard when the AgentX window sent its ``/start_profile``, ``open_after`` seconds
+    after the ``measured`` mark; ``detail`` states how long it had been silent when the ``finished`` mark ended it."""
+    measured, finished = instants.get(_CLIENT_MEASURED), instants.get(_CLIENT_FINISHED)
+    found = _STALL_DETAIL.search(detail)
+    if measured is None or finished is None or open_after is None or found is None:
+        return False
+    last_heard = finished - float(found.group(1))
+    return last_heard >= measured + open_after - _TALKING_SLACK_SEC
+
+
+def _failure_detail(layout: RunLayout) -> str:
+    """What the round's ``report.json`` says of why it failed; ``""`` when it says nothing or cannot be read."""
+    try:
+        document = json.loads(layout.report.read_text(encoding=_UTF8))
+    except (OSError, ValueError):
+        return ""
+    detail = document.get("failure_detail") if isinstance(document, dict) else None
+    return detail if isinstance(detail, str) else ""
+
+
+def _unanswered_window_request(layout: RunLayout) -> str | None:
+    """The window control request the round's ``profile/capture.json`` records its server never answered, if any."""
     try:
         document = json.loads(layout.profile_capture.read_text(encoding=_UTF8))
     except (OSError, ValueError):
-        return False
+        return None
     error = document.get("error") if isinstance(document, dict) else None
     if not isinstance(error, str):
-        return False
+        return None
     path, _, cause = error.partition(": ")
-    return path in _WINDOW_REQUESTS and not cause.startswith(_ANSWERED_WITH_STATUS)
+    return path if path in _WINDOW_REQUESTS and not cause.startswith(_ANSWERED_WITH_STATUS) else None
 
 
 def profile_stall(run_dir: Path, step: FailedStep) -> str | None:

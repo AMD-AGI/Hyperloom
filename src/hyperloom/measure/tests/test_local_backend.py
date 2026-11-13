@@ -36,7 +36,7 @@ from hyperloom.orchestrator.actions.executors import (
     VariantResult,
 )
 from hyperloom.orchestrator.actions.executors._server_lifecycle import REUSE_PORT_DEFAULT
-from inference_suite.contracts import Deadlines, FailedStep, RunLayout
+from inference_suite.contracts import Deadlines, FailedStep, ProfileConfig, RunLayout
 from inference_suite.tests import test_config_contract
 
 
@@ -543,13 +543,18 @@ def test_the_step_a_rounds_report_failed_at_classifies_the_test_its_logs_cannot(
 _TRACER_HANG = "queue_interposition.cpp:412 Async signal handler still waiting"
 
 
-def _stalled_profile_round(run_dir: Path, marks: dict[str, float], window_error: str | None = None) -> Path:
-    """A round the suite ended ``server_stalled`` after a 600 s silence, with the phase ``marks`` (monotonic seconds),
-    whose window recorded the control request ``window_error`` in ``profile/capture.json``."""
-    workspace = write_run_dir(run_dir, failed_step=FailedStep.SERVER_STALLED)
+def _stalled_profile_round(
+    run_dir: Path, marks: dict[str, float], window_error: str | None = None, silence: float = 601.0
+) -> Path:
+    """A round the suite ended ``server_stalled`` after ``silence`` seconds of a 600 s limit, with the phase ``marks``
+    (monotonic seconds), whose window recorded the control request ``window_error`` in ``profile/capture.json``; an
+    AgentX window opens 300 s after the measured mark."""
+    detail = f"no server log or client output for {silence:.1f}s"
+    workspace = write_run_dir(run_dir, failed_step=FailedStep.SERVER_STALLED, failure_detail=detail)
     layout = RunLayout(workspace)
     config = test_config_contract._config(
-        deadlines=Deadlines(boot_sec=1800, round_sec=3600, eval_sec=1200, silence_sec=600)
+        deadlines=Deadlines(boot_sec=1800, round_sec=3600, eval_sec=1200, silence_sec=600),
+        profile=ProfileConfig(enabled=True, agentx_open_after_sec=300, agentx_duration_sec=300),
     )
     layout.config.write_text(yaml.safe_dump(config.to_document(), sort_keys=False), encoding="utf-8")
     document = {"phase_marks": [{"phase": phase, "ts": 1.7e9 + at, "mono": at} for phase, at in marks.items()]}
@@ -565,38 +570,40 @@ def _stalled_profile_round(run_dir: Path, marks: dict[str, float], window_error:
 #: and its ``/stop_profile`` blocked for the control request's 600 s; the silence ended the round at the next poll.
 _AGENTX_HANG = {"ready": 0.0, "measured": 100.0, "profile_open": 400.0, "profile_close": 700.0, "finished": 1302.0}
 _UNANSWERED_STOP = "/stop_profile: <urlopen error timed out>"
+#: An AgentX window that sent its ``/start_profile`` at 400 and never had an answer; the request blocked for 600 s and
+#: the silence ended the round at the next poll.
+_AGENTX_START = {"ready": 0.0, "measured": 100.0, "finished": 1001.0}
 
 
 @pytest.mark.parametrize(
-    ("marks", "window_error", "failure_class", "reason"),
+    ("marks", "window_error", "silence", "failure_class", "reason"),
     [
         # The AgentX window's /stop_profile went unanswered: the profiler hung the server.
-        (_AGENTX_HANG, _UNANSWERED_STOP, "infra", f"profiler_hung: {_TRACER_HANG}"),
-        # Its /start_profile went unanswered until the round ended: the window never marked its opening.
-        (
-            {"ready": 0.0, "measured": 100.0, "finished": 1302.0},
-            "/start_profile: timed out",
-            "infra",
-            f"profiler_hung: {_TRACER_HANG}",
-        ),
+        (_AGENTX_HANG, _UNANSWERED_STOP, 601.0, "infra", f"profiler_hung: {_TRACER_HANG}"),
+        # Its /start_profile went unanswered from a server still talking when it went out (last heard 400.5).
+        (_AGENTX_START, "/start_profile: timed out", 600.5, "infra", f"profiler_hung: {_TRACER_HANG}"),
+        # The same unanswered /start_profile to a server silent since 200.5, a hang before the window would open.
+        (_AGENTX_START, "/start_profile: timed out", 800.5, "unclear", "server_stalled"),
         # The same timeline with both control requests answered: the stall is not known to be the profiler's.
-        (_AGENTX_HANG, None, "unclear", "server_stalled"),
+        (_AGENTX_HANG, None, 601.0, "unclear", "server_stalled"),
         # A control request the server answered with a refusal was answered.
-        (_AGENTX_HANG, "/stop_profile: HTTP Error 400: Bad Request", "unclear", "server_stalled"),
+        (_AGENTX_HANG, "/stop_profile: HTTP Error 400: Bad Request", 601.0, "unclear", "server_stalled"),
         # A fixed load's window opened at 400, the server went quiet at 411 and the round ended it 600 s later, closing
         # the window (whose /stop_profile answer the fixed load does not record).
         (
             {"ready": 0.0, "measured": 100.0, "profile_open": 400.0, "finished": 1011.0, "profile_close": 1011.0},
             None,
+            600.5,
             "infra",
             f"profiler_hung: {_TRACER_HANG}",
         ),
         # The server went quiet at 311, before the window would have opened: no window mark.
-        ({"ready": 0.0, "measured": 100.0, "finished": 911.0}, None, "unclear", "server_stalled"),
+        ({"ready": 0.0, "measured": 100.0, "finished": 911.0}, None, 600.5, "unclear", "server_stalled"),
         # The window ran 400-460 and closed; the server went quiet at 511, after it.
         (
             {"ready": 0.0, "measured": 100.0, "profile_open": 400.0, "profile_close": 460.0, "finished": 1111.0},
             None,
+            600.5,
             "unclear",
             "server_stalled",
         ),
@@ -604,6 +611,7 @@ _UNANSWERED_STOP = "/stop_profile: <urlopen error timed out>"
         (
             {"ready": 0.0, "measured": 100.0, "profile_open": 400.0, "finished": 990.0, "profile_close": 990.0},
             None,
+            600.5,
             "unclear",
             "server_stalled",
         ),
@@ -611,6 +619,7 @@ _UNANSWERED_STOP = "/stop_profile: <urlopen error timed out>"
     ids=[
         "agentx_stop_unanswered",
         "agentx_start_unanswered",
+        "agentx_start_unanswered_after_the_server_went_silent",
         "agentx_both_answered",
         "agentx_stop_refused",
         "fixed_inside_the_window",
@@ -620,10 +629,10 @@ _UNANSWERED_STOP = "/stop_profile: <urlopen error timed out>"
     ],
 )
 def test_a_server_that_stalled_with_its_profile_window_open_is_the_profilers_failure(
-    grid, server, tmp_path, marks, window_error, failure_class, reason
+    grid, server, tmp_path, marks, window_error, silence, failure_class, reason
 ):
     """A tracer that hangs the server hangs it in every sandbox of the image; any other stall stays unclear."""
-    workspace = _stalled_profile_round(grid.tmp_path / "ws" / "warmup", marks, window_error)
+    workspace = _stalled_profile_round(grid.tmp_path / "ws" / "warmup", marks, window_error, silence)
     grid.answers["warmup"] = grid.result(
         "warmup", status="failed", returncode=1, error="server_stalled", server_log_path=str(workspace / "server.log")
     )

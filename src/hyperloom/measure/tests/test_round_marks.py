@@ -36,9 +36,10 @@ from hyperloom.measure.round_marks import (
     round_boundaries,
     stalled_in_profile_window,
 )
-from inference_suite.contracts import FailedStep
+from inference_suite.contracts import Deadlines, FailedStep, ProfileConfig
 from inference_suite.profile.inject import START_PROFILE_PATH, STOP_PROFILE_PATH
 from inference_suite.runtime.phases import Phase
+from inference_suite.runtime.watch import ServerWatch
 from inference_suite.tests import test_config_contract
 
 T0 = 1_000.0
@@ -475,13 +476,43 @@ def test_the_window_requests_read_are_the_ones_the_suite_sends_and_words() -> No
     assert str(refused).startswith(round_marks._ANSWERED_WITH_STATUS)
 
 
-def _agentx_round(directory: Path, capture: str) -> Path:
-    """An AgentX round whose window opened at 400 and closed at 700, ended 1302 by a 600 s silence, with ``capture`` as
-    its ``profile/capture.json``: the marks alone place the silence after the window."""
-    marks = {"measured": 100.0, "profile_open": 400.0, "profile_close": 700.0, "finished": 1302.0}
+def test_the_silence_read_is_the_one_the_suites_gate_states(tmp_path: Path) -> None:
+    """The wording is literal here (``measure`` may not import the suite's runtime); the silence gate owns it."""
+    log = tmp_path / "server.log"
+    log.write_text("", encoding="utf-8")
+    deadlines = Deadlines(boot_sec=1800, round_sec=3600, eval_sec=1200, silence_sec=600)
+    stop = ServerWatch(log, 0, deadlines, 100.0).stalled(700.25)
+
+    assert stop is not None
+    found = round_marks._STALL_DETAIL.search(stop.detail)
+    assert found is not None and float(found.group(1)) == pytest.approx(600.25, abs=0.05)
+
+
+#: An AgentX window opened at 400, 300 s after the measured mark, and closed at 700; the round ended at 1302.
+_AGENTX_STOP_TIMELINE = {"measured": 100.0, "profile_open": 400.0, "profile_close": 700.0, "finished": 1302.0}
+#: An AgentX window that sent its ``/start_profile`` at 400 and was never answered; the round ended at 1001.
+_AGENTX_START_TIMELINE = {"measured": 100.0, "finished": 1001.0}
+_AGENTX_PROFILE = ProfileConfig(enabled=True, agentx_open_after_sec=300, agentx_duration_sec=300)
+
+
+def _silence(seconds: float) -> str:
+    return f"no server log or client output for {seconds:.1f}s"
+
+
+def _agentx_round(
+    directory: Path,
+    capture: str,
+    marks: dict[str, float] = _AGENTX_STOP_TIMELINE,
+    profile: ProfileConfig = _AGENTX_PROFILE,
+    detail: str = _silence(601.5),
+) -> Path:
+    """An AgentX round with the phase ``marks``, ``capture`` as its ``profile/capture.json`` and ``detail`` as its
+    report's failure detail; on the default marks the window ran 400-700 and the round ended 1302 by a 601.5 s silence,
+    so the marks alone place it after the window."""
+    (directory / "report.json").write_text(json.dumps({"failure_detail": detail}), encoding="utf-8")
     document = {"phase_marks": [{"phase": phase, "ts": at, "mono": at} for phase, at in marks.items()]}
     (directory / "phase_marks.json").write_text(json.dumps(document), encoding="utf-8")
-    config = test_config_contract._config()
+    config = test_config_contract._config(profile=profile)
     (directory / "config.yaml").write_text(yaml.safe_dump(config.to_document(), sort_keys=False), encoding="utf-8")
     (directory / "profile").mkdir()
     (directory / "profile" / "capture.json").write_text(capture, encoding="utf-8")
@@ -512,7 +543,59 @@ def _agentx_round(directory: Path, capture: str) -> Path:
 def test_a_window_request_the_server_never_answered_places_the_stall_in_the_window(
     tmp_path: Path, capture: str, stalled: bool
 ) -> None:
+    """On the AgentX stop timeline the server was talking until the window's requests; the stall was 601.5 s long."""
     assert stalled_in_profile_window(_agentx_round(tmp_path, capture)) is stalled
+
+
+def test_an_unanswered_stop_profile_is_the_profilers_however_long_the_server_had_been_quiet(tmp_path: Path) -> None:
+    """``/stop_profile`` goes out only inside an opened window: the server last heard at 101 does not move the stall."""
+    capture = json.dumps({"error": "/stop_profile: <urlopen error timed out>"})
+    directory = _agentx_round(tmp_path, capture, detail=_silence(1201.0))
+
+    assert stalled_in_profile_window(directory)
+
+
+_UNANSWERED_START = json.dumps({"error": "/start_profile: <urlopen error timed out>"})
+
+
+@pytest.mark.parametrize(
+    ("silence", "stalled"),
+    [(600.5, True), (606.0, True), (616.0, False), (800.5, False), (None, False)],
+    ids=[
+        "talking_until_the_request",
+        "last_heard_inside_the_slack",
+        "last_heard_past_the_slack",
+        "silent_before_the_request",
+        "silence_not_stated",
+    ],
+)
+def test_an_unanswered_start_profile_is_the_profilers_only_while_the_server_was_talking_as_it_went_out(
+    tmp_path: Path, silence: float | None, stalled: bool
+) -> None:
+    """The request went out at 400 (measured 100 plus ``agentx_open_after_sec`` 300) and blocked for its 600 s; the round
+    ended at 1001. A server last heard 1001 - ``silence``: at 400.5 or 395 it was talking (inside the slack), at 385 or
+    200.5 (a transient hang at measured+100) it had gone silent before the window, which stays ``server_stalled``."""
+    detail = "the server stalled" if silence is None else _silence(silence)
+    directory = _agentx_round(tmp_path, _UNANSWERED_START, _AGENTX_START_TIMELINE, detail=detail)
+
+    assert stalled_in_profile_window(directory) is stalled
+
+
+@pytest.mark.parametrize(
+    ("marks", "profile"),
+    [
+        ({"finished": 1001.0}, _AGENTX_PROFILE),
+        ({"measured": 100.0}, _AGENTX_PROFILE),
+        (_AGENTX_START_TIMELINE, ProfileConfig(enabled=False)),
+    ],
+    ids=["no_measured_mark", "no_finished_mark", "no_open_offset"],
+)
+def test_an_unanswered_start_profile_whose_request_instant_cannot_be_placed_is_not_the_profilers(
+    tmp_path: Path, marks: dict[str, float], profile: ProfileConfig
+) -> None:
+    directory = _agentx_round(tmp_path, _UNANSWERED_START, marks, profile, _silence(600.5))
+
+    assert not stalled_in_profile_window(directory)
 
 
 def _window_round(directory: Path) -> Path:
@@ -560,3 +643,15 @@ def test_a_round_whose_marks_or_config_cannot_be_read_is_not_known_to_have_stall
         (tmp_path / name).write_text(text, encoding="utf-8")
 
     assert not stalled_in_profile_window(tmp_path)
+
+
+@pytest.mark.parametrize("report", ["{not json", "[]", json.dumps({"failure_detail": None})])
+def test_an_unanswered_start_profile_of_a_round_whose_report_states_no_silence_is_not_the_profilers(
+    tmp_path: Path, report: str
+) -> None:
+    directory = _agentx_round(tmp_path, _UNANSWERED_START, _AGENTX_START_TIMELINE, detail=_silence(600.5))
+    assert stalled_in_profile_window(directory), "the case is the profiler's until the report is broken"
+
+    (directory / "report.json").write_text(report, encoding="utf-8")
+
+    assert not stalled_in_profile_window(directory)
