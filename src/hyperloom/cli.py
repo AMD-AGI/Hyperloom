@@ -8,6 +8,8 @@ from __future__ import annotations
 import importlib
 import sys
 
+from hyperloom.common.reexec import MODE_OFF, ReexecError, ReexecRoots, is_reexeced, reexec_if_required, resolve_mode
+
 _IO = "hyperloom.inference_optimizer"
 
 # command -> (module whose ``main(argv)`` runs it, argv prefix, one-line help)
@@ -92,6 +94,20 @@ def _dispatch(command: str, rest: list[str]) -> int:
     return _run(_SESSION_COMMANDS[rest[0]][0], rest[1:])
 
 
+def _reexec_roots(command: str, rest: list[str]) -> ReexecRoots:
+    """What ``command`` wants bound, from its own arguments.
+
+    A sub-command opts in by exporting ``reexec_roots(argv)``; one that does not gets the
+    operator's declared roots alone. ``hosted`` is skipped: a hosted run takes its sandbox
+    from the hosting layer and already re-executes itself.
+    """
+    if command == "hosted" or command not in _COMMANDS or resolve_mode() == MODE_OFF or is_reexeced():
+        return ReexecRoots()
+    name, prefix, _ = _COMMANDS[command]
+    derive = getattr(importlib.import_module(name), "reexec_roots", None)
+    return derive([*prefix, *rest]) if derive is not None else ReexecRoots()
+
+
 def main(argv: list[str] | None = None) -> int:
     args = list(sys.argv[1:] if argv is None else argv)
     if args and args[0] in ("-h", "--help"):
@@ -103,6 +119,11 @@ def main(argv: list[str] | None = None) -> int:
     command, rest = args[0], args[1:]
     if (error := _ledger_dir_error(command, rest)) is not None:
         print(error, file=sys.stderr)
+        return 2
+    try:
+        reexec_if_required(args, _reexec_roots(command, rest))
+    except ReexecError as exc:
+        print(f"ERROR: {exc}", file=sys.stderr)
         return 2
     try:
         return _dispatch(command, rest)
