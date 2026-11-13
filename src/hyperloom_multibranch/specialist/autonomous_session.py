@@ -110,6 +110,7 @@ from hyperloom_multibranch.specialist.agent_onboarding import (
 from hyperloom_multibranch.specialist.agent_session import BranchPlace
 from hyperloom_multibranch.specialist.agent_spend import AgentSpend, newest_write
 from hyperloom_multibranch.specialist.arbor_adapter import EXIT_REFUSED, exit_reason, refused_reasons, served_config
+from hyperloom_multibranch.specialist.arbor_end import exit_end
 from hyperloom_multibranch.specialist.dev_sandbox import MINUTE, TOO_MANY
 from hyperloom_multibranch.rulegate.rules import RETRACTION_ID
 from hyperloom_multibranch.specialist.judging import NOTICE
@@ -655,7 +656,9 @@ class AutonomousSession:
             raise SessionRefused(refused)
         if process.returncode != 0:
             raise SessionCrashed(f"the agent exited {process.returncode}: {tail(await process.output())}")
-        said = self._exit_reason(manifest) if manifest.snapshots is not None else ""
+        end = (
+            exit_end(self._agent_dir / SOURCE_DIR / manifest.snapshots_exit) if manifest.snapshots is not None else None
+        )
         if not manifest.signals_keeps:
             await self._take(manifest, watch, watch.seq + 1)
         await self._learn(manifest.ledger, watch)
@@ -664,7 +667,7 @@ class AutonomousSession:
         ):
             await self._submit(manifest, watch)
             await self._pause()
-        finished = f"the agent finished its run: {said}" if said else "the agent finished its run"
+        finished = end.said() if end is not None else "the agent finished its run"
         await self._note(finished)
         raise SessionFinished(finished)
 
