@@ -9,12 +9,14 @@ Each check raises ValueError when the environment contradicts the command line (
 
 from __future__ import annotations
 
+import logging
 import os
 from collections.abc import Mapping
 from pathlib import Path
 
 from hyperloom.common.benchmark_config import BENCHMARK_CONFIG_ENV, benchmark_config_path
 from hyperloom_common.env import EnvValueError
+from hyperloom_common.shared_storage import setgid_warnings, writable_problems
 from hyperloom.common.outside_facts.image_check import mode_from_environment
 from hyperloom.common.perf_metric import agentx_enabled
 from hyperloom.measure.short_prompts.staging import CACHE_ENV as RUNNER_CACHE_ENV
@@ -25,6 +27,8 @@ from hyperloom_multibranch.blackboard.rsi.archive import ARCHIVE_ENV
 from hyperloom_multibranch.scheduling.llm import default_model
 from hyperloom_multibranch.scheduling.local_peers import AGENTX_ENV, specialist_model
 from hyperloom_multibranch.scheduling.settings import RunSettings, Workload
+
+log = logging.getLogger(__name__)
 
 
 class EnvironmentIncomplete(RuntimeError):
@@ -76,18 +80,28 @@ def recipe_kb_from_env() -> RemoteRecipeClient | None:
         raise EnvironmentIncomplete(f"the Recipe KB is half configured: {exc}") from exc
 
 
-def require_rsi_archive(env: Mapping[str, str]) -> None:
-    """Raise :class:`EnvironmentIncomplete` naming ``HYPERLOOM_RSI_ARCHIVE`` when ``env`` does not set it, and unless
-    the archive it names is a writable directory. There is no default: the archive is the deployment's shared folder."""
+def require_writable_storage(env: Mapping[str, str], dirs: Mapping[str, Path]) -> None:
+    """Raise :class:`EnvironmentIncomplete` naming ``HYPERLOOM_RSI_ARCHIVE`` when ``env`` does not set it (there is no
+    default: the archive is the deployment's shared folder), and otherwise naming, in one message, the archive and each
+    of ``dirs`` (a directory by the variable that names it) this account cannot create and remove a file in, with its
+    errno, owner and mode. With ``dirs`` (a hosted session, whose legs may be different accounts of one group), a
+    warning is logged for each that is not setgid; a local session's archive is one account's to set up.
+
+    A real write (:func:`~hyperloom_common.shared_storage.writable_problems`), not ``os.access``: each leg of a hosted
+    run may be another account of one group, and on NFS and in a user namespace neither ``access()`` nor a comparison
+    of ids says what a write will do."""
 
     if not env.get(ARCHIVE_ENV, "").strip():
         raise EnvironmentIncomplete(
             f"{ARCHIVE_ENV} is not set: name the writable shared directory the session archives its search tree in"
         )
-    archive = Path(env[ARCHIVE_ENV].strip())
-    if not (archive.is_dir() and os.access(archive, os.W_OK)):
+    named = {**dirs, ARCHIVE_ENV: Path(env[ARCHIVE_ENV].strip())}
+    for warning in setgid_warnings(named) if dirs else ():
+        log.warning("%s", warning)
+    problems = writable_problems(named)
+    if problems:
         raise EnvironmentIncomplete(
-            f"the RSI archive {archive} is not a writable directory: mount it, or set {ARCHIVE_ENV} to one"
+            f"this account (uid {os.geteuid()}) cannot write the shared storage: {'; '.join(problems)}"
         )
 
 
@@ -119,7 +133,7 @@ __all__ = [
     "hosted_runner_cache",
     "recipe_kb_from_env",
     "require_priced_models",
-    "require_rsi_archive",
     "require_session_environment",
     "require_workload_switch",
+    "require_writable_storage",
 ]

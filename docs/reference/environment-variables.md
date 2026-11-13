@@ -270,7 +270,7 @@ does, so under `HYPERLOOM_RSI_WRITE_ONLY=1` it finds none and `HYPERLOOM_RSI_AS_
 
 | Variable | Default | Description |
 |---|---|---|
-| `HYPERLOOM_RSI_ARCHIVE` | None; required | The archive directory sessions read and write. A session refuses to start when it is unset or does not name a writable directory. Operator configuration. |
+| `HYPERLOOM_RSI_ARCHIVE` | None; required | The archive directory sessions read and write. A session refuses to start when it is unset or this account cannot create and remove a file in it (a real write, named with its errno, owner and mode). Operator configuration. |
 | `HYPERLOOM_RSI_AS_OF` | Unset (everything) | An ISO time the archive is read as of, for sessions run as repeats or as pairs: lessons and playbooks by when they were written, a search tree by its session's start plus budget, not by when CLOSE wrote it. A tree that ended by then but is written after it is read by a session that loads the archive after the write and missed by one that loads it before. For experiments. |
 | `HYPERLOOM_RSI_WRITE_ONLY` | Unset (read and write) | `1` reads nothing of the archive, for a run beside the archive runs, while CLOSE still writes the session's outcomes into it. For experiments. |
 
@@ -1015,6 +1015,32 @@ brought, ahead of the image's (the image's venv takes no user install and is rea
 defaults, its own writable tree, where the image's prebuilt JIT modules and FlyDSL kernels are. A sandbox whose paths
 bubblewrap cannot bind safely (before 0.12, nothing may be bound below the shared `/tmp`, so a session directory under
 `/tmp` cannot be) runs unconfined, as before, with a WARNING; a hosted run refuses it.
+
+A multi-branch session measured on this host's cards runs each test's runner, and the server it starts with the
+branch's patches, in a local sandbox (`hyperloom.sandbox.confined`) under the same rule: where its provider names no
+account for it (`ProcessUsers`), bubblewrap where `choose_test_isolation()` gives it, else as before with one WARNING
+(`tests run unconfined on this host, as before: they can read this account's files and credentials (<reasons>)`); a
+hosted run refuses to build the toolbox instead. Each sandbox writes its own `fs/` (`/in`, `/out`, `/work`), a private
+`/tmp` and a full-size `/dev/shm`, and a sealed one its own `private/`, where the runner reads its signing key and
+removes it; it reads its toolchain, its interpreter, the model and what its entries link to (each link's target
+itself, never the directory it is in; a hub snapshot's repository `blobs`), the Hugging Face hub cache, and the trees
+its template names (the framework snapshot, the staged rule pack, the compiled-code store, the runner cache, the native
+build store and trust file, a local InferenceX repository); the app's credential locations those show are
+masked, and a sandbox one of whose read paths is itself a credential location (a home, a login file) runs as before
+with a WARNING, refused in a hosted run. So does one whose model links to or below a credential location, or into a
+hidden entry of a home (`~/.ssh`, `~/.claude`, `~/.config`, `~/.aws`, `~/.netrc`), where no mask could hide the logins;
+a link to anything else in the home (`~/tokdir`, `~/config.json`), outside it, or into the hub cache binds as before,
+except into a credential location the hub cache holds (one set to the home's parent), whose mask the link would open.
+Nothing else of the host is there: not the session's other files, another sandbox's directory or key, the app's state,
+nor any process of the app's (its own pid namespace; a sandbox that runs several commands shares one holder's, as an
+agent sandbox does). A sandbox with cards gets `/dev/kfd` and `/dev/dri`, `/sys`
+is read-only, the network is the app's (its server listens on loopback for the benchmark client). The sandbox's id
+(`E2B_SANDBOX_ID`) is set inside only, so the reap, the card guard and the tag sweep find its processes and never
+bubblewrap's own, and a reap's SIGTERM reaches them with their grace. Before bubblewrap 0.12 a sealed runner whose
+session directory is below `/tmp` gets a fresh `/tmp` of its own instead of the bound one. A probe that gives no answer
+in time leaves only that launch's test unconfined: the next sandbox is chosen for again. The app opens a sandbox's files
+(the runner's output and logs) by one walk below its `fs/` that follows no link out of it, so a process of the sandbox
+cannot swap a link to the app's files in between a check and the open.
 
 A hosted run uses only its hosting layer's bubblewrap, by the path its entry names, never one found on `PATH` (the
 framework image may carry its own); a local run uses the `bwrap` on `PATH`. `hyperloom hosted run` and
