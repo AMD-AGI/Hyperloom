@@ -20,7 +20,7 @@ from hyperloom.contracts.measurement import Purpose, TestKind
 from hyperloom.hosted.mcp_server import McpServer, McpServerConfig
 from hyperloom_multibranch.contracts.blackboard import Role, Writer
 from hyperloom_multibranch.contracts.blackboard.vocab import INTEGRATION_BRANCH
-from hyperloom_multibranch.contracts.blackboard.records import ToolResultPointer
+from hyperloom_multibranch.contracts.blackboard.records import BaselineRecord, ToolResultPointer
 from hyperloom_multibranch.contracts.toolbox import RequestRejected
 from hyperloom_multibranch.blackboard import LocalBlackboard
 from hyperloom_multibranch.toolbox.mcp_tools import (
@@ -33,6 +33,7 @@ from hyperloom_multibranch.toolbox.tests.helpers import PARENT, Rig, build, delt
 from hyperloom_multibranch.toolbox.tools import ToolJobs, ToolOutput, ToolRequest
 from hyperloom_multibranch.toolbox.tools import op_shares as op_shares_module
 from hyperloom_multibranch.toolbox.tools.op_shares import with_op_shares
+from hyperloom_multibranch.toolbox.tools.phase_mix import MEASURED_LENGTH_KEYS
 
 SHARES = {"gemm": 61.5, "attention": 20.0}
 HEAD = "head-of-b1"
@@ -408,7 +409,7 @@ async def test_the_splitter_hints_are_the_workload_of_the_profile_tests_own_poin
     assert roofline_profile == {}  # the roofline tool has no splitter
 
 
-@pytest.mark.parametrize("key", sorted(HINTS))
+@pytest.mark.parametrize("key", [*sorted(HINTS), *MEASURED_LENGTH_KEYS])
 @pytest.mark.parametrize("with_profile", [True, False])
 async def test_a_hint_of_the_callers_is_refused_and_cannot_replace_the_point(
     stack: Stack, tmp_path: Path, key: str, with_profile: bool
@@ -467,3 +468,115 @@ async def test_without_a_session_root_there_is_no_point_to_read_and_no_hint(stac
     stack.rig.repo.heads["b1"] = PARENT
     profile = await _profile_test(stack, output_dir=LANDED)  # the rig has no trace_root
     assert await _split_params(stack, "tracelens", profile) == {}
+
+
+#: An AgentX point: a concurrency, and no prompt or output length to weight the phase windows by.
+AGENTX_POINT = """\
+benchmark:
+  framework: vllm
+  envs:
+    TP: '2'
+    CONC: '16'
+"""
+#: An AgentX baseline's reading: 1520 prompt and 1 output tokens a second over 1000 s, for 10 completed requests, which is
+#: 152000 prompt and 100 output tokens per request.
+AGENTX_READING = {
+    "input_throughput": 1520.0,
+    "output_throughput": 1.0,
+    "duration_seconds": 1000.0,
+    "completed_requests": 10.0,
+    "e2e_norm_intvty_p50": 30.0,
+}
+BASELINE_LANDED = "tests/base/attempt-1"
+
+
+def _kv_metrics(queried: float, hit: float) -> str:
+    return json.dumps({"prefix_cache": {"prefix_cache_queries_delta": queried, "prefix_cache_hits_delta": hit}})
+
+
+async def _with_baseline(stack: Stack, tmp_path: Path, values: dict[str, float], files: dict[str, str]) -> None:
+    """The rule gate's baseline of ``values``, anchored on a test whose landed directory holds ``files``."""
+    landed = tmp_path / "session" / BASELINE_LANDED
+    for name, text in files.items():
+        (landed / name).parent.mkdir(parents=True, exist_ok=True)
+        (landed / name).write_text(text, encoding="utf-8")
+    rig = stack.rig
+    rig.executor.script = [lambda job: ok(job, output_dir=BASELINE_LANDED)]
+    test = await rig.toolbox.submit_test(req("b1", purpose=Purpose.BASELINE))
+    await rig.toolbox.drain()
+    gate = rig.open_blackboard(Role.GATE)
+    await gate.write_baseline(BaselineRecord(PARENT, values, {}, {}, (test,)))
+
+
+async def _workload_params(stack: Stack, profile: str) -> dict[str, Any]:
+    job = json.loads(_text(await stack.start(tool="tracelens", profile_request_id=profile)))["job_id"]
+    await stack.jobs.wait(job)
+    (request,) = stack.tools["tracelens"].requests
+    return {key: value for key, value in request.params.items() if key.startswith(("split_", "measured_"))}
+
+
+async def test_an_agentx_point_is_weighted_by_the_prompt_tokens_its_baselines_server_computed(
+    stack: Stack, tmp_path: Path
+) -> None:
+    """95% of the prompt tokens the baseline's server looked up were in its prefix cache: a request's prefill computed
+    7600 of its 152000; the warm-up round's counts are not the measurement's."""
+    measured = {"variant_00_test/kv_metrics.json": _kv_metrics(1000.0, 950.0)}
+    warmup = {"variant_00_test/warmup_round/kv_metrics.json": _kv_metrics(1000.0, 0.0)}
+    await _with_baseline(stack, tmp_path, AGENTX_READING, {**measured, **warmup})
+    profile = await _profile_with_points(stack, tmp_path, {"variant_00_test/config.yaml": AGENTX_POINT})
+
+    params = await _workload_params(stack, profile)
+
+    source = params.pop("measured_lengths_source")
+    assert params == {"split_conc": "16", "measured_isl": "7600", "measured_osl": "100"}
+    assert "computed prompt tokens per request, 7600 (152000 less the 95.0% its prefix cache served)" in source
+
+
+@pytest.mark.parametrize(
+    "files",
+    [
+        {},
+        {"variant_00_test/kv_metrics.json": json.dumps({"prefix_cache": {"cached_tokens_total_delta": 9.0}})},
+        {"variant_00_test/kv_metrics.json": _kv_metrics(1000.0, 1000.0)},
+        {"variant_00_test/kv_metrics.json": "{"},
+    ],
+)
+async def test_an_agentx_baseline_without_a_prefix_cache_split_weights_by_its_mean_prompt_tokens_and_says_so(
+    stack: Stack, tmp_path: Path, files: dict[str, str]
+) -> None:
+    await _with_baseline(stack, tmp_path, AGENTX_READING, files)
+    profile = await _profile_with_points(stack, tmp_path, {"variant_00_test/config.yaml": AGENTX_POINT})
+
+    params = await _workload_params(stack, profile)
+
+    source = params.pop("measured_lengths_source")
+    assert params == {"split_conc": "16", "measured_isl": "152000", "measured_osl": "100"}
+    assert "mean prompt and output tokens per request, 152000 and 100" in source and "no prefix-cache split" in source
+
+
+@pytest.mark.parametrize("missing", ["input_throughput", "output_throughput", "duration_seconds", "completed_requests"])
+async def test_an_agentx_point_gets_no_lengths_from_a_baseline_reading_that_lacks_a_figure(
+    stack: Stack, tmp_path: Path, missing: str
+) -> None:
+    values = {key: value for key, value in AGENTX_READING.items() if key != missing}
+    await _with_baseline(stack, tmp_path, values, {"variant_00_test/kv_metrics.json": _kv_metrics(1000.0, 950.0)})
+    profile = await _profile_with_points(stack, tmp_path, {"variant_00_test/config.yaml": AGENTX_POINT})
+
+    assert await _workload_params(stack, profile) == {"split_conc": "16"}
+
+
+async def test_an_agentx_point_gets_no_lengths_before_the_rule_gate_wrote_a_baseline(
+    stack: Stack, tmp_path: Path
+) -> None:
+    profile = await _profile_with_points(stack, tmp_path, {"variant_00_test/config.yaml": AGENTX_POINT})
+
+    assert await _workload_params(stack, profile) == {"split_conc": "16"}
+
+
+async def test_a_point_that_names_its_lengths_is_weighted_by_them_whatever_the_baseline_measured(
+    stack: Stack, tmp_path: Path
+) -> None:
+    await _with_baseline(stack, tmp_path, AGENTX_READING, {"variant_00_test/kv_metrics.json": _kv_metrics(10.0, 5.0)})
+    profile = await _profile_with_points(stack, tmp_path, {"variant_00_test/config.yaml": POINT})
+
+    assert await _workload_params(stack, profile) == HINTS

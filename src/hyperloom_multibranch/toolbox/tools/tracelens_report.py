@@ -81,6 +81,7 @@ from hyperloom_multibranch.toolbox.tools.op_shares import (
     OWN_DEGRADED_KEY,
 )
 from hyperloom_multibranch.toolbox.tools.phase_mix import (
+    MEASURED_LENGTH_KEYS,
     PHASE_MODES,
     PhaseWindow,
     Workload,
@@ -258,6 +259,12 @@ def _split_hints(payload: Mapping[str, Any]) -> dict[str, str]:
     return hints
 
 
+def _measured_lengths(payload: Mapping[str, Any]) -> dict[str, str]:
+    """The lengths measured on the session's baseline the request carries, with their source, by request key; the
+    weights read them (:class:`~.phase_mix.Workload`), the splitter never does."""
+    return {key: text for key in MEASURED_LENGTH_KEYS if (text := _text(payload, key))}
+
+
 def _split_command(trace: Path, split_dir: Path, hints: Mapping[str, str]) -> list[str]:
     cmd = [sys.executable, "-m", _SPLITTER, str(trace), "-o", str(split_dir), "--find-steady-state"]
     cmd += ["--num-steps", str(_SPLIT_NUM_STEPS), "--llm-inference"]
@@ -412,6 +419,7 @@ def _analyse(payload: Mapping[str, Any], session_dir: Path) -> dict[str, Any]:
     run.out_dir.mkdir(parents=True, exist_ok=True)
 
     hints = _split_hints(payload)
+    measured = _measured_lengths(payload)
     trace = _analysed_trace(trace_input)
     _sh(run, "split", _split_command(trace, run.split_dir, hints))
     chunk = _steady_state_chunk(run.split_dir, mode)
@@ -425,7 +433,7 @@ def _analyse(payload: Mapping[str, Any], session_dir: Path) -> dict[str, Any]:
     if coverage.graph_under_recorded:
         _write_degraded_report(run, coverage)
     windows = _phase_windows(run.split_dir, trace, capture)
-    mix = graded_mix(windows, Workload.from_hints(hints))
+    mix = graded_mix(windows, Workload.from_hints({**hints, **measured}))
     table = run.out_dir / KERNEL_SHARES_FILE
     if not mix.degraded_reason:
         write_mix_table(mix, table)
@@ -442,6 +450,7 @@ def _analyse(payload: Mapping[str, Any], session_dir: Path) -> dict[str, Any]:
         "analysed_trace": trace.name,
         "steady_state_mode": mode,
         "split_hints": hints,
+        "measured_lengths": measured,
         "steady_state_chunk": chunk.name,
         "capture_folder": str(capture or ""),
         "graph_replay_fraction": round(coverage.graph_replay_fraction, 4),

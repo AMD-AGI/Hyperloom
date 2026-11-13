@@ -36,6 +36,10 @@ missing window is of a wave. Where the fractions cannot be taken (no ``CONC``, `
 has no step time) the other window stands alone and the result says so. With neither window the shares are degraded, and
 so they are when both are there but the request names no ``CONC``, ``ISL`` and ``OSL`` to weight them by: a mix is never
 guessed.
+
+A point that names no ``ISL`` and ``OSL`` (an AgentX replay of a conversation corpus) is weighted by the lengths the
+session's baseline measured, which the request carries with what they are (:mod:`~.baseline_lengths`); the result's note
+then says which. They are measured, never assumed: a request that carries neither is degraded as above.
 """
 
 from __future__ import annotations
@@ -67,6 +71,10 @@ PHASE_MODES = {PREFILL: "prefilldecode", DECODE: "decode_only"}
 EXECUTION_DETAILS = "execution_details.json"
 #: The request keys of the point's workload the fractions are made of.
 CONC_KEY, ISL_KEY, OSL_KEY = "split_conc", "split_isl", "split_osl"
+#: The request keys of the lengths measured on the session's baseline, for a point that names no ``ISL`` and ``OSL``, and
+#: of what they are; only the fractions read them, never the splitter.
+MEASURED_ISL_KEY, MEASURED_OSL_KEY, MEASURED_SOURCE_KEY = "measured_isl", "measured_osl", "measured_lengths_source"
+MEASURED_LENGTH_KEYS = (MEASURED_ISL_KEY, MEASURED_OSL_KEY, MEASURED_SOURCE_KEY)
 #: The result's weight of each phase, and its windows with their facts.
 PHASE_FRACTIONS_KEY, PHASE_WINDOWS_KEY = "phase_fractions", "phase_windows"
 #: The columns of the mix table after the name and the weighted share: each phase's own share.
@@ -78,20 +86,28 @@ _TIME_DIGITS = 3
 
 @dataclass(frozen=True)
 class Workload:
-    """The graded point's shape: concurrent requests, prompt tokens and output tokens of one."""
+    """The graded point's shape: concurrent requests, prompt tokens and output tokens of one, and, for lengths measured on
+    the session's baseline rather than named by the point, what they are (empty for the point's own)."""
 
     conc: float
     isl: float
     osl: float
+    source: str = ""
 
     @classmethod
     def from_hints(cls, hints: Mapping[str, str]) -> Workload | None:
-        """The workload the request's hints name; ``None`` when one is missing."""
+        """The workload the request's hints name: the point's ``CONC``, ``ISL`` and ``OSL``, or, for a point that names no
+        ``ISL`` and ``OSL``, its ``CONC`` and the measured lengths with their source; ``None`` when one is missing."""
+        named = ISL_KEY in hints and OSL_KEY in hints
+        isl_key, osl_key = (ISL_KEY, OSL_KEY) if named else (MEASURED_ISL_KEY, MEASURED_OSL_KEY)
+        source = "" if named else str(hints.get(MEASURED_SOURCE_KEY) or "").strip()
         try:
-            conc, isl, osl = (float(hints[key]) for key in (CONC_KEY, ISL_KEY, OSL_KEY))
+            conc, isl, osl = (float(hints[key]) for key in (CONC_KEY, isl_key, osl_key))
         except (KeyError, ValueError):
             return None
-        return cls(conc, isl, osl) if all(math.isfinite(v) and v > 0 for v in (conc, isl, osl)) else None
+        if not (named or source) or not all(math.isfinite(v) and v > 0 for v in (conc, isl, osl)):
+            return None
+        return cls(conc, isl, osl, source)
 
 
 @dataclass(frozen=True)
@@ -164,7 +180,7 @@ class MixRow:
 @dataclass(frozen=True)
 class GradedMix:
     """The shares of a graded wave: the weight of each phase (empty when degraded), the rows, why there are none, and a note
-    when one window stands for the wave alone."""
+    when one window stands for the wave alone, or when measured lengths weight the two."""
 
     fractions: Mapping[str, float]
     rows: tuple[MixRow, ...]
@@ -297,6 +313,7 @@ def graded_mix(windows: Sequence[PhaseWindow], workload: Workload | None) -> Gra
             return GradedMix(
                 {}, (), "the time of a wave of this workload is not a finite number from the windows' step times", ""
             )
+        note = f"the prefill and decode windows are weighted by {workload.source}" if workload.source else ""
     return GradedMix({phase: weights.get(phase, 0.0) for phase in PHASE_MODES}, _rows(usable, weights), "", note)
 
 
@@ -329,6 +346,10 @@ def mix_fields(windows: Sequence[PhaseWindow], mix: GradedMix, table: Path) -> d
 __all__ = [
     "DECODE",
     "EXECUTION_DETAILS",
+    "MEASURED_ISL_KEY",
+    "MEASURED_LENGTH_KEYS",
+    "MEASURED_OSL_KEY",
+    "MEASURED_SOURCE_KEY",
     "PHASE_MODES",
     "PREFILL",
     "GradedMix",
