@@ -345,6 +345,8 @@ def test_codex_argv_reuses_the_sdk_gateway_overrides(
     assert f'model_provider="{CODEX_PROVIDER_NAME}"' in overrides
     # A specialist must not carry memory between tasks (matches the SDK session).
     assert "features.memories=false" in overrides
+    # Gateways cannot replay Codex's hosted web_search tool results, so the next request fails with a 400.
+    assert 'web_search="disabled"' in overrides
     # The credential crosses as an env-var NAME; its value stays out of argv, where any user on the host could read it
     # out of ``ps``.
     assert any(o.endswith('env_key="OPENAI_API_KEY"') for o in overrides)
