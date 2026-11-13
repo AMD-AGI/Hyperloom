@@ -2,6 +2,8 @@
 
 This fork tracks RX 9000-series compatibility work for ROCm Hyperloom, focused on bringing RX 9070 XT (`gfx1201`) into GPU identification and compatibility reporting while retaining the upstream optimization workflow. The card is detected with board facts (16 GB, 640 GB/s, dense bf16 195 / fp8 389 / fp32 48.7 TFLOPS) and reuses the validated gfx12 vLLM runner. See the [RX 9070 XT compatibility notes](docs/compatibility.rst#rx-9070-xt).
 
+Status: preliminary validation only. This update has passed preliminary local test runs on an RX 9070 XT, and the current branch is consistent with those smoke-test results. The RX 9000-series Hyperloom changes themselves are intended to work on Linux, but I have not been able to test that path here because my dev environment and target OS are Windows; the missing working RDNA4 vLLM Windows branch is the main blocker for further end-to-end validation.
+
 # ROCm Hyperloom
 
 [![Tests](https://github.com/AMD-AGI/Hyperloom/actions/workflows/tests-coverage.yml/badge.svg)](https://github.com/AMD-AGI/Hyperloom/actions/workflows/tests-coverage.yml)
