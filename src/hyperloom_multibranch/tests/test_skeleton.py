@@ -21,6 +21,7 @@ import asyncio
 import contextlib
 import errno
 import json
+import logging
 import os
 import signal
 import stat
@@ -1655,6 +1656,16 @@ async def test_a_failed_opening_judge_call_opens_one_branch_at_k_one(tmp_path: P
     assert not [
         row for row in _decisions(stage) if row["kind"] == "judge" or (row["kind"] == "open" and not row["branch"])
     ]
+
+
+async def test_a_failed_judge_call_logs_its_error(tmp_path: Path, caplog: pytest.LogCaptureFixture) -> None:
+    stage = _stage(tmp_path)
+    stage.judge = ScriptedCompletion(error=CompletionFailed("judge call failed: RuntimeError: status=529"))
+
+    with caplog.at_level(logging.WARNING, logger="hyperloom_multibranch.scheduling.judge"):
+        await stage.run()
+
+    assert "judge call failed: RuntimeError: status=529" in caplog.text
 
 
 def _crowding(stage: Stage) -> type[RefusingRuntime]:

@@ -154,6 +154,7 @@ from hyperloom_multibranch.scheduling.hosted_run import (
     grant_explore_cap,
     grant_tests_that_fit,
     hosted_restart_leg,
+    hosted_storage,
     recorded_session,
     refuse_unhosted_branches,
     reported_stop_reason,
@@ -196,8 +197,8 @@ from hyperloom_multibranch.scheduling.session_environment import (
     EnvironmentIncomplete,
     hosted_runner_cache,
     recipe_kb_from_env,
-    require_rsi_archive,
     require_session_environment,
+    require_writable_storage,
 )
 from hyperloom_multibranch.scheduling.stops import SessionStopReason
 from hyperloom_multibranch.scheduling.settings import (
@@ -1032,17 +1033,16 @@ def hosted_ready_session(host: HostInfo, workload: Workload, *, local: bool = Fa
 
     cache = hosted_runner_cache(os.environ)
     load = local_grant_peers(host) if local else partial(load_hosted_peers, inputs=PinnedToolboxInputs(host, cache))
-    return ready_session(workload, load)
+    return ready_session(workload, load, **hosted_storage(cache))
 
 
-def ready_session(workload: Workload, load: Callable[[Workload], PeerFactory]) -> ReadySession:
-    """The peers ``load`` has for ``workload`` and the services, the Recipe KB and the RSI archive checked first;
-    raises :class:`EnvironmentIncomplete` or :class:`PeersUnavailable` naming what is missing. Creates nothing."""
+def ready_session(workload: Workload, load: Callable[[Workload], PeerFactory], **storage: Path) -> ReadySession:
+    """The peers ``load`` has for ``workload`` and the services, the Recipe KB, the RSI archive and the directories of
+    ``storage`` checked first; raises :class:`EnvironmentIncomplete` or :class:`PeersUnavailable` naming the problem."""
 
     recipe_kb = recipe_kb_from_env()
-    require_rsi_archive(os.environ)
-    peer_factory = load(workload)
-    return ReadySession(peer_factory, session_services(recipe_kb))
+    require_writable_storage(os.environ, storage)
+    return ReadySession(load(workload), session_services(recipe_kb))
 
 
 @dataclass(frozen=True)

@@ -13,7 +13,8 @@ second recovery while it works.
 ``local``, on this container's cards with no grant, sandbox or source, on the image the measurement pins name; its
 agents are isolated with the hosting layer's bubblewrap or not run at all; it tells the host in ``exit.json`` that the
 run is over once CLOSE ran or when nothing a restart changes keeps a session from running, and leaves the host to start
-a crashed run again, which then finishes the session the first start began.
+a crashed run again, which then takes over the session the first start began: it resumes it up to its first deadline
+while its baseline holds, else finishes it as ``final-only`` does.
 
 ``run --measurement hosted`` measures in the sandboxes of a grant handed to it in the environment, without a campaign
 spec, a run id or a state directory, refuses a missing grant variable by name and what would run on this machine, and
@@ -27,6 +28,7 @@ import errno
 import json
 import logging
 import os
+import stat
 import subprocess
 import sys
 import time
@@ -41,6 +43,7 @@ import pytest
 from hyperloom.common.benchmark_config import BENCHMARK_CONFIG_ENV
 from hyperloom_common import bwrap as bwrap_module
 from hyperloom_common.bwrap import BwrapProbe
+from hyperloom_common.shared_storage import current_umask
 from hyperloom.common import agent_isolation, visible_devices
 from hyperloom_common.llm.llm_config import (
     AGENT_BACKEND_CLAUDE,
@@ -119,7 +122,7 @@ from hyperloom_multibranch.scheduling.settings import (
     Workload,
 )
 from hyperloom_multibranch.scheduling.session_base import freeze_session_base
-from hyperloom_multibranch.scheduling.session_environment import hosted_runner_cache
+from hyperloom_multibranch.scheduling.session_environment import hosted_runner_cache, require_writable_storage
 from hyperloom_multibranch.scheduling.stops import SessionStopReason
 from hyperloom_multibranch.tests.base_records import write_record
 from hyperloom_multibranch.tests.staging_rig import verified_tool_cache
@@ -1876,6 +1879,23 @@ def test_the_hosted_runner_cache_is_the_directory_the_variable_names() -> None:
     assert hosted_runner_cache({"HYPERLOOM_RUNNER_CACHE": " /data/hl/runner-cache "}) == Path("/data/hl/runner-cache")
 
 
+def test_only_a_hosted_session_is_warned_that_its_rsi_archive_is_not_setgid(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    archive = tmp_path / "archive"
+    archive.mkdir()
+    archive.chmod(0o755)
+    env = {ARCHIVE_ENV: str(archive)}
+
+    with caplog.at_level(logging.WARNING):
+        require_writable_storage(env, {})
+    assert "not setgid" not in caplog.text, "a local session's archive is one account's"
+
+    with caplog.at_level(logging.WARNING):
+        require_writable_storage(env, {"HYPERLOOM_RUNNER_CACHE": tmp_path})
+    assert f"{ARCHIVE_ENV} {archive} is not setgid" in caplog.text
+
+
 def _no_local_cards() -> tuple[int, ...]:
     raise AssertionError("a hosted run measures on the grant's cards, not this container's")
 
@@ -2856,6 +2876,64 @@ def test_a_hosted_run_without_make_before_break_runs_every_test_the_handed_grant
     [(settings, _)] = handed.sessions
     assert settings.make_before_break is False
     assert settings.caps.max_parallel_tests == 3, "TP=2 on 8 GPUs and 3 sandboxes, no room kept"
+
+
+@pytest.mark.usefixtures("ready_environment")
+def test_a_hosted_run_names_every_shared_directory_it_cannot_write_in_one_message_before_a_session_starts(
+    handed: Started, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    blocker = tmp_path / "a-file"
+    blocker.write_text("")
+    monkeypatch.setenv("HYPERLOOM_EVENTS_DIR", str(blocker / "events"))
+    monkeypatch.setenv("HYPERLOOM_RUNNER_CACHE", str(blocker / "runner-cache"))
+    monkeypatch.setenv(ARCHIVE_ENV, str(tmp_path / "no-such-archive"))
+
+    assert cli.main(["run", *WORKLOAD_ARGS, "--measurement", "hosted"]) == cli.EXIT_FAILED
+
+    [line] = [line for line in capsys.readouterr().err.splitlines() if "cannot write the shared storage" in line]
+    assert "HYPERLOOM_EVENTS_DIR" not in line, "a multi-branch session never writes the events directory"
+    assert f"HYPERLOOM_RUNNER_CACHE {blocker / 'runner-cache'}: ENOTDIR" in line
+    assert f"{ARCHIVE_ENV} {tmp_path / 'no-such-archive'}: ENOENT" in line
+    assert not handed.sessions
+
+
+@pytest.mark.usefixtures("ready_environment")
+@pytest.mark.parametrize("shared", [True, False], ids=["below-shared-storage", "elsewhere"])
+def test_a_hosted_run_makes_the_shared_directories_it_writes_2775_when_they_are_missing(
+    handed: Started, shared: bool, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    parent = tmp_path / "shared"
+    parent.mkdir()
+    parent.chmod(0o2775 if shared else 0o755)  # set up to be shared, or a plain directory
+    made = {"HYPERLOOM_RUNNER_CACHE": parent / "runner-cache"}
+    for name, directory in made.items():
+        monkeypatch.setenv(name, str(directory))
+    events = parent / "run" / "events"
+    monkeypatch.setenv("HYPERLOOM_EVENTS_DIR", str(events))
+
+    assert cli.main(["run", *WORKLOAD_ARGS, "--measurement", "hosted"]) == 0
+
+    assert handed.sessions
+    for name, directory in made.items():
+        mode = stat.S_IMODE(directory.stat().st_mode)
+        assert mode == (0o2775 if shared else 0o2775 & ~current_umask() & 0o777), (name, oct(mode))
+    assert not events.parent.exists(), "a multi-branch session never writes the events directory"
+
+
+@pytest.mark.usefixtures("ready_environment")
+def test_a_hosted_run_warns_of_a_shared_directory_that_is_not_setgid_and_starts(
+    handed: Started, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    cache = tmp_path / "runner-cache"
+    cache.mkdir()
+    cache.chmod(0o775)
+    monkeypatch.setenv("HYPERLOOM_RUNNER_CACHE", str(cache))
+
+    with caplog.at_level(logging.WARNING):
+        assert cli.main(["run", *WORKLOAD_ARGS, "--measurement", "hosted"]) == 0
+
+    assert handed.sessions
+    assert f"HYPERLOOM_RUNNER_CACHE {cache} is not setgid" in caplog.text
 
 
 @pytest.mark.usefixtures("ready_environment")
