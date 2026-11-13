@@ -276,7 +276,8 @@ def write_run_config(
         trace_path (Path): The trace to analyse.
         platform (str): The target platform name.
         analysis_mode (str): ``"default"`` or ``"inference"``.
-        capture_folder (Path | None): Graph-capture folder; omitted when ``None``.
+        capture_folder (Path | None): Graph-capture folder; omitted when ``None``, and unless the mode is
+            ``"inference"``, the only mode TraceLens accepts one in (a ``custom`` profile has the folder too).
 
     Returns:
         Path: The path of the written ``run.yaml``.
@@ -285,7 +286,7 @@ def write_run_config(
         ConfigError: If TraceLens rejects the config.
     """
     job = {"trace_path": str(trace_path.resolve()), "platform": platform}
-    if capture_folder is not None:
+    if capture_folder is not None and analysis_mode == "inference":
         job["capture_folder"] = str(capture_folder.resolve())
     config = {"analysis_mode": analysis_mode, "output_dir": str(output_dir.resolve()), "jobs": [job]}
     check_config(config, "standalone")
