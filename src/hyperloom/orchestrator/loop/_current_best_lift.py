@@ -23,7 +23,7 @@ from hyperloom.plugs import progress as _progress
 
 from ..framework.artifacts import candidate_key
 from ..launch_controls import LAUNCH_CONTROL_KEYS, kept_launch_controls
-from ..measurement.runtime_findings import KEEP_REASON_CORRECTNESS_FIX
+from ..measurement.runtime_findings import KEEP_REASON_CORRECTNESS_FIX, KEEP_REASON_EXPORT_LANDED
 from ..source_snapshot import report_missing_source_snapshot
 from ..state.shared_state import resolve_graded_comparison
 from typing import TYPE_CHECKING
@@ -287,6 +287,8 @@ class CurrentBestLiftMixin:
         )
         if graded is not None and self._refuses_graded_winner(task_kind, bv, graded):
             return False
+        if self._gives_up_a_landed_export(task_kind, bv):
+            return False
         previous = self.shared_state.current_best
         from hyperloom.common.perf_metric import agentx_active
 
@@ -303,6 +305,31 @@ class CurrentBestLiftMixin:
         self._write_current_best(request, launch, cand_source, previous)
         return True
 
+    def _gives_up_a_landed_export(self, task_kind: str, bv: Mapping[str, Any]) -> bool:
+        """Whether this winner would replace an exporting deliverable with one that does not.
+
+        Every lane writes ``current_best`` through this method, which is why the check
+        belongs here and not in any one of them. The KEEP gate refuses such a candidate
+        earlier and more loudly, but it only sees integrate; explore has no equivalent,
+        and its leave-one-out arm exists precisely to measure the configuration with the
+        export switch unset. Winning on throughput is the expected result for that arm,
+        since an export is usually slower than eager.
+
+        The run directory is the graded leg's own, under whichever key the lane recorded
+        it. A lane that records none -- a replayed warm recipe, the kernel lanes -- is
+        refused after a landing rather than waved through, the same way the gate treats a
+        candidate it cannot see the counters for.
+        """
+        from ..measurement.aoti_evidence import gives_up_a_landed_export
+
+        workspace = str(bv.get("single_workspace") or bv.get("workspace") or "")
+        refusal = gives_up_a_landed_export(self.shared_state, workspace)
+        if not refusal:
+            return False
+        log.warning("current_best held: %s winner gives up the landed export: %s", task_kind, refusal)
+        _progress.warn("export_given_up", f"{task_kind} winner refused: {refusal}")
+        return True
+
     def _refuses_graded_winner(self, task_kind: str, bv: Mapping[str, Any], graded: "GradedComparison") -> bool:
         from hyperloom.common.perf_metric import VERDICT_KEEP
 
@@ -315,7 +342,11 @@ class CurrentBestLiftMixin:
             )
             _progress.warn("winner_vetoed", f"{task_kind} winner refused by {graded.vetoed_by}: {graded.veto_reason}")
             return True
-        correctness_fix = bv.get("keep_reason") == KEEP_REASON_CORRECTNESS_FIX
+        # A verified correctness fix, and the first export (an eager reference is not a
+        # deliverable), were already bounded by the integrate gate: neither has to beat
+        # the anchor to be recorded. Without the lift nothing snapshots the hook, and the
+        # deployment export then has no module to ship.
+        correctness_fix = bv.get("keep_reason") in (KEEP_REASON_CORRECTNESS_FIX, KEEP_REASON_EXPORT_LANDED)
         if graded.graded_on_intvty and graded.verdict != VERDICT_KEEP and not correctness_fix:
             log.info(
                 "current_best held: %s winner refused by %s, intvty %.1f->%.1f tput %.1f->%.1f",

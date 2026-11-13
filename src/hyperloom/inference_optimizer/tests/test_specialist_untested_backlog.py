@@ -154,3 +154,33 @@ _NO_TASKS = SimpleNamespace(
 def test_the_cap_holds_back_only_a_framework_agent_specialist_orchestration_may_dispatch(action_name, params, phase):
     assert untested_backlog_denial(action_name, params, _full_state(phase), _NO_TASKS) is None
     assert untested_backlog_denial("specialist", {"mode": "research"}, _full_state(), _NO_TASKS) is not None
+
+
+def _declare_export(tmp_path, monkeypatch, *, enabled: bool = True) -> None:
+    import json
+
+    module = tmp_path / "hyperloom_optimize.py"
+    module.write_text("def hyperloom_optimize(model):\n    return model\n", encoding="utf-8")
+    scope = {"schema_version": 2, "file": str(module), "aoti": {"enabled": enabled}}
+    (tmp_path / "optimization_scope.json").write_text(json.dumps(scope), encoding="utf-8")
+    monkeypatch.setenv("HYPERLOOM_BYPASS_SCRIPTS_DIR", str(tmp_path))
+
+
+def test_the_cap_stands_down_while_the_export_gate_holds_the_bench(tmp_path, monkeypatch):
+    """Under a declared export, nothing drains this backlog: explore is held until one
+    lands, and a patch specialist is the only lane that can land it. Holding one back here
+    would stall the run on a queue it cannot empty."""
+    _declare_export(tmp_path, monkeypatch)
+    assert untested_backlog_denial("specialist", {"mode": "research"}, _full_state(), _NO_TASKS) is None
+
+
+def test_the_cap_applies_again_once_the_export_lands(tmp_path, monkeypatch):
+    _declare_export(tmp_path, monkeypatch)
+    state = _full_state()
+    state.current_best_exports = True
+    assert untested_backlog_denial("specialist", {"mode": "research"}, state, _NO_TASKS) is not None
+
+
+def test_a_workload_declaring_no_export_keeps_the_cap(tmp_path, monkeypatch):
+    _declare_export(tmp_path, monkeypatch, enabled=False)
+    assert untested_backlog_denial("specialist", {"mode": "research"}, _full_state(), _NO_TASKS) is not None

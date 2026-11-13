@@ -28,6 +28,7 @@ from ..loop.proposals import integrate_review_in_flight, record_proposal
 from ..actions.executors import _integrate_vocabulary
 from hyperloom.common.framework_arm import LOCAL_EXPLORE_CANDIDATE_PREFIX
 from hyperloom.orchestrator.lever import LEVER_SOURCE_PATCH, LEVER_UPSTREAM_PR, patch_owner_phase
+from hyperloom.common.export_gate import export_gate_is_shut
 from .proposal_bench import CUSTOM_PROPOSAL_DOMAIN, ProposalBench, kb_exposure_of, waiting_proposal_rows
 from .framework_discovery import DISCOVER_FAILURE_RETRY_LIMIT, _CandidateDiscoveryMixin
 from .framework_records import (
@@ -1769,6 +1770,12 @@ class FrameworkPhase(_AuthoredOutcomeMixin, _CandidateDiscoveryMixin, ProposalBe
             if await self._enqueue_bench_grid(custom, operator_priority=True):
                 return
         if state.custom_specialist_only or explores:
+            return
+        if export_gate_is_shut(state):
+            # This bench creates its explore task directly, so it never passes the
+            # admission gate and has to read the export gate itself. The operator's own
+            # specialist keeps its carve-out above: its grid is one per macro cycle and
+            # the mode that runs nothing else depends on it to finish the cycle.
             return
         rows = [r for r in waiting_proposal_rows(state, self.tasks) if r["domain"] != CUSTOM_PROPOSAL_DOMAIN]
         if rows:

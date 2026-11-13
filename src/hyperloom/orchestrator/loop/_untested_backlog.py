@@ -8,6 +8,8 @@ from __future__ import annotations
 from collections.abc import Mapping
 from typing import Any
 
+from hyperloom.common.export_gate import export_gate_is_shut
+
 from ..phases.machine_state import PHASE_FRAMEWORK_AGENT
 from ..phases.proposal_bench import UNTESTED_BACKLOG_CAP, waiting_proposal_rows
 from ..policy.denial import PolicyDenied
@@ -33,6 +35,11 @@ def untested_backlog_denial(
     if action_name != SPECIALIST_ACTION_NAME or is_custom_specialist_dispatch(dict(params or {})):
         return None
     if str(shared_state.phase or "").strip().upper() != PHASE_FRAMEWORK_AGENT:
+        return None
+    if export_gate_is_shut(shared_state):
+        # Nothing can drain the backlog: the automatic bench is held for the same reason,
+        # and a patch specialist is the only lane that can land the export that reopens
+        # both. Holding one back here would stall the run on a queue it cannot empty.
         return None
     waiting = len(waiting_proposal_rows(shared_state, tasks))
     if waiting < UNTESTED_BACKLOG_CAP:
