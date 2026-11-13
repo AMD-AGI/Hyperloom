@@ -76,6 +76,10 @@ _UTF8 = "utf-8"
 _EVAL, _CLIENT_WARMUP, _CLIENT_MEASURED, _CLIENT_FINISHED = "eval", "warmup", "measured", "finished"
 #: The marks of a profile round's window in its ``phase_marks.json``, as inference_suite's ``Phase`` names them.
 _PROFILE_OPEN, _PROFILE_CLOSE = "profile_open", "profile_close"
+#: The control requests a profile window sends its server, as inference_suite's ``profile.inject`` names them.
+_WINDOW_REQUESTS = ("/start_profile", "/stop_profile")
+#: How urllib words the error of a request the server answered with an error status.
+_ANSWERED_WITH_STATUS = "HTTP Error "
 _MIB = 1 << 20
 #: A boot is in the first bytes of a server's log, and a log of a long test is large.
 _LOG_HEAD_BYTES = 8 * _MIB
@@ -338,12 +342,18 @@ def stalled_in_profile_window(run_dir: Path) -> bool:
     """Whether the server of the round in ``run_dir``, which the round ended for its silence, went silent while the
     round's profile window was open.
 
-    The round marks ``finished`` as the silence ends it, so the silence began the round's silence limit before that mark
-    at the latest; it began in the window when ``profile_open`` is at or before that instant and ``profile_close`` is
-    absent or after it (a window open when the round ended is closed then). A round whose marks or config cannot be read
-    is not known to have stalled there.
+    It did when the window's ``/start_profile`` or ``/stop_profile`` went unanswered (``profile/capture.json`` records
+    that request as ``<path>: <error>``; one the server answered with an error status was answered). An AgentX window
+    sends them from the round's poll and waits up to ten minutes for an answer, so its marks place no silence; a fixed
+    load's window does not record its ``/stop_profile`` answer, so for it the marks decide. The round marks ``finished``
+    as the silence ends it, so the silence began the round's silence limit before that mark at the latest; it began in
+    the window when ``profile_open`` is at or before that instant and ``profile_close`` is absent or after it (a window
+    open when the round ended is closed then). A round whose capture, marks or config cannot be read is not known to
+    have stalled there.
     """
     layout = RunLayout(run_dir)
+    if _window_request_unanswered(layout):
+        return True
     try:
         config = SuiteConfig.from_document(yaml.safe_load(layout.config.read_text(encoding=_UTF8)))
         document = json.loads(layout.phase_marks.read_text(encoding=_UTF8))
@@ -361,6 +371,19 @@ def stalled_in_profile_window(run_dir: Path) -> bool:
     began = finished - config.deadlines.silence_sec
     closed = instants.get(_PROFILE_CLOSE)
     return opened <= began and (closed is None or closed > began)
+
+
+def _window_request_unanswered(layout: RunLayout) -> bool:
+    """Whether the round's ``profile/capture.json`` records a window control request its server never answered."""
+    try:
+        document = json.loads(layout.profile_capture.read_text(encoding=_UTF8))
+    except (OSError, ValueError):
+        return False
+    error = document.get("error") if isinstance(document, dict) else None
+    if not isinstance(error, str):
+        return False
+    path, _, cause = error.partition(": ")
+    return path in _WINDOW_REQUESTS and not cause.startswith(_ANSWERED_WITH_STATUS)
 
 
 def profile_stall(run_dir: Path, step: FailedStep) -> str | None:

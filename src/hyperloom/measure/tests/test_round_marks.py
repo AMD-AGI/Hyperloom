@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import json
 import os
+import urllib.error
 from pathlib import Path
 
 import pytest
@@ -36,6 +37,7 @@ from hyperloom.measure.round_marks import (
     stalled_in_profile_window,
 )
 from inference_suite.contracts import FailedStep
+from inference_suite.profile.inject import START_PROFILE_PATH, STOP_PROFILE_PATH
 from inference_suite.runtime.phases import Phase
 from inference_suite.tests import test_config_contract
 
@@ -82,11 +84,11 @@ def _phases(boundaries: list[Boundary], window: tuple[float, float] = WINDOW) ->
 
 def _shape(role: str = ROLE_MEASURE, **overrides: object) -> RoundShape:
     fields: dict[str, object] = {"agentx": False, "reuses_server": False, "failed": False}
-    return RoundShape(role, **{**fields, **overrides})  # type: ignore[arg-type]
+    return RoundShape(role, **{**fields, **overrides})
 
 
 def _run(**fields: object) -> RunMarks:
-    return RunMarks(Path("/nowhere"), **{"ready": T0 + 90.0, **fields})  # type: ignore[arg-type]
+    return RunMarks(Path("/nowhere"), **{"ready": T0 + 90.0, **fields})
 
 
 # -- reading the marks --------------------------------------------------------------------------------------------
@@ -462,6 +464,55 @@ def test_the_window_marks_read_are_the_ones_the_suite_writes() -> None:
         Phase.PROFILE_CLOSE.value,
         Phase.FINISHED.value,
     )
+
+
+def test_the_window_requests_read_are_the_ones_the_suite_sends_and_words() -> None:
+    """The paths are literal here (``measure`` may not import the suite's profile package), and so is how urllib words
+    a request the server answered with an error status."""
+    refused = urllib.error.HTTPError(STOP_PROFILE_PATH, 400, "Bad Request", None, None)
+
+    assert round_marks._WINDOW_REQUESTS == (START_PROFILE_PATH, STOP_PROFILE_PATH)
+    assert str(refused).startswith(round_marks._ANSWERED_WITH_STATUS)
+
+
+def _agentx_round(directory: Path, capture: str) -> Path:
+    """An AgentX round whose window opened at 400 and closed at 700, ended 1302 by a 600 s silence, with ``capture`` as
+    its ``profile/capture.json``: the marks alone place the silence after the window."""
+    marks = {"measured": 100.0, "profile_open": 400.0, "profile_close": 700.0, "finished": 1302.0}
+    document = {"phase_marks": [{"phase": phase, "ts": at, "mono": at} for phase, at in marks.items()]}
+    (directory / "phase_marks.json").write_text(json.dumps(document), encoding="utf-8")
+    config = test_config_contract._config()
+    (directory / "config.yaml").write_text(yaml.safe_dump(config.to_document(), sort_keys=False), encoding="utf-8")
+    (directory / "profile").mkdir()
+    (directory / "profile" / "capture.json").write_text(capture, encoding="utf-8")
+    return directory
+
+
+@pytest.mark.parametrize(
+    ("capture", "stalled"),
+    [
+        (json.dumps({"error": "/stop_profile: <urlopen error timed out>"}), True),
+        (json.dumps({"error": "/start_profile: timed out"}), True),
+        (json.dumps({"error": None}), False),
+        (json.dumps({"error": "/stop_profile: HTTP Error 400: Bad Request"}), False),
+        (json.dumps({"error": "something else: timed out"}), False),
+        ("{not json", False),
+        ("[]", False),
+    ],
+    ids=[
+        "stop_unanswered",
+        "start_unanswered",
+        "both_answered",
+        "stop_refused",
+        "not_a_window_request",
+        "capture_unreadable",
+        "capture_off_contract",
+    ],
+)
+def test_a_window_request_the_server_never_answered_places_the_stall_in_the_window(
+    tmp_path: Path, capture: str, stalled: bool
+) -> None:
+    assert stalled_in_profile_window(_agentx_round(tmp_path, capture)) is stalled
 
 
 def _window_round(directory: Path) -> Path:
