@@ -15,7 +15,7 @@ from pathlib import Path
 import pytest
 
 from inference_suite.contracts.base_launch import LaunchQuery, Workload
-from inference_suite.multinode import RECORD_NAME, read_record, write_record
+from inference_suite.multinode import RECORD_NAME, PdMode, Role, read_record, write_record
 from hyperloom.inference_optimizer.cli import bootstrap
 from hyperloom.inference_optimizer.cli import multi_node as cli_mn
 from hyperloom.inference_optimizer.multi_node import cli as mn_cli
@@ -163,3 +163,76 @@ def test_a_gone_engine_is_named(session: Path, monkeypatch) -> None:
     gone = [types.SimpleNamespace(role="decode", host="d0")]
     monkeypatch.setattr(pd_session, "engines_gone", lambda launch, cluster: gone)
     assert lifecycle.pd_engines_lost_reason() == "decode engine on d0 is gone"
+
+
+_INFERA_NODES = {
+    "framework": "sglang",
+    "model": "/models/M",
+    "service_url": "http://frontend:30080",
+    "mode": "aggregated",
+    "worker": [{"host": "w0", "ssh_port": 2240}, {"host": "w1", "ssh_port": 2241}],
+    "gpus_per_node": 8,
+    "ssh": {"port": 2240, "user": "root", "key_file": "/keys/id"},
+    "frontend": "infera",
+    "topology": {"worker": {"tp": 16}},
+    "config": {"worker_args": "--mem-fraction-static 0.8"},
+}
+
+
+@pytest.fixture()
+def infera_session(session: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
+    """An aggregated Infera node-list hand-off."""
+    monkeypatch.setenv(pd_session.NODE_LIST_ENV, json.dumps(_INFERA_NODES))
+    monkeypatch.setenv("PD_MODE", "aggregated")
+    return session
+
+
+def test_an_infera_node_list_is_a_suite_session(infera_session: Path) -> None:
+    state = _adopt(infera_session)
+    assert state["backend"] == "infera" and pd_session.is_pd_state(state)
+    assert (state["pd_mode"], state["worker_pod_ips"], state["prefill_pod_ips"]) == ("aggregated", ["w0", "w1"], [])
+    assert [pod["sshPort"] for pod in state["worker_pods"]] == [2240, 2241]
+    assert cli_mn.is_pd_session(_args())
+    assert read_record(infera_session / RECORD_NAME).mode.value == "aggregated"
+
+
+def test_an_infera_state_without_a_node_list_keeps_the_legacy_path() -> None:
+    assert not pd_session.is_pd_state({"backend": "infera", "pd_mode": "aggregated"})
+
+
+def test_an_infera_hand_off_without_a_node_list_is_no_suite_session(session: Path, monkeypatch) -> None:
+    monkeypatch.delenv(pd_session.NODE_LIST_ENV)
+    assert not cli_mn.is_pd_session(argparse.Namespace(nodes=2, mn_backend="infera"))
+
+
+def test_the_session_mode_must_be_the_node_lists(infera_session: Path, monkeypatch) -> None:
+    monkeypatch.setenv("PD_MODE", "disaggregated")
+    with pytest.raises(SystemExit) as raised:
+        cli_mn.freeze_pd_session_launch(infera_session, _args(), _SESSION)
+    assert raised.value.code == 2
+
+
+def test_aggregated_rounds_override_the_workers() -> None:
+    mode = PdMode.AGGREGATED
+    assert pd_session.round_overrides("--chunked-prefill-size 4096", "--x", mode=mode) == {
+        "worker": ["--chunked-prefill-size", "4096"]
+    }
+    assert pd_session.round_overrides("", mode=mode) == {}
+
+
+def test_an_aggregated_round_restarts_the_workers(infera_session: Path, monkeypatch) -> None:
+    _adopt(infera_session)
+    seen: dict = {}
+    monkeypatch.setattr(pd_session, "restart", _fake_restart(seen))
+    asyncio.run(lifecycle.restart_server_for_round(lifecycle.RoundServer("--chunked-prefill-size 4096")))
+    assert seen["overrides"] == {"worker": ["--chunked-prefill-size", "4096"]}
+    ran = read_record(infera_session / pd_session.RAN_RECORD_NAME)
+    assert ran.role(Role.WORKER).args == ("--mem-fraction-static", "0.8", "--chunked-prefill-size", "4096")
+
+
+def test_kill_inference_stops_the_infera_workers(infera_session: Path, monkeypatch) -> None:
+    _adopt(infera_session)
+    stopped = []
+    monkeypatch.setattr(pd_session, "stop", lambda launch, cluster, options: stopped.append(launch.mode.value))
+    assert mn_cli.cmd_kill_inference(argparse.Namespace(pid_file=None)) == 0
+    assert stopped == ["aggregated"]

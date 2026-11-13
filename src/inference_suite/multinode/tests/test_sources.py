@@ -2,11 +2,12 @@
 # SPDX-License-Identifier: MIT
 
 import textwrap
+import types
 from dataclasses import replace
 
 import pytest
 
-from inference_suite.contracts.base_launch import Workload
+from inference_suite.contracts.base_launch import LaunchSource, Redacted, SourceKind, Topology, Workload
 from inference_suite.frameworks import Framework
 from inference_suite.multinode.inferencex import (
     MULTI_NODE_RECIPES,
@@ -16,9 +17,10 @@ from inference_suite.multinode.inferencex import (
     master_candidates,
 )
 from inference_suite.multinode.query import PdQuery, PdQueryError, RoleAsk
-from inference_suite.multinode.record import FrontendType, PdSourceKind
+from inference_suite.multinode.record import FrontendType, PdMode, PdSourceKind, Role
 from inference_suite.multinode.recipe import OperatorArgs, PdResolveError, ResolveInputs, resolve
 from inference_suite.recipe.inferencex import MASTER, RUNNERS
+from inference_suite.recipe.resolve import Miss
 from inference_suite.recipe.sources import Checkout, SourceFetchError
 
 _MASTER = """
@@ -104,8 +106,10 @@ def _query(prefill=1, decode=1, **fields):
         gpus_per_node=8,
         workload=Workload.FIXED,
         concurrencies=(64,),
-        prefill=RoleAsk(tuple(f"p{i}" for i in range(prefill))),
-        decode=RoleAsk(tuple(f"d{i}" for i in range(decode))),
+        roles={
+            Role.PREFILL: RoleAsk(tuple(f"p{i}" for i in range(prefill))),
+            Role.DECODE: RoleAsk(tuple(f"d{i}" for i in range(decode))),
+        },
         router_host="r0",
         isl=1024,
         osl=1024,
@@ -218,6 +222,64 @@ def test_table_runs_the_asked_router_without_the_other_routers_args():
     assert asked.prefill.args == default.prefill.args
 
 
-def test_infera_is_no_pd_router():
-    with pytest.raises(PdQueryError, match="sglang-router or atomesh"):
-        _query(frontend=FrontendType.INFERA)
+def test_infera_serves_sglang_through_the_platform_frontend():
+    assert _query(frontend=FrontendType.INFERA).served_frontend is FrontendType.INFERA
+    with pytest.raises(PdQueryError, match="atom session serves through"):
+        _query(framework=Framework.ATOM, frontend=FrontendType.INFERA)
+
+
+def test_a_query_asks_for_the_roles_of_its_mode():
+    with pytest.raises(PdQueryError, match="aggregated session asks for"):
+        _query(mode=PdMode.AGGREGATED)
+
+
+def _aggregated(workers=2, **fields):
+    query = _query(roles={Role.WORKER: RoleAsk(tuple(f"w{i}" for i in range(workers)))}, mode=PdMode.AGGREGATED)
+    return replace(query, frontend=FrontendType.INFERA, **fields)
+
+
+def _base_launch(tp=8):
+    return types.SimpleNamespace(
+        topology=Topology(tp=tp, ep=1),
+        args=("--tp-size", str(tp), "--enable-dp-attention", "--mem-fraction-static", "0.8"),
+        env={"SGLANG_X": "1", "HF_TOKEN": Redacted("ab" * 32)},
+        stripped=("--port",),
+        warnings=("tuned elsewhere",),
+        source=LaunchSource(SourceKind.DEFAULT_TABLE, path="models.yaml", entry="M"),
+    )
+
+
+def test_aggregated_workers_run_the_single_node_base(checkout):
+    launch = resolve(_aggregated(), ResolveInputs(inferencex=lambda: checkout, base=_base_launch))
+    worker = launch.role(Role.WORKER)
+    assert launch.mode is PdMode.AGGREGATED and launch.source.kind is PdSourceKind.BASE_LAUNCH
+    assert (worker.hosts, worker.workers, worker.tp, worker.dp_attention) == (("w0", "w1"), 2, 8, True)
+    assert worker.args == ("--enable-dp-attention", "--mem-fraction-static", "0.8")
+    assert worker.env == {"SGLANG_X": "1"} and "env HF_TOKEN" in worker.stripped and "--tp-size" in worker.stripped
+    assert launch.transfer_backend == "" and launch.frontend.type is FrontendType.INFERA
+    assert "tuned elsewhere" in launch.source.warnings and launch.source.entry == "M"
+
+
+def test_a_base_spanning_hosts_is_one_worker():
+    launch = resolve(_aggregated(), ResolveInputs(base=lambda: _base_launch(tp=16)))
+    assert (launch.role(Role.WORKER).workers, launch.role(Role.WORKER).tp) == (1, 16)
+
+
+def test_aggregated_operator_args_win_over_the_base():
+    operator = OperatorArgs(worker=("--tp-size", "16", "--x"))
+    launch = resolve(_aggregated(), ResolveInputs(operator=operator, base=lambda: pytest.fail("resolved a base")))
+    assert launch.source.kind is PdSourceKind.OPERATOR and launch.role(Role.WORKER).args == ("--x",)
+
+
+def test_aggregated_session_without_a_base_is_refused():
+    with pytest.raises(PdResolveError, match="no source serves the workers"):
+        resolve(_aggregated(), ResolveInputs(base=lambda: Miss(())))
+    with pytest.raises(PdResolveError, match="no resolver"):
+        resolve(_aggregated(), ResolveInputs())
+
+
+def test_replay_keeps_the_mode():
+    first = resolve(_aggregated(), ResolveInputs(base=_base_launch))
+    assert resolve(_aggregated(router_host="r9"), ResolveInputs(replay=first)).digest() == first.digest()
+    with pytest.raises(PdResolveError, match="aggregated, not disaggregated"):
+        resolve(_query(), ResolveInputs(replay=first))

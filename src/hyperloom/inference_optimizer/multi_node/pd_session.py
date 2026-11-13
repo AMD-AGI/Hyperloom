@@ -1,7 +1,8 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""PD-disaggregated sessions on a cluster handed over as a node list: its state, its frozen launch, its rounds."""
+"""Sessions on a cluster handed over as a node list, PD-disaggregated or aggregated: its state, its frozen launch, its
+rounds."""
 
 from __future__ import annotations
 
@@ -22,6 +23,7 @@ from inference_suite.multinode import (
     NodeList,
     NodeListError,
     PdLaunch,
+    PdMode,
     PdRecordError,
     PdResolveError,
     SshError,
@@ -36,7 +38,7 @@ from inference_suite.multinode import (
     write_record,
 )
 
-from ._internal.pd_handoff import PD_BACKENDS, handed_node_list, is_pd_state, node_list_backend, pd_state
+from ._internal.pd_handoff import INFERA, PD_BACKENDS, handed_node_list, is_pd_state, node_list_backend, pd_state
 
 PD_LAUNCH_KEY = "pd_launch"
 PD_DIGEST_KEY = "pd_launch_digest"
@@ -48,6 +50,7 @@ SERVER_LOG_DIR_ENV = "HYPERLOOM_MN_SERVER_LOG_DIR"
 
 _PREFILL = "prefill"
 _DECODE = "decode"
+_WORKER = "worker"
 _ENV_KEY = re.compile(r"[A-Za-z_][A-Za-z0-9_]*")
 _RESERVED_ENV_PREFIX = "HL_"
 _SUITE_ERRORS = (LaunchError, NodeListError, PdRecordError, PdResolveError, SshError, OSError)
@@ -86,9 +89,14 @@ def verified_launch(record: Path, digest: str) -> PdLaunch:
     return launch
 
 
-def round_overrides(shared: str, prefill: str = "", decode: str = "") -> dict[str, list[str]]:
-    """Per-role overrides of one round: ``shared`` for both engines, each role's own args replacing its flags."""
+def round_overrides(
+    shared: str, prefill: str = "", decode: str = "", *, mode: PdMode = PdMode.DISAGGREGATED
+) -> dict[str, list[str]]:
+    """Per-role overrides of one round: ``shared`` for every engine, each PD role's own args replacing its flags; an
+    aggregated launch's workers take ``shared`` alone."""
     common = shlex.split(shared)
+    if mode is PdMode.AGGREGATED:
+        return {_WORKER: common} if common else {}
     given = {_PREFILL: replace_flags(common, shlex.split(prefill)), _DECODE: replace_flags(common, shlex.split(decode))}
     return {role: list(args) for role, args in given.items() if args}
 
@@ -121,7 +129,7 @@ def _session_cluster(state: dict[str, Any]) -> _SessionCluster:
     """
     nodes = handed_node_list()
     if nodes is None:
-        raise PdSessionError(f"a PD session needs {NODE_LIST_ENV}, which is unset")
+        raise PdSessionError(f"a node-list session needs {NODE_LIST_ENV}, which is unset")
     record = Path(str(state.get(PD_LAUNCH_KEY) or ""))
     verified_launch(record, str(state.get(PD_DIGEST_KEY) or ""))
     return _SessionCluster(record, placed_launch(nodes, record), cluster_of(nodes, record))
@@ -130,16 +138,20 @@ def _session_cluster(state: dict[str, Any]) -> _SessionCluster:
 def restart_round(state: dict[str, Any], shared_args: str, options: LaunchOptions) -> PdLaunch:
     """Restart the session's cluster with one round's args over the frozen launch; returns the launch as run.
 
-    ``shared_args`` apply to both engines; ``$PD_PREFILL_EXTRA_ARGS`` and ``$PD_DECODE_EXTRA_ARGS`` to their own.
+    ``shared_args`` apply to every engine; ``$PD_PREFILL_EXTRA_ARGS`` and ``$PD_DECODE_EXTRA_ARGS`` to their own PD
+    role.
 
     Raises:
         PdSessionError: the launch cannot be verified, a host refused, or the cluster did not come up.
     """
-    overrides = round_overrides(
-        shared_args, os.environ.get(PREFILL_EXTRA_ENV, ""), os.environ.get(DECODE_EXTRA_ENV, "")
-    )
     try:
         session = _session_cluster(state)
+        overrides = round_overrides(
+            shared_args,
+            os.environ.get(PREFILL_EXTRA_ENV, ""),
+            os.environ.get(DECODE_EXTRA_ENV, ""),
+            mode=session.launch.mode,
+        )
         ran = restart(session.launch, overrides, session.cluster, options)
         write_record(ran, session.record.with_name(RAN_RECORD_NAME))
     except _SUITE_ERRORS as exc:
@@ -172,6 +184,7 @@ def engines_lost(state: dict[str, Any]) -> str:
 
 __all__ = [
     "DECODE_EXTRA_ENV",
+    "INFERA",
     "PD_BACKENDS",
     "PD_DIGEST_KEY",
     "PD_LAUNCH_KEY",

@@ -1,13 +1,13 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""``python -m inference_suite multinode``: ``resolve`` a PD launch, ``start``, ``restart`` or ``stop`` it.
+"""``python -m inference_suite multinode``: ``resolve`` a multi-node launch, ``start``, ``restart`` or ``stop`` it.
 
 Every command reads the cluster from the node list in ``HYPERLOOM_MN_NODE_LIST``. ``resolve --query <query.json>
 [--replay <pd_launch.json>] [--inferencex-commit <sha>] [--out <path>]`` writes the launch the sources give and prints
-its digest. ``start``, ``restart [--prefill-args ARGS] [--decode-args ARGS] [--router-args ARGS]`` and ``stop`` act
-on the launch at ``--record`` on the node list's hosts; ``start`` and ``restart`` write the launch as it ran back to
-the record and print its digest. The record defaults to ``pd_launch.json`` in
+its digest. ``start``, ``restart [--prefill-args ARGS] [--decode-args ARGS] [--worker-args ARGS] [--router-args
+ARGS]`` and ``stop`` act on the launch at ``--record`` on the node list's hosts; ``start`` and ``restart`` write the
+launch as it ran back to the record and print its digest. The record defaults to ``pd_launch.json`` in
 ``$INFERENCE_OPTIMIZER_CURRENT_SESSION_DIR``. Exit 1 is a cluster that did not come up, exit 2 a refused input.
 """
 
@@ -68,7 +68,8 @@ def _options(args: argparse.Namespace) -> LaunchOptions:
 
 
 def _overrides(args: argparse.Namespace) -> dict[str, list[str]]:
-    given = {Role.PREFILL.value: args.prefill_args, Role.DECODE.value: args.decode_args, "router": args.router_args}
+    given = {role.value: getattr(args, f"{role.value}_args") for role in Role}
+    given["router"] = args.router_args
     return {role: shlex.split(text) for role, text in given.items() if text}
 
 
@@ -118,7 +119,7 @@ def add_commands(commands: Any) -> None:
     resolve_parser.set_defaults(handler=_resolve)
     _cluster_parser(actions, "start", "start the launch on the node list's hosts", record)
     restart_parser = _cluster_parser(actions, "restart", "start the launch with per-role flag overrides", record)
-    for role in ("prefill", "decode", "router"):
+    for role in (*(role.value for role in Role), "router"):
         restart_parser.add_argument(f"--{role}-args", default="", help=f"flags that replace the {role}'s same flags")
     _cluster_parser(actions, "stop", "stop the router and every engine", record)
 

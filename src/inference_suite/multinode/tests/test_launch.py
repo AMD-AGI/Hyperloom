@@ -22,7 +22,16 @@ from inference_suite.multinode.launch import (
     with_overrides,
 )
 from inference_suite.multinode.nodes import SshAccess, parse_node_list
-from inference_suite.multinode.record import Frontend, FrontendType, PdLaunch, PdSource, PdSourceKind, RoleLaunch
+from inference_suite.multinode.record import (
+    Frontend,
+    FrontendType,
+    PdLaunch,
+    PdMode,
+    PdSource,
+    PdSourceKind,
+    Role,
+    RoleLaunch,
+)
 from inference_suite.multinode.ssh import SshClient, SshResult
 
 _FLAGS = "--model-path\n--mem-fraction-static\n--cuda-graph-bs-decode\n--chunked-prefill-size\n"
@@ -95,8 +104,10 @@ def _launch(kind=PdSourceKind.INFERENCEX_MASTER):
         served_model_name="org/M",
         context_length=2048,
         transfer_backend="mori",
-        prefill=RoleLaunch(("p0",), 1, 8, args=("--mem-fraction-static", "0.8", "--cuda-graph-bs", "1", "2")),
-        decode=RoleLaunch(("d0",), 1, 8, args=("--cuda-graph-bs", "1", "2", "--retired-flag", "x")),
+        roles={
+            Role.PREFILL: RoleLaunch(("p0",), 1, 8, args=("--mem-fraction-static", "0.8", "--cuda-graph-bs", "1", "2")),
+            Role.DECODE: RoleLaunch(("d0",), 1, 8, args=("--cuda-graph-bs", "1", "2", "--retired-flag", "x")),
+        },
         frontend=Frontend(FrontendType.SGLANG_ROUTER, "r0", ()),
     )
 
@@ -215,3 +226,57 @@ def test_atom_launch_does_not_probe_sglang(tmp_path):
     ran = start(launch, cluster, _OPTIONS)
     assert ran.decode.args == launch.decode.args
     assert not any("launch_server --help" in stdin for _kind, _host, stdin in hosts.calls)
+
+
+def test_an_infera_launch_starts_no_router_and_waits_for_the_service(tmp_path):
+    hosts = FakeHosts()
+    probed = []
+    launch = PdLaunch(
+        source=PdSource(PdSourceKind.OPERATOR),
+        framework=Framework.SGLANG,
+        model="/models/M",
+        served_model_name="org/M",
+        context_length=None,
+        transfer_backend="",
+        roles={Role.WORKER: RoleLaunch(("w0", "w1"), 1, 16, args=("--mem-fraction-static", "0.8"))},
+        frontend=Frontend(FrontendType.INFERA),
+        mode=PdMode.AGGREGATED,
+    )
+    nodes = _nodes(mode="aggregated", prefill=None, decode=None, worker=[{"host": "w0"}, {"host": "w1"}])
+    nodes = replace(nodes, frontend=FrontendType.INFERA, router="")
+    cluster = replace(_cluster(tmp_path, hosts, lambda url: probed.append(url) or True), nodes=nodes)
+    ran = start(launch, cluster, _OPTIONS)
+    assert hosts.driven("restart") == ["w0", "w1"]
+    assert probed == ["http://w0:30000/health", "http://svc:8000/health"]
+    assert ran.role(Role.WORKER).args == ("--mem-fraction-static", "0.8")
+    assert any("infera.engine.sglang" in stdin for _kind, _host, stdin in hosts.calls)
+    stop(launch, cluster, _OPTIONS)
+    assert hosts.driven("stop") == ["w0", "w1"]
+
+
+def test_worker_overrides_apply_to_an_aggregated_launch():
+    launch = PdLaunch(
+        source=PdSource(PdSourceKind.OPERATOR),
+        framework=Framework.SGLANG,
+        model="/models/M",
+        served_model_name="org/M",
+        context_length=None,
+        transfer_backend="",
+        roles={Role.WORKER: RoleLaunch(("w0",), 1, 8, args=("--a", "1"))},
+        frontend=Frontend(FrontendType.SGLANG_ROUTER, "r0"),
+        mode=PdMode.AGGREGATED,
+    )
+    assert with_overrides(launch, {"worker": ["--a", "2"]}).role(Role.WORKER).args == ("--a", "2")
+    with pytest.raises(LaunchError, match="no role"):
+        with_overrides(launch, {"prefill": ["--a", "2"]})
+
+
+def test_a_host_with_its_own_ssh_port_is_reached_there(tmp_path):
+    argvs = []
+    access = SshAccess(22, "root", "/keys/id", host_ports={"d0": 2232})
+    client = SshClient(
+        access, tmp_path / "known_hosts", runner=lambda argv, stdin, timeout: argvs.append(argv) or SshResult(0, "", "")
+    )
+    client.run("d0", "true", 5)
+    client.run("p0", "true", 5)
+    assert [argv[argv.index("-p") + 1] for argv in argvs] == ["2232", "22"]

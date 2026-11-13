@@ -67,7 +67,7 @@ class SshClient:
         argv = ["ssh"]
         for option in options:
             argv += ["-o", option]
-        return [*argv, "-i", self.access.key_file, "-p", str(self.access.port), f"{self.access.user}@{host}"]
+        return [*argv, "-i", self.access.key_file, "-p", str(self.access.port_of(host)), f"{self.access.user}@{host}"]
 
     def learn(self, hosts: Sequence[str]) -> None:
         """Append the host keys of ``hosts`` not yet pinned to ``known_hosts``.
@@ -78,9 +78,10 @@ class SshClient:
         self.known_hosts.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
         self.known_hosts.touch(mode=0o600, exist_ok=True)
         for host in hosts:
-            scanned = self.runner(["ssh-keyscan", "-p", str(self.access.port), "-H", host], "", _KEYSCAN_TIMEOUT_S)
+            port = self.access.port_of(host)
+            scanned = self.runner(["ssh-keyscan", "-p", str(port), "-H", host], "", _KEYSCAN_TIMEOUT_S)
             if scanned.returncode != 0 or not scanned.stdout.strip():
-                raise SshError(f"ssh-keyscan returned no host key for {host}:{self.access.port}")
+                raise SshError(f"ssh-keyscan returned no host key for {host}:{port}")
             with self.known_hosts.open("a", encoding="utf-8") as pinned:
                 pinned.write(scanned.stdout if scanned.stdout.endswith("\n") else f"{scanned.stdout}\n")
 
