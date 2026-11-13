@@ -28,9 +28,11 @@ from hyperloom.inference_optimizer.framework_paths import (
 
 
 from .tracelens_arch_benchmark import (
+    INTERNAL_ROOT_ENV,
     ArchSpec,
     Microbench,
     internal_extension_arch_json,
+    internal_extension_root,
     normalize_platform,
     parse_arch_gpus,
     populate_gpu_arch_json,
@@ -131,7 +133,10 @@ def _trajectory_scope(args: argparse.Namespace) -> contextlib.AbstractContextMan
 
 
 def _gpu_arch_json(run: AnalysisRun, *, tl_root: Path, tl_internal_root: Path | None) -> ArchSpec | None:
-    """The arch JSON roofline reads: the bundled spec under the internal extension, else bundled, measured or fallback."""
+    """The arch JSON roofline reads: the bundled spec under the internal extension, else bundled, measured or fallback.
+
+    It measures exactly when :func:`measures_arch_spec` says so, which the toolbox reads to lease the card first.
+    """
     log_path = run.log_path
     arch_benchmark_timeout_s = _resolve_arch_benchmark_timeout_s()
     if tl_internal_root is not None:
@@ -234,7 +239,7 @@ def _check_tracelens_checkout(args: argparse.Namespace, log_path: Path) -> _Trac
     tl_root = Path(tl_root_arg)
     # Internal extension is opt-in (non-empty --tracelens-internal-root / env).
     internal_root_arg = args.tracelens_internal_root.strip()
-    tl_internal_root: Path | None = Path(internal_root_arg) if internal_root_arg else None
+    tl_internal_root = internal_extension_root(internal_root_arg)
     if not tl_root.exists():
         raise FileNotFoundError(f"TraceLens root not found: {tl_root} (set TRACELENS_ROOT or pass --tracelens-root)")
     # A dir that exists but has neither git metadata nor the TraceLens
@@ -244,14 +249,13 @@ def _check_tracelens_checkout(args: argparse.Namespace, log_path: Path) -> _Trac
             f"TraceLens root incomplete (not a git checkout): {tl_root} "
             "(set TRACELENS_ROOT or pass --tracelens-root to a valid checkout)"
         )
-    if tl_internal_root is not None and not tl_internal_root.exists():
+    if internal_root_arg and tl_internal_root is None:
         append_log(
             log_path,
-            f"TraceLens-internal root not found: {tl_internal_root}; "
+            f"TraceLens-internal root not found: {internal_root_arg}; "
             "falling back to open-source-only "
             "(provide an existing internal checkout to enable)",
         )
-        tl_internal_root = None
     if tl_internal_root is None:
         append_log(
             log_path,
@@ -661,7 +665,7 @@ def _add_root_args(parser: argparse.ArgumentParser) -> None:
     )
     parser.add_argument(
         "--tracelens-internal-root",
-        default=os.environ.get("TRACELENS_INTERNAL_ROOT", DEFAULT_TRACELENS_INTERNAL_ROOT),
+        default=os.environ.get(INTERNAL_ROOT_ENV, DEFAULT_TRACELENS_INTERNAL_ROOT),
         help="Optional TraceLens-internal checkout (TRACELENS_INTERNAL_ROOT). "
         "Rehydration module; plumbed to run_tracelens_skill. "
         "Leave empty for the open-source-only report.",

@@ -259,6 +259,45 @@ def test_parse_arch_gpus(text: str, expected: list[int]) -> None:
     assert tab.parse_arch_gpus(text) == expected
 
 
+def test_internal_extension_root_is_an_existing_checkout_or_none(tmp_path: Path) -> None:
+    assert tab.internal_extension_root(f"  {tmp_path}  ") == tmp_path
+    assert tab.internal_extension_root(str(tmp_path / "missing")) is None
+    assert tab.internal_extension_root("  ") is None
+
+
+@pytest.mark.parametrize("internal", [True, False], ids=["internal extension", "open source"])
+@pytest.mark.parametrize("bundled", [True, False], ids=["bundled spec", "no spec"])
+def test_the_analysis_measures_exactly_when_measures_arch_spec_says_so(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, internal: bool, bundled: bool
+) -> None:
+    """The toolbox leases a card from :func:`measures_arch_spec`; the analysis must measure in exactly those cases."""
+    from types import SimpleNamespace
+
+    from hyperloom.orchestrator.trace_analysis import tracelens_analysis as tla
+
+    spec = tmp_path / "MI355X.json"
+    spec.write_text("{}", encoding="utf-8")
+    internal_root = tab.internal_extension_root(str(tmp_path) if internal else "")
+    runs: list[list[str]] = []
+
+    def _run_command(cmd, *, cwd, log_path, timeout_s, env=None):
+        runs.append(cmd)
+        return _measured_mi355x(cmd, cwd=cwd, env=env)
+
+    monkeypatch.setattr(tla, "run_command", _run_command)
+    monkeypatch.setattr(tab, "resolve_arch_json_path", lambda _platform: spec if bundled else None)
+    run = SimpleNamespace(
+        log_path=tmp_path / "analysis.log",
+        session_runs_dir=tmp_path / "runs",
+        args=SimpleNamespace(target_platform="MI355X", arch_gpus=[0]),
+    )
+
+    tla._gpu_arch_json(run, tl_root=tmp_path / "TraceLens", tl_internal_root=internal_root)
+
+    assert bool(runs) is tab.measures_arch_spec("MI355X", internal_root)
+    assert bool(runs) is (not internal and not bundled)
+
+
 def test_populate_skips_microbench_when_internal_extension_enabled(
     tmp_path: Path,
 ) -> None:

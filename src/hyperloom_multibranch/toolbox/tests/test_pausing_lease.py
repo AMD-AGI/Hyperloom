@@ -93,7 +93,7 @@ async def test_a_pausing_lease_cancelled_before_its_card_stops_pausing(tmp_path:
 
     lease.cancel()
     with pytest.raises(asyncio.CancelledError):
-        await lease
+        await asyncio.wait_for(lease, 5)
 
     assert leases.tests_at_once() == 1
 

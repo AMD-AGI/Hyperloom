@@ -27,7 +27,10 @@ from hyperloom.inference_optimizer.framework_registry import is_scriptable
 from hyperloom.orchestrator.actions.executors.trace_analyze import ARCH_GPUS_PARAM, trace_analyze_handler
 from hyperloom.orchestrator.trace_analysis.analysis_route import AnalysisRoute
 from hyperloom.orchestrator.trace_analysis.tracelens_arch_benchmark import (
+    INTERNAL_ROOT_ENV,
     build_hyperloom_arch_spec,
+    internal_extension_root,
+    measures_arch_spec,
     resolve_arch_json_path,
 )
 from hyperloom.sandbox.socket import SandboxUnavailable
@@ -75,15 +78,17 @@ class _ArchCard:
     card however long the running tests take, and when the tests need every card no new test starts until it is
     released. The analysis is
     told the card in ``arch_gpus``, which the caller cannot set. With no pool (a toolbox whose cards it does not own), or
-    a lease refused as the toolbox closes, it is given none, and its roofline reads vendor peaks. A board with an arch
-    spec, or a route that never measures, takes no card.
+    a lease refused as the toolbox closes, it is given none, and its roofline reads vendor peaks. An analysis that will
+    not measure (:func:`measures_arch_spec`: the internal extension is set, or TraceLens has a spec for the board), or a
+    route that never measures, takes no card.
     """
 
     name: str
     _leases: BranchLeases | None
 
     def _measures(self, params: Mapping[str, Any]) -> bool:
-        return resolve_arch_json_path(_platform(params)) is None
+        internal_root = internal_extension_root(os.environ.get(INTERNAL_ROOT_ENV, ""))
+        return measures_arch_spec(_platform(params), internal_root)
 
     async def run(self, request: ToolRequest, workdir: Path) -> ToolOutput:
         params = {key: value for key, value in request.params.items() if key != ARCH_GPUS_PARAM}

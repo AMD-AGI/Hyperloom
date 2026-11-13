@@ -9,10 +9,10 @@ from pathlib import Path
 
 import pytest
 
+from hyperloom.orchestrator.trace_analysis import tracelens_arch_benchmark as tab
 from hyperloom.sandbox.socket import SandboxUnavailable
 from hyperloom_multibranch.contracts.blackboard.vocab import LeaseKind
 from hyperloom_multibranch.contracts.toolbox import BranchLease, LeaseCharge, RequestRejected
-from hyperloom_multibranch.toolbox.tools import roofline as roofline_module
 from hyperloom_multibranch.toolbox.tools.base import ToolRequest
 from hyperloom_multibranch.toolbox.tools.roofline import ARCH_GPUS_PARAM, roofline_tool, tracelens_tool
 
@@ -55,8 +55,13 @@ class RecordingHandler:
         return {"status": "completed", "hot_kernels": ["gemm"]}
 
 
+@pytest.fixture(autouse=True)
+def _open_source_only(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.delenv(tab.INTERNAL_ROOT_ENV, raising=False)
+
+
 def _without_arch_spec(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setattr(roofline_module, "resolve_arch_json_path", lambda _platform: None)
+    monkeypatch.setattr(tab, "resolve_arch_json_path", lambda _platform: None)
 
 
 async def test_the_roofline_measures_the_board_on_a_leased_card_not_the_tests(
@@ -80,7 +85,7 @@ async def test_the_roofline_measures_the_board_on_a_leased_card_not_the_tests(
 
 
 async def test_a_board_with_an_arch_spec_takes_no_card(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setattr(roofline_module, "resolve_arch_json_path", lambda _platform: tmp_path / "MI355X.json")
+    monkeypatch.setattr(tab, "resolve_arch_json_path", lambda _platform: tmp_path / "MI355X.json")
     pool = PoolBesideATest()
     tool = roofline_tool(pool)
     handler = RecordingHandler(pool)
@@ -90,6 +95,41 @@ async def test_a_board_with_an_arch_spec_takes_no_card(tmp_path: Path, monkeypat
 
     assert pool.leases == []
     assert ARCH_GPUS_PARAM not in handler.payloads[0]
+
+
+@pytest.mark.parametrize("make_tool", [roofline_tool, tracelens_tool], ids=["roofline", "tracelens"])
+async def test_the_internal_extension_measures_nothing_so_takes_no_card(
+    make_tool, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _without_arch_spec(monkeypatch)
+    internal = tmp_path / "TraceLens-internal"
+    internal.mkdir()
+    monkeypatch.setenv(tab.INTERNAL_ROOT_ENV, str(internal))
+    pool = PoolBesideATest()
+    tool = make_tool(pool)
+    handler = RecordingHandler(pool)
+    tool._handler = handler
+
+    params = {"trace_input": "/t", "target_platform": "MI355X", "analysis_route": "non-llm"}
+    await tool.run(ToolRequest(tool.name, "b1", params), tmp_path)
+
+    assert pool.leases == []
+    assert ARCH_GPUS_PARAM not in handler.payloads[0]
+
+
+async def test_an_internal_root_that_is_not_there_still_measures_on_a_leased_card(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _without_arch_spec(monkeypatch)
+    monkeypatch.setenv(tab.INTERNAL_ROOT_ENV, str(tmp_path / "missing"))
+    pool = PoolBesideATest()
+    tool = roofline_tool(pool)
+    handler = RecordingHandler(pool)
+    tool._handler = handler
+
+    await tool.run(ToolRequest("roofline", "b1", {"trace_input": "/t"}), tmp_path)
+
+    assert handler.payloads[0][ARCH_GPUS_PARAM] == [_FREE_CARD]
 
 
 @pytest.mark.parametrize(

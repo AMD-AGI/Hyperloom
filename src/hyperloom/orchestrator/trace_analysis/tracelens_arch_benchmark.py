@@ -29,6 +29,8 @@ except ImportError:
 
 MICROBENCH_WARMUP = 20
 MICROBENCH_REP = 50
+#: The TraceLens-internal checkout whose extension backfills MAF, so that no microbenchmark runs (opt-in).
+INTERNAL_ROOT_ENV = "TRACELENS_INTERNAL_ROOT"
 #: Exit status of ``TraceLens.PerfModel.benchmarking.microbench`` when its idle gate rejects the GPU.
 _MICROBENCH_BUSY_EXIT = 2
 
@@ -309,6 +311,20 @@ def _run_microbench_on_idle_gpu(
             raise RuntimeError(f"gpu arch microbenchmark failed with exit code {rc}; see log for details")
         log(f"gpu_arch_json: GPU {physical_id} is busy; trying the next candidate")
     raise RuntimeError(f"gpu_arch_benchmark found no unoccupied GPU among {candidates}")
+
+
+def internal_extension_root(raw: str) -> Path | None:
+    """The TraceLens-internal checkout ``raw`` names (``TRACELENS_INTERNAL_ROOT``); ``None`` when it is empty or not
+    there, and the analysis runs open-source only."""
+    text = raw.strip()
+    return Path(text) if text and Path(text).exists() else None
+
+
+def measures_arch_spec(platform: str, internal_root: Path | None) -> bool:
+    """Whether the analysis runs the arch microbenchmark, on a card, to resolve ``platform``'s arch spec: never under the
+    internal extension (:func:`internal_extension_arch_json`), and otherwise only when TraceLens has no spec for the
+    board (:func:`populate_gpu_arch_json`)."""
+    return internal_root is None and resolve_arch_json_path(platform) is None
 
 
 def internal_extension_arch_json(platform: str, *, log: Callable[[str], None]) -> ArchSpec | None:
