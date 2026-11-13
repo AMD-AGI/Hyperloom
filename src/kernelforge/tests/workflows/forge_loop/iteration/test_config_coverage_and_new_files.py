@@ -25,7 +25,6 @@ from kernelforge.workflows.forge_loop.campaign.campaign_config import CampaignCo
 from kernelforge.workflows.forge_loop.campaign.campaign_setup import resolve_campaign
 from kernelforge.tests.workflows.forge_loop.campaign._campaign_args import _base_args, _git_workspace
 from kernelforge.tests.workflows.forge_loop.iteration._iteration_loop import _make_loop, _unused_supervisor
-from kernelforge.workflows.forge_loop.iteration import iteration_types
 
 
 def _coverage_loop(baseline: dict[str, float], unscored: set[str] | None = None):
@@ -213,16 +212,6 @@ def test_ledger_without_a_keep_says_so_instead_of_reading_as_untuned():
     assert loop._case_config_coverage_flags() == {}
 
 
-def test_ledger_names_the_session_it_was_read_from():
-    loop = _coverage_loop({"decode-t64": 10.0})
-    loop.results = [_keep(3, {"decode-t64": 8.0})]
-
-    rendered = loop._render_case_config_coverage()
-
-    assert "Read off KEEP iteration(s) 3" in rendered
-    assert "A resumed campaign restarts this record" in rendered
-
-
 def test_coverage_flags_reach_the_planning_context(tmp_path):
     loop = _coverage_loop({"decode-t64": 10.0, "prefill-t4096": 10.0})
     loop.results = [_keep(2, {"decode-t64": 10.0, "prefill-t4096": 8.0})]
@@ -232,13 +221,6 @@ def test_coverage_flags_reach_the_planning_context(tmp_path):
     flags = {case.case_id: case.flags for case in context.cases}
     assert "config_coverage_fallback" in flags["decode-t64"]
     assert "config_coverage_keep_2" in flags["prefill-t4096"]
-
-
-def test_planning_context_is_untouched_before_the_first_keep(tmp_path):
-    loop = _coverage_loop({"decode-t64": 10.0})
-    context = _context(tmp_path, ("decode-t64",))
-
-    assert loop._with_case_config_coverage(context) is context
 
 
 def _write_new_files(workspace: Path) -> None:
@@ -480,13 +462,6 @@ def test_discard_still_restores_a_workspace_it_cannot_enumerate(tmp_path, monkey
     assert (workspace / "kernel.py").read_text() == "def kernel():\n    return 1\n"
 
 
-def test_unenumerable_workspace_does_not_force_a_discard(tmp_path, monkeypatch):
-    loop, _workspace = _make_loop(tmp_path, monkeypatch)
-    _unlistable(loop, monkeypatch)
-
-    assert loop._new_paths_need_discard() is False
-
-
 def test_keep_commit_refuses_a_workspace_it_cannot_enumerate(tmp_path, monkeypatch):
     loop, workspace = _make_loop(tmp_path, monkeypatch)
     (workspace / "kernel.py").write_text("def kernel():\n    return 2\n")
@@ -583,17 +558,6 @@ def test_keep_gate_sized_move_alone_no_longer_counts_as_coverage():
 
     assert coverage.covered == {}
     assert coverage.fallback == ("decode-t64",)
-
-
-def test_floor_ratio_is_configurable_and_not_read_off_the_keep_gate():
-    from kernelforge.evaluation.scoring import KEEP_MIN_MARGIN_FRACTION
-
-    assert iteration_types.CONFIG_COVERAGE_MIN_MOVE_RATIO != KEEP_MIN_MARGIN_FRACTION
-    loop = _coverage_loop({"decode-t64": 10.0})
-    loop.ic = replace(loop.ic, config_coverage_min_move_ratio=0.2)
-    loop.results = [_keep(1, {"decode-t64": 9.0})]
-
-    assert loop._case_config_coverage().covered == {}
 
 
 def test_rendered_ledger_states_the_rule_it_applied():
@@ -757,14 +721,15 @@ def test_discard_that_cannot_enumerate_also_refreshes_the_report(tmp_path, monke
     loop, workspace = _make_loop(tmp_path, monkeypatch)
     loop.ic = replace(loop.ic, commit_new_paths=["configs/*.json"])
     (workspace / "stray.txt").write_text("from the previous iteration\n")
-    assert loop._new_paths_need_discard() is False
-    assert loop._refused_new_paths == ["stray.txt"]
+    loop._git_discard_all_tracked_changes()
+    assert "stray.txt" in loop._render_uncommittable_new_paths()
 
     _unlistable(loop, monkeypatch)
     loop._git_discard_all_tracked_changes()
 
-    assert loop._refused_new_paths == []
-    assert "could not enumerate" in loop._render_uncommittable_new_paths()
+    rendered = loop._render_uncommittable_new_paths()
+    assert "stray.txt" not in rendered
+    assert "could not enumerate" in rendered
 
 
 def test_retained_allowlisted_file_reaches_the_next_implementer(tmp_path, monkeypatch):

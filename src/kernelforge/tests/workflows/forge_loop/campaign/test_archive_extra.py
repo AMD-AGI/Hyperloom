@@ -13,29 +13,27 @@ import pytest
 from kernelforge.workflows.forge_loop.campaign.archive import CandidateArchive, CandidateRecord
 
 
-# ── numeric helpers ────────────────────────────────────────────────────────────
-
-
-def test_mean_case_speedup_delta_pct():
-    assert CandidateArchive._mean_case_speedup_delta_pct(2.0, 1.0) == 100.0
-    assert CandidateArchive._mean_case_speedup_delta_pct(None, 1.0) is None
-    assert CandidateArchive._mean_case_speedup_delta_pct(2.0, None) is None
-
-
-def test_fmt_num_handles_bad_values():
-    assert CandidateArchive._fmt_num(1.2345, ".2f") == "1.23"
-    assert CandidateArchive._fmt_num(None, ".2f") == "-"
-    assert CandidateArchive._fmt_num("x", ".2f") == "-"
-    assert CandidateArchive._fmt_num(1.0, ".2f", "x") == "1.00x"
-
-
-def test_label_fallback():
-    assert CandidateArchive._label("KEEP") == "KEEP*"
-    assert CandidateArchive._label("UNKNOWN") == "UNKNOWN"
-    assert CandidateArchive._label("") == "?"
-
-
 # ── record + meta round-trip ───────────────────────────────────────────────────
+
+
+@pytest.mark.parametrize(
+    ("mean_case_speedup", "best_before", "expected"),
+    [(2.0, 1.0, 100.0), (1.0, 2.0, -50.0), (None, 1.0, None), (2.0, None, None)],
+    ids=["improvement", "regression", "unmeasured-candidate", "no-best-yet"],
+)
+def test_the_recorded_delta_vs_best_is_a_signed_percentage(tmp_path, mean_case_speedup, best_before, expected):
+    archive = CandidateArchive(str(tmp_path))
+    archive.record(
+        CandidateRecord(
+            iteration=1,
+            decision="KEEP",
+            kept=True,
+            mean_case_speedup=mean_case_speedup,
+            best_mean_case_speedup_before=best_before,
+        )
+    )
+
+    assert archive.load_meta(1)["delta_vs_best_pct"] == expected
 
 
 def test_record_writes_all_files_and_meta(tmp_path):
@@ -68,11 +66,6 @@ def test_record_writes_all_files_and_meta(tmp_path):
     assert meta["mean_case_speedup"] == 2.0
     assert "speedup_vs_baseline" not in meta
     assert meta["files"]["kernel"] == "flash.py"
-
-
-def test_default_kernel_basename(tmp_path):
-    archive = CandidateArchive(str(tmp_path))
-    assert archive.kernel_basename == "kernel.py"
 
 
 # ── robust read paths ──────────────────────────────────────────────────────────
@@ -427,17 +420,21 @@ def test_index_rebuild_failure_still_returns_reconciled_view(tmp_path, monkeypat
     assert archive.index_path.read_text() == truncated
 
 
-def test_cache_add_entry_leaves_a_cold_cache_cold(tmp_path):
+def test_a_record_after_a_degraded_read_leaves_the_index_to_be_reconciled(tmp_path, monkeypatch):
     archive = CandidateArchive(str(tmp_path))
     archive.record(CandidateRecord(iteration=1, decision="KEEP", kept=True))
+    archive.index_path.write_text("")
     archive._invalidate_cache()
 
-    archive._cache_add_entry({"iter": 9, "decision": "KEEP", "dir": "iter_009"})
+    def failing_write(_entries):
+        raise OSError("simulated index rebuild failure")
 
-    # Folding into a cold cache must not conjure a one-entry cache out of thin air — the next read has to reconcile
-    # from disk, which knows nothing of 9.
-    assert archive._index_cache is None
-    assert [entry["iter"] for entry in archive.load_index()] == [1]
+    monkeypatch.setattr(archive, "_write_index", failing_write)
+    archive.record(CandidateRecord(iteration=2, decision="REVERT_PERF"))
+    monkeypatch.undo()
+
+    # The record's own read was degraded, so its entry must not become a one-entry cache that hides iteration 1.
+    assert [entry["iter"] for entry in archive.load_index()] == [1, 2]
 
 
 # ── record collision handling ───────────────────────────────────────────────────

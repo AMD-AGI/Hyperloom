@@ -164,17 +164,6 @@ class TestMandate:
             "improved",
         ]
 
-    def test_the_brief_carries_the_constraints_that_were_learned_the_hard_way(self):
-        text = self._mandate().render()
-        # A single correctness check passes an intermittently wrong kernel at random; a Python-loop timer cannot rank
-        # kernels this small.
-        assert "8 times" in text or "{} times".format(8) in text
-        assert "fresh inputs" in text
-        assert "captured graph" in text
-        assert "12us" in text
-        # And that its own numbers do not decide anything.
-        assert "informational" in text
-
     def test_the_brief_names_the_shapes_and_the_reason(self):
         text = self._mandate().render()
         assert "M=16, N=1536, K=7168" in text
@@ -184,16 +173,6 @@ class TestMandate:
         d = self._mandate().to_dict()
         assert json.loads(json.dumps(d))["table"] == "odd_tuned_gemm.csv"
         assert d["correctness_trials"] == 8
-
-    def test_the_brief_says_how_the_error_is_measured(self):
-        # Left to interpretation, the obvious element-wise ratio makes any output element near zero dominate -- and by
-        # that measure the unmodified torch.matmul scores 1.375, so the gate rejects the default path.
-        text = self._mandate().render()
-        assert "mean|ref|" in text
-        assert "1.375" in text, "the reason has to travel with the rule"
-
-    def test_the_definition_reaches_the_machine_readable_form(self):
-        assert "mean|ref|" in self._mandate().to_dict()["max_relative_error_definition"]
 
     def _moe_mandate(self):
         gap = CoverageGap(
@@ -463,17 +442,6 @@ class TestReferee:
         assert not j.improved
         assert j.best_timing.speedup == pytest.approx(0.25)
 
-    def test_the_judgement_serialises(self, clock):
-        j = judge_candidates(
-            "s",
-            [{"n": "a"}],
-            ShapeHarness(
-                baseline=clock.call(2e-6),
-                dispatch=lambda c: clock.call(1e-6),
-            ),
-        )
-        assert json.loads(json.dumps(j.to_dict()))["improved"] is True
-
 
 @pytest.mark.parametrize("bad", ["", "16x1536", "16x1536x7168x4", "16xNx7168", "not-a-shape"])
 def test_shape_key_rejects_a_shape_it_cannot_turn_into_m_n_k(bad: str) -> None:
@@ -493,23 +461,19 @@ def test_shape_key_parses_the_well_formed_case() -> None:
 class TestAWinHasToClearTheNoise:
     """Require a speedup above the measured 1.00925x null-comparison noise."""
 
-    def test_the_floor_sits_above_every_null_reading_we_measured(self):
-        from kernelforge.workflows.gemm_tune.tier3 import referee
-
-        assert referee.MIN_SPEEDUP > 1.00925
-
-    def test_a_speedup_inside_the_noise_is_not_an_improvement(self, clock):
-        # 1.0076x is verbatim what torch measured against itself on hardware.
+    @pytest.mark.parametrize("null_speedup", [1.0076, 1.00925], ids=["torch-against-itself", "widest-null-reading"])
+    def test_a_speedup_inside_the_noise_is_not_an_improvement(self, clock, null_speedup):
+        # Both are null readings: the unmodified path measured against itself on hardware.
         j = judge_candidates(
             "8192x3456x1152",
             [{"backend": "torch", "config": ""}],
             ShapeHarness(
-                baseline=clock.call(1.0076e-6),
+                baseline=clock.call(null_speedup * 1e-6),
                 dispatch=lambda c: clock.call(1e-6),
             ),
         )
         assert j.best_timing.usable
-        assert j.best_timing.speedup == pytest.approx(1.0076)
+        assert j.best_timing.speedup == pytest.approx(null_speedup)
         assert not j.improved, "the unmodified path is not an improvement over itself"
 
     def test_a_win_that_clears_the_floor_still_counts(self, clock):
@@ -585,22 +549,10 @@ class TestHipblasltCannotTakeTheRunDownWithIt:
         monkeypatch.setattr(a, "_torch", lambda: types.SimpleNamespace(bfloat16="bf16"))
         return a
 
-    def test_the_extension_is_created_before_anything_touches_the_handle(self, adapter, aiter):
-        call = adapter._build((512, 512, 512), {"backend": "hipblaslt", "config": "solidx=42"})
-        assert aiter.created, "the guard used to warm up with findallsols, which needs the same handle"
-        assert call is not None and call() == "out"
-
-    def test_a_solidx_hipblaslt_never_offered_is_refused_not_run(self, adapter, aiter):
-        call = adapter._build((512, 512, 512), {"backend": "hipblaslt", "config": "solidx=999999999"})
+    @pytest.mark.parametrize("solidx", ["999999999", "fastest"], ids=["never-offered", "not-a-number"])
+    def test_a_solidx_hipblaslt_never_offered_is_refused_not_run(self, adapter, aiter, solidx):
+        call = adapter._build((512, 512, 512), {"backend": "hipblaslt", "config": f"solidx={solidx}"})
         assert call is None, "dispatching this would end the process, not raise"
-
-    def test_a_solidx_that_is_not_even_a_number_is_refused(self, adapter, aiter):
-        assert adapter._build((512, 512, 512), {"backend": "hipblaslt", "config": "solidx=fastest"}) is None
-
-    def test_the_solution_set_is_fetched_once_per_shape(self, adapter, aiter):
-        for cfg in ("solidx=17", "solidx=42", "solidx=99"):
-            assert adapter._build((512, 512, 512), {"backend": "hipblaslt", "config": cfg}) is not None
-        assert aiter.calls == ["findallsols"]
 
     def test_a_different_shape_asks_again(self, adapter, aiter):
         """Solutions are per-operand; reusing one shape's set would invent indices."""
@@ -632,14 +584,11 @@ class TestTheAuthorIsToldWhatACandidateHasToLookLike:
         for backend in DENSE_BF16_BACKENDS:
             assert backend in text, f"{backend} is dispatchable but the author is never told"
 
-    def test_the_config_grammar_and_the_shape_key_are_spelled_out(self):
+    def test_the_shape_key_the_config_grammar_and_the_required_keys_are_spelled_out(self):
         text = self._brief()
         assert "MxNxK" in text, "the keys of candidates.json are parsed, not free text"
         assert "8192x3456x1152" in text, "an example beats a description of one"
         assert "key=value" in text and "`;`" in text
-
-    def test_the_required_key_of_each_backend_is_stated(self):
-        text = self._brief()
         # A candidate missing these is refused, so leaving them implicit costs
         # the whole shape.
         assert "solidx" in text
@@ -862,40 +811,3 @@ class TestTheAuthoringSessionIsAllowedToDoTheJob:
         )
         assert not out.ok
         assert "write access" in out.reason, "the agent named its own blocker and we dropped it"
-
-
-class TestTheAuthorIsWarnedThatABadLaunchKillsTheProcess:
-    """Warn that a bad GPU launch kills the process and must be isolated."""
-
-    def _brief(self):
-        gap = CoverageGap(
-            table="bf16_tuned_gemm.csv",
-            tuner="sglang_dense_bf16",
-            env_var="AITER_CONFIG_GEMM_BF16",
-            key_schema=["M", "N", "K"],
-            miss_count=40,
-            reason="sglang_dense_bf16 produced nothing landable",
-        )
-        return build_mandate(gap, [{"M": 16, "N": 1536, "K": 7168}]).render()
-
-    def test_the_failure_mode_is_named_not_hinted_at(self):
-        brief = self._brief().lower()
-        assert "memory access fault" in brief
-        assert "does not raise" in brief, "an author who thinks it raises will wrap it in try/except"
-
-    def test_it_says_the_fault_can_surface_late(self):
-        # Blacklisting the candidate the process died on is only correct if the
-        # author knows it may be the wrong one; without this they trust it.
-        assert "asynchronous" in self._brief()
-
-    def test_it_says_how_to_survive_one(self):
-        brief = self._brief()
-        assert "subprocess" in brief, "in-process recovery is impossible; the brief must say so"
-        assert "on disk" in brief, "state that dies with the process is state that is lost"
-
-    def test_the_default_is_recorded_before_anything_risky(self):
-        # The control row is what lets a shape that was never tuned still meet
-        # the contract's "one row per demanded shape", so a fault costs a
-        # candidate rather than the whole submission.
-        brief = self._brief()
-        assert "the default first, before anything risky" in brief

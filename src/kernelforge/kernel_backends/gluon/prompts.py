@@ -3,10 +3,7 @@
 
 """System prompt for the Gluon kernel-backend agent."""
 
-from kernelforge.kernel_backends.prompt_utils import (
-    EDIT_SURFACE_AND_SWEEPS_PROMPT,
-    context_sections_block,
-)
+from kernelforge.kernel_backends.prompt_utils import render_system_prompt
 
 
 _SYSTEM_PROMPT_TEMPLATE = """\
@@ -152,9 +149,4 @@ def build_system_prompt(
     knowledge_content: str,
     canonical_gate: str,
 ) -> str:
-    return _SYSTEM_PROMPT_TEMPLATE.format(
-        config_gpu_target=config_gpu_target,
-        canonical_gate=canonical_gate,
-        edit_surface=EDIT_SURFACE_AND_SWEEPS_PROMPT,
-        context_sections=context_sections_block(knowledge_content=knowledge_content),
-    )
+    return render_system_prompt(_SYSTEM_PROMPT_TEMPLATE, config_gpu_target, knowledge_content, canonical_gate)

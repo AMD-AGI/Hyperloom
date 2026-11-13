@@ -77,10 +77,6 @@ def test_salvage_ignores_braces_in_strings():
     assert objects[0]["name"] == "a {nested}"
 
 
-def test_extract_empty_text():
-    assert _extract_json_array("") == []
-
-
 def test_extract_skips_invalid_array_then_salvages():
     assert _extract_json_array('[{"name": "a"}, {broken') == [{"name": "a"}]
 

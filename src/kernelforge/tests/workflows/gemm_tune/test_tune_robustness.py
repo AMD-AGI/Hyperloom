@@ -5,6 +5,8 @@
 
 from __future__ import annotations
 
+import pytest
+
 from kernelforge.workflows.gemm_tune import tune_robustness as tr
 
 
@@ -23,20 +25,24 @@ class TestClassifyFault:
     def test_outer_timeout(self):
         assert tr.classify_fault(124, "", "") == "outer_timeout"
 
-    def test_hard_fault_gpu_memory(self):
-        # A memory-access fault that ALSO crashed the run (non-zero exit).
-        assert tr.classify_fault(134, "Memory access fault by GPU node-2", "") == "hard_fault"
+    @pytest.mark.parametrize(
+        ("rc", "stdout", "stderr"),
+        [(134, "Memory access fault by GPU node-2", ""), (1, "", "GPU coredump failed")],
+        ids=["gpu-memory-fault-in-stdout", "coredump-in-stderr"],
+    )
+    def test_hard_fault(self, rc, stdout, stderr):
+        # A fault signature that ALSO crashed the run (non-zero exit).
+        assert tr.classify_fault(rc, stdout, stderr) == "hard_fault"
 
-    def test_hard_fault_coredump(self):
-        assert tr.classify_fault(1, "", "GPU coredump failed") == "hard_fault"
-
-    def test_recovered_memory_fault_rc0_not_hard(self):
+    @pytest.mark.parametrize(
+        "stdout",
+        ["Memory access fault by GPU node-2", "Total shapes: 1 | Would update: 1"],
+        ids=["recovered-memory-fault", "clean-run"],
+    )
+    def test_a_zero_exit_is_not_a_hard_fault(self, stdout):
         # rc==0 with a memory-fault string = a per-candidate fault aiter --timeout recovered (merely printed under
         # -v); must NOT be a hard fault, else a shape that tuned fine gets permanently blocklisted.
-        assert tr.classify_fault(0, "Memory access fault by GPU node-2", "") is None
-
-    def test_clean_run_is_none(self):
-        assert tr.classify_fault(0, "Total shapes: 1 | Would update: 1", "") is None
+        assert tr.classify_fault(0, stdout, "") is None
 
     def test_soft_fault_not_a_fault(self):
         # A recovered per-candidate timeout / mapping error is survivable.

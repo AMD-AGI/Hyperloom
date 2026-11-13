@@ -47,6 +47,7 @@ from kernelforge.workflows.forge_loop.roles.analysis_session import (
     AnalysisAttemptLimitError,
     AnalysisSessionJournal,
     MAX_ANALYSIS_SESSION_ATTEMPTS,
+    _sha256,
 )
 from hyperloom_common.io import DURABLE, JsonFormat, atomic_write_json, fsync_directory, fsync_tree
 from kernelforge.config.resources import assert_sandbox_grant
@@ -273,14 +274,6 @@ def _analysis_cases(context: OrchestrationContext) -> tuple[AnalysisCase, ...]:
         AnalysisCase(case_id=case.case_id, directory=_case_directory(case.case_id), latency_ms=case.latency_ms)
         for case in context.cases
     )
-
-
-def _sha256(path: Path) -> str:
-    digest = hashlib.sha256()
-    with path.open("rb") as stream:
-        for chunk in iter(lambda: stream.read(1024 * 1024), b""):
-            digest.update(chunk)
-    return digest.hexdigest()
 
 
 def _source_digest(paths: tuple[Path, ...]) -> str:

@@ -19,17 +19,16 @@ class TestReadingTheCeiling:
         monkeypatch.setattr(utils, "_CGROUP_MEMORY_LIMITS", (str(limit),))
         assert utils.cgroup_memory_limit() == 128 * GIB
 
-    def test_cgroup_v2_unlimited_is_not_a_ceiling(self, tmp_path, monkeypatch):
-        limit = tmp_path / "memory.max"
-        limit.write_text("max\n", encoding="utf-8")
-        monkeypatch.setattr(utils, "_CGROUP_MEMORY_LIMITS", (str(limit),))
-        assert utils.cgroup_memory_limit() is None
-
-    def test_cgroup_v1_sentinel_is_not_a_ceiling(self, tmp_path, monkeypatch):
+    @pytest.mark.parametrize(
+        ("name", "content"),
+        [("memory.max", "max\n"), ("memory.limit_in_bytes", "9223372036854771712\n")],
+        ids=["cgroup-v2-max", "cgroup-v1-page-counter-max"],
+    )
+    def test_an_unlimited_cgroup_is_not_a_ceiling(self, tmp_path, monkeypatch, name, content):
         # v1 spells "no limit" as PAGE_COUNTER_MAX rounded to a page. Taken at
         # face value it would compute a job limit of several billion.
-        limit = tmp_path / "memory.limit_in_bytes"
-        limit.write_text("9223372036854771712\n", encoding="utf-8")
+        limit = tmp_path / name
+        limit.write_text(content, encoding="utf-8")
         monkeypatch.setattr(utils, "_CGROUP_MEMORY_LIMITS", (str(limit),))
         assert utils.cgroup_memory_limit() is None
 

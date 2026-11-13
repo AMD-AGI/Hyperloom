@@ -12,6 +12,7 @@ from types import SimpleNamespace
 
 from kernelforge.agent_backends.base import AgentRunSpec, AgentToolPolicy
 from kernelforge.agent_backends.claude import ClaudeBackend
+from kernelforge.agent_backends.registry import get_agent_provider
 from kernelforge.utils.git import git
 from kernelforge.config.edit_policy import FORGE_PROTECTED_PATHS
 
@@ -36,6 +37,7 @@ def _result_message(session_id="", subtype="success"):
 def _backend(messages, captured, stream_error=None):
     """Build a ClaudeBackend whose SDK is replaced by a recording fake."""
     backend = ClaudeBackend.__new__(ClaudeBackend)
+    backend.capabilities = get_agent_provider("claude").capabilities
     backend.runtime = SimpleNamespace(
         provider="claude",
         model="fake-model",

@@ -69,6 +69,11 @@ def _candidates(kb: KernelRecipeKB, limit: int = 3) -> list:
     return kb._store.candidates(kb.canonical_id, limit=limit)
 
 
+def _stored_artifact(kb: KernelRecipeKB, session_id: str, rel_path: str) -> bytes:
+    """One artifact's bytes as the store serves them to a direct fetch."""
+    return kb._store.read_bytes(kb.canonical_id, session_id, rel_path)
+
+
 # --- gates ----------------------------------------------------------------- #
 def test_write_skips_when_the_store_is_not_configured(tmp_path, workspace):
     # Built directly: from_env refuses remote mode without KB Store credentials.
@@ -168,7 +173,7 @@ def test_write_preserves_the_patch_and_the_measurements(config, workspace):
     assert record["task_id"] == "exp1"
     # The diff travels as an artifact, not inside the record.
     assert "patch_content" not in record
-    assert kb.prior_file(status["session_id"], PATCH_ARTIFACT) == DIFF.encode()
+    assert _stored_artifact(kb, status["session_id"], PATCH_ARTIFACT) == DIFF.encode()
 
 
 def test_a_crlf_patch_round_trips_byte_for_byte(config, workspace):
@@ -183,7 +188,7 @@ def test_a_crlf_patch_round_trips_byte_for_byte(config, workspace):
     # a direct fetch goes through the store.
     bundle = kb.read_top_n(workspace / "kb-candidates", limit=1)[0]
     materialized = (bundle.files_dir / PATCH_ARTIFACT).read_bytes()
-    fetched = kb.prior_file(bundle.session_id, PATCH_ARTIFACT)
+    fetched = _stored_artifact(kb, bundle.session_id, PATCH_ARTIFACT)
 
     assert materialized == crlf.encode()
     assert fetched == crlf.encode()
@@ -265,7 +270,7 @@ def test_a_warm_started_run_that_improved_nothing_records_no_second_copy(config,
     kb = _records(config, workspace)
     candidates = _candidates(kb, limit=5)
     assert len(candidates) == 1
-    assert kb.prior_file(candidates[0].session_id, PATCH_ARTIFACT) == DIFF.encode()
+    assert _stored_artifact(kb, candidates[0].session_id, PATCH_ARTIFACT) == DIFF.encode()
 
 
 def test_a_warm_started_run_that_improved_records_the_better_result(config, workspace):

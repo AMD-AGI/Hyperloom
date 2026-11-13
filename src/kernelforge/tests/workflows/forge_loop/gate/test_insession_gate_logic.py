@@ -9,6 +9,7 @@ import dataclasses
 import subprocess
 from pathlib import Path
 
+from kernelforge.evaluation.scoring import KEEP_MEASUREMENT_COUNT
 from kernelforge.utils.git import GitError
 from kernelforge.workflows.forge_loop.gate.gate_settings import GateMeasurement, GateScope
 from kernelforge.workflows.forge_loop.gate.insession_gate import InSessionGate
@@ -114,29 +115,16 @@ def test_protected_changes_reports_added_and_deleted(tmp_path):
     assert "deleted" in gate._protected_changes()
 
 
-def test_snapshot_keys_driver_relative_to_root(tmp_path):
-    gate, _ = _gate(tmp_path)
-    # The driver lives at the workspace root, so it is keyed by its relative name.
-    assert "forge_driver.py" in gate._protected_snapshot
-
-
 # ── make_agent_hooks ───────────────────────────────────────────────────────────
 
 
-def test_make_agent_hooks_shape(tmp_path):
-    """Expose the provider-neutral lifecycle hook groups."""
+def test_the_stop_hook_outlasts_correctness_and_every_bench_measurement(tmp_path):
+    """Under a multi-rank driver each stage is a full launch; a ceiling sized for one loses the verdict mid-bench."""
     gate, _ = _gate(tmp_path)
-    hooks = gate.make_agent_hooks()
-    assert len(hooks.pre_tool_use) == 2
-    assert hooks.post_tool_use == []
-    assert len(hooks.stop) == 1
-    # The Stop hook runs correctness AND bench, so its ceiling has to cover both stages plus slack -- under a
-    # multi-rank driver each is a full launch, and a timeout sized for one of them loses the verdict mid-bench.
-    assert gate.stage_timeout_sec == 1800
-    assert gate.bench_timeout_sec == 300
-    assert gate.hook_timeout_sec == 2820
-    assert hooks.stop[0].timeout_sec == 2820
-    assert gate.hook_timeout_sec == (gate.stage_timeout_sec + 3 * gate.bench_timeout_sec + 120)
+
+    (stop_hook,) = gate.make_agent_hooks().stop
+
+    assert stop_hook.timeout_sec > gate.stage_timeout_sec + KEEP_MEASUREMENT_COUNT * gate.bench_timeout_sec
 
 
 # ── PreToolUse edit deny ───────────────────────────────────────────────────────

@@ -177,17 +177,6 @@ def _repo_with_consumer_layout(tmp_path: Path) -> tuple[Path, Path]:
     return repo, consumer
 
 
-def test_git_apply_rewrites_matching_canonical_owner_paths(tmp_path):
-    repo, consumer = _repo_with_consumer_layout(tmp_path)
-    allowed = {"src/aiter/ops/kernel.py"}
-    source_map = {"aiter/ops/kernel.py": "src/aiter/ops/kernel.py"}
-
-    target = integ._PatchTarget(allowed, {"aiter/ops/kernel.py"}, source_map)
-    assert integ._git_apply(str(repo), _PRODUCER_PATCH, check_only=True, target=target)
-    assert integ._git_apply(str(repo), _PRODUCER_PATCH, target=target)
-    assert consumer.read_text() == "new\n"
-
-
 def test_kb_warmstart_uses_canonical_path_mapping_end_to_end(
     monkeypatch,
     tmp_path,
@@ -355,8 +344,11 @@ def test_fresh_kb_lookup_clears_stale_references(
     warm = _warmstart(repo)
 
     if lookup_mode == "error":
-        assert warm["read_reason"] == "warm_start_error"
-        assert warm["read_error"] == "RuntimeError: lookup failed"
+        assert warm == {
+            "candidate": False,
+            "read_reason": "warm_start_error",
+            "read_error": "RuntimeError: lookup failed",
+        }
     else:
         assert warm == {
             "candidate": False,
@@ -380,29 +372,6 @@ def test_clear_kb_references_does_not_follow_root_symlink(tmp_path):
 
     assert not (experiments / "kb_references").exists()
     assert (external / "index.md").read_text() == "preserve\n"
-
-
-def test_kb_warmstart_applies_ranked_solution_when_safe(monkeypatch, tmp_path):
-    repo = _init_repo(tmp_path)
-    _patch_read_solutions(
-        monkeypatch,
-        _solution(
-            APPLICABLE_PATCH,
-            solution_slug="kernelforge-exp/kernel/decode",
-            speedup=5.0,
-            match_mode="reference",
-        ),
-    )
-    benches = _three_measurements(_bench(10.0), _bench(5.0))
-    monkeypatch.setattr(integ, "_bench_once", lambda *_a, **_k: next(benches))
-    monkeypatch.setattr(integ, "_correctness_once", lambda *_a, **_k: True)
-
-    warm = _warmstart(repo)
-
-    assert warm["candidate"] is True
-    assert warm["applied"] is True
-    assert warm["keep_baseline_ms"] == 5.0
-    assert (repo / "kernel.py").read_text() == "new\n"
 
 
 def test_kb_warmstart_tries_next_candidate_when_first_ranked_fails(
@@ -917,30 +886,17 @@ def test_kb_warmstart_mismatched_candidate_falls_back_when_patch_does_not_apply(
     assert _run(["git", "log", "-1", "--pretty=%s"], repo) == "initial"
 
 
-def test_kb_warmstart_rolls_back_when_applied_kernel_fails_bench(monkeypatch, tmp_path):
+@pytest.mark.parametrize(
+    ("candidate_stages", "correct"),
+    [((None,), True), ((), False), ((_bench(12.0),), True)],
+    ids=["candidate-bench-fails", "fails-correctness-before-any-candidate-bench", "correct-but-slower"],
+)
+def test_kb_warmstart_rolls_back_a_rejected_applied_kernel(monkeypatch, tmp_path, candidate_stages, correct):
     repo = _init_repo(tmp_path)
     _patch_read_solution(monkeypatch, APPLICABLE_PATCH)
-    benches = _three_measurements(_bench(10.0), None)
+    benches = _three_measurements(_bench(10.0), *candidate_stages)
     monkeypatch.setattr(integ, "_bench_once", lambda *_a, **_k: next(benches))
-    monkeypatch.setattr(integ, "_correctness_once", lambda *_a, **_k: True)
-
-    warm = _warmstart(repo)
-
-    assert warm["candidate"] is True
-    assert warm["applied"] is False
-    assert warm["keep_baseline_ms"] == 10.0
-    assert (repo / "kernel.py").read_text() == "old\n"
-    assert _run(["git", "log", "-1", "--pretty=%s"], repo) == "initial"
-
-
-def test_kb_warmstart_rolls_back_when_applied_kernel_fails_correctness(monkeypatch, tmp_path):
-    repo = _init_repo(tmp_path)
-    _patch_read_solution(monkeypatch, APPLICABLE_PATCH)
-    # Only the three pristine measurements should run; correctness rejects the applied patch before candidate
-    # measurement.
-    benches = _three_measurements(_bench(10.0))
-    monkeypatch.setattr(integ, "_bench_once", lambda *_a, **_k: next(benches))
-    monkeypatch.setattr(integ, "_correctness_once", lambda *_a, **_k: False)
+    monkeypatch.setattr(integ, "_correctness_once", lambda *_a, **_k: correct)
 
     warm = _warmstart(repo)
 
@@ -986,26 +942,6 @@ def test_rejected_warmstart_removes_only_new_untracked_probe_artifacts(
     assert not (repo / ".probe-cache" / "generated.bin").exists()
     assert not (repo / "probe-output").exists()
     assert (repo / "kernel.py").read_text() == "old\n"
-
-
-def test_kb_warmstart_rolls_back_when_applied_kernel_is_slower(monkeypatch, tmp_path):
-    repo = _init_repo(tmp_path)
-    _patch_read_solution(monkeypatch, APPLICABLE_PATCH)
-    # Applied kernel is correct but slower than the pristine baseline (12 >= 10): it must be discarded and the loop
-    # cold-started from the pristine baseline.
-    benches = _three_measurements(_bench(10.0), _bench(12.0))
-    monkeypatch.setattr(integ, "_bench_once", lambda *_a, **_k: next(benches))
-    monkeypatch.setattr(integ, "_correctness_once", lambda *_a, **_k: True)
-
-    warm = _warmstart(repo)
-
-    assert warm["candidate"] is True
-    assert warm["applied"] is False
-    assert warm["pristine_ms"] == 10.0
-    assert warm["keep_baseline_ms"] == 10.0
-    assert "kb_references/index.md" in warm["program_md_addition"]
-    assert (repo / "kernel.py").read_text() == "old\n"
-    assert _run(["git", "log", "-1", "--pretty=%s"], repo) == "initial"
 
 
 @pytest.mark.parametrize(

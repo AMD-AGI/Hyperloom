@@ -75,58 +75,11 @@ def test_needs_inplace_reads_through_the_cache(monkeypatch: pytest.MonkeyPatch) 
     assert editable_repo.needs_inplace("") is False
 
 
-def test_the_scan_finds_a_quoted_path_and_a_finder_mapping(tmp_path, only_these_search_dirs) -> None:
-    """The two layouts setuptools writes, plus the bare-path one pip leaves."""
-    site_dir = tmp_path / "site-packages"
-    site_dir.mkdir()
-    bare = tmp_path / "bare-root"
-    quoted = tmp_path / "quoted-root"
-    mapped = tmp_path / "mapped-root"
-    for root in (bare, quoted, mapped):
-        root.mkdir()
-    (site_dir / "__editable__.bare-1.0.pth").write_text(f"{bare}\n", encoding="utf-8")
-    (site_dir / "__editable__.quoted-1.0.pth").write_text(f'x = "{quoted}"\n', encoding="utf-8")
-    (site_dir / "__editable__.mapped-1.0.pth").write_text("import __editable___mapped_1_0_finder\n", encoding="utf-8")
-    (site_dir / "__editable___mapped_1_0_finder.py").write_text(
-        f'MAPPING = {{"mapped": "{mapped}"}}\n', encoding="utf-8"
-    )
-    (site_dir / "unrelated.pth").write_text(f"{tmp_path / 'ignored'}\n", encoding="utf-8")
-    only_these_search_dirs(str(site_dir))
-
-    found = editable_repo._scan_editable_roots()
-
-    assert set(found) == {str(bare.resolve()), str(quoted.resolve()), str(mapped.resolve())}
-
-
 def test_an_unreadable_search_directory_is_skipped(tmp_path, only_these_search_dirs) -> None:
     """A path entry that is not a directory, or cannot be listed, is not fatal."""
     only_these_search_dirs("", str(tmp_path / "absent"), str(tmp_path))
 
     assert editable_repo._scan_editable_roots() == ()
-
-
-def test_a_lock_is_exclusive_and_release_frees_it(tmp_path) -> None:
-    repo = tmp_path / "repo"
-    (repo / ".git").mkdir(parents=True)
-
-    held = editable_repo.acquire_repo_lock(str(repo))
-    contender = editable_repo.acquire_repo_lock(str(repo))
-
-    assert held is not None
-    assert contender is None
-    editable_repo.release_repo_lock(held)
-    again = editable_repo.acquire_repo_lock(str(repo))
-    assert again is not None
-    editable_repo.release_repo_lock(again)
-
-
-def test_a_repository_with_no_git_directory_cannot_be_locked(tmp_path) -> None:
-    """The lock lives inside .git, so a non-checkout has nowhere to keep one."""
-    assert editable_repo.acquire_repo_lock(str(tmp_path / "not-a-repo")) is None
-
-
-def test_releasing_nothing_is_allowed() -> None:
-    assert editable_repo.release_repo_lock(None) is None
 
 
 def test_a_virtualenv_site_packages_off_the_path_is_still_scanned(

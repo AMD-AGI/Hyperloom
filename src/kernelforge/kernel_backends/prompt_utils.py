@@ -57,3 +57,13 @@ them with the `Read` tool; what follows is the part you must not have to look up
   What carries an axis to the next session is the constant you name in this
   iteration's lesson — the values you timed and what they cost — not a knob left
   behind in the shipped file for someone to mistake for live configuration."""
+
+
+def render_system_prompt(template: str, config_gpu_target: str, knowledge_content: str, canonical_gate: str) -> str:
+    """Fill a backend's ``str.format`` template: target, gate, the edit-surface card and the knowledge block."""
+    return template.format(
+        config_gpu_target=config_gpu_target,
+        canonical_gate=canonical_gate,
+        edit_surface=EDIT_SURFACE_AND_SWEEPS_PROMPT,
+        context_sections=context_sections_block(knowledge_content=knowledge_content),
+    )
