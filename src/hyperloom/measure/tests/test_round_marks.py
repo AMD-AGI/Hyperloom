@@ -3,7 +3,9 @@
 
 """The phases of a round, read off the marks its runs leave in their run_dirs beside their server logs.
 
-The marks are written the way an inference_suite round writes them (``server_ready_at``, ``kv_metrics.json``); the cases are the
+The run_dirs are laid out the way ``run_grid`` and an inference_suite round lay them out (the same helpers make them) and are
+found the way the test runner finds them (``grid_run_dirs``); the marks are written the way an inference_suite round
+writes them (``server_ready_at``, ``kv_metrics.json``); the cases are the
 rounds a test is made of: a graded test's warmup round and its measured round, a round with a warmup run in front of its
 measured one, an AgentX round, a round whose server never got ready.
 """
@@ -36,7 +38,10 @@ from hyperloom.measure.round_marks import (
     round_boundaries,
     stalled_in_profile_window,
 )
-from inference_suite.contracts import FailedStep
+from hyperloom.orchestrator.actions.executors import grid_run_dirs, variant_slot
+from hyperloom.orchestrator.actions.executors._grid_base import MN_WARMUP_DIR, WARMUP_ROUND_DIR
+from hyperloom.orchestrator.actions.executors._suite.rounds import _next_run_dir
+from inference_suite.contracts import FailedStep, ReadyStamp, RunLayout
 from inference_suite.profile.inject import START_PROFILE_PATH, STOP_PROFILE_PATH
 from inference_suite.runtime.phases import Phase
 from inference_suite.tests import test_config_contract
@@ -45,10 +50,18 @@ T0 = 1_000.0
 WINDOW = (T0, T0 + 300.0)
 
 
-def _run_dir(root: Path, round_name: str, *, warmup: bool = False) -> Path:
-    directory = root / round_name / "warmup_round" if warmup else root / round_name
-    directory.mkdir(parents=True, exist_ok=True)
-    return directory
+def _run_dir(root: Path, variant: str, *, below: str | None = None) -> Path:
+    """The next run_dir a round of the grid's first variant, named ``variant``, runs in, as ``run_grid`` and the round
+    make it: in the variant's slot, or in the slot's warmup directory ``below`` names."""
+    slot = variant_slot(root, 0, variant)
+    run_dir = _next_run_dir(slot if below is None else slot / below)
+    run_dir.mkdir(parents=True)
+    return run_dir
+
+
+def _read(root: Path, window: tuple[float, float] = WINDOW) -> list[RunMarks]:
+    """The runs of the round in ``window``, found below the test's output directory the way the test runner finds them."""
+    return read_runs(grid_run_dirs(root), window)
 
 
 def _write_run(
@@ -61,15 +74,16 @@ def _write_run(
     log: str | None = None,
 ) -> None:
     """What a run leaves: the ready stamp, its phase marks and, when it ended, the file's time."""
-    (directory / "server_ready_at").write_text(f"{ready:.3f} {boot:.3f}\n", encoding="utf-8")
+    layout = RunLayout(directory)
+    layout.write_ready_stamp(ReadyStamp(ready, boot))
     if marks is not None or ended is not None:
         phase_marks = [{"phase": phase, "mono": 1.0, "ts": at} for phase, at in (marks or {}).items()]
-        kv = directory / "kv_metrics.json"
+        kv = layout.kv_metrics
         kv.write_text(json.dumps({"phase_marks": phase_marks, "samples": []}), encoding="utf-8")
         if ended is not None:
             os.utime(kv, (ended, ended))
     if log is not None:
-        (directory / "server.log").write_text(log, encoding="utf-8")
+        layout.server_log.write_text(log, encoding="utf-8")
 
 
 def _phases(boundaries: list[Boundary], window: tuple[float, float] = WINDOW) -> list[tuple[str, float]]:
@@ -98,15 +112,15 @@ def test_the_runs_of_a_round_are_read_in_the_order_they_were_ready_from_their_st
     tmp_path: Path,
 ) -> None:
     _write_run(
-        _run_dir(tmp_path, "variant_00_test", warmup=True),
+        _run_dir(tmp_path, "test", below=WARMUP_ROUND_DIR),
         T0 + 90.0,
         82.0,
         marks={"eval": T0 + 120.0},
         ended=T0 + 150.0,
     )
-    _write_run(_run_dir(tmp_path, "variant_00_test"), T0 + 160.0, 0.0, marks={"measured": T0 + 160.0}, ended=T0 + 200.0)
+    _write_run(_run_dir(tmp_path, "test"), T0 + 160.0, 0.0, marks={"measured": T0 + 160.0}, ended=T0 + 200.0)
 
-    warmup, measured = read_runs(tmp_path, WINDOW)
+    warmup, measured = _read(tmp_path)
 
     assert (warmup.ready, warmup.boot_seconds, warmup.eval_at, warmup.ended) == (
         T0 + 90.0,
@@ -120,36 +134,74 @@ def test_the_runs_of_a_round_are_read_in_the_order_they_were_ready_from_their_st
         None,
         T0 + 200.0,
     )
-    assert warmup.directory == tmp_path / "variant_00_test" / "warmup_round"
+    assert warmup.directory == tmp_path / "variant_00_test" / "warmup_round" / "suite_run_0"
+    assert measured.directory == tmp_path / "variant_00_test" / "suite_run_0"
+
+
+def test_a_round_on_disk_as_run_grid_leaves_it_is_split_into_its_phases_not_left_as_one(tmp_path: Path) -> None:
+    _write_run(_run_dir(tmp_path, "test", below=WARMUP_ROUND_DIR), T0 + 90.0, 82.0, ended=T0 + 150.0)
+    _write_run(_run_dir(tmp_path, "test"), T0 + 160.0, 0.0, marks={"eval": T0 + 250.0}, ended=T0 + 280.0)
+
+    phases = _phases(round_boundaries(WINDOW, _read(tmp_path), _shape()))
+
+    assert [name for name, _ in phases] == [
+        "round_setup",
+        "server_boot",
+        "warmup",
+        "round_collect",
+        "measured",
+        "accuracy_eval",
+        "teardown",
+    ]
+
+
+def test_a_run_an_earlier_round_left_in_the_same_slot_is_not_this_rounds(tmp_path: Path) -> None:
+    _write_run(_run_dir(tmp_path, "test"), T0 - 400.0, 80.0, ended=T0 - 200.0)
+    _write_run(_run_dir(tmp_path, "test"), T0 + 5.0, 0.0, ended=T0 + 100.0)
+
+    (run,) = _read(tmp_path)
+
+    assert run.directory == tmp_path / "variant_00_test" / "suite_run_1"
+    assert run.ready == T0 + 5.0
+
+
+def test_a_multi_node_warmup_pass_is_a_run_of_the_round_before_its_measured_one(tmp_path: Path) -> None:
+    _write_run(_run_dir(tmp_path, "test", below=MN_WARMUP_DIR), T0 + 20.0, 0.0, ended=T0 + 80.0)
+    _write_run(_run_dir(tmp_path, "test"), T0 + 90.0, 0.0, ended=T0 + 200.0)
+
+    warmup, measured = _read(tmp_path)
+
+    assert warmup.directory == tmp_path / "variant_00_test" / "mn_warmup" / "suite_run_0"
+    assert measured.ready == T0 + 90.0
 
 
 def test_a_stamp_an_earlier_round_left_in_the_directory_is_not_this_rounds(tmp_path: Path) -> None:
-    _write_run(_run_dir(tmp_path, "variant_00_c128"), T0 - 400.0, 80.0, marks={"eval": T0 - 300.0}, ended=T0 - 200.0)
+    _write_run(_run_dir(tmp_path, "c128"), T0 - 400.0, 80.0, marks={"eval": T0 - 300.0}, ended=T0 - 200.0)
 
-    assert read_runs(tmp_path, WINDOW) == []
+    assert _read(tmp_path) == []
 
 
 def test_a_mark_or_file_time_from_before_the_round_is_not_this_rounds_either(tmp_path: Path) -> None:
-    directory = _run_dir(tmp_path, "variant_00_c128")
+    directory = _run_dir(tmp_path, "c128")
     _write_run(directory, T0 + 5.0, 0.0, marks={"eval": T0 - 50.0, "measured": T0 + 5.0}, ended=T0 - 10.0)
 
-    (run,) = read_runs(tmp_path, WINDOW)
+    (run,) = _read(tmp_path)
 
     assert (run.eval_at, run.client_measured_at, run.ended) == (None, T0 + 5.0, None)
 
 
 def test_a_run_with_no_kv_file_or_a_broken_one_has_a_stamp_and_no_instants(tmp_path: Path) -> None:
-    _write_run(_run_dir(tmp_path, "variant_00_a"), T0 + 5.0, 0.0)
-    broken = _run_dir(tmp_path, "variant_00_b")
+    _write_run(_run_dir(tmp_path, "a"), T0 + 5.0, 0.0)
+    broken = _run_dir(tmp_path, "b")
     _write_run(broken, T0 + 6.0, 0.0)
     (broken / "kv_metrics.json").write_text("{not json", encoding="utf-8")
-    weird = _run_dir(tmp_path, "variant_00_c")
+    weird = _run_dir(tmp_path, "c")
     _write_run(weird, T0 + 7.0, 0.0)
     (weird / "kv_metrics.json").write_text(
         json.dumps({"phase_marks": [None, {"phase": "eval", "ts": "x"}, 3]}), encoding="utf-8"
     )
 
-    runs = read_runs(tmp_path, WINDOW)
+    runs = _read(tmp_path)
 
     assert [(r.eval_at, r.ended) for r in runs] == [(None, None), (None, None), (None, runs[2].ended)]
     assert runs[2].ended is not None, "a readable file that holds no usable mark still says when it was written"
@@ -157,18 +209,18 @@ def test_a_run_with_no_kv_file_or_a_broken_one_has_a_stamp_and_no_instants(tmp_p
 
 @pytest.mark.parametrize("stamp", ["10**400", "1e999", "NaN", "-Infinity", "true"], ids=lambda s: s[:9])
 def test_a_phase_mark_that_is_no_finite_number_a_float_can_hold_is_no_mark(tmp_path: Path, stamp: str) -> None:
-    directory = _run_dir(tmp_path, "variant_00_a")
+    directory = _run_dir(tmp_path, "a")
     _write_run(directory, T0 + 5.0, 0.0)
     text = '{"phase_marks": [{"phase": "eval", "ts": %s}, {"phase": "measured", "ts": %f}]}' % (stamp, T0 + 7.0)
     (directory / "kv_metrics.json").write_text(text.replace("10**400", "1" + "0" * 400), encoding="utf-8")
 
-    (run,) = read_runs(tmp_path, WINDOW)
+    (run,) = _read(tmp_path)
 
     assert (run.eval_at, run.client_measured_at) == (None, T0 + 7.0), "the mark beside it is still read"
 
 
 def test_an_output_directory_that_does_not_exist_holds_no_runs(tmp_path: Path) -> None:
-    assert read_runs(tmp_path / "missing", WINDOW) == []
+    assert _read(tmp_path / "missing") == []
 
 
 # -- the boundaries of each kind of round -------------------------------------------------------------------------
@@ -356,9 +408,9 @@ def test_a_log_that_says_nothing_of_the_boot_or_is_not_there_gives_no_parts(tmp_
 
 
 def test_a_booted_run_is_split_into_what_its_log_accounts_for_in_the_order_an_engine_does_it(tmp_path: Path) -> None:
-    directory = _run_dir(tmp_path, "variant_00_warmup")
+    directory = _run_dir(tmp_path, "warmup")
     _write_run(directory, T0 + 90.0, 80.0, log=VLLM_LOG)
-    (run,) = read_runs(tmp_path, WINDOW)
+    (run,) = _read(tmp_path)
 
     phases = _phases(round_boundaries(WINDOW, [run], _shape(ROLE_WARMUP)))
 
@@ -379,9 +431,9 @@ def test_a_booted_run_is_split_into_what_its_log_accounts_for_in_the_order_an_en
 
 
 def test_parts_that_outrun_the_boot_are_cut_to_it_so_the_boot_is_never_longer_than_it_was(tmp_path: Path) -> None:
-    directory = _run_dir(tmp_path, "variant_00_warmup")
+    directory = _run_dir(tmp_path, "warmup")
     _write_run(directory, T0 + 30.0, 20.0, log=VLLM_LOG)
-    (run,) = read_runs(tmp_path, WINDOW)
+    (run,) = _read(tmp_path)
 
     phases = _phases(round_boundaries(WINDOW, [run], _shape(ROLE_WARMUP)))
 
@@ -392,8 +444,8 @@ def test_parts_that_outrun_the_boot_are_cut_to_it_so_the_boot_is_never_longer_th
 
 
 def test_a_run_whose_log_says_nothing_of_its_boot_is_one_boot_phase(tmp_path: Path) -> None:
-    _write_run(_run_dir(tmp_path, "variant_00_warmup"), T0 + 90.0, 80.0, log="INFO: Application startup complete.\n")
-    (run,) = read_runs(tmp_path, WINDOW)
+    _write_run(_run_dir(tmp_path, "warmup"), T0 + 90.0, 80.0, log="INFO: Application startup complete.\n")
+    (run,) = _read(tmp_path)
 
     names = [name for name, _ in _phases(round_boundaries(WINDOW, [run], _shape(ROLE_WARMUP)))]
 
@@ -440,11 +492,11 @@ def test_a_capture_that_only_began_or_failed_is_not_a_graph_capture_time(tmp_pat
 
 
 def test_the_server_log_in_the_run_dir_splits_the_boot_and_one_below_it_is_not_read(tmp_path: Path) -> None:
-    directory = _run_dir(tmp_path, "variant_00_test", warmup=True)
+    directory = _run_dir(tmp_path, "test", below=WARMUP_ROUND_DIR)
     _write_run(directory, T0 + 90.0, 80.0, log=SGLANG_NEW_LOG)
     (directory / "nested").mkdir()
     (directory / "nested" / "server.log").write_text(VLLM_LOG, encoding="utf-8")
-    (run,) = read_runs(tmp_path, WINDOW)
+    (run,) = _read(tmp_path)
 
     phases = _phases(round_boundaries(WINDOW, [run], _shape(ROLE_WARMUP)))
 
