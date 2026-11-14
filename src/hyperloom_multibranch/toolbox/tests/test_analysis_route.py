@@ -40,7 +40,22 @@ from hyperloom_multibranch.toolbox.tools import ToolJobs, ToolOutput, ToolReques
 from hyperloom_multibranch.toolbox.tools import op_shares as op_shares_module
 from hyperloom_multibranch.toolbox.tools.op_shares import with_op_shares
 from hyperloom_multibranch.toolbox.tools.baseline_lengths import measuring_run_dirs
-from hyperloom_multibranch.toolbox.tools.phase_mix import MEASURED_LENGTH_KEYS
+from hyperloom_multibranch.scheduling.clock import Clock
+from hyperloom_multibranch.scheduling.events import PROFILE_NOT_ANALYSED, PROFILED, IntegrationProfiler
+from hyperloom_multibranch.scheduling.requests import SessionTests
+from hyperloom_multibranch.toolbox.tools.kernel_launchers import Relabelled
+from hyperloom_multibranch.toolbox.tools.kernel_shares import KERNEL_SHARES_FILE, GpuEvent, kernel_window
+from hyperloom_multibranch.toolbox.tools.op_shares import OWN_DEGRADED_KEY
+from hyperloom_multibranch.toolbox.tools.phase_mix import (
+    DECODE,
+    MEASURED_LENGTH_KEYS,
+    PREFILL,
+    PhaseWindow,
+    Workload,
+    graded_mix,
+    mix_fields,
+    write_mix_table,
+)
 
 SHARES = {"gemm": 61.5, "attention": 20.0}
 HEAD = "head-of-b1"
@@ -114,9 +129,14 @@ def _shares(monkeypatch: pytest.MonkeyPatch) -> None:
 
 
 async def _stack(
-    tmp_path: Path, *, with_tools: bool = True, names: tuple[str, ...] = ("tracelens", "roofline", "profile")
+    tmp_path: Path,
+    *,
+    with_tools: bool = True,
+    names: tuple[str, ...] = ("tracelens", "roofline", "profile"),
+    analyses: dict[str, Any] | None = None,
 ) -> AsyncIterator[Stack]:
-    tools = {name: _Analysis(name) for name in names}
+    """``analyses`` replaces the stand-in of each tool it names."""
+    tools = {name: _Analysis(name) for name in names} | (analyses or {})
     holder: list[_Capture] = []
 
     def make(blackboard: LocalBlackboard) -> ToolJobs:
@@ -652,3 +672,140 @@ async def test_a_point_that_names_its_lengths_is_weighted_by_them_whatever_the_b
     profile = await _profile_with_points(stack, tmp_path, {"variant_00_test/config.yaml": POINT})
 
     assert await _workload_params(stack, profile) == HINTS
+
+
+# --- the root's profile in PRELUDE: its analysis waits for the baseline ---------------------------------------------
+
+#: The real share reader: the module's autouse fixture replaces it for the tests above.
+_READ_OP_SHARES = op_shares_module.read_op_shares
+#: What the profile test leaves: its trace, and the point it ran in the landed test directory.
+ROOT_PROFILED = {"profile_location": "traces/p1", "output_dir": LANDED}
+
+
+def _window(phase: str, steps: int, tokens: int, step_ms: float, kernel: str) -> PhaseWindow:
+    """A splitter window of ``steps`` steps that each run one ``kernel`` for ``step_ms``, one after another."""
+    events = [GpuEvent(("0", "1"), i * step_ms * 1000, (i + 1) * step_ms * 1000, kernel) for i in range(steps)]
+    return PhaseWindow(
+        phase, f"{phase}.json.gz", kernel_window(events, list), Relabelled(events, 0, 0, ()), steps, tokens, ""
+    )
+
+
+class _GradedTraceLens:
+    """The report route from its phase windows on: a trace whose prefill and decode windows are both usable, weighted by
+    the workload the request carries (``graded_mix``), the shares read off the table it writes (``with_op_shares``)."""
+
+    name = "tracelens"
+
+    def __init__(self) -> None:
+        self.requests: list[ToolRequest] = []
+
+    async def run(self, request: ToolRequest, workdir: Path) -> ToolOutput:
+        self.requests.append(request)
+        windows = [_window(PREFILL, 5, 65536, 200.0, "prefill_gemm"), _window(DECODE, 32, 0, 10.0, "paged_attention")]
+        mix = graded_mix(windows, Workload.from_hints({key: str(value) for key, value in request.params.items()}))
+        workdir.mkdir(parents=True, exist_ok=True)
+        table = workdir / KERNEL_SHARES_FILE
+        if not mix.degraded_reason:
+            write_mix_table(mix, table)
+        result = {"status": "ok", **mix_fields(windows, mix, table)}
+        return with_op_shares(ToolOutput(result=result, summary="trace analysed"), request)
+
+
+@pytest.fixture
+async def graded(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> AsyncIterator[Stack]:
+    """The stack with :class:`_GradedTraceLens` and the real share reader, the integration head at the profiled commit,
+    and the session root the profile test lands its point in."""
+    monkeypatch.setattr(op_shares_module, "read_op_shares", _READ_OP_SHARES)
+    async for item in _stack(tmp_path, analyses={"tracelens": _GradedTraceLens()}):
+        item.rig.repo.heads[INTEGRATION_BRANCH] = PARENT
+        item.rig.repo.heads["b1"] = PARENT
+        item.rig.toolbox.trace_root = tmp_path / "session"
+        yield item
+
+
+def _root_profiler(stack: Stack) -> IntegrationProfiler:
+    async def poll(seconds: float) -> None:
+        await asyncio.sleep(0.01)
+
+    clock = Clock(now=stack.rig.clock, sleep=poll)
+    records = stack.rig.open_blackboard(Role.SCHEDULER)
+    return IntegrationProfiler(stack.rig.toolbox, SessionTests(stack.rig.toolbox, clock), records, clock)
+
+
+async def _profiled_root(
+    stack: Stack, tmp_path: Path, point: str, baseline: asyncio.Future[None] | None
+) -> asyncio.Task:
+    """PRELUDE's profile of the root, started with ``baseline`` as the baseline's measurement, once its profile test
+    ended; the profile test lands ``point``."""
+    (tmp_path / "session" / LANDED / "variant_00_test").mkdir(parents=True)
+    (tmp_path / "session" / LANDED / "variant_00_test" / "config.yaml").write_text(point, encoding="utf-8")
+    stack.rig.executor.script = [lambda job: ok(job, **ROOT_PROFILED)]
+    task = asyncio.ensure_future(_root_profiler(stack).profile_root(PARENT, baseline))
+    while not stack.rig.executor.jobs:
+        await asyncio.sleep(0.01)
+    await stack.rig.toolbox.drain()
+    for _ in range(5):
+        await asyncio.sleep(0.01)
+    return task
+
+
+async def test_an_agentx_roots_analysis_waits_for_the_baseline_and_its_shared_result_has_the_shares(
+    graded: Stack, tmp_path: Path
+) -> None:
+    """The profile test ends before the baseline is written (a toolbox running both at once). Analysed then, the request
+    would name no lengths and both windows would leave the mix degraded under ``tracelens:<profile>``; held for the
+    baseline, it carries the lengths the baseline measured and the shared result has the shares."""
+    baseline: asyncio.Future[None] = asyncio.get_running_loop().create_future()
+    task = await _profiled_root(graded, tmp_path, AGENTX_POINT, baseline)
+    assert graded.tools["tracelens"].requests == [] and not task.done()
+
+    await _with_baseline(graded, tmp_path, AGENTX_READING, _kv_metrics(1000.0, 950.0))
+    baseline.set_result(None)
+    outcome = await task
+
+    assert outcome.reason == PROFILED and outcome.detail["after_baseline"] is True
+    (request,) = graded.tools["tracelens"].requests
+    assert (request.params["measured_isl"], request.params["measured_osl"]) == ("7600", "100")
+    profile, job = outcome.detail["request_id"], outcome.detail["job_id"]
+    shares = await graded.rig.open_blackboard(Role.SCHEDULER).op_shares(PARENT)
+    assert shares is not None and shares.profile_request_id == profile
+    assert set(shares.shares) == {"prefill_gemm", "paged_attention"}
+    # The opening judge and every branch read the same job: the one the key tracelens:<profile> names.
+    shared = json.loads(_text(await graded.start(tool="tracelens", profile_request_id=profile)))["job_id"]
+    assert shared == job and len(graded.tools["tracelens"].requests) == 1
+
+
+async def test_an_agentx_root_whose_baseline_never_lands_is_analysed_as_before_degraded_with_its_reason(
+    graded: Stack, tmp_path: Path
+) -> None:
+    """A baseline measurement that ended without a baseline releases the analysis at once: no lengths, so the two windows
+    leave the mix degraded with today's reason, and PRELUDE raises the baseline's own failure."""
+    baseline: asyncio.Future[None] = asyncio.get_running_loop().create_future()
+    task = await _profiled_root(graded, tmp_path, AGENTX_POINT, baseline)
+    assert graded.tools["tracelens"].requests == []
+
+    baseline.set_exception(RuntimeError("the baseline anchors nothing"))
+    outcome = await task
+    baseline.exception()  # PRELUDE's to raise
+
+    assert outcome.reason == PROFILE_NOT_ANALYSED
+    (request,) = graded.tools["tracelens"].requests
+    assert not set(MEASURED_LENGTH_KEYS) & set(request.params)
+    assert await graded.rig.open_blackboard(Role.SCHEDULER).op_shares(PARENT) is None
+    result = graded.rig.toolbox.tool_result(str(outcome.detail["job_id"]))
+    assert "the request names no split_conc, split_isl and split_osl" in result[OWN_DEGRADED_KEY]
+
+
+async def test_an_inferencex_root_is_analysed_once_its_profile_test_ended_weighted_by_its_own_point(
+    graded: Stack, tmp_path: Path
+) -> None:
+    """PRELUDE hands an InferenceX root no baseline to wait for: its point names its lengths."""
+    task = await _profiled_root(graded, tmp_path, POINT, None)
+    outcome = await task
+
+    assert outcome.reason == PROFILED and "after_baseline" not in outcome.detail
+    (request,) = graded.tools["tracelens"].requests
+    assert (request.params["split_isl"], request.params["split_osl"]) == ("256", "64")
+    assert not set(MEASURED_LENGTH_KEYS) & set(request.params)
+    shares = await graded.rig.open_blackboard(Role.SCHEDULER).op_shares(PARENT)
+    assert shares is not None and set(shares.shares) == {"prefill_gemm", "paged_attention"}
