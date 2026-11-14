@@ -11,7 +11,9 @@ things then run together, any of them failing ending the others: as many tests o
 from which the gate writes the baseline and its bar; a PROFILE test of the root and its TraceLens analysis in the
 toolbox (:meth:`~hyperloom_multibranch.scheduling.events.IntegrationProfiler.profile_root`), which PRELUDE waits for so
 the opening judge call reads the root's op shares, and which a backend that cannot profile or analyse leaves as its
-decision only; and the replay of the Recipe KB's champion. The longest of the root tests, start to finish, is how long
+decision only; and the replay of the Recipe KB's champion. An AgentX root's analysis is submitted once the baseline
+measurement has ended, since its phase windows are weighted by the lengths the baseline measured; PRELUDE waits for that
+measurement anyway, so the opening judge call reads shares weighted by them. The longest of the root tests, start to finish, is how long
 one test of this workload takes; it is FINAL's reserve.
 
 The session profile is known once the root is committed, so the Recipe KB's champions for it are read as warm-start
@@ -134,8 +136,9 @@ OpenIntegration = Callable[[str], Awaitable[None]]
 #: Replays the champion on the root commit and returns the commit EXPLORE opens on; the replay is judged once the
 #: awaitable, the baseline's anchoring, has ended.
 ReplayChampion = Callable[[PreparedReplay, str, Awaitable[object]], Awaitable[ChampionOutcome]]
-#: Profiles the root commit in the toolbox and analyses the profile, returning how that ended.
-ProfileRoot = Callable[[str], Awaitable[ProfileOutcome]]
+#: Profiles the root commit in the toolbox and analyses the profile, returning how that ended; the analysis is submitted
+#: once the awaitable, the baseline's measurement, has ended when one is given.
+ProfileRoot = Callable[[str, Awaitable[object] | None], Awaitable[ProfileOutcome]]
 
 
 @dataclass(frozen=True)
@@ -184,7 +187,9 @@ class Prelude:
             Decision(DecisionKind.PRELUDE, ROOT_COMMITTED, INTEGRATION_BRANCH, {"root_commit": opened.commit})
         )
         baseline = asyncio.ensure_future(self._measure_baseline(opened.commit))
-        profiled = asyncio.ensure_future(self._profile_root_commit(opened.commit))
+        # An AgentX point names no prompt and output length: its analysis waits for the lengths the baseline measures.
+        lengths = baseline if workload.inferencex is None else None
+        profiled = asyncio.ensure_future(self._profile_root_commit(opened.commit, lengths))
         replayed = asyncio.ensure_future(self._replay(opened, baseline))
         await together(baseline, profiled, replayed)
         leads, start = replayed.result().warm_leads, replayed.result().start_commit
@@ -205,9 +210,10 @@ class Prelude:
         job = "" if profiled is None else str(profiled["detail"].get("job_id") or "")
         return PreludeResult(root, start, profile, (), float(baseline["detail"]["longest_test_seconds"]), job)
 
-    async def _profile_root_commit(self, root: str) -> str:
-        """Profile ``root`` and record how; the job that analysed the profile, ``""`` when none did."""
-        outcome = await self._profile_root(root)
+    async def _profile_root_commit(self, root: str, baseline: Awaitable[object] | None) -> str:
+        """Profile ``root``, analysed once ``baseline`` ended when there is one, and record how; the job that analysed
+        the profile, ``""`` when none did."""
+        outcome = await self._profile_root(root, baseline)
         self._decisions.record(Decision(DecisionKind.PROFILE, outcome.reason, detail=outcome.detail))
         return str(outcome.detail.get("job_id") or "")
 
