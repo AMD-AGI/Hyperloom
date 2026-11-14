@@ -26,14 +26,13 @@ With no adapter installed, every agent source takes the onboarding model's path.
 from __future__ import annotations
 
 import functools
-import importlib
 import json
 import os
 import re
 import shlex
 from collections.abc import Awaitable, Callable, Mapping
 from dataclasses import dataclass, field
-from importlib import metadata
+from importlib import import_module, metadata
 from pathlib import Path
 from typing import Any
 
@@ -181,7 +180,7 @@ def _flag_word(word: str) -> str:
         try:
             value = json.dumps(json.loads(value), separators=(",", ":"))
         except ValueError:
-            pass
+            pass  # not JSON after all: the value is quoted as it stands
     if any(char.isspace() for char in value):
         return shlex.quote(flag + value)
     return flag + shlex.quote(value)
@@ -207,7 +206,7 @@ def _shell_words(args: str) -> list[str]:
             try:
                 end = decoder.raw_decode(text, i)[1]
             except ValueError:
-                pass
+                pass  # no JSON value starts here: the character is the shell's
             else:
                 parts.append(f"\0{len(blobs)}\0")
                 blobs.append(text[i:end])
@@ -300,7 +299,7 @@ def installed() -> tuple[ComponentAgent, ...]:
     agents = []
     for name, target in declared:
         module, _, attribute = target.partition(":")
-        agent = getattr(importlib.import_module(module), attribute, None)
+        agent = getattr(import_module(module), attribute, None)
         if not isinstance(agent, ComponentAgent):
             raise TypeError(f"the component agent {name} ({target}) names no ComponentAgent")
         agents.append(agent)
