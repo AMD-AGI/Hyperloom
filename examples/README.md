@@ -114,10 +114,10 @@ Requirements:
 - **Base Python on this GPU host** — the interpreter `install_baremetal.sh`
   resolves, not a child venv:
   - Python 3.10+ for SGLang and general operation.
-  - **Exactly Python 3.12** when setup installs vLLM. vLLM ROCm wheels are
-    built for 3.12 only. vLLM defaults to an isolated framework venv, but that
-    venv is created from the base interpreter and inherits its version; isolated
-    mode does not relax the requirement.
+  - **Exactly Python 3.12** when setup installs vLLM from a ROCm 7.2.x wheel.
+    The ROCm 10.0 source-build route accepts Python >= 3.10, < 3.15.
+    The isolated framework venv is created from the selected base interpreter,
+    so it does not relax either requirement.
 
 In this scenario, `/hyperloom-setup` runs the packaged setup backend on the host:
 
