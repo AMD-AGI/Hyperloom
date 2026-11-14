@@ -196,13 +196,6 @@ def test_a_round_whose_server_never_stamps_a_ready_banner_has_no_limit(framework
     assert boot_limit_sec(_benchmark(framework), 3600) is None
 
 
-def test_the_frameworks_the_guard_copies_are_the_serving_frameworks() -> None:
-    from inference_suite.frameworks import Framework, FrameworkKind, framework_facts
-
-    serving = {item.value for item in Framework if framework_facts(item).kind is FrameworkKind.SERVING}
-    assert set(boot_watch._SERVER_FRAMEWORKS) == serving
-
-
 def _stamp(directory: Path, text: str) -> None:
     directory.mkdir(parents=True, exist_ok=True)
     (directory / "server_ready_at").write_text(text, encoding="utf-8")

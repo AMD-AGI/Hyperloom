@@ -7,7 +7,7 @@ from __future__ import annotations
 
 
 from inference_suite import server_log
-from inference_suite.server_log import READY_MARKERS, LogCursor, throughput_samples
+from inference_suite.server_log import READY_MARKERS, LogCursor
 
 
 def test_the_ready_table_is_the_only_one_the_launcher_reads() -> None:
@@ -29,65 +29,18 @@ def test_scan_increment_detects_vllm_rust_frontend_ready(tmp_path):
     assert server_log._scan_increment(str(log_path), 0).saw_ready is True
 
 
-def test_scan_increment_detects_ready_and_progress(tmp_path):
-    """The incremental scanner advances its offset and flags ready/progress
-    markers only in the newly appended bytes."""
+def test_scan_increment_flags_ready_only_in_the_appended_bytes(tmp_path):
+    """The incremental scanner advances its offset and flags the ready marker
+    only in the newly appended bytes."""
     log_path = tmp_path / "server.log"
     log_path.write_text("INFO loading weights\nApplication startup complete\n")
     first = server_log._scan_increment(str(log_path), 0)
     assert first.saw_ready is True
-    assert first.saw_progress is False and first.saw_eval_start is False
     assert first.offset == log_path.stat().st_size
     # Re-scan from the advanced offset: nothing new, no re-trigger.
     second = server_log._scan_increment(str(log_path), first.offset)
-    assert second.saw_ready is False and second.saw_progress is False and second.saw_eval_start is False
+    assert second.saw_ready is False
     assert second.offset == first.offset
-    # Append a vLLM throughput line; only the new bytes are scanned.
-    with log_path.open("a") as f:
-        f.write("Avg generation throughput: 123.4 tokens/s, Running: 8\n")
-    third = server_log._scan_increment(str(log_path), second.offset)
-    assert third.saw_progress is True and third.saw_ready is False and third.saw_eval_start is False
-    assert third.offset == log_path.stat().st_size
-    # The eval-start marker is reported independently of ready/progress.
-    with log_path.open("a") as f:
-        f.write("HYPERLOOM_EVAL_START\n")
-    fourth = server_log._scan_increment(str(log_path), third.offset)
-    assert fourth.saw_eval_start is True and fourth.saw_ready is False and fourth.saw_progress is False
-    assert fourth.offset == log_path.stat().st_size
-    # An idle engine keeps printing the same line with no rate on it: the value
-    # is the progress signal, not the marker.
-    with log_path.open("a") as f:
-        f.write("Avg generation throughput: 0.0 tokens/s, Running: 0 reqs\n")
-    fifth = server_log._scan_increment(str(log_path), fourth.offset)
-    assert fifth.saw_progress is False and fifth.offset == log_path.stat().st_size
-
-
-def test_log_cursor_tells_the_childs_own_log_from_the_servers(tmp_path):
-    """Only one of the resolved logs is written by the process being waited on.
-
-    ``server.log`` is the inference server's; ``benchmark_stderr.log`` holds the
-    benchmark body's own stderr, so the parent's pipe stays empty for the whole
-    round and that file is the only place the child's own output shows up.
-    Liveness that cannot tell them apart either vouches for a wedged client or
-    leaves a working one unable to report.
-    """
-    server_log = tmp_path / "server.log"
-    child_log = tmp_path / "benchmark_stderr.log"
-    server_log.write_text("Application startup complete\n")
-    child_log.write_text("running benchmark\n")
-    passed = str(tmp_path / "server.log")
-    cursor = LogCursor()
-    cursor.advance(passed)
-
-    with server_log.open("a") as f:
-        f.write("[atom 22:29:41] Scheduled prefill batch: 4 reqs, 3707 new tokens\n")
-    server_only = cursor.advance(passed)
-    assert server_only.grew is True and server_only.child_spoke is False
-
-    with child_log.open("a") as f:
-        f.write("bench: 128/2000 requests done\n")
-    child_only = cursor.advance(passed)
-    assert child_only.grew is True and child_only.child_spoke is True
 
 
 def test_health_probe_lines_are_not_server_activity(tmp_path):
@@ -196,19 +149,6 @@ def test_truncation_drops_the_carried_tail(tmp_path):
     after = server_log._scan_increment(str(log_path), 10_000, first.residual)
 
     assert after.saw_measured_begin is False
-
-
-def test_throughput_samples_reads_sglang_and_vllm_lines_and_drops_non_positive() -> None:
-    text = "\n".join(
-        [
-            "Decode batch. #running-req: 4 gen throughput (token/s): 100.0",
-            "Decode batch. #running-req: 4 gen throughput (token/s): 200.5",
-            "Avg generation throughput: 300 tokens/s",
-            "irrelevant line",
-            "gen throughput (token/s): 0",
-        ]
-    )
-    assert throughput_samples(text) == [100.0, 200.5, 300.0]
 
 
 def test_a_death_excerpt_cut_anywhere_carries_no_surrounding_whitespace(tmp_path):

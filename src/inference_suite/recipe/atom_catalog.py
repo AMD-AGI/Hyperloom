@@ -36,6 +36,7 @@ from inference_suite.recipe.model import (
     SourceMiss,
     boards_interchangeable,
 )
+from inference_suite.recipe.shell_launch import _logical_lines
 
 ATOM_REPO = "https://github.com/ROCm/ATOM"
 CATALOG = ".github/benchmark/models.json"
@@ -82,18 +83,6 @@ def _words(line: str) -> list[str] | str:
         return f"it does not parse as shell words: {error}"
     operator = next((word for word in words if set(word) <= set(_SHELL_OPERATORS)), None)
     return f"it uses shell operator {operator!r}" if operator else words
-
-
-def _logical_lines(text: str) -> Iterator[str]:
-    pending = ""
-    for line in text.splitlines():
-        if line.rstrip().endswith("\\"):
-            pending += line.rstrip()[:-1] + " "
-            continue
-        yield pending + line
-        pending = ""
-    if pending:
-        yield pending
 
 
 @dataclass(frozen=True)

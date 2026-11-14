@@ -40,6 +40,7 @@ from hyperloom.common.outside_facts import (
     ENV_RUN_EVAL,
 )
 from hyperloom.contracts.recipe import RecipeError
+from hyperloom_common.fs_utils import file_sha256
 
 #: ``benchmark`` keys that fix what is measured.
 SURFACE_BENCH_KEYS: tuple[str, ...] = ("framework", "model", "benchmark_script")
@@ -93,19 +94,11 @@ def _text(value: object) -> str | None:
     return str(value).strip()
 
 
-def _sha256_file(path: Path) -> str:
-    digest = hashlib.sha256()
-    with path.open("rb") as handle:
-        for chunk in iter(lambda: handle.read(1 << 20), b""):
-            digest.update(chunk)
-    return digest.hexdigest()
-
-
 def hash_model_files(model_dir: Path) -> dict[str, str]:
     """``{relative path: sha256}`` of the configuration and tokenizer files in a model directory."""
 
     return {
-        path.relative_to(model_dir).as_posix(): _sha256_file(path)
+        path.relative_to(model_dir).as_posix(): file_sha256(path)
         for path in sorted(model_dir.rglob("*"))
         if path.name in MODEL_FILE_NAMES and path.is_file()
     }
@@ -143,7 +136,7 @@ def extract_surface(config: Mapping[str, Any]) -> MeasurementSurface:
     fields.update({f"envs.{key}": _text(envs.get(key)) for key in SURFACE_ENV_KEYS})
     script, root = _text(bench.get("benchmark_script")), _text(bench.get("inferencex_path"))
     script_path = Path(root) / "benchmarks" / script if script and root else None
-    fields[SCRIPT_FIELD] = _sha256_file(script_path) if script_path and script_path.is_file() else None
+    fields[SCRIPT_FIELD] = file_sha256(script_path) if script_path and script_path.is_file() else None
     model = _text(envs.get("MODEL_PATH")) or _text(bench.get("model"))
     model_files = hash_model_files(Path(model)) if model and Path(model).is_dir() else None
     fields[_MODEL_FILES_FIELD] = json.dumps(model_files, sort_keys=True) if model_files is not None else None

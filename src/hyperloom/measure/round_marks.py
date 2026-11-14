@@ -15,7 +15,6 @@ stay in the phase before them and none are dropped.
 from __future__ import annotations
 
 import json
-import math
 import os
 import re
 from collections.abc import Iterable, Sequence
@@ -29,6 +28,7 @@ import yaml
 from hyperloom.common.outside_facts import SGLANG_CUDA_GRAPH_CAPTURE_END
 from hyperloom.measure import log_causes
 from hyperloom.measure.boot_watch import read_ready_stamp
+from hyperloom.measure.hosted_live import finite_number
 from hyperloom.measure.phases import (
     ACCURACY_EVAL,
     BOOT_COMPILE,
@@ -204,21 +204,10 @@ def _kv_instants(path: Path, since: float) -> tuple[dict[str, float], float | No
     marks = document.get("phase_marks") if isinstance(document, dict) else None
     instants: dict[str, float] = {}
     for mark in marks if isinstance(marks, list) else []:
-        phase, at = (mark.get("phase"), _instant(mark.get("ts"))) if isinstance(mark, dict) else (None, None)
+        phase, at = (mark.get("phase"), finite_number(mark.get("ts"))) if isinstance(mark, dict) else (None, None)
         if isinstance(phase, str) and at is not None and at >= since:
             instants.setdefault(phase, at)
     return instants, written if written >= since else None
-
-
-def _instant(value: object) -> float | None:
-    """``value`` as a unix time, or ``None`` when it is not a finite number a float can hold."""
-    if isinstance(value, bool) or not isinstance(value, (int, float)):
-        return None
-    try:
-        instant = float(value)
-    except OverflowError:
-        return None
-    return instant if math.isfinite(instant) else None
 
 
 def boot_parts(server_log: Path) -> BootParts:
@@ -351,7 +340,7 @@ def stalled_in_profile_window(run_dir: Path) -> bool:
     marks = document.get("phase_marks") if isinstance(document, dict) else None
     instants: dict[str, float] = {}
     for mark in marks if isinstance(marks, list) else []:
-        phase, at = (mark.get("phase"), _instant(mark.get("mono"))) if isinstance(mark, dict) else (None, None)
+        phase, at = (mark.get("phase"), finite_number(mark.get("mono"))) if isinstance(mark, dict) else (None, None)
         if isinstance(phase, str) and at is not None:
             instants.setdefault(phase, at)
     opened, finished = instants.get(_PROFILE_OPEN), instants.get(_CLIENT_FINISHED)

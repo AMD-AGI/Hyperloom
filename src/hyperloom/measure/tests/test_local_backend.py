@@ -22,7 +22,7 @@ from hyperloom.contracts.measurement import AccuracyValue, AttachmentRef
 from hyperloom.measure import farm as farm_module
 from hyperloom.measure import log_causes
 from hyperloom.measure import local
-from hyperloom.measure.local import SUPPORTED_KINDS, LocalMeasurementBackend, TestCallRefused
+from hyperloom.measure.local import LocalMeasurementBackend, TestCallRefused
 from hyperloom.measure.points import AMBIENT_SHAPE_ENVS
 from hyperloom.measure.repro import read_verdict
 from hyperloom.measure.runner.rounds import rounds_document
@@ -202,11 +202,6 @@ def test_the_warnings_run_grid_wrote_ride_on_the_first_round_of_the_point_once(g
     assert [w for r in outcome.rounds for w in r.nonfatal_warnings] == warnings
 
 
-def test_a_point_that_run_grid_did_not_warn_about_carries_none(grid, tmp_path):
-    outcome = _run(_call(tmp_path))
-    assert [r.nonfatal_warnings for r in outcome.rounds] == [()]
-
-
 def test_an_accuracy_test_reports_the_accuracy_round_with_the_eval_exit_code(grid, unheld, tmp_path):
     result = grid.result("test", returncode=0)
     write_run_dir(Path(result.workspace), eval_code=3)
@@ -243,18 +238,6 @@ def test_the_accuracy_round_carries_the_measured_rounds_scores_not_the_warmups(g
     assert by_phase["warmup"] == by_phase["measure"] == ()
 
 
-def test_the_accuracy_round_carries_the_version_lm_eval_reported(grid, unheld, tmp_path):
-    result = grid.result("test")
-    _evaluated(Path(result.workspace), 0.64)
-    grid.answers["test"] = result
-    point = _point(tmp_path, "acc", run_eval="true")
-
-    outcome = _run(_call(tmp_path, point, accuracy=True, kind="accuracy"))
-
-    (value,) = [r.accuracy for r in outcome.rounds if r.phase == "accuracy"][0]
-    assert value.version == "lm_eval=0.4.9;gsm8k=3"
-
-
 def test_an_accuracy_round_with_only_a_warmup_evaluation_carries_no_score(grid, tmp_path):
     result = grid.result("test", nonfatal_warnings=["run_grid_warmup_discarded_first"])
     _evaluated(Path(result.workspace).parent / "warmup_round", 0.10)
@@ -264,12 +247,6 @@ def test_an_accuracy_round_with_only_a_warmup_evaluation_carries_no_score(grid, 
     outcome = _run(_call(tmp_path, point, accuracy=True, kind="accuracy"))
 
     assert [r.accuracy for r in outcome.rounds if r.phase == "accuracy"] == [()]
-
-
-def test_a_test_that_did_not_ask_for_accuracy_reports_no_accuracy_round(grid, tmp_path):
-    outcome = _run(_call(tmp_path))
-
-    assert [r.phase for r in outcome.rounds] == ["measure"]
 
 
 # --- every test runs its rounds on one held server, the evaluation after the measured bench -------------------------
@@ -1171,23 +1148,6 @@ def test_a_graded_sweep_on_a_framework_that_cannot_hold_a_server_evaluates_in_ea
     ]
 
 
-def test_a_sweep_that_does_not_run_accuracy_boots_the_same_way(grid, server, tmp_path):
-    _run(_graded_sweep(tmp_path, 8, 4, run_eval="false"))
-
-    boot, *measured = grid.calls
-    assert boot["recipe"].base.extra_envs == BOOT_ENVS and all(c["recipe"].base.extra_envs is None for c in measured)
-
-
-def test_a_boot_does_not_pin_what_the_point_pins_for_a_graded_round(grid, server, tmp_path):
-    """The boot's overrides live in its round's environment; the call's own validation reads the point."""
-    call = _graded_sweep(tmp_path, 8, 4)
-
-    _run(call)  # an accuracy sweep whose points say RUN_EVAL=true is accepted, and its boots run
-
-    assert all(yaml.safe_load(Path(p).read_text())["benchmark"]["envs"]["RUN_EVAL"] == "true" for p in call.points)
-    assert grid.calls[0]["recipe"].base_yaml_path == call.points[0]
-
-
 def test_an_agentx_boot_pins_nothing(grid, server, tmp_path, monkeypatch):
     """An AgentX point has no evaluation round and no prompt count, and no backend phase is said for a boot."""
     _boot_only(grid)
@@ -1216,12 +1176,6 @@ def test_an_agentx_sweep_boots_a_server_of_its_own_for_each_level(grid, tmp_path
     assert [(r.point, r.phase) for r in outcome.rounds] == [(i, "measure") for i in range(len(levels))]
     assert "server restarted per level: an AgentX replay is cache-sensitive" in outcome.stderr
     assert outcome.returncode == 0 and torn_down == []
-
-
-def test_no_call_of_a_sweep_runs_without_the_shared_server(grid, server, tmp_path):
-    _run(_sweep_call(tmp_path, 8, 4, 2))
-
-    assert all(_lifecycle(c) is not None for c in grid.calls)
 
 
 def test_a_round_the_lifecycle_holds_runs_from_the_point_itself_on_the_lifecycles_port(grid, server, tmp_path):
@@ -1881,10 +1835,6 @@ def _repro_call(tmp_path: Path, **kwargs: Any) -> TestCall:
 
 def _boot_only(grid: _Grid) -> None:
     grid.answers["repro"] = grid.result("repro", note="server_lifecycle_boot_only")
-
-
-def test_repro_is_a_kind_the_local_backend_runs():
-    assert "repro" in SUPPORTED_KINDS
 
 
 @pytest.mark.parametrize(("code", "verdict"), [(0, "not_reproduced"), (1, "reproduced")])

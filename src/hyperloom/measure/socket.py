@@ -1,18 +1,16 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""The measurement socket: one complete test, run by whichever backend is active.
+"""The measurement socket: one complete test, and the backend protocol that runs it.
 
 A test is every measurement that shares one inference server: the server start, the optional warmup round, the
-measured round(s), an accuracy round when the caller asked for one, and the teardown. ``run_test`` blocks; the caller
-puts it in ``asyncio.to_thread``. When it returns, the inference server has been reclaimed.
+measured round(s), an accuracy round when the caller asked for one, and the teardown. A backend's ``run_test`` blocks;
+the caller puts it in ``asyncio.to_thread``. When it returns, the inference server has been reclaimed.
 """
 
 from __future__ import annotations
 
-import importlib
 import subprocess
-import threading
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -37,9 +35,6 @@ __all__ = [
     "TestCall",
     "TestMeta",
     "TestOutcome",
-    "active_backend",
-    "run_test",
-    "set_active_backend",
 ]
 
 Prep = Literal["grid", "conc_sweep"]
@@ -229,53 +224,3 @@ class MeasurementBackend(Protocol):
 
     def run_test(self, call: TestCall) -> TestOutcome:
         """Run the test ``call`` describes and return what it produced."""
-
-
-#: The backend used until another is chosen, by import path: the local backend imports this module for its types.
-_DEFAULT_BACKEND = "hyperloom.measure.local:LocalMeasurementBackend"
-
-
-class _Registry:
-    """Holds the chosen backend; ``None`` means the default one."""
-
-    def __init__(self) -> None:
-        self._lock = threading.Lock()
-        self._backend: MeasurementBackend | None = None
-
-    def set(self, backend: MeasurementBackend | None) -> None:
-        with self._lock:
-            self._backend = backend
-
-    def get(self) -> MeasurementBackend:
-        with self._lock:
-            if self._backend is not None:
-                return self._backend
-        module, _, attribute = _DEFAULT_BACKEND.partition(":")
-        return getattr(importlib.import_module(module), attribute)()
-
-
-_REGISTRY = _Registry()
-
-
-def set_active_backend(backend: MeasurementBackend | None) -> None:
-    """Choose the backend ``run_test`` uses; ``None`` returns to the local one."""
-    _REGISTRY.set(backend)
-
-
-def active_backend() -> MeasurementBackend:
-    """The chosen backend, or the local one when none was chosen."""
-    return _REGISTRY.get()
-
-
-def run_test(call: TestCall) -> TestOutcome:
-    """Run one complete test through the active measurement backend.
-
-    A call with no point or no task id is refused here, and a backend that returns anything but a ``TestOutcome`` is a
-    defect reported at the socket instead of surfacing later in a caller.
-    """
-    if not call.points or not call.task_id:
-        raise ValueError("a test call needs at least one measurement point and a task id")
-    outcome = _REGISTRY.get().run_test(call)
-    if not isinstance(outcome, TestOutcome):
-        raise TypeError(f"a measurement backend must return a TestOutcome, got {type(outcome).__name__}")
-    return outcome
