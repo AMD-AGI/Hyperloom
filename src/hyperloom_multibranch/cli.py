@@ -213,7 +213,7 @@ from hyperloom_multibranch.scheduling.settings import (
     Workload,
     session_early_stop,
 )
-from hyperloom_multibranch.specialist.arbor_adapter import DOSSIER_INDEX, ArborRefused, read_launch
+from hyperloom_multibranch.specialist.component_agent import AgentRefused, dossier_lacks, read_launch
 from inference_suite import UserFileError, parse_inferencex_commit, parse_user_file
 from inference_suite.contracts import BaseLaunchError
 
@@ -715,7 +715,7 @@ def _agent_launch(path: Path | None, agents: list[str], reference_script: Path |
         raise ValueError("--agent-launch is not taken with --reference-script: the Arbors are served the frozen base")
     try:
         launch = read_launch(path)
-    except ArborRefused as exc:
+    except AgentRefused as exc:
         raise ValueError(f"--agent-launch: {exc}") from exc
     if launch.record:
         raise ValueError(
@@ -757,8 +757,8 @@ def _agent_dossier(path: Path | None, directions: Path | None) -> str:
         return ""
     if directions is None:
         raise ValueError("--agent-dossier is given with the --agent-directions map it was made with")
-    if not (path / DOSSIER_INDEX).is_file():
-        raise ValueError(f"--agent-dossier {path} is no dossier: it has no {DOSSIER_INDEX}")
+    if lacks := dossier_lacks(path):
+        raise ValueError(f"--agent-dossier {path} is no dossier: it has no {lacks}")
     return str(path.absolute())
 
 
