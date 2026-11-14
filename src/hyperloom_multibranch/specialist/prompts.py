@@ -496,12 +496,14 @@ def _agentx_grading(objective: AgentXObjective) -> _Grading:
         f"The session is graded on {objective.title} ({objective.metric}): {objective.description} A gain must clear "
         f"the session's bar of +{objective.bar_pct:g}% on it while {held} each hold within "
         f"{objective.guard_band_pct:g}% of the parent; that one measurement is final unless a guard, more failed "
-        "requests or the request error rate holds the gain back for a retest;"
+        "requests or the request error rate holds the gain back for a retest. The accuracy gate is the request error "
+        "rate on your branch; a merge onto the integration head and FINAL check the change's long-context answers "
+        "against the root's instead, and a drop beyond the check's noise (long_context_dropped) keeps it out with no "
+        "retest;"
     )
     return _Grading(
         bar=bar,
-        blocked_by=f"the accuracy gate (the request error rate), a guard ({refusals}) or more failed requests than "
-        "its parent",
+        blocked_by=f"the request error rate, a guard ({refusals}) or more failed requests than its parent",
         trade_off=f", a {objective.title} gain bought with {' or '.join(guard.name for guard in guards)}",
     )
 

@@ -6,7 +6,8 @@
 Acceptance plans the test, reads the context its planned launch serves (its context flag, else ``MAX_MODEL_LEN``) and
 gives it the model's set for that context, staged in the runner cache keyed by its length; the check then runs on a fake
 server with the runner's own reading of that set. A launch at the model's full window keeps the set at the model's limit;
-a 1M-token launch gets its set at the bound, not at 1M tokens a prompt; an AgentX test gets none.
+a 1M-token launch gets its set at the bound, not at 1M tokens a prompt. An AgentX campaign gets one on the tests its gate
+reads (BASELINE, every integration merge TEST, FINAL's TEST) and none, staging nothing, on any other.
 """
 
 from __future__ import annotations
@@ -18,7 +19,7 @@ from pathlib import Path
 import pytest
 
 from hyperloom.contracts.long_context import LONG_CONTEXT_COMPLETE, PROMPT_OK, LongContextResult
-from hyperloom.contracts.measurement import Purpose
+from hyperloom.contracts.measurement import Purpose, TestKind
 from hyperloom.measure.long_context import build as build_module
 from hyperloom.measure.long_context.build import build_entry
 from hyperloom.measure.long_context.plan import LongContextPlan
@@ -88,8 +89,14 @@ class _Session:
         self.source = ServedLongContext(self.model, self.environ, stage=True)
 
     def planned(
-        self, point: Path, purpose: Purpose = Purpose.BASELINE, workload: WorkloadKind = WorkloadKind.INFERENCEX
+        self,
+        point: Path,
+        purpose: Purpose = Purpose.BASELINE,
+        workload: WorkloadKind = WorkloadKind.INFERENCEX,
+        **request: object,
     ) -> LongContextPlan | None:
+        """The check the test of ``point`` for ``purpose`` is planned with; the request forces it unless ``request``
+        says otherwise."""
         acceptance = Acceptance(
             AcceptanceSetup(
                 FakeRepo(None),  # type: ignore[arg-type]
@@ -100,7 +107,8 @@ class _Session:
             ),
             is_accepted=lambda _id: True,
         )
-        planned = asyncio.run(acceptance.prepare(req(purpose=purpose, long_context_check=True))).environment
+        submitted = req(purpose=purpose, **{"long_context_check": True, **request})  # type: ignore[arg-type]
+        planned = asyncio.run(acceptance.prepare(submitted)).environment
         assert isinstance(planned, AcceptedMeasurement)
         return planned.long_context
 
@@ -219,11 +227,46 @@ def test_the_sets_key_holds_the_bound_so_another_bound_is_another_set_staged_onc
     assert builds == [SERVED - HEADROOM, SERVED - HEADROOM], "the new bound's set is staged, once"
 
 
-def test_an_agentx_test_runs_no_long_context_check_and_stages_nothing(tmp_path: Path, builds: list[int]) -> None:
+@pytest.mark.parametrize("purpose", [Purpose.BASELINE, Purpose.INTEGRATION, Purpose.FINAL])
+def test_an_agentx_campaign_gates_every_baseline_integration_and_final_test_on_the_check(
+    tmp_path: Path, builds: list[int], purpose: Purpose
+) -> None:
     session = _Session(tmp_path)
     point = _point(tmp_path, "agentx", MAX_MODEL_LEN=SERVED)
 
-    for purpose in (Purpose.BASELINE, Purpose.FINAL):
-        assert session.planned(point, purpose, WorkloadKind.AGENTX) is None, "forced, and an always purpose, too"
+    plan = session.planned(point, purpose, WorkloadKind.AGENTX, long_context_check=False)
+
+    assert plan is not None and plan.trigger == (f"agentx gate: purpose {purpose.value}",), "not forced: the gate"
+    assert plan.length == SERVED - HEADROOM and builds == [SERVED - HEADROOM]
+
+
+def test_an_agentx_merge_that_touches_no_lever_is_planned_where_an_inferencex_one_is_not(
+    tmp_path: Path, builds: list[int]
+) -> None:
+    session = _Session(tmp_path)
+    point = _point(tmp_path, "agentx", MAX_MODEL_LEN=SERVED)
+    unforced = {"long_context_check": False, "server_args": "--max-running-requests 128"}
+
+    assert session.planned(point, Purpose.INTEGRATION, WorkloadKind.AGENTX, **unforced) is not None
+    assert session.planned(point, Purpose.INTEGRATION, WorkloadKind.INFERENCEX, **unforced) is None
+
+
+@pytest.mark.parametrize("purpose", [Purpose.EXPLORE, Purpose.CONFIRM])
+def test_an_agentx_explore_or_confirm_runs_no_check_forced_or_on_a_lever_and_stages_nothing(
+    tmp_path: Path, builds: list[int], purpose: Purpose
+) -> None:
+    session = _Session(tmp_path)
+    point = _point(tmp_path, "agentx", MAX_MODEL_LEN=SERVED)
+    lever = {"server_args": "--attention-backend aiter", **({"retest_of": "r-1"} if purpose is Purpose.CONFIRM else {})}
+
+    assert session.planned(point, purpose, WorkloadKind.AGENTX, **lever) is None, "forced, on a lever line, too"
     assert builds == [] and not (tmp_path / "cache" / "evalsets").exists()
-    assert session.planned(point) is not None, "the same test in an InferenceX campaign runs it"
+    assert session.planned(point, purpose, **lever) is not None, "the same test in an InferenceX campaign runs it"
+
+
+def test_an_agentx_final_sweep_runs_no_check(tmp_path: Path, builds: list[int]) -> None:
+    session = _Session(tmp_path)
+    point = _point(tmp_path, "agentx", MAX_MODEL_LEN=SERVED)
+
+    assert session.planned(point, Purpose.FINAL, WorkloadKind.AGENTX, kind=TestKind.SWEEP) is None
+    assert builds == []

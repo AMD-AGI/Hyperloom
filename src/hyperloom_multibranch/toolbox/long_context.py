@@ -8,7 +8,9 @@ change from its parent recipe to its candidate touches what the rule pack's ``sh
 (``short_prompts.lever_lines``), when its purpose is one of the pack's ``always_purposes`` (a final candidate, and a
 baseline, whose checks are the root's reading every candidate is judged after; no test is added for it), or when the request
 sets ``long_context_check``. A caller can add the check, never remove one the rule demands. A toolbox given no setup runs no
-check and refuses nothing. The check runs on the test's own server after its measured rounds, at the context the canonical
+check and refuses nothing. An AgentX campaign gates on it instead (:func:`decide_agentx`): every TEST whose purpose is in
+``AGENTX_GATED_PURPOSES`` runs it (the root's BASELINE reference, every integration merge test whatever it touches, and
+FINAL's reproduction test), and no other test does, forced or not: EXPLORE and CONFIRM tests stay speed-only. The check runs on the test's own server after its measured rounds, at the context the canonical
 launch serves (the launch is not widened for it).
 
 *Switched on.* The check is on by default. A builder gives the toolbox the setup: from its options, or from the host
@@ -19,9 +21,7 @@ else its ``MAX_MODEL_LEN``; no more than the model's own limit, nor than ``LENGT
 default seed (:func:`default_long_context`). The set is keyed by that length and the bound, so a launch served at 8192
 tokens checks retrieval over that window instead of recording every prompt ``not_run``, a launch at the model's full window
 (or one that states no context) keeps the set at the model's limit, and a 1M-token launch checks at the bound, not at 1M
-tokens a prompt. Root and candidate share one launch shape and so one set. An AgentX campaign runs no check: its tests'
-servers are not held up for one. It is
-read, and staged where the toolbox's runners read this host's cache, when acceptance first plans a test of that length. A
+tokens a prompt. Root and candidate share one launch shape and so one set. It is read, and staged where the toolbox's runners read this host's cache, when acceptance first plans a test of that length. A
 named set is used whatever the launch serves; one built longer than the launch serves makes the check ``incomplete`` with
 the reason. A set that is asked for, or found and not readable, is refused, never run without.
 
@@ -65,6 +65,7 @@ from hyperloom.measure.long_context.resolve import StagedSet, staged_set
 from hyperloom.measure.long_context.staging import KEY_PREFIX
 from hyperloom.measure.points import launch_carriers
 from hyperloom.measure.short_prompts.staging import CACHE_ENV, EVALSETS_DIR, cache_root, entry_key
+from hyperloom_multibranch.contracts.toolbox import AGENTX_GATED_PURPOSES, agentx_gated
 from hyperloom_multibranch.toolbox.submission_log import LogEntry
 from hyperloom_multibranch.toolbox.short_prompts import (
     MODEL_PATH_ENV,
@@ -80,7 +81,10 @@ __all__ = [
     "LongContextNotStaged",
     "LongContextSetup",
     "ServedLongContext",
+    "AGENTX_GATED_PURPOSES",
+    "agentx_gated",
     "decide",
+    "decide_agentx",
     "default_long_context",
     "environment_long_context",
     "first_difference",
@@ -102,6 +106,7 @@ _NOT_STAGED = "long-context check off: the model's prompt set %s is not staged i
 
 _CHECKED_KINDS = (TestKind.TEST, TestKind.SWEEP)
 _FORCED = "request long_context_check"
+_AGENTX_GATE = "agentx gate: purpose {purpose}"
 _MAX_FAILED_SHOWN = 3
 #: What a check records that its bundle cannot show: why it ran, and the root's reading, made from other tests' bundles.
 _NOT_IN_BUNDLE = frozenset({"trigger", "root", "bound"})
@@ -309,6 +314,15 @@ def decide(
     )
 
 
+def decide_agentx(request: TestRequest, setup: LongContextSetup | None) -> LongContextPlan | None:
+    """The check an AgentX campaign's ``request`` runs, or ``None``: every TEST whose purpose is one the gate reads
+    (``AGENTX_GATED_PURPOSES``), whatever its change touches, and nothing else, even when the request forces it."""
+    if setup is None or not agentx_gated(request):
+        return None
+    trigger = (_AGENTX_GATE.format(purpose=request.purpose.value),)
+    return LongContextPlan(setup.prompt_set, setup.prompts_sha256, setup.length, trigger=trigger, bound=setup.bound)
+
+
 # --- what is recorded ----------------------------------------------------------------------------------------------
 
 
@@ -447,7 +461,7 @@ def _root_checks(entries: Iterable[LogEntry]) -> list[tuple[str, LongContextResu
 def with_root_reading(request: TestRequest, result: TestResult, entries: Iterable[LogEntry]) -> TestResult:
     """``result`` with the root's reading of the long-context check (``LongContextResult.root``), pooled from the root's
     tests the submit log ``entries`` hold as ended; as it is for a test that ran no check, for a root test itself, and
-    while the root has no complete check (an AgentX session, whose root is first tested at FINAL, has none)."""
+    while the root has no complete check (an AgentX session before its BASELINE test checked its root has none)."""
     check = result.long_context
     if check is None or request.purpose is Purpose.BASELINE:
         return result

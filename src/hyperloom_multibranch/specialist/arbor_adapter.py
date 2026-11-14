@@ -852,7 +852,6 @@ def host_rules(spec: AgentSpec) -> list[str]:
     the variables it owns, how it keeps a change, its accuracy rule and, when the spec says why, that no source change
     can be kept. MB refuses or rejects a change that breaks one, whatever Arbor measured; the dossier lists them among
     the benchmark's rules."""
-
     point = ", ".join(f"{key} {value}" for key, value in _operating_point(spec.workload).items())
     owned = ", ".join(sorted({*SURFACE_ENV_KEYS, *POINT_ENV_KEYS, *REQUEST_ENV_KEYS}))
     kind = str(spec.workload.get("kind") or "the session's workload")
@@ -866,7 +865,8 @@ def host_rules(spec: AgentSpec) -> list[str]:
     ]
     if kind == AGENTX:
         rules.append(
-            f"{HOST_RULE}: accuracy: the request error rate stays at or under {AGENTX_ERROR_RATE_THRESHOLD_PCT:g}%."
+            f"{HOST_RULE}: accuracy: the request error rate stays at or under {AGENTX_ERROR_RATE_THRESHOLD_PCT:g}%; a"
+            " change whose answers on MB's long-context check drop below the root's is never merged."
         )
     else:
         rules.append(

@@ -483,6 +483,7 @@ class Stage:
             conc=CONC,
             log=setup.layout.toolbox / SUBMISSIONS,
             repo=repo,
+            workload=setup.workload.kind,
         )
         if isinstance(toolbox, StuckToolbox) and self.stuck:
             toolbox.stuck = self.stuck
