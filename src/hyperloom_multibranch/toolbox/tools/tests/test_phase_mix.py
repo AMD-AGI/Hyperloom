@@ -345,6 +345,33 @@ def test_a_workload_whose_wave_time_overflows_is_degraded_not_nan(probe_windows:
         ({"split_conc": "64", "split_isl": "0", "split_osl": "1024"}, None),
         ({"split_conc": "many", "split_isl": "1024", "split_osl": "1024"}, None),
         ({"split_conc": "64", "split_isl": "nan", "split_osl": "1024"}, None),
+        (
+            {
+                "split_conc": "16",
+                "measured_isl": "7600",
+                "measured_osl": "100",
+                "measured_lengths_source": "the baseline",
+            },
+            Workload(16, 7600, 100, "the baseline"),
+        ),
+        # lengths no one says the source of
+        ({"split_conc": "16", "measured_isl": "7600", "measured_osl": "100"}, None),
+        ({"split_conc": "16", "measured_isl": "7600", "measured_lengths_source": "the baseline"}, None),
+        (
+            {"split_conc": "16", "measured_isl": "0", "measured_osl": "100", "measured_lengths_source": "the baseline"},
+            None,
+        ),
+        (
+            {
+                "split_conc": "64",
+                "split_isl": "1024",
+                "split_osl": "1024",
+                "measured_isl": "7600",
+                "measured_osl": "100",
+                "measured_lengths_source": "the baseline",
+            },
+            Workload(64, 1024, 1024),
+        ),
     ],
 )
 def test_the_workload_is_the_requests_conc_isl_and_osl_or_nothing(
@@ -381,3 +408,26 @@ def test_the_rank_trace_is_read_once_however_many_windows_price_excluded_events_
     trace.unlink()
 
     assert len(first) == 1 and read() is first
+
+
+def test_an_agentx_point_with_both_windows_is_weighted_by_its_measured_lengths_and_the_note_says_which() -> None:
+    """An AgentX profile at concurrency 16 whose trace has a 1021-token prefill step of 128.922 ms and decode steps of
+    10.105 ms: a wave of requests of 7600 computed prompt and 100 output tokens is 93.8% prefill by time."""
+    prefill = _synthetic(PREFILL, 1, 1021, 128.922, "gemm")
+    decode = _synthetic(DECODE, 32, 0, 10.105, "paged_attention")
+    hints = {"split_conc": "16"}
+    measured = {"measured_isl": "7600", "measured_osl": "100", "measured_lengths_source": "the baseline's lengths"}
+
+    mix = graded_mix([prefill, decode], Workload.from_hints({**hints, **measured}))
+    unweighted = graded_mix([prefill, decode], Workload.from_hints(hints))
+
+    assert mix.degraded_reason == "" and {row.name for row in mix.rows} == {"gemm", "paged_attention"}
+    assert mix.fractions[PREFILL] == pytest.approx(0.938, abs=1e-3)
+    assert mix.note == "the prefill and decode windows are weighted by the baseline's lengths"
+    assert unweighted.rows == () and "split_conc, split_isl and split_osl" in unweighted.degraded_reason
+
+
+def test_a_point_that_names_its_lengths_gets_no_note_on_its_weights(probe_windows: dict[str, PhaseWindow]) -> None:
+    mix = graded_mix([probe_windows[PREFILL], probe_windows[DECODE]], WORKLOAD)
+
+    assert mix.rows and mix.note == ""
