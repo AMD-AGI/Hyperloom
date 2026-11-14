@@ -87,7 +87,7 @@ It asks for these values with a fixed option order:
    - `docker`
    - `baremetal`
 
-```note
+```{note}
 If you are performing the Hyperloom setup inside of a Docker container, select
 the "baremetal" option as the run mode during setup.
 ```

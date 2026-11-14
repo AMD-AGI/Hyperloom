@@ -91,7 +91,7 @@ Setup asks for the Anthropic side only. To run on Codex, add `OPENAI_BASE_URL`,
 OpenAI side configured, orchestration, TraceLens and Forge run on Codex, while
 GEAK needs the Anthropic side.
 
-```note
+```{note}
 If you are performing the Hyperloom setup inside of a Docker container, select
 the "baremetal" option as the run mode during setup.
 ```
