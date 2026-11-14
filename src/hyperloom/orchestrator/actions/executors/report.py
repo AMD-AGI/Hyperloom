@@ -259,6 +259,25 @@ def _cumulative_validation_status(summary: dict[str, Any]) -> str:
     return "current"
 
 
+from hyperloom.common.export_gate_report import export_gate_stop_reason  # noqa: E402
+
+
+def _stop_reason_fields(state: Any) -> dict[str, Any]:
+    """The terminal a run reports, its explanation, and the one an export-gate override replaced."""
+    # The wind-down report is rendered inside closing_phase, before the loop assigns the terminal stop_reason;
+    # closing_phase is only entered on the wall-clock deadline, so fall back to time_exhausted rather than blank.
+    stop_reason = str(getattr(state, "stop_reason", "") or "").strip()
+    if not stop_reason and getattr(state, "closing_phase", False):
+        stop_reason = "time_exhausted"
+    gated = export_gate_stop_reason(state)
+    return {
+        "stop_reason": gated or stop_reason,
+        "stop_reason_explanation": _explain_stop_reason(gated or stop_reason, state),
+        # The terminal the run would have reported, kept so the override hides nothing.
+        **({"ungated_close_reason": stop_reason} if gated else {}),
+    }
+
+
 def _build_summary_dict(
     state: SharedState,
     ev_counts: dict[str, int],
@@ -269,19 +288,13 @@ def _build_summary_dict(
 ) -> dict[str, Any]:
     """Assemble the machine-readable session summary dict."""
     graded = resolve_graded_comparison(state, state.current_best, against_baseline=True)
-    # The wind-down report is rendered inside closing_phase, before the loop assigns the terminal stop_reason;
-    # closing_phase is only entered on the wall-clock deadline, so fall back to time_exhausted rather than blank.
-    stop_reason = str(getattr(state, "stop_reason", "") or "").strip()
-    if not stop_reason and getattr(state, "closing_phase", False):
-        stop_reason = "time_exhausted"
     summary: dict[str, Any] = {
         "session_id": state.session_id,
         "model_name": state.model_name,
         "model_path": state.model_path,
         "model_class": state.model_class,
         "framework": getattr(state, "framework", "") or "",
-        "stop_reason": stop_reason,
-        "stop_reason_explanation": _explain_stop_reason(stop_reason, state),
+        **_stop_reason_fields(state),
         "baseline_tput": state.baseline_tput,
         "baseline_perf": dict(getattr(state, "baseline_perf", None) or {}),
         # Read back by the graded-axes section: the persisted AgentX marker outlives the shell, so a report rendered

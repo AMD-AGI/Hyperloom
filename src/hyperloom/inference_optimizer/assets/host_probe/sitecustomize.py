@@ -50,3 +50,9 @@ finally:
     import hl_host_probe
 
     hl_host_probe.install_from_env()
+
+    # Separate from the probe above, and armed separately: the export gate needs this
+    # on benchmark runs, where the probe is deliberately off.
+    import hl_aoti_evidence
+
+    hl_aoti_evidence.install_from_env()

@@ -251,6 +251,125 @@ def test_an_unreadable_patch_without_a_declared_boundary_is_unchanged(
     assert _resolve_framework_root(str(tmp_path), paths) == _resolve_framework_root_unscoped(str(tmp_path), paths)
 
 
+def _declare_aoti(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, aoti: object) -> Path:
+    module = tmp_path / "hyperloom_optimize.py"
+    module.write_text(_HOOK, encoding="utf-8")
+    (tmp_path / "optimization_scope.json").write_text(
+        json.dumps({"schema_version": 2, "file": str(module), "aoti": aoti}), encoding="utf-8"
+    )
+    monkeypatch.setenv("HYPERLOOM_BYPASS_SCRIPTS_DIR", str(tmp_path))
+    return module
+
+
+def test_a_schema_1_declaration_declares_no_export(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Schema 1 predates the block, so a stray one must not silently enable export."""
+    from hyperloom.common.optimization_scope import aoti_config
+
+    module = tmp_path / "hyperloom_optimize.py"
+    module.write_text(_HOOK, encoding="utf-8")
+    (tmp_path / "optimization_scope.json").write_text(
+        json.dumps({"schema_version": 1, "file": str(module), "aoti": {"enabled": True}}), encoding="utf-8"
+    )
+    monkeypatch.setenv("HYPERLOOM_BYPASS_SCRIPTS_DIR", str(tmp_path))
+    assert aoti_config() is None
+
+
+def test_declared_dynamic_dimensions_are_read(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    from hyperloom.common.optimization_scope import aoti_config
+
+    dim = {"input": "pixel_values", "dim": 0, "min": 1, "max": 8, "derivation": "camera count on the rig"}
+    _declare_aoti(tmp_path, monkeypatch, {"enabled": True, "dynamic_dims": [dim]})
+    config = aoti_config()
+    assert config.enabled and config.pin_all_others is True
+    assert (config.dynamic_dims[0].input, config.dynamic_dims[0].max) == ("pixel_values", 8)
+
+
+@pytest.mark.parametrize(
+    ("aoti", "message"),
+    [
+        ({"enabled": "yes"}, "aoti.enabled must be a boolean"),
+        ({"enabled": True, "dynamic_dims": {}}, "aoti.dynamic_dims must be a list"),
+        ({"enabled": True, "dynamic_dims": [{"input": "x"}]}, "is missing"),
+        (
+            {"enabled": True, "dynamic_dims": [{"input": "x", "dim": 0, "min": 8, "max": 8, "derivation": "d"}]},
+            "requires min < max",
+        ),
+        (
+            {
+                "enabled": True,
+                "dynamic_dims": [
+                    {"input": "x", "dim": 0, "min": 1, "max": 8, "derivation": "d"},
+                    {"input": "x", "dim": 0, "min": 2, "max": 9, "derivation": "d"},
+                ],
+            },
+            "twice",
+        ),
+        ("not an object", "aoti must be an object"),
+    ],
+)
+def test_a_malformed_export_block_is_refused(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, aoti: object, message: str
+) -> None:
+    from hyperloom.common.optimization_scope import aoti_config
+
+    _declare_aoti(tmp_path, monkeypatch, aoti)
+    with pytest.raises(ValueError, match=message):
+        aoti_config()
+
+
+def test_the_launch_refuses_a_malformed_export_block(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Nothing else reports it: every other caller of aoti_config swallows the error."""
+    module = _declare_aoti(tmp_path, monkeypatch, {"enabled": "yes"})
+    monkeypatch.setenv("FRAMEWORK_REPO_PATH", str(module.parent))
+    with pytest.raises(ValueError, match="aoti.enabled must be a boolean"):
+        enforce_custom_scope("custom")
+
+
+def test_a_declared_export_adds_its_bounds_to_the_agent_instructions(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    dim = {"input": "pixel_values", "dim": 0, "min": 1, "max": 8, "derivation": "camera count"}
+    _declare_aoti(tmp_path, monkeypatch, {"enabled": True, "dynamic_dims": [dim]})
+    instructions = scope_instructions()
+    assert "aoti_compile_and_package" in instructions
+    assert "pixel_values axis 0 in [1, 8] (camera count)" in instructions
+
+
+def test_a_malformed_block_does_not_take_down_prompt_building(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """The agent is simply not told about an export it could not have been given valid bounds for."""
+    _declare_aoti(tmp_path, monkeypatch, {"enabled": "yes"})
+    instructions = scope_instructions()
+    assert "Single-file optimization contract" in instructions
+    assert "aoti_compile_and_package" not in instructions
+
+
+def test_an_exporting_module_declares_what_its_first_call_costs(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    body = "import torch\n\n\ndef hyperloom_optimize(model):\n    return torch._inductor.aoti_load_package('m.pt2')\n"
+    state, dest = _accepted(tmp_path, monkeypatch, body=body)
+    result = build_single_file(state, tmp_path, optimization_scope(), dest)
+    assert result["runtime_requirements"]["compiles_on_first_call"] is True
+    assert any("aoti_first_call_compiles" in w for w in result["warnings"])
+
+
+def test_a_non_exporting_module_declares_no_runtime_requirements(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    state, dest = _accepted(tmp_path, monkeypatch)
+    assert "runtime_requirements" not in build_single_file(state, tmp_path, optimization_scope(), dest)
+
+
+def test_a_kernel_patch_is_refused_for_a_single_file_workload(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """That route writes whole files into the tree, outside the one editable module."""
+    from hyperloom.orchestrator.kernel.apply_kernel_patch import apply_kernel_patch
+
+    _declare(tmp_path, monkeypatch)
+    result = apply_kernel_patch(object())
+    assert result["error_class"] == "single_file_scope"
+    assert "hyperloom_optimize.py" in result["error"]
+
+
 import pytest
 from pathlib import Path
 from hyperloom.common.optimization_scope import (
