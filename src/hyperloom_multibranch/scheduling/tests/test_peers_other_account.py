@@ -91,7 +91,7 @@ def build_peers(workspace: str, root: str | None, agentx: bool) -> dict[str, str
         0,
         (),
         "",
-        agent_launch="/launches/arbor.json",
+        agent_launch="/launches/agent.json",
     )
 
     def sessions(_wiring: object) -> ModelSessions:

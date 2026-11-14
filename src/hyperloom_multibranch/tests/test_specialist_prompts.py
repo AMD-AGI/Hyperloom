@@ -351,11 +351,11 @@ def test_the_role_says_a_cross_image_lead_is_measured_here_and_its_left_out_file
     assert "never replay it as is" in prompt
 
 
-def test_the_role_holds_the_specialist_to_arbor_s_map_when_its_brief_has_one():
+def test_the_role_holds_the_specialist_to_the_agent_map_when_its_brief_has_one():
     role = role_prompt(WORKLOAD)
 
-    assert "Arbor's map" in role and "binding" in role
-    assert "a direction a running Arbor branch holds" in role and "answers its reason" in role
+    assert "The agent map" in role and "binding" in role
+    assert "a direction a running agent branch holds" in role and "answers its reason" in role
 
 
 def test_an_inferencex_role_names_its_bar_and_defects_and_no_agentx_objective():

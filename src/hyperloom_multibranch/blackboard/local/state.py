@@ -84,7 +84,7 @@ class ClaimDecision:
 
 @dataclass(frozen=True)
 class AgentMapWrite:
-    """Arbor's map as the scheduler wrote it: its directions, in the map's order."""
+    """The agent map as the scheduler wrote it: its directions, in the map's order."""
 
     directions: tuple[MapDirection, ...] = ()
 

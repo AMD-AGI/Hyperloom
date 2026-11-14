@@ -27,7 +27,7 @@ what it said before, so other branches read them; what it wrote after its last k
 branch's judge judges the imports as it judges any branch's tests; nothing of its verdicts reaches the agent, but
 what the integration head holds does, through the notes (:mod:`agent_knowledge`) rewritten whenever the head moves,
 and the agent is given until its last import can still be judged in EXPLORE as its time budget. An agent that writes
-a snapshot of each keep (Arbor's component mode) runs to that time as its absolute deadline, against the commit its
+a snapshot of each keep (component mode) runs to that time as its absolute deadline, against the commit its
 workspace starts on, and has its newest snapshot read whole, chained back to that commit, its launch only as it
 differs from the one MB started it with (:func:`read_snapshot`); a variable the measurement sets itself is left out of
 every keep and noted once; why it ended, from its exit file, goes into the branch log; one that refuses its config

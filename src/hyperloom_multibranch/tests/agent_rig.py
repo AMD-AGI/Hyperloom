@@ -2,8 +2,9 @@
 # SPDX-License-Identifier: MIT
 
 """Fakes for the tests of an autonomous agent's specialist: the onboarding's sandbox and process, a local sandbox and
-toolbox, the component agent and its plan, an image's aiter tables, and a fake Arbor checkout with a branch's spec.
-It imports nothing of the autonomous session, so a test that only onboards an agent does not need it."""
+toolbox, the component agent and its plan, an image's aiter tables, and a stand-in component agent's checkout and
+adapter with a branch's spec. It imports nothing of the autonomous session, so a test that only onboards an agent
+does not need it."""
 
 import asyncio
 import hashlib
@@ -11,6 +12,7 @@ import json
 import os
 import signal
 import subprocess
+import sys
 from collections.abc import Mapping
 from dataclasses import asdict, dataclass, field, replace
 from pathlib import Path
@@ -20,12 +22,21 @@ from hyperloom.contracts.measurement import AttachmentRef, TestRequest
 from hyperloom.contracts.recipe import ComponentPatches, KernelArtifact, KernelKind, LaunchConfig, Recipe
 from hyperloom.measure.compile import LocalBlobStore
 from hyperloom.measure.surface import SurfaceViolation, check_launch_envs
-from hyperloom_common.shared_storage import child_umask
+from hyperloom_common.shared_storage import child_umask, copy_shared_file, make_shared_dirs
 from hyperloom_multibranch.blackboard import LocalBlackboard
 from hyperloom_multibranch.contracts.toolbox import BranchLease, LeaseCharge, RequestRejected
+from hyperloom_multibranch.specialist import component_agent
+from hyperloom_multibranch.specialist.agent_manifest import AgentManifest
 from hyperloom_multibranch.specialist.agent_onboarding import CommandResult, OnboardingSetup
 from hyperloom_multibranch.specialist.agent_spec import AgentSpec
-from hyperloom_multibranch.specialist.arbor_adapter import ARBOR_PYTHON, BRANCH_RUN
+from hyperloom_multibranch.specialist.component_agent import (
+    BRANCH_RUN,
+    MB_DIR,
+    AgentCheckout,
+    ComponentAgent,
+    ComponentRun,
+    SplitFailed,
+)
 from hyperloom_multibranch.specialist.gate_client import FixedGateClient
 from hyperloom_multibranch.toolbox.kernel_artifacts import KernelVariables
 from inference_suite.contracts import FixedWorkload
@@ -98,17 +109,17 @@ ROOT = Recipe(
 )
 
 
-#: An agent in Arbor's component mode, session in run/: every ``gap`` s it commits each of ``keeps`` (a file of its own
+#: An agent in component mode, session in run/: every ``gap`` s it commits each of ``keeps`` (a file of its own
 #: at the first) and snapshots it to run/snaps, the outbox MB's config names: ``change.patch`` against its parent,
 #: ``served.patch`` against the root, the launch, ``table`` as AITER_CONFIG_GEMM_A8W8's table after an image default
 #: (too large to copy with ``huge``, wrong digest with ``bad_sha``) and an AITER JIT link outside its tree; ``parts``
-#: gives the variable's value with ``table`` appended or replacing its last part, in Arbor's multi-part shape. LATEST
+#: gives the variable's value with ``table`` appended or replacing its last part, as a path list. LATEST
 #: names each keep, or the last only without ``latest_each``. ``skip`` gets no snapshot; ``stray`` is made on a commit
 #: MB never gave it; ``orphan`` on the root (``orphan_notes`` say so). It removes the last exit file, ends with ``exit``
 #: after ``tail`` s or 0 on SIGTERM, writing ``reason`` to run/component_exit.json before an exit 0 only.
 COMPONENT_AGENT = """
 import hashlib, json, os, pathlib, signal, subprocess, sys, time
-LISTED = "/sgl-workspace/aiter/aiter/configs/a8w8_tuned_gemm.csv:/arbor/workspace/tuned.csv"
+LISTED = "/sgl-workspace/aiter/aiter/configs/a8w8_tuned_gemm.csv:/agent/workspace/tuned.csv"
 config = json.loads(pathlib.Path("campaign.json").read_text())
 plan, workspace, root = config["plan"], pathlib.Path(config["workspace"]), config["component"]["root"]
 session = pathlib.Path("run")
@@ -218,7 +229,7 @@ class Component:
     latest_each: bool = True
     envs: dict[str, str] = field(default_factory=dict)
     flags: str = "--max-num-seqs {seqs}"
-    #: The launch the config MB wrote starts the agent with, as Arbor's ``server_flags`` and ``server_env``.
+    #: The launch the config MB wrote starts the agent with, as its ``server_flags`` and ``server_env``.
     started: dict[str, object] | None = None
     table: str = ""
     huge: bool = False
@@ -484,10 +495,10 @@ CONFIG_FILE, SESSION_DIR = BRANCH_RUN.config_file, BRANCH_RUN.session_dir
 START_TABLE_PARTS = ("/mb/agent/start-tables/AITER_CONFIG_GEMM_A8W8/a8w8_tuned_gemm.csv", "/mb/start-tables/r.csv")
 
 
-#: Arbor's entry point in a fake checkout. It runs :data:`COMPONENT_AGENT` on the config ``--config`` names, which
+#: The stand-in agent's entry point. It runs :data:`COMPONENT_AGENT` on the config ``--config`` names, which
 #: reads campaign.json and keeps its session in run/ of its working directory: run/ is linked to the config's session
-#: and the plan comes from fake-plan.json, its environment on top of the config's ``server_env``, as Arbor's snapshot
-#: records the launch it measured. With ``refuse`` in the plan it refuses instead, as Arbor does, after ``tail``
+#: and the plan comes from fake-plan.json, its environment on top of the config's ``server_env``, as a snapshot
+#: records the launch it measured. With ``refuse`` in the plan it refuses instead, as a component does, after ``tail``
 #: seconds: the reasons on stderr and in the session's refusal file, then exit 2.
 FAKE_MAIN = """
 import json, os, pathlib, runpy, sys, time
@@ -499,7 +510,7 @@ if plan["refuse"]:
     time.sleep(plan["tail"])
     (session / "component_refused.json").write_text(json.dumps({"reasons": plan["refuse"], "ts": "2026-10-29T00:00:00Z"}))
     for reason in plan["refuse"]:
-        print(f"[arbor] refusing to start: {reason}", file=sys.stderr, flush=True)
+        print(f"[agent] refusing to start: {reason}", file=sys.stderr, flush=True)
     sys.exit(2)
 if not os.path.lexists("run"):
     os.symlink(session, "run")
@@ -508,7 +519,7 @@ runpy.run_path("component.py", run_name="__main__")
 """
 
 
-#: Arbor's split in a fake checkout: the open directions of the map dealt in turn to the shares, or exit 1 when there
+#: The stand-in agent's map tool. Its split: the open directions of the map dealt in turn to the shares, or exit 1 when there
 #: are fewer than shares. Its generate: one direction per op of the profile at 2 % or more, largest first, or exit 1
 #: when there is none.
 FAKE_DIRECTIONS = """
@@ -533,17 +544,9 @@ for number in range(1, shares + 1):
 """
 
 
-#: What an Arbor checkout needs for the adapter: its markers and the serving pack's validator.
-CHECKOUT_FILES = {
-    "arbor/__init__.py": "",
-    "arbor/__main__.py": FAKE_MAIN,
-    "arbor/component.py": "# component mode\n",
-    "arbor/directions.py": FAKE_DIRECTIONS,
-    "docs/hosts.md": "# Running Arbor inside a host (component mode)\n",
-    "packs/serving/pack.yaml": "name: serving\n",
-    "packs/serving/validator/bench.sh": "#!/usr/bin/env bash\n",
-    "packs/serving/validator/correctness.sh": "#!/usr/bin/env bash\n",
-}
+#: The stand-in agent's checkout, which its adapter recognises by these two files: its entry point and its map tool.
+ENTRY_POINT, MAP_TOOL = "agent.py", "directions.py"
+CHECKOUT_FILES = {ENTRY_POINT: FAKE_MAIN, MAP_TOOL: FAKE_DIRECTIONS}
 
 
 def _git(cwd: Path, *args: str) -> str:
@@ -591,14 +594,6 @@ def _spec(tmp_path: Path, **changes: object) -> AgentSpec:
     return replace(spec, **changes)
 
 
-#: Arbor main 1fa2069's arbor/component.py, as far as the adapter reads it: its component keys, "review" among them.
-GATED_COMPONENT = (
-    'BLOCK_KEYS = ("host", "deadline", "seconds", "notes", "bench_command", "outbox", "phase_minutes",\n'
-    '              "root", "plan", "stop_at", "profile", "review")\n'
-    'REVIEW_BY = ("host",)\n'
-)
-
-
 MAP = {
     "directions": [
         {"id": "m-attn", "kind": "increment", "title": "attention decode path", "rank": 1},
@@ -609,13 +604,130 @@ MAP = {
 }
 
 
-LAUNCH = f"{ARBOR_PYTHON} -m arbor run --config {CONFIG_FILE}"
-REASONS = ["component.plan[0]: m-attn: no title", "component mode needs a deadline"]
+#: Where the stand-in's adapter copies a branch's plan in its checkout, beside its config.
+PLAN_FILE = f"{MB_DIR}/plan.json"
+#: Where the stand-in ships dossiers of its own, and the one of them a pass never wrote.
+DOSSIER_DIR, SHIPPED = "docs/dossier", "shipped"
 
 
-def _arbor_repo(tmp_path: Path, agent: Component = Component(), refuse: tuple[str, ...] = ()) -> Path:
-    """A fake Arbor's repository, run as :data:`FAKE_MAIN` says."""
+def launch_of(run: ComponentRun = BRANCH_RUN) -> str:
+    """The command the stand-in's adapter launches it with for ``run``."""
+
+    return f"python3 {ENTRY_POINT} --config {run.config_file}"
+
+
+def _stand_in_repo(tmp_path: Path, agent: Component = Component(), refuse: tuple[str, ...] = ()) -> Path:
+    """The stand-in agent's repository, run as :data:`FAKE_MAIN` says."""
 
     plan = json.dumps({**asdict(agent), "refuse": list(refuse)})
     files = {**CHECKOUT_FILES, "component.py": COMPONENT_AGENT, "fake-plan.json": plan}
-    return _committed(_write(tmp_path / "arbor-repo", files))
+    return _committed(_write(tmp_path / "agent-repo", files))
+
+
+def _stand_in_manifest(install: tuple[str, ...]):
+    def manifest(spec: AgentSpec, checkout: AgentCheckout, run: ComponentRun) -> AgentManifest:
+        """The stand-in's manifest for ``run``: a config of what its scripts read, the branch's plan copied beside it."""
+
+        path = checkout.path.absolute()
+        make_shared_dirs(path / run.session_dir)
+        component: dict[str, object] = {"host": "hyperloom-mb", "root": spec.root, "outbox": "keeps"}
+        if spec.deadline:
+            component["deadline"] = spec.deadline
+        if run.stop_at:
+            component["stop_at"] = run.stop_at
+        if spec.plan:
+            carried = path / PLAN_FILE
+            make_shared_dirs(carried.parent)
+            copy_shared_file(Path(spec.plan), carried)
+            component["plan"] = str(carried)
+        config = {
+            "session_root": str(path / run.session_dir),
+            "workspace_root": spec.workspace,
+            "server_flags": spec.server_args,
+            "server_env": dict(spec.envs),
+            "source_unkept": spec.source_unkept,
+            "component": component,
+        }
+        return AgentManifest.read(
+            {
+                "source": checkout.source,
+                "commit": checkout.commit,
+                "install": list(install),
+                "config_file": run.config_file,
+                "config": config,
+                "launch": launch_of(run),
+                "resume": launch_of(run),
+                "keep": None,
+                "config_source": None,
+                "summary_field": "",
+                "needs": [],
+                "ledger": None,
+                "snapshots": {"session": run.session_dir},
+            }
+        )
+
+    return manifest
+
+
+async def _map_tool(checkout: Path, written: tuple[Path, ...], *args: str) -> None:
+    """Run the stand-in's map tool in ``checkout``; :class:`SplitFailed` with what it printed when it fails or leaves
+    any of ``written`` unwritten."""
+
+    process = await asyncio.create_subprocess_exec(
+        sys.executable,
+        MAP_TOOL,
+        *args,
+        cwd=checkout,
+        stdout=asyncio.subprocess.PIPE,
+        stderr=asyncio.subprocess.STDOUT,
+    )
+    output, _ = await process.communicate()
+    if process.returncode != 0 or not all(path.is_file() for path in written):
+        raise SplitFailed(f"the map tool exited {process.returncode}: {output.decode(errors='replace').strip()}")
+
+
+async def _generate(checkout: Path, profile: Path, out: Path) -> Path:
+    await _map_tool(checkout, (out,), "generate", "--profile", str(profile), "--out", str(out))
+    return out
+
+
+async def _split(checkout: Path, map_file: Path, shares: int, out: Path) -> tuple[Path, ...]:
+    paths = tuple(out / f"share-{number}.json" for number in range(1, shares + 1))
+    await _map_tool(checkout, paths, "split", str(map_file), "--shares", str(shares), "--out", str(out))
+    return paths
+
+
+def _pass_dossier(checkout: Path, session: Path) -> Path | None:
+    """The dossier a pass wrote, in its session or else in its checkout: never the one the stand-in ships."""
+
+    for root in (session / DOSSIER_DIR, checkout / DOSSIER_DIR):
+        written = sorted(path for path in root.glob("*") if path.is_dir() and path.name != SHIPPED)
+        if written:
+            return written[0]
+    return None
+
+
+def stand_in_agent(install: tuple[str, ...] = ()) -> ComponentAgent:
+    """The adapter of the stand-in agent, whose checkout holds :data:`CHECKOUT_FILES`; it installs with ``install``."""
+
+    return ComponentAgent(
+        name="the stand-in agent",
+        recognises=lambda checkout: all((checkout / name).is_file() for name in CHECKOUT_FILES),
+        manifest=_stand_in_manifest(install),
+        fit_keys=lambda config, checkout: (dict(config), ()),
+        eval_envs=("GSM8K_MIN", "GSM8K_LIMIT"),
+        map_file="directions.json",
+        generate_directions=_generate,
+        split_directions=_split,
+        dossier_index="README.md",
+        pass_dossier=_pass_dossier,
+        dossier_notes=lambda checkout, dossier: (),
+    )
+
+
+def install_stand_in(monkeypatch, install: tuple[str, ...] = ()) -> ComponentAgent:
+    """Make the stand-in's adapter the one this install has, for one test; the adapter."""
+
+    agent = stand_in_agent(install)
+    monkeypatch.setattr(component_agent, "installed", lambda: (agent,))
+    return agent

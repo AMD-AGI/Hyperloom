@@ -27,10 +27,6 @@ _UNPACKAGED_ASSETS = (
     # The gemm-tune subpackage's own docs describe the source tree (how to run the tuner from a checkout), not the
     # installed package.
     "kernelforge/workflows/gemm_tune/*.md",
-    # Git's own files in the vendored Arbor (hyperloom_arbor/VENDOR.md), which ships whole otherwise: its
-    # attributes and an empty directory's keeper mean nothing outside a checkout.
-    "hyperloom_arbor/**/.gitattributes",
-    "hyperloom_arbor/**/.gitkeep",
 )
 
 try:  # tomllib is stdlib from 3.11; the ``ci`` extra pins tomli for 3.10.

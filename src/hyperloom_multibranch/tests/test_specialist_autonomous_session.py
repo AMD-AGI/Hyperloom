@@ -40,7 +40,6 @@ from hyperloom_multibranch.blackboard import LocalBlackboard
 from hyperloom_multibranch.blackboard.local.blackboard import LEARNING_MAX_CHARS
 from hyperloom_multibranch.blackboard.tests.factories import result
 from hyperloom_multibranch.specialist import (
-    arbor_adapter,
     autonomous_session,
     keep_requeue,
     worktree as worktree_module,
@@ -88,17 +87,18 @@ from hyperloom_multibranch.tests.agent_rig import (
     LocalSandbox,
     Toolbox,
     _aiter,
-    _arbor_repo,
     _replayed,
+    _stand_in_repo,
     _until,
+    install_stand_in,
 )
 
 
 #: An agent that, every ``gap`` seconds, writes each of ``keeps`` to its workspace's config.py and to the config it
-#: runs with, commits it when ``commits`` is set, as Arbor does, and records and prints the keep; it ends with ``exit``
+#: runs with, commits it when ``commits`` is set, and records and prints the keep; it ends with ``exit``
 #: after ``tail`` more seconds of silence. With ``table`` it also writes that kernel table, for the keep, to its workspace's tuned.csv,
 #: or to ``table_at`` in its checkout. It reports ``envs`` as NAME=VALUE words in run/result.json, as GEAK does.
-#: Before each keep it appends that keep's entries of ``ledger`` to its ledger, run/ledger.jsonl, as Arbor does.
+#: Before each keep it appends that keep's entries of ``ledger`` to its ledger, run/ledger.jsonl.
 #: With a keep file, it keeps nothing until ``after`` exists, the session's watch file: the preflight reads the keep
 #: file's baseline once the agent started, and a keep made before that read would be taken for one it had before.
 AGENT = """
@@ -230,7 +230,7 @@ def _manifest(workspace: str, agent: Agent | Component, after: str = "") -> str:
 def _component_manifest(workspace: str, agent: Component) -> str:
     return json.dumps(
         {
-            "source": "arbor",
+            "source": "agent",
             "commit": "c",
             "install": [],
             "config_file": "campaign.json",
@@ -440,7 +440,7 @@ def _from_a_wheel(monkeypatch: pytest.MonkeyPatch) -> None:
 
 
 def _told(monkeypatch: pytest.MonkeyPatch) -> None:
-    """The agent made ready as Arbor is: told why no change to its component's source can be kept."""
+    """The agent made ready as an adapter makes one: told why no change to its component's source can be kept."""
     make_ready = autonomous_session.make_ready
 
     async def told(source: str, spec: AgentSpec, *args):
@@ -1355,7 +1355,7 @@ async def test_an_agent_in_component_mode_runs_to_the_deadline_on_the_commit_mb_
     root = rig.sandbox.prompts[0].split('"root": "')[1].split('"')[0]
     assert (config["mode"], config["docker_container"]) == ("component", "@host")
     assert config["component"] == {"outbox": "snaps", "deadline": int(now + 3600.0 - 0.5), "root": root}
-    assert "docs/hosts.md" in rig.sandbox.prompts[0]
+    assert "its own documentation describes" in rig.sandbox.prompts[0]
     assert root == json.loads((tmp_path / BRANCH / "session" / "agent-watch.json").read_text())["root"]
 
 
@@ -1516,10 +1516,10 @@ async def _imported(rig: Rig) -> TestRequest:
     return request
 
 
-#: The launch the config MB wrote for an Arbor branch: its pack's harness
+#: The launch the config MB wrote for a component agent's branch: its pack's harness
 #: variables sit next to the server's own.
-ARBOR_FLAGS = "--tp 1 --max-num-seqs 128"
-ARBOR_ENV = {
+COMPONENT_FLAGS = "--tp 1 --max-num-seqs 128"
+COMPONENT_ENV = {
     "SGLANG_AITER_KV_CACHE_LAYOUT": "vectorized_5d",
     "ISL": "1024",
     "OSL": "1024",
@@ -1530,11 +1530,12 @@ ARBOR_ENV = {
 
 
 async def test_a_snapshot_imports_only_the_launch_changes_made_since_the_start_and_no_workload_variable(
-    tmp_path: Path,
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    envs = {**ARBOR_ENV, "SGLANG_QWEN3_GATE_UP_PTPC": "1"}
-    started = {"server_flags": ARBOR_FLAGS, "server_env": ARBOR_ENV}
-    agent = Component(keeps=(256,), gap=0.1, flags=ARBOR_FLAGS, envs=envs, started=started)
+    install_stand_in(monkeypatch)
+    envs = {**COMPONENT_ENV, "SGLANG_QWEN3_GATE_UP_PTPC": "1"}
+    started = {"server_flags": COMPONENT_FLAGS, "server_env": COMPONENT_ENV}
+    agent = Component(keeps=(256,), gap=0.1, flags=COMPONENT_FLAGS, envs=envs, started=started)
     rig = await _rig(tmp_path, agent, start_seconds=0.2)
 
     request = await _imported(rig)
@@ -1542,7 +1543,7 @@ async def test_a_snapshot_imports_only_the_launch_changes_made_since_the_start_a
     assert request.delta.config.envs == {"SGLANG_QWEN3_GATE_UP_PTPC": "1"}
     assert request.delta.config.server_args == "" and request.delta.config.unset_envs == ()
     watch = json.loads((tmp_path / BRANCH / "session" / "agent-watch.json").read_text())
-    # GSM8K_LIMIT is Arbor's evaluation setting, which MB gives it (arbor_adapter.EVAL_ENVS)
+    # GSM8K_LIMIT is an evaluation setting the installed adapter names, which MB gives its agent
     assert watch["refused_envs"] == {"GSM8K_LIMIT": "400", "ISL": "1024", "OSL": "1024"}
     dropped = [note for note in await rig.notices() if "GSM8K_LIMIT, ISL, OSL" in note]
     assert len(dropped) == 1 and "keep 1" in dropped[0]
@@ -1567,8 +1568,8 @@ async def test_a_keep_setting_a_variable_that_needs_a_set_flag_off_is_imported_w
 
 
 async def test_a_snapshot_whose_launch_is_the_one_it_started_with_imports_no_launch_change(tmp_path: Path) -> None:
-    started = {"server_flags": ARBOR_FLAGS, "server_env": ARBOR_ENV}
-    agent = Component(keeps=(256,), gap=0.1, flags=ARBOR_FLAGS, envs=ARBOR_ENV, started=started)
+    started = {"server_flags": COMPONENT_FLAGS, "server_env": COMPONENT_ENV}
+    agent = Component(keeps=(256,), gap=0.1, flags=COMPONENT_FLAGS, envs=COMPONENT_ENV, started=started)
     rig = await _rig(tmp_path, agent, start_seconds=0.2)
 
     request = await _imported(rig)
@@ -1617,7 +1618,7 @@ async def test_a_table_too_large_to_copy_is_noted_and_its_variable_imported_as_t
     request = await _imported(rig)
 
     assert request.delta.add_kernels == ()
-    assert request.delta.config.envs["AITER_CONFIG_GEMM_A8W8"].endswith(":/arbor/workspace/tuned.csv")
+    assert request.delta.config.envs["AITER_CONFIG_GEMM_A8W8"].endswith(":/agent/workspace/tuned.csv")
     assert any("AITER_CONFIG_GEMM_A8W8" in note and "not copied" in note for note in await rig.notices())
 
 
@@ -1721,26 +1722,20 @@ def _under_git(path: Path, names: tuple[str, ...]) -> bool:
     return any(parts[i] == ".git" and parts[i + 1] in names for i in range(len(parts) - 1))
 
 
-@pytest.mark.parametrize("arbor", [False, True], ids=["agent", "arbor"])
+@pytest.mark.parametrize("adapted", [False, True], ids=["agent", "adapted"])
 async def test_a_preflight_below_shared_storage_leaves_the_group_write_on_all_it_made_but_git_s_own_files(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, arbor: bool
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, adapted: bool
 ) -> None:
     tmp_path.chmod(0o2775)
     previous = os.umask(0o022)
     try:
         given: dict[str, object] = {}
-        if arbor:
-            monkeypatch.setattr(arbor_adapter, "INSTALL", ())
-            plan, dossier = tmp_path / "plan.json", tmp_path / "dossier" / "d1"
+        if adapted:
+            install_stand_in(monkeypatch)
+            plan = tmp_path / "plan.json"
             plan.write_text(json.dumps({"directions": ["fuse the decode norm"]}))
-            dossier.mkdir(parents=True)
-            (dossier / "index.md").write_text("# dossier\n")
-            source = _arbor_repo(tmp_path, Component(keeps=(), tail=0.6))
-            given = {
-                "source": source,
-                "start_seconds": 0.2,
-                "spec_fields": {"plan": str(plan), "dossier": str(dossier)},
-            }
+            source = _stand_in_repo(tmp_path, Component(keeps=(), tail=0.6))
+            given = {"source": source, "start_seconds": 0.2, "spec_fields": {"plan": str(plan)}}
         rig = await _rig(tmp_path, **given)
         await rig.session.preflight()
     finally:
@@ -1791,19 +1786,19 @@ def _as_member(accounts: Accounts, uid: int, leg: Callable[[], Awaitable[None]])
 
 
 @pytest.mark.filterwarnings("ignore:This process .* is multi-threaded:DeprecationWarning")
-@pytest.mark.parametrize("arbor", [False, True], ids=["agent", "arbor"])
+@pytest.mark.parametrize("adapted", [False, True], ids=["agent", "adapted"])
 def test_another_account_of_the_group_resumes_a_branch_whose_files_a_first_leg_wrote_under_umask_022(
-    monkeypatch: pytest.MonkeyPatch, arbor: bool
+    monkeypatch: pytest.MonkeyPatch, adapted: bool
 ) -> None:
     with other_accounts() as accounts:
         tmp_path = accounts.shared_dir("run")
         blobs = LocalBlobStore(tmp_path / "blobs")
         given: dict[str, object] = {"start": _replayed(blobs), "aiter": _aiter(tmp_path)}
-        if arbor:
-            monkeypatch.setattr(arbor_adapter, "INSTALL", ())
+        if adapted:
+            install_stand_in(monkeypatch)
             plan = tmp_path / "plan.json"
             plan.write_text(json.dumps({"directions": ["fuse the decode norm"]}))
-            source = _arbor_repo(tmp_path, Component(keeps=(), exit=3, tail=0.6))
+            source = _stand_in_repo(tmp_path, Component(keeps=(), exit=3, tail=0.6))
             given |= {"source": source, "start_seconds": 0.2, "spec_fields": {"plan": str(plan)}}
         agent = Agent(keeps=(), exit=3, resume="exit 3")
         rig = asyncio.run(_rig(tmp_path, agent, **given))
@@ -1936,7 +1931,7 @@ async def _multi_part(tmp_path: Path, parts: str) -> tuple[Rig, TestRequest]:
 async def test_a_snapshot_that_appends_its_rows_to_the_start_s_tables_imports_the_start_s_rows_and_its_own(
     tmp_path: Path,
 ) -> None:
-    """Arbor copies every file of a multi-part value; the private default copies carry no rows of the agent's."""
+    """A snapshot copies every file of a multi-part value; the private default copies carry no rows of the agent's."""
 
     rig, request = await _multi_part(tmp_path, "append")
 

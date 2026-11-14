@@ -72,9 +72,9 @@ Declare = Callable[..., None]
 
 @pytest.fixture
 def declare(monkeypatch: pytest.MonkeyPatch) -> Iterator[Declare]:
-    """Declare adapters as other packages' entry points do, with none of this package's own unless ``built_in``."""
+    """Declare adapters as other packages' entry points do."""
 
-    def _declare(*agents: object, built_in: tuple[str, ...] = ()) -> None:
+    def _declare(*agents: object) -> None:
         module = types.ModuleType(MODULE)
         points = []
         for number, agent in enumerate(agents):
@@ -86,7 +86,6 @@ def declare(monkeypatch: pytest.MonkeyPatch) -> Iterator[Declare]:
             "entry_points",
             lambda group: points if group == ENTRY_POINT_GROUP else [],
         )
-        monkeypatch.setattr(component_agent, "_BUILT_IN", built_in)
         installed.cache_clear()
 
     yield _declare
@@ -114,13 +113,11 @@ def test_another_package_s_adapter_is_found_by_its_entry_point(declare: Declare,
     assert eval_envs() == frozenset({"STAND_IN_EVAL"})
 
 
-def test_adapters_are_listed_by_name_after_this_package_s_own(declare: Declare) -> None:
-    own, zeta, alpha = stand_in("own"), stand_in("zeta", ("Z",)), stand_in("alpha", ("A",))
-    declare(zeta, alpha, built_in=(f"{MODULE}:OWN",))
-    setattr(sys.modules[MODULE], "OWN", own)
+def test_adapters_are_listed_by_name(declare: Declare) -> None:
+    declare(stand_in("zeta", ("Z",)), stand_in("alpha", ("A",)))
 
-    assert [agent.name for agent in installed()] == ["own", "alpha", "zeta"]
-    assert eval_envs() == frozenset({"STAND_IN_EVAL", "A", "Z"})
+    assert [agent.name for agent in installed()] == ["alpha", "zeta"]
+    assert eval_envs() == frozenset({"A", "Z"})
 
 
 def test_a_declaration_that_names_no_adapter_is_refused(declare: Declare) -> None:
@@ -147,9 +144,3 @@ def test_a_dossier_is_one_an_installed_adapter_knows(declare: Declare, tmp_path:
         cli._agent_dossier(tmp_path, tmp_path / "map.json")
     (tmp_path / "INDEX.md").write_text("# a dossier\n", encoding="utf-8")
     assert cli._agent_dossier(tmp_path, tmp_path / "map.json") == str(tmp_path.absolute())
-
-
-def test_this_package_carries_one_adapter_of_its_own() -> None:
-    installed.cache_clear()
-
-    assert [agent.name for agent in installed()][:1] == ["Arbor"]

@@ -14,7 +14,7 @@ value may list the image's default tables before them, which the artifact's rows
 in the agent's run, so it carries only the agent's rows.
 
 An agent run as a component writes each keep whole instead, as a snapshot directory (:func:`read_snapshot`, the layout
-of Arbor's component mode): ``keep.json`` names the keep before it and the commits it was made on and made, its
+of component mode): ``keep.json`` names the keep before it and the commits it was made on and made, its
 ``change.patch`` takes the one to the other, ``config.json`` is its whole launch, of which only what differs from the
 launch it was started with goes in, and ``tables/<VAR>/`` the kernel table each variable loads, with the digest
 ``keep.json`` lists (a table too large to copy is listed with no file); for an aiter value that lists several files,
@@ -235,8 +235,8 @@ def _by_flag(args: str) -> dict[str, list[list[str]]]:
 
 
 def _without_measurement(envs: Mapping[str, str]) -> tuple[dict[str, str], dict[str, str]]:
-    """``envs`` without the variables the measurement sets itself, which a test refuses in its launch, and Arbor's
-    evaluation settings (:func:`~.component_agent.eval_envs`), which MB gives it; and those."""
+    """``envs`` without the variables the measurement sets itself, which a test refuses in its launch, and the
+    evaluation settings of a component agent (:func:`~.component_agent.eval_envs`), which MB gives it; and those."""
 
     owned = {*measurement_envs(envs), *(name for name in envs if name in eval_envs())}
     return {name: value for name, value in envs.items() if name not in owned}, {name: envs[name] for name in owned}
@@ -332,7 +332,7 @@ def read_snapshot(outbox: Path, number: int, root: str, applied: Applied, start:
 
 
 def _component_launch(config: object) -> _Launch | None:
-    """The ``server_flags`` and ``server_env`` of a config of Arbor's, ``None`` when it holds no such pair."""
+    """The ``server_flags`` and ``server_env`` of a component agent's config, ``None`` when it holds no such pair."""
 
     args = config.get("server_flags") if isinstance(config, Mapping) else None
     envs = config.get("server_env") if isinstance(config, Mapping) else None
@@ -373,7 +373,7 @@ def _snapshot(outbox: Path, number: int, root: str) -> _Snapshot:
         raise KeptChangeError(f"{_directory(number)}/{KEEP_FILE} names no parent and commit")
     if not isinstance(tables, Mapping):
         raise KeptChangeError(f"{_directory(number)}/{KEEP_FILE} lists no tables")
-    # Arbor makes a keep on the root when the commit of the one before is gone from its workspace, and says why.
+    # A keep is made on the root when the commit of the one before is gone from the agent's workspace; it says why.
     notes = keep.get("notes")
     rebased = previous is not None and parent == root and isinstance(notes, str) and bool(notes.strip())
     snapshot = _Snapshot(number, previous, parent, commit, _said(keep), tables, rebased, keep.get("retracts"))

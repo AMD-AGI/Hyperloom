@@ -47,8 +47,8 @@ class BranchTask:
     focus: str = ""
     #: The file of an agent branch's share of the session's directions, ``""`` for none.
     plan: str = ""
-    #: For a mapping branch, the Arbor agents its map is split among: it runs the first one's dossier pass, and each
-    #: share runs on a branch of its own. Empty for every other branch.
+    #: For a mapping branch, the component agents its map is split among: it runs the first one's dossier pass, and
+    #: each share runs on a branch of its own. Empty for every other branch.
     map_for: tuple[str, ...] = ()
 
 

@@ -789,15 +789,15 @@ class FocusBranch:
     under_start: bool = False
 
 
-#: Arbor's status of a direction of its map still to work; any other status sets the direction aside, with its ``why``.
+#: The map's status of a direction still to work; any other status sets the direction aside, with its ``why``.
 MAP_OPEN = "open"
 
 
 @dataclass(frozen=True)
 class MapDirection:
-    """A direction of Arbor's map: its map ``id`` (``m-...``), ``title``, Arbor ``status`` and the ``why`` of it.
+    """A direction of the agent map: its map ``id`` (``m-...``), ``title``, map ``status`` and the ``why`` of it.
 
-    ``holder`` is the Arbor branch the share the direction is in was dealt to, empty for one in no share; the branch
+    ``holder`` is the agent branch the share the direction is in was dealt to, empty for one in no share; the branch
     holds an open direction while it runs. ``ops`` are the profile ops the direction acts on when the map names them
     exactly; without them, its id, title and why name its ops.
     """
@@ -826,8 +826,8 @@ class StartupBrief:
     ``settings_menu`` is the settings this session has not tried and ``code_menu`` the source and kernel changes, each
     ranked for the branch, a line each, the ops it acts on and its family's note indented under it; none for a branch
     of the menu's control. ``focus_history`` are the stopped branches opened on the same focus op, newest first.
-    ``agent_map`` is what the branch is shown of Arbor's map, in the map's order: the directions that name its focus
-    op, those a running Arbor branch holds, each with its holder in ``map_holders``, and those the map set aside; none
+    ``agent_map`` is what the branch is shown of the agent map, in the map's order: the directions that name its focus
+    op, those a running agent branch holds, each with its holder in ``map_holders``, and those the map set aside; none
     in a session without a map.
     """
 
@@ -936,7 +936,7 @@ class BlackboardSnapshot:
     """Everything the blackboard held at ``taken_at``, read at once: what the RSI, the dashboard and the exports use.
     ``resolved_patches`` are the model-written patches of every merge recorded, in the order the merges were.
     ``op_shares`` holds, by commit, the op shares :meth:`RecordSearch.op_shares` gives it: a commit no tool profiled
-    has those of the last profiled commit of the same recipe. ``agent_map`` holds the directions of Arbor's map the
+    has those of the last profiled commit of the same recipe. ``agent_map`` holds the directions of the agent map the
     scheduler wrote last, in the map's order; none in a session without a map."""
 
     taken_at: float
@@ -1010,7 +1010,7 @@ class BlackboardSnapshot:
         return made.judgement.recorded_value if made is not None and made.judgement is not None else {}
 
     def map_holders(self) -> dict[str, str]:
-        """The Arbor branch that holds each open direction of ``agent_map``, by the direction's id: its ``holder``
+        """The agent branch that holds each open direction of ``agent_map``, by the direction's id: its ``holder``
         while the lineage shows that branch running. Once the branch stops, the direction is held by none."""
 
         running = {node.branch for node in self.lineage.branches if node.stopped_at is None}
