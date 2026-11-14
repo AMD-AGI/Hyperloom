@@ -66,26 +66,25 @@ workspace, records the selected run scenario, and stops before launching an
 optimization. Run `/hyperloom-setup` once per workspace; demo skills reuse the
 values already written to `.env`.
 
-It asks for these values with a fixed option order:
+Setup first asks which backend to configure: `Claude (Anthropic)`,
+`Codex (OpenAI)`, or `Both`. It collects the selected backend's endpoint,
+credentials and model; Codex configuration does not require an Anthropic key.
 
-1. Anthropic URL:
-   - `Use default (https://api.anthropic.com)`
-   - `Use AMD gateway (https://llm-api.amd.com/anthropic)`
-   - `Custom`
-2. Model:
-   - `Use default (claude-opus-5-5)`
-   - `Custom`
-3. Secrets:
-   - Setup writes placeholders in `.env`.
-   - Edit secrets directly in `.env`; never paste API keys into chat.
-   - If `.env` already exists, setup preserves unrelated keys but updates the
-     Hyperloom setup keys selected in this run.
-4. `USER_DATA_PATH`:
-   - Default: `<workspace>/session`
-   - Custom path
-5. Run mode, recorded in `.env` as `HYPERLOOM_RUN_MODE`:
-   - `docker`
-   - `baremetal`
+For Claude, choose `Anthropic API key` or `Claude subscription (Pro/Max)`.
+The subscription path uses `CLAUDE_CODE_OAUTH_TOKEN` from `claude setup-token`
+against the official Anthropic endpoint. An existing `ANTHROPIC_API_KEY` or
+`ANTHROPIC_AUTH_TOKEN` takes precedence over that token; review the selected
+authentication method before launching.
+
+Setup writes placeholders for missing secrets and preserves existing
+non-placeholder credentials. Fill in secrets directly in `.env`, never in chat.
+It also asks for `USER_DATA_PATH` (recommended: `<workspace>/session`), reuses a
+valid run mode from the shell or workspace `.env`, or asks you to choose
+`docker` or `baremetal`. It records the Docker target host when applicable.
+Demo skills reuse these settings.
+
+See [Authentication and credentials](../reference/authentication.md) for
+credential details.
 
 ```{note}
 If you are performing the Hyperloom setup inside of a Docker container, select
@@ -205,18 +204,15 @@ runs inside the container.
 
 ### Environment written by setup
 
-LLM defaults:
+Setup writes the selected provider configuration to `.env`. Claude API-key
+authentication uses `ANTHROPIC_BASE_URL`, `ANTHROPIC_API_KEY` and `CLAUDE_MODEL`;
+Claude subscription authentication uses `CLAUDE_CODE_OAUTH_TOKEN` and the
+official Anthropic endpoint, with the model selected through `CLAUDE_MODEL`.
+Codex uses `OPENAI_BASE_URL`, `OPENAI_API_KEY` and `CODEX_MODEL`. Selecting
+`Both` configures each side with its own endpoint and credentials.
 
-| Mode | Required secret | Default base URL | Default model |
-|------|-----------------|------------------|---------------|
-| Anthropic | `ANTHROPIC_API_KEY` | `https://api.anthropic.com` | `CLAUDE_MODEL=claude-opus-5-5` |
-
-Setup creates or updates `.env` in the current workspace and writes the resolved
-values there. Setup asks for the Anthropic side only; to run on Codex, add
-`OPENAI_BASE_URL`, `OPENAI_API_KEY` and, optionally, `CODEX_MODEL` to `.env`
-yourself. With only the OpenAI side configured, orchestration, TraceLens and
-Forge run on Codex, while GEAK needs the Anthropic side. See
-[Authentication](../reference/authentication.md) for every provider layout.
+See [Authentication and credentials](../reference/authentication.md) for
+credential details.
 
 Common keys:
 
