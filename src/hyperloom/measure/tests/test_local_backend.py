@@ -20,6 +20,7 @@ import yaml
 from hyperloom_common.env import is_truthy
 from hyperloom.contracts.measurement import AccuracyValue, AttachmentRef
 from hyperloom.measure import farm as farm_module
+from hyperloom.measure import log_causes
 from hyperloom.measure import local
 from hyperloom.measure.local import SUPPORTED_KINDS, LocalMeasurementBackend, TestCallRefused
 from hyperloom.measure.points import AMBIENT_SHAPE_ENVS
@@ -2083,16 +2084,16 @@ def _log_with_refusal_at(tmp_path: Path, *, from_end: int, size: int) -> Path:
 def test_the_refusal_is_found_wherever_it_sits_in_the_scanned_part_of_a_log(tmp_path, from_end):
     path = _log_with_refusal_at(tmp_path, from_end=from_end, size=5 * (1 << 20))
 
-    assert local._read_refusal(path) == eval_refusal_logs.REFUSAL, "the whole line, not the half a block cut"
+    assert log_causes.last_refusal(path) == eval_refusal_logs.REFUSAL, "the whole line, not the half a block cut"
 
 
 def test_a_refusal_older_than_the_scanned_part_of_a_log_is_not_searched_for(tmp_path):
     path = _log_with_refusal_at(
-        tmp_path, from_end=local._REFUSAL_SCAN_CHARS + 1000, size=local._REFUSAL_SCAN_CHARS + 2000
+        tmp_path, from_end=log_causes.REFUSAL_SCAN_CHARS + 1000, size=log_causes.REFUSAL_SCAN_CHARS + 2000
     )
 
-    assert local._read_refusal(path) == ""
-    assert local._read_refusal(tmp_path / "missing.log") == ""
+    assert log_causes.last_refusal(path) == ""
+    assert log_causes.last_refusal(tmp_path / "missing.log") == ""
 
 
 def test_an_evaluation_that_fails_is_classified_from_the_logs_it_wrote(grid, server, tmp_path):

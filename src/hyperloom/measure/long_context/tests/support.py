@@ -27,7 +27,7 @@ from hyperloom.contracts.long_context import PROMPT_OK
 from hyperloom.measure.long_context.outputs import PromptEntry, RunFacts, write_outputs
 from hyperloom.measure.long_context.plan import LONG_CONTEXT_DIR, OUTPUTS_FILE, LongContextPlan
 from hyperloom.measure.long_context.prompts import PER_TASK, TASKS
-from hyperloom.measure.long_context.rounds import run_long_context
+from hyperloom.measure.long_context.rounds import CheckServer, run_long_context
 from hyperloom.measure.long_context.staging import stage_entry
 from hyperloom.measure.long_context.tasks import build_prompts
 from hyperloom.measure.short_prompts.tests.support import LocalServer, free_port
@@ -177,7 +177,7 @@ def outputs_files(
     with tempfile.TemporaryDirectory() as scratch:
         if served is not None and served < plan.needed_context:
             asyncio.run(
-                run_long_context(plan, prompt_set(plan.length), _NoServer(), Path(scratch), served_context=served)
+                run_long_context(plan, prompt_set(plan.length), _NoServer(), Path(scratch), server=CheckServer(served))
             )
             path = Path(scratch) / LONG_CONTEXT_DIR / OUTPUTS_FILE
         else:

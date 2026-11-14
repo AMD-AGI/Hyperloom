@@ -67,6 +67,7 @@ from .._subprocess_kill import (
     session_deadline_to_remaining_sec,
 )
 from .config import (
+    CHECK_SERVER_PHASE,
     _GPU_MASK_ENV,
     _RUN_PHASE_ENV,
     _SERVER_ONLY_PHASE,
@@ -191,8 +192,12 @@ def _round_point(config_path: Path, lease: ServingLease | None, cards: int) -> M
 
 
 def _server_phase_point(document: Mapping[str, object]) -> Mapping[str, object]:
+    """``document`` as a boot round runs it: a server-only phase, unless it boots the check server, itself a boot."""
     bench = _bench(document)
-    return {**document, "benchmark": {**bench, "envs": {**_envs(bench), _RUN_PHASE_ENV: _SERVER_ONLY_PHASE}}}
+    envs = _envs(bench)
+    if str(envs.get(_RUN_PHASE_ENV, "")).lower() == CHECK_SERVER_PHASE:
+        return document
+    return {**document, "benchmark": {**bench, "envs": {**envs, _RUN_PHASE_ENV: _SERVER_ONLY_PHASE}}}
 
 
 def staged_tool_cache() -> Path:
