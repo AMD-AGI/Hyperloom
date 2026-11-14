@@ -314,6 +314,108 @@ shows it immediately, instead of after hours of search against the wrong
 denominator. For the full artifact schema, see
 [`session_breakdown.json` integration in Hyperloom](../reference/session-breakdown.md).
 
+## Optimize a single Python module
+
+Everything above asks you to write a benchmark. You can instead keep model loading, inputs, validation and timing in the script you already have, and expose one optimization point:
+
+Import the hook **twice**. Once as the very first thing in the script, before any other import -- side effect only, so accepted settings land as environment variables before anything else can read and cache them. And once again at the documented call site, after the model is loaded, for the patches themselves, which need the model object and so cannot move earlier. Python runs a module's top-level code only on its first import, so the second import is a cached no-op for the side-effecting part; this costs one extra line.
+
+```python
+try:
+    import hyperloom_optimize  # noqa: F401  -- side effect only; must be first
+except ModuleNotFoundError as exc:
+    if exc.name != "hyperloom_optimize":
+        raise
+
+# ... all your other imports, including torch, go after the block above ...
+
+try:
+    from hyperloom_optimize import hyperloom_optimize
+except ModuleNotFoundError as exc:
+    if exc.name != "hyperloom_optimize":
+        raise
+
+    def hyperloom_optimize(model):
+        return model
+
+# Load model and weights, construct inputs, and capture any reference first.
+model = hyperloom_optimize(model)
+outputs = model(**inputs)
+```
+
+Skipping the early import does not fail quietly. If the exported module carries accepted settings, it checks at import time whether the GPU is already initialized or torch's compiler stack is already loaded, and raises if so, rather than silently shipping a setting that never took effect.
+
+Point `--framework-path` at a directory holding `hyperloom_optimize.py`, initially an identity function. It does not need to be a Git checkout. In the frozen benchmark directory, declare `optimization_scope.json`:
+
+```json
+{"schema_version": 1, "file": "/absolute/workspace/optimization/hyperloom_optimize.py"}
+```
+
+An optional `function` names the entry point, so neither the module nor the function need mention Hyperloom: `{"schema_version": 1, "file": ".../encoder_opt.py", "function": "apply"}`.
+
+The declaration is the boundary, and it is enforced everywhere a change could enter the tree. Patch integration is narrowed to that exact file and root, including patches carrying a recorded source root. Direct kernel-patch installation is refused outright: a custom kernel belongs in the optimization module and goes in through the normal patch path. Coordinator and specialist prompts carry the same boundary, so an agent is told the rule rather than discovering it by having a patch rejected. The declaration is checked once at launch, against `--framework-path`, so a campaign aimed at the wrong tree costs nothing instead of failing at its first patch.
+
+A workload with no declaration is unaffected; everything above continues to apply to it.
+
+### Optimize an unchanged script
+
+`hyperloom script prepare` builds that workspace around an inference script you already have, whose only integration is importing the module first and passing its model through it once:
+
+```python
+from encoder_opt import apply   # first import: accepted settings land before torch reads them
+import torch
+...
+model = apply(model)
+```
+
+```bash
+hyperloom script prepare --workspace "$WS" --script encoder.py --python /path/to/model/env/python \
+  --calibrate-autocast bfloat16 -- --frames 6   # or --error-limit 0.01; arguments after -- go to the script
+```
+
+It runs the script once with the identity module, records the calls of the object `apply` returns as references, and writes `benchmark/custom_<runner>.sh`. Each measurement then runs the script until `apply` returns, replays the recorded calls on fresh perturbed inputs with hidden held-out inputs mixed in, and compares outputs in a process that never imports the candidate. Your script needs no timing or validation code, and is never copied -- its checksum is pinned and rechecked on every measurement.
+
+Preparation refuses a script that imports the module after the GPU is initialized or after `torch._inductor`/`torch._dynamo` are loaded, naming both lines, and warns if it imports it merely after `torch`. Settings baked into the module only reach torch if the import comes first, so an import too late means the deployed result would not behave like the measured one.
+
+`--calibrate-autocast bfloat16` sets the tolerance from the model itself: "allow as much extra error as bfloat16 costs this model", measured on your model rather than guessed. `--error-limit` sets it directly instead.
+
+#### Judging an output whose shape changes
+
+By default two outputs are compared element by element, which needs them to have the same shape. Many models do not: anything that generates text stops at a different length, a detector returns however many objects passed its threshold, a transcriber returns a different number of words. A candidate that is only slightly different can produce one row fewer, and the default comparison then reports an infinite error -- not because the answer is bad, but because it cannot line the two up at all.
+
+Pass `--scorer my_scorer.py` to judge such a workload your own way. The file defines one required function and one optional one:
+
+```python
+def score(candidate, reference):
+    # How wrong the candidate is. Any number, lower being better.
+    return word_error_rate(candidate["text"], reference["text"])
+
+
+def capture(output):
+    # Optional: turn one model output into tensors the comparison can load.
+    return {"text": tokens_of(output)}
+```
+
+`capture` runs next to the model and decides what is worth keeping -- the number of detections, the transcript, whatever your `score` reads. `score` runs in the separate process that never loads the candidate, so a candidate cannot soften its own mark. Whatever units `score` returns are the units of `--error-limit` and of `--calibrate-autocast`.
+
+The file is copied into the frozen benchmark directory and its checksum recorded, so editing it after preparation stops the run rather than quietly changing what passes. Everything else is unchanged: the clock, the hidden held-out inputs, the input perturbation and the output-buffer check all still apply.
+
+## Use the optimized model without Hyperloom
+
+On CLOSE, a custom session exports what it accepted. A single-file workload produces `deployment/hyperloom_optimize.py` with bookkeeping in `reports/deployment.json` (`kind: single_file`); a workload that declares an adapter through `hyperloom_inference.json` produces a self-contained `deployment/` with its own `inference.py` CLI, its source and assets captured, and runtime paths relocated so the directory can be moved.
+
+Copy the single module beside the original script and run that script in its original runtime. No Hyperloom installation is needed at the destination.
+
+The accepted runtime settings travel inside the module. `reports/deployment.json` records what was carried under `settings`: what became a torch API call, what stayed an environment variable, what was deliberately excluded, and what could not be carried at all. An absolute cache path is in the last group -- it is not portable to another machine -- and surfaces as a `settings_not_carried` warning rather than being dropped silently.
+
+The export is checked against what was benchmarked, and refuses rather than shipping something unproven. The module is compared byte for byte against the source snapshots recorded at each KEEP, so it is refused if it differs from what was measured, if no snapshot covers it at all, or if it imports a file sitting beside it -- only the one module ships, so a sibling import would arrive broken. None of this requires the file to live in a git repository.
+
+A refusal is recorded with its reason on the CLOSE step and written into the session package, so the artifacts never imply an export that did not happen.
+
+`deployment.json` always reports `"validation": "not_run"`, and it can never say anything else. The standalone `--validate` command writes its result to a separate file stamped with a checksum of `deployment.json`; putting the result inside `deployment.json` would change that checksum, so the result could no longer point at the thing it checked. A single-file export has no such check to run anyway -- it ships one module, with no `inference.py` or adapter.
+
+What stands behind the module is everything that happened before it was written out: every accepted change had to pass your own quality gate, and the module is compared against the copy saved at the moment it was accepted. Do not read the field as a check that failed.
+
 ## Troubleshooting
 
 | Symptom | Cause |

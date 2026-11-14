@@ -1144,6 +1144,26 @@ def apply_kernel_patch(request: KernelPatchRequest) -> dict[str, Any]:
             cache-clear / rebuild / jit-build records, and an optional
             ``multinode`` block.
     """
+    from hyperloom.common.optimization_scope import optimization_scope
+
+    # A single-file workload permits changes to one module only, and this route writes
+    # whole files into the framework tree outside it. An unreadable declaration refuses on
+    # the same ground: the ``try`` below catches only ``_PatchRefused``, so a ValueError
+    # escaping here would crash the executor where every other failure returns a result.
+    try:
+        scope = optimization_scope()
+    except ValueError as exc:
+        return {
+            "status": "failed",
+            "error_class": "single_file_scope",
+            "error": f"Single-file optimization scope is unreadable, so this route cannot be cleared: {exc}",
+        }
+    if scope is not None:
+        return {
+            "status": "failed",
+            "error_class": "single_file_scope",
+            "error": f"Single-file workloads must integrate kernels through {scope.file.name} using integrate_patch",
+        }
     try:
         if request.snapshot_dir is not None:
             return _apply_kernel_patch_snapshot(request)

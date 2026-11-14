@@ -298,6 +298,45 @@ def _resolve_framework_root(
     patch_texts: list[str] | None = None,
     recorded_root: str | None = None,
 ) -> Path | None:
+    """Resolve the apply root, refusing one an operator-declared file boundary excludes."""
+    from ...framework.optimization_scope import check_patch_scope
+
+    root = _resolve_framework_root_unscoped(explicit, patch_paths, patch_texts, recorded_root)
+    if root is None:
+        return None
+    from hyperloom.common.optimization_scope import optimization_scope
+
+    texts = _read_patch_texts(patch_paths)
+    # A patch that could not be read contributes no targets, and a boundary check over
+    # the remainder passes on what it did not see -- while the apply step reads the file
+    # again and lands it. Under a declared boundary a short read refuses outright.
+    if len(texts) != len(patch_paths or []):
+        try:
+            declared = optimization_scope() is not None
+        except ValueError:
+            declared = True
+        if declared:
+            log.warning(
+                "integrate_patch: %d of %d patches unreadable; refusing rather than checking the boundary "
+                "against the ones that happened to load",
+                len(patch_paths or []) - len(texts),
+                len(patch_paths or []),
+            )
+            return None
+    try:
+        check_patch_scope(root, [*(patch_texts or []), *texts])
+    except ValueError as exc:
+        log.warning("integrate_patch: %s", exc)
+        return None
+    return root
+
+
+def _resolve_framework_root_unscoped(
+    explicit: str | None,
+    patch_paths: list[Path] | None = None,
+    patch_texts: list[str] | None = None,
+    recorded_root: str | None = None,
+) -> Path | None:
     """Pick one unambiguous framework root under the shared Patch rules.
 
     A ``recorded_root`` — carried from the authoring stage through

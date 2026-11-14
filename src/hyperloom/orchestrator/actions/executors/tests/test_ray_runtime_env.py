@@ -149,3 +149,16 @@ def test_gateway_custom_headers_reach_the_worker(monkeypatch):
 
     assert env["ANTHROPIC_CUSTOM_HEADERS"] == "Ocp-Apim-Subscription-Key: anthropic-key"
     assert env["OPENAI_CUSTOM_HEADERS"] == "X-Tenant: acme"
+
+
+def test_a_worker_is_told_the_custom_workload_boundary(monkeypatch) -> None:
+    """A worker that cannot read the scope declaration sees no boundary, so its refusals never fire."""
+    import os
+
+    from hyperloom.orchestrator.actions.executors import _ray_runtime
+
+    monkeypatch.setenv("HYPERLOOM_BYPASS_SCRIPTS_DIR", "/frozen/benchmark")
+    env_vars = _ray_runtime.safe_runtime_env()["env_vars"]
+    assert env_vars["HYPERLOOM_BYPASS_SCRIPTS_DIR"] == "/frozen/benchmark"
+    assert "HYPERLOOM_BYPASS_SCRIPTS_DIR" in _ray_runtime.SAFE_ENV_KEYS
+    assert os.environ["HYPERLOOM_BYPASS_SCRIPTS_DIR"] == "/frozen/benchmark"

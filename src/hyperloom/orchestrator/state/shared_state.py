@@ -494,6 +494,9 @@ class SharedState(_RenderMixin, GapsStateMixin, _PhaseStateMixin, _RooflineState
     warm_replay_min_confidence: float = 0.7
     # Full accepted configuration stack across action families; current_best keeps the materialized full args/env.
     optimization_stack: list[dict[str, Any]] = field(default_factory=list)
+    # Source an inert KEEP committed with every switch off: snapshot handles plus ``after_stack_len``. Not an
+    # adoption, so it stays off ``optimization_stack`` and out of every length and attribution count over it.
+    inert_source_layers: list[dict[str, Any]] = field(default_factory=list)
     # Index-aligned with ``optimization_stack``: per-entry incremental gain pct; missing => None.
     gain_per_stack_entry: list[float | None] = field(default_factory=list)
     # Total gain over ``baseline_tput``, stamped only from a measurement taken with the whole stack applied;
