@@ -49,7 +49,8 @@ from ._subprocess_kill import (
     sync_agentx_phase_wait,
 )
 from ._ray_serving import ServingLease
-from ._suite.rounds import SuiteRound, SuiteRoundRefused, SuiteRoute, deadline_unix, point_server, run_suite_round
+from ._suite.rounds import RUN_DIR_PREFIX, SuiteRound, SuiteRoundRefused, SuiteRoute, deadline_unix, point_server
+from ._suite.rounds import run_suite_round
 
 log = logging.getLogger(__name__)
 
@@ -64,6 +65,11 @@ TS_SKIPPED_DEDUP = "SKIPPED_DEDUP"
 
 #: The point YAML a grid variant's rounds run from, in the variant's slot beside the rounds' workspaces.
 VARIANT_CONFIG_FILE = "config.yaml"
+#: The directory of a variant's slot that its discarded warmup round runs in.
+WARMUP_ROUND_DIR = "warmup_round"
+#: The directory of a variant's slot that its discarded multi-node client warmup pass runs in.
+MN_WARMUP_DIR = "mn_warmup"
+_SLOT_PREFIX = "variant_"
 
 
 def variant_config_of(workspace: str) -> Path:
@@ -78,7 +84,28 @@ def _safe(name: str) -> str:
 
 def variant_slot(output_root: Path, index: int, name: str) -> Path:
     """The directory below ``output_root`` that the variant at ``index`` of a grid, named ``name``, runs its rounds in."""
-    return output_root / f"variant_{index:02d}_{_safe(name)}"
+    return output_root / f"{_SLOT_PREFIX}{index:02d}_{_safe(name)}"
+
+
+def grid_run_dirs(output_root: Path) -> list[Path]:
+    """Every inference_suite run_dir the rounds of ``run_grid`` calls left below ``output_root``, in no promised order.
+
+    A round runs in a run_dir of its own below the directory it is given (``_suite.rounds``), and ``run_grid`` gives it
+    a variant's slot, or for a discarded warmup pass a directory of the slot's; so the run_dirs are those directories'
+    ``suite_run_*`` children. A directory that cannot be listed holds none.
+    """
+    found: list[Path] = []
+    for slot in _subdirectories(output_root, f"{_SLOT_PREFIX}*"):
+        for parent in (slot / WARMUP_ROUND_DIR, slot / MN_WARMUP_DIR, slot):
+            found.extend(_subdirectories(parent, f"{RUN_DIR_PREFIX}*"))
+    return found
+
+
+def _subdirectories(directory: Path, pattern: str) -> list[Path]:
+    try:
+        return sorted(path for path in directory.glob(pattern) if path.is_dir())
+    except OSError:
+        return []
 
 
 def sync_benchmark_timeout(config_path: Path, timeout_sec: float) -> None:

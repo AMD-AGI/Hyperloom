@@ -154,17 +154,17 @@ def test_a_test_whose_server_never_got_ready_has_the_phases_up_to_the_failure(mo
 def _sweep_scripts(clock: FakeClock) -> dict[str, Script]:
     def measure(slot: Path, kwargs: dict[str, Any]):
         clock.advance(1.0)
-        Run(clock, slot).found_ready().end(20.0)
+        run = Run(clock, slot).found_ready().end(20.0)
         clock.advance(2.0)
-        return result(slot.name.removeprefix("variant_00_"), slot)
+        return result(slot.name.removeprefix("variant_00_"), run.directory)
 
     def boot_then_measure(slot: Path, kwargs: dict[str, Any]):
         if not kwargs["launch"].lifecycle_boot_only:
             return measure(slot, kwargs)
         clock.advance(5.0)
-        Run(clock, slot).boot(70.0, log=Rounds(clock).vllm_log()).end(2.0)
+        run = Run(clock, slot).boot(70.0, log=Rounds(clock).vllm_log()).end(2.0)
         clock.advance(1.0)
-        return result("c8", slot)
+        return result("c8", run.directory)
 
     return {"c8": boot_then_measure, "c4": measure, "c2": measure}
 
@@ -223,8 +223,10 @@ def test_a_graded_sweep_arm_benches_every_level_and_its_one_evaluation_is_a_phas
 def test_a_test_that_timed_out_says_the_phases_it_went_through(monkeypatch, clock, tmp_path) -> None:
     def timing_out(slot: Path, kwargs: dict[str, Any]):
         clock.advance(3.0)
-        Run(clock, slot).boot(30.0, log=READY_ONLY_LOG).end(1500.0)
-        return result("test", slot, status="failed", returncode=None, error="timed out", error_class="round_timeout")
+        run = Run(clock, slot).boot(30.0, log=READY_ONLY_LOG).end(1500.0)
+        return result(
+            "test", run.directory, status="failed", returncode=None, error="timed out", error_class="round_timeout"
+        )
 
     monkeypatch.setattr(local, "run_grid", StagedGrid({"test": timing_out}))
 
