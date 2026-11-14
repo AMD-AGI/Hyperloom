@@ -90,6 +90,7 @@ from ._grid_base import (
     importable_overlay_dir,
     pin_xdit_tool_path,
     runnable_moe_backend_args,
+    variant_slot,
 )
 from hyperloom.inference_optimizer.framework_registry import server_args_env_name
 from hyperloom.inference_optimizer.grid_server_args import (
@@ -1392,7 +1393,7 @@ async def run_grid(
     )
     results: list[VariantResult] = []
     for i, variant in enumerate(grid):
-        at = _VariantSlot(i, variant, output_root / f"variant_{i:02d}_{_safe(variant.name)}")
+        at = _VariantSlot(i, variant, variant_slot(output_root, i, variant.name))
         try:
             if _warn_budget_cannot_admit(
                 run, i, rounds_left=run.rounds_per_variant, spent_on="the variants before this one"
@@ -1496,7 +1497,7 @@ def _attach_grid_launch_evidence(
             ServerArgvInvalidError.error_class,
         }:
             continue
-        slot = output_root / f"variant_{idx:02d}_{_safe(grid[idx].name)}"
+        slot = variant_slot(output_root, idx, grid[idx].name)
         config_path = slot / VARIANT_CONFIG_FILE
         workspace = Path(result.workspace) if result.workspace else None
         primary_log = Path(result.server_log_path) if result.server_log_path else slot / "server.log"
@@ -1512,11 +1513,6 @@ def _attach_grid_launch_evidence(
         )
         result.launch_evidence = evidence
         result.launch_evidence_path = persist_measurement_evidence(evidence, actual_server_log=actual_log, slot=slot)
-
-
-def _safe(name: str) -> str:
-    """Filesystem-safe slug for variant directory names."""
-    return "".join(c if c.isalnum() or c in "-_." else "_" for c in name)[:60]
 
 
 def _write_variant_abort_marker(

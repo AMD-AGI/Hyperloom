@@ -371,6 +371,9 @@ class RecordSearch(Protocol):
         """The latest TraceLens op shares a tool reported on ``commit_id``, else on a commit of the same recipe digest,
         which runs the same ops; ``None`` when no commit of its recipe was analysed."""
 
+    async def baseline(self) -> BaselineRecord:
+        """The PRELUDE baseline the rule gate measured; raises :class:`NotRecorded` before it wrote one."""
+
 
 class Blackboard(
     TestRecordSink,

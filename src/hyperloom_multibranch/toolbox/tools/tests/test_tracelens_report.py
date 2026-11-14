@@ -268,6 +268,24 @@ async def test_a_request_without_the_workload_has_no_weights_so_it_has_no_shares
     assert result["kernel_shares_path"] == "" and result["phase_fractions"] == {}
 
 
+async def test_a_point_weighted_by_measured_lengths_gets_its_shares_and_says_where_the_lengths_came_from(
+    rig: Rig, tmp_path: Path
+) -> None:
+    """The lengths measured on the baseline weight the windows as the point's own would; the splitter never takes them."""
+    probe.install_capture(rig.trace_input / "torch_trace" / "graph_capture_profile")
+    measured = {"measured_isl": "1024", "measured_osl": "1024", "measured_lengths_source": "the baseline's lengths"}
+    status, pointer, record = await _run(tmp_path, {"split_conc": "64", **measured}, rig)
+
+    assert status is JobStatus.SUCCEEDED and pointer.op_shares and DEGRADED_NOTICE not in pointer.summary
+    assert "weighted by the baseline's lengths" in pointer.summary
+    result = record["result"]
+    assert (result["split_hints"], result["measured_lengths"]) == ({"split_conc": "64"}, measured)
+    assert result["phase_fractions"] == {"prefill": 0.1, "decode": 0.9}
+    assert result["phase_note"] == "the prefill and decode windows are weighted by the baseline's lengths"
+    split, _ = rig.shell.commands
+    assert split[split.index("--CONC") + 1] == "64" and not {"--OSL", "--ISL", "--R"} & set(split)
+
+
 async def test_the_splitter_hints_and_the_mode_come_from_the_request_never_from_the_toolbox_process(
     rig: Rig, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

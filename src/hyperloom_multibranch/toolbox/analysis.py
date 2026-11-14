@@ -9,8 +9,11 @@ The caller names the tool and its own parameters. The commit the analysis is abo
 head of the caller's branch in the experiment repository, read here. ``profile_request_id`` is kept only when the
 blackboard holds a PROFILE test of that id on that commit, whichever branch asked for it: a profile describes a commit,
 and ``submit_test`` refuses a second profile of a commit with the id of the first (``profile_exists``). The trace and
-the trace splitter's workload hints are that profile test's own: the caller names neither. A ``kernel_tune`` request names a test (``test_request_id``) and gets the
-directory its output landed in, resolved inside the session, from the blackboard's record of it, never from the caller.
+the trace splitter's workload hints are that profile test's own: the caller names neither. A point that names no
+prompt and output length (an AgentX replay) has its phase windows weighted by the lengths the session's baseline
+measured (:mod:`~.tools.baseline_lengths`), which the caller names no more than the hints. A ``kernel_tune`` request
+names a test (``test_request_id``) and gets the directory its output landed in, resolved inside the session, from the
+blackboard's record of it, never from the caller.
 An ``upstream_pr_search`` request is about no commit and no test: it names a repository (one the rule pack lists) and what to
 look for, and the service the search asks is the host's, never the caller's.
 """
@@ -22,13 +25,15 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Protocol
 
-from hyperloom_multibranch.contracts.blackboard.interfaces import RecordSearch, UnknownRequest
+from hyperloom_multibranch.contracts.blackboard.interfaces import NotRecorded, RecordSearch, UnknownRequest
 from hyperloom_multibranch.contracts.blackboard.records import TestRecord
 from hyperloom_multibranch.contracts.repo import ExperimentRepo
 from hyperloom_multibranch.contracts.toolbox import RequestRejected
 from hyperloom_multibranch.toolbox.tools.base import InvalidRequest, ToolRequest
+from hyperloom_multibranch.toolbox.tools.baseline_lengths import baseline_lengths, prefix_cache_reading
 from hyperloom_multibranch.toolbox.tools.kernel_tune import KERNEL_TUNE_TOOL, LANDED_PARAM, TEST_PARAM, check_params
 from hyperloom_multibranch.toolbox.tools.op_shares import COMMIT_PARAM, PROFILE_REQUEST_PARAM
+from hyperloom_multibranch.toolbox.tools.phase_mix import ISL_KEY, MEASURED_LENGTH_KEYS, OSL_KEY
 from hyperloom_multibranch.toolbox.tools.roofline import ROOFLINE_TOOL, TRACELENS_TOOL
 from hyperloom_multibranch.toolbox.tools.tracelens_report import WORKLOAD_HINTS, split_hint
 from hyperloom_multibranch.toolbox.tools.tune_inputs import POINT_CONFIG_GLOB, read_point
@@ -49,6 +54,10 @@ CODE_TEST_UNKNOWN = "test_unknown"
 CODE_TEST_WITHOUT_OUTPUT = "test_without_output"
 TRACE_INPUT_PARAM = "trace_input"
 SPLIT_HINT_PARAMS = tuple(key for _, key, _ in WORKLOAD_HINTS)
+#: What the server sets from the branch's commit and the test or profile test a request names, never the caller.
+_SERVER_OWNED_PARAMS = frozenset(
+    {COMMIT_PARAM, PROFILE_REQUEST_PARAM, TRACE_INPUT_PARAM, LANDED_PARAM, *SPLIT_HINT_PARAMS, *MEASURED_LENGTH_KEYS}
+)
 #: The monitor service an upstream PR search may also read: only the host names one.
 PR_MONITOR_PARAM = "pr_monitor_url"
 
@@ -164,6 +173,31 @@ def _split_hints(record: TestRecord, root: Path | None) -> dict[str, str]:
     return point_split_hints(points[0], root) if len(points) == 1 else {}
 
 
+async def _landed(records: RecordSearch, request_id: str, root: Path) -> Path | None:
+    """The directory the test ``request_id`` landed in, inside the session ``root``; ``None`` when it landed none."""
+    try:
+        record = await records.record(request_id)
+    except UnknownRequest:
+        return None
+    output = record.result.output_dir if record.result is not None else ""
+    return _in_session(output, root) if output else None
+
+
+async def _workload_hints(records: RecordSearch, record: TestRecord, root: Path | None) -> dict[str, str]:
+    """The workload of the point the PROFILE ``record`` measured (:func:`_split_hints`) and, when it names no prompt and
+    output length, the lengths the session's baseline measured with their source; none of them before the rule gate wrote
+    the baseline, or when its reading lacks them."""
+    hints = _split_hints(record, root)
+    if ISL_KEY in hints and OSL_KEY in hints:
+        return hints
+    try:
+        baseline = await records.baseline()
+    except NotRecorded:
+        return hints
+    landed = [await _landed(records, request_id, root) for request_id in baseline.request_ids] if root else []
+    return {**hints, **baseline_lengths(baseline.values, prefix_cache_reading(d for d in landed if d is not None))}
+
+
 @dataclass(frozen=True)
 class AnalysisAsk:
     """What the caller named: the branch (from its token), the tool, the tool's own params and a profile test id."""
@@ -182,14 +216,13 @@ async def analysis_request(
     With a verified ``profile_request_id`` the ``trace_input`` is the record's own trace (see :func:`_trace_input`,
     resolved against ``trace_root``); the caller never names one, because the trace must be that profile's. The same
     holds for the ``split_*`` hints tracelens' splitter takes: they are the workload of the point that profile measured
-    (see :func:`_split_hints`).
+    (see :func:`_split_hints`), and for the lengths measured on the baseline that weight a point naming none
+    (see :func:`_workload_hints`).
     """
     if ask.tool not in ANALYSIS_TOOLS:
         allowed = f"{', '.join(ANALYSIS_TOOLS[:-1])} and {ANALYSIS_TOOLS[-1]}"
         raise RequestRejected(f"a specialist starts only {allowed} here, not {ask.tool!r}", CODE_TOOL_NOT_ALLOWED)
-    owned = sorted(
-        {COMMIT_PARAM, PROFILE_REQUEST_PARAM, TRACE_INPUT_PARAM, LANDED_PARAM, *SPLIT_HINT_PARAMS} & set(ask.params)
-    )
+    owned = sorted(_SERVER_OWNED_PARAMS & set(ask.params))
     if owned:
         raise RequestRejected(
             f"{', '.join(owned)} in params is set by the server (from the branch's own commit, or the test or profile "
@@ -208,10 +241,10 @@ async def analysis_request(
     commit = await _head(repo, ask.branch)
     record = await _verified_profile(records, ask.branch, commit, ask.profile_request_id)
     params = {**ask.params, COMMIT_PARAM: commit, PROFILE_REQUEST_PARAM: ask.profile_request_id}
-    if record is not None:
+    if records is not None and record is not None:
         params[TRACE_INPUT_PARAM] = _trace_input(record, trace_root)
         if ask.tool == TRACELENS_TOOL:
-            params.update(_split_hints(record, trace_root))
+            params.update(await _workload_hints(records, record, trace_root))
     return ToolRequest(ask.tool, ask.branch, params)
 
 
