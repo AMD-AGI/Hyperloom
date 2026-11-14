@@ -32,13 +32,22 @@ from hyperloom.orchestrator.rehearsal import VirtualClock
 from hyperloom.orchestrator.rehearsal.scenario import ScenarioError
 from hyperloom.orchestrator.actions.stop_attribution import SESSION_TIME_EXHAUSTED_CLASS
 from hyperloom.orchestrator.phases.machine_state import RETRY_PAST_THE_RESERVE
-from hyperloom.orchestrator.state.failure_evidence import ARGV_INVALID, SERVER_INIT_DEAD
+from hyperloom.orchestrator.state.failure_evidence import ARGV_INVALID, ENGINE_CAPACITY, SERVER_INIT_DEAD
 from inference_suite.runtime.process import Reaped
 from inference_suite.contracts import FailedStep, LifecycleMode, RunLayout, WorkloadKind
 from inference_suite.tests.test_compose import _launch
 
 _COLD = {"output_throughput": 270.9, "completed_requests": 64}
 _HOT = {"output_throughput": 4701.6, "completed_requests": 64}
+
+# vLLM logs the start-failure marker first and the traceback, ending in the cause, below it.
+_CAPACITY_SERVER_LOG = (
+    "(EngineCore pid=7) ERROR core.py:1349] EngineCore failed to start.\n"
+    "(EngineCore pid=7) Traceback (most recent call last):\n"
+    + "".join(f"(EngineCore pid=7)     frame {i}\n" for i in range(55))
+    + "(EngineCore pid=7) ValueError: max_num_seqs (256) exceeds available Mamba cache blocks (237).\n"
+    "(APIServer pid=1) RuntimeError: Engine core initialization failed. Failed core proc(s): {}\n"
+)
 
 
 def _point(path: Path) -> Path:
@@ -163,6 +172,16 @@ def test_a_round_that_stopped_at_a_step_fails_under_that_steps_error_class(monke
     assert result["run_status"] == "failed"
     assert Path(result["report_path"]).is_file()
     assert suite.stopped == [suite.ws]
+
+
+def test_a_server_that_exits_on_a_capacity_error_fails_as_engine_capacity(monkeypatch, suite):
+    attempt = LaunchAttempt(outcome=STAGE_FAILED, stage="engine_init", server_log=_CAPACITY_SERVER_LOG)
+
+    result, _ = _play(monkeypatch, suite, attempt, baseline_double_run=False)
+
+    assert result["status"] == "failed"
+    assert result["error_class"] == ENGINE_CAPACITY
+    assert "max_num_seqs (256) exceeds available Mamba cache blocks (237)" in result["error"]
 
 
 def test_a_round_refused_before_it_ran_fails_as_staging_missing(monkeypatch, suite, tmp_path):

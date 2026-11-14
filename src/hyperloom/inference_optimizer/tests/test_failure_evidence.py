@@ -16,11 +16,56 @@ from hyperloom.orchestrator.state.failure_evidence import (
     FAILURE_STAGE_DECISION,
     FAILURE_STAGE_WARMUP,
     classify_failure_attribution,
+    engine_capacity_cause,
     failure_from_variant_outcome,
     make_failure_id,
     render_failure_line,
     tail_excerpt,
 )
+
+_MAMBA_CAPACITY_LINE = (
+    "(EngineCore pid=7) ValueError: max_num_seqs (256) exceeds available Mamba cache blocks (237). "
+    "Each decode sequence requires one Mamba cache block, so CUDA graph capture cannot proceed. "
+    "Please lower max_num_seqs to at most 237 or increase gpu_memory_utilization."
+)
+_KV_MEMORY_LINE = (
+    "ValueError: To serve at least one request with the model's max seq len (262144), (24.5 GiB KV cache is "
+    "needed, which is larger than the available KV cache memory (9.1 GiB). Try increasing "
+    "`gpu_memory_utilization` or decreasing `max_model_len` when initializing the engine."
+)
+_KV_EMPTY_LINE = (
+    "ValueError: No available memory for the cache blocks. Try increasing `gpu_memory_utilization` "
+    "when initializing the engine."
+)
+
+
+def test_engine_capacity_cause_parses_the_numbers():
+    assert engine_capacity_cause(_MAMBA_CAPACITY_LINE) == {
+        "kind": "mamba_cache_blocks",
+        "requested": 256,
+        "available": 237,
+    }
+    assert engine_capacity_cause(_KV_MEMORY_LINE) == {
+        "kind": "kv_cache_memory",
+        "max_model_len": 262144,
+        "needed_gib": 24.5,
+        "available_gib": 9.1,
+    }
+    assert engine_capacity_cause(_KV_EMPTY_LINE) == {"kind": "kv_cache_empty"}
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        "",
+        "RuntimeError: HIP out of memory. Tried to allocate 10.54 GiB",
+        "hipErrorNoBinaryForGpu: no kernel image is available for execution on the device",
+        "Transformers does not recognize this architecture",
+        "INFO max_num_seqs=256 gpu_memory_utilization=0.9",
+    ],
+)
+def test_engine_capacity_cause_ignores_other_failures(text):
+    assert engine_capacity_cause(text) is None
 
 
 class TestClassifyFailureAttribution:
@@ -92,6 +137,12 @@ class TestClassifyFailureAttribution:
     def test_ambiguous_failure_remains_unknown(self):
         assert (
             classify_failure_attribution(framework_changed=False, error_class="server_init_dead")
+            == FAILURE_ATTRIBUTION_UNKNOWN
+        )
+
+    def test_engine_capacity_is_not_attributed_to_the_candidate_or_the_host(self):
+        assert (
+            classify_failure_attribution(framework_changed=False, error_class="engine_capacity")
             == FAILURE_ATTRIBUTION_UNKNOWN
         )
 
@@ -284,6 +335,20 @@ class TestFailedStepClasses:
         assert failed_step_error_class(FailedStep.GPUS_UNAVAILABLE) == "host_gpus_unavailable"
         for step in (FailedStep.DEADLINE_EXHAUSTED, FailedStep.CANCELLED):
             assert failed_step_error_class(step) in STOPPED_BY_THE_RUN
+
+    def test_a_capacity_error_in_the_detail_of_a_server_that_exited_before_ready_is_engine_capacity(self):
+        from inference_suite.contracts import FailedStep
+
+        from hyperloom.orchestrator.actions.executors._failed_step import failed_step_error_class
+
+        detail = "ValueError: max_num_seqs (256) exceeds available Mamba cache blocks (237)."
+
+        assert failed_step_error_class(FailedStep.SERVER_EXITED_BEFORE_READY, detail) == "engine_capacity"
+        assert (
+            failed_step_error_class(FailedStep.SERVER_EXITED_BEFORE_READY, "KeyError: 'qwen3_moe'")
+            == "server_init_dead"
+        )
+        assert failed_step_error_class(FailedStep.SERVER_DIED, detail) == FailedStep.SERVER_DIED.value
 
     def test_new_step_classes_carry_their_attribution(self):
         from inference_suite.contracts import FailedStep
