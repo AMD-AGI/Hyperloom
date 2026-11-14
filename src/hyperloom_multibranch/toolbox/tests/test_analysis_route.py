@@ -20,7 +20,7 @@ from hyperloom.contracts.measurement import Purpose, TestKind
 from hyperloom.measure.round_marks import ROLE_WARMUP
 from hyperloom.measure.runner.rounds import ROUNDS_FILE, WARMUP_DIR, write_rounds
 from hyperloom.measure.socket import RoundOutcome, SandboxFacts, TestOutcome
-from hyperloom.orchestrator.actions.executors._grid_runner import variant_slot
+from hyperloom.orchestrator.actions.executors import variant_slot
 from hyperloom.orchestrator.actions.executors._suite.rounds import _next_run_dir
 from hyperloom.hosted.mcp_server import McpServer, McpServerConfig
 from hyperloom_multibranch.contracts.blackboard import Role, Writer

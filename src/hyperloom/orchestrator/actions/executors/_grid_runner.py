@@ -90,6 +90,7 @@ from ._grid_base import (
     importable_overlay_dir,
     pin_xdit_tool_path,
     runnable_moe_backend_args,
+    variant_slot,
 )
 from hyperloom.inference_optimizer.framework_registry import server_args_env_name
 from hyperloom.inference_optimizer.grid_server_args import (
@@ -1514,16 +1515,6 @@ def _attach_grid_launch_evidence(
         result.launch_evidence_path = persist_measurement_evidence(evidence, actual_server_log=actual_log, slot=slot)
 
 
-def _safe(name: str) -> str:
-    """Filesystem-safe slug for variant directory names."""
-    return "".join(c if c.isalnum() or c in "-_." else "_" for c in name)[:60]
-
-
-def variant_slot(output_root: Path, index: int, name: str) -> Path:
-    """The directory below ``output_root`` that the variant at ``index`` of a grid, named ``name``, runs its rounds in."""
-    return output_root / f"variant_{index:02d}_{_safe(name)}"
-
-
 def _write_variant_abort_marker(
     slot: Path,
     *,
@@ -1598,7 +1589,6 @@ __all__ = [
     "session_grid_bounds",
     "stopped_by_the_run",
     "teardown_variant_server",
-    "variant_slot",
 ]
 
 

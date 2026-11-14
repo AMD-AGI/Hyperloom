@@ -68,7 +68,7 @@ from ._proposal_identity import (
 )
 from .explore_prefilter.measured_variants import GAIN_BELOW_THRESHOLD, MeasuredOn, measured_verdict, stack_of_measured
 from ._grid_base import DEFAULT_KEEP_THRESHOLD_PCT, TS_FAILED, TS_SKIPPED_DEDUP, _default_grid_for_framework
-from ._grid_base import importable_overlay_dir, variant_config_of
+from ._grid_base import _safe, importable_overlay_dir, variant_config_of
 from ._grid_base import apply_base_env
 from ._agentx_checkpoint import round_checkpoint
 from ._subprocess_kill import AGENTX_EARLY_STOP_ERROR_CLASS
@@ -84,7 +84,6 @@ from ._grid_runner import (
     SessionDirField,
     _build_variant_yaml,
     lease_cards,
-    _safe,
     run_grid,
     sanitize_result_dir,
     sanitize_script_name,

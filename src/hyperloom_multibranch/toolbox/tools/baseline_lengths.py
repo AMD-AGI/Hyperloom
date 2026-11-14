@@ -34,8 +34,7 @@ from pathlib import Path
 from hyperloom.common.perf_metric import GRADED_DURATION, GRADED_OUTPUT
 from hyperloom.measure.round_marks import ROLE_EVAL, ROLE_MEASURE, ROLE_WARMUP
 from hyperloom.measure.runner.rounds import ROUNDS_FILE
-from hyperloom.orchestrator.actions.executors._grid_runner import variant_slot
-from hyperloom.orchestrator.actions.executors._round_folder import is_round_folder
+from hyperloom.orchestrator.actions.executors import is_round_folder, variant_slot
 from hyperloom_multibranch.toolbox.tools.phase_mix import MEASURED_ISL_KEY, MEASURED_OSL_KEY, MEASURED_SOURCE_KEY
 from inference_suite.contracts import RunLayout
 

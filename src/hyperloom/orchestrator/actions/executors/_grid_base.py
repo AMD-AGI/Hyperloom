@@ -71,6 +71,16 @@ def variant_config_of(workspace: str) -> Path:
     return Path(workspace).parent / VARIANT_CONFIG_FILE
 
 
+def _safe(name: str) -> str:
+    """Filesystem-safe slug for variant directory names."""
+    return "".join(c if c.isalnum() or c in "-_." else "_" for c in name)[:60]
+
+
+def variant_slot(output_root: Path, index: int, name: str) -> Path:
+    """The directory below ``output_root`` that the variant at ``index`` of a grid, named ``name``, runs its rounds in."""
+    return output_root / f"variant_{index:02d}_{_safe(name)}"
+
+
 def sync_benchmark_timeout(config_path: Path, timeout_sec: float) -> None:
     """Hold the round of the point at ``config_path`` to the same cap as the enclosing benchmark process."""
     cfg = yaml.safe_load(config_path.read_text(encoding="utf-8"))

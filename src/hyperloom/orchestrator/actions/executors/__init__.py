@@ -17,7 +17,7 @@ from ._workload_envs import (
     default_baseline_config,
     materialize_benchmark_config,
 )
-from ._grid_base import GridVariant, VariantResult
+from ._grid_base import GridVariant, VariantResult, variant_slot
 from ._profile_setup import VLLM_PATCH_PROFILER_FIELDS
 from ._server_patcher import ensure_vllm_patched_for_tracelens
 from ._grid_runner import _run_grid_warmup_enabled as run_grid_warmup_enabled
@@ -104,4 +104,5 @@ __all__ = [
     "speculative_pin_reason",
     "strip_visible_devices_from_config",
     "teardown_variant_server",
+    "variant_slot",
 ]
