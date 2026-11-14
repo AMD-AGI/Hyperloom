@@ -114,8 +114,7 @@ from hyperloom.measure.short_prompts.rounds import Serving, write_answered
 from hyperloom.measure.short_prompts.staging import load_prompt_set
 from hyperloom.measure.short_prompts.prompts import PromptSetError
 from hyperloom.measure.socket import MeasurementTimeout, RoundOutcome, TestCall, TestOutcome
-from hyperloom.measure.spec import Attachment
-from hyperloom.measure.spec import EnvRoot as SpecEnvRoot
+from hyperloom.measure.spec import Attachment, EnvRoot as SpecEnvRoot
 from hyperloom.orchestrator.actions.executors import (
     CHECK_SERVER_ENVS,
     ORCHESTRATOR_CANCELLED_RETURNCODE,
@@ -127,6 +126,7 @@ from hyperloom.orchestrator.actions.executors import (
     GridVariant,
     LaunchLayer,
     VariantResult,
+    grid_run_dirs,
     is_round_folder,
     resolve_lifecycle_params,
     run_grid,
@@ -661,7 +661,7 @@ def _round_shape(run: _Run, point: int, name: str, kwargs: dict[str, Any], resul
 
 def _stamp_round(run: _Run, point: int, shape: RoundShape, window: tuple[float, float]) -> None:
     """Stamp the phases of the round that ran in ``window``; what follows it is ``other`` until something stamps."""
-    for boundary in round_boundaries(window, read_runs(Path(run.call.output_dir), window), shape):
+    for boundary in round_boundaries(window, read_runs(grid_run_dirs(Path(run.call.output_dir)), window), shape):
         run.phases.begin(boundary.name, at=boundary.at, point=point)
     run.phases.begin(OTHER, at=window[1])
 

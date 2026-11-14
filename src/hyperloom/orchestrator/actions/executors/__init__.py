@@ -17,7 +17,7 @@ from ._workload_envs import (
     default_baseline_config,
     materialize_benchmark_config,
 )
-from ._grid_base import GridVariant, VariantResult, variant_slot
+from ._grid_base import GridVariant, VariantResult, grid_run_dirs, variant_slot
 from ._profile_setup import VLLM_PATCH_PROFILER_FIELDS
 from ._server_patcher import ensure_vllm_patched_for_tracelens
 from ._grid_runner import _run_grid_warmup_enabled as run_grid_warmup_enabled
@@ -88,6 +88,7 @@ __all__ = [
     "failed_step_error_class",
     "external_agentx_config",
     "fixed_workload",
+    "grid_run_dirs",
     "harvest_leaked_artifacts",
     "is_round_folder",
     "materialize_benchmark_config",

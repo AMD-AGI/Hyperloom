@@ -78,7 +78,9 @@ from .agentx_point import ServerArgvInvalidError, materialize_grid_variant
 from ._workload_envs import BenchmarkTarget, LaunchLayer
 
 from ._grid_base import (
+    MN_WARMUP_DIR,
     VARIANT_CONFIG_FILE,
+    WARMUP_ROUND_DIR,
     GridRound,
     GridVariant,
     RoundError,
@@ -101,8 +103,6 @@ from hyperloom.inference_optimizer.grid_server_args import (
 
 log = logging.getLogger(__name__)
 
-#: Sub-directory of a variant's slot that its discarded warmup round runs in.
-_WARMUP_ROUND_DIR = "warmup_round"
 #: A variant whose warm-up setup or warm-up YAML could not be built.
 _WARMUP_YAML_BUILD_ERROR = "warmup_yaml_build_error"
 #: A variant whose composed config named a workload its benchmark cap could not be sized from.
@@ -887,7 +887,7 @@ async def _prepare_variant_rounds(run: _GridRun, at: _VariantSlot) -> _VariantRo
 
 async def _run_warmup_round(run: _GridRun, at: _VariantSlot, rounds: _VariantRounds) -> float | None:
     """Run and discard one benchmark pass so the measured round starts on a warm server."""
-    warmup_slot = at.path / _WARMUP_ROUND_DIR
+    warmup_slot = at.path / WARMUP_ROUND_DIR
     warmup_server_log = warmup_slot / "server.log"
     cfg_path = await _variant_yaml_or_abort(
         run,
@@ -929,7 +929,7 @@ async def _warmup_throughput(
     pass_: _BenchmarkPass,
 ) -> float | None:
     """The throughput the warmup pass measured, or end the variant when it measured none."""
-    warmup_slot = at.path / _WARMUP_ROUND_DIR
+    warmup_slot = at.path / WARMUP_ROUND_DIR
     run_ws = select_run_workspace(warmup_slot, known_before=pass_.workspaces_before)
     workspace = run_ws if run_ws is not None else warmup_slot
     harvested = harvest_leaked_artifacts(workspace, subprocess_started_unix=pass_.started_unix)
@@ -1028,7 +1028,7 @@ async def _run_multi_node_warmup(run: _GridRun, at: _VariantSlot, rounds: _Varia
 
     if not is_multi_node() or not mn_bench_warmup_enabled():
         return
-    warm_slot = at.path / "mn_warmup"
+    warm_slot = at.path / MN_WARMUP_DIR
     started_unix = time.time()
     proc = await _reported_round(
         run,
@@ -1463,7 +1463,7 @@ def _measurement_server_log_path(
         direct = _existing_log_path(workspace / "server.log")
     if direct:
         return direct
-    warmup_dir = owning_slot / _WARMUP_ROUND_DIR
+    warmup_dir = owning_slot / WARMUP_ROUND_DIR
     try:
         candidates = [p for d in (owning_slot, warmup_dir) for p in d.glob("*/server.log") if p.is_file()]
     except OSError:
