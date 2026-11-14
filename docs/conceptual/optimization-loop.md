@@ -501,8 +501,9 @@ build: a PR reference becomes a checkout of that PR's head, not just a
 released-tag autoselect. This makes support that exists only in an
 unreleased PR or branch reachable. When a discovered PR ref drives the
 build, the source PR URL is recorded as build provenance in the session
-breakdown's `installed_versions` map (`source_pr_url`); see the
-[`enablement` section](../reference/session-breakdown.md#enablement--admission-round-lifecycle-builds--attempt-runtimes).
+breakdown's `enablement` timeline event, under
+`ext.builds.rows[].installed_versions.source_pr_url`; see the
+[`enablement` event reference](../reference/session-breakdown.md#enablement-timeline-event).
 
 ### Novelty and crash safety
 
