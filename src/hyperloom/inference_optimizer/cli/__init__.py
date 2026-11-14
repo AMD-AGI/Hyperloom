@@ -32,7 +32,9 @@ from .backends import (
     _build_backends,
     _build_proposal_scorer,
     _orchestration_banner,
+    _resolve_orchestration_backend,
 )
+from .session_gates import _check_codex_sandbox, _preflight_agentx_backend
 from .model_gate import (
     _finish_model_gate,
     _preflight_context_window,
@@ -445,24 +447,6 @@ def _reset_state_file(session_dir: Path, state: SharedState) -> None:
         backup_path.name,
         state.framework,
     )
-
-
-def _preflight_agentx_backend(args: argparse.Namespace) -> None:
-    """Reject the combinations where AgentX labels work it did not do."""
-    if not _agentx_enabled():
-        return
-    from hyperloom.inference_optimizer import framework_registry
-
-    framework = str(getattr(args, "framework", "") or "").strip().lower()
-    if framework and framework_registry.is_scriptable(framework):
-        print(
-            f"ERROR: HYPERLOOM_AGENTX=1 with --framework {framework!r}, which is "
-            "scriptable. The AgentX switch only replaces the benchmark client of a "
-            "serving framework, so no trace would be replayed -- but the session "
-            "would still be labelled AgentX and run on AgentX budgets. Pick one.",
-            file=sys.stderr,
-        )
-        raise SystemExit(2)
 
 
 def _apply_default_budget(args: argparse.Namespace) -> None:
@@ -1547,6 +1531,12 @@ async def _prepare_run(args: argparse.Namespace) -> _ProviderIntent:
             log.warning("failed to preserve SBD V6 preflight failure", exc_info=True)
         raise
 
+    # Provider intent already fixes the orchestration backend; reject an unusable sandbox before catalog requests.
+    _check_codex_sandbox(
+        _resolve_orchestration_backend(
+            codex_follows_claude=codex_follows_claude, claude_follows_codex=claude_follows_codex
+        )
+    )
     # Model resolution makes blocking LLM calls; the subscription-token client refuses to run inside this loop.
     await asyncio.to_thread(
         _resolve_models_for_run,
