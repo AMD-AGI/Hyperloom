@@ -743,6 +743,26 @@ async def _restart_round_server(params: dict[str, Any], round_trace_root: str) -
     return None
 
 
+def _leave_capture_to_engines(config_path: Path) -> None:
+    """Turn the client-side profiler off in a multi-node point: the round loads a server it does not hold, whose
+    engines the executor starts and stops profiling on itself."""
+    from ._multi_node_env import is_multi_node
+
+    if not is_multi_node():
+        return
+    cfg = yaml.safe_load(config_path.read_text(encoding="utf-8")) or {}
+    bench = cfg.get("benchmark") if isinstance(cfg, dict) else None
+    if not isinstance(bench, dict):
+        return
+    torch_profiler = (bench.get("profiler") or {}).get("torch_profiler")
+    if isinstance(torch_profiler, dict):
+        torch_profiler["enabled"] = False
+    envs = bench.get("envs")
+    if isinstance(envs, dict):
+        envs.pop("PROFILE", None)
+    config_path.write_text(yaml.safe_dump(cfg, sort_keys=False), encoding="utf-8")
+
+
 async def _trigger_engine_profiles(action: str, body: dict[str, Any] | None = None) -> None:
     """Start or stop torch profiling on the Infera workers and on the PD engines (each a no-op elsewhere)."""
     from ._multi_node_server_lifecycle import trigger_infera_engine_profile, trigger_pd_engine_profile
@@ -1089,6 +1109,7 @@ class ProfileExecutor(BenchmarkRunExecutor):
             self._host_probe_status = f"probe_injection_failed: {exc}"
         with contextlib.suppress(OSError, ValueError, yaml.YAMLError):
             self._instrumentation_preflight = _instrumentation_preflight_row(read_benchmark_point(config_path).envs)
+        _leave_capture_to_engines(config_path)
 
     def drain_instrumentation_report(self) -> dict[str, Any] | None:
         """Take the instrumentation report this executor produced, clearing it.
