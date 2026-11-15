@@ -7,12 +7,14 @@ from dataclasses import replace
 import pytest
 
 from inference_suite.frameworks import Framework
+from inference_suite.multinode import launch as launch_module
 from inference_suite.multinode.commands import HostCommand
 from inference_suite.multinode.launch import (
     Cluster,
     LaunchError,
     LaunchOptions,
     check_env,
+    engines_gone,
     fit_to_engine,
     launch_script,
     replace_flags,
@@ -158,6 +160,38 @@ def test_dead_engine_fails_the_start_with_its_log(tmp_path):
     with pytest.raises(LaunchError, match="decode on d0 exited during startup:\nRuntimeError: out of memory"):
         start(_launch(), _cluster(tmp_path, hosts, lambda url: "d0" not in url), _OPTIONS)
     assert "r0" not in hosts.driven("restart")
+
+
+def test_a_dead_engine_logging_under_the_log_dir_shows_that_log(tmp_path):
+    hosts = FakeHosts(gone={"d0"})
+    with pytest.raises(LaunchError, match="exited during startup"):
+        start(_launch(), _cluster(tmp_path, hosts, lambda url: "d0" not in url), replace(_OPTIONS, log_dir="/logs"))
+    tails = [stdin for kind, host, stdin in hosts.calls if kind == "ssh" and host == "d0" and "tail -n" in stdin]
+    assert tails and "/logs/pd_decode_d0.log" in tails[-1]
+
+
+def _local_hosts(argv, stdin, timeout):
+    if argv[0] == "ssh-keyscan":
+        return SshResult(0, f"{argv[-1]} ssh-ed25519 AAAA\n", "")
+    done = subprocess.run(["bash", "-c", stdin], capture_output=True, text=True, timeout=timeout)
+    return SshResult(done.returncode, done.stdout, done.stderr)
+
+
+@pytest.mark.parametrize("command", ["sleep 30", "exec -a sglang.launch_server sleep 30"])
+def test_an_engine_still_in_its_launch_script_is_not_gone(tmp_path, monkeypatch, command):
+    monkeypatch.setattr(launch_module, "_pidfile", lambda role: str(tmp_path / f"{role}.pid"))
+    monkeypatch.setattr(launch_module, "_launch_path", lambda role: str(tmp_path / f"hyperloom-mn-{role}.sh"))
+    script = tmp_path / "hyperloom-mn-decode.sh"
+    script.write_text(f"{command}\n")
+    engine = subprocess.Popen(["/bin/bash", str(script)])
+    try:
+        (tmp_path / "decode.pid").write_text(str(engine.pid))
+        client = SshClient(SshAccess(22, "root", "/keys/id"), tmp_path / "known_hosts", runner=_local_hosts)
+        cluster = Cluster(_nodes(), client, probe=lambda url: False)
+        assert [gone.role for gone in engines_gone(_launch(), cluster)] == ["prefill"]
+    finally:
+        engine.kill()
+        engine.wait()
 
 
 def test_engines_that_never_answer_time_out(tmp_path):

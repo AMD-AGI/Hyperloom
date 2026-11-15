@@ -154,7 +154,7 @@ def _gpu_release_lines() -> list[str]:
 
 def _log_lines(log_dir: str, command: HostCommand) -> list[str]:
     """Bash that also appends the engine's output to ``<log_dir>/pd_<role>_<host>.log``."""
-    log = shlex.quote(f"{log_dir}/pd_{command.role}_{command.host}.log")
+    log = shlex.quote(_engine_log(log_dir, command))
     return [
         f"if mkdir -p {shlex.quote(log_dir)} 2>/dev/null; then exec > >(tee -ai {log}) 2>&1; fi",
         'echo "[hyperloom] engine launch $(date -u +%Y-%m-%dT%H:%M:%SZ)"',
@@ -304,8 +304,14 @@ def _health_urls(launch: PdLaunch, nodes: NodeList, role: Role) -> list[str]:
     return [f"{url}/health" for url in engine_urls(launch, nodes)[role.value]]
 
 
-def _log_tail(cluster: Cluster, command: HostCommand, timeout: int) -> str:
-    result = cluster.client.run(command.host, f"tail -n {_LOG_TAIL_LINES} {_launch_path(command.role)}.log", timeout)
+def _engine_log(log_dir: str, command: HostCommand) -> str:
+    return f"{log_dir}/pd_{command.role}_{command.host}.log"
+
+
+def _log_tail(cluster: Cluster, command: HostCommand, timeout: int, log_dir: str = "") -> str:
+    """The last lines of ``command``'s engine log: the one under ``log_dir`` when absolute, else its launch log."""
+    log = _engine_log(log_dir, command) if log_dir.startswith("/") else f"{_launch_path(command.role)}.log"
+    result = cluster.client.run(command.host, f"tail -n {_LOG_TAIL_LINES} {shlex.quote(log)}", timeout)
     return result.stdout.strip()
 
 
@@ -315,11 +321,13 @@ def _engine_commands(launch: PdLaunch, nodes: NodeList) -> list[HostCommand]:
 
 
 def engines_gone(launch: PdLaunch, cluster: Cluster, timeout: int = 30) -> list[HostCommand]:
-    """The engine hosts whose launched server no longer runs (a restarted container lost it, or it exited)."""
+    """The engine hosts whose launched server no longer runs (a restarted container lost it, or it exited); one
+    still in its launch script, waiting for the GPUs before it execs the server, runs."""
     gone = []
     for command in _engine_commands(launch, cluster.nodes):
         needle = process_needle(command.role, launch.framework, launch.frontend.type)
-        patterns = " ".join(f"-e {shlex.quote(part)}" for part in needle.split("|"))
+        parts = [*needle.split("|"), _launch_path(command.role)]
+        patterns = " ".join(f"-e {shlex.quote(part)}" for part in parts)
         script = (
             f'pid=$(cat {_pidfile(command.role)} 2>/dev/null) && kill -0 "$pid" 2>/dev/null && tr "\\0" " " '
             f'< /proc/"$pid"/cmdline | grep -qF {patterns} && echo HL_ALIVE || echo HL_GONE'
@@ -343,7 +351,7 @@ def _await(urls: Sequence[str], launch: PdLaunch, cluster: Cluster, options: Lau
             return
         gone = engines_gone(launch, cluster)
         if gone:
-            tail = _log_tail(cluster, gone[0], options.ssh_timeout_s)
+            tail = _log_tail(cluster, gone[0], options.ssh_timeout_s, options.log_dir)
             raise LaunchError(f"{gone[0].role} on {gone[0].host} exited during startup:\n{tail}")
         if cluster.clock() >= deadline:
             raise LaunchError(f"not ready after {options.ready_timeout_s}s: {waiting}")
