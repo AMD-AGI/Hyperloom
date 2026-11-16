@@ -14,8 +14,9 @@ does a branch the judge or the session's end stopped, nor a record that waits on
 opens again once the integration head moves, and an op of a direction of the map once its agent branch stops. With too
 little of EXPLORE left for a new branch's first commit, the playbook's ``last_open_minutes`` or else the median time a
 new branch took to it, it says that no branch should open. Shares taken from a commit the head builds on are named as that commit's, beside
-the head's. The direction families' odds are the specialists' menu (:mod:`rsi.menu`), not the judge's: a family has
-too few tests to rank ops by.
+the head's. Without shares, a head (or a commit it builds on) whose recipe a PROFILE test measured reads as unknown,
+not as unprofiled: neither is a profile out of ops. The direction families' odds are the specialists' menu
+(:mod:`rsi.menu`), not the judge's: a family has too few tests to rank ops by.
 """
 
 from __future__ import annotations
@@ -25,6 +26,7 @@ from dataclasses import dataclass, field
 
 from hyperloom_multibranch.contracts.blackboard import INTEGRATION_BRANCH
 from hyperloom_multibranch.contracts.blackboard.exhausted import Exhausted, ExhaustedWhy, latest_exhausted
+from hyperloom_multibranch.contracts.blackboard.peers import TestKind, Validity
 from hyperloom_multibranch.contracts.blackboard.records import (
     BlackboardSnapshot,
     BranchNode,
@@ -79,7 +81,9 @@ class OpenAreas:
     running branches work on them (``covered``, by op, the branches, an agent branch with the ids of the directions of
     its map that name the op) or they are spent (``spent``, by op, the history of the branches focused on it), the
     minutes left of EXPLORE and those a new branch takes to its first commit. ``head`` is the integration head; a
-    ``profiled`` commit other than it is one it builds on, because no commit of the head's recipe was profiled."""
+    ``profiled`` commit other than it is one it builds on, because no commit of the head's recipe was profiled.
+    ``unanalysed`` is, without a ``profiled`` commit, the head or the nearest commit it builds on whose recipe a
+    PROFILE test measured, its trace not analysed into op shares."""
 
     profiled: str = ""
     ops: tuple[OpenOp, ...] = ()
@@ -88,6 +92,7 @@ class OpenAreas:
     minutes_left: float | None = None
     first_commit_minutes: float | None = None
     head: str = ""
+    unanalysed: str = ""
 
     @property
     def too_late(self) -> bool:
@@ -116,6 +121,14 @@ class OpenAreas:
                 f"+{item.ceiling_pct:.1f}%"
                 for item in self.ops
             ] or ["- none: every large op is worked on or spent"]
+        elif self.unanalysed:
+            source = (
+                "The integration head" if self.unanalysed == self.head else "A commit the integration head builds on"
+            )
+            lines = [
+                f"Open areas for a new branch: unknown. {source} {self.unanalysed} is profiled, its trace not analysed: "
+                "it left no op shares, so no op is known."
+            ]
         else:
             lines = ["Open areas for a new branch: neither the integration head nor a commit it builds on is profiled."]
         if self.covered:
@@ -141,6 +154,27 @@ class OpenAreas:
                 "branch takes to its first commit: open no new branch."
             )
         return "\n".join(lines)
+
+
+def _unanalysed(snapshot: BlackboardSnapshot, head: str) -> str:
+    """``head`` or the nearest commit it builds on whose recipe a PROFILE test measured; empty when none was."""
+
+    lineage = snapshot.lineage
+    measured = {
+        record.request.parent_commit
+        for record in snapshot.records
+        if record.request.kind is TestKind.PROFILE
+        and record.result is not None
+        and record.result.validity is Validity.SUCCEEDED
+    }
+    return next(
+        (
+            item
+            for item in (head, *lineage.ancestry(head))
+            if any(lineage.same_recipe(item, commit) for commit in measured)
+        ),
+        "",
+    )
 
 
 def _working(snapshot: BlackboardSnapshot) -> dict[str, set[str]]:
@@ -280,7 +314,8 @@ def open_areas(
     left = max(0.0, seconds_left) / _MINUTE
     needed = numbers.last_open_minutes if numbers.last_open_minutes is not None else first_commit_minutes
     open_ops = tuple(item for item in ops if item.op not in covered and item.op not in spent)[:OPEN_OPS]
-    return OpenAreas(profiled, open_ops, covered, spent, left, needed, head)
+    unanalysed = _unanalysed(snapshot, head) if head and not profiled else ""
+    return OpenAreas(profiled, open_ops, covered, spent, left, needed, head, unanalysed)
 
 
 __all__ = ["OPEN_OPS", "FocusHistory", "OpenAreas", "OpenOp", "StoppedOnFocus", "open_areas", "stopped_on_focus"]

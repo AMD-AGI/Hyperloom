@@ -7,8 +7,8 @@ One function decides for the local backend, the hosted backend and the runner, s
 wherever it is read. The classes drive different follow-ups in the tool layer:
 
 * ``infra``: nothing about the candidate was learned; retry in a fresh sandbox, write no negative result;
-* ``candidate``: the log carries a known failure signature, the server refused its own command line, or it did not
-  become ready within its boot limit; record a negative result;
+* ``candidate``: the log carries a known failure signature, the server or the suite refused its own command line, or
+  it did not become ready within its boot limit; record a negative result;
 * ``unclear``: non-zero with no known signature, a stalled server, or a timeout; rerun once in a fresh sandbox. The
   reason still names what the log says (a refused evaluation request, a Python exception) when it says anything. A
   profile's server that stalled with its profile window open is no candidate's doing: :data:`PROFILER_HUNG`, ``infra``.
@@ -172,6 +172,8 @@ FRAMEWORK_UNIMPORTABLE_REASON = "framework_unimportable"
 _FAILED_STEP_VERDICTS: dict[FailedStep, tuple[FailureClass, str]] = {
     # The suite parses the argv before the server starts, so no server log holds the refusal.
     FailedStep.FLAG_UNKNOWN: (FailureClass.CANDIDATE, SERVE_FLAG),
+    # The candidate's layer sets or removes a setting the golden launch owns; refused before the server starts.
+    FailedStep.GOLDEN_OWNED_TOUCHED: (FailureClass.CANDIDATE, SERVE_FLAG),
     FailedStep.PORT_IN_USE: (FailureClass.INFRA, PORT_IN_USE_REASON),
     FailedStep.GPUS_UNAVAILABLE: (FailureClass.INFRA, HOST_GPUS_UNAVAILABLE_REASON),
     FailedStep.SERVER_SILENT_BEFORE_READY: (FailureClass.INFRA, HUNG_BEFORE_READY),
@@ -179,7 +181,7 @@ _FAILED_STEP_VERDICTS: dict[FailedStep, tuple[FailureClass, str]] = {
     FailedStep.SERVER_STALLED: (FailureClass.UNCLEAR, SERVER_STALLED_REASON),
 }
 #: The steps whose reason quotes the report's ``failure_detail``, as ``<reason>: <detail>``.
-_DETAILED_STEPS = frozenset({FailedStep.FLAG_UNKNOWN})
+_DETAILED_STEPS = frozenset({FailedStep.FLAG_UNKNOWN, FailedStep.GOLDEN_OWNED_TOUCHED})
 #: The two causes an unclear failure names when its log carries them; the reason is ``<prefix>: <the log's line>``.
 #: A failure the log only calls a crashed evaluation names the refused request too, when the log carries one.
 LM_EVAL_BAD_REQUEST_REASON = "lm_eval_http_400"
