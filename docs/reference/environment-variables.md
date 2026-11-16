@@ -282,7 +282,7 @@ does, so under `HYPERLOOM_RSI_WRITE_ONLY=1` it finds none and `HYPERLOOM_RSI_AS_
 A multi-branch session sets the prompt-cache TTL of every branch's Claude CLI. On an InferenceX workload a branch
 waits for its test in the same conversation for longer than the CLI's default 5-minute TTL, so the session
 defaults to `1h` there; on an AgentX workload, whose test outlasts even an hour, it keeps the CLI's default. A
-variable set in the session's environment wins on either workload.
+variable set in the session's environment wins on either workload, and reaches a single-lineage specialist too.
 
 | Variable | Default | Description |
 |---|---|---|

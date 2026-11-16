@@ -661,13 +661,18 @@ PROMPT_CACHE_TTL_ENV = ("CLAUDE_CODE_PROMPT_CACHE_TTL", "CLAUDE_CODE_SUBAGENT_PR
 INFERENCEX_PROMPT_CACHE_TTL = "1h"
 
 
-def specialist_prompt_cache(workload: Workload, environ: Mapping[str, str]) -> dict[str, str]:
-    """The prompt-cache TTL a branch's specialist runs with: what ``environ`` sets, else
-    :data:`INFERENCEX_PROMPT_CACHE_TTL` on an InferenceX workload, and the CLI's own default on an AgentX one, whose
-    test outlasts even an hour's cache."""
+def specialist_env(workload: Workload) -> dict[str, str]:
+    """The environment a branch's specialist runs with: the main flow's allowlisted one, which carries the prompt-cache
+    TTL an operator sets, with :data:`INFERENCEX_PROMPT_CACHE_TTL` for each TTL it lacks on an InferenceX workload; on
+    an AgentX one, whose test outlasts even an hour's cache, the CLI keeps its own default."""
 
-    default = INFERENCEX_PROMPT_CACHE_TTL if workload.inferencex is not None else ""
-    return {name: value for name in PROMPT_CACHE_TTL_ENV if (value := environ.get(name) or default)}
+    from hyperloom.orchestrator.specialists.agent_runner import build_specialist_env
+
+    env = dict(build_specialist_env())
+    if workload.inferencex is not None:
+        for name in PROMPT_CACHE_TTL_ENV:
+            env.setdefault(name, INFERENCEX_PROMPT_CACHE_TTL)
+    return env
 
 
 def model_backed_sessions(command: AgentCommand) -> SpecialistSessions:
@@ -676,13 +681,13 @@ def model_backed_sessions(command: AgentCommand) -> SpecialistSessions:
     the gate's benchmark client of the session's canonical configuration; a session that runs no agent reads no
     canonical.
 
-    The CLI runs on the main flow's allowlisted specialist environment with the prompt-cache TTL of
-    :func:`specialist_prompt_cache`, through a local AI work socket whose resource log is under ``MB-logs``; its worktrees branch off one source base at ``MB-source``, and each launch rebuilds the
+    The CLI runs on :func:`specialist_env`, the main flow's allowlisted specialist environment with an InferenceX
+    workload's prompt-cache TTL, through a local AI work socket whose resource log is under ``MB-logs``; its worktrees branch off one source base at ``MB-source``, and each launch rebuilds the
     branch's brief at the head it starts from.
     """
 
     def build(wiring: SessionWiring) -> ModelSessions:
-        from hyperloom.orchestrator.specialists.agent_runner import Liveness, LocalAgentRunner, build_specialist_env
+        from hyperloom.orchestrator.specialists.agent_runner import Liveness, LocalAgentRunner
         from hyperloom_multibranch.specialist.agent_session import SPECIALIST_LOST_AFTER_S, AgentSetup
         from hyperloom_multibranch.specialist.agent_sessions import AgentSessions, with_agents
         from hyperloom_multibranch.specialist.model_sessions import model_sessions
@@ -701,7 +706,7 @@ def model_backed_sessions(command: AgentCommand) -> SpecialistSessions:
                 dev_leases=wiring.dev_leases.limits.cap if wiring.dev_leases else 0,
                 native=wiring.native,
             ),
-            env={**build_specialist_env(), **specialist_prompt_cache(workload, os.environ)},
+            env=specialist_env(workload),
             runner=LocalAgentRunner(
                 session_dir=layout.logs, liveness=Liveness(lost_after_seconds=SPECIALIST_LOST_AFTER_S)
             ),
@@ -935,8 +940,8 @@ __all__ = [
     "render_nodes",
     "require_framework_package",
     "specialist_command",
+    "specialist_env",
     "specialist_model",
-    "specialist_prompt_cache",
     "specialist_recall",
     "workload_environment",
     "workload_rule",
