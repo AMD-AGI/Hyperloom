@@ -1,8 +1,8 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""Arbor's map as the scheduler deals it: each direction read with the share it is in, and held by the branch that
-share was dealt to."""
+"""The agent map as the scheduler deals it: each direction read with the share it is in, and held by the branch
+that share was dealt to."""
 
 from __future__ import annotations
 

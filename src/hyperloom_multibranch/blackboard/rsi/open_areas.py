@@ -5,17 +5,18 @@
 
 :func:`open_areas` lists the ops of the integration head's profile, or of the nearest commit it builds on that was
 profiled, with the largest Amdahl ceilings, leaving out the ops a running branch works on (its focus, an op a direction
-of Arbor's map it holds names, or an op of the family of a claim it holds or of its last explore test, which is all a
+of the agent map it holds names, or an op of the family of a claim it holds or of its last explore test, which is all a
 branch opened without a focus shows) and the spent ones: those the playbook's ``failed_op_limit`` branches opened on
 the integration head as it stands were focused on and stopped without a commit, and those a branch focused on them
 gave up on at that head, its give-up quoting an EXHAUSTED record that finds no ceiling above the bar or every idea
-tested or claimed there. A record alone is about one of the session's directions, not the op, and spends nothing; nor
+tested or claimed there; a commit of the integration head's recipe counts as that head. A record alone is about one of the session's directions, not the op, and spends nothing; nor
 does a branch the judge or the session's end stopped, nor a record that waits on a tool or a capability. A spent op
-opens again once the integration head moves, and an op of a direction of the map once its Arbor branch stops. With too
+opens again once the integration head moves, and an op of a direction of the map once its agent branch stops. With too
 little of EXPLORE left for a new branch's first commit, the playbook's ``last_open_minutes`` or else the median time a
 new branch took to it, it says that no branch should open. Shares taken from a commit the head builds on are named as that commit's, beside
-the head's. The direction families' odds are the specialists' menu (:mod:`rsi.menu`), not the judge's: a family has
-too few tests to rank ops by.
+the head's. Without shares, a head (or a commit it builds on) whose recipe a PROFILE test measured reads as unknown,
+not as unprofiled: neither is a profile out of ops. The direction families' odds are the specialists' menu
+(:mod:`rsi.menu`), not the judge's: a family has too few tests to rank ops by.
 """
 
 from __future__ import annotations
@@ -25,6 +26,7 @@ from dataclasses import dataclass, field
 
 from hyperloom_multibranch.contracts.blackboard import INTEGRATION_BRANCH
 from hyperloom_multibranch.contracts.blackboard.exhausted import Exhausted, ExhaustedWhy, latest_exhausted
+from hyperloom_multibranch.contracts.blackboard.peers import TestKind, Validity
 from hyperloom_multibranch.contracts.blackboard.records import (
     BlackboardSnapshot,
     BranchNode,
@@ -60,7 +62,7 @@ class OpenOp:
 class FocusHistory:
     """The branches this session opened on one op as their focus: how many, how many of them stopped without a
     commit, the commits they made and the best gain among those; ``exhausted`` is the record that spent the op when
-    one of them gave up on it on the integration head quoting it."""
+    one of them gave up on it on a commit of the integration head's recipe quoting it."""
 
     opened: int
     ended_without_commit: int
@@ -76,10 +78,12 @@ class FocusHistory:
 @dataclass(frozen=True)
 class OpenAreas:
     """Where a new branch could open: the ``ops`` of the profile of ``profiled`` left open, the ops left out because
-    running branches work on them (``covered``, by op, the branches, an Arbor branch with the ids of the directions of
+    running branches work on them (``covered``, by op, the branches, an agent branch with the ids of the directions of
     its map that name the op) or they are spent (``spent``, by op, the history of the branches focused on it), the
     minutes left of EXPLORE and those a new branch takes to its first commit. ``head`` is the integration head; a
-    ``profiled`` commit other than it is one it builds on, because no commit of the head's recipe was profiled."""
+    ``profiled`` commit other than it is one it builds on, because no commit of the head's recipe was profiled.
+    ``unanalysed`` is, without a ``profiled`` commit, the head or the nearest commit it builds on whose recipe a
+    PROFILE test measured, its trace not analysed into op shares."""
 
     profiled: str = ""
     ops: tuple[OpenOp, ...] = ()
@@ -88,6 +92,7 @@ class OpenAreas:
     minutes_left: float | None = None
     first_commit_minutes: float | None = None
     head: str = ""
+    unanalysed: str = ""
 
     @property
     def too_late(self) -> bool:
@@ -116,6 +121,14 @@ class OpenAreas:
                 f"+{item.ceiling_pct:.1f}%"
                 for item in self.ops
             ] or ["- none: every large op is worked on or spent"]
+        elif self.unanalysed:
+            source = (
+                "The integration head" if self.unanalysed == self.head else "A commit the integration head builds on"
+            )
+            lines = [
+                f"Open areas for a new branch: unknown. {source} {self.unanalysed} is profiled, its trace not analysed: "
+                "it left no op shares, so no op is known."
+            ]
         else:
             lines = ["Open areas for a new branch: neither the integration head nor a commit it builds on is profiled."]
         if self.covered:
@@ -143,6 +156,27 @@ class OpenAreas:
         return "\n".join(lines)
 
 
+def _unanalysed(snapshot: BlackboardSnapshot, head: str) -> str:
+    """``head`` or the nearest commit it builds on whose recipe a PROFILE test measured; empty when none was."""
+
+    lineage = snapshot.lineage
+    measured = {
+        record.request.parent_commit
+        for record in snapshot.records
+        if record.request.kind is TestKind.PROFILE
+        and record.result is not None
+        and record.result.validity is Validity.SUCCEEDED
+    }
+    return next(
+        (
+            item
+            for item in (head, *lineage.ancestry(head))
+            if any(lineage.same_recipe(item, commit) for commit in measured)
+        ),
+        "",
+    )
+
+
 def _working(snapshot: BlackboardSnapshot) -> dict[str, set[str]]:
     """The families the running specialist branches work on, each with the branches: a claim held, or the last
     explore test."""
@@ -163,7 +197,7 @@ def _working(snapshot: BlackboardSnapshot) -> dict[str, set[str]]:
 
 
 def _held(snapshot: BlackboardSnapshot) -> dict[str, list[MapDirection]]:
-    """The directions of Arbor's map each running Arbor branch holds, by the branch."""
+    """The directions of the agent map each running agent branch holds, by the branch."""
 
     holders = snapshot.map_holders()
     held: dict[str, list[MapDirection]] = {}
@@ -174,14 +208,14 @@ def _held(snapshot: BlackboardSnapshot) -> dict[str, list[MapDirection]]:
 
 
 def _covering(op: str, running: set[str], held: Mapping[str, Sequence[MapDirection]]) -> tuple[str, ...]:
-    """The ``running`` branches that work on ``op``, and each Arbor branch that holds a direction naming it, named
+    """The ``running`` branches that work on ``op``, and each agent branch that holds a direction naming it, named
     with the ids of those directions."""
 
     shown = {branch: branch for branch in running}
     for branch, directions in held.items():
         ids = [item.id for item in directions if direction_names_op(item, op)]
         if ids:
-            shown[branch] = f"{branch} (Arbor, {', '.join(ids)})"
+            shown[branch] = f"{branch} (agent map, {', '.join(ids)})"
     return tuple(shown[branch] for branch in sorted(shown))
 
 
@@ -225,20 +259,23 @@ def stopped_on_focus(snapshot: BlackboardSnapshot, focus: str) -> tuple[StoppedO
 def _spent(
     snapshot: BlackboardSnapshot, op: str, focused: Sequence[BranchNode], head: str, limit: int
 ) -> FocusHistory | None:
-    """The history of the ``focused`` branches of ``op`` when one gave up on it on ``head``, or ``limit`` of those
-    opened on ``head`` stopped without a commit, else ``None``."""
+    """The history of the ``focused`` branches of ``op`` when one gave up on it on a commit of ``head``'s recipe, or
+    ``limit`` of those opened on one stopped without a commit, else ``None``."""
 
+    lineage = snapshot.lineage
     record = next(
         (
             quoted
             for item in stopped_on_focus(snapshot, op)
-            if (quoted := item.gave_up_on) is not None and quoted.why in _DONE and quoted.head == head
+            if (quoted := item.gave_up_on) is not None
+            and quoted.why in _DONE
+            and lineage.same_recipe(quoted.head, head)
         ),
         None,
     )
     committed = {commit.branch for commit in snapshot.committed}
     bare = [node for node in focused if node.stopped_at is not None and node.branch not in committed]
-    if record is None and sum(1 for node in bare if node.start_commit == head) < limit:
+    if record is None and sum(1 for node in bare if lineage.same_recipe(node.start_commit, head)) < limit:
         return None
     branches = {node.branch for node in focused}
     gains = [commit.gain_pct for commit in snapshot.committed if commit.branch in branches]
@@ -277,7 +314,8 @@ def open_areas(
     left = max(0.0, seconds_left) / _MINUTE
     needed = numbers.last_open_minutes if numbers.last_open_minutes is not None else first_commit_minutes
     open_ops = tuple(item for item in ops if item.op not in covered and item.op not in spent)[:OPEN_OPS]
-    return OpenAreas(profiled, open_ops, covered, spent, left, needed, head)
+    unanalysed = _unanalysed(snapshot, head) if head and not profiled else ""
+    return OpenAreas(profiled, open_ops, covered, spent, left, needed, head, unanalysed)
 
 
 __all__ = ["OPEN_OPS", "FocusHistory", "OpenAreas", "OpenOp", "StoppedOnFocus", "open_areas", "stopped_on_focus"]

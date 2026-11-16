@@ -760,13 +760,6 @@ class RecipeDiff:
         return tuple(change for change in (*self.args, *self.envs) if change.conflicting)
 
     @property
-    def patch_overlap(self) -> float:
-        """Jaccard similarity of the two patch sets; ``1.0`` when neither recipe has patches."""
-
-        union = len(self.shared_patches) + len(self.patches_only_in_first) + len(self.patches_only_in_second)
-        return len(self.shared_patches) / union if union else 1.0
-
-    @property
     def is_empty(self) -> bool:
         return not (
             self.args

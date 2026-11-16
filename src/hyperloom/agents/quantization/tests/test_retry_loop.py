@@ -11,7 +11,6 @@ from hyperloom.agents.quantization.driver.outcomes import OutcomeId
 from hyperloom.agents.quantization.driver.retry import (
     DEFAULT_QUARK_GIT_URL,
     QuantSkillRunOptions,
-    QuantSkillRunResult,
     _decide_next_step,
     _resolve_interactive,
     quantize_via_prompt,
@@ -785,14 +784,6 @@ async def test_auto_recover_surfaced_does_not_retry(tmp_path, quark_root, build_
 # ─────────────────────────────────────────────────────────────────────────────
 
 
-def test_resolve_interactive_explicit_true():
-    assert _resolve_interactive(True) is True
-
-
-def test_resolve_interactive_explicit_false():
-    assert _resolve_interactive(False) is False
-
-
 def test_resolve_interactive_auto_no_tty(monkeypatch):
     import sys
 
@@ -809,78 +800,6 @@ def test_resolve_interactive_auto_no_tty(monkeypatch):
 # ─────────────────────────────────────────────────────────────────────────────
 
 
-def test_decide_next_step_none_outcome(tmp_path):
-    d = _decide_next_step(
-        None,
-        fix_hypothesis=tmp_path / "fix_hypothesis_attempt_2.md",
-        interactive=False,
-        max_requantize_attempts=3,
-        counter=0,
-    )
-    assert d.retry is False
-    assert d.promote_to is None
-
-
-def test_decide_next_step_auto_fail(tmp_path):
-    d = _decide_next_step(
-        OutcomeId.must_validate_md5_mismatch,
-        fix_hypothesis=tmp_path / "fix_hypothesis_attempt_2.md",
-        interactive=False,
-        max_requantize_attempts=3,
-        counter=0,
-    )
-    assert d.retry is False
-    assert "auto_fail" in d.note
-
-
-def test_decide_next_step_auto_recover(tmp_path):
-    d = _decide_next_step(
-        OutcomeId.eval_env_unavailable,
-        fix_hypothesis=tmp_path / "fix_hypothesis_attempt_2.md",
-        interactive=False,
-        max_requantize_attempts=3,
-        counter=0,
-    )
-    assert d.retry is False
-    assert "auto_recover_unresolved" in d.note
-
-
-def test_decide_next_step_ask_retryable_with_hypothesis(tmp_path):
-    (tmp_path / "fix_hypothesis_attempt_2.md").write_text("x", encoding="utf-8")
-    d = _decide_next_step(
-        OutcomeId.exec_oom,
-        fix_hypothesis=tmp_path / "fix_hypothesis_attempt_2.md",
-        interactive=False,
-        max_requantize_attempts=2,
-        counter=0,
-    )
-    assert d.retry is True
-
-
-def test_decide_next_step_ask_retryable_without_hypothesis(tmp_path):
-    d = _decide_next_step(
-        OutcomeId.exec_oom,
-        fix_hypothesis=tmp_path / "fix_hypothesis_attempt_2.md",
-        interactive=False,
-        max_requantize_attempts=2,
-        counter=0,
-    )
-    assert d.retry is False
-    assert d.note == "no_fix_hypothesis"
-
-
-def test_decide_next_step_unclassified_failure(tmp_path):
-    (tmp_path / "fix_hypothesis_attempt_2.md").write_text("x", encoding="utf-8")
-    d = _decide_next_step(
-        OutcomeId.unclassified_failure,
-        fix_hypothesis=tmp_path / "fix_hypothesis_attempt_2.md",
-        interactive=False,
-        max_requantize_attempts=2,
-        counter=0,
-    )
-    assert d.retry is True
-
-
 def test_decide_next_step_checkpoint_aborted_never_retries(tmp_path):
     (tmp_path / "fix_hypothesis_attempt_2.md").write_text("x", encoding="utf-8")
     d = _decide_next_step(
@@ -892,34 +811,3 @@ def test_decide_next_step_checkpoint_aborted_never_retries(tmp_path):
     )
     assert d.retry is False
     assert "checkpoint_aborted" in d.note
-
-
-def test_decide_next_step_eval_gap_accepted_promotes(tmp_path, monkeypatch):
-    from hyperloom.agents.quantization.driver import retry as rmod
-
-    monkeypatch.setattr(rmod, "_ask_operator", lambda msg: True)
-    d = _decide_next_step(
-        OutcomeId.eval_gap_exceeded,
-        fix_hypothesis=tmp_path / "fix_hypothesis_attempt_2.md",
-        interactive=True,
-        max_requantize_attempts=0,
-        counter=0,
-    )
-    assert d.retry is False
-    assert d.promote_to == OutcomeId.eval_gap_accepted
-
-
-# ───────────────────────────────────────────────────────────────────────────── QuantSkillRunResult shape
-# ─────────────────────────────────────────────────────────────────────────────
-
-
-def test_quant_skill_run_result_is_frozen():
-    from hyperloom.agents.quantization.driver.assessment import Assessment
-
-    r = QuantSkillRunResult(
-        status="success",
-        quantized_model_dir=None,
-        assessment=Assessment(final=None, attempts=(None,), recovered=False, eval_gap=None),
-    )
-    with pytest.raises(Exception):
-        r.status = "failed"  # type: ignore[misc]

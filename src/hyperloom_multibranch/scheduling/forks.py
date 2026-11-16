@@ -2,7 +2,7 @@
 # SPDX-License-Identifier: MIT
 
 """The scheduler's answer to the requests for a new branch: the rule gate's fork for a correctness fix and repair of a
-blocked gain, and a mapping branch's share branch, which runs an Arbor agent on its share of the map.
+blocked gain, and a mapping branch's share branch, which runs a component agent on its share of the map.
 
 :class:`ForkDesk` is the scheduler's :class:`~hyperloom_multibranch.contracts.fork.ForkAdmissionService`. A request of a
 branch that is on the roster and not stopped is queued, first in first out, under a reserved branch id; it enters the

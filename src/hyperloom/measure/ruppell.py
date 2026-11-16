@@ -1,7 +1,7 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""ruppell, Arbor's graph-aware GPU tracer, beside TraceLens in an SGLang profile test, at sampled detail.
+"""ruppell, a graph-aware GPU tracer, beside TraceLens in an SGLang profile test, at sampled detail.
 
 ruppell attributes every kernel, graph-replayed ones included, to the module that launched it, and keeps kernel detail
 for a sample of the serving steps only (``RUPPELL_DETAIL=5/1000``, which keeps its cost to output throughput small on

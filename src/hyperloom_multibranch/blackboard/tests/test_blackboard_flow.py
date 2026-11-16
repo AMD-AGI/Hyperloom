@@ -12,7 +12,7 @@ import pytest
 
 from hyperloom_multibranch.contracts.blackboard import INTEGRATION_BRANCH, ClaimKey, Role
 from hyperloom.contracts.measurement import AttachmentRef
-from hyperloom_multibranch.contracts.blackboard.peers import Purpose, TestKind, Verdict
+from hyperloom_multibranch.contracts.blackboard.peers import Purpose, TestKind, Validity, Verdict
 from hyperloom_multibranch.contracts.blackboard.records import (
     BaselineRecord,
     LineageEvent,
@@ -30,6 +30,7 @@ from hyperloom_multibranch.contracts.blackboard.vocab import (
     MergeOutcome,
 )
 from hyperloom_multibranch.blackboard import LocalBlackboard
+from hyperloom_multibranch.blackboard.local.views import MERGE_TEST_FAILED
 from hyperloom_multibranch.blackboard.tests.factories import TTL, delta, intent, judgement, request, result
 
 BASELINE = {"output_tps": 1000.0}
@@ -186,9 +187,48 @@ async def test_a_branch_inbox_gets_its_results_judgements_and_lineage_once(sessi
     assert [(item.kind, item.pointer) for item in first.items if item.kind is not InboxKind.LINEAGE] == [
         (InboxKind.RESULT, "r1"),
         (InboxKind.JUDGEMENT, "r1"),
+        (InboxKind.MERGE, "m1"),
     ]
     assert [item.kind for item in first.items].count(InboxKind.LINEAGE) == 1
     assert again.items == ()
+
+
+async def test_a_merge_the_integrator_settles_reaches_the_branches_whose_commits_it_carried_once(
+    session: Session,
+) -> None:
+    (merged,) = [item for item in (await session.s1.poll("s1")).items if item.kind is InboxKind.MERGE]
+    cursor = (await session.s2.poll("s2")).cursor
+    await _measure(session, session.s1, "r3", intent("s1", "c1", "attention", "fused rope"), delta("--rope fused"))
+    await session.gate.write_judgement("r3", judgement(1.0, ("r3",)), Conclusion.COMMITTED, "c3")
+    seen = (await session.s1.poll("s1")).cursor
+
+    stacking = intent(INTEGRATION_BRANCH, "i1", "merge", "c3")
+    await session.toolbox.write_request(request("m2", stacking, delta("--rope fused")))
+    await session.integrator.record_merge_attempt(MergeAttempt(("c3",), "i1", request_id="m2"))
+    await session.toolbox.write_result(result("m2"))
+    await session.integrator.write_judgement("m2", judgement(0.1, ("m2",)), Conclusion.NOT_STACKABLE)
+    skipped = MergeAttempt(("c3",), "i1", skipped_reason="the merge does not combine")
+    await session.integrator.record_merge_attempt(skipped)
+    failed = intent(INTEGRATION_BRANCH, "i1", "merge", "c3 again")
+    await session.toolbox.write_request(request("m3", failed, delta("--rope fused")))
+    await session.integrator.record_merge_attempt(MergeAttempt(("c3",), "i1", request_id="m3"))
+    await session.toolbox.write_result(
+        result("m3", validity=Validity.CANDIDATE_FAILED, failure_reason="server crashed")
+    )
+
+    page = await session.s1.poll("s1", seen)
+    others = await session.s2.poll("s2", cursor)
+
+    merges = [item for item in page.items if item.kind is InboxKind.MERGE]
+    assert merged.summary == "the merge of your c1 onto c0: merged as i1"
+    assert [item.summary for item in merges] == [
+        "the merge of your c3 onto i1: not_stackable (+0.10% on the integration head)",
+        "the merge of your c3 onto i1: conflict_skipped (the merge does not combine)",
+        f"the merge of your c3 onto i1: not_stackable ({MERGE_TEST_FAILED}: server crashed)",
+    ]
+    assert (merges[0].pointer, merges[2].pointer) == ("m2", "m3")
+    assert not [item for item in others.items if item.kind is InboxKind.MERGE]
+    assert (await session.s1.poll("s1", page.cursor)).items == ()
 
 
 async def test_a_stopped_branch_reads_as_stopped_and_gives_up_its_claims(session: Session) -> None:

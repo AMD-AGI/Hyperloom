@@ -3,8 +3,8 @@
 
 """What a round of a test left on disk about when its parts began, and the phases that follow from it.
 
-A round is one or two inference_suite runs (a warmup run whose result is discarded, then the measured one), and each
-run's run_dir holds ``server_ready_at`` (the instant the server reported ready and how long its boot took from the
+A round is one or two inference_suite runs (a warmup run whose result is discarded, then the measured one), each in a
+run_dir of its own (the caller finds them where the round's runner put them), and each run's run_dir holds ``server_ready_at`` (the instant the server reported ready and how long its boot took from the
 spawn) and ``kv_metrics.json`` (the instants the round's client began its evaluation, or, for an AgentX client, its
 warmup and measured phases began and ended; the file's own time is when the run ended), both written by the
 inference_suite round. This module reads those marks after the round and turns them into phase boundaries. A mark that
@@ -18,7 +18,7 @@ import json
 import math
 import os
 import re
-from collections.abc import Iterator, Sequence
+from collections.abc import Iterable, Sequence
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
@@ -68,9 +68,6 @@ ROLE_BOOT = "boot"
 ROLE_WARMUP = "warmup"
 ROLE_MEASURE = "measure"
 ROLE_EVAL = "eval"
-#: Where ``run_grid`` keeps the discarded warmup run of a round, below the round's own directory.
-_WARMUP_DIR = "warmup_round"
-_ROUND_GLOB = "variant_*"
 _UTF8 = "utf-8"
 #: The phases ``kv_metrics.json`` records the instants of: the client's evaluation, and an AgentX client's own phases.
 _EVAL, _CLIENT_WARMUP, _CLIENT_MEASURED, _CLIENT_FINISHED = "eval", "warmup", "measured", "finished"
@@ -165,29 +162,19 @@ class RoundShape:
 # -- reading the marks --------------------------------------------------------------------------------------------------
 
 
-def read_runs(output_root: Path, window: tuple[float, float]) -> list[RunMarks]:
-    """The runs that began inside ``window`` below ``output_root``, in the order they were ready.
+def read_runs(run_dirs: Iterable[Path], window: tuple[float, float]) -> list[RunMarks]:
+    """The runs among the inference_suite ``run_dirs`` that began inside ``window``, in the order they were ready.
 
-    A run is found by its ready stamp, which holds the wall-clock instant the run's server was ready, so a stamp an
-    earlier round left in a directory the same name serves again is not taken for this round's.
+    A run is taken by its ready stamp, which holds the wall-clock instant the run's server was ready, so a run an
+    earlier round left beside this round's is not taken for this round's.
     """
     started, ended = window
     runs = []
-    for directory in _run_directories(output_root):
+    for directory in run_dirs:
         stamp = read_ready_stamp(directory)
         if stamp is not None and started <= stamp[0] <= ended + 1.0:
             runs.append(_marks_of(directory, stamp, started))
     return sorted(runs, key=lambda run: run.ready)
-
-
-def _run_directories(output_root: Path) -> Iterator[Path]:
-    try:
-        rounds = sorted(Path(output_root).glob(_ROUND_GLOB))
-    except OSError:
-        return
-    for directory in rounds:
-        yield directory / _WARMUP_DIR
-        yield directory
 
 
 def _marks_of(directory: Path, stamp: tuple[float, float], since: float) -> RunMarks:

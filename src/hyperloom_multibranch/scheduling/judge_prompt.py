@@ -88,16 +88,18 @@ the integrator merges.""",
 stranded_lead and probation: the playbook's safety envelope keeps a branch whose head leads the integration head on
 commits that failed to merge, and one drawn for probation: you may lower their K, not stop them.""",
     default_focus="""\
-the open areas' ops in turn, or on none when no profile of the integration head or a commit it builds on is
-known""",
+the open areas' ops in turn, or on none when no op shares of the integration head or a commit it builds on are known:
+it was not profiled, or its trace was not analysed""",
     free_slot="""\
-When the open areas list no op, leave a free slot free: give its tests to the running branches by raising their K
-where the caps allow, or to the pending forks and repairs; the scheduler then opens only the branches you name a focus
-for. Reopen an op a stopped branch was opened on only for an angle its history has not tried, or, for one spent by a
-give-up, when its 'worth again if' holds, and say in your reasoning which.""",
+When the open areas list no op because every op of the profile is worked on or spent, leave a free slot free: give its
+tests to the running branches by raising their K where the caps allow, or to the pending forks and repairs; the
+scheduler then opens only the branches you name a focus for. Reopen an op a stopped branch was opened on only for an
+angle its history has not tried, or, for one spent by a give-up, when its 'worth again if' holds, and say in your
+reasoning which. When they list no op because none is known, not profiled or its trace not analysed, no op is spent
+either: fill the free slots with branches left to the default focus while time is left for them.""",
     out_of_ideas="""\
-a branch out of ideas is one to stop, its slot refilled while an open area is left, rather than stop
-the session""",
+a branch out of ideas is one to stop, its slot refilled while an open area is left or no op is known,
+rather than stop the session""",
 )
 
 
@@ -146,6 +148,10 @@ share fell by more than {MB_BOTTLENECK_SHIFT_PP} percentage points: branches sti
 have less to gain, and a branch you open now without a focus is briefed from the new profile as above.
 The integration branch's profile_running is true while that profile runs: its PROFILE test holds one of the
 integration branch's K slots, so merge tests wait for it while that K is 1; size the integration branch's K with it.
+The integration branch's K is bounded by max_parallel_tests, not by max_k_per_branch.
+A profile of the integration head starts only after a merge moved it as integration_moved says, and none is tried
+again: raising the integration branch's K starts none, so a head whose trace was not analysed stays without op shares
+until such a merge moves it.
 environment_changed: the toolbox quarantined a measurement node after an infrastructure failure (gpu_ids is empty for
 the whole node), or a node's measurement environment moved between two of its results (changed names each of
 image_digest, gpu_model, power_cap_w and partition_mode that moved, before and after, and request_id the first result

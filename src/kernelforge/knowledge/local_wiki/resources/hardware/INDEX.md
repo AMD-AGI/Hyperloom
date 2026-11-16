@@ -25,8 +25,9 @@ numbers here are wrong for you; use AMD's CDNA3 documentation instead. CDNA3 app
 
 ## Layout — one flat folder, one file per subsystem
 
-There are no subfolders. Each card carries **both** the mental model and the concrete gfx950 numbers
-for its subsystem, so a single Read answers a question end to end.
+One file per subsystem. Each card carries **both** the mental model and the concrete gfx950 numbers
+for its subsystem, so a single Read answers a question end to end. The one subfolder, `rdna3/`, is a
+separate map for the Radeon PRO W7900 (gfx1100); a gfx1100 campaign is given it instead of this one.
 
 | File | Subsystem |
 |---|---|

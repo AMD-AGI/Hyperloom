@@ -178,10 +178,10 @@ def test_demoted_reap_signals_only_pids_the_specialist_account_owns(monkeypatch)
     own = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(30)"])
     roots: list[list[int]] = []
     monkeypatch.setattr(launch_env, "LIST_MARKED_SCRIPT", f"echo 1; echo {own.pid}")
-    monkeypatch.setattr(ss, "collect_tree", lambda pids: roots.append(list(pids)) or Tree((), (), frozenset()))
-    monkeypatch.setattr(ss, "kill_tree", lambda tree: True)
+    monkeypatch.setattr(launch_env, "collect_tree", lambda pids: roots.append(list(pids)) or Tree((), (), frozenset()))
+    monkeypatch.setattr(launch_env, "kill_tree", lambda tree: True)
     try:
-        SpecialistSubprocessDispatcher._reap_marked("mark", PreparedLaunch(AccountIsolation(_SameUidRunAs())))
+        PreparedLaunch(AccountIsolation(_SameUidRunAs())).reap_marked("mark")
     finally:
         own.kill()
         own.wait(timeout=5)
@@ -262,6 +262,51 @@ async def test_natural_exit_reaps_detached_descendant(monkeypatch, tmp_path, dem
             os.kill(heartbeat_pid, signal.SIGKILL)
         bystander.kill()
         bystander.wait(timeout=5)
+
+
+@pytest.mark.asyncio
+async def test_a_sweep_that_never_returns_does_not_hold_back_the_done_file(monkeypatch, tmp_path, caplog):
+    """The specialist wrote its done file and exited; a straggler sweep stuck in the kernel must not keep it unbooked."""
+    import threading
+
+    done = {"intent_type": "specialist_done", "payload": {"summary": "finished", "proposal_set": []}}
+    child_code = (
+        f"import pathlib; pathlib.Path({str(tmp_path / 'specialist_done.json')!r}).write_text({json.dumps(done)!r})"
+    )
+    real_popen = ss.subprocess.Popen
+
+    def spawn(cmd, *args, **kwargs):
+        return real_popen([sys.executable, "-c", child_code], stdout=subprocess.DEVNULL, start_new_session=True)
+
+    stuck = threading.Event()
+    monkeypatch.setattr(ss.subprocess, "Popen", spawn)
+    monkeypatch.setattr(PreparedLaunch, "reap_marked", lambda self, mark: stuck.wait(30))
+    monkeypatch.setattr(launch_env, "STRAGGLER_SWEEP_BOUND_SEC", 0.2)
+    dispatcher = SpecialistSubprocessDispatcher(
+        ss.SpecialistSubprocessConfig(agent_backend="claude", poll_interval_seconds=0.05)
+    )
+    monkeypatch.setattr(dispatcher, "_build_claude_cmd", lambda **kw: ["unused"])
+    monkeypatch.setattr(dispatcher, "_collect_patches", lambda *args, **kwargs: ([], {}))
+    try:
+        with caplog.at_level("WARNING", logger=launch_env.log.name):
+            result = await asyncio.wait_for(
+                dispatcher.run(
+                    SpecialistSpawn(
+                        task_id="stuck-sweep",
+                        workspace=tmp_path,
+                        worktree=None,
+                        worktree_base=None,
+                        system_prompt="system",
+                        user_prompt="user",
+                    )
+                ),
+                10,
+            )
+    finally:
+        stuck.set()
+    assert result.done_payload["summary"] == "finished"
+    assert result.exit_code == 0
+    assert "stuck-sweep: the sweep for processes its launch left behind outlasted" in caplog.text
 
 
 def test_kill_exited_root_cannot_confirm_descendants(monkeypatch):

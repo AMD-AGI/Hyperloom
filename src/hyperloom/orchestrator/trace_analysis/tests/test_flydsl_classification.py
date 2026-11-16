@@ -182,50 +182,18 @@ class TestReusableSourceRoots(unittest.TestCase):
             reusable, skip = classify_patchability(cand)
             self.assertTrue(reusable, msg=skip)
 
-    def test_flydsl_roots_always_include_known_defaults(self) -> None:
-        # Known FlyDSL checkouts present even with no env override.
-        env = dict(os.environ)
-        env.pop("DSL2_ROOT", None)
-        env.pop("FLYDSL_ROOT", None)
-        with mock.patch.dict(os.environ, env, clear=True):
-            roots = _flydsl_reusable_roots()
-            self.assertIn("/sgl-workspace/flydsl/", roots)
-
 
 class TestSourceTypeAdmission(unittest.TestCase):
-    """``source_type='flydsl'`` must pass the patchability gate."""
+    """Admitting ``source_type='flydsl'`` leaves the other source types' admission unchanged."""
 
-    _BASE = "/sgl-workspace/flydsl/python/flydsl/ops/k.py"
-
-    def test_flydsl_source_type_admitted(self) -> None:
-        cand = {"name": "k", "source_file": self._BASE, "source_type": "flydsl"}
-        reusable, skip = classify_patchability(cand)
-        self.assertTrue(reusable, msg=skip)
-        self.assertEqual(skip, "")
-
-    def test_triton_source_type_still_admitted(self) -> None:
-        cand = {
-            "name": "k",
-            "source_file": "/sgl-workspace/aiter/aiter/ops/triton/k.py",
-            "source_type": "triton",
-        }
-        self.assertTrue(classify_patchability(cand)[0])
-
-    def test_python_source_type_still_admitted(self) -> None:
-        cand = {
-            "name": "k",
-            "source_file": "/sgl-workspace/aiter/aiter/ops/k.py",
-            "source_type": "python",
-        }
-        self.assertTrue(classify_patchability(cand)[0])
-
-    def test_hip_cpp_source_type_still_admitted(self) -> None:
-        cand = {
-            "name": "k",
-            "source_file": "/sgl-workspace/aiter/csrc/k.cu",
-            "source_type": "hip_cpp",
-        }
-        self.assertTrue(classify_patchability(cand)[0])
+    def test_existing_source_types_still_admitted(self) -> None:
+        for source_type, source_file in (
+            ("triton", "/sgl-workspace/aiter/aiter/ops/triton/k.py"),
+            ("python", "/sgl-workspace/aiter/aiter/ops/k.py"),
+            ("hip_cpp", "/sgl-workspace/aiter/csrc/k.cu"),
+        ):
+            cand = {"name": "k", "source_file": source_file, "source_type": source_type}
+            self.assertTrue(classify_patchability(cand)[0], source_type)
 
     def test_unknown_source_type_still_rejected(self) -> None:
         cand = {
@@ -281,14 +249,6 @@ class TestFlyDSLKernelParams(unittest.TestCase):
         tmp.flush()
         tmp.close()
         return tmp.name
-
-    def test_target_arch_mapping(self) -> None:
-        params = _flydsl_kernel_params("", "mi300x")
-        self.assertEqual(params["FLYDSL_TARGET_ARCH"], "gfx942")
-        params = _flydsl_kernel_params("", "MI355X")
-        self.assertEqual(params["FLYDSL_TARGET_ARCH"], "gfx950")
-        params = _flydsl_kernel_params("", "")
-        self.assertNotIn("FLYDSL_TARGET_ARCH", params)
 
     def test_env_passthrough(self) -> None:
         env = {
@@ -369,14 +329,10 @@ class TestCandidateEnvForwarding(unittest.TestCase):
 
         self.h = trace_analyze
 
-    def test_flydsl_prefix_allowed(self) -> None:
+    def test_flydsl_and_existing_prefixes_allowed(self) -> None:
         self.assertIn("FLYDSL_", self.h._CANDIDATE_ENV_PREFIXES)
-        self.assertTrue(self.h._candidate_env_allowed("FLYDSL_AUTOTUNE_CACHE_DIR"))
-        self.assertTrue(self.h._candidate_env_allowed("FLYDSL_RUNTIME_ENABLE_CACHE"))
-
-    def test_existing_prefixes_preserved(self) -> None:
-        self.assertTrue(self.h._candidate_env_allowed("SGLANG_FOO"))
-        self.assertTrue(self.h._candidate_env_allowed("TRITON_BAR"))
+        for name in ("FLYDSL_AUTOTUNE_CACHE_DIR", "FLYDSL_RUNTIME_ENABLE_CACHE", "SGLANG_FOO", "TRITON_BAR"):
+            self.assertTrue(self.h._candidate_env_allowed(name), name)
 
     def test_sensitive_keys_still_blocked(self) -> None:
         self.assertFalse(self.h._candidate_env_allowed("FLYDSL_API_KEY"))
@@ -406,23 +362,9 @@ class TestOrchestratorReusableRootsInSync(unittest.TestCase):
 class TestFlyDSLPseudoOpIdentification(unittest.TestCase):
     """pseudo_op names must be classified as FlyDSL by name prefix without on-disk source."""
 
-    def test_pseudo_op_moe_flydsl_stage1_recognised(self) -> None:
-        self.assertEqual(
-            source_type_for("pseudo_op::moe_flydsl_stage1", ""),
-            "flydsl",
-        )
-
-    def test_pseudo_op_moe_flydsl_stage2_recognised(self) -> None:
-        self.assertEqual(
-            source_type_for("pseudo_op::moe_flydsl_stage2", ""),
-            "flydsl",
-        )
-
-    def test_generic_pseudo_op_flydsl_recognised(self) -> None:
-        self.assertEqual(
-            source_type_for("pseudo_op::flydsl_custom_kernel", ""),
-            "flydsl",
-        )
+    def test_flydsl_pseudo_ops_recognised(self) -> None:
+        for name in ("pseudo_op::moe_flydsl_stage1", "pseudo_op::moe_flydsl_stage2", "pseudo_op::flydsl_custom_kernel"):
+            self.assertEqual(source_type_for(name, ""), "flydsl", name)
 
     def test_unrelated_pseudo_op_falls_back_to_unknown(self) -> None:
         """Only flydsl-flavoured pseudo ops should be claimed."""

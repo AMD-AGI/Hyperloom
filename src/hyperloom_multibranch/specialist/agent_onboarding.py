@@ -14,13 +14,13 @@ After :data:`ATTEMPTS` failures the preflight raises :class:`~hyperloom_multibra
 with every line, and at once after a model call refused for a reason the next attempt would meet again
 (:class:`ModelRefused`).
 
-An agent that writes a snapshot of each keep runs as a component of MB, in the mode Arbor's README describes: MB sets
+An agent that writes a snapshot of each keep runs as a component of MB (:mod:`component_agent`): MB sets
 that mode, its host, the absolute deadline and the commit its keeps are read against in its config itself
 (:func:`component_config`), whatever the manifest says of them, and, when the session's root was profiled, the file in
-its session that holds the root's op shares (:data:`PROFILE_FILE`). Arbor itself is not onboarded by the model: its
-checkout says what it is, and :mod:`arbor_adapter` writes its manifest and config from the spec, which MB then sets
-as it sets any agent's in that mode. A config refused then, by the adapter's check or by Arbor as it starts, is the
-last attempt (:class:`ConfigRefused`): another would write the same config.
+its session that holds the root's op shares (:data:`PROFILE_FILE`). An agent an installed adapter recognises is not
+onboarded by the model: its checkout says what it is, and the adapter writes its manifest and config from the spec,
+which MB then sets as it sets any agent's in that mode. A config refused then, by the adapter's check or by the agent
+as it starts, is the last attempt (:class:`ConfigRefused`): another would write the same config.
 
 The agent runs commands, not containers: a ``docker`` on its ``PATH`` (:data:`DOCKER_SHIM`) runs ``docker exec`` and
 ``docker cp`` in place, for an agent written to drive a container, and refuses everything else.
@@ -63,16 +63,13 @@ from hyperloom_common.git_safety import NO_PROGRAMS
 from hyperloom_multibranch.repo.isolated_git import NO_LAZY_FETCH, blank_driver_programs, leading_options, trusting
 from hyperloom_multibranch.specialist.agent_manifest import AgentManifest, ManifestError
 from hyperloom_multibranch.specialist.agent_spec import ROOT_PROFILE_SOURCE, AgentSpec
-from hyperloom_multibranch.specialist.arbor_adapter import (
+from hyperloom_multibranch.specialist.component_agent import (
     BRANCH_RUN,
     EXIT_REFUSED,
-    ArborCheckout,
-    ArborRefused,
-    ArborRun,
-    arbor_manifest,
-    dossier_notes,
-    fit_keys,
-    is_arbor,
+    AgentCheckout,
+    AgentRefused,
+    ComponentRun,
+    adapter_for,
     refused_reasons,
 )
 from hyperloom_multibranch.specialist.runtime import PreflightFailed
@@ -188,12 +185,12 @@ Onboard = Callable[[Path, str], Awaitable[str]]
 
 @dataclass(frozen=True)
 class OnboardingSetup:
-    """``run`` is the run of Arbor the preflight starts, when the agent is Arbor: a branch's, or the session's
+    """``run`` is the run the preflight starts when an adapter recognises the agent: a branch's, or the session's
     dossier pass."""
 
     sandbox: AgentSandbox
     onboard: Onboard
-    run: ArborRun = BRANCH_RUN
+    run: ComponentRun = BRANCH_RUN
     start_seconds: float = START_SECONDS
     poll_seconds: float = 5.0
     sleep: Callable[[float], Awaitable[None]] = asyncio.sleep
@@ -202,9 +199,9 @@ class OnboardingSetup:
 @dataclass(frozen=True)
 class ReadyAgent:
     """An agent preflight made ready: its manifest, its checkout and the process it runs in, what its branch should
-    note of how it was started (an input its Arbor lacks, :func:`fit_keys`, or a dossier that is gone,
+    note of how it was started (an input its version lacks, :func:`fit_keys`, or a dossier that is gone,
     :func:`dossier_notes`), and ``source_unkept``, the spec's reason no change to the framework's source can be kept
-    when the agent was told it (Arbor, in its host rules), ``""`` when it was told none."""
+    when the agent was told it (by its adapter, in its config), ``""`` when it was told none."""
 
     manifest: AgentManifest
     source_dir: Path
@@ -271,12 +268,13 @@ async def _attempt(
 ) -> ReadyAgent:
     checkout = agent_dir / SOURCE_DIR
     commit = await fetch_source(source, checkout)
-    adapted = is_arbor(checkout)
-    if adapted:
+    agent = adapter_for(checkout)
+    adapted = agent is not None
+    if agent is not None:
         try:
-            manifest = await asyncio.to_thread(arbor_manifest, spec, ArborCheckout(source, commit, checkout), setup.run)
-        except ArborRefused as error:
-            raise ConfigRefused(f"Arbor would refuse the config written for it: {error}") from error
+            manifest = await asyncio.to_thread(agent.manifest, spec, AgentCheckout(source, commit, checkout), setup.run)
+        except AgentRefused as error:
+            raise ConfigRefused(f"{agent.name} would refuse the config written for it: {error}") from error
     else:
         answer = await setup.onboard(checkout, onboarding_prompt(spec, source, checkout, commit, failures))
         try:
@@ -287,9 +285,9 @@ async def _attempt(
         profile = root_profile(spec.root_shares, checkout / manifest.snapshots.session, spec.root_shares_source)
         manifest = replace(manifest, config=component_config(manifest.config, spec, profile))
     notes: tuple[str, ...] = ()
-    if adapted:
-        config, notes = fit_keys(manifest.config, checkout)
-        manifest, notes = replace(manifest, config=config), (*notes, *dossier_notes(checkout, spec.dossier))
+    if agent is not None:
+        config, notes = agent.fit_keys(manifest.config, checkout)
+        manifest, notes = replace(manifest, config=config), (*notes, *agent.dossier_notes(checkout, spec.dossier))
     make_shared_dirs((checkout / manifest.config_file).parent)
     write_shared_text(checkout / manifest.config_file, json.dumps(manifest.config, indent=2))
     env = agent_env(agent_dir)
@@ -316,7 +314,7 @@ async def install(manifest: AgentManifest, setup: OnboardingSetup, checkout: Pat
 
 
 def component_config(config: Mapping[str, object], spec: AgentSpec, profile: Path | None = None) -> dict[str, object]:
-    """``config`` in Arbor's component mode, which runs on the host only, ending by ``spec``'s deadline, in whole unix
+    """``config`` in component mode, which runs on the host only, ending by ``spec``'s deadline, in whole unix
     seconds, making every patch against ``spec``'s root and reading the root's op shares from ``profile``, if any."""
 
     component = config.get("component")
@@ -331,8 +329,8 @@ def component_config(config: Mapping[str, object], spec: AgentSpec, profile: Pat
 
 
 def root_profile(shares: OpShares | None, session: Path, source: str = ROOT_PROFILE_SOURCE) -> Path | None:
-    """Write ``shares``, which came from ``source``, to :data:`PROFILE_FILE` in ``session``, the form Arbor's
-    ``component.profile`` reads; the file, ``None`` with no shares."""
+    """Write ``shares``, which came from ``source``, to :data:`PROFILE_FILE` in ``session``, the form the
+    agent's ``component.profile`` reads; the file, ``None`` with no shares."""
 
     if shares is None:
         return None
@@ -602,11 +600,11 @@ The sandbox:
 - the agent edits the framework source in "workspace", in place, and launches its servers from it;
 - "seconds" is how long the agent may run, 0 when MB stops it: then give it a time budget it cannot reach.
 
-If the agent can run inside a host (Arbor's component mode, which its docs/hosts.md describes: an absolute deadline, the
+If the agent can run inside a host (a component mode its own documentation describes: an absolute deadline, the
 commit its patches are made against, and a snapshot directory written for each kept change), run it in that mode: MB
 sets its "mode", "docker_container", "component.deadline" ("deadline"), "component.root" ("root") and, when the
-session's root was profiled, "component.profile" itself; set everything else docs/hosts.md asks of a host, give its
-session a directory in the checkout, and answer "snapshots".
+session's root was profiled, "component.profile" itself; set everything else that documentation asks of a host, give
+its session a directory in the checkout, and answer "snapshots".
 
 MB judges every change the agent keeps by measuring it with "client", the gate's own benchmark client, against a
 server on "port"; another client sends other prompts and ranks changes otherwise. Unless "client" is empty, make the

@@ -14,6 +14,7 @@ from ..bus.gpu_pool import gpus_by_task_sync
 from ..mcp_tool_names import qualified_context_tool_name
 from ..phases import dispatch_order
 from ..phases import machine_state as _phase_state
+from ..phases.proposal_bench import carried_fingerprints, explore_grid_fingerprints, waiting_proposal_rows
 from ..policy.projection import resource_pools_summary
 from ..specialists.in_flight import in_flight_domains
 from ..specialists.reap_watch import newest_activity, specialist_activity_paths
@@ -484,10 +485,7 @@ class ConversationCollaborator(CoordinatorCollaborator):
     def _queued_backlog_line(self) -> str:
         """Benchmark-lane backlog: queued integrate_patch / explore tasks in dispatch order, and untested proposals."""
         counts = self.tasks.queued_kind_counts_sync()
-        in_grids = self._explore_grid_fingerprints()
-        counts["untested proposals"] = sum(
-            row["fingerprint"] not in in_grids for row in self.shared_state.untested_proposal_rows()
-        )
+        counts["untested proposals"] = len(waiting_proposal_rows(self.shared_state, self.tasks))
         parts = [f"{counts[kind]} {kind}" for kind in (*_BENCH_LANE_KINDS, "untested proposals") if counts.get(kind)]
         if not parts:
             return ""
@@ -565,18 +563,6 @@ class ConversationCollaborator(CoordinatorCollaborator):
         )
         append_conversation(session_dir=self.session_dir, record=record)
 
-    def _explore_grid_fingerprints(self) -> set[str]:
-        """Content fingerprints of the variants in every queued or running explore grid."""
-        from ..actions.executors._proposal_identity import content_fingerprint
-
-        return {
-            content_fingerprint(variant)
-            for task in (*self.tasks.queued_context_sync(), *self.tasks.running_context_sync())
-            if task.kind == _EXPLORE
-            for variant in (task.params or {}).get("grid") or ()
-            if isinstance(variant, dict)
-        }
-
     def trajectory_digest(self) -> str:
         """The deterministic trajectory digest, or "" when building it fails."""
         from ..knowledge import trajectory_reviewer
@@ -604,10 +590,13 @@ class ConversationCollaborator(CoordinatorCollaborator):
             sections.append(denial_summary)
         if (self.shared_state.phase or "").strip().upper() == _phase_state.PHASE_FRAMEWORK_AGENT:
             # The predictor's rows lead the queue, so its block comes first, under the same section.
-            in_grids = self._explore_grid_fingerprints()
+            in_grids = explore_grid_fingerprints(self.tasks)
+            carried = carried_fingerprints(self.shared_state, self.tasks)
             blocks = (
-                queue_block(self.shared_state, in_grids=in_grids),
-                self.shared_state.to_untested_proposals_summary(skip_provenance=PROVENANCE, in_grids=in_grids),
+                queue_block(self.shared_state, in_grids=in_grids, carried=carried),
+                self.shared_state.to_untested_proposals_summary(
+                    skip_provenance=PROVENANCE, in_grids=in_grids, carried=carried
+                ),
             )
             untested_block = "\n\n".join(block for block in blocks if block)
             if untested_block:

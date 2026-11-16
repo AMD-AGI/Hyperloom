@@ -15,21 +15,19 @@ from hyperloom.orchestrator.kernel import patch_landing as pl
 # --- record_source_path: one spelling read on both sides ---------------------
 
 
-def test_source_path_prefers_target_file() -> None:
+@pytest.mark.parametrize(
+    ("record", "expected"),
+    [
+        ({"target_file": "a.py", "source_file": "b.py"}, "a.py"),
+        ({"source_file": "b.py"}, "b.py"),
+        ({}, ""),
+        ({"target_file": "  a.py \n"}, "a.py"),
+    ],
+    ids=["target-file-wins", "source-file-fallback", "neither-set", "strips-whitespace"],
+)
+def test_source_path_prefers_target_file_then_source_file(record: dict[str, str], expected: str) -> None:
     """target_file wins so the write side and read side cannot disagree."""
-    assert pl.record_source_path({"target_file": "a.py", "source_file": "b.py"}) == "a.py"
-
-
-def test_source_path_falls_back_to_source_file() -> None:
-    assert pl.record_source_path({"source_file": "b.py"}) == "b.py"
-
-
-def test_source_path_is_empty_when_neither_is_set() -> None:
-    assert pl.record_source_path({}) == ""
-
-
-def test_source_path_strips_whitespace() -> None:
-    assert pl.record_source_path({"target_file": "  a.py \n"}) == "a.py"
+    assert pl.record_source_path(record) == expected
 
 
 @pytest.mark.parametrize("value", [None, "not-a-mapping", 42, ["a.py"]])
@@ -49,12 +47,9 @@ def test_budget_defaults_when_nothing_is_configured() -> None:
     assert pl.patch_budget(None) == pl.DEFAULT_PATCH_BUDGET
 
 
-def test_budget_honours_a_configured_override() -> None:
-    assert pl.patch_budget(5) == 5
-
-
-def test_budget_accepts_a_numeric_string() -> None:
-    assert pl.patch_budget("7") == 7
+@pytest.mark.parametrize(("value", "expected"), [(5, 5), ("7", 7)], ids=["int", "numeric-string"])
+def test_budget_honours_a_configured_override(value: Any, expected: int) -> None:
+    assert pl.patch_budget(value) == expected
 
 
 @pytest.mark.parametrize("value", [0, -1, "0", "-4"])
