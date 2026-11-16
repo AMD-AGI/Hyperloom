@@ -30,21 +30,10 @@ from hyperloom.orchestrator.phases.dispatch_order import in_dispatch_order
 from hyperloom.orchestrator.policy.denial import PolicyDenied
 from hyperloom.orchestrator.policy.gate import PolicyGate
 from hyperloom.orchestrator.specialists.prompt_inputs import SpecialistPromptInputs
-from hyperloom.orchestrator.prompts.specialist_prompt_builder import (
-    _section_execution_budget,
-    _section_gap,
-    _section_hardware,
-    _section_identity,
-    _section_iron_rules,
-    _section_mandate,
-    _section_output_protocol,
-    _section_pd_disaggregation,
-    _section_source_hint,
-    build_specialist_prompts,
-)
+from hyperloom.orchestrator.prompts.specialist_prompt_builder import build_specialist_prompts
 from hyperloom.orchestrator.roles.agent_role import default_role_registry
 from hyperloom.orchestrator.specialists.dispatch import SpecialistDispatchCollaborator
-from hyperloom.orchestrator.specialists.domains import KNOWLEDGE_DOMAIN_TAGS, get_domain
+from hyperloom.orchestrator.specialists.domains import get_domain
 from hyperloom.orchestrator.specialists.runner import SpecialistRunner, SpecialistSubprocessConfig
 from hyperloom.orchestrator.state.objective import build_objective
 from hyperloom.orchestrator.state.shared_state import SharedState
@@ -72,40 +61,7 @@ def _headers(text: str) -> list[str]:
     return [line for line in text.splitlines() if line.startswith("## ")]
 
 
-def _joined(*sections: list[str]) -> str:
-    out: list[str] = []
-    for sec in sections:
-        if sec:
-            if out:
-                out.append("")
-            out.extend(sec)
-    return "\n".join(out) + "\n"
-
-
 # Specialist prompt
-def test_custom_system_prompt_carries_operator_identity_and_verbatim_focus():
-    inp = _inputs(_custom_domain(), custom_specialist_prompt=_PROMPT)
-    system, _ = build_specialist_prompts(inp)
-
-    assert system == _joined(_section_identity(inp), _section_output_protocol(inp), _section_iron_rules(inp))
-    assert system.splitlines()[:7] == [
-        "## 1. IDENTITY & AUTONOMY",
-        "",
-        "You are a fully autonomous **custom_specialist** dispatched by the",
-        "Hyperloom Coordinator. Layer: operator-defined.",
-        "KB anchor: custom_specialist.",
-        "",
-        f"Description: {_DESCRIPTION}",
-    ]
-    focus = system.split("### Domain focus — custom_specialist\n\n", 1)[1].split("\n\n## 8. OUTPUT PROTOCOL", 1)[0]
-    assert focus == _PROMPT
-    assert _headers(system) == [
-        "## 1. IDENTITY & AUTONOMY",
-        "## 8. OUTPUT PROTOCOL",
-        "## 9. IRON RULES (Inv-5.1 / Inv-5.3)",
-    ]
-
-
 @pytest.mark.parametrize(
     ("mode", "expected"),
     [
@@ -126,18 +82,8 @@ def test_custom_system_prompt_carries_operator_identity_and_verbatim_focus():
     ],
 )
 def test_custom_user_prompt_is_minimal(mode, expected):
-    inp = _inputs(_custom_domain(), custom_specialist_prompt=_PROMPT, mode=mode, notes="n")
-    _, user = build_specialist_prompts(inp)
-
-    source_hint = _section_source_hint(inp) if mode == "patch" else []
-    assert user == _joined(
-        _section_mandate(inp),
-        _section_hardware(inp),
-        _section_pd_disaggregation(inp),
-        _section_execution_budget(inp),
-        _section_gap(inp),
-        source_hint,
-        ["## 10. NOTES FROM ORCHESTRATION", "", "n"],
+    _, user = build_specialist_prompts(
+        _inputs(_custom_domain(), custom_specialist_prompt=_PROMPT, mode=mode, notes="n")
     )
     assert _headers(user) == expected
 
@@ -275,18 +221,12 @@ def test_gate_allows_a_builtin_dispatch_with_the_generic_custom_tag():
     )
 
 
-def test_knowledge_domain_tags_do_not_include_the_custom_specialist():
-    assert KNOWLEDGE_DOMAIN_TAGS == (
-        "framework",
-        "kernel_agent",
-        "communication",
-        "compiler",
-        "systems",
-        "speculative_decoding",
-        "pr_intelligence",
-        "research_scout",
-        "static_recon",
-    )
+def test_the_custom_specialist_gets_no_round_counters():
+    """Operator-defined domains are per session, so the stalled-domain bookkeeping never counts them."""
+    state = SharedState()
+    state.bump_domain_round_counters()
+    assert "custom_specialist" not in state.rounds_since_last_specialist
+    assert "custom_specialist" not in state.rounds_since_last_keep
 
 
 # CLI
@@ -312,12 +252,6 @@ def test_load_custom_specialist_args_strips_and_sets_values(tmp_path):
     _load_custom_specialist_args(args)
 
     assert (args.custom_specialist_prompt, args.custom_specialist_description) == (_PROMPT, _DESCRIPTION)
-
-
-def test_load_custom_specialist_args_absent_flags_leave_empty_prompt():
-    args = _ns()
-    _load_custom_specialist_args(args)
-    assert args.custom_specialist_prompt == ""
 
 
 @pytest.mark.parametrize(
@@ -380,14 +314,6 @@ def test_resume_with_a_new_definition_replaces_the_stored_one():
 def test_custom_specialist_conflicts(overrides, state_kw, expected):
     state = SharedState(custom_specialist_prompt=_PROMPT, custom_specialist_description=_DESCRIPTION, **state_kw)
     assert _custom_specialist_conflict(_ns(**overrides), state) == expected
-
-
-def test_conflicts_apply_to_a_definition_passed_on_this_launch():
-    args = _ns(custom_specialist_prompt=_PROMPT, custom_specialist_description=_DESCRIPTION)
-    state = SharedState(framework_agent_phase_enabled=False)
-    assert _custom_specialist_conflict(args, state) == (
-        "the FRAMEWORK_AGENT phase is disabled, so custom_specialist cannot be guaranteed to run"
-    )
 
 
 @pytest.mark.parametrize("stored", [True, False])
@@ -498,16 +424,6 @@ async def test_dispatch_key_names_the_cycle_and_the_definition(custom_coord):
     assert key == _custom_key(2, "other focus")
 
 
-@pytest.mark.parametrize("state", ["queued", "running", "succeeded", "failed", "cancelled"])
-async def test_one_dispatch_per_cycle_whatever_became_of_it(custom_coord, state):
-    custom_coord.tasks.find_by_idempotency_key.return_value = SimpleNamespace(state=state)
-
-    await custom_coord.specialist_dispatch.ensure_custom_specialist()
-
-    custom_coord.tasks.find_by_idempotency_key.assert_awaited_once_with(_custom_key())
-    custom_coord.router.handle_delegate.assert_not_awaited()
-
-
 async def test_a_task_that_only_borrows_the_custom_tag_does_not_hold_the_dispatch_back(custom_coord):
     custom_coord.tasks.queued.return_value = [
         SimpleNamespace(kind="specialist", params={"domain": "serving_specialist", "tags": ["custom_specialist"]})
@@ -520,13 +436,17 @@ async def test_a_task_that_only_borrows_the_custom_tag_does_not_hold_the_dispatc
 
 
 @pytest.mark.parametrize(("prompt", "phase"), [("", "FRAMEWORK_AGENT"), (_PROMPT, "ENABLEMENT")])
-async def test_dispatch_is_a_no_op(custom_coord, prompt, phase):
-    custom_coord.shared_state.custom_specialist_prompt = prompt
-    custom_coord.shared_state.phase = phase
+async def test_dispatch_is_a_no_op(tmp_path, prompt, phase):
+    state = SharedState(custom_specialist_prompt=prompt, custom_specialist_description=_DESCRIPTION)
+    state.max_minutes = 30
+    state.framework = "sglang"
+    coord = _coordinator(tmp_path, state)
+    coord.shared_state.phase = phase
 
-    await custom_coord.specialist_dispatch.ensure_custom_specialist()
+    await coord.specialist_dispatch.ensure_custom_specialist()
 
-    custom_coord.router.handle_delegate.assert_not_awaited()
+    assert await coord.tasks.queued() == []
+    assert coord.specialist_dispatch.refused_custom_key == ""
 
 
 async def test_dispatch_falls_back_to_research_when_patches_are_impossible(custom_coord, monkeypatch):

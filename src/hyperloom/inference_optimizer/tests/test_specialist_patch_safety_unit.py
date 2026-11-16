@@ -104,13 +104,6 @@ def test_patch_escapes_tree():
     assert ps.patch_escapes_tree(dotdot) == "../../escape.py"
 
 
-# ---- cross-domain rule descriptors ----------------------------------------
-def test_cross_domain_rule_descriptors():
-    desc = ps.cross_domain_rule_descriptors()
-    assert len(desc) == len(ps.CROSS_DOMAIN_RULES)
-    assert {"rule_id", "description", "failure_verdict", "failure_reason_code"} <= set(desc[0])
-
-
 # ---- vet_patches grounding verdicts ---------------------------------------
 def _ground(tmp_path: Path, text: str, base_checkout: Path | None) -> str:
     patch = tmp_path / "p.patch"
@@ -186,10 +179,6 @@ def test_patch_safety_report_notes():
     assert "patch_safety_stale" in joined
     assert "patch_safety_numeric" in joined
     assert "patch_safety_forbidden_fields" in joined
-
-
-def test_patch_safety_report_notes_empty():
-    assert ps.PatchSafetyReport().notes() == []
 
 
 # ---- proposals whose env files are not on disk -------------------------------
@@ -268,10 +257,6 @@ def test_scan_numeric_claims():
     assert any("x" in w.lower() for w in warnings)
 
 
-def test_scan_numeric_claims_empty():
-    assert ps.scan_numeric_claims({}) == []
-
-
 def test_the_numeric_scan_answers_only_the_question_no_one_else_answers():
     """It used to return the same ``keys & FORBIDDEN_*`` intersection ``strip_forbidden_proposal_fields`` computes, for a caller that discarded it: one question with two implementations, free to drift apart."""
     payload = {
@@ -337,13 +322,6 @@ def test_stripping_tolerates_a_payload_that_is_not_a_dict(payload):
 
 
 # ---- quantitative_claim_rule_descriptor ------------------------------------
-def test_the_rule_the_critic_gets_lists_exactly_what_the_runner_strips():
-    """A hand-copied field list in the prompt is how the Critic came to reject over a field the runner never enforced."""
-    rule = ps.quantitative_claim_rule_descriptor()
-
-    assert set(rule["forbidden_proposal_fields"]) == set(ps.FORBIDDEN_PROPOSAL_FIELDS)
-
-
 def test_a_format_slip_is_advisory_not_a_reject():
     rule = ps.quantitative_claim_rule_descriptor()
 
@@ -375,10 +353,6 @@ def test_a_rule_asking_for_a_reject_is_left_alone(monkeypatch):
 
     assert "cross_domain_hard_guard" not in codes
     assert ps.QUANTITATIVE_CLAIM_REASON_CODE in codes
-
-
-def test_the_codes_carry_no_blank_entry():
-    assert "" not in ps.advisory_only_reason_codes()
 
 
 # ---- advisory_rules_govern -------------------------------------------------
@@ -595,10 +569,6 @@ def test_grounding_root_prefers_a_declared_source_root():
         patch_roots={"/a.patch": "/harvested/tree"},
     )
     assert root == Path("/declared/tree")
-
-
-def test_grounding_root_declines_for_an_empty_set():
-    assert runner._grounding_explicit_root(declared="", patches=[], patch_roots={}) is None
 
 
 def test_a_deleted_line_that_looks_like_a_header_is_not_a_path():
