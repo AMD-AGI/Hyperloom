@@ -89,7 +89,7 @@ from hyperloom.measure.local_templates import image_env
 from hyperloom.sandbox.launcher import LAUNCHER_SOURCE, StatusPipe, launcher_argv
 from hyperloom_common.bwrap import BwrapPolicy, BwrapPolicyError, Holder, Scratch
 from hyperloom_common.shared_storage import make_shared_dirs
-from hyperloom_multibranch.repo.isolated_git import SESSION_IDENTITY
+from hyperloom_multibranch.repo.isolated_git import AGENT_IDENTITY
 from hyperloom_multibranch.specialist.agent_onboarding import CommandResult
 from hyperloom_multibranch.specialist.agent_session import Processes
 from hyperloom_multibranch.specialist.agent_watch import (
@@ -957,7 +957,7 @@ def confined_env(environ: Mapping[str, str], home: Path, forwarded: Mapping[str,
     image's own settings (:func:`~hyperloom.measure.local_templates.image_env`), and ``forwarded`` (the LLM gateway,
     its credentials and models, proxies and CA bundle); with ``home`` as the home, Claude config, cache, Python's user
     base, pip's install target (:data:`SITE_DIR`) and Triton's cache, which the image's settings may name in the app's
-    home; and the session's git identity (:data:`~hyperloom_multibranch.repo.isolated_git.SESSION_IDENTITY`), which
+    home; and the agent's git identity (:data:`~hyperloom_multibranch.repo.isolated_git.AGENT_IDENTITY`), which
     a commit of the agent's own needs in a home with no git config. aiter's JIT directory and FlyDSL's cache are left to aiter: its own tree, which a confined command writes,
     where the image's prebuilt modules and FlyDSL kernels are, which a directory of the home would hide. No other
     variable of the app's: not its other credentials, nor its home or tools' configuration. Without a Hugging Face
@@ -978,7 +978,7 @@ def confined_env(environ: Mapping[str, str], home: Path, forwarded: Mapping[str,
             "TRITON_CACHE_DIR": str(home / ".triton" / CACHE_DIR),
             # The inner user is the app's, root in a container, which the Claude CLI accepts only in a sandbox.
             "IS_SANDBOX": "1",
-            **SESSION_IDENTITY,
+            **AGENT_IDENTITY,
         }
     )
     return kept

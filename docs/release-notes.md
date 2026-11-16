@@ -34,8 +34,8 @@ it.
   sandbox's home has no git config and the sandbox kept no git identity, so a
   component agent that commits its own checkpoints failed its first commit
   with `Author identity unknown`, and its share branch never started. The
-  sandbox's commands now carry the session's git identity
-  (`hyperloom-multibranch`), the one the session's own commits use.
+  sandbox's commands now carry an agent git identity (`hyperloom-agent`),
+  apart from the session's own (`hyperloom-multibranch`).
 - **A new specialist waits while the untested-proposal queue is full.** In
   FRAMEWORK_AGENT, a `specialist` delegate is refused with `policy_denied`
   rule `specialist_untested_backlog_full` while 8 proposals, twice the

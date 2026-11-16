@@ -618,15 +618,15 @@ def test_confined_env_keeps_what_a_command_needs_and_nothing_else_of_the_app_s(t
         "PIP_TARGET": str(home / "site-packages"),
         "TRITON_CACHE_DIR": str(home / ".triton" / "cache"),
         "IS_SANDBOX": "1",
-        "GIT_AUTHOR_NAME": "hyperloom-multibranch",
-        "GIT_AUTHOR_EMAIL": "multibranch@hyperloom.invalid",
-        "GIT_COMMITTER_NAME": "hyperloom-multibranch",
-        "GIT_COMMITTER_EMAIL": "multibranch@hyperloom.invalid",
+        "GIT_AUTHOR_NAME": "hyperloom-agent",
+        "GIT_AUTHOR_EMAIL": "agent@hyperloom.invalid",
+        "GIT_COMMITTER_NAME": "hyperloom-agent",
+        "GIT_COMMITTER_EMAIL": "agent@hyperloom.invalid",
     }
     assert "HF_HUB_CACHE" not in confined_env({**environ, "HF_HOME": "/hf"}, home, {}), "an HF location is kept"
 
 
-def test_a_confined_command_commits_with_the_session_s_identity_from_a_home_with_no_git_config(tmp_path: Path) -> None:
+def test_a_confined_command_commits_with_the_agent_identity_from_a_home_with_no_git_config(tmp_path: Path) -> None:
     checkout = tmp_path / "checkout"
     checkout.mkdir()
     home = tmp_path / "home"
@@ -640,7 +640,7 @@ def test_a_confined_command_commits_with_the_session_s_identity_from_a_home_with
     author = subprocess.run(
         ["git", "log", "-1", "--format=%an <%ae>"], cwd=checkout, env=env, capture_output=True, text=True, check=True
     ).stdout.strip()
-    assert author == "hyperloom-multibranch <multibranch@hyperloom.invalid>"
+    assert author == "hyperloom-agent <agent@hyperloom.invalid>"
 
 
 def test_a_sandbox_whose_paths_bubblewrap_cannot_bind_safely_runs_as_before_and_says_so(

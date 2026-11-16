@@ -42,13 +42,21 @@ NO_EXCLUDES_FILE = ("-c", f"core.excludesFile={os.devnull}")
 #: No object is fetched behind a command's back: a config can make a repository a partial clone whose promisor
 #: remote's transport (an ssh command, a local ``uploadpack`` program) runs when an object is missing.
 NO_LAZY_FETCH = {"GIT_NO_LAZY_FETCH": "1"}
-#: The identity of every commit the session makes or an agent makes in its sandbox, whoever runs the session: the
-#: operator's git config never decides it, and a sandbox's home has none.
+#: The identity of every commit the session makes, whoever runs the session: the operator's git config never decides
+#: it.
 SESSION_IDENTITY = {
     "GIT_AUTHOR_NAME": "hyperloom-multibranch",
     "GIT_AUTHOR_EMAIL": "multibranch@hyperloom.invalid",
     "GIT_COMMITTER_NAME": "hyperloom-multibranch",
     "GIT_COMMITTER_EMAIL": "multibranch@hyperloom.invalid",
+}
+#: The identity of every commit an agent makes in its sandbox, whose home has no git config: not the session's, so a
+#: history tells an agent's own commits from the session's.
+AGENT_IDENTITY = {
+    "GIT_AUTHOR_NAME": "hyperloom-agent",
+    "GIT_AUTHOR_EMAIL": "agent@hyperloom.invalid",
+    "GIT_COMMITTER_NAME": "hyperloom-agent",
+    "GIT_COMMITTER_EMAIL": "agent@hyperloom.invalid",
 }
 #: ``git init`` with no template directory, so no hook or ``info/exclude`` is copied in.
 INIT = ("init", "--template=")
@@ -131,6 +139,7 @@ def pinned_git(cwd: Path, *args: str, timeout: float = _CONFIG_TIMEOUT_S) -> sub
 
 
 __all__ = [
+    "AGENT_IDENTITY",
     "INIT",
     "NO_EXCLUDES_FILE",
     "NO_LAZY_FETCH",
