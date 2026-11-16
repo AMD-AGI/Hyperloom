@@ -49,6 +49,11 @@ rocprofv3 --pmc SQ_WAVES GRBM_GUI_ACTIVE -d out -- python driver.py --profile-ru
 - The performance level can be set: `sudo rocm-smi --setperflevel high` (or `amd-smi set -g 0 --perf-level
   HIGH`), restored with `--setperflevel auto`. That holds clocks high but not fixed, so expect more run-to-run
   spread than on an Instinct part; repeat measurements rather than trusting one.
+- Measured: a 32 µs Triton softmax on a W7900D at the default (auto) performance level scored 1.12×, 1.06× and
+  0.95× in three independent benchmarks of one candidate. That spread (σ ≈ 0.08) raised the keep bar to 1.14×, and
+  a correct candidate with a 4% mean gain was reverted. On this board, for kernels this short, a gain under ~10%
+  is not measurable without help: hold the performance level high, raise `--bench-repeat`, and prefer benchmark
+  cases large enough that one launch runs for hundreds of microseconds.
 
 ## Library support on gfx1100
 

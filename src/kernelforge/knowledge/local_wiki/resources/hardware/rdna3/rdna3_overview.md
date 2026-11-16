@@ -52,7 +52,7 @@ bandwidth for working sets that fit in it, so a measured bandwidth above 864 GB/
 
 | CDNA habit | On gfx1100 |
 |---|---|
-| wave64 everywhere | wave32 by default for HIP; wave64 is a build option that issues VALU/VMEM twice |
+| wave64 everywhere | wave32 by default for HIP and Triton; wave64 is a build option that issues VALU/VMEM twice |
 | MFMA (`v_mfma_*`), many shapes | WMMA (`v_wmma_*`), 16×16×16 only, A/B replicated across half-waves |
 | AGPR accumulators, `v_accvgpr_*` | no AGPRs; accumulators are VGPRs |
 | 512 VGPR+AGPR per lane budget | ≤256 VGPRs per wave; 1536 per SIMD in wave32, 24-register granule |

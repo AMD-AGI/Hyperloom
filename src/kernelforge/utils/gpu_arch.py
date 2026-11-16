@@ -118,15 +118,18 @@ The backend guidance and the knowledge cards are mostly written for Instinct (CD
 - Matrix instructions are **WMMA** (`v_wmma_*`, 16x16x16), not MFMA. Wherever the guidance says MFMA,
   read WMMA; MFMA intrinsics, scaled MFMA and their shape tables do not exist here.
 - There are **no AGPRs**. Accumulators live in ordinary VGPRs; ignore AGPR budgets and `v_accvgpr_*` advice.
-- HIP compiles gfx1100 for **wave32** unless `-mwavefrontsize64` is passed; check a Triton kernel's wave size in
-  its AMDGCN dump. Lane, shuffle, ballot and reduction math follows the wave size the build chose, not CDNA's 64.
+- HIP and Triton compile gfx1100 for **wave32** (HIP unless `-mwavefrontsize64` is passed). Lane, shuffle, ballot
+  and reduction math follows the wave size the build chose (`.amdhsa_wavefront_size32` in the dump), not CDNA's 64.
 - **No FP8/FP4** matrix path and no FNUZ/OCP question: FP16, BF16, INT8 and INT4 are the WMMA input types.
 - Memory is **GDDR6 (~864 GB/s)** behind a 96 MB Infinity Cache, not HBM; the roofline ridge is far lower.
 - rocprof-compute does not support this target, so "wait/MFMA" ratios and its PMC reports are unavailable. Judge
   bottlenecks with the RDNA 3 cards under `hardware/rdna3/` and with rocprofv3 where it is installed.
 - The kernel backends that build here are triton, hip, hipblaslt and ck. HipKittens and the `gl.amd.cdna3`/`cdna4`
   Gluon ops are CDNA only.
-Every concrete number for this chip is in `hardware/rdna3/`; read those cards, not the MI350 ones."""
+- Benchmarks are noisy on this board: a gain under ~10% on a kernel of tens of microseconds is usually not
+  measurable. Prefer changes with a large expected gain, and benchmark cases long enough to time reliably.
+Every concrete number for this chip is in `hardware/rdna3/`. Where another card cites `hardware/mi350_*.md`, read the
+RDNA 3 card for that topic instead (the map in `hardware/rdna3/INDEX.md` pairs them); the MI350 numbers are wrong here."""
 
 #: gfx1100 in wave32: 1536 VGPRs per SIMD allocated in blocks of 24 and at most 16 waves, so 96 VGPRs is the last
 #: count that keeps every wave slot; LDS is 128 KiB per WGP with a 64 KiB cap per work-group (RDNA 3 ISA §3.3).

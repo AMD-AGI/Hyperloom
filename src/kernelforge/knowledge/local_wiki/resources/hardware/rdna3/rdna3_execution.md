@@ -26,8 +26,9 @@ The card behind every "how many waves fit?" and "is this lane math right?" quest
   `wavefrontsize64` target feature is off unless `-mwavefrontsize64` is passed. (LLVM AMDGPUUsage)
 - In wave64, VALU and VMEM instructions issue **twice** (low half, then high half); scalar ops, branches and
   messages issue once. (ISA §2.1)
-- Triton: confirm the warp size of a compiled kernel from its AMDGCN dump (`.amdhsa_wavefront_size32`) rather
-  than assuming it; the Triton version decides the default.
+- Triton compiles gfx1100 kernels for wave32 too: a Triton 3.8 (ROCm 10.1) build on a W7900D emits
+  `.amdhsa_wavefront_size32 1`. An older or patched Triton may differ, so read that directive in the dump before
+  doing lane arithmetic.
 - Consequence: `__shfl*`, ballots, `warpSize`-based reductions and any lane-index arithmetic written for CDNA's
   64 lanes are wrong in wave32. Use `warpSize` or the wave size the build actually chose.
 

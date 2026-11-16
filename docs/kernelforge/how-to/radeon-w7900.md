@@ -25,7 +25,7 @@ as its own board (`w7900d`) with its own peaks.
 | Kernel backends | all ten | `triton`, `hip`, `hipblaslt`, `ck` |
 | Hardware knowledge the agents read | `hardware/` (MI350) | `hardware/rdna3/` |
 | Matrix instructions | MFMA, AGPR accumulators | WMMA, accumulators in VGPRs |
-| Default wave size | wave64 | wave32 for HIP; check a Triton kernel's dump |
+| Default wave size | wave64 | wave32 (HIP; Triton 3.8 measured) |
 | Analysis Agent | profiled on long runs | static-only: rocprof-compute does not support gfx1100 |
 | Experience-KB records | `mi300x` / `mi355x` | `w7900` (W7900 and W7900D) |
 
@@ -69,6 +69,12 @@ sudo rocm-smi --setperflevel high
 Restore automatic clock management afterwards with `sudo rocm-smi --setperflevel auto`. That keeps clocks high
 but not fixed, so expect more run-to-run spread than on Instinct; `--bench-repeat` above 1 takes the per-case
 median of several in-process repeats and narrows it.
+
+How much this matters, measured: on a W7900D at the default performance level, the packaged Triton softmax (about
+32 µs per launch) scored one candidate at 1.12×, 1.06× and 0.95× in its three independent benchmarks. The keep bar
+rose to 1.14× and a correct 4% gain was reverted. For short kernels, raise `--bench-repeat`, use benchmark cases
+that run for hundreds of microseconds, and budget at least two hours: the 30-minute finalize reserve and the
+per-round admission leave a 1.5-hour campaign room for about one round.
 
 ## Not covered on gfx1100
 

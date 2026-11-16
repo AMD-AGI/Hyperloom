@@ -33,6 +33,18 @@ contrast, never for a number.
 | `rdna3_memory.md` | LDS (128 KiB/WGP, 64 KiB/work-group cap, CU vs WGP mode), cache ladder, GDDR6 bandwidth |
 | `rdna3_measure.md` | rocprofv3 on gfx1100, what rocprof-compute cannot do here, clock control, library support |
 
+## Cards elsewhere that cite `hardware/mi350_*.md`
+
+Methodology and language cards were written against the MI350 map and cite its files by name. On gfx1100 read
+the RDNA 3 card for the same topic instead:
+
+| Cited MI350 card | Read instead |
+|---|---|
+| `mi350_overview.md`, `mi350_clocks.md` | `rdna3_overview.md`, `rdna3_measure.md` |
+| `mi350_execution.md`, `mi350_isa.md` | `rdna3_execution.md` |
+| `mi350_matrix_core.md`, `mi350_dtypes.md` | `rdna3_wmma.md` |
+| `mi350_lds.md`, `mi350_memory.md`, `mi350_chiplet.md` | `rdna3_memory.md` |
+
 ## Constants you will look up most
 
 | | |
@@ -46,7 +58,8 @@ contrast, never for a number.
 ## Portable golden rules
 
 - **Wave size is a build choice, not a constant.** HIP compiles gfx1100 for wave32 unless `-mwavefrontsize64` is
-  passed; check the kernel's own build before doing any lane, shuffle, ballot or reduction arithmetic.
+  passed, and Triton 3.8 does too; check the kernel's own build (`.amdhsa_wavefront_size32`) before doing any
+  lane, shuffle, ballot or reduction arithmetic.
 - **Every MFMA idea needs translating.** WMMA has one shape (16×16×16), needs its A/B operands replicated across
   half-waves, and accumulates in ordinary VGPRs.
 - **Occupancy is a VGPR budget of 1536 per SIMD** (wave32), rounded to 24-register blocks; 96 VGPRs or fewer
