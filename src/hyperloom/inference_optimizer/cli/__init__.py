@@ -1531,6 +1531,12 @@ async def _prepare_run(args: argparse.Namespace) -> _ProviderIntent:
             log.warning("failed to preserve SBD V6 preflight failure", exc_info=True)
         raise
 
+    # The orchestration role's session refuses without a sandbox; reject before model resolution makes LLM calls.
+    _check_codex_sandbox(
+        _resolve_orchestration_backend(
+            codex_follows_claude=codex_follows_claude, claude_follows_codex=claude_follows_codex
+        )
+    )
     # Model resolution makes blocking LLM calls; the subscription-token client refuses to run inside this loop.
     await asyncio.to_thread(
         _resolve_models_for_run,
@@ -1543,12 +1549,6 @@ async def _prepare_run(args: argparse.Namespace) -> _ProviderIntent:
     # Before either session branch: these are read by the fresh-launch seeding AND by the resume path, so this is the
     # one place that covers both.
     _preflight_agentx_backend(args)
-    # The session that refuses without a sandbox is the orchestration role's, decided on the pre-preflight intent.
-    _check_codex_sandbox(
-        _resolve_orchestration_backend(
-            codex_follows_claude=codex_follows_claude, claude_follows_codex=claude_follows_codex
-        )
-    )
     if not args.resume_from:
         _scope_error = latency_budget_scope_error(
             getattr(args, "framework", None) or os.environ.get("FRAMEWORK", ""), getattr(args, "max_latency_ms", None)

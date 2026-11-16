@@ -293,6 +293,7 @@ def test_resume_restores_pins_before_the_agentx_staleness_guard(tmp_path, monkey
         lambda: {"dir": "", "deleted": 0, "skipped_fresh": 0, "errors": 0},
     )
     monkeypatch.setattr(f"{cli_mod}._preflight", lambda args: ("", ""))
+    monkeypatch.setattr(f"{cli_mod}._check_codex_sandbox", lambda backend: None)
 
     def past_the_guard(*a, **kw):
         raise RuntimeError("resume cleared the staleness guard")
