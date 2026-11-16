@@ -51,6 +51,17 @@ async def test_sweep_asks_for_the_directive_once_per_cycle(session_dir):
 
 
 @pytest.mark.asyncio
+async def test_a_held_sweep_exit_still_writes_the_next_cycles_directive(session_dir):
+    coord, orchestration = _sweep_coordinator(session_dir, replies=[MockTurn(raw_text=_DIRECTIVE)])
+    coord.dispatcher.admission_frozen = True
+
+    await coord.phase_machine.pump_current_phase()
+
+    assert len(orchestration.calls) == 1
+    assert coord.shared_state.orchestration_memory["next_cycle_directive"] == _DIRECTIVE
+
+
+@pytest.mark.asyncio
 async def test_a_reply_without_intents_is_not_an_error(session_dir):
     coord, _ = _sweep_coordinator(session_dir, replies=[MockTurn(raw_text=_DIRECTIVE)])
 

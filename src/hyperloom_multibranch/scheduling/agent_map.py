@@ -1,11 +1,11 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""Arbor's map as the scheduler deals it: each direction of the session's agent map, the share it was split into, and
-the Arbor branch that share went to.
+"""The agent map as the scheduler deals it: each direction of the session's map, the share it was split into, and the
+agent branch that share went to.
 
-A session's agent map is split into one share per Arbor agent (:mod:`agent_plans`), and a share branch works the open
-directions of its share. The scheduler keeps the map on the blackboard
+A session's agent map is split into one share per component agent (:mod:`agent_plans`), and a share branch works the
+open directions of its share. The scheduler keeps the map on the blackboard
 (:meth:`~hyperloom_multibranch.contracts.blackboard.Blackboard.write_agent_map`), each direction with the branch its
 share was dealt to, and that record is what the open areas, the specialists' briefs, the menu and the judge read: a
 direction is held while its branch runs, and the ones the map closed (``done``, ``killed``, ``below_floor``,
@@ -26,8 +26,8 @@ _TITLE_CHARS = 160
 _WHY_CHARS = 300
 #: The judge's rule for the map, the one the specialists' brief binds them to.
 JUDGE_RULE = (
-    "Arbor's map: the directions the session's Arbor branches work, and those the map set aside. Open no branch on a "
-    "direction a running Arbor branch holds, nor focus one on its ops; it is free again once that branch stops. Open "
+    "The agent map: the directions the session's agent branches work, and those the map set aside. Open no branch on "
+    "a direction a running agent branch holds, nor focus one on its ops; it is free again once that branch stops. Open "
     "none on a set-aside direction unless its focus answers the reason given, and say how."
 )
 
@@ -69,7 +69,7 @@ class SharedMap:
 
 
 def render_map(snapshot: BlackboardSnapshot) -> str:
-    """The map ``snapshot`` keeps, for the judge's prompt: each direction held by its running Arbor branch, open, or
+    """The map ``snapshot`` keeps, for the judge's prompt: each direction held by its running agent branch, open, or
     set aside with why, as the specialists' brief words them; ``""`` for a session without a map."""
 
     if not snapshot.agent_map:

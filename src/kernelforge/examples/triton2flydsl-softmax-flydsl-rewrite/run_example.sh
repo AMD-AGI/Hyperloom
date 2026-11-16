@@ -74,7 +74,7 @@ if [ -n "${FORGE_MODEL:-}" ]; then
   MODEL_ARGS+=(--model "$FORGE_MODEL")
 fi
 
-echo "==> Launching forge-rewrite-by-flydsl (gpu=mi355x/$GPU_TARGET, port_attempts=$MAX_PORT_ATTEMPTS, max_hours=$MAX_HOURS)"
+echo "==> Launching forge-rewrite-by-flydsl (gpu=$GPU_TARGET, port_attempts=$MAX_PORT_ATTEMPTS, max_hours=$MAX_HOURS)"
 kernelforge forge-rewrite-by-flydsl \
   --source-kernel "$WORKSPACE/softmax.py" \
   --driver "$WORKSPACE/driver.py" \

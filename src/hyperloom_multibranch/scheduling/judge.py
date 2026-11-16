@@ -137,7 +137,7 @@ class JudgeView:
     ``building`` to the native builds not ready yet that its tests in flight wait for; a branch with none is not in
     either. ``focus`` maps a branch to the focus its ``OPEN`` lineage names; a branch opened on none is not in it.
     ``open_areas`` says where a new branch could open and ``playbook`` is the scheduling playbook the session
-    plays, as the RSI renders them; both are empty for a session that reads no archive. ``agent_map`` is Arbor's map
+    plays, as the RSI renders them; both are empty for a session that reads no archive. ``agent_map`` is the agent map
     as :func:`~hyperloom_multibranch.scheduling.agent_map.render_map` gives it, empty for a session with none.
     """
 
@@ -582,7 +582,7 @@ def cap_decision(decision: JudgeDecision, view: JudgeView) -> JudgeDecision:
         if order.branch in live and live[order.branch].kind is BranchKind.SPECIALIST
     }
     ks = {
-        order.branch: KOrder(order.branch, view.caps.clamp_k(order.k))
+        order.branch: KOrder(order.branch, view.caps.clamp_k(order.k, live[order.branch].kind))
         for order in decision.k
         if order.branch in live and order.branch not in asked
     }
@@ -590,7 +590,7 @@ def cap_decision(decision: JudgeDecision, view: JudgeView) -> JudgeDecision:
     opened = min(max(decision.open_count, floor), view.caps.max_branches)
     return JudgeDecision(
         open_count=opened,
-        open_k=view.caps.clamp_k(decision.open_k),
+        open_k=view.caps.clamp_k(decision.open_k, BranchKind.SPECIALIST),
         focus=decision.focus[:opened],
         k=tuple(ks.values()),
         stop=tuple(asked.values()),

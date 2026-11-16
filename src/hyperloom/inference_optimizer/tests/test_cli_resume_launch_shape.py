@@ -9,6 +9,8 @@ import argparse
 import json
 import os
 
+import pytest
+
 from hyperloom.inference_optimizer.cli.launch_shape import _export_operator_launch_shape
 from hyperloom.inference_optimizer.cli.bootstrap import parse_operator_extra_env
 from hyperloom.orchestrator.state.shared_state import SharedState
@@ -32,11 +34,12 @@ def _pin(monkeypatch, **pins):
     _export_operator_launch_shape(server_args="", extra_env=dict(pins))
 
 
-def test_pin_fills_a_workload_knob_the_flags_left_unset(monkeypatch):
+@pytest.mark.parametrize("isl_pin", ["4096", "  4096  "], ids=["plain", "padded"])
+def test_pin_fills_a_workload_knob_the_flags_left_unset(monkeypatch, isl_pin):
     """A pin reaches the ladder through the environment, and ``args`` is what every later projection writes."""
     from hyperloom.inference_optimizer.cli.launch_shape import _resolve_workload_knobs
 
-    _pin(monkeypatch, ISL="4096", OSL="512")
+    _pin(monkeypatch, ISL=isl_pin, OSL="512")
     args = _knob_args()
 
     _resolve_workload_knobs(args)
@@ -167,23 +170,15 @@ def test_the_fresh_launch_anchors_stay_in_order():
         )
 
 
-def test_the_environment_rung_is_positive_ints_only(monkeypatch):
-    """The rung every ladder shares: a value that is not a positive integer falls through rather than raising."""
-    from hyperloom.inference_optimizer.cli.launch_shape import _positive_env_int
-
-    for raw, expected in (("65536", 65536), ("", 0), ("nope", 0), ("0", 0), ("-4", 0), ("  8  ", 8)):
-        monkeypatch.setenv("MAX_MODEL_LEN", raw)
-        assert _positive_env_int("MAX_MODEL_LEN") == expected
-
-
-def test_a_malformed_pinned_knob_does_not_take_the_run_down(monkeypatch):
+@pytest.mark.parametrize("pin", ["not-a-number", "0", "-4", ""], ids=["not-a-number", "zero", "negative", "blank"])
+def test_a_malformed_pinned_knob_does_not_take_the_run_down(monkeypatch, pin):
     """A pin that is not a positive integer falls through to the rest of the ladder rather than raising."""
     from hyperloom.inference_optimizer.cli.launch_shape import _resolve_workload_knobs
     from hyperloom.common.workload_defaults import DEFAULT_ISL
 
     monkeypatch.setenv("INFERENCE_OPTIMIZER_EXTRA_ENV", "")
     monkeypatch.setenv("ISL", "")
-    _export_operator_launch_shape(server_args="", extra_env={"ISL": "not-a-number"})
+    _export_operator_launch_shape(server_args="", extra_env={"ISL": pin})
     args = _knob_args()
 
     _resolve_workload_knobs(args)

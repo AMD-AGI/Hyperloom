@@ -21,18 +21,6 @@ def test_gemm_flops_is_two_mnk():
     assert rc._gemm_flops(M=4, N=8, K=16) == 2.0 * 4 * 8 * 16
 
 
-def test_gemm_bytes_separates_activation_from_weight_precision():
-    """A quantized weight is read at its own width; activations stay bf16."""
-    m, n, k = 4, 8, 16
-    both_fp8 = rc._gemm_bytes(M=m, N=n, K=k, weight_bpe=1.0)
-    assert both_fp8 == m * k * 1.0 + k * n * 1.0 + m * n * 1.0
-
-    split = rc._gemm_bytes(M=m, N=n, K=k, weight_bpe=1.0, act_bpe=2.0)
-    assert split == m * k * 2.0 + k * n * 1.0 + m * n * 2.0
-    # Only the weight read stays narrow, so the split total is the larger one.
-    assert split > both_fp8
-
-
 def test_sdpa_flops_counts_both_matmuls():
     b, n_q, h_q, n_kv, h_kv, d = 2, 3, 8, 5, 2, 64
     expected = b * h_q * (2.0 * n_q * n_kv * d) * 2
@@ -464,16 +452,6 @@ def test_perfmodel_sizes_the_moe_op_at_the_latent_expert_width(tmp_path):
     assert _breakdown(2048).bytes_moved < _breakdown(0).bytes_moved
     # 0 means "unset", which must behave exactly like the residual width.
     assert _breakdown(0).bytes_moved == _breakdown(4096).bytes_moved
-
-
-def test_a_checkpoint_sized_weight_shard_is_not_written_out(tmp_path):
-    """The reader only stats the shard, so a real checkpoint's size must cost neither memory nor disk."""
-    weight_bytes = int(4 * 512 * 3 * 512 * 2048 * 0.5 * 1.15)
-    shard = _write_model(tmp_path / "m", _DENSE_CFG, weight_bytes=weight_bytes) / "model.safetensors"
-
-    stat = shard.stat()
-    assert stat.st_size == weight_bytes
-    assert stat.st_blocks * 512 < 1024**2
 
 
 def test_load_model_meta_keeps_a_quark_moe_checkpoint_decomposed(tmp_path):

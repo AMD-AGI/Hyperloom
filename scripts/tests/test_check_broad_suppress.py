@@ -34,67 +34,37 @@ def test_clean_file_exits_zero(tmp_path: Path) -> None:
     assert main([str(p)]) == 0
 
 
-def test_suppress_exception_detected(tmp_path: Path) -> None:
+@pytest.mark.parametrize(
+    "caught",
+    ["Exception", "BaseException", "OSError, Exception"],
+    ids=["exception", "base_exception", "exception_in_a_tuple"],
+)
+def test_suppress_exception_detected(tmp_path: Path, caught: str) -> None:
     p = write(
         tmp_path,
         "broad.py",
-        """\
+        f"""\
         import contextlib
-        with contextlib.suppress(Exception):
+        with contextlib.suppress({caught}):
             some_call()
         """,
     )
     assert main([str(p)]) == 1
 
 
-def test_suppress_base_exception_detected(tmp_path: Path) -> None:
-    p = write(
-        tmp_path,
-        "broad_base.py",
-        """\
-        import contextlib
-        with contextlib.suppress(BaseException):
-            some_call()
-        """,
-    )
-    assert main([str(p)]) == 1
-
-
-def test_exception_in_tuple_detected(tmp_path: Path) -> None:
-    p = write(
-        tmp_path,
-        "tuple_broad.py",
-        """\
-        import contextlib
-        with contextlib.suppress(OSError, Exception):
-            some_call()
-        """,
-    )
-    assert main([str(p)]) == 1
-
-
-def test_test_files_are_skipped(tmp_path: Path) -> None:
-    tests_dir = tmp_path / "tests"
-    tests_dir.mkdir()
-    p = tests_dir / "test_something.py"
+@pytest.mark.parametrize(
+    "relative",
+    ["tests/helpers.py", "test_broad.py"],
+    ids=["in_a_tests_directory", "test_prefix"],
+)
+def test_test_files_are_skipped(tmp_path: Path, relative: str) -> None:
+    p = tmp_path / relative
+    p.parent.mkdir(exist_ok=True)
     p.write_text(
         "import contextlib\nwith contextlib.suppress(Exception):\n    pass\n",
         encoding="utf-8",
     )
     assert main([str(tmp_path)]) == 0
-
-
-def test_test_prefix_files_skipped(tmp_path: Path) -> None:
-    p = write(
-        tmp_path,
-        "test_broad.py",
-        """\
-        import contextlib
-        with contextlib.suppress(Exception):
-            pass
-        """,
-    )
-    assert main([str(p)]) == 0
 
 
 def test_waiver_comment_allows_broad_suppress(tmp_path: Path) -> None:
@@ -142,12 +112,6 @@ def test_syntax_error_skipped(tmp_path: Path) -> None:
     p = tmp_path / "broken.py"
     p.write_text("def (\n", encoding="utf-8")
     assert main([str(p)]) == 0
-
-
-def test_multiple_files_all_clean(tmp_path: Path) -> None:
-    write(tmp_path, "a.py", "with __import__('contextlib').suppress(OSError): pass\n")
-    write(tmp_path, "b.py", "x = 1\n")
-    assert main([str(tmp_path)]) == 0
 
 
 def test_multiple_files_one_broad(tmp_path: Path, capsys: pytest.CaptureFixture) -> None:

@@ -88,6 +88,7 @@ from .credentials import (
 )
 from .multi_node import (
     _prepare_multi_node_state as _prepare_multi_node_state,
+    _resolve_mn_backend,
 )
 from .model_catalog import (
     _resolve_critic_choice,
@@ -378,14 +379,6 @@ def _build_orchestration_prompt(
 def _load_critic_prompt() -> str:
     """Return the Critic system prompt sourced from ``orchestrator/prompts/critic.md``."""
     return (asset_system_prompts_dir() / "critic.md").read_text(encoding="utf-8")
-
-
-def _should_remote_probe_gpu(args: argparse.Namespace) -> bool:
-    """Return whether the GPU type should be probed on the remote cluster."""
-    if int(getattr(args, "nodes", 1) or 1) < 2:
-        return False
-    backend = (getattr(args, "mn_backend", None) or "rayjob").strip().lower()
-    return backend in ("rayjob", "infera")
 
 
 def _apply_atom_auto_tighten(args: argparse.Namespace) -> None:
@@ -1185,12 +1178,12 @@ def _resolve_target_gpu(args: argparse.Namespace, framework: str) -> None:
     """Settle ``args.gpu_type``, then refuse a board this session cannot serve."""
     # Resolve real target GPU: probe > --gpu-type hint; probe wins to catch wrong-host typos that corrupt KB.
     user_specified = _resolve_amd_gpu_type(args.gpu_type) or ""
-    if _should_remote_probe_gpu(args):
+    if int(args.nodes) >= 2:
         from ..multi_node._internal.gpu_probe import remote_autodetect_gpu_type
 
         probed = remote_autodetect_gpu_type() or ""
         if probed:
-            print(f"GPU probe       : {probed} (remote {(args.mn_backend or 'rayjob').lower()})")
+            print(f"GPU probe       : {probed} (remote {_resolve_mn_backend(args)})")
     else:
         probed = _autodetect_gpu_type() or ""
     gpu_type, gpu_warnings = _resolve_gpu_type(user_specified=user_specified, probed=probed)

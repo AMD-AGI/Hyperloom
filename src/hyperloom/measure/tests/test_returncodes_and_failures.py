@@ -379,28 +379,36 @@ def test_the_step_a_round_failed_at_names_a_cause_its_log_does_not(step, failure
 
 
 @pytest.mark.parametrize(
-    "detail",
+    ("step", "detail"),
     [
-        "the user layer: unrecognized arguments: --foo-bar 1",
-        "the user layer: argument --attention-backend: invalid choice: 'nonexistent' (choose from 'fa3', 'triton')",
+        (FailedStep.FLAG_UNKNOWN, "the user layer: unrecognized arguments: --foo-bar 1"),
+        (
+            FailedStep.FLAG_UNKNOWN,
+            "the user layer: argument --attention-backend: invalid choice: 'nonexistent' (choose from 'fa3', 'triton')",
+        ),
+        (
+            FailedStep.GOLDEN_OWNED_TOUCHED,
+            "the user layer sets golden-owned --speculative-config.method, --speculative-config.num_speculative_tokens",
+        ),
     ],
-    ids=["bad_flag", "bad_choice"],
+    ids=["bad_flag", "bad_choice", "golden_owned"],
 )
 @pytest.mark.parametrize("logs", [[], [TRACEBACK_LOG]])
-def test_a_flag_the_suite_refused_before_boot_is_a_candidate_serve_flag_quoting_the_refusal(detail, logs) -> None:
-    """The suite parses the argv before the server starts, so no server log states the refusal; its report does."""
+def test_a_command_line_the_suite_refused_before_boot_is_a_candidate_serve_flag_quoting_the_refusal(
+    step, detail, logs
+) -> None:
+    """The suite checks the argv before the server starts, so no server log states the refusal; its report does."""
     verdict = classify_test_failure(
         returncode=1,
-        evidence=FailureEvidence(logs=tuple(logs), step_failure=StepFailure(FailedStep.FLAG_UNKNOWN, detail)),
+        evidence=FailureEvidence(logs=tuple(logs), step_failure=StepFailure(step, detail)),
     )
     assert (verdict.failure_class, verdict.failure_reason) == (FailureClass.CANDIDATE, f"serve_flag: {detail}")
     assert decides_test(verdict)
 
 
-def test_a_flag_refusal_without_a_detail_is_still_a_candidate_serve_flag() -> None:
-    verdict = classify_test_failure(
-        returncode=1, evidence=FailureEvidence(step_failure=StepFailure(FailedStep.FLAG_UNKNOWN))
-    )
+@pytest.mark.parametrize("step", [FailedStep.FLAG_UNKNOWN, FailedStep.GOLDEN_OWNED_TOUCHED])
+def test_a_command_line_refusal_without_a_detail_is_still_a_candidate_serve_flag(step) -> None:
+    verdict = classify_test_failure(returncode=1, evidence=FailureEvidence(step_failure=StepFailure(step)))
     assert (verdict.failure_class, verdict.failure_reason) == (FailureClass.CANDIDATE, "serve_flag")
 
 

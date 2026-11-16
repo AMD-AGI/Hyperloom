@@ -10,12 +10,19 @@ the benchmark's stderr, and that line is what the specialist needs, so each read
 signature table does know (an import that failed, a refused flag) quotes its line the same way.
 
 Every reader takes the joined log text and returns the last line that names the cause, shortened to one bounded line, or
-``None``.
+``None``. The file readers at the end (:func:`failure_logs`, :func:`client_logs`) give that text: the tails of the logs a
+failed round left, and the last refusal of an evaluation request wherever it sits in the scanned part of a log.
 """
 
 from __future__ import annotations
 
+import os
 import re
+from collections.abc import Iterable
+from pathlib import Path
+from typing import TYPE_CHECKING
+
+from inference_suite.contracts import RunLayout
 
 from hyperloom.common.failure_signature import EXCEPTION_NAME_START, IMPORT_FAILURE_LINE, argparse_refusal
 from hyperloom.common.outside_facts import (
@@ -27,6 +34,9 @@ from hyperloom.common.outside_facts import (
     HUB_RATE_LIMITED,
     TORCH_MEMORY_SNAPSHOT_FRAME,
 )
+
+if TYPE_CHECKING:
+    from hyperloom.orchestrator.actions.executors import VariantResult
 
 #: A cause line longer than this is cut, so a reason stays one readable line.
 CAUSE_CHARS = 300
@@ -226,3 +236,80 @@ def _is_datasets_lock(path: str) -> bool:
     directory, _, name = path.rpartition("/")
     root_lock = bool(directory) and name.endswith(".lock") and name.startswith(directory.replace("/", "_") + "_")
     return root_lock or bool(_DATASETS_BUILD_LOCK.search(path))
+
+
+# --- the logs a failed round left -----------------------------------------------------------------------------------
+
+#: How much of the end of a log is read.
+LOG_TAIL_CHARS = 64 * 1024
+#: How far back a log is searched for the refusal of an evaluation request, in blocks that overlap by a line's length.
+_MIB = 1 << 20
+REFUSAL_SCAN_CHARS = 16 * _MIB
+_REFUSAL_BLOCK_CHARS = _MIB
+_REFUSAL_BLOCK_OVERLAP_CHARS = 4096
+_UTF8 = "utf-8"
+
+
+def log_tail(path: str | None) -> str:
+    """The last ``LOG_TAIL_CHARS`` of the log at ``path``; ``""`` for none or one that cannot be read."""
+    if not path:
+        return ""
+    try:
+        with open(path, "rb") as handle:
+            handle.seek(0, os.SEEK_END)
+            handle.seek(max(0, handle.tell() - LOG_TAIL_CHARS))
+            return handle.read().decode(_UTF8, errors="replace")
+    except OSError:
+        return ""
+
+
+def last_refusal(path: Path) -> str:
+    """The last refusal of an evaluation request the log at ``path`` holds wherever it is in the log, else ``""``.
+
+    The evaluation client prints a refusal when it happens and, once its retries are spent, one traceback for each
+    request that gave up, thousands of them: the tail of the log is those tracebacks and the refusal sits far above.
+    """
+    try:
+        with open(path, "rb") as handle:
+            end = handle.seek(0, os.SEEK_END)
+            floor = max(0, end - REFUSAL_SCAN_CHARS)
+            while end > floor:
+                start = max(floor, end - _REFUSAL_BLOCK_CHARS)
+                handle.seek(start)
+                block = handle.read(end - start).decode(_UTF8, errors="replace")
+                # The block starts mid-line unless it starts the file; the overlap of the next block holds that line whole.
+                found = bad_request(block if start == 0 else block.partition("\n")[2])
+                if found:
+                    return found
+                end = start + _REFUSAL_BLOCK_OVERLAP_CHARS if start > floor else floor
+    except OSError:
+        return ""
+    return ""
+
+
+def failure_logs(failing: Iterable[VariantResult]) -> list[str]:
+    """The tails of the server log and of the client's and the evaluation's stderr of every result with a failed round.
+
+    The launcher's pipe seldom holds the cause: the server prints a refused flag or a crash into ``server.log``, and the
+    client or the evaluation prints a refused request into its own stderr in the round's run_dir.
+    """
+    logs: list[str] = []
+    for result in failing:
+        if result.server_log_path:
+            logs.append(log_tail(result.server_log_path))
+        if result.workspace:
+            layout = RunLayout(Path(result.workspace))
+            stderr_logs = [layout.client_stderr, layout.eval_stderr]
+            logs.extend(log_tail(str(path)) for path in stderr_logs)
+            logs.extend(last_refusal(path) for path in stderr_logs)
+    return logs
+
+
+def client_logs(failing: Iterable[VariantResult]) -> list[str]:
+    """The tails of the AgentX replay client's own log in the run_dir of every result with a failed round.
+
+    The round's report names only the client's exit code; what the client was refused is in this log alone.
+    """
+    return [
+        log_tail(str(RunLayout(Path(result.workspace)).agentx_client_log)) for result in failing if result.workspace
+    ]

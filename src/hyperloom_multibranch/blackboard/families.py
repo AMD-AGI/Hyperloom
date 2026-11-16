@@ -15,7 +15,7 @@ whatever op the specialist named as its target.
 What the families of past sessions came to is :mod:`rsi.family_stats`'s.
 
 :func:`names_op` says whether words name a profile op, by the rule the scheduler reads a judge's focus with, and
-:func:`direction_names_op` whether a direction of Arbor's map acts on one.
+:func:`direction_names_op` whether a direction of the agent map acts on one.
 """
 
 from __future__ import annotations
@@ -259,7 +259,7 @@ def names_op(text: str, op: str) -> bool:
 
 
 def direction_names_op(direction: MapDirection, op: str) -> bool:
-    """Whether the direction of Arbor's map acts on the profile op ``op``: one of its ``ops``, with or without the
+    """Whether the direction of the agent map acts on the profile op ``op``: one of its ``ops``, with or without the
     ``.kd`` suffix, when it lists them; else an op its id, title or why names (:func:`names_op`)."""
 
     if direction.ops:

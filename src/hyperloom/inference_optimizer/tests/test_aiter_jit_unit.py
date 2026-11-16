@@ -173,39 +173,16 @@ def test_clean_ignores_non_lock_files(tmp_path):
     assert stats["scanned"] == 0
 
 
-def test_clean_counts_unlink_error(tmp_path, monkeypatch):
-    lock = tmp_path / "lock"
-    lock.write_text("", encoding="utf-8")
+@pytest.mark.parametrize(
+    ("owner", "name"), [(Path, "unlink"), (Path, "stat"), (os, "walk")], ids=["unlink", "stat", "walk"]
+)
+def test_clean_counts_a_failed_filesystem_call_as_an_error(tmp_path, monkeypatch, owner, name):
+    (tmp_path / "lock").write_text("", encoding="utf-8")
 
-    def _boom(self, *a, **k):
-        raise OSError("cannot unlink")
+    def _boom(*_args, **_kwargs):
+        raise OSError(f"{name} failed")
 
-    monkeypatch.setattr(Path, "unlink", _boom)
-    stats = aj.clean_stale_aiter_locks(tmp_path, stale_minutes=0)
-    assert stats["errors"] == 1
-
-
-def test_clean_counts_stat_error(tmp_path, monkeypatch):
-    lock = tmp_path / "lock"
-    lock.write_text("", encoding="utf-8")
-
-    real_stat = Path.stat
-
-    def _stat(self, *a, **k):
-        if self.name == "lock":
-            raise OSError("stat failed")
-        return real_stat(self, *a, **k)
-
-    monkeypatch.setattr(Path, "stat", _stat)
-    stats = aj.clean_stale_aiter_locks(tmp_path, stale_minutes=0)
-    assert stats["errors"] == 1
-
-
-def test_clean_walk_oserror(tmp_path, monkeypatch):
-    def _boom(*a, **k):
-        raise OSError("walk failed")
-
-    monkeypatch.setattr(aj.os, "walk", _boom)
+    monkeypatch.setattr(owner, name, _boom)
     stats = aj.clean_stale_aiter_locks(tmp_path, stale_minutes=0)
     assert stats["errors"] == 1
 
@@ -353,6 +330,17 @@ class _FakeProc:
         self.info = info
 
 
+class _RaisingProc:
+    """A proc whose ``.info`` access raises a per-process psutil error."""
+
+    def __init__(self, exc):
+        self._exc = exc
+
+    @property
+    def info(self):
+        raise self._exc
+
+
 def _install_fake_psutil(monkeypatch, procs, iter_raises=False):
     import types
 
@@ -386,10 +374,23 @@ def _install_fake_psutil(monkeypatch, procs, iter_raises=False):
     return fake
 
 
-def test_any_live_compiler_psutil_missing(monkeypatch):
-    import sys
+def _install_access_denied_psutil(monkeypatch):
+    fake = _install_fake_psutil(monkeypatch, [])
+    fake.process_iter = lambda fields: iter([_RaisingProc(fake.AccessDenied())])
 
-    monkeypatch.setitem(sys.modules, "psutil", None)
+
+@pytest.mark.parametrize(
+    "install",
+    [
+        lambda mp: mp.setitem(sys.modules, "psutil", None),
+        lambda mp: _install_fake_psutil(mp, [], iter_raises=True),
+        _install_access_denied_psutil,
+        lambda mp: _install_fake_psutil(mp, [_FakeProc({"name": None, "cmdline": None, "cwd": None})]),
+    ],
+    ids=["psutil-missing", "enumeration-error", "access-denied", "unreadable-identity"],
+)
+def test_any_live_compiler_is_unknown_when_liveness_cannot_be_read(monkeypatch, install):
+    install(monkeypatch)
     assert aj._any_live_compiler() is None
 
 
@@ -455,22 +456,6 @@ def test_any_live_compiler_none_alive(monkeypatch):
     assert aj._any_live_compiler() is False
 
 
-def test_any_live_compiler_enum_error(monkeypatch):
-    _install_fake_psutil(monkeypatch, [], iter_raises=True)
-    assert aj._any_live_compiler() is None
-
-
-class _RaisingProc:
-    """A proc whose ``.info`` access raises a per-process psutil error."""
-
-    def __init__(self, exc):
-        self._exc = exc
-
-    @property
-    def info(self):
-        raise self._exc
-
-
 def test_any_live_compiler_skips_dead_process(monkeypatch):
     fake = _install_fake_psutil(monkeypatch, [])
     procs = [
@@ -509,17 +494,6 @@ def test_sweep_unknown_liveness_preserves_stale_lock(tmp_path, monkeypatch):
     assert stats["deleted"] == 0
     assert stats["errors"] == 1
     assert lock.exists()
-
-
-def test_any_live_compiler_access_denied_is_unknown(monkeypatch):
-    fake = _install_fake_psutil(monkeypatch, [])
-    fake.process_iter = lambda fields: iter([_RaisingProc(fake.AccessDenied())])
-    assert aj._any_live_compiler() is None
-
-
-def test_any_live_compiler_unreadable_identity_is_unknown(monkeypatch):
-    _install_fake_psutil(monkeypatch, [_FakeProc({"name": None, "cmdline": None, "cwd": None})])
-    assert aj._any_live_compiler() is None
 
 
 def test_live_compiler_unreadable_build_location_is_unknown(monkeypatch, tmp_path):

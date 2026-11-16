@@ -443,7 +443,7 @@ def test_an_agentx_point_runs_on_the_sessions_frozen_base_as_the_main_flow_compo
     assert user.env_set["HSA_FORCE_FINE_GRAIN_PCIE"] == "1"
 
 
-#: A base option an AgentX recipe turns off, the way an Arbor KEEP drops a default feature.
+#: A base option an AgentX recipe turns off, the way an agent's kept change drops a default feature.
 BASE_OPTION = "--enable-dp-attention"
 
 

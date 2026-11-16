@@ -88,6 +88,14 @@ measurement, NOT a failure — do not retry it.
   params keep colliding with the same invariant, so change something
   substantive — a new `params.grid` variant or a sibling action family.
   Re-emitting the identical denied intent just wastes a tick.
+* **RULE F4 — `error_class='engine_execute_timeout'` is not a boot failure.**
+  The server was serving when one vLLM model step outran
+  `VLLM_EXECUTE_MODEL_TIMEOUT_SECONDS` and the engine shut down
+  (`server_died` is the same death without that timeout). The same launch
+  stalls the same way, and a roofline that failed so is not re-run on the
+  recipe until a KEEP changes it. Raise `VLLM_EXECUTE_MODEL_TIMEOUT_SECONDS`
+  in `params.extra_envs` only when the step is genuinely that slow;
+  otherwise change what the step runs.
 
 ## Example (PRELUDE — baseline failed twice with `error_class='server_init_dead'`)
 

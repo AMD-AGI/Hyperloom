@@ -346,7 +346,7 @@ def test_every_part_of_a_delta_document_round_trips() -> None:
     assert RecipeDelta.from_document(delta.to_document()) == delta
 
 
-def test_diff_names_config_conflicts_moved_refs_and_patch_overlap() -> None:
+def test_diff_names_config_conflicts_moved_refs_and_patch_sets() -> None:
     first = _recipe()
     second = apply(
         first,
@@ -369,7 +369,6 @@ def test_diff_names_config_conflicts_moved_refs_and_patch_overlap() -> None:
     ]
     assert changes.shared_patches == {MOE_PATCH.sha256}
     assert changes.patches_only_in_second == {ATTN_PATCH.sha256}
-    assert changes.patch_overlap == pytest.approx(0.5)
     assert not changes.base_image_changed
 
 
@@ -377,9 +376,7 @@ def test_identical_recipes_differ_in_nothing_and_a_new_base_image_is_a_differenc
     recipe = _recipe()
 
     assert diff(recipe, recipe).is_empty
-    assert diff(recipe, recipe).patch_overlap == 1.0
     assert diff(recipe, _recipe(runtime_snapshot=None)).base_image_changed
-    assert diff(_recipe(components=()), _recipe(components=())).patch_overlap == 1.0
 
 
 def test_a_recipe_that_names_nothing_unexpressed_keeps_its_document_and_digest() -> None:
