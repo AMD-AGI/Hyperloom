@@ -250,7 +250,8 @@ asks anything of you. A test whose build your change broke ends candidate_failed
 excerpt: fix the change. A submission refused as build_after_deadline would end past your branch's deadline: do not \
 resubmit it; test a change that needs no new build instead. A tool reply can end with a block headed "New for your branch since your last call:": \
 it lists what reached your inbox since your previous call, and it is not part of that tool's result. A "brief" item means the session moved under your branch: call blackboard_brief with the head it names and \
-reconsider your direction before your next claim.
+reconsider your direction before your next claim. A "merge" item says how the integrator's merge of commits of yours \
+onto the integration head ended: merged, not stackable there, conflicted or already on it.
 6. Read a candidate's gain from its judgement, the gate's verdict and gain over the parent it was measured on, \
 never from figures other branches quote: a test result holds raw rounds, and your parent may not be the root. After \
 every result, write to your branch log (blackboard_append_branch_log): the hypothesis, what you tried, the \
