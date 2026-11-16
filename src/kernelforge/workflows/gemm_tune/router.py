@@ -44,8 +44,6 @@ _1STAGE_PATTERN = re.compile(r"using 1stage default", re.IGNORECASE)
 DEMAND_MIN_MISSES = 25
 
 # Known unsupported AITER FP4/MXFP4 tuner paths.
-# Other ISAs, including gfx1250, retain existing routing eligibility; that
-# eligibility does not establish tuner support.
 _FP4_UNSUPPORTED_GFX = {"gfx942", "gfx1201"}
 
 _FP4_SKIP_REASON = "AITER FP4/MXFP4 tuning unsupported on {gfx_arch}"

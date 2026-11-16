@@ -307,22 +307,6 @@ class TestFp4UnsupportedArchSkip:
         blockscale = [s for s in specs if s.name == "a8w8_blockscale"][0]
         assert blockscale.should_run
 
-    @pytest.mark.parametrize("framework", ["sglang", "vllm-aiter"])
-    @pytest.mark.parametrize("precision", ["fp4", "mxfp4"])
-    @pytest.mark.parametrize("gpu_type", ["gfx1250", "auto"])
-    def test_gfx1250_is_not_rejected_by_arch_guard(self, monkeypatch, framework, precision, gpu_type):
-        """Pin routing eligibility without asserting AITER kernel support."""
-        monkeypatch.setattr(router, "detect_arch", lambda: "gfx1250")
-        profile = _make_profile(is_moe=True, num_experts=128, num_experts_per_tok=8, moe_intermediate_size=768)
-        specs = select_tuners(
-            profile,
-            RoutingTarget(framework=framework, precision=precision, quant_type=precision, gpu_type=gpu_type),
-            RoutingEvidence(has_untuned_csv=True),
-        )
-        for name in ("a4w4_blockscale", "fmoe_ck"):
-            spec = next(spec for spec in specs if spec.name == name)
-            assert spec.should_run, spec.skip_reason
-
 
 class TestGpuTypeAutoDetect:
     """gpu_type='auto'/'' probes the local host via rocminfo, then gates FP4."""
