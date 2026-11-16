@@ -74,7 +74,6 @@ from .bootstrap import (
     measurement_state_is_stale,
     resume_gpu_power_settings,
     latency_budget_scope_error,
-    parse_operator_extra_env,
     resolve_framework_version,
     resolve_model_display_name,
 )
@@ -97,6 +96,7 @@ from .model_catalog import (
 from .launch_shape import (
     _refuse_multinode_partition_shape,
     _export_operator_launch_shape,
+    _launch_pins,
     _positive_env_int,
     _resolve_precision,
     _resolve_run_max_model_len,
@@ -1132,8 +1132,7 @@ async def _resume_session(args: argparse.Namespace) -> _SessionStart:
     # Restored before the staleness guard below, which resolves the AgentX backend from the environment: a
     # session whose backend came from a pin would otherwise be refused as a workload mismatch. An explicit flag
     # on this resume wins, else the persisted value.
-    _resume_server_args = str(getattr(args, "server_args", "") or "").strip() or state.operator_server_args
-    _resume_extra_env = parse_operator_extra_env(args) or dict(state.operator_extra_env)
+    _resume_server_args, _resume_extra_env = _launch_pins(args, state.operator_server_args, state.operator_extra_env)
     _export_operator_launch_shape(server_args=_resume_server_args, extra_env=_resume_extra_env)
     _stale = measurement_state_is_stale(state)
     if _stale:
