@@ -14,10 +14,9 @@ does a branch the judge or the session's end stopped, nor a record that waits on
 opens again once the integration head moves, and an op of a direction of the map once its agent branch stops. With too
 little of EXPLORE left for a new branch's first commit, the playbook's ``last_open_minutes`` or else the median time a
 new branch took to it, it says that no branch should open. Shares taken from a commit the head builds on are named as that commit's, beside
-the head's. Without shares, it tells a head (or a commit it builds on) a PROFILE test measured, its trace not analysed
-into op shares, from one no PROFILE test measured: either way no op is known, which is not a profile out of ops. The
-direction families' odds are the specialists' menu (:mod:`rsi.menu`), not the judge's: a family has too few tests to
-rank ops by.
+the head's. Without shares, a head (or a commit it builds on) a PROFILE test measured reads as unknown, not as
+unprofiled: neither is a profile out of ops. The direction families' odds are the specialists' menu
+(:mod:`rsi.menu`), not the judge's: a family has too few tests to rank ops by.
 """
 
 from __future__ import annotations
