@@ -121,6 +121,9 @@ def forge_loop_prompts(monkeypatch):
 # judges each output itself as the other form of the pre-filter, and says "clears
 # the driver" where it said "clears SNR" (diffed line by line: those two sentences,
 # the first rewrapped onto two lines, and nothing else).
+# The declared-launch-count rule moved `mono` alone: its contract's first item now
+# takes the launch count from the task (one, or a split layer's K1 and K2) instead
+# of fixing it at one.
 _SHA256_FORGE_LOOP: dict[str, str] = {
     "ave": "3969bcd708d0dd6a46a7ed4401dbb9984cc0faa70bd13fe50509ea4e36fda434",
     "aiter": "fe0cfc662b64fac7fa1c4a48758366549d10b710f6aacec3a609e98277c16dfd",
@@ -134,7 +137,7 @@ _SHA256_FORGE_LOOP: dict[str, str] = {
     "gluon": "0c6b20832cd9f49349b5f5974137a7a35f958820530e4237a20a3fe56899956b",
     "hip": "662524299466f87fea4ad630c7fbf414a699a373f7635d5167c50cf1099eb48d",
     "hipblaslt": "4dc01cdd379c6c55a9847dd6f0532853b199128a5039eb09e51227657736d4da",
-    "mono": "141b4f07171b67606a095beac0539698d0264ce70da48fe0a2e14dcaad1ff5fd",
+    "mono": "e00a7fbb6938a7832ef7873d1987d5a6f9533f7179a474bea009ae5932bbc50c",
     "triton": "e32193395d0dc3ea323c29f6cfb3d82f2a96c66cb447057486a7e83fef538e89",
 }
 

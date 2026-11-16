@@ -108,10 +108,26 @@ measured by a multi-rank driver inside `dist_harness` (`--nproc-per-node`). When
 cannot state the launch's contract, such as an output that must stay bitwise next to a
 toleranced one, each case brings a `judge`, and `verify_replay=True` also judges the last
 timed graph replay. A case also declares the launch structure it is measured on:
-`launches=1` refuses a candidate whose call captures to anything but one kernel, and
+`launches=N` refuses a candidate whose call captures to anything but N kernels, and
 `resident=True` one whose grid cannot be resident on the GPU at once, before the case is
 judged or timed. The example `src/kernelforge/examples/mono-qwen3-seam-gfx942-forge-loop/`
 puts these together for a FlyDSL monokernel on 4 x MI300X.
+
+Three things to settle when a monokernel task in sgl-amd-mono judges a candidate against a
+pristine copy of the launch:
+
+- Keep the copy inside the `sgl_amd_mono` package, under a directory forge protects (for
+  example `sgl_amd_mono/benchmark/<model>_ref/`): the repository's JIT cache key
+  (`common/plan.py`, `kernel_sources`) traces only modules of that package, so a copy
+  anywhere else fails to import.
+- Give the copy's modules names of their own (`ffn_pristine.py` beside the candidate's
+  `ffn.py`), with its relative imports renamed to match. A shell command that names a file by
+  a basename it shares with a protected one is refused unless the session's directory or a
+  `cd` in the command places it outside the protected tree.
+- `dist_harness` times one graph replayed on one set of weights. A launch that streams more
+  experts than a step touches keeps them in the GPU's last-level cache between replays, which
+  a served model's layers do not; time weight-streaming changes again with the weights
+  rotating through several copies before quoting them.
 
 Before the first iteration, the loop checks the driver against the contract it
 enforces at run time and repairs it if needed. When that fails the run aborts

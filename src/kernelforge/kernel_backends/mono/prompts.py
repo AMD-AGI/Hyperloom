@@ -11,9 +11,10 @@ from kernelforge.kernel_backends.prompt_utils import (
 _CONTRACT = """\
 ## The contract a candidate must not move
 
-- One launch per call: the candidate's call launches one kernel, with no second kernel, copy,
-  memset or host-side collective beside it. A driver that declares the launch count refuses any
-  other graph.
+- The launch count is the task's: the candidate's call launches as many kernels as the span
+  has launches (one for most monokernels; some split a layer, as K1 and K2), with no other kernel,
+  copy, memset or host-side collective beside them. A driver that declares the launch count
+  refuses any other graph.
 - The grid stays resident: every CTA of the launch is on the GPU at once, or the waits between
   CTAs deadlock. Re-derive the grid from the compiled kernel's VGPR and LDS use before changing
   it.
