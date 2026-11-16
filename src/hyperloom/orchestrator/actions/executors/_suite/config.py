@@ -19,8 +19,9 @@ A scriptable point (xDiT, or a custom session's own benchmark and eval scripts) 
 with the point's environment (:func:`scriptable_workload`); the quality gate the script writes is its eval, so it
 runs no GSM8K.
 
-:func:`accuracy_config` builds the D9 accuracy round of an AgentX point, and :func:`agentx_client_config` its replay
-against a server that serves a launch of its own (an agent's). :mod:`.rounds` runs the configs built here.
+:func:`accuracy_config` builds the D9 accuracy round of an AgentX point, :func:`check_server_config` the boot of the
+server its long-context check runs on, and :func:`agentx_client_config` its replay against a server that serves a launch
+of its own (an agent's). :mod:`.rounds` runs the configs built here.
 """
 
 from __future__ import annotations
@@ -111,6 +112,10 @@ _PORT_ENV = "PORT"
 _GPU_MASK_ENV = "ROCR_VISIBLE_DEVICES"
 _RUN_PHASE_ENV = "HYPERLOOM_RUN_PHASE"
 _SERVER_ONLY_PHASE = "server"
+#: The phase of an AgentX point's boot round that brings up the long-context check's server (:func:`check_server_config`).
+CHECK_SERVER_PHASE = "check_server"
+#: What a caller adds to an AgentX point's environment for its boot round to bring up the check server.
+CHECK_SERVER_ENVS: Mapping[str, str] = MappingProxyType({_RUN_PHASE_ENV: CHECK_SERVER_PHASE})
 _CLIENT_TRUST_ENV = "BENCH_TRUST_REMOTE_CODE"
 _TOKENIZER_MODE_ENV = "HYPERLOOM_CLIENT_TOKENIZER_MODE"
 _REMOTE_SERVER_ENV = "BENCHMARK_BASE_URL"
@@ -705,7 +710,8 @@ def _scriptable_config(
 def suite_config(document: Mapping[str, object], base: BaseLaunch, settings: RoundSettings) -> SuiteConfig:
     """The config one round of the point ``document`` runs from, composed on ``base``.
 
-    A point whose ``HYPERLOOM_RUN_PHASE`` is ``server`` only boots the server, so its round runs no load and no eval; one
+    A point whose ``HYPERLOOM_RUN_PHASE`` is ``server`` only boots the server, so its round runs no load and no eval;
+    ``check_server`` boots an AgentX point's check server instead (:func:`check_server_config`); one
     that sets ``EVAL_ONLY`` runs the eval and no load, as InferenceX's ``run_benchmark_serving`` does. A client-only round (``settings.server_url`` or the point's ``BENCHMARK_BASE_URL``) holds its server as ``external``.
 
     Raises:
@@ -717,7 +723,10 @@ def suite_config(document: Mapping[str, object], base: BaseLaunch, settings: Rou
     point = _point(document)
     _check_base(point, base)
     bench = _bench(document)
-    boot_only = (point.text(_RUN_PHASE_ENV) or "").lower() == _SERVER_ONLY_PHASE
+    phase = (point.text(_RUN_PHASE_ENV) or "").lower()
+    if phase == CHECK_SERVER_PHASE:
+        return check_server_config(document, base, settings)
+    boot_only = phase == _SERVER_ONLY_PHASE
     url = point.text(_REMOTE_SERVER_ENV) or settings.server_url
     scriptable = framework_facts(point.framework).kind is FrameworkKind.SCRIPTABLE
     if url is not None and (is_agentx(bench) or _is_mlperf(bench) or scriptable):
@@ -819,6 +828,43 @@ def _layer_over_base(launch: AgentxLaunch, base: BaseLaunch, point_env: Mapping[
     )
 
 
+def check_server_config(document: Mapping[str, object], base: BaseLaunch, settings: RoundSettings) -> SuiteConfig:
+    """The boot of the server the AgentX point ``document``'s long-context check runs on, after its measured rounds.
+
+    It is the measured point's own server, composed the same way on ``base`` (the base, the user and candidate layers,
+    the golden layer) with only the golden layer's acceptance simulation taken out (``GoldenUse.REAL_ACCEPTANCE``):
+    the draft runs, the target model accepts what it really accepts, and the check grades the model's own text. It
+    runs no workload and holds its server as ``settings.lifecycle`` says, for the check to ask.
+
+    Raises:
+        ConfigError: When the point is not AgentX, does not run the session base, names another framework or topology
+            than ``base``, ``base`` has no golden layer (the measured server is then the check's own), or the
+            session's rounds measure an external server.
+    """
+    bench = _bench(document)
+    if not is_agentx(bench):
+        raise ConfigError("a check server serves an AgentX point")
+    if settings.server_url is not None:
+        raise ConfigError("a check server is the round's own, and a client-only session's server is external")
+    if base.golden_al is None:
+        raise ConfigError("a check server takes the golden layer's simulation out, and this base has no golden layer")
+    point = _point(document)
+    point = replace(point, model=point.text(_MODEL_PATH_ENV) or point.model)
+    _check_base(point, base)
+    _check_agentx_block(_agentx_block(bench), point)
+    _check_agentx_envs(point, base)
+    server = _agentx_server(point, bench, base, settings)
+    return SuiteConfig(
+        server=replace(server, golden=GoldenUse.REAL_ACCEPTANCE),
+        workload=WorkloadKind.NONE,
+        eval=_eval(point, enabled=False),
+        telemetry=settings.telemetry,
+        lifecycle=settings.lifecycle,
+        deadlines=_deadlines(point, settings),
+        paths=settings.paths,
+    )
+
+
 def accuracy_config(
     document: Mapping[str, object], base: BaseLaunch, settings: RoundSettings, timeout_sec: float
 ) -> SuiteConfig:
@@ -852,11 +898,14 @@ def accuracy_config(
 
 
 __all__ = [
+    "CHECK_SERVER_ENVS",
+    "CHECK_SERVER_PHASE",
     "MEASURED_SEED",
     "SERVER_HOST",
     "WARMUP_SEED",
     "accuracy_config",
     "agentx_client_config",
+    "check_server_config",
     "RoundSettings",
     "fixed_workload",
     "suite_config",

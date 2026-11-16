@@ -214,7 +214,7 @@ class LedgerSource:
         return {"path": self.path, "id": self.id, "kind": self.kind, "text": self.text, "kinds": kinds}
 
 
-#: Where Arbor's component mode writes its snapshots in its session, unless its config's ``component.outbox`` renames
+#: Where component mode writes an agent's snapshots in its session, unless its config's ``component.outbox`` renames
 #: it, the file it writes why it ended to, before an exit 0 only, and the one it writes why it refused its config to,
 #: before an exit 2.
 DEFAULT_OUTBOX = "keeps"
@@ -224,7 +224,7 @@ REFUSED_FILE = "component_refused.json"
 
 @dataclass(frozen=True)
 class SnapshotSource:
-    """Where an agent run as a component, as Arbor's component mode, keeps its session: the directory ``session`` of its
+    """Where an agent run as a component keeps its session: the directory ``session`` of its
     checkout, holding its snapshot outbox (one directory per keep and ``LATEST``, which names the newest) and its exit
     file."""
 

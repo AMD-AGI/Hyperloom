@@ -32,15 +32,17 @@ from hyperloom.measure.compile import LocalBlobStore, PackageBase, kernel_rows_o
 from hyperloom.sandbox import SandboxGone
 from hyperloom.sandbox.socket import SandboxUnavailable
 from hyperloom_multibranch.contracts.lifecycle import BranchTask
-from hyperloom_multibranch.contracts.blackboard.vocab import LeaseKind
+from hyperloom_multibranch.contracts.blackboard.vocab import Conclusion, LeaseKind
 from hyperloom_multibranch.contracts.toolbox import Backpressure, BranchLease, LeaseCharge, RequestRejected
 from hyperloom_multibranch.contracts.blackboard import INTEGRATION_BRANCH, Role, Writer
 from hyperloom_multibranch.contracts.blackboard.records import BaselineRecord, ToolResultPointer
 from hyperloom_multibranch.blackboard import LocalBlackboard
 from hyperloom_multibranch.blackboard.local.blackboard import LEARNING_MAX_CHARS
-from hyperloom_multibranch.blackboard.tests.factories import result
+from hyperloom_multibranch.blackboard.tests.factories import judgement, result
+from hyperloom_multibranch.rulegate.rules import RETRACTION_ID
+from hyperloom_multibranch.scheduling.session_base import served_launch
+from hyperloom_multibranch.specialist.agent_import import KeptChange, Retraction
 from hyperloom_multibranch.specialist import (
-    arbor_adapter,
     autonomous_session,
     keep_requeue,
     worktree as worktree_module,
@@ -57,6 +59,7 @@ from hyperloom_multibranch.specialist.autonomous_session import (
     START_TABLES_DIR,
     WATCH_FILE,
     AutonomousSession,
+    KeepWatch,
     AutonomousSetup,
     collection_margin,
     without_file,
@@ -74,10 +77,12 @@ from hyperloom_multibranch.specialist.runtime import (
 from hyperloom_multibranch.specialist.worktree import Upstream
 from hyperloom_common.tests._bwrap_host import usable_bwrap
 from hyperloom_common.tests.shared_accounts import Accounts, other_accounts
+from hyperloom_multibranch.tests.base_records import TOKEN, frozen_credential_base
 from hyperloom_multibranch.tests.branch_rig import branch_rig
 from hyperloom_multibranch.tests.agent_rig import (
     BRANCH,
     CHAMPION_ROWS,
+    CONFIG_FILE,
     COMPONENT_AGENT,
     IMAGE_DEFAULT,
     IMAGE_MODEL,
@@ -88,17 +93,18 @@ from hyperloom_multibranch.tests.agent_rig import (
     LocalSandbox,
     Toolbox,
     _aiter,
-    _arbor_repo,
     _replayed,
+    _stand_in_repo,
     _until,
+    install_stand_in,
 )
 
 
 #: An agent that, every ``gap`` seconds, writes each of ``keeps`` to its workspace's config.py and to the config it
-#: runs with, commits it when ``commits`` is set, as Arbor does, and records and prints the keep; it ends with ``exit``
+#: runs with, commits it when ``commits`` is set, and records and prints the keep; it ends with ``exit``
 #: after ``tail`` more seconds of silence. With ``table`` it also writes that kernel table, for the keep, to its workspace's tuned.csv,
 #: or to ``table_at`` in its checkout. It reports ``envs`` as NAME=VALUE words in run/result.json, as GEAK does.
-#: Before each keep it appends that keep's entries of ``ledger`` to its ledger, run/ledger.jsonl, as Arbor does.
+#: Before each keep it appends that keep's entries of ``ledger`` to its ledger, run/ledger.jsonl.
 #: With a keep file, it keeps nothing until ``after`` exists, the session's watch file: the preflight reads the keep
 #: file's baseline once the agent started, and a keep made before that read would be taken for one it had before.
 AGENT = """
@@ -230,7 +236,7 @@ def _manifest(workspace: str, agent: Agent | Component, after: str = "") -> str:
 def _component_manifest(workspace: str, agent: Component) -> str:
     return json.dumps(
         {
-            "source": "arbor",
+            "source": "agent",
             "commit": "c",
             "install": [],
             "config_file": "campaign.json",
@@ -440,7 +446,7 @@ def _from_a_wheel(monkeypatch: pytest.MonkeyPatch) -> None:
 
 
 def _told(monkeypatch: pytest.MonkeyPatch) -> None:
-    """The agent made ready as Arbor is: told why no change to its component's source can be kept."""
+    """The agent made ready as an adapter makes one: told why no change to its component's source can be kept."""
     make_ready = autonomous_session.make_ready
 
     async def told(source: str, spec: AgentSpec, *args):
@@ -1355,7 +1361,7 @@ async def test_an_agent_in_component_mode_runs_to_the_deadline_on_the_commit_mb_
     root = rig.sandbox.prompts[0].split('"root": "')[1].split('"')[0]
     assert (config["mode"], config["docker_container"]) == ("component", "@host")
     assert config["component"] == {"outbox": "snaps", "deadline": int(now + 3600.0 - 0.5), "root": root}
-    assert "docs/hosts.md" in rig.sandbox.prompts[0]
+    assert "its own documentation describes" in rig.sandbox.prompts[0]
     assert root == json.loads((tmp_path / BRANCH / "session" / "agent-watch.json").read_text())["root"]
 
 
@@ -1516,10 +1522,10 @@ async def _imported(rig: Rig) -> TestRequest:
     return request
 
 
-#: The launch the config MB wrote for an Arbor branch: its pack's harness
+#: The launch the config MB wrote for a component agent's branch: its pack's harness
 #: variables sit next to the server's own.
-ARBOR_FLAGS = "--tp 1 --max-num-seqs 128"
-ARBOR_ENV = {
+COMPONENT_FLAGS = "--tp 1 --max-num-seqs 128"
+COMPONENT_ENV = {
     "SGLANG_AITER_KV_CACHE_LAYOUT": "vectorized_5d",
     "ISL": "1024",
     "OSL": "1024",
@@ -1530,11 +1536,12 @@ ARBOR_ENV = {
 
 
 async def test_a_snapshot_imports_only_the_launch_changes_made_since_the_start_and_no_workload_variable(
-    tmp_path: Path,
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    envs = {**ARBOR_ENV, "SGLANG_QWEN3_GATE_UP_PTPC": "1"}
-    started = {"server_flags": ARBOR_FLAGS, "server_env": ARBOR_ENV}
-    agent = Component(keeps=(256,), gap=0.1, flags=ARBOR_FLAGS, envs=envs, started=started)
+    install_stand_in(monkeypatch)
+    envs = {**COMPONENT_ENV, "SGLANG_QWEN3_GATE_UP_PTPC": "1"}
+    started = {"server_flags": COMPONENT_FLAGS, "server_env": COMPONENT_ENV}
+    agent = Component(keeps=(256,), gap=0.1, flags=COMPONENT_FLAGS, envs=envs, started=started)
     rig = await _rig(tmp_path, agent, start_seconds=0.2)
 
     request = await _imported(rig)
@@ -1542,7 +1549,7 @@ async def test_a_snapshot_imports_only_the_launch_changes_made_since_the_start_a
     assert request.delta.config.envs == {"SGLANG_QWEN3_GATE_UP_PTPC": "1"}
     assert request.delta.config.server_args == "" and request.delta.config.unset_envs == ()
     watch = json.loads((tmp_path / BRANCH / "session" / "agent-watch.json").read_text())
-    # GSM8K_LIMIT is Arbor's evaluation setting, which MB gives it (arbor_adapter.EVAL_ENVS)
+    # GSM8K_LIMIT is an evaluation setting the installed adapter names, which MB gives its agent
     assert watch["refused_envs"] == {"GSM8K_LIMIT": "400", "ISL": "1024", "OSL": "1024"}
     dropped = [note for note in await rig.notices() if "GSM8K_LIMIT, ISL, OSL" in note]
     assert len(dropped) == 1 and "keep 1" in dropped[0]
@@ -1567,8 +1574,8 @@ async def test_a_keep_setting_a_variable_that_needs_a_set_flag_off_is_imported_w
 
 
 async def test_a_snapshot_whose_launch_is_the_one_it_started_with_imports_no_launch_change(tmp_path: Path) -> None:
-    started = {"server_flags": ARBOR_FLAGS, "server_env": ARBOR_ENV}
-    agent = Component(keeps=(256,), gap=0.1, flags=ARBOR_FLAGS, envs=ARBOR_ENV, started=started)
+    started = {"server_flags": COMPONENT_FLAGS, "server_env": COMPONENT_ENV}
+    agent = Component(keeps=(256,), gap=0.1, flags=COMPONENT_FLAGS, envs=COMPONENT_ENV, started=started)
     rig = await _rig(tmp_path, agent, start_seconds=0.2)
 
     request = await _imported(rig)
@@ -1617,7 +1624,7 @@ async def test_a_table_too_large_to_copy_is_noted_and_its_variable_imported_as_t
     request = await _imported(rig)
 
     assert request.delta.add_kernels == ()
-    assert request.delta.config.envs["AITER_CONFIG_GEMM_A8W8"].endswith(":/arbor/workspace/tuned.csv")
+    assert request.delta.config.envs["AITER_CONFIG_GEMM_A8W8"].endswith(":/agent/workspace/tuned.csv")
     assert any("AITER_CONFIG_GEMM_A8W8" in note and "not copied" in note for note in await rig.notices())
 
 
@@ -1721,26 +1728,20 @@ def _under_git(path: Path, names: tuple[str, ...]) -> bool:
     return any(parts[i] == ".git" and parts[i + 1] in names for i in range(len(parts) - 1))
 
 
-@pytest.mark.parametrize("arbor", [False, True], ids=["agent", "arbor"])
+@pytest.mark.parametrize("adapted", [False, True], ids=["agent", "adapted"])
 async def test_a_preflight_below_shared_storage_leaves_the_group_write_on_all_it_made_but_git_s_own_files(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, arbor: bool
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, adapted: bool
 ) -> None:
     tmp_path.chmod(0o2775)
     previous = os.umask(0o022)
     try:
         given: dict[str, object] = {}
-        if arbor:
-            monkeypatch.setattr(arbor_adapter, "INSTALL", ())
-            plan, dossier = tmp_path / "plan.json", tmp_path / "dossier" / "d1"
+        if adapted:
+            install_stand_in(monkeypatch)
+            plan = tmp_path / "plan.json"
             plan.write_text(json.dumps({"directions": ["fuse the decode norm"]}))
-            dossier.mkdir(parents=True)
-            (dossier / "index.md").write_text("# dossier\n")
-            source = _arbor_repo(tmp_path, Component(keeps=(), tail=0.6))
-            given = {
-                "source": source,
-                "start_seconds": 0.2,
-                "spec_fields": {"plan": str(plan), "dossier": str(dossier)},
-            }
+            source = _stand_in_repo(tmp_path, Component(keeps=(), tail=0.6))
+            given = {"source": source, "start_seconds": 0.2, "spec_fields": {"plan": str(plan)}}
         rig = await _rig(tmp_path, **given)
         await rig.session.preflight()
     finally:
@@ -1791,19 +1792,19 @@ def _as_member(accounts: Accounts, uid: int, leg: Callable[[], Awaitable[None]])
 
 
 @pytest.mark.filterwarnings("ignore:This process .* is multi-threaded:DeprecationWarning")
-@pytest.mark.parametrize("arbor", [False, True], ids=["agent", "arbor"])
+@pytest.mark.parametrize("adapted", [False, True], ids=["agent", "adapted"])
 def test_another_account_of_the_group_resumes_a_branch_whose_files_a_first_leg_wrote_under_umask_022(
-    monkeypatch: pytest.MonkeyPatch, arbor: bool
+    monkeypatch: pytest.MonkeyPatch, adapted: bool
 ) -> None:
     with other_accounts() as accounts:
         tmp_path = accounts.shared_dir("run")
         blobs = LocalBlobStore(tmp_path / "blobs")
         given: dict[str, object] = {"start": _replayed(blobs), "aiter": _aiter(tmp_path)}
-        if arbor:
-            monkeypatch.setattr(arbor_adapter, "INSTALL", ())
+        if adapted:
+            install_stand_in(monkeypatch)
             plan = tmp_path / "plan.json"
             plan.write_text(json.dumps({"directions": ["fuse the decode norm"]}))
-            source = _arbor_repo(tmp_path, Component(keeps=(), exit=3, tail=0.6))
+            source = _stand_in_repo(tmp_path, Component(keeps=(), exit=3, tail=0.6))
             given |= {"source": source, "start_seconds": 0.2, "spec_fields": {"plan": str(plan)}}
         agent = Agent(keeps=(), exit=3, resume="exit 3")
         rig = asyncio.run(_rig(tmp_path, agent, **given))
@@ -1936,7 +1937,7 @@ async def _multi_part(tmp_path: Path, parts: str) -> tuple[Rig, TestRequest]:
 async def test_a_snapshot_that_appends_its_rows_to_the_start_s_tables_imports_the_start_s_rows_and_its_own(
     tmp_path: Path,
 ) -> None:
-    """Arbor copies every file of a multi-part value; the private default copies carry no rows of the agent's."""
+    """A snapshot copies every file of a multi-part value; the private default copies carry no rows of the agent's."""
 
     rig, request = await _multi_part(tmp_path, "append")
 
@@ -2178,3 +2179,169 @@ async def test_under_bubblewrap_git_works_in_an_agent_s_worktree_and_the_branch_
     assert probed.output.split()[:3] == ["probe", "k", "k"], "the agent committed each keep, and git ran confined"
     assert not os.path.exists(f"/proc/{holder.pid}"), "the branch's end ended the sandbox's holder"
     assert not os.path.exists(scratch.tmp) and not os.path.exists(scratch.shm), "and deleted its /tmp and /dev/shm"
+
+
+# ---- a keep that retracts an earlier one -------------------------------------------------------------------------
+
+FINDING = {"iteration": 7, "keep": 1, "finding": "iter7-agentx-283-selection-invalid"}
+#: The launch an agent's branch is started with and keeps, so a revert of a keep's source undoes all of it.
+STEADY = "--tp 1"
+
+
+def _retracting(keeps: tuple[int, ...]) -> Component:
+    """An agent whose keep 2 reverts keep 1's commit and says it retracts keep 1."""
+    started = {"server_flags": STEADY, "server_env": {}}
+    return Component(keeps=keeps, retracts=FINDING, retracting_keep=2, flags=STEADY, started=started, tail=1.0)
+
+
+async def _landed_in_turn(rig: Rig, tmp_path: Path, landed: int) -> list[TestRequest]:
+    """Every import of a component agent's run, each measured once the one before was judged: the first ``landed`` of
+    them committed on the branch, the rest recorded only."""
+
+    gate = LocalBlackboard(tmp_path / "blackboard", Writer(Role.GATE, "gate"))
+    await rig.session.preflight()
+    running = asyncio.create_task(rig.session.run())
+    while not running.done():
+        count = len(rig.toolbox.requests)
+        await _until(lambda: len(rig.toolbox.requests) > count or running.done(), "the next import")
+        if len(rig.toolbox.requests) > count:
+            request = rig.toolbox.requests[count]
+            request_id = request.request_id or ""
+            await rig.toolbox_blackboard.write_result(result(request_id))
+            made = None
+            if count < landed:
+                recipe = apply(await rig.repo.read_recipe(request.parent_commit), request.delta)
+                made = await rig.repo.commit(BRANCH, request.parent_commit, recipe, request_id)
+            conclusion = Conclusion.COMMITTED if made else Conclusion.RECORDED_ONLY
+            await gate.write_judgement(request_id, judgement(-3.0, (request_id,)), conclusion, made)
+    with pytest.raises(SessionFinished):
+        await asyncio.wait_for(running, 10)
+    return rig.toolbox.requests
+
+
+async def test_a_retraction_of_a_keep_that_landed_is_imported_with_both_checks_and_names_what_it_retracts(
+    tmp_path: Path,
+) -> None:
+    rig = await _rig(tmp_path, _retracting((256, 512)), start_seconds=0.2)
+
+    first, retraction = await _landed_in_turn(rig, tmp_path, landed=1)
+
+    [attachment] = retraction.attachments
+    assert attachment.id == RETRACTION_ID
+    landed = (await rig.toolbox_blackboard.record(first.request_id or "")).commit_id
+    assert json.loads(rig.toolbox.attachments[attachment.sha256]) == {**FINDING, "retracted_commit": landed}
+    assert (retraction.consistency_check, retraction.long_context_check) == (True, True)
+    assert first.attachments == ()
+    named = "the agent's iteration 7 (its keep 1), found invalid by iter7-agentx-283-selection-invalid"
+    assert f"{NOTICE} keep 2 retracts {named}: r2 is not held to the speed gate" in await rig.notices()
+
+
+async def test_a_retraction_that_does_more_than_undo_its_keep_is_held_to_the_speed_gate(tmp_path: Path) -> None:
+    agent = replace(_retracting((256, 512)), flags=f"{STEADY} --max-num-seqs {{seqs}}")
+    rig = await _rig(tmp_path, agent, start_seconds=0.2)
+
+    _, retraction = await _landed_in_turn(rig, tmp_path, landed=1)
+
+    assert (retraction.attachments, retraction.consistency_check) == ((), None)
+    held = "r2 is held to the speed gate: it also changes --max-num-seqs"
+    assert any(note.endswith(held) for note in await rig.notices())
+
+
+async def test_a_retraction_of_a_keep_that_did_not_land_changes_nothing_on_the_head(tmp_path: Path) -> None:
+    rig = await _rig(tmp_path, _retracting((256, 512)), start_seconds=0.2)
+
+    [first] = await _landed_in_turn(rig, tmp_path, landed=0)
+
+    assert first.attachments == ()
+    assert f"{NOTICE} keep 2 changes nothing on the branch head" in await rig.notices()
+
+
+async def test_a_retraction_goes_alone_after_the_keep_it_was_made_on_and_before_the_keep_after_it(
+    tmp_path: Path,
+) -> None:
+    rig = await _rig(tmp_path, _retracting((256, 512, 768)), start_seconds=0.2)
+    rig.toolbox.refusals = [Backpressure(BRANCH, 1, 1)] * 40
+
+    first, retraction, after = await _landed_in_turn(rig, tmp_path, landed=2)
+
+    assert "+max_num_seqs = 256" in rig.patch(first) and "-max_num_seqs = 256" in rig.patch(retraction)
+    assert "+max_num_seqs = 768" in rig.patch(after)
+    assert [len(request.attachments) for request in (first, retraction, after)] == [0, 1, 0]
+
+
+async def test_a_retraction_whose_import_measured_nothing_goes_once_more_as_the_retraction_it_went_as(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(keep_requeue, "REQUEUE_SECONDS", 0.3)
+    rig = await _rig(tmp_path, _retracting((256, 512)), start_seconds=0.2)
+    gate = LocalBlackboard(tmp_path / "blackboard", Writer(Role.GATE, "gate"))
+
+    await rig.session.preflight()
+    running = asyncio.create_task(rig.session.run())
+    await _until(lambda: rig.toolbox.requests, "the first import")
+    first = rig.toolbox.requests[0]
+    await rig.toolbox_blackboard.write_result(result("r1"))
+    recipe = apply(await rig.repo.read_recipe(first.parent_commit), first.delta)
+    made = await rig.repo.commit(BRANCH, first.parent_commit, recipe, "r1")
+    await gate.write_judgement("r1", judgement(-3.0, ("r1",)), Conclusion.COMMITTED, made)
+    await _until(lambda: len(rig.toolbox.requests) == 2, "the retraction's import")
+    await rig.toolbox_blackboard.write_result(_failed("r2", Validity.MEASUREMENT_FAILED))
+    await _until(lambda: len(rig.toolbox.requests) == 3, "the requeued retraction")
+    await rig.toolbox_blackboard.write_result(result("r3"))
+    with pytest.raises(SessionFinished):
+        await asyncio.wait_for(running, 10)
+
+    _, retraction, again = rig.toolbox.requests
+    assert rig.patch(again) == rig.patch(retraction) and again.parent_commit == retraction.parent_commit
+    assert [attachment.id for attachment in again.attachments] == [RETRACTION_ID]
+    assert again.attachments == retraction.attachments
+    assert (again.consistency_check, again.long_context_check) == (True, True)
+    assert any(note.endswith("r3 is not held to the speed gate") for note in await rig.notices())
+
+
+def test_the_keeps_waiting_at_a_crash_are_read_back_by_the_run_after_it(tmp_path: Path) -> None:
+    retraction = Retraction(7, 1, "iter7-selection-invalid", 1)
+    later = KeptChange(3, "patch", "--max-num-seqs 768")
+    watch = KeepWatch("a" * 40, seq=3, pending=KeptChange(2, "patch", "", retracts=retraction), waiting=[later])
+
+    watch.save(tmp_path / "watch.json")
+
+    loaded = KeepWatch.load(tmp_path / "watch.json")
+    assert loaded.pending is not None and (loaded.pending.seq, loaded.pending.retracts) == (2, retraction)
+    assert [kept.seq for kept in loaded.waiting] == [3]
+
+
+async def test_a_snapshot_that_retracts_nothing_is_imported_as_before(tmp_path: Path) -> None:
+    rig = await _rig(tmp_path, Component(keeps=(256,)), start_seconds=0.2)
+
+    request = await _imported(rig)
+
+    assert (request.attachments, request.consistency_check, request.long_context_check) == ((), None, None)
+    assert rig.toolbox.attachments == {}
+
+
+async def test_an_agent_served_a_frozen_base_s_credential_keeps_it_out_of_its_stored_manifest_and_resumes_with_the_host_s(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    install_stand_in(monkeypatch)
+    frozen = frozen_credential_base(tmp_path, monkeypatch)
+    monkeypatch.setenv("HF_TOKEN", TOKEN)
+    agent = Component(keeps=(256,), gap=1.0, tail=0.6)
+    launch = served_launch(frozen, "")
+    source = _stand_in_repo(tmp_path, agent)
+    rig = await _rig(tmp_path, source=source, start_seconds=0.2, spec_fields={"launch": launch})
+    config = tmp_path / BRANCH / "session" / AGENT_DIR / "src" / CONFIG_FILE
+
+    await rig.session.preflight()
+    await rig.session.stop()
+    resumed = rig.restart()
+    running = asyncio.create_task(resumed.run())
+    await _until(lambda: rig.toolbox.requests, "the import")
+    await rig.toolbox_blackboard.write_result(result("r1"))
+    with pytest.raises(SessionFinished):
+        await asyncio.wait_for(running, 10)
+
+    assert TOKEN not in (tmp_path / BRANCH / "session" / MANIFEST_FILE).read_text()
+    assert json.loads(config.read_text())["server_env"]["HF_TOKEN"] == TOKEN
+    [request] = rig.toolbox.requests
+    assert request.delta.config.envs == {} and "+max_num_seqs = 256" in rig.patch(request)

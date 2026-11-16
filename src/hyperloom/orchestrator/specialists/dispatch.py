@@ -252,6 +252,7 @@ class SpecialistDispatchCollaborator(CoordinatorCollaborator):
                 "roofline_snapshot_id": last_ta.get("roofline_snapshot_id"),
                 "executive_summary": executive_summary,
                 "hot_kernels_top15": hot_kernels,
+                "fusion_findings": list(last_ta.get("fusion_findings") or [])[:8],
             }
 
         measurement = getattr(state, "current_best_measurement", None)

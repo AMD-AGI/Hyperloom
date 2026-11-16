@@ -3,8 +3,8 @@
 
 """What a round of a test left on disk about when its parts began, and the phases that follow from it.
 
-A round is one or two inference_suite runs (a warmup run whose result is discarded, then the measured one), and each
-run's run_dir holds ``server_ready_at`` (the instant the server reported ready and how long its boot took from the
+A round is one or two inference_suite runs (a warmup run whose result is discarded, then the measured one), each in a
+run_dir of its own (the caller finds them where the round's runner put them), and each run's run_dir holds ``server_ready_at`` (the instant the server reported ready and how long its boot took from the
 spawn) and ``kv_metrics.json`` (the instants the round's client began its evaluation, or, for an AgentX client, its
 warmup and measured phases began and ended; the file's own time is when the run ended), both written by the
 inference_suite round. This module reads those marks after the round and turns them into phase boundaries. A mark that
@@ -16,14 +16,18 @@ from __future__ import annotations
 
 import json
 import math
+import os
 import re
-from collections.abc import Iterator, Sequence
+from collections.abc import Iterable, Sequence
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import NamedTuple
 
+import yaml
+
 from hyperloom.common.outside_facts import SGLANG_CUDA_GRAPH_CAPTURE_END
+from hyperloom.measure import log_causes
 from hyperloom.measure.boot_watch import read_ready_stamp
 from hyperloom.measure.phases import (
     ACCURACY_EVAL,
@@ -40,7 +44,7 @@ from hyperloom.measure.phases import (
     TEARDOWN,
     WARMUP,
 )
-from inference_suite.contracts import RunLayout
+from inference_suite.contracts import FailedStep, RunLayout, SuiteConfig
 
 __all__ = [
     "ROLE_BOOT",
@@ -54,6 +58,8 @@ __all__ = [
     "boot_parts",
     "read_runs",
     "round_boundaries",
+    "profile_stall",
+    "stalled_in_profile_window",
 ]
 
 #: The roles of a round's call: one that only boots the server, the warmup round of a test on a held server, one that
@@ -62,15 +68,20 @@ ROLE_BOOT = "boot"
 ROLE_WARMUP = "warmup"
 ROLE_MEASURE = "measure"
 ROLE_EVAL = "eval"
-#: Where ``run_grid`` keeps the discarded warmup run of a round, below the round's own directory.
-_WARMUP_DIR = "warmup_round"
-_ROUND_GLOB = "variant_*"
 _UTF8 = "utf-8"
 #: The phases ``kv_metrics.json`` records the instants of: the client's evaluation, and an AgentX client's own phases.
 _EVAL, _CLIENT_WARMUP, _CLIENT_MEASURED, _CLIENT_FINISHED = "eval", "warmup", "measured", "finished"
+#: The marks of a profile round's window in its ``phase_marks.json``, as inference_suite's ``Phase`` names them.
+_PROFILE_OPEN, _PROFILE_CLOSE = "profile_open", "profile_close"
+#: The control request that ends a profile window, as inference_suite's ``profile.inject`` names it.
+_STOP_PROFILE = "/stop_profile"
+#: How urllib words the error of a request the server answered with an error status.
+_ANSWERED_WITH_STATUS = "HTTP Error "
 _MIB = 1 << 20
 #: A boot is in the first bytes of a server's log, and a log of a long test is large.
 _LOG_HEAD_BYTES = 8 * _MIB
+#: How much of the end of a server log is read for its last line.
+_LOG_END_BYTES = 64 * 1024
 _KV_MAX_BYTES = 64 * _MIB
 _SECONDS = r"(\d+(?:\.\d+)?)"
 _WEIGHTS_PATTERNS = (
@@ -151,29 +162,19 @@ class RoundShape:
 # -- reading the marks --------------------------------------------------------------------------------------------------
 
 
-def read_runs(output_root: Path, window: tuple[float, float]) -> list[RunMarks]:
-    """The runs that began inside ``window`` below ``output_root``, in the order they were ready.
+def read_runs(run_dirs: Iterable[Path], window: tuple[float, float]) -> list[RunMarks]:
+    """The runs among the inference_suite ``run_dirs`` that began inside ``window``, in the order they were ready.
 
-    A run is found by its ready stamp, which holds the wall-clock instant the run's server was ready, so a stamp an
-    earlier round left in a directory the same name serves again is not taken for this round's.
+    A run is taken by its ready stamp, which holds the wall-clock instant the run's server was ready, so a run an
+    earlier round left beside this round's is not taken for this round's.
     """
     started, ended = window
     runs = []
-    for directory in _run_directories(output_root):
+    for directory in run_dirs:
         stamp = read_ready_stamp(directory)
         if stamp is not None and started <= stamp[0] <= ended + 1.0:
             runs.append(_marks_of(directory, stamp, started))
     return sorted(runs, key=lambda run: run.ready)
-
-
-def _run_directories(output_root: Path) -> Iterator[Path]:
-    try:
-        rounds = sorted(Path(output_root).glob(_ROUND_GLOB))
-    except OSError:
-        return
-    for directory in rounds:
-        yield directory / _WARMUP_DIR
-        yield directory
 
 
 def _marks_of(directory: Path, stamp: tuple[float, float], since: float) -> RunMarks:
@@ -322,3 +323,66 @@ def _boot_boundaries(run: RunMarks) -> list[Boundary]:
         boundaries.append(Boundary(name, at))
         at += seconds
     return boundaries
+
+
+def stalled_in_profile_window(run_dir: Path) -> bool:
+    """Whether the server of the round in ``run_dir``, which the round ended for its silence, went silent while the
+    round's profile window was open.
+
+    It did when the window's ``/stop_profile``, which is sent only inside the opened window, went unanswered
+    (``profile/capture.json`` records that request as ``<path>: <error>``; one the server answered with an error status
+    was answered). An AgentX window sends it from the round's poll and waits up to ten minutes for an answer, so its
+    marks place no silence; a fixed load's window does not record its ``/stop_profile`` answer, so for it the marks
+    decide. An unanswered ``/start_profile`` is not read: the window sends it on schedule whatever the server is doing,
+    and nothing in the round's files tells a request that hung the server from one sent to a server already hung, so
+    that stall stays ``server_stalled``. The round marks ``finished`` as the silence ends it, so the silence began the
+    round's silence limit before that mark at the latest; it began in the window when ``profile_open`` is at or before
+    that instant and ``profile_close`` is absent or after it (a window open when the round ended is closed then). A
+    round whose capture, marks or config cannot be read is not known to have stalled there.
+    """
+    layout = RunLayout(run_dir)
+    if _stop_unanswered(layout):
+        return True
+    try:
+        config = SuiteConfig.from_document(yaml.safe_load(layout.config.read_text(encoding=_UTF8)))
+        document = json.loads(layout.phase_marks.read_text(encoding=_UTF8))
+    except (OSError, ValueError, yaml.YAMLError):
+        return False
+    marks = document.get("phase_marks") if isinstance(document, dict) else None
+    instants: dict[str, float] = {}
+    for mark in marks if isinstance(marks, list) else []:
+        phase, at = (mark.get("phase"), _instant(mark.get("mono"))) if isinstance(mark, dict) else (None, None)
+        if isinstance(phase, str) and at is not None:
+            instants.setdefault(phase, at)
+    opened, finished = instants.get(_PROFILE_OPEN), instants.get(_CLIENT_FINISHED)
+    if opened is None or finished is None:
+        return False
+    began = finished - config.deadlines.silence_sec
+    closed = instants.get(_PROFILE_CLOSE)
+    return opened <= began and (closed is None or closed > began)
+
+
+def _stop_unanswered(layout: RunLayout) -> bool:
+    """Whether the round's ``profile/capture.json`` records a ``/stop_profile`` its server never answered."""
+    try:
+        document = json.loads(layout.profile_capture.read_text(encoding=_UTF8))
+    except (OSError, ValueError):
+        return False
+    error = document.get("error") if isinstance(document, dict) else None
+    if not isinstance(error, str):
+        return False
+    path, _, cause = error.partition(": ")
+    return path == _STOP_PROFILE and not cause.startswith(_ANSWERED_WITH_STATUS)
+
+
+def profile_stall(run_dir: Path, step: FailedStep) -> str | None:
+    """``None`` unless the round in ``run_dir`` failed at ``step`` ``server_stalled`` while its profile window was open
+    (:func:`stalled_in_profile_window`); then the last line of its server log, ``""`` when it has none."""
+    if step is not FailedStep.SERVER_STALLED or not stalled_in_profile_window(run_dir):
+        return None
+    try:
+        with RunLayout(run_dir).server_log.open("rb") as handle:
+            handle.seek(max(0, handle.seek(0, os.SEEK_END) - _LOG_END_BYTES))
+            return log_causes.last_line(handle.read().decode(_UTF8, errors="replace"))
+    except OSError:
+        return ""

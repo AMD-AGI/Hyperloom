@@ -30,15 +30,15 @@ from inference_suite.load.agentx import (
 from inference_suite.staging import AGENTX_PYTHON
 from inference_suite.runtime.phases import Phase, PhaseClock
 from inference_suite.runtime.server import Server
-from inference_suite.runtime.watch import RoundGate
+from inference_suite.runtime.watch import RoundGate, ServerWatch
 from inference_suite.tests.test_config_contract import _AGENTX
 from inference_suite.tests.test_load import _DEADLINES, _flag, _round_config
 
 _WORKLOAD = replace(_AGENTX, warmup_seed=_AGENTX.seed)
-_FAKE_ENV = ("FAKE_CALLS", "FAKE_EXIT", "FAKE_EXPORT", "FAKE_AGGREGATE", "FAKE_LOG")
+_FAKE_ENV = ("FAKE_CALLS", "FAKE_EXIT", "FAKE_EXPORT", "FAKE_AGGREGATE", "FAKE_LOG", "FAKE_PACE")
 _FAKE_HARNESS = textwrap.dedent(
     """
-    import json, os, shutil, sys
+    import json, os, shutil, sys, time
     argv = sys.argv[1:]
     with open(os.environ["FAKE_CALLS"], "a") as calls:
         calls.write(json.dumps(argv) + "\\n")
@@ -46,6 +46,9 @@ _FAKE_HARNESS = textwrap.dedent(
         artifacts = argv[argv.index("--output-artifact-dir") + 1]
         os.makedirs(artifacts, exist_ok=True)
         shutil.copy(os.environ["FAKE_EXPORT"], os.path.join(artifacts, "profile_export.jsonl"))
+        for pause in os.environ.get("FAKE_PACE", "").split():
+            time.sleep(float(pause))
+            print("progress", flush=True)
         print(os.environ.get("FAKE_LOG", "replayed"))
         sys.exit(int(os.environ.get("FAKE_EXIT", "0")))
     with open(os.environ["FAKE_CALLS"] + ".aggregator_tp", "w") as seen:
@@ -294,3 +297,23 @@ def test_listeners_hear_the_finished_mark_before_the_export_is_aggregated(tmp_pa
     run_agentx(replace(agentx_round, listeners=(listener,)))
     assert heard[-1] == (True, 1), "the last poll sees the finished mark while only the replay has run"
     assert len(calls.read_text().splitlines()) == 2
+
+
+def test_client_output_while_a_listener_blocks_past_the_silence_bound_is_not_a_stall(tmp_path, harness, monkeypatch):
+    monkeypatch.setenv("FAKE_PACE", "0.6 5.1")
+    deadlines = replace(_DEADLINES, silence_sec=3.0)
+    log = tmp_path / "server.log"
+    log.write_text("")
+    now = time.monotonic()
+    server = Server("http://127.0.0.1:30000", True, ServerWatch(log, 0, deadlines, now), lambda: True)
+    agentx_round = AgentxRound(_config(tmp_path), harness, server, RoundGate(deadlines, lambda: "", now), PhaseClock())
+    polls: list[float] = []
+
+    def stop_profile(now: float) -> None:
+        # A window closes past the measured mark, never on the first poll, whose output check counts as activity anyway.
+        polls.append(now)
+        if len(polls) == 2:
+            time.sleep(3.5)
+
+    outcome = run_agentx(replace(agentx_round, listeners=(stop_profile,)))
+    assert outcome.stop is None and outcome.returncode == 0, outcome.stop

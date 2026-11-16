@@ -13,7 +13,8 @@ second recovery while it works.
 ``local``, on this container's cards with no grant, sandbox or source, on the image the measurement pins name; its
 agents are isolated with the hosting layer's bubblewrap or not run at all; it tells the host in ``exit.json`` that the
 run is over once CLOSE ran or when nothing a restart changes keeps a session from running, and leaves the host to start
-a crashed run again, which then finishes the session the first start began.
+a crashed run again, which then takes over the session the first start began: it resumes it up to its first deadline
+while its baseline holds, else finishes it as ``final-only`` does.
 
 ``run --measurement hosted`` measures in the sandboxes of a grant handed to it in the environment, without a campaign
 spec, a run id or a state directory, refuses a missing grant variable by name and what would run on this machine, and
@@ -27,6 +28,7 @@ import errno
 import json
 import logging
 import os
+import stat
 import subprocess
 import sys
 import time
@@ -41,6 +43,7 @@ import pytest
 from hyperloom.common.benchmark_config import BENCHMARK_CONFIG_ENV
 from hyperloom_common import bwrap as bwrap_module
 from hyperloom_common.bwrap import BwrapProbe
+from hyperloom_common.shared_storage import current_umask
 from hyperloom.common import agent_isolation, visible_devices
 from hyperloom_common.llm.llm_config import (
     AGENT_BACKEND_CLAUDE,
@@ -119,8 +122,9 @@ from hyperloom_multibranch.scheduling.settings import (
     Workload,
 )
 from hyperloom_multibranch.scheduling.session_base import freeze_session_base
-from hyperloom_multibranch.scheduling.session_environment import hosted_runner_cache
+from hyperloom_multibranch.scheduling.session_environment import hosted_runner_cache, require_writable_storage
 from hyperloom_multibranch.scheduling.stops import SessionStopReason
+from hyperloom_multibranch.tests.agent_rig import install_stand_in
 from hyperloom_multibranch.tests.base_records import write_record
 from hyperloom_multibranch.tests.staging_rig import verified_tool_cache
 from inference_suite.recipe import sources
@@ -421,21 +425,6 @@ def test_an_agent_source_whose_user_is_an_ssh_login_is_accepted(source: str) -> 
     assert _settings("--autonomous-agent", source).agents == (source,)
 
 
-def test_the_arbor_keyword_is_the_vendored_tree(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setattr(cli, "VENDORED_ARBOR", tmp_path)
-
-    assert _settings("--autonomous-agent", "arbor", "--autonomous-agent", "/a").agents == (str(tmp_path), "/a")
-
-
-def test_the_arbor_keyword_without_a_vendored_tree_is_a_usage_error(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    monkeypatch.setattr(cli, "VENDORED_ARBOR", tmp_path / "missing")
-
-    with pytest.raises(ValueError, match="--autonomous-agent arbor"):
-        _settings("--autonomous-agent", "arbor")
-
-
 def test_an_ssh_source_with_a_password_carries_credentials() -> None:
     with pytest.raises(ValueError, match="credentials"):
         _settings("--autonomous-agent", "ssh://git:secret@github.com/acme/agent.git")
@@ -445,40 +434,40 @@ def test_the_agent_directions_map_is_kept_by_its_absolute_path(tmp_path: Path, m
     monkeypatch.chdir(tmp_path)
     (tmp_path / "map.json").write_text(json.dumps({"directions": [{"id": "m-attn", "title": "attention"}]}))
 
-    settings = _settings("--autonomous-agent", "/agents/arbor", "--agent-directions", "map.json")
+    settings = _settings("--autonomous-agent", "/agents/component", "--agent-directions", "map.json")
 
     assert settings.agent_directions == str(tmp_path / "map.json")
-    assert _settings("--autonomous-agent", "/agents/arbor").agent_directions == ""
+    assert _settings("--autonomous-agent", "/agents/component").agent_directions == ""
 
 
 def test_the_dossier_pass_has_ninety_minutes_unless_the_run_gives_it_others_and_none_below_zero() -> None:
-    assert _settings("--autonomous-agent", "/agents/arbor").agent_dossier_minutes == DOSSIER_MINUTES == 90.0
+    assert _settings("--autonomous-agent", "/agents/component").agent_dossier_minutes == DOSSIER_MINUTES == 90.0
     assert _settings("--agent-dossier-minutes", "0").agent_dossier_minutes == 0.0
     with pytest.raises(ValueError, match=r"--agent-dossier-minutes must be 0 \(runs no dossier pass\) or positive"):
         _settings("--agent-dossier-minutes", "-5")
 
 
-def test_the_shares_need_an_arbor_iteration_s_63_minutes_unless_the_run_says_otherwise_and_none_below_zero() -> None:
-    assert _settings("--autonomous-agent", "/agents/arbor").agent_share_minutes == SHARE_MINUTES == 63.0
+def test_the_shares_need_a_component_agent_iteration_s_63_minutes_by_default_and_none_below_zero() -> None:
+    assert _settings("--autonomous-agent", "/agents/component").agent_share_minutes == SHARE_MINUTES == 63.0
     assert _settings("--agent-share-minutes", "0").agent_share_minutes == 0.0
     with pytest.raises(ValueError, match=r"--agent-share-minutes must be 0 \(always opens the shares\) or positive"):
         _settings("--agent-share-minutes", "-1")
 
 
 def test_the_agent_pack_is_kept_by_name_and_empty_without_one() -> None:
-    assert _settings("--autonomous-agent", "/agents/arbor", "--agent-pack", "agentx-qwen38-1").agent_pack == (
-        "agentx-qwen38-1"
+    assert _settings("--autonomous-agent", "/agents/component", "--agent-pack", "agentx-pack").agent_pack == (
+        "agentx-pack"
     )
-    assert _settings("--autonomous-agent", "/agents/arbor").agent_pack == ""
+    assert _settings("--autonomous-agent", "/agents/component").agent_pack == ""
 
 
 @pytest.mark.parametrize(
     ("extra", "match"),
     [
-        (["--agent-pack", "agentx-qwen38-1"], "needs an --autonomous-agent"),
-        (["--autonomous-agent", "/agents/arbor", "--agent-pack", "packs/agentx"], "not the name of one pack"),
-        (["--autonomous-agent", "/agents/arbor", "--agent-pack", ".."], "not the name of one pack"),
-        (["--autonomous-agent", "/agents/arbor", "--agent-pack", ""], "not the name of one pack"),
+        (["--agent-pack", "agentx-pack"], "needs an --autonomous-agent"),
+        (["--autonomous-agent", "/agents/component", "--agent-pack", "packs/agentx"], "not the name of one pack"),
+        (["--autonomous-agent", "/agents/component", "--agent-pack", ".."], "not the name of one pack"),
+        (["--autonomous-agent", "/agents/component", "--agent-pack", ""], "not the name of one pack"),
     ],
 )
 def test_an_agent_pack_without_an_agent_or_not_one_directory_is_a_usage_error(extra: list[str], match: str) -> None:
@@ -500,27 +489,29 @@ def test_the_agent_launch_file_is_kept_by_its_absolute_path(tmp_path: Path, monk
     monkeypatch.chdir(tmp_path)
     (tmp_path / "launch.json").write_text(json.dumps({"server_flags": "--tp 1", "server_env": {}}))
 
-    settings = _settings("--autonomous-agent", "/agents/arbor", "--agent-launch", "launch.json")
+    settings = _settings("--autonomous-agent", "/agents/component", "--agent-launch", "launch.json")
 
     assert settings.agent_launch == str(tmp_path / "launch.json")
-    assert _settings("--autonomous-agent", "/agents/arbor").agent_launch == ""
+    assert _settings("--autonomous-agent", "/agents/component").agent_launch == ""
 
 
 def test_a_base_launch_record_given_as_an_agent_launch_is_refused_for_the_reference_script(tmp_path: Path) -> None:
     record = write_record(tmp_path / "base_launch.json")
 
     with pytest.raises(ValueError, match="--agent-launch .* is a base launch record; give it as --reference-script"):
-        _settings("--autonomous-agent", "/agents/arbor", "--agent-launch", str(record))
+        _settings("--autonomous-agent", "/agents/component", "--agent-launch", str(record))
 
 
 def test_an_unfilled_template_is_a_usage_error(tmp_path: Path) -> None:
-    template = Path(__file__).parents[3] / "examples" / "multibranch-arbor-launch" / "launch.template.json"
+    template = Path(__file__).parents[3] / "examples" / "multibranch-agent-launch" / "launch.template.json"
 
     with pytest.raises(ValueError, match="--agent-launch: .*still hold the template's placeholders"):
-        _settings("--autonomous-agent", "/agents/arbor", "--agent-launch", str(template))
+        _settings("--autonomous-agent", "/agents/component", "--agent-launch", str(template))
 
 
-@pytest.mark.parametrize("agent", [[], ["--autonomous-agent", "/agents/arbor"]], ids=["specialists-only", "arbor"])
+@pytest.mark.parametrize(
+    "agent", [[], ["--autonomous-agent", "/agents/component"]], ids=["specialists-only", "component-agent"]
+)
 @pytest.mark.parametrize(
     "launch",
     [
@@ -571,10 +562,10 @@ def test_an_agent_launch_beside_a_reference_script_is_a_usage_error(tmp_path: Pa
     launch.write_text(json.dumps({"server_flags": "--tp 1", "server_env": {}}))
 
     with pytest.raises(
-        ValueError, match="--agent-launch is not taken with --reference-script: the Arbors are served the frozen base"
+        ValueError, match="--agent-launch is not taken with --reference-script: the agents are served the frozen base"
     ):
         _settings(
-            "--autonomous-agent", "/agents/arbor", "--reference-script", str(record), "--agent-launch", str(launch)
+            "--autonomous-agent", "/agents/component", "--reference-script", str(record), "--agent-launch", str(launch)
         )
 
 
@@ -593,23 +584,23 @@ def test_an_agent_launch_without_an_agent_or_unusable_is_a_usage_error(
     path = tmp_path / "launch.json"
     if document is not None:
         path.write_text(json.dumps(document))
-    extra = ["--autonomous-agent", "/agents/arbor"] if agent else []
+    extra = ["--autonomous-agent", "/agents/component"] if agent else []
 
     with pytest.raises(ValueError, match=match):
         _settings(*extra, "--agent-launch", str(path))
 
 
 def test_the_agent_port_is_the_run_s_own_or_the_shared_default() -> None:
-    assert _settings("--autonomous-agent", "/agents/arbor", "--agent-port", "32100").agent_port == 32100
-    assert _settings("--autonomous-agent", "/agents/arbor").agent_port == AGENT_PORT
+    assert _settings("--autonomous-agent", "/agents/component", "--agent-port", "32100").agent_port == 32100
+    assert _settings("--autonomous-agent", "/agents/component").agent_port == AGENT_PORT
 
 
 @pytest.mark.parametrize(
     ("extra", "match"),
     [
         (["--agent-port", "32100"], "needs an --autonomous-agent"),
-        (["--autonomous-agent", "/agents/arbor", "--agent-port", "0"], "is not a port"),
-        (["--autonomous-agent", "/agents/arbor", "--agent-port", "65536"], "is not a port"),
+        (["--autonomous-agent", "/agents/component", "--agent-port", "0"], "is not a port"),
+        (["--autonomous-agent", "/agents/component", "--agent-port", "65536"], "is not a port"),
     ],
     ids=["no-agent", "zero", "past-the-last-port"],
 )
@@ -619,13 +610,13 @@ def test_an_agent_port_without_an_agent_or_that_is_no_port_is_a_usage_error(extr
 
 
 def test_a_run_stops_after_its_map_only_when_asked() -> None:
-    assert _settings("--autonomous-agent", "/agents/arbor", "--stop-after-map").stop_after_map
-    assert not _settings("--autonomous-agent", "/agents/arbor").stop_after_map
+    assert _settings("--autonomous-agent", "/agents/component", "--stop-after-map").stop_after_map
+    assert not _settings("--autonomous-agent", "/agents/component").stop_after_map
 
 
 def test_the_review_gate_is_on_unless_the_run_turns_it_off() -> None:
-    assert _settings("--autonomous-agent", "/agents/arbor").review_gate
-    assert not _settings("--autonomous-agent", "/agents/arbor", "--no-review-gate").review_gate
+    assert _settings("--autonomous-agent", "/agents/component").review_gate
+    assert not _settings("--autonomous-agent", "/agents/component", "--no-review-gate").review_gate
 
 
 def test_a_person_shows_and_approves_a_session_s_review_and_a_second_decision_is_refused(
@@ -656,7 +647,7 @@ def test_stopping_after_the_map_without_an_agent_or_with_a_map_given_is_a_usage_
     with pytest.raises(ValueError, match="needs an --autonomous-agent"):
         _settings("--stop-after-map")
     with pytest.raises(ValueError, match="already gives them"):
-        _settings("--autonomous-agent", "/agents/arbor", "--agent-directions", str(given), "--stop-after-map")
+        _settings("--autonomous-agent", "/agents/component", "--agent-directions", str(given), "--stop-after-map")
 
 
 def _reviewed(tmp_path: Path) -> tuple[Path, Path]:
@@ -673,8 +664,9 @@ def test_the_reviewed_dossier_is_kept_by_its_absolute_path_beside_its_map(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     monkeypatch.chdir(tmp_path)
+    install_stand_in(monkeypatch)
     given, _ = _reviewed(tmp_path)
-    agent = ["--autonomous-agent", "/agents/arbor", "--agent-directions", str(given)]
+    agent = ["--autonomous-agent", "/agents/component", "--agent-directions", str(given)]
 
     assert _settings(*agent, "--agent-dossier", "dossier/qwen3-8b").agent_dossier == str(
         tmp_path / "dossier" / "qwen3-8b"
@@ -686,10 +678,15 @@ def test_a_dossier_without_its_map_or_that_is_no_dossier_is_a_usage_error(tmp_pa
     given, dossier = _reviewed(tmp_path)
 
     with pytest.raises(ValueError, match="with the --agent-directions map"):
-        _settings("--autonomous-agent", "/agents/arbor", "--agent-dossier", str(dossier))
+        _settings("--autonomous-agent", "/agents/component", "--agent-dossier", str(dossier))
     with pytest.raises(ValueError, match="is no dossier"):
         _settings(
-            "--autonomous-agent", "/agents/arbor", "--agent-directions", str(given), "--agent-dossier", str(tmp_path)
+            "--autonomous-agent",
+            "/agents/component",
+            "--agent-directions",
+            str(given),
+            "--agent-dossier",
+            str(tmp_path),
         )
 
 
@@ -707,7 +704,7 @@ def test_an_agent_directions_map_without_an_agent_or_directions_is_a_usage_error
 ) -> None:
     path = tmp_path / "map.json"
     path.write_text("{not json" if document is None else json.dumps(document))
-    agents = ["--autonomous-agent", "/agents/arbor"] if agent else []
+    agents = ["--autonomous-agent", "/agents/component"] if agent else []
 
     with pytest.raises(ValueError, match=match):
         _settings(*agents, "--agent-directions", str(path))
@@ -1876,6 +1873,23 @@ def test_the_hosted_runner_cache_is_the_directory_the_variable_names() -> None:
     assert hosted_runner_cache({"HYPERLOOM_RUNNER_CACHE": " /data/hl/runner-cache "}) == Path("/data/hl/runner-cache")
 
 
+def test_only_a_hosted_session_is_warned_that_its_rsi_archive_is_not_setgid(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    archive = tmp_path / "archive"
+    archive.mkdir()
+    archive.chmod(0o755)
+    env = {ARCHIVE_ENV: str(archive)}
+
+    with caplog.at_level(logging.WARNING):
+        require_writable_storage(env, {})
+    assert "not setgid" not in caplog.text, "a local session's archive is one account's"
+
+    with caplog.at_level(logging.WARNING):
+        require_writable_storage(env, {"HYPERLOOM_RUNNER_CACHE": tmp_path})
+    assert f"{ARCHIVE_ENV} {archive} is not setgid" in caplog.text
+
+
 def _no_local_cards() -> tuple[int, ...]:
     raise AssertionError("a hosted run measures on the grant's cards, not this container's")
 
@@ -2856,6 +2870,64 @@ def test_a_hosted_run_without_make_before_break_runs_every_test_the_handed_grant
     [(settings, _)] = handed.sessions
     assert settings.make_before_break is False
     assert settings.caps.max_parallel_tests == 3, "TP=2 on 8 GPUs and 3 sandboxes, no room kept"
+
+
+@pytest.mark.usefixtures("ready_environment")
+def test_a_hosted_run_names_every_shared_directory_it_cannot_write_in_one_message_before_a_session_starts(
+    handed: Started, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    blocker = tmp_path / "a-file"
+    blocker.write_text("")
+    monkeypatch.setenv("HYPERLOOM_EVENTS_DIR", str(blocker / "events"))
+    monkeypatch.setenv("HYPERLOOM_RUNNER_CACHE", str(blocker / "runner-cache"))
+    monkeypatch.setenv(ARCHIVE_ENV, str(tmp_path / "no-such-archive"))
+
+    assert cli.main(["run", *WORKLOAD_ARGS, "--measurement", "hosted"]) == cli.EXIT_FAILED
+
+    [line] = [line for line in capsys.readouterr().err.splitlines() if "cannot write the shared storage" in line]
+    assert "HYPERLOOM_EVENTS_DIR" not in line, "a multi-branch session never writes the events directory"
+    assert f"HYPERLOOM_RUNNER_CACHE {blocker / 'runner-cache'}: ENOTDIR" in line
+    assert f"{ARCHIVE_ENV} {tmp_path / 'no-such-archive'}: ENOENT" in line
+    assert not handed.sessions
+
+
+@pytest.mark.usefixtures("ready_environment")
+@pytest.mark.parametrize("shared", [True, False], ids=["below-shared-storage", "elsewhere"])
+def test_a_hosted_run_makes_the_shared_directories_it_writes_2775_when_they_are_missing(
+    handed: Started, shared: bool, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    parent = tmp_path / "shared"
+    parent.mkdir()
+    parent.chmod(0o2775 if shared else 0o755)  # set up to be shared, or a plain directory
+    made = {"HYPERLOOM_RUNNER_CACHE": parent / "runner-cache"}
+    for name, directory in made.items():
+        monkeypatch.setenv(name, str(directory))
+    events = parent / "run" / "events"
+    monkeypatch.setenv("HYPERLOOM_EVENTS_DIR", str(events))
+
+    assert cli.main(["run", *WORKLOAD_ARGS, "--measurement", "hosted"]) == 0
+
+    assert handed.sessions
+    for name, directory in made.items():
+        mode = stat.S_IMODE(directory.stat().st_mode)
+        assert mode == (0o2775 if shared else 0o2775 & ~current_umask() & 0o777), (name, oct(mode))
+    assert not events.parent.exists(), "a multi-branch session never writes the events directory"
+
+
+@pytest.mark.usefixtures("ready_environment")
+def test_a_hosted_run_warns_of_a_shared_directory_that_is_not_setgid_and_starts(
+    handed: Started, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    cache = tmp_path / "runner-cache"
+    cache.mkdir()
+    cache.chmod(0o775)
+    monkeypatch.setenv("HYPERLOOM_RUNNER_CACHE", str(cache))
+
+    with caplog.at_level(logging.WARNING):
+        assert cli.main(["run", *WORKLOAD_ARGS, "--measurement", "hosted"]) == 0
+
+    assert handed.sessions
+    assert f"HYPERLOOM_RUNNER_CACHE {cache} is not setgid" in caplog.text
 
 
 @pytest.mark.usefixtures("ready_environment")

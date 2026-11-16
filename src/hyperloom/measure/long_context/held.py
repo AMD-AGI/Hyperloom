@@ -17,6 +17,11 @@ first tokens with a trace. Which of the two held is a note on the test.
 A test whose server is not held up for them (a framework the lifecycle cannot hold, a fallback that restarted the server
 per level, an AgentX test: ``BenchmarkPoint.holds_accuracy_checks``) runs the checks on no server: :class:`NoServer`
 makes each one record the reason, never a pass and never a second boot.
+
+An AgentX test that plans the long-context check is the exception: the local backend runs that check alone (its
+short-prompt check stays unheld) on its held server when the session base has no golden layer, and otherwise on a server
+it boots after the measured rounds from the measured launch less the golden layer's acceptance simulation
+(``HeldChecks.server`` says which, and the outputs file records it).
 """
 
 from __future__ import annotations
@@ -30,9 +35,10 @@ from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Any
 
+from hyperloom.contracts.long_context import LONG_CONTEXT_HELD
 from hyperloom.measure.eval_context import eval_context, served_context
 from hyperloom.measure.long_context import staging as long_context_staging
-from hyperloom.measure.long_context.rounds import run_long_context
+from hyperloom.measure.long_context.rounds import CheckServer, run_long_context
 from hyperloom.measure.phases import LONG_CONTEXT, OTHER, SHORT_PROMPTS, PhaseRecorder
 from hyperloom.measure.short_prompts.outputs import FAILED, ProcessEntry, clean_reason
 from hyperloom.measure.long_context.plan import LongContextPlan
@@ -120,13 +126,15 @@ def served_by(envs: dict[str, Any], carried: str | None) -> int | None:
 
 @dataclass(frozen=True)
 class HeldChecks:
-    """The checks a test plans (``None`` for one it does not), the test's output directory, where their outputs go, and
-    the context its launch serves (``None`` when it states none)."""
+    """The checks a test plans (``None`` for one it does not), the test's output directory, where their outputs go, the
+    context its launch serves (``None`` when it states none) and which server the long-context check asks
+    (``LONG_CONTEXT_SERVERS``)."""
 
     short_prompts: ShortPromptPlan | None
     long_context: LongContextPlan | None
     output_dir: Path
     served_context: int | None
+    server: str = LONG_CONTEXT_HELD
 
 
 def not_held(checks: HeldChecks, reason: str) -> Answered | None:
@@ -171,4 +179,6 @@ async def long_context_unheld(checks: HeldChecks, reason: str) -> None:
 
 async def _long_context(plan: LongContextPlan, checks: HeldChecks, host: PassHost) -> None:
     prompts = long_context_staging.load_prompt_set(plan, os.environ)
-    await run_long_context(plan, prompts, host, checks.output_dir, served_context=checks.served_context)
+    await run_long_context(
+        plan, prompts, host, checks.output_dir, server=CheckServer(checks.served_context, checks.server)
+    )

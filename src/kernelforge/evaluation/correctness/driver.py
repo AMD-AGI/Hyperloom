@@ -59,8 +59,8 @@ async def test_correctness(
     snr_db = float(snr_match.group(1)) if snr_match else None
 
     # Parse allclose
-    allclose_match = re.search(r"allclose:\s*(True|False)", full_output, re.IGNORECASE)
-    allclose = allclose_match.group(1).lower() == "true" if allclose_match else None
+    allclose_matches = re.findall(r"allclose:\s*(true|false)", full_output.casefold())
+    allclose = "false" not in allclose_matches if allclose_matches else None
 
     # Parse max_diff
     diff_match = re.search(r"max_diff:\s*([\d.eE+-]+)", full_output)
@@ -68,8 +68,8 @@ async def test_correctness(
 
     # Determine pass/fail
     if snr_db is not None:
-        passed = snr_db >= snr_threshold
-        verdict = f"SNR={snr_db:.2f} dB (threshold={snr_threshold})"
+        passed = snr_db >= snr_threshold and allclose is not False
+        verdict = f"SNR={snr_db:.2f} dB (threshold={snr_threshold}, allclose={allclose})"
     elif allclose is not None:
         passed = allclose
         verdict = f"allclose={allclose}"

@@ -10,6 +10,7 @@ import threading
 import time
 from collections.abc import Callable
 from pathlib import Path
+from typing import Any
 
 import pytest
 
@@ -379,18 +380,31 @@ def test_a_sandbox_that_failed_while_its_create_was_cut_is_not_created_again_und
     assert pool.active == 0
 
 
-def test_a_sandbox_that_timed_out_pending_while_its_create_was_cut_is_unavailable_not_failed(
-    service: _Service,
+@pytest.mark.parametrize(
+    "answers",
+    [
+        [GATEWAY_CUTS[0], (410, key_spent_body(PENDING_TIMEOUT_MESSAGE))],
+        [(410, key_spent_body(PENDING_TIMEOUT_MESSAGE))],
+        [(503, {"code": 503, "message": PENDING_TIMEOUT_MESSAGE})],
+    ],
+    ids=["spent_while_the_create_was_cut", "spent_by_an_earlier_process", "refused_at_the_pending_limit"],
+)
+def test_a_sandbox_that_timed_out_pending_is_asked_for_again_under_the_attempts_fresh_key(
+    service: _Service, answers: list[tuple[int, Any]]
 ) -> None:
-    """The replay is told the key is spent and that its sandbox ended in the service's pending timeout: no capacity in
-    time, as the 503 the cut hid would have said, so the attempt is unavailable and its key is not replaced."""
-    _platform_answers(service, GATEWAY_CUTS[0], (410, key_spent_body(PENDING_TIMEOUT_MESSAGE)))
-    pool = _e2b_pool(service)
-    with pytest.raises(SandboxUnavailable, match="pending_timeout: not running after") as unavailable:
-        _acquire(pool)
-    assert not isinstance(unavailable.value, (SandboxQuotaExceeded, AcquireTimedOut))
-    assert _keys_created(service) == ["run-1:req-1:1", "run-1:req-1:1"]
-    assert pool.active == 0
+    """The service deleted the sandbox still queued at its pending limit: the provider asks again under ``<key>:p1``,
+    within the same attempt and its one wait. It is not the pool's ``<key>:r1``, which replaces a key whose sandbox
+    ended otherwise; both keep the attempt's key first and the same sequence every time, and the sandbox carries the
+    run's and the request's metadata whatever its key, so a restart still finds and adopts it."""
+    _platform_answers(service, *answers)
+    service.reply("GET", "/sandboxes/sbx-1", (200, _listed("sbx-1", dict(_THIS_RUN))))
+    runner = _acquire(_e2b_pool(service))
+    assert runner.sandbox_id == "sbx-1"
+    assert _keys_created(service) == ["run-1:req-1:1"] * len(answers) + ["run-1:req-1:1:p1"]
+    last = service.calls("POST", "/v2/sandboxes")[-1].body["metadata"]
+    assert (last[RUN_ID_KEY], last[sandboxes.REQUEST_ID_KEY]) == ("run-1", "req-1"), (
+        "found by the run's scope, not the key"
+    )
 
 
 def test_a_key_an_earlier_process_spent_on_a_failed_sandbox_is_replaced_not_the_end_of_the_attempt(

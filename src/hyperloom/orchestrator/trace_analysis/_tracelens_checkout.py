@@ -5,12 +5,20 @@
 
 from __future__ import annotations
 
+import logging
 import os
+import re
 import subprocess
 import uuid
 from pathlib import Path
 
+import httpx
+
+from hyperloom_common.llm.llm_config import LLMConfigError, get_anthropic_client
+
 from ._io_utils import append_log
+
+log = logging.getLogger(__name__)
 
 
 ARCH_BENCHMARK_TIMEOUT_ENV = "TRACELENS_ARCH_BENCHMARK_TIMEOUT_SEC"
@@ -38,24 +46,48 @@ def _is_safe_litellm_gateway() -> bool:
     return any(m in base_url for m in markers)
 
 
-def _resolve_tracelens_model() -> str:
-    """Resolve ``ANTHROPIC_MODEL``, else ``CLAUDE_MODEL``, to the gateway's dash-form id (#574).
+def _fetch_gateway_model_ids() -> set[str]:
+    """The lower-cased model ids the gateway lists; empty, with a warning, when it cannot be asked.
 
-    Only the strict SAFE/LiteLLM gateway rejects the image's dot form
-    (``Claude-Opus-4.7``); for it, map a Claude id to dash (``claude-opus-4-7``).
-    That gateway serves other families under their dot form (``gpt-5.6-sol``),
-    so those keep the raw id, as do other backends; both unset yields ``""``
-    (SDK default).
+    The request goes out through the same client as every other Anthropic call, so it carries the
+    gateway's credential and its ``ANTHROPIC_CUSTOM_HEADERS``.
+    """
+    try:
+        with get_anthropic_client(timeout=10.0) as client:  # type: ignore[attr-defined]
+            path = "models" if str(client.base_url).rstrip("/").endswith("/v1") else "v1/models"
+            response = client.get(path)
+            response.raise_for_status()
+            rows = response.json().get("data", [])
+    except (LLMConfigError, httpx.HTTPError, ValueError, AttributeError) as exc:
+        log.warning("tracelens: could not read the gateway's model list (%r); the model id is sent unchanged", exc)
+        return set()
+    return {str(row["id"]).lower() for row in rows if isinstance(row, dict) and row.get("id")}
+
+
+def _resolve_tracelens_model() -> str:
+    """Resolve ``ANTHROPIC_MODEL``, else ``CLAUDE_MODEL``, to the id the gateway serves (#574).
+
+    A Claude id on a strict SAFE/LiteLLM gateway must match an id the gateway
+    lists exactly, and the gateway mixes forms (``claude-opus-5.5`` beside
+    ``claude-opus-4-7``). The id is sent as given when listed; otherwise its
+    dash form and its dot form are tried, and an id in none of them, or from a
+    gateway that lists nothing, is sent unchanged. Other families keep the raw
+    id, as do other backends; both vars unset yields ``""`` (SDK default).
 
     Returns:
-        The model id to pass to the SDK, normalized only for a Claude id on SAFE/LiteLLM.
+        The model id to pass to the SDK.
     """
     raw = os.environ.get("ANTHROPIC_MODEL", "").strip() or os.environ.get("CLAUDE_MODEL", "").strip()
     if not raw:
         return ""
     if not _is_safe_litellm_gateway() or not raw.lower().startswith("claude"):
         return raw
-    return raw.lower().replace(".", "-")
+    listed = _fetch_gateway_model_ids()
+    lowered = raw.lower()
+    for candidate in (lowered, lowered.replace(".", "-"), re.sub(r"(?<=\d)-(?=\d)", ".", lowered)):
+        if candidate in listed:
+            return candidate
+    return raw
 
 
 def _resolve_arch_benchmark_timeout_s() -> int:

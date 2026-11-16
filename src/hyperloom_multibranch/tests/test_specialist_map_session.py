@@ -12,13 +12,13 @@ from pathlib import Path
 import pytest
 
 from hyperloom_multibranch.contracts.lifecycle import BranchTask
-from hyperloom_multibranch.specialist.arbor_adapter import MAPPED
+from hyperloom_multibranch.specialist.component_agent import MAPPED
 from hyperloom_multibranch.specialist.dossier_pass import DossierOutcome, DossierStart
 from hyperloom_multibranch.specialist.map_session import MapCalls, MapSession
 from hyperloom_multibranch.specialist.runtime import SessionFinished, SessionStart
 
-ARBORS = ("/agents/arbor-a", "/agents/arbor-b")
-START = SessionStart("b01", "c0", 1, BranchTask(agent=ARBORS[0], deadline=5000.0, map_for=ARBORS))
+AGENTS = ("/agents/component-a", "/agents/component-b")
+START = SessionStart("b01", "c0", 1, BranchTask(agent=AGENTS[0], deadline=5000.0, map_for=AGENTS))
 OUTCOME = DossierOutcome(Path("/pass/directions.json"), None, MAPPED)
 
 
@@ -42,7 +42,7 @@ class Scheduler:
         return MapCalls(self.start, self.handed)
 
 
-async def test_the_pass_of_the_first_arbor_runs_and_its_map_is_handed_out_before_the_run_finishes() -> None:
+async def test_the_pass_of_the_first_agent_runs_and_its_map_is_handed_out_before_the_run_finishes() -> None:
     scheduler, ran = Scheduler(), []
 
     async def run_pass(start: DossierStart) -> DossierOutcome:
@@ -52,9 +52,9 @@ async def test_the_pass_of_the_first_arbor_runs_and_its_map_is_handed_out_before
     with pytest.raises(SessionFinished, match="2 share branches asked"):
         await MapSession(START, scheduler.calls(), run_pass).run()
 
-    assert scheduler.asked == [(ARBORS[0], "c0", 5000.0)]
-    assert ran == [DossierStart(ARBORS[0], "c0", 5000.0)]
-    assert scheduler.split == [("b01", "c0", ARBORS, OUTCOME)]
+    assert scheduler.asked == [(AGENTS[0], "c0", 5000.0)]
+    assert ran == [DossierStart(AGENTS[0], "c0", 5000.0)]
+    assert scheduler.split == [("b01", "c0", AGENTS, OUTCOME)]
 
 
 async def test_without_a_pass_the_map_is_handed_out_with_no_outcome() -> None:
@@ -66,7 +66,7 @@ async def test_without_a_pass_the_map_is_handed_out_with_no_outcome() -> None:
     with pytest.raises(SessionFinished):
         await MapSession(START, scheduler.calls(), run_pass).run()
 
-    assert scheduler.split == [("b01", "c0", ARBORS, None)]
+    assert scheduler.split == [("b01", "c0", AGENTS, None)]
 
 
 async def test_a_stop_cancels_the_pass_still_running_and_nothing_is_handed_out() -> None:

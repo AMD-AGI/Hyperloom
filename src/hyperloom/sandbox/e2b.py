@@ -16,8 +16,9 @@ The service puts the reason code of a refused create first in the error's ``mess
 SDK keeps:
 
 - 503 ``pending_timeout: not running after <pending>: <SaFE error>``: the sandbox did not run within the service's
-  pending limit (``SandboxUnavailable``). A 503 is not replayed on create; ``no_capacity`` and ``template_unavailable:
-  <template>`` are 503s too, each a plain ``SandboxUnavailable``.
+  pending limit, and the service has deleted it. Its key is never replayed: the create is sent again with a fresh key
+  while its wait lasts, see below. ``no_capacity`` and ``template_unavailable: <template>`` are 503s too, each a plain
+  ``SandboxUnavailable`` and not repeated.
 - 500 ``sandbox_create_failed: <SaFE error>``: any other failure of the create; a workload in the ``Failed`` phase says
   the same. Replaying the key finds only the failed sandbox (or makes another that fails the same way), so it is final at
   once (``SandboxCreateFailed``): a new attempt, with a new key, is the caller's to decide.
@@ -30,11 +31,21 @@ SDK keeps:
 
 A server error is replayed only while it says nothing about the sandbox: a gateway that cut a create still pending, say,
 where the replay with the same key finds that sandbox. A 410 to the first send means the key was spent before this
-create (an earlier process made its sandbox and that has ended), whatever the stored reason: ``SandboxGone``, and a new
-key makes a new sandbox. A 410 to the create's own replay means the sandbox the first send made has ended meanwhile (the
-service never makes a second sandbox for a key, nor repeats the 503 or 500), and its stored reason says how: a
-``pending_timeout`` is ``SandboxUnavailable``, as the 503 would have been; anything else is ``SandboxCreateFailed``, see
-:meth:`E2BSandboxProvider.create`.
+create (an earlier process made its sandbox and that has ended): ``SandboxGone``, and a new key makes a new sandbox. A
+410 to the create's own replay means the sandbox the first send made has ended meanwhile (the service never makes a
+second sandbox for a key, nor repeats the 503 or 500): ``SandboxCreateFailed``, see :meth:`E2BSandboxProvider.create`.
+
+A pending timeout is the exception to both: the 503 ``pending_timeout``, or a 410 whose stored reason is
+``pending_timeout`` (to the first send or to a replay), says only that the service had no room in time and deleted the
+sandbox. The create is sent again with a fresh key, ``<key>:p1``, ``<key>:p2`` and so on (the same sequence every time,
+so a later create with the caller's key finds a sandbox an earlier one made under the next key; a create without a key
+is sent again without one), after the retry policy's back-off, until the create's own wait (``wait_sec``) is spent;
+then it is ``SandboxUnavailable`` naming the reason.
+
+Every create tells the service how long it may stay queued: the metadata ``agent-sandbox.io/pending-timeout`` is the
+whole seconds of the wait left (``wait_sec`` on the first send), 1 to 86400, unless the caller's metadata names it. A
+sandbox the service could not run within the create's wait is then deleted by the service instead of running later,
+unclaimed.
 
 A key that may create in more than one workspace (a SaFE key used directly; a Claw grant's key names its own) must say
 which: the provider's ``workspace`` (``HYPERLOOM_SANDBOX_WORKSPACE``) is sent on every create as the metadata
@@ -47,6 +58,7 @@ from __future__ import annotations
 import contextlib
 import enum
 import json
+import logging
 import re
 import time
 from collections.abc import Callable, Iterator, Mapping
@@ -59,6 +71,7 @@ import httpx
 
 from hyperloom.sandbox.socket import (
     IDEMPOTENCY_KEY,
+    PENDING_TIMEOUT_KEY,
     WORKSPACE_KEY,
     CommandResult,
     CreateOptions,
@@ -78,6 +91,8 @@ __all__ = ["E2BSandboxProvider", "RetryPolicy"]
 
 T = TypeVar("T")
 
+log = logging.getLogger(__name__)
+
 _KEY_ENV: dict[Role, str] = {
     "measurement": "HYPERLOOM_SANDBOX_KEY_MEASUREMENT",
     "subrun": "HYPERLOOM_SANDBOX_KEY_SUBRUN",
@@ -87,6 +102,10 @@ _API_URL_ENV = "E2B_API_URL"
 _SANDBOX_URL_ENV = "E2B_SANDBOX_URL"
 _WORKSPACE_ENV = "HYPERLOOM_SANDBOX_WORKSPACE"
 _LIST_PAGE = 100
+
+#: The bounds the service accepts for ``agent-sandbox.io/pending-timeout``, in seconds.
+_PENDING_TIMEOUT_MIN_SEC = 1
+_PENDING_TIMEOUT_MAX_SEC = 86400
 
 #: Everything the SDK raises for a failed call. ``ServiceBusyException`` (a 503) is not a ``SandboxException``, and a
 #: gateway's HTML error page reaches the caller as the ``JSONDecodeError`` of the SDK's parse of an error body.
@@ -115,7 +134,12 @@ _CREATE_FAILED = re.compile(r"\bsandbox_create_failed\b|\bphase Failed\b")
 _KEY_SPENT = re.compile(r"\bidempotency_key_spent\b(?::\s*(?P<sandbox>[^:\s]+)(?::\s*(?P<reason>.*))?)?", re.DOTALL)
 
 #: The stored reason of a sandbox that did not run within the service's pending limit, the 503 ``pending_timeout``.
-_PENDING_TIMEOUT = re.compile(r"pending_timeout\b")
+_PENDING_TIMEOUT = re.compile(r"\bpending_timeout\b")
+
+#: How a 503 says the create's sandbox did not run within the pending limit: the service puts the code first in its
+#: message, which the SDK gives after its own words for a 503 (``503: Service temporarily unavailable, ... - <message>``).
+_PENDING_REFUSAL = re.compile(r"(?:^|:\s|\s-\s)pending_timeout\b")
+_SERVICE_BUSY = 503
 
 #: Statuses that mean the request was not processed and may succeed if repeated; a 503 means the service has no room
 #: and is not retried on create. A 501 or 505 will not change on a retry.
@@ -261,6 +285,11 @@ class _Control:
         self.params = dict(params)
         self._retry = retry
 
+    @property
+    def policy(self) -> RetryPolicy:
+        """How this role's calls are retried."""
+        return self._retry
+
     def call(self, fn: Callable[[], T], *, retry: _Retry = _Retry.TRANSIENT, until: float | None = None) -> T:
         """Run one control-plane call, repeating it while its failure is one ``retry`` allows and time remains.
 
@@ -389,16 +418,23 @@ class E2BSandboxProvider:
     ) -> Sandbox:
         """Create a sandbox and wait until the service reports it running.
 
-        The wait is bounded by ``options.wait_sec``. A metadata ``agent-sandbox.io/idempotency-key`` makes a repeated create
-        (also this method's own retry after a server error) return the sandbox the service already made. The
-        provider's workspace is added to ``metadata`` as ``agent-sandbox.io/workspace`` unless ``metadata`` has that key.
+        The wait is bounded by ``options.wait_sec``, and the service is told so: ``agent-sandbox.io/pending-timeout`` is
+        the whole seconds of the wait left, 1 to 86400, unless ``metadata`` has that key. A metadata
+        ``agent-sandbox.io/idempotency-key`` makes a repeated create (also this method's own retry after a server error)
+        return the sandbox the service already made. The provider's workspace is added to ``metadata`` as
+        ``agent-sandbox.io/workspace`` unless ``metadata`` has that key.
+
+        A sandbox the service deleted for not running within its pending limit (503 ``pending_timeout``, or a 410
+        ``idempotency_key_spent`` whose stored reason is ``pending_timeout``) is asked for again under a fresh key,
+        ``<key>:p<n>``, after the retry policy's back-off, while the wait lasts.
 
         Raises:
             ValueError: When ``timeout_sec`` is not positive.
             SandboxDenied: No key for ``role``, or the service refused the key, template, environment or metadata. A
                 refusal for want of a workspace (``workspace_required``) says to set ``HYPERLOOM_SANDBOX_WORKSPACE``.
             SandboxGone: The idempotency key's sandbox had ended before this create first sent the key (410
-                ``idempotency_key_spent``, whatever reason it names); the key is spent, a new key makes a new one.
+                ``idempotency_key_spent`` with a stored reason other than ``pending_timeout``, or none); the key is
+                spent, a new key makes a new one.
             SandboxCreateFailed: The create failed on the platform (``sandbox_create_failed``, a workload in the
                 ``Failed`` phase); it is not replayed. Also a 410 answering this create's own replay, unless its stored
                 reason is ``pending_timeout``: the service binds the key to the sandbox the first send made and answers
@@ -408,44 +444,50 @@ class E2BSandboxProvider:
                 capacity, so it ends the create the same way and a new key is the caller's to decide.
             SandboxQuotaExceeded: The session's quota is full (429 ``grant_quota_exceeded``); it clears when a running
                 sandbox ends.
-            SandboxUnavailable: No capacity or the service's pending limit (503, ``pending_timeout`` among them), the
-                same ``pending_timeout`` stored as the end of the sandbox this create's replay finds spent, or the
-                sandbox was not running within ``wait_sec``.
+            SandboxUnavailable: No capacity (503), the sandbox was not running within ``wait_sec``, or every sandbox
+                asked for within it outlived the service's pending limit (the message names ``pending_timeout``).
         """
         if timeout_sec <= 0:
             raise ValueError("timeout_sec must be positive")
         control = self._control(role)
         deadline = time.monotonic() + options.wait_sec
-        envs = dict(options.envs) if options.envs else None
+        request = _CreateRequest(template, timeout_sec, dict(options.envs) if options.envs else None, deadline)
         sent = dict(metadata)
         if self._workspace is not None:
             sent.setdefault(WORKSPACE_KEY, self._workspace)
-
-        sends = 0
-
-        def attempt() -> e2b.Sandbox:
-            nonlocal sends
-            sends += 1
-            return e2b.Sandbox.create(
-                template=template,
-                timeout=timeout_sec,
-                metadata=dict(sent),
-                envs=envs,
-                **{**control.params, "request_timeout": max(deadline - time.monotonic(), 0.001)},
-            )
-
-        retry = _Retry.SERVER_ERROR if IDEMPOTENCY_KEY in sent else _Retry.NEVER
-        try:
-            created = control.call(attempt, retry=retry, until=deadline)
-        except SandboxGone as exc:
-            if sends > 1:  # this create's own sandbox ended while the request was cut; its stored reason says how
-                raise _ended_on_replay(exc) from exc
-            raise
-        except SandboxDenied as exc:
-            if _WORKSPACE_REQUIRED.search(str(exc)):
-                raise SandboxDenied(_no_workspace(role, sent.get(WORKSPACE_KEY), exc)) from exc
-            raise
-        return _E2BSandbox(created, control)
+        bounded = PENDING_TIMEOUT_KEY not in sent
+        key = sent.get(IDEMPOTENCY_KEY)
+        pending = options.wait_sec
+        delay = control.policy.first_delay_sec
+        renewed = 0
+        while True:
+            if bounded:
+                sent[PENDING_TIMEOUT_KEY] = _pending_timeout(pending)
+            try:
+                created = _send(control, request, sent)
+            except _PendingTimedOut as timed_out:
+                if time.monotonic() + delay >= deadline:
+                    raise SandboxUnavailable(
+                        f"no sandbox was running within the create's wait of {options.wait_sec:g} s: the service"
+                        f" deleted each one still queued at its pending limit ({timed_out})"
+                    ) from timed_out.__cause__
+                renewed += 1
+                if key is not None:
+                    sent[IDEMPOTENCY_KEY] = f"{key}:p{renewed}"
+                log.info(
+                    "the service deleted the sandbox of a %r create still queued at its pending limit; asking again%s",
+                    template,
+                    "" if key is None else f" under the fresh key {sent[IDEMPOTENCY_KEY]}",
+                )
+                time.sleep(delay)
+                delay = min(delay * 2, control.policy.max_delay_sec)
+                pending = deadline - time.monotonic()
+                continue
+            except SandboxDenied as exc:
+                if _WORKSPACE_REQUIRED.search(str(exc)):
+                    raise SandboxDenied(_no_workspace(role, sent.get(WORKSPACE_KEY), exc)) from exc
+                raise
+            return _E2BSandbox(created, control)
 
     def connect(self, sandbox_id: str, *, role: Role) -> Sandbox:
         """Return a handle on the live sandbox ``role`` created.
@@ -480,16 +522,78 @@ def _require_url(url: str, variable: str, plane: str) -> None:
         )
 
 
-def _ended_on_replay(gone: SandboxGone) -> SandboxUnavailable | SandboxCreateFailed:
-    """What a create's own replay told the key is spent raises: the reason the service stored for the sandbox the first
-    send made. A ``pending_timeout`` is the 503 the cut hid; anything else, or no reason, ends the create as failed."""
-    spent = _KEY_SPENT.search(str(gone))
-    reason = (spent.group("reason") or "") if spent else ""
-    if _PENDING_TIMEOUT.match(reason):
-        return SandboxUnavailable(
-            f"the sandbox of this create was not running within the service's pending limit: {gone}"
+class _PendingTimedOut(Exception):
+    """The service deleted the sandbox of one send for not running within its pending limit; another key may run."""
+
+
+@dataclass(frozen=True)
+class _CreateRequest:
+    """What every send of one create carries besides its metadata, and when its wait ends (``time.monotonic()``)."""
+
+    template: str
+    timeout_sec: int
+    envs: dict[str, str] | None
+    deadline: float
+
+
+def _send(control: _Control, request: _CreateRequest, metadata: Mapping[str, str]) -> e2b.Sandbox:
+    """Send one create under one idempotency key, replaying it after a server error while that key allows.
+
+    Raises:
+        _PendingTimedOut: The service deleted the sandbox at its pending limit (a 503 ``pending_timeout``, or a 410
+            whose stored reason is ``pending_timeout``); its ``__cause__`` is the socket exception that said so.
+        SandboxCreateFailed: A replay was told the key is spent for another reason, or none.
+        SandboxUnavailable, SandboxGone, SandboxDenied: As :meth:`_Control.call` raised them.
+    """
+    sends = 0
+
+    def attempt() -> e2b.Sandbox:
+        nonlocal sends
+        sends += 1
+        return e2b.Sandbox.create(
+            template=request.template,
+            timeout=request.timeout_sec,
+            metadata=dict(metadata),
+            envs=request.envs,
+            **{**control.params, "request_timeout": max(request.deadline - time.monotonic(), 0.001)},
         )
-    return SandboxCreateFailed(f"the sandbox of this create did not run: {gone}")
+
+    retry = _Retry.SERVER_ERROR if IDEMPOTENCY_KEY in metadata else _Retry.NEVER
+    try:
+        return control.call(attempt, retry=retry, until=request.deadline)
+    except SandboxGone as exc:
+        if _spent_at_pending_limit(str(exc)):
+            raise _PendingTimedOut(str(exc)) from exc
+        if sends > 1:  # this create's own sandbox ended while the request was cut; its stored reason says how
+            raise SandboxCreateFailed(f"the sandbox of this create did not run: {exc}") from exc
+        raise
+    except SandboxUnavailable as exc:
+        if _at_pending_limit(exc):
+            raise _PendingTimedOut(str(exc)) from exc
+        raise
+
+
+def _at_pending_limit(refused: SandboxUnavailable) -> bool:
+    """Whether a create was refused with the 503 ``pending_timeout``, and not for capacity or quota."""
+    cause = refused.__cause__
+    return (
+        type(refused) is SandboxUnavailable
+        and isinstance(cause, Exception)
+        and (isinstance(cause, e2b.ServiceBusyException) or _status(cause) == _SERVICE_BUSY)
+        and _PENDING_REFUSAL.search(str(cause)) is not None
+    )
+
+
+def _spent_at_pending_limit(said: str) -> bool:
+    """Whether a 410 ``idempotency_key_spent`` names ``pending_timeout`` as how the key's sandbox ended."""
+    spent = _KEY_SPENT.search(said)
+    return spent is not None and _PENDING_TIMEOUT.search(spent.group("reason") or "") is not None
+
+
+def _pending_timeout(wait_sec: float) -> str:
+    """The ``agent-sandbox.io/pending-timeout`` for a create that waits ``wait_sec``: whole seconds, within the
+    bounds the service accepts."""
+    return str(min(max(int(wait_sec), _PENDING_TIMEOUT_MIN_SEC), _PENDING_TIMEOUT_MAX_SEC))
 
 
 def _no_workspace(role: Role, named: str | None, refusal: SandboxDenied) -> str:

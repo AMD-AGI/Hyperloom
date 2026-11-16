@@ -19,7 +19,10 @@ branch builds on. Nothing here scores the frontier, which logs a round every tim
 
 After the integration head moved, :class:`IntegrationProfiler` profiles it, one profile at a time, in a task of its own:
 a PROFILE test of the head, then a TraceLens analysis of that test's trace, whose op shares the bottleneck is read from.
-PRELUDE has it profile the root the same way, and waits for it.
+PRELUDE has it profile the root the same way, and waits for it. An AgentX root's analysis is submitted only once the
+baseline measurement has ended: its point names no prompt and output length, so the analysis weights its prefill and
+decode windows by the lengths the baseline measured (``toolbox/analysis.py``), and an analysis submitted before the rule
+gate wrote the baseline would stay degraded under the profile's shared key, for every branch and the judge.
 Both wait for the measurement to end, so the tick only starts the task and looks whether it is done. The PROFILE takes
 one of the integration branch's K slots; when the workload's profile would hold that slot as long as a test, the moved
 head is profiled only once a branch opens on it (:attr:`~.settings.Workload.profiles_moved_head_on_merge`). A head whose
@@ -34,7 +37,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
-from collections.abc import Iterable, Mapping
+from collections.abc import Awaitable, Iterable, Mapping
 from dataclasses import dataclass, field
 from enum import Enum
 from typing import TYPE_CHECKING
@@ -254,11 +257,17 @@ class IntegrationProfiler:
         else:
             self._task = asyncio.ensure_future(self._profile(head, moved_from))
 
-    async def profile_root(self, root: str) -> ProfileOutcome:
+    async def profile_root(self, root: str, baseline: Awaitable[object] | None = None) -> ProfileOutcome:
         """Profile ``root`` and wait for its analysis, for PRELUDE; a backend that cannot profile is not asked again in
-        this session either."""
+        this session either.
 
-        outcome = await self._profile(root, root)
+        With ``baseline`` (the baseline's measurement, for a point that names no prompt and output length) the analysis
+        is submitted once the profile test ended and ``baseline`` has ended, however it ended: the request then carries
+        the lengths the baseline measured. One that ended without writing a baseline leaves the analysis as it was
+        before, degraded with its reason; the wait adds nothing to PRELUDE, which waits for the baseline anyway.
+        """
+
+        outcome = await self._profile(root, root, baseline)
         self._available = outcome.available
         return outcome
 
@@ -296,7 +305,7 @@ class IntegrationProfiler:
         with contextlib.suppress(asyncio.CancelledError):
             await task
 
-    async def _profile(self, head: str, moved_from: str) -> ProfileOutcome:
+    async def _profile(self, head: str, moved_from: str, baseline: Awaitable[object] | None = None) -> ProfileOutcome:
         from hyperloom_multibranch.toolbox.analysis import (
             CODE_NO_EXECUTOR,
             CODE_PROFILE_UNVERIFIED,
@@ -307,7 +316,9 @@ class IntegrationProfiler:
         before = self._shares or await self._records.op_shares(moved_from)
         request = integration_test_request(TestKind.PROFILE, Purpose.PROFILE, head)
         try:
-            return await self._tests.judged(request, lambda request_id: self._analysed(head, request_id, before))
+            return await self._tests.judged(
+                request, lambda request_id: self._analysed(head, request_id, before, baseline)
+            )
         except RequestRejected as rejected:
             detail = {"commit": head, "code": rejected.code, "rejection": rejected.reason}
             if rejected.code == CODE_PROFILE_UNVERIFIED:
@@ -341,9 +352,11 @@ class IntegrationProfiler:
         shares = await self._records.op_shares(profiled)
         return shares if shares is not None and shares.profile_request_id == request_id else None
 
-    async def _analysed(self, head: str, request_id: str, before: OpShares | None) -> ProfileOutcome:
-        """Analyse the trace of the PROFILE ``request_id`` once it ended; the toolbox reads the trace off that test's
-        own record."""
+    async def _analysed(
+        self, head: str, request_id: str, before: OpShares | None, baseline: Awaitable[object] | None
+    ) -> ProfileOutcome:
+        """Analyse the trace of the PROFILE ``request_id`` once it ended, and once ``baseline`` ended when there is one;
+        the toolbox reads the trace off that test's own record."""
 
         from hyperloom_multibranch.toolbox.tools.base import JobStatus
         from hyperloom_multibranch.toolbox.tools.roofline import TRACELENS_TOOL
@@ -353,6 +366,9 @@ class IntegrationProfiler:
         if result.validity is not Validity.SUCCEEDED:
             failed = {**detail, "validity": result.validity.value, "failure_reason": result.failure_reason}
             return ProfileOutcome(PROFILE_UNAVAILABLE, failed, available=False)
+        if baseline is not None:
+            await asyncio.wait([asyncio.ensure_future(baseline)])  # a failed baseline is PRELUDE's to raise, not ours
+            detail.update(after_baseline=True)
         job = await self._toolbox.submit_analysis(INTEGRATION_BRANCH, TRACELENS_TOOL, {}, request_id)
         while self._toolbox.tool_status(job) is JobStatus.RUNNING:
             await self._clock.sleep(ANALYSIS_POLL_SECONDS)

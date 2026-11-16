@@ -334,7 +334,14 @@ Correctness — `python driver.py`
 must run the complete correctness suite and
 prints (at least one):
     SNR: 62.13 dB          # preferred; forge pre-filters on this vs the SNR threshold
-    allclose: True         # optional fallback
+    allclose: True         # optional binding verdict, including without SNR
+Every emitted `allclose: True/False` is a required check: any False rejects the
+candidate, even when SNR meets the campaign threshold. Without SNR, all reported
+allclose verdicts must be True. With neither metric, the result is invalid.
+Only emit `allclose:` for task-required checks with task-appropriate tolerances.
+An informational comparison must use `allclose_diagnostic: True/False`, which
+does not supply a correctness verdict. The reference template's fixed 1e-2
+comparison is diagnostic, not an additional acceptance tolerance.
 Benchmark — `python driver.py --warmup <n> --iters <n> --bench-mode`
 must run the complete benchmark suite and
 prints per-iteration:
@@ -456,7 +463,7 @@ def _run_correctness(device):
         snrs.append(_snr_db(ref, out))
         close = close and torch.allclose(out, ref, atol=1e-2, rtol=1e-2)
     print(f"SNR: {min(snrs):.2f} dB")
-    print(f"allclose: {close}")
+    print(f"allclose_diagnostic: {close}")
     return 0
 
 

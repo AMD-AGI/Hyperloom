@@ -72,7 +72,7 @@ class SessionManifest:
 
     def write(self, path: Path) -> None:
         """Write the document to ``path``, replacing whatever is there; ``664``, as a later leg of a hosted run, maybe
-        another account of the group, reads it back to finish the session."""
+        another account of the group, reads it back to take the session over."""
 
         atomic_write_json(path, encode(self), options=WriteOptions(shared=True))
 
