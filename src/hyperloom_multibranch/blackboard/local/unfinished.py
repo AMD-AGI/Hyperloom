@@ -9,8 +9,7 @@
 * an explore withdrawn before its result, a branch stop's withdrawal included, unless another explore measured its
   change.
 
-A commit, merged or not, is no lead: offering it again on a later integration head is the integrator's, and a merge
-measured not stackable is an answer about the change, not something left to finish.
+A commit is no lead: offering it again on a later integration head is the integrator's.
 
 A lead drops out once its direction or its change is tested again on any branch, its own confirm aside, or a branch
 holds a claim on it, so two later branches do not chase the same one: a replay claims an intent of its own, but tests

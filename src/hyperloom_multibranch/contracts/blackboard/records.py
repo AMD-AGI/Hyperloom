@@ -615,8 +615,7 @@ class LineageView:
         return next((node for node in self.commits if node.commit_id == commit_id), None)
 
     def same_recipe(self, first: str, second: str) -> bool:
-        """Whether ``first`` and ``second`` hold one recipe: they are one commit, or their writers named one digest, as
-        an integration commit that took a branch's head as it was does."""
+        """Whether ``first`` and ``second`` hold one recipe: they are one commit, or their writers named one digest."""
 
         if first == second:
             return True

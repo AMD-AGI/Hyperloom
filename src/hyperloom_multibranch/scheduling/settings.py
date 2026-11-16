@@ -117,9 +117,8 @@ class Workload:
 
     @property
     def integration_k(self) -> int:
-        """The K the integration branch opens at. An InferenceX merge test and profile are short, so two run at once:
-        a merge test beside the moved head's profile, or two merge tests on one head. An AgentX merge test holds one of
-        a few large slots for its whole trace window, so one runs at a time."""
+        """The K the integration branch opens at: 2 for InferenceX, whose merge tests and profiles are short; 1 for
+        AgentX, whose merge test holds one of a few large slots for its whole trace window."""
 
         return 1 if self.inferencex is None else 2
 

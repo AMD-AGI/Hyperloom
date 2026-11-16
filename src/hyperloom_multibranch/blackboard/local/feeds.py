@@ -306,10 +306,8 @@ def search(state: BlackboardState, query: str, limit: int) -> tuple[SearchHit, .
 
 
 def profiles(state: BlackboardState, commit_id: str) -> tuple[TestRecord, ...]:
-    """The profile tests of ``commit_id``'s recipe whose result points at an artifact, oldest first: those of the commit,
-    and those of another commit of its recipe digest that changed nothing, as the toolbox's ``profile_exists`` takes
-    one profile for every commit that holds its recipe. A profile of another commit with a change measured a recipe the
-    blackboard holds no digest of, and is that commit's only."""
+    """The profile tests of ``commit_id``'s recipe whose result points at an artifact, oldest first: the commit's own,
+    and those of another commit of its recipe digest that changed nothing, whose recipe the blackboard knows."""
 
     digests = state.recipe_digests()
     recipe = digests.get(commit_id)

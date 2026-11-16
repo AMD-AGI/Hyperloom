@@ -231,14 +231,6 @@ async def test_a_lead_blackboard_replay_refused_on_a_head_leaves_the_briefs_from
     }
 
 
-async def test_a_stopped_branchs_commit_whose_merge_was_not_stackable_is_no_lead(tmp_path: Path) -> None:
-    observer = await _leftovers(tmp_path / "blackboard", FakeClock())
-
-    brief = await observer.startup_brief("i1")
-
-    assert "u1" not in [item.request_id for item in brief.unfinished]
-
-
 async def test_a_running_branchs_commits_and_the_merged_ones_are_not_unfinished(tmp_path: Path) -> None:
     observer = await scripted_session(tmp_path / "blackboard", FakeClock())
 

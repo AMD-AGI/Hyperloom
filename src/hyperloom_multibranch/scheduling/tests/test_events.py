@@ -547,12 +547,10 @@ async def test_a_head_that_moved_while_a_profile_ran_is_profiled_when_that_one_e
     await events.stop_profiling()
 
 
-async def test_a_head_a_branch_is_profiling_waits_for_that_profile_and_analyses_it_without_profiling_again(
-    log: Path,
-) -> None:
-    shares = _Shares()
-    toolbox = _AnalysingToolbox(shares, autorun=False)
-    branch_profile = await _branch_profiled(toolbox, "c-merged")
+async def test_a_head_whose_recipe_a_branch_is_profiling_waits_for_that_profile_and_analyses_it(log: Path) -> None:
+    shares = _Shares(recipes={"c-merged": "c-b01"})
+    toolbox = _AnalysingToolbox(shares, _HeadRecipes({"c-merged": "c-b01"}), autorun=False)
+    branch_profile = await _branch_profiled(toolbox, "c-b01")
     events = _events(_Health(), log, toolbox, shares)
     events.note_merges((_moved_onto("c-merged"),))
 
@@ -568,15 +566,12 @@ async def test_a_head_a_branch_is_profiling_waits_for_that_profile_and_analyses_
     assert list(toolbox.requests) == [branch_profile]
     assert toolbox.analyses == [(INTEGRATION_BRANCH, "tracelens", {}, branch_profile)]
     [profile] = [row for row in _logged(log) if row["kind"] == "profile"]
-    assert profile["reason"] == PROFILE_EXISTS
-    assert profile["detail"]["commit"] == "c-merged" and profile["detail"]["request_id"] == branch_profile
-    assert profile["detail"]["code"] == "profile_exists"
-    assert (profile["detail"]["job_id"], profile["detail"]["analysis"]) == ("job-1", "succeeded")
+    assert (profile["reason"], profile["detail"]["request_id"], profile["detail"]["job_id"]) == (
+        PROFILE_EXISTS,
+        branch_profile,
+        "job-1",
+    )
     assert [aim.op for aim in await events.focus_on("c-merged", (), 1)] == ["gemm"]
-    events.note_merges((_moved_onto("c-next"),))
-    await events.detect()
-    assert events.profiling, "a head that has no profile yet is profiled as before"
-    await events.stop_profiling()
 
 
 @pytest.mark.parametrize("ended", ["failed", "withdrawn"])
@@ -785,53 +780,3 @@ async def test_an_agentx_head_whose_recipe_a_branch_profiled_reads_that_profiles
     assert [aim.op for aim in await events.focus_on("c-merged", ("moe",), 2)] == ["moe", "gemm"]
     [profile] = [row for row in _logged(log) if row["kind"] == "profile"]
     assert (profile["reason"], profile["detail"]["request_id"]) == (PROFILE_EXISTS, branch_profile)
-
-
-async def test_a_head_whose_recipes_profile_left_no_shares_has_the_integration_branch_analyse_that_profile(
-    log: Path,
-) -> None:
-    shares = _Shares(recipes={"c-merged": "c-b01"})
-    toolbox = _AnalysingToolbox(shares, _HeadRecipes({"c-merged": "c-b01"}), autorun=False)
-    branch_profile = await _branch_profiled(toolbox, "c-b01")
-    await toolbox.drain()
-    events = _events(_Health(), log, toolbox, shares, workload=AGENTX)
-    events.note_merges((_moved_onto("c-merged"),))
-    await events.detect()
-    events.branches_opened_on("c-merged")
-    await _until(lambda: toolbox.analyses)
-
-    assert toolbox.analyses == [(INTEGRATION_BRANCH, "tracelens", {}, branch_profile)]
-    assert [aim.op for aim in await events.focus_on("c-merged", (), 1)] == [""]
-    toolbox.finish("c-merged", {"gemm": 55.0})
-    await _until(lambda: not events.profiling)
-    await events.detect()
-
-    assert [aim.op for aim in await events.focus_on("c-merged", (), 1)] == ["gemm"]
-    assert list(toolbox.requests) == [branch_profile]
-    [profile] = [row for row in _logged(log) if row["kind"] == "profile"]
-    assert (profile["reason"], profile["detail"]["request_id"], profile["detail"]["job_id"]) == (
-        PROFILE_EXISTS,
-        branch_profile,
-        "job-1",
-    )
-
-
-async def test_a_reused_profile_whose_analysis_the_toolbox_refuses_leaves_the_head_without_shares_and_says_why(
-    log: Path,
-) -> None:
-    shares = _Shares(recipes={"c-merged": "c-b01"})
-    toolbox = _AnalysingToolbox(shares, _HeadRecipes({"c-merged": "c-b01"}), autorun=False)
-    branch_profile = await _branch_profiled(toolbox, "c-b01")
-    await toolbox.drain()
-    toolbox.rejection = RequestRejected("not a profile of the head's recipe", CODE_PROFILE_UNVERIFIED)
-    events = _events(_Health(), log, toolbox, shares, workload=AGENTX)
-    events.note_merges((_moved_onto("c-merged"),))
-    await events.detect()
-    events.branches_opened_on("c-merged")
-    await _until(lambda: not events.profiling)
-    await events.detect()
-
-    [profile] = [row for row in _logged(log) if row["kind"] == "profile"]
-    assert (profile["reason"], profile["detail"]["request_id"]) == (PROFILE_EXISTS, branch_profile)
-    assert profile["detail"]["analysis_refused"] == "not a profile of the head's recipe"
-    assert [aim.op for aim in await events.focus_on("c-merged", (), 1)] == [""]

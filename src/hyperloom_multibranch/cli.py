@@ -395,7 +395,7 @@ def _add_concurrency_options(run: argparse.ArgumentParser) -> None:
         default=None,
         help="Tests running at once; default as many as the machine's cards, or the grant, run at TP.",
     )
-    run.add_argument("--max-k-per-branch", type=int, default=DEFAULT_MAX_K_PER_BRANCH, help="Highest K of a branch.")
+    run.add_argument("--max-k-per-branch", type=int, default=DEFAULT_MAX_K_PER_BRANCH, help="Highest specialist K.")
     run.add_argument(
         "--dev-leases",
         type=int,
