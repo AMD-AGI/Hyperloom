@@ -10,6 +10,7 @@ import glob
 from pathlib import Path
 
 from kernelforge.evaluation.profiling.compiler_output import parse_register_info
+from kernelforge.utils.gpu_arch import arch_profile
 from kernelforge.utils.process_group import communicate_process_group
 
 
@@ -55,6 +56,7 @@ async def check_registers(build_dir: str | None, gpu_target: str) -> dict:
         output = stdout2.decode(errors="replace")
 
     info = parse_register_info(output)
+    info.occupancy_rule = arch_profile(gpu_target).occupancy
 
     return {
         "success": True,

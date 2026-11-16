@@ -10,7 +10,15 @@ import subprocess
 import pytest
 
 from hyperloom_common.gpu_identity import AMD_GPU_BOARDS
-from kernelforge.utils.gpu_arch import canon_arch, canonical_gpu_type, detect_arch, product_arch
+from kernelforge.kernel_backends.constants import KERNEL_BACKENDS
+from kernelforge.utils.gpu_arch import (
+    CDNA_OCCUPANCY,
+    arch_profile,
+    canon_arch,
+    canonical_gpu_type,
+    detect_arch,
+    product_arch,
+)
 
 
 @pytest.mark.parametrize(
@@ -132,3 +140,41 @@ def test_detect_arch_is_empty_without_rocminfo(monkeypatch):
     monkeypatch.setattr(subprocess, "run", _missing)
 
     assert detect_arch() == ""
+
+
+@pytest.mark.parametrize(
+    "gpu_target", ["gfx942", "gfx950", "gfx950:sramecc+:xnack-", "MI355X", "gfx1201", "gfx1151", ""]
+)
+def test_instinct_and_unprofiled_targets_keep_the_instinct_defaults(gpu_target):
+    profile = arch_profile(gpu_target)
+
+    assert profile.hardware_knowledge == "hardware"
+    assert profile.rocprof_compute is True
+    assert all(profile.supports_kernel_backend(backend) for backend in KERNEL_BACKENDS)
+    assert profile.occupancy is CDNA_OCCUPANCY
+    assert profile.prompt_note == ""
+
+
+@pytest.mark.parametrize("gpu_target", ["gfx1100", "GFX1100", "gfx1100:xnack-", "w7900", "AMD Radeon PRO W7900"])
+def test_gfx1100_has_the_rdna3_profile(gpu_target):
+    profile = arch_profile(gpu_target)
+
+    assert profile.family == "RDNA3"
+    assert profile.hardware_knowledge == "hardware/rdna3"
+    assert profile.rocprof_compute is False
+    assert {backend for backend in KERNEL_BACKENDS if profile.supports_kernel_backend(backend)} == {
+        "triton",
+        "hip",
+        "hipblaslt",
+        "ck",
+    }
+    assert profile.occupancy is not CDNA_OCCUPANCY
+    assert "WMMA" in profile.prompt_note
+
+
+def test_every_profiled_hardware_pillar_ships_with_its_map():
+    from kernelforge.config.resources import resource_path
+
+    root = resource_path("local_knowledge")
+    for gpu_target in ("gfx942", "gfx950", "gfx1100"):
+        assert (root / arch_profile(gpu_target).hardware_knowledge / "INDEX.md").is_file(), gpu_target

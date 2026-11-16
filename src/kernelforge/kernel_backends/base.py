@@ -61,6 +61,7 @@ def build_single_kernel_backend_prompt(
 
     knowledge = build_forge_knowledge(
         root,
+        gpu_target=config.gpu_target,
         language=language,
         include_aiter=include_aiter,
         include_mori=include_mori,
