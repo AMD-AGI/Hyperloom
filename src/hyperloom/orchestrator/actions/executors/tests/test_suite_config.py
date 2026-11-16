@@ -27,7 +27,7 @@ from hyperloom.orchestrator.actions.executors._workload_envs import (
 from hyperloom.orchestrator.state.tests._session_base import freeze_base
 from inference_suite import LaunchQuery, SourceSnapshot, resolve_base
 from inference_suite.argv import argv_flag_occurrences, canonical_flag_name, normalize_argv
-from inference_suite.compose import RoundFacts, compose
+from inference_suite.compose import READY_TIMEOUT_SEC, RoundFacts, compose
 from inference_suite.contracts import (
     BaseLaunch,
     ConfigError,
@@ -76,12 +76,19 @@ _POINT_ENV = {
     "ROCR_VISIBLE_DEVICES": "4,5",
     "HIP_VISIBLE_DEVICES": "0,1",
 }
+#: The guard's hold on each framework's own ready timeout; ATOM has none.
+_SGLANG_READY = {"SGLANG_WARMUP_TIMEOUT": str(READY_TIMEOUT_SEC)}
+_VLLM_READY = {"VLLM_ENGINE_READY_TIMEOUT_S": str(READY_TIMEOUT_SEC)}
 #: (server command under the framework python, argv after it, server environment) per framework and board.
 _LAUNCH = {
-    ("sglang", "mi300x"): (_SGLANG_ENTRY, _SGLANG_ARGV, {"SGLANG_USE_AITER": "1", "SGLANG_AITER_MLA_PERSIST": "1"}),
-    ("sglang", "mi355x"): (_SGLANG_ENTRY, _SGLANG_ARGV, {"SGLANG_USE_AITER": "1"}),
-    ("vllm", "mi300x"): (_VLLM_ENTRY, _VLLM_ARGV, {"VLLM_ROCM_USE_AITER": "1"}),
-    ("vllm", "mi355x"): (_VLLM_ENTRY, _VLLM_ARGV, {"VLLM_ROCM_USE_AITER": "1"}),
+    ("sglang", "mi300x"): (
+        _SGLANG_ENTRY,
+        _SGLANG_ARGV,
+        {"SGLANG_USE_AITER": "1", "SGLANG_AITER_MLA_PERSIST": "1", **_SGLANG_READY},
+    ),
+    ("sglang", "mi355x"): (_SGLANG_ENTRY, _SGLANG_ARGV, {"SGLANG_USE_AITER": "1", **_SGLANG_READY}),
+    ("vllm", "mi300x"): (_VLLM_ENTRY, _VLLM_ARGV, {"VLLM_ROCM_USE_AITER": "1", **_VLLM_READY}),
+    ("vllm", "mi355x"): (_VLLM_ENTRY, _VLLM_ARGV, {"VLLM_ROCM_USE_AITER": "1", **_VLLM_READY}),
     ("atom", "mi300x"): (_ATOM_ENTRY, _ATOM_ARGV, {}),
     ("atom", "mi355x"): (_ATOM_ENTRY, _ATOM_ARGV, {}),
 }

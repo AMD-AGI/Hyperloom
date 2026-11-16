@@ -126,7 +126,10 @@ that set each flag and environment variable and what it overrode:
 3. the candidate's layer: removals, then additions;
 4. the golden layer, when the round applies it;
 5. the guard: the model path, address and GPU masks of the round
-   (`ROCR_VISIBLE_DEVICES` the round's cards, `HIP_VISIBLE_DEVICES` `0..n-1`);
+   (`ROCR_VISIBLE_DEVICES` the round's cards, `HIP_VISIBLE_DEVICES` `0..n-1`),
+   and the framework's own ready timeout (`VLLM_ENGINE_READY_TIMEOUT_S`,
+   `SGLANG_WARMUP_TIMEOUT`) at 86400 s, so a slow start ends at the round's
+   `boot_sec` as `server_boot_timeout`, not at the framework's 600 s;
 6. the runner's layer: the environment and floors a host needs, and the
    framework's metrics switch (`--enable-metrics` for SGLang; vLLM needs none)
    when the round samples KV telemetry;
@@ -134,7 +137,8 @@ that set each flag and environment variable and what it overrode:
 
 Neither the operator's nor the candidate's layer may set what the guard or the
 runner owns, nor, under a golden layer, what golden owns
-(`golden_owned_touched`); such a layer is refused, not overridden.
+(`golden_owned_touched`); such a layer is refused, not overridden. A base may
+set the ready timeout, as recipes do for a slow start; the guard's value replaces it.
 
 The golden layer carries a base's golden acceptance length (speculative decoding
 draft and simulation settings) as its own record. An AgentX session runs a GSM8K

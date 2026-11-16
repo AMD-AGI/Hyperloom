@@ -4,11 +4,12 @@
 """Compose a round's launch from its frozen base and the config's layers.
 
 The order is fixed: base, user removals, user additions, candidate removals, candidate additions, the golden layer (when
-the round applies it, or applies it less its acceptance simulation: ``real_acceptance``), the guard (the round's model path, address and GPU mask), the runner's layer (with the
+the round applies it, or applies it less its acceptance simulation: ``real_acceptance``), the guard (the round's model path, address, GPU mask and the framework's own ready timeout), the runner's layer (with the
 framework's metrics flag when the round scrapes ``/metrics``), then the profiler layer of a profile round. A layer's
 flag beats every earlier group of the same flag; a later alias of it wins only because the engine applies the last
 one. Neither the user nor the candidate may set what the guard or the runner owns, nor, under a golden layer, what
-golden owns; such a layer is refused, not overridden, so the refusal names whose layer it was.
+golden owns; such a layer is refused, not overridden, so the refusal names whose layer it was. A base may set the
+framework's ready timeout, which recipes raise for a slow start; the guard's replaces it.
 
 The server runs as the framework's server module under ``server.framework_python``, the interpreter the version probe
 and the parser check run, never the base's entrypoint through ``PATH``. A base whose entrypoint is not its framework's
@@ -55,6 +56,10 @@ GPU_MASK_ENV = "ROCR_VISIBLE_DEVICES"
 HIP_MASK_ENV = "HIP_VISIBLE_DEVICES"
 #: Every device mask a launch's processes read; the guard sets the first two and no layer may set any.
 _DEVICE_MASK_ENVS = (GPU_MASK_ENV, HIP_MASK_ENV, "CUDA_VISIBLE_DEVICES")
+#: What the guard sets a framework's ready timeout (``FrameworkFacts.ready_timeout_env``) to: longer than any round, so
+#: the server never gives up on its start before the round's boot deadline ends it, which leaves aiter builds out and
+#: names the step. One value for every round, so a server a later round reuses runs the launch that round composes.
+READY_TIMEOUT_SEC = 86400
 
 
 @dataclass(frozen=True)
@@ -124,7 +129,10 @@ def runner_owned(base: BaseLaunch) -> RunnerOwned:
         else ()
     )
     flags = {*base.runner_owned.args, *(flag for flag in (*guard, spec.metrics_flag) if flag)}
-    return RunnerOwned(args=tuple(sorted(flags)), env=tuple(sorted({*base.runner_owned.env, *_DEVICE_MASK_ENVS})))
+    env = {*base.runner_owned.env, *_DEVICE_MASK_ENVS}
+    if spec.ready_timeout_env is not None:
+        env.add(spec.ready_timeout_env)
+    return RunnerOwned(args=tuple(sorted(flags)), env=tuple(sorted(env)))
 
 
 def _owned(base: BaseLaunch) -> _Touch:
@@ -133,7 +141,8 @@ def _owned(base: BaseLaunch) -> _Touch:
 
 
 def _first_refusal(server: ServerConfig, base: BaseLaunch, owned: _Touch) -> Refusal | None:
-    base_touch = _Touch(frozenset(name for name, _ in argv_flag_occurrences(base.args)), frozenset(base.env), golden=())
+    base_env = frozenset(base.env) - {framework_facts(Framework(base.framework)).ready_timeout_env}
+    base_touch = _Touch(frozenset(name for name, _ in argv_flag_occurrences(base.args)), base_env, golden=())
     layers = (
         (LayerSource.BASE, base_touch),
         (LayerSource.USER, _delta_touch(server.user)),
@@ -236,12 +245,19 @@ def _number_text(value: float) -> str:
     return str(int(value)) if float(value).is_integer() else str(value)
 
 
-def _guard(server: ServerConfig, server_flags: ServerFlags) -> tuple[tuple[str, ...], dict[str, EnvValue]]:
+def _guard(
+    server: ServerConfig, server_flags: ServerFlags, ready_timeout_env: str | None
+) -> tuple[tuple[str, ...], dict[str, EnvValue]]:
     args = [server_flags.model, server.model_path, server_flags.host, server.host, server_flags.port, str(server.port)]
     if server_flags.served_model_name is not None:
         args += [server_flags.served_model_name, server.served_model_name]
-    masks = {GPU_MASK_ENV: ",".join(map(str, server.gpus)), HIP_MASK_ENV: ",".join(map(str, range(len(server.gpus))))}
-    return tuple(args), masks
+    env: dict[str, EnvValue] = {
+        GPU_MASK_ENV: ",".join(map(str, server.gpus)),
+        HIP_MASK_ENV: ",".join(map(str, range(len(server.gpus)))),
+    }
+    if ready_timeout_env is not None:
+        env[ready_timeout_env] = str(READY_TIMEOUT_SEC)
+    return tuple(args), env
 
 
 def _golden_layer(use: GoldenUse, base: BaseLaunch) -> tuple[tuple[str, ...], Mapping[str, str]] | None:
@@ -288,7 +304,7 @@ def compose(config: SuiteConfig, base: BaseLaunch, facts: RoundFacts) -> Launch 
     if golden is not None:
         composer.add_args(golden[0], LayerSource.GOLDEN)
         composer.set_env(golden[1], LayerSource.GOLDEN)
-    guard_args, guard_env = _guard(server, server_flags)
+    guard_args, guard_env = _guard(server, server_flags, spec.ready_timeout_env)
     composer.add_args(guard_args, LayerSource.GUARD)
     composer.set_env(guard_env, LayerSource.GUARD)
     composer.apply_runner(server.runner, spec.metrics_flag if config.telemetry.kv else None)
@@ -317,4 +333,4 @@ def compose(config: SuiteConfig, base: BaseLaunch, facts: RoundFacts) -> Launch 
     )
 
 
-__all__ = ["GPU_MASK_ENV", "Refusal", "RoundFacts", "compose", "runner_owned"]
+__all__ = ["GPU_MASK_ENV", "READY_TIMEOUT_SEC", "Refusal", "RoundFacts", "compose", "runner_owned"]
