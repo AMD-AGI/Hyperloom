@@ -52,7 +52,7 @@ def test_canon_arch_names_no_target_rather_than_a_wrong_one(value):
         ("amd instinct mi355x", "mi355x"),
         ("amd_instinct_mi325x", "mi300x"),
         ("Radeon 8060S", "radeon8060s"),
-        ("gfx1100", "gfx1100"),
+        ("gfx1030", "gfx1030"),
         ("MI250-X", "mi250_x"),
     ],
 )

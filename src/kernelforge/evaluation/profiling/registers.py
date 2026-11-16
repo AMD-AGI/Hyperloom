@@ -13,8 +13,8 @@ from kernelforge.evaluation.profiling.compiler_output import parse_register_info
 from kernelforge.utils.process_group import communicate_process_group
 
 
-async def check_registers(build_dir: str | None = None) -> dict:
-    """Analyze register usage from the first compiled kernel binary in a build directory."""
+async def check_registers(build_dir: str | None, gpu_target: str) -> dict:
+    """Analyze register usage of the first compiled kernel binary in ``build_dir``, disassembled for ``gpu_target``."""
     if build_dir is None:
         return {"success": False, "message": "No build_dir provided"}
 
@@ -27,7 +27,8 @@ async def check_registers(build_dir: str | None = None) -> dict:
     binary_path = so_files[0]
 
     # Disassemble
-    cmd = ["llvm-objdump", "-d", "--mcpu=gfx950", binary_path]
+    # Without a target llvm-objdump reads the one the code object records.
+    cmd = ["llvm-objdump", "-d", *([f"--mcpu={gpu_target}"] if gpu_target else []), binary_path]
     proc = await asyncio.create_subprocess_exec(
         *cmd,
         stdout=asyncio.subprocess.PIPE,
