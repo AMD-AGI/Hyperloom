@@ -20,12 +20,11 @@ def _spelling(value: str) -> str:
 _ARCH_BY_GPU_TYPE = {
     _spelling(name): board.gfx for board in AMD_GPU_BOARDS.values() for name in (board.product, *board.aliases)
 }
-# The product name each gfx target is recorded under, so one chip has one name in KB identities.
+# Established product aliases; gfx1201 stays an ISA because it names more than one board.
 _GPU_TYPE_BY_ARCH = {
     "gfx942": "mi300x",
     "gfx950": "mi355x",
     "gfx1151": "radeon8060s",
-    "gfx1201": "r9700",
 }
 # A concrete target only: rocminfo also lists generic ISAs such as ``gfx12-generic`` beside the chip's own.
 _GFX_RE = re.compile(r"\bgfx[0-9a-f]+\b(?!-)", re.IGNORECASE)
