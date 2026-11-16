@@ -134,6 +134,7 @@ __all__ = [
     "INIT",
     "NO_EXCLUDES_FILE",
     "NO_LAZY_FETCH",
+    "SESSION_IDENTITY",
     "blank_driver_programs",
     "git_argv",
     "git_env",
