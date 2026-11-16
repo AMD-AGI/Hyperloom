@@ -467,7 +467,9 @@ async def _with_server_log(run: _ForgeGemmRun, state: Any, session_dir: Path) ->
             framework=run.framework,
             precision=run.precision,
             quant_type=run.quant_type,
-            aiter_routing=_resolve_vllm_aiter_routing(model_path=run.model_dir, server_log=server_log, tp=run.tp),
+            aiter_routing=_resolve_vllm_aiter_routing(
+                model_path=run.model_dir, server_log=server_log, tp=run.tp, gpu_type=run.gpu_type
+            ),
         ),
     )
 
