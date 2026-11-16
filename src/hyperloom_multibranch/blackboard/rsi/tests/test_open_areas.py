@@ -427,6 +427,18 @@ def test_a_profile_that_left_no_op_shares_reads_as_unknown_not_as_unprofiled_nor
     )
 
 
+def test_a_profile_of_another_commit_of_the_heads_recipe_that_left_no_op_shares_reads_as_unknown(
+    snapshot: BlackboardSnapshot,
+) -> None:
+    def measured_on(digest: str) -> BlackboardSnapshot:
+        return _recipes(_profile_measured(snapshot, "k7"), {"i1": "sha256:head", "k7": digest})
+
+    same = open_areas(measured_on("sha256:head"), seconds_left=4 * HOUR, first_commit_minutes=None)
+    other = open_areas(measured_on("sha256:other"), seconds_left=4 * HOUR, first_commit_minutes=None)
+
+    assert same.unanalysed == "i1" and other.unanalysed == ""
+
+
 def test_a_profile_with_every_op_worked_on_or_spent_is_out_of_ops_whatever_profile_test_measured_it(
     snapshot: BlackboardSnapshot,
 ) -> None:

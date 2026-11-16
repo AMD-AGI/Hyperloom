@@ -14,8 +14,8 @@ does a branch the judge or the session's end stopped, nor a record that waits on
 opens again once the integration head moves, and an op of a direction of the map once its agent branch stops. With too
 little of EXPLORE left for a new branch's first commit, the playbook's ``last_open_minutes`` or else the median time a
 new branch took to it, it says that no branch should open. Shares taken from a commit the head builds on are named as that commit's, beside
-the head's. Without shares, a head (or a commit it builds on) a PROFILE test measured reads as unknown, not as
-unprofiled: neither is a profile out of ops. The direction families' odds are the specialists' menu
+the head's. Without shares, a head (or a commit it builds on) whose recipe a PROFILE test measured reads as unknown,
+not as unprofiled: neither is a profile out of ops. The direction families' odds are the specialists' menu
 (:mod:`rsi.menu`), not the judge's: a family has too few tests to rank ops by.
 """
 
@@ -82,8 +82,8 @@ class OpenAreas:
     its map that name the op) or they are spent (``spent``, by op, the history of the branches focused on it), the
     minutes left of EXPLORE and those a new branch takes to its first commit. ``head`` is the integration head; a
     ``profiled`` commit other than it is one it builds on, because no commit of the head's recipe was profiled.
-    ``unanalysed`` is, without a ``profiled`` commit, the head or the nearest commit it builds on a PROFILE test
-    measured, its trace not analysed into op shares."""
+    ``unanalysed`` is, without a ``profiled`` commit, the head or the nearest commit it builds on whose recipe a
+    PROFILE test measured, its trace not analysed into op shares."""
 
     profiled: str = ""
     ops: tuple[OpenOp, ...] = ()
@@ -157,8 +157,9 @@ class OpenAreas:
 
 
 def _unanalysed(snapshot: BlackboardSnapshot, head: str) -> str:
-    """``head`` or the nearest commit it builds on that a PROFILE test measured; empty when none was."""
+    """``head`` or the nearest commit it builds on whose recipe a PROFILE test measured; empty when none was."""
 
+    lineage = snapshot.lineage
     measured = {
         record.request.parent_commit
         for record in snapshot.records
@@ -166,7 +167,14 @@ def _unanalysed(snapshot: BlackboardSnapshot, head: str) -> str:
         and record.result is not None
         and record.result.validity is Validity.SUCCEEDED
     }
-    return next((item for item in (head, *snapshot.lineage.ancestry(head)) if item in measured), "")
+    return next(
+        (
+            item
+            for item in (head, *lineage.ancestry(head))
+            if any(lineage.same_recipe(item, commit) for commit in measured)
+        ),
+        "",
+    )
 
 
 def _working(snapshot: BlackboardSnapshot) -> dict[str, set[str]]:
