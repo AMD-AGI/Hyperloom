@@ -677,7 +677,7 @@ def test_cap_drops_unknown_stopped_and_integration_orders_and_clamps_k() -> None
         open_count=3,
         k=(
             KOrder("b01", 9),
-            KOrder(INTEGRATION_BRANCH, 0),
+            KOrder(INTEGRATION_BRANCH, 5),
             KOrder("b03", 2),
             KOrder("b99", 2),
             KOrder("b02", 2),
@@ -693,7 +693,7 @@ def test_cap_drops_unknown_stopped_and_integration_orders_and_clamps_k() -> None
 
     assert cap_decision(decision, _view()) == JudgeDecision(
         open_count=3,
-        k=(KOrder("b01", 2), KOrder(INTEGRATION_BRANCH, 1)),
+        k=(KOrder("b01", 2), KOrder(INTEGRATION_BRANCH, 5)),
         stop=(StopOrder("b02", "flat"),),
         session_stop="done",
     )

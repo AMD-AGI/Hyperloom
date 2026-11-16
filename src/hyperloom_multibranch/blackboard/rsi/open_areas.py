@@ -60,7 +60,7 @@ class OpenOp:
 class FocusHistory:
     """The branches this session opened on one op as their focus: how many, how many of them stopped without a
     commit, the commits they made and the best gain among those; ``exhausted`` is the record that spent the op when
-    one of them gave up on it on the integration head quoting it."""
+    one of them gave up on it on a commit of the integration head's recipe quoting it."""
 
     opened: int
     ended_without_commit: int

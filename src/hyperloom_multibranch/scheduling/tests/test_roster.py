@@ -84,7 +84,7 @@ def test_k_is_clamped_on_open_and_set_k(tmp_path: Path) -> None:
     assert roster.entry(branch).k == MAX_K
     assert roster.set_k(branch, 0).k == 1
     assert roster.add_integration(ROOT, k=MAX_K + 1).k == MAX_K + 1
-    assert roster.set_k(INTEGRATION_BRANCH, 2).k == 2
+    assert roster.set_k(INTEGRATION_BRANCH, MAX_K + 2).k == MAX_K + 2
 
 
 def test_stopped_branch_is_never_restarted_or_resized(tmp_path: Path) -> None:
