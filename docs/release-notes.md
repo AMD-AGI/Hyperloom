@@ -20,6 +20,12 @@ Merged to `main` and not yet carried by a tagged release. Each entry moves
 into the [release](https://github.com/AMD-AGI/Hyperloom/releases) that ships
 it.
 
+- **A multi-branch session runs on MI325X.** `hyperloom-multibranch run`
+  accepts `--gpu-type mi325x`. Before, it refused MI325X, a limit left from
+  Magpie, which had no benchmark script of MI325X's own; InferenceSuite
+  measures MI325X as it measures the other boards. A Qwen3-14B-FP8 InferenceX
+  session (SGLang, TP1) and a DeepSeek-V4.1-Flash AgentX session (vLLM, TP4)
+  each ran its 12 hours to the end on an 8-GPU MI325X node.
 - **A multi-branch InferenceX session caches its branches' prompts for an
   hour.** Each branch's Claude CLI now runs with `CLAUDE_CODE_PROMPT_CACHE_TTL`
   and `CLAUDE_CODE_SUBAGENT_PROMPT_CACHE_TTL` at `1h` on an InferenceX
