@@ -36,6 +36,7 @@ from hyperloom_multibranch.specialist.component_agent import (
     ComponentAgent,
     ComponentRun,
     SplitFailed,
+    read_launch,
 )
 from hyperloom_multibranch.specialist.gate_client import FixedGateClient
 from hyperloom_multibranch.toolbox.kernel_artifacts import KernelVariables
@@ -626,7 +627,8 @@ def _stand_in_repo(tmp_path: Path, agent: Component = Component(), refuse: tuple
 
 def _stand_in_manifest(install: tuple[str, ...]):
     def manifest(spec: AgentSpec, checkout: AgentCheckout, run: ComponentRun) -> AgentManifest:
-        """The stand-in's manifest for ``run``: a config of what its scripts read, the branch's plan copied beside it."""
+        """The stand-in's manifest for ``run``: a config of what its scripts read, the launch ``spec`` names with the
+        recipe's added to it, and the branch's plan copied beside it."""
 
         path = checkout.path.absolute()
         make_shared_dirs(path / run.session_dir)
@@ -640,11 +642,14 @@ def _stand_in_manifest(install: tuple[str, ...]):
             make_shared_dirs(carried.parent)
             copy_shared_file(Path(spec.plan), carried)
             component["plan"] = str(carried)
+        launch = read_launch(Path(spec.launch)) if spec.launch else None
         config = {
             "session_root": str(path / run.session_dir),
             "workspace_root": spec.workspace,
-            "server_flags": spec.server_args,
-            "server_env": dict(spec.envs),
+            "server_flags": " ".join(
+                part for part in (launch.server_flags if launch else "", spec.server_args) if part
+            ),
+            "server_env": {**(launch.server_env if launch else {}), **spec.envs},
             "source_unkept": spec.source_unkept,
             "component": component,
         }

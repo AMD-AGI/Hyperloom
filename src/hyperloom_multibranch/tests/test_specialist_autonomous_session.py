@@ -32,13 +32,16 @@ from hyperloom.measure.compile import LocalBlobStore, PackageBase, kernel_rows_o
 from hyperloom.sandbox import SandboxGone
 from hyperloom.sandbox.socket import SandboxUnavailable
 from hyperloom_multibranch.contracts.lifecycle import BranchTask
-from hyperloom_multibranch.contracts.blackboard.vocab import LeaseKind
+from hyperloom_multibranch.contracts.blackboard.vocab import Conclusion, LeaseKind
 from hyperloom_multibranch.contracts.toolbox import Backpressure, BranchLease, LeaseCharge, RequestRejected
 from hyperloom_multibranch.contracts.blackboard import INTEGRATION_BRANCH, Role, Writer
 from hyperloom_multibranch.contracts.blackboard.records import BaselineRecord, ToolResultPointer
 from hyperloom_multibranch.blackboard import LocalBlackboard
 from hyperloom_multibranch.blackboard.local.blackboard import LEARNING_MAX_CHARS
-from hyperloom_multibranch.blackboard.tests.factories import result
+from hyperloom_multibranch.blackboard.tests.factories import judgement, result
+from hyperloom_multibranch.rulegate.rules import RETRACTION_ID
+from hyperloom_multibranch.scheduling.session_base import served_launch
+from hyperloom_multibranch.specialist.agent_import import KeptChange, Retraction
 from hyperloom_multibranch.specialist import (
     autonomous_session,
     keep_requeue,
@@ -56,6 +59,7 @@ from hyperloom_multibranch.specialist.autonomous_session import (
     START_TABLES_DIR,
     WATCH_FILE,
     AutonomousSession,
+    KeepWatch,
     AutonomousSetup,
     collection_margin,
     without_file,
@@ -73,10 +77,12 @@ from hyperloom_multibranch.specialist.runtime import (
 from hyperloom_multibranch.specialist.worktree import Upstream
 from hyperloom_common.tests._bwrap_host import usable_bwrap
 from hyperloom_common.tests.shared_accounts import Accounts, other_accounts
+from hyperloom_multibranch.tests.base_records import TOKEN, frozen_credential_base
 from hyperloom_multibranch.tests.branch_rig import branch_rig
 from hyperloom_multibranch.tests.agent_rig import (
     BRANCH,
     CHAMPION_ROWS,
+    CONFIG_FILE,
     COMPONENT_AGENT,
     IMAGE_DEFAULT,
     IMAGE_MODEL,
@@ -2173,3 +2179,169 @@ async def test_under_bubblewrap_git_works_in_an_agent_s_worktree_and_the_branch_
     assert probed.output.split()[:3] == ["probe", "k", "k"], "the agent committed each keep, and git ran confined"
     assert not os.path.exists(f"/proc/{holder.pid}"), "the branch's end ended the sandbox's holder"
     assert not os.path.exists(scratch.tmp) and not os.path.exists(scratch.shm), "and deleted its /tmp and /dev/shm"
+
+
+# ---- a keep that retracts an earlier one -------------------------------------------------------------------------
+
+FINDING = {"iteration": 7, "keep": 1, "finding": "iter7-agentx-283-selection-invalid"}
+#: The launch an agent's branch is started with and keeps, so a revert of a keep's source undoes all of it.
+STEADY = "--tp 1"
+
+
+def _retracting(keeps: tuple[int, ...]) -> Component:
+    """An agent whose keep 2 reverts keep 1's commit and says it retracts keep 1."""
+    started = {"server_flags": STEADY, "server_env": {}}
+    return Component(keeps=keeps, retracts=FINDING, retracting_keep=2, flags=STEADY, started=started, tail=1.0)
+
+
+async def _landed_in_turn(rig: Rig, tmp_path: Path, landed: int) -> list[TestRequest]:
+    """Every import of a component agent's run, each measured once the one before was judged: the first ``landed`` of
+    them committed on the branch, the rest recorded only."""
+
+    gate = LocalBlackboard(tmp_path / "blackboard", Writer(Role.GATE, "gate"))
+    await rig.session.preflight()
+    running = asyncio.create_task(rig.session.run())
+    while not running.done():
+        count = len(rig.toolbox.requests)
+        await _until(lambda: len(rig.toolbox.requests) > count or running.done(), "the next import")
+        if len(rig.toolbox.requests) > count:
+            request = rig.toolbox.requests[count]
+            request_id = request.request_id or ""
+            await rig.toolbox_blackboard.write_result(result(request_id))
+            made = None
+            if count < landed:
+                recipe = apply(await rig.repo.read_recipe(request.parent_commit), request.delta)
+                made = await rig.repo.commit(BRANCH, request.parent_commit, recipe, request_id)
+            conclusion = Conclusion.COMMITTED if made else Conclusion.RECORDED_ONLY
+            await gate.write_judgement(request_id, judgement(-3.0, (request_id,)), conclusion, made)
+    with pytest.raises(SessionFinished):
+        await running
+    return rig.toolbox.requests
+
+
+async def test_a_retraction_of_a_keep_that_landed_is_imported_with_both_checks_and_names_what_it_retracts(
+    tmp_path: Path,
+) -> None:
+    rig = await _rig(tmp_path, _retracting((256, 512)), start_seconds=0.2)
+
+    first, retraction = await _landed_in_turn(rig, tmp_path, landed=1)
+
+    [attachment] = retraction.attachments
+    assert attachment.id == RETRACTION_ID
+    landed = (await rig.toolbox_blackboard.record(first.request_id or "")).commit_id
+    assert json.loads(rig.toolbox.attachments[attachment.sha256]) == {**FINDING, "retracted_commit": landed}
+    assert (retraction.consistency_check, retraction.long_context_check) == (True, True)
+    assert first.attachments == ()
+    named = "the agent's iteration 7 (its keep 1), found invalid by iter7-agentx-283-selection-invalid"
+    assert f"{NOTICE} keep 2 retracts {named}: r2 is not held to the speed gate" in await rig.notices()
+
+
+async def test_a_retraction_that_does_more_than_undo_its_keep_is_held_to_the_speed_gate(tmp_path: Path) -> None:
+    agent = replace(_retracting((256, 512)), flags=f"{STEADY} --max-num-seqs {{seqs}}")
+    rig = await _rig(tmp_path, agent, start_seconds=0.2)
+
+    _, retraction = await _landed_in_turn(rig, tmp_path, landed=1)
+
+    assert (retraction.attachments, retraction.consistency_check) == ((), None)
+    held = "r2 is held to the speed gate: it also changes --max-num-seqs"
+    assert any(note.endswith(held) for note in await rig.notices())
+
+
+async def test_a_retraction_of_a_keep_that_did_not_land_changes_nothing_on_the_head(tmp_path: Path) -> None:
+    rig = await _rig(tmp_path, _retracting((256, 512)), start_seconds=0.2)
+
+    [first] = await _landed_in_turn(rig, tmp_path, landed=0)
+
+    assert first.attachments == ()
+    assert f"{NOTICE} keep 2 changes nothing on the branch head" in await rig.notices()
+
+
+async def test_a_retraction_goes_alone_after_the_keep_it_was_made_on_and_before_the_keep_after_it(
+    tmp_path: Path,
+) -> None:
+    rig = await _rig(tmp_path, _retracting((256, 512, 768)), start_seconds=0.2)
+    rig.toolbox.refusals = [Backpressure(BRANCH, 1, 1)] * 40
+
+    first, retraction, after = await _landed_in_turn(rig, tmp_path, landed=2)
+
+    assert "+max_num_seqs = 256" in rig.patch(first) and "-max_num_seqs = 256" in rig.patch(retraction)
+    assert "+max_num_seqs = 768" in rig.patch(after)
+    assert [len(request.attachments) for request in (first, retraction, after)] == [0, 1, 0]
+
+
+async def test_a_retraction_whose_import_measured_nothing_goes_once_more_as_the_retraction_it_went_as(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(keep_requeue, "REQUEUE_SECONDS", 0.3)
+    rig = await _rig(tmp_path, _retracting((256, 512)), start_seconds=0.2)
+    gate = LocalBlackboard(tmp_path / "blackboard", Writer(Role.GATE, "gate"))
+
+    await rig.session.preflight()
+    running = asyncio.create_task(rig.session.run())
+    await _until(lambda: rig.toolbox.requests, "the first import")
+    first = rig.toolbox.requests[0]
+    await rig.toolbox_blackboard.write_result(result("r1"))
+    recipe = apply(await rig.repo.read_recipe(first.parent_commit), first.delta)
+    made = await rig.repo.commit(BRANCH, first.parent_commit, recipe, "r1")
+    await gate.write_judgement("r1", judgement(-3.0, ("r1",)), Conclusion.COMMITTED, made)
+    await _until(lambda: len(rig.toolbox.requests) == 2, "the retraction's import")
+    await rig.toolbox_blackboard.write_result(_failed("r2", Validity.MEASUREMENT_FAILED))
+    await _until(lambda: len(rig.toolbox.requests) == 3, "the requeued retraction")
+    await rig.toolbox_blackboard.write_result(result("r3"))
+    with pytest.raises(SessionFinished):
+        await asyncio.wait_for(running, 10)
+
+    _, retraction, again = rig.toolbox.requests
+    assert rig.patch(again) == rig.patch(retraction) and again.parent_commit == retraction.parent_commit
+    assert [attachment.id for attachment in again.attachments] == [RETRACTION_ID]
+    assert again.attachments == retraction.attachments
+    assert (again.consistency_check, again.long_context_check) == (True, True)
+    assert any(note.endswith("r3 is not held to the speed gate") for note in await rig.notices())
+
+
+def test_the_keeps_waiting_at_a_crash_are_read_back_by_the_run_after_it(tmp_path: Path) -> None:
+    retraction = Retraction(7, 1, "iter7-selection-invalid", 1)
+    later = KeptChange(3, "patch", "--max-num-seqs 768")
+    watch = KeepWatch("a" * 40, seq=3, pending=KeptChange(2, "patch", "", retracts=retraction), waiting=[later])
+
+    watch.save(tmp_path / "watch.json")
+
+    loaded = KeepWatch.load(tmp_path / "watch.json")
+    assert loaded.pending is not None and (loaded.pending.seq, loaded.pending.retracts) == (2, retraction)
+    assert [kept.seq for kept in loaded.waiting] == [3]
+
+
+async def test_a_snapshot_that_retracts_nothing_is_imported_as_before(tmp_path: Path) -> None:
+    rig = await _rig(tmp_path, Component(keeps=(256,)), start_seconds=0.2)
+
+    request = await _imported(rig)
+
+    assert (request.attachments, request.consistency_check, request.long_context_check) == ((), None, None)
+    assert rig.toolbox.attachments == {}
+
+
+async def test_an_agent_served_a_frozen_base_s_credential_keeps_it_out_of_its_stored_manifest_and_resumes_with_the_host_s(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    install_stand_in(monkeypatch)
+    frozen = frozen_credential_base(tmp_path, monkeypatch)
+    monkeypatch.setenv("HF_TOKEN", TOKEN)
+    agent = Component(keeps=(256,), gap=1.0, tail=0.6)
+    launch = served_launch(frozen, "")
+    source = _stand_in_repo(tmp_path, agent)
+    rig = await _rig(tmp_path, source=source, start_seconds=0.2, spec_fields={"launch": launch})
+    config = tmp_path / BRANCH / "session" / AGENT_DIR / "src" / CONFIG_FILE
+
+    await rig.session.preflight()
+    await rig.session.stop()
+    resumed = rig.restart()
+    running = asyncio.create_task(resumed.run())
+    await _until(lambda: rig.toolbox.requests, "the import")
+    await rig.toolbox_blackboard.write_result(result("r1"))
+    with pytest.raises(SessionFinished):
+        await asyncio.wait_for(running, 10)
+
+    assert TOKEN not in (tmp_path / BRANCH / "session" / MANIFEST_FILE).read_text()
+    assert json.loads(config.read_text())["server_env"]["HF_TOKEN"] == TOKEN
+    [request] = rig.toolbox.requests
+    assert request.delta.config.envs == {} and "+max_num_seqs = 256" in rig.patch(request)
