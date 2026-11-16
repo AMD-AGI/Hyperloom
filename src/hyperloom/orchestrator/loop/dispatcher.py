@@ -47,6 +47,7 @@ from ..bus.gpu_pool import GPU_LEASE_TTL_GRACE
 from ..bus.resource_lock import KNOWN_LANES, _expand_lanes
 from ._dead_holder import DeadHolderAccountingMixin
 from ._explore_grid import explore_grid_denial
+from ._untested_backlog import untested_backlog_denial
 from .sub_agent_runner import SubAgentResult
 from ..specialists.wall_budget import limit_wall_budget_extension
 from ..state.task_registry import IllegalTransition, Task, TaskNotFound, TaskSpec
@@ -1267,6 +1268,7 @@ class DispatcherCollaborator(DeadHolderAccountingMixin, CoordinatorCollaborator)
             or self._sequence_denial_for_action(action_name)
             or specialist_in_flight_denial(action_name, params, self.tasks, self.shared_state.find_gap)
             or self.time_budget_denial_for_action(action_name, params=params)
+            or untested_backlog_denial(action_name, params, self.shared_state, self.tasks)
             # Last: a session out of time is told so before an explore is told its grid is missing.
             or explore_grid_denial(action_name, params, self.shared_state)
         )

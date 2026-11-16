@@ -671,6 +671,19 @@ class _BenchTasks:
     async def running(self):
         return self._running
 
+    def queued_context_sync(self):
+        return self._queued
+
+    def running_context_sync(self):
+        return self._running
+
+    def with_key_prefix_sync(self, kind, key_prefix):
+        return [
+            SimpleNamespace(kind=c["kind"], params=c["params"], state="succeeded")
+            for c in self.created
+            if c["kind"] == kind and c["idempotency_key"].startswith(key_prefix)
+        ]
+
     async def create_or_return_existing(self, spec):
         existing = any(c["idempotency_key"] == spec.idempotency_key for c in self.created)
         self.created.append(vars(spec))

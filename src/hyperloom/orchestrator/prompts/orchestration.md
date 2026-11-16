@@ -577,6 +577,12 @@ whatever gap each names: a second `scope=domain` delegate for it is refused
 that domain's next dispatch; the in-flight block lists the domains queued
 specialists hold. `domains` and `freeform` dispatches hold no domain.
 
+While the `untested proposals` count of the queued backlog is at its cap,
+every new `specialist` delegate is refused (`specialist_untested_backlog_full`);
+the denial names the cap. Specialists already queued or running still land
+every proposal they return. Let the queue drain through explore grids first;
+proposals already in a grid do not count.
+
 **Domain-anchored example:**
 ```
 intent_type: "delegate"

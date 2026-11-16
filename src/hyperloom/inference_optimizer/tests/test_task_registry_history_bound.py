@@ -226,8 +226,15 @@ async def test_cursor_reuse_validates_dispatch_class(tmp_path):
 
 
 @pytest.mark.asyncio
-async def test_with_key_prefix_matches_the_prefix_literally(tmp_path):
+@pytest.mark.parametrize("sync", [False, True], ids=["async", "sync"])
+async def test_with_key_prefix_matches_the_prefix_literally(tmp_path, sync):
     registry = TaskRegistry(SqliteConnection(tmp_path / "key-prefix.db"))
+
+    async def with_key_prefix(kind: str, key_prefix: str):
+        if sync:
+            return registry.with_key_prefix_sync(kind, key_prefix)
+        return await registry.with_key_prefix(kind, key_prefix)
+
     try:
         first, _ = await registry.create_or_return_existing(
             TaskSpec(kind="integrate_patch", params={}, idempotency_key="aab-reconcile1")
@@ -239,13 +246,13 @@ async def test_with_key_prefix_matches_the_prefix_literally(tmp_path):
         )
 
         # Every state, oldest first: the caller decides which ones count.
-        matched = await registry.with_key_prefix("integrate_patch", "aab-reconcile")
+        matched = await with_key_prefix("integrate_patch", "aab-reconcile")
         assert [(t.task_id, t.state) for t in matched] == [(first.task_id, "succeeded"), (second.task_id, "queued")]
         # Real keys carry ``_``; it must match only itself, not any character.
-        assert await registry.with_key_prefix("integrate_patch", "a_b-reconcile") == []
-        assert await registry.with_key_prefix("integrate_patch", "a%b-reconcile") == []
-        assert await registry.with_key_prefix("integrate_patch", "AAB-reconcile") == []
-        assert await registry.with_key_prefix("explore", "aab-reconcile") == []
+        assert await with_key_prefix("integrate_patch", "a_b-reconcile") == []
+        assert await with_key_prefix("integrate_patch", "a%b-reconcile") == []
+        assert await with_key_prefix("integrate_patch", "AAB-reconcile") == []
+        assert await with_key_prefix("explore", "aab-reconcile") == []
     finally:
         registry.db.close()
 

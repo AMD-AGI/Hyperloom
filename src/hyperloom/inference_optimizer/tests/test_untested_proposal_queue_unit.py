@@ -85,6 +85,19 @@ def test_only_the_current_cycle_is_rendered():
     assert "old" not in out
 
 
+def test_a_proposal_a_finished_automatic_grid_carried_is_named_not_listed_as_waiting():
+    state = _state([_round([{"name": "ended", "extra_args": "--a"}, {"name": "waits", "extra_args": "--b"}])])
+    ended = next(row for row in state.untested_proposal_rows() if row["name"] == "ended")
+
+    out = state.to_untested_proposals_summary(carried={ended["fingerprint"]})
+
+    assert [line.split()[1] for line in out.splitlines() if line.startswith("•")] == ["waits"]
+    assert out.splitlines()[-1] == (
+        "Specialist proposals an automatic explore grid carried to its end without a verdict; the Coordinator "
+        "does not bench them again: ended"
+    )
+
+
 def test_a_round_missing_its_cycle_field_reads_as_zero():
     entry = _round([{"name": "legacy", "extra_args": "--legacy"}])
     entry.pop("cycle")
