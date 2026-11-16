@@ -158,6 +158,14 @@ class EnablementBuild(CoordinatorCollaborator):
             return ""
         return await self._coord.build_lifecycle.enqueue_targeted_build(action)
 
+    def _targeted_builds_off(self) -> bool:
+        """No targeted build starts this session: switched off, multi-node, or ``--no-source-changes``.
+
+        Under ``--no-source-changes`` a build can only end in a launch-only round on the built runtime, which
+        integrate_patch skips.
+        """
+        return _targeted_build_unavailable() or bool(getattr(self.shared_state, "no_source_changes", False))
+
     async def maybe_escalate_to_targeted_build(
         self,
         launch_log: str,
@@ -165,7 +173,7 @@ class EnablementBuild(CoordinatorCollaborator):
         attempt: int = 0,
     ) -> None:
         """Enqueue a targeted build row when the residual gap is a compiled miss."""
-        if _targeted_build_unavailable():
+        if self._targeted_builds_off():
             return
         from hyperloom.common.failure_signature import (
             MISSING_MODEL_ARCH,
@@ -253,7 +261,7 @@ class EnablementBuild(CoordinatorCollaborator):
                 state.enablement.last_specialist_task_id = ""
 
         try:
-            if _targeted_build_unavailable():
+            if self._targeted_builds_off():
                 _consume_marker()
                 return
             if payload is None:

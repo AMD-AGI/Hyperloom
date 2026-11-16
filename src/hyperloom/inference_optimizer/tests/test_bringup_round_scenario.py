@@ -143,6 +143,7 @@ def _lane(session: Path, tasks: TaskRegistry, rounds: RoundStore, launch_log: st
         (EnablementLane, "close_lane_event"),
         (EnablementBuild, "maybe_enqueue_specialist_requested_build"),
         (EnablementBuild, "maybe_escalate_to_targeted_build"),
+        (EnablementBuild, "_targeted_builds_off"),
     ):
         setattr(shim, name, types.MethodType(getattr(owner, name), shim))
     # Collaborator access goes through self._coord, so route it back to the shim.
