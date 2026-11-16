@@ -701,7 +701,7 @@ PD_PROFILE_MODE_TIME = "time"
 # Per role: the step-count env override, its default, and whether the trace is split by forward stage.
 _PD_ROLE_PROFILE_STEPS = {
     "prefill": ("HYPERLOOM_MN_PD_PREFILL_PROFILE_STEPS", 8, True),
-    "decode": ("HYPERLOOM_MN_PD_DECODE_PROFILE_STEPS", 40, False),
+    "decode": ("HYPERLOOM_MN_PD_DECODE_PROFILE_STEPS", 256, False),
 }
 
 
@@ -729,7 +729,7 @@ async def trigger_pd_engine_profile(action: str, body: dict | None = None) -> li
     ``HYPERLOOM_MN_EXT_<ROLE>_URL``. A start sends ``output_dir`` and ``with_stack``
     (``HYPERLOOM_MN_PROFILE_WITH_STACK``, default off). In ``steps`` mode
     (:func:`pd_profile_mode`) it also sends the role's step window: prefill records 8 steps split by stage, decode
-    40 steps (``HYPERLOOM_MN_PD_<ROLE>_PROFILE_STEPS``), both with shapes, and each engine closes its own window.
+    256 steps (``HYPERLOOM_MN_PD_<ROLE>_PROFILE_STEPS``), both with shapes, and each engine closes its own window.
     In ``time`` mode the window lasts until the stop.
 
     Returns the roles with at least one engine that answered without an error status.

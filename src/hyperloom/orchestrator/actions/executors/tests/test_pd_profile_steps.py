@@ -65,7 +65,7 @@ def test_steps_mode_is_the_default_and_sends_each_role_its_step_window(engines, 
             "output_dir": str(tmp_path / "prefill"),
         },
         "decode": {
-            "num_steps": 40,
+            "num_steps": 256,
             "profile_by_stage": False,
             "record_shapes": True,
             "with_stack": False,
