@@ -289,6 +289,10 @@ class TestTimeBudgetGate:
         _set_budget(coord, minutes=1)
         assert coord.dispatcher.time_budget_denial_for_action("frobnicate") is None
 
+    def test_only_the_closing_actions_are_exempt_from_the_budget(self):
+        """Recover restarts the server; it is not how a session ends."""
+        assert TIME_BUDGET_EXEMPT_ACTIONS == frozenset({"report", "session_breakdown"})
+
     def test_the_closing_actions_stay_startable_on_an_empty_budget(self, coord: Coordinator):
         """Refusing these would strand the session with nothing to show."""
         _set_budget(coord, minutes=60, elapsed_min=60.0)
@@ -1489,7 +1493,8 @@ class TestATickCannotOutliveTheSessionBound:
         assert finished == [True]
 
     @pytest.mark.asyncio
-    async def test_an_active_reactor_turn_is_cancelled_at_its_total_timeout(self, coord: Coordinator):
+    @pytest.mark.parametrize("stage", ["reactor:orchestration", "reactor:critic"])
+    async def test_an_active_reactor_turn_is_cancelled_at_its_total_timeout(self, coord: Coordinator, stage: str):
         coord.reactor_turn_timeout_sec = 0.03
         coord._run_deadline = Deadline.after(60.0)
         activity: list[float] = []
@@ -1509,7 +1514,7 @@ class TestATickCannotOutliveTheSessionBound:
         await asyncio.wait_for(
             coord.await_within_session_bound(
                 _stay_active,
-                stage="reactor:orchestration",
+                stage=stage,
             ),
             timeout=5.0,
         )
