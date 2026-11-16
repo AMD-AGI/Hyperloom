@@ -614,6 +614,16 @@ class LineageView:
     def commit(self, commit_id: str) -> CommitNode | None:
         return next((node for node in self.commits if node.commit_id == commit_id), None)
 
+    def same_recipe(self, first: str, second: str) -> bool:
+        """Whether ``first`` and ``second`` hold one recipe: they are one commit, or their writers named one digest, as
+        an integration commit that took a branch's head as it was does."""
+
+        if first == second:
+            return True
+        digests = {node.commit_id: node.recipe_digest for node in self.commits if node.commit_id in (first, second)}
+        found = digests.get(first)
+        return found is not None and found == digests.get(second)
+
     def ancestry(self, commit_id: str) -> tuple[str, ...]:
         """``commit_id`` and every commit it builds on, through parents and the sources merges brought in."""
 

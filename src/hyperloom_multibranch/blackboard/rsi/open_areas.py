@@ -9,7 +9,8 @@ of the agent map it holds names, or an op of the family of a claim it holds or o
 branch opened without a focus shows) and the spent ones: those the playbook's ``failed_op_limit`` branches opened on
 the integration head as it stands were focused on and stopped without a commit, and those a branch focused on them
 gave up on at that head, its give-up quoting an EXHAUSTED record that finds no ceiling above the bar or every idea
-tested or claimed there. A record alone is about one of the session's directions, not the op, and spends nothing; nor
+tested or claimed there. A head is its recipe: a commit whose recipe the integration head took as it was stands for
+the head. A record alone is about one of the session's directions, not the op, and spends nothing; nor
 does a branch the judge or the session's end stopped, nor a record that waits on a tool or a capability. A spent op
 opens again once the integration head moves, and an op of a direction of the map once its agent branch stops. With too
 little of EXPLORE left for a new branch's first commit, the playbook's ``last_open_minutes`` or else the median time a
@@ -225,20 +226,23 @@ def stopped_on_focus(snapshot: BlackboardSnapshot, focus: str) -> tuple[StoppedO
 def _spent(
     snapshot: BlackboardSnapshot, op: str, focused: Sequence[BranchNode], head: str, limit: int
 ) -> FocusHistory | None:
-    """The history of the ``focused`` branches of ``op`` when one gave up on it on ``head``, or ``limit`` of those
-    opened on ``head`` stopped without a commit, else ``None``."""
+    """The history of the ``focused`` branches of ``op`` when one gave up on it on a commit of ``head``'s recipe, or
+    ``limit`` of those opened on one stopped without a commit, else ``None``."""
 
+    lineage = snapshot.lineage
     record = next(
         (
             quoted
             for item in stopped_on_focus(snapshot, op)
-            if (quoted := item.gave_up_on) is not None and quoted.why in _DONE and quoted.head == head
+            if (quoted := item.gave_up_on) is not None
+            and quoted.why in _DONE
+            and lineage.same_recipe(quoted.head, head)
         ),
         None,
     )
     committed = {commit.branch for commit in snapshot.committed}
     bare = [node for node in focused if node.stopped_at is not None and node.branch not in committed]
-    if record is None and sum(1 for node in bare if node.start_commit == head) < limit:
+    if record is None and sum(1 for node in bare if lineage.same_recipe(node.start_commit, head)) < limit:
         return None
     branches = {node.branch for node in focused}
     gains = [commit.gain_pct for commit in snapshot.committed if commit.branch in branches]
