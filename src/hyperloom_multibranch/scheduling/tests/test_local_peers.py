@@ -85,6 +85,7 @@ from hyperloom_multibranch.scheduling.local_peers import (
     machine_cards,
     machine_parallel_tests,
     measurement_host,
+    PROMPT_CACHE_TTL_ENV,
     model_backed_sessions,
     native_trees,
     render_nodes,
@@ -1169,9 +1170,8 @@ async def test_a_session_without_agents_reads_no_canonical(built: _Built, monkey
     assert clients == [None]
 
 
-async def test_an_agentx_session_s_specialists_are_told_its_objective(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
+def _specialist_setup(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, workload: Workload) -> AgentSetup:
+    """The setup ``model_backed_sessions`` builds every branch's specialist from, on ``workload``."""
     built: list[AgentSetup] = []
 
     def sessions(setup: AgentSetup, **_: object) -> ModelSessions:
@@ -1182,7 +1182,7 @@ async def test_an_agentx_session_s_specialists_are_told_its_objective(
     layout = SimpleNamespace(logs=tmp_path, source=tmp_path, branch_dir=lambda branch: tmp_path)
     setup = SimpleNamespace(
         layout=layout,
-        workload=TOTAL_AGENTX,
+        workload=workload,
         references={},
         processes=None,
         agents=(),
@@ -1207,12 +1207,42 @@ async def test_an_agentx_session_s_specialists_are_told_its_objective(
         base=BASE,
     )
     model_backed_sessions(AgentCommand("claude", "claude"))(wiring)
+    [setup] = built
+    return setup
+
+
+async def test_an_agentx_session_s_specialists_are_told_its_objective(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    setup = _specialist_setup(tmp_path, monkeypatch, TOTAL_AGENTX)
 
     objective = AgentXObjective.TOTAL_TOKEN_THROUGHPUT
-    assert built[0].role == role_prompt(
-        RoleWorkload(_specialist_role(TOTAL_AGENTX), objective), references={}, base=BASE
-    )
-    assert objective.description in " ".join(built[0].role.split())
+    assert setup.role == role_prompt(RoleWorkload(_specialist_role(TOTAL_AGENTX), objective), references={}, base=BASE)
+    assert objective.description in " ".join(setup.role.split())
+
+
+@pytest.mark.parametrize(("workload", "ttl"), [(WORKLOAD, "1h"), (AGENTX, None)])
+def test_a_specialist_caches_its_prompt_for_an_hour_on_inferencex_and_at_the_cli_s_default_on_agentx(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, workload: Workload, ttl: str | None
+) -> None:
+    for name in PROMPT_CACHE_TTL_ENV:
+        monkeypatch.delenv(name, raising=False)
+
+    env = _specialist_setup(tmp_path, monkeypatch, workload).env
+
+    assert [env.get(name) for name in PROMPT_CACHE_TTL_ENV] == [ttl, ttl]
+
+
+@pytest.mark.parametrize("workload", [WORKLOAD, AGENTX])
+def test_the_operator_s_prompt_cache_ttl_reaches_the_specialist_on_either_workload(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, workload: Workload
+) -> None:
+    monkeypatch.setenv("CLAUDE_CODE_PROMPT_CACHE_TTL", "5m")
+    monkeypatch.setenv("CLAUDE_CODE_SUBAGENT_PROMPT_CACHE_TTL", "1h")
+
+    env = _specialist_setup(tmp_path, monkeypatch, workload).env
+
+    assert (env.get("CLAUDE_CODE_PROMPT_CACHE_TTL"), env.get("CLAUDE_CODE_SUBAGENT_PROMPT_CACHE_TTL")) == ("5m", "1h")
 
 
 async def test_the_specialists_are_told_of_and_give_back_the_dev_sandboxes_the_session_lends(

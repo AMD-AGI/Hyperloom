@@ -654,14 +654,30 @@ def _specialist_role(workload: Workload) -> str:
 AITER = "aiter"
 
 
+#: The variables that set a Claude CLI's prompt-cache TTL: its own, and its subagents'.
+PROMPT_CACHE_TTL_ENV = ("CLAUDE_CODE_PROMPT_CACHE_TTL", "CLAUDE_CODE_SUBAGENT_PROMPT_CACHE_TTL")
+#: The TTL a specialist caches its prompt at on an InferenceX workload, where it waits for a test in the same
+#: conversation past the CLI's default of 5 minutes and would write the whole conversation to the cache again.
+INFERENCEX_PROMPT_CACHE_TTL = "1h"
+
+
+def specialist_prompt_cache(workload: Workload, environ: Mapping[str, str]) -> dict[str, str]:
+    """The prompt-cache TTL a branch's specialist runs with: what ``environ`` sets, else
+    :data:`INFERENCEX_PROMPT_CACHE_TTL` on an InferenceX workload, and the CLI's own default on an AgentX one, whose
+    test outlasts even an hour's cache."""
+
+    default = INFERENCEX_PROMPT_CACHE_TTL if workload.inferencex is not None else ""
+    return {name: value for name in PROMPT_CACHE_TTL_ENV if (value := environ.get(name) or default)}
+
+
 def model_backed_sessions(command: AgentCommand) -> SpecialistSessions:
     """Sessions that run ``command`` for every branch's specialist, in a worktree of the workload's framework, and
     each branch's third-party agent in a sandbox leased from the session's toolbox (``wiring.agent_sandboxes``), given
     the gate's benchmark client of the session's canonical configuration; a session that runs no agent reads no
     canonical.
 
-    The CLI runs on the main flow's allowlisted specialist environment, through a local AI work socket whose resource
-    log is under ``MB-logs``; its worktrees branch off one source base at ``MB-source``, and each launch rebuilds the
+    The CLI runs on the main flow's allowlisted specialist environment with the prompt-cache TTL of
+    :func:`specialist_prompt_cache`, through a local AI work socket whose resource log is under ``MB-logs``; its worktrees branch off one source base at ``MB-source``, and each launch rebuilds the
     branch's brief at the head it starts from.
     """
 
@@ -685,7 +701,7 @@ def model_backed_sessions(command: AgentCommand) -> SpecialistSessions:
                 dev_leases=wiring.dev_leases.limits.cap if wiring.dev_leases else 0,
                 native=wiring.native,
             ),
-            env=build_specialist_env(),
+            env={**build_specialist_env(), **specialist_prompt_cache(workload, os.environ)},
             runner=LocalAgentRunner(
                 session_dir=layout.logs, liveness=Liveness(lost_after_seconds=SPECIALIST_LOST_AFTER_S)
             ),
@@ -899,9 +915,11 @@ __all__ = [
     "AGENTX_ENV",
     "CLAIM_TTL_SECONDS",
     "GATE_WRITER",
+    "INFERENCEX_PROMPT_CACHE_TTL",
     "InferenceXCheckout",
     "LocalCards",
     "MeasurementHost",
+    "PROMPT_CACHE_TTL_ENV",
     "RENDER_NODE_DIR",
     "SessionWiring",
     "SpecialistSessions",
@@ -918,6 +936,7 @@ __all__ = [
     "require_framework_package",
     "specialist_command",
     "specialist_model",
+    "specialist_prompt_cache",
     "specialist_recall",
     "workload_environment",
     "workload_rule",
