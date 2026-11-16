@@ -1799,18 +1799,19 @@ def test_a_patch_step_naming_no_root_is_faulted_once():
     assert "patch_step_not_captured" not in codes
 
 
-def test_a_patch_step_with_no_recorded_targets_is_refused():
+@pytest.mark.parametrize(
+    "recorded",
+    [{}, {"patch_targets": {"/p/1.patch": {}}}],
+    ids=["absent", "empty-target-map"],
+)
+def test_a_patch_step_with_no_recorded_targets_is_refused(recorded):
     """``patch_targets`` absent is "no producer recorded this", not "touches
-    nothing" -- the state a session written before this contract carries."""
-    state = {k: v for k, v in _sufficient_state().items() if k != "patch_targets"}
+    nothing" -- the state a session written before this contract carries. A
+    patch whose target map is empty is no step a replay can act on either."""
+    state = {**{k: v for k, v in _sufficient_state().items() if k != "patch_targets"}, **recorded}
     codes = _codes(_decide(state, _sufficient_section()))
     assert "patch_targets_unknown" in codes
     assert "patch_step_not_captured" not in codes
-
-
-def test_an_empty_target_map_for_a_patch_is_also_unknown():
-    state = {**_sufficient_state(), "patch_targets": {"/p/1.patch": {}}}
-    assert "patch_targets_unknown" in _codes(_decide(state, _sufficient_section()))
 
 
 def test_patch_step_reasons_never_carry_the_patch_path():
