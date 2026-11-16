@@ -284,6 +284,11 @@ def _server_died(evidence: str) -> bool:
     )
 
 
+def _is_engine_capacity(error_class: str, error_text: str) -> bool:
+    """Whether the failure names a start-time engine-capacity limit."""
+    return error_class == ENGINE_CAPACITY or is_engine_capacity_error(error_text)
+
+
 def classify_root_cause_type(error_class: str, error_text: str) -> str:
     """Map a baseline attempt's ``error_class`` + message to a coarse enum.
 
@@ -298,7 +303,7 @@ def classify_root_cause_type(error_class: str, error_text: str) -> str:
     blob = f"{error_class} {error_text}".lower()
     if error_class == "kv_cache_oom" or any(m in blob for m in KV_CACHE_OOM_MARKERS):
         return "kv_cache_oom"
-    if error_class == ENGINE_CAPACITY or is_engine_capacity_error(error_text):
+    if _is_engine_capacity(error_class, error_text):
         return "engine_capacity"
     if "out of memory" in blob or "hip oom" in blob:
         return "oom"
