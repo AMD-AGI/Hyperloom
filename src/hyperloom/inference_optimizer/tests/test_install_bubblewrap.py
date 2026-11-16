@@ -18,7 +18,7 @@ INSTALL_SH = REPO_ROOT / "src" / "hyperloom" / "inference_optimizer" / "assets" 
 APT_LOG = "apt-calls"
 
 # PATH is curated so each test controls which of apt-get and bwrap are discoverable.
-_PATH_TOOLS = ("bash", "env", "cat", "echo", "printf", "dirname")
+_PATH_TOOLS = ("bash", "env", "cat", "echo", "printf", "dirname", "tail", "rm")
 
 
 def _ensure_bubblewrap_source() -> str:
@@ -46,7 +46,10 @@ def _run(
     apt_log = tmp_path / APT_LOG
     if with_apt:
         stub = bindir / "apt-get"
-        stub.write_text(f'#!/usr/bin/env bash\necho "$*" >> "{apt_log}"\nexit {apt_rc}\n', encoding="utf-8")
+        stub.write_text(
+            f'#!/usr/bin/env bash\necho "$*" >> "{apt_log}"\necho "E: stub apt output"\nexit {apt_rc}\n',
+            encoding="utf-8",
+        )
         stub.chmod(0o755)
     if with_bwrap:
         stub = bindir / "bwrap"
@@ -109,3 +112,9 @@ def test_a_failed_apt_install_warns_and_continues(tmp_path):
     assert proc.returncode == 0
     assert "bubblewrap" in proc.stderr
     assert any("install" in call for call in calls)
+
+
+def test_a_failed_apt_install_reports_the_apt_output(tmp_path):
+    proc, _ = _run(tmp_path, with_bwrap=False, with_apt=True, apt_rc=100)
+
+    assert "apt| E: stub apt output" in proc.stderr

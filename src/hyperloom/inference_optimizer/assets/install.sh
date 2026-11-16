@@ -1495,11 +1495,18 @@ ensure_bubblewrap() {
   else
     log "installing bubblewrap via apt"
     export DEBIAN_FRONTEND=noninteractive
-    if ! apt-get install -y --no-install-recommends bubblewrap >/dev/null 2>&1; then
-      apt-get update -qq >/dev/null 2>&1 || true
-      apt-get install -y --no-install-recommends bubblewrap >/dev/null 2>&1 \
-        || warn "bubblewrap: apt install failed (needs root and a reachable mirror); Codex workspace-write orchestration cannot start."
+    local apt_log="${TMPDIR:-/tmp}/bwrap_apt_$$.log"
+    if ! apt-get install -y --no-install-recommends bubblewrap >"$apt_log" 2>&1; then
+      apt-get update -qq >>"$apt_log" 2>&1 || true
+      if ! apt-get install -y --no-install-recommends bubblewrap >>"$apt_log" 2>&1; then
+        warn "bubblewrap: apt install failed (needs root and a reachable mirror); Codex workspace-write orchestration cannot start."
+        # An unwritable TMPDIR leaves no log; under set -euo pipefail the tail must not abort this fail-soft step.
+        if [ -f "$apt_log" ]; then
+          tail -n 6 "$apt_log" 2>/dev/null | while IFS= read -r _ln; do warn "  apt| ${_ln}"; done || true
+        fi
+      fi
     fi
+    rm -f "$apt_log" 2>/dev/null || true
   fi
   return 0
 }
