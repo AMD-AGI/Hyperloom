@@ -12,6 +12,7 @@ import logging
 import os
 import re
 import shlex
+import shutil
 import subprocess
 from contextlib import contextmanager
 from dataclasses import dataclass
@@ -36,6 +37,8 @@ _COMPUTE_BOUND_PROFILE_ENV = "HYPERLOOM_MN_PROFILE_COMPUTE_BOUND"
 
 # Control variables the multi-node launcher reads out of this process' environment for one restart.
 _PROFILE_TRACE_DIR_ENV = "HYPERLOOM_MN_PROFILE_TRACE_DIR"
+# Folders the engines write their CUDA-graph captures to, in the profiler dir or one role subdir of it.
+_GRAPH_CAPTURE_DIR_NAMES = ("graph_capture_profile", "capture_traces", "graph_capture")
 _EXTRA_FWD_ENV = "HYPERLOOM_MN_EXTRA_FWD_ENV"
 _UNSET_FWD_ENV = "HYPERLOOM_MN_UNSET_FWD_ENV"
 _RESUME_RUNNING_ENV = "MULTI_NODE_RESTART_RESUME_RUNNING"
@@ -253,6 +256,23 @@ def _resolve_round_args(server: RoundServer) -> tuple[str, str, int, int]:
 _RESTART_LOCK: "asyncio.Lock | None" = None
 
 
+def _drop_graph_captures(torch_profiler_dir: str) -> None:
+    """Remove the CUDA-graph capture folders under ``torch_profiler_dir``, so they hold only the next server's captures.
+
+    A relaunched server rewrites only the batch sizes it captures; a capture of the previous server left beside them
+    is matched against replays it never ran.
+    """
+    root = Path(torch_profiler_dir)
+    for name in _GRAPH_CAPTURE_DIR_NAMES:
+        for folder in (root / name, *root.glob(f"*/{name}")):
+            if not folder.is_dir():
+                continue
+            try:
+                shutil.rmtree(folder)
+            except OSError as exc:
+                log.warning("restart_server_for_round: cannot remove stale graph captures %s: %s", folder, exc)
+
+
 def _get_restart_lock() -> "asyncio.Lock":
     """Serialize multi-node server restart+wait (single shared cluster server)."""
     global _RESTART_LOCK
@@ -465,6 +485,7 @@ async def restart_server_for_round(
                 Path(torch_profiler_dir).mkdir(parents=True, exist_ok=True)
             except OSError as exc:
                 raise ServerRestartFailed(f"cannot mkdir torch_profiler_dir {torch_profiler_dir!r}: {exc}") from exc
+            _drop_graph_captures(torch_profiler_dir)
         with _restart_env_scope(extra_env, unset_env, torch_profiler_dir):
             from ._server_patcher import resolve_sglang_patch_set
 

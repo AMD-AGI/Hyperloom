@@ -227,6 +227,21 @@ def test_gc_fan_out_waits_for_a_profiling_round(monkeypatch, tmp_path):
     ]
 
 
+def test_a_profiling_restart_drops_the_graph_captures_of_the_previous_server(monkeypatch, tmp_path):
+    """The relaunched engines capture fewer batch sizes than before; the folder must hold only their captures."""
+    trace_dir = tmp_path / "trace"
+    stale = trace_dir / "decode" / "graph_capture_profile" / "DecodeCudaGraphRunner_bs_104_rank0.json.gz"
+    stale.parent.mkdir(parents=True)
+    stale.write_bytes(b"capture")
+    replay = trace_dir / "decode" / "1794822923.9-TP-0.trace.json.gz"
+    replay.write_bytes(b"trace")
+
+    _fan_out_calls(monkeypatch, tmp_path, patch_set="graph-capture", torch_profiler_dir=str(trace_dir))
+
+    assert not stale.parent.exists()
+    assert replay.is_file()
+
+
 def test_roofline_fan_out_still_runs_on_every_restart(monkeypatch, tmp_path):
     assert _fan_out_calls(monkeypatch, tmp_path, patch_set="roofline", torch_profiler_dir="") == ["roofline"]
 
