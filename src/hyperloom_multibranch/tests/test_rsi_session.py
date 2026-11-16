@@ -537,8 +537,7 @@ async def test_refills_the_judge_names_no_focus_for_take_the_open_areas_in_turn_
 
 
 class UnanalysedToolbox(ProfilingToolbox):
-    """The profiling toolbox whose TraceLens analysis ends at once and leaves no op shares, as a degraded report does;
-    a double for a backend that profiles, not a placeholder."""
+    """The profiling toolbox whose TraceLens analysis ends at once and leaves no op shares, as a degraded report does."""
 
     async def submit_analysis(
         self, branch: str, tool: str, params: Mapping[str, Any], profile_request_id: str = ""

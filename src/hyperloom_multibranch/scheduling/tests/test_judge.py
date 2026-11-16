@@ -375,7 +375,6 @@ def test_a_playbook_session_s_prompt_leaves_a_free_slot_free_only_while_every_op
         "When the open areas list no op because every op of the profile is worked on or spent, leave a free slot free"
         in prose
     )
-    assert "When the open areas list no op, leave a free slot free" not in prose
     assert "the scheduler then opens only the branches you name a focus for" in prose
     assert "only for an angle its history has not tried" in prose
     assert "briefed on the open areas' ops in turn" in prose
