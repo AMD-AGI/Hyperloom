@@ -19,6 +19,7 @@ log = _logging.getLogger(__name__)
 __all__ = [
     "CUSTOM_PROPOSAL_DOMAIN",
     "ProposalBench",
+    "carried_fingerprints",
     "explore_grid_fingerprints",
     "kb_exposure_of",
     "waiting_proposal_rows",
@@ -28,23 +29,54 @@ __all__ = [
 CUSTOM_PROPOSAL_DOMAIN: str = CUSTOM_SPECIALIST_KEY.removesuffix("_specialist")
 
 
-def explore_grid_fingerprints(tasks: Any) -> set[str]:
-    """Content fingerprints of the variants in every queued or running explore grid."""
+def _bench_key_prefix(cycle: int, *, operator_priority: bool) -> str:
+    """Idempotency-key prefix of macro cycle ``cycle``'s automatic explore grids."""
+    return f"{'auto-explore-custom' if operator_priority else 'auto-explore'}-c{cycle}-"
+
+
+def _grid_fingerprints(tasks: Iterable[Any]) -> set[str]:
+    """Content fingerprints of the variants in the grids of ``tasks``."""
     from ..actions.executors._proposal_identity import content_fingerprint
 
     return {
         content_fingerprint(variant)
-        for task in (*tasks.queued_context_sync(), *tasks.running_context_sync())
-        if task.kind == "explore"
+        for task in tasks
         for variant in (task.params or {}).get("grid") or ()
         if isinstance(variant, dict)
     }
 
 
+def explore_grid_fingerprints(tasks: Any) -> set[str]:
+    """Content fingerprints of the variants in every queued or running explore grid."""
+    return _grid_fingerprints(
+        task for task in (*tasks.queued_context_sync(), *tasks.running_context_sync()) if task.kind == "explore"
+    )
+
+
+def carried_fingerprints(shared_state: Any, tasks: Any) -> set[str]:
+    """Content fingerprints of the variants this macro cycle's automatic explore grids carried to their end.
+
+    A variant among them that is still untested ended without a verdict, and the Coordinator does not bench it again.
+    """
+    from ..state.task_registry import TERMINAL_STATES
+
+    cycle = int(shared_state.macro_cycle or 0)
+    return _grid_fingerprints(
+        task
+        for operator_priority in (False, True)
+        for task in tasks.with_key_prefix_sync("explore", _bench_key_prefix(cycle, operator_priority=operator_priority))
+        if task.state in TERMINAL_STATES
+    )
+
+
 def waiting_proposal_rows(shared_state: Any, tasks: Any) -> list[dict[str, Any]]:
-    """The untested proposals still waiting for a bench: those no queued or running explore grid holds."""
-    in_grids = explore_grid_fingerprints(tasks)
-    return [row for row in shared_state.untested_proposal_rows() if row["fingerprint"] not in in_grids]
+    """The untested proposals still waiting for a bench.
+
+    A proposal in a queued or running explore grid is being benched, and one a finished automatic grid carried is not
+    benched again.
+    """
+    held = explore_grid_fingerprints(tasks) | carried_fingerprints(shared_state, tasks)
+    return [row for row in shared_state.untested_proposal_rows() if row["fingerprint"] not in held]
 
 
 def kb_exposure_of(rows: Iterable[Mapping[str, Any]]) -> dict[str, Any]:
@@ -74,24 +106,23 @@ class ProposalBench(CoordinatorCollaborator):
         return any(is_operator_work(t.kind, t.params) for t in tasks)
 
     def _custom_proposal_rows(self) -> list[dict[str, Any]]:
-        """Untested proposals of the operator-defined specialist, capped at one grid."""
-        rows = [r for r in self.shared_state.untested_proposal_rows() if r["domain"] == CUSTOM_PROPOSAL_DOMAIN]
+        """The operator-defined specialist's proposals waiting for a bench, capped at one grid."""
+        rows = [
+            r for r in waiting_proposal_rows(self.shared_state, self.tasks) if r["domain"] == CUSTOM_PROPOSAL_DOMAIN
+        ]
         return rows[: self._AUTO_EXPLORE_GRID_CAP]
 
     def _bench_key(self, rows: list[dict[str, Any]], *, operator_priority: bool) -> str:
-        """Idempotency key naming the fingerprint set, so a grid that recorded nothing is not re-enqueued."""
+        """Idempotency key naming the fingerprint set, so one set of proposals is enqueued once."""
         fp_hash = sha1(",".join(sorted(row["fingerprint"] for row in rows)).encode(), usedforsecurity=False)
-        prefix = "auto-explore-custom" if operator_priority else "auto-explore"
-        return f"{prefix}-c{int(self.shared_state.macro_cycle or 0)}-{fp_hash.hexdigest()[:12]}"
+        prefix = _bench_key_prefix(int(self.shared_state.macro_cycle or 0), operator_priority=operator_priority)
+        return f"{prefix}{fp_hash.hexdigest()[:12]}"
 
     async def operator_work_pending(self) -> bool:
         """Whether the operator-defined specialist or the bench of its proposals has not run yet."""
         if self._has_operator_work((*await self.tasks.queued(), *await self.tasks.running())):
             return True
-        custom = self._custom_proposal_rows()
-        if not custom:
-            return False
-        return await self.tasks.find_by_idempotency_key(self._bench_key(custom, operator_priority=True)) is None
+        return bool(self._custom_proposal_rows())
 
     async def _maybe_finish_custom_only_cycle(self) -> None:
         """In custom-specialist-only mode, hint ``skip_to_sweep`` once this cycle's custom work has all run."""

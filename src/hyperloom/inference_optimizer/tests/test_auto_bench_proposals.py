@@ -8,17 +8,36 @@ from __future__ import annotations
 from types import SimpleNamespace
 from typing import Any
 
+import pytest
+
 
 class _Tasks:
     def __init__(self, queued=(), running=()) -> None:
         self._queued, self._running = list(queued), list(running)
         self.created: list[dict[str, Any]] = []
+        self.ended: dict[str, str] = {}
 
     async def queued(self):
         return self._queued
 
     async def running(self):
         return self._running
+
+    def queued_context_sync(self):
+        return self._queued
+
+    def running_context_sync(self):
+        return self._running
+
+    def with_key_prefix_sync(self, kind, key_prefix):
+        return [
+            SimpleNamespace(kind=c["kind"], params=c["params"], state=self.ended.get(c["idempotency_key"], "queued"))
+            for c in self.created
+            if c["kind"] == kind and c["idempotency_key"].startswith(key_prefix)
+        ]
+
+    def end_every_grid(self, state: str) -> None:
+        self.ended.update((c["idempotency_key"], state) for c in self.created)
 
     async def create_or_return_existing(self, spec):
         existing = any(c["idempotency_key"] == spec.idempotency_key for c in self.created)
@@ -87,6 +106,43 @@ async def test_same_queue_head_maps_to_the_same_idempotency_key():
     await fp._maybe_bench_untested_proposals()
     keys = {c["idempotency_key"] for c in _explores(fp)}
     assert len(keys) == 1
+
+
+@pytest.mark.parametrize("ended", ["failed", "cancelled", "succeeded"])
+async def test_a_grid_that_ended_without_a_verdict_hands_the_head_to_the_rows_behind_it(ended):
+    fp = _phase(rounds=[_round(*(f"v{i}" for i in range(6)))])
+    await fp._maybe_bench_untested_proposals()
+    fp._coord.tasks.end_every_grid(ended)
+
+    await fp._maybe_bench_untested_proposals()
+
+    first, second = _explores(fp)
+    assert [v["name"] for v in first["params"]["grid"]] == ["v0", "v1", "v2", "v3"]
+    assert [v["name"] for v in second["params"]["grid"]] == ["v4", "v5"]
+
+
+async def test_proposals_a_finished_grid_carried_are_not_benched_again():
+    fp = _phase(rounds=[_round("a", "b")])
+    await fp._maybe_bench_untested_proposals()
+    fp._coord.tasks.end_every_grid("failed")
+
+    await fp._maybe_bench_untested_proposals()
+
+    assert len(_explores(fp)) == 1
+    assert [row["name"] for row in fp.shared_state.untested_proposal_rows()] == ["a", "b"]
+
+
+async def test_a_grid_of_an_earlier_cycle_does_not_hold_back_this_cycles_proposals():
+    fp = _phase(rounds=[_round("a")])
+    await fp._maybe_bench_untested_proposals()
+    fp._coord.tasks.end_every_grid("failed")
+    state = fp._coord.shared_state
+    state.macro_cycle = 1
+    state.specialist_rounds = [{**_round("a"), "cycle": 1}]
+
+    await fp._maybe_bench_untested_proposals()
+
+    assert [c["idempotency_key"].split("-")[2] for c in _explores(fp)] == ["c0", "c1"]
 
 
 async def test_already_benched_fingerprints_are_skipped():
