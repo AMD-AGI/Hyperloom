@@ -535,7 +535,7 @@ _ROWS = [
      {"VLLM_ROCM_USE_AITER": "1"}),
     ("vllm", {"gfx1201"}, "--trust-remote-code --gpu-memory-utilization 0.9",
      {"VLLM_ROCM_USE_AITER": "0", "FLASH_ATTENTION_TRITON_AMD_ENABLE": "TRUE"}),
-    ("vllm", {"gfx1151"}, "--trust-remote-code --gpu-memory-utilization 0.95",
+    ("vllm", {"gfx1100", "gfx1151"}, "--trust-remote-code --gpu-memory-utilization 0.95",
      {"VLLM_ROCM_USE_AITER": "0", "VLLM_ROCM_USE_AITER_MHA": "0", "VLLM_ROCM_USE_AITER_RMSNORM": "0"}),
     ("atom", {"gfx942", "gfx950"}, "--trust-remote-code", {}),
 ]  # fmt: skip
