@@ -20,6 +20,16 @@ Merged to `main` and not yet carried by a tagged release. Each entry moves
 into the [release](https://github.com/AMD-AGI/Hyperloom/releases) that ships
 it.
 
+- **A multi-branch InferenceX session caches its branches' prompts for an
+  hour.** Each branch's Claude CLI now runs with `CLAUDE_CODE_PROMPT_CACHE_TTL`
+  and `CLAUDE_CODE_SUBAGENT_PROMPT_CACHE_TTL` at `1h` on an InferenceX
+  workload, and at the CLI's default `5m` on an AgentX one. Either variable set
+  in the session's environment wins, and now reaches a single-lineage
+  specialist too. Before, the specialist allowlist dropped both, so every
+  specialist ran at `5m`, and a branch that waited past 5 minutes for its test
+  wrote its whole conversation to the cache again. In a 12-hour Qwen3-14B
+  InferenceX session on MI325X those rewrites were 74% of the cache writes, and
+  the same calls priced at `1h` cost 20% less.
 - **A new specialist waits while the untested-proposal queue is full.** In
   FRAMEWORK_AGENT, a `specialist` delegate is refused with `policy_denied`
   rule `specialist_untested_backlog_full` while 8 proposals, twice the
