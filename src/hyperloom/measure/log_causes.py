@@ -17,7 +17,7 @@ from __future__ import annotations
 
 import re
 
-from hyperloom.common.failure_signature import IMPORT_FAILURE_LINE, argparse_refusal
+from hyperloom.common.failure_signature import ENGINE_CAPACITY_LINE, IMPORT_FAILURE_LINE, argparse_refusal
 from hyperloom.common.outside_facts import (
     HIP_ERROR_PREFIX,
     HIP_NO_BINARY_FOR_GPU,
@@ -127,6 +127,11 @@ def bad_request(text: str) -> str | None:
 def import_error(text: str) -> str | None:
     """The ``ImportError``/``ModuleNotFoundError`` line a failed import ended the server with."""
     return _last_matching(text, lambda line: bool(IMPORT_FAILURE_LINE.search(line)))
+
+
+def engine_capacity(text: str) -> str | None:
+    """The line that says the card holds less than the launch asked for (Mamba cache blocks, KV cache memory)."""
+    return _last_matching(text, lambda line: bool(ENGINE_CAPACITY_LINE.search(line)))
 
 
 def python_exception(text: str) -> str | None:

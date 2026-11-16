@@ -17,6 +17,7 @@ from typing import Any
 from hyperloom_common import io as _common_io
 from inference_suite.server_log import death_excerpt
 from hyperloom.common.agent_isolation import session_isolation_lines
+from hyperloom.common.failure_signature import is_engine_capacity_error
 from hyperloom.common.gain_math import gain_pct
 from hyperloom.common.platform_probe import platform_fingerprint
 
@@ -25,7 +26,7 @@ from ...bus.storage.connection import SqliteConnection
 from hyperloom.inference_optimizer.session.optimization_journal import read_journal_entries
 from hyperloom.inference_optimizer.session.paths import db_path_for
 from ...kernel import kernel_decisions
-from ...state.failure_evidence import classify_root_cause_type, engine_capacity_cause
+from ...state.failure_evidence import classify_root_cause_type
 from ...state.shared_state import SharedState, resolve_graded_comparison
 from ..stop_reason_explanations import STOP_REASON_EXPLANATIONS
 
@@ -76,7 +77,7 @@ def _pick_failure_headline(text: str) -> str:
     if not lines:
         return ""
     for ln in lines:
-        if engine_capacity_cause(ln) is not None:
+        if is_engine_capacity_error(ln):
             return ln
     priority = (
         "out of memory",

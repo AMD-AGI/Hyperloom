@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import pytest
 
+from hyperloom.common.failure_signature import is_engine_capacity_error
 from hyperloom.inference_optimizer.breakdown.stop_reasons import ARGV_INVALID
 from hyperloom.orchestrator.state.failure_evidence import (
     FAILURE_ATTRIBUTION_CANDIDATE,
@@ -16,7 +17,6 @@ from hyperloom.orchestrator.state.failure_evidence import (
     FAILURE_STAGE_DECISION,
     FAILURE_STAGE_WARMUP,
     classify_failure_attribution,
-    engine_capacity_cause,
     failure_from_variant_outcome,
     make_failure_id,
     render_failure_line,
@@ -39,19 +39,9 @@ _KV_EMPTY_LINE = (
 )
 
 
-def test_engine_capacity_cause_parses_the_numbers():
-    assert engine_capacity_cause(_MAMBA_CAPACITY_LINE) == {
-        "kind": "mamba_cache_blocks",
-        "requested": 256,
-        "available": 237,
-    }
-    assert engine_capacity_cause(_KV_MEMORY_LINE) == {
-        "kind": "kv_cache_memory",
-        "max_model_len": 262144,
-        "needed_gib": 24.5,
-        "available_gib": 9.1,
-    }
-    assert engine_capacity_cause(_KV_EMPTY_LINE) == {"kind": "kv_cache_empty"}
+@pytest.mark.parametrize("text", [_MAMBA_CAPACITY_LINE, _KV_MEMORY_LINE, _KV_EMPTY_LINE])
+def test_an_engine_capacity_error_is_recognised(text):
+    assert is_engine_capacity_error(text)
 
 
 @pytest.mark.parametrize(
@@ -64,8 +54,8 @@ def test_engine_capacity_cause_parses_the_numbers():
         "INFO max_num_seqs=256 gpu_memory_utilization=0.9",
     ],
 )
-def test_engine_capacity_cause_ignores_other_failures(text):
-    assert engine_capacity_cause(text) is None
+def test_engine_capacity_error_ignores_other_failures(text):
+    assert not is_engine_capacity_error(text)
 
 
 class TestClassifyFailureAttribution:

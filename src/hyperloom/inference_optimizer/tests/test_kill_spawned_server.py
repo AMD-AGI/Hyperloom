@@ -819,7 +819,7 @@ def test_a_legacy_marker_that_contains_a_fatal_one_keeps_legacy_handling(tmp_pat
 
 def test_death_excerpt_keeps_the_exception_below_the_marker(tmp_path):
     """``EngineCore failed to start`` precedes its traceback; on Python 3.14 the cause sits 62 lines below it."""
-    from hyperloom.orchestrator.state.failure_evidence import engine_capacity_cause
+    from hyperloom.common.failure_signature import is_engine_capacity_error
 
     err = "(EngineCore pid=14353) ERROR 11-09 16:41:10 [core.py:1349]"
     marker = f"{err} EngineCore failed to start."
@@ -839,4 +839,4 @@ def test_death_excerpt_keeps_the_exception_below_the_marker(tmp_path):
     excerpt = death_excerpt(str(log_path))
     assert excerpt is not None
     assert "EngineCore failed to start" in excerpt
-    assert engine_capacity_cause(excerpt) == {"kind": "mamba_cache_blocks", "requested": 256, "available": 237}
+    assert is_engine_capacity_error(excerpt)

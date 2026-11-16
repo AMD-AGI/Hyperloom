@@ -31,6 +31,7 @@ from hyperloom.common.failure_signature import (
     HIP_KERNEL_MISSING,
     HIP_RUNTIME_ERROR,
     IMPORT_ERROR,
+    RESOURCE_CONSTRAINT,
     SERVE_FLAG,
     FailureSignature,
     classify_failure,
@@ -175,6 +176,9 @@ _DETAILED_STEPS = frozenset({FailedStep.FLAG_UNKNOWN})
 LM_EVAL_BAD_REQUEST_REASON = "lm_eval_http_400"
 PYTHON_EXCEPTION_REASON = "python_exception"
 NO_KNOWN_SIGNATURE_REASON = "no_known_signature"
+#: The server died at start because the card holds less than the launch asked for (Mamba cache blocks, KV cache memory);
+#: the reason is ``<this>: <the log's line>``. A fresh sandbox of the same card meets it again.
+ENGINE_CAPACITY_REASON = "engine_capacity"
 #: The kinds of the shared signature table whose reason also quotes the log line that states them, with the reader of it.
 _QUOTED_KINDS = {
     SERVE_FLAG: log_causes.argparse_error,
@@ -192,6 +196,7 @@ _DECISIVE_REASONS = frozenset(
         IMPORT_ERROR,
         SERVE_FLAG,
         EVAL_RUNTIME_FAILURE,
+        ENGINE_CAPACITY_REASON,
         LM_EVAL_BAD_REQUEST_REASON,
         PYTHON_EXCEPTION_REASON,
         SERVER_BOOT_TIMEOUT_REASON,
@@ -391,6 +396,10 @@ def _named_by_logs(text: str, parts: list[str], *, eval_failed: bool = False) ->
     if hang:
         return _infra(f"{JIT_BUILD_TIMEOUT}: {hang}")
     signature = classify_failure(text)
+    if signature.kind == RESOURCE_CONSTRAINT:
+        capacity = log_causes.engine_capacity(text)
+        if capacity:
+            return _candidate(f"{ENGINE_CAPACITY_REASON}: {capacity}")
     if eval_failed and not signature.is_actionable:
         signature = FailureSignature(kind=EVAL_RUNTIME_FAILURE)
     if signature.kind == EVAL_RUNTIME_FAILURE:

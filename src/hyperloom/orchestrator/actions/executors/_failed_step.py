@@ -7,7 +7,9 @@ from __future__ import annotations
 
 from inference_suite.contracts import FailedStep
 
-from ...state.failure_evidence import ENGINE_CAPACITY, FAILED_STEP_ERROR_CLASSES, engine_capacity_cause
+from hyperloom.common.failure_signature import is_engine_capacity_error
+
+from ...state.failure_evidence import ENGINE_CAPACITY, FAILED_STEP_ERROR_CLASSES
 from ..stop_attribution import ORCHESTRATOR_CANCELLED_CLASS, SESSION_TIME_EXHAUSTED_CLASS
 
 # The failed steps whose class an action module owns; every other step is mapped in ``failure_evidence``. A round
@@ -24,7 +26,7 @@ def failed_step_error_class(step: FailedStep, detail: str = "") -> str:
 
     A server that exited before it was ready on a capacity error in ``detail`` is a config limit, not an engine fault.
     """
-    if step is FailedStep.SERVER_EXITED_BEFORE_READY and engine_capacity_cause(detail):
+    if step is FailedStep.SERVER_EXITED_BEFORE_READY and is_engine_capacity_error(detail):
         return ENGINE_CAPACITY
     return _ACTION_OWNED_STEP_CLASSES.get(step) or FAILED_STEP_ERROR_CLASSES[step]
 

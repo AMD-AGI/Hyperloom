@@ -57,6 +57,13 @@ EVAL_GENERATION_PATHOLOGY = "eval_generation_pathology"
 EVAL_RUNTIME_FAILURE = "eval_runtime_failure"
 UNKNOWN = "unknown"
 
+#: A vLLM start-time capacity error: the card holds less than the launch asked for (Mamba cache blocks, KV cache memory).
+ENGINE_CAPACITY_LINE = re.compile(
+    r"max_num_seqs \(\d+\) exceeds available \w+ cache blocks"
+    r"|KV cache is needed, which is larger than the available KV cache memory"
+    r"|No available memory for the cache blocks"
+)
+
 # --- Result model ----------------------------------------------------------
 
 
@@ -273,9 +280,7 @@ _RULES: tuple[_Rule, ...] = (
             re.compile(r"[Oo]ut\s+of\s+memory"),
             re.compile(r"no\s+GPU\s+memory\s+(?:for|left\s+for)\s+the\s+KV\s+[Cc]ache", re.IGNORECASE),
             re.compile(r"[Cc]annot\s+allocate\s+(?:memory|cuda|hip)"),
-            re.compile(r"max_num_seqs \(\d+\) exceeds available \w+ cache blocks"),
-            re.compile(r"KV cache is needed, which is larger than the available KV cache memory"),
-            re.compile(r"No available memory for the cache blocks"),
+            ENGINE_CAPACITY_LINE,
             re.compile(r"[Oo]ut[Oo]f[Mm]emory[Ee]rror"),
             re.compile(r"requires?\s+(?:at\s+least\s+)?(\d+)\s+GPU[s]?"),
             re.compile(r"[Tt]ensor\s+[Pp]arallel\s+[Ss]ize\s+.*?(\d+).*?GPU"),
@@ -440,6 +445,11 @@ def argparse_refusal(text: str) -> str | None:
     return None
 
 
+def is_engine_capacity_error(text: str) -> bool:
+    """Whether ``text`` carries a vLLM start-time capacity error."""
+    return ENGINE_CAPACITY_LINE.search(text) is not None
+
+
 # --- Request model ---------------------------------------------------------
 
 
@@ -527,6 +537,7 @@ __all__ = [
     "ACCURACY_BELOW_FLOOR",
     "CAPABILITY_DISABLED",
     "EVAL_GENERATION_PATHOLOGY",
+    "ENGINE_CAPACITY_LINE",
     "EVAL_RUNTIME_FAILURE",
     "HIP_KERNEL_MISSING",
     "HIP_RUNTIME_ERROR",
@@ -546,6 +557,7 @@ __all__ = [
     "argparse_refusal",
     "classify_failure",
     "framework_unimportable_line",
+    "is_engine_capacity_error",
     "is_targeted_build_candidate",
     "runnable_decision",
 ]

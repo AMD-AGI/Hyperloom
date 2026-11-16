@@ -15,7 +15,7 @@ from __future__ import annotations
 import pytest
 
 from hyperloom.measure import log_causes
-from hyperloom.measure.failures import FailureClass, FailureEvidence, classify_test_failure
+from hyperloom.measure.failures import FailureClass, FailureEvidence, classify_test_failure, decides_test
 from hyperloom.measure.tests import eval_refusal_logs
 
 ARGPARSE_LOG = (
@@ -108,6 +108,13 @@ UNDEFINED_SYMBOL_LOG = (
     "ImportError: /opt/sgl-kernel/common_ops.so: undefined symbol: _ZN4aiter8fmha_fwdEv\n"
 )
 PLAIN_LOG = "INFO server booted\nINFO request finished in 3.1s\nsegfault somewhere\n"
+ENGINE_CAPACITY_LOG = (
+    "(EngineCore pid=7) ERROR 01-01 00:00:00 [core.py:700] EngineCore failed to start.\n"
+    "(EngineCore pid=7) ERROR 01-01 00:00:00 [core.py:700] ValueError: max_num_seqs (256) exceeds available Mamba cache "
+    "blocks (237). Each decode sequence requires one Mamba cache block.\n"
+    "(APIServer pid=1) RuntimeError: Engine core initialization failed. See root cause above.\n"
+)
+OUT_OF_MEMORY_LOG = "(VllmWorker pid=3) ERROR torch.OutOfMemoryError: CUDA out of memory. Tried to allocate 2.00 GiB\n"
 
 
 def _classify(*logs: str, returncode: int = 1):
@@ -277,6 +284,23 @@ def test_an_absent_symbol_is_a_missing_kernel_that_names_the_symbol() -> None:
     )
 
 
+def test_an_engine_capacity_error_names_its_line_and_decides_the_test() -> None:
+    verdict = classify_test_failure(returncode=1, evidence=FailureEvidence(logs=(ENGINE_CAPACITY_LOG,)))
+
+    assert verdict.failure_class is FailureClass.CANDIDATE
+    assert verdict.failure_reason is not None
+    assert verdict.failure_reason.startswith("engine_capacity: ")
+    assert "exceeds available Mamba cache blocks (237)" in verdict.failure_reason
+    assert decides_test(verdict)
+
+
+def test_another_resource_constraint_stays_the_bare_kind_and_does_not_decide_the_test() -> None:
+    verdict = classify_test_failure(returncode=1, evidence=FailureEvidence(logs=(OUT_OF_MEMORY_LOG,)))
+
+    assert (verdict.failure_class, verdict.failure_reason) == (FailureClass.CANDIDATE, "resource_constraint")
+    assert not decides_test(verdict)
+
+
 def test_a_port_taken_still_wins_over_a_refused_flag() -> None:
     log = ARGPARSE_LOG + "OSError: [Errno 98] error while attempting to bind on address: address already in use\n"
 
@@ -296,6 +320,11 @@ def test_a_cause_line_is_one_bounded_line() -> None:
         (log_causes.argparse_error, ARGPARSE_LOG, "launch_server.py: error: ambiguous option:"),
         (log_causes.bad_request, LM_EVAL_STDERR, "API request failed with error message:"),
         (log_causes.python_exception, PYTHON_EXCEPTION_LOG, "AssertionError: M must be"),
+        (
+            log_causes.engine_capacity,
+            ENGINE_CAPACITY_LOG,
+            "max_num_seqs (256) exceeds available Mamba cache blocks (237)",
+        ),
         (log_causes.import_error, FASTSAFETENSORS_LOG, "ImportError: Please install fastsafetensors"),
         (log_causes.hip_error, ILLEGAL_ADDRESS_LOG, "HIP error: an illegal memory access"),
         (log_causes.missing_hip_kernel, UNDEFINED_SYMBOL_LOG, "undefined symbol: _ZN4aiter8fmha_fwdEv"),
