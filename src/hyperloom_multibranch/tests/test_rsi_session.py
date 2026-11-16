@@ -20,7 +20,7 @@ from __future__ import annotations
 
 import asyncio
 import json
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Any
@@ -32,6 +32,7 @@ from hyperloom.contracts.recipe import RecipeDelta
 from hyperloom_multibranch import cli
 from hyperloom_multibranch.contracts.llm import CompletionReply
 from hyperloom_multibranch.contracts.blackboard import Role
+from hyperloom_multibranch.contracts.blackboard.records import ToolResultPointer
 from hyperloom_multibranch.blackboard.rsi.archive import (
     ARCHIVE_ENV,
     ARCHIVED,
@@ -65,6 +66,7 @@ from hyperloom_multibranch.blackboard.rsi.session import NO_PLAYBOOK_PLAYED, STO
 from hyperloom_multibranch.blackboard.tools import CODE_TITLE, MAP_TITLE, SETTINGS_TITLE
 from hyperloom_multibranch.scheduling import lifecycle
 from hyperloom_multibranch.scheduling.agent_map import JUDGE_RULE
+from hyperloom_multibranch.scheduling.events import PROFILE_NOT_ANALYSED
 from hyperloom_multibranch.scheduling.explore import PLAYBOOK_FALLBACK_REASON, PLAYBOOK_OPEN_CUT_REASON
 from hyperloom_multibranch.scheduling.judge import GRACE_KEY, HoldReason
 from hyperloom_multibranch.scheduling.judge_prompt import (
@@ -532,6 +534,46 @@ async def test_refills_the_judge_names_no_focus_for_take_the_open_areas_in_turn_
     assert cuts and all(detail["no_open_area"] and (detail["requested"], detail["opened"]) == (1, 0) for detail in cuts)
     rows = _rounds(stage)[-1]
     assert (rows["b02"]["focus"], rows["b03"]["focus"]) == ("moe_gemm", "attention")
+
+
+class UnanalysedToolbox(ProfilingToolbox):
+    """The profiling toolbox whose TraceLens analysis ends at once and leaves no op shares, as a degraded report does;
+    a double for a backend that profiles, not a placeholder."""
+
+    async def submit_analysis(
+        self, branch: str, tool: str, params: Mapping[str, Any], profile_request_id: str = ""
+    ) -> str:
+        commit = self.requests[profile_request_id].parent_commit
+        pointer = ToolResultPointer(
+            branch, "tracelens-1", "/a", "trace analysed, no op shares", commit, profile_request_id
+        )
+        await self.blackboard.notify_tool_result(pointer)
+        return pointer.job_id
+
+    def tool_result(self, job_id: str) -> Mapping[str, Any]:
+        return {}
+
+
+async def test_refills_open_unfocused_and_uncut_when_the_root_is_profiled_but_its_trace_left_no_op_shares(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    stage = _focused_stage(tmp_path, monkeypatch, PlaybookJudge(opening=1, refill=1))
+    stage.toolbox_type = UnanalysedToolbox
+
+    outcome = await stage.run()
+
+    assert outcome.exit_code == 0
+    root = await stage.root()
+    assert [row["reason"] for row in _decisions(stage) if row["kind"] == "profile"] == [PROFILE_NOT_ANALYSED]
+    focus = await _lineage_focus(stage)
+    assert set(focus) >= {"b02", "b03", "b04"} and not any(focus.values())
+    assert not [row for row in _decisions(stage) if row["reason"] == PLAYBOOK_OPEN_CUT_REASON]
+    unknown = (
+        f"Open areas for a new branch: unknown. The integration head {root} is profiled, its trace not analysed: "
+        "it left no op shares, so no op is known."
+    )
+    steering = [prompt for prompt in _judge_prompts(stage) if not _judge_state(prompt)["opening"]]
+    assert steering and all(unknown in prompt.splitlines() for prompt in steering)
 
 
 async def test_a_refill_leaves_the_op_a_running_agent_branch_holds_and_its_brief_and_the_judge_read_the_map(
