@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import ast
 import contextlib
+import functools
 from collections.abc import Iterator, Sequence
 from dataclasses import dataclass
 import hashlib
@@ -24,6 +25,7 @@ from typing import Any
 from kernelforge.config.edit_policy import FORGE_PROTECTED_PATHS, PROTECTED_GLOBS
 from kernelforge.utils.git import GitError, git, git_bytes
 from kernelforge.workflows.forge_loop.gate.gate_settings import GateMeasurement, GateScope
+from kernelforge.workflows.forge_loop.gate.protected_names import ProtectedNames, command_cwds, written_arguments
 from kernelforge.evaluation.jit_rebuild import JitRebuildUnavailable, force_jit_rebuild_for_changes
 from kernelforge.evaluation.scoring import (
     KEEP_MEASUREMENT_COUNT,
@@ -889,65 +891,52 @@ class InSessionGate:
         if remaining:
             raise RuntimeError(f"protected files remain inconsistent after restoration: {remaining}")
 
-    def _protected_basenames(self) -> set[str]:
-        """Basenames of every protected file.
+    @functools.cached_property
+    def _names(self) -> ProtectedNames:
+        """The protected files by the names a shell command gives them (agents ``cd`` into the
+        workspace, so a command's paths are usually relative)."""
+        return ProtectedNames(self.workspace_root, (*self.protected_abs, *self._protected_snapshot), self._is_protected)
 
-        Agents ``cd`` into the workspace, so a command's path arguments are
-        usually relative and would never resolve to the protected ABSPATH.
-        """
-        return {os.path.basename(path) for path in self.protected_abs} | {
-            Path(relative).name for relative in self._protected_snapshot
-        }
-
-    def _names_protected(self, raw: str) -> bool:
+    def _names_protected(self, raw: str, cwds: Sequence[Path] = ()) -> bool:
         """Whether a command argument names a protected file, by path or by basename."""
         path = _unquote(raw)
-        if not path:
-            return False
-        return self._is_protected(path) or os.path.basename(path) in self._protected_basenames()
+        return bool(path) and (self._is_protected(path) or self._names.by_name(path, cwds))
 
-    def _protected_mention(self, text: str) -> str:
-        """Basename of the first protected file this text mentions anywhere, or \"\"."""
-        lowered = text.lower()
-        for path in (*self.protected_abs, *self._protected_snapshot):
-            if path.lower() in lowered or Path(path).name.lower() in lowered:
-                return Path(path).name
-        return ""
-
-    def _python_write_deny_reason(self, source: str) -> str:
+    def _python_write_deny_reason(self, source: str, cwds: Sequence[Path] = ()) -> str:
         """WHY an inline Python payload writes a protected file, or \"\"."""
         targets, ambiguous, found_write = _python_write_targets(source)
         if not found_write:
             return ""
         for target in targets:
-            if self._names_protected(target):
+            if self._names_protected(target, cwds):
                 return f"inline write targets protected file '{os.path.basename(_unquote(target))}'"
         if not ambiguous:
             return ""
-        mentioned = self._protected_mention(source)
+        mentioned = self._names.mention(source)
         return f"inline write may modify protected file '{mentioned}'" if mentioned else ""
 
-    def _redirect_deny_reason(self, text: str) -> str:
+    def _redirect_deny_reason(self, text: str, cwds: Sequence[Path] = ()) -> str:
         """WHY an output redirection in this command writes a protected file, or \"\"."""
         for match in _BASH_REDIRECT_TARGET.finditer(text):
             target = match.group(1)
             if _is_disposable_redirect_target(target):
                 continue
-            if self._names_protected(target):
+            if self._names_protected(target, cwds):
                 return f"redirect writes protected path '{_unquote(target)}'"
         return ""
 
-    def _write_verb_deny_reason(self, text: str) -> str:
+    def _write_verb_deny_reason(self, text: str, cwds: Sequence[Path] = ()) -> str:
         """WHY a shell write verb in this command takes a protected file as a path argument, or \"\"."""
         for verb, args in _simple_commands(text):
             inplace_edit = verb in ("sed", "perl") and any(arg == "-i" or arg.startswith("-i") for arg in args)
             if verb not in _BASH_WRITE_VERBS and not inplace_edit:
                 continue
-            for arg in args:
-                if arg.startswith("-"):
-                    continue
-                if self._names_protected(arg):
-                    return f"`{verb}` writes protected file '{os.path.basename(_unquote(arg))}'"
+            named, placed = written_arguments(verb, args, lambda path: self._names.is_directory(path, cwds))
+            hit = next((arg for arg in named if self._names_protected(arg, cwds)), None)
+            if hit is None:
+                hit = next((path for path in placed if self._names.places_into_protected(path, cwds)), None)
+            if hit is not None:
+                return f"`{verb}` writes protected file '{os.path.basename(_unquote(hit))}'"
         return ""
 
     def _inline_write_deny_reason(self, text: str) -> str:
@@ -958,13 +947,14 @@ class InSessionGate:
         """
         if not _INLINE_WRITE_INTENT.search(text):
             return ""
-        mentioned = self._protected_mention(text)
+        mentioned = self._names.mention(text)
         return f"inline write may modify protected file '{mentioned}'" if mentioned else ""
 
-    def _bash_deny_reason(self, command: str) -> str:
-        """WHY a Bash command is denied (a short trigger reason), or \"\" to allow."""
+    def _bash_deny_reason(self, command: str, cwd: str | None = None) -> str:
+        """WHY a Bash command run in ``cwd`` is denied (a short trigger reason), or \"\" to allow."""
         if not command:
             return ""
+        cwds = command_cwds(_simple_commands(command), cwd, self.workspace_root)
         # Every inline Python payload is parsed on its own, then blanked out so the
         # textual scans below never read a quoted program as shell text.
         remainder = command
@@ -974,13 +964,13 @@ class InSessionGate:
         ):
             payloads = find_payloads(remainder)
             for source, _start, _end in payloads:
-                reason = self._python_write_deny_reason(source)
+                reason = self._python_write_deny_reason(source, cwds)
                 if reason:
                     return reason
             remainder = blank(remainder, [(start, end) for _source, start, end in payloads])
         return (
-            self._redirect_deny_reason(remainder)
-            or self._write_verb_deny_reason(remainder)
+            self._redirect_deny_reason(remainder, cwds)
+            or self._write_verb_deny_reason(remainder, cwds)
             or self._inline_write_deny_reason(remainder)
         )
 
@@ -1055,7 +1045,7 @@ class InSessionGate:
         if input_data.get("tool_name", "") != "Bash":
             return {}
         command = self._bash_command(input_data)
-        reason = self._bash_deny_reason(command)
+        reason = self._bash_deny_reason(command, input_data.get("cwd"))
         if reason:
             return self._deny_bash(
                 command,
