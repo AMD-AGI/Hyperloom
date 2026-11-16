@@ -19,6 +19,7 @@ log = _logging.getLogger(__name__)
 __all__ = [
     "CUSTOM_PROPOSAL_DOMAIN",
     "ProposalBench",
+    "UNTESTED_BACKLOG_CAP",
     "carried_fingerprints",
     "explore_grid_fingerprints",
     "kb_exposure_of",
@@ -154,3 +155,7 @@ class ProposalBench(CoordinatorCollaborator):
             return
         if state.set_pending_escalate_hint(ESCALATE_HINT_SKIP_TO_SWEEP):
             log.info("custom-specialist-only: cycle %s done; leaving FRAMEWORK_AGENT", state.macro_cycle)
+
+
+#: Proposals waiting for a bench at which a new specialist dispatch is refused: two automatic grids.
+UNTESTED_BACKLOG_CAP: int = 2 * ProposalBench._AUTO_EXPLORE_GRID_CAP
