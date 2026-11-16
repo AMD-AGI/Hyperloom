@@ -588,7 +588,6 @@ def _iteration_config(inputs: _RunInputs, campaign: CampaignConfig) -> Iteration
         driver_script=str((workspace / campaign.driver_path).resolve()),
         canonical_driver_sha256=campaign.driver_sha256,
         campaign_base_commit=campaign.base_commit,
-        gpu_target=campaign.gpu_target,
         snr_threshold=campaign.snr_threshold,
         max_time_hours=max(0.05, request.budget.max_hours),
         deadline_unix=deadline.deadline_unix - deadline.finalize_reserve_sec,
