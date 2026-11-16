@@ -147,11 +147,11 @@ def test_a_decision_with_no_review_pending_is_refused(tmp_path: Path) -> None:
     assert show(tmp_path / "MB-review") is None
 
 
-def test_a_review_with_no_map_says_each_arbor_maps_its_own(tmp_path: Path) -> None:
+def test_a_review_with_no_map_says_each_component_agent_maps_its_own(tmp_path: Path) -> None:
     request(tmp_path / "MB-review", tmp_path, Reviewed(None, None, "generated from the root's shares"), NOW)
 
     page = (tmp_path / "MB-review" / REVIEW_PAGE).read_text()
-    assert "none could be made: each Arbor maps its own" in page and "**Dossier:** none" in page
+    assert "none was made: each component agent maps its own" in page and "**Dossier:** none" in page
     assert "The pause does not count against --max-hours" in page and "## The clock" not in page
     assert str(show(tmp_path / "MB-review")).endswith("Status: pending\n")
 

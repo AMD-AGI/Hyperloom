@@ -9,6 +9,13 @@ import dataclasses
 import json
 from pathlib import Path
 
+import pytest
+
+from hyperloom.common.launch_credentials import redact_credential_env
+from hyperloom.inference_optimizer.cli import base_launch as cli_base_launch
+from hyperloom.orchestrator.state.base_launch import FrozenBase
+from hyperloom_multibranch.scheduling.session_base import freeze_session_base
+from hyperloom_multibranch.scheduling.settings import KernelOptimizer, Workload as SessionWorkload
 from inference_suite import INFERENCEX_CLIENT_COMMIT
 from inference_suite.contracts import (
     BaseLaunch,
@@ -71,3 +78,16 @@ def write_record(path: Path, base: BaseLaunch | None = None, **edits: object) ->
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(json.dumps({**document, **edits}), encoding="utf-8")
     return path
+
+
+#: A credential a reference script exports, which the session freezes as its sha256.
+TOKEN = "hf_frozen_token_value"
+
+
+def frozen_credential_base(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> FrozenBase:
+    """The base of an AgentX session that exports ``HF_TOKEN``, frozen as the session freezes a resolved base."""
+
+    exported = base_record(env={**base_record().env, "HF_TOKEN": TOKEN})
+    monkeypatch.setattr(cli_base_launch, "resolve_server_base", lambda _: redact_credential_env(exported))
+    workload = SessionWorkload(MODEL_ID, "vllm", 2, 8, "fp8", "mi355x", KernelOptimizer.FORGE, None)
+    return freeze_session_base(tmp_path / "toolbox", workload, "")

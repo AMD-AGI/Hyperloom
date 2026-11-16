@@ -37,8 +37,8 @@ class BranchKind(str, Enum):
 class BranchOrigin(str, Enum):
     """Where a branch's start comes from: the root commit (integration), a direction the user wrote or a third-party
     agent the user named, both opening ahead of the opening batch, the opening batch, a later batch that refills freed
-    slots, a rule-gate request: a fork for a correctness fix or a repair of a blocked gain, or an Arbor agent's share of
-    the map a mapping branch made."""
+    slots, a rule-gate request: a fork for a correctness fix or a repair of a blocked gain, or a component agent's share
+    of the map a mapping branch made."""
 
     ROOT = "root"
     USER = "user"

@@ -61,8 +61,8 @@ class SessionStopReason(str, Enum):
     PRELUDE_FAILED = "prelude_baseline_failed"
     #: The toolbox has fewer usable cards than one test needs; FINAL is skipped and the session failed.
     NO_MEASUREMENT_CARDS = "no_measurement_cards"
-    #: The run asked to stop once its Arbor agents' directions were mapped (``--stop-after-map``): PRELUDE and the map
-    #: ran, EXPLORE and FINAL did not, and the map and dossier were left for a person to review.
+    #: The run asked to stop once its component agents' directions were mapped (``--stop-after-map``): PRELUDE and the
+    #: map ran, EXPLORE and FINAL did not, and the map and dossier were left for a person to review.
     MAPPED = "mapped"
     #: A person rejected the session's agent map at its review (:mod:`.review`): PRELUDE and the map ran, no agent
     #: branch opened, and EXPLORE and FINAL did not run.
