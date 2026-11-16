@@ -24,7 +24,7 @@ _ARCH_BY_GPU_TYPE = {
 _GPU_TYPE_BY_ARCH = {
     "gfx942": "mi300x",
     "gfx950": "mi355x",
-    "gfx1100": "w7900d",
+    "gfx1100": "w7900",
     "gfx1151": "radeon8060s",
     "gfx1201": "r9700",
 }

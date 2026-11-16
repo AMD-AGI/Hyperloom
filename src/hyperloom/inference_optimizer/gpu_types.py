@@ -40,6 +40,7 @@ _BOARD_POLICIES: dict[str, BoardPolicy] = {
     "r9600d": BoardPolicy(
         validated_frameworks=frozenset({"vllm"}), targeted_build_validated=False, geak_identity_pinned=True
     ),
+    "w7900": BoardPolicy(validated_frameworks=frozenset({"vllm"}), targeted_build_validated=False),
     "w7900d": BoardPolicy(validated_frameworks=frozenset({"vllm"}), targeted_build_validated=False),
     "radeon8060s": BoardPolicy(),
 }
