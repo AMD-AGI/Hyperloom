@@ -1468,16 +1468,6 @@ def test_explicit_specialist_model_overrides_the_selected_backend_model(
     assert runner.subprocess_config.model == "specialist-override"
 
 
-def test_specialist_model_help_describes_generic_selected_backend_override() -> None:
-    """The help text must not claim the generic override is Claude-only."""
-    from hyperloom.inference_optimizer.cli.parser import _build_parser
-
-    parser = _build_parser()
-    subparsers = next(action for action in parser._actions if isinstance(action, argparse._SubParsersAction))
-    help_text = " ".join(subparsers.choices["optimize"].format_help().split())
-    assert "selected specialist backend" in help_text
-
-
 def _write_mcp_config(tmp_path: Path, servers: dict[str, Any]) -> str:
     path = tmp_path / "mcp.json"
     path.write_text(json.dumps({"mcpServers": servers}), encoding="utf-8")

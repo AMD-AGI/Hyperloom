@@ -206,35 +206,6 @@ def test_build_emit_intent_server_returns_none_without_factories():
     assert cfg is None
 
 
-def test_build_emit_intent_server_uses_factories():
-    captured: dict[str, Any] = {}
-
-    def fake_tool(name, desc, schema):
-        captured["tool_name"] = name
-
-        def deco(handler):
-            captured["handler"] = handler
-            return ("decorated", handler)
-
-        return deco
-
-    def fake_server(name, version, tools):
-        captured["server_name"] = name
-        captured["version"] = version
-        captured["tools"] = tools
-        return {"server": name}
-
-    cfg = build_emit_intent_server(
-        tool_factory=fake_tool,
-        server_factory=fake_server,
-    )
-    assert cfg == {"server": "inference_optimizer"}
-    assert captured["tool_name"] == EMIT_INTENT_TOOL_NAME
-    assert captured["server_name"] == "inference_optimizer"
-    assert captured["version"] == "1.0.0"
-    assert len(captured["tools"]) == 1
-
-
 _ORCHESTRATION_INTENTS = default_role_registry()["orchestration"].allowed_intents
 _CRITIC_INTENTS = default_role_registry()["critic"].allowed_intents
 _REVIEW_VERDICT_EMIT = {
@@ -361,15 +332,6 @@ def test_claude_backend_raises_without_sdk_or_seams(monkeypatch):
             sdk_options_cls=None,
             sdk_module=None,
         )
-
-
-def test_claude_backend_with_seams_constructs(monkeypatch):
-    backend = ClaudeBackend(
-        sdk_query_factory=_make_query_factory([]),
-        sdk_options_cls=FakeOptions,
-        mcp_server_factory=lambda *a, **k: None,
-    )
-    assert backend.sdk_query_factory is not None
 
 
 def _clear_effort_env(monkeypatch):

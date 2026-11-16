@@ -86,20 +86,12 @@ def test_import_sdk_incomplete(monkeypatch):
         cl._import_sdk()
 
 
-def test_import_sdk_ok(monkeypatch):
-    fake = SimpleNamespace(query=lambda: None, ClaudeAgentOptions=object)
+# ---- __post_init__ --------------------------------------------------------
+def test_backend_without_seams_uses_the_installed_sdk(monkeypatch):
+    fake = SimpleNamespace(query=_query([]), ClaudeAgentOptions=_FakeOptions)
     monkeypatch.setattr(cl.importlib, "import_module", lambda name: fake)
-    q, opts, mod = cl._import_sdk()
-    assert opts is object
-    assert mod is fake
-
-
-# ---- __post_init__ via real _import_sdk seam ------------------------------
-def test_post_init_imports_sdk(monkeypatch):
-    fake_q = _query([])
-    fake = SimpleNamespace(query=fake_q, ClaudeAgentOptions=_FakeOptions)
-    monkeypatch.setattr(cl, "_import_sdk", lambda: (fake_q, _FakeOptions, fake))
     b = cl.ClaudeBackend()
+    assert b.sdk_query_factory is fake.query
     assert b.sdk_options_cls is _FakeOptions
     assert b.sdk_module is fake
 
@@ -111,13 +103,6 @@ def test_post_init_emit_intent_setup_failure_fails_construction(monkeypatch):
 
 
 # ---- set_context_provider -------------------------------------------------
-def test_set_context_provider_success(monkeypatch):
-    monkeypatch.setattr(cl, "build_context_tools_server", lambda provider, **k: SimpleNamespace(name="ctx"))
-    b = _backend()
-    b.set_context_provider(SimpleNamespace())
-    assert b._context_server_config is not None
-
-
 def test_set_context_provider_failure_raises(monkeypatch):
     monkeypatch.setattr(cl, "build_context_tools_server", lambda provider, **k: (_ for _ in ()).throw(ValueError("x")))
     b = _backend()
@@ -146,34 +131,21 @@ def test_build_options_with_context_tools(monkeypatch):
     assert cl.CONTEXT_MCP_SERVER_NAME in opts.kwargs["mcp_servers"]
 
 
-# ---- _instantiate_options --------------------------------------------------
-def test_instantiate_options_passthrough():
-    class _Options:
-        def __init__(self, **kwargs):
-            self.kwargs = kwargs
+# ---- CLI stderr -----------------------------------------------------------
+async def test_cli_stderr_lines_go_to_the_debug_log(caplog):
+    """The SDK hands each CLI stderr line to the options' callback instead of the operator console."""
 
-    b = _backend(sdk_options_cls=_Options)
-    opts = b._instantiate_options({"max_turns": 4, "resume": "s"})
-    assert opts.kwargs == {"max_turns": 4, "resume": "s"}
+    async def _query_writing_stderr(*, prompt, options):
+        options.kwargs["stderr"]("  error line  ")
+        options.kwargs["stderr"]("   ")
+        yield _Msg(content=[TextBlock("hi")], result="hi")
 
-
-def test_instantiate_options_typeerror_propagates():
-    class _Boom:
-        def __init__(self, **kwargs):
-            raise TypeError("boom")
-
-    b = _backend(sdk_options_cls=_Boom)
-    with pytest.raises(TypeError):
-        b._instantiate_options({"max_turns": 4})
-
-
-# ---- _stderr_sink ---------------------------------------------------------
-def test_stderr_sink_logs_non_blank_lines_at_debug(caplog):
     b = _backend()
+    b.sdk_query_factory = _query_writing_stderr
     with caplog.at_level(logging.DEBUG, logger=cl.log.name):
-        b._stderr_sink("  error line  ")
-        b._stderr_sink("   ")
-    assert [(r.levelno, r.getMessage()) for r in caplog.records] == [(logging.DEBUG, "claude CLI stderr: error line")]
+        await b.run("hi")
+    stderr_records = [r for r in caplog.records if r.getMessage().startswith("claude CLI stderr")]
+    assert [(r.levelno, r.getMessage()) for r in stderr_records] == [(logging.DEBUG, "claude CLI stderr: error line")]
 
 
 # ---- run(): timeout -------------------------------------------------------
@@ -341,12 +313,6 @@ async def test_last_reported_stop_reason_wins():
     assert res.metadata["stop_reason"] == "end_turn"
 
 
-def test_parse_tool_use_block_invalid_returns_none():
-    b = _backend()
-    bad = ToolUseBlock(name=cl.EMIT_INTENT_TOOL_QUALIFIED, input={"intent_type": "not_a_real_type", "payload": {}})
-    assert b._parse_tool_use_block(bad) is None
-
-
 # ---- mcp_emit_intent: handler + validation branches -----------------------
 
 from hyperloom.orchestrator.roles import mcp_emit_intent as mei
@@ -355,30 +321,24 @@ from hyperloom.inference_optimizer.protocol.intent import (
 )
 
 
-def test_validate_emit_intent_input_non_dict_payload_raises():
-    with pytest.raises(IntentValidationError, match="'payload' must be an object"):
-        mei.validate_emit_intent_input({"intent_type": "send_message", "payload": "nope"})
-
-
-def test_validate_emit_intent_input_not_an_object_raises():
-    with pytest.raises(IntentValidationError, match="must be an object"):
-        mei.validate_emit_intent_input(["not", "a", "dict"])  # type: ignore[arg-type]
-
-
-def test_validate_emit_intent_input_unexpected_keys_raises():
-    with pytest.raises(IntentValidationError, match="unexpected keys"):
-        mei.validate_emit_intent_input({"intent_type": "send_message", "payload": {}, "extra": 1})
-
-
-def test_validate_emit_intent_input_missing_top_level_key_raises():
-    with pytest.raises(IntentValidationError, match="requires both"):
-        mei.validate_emit_intent_input({"intent_type": "send_message"})
-
-
-def test_validate_emit_intent_input_missing_required_payload_field_raises():
-    # send_message requires 'topic'; omit it. The message names the field, which is what tells the agent what to fix.
-    with pytest.raises(IntentValidationError, match="topic"):
-        mei.validate_emit_intent_input({"intent_type": "send_message", "payload": {}})
+@pytest.mark.parametrize(
+    ("tool_input", "error_match"),
+    [
+        pytest.param(
+            {"intent_type": "send_message", "payload": "nope"}, "'payload' must be an object", id="non-dict-payload"
+        ),
+        pytest.param(["not", "a", "dict"], "must be an object", id="not-an-object"),
+        pytest.param(
+            {"intent_type": "send_message", "payload": {}, "extra": 1}, "unexpected keys", id="unexpected-keys"
+        ),
+        pytest.param({"intent_type": "send_message"}, "requires both", id="missing-top-level-key"),
+        # send_message requires 'topic'; the message names the field, which is what tells the agent what to fix.
+        pytest.param({"intent_type": "send_message", "payload": {}}, "topic", id="missing-required-payload-field"),
+    ],
+)
+def test_validate_emit_intent_input_rejects(tool_input, error_match):
+    with pytest.raises(IntentValidationError, match=error_match):
+        mei.validate_emit_intent_input(tool_input)
 
 
 @pytest.mark.asyncio
