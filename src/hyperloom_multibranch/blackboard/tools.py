@@ -114,7 +114,6 @@ MAP_TITLE = (
     "your intent answers its reason, saying how:"
 )
 _UNFINISHED = {
-    UnfinishedReason.NOT_STACKABLE: "committed, merge not stackable",
     UnfinishedReason.REPAIR_UNFINISHED: "blocked, its repair never finished",
     UnfinishedReason.WITHDRAWN: "withdrawn before its result",
 }

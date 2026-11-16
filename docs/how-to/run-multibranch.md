@@ -101,7 +101,8 @@ value but `on`, `off` or empty is refused when the toolbox is built.
   gives a launch file.
 - **Limits:** `--max-hours` (default 2, 0 for none), `--max-gpu-hours` and `--max-llm-usd` (0 for none),
   `--max-branches` (default 4). A negative or non-finite limit is a usage error.
-- **Concurrency:** `--max-parallel-tests` (default: as many as fit at TP), `--max-k-per-branch` (default 2),
+- **Concurrency:** `--max-parallel-tests` (default: as many as fit at TP), `--max-k-per-branch` (default 2; a
+  specialist's branch only, the integration branch's K is bounded by `--max-parallel-tests`),
   `--dev-leases`, `--judge-interval-sec` (default 600, must be positive), `--measurement local|hosted`,
   `--[no-]make-before-break` (hosted only, default on: where the grant fits at least three tests at TP, a finished
   test's sandbox is kept until the next test's runs, so that the cluster does not give its node to another job, and one

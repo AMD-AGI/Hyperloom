@@ -927,10 +927,10 @@ def test_the_nudge_and_role_send_later_heads_on_a_path_whose_profile_analysis_fa
     assert "profile your head unless a profile analysis already failed on its execution path" in role
 
 
-def test_the_role_retries_a_lead_the_integrator_refused_only_with_a_reason_it_would_now_stack():
+def test_the_role_retries_a_change_the_integrator_refused_only_with_a_reason_it_would_now_stack():
     prompt = role_prompt(WORKLOAD)
 
-    assert "A lead the integrator measured not stackable on the integration head" in prompt
+    assert "A change the integrator measured not stackable on the integration head" in prompt
     assert "only with a stated reason it would now stack" in prompt
 
 

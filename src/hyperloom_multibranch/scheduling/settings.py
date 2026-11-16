@@ -116,6 +116,13 @@ class Workload:
         return self.inferencex is not None
 
     @property
+    def integration_k(self) -> int:
+        """The K the integration branch opens at: 2 for InferenceX, whose merge tests and profiles are short; 1 for
+        AgentX, whose merge test holds one of a few large slots for its whole trace window."""
+
+        return 1 if self.inferencex is None else 2
+
+    @property
     def bundles_merges(self) -> bool:
         """Whether a merge round tests the commits it is offered together, in one merge test, before it tests them one
         by one. An AgentX merge test holds one of a few large slots for its whole trace window, so one test per commit
