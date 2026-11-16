@@ -19,7 +19,7 @@ from typing import Any
 from inference_suite.contracts import FailedStep
 
 from hyperloom.common.env_safety import redact_secret_values
-from hyperloom.common.failure_signature import SERVE_FLAG, framework_unimportable_line
+from hyperloom.common.failure_signature import SERVE_FLAG, framework_unimportable_line, is_engine_capacity_error
 from hyperloom.inference_optimizer.breakdown.stop_reasons import ARGV_INVALID, HOST_GPUS_UNAVAILABLE
 
 FAILURE_STAGE_WARMUP: str = "warmup"
@@ -60,6 +60,8 @@ ENGINE_EXECUTE_TIMEOUT_HINT: str = (
 DETOKENIZER_STALL: str = "detokenizer_stall"
 BENCHMARK_REPORT_MISSING: str = "benchmark_report_missing"
 YAML_BUILD_ERROR: str = "yaml_build_error"
+# The error class of a server that died at start because the card holds less than the launch settings ask for.
+ENGINE_CAPACITY: str = "engine_capacity"
 
 # The class each inference_suite failed step is recorded under. A step that replaces a
 # failure Hyperloom names independently of the runner keeps that class, so readers of the
@@ -282,6 +284,11 @@ def _server_died(evidence: str) -> bool:
     )
 
 
+def _is_engine_capacity(error_class: str, error_text: str) -> bool:
+    """Whether the failure names a start-time engine-capacity limit."""
+    return error_class == ENGINE_CAPACITY or is_engine_capacity_error(error_text)
+
+
 def classify_root_cause_type(error_class: str, error_text: str) -> str:
     """Map a baseline attempt's ``error_class`` + message to a coarse enum.
 
@@ -296,6 +303,8 @@ def classify_root_cause_type(error_class: str, error_text: str) -> str:
     blob = f"{error_class} {error_text}".lower()
     if error_class == "kv_cache_oom" or any(m in blob for m in KV_CACHE_OOM_MARKERS):
         return "kv_cache_oom"
+    if _is_engine_capacity(error_class, error_text):
+        return "engine_capacity"
     if "out of memory" in blob or "hip oom" in blob:
         return "oom"
     if error_class == "timeout" or "benchmark exceeded" in blob:

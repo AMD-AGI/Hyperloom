@@ -25,6 +25,7 @@ from hyperloom.orchestrator.state.tests._session_base import freeze_base
 from hyperloom.orchestrator.actions.executors import _grid_base, _grid_runner
 from hyperloom.orchestrator.actions.executors._suite import rounds as suite_rounds
 from hyperloom.orchestrator.actions.executors._failed_step import failed_step_error_class
+from hyperloom.orchestrator.actions.executors.tests.test_baseline_suite_round import _CAPACITY_SERVER_LOG
 from hyperloom.orchestrator.actions.executors._grid_runner import GridLaunch, GridRecipe, GridStop, GridVariant
 from hyperloom.orchestrator.actions.executors._grid_runner import run_grid
 from hyperloom.orchestrator.actions.executors._suite.config import MEASURED_SEED
@@ -34,7 +35,7 @@ from hyperloom.orchestrator.actions.executors.tests.test_suite_config import _MO
 from hyperloom.orchestrator.rehearsal import READY, STAGE_FAILED, LaunchAttempt, LaunchScenario, ScriptedRounds
 from hyperloom.orchestrator.rehearsal import VirtualClock, installed_clock
 from hyperloom.orchestrator.rehearsal.scenario import ScenarioError
-from hyperloom.orchestrator.state.failure_evidence import ARGV_INVALID
+from hyperloom.orchestrator.state.failure_evidence import ARGV_INVALID, ENGINE_CAPACITY
 from hyperloom.orchestrator.actions.stop_attribution import ORCHESTRATOR_CANCELLED_CLASS, SESSION_TIME_EXHAUSTED_CLASS
 from inference_suite.contracts import FailedStep, LifecycleMode, RunLayout, WorkloadKind
 from inference_suite.runtime.process import Reaped
@@ -211,6 +212,18 @@ def test_a_round_stopped_at_a_step_fails_the_variant_under_that_steps_class(monk
     assert row.status == "failed"
     assert row.error_class == ARGV_INVALID
     assert row.workspace == str(slot / f"{RUN_DIR_PREFIX}0")
+
+
+def test_a_server_that_exits_on_a_capacity_error_fails_the_variant_as_engine_capacity(monkeypatch, suite):
+    row, _, _ = _play(
+        monkeypatch,
+        suite,
+        LaunchAttempt(outcome=STAGE_FAILED, stage="engine_init", server_log=_CAPACITY_SERVER_LOG),
+        launch=GridLaunch(warmup_before_measure=False),
+    )
+
+    assert row.status == "failed"
+    assert row.error_class == ENGINE_CAPACITY
 
 
 def test_a_cancelled_round_is_the_runs_own_stop(monkeypatch, suite):
