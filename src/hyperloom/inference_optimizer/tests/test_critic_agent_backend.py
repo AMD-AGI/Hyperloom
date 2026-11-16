@@ -19,6 +19,8 @@ from hyperloom.orchestrator.roles import CriticAgentBackend
 from hyperloom.orchestrator.roles.base import BackendError, LLMCallFailed
 from hyperloom_common.llm.llm_config import AnthropicMessageResult
 from hyperloom.orchestrator.roles.critic_agent import (
+    CRITIC_AGENT_LLM_CONNECT_TIMEOUT_SEC,
+    CRITIC_AGENT_LLM_RW_TIMEOUT_SEC,
     CRITIC_AGENT_MAX_COMPLETION_TOKENS,
     CRITIC_AGENT_TRUNCATION_RETRY_FACTOR,
     RuntimeCall,
@@ -340,6 +342,15 @@ def test_construct_forwards_llm_timeout_knobs_to_the_client(monkeypatch, tmp_pat
     monkeypatch.setenv("CRITIC_AGENT_LLM_RW_TIMEOUT_S", "7")
     timeout = _construct_critic_capturing_sdk_kwargs(monkeypatch, tmp_path)["timeout"]
     assert (timeout.connect, timeout.read, timeout.write, timeout.pool) == (3.0, 7.0, 7.0, 7.0)
+
+
+def test_construct_defaults_llm_timeouts_without_env_knobs(monkeypatch, tmp_path: Path):
+    monkeypatch.setenv("OPENAI_API_KEY", "openai-user-key")
+    monkeypatch.delenv("CRITIC_AGENT_LLM_CONNECT_TIMEOUT_S", raising=False)
+    monkeypatch.delenv("CRITIC_AGENT_LLM_RW_TIMEOUT_S", raising=False)
+    timeout = _construct_critic_capturing_sdk_kwargs(monkeypatch, tmp_path)["timeout"]
+    assert timeout.connect == CRITIC_AGENT_LLM_CONNECT_TIMEOUT_SEC
+    assert timeout.read == CRITIC_AGENT_LLM_RW_TIMEOUT_SEC
 
 
 def test_construct_without_httpx_falls_back_to_sdk_default_timeouts(monkeypatch, tmp_path: Path):

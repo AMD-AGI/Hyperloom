@@ -78,6 +78,20 @@ def test_the_report_catalogue_entry_names_the_only_phase_that_admits_it(registry
     assert "only in CLOSE" in registry["report"].description
 
 
+@pytest.mark.parametrize(
+    ("marker", "phases"),
+    [
+        ("## 6. KERNEL-OPT REQUEST REFERENCE", {_ps.PHASE_KERNEL_AGENT}),
+        ("### IDEA GENERATION", {_ps.PHASE_FRAMEWORK_AGENT}),
+        ("RULE F1", {_ps.PHASE_PRELUDE, _ps.PHASE_ENABLEMENT}),
+    ],
+    ids=["kernel_request_reference", "idea_generation", "rule_f1"],
+)
+def test_each_builder_scoped_section_renders_in_exactly_its_phases(registry, marker, phases):
+    """Each section guides work only these phases do; the sets are literal so that a changed scope fails here."""
+    assert {phase for phase in _ps.PHASE_NAMES if marker in _build(registry, phase)} == phases
+
+
 def test_scoping_never_hides_a_block_from_every_phase(registry):
     """A scope naming no real phase would drop its block from every prompt the model can receive."""
     scoped = set().union(*(_build(registry, phase).splitlines() for phase in _ps.PHASE_NAMES))
