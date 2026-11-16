@@ -7,12 +7,14 @@
 
     {"schema": 1, "prompt_set": KEY, "prompts_sha256": SHA, "length": L, "max_new_tokens": N, "concurrency": C,
      "needed_context": L+128, "served_context": N or null, "stopped": "", "boot_seconds": S, "query_seconds": S,
+     "server": "held"|"real_acceptance",
      "prompts": [{"id": ID, "task": T, "references": [..], "tokens": N, "status": "ok"|"error"|"not_run", "reason": "",
                   "text": "", "finish_reason": "", "prompt_tokens": N or null, "seconds": S}, ...]}
 
 Every prompt of the set is listed, answered or not, with the references its answer is graded against, so the file alone is
 enough to grade the check again. ``stopped`` says why the whole check ended early (a launch that serves too little context,
-a server that did not come up, the phase cap). The toolbox reads the file from the landed bundle, so every field is read
+a server that did not come up, the phase cap). ``server`` is the server the check asked (``LONG_CONTEXT_SERVERS``); a file
+written before it was recorded has none, and was asked of the held server. The toolbox reads the file from the landed bundle, so every field is read
 strictly.
 """
 
@@ -25,7 +27,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-from hyperloom.contracts.long_context import PROMPT_OK, PROMPT_STATUSES
+from hyperloom.contracts.long_context import LONG_CONTEXT_HELD, LONG_CONTEXT_SERVERS, PROMPT_OK, PROMPT_STATUSES
 from hyperloom.measure.docs import DocumentError, parse_json_object
 from hyperloom.measure.long_context.plan import LONG_CONTEXT_DIR, OUTPUTS_FILE, LongContextPlan
 
@@ -51,6 +53,7 @@ _TOP_KEYS = frozenset(
         "boot_seconds query_seconds prompts"
     ).split()
 )
+_SERVER_KEY = "server"
 _PROMPT_KEYS = "id task references tokens status reason text finish_reason prompt_tokens seconds".split()
 
 
@@ -91,6 +94,7 @@ class OutputsFile:
     boot_seconds: float
     query_seconds: float
     prompts: tuple[PromptEntry, ...]
+    server: str = LONG_CONTEXT_HELD
 
 
 def clean_reason(text: str) -> str:
@@ -101,12 +105,14 @@ def clean_reason(text: str) -> str:
 @dataclass(frozen=True)
 class RunFacts:
     """What the pass says of itself rather than of a prompt: the context the launch serves (when it states one), why the
-    whole check ended early (or ``""``) and the seconds the server took to come up and to answer."""
+    whole check ended early (or ``""``), the seconds the server took to come up and to answer, and which server it was
+    (``LONG_CONTEXT_SERVERS``)."""
 
     served_context: int | None
     stopped: str
     boot_seconds: float
     query_seconds: float
+    server: str = LONG_CONTEXT_HELD
 
 
 def write_outputs(output_dir: Path, plan: LongContextPlan, entries: Sequence[PromptEntry], facts: RunFacts) -> Path:
@@ -124,6 +130,7 @@ def write_outputs(output_dir: Path, plan: LongContextPlan, entries: Sequence[Pro
         "boot_seconds": round(facts.boot_seconds, 3),
         "query_seconds": round(facts.query_seconds, 3),
         "prompts": [entry.to_document() for entry in entries],
+        _SERVER_KEY: facts.server,
     }
     directory = Path(output_dir) / LONG_CONTEXT_DIR
     directory.mkdir(parents=True, exist_ok=True)
@@ -161,10 +168,17 @@ def _prompt(value: Any, path: str) -> PromptEntry:
 
 
 def parse_outputs(document: Mapping[str, Any]) -> OutputsFile:
-    if set(document) != _TOP_KEYS or document["schema"] != _SCHEMA or not isinstance(document["prompts"], list):
+    if (
+        set(document) - {_SERVER_KEY} != _TOP_KEYS
+        or document["schema"] != _SCHEMA
+        or not isinstance(document["prompts"], list)
+    ):
         raise OutputsError(
             f"the outputs file holds the keys {sorted(document)}, not {sorted(_TOP_KEYS)} of schema {_SCHEMA}"
         )
+    server = document.get(_SERVER_KEY, LONG_CONTEXT_HELD)
+    if server not in LONG_CONTEXT_SERVERS:
+        raise OutputsError(f"the outputs file's server is one of {LONG_CONTEXT_SERVERS}, got {server!r}")
     ints = [document[k] for k in ("length", "max_new_tokens", "concurrency", "needed_context")]
     texts = [document[k] for k in ("prompt_set", "prompts_sha256", "stopped")]
     served, spent = document["served_context"], [document["boot_seconds"], document["query_seconds"]]
@@ -175,7 +189,7 @@ def parse_outputs(document: Mapping[str, Any]) -> OutputsFile:
     prompts = tuple(_prompt(item, f"prompts[{i}]") for i, item in enumerate(document["prompts"]))
     if not prompts or len({p.id for p in prompts}) != len(prompts):
         raise OutputsError("the outputs file lists no prompt, or a prompt id twice")
-    return OutputsFile(*texts[:2], *ints, served, texts[2], float(spent[0]), float(spent[1]), prompts)
+    return OutputsFile(*texts[:2], *ints, served, texts[2], float(spent[0]), float(spent[1]), prompts, server)
 
 
 def read_outputs(directory: Path) -> OutputsFile:

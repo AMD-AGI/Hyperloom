@@ -30,6 +30,14 @@ from hyperloom_common.llm.token_usage import uncached_input_tokens
 # Name Codex records the gateway under in its own TOML config.
 CODEX_PROVIDER_NAME = "hyperloom"
 
+# Config overrides every Codex run carries. ``features.memories=false`` keeps a run from carrying state between
+# tasks. ``web_search="disabled"`` withholds Codex's hosted web_search tool: a gateway cannot replay its server-side
+# tool results, so the request after a search fails with a 400 and the run crashes.
+CODEX_BASE_OVERRIDES = ("features.memories=false", 'web_search="disabled"')
+
+# Removes Codex's ``exec_command`` and ``write_stdin`` tools from the model's tool list.
+_SHELL_TOOL_OFF_OVERRIDE = "features.shell_tool=false"
+
 _CLIENT_NAME = "hyperloom"
 _CLIENT_TITLE = "Hyperloom"
 
@@ -499,11 +507,12 @@ def normalize_codex_result(result: Any) -> CodexSessionResult:
 
 @dataclass(frozen=True)
 class CodexSessionConfig:
-    """The runtime one Codex session runs in: workspace, model and the roots it may write."""
+    """The runtime one Codex session runs in: workspace, model, the roots it may write and whether it has a shell."""
 
     cwd: Path
     model: str
     writable_roots: Sequence[Path] = ()
+    shell_tool: bool = True
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "cwd", Path(self.cwd))
@@ -598,9 +607,10 @@ class CodexSession:
             sandbox_mode=resolved_sandbox_mode,
         )
         config_overrides = (
-            "features.memories=false",
+            *CODEX_BASE_OVERRIDES,
             *provider_config.overrides,
             *_writable_root_overrides(self.config.writable_roots),
+            *(() if self.config.shell_tool else (_SHELL_TOOL_OFF_OVERRIDE,)),
         )
         # The client is entered inside the CODEX_HOME context so unwinding closes the client first and only then
         # removes the state it writes.
@@ -690,6 +700,7 @@ class CodexSession:
                     await asyncio.wait_for(turn_handle.interrupt(), timeout=_INTERRUPT_TIMEOUT_SEC)
                 with contextlib.suppress(self._sdk.CodexError, RuntimeError, asyncio.TimeoutError):
                     await asyncio.wait_for(asyncio.shield(turn_task), timeout=_INTERRUPT_TIMEOUT_SEC)
+                self.reset_thread()
                 raise CodexSessionTimeoutError(f"Codex turn timed out after {request.timeout_sec:g}s")
             sdk_result = turn_task.result()
         except CodexSessionError:
@@ -727,6 +738,7 @@ async def run_codex_turn(
 
 
 __all__ = [
+    "CODEX_BASE_OVERRIDES",
     "CODEX_PROVIDER_NAME",
     "CODEX_SANDBOX_MODES",
     "CODEX_SANDBOX_MODE_ENV",

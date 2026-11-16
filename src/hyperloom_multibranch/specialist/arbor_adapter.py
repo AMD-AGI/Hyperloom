@@ -51,7 +51,6 @@ import re
 import shlex
 import subprocess
 from collections.abc import Mapping
-from dataclasses import dataclass, field
 from fnmatch import fnmatch
 from pathlib import Path, PurePosixPath
 from typing import Any
@@ -79,23 +78,44 @@ from hyperloom.measure.compile import (
 )
 from hyperloom.measure.surface import POINT_ENV_KEYS, REQUEST_ENV_KEYS, SURFACE_ENV_KEYS
 from hyperloom_common.shared_storage import copy_shared_file, make_shared_dirs
-from hyperloom_multibranch.blackboard.local.agent_manifest import REDACTED
 from hyperloom_multibranch.repo.isolated_git import pinned_git
 from hyperloom_multibranch.rulegate.agentx import AgentXObjective
-from hyperloom_multibranch.specialist.agent_manifest import EXIT_FILE, AgentManifest
+from hyperloom_multibranch.specialist.agent_manifest import AgentManifest
 from hyperloom_multibranch.specialist.agent_spec import AgentSpec
+from hyperloom_multibranch.specialist.component_agent import (
+    BRANCH_RUN,
+    DOSSIER_PASS,
+    EXIT_REFUSED,
+    LAUNCH_KEYS,
+    MAPPED,
+    MB_DIR,
+    REVIEW_HOST,
+    REVIEW_OFF,
+    AgentCheckout,
+    AgentRefused,
+    ComponentAgent,
+    ComponentRun,
+    ResolvedLaunch,
+    SplitFailed,
+    exit_reason,
+    mapped,
+    read_launch,
+    refused_reasons,
+    served_config,
+    shell_line,
+)
 from hyperloom_multibranch.specialist.worktree import SKIPPED
-from inference_suite.argv import remove_server_args, reserialize_json_blobs, tokenize_server_args_preserving_json
+from inference_suite.argv import remove_server_args, tokenize_server_args_preserving_json
 from inference_suite.contracts import (
-    BASE_LAUNCH_SCHEMA,
-    BaseLaunch,
-    BaseLaunchError,
-    CredentialNotHeld,
     RunStatus,
-    held_env,
 )
 from inference_suite.contracts.layout import REPORT_FILE
 
+
+#: The host's own parts of this adapter are :mod:`component_agent`'s; these are the names they had here.
+ArborRefused = AgentRefused
+ArborCheckout = AgentCheckout
+ArborRun = ComponentRun
 
 #: What makes a checkout Arbor's, run as a component: the mode, the entry point and the host's contract.
 MARKERS = ("arbor/component.py", "arbor/__main__.py", "docs/hosts.md")
@@ -106,18 +126,10 @@ HOST = "hyperloom-mb"
 PACK = "serving"
 BENCH_SCRIPT = "validator/bench.sh"
 CORRECTNESS_SCRIPT = "validator/correctness.sh"
-#: Where MB writes Arbor's configs and keeps its sessions, in Arbor's checkout: a config must be under the checkout,
-#: where Arbor finds its packs from it.
-MB_DIR = "hyperloom-mb"
 #: Where a branch's share of the directions is copied in its checkout, beside its config: the share MB splits off is
 #: under the session, which the branch's sandbox need not see.
 PLAN_FILE = f"{MB_DIR}/plan.json"
 OUTBOX = "keeps"
-#: The keys of a launch file (:func:`read_launch`): the first two it must give, the others it may.
-LAUNCH_KEYS = ("server_flags", "server_env", "model_name")
-#: A placeholder of the repository's launch template still to be filled: ``<NAME>``, or a description such as ``<the
-#: name the server answers to>``. A literal tag in a real flag, ``<think>``, is neither.
-_PLACEHOLDER = re.compile(r"<(?:[A-Z_]+|[^<>]*\s[^<>]*)>")
 #: Where a branch's checkout carries the base launch record it is served, beside its config.
 BASE_LAUNCH_FILE = f"{MB_DIR}/base_launch.json"
 #: The pass floor of the serving pack's GSM8K check, which Arbor reads from the config's ``server_env``; without one
@@ -224,10 +236,7 @@ INSTALL = (
     f" || {PYTHON} -m pip install --quiet claude-agent-sdk",
     f"{ARBOR_PYTHON} -c 'import arbor, yaml, claude_agent_sdk' || {{ {ARBOR_PYTHON} -c '{_SITE_UNREAD}'; exit 1; }}",
 )
-#: Arbor's exit code for a config it refuses, and only for that; its session's refusal file says why.
-EXIT_REFUSED = 2
 #: The exit reason of a dossier pass that set its map, and the map's file in its session.
-MAPPED = "mapped"
 MAP_FILE = "directions.json"
 #: Where Arbor's dossier skill writes a dossier in its checkout and looks one up: a directory per dossier, with its
 #: index. Arbor ships dossiers of its own there, which git tracks.
@@ -256,8 +265,6 @@ ENTRYPOINTS = {SGLANG: ("python3", "-m", "sglang.launch_server"), VLLM: ("vllm",
 #: How a spec hands Arbor's review gate over: the host reviewed the campaign before it starts the run (the only value
 #: ``component.review`` takes), or nobody reviews it (``"review_gate": false`` at the config's top level).
 REVIEW_KEY = "review"
-REVIEW_HOST = "host"
-REVIEW_OFF = "off"
 REVIEW_GATE_KEY = "review_gate"
 #: Where an Arbor checkout declares its component block's keys, which says whether it has the review gate.
 COMPONENT_MODULE = "arbor/component.py"
@@ -296,198 +303,6 @@ _TAIL_LINES = 20
 #: The built files of an installed package, its compiled extensions among them: the source base's (:data:`SKIPPED`)
 #: but its bytecode, which Python writes again.
 BUILT = tuple(pattern for pattern in SKIPPED if pattern.startswith("*.") and pattern not in ("*.pyc", "*.pyo"))
-
-
-class ArborRefused(ValueError):
-    """A config Arbor would refuse at its start; ``reasons`` says why, one line each."""
-
-    def __init__(self, reasons: list[str]) -> None:
-        super().__init__("; ".join(reasons))
-        self.reasons = tuple(reasons)
-
-
-class SplitFailed(RuntimeError):
-    """Arbor could not generate a map, or split one into shares; the message says what it printed."""
-
-
-@dataclass(frozen=True)
-class ResolvedLaunch:
-    """A server's launch as the recipe's framework resolves it: its ``server_flags`` and ``server_env``, the
-    ``model_name`` the server answers to, ``""`` when not given. The recipe's
-    own launch is added to it, as a round adds a root recipe's ``extra_server_args`` and ``extra_envs``."""
-
-    server_flags: str = ""
-    server_env: Mapping[str, str] = field(default_factory=dict)
-    model_name: str = ""
-    #: A base launch record's file, its digest and its entrypoint; empty for a launch file.
-    record: str = ""
-    digest: str = ""
-    entrypoint: tuple[str, ...] = ()
-
-
-def read_launch(path: Path) -> ResolvedLaunch:
-    """The launch in the file ``path``, a JSON object of :data:`LAUNCH_KEYS` (the repository's
-    ``examples/multibranch-arbor-launch`` has a template), or a base launch record (:func:`_read_record`); raise
-    :class:`ArborRefused` with every reason it cannot be used: unreadable, a key it does not have, no ``server_flags``
-    or ones with a quote left open, a ``server_env`` that is not an object of strings, or a template placeholder left
-    unfilled. The gate gives every Arbor its client, so a launch names none."""
-
-    try:
-        document = json.loads(path.read_text(encoding=ENCODING))
-    except (OSError, UnicodeDecodeError, ValueError) as error:
-        raise ArborRefused([f"the launch file {path} cannot be read: {error}"]) from error
-    if not isinstance(document, dict):
-        raise ArborRefused([f"the launch file {path} is not a JSON object"])
-    if document.get("schema") == BASE_LAUNCH_SCHEMA:
-        return _read_record(path, document)
-    unknown = sorted(set(document) - set(LAUNCH_KEYS))
-    reasons = [f"it has keys a launch does not: {', '.join(unknown)}"] if unknown else []
-    flags, env = document.get("server_flags"), document.get("server_env")
-    if not isinstance(flags, str) or not flags.strip():
-        reasons.append("it gives no server_flags, the launch's server arguments")
-    elif not _splits_as_shell(flags):
-        reasons.append("its server_flags do not split into shell words: a quote is left open")
-    if not isinstance(env, dict) or not all(isinstance(value, str) for value in env.values()):
-        reasons.append("its server_env is not an object of strings")
-    texts = {key: document.get(key, "") for key in LAUNCH_KEYS[2:]}
-    reasons += [f"its {key} is not a string" for key, value in texts.items() if not isinstance(value, str)]
-    unfilled = [key for key in LAUNCH_KEYS if _PLACEHOLDER.search(json.dumps(document.get(key, "")))]
-    if unfilled:
-        reasons.append(f"its {', '.join(unfilled)} still hold the template's placeholders: fill them in")
-    if reasons:
-        raise ArborRefused([f"the launch file {path}: {reason}" for reason in reasons])
-    return ResolvedLaunch(flags, env, texts["model_name"])
-
-
-def served_config(config: Mapping[str, Any], spec: AgentSpec) -> dict[str, Any]:
-    """``config`` as MB stores it, every credential masked, with each masked ``server_env`` value that ``spec``'s
-    launch file serves read from it again (:func:`read_launch`): a frozen base's from this host. Raise
-    :class:`ArborRefused` when the host no longer holds that value."""
-
-    env = config.get("server_env")
-    masked = [name for name, value in env.items() if value == REDACTED] if isinstance(env, Mapping) else []
-    if not masked or not spec.launch:
-        return dict(config)
-    served = read_launch(Path(spec.launch)).server_env
-    return {**config, "server_env": {**env, **{name: served[name] for name in masked if name in served}}}
-
-
-def _read_record(path: Path, document: Mapping[str, Any]) -> ResolvedLaunch:
-    """The launch the base launch record ``document`` read from ``path`` serves: its server argv and environment as the
-    gate seeds a launch with them (:func:`~hyperloom.orchestrator.state.base_launch.server_base`) and each redacted
-    value from this host (:func:`~inference_suite.contracts.held_env`, as the suite's own round fills it), the record itself, its
-    digest and its entrypoint, which Arbor checks its own launch against at its start. The record names no served
-    model and no client command: those are the gate's client's. Raise :class:`ArborRefused` when it is no valid record,
-    a scriptable base, which launches no server, or one whose redacted value this host does not hold."""
-
-    from hyperloom.orchestrator.state.base_launch import server_argv, server_base
-
-    try:
-        base = BaseLaunch.from_document(document)
-    except BaseLaunchError as error:
-        raise ArborRefused([f"the base launch record {path} cannot be used: {error}"]) from error
-    if base.scriptable:
-        raise ArborRefused([f"the base launch record {path} runs a script and launches no server for Arbor"])
-    try:
-        held = held_env(base.env, os.environ)
-    except CredentialNotHeld as error:
-        raise ArborRefused([f"the base launch record {path} cannot be served: {error}"]) from error
-    return ResolvedLaunch(
-        server_flags=" ".join(_flag_word(word) for word in server_argv(base)),
-        server_env={**held, **server_base(base).env},
-        record=str(path),
-        digest=base.digest(),
-        entrypoint=base.entrypoint,
-    )
-
-
-def _flag_word(word: str) -> str:
-    """``word`` as Arbor's server_flags carry it, which Arbor launches through a shell: quoted for the shell, a JSON
-    value compacted first, and of a ``--name=value`` word only its value, so that it still reads as a flag, unless the
-    value holds whitespace, which Arbor's non-POSIX split would break inside a quoted value."""
-
-    flag, value = _flag_and_value(word)
-    if value[:1] in "{[":
-        try:
-            value = json.dumps(json.loads(value), separators=(",", ":"))
-        except ValueError:
-            pass
-    if any(char.isspace() for char in value):
-        return shlex.quote(flag + value)
-    return flag + shlex.quote(value)
-
-
-def _shell_line(args: str) -> str:
-    """Server arguments as MB composes them as the shell line Arbor's server_flags are: each of
-    :func:`_shell_words` quoted by :func:`_flag_word`."""
-
-    return " ".join(_flag_word(word) for word in _shell_words(args))
-
-
-def _shell_words(args: str) -> list[str]:
-    """The words a shell gives ``args``, in which a JSON value may also stand unquoted, as MB composes one; raise
-    ``ValueError`` when a quote is left open."""
-
-    text, decoder = reserialize_json_blobs(args), json.JSONDecoder()
-    parts: list[str] = []
-    blobs: list[str] = []
-    i = 0
-    while i < len(text):
-        if text[i] in "{[":
-            try:
-                end = decoder.raw_decode(text, i)[1]
-            except ValueError:
-                pass
-            else:
-                parts.append(f"\0{len(blobs)}\0")
-                blobs.append(text[i:end])
-                i = end
-                continue
-        parts.append(text[i])
-        i += 1
-    return [re.sub(r"\0(\d+)\0", lambda found: blobs[int(found[1])], word) for word in shlex.split("".join(parts))]
-
-
-def _splits_as_shell(args: str) -> bool:
-    try:
-        _shell_words(args)
-    except ValueError:
-        return False
-    return True
-
-
-def _flag_and_value(word: str) -> tuple[str, str]:
-    """A ``--name=value`` word as ``--name=`` and its value; any other word as ``""`` and itself."""
-
-    if word.startswith("-") and "=" in word:
-        name, _, value = word.partition("=")
-        return f"{name}=", value
-    return "", word
-
-
-@dataclass(frozen=True)
-class ArborCheckout:
-    """Arbor at ``commit`` of ``source``, checked out at ``path``."""
-
-    source: str
-    commit: str
-    path: Path
-
-
-@dataclass(frozen=True)
-class ArborRun:
-    """One run of Arbor in its checkout: where its config and its session are, and where it stops of itself, ``None``
-    when only its deadline or MB stops it."""
-
-    config_file: str
-    session_dir: str
-    stop_at: str | None = None
-
-
-#: A branch's run, and the dossier pass, which writes the dossier and its map on one lease before the branches open and
-#: exits 0 once the map is set (:func:`mapped`).
-BRANCH_RUN = ArborRun(f"{MB_DIR}/config.json", f"{MB_DIR}/session")
-DOSSIER_PASS = ArborRun(f"{MB_DIR}/dossier.json", f"{MB_DIR}/dossier", stop_at="map")
 
 
 def is_arbor(checkout: Path) -> bool:
@@ -804,7 +619,7 @@ def _arbor_objective(objective: AgentXObjective) -> dict[str, Any]:
 
 
 def server_flags(spec: AgentSpec, resolved: str = "") -> str:
-    """The recipe's server arguments as the shell line Arbor launches them with (:func:`_shell_line`), after the
+    """The recipe's server arguments as the shell line Arbor launches them with (:func:`~hyperloom_multibranch.specialist.component_agent.shell_line`), after the
     ``resolved`` launch's, less the flags the recipe removes from it, when there is one, with the workload's TP size
     unless the arguments set it (SGLang and vLLM); on SGLang also its expert-parallel size, unless the arguments set
     it, and only when it divides the TP, as MB's own launch has it."""
@@ -812,13 +627,13 @@ def server_flags(spec: AgentSpec, resolved: str = "") -> str:
     args = merge_server_args(remove_server_args(resolved, spec.remove_args), spec.server_args)
     tp_flags = {SGLANG: SGLANG_TP_FLAGS, VLLM: VLLM_TP_FLAGS}.get(spec.framework)
     if tp_flags is None:
-        return _shell_line(args)
+        return shell_line(args)
     named = _flag_names(args)
     added = [] if named & set(tp_flags) else [f"{tp_flags[0]} {spec.tp}"]
     flag, aliases, _ = expert_parallel_flag(SGLANG)
     if spec.framework == SGLANG and spec.ep > 1 and spec.tp % spec.ep == 0 and not named & set(aliases):
         added.append(f"{flag} {spec.ep}")
-    return _shell_line(merge_server_args(args, *added))
+    return shell_line(merge_server_args(args, *added))
 
 
 def _launch_refusals(spec: AgentSpec) -> list[str]:
@@ -1113,40 +928,6 @@ def _plan_refusals(plan: object) -> list[str]:
     return []
 
 
-def refused_reasons(path: Path) -> str:
-    """Why Arbor refused its config, as the refusal file at ``path`` lists it; ``""`` when there is none to read."""
-
-    try:
-        document = json.loads(path.read_text(encoding=ENCODING))
-    except (OSError, ValueError):
-        return ""
-    reasons = document.get("reasons") if isinstance(document, dict) else None
-    if not isinstance(reasons, list):
-        return ""
-    return "; ".join(str(reason) for reason in reasons if str(reason).strip())
-
-
-def exit_reason(path: Path) -> str:
-    """Why Arbor says its run ended, as the exit file at ``path`` it writes before an exit 0 has it; else what is
-    wrong with that file."""
-
-    try:
-        document = json.loads(path.read_text(encoding=ENCODING))
-    except FileNotFoundError:
-        return "it wrote no exit reason"
-    except (OSError, ValueError) as error:
-        return f"its exit reason cannot be read: {error}"
-    reason = document.get("reason") if isinstance(document, dict) else None
-    return reason if isinstance(reason, str) and reason else f"its exit file names no reason: {document!r}"
-
-
-def mapped(session: Path) -> bool:
-    """Whether the dossier pass whose session is ``session`` ended with its map set, as its exit file says; the map is
-    then the session's :data:`MAP_FILE`."""
-
-    return exit_reason(session / EXIT_FILE) == MAPPED
-
-
 async def split_directions(checkout: Path, map_file: Path, shares: int, out: Path) -> tuple[Path, ...]:
     """Split the open directions of ``map_file`` into ``shares`` disjoint plans in ``out``, with Arbor's own command
     line in ``checkout``; the plan files, in order, each a ``component.plan``. Raise :class:`SplitFailed` with what
@@ -1189,8 +970,25 @@ async def _directions(checkout: Path, written: tuple[Path, ...], *args: str) -> 
         raise SplitFailed(f"`{shlex.join(argv)}` wrote no {', '.join(missing)}: {said}")
 
 
+#: Arbor, as the registry of component agents finds it (:mod:`component_agent`).
+ADAPTER = ComponentAgent(
+    name="Arbor",
+    recognises=is_arbor,
+    manifest=arbor_manifest,
+    fit_keys=fit_keys,
+    eval_envs=EVAL_ENVS,
+    map_file=MAP_FILE,
+    generate_directions=generate_directions,
+    split_directions=split_directions,
+    dossier_index=DOSSIER_INDEX,
+    pass_dossier=pass_dossier,
+    dossier_notes=dossier_notes,
+)
+
+
 __all__ = [
     "ACCURACY_FLOOR_ENV",
+    "ADAPTER",
     "ACCURACY_POLICY",
     "ARBOR_PYTHON",
     "BASE_LAUNCH_FILE",

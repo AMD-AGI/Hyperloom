@@ -92,6 +92,22 @@ def test_gc_patch_uses_the_cached_tracelens_checkout_without_tracelens_root(tmp_
     assert target.read_text(encoding="utf-8") == RUNNER_SOURCE
 
 
+@pytest.mark.parametrize(
+    ("version", "expected"),
+    [
+        ("0.5.17", False),
+        ("0.5.18", True),
+        ("0.5.21", True),
+        ("0.5.21.dev3+gabc1234", True),
+        ("0.5.22", False),
+        ("0.5.23", False),
+        ("", False),
+    ],
+)
+def test_gc_patch_is_needed_only_from_0_5_18_through_0_5_21(version, expected):
+    assert _server_patcher.sglang_gc_patch_needed(version) is expected
+
+
 def test_newer_sglang_without_exact_gc_set_is_left_alone(tmp_path: Path, monkeypatch):
     repo = tmp_path / "sglang"
     target = _editable_install(repo)

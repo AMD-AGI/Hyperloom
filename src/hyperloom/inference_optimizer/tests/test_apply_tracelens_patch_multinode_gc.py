@@ -83,7 +83,7 @@ def test_pod_below_gate_stays_on_roofline(pod_patcher, tmp_path, monkeypatch):
 
 def test_pod_without_exact_gc_set_skips_without_failing(pod_patcher, tmp_path, monkeypatch, capsys):
     """No gc set for the pod's version: leave the tree alone, don't borrow an older set, and don't fail the fan-out."""
-    target, tracelens = _install(tmp_path, monkeypatch, "0.5.22")
+    target, tracelens = _install(tmp_path, monkeypatch, "0.5.20")
 
     result = pod_patcher._apply_on_pod(
         tracelens_root=str(tracelens), sglang_version_pin=None, patch_set="graph-capture"
@@ -109,6 +109,17 @@ def test_pod_without_exact_gc_set_skips_without_failing(pod_patcher, tmp_path, m
     assert '"status": "skipped"' in capsys.readouterr().out
 
 
+def test_pod_past_the_gc_range_needs_no_patch_and_is_not_checked(pod_patcher, tmp_path, monkeypatch):
+    target, tracelens = _install(tmp_path, monkeypatch, "0.5.22")
+
+    result = pod_patcher._apply_on_pod(
+        tracelens_root=str(tracelens), sglang_version_pin=None, patch_set="graph-capture"
+    )
+    assert result["status"] == "skipped", result
+    assert "no patch needed" in result["skip_reason"], result
+    assert target.read_text(encoding="utf-8") == RUNNER_SOURCE
+
+
 def test_controller_roofline_choice_wins_over_pod_version(pod_patcher, tmp_path, monkeypatch):
     target, tracelens = _install(tmp_path, monkeypatch, "0.5.21")
 
@@ -122,7 +133,16 @@ def test_controller_patch_set_follows_shape_mode(monkeypatch, mode, expected):
     from hyperloom.orchestrator.actions.executors import _server_patcher
 
     monkeypatch.setattr(_server_patcher, "resolve_sglang_shape_mode", lambda: mode)
+    monkeypatch.setattr(_server_patcher, "_detect_installed_sglang_version", lambda: "0.5.21")
     assert _server_patcher.resolve_sglang_patch_set() == expected
+
+
+def test_controller_sitecustomize_past_the_gc_range_has_no_patch_set(monkeypatch):
+    from hyperloom.orchestrator.actions.executors import _server_patcher
+
+    monkeypatch.setattr(_server_patcher, "resolve_sglang_shape_mode", lambda: "sitecustomize")
+    monkeypatch.setattr(_server_patcher, "_detect_installed_sglang_version", lambda: "0.5.22")
+    assert _server_patcher.resolve_sglang_patch_set() == "none"
 
 
 def test_ray_entrypoint_forwards_patch_set(monkeypatch):
@@ -225,6 +245,10 @@ def test_gc_fan_out_waits_for_a_profiling_round(monkeypatch, tmp_path):
     assert _fan_out_calls(monkeypatch, tmp_path, patch_set="graph-capture", torch_profiler_dir=trace_dir) == [
         "graph-capture"
     ]
+
+
+def test_fan_out_is_skipped_when_the_sglang_needs_no_patch_set(monkeypatch, tmp_path):
+    assert _fan_out_calls(monkeypatch, tmp_path, patch_set="none", torch_profiler_dir=str(tmp_path / "trace")) == []
 
 
 def test_roofline_fan_out_still_runs_on_every_restart(monkeypatch, tmp_path):
