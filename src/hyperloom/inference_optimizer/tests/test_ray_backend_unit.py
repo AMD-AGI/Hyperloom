@@ -967,7 +967,7 @@ def test_maybe_serving_lease_explicit_on_single_node(monkeypatch: pytest.MonkeyP
         "make_serving_actor",
         lambda n, *, serving_slot, max_concurrency: made.append(n) or _FakeActor((0, "", "")),
     )
-    monkeypatch.setattr(rb, "get_ray_backend", lambda: _StubBackendP2())
+    monkeypatch.setattr(rb, "get_ray_backend", _StubBackendP2)
 
     lease.ensure()
 
@@ -1026,6 +1026,8 @@ def test_managed_process_exit_code_none_then_latched():
     """exit_code is None before start / while alive, then the real return code."""
     mgr = ManagedServerProcess()
     assert mgr.exit_code() is None  # never started
+    assert mgr.pid() is None
+    assert mgr.is_alive() is False
     mgr.start(["sh", "-c", "sleep 0.2; exit 3"])
     assert mgr.exit_code() is None  # still running
     deadline = time.time() + 5.0

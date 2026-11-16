@@ -34,11 +34,12 @@ def _pin(monkeypatch, **pins):
     _export_operator_launch_shape(server_args="", extra_env=dict(pins))
 
 
-def test_pin_fills_a_workload_knob_the_flags_left_unset(monkeypatch):
+@pytest.mark.parametrize("isl_pin", ["4096", "  4096  "], ids=["plain", "padded"])
+def test_pin_fills_a_workload_knob_the_flags_left_unset(monkeypatch, isl_pin):
     """A pin reaches the ladder through the environment, and ``args`` is what every later projection writes."""
     from hyperloom.inference_optimizer.cli.launch_shape import _resolve_workload_knobs
 
-    _pin(monkeypatch, ISL="4096", OSL="512")
+    _pin(monkeypatch, ISL=isl_pin, OSL="512")
     args = _knob_args()
 
     _resolve_workload_knobs(args)
@@ -169,7 +170,7 @@ def test_the_fresh_launch_anchors_stay_in_order():
         )
 
 
-@pytest.mark.parametrize("pin", ["not-a-number", "0", "-4"], ids=["not-a-number", "zero", "negative"])
+@pytest.mark.parametrize("pin", ["not-a-number", "0", "-4", ""], ids=["not-a-number", "zero", "negative", "blank"])
 def test_a_malformed_pinned_knob_does_not_take_the_run_down(monkeypatch, pin):
     """A pin that is not a positive integer falls through to the rest of the ladder rather than raising."""
     from hyperloom.inference_optimizer.cli.launch_shape import _resolve_workload_knobs

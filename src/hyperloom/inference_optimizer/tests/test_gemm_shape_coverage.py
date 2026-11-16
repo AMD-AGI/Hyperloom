@@ -370,8 +370,13 @@ class TestTunedCsvCoverage:
         assert report["requested"] == 0
         assert report["coverage_pct"] is None
 
-    def test_retry_integrate_dir_is_scanned(self, tmp_path):
-        """A ``-2`` retry replaces the first attempt; it must not be ignored."""
+    @pytest.mark.parametrize(
+        ("retry_mtime", "first_mtime", "expected"),
+        [(2_000_000_000, 1_000_000_000, "retry attempt"), (1_000_000_000, 2_000_000_000, "first attempt")],
+        ids=["retry-newer", "first-newer"],
+    )
+    def test_retry_integrate_dir_is_scanned(self, tmp_path, retry_mtime, first_mtime, expected):
+        """A ``-2`` retry is scanned beside the first attempt, and the newer ``server.log`` of the two is read."""
         from hyperloom.orchestrator.kernel.gemm_shape_coverage import read_latest_integrate_server_log
 
         integrate = tmp_path / "runs" / "integrate"
@@ -381,12 +386,12 @@ class TestTunedCsvCoverage:
             d.mkdir(parents=True)
         (first / "server.log").write_text("first attempt", encoding="utf-8")
         (retry / "server.log").write_text("retry attempt", encoding="utf-8")
-        os.utime(retry / "server.log", (2_000_000_000, 2_000_000_000))
-        os.utime(first / "server.log", (1_000_000_000, 1_000_000_000))
+        os.utime(retry / "server.log", (retry_mtime, retry_mtime))
+        os.utime(first / "server.log", (first_mtime, first_mtime))
 
         found = read_latest_integrate_server_log(tmp_path, "integrate-gemm_tune_fmoe_ck")
         assert found is not None
-        assert found[1] == "retry attempt"
+        assert found[1] == expected
 
     def test_runtime_confirmed_hit_counts_as_covered(self):
         """aiter saying it used a row beats our replay of its padding rules."""

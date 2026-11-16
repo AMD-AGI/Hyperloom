@@ -197,14 +197,17 @@ def test_rescue_directory_scanned_for_inferencex_result_glob(
     leak_dir.mkdir()
     a = leak_dir / "inferencex_result_eval.json"
     b = leak_dir / "inferencex_result.json"
+    # Sorts ahead of both results, so a glob wider than ``inferencex_result*.json`` would rescue it first.
+    stray = leak_dir / "benchmark_summary.json"
     _write_inferencex(a, tput=100.0)
     _write_inferencex(b, tput=200.0)
+    _write_inferencex(stray, tput=999.0)
     monkeypatch.setenv("INFERENCE_OPTIMIZER_RESCUE_PATHS", str(leak_dir))
 
     measurement = extract_benchmark_measurement(
         report={"success": False},
         workspace=workspace,
-        subprocess_started_unix=min(a.stat().st_mtime, b.stat().st_mtime) - 1.0,
+        subprocess_started_unix=min(p.stat().st_mtime for p in (a, b, stray)) - 1.0,
     )
     assert measurement["valid_measurement"] is True
     assert measurement["output_throughput"] in (100.0, 200.0)
