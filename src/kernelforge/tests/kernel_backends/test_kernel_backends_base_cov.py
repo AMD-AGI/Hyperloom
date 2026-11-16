@@ -67,7 +67,7 @@ def test_resolve_language_dirs_empty_without_folder(tmp_path):
 
 def test_build_single_kernel_backend_prompt_aiter_operator():
     config = Config(gpu_target="gfx950")
-    # AITER operator path exercises include_aiter=True branch.
+    # The AITER operator path adds the framework/aiter knowledge.
     prompt = build_single_kernel_backend_prompt(
         config,
         "ck",

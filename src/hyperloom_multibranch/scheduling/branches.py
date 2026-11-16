@@ -110,7 +110,7 @@ class Launch:
     """What a branch's specialist starts on: the repair the branch was opened for, the focus the session's briefs keep
     for it unless ``None``, the direction the user wrote for a user branch, and the agent the user named for an agent's
     branch with the file of its share of the session's directions, if it has one; ``map_for`` makes an agent branch a
-    mapping branch, which maps the directions those Arbor agents split (:attr:`BranchTask.map_for`)."""
+    mapping branch, which maps the directions those component agents split (:attr:`BranchTask.map_for`)."""
 
     repair: RepairRequest | None = None
     focus: BranchFocus | None = None
@@ -199,7 +199,7 @@ class BranchControl:
     async def open_map_branch(
         self, map_for: tuple[str, ...], start_commit: str, deadline: float
     ) -> tuple[BranchEntry, ...]:
-        """Open one :attr:`BranchOrigin.AGENT` branch at ``start_commit`` that maps the directions the Arbor agents
+        """Open one :attr:`BranchOrigin.AGENT` branch at ``start_commit`` that maps the directions the component agents
         ``map_for`` split, with the first one's dossier pass; each share then opens as a branch the fork desk admits, into
         the slots the mapping branch holds for them meanwhile."""
 

@@ -94,15 +94,15 @@ value but `on`, `off` or empty is refused when the toolbox is built.
   moves it (the same stack on GLM-5.3 TP4/EP4 gained +1.8% total per GPU at conc 4 and +7–14% at conc 8–16). The
   bar and guards are read from the code, so a resumed session judges by the current rule. The manifest records the
   objective, so a resumed session keeps it; the frontier, FINAL, the dashboard and `MB-report.md` all read that metric. A
-  `total_token_throughput` session writes no Recipe KB record: the KB partitions by workload, not objective. Each Arbor
-  is given the objective with its bar and guards (`opt_objective`), which needs Arbor `29c72f9` or later.
+  `total_token_throughput` session writes no Recipe KB record: the KB partitions by workload, not objective.
 - **Base launch:** `--reference-script FILE`, a shell launch script or a base launch record frozen elsewhere, as for
   `hyperloom optimize`; the session freezes it as its base, a record without reading any recipe source. Without it
-  the base comes from the recipe sources. Every Arbor is served the frozen base unless `--agent-launch` gives a launch
-  file.
+  the base comes from the recipe sources. Every component agent is served the frozen base unless `--agent-launch`
+  gives a launch file.
 - **Limits:** `--max-hours` (default 2, 0 for none), `--max-gpu-hours` and `--max-llm-usd` (0 for none),
   `--max-branches` (default 4). A negative or non-finite limit is a usage error.
-- **Concurrency:** `--max-parallel-tests` (default: as many as fit at TP), `--max-k-per-branch` (default 2),
+- **Concurrency:** `--max-parallel-tests` (default: as many as fit at TP), `--max-k-per-branch` (default 2; a
+  specialist's branch only, the integration branch's K is bounded by `--max-parallel-tests`),
   `--dev-leases`, `--judge-interval-sec` (default 600, must be positive), `--measurement local|hosted`,
   `--[no-]make-before-break` (hosted only, default on: where the grant fits at least three tests at TP, a finished
   test's sandbox is kept until the next test's runs, so that the cluster does not give its node to another job, and one
@@ -112,7 +112,11 @@ value but `on`, `off` or empty is refused when the toolbox is built.
   `--agent-directions`, `--agent-dossier-minutes`, `--agent-share-minutes`, `--agent-pack`, `--agent-launch`,
   `--agent-port`, `--stop-after-map`, `--agent-dossier`, `--no-review-gate`.
   Each agent measures with the gate's own client: on `agentx`, the gate's replay run by
-  `python -m inference_suite run` against the agent's server, so an Arbor needs no bench variables in its launch.
+  `python -m inference_suite run` against the agent's server, so an agent needs no bench variables in its launch.
+  A component agent is a source whose checkout an adapter recognises. An adapter is a package of its own, installed
+  beside Hyperloom and declared under the entry-point group `hyperloom_multibranch.component_agents`; Hyperloom ships
+  none. With none installed, every source is onboarded by a model, and the map, pack, launch and dossier options have
+  no agent to act on.
 - **Scheduling playbook:** `--playbook auto|champion|challenger` (default `auto`).
 
 ## Resuming a stopped session
@@ -123,7 +127,7 @@ the profile and the root commit are the ones the first PRELUDE recorded.
 
 - **What it continues:** the earlier run's unfinished tests are withdrawn and the branches it left open are stopped.
   The roster and the integration branch open again (a `reopen` lineage event), and EXPLORE opens new branches, new
-  ids and worktrees, on the integration head. Specialist and Arbor branches alike start fresh.
+  ids and worktrees, on the integration head. Specialist and agent branches alike start fresh.
 - **Deadline:** the session's deadline moves by its downtime, the time between the last decision the earlier run
   recorded and the resume. The new deadline is written to the manifest and recorded as a `resume` phase in
   `MB-decisions.jsonl` with `ended`, `downtime_seconds` and `deadline`. GPU hours are not given back: the session

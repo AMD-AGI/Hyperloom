@@ -201,18 +201,26 @@ class TestSelectTuners:
         assert priorities == sorted(priorities)
 
 
-class TestFp4Gfx942Skip:
-    """FP4/MXFP4 GEMM is unsupported on gfx942 (aiter requires gfx950)."""
+class TestFp4UnsupportedArchSkip:
+    """Automatic AITER FP4/MXFP4 routing skips known unsupported targets."""
 
-    def test_dense_fp4_skipped_on_gfx942(self):
+    @pytest.mark.parametrize(
+        ("gpu_type", "gfx_arch", "framework"),
+        [
+            ("mi300x", "gfx942", "sglang"),
+            ("r9700", "gfx1201", "vllm-aiter"),
+            ("gfx1201", "gfx1201", "vllm-aiter"),
+        ],
+    )
+    def test_dense_fp4_skipped_on_known_unsupported_arch(self, gpu_type, gfx_arch, framework):
         profile = _make_profile(is_moe=False)
         specs = select_tuners(
             profile,
             RoutingTarget(
-                framework="sglang",
+                framework=framework,
                 precision="fp4",
                 quant_type="fp4",
-                gpu_type="mi300x",
+                gpu_type=gpu_type,
             ),
             RoutingEvidence(
                 has_untuned_csv=True,
@@ -220,8 +228,7 @@ class TestFp4Gfx942Skip:
         )
         a4w4 = [s for s in specs if s.name == "a4w4_blockscale"][0]
         assert not a4w4.should_run
-        assert "gfx942" in a4w4.skip_reason
-        assert "gfx950" in a4w4.skip_reason
+        assert a4w4.skip_reason == f"AITER FP4/MXFP4 tuning unsupported on {gfx_arch}"
 
     def test_dense_fp4_runs_on_gfx950(self):
         profile = _make_profile(is_moe=False)
@@ -240,15 +247,22 @@ class TestFp4Gfx942Skip:
         a4w4 = [s for s in specs if s.name == "a4w4_blockscale"][0]
         assert a4w4.should_run
 
-    def test_moe_mxfp4_skipped_on_gfx942(self):
+    @pytest.mark.parametrize(
+        ("gpu_type", "gfx_arch", "framework"),
+        [
+            ("mi300x", "gfx942", "sglang"),
+            ("r9700", "gfx1201", "vllm-aiter"),
+            ("gfx1201", "gfx1201", "vllm-aiter"),
+        ],
+    )
+    def test_moe_mxfp4_skipped_on_known_unsupported_arch(self, gpu_type, gfx_arch, framework):
         profile = _make_profile(is_moe=True, num_experts=128, num_experts_per_tok=8, moe_intermediate_size=768)
         specs = select_tuners(
-            profile, RoutingTarget(framework="sglang", precision="mxfp4", quant_type="mxfp4", gpu_type="mi300x")
+            profile, RoutingTarget(framework=framework, precision="mxfp4", quant_type="mxfp4", gpu_type=gpu_type)
         )
         fmoe = [s for s in specs if s.name == "fmoe_ck"][0]
         assert not fmoe.should_run
-        assert "gfx942" in fmoe.skip_reason
-        assert "gfx950" in fmoe.skip_reason
+        assert fmoe.skip_reason == f"AITER FP4/MXFP4 tuning unsupported on {gfx_arch}"
 
     def test_moe_mxfp4_runs_on_gfx950(self):
         profile = _make_profile(is_moe=True, num_experts=128, num_experts_per_tok=8, moe_intermediate_size=768)
@@ -292,6 +306,22 @@ class TestFp4Gfx942Skip:
         )
         blockscale = [s for s in specs if s.name == "a8w8_blockscale"][0]
         assert blockscale.should_run
+
+    @pytest.mark.parametrize("framework", ["sglang", "vllm-aiter"])
+    @pytest.mark.parametrize("precision", ["fp4", "mxfp4"])
+    @pytest.mark.parametrize("gpu_type", ["gfx1250", "auto"])
+    def test_gfx1250_is_not_rejected_by_arch_guard(self, monkeypatch, framework, precision, gpu_type):
+        """Pin routing eligibility without asserting AITER kernel support."""
+        monkeypatch.setattr(router, "detect_arch", lambda: "gfx1250")
+        profile = _make_profile(is_moe=True, num_experts=128, num_experts_per_tok=8, moe_intermediate_size=768)
+        specs = select_tuners(
+            profile,
+            RoutingTarget(framework=framework, precision=precision, quant_type=precision, gpu_type=gpu_type),
+            RoutingEvidence(has_untuned_csv=True),
+        )
+        for name in ("a4w4_blockscale", "fmoe_ck"):
+            spec = next(spec for spec in specs if spec.name == name)
+            assert spec.should_run, spec.skip_reason
 
 
 class TestGpuTypeAutoDetect:

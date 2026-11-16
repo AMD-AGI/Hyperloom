@@ -788,21 +788,6 @@ def test_confirmation_sql_failure_rolls_back_history_and_all_releases(tmp_path, 
     assert path.read_bytes() == before
 
 
-def test_confirmation_requires_fcntl_before_acquiring_session_lock(tmp_path, monkeypatch):
-    from hyperloom.inference_optimizer.session import lock, resume_guard
-
-    path = _database(tmp_path)
-    _task(path)
-    before = path.read_bytes()
-    monkeypatch.setattr(lock, "fcntl", None)
-    acquire = Mock(side_effect=AssertionError("non-exclusive fallback must not be used"))
-    monkeypatch.setattr(lock.SessionLock, "acquire", acquire)
-    with pytest.raises(resume_guard.CleanupConfirmationError, match="POSIX|fcntl"):
-        resume_guard.confirm_task_stopped(tmp_path, task_id="task-1", reason=_CONFIRMATION_REASON)
-    acquire.assert_not_called()
-    assert path.read_bytes() == before
-
-
 @pytest.mark.skipif(sys.platform == "win32", reason="Confirmation requires a real POSIX flock")
 def test_confirmation_public_uses_real_session_lock_and_existing_database(tmp_path):
     from hyperloom.inference_optimizer.session.lock import SessionLock

@@ -11,9 +11,9 @@ its environment (a Claude CLI runs each of its shell commands in a session of it
 servers through one), and so does the session's watch (:mod:`agent_watch`) once the session's process is gone.
 :meth:`LocalProcess.kill` ends one command's alone, selected by
 :data:`~hyperloom_multibranch.specialist.agent_watch.PROCESS_MARKER` and its launcher's tree. The pod
-forbids a PID namespace, so an agent's ``pkill``, ``pgrep`` and ``killall`` would otherwise reach the whole host; Arbor
-stops its server with ``docker exec C pkill -TERM -f sglang.launch_server``, which through the docker shim would stop
-MB's measurement servers too. The sandbox puts wrappers for them first on ``PATH`` that match only the processes
+forbids a PID namespace, so an agent's ``pkill``, ``pgrep`` and ``killall`` would otherwise reach the whole host; an
+agent that stops its server with ``docker exec C pkill -TERM -f sglang.launch_server`` would, through the docker shim,
+stop MB's measurement servers too. The sandbox puts wrappers for them first on ``PATH`` that match only the processes
 carrying the caller's marker and never the caller or its ancestors, as a ``docker exec`` from outside a container would
 not: a shell that waits with ``until ! pgrep -f X`` carries ``X`` in its own command line. Nor do they match a launcher,
 which would leave what it holds to init. ``killall NAME`` is ``pkill -x`` on the name's first 15 characters, all the
@@ -155,8 +155,8 @@ CLAUDE_DIR = ".claude"
 USER_BASE = ".local"
 #: Where in a confined home pip installs (``PIP_TARGET``), with every dependency an install brings: on no import path,
 #: so no inference server a command starts imports those ahead of the image's and runs other packages than the
-#: baseline it is measured against. Arbor imports from it on its own commands alone (``ARBOR_SITE``,
-#: :mod:`~hyperloom_multibranch.specialist.arbor_adapter`).
+#: baseline it is measured against. An agent's adapter may put it on the path of the agent's own commands alone
+#: (:mod:`~hyperloom_multibranch.specialist.component_agent`).
 SITE_DIR = "site-packages"
 #: The programs a confined command may run besides those of its toolchain's trees: its shell and the agent CLIs.
 AGENT_PROGRAMS = ("bash", "claude", "codex")

@@ -671,6 +671,19 @@ class _BenchTasks:
     async def running(self):
         return self._running
 
+    def queued_context_sync(self):
+        return self._queued
+
+    def running_context_sync(self):
+        return self._running
+
+    def with_key_prefix_sync(self, kind, key_prefix):
+        return [
+            SimpleNamespace(kind=c["kind"], params=c["params"], state="succeeded")
+            for c in self.created
+            if c["kind"] == kind and c["idempotency_key"].startswith(key_prefix)
+        ]
+
     async def create_or_return_existing(self, spec):
         existing = any(c["idempotency_key"] == spec.idempotency_key for c in self.created)
         self.created.append(vars(spec))
@@ -702,7 +715,6 @@ def _framework(*, rounds, queued=(), running=(), phase_done=False):
     state.specialist_rounds = list(rounds)
     state.framework_agent_phase_done = phase_done
     dispatcher = SimpleNamespace(
-        admission_frozen=False,
         dispatch_paused_for_phase_budget=lambda: False,
         registry_lanes_ttl=lambda kind: (["benchmark_lane"], 1800),
     )

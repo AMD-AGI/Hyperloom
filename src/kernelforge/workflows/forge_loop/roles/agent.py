@@ -24,6 +24,7 @@ from kernelforge.agent_backends.runtime import agent_runtime, agent_runtime_sett
 from kernelforge.agent_backends.session_resume import run_session_with_api_resume
 from kernelforge.config import Config, resolve_agent_model
 from kernelforge.config.edit_policy import FORGE_PROTECTED_PATHS, TOOL_OWNED_UNTRACKED_GLOBS
+from kernelforge.utils.gpu_arch import Profiler, arch_profile
 from kernelforge.knowledge.pr_knowledge.agent_tools import TOOL_NAMES as PR_TOOL_NAMES
 from kernelforge.workflows.forge_loop.gate.gate_tag import gate_outcome_tag
 from kernelforge.workflows.forge_loop.gate.insession_gate import GateMeasurement, GateScope, InSessionGate
@@ -113,6 +114,25 @@ script rather than raw `rocprof-compute` (it finds a usable interpreter, runs pr
 prints the tables). If this environment lacks rocprof-compute's deps the script prints an
 "unavailable — skipping" notice and exits without data; just proceed without profiling (don't retry it).
 """
+
+_ROCPROFV3_SELF_PROFILING_SECTION = """
+## Self-profiling (optional, on demand)
+rocprof-compute does not support this GPU, so there is no Speed-of-Light report; profile with rocprofv3 directly.
+Start with a kernel trace, which times every kernel the driver launches:
+    rocprofv3 --kernel-trace --stats -d <scratch dir> -- python3 {driver_run} --profile-run
+Before naming a counter, list what this device and ROCm release expose (CDNA counter names often do not exist here):
+    rocprofv3-avail info -d 0
+then collect only the ones you need:
+    rocprofv3 --pmc <COUNTER> [<COUNTER> ...] -d <scratch dir> -- python3 {driver_run} --profile-run
+Keep the output outside the workspace. Classify the bottleneck yourself with measure_triage.md and
+measure_roofline.md in {profiling_dir} and the target's hardware cards. If rocprofv3 is not installed, proceed
+without profiling (don't retry it).
+"""
+
+_SELF_PROFILING_SECTIONS = {
+    Profiler.ROCPROF_COMPUTE: _SELF_PROFILING_SECTION,
+    Profiler.ROCPROFV3: _ROCPROFV3_SELF_PROFILING_SECTION,
+}
 
 _BASE_SYSTEM_PROMPT = """\
 You are a GPU kernel optimization agent in an autonomous iteration loop.
@@ -741,11 +761,8 @@ def make_agent_fn(
     )
     profiling_dir = Path(config.local_knowledge_dir) / "common_methodology" / "profiling"
     # Suppressed when profiling is disabled so the implementer prompt carries no profiling affordance/hint at all.
-    self_profiling_section = (
-        ""
-        if not task.profiling_enabled
-        else _SELF_PROFILING_SECTION.format(profiling_dir=profiling_dir, driver_run=driver_run)
-    )
+    section = _SELF_PROFILING_SECTIONS[arch_profile(config.gpu_target).profiler] if task.profiling_enabled else ""
+    self_profiling_section = section.format(profiling_dir=profiling_dir, driver_run=driver_run)
 
     pr_mcp_servers = _pr_mcp_servers(task.pr_kb_repo, backend)
 
