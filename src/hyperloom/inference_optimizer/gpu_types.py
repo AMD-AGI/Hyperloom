@@ -34,6 +34,8 @@ _BOARD_POLICIES: dict[str, BoardPolicy] = {
     # The same gfx950 die as mi355x; gfx950 alone still names mi355x.
     "mi350x": BoardPolicy(),
     "mi355x": BoardPolicy(names_its_arch=True),
+    # RDNA3 workstation. AITER and GEAK are not validated here; vLLM is the serving path.
+    "w7900": BoardPolicy(validated_frameworks=frozenset({"vllm"}), targeted_build_validated=False),
     "r9700": BoardPolicy(
         validated_frameworks=frozenset({"vllm"}), targeted_build_validated=False, geak_identity_pinned=True
     ),

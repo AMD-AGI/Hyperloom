@@ -113,6 +113,19 @@ AMD_GPU_BOARDS: dict[str, GpuBoard] = {
             aliases=("AMD Instinct MI355X",),
             device_ids=frozenset({"75a3", "75b3"}),
         ),
+        # https://www.amd.com/en/products/graphics/workstations/radeon-pro/w7000-series/radeon-pro-w7900
+        # 96 CUs, 48 GB GDDR6, 864 GB/s, 61.32 TFLOPS FP32 / 122.64 TFLOPS FP16. RDNA3 publishes no FP8 peak.
+        # 0x744b is the W7900D; gfx1100 is shared with other Navi 31 boards, so a bare arch does not name this one.
+        GpuBoard(
+            "w7900",
+            "gfx1100",
+            96,
+            48.0,
+            864.0,
+            {"bf16": 122.64, "fp16": 122.64, "fp32": 61.32},
+            aliases=("W7900D", "AMD Radeon PRO W7900", "AMD Radeon PRO W7900D"),
+            device_ids=frozenset({"744b"}),
+        ),
         # https://www.amd.com/en/products/graphics/workstations/radeon-ai-pro/ai-9000-series/amd-radeon-ai-pro-r9700.html
         GpuBoard("r9700", "gfx1201", 64, 32.0, 640.0, _matrix_peaks(bf16=191.0, fp8=383.0, fp32=47.8)),
         # https://www.amd.com/en/products/graphics/workstations/radeon-ai-pro/ai-9000-series/amd-radeon-ai-pro-r9600d.html
