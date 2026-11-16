@@ -33,6 +33,7 @@ _HANDOFF_CARRIED_KEYS = (
     "pd_decode_url",
     "pd_launch",
     "pd_launch_digest",
+    "pods",
     "profile_trace_shared",
     "profile_trace_share_error",
 )

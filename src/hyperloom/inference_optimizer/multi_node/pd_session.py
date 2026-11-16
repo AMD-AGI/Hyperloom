@@ -29,6 +29,7 @@ from inference_suite.multinode import (
     PdRecordError,
     PdResolveError,
     SshError,
+    cluster_commands,
     cluster_of,
     engine_urls,
     engines_gone,
@@ -48,6 +49,8 @@ log = logging.getLogger(__name__)
 
 PD_LAUNCH_KEY = "pd_launch"
 PD_DIGEST_KEY = "pd_launch_digest"
+#: Every host of the frozen launch with the command it serves.
+PODS_KEY = "pods"
 #: The launch as the last round ran it, beside the frozen ``pd_launch.json``.
 RAN_RECORD_NAME = "pd_launch.ran.json"
 PREFILL_EXTRA_ENV = "PD_PREFILL_EXTRA_ARGS"
@@ -212,6 +215,36 @@ def session_engine_urls(state: dict[str, Any]) -> dict[str, list[str]]:
         raise PdSessionError(f"the PD engines cannot be placed: {exc}") from exc
 
 
+def stamp_launch_pods(state: dict[str, Any]) -> None:
+    """Record every host of the session's frozen launch in ``state`` as a pod with the command it serves, as
+    ``pods``: the shape readers of the multi-node state such as GEAK take a cluster in.
+
+    Raises:
+        PdSessionError: no node list is handed over, or the frozen launch cannot be verified or placed.
+    """
+    try:
+        session = _session_cluster(state)
+        commands = cluster_commands(session.launch, session.cluster.nodes)
+    except (*_SUITE_ERRORS, ValueError) as exc:
+        raise PdSessionError(f"the PD launch cannot be placed: {exc}") from exc
+    ssh = session.cluster.nodes.ssh
+    indices: dict[str, int] = {}
+    pods: list[dict[str, Any]] = []
+    for command in commands:
+        index = indices[command.role] = indices.get(command.role, -1) + 1
+        pods.append(
+            {
+                "podIP": command.host,
+                "podId": f"external-{command.role}-{index}",
+                "role": command.role,
+                "lwsIndex": index,
+                "sshPort": ssh.port_of(command.host) if ssh else 0,
+                "launch_command": command.command,
+            }
+        )
+    state[PODS_KEY] = pods
+
+
 def _host_reads_marker(cluster: Cluster, host: str, marker: Path, token: str) -> str:
     """``""`` when ``host`` reads ``token`` from ``marker`` over SSH, else why it does not."""
     result = cluster.client.run(host, f"cat {shlex.quote(str(marker))}", TRACE_SHARE_PROBE_TIMEOUT_S)
@@ -274,6 +307,7 @@ __all__ = [
     "PD_BACKENDS",
     "PD_DIGEST_KEY",
     "PD_LAUNCH_KEY",
+    "PODS_KEY",
     "PREFILL_EXTRA_ENV",
     "PROFILER_DIR_ENV",
     "RAN_RECORD_NAME",
@@ -292,6 +326,7 @@ __all__ = [
     "restart_round",
     "round_overrides",
     "session_engine_urls",
+    "stamp_launch_pods",
     "stop_cluster",
     "verified_launch",
 ]

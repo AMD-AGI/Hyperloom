@@ -145,17 +145,24 @@ def _bind_pd_launch(ext_state: dict[str, Any], session_dir: Path | None) -> None
     from inference_suite.multinode import RECORD_NAME
 
     from ..multi_node._internal.external_state import load_multi_node_state
-    from ..multi_node.pd_session import PD_DIGEST_KEY, PD_LAUNCH_KEY, PdSessionError, verified_launch
+    from ..multi_node.pd_session import (
+        PD_DIGEST_KEY,
+        PD_LAUNCH_KEY,
+        PdSessionError,
+        stamp_launch_pods,
+        verified_launch,
+    )
 
     if session_dir is None:
         _exit_refused("a PD session binds its frozen launch to a session directory, and none is open")
     frozen = str(load_multi_node_state().get(PD_DIGEST_KEY) or "")
     try:
         launch = verified_launch(session_dir / RECORD_NAME, frozen)
+        ext_state[PD_LAUNCH_KEY] = str(session_dir / RECORD_NAME)
+        ext_state[PD_DIGEST_KEY] = launch.digest()
+        stamp_launch_pods(ext_state)
     except PdSessionError as exc:
         _exit_refused(str(exc))
-    ext_state[PD_LAUNCH_KEY] = str(session_dir / RECORD_NAME)
-    ext_state[PD_DIGEST_KEY] = launch.digest()
 
 
 def _record_trace_share(ext_state: dict[str, Any]) -> None:

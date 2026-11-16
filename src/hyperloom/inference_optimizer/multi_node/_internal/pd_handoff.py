@@ -11,6 +11,7 @@ from typing import Any
 
 from inference_suite.multinode import NODE_LIST_ENV, NodeList, NodeListError, Role, read_node_list
 
+from ...session.paths import workspace_root
 from .topology_file import TopologyHandoffError
 
 ATOMESH = "atomesh"
@@ -85,6 +86,7 @@ def pd_state(nodes: NodeList, backend: str) -> dict[str, Any]:
         **{f"{role.value}_pods": _pods(nodes, role.value) for role in Role},
         "pd_prefill_nodes": len(prefill),
         "pd_decode_nodes": len(decode),
+        "user_data_path": str(workspace_root()),
     }
     if nodes.prefill_url:
         state["pd_prefill_url"] = nodes.prefill_url

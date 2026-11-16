@@ -6,7 +6,7 @@ SSH."""
 
 from __future__ import annotations
 
-from inference_suite.multinode.commands import engine_urls
+from inference_suite.multinode.commands import cluster_commands, engine_urls
 from inference_suite.multinode.launch import (
     Cluster,
     LaunchError,
@@ -33,6 +33,7 @@ from inference_suite.multinode.session import client_base, cluster_of, placed_la
 from inference_suite.multinode.ssh import SshClient, SshError
 
 __all__ = [
+    "cluster_commands",
     "engine_urls",
     "engines_gone",
     "replace_flags",

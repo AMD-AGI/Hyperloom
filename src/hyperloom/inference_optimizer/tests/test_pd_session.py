@@ -133,6 +133,20 @@ def test_adoption_records_the_frozen_launch_and_its_digest(session: Path) -> Non
     assert state[pd_session.PD_DIGEST_KEY] == launch.digest()
 
 
+def test_adoption_gives_every_host_a_pod_with_the_command_it_serves(session: Path) -> None:
+    state = _adopt(session)
+    pods = {pod["role"]: pod for pod in state["pods"]}
+    assert sorted(pods) == ["decode", "prefill", "router"]
+    assert {role: pod["podIP"] for role, pod in pods.items()} == {"router": "r0", "prefill": "p0", "decode": "d0"}
+    assert all(pod["sshPort"] == 22 for pod in pods.values())
+    for role in ("prefill", "decode"):
+        assert "sglang.launch_server" in pods[role]["launch_command"]
+        assert f"--disaggregation-mode {role}" in pods[role]["launch_command"]
+    assert "sglang_router.launch_router" in pods["router"]["launch_command"]
+    assert "--port 8000" in pods["router"]["launch_command"]
+    assert state["user_data_path"]
+
+
 def test_resume_refuses_a_launch_that_is_not_the_one_frozen(session: Path) -> None:
     _adopt(session)
     record = session / RECORD_NAME
