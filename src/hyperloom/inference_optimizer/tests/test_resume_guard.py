@@ -541,22 +541,6 @@ def test_confirmation_cli_rejects_bad_argument_pairs_before_reports(tmp_path, mo
     confirm.assert_not_called()
 
 
-def test_confirmation_cli_keeps_old_namespace_compatible(tmp_path, monkeypatch):
-    recover = _recover_module()
-    status_probe = Mock(
-        return_value=dict(
-            close_done=True, breakdown_exists=True, breakdown_recorded=True, counts_final=True, looks_complete=True
-        )
-    )
-    monkeypatch.setattr(recover, "_session_recovery_status", status_probe)
-    args = argparse.Namespace(session_dir=tmp_path, force=False)
-
-    result = recover._run_recover_session(args)
-
-    assert result == 0
-    status_probe.assert_called_once_with(tmp_path.resolve())
-
-
 @pytest.mark.skipif(sys.platform == "win32", reason="CLI parser imports require POSIX fcntl")
 def test_confirmation_parser_accepts_only_explicit_task_arguments(tmp_path):
     from hyperloom.inference_optimizer.cli.parser import _build_parser

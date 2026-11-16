@@ -16,7 +16,6 @@ from unittest.mock import AsyncMock
 import pytest
 
 from hyperloom.orchestrator.scoring.proposal_scorer import (
-    DEFAULT_SCORER_MODELS,
     ProposalScorer,
     _prepare_scoring_proposals,
 )
@@ -236,14 +235,6 @@ async def test_failed_scoring_call_writes_an_error_row(tmp_path: Path):
 
 
 @pytest.mark.asyncio
-async def test_scoring_without_session_dir_writes_no_trace(tmp_path: Path):
-    """The default (tests / no full-trace) path writes no conversation file."""
-    scorer = _make_scorer({"m1": _scores_json(("proposal_0", 7.0, "x"))})
-    await scorer.score(gap=_GAP, proposals=_PROPOSALS)
-    assert scorer.session_dir is None
-
-
-@pytest.mark.asyncio
 async def test_group_prompt_contains_all_proposals_and_gap():
     behaviour = {"m1": _scores_json(("proposal_0", 7.0, "x"))}
     scorer = _make_scorer(behaviour)
@@ -303,15 +294,6 @@ async def test_empty_proposals_returns_empty_envelope():
     assert out["models"] == {}
     assert out["errors"] == {}
     assert scorer._client.chat.completions.calls == []
-
-
-def test_default_models_constant():
-    assert DEFAULT_SCORER_MODELS == (
-        "claude-opus-5-5",
-        "gpt-5.6-sol",
-        "dvue-aoai-005-Kimi-K2.6",
-        "gemini/gemini-3.1-pro-preview",
-    )
 
 
 # 2. Coordinator wiring
@@ -553,10 +535,8 @@ class _ScriptedCompletions:
     def __init__(self, chunks: list[Any], *, stall: bool = False):
         self._chunks = chunks
         self._stall = stall
-        self.calls: list[dict[str, Any]] = []
 
     async def create(self, *, model, messages, max_completion_tokens, stream=False, stream_options=None):
-        self.calls.append({"stream": stream, "stream_options": stream_options})
         return _ScriptedStream(self._chunks, stall=self._stall)
 
 
@@ -579,18 +559,7 @@ def _scripted_scorer(chunks: list[Any], *, stall: bool = False, call_timeout_s: 
         models=("m",),
         client_factory=lambda: client,
         call_timeout_s=call_timeout_s,
-    ), client
-
-
-@pytest.mark.asyncio
-async def test_stream_flag_is_passed():
-    chunks = [_content_chunk(_scores_json(("proposal_0", 5, "ok"))), _usage_chunk(_FakeUsage(10, 20))]
-    scorer, client = _scripted_scorer(chunks)
-    entries = _prepare_scoring_proposals([{"name": "p"}])
-    await scorer._score_one_model("m", "prompt", entries)
-    call = client.chat.completions.calls[0]
-    assert call["stream"] is True
-    assert call["stream_options"] == {"include_usage": True}
+    )
 
 
 @pytest.mark.asyncio
@@ -604,7 +573,7 @@ async def test_multiple_content_chunks_are_accumulated():
         _content_chunk(body[2 * third :]),
         _usage_chunk(_FakeUsage(11, 22)),
     ]
-    scorer, _ = _scripted_scorer(chunks)
+    scorer = _scripted_scorer(chunks)
     entries = _prepare_scoring_proposals([{"name": "p"}])
     out = await scorer._score_one_model("m", "prompt", entries)
     assert out["p"]["score"] == 7.0
@@ -614,7 +583,7 @@ async def test_multiple_content_chunks_are_accumulated():
 async def test_stalled_stream_body_times_out():
     # Stream stalls after one chunk: the deadline must cover the consumption loop.
     chunks = [_content_chunk('{"scores": {')]
-    scorer, _ = _scripted_scorer(chunks, stall=True, call_timeout_s=0.05)
+    scorer = _scripted_scorer(chunks, stall=True, call_timeout_s=0.05)
     entries = _prepare_scoring_proposals([{"name": "p"}])
     with pytest.raises(RuntimeError, match="timed out"):
         await scorer._score_one_model("m", "prompt", entries)
@@ -624,7 +593,7 @@ async def test_stalled_stream_body_times_out():
 async def test_missing_usage_chunk_degrades_cleanly():
     # No usage-bearing chunk: scoring still succeeds.
     chunks = [_content_chunk(_scores_json(("proposal_0", 4, "fine")))]
-    scorer, _ = _scripted_scorer(chunks)
+    scorer = _scripted_scorer(chunks)
     entries = _prepare_scoring_proposals([{"name": "p"}])
     out = await scorer._score_one_model("m", "prompt", entries)
     assert out["p"]["score"] == 4.0

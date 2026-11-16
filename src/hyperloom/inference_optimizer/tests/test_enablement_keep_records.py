@@ -138,24 +138,6 @@ def test_a_kept_patch_applies_exactly_once_to_the_recorded_base(repo: Path, tmp_
     assert second.returncode != 0
 
 
-def test_a_patch_replayed_against_the_post_keep_commit_is_a_second_application(repo: Path, tmp_path: Path):
-    patch = tmp_path / "1.patch"
-    patch.write_text(
-        f"--- a/{TARGET}\n+++ b/{TARGET}\n@@ -1 +1 @@\n-{BASE_TEXT.strip()}\n+{PATCHED_TEXT.strip()}\n",
-        encoding="utf-8",
-    )
-    (repo / TARGET).write_text(PATCHED_TEXT, encoding="utf-8")
-    _git_commit_kept(repo, "hyperloom KEEP", [TARGET])
-
-    refused = subprocess.run(
-        ["git", "-C", str(repo), "apply", "--check", str(patch)],
-        capture_output=True,
-        text=True,
-        check=False,
-    )
-    assert refused.returncode != 0
-
-
 def test_root_record_carries_the_pre_keep_base_sha(repo: Path):
     recorded = _git_head_sha(repo)
     (repo / TARGET).write_text(PATCHED_TEXT, encoding="utf-8")
@@ -1616,16 +1598,16 @@ def test_a_base_less_root_keeps_a_tab_bearing_name_whole(tmp_path: Path):
     """``-z`` makes NUL the RECORD separator; the three fields inside a record
     are still tab-separated and a name may contain a tab. Splitting on every
     tab truncates ``real<TAB>part`` to ``real`` -- which is a different file
-    that also exists here, so the capture would take the wrong one."""
+    that also exists here, so the capture would take the wrong one. The name
+    is C-quoted as git writes it: unquoted, git reads the tab as the start of
+    a header timestamp and the patch never names ``real<TAB>part`` at all."""
     from hyperloom.orchestrator.actions.executors._patch_snapshot import overlay_inventory_without_base
 
     plain = _git_tree(tmp_path / "tabname")
     (plain / "real").write_text("decoy\n", encoding="utf-8")
     (plain / "real\tpart").write_text("z = 2\n", encoding="utf-8")
-    patch = _patch(tmp_path, "t.patch", "--- a/real\tpart\n+++ b/real\tpart\n@@ -1 +1 @@\n-z = 1\n+z = 2\n")
-    got = overlay_inventory_without_base(plain, patch)
-    assert got is None or got == {"real\tpart": "upsert"}
-    assert got is None or "real" not in got
+    patch = _patch(tmp_path, "t.patch", '--- "a/real\\tpart"\n+++ "b/real\\tpart"\n@@ -1 +1 @@\n-z = 1\n+z = 2\n')
+    assert overlay_inventory_without_base(plain, patch) == {"real\tpart": "upsert"}
 
 
 def test_a_base_less_root_refuses_an_undecodable_name(tmp_path: Path):

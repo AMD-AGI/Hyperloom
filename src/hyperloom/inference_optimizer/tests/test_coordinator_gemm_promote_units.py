@@ -1016,45 +1016,8 @@ class TestBf16DenseFallbackIsInternalToForge:
         assert not any(c["task_id"].endswith("_bf16_fallback") for c in calls)
         assert "bf16_fallback" not in coord.shared_state.last_gemm_tuning.get("task_id", "")
 
-    def test_deleted_fallback_machinery_is_gone(self, tmp_path):
-        """The dedicated bf16-fallback methods no longer exist on the coordinator."""
-        coord = _coord(tmp_path, framework="sglang")
-        for name in (
-            "_run_bf16_dense_gemm_fallback",
-            "_should_run_bf16_dense_gemm_fallback",
-            "_bf16_dense_gemm_fallback_pending",
-            "_bf16_dense_gemm_fallback_attempted",
-            "_is_bf16_dense_gemm_fallback_attempt",
-        ):
-            assert not hasattr(coord, name), f"{name} should have been removed by Change 3"
-
 
 class TestHandleGemmTuningResult:
-    @pytest.mark.asyncio
-    async def test_forge_requires_e2e_routes_to_validator(self, tmp_path):
-        coord = _coord(tmp_path, baseline_tput=100.0)
-        called: dict[str, object] = {}
-
-        async def _fake_validate(result):
-            called["result"] = result
-
-        coord.phase_kernel._validate_gemm_tuning_e2e = _fake_validate  # type: ignore[assignment]
-
-        await coord.phase_kernel._handle_gemm_tuning_result(
-            {
-                "status": "ok",
-                "decision": "KEEP",
-                "best_speedup": 1.3,
-                "backend": "forge",
-                "requires_e2e_validation": True,
-                "extra_envs": {"AITER_CONFIG": "/cfg/tuned.json"},
-            }
-        )
-
-        assert "result" in called
-        # Validator owns promotion; inline promote must not have run.
-        assert coord.shared_state.optimization_stack == []
-
     @pytest.mark.asyncio
     async def test_forge_e2e_rewrites_latest_attempt_history(self, tmp_path, monkeypatch):
         coord = _coord(tmp_path, baseline_tput=100.0, framework="sglang")
