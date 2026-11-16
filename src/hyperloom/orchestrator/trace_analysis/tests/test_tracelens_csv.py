@@ -3794,6 +3794,20 @@ def test_idle_gate_graph_guard_applies_gate_when_not_under_recorded(monkeypatch)
     assert high_idle["code"] == "high_gpu_idle_pct"
 
 
+def test_idle_gate_graph_guard_noop_below_threshold(monkeypatch):
+    # The stub would raise the graph warning, so only the threshold check keeps the result empty.
+    monkeypatch.setattr(
+        trace_gates,
+        "_graph_coverage_from_raw_trace",
+        lambda _tp: {"graph_under_recorded": True, "graph_launch_count": 8},
+    )
+    threshold, high_idle, graph_warn = trace_gates._evaluate_idle_gate_with_graph_guard(
+        10.0, Path("analysis.md"), "raw.trace.json"
+    )
+    assert threshold == 80.0
+    assert (high_idle, graph_warn) == (None, None)
+
+
 def test_graph_coverage_from_raw_trace_never_raises():
     # Missing/unreadable trace must degrade to {} (fall back to the plain gate).
     assert trace_gates._graph_coverage_from_raw_trace(None) == {}
