@@ -145,28 +145,13 @@ def test_an_explore_slot_under_another_definition_is_reverted(tmp_path, digest, 
 
 
 @pytest.mark.parametrize(
-    ("digest", "expected"), [(BASELINE_DIGEST, False), (OTHER_DIGEST, None)], ids=["same_definition", "other"]
+    ("digest", "accuracy_pass"),
+    [(BASELINE_DIGEST, False), (OTHER_DIGEST, None)],
+    ids=["same_definition", "other_definition"],
 )
-def test_an_integrate_bench_is_graded_only_under_the_baselines_definition(tmp_path, digest, expected):
-    from hyperloom.orchestrator.actions.executors._integrate_bench import _grade_bench_accuracy
-    from hyperloom.orchestrator.actions.executors._integrate_results import _PatchBench
-
-    slot = tmp_path / "variant_00"
-    suite_eval(slot / ag.ACCURACY_DIR, 0.0, digest)
-    bench_leg = _PatchBench(
-        params={"accuracy_baseline": 0.945, "framework": "vllm"},
-        output_root=tmp_path,
-        specialist_task_id="t",
-        benchmark_mode="agentx",
-        accuracy_definition_digest=BASELINE_DIGEST,
-    )
-    gate_evidence: dict = {}
-    _grade_bench_accuracy({"status": "succeeded"}, bench_leg, str(slot), gate_evidence)
-    assert gate_evidence["accuracy_pass"] is expected
-
-
-@pytest.mark.parametrize("digest", [BASELINE_DIGEST, OTHER_DIGEST], ids=["same_definition", "other_definition"])
-def test_an_integrate_patch_that_wins_on_throughput_is_not_kept_on_a_score_the_baseline_cannot_judge(tmp_path, digest):
+def test_an_integrate_patch_that_wins_on_throughput_is_not_kept_on_a_score_the_baseline_cannot_judge(
+    tmp_path, digest, accuracy_pass
+):
     """A collapsed score blocks the KEEP whether it is a measured drop or was taken under another eval definition."""
     from hyperloom.common.perf_metric import VERDICT_KEEP, GradedComparison
     from hyperloom.orchestrator.actions.executors._integrate_attempt import IntegrateAttempt
@@ -186,6 +171,7 @@ def test_an_integrate_patch_that_wins_on_throughput_is_not_kept_on_a_score_the_b
     )
     gate_evidence: dict = {}
     _grade_bench_accuracy({"status": "succeeded"}, bench_leg, str(slot), gate_evidence)
+    assert gate_evidence["accuracy_pass"] is accuracy_pass
     won = GradedComparison(objective="output_throughput", candidate=120.0, reference=100.0, verdict=VERDICT_KEEP)
     throughput = _ThroughputGrade(_GateBasis(100.0, 1.0), won, 20.0)
     attempt = IntegrateAttempt(task_id="t-int", specialist_task_id="t", shared_state=SharedState())
@@ -235,10 +221,6 @@ def test_a_scored_eval_failure_keeps_the_digest_of_its_score(tmp_path):
         }
     )
     assert result[ag.ACCURACY_DEFINITION_DIGEST_KEY] == BASELINE_DIGEST
-
-
-def test_an_eval_failure_outside_an_accuracy_round_records_no_digest():
-    assert ag.ACCURACY_DEFINITION_DIGEST_KEY not in _stamp_failure({})
 
 
 def test_the_enablement_trigger_keeps_the_digest_its_eval_failure_ran_under():

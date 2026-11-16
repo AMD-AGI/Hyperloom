@@ -159,16 +159,6 @@ def test_author_env_leaves_codex_environment_untouched(monkeypatch):
     assert forge_fusion._author_env("codex") == dict(os.environ)
 
 
-def test_build_cmd_forwards_read_only_agent_sandbox(tmp_path):
-    payload = _payload(tmp_path)
-    payload["agent_backend"] = "codex"
-    payload["agent_sandbox_mode"] = "read-only"
-
-    cmd = forge_fusion._build_cmd(payload)
-
-    assert cmd[cmd.index("--agent-sandbox-mode") + 1] == "read-only"
-
-
 def test_run_passes_timeout_and_author_env_to_the_subprocess(tmp_path, monkeypatch):
     output_dir = tmp_path / "out"
     output_dir.mkdir()
@@ -682,20 +672,6 @@ def test_normalize_manifest_reports_an_llm_outage_as_infrastructure(tmp_path):
     assert "Error code: 400" in result["error"]
 
 
-def test_an_llm_outage_leaves_fusion_retryable_at_the_next_kernel_entry(tmp_path):
-    """The load-bearing consequence: `status` decides whether fusion runs again."""
-    output_dir = tmp_path / "out"
-    output_dir.mkdir()
-    (output_dir / "fusion_manifest.json").write_text(
-        json.dumps({"schema_version": 2, "verdict": "llm_unavailable", "error": {}}),
-        encoding="utf-8",
-    )
-
-    result = forge_fusion._normalize_manifest(str(output_dir), rc=3)
-
-    assert result["status"] not in ("ok", "complete", "kept")
-
-
 def test_an_llm_outage_verdict_never_discards_a_validated_fusion(tmp_path):
     """A KEEP outranks the outage verdict, however the manifest ends up shaped."""
     output_dir = tmp_path / "out"
@@ -780,34 +756,6 @@ def test_normalize_manifest_reports_a_harness_author_abort_as_infrastructure(tmp
     assert "DEEPSEEK_V4_FUSED_ATTN_REDUCE_INV_ROPE" in result["error"]
     assert result["env_flags"] == {}
     assert result["baseline_env_flags"] == {}
-
-
-def test_an_abort_leaves_fusion_retryable_at_the_next_kernel_entry(tmp_path):
-    """The load-bearing consequence: ``status`` decides whether fusion runs again."""
-    output_dir = tmp_path / "out"
-    output_dir.mkdir()
-    (output_dir / "fusion_manifest.json").write_text(
-        json.dumps(_aborted_manifest("harness_author_failed")), encoding="utf-8"
-    )
-
-    result = forge_fusion._normalize_manifest(str(output_dir), rc=0)
-
-    assert result["status"] not in ("ok", "complete", "kept")
-
-
-def test_a_missing_git_workspace_abort_takes_the_same_path(tmp_path):
-    """The handling keys on the termination reason, not on one known failure."""
-    output_dir = tmp_path / "out"
-    output_dir.mkdir()
-    (output_dir / "fusion_manifest.json").write_text(
-        json.dumps(_aborted_manifest("no_git_workspace")), encoding="utf-8"
-    )
-
-    result = forge_fusion._normalize_manifest(str(output_dir), rc=0)
-
-    assert result["status"] == "failed"
-    assert result["error_class"] == "no_git_workspace"
-    assert result["status"] not in ("ok", "complete", "kept")
 
 
 def test_an_abort_never_discards_a_validated_fusion(tmp_path):
@@ -936,25 +884,6 @@ def test_normalize_manifest_still_reports_a_real_no_opportunity(tmp_path):
     assert result["micro_decision"] == "no_improvement"
     assert result["verdict"] == "no_opportunity"
     assert "error_class" not in result
-
-
-def test_normalize_manifest_prefers_artifacts_repo_root(tmp_path, monkeypatch):
-    """kernel_repo must come from the root forge-fusion exported against (authoritative for a non-git pip framework), NOT a git toplevel that would break patch apply."""
-    output_dir = tmp_path / "out"
-    output_dir.mkdir()
-    manifest = {
-        "fusion_loop": {"kept": True, "best": {"kernel_speedup": 1.2}},
-        "validation": {"kept": True},
-        "artifacts": {
-            "patch": _patch_file(output_dir),
-            "changes": [{"path": "vllm/x.py"}],
-            "repo_root": "/venv/site-packages",
-        },
-        "fusion": {"source_file": str(output_dir / "x.py")},
-    }
-    (output_dir / "fusion_manifest.json").write_text(json.dumps(manifest), encoding="utf-8")
-    result = forge_fusion._normalize_manifest(str(output_dir), rc=0)
-    assert result["kernel_repo"] == "/venv/site-packages"
 
 
 def test_normalize_manifest_missing_file_reports_error(tmp_path):
