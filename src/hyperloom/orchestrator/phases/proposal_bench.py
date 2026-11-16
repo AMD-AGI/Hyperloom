@@ -16,10 +16,35 @@ from .dispatch_order import is_operator_work
 
 log = _logging.getLogger(__name__)
 
-__all__ = ["CUSTOM_PROPOSAL_DOMAIN", "ProposalBench", "kb_exposure_of"]
+__all__ = [
+    "CUSTOM_PROPOSAL_DOMAIN",
+    "ProposalBench",
+    "explore_grid_fingerprints",
+    "kb_exposure_of",
+    "waiting_proposal_rows",
+]
 
 # ``untested_proposal_rows`` names a round's domain without the ``_specialist`` suffix.
 CUSTOM_PROPOSAL_DOMAIN: str = CUSTOM_SPECIALIST_KEY.removesuffix("_specialist")
+
+
+def explore_grid_fingerprints(tasks: Any) -> set[str]:
+    """Content fingerprints of the variants in every queued or running explore grid."""
+    from ..actions.executors._proposal_identity import content_fingerprint
+
+    return {
+        content_fingerprint(variant)
+        for task in (*tasks.queued_context_sync(), *tasks.running_context_sync())
+        if task.kind == "explore"
+        for variant in (task.params or {}).get("grid") or ()
+        if isinstance(variant, dict)
+    }
+
+
+def waiting_proposal_rows(shared_state: Any, tasks: Any) -> list[dict[str, Any]]:
+    """The untested proposals still waiting for a bench: those no queued or running explore grid holds."""
+    in_grids = explore_grid_fingerprints(tasks)
+    return [row for row in shared_state.untested_proposal_rows() if row["fingerprint"] not in in_grids]
 
 
 def kb_exposure_of(rows: Iterable[Mapping[str, Any]]) -> dict[str, Any]:
