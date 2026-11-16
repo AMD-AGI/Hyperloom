@@ -227,15 +227,19 @@ def test_a_gpu_type_names_the_same_board_in_any_case() -> None:
     assert _settings("--gpu-type", "MI355X").workload.gpu_type == "mi355x"
 
 
+def test_a_session_runs_on_mi325x() -> None:
+    assert _settings("--gpu-type", "MI325X").workload.gpu_type == "mi325x"
+
+
 def test_an_unknown_gpu_type_is_refused_naming_the_types_a_session_runs_on(capsys: pytest.CaptureFixture[str]) -> None:
     with pytest.raises(SystemExit) as exc:
-        cli.main(["run", *WORKLOAD_ARGS, "--gpu-type", "MI325X"])
+        cli.main(["run", *WORKLOAD_ARGS, "--gpu-type", "MI308X"])
 
     assert exc.value.code == cli.EXIT_USAGE
     err = capsys.readouterr().err
-    assert "invalid choice: 'mi325x'" in err
+    assert "invalid choice: 'mi308x'" in err
     # argparse quotes the choices before Python 3.12.8 and lists them bare from it on.
-    assert "(choose from mi300x, mi350x, mi355x)" in err.replace("'", "")
+    assert "(choose from mi300x, mi325x, mi350x, mi355x)" in err.replace("'", "")
 
 
 def test_an_agentx_run_has_no_sequence_lengths_and_is_graded_on_p50_interactivity_at_its_conc_alone() -> None:
@@ -360,7 +364,6 @@ def test_parallel_tests_default_fills_the_machine() -> None:
         ["run", *WORKLOAD_ARGS, "--conc", "many"],
         ["run", *WORKLOAD_ARGS[:-2]],
         ["run", *WORKLOAD_ARGS, "--gpu-type", "h100"],
-        ["run", *WORKLOAD_ARGS, "--gpu-type", "mi325x"],
         ["run", *WORKLOAD_ARGS, "--gpu-type", "mi308x"],
         ["run", *WORKLOAD_ARGS, "--kernel-optimizer", "triton"],
         ["run", *_without(WORKLOAD_ARGS, "--workload")],
