@@ -109,6 +109,7 @@ def analyze_perf_report(run_config_path: Path) -> PerfReportAnalysis:
         "top_operations": _top_operations(csv_dir),
         "compute_optimizations": compute_tasks(ops),
         "fusion_optimizations": [],
+        "system_optimizations": [],
     }
     report_path = output_dir / _ANALYSIS_JSON
     atomic_write_json(report_path, report)
