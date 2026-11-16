@@ -210,6 +210,41 @@ def test_unreadable_inferencex_falls_to_the_table():
     assert any("offline" in warning for warning in launch.source.warnings)
 
 
+def test_the_table_launch_names_why_each_inferencex_source_passed(checkout):
+    query = _query(model_id="Qwen/Qwen3.5-397B-A17B-FP8", model_path="/m/Qwen3.5-397B-A17B-FP8", board="mi300x")
+    launch = resolve(query, ResolveInputs(inferencex=lambda: checkout))
+    assert launch.source.kind is PdSourceKind.PD_TABLE
+    warnings = "\n".join(launch.source.warnings)
+    assert "no multi-node disaggregated entry serves Qwen/Qwen3.5-397B-A17B-FP8 with sglang" in warnings
+    assert "no recipe directory of Qwen/Qwen3.5-397B-A17B-FP8 for sglang on mi300x" in warnings
+
+
+def test_a_lookup_without_the_board_directory_names_the_directory_it_looked_for(checkout):
+    misses = lookup_candidates(_query(board="mi300x"), checkout).misses
+    assert f"no recipe directory of org/M for sglang on mi300x: {MULTI_NODE_RECIPES}/m/sglang/mi300x-fp8" in misses
+
+
+@pytest.mark.parametrize(("tuned", "asked"), [("mi325x", "mi300x"), ("mi300x", "mi325x")])
+def test_a_pd_session_takes_mi300x_and_mi325x_launches_for_each_other(tmp_path, tuned, asked):
+    files = {
+        MASTER: _MASTER.replace("mi355x", tuned),
+        RUNNERS: _RUNNERS.replace("mi355x", tuned),
+        f"{MULTI_NODE_RECIPES}/m/sglang/{tuned}-fp8/1k1k/disagg.yaml": _RECIPE.replace("mi355x", tuned),
+        f"{MULTI_NODE_RECIPES}/m/sglang/{tuned}-fp8/1k1k/extra.yaml": _RECIPE.replace("mi355x", tuned),
+    }
+    for path, text in files.items():
+        (tmp_path / path).parent.mkdir(parents=True, exist_ok=True)
+        (tmp_path / path).write_text(textwrap.dedent(text))
+    board_checkout = Checkout("https://example/InferenceX", "c0ffee", tmp_path)
+
+    master = master_candidates(_query(board=asked), board_checkout).found
+    lookup = lookup_candidates(_query(board=asked), board_checkout).found
+
+    assert master and all(f"on {tuned}, not {asked}" in " ".join(c.warnings) for c in master)
+    assert lookup and all(f"{tuned}-fp8/1k1k/extra.yaml" in c.path for c in lookup)
+    assert all(f"on {tuned}, not {asked}" in " ".join(c.warnings) for c in lookup)
+
+
 def test_pinned_unreadable_inferencex_is_refused():
     with pytest.raises(PdResolveError, match="pinned"):
         resolve(_query(), ResolveInputs(inferencex=_unreadable, pinned=True))

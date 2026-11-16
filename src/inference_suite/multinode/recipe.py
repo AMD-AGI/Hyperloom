@@ -351,7 +351,7 @@ def resolve(query: PdQuery, inputs: ResolveInputs) -> PdLaunch:
     if launch is not None:
         return launch
     try:
-        return _table(query, warnings)
+        return _table(query, (*warnings, *misses))
     except TableError as error:
         misses.append(f"PD default table: {error}")
     passed = "\n  ".join((*warnings, *misses))

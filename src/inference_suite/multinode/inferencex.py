@@ -41,6 +41,8 @@ MULTI_NODE_RECIPES = f"{PROJECT}/benchmarks/multi_node/srt-slurm-recipes"
 NVIDIA_MASTER = f"{PROJECT}/configs/nvidia-master.yaml"
 #: What a PD resolution checks out of InferenceX.
 CHECKOUT_DIRECTORIES = (f"{PROJECT}/configs", MULTI_NODE_RECIPES)
+#: Boards a PD session takes each other's launches for, beyond :func:`boards_interchangeable`.
+_PD_INTERCHANGEABLE_BOARDS = (frozenset({"mi300x", "mi325x"}),)
 _SCENARIO_OF = {Workload.FIXED: Scenario.FIXED, Workload.AGENTX: Scenario.AGENTIC}
 _AGENTX_SHAPE = "agentx"
 _NO_SPEC = "none"
@@ -280,6 +282,18 @@ class _MasterRow:
     row: Mapping[str, Any]
 
 
+def _pd_boards(board: str) -> tuple[str, ...]:
+    """``board`` then the boards a PD session takes launches from in its place."""
+    board = board.lower()
+    others = sorted({other for group in _PD_INTERCHANGEABLE_BOARDS if board in group for other in group} - {board})
+    return (board, *others)
+
+
+def _pd_boards_interchangeable(board: str, other: str) -> bool:
+    """Whether a PD session on ``board`` takes a launch tuned on ``other``."""
+    return boards_interchangeable(board, other) or other.lower() in _pd_boards(board)
+
+
 def _master_rows(query: PdQuery, master: Mapping[str, Any]) -> Iterator[_MasterRow]:
     """Every row of the query's scenario in the multi-node disaggregated entries of its model and framework."""
     frameworks = {query.framework.value, f"{query.framework.value}-disagg"}
@@ -336,14 +350,21 @@ def master_candidates(query: PdQuery, checkout: Checkout) -> Candidates:
     _, note = master_model(query.model_id, [master])
     found: list[Candidate] = []
     misses: list[str] = [note] if note else []
-    for master_row in _master_rows(query, master):
+    rows = list(_master_rows(query, master))
+    if not rows:
+        scenario = _SCENARIO_OF[query.workload].value
+        misses.append(
+            f"{MASTER}: no multi-node disaggregated entry serves {query.model_id} with {query.framework.value} "
+            f"in its {scenario} scenario"
+        )
+    for master_row in rows:
         arm = master_row.arm
         try:
             board = runner_board(str(master_row.entry.get("runner")), labels)
         except RecipeSourceError as error:
             misses.append(f"{arm}: {error}")
             continue
-        if not boards_interchangeable(query.board, board):
+        if not _pd_boards_interchangeable(query.board, board):
             misses.append(f"{arm}: it runs on {board}, not {query.board}")
             continue
         candidate = _row_candidate(query, checkout, master_row)
@@ -373,9 +394,13 @@ def _named_recipes(master: Mapping[str, Any]) -> set[str]:
     return named
 
 
-def _lookup_dirs(query: PdQuery, checkout: Checkout, masters: Sequence[Mapping[str, Any]]) -> list[str]:
-    """The workload directories of the query's model, framework and board: ``<board>-<precision>`` and its suffixed
-    siblings (``-mtp``) for every model prefix and precision the master configs give the model."""
+def _lookup_dirs(
+    query: PdQuery, checkout: Checkout, masters: Sequence[Mapping[str, Any]]
+) -> tuple[list[str], list[str]]:
+    """The workload directories of the query's model, framework and boards (its own, then those :func:`_pd_boards`
+    takes in its place): ``<board>-<precision>`` and its suffixed siblings (``-mtp``) for every model prefix and
+    precision the master configs give the model; then the query board's ``<board>-<precision>`` directories of the
+    prefixes and precisions no board has."""
     model, _ = master_model(query.model_id, masters)
     labels = sorted(
         {
@@ -389,19 +414,26 @@ def _lookup_dirs(query: PdQuery, checkout: Checkout, masters: Sequence[Mapping[s
         shape = f"{query.isl // 1024}k{query.osl // 1024}k"
     else:
         shape = _AGENTX_SHAPE
-    board = query.board.lower()
+    boards = _pd_boards(query.board)
     found: list[str] = []
+    absent: list[str] = []
     for prefix, precision in labels:
         engine = checkout.root / MULTI_NODE_RECIPES / prefix / query.framework.value
-        for label in sorted(engine.glob(f"{board}-{precision}*")):
-            if label.name == f"{board}-{precision}" or label.name.startswith(f"{board}-{precision}-"):
-                found.append(f"{MULTI_NODE_RECIPES}/{prefix}/{query.framework.value}/{label.name}/{shape}")
-    return found
+        matched = [
+            label.name
+            for board in boards
+            for label in sorted(engine.glob(f"{board}-{precision}*"))
+            if label.name == f"{board}-{precision}" or label.name.startswith(f"{board}-{precision}-")
+        ]
+        found.extend(f"{MULTI_NODE_RECIPES}/{prefix}/{query.framework.value}/{name}/{shape}" for name in matched)
+        if not matched:
+            absent.append(f"{MULTI_NODE_RECIPES}/{prefix}/{query.framework.value}/{boards[0]}-{precision}")
+    return found, absent
 
 
 def _lookup_candidate(query: PdQuery, path: str, selector: str, recipe: Mapping[str, Any]) -> Candidate | str:
     gpu_type = str((recipe.get("resources") or {}).get("gpu_type") or "")
-    if gpu_type.lower() != query.board.lower():
+    if gpu_type.lower() not in _pd_boards(query.board):
         return f"it is for {gpu_type}, not {query.board}"
     unported = _unported(recipe, query)
     if unported is not None:
@@ -413,6 +445,9 @@ def _lookup_candidate(query: PdQuery, path: str, selector: str, recipe: Mapping[
     misfit = _roles_misfit(query, fits)
     if misfit is not None:
         return misfit
+    warnings = [f"{path}:{selector} is not a recipe InferenceX's master configuration benchmarks"]
+    if gpu_type.lower() != query.board.lower():
+        warnings.append(f"InferenceX tuned {path}:{selector} on {gpu_type}, not {query.board}")
     return Candidate(
         kind=PdSourceKind.INFERENCEX_LOOKUP,
         entry="",
@@ -420,7 +455,7 @@ def _lookup_candidate(query: PdQuery, path: str, selector: str, recipe: Mapping[
         locator=selector,
         recipe=recipe,
         fits=fits,
-        warnings=(f"{path}:{selector} is not a recipe InferenceX's master configuration benchmarks",),
+        warnings=tuple(warnings),
     )
 
 
@@ -434,7 +469,12 @@ def lookup_candidates(query: PdQuery, checkout: Checkout) -> Candidates:
     _, note = master_model(query.model_id, masters)
     found: list[Candidate] = []
     misses: list[str] = [note] if note else []
-    for directory in _lookup_dirs(query, checkout, masters):
+    directories, absent = _lookup_dirs(query, checkout, masters)
+    what = f"no recipe directory of {query.model_id} for {query.framework.value} on {query.board}"
+    if not directories and not absent:
+        misses.append(f"{what}: the master configurations give the model no recipe prefix")
+    misses.extend(f"{what}: {directory}" for directory in absent)
+    for directory in directories:
         for path in checkout.paths(directory, ".yaml", nested=False):
             for selector, recipe in expand_variants(_yaml(checkout, path)):
                 if f"{path}:{selector}" in named:
