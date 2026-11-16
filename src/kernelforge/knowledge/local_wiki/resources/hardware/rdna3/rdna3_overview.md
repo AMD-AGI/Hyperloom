@@ -30,9 +30,9 @@ One-screen cheat sheet for the W7900. Read this first; the other cards in `hardw
 | INT4 | 245 TOPS | WMMA (iu4) |
 | FP8 / FP4 | — | not supported on gfx11 |
 
-**W7900D:** the same 96 CUs, 48 GB and 864 GB/s at a lower engine clock (rocminfo reports a 1760 MHz maximum).
-AMD publishes no peaks for it; scale the W7900's compute peaks by the clock ratio as an estimate, and treat any
-compute-bound conclusion on a W7900D as needing a measured ceiling. Its bandwidth ridge is lower in proportion.
+**W7900D:** the same 96 CUs, 48 GB and 864 GB/s at a lower boost clock (2156 MHz against 2500 MHz). AMD's
+W7900D page (published in Chinese only) lists **FP16/BF16 106 TFLOPS** and **FP32 53 TFLOPS**, so its FP16 ridge
+is ≈ 123 FLOP/byte. Use these numbers, not the W7900's, on a W7900D.
 
 AMD does not publish W7900 clocks. Third-party databases list a ~2.5 GHz boost, which is consistent with the
 FP32 figure (6144 × 2 FMA × 2 dual-issue × 2.495 GHz ≈ 61.3 TFLOPS). Do not quote a clock as a fact; measure it.

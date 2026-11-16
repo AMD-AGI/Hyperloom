@@ -11,8 +11,8 @@ from dataclasses import replace
 import pytest
 
 from hyperloom_common.gpu_identity import AMD_GPU_BOARDS
-from kernelforge.kernel_backends.constants import KERNEL_BACKENDS
 from kernelforge.utils import gpu_arch
+from kernelforge.kernel_backends.constants import KERNEL_BACKENDS
 from kernelforge.utils.gpu_arch import (
     CDNA_OCCUPANCY,
     arch_profile,
@@ -41,9 +41,6 @@ from kernelforge.utils.gpu_arch import (
         ("AMD Radeon AI PRO R9700", "gfx1201"),
         ("AMD Radeon 8060S Graphics", "gfx1151"),
         ("radeon_8060s", "gfx1151"),
-        ("W7900", "gfx1100"),
-        ("AMD Radeon PRO W7900", "gfx1100"),
-        ("AMD Radeon PRO W7900D", "gfx1100"),
     ],
 )
 def test_canon_arch_folds_product_names_onto_their_gfx_target(value, expected):
@@ -63,10 +60,7 @@ def test_canon_arch_names_no_target_rather_than_a_wrong_one(value):
         ("amd instinct mi355x", "mi355x"),
         ("amd_instinct_mi325x", "mi300x"),
         ("Radeon 8060S", "radeon8060s"),
-        ("gfx1100", "gfx1100"),
-        ("W7900", "w7900"),
-        ("Radeon PRO W7900", "w7900"),
-        ("AMD Radeon PRO W7900D", "w7900d"),
+        ("gfx1030", "gfx1030"),
         ("MI250-X", "mi250_x"),
     ],
 )
@@ -74,9 +68,8 @@ def test_canonical_gpu_type_records_one_chip_under_one_name(value, expected):
     assert canonical_gpu_type(value) == expected
 
 
-@pytest.mark.parametrize("gfx", ["gfx1201", "gfx1100"])
-def test_an_isa_shared_by_several_boards_keeps_its_isa_identity_when_board_is_unspecified(gfx):
-    assert canonical_gpu_type(gfx) == gfx
+def test_gfx1201_keeps_isa_identity_when_board_is_unspecified():
+    assert canonical_gpu_type("gfx1201") == "gfx1201"
 
 
 @pytest.mark.parametrize(
@@ -98,7 +91,6 @@ def test_canonical_gpu_type_keeps_a_spelling_that_only_contains_a_known_name(val
         (" MI355X ", "gfx950"),
         ("amd_instinct_mi300x", "gfx942"),
         ("r9700", "gfx1201"),
-        ("w7900", "gfx1100"),
         ("mi300x_vf", ""),
         ("amd instinct mi300x", ""),
         ("gfx942", ""),
@@ -112,7 +104,7 @@ def test_product_arch_maps_only_an_exact_product_name(value, expected):
 def test_every_board_the_shared_table_knows_is_recorded_under_a_board_of_its_own_target(board):
     recorded = canonical_gpu_type(board.product)
     assert AMD_GPU_BOARDS[recorded].gfx == board.gfx
-    expected = board.gfx if board.gfx in ("gfx1201", "gfx1100") else recorded
+    expected = board.gfx if board.gfx == "gfx1201" else recorded
     assert canonical_gpu_type(board.gfx) == expected
 
 

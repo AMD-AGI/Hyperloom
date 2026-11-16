@@ -21,15 +21,11 @@ def _spelling(value: str) -> str:
 _ARCH_BY_GPU_TYPE = {
     _spelling(name): board.gfx for board in AMD_GPU_BOARDS.values() for name in (board.product, *board.aliases)
 }
-# Each board's own spellings (product name and aliases) fold onto its product key.
-_PRODUCT_BY_SPELLING = {
-    _spelling(name): board.product for board in AMD_GPU_BOARDS.values() for name in (board.product, *board.aliases)
-}
-# Established product aliases; gfx1201 (R9700, R9600D) and gfx1100 (W7900, W7900D) stay ISAs because each names
-# more than one board.
+# Established product aliases; gfx1201 stays an ISA because it names more than one board.
 _GPU_TYPE_BY_ARCH = {
     "gfx942": "mi300x",
     "gfx950": "mi355x",
+    "gfx1100": "w7900",
     "gfx1151": "radeon8060s",
 }
 # A concrete target only: rocminfo also lists generic ISAs such as ``gfx12-generic`` beside the chip's own.
@@ -61,9 +57,8 @@ def canonical_gpu_type(value: str) -> str:
     merely contains one (``mi300x_vf``, ``gfx942:sramecc+``) keeps the records it was stored under.
     """
     normalized = _spelling(value)
-    product = _PRODUCT_BY_SPELLING.get(normalized, normalized)
     arch = _ARCH_BY_GPU_TYPE.get(normalized, normalized)
-    return _GPU_TYPE_BY_ARCH.get(arch, product)
+    return _GPU_TYPE_BY_ARCH.get(arch, normalized)
 
 
 def product_arch(value: str) -> str:

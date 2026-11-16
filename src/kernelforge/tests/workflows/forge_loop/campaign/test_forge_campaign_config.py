@@ -919,11 +919,11 @@ def test_a_fresh_campaign_refuses_a_backend_that_cannot_build_for_gfx1100(tmp_pa
         )
 
 
-@pytest.mark.parametrize(("gpu_type", "recorded"), [("", "gfx1100"), ("W7900D", "w7900d")])
+@pytest.mark.parametrize(("gpu_type", "recorded"), [("", "w7900"), ("W7900D", "w7900d")])
 def test_a_gfx1100_campaign_with_a_supported_backend_keeps_the_board_it_names(
     tmp_path, monkeypatch, gpu_type, recorded
 ):
-    """gfx1100 names both the W7900 and the W7900D, so only an explicit board picks one."""
+    """A bare gfx1100 is recorded as the W7900; an explicit board is kept as given."""
     workspace, kernel, _helper, driver = _git_workspace(tmp_path)
     monkeypatch.setenv("GPU_TARGET", "gfx1100")
 
