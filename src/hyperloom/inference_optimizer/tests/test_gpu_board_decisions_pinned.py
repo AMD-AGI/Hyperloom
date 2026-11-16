@@ -53,7 +53,18 @@ def test_r9700_is_validated_for_vllm_only(framework):
 def test_only_the_gfx1201_radeon_boards_pin_their_geak_identity():
     assert gpu_types.geak_identity_pin("r9700") == {"expected_target": "r9700", "expected_gfx": "gfx1201"}
     assert gpu_types.geak_identity_pin("r9600d") == {"expected_target": "r9600d", "expected_gfx": "gfx1201"}
-    for product in ("mi300x", "mi308x", "mi325x", "mi350x", "mi355x", "radeon8060s", "w7900", "w7900d", "unknown_gpu", ""):
+    for product in (
+        "mi300x",
+        "mi308x",
+        "mi325x",
+        "mi350x",
+        "mi355x",
+        "radeon8060s",
+        "w7900",
+        "w7900d",
+        "unknown_gpu",
+        "",
+    ):
         assert gpu_types.geak_identity_pin(product) == {}, product
 
 
