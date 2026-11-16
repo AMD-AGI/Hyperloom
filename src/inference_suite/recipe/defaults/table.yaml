@@ -34,11 +34,7 @@ rows:
     args: [--trust-remote-code, --gpu-memory-utilization, "0.9"]
     env: {VLLM_ROCM_USE_AITER: "0", FLASH_ATTENTION_TRITON_AMD_ENABLE: "TRUE"}
   - framework: vllm
-    gfx: [gfx1100]
-    args: [--trust-remote-code, --gpu-memory-utilization, "0.95"]
-    env: {VLLM_ROCM_USE_AITER: "0", VLLM_ROCM_USE_AITER_MHA: "0", VLLM_ROCM_USE_AITER_RMSNORM: "0"}
-  - framework: vllm
-    gfx: [gfx1151]
+    gfx: [gfx1100, gfx1151]
     args: [--trust-remote-code, --gpu-memory-utilization, "0.95"]
     env: {VLLM_ROCM_USE_AITER: "0", VLLM_ROCM_USE_AITER_MHA: "0", VLLM_ROCM_USE_AITER_RMSNORM: "0"}
   - framework: atom
