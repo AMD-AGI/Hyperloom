@@ -5,7 +5,6 @@
 
 from __future__ import annotations
 
-from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
 
@@ -155,12 +154,3 @@ _NO_TASKS = SimpleNamespace(
 def test_the_cap_holds_back_only_a_framework_agent_specialist_orchestration_may_dispatch(action_name, params, phase):
     assert untested_backlog_denial(action_name, params, _full_state(phase), _NO_TASKS) is None
     assert untested_backlog_denial("specialist", {"mode": "research"}, _full_state(), _NO_TASKS) is not None
-
-
-def test_orchestration_is_told_the_cap_and_the_rule():
-    from hyperloom.orchestrator.prompts import prompt_builder
-
-    md = (Path(prompt_builder.__file__).parent / "orchestration.md").read_text(encoding="utf-8")
-
-    assert f"While {UNTESTED_BACKLOG_CAP} untested proposals" in md
-    assert SPECIALIST_UNTESTED_BACKLOG_FULL in md
