@@ -5,6 +5,7 @@
 
 from __future__ import annotations
 
+import fcntl
 import logging
 from contextlib import contextmanager
 from typing import Iterator
@@ -14,12 +15,7 @@ log = logging.getLogger(__name__)
 
 @contextmanager
 def best_effort_file_lock(lock_path: str, *, label: str = "file_lock") -> Iterator[None]:
-    """Best-effort mutex; falls through without exclusion when fcntl/lock-file is unavailable."""
-    try:
-        import fcntl
-    except ImportError:
-        yield
-        return
+    """Best-effort mutex; falls through without exclusion when the lock file cannot be opened."""
     try:
         fp = open(lock_path, "w")
     except OSError as e:

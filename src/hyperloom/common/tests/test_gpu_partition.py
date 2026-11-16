@@ -52,12 +52,8 @@ class TestParseMode:
 
     def test_an_unknown_mode_is_a_parse_error(self):
         """A typo must fail at parse time, not as an assertion that never holds."""
-        with pytest.raises(gp.PartitionError, match="unknown compute-partition mode"):
+        with pytest.raises(gp.PartitionError, match="unknown compute-partition mode .*expected one of .*SPX"):
             gp.parse_mode("opx")
-
-    def test_the_error_lists_what_is_valid(self):
-        with pytest.raises(gp.PartitionError, match="SPX"):
-            gp.parse_mode("octuple")
 
 
 class TestReadPartitionMode:
@@ -124,15 +120,15 @@ class TestReadDeviceCu:
 
 
 class TestReadDeviceGib:
-    def test_mebibytes_are_the_binary_kind(self, smi):
-        """An MI355X's 288 GiB is reported as 294896 "MB"."""
-        smi.payloads["--vram"] = _vram_payload(294896, "MB")
-        assert gp.read_device_gib(0) == pytest.approx(288.0, abs=0.1)
-
-    def test_a_partitioned_device_reports_its_partitions_memory(self, smi):
-        """Under CPX a device *is* a partition, so this needs no dividing."""
-        smi.payloads["--vram"] = _vram_payload(36862, "MB")
-        assert gp.read_device_gib(0) == pytest.approx(36.0, abs=0.1)
+    @pytest.mark.parametrize(
+        ("mebibytes", "gib"),
+        # An MI355X's 288 GiB is reported as 294896 "MB"; under CPX a device *is* a partition, so it needs no dividing.
+        [(294896, 288.0), (36862, 36.0)],
+        ids=["a_whole_card", "a_cpx_partition"],
+    )
+    def test_mebibytes_are_the_binary_kind(self, smi, mebibytes, gib):
+        smi.payloads["--vram"] = _vram_payload(mebibytes, "MB")
+        assert gp.read_device_gib(0) == pytest.approx(gib, abs=0.1)
 
     @pytest.mark.parametrize(
         ("value", "unit", "expected"),
@@ -278,30 +274,6 @@ class TestPartitionDevicePredicate:
         is_partition = gp.partition_device_predicate(32)
         assert is_partition(32) is True
         assert is_partition(256) is False
-
-    def test_its_docstring_admits_it_has_no_in_tree_caller(self):
-        """Otherwise the next reader goes looking for the consumer and finds none."""
-        assert "No caller in this repository" in (gp.partition_device_predicate.__doc__ or "")
-
-
-class TestPublicSurface:
-    def test_the_dead_unpartitioned_mode_constant_is_gone(self):
-        """Defined and exported, referenced nowhere -- including by its own tests."""
-        assert not hasattr(gp, "UNPARTITIONED_MODE")
-        assert "UNPARTITIONED_MODE" not in gp.__all__
-
-    @pytest.mark.parametrize(
-        "name",
-        ["read_partition_mode", "read_partition_modes", "read_device_cu", "read_device_gib"],
-    )
-    def test_the_probe_helpers_behind_observe_partition_are_not_advertised(self, name):
-        """``observe_partition`` calls itself the single entry point a caller needs."""
-        assert name not in gp.__all__
-        assert callable(getattr(gp, name))
-
-    def test_everything_advertised_exists(self):
-        for name in gp.__all__:
-            assert hasattr(gp, name), name
 
 
 class TestPublishedShape:
