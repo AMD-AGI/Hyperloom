@@ -122,19 +122,27 @@ def test_a_keep_reads_the_agent_s_config_through_its_config_source() -> None:
     assert kept == KeptChange(3, "diff\n", "--tp 1 --enable-torch-compile", {"SGLANG_A": "0"}, "fused rmsnorm")
 
 
-@pytest.mark.parametrize(
-    "owned",
-    [{"ISL": "1024", "osl": "1024"}, {"GSM8K_MIN": "0.5", "GSM8K_LIMIT": "400"}],
-    ids=["workload-variables-the-measurement-sets", "arbor-evaluation-settings-mb-gives-it"],
-)
-def test_a_keep_leaves_out_the_variables_mb_sets_itself_and_names_them(owned: dict[str, str]) -> None:
+def test_a_keep_leaves_out_the_workload_variables_the_measurement_sets_and_names_them() -> None:
     source = ConfigSource("agent/config.json", "server_flags", "server_env")
-    state = {"server_flags": "--tp 1", "server_env": {"SGLANG_A": "0", **owned}}
+    state = {"server_flags": "--tp 1", "server_env": {"SGLANG_A": "0", "ISL": "1024", "osl": "1024"}}
 
     kept = read_kept_change(_started(ROOT.launch), state, source)
 
     assert kept.envs == {"SGLANG_A": "0"}
-    assert kept.dropped == owned
+    assert kept.dropped == {"ISL": "1024", "osl": "1024"}
+
+
+def test_a_keep_leaves_out_the_evaluation_settings_an_adapter_names_which_mb_gives_its_agent(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(agent_import, "eval_envs", lambda: frozenset({"GSM8K_MIN", "GSM8K_LIMIT"}))
+    source = ConfigSource("agent/config.json", "server_flags", "server_env")
+    state = {"server_flags": "--tp 1", "server_env": {"SGLANG_A": "0", "GSM8K_MIN": "0.5", "GSM8K_LIMIT": "400"}}
+
+    kept = read_kept_change(_started(ROOT.launch), state, source)
+
+    assert kept.envs == {"SGLANG_A": "0"}
+    assert kept.dropped == {"GSM8K_MIN": "0.5", "GSM8K_LIMIT": "400"}
 
 
 def test_a_keep_whose_config_the_source_cannot_read_is_refused_naming_the_file() -> None:
@@ -288,8 +296,8 @@ def test_a_variable_listing_only_the_image_s_tables_stays_a_launch_value(tmp_pat
 ROOT_COMMIT = "a" * 40
 
 
-def _arbor_keep(outbox: Path, value: str, copied: dict[str, bytes], digests: dict[str, str] | None = None) -> None:
-    """Snapshot 1 of ``outbox`` as Arbor writes one whose ``TABLE_ENV`` is the pathsep list ``value``: each part in
+def _snapshot_keep(outbox: Path, value: str, copied: dict[str, bytes], digests: dict[str, str] | None = None) -> None:
+    """Snapshot 1 of ``outbox`` as a component agent writes one whose ``TABLE_ENV`` is the pathsep list ``value``: each part in
     ``copied`` copied under ``tables/<VAR>/<k>-<basename>`` in list order, the other parts in its path only."""
 
     directory = outbox / "0001"
@@ -332,7 +340,7 @@ def test_a_snapshot_reads_every_file_a_multi_part_aiter_value_lists_as_one_table
 ) -> None:
     defaults, start, own = _start_files(tmp_path)
     value = ":".join([*map(str, defaults), _listing(start, own)])
-    _arbor_keep(tmp_path / "outbox", value, {str(path): path.read_bytes() for path in (*defaults, start, own)})
+    _snapshot_keep(tmp_path / "outbox", value, {str(path): path.read_bytes() for path in (*defaults, start, own)})
 
     kept = _read(tmp_path / "outbox", tuple(map(str, defaults)))
 
@@ -351,13 +359,13 @@ def test_the_tables_of_a_vllm_image_s_aiter_are_the_image_s_not_the_agent_s_rows
     configs = tmp_path / "site-packages" / "aiter" / "configs"
     monkeypatch.setattr(agent_import, "image_configs", lambda: configs)
     defaults = [configs / "bf16_tuned_gemm.csv", configs / "model_configs" / "llama70B_bf16_tuned_gemm.csv"]
-    own = tmp_path / "worktree" / "arbor" / "aiter_tables" / "qwen3_bf16_tuned_gemm.csv"
+    own = tmp_path / "worktree" / "agent" / "aiter_tables" / "qwen3_bf16_tuned_gemm.csv"
     texts = ("M,N,K\n1,4096,4096\n", "M,N,K\n2,4096,4096\n", "M,N,K\n8,6144,4096\n")
     for path, text in zip((*defaults, own), texts, strict=True):
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text(text, encoding="utf-8")
     value = ":".join(map(str, (*defaults, own)))
-    _arbor_keep(tmp_path / "outbox", value, {str(path): path.read_bytes() for path in (*defaults, own)})
+    _snapshot_keep(tmp_path / "outbox", value, {str(path): path.read_bytes() for path in (*defaults, own)})
 
     kept = _read(tmp_path / "outbox", ())
 
@@ -368,10 +376,10 @@ def test_a_multi_part_value_whose_copy_does_not_match_its_sha256_or_is_missing_i
     defaults, start, own = _start_files(tmp_path)
     value = ":".join(map(str, (*defaults, start, own)))
     copied = {str(path): path.read_bytes() for path in (*defaults, start, own)}
-    _arbor_keep(tmp_path / "bad", value, copied, digests={str(own): "0" * 64})
-    _arbor_keep(tmp_path / "missing", value, copied)
+    _snapshot_keep(tmp_path / "bad", value, copied, digests={str(own): "0" * 64})
+    _snapshot_keep(tmp_path / "missing", value, copied)
     (tmp_path / "missing" / "0001" / "tables" / TABLE_ENV / "3-own.csv").unlink()
-    _arbor_keep(tmp_path / "unlisted", value, {str(path): copied[str(path)] for path in (*defaults, own)})
+    _snapshot_keep(tmp_path / "unlisted", value, {str(path): copied[str(path)] for path in (*defaults, own)})
 
     with pytest.raises(KeptChangeError, match="sha256"):
         _read(tmp_path / "bad", tuple(map(str, defaults)))
@@ -538,7 +546,7 @@ def test_a_keep_that_sets_a_variable_needing_a_flag_off_is_read_without_it_and_n
     assert (valued.server_args, valued.disabled) == ("--tp 1", {REPLAYSSM: f"{MONOKERNEL}=1"})
 
 
-def test_an_arbor_snapshot_that_sets_a_variable_needing_a_flag_off_is_read_without_the_flag(tmp_path: Path) -> None:
+def test_a_snapshot_that_sets_a_variable_needing_a_flag_off_is_read_without_the_flag(tmp_path: Path) -> None:
     directory = tmp_path / "keeps" / "0001"
     directory.mkdir(parents=True)
     keep = {"number": 1, "previous": None, "root": ROOT_COMMIT, "parent": ROOT_COMMIT, "commit": "b" * 40,
@@ -570,7 +578,7 @@ OWN_LAUNCH = LaunchConfig("--chunked-prefill-size 4096")
 
 
 def _resolved_snapshot(tmp_path: Path, flags: str, envs: dict[str, str]) -> KeptChange:
-    """Snapshot 1 of an Arbor MB started on ``RESOLVED_FLAGS`` with ``OWN_LAUNCH`` added, run with ``flags``."""
+    """Snapshot 1 of an agent MB started on ``RESOLVED_FLAGS`` with ``OWN_LAUNCH`` added, run with ``flags``."""
 
     directory = tmp_path / "keeps" / "0001"
     directory.mkdir(parents=True)
@@ -610,18 +618,18 @@ async def test_a_keep_s_removal_from_the_resolved_launch_stays_on_the_head_s_lau
 
 
 def test_a_keep_s_patch_is_read_byte_for_byte_with_a_lone_carriage_return_in_an_added_file(tmp_path: Path) -> None:
-    # A server log with a progress bar, as Arbor's landed tree carries: universal newlines would split its line.
+    # A server log with a progress bar, as an agent's landed tree may carry: universal newlines would split its line.
     patch = "--- /dev/null\n+++ b/eval/server.log\n@@ -0,0 +1 @@\n+Loading 10%\r 20%\r 30%\n"
-    _arbor_keep(tmp_path, "", {})
+    _snapshot_keep(tmp_path, "", {})
     (tmp_path / "0001" / "change.patch").write_bytes(patch.encode())
     assert _read(tmp_path, ()).source_patch == patch
 
 
 async def test_a_source_only_snapshot_keeps_the_evaluation_settings_the_recipe_sets(tmp_path: Path) -> None:
-    # MB starts Arbor with the recipe's GSM8K_MIN in its config; the snapshot runs with it too.
+    # MB starts the agent with the recipe's GSM8K_MIN in its config; the snapshot runs with it too.
     launch = LaunchConfig(ROOT.launch.server_args, {**ROOT.launch.envs, "GSM8K_MIN": "0.8"})
     recipe = replace(ROOT, launch=launch)
-    _arbor_keep(tmp_path, "", {})
+    _snapshot_keep(tmp_path, "", {})
     config = {"server_flags": launch.server_args, "server_env": dict(launch.envs)}
     (tmp_path / "0001" / "config.json").write_text(json.dumps(config), encoding="utf-8")
     (tmp_path / "0001" / "change.patch").write_text("diff\n", encoding="utf-8")
@@ -633,7 +641,7 @@ async def test_a_source_only_snapshot_keeps_the_evaluation_settings_the_recipe_s
 
 
 def test_a_snapshot_whose_json_nests_too_deep_to_parse_is_refused(tmp_path: Path) -> None:
-    _arbor_keep(tmp_path, "", {})
+    _snapshot_keep(tmp_path, "", {})
     (tmp_path / "0001" / "config.json").write_text("[" * 200_000 + "]" * 200_000, encoding="utf-8")
 
     with pytest.raises(KeptChangeError, match="config.json"):
@@ -643,7 +651,7 @@ def test_a_snapshot_whose_json_nests_too_deep_to_parse_is_refused(tmp_path: Path
 def test_a_snapshot_listing_a_table_file_whose_path_is_no_string_is_refused(tmp_path: Path) -> None:
     defaults, start, own = _start_files(tmp_path)
     value = ":".join(map(str, (*defaults, own)))
-    _arbor_keep(tmp_path / "outbox", value, {str(path): path.read_bytes() for path in (*defaults, own)})
+    _snapshot_keep(tmp_path / "outbox", value, {str(path): path.read_bytes() for path in (*defaults, own)})
     keep_file = tmp_path / "outbox" / "0001" / "keep.json"
     keep = json.loads(keep_file.read_text(encoding="utf-8"))
     keep["tables"][TABLE_ENV]["files"][-1]["path"] = [str(own)]

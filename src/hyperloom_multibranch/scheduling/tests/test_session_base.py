@@ -3,7 +3,7 @@
 
 """A session freezes the base launch its tests run on once, resolved as ``hyperloom optimize`` resolves it, and a
 resumed session keeps the one it froze; the operator's ``--reference-script`` is the base, a base launch record frozen
-without reading any recipe source. The Arbor agents are served the frozen base unless given a launch file."""
+without reading any recipe source. The component agents are served the frozen base unless given a launch file."""
 
 from __future__ import annotations
 
@@ -22,7 +22,7 @@ from hyperloom.orchestrator.state.base_launch import FrozenBase, freeze_base, fr
 from hyperloom_multibranch.scheduling.peers import PeersUnavailable
 from hyperloom_multibranch.scheduling.session_base import freeze_session_base, served_launch
 from hyperloom_multibranch.scheduling.settings import InferenceXShape, KernelOptimizer, Workload
-from hyperloom_multibranch.specialist.arbor_adapter import read_launch
+from hyperloom_multibranch.specialist.component_agent import read_launch
 from hyperloom_multibranch.tests.base_records import MODEL_ID, base_record, write_record
 from inference_suite import InferencexCommitRefused, SourceSnapshot
 from inference_suite.contracts import BaseLaunch, LaunchModel, SourceKind
@@ -192,7 +192,7 @@ def test_a_base_on_another_topology_than_the_workloads_is_refused(tmp_path: Path
     assert frozen_base(tmp_path / "toolbox") is None
 
 
-def test_a_record_is_frozen_as_the_base_without_a_source_and_arbor_is_served_the_frozen_base(
+def test_a_record_is_frozen_as_the_base_without_a_source_and_a_component_agent_is_served_the_frozen_base(
     tmp_path: Path, offline: None
 ) -> None:
     record = write_record(tmp_path / "base_launch.json")
@@ -215,7 +215,7 @@ def test_a_resumed_session_keeps_its_base_and_serves_it(tmp_path: Path, offline:
     assert served_launch(resumed, "") == str(first.path)
 
 
-def test_an_arbor_launch_file_is_served_in_place_of_the_frozen_base(tmp_path: Path) -> None:
+def test_a_component_agent_launch_file_is_served_in_place_of_the_frozen_base(tmp_path: Path) -> None:
     launch = tmp_path / "launch.json"
     launch.write_text(json.dumps({"server_flags": "--max-num-seqs 64", "server_env": {}}), encoding="utf-8")
     frozen = FrozenBase(tmp_path / "toolbox" / "base_launch.json", base_record())

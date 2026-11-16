@@ -156,7 +156,7 @@ OTHER_FORMS = [
     ("--model-pa /models/fp8", "the checkpoint: (not set) -> /models/fp8"),
     ("--online_q /quant/a.yaml", "--online-quant-config: (not set) -> /quant/a.yaml"),
     ("--quantization-c.linear fp8_per_channel", "--quantization-config: (not set) -> .linear fp8_per_channel"),
-    # The same readings for the flags added with Arbor's copy of the list.
+    # The same readings for the checkpoint's revision, the config file of flags and the other quantization flags.
     ("--revision=abc123", "the checkpoint's revision: (not set) -> abc123"),
     ("--rev abc123", "the checkpoint's revision: (not set) -> abc123"),
     ("--revision.x abc123", "the checkpoint's revision: (not set) -> .x abc123"),
@@ -353,7 +353,7 @@ def _changes(before: str, after: str) -> list[str]:
         ("", "-- --max-num-seqs 8", []),
     ],
 )
-def test_the_comparison_reads_flags_as_arbor_does(before: str, after: str, expected: list[str]) -> None:
+def test_the_comparison_reads_flags_and_their_values(before: str, after: str, expected: list[str]) -> None:
     assert _changes(before, after) == expected
 
 

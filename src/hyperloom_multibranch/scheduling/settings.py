@@ -21,16 +21,16 @@ from hyperloom_multibranch.scheduling.roster import RosterCaps
 
 #: FINAL's sweep concs as multiples of an InferenceX workload's conc; the primary operating point is one of them.
 SWEEP_FACTORS = (0.5, 1.0, 2.0)
-#: How long the dossier pass that maps two or more Arbors' directions may run, unless the run says otherwise. Arbor
-#: starts its first iteration only with an hour and its 3 min margin left (its estimate with none measured), and ends
-#: the pass as soon as the map is set, which two iterations have reached in well under this bound.
+#: How long the dossier pass that maps two or more component agents' directions may run, unless the run says otherwise.
+#: A component agent starts its first iteration only with an hour and its 3 min margin left (its estimate with none
+#: measured), and ends the pass as soon as the map is set.
 DOSSIER_MINUTES = 90.0
-#: The least time each Arbor's share branch must have to its cutoff for the shares to open, unless the run says
-#: otherwise: with less, that first iteration never starts. Arbor measures the root's GSM8K before it, a few minutes on
-#: a small model and up to 30 on a large one, so a share given just this may still run nothing.
+#: The least time each component agent's share branch must have to its cutoff for the shares to open, unless the run
+#: says otherwise: with less, that first iteration never starts. An agent may measure the root's GSM8K before it, a few
+#: minutes on a small model and up to 30 on a large one, so a share given just this may still run nothing.
 SHARE_MINUTES = 63.0
-#: The first port of the blocks the Arbor agents' servers take, unless the run names another. Sessions that share a
-#: machine each name their own, since every agent serves on the host's network.
+#: The first port of the blocks the component agents' servers take, unless the run names another. Sessions that share
+#: a machine each name their own, since every agent serves on the host's network.
 AGENT_PORT = 31100
 #: The axis an AgentX session is graded on unless the run names another.
 DEFAULT_AGENTX_OBJECTIVE = AgentXObjective.P50_INTERACTIVITY
@@ -139,22 +139,22 @@ class RunSettings:
     them. ``user_directions`` are the directions the user
     wrote, each opening one branch where EXPLORE starts, ahead of the opening batch, within the branch cap; ``agents``
     the third-party agents the user named, each opening one autonomous branch the same way, and ``agent_directions``
-    the directions map whose disjoint shares the Arbor agents among them work, one share each (``""`` for none; see
-    :mod:`~hyperloom_multibranch.scheduling.agent_plans`), ``agent_pack`` the pack those Arbors run (``""`` for
-    the adapter's default, Arbor's serving template), ``agent_launch`` the file of the launch their recipe's adds
-    to (``""`` for the session's frozen base), ``agent_dossier_minutes`` how long the dossier pass that
-    maps two or more Arbors' directions may run when no map is given (0: none, the map is generated from the root's
+    the directions map whose disjoint shares the component agents among them work, one share each (``""`` for none; see
+    :mod:`~hyperloom_multibranch.scheduling.agent_plans`), ``agent_pack`` the pack those component agents run (``""``
+    for the adapter's default), ``agent_launch`` the file of the launch their recipe's adds
+    to (``""`` for the session's frozen base), ``agent_dossier_minutes`` how long the dossier pass that maps
+    two or more component agents' directions may run when no map is given (0: none, the map is generated from the root's
     shares; :mod:`~hyperloom_multibranch.specialist.dossier_pass`), ``agent_share_minutes`` the least time to their
     cutoff the share branches of a split map must have to open, and the least an agent branch whose lease is refused
     for want of cards must still have to run to keep waiting for them (0: they always open, and wait while any time is
     left), and ``agent_port`` the first port of the blocks
     their servers take, one block per agent branch, a mapping branch's included, and one for a pass before EXPLORE. ``stop_after_map`` ends the session
-    once those Arbors' directions are mapped, one Arbor's too, before EXPLORE, and leaves the map and its dossier for a
-    person to review; the run after the review is given that map as ``agent_directions`` and that dossier as
-    ``agent_dossier``, which every agent branch gets in place of a dossier pass's (``""`` for none). ``review_gate``
-    has those Arbors wait, once their map is made, until a person approves or rejects it (:mod:`.review`): the mapping
-    branch waits in EXPLORE while the others go on, a given map pauses the session before EXPLORE. It tells each Arbor
-    the host reviewed; off, nothing waits and each Arbor is started with its own gate off.
+    once the component agents' directions are mapped, those of a single one too, before EXPLORE, and leaves the map and
+    its dossier for a person to review; the run after the review is given that map as ``agent_directions`` and that
+    dossier as ``agent_dossier``, which every agent branch gets in place of a dossier pass's (``""`` for none).
+    ``review_gate`` has the component agents wait, once their map is made, until a person approves or rejects it
+    (:mod:`.review`): the mapping branch waits in EXPLORE while the others go on, a given map pauses the session before
+    EXPLORE. It tells each of them the host reviewed; off, nothing waits and each is started with its own gate off.
     ``references`` are the
     directories of reference material the run copies in before its first phase, each with the commit it was taken at.
     ``reference_script`` is the operator's launch file the session freezes as its base (``""`` to resolve it from the

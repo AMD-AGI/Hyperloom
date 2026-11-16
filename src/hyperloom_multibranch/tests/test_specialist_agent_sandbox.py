@@ -396,7 +396,7 @@ def test_a_server_started_in_a_session_of_its_own_is_still_the_sandbox_s(tmp_pat
 
 def test_pgrep_does_not_find_itself_so_a_wait_for_a_process_to_end_ends(tmp_path: Path) -> None:
     marker = f"bench{uuid.uuid4().hex}"
-    # Arbor waits for its bench to end with `until ! pgrep -f validator/bench.sh`, from a model's shell command.
+    # An agent may wait for its bench to end with `until ! pgrep -f validator/bench.sh`, from a model's shell command.
     script = (
         f"{shlex.quote(sys.executable)} -c 'import time; time.sleep(1)' {marker} & "
         f"until ! pgrep -f {marker} >/dev/null; do sleep 0.2; done; echo ended; "

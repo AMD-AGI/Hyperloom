@@ -229,7 +229,7 @@ from hyperloom_multibranch.scheduling.review import (
 )
 from hyperloom_multibranch.scheduling.settings import DOSSIER_MINUTES
 from hyperloom_multibranch.specialist import autonomous_session
-from hyperloom_multibranch.specialist.arbor_adapter import MAPPED, SplitFailed
+from hyperloom_multibranch.specialist.component_agent import MAPPED, SplitFailed
 from hyperloom_multibranch.specialist.dev_sandbox import DevLeases
 from hyperloom_multibranch.specialist.directions import DIRECTIONS
 from hyperloom_multibranch.specialist.dossier_pass import DossierOutcome, DossierPass, DossierStart
@@ -264,8 +264,8 @@ ISOLATION = LaunchIsolation(
 )
 #: How the peers of a ``final-only`` recovery would launch agents, which is not how the session's ran.
 RECOVERY_ISOLATION = LaunchIsolation("bwrap", "none", "bwrap", False, ("an agent sandbox runs unconfined",))
-#: The review gate pauses a session with Arbor agents for a person; these sessions open their branches without one,
-#: as ``run --no-review-gate`` does, and the review's own tests turn it on.
+#: The review gate pauses a session with component agents for a person; these sessions open their branches without
+#: one, as ``run --no-review-gate`` does, and the review's own tests turn it on.
 SETTINGS = RunSettings(
     WORKLOAD,
     max_hours=0.5,
@@ -274,7 +274,7 @@ SETTINGS = RunSettings(
     caps=RosterCaps(3, 2, 8),
     judge_interval_seconds=600.0,
     review_gate=False,
-    agent_share_minutes=0.0,  # these sessions are shorter than the time an Arbor iteration needs
+    agent_share_minutes=0.0,  # these sessions are shorter than the time one iteration of a component agent needs
 )
 #: An InferenceX matrix with one single-node entry for the workload's model.
 LLAMA_MATRIX = """\
@@ -1068,7 +1068,7 @@ async def test_a_setting_of_the_run_reaches_the_peers(tmp_path: Path, name: str,
 
 
 @pytest.mark.parametrize(("review_gate", "handed"), [(True, "host"), (False, "off")])
-async def test_the_session_s_review_stands_in_for_each_arbor_s_own(
+async def test_the_session_s_review_stands_in_for_each_component_agent_s_own(
     tmp_path: Path, review_gate: bool, handed: str
 ) -> None:
     stage = _stage(tmp_path)
@@ -2485,8 +2485,8 @@ def _judged_rows(prompt: str) -> dict[str, dict[str, Any]]:
 async def test_two_agents_each_start_at_the_root_on_the_share_of_the_session_s_directions_split_after_prelude(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    # The split's own subprocesses are tested with a fake Arbor in scheduling/tests/test_agent_plans.py; here a
-    # stand-in, since real subprocesses would let the virtual clock run past EXPLORE.
+    # The split's own subprocesses are tested with a stand-in agent in scheduling/tests/test_agent_plans.py; here the
+    # split itself is one, since real subprocesses would let the virtual clock run past EXPLORE.
     asked: list[tuple[tuple[str, ...], str, Path]] = []
     given: list[OpShares | None] = []
 
@@ -2499,13 +2499,15 @@ async def test_two_agents_each_start_at_the_root_on_the_share_of_the_session_s_d
 
     monkeypatch.setattr(lifecycle, "agent_plans", split)
     stage = _stage(tmp_path)
-    stage.settings = replace(SETTINGS, agents=("/agents/arbor", "/agents/arbor"), agent_directions="/maps/d.json")
+    stage.settings = replace(
+        SETTINGS, agents=("/agents/component", "/agents/component"), agent_directions="/maps/d.json"
+    )
     stage.judge = ScriptedCompletion([])
 
     outcome = await stage.run()
 
     assert outcome.stop_reason is SessionStopReason.TIME_EXHAUSTED
-    assert asked == [(("/agents/arbor", "/agents/arbor"), "/maps/d.json", stage.layout.agent_plans)]
+    assert asked == [(("/agents/component", "/agents/component"), "/maps/d.json", stage.layout.agent_plans)]
     assert {branch for branch, origin in _origins(stage).items() if origin == "agent"} == {"b01", "b02"}
     root = await stage.root()
     assert given == [await stage.handle(Role.OBSERVER).op_shares(root)]
@@ -2526,16 +2528,16 @@ AGENT_CURVES = {
 async def test_two_agents_started_on_their_shares_both_have_their_keeps_merged_into_the_integration_branch(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    # The operator's first work item (plan, two Arbors, merge), with each agent's keep as its branch's scripted change.
+    # A plan, two component agents and a merge, with each agent's keep as its branch's scripted change.
     async def split(
         agents: tuple[str, ...], map_file: str, work_dir: Path, root_shares: OpShares | None = None, *_source: str
     ) -> tuple[str, ...]:
         return ("/shares/share-1.json", "/shares/share-2.json")
 
     monkeypatch.setattr(lifecycle, "agent_plans", split)
-    monkeypatch.setattr(lifecycle, "arbor_agents", _two_arbors)
+    monkeypatch.setattr(lifecycle, "component_agents", _two_component_agents)
     stage = _stage(tmp_path)
-    stage.settings = replace(SETTINGS, agents=("/agents/arbor", "/agents/arbor"))
+    stage.settings = replace(SETTINGS, agents=("/agents/component", "/agents/component"))
     # b01 maps, and the two shares open as b02 and b03.
     stage.scripts = {"b02": (tagged("a1"),), "b03": (tagged("a2"),)}
     stage.explored = stage.measured = AGENT_CURVES
@@ -2553,8 +2555,9 @@ async def test_two_agents_started_on_their_shares_both_have_their_keeps_merged_i
     assert recipe_tags(await stage.repo.read_recipe(head)) == {"a1", "a2"}
 
 
-async def _two_arbors(agents: tuple[str, ...], work_dir: Path) -> dict[int, Path]:
-    """Every agent an Arbor checkout, with none fetched: real subprocesses would let the virtual clock run on."""
+async def _two_component_agents(agents: tuple[str, ...], work_dir: Path) -> dict[int, Path]:
+    """Every agent a component agent's checkout, with none fetched: real subprocesses would let the virtual clock run
+    on."""
 
     return dict.fromkeys(range(len(agents)), work_dir / "sources" / "0")
 
@@ -2575,7 +2578,7 @@ def _agent_map(stage: Stage) -> list[dict[str, Any]]:
 PASS_SECONDS = 600.0
 
 
-async def test_without_a_map_two_arbors_split_the_map_of_the_session_s_dossier_pass(
+async def test_without_a_map_two_component_agents_split_the_map_of_the_session_s_dossier_pass(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     asked: list[tuple[str, OpShares | None]] = []
@@ -2593,9 +2596,9 @@ async def test_without_a_map_two_arbors_split_the_map_of_the_session_s_dossier_p
         return DossierOutcome(Path("/pass/directions.json"), Path("/pass/docs/dossier/qwen3-8b"), MAPPED)
 
     monkeypatch.setattr(lifecycle, "agent_plans", split)
-    monkeypatch.setattr(lifecycle, "arbor_agents", _two_arbors)
+    monkeypatch.setattr(lifecycle, "component_agents", _two_component_agents)
     stage = _stage(tmp_path)
-    stage.settings = replace(SETTINGS, agents=("/agents/arbor", "/agents/arbor"))
+    stage.settings = replace(SETTINGS, agents=("/agents/component", "/agents/component"))
     stage.dossier_pass = dossier
     stage.judge = ScriptedCompletion([])
 
@@ -2604,8 +2607,8 @@ async def test_without_a_map_two_arbors_split_the_map_of_the_session_s_dossier_p
     assert outcome.stop_reason is SessionStopReason.TIME_EXHAUSTED
     [start] = started
     root = await stage.root()
-    assert (start.source, start.start_commit) == ("/agents/arbor", root)
-    assert stage.sessions.mapping == {"b01": ("/agents/arbor", "/agents/arbor")}
+    assert (start.source, start.start_commit) == ("/agents/component", root)
+    assert stage.sessions.mapping == {"b01": ("/agents/component", "/agents/component")}
     assert asked == [("/pass/directions.json", None)]
     read, began, ended = _agent_map(stage)
     assert [read["reason"], began["reason"], ended["reason"]] == [ROOT_SHARES_READ, DOSSIER_STARTED, DOSSIER_ENDED]
@@ -2647,9 +2650,9 @@ async def test_a_dossier_pass_with_no_map_or_no_minutes_leaves_the_split_to_the_
         return DossierOutcome(None, None, "it refused its config: the pack has no dossier skill")
 
     monkeypatch.setattr(lifecycle, "agent_plans", split)
-    monkeypatch.setattr(lifecycle, "arbor_agents", _two_arbors)
+    monkeypatch.setattr(lifecycle, "component_agents", _two_component_agents)
     stage = _stage(tmp_path)
-    stage.settings = replace(SETTINGS, agents=("/agents/arbor", "/agents/arbor"), agent_dossier_minutes=minutes)
+    stage.settings = replace(SETTINGS, agents=("/agents/component", "/agents/component"), agent_dossier_minutes=minutes)
     stage.dossier_pass = dossier
     stage.judge = ScriptedCompletion([])
 
@@ -2665,7 +2668,7 @@ async def test_a_dossier_pass_with_no_map_or_no_minutes_leaves_the_split_to_the_
         assert (steps, started) == ([ROOT_SHARES_READ, DOSSIER_SKIPPED], [])
 
 
-async def _one_arbor(agents: tuple[str, ...], work_dir: Path) -> dict[int, Path]:
+async def _one_component_agent(agents: tuple[str, ...], work_dir: Path) -> dict[int, Path]:
     return {0: work_dir / "sources" / "0"}
 
 
@@ -2679,7 +2682,7 @@ def _pass_wrote(tmp_path: Path) -> tuple[Path, Path]:
     return map_file, dossier
 
 
-async def test_a_run_that_stops_after_its_map_maps_one_arbor_keeps_map_and_dossier_and_opens_no_branch(
+async def test_a_run_that_stops_after_its_map_maps_one_component_agent_keeps_map_and_dossier_and_opens_no_branch(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     map_file, dossier = _pass_wrote(tmp_path)
@@ -2689,9 +2692,9 @@ async def test_a_run_that_stops_after_its_map_maps_one_arbor_keeps_map_and_dossi
         started.append(start)
         return DossierOutcome(map_file, dossier, MAPPED)
 
-    monkeypatch.setattr(lifecycle, "arbor_agents", _one_arbor)
+    monkeypatch.setattr(lifecycle, "component_agents", _one_component_agent)
     stage = _stage(tmp_path)
-    stage.settings = replace(SETTINGS, agents=("/agents/arbor",), stop_after_map=True)
+    stage.settings = replace(SETTINGS, agents=("/agents/component",), stop_after_map=True)
     stage.dossier_pass = mapping
 
     outcome = await stage.run()
@@ -2703,7 +2706,7 @@ async def test_a_run_that_stops_after_its_map_maps_one_arbor_keeps_map_and_dossi
     summary = json.loads((kept / KEPT_SUMMARY).read_text())
     assert summary == {
         "conc": SETTINGS.workload.conc,
-        "source": "/agents/arbor",
+        "source": "/agents/component",
         "start_commit": start.start_commit,
         "pass": MAPPED,
         "made_by": MADE_BY_PASS,
@@ -2730,10 +2733,10 @@ async def test_a_run_that_stops_after_its_map_keeps_a_map_generated_from_the_roo
     async def generate(*_args: object) -> Path:
         return generated
 
-    monkeypatch.setattr(lifecycle, "arbor_agents", _one_arbor)
+    monkeypatch.setattr(lifecycle, "component_agents", _one_component_agent)
     monkeypatch.setattr(lifecycle, "generated_map", generate)
     stage = _stage(tmp_path)
-    stage.settings = replace(SETTINGS, agents=("/agents/arbor",), stop_after_map=True)
+    stage.settings = replace(SETTINGS, agents=("/agents/component",), stop_after_map=True)
     stage.dossier_pass = mapping
 
     outcome = await stage.run()
@@ -2758,10 +2761,10 @@ async def test_a_run_that_stops_after_its_map_and_gets_none_fails_with_why_and_k
     async def generate(*_args: object) -> Path:
         raise SplitFailed("the root has no shares to generate a map from")
 
-    monkeypatch.setattr(lifecycle, "arbor_agents", _one_arbor)
+    monkeypatch.setattr(lifecycle, "component_agents", _one_component_agent)
     monkeypatch.setattr(lifecycle, "generated_map", generate)
     stage = _stage(tmp_path)
-    stage.settings = replace(SETTINGS, agents=("/agents/arbor",), stop_after_map=True)
+    stage.settings = replace(SETTINGS, agents=("/agents/component",), stop_after_map=True)
     stage.dossier_pass = mapping
 
     outcome = await stage.run()
@@ -2778,9 +2781,9 @@ async def test_a_run_that_stops_after_its_map_fails_when_its_dossier_pass_crashe
     async def mapping(_start: DossierStart) -> DossierOutcome:
         raise RuntimeError("the pass lost its sandbox")
 
-    monkeypatch.setattr(lifecycle, "arbor_agents", _one_arbor)
+    monkeypatch.setattr(lifecycle, "component_agents", _one_component_agent)
     stage = _stage(tmp_path)
-    stage.settings = replace(SETTINGS, agents=("/agents/arbor",), stop_after_map=True)
+    stage.settings = replace(SETTINGS, agents=("/agents/component",), stop_after_map=True)
     stage.dossier_pass = mapping
 
     with pytest.raises(RuntimeError, match="the pass lost its sandbox"):
@@ -2820,9 +2823,11 @@ def _review_steps(stage: Stage) -> list[str]:
     return [str(row["reason"]) for row in _decisions(stage) if str(row["reason"]).startswith("review ")]
 
 
-def _two_arbors_reviewed(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, read: list[str]) -> tuple[Stage, Path, Path]:
-    """A session of two Arbors with the review on, whose dossier pass writes a map and a dossier; the split records
-    the map's text as it reads it."""
+def _two_component_agents_reviewed(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, read: list[str]
+) -> tuple[Stage, Path, Path]:
+    """A session of two component agents with the review on, whose dossier pass writes a map and a dossier; the split
+    records the map's text as it reads it."""
     map_file, dossier = _pass_wrote(tmp_path)
 
     async def split(
@@ -2835,19 +2840,19 @@ def _two_arbors_reviewed(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, read: 
         return DossierOutcome(map_file, dossier, MAPPED)
 
     monkeypatch.setattr(lifecycle, "agent_plans", split)
-    monkeypatch.setattr(lifecycle, "arbor_agents", _two_arbors)
+    monkeypatch.setattr(lifecycle, "component_agents", _two_component_agents)
     stage = _stage(tmp_path)
-    stage.settings = replace(SETTINGS, agents=("/agents/arbor", "/agents/arbor"), review_gate=True)
+    stage.settings = replace(SETTINGS, agents=("/agents/component", "/agents/component"), review_gate=True)
     stage.dossier_pass = mapping
     stage.judge = ScriptedCompletion([])
     return stage, map_file, dossier
 
 
-async def test_two_arbors_wait_for_a_person_s_review_of_the_map_as_edited_while_the_other_branches_go_on(
+async def test_two_component_agents_wait_for_a_person_s_review_of_the_map_as_edited_while_the_other_branches_go_on(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     read: list[str] = []
-    stage, map_file, dossier = _two_arbors_reviewed(tmp_path, monkeypatch, read)
+    stage, map_file, dossier = _two_component_agents_reviewed(tmp_path, monkeypatch, read)
     edited = json.dumps({"directions": [{"id": "m-attn", "title": "attention"}, {"id": "m-gemm"}]})
 
     outcome, decided = await asyncio.gather(
@@ -2878,7 +2883,7 @@ async def test_a_rejected_map_opens_no_share_branch_and_the_session_goes_on(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     read: list[str] = []
-    stage, _map_file, _dossier = _two_arbors_reviewed(tmp_path, monkeypatch, read)
+    stage, _map_file, _dossier = _two_component_agents_reviewed(tmp_path, monkeypatch, read)
 
     outcome, decided = await asyncio.gather(stage.run(), _decide(stage, False))
 
@@ -2895,11 +2900,11 @@ def _too_late(stage: Stage) -> list[tuple[object, ...]]:
     return [(row["kind"], row["branch"], row["detail"]["step"], row["detail"]["floor"]) for row in rows]
 
 
-async def test_shares_with_less_time_than_an_arbor_iteration_needs_open_none_and_ask_no_review(
+async def test_shares_with_less_time_than_one_iteration_of_a_component_agent_needs_open_none_and_ask_no_review(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     read: list[str] = []
-    stage, _map_file, _dossier = _two_arbors_reviewed(tmp_path, monkeypatch, read)
+    stage, _map_file, _dossier = _two_component_agents_reviewed(tmp_path, monkeypatch, read)
     stage.settings = replace(stage.settings, agent_share_minutes=600.0)
 
     outcome = await stage.run()
@@ -2924,7 +2929,7 @@ async def test_a_review_decided_after_its_clock_ran_out_opens_no_share_and_says_
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     read: list[str] = []
-    stage, _map_file, _dossier = _two_arbors_reviewed(tmp_path, monkeypatch, read)
+    stage, _map_file, _dossier = _two_component_agents_reviewed(tmp_path, monkeypatch, read)
     stage.settings = replace(stage.settings, agent_share_minutes=2.0)
     # No margin before EXPLORE's end: a share opened at any time would run until it, so the clock is EXPLORE's alone.
     monkeypatch.setattr(autonomous_session, "collection_margin", lambda _records, _floor: 0.0)
@@ -2942,11 +2947,11 @@ async def test_a_review_decided_after_its_clock_ran_out_opens_no_share_and_says_
     assert "**Decide by about:**" in (stage.layout.review / REVIEW_PAGE).read_text()
 
 
-async def test_without_the_review_gate_two_arbors_split_their_map_at_once_and_the_skip_is_recorded(
+async def test_without_the_review_gate_two_component_agents_split_their_map_at_once_and_the_skip_is_recorded(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     read: list[str] = []
-    stage, map_file, _dossier = _two_arbors_reviewed(tmp_path, monkeypatch, read)
+    stage, map_file, _dossier = _two_component_agents_reviewed(tmp_path, monkeypatch, read)
     stage.settings = replace(stage.settings, review_gate=False)
 
     outcome = await stage.run()
@@ -2957,7 +2962,7 @@ async def test_without_the_review_gate_two_arbors_split_their_map_at_once_and_th
     assert sorted(_shares(stage).values()) == ["/shares/share-1.json", "/shares/share-2.json"]
 
 
-async def test_with_the_review_on_one_arbor_gets_the_map_step_and_takes_the_reviewed_map_whole(
+async def test_with_the_review_on_one_component_agent_gets_the_map_step_and_takes_the_reviewed_map_whole(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     map_file, dossier = _pass_wrote(tmp_path)
@@ -2973,20 +2978,20 @@ async def test_with_the_review_on_one_arbor_gets_the_map_step_and_takes_the_revi
         return DossierOutcome(map_file, dossier, MAPPED)
 
     monkeypatch.setattr(lifecycle, "agent_plans", split)
-    monkeypatch.setattr(lifecycle, "arbor_agents", _one_arbor)
+    monkeypatch.setattr(lifecycle, "component_agents", _one_component_agent)
     stage = _stage(tmp_path)
-    stage.settings = replace(SETTINGS, agents=("/agents/arbor",), review_gate=True)
+    stage.settings = replace(SETTINGS, agents=("/agents/component",), review_gate=True)
     stage.dossier_pass = mapping
     stage.judge = ScriptedCompletion([])
 
     outcome, _decided = await asyncio.gather(stage.run(), _decide(stage, True))
 
     assert outcome.stop_reason is SessionStopReason.TIME_EXHAUSTED
-    assert asked == [(("/agents/arbor",), str(map_file))]
+    assert asked == [(("/agents/component",), str(map_file))]
     steps = [row["reason"] for row in _agent_map(stage)]
     assert steps == [ROOT_SHARES_READ, DOSSIER_STARTED, DOSSIER_ENDED]
     assert _review_steps(stage) == [REVIEW_REQUESTED, REVIEW_APPROVED]
-    assert stage.sessions.mapping == {"b01": ("/agents/arbor",)}
+    assert stage.sessions.mapping == {"b01": ("/agents/component",)}
     assert list(_shares(stage).values()) == ["/shares/share-1.json"]
 
 
@@ -3003,10 +3008,10 @@ async def test_a_given_map_is_reviewed_too_and_split_as_given(tmp_path: Path, mo
         return ("/shares/share-1.json", "/shares/share-2.json")
 
     monkeypatch.setattr(lifecycle, "agent_plans", split)
-    monkeypatch.setattr(lifecycle, "arbor_agents", _two_arbors)
+    monkeypatch.setattr(lifecycle, "component_agents", _two_component_agents)
     stage = _stage(tmp_path)
     stage.settings = replace(
-        SETTINGS, agents=("/agents/arbor", "/agents/arbor"), agent_directions=str(given), review_gate=True
+        SETTINGS, agents=("/agents/component", "/agents/component"), agent_directions=str(given), review_gate=True
     )
     stage.judge = ScriptedCompletion([])
 
@@ -3027,9 +3032,9 @@ async def test_a_run_that_stops_after_its_map_does_not_pause_even_with_the_revie
     async def mapping(_start: DossierStart) -> DossierOutcome:
         return DossierOutcome(map_file, dossier, MAPPED)
 
-    monkeypatch.setattr(lifecycle, "arbor_agents", _one_arbor)
+    monkeypatch.setattr(lifecycle, "component_agents", _one_component_agent)
     stage = _stage(tmp_path)
-    stage.settings = replace(SETTINGS, agents=("/agents/arbor",), stop_after_map=True, review_gate=True)
+    stage.settings = replace(SETTINGS, agents=("/agents/component",), stop_after_map=True, review_gate=True)
     stage.dossier_pass = mapping
 
     outcome = await stage.run()

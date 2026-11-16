@@ -104,7 +104,7 @@ class SessionFinished(RuntimeError):
 
 
 class SessionRefused(SessionFinished):
-    """A run of a third-party agent that refused the config it was given, as Arbor's exit 2 says, or kept a source change
+    """A run of a third-party agent that refused the config it was given (a component's exit 2) or kept a source change
     after being told none can land: started again, it would do so again, so it ends its specialist as a finished run
     does, with why."""
 

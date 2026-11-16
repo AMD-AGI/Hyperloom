@@ -18,8 +18,8 @@ from hyperloom_multibranch.blackboard.tests.factories import START, FakeClock
 
 Open = Callable[..., LocalBlackboard]
 
-#: An Arbor branch's sandbox on two local cards, and a Forge job on a hosted sandbox of two.
-ARBOR = LeaseStart("lease-1", "b01", "b01", LeaseKind.AUTONOMOUS, 2, START, gpu_ids=(4, 5))
+#: An agent branch's sandbox on two local cards, and a Forge job on a hosted sandbox of two.
+AUTONOMOUS = LeaseStart("lease-1", "b01", "b01", LeaseKind.AUTONOMOUS, 2, START, gpu_ids=(4, 5))
 FORGE = LeaseStart("lease-2", "tool:job-7", "b01", LeaseKind.TOOL_JOB, 2, START, tool="forge", sandbox_id="sb-1")
 
 
@@ -36,7 +36,7 @@ async def test_a_lease_charges_its_branch_each_card_from_the_grant_until_it_goes
     open_as: Open, clock: FakeClock
 ) -> None:
     toolbox = await _opened(open_as)
-    await toolbox.record_lease_start(ARBOR)
+    await toolbox.record_lease_start(AUTONOMOUS)
     await toolbox.record_lease_end(LeaseEnd("lease-1", START + 100.0, LeaseEndReason.RELEASED, (4,)))
     clock.now = START + 300.0
 
@@ -65,7 +65,7 @@ async def test_a_hosted_lease_goes_back_whole_and_a_cards_first_return_stands(op
     toolbox = await _opened(open_as)
     await toolbox.record_lease_start(FORGE)
     await toolbox.record_lease_end(LeaseEnd("lease-2", START + 50.0, LeaseEndReason.RELEASED))
-    await toolbox.record_lease_start(replace(ARBOR, lease_id="lease-3", cards=1, gpu_ids=(0,)))
+    await toolbox.record_lease_start(replace(AUTONOMOUS, lease_id="lease-3", cards=1, gpu_ids=(0,)))
     await toolbox.record_lease_end(LeaseEnd("lease-3", START + 10.0, LeaseEndReason.RELEASED, (0,)))
     await toolbox.record_lease_end(LeaseEnd("lease-3", START + 20.0, LeaseEndReason.TOOLBOX_LOST, (0,)))
 
@@ -90,12 +90,12 @@ async def test_the_dossier_pass_lease_is_charged_to_the_integration_branch(open_
 @pytest.mark.parametrize(
     "start",
     [
-        replace(ARBOR, branch_id="b09"),
-        replace(ARBOR, cards=3),
-        replace(ARBOR, cards=0, gpu_ids=()),
+        replace(AUTONOMOUS, branch_id="b09"),
+        replace(AUTONOMOUS, cards=3),
+        replace(AUTONOMOUS, cards=0, gpu_ids=()),
         replace(FORGE, tool=""),
-        replace(ARBOR, tool="forge"),
-        replace(ARBOR, kind="sandbox"),
+        replace(AUTONOMOUS, tool="forge"),
+        replace(AUTONOMOUS, kind="sandbox"),
     ],
 )
 async def test_a_lease_start_the_blackboard_cannot_charge_or_count_is_refused(open_as: Open, start: LeaseStart) -> None:
@@ -108,16 +108,16 @@ async def test_a_lease_start_the_blackboard_cannot_charge_or_count_is_refused(op
 
 async def test_a_lease_end_of_no_lease_or_card_and_a_lease_started_twice_are_refused(open_as: Open) -> None:
     toolbox = await _opened(open_as)
-    await toolbox.record_lease_start(ARBOR)
+    await toolbox.record_lease_start(AUTONOMOUS)
 
     with pytest.raises(ValueError, match="already started"):
-        await toolbox.record_lease_start(replace(ARBOR, gpu_ids=(6, 7)))
+        await toolbox.record_lease_start(replace(AUTONOMOUS, gpu_ids=(6, 7)))
     with pytest.raises(ValueError, match="never started"):
         await toolbox.record_lease_end(LeaseEnd("lease-9", START + 1.0, LeaseEndReason.RELEASED))
     with pytest.raises(ValueError, match="holds no card"):
         await toolbox.record_lease_end(LeaseEnd("lease-1", START + 1.0, LeaseEndReason.RELEASED, (4, 6)))
     with pytest.raises(WriterNotAllowed):
-        await open_as(Role.SCHEDULER).record_lease_start(replace(ARBOR, lease_id="lease-4"))
+        await open_as(Role.SCHEDULER).record_lease_start(replace(AUTONOMOUS, lease_id="lease-4"))
     (hold,) = await toolbox.card_holds()
     assert hold.returned == {}
 
@@ -127,7 +127,7 @@ async def test_the_toolbox_is_last_seen_at_its_own_last_entry(open_as: Open) -> 
     assert await scheduler.toolbox_seen_at() is None
     toolbox = await _opened(open_as)
 
-    await toolbox.record_lease_start(ARBOR)
+    await toolbox.record_lease_start(AUTONOMOUS)
     seen = await toolbox.toolbox_seen_at()
     await scheduler.record_lineage(LineageEvent(LineageKind.OPEN, "b02", from_commit="c0"))
 

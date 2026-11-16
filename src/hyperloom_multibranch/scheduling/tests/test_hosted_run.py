@@ -486,7 +486,7 @@ def _made_by_a_child(directory: Path) -> tuple[int, int]:
 
 @pytest.mark.usefixtures("umask_022")
 def test_below_shared_storage_the_children_of_a_hosted_run_write_what_the_group_can_write(tmp_path: Path) -> None:
-    # A later leg of the run may be another account of the group: what Arbor or an agent writes there is its too.
+    # A later leg of the run may be another account of the group: what an agent writes there is its too.
     root = tmp_path / "MB-session"
     root.mkdir()
     root.chmod(0o2775)

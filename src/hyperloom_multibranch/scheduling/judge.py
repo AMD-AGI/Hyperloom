@@ -137,7 +137,7 @@ class JudgeView:
     ``building`` to the native builds not ready yet that its tests in flight wait for; a branch with none is not in
     either. ``focus`` maps a branch to the focus its ``OPEN`` lineage names; a branch opened on none is not in it.
     ``open_areas`` says where a new branch could open and ``playbook`` is the scheduling playbook the session
-    plays, as the RSI renders them; both are empty for a session that reads no archive. ``agent_map`` is Arbor's map
+    plays, as the RSI renders them; both are empty for a session that reads no archive. ``agent_map`` is the agent map
     as :func:`~hyperloom_multibranch.scheduling.agent_map.render_map` gives it, empty for a session with none.
     """
 

@@ -110,7 +110,7 @@ def test_a_running_branch_opened_without_a_focus_covers_the_ops_of_the_family_it
 
 
 def _mapped(snapshot: BlackboardSnapshot, *directions: MapDirection) -> BlackboardSnapshot:
-    """``snapshot`` with Arbor's map of ``directions``, its Arbor branch b7 running beside b3, focused on the
+    """``snapshot`` with the agent map of ``directions``, its agent branch b7 running beside b3, focused on the
     activation, and b8 stopped."""
 
     worked = _worked(
@@ -119,7 +119,7 @@ def _mapped(snapshot: BlackboardSnapshot, *directions: MapDirection) -> Blackboa
     return dataclasses.replace(worked, agent_map=directions)
 
 
-def test_an_op_a_direction_held_by_a_running_arbor_branch_names_is_left_out_as_worked_on_by_that_branch(
+def test_an_op_a_direction_held_by_a_running_agent_branch_names_is_left_out_as_worked_on_by_that_branch(
     snapshot: BlackboardSnapshot,
 ) -> None:
     mapped = _mapped(
@@ -131,13 +131,17 @@ def test_an_op_a_direction_held_by_a_running_arbor_branch_names_is_left_out_as_w
     found = open_areas(mapped, seconds_left=4 * HOUR, first_commit_minutes=42.0)
 
     assert [item.op for item in found.ops] == [ALLREDUCE, "paged_attention_ll4mi", "rmsnorm"]
-    assert dict(found.covered) == {ACT_MUL: ("b3", "b7 (Arbor, m-4)"), "gemm_a8w8_blockscale": ("b7 (Arbor, m-3)",)}
+    assert dict(found.covered) == {
+        ACT_MUL: ("b3", "b7 (agent map, m-4)"),
+        "gemm_a8w8_blockscale": ("b7 (agent map, m-3)",),
+    }
     assert found.render().splitlines()[-1] == (
-        f"Left out: {ACT_MUL}, worked on by b3, b7 (Arbor, m-4); gemm_a8w8_blockscale, worked on by b7 (Arbor, m-3)."
+        f"Left out: {ACT_MUL}, worked on by b3, b7 (agent map, m-4); "
+        "gemm_a8w8_blockscale, worked on by b7 (agent map, m-3)."
     )
 
 
-def test_the_ops_of_a_direction_whose_arbor_branch_stopped_or_that_the_map_set_aside_stay_open(
+def test_the_ops_of_a_direction_whose_agent_branch_stopped_or_that_the_map_set_aside_stay_open(
     snapshot: BlackboardSnapshot,
 ) -> None:
     mapped = _mapped(
