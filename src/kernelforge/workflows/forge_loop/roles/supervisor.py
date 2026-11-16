@@ -205,8 +205,9 @@ objective validation and measurement records remain authoritative.
 
 
 def make_supervisor_fn(
+    *,
+    gpu_target: str,
     program_md: str = "",
-    gpu_target: str = "gfx942",
     backend: str = "",
     usage=None,
     config: Config | None = None,

@@ -117,6 +117,20 @@ AMD_GPU_BOARDS: dict[str, GpuBoard] = {
         GpuBoard("r9700", "gfx1201", 64, 32.0, 640.0, _matrix_peaks(bf16=191.0, fp8=383.0, fp32=47.8)),
         # https://www.amd.com/en/products/graphics/workstations/radeon-ai-pro/ai-9000-series/amd-radeon-ai-pro-r9600d.html
         GpuBoard("r9600d", "gfx1201", 48, 32.0, 640.0, _matrix_peaks(bf16=99.0, fp8=199.0, fp32=24.8)),
+        # https://www.amd.com/en/products/graphics/workstations/radeon-pro/w7900.html
+        # RDNA 3 (Navi 31), 48 GB GDDR6. AMD publishes FP32 vector and FP16 matrix (WMMA) peaks only, so FP16 is read
+        # as BF16 too, as for every board; gfx1100 has no FP8 path. Device ids from ``amdgpu.ids``: 7448 is the W7900,
+        # 744a the W7900 Dual Slot, the same silicon and figures. 744b, the W7900D, is another product and is left out.
+        GpuBoard(
+            "w7900",
+            "gfx1100",
+            96,
+            48.0,
+            864.0,
+            {"bf16": 122.6, "fp16": 122.6, "fp32": 61.3},
+            aliases=("Radeon PRO W7900",),
+            device_ids=frozenset({"7448", "744a"}),
+        ),
         # https://www.amd.com/en/products/processors/desktops/ryzen/ryzen-ai-halo/ryzen-ai-max-plus-395.html
         # Unified memory, so no fixed capacity. AMD publishes only the FP16 rate, read as BF16 too, as for every board.
         GpuBoard(

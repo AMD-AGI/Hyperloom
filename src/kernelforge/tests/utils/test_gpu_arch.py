@@ -31,13 +31,15 @@ from kernelforge.utils.gpu_arch import canon_arch, canonical_gpu_type, detect_ar
         ("AMD Radeon AI PRO R9700", "gfx1201"),
         ("AMD Radeon 8060S Graphics", "gfx1151"),
         ("radeon_8060s", "gfx1151"),
+        ("W7900", "gfx1100"),
+        ("AMD Radeon PRO W7900", "gfx1100"),
     ],
 )
 def test_canon_arch_folds_product_names_onto_their_gfx_target(value, expected):
     assert canon_arch(value) == expected
 
 
-@pytest.mark.parametrize("value", ["", "some-new-gpu", "gfx12-generic", "gfx", "R9700S", "XR9700", "MI300XL"])
+@pytest.mark.parametrize("value", ["", "some-new-gpu", "gfx12-generic", "gfx", "R9700S", "XR9700", "MI300XL", "W7900D"])
 def test_canon_arch_names_no_target_rather_than_a_wrong_one(value):
     assert canon_arch(value) == ""
 
@@ -51,7 +53,8 @@ def test_canon_arch_names_no_target_rather_than_a_wrong_one(value):
         ("amd_instinct_mi325x", "mi300x"),
         ("gfx1201", "r9700"),
         ("Radeon 8060S", "radeon8060s"),
-        ("gfx1100", "gfx1100"),
+        ("gfx1100", "w7900"),
+        ("Radeon PRO W7900", "w7900"),
         ("MI250-X", "mi250_x"),
     ],
 )
@@ -78,6 +81,7 @@ def test_canonical_gpu_type_keeps_a_spelling_that_only_contains_a_known_name(val
         (" MI355X ", "gfx950"),
         ("amd_instinct_mi300x", "gfx942"),
         ("r9700", "gfx1201"),
+        ("w7900", "gfx1100"),
         ("mi300x_vf", ""),
         ("amd instinct mi300x", ""),
         ("gfx942", ""),

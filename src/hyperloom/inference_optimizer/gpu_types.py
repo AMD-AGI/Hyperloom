@@ -41,6 +41,8 @@ _BOARD_POLICIES: dict[str, BoardPolicy] = {
         validated_frameworks=frozenset({"vllm"}), targeted_build_validated=False, geak_identity_pinned=True
     ),
     "radeon8060s": BoardPolicy(),
+    # Registered for KernelForge kernel work; AITER and the targeted build do not support gfx1100.
+    "w7900": BoardPolicy(targeted_build_validated=False),
 }
 
 #: A bare arch resolves only to a board marked ``names_its_arch`` (gfx942 to mi300x, gfx950 to mi355x); gfx12 and

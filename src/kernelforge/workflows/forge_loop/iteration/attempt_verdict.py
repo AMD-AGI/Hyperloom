@@ -338,7 +338,7 @@ class AttemptVerdictMixin:
         mean_case_speedup = bench_result.get("mean_case_speedup")
         snr_db = report.results[-1].snr_db if report.results else None
 
-        reg_result = await check_registers(build_dir=self.ic.build_dir)
+        reg_result = await check_registers(build_dir=self.ic.build_dir, gpu_target=self.ic.gpu_target)
         vgpr = reg_result.get("vgpr") if reg_result.get("success") else None
         if vgpr:
             print(f"  [registers] VGPR={vgpr}")

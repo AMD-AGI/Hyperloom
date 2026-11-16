@@ -26,6 +26,7 @@ _GPU_TYPE_BY_ARCH = {
     "gfx950": "mi355x",
     "gfx1151": "radeon8060s",
     "gfx1201": "r9700",
+    "gfx1100": "w7900",
 }
 # A concrete target only: rocminfo also lists generic ISAs such as ``gfx12-generic`` beside the chip's own.
 _GFX_RE = re.compile(r"\bgfx[0-9a-f]+\b(?!-)", re.IGNORECASE)

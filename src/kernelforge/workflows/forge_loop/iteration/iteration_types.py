@@ -40,6 +40,8 @@ class IterationConfig:
     # Build command (if needed)
     build_command: list[str] | None = None
     build_dir: str | None = None
+    # The campaign's gfx target, which the compiled kernel is disassembled for.
+    gpu_target: str = ""
 
     # Performance targets
     target_wall_ms: float | None = None
