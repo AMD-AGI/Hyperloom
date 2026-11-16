@@ -63,16 +63,13 @@ from hyperloom_common.git_safety import NO_PROGRAMS
 from hyperloom_multibranch.repo.isolated_git import NO_LAZY_FETCH, blank_driver_programs, leading_options, trusting
 from hyperloom_multibranch.specialist.agent_manifest import AgentManifest, ManifestError
 from hyperloom_multibranch.specialist.agent_spec import ROOT_PROFILE_SOURCE, AgentSpec
-from hyperloom_multibranch.specialist.arbor_adapter import (
+from hyperloom_multibranch.specialist.component_agent import (
     BRANCH_RUN,
     EXIT_REFUSED,
-    ArborCheckout,
-    ArborRefused,
-    ArborRun,
-    arbor_manifest,
-    dossier_notes,
-    fit_keys,
-    is_arbor,
+    AgentCheckout,
+    AgentRefused,
+    ComponentRun,
+    adapter_for,
     refused_reasons,
 )
 from hyperloom_multibranch.specialist.runtime import PreflightFailed
@@ -193,7 +190,7 @@ class OnboardingSetup:
 
     sandbox: AgentSandbox
     onboard: Onboard
-    run: ArborRun = BRANCH_RUN
+    run: ComponentRun = BRANCH_RUN
     start_seconds: float = START_SECONDS
     poll_seconds: float = 5.0
     sleep: Callable[[float], Awaitable[None]] = asyncio.sleep
@@ -271,12 +268,13 @@ async def _attempt(
 ) -> ReadyAgent:
     checkout = agent_dir / SOURCE_DIR
     commit = await fetch_source(source, checkout)
-    adapted = is_arbor(checkout)
-    if adapted:
+    agent = adapter_for(checkout)
+    adapted = agent is not None
+    if agent is not None:
         try:
-            manifest = await asyncio.to_thread(arbor_manifest, spec, ArborCheckout(source, commit, checkout), setup.run)
-        except ArborRefused as error:
-            raise ConfigRefused(f"Arbor would refuse the config written for it: {error}") from error
+            manifest = await asyncio.to_thread(agent.manifest, spec, AgentCheckout(source, commit, checkout), setup.run)
+        except AgentRefused as error:
+            raise ConfigRefused(f"{agent.name} would refuse the config written for it: {error}") from error
     else:
         answer = await setup.onboard(checkout, onboarding_prompt(spec, source, checkout, commit, failures))
         try:
@@ -287,9 +285,9 @@ async def _attempt(
         profile = root_profile(spec.root_shares, checkout / manifest.snapshots.session, spec.root_shares_source)
         manifest = replace(manifest, config=component_config(manifest.config, spec, profile))
     notes: tuple[str, ...] = ()
-    if adapted:
-        config, notes = fit_keys(manifest.config, checkout)
-        manifest, notes = replace(manifest, config=config), (*notes, *dossier_notes(checkout, spec.dossier))
+    if agent is not None:
+        config, notes = agent.fit_keys(manifest.config, checkout)
+        manifest, notes = replace(manifest, config=config), (*notes, *agent.dossier_notes(checkout, spec.dossier))
     make_shared_dirs((checkout / manifest.config_file).parent)
     write_shared_text(checkout / manifest.config_file, json.dumps(manifest.config, indent=2))
     env = agent_env(agent_dir)

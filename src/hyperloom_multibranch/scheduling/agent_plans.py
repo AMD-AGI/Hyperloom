@@ -6,7 +6,7 @@
 The user names one directions map with ``--agent-directions``: the open directions of an Arbor dossier map, or a list
 written by hand, in the form Arbor's ``component.plan`` reads. Two Arbor agents given the whole map would work the
 same directions. Split, each works its own. Before the agent branches open, each agent source is fetched once, and the
-map is split by Arbor's own command line (:func:`~hyperloom_multibranch.specialist.arbor_adapter.split_directions`)
+map is split by Arbor's own command line (its adapter's ``split_directions``, :mod:`~hyperloom_multibranch.specialist.component_agent`)
 into as many disjoint shares as there are Arbor agents, one each, in the order the user named them. Any other agent
 gets none: only Arbor reads a plan.
 
@@ -15,7 +15,7 @@ Without a map, two or more Arbor agents split the map of the dossier pass
 (:mod:`~hyperloom_multibranch.specialist.map_session`), which the session passes here as the map once the pass ends and
 opens a share branch for each share. The dossier pass is the default, and it runs on a branch, so no other branch waits
 for it. When the pass gives none, they split one Arbor generates from the root's shares, PRELUDE's profile, with no GPU
-time (:func:`~hyperloom_multibranch.specialist.arbor_adapter.generate_directions`): one direction per op family, ranked
+time (its adapter's ``generate_directions``): one direction per op family, ranked
 by its share. Those shares are the root's op shares (:mod:`~hyperloom_multibranch.scheduling.root_shares`), kernel
 names where the toolbox ranked kernels, and ``shares_source`` says where they came from. A single Arbor gets none and
 maps its own directions, which its dossier measures better.
@@ -43,7 +43,7 @@ from hyperloom_multibranch.specialist.agent_onboarding import (
     fetch_source,
     root_profile,
 )
-from hyperloom_multibranch.specialist.arbor_adapter import SplitFailed, generate_directions, is_arbor, split_directions
+from hyperloom_multibranch.specialist.component_agent import SplitFailed, adapter_for, agent_of
 
 logger = logging.getLogger(__name__)
 
@@ -129,18 +129,18 @@ async def _split(arbor: Path, map_file: Path, shares: int, work_dir: Path) -> tu
 
     out = work_dir / SHARES_DIR
     out.mkdir(parents=True, exist_ok=True)
-    return await split_directions(arbor, map_file, shares, out)
+    return await agent_of(arbor).split_directions(arbor, map_file, shares, out)
 
 
 async def generated_map(arbor: Path, root_shares: OpShares | None, source: str, work_dir: Path) -> Path:
     """The map the Arbor checkout ``arbor`` generates in ``work_dir`` from ``root_shares``, which came from
-    ``source``; raise :class:`~hyperloom_multibranch.specialist.arbor_adapter.SplitFailed` when there are none to
+    ``source``; raise :class:`~hyperloom_multibranch.specialist.component_agent.SplitFailed` when there are none to
     generate it from or Arbor cannot."""
 
     profile = root_profile(root_shares, work_dir, source)
     if profile is None:
         raise SplitFailed("the root has no shares to generate a map from")
-    return await generate_directions(arbor, profile, work_dir / GENERATED_MAP)
+    return await agent_of(arbor).generate_directions(arbor, profile, work_dir / GENERATED_MAP)
 
 
 def keep_map(target: Path, map_file: Path, dossier: Path | None, made: Mapping[str, object]) -> Path:
@@ -166,5 +166,5 @@ async def _checkouts(agents: tuple[str, ...], root: Path) -> dict[str, Path | No
     for index, source in enumerate(dict.fromkeys(agents)):
         path = root / str(index)
         await fetch_source(source, path)
-        checkouts[source] = path if is_arbor(path) else None
+        checkouts[source] = path if adapter_for(path) is not None else None
     return checkouts
