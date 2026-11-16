@@ -614,6 +614,15 @@ class LineageView:
     def commit(self, commit_id: str) -> CommitNode | None:
         return next((node for node in self.commits if node.commit_id == commit_id), None)
 
+    def same_recipe(self, first: str, second: str) -> bool:
+        """Whether ``first`` and ``second`` hold one recipe: they are one commit, or their writers named one digest."""
+
+        if first == second:
+            return True
+        digests = {node.commit_id: node.recipe_digest for node in self.commits if node.commit_id in (first, second)}
+        found = digests.get(first)
+        return found is not None and found == digests.get(second)
+
     def ancestry(self, commit_id: str) -> tuple[str, ...]:
         """``commit_id`` and every commit it builds on, through parents and the sources merges brought in."""
 
@@ -756,8 +765,7 @@ class UnfinishedLead:
     """A result of this session worth finishing, by replaying test ``request_id`` of ``branch`` on another head.
 
     ``target`` and ``mechanism`` are its intent's, ``change`` its recipe delta in one line, ``measured_on`` the commit it
-    was tested on, ``gain_pct`` its judged gain where it had one, and ``detail`` more on ``reason``: the commit it made
-    and what its merge test found, the bar it fell short of, or why it was withdrawn.
+    was tested on, ``gain_pct`` its judged gain where it had one, and ``detail`` why it was withdrawn.
     """
 
     request_id: str

@@ -134,8 +134,9 @@ FAILED_MERGES = frozenset({MergeOutcome.CONFLICT_SKIPPED, MergeOutcome.NOT_STACK
 
 class InboxKind(str, Enum):
     """What an inbox item points at; a ``brief`` item points at the branch's head and asks for its brief again, a
-    ``peer_outcome`` item at another branch's test that refused the branch's claim, once that test ended, and a
-    ``build`` item at the branch's test waiting on a build that became ready, or failed and will be retried."""
+    ``peer_outcome`` item at another branch's test that refused the branch's claim, once that test ended, a ``build``
+    item at the branch's test waiting on a build that became ready, or failed and will be retried, and a ``merge`` item
+    at the merge test, or the merge skipped untested, that settled a merge of commits of the branch."""
 
     RESULT = "result"
     JUDGEMENT = "judgement"
@@ -144,6 +145,7 @@ class InboxKind(str, Enum):
     BRIEF = "brief"
     PEER_OUTCOME = "peer_outcome"
     BUILD = "build"
+    MERGE = "merge"
 
 
 class BuildOutcome(str, Enum):
@@ -224,11 +226,9 @@ class FrontierBasis(str, Enum):
 
 
 class UnfinishedReason(str, Enum):
-    """Why a result of the session is worth finishing: a commit of a stopped branch whose merge onto the integration
-    head was not stackable, a blocked candidate whose repair never finished, or an explore withdrawn before its
-    result."""
+    """Why a result of the session is worth finishing: a blocked candidate whose repair never finished, or an explore
+    withdrawn before its result."""
 
-    NOT_STACKABLE = _NOT_STACKABLE
     REPAIR_UNFINISHED = "repair_unfinished"
     WITHDRAWN = "withdrawn"
 

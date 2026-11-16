@@ -582,7 +582,7 @@ def cap_decision(decision: JudgeDecision, view: JudgeView) -> JudgeDecision:
         if order.branch in live and live[order.branch].kind is BranchKind.SPECIALIST
     }
     ks = {
-        order.branch: KOrder(order.branch, view.caps.clamp_k(order.k))
+        order.branch: KOrder(order.branch, view.caps.clamp_k(order.k, live[order.branch].kind))
         for order in decision.k
         if order.branch in live and order.branch not in asked
     }
@@ -590,7 +590,7 @@ def cap_decision(decision: JudgeDecision, view: JudgeView) -> JudgeDecision:
     opened = min(max(decision.open_count, floor), view.caps.max_branches)
     return JudgeDecision(
         open_count=opened,
-        open_k=view.caps.clamp_k(decision.open_k),
+        open_k=view.caps.clamp_k(decision.open_k, BranchKind.SPECIALIST),
         focus=decision.focus[:opened],
         k=tuple(ks.values()),
         stop=tuple(asked.values()),
