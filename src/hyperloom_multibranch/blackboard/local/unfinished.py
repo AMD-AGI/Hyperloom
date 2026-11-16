@@ -5,12 +5,12 @@
 
 :func:`unfinished_leads` reads the session's blackboard for results worth finishing:
 
-* a commit of a stopped branch whose last merge onto the integration head was not stackable: that answer stands until
-  the head moves in a way that offers the commit again, while a commit not merge-tested yet, or skipped on a conflict,
-  is the integrator's to offer again, not a lead;
 * a blocked candidate whose repair never finished;
 * an explore withdrawn before its result, a branch stop's withdrawal included, unless another explore measured its
   change.
+
+A commit, merged or not, is no lead: offering it again on a later integration head is the integrator's, and a merge
+measured not stackable is an answer about the change, not something left to finish.
 
 A lead drops out once its direction or its change is tested again on any branch, its own confirm aside, or a branch
 holds a claim on it, so two later branches do not chase the same one: a replay claims an intent of its own, but tests
@@ -18,9 +18,8 @@ the lead's change, with its delta or, made with ``blackboard_replay``, with one 
 naming the lead. It drops out of the brief of a start commit too once a replay of it was claimed on that commit or one
 it builds on and released with no test (:func:`refused_replays`): the change could not be made for that head, the
 toolbox refusing it or the change no longer applying; otherwise one lead would be claimed and released that way again
-and again, on branch after branch. A commit drops out once the integrator offers it again. The leads
-come in that order, unstackable commits by gain, unfinished repairs and withdrawn explores newest first, one for each
-direction and each change, at most :data:`MAX_UNFINISHED` of them.
+and again, on branch after branch. The leads come in that order, newest first, one for each direction and each change,
+at most :data:`MAX_UNFINISHED` of them.
 """
 
 from __future__ import annotations
@@ -32,7 +31,6 @@ from hyperloom_multibranch.contracts.judgement import AccuracyVerdict
 from hyperloom_multibranch.contracts.blackboard.peers import Purpose, TestKind
 from hyperloom_multibranch.contracts.blackboard.records import (
     REPLAY_TARGET,
-    SHORT_COMMIT,
     Claim,
     LineageView,
     TestRecord,
@@ -42,12 +40,10 @@ from hyperloom_multibranch.contracts.blackboard.vocab import (
     INTEGRATION_BRANCH,
     ClaimStatus,
     Conclusion,
-    MergeOutcome,
     UnfinishedReason,
 )
 from hyperloom_multibranch.blackboard.changes import describe_change
 from hyperloom_multibranch.blackboard.local.state import BlackboardState
-from hyperloom_multibranch.blackboard.local.views import committed
 
 MAX_UNFINISHED = 8
 #: How soon after its branch stopped a claim's release is the stop's, not the answer of a replay that could not be made.
@@ -89,37 +85,6 @@ def hinted_gain(record: TestRecord) -> float | None:
         return judgement.gain_pct
     below = judgement.accuracy is AccuracyVerdict.NOT_MEASURED and judgement.gain_pct < judgement.threshold_pct
     return judgement.gain_pct if below else None
-
-
-def _merge_found(state: BlackboardState, request_id: str | None) -> str:
-    """What the merge test ``request_id`` found, as its judgement records it."""
-
-    write = state.latest_judgement(request_id) if request_id is not None else None
-    if write is None:
-        return ""
-    found = write.judgement
-    return f" {found.gain_pct:+.2f}%, bar {found.threshold_pct:.2f}%"
-
-
-def _not_stackable(state: BlackboardState, view: LineageView) -> list[UnfinishedLead]:
-    """The commits of stopped branches whose last merge was not stackable, each led by the test it came from."""
-
-    stopped = {node.branch for node in view.branches if node.stop_reason is not None}
-    integration = next((node for node in view.branches if node.branch == INTEGRATION_BRANCH), None)
-    on_head = set(view.ancestry(integration.head_commit)) if integration is not None else set()
-    records = {record.request_id: record for record in state.records()}
-    leads = []
-    for commit in committed(state, view):
-        last = commit.last_merge
-        record = records.get(commit.request_id)
-        if last is None or last.outcome is not MergeOutcome.NOT_STACKABLE or record is None:
-            continue
-        if commit.branch not in stopped or commit.commit_id in on_head:
-            continue
-        found = _merge_found(state, last.request_id)
-        detail = f"merge on {last.integration_head[:SHORT_COMMIT]}{found}; commit {commit.commit_id[:SHORT_COMMIT]}"
-        leads.append(_lead(state, record, UnfinishedReason.NOT_STACKABLE, detail))
-    return leads
 
 
 def _replayed(state: BlackboardState, records: Sequence[TestRecord]) -> dict[str, str]:
@@ -176,10 +141,6 @@ def _measured_elsewhere(record: TestRecord, records: Sequence[TestRecord], repla
     )
 
 
-def _by_gain(leads: Sequence[UnfinishedLead]) -> list[UnfinishedLead]:
-    return sorted(leads, key=lambda lead: -(lead.gain_pct or 0.0))
-
-
 def refused_replays(claims: Iterable[Claim], view: LineageView, start_commit: str) -> frozenset[str]:
     """The leads whose replay was claimed on ``start_commit`` or a commit it builds on and released with no test, by
     request id; a release its branch's stop made is left out, since it says nothing of the replay."""
@@ -203,7 +164,7 @@ def _released_by_its_stop(claim: Claim, stopped: Mapping[str, float]) -> bool:
 
 
 def unfinished_leads(
-    state: BlackboardState, view: LineageView, held: Collection[str] = (), refused: Collection[str] = ()
+    state: BlackboardState, held: Collection[str] = (), refused: Collection[str] = ()
 ) -> tuple[UnfinishedLead, ...]:
     """The session's unfinished leads, in the module's order; ``held`` are the intent fingerprints branches claim, and
     ``refused`` the leads :func:`refused_replays` found for the brief's start commit."""
@@ -229,8 +190,7 @@ def unfinished_leads(
         and record.result is None
         and not _measured_elsewhere(record, records, replayed)
     ]
-    unstackable = [lead for lead in _not_stackable(state, view) if lead.request_id in untaken]
-    leads = _distinct((*_by_gain(unstackable), *repairs, *withdrawn), records, replayed)
+    leads = _distinct((*repairs, *withdrawn), records, replayed)
     return tuple(leads[:MAX_UNFINISHED])
 
 

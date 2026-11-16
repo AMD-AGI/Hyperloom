@@ -227,7 +227,7 @@ with it: read its text with blackboard_replay and reference set to that path, th
 from this image's upstream, for its change already; if missing, port its intent to your head with worktree_patch and test it. Any other "left out:" entry is a kernel artifact built for \
 another image: never replay it as is, tune your own on your head. A champion the brief lists as "already on your head, nothing to replay" is in your head already: build on \
 it, do not test it again. A lead under "Unfinished in this session" in the brief is a change another branch measured \
-but left unfinished: finish one in your direction the same way before starting a new idea. A lead the integrator \
+but left unfinished: finish one in your direction the same way before starting a new idea. A change the integrator \
 measured not stackable on the integration head is retried only with a stated reason it would now stack, written to \
 your branch log first. Before you replay a \
 lead, check whether your head already carries its change (its patch's lines in your synced worktree, its settings \
