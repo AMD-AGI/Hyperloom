@@ -186,7 +186,8 @@ CPython 3.12 build `pins.py` pins, are staged ahead of time into a tool cache wi
 one `staging_manifest.json`. InferenceX's files are read from the pinned commit's tree (`git archive`),
 never from a checkout's working tree: a `--source` checkout's local edits, untracked files and later commits are
 not staged, and a checkout that lacks the pinned commit is refused. Staging patches the harness's aiperf so a reply it found no content in exports the
-server's output token count as `error_osl`; a harness the patch does not apply to fails the staging, and a cache
+server's output token count as `error_osl`, and so the warmup abort it logs carries the failed request's error; a
+harness the patch does not apply to fails the staging, and a cache
 staged before the patch is staged again. Two hosts compare stagings by their normalised
 manifest: each installed package's name, version and wheel sha256, the
 interpreter's version and build sha256, the InferenceX pin and lm-eval, with no
@@ -241,14 +242,14 @@ One round writes one run directory and leaves it unchanged once the round ends.
 |---|---|
 | `config.yaml` | The round's config (`inference-suite-config/1`), stored verbatim. |
 | `launch.json` | The exact launch (`inference-suite-launch/1`), with the base it was composed on. |
-| `report.json` | What the round measured, or the step it failed at (`inference-suite-report/1`). Written last. |
+| `report.json` | What the round measured, or the step it failed at (`inference-suite-report/2`). Written last. |
 | `server.log` | The server's log. A `boot` or `reuse` round copies the bytes logged during the round and records their range. |
 | `server_ready_at` | `<ready unix time> <boot seconds>`; `0` boot seconds for a reused server. |
 | `server.pid` | An `own` round's pidfile while its server runs; `boot` and `reuse` keep theirs in `pid_dir`. |
 | `phase_marks.json` | The instants the round passed from one phase to the next. |
 | `kv_metrics.json`, `agentx_timeline.jsonl` | KV-cache samples and the AgentX request timeline. |
 | `power.json` | Every power reading the node gave over the whole round; see [Power](#power). |
-| `client/` | `stdout.log`, `stderr.log`, `agentx_client.log`, `inferencex_result.json`, `aiperf_artifacts/` (`profile_export.jsonl`, `logs/aiperf.log`) and, on an MLPerf round, `mlperf_artifacts/` (the harness's `result_summary.json` and `scores.json`). |
+| `client/` | `stdout.log`, `stderr.log`, `agentx_client.log`, `inferencex_result.json`, `aiperf_artifacts/` (`profile_export.jsonl`, `profile_export_aiperf.json`, `logs/aiperf.log`) and, on an MLPerf round, `mlperf_artifacts/` (the harness's `result_summary.json` and `scores.json`). |
 | `eval/` | `stdout.log`, `stderr.log`, lm-eval's `results_<time>.json`, `hyperloom_eval_probe.json` and `definition.json`. |
 | `profile/` | `torch_trace/`, `capture_traces/`, `graph_capture_profile/` and `capture.json`. |
 
@@ -345,4 +346,11 @@ A round that did not complete names one `failed_step`:
 
 Every metric key is fixed: a metric nobody measured is `null`, never `0`. An eval
 records its definition digest, and two scores compare only under one definition.
+
+An AgentX round's counts are recounted from `profile_export.jsonl`, except
+`context_overflow`: the profiling requests aiperf skipped because the server
+refused them as longer than the context it serves. aiperf keeps those out of the
+export and every metric, so the count is read from its summary,
+`profile_export_aiperf.json`. A report of the previous schema,
+`inference-suite-report/1`, still reads, with `context_overflow` `null`.
 
