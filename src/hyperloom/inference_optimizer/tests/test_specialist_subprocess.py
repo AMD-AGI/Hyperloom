@@ -22,7 +22,7 @@ import pytest
 
 from hyperloom.common.deadline import Deadline
 from hyperloom_common.git_safety import recorded_admin_dir, trusted_admin_dir, worktree_head
-from hyperloom.common.env_safety import specialist_run_as
+from hyperloom.common.env_safety import resolve_run_as
 
 from .conftest import init_git_repo, make_fake_claude
 from hyperloom.orchestrator.specialists.tests._agent_fixtures import FORGES_ITS_GIT
@@ -1860,8 +1860,7 @@ async def test_demoted_specialist_writes_its_worktree_and_cannot_read_the_apps_f
 
 
 @_demote_skip
-def test_demote_shares_a_worktree_that_lives_outside_the_workspace(tmp_path, monkeypatch, restore_umask):
-    monkeypatch.setenv("HYPERLOOM_SPECIALIST_USER", _DEMOTE_USER)
+def test_demote_shares_a_worktree_that_lives_outside_the_workspace(tmp_path, restore_umask):
     request = SpecialistSpawn(
         task_id="t-outside",
         workspace=tmp_path / "ws",
@@ -1875,7 +1874,7 @@ def test_demote_shares_a_worktree_that_lives_outside_the_workspace(tmp_path, mon
     request.workspace.mkdir()
     request.worktree.mkdir()
     (request.workspace / "prompt.md").write_text("p", encoding="utf-8")
-    run_as = specialist_run_as()
+    run_as = resolve_run_as(_DEMOTE_USER)
 
     kwargs = prepare_demote(run_as, request.workspace, request.worktree, {}, (request.workspace / "prompt.md",))
 
@@ -2111,7 +2110,7 @@ async def test_every_demoted_specialist_gets_git_and_its_mcp_config_with_the_app
 
 
 @_demote_skip
-def test_a_worktree_made_under_umask_007_is_readable_to_git_once_prepared(tmp_path, monkeypatch, restore_umask):
+def test_a_worktree_made_under_umask_007_is_readable_to_git_once_prepared(tmp_path, restore_umask):
     import shutil
     import tempfile
 
@@ -2127,8 +2126,7 @@ def test_a_worktree_made_under_umask_007_is_readable_to_git_once_prepared(tmp_pa
         # The shape the review reproduced: the app's own git, under its own umask, makes the worktree.
         subprocess.run(["git", "-C", str(repo), "worktree", "add", "-q", "-b", "sp", str(worktree)], check=True)
         assert (worktree / ".git").stat().st_mode & 0o004 == 0
-        monkeypatch.setenv("HYPERLOOM_SPECIALIST_USER", _DEMOTE_USER)
-        run_as = specialist_run_as()
+        run_as = resolve_run_as(_DEMOTE_USER)
         kwargs = prepare_demote(run_as, worktree.parent, worktree, {}, ())
         for args in (["status", "--porcelain"], ["diff"]):
             done = subprocess.run(
@@ -2221,7 +2219,7 @@ def test_the_archive_does_not_copy_an_applied_patch_the_child_replaced_with_a_li
 
 # ---- review r2: the snapshot's objects stay readable, and no app write follows a child's link -------------
 @_demote_skip
-def test_a_snapshot_refreshed_between_two_demoted_tasks_stays_readable_to_git(monkeypatch, restore_umask):
+def test_a_snapshot_refreshed_between_two_demoted_tasks_stays_readable_to_git(restore_umask):
     import shutil
     import tempfile
 
@@ -2235,8 +2233,7 @@ def test_a_snapshot_refreshed_between_two_demoted_tasks_stays_readable_to_git(mo
         (tree / "mod.py").write_text("x = 1\n", encoding="utf-8")
         repo = base / "snap.git"
         os.umask(0o077)  # an app that runs under a strict umask must not hide the objects it commits
-        monkeypatch.setenv("HYPERLOOM_SPECIALIST_USER", _DEMOTE_USER)
-        run_as = specialist_run_as()
+        run_as = resolve_run_as(_DEMOTE_USER)
         git_env = {
             "PATH": os.environ["PATH"],
             "HOME": run_as.home,
@@ -2357,7 +2354,7 @@ def test_the_harvest_does_not_run_a_program_a_child_planted_in_a_replaced_dot_gi
 
 
 @_demote_skip
-def test_a_demoted_child_cannot_make_the_apps_git_run_its_fsmonitor(monkeypatch):
+def test_a_demoted_child_cannot_make_the_apps_git_run_its_fsmonitor():
     import shutil
     import tempfile
 
@@ -2370,8 +2367,7 @@ def test_a_demoted_child_cannot_make_the_apps_git_run_its_fsmonitor(monkeypatch)
         worktree, err = worktrees._setup_worktree(repo, workspace / "worktree", "task-g")
         assert worktree is not None, err
         admin = recorded_admin_dir(repo, worktree)
-        monkeypatch.setenv("HYPERLOOM_SPECIALIST_USER", _DEMOTE_USER)
-        run_as = specialist_run_as()
+        run_as = resolve_run_as(_DEMOTE_USER)
         kwargs = prepare_demote(run_as, workspace, worktree, {}, ())
         marker = base / "executed"
         marker.write_text("", encoding="utf-8")
