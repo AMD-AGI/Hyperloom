@@ -36,14 +36,15 @@ def test_nearest_lower_fallback(tmp_path: Path):
     assert got is not None and got.name == "config_xdit_v26.7.patch"
 
 
-def test_only_higher_returns_none(tmp_path: Path):
-    d = _mk_patches(tmp_path, ["26.8"])
-    assert sp._resolve_xdit_patch_file(d, "26.7") is None
-
-
-def test_empty_dir_returns_none(tmp_path: Path):
-    d = tmp_path / "xdit_patches"
-    d.mkdir()
+@pytest.mark.parametrize(
+    "versions",
+    [
+        pytest.param(["26.8"], id="only-higher"),
+        pytest.param([], id="empty-dir"),
+    ],
+)
+def test_no_patch_at_or_below_returns_none(tmp_path: Path, versions: list[str]):
+    d = _mk_patches(tmp_path, versions)
     assert sp._resolve_xdit_patch_file(d, "26.7") is None
 
 

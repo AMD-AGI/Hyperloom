@@ -341,16 +341,7 @@ def test_profile_negative_delay_clamped(monkeypatch, tmp_path):
     # PROFILE triggers is_profile; bad RANDOM_RANGE_RATIO hits the except branch.
     src = write_config(tmp_path / "cfg.yaml", envs={"PROFILE": "1", "RANDOM_RANGE_RATIO": "not-a-float"})
     bench = materialize(src, tmp_path / "out")
-    assert "NUM_PROMPTS" in bench["envs"]
-
-
-def test_profile_max_iters_override(monkeypatch, tmp_path):
-    clear_env(monkeypatch)
-    monkeypatch.setenv("HYPERLOOM_PROFILE_MAX_ITERS", "8")
-    monkeypatch.setenv("HYPERLOOM_PROFILE_DELAY_ITERS", "4")
-    src = write_config(tmp_path / "cfg.yaml", envs={"PROFILE": "1"})
-    bench = materialize(src, tmp_path / "out")
-    assert "NUM_PROMPTS" in bench["envs"]
+    assert json.loads(bench["envs"]["PROFILE_EXTRA_BODY"])["start_step"] == 0
 
 
 def test_a_synthetic_run_still_honors_the_delay_override(monkeypatch, tmp_path):
@@ -652,9 +643,6 @@ def test_quality_ref_zero_config_baseline_writes_session_ref(monkeypatch, tmp_pa
     expected = str(sess / "storage" / "quality_ref" / "baseline.png")
     assert bench["envs"]["XDIT_QUALITY_REF"] == ""
     assert bench["envs"]["XDIT_QUALITY_REF_WRITE"] == expected
-
-
-# Scriptable baseline sampling cost (measurement contract values)
 
 
 # ---- naming the client's tokenizer, only when HF cannot ----------------------

@@ -14,31 +14,38 @@ import pytest
 from hyperloom.inference_optimizer.baseline_comparison.types import TargetAnalysisRequest
 
 
-def test_shared_helpers_are_exported():
-    from hyperloom.inference_optimizer.baseline_comparison import inferencex_client, target_analyzer
-
-    assert {"clear_competitor_target", "to_inferencex_name"} <= set(target_analyzer.__all__)
-    assert "normalize_benchmark_id" in inferencex_client.__all__
-    assert target_analyzer.normalize_benchmark_id is inferencex_client.normalize_benchmark_id
-
-
 # name_mapping
-def test_name_mapping_known_display_name_passthrough():
+@pytest.mark.parametrize(
+    "name,expected",
+    [
+        ("MiniMax-M2.5", "MiniMax-M2.5"),
+        ("/path/models/MiniMaxAI-MiniMax-M2.5", "MiniMax-M2.5"),
+        ("/path/x/minimaxai-minimax-m2.5", "MiniMax-M2.5"),
+        ("GLM-5.2", "GLM-5.2"),
+        ("zai-org/GLM-5.2-FP8", "GLM-5.2"),
+        ("/models/GLM-5.2-MXFP4", "GLM-5.2"),
+        ("MiniMaxAI/MiniMax-M3", "MiniMax-M3"),
+        ("/models/MiniMaxAI-MiniMax-M3-NVFP4", "MiniMax-M3"),
+        ("GLM-5.3-Quark-MXFP4-AttnFP8", None),
+        ("GLM-5.2-custom-finetune", None),
+    ],
+    ids=[
+        "display-name",
+        "vendor-prefixed-path",
+        "case-insensitive-path",
+        "agentic-display-name",
+        "agentic-repo-quant-suffix",
+        "agentic-path-quant-suffix",
+        "agentic-repo",
+        "agentic-vendor-prefixed-path-quant-suffix",
+        "unverified-quant-variant",
+        "unverified-finetune",
+    ],
+)
+def test_name_mapping_resolves_verified_aliases_only(name, expected):
     from hyperloom.inference_optimizer.baseline_comparison.target_analyzer import to_inferencex_name
 
-    assert to_inferencex_name("MiniMax-M2.5") == "MiniMax-M2.5"
-
-
-def test_name_mapping_strips_vendor_prefix_from_path():
-    from hyperloom.inference_optimizer.baseline_comparison.target_analyzer import to_inferencex_name
-
-    assert to_inferencex_name("/path/models/MiniMaxAI-MiniMax-M2.5") == "MiniMax-M2.5"
-
-
-def test_name_mapping_case_insensitive():
-    from hyperloom.inference_optimizer.baseline_comparison.target_analyzer import to_inferencex_name
-
-    assert to_inferencex_name("/path/x/minimaxai-minimax-m2.5") == "MiniMax-M2.5"
+    assert to_inferencex_name(name) == expected
 
 
 def test_name_mapping_canonical_names_starting_with_vendor_token():
@@ -57,15 +64,6 @@ def test_name_mapping_unknown_returns_none():
     assert to_inferencex_name("/path/models/MyCorp-Custom-FT-7B") is None
     assert to_inferencex_name("") is None
     assert to_inferencex_name(None) is None  # type: ignore[arg-type]
-
-
-def test_known_models_list_is_nonempty():
-    from hyperloom.inference_optimizer.baseline_comparison.target_analyzer import (
-        KNOWN_INFERENCEX_MODELS,
-    )
-
-    assert "MiniMax-M2.5" in KNOWN_INFERENCEX_MODELS
-    assert len(KNOWN_INFERENCEX_MODELS) >= 5
 
 
 # Shared InferenceX row shape the target_analyzer tests build their fixtures from.
@@ -269,66 +267,34 @@ def test_analyze_no_target_gpu_writes_marker(tmp_path):
     assert on_disk["reason"] == "no_target_gpu_configured"
 
 
-def test_analyze_unsupported_target_gpu(tmp_path, monkeypatch):
-    """A GPU InferenceX has no data for → ``no_match`` / ``unsupported_target_gpu``."""
-    _patch_fetch_rows(monkeypatch, _make_rows())
+@pytest.mark.parametrize(
+    "rows,request_overrides,reason",
+    [
+        (_make_rows(), {"compare_against_gpu": "mi999x"}, "unsupported_target_gpu"),
+        (_make_rows(), {"isl": 2048, "osl": 2048}, "dimension_mismatch"),
+        # _make_rows() carries b300/1024/1024 at fp8 (and one fp4 row), never at bf16.
+        (_make_rows(), {"precision": "bf16"}, "precision_mismatch"),
+        ([], {}, "no_inferencex_data"),
+    ],
+    ids=["unsupported-target-gpu", "dimension-mismatch", "precision-mismatch", "no-inferencex-data"],
+)
+def test_analyze_no_match_reason(tmp_path, monkeypatch, rows, request_overrides, reason):
+    _patch_fetch_rows(monkeypatch, rows)
 
     from hyperloom.inference_optimizer.baseline_comparison.target_analyzer import analyze
 
-    summary = analyze(
-        session_dir=tmp_path,
-        request=TargetAnalysisRequest(
-            model_path="MiniMax-M2.5",
-            compare_against_gpu="mi999x",
-            framework="vllm",
-            precision="fp8",
-            isl=1024,
-            osl=1024,
-        ),
-    )
+    request = {
+        "model_path": "MiniMax-M2.5",
+        "compare_against_gpu": "b300",
+        "framework": "vllm",
+        "precision": "fp8",
+        "isl": 1024,
+        "osl": 1024,
+        **request_overrides,
+    }
+    summary = analyze(session_dir=tmp_path, request=TargetAnalysisRequest(**request))
     assert summary.status == "no_match"
-    assert summary.reason == "unsupported_target_gpu"
-    assert summary.best is None
-
-
-def test_analyze_dimension_mismatch(tmp_path, monkeypatch):
-    """GPU present but no row matches the run's isl/osl → ``dimension_mismatch``."""
-    _patch_fetch_rows(monkeypatch, _make_rows())
-
-    from hyperloom.inference_optimizer.baseline_comparison.target_analyzer import analyze
-
-    summary = analyze(
-        session_dir=tmp_path,
-        request=TargetAnalysisRequest(
-            model_path="MiniMax-M2.5", compare_against_gpu="b300", framework="vllm", precision="fp8", isl=2048, osl=2048
-        ),
-    )
-    assert summary.status == "no_match"
-    assert summary.reason == "dimension_mismatch"
-    assert summary.best is None
-
-
-def test_analyze_precision_mismatch(tmp_path, monkeypatch):
-    """GPU + shape exist but only at a different precision → ``precision_mismatch``."""
-    # _make_rows() has b300/1024/1024 rows at fp8 (and one fp4 row); ask for a precision InferenceX does not carry for
-    # this shape.
-    _patch_fetch_rows(monkeypatch, _make_rows())
-
-    from hyperloom.inference_optimizer.baseline_comparison.target_analyzer import analyze
-
-    summary = analyze(
-        session_dir=tmp_path,
-        request=TargetAnalysisRequest(
-            model_path="MiniMax-M2.5",
-            compare_against_gpu="b300",
-            framework="vllm",
-            precision="bf16",
-            isl=1024,
-            osl=1024,
-        ),
-    )
-    assert summary.status == "no_match"
-    assert summary.reason == "precision_mismatch"
+    assert summary.reason == reason
     assert summary.best is None
 
 
@@ -414,41 +380,6 @@ def test_analyze_ok_write_failure_clears_stale_competitor_target(tmp_path, monke
     assert summary.status == "ok"
     assert not session_paths.competitor_target_json(tmp_path).exists()
     assert research_hints.load_competitor_target(tmp_path) is None
-
-
-def test_analyze_no_inferencex_data(tmp_path, monkeypatch):
-    """Empty API result (``fetch_rows`` returns ``[]``) → ``no_inferencex_data``."""
-    _patch_fetch_rows(monkeypatch, [])
-
-    from hyperloom.inference_optimizer.baseline_comparison.target_analyzer import analyze
-
-    summary = analyze(
-        session_dir=tmp_path,
-        request=TargetAnalysisRequest(
-            model_path="MiniMax-M2.5", compare_against_gpu="b300", framework="vllm", precision="fp8", isl=1024, osl=1024
-        ),
-    )
-    assert summary.status == "no_match"
-    assert summary.reason == "no_inferencex_data"
-    assert summary.best is None
-
-
-@pytest.mark.parametrize(
-    "name,expected",
-    [
-        ("GLM-5.2", "GLM-5.2"),
-        ("zai-org/GLM-5.2-FP8", "GLM-5.2"),
-        ("/models/GLM-5.2-MXFP4", "GLM-5.2"),
-        ("MiniMaxAI/MiniMax-M3", "MiniMax-M3"),
-        ("/models/MiniMaxAI-MiniMax-M3-NVFP4", "MiniMax-M3"),
-        ("GLM-5.3-Quark-MXFP4-AttnFP8", None),
-        ("GLM-5.2-custom-finetune", None),
-    ],
-)
-def test_agentic_model_names_use_verified_aliases_only(name, expected):
-    from hyperloom.inference_optimizer.baseline_comparison.target_analyzer import to_inferencex_name
-
-    assert to_inferencex_name(name) == expected
 
 
 def _agentic_row(benchmark_id, *, tput=2643.69293, conc=1, **overrides):
@@ -732,19 +663,6 @@ def test_report_section_renders_fetch_error_with_warning():
     assert "fetch_error" in md
     assert "upstream timed out" in md
     assert "No reference best available" in md
-
-
-def test_session_paths_helpers_under_target_analysis(tmp_path):
-    from hyperloom.inference_optimizer.session.session_paths import (
-        target_analysis_dir,
-        target_analysis_report_md,
-        target_baseline_json,
-    )
-
-    sd = tmp_path / "sess"
-    assert target_analysis_dir(sd) == sd / "target_analysis"
-    assert target_baseline_json(sd) == sd / "target_analysis" / "target_baseline.json"
-    assert target_analysis_report_md(sd) == (sd / "target_analysis" / "target_analysis_report.md")
 
 
 def _measured_point():

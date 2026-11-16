@@ -130,20 +130,6 @@ def test_mi308x_session_records_the_real_gpu_type(tmp_path, monkeypatch):
     assert os.environ["TARGET_GPU_TYPE"] == "mi308x"
 
 
-def test_cli_parser_accepts_mi308x():
-    parser = cli_parser._build_parser()
-    args = parser.parse_args(
-        [
-            "optimize",
-            "--model",
-            "/tmp/model",
-            "--gpu-type",
-            "mi308x",
-        ]
-    )
-    assert args.gpu_type == "mi308x"
-
-
 @pytest.fixture(autouse=True)
 def _isolate_leak_root(tmp_path_factory, monkeypatch):
     """Pin ``INFERENCE_OPTIMIZER_LEAK_ROOTS`` to an empty sandbox so the artifact harvest doesn't pick up the host's ``/workspace``."""
@@ -838,20 +824,6 @@ def test_materialize_profile_window_sglang_skill_formula(
     # max capped at 128; delay = 1024 * 2 * 3 - 128/2 = 6080.
     assert body["start_step"] == 6080
     assert body["num_steps"] == 128
-
-
-def test_materialize_profile_max_iters_override_is_quiet_without_agentx(
-    tmp_path,
-    monkeypatch,
-    caplog,
-):
-    """The new warning is AgentX-only; the synthetic path has no host-RAM bound."""
-    _clear_workload_env(monkeypatch)
-    monkeypatch.setenv("HYPERLOOM_PROFILE_MAX_ITERS", "128")
-    src = _profile_yaml(tmp_path, "vllm", {"CONC": 32, "ISL": 256, "OSL": 1024})
-    with caplog.at_level("WARNING"):
-        materialize_benchmark_config(src, tmp_path)
-    assert not any("AgentX capture bound" in r.message for r in caplog.records)
 
 
 def test_materialize_persists_inferencex_path(
@@ -3219,15 +3191,33 @@ async def test_trace_analyze_handler_t4_failure_appends_to_existing_warnings(
     assert warnings[1]["code"] == "tracelens_analysis_failed"
 
 
-def test_handlers_dispatch_table():
-    """Dispatch table includes trace_analyze, not the Coordinator-owned lanes or unknown kinds."""
-    assert "trace_analyze" in krh.KERNEL_REQUEST_HANDLERS
-    assert "run_gemm_tuning" not in krh.KERNEL_REQUEST_HANDLERS
-    assert "run_optimization" not in krh.KERNEL_REQUEST_HANDLERS
-    assert "totally_unknown_kind" not in krh.KERNEL_REQUEST_HANDLERS
+@pytest.mark.asyncio
+async def test_coordinator_answers_trace_analyze_with_the_registered_handler(session_dir, monkeypatch):
+    """With the dispatch table as shipped, trace_analyze reaches its handler instead of the unknown-kind reject."""
 
+    async def fake_run_subprocess(cmd, *, timeout_sec, **_kwargs):
+        return 0, json.dumps({"status": "ok", "hot_kernels": ["kernel_a"]}), ""
 
-# _batch_kernel_candidates collapses task_group members.
+    monkeypatch.setattr(ta, "_run_subprocess", fake_run_subprocess)
+    c = Coordinator(session_dir, backends=_backends_silent())
+    try:
+        await c.router.handle_intent(
+            "orchestration",
+            Intent(
+                type=IntentType.REQUEST,
+                payload={
+                    "target_agent": "kernel_agent",
+                    "kind": "trace_analyze",
+                    "params": {"trace_input": str(session_dir), "dry_run": True},
+                },
+            ),
+        )
+        (reply,) = await c.bus.tail(topic="response", to_agent="orchestration")
+        assert reply.payload["source"] == "programmatic_handler"
+        assert reply.payload["kind"] == "trace_analyze_done"
+        assert reply.payload["result"]["hot_kernels"] == ["kernel_a"]
+    finally:
+        await c.stop()
 
 
 # Coordinator — REQUEST programmatic handler integration

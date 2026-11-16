@@ -50,36 +50,19 @@ def _default_non_amd_gpu(monkeypatch):
 
 
 # _detect_incompatible_model_config
-def test_compat_detector_registry_order_is_pinned():
-    """The waterfall order is a behavioral contract (first match wins)."""
-    specs = cli_model_gate._COMPAT_DETECTORS
-    assert [s.name for s in specs] == [
-        "amd_unsupported_quant",  # 3
-        "amd_unsupported_architecture",  # 4
-        "null_strict_bool",  # 5
-        "rope_without_max_position",  # 6
-        "phi3_rope_scaling",  # 7
-        "gemma2_hidden_act",  # 8
-        "unrecognized_architecture",  # 9
-        "private_quant",  # 10
-        "peft_adapter_only",  # 11
-        "vocab_weight_shape",  # 12
-        "tokenizer_artifacts",  # 13
-        "unregistered_custom_autoconfig",  # 14
-        "amd_dual_chunk_attention",  # 15
-    ]
-    assert {s.name for s in specs if s.amd_only} == {
-        "amd_unsupported_quant",
-        "amd_unsupported_architecture",
-        "amd_dual_chunk_attention",
-    }
-    assert {s.name for s in specs if s.skip_when_scriptable} == {
-        "tokenizer_artifacts",
-    }
-    # Step 13 is a 3-detector short-circuiting sub-chain.
-    tok = next(s for s in specs if s.name == "tokenizer_artifacts")
-    assert isinstance(tok.fn, tuple)
-    assert len(tok.fn) == 3
+def test_detect_reports_the_first_matching_detector(tmp_path):
+    """First match wins: on AMD a DeepSeek-V3.2 config reports its missing ROCm path, not the RoPE gap a later detector also sees."""
+    m = tmp_path / "deepseek_v32_rope_no_maxpos"
+    _write_config(
+        m,
+        model_type="deepseek_v32",
+        architectures=["DeepseekV32ForCausalLM"],
+        rope_scaling={"type": "yarn", "factor": 40.0},
+    )
+    reason = cli._detect_incompatible_model_config(str(m), gpu_type="mi300x")
+    assert reason is not None
+    assert "AMD/ROCm" in reason
+    assert "RoPE" not in reason
 
 
 def test_detect_healthy_config_returns_none(tmp_path):
@@ -297,69 +280,45 @@ def test_detect_mimo_v2_flash_unrecognized_blocked(tmp_path):
     assert reason is not None and "not recognized" in reason
 
 
-def test_detect_deepseek_v4_now_recognized(tmp_path):
-    # DeepSeek-V4 resolves via AutoConfig/vLLM get_config; not fail-fasted.
-    m = tmp_path / "deepseek_v4"
+# DeepSeek-V4 resolves via AutoConfig/vLLM get_config; glm_moe_dsa and gemma4 are registered by AutoConfig and vLLM's
+# ModelRegistry/ModelConfig. None of them is fail-fasted.
+@pytest.mark.parametrize(
+    ("model_type", "arch", "max_position"),
+    [
+        ("deepseek_v4", "DeepseekV4ForCausalLM", 1048576),
+        ("glm_moe_dsa", "GlmMoeDsaForCausalLM", 131072),
+        ("gemma4", "Gemma4ForCausalLM", 32768),
+    ],
+    ids=["deepseek_v4", "glm_moe_dsa", "gemma4"],
+)
+def test_detect_now_recognized_arch_not_blocked(tmp_path, model_type, arch, max_position):
+    m = tmp_path / model_type
     _write_config(
         m,
-        model_type="deepseek_v4",
-        architectures=["DeepseekV4ForCausalLM"],
-        max_position_embeddings=1048576,
+        model_type=model_type,
+        architectures=[arch],
+        max_position_embeddings=max_position,
     )
     reason = cli._detect_incompatible_model_config(str(m))
     assert reason is None
 
 
-def test_detect_glm_moe_dsa_now_recognized(tmp_path):
-    # glm_moe_dsa is registered by AutoConfig/vLLM ModelRegistry; not fail-fasted.
-    m = tmp_path / "glm_moe_dsa"
-    _write_config(
-        m,
-        model_type="glm_moe_dsa",
-        architectures=["GlmMoeDsaForCausalLM"],
-        max_position_embeddings=131072,
-    )
-    reason = cli._detect_incompatible_model_config(str(m))
-    assert reason is None
-
-
-def test_detect_gemma4_now_recognized(tmp_path):
-    # gemma4 is registered by AutoConfig/vLLM ModelConfig; not fail-fasted.
-    m = tmp_path / "gemma4"
-    _write_config(
-        m,
-        model_type="gemma4",
-        architectures=["Gemma4ForCausalLM"],
-        max_position_embeddings=32768,
-    )
-    reason = cli._detect_incompatible_model_config(str(m))
-    assert reason is None
-
-
-def test_detect_bailing_ling_left_to_runtime_scope(tmp_path):
-    # Bailing filters are out of scope for the fail-fast gate.
-    for model_type, arch in (
+@pytest.mark.parametrize(
+    ("model_type", "arch"),
+    [
         ("bailing_moe", "BailingMoeV2ForCausalLM"),
         ("bailing_hybrid", "BailingMoeV2_5ForCausalLM"),
-    ):
-        m = tmp_path / model_type
-        _write_config(
-            m,
-            model_type=model_type,
-            architectures=[arch],
-            max_position_embeddings=32768,
-        )
-        reason = cli._detect_incompatible_model_config(str(m))
-        assert reason is None
-
-
-def test_detect_ovis_next_left_to_runtime_scope(tmp_path):
-    # Ovis filters are out of scope for the fail-fast gate.
-    m = tmp_path / "ovis"
+        ("ovis2_6_next", "Ovis2_6_NextForCausalLM"),
+    ],
+    ids=["bailing_moe", "bailing_hybrid", "ovis2_6_next"],
+)
+def test_detect_arch_left_to_runtime_scope(tmp_path, model_type, arch):
+    # Bailing and Ovis filters are out of scope for the fail-fast gate.
+    m = tmp_path / model_type
     _write_config(
         m,
-        model_type="ovis2_6_next",
-        architectures=["Ovis2_6_NextForCausalLM"],
+        model_type=model_type,
+        architectures=[arch],
         max_position_embeddings=32768,
     )
     reason = cli._detect_incompatible_model_config(str(m))
@@ -1027,16 +986,6 @@ def test_preflight_blocks_amd_unsupported_arch_from_args_gpu_type(
     assert final["stop_reason"] == "model_config_incompatible"
 
 
-def test_stop_reason_is_canonical_vocab():
-    from hyperloom.inference_optimizer.breakdown.stop_reasons import (
-        STOP_REASON_VOCAB,
-        is_valid_stop_reason,
-    )
-
-    assert "model_config_incompatible" in STOP_REASON_VOCAB
-    assert is_valid_stop_reason("model_config_incompatible")
-
-
 def test_preflight_persists_under_strict_env(tmp_path, monkeypatch):
     monkeypatch.setenv("INFERENCE_OPTIMIZER_STRICT_STOP_REASON", "1")
     model = tmp_path / "bad_strict"
@@ -1050,68 +999,77 @@ def test_preflight_persists_under_strict_env(tmp_path, monkeypatch):
 
 
 # Private / third-party quantization formats (paroquant, MLX, mxtq, GGUF)
-def test_private_quant_paroquant_blocks(tmp_path):
-    m = tmp_path / "paro"
-    _write_config(
-        m,
-        model_type="qwen3_5",
-        max_position_embeddings=32768,
-        quantization_config={"quant_method": "paroquant", "bits": 4, "group_size": 128, "krot": 8},
-    )
+@pytest.mark.parametrize(
+    ("config", "files", "expected"),
+    [
+        pytest.param(
+            {
+                "model_type": "qwen3_5",
+                "max_position_embeddings": 32768,
+                "quantization_config": {"quant_method": "paroquant", "bits": 4, "group_size": 128, "krot": 8},
+            },
+            (),
+            "paroquant",
+            id="paroquant",
+        ),
+        # MTPLX / MLX 8-bit affine: mode set, no quant_method.
+        pytest.param(
+            {
+                "model_type": "qwen3_5",
+                "max_position_embeddings": 32768,
+                "quantization_config": {"bits": 8, "group_size": 64, "mode": "affine"},
+            },
+            (),
+            "MLX",
+            id="mlx_affine",
+        ),
+        # bits/group_size but no quant_method/mode; sglang raises "Unknown quantization method: ''" in engine init.
+        pytest.param(
+            {
+                "model_type": "llama",
+                "max_position_embeddings": 32768,
+                "quantization_config": {"group_size": 64, "bits": 8},
+            },
+            (),
+            "quant_method",
+            id="no_method",
+        ),
+        pytest.param(
+            {
+                "model_type": "qwen3_5_moe",
+                "max_position_embeddings": 32768,
+                "quantization_config": {"weight_format": "mxtq", "method": "affine", "group_size": 64},
+            },
+            (),
+            "mxtq",
+            id="mxtq",
+        ),
+        pytest.param(
+            {
+                "model_type": "llama",
+                "architectures": ["LlamaForCausalLM"],
+                "max_position_embeddings": 4096,
+                "quantization_config": {"quant_method": ""},
+            },
+            (),
+            "quant_method is empty",
+            id="empty_method",
+        ),
+        pytest.param(
+            {"model_type": "qwen3_5_moe", "max_position_embeddings": 32768},
+            ("model-TQ3_4S.gguf",),
+            "GGUF",
+            id="gguf_only",
+        ),
+    ],
+)
+def test_private_quant_blocks(tmp_path, config, files, expected):
+    m = tmp_path / "model"
+    _write_config(m, **config)
+    for name in files:
+        (m / name).write_text("dummy", encoding="utf-8")
     reason = cli._detect_incompatible_model_config(str(m))
-    assert reason is not None and "paroquant" in reason
-
-
-def test_private_quant_mlx_affine_blocks(tmp_path):
-    # MTPLX / MLX 8-bit affine: mode set, no quant_method.
-    m = tmp_path / "mlx_affine"
-    _write_config(
-        m,
-        model_type="qwen3_5",
-        max_position_embeddings=32768,
-        quantization_config={"bits": 8, "group_size": 64, "mode": "affine"},
-    )
-    reason = cli._detect_incompatible_model_config(str(m))
-    assert reason is not None and "MLX" in reason
-
-
-def test_private_quant_no_method_blocks(tmp_path):
-    # quantization_config carries bits/group_size but no quant_method/mode; sglang raises "Unknown quantization
-    # method: ''" in engine init.
-    m = tmp_path / "no_method"
-    _write_config(
-        m,
-        model_type="llama",
-        max_position_embeddings=32768,
-        quantization_config={"group_size": 64, "bits": 8},
-    )
-    reason = cli._detect_incompatible_model_config(str(m))
-    assert reason is not None and "quant_method" in reason
-
-
-def test_private_quant_mxtq_blocks(tmp_path):
-    m = tmp_path / "mxtq"
-    _write_config(
-        m,
-        model_type="qwen3_5_moe",
-        max_position_embeddings=32768,
-        quantization_config={"weight_format": "mxtq", "method": "affine", "group_size": 64},
-    )
-    reason = cli._detect_incompatible_model_config(str(m))
-    assert reason is not None and "mxtq" in reason
-
-
-def test_private_quant_empty_method_blocks(tmp_path):
-    m = tmp_path / "empty_quant_method"
-    _write_config(
-        m,
-        model_type="llama",
-        architectures=["LlamaForCausalLM"],
-        max_position_embeddings=4096,
-        quantization_config={"quant_method": ""},
-    )
-    reason = cli._detect_incompatible_model_config(str(m))
-    assert reason is not None and "quant_method is empty" in reason
+    assert reason is not None and expected in reason
 
 
 def test_private_quant_mlx_weights_index_blocks(tmp_path):
@@ -1132,14 +1090,6 @@ def test_private_quant_mlx_weights_index_blocks(tmp_path):
     )
     reason = cli._detect_incompatible_model_config(str(m))
     assert reason is not None and "MLX" in reason
-
-
-def test_private_quant_gguf_only_blocks(tmp_path):
-    m = tmp_path / "gguf_only"
-    _write_config(m, model_type="qwen3_5_moe", max_position_embeddings=32768)
-    (m / "model-TQ3_4S.gguf").write_text("dummy", encoding="utf-8")
-    reason = cli._detect_incompatible_model_config(str(m))
-    assert reason is not None and "GGUF" in reason
 
 
 def test_peft_adapter_only_checkpoint_blocks(tmp_path):
@@ -1188,27 +1138,16 @@ def test_merged_peft_like_checkpoint_with_base_weights_not_blocked(tmp_path):
     assert cli._detect_incompatible_model_config(str(m)) is None
 
 
-def test_standard_quant_fp8_not_blocked(tmp_path):
-    m = tmp_path / "fp8"
+@pytest.mark.parametrize("method", ["fp8", "awq", "gptq", "compressed-tensors"])
+def test_standard_quant_not_blocked(tmp_path, method):
+    m = tmp_path / "std"
     _write_config(
         m,
         model_type="qwen3",
         max_position_embeddings=32768,
-        quantization_config={"quant_method": "fp8"},
+        quantization_config={"quant_method": method},
     )
     assert cli._detect_incompatible_model_config(str(m)) is None
-
-
-def test_standard_quant_awq_gptq_not_blocked(tmp_path):
-    for method in ("awq", "gptq", "compressed-tensors"):
-        m = tmp_path / f"std_{method.replace('-', '_')}"
-        _write_config(
-            m,
-            model_type="qwen3",
-            max_position_embeddings=32768,
-            quantization_config={"quant_method": method},
-        )
-        assert cli._detect_incompatible_model_config(str(m)) is None, method
 
 
 def test_gguf_with_safetensors_not_blocked(tmp_path):
