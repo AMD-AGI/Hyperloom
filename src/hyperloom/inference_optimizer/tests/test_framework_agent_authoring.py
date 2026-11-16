@@ -1015,3 +1015,29 @@ async def test_discovery_fallback_waits_until_nothing_is_in_flight(parallel_phas
     parallel_phase.tasks._queued.clear()
     await parallel_phase.phase_framework._pump_framework_agent_phase()
     assert parallel_phase.discoveries == ["candidate_pool_empty"]
+
+
+@pytest.mark.asyncio
+async def test_an_authored_patch_skipped_by_no_source_changes_is_finished_not_reauthored(tmp_path: Path) -> None:
+    """A policy skip is the candidate's last word: no re-author, and the pump does not select it again."""
+    stub = _stub(tmp_path)
+    pr_url = "https://github.com/vllm-project/vllm/pull/60077"
+    _seed_batch(stub, {"pr_url": pr_url, "diff_url": f"{pr_url}.diff"})
+    task = SimpleNamespace(
+        task_id="integrate-60077",
+        kind="integrate_patch",
+        params={"framework_agent_authoring": True, "framework_agent_candidate_id": pr_url, "specialist_task_id": "s"},
+    )
+    result = SubAgentResult(
+        task_id=task.task_id,
+        state="succeeded",
+        result={"status": "skipped", "skipped_reason": "no_source_changes", "specialist_task_id": "s"},
+    )
+
+    await stub.phase_framework.on_integrate_patch_settled(task, result, Verdict.FAILED)
+
+    assert stub.shared_state.apply_fail_reauthor_attempts == {}
+    assert stub.tasks.created == []
+    rows = stub.shared_state.framework_agent_phase_progress
+    assert [(row["candidate_id"], row["status"], row["kept"]) for row in rows] == [(pr_url, "skipped", False)]
+    assert stub.phase_framework._unprocessed_framework_agent_candidates() == []
