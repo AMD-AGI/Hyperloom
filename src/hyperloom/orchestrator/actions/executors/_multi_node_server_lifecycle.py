@@ -696,20 +696,49 @@ def select_pd_role_traces(root: str, since_unix: float) -> dict[str, str]:
     return {role: paths[0] for role, paths in select_pd_node_traces(root, since_unix).items()}
 
 
-async def trigger_pd_engine_profile(action: str, body: dict | None = None) -> None:
+PD_PROFILE_MODE_STEPS = "steps"
+PD_PROFILE_MODE_TIME = "time"
+# Per role: the step-count env override, its default, and whether the trace is split by forward stage.
+_PD_ROLE_PROFILE_STEPS = {
+    "prefill": ("HYPERLOOM_MN_PD_PREFILL_PROFILE_STEPS", 8, True),
+    "decode": ("HYPERLOOM_MN_PD_DECODE_PROFILE_STEPS", 40, False),
+}
+
+
+def pd_profile_mode() -> str:
+    """The PD engine profiling mode, ``HYPERLOOM_MN_PD_PROFILE_MODE``: ``steps`` (default) or ``time``."""
+    mode = os.environ.get("HYPERLOOM_MN_PD_PROFILE_MODE", "").strip().lower()
+    return PD_PROFILE_MODE_TIME if mode == PD_PROFILE_MODE_TIME else PD_PROFILE_MODE_STEPS
+
+
+def _pd_step_window(role: str) -> dict[str, Any]:
+    """The step-window fields of ``role``'s start body: its step count, stage split and shape recording."""
+    env_key, default_steps, by_stage = _PD_ROLE_PROFILE_STEPS[role]
+    try:
+        steps = int(os.environ.get(env_key, "") or default_steps)
+    except ValueError:
+        steps = default_steps
+    return {"num_steps": max(1, steps), "profile_by_stage": by_stage, "record_shapes": True}
+
+
+async def trigger_pd_engine_profile(action: str, body: dict | None = None) -> list[str]:
     """POST /start_profile or /stop_profile on every atomesh/sglangrouter prefill and decode pod.
 
     The router does not write GPU traces. Each engine listens on its pod's
     ``enginePort``, else the worker port. A role with no pods in state is reached through
     ``HYPERLOOM_MN_EXT_<ROLE>_URL``. A start sends ``output_dir`` and ``with_stack``
-    (``HYPERLOOM_MN_PROFILE_WITH_STACK``, default off); step-window fields crash
-    disaggregated SGLang.
+    (``HYPERLOOM_MN_PROFILE_WITH_STACK``, default off). In ``steps`` mode
+    (:func:`pd_profile_mode`) it also sends the role's step window: prefill records 8 steps split by stage, decode
+    40 steps (``HYPERLOOM_MN_PD_<ROLE>_PROFILE_STEPS``), both with shapes, and each engine closes its own window.
+    In ``time`` mode the window lasts until the stop.
+
+    Returns the roles with at least one engine that answered without an error status.
     """
     if not is_multi_node():
-        return
+        return []
     state = _read_state() or {}
     if str(state.get("backend") or "").strip().lower() not in ("atomesh", "sglangrouter"):
-        return
+        return []
     port = str(os.environ.get("HYPERLOOM_MN_WORKER_PORT", "8000") or "8000").strip() or "8000"
     targets: list[tuple[str, str]] = []
     for role in PD_PROFILE_ROLES:
@@ -720,24 +749,28 @@ async def trigger_pd_engine_profile(action: str, body: dict | None = None) -> No
             targets.append((role, engine_url))
     if not targets:
         log.warning("trigger_pd_engine_profile(%s): no prefill/decode pods or engine URLs", action)
-        return
+        return []
     try:
         import httpx as _httpx
     except ImportError:  # pragma: no cover
         log.warning("httpx unavailable; cannot trigger pd-cluster profiling")
-        return
+        return []
     route = "start_profile" if action == "start" else "stop_profile"
     output_dir = str((body or {}).get("output_dir") or "").strip() if action == "start" else ""
     with_stack = os.environ.get("HYPERLOOM_MN_PROFILE_WITH_STACK", "").strip().lower() in ("1", "true", "yes", "on")
+    by_steps = pd_profile_mode() == PD_PROFILE_MODE_STEPS
     if action == "start":
         client_timeout = 30.0
     else:
         client_timeout = float(os.environ.get("HYPERLOOM_MN_STOP_PROFILE_TIMEOUT_S", "600") or 600)
 
-    async def _post(client: Any, role: str, base_url: str) -> None:
-        """Send ``route`` to one engine; a transport error is logged, not raised."""
+    async def _post(client: Any, role: str, base_url: str) -> bool:
+        """Send ``route`` to one engine and return whether it answered without an error status.
+
+        A transport error or error status is logged, not raised.
+        """
         url = f"{base_url}/{route}"
-        payload: dict = {}
+        payload: dict = _pd_step_window(role) if action == "start" and by_steps else {}
         if output_dir:
             # Each role writes under <output_dir>/<role> so its traces stay attributable.
             role_dir = pd_role_trace_dir(output_dir, role)
@@ -753,10 +786,13 @@ async def trigger_pd_engine_profile(action: str, body: dict | None = None) -> No
             log.info("pd-cluster profile %s %s -> %s HTTP %d", role, route, url, resp.status_code)
         except _httpx.HTTPError as exc:
             log.warning("pd-cluster profile %s -> %s failed (%s); continuing", route, url, exc)
+            return False
+        return resp.status_code < 400
 
     # stop_profile returns after the trace export; engines start and stop together so each records the same window.
     async with _httpx.AsyncClient(timeout=client_timeout) as client:
-        await asyncio.gather(*(_post(client, role, base_url) for role, base_url in targets))
+        answered = await asyncio.gather(*(_post(client, role, base_url) for role, base_url in targets))
+    return list(dict.fromkeys(role for (role, _url), ok in zip(targets, answered) if ok))
 
 
 async def _probe_health(client: Any, health_url: str) -> tuple[bool, str]:

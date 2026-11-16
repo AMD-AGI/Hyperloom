@@ -301,6 +301,7 @@ def test_pd_engine_profile_uses_engine_urls_without_pods(monkeypatch: pytest.Mon
     monkeypatch.setattr(httpx, "AsyncClient", lambda *a, **k: real_client(transport=httpx.MockTransport(handler)))
     monkeypatch.setenv("HYPERLOOM_MN_EXT_PREFILL_URL", "http://p-svc:8010/")
     monkeypatch.setenv("HYPERLOOM_MN_EXT_DECODE_URL", "http://d-svc:8020")
+    monkeypatch.setenv("HYPERLOOM_MN_PD_PROFILE_MODE", "time")
 
     asyncio.run(life.trigger_pd_engine_profile("start", {"output_dir": str(tmp_path)}))
 

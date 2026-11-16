@@ -743,13 +743,52 @@ async def _restart_round_server(params: dict[str, Any], round_trace_root: str) -
     return None
 
 
-# Runs the body with a warmup-then-bounded Infera engine profiling window around it.
+_PD_TRACE_POLL_S = 5.0
+
+
+async def _await_pd_role_traces(root: str, roles: list[str], since_unix: float) -> None:
+    """Wait until each of ``roles`` has a trace written under ``<root>/<role>`` since ``since_unix``.
+
+    Polls every ``_PD_TRACE_POLL_S`` seconds for at most ``HYPERLOOM_MN_STOP_PROFILE_TIMEOUT_S`` (default 600).
+    """
+    import asyncio as _asyncio
+    import time as _time
+
+    from ._multi_node_server_lifecycle import select_pd_node_traces
+
+    timeout_s = float(os.environ.get("HYPERLOOM_MN_STOP_PROFILE_TIMEOUT_S", "600") or 600)
+    deadline = _time.monotonic() + timeout_s
+    while True:
+        found = await _asyncio.to_thread(select_pd_node_traces, root, since_unix)
+        missing = [role for role in roles if role not in found]
+        if not missing:
+            return
+        remaining = deadline - _time.monotonic()
+        if remaining <= 0:
+            log.warning(
+                "profile_executor: no PD trace from %s under %s after %.0fs; sending the safety stop",
+                missing,
+                root,
+                timeout_s,
+            )
+            return
+        await _asyncio.sleep(min(_PD_TRACE_POLL_S, remaining))
+
+
+# Runs the body with a warmup-then-bounded Infera engine profiling window around it. PD engines share the window in
+# ``time`` mode; in ``steps`` mode each closes its own after its steps, and one safety stop follows their traces.
 @contextlib.asynccontextmanager
-async def _infera_profile_window(round_trace_root: str):
+async def _infera_profile_window(round_trace_root: str, since_unix: float = 0.0):
     import asyncio as _asyncio
 
-    from ._multi_node_server_lifecycle import trigger_infera_engine_profile, trigger_pd_engine_profile
+    from ._multi_node_server_lifecycle import (
+        PD_PROFILE_MODE_STEPS,
+        pd_profile_mode,
+        trigger_infera_engine_profile,
+        trigger_pd_engine_profile,
+    )
 
+    pd_by_steps = pd_profile_mode() == PD_PROFILE_MODE_STEPS
     prof_body: dict[str, Any] = {}
     try:
         parsed = json.loads(os.environ.get("PROFILE_EXTRA_BODY") or "{}")
@@ -762,20 +801,26 @@ async def _infera_profile_window(round_trace_root: str):
     warmup_s = float(os.environ.get("HYPERLOOM_MN_PROFILE_WARMUP_S", "60") or 60)
     window_s = float(os.environ.get("HYPERLOOM_MN_PROFILE_WINDOW_S", "8") or 8)
     started = {"v": False}
+    pd_open: list[str] = []
+    body_done = False
 
     async def _bounded_profile_window() -> None:
         await _asyncio.sleep(warmup_s)
         await trigger_infera_engine_profile("start", prof_body)
-        await trigger_pd_engine_profile("start", prof_body)
+        roles = await trigger_pd_engine_profile("start", prof_body)
+        if pd_by_steps:
+            pd_open.extend(roles or [])
         started["v"] = True
         await _asyncio.sleep(window_s)
         await trigger_infera_engine_profile("stop")
-        await trigger_pd_engine_profile("stop")
+        if not pd_by_steps:
+            await trigger_pd_engine_profile("stop")
         started["v"] = False
 
     prof_task = _asyncio.create_task(_bounded_profile_window())
     try:
         yield
+        body_done = True
     finally:
         if not prof_task.done():
             prof_task.cancel()
@@ -785,7 +830,14 @@ async def _infera_profile_window(round_trace_root: str):
                 log.debug("profile_executor: bounded profile task ended during cleanup: %r", exc)
         if started.get("v"):
             await trigger_infera_engine_profile("stop")
-            await trigger_pd_engine_profile("stop")
+            if not pd_by_steps:
+                await trigger_pd_engine_profile("stop")
+        if pd_open:
+            try:
+                if body_done and prof_body.get("output_dir"):
+                    await _await_pd_role_traces(str(prof_body["output_dir"]), pd_open, since_unix)
+            finally:
+                await trigger_pd_engine_profile("stop")
 
 
 # Attaches this round's multi-node trace files. A PD cluster's prefill and decode traces land in per-role subdirs and
@@ -1173,7 +1225,7 @@ class ProfileExecutor(BenchmarkRunExecutor):
             if refusal is not None:
                 return refusal
             extra["mn_round_restarted"] = True
-        async with _infera_profile_window(round_trace_root):
+        async with _infera_profile_window(round_trace_root, task_started_unix):
             result = await super().__call__(ctx)
         self._collect_rewrite_evidence(result)
         workspace_str = result.get("workspace")
