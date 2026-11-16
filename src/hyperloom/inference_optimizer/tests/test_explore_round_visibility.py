@@ -80,6 +80,22 @@ async def test_a_proposal_in_a_running_round_is_named_not_offered_as_untested(co
     assert "1 untested proposals" in coord.conversation._context_running_tasks_reader()
 
 
+@pytest.mark.asyncio
+async def test_a_proposal_a_finished_automatic_round_carried_is_named_not_offered_or_counted(coord):
+    _queue_two_proposals(coord)
+    in_round = [row for row in coord.shared_state.untested_proposal_rows() if row["name"] == "in-round"]
+    task = await _running_round(coord, _grid_of(in_round))
+    await coord.tasks.transition(task.task_id, "failed")
+
+    out = (await coord.conversation.compose_prompt("orchestration")).text
+    queue = out.split("=== Untested proposals (current cycle) ===", 1)[1]
+
+    offered = [line.split()[1] for line in queue.splitlines() if line.startswith("• ")]
+    assert offered == ["still-waiting"]
+    assert "carried to its end without a verdict" in queue and "in-round" in queue
+    assert "1 untested proposals" in coord.conversation._context_running_tasks_reader()
+
+
 async def _step(coord: Coordinator, task_id: str, variant: str, step: str, status: str) -> None:
     """A step note as the grid runner reports it: on entry, then a heartbeat while output flows."""
     await coord.tasks.record_progress(

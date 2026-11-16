@@ -28,7 +28,7 @@ from ..loop.proposals import integrate_review_in_flight, record_proposal
 from ..actions.executors import _integrate_vocabulary
 from hyperloom.common.framework_arm import LOCAL_EXPLORE_CANDIDATE_PREFIX
 from hyperloom.orchestrator.lever import LEVER_SOURCE_PATCH, LEVER_UPSTREAM_PR, patch_owner_phase
-from .proposal_bench import CUSTOM_PROPOSAL_DOMAIN, ProposalBench, kb_exposure_of
+from .proposal_bench import CUSTOM_PROPOSAL_DOMAIN, ProposalBench, kb_exposure_of, waiting_proposal_rows
 from .framework_discovery import DISCOVER_FAILURE_RETRY_LIMIT, _CandidateDiscoveryMixin
 from .framework_records import (
     ProgressStamp,
@@ -1759,7 +1759,7 @@ class FrameworkPhase(_AuthoredOutcomeMixin, _CandidateDiscoveryMixin, ProposalBe
             self._coord.record_exception(stage=stage, exc=exc)
 
     async def _maybe_bench_untested_proposals(self) -> None:
-        """Enqueue explore grids from ``untested_proposal_rows``: the custom specialist's alone, ahead of every gate;
+        """Enqueue explore grids from ``waiting_proposal_rows``: the custom specialist's alone, ahead of every gate;
         the rest once no explore is queued or running and the framework candidate track is open."""
         state = self.shared_state
         if (state.phase or "").strip().upper() != _phase_state.PHASE_FRAMEWORK_AGENT:
@@ -1774,7 +1774,7 @@ class FrameworkPhase(_AuthoredOutcomeMixin, _CandidateDiscoveryMixin, ProposalBe
                 return
         if state.custom_specialist_only or state.framework_agent_phase_done or explores:
             return
-        rows = [r for r in state.untested_proposal_rows() if r["domain"] != CUSTOM_PROPOSAL_DOMAIN]
+        rows = [r for r in waiting_proposal_rows(state, self.tasks) if r["domain"] != CUSTOM_PROPOSAL_DOMAIN]
         if rows:
             await self._enqueue_bench_grid(rows[: self._AUTO_EXPLORE_GRID_CAP], operator_priority=False)
 

@@ -752,6 +752,8 @@ async def test_a_session_runs_every_phase_and_leaves_nothing_behind(tmp_path: Pa
         k for policy in stage.toolbox.policies for b, k in policy.branch_k.items() if b != INTEGRATION_BRANCH
     ]
     assert max(specialist_ks) == SETTINGS.caps.max_k_per_branch
+    opened = next(policy for policy in stage.toolbox.policies if INTEGRATION_BRANCH in policy.branch_k)
+    assert opened.k_for(INTEGRATION_BRANCH) == 2
     steering = [policy for policy in stage.toolbox.policies if "b01" in policy.branch_k]
     assert steering[-1].k_for(INTEGRATION_BRANCH) == 2 and "b02" not in steering[-1].branch_k
     assert all(policy.listed_branches_only for policy in stage.toolbox.policies)

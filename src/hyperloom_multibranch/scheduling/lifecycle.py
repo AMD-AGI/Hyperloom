@@ -1022,9 +1022,9 @@ class Session:
         return prelude
 
     async def _open_integration(self, root: str) -> None:
-        """Put the integration branch at ``root`` on the roster with its K, which the toolbox is then given."""
+        """Put the integration branch at ``root`` on the roster with its workload's K, which the toolbox is then given."""
 
-        self._roster.add_integration(root, k=1)
+        self._roster.add_integration(root, k=self._settings.workload.integration_k)
         await self._branches.push_quota()
 
     def _reference_dirs(self) -> dict[str, Path]:

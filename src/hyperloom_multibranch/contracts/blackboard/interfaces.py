@@ -365,7 +365,8 @@ class RecordSearch(Protocol):
     async def record(self, request_id: str) -> TestRecord: ...
 
     async def profiles(self, commit_id: str) -> tuple[TestRecord, ...]:
-        """The profile tests of ``commit_id`` that produced an artifact."""
+        """The profile tests of ``commit_id``'s recipe that produced an artifact: its own, and those of another commit
+        of the same recipe digest that changed nothing."""
 
     async def op_shares(self, commit_id: str) -> OpShares | None:
         """The latest TraceLens op shares a tool reported on ``commit_id``, else on a commit of the same recipe digest,

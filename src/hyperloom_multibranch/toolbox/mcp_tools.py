@@ -289,7 +289,7 @@ def _start_analysis_description(served: Sequence[str]) -> str:
     return (
         f"Start {named} for this branch; returns the job id at once and the result arrives in poll_inbox. The commit "
         "analysed is this branch's head, set by the server; with a profile_request_id of any branch's profile test of "
-        "it the pointer carries its op shares."
+        "its recipe the pointer carries its op shares."
         + (_KERNEL_TUNE_GUIDE if KERNEL_TUNE_TOOL in served else "")
         + (_UPSTREAM_PR_GUIDE if UPSTREAM_PR_TOOL in served else "")
     )
