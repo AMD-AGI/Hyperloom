@@ -18,7 +18,7 @@ from .integrate._integrate_bench import BenchStageMixin
 from .integrate._integrate_build import BuildStageMixin
 from .integrate._integrate_enablement_gate import EnablementGateMixin
 from .integrate._integrate_perf_gate import PerfGateMixin
-from .integrate._integrate_resolve import ResolveStageMixin
+from .integrate._integrate_resolve import ResolveStageMixin, source_change_skip
 from .integrate._integrate_vocabulary import KEEP_STATUSES, RESULT_BENCHED, RESULT_FRAMEWORK_CHANGED, RESULT_GRADED
 from .patching._patch_git import restore_pending_integrate
 from .candidate_builds import CandidateBuilds
@@ -77,6 +77,9 @@ class IntegratePatchExecutor(
         early = await self._stage_resolve(attempt, params, extra)
         if early is not None:
             return early
+        skipped = source_change_skip(attempt, params)
+        if skipped is not None:
+            return skipped
 
         # Provision an attempt-scoped runtime AFTER the Critic gate (in
         # _stage_resolve) and BEFORE any patch apply / setup replay.

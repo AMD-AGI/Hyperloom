@@ -1,7 +1,8 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""The front of one integration attempt: resolving what it integrates and provisioning its runtime."""
+"""The front of one integration attempt: resolving what it integrates, skipping what the session may not keep, and
+provisioning its runtime."""
 
 from __future__ import annotations
 
@@ -18,6 +19,7 @@ from hyperloom.inference_optimizer.session.session_paths import enablement_stack
 from ....state.shared_state import inject_stack_base_params
 from .._integrate_attempt import IntegrateAttempt
 from ._integrate_refusals import _enablement_lane_closed_skip, _enforce_critic_gate
+from ._integrate_results import _Deliverable
 from ..patching._patch_source_pr import _candidate_slug, materialize_candidate_patches
 from ._integrate_vocabulary import PATCH_SOURCE_UPSTREAM_PR, resolve_patch_source
 from ..patching._patch_sources import (
@@ -26,11 +28,14 @@ from ..patching._patch_sources import (
     _read_done_payload,
     _resolve_framework_root,
 )
+from .._setup_replay import resolve_setup_commands
 
 if TYPE_CHECKING:
     from ....enablement.runtime.stack_actions import EnablementStackAction
 
 log = logging.getLogger(__name__)
+
+SKIPPED_REASON_NO_SOURCE_CHANGES = "no_source_changes"
 
 _LAUNCH_ONLY_MUTATION_FIELDS: tuple[str, ...] = (
     "patches",
@@ -399,6 +404,60 @@ def _attempt_stack_action(attempt: IntegrateAttempt) -> EnablementStackAction | 
         return None
     framework = str(getattr(attempt.shared_state, "framework", "") or "").strip().lower()
     return get_adapter(framework).build_stack_action(request)
+
+
+def _keeps_launch_config_only(attempt: IntegrateAttempt) -> bool:
+    """Whether the session runs under ``--no-source-changes``; an attempt without a session state does not."""
+    return bool(getattr(attempt.shared_state, "no_source_changes", False))
+
+
+def source_change_skip(attempt: IntegrateAttempt, params: dict[str, Any]) -> dict[str, Any] | None:
+    """The ``skipped`` result for a round that carries a source, file or runtime change; ``None`` otherwise.
+
+    Read once the round is resolved and before anything is provisioned, stashed or applied, so a skip
+    leaves the tree and the environment as they were. It is a skip rather than an apply failure: the
+    round is not broken, the session refuses what it carries, so nothing re-authors it.
+    """
+    if not _keeps_launch_config_only(attempt):
+        return None
+    carried = _source_changes_carried(attempt, params)
+    if not carried:
+        return None
+    result: dict[str, Any] = {
+        "status": "skipped",
+        "skipped_reason": SKIPPED_REASON_NO_SOURCE_CHANGES,
+        "specialist_task_id": attempt.specialist_task_id,
+        "patches_applied": [],
+        "patches_reverted": [],
+        "source_changes": carried,
+        "reason": (
+            f"--no-source-changes: this round carries {', '.join(carried)}; "
+            "the session keeps only server arguments and environment variables"
+        ),
+    }
+    if params.get("enablement"):
+        result["enablement"] = True
+    return result
+
+
+def _source_changes_carried(attempt: IntegrateAttempt, params: dict[str, Any]) -> list[str]:
+    """What the round would land beyond server arguments, environment variables and launch controls."""
+    # The bench applies a runtime_override on any round, not only on a launch-only one.
+    carried = ["a pre-built runtime"] if params.get("runtime_override") else []
+    if params.get("enablement_launch_only"):
+        return carried
+    deliverable = _Deliverable.resolve(attempt, params)
+    if deliverable.patch_paths:
+        carried.append(f"{len(deliverable.patch_paths)} patch(es)")
+    if deliverable.artifact_specs:
+        carried.append(f"{len(deliverable.artifact_specs)} tuned artifact(s)")
+    if deliverable.switch_manifest:
+        carried.append(f"{len(deliverable.switch_manifest)} rewrite switch(es)")
+    if params.get("enablement") and resolve_setup_commands(params=params, done_payload=attempt.done_payload):
+        carried.append("setup commands")
+    if _acquiring_round(params) and _attempt_stack_action(attempt) is not None:
+        carried.append("another runtime")
+    return carried
 
 
 def _attempt_disk_preflight_failure(attempt_dir: Path, specialist_task_id: str) -> dict[str, Any] | None:
