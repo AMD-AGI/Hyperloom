@@ -14,6 +14,7 @@ from hyperloom_common.coerce import to_str_list
 from hyperloom.inference_optimizer.grid_server_args import (
     dedupe_extra_server_args,
     merge_cumulative_extra_server_args,
+    normalize_server_args,
     strip_benchmark_harness_flags,
 )
 from hyperloom.inference_optimizer.session.optimization_journal import classify_change_kind, operation_kind_for
@@ -46,6 +47,28 @@ class _ResolvedLaunch(NamedTuple):
     candidate_args: str
     full_args: str
     overlay: str
+
+
+def _serving_recipe_requires_remeasurement(winner: Mapping[str, Any]) -> bool:
+    """Whether publication drops a flag from the measured launch, or its legacy argument record."""
+    evidence = winner.get("launch_evidence")
+    observed = [winner.get("resolved_server_launch_flags")]
+    if isinstance(evidence, Mapping):
+        observed.append(evidence.get("observed_server_launch_flags"))
+    measured = [args for args in observed if isinstance(args, (str, list, tuple)) and args]
+    if isinstance(evidence, Mapping) and isinstance(evidence.get("requested_server_args"), (str, list, tuple)):
+        measured.append(evidence["requested_server_args"])
+    args_to_check = measured or [
+        winner.get("effective_extra_server_args"),
+        winner.get("extra_server_args"),
+        winner.get("candidate_extra_server_args"),
+    ]
+    for args in args_to_check:
+        text = " ".join(args) if isinstance(args, (list, tuple)) else args
+        normalized = normalize_server_args(text)
+        if normalize_server_args(strip_benchmark_harness_flags(normalized)) != normalized:
+            return True
+    return False
 
 
 def _resolved_launch(previous: Mapping[str, Any], bv: Mapping[str, Any]) -> _ResolvedLaunch:
@@ -237,6 +260,12 @@ class CurrentBestLiftMixin:
             else resolve_graded_comparison(self.shared_state, cand_source)
         )
         if graded is not None and self._refuses_graded_winner(task_kind, bv, graded):
+            return False
+        if graded is not None and _serving_recipe_requires_remeasurement(bv):
+            log.warning(
+                "current_best held: %s winner needs remeasurement under the publishable serving arguments",
+                task_kind,
+            )
             return False
         previous = self.shared_state.current_best
         launch = _resolved_launch(previous, bv)
