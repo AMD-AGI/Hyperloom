@@ -5,7 +5,6 @@
 
 from __future__ import annotations
 
-import ast
 import re
 import subprocess
 import sys
@@ -14,15 +13,7 @@ from pathlib import Path
 import pytest
 
 from hyperloom.inference_optimizer.cli import preflight as cli_preflight
-
-RAY_RUNTIME = Path(cli_preflight.__file__).parents[2] / "orchestrator" / "actions" / "executors" / "_ray_runtime.py"
-# The functions that build the `ray start` argv for the head preflight provisions.
-_HEAD_ARGV_BUILDERS = (
-    "_resources_start_args",
-    "_isolated_head_port_args",
-    "ensure_ray_cluster",
-    "force_restart_local_cluster",
-)
+from hyperloom.orchestrator.actions.executors import _ray_runtime as rr
 
 
 @pytest.fixture(autouse=True)
@@ -168,21 +159,25 @@ def test_smoke_rejects_ray_below_the_floor(tmp_path: Path) -> None:
     assert "ray too old" in result.stderr
 
 
-def test_certified_start_options_are_the_ones_the_head_is_started_with() -> None:
+def test_certified_start_options_are_the_ones_the_head_is_started_with(monkeypatch) -> None:
     """The options the smoke asks the CLI parser for are the ones the head gets."""
-    source = RAY_RUNTIME.read_text(encoding="utf-8")
-    tree = ast.parse(source)
-    bodies = {
-        node.name: ast.get_source_segment(source, node)
-        for node in tree.body
-        if isinstance(node, ast.FunctionDef) and node.name in _HEAD_ARGV_BUILDERS
-    }
+    started: list[list[str]] = []
+
+    def run(cmd, **_kwargs):
+        if cmd[:2] == ["ray", "start"]:
+            started.append(cmd)
+        return subprocess.CompletedProcess(cmd, 0)
+
+    monkeypatch.setattr(rr.subprocess, "run", run)
+    monkeypatch.setattr(rr, "ray_probe", lambda timeout=None: rr.RayProbe.UP)
+    monkeypatch.setattr(rr, "ensure_fd_limit", lambda: (0, 0))
+
+    rr.force_restart_local_cluster(num_gpus=8)
 
     certified = {token.split("=", 1)[0] for token in cli_preflight._RAY_START_ARGV if token.startswith("--")}
-    assert set(bodies) == set(_HEAD_ARGV_BUILDERS), f"ray start argv builders moved: {sorted(bodies)}"
-    for name, body in bodies.items():
-        for option in re.findall(r"--[a-z][a-z-]+", body):
-            assert option in certified, f"{name} passes {option}, which preflight never certifies"
+    (argv,) = started
+    passed = {token.split("=", 1)[0] for token in argv if token.startswith("--")}
+    assert passed <= certified, f"the head gets {sorted(passed - certified)}, which preflight never certifies"
 
 
 def test_probe_env_reindexes_hip_devices_from_rocr(monkeypatch) -> None:

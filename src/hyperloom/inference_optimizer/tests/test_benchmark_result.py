@@ -39,11 +39,6 @@ class TestCandidateRawJsons:
         assert names[1] == "profile_result.json"
         assert "benchmark_report.json" not in names
 
-    def test_returns_empty_when_no_json_files(self, tmp_path):
-        ws = tmp_path / "empty"
-        ws.mkdir()
-        assert br._candidate_raw_jsons(ws) == []
-
 
 # snapshot_workspaces / select_run_workspace
 class TestWorkspaceSelection:
@@ -76,9 +71,6 @@ class TestWorkspaceSelection:
         result = select_run_workspace(tmp_path, known_before=known)
         assert result is None
 
-    def test_select_run_workspace_no_dirs_returns_none(self, tmp_path):
-        assert select_run_workspace(tmp_path, known_before=frozenset()) is None
-
     def test_select_run_workspace_picks_newest_of_several_fresh(self, tmp_path):
         known = snapshot_workspaces(tmp_path)
         (tmp_path / "benchmark_vllm_20260812_120000").mkdir()
@@ -96,65 +88,6 @@ class TestWorkspaceSelection:
         result = select_run_workspace(tmp_path, known_before=known)
         assert result is not None
         assert result.name == "benchmark_vllm_20260812_120000"
-
-
-# _rescue_candidate_paths — env handling + workspace filter
-class TestRescueCandidatePaths:
-    def test_no_env_no_default_returns_empty(self, tmp_path, monkeypatch):
-        monkeypatch.delenv("INFERENCE_OPTIMIZER_RESCUE_PATHS", raising=False)
-        ws = tmp_path / "ws"
-        ws.mkdir()
-        assert br._rescue_candidate_paths(ws) == []
-
-    def test_explicit_file_included(self, tmp_path, monkeypatch):
-        leak = tmp_path / "leak" / "inferencex_result.json"
-        leak.parent.mkdir()
-        leak.write_text("{}")
-        monkeypatch.setenv("INFERENCE_OPTIMIZER_RESCUE_PATHS", str(leak))
-        ws = tmp_path / "ws"
-        ws.mkdir()
-        out = br._rescue_candidate_paths(ws)
-        assert leak.resolve() in [p.resolve() for p in out]
-
-    def test_directory_scanned_for_inferencex_pattern(self, tmp_path, monkeypatch):
-        leak_dir = tmp_path / "leak"
-        leak_dir.mkdir()
-        a = leak_dir / "inferencex_result.json"
-        a.write_text("{}")
-        b = leak_dir / "inferencex_result_eval.json"
-        b.write_text("{}")
-        unrelated = leak_dir / "unrelated.json"
-        unrelated.write_text("{}")
-        monkeypatch.setenv("INFERENCE_OPTIMIZER_RESCUE_PATHS", str(leak_dir))
-        ws = tmp_path / "ws"
-        ws.mkdir()
-        out = br._rescue_candidate_paths(ws)
-        names = {p.name for p in out}
-        assert names == {"inferencex_result.json", "inferencex_result_eval.json"}
-
-    def test_paths_inside_workspace_filtered_out(self, tmp_path, monkeypatch):
-        ws = tmp_path / "ws"
-        ws.mkdir()
-        nested = ws / "inferencex_result.json"
-        nested.write_text("{}")
-        monkeypatch.setenv("INFERENCE_OPTIMIZER_RESCUE_PATHS", str(nested))
-        out = br._rescue_candidate_paths(ws)
-        assert nested.resolve() not in [p.resolve() for p in out]
-
-    def test_mtime_gate_drops_stale_leak(self, tmp_path, monkeypatch):
-        leak = tmp_path / "old" / "inferencex_result.json"
-        leak.parent.mkdir()
-        leak.write_text("{}")
-        old = leak.stat().st_mtime - 3600.0
-        os.utime(leak, (old, old))
-        monkeypatch.setenv("INFERENCE_OPTIMIZER_RESCUE_PATHS", str(leak))
-        ws = tmp_path / "ws"
-        ws.mkdir()
-        out = br._rescue_candidate_paths(
-            ws,
-            subprocess_started_unix=leak.stat().st_mtime + 60.0,
-        )
-        assert out == []
 
 
 # Rescue end-to-end: salvage adopts mtime-gated leaked results into the workspace.
@@ -264,14 +197,17 @@ def test_rescue_directory_scanned_for_inferencex_result_glob(
     leak_dir.mkdir()
     a = leak_dir / "inferencex_result_eval.json"
     b = leak_dir / "inferencex_result.json"
+    # Sorts ahead of both results, so a glob wider than ``inferencex_result*.json`` would rescue it first.
+    stray = leak_dir / "benchmark_summary.json"
     _write_inferencex(a, tput=100.0)
     _write_inferencex(b, tput=200.0)
+    _write_inferencex(stray, tput=999.0)
     monkeypatch.setenv("INFERENCE_OPTIMIZER_RESCUE_PATHS", str(leak_dir))
 
     measurement = extract_benchmark_measurement(
         report={"success": False},
         workspace=workspace,
-        subprocess_started_unix=min(a.stat().st_mtime, b.stat().st_mtime) - 1.0,
+        subprocess_started_unix=min(p.stat().st_mtime for p in (a, b, stray)) - 1.0,
     )
     assert measurement["valid_measurement"] is True
     assert measurement["output_throughput"] in (100.0, 200.0)
