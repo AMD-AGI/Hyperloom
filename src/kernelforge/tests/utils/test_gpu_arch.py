@@ -6,11 +6,13 @@
 from __future__ import annotations
 
 import subprocess
+from dataclasses import replace
 
 import pytest
 
 from hyperloom_common.gpu_identity import AMD_GPU_BOARDS
 from kernelforge.kernel_backends.constants import KERNEL_BACKENDS
+from kernelforge.utils import gpu_arch
 from kernelforge.utils.gpu_arch import (
     CDNA_OCCUPANCY,
     arch_profile,
@@ -60,16 +62,21 @@ def test_canon_arch_names_no_target_rather_than_a_wrong_one(value):
         ("MI325X", "mi300x"),
         ("amd instinct mi355x", "mi355x"),
         ("amd_instinct_mi325x", "mi300x"),
-        ("gfx1201", "r9700"),
         ("Radeon 8060S", "radeon8060s"),
-        ("gfx1100", "w7900"),
+        ("gfx1100", "gfx1100"),
+        ("W7900", "w7900"),
         ("Radeon PRO W7900", "w7900"),
-        ("w7900d", "w7900"),
+        ("AMD Radeon PRO W7900D", "w7900d"),
         ("MI250-X", "mi250_x"),
     ],
 )
 def test_canonical_gpu_type_records_one_chip_under_one_name(value, expected):
     assert canonical_gpu_type(value) == expected
+
+
+@pytest.mark.parametrize("gfx", ["gfx1201", "gfx1100"])
+def test_an_isa_shared_by_several_boards_keeps_its_isa_identity_when_board_is_unspecified(gfx):
+    assert canonical_gpu_type(gfx) == gfx
 
 
 @pytest.mark.parametrize(
@@ -103,10 +110,21 @@ def test_product_arch_maps_only_an_exact_product_name(value, expected):
 
 @pytest.mark.parametrize("board", AMD_GPU_BOARDS.values(), ids=lambda board: board.product)
 def test_every_board_the_shared_table_knows_is_recorded_under_a_board_of_its_own_target(board):
-    recorded = canonical_gpu_type(board.gfx)
-
-    assert canonical_gpu_type(board.product) == recorded
+    recorded = canonical_gpu_type(board.product)
     assert AMD_GPU_BOARDS[recorded].gfx == board.gfx
+    expected = board.gfx if board.gfx in ("gfx1201", "gfx1100") else recorded
+    assert canonical_gpu_type(board.gfx) == expected
+
+
+def test_two_boards_sharing_gfx1201_keep_their_product_identity(monkeypatch):
+    r9600d = replace(AMD_GPU_BOARDS["r9700"], product="r9600d")
+    monkeypatch.setitem(AMD_GPU_BOARDS, "r9600d", r9600d)
+    monkeypatch.setitem(gpu_arch._ARCH_BY_GPU_TYPE, "r9600d", "gfx1201")
+
+    assert canon_arch("R9600D") == "gfx1201"
+    assert canonical_gpu_type("r9700") == "r9700"
+    assert canonical_gpu_type("r9600d") == "r9600d"
+    assert canonical_gpu_type("gfx1201") == "gfx1201"
 
 
 def _rocminfo(monkeypatch, *, returncode=0, stdout=""):

@@ -919,15 +919,24 @@ def test_a_fresh_campaign_refuses_a_backend_that_cannot_build_for_gfx1100(tmp_pa
         )
 
 
-def test_a_gfx1100_campaign_with_a_supported_backend_is_recorded_on_the_w7900(tmp_path, monkeypatch):
+@pytest.mark.parametrize(("gpu_type", "recorded"), [("", "gfx1100"), ("W7900D", "w7900d")])
+def test_a_gfx1100_campaign_with_a_supported_backend_keeps_the_board_it_names(
+    tmp_path, monkeypatch, gpu_type, recorded
+):
+    """gfx1100 names both the W7900 and the W7900D, so only an explicit board picks one."""
     workspace, kernel, _helper, driver = _git_workspace(tmp_path)
     monkeypatch.setenv("GPU_TARGET", "gfx1100")
 
     config = create_campaign_config(
         str(workspace),
         CampaignInputs(
-            kernel=str(kernel), driver=str(driver), source_files="", program_md_file=None, kernel_backend="triton"
+            kernel=str(kernel),
+            driver=str(driver),
+            source_files="",
+            program_md_file=None,
+            kernel_backend="triton",
+            gpu_type=gpu_type,
         ),
     )
 
-    assert (config.gpu_target, config.gpu_type, config.kernel_backend) == ("gfx1100", "w7900", "triton")
+    assert (config.gpu_target, config.gpu_type, config.kernel_backend) == ("gfx1100", recorded, "triton")

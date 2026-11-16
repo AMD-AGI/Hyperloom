@@ -515,8 +515,8 @@ class RealToolbox:
         """Start ``tracelens``, ``roofline`` or ``kernel_tune`` (those of :attr:`analysis_tools`) for ``branch``; returns the job id at once.
 
         The commit of ``tracelens`` and ``roofline`` is the head of the branch in the experiment repository, read here at
-        submission; it is never taken from ``params``. ``profile_request_id`` is kept only for a PROFILE test of that commit,
-        whichever branch ran it. ``kernel_tune`` reads the landed output of the test ``params`` names (the blackboard's record
+        submission; it is never taken from ``params``. ``profile_request_id`` is kept only for a PROFILE test of that
+        commit's recipe, whichever branch ran it. ``kernel_tune`` reads the landed output of the test ``params`` names (the blackboard's record
         of it) and leases a card of the toolbox for the job, which ``lease_leaves_no_measurement`` refuses when the card
         cannot be spared.
 

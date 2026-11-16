@@ -146,6 +146,7 @@ share fell by more than {MB_BOTTLENECK_SHIFT_PP} percentage points: branches sti
 have less to gain, and a branch you open now without a focus is briefed from the new profile as above.
 The integration branch's profile_running is true while that profile runs: its PROFILE test holds one of the
 integration branch's K slots, so merge tests wait for it while that K is 1; size the integration branch's K with it.
+The integration branch's K is bounded by max_parallel_tests, not by max_k_per_branch.
 environment_changed: the toolbox quarantined a measurement node after an infrastructure failure (gpu_ids is empty for
 the whole node), or a node's measurement environment moved between two of its results (changed names each of
 image_digest, gpu_model, power_cap_w and partition_mode that moved, before and after, and request_id the first result

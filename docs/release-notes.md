@@ -20,6 +20,30 @@ Merged to `main` and not yet carried by a tagged release. Each entry moves
 into the [release](https://github.com/AMD-AGI/Hyperloom/releases) that ships
 it.
 
+- **A new specialist waits while the untested-proposal queue is full.** In
+  FRAMEWORK_AGENT, a `specialist` delegate is refused with `policy_denied`
+  rule `specialist_untested_backlog_full` while 8 proposals, twice the
+  Coordinator's 4-variant automatic grid, wait for a bench: the
+  `untested proposals` count of Orchestration's queued backlog. Proposals in a
+  queued or running explore grid, or carried by a finished automatic one, do
+  not count. Nothing is refused on the way into the queue: a specialist
+  already queued or running still records every proposal it returns. Before,
+  Orchestration could keep dispatching specialists faster than the benchmark
+  lane benched their proposals, paying a full agent run for each while the
+  proposals waited unmeasured until the macro cycle ended. The Coordinator's
+  stalled-domain specialist is held back the same way; the operator-defined
+  custom specialist is not.
+- **The automatic bench moves past a grid that ended without a verdict.**
+  When the automatic explore grid of the untested-proposal queue's head ended
+  without a verdict for any of its proposals (its round failed or was
+  cancelled, or it refused every variant), the Coordinator computed the same
+  head on every later tick and enqueued nothing, so every proposal behind it
+  waited until a new specialist round reordered the queue or the macro cycle
+  ended. The next automatic grid now takes the proposals behind it. The ones
+  the ended grid carried are not benched again, and Orchestration's
+  untested-proposal section names them on a line of their own instead of
+  listing them as waiting.
+
 - **A multi-branch AgentX session with a component agent needs no launch
   flag.** `hyperloom-multibranch run --autonomous-agent` now serves every
   component agent (an agent an installed adapter recognises) the session's

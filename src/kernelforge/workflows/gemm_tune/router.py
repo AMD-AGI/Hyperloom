@@ -39,14 +39,16 @@ class TunerSpec:
 # Kernel signature patterns indicating 1-stage ASM (from server log)
 _1STAGE_PATTERN = re.compile(r"using 1stage default", re.IGNORECASE)
 
-# Architectures that cannot run FP4/MXFP4 GEMM (aiter requires gfx950).
 # How many runtime lookups a table has to have missed before its owner is worth booking time for. Same number as
 # tier3's DEFAULT_MIN_MISSES, read off the same demand report.
 DEMAND_MIN_MISSES = 25
 
-_FP4_UNSUPPORTED_GFX = {"gfx942"}
+# Known unsupported AITER FP4/MXFP4 tuner paths.
+# Other ISAs, including gfx1250, retain existing routing eligibility; that
+# eligibility does not establish tuner support.
+_FP4_UNSUPPORTED_GFX = {"gfx942", "gfx1201"}
 
-_FP4_GFX942_SKIP_REASON = "FP4/MXFP4 GEMM unsupported on gfx942 (aiter requires gfx950)"
+_FP4_SKIP_REASON = "AITER FP4/MXFP4 tuning unsupported on {gfx_arch}"
 
 
 def _requests_detection(gpu_type: str) -> bool:
@@ -75,7 +77,7 @@ def _resolve_gfx_arch(gpu_type: str) -> str:
 
 
 def _fp4_unsupported_on(gfx_arch: str) -> bool:
-    """True if FP4/MXFP4 GEMM is known to be unsupported on this gfx arch."""
+    """True for known unsupported AITER FP4/MXFP4 tuner targets."""
     return gfx_arch in _FP4_UNSUPPORTED_GFX
 
 
@@ -463,7 +465,7 @@ def _select_sglang_moe_tuners(
                 tuners.append(
                     TunerSpec(
                         "fmoe_ck",
-                        skip_reason=_FP4_GFX942_SKIP_REASON,
+                        skip_reason=_FP4_SKIP_REASON.format(gfx_arch=gfx_arch),
                         priority=10,
                         estimated_minutes=0,
                     )
@@ -548,7 +550,7 @@ def _select_sglang_dense_tuners(
             tuners.append(
                 TunerSpec(
                     "a4w4_blockscale",
-                    skip_reason=_FP4_GFX942_SKIP_REASON,
+                    skip_reason=_FP4_SKIP_REASON.format(gfx_arch=gfx_arch),
                     priority=20,
                     estimated_minutes=0,
                 )

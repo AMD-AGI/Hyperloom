@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import dataclasses
 import json
+from collections.abc import Mapping
 
 from hyperloom_multibranch.contracts.blackboard import INTEGRATION_BRANCH
 from hyperloom_multibranch.contracts.blackboard.exhausted import EXHAUSTED_PREFIX, ExhaustedWhy, latest_exhausted
@@ -15,11 +16,12 @@ from hyperloom_multibranch.contracts.blackboard.records import (
     BlackboardSnapshot,
     BranchLogRecord,
     BranchNode,
+    CommitNode,
     CommittedCommit,
     MapDirection,
     OpShares,
 )
-from hyperloom_multibranch.contracts.blackboard.vocab import ClaimStatus, LineageKind
+from hyperloom_multibranch.contracts.blackboard.vocab import ClaimStatus, CommitOrigin, LineageKind
 from hyperloom_multibranch.contracts.branch_log import BranchLogEntry, BranchLogType
 from hyperloom_multibranch.blackboard.rsi.open_areas import FocusHistory, OpenOp, open_areas, stopped_on_focus
 from hyperloom_multibranch.blackboard.rsi.playbook import H0, replaced
@@ -313,6 +315,51 @@ def test_an_op_exhausted_on_an_older_head_opens_again_once_the_integration_head_
 
     assert ALLREDUCE in on_head.spent and ALLREDUCE not in [item.op for item in on_head.ops]
     assert not moved.spent and ALLREDUCE in [item.op for item in moved.ops]
+
+
+def _recipes(snapshot: BlackboardSnapshot, digests: Mapping[str, str]) -> BlackboardSnapshot:
+    """``snapshot`` with each commit of ``digests`` holding that recipe digest, as a branch commit when it is new."""
+
+    commits = tuple(
+        dataclasses.replace(node, recipe_digest=digests.get(node.commit_id, node.recipe_digest))
+        for node in snapshot.lineage.commits
+    )
+    known = {node.commit_id for node in commits}
+    added = tuple(
+        CommitNode(commit, "c0", "b9", CommitOrigin.COMMIT, recipe_digest=digest)
+        for commit, digest in digests.items()
+        if commit not in known
+    )
+    return dataclasses.replace(snapshot, lineage=dataclasses.replace(snapshot.lineage, commits=(*commits, *added)))
+
+
+def test_an_op_given_up_on_a_commit_of_the_integration_heads_recipe_is_spent_as_on_the_head_itself(
+    snapshot: BlackboardSnapshot,
+) -> None:
+    def gave_up_at(digest: str) -> BlackboardSnapshot:
+        worked = _recipes(_worked(snapshot, _focused("b9", ALLREDUCE)), {"i1": "sha256:head", "k9": digest})
+        return _gave_up(_exhausted(worked, "b9", ExhaustedWhy.ALL_TESTED_OR_CLAIMED, "k9"), "b9")
+
+    same = open_areas(gave_up_at("sha256:head"), seconds_left=4 * HOUR, first_commit_minutes=42.0)
+    other = open_areas(gave_up_at("sha256:other"), seconds_left=4 * HOUR, first_commit_minutes=42.0)
+
+    record = same.spent[ALLREDUCE].exhausted
+    assert record is not None and record.head == "k9" and ALLREDUCE not in [item.op for item in same.ops]
+    assert not other.spent and ALLREDUCE in [item.op for item in other.ops]
+
+
+def test_branches_opened_on_a_commit_of_the_integration_heads_recipe_spend_its_focus_as_on_the_head(
+    snapshot: BlackboardSnapshot,
+) -> None:
+    def opened_on(digest: str) -> BlackboardSnapshot:
+        branches = (_focused("b5", ALLREDUCE, start="k8"), _focused("b6", ALLREDUCE, start="k8"))
+        return _recipes(_worked(snapshot, *branches), {"i1": "sha256:head", "k8": digest})
+
+    same = open_areas(opened_on("sha256:head"), seconds_left=4 * HOUR, first_commit_minutes=42.0)
+    other = open_areas(opened_on("sha256:other"), seconds_left=4 * HOUR, first_commit_minutes=42.0)
+
+    assert dict(same.spent) == {ALLREDUCE: FocusHistory(2, 2)}
+    assert not other.spent and ALLREDUCE in [item.op for item in other.ops]
 
 
 def test_too_little_time_left_for_a_first_commit_says_to_open_no_branch(snapshot: BlackboardSnapshot) -> None:

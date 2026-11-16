@@ -552,6 +552,15 @@ the phase's work; a source change it proposes is offered as a mandate a patch
 specialist takes by id. `shadow` asks and only logs; without an endpoint, or in
 `off`, nothing is asked and nothing waits.
 
+Executable proposals from specialists and the predictor wait in the macro
+cycle's untested-proposal queue. Whenever no explore task is queued or running,
+the Coordinator benches the head of that queue, four proposals per grid. A
+proposal an automatic grid carried to its end without a verdict leaves the queue
+rather than holding its head, and is not benched again. While eight proposals
+wait, a new specialist delegate is refused (`specialist_untested_backlog_full`),
+so dispatch cannot outrun the benchmark lane; a specialist already queued or
+running still records every proposal it returns.
+
 The phase advances to KERNEL_AGENT only when **both** levers are dry
 (`optimize_no_more_leverage`). Either arm going quiet raises
 `switch_bottleneck` so the next macro-cycle steers off this bottleneck,

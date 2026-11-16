@@ -970,3 +970,24 @@ async def test_profiles_of_a_commit_are_its_profile_tests_that_left_an_artifact(
 
     assert [record.request_id for record in found] == ["p1"]
     assert (await toolbox.record("p1")).result.profile_location == "/profiles/p1.json"
+
+
+async def test_profiles_of_a_commit_are_also_those_of_another_commit_of_its_recipe_that_changed_nothing(
+    open_as: Open,
+) -> None:
+    scheduler, gate, toolbox = open_as(Role.SCHEDULER), open_as(Role.GATE), open_as(Role.TOOLBOX)
+    await scheduler.record_lineage(
+        LineageEvent(LineageKind.ROOT, INTEGRATION_BRANCH, commit_id="c0", recipe_digest=ROOT_RECIPE)
+    )
+    for n in (1, 2):
+        await _tested(open_as, f"r{n}", branch=f"s{n}")
+        await gate.write_judgement(
+            f"r{n}", judgement(3.0, (f"r{n}",)), Conclusion.COMMITTED, f"c{n}", recipe_digest=CHILD_RECIPE
+        )
+    for request_id, parent, change in (("p0", "c0", RecipeDelta()), ("p1", "c1", RecipeDelta()), ("p2", "c1", delta())):
+        await toolbox.write_request(request(request_id, intent("s1", parent), change, kind=TestKind.PROFILE))
+        await toolbox.write_result(result(request_id, profile_location=f"/profiles/{request_id}.json"))
+
+    assert [record.request_id for record in await toolbox.profiles("c2")] == ["p1"]
+    assert [record.request_id for record in await toolbox.profiles("c1")] == ["p1", "p2"]
+    assert [record.request_id for record in await toolbox.profiles("c0")] == ["p0"]
