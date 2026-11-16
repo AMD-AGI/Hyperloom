@@ -27,7 +27,8 @@ Both wait for the measurement to end, so the tick only starts the task and looks
 one of the integration branch's K slots; when the workload's profile would hold that slot as long as a test, the moved
 head is profiled only once a branch opens on it (:attr:`~.settings.Workload.profiles_moved_head_on_merge`). A head whose
 recipe a profile already measured, maybe a branch's of its own commit, is not profiled again: it reads that profile's
-shares. A backend that cannot profile, by refusing the PROFILE, failing it, running
+shares once it ended, and analyses it when no analysis left them, as when a branch's analysis of it failed. A backend
+that cannot profile, by refusing the PROFILE, failing it, running
 no analysis or leaving a trace no analysis can read, is not asked again in this session: on a backend that refuses after its sandbox is built, every try costs
 a cold start and holds the integration branch's slot. The toolbox's own names are imported where the profile uses
 them: the toolbox loads the main flow's runtime, which importing the session must not.
@@ -52,7 +53,7 @@ from hyperloom_multibranch.contracts.blackboard.records import (
     QuarantineEvent,
 )
 from hyperloom_multibranch.contracts.blackboard.vocab import MergeOutcome
-from hyperloom_multibranch.contracts.toolbox import MeasurementCapacity, RequestRejected, Toolbox
+from hyperloom_multibranch.contracts.toolbox import MeasurementCapacity, RequestRejected, TestWithdrawn, Toolbox
 from hyperloom_multibranch.scheduling.branches import BranchFocus
 from hyperloom_multibranch.scheduling.clock import Clock
 from hyperloom_multibranch.scheduling.decisions import Decision, DecisionKind, DecisionLog
@@ -223,7 +224,8 @@ class IntegrationProfiler:
     TraceLens analysis of that test, whose op shares the ``records`` hold once the analysis has ended. Its bottleneck is
     compared with the shares of the previous profile, or else with those of the head the move started from. Once a
     profile shows the backend cannot profile, no profile starts again. A head the toolbox refuses to profile, because a
-    profile of its recipe exists, takes that profile's shares once its analysis left them.
+    profile of its recipe exists, waits for that profile and takes the shares of its recipe, analysing that profile
+    itself when no analysis left them.
     """
 
     def __init__(self, toolbox: RealToolbox, tests: SessionTests, records: RecordSearch, clock: Clock) -> None:
@@ -235,7 +237,6 @@ class IntegrationProfiler:
         self._waiting: tuple[str, str] | None = None
         self._shares: OpShares | None = None
         self._available = True
-        self._same_recipe: dict[str, str] = {}
 
     @property
     def running(self) -> bool:
@@ -286,13 +287,9 @@ class IntegrationProfiler:
         return outcome
 
     async def shares_of(self, commit: str) -> OpShares | None:
-        """The op shares of ``commit``: its own, else those of the profile of its recipe the toolbox named when it
-        refused to profile ``commit`` again."""
+        """The op shares of ``commit``: its own, else those of a profiled commit of its recipe."""
 
-        own = await self._records.op_shares(commit)
-        if own is not None or commit not in self._same_recipe:
-            return own
-        return await self._profile_shares(self._same_recipe[commit])
+        return await self._records.op_shares(commit)
 
     async def stop(self) -> None:
         """Cancel the running profile, which takes its PROFILE test back; its analysis goes with the integration
@@ -333,13 +330,25 @@ class IntegrationProfiler:
     async def _reused(
         self, head: str, request_id: str, before: OpShares | None, detail: Mapping[str, object]
     ) -> ProfileOutcome:
-        """The outcome of ``head`` reusing the profile ``request_id`` of its recipe, maybe a specialist branch's."""
+        """The outcome of ``head`` reusing the profile ``request_id`` of its recipe, maybe a specialist branch's, once
+        that profile ended: the shares of the recipe, or those of an analysis of the profile submitted here when none
+        left them. The toolbox runs one analysis of a profile whichever branch asks, so one running is joined and one
+        that failed runs again. A reused profile that did not succeed, or whose analysis the toolbox refuses, leaves
+        the head without shares and says nothing of the backend: it was another test."""
 
-        self._same_recipe[head] = request_id
-        reused = {**detail, "request_id": request_id}
-        shares = await self._profile_shares(request_id)
+        reused: dict[str, object] = {**detail, "request_id": request_id}
+        try:
+            result = await self._toolbox.outcome(request_id)
+        except TestWithdrawn as withdrawn:
+            return ProfileOutcome(PROFILE_EXISTS, {**reused, "withdrawn": withdrawn.reason})
+        if result.validity is not Validity.SUCCEEDED:
+            return ProfileOutcome(PROFILE_EXISTS, {**reused, "validity": result.validity.value})
+        shares = await self._records.op_shares(head)
         if shares is None:
-            return ProfileOutcome(PROFILE_EXISTS, reused)
+            try:
+                return await self._analyse(request_id, before, reused, PROFILE_EXISTS)
+            except RequestRejected as refused:
+                return ProfileOutcome(PROFILE_EXISTS, {**reused, "analysis_refused": refused.reason})
         self._shares = shares
         return ProfileOutcome(
             PROFILE_EXISTS, {**reused, "largest_op": dict(shares.largest(1))}, bottleneck_moved(before, shares)
@@ -355,11 +364,7 @@ class IntegrationProfiler:
     async def _analysed(
         self, head: str, request_id: str, before: OpShares | None, baseline: Awaitable[object] | None
     ) -> ProfileOutcome:
-        """Analyse the trace of the PROFILE ``request_id`` once it ended, and once ``baseline`` ended when there is one;
-        the toolbox reads the trace off that test's own record."""
-
-        from hyperloom_multibranch.toolbox.tools.base import JobStatus
-        from hyperloom_multibranch.toolbox.tools.roofline import TRACELENS_TOOL
+        """Analyse the trace of the PROFILE ``request_id`` once it ended, and once ``baseline`` ended when there is one."""
 
         result = await self._toolbox.outcome(request_id)
         detail: dict[str, object] = {"commit": head, "request_id": request_id}
@@ -369,6 +374,18 @@ class IntegrationProfiler:
         if baseline is not None:
             await asyncio.wait([asyncio.ensure_future(baseline)])  # a failed baseline is PRELUDE's to raise, not ours
             detail.update(after_baseline=True)
+        return await self._analyse(request_id, before, detail, PROFILED)
+
+    async def _analyse(
+        self, request_id: str, before: OpShares | None, detail: dict[str, object], reason: str
+    ) -> ProfileOutcome:
+        """The outcome ``reason`` of a TraceLens analysis of the PROFILE ``request_id``, which ended successfully, with
+        the shares it left; ``detail`` holds the decision's facts so far. The toolbox reads the trace off that test's
+        own record."""
+
+        from hyperloom_multibranch.toolbox.tools.base import JobStatus
+        from hyperloom_multibranch.toolbox.tools.roofline import TRACELENS_TOOL
+
         job = await self._toolbox.submit_analysis(INTEGRATION_BRANCH, TRACELENS_TOOL, {}, request_id)
         while self._toolbox.tool_status(job) is JobStatus.RUNNING:
             await self._clock.sleep(ANALYSIS_POLL_SECONDS)
@@ -385,7 +402,7 @@ class IntegrationProfiler:
             return ProfileOutcome(PROFILE_NOT_ANALYSED, detail)
         self._shares = shares
         detail.update(largest_op=dict(shares.largest(1)))
-        return ProfileOutcome(PROFILED, detail, bottleneck_moved(before, shares))
+        return ProfileOutcome(reason, detail, bottleneck_moved(before, shares))
 
 
 def _slot(quarantine: QuarantineEvent) -> tuple[str, tuple[int, ...]]:

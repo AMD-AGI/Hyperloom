@@ -27,6 +27,7 @@ import json
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
 
+from hyperloom.contracts.recipe import RecipeDelta
 from hyperloom_multibranch.contracts.blackboard.peers import Intent, TestKind, TestResult, Validity
 from hyperloom_multibranch.contracts.blackboard.records import (
     Claim,
@@ -255,13 +256,25 @@ def search(state: BlackboardState, query: str, limit: int) -> tuple[SearchHit, .
 
 
 def profiles(state: BlackboardState, commit_id: str) -> tuple[TestRecord, ...]:
-    """The profile tests of ``commit_id`` whose result points at an artifact, oldest first."""
+    """The profile tests of ``commit_id``'s recipe whose result points at an artifact, oldest first: those of the commit,
+    and those of another commit of its recipe digest that changed nothing, as the toolbox's ``profile_exists`` takes
+    one profile for every commit that holds its recipe. A profile of another commit with a change measured a recipe the
+    blackboard holds no digest of, and is that commit's only."""
 
+    digests = state.recipe_digests()
+    recipe = digests.get(commit_id)
     return tuple(
         record
         for record in state.records()
         if record.request.kind is TestKind.PROFILE
-        and record.request.parent_commit == commit_id
+        and (
+            record.request.parent_commit == commit_id
+            or (
+                recipe is not None
+                and digests.get(record.request.parent_commit) == recipe
+                and record.request.delta == RecipeDelta()
+            )
+        )
         and record.result is not None
         and record.result.profile_location
     )

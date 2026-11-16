@@ -16,7 +16,7 @@ from typing import Any
 
 import pytest
 
-from hyperloom.contracts.measurement import Purpose, TestKind
+from hyperloom.contracts.measurement import Purpose, TestKind, TestRequest
 from hyperloom.contracts.recipe import LaunchConfig, Recipe
 from hyperloom_multibranch.contracts.blackboard import INTEGRATION_BRANCH
 from hyperloom_multibranch.contracts.blackboard.records import (
@@ -160,17 +160,26 @@ CLOCK = Clock(now=lambda: 7.0, sleep=_no_wait)
 
 
 class _Shares:
-    """The blackboard's op shares by commit, as the TraceLens results put them there, and the records of the tests
-    ``toolbox`` holds."""
+    """The blackboard's op shares by commit, as the TraceLens results put them there, a commit no analysis left any of
+    its own taking the latest of its recipe (``recipes`` names, for a commit, the commit whose recipe it holds), and the
+    records of the tests ``toolbox`` holds."""
 
-    def __init__(self, shares: Mapping[str, OpShares] | None = None) -> None:
+    def __init__(self, shares: Mapping[str, OpShares] | None = None, recipes: Mapping[str, str] | None = None) -> None:
         self.shares = dict(shares or {})
+        self.recipes = dict(recipes or {})
         self.reads: list[str] = []
         self.toolbox: FakeToolbox
 
     async def op_shares(self, commit_id: str) -> OpShares | None:
         self.reads.append(commit_id)
-        return self.shares.get(commit_id)
+        own = self.shares.get(commit_id)
+        if own is not None:
+            return own
+        recipe = self.recipes.get(commit_id, commit_id)
+        return next(
+            (found for commit, found in reversed(self.shares.items()) if self.recipes.get(commit, commit) == recipe),
+            None,
+        )
 
     async def record(self, request_id: str) -> TestRecord:
         return TestRecord(self.toolbox.requests[request_id])
@@ -354,6 +363,11 @@ class _AnalysingToolbox(FakeToolbox):
         self.status = JobStatus.RUNNING
         self.error_class = ""
         self.rejection: RequestRejected | None = None
+        self.asked: list[TestRequest] = []
+
+    async def submit_test(self, request: TestRequest) -> str:
+        self.asked.append(request)
+        return await super().submit_test(request)
 
     async def submit_analysis(
         self, branch: str, tool: str, params: Mapping[str, Any], profile_request_id: str = ""
@@ -533,27 +547,65 @@ async def test_a_head_that_moved_while_a_profile_ran_is_profiled_when_that_one_e
     await events.stop_profiling()
 
 
-async def test_a_head_a_branch_already_profiled_is_not_profiled_again_and_is_not_an_error(log: Path) -> None:
+async def test_a_head_a_branch_is_profiling_waits_for_that_profile_and_analyses_it_without_profiling_again(
+    log: Path,
+) -> None:
     shares = _Shares()
     toolbox = _AnalysingToolbox(shares, autorun=False)
-    branch_profile = await toolbox.submit_test(
-        replace(integration_test_request(TestKind.PROFILE, Purpose.PROFILE, "c-merged"), branch_id="b01")
-    )
+    branch_profile = await _branch_profiled(toolbox, "c-merged")
     events = _events(_Health(), log, toolbox, shares)
     events.note_merges((_moved_onto("c-merged"),))
 
     await events.detect()
+    await _until(lambda: len(toolbox.asked) == 2)
+    assert events.profiling and toolbox.analyses == []
+    await toolbox.drain()
+    await _until(lambda: toolbox.analyses)
+    toolbox.finish("c-merged", {"gemm": 55.0, "attn": 30.0})
     await _until(lambda: not events.profiling)
     assert not await events.detect()
 
-    assert list(toolbox.requests) == [branch_profile] and toolbox.analyses == []
+    assert list(toolbox.requests) == [branch_profile]
+    assert toolbox.analyses == [(INTEGRATION_BRANCH, "tracelens", {}, branch_profile)]
     [profile] = [row for row in _logged(log) if row["kind"] == "profile"]
     assert profile["reason"] == PROFILE_EXISTS
     assert profile["detail"]["commit"] == "c-merged" and profile["detail"]["request_id"] == branch_profile
     assert profile["detail"]["code"] == "profile_exists"
+    assert (profile["detail"]["job_id"], profile["detail"]["analysis"]) == ("job-1", "succeeded")
+    assert [aim.op for aim in await events.focus_on("c-merged", (), 1)] == ["gemm"]
     events.note_merges((_moved_onto("c-next"),))
     await events.detect()
     assert events.profiling, "a head that has no profile yet is profiled as before"
+    await events.stop_profiling()
+
+
+@pytest.mark.parametrize("ended", ["failed", "withdrawn"])
+async def test_a_reused_profile_that_ended_without_a_trace_leaves_the_head_unprofiled_and_profiling_on(
+    log: Path, ended: str
+) -> None:
+    shares = _Shares()
+    toolbox = _AnalysingToolbox(shares, autorun=False)
+    toolbox.script(lambda request: request.branch_id == "b01", [Fate.MEASUREMENT])
+    branch_profile = await _branch_profiled(toolbox, "c-merged")
+    events = _events(_Health(), log, toolbox, shares)
+    events.note_merges((_moved_onto("c-merged"),))
+
+    await events.detect()
+    await _until(lambda: len(toolbox.asked) == 2)
+    if ended == "failed":
+        await toolbox.drain()
+    else:
+        await toolbox.cancel(branch_profile)
+    await _until(lambda: not events.profiling)
+    assert not await events.detect()
+
+    assert toolbox.analyses == []
+    [profile] = [row for row in _logged(log) if row["kind"] == "profile"]
+    assert profile["reason"] == PROFILE_EXISTS and profile["detail"]["request_id"] == branch_profile
+    assert {"failed": "validity", "withdrawn": "withdrawn"}[ended] in profile["detail"]
+    events.note_merges((_moved_onto("c-next"),))
+    await events.detect()
+    assert events.profiling, "another branch's profile that ended without a trace says nothing of the backend"
     await events.stop_profiling()
 
 
@@ -713,9 +765,10 @@ async def _branch_profiled(toolbox: _AnalysingToolbox, commit: str) -> str:
 async def test_an_agentx_head_whose_recipe_a_branch_profiled_reads_that_profiles_shares_without_profiling_again(
     log: Path,
 ) -> None:
-    shares = _Shares({"c-root": _op_shares("c-root", BEFORE)})
+    shares = _Shares({"c-root": _op_shares("c-root", BEFORE)}, recipes={"c-merged": "c-b01"})
     toolbox = _AnalysingToolbox(shares, _HeadRecipes({"c-merged": "c-b01"}), autorun=False)
     branch_profile = await _branch_profiled(toolbox, "c-b01")
+    await toolbox.drain()
     shares.shares["c-b01"] = OpShares("c-b01", "job-b01", branch_profile, {"gemm": 55.0, "attn": 30.0})
     events = _events(_Health(), log, toolbox, shares, workload=AGENTX)
     events.note_merges((_moved_onto("c-merged"),))
@@ -734,12 +787,43 @@ async def test_an_agentx_head_whose_recipe_a_branch_profiled_reads_that_profiles
     assert (profile["reason"], profile["detail"]["request_id"]) == (PROFILE_EXISTS, branch_profile)
 
 
-async def test_a_head_reads_the_shares_of_its_recipes_profile_once_the_branch_that_made_it_analysed_it(
+async def test_a_head_whose_recipes_profile_left_no_shares_has_the_integration_branch_analyse_that_profile(
     log: Path,
 ) -> None:
-    shares = _Shares()
+    shares = _Shares(recipes={"c-merged": "c-b01"})
     toolbox = _AnalysingToolbox(shares, _HeadRecipes({"c-merged": "c-b01"}), autorun=False)
     branch_profile = await _branch_profiled(toolbox, "c-b01")
+    await toolbox.drain()
+    events = _events(_Health(), log, toolbox, shares, workload=AGENTX)
+    events.note_merges((_moved_onto("c-merged"),))
+    await events.detect()
+    events.branches_opened_on("c-merged")
+    await _until(lambda: toolbox.analyses)
+
+    assert toolbox.analyses == [(INTEGRATION_BRANCH, "tracelens", {}, branch_profile)]
+    assert [aim.op for aim in await events.focus_on("c-merged", (), 1)] == [""]
+    toolbox.finish("c-merged", {"gemm": 55.0})
+    await _until(lambda: not events.profiling)
+    await events.detect()
+
+    assert [aim.op for aim in await events.focus_on("c-merged", (), 1)] == ["gemm"]
+    assert list(toolbox.requests) == [branch_profile]
+    [profile] = [row for row in _logged(log) if row["kind"] == "profile"]
+    assert (profile["reason"], profile["detail"]["request_id"], profile["detail"]["job_id"]) == (
+        PROFILE_EXISTS,
+        branch_profile,
+        "job-1",
+    )
+
+
+async def test_a_reused_profile_whose_analysis_the_toolbox_refuses_leaves_the_head_without_shares_and_says_why(
+    log: Path,
+) -> None:
+    shares = _Shares(recipes={"c-merged": "c-b01"})
+    toolbox = _AnalysingToolbox(shares, _HeadRecipes({"c-merged": "c-b01"}), autorun=False)
+    branch_profile = await _branch_profiled(toolbox, "c-b01")
+    await toolbox.drain()
+    toolbox.rejection = RequestRejected("not a profile of the head's recipe", CODE_PROFILE_UNVERIFIED)
     events = _events(_Health(), log, toolbox, shares, workload=AGENTX)
     events.note_merges((_moved_onto("c-merged"),))
     await events.detect()
@@ -747,7 +831,7 @@ async def test_a_head_reads_the_shares_of_its_recipes_profile_once_the_branch_th
     await _until(lambda: not events.profiling)
     await events.detect()
 
+    [profile] = [row for row in _logged(log) if row["kind"] == "profile"]
+    assert (profile["reason"], profile["detail"]["request_id"]) == (PROFILE_EXISTS, branch_profile)
+    assert profile["detail"]["analysis_refused"] == "not a profile of the head's recipe"
     assert [aim.op for aim in await events.focus_on("c-merged", (), 1)] == [""]
-    shares.shares["c-b01"] = OpShares("c-b01", "job-b01", branch_profile, {"gemm": 55.0})
-    assert [aim.op for aim in await events.focus_on("c-merged", (), 1)] == ["gemm"]
-    assert list(toolbox.requests) == [branch_profile]
