@@ -345,5 +345,5 @@ def build_forge_knowledge(
             "",
         ]
     )
-    note = f"{profile.prompt_note}\n\n" if profile.prompt_note else ""
+    note = f"{profile.rendered_prompt_note()}\n\n" if profile.prompt_note else ""
     return note + preamble + "\n" + "\n\n".join(sections)

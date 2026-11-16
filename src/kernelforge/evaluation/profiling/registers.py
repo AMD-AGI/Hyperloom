@@ -67,5 +67,6 @@ async def check_registers(build_dir: str | None, gpu_target: str) -> dict:
         "spill_bytes": info.spill_bytes,
         "has_spill": info.has_spill,
         "occupancy": info.occupancy,
+        "occupancy_analysis": info.occupancy_analysis,
         "message": f"REGISTERS: {info.summary()}",
     }

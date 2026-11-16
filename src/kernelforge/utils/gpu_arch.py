@@ -8,6 +8,7 @@ from __future__ import annotations
 import re
 import subprocess
 from dataclasses import dataclass
+from enum import Enum
 
 from hyperloom_common.gpu_identity import AMD_GPU_BOARDS, board_named_in
 
@@ -89,6 +90,16 @@ CDNA_OCCUPANCY = OccupancyRule(
 )
 
 
+class Profiler(Enum):
+    """The hardware profiler a gfx target is profiled with."""
+
+    #: rocprof-compute (Omniperf): the profiled Analysis tier and the implementer's rocpc_profile.py run on it.
+    ROCPROF_COMPUTE = "rocprof-compute"
+    #: rocprofv3 only: kernel traces and the counters the device lists, which the implementer drives by hand.
+    ROCPROFV3 = "rocprofv3"
+    NONE = "none"
+
+
 @dataclass(frozen=True)
 class ArchProfile:
     """What KernelForge does differently on one gfx target.
@@ -99,16 +110,20 @@ class ArchProfile:
     family: str
     #: Knowledge folder, relative to the knowledge root, injected as the ``hardware`` pillar.
     hardware_knowledge: str = "hardware"
-    #: Whether rocprof-compute supports the target, which the profiled Analysis tier and self-profiling run on.
-    rocprof_compute: bool = True
+    profiler: Profiler = Profiler.ROCPROF_COMPUTE
     #: Kernel backends that can build for the target; ``None`` means every registered backend.
     kernel_backends: frozenset[str] | None = None
     occupancy: OccupancyRule = CDNA_OCCUPANCY
-    #: Always-inlined note that re-reads the Instinct vocabulary of the backend prompts for this target.
+    #: Always-inlined note that re-reads the Instinct vocabulary of the backend prompts for this target;
+    #: ``{kernel_backends}`` stands for the backends that build for it.
     prompt_note: str = ""
 
     def supports_kernel_backend(self, backend: str) -> bool:
         return self.kernel_backends is None or backend in self.kernel_backends
+
+    def rendered_prompt_note(self) -> str:
+        """``prompt_note`` with the target's kernel backends filled in from ``kernel_backends``."""
+        return self.prompt_note.format(kernel_backends=", ".join(sorted(self.kernel_backends or ())))
 
 
 _RDNA3_PROMPT_NOTE = """\
@@ -122,10 +137,11 @@ The backend guidance and the knowledge cards are mostly written for Instinct (CD
   and reduction math follows the wave size the build chose (`.amdhsa_wavefront_size32` in the dump), not CDNA's 64.
 - **No FP8/FP4** matrix path and no FNUZ/OCP question: FP16, BF16, INT8 and INT4 are the WMMA input types.
 - Memory is **GDDR6 (~864 GB/s)** behind a 96 MB Infinity Cache, not HBM; the roofline ridge is far lower.
-- rocprof-compute does not support this target, so "wait/MFMA" ratios and its PMC reports are unavailable. Judge
-  bottlenecks with the RDNA 3 cards under `hardware/rdna3/` and with rocprofv3 where it is installed.
-- The kernel backends that build here are triton, hip, hipblaslt and ck. HipKittens and the `gl.amd.cdna3`/`cdna4`
-  Gluon ops are CDNA only.
+- rocprof-compute does not support this target, so "wait/MFMA" ratios and its PMC reports are unavailable and the
+  Analysis Agent stays static. Judge bottlenecks with the RDNA 3 cards under `hardware/rdna3/`; the implementer
+  can profile with rocprofv3 (its Self-profiling section says how).
+- The kernel backends that build here are {kernel_backends}. HipKittens and the `gl.amd.cdna3`/`cdna4` Gluon ops
+  are CDNA only.
 - Benchmarks are noisy on this board: a gain under ~10% on a kernel of tens of microseconds is usually not
   measurable. Prefer changes with a large expected gain, and benchmark cases long enough to time reliably.
 Every concrete number for this chip is in `hardware/rdna3/`. Where another card cites `hardware/mi350_*.md`, read the
@@ -148,7 +164,7 @@ _ARCH_PROFILES: dict[str, ArchProfile] = {
     "gfx1100": ArchProfile(
         family="RDNA3",
         hardware_knowledge="hardware/rdna3",
-        rocprof_compute=False,
+        profiler=Profiler.ROCPROFV3,
         kernel_backends=frozenset({"triton", "hip", "hipblaslt", "ck"}),
         occupancy=_RDNA3_OCCUPANCY,
         prompt_note=_RDNA3_PROMPT_NOTE,
@@ -178,6 +194,7 @@ __all__ = [
     "CDNA_OCCUPANCY",
     "ArchProfile",
     "OccupancyRule",
+    "Profiler",
     "arch_profile",
     "canon_arch",
     "canonical_gpu_type",

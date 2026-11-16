@@ -12,7 +12,8 @@ updated: 2026-11-16
 
 - **rocprof-compute (Omniperf) does not support gfx1100.** Its only RDNA support is RDNA 3.5 (gfx1151). The
   `rocpc_profile.py` script in `common_methodology/profiling/` and every "wait/MFMA" ratio depend on it; neither
-  applies on this chip. KernelForge turns its profiled Analysis tier off on gfx1100 for this reason.
+  applies on this chip. KernelForge keeps the Analysis Agent static on gfx1100 and gives the implementer a
+  rocprofv3 Self-profiling section instead.
 
 ## rocprofv3
 

@@ -37,7 +37,7 @@ from kernelforge.config import Config, KnowledgeConfig, agent_runtime_overrides
 from kernelforge.workflows.forge_loop.memory.knowledge_integration import kb_reference_program_md
 from hyperloom_common.io import DURABLE, JsonFormat, atomic_write_json
 from kernelforge.utils.git import git_head
-from kernelforge.utils.gpu_arch import arch_profile
+from kernelforge.utils.gpu_arch import Profiler, arch_profile
 from kernelforge.workflows.forge_loop.campaign.schema import ExperimentSubject
 
 if TYPE_CHECKING:
@@ -488,12 +488,32 @@ def run_forge_loop(request: ForgeLoopRequest, *, publish_result: Callable[[dict]
         workspace_lock.release()
 
 
-def _profiler_supports(gpu_target: str) -> bool:
-    """Whether rocprof-compute, which the profiled Analysis tier and self-profiling run, supports ``gpu_target``."""
-    if arch_profile(gpu_target).rocprof_compute:
-        return True
-    print(f"  Profiling: off -- rocprof-compute does not support {gpu_target}; the Analysis Agent runs static-only")
-    return False
+@dataclass(frozen=True)
+class _ProfilingPlan:
+    """Who profiles in this campaign: the Analysis Agent's profiled tier, the implementer's self-profiling, or both."""
+
+    analysis: bool
+    implementer: bool
+
+
+def _profiling_plan(requested: bool, gpu_target: str) -> _ProfilingPlan:
+    """What a profiling request becomes on ``gpu_target``, given the profiler its profile names.
+
+    The profiled Analysis tier runs on rocprof-compute only; the implementer can self-profile with any profiler.
+    """
+    profiler = arch_profile(gpu_target).profiler
+    plan = _ProfilingPlan(
+        analysis=requested and profiler is Profiler.ROCPROF_COMPUTE,
+        implementer=requested and profiler is not Profiler.NONE,
+    )
+    if requested and not plan.analysis:
+        implementer = (
+            "the implementer self-profiles with it" if plan.implementer else "the implementer gets no profiler"
+        )
+        print(
+            f"  Profiling: {gpu_target} profiles with {profiler.value}; the Analysis Agent runs static-only, {implementer}"
+        )
+    return plan
 
 
 def _run_campaign(inputs: _RunInputs) -> dict:
@@ -518,16 +538,14 @@ def _run_campaign(inputs: _RunInputs) -> dict:
     # Analysis Agent.
     run.iter_config.program_md = warm_start.program_md
 
-    profiling_enabled = bool(request.roles.profiling and long_horizon) and _profiler_supports(
-        opened.resolution.campaign.gpu_target
-    )
+    profiling = _profiling_plan(bool(request.roles.profiling and long_horizon), opened.resolution.campaign.gpu_target)
     from kernelforge.workflows.forge_loop.roles.orchestration import default_specialist_definitions
 
     plan = _SearchPlan(
-        setup=_implementer_setup(run, assembly.source_files, session_timeout_sec, profiling_enabled),
+        setup=_implementer_setup(run, assembly.source_files, session_timeout_sec, profiling.implementer),
         source_files=assembly.source_files,
         specialist_definitions=default_specialist_definitions(),
-        profiling_enabled=profiling_enabled,
+        profiling_enabled=profiling.analysis,
         critic_enabled=bool(long_horizon),
         warm_start=warm_start,
         assembly=assembly,

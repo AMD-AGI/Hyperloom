@@ -26,7 +26,7 @@ as its own board (`w7900d`) with its own peaks.
 | Hardware knowledge the agents read | `hardware/` (MI350) | `hardware/rdna3/` |
 | Matrix instructions | MFMA, AGPR accumulators | WMMA, accumulators in VGPRs |
 | Default wave size | wave64 | wave32 (HIP; Triton 3.8 measured) |
-| Analysis Agent | profiled on long runs | static-only: rocprof-compute does not support gfx1100 |
+| Profiling on long runs | profiled Analysis Agent; implementer self-profiles with rocprof-compute | static-only Analysis Agent (rocprof-compute does not support gfx1100); implementer self-profiles with rocprofv3 |
 | Experience-KB records | `mi300x` / `mi355x` | `w7900` (W7900 and W7900D) |
 
 - A fresh campaign that names `aiter`, `flydsl`, `assembly`, `gluon`, `fusion` or `ave` on gfx1100 is refused
@@ -80,6 +80,6 @@ per-round admission leave a 1.5-hour campaign room for about one round.
 
 - `forge-fuse`, `kernel-rewrite-controller` and `gemm-tune` drive vLLM, SGLang or AITER, none of which this
   change validates on gfx1100.
-- Hardware-counter profiling: the profiled Analysis tier and the implementer's self-profiling script run on
-  rocprof-compute. On gfx1100 the agents can still run `rocprofv3` themselves for kernel traces and the
-  counters it lists for the device; the `hardware/rdna3/` cards say which ones answer which question.
+- The profiled Analysis tier: it runs on rocprof-compute, which does not support gfx1100, so the Analysis Agent
+  is static-only there. On a long run the implementer's Self-profiling section points it at `rocprofv3` instead
+  (kernel traces, and the counters `rocprofv3-avail` lists for the device).
