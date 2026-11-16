@@ -113,7 +113,7 @@ class ArchProfile:
 
 
 _RDNA3_PROMPT_NOTE = """\
-## Target architecture: gfx1100 (RDNA 3, Radeon PRO W7900) — overrides any Instinct fact in this prompt
+## Target architecture: gfx1100 (RDNA 3, Radeon PRO W7900 / W7900D) — overrides any Instinct fact in this prompt
 
 The backend guidance and the knowledge cards are mostly written for Instinct (CDNA) GPUs. On this target:
 - Matrix instructions are **WMMA** (`v_wmma_*`, 16x16x16), not MFMA. Wherever the guidance says MFMA,

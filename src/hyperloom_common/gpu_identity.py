@@ -120,7 +120,7 @@ AMD_GPU_BOARDS: dict[str, GpuBoard] = {
         # https://www.amd.com/en/products/graphics/workstations/radeon-pro/w7900.html
         # RDNA 3 (Navi 31), 48 GB GDDR6. AMD publishes FP32 vector and FP16 matrix (WMMA) peaks only, so FP16 is read
         # as BF16 too, as for every board; gfx1100 has no FP8 path. Device ids from ``amdgpu.ids``: 7448 is the W7900,
-        # 744a the W7900 Dual Slot, the same silicon and figures. 744b, the W7900D, is another product and is left out.
+        # 744a the W7900 Dual Slot, the same silicon and figures.
         GpuBoard(
             "w7900",
             "gfx1100",
@@ -131,6 +131,11 @@ AMD_GPU_BOARDS: dict[str, GpuBoard] = {
             aliases=("Radeon PRO W7900",),
             device_ids=frozenset({"7448", "744a"}),
         ),
+        # The W7900D: the same Navi 31 board at a lower engine clock (rocminfo reports 1760 MHz max). AMD publishes no
+        # spec page for it; its 96 CUs and 48 GB are what rocminfo and amd-smi report, and the 864 GB/s is AMD's listing
+        # as reported at launch (https://www.techspot.com/news/110426-amd-quietly-debuts-new-radeon-pro-w7900d-lists.html).
+        # No compute peak is carried until AMD publishes one; the roofline then falls back to memory time.
+        GpuBoard("w7900d", "gfx1100", 96, 48.0, 864.0, aliases=("Radeon PRO W7900D",), device_ids=frozenset({"744b"})),
         # https://www.amd.com/en/products/processors/desktops/ryzen/ryzen-ai-halo/ryzen-ai-max-plus-395.html
         # Unified memory, so no fixed capacity. AMD publishes only the FP16 rate, read as BF16 too, as for every board.
         GpuBoard(

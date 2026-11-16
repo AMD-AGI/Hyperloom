@@ -14,7 +14,10 @@ SPDX-License-Identifier: MIT
 
 KernelForge was built on AMD Instinct (CDNA) GPUs. A Radeon PRO W7900 is an RDNA 3 board, ISA gfx1100, and
 `forge-loop` runs on it with the differences below. Everything else — the driver contract, the SNR gate, the
-benchmark and the keep-or-revert decision — is architecture-neutral and unchanged.
+benchmark and the keep-or-revert decision — is architecture-neutral and unchanged. Everything here applies to
+the **W7900D** as well: the same gfx1100 board at a lower engine clock, registered as its own board (`w7900d`)
+but recorded in the experience store under `w7900`, as one chip. AMD publishes no compute peak for the W7900D,
+so Hyperloom's roofline treats its compute ceiling as unknown.
 
 ## What differs from an Instinct run
 
@@ -25,7 +28,7 @@ benchmark and the keep-or-revert decision — is architecture-neutral and unchan
 | Matrix instructions | MFMA, AGPR accumulators | WMMA, accumulators in VGPRs |
 | Default wave size | wave64 | wave32 for HIP; check a Triton kernel's dump |
 | Analysis Agent | profiled on long runs | static-only: rocprof-compute does not support gfx1100 |
-| Experience-KB records | `mi300x` / `mi355x` | `w7900` |
+| Experience-KB records | `mi300x` / `mi355x` | `w7900` (W7900 and W7900D) |
 
 - A fresh campaign that names `aiter`, `flydsl`, `assembly`, `gluon`, `fusion` or `ave` on gfx1100 is refused
   before any GPU work, with the list of backends that do build for it. The backend is also inferred from the

@@ -20,6 +20,8 @@ _BOARDS = [
     ("r9700", False, "vendor"),
     ("r9600d", False, "vendor"),
     ("w7900", False, "vendor"),
+    # No vendor compute peak is published for the W7900D, so its compute ceiling is unknown.
+    ("w7900d", False, "unknown"),
 ]
 
 
@@ -51,7 +53,7 @@ def test_r9700_is_validated_for_vllm_only(framework):
 def test_only_the_gfx1201_radeon_boards_pin_their_geak_identity():
     assert gpu_types.geak_identity_pin("r9700") == {"expected_target": "r9700", "expected_gfx": "gfx1201"}
     assert gpu_types.geak_identity_pin("r9600d") == {"expected_target": "r9600d", "expected_gfx": "gfx1201"}
-    for product in ("mi300x", "mi308x", "mi325x", "mi350x", "mi355x", "radeon8060s", "w7900", "unknown_gpu", ""):
+    for product in ("mi300x", "mi308x", "mi325x", "mi350x", "mi355x", "radeon8060s", "w7900", "w7900d", "unknown_gpu", ""):
         assert gpu_types.geak_identity_pin(product) == {}, product
 
 
@@ -74,7 +76,7 @@ def test_only_the_gfx1201_radeon_boards_pin_their_geak_identity():
         ("Card Series: AMD Radeon 8060S Graphics", "radeon8060s"),
         ("Card Series: AMD Radeon PRO W7900", "w7900"),
         ("Card Series: AMD Radeon PRO W7900 Dual Slot", "w7900"),
-        ("Card Series: AMD Radeon PRO W7900D", None),
+        ("Card Series: AMD Radeon PRO W7900D", "w7900d"),
         ("Card Series: AMD Radeon RX 7900 XTX", None),
         ("gfx1151", None),
         ("gfx942:sramecc+:xnack-", "mi300x"),

@@ -33,6 +33,7 @@ def test_a_device_id_belongs_to_one_board():
         ("0x74a5", "mi325x"),
         ("0x7448", "w7900"),
         ("0x744a", "w7900"),
+        ("0x744b", "w7900d"),
     ],
 )
 def test_the_boards_the_measured_nodes_report(device_id, board):
@@ -54,7 +55,7 @@ def test_the_mi350x_is_the_mi355x_die_at_the_lower_peak_clock():
 
 
 @pytest.mark.parametrize(
-    "device_id", [None, "", "0x", "not-an-id", "0x0000", True, "0x74a2", "0x74b6", "0x7551", "0x744b", "0x744c"]
+    "device_id", [None, "", "0x", "not-an-id", "0x0000", True, "0x74a2", "0x74b6", "0x7551", "0x744c"]
 )
 def test_an_unknown_ambiguous_or_unreadable_id_names_no_board(device_id):
     assert gpu_type_for_device_id(device_id) is None

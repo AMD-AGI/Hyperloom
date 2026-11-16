@@ -41,13 +41,14 @@ from kernelforge.utils.gpu_arch import (
         ("radeon_8060s", "gfx1151"),
         ("W7900", "gfx1100"),
         ("AMD Radeon PRO W7900", "gfx1100"),
+        ("AMD Radeon PRO W7900D", "gfx1100"),
     ],
 )
 def test_canon_arch_folds_product_names_onto_their_gfx_target(value, expected):
     assert canon_arch(value) == expected
 
 
-@pytest.mark.parametrize("value", ["", "some-new-gpu", "gfx12-generic", "gfx", "R9700S", "XR9700", "MI300XL", "W7900D"])
+@pytest.mark.parametrize("value", ["", "some-new-gpu", "gfx12-generic", "gfx", "R9700S", "XR9700", "MI300XL"])
 def test_canon_arch_names_no_target_rather_than_a_wrong_one(value):
     assert canon_arch(value) == ""
 
@@ -63,6 +64,7 @@ def test_canon_arch_names_no_target_rather_than_a_wrong_one(value):
         ("Radeon 8060S", "radeon8060s"),
         ("gfx1100", "w7900"),
         ("Radeon PRO W7900", "w7900"),
+        ("w7900d", "w7900"),
         ("MI250-X", "mi250_x"),
     ],
 )

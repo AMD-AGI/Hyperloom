@@ -16,7 +16,9 @@ what the numbers are, and what each subsystem does to a kernel.
 
 ## Scope: gfx1100 only
 
-Target part is the **Radeon PRO W7900** (Navi 31, RDNA 3, ISA **gfx1100**). The RX 7900 XTX is the same die;
+Target parts are the **Radeon PRO W7900** and **W7900D** (Navi 31, RDNA 3, ISA **gfx1100**). The W7900D is the
+same board at a lower engine clock, so every count and size here holds for it and only the peaks scale down
+(`rdna3_overview.md`). The RX 7900 XTX is the same die;
 other Navi 3x chips (gfx1101, gfx1102) have a smaller register file and fewer CUs, so their occupancy numbers
 differ. The MI350 cards in the parent `hardware/` folder are **wrong for this chip** — open them only for the
 contrast, never for a number.
