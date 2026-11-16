@@ -2215,7 +2215,7 @@ async def _landed_in_turn(rig: Rig, tmp_path: Path, landed: int) -> list[TestReq
             conclusion = Conclusion.COMMITTED if made else Conclusion.RECORDED_ONLY
             await gate.write_judgement(request_id, judgement(-3.0, (request_id,)), conclusion, made)
     with pytest.raises(SessionFinished):
-        await running
+        await asyncio.wait_for(running, 10)
     return rig.toolbox.requests
 
 
