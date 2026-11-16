@@ -2,8 +2,8 @@
 # SPDX-License-Identifier: MIT
 
 """Requests to the scheduler for a new branch, to carry a correctness fix that costs its branch performance, to
-repair the defect that blocked a gain, or to run an Arbor agent on its share of the map a mapping branch made, and the
-scheduler's answer.
+repair the defect that blocked a gain, or to run a component agent on its share of the map a mapping branch made, and
+the scheduler's answer.
 
 On ``ACCEPTED`` the answer names the new branch. ``PENDING`` waits for a free branch slot and names the branch id
 reserved for it. The requesting specialist stays on its own branch either way. The scheduler cuts a repair or share

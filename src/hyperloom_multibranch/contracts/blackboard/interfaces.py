@@ -333,7 +333,7 @@ class DirectionNotes(Protocol):
 
 
 class SessionRecords(Protocol):
-    """What the session is, what it ran with and Arbor's map of its directions; the scheduler writes all three, the
+    """What the session is, what it ran with and the agent map of its directions; the scheduler writes all three, the
     profile once at PRELUDE."""
 
     async def write_session_profile(self, profile: SessionProfile) -> None: ...
@@ -346,7 +346,7 @@ class SessionRecords(Protocol):
     async def manifest_fingerprints(self) -> tuple[ManifestFingerprint, ...]: ...
 
     async def write_agent_map(self, directions: Sequence[MapDirection]) -> None:
-        """Keep Arbor's map, its ``directions`` in the map's order; the latest map written is in force. Raises
+        """Keep the agent map, its ``directions`` in the map's order; the latest map written is in force. Raises
         ``ValueError`` for a direction without an id or with the id of another."""
 
 
