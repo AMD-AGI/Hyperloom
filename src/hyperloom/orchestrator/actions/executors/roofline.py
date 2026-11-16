@@ -27,8 +27,7 @@ from ...loop.sub_agent_runner import RunnerContext
 from ...state.analysis_failures import remember_roofline_failure, remember_trace_failure
 from hyperloom.inference_optimizer.trace.task_progress import report_progress
 from ._multi_node_env import is_multi_node
-from ._pd_combined_report import report_pd_profile
-from ._pd_role_trace import ROLE_STEADY_STATE_MODE, analyze_role_traces
+from ._pd_role_trace import ROLE_STEADY_STATE_MODE, node_trace_summaries
 from ..stop_attribution import ORCHESTRATOR_CANCELLED_CLASS
 from hyperloom.inference_optimizer.breakdown.recorder.event_ids import INLINE_EVENT_PARAM
 from hyperloom.inference_optimizer.breakdown.recorder.roofline_event import (
@@ -805,6 +804,44 @@ def _pd_main_role(profiled: _ProfileOutcome) -> str:
     return next((role for role, path in role_traces.items() if path and path == profiled.trace_path), "")
 
 
+def _pd_multi_trace_input(profile_result: dict[str, Any]) -> dict[str, Any] | None:
+    """The multi-trace analysis input of a PD profile with decode nodes and two or more nodes in all, else ``None``."""
+    node_traces = profile_result.get("role_node_traces")
+    trace_dir = str(profile_result.get("trace_dir") or "")
+    if not isinstance(node_traces, dict) or not trace_dir or not node_traces.get("decode"):
+        return None
+    if sum(len(paths or []) for paths in node_traces.values()) < 2:
+        return None
+    return {"role_node_traces": node_traces, "trace_dir": trace_dir}
+
+
+def _pd_node_summaries(profile_result: dict[str, Any], main_role: str, analysis: _AnalysisOutcome) -> dict[str, Any]:
+    """Each PD node's top kernels from the analysis's ``analysis.json``, the focus node carrying its warning codes.
+
+    A multi-trace analysis names its nodes ``<role>_<n>``; a single-trace analysis is summarised under ``main_role``.
+    """
+    report = str(analysis.result.get("trace_report_path") or "")
+    if not report:
+        return {}
+    report_path = Path(report)
+    analysis_json = report_path if report_path.suffix == ".json" else report_path.with_name("analysis.json")
+    pd_input = analysis.payload.get("pd_node_traces")
+    if pd_input:
+        node_traces = {
+            f"{role}_{node}": str(trace)
+            for role in ("decode", "prefill")
+            for node, trace in enumerate((pd_input.get("role_node_traces") or {}).get(role) or [])
+        }
+    else:
+        node_traces = {main_role: str((profile_result.get("role_traces") or {}).get(main_role) or "")}
+    warnings = [
+        w
+        for w in analysis.result.get("trace_health_warnings") or []
+        if isinstance(w, dict) and w.get("code") and w.get("severity") != "info"
+    ]
+    return node_trace_summaries(analysis_json, node_traces, warnings)
+
+
 def _hot_kernels(ta_result: dict[str, Any]) -> list[Any]:
     """The hot kernels an analysis surfaced."""
     return ta_result.get("hot_kernels_top15") or ta_result.get("hot_kernels") or []
@@ -932,41 +969,21 @@ class RooflineExecutor:
         if main_role:
             payload.setdefault("steady_state_mode", ROLE_STEADY_STATE_MODE[main_role])
             payload.setdefault("split_llm_inference", False)
+            pd_input = _pd_multi_trace_input(profiled.result)
+            if pd_input:
+                payload["pd_node_traces"] = pd_input
 
         analysis = await self._analyze(ctx, recorder, payload)
         if not isinstance(analysis, _AnalysisOutcome):
             remember_trace_failure(self.shared_state, payload, analysis)
             return analysis
         if main_role:
-            await self._record_role_analyses(ctx, profiled, main_role, analysis, framework=arm.framework)
+            self.shared_state.last_trace_analyze_by_role = _pd_node_summaries(profiled.result, main_role, analysis)
         attribution_degraded = _flag_attribution_degraded(analysis.result, profiled.result)
         analysed = _AnalysedProfile(profiled, analysis)
         if _wants_compute_bound_reprofile(analysis.result):
             analysed = await self._compute_bound_reprofile(ctx, recorder, arm, analysis) or analysed
         return self._conclude(ctx, recorder, analysed, attribution_degraded=attribution_degraded, started=started)
-
-    async def _record_role_analyses(
-        self,
-        ctx: RunnerContext,
-        profiled: _ProfileOutcome,
-        main_role: str,
-        analysis: _AnalysisOutcome,
-        *,
-        framework: str,
-    ) -> None:
-        """Analyse the PD roles other than ``main_role``, record every role's summary on ``last_trace_analyze_by_role``,
-        then run the combined per-node TraceLens report."""
-        role_traces = dict(profiled.result.get("role_traces") or {})
-        self.shared_state.last_trace_analyze_by_role = await analyze_role_traces(
-            role_traces,
-            session_dir=Path(ctx.extra["session_dir"]),
-            framework=framework,
-            known={main_role: analysis.result},
-        )
-        try:
-            await report_pd_profile(profiled.result, framework=framework, platform=self.shared_state.gpu_type)
-        except (OSError, RuntimeError, ValueError) as exc:
-            log.warning("roofline: pd combined report raised: %r", exc)
 
     async def _profile_until_usable(
         self, ctx: RunnerContext, recorder: Any, arm: _ProfileArm

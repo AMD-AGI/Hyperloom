@@ -111,6 +111,8 @@ def _member_to_candidate(task: dict[str, Any], member: dict[str, Any]) -> dict[s
     }
     if candidate["shapes"]:
         candidate["shape_provenance"] = "torch_trace"
+    if task.get("node"):
+        candidate["tracelens_node"] = str(task["node"])
     return candidate
 
 

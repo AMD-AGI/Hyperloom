@@ -26,7 +26,8 @@ from pathlib import Path
 from typing import Any, Awaitable, Callable, Iterable
 
 import yaml
-from TraceLens.Agent.Analysis.utils.config_utils import check_config
+from TraceLens.Agent.Analysis.utils.config_utils import SCOPE_MULTI_TRACE, SCOPE_STANDALONE, check_config
+from TraceLens.Reporting.aggregate_perf_reports import POLICY_BY_NODE
 
 from hyperloom.common.codex_session import (
     CodexSessionConfig,
@@ -294,6 +295,31 @@ def write_run_config(
     return config_path
 
 
+def write_multi_trace_run_config(*, output_dir: Path, jobs: list[dict[str, Any]], analysis_mode: str) -> Path:
+    """Write the ``combine_by_node`` multi-trace run config for ``jobs``, the first job being the focus.
+
+    Checked with TraceLens's ``check_config`` under the ``multi_trace`` scope; job paths are made absolute. A rejected
+    config raises ``ConfigError``.
+    """
+    resolved = [
+        {
+            **job,
+            **{key: str(Path(job[key]).resolve()) for key in ("trace_path", "capture_folder") if job.get(key)},
+        }
+        for job in jobs
+    ]
+    config = {
+        "analysis_mode": analysis_mode,
+        "output_dir": str(output_dir.resolve()),
+        "aggregation": {"policy": POLICY_BY_NODE},
+        "jobs": resolved,
+    }
+    check_config(config, SCOPE_MULTI_TRACE)
+    config_path = output_dir / RUN_CONFIG_NAME
+    config_path.write_text(yaml.safe_dump(config, sort_keys=False), encoding="utf-8")
+    return config_path
+
+
 def discover_capture_folder(trace_input: Path, trace_files: list[Path]) -> Path | None:
     """Find a graph-capture folder near a torch_trace input.
 
@@ -348,6 +374,7 @@ class TraceLensSkillRequest:
         tracelens_internal_root: The TraceLens-internal root, ``None`` in OSS-only mode.
         capture_folder: Graph-capture folder, read only as the Codex runner's
             write scope; the run config already names it.
+        scope: The TraceLens scope the skill runs the config under.
     """
 
     skill_path: Path
@@ -355,6 +382,7 @@ class TraceLensSkillRequest:
     tracelens_root: Path
     tracelens_internal_root: Path | None
     capture_folder: Path | None
+    scope: str = SCOPE_STANDALONE
 
 
 @dataclass(frozen=True)
@@ -384,7 +412,7 @@ class _StreamIdleBounds:
 
 
 def build_orchestrator_prompt(request: TraceLensSkillRequest) -> str:
-    """Prompt an agent to run the TraceLens standalone skill from ``run.yaml``.
+    """Prompt an agent to run the TraceLens skill from ``run.yaml`` under ``request.scope``.
 
     Provider-neutral: the same prompt drives the Claude SDK runner and the
     Codex SDK runner. The trace, platform, analysis mode and capture folder
@@ -404,12 +432,12 @@ def build_orchestrator_prompt(request: TraceLensSkillRequest) -> str:
         str(request.tracelens_internal_root) if request.tracelens_internal_root else "(not installed; OSS-only mode)"
     )
     tl_extension_text = "TraceLens_internal" if request.tracelens_internal_root else "(unset)"
-    return f"""You are running TraceLens standalone analysis for Hyperloom.
+    return f"""You are running TraceLens {request.scope} analysis for Hyperloom.
 
 Read and follow the FULL instructions in this skill file:
 {request.skill_path}
 
-Run it from config {run_config}, standalone.
+Run it from config {run_config}, {request.scope}.
 The execution context below answers the remaining Step 0 questions.
 Do not ask the user any questions; proceed with the analysis.
 
@@ -1151,5 +1179,6 @@ __all__ = [
     "extract_idle_pct_from_analysis_md",
     "run_tracelens_skill",
     "write_local_cmd_prefix",
+    "write_multi_trace_run_config",
     "write_run_config",
 ]
