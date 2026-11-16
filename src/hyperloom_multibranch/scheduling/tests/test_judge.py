@@ -699,6 +699,14 @@ def test_cap_drops_unknown_stopped_and_integration_orders_and_clamps_k() -> None
     )
 
 
+def test_cap_cuts_the_integration_branchs_k_to_the_tests_in_flight_and_a_specialists_to_the_per_branch_cap() -> None:
+    decision = JudgeDecision(open_count=0, k=(KOrder("b01", 5), KOrder(INTEGRATION_BRANCH, 5)))
+
+    capped = cap_decision(decision, _view())
+
+    assert capped.k == (KOrder("b01", 2), KOrder(INTEGRATION_BRANCH, 5))
+
+
 @pytest.mark.parametrize(("asked", "granted"), [(0, 1), (2, 2), (7, 4)])
 def test_opening_count_is_clamped_to_one_and_the_branch_cap(asked: int, granted: int) -> None:
     view = _view(opening=True, roster=OPENING_ROSTER, free_slots=1)
