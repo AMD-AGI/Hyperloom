@@ -1764,8 +1764,7 @@ class FrameworkPhase(_AuthoredOutcomeMixin, _CandidateDiscoveryMixin, ProposalBe
         state = self.shared_state
         if (state.phase or "").strip().upper() != _phase_state.PHASE_FRAMEWORK_AGENT:
             return
-        dispatcher = self._coord.dispatcher
-        if dispatcher.admission_frozen or dispatcher.dispatch_paused_for_phase_budget():
+        if self._coord.dispatcher.dispatch_paused_for_phase_budget():
             return
         explores = [t for t in (*await self.tasks.queued(), *await self.tasks.running()) if t.kind == "explore"]
         custom = self._custom_proposal_rows()
