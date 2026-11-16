@@ -30,6 +30,12 @@ it.
   wrote its whole conversation to the cache again. In a 12-hour Qwen3-14B
   InferenceX session on MI325X those rewrites were 74% of the cache writes, and
   the same calls priced at `1h` cost 20% less.
+- **A component agent's own commits work in an agent sandbox.** A confined
+  sandbox's home has no git config and the sandbox kept no git identity, so a
+  component agent that commits its own checkpoints failed its first commit
+  with `Author identity unknown`, and its share branch never started. The
+  sandbox's commands now carry the session's git identity
+  (`hyperloom-multibranch`), the one the session's own commits use.
 - **A new specialist waits while the untested-proposal queue is full.** In
   FRAMEWORK_AGENT, a `specialist` delegate is refused with `policy_denied`
   rule `specialist_untested_backlog_full` while 8 proposals, twice the
