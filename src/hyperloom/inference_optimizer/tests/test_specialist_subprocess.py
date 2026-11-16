@@ -98,6 +98,13 @@ def test_build_specialist_env_forwards_the_claude_config_dir(monkeypatch):
     assert _build_specialist_env()["CLAUDE_CONFIG_DIR"] == "/tmp/claude-config"
 
 
+def test_build_specialist_env_forwards_the_prompt_cache_ttl(monkeypatch):
+    monkeypatch.setenv("CLAUDE_CODE_PROMPT_CACHE_TTL", "1h")
+    monkeypatch.setenv("CLAUDE_CODE_SUBAGENT_PROMPT_CACHE_TTL", "5m")
+    env = _build_specialist_env()
+    assert (env["CLAUDE_CODE_PROMPT_CACHE_TTL"], env["CLAUDE_CODE_SUBAGENT_PROMPT_CACHE_TTL"]) == ("1h", "5m")
+
+
 def test_build_specialist_env_forwards_oauth_token_without_mirroring_it(monkeypatch):
     """A subscription-only parent must hand the token down untouched."""
     oauth_env = "_".join(("CLAUDE", "CODE", "OAUTH", "TOKEN"))
