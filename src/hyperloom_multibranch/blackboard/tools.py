@@ -110,7 +110,7 @@ CODE_TITLE = (
     "a test):"
 )
 MAP_TITLE = (
-    "Arbor's map, binding: do not work a direction a running Arbor branch holds, and reopen a set-aside one only if "
+    "The agent map, binding: do not work a direction a running agent branch holds, and reopen a set-aside one only if "
     "your intent answers its reason, saying how:"
 )
 _UNFINISHED = {
@@ -317,7 +317,7 @@ def _map_direction(item: MapDirection, holders: Mapping[str, str]) -> list[str]:
 
 
 def _agent_map(brief: StartupBrief) -> list[str]:
-    """The directions of Arbor's map the brief shows, those a running Arbor branch holds first, then those that name
+    """The directions of the agent map the brief shows, those a running agent branch holds first, then those that name
     the focus, then those set aside, each in the map's order. Past :data:`MAX_LINES` the directions left over are
     counted, not cut through, so the cap never drops a why or a held direction ahead of a set-aside one."""
 

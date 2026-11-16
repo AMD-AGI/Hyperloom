@@ -8,9 +8,9 @@ test and one CLOSE grace are left before the deadline. EXPLORE and CLOSE score t
 defaults for the session's budget. Once the baseline is established, a session with an RSI archive plays the
 scheduling playbook ``--playbook`` asks for, the champion of the pool beside it or a playbook on trial, as the session's id draws under
 ``auto``, recorded under ``playbook`` in ``policy_versions``. The FINAL candidates are fixed while every branch still stands,
-then exploration ends and FINAL validates them. With the review on, a session whose Arbor agents are given a map pauses before their branches open until a person approves it (:mod:`.review`); the pause moves the
+then exploration ends and FINAL validates them. With the review on, a session whose component agents are given a map pauses before their branches open until a person approves it (:mod:`.review`); the pause moves the
 deadline, and EXPLORE's end, by its length. A map a mapping branch makes is reviewed in EXPLORE, while the clock runs,
-and its shares open only with ``--agent-share-minutes`` left before their cutoff. A failed PRELUDE, a run asked to stop once its Arbor agents' directions are mapped,
+and its shares open only with ``--agent-share-minutes`` left before their cutoff. A failed PRELUDE, a run asked to stop once its component agents' directions are mapped,
 a map a person rejected, an EXPLORE that ran out of cards to measure on, a stop signal, the session deadline
 before FINAL starts or an unhandled error skip straight to CLOSE, which always runs and kills every process the session started. FINAL waits for the validation tests it started, past the deadline and the hard
 stop if need be, and moves the hard stop to no sooner than one CLOSE grace from its end. The deadline plus the CLOSE
@@ -84,7 +84,7 @@ from hyperloom_multibranch.scheduling.agent_plans import (
     ROOT_SHARES_READ,
     SHARES_TOO_LATE,
     agent_plans,
-    arbor_agents,
+    component_agents,
     generated_map,
     keep_map,
 )
@@ -166,7 +166,7 @@ logger = logging.getLogger(__name__)
 
 
 class AgentBranches(NamedTuple):
-    """The agents EXPLORE opens a branch for at once, each one's share of the directions, and the Arbor agents a
+    """The agents EXPLORE opens a branch for at once, each one's share of the directions, and the component agents a
     mapping branch maps for (empty for none)."""
 
     agents: tuple[str, ...]
@@ -204,7 +204,7 @@ NO_CARDS_LEFT = "the toolbox has fewer usable cards than one test needs, so FINA
 #: Why FINAL over a session that ended before its baseline was recorded chose nothing.
 NO_BASELINE = "no candidate: the session ended before PRELUDE recorded its baseline, so FINAL had nothing to validate"
 #: Why a session that was to stop after its map kept none.
-NO_ARBOR_TO_MAP = "no map: no agent named is an Arbor whose directions could be mapped"
+NO_AGENT_TO_MAP = "no map: no agent named is a component agent whose directions could be mapped"
 NO_MAP = "no map: the dossier pass set none and none could be generated from the root's shares"
 
 
@@ -348,7 +348,7 @@ class Session:
             settings.agent_launch,
             settings.agent_port,
             settings.agent_dossier,
-            # The session's review stands in for each Arbor's own; without one, nobody's does.
+            # The session's review stands in for each component agent's own; without one, nobody's does.
             REVIEW_HOST if settings.review_gate else REVIEW_OFF,
             maps,
             settings.agent_share_minutes,
@@ -668,33 +668,33 @@ class Session:
 
     async def _agent_branches(self, prelude: PreludeResult) -> AgentBranches:
         """The agents whose branches EXPLORE opens at once, each one's share of the directions (:mod:`agent_plans`),
-        and the Arbor agents a mapping branch maps for (:mod:`~hyperloom_multibranch.specialist.map_session`).
+        and the component agents a mapping branch maps for (:mod:`~hyperloom_multibranch.specialist.map_session`).
 
         With the user's map, every agent opens on its share of it, after a person reviewed it when the review is on.
-        Without one, two or more Arbors, or one under the review, wait for a mapping branch, which EXPLORE opens beside
-        the others: its map is the dossier pass's, else one generated from the root's shares, and is reviewed, split
-        and handed out as share branches (:meth:`_map_split`), so no other branch waits for it. Fewer Arbors map their
-        own directions and open at once. Raises :class:`~hyperloom_multibranch.scheduling.review.ReviewRejected` when
-        the person rejects the user's map."""
+        Without one, two or more component agents, or one under the review, wait for a mapping branch, which EXPLORE
+        opens beside the others: its map is the dossier pass's, else one generated from the root's shares, and is
+        reviewed, split and handed out as share branches (:meth:`_map_split`), so no other branch waits for it. Fewer
+        component agents map their own directions and open at once. Raises
+        :class:`~hyperloom_multibranch.scheduling.review.ReviewRejected` when the person rejects the user's map."""
 
         settings, work = self._settings, self._layout.agent_plans
         if settings.agents and not settings.review_gate:
             self._decisions.record(Decision(DecisionKind.PRELUDE, REVIEW_SKIPPED, INTEGRATION_BRANCH, {}))
         if not settings.agents or settings.agent_directions:
-            if settings.agent_directions and settings.review_gate and await self._arbors():
+            if settings.agent_directions and settings.review_gate and await self._component_agents():
                 dossier = Path(settings.agent_dossier) if settings.agent_dossier else None
                 await self._review(Path(settings.agent_directions), dossier, MADE_BY_USER)
             plans = await agent_plans(settings.agents, settings.agent_directions, work)
             await self._hand_map(settings.agent_directions, plans)
             return AgentBranches(settings.agents, plans)
-        arbors = await self._arbors()
-        if not arbors or (len(arbors) < GENERATED_FOR and not settings.review_gate):
+        adapted = await self._component_agents()
+        if not adapted or (len(adapted) < GENERATED_FOR and not settings.review_gate):
             return AgentBranches(settings.agents, await agent_plans(settings.agents, "", work))
-        others = tuple(agent for index, agent in enumerate(settings.agents) if index not in arbors)
-        return AgentBranches(others, ("",) * len(others), tuple(settings.agents[index] for index in sorted(arbors)))
+        others = tuple(agent for index, agent in enumerate(settings.agents) if index not in adapted)
+        return AgentBranches(others, ("",) * len(others), tuple(settings.agents[index] for index in sorted(adapted)))
 
     async def _map_start(self, source: str, start_commit: str, deadline: float) -> DossierStart | None:
-        """The dossier pass a mapping branch runs on the Arbor ``source`` at ``start_commit``, by ``deadline`` or
+        """The dossier pass a mapping branch runs on the agent ``source`` at ``start_commit``, by ``deadline`` or
         sooner by ``--agent-dossier-minutes``, with the root's shares as its profile; ``None`` with no minutes for it."""
 
         from hyperloom_multibranch.specialist.dossier_pass import DossierStart
@@ -722,11 +722,11 @@ class Session:
     async def _map_split(
         self, branch: str, start_commit: str, map_for: tuple[str, ...], outcome: DossierOutcome | None
     ) -> str:
-        """Hand the map of the mapping branch ``branch`` out to the Arbor agents ``map_for``: the pass's map, else one
-        generated from the root's shares, reviewed by a person when the session's review is on, while the other
-        branches go on; split into one share each; and asked of the fork desk as share branches cut at
-        ``start_commit``. A rejected map opens none, and neither does a split too late for the shares to run an Arbor
-        iteration (:meth:`_too_late`), checked before the review and after it. What was done, for the branch log."""
+        """Hand the map of the mapping branch ``branch`` out to the component agents ``map_for``: the pass's map, else
+        one generated from the root's shares, reviewed by a person when the session's review is on, while the other
+        branches go on; split into one share each; and asked of the fork desk as share branches cut at ``start_commit``.
+        A rejected map opens none, and neither does a split too late for the shares to run one iteration of a component
+        agent (:meth:`_too_late`), checked before the review and after it. What was done, for the branch log."""
 
         if outcome is not None:
             ended = {"reason": outcome.reason, "map": str(outcome.map or ""), "dossier": str(outcome.dossier or "")}
@@ -737,8 +737,8 @@ class Session:
         map_file = "" if outcome is None or outcome.map is None else str(outcome.map)
         if self._settings.review_gate:
             made_by = MADE_BY_PASS if map_file else MADE_BY_SHARES
-            arbors = await self._arbors()
-            map_file = map_file or (await self._generated(arbors, shares) if arbors else "")
+            adapted = await self._component_agents()
+            map_file = map_file or (await self._generated(adapted, shares) if adapted else "")
             dossier = None if outcome is None else outcome.dossier
             try:
                 await self._review(Path(map_file) if map_file else None, dossier, made_by, branch=branch)
@@ -754,7 +754,7 @@ class Session:
         for agent, plan in zip(map_for, plans):
             admission = await self._desk.admit_share(ShareRequest(branch, start_commit, agent, plan))
             answers.append(f"{admission.branch or admission.reason} ({admission.status.value})")
-        split = "split" if any(plans) else "not split, each Arbor maps its own"
+        split = "split" if any(plans) else "not split, each component agent maps its own"
         return f"{len(map_for)} share branches asked, the map {split}: {', '.join(answers)}"
 
     async def _hand_map(self, map_file: str, plans: tuple[str, ...]) -> None:
@@ -780,7 +780,7 @@ class Session:
         self._decisions.record(Decision(DecisionKind.SHARE, SHARES_TOO_LATE, branch, detail))
         return (
             f"no share branch opens ({step}): each would run {minutes:.0f} min before its cutoff, under the"
-            f" {need:g} an Arbor iteration needs (--agent-share-minutes)"
+            f" {need:g} one iteration of a component agent needs (--agent-share-minutes)"
         )
 
     async def _share_time(self) -> tuple[float, float]:
@@ -794,13 +794,13 @@ class Session:
         margin = collection_margin(records, CUTOFF_SECONDS)
         return runway, self._explore_end - margin - self._settings.agent_share_minutes * MINUTE
 
-    async def _generated(self, arbors: dict[int, Path], shares: RootShares | None) -> str:
-        """The map the first Arbor generates from the root's ``shares``, for a person to review before it is split;
-        ``""`` when there are none, or Arbor cannot."""
+    async def _generated(self, adapted: dict[int, Path], shares: RootShares | None) -> str:
+        """The map the first component agent generates from the root's ``shares``, for a person to review before it is
+        split; ``""`` when there are none, or the agent cannot."""
 
         given = (None, ROOT_PROFILE_SOURCE) if shares is None else (shares.shares, shares.source)
         try:
-            return str(await generated_map(arbors[min(arbors)], *given, self._layout.agent_plans))
+            return str(await generated_map(adapted[min(adapted)], *given, self._layout.agent_plans))
         except SplitFailed as exc:
             logger.warning("no map could be generated for the review: %s", exc)
             return ""
@@ -839,15 +839,15 @@ class Session:
             raise ReviewRejected(f"rejected by {decided.get('by') or 'a person'}: {decided.get('note') or ''}")
 
     async def _stop_after_map(self, prelude: PreludeResult) -> SessionOutcome:
-        """End the session before EXPLORE once its Arbor agents' directions are mapped, for one Arbor too: the map of
-        the dossier pass of the first Arbor, else one generated from the root's shares, kept with the pass's dossier in
-        ``MB-agent-map`` for a person to review (:func:`keep_map`). Without either, the session ends with why as its
-        error."""
+        """End the session before EXPLORE once its component agents' directions are mapped, for one component agent too:
+        the map of the dossier pass of the first, else one generated from the root's shares, kept with the pass's
+        dossier in ``MB-agent-map`` for a person to review (:func:`keep_map`). Without either, the session ends with why
+        as its error."""
 
-        arbors = await self._arbors()
-        if not arbors:
-            return SessionOutcome(SessionStopReason.MAPPED, None, None, NO_ARBOR_TO_MAP)
-        first = min(arbors)
+        adapted = await self._component_agents()
+        if not adapted:
+            return SessionOutcome(SessionStopReason.MAPPED, None, None, NO_AGENT_TO_MAP)
+        first = min(adapted)
         source, start_commit = self._settings.agents[first], prelude.start_commit
         shares = await self._root_shares(prelude)
         outcome = await self._dossier_map(source, start_commit, shares)
@@ -858,7 +858,7 @@ class Session:
         else:
             given = (None, ROOT_PROFILE_SOURCE) if shares is None else (shares.shares, shares.source)
             try:
-                generated = await generated_map(arbors[first], *given, self._layout.agent_plans)
+                generated = await generated_map(adapted[first], *given, self._layout.agent_plans)
             except SplitFailed as exc:
                 return SessionOutcome(SessionStopReason.MAPPED, None, None, f"{NO_MAP}: {passed}; {exc}")
             dossier = None if outcome is None else outcome.dossier
@@ -874,19 +874,19 @@ class Session:
         self._decisions.record(Decision(DecisionKind.PRELUDE, ROOT_SHARES_READ, INTEGRATION_BRANCH, read.detail))
         return read.shares
 
-    async def _arbors(self) -> dict[int, Path]:
-        """The Arbor agents of the run, by index; none, recorded, when a source cannot be fetched."""
+    async def _component_agents(self) -> dict[int, Path]:
+        """The component agents of the run, by index; none, recorded, when a source cannot be fetched."""
 
         try:
-            return await arbor_agents(self._settings.agents, self._layout.agent_plans)
+            return await component_agents(self._settings.agents, self._layout.agent_plans)
         except (AttemptFailed, OSError) as exc:
             detail = {"error": str(exc)}
             self._decisions.record(Decision(DecisionKind.PRELUDE, AGENT_SOURCES_UNREAD, INTEGRATION_BRANCH, detail))
             return {}
 
     async def _dossier_map(self, source: str, start_commit: str, shares: RootShares | None) -> DossierOutcome | None:
-        """How the dossier pass of the Arbor ``source`` on ``start_commit``, given ``shares`` as its profile, ended;
-        ``None`` when none ran (no runner, or no minutes for it). Each step is a ``PRELUDE`` decision."""
+        """How the dossier pass of the component agent ``source`` on ``start_commit``, given ``shares`` as its profile,
+        ended; ``None`` when none ran (no runner, or no minutes for it). Each step is a ``PRELUDE`` decision."""
 
         from hyperloom_multibranch.specialist.dossier_pass import DossierStart
 

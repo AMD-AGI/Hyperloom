@@ -907,8 +907,8 @@ async def test_a_focus_that_names_no_op_recalls_only_the_branches_opened_on_the_
     assert [item.branch for item in brief.focus_history] == ["s6"]
 
 
-#: Arbor's map of the scripted session: b7 runs and holds ``m-gemm``; s2, which held ``m-attn``, stopped.
-ARBOR_MAP = (
+#: The agent map of the scripted session: b7 runs and holds ``m-gemm``; s2, which held ``m-attn``, stopped.
+AGENT_MAP = (
     MapDirection("m-gemm", "Dense GEMMs: tuned kernels", "open", holder="b7"),
     MapDirection("m-act", "Fold the activation mul into the GEMM epilogue", "open", f"root profile: {ACT_MUL} 30%"),
     MapDirection("m-moe", "MoE routing", "open"),
@@ -918,7 +918,7 @@ ARBOR_MAP = (
 )
 
 
-async def test_the_brief_binds_the_branch_to_the_directions_of_arbors_map_on_its_focus_held_or_set_aside(
+async def test_the_brief_binds_the_branch_to_the_directions_of_the_agent_map_on_its_focus_held_or_set_aside(
     tmp_path: Path,
 ) -> None:
     clock = FakeClock()
@@ -926,7 +926,7 @@ async def test_the_brief_binds_the_branch_to_the_directions_of_arbors_map_on_its
     scheduler = Writers(tmp_path / "blackboard", clock).as_role(Role.SCHEDULER)
     for branch, focus in (("b7", ""), ("s9", ACT_MUL)):
         await scheduler.record_lineage(LineageEvent(LineageKind.OPEN, branch, from_commit="c1", focus=focus))
-    await scheduler.write_agent_map(ARBOR_MAP)
+    await scheduler.write_agent_map(AGENT_MAP)
 
     shown = (await SessionBriefs(blackboard).text("s9", "c1")).splitlines()
 
@@ -942,7 +942,7 @@ async def test_the_brief_binds_the_branch_to_the_directions_of_arbors_map_on_its
     ]
 
 
-async def test_a_session_without_arbors_map_briefs_no_map(tmp_path: Path) -> None:
+async def test_a_session_without_an_agent_map_briefs_no_map(tmp_path: Path) -> None:
     blackboard = await scripted_session(tmp_path / "blackboard", FakeClock())
 
     brief = await SessionBriefs(blackboard).for_branch("s1").startup_brief("c1")
@@ -951,7 +951,7 @@ async def test_a_session_without_arbors_map_briefs_no_map(tmp_path: Path) -> Non
     assert MAP_TITLE not in render_brief(brief)
 
 
-def test_arbors_map_in_the_brief_keeps_to_the_line_and_list_caps_and_a_long_title_leaves_the_why_whole() -> None:
+def test_the_agent_map_in_the_brief_keeps_to_the_line_and_list_caps_and_a_long_title_leaves_the_why_whole() -> None:
     title = "Retune every dense GEMM of the decode path at each batch size " * 4
     aside = tuple(MapDirection(f"m-{n}", title, "killed", f"reason {n}") for n in range(MAX_LINES))
 
@@ -964,7 +964,7 @@ def test_arbors_map_in_the_brief_keeps_to_the_line_and_list_caps_and_a_long_titl
     assert listed[1:-1:2] == [f"  why: reason {n}" for n in range(kept)]
 
 
-def test_arbors_map_in_the_brief_puts_the_held_directions_first_and_cuts_only_between_directions() -> None:
+def test_the_agent_map_in_the_brief_puts_the_held_directions_first_and_cuts_only_between_directions() -> None:
     aside = tuple(MapDirection(f"m-{n}", f"direction {n}", "done", f"reason {n}") for n in range(MAX_LINES))
     held = (
         MapDirection("m-gemm", "Dense GEMMs", "open", holder="b7"),

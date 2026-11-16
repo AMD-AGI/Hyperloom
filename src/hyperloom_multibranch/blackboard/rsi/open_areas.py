@@ -5,13 +5,13 @@
 
 :func:`open_areas` lists the ops of the integration head's profile, or of the nearest commit it builds on that was
 profiled, with the largest Amdahl ceilings, leaving out the ops a running branch works on (its focus, an op a direction
-of Arbor's map it holds names, or an op of the family of a claim it holds or of its last explore test, which is all a
+of the agent map it holds names, or an op of the family of a claim it holds or of its last explore test, which is all a
 branch opened without a focus shows) and the spent ones: those the playbook's ``failed_op_limit`` branches opened on
 the integration head as it stands were focused on and stopped without a commit, and those a branch focused on them
 gave up on at that head, its give-up quoting an EXHAUSTED record that finds no ceiling above the bar or every idea
 tested or claimed there. A record alone is about one of the session's directions, not the op, and spends nothing; nor
 does a branch the judge or the session's end stopped, nor a record that waits on a tool or a capability. A spent op
-opens again once the integration head moves, and an op of a direction of the map once its Arbor branch stops. With too
+opens again once the integration head moves, and an op of a direction of the map once its agent branch stops. With too
 little of EXPLORE left for a new branch's first commit, the playbook's ``last_open_minutes`` or else the median time a
 new branch took to it, it says that no branch should open. Shares taken from a commit the head builds on are named as that commit's, beside
 the head's. The direction families' odds are the specialists' menu (:mod:`rsi.menu`), not the judge's: a family has
@@ -76,7 +76,7 @@ class FocusHistory:
 @dataclass(frozen=True)
 class OpenAreas:
     """Where a new branch could open: the ``ops`` of the profile of ``profiled`` left open, the ops left out because
-    running branches work on them (``covered``, by op, the branches, an Arbor branch with the ids of the directions of
+    running branches work on them (``covered``, by op, the branches, an agent branch with the ids of the directions of
     its map that name the op) or they are spent (``spent``, by op, the history of the branches focused on it), the
     minutes left of EXPLORE and those a new branch takes to its first commit. ``head`` is the integration head; a
     ``profiled`` commit other than it is one it builds on, because no commit of the head's recipe was profiled."""
@@ -163,7 +163,7 @@ def _working(snapshot: BlackboardSnapshot) -> dict[str, set[str]]:
 
 
 def _held(snapshot: BlackboardSnapshot) -> dict[str, list[MapDirection]]:
-    """The directions of Arbor's map each running Arbor branch holds, by the branch."""
+    """The directions of the agent map each running agent branch holds, by the branch."""
 
     holders = snapshot.map_holders()
     held: dict[str, list[MapDirection]] = {}
@@ -174,14 +174,14 @@ def _held(snapshot: BlackboardSnapshot) -> dict[str, list[MapDirection]]:
 
 
 def _covering(op: str, running: set[str], held: Mapping[str, Sequence[MapDirection]]) -> tuple[str, ...]:
-    """The ``running`` branches that work on ``op``, and each Arbor branch that holds a direction naming it, named
+    """The ``running`` branches that work on ``op``, and each agent branch that holds a direction naming it, named
     with the ids of those directions."""
 
     shown = {branch: branch for branch in running}
     for branch, directions in held.items():
         ids = [item.id for item in directions if direction_names_op(item, op)]
         if ids:
-            shown[branch] = f"{branch} (Arbor, {', '.join(ids)})"
+            shown[branch] = f"{branch} (agent map, {', '.join(ids)})"
     return tuple(shown[branch] for branch in sorted(shown))
 
 

@@ -347,7 +347,7 @@ def specialist_recall(reports: Path) -> LessonRecall:
 def local_peers(host: MeasurementHost, sessions: SpecialistSessions, setup: PeerSetup) -> Peers:
     """The session's peers on this machine; exports the workload into this process (:func:`_export_workload`) and
     freezes the base launch every test runs on in ``MB-toolbox`` unless the session froze one
-    (:func:`~hyperloom_multibranch.scheduling.session_base.freeze_session_base`), which its Arbor agents are served
+    (:func:`~hyperloom_multibranch.scheduling.session_base.freeze_session_base`), which its component agents are served
     unless the operator gave them a launch file. Raises :class:`PeersUnavailable`
     when no base launch can be frozen or the session's canonical measurement cannot be taken.
 
@@ -826,10 +826,10 @@ def native_trees(environ: Mapping[str, str]) -> dict[str, NativeTree]:
 def _agent_spec(
     workload: Workload, pack: str = "", launch: str = "", port: int = AGENT_PORT, review: str = ""
 ) -> AgentSpec:
-    """What every agent of a session of ``workload`` is asked to optimize, an Arbor on ``pack`` when one is named,
-    served the launch in the file ``launch`` with the root's added when one is given, its own review gate handed over
-    as ``review`` says; the root's launch, the workspace, the cards and a port block from ``port`` on are each
-    branch's own."""
+    """What every agent of a session of ``workload`` is asked to optimize, a component agent on ``pack`` when one is
+    named, served the launch in the file ``launch`` with the root's added when one is given, its own review gate
+    handed over as ``review`` says; the root's launch, the workspace, the cards and a port block from ``port`` on are
+    each branch's own."""
 
     from hyperloom_multibranch.specialist.agent_onboarding import AgentSpec
 

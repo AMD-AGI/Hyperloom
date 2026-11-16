@@ -13,8 +13,8 @@ and where its dossier is.
 
 This module is the host's side of that:
 
-* the adapter's record, and the registry of the installed ones (:func:`installed`, :func:`adapter_for`): another
-  package declares its adapter under the entry-point group :data:`ENTRY_POINT_GROUP`;
+* the adapter's record, and the registry of the installed ones (:func:`installed`, :func:`adapter_for`): a
+  package declares its adapter under the entry-point group :data:`ENTRY_POINT_GROUP`, and this one carries none;
 * the runs MB starts in an agent's checkout (:data:`BRANCH_RUN`, :data:`DOSSIER_PASS`);
 * the launch a recipe adds to, as a launch file or a base launch record (:func:`read_launch`);
 * how a run ended (:func:`exit_reason`, :func:`refused_reasons`, :func:`mapped`);
@@ -61,8 +61,6 @@ REVIEW_HOST = "host"
 REVIEW_OFF = "off"
 #: The entry-point group another package declares its adapter under: ``name = "package.module:ADAPTER"``.
 ENTRY_POINT_GROUP = "hyperloom_multibranch.component_agents"
-#: The adapters this package carries itself, named as an entry point names one.
-_BUILT_IN = ("hyperloom_multibranch.specialist.arbor_adapter:ADAPTER",)
 
 
 class AgentRefused(ValueError):
@@ -95,7 +93,7 @@ class ResolvedLaunch:
 
 def read_launch(path: Path) -> ResolvedLaunch:
     """The launch in the file ``path``, a JSON object of :data:`LAUNCH_KEYS` (the repository's
-    ``examples/multibranch-arbor-launch`` has a template), or a base launch record (:func:`_read_record`); raise
+    ``examples/multibranch-agent-launch`` has a template), or a base launch record (:func:`_read_record`); raise
     :class:`AgentRefused` with every reason it cannot be used: unreadable, a key it does not have, no ``server_flags``
     or ones with a quote left open, a ``server_env`` that is not an object of strings, or a template placeholder left
     unfilled. The gate gives every agent its client, so a launch names none."""
@@ -291,11 +289,10 @@ class ComponentAgent:
 
 @functools.cache
 def installed() -> tuple[ComponentAgent, ...]:
-    """The adapters this install has: this package's own, then those other packages declare under
-    :data:`ENTRY_POINT_GROUP`, by name. ``TypeError`` for a declaration that names no :class:`ComponentAgent`."""
+    """The adapters this install has: those other packages declare under :data:`ENTRY_POINT_GROUP`, by name. This
+    package carries none. ``TypeError`` for a declaration that names no :class:`ComponentAgent`."""
 
-    declared = [(target, target) for target in _BUILT_IN]
-    declared += sorted((point.name, point.value) for point in metadata.entry_points(group=ENTRY_POINT_GROUP))
+    declared = sorted((point.name, point.value) for point in metadata.entry_points(group=ENTRY_POINT_GROUP))
     agents = []
     for name, target in declared:
         module, _, attribute = target.partition(":")

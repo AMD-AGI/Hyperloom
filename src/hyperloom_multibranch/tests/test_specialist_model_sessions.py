@@ -19,7 +19,7 @@ from hyperloom_multibranch.contracts.toolbox import BranchLease
 from hyperloom_multibranch.specialist import agent_sessions
 from hyperloom_multibranch.specialist.agent_sandbox import UNCONFINED
 from hyperloom_multibranch.specialist.agent_spec import AgentSpec
-from hyperloom_multibranch.specialist.arbor_adapter import MAPPED
+from hyperloom_multibranch.specialist.component_agent import MAPPED
 from hyperloom_multibranch.specialist.dossier_pass import DossierOutcome, DossierSetup, DossierStart
 from hyperloom_multibranch.specialist.agent_sessions import (
     AgentSessions,
@@ -79,7 +79,7 @@ def test_an_agent_branch_waits_for_cards_while_it_would_still_run_the_session_s_
     agents = replace(_agent_sessions(), least_run_seconds=3780.0)
     place = BranchPlace(SimpleNamespace(path=tmp_path / "worktree"), object(), tmp_path / "session")
 
-    session = agents.session(SessionStart("a1", "c0", 1, BranchTask(agent="arbor")), place)
+    session = agents.session(SessionStart("a1", "c0", 1, BranchTask(agent="/agents/component")), place)
 
     assert session._setup.least_run_seconds == 3780.0
 
@@ -89,7 +89,7 @@ def test_a_session_that_runs_no_agent_has_no_sandboxes_and_refuses_an_agent_bran
     place = BranchPlace(SimpleNamespace(path=tmp_path / "worktree"), object(), tmp_path / "session")
 
     with pytest.raises(ValueError, match="a1 runs an agent, and the session has no sandboxes"):
-        agents.session(SessionStart("a1", "c0", 1, BranchTask(agent="arbor")), place)
+        agents.session(SessionStart("a1", "c0", 1, BranchTask(agent="/agents/component")), place)
 
 
 def test_a_branch_whose_task_names_an_agent_runs_it_on_ports_of_its_own_in_the_sandbox_it_leases(tmp_path, monkeypatch):
@@ -155,7 +155,7 @@ benchmark:
 def test_each_agent_s_spec_carries_its_branch_s_share_of_the_directions(tmp_path):
     agents = _agent_sessions()
     place = BranchPlace(SimpleNamespace(path=tmp_path / "worktree"), object(), tmp_path / "session")
-    tasks = (BranchTask(agent="arbor", plan="/shares/share-1.json"), BranchTask(agent="arbor"))
+    tasks = (BranchTask(agent="/agents/component", plan="/shares/share-1.json"), BranchTask(agent="/agents/component"))
 
     specs = [
         agents.session(SessionStart(branch, "c0", 1, task), place)._setup.spec
@@ -177,8 +177,8 @@ async def test_the_dossier_pass_runs_on_a_port_block_of_its_own_and_its_dossier_
         return DossierOutcome(tmp_path / "directions.json", tmp_path / "docs" / "dossier" / "qwen3-8b", MAPPED)
 
     monkeypatch.setattr(agent_sessions, "run_dossier_pass", run)
-    outcome = await agents.dossier_pass(DossierStart("arbor", "c0", 1.0), lambda: place)
-    spec = agents.session(SessionStart("a1", "c0", 1, BranchTask(agent="arbor")), place)._setup.spec
+    outcome = await agents.dossier_pass(DossierStart("/agents/component", "c0", 1.0), lambda: place)
+    spec = agents.session(SessionStart("a1", "c0", 1, BranchTask(agent="/agents/component")), place)._setup.spec
 
     assert outcome.reason == MAPPED
     [setup] = ran
@@ -191,7 +191,7 @@ def test_a_run_given_a_reviewed_dossier_gives_it_to_every_agent_branch(tmp_path)
     place = BranchPlace(SimpleNamespace(path=tmp_path / "worktree"), object(), tmp_path / "session")
 
     specs = [
-        agents.session(SessionStart(branch, "c0", 1, BranchTask(agent="arbor")), place)._setup.spec
+        agents.session(SessionStart(branch, "c0", 1, BranchTask(agent="/agents/component")), place)._setup.spec
         for branch in ("a1", "a2")
     ]
 

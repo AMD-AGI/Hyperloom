@@ -272,13 +272,13 @@ async def test_agent_branches_open_at_the_root_at_k_one_after_the_user_branches_
 async def test_each_agent_branch_starts_on_its_own_share_of_the_directions_in_order(tmp_path: Path) -> None:
     bench = await Bench(tmp_path).rooted()
 
-    agents = ("/agents/arbor", "/agents/other", "/agents/arbor")
+    agents = ("/agents/component", "/agents/other", "/agents/component")
     await bench.control.open_agent_branches(
         agents, bench.root, OPEN_BY, ("/shares/share-1.json", "", "/shares/share-2.json")
     )
     await _runs_started()
 
-    assert bench.sessions.agents == {"b01": "/agents/arbor", "b02": "/agents/other", "b03": "/agents/arbor"}
+    assert bench.sessions.agents == {"b01": "/agents/component", "b02": "/agents/other", "b03": "/agents/component"}
     assert bench.sessions.plans == {"b01": "/shares/share-1.json", "b02": "", "b03": "/shares/share-2.json"}
 
 

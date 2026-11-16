@@ -131,7 +131,7 @@ def test_round_trip_without_golden_or_image():
     assert BaseLaunch.from_document(base.to_document()) == base
 
 
-def test_arbors_fields_are_written_where_it_reads_them_and_round_trip():
+def test_the_fields_an_agent_reads_are_written_where_it_reads_them_and_round_trip():
     document = json.loads(json.dumps(_base().to_document()))
 
     assert document["model"] == {"id": "zai-org/GLM-5.3", "path": "/data/models/GLM-5.3"}

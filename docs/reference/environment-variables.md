@@ -1011,8 +1011,8 @@ with `HOME`, `CLAUDE_CONFIG_DIR` and `TRITON_CACHE_DIR` of the sandbox's own (an
 branch's session directory, where its Claude CLI's transcripts are read from). A Claude CLI there logs in only through
 those variables, never the app's `~/.claude`. pip installs to `PIP_TARGET`, `site-packages` in that home, which is on
 no interpreter's import path, so no server a command starts imports what was installed, nor the dependencies an install
-brought, ahead of the image's (the image's venv takes no user install and is read-only); Arbor imports from it by
-`ARBOR_SITE`, which MB gives Arbor's own commands only. `AITER_JIT_DIR` and `FLYDSL_RUNTIME_CACHE_DIR` are aiter's
+brought, ahead of the image's (the image's venv takes no user install and is read-only); an agent's adapter may put
+it on the path of the agent's own commands only. `AITER_JIT_DIR` and `FLYDSL_RUNTIME_CACHE_DIR` are aiter's
 defaults, its own writable tree, where the image's prebuilt JIT modules and FlyDSL kernels are. A sandbox whose paths
 bubblewrap cannot bind safely (before 0.12, nothing may be bound below the shared `/tmp`, so a session directory under
 `/tmp` cannot be) runs unconfined, as before, with a WARNING; a hosted run refuses it.
