@@ -406,7 +406,14 @@ async def test_a_stalled_turn_does_not_hold_back_booking_or_dispatch(coord):
 
     tick = asyncio.create_task(coord._tick_once())
     await asyncio.wait_for(stalled.entered.wait(), timeout=5)
-    await _until(lambda: finished.calls and waiting.calls and not coord.dispatcher.has_unbooked_completions())
+    await _until(
+        lambda: (
+            finished.calls
+            and waiting.calls
+            and not coord.dispatcher.has_unbooked_completions()
+            and not coord.dispatcher.owes_result(waiting.calls[0])
+        )
+    )
 
     assert not coord.dispatcher.owes_result(finished.calls[0])
     assert not coord.dispatcher.owes_result(waiting.calls[0])
