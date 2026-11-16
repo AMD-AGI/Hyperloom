@@ -55,16 +55,16 @@ def build_single_kernel_backend_prompt(
 
     root = Path(config.local_knowledge_dir)
     language = resolve_language_dirs(backend, root)
-    include_aiter = backend == "aiter" or _is_aiter_operator(task_type, source_paths)
+    frameworks = ["aiter"] if backend == "aiter" or _is_aiter_operator(task_type, source_paths) else []
     # Experimental ablation-only knob (off by default): see Config.include_mori_kb.
-    include_mori = bool(getattr(config, "include_mori_kb", False))
+    if getattr(config, "include_mori_kb", False):
+        frameworks.append("mori")
 
     knowledge = build_forge_knowledge(
         root,
         gpu_target=config.gpu_target,
         language=language,
-        include_aiter=include_aiter,
-        include_mori=include_mori,
+        frameworks=frameworks,
         defer_all=bool(getattr(config, "defer_knowledge_maps", False)),
     )
 

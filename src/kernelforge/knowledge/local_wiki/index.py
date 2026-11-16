@@ -279,16 +279,15 @@ def build_forge_knowledge(
     *,
     gpu_target: str = "",
     language: str | Sequence[str] | None = None,
-    include_aiter: bool = False,
-    include_mori: bool = False,
+    frameworks: Sequence[str] = (),
     defer_all: bool = False,
 ) -> str:
     """Assemble the layered knowledge block for one forge-loop kernel task.
 
     Layers, in reading order: the hardware pillar ``gpu_target``'s profile names
     (``hardware/`` unless it names another folder) + ``common_methodology/`` always;
-    ``framework/aiter/`` when ``include_aiter``; ``framework/mori/`` when
-    ``include_mori`` (ablation-only, off by default); ``languages/<language>/``
+    ``framework/<name>/`` for each of ``frameworks`` (``aiter`` for an AITER
+    operator; ``mori`` only for the ablation, off by default); ``languages/<language>/``
     when given and present. ``language`` accepts a sequence (triton/gluon are one
     toolchain and carry each other); duplicates collapse. Each level follows the
     INDEX.md convention. Returns "" if the root or all levels are missing.
@@ -305,10 +304,7 @@ def build_forge_knowledge(
 
     profile = arch_profile(gpu_target)
     rels: list[str] = [profile.hardware_knowledge, "common_methodology"]
-    if include_aiter:
-        rels.append("framework/aiter")
-    if include_mori:
-        rels.append("framework/mori")
+    rels.extend(f"framework/{name}" for name in dict.fromkeys(frameworks))
     languages = [language] if isinstance(language, str) else list(language or ())
     deferred: set[str] = set()
     for position, name in enumerate(dict.fromkeys(item for item in languages if item)):

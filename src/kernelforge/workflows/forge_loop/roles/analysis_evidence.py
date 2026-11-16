@@ -186,7 +186,7 @@ class AnalysisEvidenceMixin:
                     root,
                     gpu_target=self.config.gpu_target,
                     language=resolve_language_dirs(backend, root),
-                    include_aiter=include_aiter,
+                    frameworks=("aiter",) if include_aiter else (),
                     # The orchestration context is inlined into every specialist
                     # and analysis prompt, so the ablation has to reach it too or
                     # it only measures half the knowledge block's cost.

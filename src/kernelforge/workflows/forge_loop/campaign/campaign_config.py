@@ -519,8 +519,9 @@ def _source_owner_framework(
     )
 
 
-def _require_backend_builds_for(kernel_backend: str, gpu_target: str) -> None:
-    """Refuse a fresh campaign whose kernel backend cannot build for ``gpu_target``, before any GPU work."""
+def _resolve_gpu_target(requested: str, kernel_backend: str) -> str:
+    """The campaign's gfx target, refused before any GPU work when ``kernel_backend`` cannot build for it."""
+    gpu_target = requested.strip() or detect_gpu_target()
     profile = arch_profile(gpu_target)
     if not profile.supports_kernel_backend(kernel_backend):
         supported = ", ".join(sorted(profile.kernel_backends or ()))
@@ -528,6 +529,7 @@ def _require_backend_builds_for(kernel_backend: str, gpu_target: str) -> None:
             f"kernel backend {kernel_backend!r} does not target {gpu_target} ({profile.family}); "
             f"backends that do: {supported}"
         )
+    return gpu_target
 
 
 def create_campaign_config(
@@ -546,8 +548,7 @@ def create_campaign_config(
     raw_source_paths = _campaign_source_paths(workspace, kernel_path, normalized_sources)
     pristine_sources = _read_pristine_sources(workspace, raw_source_paths, base_commit=resolved_base_commit)
     resolved_kernel_backend = _resolved_kernel_backend(workspace, inputs.kernel_backend, normalized_sources)
-    gpu_target = inputs.gpu_target.strip() or detect_gpu_target()
-    _require_backend_builds_for(resolved_kernel_backend, gpu_target)
+    gpu_target = _resolve_gpu_target(inputs.gpu_target, resolved_kernel_backend)
     resolved_targets = parse_list(inputs.target_functions) or _derive_target_functions(
         workspace,
         normalized_sources,
