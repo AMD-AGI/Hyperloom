@@ -28,7 +28,9 @@ def _dispatcher(phase: str, *, baseline_tput: float = 800.0) -> DispatcherCollab
     state = SharedState(session_id="s")
     state.phase = phase
     state.baseline_tput = baseline_tput
-    no_tasks = SimpleNamespace(queued_context_sync=list, running_context_sync=list)
+    no_tasks = SimpleNamespace(
+        queued_context_sync=list, running_context_sync=list, with_key_prefix_sync=lambda kind, key_prefix: []
+    )
     return DispatcherCollaborator(SimpleNamespace(shared_state=state, tasks=no_tasks))
 
 

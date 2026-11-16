@@ -35,6 +35,7 @@ The source lives under ``src/kernelforge`` in the Hyperloom repository.
     * :doc:`Autonomous overnight loop </kernelforge/how-to/autonomous-loop>`
     * :doc:`Fuse a launch-bound decode path </kernelforge/how-to/kernel-fusion>`
     * :doc:`Debug task preparation </kernelforge/how-to/debug-task-preparation>`
+    * :doc:`Run on a Radeon PRO W7900 (gfx1100) </kernelforge/how-to/radeon-w7900>`
     * :doc:`Add a kernel backend, tool, or knowledge </kernelforge/how-to/extending>`
 
   .. grid-item-card:: Reference

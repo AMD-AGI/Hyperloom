@@ -6,11 +6,22 @@
 from __future__ import annotations
 
 import subprocess
+from dataclasses import replace
 
 import pytest
 
 from hyperloom_common.gpu_identity import AMD_GPU_BOARDS
-from kernelforge.utils.gpu_arch import canon_arch, canonical_gpu_type, detect_arch, product_arch
+from kernelforge.utils import gpu_arch
+from kernelforge.kernel_backends.constants import KERNEL_BACKENDS
+from kernelforge.utils.gpu_arch import (
+    CDNA_OCCUPANCY,
+    Profiler,
+    arch_profile,
+    canon_arch,
+    canonical_gpu_type,
+    detect_arch,
+    product_arch,
+)
 
 
 @pytest.mark.parametrize(
@@ -49,14 +60,17 @@ def test_canon_arch_names_no_target_rather_than_a_wrong_one(value):
         ("MI325X", "mi300x"),
         ("amd instinct mi355x", "mi355x"),
         ("amd_instinct_mi325x", "mi300x"),
-        ("gfx1201", "r9700"),
         ("Radeon 8060S", "radeon8060s"),
-        ("gfx1100", "gfx1100"),
+        ("gfx1030", "gfx1030"),
         ("MI250-X", "mi250_x"),
     ],
 )
 def test_canonical_gpu_type_records_one_chip_under_one_name(value, expected):
     assert canonical_gpu_type(value) == expected
+
+
+def test_gfx1201_keeps_isa_identity_when_board_is_unspecified():
+    assert canonical_gpu_type("gfx1201") == "gfx1201"
 
 
 @pytest.mark.parametrize(
@@ -89,10 +103,21 @@ def test_product_arch_maps_only_an_exact_product_name(value, expected):
 
 @pytest.mark.parametrize("board", AMD_GPU_BOARDS.values(), ids=lambda board: board.product)
 def test_every_board_the_shared_table_knows_is_recorded_under_a_board_of_its_own_target(board):
-    recorded = canonical_gpu_type(board.gfx)
-
-    assert canonical_gpu_type(board.product) == recorded
+    recorded = canonical_gpu_type(board.product)
     assert AMD_GPU_BOARDS[recorded].gfx == board.gfx
+    expected = board.gfx if board.gfx == "gfx1201" else recorded
+    assert canonical_gpu_type(board.gfx) == expected
+
+
+def test_two_boards_sharing_gfx1201_keep_their_product_identity(monkeypatch):
+    r9600d = replace(AMD_GPU_BOARDS["r9700"], product="r9600d")
+    monkeypatch.setitem(AMD_GPU_BOARDS, "r9600d", r9600d)
+    monkeypatch.setitem(gpu_arch._ARCH_BY_GPU_TYPE, "r9600d", "gfx1201")
+
+    assert canon_arch("R9600D") == "gfx1201"
+    assert canonical_gpu_type("r9700") == "r9700"
+    assert canonical_gpu_type("r9600d") == "r9600d"
+    assert canonical_gpu_type("gfx1201") == "gfx1201"
 
 
 def _rocminfo(monkeypatch, *, returncode=0, stdout=""):
@@ -128,3 +153,49 @@ def test_detect_arch_is_empty_without_rocminfo(monkeypatch):
     monkeypatch.setattr(subprocess, "run", _missing)
 
     assert detect_arch() == ""
+
+
+@pytest.mark.parametrize(
+    "gpu_target", ["gfx942", "gfx950", "gfx950:sramecc+:xnack-", "MI355X", "gfx1201", "gfx1151", ""]
+)
+def test_instinct_and_unprofiled_targets_keep_the_instinct_defaults(gpu_target):
+    profile = arch_profile(gpu_target)
+
+    assert profile.hardware_knowledge == "hardware"
+    assert profile.profiler is Profiler.ROCPROF_COMPUTE
+    assert all(profile.supports_kernel_backend(backend) for backend in KERNEL_BACKENDS)
+    assert profile.occupancy is CDNA_OCCUPANCY
+    assert profile.prompt_note == ""
+
+
+@pytest.mark.parametrize("gpu_target", ["gfx1100", "GFX1100", "gfx1100:xnack-", "w7900", "AMD Radeon PRO W7900"])
+def test_gfx1100_has_the_rdna3_profile(gpu_target):
+    profile = arch_profile(gpu_target)
+
+    assert profile.family == "RDNA3"
+    assert profile.hardware_knowledge == "hardware/rdna3"
+    assert profile.profiler is Profiler.ROCPROFV3
+    assert {backend for backend in KERNEL_BACKENDS if profile.supports_kernel_backend(backend)} == {
+        "triton",
+        "hip",
+        "hipblaslt",
+        "ck",
+    }
+    assert profile.occupancy is not CDNA_OCCUPANCY
+    assert "WMMA" in profile.rendered_prompt_note()
+
+
+def test_the_rdna3_note_names_exactly_the_backends_its_profile_admits():
+    """The note's backend sentence is derived from ``kernel_backends``, so the two cannot drift."""
+    note = arch_profile("gfx1100").rendered_prompt_note()
+
+    assert "The kernel backends that build here are ck, hip, hipblaslt, triton." in note
+    assert "{" not in note
+
+
+def test_every_profiled_hardware_pillar_ships_with_its_map():
+    from kernelforge.config.resources import resource_path
+
+    root = resource_path("local_knowledge")
+    for gpu_target in ("gfx942", "gfx950", "gfx1100"):
+        assert (root / arch_profile(gpu_target).hardware_knowledge / "INDEX.md").is_file(), gpu_target

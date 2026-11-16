@@ -19,7 +19,7 @@ from pathlib import Path
 import pytest
 
 from hyperloom.common import env_safety as run_as_mod
-from hyperloom.common.env_safety import RunAsError, resolve_run_as, specialist_run_as
+from hyperloom.common.env_safety import RunAsError, resolve_run_as
 from hyperloom.common.tests._id_map_helpers import HOST_MAP, ONE_ID_MAP, use_id_maps
 
 UNPRIVILEGED = "nobody"
@@ -56,13 +56,8 @@ def _run_as_unprivileged(script: str) -> subprocess.CompletedProcess[str]:
 
 
 @pytest.mark.parametrize("value", [None, "", "   "])
-def test_unset_or_blank_means_no_demote(value, monkeypatch):
+def test_unset_or_blank_means_no_demote(value):
     assert resolve_run_as(value) is None
-    if value is None:
-        monkeypatch.delenv(run_as_mod.SPECIALIST_USER_ENV, raising=False)
-    else:
-        monkeypatch.setenv(run_as_mod.SPECIALIST_USER_ENV, value)
-    assert specialist_run_as() is None
 
 
 def test_unknown_user_is_refused():
@@ -70,10 +65,9 @@ def test_unknown_user_is_refused():
         resolve_run_as("no-such-user-d16")
 
 
-def test_root_is_refused(monkeypatch):
-    monkeypatch.setenv(run_as_mod.SPECIALIST_USER_ENV, "root")
+def test_root_is_refused():
     with pytest.raises(RunAsError, match="uid 0"):
-        specialist_run_as()
+        resolve_run_as("root")
 
 
 @pytest.mark.skipif(not _account_exists(UNPRIVILEGED), reason=f"no {UNPRIVILEGED!r} account")
@@ -239,11 +233,10 @@ def restore_umask() -> Iterator[None]:
         os.umask(saved)
 
 
-def test_resolving_the_user_does_not_touch_the_umask(monkeypatch, restore_umask):
-    monkeypatch.setenv(run_as_mod.SPECIALIST_USER_ENV, UNPRIVILEGED if _account_exists(UNPRIVILEGED) else "root")
+def test_resolving_the_user_does_not_touch_the_umask(restore_umask):
     # Whether the account resolves (non-root runs may be the account) or is refused, the umask must not move.
     with contextlib.suppress(RunAsError):
-        specialist_run_as()
+        resolve_run_as(UNPRIVILEGED if _account_exists(UNPRIVILEGED) else "root")
     assert os.umask(0o022) == 0o022
 
 

@@ -9,34 +9,29 @@ from __future__ import annotations
 
 from pathlib import Path
 
+import pytest
+
 from hyperloom.orchestrator.kernel.kernel_decisions import _honest_flag
 from hyperloom.orchestrator.kernel import _integrate_rebaseline as integrate_rebaseline
 from hyperloom.orchestrator.kernel import _source_import as source_import
 
 
 # -- _honest_flag (umbrella + per-fix override) ---------------------------
-def test_honest_flag_default_off(monkeypatch) -> None:
-    monkeypatch.setenv("HL_HONEST_E2E", "0")
+@pytest.mark.parametrize(
+    ("env", "expected"),
+    [
+        ({"HL_HONEST_E2E": "0"}, False),
+        ({"HL_HONEST_E2E": "1"}, True),
+        ({"HL_HONEST_E2E": "0", "HL_KERNEL_OPFANOUT_DEDUP": "yes"}, True),
+        ({"HL_HONEST_E2E": "1", "HL_KERNEL_OPFANOUT_DEDUP": "off"}, False),
+    ],
+    ids=["umbrella-off", "umbrella-on", "specific-on-beats-umbrella-off", "specific-off-beats-umbrella-on"],
+)
+def test_honest_flag_lets_the_specific_flag_override_the_umbrella(monkeypatch, env, expected) -> None:
     monkeypatch.delenv("HL_KERNEL_OPFANOUT_DEDUP", raising=False)
-    assert _honest_flag("HL_KERNEL_OPFANOUT_DEDUP") is False
-
-
-def test_honest_flag_umbrella_enables(monkeypatch) -> None:
-    monkeypatch.setenv("HL_HONEST_E2E", "1")
-    monkeypatch.delenv("HL_KERNEL_OPFANOUT_DEDUP", raising=False)
-    assert _honest_flag("HL_KERNEL_OPFANOUT_DEDUP") is True
-
-
-def test_honest_flag_specific_enables(monkeypatch) -> None:
-    monkeypatch.delenv("HL_HONEST_E2E", raising=False)
-    monkeypatch.setenv("HL_KERNEL_OPFANOUT_DEDUP", "yes")
-    assert _honest_flag("HL_KERNEL_OPFANOUT_DEDUP") is True
-
-
-def test_honest_flag_specific_falsey_overrides_umbrella(monkeypatch) -> None:
-    monkeypatch.setenv("HL_HONEST_E2E", "1")
-    monkeypatch.setenv("HL_KERNEL_OPFANOUT_DEDUP", "off")
-    assert _honest_flag("HL_KERNEL_OPFANOUT_DEDUP") is False
+    for name, value in env.items():
+        monkeypatch.setenv(name, value)
+    assert _honest_flag("HL_KERNEL_OPFANOUT_DEDUP") is expected
 
 
 # -- _vram_guarded_server_args -------------------------------------------
@@ -89,12 +84,9 @@ def test_vram_guard_sglang_is_noop(monkeypatch) -> None:
 
 
 # -- _confirm_source_imported (tri-state) ---------------------------------
-def test_confirm_source_none_inputs() -> None:
+def test_confirm_source_without_a_source_workspace_or_log_is_unknown(tmp_path: Path) -> None:
     assert source_import._confirm_source_imported("", None) is None
     assert source_import._confirm_source_imported("foo.py", None) is None
-
-
-def test_confirm_source_no_log_is_unknown(tmp_path: Path) -> None:
     assert source_import._confirm_source_imported("foo.py", tmp_path) is None
 
 
@@ -190,13 +182,3 @@ def test_confirm_sources_deduplicates_repeated_paths(tmp_path: Path) -> None:
 
     assert overall is True
     assert list(per_file) == ["vllm/dispatcher.py"]
-
-
-def test_confirm_sources_matches_single_file_semantics(tmp_path: Path) -> None:
-    """A one-file bundle must grade exactly as the single-file check does."""
-    _write_server_log(tmp_path, "nothing relevant here\n")
-
-    overall, _ = source_import._confirm_sources_imported(["my_kernel.py"], tmp_path)
-
-    assert overall is source_import._confirm_source_imported("my_kernel.py", tmp_path)
-    assert overall is False

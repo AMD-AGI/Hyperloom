@@ -27,7 +27,8 @@ Both wait for the measurement to end, so the tick only starts the task and looks
 one of the integration branch's K slots; when the workload's profile would hold that slot as long as a test, the moved
 head is profiled only once a branch opens on it (:attr:`~.settings.Workload.profiles_moved_head_on_merge`). A head whose
 recipe a profile already measured, maybe a branch's of its own commit, is not profiled again: it reads that profile's
-shares. A backend that cannot profile, by refusing the PROFILE, failing it, running
+shares once it ended, and analyses it when no analysis left them. A backend that cannot profile, by refusing the
+PROFILE, failing it, running
 no analysis or leaving a trace no analysis can read, is not asked again in this session: on a backend that refuses after its sandbox is built, every try costs
 a cold start and holds the integration branch's slot. The toolbox's own names are imported where the profile uses
 them: the toolbox loads the main flow's runtime, which importing the session must not.
@@ -52,7 +53,7 @@ from hyperloom_multibranch.contracts.blackboard.records import (
     QuarantineEvent,
 )
 from hyperloom_multibranch.contracts.blackboard.vocab import MergeOutcome
-from hyperloom_multibranch.contracts.toolbox import MeasurementCapacity, RequestRejected, Toolbox
+from hyperloom_multibranch.contracts.toolbox import MeasurementCapacity, RequestRejected, TestWithdrawn, Toolbox
 from hyperloom_multibranch.scheduling.branches import BranchFocus
 from hyperloom_multibranch.scheduling.clock import Clock
 from hyperloom_multibranch.scheduling.decisions import Decision, DecisionKind, DecisionLog
@@ -223,7 +224,7 @@ class IntegrationProfiler:
     TraceLens analysis of that test, whose op shares the ``records`` hold once the analysis has ended. Its bottleneck is
     compared with the shares of the previous profile, or else with those of the head the move started from. Once a
     profile shows the backend cannot profile, no profile starts again. A head the toolbox refuses to profile, because a
-    profile of its recipe exists, takes that profile's shares once its analysis left them.
+    profile of its recipe exists, waits for that profile and takes its recipe's shares, analysing it when none exist.
     """
 
     def __init__(self, toolbox: RealToolbox, tests: SessionTests, records: RecordSearch, clock: Clock) -> None:
@@ -235,7 +236,6 @@ class IntegrationProfiler:
         self._waiting: tuple[str, str] | None = None
         self._shares: OpShares | None = None
         self._available = True
-        self._same_recipe: dict[str, str] = {}
 
     @property
     def running(self) -> bool:
@@ -286,13 +286,9 @@ class IntegrationProfiler:
         return outcome
 
     async def shares_of(self, commit: str) -> OpShares | None:
-        """The op shares of ``commit``: its own, else those of the profile of its recipe the toolbox named when it
-        refused to profile ``commit`` again."""
+        """The op shares of ``commit``: its own, else those of a profiled commit of its recipe."""
 
-        own = await self._records.op_shares(commit)
-        if own is not None or commit not in self._same_recipe:
-            return own
-        return await self._profile_shares(self._same_recipe[commit])
+        return await self._records.op_shares(commit)
 
     async def stop(self) -> None:
         """Cancel the running profile, which takes its PROFILE test back; its analysis goes with the integration
@@ -306,13 +302,6 @@ class IntegrationProfiler:
             await task
 
     async def _profile(self, head: str, moved_from: str, baseline: Awaitable[object] | None = None) -> ProfileOutcome:
-        from hyperloom_multibranch.toolbox.analysis import (
-            CODE_NO_EXECUTOR,
-            CODE_PROFILE_UNVERIFIED,
-            CODE_PROFILE_WITHOUT_TRACE,
-            CODE_TOOL_UNAVAILABLE,
-        )
-
         before = self._shares or await self._records.op_shares(moved_from)
         request = integration_test_request(TestKind.PROFILE, Purpose.PROFILE, head)
         try:
@@ -320,26 +309,29 @@ class IntegrationProfiler:
                 request, lambda request_id: self._analysed(head, request_id, before, baseline)
             )
         except RequestRejected as rejected:
-            detail = {"commit": head, "code": rejected.code, "rejection": rejected.reason}
-            if rejected.code == CODE_PROFILE_UNVERIFIED:
-                return ProfileOutcome(HEAD_MOVED_DURING_PROFILE, detail)
             if rejected.code == PROFILE_EXISTS_CODE:
-                return await self._reused(head, str(rejected.existing_request_id), before, detail)
-            unable = (UNSUPPORTED_KIND, CODE_PROFILE_WITHOUT_TRACE, CODE_NO_EXECUTOR, CODE_TOOL_UNAVAILABLE)
-            if rejected.code in unable:
-                return ProfileOutcome(PROFILE_UNAVAILABLE, detail, available=False)
-            raise
+                return await self._reused(head, rejected, before)
+            return _refused(head, rejected)
 
-    async def _reused(
-        self, head: str, request_id: str, before: OpShares | None, detail: Mapping[str, object]
-    ) -> ProfileOutcome:
-        """The outcome of ``head`` reusing the profile ``request_id`` of its recipe, maybe a specialist branch's."""
+    async def _reused(self, head: str, rejected: RequestRejected, before: OpShares | None) -> ProfileOutcome:
+        """The outcome of ``head`` reusing the profile of its recipe that ``rejected`` names, once that profile ended:
+        the recipe's shares, else those of an analysis of it submitted here. A reused profile that did not succeed
+        leaves the head without shares and says nothing of the backend."""
 
-        self._same_recipe[head] = request_id
-        reused = {**detail, "request_id": request_id}
-        shares = await self._profile_shares(request_id)
+        request_id = str(rejected.existing_request_id)
+        reused = {**_facts(head, rejected), "request_id": request_id}
+        try:
+            result = await self._toolbox.outcome(request_id)
+        except TestWithdrawn as withdrawn:
+            return ProfileOutcome(PROFILE_EXISTS, {**reused, "withdrawn": withdrawn.reason})
+        if result.validity is not Validity.SUCCEEDED:
+            return ProfileOutcome(PROFILE_EXISTS, {**reused, "validity": result.validity.value})
+        shares = await self._records.op_shares(head)
         if shares is None:
-            return ProfileOutcome(PROFILE_EXISTS, reused)
+            try:
+                return await self._analyse(request_id, before, reused, PROFILE_EXISTS)
+            except RequestRejected as refused:
+                return _refused(head, refused)
         self._shares = shares
         return ProfileOutcome(
             PROFILE_EXISTS, {**reused, "largest_op": dict(shares.largest(1))}, bottleneck_moved(before, shares)
@@ -355,11 +347,7 @@ class IntegrationProfiler:
     async def _analysed(
         self, head: str, request_id: str, before: OpShares | None, baseline: Awaitable[object] | None
     ) -> ProfileOutcome:
-        """Analyse the trace of the PROFILE ``request_id`` once it ended, and once ``baseline`` ended when there is one;
-        the toolbox reads the trace off that test's own record."""
-
-        from hyperloom_multibranch.toolbox.tools.base import JobStatus
-        from hyperloom_multibranch.toolbox.tools.roofline import TRACELENS_TOOL
+        """Analyse the trace of the PROFILE ``request_id`` once it ended, and once ``baseline`` ended when there is one."""
 
         result = await self._toolbox.outcome(request_id)
         detail: dict[str, object] = {"commit": head, "request_id": request_id}
@@ -369,6 +357,17 @@ class IntegrationProfiler:
         if baseline is not None:
             await asyncio.wait([asyncio.ensure_future(baseline)])  # a failed baseline is PRELUDE's to raise, not ours
             detail.update(after_baseline=True)
+        return await self._analyse(request_id, before, detail, PROFILED)
+
+    async def _analyse(
+        self, request_id: str, before: OpShares | None, detail: dict[str, object], reason: str
+    ) -> ProfileOutcome:
+        """The outcome ``reason`` of a TraceLens analysis of the PROFILE ``request_id``, which ended successfully, with
+        the shares it left; ``detail`` holds the decision's facts so far."""
+
+        from hyperloom_multibranch.toolbox.tools.base import JobStatus
+        from hyperloom_multibranch.toolbox.tools.roofline import TRACELENS_TOOL
+
         job = await self._toolbox.submit_analysis(INTEGRATION_BRANCH, TRACELENS_TOOL, {}, request_id)
         while self._toolbox.tool_status(job) is JobStatus.RUNNING:
             await self._clock.sleep(ANALYSIS_POLL_SECONDS)
@@ -385,7 +384,28 @@ class IntegrationProfiler:
             return ProfileOutcome(PROFILE_NOT_ANALYSED, detail)
         self._shares = shares
         detail.update(largest_op=dict(shares.largest(1)))
-        return ProfileOutcome(PROFILED, detail, bottleneck_moved(before, shares))
+        return ProfileOutcome(reason, detail, bottleneck_moved(before, shares))
+
+
+def _facts(head: str, rejected: RequestRejected) -> dict[str, object]:
+    return {"commit": head, "code": rejected.code, "rejection": rejected.reason}
+
+
+def _refused(head: str, rejected: RequestRejected) -> ProfileOutcome:
+    """The outcome of a profile or an analysis of ``head`` the toolbox refused; a refusal no profile expects raises."""
+
+    from hyperloom_multibranch.toolbox.analysis import (
+        CODE_NO_EXECUTOR,
+        CODE_PROFILE_UNVERIFIED,
+        CODE_PROFILE_WITHOUT_TRACE,
+        CODE_TOOL_UNAVAILABLE,
+    )
+
+    if rejected.code == CODE_PROFILE_UNVERIFIED:
+        return ProfileOutcome(HEAD_MOVED_DURING_PROFILE, _facts(head, rejected))
+    if rejected.code in (UNSUPPORTED_KIND, CODE_PROFILE_WITHOUT_TRACE, CODE_NO_EXECUTOR, CODE_TOOL_UNAVAILABLE):
+        return ProfileOutcome(PROFILE_UNAVAILABLE, _facts(head, rejected), available=False)
+    raise rejected
 
 
 def _slot(quarantine: QuarantineEvent) -> tuple[str, tuple[int, ...]]:

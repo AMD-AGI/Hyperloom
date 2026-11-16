@@ -112,6 +112,8 @@ subtrees:
     title: Fuse a launch-bound decode path
   - file: kernelforge/how-to/debug-task-preparation.md
     title: Debug task preparation
+  - file: kernelforge/how-to/radeon-w7900.md
+    title: Run on a Radeon PRO W7900 (gfx1100)
   - file: kernelforge/how-to/extending.md
     title: Add a kernel backend, tool, or knowledge
   - file: kernelforge/reference/cli.md

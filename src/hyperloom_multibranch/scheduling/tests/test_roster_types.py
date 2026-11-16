@@ -40,7 +40,12 @@ def test_cap_counts_admitted_and_running_specialists_only() -> None:
 
 def test_k_is_cut_to_one_through_the_cap() -> None:
     caps = RosterCaps(max_branches=4, max_k_per_branch=2, max_parallel_tests=8)
-    assert [caps.clamp_k(k) for k in (-3, 0, 1, 2, 9)] == [1, 1, 1, 2, 2]
+    assert [caps.clamp_k(k, BranchKind.SPECIALIST) for k in (-3, 0, 1, 2, 9)] == [1, 1, 1, 2, 2]
+
+
+def test_the_integration_branchs_k_is_cut_by_the_tests_in_flight_not_by_the_per_branch_cap() -> None:
+    caps = RosterCaps(max_branches=4, max_k_per_branch=1, max_parallel_tests=8)
+    assert [caps.clamp_k(k, BranchKind.INTEGRATION) for k in (0, 1, 2, 9)] == [1, 1, 2, 8]
 
 
 @pytest.mark.parametrize("field", ["max_branches", "max_k_per_branch", "max_parallel_tests"])

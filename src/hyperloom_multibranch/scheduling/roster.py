@@ -155,7 +155,9 @@ def specialist_open(entries: Iterable[BranchEntry]) -> bool:
 
 @dataclass(frozen=True)
 class RosterCaps:
-    """The hard limits the judge's decisions are cut to."""
+    """The hard limits the judge's decisions are cut to. ``max_k_per_branch`` bounds the K of a specialist's branch;
+    the integration branch is the scheduler's own lane for merge tests and the head's profiles, which only
+    ``max_parallel_tests`` bounds."""
 
     max_branches: int
     max_k_per_branch: int
@@ -166,10 +168,11 @@ class RosterCaps:
             if getattr(self, name) < 1:
                 raise ValueError(f"{name} must be at least 1, got {getattr(self, name)}")
 
-    def clamp_k(self, k: int) -> int:
-        """``k`` cut to ``[1, max_k_per_branch]``; a branch is brought to no tests by stopping it."""
+    def clamp_k(self, k: int, kind: BranchKind) -> int:
+        """``k`` cut to ``[1, ceiling]`` for a branch of ``kind``; a branch is brought to no tests by stopping it."""
 
-        return min(max(k, 1), self.max_k_per_branch)
+        ceiling = self.max_parallel_tests if kind is BranchKind.INTEGRATION else self.max_k_per_branch
+        return min(max(k, 1), ceiling)
 
 
 class RosterFull(RuntimeError):
@@ -273,7 +276,7 @@ class Roster:
             BranchKind.INTEGRATION,
             BranchOrigin.ROOT,
             root_commit,
-            self.caps.clamp_k(k),
+            self.caps.clamp_k(k, BranchKind.INTEGRATION),
             self._clock.now(),
         )
         return self._add(entry)
@@ -291,7 +294,7 @@ class Roster:
             BranchKind.SPECIALIST,
             origin,
             start_commit,
-            self.caps.clamp_k(k),
+            self.caps.clamp_k(k, BranchKind.SPECIALIST),
             self._clock.now(),
             from_branch=from_branch,
         )
@@ -303,7 +306,8 @@ class Roster:
         return self._update(self._live(branch), start_commit=start_commit)
 
     def set_k(self, branch: str, k: int) -> BranchEntry:
-        return self._update(self._live(branch), k=self.caps.clamp_k(k))
+        entry = self._live(branch)
+        return self._update(entry, k=self.caps.clamp_k(k, entry.kind))
 
     def stop(self, branch: str, stop: BranchStop) -> BranchEntry:
         """Stops ``branch``; stopping it again keeps the first stop."""

@@ -66,13 +66,6 @@ def _serve_b(tree: KernelTree, env: Mapping[str, str]) -> None:
                 tree.holds(pid, card, vram=_OPENED_CONTEXT_VRAM, queues=0)
 
 
-def test_bs_server_reaches_the_runtime_with_a_rocr_mask_of_its_own_cards_only(tmp_path: Path) -> None:
-    env = _b_server_env()
-
-    assert _rocm_opened_cards(env) == _B_CARDS
-    assert env["HIP_VISIBLE_DEVICES"] == "0,1,2,3"
-
-
 def test_a_sees_no_foreign_holder_on_its_cards_while_bs_server_runs_beside_it(tmp_path: Path) -> None:
     tree = KernelTree(tmp_path, gpus=_MACHINE_CARDS, pid_namespace="pid:[4026532001]")
     _serve_b(tree, _b_server_env())

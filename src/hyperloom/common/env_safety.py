@@ -14,7 +14,6 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Iterable, MutableMapping, Sequence
 from hyperloom_common.credential_names import env_name_spelled_by, is_credential_env_name
-from hyperloom_common.env import env_str
 from hyperloom_common.git_safety import trusted_admin_dir
 from hyperloom_common.fs_utils import rewrite_lines_nofollow
 
@@ -876,11 +875,6 @@ def resolve_run_as(user: str | None) -> RunAs | None:
     return RunAs(
         user=entry.pw_name, uid=entry.pw_uid, gid=entry.pw_gid, groups=groups, home=entry.pw_dir, drop_tool=drop_tool
     )
-
-
-def specialist_run_as() -> RunAs | None:
-    """Resolve ``HYPERLOOM_SPECIALIST_USER``; ``None`` (today's behaviour) when unset or blank. No side effects."""
-    return resolve_run_as(env_str(SPECIALIST_USER_ENV))
 
 
 _CAPABILITIES = {"CAP_KILL": 5, "CAP_SETGID": 6, "CAP_SETUID": 7}

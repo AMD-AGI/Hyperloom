@@ -436,19 +436,24 @@ class _RenderMixin:
         ranked.sort(key=lambda r: (-r[0], -r[1], -r[2]))
         return [row for _, _, _, row in ranked]
 
-    def to_untested_proposals_summary(self, *, skip_provenance: str = "", in_grids: Collection[str] = ()) -> str:
+    def to_untested_proposals_summary(
+        self, *, skip_provenance: str = "", in_grids: Collection[str] = (), carried: Collection[str] = ()
+    ) -> str:
         """Render the specialist proposals still waiting for a benchmark slot.
 
         Args:
             skip_provenance: Leave out the rows a producer with its own section renders.
             in_grids: Content fingerprints of the variants in queued or running explore grids. Such a row is
                 already on its way to a bench, so it is named rather than listed as waiting.
+            carried: Content fingerprints of the variants finished automatic explore grids carried. Such a row
+                ended without a verdict and is not benched again, so it is named rather than listed as waiting.
         """
         rows = [
             row for row in self.untested_proposal_rows() if not skip_provenance or row["provenance"] != skip_provenance
         ]
-        waiting = [row for row in rows if row["fingerprint"] not in in_grids]
+        waiting = [row for row in rows if row["fingerprint"] not in in_grids and row["fingerprint"] not in carried]
         held = [row["name"] for row in rows if row["fingerprint"] in in_grids]
+        ended = [row["name"] for row in rows if row["fingerprint"] in carried and row["fingerprint"] not in in_grids]
         out: list[str] = []
         if waiting:
             out.extend(
@@ -469,6 +474,15 @@ class _RenderMixin:
                 _flatten_for_prompt(
                     "Specialist proposals already in a queued or running explore grid (its progress is in that task's "
                     "line of the tasks in flight): " + ", ".join(held)
+                )
+            )
+        if ended:
+            if out:
+                out.append("")
+            out.append(
+                _flatten_for_prompt(
+                    "Specialist proposals an automatic explore grid carried to its end without a verdict; the "
+                    "Coordinator does not bench them again: " + ", ".join(ended)
                 )
             )
         return "\n".join(out)

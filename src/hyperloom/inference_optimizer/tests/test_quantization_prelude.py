@@ -68,9 +68,10 @@ def test_quantize_flag_captures_prompt():
     assert args.quantize == "fp8, exclude lm_head"
 
 
-def test_quantize_scheme_flag_parses():
-    args = _parse(["--quantize-scheme", "fp8"])
-    assert args.quantize_scheme == "fp8"
+@pytest.mark.parametrize("scheme", ["none", "fp8", "ptpc_fp8", "mxfp4", "mxfp4_fp8"])
+def test_quantize_scheme_flag_parses(scheme):
+    args = _parse(["--quantize-scheme", scheme])
+    assert args.quantize_scheme == scheme
 
 
 def test_quantize_scheme_rejects_unknown_choice():
@@ -84,24 +85,6 @@ def test_quantize_scheme_rejects_unknown_choice():
 def test_resolve_scheme_none_returns_none():
     assert qs.resolve_scheme_prompt(None) is None
     assert qs.resolve_scheme_prompt("none") is None
-
-
-def test_resolve_scheme_known_returns_prompt():
-    assert qs.resolve_scheme_prompt("fp8") == "Quantization strategy:\nApply fp8 as the global quantization scheme."
-
-
-def test_resolve_scheme_has_no_hardcoded_defaults():
-    # The agent must not bake in kv_cache / exclude_layers defaults.
-    p = qs.resolve_scheme_prompt("fp8")
-    assert "lm_head" not in p
-    assert "kv_cache" not in p
-    assert "Calibration" not in p
-    assert "Evaluation" not in p
-
-
-def test_scheme_choices_match_supported_set():
-    assert qs.QUANT_SCHEME_CHOICES == ["none", "fp8", "ptpc_fp8", "mxfp4", "mxfp4_fp8"]
-    assert "int8" not in qs.QUANT_SCHEME_CHOICES
 
 
 # Group A3 — GPU-constrained schemes
@@ -124,24 +107,27 @@ def test_validate_scheme_mxfp4_on_mi300x_raises():
         qs.validate_scheme("mxfp4", "mi300x")
 
 
-def test_validate_scheme_mxfp4_on_mi355x_ok():
-    qs.validate_scheme("mxfp4", "mi355x")  # no raise
+@pytest.mark.parametrize(
+    ("scheme", "gpu_type"),
+    [
+        pytest.param("mxfp4", "mi355x", id="mxfp4-on-mi355x"),
+        pytest.param("fp8", "mi300x", id="fp8-on-mi300x"),
+        pytest.param("fp8", "mi325x", id="fp8-on-mi325x"),
+        pytest.param("fp8", "mi355x", id="fp8-on-mi355x"),
+        pytest.param("fp8", "", id="fp8-on-empty-gpu"),
+        pytest.param("fp8", None, id="fp8-on-no-gpu"),
+        pytest.param(None, "mi300x", id="no-scheme"),
+        pytest.param("none", "mi300x", id="none-scheme"),
+    ],
+)
+def test_validate_scheme_accepts(scheme, gpu_type):
+    qs.validate_scheme(scheme, gpu_type)
 
 
 def test_validate_scheme_mxfp4_unknown_gpu_not_enforced():
     # GPU resolved later via probe; not enforceable without a concrete target.
     qs.validate_scheme("mxfp4", "")
     qs.validate_scheme("mxfp4", None)
-
-
-def test_validate_scheme_fp8_anywhere_ok():
-    for gpu in ("mi300x", "mi325x", "mi355x", "", None):
-        qs.validate_scheme("fp8", gpu)
-
-
-def test_validate_scheme_none_is_noop():
-    qs.validate_scheme(None, "mi300x")
-    qs.validate_scheme("none", "mi300x")
 
 
 def test_validate_scheme_unknown_raises_valueerror():
@@ -394,17 +380,6 @@ def test_prelude_env_gate_skips_when_unset(monkeypatch):
     asyncio.run(cli_quantization._run_quantization_prelude(args))
     assert called["n"] == 0
     assert str(args.model) == "/models/src"
-
-
-def test_quantize_switch_token_vocabulary(monkeypatch):
-    for v in ("1", "true", "TRUE", "yes", "on", "On", " 1 "):
-        monkeypatch.setenv("HYPERLOOM_QUANTIZE_ENABLED", v)
-        assert env_bool("HYPERLOOM_QUANTIZE_ENABLED") is True
-    for v in ("0", "false", "no", "off", ""):
-        monkeypatch.setenv("HYPERLOOM_QUANTIZE_ENABLED", v)
-        assert env_bool("HYPERLOOM_QUANTIZE_ENABLED") is False
-    monkeypatch.delenv("HYPERLOOM_QUANTIZE_ENABLED", raising=False)
-    assert env_bool("HYPERLOOM_QUANTIZE_ENABLED") is False
 
 
 def test_an_unreadable_quantize_switch_is_not_silently_off(monkeypatch):

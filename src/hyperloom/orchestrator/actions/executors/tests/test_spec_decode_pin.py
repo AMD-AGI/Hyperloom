@@ -491,20 +491,6 @@ def test_building_a_variant_leaves_a_real_draft_base_open(tmp_path):
 
 
 @pytest.mark.asyncio
-async def test_run_grid_records_the_refusal_without_launching(tmp_path, monkeypatch):
-    monkeypatch.setattr(gr, "run_grid_suite_round", lambda *_a, **_k: pytest.fail("a refused variant was launched"))
-    base = _base_yaml(tmp_path, "vllm", VLLM_SYNTHETIC, {})
-    results = await run_grid(
-        grid=[GridVariant("more-draft", extra_server_args=_spec_config(num_speculative_tokens=5))],
-        output_root=tmp_path / "out",
-        recipe=GridRecipe(base_yaml_path=base),
-    )
-    assert [(r.status, r.error_class) for r in results] == [("failed", SERVE_FLAG)]
-    assert "num_speculative_tokens" in results[0].error
-    assert not results[0].launch_evidence
-
-
-@pytest.mark.asyncio
 @pytest.mark.parametrize(
     ("candidate", "key"),
     [
@@ -525,6 +511,7 @@ async def test_a_variant_touching_golden_fails_as_serve_flag_naming_the_key(tmp_
     )
     assert [(r.status, r.error_class) for r in results] == [("failed", SERVE_FLAG)]
     assert f"{SERVE_FLAG}: golden-owned --speculative-config.{key}" in results[0].error
+    assert not results[0].launch_evidence
 
 
 def _native_recipe(

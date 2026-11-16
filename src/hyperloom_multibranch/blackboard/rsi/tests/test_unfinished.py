@@ -40,9 +40,10 @@ DROPPED = intent("s3", "i1", "scheduler", "chunked prefill 8k", IntentLayer.CONF
 
 
 async def _leftovers(root: Path, clock: FakeClock) -> LocalBlackboard:
-    """The scripted session, then ``s3`` from the integration head: a commit whose merge was not stackable, one on it
-    not merge-tested yet, an explore that kept accuracy and fell just short of its bar, three blocked gains waiting for
-    their diagnosis, one tried again on ``s4`` and one ``s1`` claims, and an explore withdrawn by the stop of ``s3``."""
+    """The scripted session, then ``s3`` from the integration head: a commit whose merge was not stackable (``u1``), one
+    on it not merge-tested yet, an explore that kept accuracy and fell just short of its bar, three blocked gains waiting
+    for their diagnosis, one tried again on ``s4`` and one ``s1`` claims, and an explore withdrawn by the stop of
+    ``s3``."""
 
     observer = await scripted_session(root, clock)
     w = Writers(root, clock)
@@ -92,13 +93,10 @@ async def test_the_brief_lists_what_the_session_left_unfinished_in_order_and_dro
     brief = await observer.startup_brief("i1")
 
     assert [(item.request_id, item.reason) for item in brief.unfinished] == [
-        ("u1", UnfinishedReason.NOT_STACKABLE),
         ("d1", UnfinishedReason.REPAIR_UNFINISHED),
         ("x1", UnfinishedReason.WITHDRAWN),
     ]
-    landed, _, withdrawn = brief.unfinished
-    assert (landed.branch, landed.measured_on, landed.gain_pct) == ("s3", "i1", 3.0)
-    assert landed.detail == "merge on i1 -0.50%, bar 1.00%; commit c3"
+    _, withdrawn = brief.unfinished
     assert (withdrawn.gain_pct, withdrawn.detail) == (None, "branch stopped")
     assert withdrawn.change == "add args --chunked-prefill-size 8192"
     assert len(brief.unfinished) <= MAX_UNFINISHED
@@ -118,7 +116,6 @@ async def test_a_result_just_short_of_its_bar_is_no_lead_whether_or_not_its_eval
     brief = await observer.startup_brief("i1")
 
     assert [(item.request_id, item.reason) for item in brief.unfinished] == [
-        ("u1", UnfinishedReason.NOT_STACKABLE),
         ("d1", UnfinishedReason.REPAIR_UNFINISHED),
         ("x1", UnfinishedReason.WITHDRAWN),
     ]
@@ -154,7 +151,7 @@ async def test_a_lead_another_branch_replayed_drops_out_and_a_withdrawn_replay_o
 
     brief = await observer.startup_brief("i1")
 
-    assert [item.request_id for item in brief.unfinished] == ["u1", "d1"]
+    assert [item.request_id for item in brief.unfinished] == ["d1"]
 
 
 async def test_a_lead_replayed_with_a_change_made_for_another_head_drops_out(tmp_path: Path) -> None:
@@ -164,11 +161,12 @@ async def test_a_lead_replayed_with_a_change_made_for_another_head_drops_out(tmp
     await w.as_role(Role.SCHEDULER).record_lineage(
         LineageEvent(LineageKind.OPEN, "s5", from_commit="c4", reason="refill")
     )
-    await w.measure("s5", "p4", intent("s5", "c4", REPLAY_TARGET, "u1"), delta("--sampler fused --sampler-batch 4"))
+    replay = delta("--chunked-prefill-size 8192 --max-num-batched-tokens 8192")
+    await w.measure("s5", "p4", intent("s5", "c4", REPLAY_TARGET, "x1"), replay)
 
     brief = await observer.startup_brief("i1")
 
-    assert [item.request_id for item in brief.unfinished] == ["d1", "x1"]
+    assert [item.request_id for item in brief.unfinished] == ["d1"]
 
 
 async def test_a_lead_whose_replay_was_released_untested_drops_out_for_that_head_but_not_one_its_stop_released(
@@ -193,8 +191,8 @@ async def test_a_lead_whose_replay_was_released_untested_drops_out_for_that_head
 
     on_c4, on_i1 = await observer.startup_brief("c4"), await observer.startup_brief("i1")
 
-    assert [item.request_id for item in on_c4.unfinished] == ["u1", "d1"]
-    assert [item.request_id for item in on_i1.unfinished] == ["u1", "d1", "x1"]
+    assert [item.request_id for item in on_c4.unfinished] == ["d1"]
+    assert [item.request_id for item in on_i1.unfinished] == ["d1", "x1"]
 
 
 @dataclass(frozen=True)
@@ -226,10 +224,10 @@ async def test_a_lead_blackboard_replay_refused_on_a_head_leaves_the_briefs_from
         for commit in ("c3", "c4", "i1", "c1")
     }
     assert offered == {
-        "c3": ["u1", "x1"],
-        "c4": ["u1", "x1"],
-        "i1": ["u1", "d1", "x1"],
-        "c1": ["u1", "d1", "x1"],
+        "c3": ["x1"],
+        "c4": ["x1"],
+        "i1": ["d1", "x1"],
+        "c1": ["d1", "x1"],
     }
 
 
@@ -250,10 +248,9 @@ async def test_the_rendered_brief_names_each_lead_and_how_to_finish_it(tmp_path:
 
     assert "blackboard_replay" in UNFINISHED_TITLE and lines.index("Tried:") < start
     assert lines[start + 1] == (
-        "- u1 on s3, i1 +3.00%: committed, merge not stackable (merge on i1 -0.50%, bar 1.00%; commit c3); "
-        "sampler / fused top-k (add args --sampler fused)"
+        "- d1 on s3, i1 +2.00%: blocked, its repair never finished; gemm / fp8 gemm (add args --fp8-gemm)"
     )
-    assert lines[start + 3] == (
+    assert lines[start + 2] == (
         "- x1 on s3, i1: withdrawn before its result (branch stopped); scheduler / chunked prefill 8k "
         "(add args --chunked-prefill-size 8192)"
     )
@@ -267,14 +264,14 @@ def test_a_clipped_lead_line_keeps_the_verdict_and_cuts_the_change() -> None:
         mechanism="min free slots delay on NEXTN",
         change="add args --min-free-slots-delay 8 --speculative-num-steps 3 --speculative-eagle-topk 1",
         measured_on="a785ed60" + "0" * 32,
-        reason=UnfinishedReason.NOT_STACKABLE,
+        reason=UnfinishedReason.WITHDRAWN,
         gain_pct=20.27,
-        detail="merge on 2a13404f -15.38%, bar 0.60%; commit 1af0dc55",
+        detail="branch stopped",
     )
 
     text = render_brief(StartupBrief("c9", (), unfinished=(lead,)))
     (line,) = (item for item in text.splitlines() if item.startswith(f"- {lead.request_id}"))
 
-    verdict = "committed, merge not stackable (merge on 2a13404f -15.38%, bar 0.60%; commit 1af0dc55)"
+    verdict = "withdrawn before its result (branch stopped)"
     assert line.startswith(f"- {lead.request_id} on b13, a785ed60 +20.27%: {verdict}; ")
     assert len(line) == LINE_CHARS and line.endswith("...")

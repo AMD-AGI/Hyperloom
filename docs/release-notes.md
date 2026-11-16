@@ -20,6 +20,52 @@ Merged to `main` and not yet carried by a tagged release. Each entry moves
 into the [release](https://github.com/AMD-AGI/Hyperloom/releases) that ships
 it.
 
+- **A multi-branch session runs on MI325X.** `hyperloom-multibranch run`
+  accepts `--gpu-type mi325x`. Before, it refused MI325X, a limit left from
+  Magpie, which had no benchmark script of MI325X's own; InferenceSuite
+  measures MI325X as it measures the other boards. A Qwen3-14B-FP8 InferenceX
+  session (SGLang, TP1) and a DeepSeek-V4.1-Flash AgentX session (vLLM, TP4)
+  each ran its 12 hours to the end on an 8-GPU MI325X node.
+- **A multi-branch InferenceX session caches its branches' prompts for an
+  hour.** Each branch's Claude CLI now runs with `CLAUDE_CODE_PROMPT_CACHE_TTL`
+  and `CLAUDE_CODE_SUBAGENT_PROMPT_CACHE_TTL` at `1h` on an InferenceX
+  workload, and at the CLI's default `5m` on an AgentX one. Either variable set
+  in the session's environment wins, and now reaches a single-lineage
+  specialist too. Before, the specialist allowlist dropped both, so every
+  specialist ran at `5m`, and a branch that waited past 5 minutes for its test
+  wrote its whole conversation to the cache again. In a 12-hour Qwen3-14B
+  InferenceX session on MI325X those rewrites were 74% of the cache writes, and
+  the same calls priced at `1h` cost 20% less.
+- **A component agent's own commits work in an agent sandbox.** An agent
+  sandbox's home, bubblewrap or hosted, has no git config and the sandbox kept
+  no git identity, so a component agent that commits its own checkpoints
+  failed its first commit with `Author identity unknown`, and its share branch
+  never started. The sandbox's commands now carry an agent git identity
+  (`hyperloom-agent`), apart from the session's own (`hyperloom-multibranch`).
+- **A new specialist waits while the untested-proposal queue is full.** In
+  FRAMEWORK_AGENT, a `specialist` delegate is refused with `policy_denied`
+  rule `specialist_untested_backlog_full` while 8 proposals, twice the
+  Coordinator's 4-variant automatic grid, wait for a bench: the
+  `untested proposals` count of Orchestration's queued backlog. Proposals in a
+  queued or running explore grid, or carried by a finished automatic one, do
+  not count. Nothing is refused on the way into the queue: a specialist
+  already queued or running still records every proposal it returns. Before,
+  Orchestration could keep dispatching specialists faster than the benchmark
+  lane benched their proposals, paying a full agent run for each while the
+  proposals waited unmeasured until the macro cycle ended. The Coordinator's
+  stalled-domain specialist is held back the same way; the operator-defined
+  custom specialist is not.
+- **The automatic bench moves past a grid that ended without a verdict.**
+  When the automatic explore grid of the untested-proposal queue's head ended
+  without a verdict for any of its proposals (its round failed or was
+  cancelled, or it refused every variant), the Coordinator computed the same
+  head on every later tick and enqueued nothing, so every proposal behind it
+  waited until a new specialist round reordered the queue or the macro cycle
+  ended. The next automatic grid now takes the proposals behind it. The ones
+  the ended grid carried are not benched again, and Orchestration's
+  untested-proposal section names them on a line of their own instead of
+  listing them as waiting.
+
 - **A multi-branch AgentX session with a component agent needs no launch
   flag.** `hyperloom-multibranch run --autonomous-agent` now serves every
   component agent (an agent an installed adapter recognises) the session's

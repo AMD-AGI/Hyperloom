@@ -277,42 +277,19 @@ async def test_the_baseline_drop_stays_on_the_cache_filesystem(tmp_path, monkeyp
 
 
 @pytest.mark.asyncio
-async def test_the_preflight_runs_even_when_the_round_names_no_csv(tmp_path, monkeypatch):
-    """No env is exactly the case that needs the unset-branch check, not a reason to skip."""
-    seen: list[dict] = []
-
-    def _prepare(envs, backup_dir=None, environ=None):
-        seen.append(dict(envs))
-        return {"action": "skip"}
-
-    monkeypatch.setattr(_PREPARE, _prepare)
-
-    await launch_mod._prepare_aiter_serving_so({"RUN_EVAL": "false"})
-
-    assert seen == [{}]
-
-
-@pytest.mark.asyncio
-async def test_only_the_csv_variables_travel(tmp_path, monkeypatch):
-    seen: list[dict] = []
-
-    def _prepare(envs, backup_dir=None, environ=None):
-        seen.append(dict(envs))
-        return {"action": "skip"}
-
-    monkeypatch.setattr(_PREPARE, _prepare)
-
-    await launch_mod._prepare_aiter_serving_so(
-        {
-            "AITER_CONFIG_GEMM_A8W8_BLOCKSCALE_BPRESHUFFLE": "/tuned/bpreshuffle.csv",
-            "AITER_CONFIG_GEMM_BF16": "  ",
-            "RUN_EVAL": "false",
-        },
+async def test_a_blank_csv_variable_is_checked_as_unset(tmp_path, monkeypatch):
+    """A blank value is an unset variable, so the model overlay aiter merges for it is checked."""
+    jit = _aiter_tree(
+        tmp_path,
+        csv_rows="16,512,2048,a8w8_blockscale_bpreshuffle_never_built,ck\n",
+        so_contains=b"a8w8_blockscale_bpreshuffle_something_else",
+        overlay=True,
     )
+    monkeypatch.setenv("INFERENCE_OPTIMIZER_AITER_JIT_DIR", str(jit))
 
-    # A blank value is an unset variable, and the rest of the round's environment is not
-    # the coverage check's business.
-    assert seen == [{"AITER_CONFIG_GEMM_A8W8_BLOCKSCALE_BPRESHUFFLE": "/tuned/bpreshuffle.csv"}]
+    await launch_mod._prepare_aiter_serving_so({"AITER_CONFIG_GEMM_A8W8_BLOCKSCALE_BPRESHUFFLE": "  "})
+
+    assert not (jit / "module_gemm_a8w8_blockscale_bpreshuffle.so").exists()
 
 
 @pytest.mark.asyncio

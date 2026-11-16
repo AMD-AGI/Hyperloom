@@ -1025,7 +1025,7 @@ class LocalBlackboard(
         claims = self._leases.all_current()
         held = {claim.key.intent_fingerprint for claim in claims if is_live(claim, now)}
         refused = refused_replays(claims, view, start_commit)
-        unfinished = unfinished_leads(state, view, held, refused)
+        unfinished = unfinished_leads(state, held, refused)
         return replace(views.startup_brief(state, view, start_commit), unfinished=unfinished)
 
     async def search(self, query: str, *, limit: int = 20) -> tuple[SearchHit, ...]:

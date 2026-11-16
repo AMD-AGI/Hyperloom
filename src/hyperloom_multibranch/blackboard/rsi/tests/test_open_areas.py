@@ -7,24 +7,28 @@ from __future__ import annotations
 
 import dataclasses
 import json
+from collections.abc import Mapping
 
 from hyperloom_multibranch.contracts.blackboard import INTEGRATION_BRANCH
 from hyperloom_multibranch.contracts.blackboard.exhausted import EXHAUSTED_PREFIX, ExhaustedWhy, latest_exhausted
-from hyperloom_multibranch.contracts.blackboard.peers import Intent, IntentLayer
+from hyperloom_multibranch.contracts.blackboard.peers import Intent, IntentLayer, TestKind, Validity
 from hyperloom_multibranch.contracts.blackboard.records import (
     BlackboardSnapshot,
     BranchLogRecord,
     BranchNode,
+    CommitNode,
     CommittedCommit,
     MapDirection,
     OpShares,
+    TestRecord,
 )
-from hyperloom_multibranch.contracts.blackboard.vocab import ClaimStatus, LineageKind
+from hyperloom_multibranch.contracts.blackboard.vocab import ClaimStatus, CommitOrigin, LineageKind
 from hyperloom_multibranch.contracts.branch_log import BranchLogEntry, BranchLogType
 from hyperloom_multibranch.blackboard.rsi.open_areas import FocusHistory, OpenOp, open_areas, stopped_on_focus
 from hyperloom_multibranch.blackboard.rsi.playbook import H0, replaced
 from hyperloom_multibranch.blackboard.rsi.session import judge_open_areas
 from hyperloom_multibranch.blackboard.rsi.tests.trees import branch, tree
+from hyperloom_multibranch.blackboard.tests.factories import intent, request, result
 from hyperloom_multibranch.blackboard.tests.sessions import METRIC
 
 HOUR = 3600.0
@@ -315,6 +319,51 @@ def test_an_op_exhausted_on_an_older_head_opens_again_once_the_integration_head_
     assert not moved.spent and ALLREDUCE in [item.op for item in moved.ops]
 
 
+def _recipes(snapshot: BlackboardSnapshot, digests: Mapping[str, str]) -> BlackboardSnapshot:
+    """``snapshot`` with each commit of ``digests`` holding that recipe digest, as a branch commit when it is new."""
+
+    commits = tuple(
+        dataclasses.replace(node, recipe_digest=digests.get(node.commit_id, node.recipe_digest))
+        for node in snapshot.lineage.commits
+    )
+    known = {node.commit_id for node in commits}
+    added = tuple(
+        CommitNode(commit, "c0", "b9", CommitOrigin.COMMIT, recipe_digest=digest)
+        for commit, digest in digests.items()
+        if commit not in known
+    )
+    return dataclasses.replace(snapshot, lineage=dataclasses.replace(snapshot.lineage, commits=(*commits, *added)))
+
+
+def test_an_op_given_up_on_a_commit_of_the_integration_heads_recipe_is_spent_as_on_the_head_itself(
+    snapshot: BlackboardSnapshot,
+) -> None:
+    def gave_up_at(digest: str) -> BlackboardSnapshot:
+        worked = _recipes(_worked(snapshot, _focused("b9", ALLREDUCE)), {"i1": "sha256:head", "k9": digest})
+        return _gave_up(_exhausted(worked, "b9", ExhaustedWhy.ALL_TESTED_OR_CLAIMED, "k9"), "b9")
+
+    same = open_areas(gave_up_at("sha256:head"), seconds_left=4 * HOUR, first_commit_minutes=42.0)
+    other = open_areas(gave_up_at("sha256:other"), seconds_left=4 * HOUR, first_commit_minutes=42.0)
+
+    record = same.spent[ALLREDUCE].exhausted
+    assert record is not None and record.head == "k9" and ALLREDUCE not in [item.op for item in same.ops]
+    assert not other.spent and ALLREDUCE in [item.op for item in other.ops]
+
+
+def test_branches_opened_on_a_commit_of_the_integration_heads_recipe_spend_its_focus_as_on_the_head(
+    snapshot: BlackboardSnapshot,
+) -> None:
+    def opened_on(digest: str) -> BlackboardSnapshot:
+        branches = (_focused("b5", ALLREDUCE, start="k8"), _focused("b6", ALLREDUCE, start="k8"))
+        return _recipes(_worked(snapshot, *branches), {"i1": "sha256:head", "k8": digest})
+
+    same = open_areas(opened_on("sha256:head"), seconds_left=4 * HOUR, first_commit_minutes=42.0)
+    other = open_areas(opened_on("sha256:other"), seconds_left=4 * HOUR, first_commit_minutes=42.0)
+
+    assert dict(same.spent) == {ALLREDUCE: FocusHistory(2, 2)}
+    assert not other.spent and ALLREDUCE in [item.op for item in other.ops]
+
+
 def test_too_little_time_left_for_a_first_commit_says_to_open_no_branch(snapshot: BlackboardSnapshot) -> None:
     worked = _worked(snapshot)
 
@@ -341,6 +390,69 @@ def test_without_a_profile_the_open_areas_say_so_and_the_judge_reads_them_once_t
         .render()
         .startswith("Open areas for a new branch, from the profile of i1:")
     )
+
+
+def _profile_measured(
+    snapshot: BlackboardSnapshot, commit: str, validity: Validity = Validity.SUCCEEDED
+) -> BlackboardSnapshot:
+    """``snapshot`` with a PROFILE test of the integration branch on ``commit`` that ended ``validity``."""
+
+    profiled = TestRecord(
+        request(f"p-{commit}", intent(INTEGRATION_BRANCH, commit, "profile", commit), kind=TestKind.PROFILE),
+        result(f"p-{commit}", validity=validity),
+    )
+    return dataclasses.replace(snapshot, records=(*snapshot.records, profiled))
+
+
+def test_a_profile_that_left_no_op_shares_reads_as_unknown_not_as_unprofiled_nor_as_out_of_ops(
+    snapshot: BlackboardSnapshot,
+) -> None:
+    on_head = open_areas(_profile_measured(snapshot, "i1"), seconds_left=4 * HOUR, first_commit_minutes=None)
+    on_root = open_areas(_profile_measured(snapshot, "c0"), seconds_left=4 * HOUR, first_commit_minutes=None)
+    failed = open_areas(
+        _profile_measured(snapshot, "i1", Validity.CANDIDATE_FAILED), seconds_left=4 * HOUR, first_commit_minutes=None
+    )
+
+    assert (on_head.unanalysed, on_head.profiled, on_head.ops) == ("i1", "", ())
+    assert not on_head.exhausted and not on_root.exhausted
+    assert on_head.render() == (
+        "Open areas for a new branch: unknown. The integration head i1 is profiled, its trace not analysed: it left no "
+        "op shares, so no op is known."
+    )
+    assert on_root.render().startswith(
+        "Open areas for a new branch: unknown. A commit the integration head builds on c0"
+    )
+    assert failed.unanalysed == "" and failed.render().startswith(
+        "Open areas for a new branch: neither the integration head nor a commit"
+    )
+
+
+def test_a_profile_of_another_commit_of_the_heads_recipe_that_left_no_op_shares_reads_as_unknown(
+    snapshot: BlackboardSnapshot,
+) -> None:
+    def measured_on(digest: str) -> BlackboardSnapshot:
+        return _recipes(_profile_measured(snapshot, "k7"), {"i1": "sha256:head", "k7": digest})
+
+    same = open_areas(measured_on("sha256:head"), seconds_left=4 * HOUR, first_commit_minutes=None)
+    other = open_areas(measured_on("sha256:other"), seconds_left=4 * HOUR, first_commit_minutes=None)
+
+    assert same.unanalysed == "i1" and other.unanalysed == ""
+
+
+def test_a_profile_with_every_op_worked_on_or_spent_is_out_of_ops_whatever_profile_test_measured_it(
+    snapshot: BlackboardSnapshot,
+) -> None:
+    every = [_focused(f"b{n}", op, running=True) for n, op in enumerate(SHARES)]
+
+    found = open_areas(
+        _profile_measured(_worked(snapshot, *every), "i1"), seconds_left=4 * HOUR, first_commit_minutes=None
+    )
+
+    assert found.exhausted and found.unanalysed == ""
+    assert found.render().splitlines()[:2] == [
+        "Open areas for a new branch, from the profile of i1:",
+        "- none: every large op is worked on or spent",
+    ]
 
 
 def test_without_archived_sessions_only_the_playbook_s_last_open_minutes_says_it_is_too_late(

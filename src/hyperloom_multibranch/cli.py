@@ -229,7 +229,7 @@ ENCODING = "utf-8"
 FILE_METAVAR = "FILE"
 log = logging.getLogger(__name__)
 #: The GPU types a session runs on; the toolbox's environment exports the board itself as ``GPU_TYPE``.
-SESSION_GPU_TYPES = ("mi300x", "mi350x", "mi355x")
+SESSION_GPU_TYPES = ("mi300x", "mi325x", "mi350x", "mi355x")
 #: The options ``run`` requires unless it is given ``--resume``, by their argparse names.
 RUN_REQUIRED = ("model", "framework", "gpu_type", "workload", "tp", "conc", "precision")
 #: The options an inferencex workload requires and an agentx one refuses.
@@ -395,7 +395,7 @@ def _add_concurrency_options(run: argparse.ArgumentParser) -> None:
         default=None,
         help="Tests running at once; default as many as the machine's cards, or the grant, run at TP.",
     )
-    run.add_argument("--max-k-per-branch", type=int, default=DEFAULT_MAX_K_PER_BRANCH, help="Highest K of a branch.")
+    run.add_argument("--max-k-per-branch", type=int, default=DEFAULT_MAX_K_PER_BRANCH, help="Highest specialist K.")
     run.add_argument(
         "--dev-leases",
         type=int,
