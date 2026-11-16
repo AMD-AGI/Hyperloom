@@ -139,6 +139,16 @@ _RDNA3_OCCUPANCY = OccupancyRule(
     lds_beyond="over the 64 KiB work-group cap: will not launch",
 )
 
+_RDNA4_PROMPT_NOTE = """\
+## Target architecture: gfx1201 (RDNA 4, Radeon AI PRO R9700) — overrides any Instinct fact in this prompt
+
+Use wave32 and WMMA; inspect the compiled gfx1201 ISA before choosing lane layouts or matrix instructions.
+Accumulators live in VGPRs, so MFMA/AGPR guidance does not apply. Memory is GDDR6 rather than HBM.
+Read `hardware/rdna4/` for the R9700 and its BF16 activation × packed-MXFP4 weight serving path.
+rocprof-compute does not support this target. Use rocprofv3 kernel tracing where installed, retain raw traces,
+and collect only small runtime-supported counter groups with finite timeouts; unavailable counters and native
+scaled-FP4 ceilings remain unknown."""
+
 _ARCH_PROFILES: dict[str, ArchProfile] = {
     "gfx942": ArchProfile(family="CDNA3"),
     "gfx950": ArchProfile(family="CDNA4"),
@@ -149,6 +159,14 @@ _ARCH_PROFILES: dict[str, ArchProfile] = {
         kernel_backends=frozenset({"triton", "hip", "hipblaslt", "ck"}),
         occupancy=_RDNA3_OCCUPANCY,
         prompt_note=_RDNA3_PROMPT_NOTE,
+    ),
+    "gfx1201": ArchProfile(
+        family="RDNA4",
+        hardware_knowledge="hardware/rdna4",
+        rocprof_compute=False,
+        # gfx1201 has the same static wave32 VGPR allocation and work-group LDS cap.
+        occupancy=_RDNA3_OCCUPANCY,
+        prompt_note=_RDNA4_PROMPT_NOTE,
     ),
 }
 _DEFAULT_PROFILE = ArchProfile(family="")

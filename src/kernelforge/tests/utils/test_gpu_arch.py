@@ -154,9 +154,7 @@ def test_detect_arch_is_empty_without_rocminfo(monkeypatch):
     assert detect_arch() == ""
 
 
-@pytest.mark.parametrize(
-    "gpu_target", ["gfx942", "gfx950", "gfx950:sramecc+:xnack-", "MI355X", "gfx1201", "gfx1151", ""]
-)
+@pytest.mark.parametrize("gpu_target", ["gfx942", "gfx950", "gfx950:sramecc+:xnack-", "MI355X", "gfx1151", ""])
 def test_instinct_and_unprofiled_targets_keep_the_instinct_defaults(gpu_target):
     profile = arch_profile(gpu_target)
 
@@ -188,5 +186,17 @@ def test_every_profiled_hardware_pillar_ships_with_its_map():
     from kernelforge.config.resources import resource_path
 
     root = resource_path("local_knowledge")
-    for gpu_target in ("gfx942", "gfx950", "gfx1100"):
+    for gpu_target in ("gfx942", "gfx950", "gfx1100", "gfx1201"):
         assert (root / arch_profile(gpu_target).hardware_knowledge / "INDEX.md").is_file(), gpu_target
+
+
+def test_gfx1201_has_the_rdna4_profile():
+    profile = arch_profile("gfx1201")
+
+    assert profile.family == "RDNA4"
+    assert profile.hardware_knowledge == "hardware/rdna4"
+    assert profile.rocprof_compute is False
+    assert profile.occupancy.vgpr_limit == 96
+    assert profile.occupancy.lds_limit_kib == 64
+    assert "Use wave32 and WMMA" in profile.prompt_note
+    assert "rocprofv3 kernel tracing" in profile.prompt_note
