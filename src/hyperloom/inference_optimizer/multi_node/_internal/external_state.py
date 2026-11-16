@@ -33,7 +33,6 @@ _HANDOFF_CARRIED_KEYS = (
     "pd_decode_url",
     "pd_launch",
     "pd_launch_digest",
-    "pods",
     "profile_trace_shared",
     "profile_trace_share_error",
 )
@@ -303,6 +302,11 @@ def _carry_disk_bookkeeping(disk: dict[str, Any], ext_state: dict[str, Any]) -> 
         carried = key.startswith(_SESSION_KEY_PREFIX) or key in _HANDOFF_CARRIED_KEYS
         if carried and key not in ext_state:
             ext_state[key] = value
+    from .pd_handoff import LAUNCH_POD_KEYS, NODE_LIST_KEY, PODS_KEY
+
+    # A node-list cluster's pods carry the commands of its launch, which the hand-off alone does not give.
+    if ext_state.get(NODE_LIST_KEY) is True and disk.get(PODS_KEY):
+        ext_state.update({key: disk[key] for key in LAUNCH_POD_KEYS if key in disk})
 
 
 def load_multi_node_state() -> dict[str, Any]:

@@ -20,6 +20,10 @@ INFERA = "infera"
 PD_BACKENDS = (ATOMESH, SGLANGROUTER)
 #: The multi-node state key that marks a node-list cluster.
 NODE_LIST_KEY = "node_list"
+#: Every host of a node-list cluster's launch with the command it serves.
+PODS_KEY = "pods"
+#: The pod keys a node-list session writes from its launch, which a reload of the same hand-off keeps.
+LAUNCH_POD_KEYS = (PODS_KEY, "prefill_pods", "decode_pods", "worker_pods", "router_pods")
 
 _FRONTEND_BACKEND = {"atomesh": ATOMESH, "sglang-router": SGLANGROUTER, "infera": INFERA}
 _FRAMEWORK_BACKEND = {"atom": ATOMESH, "sglang": SGLANGROUTER}
@@ -99,4 +103,14 @@ def pd_state(nodes: NodeList, backend: str) -> dict[str, Any]:
     return state
 
 
-__all__ = ["INFERA", "NODE_LIST_KEY", "PD_BACKENDS", "handed_node_list", "is_pd_state", "node_list_backend", "pd_state"]
+__all__ = [
+    "INFERA",
+    "LAUNCH_POD_KEYS",
+    "NODE_LIST_KEY",
+    "PODS_KEY",
+    "PD_BACKENDS",
+    "handed_node_list",
+    "is_pd_state",
+    "node_list_backend",
+    "pd_state",
+]

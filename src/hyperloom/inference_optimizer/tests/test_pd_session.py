@@ -144,7 +144,23 @@ def test_adoption_gives_every_host_a_pod_with_the_command_it_serves(session: Pat
         assert f"--disaggregation-mode {role}" in pods[role]["launch_command"]
     assert "sglang_router.launch_router" in pods["router"]["launch_command"]
     assert "--port 8000" in pods["router"]["launch_command"]
+    assert pods["router"]["managed_by"] == "platform" and "enginePort" not in pods["router"]
+    for role in ("prefill", "decode"):
+        assert f"--port {pods[role]['enginePort']} " in pods[role]["launch_command"]
+    for role in ("router", "prefill", "decode"):
+        assert state[f"{role}_pods"] == [pods[role]]
+    assert state["worker_pods"] == []
     assert state["user_data_path"]
+
+
+def test_a_round_records_the_pods_of_the_launch_as_run(session: Path, monkeypatch) -> None:
+    _adopt(session)
+    monkeypatch.setattr(pd_session, "restart", _fake_restart({}))
+    asyncio.run(lifecycle.restart_server_for_round(lifecycle.RoundServer("--chunked-prefill-size 4096")))
+    state = ext.load_multi_node_state()
+    pods = {pod["role"]: pod for pod in state["pods"]}
+    assert "--chunked-prefill-size 4096" in pods["decode"]["launch_command"]
+    assert state["decode_pods"] == [pods["decode"]]
 
 
 def test_resume_refuses_a_launch_that_is_not_the_one_frozen(session: Path) -> None:

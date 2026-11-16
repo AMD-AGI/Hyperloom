@@ -28,9 +28,11 @@ from inference_suite.multinode import (
     PdMode,
     PdRecordError,
     PdResolveError,
+    Role,
     SshError,
     cluster_commands,
     cluster_of,
+    engine_port,
     engine_urls,
     engines_gone,
     placed_launch,
@@ -43,14 +45,24 @@ from inference_suite.multinode import (
     write_record,
 )
 
-from ._internal.pd_handoff import INFERA, PD_BACKENDS, handed_node_list, is_pd_state, node_list_backend, pd_state
+from ._internal.pd_handoff import (
+    INFERA,
+    LAUNCH_POD_KEYS,
+    PD_BACKENDS,
+    PODS_KEY,
+    handed_node_list,
+    is_pd_state,
+    node_list_backend,
+    pd_state,
+)
 
 log = logging.getLogger(__name__)
 
 PD_LAUNCH_KEY = "pd_launch"
 PD_DIGEST_KEY = "pd_launch_digest"
-#: Every host of the frozen launch with the command it serves.
-PODS_KEY = "pods"
+ROUTER_ROLE = "router"
+#: ``managed_by`` of the router pod: the frontend in front of the platform's service URL.
+PLATFORM_MANAGED = "platform"
 #: The launch as the last round ran it, beside the frozen ``pd_launch.json``.
 RAN_RECORD_NAME = "pd_launch.ran.json"
 PREFILL_EXTRA_ENV = "PD_PREFILL_EXTRA_ARGS"
@@ -215,34 +227,40 @@ def session_engine_urls(state: dict[str, Any]) -> dict[str, list[str]]:
         raise PdSessionError(f"the PD engines cannot be placed: {exc}") from exc
 
 
-def stamp_launch_pods(state: dict[str, Any]) -> None:
-    """Record every host of the session's frozen launch in ``state`` as a pod with the command it serves, as
-    ``pods``: the shape readers of the multi-node state such as GEAK take a cluster in.
+def stamp_launch_pods(state: dict[str, Any], launch: PdLaunch | None = None) -> None:
+    """Record every host of ``launch`` (the session's frozen launch by default) in ``state`` as a pod with the command
+    it serves: ``pods`` and each role's ``<role>_pods``, the shape readers of the multi-node state such as GEAK take a
+    cluster in.
 
     Raises:
         PdSessionError: no node list is handed over, or the frozen launch cannot be verified or placed.
     """
     try:
         session = _session_cluster(state)
-        commands = cluster_commands(session.launch, session.cluster.nodes)
+        nodes = session.cluster.nodes
+        commands = cluster_commands(launch or session.launch, nodes)
     except (*_SUITE_ERRORS, ValueError) as exc:
         raise PdSessionError(f"the PD launch cannot be placed: {exc}") from exc
-    ssh = session.cluster.nodes.ssh
     indices: dict[str, int] = {}
     pods: list[dict[str, Any]] = []
     for command in commands:
         index = indices[command.role] = indices.get(command.role, -1) + 1
-        pods.append(
-            {
-                "podIP": command.host,
-                "podId": f"external-{command.role}-{index}",
-                "role": command.role,
-                "lwsIndex": index,
-                "sshPort": ssh.port_of(command.host) if ssh else 0,
-                "launch_command": command.command,
-            }
-        )
+        pod: dict[str, Any] = {
+            "podIP": command.host,
+            "podId": f"external-{command.role}-{index}",
+            "role": command.role,
+            "lwsIndex": index,
+            "sshPort": nodes.ssh.port_of(command.host) if nodes.ssh else 0,
+            "launch_command": command.command,
+        }
+        if command.role == ROUTER_ROLE:
+            pod["managed_by"] = PLATFORM_MANAGED
+        else:
+            pod["enginePort"] = engine_port(nodes, Role(command.role))
+        pods.append(pod)
     state[PODS_KEY] = pods
+    for role in (*(role.value for role in Role), ROUTER_ROLE):
+        state[f"{role}_pods"] = [pod for pod in pods if pod["role"] == role]
 
 
 def _host_reads_marker(cluster: Cluster, host: str, marker: Path, token: str) -> str:
@@ -306,6 +324,7 @@ __all__ = [
     "INFERA",
     "PD_BACKENDS",
     "PD_DIGEST_KEY",
+    "LAUNCH_POD_KEYS",
     "PD_LAUNCH_KEY",
     "PODS_KEY",
     "PREFILL_EXTRA_ENV",

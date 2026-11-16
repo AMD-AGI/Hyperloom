@@ -1295,15 +1295,20 @@ def _restart_single_node(args: argparse.Namespace, state: dict) -> int:
 
 
 def restart_pd_round(shared_args: str, ready_timeout_s: int) -> Any:
-    """Restart this PD session's cluster with one round's args over its frozen launch; returns the launch as run.
+    """Restart this PD session's cluster with one round's args over its frozen launch and record the pods of the
+    launch as run in the state file; returns the launch as run.
 
     Raises:
         PdSessionError: the launch cannot be verified, a host refused, or the cluster did not come up.
     """
     from .commands.infera import _collect_forward_env
-    from .pd_session import launch_options, restart_round
+    from .pd_session import launch_options, restart_round, stamp_launch_pods
 
-    return restart_round(_load_state(), shared_args, launch_options(_collect_forward_env(), ready_timeout_s))
+    state = _load_state()
+    ran = restart_round(state, shared_args, launch_options(_collect_forward_env(), ready_timeout_s))
+    stamp_launch_pods(state, ran)
+    _save_state(state)
+    return ran
 
 
 def _pd_restart_server(args: argparse.Namespace) -> int:
