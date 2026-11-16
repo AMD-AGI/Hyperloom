@@ -272,6 +272,79 @@ def test_multi_trace_run_config_is_combine_by_node_and_passes_check_config(tmp_p
     assert check_config(config, "multi_trace").variables["focus_job"] == "decode_0"
 
 
+def _ranked_capture(tmp_path: Path, ranks: tuple[int, ...] = (0, 1)) -> Path:
+    capture = tmp_path / "graph_capture_profile"
+    capture.mkdir()
+    (capture / "execution_details.json").write_text("[]")
+    for rank in ranks:
+        for runner in ("DecodeCudaGraphRunner_bs_8", "EAGLEDraftCudaGraphRunner_bs_32"):
+            (capture / f"{runner}_rank{rank}.json.gz").write_bytes(b"capture")
+    return capture
+
+
+def test_an_sglang_tp_trace_gets_the_captures_of_its_rank_only(tmp_path: Path) -> None:
+    capture = _ranked_capture(tmp_path)
+    trace = tmp_path / "steady_state_1794831019.5-TP-1.trace.json.gz"
+    trace.write_bytes(b"trace")
+    prefill = tmp_path / "1794831019.5-TP-1-EXTEND.trace.json.gz"
+    prefill.write_bytes(b"trace")
+    out = tmp_path / "tracelens"
+    out.mkdir()
+    jobs = [
+        {"phase": "decode", "node": 0, "trace_path": str(trace), "platform": "MI300X"},
+        {"phase": "prefill", "node": 0, "trace_path": str(prefill), "platform": "MI300X"},
+    ]
+    jobs[0]["capture_folder"] = str(capture)
+
+    config = yaml.safe_load(
+        tlr.write_multi_trace_run_config(output_dir=out, jobs=jobs, analysis_mode="inference").read_text()
+    )
+
+    scoped = Path(config["jobs"][0]["capture_folder"])
+    assert sorted(p.name for p in scoped.iterdir()) == [
+        "DecodeCudaGraphRunner_bs_8_rank1.json.gz",
+        "EAGLEDraftCudaGraphRunner_bs_32_rank1.json.gz",
+    ]
+    assert all(p.resolve().parent == capture.resolve() for p in scoped.iterdir())
+    assert len(list(capture.iterdir())) == 5
+
+
+def test_the_standalone_config_scopes_the_captures_to_the_trace_rank(tmp_path: Path) -> None:
+    capture = _ranked_capture(tmp_path)
+    trace = tmp_path / "1794831019.5-TP-0.trace.json.gz"
+    trace.write_bytes(b"trace")
+
+    path = tlr.write_run_config(
+        output_dir=tmp_path, trace_path=trace, platform="MI300X", analysis_mode="inference", capture_folder=capture
+    )
+
+    scoped = Path(yaml.safe_load(path.read_text())["jobs"][0]["capture_folder"])
+    assert {p.name for p in scoped.iterdir()} == {
+        "DecodeCudaGraphRunner_bs_8_rank0.json.gz",
+        "EAGLEDraftCudaGraphRunner_bs_32_rank0.json.gz",
+    }
+
+
+@pytest.mark.parametrize(
+    ("trace_name", "ranks"),
+    [
+        ("1794831019.5.trace.json.gz", (0, 1)),
+        ("1794831019.5-TP-2.trace.json.gz", (0, 1)),
+        ("x-TP-0.trace.json.gz", (0,)),
+    ],
+)
+def test_the_capture_folder_is_kept_when_it_cannot_be_scoped(tmp_path: Path, trace_name: str, ranks) -> None:
+    capture = _ranked_capture(tmp_path, ranks)
+    trace = tmp_path / trace_name
+    trace.write_bytes(b"trace")
+
+    path = tlr.write_run_config(
+        output_dir=tmp_path, trace_path=trace, platform="MI300X", analysis_mode="inference", capture_folder=capture
+    )
+
+    assert yaml.safe_load(path.read_text())["jobs"][0]["capture_folder"] == str(capture.resolve())
+
+
 def test_colocated_run_config_is_unchanged(tmp_path: Path) -> None:
     trace = tmp_path / "t.trace.json.gz"
     trace.write_bytes(b"trace")
