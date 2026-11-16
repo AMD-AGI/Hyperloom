@@ -186,7 +186,8 @@ class _InFlight:
     whose launching tool call already returned. A background task is tracked by
     id from ``TaskStartedMessage`` until a ``TaskNotificationMessage`` or a
     ``TaskUpdatedMessage`` with a terminal status, which is how the SDK says
-    active task ids must be cleared.
+    active task ids must be cleared. A ``ResultMessage`` ends a turn, not the
+    tasks: the session stays open until each one reports.
     """
 
     def __init__(self) -> None:
@@ -205,11 +206,9 @@ class _InFlight:
             self.tool = False
         name = type(message).__name__
         task_id = str(getattr(message, "task_id", "") or "")
-        if name == "ResultMessage":
-            self.tasks.clear()
-        elif not task_id:
+        if not task_id:
             return
-        elif name == "TaskStartedMessage":
+        if name == "TaskStartedMessage":
             self.tasks.add(task_id)
         elif name == "TaskNotificationMessage":
             self.tasks.discard(task_id)

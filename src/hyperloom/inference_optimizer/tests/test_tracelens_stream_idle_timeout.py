@@ -150,6 +150,28 @@ class TestBackgroundTasks:
             ]
         )
 
+    def test_a_turn_ending_on_a_background_bash_keeps_the_run_busy(self):
+        """The agent ends its turn to wait on a background Bash; the session stays open until it reports."""
+        assert _busy_after(
+            [
+                AssistantMessage(ToolUseBlock("Bash")),
+                TaskStartedMessage("perf_report"),
+                AssistantMessage(ToolResultBlock()),
+                AssistantMessage(TextBlock("Perf report generation (Step 1) is still running in the background.")),
+                ResultMessage(),
+            ]
+        )
+
+    def test_the_background_task_reporting_after_the_turn_releases_it(self):
+        assert not _busy_after(
+            [
+                TaskStartedMessage("perf_report"),
+                AssistantMessage(ToolResultBlock()),
+                ResultMessage(),
+                TaskNotificationMessage("perf_report", "completed"),
+            ]
+        )
+
     def test_silence_with_nothing_in_flight_stays_tightly_bounded(self):
         assert not _busy_after([AssistantMessage(TextBlock("reading the skill file"))])
 
