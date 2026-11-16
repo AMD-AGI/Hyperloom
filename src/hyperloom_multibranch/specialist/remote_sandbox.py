@@ -52,6 +52,7 @@ from pathlib import Path
 from hyperloom.common.visible_devices import GPU_MASK_ENV_NAMES
 from hyperloom_common.shared_storage import child_umask, create_shared_file, make_shared_dirs, write_shared_text
 from hyperloom.sandbox import RunSettings, Sandbox, SandboxGone, SandboxUnavailable
+from hyperloom_multibranch.repo.isolated_git import SESSION_IDENTITY
 from hyperloom_multibranch.specialist.agent_onboarding import ENCODING, CommandResult
 from hyperloom_multibranch.specialist.agent_sandbox import TIMED_OUT, read_tail
 from hyperloom_multibranch.specialist.agent_watch import GRACE_SECONDS, MARKER, PROCESS_MARKER
@@ -300,6 +301,8 @@ class RemoteAgentSandbox:
             "GIT_CONFIG_COUNT": "1",
             "GIT_CONFIG_KEY_0": "safe.directory",
             "GIT_CONFIG_VALUE_0": "*",
+            # The home has no git config, and an agent commits its own changes in its checkout.
+            **SESSION_IDENTITY,
         }
         merged.update({name: value for name, value in env.items() if name != "PATH"})
         merged = {name: value for name, value in merged.items() if name not in GPU_MASK_ENV_NAMES}

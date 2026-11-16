@@ -67,6 +67,18 @@ async def test_a_command_runs_on_the_sandboxs_environment_with_only_what_is_forw
     assert not any(line.startswith("HL_") for line in lines)
 
 
+async def test_a_command_commits_with_the_session_s_identity_from_the_sandbox_s_home(tmp_path):
+    remote = _remote(tmp_path)
+    checkout = tmp_path / "checkout"
+    checkout.mkdir()
+    commit = "git init -q && git commit -q --allow-empty -m seed && git log -1 --format='%an <%ae>'"
+
+    done = await remote.run(commit, checkout, {"GIT_CONFIG_NOSYSTEM": "1"}, timeout=30)
+
+    assert done.returncode == 0, done.output
+    assert done.output.splitlines()[-1] == "hyperloom-multibranch <multibranch@hyperloom.invalid>"
+
+
 async def test_a_command_that_exits_reports_its_code_and_output_through_the_shared_files(tmp_path):
     remote = _remote(tmp_path)
 
