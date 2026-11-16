@@ -109,7 +109,7 @@ from hyperloom_multibranch.specialist.agent_onboarding import (
 )
 from hyperloom_multibranch.specialist.agent_session import BranchPlace
 from hyperloom_multibranch.specialist.agent_spend import AgentSpend, newest_write
-from hyperloom_multibranch.specialist.arbor_adapter import EXIT_REFUSED, exit_reason, refused_reasons, served_config
+from hyperloom_multibranch.specialist.component_agent import EXIT_REFUSED, exit_reason, refused_reasons, served_config
 from hyperloom_multibranch.specialist.dev_sandbox import MINUTE, TOO_MANY
 from hyperloom_multibranch.rulegate.rules import RETRACTION_ID
 from hyperloom_multibranch.specialist.judging import NOTICE

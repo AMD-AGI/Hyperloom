@@ -4,7 +4,7 @@
 """The session's dossier pass: Arbor run once to map the directions the agent branches split.
 
 With two or more Arbor agents and no map given, the session runs the first Arbor source once as its dossier pass
-(:data:`~hyperloom_multibranch.specialist.arbor_adapter.DOSSIER_PASS`, ``component.stop_at: "map"``), as Arbor's
+(:data:`~hyperloom_multibranch.specialist.component_agent.DOSSIER_PASS`, ``component.stop_at: "map"``), as Arbor's
 ``docs/hosts.md`` describes it:
 - **where:** on a worktree at the commit the branches open on, with that commit's launch, on the cards of one lease;
 - **with what:** the root's shares as its ``component.profile``, until its deadline;
@@ -43,14 +43,13 @@ from hyperloom_multibranch.specialist.agent_onboarding import (
     make_ready,
     tail,
 )
-from hyperloom_multibranch.specialist.arbor_adapter import (
+from hyperloom_multibranch.specialist.component_agent import (
     DOSSIER_PASS,
     EXIT_REFUSED,
-    MAP_FILE,
     MAPPED,
+    agent_of,
     exit_reason,
     mapped,
-    pass_dossier,
     refused_reasons,
 )
 from hyperloom_multibranch.specialist.runtime import PreflightFailed
@@ -88,7 +87,7 @@ class DossierStart:
 @dataclass(frozen=True)
 class DossierOutcome:
     """How the pass ended: ``map``, the directions it set, and ``dossier``, the dossier it wrote, each ``None`` without;
-    ``reason``, :data:`~hyperloom_multibranch.specialist.arbor_adapter.MAPPED` when it set its map, else why not."""
+    ``reason``, :data:`~hyperloom_multibranch.specialist.component_agent.MAPPED` when it set its map, else why not."""
 
     map: Path | None
     dossier: Path | None
@@ -190,11 +189,12 @@ async def _ended(ready: ReadyAgent, start: DossierStart, setup: DossierSetup) ->
     while process.returncode is None and setup.clock() < start.deadline + EXIT_GRACE_SECONDS:
         await setup.sleep(POLL_SECONDS)
     session = checkout / DOSSIER_PASS.session_dir
-    dossier = pass_dossier(checkout, session)
+    agent = agent_of(checkout)
+    dossier = agent.pass_dossier(checkout, session)
     if process.returncode is None:
         return DossierOutcome(None, dossier, "it set no map by its deadline and was stopped")
     if process.returncode == 0 and mapped(session):
-        return DossierOutcome(session / MAP_FILE, dossier, MAPPED)
+        return DossierOutcome(session / agent.map_file, dossier, MAPPED)
     if process.returncode == EXIT_REFUSED:
         why = refused_reasons(checkout / ready.manifest.snapshots_refused) or tail(await process.output())
         return DossierOutcome(None, None, f"it refused its config: {why}")

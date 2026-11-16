@@ -155,7 +155,7 @@ from hyperloom_multibranch.scheduling.stops import (
 from hyperloom_multibranch.scheduling.similarity import BranchSimilarity
 from hyperloom_multibranch.scheduling.widening import Widening
 from hyperloom_multibranch.specialist.agent_onboarding import ROOT_PROFILE_SOURCE, AttemptFailed
-from hyperloom_multibranch.specialist.arbor_adapter import REVIEW_HOST, REVIEW_OFF, SplitFailed
+from hyperloom_multibranch.specialist.component_agent import REVIEW_HOST, REVIEW_OFF, SplitFailed
 from hyperloom_multibranch.specialist.prompts import prompt_versions
 
 if TYPE_CHECKING:
