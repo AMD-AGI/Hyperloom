@@ -18,7 +18,7 @@ from typing import Any, NamedTuple
 
 from hyperloom.inference_optimizer.protocol.action_surfaces import REQUEST_KIND_TO_OWNED_ACTION
 
-from ..bus.message_bus import Message
+from ..bus.message_bus import LANES_BUSY_SOURCE, Message
 from ..kernel import kernel_decisions
 
 log = logging.getLogger(__name__)
@@ -214,7 +214,7 @@ async def run_kernel_handler(router: Any, request: KernelRequest, handler: Any) 
             await router._reply(
                 request.message,
                 {"status": "deferred", "reason": "lanes_busy", "lanes": lanes},
-                source="lanes_busy",
+                source=LANES_BUSY_SOURCE,
             )
             return None
 

@@ -455,9 +455,9 @@ async def test_coordinator_starts_with_silent_backends(session_dir):
     c = Coordinator(session_dir, backends=backends)
     try:
         await c.tick(2)
-        # 3 agents × 2 ticks × 1 idle message = 6 send_message events
+        # Both agents idle on tick 1; on tick 2 only the Critic does, as nothing Orchestration reads has changed.
         msgs = await c.bus.tail(n=20, topic="observation")
-        assert len(msgs) == 4
+        assert len(msgs) == 3
     finally:
         await c.stop()
 
