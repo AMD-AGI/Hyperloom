@@ -10,6 +10,7 @@ brain, and scores both answers against a dataset.
 from __future__ import annotations
 
 import json
+import re
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Iterator, Mapping
@@ -23,11 +24,23 @@ CALL_TYPES: Mapping[CallSite, tuple[type, type]] = {
     CallSite.PROPOSE: (ProposeAsk, Proposal),
     CallSite.REVIEW: (ReviewAsk, Review),
 }
+#: Call site -> the eval point of the brain method the body calls there.
+MAIN_POINTS: Mapping[CallSite, str] = {CallSite.PROPOSE: "main.propose", CallSite.REVIEW: "main.review"}
+
+_POINT_NAME = re.compile(r"^[a-z][a-z0-9_]*(\.[a-z][a-z0-9_]*)+$")
+
+
+def valid_point_name(name: str) -> bool:
+    """Whether ``name`` is a dotted lower_snake_case eval point name with at least two parts."""
+    return bool(_POINT_NAME.match(name))
 
 
 @dataclass(frozen=True)
 class BrainCall:
-    """One call: what the brain was given, what it answered (or why it failed), when and for how long."""
+    """One call of an eval point: what it was given, what it answered (or why it failed), when and for how long.
+
+    ``point`` is the eval point called; it defaults to the main point of ``call_site``.
+    """
 
     call_site: CallSite
     contract_version: str
@@ -36,10 +49,16 @@ class BrainCall:
     ask: ProposeAsk | ReviewAsk
     answer: Proposal | Review | None = None
     error: str = ""
+    point: str = ""
+    point_version: str = "0.1"
     started_unix: float = 0.0
     duration_sec: float = 0.0
 
     def __post_init__(self) -> None:
+        if not self.point:
+            object.__setattr__(self, "point", MAIN_POINTS[self.call_site])
+        if not valid_point_name(self.point):
+            raise WireError(f"eval point name {self.point!r} is not dotted lower_snake_case")
         ask_type, answer_type = CALL_TYPES[self.call_site]
         if not isinstance(self.ask, ask_type):
             raise WireError(f"a {self.call_site.value} call takes a {ask_type.__name__}")
@@ -58,6 +77,8 @@ class BrainCall:
             "ask": to_wire(self.ask),
             "answer": None if self.answer is None else to_wire(self.answer),
             "error": self.error,
+            "point": self.point,
+            "point_version": self.point_version,
             "started_unix": self.started_unix,
             "duration_sec": self.duration_sec,
         }
@@ -73,6 +94,8 @@ class BrainCall:
             "ask",
             "answer",
             "error",
+            "point",
+            "point_version",
             "started_unix",
             "duration_sec",
         }
@@ -92,6 +115,8 @@ class BrainCall:
             ask=from_wire(ask_type, data["ask"]),
             answer=None if answer is None else from_wire(answer_type, answer),
             error=str(data["error"]),
+            point=str(data["point"]),
+            point_version=str(data["point_version"]),
             started_unix=float(data["started_unix"]),
             duration_sec=float(data["duration_sec"]),
         )
