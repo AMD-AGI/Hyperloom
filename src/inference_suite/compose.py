@@ -57,10 +57,12 @@ GPU_MASK_ENV = "ROCR_VISIBLE_DEVICES"
 HIP_MASK_ENV = "HIP_VISIBLE_DEVICES"
 #: Every device mask a launch's processes read; the guard sets the first two and no layer may set any.
 _DEVICE_MASK_ENVS = (GPU_MASK_ENV, HIP_MASK_ENV, "CUDA_VISIBLE_DEVICES")
-#: What the guard sets a framework's ready timeout (``FrameworkFacts.ready_timeout_env``) to: longer than any round, so
-#: the server never gives up on its start before the round's boot deadline ends it, which leaves aiter builds out and
-#: names the step. One value for every round, so a server a later round reuses runs the launch that round composes.
-READY_TIMEOUT_SEC = 86400
+#: What the guard sets a framework's ready timeout (``FrameworkFacts.ready_timeout_env``) to: the largest value an
+#: InferenceX recipe sets, and above Hyperloom's default boot limit (7200 s), so the round's ``boot_sec`` ends a slow
+#: start and names the step before the server gives up on its own. ``boot_sec`` leaves aiter builds out and the
+#: server's clock does not, so a start whose builds outlast the difference still meets the server's limit first. One
+#: value for every round, so a server a later round reuses runs the launch that round composes.
+READY_TIMEOUT_SEC = 10800
 
 
 @dataclass(frozen=True)
