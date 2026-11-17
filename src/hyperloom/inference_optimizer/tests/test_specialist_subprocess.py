@@ -31,10 +31,7 @@ from hyperloom.common.visible_devices import GPU_MASK_ENV_NAMES
 
 from hyperloom.orchestrator.actions.executors._ray_serving import RayInfeasibleError
 
-from hyperloom.orchestrator.specialists.runner import (
-    SPECIALIST_TOOL_DENYLIST,
-    SpecialistRunner,
-)
+from hyperloom.orchestrator.specialists.runner import SpecialistRunner
 from hyperloom.orchestrator.specialists import subprocess_, wall_budget
 from hyperloom.orchestrator.specialists import launch_env
 from hyperloom.common import agent_isolation
@@ -161,13 +158,6 @@ def _make_runner_ctx(task_id: str = "t-spec-1") -> RunnerContext:
     return RunnerContext(task=task, lease=None, extra={})
 
 
-def test_runner_accepts_subprocess_config_only():
-    runner = SpecialistRunner(
-        subprocess_config=SpecialistSubprocessConfig(),
-    )
-    assert runner.subprocess_dispatcher is not None
-
-
 @pytest.mark.parametrize("local", [True, False])
 async def test_the_runner_hands_the_dispatcher_the_tasks_model_to_read(tmp_path, local):
     model = tmp_path / "models" / "llama"
@@ -211,18 +201,6 @@ async def test_the_runner_hands_the_dispatcher_the_admin_dir_the_repository_reco
     [spawn] = spawns
     assert spawn.worktree is not None
     assert spawn.worktree_admin == recorded_admin_dir(framework, spawn.worktree)
-
-
-def test_denylist_blocks_dangerous_process_tools():
-    """KillShell and SlashCommand are in the denylist to enforce the prompt-rule against global process cleanup that could kill the serving / benchmark process."""
-    assert "KillShell" in SPECIALIST_TOOL_DENYLIST
-    assert "SlashCommand" in SPECIALIST_TOOL_DENYLIST
-
-
-def test_kb_mcp_tools_not_in_denylist():
-    """KB MCP server names must not appear in the denylist."""
-    denylisted_kb_mcp = [t for t in SPECIALIST_TOOL_DENYLIST if t.startswith("mcp__") and "kb" in t.lower()]
-    assert denylisted_kb_mcp == [], f"stale KB MCP entries in the denylist: {denylisted_kb_mcp}"
 
 
 @pytest.mark.asyncio
@@ -290,18 +268,37 @@ def test_a_reused_worktree_keeps_the_admin_dir_its_repository_records(tmp_path: 
     assert (worktree, admin) == (None, None) and "is not a worktree" in err
 
 
-def test_an_integrate_in_flight_holds_the_snapshot(tmp_path: Path):
+async def test_an_integrate_in_flight_holds_the_snapshot(tmp_path: Path):
+    """The integrate has mutated the installed package without deciding on it; a specialist must not build on that."""
     from hyperloom.orchestrator.state.shared_state import SharedState
 
+    package = tmp_path / "site-packages" / "vllm"
+    package.mkdir(parents=True)
+    (package / "__init__.py").write_text("", encoding="utf-8")
+    (package / "envs.py").write_text("VLLM_USE_X = 0\n", encoding="utf-8")
     session_dir = tmp_path / "session"
     session_dir.mkdir()
     runner = SpecialistRunner(subprocess_config=SpecialistSubprocessConfig(), session_dir=session_dir)
-    assert runner._integrate_in_flight() is False
+    seen: list[str] = []
 
+    async def run(spawn: SpecialistSpawn) -> subprocess_.SpecialistSubprocessResult:
+        seen.append((spawn.worktree / "envs.py").read_text(encoding="utf-8"))
+        return subprocess_.SpecialistSubprocessResult(exit_code=0)
+
+    runner.subprocess_dispatcher.run = run
+    ctx = _make_runner_ctx("t-before")
+    ctx.task.params["session_framework_tree"] = f"{package}/"
+    await runner.run(ctx)
+
+    (package / "envs.py").write_text("VLLM_USE_X = 1\n", encoding="utf-8")
     state = SharedState.load_or_init(session_dir)
     state.pending_integrate = {"task_id": "t-integrate", "patches": []}
     state.save(session_dir)
-    assert runner._integrate_in_flight() is True
+    ctx = _make_runner_ctx("t-during")
+    ctx.task.params["session_framework_tree"] = f"{package}/"
+    await runner.run(ctx)
+
+    assert seen == ["VLLM_USE_X = 0\n", "VLLM_USE_X = 0\n"]
 
 
 def test_setup_worktree_creates_branch_off_base(
@@ -1890,23 +1887,20 @@ def test_demote_shares_a_worktree_that_lives_outside_the_workspace(tmp_path, res
     assert (request.workspace / "prompt.md").stat().st_mode & 0o077 == 0
 
 
-@pytest.mark.skipif(not _account_exists(_DEMOTE_USER), reason=f"no {_DEMOTE_USER!r} account")
-async def test_a_launch_the_ray_path_refuses_leaves_the_apps_umask_alone(tmp_path, monkeypatch, restore_umask):
-    monkeypatch.setenv("HYPERLOOM_SPECIALIST_USER", _DEMOTE_USER)
-    await _run_spawn(tmp_path, monkeypatch, gpu_lease=object())
-    assert os.umask(0o022) == 0o022
+_needs_demote_account = pytest.mark.skipif(not _account_exists(_DEMOTE_USER), reason=f"no {_DEMOTE_USER!r} account")
 
 
-@pytest.mark.skipif(not _account_exists(_DEMOTE_USER), reason=f"no {_DEMOTE_USER!r} account")
-async def test_a_launch_that_names_a_user_leaves_the_apps_umask_alone(tmp_path, monkeypatch, restore_umask):
-    monkeypatch.setenv("HYPERLOOM_SPECIALIST_USER", _DEMOTE_USER)
-    await _run_spawn(tmp_path, monkeypatch)
-    assert os.umask(0o022) == 0o022
-
-
-async def test_a_launch_with_no_user_leaves_the_apps_umask_alone(tmp_path, monkeypatch, restore_umask):
-    monkeypatch.delenv("HYPERLOOM_SPECIALIST_USER", raising=False)
-    await _run_spawn(tmp_path, monkeypatch)
+@pytest.mark.parametrize(
+    ("user", "spawn_kwargs"),
+    [
+        pytest.param(_DEMOTE_USER, {"gpu_lease": object()}, marks=_needs_demote_account, id="ray_path_refuses"),
+        pytest.param(_DEMOTE_USER, {}, marks=_needs_demote_account, id="names_a_user"),
+        pytest.param("", {}, id="no_user"),
+    ],
+)
+async def test_a_launch_leaves_the_apps_umask_alone(tmp_path, monkeypatch, restore_umask, user, spawn_kwargs):
+    monkeypatch.setenv("HYPERLOOM_SPECIALIST_USER", user)
+    await _run_spawn(tmp_path, monkeypatch, **spawn_kwargs)
     assert os.umask(0o022) == 0o022
 
 

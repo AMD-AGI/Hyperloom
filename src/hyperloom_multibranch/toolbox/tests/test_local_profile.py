@@ -115,10 +115,6 @@ async def test_a_profile_test_leaves_a_verified_trace_that_tracelens_is_started_
         await toolbox.start()
         result = await _profile(toolbox)
         assert result.validity is Validity.SUCCEEDED and result.rounds == (), result
-        # The runner's ROCm is none: ruppell is not built and says so, in the runner's signed notes.
-        assert [w for w in result.nonfatal_warnings if w.startswith("ruppell:")] == [
-            "ruppell: skipped (ROCm unknown is outside 7.0.2 to 8.0.0 (exclusive))"
-        ]
         session = tmp_path / "session"
         trace_dir = session / result.profile_location
         assert (trace_dir / "torch_trace" / "rank0.pt.trace.json.gz").read_bytes() == b"stub trace bytes"

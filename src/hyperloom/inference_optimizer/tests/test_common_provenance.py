@@ -222,16 +222,19 @@ def test_gfx_arch_probe_via_rocminfo(monkeypatch):
     assert detect_gfx_arch({}, probe=True) == "gfx950"
 
 
-def test_gfx_arch_probe_subprocess_absent(monkeypatch):
-    def _boom(*a, **k):
-        raise FileNotFoundError("rocminfo not installed")
-
-    monkeypatch.setattr(_prov.subprocess, "run", _boom)
-    assert detect_gfx_arch({}, probe=True) is None
+def _rocminfo_not_installed(*a, **k):
+    raise FileNotFoundError("rocminfo not installed")
 
 
-def test_gfx_arch_probe_nonzero_returncode(monkeypatch):
-    monkeypatch.setattr(_prov.subprocess, "run", lambda *a, **k: SimpleNamespace(returncode=1, stdout=""))
+@pytest.mark.parametrize(
+    "run",
+    [
+        pytest.param(_rocminfo_not_installed, id="subprocess_absent"),
+        pytest.param(lambda *a, **k: SimpleNamespace(returncode=1, stdout=""), id="nonzero_returncode"),
+    ],
+)
+def test_gfx_arch_probe_failure_is_none(monkeypatch, run):
+    monkeypatch.setattr(_prov.subprocess, "run", run)
     assert detect_gfx_arch({}, probe=True) is None
 
 

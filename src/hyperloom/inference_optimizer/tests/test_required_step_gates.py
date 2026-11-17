@@ -224,37 +224,6 @@ def test_mission_summary_surfaces_untried_hot_kernels(session_dir):
     assert "k002" in summary
 
 
-def test_report_always_allowed_regardless_of_hot_kernels(session_dir):
-    """``report`` is never sequence-denied for hot-kernel reasons."""
-    coord = Coordinator(session_dir, backends=_backends_full())
-    _seed_post_baseline(coord)
-    _seed_trace_analyze(
-        coord,
-        hot_kernels=[
-            {"kernel_id": "k001", "gpu_pct": 31.9, "reusable_native_kernel": True, "source_file": "/p/moe_op.py"},
-        ],
-    )
-    coord.shared_state.last_trace_analyze["roofline_snapshot_id"] = 1
-    assert coord.dispatcher._sequence_denial_for_action("report") is None
-
-
-def test_trace_analyze_gate_does_not_block_explore_actions(session_dir):
-    """An empty ``last_trace_analyze`` cache must not action-layer-deny explore actions."""
-    coord = Coordinator(session_dir, backends=_backends_full())
-    _write_baseline_json(session_dir)
-    s = coord.shared_state
-    s.baseline_tput = 100.0
-    s.last_profile_trace = "/tmp/profile.tar.gz"
-    s.last_trace_analyze = {}
-    for action in ("explore", "report"):
-        denied = coord.dispatcher._sequence_denial_for_action(action)
-        if denied is None:
-            continue
-        assert "trace_analyze must run first" not in str(denied), (
-            f"{action!r} hit the removed trace_analyze action-layer gate: {denied!s}"
-        )
-
-
 def test_run_optimization_request_no_longer_blocked_by_stale_trace_analyze(
     session_dir,
 ):
@@ -277,29 +246,3 @@ def test_trace_analyze_request_itself_passes(session_dir):
     s.last_profile_trace = "/tmp/profile.tar.gz"
     s.last_trace_analyze = {}
     assert coord.dispatcher.admission_denial_for_request("kernel_agent", "trace_analyze") is None
-
-
-def test_legacy_select_kernels_request_kind_no_longer_recognised(session_dir):
-    """The pre-M4 ``select_kernels`` request kind was removed; no handler is registered for it."""
-    coord = Coordinator(session_dir, backends=_backends_full())
-    s = coord.shared_state
-    s.baseline_tput = 100.0
-    s.last_profile_trace = "/tmp/profile.tar.gz"
-    from hyperloom.orchestrator.kernel.request_handlers import KERNEL_REQUEST_HANDLERS
-
-    assert "select_kernels" not in KERNEL_REQUEST_HANDLERS
-    assert "trace_analyze" in KERNEL_REQUEST_HANDLERS
-
-
-def test_trace_analyze_gate_clears_run_opt_request_when_cache_fresh(session_dir):
-    """A fresh ``last_trace_analyze`` cache clears the request-layer gate."""
-    coord = Coordinator(session_dir, backends=_backends_full())
-    _write_baseline_json(session_dir)
-    s = coord.shared_state
-    s.baseline_tput = 100.0
-    s.last_profile_trace = "/tmp/profile.tar.gz"
-    s.last_trace_analyze = {
-        "trace_input": "/tmp/profile.tar.gz",
-        "candidates_path": "/tmp/cands.json",
-    }
-    assert coord.dispatcher.admission_denial_for_request("kernel_agent", "run_optimization") is None

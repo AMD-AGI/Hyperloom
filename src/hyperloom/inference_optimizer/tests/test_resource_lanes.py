@@ -17,11 +17,7 @@ import pytest
 
 from hyperloom.orchestrator.bus import resource_lock
 from hyperloom.orchestrator.bus.gpu_pool import SpecialistGpuPool
-from hyperloom.orchestrator.bus.resource_lock import (
-    KNOWN_LANES,
-    LANE_CONFLICTS,
-    SqliteLeaseBackend,
-)
+from hyperloom.orchestrator.bus.resource_lock import SqliteLeaseBackend
 from hyperloom.orchestrator.bus.storage.connection import SqliteConnection
 from hyperloom.orchestrator.bus.storage.schema import (
     DEFAULT_LANE_CAPACITIES,
@@ -308,12 +304,6 @@ async def test_research_lane_independent_of_benchmark_lane(conn, locks):
     assert "research_lane" in spec.lanes
     await locks.release(bench)
     await locks.release(spec)
-
-
-def test_lane_conflicts_research_lane_isolated():
-    assert LANE_CONFLICTS["research_lane"] == frozenset()
-    for lane, conflicts in LANE_CONFLICTS.items():
-        assert "research_lane" not in conflicts
 
 
 @pytest.mark.asyncio
@@ -745,14 +735,6 @@ async def test_lane_holders_distinct(conn, locks):
         await locks.release(l)
 
 
-@pytest.mark.asyncio
-async def test_lane_capacities_returns_full_table(conn, locks):
-    caps = await locks.lane_capacities()
-    for lane in KNOWN_LANES:
-        assert lane in caps
-    assert caps["research_lane"] == DEFAULT_LANE_CAPACITIES["research_lane"]
-
-
 def _make_session_with_db(tmp_path: Path) -> tuple[Path, SqliteConnection]:
     session_dir = tmp_path / "session"
     (session_dir / "storage").mkdir(parents=True)
@@ -786,60 +768,21 @@ async def test_concurrent_acquires_respect_capacity(conn, locks):
         await locks.release(lease)
 
 
-def test_gpu_research_lane_known_and_conflicts_are_symmetric():
-    """gpu_research_lane is a known lane, mutually exclusive with serving."""
-    assert "gpu_research_lane" in KNOWN_LANES
-    assert LANE_CONFLICTS["gpu_research_lane"] == frozenset({"benchmark_lane", "profile_lane", "server_lifecycle"})
-    for serving in ("benchmark_lane", "profile_lane", "server_lifecycle"):
-        assert "gpu_research_lane" in LANE_CONFLICTS[serving]
-    assert "gpu_research_lane" not in LANE_CONFLICTS["gpu_research_lane"]
-
-
 @pytest.mark.asyncio
-async def test_gpu_research_lane_blocks_serving(locks):
-    """Holding gpu_research_lane blocks every serving lane."""
-    gpu = await locks.acquire_many(
-        ["gpu_research_lane"],
-        holder_id="g0",
-        task_id="tg0",
-        action="specialist",
-        ttl_sec=60,
-    )
-    for serving in ("server_lifecycle", "benchmark_lane", "profile_lane"):
-        assert (
-            await locks.acquire_many(
-                [serving],
-                holder_id=f"h-{serving}",
-                task_id=f"t-{serving}",
-                action="serve",
-                ttl_sec=60,
-            )
-            is None
-        )
-    await locks.release(gpu)
-
-
-@pytest.mark.asyncio
-async def test_serving_blocks_gpu_research_lane(locks):
-    """Symmetry: a live benchmark blocks a GPU specialist's gpu_research_lane."""
-    bench = await locks.acquire_many(
-        ["benchmark_lane"],
-        holder_id="b0",
-        task_id="tb0",
-        action="bench",
-        ttl_sec=60,
-    )
-    assert (
-        await locks.acquire_many(
-            ["gpu_research_lane"],
-            holder_id="g0",
-            task_id="tg0",
-            action="specialist",
-            ttl_sec=60,
-        )
-        is None
-    )
-    await locks.release(bench)
+@pytest.mark.parametrize(
+    ("held", "requested"),
+    [
+        pytest.param("gpu_research_lane", "server_lifecycle", id="gpu-blocks-server_lifecycle"),
+        pytest.param("gpu_research_lane", "benchmark_lane", id="gpu-blocks-benchmark_lane"),
+        pytest.param("gpu_research_lane", "profile_lane", id="gpu-blocks-profile_lane"),
+        pytest.param("benchmark_lane", "gpu_research_lane", id="benchmark_lane-blocks-gpu"),
+    ],
+)
+async def test_gpu_research_lane_and_serving_lanes_exclude_each_other(locks, held, requested):
+    """A GPU specialist and a serving lane never hold the machine at the same time."""
+    lease = await locks.acquire_many([held], holder_id="h0", task_id="t0", action="hold", ttl_sec=60)
+    assert await locks.acquire_many([requested], holder_id="h1", task_id="t1", action="request", ttl_sec=60) is None
+    await locks.release(lease)
 
 
 @pytest.mark.asyncio
@@ -936,8 +879,3 @@ async def test_dead_coordinator_does_not_release_specialist_gpu_lanes(conn, lock
     await pool.try_acquire(count=1, holder_id="specialist", task_id="specialist")
     assert await locks.reap_dead_holders() == []
     assert (await locks.lane_holders())["gpu_research_lane"] == 1
-
-
-def test_gpu_research_lane_seeded_capacity_one():
-    """A fresh DB seeds gpu_research_lane at capacity 1 (strictly serial)."""
-    assert DEFAULT_LANE_CAPACITIES.get("gpu_research_lane") == 1

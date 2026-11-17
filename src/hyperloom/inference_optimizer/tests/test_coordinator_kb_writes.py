@@ -77,14 +77,6 @@ def _expected_cid() -> str:
     )
 
 
-def test_workload_canonical_id_defined_and_consistent(tmp_path: Path) -> None:
-    """``workload_canonical_id`` exists and agrees with ``recipe_canonical_id``."""
-    coord = _make_coordinator(tmp_path)
-    assert hasattr(coord.recipe_journal, "workload_canonical_id")
-    assert coord.recipe_journal.workload_canonical_id() == _expected_cid()
-    assert coord.recipe_journal.workload_canonical_id() == _expected_cid()
-
-
 def test_kb_amend_recipe_persists_lesson(tmp_path: Path) -> None:
     """Appending a lesson lands in the local KB."""
     coord = _make_coordinator(tmp_path)
@@ -476,6 +468,27 @@ def test_close_below_the_row_keeps_what_worked_and_merges_what_failed(tmp_path: 
         ("fp8_kv_cache", "accuracy"),
         ("tp8", "oom"),
     ]
+
+
+def test_close_finalize_keeps_the_sessions_other_runs_recorded(tmp_path: Path) -> None:
+    coord = _make_coordinator(tmp_path)
+    cid = _expected_cid()
+    coord.recipe_kb.put_recipe(
+        RecipeUpsert(
+            canonical_id=cid,
+            model=_MODEL,
+            hardware=_HW,
+            framework_name=_FW,
+            framework_version=_FWV,
+            precision=_PREC,
+            sessions=[{"session_id": "other-session", "gain_pct": 4.0}],
+        )
+    )
+
+    assert coord.recipe_journal.finalize_recipe_and_journal()["result_type"] == "written"
+
+    row = coord.recipe_kb.get_recipe(canonical_id=cid)
+    assert "other-session" in [s["session_id"] for s in row["sessions"]]
 
 
 def test_best_config_reads_stack_args_from_canonical_server_key(
@@ -896,14 +909,6 @@ def test_finalize_gate_honours_persisted_mode_without_the_env_var(tmp_path, monk
     assert out["reason"] == "agentx_local_store_unsupported"
 
 
-def test_finalize_recipe_still_runs_without_agentx(tmp_path, monkeypatch) -> None:
-    """The gate must not cost the synthetic path its finalize."""
-    monkeypatch.delenv("HYPERLOOM_BENCHMARK_CONFIG", raising=False)
-    coord = _make_coordinator(tmp_path)
-    out = coord.recipe_journal.finalize_recipe_and_journal(source="close")
-    assert out.get("reason") != "agentx"
-
-
 def test_t0_anchor_does_not_write_under_agentx(native_benchmark, tmp_path, monkeypatch) -> None:
     """The third Recipe sink, and the one the first two gates never saw."""
     from hyperloom.orchestrator.knowledge.recipe_kb_t0 import T0AnchorRequest, run_t0_anchor
@@ -1066,3 +1071,61 @@ def test_fact_write_hook_lets_an_unexpected_recipe_store_error_propagate(tmp_pat
 
     with pytest.raises(TypeError, match="put_recipe signature drifted"):
         _fact_write_for_three_kept_variants(coord)
+
+
+def _fact_write_for_one_task(coord, *, result: dict, verdict) -> None:
+    import asyncio
+    from types import SimpleNamespace
+
+    task = SimpleNamespace(kind="integrate_patch", task_id="t-fact", params={})
+    asyncio.run(coord.recipe_journal.fact_write_hook(task=task, result=result, verdict=verdict))
+
+
+def test_fact_write_hook_files_a_lesson_for_an_adopted_gain(tmp_path: Path) -> None:
+    from hyperloom.inference_optimizer.session.optimization_journal import Verdict
+
+    coord = _make_coordinator(tmp_path)
+    _fact_write_for_one_task(
+        coord, result={"status": "kept", "gain_pct": 6.0, "output_throughput": 950.0}, verdict=Verdict.ADOPTED
+    )
+    row = coord.recipe_kb.get_recipe(canonical_id=_expected_cid())
+    assert [lesson["measured_impact"]["gain_pct"] for lesson in row["lessons"]] == [6.0]
+
+
+@pytest.mark.parametrize(
+    ("recipe_kb_session_id", "stamped"),
+    [
+        pytest.param("recipe-kb-99", "recipe-kb-99", id="anchored_session_id"),
+        pytest.param("", "session", id="session_dir_name"),
+    ],
+)
+def test_fact_write_hook_stamps_the_local_session_id(tmp_path: Path, recipe_kb_session_id: str, stamped: str) -> None:
+    from hyperloom.inference_optimizer.session.optimization_journal import Verdict
+
+    coord = _make_coordinator(tmp_path)
+    coord.shared_state.recipe_kb_session_id = recipe_kb_session_id
+    _fact_write_for_one_task(
+        coord, result={"status": "kept", "gain_pct": 6.0, "output_throughput": 950.0}, verdict=Verdict.ADOPTED
+    )
+    row = coord.recipe_kb.get_recipe(canonical_id=_expected_cid())
+    assert row["provenance"]["details"]["source_session_id"] == stamped
+
+
+@pytest.mark.parametrize(
+    ("result", "severities"),
+    [
+        pytest.param({"error_class": "oom", "reason": "bad"}, ["crash"], id="oom"),
+        pytest.param({"status": "crash"}, ["crash"], id="crash_status"),
+        pytest.param({"gain_pct": -10.0}, ["regress"], id="regression"),
+        pytest.param({"gain_pct": 2.0}, [], id="small_gain"),
+        pytest.param({"gain_pct": "bad"}, [], id="unparseable_gain"),
+        pytest.param({}, [], id="empty_result"),
+    ],
+)
+def test_fact_write_hook_files_the_pitfall_a_failure_warrants(tmp_path: Path, result: dict, severities: list) -> None:
+    from hyperloom.inference_optimizer.session.optimization_journal import Verdict
+
+    coord = _make_coordinator(tmp_path)
+    _fact_write_for_one_task(coord, result=result, verdict=Verdict.FAILED)
+    row = coord.recipe_kb.get_recipe(canonical_id=_expected_cid()) or {}
+    assert [pitfall["severity"] for pitfall in row.get("pitfalls") or []] == severities

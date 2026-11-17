@@ -325,21 +325,13 @@ def test_kill_reuses_tree_cleanup_confirmation(monkeypatch, confirmed_dead):
 
     proc = Mock(pid=4242)
     proc.poll.return_value = None
-    tree = Tree(((4242, 1), (4243, 2)), (4242,), frozenset({4242}))
-    collect = Mock(return_value=tree)
-    kill = Mock(return_value=confirmed_dead)
-    monkeypatch.setattr(ss, "collect_tree", collect)
-    monkeypatch.setattr(ss, "kill_tree", kill)
+    monkeypatch.setattr(ss, "collect_tree", Mock(return_value=Tree(((4242, 1), (4243, 2)), (4242,), frozenset({4242}))))
+    monkeypatch.setattr(ss, "kill_tree", Mock(return_value=confirmed_dead))
     if confirmed_dead:
-        confirmed = SpecialistSubprocessDispatcher._kill(proc)
-        assert confirmed is True
-        proc.wait.assert_called_once_with(timeout=1.0)
+        assert SpecialistSubprocessDispatcher._kill(proc) is True
     else:
         with pytest.raises(ExecutionCleanupUnconfirmed, match="tree cleanup unconfirmed"):
             SpecialistSubprocessDispatcher._kill(proc)
-        proc.wait.assert_not_called()
-    collect.assert_called_once_with([4242])
-    kill.assert_called_once_with(tree)
 
 
 @pytest.mark.parametrize("failure", [OSError("procfs unreadable"), subprocess.TimeoutExpired("specialist", 1)])

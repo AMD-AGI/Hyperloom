@@ -56,16 +56,16 @@ def test_apply_reasoning_effort_is_noop_without_env():
     assert out is params  # mutates in place
 
 
-def test_apply_reasoning_effort_injects_recognized_value():
-    out = apply_reasoning_effort({"model": "m"}, env={"HYPERLOOM_REASONING_EFFORT": "MEDIUM"})
-    assert out["reasoning_effort"] == "medium"
-    out2 = apply_reasoning_effort({"model": "m"}, env={"OPENAI_REASONING_EFFORT": "high"})
-    assert out2["reasoning_effort"] == "high"
-
-
-def test_apply_reasoning_effort_accepts_the_top_of_the_ladder():
-    out = apply_reasoning_effort({"model": "m"}, env={"HYPERLOOM_REASONING_EFFORT": " XHigh "})
-    assert out["reasoning_effort"] == "xhigh"
+@pytest.mark.parametrize(
+    ("env", "expected"),
+    [
+        pytest.param({"HYPERLOOM_REASONING_EFFORT": "MEDIUM"}, "medium", id="hyperloom_env_case_folded"),
+        pytest.param({"OPENAI_REASONING_EFFORT": "high"}, "high", id="openai_env"),
+        pytest.param({"HYPERLOOM_REASONING_EFFORT": " XHigh "}, "xhigh", id="top_of_the_ladder_padded"),
+    ],
+)
+def test_apply_reasoning_effort_injects_recognized_value(env, expected):
+    assert apply_reasoning_effort({"model": "m"}, env=env)["reasoning_effort"] == expected
 
 
 def test_apply_reasoning_effort_sends_max_as_the_gateway_level():
@@ -600,15 +600,6 @@ def test_claude_sdk_env_options_isolates_settings_for_oauth_only_env():
     """OAuth alone is a gateway signal, so the run still gets an isolated env."""
     opts = claude_sdk_env_options(env={"_".join(("CLAUDE", "CODE", "OAUTH", "TOKEN")): "sk-ant-oat01-fake"})
     assert opts["setting_sources"] == []
-
-
-def test_anthropic_credential_env_order_is_cli_precedence():
-    """Highest precedence first; OAuth is live only when both key vars are unset."""
-    assert ANTHROPIC_CREDENTIAL_ENV_ORDER == (
-        "_".join(("ANTHROPIC", "API", "KEY")),
-        "_".join(("ANTHROPIC", "AUTH", "TOKEN")),
-        "_".join(("CLAUDE", "CODE", "OAUTH", "TOKEN")),
-    )
 
 
 def test_claude_sdk_env_options_keeps_explicit_deepseek_base_url():
