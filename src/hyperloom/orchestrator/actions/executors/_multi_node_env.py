@@ -8,7 +8,7 @@ from __future__ import annotations
 
 import logging
 import os
-from typing import Any
+from typing import Any, Iterable, Mapping
 
 from hyperloom_common.coerce import to_int
 from hyperloom_common.env import env_flag
@@ -50,6 +50,23 @@ def is_multi_node() -> bool:
     except ValueError:
         return False
     return env_n >= 2
+
+
+def round_server_env(variant_envs: Mapping[str, Any] | None = None, unset_envs: Iterable[str] = ()) -> dict[str, str]:
+    """The env a multi-node restart forwards to every rank, layered as a single-node round's ``benchmark.envs`` is.
+
+    The session base's server env, the operator's ``--extra-env`` pins over it, and the round's own envs over both;
+    the round's unsets drop what the base and the pins set. The forwarded env overrides what the pods were created
+    with, so a layer left out here is lost on the server.
+    """
+    from hyperloom.orchestrator.state.base_launch import session_server_base
+
+    from ._workload_envs import _operator_extra_env
+
+    unset = set(unset_envs)
+    merged = {k: v for k, v in {**session_server_base().env, **_operator_extra_env()}.items() if k not in unset}
+    merged.update({str(k): str(v) for k, v in (variant_envs or {}).items()})
+    return merged
 
 
 def _compute_partition_mode(state: dict[str, Any]) -> str:
