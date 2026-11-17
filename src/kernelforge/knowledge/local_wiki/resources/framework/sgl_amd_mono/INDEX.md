@@ -2,8 +2,8 @@
 title: sgl-amd-mono knowledge map — monokernels for SGLang on AMD Instinct
 kind: index
 scope: framework/sgl_amd_mono
-updated: 2026-11-12
-pinned_source: sgl-project/sgl-amd-mono@219f40be
+updated: 2026-11-17
+pinned_source: sgl-project/sgl-amd-mono@b504de5
 ---
 
 # sgl-amd-mono — knowledge map
@@ -54,6 +54,7 @@ runtime (`sgl_amd_mono.common`) reads the runtime cards — `overall/device_runt
 | "The weights stream slower than HBM allows" | `skills/optimize/mono_levers/weight_streaming.md` |
 | "Is a monokernel worth it for this span at all?" | `common_methodology/optimization/lever_monokernel.md` |
 | "Turn a KEEP into an upstream PR" | `overall/contributing.md` |
+| "Will the GPU CI run my PR, and what does it gate on?" | `overall/contributing.md` § The GPU CI |
 
 ## Folder structure & file roles
 ```
@@ -64,9 +65,9 @@ framework/sgl_amd_mono/
 │   ├── monokernel_interface.md       # MonoSpec, DeviceLimits, Requirements, Numerics, routing, refusal
 │   ├── device_runtime.md             # common/: plan, sync, guard, epoch, peer, stamps, build keys
 │   ├── isa_portability.md            # gfx950-only primitives in common/, LDS and CU budgets, FP8 formats
-│   └── contributing.md               # upstream PR shape and the evidence a perf PR carries
+│   └── contributing.md               # upstream PR shape, the GPU CI's gates, the evidence a perf PR carries
 ├── models/
-│   └── minimax_m31_ffn.md            # MiniMax-M3.1-Flash FFN launch: stages, budgets, measured times
+│   └── minimax_m31_ffn.md            # MiniMax-M3.1-Flash FFN launch: stages, budgets, MI350X / MI355X times, levers
 └── skills/
     ├── profile/
     │   ├── stage_timeline.md         # per-CTA stage marks and how to read the critical chain

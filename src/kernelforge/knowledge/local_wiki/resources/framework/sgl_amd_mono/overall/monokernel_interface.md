@@ -2,9 +2,10 @@
 title: the monokernel interface — MonoSpec, routing, numerics and refusal
 kind: technique
 gens: [gfx950]
-updated: 2026-11-09
+updated: 2026-11-17
 sources:
   - sgl-project/sglang@035670b6:python/sglang/kernels/plugin_kernels/amd/spec.py
+  - sgl-project/sglang@cbd4439f:python/sglang/kernels/plugin_kernels/amd/spec.py
   - sgl-project/sgl-amd-mono@219f40be:sgl_amd_mono/minimax_m31/spec.py
   - sgl-project/sgl-amd-mono@219f40be:test/unit/test_contract.py
   - https://github.com/sgl-project/sglang/issues/43949
@@ -16,6 +17,9 @@ A spec is the contract between a model's launches and SGLang. In a forge campaig
 not the candidate: the launch and its forward change, the declared contract does not.
 
 ## `MonoSpec` fields
+Re-checked against SGLang `cbd4439f` (the 2026-11-15 MI35x image): the same twelve fields below, and
+`MONOKERNEL_API_VERSION = 1`.
+
 | Field | Meaning |
 |---|---|
 | `name` | the spec's name, e.g. `"minimax_m31_ffn_hip"` |

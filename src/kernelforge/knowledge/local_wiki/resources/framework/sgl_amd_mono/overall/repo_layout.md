@@ -2,9 +2,10 @@
 title: sgl-amd-mono — packages, how a step reaches a launch, test tiers
 kind: technique
 gens: [gfx950]
-updated: 2026-11-09
+updated: 2026-11-17
 sources:
-  - sgl-project/sgl-amd-mono@219f40be:README.md
+  - sgl-project/sgl-amd-mono@b504de5:README.md
+  - sgl-project/sgl-amd-mono@b504de5:scripts/ci/README.md
   - sgl-project/sgl-amd-mono@219f40be:pyproject.toml
   - sgl-project/sgl-amd-mono@219f40be:sgl_amd_mono/__init__.py
   - sgl-project/sglang@035670b6:python/sglang/kernels/plugin_kernels/amd/spec.py
@@ -56,6 +57,10 @@ its kernel stage by stage; read a model's README or launch docstring before its 
 Most kernel and e2e tests need the model's TP size in GPUs; e2e tests also need the checkpoint path
 in an environment variable (e.g. `MINIMAX_M31_FLASH_MODEL_PATH`). `README.md` § Testing lists the
 command and GPU count per model. Many kernel tests build from random weights and need no checkpoint.
+
+The GPU CI (`scripts/ci/`, `.github/workflows/pr-test-amd.yml`) runs these tiers on two MI355X nodes
+for the models a PR touches, as `scripts/ci/models.py` lists them (packages, TP, GPUs, test paths);
+see `overall/contributing.md` for when it runs and what it gates on.
 
 ## Conventions a change must keep
 - Every module that reads SGLang internals declares the names in `SGLANG_READS` (see

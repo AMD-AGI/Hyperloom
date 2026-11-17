@@ -2,13 +2,17 @@
 title: MiniMax-M3.1-Flash FFN launch — stages, budgets and measured times
 kind: technique
 gens: [gfx950]
-updated: 2026-11-09
+updated: 2026-11-17
 sources:
   - sgl-project/sgl-amd-mono@219f40be:sgl_amd_mono/minimax_m31/ffn.py
   - sgl-project/sgl-amd-mono@219f40be:sgl_amd_mono/minimax_m31/spec.py
   - sgl-project/sgl-amd-mono@219f40be:sgl_amd_mono/minimax_m31/runner.py
   - https://github.com/sgl-project/sgl-amd-mono/pull/56
   - https://github.com/sgl-project/sgl-amd-mono/pull/59
+  - https://github.com/sgl-project/sgl-amd-mono/pull/145
+  - https://github.com/sgl-project/sgl-amd-mono/pull/146
+  - sgl-project/sgl-amd-mono@b504de5:scripts/ci/models.py
+  - sgl-project/sglang@cbd4439f:python/sglang/srt/layers/quantization/fp8_utils.py
 ---
 
 # MiniMax-M3.1-Flash — the FFN launch (`minimax_m31/`)
@@ -66,6 +70,43 @@ wait stops; a tag cycle ends with its receive half zeroed) and `test/e2e/test_mi
 the server without tokens). SGLang needs MiniMax-M3.1-Flash support (sgl-project/sglang#45925) and its
 gfx950 path (#45936).
 
+## Measured on MI355X (`main` at `b504de5`, SGLang `cbd4439f`, FlyDSL 0.4.0, TP 4)
+The launch serves MI355X as it is: the serving tests (`test/e2e/test_minimax_m31_server.py`) pass on
+4 x MI355X, GSM8K 0.97 / 0.985. The CI does not run it there (`scripts/ci/models.py`: `gpus: mi350x`).
+- Kernel time, weights rotating through four copies (eight launches a graph, slowest rank):
+  44.9 / 49.7 / 60.4 / 80.4 / 109.4 / 129.5 µs at 1 / 2 / 4 / 8 / 12 / 16 rows. Against one copy
+  replayed (which stays in the MALL), rotation moved wall time by 0.2-3.7% (ROCm 7.2 / FlyDSL 0.3.4).
+- Per-user decode (decode steps, no DSpark, 1024 in / 512 out): 278 / 180 / 129 tok/s at concurrency
+  1 / 8 / 16 with the monokernels, 184 / 137 / 119 without; at 20 (past the 16-row width) both 107.
+- A stage timeline at 16 rows: MFMA busy 1.4-4.1%; the up stage (about 40 µs) already streams at about
+  5.6 TB/s; the rest is the critical chain of hand-offs (push -> reduce -> norm -> router -> route ->
+  table -> up -> down -> final), with the shared expert and route on CTAs that serve a prefix stage first.
+- o_proj: SGLang's `fp8_utils` runs AITER's `gemm_a8w8_bpreshuffle` for o_proj's (6144, 2048) since
+  sgl-project/sglang#46693 (no `smallm_fp8_gemm` config); the launch's partial is bit-identical to it at
+  1, 3, 8 and 16 rows. `test_o_proj_is_sglangs_to_the_bit` compared with `smallm_fp8_gemm` only and fails
+  on that SGLang; #146 holds it to the dispatched GEMM.
+
+## Levers measured on this launch (#145, open as of 2026-11-17)
+Six bit-exact changes from two forge campaigns, each committed and measured on its own; cumulative
+kernel time at 16 rows -0.2, -1.2, -4.0, -5.3, -6.2, -8.8% (1 row: -4.3 ... -8.5%); per-user decode
++7.3 / +4.7 / +7.5% at concurrency 1 / 8 / 16:
+1. The shared expert's up tiles on CTAs 128..175, which have no prefix task (`SHARED0 = SEAM_TASKS`);
+   the down tasks past one a CTA to the CTAs that finish up first (`stage_down_placed`).
+2. Route on CTAs with no prefix task (`ROUTE0`), its bias load before the logits wait, the top-4
+   winner's sigmoid read from its lane instead of a butterfly.
+3. Routed up units publish UPF in pairs (`pair_flag`, `UPF_TAIL`): a drain covers two units' loads.
+4. At 16 rows o_proj on all eight waves, one accumulator chain a wave, summed in the original order.
+5. The prefix stages' inputs (residual, Gemma weights, o_proj's weight scales, SRES) issued before
+   their waits.
+6. A down slot whose UPF tiles the previous slot already saw carry this launch's tag skips its poll and
+   issues its first MID batch ahead of its weights.
+
+Measured slower or within noise (bench, ROCm 7.2 / FlyDSL 0.3.4): the reduce, norm and router loads
+batched before their waits as one change; other UPF-pairing tails; probing the next down slot together
+with hoisting the table work before the route poll; the router computing rstd from the reduce's partial
+sums with the extra down tasks split by slot; pairing down slots; folding route into the table stage.
+
 ## Not covered upstream (#59)
-MI355X, TP other than 4, and the attention side: the next layer's add-RMSNorm, qkv GEMM, q / k norms,
-RoPE, cache writes and sparse decode still run as about 7 kernels a layer (about 40 µs).
+TP other than 4, and the attention side: the next layer's add-RMSNorm, qkv GEMM, q / k norms,
+RoPE, cache writes and sparse decode still run as about 7 kernels a layer (about 40 µs). MI355X is
+measured above, by hand.

@@ -2,12 +2,15 @@
 title: contributing to sgl-amd-mono — PR shape, review gates and the evidence a perf PR carries
 kind: technique
 gens: [gfx950]
-updated: 2026-11-09
+updated: 2026-11-17
 sources:
   - sgl-project/sgl-amd-mono@219f40be:.github/pull_request_template.md
   - sgl-project/sgl-amd-mono@219f40be:.github/workflows/pr-title.yml
   - sgl-project/sgl-amd-mono@219f40be:.github/workflows/lint.yml
-  - sgl-project/sgl-amd-mono@219f40be:.github/CODEOWNERS
+  - sgl-project/sgl-amd-mono@b504de5:.github/CODEOWNERS
+  - sgl-project/sgl-amd-mono@b504de5:scripts/ci/README.md
+  - sgl-project/sgl-amd-mono@b504de5:scripts/ci/models.py
+  - sgl-project/sgl-amd-mono@b504de5:.github/workflows/pr-test-amd.yml
   - https://github.com/sgl-project/sgl-amd-mono/pull/56
   - https://github.com/sgl-project/sgl-amd-mono/pull/59
   - https://github.com/sgl-project/sgl-amd-mono/pull/62
@@ -28,6 +31,27 @@ the spec serves, against the SGLang commit it names.
   isort, ruff, ruff-format and codespell).
 - **Review** by a code owner from `.github/CODEOWNERS`; a new model's PR adds its owner line there.
 - **Squash and merge**: the title becomes the commit title on `main`.
+
+## The GPU CI (`scripts/ci/README.md`)
+Two MI355X nodes run the review guideline's checks (#107). The **PR test** runs only when a maintainer
+adds the `run-ci` label (`run-ci-extra` adds GPQA, for attention, KV-cache or long-sequence changes);
+the run removes the label when it starts, so a later push needs a maintainer again (#130 lets fork PRs
+run). It sets the `AMD PR test` status and keeps one report comment on the PR.
+- **Scope** (`scripts/ci/scope.py`): a changed model package (or its tests) runs that model's full
+  tier; `common/`, `sgl_amd_mono/__init__.py` or `pyproject.toml` runs every other model's smoke tier;
+  a PR that changes no model runs the unit and common kernel tests.
+- **What a model runs** (`scripts/ci/models.py`): its kernel and e2e tests, microbenchmarks, GSM8K
+  (sgl-eval, 1319 questions) on and off, and `sglang.benchmark.serving` (random 8k in / 1k out, range
+  ratio 0.8) on the base branch and the PR at the model's concurrencies. A model whose `gpus` the nodes
+  do not have is skipped with a warning: `minimax_m31` lists `mi350x` only, so its PRs carry
+  MI355X results by hand.
+- **The gate** fails on a failed test or step; no routing logged by the monokernel server; a GSM8K loss
+  with the monokernels on (exact one-sided McNemar on the questions the two runs answer differently,
+  p < 0.05); median TPOT more than 2% worse than the base at a covered concurrency
+  (`gate_concurrency`); **a `[Perf]` or `[Feat]` PR none of whose models gains 5% or more in median
+  TPOT at a covered concurrency**; or a change to existing lines of `.github/CODEOWNERS`.
+- The **nightly** (main, newest image) also checks the sgl-amd-mono commit the SGLang image pins
+  (`/sgl-workspace/sgl-amd-mono`) against that SGLang: `test_contract.py` and a short serving run.
 
 ## The body (`.github/pull_request_template.md`)
 | Section | What upstream PRs put there |
@@ -60,3 +84,17 @@ the spec serves, against the SGLang commit it names.
 2. Re-run on the spec's hardware and TP sizes; a gfx942-only measurement cannot support a gfx950 claim.
 3. Carry the campaign's reverted attempts into "Not covered" when each was measured — they save the
    reviewer the same experiments.
+4. Measure on the image the CI runs (the newest `rocm/sgl-dev:v*-rocm10-mi35x-*`). A campaign on an
+   older FlyDSL / AITER carries the direction of a change, not its size: MiniMax-M3.1's six FFN changes
+   measured 2-7% on a ROCm 7.2 / FlyDSL 0.3.4 stack and 5-10% on the CI image (#145).
+5. Prove each commit bitwise with a comparison that can fail: `main`'s launch (a copy inside the
+   `sgl_amd_mono` package, whose JIT cache key traces only that package) and the commit's, in one
+   process on the same inputs, every output compared by bits; then break a constant once and show
+   the comparison catches it.
+6. Clean what the search left: parameters nothing reads, constants defined away from the others,
+   comments that only make sense inside the campaign. Run `pre-commit` on every commit
+   (`git rebase --exec`), not only on the tip.
+7. Before titling a PR `[Perf]`, check the CI's 5% median-TPOT gate at a covered width; when the model's
+   CI entry cannot run on the nodes (`gpus`), attach the serving tests and per-user decode by hand.
+8. A repository test that fails on `main` too is named as such, and fixed on its own when the fix is
+   clear (#146: the o_proj parity test held to the GEMM SGLang dispatches for the shape).

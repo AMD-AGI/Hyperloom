@@ -2,7 +2,7 @@
 title: sgl-amd-mono device runtime — resident grid, mailboxes, guards, epochs, peer memory
 kind: technique
 gens: [gfx950]
-updated: 2026-11-09
+updated: 2026-11-17
 sources:
   - sgl-project/sgl-amd-mono@219f40be:sgl_amd_mono/common/__init__.py
   - sgl-project/sgl-amd-mono@219f40be:sgl_amd_mono/common/plan.py
@@ -10,6 +10,7 @@ sources:
   - sgl-project/sgl-amd-mono@219f40be:sgl_amd_mono/common/guard.py
   - sgl-project/sgl-amd-mono@219f40be:sgl_amd_mono/common/epoch.py
   - sgl-project/sgl-amd-mono@219f40be:sgl_amd_mono/common/peer.py
+  - sgl-project/sgl-amd-mono@b504de5:sgl_amd_mono/common/mx.py
   - sgl-project/sgl-amd-mono@219f40be:sgl_amd_mono/minimax_m31/runner.py
 ---
 
@@ -73,7 +74,7 @@ hand-offs (#62, #68).
 | Module | Role |
 |---|---|
 | `ops.py` | wave ops (DPP within a row, `v_permlane{16,32}_swap` across rows), hardware math, packing, buffer access; cache-policy bits `CM_DEV = 16`, `CM_SYS = 17`, `CM_NT = 2` |
-| `mx.py` | FP8 / MX arithmetic: E4M3 clamp (`FP8_MAX = 448`), E8M0 scales, the scaled MFMA |
+| `mx.py` | FP8 / MX arithmetic: E4M3 clamp (`FP8_MAX = 448`), E8M0 scales, the scaled MFMA; MXFP4 activation quant matching AITER's two scale rules (`e8m0_roundup`: its HIP quant; `e8m0_even`: its Triton one) and the E2M1 byte packer `fp4x2` (#126) |
 | `stamps.py` | timeline stage marks, debug builds only (`skills/profile/stage_timeline.md`) |
 | `hip_ext.py` | HIP C++ built into a torch extension at first use, cached under `SGLANG_AMD_MONO_CACHE_DIR`; one rank builds |
 | `rocm_codegen.py` | `SGLANG_AMD_MONO_ROCM_LLVM=<prefix>` compiles this package's kernels with an external ROCm LLVM (FlyDSL's bundled LLVM and ROCm's each miscompiled a different heavily spilling variant) |
