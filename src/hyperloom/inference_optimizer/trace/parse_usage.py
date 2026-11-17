@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import json
 import logging
+import re
 from collections.abc import Iterable, Iterator
 from pathlib import Path
 from typing import Any
@@ -187,6 +188,74 @@ def _reattach_turn_output(
         usage["output_tokens"] = None
     usages[-1]["output_tokens"] = session_output
     return usages
+
+
+_SESSION_ID_PATTERN = re.compile(r"[A-Za-z0-9_-]+")
+
+
+def claude_stream_session_id(log_path: str | Path) -> str | None:
+    """The session id the Claude CLI named on its ``system``/``init`` row of a stream-json log."""
+    for obj in iter_json_events(log_path, "stream-json"):
+        if obj.get("type") == "system" and obj.get("subtype") == "init":
+            session_id = obj.get("session_id")
+            if isinstance(session_id, str) and _SESSION_ID_PATTERN.fullmatch(session_id):
+                return session_id
+            return None
+    return None
+
+
+def parse_claude_session_record_usages(session_record: str | Path) -> list[dict[str, int | None]]:
+    """Per-API-response usage from the Claude CLI's own session record, one entry per message id.
+
+    The CLI writes a message once per content block; the last entry of an id carries its final counts.
+    """
+    by_id: dict[str, dict[str, int | None]] = {}
+    for obj in iter_json_events(session_record, "claude-session"):
+        message = obj.get("message")
+        if obj.get("type") != "assistant" or not isinstance(message, dict):
+            continue
+        message_id = message.get("id")
+        usage = normalize_usage(message.get("usage") if isinstance(message.get("usage"), dict) else None)
+        if isinstance(message_id, str) and message_id and usage is not None:
+            by_id[message_id] = usage
+    return list(by_id.values())
+
+
+def recover_claude_session_usage(
+    process_log: str | Path,
+    usage: dict[str, Any] | None,
+    config_dirs: Iterable[str | Path],
+) -> tuple[dict[str, Any], list[dict[str, int | None]]] | None:
+    """The usage of a run whose stream-json log reported none, read from the CLI's own session record.
+
+    A gateway can stream every message with zeroed usage and leave the counts to the final ``result`` row; a run
+    killed before that row leaves the stream with no counts at all. Returns the cumulative usage and the per-turn
+    usages, or ``None`` when the stream reported counts or no session record exists.
+    """
+    if _input_side_total(usage):
+        return None
+    session_id = claude_stream_session_id(process_log)
+    if session_id is None:
+        return None
+    for config_dir in config_dirs:
+        for record in sorted(Path(config_dir, "projects").glob(f"*/{session_id}.jsonl")):
+            turns = parse_claude_session_record_usages(record)
+            if not any(_input_side_total(turn) for turn in turns):
+                continue
+            totals: dict[str, Any] = {key: sum(turn.get(key) or 0 for turn in turns) for key in TOKEN_KEYS}
+            model = (usage or {}).get("model") or _stream_model(process_log)
+            if model:
+                totals["model"] = model
+            return totals, turns
+    return None
+
+
+def _stream_model(process_log: str | Path) -> str | None:
+    """The serving model a stream-json log names."""
+    model: str | None = None
+    for obj in iter_json_events(process_log, "stream-json"):
+        model = _claude_stream_model(obj) or model
+    return model
 
 
 def parse_claude_stream_json_turn_usages(
@@ -505,7 +574,10 @@ __all__ = [
     "normalize_usage",
     "parse_claude_stream_json_response",
     "parse_claude_stream_json_tool_calls",
+    "claude_stream_session_id",
+    "parse_claude_session_record_usages",
     "parse_claude_stream_json_turn_usages",
+    "recover_claude_session_usage",
     "parse_claude_stream_json_usage",
     "parse_codex_jsonl_error",
     "parse_codex_jsonl_response",

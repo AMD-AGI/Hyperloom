@@ -5,6 +5,7 @@
 
 from __future__ import annotations
 
+import os
 from pathlib import Path
 
 from hyperloom_common.llm.llm_config import AGENT_BACKEND_CODEX, AGENT_BACKEND_DEEPSEEK
@@ -20,6 +21,7 @@ from hyperloom.inference_optimizer.trace.parse_usage import (
     parse_codex_jsonl_tool_calls,
     parse_codex_jsonl_turn_usages,
     parse_codex_jsonl_usage,
+    recover_claude_session_usage,
 )
 from hyperloom.inference_optimizer.trace.request_events import record_stream_json_requests
 from hyperloom.inference_optimizer.trace.tool_events import record_stream_json_tools
@@ -48,9 +50,20 @@ def harvest_agent_trace(backend: str, workspace: Path, process_log: Path) -> Age
     record_stream_json_requests(process_log)
     record_stream_json_tools(process_log)
     record_stream_json_compactions(process_log)
+    usage = parse_claude_stream_json_usage(process_log)
+    turn_usages = parse_claude_stream_json_turn_usages(process_log)
+    recovered = recover_claude_session_usage(process_log, usage, _claude_config_dirs())
+    if recovered is not None:
+        usage, turn_usages = recovered
     return AgentTrace(
-        usage=parse_claude_stream_json_usage(process_log),
+        usage=usage,
         response=parse_claude_stream_json_response(process_log),
         tool_calls=parse_claude_stream_json_tool_calls(process_log),
-        turn_usages=parse_claude_stream_json_turn_usages(process_log),
+        turn_usages=turn_usages,
     )
+
+
+def _claude_config_dirs() -> list[Path]:
+    """Where the Claude CLI keeps its session records: ``CLAUDE_CONFIG_DIR``, else ``~/.claude``."""
+    configured = os.environ.get("CLAUDE_CONFIG_DIR", "").strip()
+    return [Path(configured)] if configured else [Path.home() / ".claude"]
