@@ -415,6 +415,57 @@ def test_a_pin_passed_on_the_resume_outranks_the_persisted_one(tmp_path, monkeyp
     assert exc.value.code == 2
 
 
+def test_the_resume_exports_its_pins_again_after_the_topology_step_rewrote_them(tmp_path, monkeypatch, request):
+    """The topology step sets SKIP_VARIANTS from its flag after the early pin export; the resume must put the pin back."""
+    import asyncio
+
+    from hyperloom.inference_optimizer.cli import _build_parser, _run_optimize
+    from hyperloom.inference_optimizer.cli.bootstrap import MEASUREMENT_EPOCH
+
+    cli_mod = "hyperloom.inference_optimizer.cli"
+    saved_environ = dict(os.environ)
+    request.addfinalizer(lambda: (os.environ.clear(), os.environ.update(saved_environ)))
+
+    workspace = tmp_path / "sessions"
+    resume_dir = workspace / "Qwen-Test" / "pinned-skip"
+    model = tmp_path / "Qwen-Test"
+    (resume_dir / "reports").mkdir(parents=True, exist_ok=True)
+    SharedState(
+        session_id="resume-pinned-skip",
+        model_name=model.name,
+        model_path=str(model),
+        measurement_epoch=MEASUREMENT_EPOCH,
+        operator_extra_env={"SKIP_VARIANTS": "pinned"},
+    ).save(resume_dir)
+    (resume_dir / "manifest.json").write_text(
+        json.dumps({"schema_version": 4, "session_id": "resume-pinned-skip"}), encoding="utf-8"
+    )
+
+    monkeypatch.setenv("INFERENCE_OPTIMIZER_CURRENT_SESSION_DIR", str(resume_dir))
+    monkeypatch.setenv("USER_DATA_PATH", str(workspace))
+    monkeypatch.setenv("INFERENCE_OPTIMIZER_EXTRA_ENV", "")
+    monkeypatch.delenv("SKIP_VARIANTS", raising=False)
+    monkeypatch.delenv("MODEL_PATH", raising=False)
+    monkeypatch.setattr(
+        f"{cli_mod}.clean_stale_aiter_locks",
+        lambda: {"dir": "", "deleted": 0, "skipped_fresh": 0, "errors": 0},
+    )
+    monkeypatch.setattr(f"{cli_mod}._preflight", lambda args: ("", ""))
+    monkeypatch.setattr(f"{cli_mod}._check_codex_sandbox", lambda backend: None)
+
+    def past_the_export(*a, **kw):
+        raise RuntimeError("resume passed its pin export")
+
+    # The first call after the export in ``_resume_session``.
+    monkeypatch.setattr(f"{cli_mod}.latency_budget_scope_error", past_the_export)
+    args = _build_parser().parse_args(["optimize", "--resume-from", str(resume_dir), "--critic-mock"])
+
+    with pytest.raises(RuntimeError, match="resume passed its pin export"):
+        asyncio.run(_run_optimize(args))
+
+    assert os.environ["SKIP_VARIANTS"] == "pinned"
+
+
 def test_parse_operator_extra_env_keeps_pairs_and_drops_junk():
     """``NAME=VALUE`` pins survive; entries without ``=`` or with a blank name do not."""
     args = _ns(extra_env=["SGLANG_USE_AITER=0", "EMPTY=", "novalue", "=blank"])
