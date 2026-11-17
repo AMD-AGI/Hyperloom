@@ -15,7 +15,7 @@ from hyperloom.orchestrator.loop.coordinator import Coordinator
 from hyperloom.orchestrator.phases import machine_state as ps
 from hyperloom.orchestrator.roles.base import BackendError
 from hyperloom.orchestrator.state.task_registry import TaskSpec
-from .conftest import silent_backends
+from .conftest import seed_pending_critic_proposal, silent_backends
 
 _HOLD_PHASES = (ps.PHASE_PRELUDE, ps.PHASE_FRAMEWORK_AGENT, ps.PHASE_KERNEL_AGENT, ps.PHASE_SWEEP)
 _ONE_TURN_THEN_HOLD = ["orchestration"]
@@ -57,6 +57,17 @@ async def test_a_tick_with_nothing_new_runs_no_orchestration_turn(ticking, phase
     await c.tick(3)
 
     assert turns == _ONE_TURN_THEN_HOLD
+
+
+@pytest.mark.parametrize("custom_only", [False, True])
+async def test_critic_admission_requires_pending_proposals(ticking, custom_only):
+    c, _turns = ticking
+    c.shared_state.phase = ps.PHASE_FRAMEWORK_AGENT
+    c.shared_state.custom_specialist_only = custom_only
+
+    assert not await c.conversation.admit_turn("critic", time.time())
+    await seed_pending_critic_proposal(c)
+    assert await c.conversation.admit_turn("critic", time.time())
 
 
 async def _enter_sweep(c: Coordinator) -> None:

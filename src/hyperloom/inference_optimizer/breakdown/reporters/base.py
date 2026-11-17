@@ -155,7 +155,7 @@ def critic_iterations_of(breakdown: Any) -> list[dict[str, Any]]:
         breakdown: The full ``session_breakdown.json`` dict.
 
     Returns:
-        ``critic.iterations``, or ``[]`` when no Critic reviews were recorded.
+        ``critic.iterations``, or ``[]`` when the critic never ran.
     """
     return dict_rows(to_mapping(to_mapping(breakdown).get("critic")).get("iterations"))
 

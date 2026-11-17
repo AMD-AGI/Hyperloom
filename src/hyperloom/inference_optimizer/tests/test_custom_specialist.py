@@ -15,7 +15,6 @@ from typing import Any
 from unittest.mock import AsyncMock
 
 import pytest
-from .conftest import seed_pending_critic_proposal
 
 from hyperloom.inference_optimizer.cli import (
     _apply_custom_specialist_resume,
@@ -1024,10 +1023,7 @@ async def test_only_mode_leaves_framework_once_the_custom_cycle_is_done(kw, hint
         ("SWEEP", True, ["orchestration"]),
     ],
 )
-@pytest.mark.parametrize("pending", [False, True])
-async def test_only_mode_framework_ticks_without_an_orchestration_turn(
-    tmp_path, monkeypatch, phase, only, expected, pending
-):
+async def test_only_mode_framework_ticks_without_an_orchestration_turn(tmp_path, monkeypatch, phase, only, expected):
     import time
 
     coord = _coordinator(tmp_path, SharedState(custom_specialist_prompt=_PROMPT, custom_specialist_only=only))
@@ -1048,14 +1044,9 @@ async def test_only_mode_framework_ticks_without_an_orchestration_turn(
     coord.phase_machine.pump_table = {"CLOSE": _noop}
     coord._last_maintenance_ts = time.monotonic()
 
-    try:
-        if pending:
-            await seed_pending_critic_proposal(coord)
-        await coord._tick_once()
+    await coord._tick_once()
 
-        assert turns == expected + (["critic"] if pending else [])
-    finally:
-        await coord.stop()
+    assert turns == expected
 
 
 @pytest.mark.parametrize(("only", "expected"), [(True, 240 * 60), (False, 10 * 60)])

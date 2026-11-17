@@ -53,7 +53,11 @@ ROLE_SUBSCRIPTIONS: dict[str, frozenset[str]] = {
             "proposal",
         }
     ),
-    "critic": frozenset({"proposal"}),
+    "critic": frozenset(
+        {
+            "proposal",
+        }
+    ),
 }
 
 

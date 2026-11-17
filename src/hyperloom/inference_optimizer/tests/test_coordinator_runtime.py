@@ -454,11 +454,14 @@ async def test_sub_agent_runner_refuses_a_lane_holding_task_with_no_lease(tmp_pa
 async def test_coordinator_starts_with_silent_backends(session_dir):
     backends = _build_backends({})
     c = Coordinator(session_dir, backends=backends)
+    c.shared_state.agent_last_active["critic"] = 123.0
     try:
         await c.tick(2)
         msgs = await c.bus.tail(n=20, topic="observation")
         assert len(msgs) == 1
         assert msgs[0].from_agent == "orchestration"
+        assert not backends["critic"].calls
+        assert c.shared_state.agent_last_active["critic"] == 123.0
     finally:
         await c.stop()
 
@@ -862,6 +865,8 @@ async def test_coordinator_propose_action_creates_pending(session_dir):
         assert len(c.state.pending_proposals) == 1
         prop = next(iter(c.state.pending_proposals.values()))
         assert prop.action_name == "baseline"
+        assert len(c.backends["critic"].calls) == 1
+        assert prop.proposal_msg_id in c.backends["critic"].calls[0]["prompt"]
     finally:
         await c.stop()
 
@@ -931,6 +936,11 @@ async def test_coordinator_review_verdict_reject_no_task(session_dir):
         assert not any(m.payload.get("kind") == "approved_proposal" for m in decisions)
         verdicts = await c.bus.tail(topic="review_verdict")
         assert any(m.payload.get("verdict") == "reject" for m in verdicts)
+        assert not c.state.pending_proposals
+        last_active = c.shared_state.agent_last_active["critic"]
+        await c.tick(1)
+        assert len(c.backends["critic"].calls) == 1
+        assert c.shared_state.agent_last_active["critic"] == last_active
     finally:
         await c.stop()
 
