@@ -93,9 +93,8 @@ the script is what checks the manifest, so it cannot check itself.
 The script reads the entry's `source.tar` once and unpacks it into the sandbox's scratch directory only when those bytes
 are the archive the manifest records. It copies the wheels there, checking each against the manifest as it copies,
 installs only those copies (`pip --no-index`), then runs the runner from the unpacked source; the scratch directory
-needs room for the unpacked source and the wheels. Nothing the runner or pip runs comes from the cache unchecked. A
-profile test later copies the staged ruppell tree (`<cache>/tools/ruppell-<commit>/`) and builds the copy only when it
-has the pinned digest. The prompt sets a test reads (`<cache>/evalsets/<key>/`) are data, and they are read from the
+needs room for the unpacked source and the wheels. Nothing the runner or pip runs comes from the cache unchecked.
+The prompt sets a test reads (`<cache>/evalsets/<key>/`) are data, and they are read from the
 cache again after their check. The start-up makes no network access; the runner still fetches InferenceX
 (`INFERENCEX_REPO` above).
 
@@ -240,20 +239,17 @@ of different accounts can each rename into it. Run the build with `umask 022` so
 staging. A test whose application staging differs from the runner's published one fails with `preflight_mismatch`,
 naming each package that differs.
 
-A new cluster also needs two more things staged into the runner cache, each with its own command, run where the cache
-is written (the prompt set on a host that has the model's tokenizer files). Without the prompt set, a test that asks for
-the short-prompt consistency check cannot load it; without the ruppell tree, a profile test runs without ruppell:
+A new cluster also needs the prompt set staged into the runner cache, with its own command, run where the cache is
+written, on a host that has the model's tokenizer files. Without it, a test that asks for the short-prompt consistency
+check cannot load it:
 
 ```shell
 PYTHONPATH=src python -m hyperloom.measure.short_prompts.build --model /mnt/shared/models/<model> \
     --cache /mnt/shared/hyperloom/runner-cache
-PYTHONPATH=src python -m hyperloom.measure.ruppell_stage --archive <tar.gz path or URL> \
-    --cache /mnt/shared/hyperloom/runner-cache
 ```
 
-`--commit` of the second command defaults to the commit a profile test pins, and `--archive` is `git archive`'s tarball
-of that commit, a file or a URL. Run both with `umask 022` too: they create the entry's directories and manifest with
-the process's umask, and the sandbox's account must be able to read them.
+Run it with `umask 022` too: it creates the entry's directories and manifest with the process's umask, and the
+sandbox's account must be able to read them.
 
 On a cluster whose sandboxes mount the shared volume at, say, `/data`, keep the app host's values and set the
 template's `HYPERLOOM_RUNNER_CACHE=/data/hyperloom/runner-cache` (and the mirrors below `/data`).

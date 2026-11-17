@@ -185,7 +185,7 @@ instead. To profile: \
 submit_test with kind "profile", purpose "profile", your head as the parent commit and no delta. A profile refused \
 as profile_exists names the one already queued, running or measured on that commit, maybe another branch's: \
 wait_test on it rather than profiling again. Once the profile succeeded, start_analysis with tool "tracelens" and that test's id as profile_request_id reports each operator's share through \
-poll_inbox; when ruppell traced the profile, the result also names module_shares_path, a table of decode and prefill GPU \
+poll_inbox; when a second tracer traced the profile, the result also names module_shares_path, a table of decode and prefill GPU \
 time per module with graph-replayed kernels attributed, which you may read. When start_analysis lists roofline, the same profile test with tool "roofline" reports how far \
 each kernel is from the card's compute or memory bound: a kernel far below its bound is one a kernel change can gain \
 on. When start_analysis lists upstream_pr_search, search with tool "upstream_pr_search" (params repo_url and \
