@@ -8,8 +8,9 @@ the round applies it, or applies it less its acceptance simulation: ``real_accep
 framework's metrics flag when the round scrapes ``/metrics``), then the profiler layer of a profile round. A layer's
 flag beats every earlier group of the same flag; a later alias of it wins only because the engine applies the last
 one. Neither the user nor the candidate may set what the guard or the runner owns, nor, under a golden layer, what
-golden owns; such a layer is refused, not overridden, so the refusal names whose layer it was. A base may set the
-framework's ready timeout, which recipes raise for a slow start; the guard's replaces it.
+golden owns; such a layer is refused, not overridden, so the refusal names whose layer it was. The framework's own
+ready timeout is the exception: recipes raise it for a slow start, and a round's user layer re-states its base's
+environment, so the guard's value replaces whatever a layer below set.
 
 The server runs as the framework's server module under ``server.framework_python``, the interpreter the version probe
 and the parser check run, never the base's entrypoint through ``PATH``. A base whose entrypoint is not its framework's
@@ -129,10 +130,7 @@ def runner_owned(base: BaseLaunch) -> RunnerOwned:
         else ()
     )
     flags = {*base.runner_owned.args, *(flag for flag in (*guard, spec.metrics_flag) if flag)}
-    env = {*base.runner_owned.env, *_DEVICE_MASK_ENVS}
-    if spec.ready_timeout_env is not None:
-        env.add(spec.ready_timeout_env)
-    return RunnerOwned(args=tuple(sorted(flags)), env=tuple(sorted(env)))
+    return RunnerOwned(args=tuple(sorted(flags)), env=tuple(sorted({*base.runner_owned.env, *_DEVICE_MASK_ENVS})))
 
 
 def _owned(base: BaseLaunch) -> _Touch:
@@ -141,8 +139,7 @@ def _owned(base: BaseLaunch) -> _Touch:
 
 
 def _first_refusal(server: ServerConfig, base: BaseLaunch, owned: _Touch) -> Refusal | None:
-    base_env = frozenset(base.env) - {framework_facts(Framework(base.framework)).ready_timeout_env}
-    base_touch = _Touch(frozenset(name for name, _ in argv_flag_occurrences(base.args)), base_env, golden=())
+    base_touch = _Touch(frozenset(name for name, _ in argv_flag_occurrences(base.args)), frozenset(base.env), golden=())
     layers = (
         (LayerSource.BASE, base_touch),
         (LayerSource.USER, _delta_touch(server.user)),

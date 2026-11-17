@@ -40,7 +40,7 @@ from inference_suite.contracts import (
     Workload,
     WorkloadKind,
 )
-from inference_suite.contracts.launch import Launch, VersionCheck
+from inference_suite.contracts.launch import Launch, LayerSource, VersionCheck
 from inference_suite.recipe.resolve import UnreadSource
 
 _MODEL = "/models/Qwen3-8B"
@@ -171,6 +171,20 @@ def test_the_translated_launch_is_the_base_under_the_points_server_layer(framewo
     assert launch.entrypoint == entry
     assert _flags(launch.argv[len(entry) :]) == _flags(argv)
     assert dict(launch.env) == {**env, **_POINT_ENV}
+
+
+@pytest.mark.parametrize(
+    ("framework", "name"), [("vllm", "VLLM_ENGINE_READY_TIMEOUT_S"), ("sglang", "SGLANG_WARMUP_TIMEOUT")]
+)
+def test_a_base_that_raises_the_ready_timeout_still_composes_a_fixed_round(framework: str, name: str) -> None:
+    """Recipes raise the framework's own ready timeout for a slow start; the point seeded from such a base re-states it
+    in the round's user layer, and the guard's value replaces it there as it does the base's."""
+    base = _base(framework)
+    base = replace(base, env={**base.env, name: "7200"})
+    launch = _launch(suite_config(_seeded(_point(framework), base), base, _settings()), base)
+
+    entry = {entry.name: entry for entry in launch.env_sources}[name]
+    assert (entry.value, entry.source) == (str(READY_TIMEOUT_SEC), LayerSource.GUARD)
 
 
 def test_the_point_knobs_become_the_config_fields() -> None:

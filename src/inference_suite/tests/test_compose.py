@@ -399,7 +399,6 @@ def test_the_guard_holds_the_frameworks_own_ready_timeout_past_any_round(base, n
 
     entry = {entry.name: entry for entry in launch.env_sources}[name]
     assert (entry.value, entry.source) == (str(READY_TIMEOUT_SEC), LayerSource.GUARD)
-    assert name in runner_owned(base).env
 
 
 def test_a_base_that_raises_the_ready_timeout_is_kept_and_the_guard_replaces_its_value():
@@ -417,8 +416,15 @@ def test_a_base_that_raises_the_ready_timeout_is_kept_and_the_guard_replaces_its
 
 
 @pytest.mark.parametrize("layer", ["user", "candidate"])
-def test_no_layer_may_set_the_ready_timeout_beside_the_guard(layer):
-    refusal = _refusal(_VLLM_BASE, **{layer: LaunchDelta(env_set={"VLLM_ENGINE_READY_TIMEOUT_S": "600"})})
+def test_the_guard_replaces_a_ready_timeout_any_layer_sets(layer):
+    """A round's user layer re-states its base's environment, so a layer that sets the ready timeout is not refused:
+    the guard's value replaces it, and the launch records whose value it replaced."""
+    launch = _launch(_VLLM_BASE, **{layer: LaunchDelta(env_set={"VLLM_ENGINE_READY_TIMEOUT_S": "600"})})
 
-    assert (refusal.step, refusal.source) == (FailedStep.CONFIG_INVALID, LayerSource(layer))
-    assert "VLLM_ENGINE_READY_TIMEOUT_S" in refusal.detail
+    entry = {entry.name: entry for entry in launch.env_sources}["VLLM_ENGINE_READY_TIMEOUT_S"]
+    assert (entry.value, entry.source, entry.overrode) == (
+        str(READY_TIMEOUT_SEC),
+        LayerSource.GUARD,
+        (LayerSource(layer),),
+    )
+    assert "VLLM_ENGINE_READY_TIMEOUT_S" not in runner_owned(_VLLM_BASE).env

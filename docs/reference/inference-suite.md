@@ -137,8 +137,10 @@ that set each flag and environment variable and what it overrode:
 
 Neither the operator's nor the candidate's layer may set what the guard or the
 runner owns, nor, under a golden layer, what golden owns
-(`golden_owned_touched`); such a layer is refused, not overridden. A base may
-set the ready timeout, as recipes do for a slow start; the guard's value replaces it.
+(`golden_owned_touched`); such a layer is refused, not overridden. The ready
+timeout is the exception: recipes raise it for a slow start and a round's
+operator layer re-states its base's environment, so whatever a layer sets, the
+guard's value replaces it and `launch.json` records whose value it replaced.
 
 The golden layer carries a base's golden acceptance length (speculative decoding
 draft and simulation settings) as its own record. An AgentX session runs a GSM8K
