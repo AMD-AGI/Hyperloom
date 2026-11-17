@@ -54,7 +54,7 @@ PROGRESS_API_HOST = "127.0.0.1"
 #: What the aggregator names its result, under the client dir: the run_dir's ``client/inferencex_result.json``.
 AGGREGATE_NAME = "inferencex_result"
 #: aiperf's summary export, beside the per-request one.
-AIPERF_SUMMARY_NAME = "profile_export_aiperf.json"
+_AIPERF_SUMMARY = "profile_export_aiperf.json"
 #: The summary's count of the profiling requests aiperf skipped as a context overflow, ``{"unit": ..., "avg": n}``; it
 #: writes the key only when it skipped one (agentx-harness 1.0.13, ``exporters/metrics_json_exporter.py``).
 _SKIPPED_OVERFLOW = "skipped_context_overflow_count"
@@ -442,7 +442,7 @@ def _result(agentx_round: AgentxRound, layout: RunLayout) -> AgentxResult | Stop
     if disagreement is not None:
         return Stop(FailedStep.CLIENT_OUTPUT_MISSING, f"the AgentX counts disagree with the aggregate: {disagreement}")
     try:
-        counts[AGENTX_CONTEXT_OVERFLOW] = skipped_context_overflow(layout.aiperf_artifacts / AIPERF_SUMMARY_NAME)
+        counts[AGENTX_CONTEXT_OVERFLOW] = skipped_context_overflow(layout.aiperf_artifacts / _AIPERF_SUMMARY)
     except (OSError, ValueError) as exc:
         return Stop(FailedStep.CLIENT_OUTPUT_MISSING, f"the AgentX summary cannot be read: {exc}")
     facts = ReplayFacts(
