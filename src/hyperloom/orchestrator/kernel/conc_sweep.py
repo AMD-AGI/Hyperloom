@@ -9,7 +9,6 @@ from hyperloom.orchestrator.actions.executors._workload_envs import prepare_grid
 import csv
 import json
 import logging
-import os
 import time
 from dataclasses import dataclass, field, replace
 from pathlib import Path
@@ -44,10 +43,10 @@ from ..actions.executors._grid_runner import (
     GridVariant,
     VariantResult,
     run_grid,
+    teardown_variant_server,
 )
 from ..actions.executors._grid_runner import variant_conc
 from ..actions.executors._subprocess_kill import session_deadline_to_remaining_sec
-from ..actions.executors.benchmark_backend import resolve_backend
 from ..actions.cancel_channel import current_cancel_scope
 from ..actions.stop_attribution import (
     ORCHESTRATOR_CANCELLED_CLASS,
@@ -58,7 +57,6 @@ from ..actions.stop_attribution import (
 from ..actions.executors._workload_envs import (
     BenchmarkTarget,
     FrameworkScriptMismatchError,
-    LaunchLayer,
     MaterializeOptions,
     default_baseline_config,
     num_prompts_per_conc,
@@ -676,9 +674,7 @@ class _SweepRun:
         else:
             self.recorder.fail_arm(arm_name, exc)
 
-    async def run_rung(
-        self, variant: GridVariant, launch: GridLaunch, window: _Window, base: LaunchLayer
-    ) -> VariantResult:
+    async def run_rung(self, variant: GridVariant, launch: GridLaunch, window: _Window) -> VariantResult:
         """Run one rung from the sweep's base config under ``window``; a deadline stop inside it exhausts the budget."""
         if self.observe_cancel():
             return _deadline_skip_result(variant, _CANCEL_STOP)
@@ -687,7 +683,6 @@ class _SweepRun:
             output_root=self.workspace,
             recipe=GridRecipe(
                 base_yaml_path=self.base_yaml_path,
-                base=base,
                 target=BenchmarkTarget(
                     model_path=self.model_path,
                     gpu_type=self.gpu_type,
@@ -785,12 +780,10 @@ class _SweepRun:
 
 @dataclass(frozen=True)
 class _ArmRound:
-    """How one round reaches the arm's server: its launch, the layer it adds over the base config, and the label a
-    round that raised is recorded under."""
+    """How one round reaches the arm's server: its launch, and the label a round that raised is recorded under."""
 
     launch: GridLaunch
     label: str
-    base: LaunchLayer = field(default_factory=LaunchLayer)
 
 
 @dataclass
@@ -798,7 +791,7 @@ class _ArmServer:
     """The server one arm's ladder runs against, and how bringing it up went.
 
     ``lifecycle`` is whether the framework keeps one server across rungs; without it every rung starts its own. Until
-    a round brings the persistent server up, each rung's round boots it.
+    a round brings the persistent server up, each rung's round boots it and measures on it.
     """
 
     arm_name: str
@@ -821,10 +814,8 @@ class _ArmServer:
                 server_lifecycle=self._server_lifecycle(cleanup=False),
                 server_already_ready=False,
                 warmup_before_measure=False,
-                lifecycle_boot_only=True,
             ),
             label="single_server_boot",
-            base=LaunchLayer(extra_envs=dict(resolve_backend().boot_phase_envs)),
         )
 
     def reuse_round(self, *, cleanup: bool) -> _ArmRound:
@@ -842,9 +833,13 @@ class _ArmServer:
         return _ArmRound(GridLaunch(serving_lease=self.lease), label="server_restart")
 
     def teardown(self) -> None:
-        from ..actions.executors._server_lifecycle import teardown_lifecycle_server
-
-        teardown_lifecycle_server(pid_dir=self.pid_dir, framework=self.framework, port=self.port)
+        if survivors := teardown_variant_server(self.pid_dir):
+            log.error(
+                "conc_sweep: arm=%s pids %s outlived SIGKILL; %s keeps their record",
+                self.arm_name,
+                survivors,
+                self.pid_dir,
+            )
 
     def close(self, run: _SweepRun, exc: BaseException | None) -> None:
         """Take the arm's server down, release its lease and close its row, however its ladder ended."""
@@ -856,7 +851,7 @@ class _ArmServer:
                 # leaves it alive past the arm that owned it.
                 log.warning("conc_sweep single-server: arm=%s teardown failed", self.arm_name, exc_info=True)
                 if run.recorder is not None:
-                    run.recorder.record_fault(stage=f"teardown_lifecycle_server:{self.arm_name}", exc=teardown_exc)
+                    run.recorder.record_fault(stage=f"teardown_variant_server:{self.arm_name}", exc=teardown_exc)
             if self.attempted:
                 run.record_boot(self.arm_name, self.attempted, self.failed, self.booted)
         if self.lease is not None:
@@ -915,7 +910,7 @@ async def _sweep_arm(
 
     The ladder's other rungs are recorded as never run under ``unpaired``, the stop that kept the first arm from them.
     """
-    from ..actions.executors._grid_runner import _num_gpus_for_config
+    from ..actions.executors._grid_runner import lease_cards
     from ..actions.executors._ray_serving import maybe_serving_lease
 
     grid = run.arm_grid(arm)
@@ -941,9 +936,9 @@ async def _sweep_arm(
         run.close_arm(arm.name, None)
         return
 
-    # Ray-managed GPU execution: one held Ray lease (``num_gpus=TP``) spans the arm's whole ladder -- its persistent
+    # Ray-managed GPU execution: one held Ray lease (as many GPUs as the launch occupies) spans the arm's whole ladder -- its persistent
     # server's boot and every reuse round, or each per-rung restart -- so no GPU process outlives it.
-    lease = maybe_serving_lease(num_gpus=_num_gpus_for_config(run.base_yaml_path))
+    lease = maybe_serving_lease(num_gpus=lease_cards(run.base_yaml_path, run.session_dir))
     strategy = _resolve_arm_strategy(run, arm.name, serving_lease_held=lease is not None)
     pid_dir = run.workspace / f"server_{arm.name}"
     pid_dir.mkdir(parents=True, exist_ok=True)
@@ -978,9 +973,6 @@ async def _run_ladder(run: _SweepRun, server: _ArmServer, ladder: list[GridVaria
             run.record_never_run(server.arm_name, ladder[idx:], window.stop)
             return
         result = await _run_rung_on(run, server, ladder[idx], window, is_last=idx == len(ladder) - 1)
-        if result is None:
-            # The round only brought the server up; the same rung's measuring round runs next.
-            continue
         run.flush_progress()
         stop = run.stop_named_by(result, window)
         if stop is not None:
@@ -994,25 +986,26 @@ async def _run_ladder(run: _SweepRun, server: _ArmServer, ladder: list[GridVaria
 
 async def _run_rung_on(
     run: _SweepRun, server: _ArmServer, variant: GridVariant, window: _Window, *, is_last: bool
-) -> VariantResult | None:
-    """Run one round of a rung on the arm's server and record it; ``None`` when the round only booted the server."""
+) -> VariantResult:
+    """Run one round of a rung on the arm's server and record it."""
     if not server.lifecycle:
         ran = await _run_round(run, variant, server.restart_round(), window)
         run.record_ran(server.arm_name, ran.result, ran.note(STAGE_SERVER_RESTART), window)
         return ran.result
     if server.booted is None:
         ran = await _run_round(run, variant, server.boot_round(), window)
-        return None if _settle_boot(run, server, variant, ran, window) else ran.result
+        _settle_boot(run, server, variant, ran, window)
+        return ran.result
     ran = await _run_round(run, variant, server.reuse_round(cleanup=is_last), window)
     run.record_ran(server.arm_name, ran.result, ran.note(STAGE_REUSE), window)
     return ran.result
 
 
-def _settle_boot(run: _SweepRun, server: _ArmServer, variant: GridVariant, ran: _RungRun, window: _Window) -> bool:
-    """Record a boot round; return whether its rung still needs a measuring round on the server it brought up.
+def _settle_boot(run: _SweepRun, server: _ArmServer, variant: GridVariant, ran: _RungRun, window: _Window) -> None:
+    """Record a boot round, which measured its rung on the server it brought up.
 
-    Only a backend that boots without measuring leaves its rung to a round on the server. A boot that failed or was
-    stopped takes its server down; one stopped by a deadline or a cancel is not a boot the server failed.
+    A boot that failed or was stopped takes its server down; one stopped by a deadline or a cancel is not a boot the
+    server failed.
     """
     result = ran.result
     stopped = run.cancelled or run.stop_named_by(result, window) is not None
@@ -1022,14 +1015,10 @@ def _settle_boot(run: _SweepRun, server: _ArmServer, variant: GridVariant, ran: 
             server.attempted.append(variant)
             server.failed.append(result)
         run.record_ran(server.arm_name, result, ran.note(STAGE_BOOT_ATTEMPT), window)
-        return False
+        return
     server.attempted.append(variant)
     server.booted = variant
-    if result.note == "server_lifecycle_boot_only":
-        run.record_rung(server.arm_name, result, ran.note(STAGE_BOOT))
-        return True
     run.record_ran(server.arm_name, result, ran.note(STAGE_BOOT), window)
-    return False
 
 
 async def _run_round(run: _SweepRun, variant: GridVariant, arm_round: _ArmRound, window: _Window) -> _RungRun:
@@ -1038,7 +1027,7 @@ async def _run_round(run: _SweepRun, variant: GridVariant, arm_round: _ArmRound,
     start_time = now_iso("seconds")
     started_at = time.time()
     try:
-        result = await run.run_rung(variant, arm_round.launch, window, arm_round.base)
+        result = await run.run_rung(variant, arm_round.launch, window)
     except Exception as exc:  # isolation boundary: one round of an arm's ladder, recorded as its rung's failure
         log.warning("conc_sweep: %s round of %s raised %r", arm_round.label, variant.name, exc, exc_info=True)
         result = _raised_result(variant, arm_round.label, exc)
@@ -1215,14 +1204,7 @@ def _prepare_sweep_setup(state: SharedState, session_dir: Path, recorder: Any) -
 
     # Re-materialize (idempotent) in case we fell back to the shipped asset.
     resolved_model = resolve_session_model_path(state_model_path=str(getattr(state, "model_path", "") or ""))
-    # Mirror the main flow (baseline/sweep/...): prefer $GPU_TYPE (cli.py canonicalizes mi325x/mi308x -> mi300x), fall
-    # back to state.gpu_type, then canonicalize through gpu_runner_type so the selected Magpie script is a shipped
-    # runner (sglang_mi300x.sh), never the unshipped sglang_mi325x.sh.
-    from hyperloom.inference_optimizer.gpu_types import gpu_runner_type
-
-    resolved_gpu = gpu_runner_type(
-        os.environ.get("GPU_TYPE", "").strip().lower() or str(getattr(state, "gpu_type", "") or "").strip().lower()
-    )
+    resolved_gpu = str(state.gpu_type or "").strip().lower()
     benchmark_script = state.accepted_baseline_script()
     try:
         base_yaml_path = prepare_grid_benchmark_config(

@@ -16,9 +16,9 @@ from hyperloom.orchestrator.actions.executors._grid_runner import (
     GridRecipe,
     GridVariant,
     _build_variant_yaml,
-    sync_benchmark_timeout,
     variant_conc,
 )
+from hyperloom.orchestrator.actions.executors._grid_base import sync_benchmark_timeout
 from hyperloom.orchestrator.actions.executors.benchmark_config import composed_benchmark_timeout_sec
 from hyperloom.orchestrator.actions.executors._subprocess_kill import (
     resolve_benchmark_timeouts,
@@ -72,7 +72,7 @@ def test_an_operator_cap_wins_over_the_mlperf_derivation():
     assert resolve_benchmark_timeouts(env)[1] == 1234.0
 
 
-def test_native_magpie_keeps_the_stock_cap():
+def test_a_native_replay_keeps_the_stock_cap():
     assert resolve_benchmark_timeouts({"MLPERF_AGENTIC_FLOW": "full"})[1] == 7800.0
 
 
@@ -97,7 +97,7 @@ def test_a_canonical_run_that_pins_no_concurrency_keeps_the_stock_cap():
     assert resolve_benchmark_timeouts(_canonical_env())[1] == 7800.0
 
 
-def test_synthetic_magpie_keeps_the_stock_cap_at_any_concurrency():
+def test_a_synthetic_replay_keeps_the_stock_cap_at_any_concurrency():
     """Only canonical replay warms up per lane; the synthetic client's warmup is capped at 8 requests."""
     assert resolve_benchmark_timeouts({"CONC": "28"})[1] == 7800.0
 

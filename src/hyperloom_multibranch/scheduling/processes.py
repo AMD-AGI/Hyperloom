@@ -24,6 +24,7 @@ from __future__ import annotations
 
 import asyncio
 import ctypes
+import json
 import logging
 import os
 import sys
@@ -32,10 +33,10 @@ from contextlib import contextmanager
 from dataclasses import asdict, dataclass
 from pathlib import Path
 
-from hyperloom_common.io import append_jsonl
 from hyperloom_common.jsonio import read_jsonl
+from hyperloom_common.shared_storage import open_shared_append
 from hyperloom.common.owner_scope import local_owner_scope, process_started_at, same_environment
-from hyperloom.common.proctree import collect_tree, descendants, group_members, kill_tree, proc_identity, running
+from hyperloom_common.proctree import collect_tree, descendants, group_members, kill_tree, proc_identity, running
 from hyperloom_multibranch.blackboard.codec import decode
 from hyperloom_multibranch.scheduling.clock import Clock
 
@@ -56,11 +57,14 @@ SCHEDULER_BRANCH = "scheduler"
 def adopting_orphans() -> Iterator[None]:
     """Make this process the child subreaper of everything it starts, for the duration (Linux).
 
-    An orphaned descendant is reparented to this process rather than to init. Nothing reaps it here: every adopted
-    orphan, killed or exited on its own, stays a zombie until this process exits. A zombie holds only its pid, and
-    ``running`` skips it, so the kills and the leftovers are unaffected. Reaping them is not safe: an in-process
-    caller, such as the AI work socket, starts a child in a session of its own and registers it only after the launch,
-    and until then nothing tells that child from an orphan, so a reap would take the exit status its ``poll`` needs.
+    An orphaned descendant is reparented to this process rather than to init. Nothing reaps an adopted orphan here in
+    general: it stays a zombie until this process exits. A zombie holds only its pid, and ``running`` skips it, so the
+    kills and the leftovers are unaffected. Reaping them all is not safe: an in-process caller, such as the AI work
+    socket, starts a child in a session of its own and registers it only after the launch, and until then nothing
+    tells that child from an orphan, so a reap would take the exit status its ``poll`` needs. A local sandbox's reap is
+    the exception: it waits only the processes it found below the launchers it killed or by the sandbox's tag, by pid
+    and start time (``proctree.reap_exited_children``), so the processes of every test it ran do not stay behind as
+    zombies.
     """
 
     _set_child_subreaper(1)
@@ -159,7 +163,9 @@ class ProcessRegistry:
         return record
 
     def _write(self, record: ProcessRecord) -> None:
-        append_jsonl(self._pids_file, asdict(record))
+        # 664: final-only of the run's next leg, maybe another account of the group, appends to it.
+        with os.fdopen(open_shared_append(self._pids_file), "a", encoding="utf-8") as pids:
+            pids.write(json.dumps(asdict(record)) + "\n")
 
     async def kill_branch(self, branch: str) -> bool:
         """Kill every tree registered for ``branch``; True when nothing of them is left."""

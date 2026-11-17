@@ -114,16 +114,18 @@ class InferenceXRule(Rule):
         )
 
 
+@dataclass(frozen=True)
 class AgentXRule(Rule):
-    """P50 interactivity with its guards; the error rate the run reports is its accuracy.
+    """The session's ``objective`` with its guards; the error rate the run reports is its accuracy.
 
     The bar is fixed rather than drawn from the root's spread, so one root test anchors the parent values. A test
     takes 75 to 90 minutes, too long to spend on a confirm the judgement may not need.
     """
 
+    objective: agentx.AgentXObjective
     accuracy_round = False
     speed_gates = agentx.SPEED_GATES
-    # Magpie's AgentX recipe runs no benchmark script MB's server lifecycle can wrap, so both checks end incomplete.
+    # An AgentX test holds no server for them (BenchmarkPoint.holds_accuracy_checks), so both checks end incomplete.
     runs_consistency_checks = False
     baseline_tests = 1
     min_baselines = 1
@@ -132,16 +134,23 @@ class AgentXRule(Rule):
     async def baseline(self, store: GateRecords, root_commit: str, records: Sequence[TestRecord]) -> BaselineRecord:
         if len(records) != self.min_baselines:
             raise ValueError(f"an AgentX baseline is one run of the root, not {len(records)} root tests")
-        return await write_agentx_baseline(store, root_commit, records[0])
+        return await write_agentx_baseline(store, root_commit, records[0], self.objective)
 
     async def first(self, record: TestRecord, parent: Mapping[str, float]) -> Judgement:
-        return agentx.compare(agentx_reading(_result(record)), parent, record.request_id)
+        """A candidate the checkpoint stopped is judged on its ruling (:func:`stopped_at_checkpoint`)."""
+        ruling = _result(record).agentx_checkpoint
+        if ruling is not None and ruling.stopped:
+            return agentx.trailed(ruling, record.request_id, self.objective)
+        return agentx.compare(self._reading(record), parent, record.request_id, self.objective)
 
     async def retest(self, first: Judgement, record: TestRecord, parent: Mapping[str, float]) -> Judgement:
-        return agentx.confirm(first, agentx_reading(_result(record)), parent, record.request_id)
+        return agentx.confirm(first, self._reading(record), parent, record.request_id, self.objective)
 
     async def accuracy_passes(self, record: TestRecord) -> bool:
-        return agentx_accuracy_ok(agentx_reading(_result(record)).get(GRADED_ERROR_RATE))
+        return agentx_accuracy_ok(self._reading(record).get(GRADED_ERROR_RATE))
+
+    def _reading(self, record: TestRecord) -> dict[str, float]:
+        return agentx_reading(_result(record), self.objective.metric)
 
 
 def ran_accuracy(request: TestRequest, rule: Rule) -> bool:
@@ -209,6 +218,13 @@ def retest_request(first: TestRecord, rule: Rule) -> TestRequest:
     )
 
 
+def stopped_at_checkpoint(record: TestRecord) -> bool:
+    """Whether the AgentX checkpoint stopped the test: a ruling on the candidate, judged though no full measurement
+    exists."""
+    ruling = None if record.result is None else record.result.agentx_checkpoint
+    return ruling is not None and ruling.stopped
+
+
 def _candidate(request: TestRequest) -> tuple[object, ...]:
     return request.parent_commit, request.delta, request.attachments
 
@@ -229,4 +245,5 @@ __all__ = [
     "repeats",
     "retest_request",
     "retracts",
+    "stopped_at_checkpoint",
 ]

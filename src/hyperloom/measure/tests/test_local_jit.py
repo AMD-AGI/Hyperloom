@@ -25,7 +25,6 @@ from hyperloom.measure.tests.test_local_backend import (  # noqa: F401 - the mod
     _profile_point,
     _run,
     _with_trace,
-    magpie_backend,
     server,
 )
 

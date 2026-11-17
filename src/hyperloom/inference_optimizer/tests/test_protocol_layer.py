@@ -144,7 +144,7 @@ async def test_message_bus_replay_for_returns_ascending(db):
     bus = MessageBus(db)
     seqs = []
     for topic in ("observation", "event", "decision"):
-        s = await bus.append_and_seq(Message.new("critic", "orchestration", topic, {}))
+        s = await bus.append_and_seq(Message.new("kernel_agent", "orchestration", topic, {}))
         seqs.append(s)
     msgs = await bus.replay_for("orchestration", after_seq=0)
     assert [m.seq for m in msgs] == sorted(seqs)

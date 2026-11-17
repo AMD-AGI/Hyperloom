@@ -8,7 +8,7 @@ from types import SimpleNamespace
 from unittest.mock import patch
 import pytest
 from hyperloom.inference_optimizer.cli.parser import _build_parser
-from hyperloom.inference_optimizer.cli.bootstrap import budget_resume_conflict
+from hyperloom.inference_optimizer.cli.bootstrap import constraint_budget_resume_conflict
 from hyperloom.inference_optimizer.session.manifest import build_manifest
 from hyperloom.orchestrator.kernel import controller_submit
 from hyperloom.orchestrator.phases import kernel_controller_attempt as controller_attempt
@@ -45,9 +45,18 @@ def test_resume_requires_an_explicit_allocation_to_match(tmp_path, stored_sec, r
     args = _build_parser().parse_args(argv)
     state = SharedState(framework="vllm", forge_controller_allocation_sec=stored_sec)
 
-    reason = budget_resume_conflict(args, state)
+    reason = constraint_budget_resume_conflict(args, state)
 
     assert ("--forge-controller-allocation-minutes" in reason) is conflicts
+
+
+def test_matching_allocation_keeps_the_persisted_agentx_accuracy_round(tmp_path):
+    args = _build_parser().parse_args(
+        ["optimize", "--model", str(tmp_path), "--forge-controller-allocation-minutes", "600", "--no-agentx-accuracy"]
+    )
+    state = SharedState(framework="vllm", forge_controller_allocation_sec=36000, agentx_accuracy=True)
+
+    assert "accuracy round" in constraint_budget_resume_conflict(args, state)
 
 
 @pytest.mark.parametrize(("remaining", "expected"), [(36000, (36000, 36030)), (7200, (7200, 7230)), (0, (0, 30))])

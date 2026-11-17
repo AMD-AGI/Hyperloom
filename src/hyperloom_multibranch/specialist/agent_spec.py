@@ -1,8 +1,8 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""What MB asks of an autonomous branch's agent, which the onboarding (:mod:`agent_onboarding`) and Arbor's adapter
-(:mod:`arbor_adapter`) both derive the agent's config from."""
+"""What MB asks of an autonomous branch's agent, which the onboarding (:mod:`agent_onboarding`) and an agent's adapter
+(:mod:`component_agent`) both derive the agent's config from."""
 
 from __future__ import annotations
 
@@ -22,18 +22,19 @@ class AgentSpec:
     server arguments and environment of the commit its branch starts on, ``workspace``, the framework checkout it edits,
     ``cards``, the GPUs it may use, ``seconds``, how long it may run (0: until MB stops it), ``port``, the first of
     the ports its servers may listen on, ``client``, the command the gate measures a server on ``port`` with (empty when
-    the session has none to give), ``baseline``, what the gate measured of the metric on the session's root (``None``
+    the session has none to give), ``client_seconds``, how long one measurement by it may take (``0`` when the
+    agent's own cap bounds it), ``baseline``, what the gate measured of the metric on the session's root (``None``
     before it did), ``knowledge``, the notes on the integration head the agent reads each iteration, and, for an agent
     run as a component, ``deadline``, the clock time it ends by, ``root``, the commit of ``workspace`` its patches
     are made against, and ``root_shares``, the op shares of the session root's profile (``None`` when it has none),
-    which the profile file says came from ``root_shares_source``. Arbor (:mod:`arbor_adapter`) is also given ``ep``,
-    the expert-parallel size the workload is served at, and may be given ``plan``, the file of the branch's share of
-    the session's directions, ``pack``, the name of the pack it runs (``None`` for the adapter's default),
+    which the profile file says came from ``root_shares_source``. An adapter (:mod:`component_agent`) is also given
+    ``ep``, the expert-parallel size the workload is served at, and may be given ``plan``, the file of the branch's
+    share of the session's directions, ``pack``, the name of the pack it runs (``None`` for the adapter's default),
     ``launch``, the file of the launch the recipe's adds to (``None`` when the recipe's is the whole launch),
     ``remove_args``, the flags of that launch the recipe removes,
     ``dossier``, the dossier the session's dossier pass wrote, for its checkout (``None`` without one), and
-    ``review``, how its review gate is handed over (:data:`~hyperloom_multibranch.specialist.arbor_adapter.REVIEW_HOST`
-    when MB reviews before its branches open, :data:`~hyperloom_multibranch.specialist.arbor_adapter.REVIEW_OFF` when
+    ``review``, how its review gate is handed over (:data:`~.component_agent.REVIEW_HOST`
+    when MB reviews before its branches open, :data:`~.component_agent.REVIEW_OFF` when
     nobody does, ``""`` to leave the config without either), and ``source_unkept``, why no change to the framework's
     source can be kept on this image (``""`` when one can); the onboarding model is told none of them."""
 
@@ -51,6 +52,7 @@ class AgentSpec:
     seconds: float
     port: int
     client: str = ""
+    client_seconds: float = 0.0
     baseline: float | None = None
     knowledge: str = ""
     deadline: float = 0.0

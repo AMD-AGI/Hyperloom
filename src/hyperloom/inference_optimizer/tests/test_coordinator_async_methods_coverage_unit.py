@@ -374,14 +374,21 @@ async def test_promote_explore_with_winner(coord: Coordinator) -> None:
 
 
 @pytest.mark.asyncio
+async def test_compose_prompt_tells_orchestration_its_session_dir(coord: Coordinator) -> None:
+    """The orchestration system prompt's SESSION_DIR contract: artefact paths it emits are rooted here."""
+    prompt = await coord.conversation.compose_prompt("orchestration")
+    assert f"SESSION_DIR={coord.session_dir}" in prompt.text.splitlines()
+
+
+@pytest.mark.asyncio
 async def test_compose_prompt_orchestration_with_time_budget(coord: Coordinator) -> None:
+    """The per-tick Time budget block the orchestration system prompt promises, carrying ``remaining=``."""
     coord._run_started_monotonic = time.monotonic() - 60.0
     coord._run_deadline = Deadline.after(600.0)
     coord.shared_state.max_minutes = 60
-    out = (await coord.conversation.compose_prompt("orchestration")).text
-    assert "SESSION_DIR=" in out
-    assert "Mission progress" in out
-    assert "Time budget" in out
+    lines = (await coord.conversation.compose_prompt("orchestration")).text.splitlines()
+    assert "=== Time budget ===" in lines
+    assert "remaining=" in lines[lines.index("=== Time budget ===") + 1]
 
 
 @pytest.mark.asyncio
@@ -392,15 +399,6 @@ async def test_compose_prompt_orchestration_deadline_imminent_warning(coord: Coo
     coord.shared_state.closing_phase = False
     out = (await coord.conversation.compose_prompt("orchestration")).text
     assert "< 5 min remaining" in out
-
-
-@pytest.mark.asyncio
-async def test_compose_prompt_kernel(coord: Coordinator) -> None:
-    coord._run_started_monotonic = time.monotonic() - 60.0
-    coord._run_deadline = Deadline.after(600.0)
-    coord.shared_state.max_minutes = 60
-    out_k = (await coord.conversation.compose_prompt("kernel_agent")).text
-    assert "SESSION_DIR=" in out_k
 
 
 #: ``(heading, owner, producer)`` for every advisory the orchestration prompt carries, in the order it carries
@@ -556,18 +554,15 @@ def test_priors_match_advisory_failure_propagates(coord: Coordinator, monkeypatc
 
 
 # -- advisory blocks -------------------------------------------------------
-def test_advisory_blocks_disabled_return_empty(coord: Coordinator) -> None:
+def test_no_target_advisory_withholds_the_target_gap(coord: Coordinator, monkeypatch) -> None:
+    from hyperloom.inference_optimizer.baseline_comparison import research_hints as rh
+
+    monkeypatch.setattr(rh, "load_competitor_target", lambda _sd: {"name": "comp"})
+    monkeypatch.setattr(rh, "gap_analysis", lambda *a, **k: {"primary_gap": "throughput"})
+    coord.shared_state.current_best = {"tput": 1000.0, "tpot_mean_ms": 5.0}
     coord.shared_state.target_advisory_enabled = False
     assert coord.conversation.target_gap_advisory_block() == ""
     assert coord.conversation._current_primary_gap() is None
-
-
-def test_plateau_advisory_block_no_signal(coord: Coordinator) -> None:
-    assert isinstance(coord.conversation.plateau_advisory_block(), str)
-
-
-def test_priors_match_advisory_block_no_variants(coord: Coordinator) -> None:
-    assert coord.conversation._priors_match_advisory_block() == ""
 
 
 # -- _harvest_specialist_findings -----------------------------------------------
@@ -656,28 +651,6 @@ async def test_escalate_skip_to_kernel_outside_framework_agent_is_refused_to_its
 
 
 # -- maybe_autosubmit_specialist_patches ----------------------------------
-@pytest.mark.asyncio
-async def test_autosubmit_skipped_when_no_patches(coord: Coordinator) -> None:
-    from hyperloom.orchestrator.state.task_registry import Task
-
-    task = Task(task_id="spec-1", kind="specialist", state="running", params={}, idempotency_key="k1")
-    await coord.phase_framework.maybe_autosubmit_specialist_patches(
-        task=task,
-        done_payload={"patches_written": []},
-    )
-
-
-@pytest.mark.asyncio
-async def test_autosubmit_skipped_when_files_missing(coord: Coordinator) -> None:
-    from hyperloom.orchestrator.state.task_registry import Task
-
-    task = Task(task_id="spec-2", kind="specialist", state="running", params={}, idempotency_key="k2")
-    await coord.phase_framework.maybe_autosubmit_specialist_patches(
-        task=task,
-        done_payload={"patches_written": ["ghost.py"]},
-    )
-
-
 @pytest.mark.asyncio
 async def test_autosubmit_creates_proposal_for_real_file(coord: Coordinator) -> None:
     from hyperloom.orchestrator.state.task_registry import Task
@@ -931,21 +904,6 @@ async def test_compose_prompt_time_only_objective_leaves_no_gap(coord: Coordinat
     assert "target_gap_pct=0.00" in text
 
 
-# -- _context_analysis_reader ----------------------------------------------
-def test_context_analysis_reader(coord: Coordinator) -> None:
-    out = coord.conversation._context_analysis_reader()
-    assert isinstance(out, str)
-
-
-def test_context_analysis_reader_fallback_path(coord: Coordinator, tmp_path) -> None:
-    md = tmp_path / "analysis.md"
-    md.write_text("# roofline\n", encoding="utf-8")
-    coord.shared_state.last_trace_analyze = {"analysis_md_path": str(md)}
-    coord.shared_state.analysis_md = ""
-    out = coord.conversation._context_analysis_reader()
-    assert isinstance(out, str)
-
-
 # -- advisory blocks enabled paths -----------------------------------------
 def test_target_gap_advisory_enabled(coord: Coordinator, monkeypatch) -> None:
     from hyperloom.inference_optimizer.baseline_comparison import research_hints as rh
@@ -1179,13 +1137,6 @@ async def test_warm_specialist_params_never_overwrites_a_key_the_caller_set(coor
     }
 
 
-# -- finalize_recipe_and_journal ------------------------------------
-def test_recipe_kb_finalize_recipe_and_journal_no_kb(coord: Coordinator) -> None:
-    coord.shared_state.current_best = {"tput": 950.0}
-    coord.shared_state.cumulative_gain_validated = 12.5
-    coord.recipe_journal.finalize_recipe_and_journal()
-
-
 # -- _record_fact_per_variant ----------------------------------------------
 def test_record_fact_per_variant_keep_revert_skip(coord: Coordinator) -> None:
     from hyperloom.orchestrator.state.task_registry import Task
@@ -1300,10 +1251,12 @@ async def test_unpromotable_baseline_repeat_of_another_class_keeps_three_strikes
 
 
 @pytest.mark.asyncio
-async def test_unpromotable_baseline_infeasible_ray_cluster_stops_on_the_first(coord: Coordinator) -> None:
+@pytest.mark.parametrize("phase", ["", "ENABLEMENT"], ids=["outside_enablement", "in_enablement"])
+async def test_unpromotable_baseline_infeasible_ray_cluster_stops_on_the_first(coord: Coordinator, phase: str) -> None:
     """A Ray cluster that cannot place the round fails the same way every time, and no patch changes that."""
     from hyperloom.orchestrator.actions.executors._ray_serving import RAY_INFEASIBLE_MARKER
 
+    coord.shared_state.phase = phase
     result = {
         "status": "failed",
         "error_class": "subprocess_nonzero",
@@ -1315,23 +1268,6 @@ async def test_unpromotable_baseline_infeasible_ray_cluster_stops_on_the_first(c
     assert coord.shared_state.stop_reason == "baseline_failed"
     # Not handed to the enablement lane as something to author a patch against.
     assert not (coord.shared_state.enablement.launch_log or "").strip()
-
-
-@pytest.mark.asyncio
-async def test_unpromotable_baseline_infeasible_ray_cluster_stops_in_enablement_too(coord: Coordinator) -> None:
-    from hyperloom.orchestrator.actions.executors._ray_serving import RAY_INFEASIBLE_MARKER
-    from hyperloom.orchestrator.phases.machine_state import PHASE_ENABLEMENT
-
-    coord.shared_state.phase = PHASE_ENABLEMENT
-    result = {
-        "status": "failed",
-        "error_class": "subprocess_nonzero",
-        "error": f"ray_ensure_error: {RAY_INFEASIBLE_MARKER}: cluster has 0.0 GPU(s), 1 requested",
-    }
-
-    await coord.writeback.handle_unpromotable_result(_baseline_task("bl-ray-en"), result)
-
-    assert coord.shared_state.stop_reason == "baseline_failed"
 
 
 @pytest.mark.asyncio
@@ -1360,197 +1296,3 @@ async def test_unpromotable_baseline_same_failure_in_prelude_with_enablement_adm
     await coord.writeback.handle_unpromotable_result(_baseline_task("bl-pre-1"), result)
     await coord.writeback.handle_unpromotable_result(_baseline_task("bl-pre-2"), result)
     assert coord.shared_state.stop_reason != "baseline_failed"
-
-
-_SHARED_TAIL = (
-    "Traceback (most recent call last):\n"
-    + "  File engine.py, in run_engine_core\n    engine.step()\n" * 60
-    + "RuntimeError: engine core died unexpectedly\n"
-)
-
-
-async def _executor_nonzero_result(
-    tmp_path, monkeypatch, name: str, stderr: str, *, workspace: bool, stdout: str = ""
-) -> dict:
-    """Run one baseline round through the executor's real result builder, with only Magpie's process faked."""
-    import types
-
-    from hyperloom.orchestrator.actions.executors import baseline as bl
-    from hyperloom.orchestrator.actions.executors.benchmark_run import launch as launch_mod
-    from hyperloom.orchestrator.actions.executors.benchmark_run.records import BenchmarkAttempt
-    from hyperloom.orchestrator.loop.sub_agent_runner import RunnerContext
-
-    session = tmp_path / "session"
-    session.mkdir(exist_ok=True)
-    out = tmp_path / name
-    out.mkdir()
-    run_workspace = out / "benchmark_vllm_1" if workspace else None
-    if run_workspace is not None:
-        run_workspace.mkdir()
-    monkeypatch.setattr(launch_mod, "harvest_leaked_artifacts", lambda *a, **k: [])
-    monkeypatch.setattr(launch_mod, "snapshot_workspaces", lambda *a, **k: set())
-    monkeypatch.setattr(launch_mod, "select_run_workspace", lambda *a, **k: run_workspace)
-    monkeypatch.setattr(
-        bl, "run_with_session_kill", lambda cmd, **kw: types.SimpleNamespace(returncode=1, stdout=stdout, stderr=stderr)
-    )
-    cfg = session / "bench.yaml"
-    cfg.write_text("benchmark:\n  framework: vllm\n  model: /tmp/m\n", encoding="utf-8")
-    ex = bl.BaselineExecutor(session_dir=session, magpie_python="/usr/bin/python3")
-    return await ex._run_single_benchmark(
-        BenchmarkAttempt(
-            timeout_sec=30,
-            override_result_dir=None,
-            resolved_model="/tmp/m",
-            materialized_config_path=cfg,
-            inferencex_path="",
-            effective_extra_server_args="",
-            params={"framework": "vllm"},
-            ctx=RunnerContext(task=_baseline_task(name), lease=None, extra={}),
-        ),
-        config_path=cfg,
-        output_dir=out,
-    )
-
-
-@pytest.mark.asyncio
-@pytest.mark.parametrize("workspace", [False, True], ids=["no_workspace", "workspace_without_report"])
-async def test_baseline_executor_signs_the_whole_output_not_the_error_tail(
-    coord: Coordinator, tmp_path, monkeypatch, workspace: bool
-) -> None:
-    """Two causes that end in the same 2000+ characters share an ``error`` but not a signature, so they keep three strikes."""
-    oom = await _executor_nonzero_result(
-        tmp_path, monkeypatch, "oom", "HIP out of memory on device 3\n" + _SHARED_TAIL, workspace=workspace
-    )
-    nccl = await _executor_nonzero_result(
-        tmp_path, monkeypatch, "nccl", "NCCL watchdog timeout after 600s\n" + _SHARED_TAIL, workspace=workspace
-    )
-
-    assert oom["error_class"] == nccl["error_class"] == "subprocess_nonzero"
-    # The executor's own ``error`` is the 2000-character tail, identical for both causes.
-    assert oom["error"] == nccl["error"]
-    assert oom["output_signature"] and nccl["output_signature"]
-    assert oom["output_signature"] != nccl["output_signature"]
-
-    await coord.writeback.handle_unpromotable_result(_baseline_task("bl-tail-1"), oom)
-    await coord.writeback.handle_unpromotable_result(_baseline_task("bl-tail-2"), nccl)
-    assert coord.shared_state.baseline_failure_streak == 2
-    assert coord.shared_state.stop_reason != "baseline_failed"
-
-
-@pytest.mark.asyncio
-async def test_baseline_executor_same_output_modulo_numbers_stops_at_two(
-    coord: Coordinator, tmp_path, monkeypatch
-) -> None:
-    first = await _executor_nonzero_result(
-        tmp_path, monkeypatch, "r1", "worker pid 4121 died at 0x7f3a2c\n" + _SHARED_TAIL, workspace=False
-    )
-    second = await _executor_nonzero_result(
-        tmp_path, monkeypatch, "r2", "worker pid 977 died at 0x7f99e0\n" + _SHARED_TAIL, workspace=False
-    )
-
-    assert first["output_signature"] == second["output_signature"] != ""
-
-    coord.shared_state.enablement_mode = "off"
-    await coord.writeback.handle_unpromotable_result(_baseline_task("bl-same-1"), first)
-    assert coord.shared_state.stop_reason != "baseline_failed"
-    await coord.writeback.handle_unpromotable_result(_baseline_task("bl-same-2"), second)
-    assert coord.shared_state.stop_reason == "baseline_failed"
-
-
-@pytest.mark.asyncio
-async def test_baseline_executor_signs_stdout_as_well_as_stderr(coord: Coordinator, tmp_path, monkeypatch) -> None:
-    """The same generic stderr over different causes on stdout is two failures, not one."""
-    stderr = "RuntimeError: engine died\n"
-    oom = await _executor_nonzero_result(
-        tmp_path, monkeypatch, "oom", stderr, stdout="HIP out of memory on device 3\n", workspace=False
-    )
-    nccl = await _executor_nonzero_result(
-        tmp_path, monkeypatch, "nccl", stderr, stdout="NCCL watchdog timeout after 600s\n", workspace=False
-    )
-
-    assert oom["error"] == nccl["error"]
-    assert oom["output_signature"] != nccl["output_signature"]
-
-    await coord.writeback.handle_unpromotable_result(_baseline_task("bl-out-1"), oom)
-    await coord.writeback.handle_unpromotable_result(_baseline_task("bl-out-2"), nccl)
-    assert coord.shared_state.stop_reason != "baseline_failed"
-
-
-_GPU0_BUSY_STDERR = (
-    "Magpie.utils.gpu - INFO - Detected AMD GPU: gfx950\n"
-    "Magpie.utils.gpu - WARNING - find_idle_gpus: requested 8 but only 7 idle ([1, 2, 3, 4, 5, 6, 7]); "
-    "rejected: ['GPU 0: has running compute process']\n"
-    "Magpie.utils.gpu - INFO - find_idle_gpus: selected [1, 2, 3, 4, 5, 6, 7] (free GB: ['287.7', '287.7'])\n"
-    "Magpie.main - ERROR - Benchmark failed: "
-    "['gpu_selection.auto: needed 8 idle GPU(s) but only found 7 ([1, 2, 3, 4, 5, 6, 7])']\n"
-)
-_NO_IDLE_GPU_STDERR = (
-    "Magpie.main - ERROR - Benchmark failed: ['gpu_selection.auto failed: find_idle_gpus: no idle GPU available "
-    "(GPU 0: has running compute process; GPU 1: only 0.4 GB free (< 1.0 GB threshold)). Free a GPU, raise "
-    "gpu_selection.min_free_memory_gb, or set HIP_VISIBLE_DEVICES manually in envs.']\n"
-)
-
-
-@pytest.mark.asyncio
-@pytest.mark.parametrize("workspace", [False, True], ids=["no_workspace", "workspace_without_report"])
-@pytest.mark.parametrize(
-    ("stderr", "named"),
-    [
-        (_GPU0_BUSY_STDERR, "rejected: ['GPU 0: has running compute process']"),
-        (_NO_IDLE_GPU_STDERR, "GPU 0: has running compute process; GPU 1: only 0.4 GB free"),
-    ],
-    ids=["fewer_idle_than_needed", "none_idle"],
-)
-async def test_a_baseline_refused_for_want_of_idle_gpus_stops_the_run_instead_of_entering_enablement(
-    coord: Coordinator, tmp_path, monkeypatch, workspace: bool, stderr: str, named: str
-) -> None:
-    """No server started and no patch frees a GPU another workload holds, so the first refusal ends the run."""
-    from hyperloom.inference_optimizer.breakdown.stop_reasons import HOST_GPUS_UNAVAILABLE
-    from hyperloom.orchestrator.phases import machine_state as phase_state
-
-    result = await _executor_nonzero_result(tmp_path, monkeypatch, "gpus", stderr, workspace=workspace)
-    assert result["error_class"] == HOST_GPUS_UNAVAILABLE
-    assert named in result["error"]
-
-    coord.shared_state.phase = phase_state.PHASE_PRELUDE
-    assert coord.enablement_lane.enablement_admitted()
-    await coord.writeback.handle_unpromotable_result(_baseline_task("bl-gpus"), result)
-
-    state = coord.shared_state
-    assert state.stop_reason == HOST_GPUS_UNAVAILABLE
-    assert state.last_action_failures[-1]["error_class"] == HOST_GPUS_UNAVAILABLE
-    assert named in state.last_action_failures[-1]["error_excerpt"]
-    assert not (state.enablement.launch_log or "").strip()
-    assert state.baseline_failure_streak == 0
-    phase, reason, _ = phase_state.compute_next_phase(state, flags=phase_state.PhaseFlags(enablement_enabled=True))
-    assert (phase, reason) == (phase_state.PHASE_CLOSE, HOST_GPUS_UNAVAILABLE)
-
-
-@pytest.mark.asyncio
-async def test_a_baseline_refused_for_want_of_idle_gpus_stops_in_enablement_too(
-    coord: Coordinator, tmp_path, monkeypatch
-) -> None:
-    from hyperloom.inference_optimizer.breakdown.stop_reasons import HOST_GPUS_UNAVAILABLE
-    from hyperloom.orchestrator.phases.machine_state import PHASE_ENABLEMENT
-
-    coord.shared_state.phase = PHASE_ENABLEMENT
-    result = await _executor_nonzero_result(tmp_path, monkeypatch, "gpus-en", _GPU0_BUSY_STDERR, workspace=False)
-
-    await coord.writeback.handle_unpromotable_result(_baseline_task("bl-gpus-en"), result)
-
-    assert coord.shared_state.stop_reason == HOST_GPUS_UNAVAILABLE
-    assert not (coord.shared_state.enablement.launch_log or "").strip()
-
-
-@pytest.mark.asyncio
-async def test_magpie_pinning_the_gpus_it_found_is_not_a_gpu_shortfall(tmp_path, monkeypatch) -> None:
-    """Magpie names ``gpu_selection.auto`` on every launch; only its refusal is a host without idle GPUs."""
-    stderr = (
-        "Magpie.modes.benchmark.benchmarker - INFO - gpu_selection.auto: pinned benchmark to physical GPU(s) "
-        "0,1,2,3 (vendor=AMD)\n"
-        "RuntimeError: worker 3 died\n"
-    )
-
-    result = await _executor_nonzero_result(tmp_path, monkeypatch, "pinned", stderr, workspace=False)
-
-    assert result["error_class"] == "subprocess_nonzero"

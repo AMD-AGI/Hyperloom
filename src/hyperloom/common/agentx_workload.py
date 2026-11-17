@@ -8,7 +8,7 @@ pinned not to import it, and that path still has to recognise a client script
 and size the benchmark cap.
 
 Both backends size that cap from the work the run was composed to do: an MLPerf
-run from its trajectory count, a canonical (Magpie/aiperf) run from the
+run from its trajectory count, a canonical (aiperf) run from the
 concurrency it measures, because its warmup phase is one set of requests per
 lane.
 """
@@ -21,12 +21,10 @@ from typing import Any, Mapping
 
 from hyperloom.common.outside_facts import AIPERF_EXPORT_DIR, ENV_CONC
 
+#: The ``benchmark_script`` that marks an MLPerf point; inference_suite runs the MLPerf harness for it, and no script by
+#: this name ships.
 MLPERF_CLIENT_SCRIPT = "mlperf_agentic_client.sh"
 AGENTX_CLIENT_SCRIPTS = frozenset({MLPERF_CLIENT_SCRIPT})
-
-# Both client scripts write the pid of the server they boot here, under their RESULT_DIR. The server is setsid'd and
-# re-parented away from the client, so reaping the round's process tree never reaches it.
-AGENTX_SERVER_PIDFILE = "agentx_server.pid"
 
 # Where the AgentX client leaves aiperf's artifacts, relative to the round's directory; a round may nest its benchmark
 # one level down.
@@ -57,10 +55,10 @@ AGENTX_BOOT_ALLOWANCE_SEC = 1800
 # 15 req/min against 48 once warm), so the cap is sized for the cold case.
 MLPERF_TIMEOUT_SAFETY_FACTOR = 2.0
 
-# The canonical phases below are Magpie's, not ours: Hyperloom composes only
-# ``envs.CONC``, and the shape of the round that answers it belongs to Magpie at
-# the ref native AgentX pins it to (docs/components/magpie.md). Every CANON_
-# number here describes that pin and has to be re-measured when it moves.
+# The canonical phases below are the replay client's, not ours: Hyperloom composes
+# only ``envs.CONC``, and the shape of the round that answers it belongs to the
+# client at the commit inference_suite pins. Every CANON_ number here describes
+# that commit and has to be re-measured when it moves.
 
 # Canonical replay warms up this many requests per lane, plus one probe, before
 # it opens the profiling window: a sweep measured 155, 221 and 309 warmup
@@ -88,13 +86,20 @@ CANON_FINALISATION_SEC = 300.0
 
 
 def agentic_backend(env: Mapping[str, str] | None = None) -> str:
-    """Return ``mlperf`` or ``magpie`` from ``HYPERLOOM_AGENTIC_BACKEND``."""
+    """Return ``mlperf`` or ``inferencex`` from ``HYPERLOOM_AGENTIC_BACKEND``."""
     runtime = os.environ if env is None else env
-    return "mlperf" if str(runtime.get(BACKEND_ENV) or "").strip().lower() == "mlperf" else "magpie"
+    return "mlperf" if str(runtime.get(BACKEND_ENV) or "").strip().lower() == "mlperf" else "inferencex"
 
 
 def is_mlperf_backend(env: Mapping[str, str] | None = None) -> bool:
     return agentic_backend(env) == "mlperf"
+
+
+def is_agentx_client_key(key: str, env: Mapping[str, str]) -> bool:
+    """True for a knob the AgentX client reads, which the server never needs."""
+    if key.startswith("AGENTX_"):
+        return True
+    return is_mlperf_backend(env) and (key.startswith(("MLPERF_", "AGENTIC_")) or key == BACKEND_ENV)
 
 
 def pin_mlperf_round_concurrency(envs: dict[str, Any]) -> None:
@@ -112,9 +117,9 @@ def pin_mlperf_round_concurrency(envs: dict[str, Any]) -> None:
 
 
 def agentx_client_script(env: Mapping[str, str] | None = None) -> str:
-    """The Magpie ``benchmark_script`` this AgentX backend pins."""
+    """The ``benchmark_script`` an MLPerf point names."""
     if not is_mlperf_backend(env):
-        raise ValueError("AgentX serving and replay are managed by Magpie; no Hyperloom client script exists")
+        raise ValueError("AgentX serving and replay are run by inference_suite; no Hyperloom client script exists")
     return MLPERF_CLIENT_SCRIPT
 
 
@@ -143,7 +148,7 @@ def mlperf_benchmark_timeout_sec(env: Mapping[str, str] | None = None) -> float:
 
 
 def is_canonical_agentx(env: Mapping[str, str] | None = None) -> bool:
-    """True for an AgentX run Magpie replays itself, rather than the MLPerf client."""
+    """True for an AgentX run the canonical replay drives, rather than the MLPerf client."""
     from hyperloom_common.env import env_bool
 
     runtime = os.environ if env is None else env

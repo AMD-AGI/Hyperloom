@@ -28,9 +28,18 @@ def test_stream_json_usage_skips_blank_and_nondict_lines(tmp_path):
     assert out["output_tokens"] == 7
 
 
-def test_stream_json_usage_dir_path_is_oserror(tmp_path):
-    # A directory triggers IsADirectoryError (an OSError) -> tolerant None.
-    assert pu.parse_claude_stream_json_usage(tmp_path) is None
+@pytest.mark.parametrize(
+    ("parse", "empty"),
+    [
+        pytest.param(pu.parse_claude_stream_json_usage, None, id="usage"),
+        pytest.param(pu.parse_claude_stream_json_response, None, id="response"),
+        pytest.param(pu.parse_claude_stream_json_turn_usages, [], id="turn-usages"),
+        pytest.param(pu.parse_claude_stream_json_tool_calls, [], id="tool-calls"),
+    ],
+)
+def test_stream_json_dir_path_is_oserror(tmp_path, parse, empty):
+    # A directory triggers IsADirectoryError (an OSError) -> tolerant empty result.
+    assert parse(tmp_path) == empty
 
 
 def test_stream_json_response_skips_blank_nondict_and_bad_message(tmp_path):
@@ -45,19 +54,11 @@ def test_stream_json_response_skips_blank_nondict_and_bad_message(tmp_path):
     assert pu.parse_claude_stream_json_response(p) == "hi"
 
 
-def test_stream_json_response_dir_path_is_oserror(tmp_path):
-    assert pu.parse_claude_stream_json_response(tmp_path) is None
-
-
 def test_stream_json_turn_usages_skips_blank_lines(tmp_path):
     p = tmp_path / "process.log"
     p.write_text('\n{"type": "assistant", "message": {"usage": {"input_tokens": 1}}}\n')
     out = pu.parse_claude_stream_json_turn_usages(p)
     assert len(out) == 1 and out[0]["input_tokens"] == 1
-
-
-def test_stream_json_turn_usages_dir_path_is_oserror(tmp_path):
-    assert pu.parse_claude_stream_json_turn_usages(tmp_path) == []
 
 
 def test_stream_json_tool_calls_skips_blank_bad_message_and_unnamed(tmp_path):
@@ -74,19 +75,16 @@ def test_stream_json_tool_calls_skips_blank_bad_message_and_unnamed(tmp_path):
     assert out == [{"tool": "Grep", "query": "x"}]
 
 
-def test_stream_json_tool_calls_dir_path_is_oserror(tmp_path):
-    assert pu.parse_claude_stream_json_tool_calls(tmp_path) == []
-
-
-def test_summarize_tool_input_unserializable_dict_falls_back_to_str():
-    # No query-ish key + an unserializable value -> json.dumps raises -> str().
-    out = pu._summarize_tool_input({"obj": object()})
-    assert isinstance(out, str) and out
-
-
-def test_summarize_tool_input_non_dict_values():
-    assert pu._summarize_tool_input(None) == ""
-    assert pu._summarize_tool_input(123) == "123"
+def test_stream_json_tool_calls_summarize_a_missing_or_scalar_input(tmp_path):
+    p = tmp_path / "process.log"
+    p.write_text(
+        '{"type": "assistant", "message": {"content": [{"type": "tool_use", "name": "Read"}]}}\n'
+        '{"type": "assistant", "message": {"content": [{"type": "tool_use", "name": "Bash", "input": 123}]}}\n'
+    )
+    assert pu.parse_claude_stream_json_tool_calls(p) == [
+        {"tool": "Read", "query": ""},
+        {"tool": "Bash", "query": "123"},
+    ]
 
 
 def test_parse_ts_missing_and_unparseable():
@@ -248,10 +246,17 @@ def test_validate_closed_row_accepts_valid_row():
 # --- conversation_trace: tolerant I/O ---------------------------------------
 
 
-def test_coerce_text_none_and_non_str():
-    assert ct._coerce_text(None) == ""
-    assert ct._coerce_text(123) == "123"
-    assert ct._coerce_text("hi") == "hi"
+@pytest.mark.parametrize(
+    ("prompt", "stored"),
+    [
+        pytest.param(None, "", id="missing"),
+        pytest.param(123, "123", id="non-text"),
+        pytest.param("hi", "hi", id="text"),
+    ],
+)
+def test_a_conversation_row_stores_the_prompt_as_text(prompt, stored):
+    row = ct.ConversationRecord(session_id="s1", component="orchestration", prompt=prompt).to_row()
+    assert row["prompt"] == stored
 
 
 def test_append_conversation_swallows_oserror(tmp_path, monkeypatch):

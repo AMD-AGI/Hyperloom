@@ -11,8 +11,8 @@ files. It turns raw PyTorch, JAX, or rocprofv3 traces into hierarchical
 performance breakdowns, roofline metrics, and multi-GPU communication analysis.
 
 Within Hyperloom, TraceLens is the profiling brain of the workload
-understanding stage: it consumes traces collected by [Magpie](magpie.md),
-captures bottlenecks, and derives the roofline targets that seed the
+understanding stage: it consumes traces collected by
+[InferenceSuite](../reference/inference-suite.md) profile rounds, captures bottlenecks, and derives the roofline targets that seed the
 optimization search tree.
 
 - **Source**: <https://github.com/AMD-AGI/TraceLens>
@@ -32,8 +32,8 @@ The orchestration runtime enters TraceLens through two paths:
   dispatched by the orchestrator.
 - The composite roofline action: `RooflineExecutor`
   (`src/hyperloom/orchestrator/actions/executors/roofline.py`) is an atomic
-  `profile` + `trace_analyze` pipeline that first profiles the workload with
-  Magpie, then calls `trace_analyze_handler()` directly on the trace.
+  `profile` + `trace_analyze` pipeline that first profiles the workload in an
+  InferenceSuite profile round, then calls `trace_analyze_handler()` directly on the trace.
 
 Before profiling, Hyperloom lays TraceLens's runtime patch for vLLM/SGLang in a
 copy of the installed package on the host's local disk and puts that copy first

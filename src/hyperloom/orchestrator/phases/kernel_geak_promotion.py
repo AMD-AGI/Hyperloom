@@ -32,13 +32,14 @@ from hyperloom.inference_optimizer.breakdown.recorder.kernel_records import (
     GeakProduct,
     IntegrateVerdict,
 )
+from ..state.base_launch import session_runner_owned
 from ..state.task_registry import Task
 from ..kernel.geak_config import (
     _geak_accepted_kernel_specs,
     _geak_has_accepted_kernel,
     geak_acceptance_specs,
     geak_spec_name,
-    _accepted_config_as_variant,
+    geak_candidate_launch,
     _accepted_config_controls,
 )
 
@@ -47,11 +48,6 @@ log = logging.getLogger(__name__)
 # |measurement_divergence_pct| above this (GEAK vs orchestrator, same config) is logged as a measurement-mismatch
 # warning at geak promote.
 _GEAK_MEASUREMENT_DIVERGENCE_WARN_PCT: float = 3.0
-
-
-def _bench_envs(bench: Mapping[str, Any]) -> dict[str, Any]:
-    envs = bench.get("envs")
-    return dict(envs) if isinstance(envs, dict) else {}
 
 
 def _covered_step(kind: str, params: dict[str, Any], *, idempotency_key: str) -> Task:
@@ -249,7 +245,9 @@ class _GeakPromotionMixin:
             return False
         result.setdefault("kernel_event_id", kernel_event_id(int(self.shared_state.macro_cycle or 0)))
         try:
-            accepted_flags, parsed_envs = _accepted_config_as_variant(result.get("accepted_config"))
+            accepted_flags, parsed_envs = geak_candidate_launch(
+                result.get("accepted_config"), session_runner_owned(self.session_dir)
+            )
         except ValueError as exc:
             self.reject_geak_promotion(result, measured_tput=0.0, current_best_tput=0.0, reason=str(exc))
             return False
@@ -403,7 +401,7 @@ class _GeakPromotionMixin:
                 measurement[key] = value
         return measurement
 
-    def _compose_geak_launch_recipe(
+    def _compose_geak_launch_delta(
         self,
         measurement: dict[str, Any],
         accepted_config: Mapping[str, Any],
@@ -411,10 +409,15 @@ class _GeakPromotionMixin:
         accepted_flags: str,
         parsed_envs: dict[str, str],
     ) -> None:
+        """Write GEAK's accepted launch onto ``measurement`` as a delta over the session's base launch.
+
+        The delta stays in append mode unless the prior stack or GEAK's own return is a complete snapshot, so the
+        base launch's arguments are applied by whoever materializes the round, not copied into the delta.
+        """
         from hyperloom_common.coerce import to_str_list
         from hyperloom.inference_optimizer.canonical_fingerprint import canonical_fingerprint
-        from hyperloom.inference_optimizer.framework_registry import server_args_env_name
-        from hyperloom.inference_optimizer.grid_server_args import compose_server_args, remove_server_args
+        from hyperloom.inference_optimizer.grid_server_args import compose_server_args
+        from inference_suite.argv import remove_server_args
 
         cb_now = self.shared_state.current_best
         accepted_controls = _accepted_config_controls(accepted_config)
@@ -429,20 +432,15 @@ class _GeakPromotionMixin:
             launch_controls["remove_args"] = to_str_list(accepted_config["remove_args"])
         if not launch_controls:
             return
-        inherited_args = ""
-        if not complete and prior_controls.get("args_mode") != "replace":
-            recipe_envs = _bench_envs(self._recipe_benchmark(str(self.shared_state.baseline_config_path or "")))
-            inherited_args = str(recipe_envs.get(server_args_env_name(self.shared_state.framework)) or "")
         measurement["extra_server_args"] = compose_server_args(
-            inherited_args=inherited_args,
             base_extra_args="" if complete else cb_now.get("extra_server_args"),
             variant_extra_args=accepted_flags,
             remove_args=launch_controls.get("remove_args"),
             args_mode="replace" if complete else "append",
         )
         if not complete and launch_controls.get("remove_args"):
-            # A legacy delta can re-enable a removed flag. The retained
-            # snapshot is complete, so stale removals would prune it again.
+            # A legacy delta can re-enable a removed flag; a removal kept beside it would prune it again when the
+            # delta is applied.
             accepted_identity = canonical_fingerprint(accepted_flags, {})
             launch_controls["remove_args"] = [
                 spec
@@ -455,7 +453,8 @@ class _GeakPromotionMixin:
         launch_envs.update(parsed_envs)
         measurement["extra_envs"] = launch_envs
         measurement.update(launch_controls)
-        measurement["args_mode"] = "replace"
+        snapshot = complete or prior_controls.get("args_mode") == "replace"
+        measurement["args_mode"] = "replace" if snapshot else "append"
 
     def _record_geak_lift_attribution(
         self,
@@ -506,7 +505,9 @@ class _GeakPromotionMixin:
         # Read before the lift overwrites ``current_best``; see :meth:`_record_geak_lift_attribution`.
         pre_geak_tput = to_float(self.shared_state.current_best.get("tput"), 0.0)
         try:
-            accepted_flags, parsed_envs = _accepted_config_as_variant(result.get("accepted_config"))
+            accepted_flags, parsed_envs = geak_candidate_launch(
+                result.get("accepted_config"), session_runner_owned(self.session_dir)
+            )
         except ValueError as exc:
             self.reject_geak_promotion(result, measured_tput=0.0, current_best_tput=0.0, reason=str(exc))
             return False
@@ -523,7 +524,7 @@ class _GeakPromotionMixin:
             kernel_proven=bool(entry_extra.get("accepted_kernels") or entry_extra.get("accepted_heads")),
         )
         if graded_measurement is result or "extra_server_args" not in graded_measurement:
-            self._compose_geak_launch_recipe(
+            self._compose_geak_launch_delta(
                 promotion_measurement,
                 result.get("accepted_config") or {},
                 accepted_flags=accepted_flags,

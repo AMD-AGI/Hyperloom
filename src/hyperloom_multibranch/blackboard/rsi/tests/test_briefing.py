@@ -13,6 +13,7 @@ from pathlib import Path
 import pytest
 from hyperloom_kb import RemoteReadResult
 
+from hyperloom.common.perf_metric import TOTAL_TOKEN_THROUGHPUT
 from hyperloom.contracts.measurement import REPRODUCED, AttachmentRef, Purpose, TestKind, TestRequest
 from hyperloom.contracts.recipe import (
     ComponentChange,
@@ -43,6 +44,7 @@ from hyperloom_multibranch.blackboard import LocalBlackboard
 from hyperloom_multibranch.blackboard.knowledge.recall import (
     INTERACTIVITY_OBJECTIVE,
     THROUGHPUT_OBJECTIVE,
+    TOTAL_THROUGHPUT_OBJECTIVE,
     IdentityIndex,
 )
 from hyperloom_multibranch.blackboard.knowledge.tests.fakes import (
@@ -346,6 +348,35 @@ async def test_an_experience_of_the_other_kind_of_session_is_only_a_lesson_to_re
     assert brief.leads == ("prior: --block-size 16: keep +10.00% [exp-faster]",)
     assert brief.lessons[-1] == (
         "to re-verify: --block-size 16: keep +12.00% on e2e_interactivity@v1 (objective differ) [exp-agentx]"
+    )
+
+
+async def test_an_agentx_briefing_graded_on_total_throughput_reads_that_objective_and_its_baseline(
+    tmp_path: Path,
+) -> None:
+    class _AgentX(_WithExtraFailure):
+        async def snapshot(self) -> BlackboardSnapshot:
+            snapshot = await self.blackboard.snapshot()
+            assert snapshot.baseline is not None
+            baseline = dataclasses.replace(snapshot.baseline, values={TOTAL_TOKEN_THROUGHPUT: 9000.0})
+            return dataclasses.replace(snapshot, profile=profile(isl=None, osl=None), baselines=(baseline,))
+
+    blackboard = _AgentX(await scripted_session(tmp_path / "blackboard", FakeClock()))
+    reader = _reader()
+
+    await CrossSessionBriefing(
+        blackboard,
+        recalls=RecallCache(),
+        champions={},
+        refused={},
+        experiences=reader,
+        metric=TOTAL_TOKEN_THROUGHPUT,
+    ).startup_brief("c0")
+
+    ((_, context, _),) = reader.calls
+    assert (context["objective"]["id"], context["benchmark_baseline"]["total_throughput"]) == (
+        TOTAL_THROUGHPUT_OBJECTIVE,
+        9000.0,
     )
 
 
@@ -876,8 +907,8 @@ async def test_a_focus_that_names_no_op_recalls_only_the_branches_opened_on_the_
     assert [item.branch for item in brief.focus_history] == ["s6"]
 
 
-#: Arbor's map of the scripted session: b7 runs and holds ``m-gemm``; s2, which held ``m-attn``, stopped.
-ARBOR_MAP = (
+#: The agent map of the scripted session: b7 runs and holds ``m-gemm``; s2, which held ``m-attn``, stopped.
+AGENT_MAP = (
     MapDirection("m-gemm", "Dense GEMMs: tuned kernels", "open", holder="b7"),
     MapDirection("m-act", "Fold the activation mul into the GEMM epilogue", "open", f"root profile: {ACT_MUL} 30%"),
     MapDirection("m-moe", "MoE routing", "open"),
@@ -887,7 +918,7 @@ ARBOR_MAP = (
 )
 
 
-async def test_the_brief_binds_the_branch_to_the_directions_of_arbors_map_on_its_focus_held_or_set_aside(
+async def test_the_brief_binds_the_branch_to_the_directions_of_the_agent_map_on_its_focus_held_or_set_aside(
     tmp_path: Path,
 ) -> None:
     clock = FakeClock()
@@ -895,7 +926,7 @@ async def test_the_brief_binds_the_branch_to_the_directions_of_arbors_map_on_its
     scheduler = Writers(tmp_path / "blackboard", clock).as_role(Role.SCHEDULER)
     for branch, focus in (("b7", ""), ("s9", ACT_MUL)):
         await scheduler.record_lineage(LineageEvent(LineageKind.OPEN, branch, from_commit="c1", focus=focus))
-    await scheduler.write_agent_map(ARBOR_MAP)
+    await scheduler.write_agent_map(AGENT_MAP)
 
     shown = (await SessionBriefs(blackboard).text("s9", "c1")).splitlines()
 
@@ -911,7 +942,7 @@ async def test_the_brief_binds_the_branch_to_the_directions_of_arbors_map_on_its
     ]
 
 
-async def test_a_session_without_arbors_map_briefs_no_map(tmp_path: Path) -> None:
+async def test_a_session_without_an_agent_map_briefs_no_map(tmp_path: Path) -> None:
     blackboard = await scripted_session(tmp_path / "blackboard", FakeClock())
 
     brief = await SessionBriefs(blackboard).for_branch("s1").startup_brief("c1")
@@ -920,7 +951,7 @@ async def test_a_session_without_arbors_map_briefs_no_map(tmp_path: Path) -> Non
     assert MAP_TITLE not in render_brief(brief)
 
 
-def test_arbors_map_in_the_brief_keeps_to_the_line_and_list_caps_and_a_long_title_leaves_the_why_whole() -> None:
+def test_the_agent_map_in_the_brief_keeps_to_the_line_and_list_caps_and_a_long_title_leaves_the_why_whole() -> None:
     title = "Retune every dense GEMM of the decode path at each batch size " * 4
     aside = tuple(MapDirection(f"m-{n}", title, "killed", f"reason {n}") for n in range(MAX_LINES))
 
@@ -933,7 +964,7 @@ def test_arbors_map_in_the_brief_keeps_to_the_line_and_list_caps_and_a_long_titl
     assert listed[1:-1:2] == [f"  why: reason {n}" for n in range(kept)]
 
 
-def test_arbors_map_in_the_brief_puts_the_held_directions_first_and_cuts_only_between_directions() -> None:
+def test_the_agent_map_in_the_brief_puts_the_held_directions_first_and_cuts_only_between_directions() -> None:
     aside = tuple(MapDirection(f"m-{n}", f"direction {n}", "done", f"reason {n}") for n in range(MAX_LINES))
     held = (
         MapDirection("m-gemm", "Dense GEMMs", "open", holder="b7"),

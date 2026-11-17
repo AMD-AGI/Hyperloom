@@ -27,10 +27,15 @@ from hyperloom.measure.failures import (
     HUB_RATE_LIMITED,
     INFRA_ERROR_CLASSES,
     JIT_BUILD_TIMEOUT,
+    PROFILER_HUNG,
+    PROFILER_SNAPSHOT_FAILED,
     TEST_TIMEOUT_REASON,
+    FailureEvidence,
+    StepFailure,
     classify_test_failure,
 )
 from hyperloom.measure.runner.import_outcome import INERT_PATCH
+from inference_suite.contracts import FailedStep
 from hyperloom_multibranch.toolbox.attempts import (
     CAPACITY_UNAVAILABLE,
     NODE_BLAMELESS_INFRA_REASONS,
@@ -200,7 +205,7 @@ async def test_another_infrastructure_failure_is_still_retried_on_other_nodes(re
 async def test_a_dataset_cache_lock_the_sandbox_may_not_take_is_not_retried_and_not_held_against_the_node() -> None:
     lock = "/x/hf/datasets/_x_hf_datasets_openai___gsm8k_main_0.0.0_e53f048.lock"
     log = f"PermissionError: [Errno 13] Permission denied: '{lock}'"
-    reason = classify_test_failure(returncode=1, logs=[log]).failure_reason
+    reason = classify_test_failure(returncode=1, evidence=FailureEvidence(logs=(log,))).failure_reason
     assert reason is not None and reason.startswith(f"{HF_CACHE_PERMISSION}: ")
     result, executor, reported = await _run(reason)
     assert len(executor.jobs) == 1 and len(result.attempts) == 1, "every sandbox shares the cache and is refused alike"
@@ -326,3 +331,98 @@ async def test_a_sweep_that_ran_out_of_time_is_not_rerun(kind, runs, validity) -
     assert result.validity is validity and result.failure_class is FailureClass.UNCLEAR
     assert result.failure_reason == TEST_TIMEOUT_REASON
     assert reported == [], "a timeout is held against neither node"
+
+
+class _ClassifyingExecutor(_ScriptedExecutor):
+    """Ends every attempt with what :func:`classify_test_failure` makes of ``log`` and the step ``step`` names, as the
+    executors record it."""
+
+    def __init__(self, log: str, step: StepFailure | None = None) -> None:
+        super().__init__("unused")
+        self.log = log
+        self.step = step
+
+    async def run(self, job: TestJob) -> TestResult:
+        self.jobs.append(job)
+        verdict = classify_test_failure(
+            returncode=1, evidence=FailureEvidence(logs=(self.log,), step_failure=self.step)
+        )
+        infra = verdict.failure_class is FailureClass.INFRA
+        return TestResult(
+            request_id="r1",
+            validity=Validity.MEASUREMENT_FAILED if infra else Validity.CANDIDATE_FAILED,
+            failure_class=verdict.failure_class,
+            failure_reason=verdict.failure_reason,
+            sandbox=SandboxFacts(sandbox_id=f"s{job.attempt}", node_name=f"n{job.attempt}"),
+        )
+
+
+async def _profile(log: str, step: StepFailure | None = None) -> tuple[TestResult, _ClassifyingExecutor, list[str]]:
+    executor = _ClassifyingExecutor(log, step)
+    reported: list[str] = []
+
+    async def on_node_failure(node: str, _reason: str, _reproduced: bool) -> None:
+        reported.append(node)
+
+    runner = AttemptRunner(executor, avoid=frozenset, on_node_failure=on_node_failure, max_infra_retries=3)
+    job = _job()
+    job = replace(job, request=replace(job.request, kind=TestKind.PROFILE, purpose=Purpose.PROFILE))
+    return await runner.run(job), executor, reported
+
+
+#: A profile's server that died in the profiler's memory-snapshot dump after the capture wrote its traces.
+_SNAPSHOT_LOG = (
+    '  File "/sgl-workspace/sglang/python/sglang/srt/model_executor/runner/decode_cuda_graph_runner.py", line 872, '
+    "in _post_process_after_profile\n"
+    '    torch.cuda.memory._dump_snapshot("cuda_graph_runner_memory_usage.pickle")\n'
+    '  File "/opt/venv/lib/python3.10/site-packages/torch/cuda/memory.py", line 1059, in _dump_snapshot\n'
+    "    s = _snapshot()\n"
+    '  File "/opt/venv/lib/python3.10/site-packages/torch/cuda/memory.py", line 1043, in _snapshot\n'
+    "    return _C._cuda_memorySnapshot(None)\n"
+    "RuntimeError: stoi\n"
+    "Exception: Capture cuda graph failed: stoi\n"
+)
+
+
+async def test_a_profile_that_died_in_the_profilers_snapshot_dump_ends_unmeasured_not_against_the_candidate() -> None:
+    result, executor, reported = await _profile(_SNAPSHOT_LOG)
+
+    assert len(executor.jobs) == 1, "every sandbox of the image dies in the same dump"
+    assert result.validity is Validity.MEASUREMENT_FAILED and result.failure_class is FailureClass.INFRA
+    assert result.failure_reason == f"{PROFILER_SNAPSHOT_FAILED}: RuntimeError: stoi"
+    assert reported == [], "the image's profiler, not the node, failed"
+
+
+_TRACER_HANG = "queue_interposition.cpp:412 Async signal handler still waiting"
+_SILENT = "no server log or client output for 600.4s"
+
+
+async def test_a_profile_whose_server_stalled_inside_its_window_is_not_retried_and_ends_unmeasured() -> None:
+    """The tracer hangs the server at the same point in every sandbox of the image; a retry only holds the cards again."""
+    stall = StepFailure(FailedStep.SERVER_STALLED, _SILENT, profile_stall=_TRACER_HANG)
+
+    result, executor, reported = await _profile("", stall)
+
+    assert len(executor.jobs) == 1, "a hang in the profile window is not retried"
+    assert result.validity is Validity.MEASUREMENT_FAILED and result.failure_class is FailureClass.INFRA
+    assert result.failure_reason == f"{PROFILER_HUNG}: {_TRACER_HANG}"
+    assert reported == [], "the image's profiler, not the node, hung the server"
+
+
+async def test_a_profile_whose_server_stalled_outside_its_window_is_still_rerun_once() -> None:
+    result, executor, _ = await _profile("", StepFailure(FailedStep.SERVER_STALLED, _SILENT))
+
+    assert len(executor.jobs) == 2, "a stall the profiler did not start is unclear: one rerun"
+    assert result.failure_class is FailureClass.UNCLEAR and result.failure_reason == "server_stalled"
+
+
+async def test_a_profile_whose_candidate_crashed_is_still_a_candidate_failure() -> None:
+    crash = (
+        "torch.AcceleratorError: HIP error: an illegal memory access was encountered\n"
+        "Search for `hipErrorIllegalAddress' for more information.\n"
+    )
+
+    result, executor, _ = await _profile(_SNAPSHOT_LOG + crash)
+
+    assert len(executor.jobs) == 1
+    assert result.validity is Validity.CANDIDATE_FAILED and result.failure_class is FailureClass.CANDIDATE

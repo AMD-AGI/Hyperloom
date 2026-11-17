@@ -28,7 +28,7 @@ _CONTROLLED_ENV_NAMES = (
     "OPENAI_API_KEY",
     "OPENAI_BASE_URL",
     "OPENAI_CUSTOM_HEADERS",
-    "MAGPIE_PATH",
+    "INFERENCEX_PATH",
 )
 
 _INSTALL_KEY = "ak-install-time-key"
@@ -62,7 +62,7 @@ export REPO_ROOT={repo_root!s}
 export USER_DATA_PATH={workdir!s}
 export HYPERLOOM_RUNTIME_DIR={workdir / "runtime"!s}
 export KERNEL_AGENT_ENV={kernel_agent_env!s}
-export MAGPIE_PATH=/data/.cache/Magpie@abc1234
+export INFERENCEX_PATH=/data/.cache/InferenceX@abc1234
 export GEAK_ROOT={workdir / "geak"!s}
 CHECK_ONLY=0
 DRY_RUN=0
@@ -89,7 +89,7 @@ write_env_file
             "ANTHROPIC_API_KEY",
             "ANTHROPIC_BASE_URL",
             "CLAUDE_CODE_OAUTH_TOKEN",
-            "MAGPIE_PATH",
+            "INFERENCEX_PATH",
         )
         exports = "".join(f"export {k}={v}\n" for k, v in exported.items())
         script = exports + f". {env_file!s}\n" + "".join(f'echo "{name}=${{{name}:-}}"\n' for name in reported)
@@ -169,9 +169,9 @@ write_env_file
             repo_root = work / "repo"
             repo_root.mkdir()
             env_file = self._write_env_file(work, repo_root)
-            values, _ = self._source_and_report(env_file, {"MAGPIE_PATH": "/stale/other-workspace/Magpie"})
+            values, _ = self._source_and_report(env_file, {"INFERENCEX_PATH": "/stale/other-workspace/InferenceX"})
 
-        self.assertEqual(values["MAGPIE_PATH"], "/data/.cache/Magpie@abc1234")
+        self.assertEqual(values["INFERENCEX_PATH"], "/data/.cache/InferenceX@abc1234")
 
 
 if __name__ == "__main__":

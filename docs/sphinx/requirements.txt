@@ -74,6 +74,7 @@ jinja2==3.1.6
     # via
     #   myst-parser
     #   sphinx
+    #   sphinxcontrib-mermaid
 jsonschema==4.25.1
     # via nbformat
 jsonschema-specifications==2025.9.1
@@ -165,6 +166,7 @@ pyyaml==6.0.3
     #   myst-parser
     #   rocm-docs-core
     #   sphinx-external-toc
+    #   sphinxcontrib-mermaid
 pyzmq==27.1.0
     # via
     #   ipykernel
@@ -203,6 +205,7 @@ sphinx==8.1.3
     #   sphinx-design
     #   sphinx-external-toc
     #   sphinx-notfound-page
+    #   sphinxcontrib-mermaid
 sphinx-book-theme==1.1.4
     # via rocm-docs-core
 sphinx-copybutton==0.5.2
@@ -221,6 +224,8 @@ sphinxcontrib-htmlhelp==2.1.0
     # via sphinx
 sphinxcontrib-jsmath==1.0.1
     # via sphinx
+sphinxcontrib-mermaid==2.1.1
+    # via -r docs/sphinx/requirements.in
 sphinxcontrib-qthelp==2.0.0
     # via sphinx
 sphinxcontrib-serializinghtml==2.0.0

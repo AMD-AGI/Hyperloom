@@ -9,9 +9,13 @@ import json
 from pathlib import Path
 
 import pytest
+import yaml
 
+from hyperloom.common.benchmark_config import BENCHMARK_CONFIG_ENV
 from hyperloom.inference_optimizer.speculative_capability import (
     CAPABILITY_UNSUPPORTED,
+    DRAFT_LIMITS_KEY,
+    DraftLimits,
     SpeculativeCapabilityUnsupportedError,
     refuse_unrunnable_speculative_stack,
     speculative_capability_lines,
@@ -136,7 +140,7 @@ def test_a_drafter_whose_heads_cannot_be_read_is_left_to_the_engine(tmp_path):
     # No metadata names this shape, so no kernel claim can be made about it: the engine decides, not this gate.
     unreadable = _spec_args(str(tmp_path / "missing"))
     assert speculative_capability_reason(unreadable, framework="vllm") is None
-    refuse_unrunnable_speculative_stack(unreadable, framework="vllm")
+    refuse_unrunnable_speculative_stack(unreadable, {"framework": "vllm"})
     # Admission keeps it too, so a drafter this gate cannot name is still measured.
     unknown = GridVariant(name="spec_aiter_fp8_k2_unknown", extra_server_args=unreadable)
     kept, dropped = apply_compatibility_filter([unknown], serving=ServingStack("vllm", ""))
@@ -146,14 +150,14 @@ def test_a_drafter_whose_heads_cannot_be_read_is_left_to_the_engine(tmp_path):
 def test_the_sixteen_head_fp8_draft_is_refused_with_the_capability_error_class(tmp_path):
     args = _spec_args(_draft_model(tmp_path))
     with pytest.raises(SpeculativeCapabilityUnsupportedError) as excinfo:
-        refuse_unrunnable_speculative_stack(args, framework="vllm")
+        refuse_unrunnable_speculative_stack(args, {"framework": "vllm"})
     assert excinfo.value.error_class == CAPABILITY_UNSUPPORTED
     # The refusal names the shape with no kernel and what to run instead, as the engine's own guard does.
     reason = str(excinfo.value)
     assert "16 query heads per rank" in reason and "ROCM_AITER_MLA" in reason and "TRITON_MLA" in reason
     # A runnable draft is not refused at all.
     runnable = _spec_args(_draft_model(tmp_path / "ok"), num_speculative_tokens=5)
-    refuse_unrunnable_speculative_stack(runnable, framework="vllm")
+    refuse_unrunnable_speculative_stack(runnable, {"framework": "vllm"})
 
 
 def test_the_draft_is_judged_at_the_tensor_parallel_size_the_launch_really_carries(tmp_path):
@@ -194,3 +198,86 @@ def test_the_proposal_prompt_states_the_same_coverage():
     prompt = speculative_decoding_focus(model_name="Kimi-K3", model_path="/models/Kimi-K3", model_info={})
     # The agent is told the constraint it would otherwise have to discover by crashing a launch.
     assert all(any(line in rendered for rendered in prompt) for line in lines)
+
+
+# A deployment whose patched-in kernel verifies at most four tokens per step, and a draft spelling six.
+SGLANG_OVERLONG_DRAFT = "--speculative-algorithm EAGLE --speculative-num-steps 5 --speculative-eagle-topk 1 --speculative-num-draft-tokens 6"
+SGLANG_WITHIN_DRAFT = "--speculative-num-steps 3 --speculative-eagle-topk 1 --speculative-num-draft-tokens 4"
+CAPPED_RECIPE = {"framework": "sglang", DRAFT_LIMITS_KEY: {"draft_tokens": {"max": 4}}}
+
+
+def test_an_sglang_draft_is_read_from_its_own_flags():
+    descriptor = speculative_descriptor(SGLANG_OVERLONG_DRAFT + " --tp 8")
+    assert descriptor is not None
+    assert (descriptor.method, descriptor.draft_length, descriptor.draft_tokens, descriptor.topk) == ("eagle", 5, 6, 1)
+    assert descriptor.tensor_parallel_size == 8
+    # A candidate composed onto a recipe spells only what it changes; the algorithm stays in the recipe.
+    partial = speculative_descriptor("--speculative-num-draft-tokens 6 --cuda-graph-max-bs 128")
+    assert partial is not None and (partial.method, partial.draft_tokens) == ("", 6)
+    assert speculative_descriptor("--cuda-graph-max-bs 128") is None
+
+
+def test_a_draft_outside_the_bounds_the_recipe_declares_is_refused():
+    limits = DraftLimits.declared(CAPPED_RECIPE)
+    reason = speculative_capability_reason(SGLANG_OVERLONG_DRAFT, framework="sglang", limits=limits)
+    assert reason is not None and "--speculative-num-draft-tokens" in reason
+    assert "at most 4" in reason and "spells 6" in reason
+    with pytest.raises(SpeculativeCapabilityUnsupportedError) as excinfo:
+        refuse_unrunnable_speculative_stack(SGLANG_OVERLONG_DRAFT, CAPPED_RECIPE)
+    assert excinfo.value.error_class == CAPABILITY_UNSUPPORTED
+    assert speculative_capability_reason(SGLANG_WITHIN_DRAFT, framework="sglang", limits=limits) is None
+    refuse_unrunnable_speculative_stack(SGLANG_WITHIN_DRAFT, CAPPED_RECIPE)
+    # Without a declaration nothing is known about the deployment's kernels, so the engine decides.
+    assert speculative_capability_reason(SGLANG_OVERLONG_DRAFT, framework="sglang") is None
+    refuse_unrunnable_speculative_stack(SGLANG_OVERLONG_DRAFT, {"framework": "sglang"})
+
+
+def test_a_setting_the_launch_leaves_to_the_engine_is_not_judged():
+    # SGLang derives this chain draft's verify window (six tokens) itself; the launch does not spell it.
+    steps_only = "--speculative-algorithm EAGLE --speculative-num-steps 5 --speculative-eagle-topk 1"
+    capped = DraftLimits.declared(CAPPED_RECIPE)
+    assert speculative_capability_reason(steps_only, framework="sglang", limits=capped) is None
+    # Bounding the draft length is how a recipe covers the window SGLang derives from it.
+    both = DraftLimits.declared({DRAFT_LIMITS_KEY: {"draft_length": {"max": 3}, "draft_tokens": {"max": 4}}})
+    reason = speculative_capability_reason(steps_only, framework="sglang", limits=both)
+    assert reason is not None and "--speculative-num-steps" in reason and "at most 3" in reason
+
+
+@pytest.mark.parametrize(
+    ("declared", "message"),
+    [
+        ("4", "must map draft settings"),
+        ({"verify_window": {"max": 4}}, "unknown draft setting"),
+        ({"draft_tokens": 4}, "must set min, max or both"),
+        ({"draft_tokens": {}}, "must set min, max or both"),
+        ({"draft_tokens": {"max": 4, "step": 1}}, "must set min, max or both"),
+        ({"draft_tokens": {"max": 0}}, "must be a positive integer"),
+        ({"draft_tokens": {"max": True}}, "must be a positive integer"),
+        ({"draft_tokens": {"max": "4"}}, "must be a positive integer"),
+        ({"draft_tokens": {"min": 5, "max": 4}}, "min 5 exceeds max 4"),
+    ],
+)
+def test_a_malformed_declaration_is_refused(declared, message):
+    with pytest.raises(ValueError, match=message):
+        DraftLimits.declared({DRAFT_LIMITS_KEY: declared})
+
+
+def test_the_grid_drops_a_variant_outside_the_recipes_bounds_before_it_is_launched():
+    over = GridVariant(name="steps5", extra_server_args=SGLANG_OVERLONG_DRAFT)
+    within = GridVariant(name="steps3", extra_server_args=SGLANG_WITHIN_DRAFT)
+    kept, dropped = apply_compatibility_filter(
+        [over, within], serving=ServingStack.of_recipe(CAPPED_RECIPE, model_path="")
+    )
+    assert [v.name for v in kept] == ["steps3"]
+    assert [(d["name"], d["source"]) for d in dropped] == [("steps5", CAPABILITY_UNSUPPORTED)]
+    assert "at most 4" in dropped[0]["reason"]
+
+
+def test_the_proposal_prompt_states_the_recipes_bounds(tmp_path, monkeypatch):
+    lines = speculative_capability_lines(CAPPED_RECIPE)
+    assert any("--speculative-num-draft-tokens" in line and "at most 4" in line for line in lines)
+    config = tmp_path / "benchmark.yaml"
+    config.write_text(yaml.safe_dump({"benchmark": CAPPED_RECIPE}), encoding="utf-8")
+    monkeypatch.setenv(BENCHMARK_CONFIG_ENV, str(config))
+    prompt = speculative_decoding_focus(model_name="Kimi-K3", model_path="/models/Kimi-K3", model_info={})
+    assert any("--speculative-num-draft-tokens" in rendered and "at most 4" in rendered for rendered in prompt)

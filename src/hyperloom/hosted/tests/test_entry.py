@@ -22,7 +22,7 @@ from hyperloom_common.tests._bwrap_host import usable_bwrap
 
 from hyperloom_common.tests.shared_accounts import theirs
 from hyperloom.common import agent_isolation, confinement
-from hyperloom.common.agent_isolation import NO_LAYER_BWRAP, RAY_ACTOR_PATH, IsolationRefused
+from hyperloom.common.agent_isolation import HOST_LAYER_ENV, NO_LAYER_BWRAP, RAY_ACTOR_PATH, IsolationRefused
 from hyperloom.common.env_safety import RunAs
 from hyperloom.hosted import entry, host_info
 from hyperloom.hosted.host_info import Var
@@ -91,7 +91,7 @@ def run(tmp_path, monkeypatch, isolation):
         Var.SANDBOX_TEMPLATES: json.dumps({"runner": {"1": "r1"}}),
         Var.E2B_API_URL: "https://api.sandbox.example.test",
         Var.MCP_PORT: str(_free_port()),  # a fixed port collides with whatever else listens on this host
-        entry.HOST_LAYER_ENV: str(tmp_path / "layer"),
+        HOST_LAYER_ENV: str(tmp_path / "layer"),
         "USER_DATA_PATH": str(work),
         "ANTHROPIC_API_KEY": "gateway-key",
         "ANTHROPIC_BASE_URL": "https://gateway.example.test",
@@ -774,9 +774,9 @@ def test_a_run_whose_layer_names_no_bubblewrap_ends_finally_without_probing_one(
 ):
     """No bubblewrap on PATH stands in for the layer's: the framework image may carry its own, maybe setuid."""
     if layer is None:
-        monkeypatch.delenv(entry.HOST_LAYER_ENV)
+        monkeypatch.delenv(HOST_LAYER_ENV)
     else:
-        monkeypatch.setenv(entry.HOST_LAYER_ENV, layer)
+        monkeypatch.setenv(HOST_LAYER_ENV, layer)
     fake = FakeOptimize(monkeypatch)
     assert entry.main(["run"]) == entry.RETURNCODE_REFUSED
     written = _exit(run)
@@ -786,7 +786,7 @@ def test_a_run_whose_layer_names_no_bubblewrap_ends_finally_without_probing_one(
 
 
 def test_a_layer_named_with_whitespace_around_it_is_probed_at_the_path_inside_it(run, monkeypatch, isolation):
-    monkeypatch.setenv(entry.HOST_LAYER_ENV, f"  {run.layer}\t\n")
+    monkeypatch.setenv(HOST_LAYER_ENV, f"  {run.layer}\t\n")
     fake = FakeOptimize(monkeypatch)
     assert entry.main(["run"]) == 0 and len(fake.calls) == 1
     assert isolation.asked == [str(run.layer / "bin" / "bwrap")]

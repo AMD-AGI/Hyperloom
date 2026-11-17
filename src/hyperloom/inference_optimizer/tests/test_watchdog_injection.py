@@ -23,9 +23,8 @@ from hyperloom.orchestrator.actions.executors._workload_envs import (
 
 @pytest.fixture(autouse=True)
 def _hermetic_env(monkeypatch):
-    """Clear the watchdog env knob and disable the TP clamp so the rendered YAML is hermetic."""
+    """Clear the watchdog env knob so the rendered YAML is hermetic."""
     monkeypatch.delenv("SGLANG_WATCHDOG_TIMEOUT", raising=False)
-    monkeypatch.setenv("INFERENCE_OPTIMIZER_DISABLE_TP_CLAMP", "1")
     for key in (
         "CONC",
         "ISL",

@@ -14,6 +14,7 @@ import pytest
 from hyperloom_kb import Experience, RemoteExperienceKB
 from hyperloom_kb.collect import CollectReport, collect, load_mapping
 
+from hyperloom.common.perf_metric import TOTAL_TOKEN_THROUGHPUT
 from hyperloom.contracts.recipe import (
     ComponentChange,
     ConfigDelta,
@@ -41,9 +42,12 @@ from hyperloom_multibranch.contracts.blackboard.records import (
 )
 from hyperloom_multibranch.contracts.blackboard.vocab import Conclusion, LearningKind
 from hyperloom_multibranch.blackboard.knowledge.experience import (
+    AGENTX_INTERACTIVITY_OBJECTIVE,
+    AGENTX_TOTAL_OBJECTIVE,
     EXPORT_FORMAT,
     MAPPING_PATH,
     MULTIBRANCH_MAPPING_PATH,
+    THROUGHPUT_OBJECTIVE,
     candidate_row,
     change_document,
     export_document,
@@ -52,6 +56,7 @@ from hyperloom_multibranch.blackboard.knowledge.experience import (
 from hyperloom_multibranch.blackboard.knowledge.tests.kb_service import experience_service
 from hyperloom_multibranch.blackboard.tests.factories import profile, result
 from hyperloom_multibranch.blackboard.tests.sessions import METRIC
+from hyperloom_multibranch.rulegate.agentx import CHECKPOINT_TRAILED
 
 NO_REASONING = "decision reasoning is missing or non-specific"
 
@@ -279,6 +284,35 @@ def test_an_agentx_session_records_every_change_on_interactivity_in_the_same_rep
     assert [_change_group(own[unit]) for unit in ("r1", "r2")] == [_change_group(shared[unit]) for unit in ("r1", "r2")]
 
 
+def _objective(snapshot: BlackboardSnapshot, metric: str) -> object:
+    metadata = export_document(snapshot, metric)["metadata"]
+    assert isinstance(metadata, dict)
+    return metadata["objective"]
+
+
+def test_an_agentx_session_graded_on_total_throughput_records_every_change_on_that_objective(
+    snapshot: BlackboardSnapshot,
+) -> None:
+    agentx = dataclasses.replace(snapshot, profile=profile(isl=None, osl=None))
+    # The scripted session measures METRIC only, so its rows carry values under that metric alone.
+    document = export_document(agentx, METRIC)
+    metadata = document["metadata"]
+    assert isinstance(metadata, dict)
+    metadata["objective"] = _objective(agentx, TOTAL_TOKEN_THROUGHPUT)
+
+    own = {
+        item.unit_id: item.experience for item in collect(MULTIBRANCH_MAPPING_PATH, document, dry_run=True).collected
+    }
+
+    assert [
+        _objective(agentx, METRIC),
+        _objective(agentx, TOTAL_TOKEN_THROUGHPUT),
+        _objective(snapshot, TOTAL_TOKEN_THROUGHPUT),
+    ] == [AGENTX_INTERACTIVITY_OBJECTIVE, AGENTX_TOTAL_OBJECTIVE, THROUGHPUT_OBJECTIVE]
+    assert sorted(own) == ["r1", "r2"]
+    assert {experience.objective for experience in own.values()} == {"e2e_total_throughput@v1"}
+
+
 def test_a_judgement_waiting_on_its_split_or_its_diagnosis_waits_to_be_published(snapshot: BlackboardSnapshot) -> None:
     (record,) = [record for record in snapshot.records if record.request_id == "r1"]
     pending = [
@@ -298,6 +332,27 @@ def test_a_test_whose_measurement_failed_or_did_not_re_verify_is_never_published
     assert snapshot.profile is not None
     assert candidate_row(unmeasured, snapshot, snapshot.profile, METRIC) is None
     assert candidate_row(unverified, snapshot, snapshot.profile, METRIC) is None
+
+
+def test_a_test_the_agentx_checkpoint_stopped_is_a_revert_without_a_value_that_is_not_published(
+    snapshot: BlackboardSnapshot,
+) -> None:
+    (record,) = [record for record in snapshot.records if record.request_id == "r2"]
+    assert record.judgement is not None
+    stopped = dataclasses.replace(
+        record,
+        result=result("r2", validity=Validity.CANDIDATE_FAILED),
+        judgement=dataclasses.replace(record.judgement, refused_by=(CHECKPOINT_TRAILED,)),
+    )
+    records = tuple(stopped if item.request_id == "r2" else item for item in snapshot.records)
+    agentx = dataclasses.replace(snapshot, profile=profile(isl=None, osl=None), records=records)
+
+    row = _rows(agentx)["r2"]
+
+    assert (row["decision"], row["outcome_value"], row["interval"]) == ("revert", None, None)
+    assert {item.unit_id: item.reason for item in _own(agentx).skipped}["r2"] == (
+        "measured candidate has no valid outcome value"
+    )
 
 
 @pytest.mark.parametrize(

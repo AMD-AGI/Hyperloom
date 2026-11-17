@@ -129,7 +129,6 @@ class TestTheSweepSwitchFallsBackToTheWorkload:
 
         monkeypatch.setattr(cb, "_load_model_config_tags", lambda _p: {})
         monkeypatch.setattr(cb, "_load_model_arch", lambda *_a, **_k: {})
-        monkeypatch.setattr(cb, "_resolve_reference_recipe", lambda _args, _framework: ("", {}, "", {}))
         monkeypatch.setattr(policy, "detect_gpu_count", lambda: 8)
         monkeypatch.setattr(policy, "research_lane_ceiling", lambda: 16)
 
@@ -148,7 +147,7 @@ class TestTheSweepSwitchFallsBackToTheWorkload:
             args,
             session_id="s",
             framework="sglang",
-            platform=cb.LaunchPlatform(compute_partition={}, gpu_power_settings={}),
+            settled=cb.SettledLaunch(compute_partition={}, gpu_power_settings={}, base=None),
         )
 
     def test_synthetic_sweeps_by_default(self, native_benchmark, tmp_path, monkeypatch):

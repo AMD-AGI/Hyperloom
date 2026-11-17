@@ -18,7 +18,7 @@ from types import SimpleNamespace
 
 import pytest
 
-from hyperloom.orchestrator.actions.executors.bypass_scriptable import (
+from hyperloom.orchestrator.actions.executors.explore_prefilter.declared_levers import (
     DECLARED_LEVERS_FILENAME,
     DeclaredLeversError,
     declared_lever_payload,

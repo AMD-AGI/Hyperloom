@@ -6,8 +6,8 @@
 #
 # Scope: write local-setup.env.sh, the env file every later step sources
 # (REPO_ROOT / USER_DATA_PATH / HYPERLOOM_RUNTIME_DIR / HYPERLOOM_DEPS_ROOT /
-# HYPERLOOM_CACHE_DIR). Open-source deps (Magpie / InferenceX / TraceLens) are
-# owned by install.sh.
+# HYPERLOOM_CACHE_DIR). Open-source deps (the InferenceSuite tools / TraceLens /
+# GEAK) are owned by install.sh.
 #
 # It used to also clone the private KernelForge repo and export $FORGE_PATH,
 # because the forge kernel backend lived in that separate checkout. forge now
@@ -53,7 +53,7 @@ usage() {
 Usage: src/hyperloom/inference_optimizer/assets/local_setup.sh [options]
 
 Writes the local env file every later step sources. Open-source deps
-(Magpie / InferenceX / TraceLens) are installed by install.sh, not here; the
+(the InferenceSuite tools / TraceLens / GEAK) are installed by install.sh, not here; the
 forge kernel backend ships in this distribution and needs no checkout.
 
 Options:

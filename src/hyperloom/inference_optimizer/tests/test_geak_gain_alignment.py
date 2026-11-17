@@ -31,54 +31,31 @@ from ._geak_helpers import resume_pending, set_resume_pending
 # ── #3: same-harness (2b) revalidation decision ──────────────────────────────
 
 
-def test_revalidation_validated_when_identity_and_engagement_hold() -> None:
+#: What the report mapper stamps on every AgentX round it accepts as evidence.
+_AGENTX_EVIDENCE = {"valid_measurement": True, "diagnostic_only": False, "workload_identity": "agentx-workload"}
+
+
+@pytest.mark.parametrize(
+    ("measured", "baseline", "got_hash", "expected_hash", "current_best", "decision"),
+    [
+        pytest.param(115.0, 100.0, "abc", "abc", None, "validated", id="identity-and-engagement-hold"),
+        pytest.param(115.0, 100.0, "WRONG", "abc", None, "fallback", id="config-identity-mismatch"),
+        pytest.param(101.0, 100.0, "abc", "abc", None, "fallback", id="win-collapsed-to-baseline"),
+        pytest.param(115.0, 100.0, "", "", None, "validated", id="no-expected-hash-skips-identity"),
+        pytest.param(9623.0, 7380.7, "abc", "abc", 10067.9, "no_promote", id="not-beating-current-best"),
+        pytest.param(10500.0, 7380.7, "abc", "abc", 10067.9, "validated", id="beating-current-best"),
+    ],
+)
+def test_revalidation_decision(measured, baseline, got_hash, expected_hash, current_best, decision) -> None:
     assert (
         _geak_revalidation_decision(
-            measured=115.0,
-            baseline=100.0,
-            got_hash="abc",
-            expected_hash="abc",
+            measured=measured,
+            baseline=baseline,
+            got_hash=got_hash,
+            expected_hash=expected_hash,
+            current_best=current_best,
         )
-        == "validated"
-    )
-
-
-def test_revalidation_fallback_on_config_identity_mismatch() -> None:
-    # Engaged (15% > 2%) but the ran config's fingerprint drifted → fall back.
-    assert (
-        _geak_revalidation_decision(
-            measured=115.0,
-            baseline=100.0,
-            got_hash="WRONG",
-            expected_hash="abc",
-        )
-        == "fallback"
-    )
-
-
-def test_revalidation_fallback_when_not_engaged() -> None:
-    # Identity matches but the win collapsed back to (near-)baseline → fall back.
-    assert (
-        _geak_revalidation_decision(
-            measured=101.0,
-            baseline=100.0,
-            got_hash="abc",
-            expected_hash="abc",
-        )
-        == "fallback"
-    )
-
-
-def test_revalidation_identity_skipped_when_no_expected_hash() -> None:
-    # No pinned expected hash → identity check is skipped; engagement decides.
-    assert (
-        _geak_revalidation_decision(
-            measured=115.0,
-            baseline=100.0,
-            got_hash="",
-            expected_hash="",
-        )
-        == "validated"
+        == decision
     )
 
 
@@ -105,38 +82,6 @@ def test_normalize_geak_overlay_dir_keeps_real_overlay(tmp_path: Path) -> None:
     overlay = tmp_path / "final" / "overlay"
     overlay.mkdir(parents=True)
     assert _normalize_geak_overlay_dir(str(overlay)) == str(overlay)
-
-
-def test_normalize_geak_overlay_dir_empty_passthrough() -> None:
-    assert _normalize_geak_overlay_dir("") == ""
-
-
-def test_revalidation_no_promote_when_not_beating_current_best() -> None:
-    # Engaged over baseline + identity matches, but does not beat current_best.
-    assert (
-        _geak_revalidation_decision(
-            measured=9623.0,
-            baseline=7380.7,
-            got_hash="abc",
-            expected_hash="abc",
-            current_best=10067.9,
-        )
-        == "no_promote"
-    )
-
-
-def test_revalidation_validated_when_beating_current_best() -> None:
-    # Beats current_best (and baseline + identity) -> a real KEEP.
-    assert (
-        _geak_revalidation_decision(
-            measured=10500.0,
-            baseline=7380.7,
-            got_hash="abc",
-            expected_hash="abc",
-            current_best=10067.9,
-        )
-        == "validated"
-    )
 
 
 # ── Shared Coordinator fixture ───────────────────────────────────────────────
@@ -247,6 +192,7 @@ def _agentx_rebench_coord(tmp_path: Path) -> Coordinator:
         "e2e_norm_intvty_p50": 5.0,
         "duration_seconds": 900.0,
         "request_error_rate": 0.0,
+        **_AGENTX_EVIDENCE,
     }
     state.current_best.update(
         {
@@ -256,6 +202,7 @@ def _agentx_rebench_coord(tmp_path: Path) -> Coordinator:
             "e2e_norm_intvty_p50": 6.0,
             "duration_seconds": 900.0,
             "request_error_rate": 0.0,
+            **_AGENTX_EVIDENCE,
         }
     )
     state.optimization_stack = [{"action": "explore", "variant_name": "prior-winner", "tput": 150.0}]
@@ -277,6 +224,7 @@ def _agentx_rebench_coord(tmp_path: Path) -> Coordinator:
         "e2e_norm_intvty_p50": 99.0,
         "duration_seconds": 900.0,
         "request_error_rate": 0.0,
+        **_AGENTX_EVIDENCE,
     }
     return coord
 
@@ -382,6 +330,7 @@ async def test_agentx_2b_uses_current_canonical_measurement(
         "e2e_norm_intvty_p50": 8.0,
         "duration_seconds": 900.0,
         "request_error_rate": 0.0,
+        **_AGENTX_EVIDENCE,
     }
     if case == "missing_axes":
         measurement.pop("e2e_norm_intvty_p90")
@@ -405,13 +354,15 @@ async def test_agentx_2b_uses_current_canonical_measurement(
             "e2e_norm_intvty_p50": 99.0,
             "duration_seconds": 900.0,
             "request_error_rate": 0.0,
+            **_AGENTX_EVIDENCE,
         }
     result = {"status": "succeeded", "output_throughput": measured, "best_variant": variant, "winners": []}
     await coord.writeback.promote_to_shared_state("explore", result, task=_revalidate_task(expected_hash="accepted"))
 
     assert not state.geak_pending
     attempt = state.explore_attempts[-1]
-    if case == "positive":
+    # Output throughput guards nothing, so ``output_drop`` promotes like ``positive``.
+    if case in {"positive", "output_drop"}:
         assert attempt["decision"] == "promoted"
         assert state.current_best["tput"] == measured
         assert state.current_best["input_throughput"] == 800.0 - measured
@@ -429,8 +380,7 @@ async def test_agentx_2b_uses_current_canonical_measurement(
         assert state.cumulative_gain_validated_stack_len == 1
         assert state.cumulative_gain_validated_ts == "2026-09-08T00:00:00Z"
         assert resume_pending(state) is True
-        # ``output_drop`` joins them: the guard reads output throughput, which this case regresses past the band.
-        if case in {"lift_refused", "missing_axes", "output_drop"}:
+        if case in {"lift_refused", "missing_axes"}:
             assert attempt["decision"] == "no_promote"
             assert attempt["status"] == "no_promote"
             assert state.geak_result["revalidation_status"] == "no_promote"

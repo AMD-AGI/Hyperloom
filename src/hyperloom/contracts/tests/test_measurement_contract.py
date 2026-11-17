@@ -7,7 +7,15 @@ import json
 from dataclasses import replace
 
 import pytest
+from inference_suite.contracts import FIXED_METRIC_KEYS
 
+from hyperloom.common.perf_metric import (
+    GRADED_DURATION,
+    GRADED_ERROR_RATE,
+    GRADED_INTVTY,
+    GRADED_INTVTY_P50,
+    GRADED_OUTPUT,
+)
 from hyperloom.contracts.measurement import (
     AccuracyValue,
     AttachmentRef,
@@ -266,15 +274,12 @@ def test_test_classes_are_not_collected_by_pytest() -> None:
 
 
 def test_request_answers_to_the_blackboards_names() -> None:
-    request = _request(accuracy=True)
+    request = _request()
     assert request.branch == "b1"
-    assert request.accuracy_rounds is True
     assert request.action_fingerprint == DELTA.fingerprint()
 
 
 def test_enums_keep_the_blackboards_member_names() -> None:
-    assert Validity.SUCCESS is Validity.SUCCEEDED
-    assert Validity.CANDIDATE_FAILURE is Validity.CANDIDATE_FAILED
     assert TestKind.SWEEP.value == "sweep"
     assert Purpose.EXPLORE == "explore"
 
@@ -283,8 +288,7 @@ def test_result_answers_to_the_blackboards_names() -> None:
     result = _result(validity=Validity.CANDIDATE_FAILED, failure_class=FailureClass.CANDIDATE)
     assert result.failure is FailureClass.CANDIDATE
     assert result.sandbox.node == "n1"
-    facts = _sandbox(power_cap_w=750.0)
-    assert facts.power_cap_watts == 750.0
+    facts = _sandbox()
     assert Attempt(sandbox=facts, failure_class=FailureClass.INFRA).failure is FailureClass.INFRA
     assert Attempt(sandbox=facts).node == "n1"
     assert Attempt().node is None
@@ -764,3 +768,10 @@ def test_a_reused_build_is_charged_no_seconds_and_no_build_is_charged_negative_s
         BuildCharge.from_document({"key": "k", "component": "c", "build_seconds": 0.0, "payment": "free"})
     with pytest.raises(MeasurementError, match="builds must be a tuple of BuildCharge"):
         _result(builds=[PAID])
+
+
+def test_round_metrics_are_named_by_the_report_fixed_key_table() -> None:
+    graded = {GRADED_OUTPUT, GRADED_INTVTY, GRADED_INTVTY_P50, GRADED_DURATION, GRADED_ERROR_RATE}
+    assert graded <= set(FIXED_METRIC_KEYS)
+    metrics = dict.fromkeys(FIXED_METRIC_KEYS, 1.0)
+    assert _roundtrip(RoundValue("measure", 8, metrics)).metrics == metrics

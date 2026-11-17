@@ -66,28 +66,27 @@ workspace, records the selected run scenario, and stops before launching an
 optimization. Run `/hyperloom-setup` once per workspace; demo skills reuse the
 values already written to `.env`.
 
-It asks for these values with a fixed option order:
+Setup first asks which backend to configure: `Claude (Anthropic)`,
+`Codex (OpenAI)`, or `Both`. It collects the selected backend's endpoint,
+credentials and model; Codex configuration does not require an Anthropic key.
 
-1. Anthropic URL:
-   - `Use default (https://api.anthropic.com)`
-   - `Use AMD gateway (https://llm-api.amd.com/anthropic)`
-   - `Custom`
-2. Model:
-   - `Use default (claude-opus-5-5)`
-   - `Custom`
-3. Secrets:
-   - Setup writes placeholders in `.env`.
-   - Edit secrets directly in `.env`; never paste API keys into chat.
-   - If `.env` already exists, setup preserves unrelated keys but updates the
-     Hyperloom setup keys selected in this run.
-4. `USER_DATA_PATH`:
-   - Default: `<workspace>/session`
-   - Custom path
-5. Run mode, recorded in `.env` as `HYPERLOOM_RUN_MODE`:
-   - `docker`
-   - `baremetal`
+For Claude, choose `Anthropic API key` or `Claude subscription (Pro/Max)`.
+The subscription path uses `CLAUDE_CODE_OAUTH_TOKEN` from `claude setup-token`
+against the official Anthropic endpoint. An existing `ANTHROPIC_API_KEY` or
+`ANTHROPIC_AUTH_TOKEN` takes precedence over that token; review the selected
+authentication method before launching.
 
-```note
+Setup writes placeholders for missing secrets and preserves existing
+non-placeholder credentials. Fill in secrets directly in `.env`, never in chat.
+It also asks for `USER_DATA_PATH` (recommended: `<workspace>/session`), reuses a
+valid run mode from the shell or workspace `.env`, or asks you to choose
+`docker` or `baremetal`. It records the Docker target host when applicable.
+Demo skills reuse these settings.
+
+See [Authentication and credentials](../reference/authentication.md) for
+credential details.
+
+```{note}
 If you are performing the Hyperloom setup inside of a Docker container, select
 the "baremetal" option as the run mode during setup.
 ```
@@ -205,18 +204,15 @@ runs inside the container.
 
 ### Environment written by setup
 
-LLM defaults:
+Setup writes the selected provider configuration to `.env`. Claude API-key
+authentication uses `ANTHROPIC_BASE_URL`, `ANTHROPIC_API_KEY` and `CLAUDE_MODEL`;
+Claude subscription authentication uses `CLAUDE_CODE_OAUTH_TOKEN` and the
+official Anthropic endpoint, with the model selected through `CLAUDE_MODEL`.
+Codex uses `OPENAI_BASE_URL`, `OPENAI_API_KEY` and `CODEX_MODEL`. Selecting
+`Both` configures each side with its own endpoint and credentials.
 
-| Mode | Required secret | Default base URL | Default model |
-|------|-----------------|------------------|---------------|
-| Anthropic | `ANTHROPIC_API_KEY` | `https://api.anthropic.com` | `CLAUDE_MODEL=claude-opus-5-5` |
-
-Setup creates or updates `.env` in the current workspace and writes the resolved
-values there. Setup asks for the Anthropic side only; to run on Codex, add
-`OPENAI_BASE_URL`, `OPENAI_API_KEY` and, optionally, `CODEX_MODEL` to `.env`
-yourself. With only the OpenAI side configured, orchestration, TraceLens and
-Forge run on Codex, while GEAK needs the Anthropic side. See
-[Authentication](../reference/authentication.md) for every provider layout.
+See [Authentication and credentials](../reference/authentication.md) for
+credential details.
 
 Common keys:
 
@@ -236,17 +232,21 @@ An exported value still wins. `rocm700` additionally requires Python 3.10 and
 setup fails outright on any other interpreter, because the source install would
 pull a mismatched ROCm 7.2 Triton. Any other ROCm stack derives nothing and takes
 the source install, which is a fallback rather than a validated path.
-`MAGPIE_PATH`, `INFERENCEX_PATH`, and the kernel-agent paths `TRACELENS_ROOT`,
-`GEAK_ROOT` and `GEAK_E2E_RUNNER` follow their pins and reach the runtime
-through the kernel-agent env file, not `.env`. To override a TraceLens or GEAK
-checkout persistently, write its path into `.env` yourself; the installer
-leaves a path outside its cache as written. A `TRACELENS_ROOT` or `GEAK_ROOT`
-override that does not exist is reported and replaced by the pinned checkout,
-and a `MAGPIE_PATH` that holds no Magpie package is reported and resolved from
-the installed package instead. Export `MAGPIE_PATH` or `INFERENCEX_PATH` in the
-shell to override those.
+The kernel-agent paths `TRACELENS_ROOT`, `GEAK_ROOT` and
+`GEAK_E2E_RUNNER` follow their pins and reach the runtime through the
+kernel-agent env file, not `.env`. To override a TraceLens or GEAK checkout
+persistently, write its path into `.env` yourself; the installer leaves a path
+outside its cache as written. A `TRACELENS_ROOT` or `GEAK_ROOT` override that
+does not exist is reported and replaced by the pinned checkout. Nothing clones
+InferenceX into `INFERENCEX_PATH`; an InferenceX checkout of your own exported
+there in the shell reaches the runtime the same way.
+The installer also stages the InferenceX client at the commit
+`src/inference_suite/pins.py` pins, the GSM8K task and the AgentX harness into
+`INFERENCE_SUITE_TOOL_CACHE`, which every benchmark round reads without fetching
+anything; see [Staging and pins](../reference/inference-suite.md#staging-and-pins).
 After a code update that moves a pin, `install.sh --check-only` exits non-zero
-and names each stale key (`TRACELENS_ROOT`, `GEAK_ROOT`, `MAGPIE_REF`), and the
+and names each stale key (`TRACELENS_ROOT`, `GEAK_ROOT`,
+`INFERENCE_SUITE_TOOL_CACHE`), and the
 optimizer's preflight refuses to start on a `TraceLens@<sha>` checkout that is
 not the pinned one; rerun `install.sh` to update them.
 

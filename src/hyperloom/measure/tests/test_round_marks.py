@@ -1,9 +1,11 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""The phases of a round, read off the marks its Magpie runs leave beside their server logs.
+"""The phases of a round, read off the marks its runs leave in their run_dirs beside their server logs.
 
-The marks are written the way the launcher writes them (``server_ready_at``, ``kv_metrics.json``); the cases are the
+The run_dirs are laid out the way ``run_grid`` and an inference_suite round lay them out (the same helpers make them) and are
+found the way the test runner finds them (``grid_run_dirs``); the marks are written the way an inference_suite round
+writes them (``server_ready_at``, ``kv_metrics.json``); the cases are the
 rounds a test is made of: a graded test's warmup round and its measured round, a round with a warmup run in front of its
 measured one, an AgentX round, a round whose server never got ready.
 """
@@ -12,11 +14,14 @@ from __future__ import annotations
 
 import json
 import os
+import urllib.error
 from pathlib import Path
 
 import pytest
+import yaml
 
 from hyperloom.contracts.measurement import PhaseTiming
+from hyperloom.measure import round_marks
 from hyperloom.measure.phases import PhaseRecorder
 from hyperloom.measure.round_marks import (
     ROLE_BOOT,
@@ -29,18 +34,34 @@ from hyperloom.measure.round_marks import (
     RunMarks,
     boot_parts,
     read_runs,
+    profile_stall,
     round_boundaries,
-    server_log_of,
+    stalled_in_profile_window,
 )
+from hyperloom.orchestrator.actions.executors import grid_run_dirs, variant_slot
+from hyperloom.orchestrator.actions.executors._grid_base import MN_WARMUP_DIR, WARMUP_ROUND_DIR
+from hyperloom.orchestrator.actions.executors._suite.rounds import _next_run_dir
+from inference_suite.contracts import FailedStep, ReadyStamp, RunLayout
+from inference_suite.profile.inject import START_PROFILE_PATH, STOP_PROFILE_PATH
+from inference_suite.runtime.phases import Phase
+from inference_suite.tests import test_config_contract
 
 T0 = 1_000.0
 WINDOW = (T0, T0 + 300.0)
 
 
-def _run_dir(root: Path, round_name: str, *, warmup: bool = False) -> Path:
-    directory = root / round_name / "warmup_round" if warmup else root / round_name
-    directory.mkdir(parents=True, exist_ok=True)
-    return directory
+def _run_dir(root: Path, variant: str, *, below: str | None = None) -> Path:
+    """The next run_dir a round of the grid's first variant, named ``variant``, runs in, as ``run_grid`` and the round
+    make it: in the variant's slot, or in the slot's warmup directory ``below`` names."""
+    slot = variant_slot(root, 0, variant)
+    run_dir = _next_run_dir(slot if below is None else slot / below)
+    run_dir.mkdir(parents=True)
+    return run_dir
+
+
+def _read(root: Path, window: tuple[float, float] = WINDOW) -> list[RunMarks]:
+    """The runs of the round in ``window``, found below the test's output directory the way the test runner finds them."""
+    return read_runs(grid_run_dirs(root), window)
 
 
 def _write_run(
@@ -52,16 +73,17 @@ def _write_run(
     ended: float | None = None,
     log: str | None = None,
 ) -> None:
-    """What a Magpie run leaves: the ready stamp, the watchdog's phase marks and, when it ended, the file's time."""
-    (directory / "server_ready_at").write_text(f"{ready:.3f} {boot:.3f}\n", encoding="utf-8")
+    """What a run leaves: the ready stamp, its phase marks and, when it ended, the file's time."""
+    layout = RunLayout(directory)
+    layout.write_ready_stamp(ReadyStamp(ready, boot))
     if marks is not None or ended is not None:
         phase_marks = [{"phase": phase, "mono": 1.0, "ts": at} for phase, at in (marks or {}).items()]
-        kv = directory / "kv_metrics.json"
+        kv = layout.kv_metrics
         kv.write_text(json.dumps({"phase_marks": phase_marks, "samples": []}), encoding="utf-8")
         if ended is not None:
             os.utime(kv, (ended, ended))
     if log is not None:
-        (directory / "server.log").write_text(log, encoding="utf-8")
+        layout.server_log.write_text(log, encoding="utf-8")
 
 
 def _phases(boundaries: list[Boundary], window: tuple[float, float] = WINDOW) -> list[tuple[str, float]]:
@@ -76,11 +98,11 @@ def _phases(boundaries: list[Boundary], window: tuple[float, float] = WINDOW) ->
 
 def _shape(role: str = ROLE_MEASURE, **overrides: object) -> RoundShape:
     fields: dict[str, object] = {"agentx": False, "reuses_server": False, "failed": False}
-    return RoundShape(role, **{**fields, **overrides})  # type: ignore[arg-type]
+    return RoundShape(role, **{**fields, **overrides})
 
 
 def _run(**fields: object) -> RunMarks:
-    return RunMarks(Path("/nowhere"), **{"ready": T0 + 90.0, **fields})  # type: ignore[arg-type]
+    return RunMarks(Path("/nowhere"), **{"ready": T0 + 90.0, **fields})
 
 
 # -- reading the marks --------------------------------------------------------------------------------------------
@@ -90,15 +112,15 @@ def test_the_runs_of_a_round_are_read_in_the_order_they_were_ready_from_their_st
     tmp_path: Path,
 ) -> None:
     _write_run(
-        _run_dir(tmp_path, "variant_00_test", warmup=True),
+        _run_dir(tmp_path, "test", below=WARMUP_ROUND_DIR),
         T0 + 90.0,
         82.0,
         marks={"eval": T0 + 120.0},
         ended=T0 + 150.0,
     )
-    _write_run(_run_dir(tmp_path, "variant_00_test"), T0 + 160.0, 0.0, marks={"measured": T0 + 160.0}, ended=T0 + 200.0)
+    _write_run(_run_dir(tmp_path, "test"), T0 + 160.0, 0.0, marks={"measured": T0 + 160.0}, ended=T0 + 200.0)
 
-    warmup, measured = read_runs(tmp_path, WINDOW)
+    warmup, measured = _read(tmp_path)
 
     assert (warmup.ready, warmup.boot_seconds, warmup.eval_at, warmup.ended) == (
         T0 + 90.0,
@@ -112,36 +134,74 @@ def test_the_runs_of_a_round_are_read_in_the_order_they_were_ready_from_their_st
         None,
         T0 + 200.0,
     )
-    assert warmup.directory == tmp_path / "variant_00_test" / "warmup_round"
+    assert warmup.directory == tmp_path / "variant_00_test" / "warmup_round" / "suite_run_0"
+    assert measured.directory == tmp_path / "variant_00_test" / "suite_run_0"
+
+
+def test_a_round_on_disk_as_run_grid_leaves_it_is_split_into_its_phases_not_left_as_one(tmp_path: Path) -> None:
+    _write_run(_run_dir(tmp_path, "test", below=WARMUP_ROUND_DIR), T0 + 90.0, 82.0, ended=T0 + 150.0)
+    _write_run(_run_dir(tmp_path, "test"), T0 + 160.0, 0.0, marks={"eval": T0 + 250.0}, ended=T0 + 280.0)
+
+    phases = _phases(round_boundaries(WINDOW, _read(tmp_path), _shape()))
+
+    assert [name for name, _ in phases] == [
+        "round_setup",
+        "server_boot",
+        "warmup",
+        "round_collect",
+        "measured",
+        "accuracy_eval",
+        "teardown",
+    ]
+
+
+def test_a_run_an_earlier_round_left_in_the_same_slot_is_not_this_rounds(tmp_path: Path) -> None:
+    _write_run(_run_dir(tmp_path, "test"), T0 - 400.0, 80.0, ended=T0 - 200.0)
+    _write_run(_run_dir(tmp_path, "test"), T0 + 5.0, 0.0, ended=T0 + 100.0)
+
+    (run,) = _read(tmp_path)
+
+    assert run.directory == tmp_path / "variant_00_test" / "suite_run_1"
+    assert run.ready == T0 + 5.0
+
+
+def test_a_multi_node_warmup_pass_is_a_run_of_the_round_before_its_measured_one(tmp_path: Path) -> None:
+    _write_run(_run_dir(tmp_path, "test", below=MN_WARMUP_DIR), T0 + 20.0, 0.0, ended=T0 + 80.0)
+    _write_run(_run_dir(tmp_path, "test"), T0 + 90.0, 0.0, ended=T0 + 200.0)
+
+    warmup, measured = _read(tmp_path)
+
+    assert warmup.directory == tmp_path / "variant_00_test" / "mn_warmup" / "suite_run_0"
+    assert measured.ready == T0 + 90.0
 
 
 def test_a_stamp_an_earlier_round_left_in_the_directory_is_not_this_rounds(tmp_path: Path) -> None:
-    _write_run(_run_dir(tmp_path, "variant_00_c128"), T0 - 400.0, 80.0, marks={"eval": T0 - 300.0}, ended=T0 - 200.0)
+    _write_run(_run_dir(tmp_path, "c128"), T0 - 400.0, 80.0, marks={"eval": T0 - 300.0}, ended=T0 - 200.0)
 
-    assert read_runs(tmp_path, WINDOW) == []
+    assert _read(tmp_path) == []
 
 
 def test_a_mark_or_file_time_from_before_the_round_is_not_this_rounds_either(tmp_path: Path) -> None:
-    directory = _run_dir(tmp_path, "variant_00_c128")
+    directory = _run_dir(tmp_path, "c128")
     _write_run(directory, T0 + 5.0, 0.0, marks={"eval": T0 - 50.0, "measured": T0 + 5.0}, ended=T0 - 10.0)
 
-    (run,) = read_runs(tmp_path, WINDOW)
+    (run,) = _read(tmp_path)
 
     assert (run.eval_at, run.client_measured_at, run.ended) == (None, T0 + 5.0, None)
 
 
 def test_a_run_with_no_kv_file_or_a_broken_one_has_a_stamp_and_no_instants(tmp_path: Path) -> None:
-    _write_run(_run_dir(tmp_path, "variant_00_a"), T0 + 5.0, 0.0)
-    broken = _run_dir(tmp_path, "variant_00_b")
+    _write_run(_run_dir(tmp_path, "a"), T0 + 5.0, 0.0)
+    broken = _run_dir(tmp_path, "b")
     _write_run(broken, T0 + 6.0, 0.0)
     (broken / "kv_metrics.json").write_text("{not json", encoding="utf-8")
-    weird = _run_dir(tmp_path, "variant_00_c")
+    weird = _run_dir(tmp_path, "c")
     _write_run(weird, T0 + 7.0, 0.0)
     (weird / "kv_metrics.json").write_text(
         json.dumps({"phase_marks": [None, {"phase": "eval", "ts": "x"}, 3]}), encoding="utf-8"
     )
 
-    runs = read_runs(tmp_path, WINDOW)
+    runs = _read(tmp_path)
 
     assert [(r.eval_at, r.ended) for r in runs] == [(None, None), (None, None), (None, runs[2].ended)]
     assert runs[2].ended is not None, "a readable file that holds no usable mark still says when it was written"
@@ -149,18 +209,18 @@ def test_a_run_with_no_kv_file_or_a_broken_one_has_a_stamp_and_no_instants(tmp_p
 
 @pytest.mark.parametrize("stamp", ["10**400", "1e999", "NaN", "-Infinity", "true"], ids=lambda s: s[:9])
 def test_a_phase_mark_that_is_no_finite_number_a_float_can_hold_is_no_mark(tmp_path: Path, stamp: str) -> None:
-    directory = _run_dir(tmp_path, "variant_00_a")
+    directory = _run_dir(tmp_path, "a")
     _write_run(directory, T0 + 5.0, 0.0)
     text = '{"phase_marks": [{"phase": "eval", "ts": %s}, {"phase": "measured", "ts": %f}]}' % (stamp, T0 + 7.0)
     (directory / "kv_metrics.json").write_text(text.replace("10**400", "1" + "0" * 400), encoding="utf-8")
 
-    (run,) = read_runs(tmp_path, WINDOW)
+    (run,) = _read(tmp_path)
 
     assert (run.eval_at, run.client_measured_at) == (None, T0 + 7.0), "the mark beside it is still read"
 
 
 def test_an_output_directory_that_does_not_exist_holds_no_runs(tmp_path: Path) -> None:
-    assert read_runs(tmp_path / "missing", WINDOW) == []
+    assert _read(tmp_path / "missing") == []
 
 
 # -- the boundaries of each kind of round -------------------------------------------------------------------------
@@ -348,9 +408,9 @@ def test_a_log_that_says_nothing_of_the_boot_or_is_not_there_gives_no_parts(tmp_
 
 
 def test_a_booted_run_is_split_into_what_its_log_accounts_for_in_the_order_an_engine_does_it(tmp_path: Path) -> None:
-    directory = _run_dir(tmp_path, "variant_00_warmup")
+    directory = _run_dir(tmp_path, "warmup")
     _write_run(directory, T0 + 90.0, 80.0, log=VLLM_LOG)
-    (run,) = read_runs(tmp_path, WINDOW)
+    (run,) = _read(tmp_path)
 
     phases = _phases(round_boundaries(WINDOW, [run], _shape(ROLE_WARMUP)))
 
@@ -371,9 +431,9 @@ def test_a_booted_run_is_split_into_what_its_log_accounts_for_in_the_order_an_en
 
 
 def test_parts_that_outrun_the_boot_are_cut_to_it_so_the_boot_is_never_longer_than_it_was(tmp_path: Path) -> None:
-    directory = _run_dir(tmp_path, "variant_00_warmup")
+    directory = _run_dir(tmp_path, "warmup")
     _write_run(directory, T0 + 30.0, 20.0, log=VLLM_LOG)
-    (run,) = read_runs(tmp_path, WINDOW)
+    (run,) = _read(tmp_path)
 
     phases = _phases(round_boundaries(WINDOW, [run], _shape(ROLE_WARMUP)))
 
@@ -384,8 +444,8 @@ def test_parts_that_outrun_the_boot_are_cut_to_it_so_the_boot_is_never_longer_th
 
 
 def test_a_run_whose_log_says_nothing_of_its_boot_is_one_boot_phase(tmp_path: Path) -> None:
-    _write_run(_run_dir(tmp_path, "variant_00_warmup"), T0 + 90.0, 80.0, log="INFO: Application startup complete.\n")
-    (run,) = read_runs(tmp_path, WINDOW)
+    _write_run(_run_dir(tmp_path, "warmup"), T0 + 90.0, 80.0, log="INFO: Application startup complete.\n")
+    (run,) = _read(tmp_path)
 
     names = [name for name, _ in _phases(round_boundaries(WINDOW, [run], _shape(ROLE_WARMUP)))]
 
@@ -410,15 +470,6 @@ The server is fired up and ready to roll!
 """
 
 
-def _magpie_run(root: Path, *, log: str, launch: str = "benchmark_sglang_20000101_000800") -> Path:
-    """A run as Magpie leaves it: the ready stamp in the run's directory, the server log one directory deeper."""
-    directory = _run_dir(root, "variant_00_test", warmup=True)
-    _write_run(directory, T0 + 90.0, 80.0)
-    (directory / launch).mkdir()
-    (directory / launch / "server.log").write_text(log, encoding="utf-8")
-    return directory
-
-
 def test_the_graph_capture_of_the_newer_sglang_wording_is_read_and_the_older_wording_still_is(tmp_path: Path) -> None:
     newer = tmp_path / "newer.log"
     newer.write_text(SGLANG_NEW_LOG, encoding="utf-8")
@@ -440,9 +491,12 @@ def test_a_capture_that_only_began_or_failed_is_not_a_graph_capture_time(tmp_pat
     assert boot_parts(log) == BootParts()
 
 
-def test_a_server_log_one_directory_below_the_runs_is_found_and_splits_the_boot(tmp_path: Path) -> None:
-    _magpie_run(tmp_path, log=SGLANG_NEW_LOG)
-    (run,) = read_runs(tmp_path, WINDOW)
+def test_the_server_log_in_the_run_dir_splits_the_boot_and_one_below_it_is_not_read(tmp_path: Path) -> None:
+    directory = _run_dir(tmp_path, "test", below=WARMUP_ROUND_DIR)
+    _write_run(directory, T0 + 90.0, 80.0, log=SGLANG_NEW_LOG)
+    (directory / "nested").mkdir()
+    (directory / "nested" / "server.log").write_text(VLLM_LOG, encoding="utf-8")
+    (run,) = _read(tmp_path)
 
     phases = _phases(round_boundaries(WINDOW, [run], _shape(ROLE_WARMUP)))
 
@@ -455,15 +509,107 @@ def test_a_server_log_one_directory_below_the_runs_is_found_and_splits_the_boot(
     assert [seconds for _, seconds in phases[2:4]] == [2.0, 11.5]
 
 
-def test_of_several_launches_below_a_run_the_last_by_name_is_read_and_a_log_in_the_directory_itself_comes_first(
-    tmp_path: Path,
-) -> None:
-    directory = _magpie_run(tmp_path, log=SGLANG_LOG, launch="benchmark_sglang_20000101_000000")
-    later = directory / "benchmark_sglang_20000101_000800"
-    later.mkdir()
-    (later / "server.log").write_text(SGLANG_NEW_LOG, encoding="utf-8")
+def test_the_window_marks_read_are_the_ones_the_suite_writes() -> None:
+    """The names are literal here (``measure`` may not import the suite's runtime); the suite's ``Phase`` owns them."""
+    assert (round_marks._PROFILE_OPEN, round_marks._PROFILE_CLOSE, round_marks._CLIENT_FINISHED) == (
+        Phase.PROFILE_OPEN.value,
+        Phase.PROFILE_CLOSE.value,
+        Phase.FINISHED.value,
+    )
 
-    assert boot_parts(server_log_of(directory)).graph_capture == 11.5
-    (directory / "server.log").write_text(VLLM_LOG, encoding="utf-8")
-    assert server_log_of(directory) == directory / "server.log"
-    assert server_log_of(tmp_path / "no_such_run") == tmp_path / "no_such_run" / "server.log"
+
+def test_the_window_request_read_is_the_one_the_suite_sends_and_words() -> None:
+    """The path is literal here (``measure`` may not import the suite's profile package), and so is how urllib words a
+    request the server answered with an error status."""
+    refused = urllib.error.HTTPError(STOP_PROFILE_PATH, 400, "Bad Request", None, None)
+
+    assert round_marks._STOP_PROFILE == STOP_PROFILE_PATH
+    assert str(refused).startswith(round_marks._ANSWERED_WITH_STATUS)
+
+
+def _agentx_round(directory: Path, capture: str) -> Path:
+    """An AgentX round whose window opened at 400 and closed at 700, ended 1302 by a 600 s silence, with ``capture`` as
+    its ``profile/capture.json``: the marks alone place the silence after the window."""
+    marks = {"measured": 100.0, "profile_open": 400.0, "profile_close": 700.0, "finished": 1302.0}
+    document = {"phase_marks": [{"phase": phase, "ts": at, "mono": at} for phase, at in marks.items()]}
+    (directory / "phase_marks.json").write_text(json.dumps(document), encoding="utf-8")
+    config = test_config_contract._config()
+    (directory / "config.yaml").write_text(yaml.safe_dump(config.to_document(), sort_keys=False), encoding="utf-8")
+    (directory / "profile").mkdir()
+    (directory / "profile" / "capture.json").write_text(capture, encoding="utf-8")
+    return directory
+
+
+@pytest.mark.parametrize(
+    ("capture", "stalled"),
+    [
+        (json.dumps({"error": "/stop_profile: <urlopen error timed out>"}), True),
+        # The window sends /start_profile whatever the server is doing: unanswered, it places no stall.
+        (json.dumps({"error": f"{START_PROFILE_PATH}: timed out"}), False),
+        (json.dumps({"error": None}), False),
+        (json.dumps({"error": "/stop_profile: HTTP Error 400: Bad Request"}), False),
+        (json.dumps({"error": "something else: timed out"}), False),
+        ("{not json", False),
+        ("[]", False),
+    ],
+    ids=[
+        "stop_unanswered",
+        "start_unanswered_is_not_read",
+        "both_answered",
+        "stop_refused",
+        "not_a_window_request",
+        "capture_unreadable",
+        "capture_off_contract",
+    ],
+)
+def test_a_window_request_the_server_never_answered_places_the_stall_in_the_window(
+    tmp_path: Path, capture: str, stalled: bool
+) -> None:
+    assert stalled_in_profile_window(_agentx_round(tmp_path, capture)) is stalled
+
+
+def _window_round(directory: Path) -> Path:
+    """A round whose server went silent at 411, 11 s into a profile window opened at 400, and was ended 600 s later."""
+    marks = {"profile_open": 400.0, "finished": 1011.0, "profile_close": 1011.0}
+    document = {"phase_marks": [{"phase": phase, "ts": at, "mono": at} for phase, at in marks.items()]}
+    (directory / "phase_marks.json").write_text(json.dumps(document), encoding="utf-8")
+    config = test_config_contract._config()
+    (directory / "config.yaml").write_text(yaml.safe_dump(config.to_document(), sort_keys=False), encoding="utf-8")
+    return directory
+
+
+@pytest.mark.parametrize(
+    ("step", "log", "stall"),
+    [
+        (FailedStep.SERVER_STALLED, "INFO serving\nhandler still waiting\n\n", "handler still waiting"),
+        (FailedStep.SERVER_STALLED, None, ""),
+        (FailedStep.SERVER_DIED, "INFO serving\nhandler still waiting\n", None),
+    ],
+    ids=["stalled_quotes_its_log", "stalled_without_a_log", "died_is_no_stall"],
+)
+def test_a_profile_stall_is_a_stalled_round_in_its_window_and_names_its_server_logs_last_line(
+    tmp_path: Path, step: FailedStep, log: str | None, stall: str | None
+) -> None:
+    directory = _window_round(tmp_path)
+    if log is not None:
+        (directory / "server.log").write_text(log, encoding="utf-8")
+
+    assert profile_stall(directory, step) == stall
+
+
+@pytest.mark.parametrize(
+    "broken",
+    [{"phase_marks.json": "{not json"}, {"config.yaml": "deadlines: ["}, {"config.yaml": "deadlines: {}\n"}],
+    ids=["marks_unreadable", "config_unreadable", "config_off_contract"],
+)
+def test_a_round_whose_marks_or_config_cannot_be_read_is_not_known_to_have_stalled_in_its_window(
+    tmp_path: Path, broken: dict[str, str]
+) -> None:
+    assert stalled_in_profile_window(_window_round(tmp_path)), (
+        "the case is a stall inside the window until a file is broken"
+    )
+
+    for name, text in broken.items():
+        (tmp_path / name).write_text(text, encoding="utf-8")
+
+    assert not stalled_in_profile_window(tmp_path)

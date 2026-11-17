@@ -5,7 +5,7 @@
 
 Needs an image with SGLang installed, a model directory and a git checkout of InferenceX; on any other machine the
 module is skipped, so a pass in a log means a real server ran. Set ``HL_HOSTED_MODEL`` (the model directory) and
-``HL_HOSTED_INFERENCEX`` (a git repository of InferenceX whose HEAD is the commit to measure with); the test uses
+``HL_HOSTED_INFERENCEX`` (a git repository of InferenceX that holds the commit inference_suite pins); the test uses
 card 0.
 """
 
@@ -15,7 +15,6 @@ import hashlib
 import importlib.util
 import json
 import os
-import subprocess
 from pathlib import Path
 
 import pytest
@@ -82,9 +81,6 @@ def _compile_with_marker(blobs: LocalBlobStore, workdir: Path):
 
 
 def test_a_patched_recipe_is_rebuilt_measured_signed_verified_and_archived(tmp_path: Path) -> None:
-    commit = subprocess.run(
-        ["git", "rev-parse", "HEAD"], cwd=INFERENCEX, capture_output=True, text=True, check=True
-    ).stdout.strip()
     template = local_runner_template(
         gpus=1,
         envs={"INFERENCEX_REPO": INFERENCEX, "INFERENCE_OPTIMIZER_BASELINE_SERVER_READY_SEC": SERVER_READY_SEC},
@@ -93,7 +89,7 @@ def test_a_patched_recipe_is_rebuilt_measured_signed_verified_and_archived(tmp_p
         tmp_path,
         templates=[template],
         gpus=1,
-        spec={"inferencex_commit": commit, "benchmark_backend": "bypass", "image_digest": IMAGE, "gpu_type": "MI355X"},
+        spec={"image_digest": IMAGE, "gpu_type": "MI355X"},
         poll_interval_sec=1.0,
         runner_start_timeout_sec=120,
     )

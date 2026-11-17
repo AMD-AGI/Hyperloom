@@ -1,18 +1,18 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""The session's dossier pass: Arbor run once to map the directions the agent branches split.
+"""The session's dossier pass: a component agent run once to map the directions the agent branches split.
 
-With two or more Arbor agents and no map given, the session runs the first Arbor source once as its dossier pass
-(:data:`~hyperloom_multibranch.specialist.arbor_adapter.DOSSIER_PASS`, ``component.stop_at: "map"``), as Arbor's
-``docs/hosts.md`` describes it:
+With two or more component agents and no map given, the session runs the first such source once as its dossier pass
+(:data:`~hyperloom_multibranch.specialist.component_agent.DOSSIER_PASS`, ``component.stop_at: "map"``), which its
+adapter makes ready:
 - **where:** on a worktree at the commit the branches open on, with that commit's launch, on the cards of one lease;
 - **with what:** the root's shares as its ``component.profile``, until its deadline;
 - **what it leaves:** the dossier and its map, then exit 0 with ``mapped``. The map is what the session splits
   (:mod:`~hyperloom_multibranch.scheduling.agent_plans`), and the dossier is copied into each branch's checkout.
 
 In EXPLORE a mapping branch (:mod:`map_session`) holds the pass, and its lease is charged to that branch; a session that
-stops after its map runs it before EXPLORE, held by no branch and charged to the integration branch. It writes nothing to the blackboard. Whatever ends it, its process is killed and its cards are given back. A pass that sets no map says
+stops after its map runs it before EXPLORE, held by no branch and charged to the integration branch. It writes nothing to the blackboard. Whatever ends it, its process and its sandbox are stopped and its cards are given back. A pass that sets no map says
 why (:class:`DossierOutcome`), and the session falls back to the generic map.
 """
 
@@ -43,14 +43,13 @@ from hyperloom_multibranch.specialist.agent_onboarding import (
     make_ready,
     tail,
 )
-from hyperloom_multibranch.specialist.arbor_adapter import (
+from hyperloom_multibranch.specialist.component_agent import (
     DOSSIER_PASS,
     EXIT_REFUSED,
-    MAP_FILE,
     MAPPED,
+    agent_of,
     exit_reason,
     mapped,
-    pass_dossier,
     refused_reasons,
 )
 from hyperloom_multibranch.specialist.runtime import PreflightFailed
@@ -67,14 +66,14 @@ DOSSIER_HOLDER = "dossier"
 #: The pass's card time is the integration branch's.
 DOSSIER_CHARGE = LeaseCharge(LeaseKind.AUTONOMOUS, INTEGRATION_BRANCH)
 POLL_SECONDS = 10.0
-#: How long past its deadline the pass has to write its exit and end of itself before it is killed: Arbor ends a run
+#: How long past its deadline the pass has to write its exit and end of itself before it is killed: the agent ends
 #: by its deadline on its own.
 EXIT_GRACE_SECONDS = 120.0
 
 
 @dataclass(frozen=True)
 class DossierStart:
-    """``source``, the Arbor to run; ``start_commit``, the commit the branches open on; ``deadline``, the clock time the
+    """``source``, the agent to run; ``start_commit``, the commit the branches open on; ``deadline``, the clock time the
     pass ends by; ``shares``, the root's shares for its profile (``None`` without), which came from
     ``shares_source``."""
 
@@ -88,7 +87,7 @@ class DossierStart:
 @dataclass(frozen=True)
 class DossierOutcome:
     """How the pass ended: ``map``, the directions it set, and ``dossier``, the dossier it wrote, each ``None`` without;
-    ``reason``, :data:`~hyperloom_multibranch.specialist.arbor_adapter.MAPPED` when it set its map, else why not."""
+    ``reason``, :data:`~hyperloom_multibranch.specialist.component_agent.MAPPED` when it set its map, else why not."""
 
     map: Path | None
     dossier: Path | None
@@ -101,7 +100,7 @@ DossierPass = Callable[[DossierStart], Awaitable[DossierOutcome]]
 @dataclass(frozen=True)
 class DossierSetup:
     """What the pass runs on: ``spec``, the session's agent spec with the pass's port and client; ``repo`` and
-    ``toolbox``; ``sandbox``, the sandbox of a lease; ``worktree``, the pass's own; and ``agent_dir``, where its Arbor
+    ``toolbox``; ``sandbox``, the sandbox of a lease; ``worktree``, the pass's own; and ``agent_dir``, where its agent
     is fetched. ``holder`` holds its lease, charged as ``charge`` says."""
 
     spec: AgentSpec
@@ -116,8 +115,8 @@ class DossierSetup:
     charge: LeaseCharge = DOSSIER_CHARGE
 
 
-async def _arbor_only(_checkout: Path, _prompt: str) -> str:
-    raise ModelRefused("the dossier pass runs Arbor, which is not onboarded by a model, and this source is not Arbor")
+async def _adapter_only(_checkout: Path, _prompt: str) -> str:
+    raise ModelRefused("the dossier pass runs an agent an installed adapter recognises, and none recognises this one")
 
 
 async def run_dossier_pass(start: DossierStart, setup: DossierSetup) -> DossierOutcome:
@@ -154,10 +153,12 @@ async def run_dossier_pass(start: DossierStart, setup: DossierSetup) -> DossierO
     except (RequestRejected, SandboxUnavailable) as error:
         return DossierOutcome(None, None, f"no cards were leased for it: {error}")
     ready: ReadyAgent | None = None
+    sandbox: AgentSandbox | None = None
     try:
+        sandbox = setup.sandbox(lease)
         onboarding = OnboardingSetup(
-            setup.sandbox(lease),
-            _arbor_only,
+            sandbox,
+            _adapter_only,
             run=DOSSIER_PASS,
             start_seconds=START_SECONDS,
             poll_seconds=POLL_SECONDS,
@@ -170,9 +171,11 @@ async def run_dossier_pass(start: DossierStart, setup: DossierSetup) -> DossierO
         return await _ended(ready, start, setup)
     finally:
         try:
-            # Always: Arbor's top process may have exited with a server it started still on the cards.
+            # Always: the agent's top process may have exited with a server it started still on the cards.
             if ready is not None:
                 await ready.process.kill()
+            if sandbox is not None:
+                await sandbox.stop()
         except SandboxUnavailable as error:
             log.warning("the dossier pass of %s could not be killed: %s", setup.holder, error)
         finally:
@@ -186,11 +189,12 @@ async def _ended(ready: ReadyAgent, start: DossierStart, setup: DossierSetup) ->
     while process.returncode is None and setup.clock() < start.deadline + EXIT_GRACE_SECONDS:
         await setup.sleep(POLL_SECONDS)
     session = checkout / DOSSIER_PASS.session_dir
-    dossier = pass_dossier(checkout, session)
+    agent = agent_of(checkout)
+    dossier = agent.pass_dossier(checkout, session)
     if process.returncode is None:
         return DossierOutcome(None, dossier, "it set no map by its deadline and was stopped")
     if process.returncode == 0 and mapped(session):
-        return DossierOutcome(session / MAP_FILE, dossier, MAPPED)
+        return DossierOutcome(session / agent.map_file, dossier, MAPPED)
     if process.returncode == EXIT_REFUSED:
         why = refused_reasons(checkout / ready.manifest.snapshots_refused) or tail(await process.output())
         return DossierOutcome(None, None, f"it refused its config: {why}")

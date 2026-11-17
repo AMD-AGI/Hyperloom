@@ -7,12 +7,14 @@ from __future__ import annotations
 
 import math
 import os
+import threading
 from pathlib import Path
 
 import pytest
 
+from hyperloom.measure import live_log
 from hyperloom.measure.hosted_live import LiveOutputs, finite_number
-from hyperloom.measure.live_log import LINE_CHARS, _tail, clean_line, last_output
+from hyperloom.measure.live_log import LINE_CHARS, _tail, clean_line, last_output, last_output_below
 
 
 class _Clock:
@@ -138,3 +140,80 @@ def test_a_log_swapped_for_a_link_after_it_was_listed_is_not_opened(tmp_path: Pa
     link.symlink_to(secret)
     assert _tail(link) is None and _tail(tmp_path) is None and _tail(tmp_path / "missing.log") is None
     assert _tail(secret) == "a line the measured program must not be able to show\n"
+
+
+def _log(path: Path, text: str, written: float) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(text)
+    os.utime(path, (written, written))
+
+
+@pytest.mark.parametrize("swapped_for", ["pipe", "link", "file"])
+def test_a_directory_swapped_after_it_was_listed_is_skipped_never_waited_on_nor_followed(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, swapped_for: str
+) -> None:
+    """The measured program may put a pipe, a link or a file where the walk listed a directory, before it opens it:
+    the walk skips it (a pipe opened to read waits for a writer; a link leads to a log anywhere) and still reads the
+    log beside it."""
+    files, elsewhere = tmp_path / "files", tmp_path / "elsewhere"
+    (files / "sub").mkdir(parents=True)
+    _log(files / "server.log", "the line\n", 500.0)
+    _log(elsewhere / "server.log", "a line the measured program must not be able to show\n", 505.0)
+    listed = live_log._listed
+    swapped: list[str] = []
+
+    def swapping(directory: int) -> tuple[list[str], list[str]]:
+        found = listed(directory)
+        if "sub" in found[1] and not swapped:
+            swapped.append(swapped_for)
+            (files / "sub").rmdir()
+            if swapped_for == "pipe":
+                os.mkfifo(files / "sub")
+            elif swapped_for == "link":
+                (files / "sub").symlink_to(elsewhere)
+            else:
+                (files / "sub").write_text("a file\n")
+        return found
+
+    monkeypatch.setattr(live_log, "_listed", swapping)
+    read: dict[str, object] = {}
+    reader = threading.Thread(target=lambda: read.update(output=last_output(files, 510.0)), daemon=True)
+    reader.start()
+    reader.join(10)
+    if reader.is_alive():
+        os.close(os.open(files / "sub", os.O_WRONLY | os.O_NONBLOCK))  # lets the reader go
+        reader.join(10)
+        pytest.fail("the walk waited on a pipe put where a directory was")
+    assert swapped and read == {"output": (10.0, "the line")}
+
+
+def test_the_walk_reads_no_deeper_than_its_limit(tmp_path: Path) -> None:
+    """A tree the measured program made deep costs the reader no descriptor past the limit: a log there is not read."""
+    files = tmp_path / "files"
+    deepest = files.joinpath(*["d"] * live_log._MAX_DEPTH)
+    _log(deepest / "server.log", "at the limit\n", 500.0)
+    _log(deepest / "d" / "server.log", "below the limit\n", 505.0)
+    assert last_output(files, 510.0) == (10.0, "at the limit")
+
+
+def test_a_directory_that_cannot_be_listed_is_no_live_line_where_its_path_is_given(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """:func:`last_output` (the runner's, which reports its progress from it) says nothing rather than raise; the walk
+    by descriptor raises, for its caller to say so."""
+    _log(tmp_path / "sub" / "server.log", "the line\n", 500.0)
+    listed = live_log._listed
+
+    def failing_below_the_top(directory: int) -> tuple[list[str], list[str]]:
+        if os.path.samestat(os.fstat(directory), os.stat(tmp_path / "sub")):
+            raise PermissionError(13, "Permission denied")
+        return listed(directory)
+
+    monkeypatch.setattr(live_log, "_listed", failing_below_the_top)
+    assert last_output(tmp_path, 510.0) is None
+    top = os.open(tmp_path, os.O_RDONLY | os.O_DIRECTORY)
+    try:
+        with pytest.raises(PermissionError):
+            last_output_below(top, 510.0)
+    finally:
+        os.close(top)

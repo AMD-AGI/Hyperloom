@@ -12,18 +12,20 @@ from unittest.mock import ANY
 
 import pytest
 
+from hyperloom.common.agent_isolation import BwrapIsolation
 from hyperloom.contracts.recipe import ComponentPatches, LaunchConfig, Recipe
 from hyperloom.hosted.mcp_server import InvalidParamsError, ToolError
 from hyperloom.measure.compile import PackageBase
 from hyperloom.common.ports import DEV_SANDBOX_PORTS
 from hyperloom.sandbox.socket import SandboxUnavailable
+from hyperloom_common.bwrap import BwrapProbe
 from hyperloom_multibranch.contracts.lifecycle import BranchTask
 from hyperloom_multibranch.contracts.blackboard.vocab import LeaseKind, UsageSource
 from hyperloom_multibranch.contracts.toolbox import BranchLease, LeaseCharge, QueueState, RequestRejected
 from hyperloom_multibranch.specialist.agent_onboarding import CommandResult
 from hyperloom_multibranch.specialist.agent_session import AgentCommand, AgentSession, AgentSetup, BranchPlace
 from hyperloom_multibranch.specialist import dev_sandbox
-from hyperloom_multibranch.specialist.agent_sandbox import FrameworkProtection
+from hyperloom_multibranch.specialist.agent_sandbox import UNCONFINED, FrameworkProtection
 from hyperloom_multibranch.specialist.dev_sandbox import (
     CACHE_DIRS,
     DevLeases,
@@ -36,7 +38,7 @@ from hyperloom_multibranch.specialist.dev_sandbox import (
 )
 from hyperloom_multibranch.specialist.framework_guard import FrameworkGuard, GuardedPackage
 from hyperloom_multibranch.specialist.judging import NOTICE
-from hyperloom_multibranch.specialist.prompts import role_prompt
+from hyperloom_multibranch.specialist.prompts import RoleWorkload, role_prompt
 from hyperloom_multibranch.specialist.runtime import SessionCrashed, SessionStart
 from hyperloom_multibranch.specialist import worktree as worktree_module
 from hyperloom_multibranch.specialist.worktree import SourceBase
@@ -47,7 +49,7 @@ from hyperloom_multibranch.toolbox.hosted_leases import HostedBranchLease
 B1, B2 = "s1", "s2"
 MINUTE = 60.0
 LIMITS = DevLimits(read_poll_s=0.01)
-WORKLOAD = "qwen3-8b on sglang, TP 1, ISL 1024, OSL 1024, concurrency 64"
+WORKLOAD = RoleWorkload("qwen3-8b on sglang, TP 1, ISL 1024, OSL 1024, concurrency 64")
 
 
 class _Clock:
@@ -265,6 +267,29 @@ async def test_a_stopped_branch_leaves_the_line(rig):
     assert "1st in line" in await _refused(built.server.call("dev_sandbox_lease", branch=B3), "cap_reached")
     await built.server.call("dev_sandbox_release")
     await built.server.call("dev_sandbox_lease", branch=B3)
+
+
+async def test_the_branches_waiting_are_those_in_line_until_granted_or_stopped(rig):
+    built = rig.build(cap=1)
+    await built.server.call("dev_sandbox_lease")
+    await _refused(built.server.call("dev_sandbox_lease", branch=B2), "cap_reached")
+    await _refused(built.server.call("dev_sandbox_lease", branch=B3), "cap_reached")
+    assert built.leases.waiting() == {B2, B3}
+    await built.leases.reclaim(B3, "its branch stopped")
+    await built.server.call("dev_sandbox_release")
+    assert built.leases.waiting() == {B2}
+    await built.server.call("dev_sandbox_lease", branch=B2)
+    assert built.leases.waiting() == frozenset()
+
+
+async def test_a_branch_whose_held_slot_lapsed_is_no_longer_waiting(rig):
+    built = rig.build(cap=1)
+    await built.server.call("dev_sandbox_lease")
+    await _refused(built.server.call("dev_sandbox_lease", branch=B2), "cap_reached")
+    await built.server.call("dev_sandbox_release")
+    assert built.leases.waiting() == {B2}
+    rig.clock.now += LIMITS.hold_s + 1
+    assert built.leases.waiting() == frozenset()
 
 
 async def test_a_branch_the_toolbox_has_no_cards_for_is_put_in_line(rig):
@@ -748,7 +773,7 @@ async def test_a_sandbox_run_leaves_the_worktrees_diff_unchanged(tmp_path, _loca
     script = tmp_path / "writer.py"
     script.write_text(CACHE_WRITER)
 
-    sandboxes = local_dev_sandboxes(lambda branch: worktree, processes=None, limits=LIMITS)
+    sandboxes = local_dev_sandboxes(lambda branch: worktree, processes=None, limits=LIMITS, choose=lambda: UNCONFINED)
     leases = DevLeases(_Toolbox(tmp_path / "leases"), sandboxes, lambda _branch: _Logs(), limits=replace(LIMITS, cap=1))
     await leases.lease(B1, 1, 5)
     ran = await leases.run(B1, f"python {script}", None, 30)
@@ -766,7 +791,10 @@ async def test_a_host_whose_frameworks_cannot_be_protected_refuses_dev_commands(
     guard = FrameworkGuard((GuardedPackage("vllm", _worktree(tmp_path, monkeypatch).path / "missing"),))
     monkeypatch.setattr(dev_sandbox, "framework_protection", lambda: FrameworkProtection(guard=guard))
     sandboxes = local_dev_sandboxes(
-        lambda branch: _worktree(tmp_path / "other", monkeypatch), processes=None, limits=LIMITS
+        lambda branch: _worktree(tmp_path / "other", monkeypatch),
+        processes=None,
+        limits=LIMITS,
+        choose=lambda: UNCONFINED,
     )
     leases = DevLeases(_Toolbox(tmp_path / "leases"), sandboxes, lambda _branch: _Logs(), limits=replace(LIMITS, cap=1))
     await leases.lease(B1, 1, 5)
@@ -856,6 +884,81 @@ async def test_a_lease_granted_after_it_answered_starting_and_released_is_not_gr
     await _granted_after_starting(rig, built)
     await built.server.call("dev_sandbox_release")
     assert (await built.server.call("dev_sandbox_lease"))["lease_id"] == "lease-2"
+
+
+def _slow_toolbox(rig) -> asyncio.Event:
+    """Hold every lease until the event is set."""
+    up = asyncio.Event()
+    leasing = rig.toolbox.lease_branch_sandbox
+
+    async def slow(*args, **kwargs):
+        await up.wait()
+        return await leasing(*args, **kwargs)
+
+    rig.toolbox.lease_branch_sandbox = slow
+    return up
+
+
+async def _second_in_line_then_held(built) -> None:
+    await built.server.call("dev_sandbox_lease")
+    await _refused(built.server.call("dev_sandbox_lease", branch=B2), "cap_reached")
+    await built.server.call("dev_sandbox_release")
+
+
+async def test_a_branch_granted_after_it_answered_starting_is_no_longer_waiting_without_asking_again(rig):
+    built = rig.build(cap=1, limits=replace(LIMITS, lease_wait_s=0.05))
+    await _second_in_line_then_held(built)
+    up = _slow_toolbox(rig)
+    assert (await built.server.call("dev_sandbox_lease", branch=B2))["state"] == "starting"
+    up.set()
+    await asyncio.sleep(0.01)
+    await built.server.call("dev_sandbox_run", branch=B2, command="true")
+    assert built.leases.waiting() == frozenset()
+
+
+async def test_a_branch_whose_start_was_abandoned_is_held_its_slot_again_and_leaves_the_line_once_it_lapses(rig):
+    built = rig.build(cap=1, limits=replace(LIMITS, lease_wait_s=0.05))
+    await _second_in_line_then_held(built)
+    _slow_toolbox(rig)
+    assert (await built.server.call("dev_sandbox_lease", branch=B2))["state"] == "starting"
+    await built.leases.reclaim_unless_busy(B2, "its specialist's run ended")
+    assert built.leases.waiting() == {B2}
+    rig.clock.now += LIMITS.hold_s + 1
+    assert built.leases.waiting() == frozenset()
+
+
+async def test_a_slot_an_abandoned_start_frees_is_held_for_the_first_in_line(rig):
+    built = rig.build(cap=1, limits=replace(LIMITS, lease_wait_s=0.05))
+    _slow_toolbox(rig)
+    assert (await built.server.call("dev_sandbox_lease"))["state"] == "starting"
+    await _refused(built.server.call("dev_sandbox_lease", branch=B2), "cap_reached")
+    await built.leases.reclaim_unless_busy(B1, "its specialist's run ended")
+    assert any(entry.branch == B2 and "held for you" in entry.content for entry in rig.logs.entries)
+
+
+async def test_a_slot_a_start_cancelled_before_it_ran_frees_is_held_for_the_first_in_line(rig):
+    built = rig.build(cap=1)
+    await built.server.call("dev_sandbox_lease")
+    await _refused(built.server.call("dev_sandbox_lease", branch=B2), "cap_reached")
+    await built.server.call("dev_sandbox_release")
+    leasing = asyncio.create_task(built.server.call("dev_sandbox_lease", branch=B2))
+    # One step runs the call up to its wait, leaving the start it made scheduled but not yet run.
+    await asyncio.sleep(0)
+    await built.leases.reclaim(B2, "its branch stopped")
+    await asyncio.gather(leasing, return_exceptions=True)
+    await built.server.call("dev_sandbox_lease", branch=B3)
+    assert rig.toolbox.leased == [(B1, 1), (B3, 1)]
+
+
+async def test_a_slot_a_start_that_failed_after_it_answered_starting_frees_is_held_for_the_first_in_line(rig):
+    built = rig.build(cap=1, limits=replace(LIMITS, lease_wait_s=0.05))
+    up = _slow_toolbox(rig)
+    assert (await built.server.call("dev_sandbox_lease"))["state"] == "starting"
+    await _refused(built.server.call("dev_sandbox_lease", branch=B2), "cap_reached")
+    rig.toolbox.refusal = RequestRejected("bad_request", "no such image")
+    up.set()
+    await asyncio.sleep(0.01)
+    assert any(entry.branch == B2 and "held for you" in entry.content for entry in rig.logs.entries)
 
 
 class _HostedToolbox(_Toolbox):
@@ -960,3 +1063,31 @@ async def test_a_stopped_session_keeps_a_busy_dev_lease_and_a_released_one_gives
     await session_rig.session.stop()
     await session_rig.session.release()
     assert session_rig.held.reclaimed == [("unless busy", B1), ("all", B1)]
+
+
+def test_where_bubblewrap_sandboxes_an_agent_a_lease_writes_its_root_and_reads_its_worktree_links_and_git(tmp_path):
+    asked = []
+    isolation = BwrapIsolation(BwrapProbe("/usr/bin/bwrap", (0, 13, 1), ()))
+    git_dir = tmp_path / "base" / ".git"
+    worktree = SimpleNamespace(
+        path=tmp_path / "worktree",
+        linked=(tmp_path / "base" / "3rdparty",),
+        admin=git_dir / "worktrees" / "worktree",
+        holds=lambda _c: False,
+    )
+    for path in (worktree.path, *worktree.linked, worktree.admin):
+        path.mkdir(parents=True)
+    sandboxes = local_dev_sandboxes(
+        lambda branch: worktree, processes=None, limits=LIMITS, choose=lambda: asked.append(1) or isolation
+    )
+
+    made = [sandboxes(B1, BranchLease(f"lease-{n}", B1, (0,), tmp_path / f"lease-{n}", {}, 0)) for n in (1, 2)]
+    try:
+        assert all(sandbox.isolation is isolation for sandbox in made)
+        assert made[0].paths.writable == ()
+        assert made[0].paths.readable == (worktree.path, *worktree.linked, git_dir), "git reads the worktree's repo"
+        assert made[0].niceness == LIMITS.niceness and made[0].tmp == Path("/tmp")
+    finally:
+        for sandbox in made:
+            asyncio.run(sandbox.stop())
+    assert asked == [1], "the session asks once how its leases' sandboxes run"

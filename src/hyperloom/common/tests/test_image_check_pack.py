@@ -21,7 +21,7 @@ import yaml
 
 from hyperloom.common import outside_facts
 from hyperloom.common.outside_facts import image_check_eval
-from hyperloom.common.outside_facts.image_check_spec import CheckKind, FileType, MatchMode
+from hyperloom.common.outside_facts.image_check_spec import CheckKind, FileType
 from hyperloom.common.outside_facts.rule_pack import DEFAULT_PACK_PATH, RulePackError, load_pack
 
 Facts = dict[str, Any]
@@ -38,7 +38,6 @@ _WITH_CHECKS = {
     "transformers_does_not_recognize",
     "aiter_log_tuned_config",
     "aiter_tuned_hit",
-    "aiperf_source",
 }
 
 
@@ -127,8 +126,8 @@ def _module_check_with_installed(check: dict[str, Any]) -> None:
         ),
         (_edit("sglang_image_layout", _set("type", "socket")), "sglang_image_layout", "is not one of"),
         (
-            _edit("aiperf_source", _set("path", [{"env": "NOT AN ENV"}, ".gitmodules"])),
-            "aiperf_source",
+            _edit("sglang_image_layout", _set("path", [{"env": "NOT AN ENV"}, "configs"])),
+            "sglang_image_layout",
             "not a valid name",
         ),
         (_edit("aiter_merged_view", _drop("examples")), "aiter_merged_view", "found"),
@@ -262,15 +261,6 @@ def test_the_checks_of_the_reference_pack_hold_the_names_the_pack_holds_and_do_n
     assert "/".join(layout.path.parts) == outside_facts.SGLANG_IMAGE_AITER_CONFIGS
     assert layout.file_type is FileType.DIR
     assert layout.installed == "sglang"
-
-
-def test_a_check_about_a_checkout_is_anchored_by_the_directory_a_variable_names() -> None:
-    check = load_pack(DEFAULT_PACK_PATH).entries["aiperf_source"].image_checks[0]
-    assert check.path is not None
-    assert check.path.base_env == "INFERENCEX_PATH"
-    assert check.path.parts == (".gitmodules",)
-    assert check.installed is None
-    assert check.match is MatchMode.SUBSTRING
 
 
 def test_the_examples_of_the_reference_pack_pin_each_check_in_both_directions() -> None:

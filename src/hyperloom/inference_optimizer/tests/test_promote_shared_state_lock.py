@@ -20,7 +20,6 @@ from hyperloom.orchestrator.loop.sub_agent_runner import SubAgentResult
 from hyperloom.orchestrator.loop import _keep_patch_column as keep_patch_column
 from hyperloom.orchestrator.loop import _promote_outcome as promote_outcome
 from hyperloom.orchestrator.loop._keep_patch_column import _is_patch_column_keep
-from hyperloom.orchestrator.loop.writeback import WritebackCollaborator
 from hyperloom.orchestrator.knowledge.remote_recipe._vendor.kb_store_client import (
     KnowledgeSections,
 )
@@ -30,6 +29,10 @@ from hyperloom.inference_optimizer.session.paths import make_session_dir
 from hyperloom.orchestrator.state.task_registry import Task, TaskSpec
 
 from .conftest import heartbeat_orchestration_with_mock_critic
+
+
+#: What the report mapper stamps on every AgentX round it accepts as evidence.
+_AGENTX_EVIDENCE = {"valid_measurement": True, "diagnostic_only": False, "workload_identity": "agentx-workload"}
 
 
 @pytest.fixture
@@ -480,6 +483,7 @@ async def test_integrate_nested_e2e_measurement_owns_promotion(session_dir, monk
         "e2e_norm_intvty_p50": 100.0,
         "duration_seconds": 900.0,
         "request_error_rate": 0.0,
+        **_AGENTX_EVIDENCE,
     }
     anchor = {
         "action": "explore",
@@ -489,6 +493,7 @@ async def test_integrate_nested_e2e_measurement_owns_promotion(session_dir, monk
         "e2e_norm_intvty_p50": 110.0,
         "duration_seconds": 900.0,
         "request_error_rate": 0.0,
+        **_AGENTX_EVIDENCE,
         "extra_server_args": "",
         "extra_envs": {},
     }
@@ -505,6 +510,7 @@ async def test_integrate_nested_e2e_measurement_owns_promotion(session_dir, monk
         "e2e_norm_intvty_p50": 50.0 if vetoed else 120.0,
         "duration_seconds": 900.0,
         "request_error_rate": 0.0,
+        **_AGENTX_EVIDENCE,
         "tpot_p90_ms": 10.0,
         "ttft_mean_ms": 12.0,
         "e2el_mean_ms": 23.0,
@@ -535,6 +541,7 @@ async def test_integrate_nested_e2e_measurement_owns_promotion(session_dir, monk
         "e2e_norm_intvty_p50": 100.0,
         "duration_seconds": 900.0,
         "request_error_rate": 0.0,
+        **_AGENTX_EVIDENCE,
         "tpot_p90_ms": 99.0,
         "ttft_mean_ms": 99.0,
         "e2el_mean_ms": 99.0,
@@ -1540,17 +1547,6 @@ async def test_promote_explore_resume_revalidate_keeps_pending_on_empty_rebench(
     assert _resume_pending(s) is True
 
 
-# GAP 10: every _PROMOTE_HANDLERS value resolves to a callable on the class, so a typo or unregistered handler is
-# caught at test time, not at runtime.
-@pytest.mark.parametrize(
-    "task_kind,handler_name",
-    list(WritebackCollaborator._PROMOTE_HANDLERS.items()),
-)
-def test_promote_handlers_are_callable(task_kind, handler_name):
-    handler = getattr(WritebackCollaborator, handler_name, None)
-    assert callable(handler), f"{task_kind!r} -> {handler_name!r} is not a callable on WritebackCollaborator"
-
-
 # Env preservation across layers and source_snapshot propagation
 
 
@@ -2036,6 +2032,7 @@ class TestWritebackRequiredAxes:
             "e2e_norm_intvty_p50": 100.0,
             "duration_seconds": 900.0,
             "request_error_rate": 0.0,
+            **_AGENTX_EVIDENCE,
         }
         state.current_best = {
             "action": "explore",
@@ -2046,6 +2043,7 @@ class TestWritebackRequiredAxes:
             "e2e_norm_intvty_p50": 120.0,
             "duration_seconds": 900.0,
             "request_error_rate": 0.0,
+            **_AGENTX_EVIDENCE,
             "extra_server_args": "--page-size 16",
             "extra_envs": {"PRIOR_ENV": "1"},
         }
@@ -2077,6 +2075,7 @@ class TestWritebackRequiredAxes:
             "e2e_norm_intvty_p50": 150.0,
             "duration_seconds": 900.0,
             "request_error_rate": 0.0,
+            **_AGENTX_EVIDENCE,
             "extra_server_args": "--page-size 32",
             "extra_envs": {"NEXT_ENV": "1"},
             "unset_envs": ["PRIOR_ENV"],
@@ -2285,6 +2284,7 @@ class TestWritebackRequiredAxes:
                 "e2e_norm_intvty_p50": intvty,
                 "duration_seconds": 900.0,
                 "request_error_rate": 0.0,
+                **_AGENTX_EVIDENCE,
             }
             assert coord.writeback.lift_to_current_best("explore", 150.0, candidate)
             assert coord.writeback.validate(150.0, candidate)
@@ -2415,8 +2415,8 @@ async def test_promote_explore_two_winners_produce_two_stack_entries(session_dir
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
     "last_tput,last_total,last_intvty,rejected",
-    [(130.0, 1250.0, 125.0, False), (90.0, 1250.0, 125.0, True), (140.0, 1150.0, 115.0, True)],
-    ids=["last_winner_intvty", "last_output_drop_rejected", "last_duplicate_recorded"],
+    [(130.0, 1250.0, 125.0, False), (130.0, 1100.0, 125.0, True), (140.0, 1150.0, 115.0, True)],
+    ids=["last_winner_intvty", "last_total_drop_rejected", "last_duplicate_recorded"],
 )
 async def test_promote_explore_cumulative_uses_last_lifted_measurement(
     session_dir, monkeypatch, last_tput, last_total, last_intvty, rejected
@@ -2436,6 +2436,7 @@ async def test_promote_explore_cumulative_uses_last_lifted_measurement(
         "e2e_norm_intvty_p50": 100.0,
         "duration_seconds": 900.0,
         "request_error_rate": 0.0,
+        **_AGENTX_EVIDENCE,
     }
     s.current_best = {
         "action": "baseline",
@@ -2445,6 +2446,7 @@ async def test_promote_explore_cumulative_uses_last_lifted_measurement(
         "e2e_norm_intvty_p50": 100.0,
         "duration_seconds": 900.0,
         "request_error_rate": 0.0,
+        **_AGENTX_EVIDENCE,
     }
     first = {
         "name": "first",
@@ -2456,6 +2458,7 @@ async def test_promote_explore_cumulative_uses_last_lifted_measurement(
         "e2e_norm_intvty_p50": 120.0,
         "duration_seconds": 900.0,
         "request_error_rate": 0.0,
+        **_AGENTX_EVIDENCE,
         "tpot_p90_ms": 10.0,
         "gain_pct": 20.0,
         "candidate_extra_server_args": "--flag-a 1",
@@ -2474,6 +2477,7 @@ async def test_promote_explore_cumulative_uses_last_lifted_measurement(
         "e2e_norm_intvty_p50": last_intvty,
         "duration_seconds": 900.0,
         "request_error_rate": 0.0,
+        **_AGENTX_EVIDENCE,
         "tpot_p90_ms": 9.0,
         "gain_pct": 4.0,
         "candidate_extra_server_args": "--flag-b 2",

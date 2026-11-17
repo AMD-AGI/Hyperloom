@@ -7,7 +7,6 @@ from __future__ import annotations
 
 import json
 import statistics
-import sys
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -17,12 +16,14 @@ from hyperloom.contracts.measurement import SandboxFacts
 from hyperloom.measure import consistency, consistency_resume as resume
 from hyperloom.measure.consistency import ChecklistItem
 from hyperloom.measure.socket import RoundOutcome, TestCall, TestOutcome
+from hyperloom.measure.tests.hosted_fixtures import freeze_session_base, staged_tool_cache
+from hyperloom.measure.tests.run_dirs import write_run_dir
 
 NODE = "node-a"
 
 
 class FakeBackend:
-    """One side: writes a valid benchmark report and says which node it ran on; ``script`` steers single calls."""
+    """One side: writes a valid run_dir report and says which node it ran on; ``script`` steers single calls."""
 
     def __init__(self, node: str = NODE, throughput: float = 5000.0) -> None:
         self.node, self.throughput = node, throughput
@@ -38,13 +39,8 @@ class FakeBackend:
         sandbox = SandboxFacts(sandbox_id=f"sb-{call.task_id}", node_name=self.node)
         if action == "fail":
             return TestOutcome(1, "", "boom", (), sandbox, call.task_id, "candidate", "import_error")
-        workspace = Path(call.output_dir) / "benchmark_local_20000101_000000"
-        workspace.mkdir(parents=True)
-        report = {
-            "success": True,
-            "throughput": {"output_throughput": self.throughput, "completed_requests": 8, "num_prompts": 8},
-        }
-        (workspace / "benchmark_report.json").write_text(json.dumps(report))
+        fixed = {"output_throughput": self.throughput, "completed_requests": 8, "requested_requests": 8}
+        workspace = write_run_dir(Path(call.output_dir) / "suite_run_0", fixed)
         return TestOutcome(0, "", "", (RoundOutcome(0, "measure", workspace, 0),), sandbox, call.task_id)
 
 
@@ -55,7 +51,6 @@ def _items(*ids: str, repeats: int = 2) -> list[ChecklistItem]:
             output_dir=output_dir,
             timeout_sec=60,
             cwd=str(output_dir),
-            magpie_python=sys.executable,
             task_id=task_id,
         )
 
@@ -268,7 +263,9 @@ def test_the_entry_point_resumes_from_the_file_and_exits_by_the_verdict(
     point.write_text("benchmark: {}\n")
     checklist.write_text(json.dumps({"items": [{"id": "base", "points": [str(point)], "repeats": 2}]}))
     config = tmp_path / "config.json"
-    config.write_text("{}")
+    config.write_text(json.dumps({"session_dir": str(tmp_path / "session")}))
+    freeze_session_base(tmp_path / "session")
+    staged_tool_cache(tmp_path, monkeypatch)
     built = []
 
     def build(_config: Path) -> consistency.Backends:
@@ -375,7 +372,9 @@ def test_the_entry_point_stops_with_12_and_measures_nothing_while_another_run_ho
     point.write_text("benchmark: {}\n")
     checklist, config = tmp_path / "checklist.json", tmp_path / "config.json"
     checklist.write_text(json.dumps({"items": [{"id": "base", "points": [str(point)]}]}))
-    config.write_text("{}")
+    config.write_text(json.dumps({"session_dir": str(tmp_path / "session")}))
+    freeze_session_base(tmp_path / "session")
+    staged_tool_cache(tmp_path, monkeypatch)
     monkeypatch.setattr(resume, "build_backends", lambda _c: pytest.fail("a locked file must not start a backend"))
     held = resume.RunLock(Path(f"{rig.jsonl}.lock"), node="node-b", pid=7)
     taken = held.acquire()

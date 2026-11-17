@@ -200,19 +200,46 @@ The container still receives every GPU through `--device=/dev/kfd
 ## Step 5: Monitor and read artifacts
 
 ```bash
-squeue -p <partition>                                 # queue
-tail -f hyperloom-hl-<key>-<backend>-<jobid>.out      # job output (submit dir)
-SID=$(ls -t <data-root>/<key> | head -1)
-cat <data-root>/<key>/$SID/state.json
+squeue -p '<partition>'
+tail -f 'hyperloom-hl-<key>-<backend>-<jobid>.out'  # job output (submit dir)
 ```
 
-The artifact directory `<data-root>/<model_key>/<CLAW_SESSION_ID>/` contains:
+Read the `[hl] session=...` line in that job's output to obtain its
+`CLAW_SESSION_ID`. Stop `tail -f` with Ctrl+C before running the commands below.
+Select that specific job rather than the most recently modified directory:
 
-- `state.json`: Live status (`baseline_tput`, `current_best`, `cumulative_gain_validated`);
-- `manifest.json`: Session manifest;
-- `ci_metrics.json`: Baseline/optimized throughput plus `gain_pct`;
-- `optimizer_runs/`: `launch_<sid>.json` and logs;
+```bash
+MODEL_KEY='<model-key>'
+JOB_SESSION_ID='<CLAW_SESSION_ID from the job log>'
+DATA_ROOT='<data-root>'
+JOB_ROOT="$DATA_ROOT/$MODEL_KEY/$JOB_SESSION_ID"
+LAUNCH_INFO="$JOB_ROOT/optimizer_runs/launch_$JOB_SESSION_ID.json"
+
+SESSION_DIR=$(python3 -c 'import json, sys; print(json.load(open(sys.argv[1]))["session_dir"])' "$LAUNCH_INFO")
+cat "$SESSION_DIR/state.json"
+```
+
+Use an absolute data root beneath `HL_SHARED_MOUNT`. These commands assume the
+login node exposes the shared filesystem at the same absolute path as the
+compute node and container. If the login node uses a different mount path,
+translate the shared-root prefix in both `JOB_ROOT` and the `session_dir` read
+from JSON to the login-node path before reading the files.
+
+The launch-info JSON appears after the optimizer creates its session. If it is
+missing, inspect the selected job's output for startup progress or errors.
+
+The job workspace `<data-root>/<model_key>/<CLAW_SESSION_ID>/` contains:
+
+- `optimizer_runs/launch_<CLAW_SESSION_ID>.json`: Launch information, including the optimizer's `session_dir`;
 - `runtime/`: files produced by the installer. The `kernel-agent.env.sh` it writes, which carries credentials, stays in the job container's own temporary directory (`KERNEL_AGENT_ENV`) and is not copied here.
+
+The optimizer creates a separate session beneath that workspace, at
+`<model-basename>/<timestamp>-<id>/`. Use `session_dir` from the launch-info JSON
+to locate its artifacts:
+
+- `state.json`: Coordinator status (`baseline_tput`, `current_best`, `cumulative_gain_validated`), populated as the run progresses;
+- `manifest.json`: Session manifest;
+- `reports/`: Reports produced during the run.
 
 A healthy run logs in this order:
 
@@ -306,9 +333,11 @@ The following are known limitations of the Slurm integration.
 - The docker path exposes all node GPUs to the container, so TP=8 occupies a
   whole node. Running multiple jobs per node requires isolating devices with
   `HIP_VISIBLE_DEVICES` / `ROCR_VISIBLE_DEVICES` (the scripts do not do this).
-- The installer pip-installs Magpie and clones InferenceX / GEAK / TraceLens from GitHub, so
-  nodes need GitHub egress. A fully offline setup must bake these into the image
-  and pre-stage model weights on the shared mount.
+- The installer clones InferenceX, GEAK and TraceLens from GitHub, and a fresh
+  session reads its base launch from InferenceX and the framework's cookbook there,
+  so nodes need GitHub egress. A fully offline setup must bake the checkouts and the
+  InferenceSuite tool cache into the image and pre-stage model weights on the
+  shared mount.
 - If the gateway's upstream lacks subscription credentials, real completions might
   return `missing subscription key` even though listing models and auth succeed;
   that is a gateway-side issue.

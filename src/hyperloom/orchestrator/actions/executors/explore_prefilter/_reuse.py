@@ -40,6 +40,8 @@ import time
 from pathlib import Path
 from typing import Any
 
+from hyperloom.common.benchmark_config import BenchmarkPoint
+
 log = logging.getLogger(__name__)
 
 ENV_STORE = "HYPERLOOM_MEASUREMENT_STORE"
@@ -155,19 +157,14 @@ def launch_digest(envs: dict[str, Any], priced: frozenset[str]) -> str:
     return hashlib.sha256(json.dumps([kept, overlays], sort_keys=True).encode()).hexdigest()[:16]
 
 
-def benchmark_identity(bench: dict[str, Any], *, volatile_roots: list[str]) -> dict[str, Any]:
-    """The base benchmark block minus where it writes."""
+def benchmark_identity(point: BenchmarkPoint, *, volatile_roots: list[str]) -> dict[str, Any]:
+    """The base point minus where it writes."""
     envs = {
         str(key): str(value)
-        for key, value in sorted((bench.get("envs") or {}).items())
+        for key, value in sorted(point.envs.items())
         if not _is_location(key, value, volatile_roots)
     }
-    return {
-        "framework": str(bench.get("framework") or "").lower(),
-        "model": str(bench.get("model") or ""),
-        "precision": str(bench.get("precision") or ""),
-        "envs": envs,
-    }
+    return {"framework": point.framework.lower(), "model": point.model, "precision": point.precision, "envs": envs}
 
 
 def measurement_identity(

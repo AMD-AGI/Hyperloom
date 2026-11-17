@@ -16,7 +16,7 @@ from hyperloom.measure.tests._recipes import IMAGE, git_patch, put_patch, recipe
 from hyperloom_multibranch.toolbox.tests.integration_round import Probe, RoundProbes, config_delta
 
 PATCHED_FILE = "launch_server.py"
-_WORKLOAD = {"FRAMEWORK": "sglang", "ISL": "256", "OSL": "64", "INFERENCE_OPTIMIZER_DISABLE_TP_CLAMP": "1"}
+_WORKLOAD = {"FRAMEWORK": "sglang", "ISL": "256", "OSL": "64"}
 _CLEARED = ("CONC", "RUN_EVAL", "TP", "EP", "PORT", "MAX_MODEL_LEN", "PRECISION", "RANDOM_RANGE_RATIO")
 __all__ = ["IMAGE", "PATCHED_FILE", "baseline_recipe", "probes", "set_workload_environment"]
 

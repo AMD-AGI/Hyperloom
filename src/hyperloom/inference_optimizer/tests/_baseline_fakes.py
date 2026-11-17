@@ -1,7 +1,7 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""Drive ``BaselineExecutor`` end to end over a mocked Magpie subprocess."""
+"""Drive ``BaselineExecutor`` end to end over a mocked round subprocess."""
 
 from __future__ import annotations
 
@@ -69,7 +69,7 @@ def fake_workspace(slot: Path, *, tput: float = 1500.0) -> Path:
 
 
 def capture_launch(captured: dict):
-    """A Magpie run that records the launched config and env, then succeeds."""
+    """A round that records the launched config and env, then succeeds."""
 
     def fake_run(cmd, *args, **kwargs):
         captured["cfg"] = yaml.safe_load(Path(cmd[cmd.index("--benchmark-config") + 1]).read_text())
@@ -82,7 +82,6 @@ def capture_launch(captured: dict):
 
 def run_baseline(base: Path, session_dir: Path, ctx, fake_run, **executor_kwargs) -> dict:
     executor = BaselineExecutor(
-        magpie_python="/opt/venv/bin/python",
         default_config_path=base,
         session_dir=session_dir,
         **executor_kwargs,

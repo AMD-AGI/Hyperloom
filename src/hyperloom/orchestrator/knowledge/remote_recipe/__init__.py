@@ -143,8 +143,13 @@ class RemoteWarmRecipeAdapter:
             candidate_dir / ".selection-sdk",
             warm_start_dir=candidate_dir,
         )
-        config = ConfigKB(sections).read()
+        config_kb = ConfigKB(sections)
+        config = config_kb.read()
         if str(config.get("extra_server_args") or "").strip() or config.get("extra_envs"):
+            return True
+        # A launch whose only change removes options of the launch the framework resolves, as a recipe's launch
+        # document carries them.
+        if config_kb.prior().get("remove_args"):
             return True
         if PatchKB(sections).read_patches():
             return True

@@ -13,7 +13,7 @@ from hyperloom.inference_optimizer.protocol.intent import Intent, IntentType
 from hyperloom.orchestrator.actions.executors.explore import runnable_grid_variants
 from hyperloom.orchestrator.loop.coordinator import Coordinator
 from hyperloom.orchestrator.loop._explore_grid import EXPLORE_GRID_MISSING, explore_grid_denial
-from hyperloom.orchestrator.loop.proposals import PendingProposal
+from hyperloom.orchestrator.state.pending_proposal import PendingProposal
 from hyperloom.orchestrator.roles import Backend, MockBackend, ScriptedPlan
 
 # A framework the default grid has no branch for, so an explore here measures what it is sent and nothing else.

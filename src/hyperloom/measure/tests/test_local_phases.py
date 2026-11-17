@@ -25,13 +25,11 @@ from hyperloom.measure.local import LocalMeasurementBackend
 from hyperloom.measure.phases import PhaseRecorder
 from hyperloom.measure.socket import MeasurementTimeout, RoundPlan, TestCall
 from hyperloom.measure.tests.phase_rounds import READY_ONLY_LOG, FakeClock, Rounds, Run, Script, StagedGrid, result
-from hyperloom.measure.tests.test_local_backend import (  # noqa: F401 - magpie_backend is the module's autouse fixture
+from hyperloom.measure.tests.test_local_backend import (
     _call,
     _graded_call,
     _graded_sweep,
-    _point,
     _sweep_call,
-    magpie_backend,
 )
 
 
@@ -42,7 +40,7 @@ def clock(monkeypatch) -> FakeClock:
     monkeypatch.setattr(
         local, "resolve_lifecycle_params", lambda path: {"eligible": True, "port": 8123, "framework": "sglang"}
     )
-    monkeypatch.setattr(local, "teardown_lifecycle_server", lambda **kw: clock.advance(3.0))
+    monkeypatch.setattr(local, "teardown_variant_server", lambda slot: clock.advance(3.0) or [])
     return clock
 
 
@@ -91,14 +89,20 @@ def test_a_graded_test_goes_through_its_phases_in_order_and_they_add_up_to_the_t
     assert recorder.phases == outcome.phases, "a recorder the runner passed in is the one the backend stamped"
 
 
-def test_the_time_before_the_first_round_is_the_kernel_tables_the_rebuilt_framework_and_the_launchers(
+def test_the_time_before_the_first_round_is_the_kernel_tables_and_the_rebuilt_framework(
     monkeypatch, clock, tmp_path
 ) -> None:
     def slow_round(slot: Path, kwargs: dict[str, Any]):
         clock.advance(2.0)
         return result("test", slot)
 
-    monkeypatch.setattr(local, "install_launchers", lambda points: clock.advance(1.5))
+    traced = local._traced
+
+    def slow_traced(*args):
+        clock.advance(1.5)
+        return traced(*args)
+
+    monkeypatch.setattr(local, "_traced", slow_traced)
 
     outcome, _ = _run(monkeypatch, clock, _call(tmp_path), {"test": slow_round})
 
@@ -115,19 +119,14 @@ def _agentx_point(tmp_path: Path) -> Path:
     return path
 
 
-def test_an_agentx_test_names_its_warmup_run_and_splits_its_measured_run_at_its_clients_phases(
-    monkeypatch, clock, tmp_path
-) -> None:
+def test_an_agentx_test_is_one_round_that_boots_and_splits_at_its_clients_phases(monkeypatch, clock, tmp_path) -> None:
     call = _call(tmp_path, _agentx_point(tmp_path), rounds=RoundPlan(warmup_rounds=1))
 
     outcome, _ = _run(monkeypatch, clock, call, Rounds(clock).agentx())
 
     assert _stamped(outcome.phases) == [
-        ("round_setup", 10.0, 0),
-        ("server_boot", 80.0, 0),
-        ("warmup", 40.0, 0),
-        ("round_collect", 30.0, 0),
         ("round_setup", 5.0, 0),
+        ("server_boot", 80.0, 0),
         ("client_start", 15.0, 0),
         ("warmup", 30.0, 0),
         ("measured", 200.0, 0),
@@ -155,17 +154,17 @@ def test_a_test_whose_server_never_got_ready_has_the_phases_up_to_the_failure(mo
 def _sweep_scripts(clock: FakeClock) -> dict[str, Script]:
     def measure(slot: Path, kwargs: dict[str, Any]):
         clock.advance(1.0)
-        Run(clock, slot).found_ready().end(20.0)
+        run = Run(clock, slot).found_ready().end(20.0)
         clock.advance(2.0)
-        return result(slot.name.removeprefix("variant_00_"), slot)
+        return result(slot.name.removeprefix("variant_00_"), run.directory)
 
     def boot_then_measure(slot: Path, kwargs: dict[str, Any]):
         if not kwargs["launch"].lifecycle_boot_only:
             return measure(slot, kwargs)
         clock.advance(5.0)
-        Run(clock, slot).boot(70.0, log=Rounds(clock).vllm_log()).end(2.0)
+        run = Run(clock, slot).boot(70.0, log=Rounds(clock).vllm_log()).end(2.0)
         clock.advance(1.0)
-        return result("c8", slot)
+        return result("c8", run.directory)
 
     return {"c8": boot_then_measure, "c4": measure, "c2": measure}
 
@@ -224,8 +223,10 @@ def test_a_graded_sweep_arm_benches_every_level_and_its_one_evaluation_is_a_phas
 def test_a_test_that_timed_out_says_the_phases_it_went_through(monkeypatch, clock, tmp_path) -> None:
     def timing_out(slot: Path, kwargs: dict[str, Any]):
         clock.advance(3.0)
-        Run(clock, slot).boot(30.0, log=READY_ONLY_LOG).end(1500.0)
-        return result("test", slot, status="failed", returncode=None, error="timed out", error_class="magpie_timeout")
+        run = Run(clock, slot).boot(30.0, log=READY_ONLY_LOG).end(1500.0)
+        return result(
+            "test", run.directory, status="failed", returncode=None, error="timed out", error_class="round_timeout"
+        )
 
     monkeypatch.setattr(local, "run_grid", StagedGrid({"test": timing_out}))
 

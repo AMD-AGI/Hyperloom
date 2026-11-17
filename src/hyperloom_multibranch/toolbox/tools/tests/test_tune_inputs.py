@@ -121,6 +121,32 @@ def test_a_test_with_no_readable_point_configuration_is_a_failure_by_name(tmp_pa
         served_workload(landed_test(tmp_path, tmp_path / "model", concs=()))
 
 
+def test_a_point_not_shaped_as_one_is_not_read(tmp_path: Path) -> None:
+    landed = landed_test(tmp_path, tmp_path / "model", concs=(64,))
+    point = landed / "variant_00_c64" / "config.yaml"
+    document = yaml.safe_load(point.read_text())
+    document["benchmark"]["envs"] = "TP=1"
+    point.write_text(yaml.safe_dump(document), encoding="utf-8")
+
+    with pytest.raises(ToolFailure, match="landed no readable point configuration"):
+        served_workload(landed)
+
+
+@pytest.mark.parametrize(
+    "unreadable",
+    [b"benchmark:\n  model: caf\xe9\n", b"benchmark:\n  framework: sglang\n  when: 2001-13-01\n"],
+    ids=["not-utf8", "bad-yaml-date"],
+)
+def test_an_unreadable_point_beside_a_readable_one_is_skipped(tmp_path: Path, unreadable: bytes) -> None:
+    landed = landed_test(tmp_path, tmp_path / "model", concs=(64,))
+    (landed / "variant_00_a").mkdir()
+    (landed / "variant_00_a" / "config.yaml").write_bytes(unreadable)
+
+    workload = served_workload(landed)
+
+    assert (workload.framework, workload.precision, workload.tp, workload.conc) == ("sglang", "fp8", 1, 64)
+
+
 @pytest.mark.parametrize(
     ("change", "message"),
     [

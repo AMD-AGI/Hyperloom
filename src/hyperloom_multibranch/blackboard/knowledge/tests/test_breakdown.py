@@ -178,10 +178,10 @@ def test_the_card_holds_count_each_lease_to_the_snapshot_and_total_them_by_branc
     snapshot: BlackboardSnapshot,
 ) -> None:
     start = snapshot.taken_at - 3600.0
-    arbor = LeaseStart("lease-1", "s1", "s1", LeaseKind.AUTONOMOUS, 2, start, gpu_ids=(4, 5))
+    agent = LeaseStart("lease-1", "s1", "s1", LeaseKind.AUTONOMOUS, 2, start, gpu_ids=(4, 5))
     forge = LeaseStart("lease-2", "tool:job-7", "s1", LeaseKind.TOOL_JOB, 1, start, tool="forge", sandbox_id="sb-1")
     # Card 4 went back after half an hour and card 5 is still out; the Forge job's one card went back after 15 min.
-    holds = (CardHold(arbor, {4: start + 1800.0}), CardHold(forge, {0: start + 900.0}, LeaseEndReason.RELEASED))
+    holds = (CardHold(agent, {4: start + 1800.0}), CardHold(forge, {0: start + 900.0}, LeaseEndReason.RELEASED))
 
     breakdown = build_breakdown(dataclasses.replace(snapshot, card_holds=holds))
 

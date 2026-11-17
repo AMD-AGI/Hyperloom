@@ -25,16 +25,9 @@ import time
 from pathlib import Path
 from typing import Any, Mapping, TypeGuard
 
-from hyperloom.common.gpu_power_settings import (
-    PERF_LEVEL,
-    POWER_CAP_W,
-    GpuPowerSettingsError,
-    gpu_rows,
-    metric_value,
-    normalize_perf_level,
-    read_amd_smi_json,
-    run_amd_smi,
-)
+from hyperloom_common.amd_smi import AmdSmiError, gpu_rows, metric_value, read_amd_smi_json, run_amd_smi
+
+from hyperloom.common.gpu_power_settings import PERF_LEVEL, POWER_CAP_W, GpuPowerSettingsError, normalize_perf_level
 
 __all__ = [
     "GPU_POWER_LEDGER_DIR",
@@ -112,7 +105,7 @@ def restore_gpu_power_settings(originals: Mapping[int, Mapping[str, Any]]) -> li
     for args in _set_commands(originals):
         try:
             run_amd_smi(args, _SET_TIMEOUT_SEC)
-        except GpuPowerSettingsError as exc:
+        except AmdSmiError as exc:
             problems.append(str(exc))
     return problems
 
@@ -121,7 +114,7 @@ def apply_gpu_power_settings(settings: Mapping[int, Mapping[str, Any]]) -> None:
     """Set each card's cap and perf level: ``{gpu: {"power_cap_w": W, "perf_level": level}}``, either one optional.
 
     Raises:
-        GpuPowerSettingsError: a set failed (typically not privileged). The caller restores from its record.
+        AmdSmiError: a set failed (typically not privileged). The caller restores from its record.
     """
     for args in _set_commands(settings):
         run_amd_smi(args, _SET_TIMEOUT_SEC)

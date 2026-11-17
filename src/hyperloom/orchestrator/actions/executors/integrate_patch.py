@@ -18,7 +18,7 @@ from ._integrate_bench import BenchStageMixin
 from ._integrate_enablement_gate import EnablementGateMixin
 from ._integrate_perf_gate import PerfGateMixin
 from ._integrate_resolve import ResolveStageMixin
-from ._integrate_vocabulary import KEEP_STATUSES, RESULT_BENCHED
+from ._integrate_vocabulary import KEEP_STATUSES, RESULT_BENCHED, RESULT_FRAMEWORK_CHANGED
 from ._patch_git import restore_pending_integrate
 
 
@@ -110,6 +110,7 @@ class IntegratePatchExecutor(
                 recovery["phase"] = "applied_with_restored_stash"
         if attempt.merged_patches:
             result["patches_merged"] = attempt.merged_patches
+        result[RESULT_FRAMEWORK_CHANGED] = attempt.changes_framework
         state = attempt.shared_state
         if state is not None:
             state.save(self.session_dir)

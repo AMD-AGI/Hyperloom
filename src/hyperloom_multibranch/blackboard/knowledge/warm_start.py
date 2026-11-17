@@ -57,12 +57,7 @@ from pathlib import Path
 from typing import Any, Protocol, TypeVar
 
 from hyperloom.contracts.recipe import LaunchConfig, Recipe, RecipeDelta, RecipeError, apply, delta_between
-from hyperloom.inference_optimizer.grid_server_args import (
-    INJECTED_LAUNCH_FLAGS,
-    merge_server_args,
-    remove_server_args,
-    tokenize_server_args_preserving_json,
-)
+from hyperloom.inference_optimizer.grid_server_args import INJECTED_LAUNCH_FLAGS, merge_server_args
 from hyperloom.inference_optimizer.recipe_snapshot_constants import recipe_canonical_id
 from hyperloom.measure.compile import LOADABLE_KERNEL_KINDS, BlobError, BlobStore
 from hyperloom.measure.eval_context import CONTEXT_FLAGS
@@ -80,6 +75,7 @@ from hyperloom_multibranch.blackboard.knowledge.lessons import listed
 from hyperloom_multibranch.blackboard.knowledge.recipe_kb import from_recipe_kb_value, overlay_ref
 from hyperloom_multibranch.blackboard.knowledge.recipe_writeback import recipe_identity, serving_identity
 from hyperloom_multibranch.blackboard.knowledge.replay_tables import StackSlot, stack_added_kernels
+from inference_suite.argv import remove_server_args, tokenize_server_args_preserving_json
 
 log = logging.getLogger(__name__)
 

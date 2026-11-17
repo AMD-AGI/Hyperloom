@@ -14,9 +14,9 @@ looks the identity up by id in the service's export. An Experience whose identit
 condition, so it is one to re-verify, never a prior. The summaries carry no change family either; the index keeps
 it from the same export, so a recalled Experience names the layer it changed.
 
-An AgentX session asks for the interactivity objective, an InferenceX session for output throughput, and a read may
-return any of a schema's Experiences. What one kind of session learnt may hold for the other, a crash, a failed
-accuracy gate or a faster kernel, but its gain is on another objective and another workload. So an Experience the
+An AgentX session asks for the objective it is graded on, interactivity or total throughput, an InferenceX session for
+output throughput, and a read may return any of a schema's Experiences. What one kind of session learnt may hold for
+another, a crash, a failed accuracy gate or a faster kernel, but its gain is on another objective. So an Experience the
 index finds recorded on another objective is one to re-verify, never a prior, after those on the session's own, and
 it names its objective; one whose objective is found nowhere is one to re-verify as well.
 """
@@ -30,6 +30,7 @@ from dataclasses import dataclass, replace
 from enum import Enum
 from typing import Any, Protocol, cast
 
+from hyperloom.common.perf_metric import TOTAL_TOKEN_THROUGHPUT
 from hyperloom_kb import ReadStatus, RemoteClientError
 from hyperloom_multibranch.contracts.blackboard.peers import IntentLayer
 from hyperloom_multibranch.contracts.blackboard.records import SessionProfile
@@ -48,6 +49,7 @@ LAYER_OF_FAMILY = {
 }
 THROUGHPUT_OBJECTIVE = "e2e_throughput@v1"
 INTERACTIVITY_OBJECTIVE = "e2e_interactivity@v1"
+TOTAL_THROUGHPUT_OBJECTIVE = "e2e_total_throughput@v1"
 EXPORT_PAGE = 100
 WORKLOAD_KEYS = frozenset({"tp", "ep", "conc", "isl", "osl", "max_model_len", "compute_partition_mode", "partitions"})
 DECISION = "Choose the next actions for one branch of a multi-branch inference optimization session."
@@ -240,25 +242,24 @@ def recall_conditions(profile: SessionProfile, bottleneck: str) -> dict[str, obj
 
 
 def recall_context(
-    profile: SessionProfile, baseline_value: float | None, *, bottleneck: str, branch: str = ""
+    profile: SessionProfile, baseline_value: float | None, *, bottleneck: str, branch: str = "", metric: str = ""
 ) -> dict[str, Any]:
-    """The read context, in the shape the Framework phase's reads use; an AgentX trace replay, which has no input
-    length, asks for the interactivity objective."""
+    """The read context, in the shape the Framework phase's reads use. An AgentX trace replay, which has no input
+    length, asks for the objective of ``metric``, the one it is graded on: total throughput, else interactivity."""
 
     identity = experience_identity(profile)
     observations = {name: text for name, text in (("bottleneck", bottleneck), ("branch", branch)) if text}
-    replays_traces = profile.isl is None
+    if profile.isl is not None:
+        objective, baseline_key = THROUGHPUT_OBJECTIVE, "throughput"
+    elif metric == TOTAL_TOKEN_THROUGHPUT:
+        objective, baseline_key = TOTAL_THROUGHPUT_OBJECTIVE, "total_throughput"
+    else:
+        objective, baseline_key = INTERACTIVITY_OBJECTIVE, "interactivity"
     return {
         "identity": {key: value for key, value in identity.items() if key not in WORKLOAD_KEYS},
         "workload": {key: value for key, value in identity.items() if key in WORKLOAD_KEYS},
-        "objective": {
-            "id": INTERACTIVITY_OBJECTIVE if replays_traces else THROUGHPUT_OBJECTIVE,
-            "direction": "higher_is_better",
-        },
-        "benchmark_baseline": {
-            "interactivity" if replays_traces else "throughput": baseline_value,
-            "source": "prelude_baseline",
-        },
+        "objective": {"id": objective, "direction": "higher_is_better"},
+        "benchmark_baseline": {baseline_key: baseline_value, "source": "prelude_baseline"},
         "observations": observations,
     }
 
@@ -298,10 +299,12 @@ def classify(
 
 @dataclass(frozen=True)
 class RecallQuery:
-    """What one recall asks for: Experiences on ``bottleneck`` for ``branch``, at most :data:`RECALL_LIMIT`."""
+    """What one recall asks for: Experiences on ``bottleneck`` for ``branch``, at most :data:`RECALL_LIMIT`, on the
+    objective of ``metric``, the one the session is graded on (:func:`recall_context`)."""
 
     bottleneck: str
     branch: str = ""
+    metric: str = ""
 
 
 def recall_experiences(
@@ -321,7 +324,9 @@ def recall_experiences(
 
     if reader is None:
         return Recall(ReadStatus.DISABLED.value, "", (), (), ())
-    context = recall_context(profile, baseline_value, bottleneck=wanted.bottleneck, branch=wanted.branch)
+    context = recall_context(
+        profile, baseline_value, bottleneck=wanted.bottleneck, branch=wanted.branch, metric=wanted.metric
+    )
     result = reader.read(DECISION, context, limit=RECALL_LIMIT)
     query = recall_conditions(profile, wanted.bottleneck)
     objective = str(context["objective"]["id"])
@@ -348,6 +353,7 @@ __all__ = [
     "INTERACTIVITY_OBJECTIVE",
     "LAYER_OF_FAMILY",
     "THROUGHPUT_OBJECTIVE",
+    "TOTAL_THROUGHPUT_OBJECTIVE",
     "ExperienceExport",
     "ExperienceReader",
     "IdentityIndex",

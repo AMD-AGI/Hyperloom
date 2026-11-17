@@ -4,7 +4,6 @@
 from __future__ import annotations
 
 import os
-import re
 import subprocess
 
 from pathlib import Path
@@ -1021,24 +1020,6 @@ def test_baremetal_setup_accepts_oauth_alongside_bare_openai_key(tmp_path: Path)
     assert proc.returncode == 0, f"oauth + official OpenAI key rejected: {proc.stderr}"
 
 
-def test_baremetal_install_no_longer_accepts_openai_safe_credential_flags():
-    install_script = Path(setup.__file__).resolve().parent / "assets" / "install_baremetal.sh"
-    script_text = install_script.read_text(encoding="utf-8")
-    credential_start = script_text.index("resolve_credentials() {")
-    credential_end = script_text.index("\nwrite_runtime_dotenv() {")
-    credential_text = script_text[credential_start:credential_end]
-
-    assert "--safe-api-key" not in script_text
-    assert "--openai-base-url" not in script_text
-    assert "SAFE_API_KEY_ARG" not in script_text
-    assert "OPENAI_BASE_URL_ARG" not in script_text
-    assert "safe_key" not in credential_text
-    assert "openai_key" not in credential_text
-    assert "openai_url" not in credential_text
-    assert "dv_safe" not in credential_text
-    assert "dv_openai" not in credential_text
-
-
 def test_baremetal_runtime_deps_probe_vllm_venv_for_isolated_vllm(tmp_path: Path):
     install_script = Path(setup.__file__).resolve().parent / "assets" / "install_baremetal.sh"
     script_text = install_script.read_text(encoding="utf-8")
@@ -1140,34 +1121,33 @@ def test_baremetal_runtime_deps_skip_sgl_kernel_without_sglang(tmp_path: Path):
     assert out == ["probe triton", "probe aiter"]
 
 
-def test_baremetal_preflight_probes_atom_by_default():
-    """Phase 1 must accept an atom-only host without extra flags."""
-    install_script = Path(setup.__file__).resolve().parent / "assets" / "install_baremetal.sh"
-    text = install_script.read_text(encoding="utf-8")
-
-    m = re.search(r'^FRAMEWORKS="\$\{FRAMEWORKS:-([^}]+)\}"', text, re.MULTILINE)
-    assert m, "install_baremetal.sh must define an overridable FRAMEWORKS default"
-    assert "atom" in m.group(1).split(","), (
-        "atom must be in the default Phase 1 probe list; otherwise setup inside an atom-only image fails preflight"
+@pytest.mark.parametrize(
+    ("install_framework", "fails"),
+    [
+        pytest.param("none", False, id="prebuilt-image"),
+        pytest.param("sglang", True, id="framework-build"),
+    ],
+)
+def test_baremetal_triton_pin_is_advisory_when_installing_nothing(tmp_path: Path, install_framework: str, fails: bool):
+    """A prebuilt image may carry its own triton; a framework built against a mismatched one fails Phase 1."""
+    res = _drive_installer(
+        tmp_path,
+        importable={"sglang", "triton", "aiter", "sgl_kernel"},
+        dotenv=tmp_path / ".env",
+        install_framework=install_framework,
+        body="\n".join(
+            [
+                "rocm-smi() { :; }",
+                "rocminfo() { echo gfx942; }",
+                "check_torch_rocm_shared_libs() { :; }",
+                "check_rocm_toolchain_alignment() { :; }",
+                "check_torch_triton_alignment() { return 1; }",
+                "base_preflight",
+            ]
+        ),
     )
 
-
-def test_baremetal_triton_pin_is_advisory_when_installing_nothing():
-    """A prebuilt image may carry its own triton."""
-    install_script = Path(setup.__file__).resolve().parent / "assets" / "install_baremetal.sh"
-    text = install_script.read_text(encoding="utf-8")
-
-    guard = re.search(
-        r'if \[ "\$INSTALL_FRAMEWORK" = "none" \]; then\s*\n'
-        r'\s*check_torch_triton_alignment "\$py" \|\| true\s*\n'
-        r"\s*else\s*\n"
-        r'\s*check_torch_triton_alignment "\$py" \|\| rc=1',
-        text,
-    )
-    assert guard, (
-        "the triton alignment check must be advisory when --install-framework "
-        "is none and fatal only when a framework layer will be built"
-    )
+    assert (res.returncode != 0) is fails, res.stderr
 
 
 def _sourceable_installer(install_script: Path, tmp_path: Path) -> Path:
@@ -2714,40 +2694,6 @@ def test_baremetal_sglang_installs_aiter_when_find_spec_succeeds_but_import_fail
     assert f"install_compatible_aiter {fake_py} {tmp_path / 'aiter'}" in calls_file.read_text(encoding="utf-8")
 
 
-def test_kernel_install_no_longer_exports_openai_safe_credentials():
-    install_script = Path(setup.__file__).resolve().parent / "assets" / "install_kernel_tools.sh"
-    script_text = install_script.read_text(encoding="utf-8")
-    write_start = script_text.index("write_env_file() {")
-    write_end = script_text.index("\nensure_geak()", write_start)
-    write_text = script_text[write_start:write_end]
-
-    assert "_OPENAI_BASE_URL_VAL" not in script_text
-    assert "_OPENAI_KEY_VAL" not in script_text
-    assert "_snap_safe" not in script_text
-    assert "_snap_openai" not in script_text
-    # The kernel-agent drives Claude Code, so kernel-agent.env.sh stays Anthropic-only regardless of what the gateway
-    # serves.
-    assert "export OPENAI_BASE_URL" not in write_text
-    assert "export OPENAI_API_KEY" not in write_text
-
-    # The gateway credentials may be *read* in memory -- the single-gateway branch derives
-    # ANTHROPIC_BASE_URL/ANTHROPIC_API_KEY from OPENAI_BASE_URL + OPENAI_API_KEY, mirroring the CLI's
-    # _resolve_llm_endpoints().
-    assert "export OPENAI_API_KEY" not in write_text
-    assert "upsert_dotenv_var OPENAI_API_KEY" not in write_text
-    # The legacy gateway key is never read, exported or persisted -- but a stale value left in a migrating .env is
-    # still scrubbed.
-    assert "export SAFE_API_KEY" not in script_text
-    assert "upsert_dotenv_var SAFE_API_KEY" not in script_text
-    assert "remove_dotenv_var SAFE_API_KEY" in write_text
-    # ... and it does not touch the OpenAI side, which it never resolves.
-    assert "remove_dotenv_var OPENAI_BASE_URL" not in write_text
-    assert "remove_dotenv_var OPENAI_API_KEY" not in write_text
-    # Retired provider variables are scrubbed on every re-install.
-    assert "remove_dotenv_var DEEPSEEK_API_KEY" in write_text
-    assert "remove_dotenv_var DEEPSEEK_BASE_URL" in write_text
-
-
 def test_packaged_install_sh_resolves_target_workspace_root(tmp_path: Path):
     install_script = Path(setup.__file__).resolve().parent / "assets" / "install.sh"
     script_text = install_script.read_text(encoding="utf-8")
@@ -2895,6 +2841,8 @@ def test_kernel_env_authoritative_anthropic_mode_does_not_emit_openai_aliases(tm
                 "OPENAI_API_KEY=stale-openai-key",
                 "LLM_GATEWAY_KEY=stale-gateway-key",
                 "SAFE_API_KEY=stale-safe-key",
+                "DEEPSEEK_API_KEY=stale-deepseek-key",
+                "DEEPSEEK_BASE_URL=https://api.deepseek.com/anthropic",
             ]
         )
         + "\n",
@@ -2920,8 +2868,6 @@ def test_kernel_env_authoritative_anthropic_mode_does_not_emit_openai_aliases(tm
                 "_OPENAI_KEY_VAL=",
                 "LLM_GATEWAY_KEY=",
                 "LLM_API_KEY=",
-                "MAGPIE_PATH=",
-                "MAGPIE_PYTHON=",
                 "PYTHONPATH=",
                 "INFERENCEX_PATH=",
                 "TRACELENS_ROOT=",
@@ -2956,9 +2902,11 @@ def test_kernel_env_authoritative_anthropic_mode_does_not_emit_openai_aliases(tm
     # The OpenAI side is not resolved by this installer, so its .env entries stay.
     assert "OPENAI_BASE_URL=https://api.anthropic.com" in dotenv_text
     assert "OPENAI_API_KEY=stale-openai-key" in dotenv_text
-    # Gateway aliases it does own are still purged.
+    # Gateway aliases it does own, and retired provider variables, are still purged.
     assert "LLM_GATEWAY_KEY=" not in dotenv_text
     assert "SAFE_API_KEY=" not in dotenv_text
+    assert "DEEPSEEK_API_KEY=" not in dotenv_text
+    assert "DEEPSEEK_BASE_URL=" not in dotenv_text
 
 
 def test_kernel_env_keeps_anthropic_creds_in_dotenv(tmp_path: Path):
@@ -2996,8 +2944,6 @@ def test_kernel_env_keeps_anthropic_creds_in_dotenv(tmp_path: Path):
                 "_OPENAI_KEY_VAL=",
                 "LLM_GATEWAY_KEY=",
                 "LLM_API_KEY=",
-                "MAGPIE_PATH=",
-                "MAGPIE_PYTHON=",
                 "PYTHONPATH=",
                 "INFERENCEX_PATH=",
                 "TRACELENS_ROOT=",
@@ -3074,8 +3020,6 @@ def test_kernel_env_persists_geak_claude_model_to_dotenv(tmp_path: Path):
                 "_OPENAI_KEY_VAL=",
                 "LLM_GATEWAY_KEY=",
                 "LLM_API_KEY=",
-                "MAGPIE_PATH=",
-                "MAGPIE_PYTHON=",
                 "PYTHONPATH=",
                 "INFERENCEX_PATH=",
                 "TRACELENS_ROOT=",

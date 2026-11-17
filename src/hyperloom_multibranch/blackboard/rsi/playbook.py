@@ -245,7 +245,6 @@ class PlaybookConflict(FileExistsError):
 def _published(path: Path, document: Mapping[str, object]) -> bool:
     """``document`` written once at ``path``; ``False`` when ``path`` was written already."""
 
-    path.parent.mkdir(parents=True, exist_ok=True)
     return publish_once(path, encode_json(document))
 
 

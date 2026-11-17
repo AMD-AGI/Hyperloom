@@ -57,6 +57,12 @@ class IntegrateAttempt:
         self.localization_touched = []
 
     @property
+    def changes_framework(self) -> bool:
+        """Whether this attempt put changed framework code where its server imports from: a patch (the localization
+        among them) or an artifact landed in the tree, or a setup command installed into the runtime."""
+        return bool(self.applied or self.applied_artifacts or self.setup_commands_applied)
+
+    @property
     def attempt_venv_root(self) -> str:
         """The acquired runtime, or no runtime when this attempt did not provision."""
         if self.provision_result is None:

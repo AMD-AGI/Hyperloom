@@ -19,7 +19,7 @@ from typing import Any
 import pytest
 import yaml
 
-from hyperloom.common.proctree import REAP_MARK_ENV
+from hyperloom_common.proctree import REAP_MARK_ENV
 from hyperloom.orchestrator.actions.executors import _ray_backend as rb
 from hyperloom.orchestrator.actions.executors import _ray_runtime as rr
 from hyperloom.orchestrator.actions.executors import _ray_serving as rs
@@ -47,15 +47,6 @@ def test_ray_exec_enabled_explicit_off(monkeypatch: pytest.MonkeyPatch, val: str
     monkeypatch.setenv("INFERENCE_OPTIMIZER_RAY_EXEC", val)
     monkeypatch.delenv("PYTEST_CURRENT_TEST", raising=False)
     monkeypatch.setenv("INFERENCE_OPTIMIZER_NODES", "1")
-    assert rb.ray_exec_enabled() is False
-
-
-def test_ray_exec_enabled_unset_multi_node_false(monkeypatch: pytest.MonkeyPatch, tmp_path: Path):
-    """Env unset + not-under-pytest + multi-node -> False."""
-    monkeypatch.delenv("INFERENCE_OPTIMIZER_RAY_EXEC", raising=False)
-    monkeypatch.delenv("PYTEST_CURRENT_TEST", raising=False)
-    monkeypatch.setenv("INFERENCE_OPTIMIZER_NODES", "2")
-    monkeypatch.setenv("MULTI_NODE_STATE_FILE", str(tmp_path / "nope.json"))
     assert rb.ray_exec_enabled() is False
 
 
@@ -93,21 +84,15 @@ def test_worker_uses_invoking_policy_and_reanchors_session(monkeypatch):
         return subprocess.CompletedProcess(cmd, 0, "out", "err")
 
     monkeypatch.setattr(sk, "run_with_session_kill", run)
-    result = rb._run_subprocess_worker(
-        rb.SessionKillRound(
-            cmd=["client"],
-            env={},
-            cwd=None,
-            timeout=7800,
-            silence_timeout_sec=600,
-            server_log_path="server.log",
-            server_already_ready=True,
-            session_remaining_sec=42,
-        )
-    )
+    result = rb.SessionKillRound(
+        cmd=["client"],
+        env={},
+        cwd=None,
+        timeout=7800,
+        session_remaining_sec=42,
+    ).run()
     assert result == (0, "out", "err")
     assert captured["timeout"] == 7800
-    assert captured["silence_timeout_sec"] == 600
     assert captured["session_deadline_sec"] == 5042
 
 
@@ -131,7 +116,7 @@ def test_specialist_close_forces_actor_kill_after_stop_attempt(monkeypatch, ack)
 @pytest.mark.parametrize("members", [[], [(10, 100, "Z")], [(10, 100, "S")]])
 def test_managed_exited_root_cannot_confirm_detached_descendants(monkeypatch, members):
     from types import SimpleNamespace
-    from hyperloom.common import proctree
+    from hyperloom_common import proctree
 
     proc = SimpleNamespace(pid=123456, poll=lambda: 0)
     mgr = ManagedServerProcess()
@@ -205,7 +190,7 @@ def test_specialist_close_is_idempotent_after_forced_kill(monkeypatch):
 @pytest.mark.parametrize("confirmed", [False, True])
 def test_managed_live_root_uses_enumerated_tree_ack(monkeypatch, confirmed):
     from types import SimpleNamespace
-    from hyperloom.common import proctree
+    from hyperloom_common import proctree
 
     waited = []
     proc = SimpleNamespace(pid=123456, poll=lambda: None, wait=lambda **kw: waited.append(kw))
@@ -236,12 +221,6 @@ def test_managed_never_started_can_confirm_stop():
     mgr = ManagedServerProcess()
     assert mgr.stop() is True
     assert mgr.stop() is True
-
-
-def test_merge_worker_env_none():
-    merged = rb._merge_worker_env(None)
-    assert isinstance(merged, dict)
-    assert merged.get("PATH") == os.environ.get("PATH")
 
 
 # ── inline fake ray (shared by the tests below) ──────────────────────────────
@@ -538,35 +517,29 @@ def test_managed_process_closes_files_on_spawn_failure(
     assert mgr.stop() is True
 
 
-def test_get_ray_backend_singleton():
-    a = rb.get_ray_backend()
-    b = rb.get_ray_backend()
-    assert a is b
+# ── serving-lease routing ────────────────────────────────────────────────────
+@pytest.mark.parametrize(("args", "cards"), [(("--dp-size", "2"), 4), (("--dp-size", "2", "--enable-dp-attention"), 2)])
+def test_a_serving_lease_holds_the_cards_the_sessions_base_launch_occupies(tmp_path: Path, args, cards):
+    from dataclasses import replace
+
+    from hyperloom.orchestrator.actions.executors import _grid_runner as gr
+    from hyperloom.orchestrator.state.tests._session_base import freeze_base, session_base
+    from inference_suite.contracts import Topology
+
+    cfg = tmp_path / "c.yaml"
+    cfg.write_text("benchmark:\n  envs:\n    TP: 2\n", encoding="utf-8")
+    freeze_base(tmp_path, replace(session_base(args), topology=Topology(tp=2)))
+    assert gr.lease_cards(cfg, tmp_path) == cards
 
 
-# ── ray_exec_enabled (execution-route gate) ───────────────────────────
-def test_ray_exec_enabled_pytest_default_off(monkeypatch: pytest.MonkeyPatch):
-    """Under pytest with env unset, the route defaults OFF (hermetic tests)."""
-    monkeypatch.delenv("INFERENCE_OPTIMIZER_RAY_EXEC", raising=False)
-    # PYTEST_CURRENT_TEST is set by pytest during the test.
-    assert rb.ray_exec_enabled() is False
-
-
-# ── _run_magpie routing (P1/T1) ──────────────────────────────────────────────
-def test_num_gpus_for_config_reads_tp(tmp_path: Path):
+def test_a_serving_lease_of_a_session_without_a_base_holds_the_points_tp(tmp_path: Path):
     from hyperloom.orchestrator.actions.executors import _grid_runner as gr
 
     cfg = tmp_path / "c.yaml"
     cfg.write_text("benchmark:\n  envs:\n    TP: 4\n", encoding="utf-8")
-    assert gr._num_gpus_for_config(cfg) == 4.0
-
-
-def test_num_gpus_for_config_defaults_to_one(tmp_path: Path):
-    from hyperloom.orchestrator.actions.executors import _grid_runner as gr
-
-    cfg = tmp_path / "c.yaml"
+    assert gr.lease_cards(cfg, tmp_path) == 4
     cfg.write_text("benchmark:\n  envs: {}\n", encoding="utf-8")
-    assert gr._num_gpus_for_config(cfg) == 1.0
+    assert gr.lease_cards(cfg, tmp_path) == 1
 
 
 # ── T2: strip *_VISIBLE_DEVICES from the benchmark config ────────────────────
@@ -596,10 +569,18 @@ def test_strip_visible_devices_from_config(tmp_path: Path):
     assert envs["FOO"] == "bar"
 
 
-def test_strip_visible_devices_noop_when_absent(tmp_path: Path):
-    """No device vars => the original path is returned unchanged (no rewrite)."""
+@pytest.mark.parametrize(
+    "text",
+    [
+        pytest.param("benchmark:\n  envs:\n    TP: 1\n", id="no-device-vars"),
+        pytest.param("benchmark:\n  envs: not_a_dict\n", id="envs-not-a-mapping"),
+        pytest.param("other:\n  envs:\n    ROCR_VISIBLE_DEVICES: '0'\n", id="no-benchmark-block"),
+    ],
+)
+def test_strip_visible_devices_noop_when_absent(tmp_path: Path, text: str):
+    """No device vars, or no point to drop them from => the original path is returned unchanged (no rewrite)."""
     cfg = tmp_path / "config.yaml"
-    cfg.write_text("benchmark:\n  envs:\n    TP: 1\n", encoding="utf-8")
+    cfg.write_text(text, encoding="utf-8")
     assert rb.strip_visible_devices_from_config(cfg) == cfg
 
 
@@ -751,7 +732,7 @@ class _RunsTheRound(_FakeMethod):
 
     def remote(self, *a, **kw):
         super().remote(*a, **kw)
-        return rb._run_subprocess_worker(a[0])
+        return a[0].run()
 
 
 def test_a_server_a_round_leaves_running_outlives_the_round(monkeypatch: pytest.MonkeyPatch, tmp_path: Path):
@@ -961,12 +942,6 @@ def test_round_wait_ceiling_rejects_values_that_would_disable_it(raw: str, monke
         rs._round_wait_timeout_sec(60)
 
 
-def test_await_or_cancel_requires_an_explicit_round_cap():
-    """A caller that forgets the cap must fail loudly, not inherit a ceiling it never asked for."""
-    with pytest.raises(TypeError):
-        ServingLease(num_gpus=1)._await_or_cancel(object(), cmd=["x"], cancel_scope=None)
-
-
 def test_serving_lease_close_idempotent(monkeypatch: pytest.MonkeyPatch):
     fake = _LeaseFakeRay()
     monkeypatch.setitem(sys.modules, "ray", fake)
@@ -979,19 +954,24 @@ def test_serving_lease_close_idempotent(monkeypatch: pytest.MonkeyPatch):
     lease.close()  # must not raise
 
 
-def test_maybe_serving_lease_pytest_default_none(monkeypatch: pytest.MonkeyPatch):
-    """Under pytest with env unset the seam returns None (hermetic local path)."""
-    monkeypatch.delenv("INFERENCE_OPTIMIZER_RAY_EXEC", raising=False)
-    assert maybe_serving_lease(num_gpus=1) is None
-
-
 def test_maybe_serving_lease_explicit_on_single_node(monkeypatch: pytest.MonkeyPatch, tmp_path: Path):
+    """With the route on, the lease's actor holds the GPUs the caller asked for."""
     monkeypatch.setenv("INFERENCE_OPTIMIZER_RAY_EXEC", "1")
     monkeypatch.setenv("INFERENCE_OPTIMIZER_NODES", "1")
     monkeypatch.setenv("MULTI_NODE_STATE_FILE", str(tmp_path / "nope.json"))
     lease = maybe_serving_lease(num_gpus=2)
-    assert isinstance(lease, ServingLease)
-    assert lease._num_gpus == 2.0
+    monkeypatch.setitem(sys.modules, "ray", _LeaseFakeRay())
+    made: list[float] = []
+    monkeypatch.setattr(
+        rs,
+        "make_serving_actor",
+        lambda n, *, serving_slot, max_concurrency: made.append(n) or _FakeActor((0, "", "")),
+    )
+    monkeypatch.setattr(rb, "get_ray_backend", _StubBackendP2)
+
+    lease.ensure()
+
+    assert made == [2.0]
 
 
 def test_maybe_serving_lease_multi_node_none(monkeypatch: pytest.MonkeyPatch, tmp_path: Path):
@@ -1002,115 +982,9 @@ def test_maybe_serving_lease_multi_node_none(monkeypatch: pytest.MonkeyPatch, tm
     assert maybe_serving_lease(num_gpus=2) is None
 
 
-# ── _run_magpie routing (P1/T1 + T2) ─────────────────────────────────────────
-class _RecordingLease:
-    """Stand-in ServingLease that records the round it was asked to run."""
-
-    def __init__(self, result=(0, "ok", "")):
-        self.result = result
-        self.calls: list[dict] = []
-
-    def run_session_kill(self, bench_round):
-        self.calls.append(dict(vars(bench_round)))
-        return self.result
-
-
-def test_run_magpie_routes_through_lease_and_strips_devices(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
-    """With a lease, _run_magpie runs in its actor on a device-stripped config."""
-    from hyperloom.orchestrator.actions.executors import _grid_runner as gr
-
-    cfg = tmp_path / "config.yaml"
-    cfg.write_text(
-        "benchmark:\n  framework: sglang\n  envs:\n    TP: 1\n    ROCR_VISIBLE_DEVICES: '0'\n    FOO: bar\n",
-        encoding="utf-8",
-    )
-    out_dir = tmp_path / "out"
-    out_dir.mkdir()
-
-    seen: dict = {}
-
-    def _fake_build(*, python_exe, config_path, output_dir):
-        seen["config_path"] = Path(config_path)
-        return ["magpie", "-m", "Magpie", "benchmark", str(config_path)]
-
-    monkeypatch.setattr(gr, "build_benchmark_command", _fake_build)
-
-    lease = _RecordingLease()
-    rc, out, err = gr._run_magpie(
-        gr.MagpieRound(magpie_python="python3", config_path=cfg, output_dir=out_dir, timeout_sec=10, cwd=str(tmp_path)),
-        serving_lease=lease,
-    )
-    assert (rc, out, err) == (0, "ok", "")
-    assert lease.calls, "the round must run inside the lease's actor"
-    # T2: the config handed to Magpie has the device list stripped.
-    used_cfg = seen["config_path"]
-    assert used_cfg.name.endswith(".ray.yaml")
-    envs = yaml.safe_load(used_cfg.read_text(encoding="utf-8"))["benchmark"]["envs"]
-    assert "ROCR_VISIBLE_DEVICES" not in envs
-    assert envs["TP"] == 1 and envs["FOO"] == "bar"
-    # server.log is pinned into the task slot for the watchdogs.
-    assert lease.calls[0]["server_log_path"] == str(out_dir / "server.log")
-    assert lease.calls[0]["timeout"] == 10
-
-
 # ── the session budget across the Ray process boundary ───────────────────────
 class TestTheSessionBudgetReachesTheRayWorker:
     """Production takes the Ray path on a single node; the local path is the test default."""
-
-    def test_run_magpie_converts_the_deadline_before_handing_it_over(
-        self,
-        tmp_path: Path,
-        monkeypatch: pytest.MonkeyPatch,
-    ):
-        from hyperloom.orchestrator.actions.executors import _grid_runner as gr
-
-        cfg = tmp_path / "config.yaml"
-        cfg.write_text("benchmark:\n  framework: sglang\n  envs:\n    TP: 1\n", encoding="utf-8")
-        out_dir = tmp_path / "out"
-        out_dir.mkdir()
-        monkeypatch.setattr(gr, "build_benchmark_command", lambda **_kw: ["magpie"])
-        monkeypatch.setattr(time, "monotonic", lambda: 1000.0)
-
-        lease = _RecordingLease()
-        gr._run_magpie(
-            gr.MagpieRound(
-                magpie_python="python3",
-                config_path=cfg,
-                output_dir=out_dir,
-                timeout_sec=10,
-                cwd=str(tmp_path),
-                session_deadline_sec=1250.0,
-            ),
-            serving_lease=lease,
-        )
-
-        assert lease.calls[0]["session_remaining_sec"] == pytest.approx(250.0)
-        assert "session_deadline_sec" not in lease.calls[0], (
-            "an absolute monotonic instant is meaningless in the actor's process"
-        )
-
-    def test_an_unbounded_budget_reaches_the_lease_as_none(
-        self,
-        tmp_path: Path,
-        monkeypatch: pytest.MonkeyPatch,
-    ):
-        from hyperloom.orchestrator.actions.executors import _grid_runner as gr
-
-        cfg = tmp_path / "config.yaml"
-        cfg.write_text("benchmark:\n  framework: sglang\n  envs:\n    TP: 1\n", encoding="utf-8")
-        out_dir = tmp_path / "out"
-        out_dir.mkdir()
-        monkeypatch.setattr(gr, "build_benchmark_command", lambda **_kw: ["magpie"])
-
-        lease = _RecordingLease()
-        gr._run_magpie(
-            gr.MagpieRound(
-                magpie_python="python3", config_path=cfg, output_dir=out_dir, timeout_sec=10, cwd=str(tmp_path)
-            ),
-            serving_lease=lease,
-        )
-
-        assert lease.calls[0]["session_remaining_sec"] is None
 
     def test_the_lease_forwards_the_budget_to_its_actor(self, monkeypatch: pytest.MonkeyPatch):
         """The lease is the last in-process hop; dropping it here loses the reaper."""
@@ -1125,34 +999,24 @@ class TestTheSessionBudgetReachesTheRayWorker:
     def test_the_worker_reaps_a_child_whose_budget_is_already_spent(self):
         """End of the chain: the duration becomes a deadline on the worker's own clock."""
         start = time.monotonic()
-        rc, _out, _err = rb._run_subprocess_worker(
-            rb.SessionKillRound(
-                cmd=[sys.executable, "-c", "import time; time.sleep(30)"],
-                env=None,
-                cwd=None,
-                timeout=60,
-                silence_timeout_sec=None,
-                server_log_path=None,
-                server_already_ready=False,
-                session_remaining_sec=-1.0,
-            )
-        )
+        rc, _out, _err = rb.SessionKillRound(
+            cmd=[sys.executable, "-c", "import time; time.sleep(30)"],
+            env=None,
+            cwd=None,
+            timeout=60,
+            session_remaining_sec=-1.0,
+        ).run()
         assert rc == SESSION_TIME_EXHAUSTED_RETURNCODE
         assert time.monotonic() - start < 10.0
 
     def test_the_worker_leaves_a_child_with_budget_left_alone(self):
-        rc, out, _err = rb._run_subprocess_worker(
-            rb.SessionKillRound(
-                cmd=["echo", "still-running"],
-                env=None,
-                cwd=None,
-                timeout=60,
-                silence_timeout_sec=None,
-                server_log_path=None,
-                server_already_ready=False,
-                session_remaining_sec=3600.0,
-            )
-        )
+        rc, out, _err = rb.SessionKillRound(
+            cmd=["echo", "still-running"],
+            env=None,
+            cwd=None,
+            timeout=60,
+            session_remaining_sec=3600.0,
+        ).run()
         assert rc == 0
         assert "still-running" in out
 
@@ -1162,6 +1026,8 @@ def test_managed_process_exit_code_none_then_latched():
     """exit_code is None before start / while alive, then the real return code."""
     mgr = ManagedServerProcess()
     assert mgr.exit_code() is None  # never started
+    assert mgr.pid() is None
+    assert mgr.is_alive() is False
     mgr.start(["sh", "-c", "sleep 0.2; exit 3"])
     assert mgr.exit_code() is None  # still running
     deadline = time.time() + 5.0
@@ -1352,13 +1218,6 @@ def test_ray_exec_enabled_multi_node_overrides_env(monkeypatch: pytest.MonkeyPat
     assert rb.ray_exec_enabled() is False
 
 
-def test_gpu_specialist_lease_is_alive_false_before_start():
-    lease = rs.GpuSpecialistLease(num_gpus=1)
-    assert lease.is_alive() is False
-    assert lease.exit_code() is None
-    lease.close()  # no-op, no actor
-
-
 def test_gpu_specialist_lease_start_async_poll_and_pending(monkeypatch: pytest.MonkeyPatch):
     """§3.3 non-blocking start: start_async submits without blocking, and poll_started returns None while pending (ray.wait empty) and the pid once ready."""
 
@@ -1389,11 +1248,6 @@ def test_gpu_specialist_lease_start_async_poll_and_pending(monkeypatch: pytest.M
     lease.close()
 
 
-def test_maybe_gpu_specialist_lease_pytest_default_none(monkeypatch: pytest.MonkeyPatch):
-    monkeypatch.delenv("INFERENCE_OPTIMIZER_RAY_EXEC", raising=False)
-    assert rs.maybe_gpu_specialist_lease(ray_exec=rb.ray_exec_enabled(), num_gpus=2) is None
-
-
 def test_maybe_gpu_specialist_lease_zero_gpus_none():
     assert rs.maybe_gpu_specialist_lease(ray_exec=True, num_gpus=0) is None
 
@@ -1405,14 +1259,6 @@ def test_maybe_gpu_specialist_lease_follows_the_callers_route_not_a_fresh_read(m
     assert isinstance(rs.maybe_gpu_specialist_lease(ray_exec=True, num_gpus=2), rs.GpuSpecialistLease)
     monkeypatch.setattr(rb, "ray_exec_enabled", lambda: True)
     assert rs.maybe_gpu_specialist_lease(ray_exec=False, num_gpus=2) is None
-
-
-def test_maybe_gpu_specialist_lease_single_node_on(monkeypatch: pytest.MonkeyPatch, tmp_path: Path):
-    monkeypatch.setenv("INFERENCE_OPTIMIZER_RAY_EXEC", "1")
-    monkeypatch.setenv("INFERENCE_OPTIMIZER_NODES", "1")
-    monkeypatch.setenv("MULTI_NODE_STATE_FILE", str(tmp_path / "nope.json"))
-    lease = rs.maybe_gpu_specialist_lease(ray_exec=rb.ray_exec_enabled(), num_gpus=2)
-    assert isinstance(lease, rs.GpuSpecialistLease)
 
 
 def test_maybe_gpu_specialist_lease_multi_node_none(monkeypatch: pytest.MonkeyPatch, tmp_path: Path):
@@ -1434,26 +1280,17 @@ def test_serving_slot_declared_in_ray_start_args():
     assert _json.loads(args[1]) == {"serving_slot": 1}
 
 
-def test_maybe_serving_lease_single_node_on(monkeypatch: pytest.MonkeyPatch, tmp_path: Path):
-    monkeypatch.setenv("INFERENCE_OPTIMIZER_RAY_EXEC", "1")
-    monkeypatch.setenv("INFERENCE_OPTIMIZER_NODES", "1")
-    monkeypatch.setenv("MULTI_NODE_STATE_FILE", str(tmp_path / "nope.json"))
-    assert isinstance(rs.maybe_serving_lease(num_gpus=2), ServingLease)
-
-
-def test_maybe_gpu_specialist_lease_serving_slot_passthrough(monkeypatch: pytest.MonkeyPatch, tmp_path: Path):
-    """Serving-disjoint pool takes no slot; whole-machine specialists take it."""
-    monkeypatch.setenv("INFERENCE_OPTIMIZER_RAY_EXEC", "1")
-    monkeypatch.setenv("INFERENCE_OPTIMIZER_NODES", "1")
-    monkeypatch.setenv("MULTI_NODE_STATE_FILE", str(tmp_path / "nope.json"))
-    disjoint = rs.maybe_gpu_specialist_lease(ray_exec=rb.ray_exec_enabled(), num_gpus=2)
-    assert disjoint is not None and disjoint._serving_slot is False
-    whole = rs.maybe_gpu_specialist_lease(ray_exec=rb.ray_exec_enabled(), num_gpus=8, serving_slot=True)
-    assert whole is not None and whole._serving_slot is True
-
-
-def test_gpu_specialist_lease_start_passes_serving_slot(monkeypatch: pytest.MonkeyPatch):
-    """The lease forwards serving_slot to the actor factory on start."""
+@pytest.mark.parametrize(
+    ("num_gpus", "slot_kwargs", "takes_slot"),
+    [
+        pytest.param(2, {}, False, id="serving-disjoint-pool"),
+        pytest.param(8, {"serving_slot": True}, True, id="whole-machine"),
+    ],
+)
+def test_gpu_specialist_lease_start_passes_serving_slot(
+    monkeypatch: pytest.MonkeyPatch, num_gpus: int, slot_kwargs: dict, takes_slot: bool
+):
+    """Serving-disjoint pool takes no slot; whole-machine specialists take it on the actor they start."""
     fake = _FakeRayP2()
     monkeypatch.setitem(sys.modules, "ray", fake)
     actor = _FakeGpuActor()
@@ -1466,51 +1303,10 @@ def test_gpu_specialist_lease_start_passes_serving_slot(monkeypatch: pytest.Monk
     monkeypatch.setattr(rs, "make_serving_actor", _fake_make)
     monkeypatch.setattr(rb, "get_ray_backend", lambda: _StubBackendP2())
 
-    lease = rs.GpuSpecialistLease(num_gpus=8, serving_slot=True)
+    lease = rs.maybe_gpu_specialist_lease(ray_exec=True, num_gpus=num_gpus, **slot_kwargs)
     lease.start_async(rs.ActorLaunch(["claude"]))
     assert lease.poll_started() == 4242
-    assert seen == {"num_gpus": 8.0, "serving_slot": True, "max_concurrency": 1}
-
-
-def test_run_magpie_local_path_untouched(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
-    """serving_lease=None keeps the local run_with_session_kill path + config."""
-    from hyperloom.orchestrator.actions.executors import _grid_runner as gr
-
-    cfg = tmp_path / "config.yaml"
-    cfg.write_text(
-        "benchmark:\n  framework: sglang\n  envs:\n    TP: 1\n    ROCR_VISIBLE_DEVICES: '0'\n",
-        encoding="utf-8",
-    )
-    out_dir = tmp_path / "out"
-    out_dir.mkdir()
-
-    seen: dict = {}
-
-    def _fake_build(*, python_exe, config_path, output_dir):
-        seen["config_path"] = Path(config_path)
-        return ["magpie", str(config_path)]
-
-    class _Proc:
-        returncode = 0
-        stdout = "local"
-        stderr = ""
-
-    def _fake_run(cmd, **kw):
-        seen["ran_local"] = True
-        return _Proc()
-
-    monkeypatch.setattr(gr, "build_benchmark_command", _fake_build)
-    monkeypatch.setattr(gr, "run_with_session_kill", _fake_run)
-
-    rc, out, err = gr._run_magpie(
-        gr.MagpieRound(magpie_python="python3", config_path=cfg, output_dir=out_dir, timeout_sec=10, cwd=str(tmp_path)),
-        serving_lease=None,
-    )
-    assert (rc, out) == (0, "local")
-    assert seen.get("ran_local") is True
-    # The local path uses the ORIGINAL config (no .ray.yaml rewrite).
-    assert seen["config_path"] == cfg
-    assert not (tmp_path / "config.ray.yaml").exists()
+    assert seen == {"num_gpus": float(num_gpus), "serving_slot": takes_slot, "max_concurrency": 1}
 
 
 # ── coverage: strip fallbacks ───────────────────────────────
@@ -1518,13 +1314,6 @@ def test_strip_visible_devices_unparseable_yaml_returns_src(tmp_path: Path):
     """A YAML parse error returns the original path unchanged (fail-soft)."""
     cfg = tmp_path / "bad.yaml"
     cfg.write_text("benchmark: [unbalanced\n", encoding="utf-8")
-    assert rb.strip_visible_devices_from_config(cfg) == cfg
-
-
-def test_strip_visible_devices_no_envs_dict_returns_src(tmp_path: Path):
-    """When benchmark.envs is not a dict, return the original path."""
-    cfg = tmp_path / "noenvs.yaml"
-    cfg.write_text("benchmark:\n  envs: not_a_dict\n", encoding="utf-8")
     assert rb.strip_visible_devices_from_config(cfg) == cfg
 
 
@@ -1580,14 +1369,6 @@ def test_gpu_specialist_lease_dead_actor_degrades(monkeypatch: pytest.MonkeyPatc
     closed = lease.close()
     assert closed is False
     assert lease._actor is not None
-
-
-# ── coverage: ManagedServerProcess pid/exit_code before start ────────────────
-def test_managed_process_pid_exit_code_before_start():
-    mgr = ManagedServerProcess()
-    assert mgr.pid() is None
-    assert mgr.exit_code() is None
-    assert mgr.is_alive() is False
 
 
 # ── coverage: ServingActor class body via a pass-through fake ray.remote ─────
@@ -1714,28 +1495,18 @@ def test_serving_actor_run_blocking_timeout_sentinel(monkeypatch: pytest.MonkeyP
 
 
 # ── coverage: RayExecutionBackend.ensure (reuses _ray_runtime) ───────────────
-def test_backend_ensure_reuses_kernel_runtime(monkeypatch: pytest.MonkeyPatch):
-    """ensure() calls ensure_ray_cluster + quiet_ray_init once, then is idempotent."""
-    from hyperloom.orchestrator.actions.executors import _ray_runtime as rr
-
-    calls: dict = {"ensure": 0, "init": 0, "num_gpus": None}
-
-    def _fake_ensure(*, num_gpus=None):
-        calls["ensure"] += 1
-        calls["num_gpus"] = num_gpus
-
-    def _fake_init(*, num_gpus=None):
-        calls["init"] += 1
-
-    monkeypatch.setattr(rr, "ensure_ray_cluster", _fake_ensure)
-    monkeypatch.setattr(rr, "quiet_ray_init", _fake_init)
+def test_every_caller_of_the_backend_shares_one_connect(monkeypatch: pytest.MonkeyPatch):
+    """Each lease asks the process-wide backend to ensure; only the first starts the cluster and connects."""
+    calls: list[tuple[str, int | None]] = []
+    monkeypatch.setattr(rr, "ensure_ray_cluster", lambda *, num_gpus=None: calls.append(("cluster", num_gpus)))
+    monkeypatch.setattr(rr, "quiet_ray_init", lambda *, num_gpus=None: calls.append(("connect", num_gpus)))
+    monkeypatch.setattr(rb, "_BACKEND", None)
     monkeypatch.setenv("INFERENCE_OPTIMIZER_RAY_NUM_GPUS", "3")
 
-    backend = rb.RayExecutionBackend()
-    backend.ensure()
-    assert calls == {"ensure": 1, "init": 1, "num_gpus": 3}
-    backend.ensure()  # idempotent: no second call
-    assert calls["ensure"] == 1
+    rb.get_ray_backend().ensure()
+    rb.get_ray_backend().ensure()
+
+    assert calls == [("cluster", 3), ("connect", 3)]
 
 
 # ── coverage: ServingLease ensure/close + make_serving_actor ─
@@ -1781,14 +1552,6 @@ def test_make_serving_actor_slot_modes(monkeypatch: pytest.MonkeyPatch):
     assert captured == {"num_gpus": 4, "resources": {"serving_slot": 1}, "max_concurrency": 2}
     rs.make_serving_actor(2, serving_slot=False, max_concurrency=1)
     assert captured == {"num_gpus": 2, "resources": None, "max_concurrency": 1}
-
-
-def test_gpu_specialist_lease_stop_no_actor_noop():
-    """stop()/close() on a never-started GpuSpecialistLease are safe no-ops."""
-    lease = rs.GpuSpecialistLease(num_gpus=1)
-    lease.stop()  # no actor -> return
-    lease.close()  # no actor -> return
-    assert lease.poll_started() is None
 
 
 def test_gpu_specialist_lease_close_kills_live_actor(monkeypatch: pytest.MonkeyPatch):

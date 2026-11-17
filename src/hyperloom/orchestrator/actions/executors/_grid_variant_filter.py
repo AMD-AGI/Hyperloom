@@ -19,13 +19,19 @@ from hyperloom_common.env import is_truthy
 from hyperloom.common.env_safety import operator_extra_env
 from hyperloom_common.gpu_identity import is_gfx_arch
 
+from hyperloom.common.failure_signature import SERVE_FLAG
+
 from ._grid_base import (
     GridVariant,
     apply_variant_env,
 )
-from ._spec_decode_pin import SPECULATIVE_DECODING_PINNED, speculative_pin_reason
+from ._spec_decode_pin import speculative_pin_reason
 from hyperloom.inference_optimizer.grid_server_args import compose_server_args
-from hyperloom.inference_optimizer.speculative_capability import CAPABILITY_UNSUPPORTED, speculative_capability_reason
+from hyperloom.inference_optimizer.speculative_capability import (
+    CAPABILITY_UNSUPPORTED,
+    DraftLimits,
+    speculative_capability_reason,
+)
 
 log = logging.getLogger(__name__)
 
@@ -261,12 +267,22 @@ def _fingerprint_component_matches(actual: str, expected: str) -> bool:
 
 @dataclass(frozen=True)
 class ServingStack:
-    """The framework, model, GPU and component versions a grid's variants are served on."""
+    """The framework, model, GPU and component versions a grid's variants are served on, and the draft bounds its
+    recipe declares."""
 
     framework: str
     model_path: str
     gpu_type: str = ""
     stack_fingerprint: dict | None = None
+    draft_limits: DraftLimits = DraftLimits()
+
+    @classmethod
+    def of_recipe(
+        cls, benchmark: Mapping[str, Any], *, model_path: str, gpu_type: str = "", stack_fingerprint: dict | None = None
+    ) -> ServingStack:
+        """The stack ``benchmark``'s recipe is served on: its framework, and the draft bounds it declares."""
+        framework = str(benchmark.get("framework") or "").lower()
+        return cls(framework, model_path, gpu_type, stack_fingerprint, DraftLimits.declared(benchmark))
 
 
 def _matches_unsafe_unified_attn_stack(serving: ServingStack) -> bool:
@@ -356,6 +372,7 @@ def _speculative_capability_reason(
         framework=serving.framework,
         envs={**base_envs, **(getattr(variant, "extra_envs", None) or {})},
         model_path=serving.model_path,
+        limits=serving.draft_limits,
     )
 
 
@@ -441,7 +458,7 @@ def apply_compatibility_filter(
         # describes it, so it is not a variant this base can own.
         skip_reason = _speculative_pin_reason(v, base_server_args=base_server_args, base_envs=base_envs or {})
         if skip_reason:
-            dropped.append({"name": v.name, "source": SPECULATIVE_DECODING_PINNED, "reason": skip_reason})
+            dropped.append({"name": v.name, "source": SERVE_FLAG, "reason": skip_reason})
             continue
         # xDiT do-not-set blacklist (env-keyed; precision lock + known crashes).
         if is_xdit:

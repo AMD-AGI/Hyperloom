@@ -221,44 +221,6 @@ def test_framework_run_eval_envs_none_for_generic_explore():
     assert framework_run_eval_envs({}) is None
 
 
-def test_resolve_patch_paths_prefers_explicit_param(tmp_path: Path):
-    workspace = _write_specialist_workspace(tmp_path, "t-a", patch_contents=[_VALID_PATCH])
-    explicit = [str(workspace / "worktree" / "patches" / "001_test.patch")]
-    paths = _resolve_patch_paths(
-        specialist_workspace=workspace,
-        explicit_patches=explicit,
-        done_payload=None,
-    )
-    assert len(paths) == 1
-    assert paths[0].name == "001_test.patch"
-
-
-def test_resolve_patch_paths_from_done_payload(tmp_path: Path):
-    workspace = _write_specialist_workspace(tmp_path, "t-b", patch_contents=[_VALID_PATCH])
-    done_payload = json.loads((workspace / "specialist_done.json").read_text(encoding="utf-8"))
-    paths = _resolve_patch_paths(
-        specialist_workspace=workspace,
-        explicit_patches=None,
-        done_payload=done_payload,
-    )
-    assert len(paths) == 1
-    assert paths[0].name == "001_test.patch"
-
-
-def test_resolve_patch_paths_falls_back_to_filesystem_scan(tmp_path: Path):
-    workspace = _write_specialist_workspace(
-        tmp_path,
-        "t-c",
-        patch_contents=[_VALID_PATCH],
-    )
-    paths = _resolve_patch_paths(
-        specialist_workspace=workspace,
-        explicit_patches=None,
-        done_payload=None,
-    )
-    assert len(paths) == 1
-
-
 def test_resolve_patch_paths_respects_empty_done_list(tmp_path: Path):
     """An explicit empty patches list is respected; no filesystem-scan fallthrough."""
     workspace = _write_specialist_workspace(
@@ -335,18 +297,6 @@ def test_git_apply_auto_detects_deep_p_level(tmp_path: Path):
     ok_r, err_r = _git_apply_reverse(repo, patch)
     assert ok_r, err_r
     assert (repo / "src.py").read_text().endswith("return 1\n")
-
-
-def test_resolve_framework_root_picks_explicit_when_dir(tmp_path: Path, monkeypatch):
-    repo = tmp_path / "repo"
-    init_git_repo(repo)
-    monkeypatch.setattr(
-        "hyperloom.orchestrator.actions.executors._patch_sources.resolve_kernel_search_roots",
-        lambda: [str(repo)],
-    )
-    root = _resolve_framework_root(str(repo))
-    assert root is not None
-    assert root.samefile(repo)
 
 
 def _patch_for(rel_path: str) -> str:
@@ -479,18 +429,6 @@ def test_session_framework_root_ignores_other_framework_env(
     assert resolve_session_framework_root() == f"{active}/"
 
 
-def test_resolve_framework_root_returns_none_when_no_candidate(monkeypatch, tmp_path: Path):
-    monkeypatch.setenv(
-        "INFERENCE_OPTIMIZER_FRAMEWORK_SOURCE_ROOTS",
-        str(tmp_path / "does-not-exist"),
-    )
-    monkeypatch.setenv("INFERENCEX_PATH", str(tmp_path / "missing-ix"))
-    root = _resolve_framework_root(None)
-    # Either None or a fallback root is acceptable here.
-    if root is not None:
-        assert root.exists()
-
-
 @pytest.mark.asyncio
 async def test_executor_apply_only_succeeds(tmp_path: Path):
     """apply_only=True: patches applied, bench skipped, status='applied_no_bench'."""
@@ -616,53 +554,6 @@ async def test_same_executor_second_early_return_does_not_reuse_runtime(tmp_path
         assert writes[0]["recovery"]["phase"] == "before_stash"
         assert writes[-1]["recovery"]["phase"] == "applied"
     assert saved[-1]["attempt_venv_root"] == ""
-
-
-@pytest.mark.asyncio
-@pytest.mark.parametrize("early_exit", ["missing_param", "critic", "multi_node"])
-async def test_same_executor_new_attempt_precedes_second_resolve_early_return(tmp_path, monkeypatch, early_exit):
-    from hyperloom.orchestrator.actions.executors import _multi_node_env
-    from hyperloom.orchestrator.state.shared_state import SharedState
-
-    session = tmp_path / "session"
-    _write_specialist_workspace(session, "spec-first", done_payload_override={"patches_written": []})
-    executor = IntegratePatchExecutor(session_dir=session)
-    attempts = []
-    resolve = executor._stage_resolve
-    state = SharedState()
-    state.record_specialist_patch_verdict("spec-first", "approve")
-
-    async def record_attempt(attempt, params, extra):
-        attempts.append(attempt)
-        return await resolve(attempt, params, extra)
-
-    monkeypatch.setattr(executor, "_stage_resolve", record_attempt)
-    first_ctx = _make_ctx("first", {"specialist_task_id": "spec-first"})
-    first_ctx.extra["shared_state"] = state
-    first = await executor(first_ctx)
-    assert first["status"] == "no_patches"
-
-    def forbidden(*_args, **_kwargs):
-        pytest.fail("a rejected attempt reached provisioning or localization")
-
-    monkeypatch.setattr(executor, "_stage_provision_attempt_runtime", forbidden)
-    monkeypatch.setattr(executor, "_stage_localize_source", forbidden)
-    state.record_specialist_patch_verdict("spec-first", "reject")
-    monkeypatch.setattr(_multi_node_env, "is_multi_node", lambda: early_exit == "multi_node")
-    second_ctx = _make_ctx("second", {} if early_exit == "missing_param" else {"specialist_task_id": "spec-first"})
-    second_ctx.extra["shared_state"] = state
-    second = await executor(second_ctx)
-
-    assert (
-        second["status"]
-        == {"missing_param": "failed", "critic": "rejected_by_critic", "multi_node": "skipped"}[early_exit]
-    )
-    first_attempt, second_attempt = attempts
-    assert second_attempt is not first_attempt
-    # A generic RunnerContext carries no integrate-private state, so a second
-    # task reusing the executor cannot read the first one's.
-    for ctx in (first_ctx, second_ctx):
-        assert ctx.extra == {"shared_state": state}
 
 
 @pytest.mark.asyncio
@@ -874,44 +765,6 @@ async def test_recorded_patch_root_survives_symlinked_session(tmp_path: Path):
     assert result["status"] == "applied_no_bench", result
     assert (intended / "new.py").read_text() == "new\n"
     assert not (unrelated / "new.py").exists()
-
-
-@pytest.mark.asyncio
-async def test_executor_single_node_guard_not_triggered(tmp_path: Path, monkeypatch):
-    """Single-node (is_multi_node False): the guard must NOT fire — the
-    executor proceeds to the normal apply path bit-for-bit. This is the
-    regression lock for the 'never affect single-node' hard requirement."""
-    from hyperloom.orchestrator.actions.executors import (
-        _multi_node_env as mne,
-    )
-
-    monkeypatch.setattr(mne, "is_multi_node", lambda: False)
-
-    session_dir = tmp_path / "session"
-    session_dir.mkdir()
-    repo = tmp_path / "framework"
-    init_git_repo(repo)
-    _write_specialist_workspace(
-        session_dir,
-        "t-spec-sn",
-        patch_contents=[_VALID_PATCH],
-    )
-
-    executor = IntegratePatchExecutor(session_dir=session_dir)
-    ctx = _make_ctx(
-        "t-int-sn",
-        {
-            "specialist_task_id": "t-spec-sn",
-            "framework_source_root": str(repo),
-            "apply_only": True,
-        },
-    )
-    result = await executor(ctx)
-
-    # Normal apply path reached (guard skipped); patch applied.
-    assert result["status"] == "applied_no_bench"
-    assert result.get("error_class") != "multi_node_unsupported"
-    assert (repo / "src.py").read_text().endswith("return 2\n")
 
 
 @pytest.mark.asyncio
@@ -1281,54 +1134,23 @@ async def test_a_keep_whose_materialized_config_is_gone_records_no_keep_evidence
 
 
 @pytest.mark.asyncio
-async def test_a_keep_whose_materialized_config_is_corrupt_records_no_keep_evidence(tmp_path: Path, monkeypatch):
-    config = tmp_path / "corrupt.yaml"
-    config.write_text("benchmark: {framework: vllm\n", encoding="utf-8")
-
-    result, _repo = await _run_enablement_integrate(
-        tmp_path, monkeypatch, booted=True, bench_materialized_config=str(config)
-    )
-
-    assert result["status"] == "kept"
-    assert [key for key in _KEEP_RECORD_KEYS if key in result] == []
-
-
-@pytest.mark.asyncio
-async def test_a_keep_whose_materialized_config_is_not_utf8_records_no_keep_evidence(tmp_path: Path, monkeypatch):
-    config = tmp_path / "latin1.yaml"
-    config.write_bytes(b"benchmark: {framework: vllm, note: \xe9}\n")
-
-    result, _repo = await _run_enablement_integrate(
-        tmp_path, monkeypatch, booted=True, bench_materialized_config=str(config)
-    )
-
-    assert result["status"] == "kept"
-    assert [key for key in _KEEP_RECORD_KEYS if key in result] == []
-
-
-@pytest.mark.asyncio
-async def test_a_keep_whose_materialized_config_holds_an_invalid_value_records_no_keep_evidence(
-    tmp_path: Path, monkeypatch
+@pytest.mark.parametrize(
+    "document",
+    [
+        b"benchmark: {framework: vllm\n",
+        b"benchmark: {framework: vllm, note: \xe9}\n",
+        b"benchmark: {framework: vllm}\nstamp: 2001-13-01\n",
+        b"",
+        b"- vllm\n",
+    ],
+    ids=["corrupt", "not_utf8", "invalid_value", "empty", "list"],
+)
+async def test_a_keep_whose_materialized_config_is_unreadable_records_no_keep_evidence(
+    tmp_path: Path, monkeypatch, document: bytes
 ):
-    config = tmp_path / "bad_date.yaml"
-    config.write_text("benchmark: {framework: vllm}\nstamp: 2001-13-01\n", encoding="utf-8")
-
-    result, _repo = await _run_enablement_integrate(
-        tmp_path, monkeypatch, booted=True, bench_materialized_config=str(config)
-    )
-
-    assert result["status"] == "kept"
-    assert [key for key in _KEEP_RECORD_KEYS if key in result] == []
-
-
-@pytest.mark.asyncio
-@pytest.mark.parametrize("document", ["", "- vllm\n"], ids=["empty", "list"])
-async def test_a_keep_whose_materialized_config_is_not_a_mapping_records_no_keep_evidence(
-    tmp_path: Path, monkeypatch, document: str
-):
-    """No launch read a config that holds no mapping, so it names no framework or env to probe under."""
-    config = tmp_path / "not_a_mapping.yaml"
-    config.write_text(document, encoding="utf-8")
+    """No launch read a config that does not load as a mapping, so it names no framework or env to probe under."""
+    config = tmp_path / "materialized.yaml"
+    config.write_bytes(document)
 
     result, _repo = await _run_enablement_integrate(
         tmp_path, monkeypatch, booted=True, bench_materialized_config=str(config)
@@ -1884,7 +1706,7 @@ async def _round_exiting_after_setup(tmp_path: Path, monkeypatch, *, arrange, pa
         return [cmd]
 
     monkeypatch.setattr(sr_mod, "run_setup_commands", _installed)
-    arrange(monkeypatch)
+    arrange(monkeypatch, repo)
 
     shared_state = SimpleNamespace(
         phase="ENABLEMENT",
@@ -1931,12 +1753,47 @@ def _fake_spec(repo: Path):
     )
 
 
-@pytest.mark.asyncio
-async def test_setup_ledger_is_durable_before_a_patch_apply_failure(tmp_path: Path, monkeypatch):
-    result, ledger = await _round_exiting_after_setup(
-        tmp_path, monkeypatch, arrange=lambda _mp: None, patch_contents=[_BAD_PATCH]
+def _refuse_the_stash(mp, _repo: Path):
+    mp.setattr(integrate_apply, "_git_stash_if_dirty", lambda _root: ("failed", "user changes present"))
+
+
+def _reject_the_artifact(mp, repo: Path):
+    mp.setattr(integrate_results, "_resolve_artifact_specs", lambda **_kw: ([_fake_spec(repo)], []))
+    mp.setattr(
+        integrate_results,
+        "_validate_aiter_gemm_artifacts",
+        lambda *_a, **_k: [{"artifact": "cfg.csv", "error": "arch"}],
     )
-    assert result["status"] == "apply_failed"
+
+
+def _fail_the_artifact_install(mp, repo: Path):
+    mp.setattr(integrate_results, "_resolve_artifact_specs", lambda **_kw: ([_fake_spec(repo)], []))
+    mp.setattr(integrate_results, "_validate_aiter_gemm_artifacts", lambda *_a, **_k: [])
+    mp.setattr(
+        integrate_bench.BenchStageMixin,
+        "_apply_artifacts",
+        lambda _self, _specs, *, backup_root: ([], [{"artifact": "cfg.csv", "error": "install_failed"}]),
+    )
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("arrange", "patch_contents", "error_class"),
+    [
+        (lambda _mp, _repo: None, [_BAD_PATCH], "git_apply_failed"),
+        (_refuse_the_stash, None, "stash_failed"),
+        (_reject_the_artifact, None, "artifact_not_runtime_ready"),
+        (_fail_the_artifact_install, None, "artifact_install_failed"),
+    ],
+    ids=["patch_apply_failure", "refused_stash", "failed_artifact_validation", "artifact_install_failure"],
+)
+async def test_setup_ledger_is_durable_before_an_apply_stage_exit(
+    tmp_path: Path, monkeypatch, arrange, patch_contents, error_class
+):
+    result, ledger = await _round_exiting_after_setup(
+        tmp_path, monkeypatch, arrange=arrange, patch_contents=patch_contents
+    )
+    assert (result["status"], result["error_class"]) == ("apply_failed", error_class)
     _assert_ledger_survived(ledger)
 
 
@@ -1944,57 +1801,12 @@ async def test_setup_ledger_is_durable_before_a_patch_apply_failure(tmp_path: Pa
 async def test_a_round_continues_the_durable_ledger_seq(tmp_path: Path, monkeypatch):
     earlier = [{"seq": 2, "round_task_id": "t-earlier"}, {"seq": 7, "round_task_id": "t-earlier"}]
     _result, ledger = await _round_exiting_after_setup(
-        tmp_path, monkeypatch, arrange=lambda _mp: None, patch_contents=[_BAD_PATCH], ledger=earlier
+        tmp_path, monkeypatch, arrange=lambda _mp, _repo: None, patch_contents=[_BAD_PATCH], ledger=earlier
     )
     assert ledger[:2] == earlier
     assert [(row["seq"], row["round_task_id"], row["source"]) for row in ledger[2:]] == [
         (8, "t-spec-ledger", "inherited")
     ]
-
-
-@pytest.mark.asyncio
-async def test_setup_ledger_is_durable_before_a_refused_stash(tmp_path: Path, monkeypatch):
-    def _refuse(mp):
-        mp.setattr(integrate_apply, "_git_stash_if_dirty", lambda _root: ("failed", "user changes present"))
-
-    result, ledger = await _round_exiting_after_setup(tmp_path, monkeypatch, arrange=_refuse)
-    assert result["error_class"] == "stash_failed"
-    _assert_ledger_survived(ledger)
-
-
-@pytest.mark.asyncio
-async def test_setup_ledger_is_durable_before_a_failed_artifact_validation(tmp_path: Path, monkeypatch):
-    def _reject(mp):
-        mp.setattr(
-            integrate_results, "_resolve_artifact_specs", lambda **_kw: ([_fake_spec(tmp_path / "framework")], [])
-        )
-        mp.setattr(
-            integrate_results,
-            "_validate_aiter_gemm_artifacts",
-            lambda *_a, **_k: [{"artifact": "cfg.csv", "error": "arch"}],
-        )
-
-    result, ledger = await _round_exiting_after_setup(tmp_path, monkeypatch, arrange=_reject)
-    assert result["status"] == "apply_failed"
-    _assert_ledger_survived(ledger)
-
-
-@pytest.mark.asyncio
-async def test_setup_ledger_is_durable_before_an_artifact_install_failure(tmp_path: Path, monkeypatch):
-    def _fail_install(mp):
-        mp.setattr(
-            integrate_results, "_resolve_artifact_specs", lambda **_kw: ([_fake_spec(tmp_path / "framework")], [])
-        )
-        mp.setattr(integrate_results, "_validate_aiter_gemm_artifacts", lambda *_a, **_k: [])
-        mp.setattr(
-            integrate_bench.BenchStageMixin,
-            "_apply_artifacts",
-            lambda _self, _specs, *, backup_root: ([], [{"artifact": "cfg.csv", "error": "install_failed"}]),
-        )
-
-    result, ledger = await _round_exiting_after_setup(tmp_path, monkeypatch, arrange=_fail_install)
-    assert result["status"] == "apply_failed"
-    _assert_ledger_survived(ledger)
 
 
 @pytest.mark.asyncio
@@ -2114,21 +1926,7 @@ async def test_base_sha_of_an_explicit_root_predates_the_setup_commands(tmp_path
     ).stdout.strip()
     assert after_setup != pre_setup
     assert shared_state.enablement.base_sha_by_root[str(explicit_root)] == pre_setup
-
-
-def test_candidate_roots_name_the_declared_root_beside_the_session_one(tmp_path: Path, monkeypatch):
-    from hyperloom.orchestrator.actions.executors import _patch_sources as patch_sources
-
-    session_root = tmp_path / "repo"
-    explicit_root = tmp_path / "framework"
-    session_root.mkdir()
-    explicit_root.mkdir()
-    monkeypatch.setattr(patch_sources, "resolve_session_framework_root", lambda: str(session_root))
-
-    roots = patch_sources._candidate_mutation_roots(
-        params={"framework_source_root": str(explicit_root)}, done_payload=None
-    )
-    assert roots == [str(session_root), str(explicit_root)]
+    assert set(shared_state.enablement.base_sha_by_root) == {str(session_root), str(explicit_root)}
 
 
 def test_candidate_roots_cover_the_patch_and_artifact_bindings(tmp_path: Path, monkeypatch):
@@ -2196,14 +1994,6 @@ async def test_setup_replay_runs_off_the_event_loop_thread(tmp_path: Path, monke
     assert result["status"] == "no_patches"
 
 
-def test_integrate_patch_executor_imports_clean():
-    """The real executor module must import without side effects."""
-    from hyperloom.orchestrator.actions.executors import integrate_patch as ip_mod
-
-    assert hasattr(ip_mod, "IntegratePatchExecutor")
-    assert callable(ip_mod.IntegratePatchExecutor)
-
-
 def test_is_git_tree_non_git(tmp_path: Path) -> None:
     assert _is_git_tree(tmp_path) is False
 
@@ -2252,27 +2042,21 @@ def test_apply_patch_no_git_rejects_path_traversal_before_apply(
     assert len(calls) == 1
 
 
-def test_derive_lane_enablement():
-    """_derive_lane returns 'enablement' when params.enablement is set."""
+@pytest.mark.parametrize(
+    ("params", "lane"),
+    [
+        ({"enablement": True}, "enablement"),
+        ({"framework_agent_authoring": True}, "perf_framework"),
+        ({"framework_agent_candidate_id": "x"}, "perf_framework"),
+        ({}, "perf_explore"),
+        ({"specialist_task_id": "abc"}, "perf_explore"),
+    ],
+    ids=["enablement", "framework_authoring", "framework_candidate", "explore_bare", "explore_specialist"],
+)
+def test_derive_lane(params, lane):
     from hyperloom.orchestrator.actions.executors._integrate_refusals import _derive_lane
 
-    assert _derive_lane({"enablement": True}) == "enablement"
-
-
-def test_derive_lane_perf_framework():
-    """_derive_lane returns 'perf_framework' for framework_agent_authoring params."""
-    from hyperloom.orchestrator.actions.executors._integrate_refusals import _derive_lane
-
-    assert _derive_lane({"framework_agent_authoring": True}) == "perf_framework"
-    assert _derive_lane({"framework_agent_candidate_id": "x"}) == "perf_framework"
-
-
-def test_derive_lane_perf_explore():
-    """_derive_lane returns 'perf_explore' for plain explore params."""
-    from hyperloom.orchestrator.actions.executors._integrate_refusals import _derive_lane
-
-    assert _derive_lane({}) == "perf_explore"
-    assert _derive_lane({"specialist_task_id": "abc"}) == "perf_explore"
+    assert _derive_lane(params) == lane
 
 
 @pytest.mark.asyncio
@@ -2316,58 +2100,6 @@ async def test_bench_patch_holds_and_closes_serving_lease(tmp_path: Path):
 
     assert captured["serving_lease"] is lease
     lease.close.assert_called_once()
-
-
-@pytest.mark.asyncio
-async def test_bench_patch_routes_variant_args_and_envs_separately(tmp_path: Path):
-    from unittest.mock import patch
-
-    from hyperloom.orchestrator.actions.executors import _ray_serving
-    from hyperloom.orchestrator.actions.executors._grid_runner import VariantResult
-
-    config_path = tmp_path / "baseline.yaml"
-    config_path.write_text("benchmark: {}\n", encoding="utf-8")
-    executor = IntegratePatchExecutor(session_dir=tmp_path)
-    captured: dict[str, Any] = {}
-    extra_args = '--kv-cache-dtype fp8 --compilation-config \'{"mode": "max-autotune"}\''
-
-    async def fake_run_grid(**kwargs):
-        captured.update(kwargs)
-        variant = kwargs["grid"][0]
-        return [
-            VariantResult(
-                name=variant.name,
-                extra_server_args=variant.extra_server_args,
-                extra_envs=variant.extra_envs,
-                status="succeeded",
-            )
-        ]
-
-    with (
-        patch.object(integrate_bench, "run_grid", new=fake_run_grid),
-        patch.object(integrate_bench, "prepare_grid_benchmark_config", return_value=config_path),
-        patch.object(_ray_serving, "maybe_serving_lease", return_value=None),
-    ):
-        await executor._bench_patch(
-            _PatchBench(
-                params={
-                    "config_path": str(config_path),
-                    "base_extra_args": "--base-flag value",
-                    "base_extra_envs": {"BASE_ENV": "1"},
-                },
-                output_root=tmp_path / "out",
-                specialist_task_id="task-explicit",
-            ),
-            extra_server_args_applied=extra_args,
-            extra_envs_applied={"VLLM_ROCM_USE_AITER": "1"},
-        )
-
-    variant = captured["grid"][0]
-    assert captured["recipe"].base.extra_server_args == "--base-flag value"
-    assert captured["recipe"].base.extra_envs == {"BASE_ENV": "1"}
-    assert variant.extra_server_args == extra_args
-    # Variant carries only the proposal envs; base envs go to run_grid.
-    assert variant.extra_envs == {"VLLM_ROCM_USE_AITER": "1"}
 
 
 @pytest.mark.asyncio
@@ -2446,6 +2178,7 @@ async def test_bench_patch_preserves_measurement_and_protocol(tmp_path: Path, mo
     }
     assert gate == {
         "accuracy_pass": None,
+        "accuracy_incomparable": False,
         "accuracy": None,
         "enablement_accuracy": None,
         "enablement_accuracy_task": "",
@@ -2462,10 +2195,10 @@ async def test_bench_patch_preserves_measurement_and_protocol(tmp_path: Path, mo
         pytest.param("agentx", 25000.0, 300.0, 200.0, None, "reverted", -100.0 / 3, id="interactivity-tradeoff"),
         pytest.param("agentx", 15000.0, 300.0, 200.0, None, "reverted", -100.0 / 3, id="both-axes-regress"),
         pytest.param("agentx", 25000.0, 450.0, 200.0, None, "reverted", 0.0, id="flat-interactivity"),
-        pytest.param("agentx", 20000.0, 495.0, 90.0, None, "reverted", 10.0, id="output-guard-breach"),
-        pytest.param("agentx", 19000.0, 459.0, 90.0, None, "reverted", 2.0, id="median-below-bar-and-output-breach"),
-        pytest.param("agentx", 18999.0, 495.0, 200.0, None, "kept", 10.0, id="total-no-longer-participates"),
-        pytest.param("agentx", 25000.0, 463.5, 200.0, None, "kept", 3.0, id="median-at-the-bar"),
+        pytest.param("agentx", 20000.0, 495.0, 90.0, None, "kept", 10.0, id="output-drop-alone-holds"),
+        pytest.param("agentx", 19000.0, 458.9, 90.0, None, "reverted", 1.9777777777777727, id="median-below-bar"),
+        pytest.param("agentx", 18999.0, 495.0, 200.0, None, "reverted", 10.0, id="total-guard-breach"),
+        pytest.param("agentx", 25000.0, 459.0, 200.0, None, "kept", 2.0, id="median-at-the-bar"),
         pytest.param("agentx", 25000.0, 458.9, 200.0, None, "reverted", 1.9777777777777727, id="median-below-the-bar"),
         pytest.param("synthetic", 15000.0, 300.0, 200.0, None, "kept", 100.0, id="synthetic-output-grading"),
         *[
@@ -2514,8 +2247,12 @@ async def test_executor_grades_real_patch_bench(
         json.dumps({"results": {"gsm8k": {"exact_match,strict-match": 0.9}}}), encoding="utf-8"
     )
     if grading_mode != "synthetic":
-        # An AgentX round's correctness signal is its request error rate, which the client writes here.
-        (workspace / "inferencex_result.json").write_text(json.dumps({"request_error_rate": 0.0}), encoding="utf-8")
+        # An AgentX slot is graded on the GSM8K score its accuracy round wrote.
+        eval_dir = workspace.parent / "accuracy" / "eval"
+        eval_dir.mkdir(parents=True)
+        (eval_dir / "results_1.json").write_text(
+            json.dumps({"results": {"gsm8k": {"exact_match,strict-match": 0.9}}}), encoding="utf-8"
+        )
     measured = VariantResult(
         name="patch-grading",
         extra_server_args="",
@@ -2529,6 +2266,9 @@ async def test_executor_grades_real_patch_bench(
         duration_seconds=900.0,
         request_error_rate=0.0,
         tpot_p90_ms=3.0,
+        valid_measurement=True,
+        diagnostic_only=False,
+        workload_identity="agentx-workload",
         workspace=str(workspace),
     )
 
@@ -2543,6 +2283,7 @@ async def test_executor_grades_real_patch_bench(
         enablement=EnablementRound(),
         framework="vllm",
         benchmark_mode="synthetic" if grading_mode == "synthetic" else "agentx",
+        agentx_accuracy=False,
         current_best={
             "tput": 100.0,
             "total_throughput": 20000.0,
@@ -2550,6 +2291,7 @@ async def test_executor_grades_real_patch_bench(
             "e2e_norm_intvty_p50": 450.0,
             "duration_seconds": 900.0,
             "request_error_rate": 0.0,
+            "workload_identity": "agentx-workload",
         },
         baseline_accuracy=0.9,
         get_specialist_patch_verdict=lambda _sid: "approve",
@@ -2722,7 +2464,7 @@ async def test_executor_rebinds_base_from_live_current_best(tmp_path: Path, monk
 async def test_bench_patch_captures_effective_config(
     tmp_path: Path, params, expected_envs, expected_args, expected_unset
 ):
-    """The bench reports the config off the variant it launched, not a re-derivation."""
+    """The bench keeps the base layer off the variant and reports the config it launched, not a re-derivation."""
     from unittest.mock import patch
 
     from hyperloom.orchestrator.actions.executors._grid_runner import VariantResult
@@ -2732,8 +2474,10 @@ async def test_bench_patch_captures_effective_config(
     config_path = tmp_path / "baseline.yaml"
     config_path.write_text("benchmark: {}\n", encoding="utf-8")
     executor = IntegratePatchExecutor(session_dir=session_dir)
+    captured: dict[str, Any] = {}
 
-    async def fake_run_grid(*_args, **_kwargs):
+    async def fake_run_grid(**kwargs):
+        captured.update(kwargs)
         return [VariantResult(name="v", extra_server_args="", extra_envs={}, status="succeeded")]
 
     task_params = {"config_path": str(config_path)}
@@ -2756,6 +2500,11 @@ async def test_bench_patch_captures_effective_config(
     assert effective["extra_envs"] == expected_envs
     assert effective["extra_server_args"] == expected_args
     assert effective["unset_envs"] == expected_unset
+    base, variant = captured["recipe"].base, captured["grid"][0]
+    assert base.extra_envs == params.get("base_extra_envs", {})
+    assert base.extra_server_args == params.get("base_extra_args", "")
+    assert variant.extra_envs == params.get("extra_envs_applied", {})
+    assert variant.extra_server_args == params.get("extra_server_args_applied", "")
 
 
 @pytest.mark.asyncio

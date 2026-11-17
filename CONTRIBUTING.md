@@ -11,7 +11,7 @@ Thank you for helping improve Hyperloom. This guide covers the expected workflow
 
 ## Proposing a new framework or platform
 
-Hyperloom includes external components (GEAK, Magpie, TraceLens, IntelliKit, frameworks). Work bring-up for a new framework or platform through the owning components before integration code lands, and open a tracking issue for it. Owners are named in [`.github/CODEOWNERS`](.github/CODEOWNERS).
+Hyperloom includes external components (GEAK, TraceLens, IntelliKit, frameworks). Work bring-up for a new framework or platform through the owning components before integration code lands, and open a tracking issue for it. Owners are named in [`.github/CODEOWNERS`](.github/CODEOWNERS).
 
 ## CI and documentation-only changes
 

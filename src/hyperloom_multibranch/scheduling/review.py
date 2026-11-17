@@ -3,11 +3,11 @@
 
 """A person's review of the session's agent map, before the agent branches open.
 
-With the review on (the default; ``run --no-review-gate`` turns it off), a session with Arbor agents waits once their
-map is made, before it splits the map and before their branches open, holding no lease for it, and writes two files in
-its ``MB-review`` directory (:func:`request`): ``review.json``, the review's state (``pending``), and ``REVIEW.md``,
-what the person reads: the map's directions, the dossier, and the commands. The person may edit the map file and the
-dossier where they lie, then decides with ``hyperloom-multibranch review --session DIR approve|reject``
+With the review on (the default; ``run --no-review-gate`` turns it off), a session with component agents waits once
+their map is made, before it splits the map and before their branches open, holding no lease for it, and writes two
+files in its ``MB-review`` directory (:func:`request`): ``review.json``, the review's state (``pending``), and
+``REVIEW.md``, what the person reads: the map's directions, the dossier, and the commands. The person may edit the map
+file and the dossier where they lie, then decides with ``hyperloom-multibranch review --session DIR approve|reject``
 (:func:`decide`). That needs no running session: the file on the session's storage is the whole protocol, so a person
 on a login node can decide for a session on a GPU node. The decision is who decided, when and why, and nothing that
 machine reads of the session's files, which it may see under other paths or not at all.
@@ -18,8 +18,8 @@ what its branches get. A map ``--agent-directions`` gives is reviewed before EXP
 does not count against ``--max-hours`` (EXPLORE ends that much later), and a rejection ends the session with
 ``review_rejected``. The map a mapping branch makes, the dossier pass's or one generated from the root's shares, is
 reviewed in EXPLORE, where only that branch waits: the other branches go on, the clock runs, and a rejection opens no
-share branch. That page has a clock: when EXPLORE ends, and by when a decision still leaves each share the time an
-Arbor needs for one iteration; ``show`` says how long is left.
+share branch. That page has a clock: when EXPLORE ends, and by when a decision still leaves each share the time a
+component agent needs for one iteration; ``show`` says how long is left.
 
 A session that stops after its map (``--stop-after-map``) does not pause: its stop is the review point, and its map is
 reviewed offline, then given to a second run (``--agent-directions``, ``--agent-dossier``).
@@ -41,7 +41,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
-from hyperloom_common.io import atomic_write_json, atomic_write_text
+from hyperloom_common.shared_storage import make_shared_dirs, write_shared_text
 from hyperloom_multibranch.scheduling.layout import REVIEW_DIR
 
 REVIEW_FILE = "review.json"
@@ -66,7 +66,7 @@ ISO = "%Y-%m-%dT%H:%M:%SZ"
 #: What ``REVIEW.md`` says before and after the commands: for a review that pauses the session, before EXPLORE, and for
 #: one in EXPLORE, where the clock runs (:func:`_clock`).
 PAUSED = (
-    "The session paused once its Arbor agents' map was made, before it splits the map and before any agent branch",
+    "The session paused once its component agents' map was made, before it splits the map and before any agent branch",
     "opens; it holds no cards.",
 )
 PAUSED_DECIDED = (
@@ -74,11 +74,11 @@ PAUSED_DECIDED = (
     "(`review_rejected`) and opens none. The pause does not count against --max-hours.",
 )
 RUNNING = (
-    "A mapping branch made the Arbor agents' map. **The session does not pause for this review:** its other branches",
-    "go on, and EXPLORE ends when it would have.",
+    "A mapping branch made the component agents' map. **The session does not pause for this review:** its other",
+    "branches go on, and EXPLORE ends when it would have.",
 )
 RUNNING_DECIDED = (
-    "Approved, the session reads the map and the dossier again and opens one share branch per Arbor on them;",
+    "Approved, the session reads the map and the dossier again and opens one share branch per component agent on them;",
     "rejected, it opens none and goes on.",
 )
 
@@ -129,7 +129,7 @@ def digests(map_file: Path | None, dossier: Path | None) -> dict[str, str]:
 
 
 def directions(map_file: Path | None) -> list[Mapping[str, Any]]:
-    """The directions of an Arbor map file (``{"directions": [...]}`` or a list), ``[]`` when it cannot be read."""
+    """The directions of an agent map file (``{"directions": [...]}`` or a list), ``[]`` when it cannot be read."""
 
     if map_file is None:
         return []
@@ -145,8 +145,8 @@ def request(directory: Path, session: Path, shown: Reviewed, now: float) -> dict
     """Ask for a review of what ``shown`` names, for the session in ``session``: write ``REVIEW.md`` and a pending
     ``review.json`` in ``directory``; the state written."""
 
-    directory.mkdir(parents=True, exist_ok=True)
-    atomic_write_text(directory / REVIEW_PAGE, _page(session, shown, now))
+    make_shared_dirs(directory)
+    write_shared_text(directory / REVIEW_PAGE, _page(session, shown, now))
     state = {
         "status": PENDING,
         "requested_at_iso": _iso(now),
@@ -161,7 +161,7 @@ def request(directory: Path, session: Path, shown: Reviewed, now: float) -> dict
         "requested_digests": digests(shown.map_file, shown.dossier),
         "changed": [],
     }
-    atomic_write_json(directory / REVIEW_FILE, state)
+    _save(directory, state)
     return state
 
 
@@ -183,9 +183,15 @@ async def wait(directory: Path, sleep: Callable[[float], Awaitable[None]]) -> di
         state = load(directory)
         if state is not None and state.get("status") in (APPROVED, REJECTED):
             state["changed"] = _changed(state)
-            atomic_write_json(directory / REVIEW_FILE, state)
+            _save(directory, state)
             return state
         await sleep(POLL_SECONDS)
+
+
+def _save(directory: Path, state: Mapping[str, Any]) -> None:
+    """Write ``review.json`` through the writers a shared run's other records use (group-writable, ``664``, below
+    shared storage), so an account other than the one that wrote it can still replace it."""
+    write_shared_text(directory / REVIEW_FILE, json.dumps(state, indent=2, sort_keys=True))
 
 
 def _changed(state: Mapping[str, Any]) -> list[str]:
@@ -208,7 +214,7 @@ def decide(directory: Path, approve: bool, by: str | None, note: str, now: float
     if state.get("status") != PENDING:
         return [f"the review is already {state.get('status')}"]
     state.update(status=APPROVED if approve else REJECTED, decided_at_iso=_iso(now), by=by or _login(), note=note)
-    atomic_write_json(directory / REVIEW_FILE, state)
+    _save(directory, state)
     return []
 
 
@@ -251,7 +257,7 @@ def _page(session: Path, shown: Reviewed, now: float) -> str:
         for entry in listed
     ]
     parts = sorted(path.name for path in dossier.iterdir()) if dossier is not None and dossier.is_dir() else []
-    mapped = f"`{map_file}` ({made_by})" if map_file is not None else "none could be made: each Arbor maps its own"
+    mapped = f"`{map_file}` ({made_by})" if map_file is not None else "none was made: each component agent maps its own"
     paused = shown.explore_end is None
     lines = [
         f"# Review before the agent branches open: {session.name}",
@@ -283,7 +289,7 @@ def _clock(session: Path, shown: Reviewed, now: float) -> list[str]:
     if open_by is not None:
         by = [
             f"- **Decide by about:** {_iso(open_by)}, {(open_by - now) / 60:.0f} min after it was asked. After that",
-            "  the shares would start with less than one Arbor iteration needs before their cutoff, and none would open.",
+            "  the shares would start with less than one iteration of a component agent needs, and none would open.",
         ]
     return [
         "",

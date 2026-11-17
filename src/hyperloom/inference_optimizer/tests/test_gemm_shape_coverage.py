@@ -285,17 +285,11 @@ class TestFmoeDispatchParsing:
         report = fmoe_tuned_config_coverage(tuned_fmoe_csv_rows(path), [record])
         assert report["covered"] == 0
 
-    def test_resolve_merged_candidate_fmoe_csv(self, tmp_path):
-        bare = tmp_path / "candidate_fmoe.csv"
+    @pytest.mark.parametrize("bare_name", ["candidate_fmoe.csv", "tuned_fmoe.csv"], ids=["candidate", "tuned"])
+    def test_resolve_merged_fmoe_csv_to_its_bare_sibling(self, tmp_path, bare_name):
+        bare = tmp_path / bare_name
         bare.write_text("gfx\n", encoding="utf-8")
-        merged = tmp_path / "merged_candidate_fmoe.csv"
-        merged.write_text("gfx\n", encoding="utf-8")
-        assert resolve_fmoe_candidate_csv(merged) == bare
-
-    def test_resolve_merged_tuned_fmoe_csv(self, tmp_path):
-        bare = tmp_path / "tuned_fmoe.csv"
-        bare.write_text("gfx\n", encoding="utf-8")
-        merged = tmp_path / "merged_tuned_fmoe.csv"
+        merged = tmp_path / f"merged_{bare_name}"
         merged.write_text("gfx\n", encoding="utf-8")
         assert resolve_fmoe_candidate_csv(merged) == bare
 
@@ -376,8 +370,13 @@ class TestTunedCsvCoverage:
         assert report["requested"] == 0
         assert report["coverage_pct"] is None
 
-    def test_retry_integrate_dir_is_scanned(self, tmp_path):
-        """A ``-2`` retry replaces the first attempt; it must not be ignored."""
+    @pytest.mark.parametrize(
+        ("retry_mtime", "first_mtime", "expected"),
+        [(2_000_000_000, 1_000_000_000, "retry attempt"), (1_000_000_000, 2_000_000_000, "first attempt")],
+        ids=["retry-newer", "first-newer"],
+    )
+    def test_retry_integrate_dir_is_scanned(self, tmp_path, retry_mtime, first_mtime, expected):
+        """A ``-2`` retry is scanned beside the first attempt, and the newer ``server.log`` of the two is read."""
         from hyperloom.orchestrator.kernel.gemm_shape_coverage import read_latest_integrate_server_log
 
         integrate = tmp_path / "runs" / "integrate"
@@ -387,12 +386,12 @@ class TestTunedCsvCoverage:
             d.mkdir(parents=True)
         (first / "server.log").write_text("first attempt", encoding="utf-8")
         (retry / "server.log").write_text("retry attempt", encoding="utf-8")
-        os.utime(retry / "server.log", (2_000_000_000, 2_000_000_000))
-        os.utime(first / "server.log", (1_000_000_000, 1_000_000_000))
+        os.utime(retry / "server.log", (retry_mtime, retry_mtime))
+        os.utime(first / "server.log", (first_mtime, first_mtime))
 
         found = read_latest_integrate_server_log(tmp_path, "integrate-gemm_tune_fmoe_ck")
         assert found is not None
-        assert found[1] == "retry attempt"
+        assert found[1] == expected
 
     def test_runtime_confirmed_hit_counts_as_covered(self):
         """aiter saying it used a row beats our replay of its padding rules."""
@@ -428,24 +427,18 @@ class TestCoverageGateDoesNotBlockOnMissingEvidence:
 
         return KernelPhase._gemm_tuned_config_coverage_impl(phase, "aiter_dense", {"AITER_CONFIG_GEMM": str(csv_path)})
 
-    def test_unreadable_csv_is_undetermined_not_zero_coverage(self, tmp_path):
+    @pytest.mark.parametrize("csv_text", ["", "a,b,c\n1,2,3\n"], ids=["empty", "no-shape-columns"])
+    def test_unreadable_csv_is_undetermined_not_zero_coverage(self, tmp_path, csv_text):
         phase = self._phase(tmp_path)
-        empty = tmp_path / "candidate.csv"
-        empty.write_text("", encoding="utf-8")
+        candidate = tmp_path / "candidate.csv"
+        candidate.write_text(csv_text, encoding="utf-8")
 
-        assert self._call(phase, empty) is None
+        assert self._call(phase, candidate) is None
 
     def test_missing_csv_is_undetermined(self, tmp_path):
         phase = self._phase(tmp_path)
 
         assert self._call(phase, tmp_path / "absent.csv") is None
-
-    def test_csv_without_shape_columns_is_undetermined(self, tmp_path):
-        phase = self._phase(tmp_path)
-        odd = tmp_path / "candidate.csv"
-        odd.write_text("a,b,c\n1,2,3\n", encoding="utf-8")
-
-        assert self._call(phase, odd) is None
 
     def test_readable_csv_with_wrong_keys_still_reports_zero(self, tmp_path):
         """Fail-open on unreadable input must not weaken the real check."""
@@ -523,13 +516,6 @@ class TestSafeMtime:
         from hyperloom.orchestrator.kernel.gemm_shape_coverage import _safe_mtime
 
         assert _safe_mtime(tmp_path / "gone.log") == 0.0
-
-    def test_existing_path_returns_its_mtime(self, tmp_path):
-        from hyperloom.orchestrator.kernel.gemm_shape_coverage import _safe_mtime
-
-        path = tmp_path / "server.log"
-        path.write_text("x", encoding="utf-8")
-        assert _safe_mtime(path) == path.stat().st_mtime
 
 
 class TestE2EValidationFailsOpen:

@@ -48,7 +48,8 @@ class EnablementRound:
     origin: str = ""
     accuracy_floor: float = 0.0
     probe_config_path: str = ""
-    eval_contract_fingerprint: str = ""
+    # The eval definition digest the failed baseline eval ran under, "" outside an inference_suite round.
+    eval_definition_digest: str = ""
     baseline_eval_evidence: str = ""
     baseline_eval_kind: str = ""
     observed_accuracy: float = 0.0
@@ -75,10 +76,6 @@ class EnablementRound:
     # Ordered, deduped allowlisted env-setup shell commands prior rounds ran; re-run idempotently by integrate_patch
     # before applying patches and booting.
     setup_commands: list = field(default_factory=list)
-    # Digests of server argvs that have already spent their one drop-only
-    # preflight repair. A distinct argv gets exactly one; the same argv failing
-    # again is terminal.
-    argv_repairs: list = field(default_factory=list)
     # Launch-log hashes already recorded as needs_human_review; one record per log.
     human_review_logged: list = field(default_factory=list)
     # Path to the materialized config produced by the KEEP'd candidate bench.

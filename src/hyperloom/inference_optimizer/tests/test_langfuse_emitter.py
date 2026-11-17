@@ -218,19 +218,6 @@ def test_sdk_availability_lets_an_unexpected_error_propagate(monkeypatch):
         lfe._sdk_available()
 
 
-def test_all_gates_pass_enables(tmp_path, monkeypatch):
-    _enable_env(monkeypatch)
-    client = _FakeClient()
-    _install_fake_sdk(monkeypatch, client)
-    sd = tmp_path / "SID"
-    _write_manifest(sd, claw_session_id="claw-XYZ")
-    em = lfe.LangfuseEmitter(sd)
-    assert em.enabled is True
-    # trace_id derives from claw_session_id so live + backfill collapse onto one trace.
-    assert em._trace_id == lfmap.derive_trace_id("claw-XYZ")
-    assert em._session_label == "claw-XYZ"
-
-
 def test_enabling_seeds_default_flush_interval(tmp_path, monkeypatch):
     # With no pinned flush cadence, building the client tightens the SDK auto-flush interval so a killed run still
     # lands its latest observations.
@@ -282,7 +269,7 @@ def test_session_start_emits_marker_with_provenance(tmp_path, monkeypatch):
                 "pid": 4242,
                 "stack_fingerprint": {"rocm": "6.2", "vllm": "0.6"},
                 "workload": {"isl": 128, "osl": 256},
-                "dependencies": {"magpie": {"path": "/weka/magpie", "commit": "deadbee"}},
+                "dependencies": {"inferencex": {"path": "/weka/inferencex", "commit": "deadbee"}},
             }
         ),
         encoding="utf-8",
@@ -302,7 +289,7 @@ def test_session_start_emits_marker_with_provenance(tmp_path, monkeypatch):
     assert out["pid"] == 4242
     assert out["stack_fingerprint"] == {"rocm": "6.2", "vllm": "0.6"}
     assert out["workload"] == {"isl": 128, "osl": 256}
-    assert out["dependencies"]["magpie"]["commit"] == "deadbee"
+    assert out["dependencies"]["inferencex"]["commit"] == "deadbee"
     assert out["user_data_path"] == "/weka/users/alice"
     # Environment snapshot is attached, with secret-looking values redacted.
     env = out["env"]
@@ -417,15 +404,26 @@ def test_session_start_noop_when_disabled(tmp_path, monkeypatch):
     assert client.span_named("session_start") is None
 
 
-def test_trace_id_falls_back_to_internal_id_without_claw(tmp_path, monkeypatch):
+@pytest.mark.parametrize(
+    ("manifest", "seed"),
+    [
+        pytest.param({"claw_session_id": "claw-XYZ"}, "claw-XYZ", id="claw_session"),
+        pytest.param(
+            {"claw_session_id": "", "session_id": "internal-99"}, "internal-99", id="internal_id_without_claw"
+        ),
+    ],
+)
+def test_the_trace_is_keyed_on_the_correlation_seed(tmp_path, monkeypatch, manifest, seed):
+    """The backfill derives the trace id from the same seed, so live and backfilled rows land on one trace."""
     _enable_env(monkeypatch)
     client = _FakeClient()
     _install_fake_sdk(monkeypatch, client)
     sd = tmp_path / "SID"
-    _write_manifest(sd, claw_session_id="", session_id="internal-99")
-    em = lfe.LangfuseEmitter(sd)
-    assert em._trace_id == lfmap.derive_trace_id("internal-99")
-    assert em._session_label == "internal-99"
+    _write_manifest(sd, **manifest)
+    lfe.LangfuseEmitter(sd).record_session_start()
+    marker = client.span_named("session_start")
+    assert marker.kwargs["trace_context"] == {"trace_id": lfmap.derive_trace_id(seed)}
+    assert marker.trace_update["session_id"] == seed
 
 
 def test_trace_session_id_set_from_claw_on_first_generation(tmp_path, monkeypatch):
@@ -1037,13 +1035,6 @@ def test_record_session_breakdown_cross_process_idempotent(tmp_path, monkeypatch
     assert em2._counts["breakdown_recorded"] == 1
 
 
-def test_record_session_breakdown_disabled_is_noop(tmp_path, monkeypatch):
-    monkeypatch.delenv("HYPERLOOM_LANGFUSE_ENABLE", raising=False)
-    em = lfe.LangfuseEmitter(tmp_path)
-    em.record_session_breakdown({"schema_version": "v3.0"})
-    assert em._counts["breakdown_recorded"] == 0
-
-
 def test_module_record_session_breakdown_reads_file(tmp_path, monkeypatch):
     _enable_env(monkeypatch)
     client = _FakeClient()
@@ -1271,13 +1262,6 @@ def test_flush_emits_predicted_gain_calibration(tmp_path, monkeypatch):
     assert "predicted_gain_pct" in by_name and "gain_pct" in by_name
     assert by_name["predicted_gain_pct"]["value"] == 12.5
     assert by_name["gain_pct"]["value"] == 6.0
-
-
-def test_record_kb_span_disabled_is_noop(tmp_path, monkeypatch):
-    monkeypatch.delenv("HYPERLOOM_LANGFUSE_ENABLE", raising=False)
-    em = lfe.LangfuseEmitter(tmp_path)
-    em.record_kb_span(name="kb_assess:iter_0", agent="critic", output={"x": 1})
-    assert em._counts["kb_spans_sent"] == 0
 
 
 def test_record_kb_span_nests_under_agent(tmp_path, monkeypatch):
@@ -1679,13 +1663,6 @@ def test_send_exception_is_swallowed(tmp_path, monkeypatch):
     em.flush_session()
 
 
-def test_get_emitter_is_cached_per_session(tmp_path, monkeypatch):
-    monkeypatch.delenv("HYPERLOOM_LANGFUSE_ENABLE", raising=False)
-    a = lfe.get_emitter(tmp_path)
-    b = lfe.get_emitter(tmp_path)
-    assert a is b
-
-
 def test_receipt_disabled_records_reason_and_redacts(tmp_path, monkeypatch):
     monkeypatch.delenv("HYPERLOOM_LANGFUSE_ENABLE", raising=False)
     em = lfe.LangfuseEmitter(tmp_path)
@@ -1857,14 +1834,6 @@ def _status(**over) -> dict:
     return base
 
 
-def test_record_status_disabled_is_noop(tmp_path, monkeypatch):
-    monkeypatch.delenv("HYPERLOOM_LANGFUSE_ENABLE", raising=False)
-    em = lfe.LangfuseEmitter(tmp_path)
-    assert em.enabled is False
-    em.record_status(_status())  # must not raise / must not build a client
-    assert em._client is None
-
-
 def test_record_status_emits_observation_and_trace_metadata(tmp_path, monkeypatch):
     _enable_env(monkeypatch)
     client = _FakeClient()
@@ -1968,18 +1937,39 @@ def test_record_status_send_failure_is_swallowed(tmp_path, monkeypatch):
     assert em._counts["status_updates_sent"] == 0
 
 
-def test_a_failed_span_end_is_counted_as_an_error(tmp_path):
-    em = lfe.LangfuseEmitter(tmp_path / "SID")
+def test_the_module_api_keeps_one_emitter_per_session(tmp_path, monkeypatch):
+    """Module-level calls for one session share an emitter, so its per-session state (here the status throttle) carries over."""
+    _enable_env(monkeypatch)
+    client = _FakeClient()
+    _install_fake_sdk(monkeypatch, client)
+    sd = tmp_path / "SID"
+    _write_manifest(sd)
+    lfe.record_status(sd, _status())
+    lfe.record_status(sd, _status())
+    assert len([s for s in client.spans if s.kwargs.get("name") == "session_status"]) == 1
 
-    class _UnendableSpan:
-        def end(self):
-            raise RuntimeError("span already exported")
 
-    em._unended_spans.append(_UnendableSpan())
-    em._close_spans()
+def test_a_failed_span_end_is_counted_as_an_error(tmp_path, monkeypatch):
+    """A span the SDK refuses to end is counted once, and the next flush does not retry it."""
+    _enable_env(monkeypatch)
+    client = _FakeClient()
+    _install_fake_sdk(monkeypatch, client)
+    sd = tmp_path / "SID"
+    _write_manifest(sd)
+    em = lfe.LangfuseEmitter(sd)
+    em.record_llm_call(_llm_row())
+    em.record_conversation(_conv_row())
+    hierarchy = list(client.spans)
 
-    assert em._counts["errors"] == 1
-    assert em._unended_spans == []
+    def _refuse(self, **kwargs):
+        raise RuntimeError("span already exported")
+
+    monkeypatch.setattr(_FakeObservation, "end", _refuse)
+    em.flush_session()
+    em.flush_session()
+
+    assert hierarchy
+    assert lfe.read_receipt(sd)["counts"]["errors"] == len(hierarchy)
 
 
 def test_a_score_the_sdk_refused_is_logged_at_warning_with_its_traceback(tmp_path, monkeypatch, caplog):

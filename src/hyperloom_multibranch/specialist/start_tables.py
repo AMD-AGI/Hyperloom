@@ -34,6 +34,7 @@ from hyperloom.measure.compile import (
 from hyperloom.measure.framework.rows import DEFAULT_TABLE_PLACEHOLDER, RowsOnlyRefused, lay_rows_over
 from hyperloom.measure.framework.table_modules import default_tables
 from hyperloom.measure.framework.tables import read_variables
+from hyperloom_common.shared_storage import copy_shared_file, make_shared_dirs, write_shared_bytes, write_shared_text
 from hyperloom_multibranch.contracts.repo import ExperimentRepo
 from hyperloom_multibranch.specialist.agent_import import KeptChange
 
@@ -68,7 +69,7 @@ async def lay_start_tables(
         return {}
     files = directory / FILES_DIR
     await asyncio.to_thread(shutil.rmtree, directory, ignore_errors=True)
-    files.mkdir(parents=True)
+    make_shared_dirs(files)
     await repo.checkout(commit, files)
     try:
         laid = [await asyncio.to_thread(_lay, kernel, files / kernel.ref, directory, configs) for kernel in kernels]
@@ -82,7 +83,7 @@ def _lay(kernel: KernelArtifact, file: Path, directory: Path, configs: Path) -> 
     if env in PER_DEVICE_TABLE_ENVS:
         # PyTorch reads the file of each device with its ordinal before the extension.
         for ordinal in DEVICE_ORDINALS:
-            shutil.copyfile(file, file.with_name(f"{file.stem}{ordinal}{file.suffix}"))
+            copy_shared_file(file, file.with_name(f"{file.stem}{ordinal}{file.suffix}"))
     if not kernel_rows_only(kernel):
         return env, StartTable(str(file))
     variable = read_variables(configs.parent / "jit" / "core.py").get(env)
@@ -94,11 +95,11 @@ def _lay(kernel: KernelArtifact, file: Path, directory: Path, configs: Path) -> 
     copies = []
     for path in defaults:
         copy = directory / env / path.relative_to(configs)
-        copy.parent.mkdir(parents=True, exist_ok=True)
+        make_shared_dirs(copy.parent)
         if path in over.kept:
-            copy.write_bytes(over.kept[path])
+            write_shared_bytes(copy, over.kept[path])
         else:
-            shutil.copyfile(path, copy)
+            copy_shared_file(path, copy)
         copies.append(str(copy))
     return env, StartTable(os.pathsep.join([*copies, str(file)]), tuple(copies))
 
@@ -126,7 +127,7 @@ def _over_image(value: str, defaults: tuple[str, ...]) -> str:
 
 def save_start_tables(tables: Mapping[str, StartTable], path: Path) -> None:
     document = {name: {"value": table.value, "defaults": list(table.defaults)} for name, table in tables.items()}
-    path.write_text(json.dumps(document), encoding=ENCODING)
+    write_shared_text(path, json.dumps(document))
 
 
 def load_start_tables(path: Path) -> dict[str, StartTable]:

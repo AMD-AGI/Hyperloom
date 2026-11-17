@@ -93,16 +93,13 @@ log = logging.getLogger(__name__)
 
 _POLL_INTERVAL_S = 6
 
-# Magpie's sglang_mi*x.sh DEFAULT_ARGS, re-applied in multi-node so tput stays comparable to single-node.
+# The single-node sglang launcher's default args (inference_suite/recipe/defaults/table.yaml), re-applied in multi-node so tput stays comparable to single-node.
 # --mem-fraction-static is 0.75 (vs 0.8) because cross-node RDMA buffers eat headroom.
-_SGLANG_DEFAULT_TOKENS: tuple[tuple[str, str], ...] = (
-    ("--mem-fraction-static", "--mem-fraction-static=0.75"),
-    ("--disable-radix-cache", "--disable-radix-cache"),
-)
+_SGLANG_DEFAULT_TOKENS: tuple[tuple[str, str], ...] = (("--mem-fraction-static", "--mem-fraction-static=0.75"),)
 
 
 def _merge_sglang_defaults(extra_args: str) -> str:
-    """Append Magpie's DEFAULT_ARGS that the user did not already set."""
+    """Append the sglang launcher's default args that the user did not already set."""
     user = (extra_args or "").strip()
     parts = [user] if user else []
     for flag_name, default_token in _SGLANG_DEFAULT_TOKENS:
@@ -298,6 +295,9 @@ def _restart_env_scope(extra_env: dict[str, str] | None, unset_env, torch_profil
 async def _apply_tracelens_patch_fanout(patch_set: str, torch_profiler_dir: str, poll_timeout_s: int) -> None:
     from ._profile_setup import _tracelens_patch_enabled
 
+    if patch_set == "none":
+        log.info("restart_server_for_round: this SGLang needs no TraceLens patch set; skipping fan-out")
+        return
     if patch_set == "graph-capture" and not torch_profiler_dir:
         log.info("restart_server_for_round: not a profiling round; skipping sglang_gc_patch fan-out")
         return
@@ -322,7 +322,7 @@ async def _apply_tracelens_patch_fanout(patch_set: str, torch_profiler_dir: str,
                 "restart_server_for_round: TraceLens SGLang patch fan-out "
                 "returned rc=%d; proceeding with restart (trace may be "
                 "unannotated, or CUDA-graph capture may IndexError on "
-                ">= 0.5.18, until patches succeed)",
+                "0.5.18 to 0.5.21, until patches succeed)",
                 patch_rc,
             )
     except (RuntimeError, ValueError, OSError, KeyError, httpx.HTTPError, httpx.InvalidURL) as exc:
@@ -406,7 +406,7 @@ async def restart_server_for_round(
     torch_profiler_dir: str = "",
     force_full_restart: bool = False,
 ) -> None:
-    """Restart the multi-node inference server for the next Magpie round."""
+    """Restart the multi-node inference server for the next round."""
     if not is_multi_node():
         return
 
@@ -436,7 +436,7 @@ async def restart_server_for_round(
             "lower --ep or raise the smaller per-group TP."
         )
 
-    # Apply Magpie's sglang DEFAULT_ARGS only for sglang (vllm has its own).
+    # Apply the sglang launcher's default args only for sglang (vllm has its own).
     extra_server_args = _merge_sglang_defaults(server.extra_server_args) if fw == "sglang" else server.extra_server_args
 
     # Compute-bound profile override (multi-node only; already gated by the is_multi_node() no-op above).
@@ -1110,7 +1110,7 @@ def _is_name_resolution_error(exc: BaseException) -> bool:
 def _warn_published_gate_skipped(health_url: str, dns_failures: int, health_poll_s: int) -> None:
     """Warn that the published-service readiness gate is skipped because its URL never resolved."""
     # Surface, don't degrade silently: to the caller this is indistinguishable from a pass, so a
-    # later completed=0 / magpie_nonzero_invalid_measurement has no other clue it was this skip.
+    # later completed=0 / round_nonzero_invalid_measurement has no other clue it was this skip.
     log.warning(
         "published service_url %s did not resolve from here after %d consecutive "
         "attempts (~%ds); SKIPPING the published-service readiness gate. If this is "

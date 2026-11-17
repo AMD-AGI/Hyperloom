@@ -19,7 +19,7 @@ from typing import Any, Iterator
 
 import pytest
 
-from hyperloom.common.proctree import REAP_MARK_ENV, proc_identity, running
+from hyperloom_common.proctree import REAP_MARK_ENV, proc_identity, running
 from hyperloom.orchestrator.specialists import agent_runner
 from hyperloom.orchestrator.specialists.agent_runner import Liveness
 from hyperloom.orchestrator.specialists import subprocess_ as ss

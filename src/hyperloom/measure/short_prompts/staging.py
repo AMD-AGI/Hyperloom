@@ -20,15 +20,15 @@ from __future__ import annotations
 import hashlib
 import json
 import os
-import shutil
+import stat
 import uuid
 from collections.abc import Mapping, Sequence
+from contextlib import suppress
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-from hyperloom_common.shared_storage import make_shared_dirs
-
+from hyperloom_common.shared_storage import current_umask, make_shared_dirs, shared_parent
 from hyperloom.measure.docs import canonical_json
 from hyperloom.measure.short_prompts.plan import ShortPromptPlan
 from hyperloom.measure.short_prompts.prompts import GENERATOR, Prompt, PromptSetError, parse_prompts, prompts_bytes
@@ -64,6 +64,13 @@ _PROMPTS_PATH = f"{DATA_DIR}/{PROMPTS_FILE}"
 KEY_PREFIX = "short-prompts-"
 _SCHEMA = 1
 _KEY_DIGITS = 16
+_ENTRY_DIR_MODE = 0o755
+_ENTRY_FILE_MODE = 0o644
+#: How the entry being built is opened below ``evalsets``, which other accounts of the group may write: never through
+#: a link one of them put at its name.
+_ENTRY_DIRECTORY = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC
+_NEW_FILE = os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW | os.O_CLOEXEC
+_BUILDING = stat.S_IRWXU
 _UTF8 = "utf-8"
 
 
@@ -112,9 +119,14 @@ def stage_file(root: Path, raw: bytes, inputs: Mapping[str, Any], *, generator: 
     same one is left as it is.
 
     The data and then the manifest are written into a directory of their own, which becomes the entry in one rename, so
-    a reader never sees half an entry. The directory of entries is made as shared storage makes its directories
-    (:func:`~hyperloom_common.shared_storage.make_shared_dirs`): in a runner cache set up to be shared by the accounts of
-    one group it is group-writable, so the next account can stage beside this one's entries.
+    a reader never sees half an entry. ``evalsets`` is made as
+    :func:`~hyperloom_common.shared_storage.make_shared_dirs` makes it: group-shared (``2775``) below storage set up to
+    be shared, so the next account of a run's group can stage another entry beside it, and as the umask leaves it
+    anywhere else. Below shared storage the entry is readable by every account whatever this process's umask (``755``
+    directories, ``644`` files: a runner sandbox reads it as an account of its own) and writable by none but its
+    writer; anywhere else the umask decides its modes, as for a plain create, so a private cache stays private. The
+    entry is built and put in place through ``evalsets`` as the walk of
+    :func:`~hyperloom_common.shared_storage.open_directory` holds it, never through a link on the way or at its name.
 
     Raises:
         PromptSetError: An entry with this key exists and differs from what would be written.
@@ -127,19 +139,69 @@ def stage_file(root: Path, raw: bytes, inputs: Mapping[str, Any], *, generator: 
         if (final / MANIFEST_NAME).read_bytes() != manifest or (final / DATA_DIR / PROMPTS_FILE).read_bytes() != raw:
             raise PromptSetError(f"the entry {final} exists and differs from the one that would be written")
         return staged
-    incoming = make_shared_dirs(final.parent) / f".incoming-{uuid.uuid4().hex}"
-    (incoming / DATA_DIR).mkdir(parents=True, mode=0o755)
-    try:
-        (incoming / DATA_DIR / PROMPTS_FILE).write_bytes(raw)
-        (incoming / MANIFEST_NAME).write_bytes(manifest)
+    make_shared_dirs(final.parent)
+    with shared_parent(final) as (evalsets, name, widen):
+        modes = (_ENTRY_DIR_MODE, _ENTRY_FILE_MODE)
+        dir_mode, file_mode = modes if widen else tuple(mode & ~current_umask() for mode in modes)
+        incoming = f".incoming-{uuid.uuid4().hex}"
+        os.mkdir(incoming, _BUILDING, dir_fd=evalsets)
         try:
-            os.rename(incoming, final)
-        except OSError:
-            if not final.exists():
-                raise
-    finally:
-        shutil.rmtree(incoming, ignore_errors=True)
+            _build_entry(
+                evalsets, incoming, {DATA_DIR: {PROMPTS_FILE: raw}, MANIFEST_NAME: manifest}, dir_mode, file_mode
+            )
+            try:
+                os.rename(incoming, name, src_dir_fd=evalsets, dst_dir_fd=evalsets)
+            except OSError:
+                if not final.exists():
+                    raise
+        finally:
+            _remove_entry(evalsets, incoming)
     return staged
+
+
+def _build_entry(parent: int, name: str, tree: Mapping[str, Any], dir_mode: int, file_mode: int) -> None:
+    """Fill the directory ``name`` of ``parent`` (opened without following a link) with ``tree`` (a file's bytes, or a
+    directory's own tree, by name), each new file with ``file_mode`` and each directory, this one last, with
+    ``dir_mode``, set by ``fchmod``."""
+    directory = os.open(name, _ENTRY_DIRECTORY, dir_fd=parent)
+    try:
+        for entry, content in tree.items():
+            if isinstance(content, bytes):
+                _write_new(directory, entry, content, file_mode)
+            else:
+                os.mkdir(entry, _BUILDING, dir_fd=directory)
+                _build_entry(directory, entry, content, dir_mode, file_mode)
+        os.fchmod(directory, dir_mode)
+    finally:
+        os.close(directory)
+
+
+def _write_new(directory: int, name: str, data: bytes, mode: int) -> None:
+    """``data`` in a new file ``name`` of ``directory``, its ``mode`` set by ``fchmod``."""
+    descriptor = os.open(name, _NEW_FILE, stat.S_IRUSR | stat.S_IWUSR, dir_fd=directory)
+    with os.fdopen(descriptor, "wb") as handle:
+        os.fchmod(handle.fileno(), mode)
+        handle.write(data)
+
+
+def _remove_entry(parent: int, name: str) -> None:
+    """Remove what is left of the entry being built at ``name`` of ``parent`` (nothing once it was renamed into
+    place), never through a link."""
+    try:
+        directory = os.open(name, _ENTRY_DIRECTORY, dir_fd=parent)
+    except OSError:
+        return
+    try:
+        for entry in os.listdir(directory):
+            with suppress(OSError):
+                if stat.S_ISDIR(os.stat(entry, dir_fd=directory, follow_symlinks=False).st_mode):
+                    _remove_entry(directory, entry)
+                else:
+                    os.unlink(entry, dir_fd=directory)
+    finally:
+        os.close(directory)
+    with suppress(OSError):
+        os.rmdir(name, dir_fd=parent)
 
 
 def recorded_sha256(entry: Path) -> str:

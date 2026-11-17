@@ -313,6 +313,7 @@ def _attempt_outcome_fields(
     if attempt.status.upper() in UNMEASURED_OUTCOMES:
         attribution = classify_failure_attribution(
             error_class=first_str(result.get("error_class")),
+            framework_changed=bool(result.get(_integrate_vocabulary.RESULT_FRAMEWORK_CHANGED)),
             error_excerpt=first_str(result.get("error"))[:600],
             reason=result.get("reason"),
             explicit=result.get("failure_attribution"),

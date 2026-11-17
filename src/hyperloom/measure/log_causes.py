@@ -10,14 +10,26 @@ the benchmark's stderr, and that line is what the specialist needs, so each read
 signature table does know (an import that failed, a refused flag) quotes its line the same way.
 
 Every reader takes the joined log text and returns the last line that names the cause, shortened to one bounded line, or
-``None``.
+``None``. The file readers at the end (:func:`failure_logs`, :func:`client_logs`) give that text: the tails of the logs a
+failed round left, and the last refusal of an evaluation request wherever it sits in the scanned part of a log.
 """
 
 from __future__ import annotations
 
+import os
 import re
+from collections.abc import Iterable
+from pathlib import Path
+from typing import TYPE_CHECKING
 
-from hyperloom.common.failure_signature import argparse_refusal
+from inference_suite.contracts import RunLayout
+
+from hyperloom.common.failure_signature import (
+    ENGINE_CAPACITY_LINE,
+    EXCEPTION_NAME_START,
+    IMPORT_FAILURE_LINE,
+    argparse_refusal,
+)
 from hyperloom.common.outside_facts import (
     HIP_ERROR_PREFIX,
     HIP_NO_BINARY_FOR_GPU,
@@ -25,9 +37,11 @@ from hyperloom.common.outside_facts import (
     HIP_UNDEFINED_SYMBOL,
     HSA_STATUS_ERROR,
     HUB_RATE_LIMITED,
-    PY_IMPORT_ERROR,
-    PY_MODULE_NOT_FOUND_ERROR,
+    TORCH_MEMORY_SNAPSHOT_FRAME,
 )
+
+if TYPE_CHECKING:
+    from hyperloom.orchestrator.actions.executors import VariantResult
 
 #: A cause line longer than this is cut, so a reason stays one readable line.
 CAUSE_CHARS = 300
@@ -43,13 +57,6 @@ _BAD_REQUEST = re.compile(
 #: The lm_eval client's own report of a refused request carries the server's message, which names the cause.
 _REFUSAL_MESSAGE = re.compile(r"API request failed|[\"']message[\"']\s*:")
 
-#: The exception a failed import raised, ``ImportError: message`` or ``ModuleNotFoundError: message`` after an optional
-#: log prefix. A server that skips a model whose imports fail logs ``Ignore import error when loading <module>: ...``
-#: and carries on; that line is not an exception and does not match.
-_IMPORT_FAILURE = re.compile(
-    r"(?<![\w.])(?:[A-Za-z_]\w*\.)*(?:" + PY_IMPORT_ERROR + "|" + PY_MODULE_NOT_FOUND_ERROR + r"):\s*\S"
-)
-
 #: What a missing compiled kernel prints: an extension that references a symbol nothing defines, or a GPU binary built for
 #: another device. Nothing else a HIP call reports belongs here, nor a failed HSA call: the ROCr queue abort that names an
 #: ``HSA_STATUS_ERROR_*`` status is a kernel that ran and faulted.
@@ -61,7 +68,7 @@ _MISSING_KERNEL = re.compile("|".join((HIP_UNDEFINED_SYMBOL, HIP_NO_KERNEL_IMAGE
 #: library print them.
 _DISK_FULL = re.compile(r"\[Errno (?:28|122)\]|No space left on device|Disk quota exceeded", re.IGNORECASE)
 _WATCHDOG_TIMEOUT = re.compile(r"watchdog timeout", re.IGNORECASE)
-#: A ``git`` command the benchmark client ran to fetch its own dependencies (Magpie's per-test ``submodule update`` of
+#: A ``git`` command the benchmark client ran to fetch its own dependencies (a per-test ``submodule update`` of
 #: the replay client) that timed out: ``subprocess.TimeoutExpired: Command ['git', ...] timed out after N seconds``.
 _GIT_FETCH_TIMEOUT = re.compile(r"TimeoutExpired: Command \[['\"]git['\"],.*\] timed out after")
 _HUB_RATE_LIMITED = re.compile(HUB_RATE_LIMITED)
@@ -91,8 +98,12 @@ _HIP_ERROR_TOKEN = re.compile(HIP_ERROR_PREFIX + r"[A-Za-z]+")
 _HSA_STATUS_TOKEN = re.compile(HSA_STATUS_ERROR + r"[A-Z_]*")
 
 #: ``SomeError: message`` after an optional log prefix, or a bare ``SomeError`` on a line of its own.
-_EXCEPTION_WITH_MESSAGE = re.compile(r"(?<![\w.])((?:[A-Za-z_]\w*\.)*(?:[A-Z]\w*)?(?:Error|Exception)):\s*\S")
+_EXCEPTION_WITH_MESSAGE = re.compile(
+    EXCEPTION_NAME_START + r"((?:[A-Za-z_]\w*\.)*(?:[A-Z]\w*)?(?:Error|Exception)):\s*\S"
+)
 _EXCEPTION_ALONE = re.compile(r"^\s*(?:[A-Za-z_]\w*\.)*(?:[A-Z]\w*)?(?:Error|Exception)\s*$")
+#: A frame of the allocator's memory-snapshot dump SGLang's CUDA-graph profile runs after the capture.
+_SNAPSHOT_FRAME = re.compile(TORCH_MEMORY_SNAPSHOT_FRAME)
 
 
 def one_line(text: str) -> str:
@@ -132,12 +143,35 @@ def bad_request(text: str) -> str | None:
 
 def import_error(text: str) -> str | None:
     """The ``ImportError``/``ModuleNotFoundError`` line a failed import ended the server with."""
-    return _last_matching(text, lambda line: bool(_IMPORT_FAILURE.search(line)))
+    return _last_matching(text, lambda line: bool(IMPORT_FAILURE_LINE.search(line)))
+
+
+def engine_capacity(text: str) -> str | None:
+    """The line that says the card holds less than the launch asked for (Mamba cache blocks, KV cache memory)."""
+    return _last_matching(text, lambda line: bool(ENGINE_CAPACITY_LINE.search(line)))
 
 
 def python_exception(text: str) -> str | None:
     """The last ``SomeError: message`` line of a traceback or of a logged exception."""
     return _last_matching(text, lambda line: bool(_EXCEPTION_WITH_MESSAGE.search(line) or _EXCEPTION_ALONE.match(line)))
+
+
+def profiler_snapshot_failure(text: str) -> str | None:
+    """The exception a traceback through the profiler's memory-snapshot dump ended on: the first unindented line after a
+    frame of the dump, when that line is an exception (``RuntimeError: stoi``); ``None`` when no such traceback is in
+    ``text``. Lines of another process written into the traceback leave it unread rather than misread."""
+    lines = text.splitlines()
+    found = None
+    for index, line in enumerate(lines):
+        if not _SNAPSHOT_FRAME.search(line):
+            continue
+        for after in lines[index + 1 :]:
+            if not after.strip() or after[:1].isspace():
+                continue
+            if _EXCEPTION_WITH_MESSAGE.search(after) or _EXCEPTION_ALONE.match(after):
+                found = one_line(after)
+            break
+    return found
 
 
 def git_fetch_timeout(text: str) -> str | None:
@@ -212,3 +246,80 @@ def _is_datasets_lock(path: str) -> bool:
     directory, _, name = path.rpartition("/")
     root_lock = bool(directory) and name.endswith(".lock") and name.startswith(directory.replace("/", "_") + "_")
     return root_lock or bool(_DATASETS_BUILD_LOCK.search(path))
+
+
+# --- the logs a failed round left -----------------------------------------------------------------------------------
+
+#: How much of the end of a log is read.
+LOG_TAIL_CHARS = 64 * 1024
+#: How far back a log is searched for the refusal of an evaluation request, in blocks that overlap by a line's length.
+_MIB = 1 << 20
+REFUSAL_SCAN_CHARS = 16 * _MIB
+_REFUSAL_BLOCK_CHARS = _MIB
+_REFUSAL_BLOCK_OVERLAP_CHARS = 4096
+_UTF8 = "utf-8"
+
+
+def log_tail(path: str | None) -> str:
+    """The last ``LOG_TAIL_CHARS`` of the log at ``path``; ``""`` for none or one that cannot be read."""
+    if not path:
+        return ""
+    try:
+        with open(path, "rb") as handle:
+            handle.seek(0, os.SEEK_END)
+            handle.seek(max(0, handle.tell() - LOG_TAIL_CHARS))
+            return handle.read().decode(_UTF8, errors="replace")
+    except OSError:
+        return ""
+
+
+def last_refusal(path: Path) -> str:
+    """The last refusal of an evaluation request the log at ``path`` holds wherever it is in the log, else ``""``.
+
+    The evaluation client prints a refusal when it happens and, once its retries are spent, one traceback for each
+    request that gave up, thousands of them: the tail of the log is those tracebacks and the refusal sits far above.
+    """
+    try:
+        with open(path, "rb") as handle:
+            end = handle.seek(0, os.SEEK_END)
+            floor = max(0, end - REFUSAL_SCAN_CHARS)
+            while end > floor:
+                start = max(floor, end - _REFUSAL_BLOCK_CHARS)
+                handle.seek(start)
+                block = handle.read(end - start).decode(_UTF8, errors="replace")
+                # The block starts mid-line unless it starts the file; the overlap of the next block holds that line whole.
+                found = bad_request(block if start == 0 else block.partition("\n")[2])
+                if found:
+                    return found
+                end = start + _REFUSAL_BLOCK_OVERLAP_CHARS if start > floor else floor
+    except OSError:
+        return ""
+    return ""
+
+
+def failure_logs(failing: Iterable[VariantResult]) -> list[str]:
+    """The tails of the server log and of the client's and the evaluation's stderr of every result with a failed round.
+
+    The launcher's pipe seldom holds the cause: the server prints a refused flag or a crash into ``server.log``, and the
+    client or the evaluation prints a refused request into its own stderr in the round's run_dir.
+    """
+    logs: list[str] = []
+    for result in failing:
+        if result.server_log_path:
+            logs.append(log_tail(result.server_log_path))
+        if result.workspace:
+            layout = RunLayout(Path(result.workspace))
+            stderr_logs = [layout.client_stderr, layout.eval_stderr]
+            logs.extend(log_tail(str(path)) for path in stderr_logs)
+            logs.extend(last_refusal(path) for path in stderr_logs)
+    return logs
+
+
+def client_logs(failing: Iterable[VariantResult]) -> list[str]:
+    """The tails of the AgentX replay client's own log in the run_dir of every result with a failed round.
+
+    The round's report names only the client's exit code; what the client was refused is in this log alone.
+    """
+    return [
+        log_tail(str(RunLayout(Path(result.workspace)).agentx_client_log)) for result in failing if result.workspace
+    ]

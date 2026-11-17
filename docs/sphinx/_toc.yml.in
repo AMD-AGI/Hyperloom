@@ -29,8 +29,6 @@ subtrees:
     - entries:
       - url: https://rocm.docs.amd.com/projects/intellikit/en/latest/
         title: IntelliKit
-      - url: https://rocm.docs.amd.com/projects/magpie/en/latest
-        title: Magpie
       - url: https://rocm.docs.amd.com/projects/tracelens/en/latest/
         title: TraceLens
       - url: https://rocm.docs.amd.com/projects/geak/en/latest/
@@ -52,6 +50,8 @@ subtrees:
     title: Run hosted multi-branch on a new cluster
   - file: how-to/run-multibranch.md
     title: Run a multi-branch session
+  - file: how-to/multibranch-review-gate.md
+    title: Review the agent map before the agent branches open
 
 - caption: Reference
   entries:
@@ -63,6 +63,8 @@ subtrees:
     title: Authentication and credentials
   - file: reference/kernel-execution-path.md
     title: Kernel optimization execution path
+  - file: reference/inference-suite.md
+    title: InferenceSuite benchmark rounds
   - file: reference/operations.md
     title: Operations and self-hosting
   - file: reference/upgrade.md
@@ -110,6 +112,8 @@ subtrees:
     title: Fuse a launch-bound decode path
   - file: kernelforge/how-to/debug-task-preparation.md
     title: Debug task preparation
+  - file: kernelforge/how-to/radeon-w7900.md
+    title: Run on a Radeon PRO W7900 (gfx1100)
   - file: kernelforge/how-to/extending.md
     title: Add a kernel backend, tool, or knowledge
   - file: kernelforge/reference/cli.md

@@ -1,14 +1,10 @@
-# Magpie baseline benchmark config for vLLM.
-# Used as the default vLLM benchmark config; the inference_optimizer
-# pipeline overrides `benchmark.model` and injects `benchmark.runner_type`
-# at runtime (see baseline_sglang.yaml header for the full rationale).
+# Default benchmark point for $FRAMEWORK=vllm, resolved by default_baseline_config().
+# `benchmark.model` is a placeholder: the executor replaces it with --model / $MODEL_PATH.
 
 benchmark:
   framework: vllm
-  # benchmark_script: vllm_mi300x.sh  # uncomment to force a specific Magpie script
-  model: /models/Qwen-Qwen3-8B  # OVERRIDDEN at runtime; see header.
+  model: /models/Qwen-Qwen3-8B
   precision: bf16
-  run_mode: local
 
   envs:
     # Last-resort fallbacks only; the CLI always projects the resolved
@@ -19,21 +15,11 @@ benchmark:
     OSL: 1024
     RANDOM_RANGE_RATIO: 1
     MAX_MODEL_LEN: 8192
-    # ROCR_VISIBLE_DEVICES injected at runtime by baseline.py
-    # (`0..TP-1`); export `ROCR_VISIBLE_DEVICES=...` to override.
     # Graph capture is slow enough to trip vLLM's per-step timeout.
     VLLM_EXECUTE_MODEL_TIMEOUT_SECONDS: "1200"
-    PATH: "/opt/venv/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
 
-  gpu_selection:
-    auto: false                # executor pins via ROCR_VISIBLE_DEVICES at runtime
-
-  timeout_seconds: 7200        # 2 h hard cap (large MoE e.g. DeepSeek-R1 671B: profiled roofline run far exceeds 40 min; stays < the WARM 7800s outer wall cap)
+  timeout_seconds: 7200        # large MoE (e.g. DeepSeek-R1 671B) exceeds 40 min; stays below the 7800 s WARM wall cap
 
   profiler:
     torch_profiler:
-      enabled: false
-    system_profiler:
-      enabled: false
-    tracelens:
       enabled: false

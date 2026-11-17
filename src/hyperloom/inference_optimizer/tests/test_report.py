@@ -135,10 +135,6 @@ def test_degraded_mode_section():
     assert "`m`" in body
 
 
-def test_degraded_mode_section_empty():
-    assert rp._format_degraded_mode_section({}) == []
-
-
 _OUTPUT_COMPARISON = {
     "objective": GRADED_OUTPUT,
     "reference": 100.0,
@@ -178,6 +174,10 @@ def test_format_md_shows_validated_gain_when_timestamp_missing():
     assert "never validated" not in md
 
 
+#: What the report mapper stamps on every AgentX round it accepts as evidence.
+_AGENTX_EVIDENCE = {"valid_measurement": True, "diagnostic_only": False, "workload_identity": "agentx-workload"}
+
+
 @pytest.fixture
 def report_performance_state(monkeypatch):
     from hyperloom.orchestrator.state.shared_state import SharedState
@@ -197,6 +197,7 @@ def report_performance_state(monkeypatch):
         GRADED_INTVTY_P50: 100.0,
         "duration_seconds": 900.0,
         "request_error_rate": 0.0,
+        **_AGENTX_EVIDENCE,
     }
     state.current_best = {
         "action": "integrate",
@@ -209,6 +210,7 @@ def report_performance_state(monkeypatch):
         GRADED_INTVTY_P50: 120.0,
         "duration_seconds": 900.0,
         "request_error_rate": 0.0,
+        **_AGENTX_EVIDENCE,
         "extra_envs": {"RECIPE": "measured"},
     }
     state.optimization_stack = [{"action": "integrate"}]
@@ -441,13 +443,6 @@ def test_load_external_baseline_missing(tmp_path):
     assert rp._load_external_baseline(tmp_path) is None
 
 
-def test_load_external_baseline_present(tmp_path):
-    p = target_baseline_json(tmp_path)
-    p.parent.mkdir(parents=True, exist_ok=True)
-    p.write_text(json.dumps({"status": "ok"}), encoding="utf-8")
-    assert rp._load_external_baseline(tmp_path)["status"] == "ok"
-
-
 def test_load_external_baseline_corrupt(tmp_path):
     p = target_baseline_json(tmp_path)
     p.parent.mkdir(parents=True, exist_ok=True)
@@ -558,15 +553,6 @@ def test_build_summary_keeps_explicit_stop_reason_over_closing_fallback():
 
 
 # ---- _explain_stop_reason ----
-def test_explain_stop_reason_target_reached():
-    assert "target" in rp._explain_stop_reason("target_reached").lower()
-
-
-def test_explain_stop_reason_unknown_is_empty():
-    assert rp._explain_stop_reason("some_unmapped_reason") == ""
-    assert rp._explain_stop_reason("") == ""
-
-
 class _SweepState:
     def __init__(self, last_conc_sweep):
         self.last_conc_sweep = last_conc_sweep

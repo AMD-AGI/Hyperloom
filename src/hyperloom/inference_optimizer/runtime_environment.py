@@ -19,7 +19,7 @@ log = logging.getLogger(__name__)
 def prepend_launch_path(envs: dict[str, Any], var: str, *entries: str) -> None:
     """Put ``entries`` first on the path-list env ``var`` the materialized config hands the server launch.
 
-    Magpie and the bypass launcher start the server with ``os.environ`` overlaid by ``benchmark.envs``, so a config
+    A round starts the server with the inherited environment overlaid by ``benchmark.envs``, so a config
     value replaces the inherited one. A config without the key therefore builds on the inherited value, or
     prepending would drop the operator's and the image's entries (import paths, ``PATH``, ``/opt/rocm/lib``); a
     config with the key stays authoritative. An entry already on the path moves to the front, and empty parts are

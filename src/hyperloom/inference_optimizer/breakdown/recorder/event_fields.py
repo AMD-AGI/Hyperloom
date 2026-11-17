@@ -85,7 +85,7 @@ def graded_axes(source: Any) -> dict[str, Any]:
     present.
 
     Recorded beside a round's output-axis figures rather than instead of them: an AgentX session is ranked on the
-    median interactivity percentile with the slow tail and output throughput held as guards, and none of that is
+    median interactivity percentile with the slow tail and total token throughput held as guards, and none of that is
     recoverable from the output axis -- on the canonical corpus the two throughputs differ by roughly two orders
     of magnitude.
     """

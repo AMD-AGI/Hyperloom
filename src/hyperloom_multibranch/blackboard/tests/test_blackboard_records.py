@@ -187,6 +187,7 @@ async def test_a_retest_appends_a_judgement_and_the_latest_one_is_in_force(open_
         (Role.SCHEDULER, LineageEvent(LineageKind.SPLIT, "s1-fix", commit_id="c2", from_commit="c1", from_branch="s1")),
         (Role.GATE, LineageEvent(LineageKind.STOP, "s1")),
         (Role.GATE, LineageEvent(LineageKind.PROBATION, "s1", tests=4)),
+        (Role.INTEGRATOR, LineageEvent(LineageKind.REOPEN, INTEGRATION_BRANCH)),
     ],
 )
 async def test_each_lineage_event_has_one_writer(open_as: Open, role: Role, event: LineageEvent) -> None:
@@ -245,6 +246,55 @@ async def test_a_branch_carries_the_focus_its_open_names_and_one_opened_without_
 
     focus = {node.branch: node.focus for node in (await open_as(Role.INTEGRATOR).lineage()).branches}
     assert focus == {INTEGRATION_BRANCH: "", "b01": "attention", "b02": ""}
+
+
+async def test_a_resumed_session_reopens_its_stopped_integration_branch_and_stops_it_again(open_as: Open) -> None:
+    scheduler = open_as(Role.SCHEDULER)
+    await scheduler.record_lineage(LineageEvent(LineageKind.ROOT, INTEGRATION_BRANCH, commit_id="c0"))
+    stop = LineageEvent(LineageKind.STOP, INTEGRATION_BRANCH, reason="time_exhausted")
+    reopen = LineageEvent(LineageKind.REOPEN, INTEGRATION_BRANCH, reason="resumed after time_exhausted")
+    with pytest.raises(ConflictingWrite, match="not stopped"):
+        await scheduler.record_lineage(reopen)
+
+    await scheduler.record_lineage(stop)
+    for event in (reopen, reopen):
+        await scheduler.record_lineage(event)
+    running = {node.branch: node for node in (await scheduler.lineage()).branches}[INTEGRATION_BRANCH]
+    await scheduler.record_lineage(stop)
+
+    stopped = {node.branch: node for node in (await scheduler.lineage()).branches}[INTEGRATION_BRANCH]
+    assert (running.stopped_at, running.stop_reason) == (None, None)
+    assert (stopped.stop_reason, stopped.stopped_at is not None) == ("time_exhausted", True)
+    assert [event.kind for event in scheduler._state().lineage] == [
+        LineageKind.ROOT,
+        LineageKind.STOP,
+        LineageKind.REOPEN,
+        LineageKind.STOP,
+    ]
+
+
+async def test_a_resumed_session_reopens_a_branch_it_reattaches_which_takes_writes_until_stopped_again(
+    open_as: Open,
+) -> None:
+    scheduler = open_as(Role.SCHEDULER)
+    await scheduler.record_lineage(LineageEvent(LineageKind.ROOT, INTEGRATION_BRANCH, commit_id="c0"))
+    await scheduler.record_lineage(LineageEvent(LineageKind.OPEN, "b01", from_commit="c0"))
+    reopen = LineageEvent(LineageKind.REOPEN, "b01", reason="resumed after signal")
+    probation = LineageEvent(LineageKind.PROBATION, "b01", tests=2)
+    with pytest.raises(ConflictingWrite, match="not stopped"):
+        await scheduler.record_lineage(reopen)
+    await scheduler.record_lineage(LineageEvent(LineageKind.STOP, "b01", reason="signal"))
+    with pytest.raises(ConflictingWrite, match="already stopped"):
+        await scheduler.record_lineage(probation)
+
+    await scheduler.record_lineage(reopen)
+    await scheduler.record_lineage(probation)
+    running = {node.branch: node for node in (await scheduler.lineage()).branches}["b01"]
+    await scheduler.record_lineage(LineageEvent(LineageKind.STOP, "b01", reason="time_exhausted"))
+
+    stopped = {node.branch: node for node in (await scheduler.lineage()).branches}["b01"]
+    assert (running.stopped_at, running.stop_reason) == (None, None)
+    assert (stopped.stop_reason, stopped.stopped_at is not None) == ("time_exhausted", True)
 
 
 async def test_a_running_branch_is_held_on_probation_once_a_stall(open_as: Open) -> None:
@@ -920,3 +970,24 @@ async def test_profiles_of_a_commit_are_its_profile_tests_that_left_an_artifact(
 
     assert [record.request_id for record in found] == ["p1"]
     assert (await toolbox.record("p1")).result.profile_location == "/profiles/p1.json"
+
+
+async def test_profiles_of_a_commit_are_also_those_of_another_commit_of_its_recipe_that_changed_nothing(
+    open_as: Open,
+) -> None:
+    scheduler, gate, toolbox = open_as(Role.SCHEDULER), open_as(Role.GATE), open_as(Role.TOOLBOX)
+    await scheduler.record_lineage(
+        LineageEvent(LineageKind.ROOT, INTEGRATION_BRANCH, commit_id="c0", recipe_digest=ROOT_RECIPE)
+    )
+    for n in (1, 2):
+        await _tested(open_as, f"r{n}", branch=f"s{n}")
+        await gate.write_judgement(
+            f"r{n}", judgement(3.0, (f"r{n}",)), Conclusion.COMMITTED, f"c{n}", recipe_digest=CHILD_RECIPE
+        )
+    for request_id, parent, change in (("p0", "c0", RecipeDelta()), ("p1", "c1", RecipeDelta()), ("p2", "c1", delta())):
+        await toolbox.write_request(request(request_id, intent("s1", parent), change, kind=TestKind.PROFILE))
+        await toolbox.write_result(result(request_id, profile_location=f"/profiles/{request_id}.json"))
+
+    assert [record.request_id for record in await toolbox.profiles("c2")] == ["p1"]
+    assert [record.request_id for record in await toolbox.profiles("c1")] == ["p1", "p2"]
+    assert [record.request_id for record in await toolbox.profiles("c0")] == ["p0"]

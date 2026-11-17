@@ -55,10 +55,11 @@ import re
 import subprocess
 import tempfile
 from pathlib import Path
-from typing import Any, Callable
+from typing import Any, Callable, Mapping
 
 import yaml
 
+from hyperloom.common.benchmark_config import BenchmarkPoint, read_benchmark_point
 from hyperloom.inference_optimizer.framework_registry import server_args_env_name
 
 from .._grid_base import GridVariant
@@ -147,13 +148,13 @@ def _target_kernels(session_dir: Path | None) -> dict[str, str]:
     return {}
 
 
-def _target_backend(bench: dict[str, Any], session_dir: Path | None) -> str | None:
+def _target_backend(point: BenchmarkPoint, session_dir: Path | None) -> str | None:
     """The attention backend to pin onto the probe, or None to leave it alone."""
     override = os.environ.get(ENV_BACKEND, "").strip()
     if override:
         return override
 
-    args = str((bench.get("envs") or {}).get("EXTRA_VLLM_ARGS") or "")
+    args = str(point.envs.get("EXTRA_VLLM_ARGS") or "")
     tokens = args.split()
     for i, tok in enumerate(tokens):
         if tok == BACKEND_FLAG and i + 1 < len(tokens):
@@ -164,12 +165,12 @@ def _target_backend(bench: dict[str, Any], session_dir: Path | None) -> str | No
     return _target_kernels(session_dir).get("attention")
 
 
-def _probe_command(bench: dict[str, Any], out_path: str, backend: str | None) -> list[str]:
-    """The ``benchmark_vllm`` invocation that screens a launch, from the ``benchmark`` block it is materialized as."""
-    envs = bench.get("envs") or {}
-    args_env = server_args_env_name(str(bench.get("framework") or "vllm"))
+def _probe_command(point: BenchmarkPoint, out_path: str, backend: str | None) -> list[str]:
+    """The ``benchmark_vllm`` invocation that screens a launch, from the point it is materialized as."""
+    envs = point.envs
+    args_env = server_args_env_name(point.framework or "vllm")
     root = os.environ.get(ENV_INFERA_ROOT, "")
-    model = os.environ.get(ENV_MODEL) or str(bench.get("model") or envs.get("MODEL", ""))
+    model = os.environ.get(ENV_MODEL) or point.model or str(envs.get("MODEL", ""))
     layers = os.environ.get(ENV_LAYERS, "").strip()
 
     cmd = [
@@ -218,7 +219,7 @@ def _probe_command(bench: dict[str, Any], out_path: str, backend: str | None) ->
 DEFAULT_PROBE_GPUS = 1
 
 
-def _probe_gpus(envs: dict[str, Any]) -> int:
+def _probe_gpus(envs: Mapping[str, Any]) -> int:
     """How many GPUs the probe runs on, never more than the target's TP.
 
     One by default: this is where nearly all the saving is, and the regime guard
@@ -236,7 +237,7 @@ def _as_int(value: Any, default: int) -> int:
 
 
 def _probe(
-    variant: GridVariant, bench: dict[str, Any], timeout_sec: int, backend: str | None
+    variant: GridVariant, point: BenchmarkPoint, timeout_sec: int, backend: str | None
 ) -> tuple[float | None, dict[str, str]]:
     """One variant's decode step latency (ms) and the kernels that produced it.
 
@@ -245,7 +246,7 @@ def _probe(
     """
     with tempfile.TemporaryDirectory(prefix="explore-screen-") as tmp:
         out_path = os.path.join(tmp, "probe.json")
-        cmd = _probe_command(bench, out_path, backend)
+        cmd = _probe_command(point, out_path, backend)
         try:
             proc = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout_sec)
         except (OSError, subprocess.SubprocessError) as exc:
@@ -272,11 +273,12 @@ def _probe(
             return None, kernels
 
 
-def _launched(materialize: Callable[[GridVariant, Path], Path], variant: GridVariant, subdir: Path) -> dict | None:
-    """The ``benchmark`` block ``variant`` launches with on the round's stack, or None when it cannot be written."""
+def _launched(
+    materialize: Callable[[GridVariant, Path], Path], variant: GridVariant, subdir: Path
+) -> BenchmarkPoint | None:
+    """The point ``variant`` launches with on the round's stack, or None when it cannot be written."""
     try:
-        with Path(materialize(variant, subdir)).open(encoding="utf-8") as fh:
-            return dict((yaml.safe_load(fh) or {}).get("benchmark") or {})
+        return read_benchmark_point(Path(materialize(variant, subdir)))
     except (OSError, ValueError, yaml.YAMLError) as exc:
         log.warning("explore screen: could not materialize %r (%s)", variant.name, exc)
         return None
@@ -343,8 +345,8 @@ def screen_variants(
     margin = margin_pct if margin_pct is not None else _margin_pct()
 
     def probe(variant: GridVariant) -> float | None:
-        bench = _launched(materialize, variant, Path(output_root) / re.sub(r"[^\w.-]", "_", variant.name))
-        return None if bench is None else _probe(variant, bench, timeout_sec, backend)[0]
+        point = _launched(materialize, variant, Path(output_root) / re.sub(r"[^\w.-]", "_", variant.name))
+        return None if point is None else _probe(variant, point, timeout_sec, backend)[0]
 
     survivors, dropped = _cut_slower(variants, probe, baseline, margin)
     log.info(

@@ -26,7 +26,6 @@ from hyperloom.orchestrator.actions.executors._grid_runner import (
 )
 from hyperloom.orchestrator.kernel import conc_sweep as conc_sweep_module, kernel_decisions
 from hyperloom.orchestrator.kernel.conc_sweep import (
-    DEFAULT_CONCS,
     _Arm,
     _build_arm_grid,
     _flush_conc_sweep_report,
@@ -116,15 +115,14 @@ def test_optimized_arm_carries_overlay_and_controls():
     assert arm.controls == {"remove_args": ["--foo"]}
 
 
-def test_optimized_arm_both_empty():
+@pytest.mark.parametrize(
+    "current_best",
+    [{"extra_server_args": "", "extra_envs": {}}, {}],
+    ids=["both_empty", "missing_current_best"],
+)
+def test_optimized_arm_empty_or_missing_is_none(current_best):
     s = SharedState()
-    s.current_best = {"extra_server_args": "", "extra_envs": {}}
-    assert _optimized_arm(s) is None
-
-
-def test_optimized_arm_missing_current_best():
-    s = SharedState()
-    s.current_best = {}
+    s.current_best = current_best
     assert _optimized_arm(s) is None
 
 
@@ -479,7 +477,7 @@ def _fake_variant(
         returncode=0 if status == "succeeded" else 1,
         nonfatal_warnings=[],
         error=error,
-        error_class="" if status == "succeeded" else "magpie_timeout",
+        error_class="" if status == "succeeded" else "round_timeout",
         note="",
         runtime_sec=12.0 if status == "succeeded" else None,
         killed_overtime=False,
@@ -570,12 +568,12 @@ def test_run_conc_sweep_happy_path_writes_reports(
     assert not final_json_path.exists()
 
 
-def test_run_conc_sweep_canonicalizes_gpu_type_to_runner(
+def test_run_conc_sweep_targets_the_session_board(
     session_dir: Path,
     baseline_yaml: Path,
     monkeypatch,
 ):
-    """On MI325X/MI308X conc-sweep must select the mi300x runner script, like every other executor — not state.gpu_type's real type."""
+    """The sweep materializes for the board the session runs on, not a runner label exported beside it."""
     state = _make_state(baseline_config_path=str(baseline_yaml))
     state.gpu_type = "mi325x"
     monkeypatch.setenv("GPU_TYPE", "mi300x")
@@ -604,14 +602,13 @@ def test_run_conc_sweep_canonicalizes_gpu_type_to_runner(
     ):
         asyncio.run(run_conc_sweep(state, session_dir, concs=[1], total_budget_sec=9000))
 
-    assert seen["materialize_gpu"] == "mi300x"
-    assert seen["run_grid_gpu"] == "mi300x"
+    assert seen["materialize_gpu"] == "mi325x"
+    assert seen["run_grid_gpu"] == "mi325x"
 
 
 def test_conc_sweep_preserves_baseline_script_through_variant_materialization(session_dir, baseline_yaml, monkeypatch):
     import yaml
 
-    from hyperloom.orchestrator.actions.executors import _server_lifecycle
     from hyperloom.orchestrator.actions.executors._grid_runner import _build_variant_yaml
 
     baseline_yaml.write_text(
@@ -622,7 +619,6 @@ def test_conc_sweep_preserves_baseline_script_through_variant_materialization(se
     state.gpu_type = "MI355X"
     state.baseline_benchmark_script = "sglang_custom.sh"
     monkeypatch.setenv("GPU_TYPE", "mi355x")
-    monkeypatch.setattr(_server_lifecycle, "teardown_lifecycle_server", lambda **_kwargs: None)
     monkeypatch.setattr(
         "hyperloom.orchestrator.actions.executors._ray_serving.maybe_serving_lease", lambda **_kwargs: None
     )
@@ -653,11 +649,11 @@ def test_conc_sweep_preserves_baseline_script_through_variant_materialization(se
     assert [call[0]["grid"][0].name for call in calls] == ["baseline_conc64", "optimized_conc64"]
     for kwargs, bench in calls:
         assert bench["benchmark_script"] == "sglang_custom.sh"
-        assert bench["runner_type"] == "mi355x"
+        assert "runner_type" not in bench
         # ISL + OSL of 9216 sends three requests per unit of concurrency, as the session's own rounds do.
         assert int(bench["envs"]["NUM_PROMPTS"]) == 192
         assert bench["envs"]["RUN_EVAL"] == "false"
-        assert kwargs["launch"].server_lifecycle is None
+        assert kwargs["launch"].server_lifecycle is not None
 
 
 def test_run_conc_sweep_optimized_oom_yields_failed_pair(
@@ -851,16 +847,6 @@ def test_the_engine_resolves_the_ladder_from_the_session_mode(monkeypatch: pytes
     state = SharedState()
     state.benchmark_mode = "agentx"
     assert default_concs_for_mode(state.benchmark_mode) == [1, 4, 8, 10, 14, 20, 28]
-
-
-def test_default_concs_is_powers_of_two():
-    """Doc-pin: default ladder is [256,128,64,32,16,8,4,2] (high-to-low for single-server reuse)."""
-    assert DEFAULT_CONCS == [256, 128, 64, 32, 16, 8, 4, 2]
-
-
-def test_default_total_budget_is_two_and_half_hours():
-    """Doc-pin: default total wall-clock budget is 2.5h."""
-    assert SharedState().conc_sweep_total_budget_sec == 9000
 
 
 # Total wall-clock budget
@@ -1456,11 +1442,6 @@ class TestTheSweepGradesOnTheAxisTheSessionKeepsOn:
         state = self._state(benchmark_mode="agentx", grading={"objective": "e2e_norm_intvty_p90", "noise_pct": 3.5})
         assert _grading_of(state) == ("e2e_norm_intvty_p90", 3.5)
 
-    def test_the_recorded_band_travels_with_the_axis(self):
-        """A lost band silently widens a 3.5% guard back to the 5% default."""
-        state = self._state(benchmark_mode="agentx", grading={"objective": "e2e_norm_intvty_p90", "noise_pct": 3.5})
-        assert _grading_of(state)[1] == 3.5
-
     def test_a_session_with_nothing_recorded_falls_back_to_its_mode(self):
         assert _grading_of(self._state(benchmark_mode="agentx"))[0] == "e2e_norm_intvty_p90"
         assert _grading_of(self._state(benchmark_mode="synthetic"))[0] == "output_throughput"
@@ -1797,7 +1778,7 @@ def test_render_conc_sweep_curve_writes_png(tmp_path: Path):
             ]
         },
     }
-    out_path = tmp_path / "curve.png"
+    out_path = tmp_path / "plots" / "curve.png"
     result = render_conc_sweep_curve(
         payload, out_path, ConcCurveOptions(model_label="TestModel", gpu_label="MI300X", tp=8)
     )
@@ -2103,30 +2084,6 @@ def _install_fake_matplotlib(monkeypatch: pytest.MonkeyPatch) -> dict[str, Any]:
     return calls
 
 
-def test_render_conc_sweep_curve_with_fake_matplotlib(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
-    from hyperloom.orchestrator.kernel.conc_sweep_plot import ConcCurveOptions, render_conc_sweep_curve
-
-    calls = _install_fake_matplotlib(monkeypatch)
-    payload = {
-        "baseline": {"points": [{"conc": 4, "output_throughput": 800.0}]},
-        "optimized": {"points": [{"conc": 4, "output_throughput": 1200.0}]},
-    }
-    out_path = tmp_path / "plots" / "curve.png"
-    result = render_conc_sweep_curve(
-        payload,
-        out_path,
-        ConcCurveOptions(model_label="M", gpu_label="MI300X", tp=4, isl=1024, osl=512),
-    )
-
-    assert result == out_path
-    assert out_path.read_bytes() == b"fake-png"
-    assert calls["backend"] == "Agg"
-    assert len(calls["plots"]) == 2
-    assert len(calls["annotations"]) == 2
-    assert "ISL=1024 OSL=512" in calls["titles"][0][0]
-    assert calls["closed"] is True
-
-
 def test_format_conc_sweep_curve_section_empty_summary():
     from hyperloom.orchestrator.actions.executors.report import _format_conc_sweep_curve_section
 
@@ -2155,11 +2112,12 @@ def _patch_lifecycle_eligible(monkeypatch: pytest.MonkeyPatch, teardown_log: lis
     def _fake_resolve(_cfg_path):
         return {"eligible": True, "framework": "vllm", "port": 8888, "reason": ""}
 
-    def _fake_teardown(*, pid_dir, framework, port):
-        teardown_log.append((str(pid_dir), framework, port))
+    def _fake_teardown(pid_dir):
+        teardown_log.append(str(pid_dir))
+        return []
 
     monkeypatch.setattr(_sl, "resolve_lifecycle_params", _fake_resolve)
-    monkeypatch.setattr(_sl, "teardown_lifecycle_server", _fake_teardown)
+    monkeypatch.setattr("hyperloom.orchestrator.kernel.conc_sweep.teardown_variant_server", _fake_teardown)
 
 
 def test_single_server_boots_on_the_first_rung_and_reuses(
@@ -2213,27 +2171,12 @@ def test_single_server_boots_on_the_first_rung_and_reuses(
     assert last["server_lifecycle"]["cleanup"] is True
 
 
-@pytest.mark.parametrize(
-    ("backend", "boot_envs"),
-    [
-        # Magpie keeps the boot round's envs as the persistent server's reuse identity, so a boot round that sent the
-        # phase would make every round that measures on that server fail its reuse check.
-        ("magpie", {}),
-        ("bypass", {"MAGPIE_RUN_PHASE": "server"}),
-    ],
-)
-def test_single_server_boot_only_is_measured_by_reuse_round(
-    session_dir: Path,
-    baseline_yaml: Path,
-    monkeypatch: pytest.MonkeyPatch,
-    backend: str,
-    boot_envs: dict[str, str],
+def test_single_server_boot_round_measures_its_rung_and_the_next_rung_reuses_it(
+    session_dir: Path, baseline_yaml: Path, monkeypatch: pytest.MonkeyPatch
 ):
-    """Booting the persistent server is not a data point; the same CONC must still run as a client round."""
-    monkeypatch.setenv("HYPERLOOM_BENCHMARK_BACKEND", backend)
+    """The round that boots an arm's server measures its own rung on it; no round of the sweep asks to boot only."""
     state = _make_state(baseline_config_path=str(baseline_yaml))
-    teardown_log: list[tuple] = []
-    _patch_lifecycle_eligible(monkeypatch, teardown_log)
+    _patch_lifecycle_eligible(monkeypatch, [])
     monkeypatch.setattr(
         "hyperloom.orchestrator.actions.executors._ray_serving.maybe_serving_lease", lambda **_kwargs: None
     )
@@ -2244,45 +2187,28 @@ def test_single_server_boot_only_is_measured_by_reuse_round(
         calls.append(
             {
                 "name": variant.name,
-                "server_lifecycle": kw["launch"].server_lifecycle,
                 "server_already_ready": kw["launch"].server_already_ready,
+                "lifecycle_boot_only": kw["launch"].lifecycle_boot_only,
                 "base_extra_envs": kw["recipe"].base.extra_envs or {},
             }
         )
-        if kw["launch"].server_lifecycle and kw["launch"].server_already_ready is False:
-            booted = _fake_variant(
-                variant.name,
-                throughput=None,
-                envs=variant.extra_envs,
-                status="succeeded",
-                error=None,
-            )
-            booted.note = "server_lifecycle_boot_only"
-            return [booted]
         return [_fake_variant(variant.name, throughput=100.0, envs=variant.extra_envs)]
 
     monkeypatch.setattr("hyperloom.orchestrator.kernel.conc_sweep.run_grid", _fake_run_grid)
 
     payload = asyncio.run(run_conc_sweep(state, session_dir, concs=[32, 16], total_budget_sec=9000))
 
-    assert [call["name"] for call in calls[:3]] == [
-        "baseline_conc16",
-        "baseline_conc16",
-        "baseline_conc32",
-    ]
-    boot, measured_boot = calls[0], calls[1]
-    assert boot["server_already_ready"] is False
-    assert boot["base_extra_envs"] == boot_envs
-    assert measured_boot["server_already_ready"] is True
-    assert measured_boot["base_extra_envs"] == {}
+    assert [call["name"] for call in calls[:2]] == ["baseline_conc16", "baseline_conc32"]
+    boot, reuse = calls[0], calls[1]
+    assert (boot["server_already_ready"], reuse["server_already_ready"]) == (False, True)
+    assert not any(call["lifecycle_boot_only"] or call["base_extra_envs"] for call in calls)
     assert payload["summary"]["successful_pairs"] == 2
 
 
-def test_a_session_closing_during_a_boot_only_round_measures_nothing_on_it(
+def test_a_session_closing_during_a_boot_round_starts_no_round_after_it(
     session_dir: Path, baseline_yaml: Path, monkeypatch: pytest.MonkeyPatch
 ):
-    """The measuring round after a boot-only round is a round like any other: a closing session does not start it."""
-    monkeypatch.setenv("HYPERLOOM_BENCHMARK_BACKEND", "bypass")
+    """A closing session does not start the round after the one that booted the server."""
     state = _make_state(baseline_config_path=str(baseline_yaml))
     _patch_lifecycle_eligible(monkeypatch, [])
     monkeypatch.setattr(
@@ -2293,9 +2219,7 @@ def test_a_session_closing_during_a_boot_only_round_measures_nothing_on_it(
     async def _fake_run_grid(*, grid: list[GridVariant], **kw):
         calls.append(grid[0].name)
         state.closing_phase = True
-        booted = _fake_variant(grid[0].name, throughput=None, envs=grid[0].extra_envs)
-        booted.note = "server_lifecycle_boot_only"
-        return [booted]
+        return [_fake_variant(grid[0].name, throughput=100.0, envs=grid[0].extra_envs)]
 
     monkeypatch.setattr("hyperloom.orchestrator.kernel.conc_sweep.run_grid", _fake_run_grid)
     payload = asyncio.run(run_conc_sweep(state, session_dir, concs=[4, 16], total_budget_sec=9000))
@@ -2303,7 +2227,7 @@ def test_a_session_closing_during_a_boot_only_round_measures_nothing_on_it(
     assert calls == ["baseline_conc4"]
     assert payload["budget_skip_reason"] == "session_deadline_reserve"
     points = payload["baseline"]["points"] + payload["optimized"]["points"]
-    assert [p["status"] for p in points] == ["skipped"] * 4
+    assert sorted(p["status"] for p in points) == ["skipped"] * 3 + ["succeeded"]
 
 
 def test_single_server_boot_that_failed_is_retried_by_the_next_rung(

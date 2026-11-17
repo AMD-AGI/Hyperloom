@@ -288,3 +288,34 @@ class TestAccuracyIsRecordedOnSuccess:
         entry = coord.shared_state.optimization_stack[-1]
         assert entry["action"] == "replay_warm_recipe"
         assert entry["accuracy"] == pytest.approx(0.89)
+
+
+class TestScoresUnderAnotherEvalDefinitionDoNotCompare:
+    """A replay served at another context took its score under another eval definition than the baseline's."""
+
+    def _replay(self, tmp_path: Path, digest: str) -> Coordinator:
+        coord = _coord_with_baseline(tmp_path, BASELINE_ACC)
+        coord.shared_state.baseline_accuracy_definition_digest = "baseline-def"
+        coord.phase_prelude.promote_warm_replay(
+            {
+                "status": "succeeded",
+                "output_throughput": 738.0,
+                "accuracy": 0.20,
+                "accuracy_definition_digest": digest,
+            },
+            task=_risky_task(),
+        )
+        return coord
+
+    def test_a_score_under_another_definition_is_no_verdict(self, tmp_path):
+        coord = self._replay(tmp_path, "other-def")
+        outcome = coord.shared_state.warm_replay_outcome
+        assert _promoted(coord) is True
+        assert outcome["eval_ran"] is True
+        assert outcome["replay_accuracy"] is None
+        assert "eval definition" in outcome["eval_error"]
+
+    def test_a_score_under_the_baseline_definition_is_graded(self, tmp_path):
+        coord = self._replay(tmp_path, "baseline-def")
+        assert _promoted(coord) is False
+        assert coord.shared_state.warm_replay_outcome["status"] == "accuracy_failed"

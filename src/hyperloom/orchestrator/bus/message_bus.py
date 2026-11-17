@@ -32,6 +32,11 @@ TOPIC_ALLOWLIST = frozenset(
     }
 )
 
+# The Critic's idle reply, the only observation the Critic sends. It says nothing, so no inbox shows it.
+_NOT_CRITIC_IDLE_SQL = "NOT (from_agent = 'critic' AND topic = 'observation')"
+# The ``source`` of the reply to a request deferred because the bench lanes are busy. The reply asks nothing of its
+# reader: the same request is deferred the same way until the lanes free.
+LANES_BUSY_SOURCE = "lanes_busy"
 # Per-role inbox subscriptions; a role absent from this map receives nothing.
 ROLE_SUBSCRIPTIONS: dict[str, frozenset[str]] = {
     "orchestration": frozenset(
@@ -200,16 +205,28 @@ class MessageBus:
         Raw-DB readers (``lookup_by_id``, ``tail``, ``inbox_context_sync``,
         ``recent_outcomes_context_sync``) bypass both rules.
         """
-        subscribed = ROLE_SUBSCRIPTIONS.get(to_agent, frozenset())
-        if not subscribed:
+        inbox = _inbox_filter(to_agent, after_seq)
+        if inbox is None:
             return []
-        placeholders = ",".join("?" * len(subscribed))
+        where, params = inbox
         rows = await self.db.fetchall(
-            f"SELECT * FROM events WHERE seq > ? AND (to_agent = ? OR to_agent = '*')"  # nosec B608
-            f" AND from_agent != ? AND topic IN ({placeholders}) ORDER BY seq ASC LIMIT ?",
-            (after_seq, to_agent, to_agent, *subscribed, limit),
+            f"SELECT * FROM events WHERE {where} ORDER BY seq ASC LIMIT ?",  # nosec B608 - fixed templates.
+            (*params, limit),
         )
         return [Message.from_row(r) for r in rows]
+
+    async def has_actionable_inbox(self, to_agent: str, *, after_seq: int) -> bool:
+        """Whether ``to_agent``'s inbox past ``after_seq`` holds a message that asks something of it."""
+        inbox = _inbox_filter(to_agent, after_seq)
+        if inbox is None:
+            return False
+        where, params = inbox
+        row = await self.db.fetchone(
+            f"SELECT EXISTS(SELECT 1 FROM events WHERE {where}"  # nosec B608 - fixed templates.
+            " AND NOT (topic = 'response' AND json_extract(payload, '$.source') IS ?)) AS found",
+            (*params, LANES_BUSY_SOURCE),
+        )
+        return bool(row and row["found"])
 
     async def lookup_by_id(self, msg_id: str) -> Message | None:
         """Look up a single message by its ``msg_id``."""
@@ -217,4 +234,17 @@ class MessageBus:
         return Message.from_row(row) if row else None
 
 
-__all__ = ["Message", "MessageBus", "ROLE_SUBSCRIPTIONS", "TOPIC_ALLOWLIST"]
+def _inbox_filter(to_agent: str, after_seq: int) -> tuple[str, tuple[Any, ...]] | None:
+    """The WHERE clause and its parameters selecting ``to_agent``'s inbox past ``after_seq``; None when it has none."""
+    subscribed = ROLE_SUBSCRIPTIONS.get(to_agent, frozenset())
+    if not subscribed:
+        return None
+    placeholders = ",".join("?" * len(subscribed))
+    where = (
+        f"seq > ? AND (to_agent = ? OR to_agent = '*') AND from_agent != ? AND topic IN ({placeholders})"
+        f" AND {_NOT_CRITIC_IDLE_SQL}"
+    )
+    return where, (after_seq, to_agent, to_agent, *subscribed)
+
+
+__all__ = ["LANES_BUSY_SOURCE", "Message", "MessageBus", "ROLE_SUBSCRIPTIONS", "TOPIC_ALLOWLIST"]

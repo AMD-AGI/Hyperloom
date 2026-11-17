@@ -19,9 +19,9 @@ which outlives the run), and every lease when the branch stops
 (:class:`~hyperloom_multibranch.specialist.agent_session.DevLeaseHolder`); the toolbox's close releases whatever is left.
 
 Commands run in a :class:`~hyperloom_multibranch.specialist.agent_sandbox.LocalAgentSandbox` on the leased cards, at a
-lower CPU priority, or, on the hosted backend, in the leased ``dev`` sandbox
-(:class:`~hyperloom_multibranch.specialist.remote_sandbox.RemoteAgentSandbox`), whose root is on the shared storage
-below the branch's directory. Either way they import the branch worktree's source, with every JIT and kernel cache in
+lower CPU priority, in bubblewrap where it can sandbox an agent here, or, on the hosted backend, in the leased ``dev``
+sandbox (:class:`~hyperloom_multibranch.specialist.remote_sandbox.RemoteAgentSandbox`), whose root is on the shared
+storage below the branch's directory. Either way they import the branch worktree's source, with every JIT and kernel cache in
 the sandbox's :attr:`DevSandbox.cache_root`: a cache beside the package it compiles for would be in the worktree, and
 its files in the next patch. A lease's sandbox lives as long as the lease asks, unless the toolbox lets it live less, which then bounds the
 lease. A lease whose sandbox is not up within :attr:`DevLimits.lease_wait_s` answers that it is starting, so the MCP
@@ -48,6 +48,7 @@ from typing import Any, Protocol
 
 from hyperloom.hosted.mcp_server import CallContext, InvalidParamsError, McpServer, ToolError
 from hyperloom.measure.compile import COMPONENT_LAYOUTS
+from hyperloom.orchestrator.specialists.launch_env import worktree_git_dirs
 from hyperloom.common.ports import DEV_SANDBOX_PORTS
 from hyperloom.sandbox.socket import SandboxUnavailable
 from hyperloom_multibranch.contracts.branch_log import BranchLogEntry, BranchLogType
@@ -63,7 +64,15 @@ from hyperloom_multibranch.contracts.toolbox import (
     RequestRejected,
 )
 from hyperloom_multibranch.specialist.agent_onboarding import AgentProcess, AgentSandbox
-from hyperloom_multibranch.specialist.agent_sandbox import LocalAgentSandbox, framework_protection
+from hyperloom.common.agent_isolation import BwrapIsolation
+from hyperloom_multibranch.specialist.agent_sandbox import (
+    FrameworkProtection,
+    LocalAgentSandbox,
+    SandboxIsolation,
+    SandboxPaths,
+    framework_protection,
+    sandbox_isolation,
+)
 from hyperloom_multibranch.specialist.agent_session import Processes
 from hyperloom_multibranch.specialist.framework_guard import FrameworksUnguarded
 from hyperloom_multibranch.specialist.judging import NOTICE
@@ -315,7 +324,6 @@ class DevLeases:
             raise
         finally:
             await self._offer()
-        self._leave_line(branch)
         return granted
 
     async def _granted(self, branch: str, cards: int, seconds: float, term: LeaseTerm) -> Granted:
@@ -325,17 +333,17 @@ class DevLeases:
         slot = self._slots[branch]
         try:
             lease = await self._leased(branch, cards, seconds)
+            try:
+                sandbox = self._sandboxes(branch, lease)
+            except BaseException:
+                await self._toolbox.release_branch_sandbox(lease.lease_id)
+                raise
         except BaseException:
-            del self._slots[branch]
-            raise
-        try:
-            sandbox = self._sandboxes(branch, lease)
-        except BaseException:
-            del self._slots[branch]
-            await self._toolbox.release_branch_sandbox(lease.lease_id)
+            await self._free(branch)
             raise
         now, seconds = self._clock(), min(seconds, sandbox.lifetime_s)
         self._held[branch] = _Lease(lease, sandbox, slot, now, now + seconds, now, term)
+        self._leave_line(branch)
         self._watching()
         given = len(lease.gpu_ids)
         what = (
@@ -393,10 +401,16 @@ class DevLeases:
         held = self._held.get(branch)
         return held is not None and held.busy()
 
+    def waiting(self) -> frozenset[str]:
+        """The branches in line for a lease, whether or not one is held for them now; one whose held slot lapsed has
+        left the line by :meth:`_offer`'s rule, even before ``_offer`` next runs to pass the slot on."""
+        now = self._clock()
+        return frozenset(branch for branch in self._line if self._holds.get(branch, math.inf) > now)
+
     async def reclaim(self, branch: str, reason: str) -> None:
         """Take back ``branch``'s lease, if it holds one or one is starting."""
-        await self._cancel_start(branch)
         self._leave_line(branch)
+        await self._cancel_start(branch)
         if branch in self._held:
             await self._end(branch, reason)
         await self._offer()
@@ -430,6 +444,9 @@ class DevLeases:
         await asyncio.gather(pending, return_exceptions=True)
         if abandoned and branch in self._held:
             await self._end(branch, "it was abandoned while starting")
+        elif branch in self._slots and branch not in self._held:
+            # A start cancelled before its first step never ran, so never freed its slot itself.
+            await self._free(branch)
 
     async def sweep(self) -> None:
         """Take back every lease that expired, sat idle, or kept tests waiting for cards too long."""
@@ -506,6 +523,10 @@ class DevLeases:
                     f"a dev sandbox is free and held for you for {self._limits.hold_s / MINUTE:g} min: "
                     "call dev_sandbox_lease to take it",
                 )
+
+    async def _free(self, branch: str) -> None:
+        del self._slots[branch]
+        await self._offer()
 
     def _leave_line(self, branch: str) -> None:
         self._holds.pop(branch, None)
@@ -672,24 +693,49 @@ def _caches(root: Path) -> dict[str, str]:
 
 
 def local_dev_sandboxes(
-    worktrees: WorktreeFor, processes: Processes | None, limits: DevLimits = DevLimits()
+    worktrees: WorktreeFor,
+    processes: Processes | None,
+    limits: DevLimits = DevLimits(),
+    choose: Callable[[], SandboxIsolation] = sandbox_isolation,
 ) -> SandboxFor:
-    """Sandboxes on this host, importing the source of every component the branch's worktree holds, with the image's
-    installed frameworks protected."""
+    """Sandboxes on this host, importing the source of every component the branch's worktree holds. Where bubblewrap
+    can sandbox an agent here (asked once, at the first lease, of ``choose``), each runs in one that writes the
+    lease's root only: the worktree, what its links point at and its repository
+    (:func:`~hyperloom.orchestrator.specialists.launch_env.worktree_git_dirs`) are read-only, as the specialist edits
+    its worktree, never a lease's command. Else each runs as before, with the image's installed frameworks protected.
 
-    frameworks = framework_protection()
+    Raises:
+        IsolationRefused: In a hosted run, where bubblewrap cannot sandbox an agent.
+    """
+
+    chosen: list[SandboxIsolation] = []
+    protected: list[FrameworkProtection] = []
 
     def sandbox(branch: str, lease: BranchLease) -> LocalAgentSandbox:
-        base_env = {**os.environ, **lease.env}
+        if not chosen:
+            chosen.append(choose())
+        isolation, base_env = chosen[0], {**os.environ, **lease.env}
+        sources, niceness = _sources(worktrees, branch), limits.niceness
+        if isinstance(isolation, BwrapIsolation):
+            worktree = worktrees(branch)
+            paths = SandboxPaths(readable=(worktree.path, *worktree.linked, *worktree_git_dirs(worktree.admin)))
+            forwarded = forwarded_env(os.environ)
+            return LocalAgentSandbox(
+                lease.gpu_ids,
+                sources,
+                lease.root,
+                processes,
+                branch,
+                base_env,
+                niceness=niceness,
+                isolation=isolation,
+                paths=paths,
+                forwarded=forwarded,
+            )
+        if not protected:
+            protected.append(framework_protection())
         return LocalAgentSandbox(
-            lease.gpu_ids,
-            _sources(worktrees, branch),
-            lease.root,
-            processes,
-            branch,
-            base_env,
-            niceness=limits.niceness,
-            frameworks=frameworks,
+            lease.gpu_ids, sources, lease.root, processes, branch, base_env, niceness=niceness, frameworks=protected[0]
         )
 
     return sandbox

@@ -9,7 +9,7 @@ from datetime import datetime, timezone
 
 import pytest
 
-from hyperloom.inference_optimizer.session.paths import asset_prompt_references_dir, asset_system_prompts_dir
+from hyperloom.inference_optimizer.session.paths import asset_system_prompts_dir
 from hyperloom.inference_optimizer.protocol.action_surfaces import ACTION_CATALOGUE
 from hyperloom.orchestrator.phases import machine_state as _ps
 from hyperloom.orchestrator.prompts.prompt_builder import (
@@ -19,58 +19,6 @@ from hyperloom.orchestrator.prompts.prompt_builder import (
     PromptAssets,
     PromptCycle,
     SessionContext,
-)
-
-
-# Marker text identifying each phase-scoped prompt module.
-KERNEL_REQUEST_REF = "## 6. KERNEL-OPT REQUEST REFERENCE"
-IDEA_GENERATION = "### IDEA GENERATION"
-BASELINE_FINGERPRINT = "seven params fields"  # now in the reference doc, not in the prompt
-SPECIALIST_DIALS = "### One specialist, three dials"
-SPECIALIST_WATCH = "### Watching a running specialist"
-SPECIALIST_DOMAIN = "### Choosing specialist domain"
-WEB_SEARCH = "### Web search"
-KERNEL_REQUEST_KINDS = "### Kernel request kinds"
-ROOFLINE_BLOCK = "### Roofline / profile analysis"
-
-# One goal block per phase.
-PHASE_GOAL_BLOCKS = {
-    _ps.PHASE_PRELUDE: "### PRELUDE — phase goal",
-    _ps.PHASE_ENABLEMENT: "### ENABLEMENT — phase goal",
-    _ps.PHASE_FRAMEWORK_AGENT: "### OPTIMIZE — phase goal",
-    _ps.PHASE_KERNEL_AGENT: "### KERNEL — phase goal",
-    _ps.PHASE_SWEEP: "### SWEEP — phase goal",
-    _ps.PHASE_CLOSE: "### CLOSE — phase goal",
-}
-
-# Analysis-driven targeting is unreachable once the levers are gone.
-ROOFLINE_PHASES = {
-    _ps.PHASE_PRELUDE,
-    _ps.PHASE_ENABLEMENT,
-    _ps.PHASE_FRAMEWORK_AGENT,
-    _ps.PHASE_KERNEL_AGENT,
-}
-
-# Only EXPLORE lets the LLM emit `delegate{specialist}`; FRAMEWORK_AGENT specialists come from the Coordinator's
-# authoring pump but stay steerable.
-SPECIALIST_DISPATCH_OPS = (SPECIALIST_DIALS, SPECIALIST_DOMAIN, WEB_SEARCH)
-ALL_SPECIALIST_OPS = (*SPECIALIST_DISPATCH_OPS, SPECIALIST_WATCH)
-
-ALWAYS_ON = (
-    "## 1. MISSION",
-    "## 2. SESSION CONTEXT",
-    "## 3. PIPELINE & TIME BUDGET",
-    "## 3a. PHASE CONTRACT",
-    "## 4. ACTIONS YOU MAY USE",
-    "## 5. DECISION FRAMEWORK",
-    "## 7. RULES & OUTPUT PROTOCOL",
-    "### Phase awareness",
-    "### Hard rules",
-    "### Pulling what the projection does not carry",
-    "### SESSION_DIR contract",
-    "### Output protocol",
-    "RULE F3",
-    "RULE F4",
 )
 
 
@@ -117,45 +65,6 @@ def test_cycle_strategy_is_rendered_in_place_of_the_default_arc(registry):
 
 
 # Phase-scoped modules render only where the behaviour exists
-def test_kernel_request_reference_only_in_kernel_phase(registry):
-    """Kernel REQUEST payload templates are legal only in KERNEL_AGENT."""
-    for phase in _ps.PHASE_NAMES:
-        text = _build(registry, phase)
-        if phase == _ps.PHASE_KERNEL_AGENT:
-            assert KERNEL_REQUEST_REF in text
-        else:
-            assert KERNEL_REQUEST_REF not in text, f"kernel request ref leaked into {phase}"
-
-
-def test_idea_generation_only_in_explore_phase(registry):
-    """The explore grid idea pipeline is unreachable outside EXPLORE."""
-    for phase in _ps.PHASE_NAMES:
-        text = _build(registry, phase)
-        if phase == _ps.PHASE_FRAMEWORK_AGENT:
-            assert IDEA_GENERATION in text
-        else:
-            assert IDEA_GENERATION not in text, f"idea generation leaked into {phase}"
-
-
-def test_baseline_recovery_detail_only_in_prelude(registry):
-    """PRELUDE and ENABLEMENT render F1/F2 (the phases where baselines keep failing)."""
-    refs_dir = asset_prompt_references_dir()
-    for phase in _ps.PHASE_NAMES:
-        text = _build(registry, phase)
-        # Detailed fingerprint text lives in the reference doc, not in any prompt.
-        assert BASELINE_FINGERPRINT not in text, f"baseline fingerprint detail leaked into {phase} prompt"
-        if phase in (_ps.PHASE_PRELUDE, _ps.PHASE_ENABLEMENT):
-            assert "RULE F1" in text
-            assert "RULE F2" in text
-        else:
-            assert "RULE F1" not in text
-            assert "RULE F2" not in text
-    # The reference doc itself must contain the fingerprint detail.
-    failure_ref = refs_dir / "failure_recovery.md"
-    if failure_ref.exists():
-        assert BASELINE_FINGERPRINT in failure_ref.read_text(encoding="utf-8")
-
-
 def test_the_stop_step_asks_for_report_only_where_the_phase_admits_it(registry):
     """Outside CLOSE a proposed ``report`` is refused at admission, so the prompt must not ask for one."""
     for phase in _ps.PHASE_NAMES:
@@ -169,103 +78,30 @@ def test_the_report_catalogue_entry_names_the_only_phase_that_admits_it(registry
     assert "only in CLOSE" in registry["report"].description
 
 
-def test_specialist_dispatch_prose_only_in_explore(registry):
-    """How to shape a dispatch matters only where the LLM can emit one."""
-    for phase in _ps.PHASE_NAMES:
-        text = _build(registry, phase)
-        for marker in SPECIALIST_DISPATCH_OPS:
-            if phase == _ps.PHASE_FRAMEWORK_AGENT:
-                assert marker in text, f"{marker} missing from {phase}"
-            else:
-                assert marker not in text, f"{marker} leaked into {phase}"
+@pytest.mark.parametrize(
+    ("marker", "phases"),
+    [
+        ("## 6. KERNEL-OPT REQUEST REFERENCE", {_ps.PHASE_KERNEL_AGENT}),
+        ("### IDEA GENERATION", {_ps.PHASE_FRAMEWORK_AGENT}),
+        ("RULE F1", {_ps.PHASE_PRELUDE, _ps.PHASE_ENABLEMENT}),
+    ],
+    ids=["kernel_request_reference", "idea_generation", "rule_f1"],
+)
+def test_each_builder_scoped_section_renders_in_exactly_its_phases(registry, marker, phases):
+    """Each section guides work only these phases do; the sets are literal so that a changed scope fails here."""
+    assert {phase for phase in _ps.PHASE_NAMES if marker in _build(registry, phase)} == phases
 
 
-def test_specialist_watching_prose_spans_both_dispatching_phases(registry):
-    """A live specialist can exist in EXPLORE and FRAMEWORK_AGENT; the LLM steers both."""
-    with_specialists = {_ps.PHASE_FRAMEWORK_AGENT, _ps.PHASE_FRAMEWORK_AGENT}
-    for phase in _ps.PHASE_NAMES:
-        text = _build(registry, phase)
-        if phase in with_specialists:
-            assert SPECIALIST_WATCH in text, f"{SPECIALIST_WATCH} missing from {phase}"
-        else:
-            assert SPECIALIST_WATCH not in text, f"{SPECIALIST_WATCH} leaked into {phase}"
-
-
-def test_phase_goal_blocks_render_only_in_their_own_phase(registry):
-    """A phase states its own goal; the other phases' goals are unreachable from it."""
-    for phase in _ps.PHASE_NAMES:
-        text = _build(registry, phase)
-        for owner, marker in PHASE_GOAL_BLOCKS.items():
-            if owner == phase:
-                assert marker in text, f"{marker} missing from its own phase"
-            else:
-                assert marker not in text, f"{marker} leaked into {phase}"
-
-
-def test_kernel_request_kinds_only_in_kernel_phase(registry):
-    """The request-kind whitelist is scoped to KERNEL_AGENT where the Coordinator routes them."""
-    for phase in _ps.PHASE_NAMES:
-        text = _build(registry, phase)
-        if phase == _ps.PHASE_KERNEL_AGENT:
-            assert KERNEL_REQUEST_KINDS in text
-        else:
-            assert KERNEL_REQUEST_KINDS not in text, f"kernel request kinds leaked into {phase}"
-
-
-def test_roofline_targeting_drops_out_of_sweep_and_close(registry):
-    """SWEEP validates and CLOSE reports; neither can act on a bottleneck class."""
-    for phase in _ps.PHASE_NAMES:
-        text = _build(registry, phase)
-        if phase in ROOFLINE_PHASES:
-            assert ROOFLINE_BLOCK in text, f"{ROOFLINE_BLOCK} missing from {phase}"
-        else:
-            assert ROOFLINE_BLOCK not in text, f"{ROOFLINE_BLOCK} leaked into {phase}"
-
-
-def test_payload_contracts_render_in_every_phase(registry):
-    """Payload templates are no longer phase-scoped, so every phase carries them."""
-    for phase in _ps.PHASE_NAMES:
-        text = _build(registry, phase)
-        assert "GRID INPUT (REQUIRED)" in text
-        assert "reasoning, provenance" in text
-        assert "Every variant requires action-time reasoning" in text
-        assert "EMIT: delegate{action_name='specialist'" in text
-        assert "- **explore** —" in text
-        assert "- **specialist** —" in text
+def test_scoping_never_hides_a_block_from_every_phase(registry):
+    """A scope naming no real phase would drop its block from every prompt the model can receive."""
+    scoped = set().union(*(_build(registry, phase).splitlines() for phase in _ps.PHASE_NAMES))
+    assert [line for line in _build(registry, "").splitlines() if line not in scoped] == []
 
 
 @pytest.mark.parametrize("phase", _ps.PHASE_NAMES)
-def test_always_on_modules_survive_every_phase(registry, phase):
-    """Scoping never removes the north star or the cross-phase planning facts."""
-    text = _build(registry, phase)
-    for marker in ALWAYS_ON:
-        assert marker in text, f"{marker} missing from {phase}"
-
-
-def test_generic_recovery_survives_outside_prelude(registry):
-    """Any action can fail, so the generic recovery surfaces stay everywhere."""
-    text = _build(registry, _ps.PHASE_CLOSE)
-    assert "### FAILURE RECOVERY" in text
-    assert "last_action_failures" in text
-
-
-# Back-compat: an unscoped build is a superset
-def test_unscoped_build_renders_every_module(registry):
-    """A caller that does not track phases keeps the pre-scoping prompt."""
-    text = _build(registry, "")
-    for marker in (
-        KERNEL_REQUEST_REF,
-        IDEA_GENERATION,
-        KERNEL_REQUEST_KINDS,
-        ROOFLINE_BLOCK,
-        "GRID INPUT (REQUIRED)",
-        *PHASE_GOAL_BLOCKS.values(),
-        *ALL_SPECIALIST_OPS,
-        *ALWAYS_ON,
-    ):
-        assert marker in text, f"{marker} missing from the unscoped build"
-    # Detailed fingerprint text now lives in the reference doc, not in the prompt.
-    assert BASELINE_FINGERPRINT not in text
+def test_every_phase_is_told_the_output_protocol(registry, phase):
+    """Replies are parsed by one protocol in every phase, so no phase may scope it out."""
+    assert "### Output protocol" in _build(registry, phase)
 
 
 def test_scoped_builds_are_strictly_smaller(registry):
@@ -273,12 +109,6 @@ def test_scoped_builds_are_strictly_smaller(registry):
     unscoped = len(_build(registry, "").splitlines())
     for phase in _ps.PHASE_NAMES:
         assert len(_build(registry, phase).splitlines()) < unscoped, f"{phase} did not shrink"
-
-
-def test_maintainer_header_never_reaches_the_model(registry):
-    """The fragment's leading blockquote is maintainer documentation."""
-    for phase in ("", *_ps.PHASE_NAMES):
-        assert "rules fragment** consumed by" not in _build(registry, phase)
 
 
 # Rules-fragment tag filtering

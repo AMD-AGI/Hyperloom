@@ -7,7 +7,6 @@ import json
 import os
 import subprocess
 from pathlib import Path
-from types import SimpleNamespace
 
 import pytest
 
@@ -38,6 +37,10 @@ _GIT_IDENTITY = {
     "GIT_COMMITTER_NAME": "integration-test",
     "GIT_COMMITTER_EMAIL": "integration-test@local",
 }
+
+
+#: What the report mapper stamps on every AgentX round it accepts as evidence.
+_AGENTX_EVIDENCE = {"valid_measurement": True, "diagnostic_only": False, "workload_identity": "agentx-workload"}
 
 
 @pytest.fixture(autouse=True)
@@ -141,6 +144,17 @@ def _publish(
     return patch_dir
 
 
+def _publish_task(layout: ControllerLayout, patch_dir: Path, *, priority: int) -> None:
+    """Write the Controller task the publication in ``patch_dir`` was made from, at ``priority``."""
+    publication = json.loads((patch_dir / "publication.json").read_text(encoding="utf-8"))
+    task_dir = layout.tasks_root / patch_dir.name
+    task_dir.mkdir(parents=True)
+    (task_dir / "driver.py").write_text("", encoding="utf-8")
+    fields = ("identity", "base_commit", "repo_root", "kernel_path", "operator_name")
+    task = {**{name: publication[name] for name in fields}, "driver_path": "driver.py", "priority": priority}
+    (task_dir / "task.json").write_text(json.dumps(task), encoding="utf-8")
+
+
 def _state(session_dir: Path, repo: Path) -> SharedState:
     state = SharedState(
         baseline_tput=100.0,
@@ -163,24 +177,6 @@ def _silent_backends() -> dict[str, object]:
         "orchestration": MockBackend(silent, name="orch"),
         "critic": MockCriticBackend(),
     }
-
-
-def test_patch_directories_follow_controller_task_priority(tmp_path: Path, monkeypatch) -> None:
-    root = tmp_path / "cycle" / "result" / "patches"
-    alphabetical = tuple(root / name for name in ("first", "second", "third"))
-    priorities = {"first": 2, "second": 0, "third": 1}
-
-    monkeypatch.setattr(integration, "published_operator_dirs", lambda _layout: alphabetical)
-    monkeypatch.setattr(
-        integration,
-        "load_task",
-        lambda path, record_state=False: SimpleNamespace(
-            task=SimpleNamespace(priority=priorities[path.name], operator_id=path.name)
-        ),
-    )
-
-    ordered = integration._priority_ordered_patch_dirs(ControllerLayout(tmp_path / "cycle"))
-    assert [path.name for path in ordered] == ["second", "third", "first"]
 
 
 def _coordinator(session_dir: Path, repo: Path) -> Coordinator:
@@ -272,6 +268,39 @@ async def test_multiple_patches_are_kept_and_committed_one_by_one(tmp_path: Path
     assert int(_git(repo, "rev-list", "--count", "HEAD")) == 3
     assert len(state.optimization_stack) == 2
     assert state.current_best["tput"] == 112.0
+
+
+@pytest.mark.asyncio
+async def test_patches_integrate_in_controller_task_priority_order(tmp_path: Path) -> None:
+    """The Controller's task priority, not the directory listing, decides which patch lands first."""
+    repo, base = _repo(tmp_path)
+    layout = ControllerLayout(tmp_path / "cycle")
+    for kernel_name, priority in (("first", 1), ("second", 0)):
+        patch_dir = _publish(
+            layout.patches_root,
+            repo,
+            base,
+            kernel_name=kernel_name,
+            kernel_path=f"{kernel_name}.py",
+            patch=_patch(repo, f"{kernel_name}.py", "VALUE = 2\n"),
+        )
+        _publish_task(layout, patch_dir, priority=priority)
+    seen: list[str] = []
+
+    async def _validate(publication):
+        seen.append(publication.identity["kernel_name"])
+        return {"decision": "KEEP", "new_tput": 110.0, "gain_pct": 10.0}
+
+    session_dir = tmp_path / "session"
+    session_dir.mkdir()
+    await _integrate(
+        patches_root=layout.patches_root,
+        session_dir=session_dir,
+        shared_state=_state(session_dir, repo),
+        validator=_validate,
+    )
+
+    assert seen == ["second", "first"]
 
 
 @pytest.mark.asyncio
@@ -1441,6 +1470,7 @@ async def test_a_keep_carries_the_axes_of_the_measurement_it_was_graded_on(
                 "e2e_norm_intvty_p50": 40.0,
                 "duration_seconds": 900.0,
                 "request_error_rate": 0.0,
+                **_AGENTX_EVIDENCE,
                 "ttft_mean_ms": 55.0,
             },
         }
@@ -1460,6 +1490,7 @@ async def test_a_keep_carries_the_axes_of_the_measurement_it_was_graded_on(
         "e2e_norm_intvty_p50": 30.0,
         "duration_seconds": 900.0,
         "request_error_rate": 0.0,
+        **_AGENTX_EVIDENCE,
         "ttft_mean_ms": 90.0,
     }
 
@@ -1519,6 +1550,7 @@ async def test_an_agentx_keep_validates_its_gain_on_the_axis_it_was_graded_on(
                 "e2e_norm_intvty_p50": 42.0,
                 "duration_seconds": 900.0,
                 "request_error_rate": 0.0,
+                **_AGENTX_EVIDENCE,
             },
         }
 
@@ -1535,6 +1567,7 @@ async def test_an_agentx_keep_validates_its_gain_on_the_axis_it_was_graded_on(
         "e2e_norm_intvty_p50": 30.0,
         "duration_seconds": 900.0,
         "request_error_rate": 0.0,
+        **_AGENTX_EVIDENCE,
     }
     state.current_best = {
         "action": "baseline",
@@ -1546,6 +1579,7 @@ async def test_an_agentx_keep_validates_its_gain_on_the_axis_it_was_graded_on(
         "e2e_norm_intvty_p50": 30.0,
         "duration_seconds": 900.0,
         "request_error_rate": 0.0,
+        **_AGENTX_EVIDENCE,
     }
 
     summary = await _integrate(
@@ -1602,6 +1636,7 @@ async def test_a_keep_measured_below_the_anchor_does_not_lower_current_best(
                 "e2e_norm_intvty_p50": 30.0,
                 "duration_seconds": 900.0,
                 "request_error_rate": 0.0,
+                **_AGENTX_EVIDENCE,
             },
         }
 
@@ -1620,6 +1655,7 @@ async def test_a_keep_measured_below_the_anchor_does_not_lower_current_best(
         "e2e_norm_intvty_p50": 40.0,
         "duration_seconds": 900.0,
         "request_error_rate": 0.0,
+        **_AGENTX_EVIDENCE,
     }
 
     summary = await _integrate(

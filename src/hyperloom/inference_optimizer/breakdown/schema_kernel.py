@@ -179,6 +179,9 @@ class V6KernelGeakHandoff(TypedDict, total=False):
     baseline_flags: str | None
     baseline_envs: str | dict[str, Any] | None
     baseline_env_spec_present: bool
+    #: The digest of the measured round's launch.json GEAK launched its servers from.
+    launch_digest: str | None
+    #: Written only by sessions that handed GEAK a recipe; kept so their archives still read.
     launch_recipe: str | None
     raw_baseline_tput: float | None
     orchestrator_best_tput_same_config: float | None

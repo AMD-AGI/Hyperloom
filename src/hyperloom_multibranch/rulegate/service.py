@@ -78,6 +78,9 @@ class GateService:
         with _judgeable():
             return await self._rule.accuracy_passes(record)
 
+    async def speed_gates(self) -> frozenset[str]:
+        return self._rule.speed_gates
+
     async def _retest_of(self, first: TestRecord) -> str:
         snapshot = await self._blackboard.snapshot()
         asked = [

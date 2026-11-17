@@ -9,6 +9,8 @@ import argparse
 import json
 import os
 
+import pytest
+
 from hyperloom.inference_optimizer.cli.launch_shape import _export_operator_launch_shape
 from hyperloom.inference_optimizer.cli.bootstrap import parse_operator_extra_env
 from hyperloom.orchestrator.state.shared_state import SharedState
@@ -32,11 +34,12 @@ def _pin(monkeypatch, **pins):
     _export_operator_launch_shape(server_args="", extra_env=dict(pins))
 
 
-def test_pin_fills_a_workload_knob_the_flags_left_unset(monkeypatch):
+@pytest.mark.parametrize("isl_pin", ["4096", "  4096  "], ids=["plain", "padded"])
+def test_pin_fills_a_workload_knob_the_flags_left_unset(monkeypatch, isl_pin):
     """A pin reaches the ladder through the environment, and ``args`` is what every later projection writes."""
     from hyperloom.inference_optimizer.cli.launch_shape import _resolve_workload_knobs
 
-    _pin(monkeypatch, ISL="4096", OSL="512")
+    _pin(monkeypatch, ISL=isl_pin, OSL="512")
     args = _knob_args()
 
     _resolve_workload_knobs(args)
@@ -167,23 +170,15 @@ def test_the_fresh_launch_anchors_stay_in_order():
         )
 
 
-def test_the_environment_rung_is_positive_ints_only(monkeypatch):
-    """The rung every ladder shares: a value that is not a positive integer falls through rather than raising."""
-    from hyperloom.inference_optimizer.cli.launch_shape import _positive_env_int
-
-    for raw, expected in (("65536", 65536), ("", 0), ("nope", 0), ("0", 0), ("-4", 0), ("  8  ", 8)):
-        monkeypatch.setenv("MAX_MODEL_LEN", raw)
-        assert _positive_env_int("MAX_MODEL_LEN") == expected
-
-
-def test_a_malformed_pinned_knob_does_not_take_the_run_down(monkeypatch):
+@pytest.mark.parametrize("pin", ["not-a-number", "0", "-4", ""], ids=["not-a-number", "zero", "negative", "blank"])
+def test_a_malformed_pinned_knob_does_not_take_the_run_down(monkeypatch, pin):
     """A pin that is not a positive integer falls through to the rest of the ladder rather than raising."""
     from hyperloom.inference_optimizer.cli.launch_shape import _resolve_workload_knobs
     from hyperloom.common.workload_defaults import DEFAULT_ISL
 
     monkeypatch.setenv("INFERENCE_OPTIMIZER_EXTRA_ENV", "")
     monkeypatch.setenv("ISL", "")
-    _export_operator_launch_shape(server_args="", extra_env={"ISL": "not-a-number"})
+    _export_operator_launch_shape(server_args="", extra_env={"ISL": pin})
     args = _knob_args()
 
     _resolve_workload_knobs(args)
@@ -253,7 +248,7 @@ def test_resume_restores_pins_before_the_agentx_staleness_guard(tmp_path, monkey
     import pytest
 
     from hyperloom.inference_optimizer.cli import _build_parser, _run_optimize
-    from hyperloom.inference_optimizer.cli.bootstrap import AGENTX_MEASUREMENT_EPOCH
+    from hyperloom.inference_optimizer.cli.bootstrap import MEASUREMENT_EPOCH
 
     cli_mod = "hyperloom.inference_optimizer.cli"
 
@@ -273,7 +268,7 @@ def test_resume_restores_pins_before_the_agentx_staleness_guard(tmp_path, monkey
         model_name=model.name,
         model_path=str(model),
         benchmark_mode="agentx",
-        agentx_epoch=AGENTX_MEASUREMENT_EPOCH,
+        measurement_epoch=MEASUREMENT_EPOCH,
         agentx_backend="mlperf",
         operator_extra_env={"HYPERLOOM_AGENTIC_BACKEND": "mlperf"},
     ).save(resume_dir)
@@ -402,7 +397,6 @@ def test_launch_shape_survives_a_state_roundtrip():
         warm_replay_min_confidence=0.55,
         bypass_scripts_dir="/scripts",
         framework_repo_path="/fw",
-        benchmark_backend="bypass",
     )
 
     restored = SharedState.from_dict(state.to_dict())
@@ -414,7 +408,6 @@ def test_launch_shape_survives_a_state_roundtrip():
     assert restored.warm_replay_min_confidence == 0.55
     assert restored.bypass_scripts_dir == "/scripts"
     assert restored.framework_repo_path == "/fw"
-    assert restored.benchmark_backend == "bypass"
 
 
 def test_pre_existing_state_without_the_fields_loads_defaults():
@@ -428,7 +421,14 @@ def test_pre_existing_state_without_the_fields_loads_defaults():
     assert restored.warm_replay_min_confidence == 0.7
     assert restored.bypass_scripts_dir == ""
     assert restored.framework_repo_path == ""
-    assert restored.benchmark_backend == ""
+
+
+def test_state_archived_with_the_retired_backend_field_still_loads():
+    """A state.json that recorded the retired benchmark_backend field loads; the field is dropped, not restored."""
+    restored = SharedState.from_dict({"session_id": "old", "benchmark_backend": "bypass", "framework_repo_path": "/fw"})
+
+    assert restored.framework_repo_path == "/fw"
+    assert "benchmark_backend" not in restored.to_dict()
 
 
 def test_restore_operator_paths_fills_env_from_state(monkeypatch):
@@ -436,7 +436,6 @@ def test_restore_operator_paths_fills_env_from_state(monkeypatch):
 
     monkeypatch.setenv("FRAMEWORK_REPO_PATH", "")
     monkeypatch.setenv("HYPERLOOM_BYPASS_SCRIPTS_DIR", "")
-    monkeypatch.setenv("HYPERLOOM_BENCHMARK_BACKEND", "")
     monkeypatch.setenv("SGLANG_REPO_PATH", "")
     monkeypatch.setenv("SGLANG_DIR", "")
     state = SharedState(
@@ -444,13 +443,11 @@ def test_restore_operator_paths_fills_env_from_state(monkeypatch):
         framework="sglang",
         framework_repo_path="/archived/fw",
         bypass_scripts_dir="/archived/scripts",
-        benchmark_backend="bypass",
     )
     _restore_operator_supplied_paths_from_state(_ns(framework_path=None, benchmark_scripts_dir=None), state)
     assert os.environ["FRAMEWORK_REPO_PATH"] == "/archived/fw"
     assert os.environ["SGLANG_REPO_PATH"] == "/archived/fw"
     assert os.environ["HYPERLOOM_BYPASS_SCRIPTS_DIR"] == "/archived/scripts"
-    assert os.environ["HYPERLOOM_BENCHMARK_BACKEND"] == "bypass"
 
 
 def test_restore_operator_paths_leaves_env_when_cli_repasses(monkeypatch):
@@ -458,12 +455,10 @@ def test_restore_operator_paths_leaves_env_when_cli_repasses(monkeypatch):
 
     monkeypatch.setenv("FRAMEWORK_REPO_PATH", "")
     monkeypatch.setenv("HYPERLOOM_BYPASS_SCRIPTS_DIR", "")
-    monkeypatch.setenv("HYPERLOOM_BENCHMARK_BACKEND", "")
     state = SharedState(
         session_id="s",
         framework_repo_path="/archived/fw",
         bypass_scripts_dir="/archived/scripts",
-        benchmark_backend="bypass",
     )
     _restore_operator_supplied_paths_from_state(
         _ns(framework_path="/cli/fw", benchmark_scripts_dir="/cli/scripts"),
@@ -471,4 +466,3 @@ def test_restore_operator_paths_leaves_env_when_cli_repasses(monkeypatch):
     )
     assert os.environ.get("FRAMEWORK_REPO_PATH", "") == ""
     assert os.environ.get("HYPERLOOM_BYPASS_SCRIPTS_DIR", "") == ""
-    assert os.environ["HYPERLOOM_BENCHMARK_BACKEND"] == "bypass"

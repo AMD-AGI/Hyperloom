@@ -13,10 +13,29 @@ import pytest
 from hyperloom.inference_optimizer import roofline_ceiling as rc
 
 
-def test_benchmark_envs():
-    assert rc._benchmark_envs({}) == {}
-    assert rc._benchmark_envs({"envs": "nope"}) == {}
-    assert rc._benchmark_envs({"envs": {"A": 1}}) == {"A": 1}
+@pytest.mark.parametrize("text", ["benchmark:\n  model: /point\n  envs: nope\n", "benchmark: [\n", "other: {}\n"])
+def test_a_malformed_baseline_point_falls_back_to_state(tmp_path: Path, text: str):
+    cfg = tmp_path / "baseline.yaml"
+    cfg.write_text(text, encoding="utf-8")
+    state = SimpleNamespace(baseline_config_path=str(cfg), model_path="/state", framework="vllm", tp=2, conc=4)
+
+    runtime = rc.resolve_runtime_workload(state)
+
+    assert (runtime.model_path, runtime.framework, runtime.tp, runtime.concurrency) == ("/state", "vllm", 2, 4)
+
+
+def test_the_baseline_point_wins_over_state(tmp_path: Path):
+    cfg = tmp_path / "baseline.yaml"
+    cfg.write_text(
+        "benchmark:\n  model: /point\n  framework: sglang\n  envs: {TP: 8, CONC: 16, EXTRA_SGLANG_ARGS: --x}\n",
+        encoding="utf-8",
+    )
+    state = SimpleNamespace(baseline_config_path=str(cfg), model_path="/state", framework="vllm", tp=2, conc=4)
+
+    runtime = rc.resolve_runtime_workload(state, arm="baseline")
+
+    assert (runtime.model_path, runtime.framework, runtime.tp, runtime.concurrency) == ("/point", "sglang", 8, 16)
+    assert runtime.server_args == "--x"
 
 
 @pytest.mark.parametrize(
@@ -69,18 +88,13 @@ def test_server_args_env_override_and_payload():
     )
 
 
-def test_read_baseline_yaml_benchmark(tmp_path: Path):
-    assert rc._read_baseline_yaml_benchmark(SimpleNamespace()) == {}
-    assert rc._read_baseline_yaml_benchmark(SimpleNamespace(baseline_config_path="")) == {}
+def test_read_baseline_server_args(tmp_path: Path):
+    assert rc.read_baseline_server_args(SimpleNamespace()) == ""
+    assert rc.read_baseline_server_args(SimpleNamespace(baseline_config_path="")) == ""
 
     cfg = tmp_path / "materialized.yaml"
     cfg.write_text("benchmark:\n  envs:\n    EXTRA_SGLANG_ARGS: '--tp 8'\n", encoding="utf-8")
-    state = SimpleNamespace(baseline_config_path=str(cfg))
-    bench = rc._read_baseline_yaml_benchmark(state)
-    assert bench.get("envs", {}).get("EXTRA_SGLANG_ARGS") == "--tp 8"
-
-    # Full chain: baseline yaml -> server args string.
-    assert rc.read_baseline_server_args(state) == "--tp 8"
+    assert rc.read_baseline_server_args(SimpleNamespace(baseline_config_path=str(cfg))) == "--tp 8"
 
 
 def test_baseline_server_args_follow_the_accepted_anchor_not_the_last_attempt(tmp_path: Path):

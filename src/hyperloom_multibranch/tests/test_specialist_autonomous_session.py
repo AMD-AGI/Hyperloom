@@ -5,14 +5,21 @@ import asyncio
 from types import SimpleNamespace
 import json
 import os
+import select
+import signal
+import stat
+import shutil
 import subprocess
+import tempfile
 import time
+from collections.abc import Awaitable, Callable, Mapping
 from dataclasses import asdict, replace, dataclass, field
 from pathlib import Path
 
 import pytest
 
-from hyperloom.contracts.measurement import Attempt, Purpose, TestKind, TestRequest
+from hyperloom.common.agent_isolation import BwrapIsolation
+from hyperloom.contracts.measurement import Attempt, Purpose, TestKind, TestRequest, Validity
 from hyperloom.contracts.recipe import (
     ConfigDelta,
     KernelKind,
@@ -25,22 +32,34 @@ from hyperloom.measure.compile import LocalBlobStore, PackageBase, kernel_rows_o
 from hyperloom.sandbox import SandboxGone
 from hyperloom.sandbox.socket import SandboxUnavailable
 from hyperloom_multibranch.contracts.lifecycle import BranchTask
-from hyperloom_multibranch.contracts.blackboard.vocab import LeaseKind
+from hyperloom_multibranch.contracts.blackboard.vocab import Conclusion, LeaseKind
 from hyperloom_multibranch.contracts.toolbox import Backpressure, BranchLease, LeaseCharge, RequestRejected
 from hyperloom_multibranch.contracts.blackboard import INTEGRATION_BRANCH, Role, Writer
 from hyperloom_multibranch.contracts.blackboard.records import BaselineRecord, ToolResultPointer
 from hyperloom_multibranch.blackboard import LocalBlackboard
 from hyperloom_multibranch.blackboard.local.blackboard import LEARNING_MAX_CHARS
-from hyperloom_multibranch.blackboard.tests.factories import result
-from hyperloom_multibranch.specialist import autonomous_session, worktree as worktree_module
-from hyperloom_multibranch.specialist.agent_onboarding import OnboardingSetup
+from hyperloom_multibranch.blackboard.tests.factories import judgement, result
+from hyperloom_multibranch.rulegate.rules import RETRACTION_ID
+from hyperloom_multibranch.scheduling.session_base import served_launch
+from hyperloom_multibranch.specialist.agent_import import KeptChange, Retraction
+from hyperloom_multibranch.specialist import (
+    autonomous_session,
+    keep_requeue,
+    worktree as worktree_module,
+)
+from hyperloom_multibranch.specialist.agent_onboarding import SHIM_DIR, AgentSandbox, CommandResult, OnboardingSetup
+from hyperloom_multibranch.specialist.agent_sandbox import LocalAgentSandbox
+from hyperloom_multibranch.specialist.agent_sessions import AgentSandboxes, LocalAgentSandboxes
 from hyperloom_multibranch.specialist.agent_spec import AgentSpec
 from hyperloom_multibranch.specialist.agent_session import BranchPlace
 from hyperloom_multibranch.specialist.agent_manifest import AgentManifest
 from hyperloom_multibranch.specialist.autonomous_session import (
     AGENT_DIR,
     MANIFEST_FILE,
+    START_TABLES_DIR,
+    WATCH_FILE,
     AutonomousSession,
+    KeepWatch,
     AutonomousSetup,
     collection_margin,
     without_file,
@@ -56,10 +75,14 @@ from hyperloom_multibranch.specialist.runtime import (
     SessionStart,
 )
 from hyperloom_multibranch.specialist.worktree import Upstream
+from hyperloom_common.tests._bwrap_host import usable_bwrap
+from hyperloom_common.tests.shared_accounts import Accounts, other_accounts
+from hyperloom_multibranch.tests.base_records import TOKEN, frozen_credential_base
 from hyperloom_multibranch.tests.branch_rig import branch_rig
 from hyperloom_multibranch.tests.agent_rig import (
     BRANCH,
     CHAMPION_ROWS,
+    CONFIG_FILE,
     COMPONENT_AGENT,
     IMAGE_DEFAULT,
     IMAGE_MODEL,
@@ -71,15 +94,19 @@ from hyperloom_multibranch.tests.agent_rig import (
     Toolbox,
     _aiter,
     _replayed,
+    _stand_in_repo,
     _until,
+    install_stand_in,
 )
 
 
 #: An agent that, every ``gap`` seconds, writes each of ``keeps`` to its workspace's config.py and to the config it
-#: runs with, commits it when ``commits`` is set, as Arbor does, and records and prints the keep; it ends with ``exit``
+#: runs with, commits it when ``commits`` is set, and records and prints the keep; it ends with ``exit``
 #: after ``tail`` more seconds of silence. With ``table`` it also writes that kernel table, for the keep, to its workspace's tuned.csv,
 #: or to ``table_at`` in its checkout. It reports ``envs`` as NAME=VALUE words in run/result.json, as GEAK does.
-#: Before each keep it appends that keep's entries of ``ledger`` to its ledger, run/ledger.jsonl, as Arbor does.
+#: Before each keep it appends that keep's entries of ``ledger`` to its ledger, run/ledger.jsonl.
+#: With a keep file, it keeps nothing until ``after`` exists, the session's watch file: the preflight reads the keep
+#: file's baseline once the agent started, and a keep made before that read would be taken for one it had before.
 AGENT = """
 import json, pathlib, subprocess, sys, time
 config = json.loads(pathlib.Path("campaign.json").read_text())
@@ -87,6 +114,9 @@ workspace = pathlib.Path(config["workspace"])
 state = pathlib.Path("run/state.json")
 state.parent.mkdir(exist_ok=True)
 state.write_text(json.dumps({"keeps": [], "note": ""}))
+until = time.time() + 10
+while config["after"] and not pathlib.Path(config["after"]).exists() and time.time() < until:
+    time.sleep(0.01)
 for step, seqs in enumerate(config["keeps"], start=1):
     time.sleep(config["gap"])
     (workspace / "vllm" / "config.py").write_text(f"max_num_seqs = {seqs}\\n")
@@ -171,7 +201,7 @@ def _given(agent: Agent | Component, prompt: str) -> Agent | Component:
     return replace(agent, envs=given, started=started)
 
 
-def _manifest(workspace: str, agent: Agent | Component) -> str:
+def _manifest(workspace: str, agent: Agent | Component, after: str = "") -> str:
     if isinstance(agent, Component):
         return _component_manifest(workspace, agent)
     plan = {"keeps": list(agent.keeps), "gap": agent.gap, "tail": agent.tail, "exit": agent.exit, "busy": agent.busy}
@@ -189,6 +219,7 @@ def _manifest(workspace: str, agent: Agent | Component) -> str:
                 "table": agent.table,
                 "table_at": agent.table_at,
                 "ledger": [list(entries) for entries in agent.ledger],
+                "after": after if agent.keep is not None else "",
                 **plan,
             },
             "launch": "python3 agent.py",
@@ -205,7 +236,7 @@ def _manifest(workspace: str, agent: Agent | Component) -> str:
 def _component_manifest(workspace: str, agent: Component) -> str:
     return json.dumps(
         {
-            "source": "arbor",
+            "source": "agent",
             "commit": "c",
             "install": [],
             "config_file": "campaign.json",
@@ -260,6 +291,7 @@ async def _rig(
     agent: Agent | Component = Agent(),
     *,
     clock=time.time,
+    sleep=asyncio.sleep,
     start: Recipe | None = None,
     deadline: float = 0.0,
     spend: type[AgentSpend] = AgentSpend,
@@ -267,31 +299,37 @@ async def _rig(
     aiter: Path | None = None,
     source: Path | None = None,
     least_run: float = 0.0,
+    spec_fields: Mapping[str, object] | None = None,
+    sandboxes: AgentSandboxes | None = None,
 ) -> Rig:
     """A session of the agent on :data:`BRANCH`, opened at the root, or at ``start`` committed onto it the way PRELUDE
     replays a Recipe KB champion; the agent's source is ``source``, or a repository holding :data:`AGENT` and
-    :data:`COMPONENT_AGENT`."""
+    :data:`COMPONENT_AGENT`, and its spec has ``spec_fields``. Its sandbox is the rig's, or one of ``sandboxes``."""
 
     rig = await branch_rig(tmp_path, ROOT, BRANCH)
     start_commit = rig.root if start is None else await rig.repo.commit(BRANCH, rig.root, start, "champion")
     toolbox_blackboard = LocalBlackboard(tmp_path / "blackboard", Writer(Role.TOOLBOX, "toolbox"))
     worktree = rig.base.worktree(BRANCH, tmp_path / BRANCH / "agent-workspace")
     sandbox, toolbox = LocalSandbox(tmp_path / "logs"), Toolbox(toolbox_blackboard)
+    session = tmp_path / BRANCH / "session"
 
     async def onboard(checkout: Path, prompt: str) -> str:
         sandbox.prompts.append(prompt)
-        return _manifest(str(worktree.path), _given(agent, prompt))
+        return _manifest(str(worktree.path), _given(agent, prompt), str(session / WATCH_FILE))
 
     def onboarding(agent_sandbox) -> OnboardingSetup:
         return OnboardingSetup(agent_sandbox, onboard, start_seconds=start_seconds, poll_seconds=0.05)
 
     def sandbox_for(lease: BranchLease) -> LocalSandbox:
+        if sandboxes is not None:
+            return sandboxes.sandbox(BRANCH, place, worktree.path, lease)
         if lease.lease_id in sandbox.gone:
             raise SandboxGone(f"the sandbox of {lease.lease_id} ended")
         sandbox.leases.append(lease)
         return sandbox
 
     spec = AgentSpec("/models/m", "vllm", 1, "fp8", "mi355x", {}, "output_throughput", "", {}, "", (), 60.0, 31100)
+    spec = replace(spec, **(spec_fields or {}))
 
     def spend_of(roots: tuple[Path, ...], ledger: Path) -> AgentSpend:
         return spend(tmp_path / "claude", roots, ledger, BRANCH, "claude-sonnet-5-5", sandbox.usage)
@@ -304,12 +342,13 @@ async def _rig(
         rig.repo,
         "vllm",
         spend_of,
+        sleep=sleep,
         clock=clock,
         least_run_seconds=least_run,
     )
     if aiter is not None:
         setup = replace(setup, aiter_configs=aiter)
-    place = BranchPlace(worktree, rig.blackboard, tmp_path / BRANCH / "session")
+    place = BranchPlace(worktree, rig.blackboard, session)
     agent_source = str(source or _agent_repo(tmp_path))
     start = SessionStart(BRANCH, start_commit, 1, BranchTask(agent=agent_source, deadline=deadline))
 
@@ -407,7 +446,7 @@ def _from_a_wheel(monkeypatch: pytest.MonkeyPatch) -> None:
 
 
 def _told(monkeypatch: pytest.MonkeyPatch) -> None:
-    """The agent made ready as Arbor is: told why no change to its component's source can be kept."""
+    """The agent made ready as an adapter makes one: told why no change to its component's source can be kept."""
     make_ready = autonomous_session.make_ready
 
     async def told(source: str, spec: AgentSpec, *args):
@@ -677,6 +716,87 @@ async def test_a_new_sandbox_whose_install_failed_is_not_resumed_in_but_leased_a
     assert rig.toolbox.released == ["L1", "L2", "L3"]
 
 
+@dataclass
+class _LeaseSandbox:
+    """The sandbox of one lease over ``of``'s local sandbox: its start raises :class:`SandboxGone` once its lease is
+    in ``of.gone``, and its stops are recorded by lease."""
+
+    of: "_PerLease"
+    lease_id: str
+
+    def watched(self) -> str:
+        return ""
+
+    async def run(self, command: str, cwd: Path, env: Mapping[str, str], timeout: float) -> CommandResult:
+        return await self.of.local.run(command, cwd, env, timeout)
+
+    async def start(self, command: str, cwd: Path, env: Mapping[str, str]) -> LocalProcess:
+        if self.lease_id in self.of.gone:
+            raise SandboxGone(f"the sandbox of {self.lease_id} ended")
+        return await self.of.local.start(command, cwd, env)
+
+    async def stop(self) -> None:
+        self.of.stopped.append(self.lease_id)
+        await self.of.local.stop()
+
+
+@dataclass
+class _PerLease:
+    """A session's sandboxes, one a lease, over one local sandbox."""
+
+    local: LocalSandbox
+    gone: set[str] = field(default_factory=set)
+    stopped: list[str] = field(default_factory=list)
+
+    def sandbox(self, branch: str, place: BranchPlace, source: Path, lease: BranchLease) -> AgentSandbox:
+        return _LeaseSandbox(self, lease.lease_id)
+
+
+async def _crashed_on_a_sandbox_that_ended(tmp_path: Path, install: str) -> tuple[Rig, _PerLease]:
+    """A rig whose agent ran in the sandbox of L1 and crashed, its run stopped, and L1's sandbox then ended."""
+
+    sandboxes = _PerLease(LocalSandbox(tmp_path / "lease-logs"))
+    agent = Agent(exit=3, resume="sleep 30", install=(install,))
+    rig = await _rig(tmp_path, agent, deadline=time.time() + 600, sandboxes=sandboxes)
+    await rig.session.preflight()
+    with pytest.raises(SessionCrashed):
+        await asyncio.wait_for(rig.session.run(), 10)
+    await rig.session.stop()
+    assert sandboxes.stopped == ["L1"]
+    sandboxes.gone.add("L1")
+    return rig, sandboxes
+
+
+async def test_a_held_sandbox_that_ended_at_the_resume_is_stopped_before_the_agent_moves_to_a_new_one(
+    tmp_path: Path,
+) -> None:
+    rig, sandboxes = await _crashed_on_a_sandbox_that_ended(tmp_path, "true installed")
+    resumed = rig.restart()
+    running = asyncio.create_task(resumed.run())
+    await _until(lambda: sandboxes.local.started[-1:] == ["sleep 30"], "the agent resumed")
+
+    assert sandboxes.stopped == ["L1", "L1"], "the ended sandbox is stopped, giving back its holder and scratch"
+    assert rig.toolbox.released == ["L1"] and len(rig.toolbox.leases) == 2
+    await resumed.stop()
+    await asyncio.wait_for(running, 10)
+    assert sandboxes.stopped == ["L1", "L1", "L2"]
+
+
+async def test_a_new_sandbox_whose_install_failed_is_stopped_before_its_lease_is_given_back(tmp_path: Path) -> None:
+    count = tmp_path / "installs"
+    # The second install, the first in the new sandbox, fails.
+    command = f"n=$(cat {count} 2>/dev/null || echo 0); echo $((n + 1)) > {count}; test $n -ne 1"
+    rig, sandboxes = await _crashed_on_a_sandbox_that_ended(tmp_path, command)
+    failed = rig.restart()
+    with pytest.raises(SessionCrashed, match="install in its new sandbox failed"):
+        await asyncio.wait_for(failed.run(), 10)
+
+    assert sandboxes.stopped == ["L1", "L1", "L2"], "the sandbox whose install failed is stopped"
+    assert rig.toolbox.released == ["L1", "L2"]
+    await failed.stop()
+    assert sandboxes.stopped == ["L1", "L1", "L2"], "and the run's stop has no sandbox left to stop again"
+
+
 async def test_a_keep_file_with_no_counter_is_one_keep_at_each_change(tmp_path: Path) -> None:
     rig = await _rig(tmp_path, Agent(keeps=(256,), keep={"path": "run/state.json"}, tail=30.0))
 
@@ -861,7 +981,12 @@ async def test_an_agent_whose_lease_is_refused_for_another_reason_fails_its_pref
 async def test_an_agent_that_waits_for_cards_past_the_time_it_needs_to_run_fails_its_preflight(
     tmp_path: Path,
 ) -> None:
-    rig = await _rig(tmp_path, deadline=time.time() + 3.0, least_run=2.0)
+    now = [0.0]
+
+    async def sleep(seconds: float) -> None:
+        now[0] += seconds
+
+    rig = await _rig(tmp_path, clock=lambda: now[0], sleep=sleep, deadline=3.0, least_run=2.0)
     rig.toolbox.cards_left = 0
 
     with pytest.raises(PreflightFailed, match="waited .* for cards.*lease_leaves_no_measurement"):
@@ -1236,7 +1361,7 @@ async def test_an_agent_in_component_mode_runs_to_the_deadline_on_the_commit_mb_
     root = rig.sandbox.prompts[0].split('"root": "')[1].split('"')[0]
     assert (config["mode"], config["docker_container"]) == ("component", "@host")
     assert config["component"] == {"outbox": "snaps", "deadline": int(now + 3600.0 - 0.5), "root": root}
-    assert "docs/hosts.md" in rig.sandbox.prompts[0]
+    assert "its own documentation describes" in rig.sandbox.prompts[0]
     assert root == json.loads((tmp_path / BRANCH / "session" / "agent-watch.json").read_text())["root"]
 
 
@@ -1397,10 +1522,10 @@ async def _imported(rig: Rig) -> TestRequest:
     return request
 
 
-#: The launch the config MB wrote for an Arbor branch: its pack's harness
+#: The launch the config MB wrote for a component agent's branch: its pack's harness
 #: variables sit next to the server's own.
-ARBOR_FLAGS = "--tp 1 --max-num-seqs 128"
-ARBOR_ENV = {
+COMPONENT_FLAGS = "--tp 1 --max-num-seqs 128"
+COMPONENT_ENV = {
     "SGLANG_AITER_KV_CACHE_LAYOUT": "vectorized_5d",
     "ISL": "1024",
     "OSL": "1024",
@@ -1411,11 +1536,12 @@ ARBOR_ENV = {
 
 
 async def test_a_snapshot_imports_only_the_launch_changes_made_since_the_start_and_no_workload_variable(
-    tmp_path: Path,
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    envs = {**ARBOR_ENV, "SGLANG_QWEN3_GATE_UP_PTPC": "1"}
-    started = {"server_flags": ARBOR_FLAGS, "server_env": ARBOR_ENV}
-    agent = Component(keeps=(256,), gap=0.1, flags=ARBOR_FLAGS, envs=envs, started=started)
+    install_stand_in(monkeypatch)
+    envs = {**COMPONENT_ENV, "SGLANG_QWEN3_GATE_UP_PTPC": "1"}
+    started = {"server_flags": COMPONENT_FLAGS, "server_env": COMPONENT_ENV}
+    agent = Component(keeps=(256,), gap=0.1, flags=COMPONENT_FLAGS, envs=envs, started=started)
     rig = await _rig(tmp_path, agent, start_seconds=0.2)
 
     request = await _imported(rig)
@@ -1423,7 +1549,7 @@ async def test_a_snapshot_imports_only_the_launch_changes_made_since_the_start_a
     assert request.delta.config.envs == {"SGLANG_QWEN3_GATE_UP_PTPC": "1"}
     assert request.delta.config.server_args == "" and request.delta.config.unset_envs == ()
     watch = json.loads((tmp_path / BRANCH / "session" / "agent-watch.json").read_text())
-    # GSM8K_LIMIT is Arbor's evaluation setting, which MB gives it (arbor_adapter.EVAL_ENVS)
+    # GSM8K_LIMIT is an evaluation setting the installed adapter names, which MB gives its agent
     assert watch["refused_envs"] == {"GSM8K_LIMIT": "400", "ISL": "1024", "OSL": "1024"}
     dropped = [note for note in await rig.notices() if "GSM8K_LIMIT, ISL, OSL" in note]
     assert len(dropped) == 1 and "keep 1" in dropped[0]
@@ -1448,8 +1574,8 @@ async def test_a_keep_setting_a_variable_that_needs_a_set_flag_off_is_imported_w
 
 
 async def test_a_snapshot_whose_launch_is_the_one_it_started_with_imports_no_launch_change(tmp_path: Path) -> None:
-    started = {"server_flags": ARBOR_FLAGS, "server_env": ARBOR_ENV}
-    agent = Component(keeps=(256,), gap=0.1, flags=ARBOR_FLAGS, envs=ARBOR_ENV, started=started)
+    started = {"server_flags": COMPONENT_FLAGS, "server_env": COMPONENT_ENV}
+    agent = Component(keeps=(256,), gap=0.1, flags=COMPONENT_FLAGS, envs=COMPONENT_ENV, started=started)
     rig = await _rig(tmp_path, agent, start_seconds=0.2)
 
     request = await _imported(rig)
@@ -1498,7 +1624,7 @@ async def test_a_table_too_large_to_copy_is_noted_and_its_variable_imported_as_t
     request = await _imported(rig)
 
     assert request.delta.add_kernels == ()
-    assert request.delta.config.envs["AITER_CONFIG_GEMM_A8W8"].endswith(":/arbor/workspace/tuned.csv")
+    assert request.delta.config.envs["AITER_CONFIG_GEMM_A8W8"].endswith(":/agent/workspace/tuned.csv")
     assert any("AITER_CONFIG_GEMM_A8W8" in note and "not copied" in note for note in await rig.notices())
 
 
@@ -1570,6 +1696,149 @@ async def test_a_stop_whose_kill_times_out_is_noted_and_the_lease_still_goes_bac
 
     assert any("the sandbox service timed out" in notice for notice in await rig.notices())
     assert rig.toolbox.released == ["L1"]
+
+
+@pytest.mark.parametrize("shared", [True, False], ids=["shared", "private"])
+@pytest.mark.parametrize("tables", [False, True], ids=["root", "kb-champion"])
+async def test_a_preflight_makes_the_branch_s_directories_the_group_s_only_on_shared_storage(
+    tmp_path: Path, shared: bool, tables: bool
+) -> None:
+    given = {"start": _replayed(LocalBlobStore(tmp_path / "blobs")), "aiter": _aiter(tmp_path)} if tables else {}
+    rig = await _rig(tmp_path, **given)
+    (tmp_path / BRANCH).chmod(0o2775 if shared else 0o755)
+    previous = os.umask(0o022)
+    try:
+        await rig.session.preflight()
+    finally:
+        os.umask(previous)
+    await rig.session.stop()
+
+    agent = tmp_path / BRANCH / "session" / AGENT_DIR
+    made = [agent.parent, agent, agent / "src", *([agent / START_TABLES_DIR] if tables else [])]
+    modes = {path.name: oct(path.stat().st_mode & 0o7777) for path in made}
+    assert modes == dict.fromkeys(modes, oct(0o2775 if shared else 0o755))
+    written = [path for path in (agent.parent.iterdir()) if path.is_file()] + [agent / "mb-integration.md"]
+    written += [path for path in (agent / START_TABLES_DIR).rglob("*") if path.is_file()] if tables else []
+    modes = {str(path): oct(path.stat().st_mode & 0o777) for path in written}
+    assert len(modes) > 4 and modes == dict.fromkeys(modes, oct(0o664 if shared else 0o644))
+
+
+def _under_git(path: Path, names: tuple[str, ...]) -> bool:
+    parts = path.parts
+    return any(parts[i] == ".git" and parts[i + 1] in names for i in range(len(parts) - 1))
+
+
+@pytest.mark.parametrize("adapted", [False, True], ids=["agent", "adapted"])
+async def test_a_preflight_below_shared_storage_leaves_the_group_write_on_all_it_made_but_git_s_own_files(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, adapted: bool
+) -> None:
+    tmp_path.chmod(0o2775)
+    previous = os.umask(0o022)
+    try:
+        given: dict[str, object] = {}
+        if adapted:
+            install_stand_in(monkeypatch)
+            plan = tmp_path / "plan.json"
+            plan.write_text(json.dumps({"directions": ["fuse the decode norm"]}))
+            source = _stand_in_repo(tmp_path, Component(keeps=(), tail=0.6))
+            given = {"source": source, "start_seconds": 0.2, "spec_fields": {"plan": str(plan)}}
+        rig = await _rig(tmp_path, **given)
+        await rig.session.preflight()
+    finally:
+        os.umask(previous)
+    await rig.session.stop()
+
+    # Git writes every object read-only, and the docker shim is replaced by rename, never rewritten.
+    made = [
+        path
+        for path in (tmp_path / BRANCH).rglob("*")
+        if not path.is_symlink()
+        and not (path.is_file() and _under_git(path, ("objects",)))
+        and path != tmp_path / BRANCH / "session" / AGENT_DIR / SHIM_DIR / "docker"
+    ]
+    git = [path for path in made if _under_git(path, ("config", "hooks", "info"))]
+    base = tmp_path / "source" / ".git"
+    git += [base / "config", base / "info", *(base / "info").iterdir()]
+    private = [str(path) for path in made if path not in git and not path.stat().st_mode & stat.S_IWGRP]
+    widened = [str(path) for path in git if path.stat().st_mode & 0o022]
+    assert len(made) > 20 and len(git) > 6
+    assert private == [] and widened == []
+
+
+def _as_member(accounts: Accounts, uid: int, leg: Callable[[], Awaitable[None]]) -> str:
+    """Run ``leg`` in a child process as ``uid`` of the accounts' group under umask ``022``: what it raised, or
+    ``"finished"``."""
+    read, write = os.pipe()
+    pid = os.fork()
+    if pid == 0:
+        said = "finished"
+        try:
+            os.setgroups([accounts.group])
+            os.setresgid(uid, uid, uid)
+            os.setresuid(uid, uid, uid)
+            os.umask(0o022)
+            asyncio.run(leg())
+        except BaseException as error:  # noqa: BLE001 - everything the leg raised goes back to the test
+            said = repr(error)
+        os.write(write, said.encode())
+        os._exit(0)
+    os.close(write)
+    if not select.select([read], [], [], 120)[0]:
+        os.kill(pid, signal.SIGKILL)  # forked from a process with threads, it may hang on a lock one of them held
+    with os.fdopen(read) as told:
+        said = told.read()
+    os.waitpid(pid, 0)
+    return said
+
+
+@pytest.mark.filterwarnings("ignore:This process .* is multi-threaded:DeprecationWarning")
+@pytest.mark.parametrize("adapted", [False, True], ids=["agent", "adapted"])
+def test_another_account_of_the_group_resumes_a_branch_whose_files_a_first_leg_wrote_under_umask_022(
+    monkeypatch: pytest.MonkeyPatch, adapted: bool
+) -> None:
+    with other_accounts() as accounts:
+        tmp_path = accounts.shared_dir("run")
+        blobs = LocalBlobStore(tmp_path / "blobs")
+        given: dict[str, object] = {"start": _replayed(blobs), "aiter": _aiter(tmp_path)}
+        if adapted:
+            install_stand_in(monkeypatch)
+            plan = tmp_path / "plan.json"
+            plan.write_text(json.dumps({"directions": ["fuse the decode norm"]}))
+            source = _stand_in_repo(tmp_path, Component(keeps=(), exit=3, tail=0.6))
+            given |= {"source": source, "start_seconds": 0.2, "spec_fields": {"plan": str(plan)}}
+        agent = Agent(keeps=(), exit=3, resume="exit 3")
+        rig = asyncio.run(_rig(tmp_path, agent, **given))
+
+        async def first_leg() -> None:
+            # The integration head holds a kernel table, laid out below the notes, and moves once the first leg ends.
+            root = await rig.repo.head(INTEGRATION_BRANCH)
+            held = await rig.repo.commit(INTEGRATION_BRANCH, root, _replayed(blobs), "kb")
+            await rig.session.preflight()
+            with pytest.raises(SessionCrashed):
+                await asyncio.wait_for(rig.session.run(), 10)
+            await rig.session.stop()
+            moved = replace(_replayed(blobs), launch=LaunchConfig("--max-num-seqs 512"))
+            await rig.repo.commit(INTEGRATION_BRANCH, held, moved, "moved")
+
+        previous = os.umask(0o022)
+        try:
+            asyncio.run(first_leg())
+        finally:
+            os.umask(previous)
+        session = tmp_path / BRANCH / "session"
+        for path in (session, *session.rglob("*")):
+            os.lchown(path, accounts.first, -1)
+        (tmp_path / "logs").chmod(0o2775)  # the fake sandbox's own logs
+
+        async def resumed_leg() -> None:
+            resumed = rig.restart()
+            await resumed.preflight()
+            with pytest.raises(SessionCrashed, match="exited 3"):
+                await asyncio.wait_for(resumed.run(), 10)
+            await resumed.stop()
+
+        assert _as_member(accounts, accounts.second, resumed_leg) == "finished"
+        assert "--max-num-seqs 512" in (session / AGENT_DIR / "mb-integration.md").read_text(encoding="utf-8")
 
 
 def _spec_envs(rig: Rig) -> dict[str, str]:
@@ -1668,7 +1937,7 @@ async def _multi_part(tmp_path: Path, parts: str) -> tuple[Rig, TestRequest]:
 async def test_a_snapshot_that_appends_its_rows_to_the_start_s_tables_imports_the_start_s_rows_and_its_own(
     tmp_path: Path,
 ) -> None:
-    """Arbor copies every file of a multi-part value; the private default copies carry no rows of the agent's."""
+    """A snapshot copies every file of a multi-part value; the private default copies carry no rows of the agent's."""
 
     rig, request = await _multi_part(tmp_path, "append")
 
@@ -1695,3 +1964,384 @@ async def test_a_multi_part_snapshot_of_the_start_s_tables_as_they_were_given_im
 
     assert (request.delta.add_kernels, request.delta.remove_kernels) == ((), ())
     assert request.delta.config == ConfigDelta()
+
+
+INFRA_REASON = "4 attempts failed for infrastructure reasons: foreign_process_on_card: pid 4242 on card 3"
+
+
+@pytest.fixture
+def quick_requeue(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(keep_requeue, "REQUEUE_SECONDS", 0.3)
+
+
+def _failed(request_id: str, validity: Validity, reason: str = INFRA_REASON):
+    return result(request_id, validity=validity, failure_reason=reason)
+
+
+async def test_a_keep_whose_import_measured_nothing_for_infrastructure_goes_once_more_and_is_measured(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # The agent exits while the requeue still waits: its run finishes only once the requeued import settled.
+    monkeypatch.setattr(keep_requeue, "REQUEUE_SECONDS", 2.0)
+    rig = await _rig(tmp_path, Agent(keeps=(256,), tail=0.3))
+
+    await rig.session.preflight()
+    running = asyncio.create_task(rig.session.run())
+    await _until(lambda: rig.toolbox.requests, "the import")
+    await rig.toolbox_blackboard.write_result(_failed("r1", Validity.MEASUREMENT_FAILED))
+    await _until(lambda: len(rig.toolbox.requests) == 2, "the requeued import")
+    await rig.toolbox_blackboard.write_result(result("r2"))
+    with pytest.raises(SessionFinished):
+        await asyncio.wait_for(running, 10)
+
+    first, again = rig.toolbox.requests
+    assert rig.patch(again) == rig.patch(first) and again.delta.config == first.delta.config, "the same keep again"
+    notices = await rig.notices()
+    assert any(f"keep 1's import r1 measured nothing ({INFRA_REASON}); it goes once more" in n for n in notices)
+    assert notices[-1] == f"{NOTICE} the agent finished its run", "the run waited for the requeued import"
+
+
+async def test_a_requeue_waits_its_time_after_the_import_ended(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(keep_requeue, "REQUEUE_SECONDS", 3.0)
+    rig = await _rig(tmp_path, Agent(keeps=(256,), tail=30.0))
+
+    await rig.session.preflight()
+    running = asyncio.create_task(rig.session.run())
+    await _until(lambda: rig.toolbox.requests, "the import")
+    await rig.toolbox_blackboard.write_result(_failed("r1", Validity.MEASUREMENT_FAILED))
+    await asyncio.sleep(1.5)
+    assert len(rig.toolbox.requests) == 1, "not before its time"
+    await _until(lambda: len(rig.toolbox.requests) == 2, "the requeued import")
+
+    await rig.session.stop()
+    await asyncio.wait_for(running, 10)
+
+
+@pytest.mark.parametrize(
+    "validity, reason",
+    [
+        (Validity.CANDIDATE_FAILED, "server_boot_timeout: no ready line"),
+        (Validity.MEASUREMENT_FAILED, "measurement refused: the spec was rejected"),
+        (Validity.MEASUREMENT_FAILED, "inert_patch: process 1 imported aiter from the image, not from the farm"),
+    ],
+    ids=["candidate", "program_error", "repeats_in_every_sandbox"],
+)
+async def test_a_keep_whose_import_failed_otherwise_is_not_requeued(
+    tmp_path: Path, quick_requeue: None, validity: Validity, reason: str
+) -> None:
+    rig = await _rig(tmp_path, Agent(keeps=(256,), tail=1.0))
+
+    await rig.session.preflight()
+    running = asyncio.create_task(rig.session.run())
+    await _until(lambda: rig.toolbox.requests, "the import")
+    await rig.toolbox_blackboard.write_result(_failed("r1", validity, reason))
+    with pytest.raises(SessionFinished):
+        await asyncio.wait_for(running, 10)
+    await asyncio.sleep(0.6)
+
+    assert len(rig.toolbox.requests) == 1
+    assert not any("goes once more" in note for note in await rig.notices())
+
+
+async def test_a_keep_is_requeued_once_and_after_the_cap_of_failed_requeues_none_is(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, quick_requeue: None
+) -> None:
+    monkeypatch.setattr(keep_requeue, "REQUEUE_FAILURES", 1)
+    rig = await _rig(tmp_path, Agent(keeps=(256, 512), gap=4.0, tail=1.0))
+
+    await rig.session.preflight()
+    running = asyncio.create_task(rig.session.run())
+    await _until(lambda: rig.toolbox.requests, "the first import")
+    await rig.toolbox_blackboard.write_result(_failed("r1", Validity.MEASUREMENT_FAILED))
+    await _until(lambda: len(rig.toolbox.requests) == 2, "the requeued import")
+    await rig.toolbox_blackboard.write_result(_failed("r2", Validity.MEASUREMENT_FAILED))
+    await _until(lambda: len(rig.toolbox.requests) == 3, "the second keep's import", seconds=15.0)
+    await rig.toolbox_blackboard.write_result(_failed("r3", Validity.MEASUREMENT_FAILED))
+    with pytest.raises(SessionFinished):
+        await asyncio.wait_for(running, 15)
+    await asyncio.sleep(0.6)
+
+    assert "+max_num_seqs = 512" in rig.patch(rig.toolbox.requests[2]) and len(rig.toolbox.requests) == 3
+    notices = await rig.notices()
+    assert any("keep 1's import r2 measured nothing" in n and "it went once more already" in n for n in notices)
+    assert any(
+        "keep 2's import r3 measured nothing" in n and "the last 1 requeued imports measured nothing again" in n
+        for n in notices
+    ), "a node that stays broken does not loop"
+
+
+async def test_a_later_keep_carries_the_change_of_one_that_measured_nothing_and_no_requeue_goes(
+    tmp_path: Path, quick_requeue: None
+) -> None:
+    rig = await _rig(tmp_path, Agent(keeps=(256, 512), gap=0.3, tail=1.0))
+
+    await rig.session.preflight()
+    running = asyncio.create_task(rig.session.run())
+    await _until(lambda: rig.toolbox.requests, "the first import")
+    await asyncio.sleep(1.0)
+    await rig.toolbox_blackboard.write_result(_failed("r1", Validity.MEASUREMENT_FAILED))
+    await _until(lambda: len(rig.toolbox.requests) == 2, "the second keep's import")
+    await rig.toolbox_blackboard.write_result(result("r2"))
+    with pytest.raises(SessionFinished):
+        await asyncio.wait_for(running, 10)
+    await asyncio.sleep(0.6)
+
+    assert len(rig.toolbox.requests) == 2 and "+max_num_seqs = 512" in rig.patch(rig.toolbox.requests[1])
+    assert not any("goes once more" in note for note in await rig.notices())
+
+
+async def test_a_requeue_due_while_a_later_keep_waits_gives_way_to_it(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # The first keep's requeue falls due while another test keeps the branch busy and the second keep lands: once the
+    # branch is free, the second keep, which carries the first's change, goes, and the requeue does not take its place.
+    monkeypatch.setattr(keep_requeue, "REQUEUE_SECONDS", 1.0)
+    rig = await _rig(tmp_path, Agent(keeps=(256, 512), gap=3.0, tail=1.0))
+    watch_file = rig.session._place.workspace / autonomous_session.WATCH_FILE
+
+    def watched() -> dict:
+        return json.loads(watch_file.read_text(encoding="utf-8")) if watch_file.exists() else {}
+
+    await rig.session.preflight()
+    running = asyncio.create_task(rig.session.run())
+    await _until(lambda: rig.toolbox.requests, "the first import")
+    await rig.toolbox_blackboard.write_result(_failed("r1", Validity.MEASUREMENT_FAILED))
+    await _until(lambda: watched().get("requeue_at"), "the requeue's time")
+    await rig.toolbox_blackboard.write_request(replace(rig.toolbox.requests[0], request_id="x1"))
+    await _until(lambda: (watched().get("pending") or {}).get("seq") == 2, "the second keep")
+    await _until(lambda: time.time() > watched()["requeue_at"], "the requeue falling due")
+    await rig.toolbox_blackboard.write_result(result("x1"))
+    await _until(lambda: len(rig.toolbox.requests) == 2, "the next import")
+    await rig.toolbox_blackboard.write_result(result("r2"))
+    with pytest.raises(SessionFinished):
+        await asyncio.wait_for(running, 10)
+
+    assert len(rig.toolbox.requests) == 2 and "+max_num_seqs = 512" in rig.patch(rig.toolbox.requests[1])
+    assert not any("goes once more" in note for note in await rig.notices())
+
+
+async def test_a_branch_s_end_stops_its_agent_s_sandbox(tmp_path: Path) -> None:
+    rig = await _rig(tmp_path, Agent(keeps=(), tail=30.0))
+
+    await rig.session.preflight()
+    assert rig.sandbox.stops == 0
+    await rig.session.stop()
+
+    assert rig.sandbox.stops == 1, "the branch's end stops its sandbox, ending what it holds on this host"
+
+
+@dataclass
+class _Made:
+    """A session's sandboxes on this host, each kept to be looked at."""
+
+    sandboxes: LocalAgentSandboxes
+    made: list[LocalAgentSandbox] = field(default_factory=list)
+
+    def sandbox(self, branch: str, place: BranchPlace, source: Path, lease: BranchLease) -> AgentSandbox:
+        made = self.sandboxes.sandbox(branch, place, source, lease)
+        assert isinstance(made, LocalAgentSandbox)
+        self.made.append(made)
+        return made
+
+
+@pytest.mark.agent_isolation
+async def test_under_bubblewrap_git_works_in_an_agent_s_worktree_and_the_branch_s_end_ends_its_sandbox() -> None:
+    probe = usable_bwrap()
+    # Outside /tmp: before bubblewrap 0.12 nothing may be bound below the sandbox's own /tmp.
+    area = Path(tempfile.mkdtemp(prefix="hl-agent-session-", dir="/var/tmp")).resolve()
+    try:
+        made = _Made(LocalAgentSandboxes(None, choose=lambda: BwrapIsolation(probe)))
+        rig = await _rig(area, Agent(commits=True), sandboxes=made)
+        worktree = rig.session._place.worktree.path
+
+        await rig.session.preflight()
+        running = asyncio.create_task(rig.session.run())
+        await _until(lambda: rig.toolbox.requests, "the first import")
+        await rig.toolbox_blackboard.write_result(result("r1"))
+        await _until(lambda: len(rig.toolbox.requests) == 2, "the second import")
+        await rig.toolbox_blackboard.write_result(result("r2"))
+        with pytest.raises(SessionFinished):
+            await asyncio.wait_for(running, 30)
+        [sandbox] = made.made
+        git = "git -c user.name=t -c user.email=t@t"
+        probed = await sandbox.run(
+            f"git status --short && {git} commit -q --allow-empty -m probe && git log --format=%s", worktree, {}, 60
+        )
+        confined = sandbox._confined
+        assert confined is not None and confined.holder is not None, "the agent ran confined"
+        holder, scratch = confined.holder, confined.scratch
+
+        await rig.session.stop()
+    finally:
+        shutil.rmtree(area, ignore_errors=True)
+
+    assert probed.returncode == 0, probed.output
+    assert probed.output.split()[:3] == ["probe", "k", "k"], "the agent committed each keep, and git ran confined"
+    assert not os.path.exists(f"/proc/{holder.pid}"), "the branch's end ended the sandbox's holder"
+    assert not os.path.exists(scratch.tmp) and not os.path.exists(scratch.shm), "and deleted its /tmp and /dev/shm"
+
+
+# ---- a keep that retracts an earlier one -------------------------------------------------------------------------
+
+FINDING = {"iteration": 7, "keep": 1, "finding": "iter7-agentx-283-selection-invalid"}
+#: The launch an agent's branch is started with and keeps, so a revert of a keep's source undoes all of it.
+STEADY = "--tp 1"
+
+
+def _retracting(keeps: tuple[int, ...]) -> Component:
+    """An agent whose keep 2 reverts keep 1's commit and says it retracts keep 1."""
+    started = {"server_flags": STEADY, "server_env": {}}
+    return Component(keeps=keeps, retracts=FINDING, retracting_keep=2, flags=STEADY, started=started, tail=1.0)
+
+
+async def _landed_in_turn(rig: Rig, tmp_path: Path, landed: int) -> list[TestRequest]:
+    """Every import of a component agent's run, each measured once the one before was judged: the first ``landed`` of
+    them committed on the branch, the rest recorded only."""
+
+    gate = LocalBlackboard(tmp_path / "blackboard", Writer(Role.GATE, "gate"))
+    await rig.session.preflight()
+    running = asyncio.create_task(rig.session.run())
+    while not running.done():
+        count = len(rig.toolbox.requests)
+        await _until(lambda: len(rig.toolbox.requests) > count or running.done(), "the next import")
+        if len(rig.toolbox.requests) > count:
+            request = rig.toolbox.requests[count]
+            request_id = request.request_id or ""
+            await rig.toolbox_blackboard.write_result(result(request_id))
+            made = None
+            if count < landed:
+                recipe = apply(await rig.repo.read_recipe(request.parent_commit), request.delta)
+                made = await rig.repo.commit(BRANCH, request.parent_commit, recipe, request_id)
+            conclusion = Conclusion.COMMITTED if made else Conclusion.RECORDED_ONLY
+            await gate.write_judgement(request_id, judgement(-3.0, (request_id,)), conclusion, made)
+    with pytest.raises(SessionFinished):
+        await asyncio.wait_for(running, 10)
+    return rig.toolbox.requests
+
+
+async def test_a_retraction_of_a_keep_that_landed_is_imported_with_both_checks_and_names_what_it_retracts(
+    tmp_path: Path,
+) -> None:
+    rig = await _rig(tmp_path, _retracting((256, 512)), start_seconds=0.2)
+
+    first, retraction = await _landed_in_turn(rig, tmp_path, landed=1)
+
+    [attachment] = retraction.attachments
+    assert attachment.id == RETRACTION_ID
+    landed = (await rig.toolbox_blackboard.record(first.request_id or "")).commit_id
+    assert json.loads(rig.toolbox.attachments[attachment.sha256]) == {**FINDING, "retracted_commit": landed}
+    assert (retraction.consistency_check, retraction.long_context_check) == (True, True)
+    assert first.attachments == ()
+    named = "the agent's iteration 7 (its keep 1), found invalid by iter7-agentx-283-selection-invalid"
+    assert f"{NOTICE} keep 2 retracts {named}: r2 is not held to the speed gate" in await rig.notices()
+
+
+async def test_a_retraction_that_does_more_than_undo_its_keep_is_held_to_the_speed_gate(tmp_path: Path) -> None:
+    agent = replace(_retracting((256, 512)), flags=f"{STEADY} --max-num-seqs {{seqs}}")
+    rig = await _rig(tmp_path, agent, start_seconds=0.2)
+
+    _, retraction = await _landed_in_turn(rig, tmp_path, landed=1)
+
+    assert (retraction.attachments, retraction.consistency_check) == ((), None)
+    held = "r2 is held to the speed gate: it also changes --max-num-seqs"
+    assert any(note.endswith(held) for note in await rig.notices())
+
+
+async def test_a_retraction_of_a_keep_that_did_not_land_changes_nothing_on_the_head(tmp_path: Path) -> None:
+    rig = await _rig(tmp_path, _retracting((256, 512)), start_seconds=0.2)
+
+    [first] = await _landed_in_turn(rig, tmp_path, landed=0)
+
+    assert first.attachments == ()
+    assert f"{NOTICE} keep 2 changes nothing on the branch head" in await rig.notices()
+
+
+async def test_a_retraction_goes_alone_after_the_keep_it_was_made_on_and_before_the_keep_after_it(
+    tmp_path: Path,
+) -> None:
+    rig = await _rig(tmp_path, _retracting((256, 512, 768)), start_seconds=0.2)
+    rig.toolbox.refusals = [Backpressure(BRANCH, 1, 1)] * 40
+
+    first, retraction, after = await _landed_in_turn(rig, tmp_path, landed=2)
+
+    assert "+max_num_seqs = 256" in rig.patch(first) and "-max_num_seqs = 256" in rig.patch(retraction)
+    assert "+max_num_seqs = 768" in rig.patch(after)
+    assert [len(request.attachments) for request in (first, retraction, after)] == [0, 1, 0]
+
+
+async def test_a_retraction_whose_import_measured_nothing_goes_once_more_as_the_retraction_it_went_as(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(keep_requeue, "REQUEUE_SECONDS", 0.3)
+    rig = await _rig(tmp_path, _retracting((256, 512)), start_seconds=0.2)
+    gate = LocalBlackboard(tmp_path / "blackboard", Writer(Role.GATE, "gate"))
+
+    await rig.session.preflight()
+    running = asyncio.create_task(rig.session.run())
+    await _until(lambda: rig.toolbox.requests, "the first import")
+    first = rig.toolbox.requests[0]
+    await rig.toolbox_blackboard.write_result(result("r1"))
+    recipe = apply(await rig.repo.read_recipe(first.parent_commit), first.delta)
+    made = await rig.repo.commit(BRANCH, first.parent_commit, recipe, "r1")
+    await gate.write_judgement("r1", judgement(-3.0, ("r1",)), Conclusion.COMMITTED, made)
+    await _until(lambda: len(rig.toolbox.requests) == 2, "the retraction's import")
+    await rig.toolbox_blackboard.write_result(_failed("r2", Validity.MEASUREMENT_FAILED))
+    await _until(lambda: len(rig.toolbox.requests) == 3, "the requeued retraction")
+    await rig.toolbox_blackboard.write_result(result("r3"))
+    with pytest.raises(SessionFinished):
+        await asyncio.wait_for(running, 10)
+
+    _, retraction, again = rig.toolbox.requests
+    assert rig.patch(again) == rig.patch(retraction) and again.parent_commit == retraction.parent_commit
+    assert [attachment.id for attachment in again.attachments] == [RETRACTION_ID]
+    assert again.attachments == retraction.attachments
+    assert (again.consistency_check, again.long_context_check) == (True, True)
+    assert any(note.endswith("r3 is not held to the speed gate") for note in await rig.notices())
+
+
+def test_the_keeps_waiting_at_a_crash_are_read_back_by_the_run_after_it(tmp_path: Path) -> None:
+    retraction = Retraction(7, 1, "iter7-selection-invalid", 1)
+    later = KeptChange(3, "patch", "--max-num-seqs 768")
+    watch = KeepWatch("a" * 40, seq=3, pending=KeptChange(2, "patch", "", retracts=retraction), waiting=[later])
+
+    watch.save(tmp_path / "watch.json")
+
+    loaded = KeepWatch.load(tmp_path / "watch.json")
+    assert loaded.pending is not None and (loaded.pending.seq, loaded.pending.retracts) == (2, retraction)
+    assert [kept.seq for kept in loaded.waiting] == [3]
+
+
+async def test_a_snapshot_that_retracts_nothing_is_imported_as_before(tmp_path: Path) -> None:
+    rig = await _rig(tmp_path, Component(keeps=(256,)), start_seconds=0.2)
+
+    request = await _imported(rig)
+
+    assert (request.attachments, request.consistency_check, request.long_context_check) == ((), None, None)
+    assert rig.toolbox.attachments == {}
+
+
+async def test_an_agent_served_a_frozen_base_s_credential_keeps_it_out_of_its_stored_manifest_and_resumes_with_the_host_s(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    install_stand_in(monkeypatch)
+    frozen = frozen_credential_base(tmp_path, monkeypatch)
+    monkeypatch.setenv("HF_TOKEN", TOKEN)
+    agent = Component(keeps=(256,), gap=1.0, tail=0.6)
+    launch = served_launch(frozen, "")
+    source = _stand_in_repo(tmp_path, agent)
+    rig = await _rig(tmp_path, source=source, start_seconds=0.2, spec_fields={"launch": launch})
+    config = tmp_path / BRANCH / "session" / AGENT_DIR / "src" / CONFIG_FILE
+
+    await rig.session.preflight()
+    await rig.session.stop()
+    resumed = rig.restart()
+    running = asyncio.create_task(resumed.run())
+    await _until(lambda: rig.toolbox.requests, "the import")
+    await rig.toolbox_blackboard.write_result(result("r1"))
+    with pytest.raises(SessionFinished):
+        await asyncio.wait_for(running, 10)
+
+    assert TOKEN not in (tmp_path / BRANCH / "session" / MANIFEST_FILE).read_text()
+    assert json.loads(config.read_text())["server_env"]["HF_TOKEN"] == TOKEN
+    [request] = rig.toolbox.requests
+    assert request.delta.config.envs == {} and "+max_num_seqs = 256" in rig.patch(request)

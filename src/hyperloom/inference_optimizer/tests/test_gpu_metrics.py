@@ -4,8 +4,8 @@
 """Tests for the per-round GPU telemetry artifact.
 
 The blocks below are the two shapes that actually occur, taken from production
-``benchmark_report.json`` files rather than invented: Magpie's pre-aggregated
-``{min,max,avg}`` form, and the multi-node harvester's flat per-sample form.
+``benchmark_report.json`` files of archived v1 rounds rather than invented: the
+pre-aggregated ``{min,max,avg}`` form, and the multi-node harvester's flat per-sample form.
 """
 
 from __future__ import annotations
@@ -22,8 +22,8 @@ from hyperloom.orchestrator.actions.executors._gpu_metrics import (
 )
 
 # Verbatim from a production single-node round. Note what is *not* here: no
-# utilization and no VRAM -- Magpie's monitor samples neither.
-MAGPIE_BLOCK: dict[str, Any] = {
+# utilization and no VRAM -- the v1 monitor sampled neither.
+V1_BLOCK: dict[str, Any] = {
     "sample_count": 35,
     "duration_sec": 70.55,
     "temperature_c": {"min": 56.0, "max": 63.0, "avg": 58.6},
@@ -33,7 +33,7 @@ MAGPIE_BLOCK: dict[str, Any] = {
 }
 
 # The second block from that same session, so the weighting below is real.
-MAGPIE_BLOCK_2: dict[str, Any] = {
+V1_BLOCK_2: dict[str, Any] = {
     "sample_count": 126,
     "duration_sec": 259.37,
     "temperature_c": {"min": 56.0, "max": 63.0, "avg": 58.8},
@@ -49,9 +49,9 @@ def _round(tmp_path: Path, gpu_monitor: Any) -> Path:
     return tmp_path
 
 
-def test_the_magpie_block_yields_real_numbers():
+def test_the_v1_block_yields_real_numbers():
     """The regression this started from: this exact shape read as all zeros."""
-    out = gpu_metrics_from_report({"gpu_monitor": MAGPIE_BLOCK})
+    out = gpu_metrics_from_report({"gpu_monitor": V1_BLOCK})
 
     assert out["avg_power_w"] == 476.5
     assert out["max_power_w"] == 943.0
@@ -65,7 +65,7 @@ def test_the_magpie_block_yields_real_numbers():
 
 def test_means_are_weighted_by_sample_count():
     """A 35-sample block must not pull the round's mean as hard as a 126-sample one."""
-    out = gpu_metrics_from_report({"gpu_monitor": [MAGPIE_BLOCK, MAGPIE_BLOCK_2]})
+    out = gpu_metrics_from_report({"gpu_monitor": [V1_BLOCK, V1_BLOCK_2]})
 
     # Weighted mean: (476.5*35 + 471.6*126) / 161
     assert out["avg_power_w"] == 472.67
@@ -75,13 +75,13 @@ def test_means_are_weighted_by_sample_count():
     assert out["blocks"] == 2
 
 
-def test_magpie_reports_no_utilization_or_vram():
+def test_a_v1_report_has_no_utilization_or_vram():
     """Single-node reality, and the reason those fields are tri-state.
 
     Null, not 0.0: a 0% utilization reading asserts the GPU sat idle through the
     round, which is the opposite of what an unsampled metric means.
     """
-    out = gpu_metrics_from_report({"gpu_monitor": MAGPIE_BLOCK})
+    out = gpu_metrics_from_report({"gpu_monitor": V1_BLOCK})
 
     assert out["avg_gpu_util_pct"] is None
     assert out["max_gpu_util_pct"] is None
@@ -168,7 +168,7 @@ def test_a_report_without_gpu_monitor_yields_nothing():
 
 def test_the_artifact_is_written_into_the_round(tmp_path):
     """Per round, beside the report it was read from."""
-    ws = _round(tmp_path, MAGPIE_BLOCK)
+    ws = _round(tmp_path, V1_BLOCK)
 
     path = write_gpu_metrics(ws)
 
@@ -205,7 +205,7 @@ def test_the_harvest_writes_it_for_every_round(tmp_path, monkeypatch):
     from hyperloom.orchestrator.actions.executors import benchmark_result as br
 
     monkeypatch.setattr(br, "harvest_mn_gpu_metrics", lambda *_a, **_k: {})
-    ws = _round(tmp_path, MAGPIE_BLOCK)
+    ws = _round(tmp_path, V1_BLOCK)
 
     br.harvest_leaked_artifacts(ws)
 
@@ -227,9 +227,7 @@ def test_a_block_offering_only_min_contributes_nothing(tmp_path):
 
 def test_a_min_only_block_does_not_inflate_a_real_one(tmp_path):
     """The weighting must come from the blocks that actually reported."""
-    out = gpu_metrics_from_report(
-        {"gpu_monitor": [MAGPIE_BLOCK, {"sample_count": 27000, "power_watts": {"min": 100.0}}]}
-    )
+    out = gpu_metrics_from_report({"gpu_monitor": [V1_BLOCK, {"sample_count": 27000, "power_watts": {"min": 100.0}}]})
 
     assert out["samples"] == 35
     assert out["avg_power_w"] == 476.5
@@ -247,7 +245,7 @@ def test_a_failed_write_is_reported_not_swallowed(tmp_path, monkeypatch, caplog)
         raise OSError("read-only workspace")
 
     monkeypatch.setattr(common_io, "atomic_write_json", explode)
-    ws = _round(tmp_path, MAGPIE_BLOCK)
+    ws = _round(tmp_path, V1_BLOCK)
 
     with caplog.at_level(logging.WARNING):
         assert write_gpu_metrics(ws) is None
@@ -266,8 +264,8 @@ def test_a_round_without_telemetry_stays_quiet(tmp_path, caplog):
 def test_a_report_that_lands_after_the_harvest_is_still_written(tmp_path):
     """Harvest runs before the report is guaranteed to exist, so it cannot be the only chance.
 
-    Magpie can finish writing ``benchmark_report.json`` after the subprocess is
-    reaped; the round settles on a report the harvest never saw.
+    A ``benchmark_report.json`` can be finished after the subprocess is reaped;
+    the round settles on a report the harvest never saw.
     """
     from hyperloom.orchestrator.actions.executors import benchmark_result as br
     from hyperloom.orchestrator.actions.executors._gpu_metrics import write_gpu_metrics_from_report
@@ -277,7 +275,7 @@ def test_a_report_that_lands_after_the_harvest_is_still_written(tmp_path):
     assert not (tmp_path / GPU_ARTIFACT_NAME).exists()
 
     # The report settles afterwards, which is where the second attempt reads it.
-    report = {"gpu_monitor": MAGPIE_BLOCK}
+    report = {"gpu_monitor": V1_BLOCK}
     (tmp_path / "benchmark_report.json").write_text(json.dumps(report), encoding="utf-8")
     write_gpu_metrics_from_report(tmp_path, report, source="benchmark_report.json")
 

@@ -1,7 +1,7 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""Unit coverage for the per-KEEP source-layer snapshot contract (``hyperloom.orchestrator.source_snapshot``): ``_safe_rel`` path sanitation, ``snapshot_source_layer`` capture (upsert/delete/missing), and ``snapshot_is_complete``."""
+"""Unit coverage for the per-KEEP source-layer snapshot contract (``hyperloom.orchestrator.source_snapshot``): ``snapshot_source_layer`` path sanitation and capture (upsert/delete/missing), and ``snapshot_is_complete``."""
 
 from __future__ import annotations
 
@@ -11,29 +11,24 @@ from pathlib import Path
 from hyperloom.orchestrator.source_snapshot import (
     MANIFEST_NAME,
     SourceLayer,
-    _safe_rel,
     snapshot_is_complete,
     snapshot_source_layer,
 )
 
 
-def test_safe_rel_normalizes_leading_slash() -> None:
-    assert _safe_rel("/foo/bar.py") == "foo/bar.py"
+def test_snapshot_source_layer_reads_a_leading_slash_path_under_the_framework_root(tmp_path: Path) -> None:
+    fw = tmp_path / "framework"
+    (fw / "pkg").mkdir(parents=True)
+    (fw / "pkg" / "mod.py").write_text("x = 1\n", encoding="utf-8")
 
+    dest = tmp_path / "snap"
+    manifest = snapshot_source_layer(
+        SourceLayer(framework_root=fw, base_sha="", rel_paths=["/pkg/mod.py"]), dest_dir=dest
+    )
 
-def test_safe_rel_rejects_empty_or_blank() -> None:
-    assert _safe_rel("") is None
-    assert _safe_rel("   ") is None
-    assert _safe_rel(None) is None
-
-
-def test_safe_rel_rejects_traversal() -> None:
-    assert _safe_rel("../etc/passwd") is None
-    assert _safe_rel("a/../../b") is None
-
-
-def test_safe_rel_passthrough_for_plain_relative_path() -> None:
-    assert _safe_rel("vllm/model_executor/layers/foo.py") == ("vllm/model_executor/layers/foo.py")
+    assert manifest is not None
+    assert manifest["files"] == [{"rel": "pkg/mod.py", "op": "upsert"}]
+    assert (dest / "files" / "pkg" / "mod.py").read_text(encoding="utf-8") == "x = 1\n"
 
 
 def test_snapshot_source_layer_upsert_only_is_complete(tmp_path: Path) -> None:
@@ -122,7 +117,7 @@ def test_snapshot_source_layer_skips_unsafe_paths(tmp_path: Path) -> None:
     dest = tmp_path / "snap"
 
     manifest = snapshot_source_layer(
-        SourceLayer(framework_root=fw, base_sha=None, rel_paths=["../escape.py", ""]), dest_dir=dest
+        SourceLayer(framework_root=fw, base_sha=None, rel_paths=["../escape.py", "a/../../b", "", "   "]), dest_dir=dest
     )
 
     assert manifest is None

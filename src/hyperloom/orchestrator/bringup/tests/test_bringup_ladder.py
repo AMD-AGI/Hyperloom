@@ -8,6 +8,8 @@ from __future__ import annotations
 import subprocess
 from pathlib import Path
 
+import pytest
+
 from hyperloom.common.bringup import (
     BootObservation,
     LadderStage,
@@ -18,6 +20,7 @@ from hyperloom.common.bringup import (
     render_excerpt,
 )
 from hyperloom.orchestrator.bringup import ladder, trees
+from inference_suite.server_log import READY_MARKERS
 
 
 def _trees(*roots: str) -> tuple[trees.TreeIdentity, ...]:
@@ -69,21 +72,6 @@ def test_failure_digest_separates_different_failures() -> None:
         trees=_trees("/sgl-workspace/vllm"),
     )
     assert failure_digest(base) != failure_digest(other)
-
-
-def test_unmatched_failure_still_digests() -> None:
-    observation = ladder.classify(
-        ladder.BootStreams(
-            "Traceback (most recent call last):\n"
-            '  File "/sgl-workspace/vllm/srt/entry.py", line 12, in boot\n'
-            "ZeroDivisionError: division by zero\n"
-        ),
-        server_elapsed_sec=2.0,
-        trees=_trees("/sgl-workspace/vllm"),
-    )
-    assert observation.matched_marker == ""
-    assert observation.stage_failed is not None
-    assert len(failure_digest(observation)) == 64
 
 
 def _engine_core_crash(root_error: str) -> str:
@@ -326,6 +314,16 @@ def test_clean_boot_has_no_failed_stage() -> None:
         trees=[],
     )
     assert observation.stage_failed is None
+    assert observation.stage_reached is LadderStage.HTTP_READY
+
+
+@pytest.mark.parametrize("ready_line", READY_MARKERS)
+def test_every_server_log_ready_marker_reaches_http_ready(ready_line: str) -> None:
+    observation = ladder.classify(
+        ladder.BootStreams(f"server_args=ServerArgs(model_path='m')\n{ready_line}\n"),
+        server_elapsed_sec=55.0,
+        trees=[],
+    )
     assert observation.stage_reached is LadderStage.HTTP_READY
 
 

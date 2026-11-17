@@ -5,40 +5,19 @@
 
 from __future__ import annotations
 
-import json
 import os
-from pathlib import Path
 
 import pytest
 import yaml
 
-from hyperloom.inference_optimizer import framework_registry as fr
-from hyperloom.orchestrator.actions.executors._grid_runner import GridLaunch, GridRecipe
-from hyperloom.orchestrator.actions.executors._workload_envs import BenchmarkTarget
-
 
 class TestRegistryEntry:
-    def test_custom_is_a_scriptable_framework(self):
-        assert fr.is_supported("custom")
-        assert fr.is_scriptable("custom")
-
-    def test_custom_declares_no_upstream_repo(self):
-        """There is no upstream to mine PRs from; the code is the operator's."""
-        assert fr.FRAMEWORKS["custom"].repo_url is None
-
     def test_custom_is_offered_by_the_cli(self):
         from hyperloom.inference_optimizer.cli import parser as cli_parser
 
         p = cli_parser._build_parser()
         ns = p.parse_args(["optimize", "--framework", "custom", "--model", "/m"])
         assert ns.framework == "custom"
-
-    def test_shipped_frameworks_keep_their_units(self):
-        """The new entry must not perturb how existing sessions report."""
-        assert fr.throughput_unit("xdit") == "img/s"
-        assert fr.throughput_unit("sglang") == "tok/s"
-        assert fr.throughput_unit("custom") == "unit/s"
-        assert fr.throughput_unit("bogus") == "tok/s"
 
 
 class TestConfigResolution:
@@ -90,6 +69,20 @@ class TestEntrypointAndCheckout:
         bench, envs = self._bench(), {}
         we.apply_scriptable_runtime_defaults(bench, envs, gpu_type="mi355x", explicit_benchmark_script=False)
         assert bench["benchmark_script"] == str(scripts / "custom_mi355x.sh")
+
+    def test_a_family_board_resolves_its_own_name_not_the_family_one(self, tmp_path, monkeypatch):
+        """The suffix is the board itself: mi325x is not folded into mi300x."""
+        from hyperloom.orchestrator.actions.executors import _workload_envs as we
+
+        scripts = tmp_path / "scripts"
+        scripts.mkdir()
+        (scripts / "custom_mi300x.sh").write_text("#!/bin/sh\n")
+        (scripts / "custom_mi325x.sh").write_text("#!/bin/sh\n")
+        monkeypatch.setenv("HYPERLOOM_BYPASS_SCRIPTS_DIR", str(scripts))
+
+        bench, envs = self._bench(), {}
+        we.apply_scriptable_runtime_defaults(bench, envs, gpu_type="mi325x", explicit_benchmark_script=False)
+        assert bench["benchmark_script"] == str(scripts / "custom_mi325x.sh")
 
     def test_an_ambiguous_directory_picks_nothing(self, tmp_path, monkeypatch):
         """Two unnamed scripts is a question, not a default; let it surface."""
@@ -247,25 +240,34 @@ class TestMeasurementContract:
         assert [v.name for v in kept] == ["geak_revalidate"]
         assert dropped == []
 
-    def test_a_shipped_framework_keeps_flipping_its_pinned_defaults(self):
+    @pytest.mark.parametrize(
+        ("framework", "expected"),
+        [
+            pytest.param("xdit", ["flip_pinned", "new_knob"], id="shipped_framework_keeps_its_ab_leg"),
+            pytest.param("custom", ["new_knob"], id="custom_drops_the_measurement_edit"),
+        ],
+    )
+    def test_only_custom_drops_a_variant_that_edits_a_pinned_env(self, framework, expected, tmp_path, monkeypatch):
         """A shipped baseline pins knobs at their off value for explore to flip."""
-        from hyperloom.inference_optimizer.session.paths import asset_root
+        from hyperloom.orchestrator.actions.executors.explore import _ExploreRound
 
-        cfg = yaml.safe_load((asset_root() / "assets" / "configs" / "baseline_xdit.yaml").read_text())
-        assert cfg["benchmark"]["envs"], "a shipped baseline pins envs explore may still flip"
-
-        import inspect
-
-        from hyperloom.orchestrator.actions.executors import explore as explore_mod
-
-        lines = inspect.getsource(explore_mod).splitlines()
-        call_at = next(i for i, line in enumerate(lines) if "filter_operator_pinned_envs(grid" in line)
-        preceding = next(line for line in reversed(lines[:call_at]) if line.strip())
-        assert 'framework == "custom"' in preceding, (
-            "the pinned-env guard must stay scoped to custom; applying it to a shipped "
-            "framework would drop the A/B legs its baseline pins exist to enable, and "
-            f"it is now guarded by: {preceding.strip()!r}"
-        )
+        monkeypatch.setenv("HYPERLOOM_BYPASS_SCRIPTS_DIR", "")
+        rnd = _ExploreRound.__new__(_ExploreRound)
+        rnd.params = {
+            "grid": [
+                {"name": "flip_pinned", "extra_envs": {"MYFW_REPEATS": "1"}},
+                {"name": "new_knob", "extra_envs": {"MYFW_CACHE": "1"}},
+            ]
+        }
+        rnd.ss = None
+        rnd.framework = framework
+        rnd.yaml_envs = {"MYFW_REPEATS": "3"}
+        rnd.output_root = tmp_path
+        rnd.base_remove_args = []
+        rnd.base_unset_envs = []
+        rnd.args_mode = "append"
+        rnd._resolve_grid()
+        assert [gv.name for gv in rnd.grid] == expected
 
 
 class TestLaunchValidation:
@@ -273,12 +275,6 @@ class TestLaunchValidation:
         from argparse import Namespace
 
         return Namespace(framework_path=None, benchmark_scripts_dir=None, **kw)
-
-    @pytest.fixture(autouse=True)
-    def _bypass_backend(self, monkeypatch):
-        # custom refuses to launch on any other backend; the path assertions in this class are about the paths, so
-        # give them the one that is valid.
-        monkeypatch.setenv("HYPERLOOM_BENCHMARK_BACKEND", "bypass")
 
     def test_custom_without_its_paths_exits_instead_of_running(self, monkeypatch):
         """Failing here beats failing at the first benchmark, half an hour in."""
@@ -317,60 +313,15 @@ class TestLaunchValidation:
         assert os.environ["FRAMEWORK_REPO_PATH"] == str(repo.resolve())
         assert os.environ["HYPERLOOM_BYPASS_SCRIPTS_DIR"] == str(scripts.resolve())
 
-    @pytest.mark.parametrize("backend", ["", "magpie", "MAGPIE", "  ", "bypasss", "none"])
-    def test_custom_refuses_a_backend_that_cannot_run_the_script(self, monkeypatch, tmp_path, backend):
-        """The default backend is Magpie, which cannot run an operator's script."""
-        from hyperloom.inference_optimizer.cli import _apply_operator_supplied_paths
-
-        repo, scripts = tmp_path / "fw", tmp_path / "sc"
-        repo.mkdir()
-        scripts.mkdir()
-        monkeypatch.setenv("FRAMEWORK_REPO_PATH", "")
-        monkeypatch.setenv("HYPERLOOM_BYPASS_SCRIPTS_DIR", "")
-        monkeypatch.setenv("HYPERLOOM_BENCHMARK_BACKEND", backend)
-        args = self._args()
-        args.framework_path = str(repo)
-        args.benchmark_scripts_dir = str(scripts)
-
-        with pytest.raises(SystemExit) as exc:
-            _apply_operator_supplied_paths(args, "custom")
-        assert exc.value.code == 2
-
-    @pytest.mark.parametrize("backend", ["bypass", "  Bypass  ", "BYPASS"])
-    def test_custom_accepts_bypass_however_it_is_spelled(self, monkeypatch, tmp_path, backend):
-        """Normalisation matches install.sh's, so the two gates cannot disagree."""
-        from hyperloom.inference_optimizer.cli import _apply_operator_supplied_paths
-
-        repo, scripts = tmp_path / "fw", tmp_path / "sc"
-        repo.mkdir()
-        scripts.mkdir()
-        monkeypatch.setenv("FRAMEWORK_REPO_PATH", "")
-        monkeypatch.setenv("HYPERLOOM_BYPASS_SCRIPTS_DIR", "")
-        monkeypatch.setenv("HYPERLOOM_BENCHMARK_BACKEND", backend)
-        args = self._args()
-        args.framework_path = str(repo)
-        args.benchmark_scripts_dir = str(scripts)
-
-        _apply_operator_supplied_paths(args, "custom")
-        assert os.environ["FRAMEWORK_REPO_PATH"] == str(repo.resolve())
-
     def test_a_shipped_framework_keeps_its_backend_freedom(self, monkeypatch):
         """The gate is scoped to custom; xdit/sglang launches are untouched."""
         from hyperloom.inference_optimizer.cli import _apply_operator_supplied_paths
 
-        monkeypatch.setenv("HYPERLOOM_BENCHMARK_BACKEND", "magpie")
         for framework in ("sglang", "vllm", "xdit"):
             args = self._args()
             if framework == "xdit":
                 args.xdit_model_name = "FLUX.2-dev"
             _apply_operator_supplied_paths(args, framework)
-
-    def test_a_shipped_framework_needs_neither_flag(self, monkeypatch):
-        from hyperloom.inference_optimizer.cli import _apply_operator_supplied_paths
-
-        monkeypatch.setenv("FRAMEWORK_REPO_PATH", "")
-        monkeypatch.setenv("HYPERLOOM_BYPASS_SCRIPTS_DIR", "")
-        _apply_operator_supplied_paths(self._args(xdit_model_name="FLUX.2-dev"), "xdit")
 
     def test_xdit_resume_accepts_env_without_flag(self, monkeypatch):
         """On resume, _restore exports XDIT_MODEL_NAME; apply must accept it."""
@@ -421,13 +372,12 @@ class TestEntrypointFailFast:
         return Namespace(framework_path=None, benchmark_scripts_dir=None, **kw)
 
     @pytest.fixture(autouse=True)
-    def _bypass_backend(self, monkeypatch):
-        monkeypatch.setenv("HYPERLOOM_BENCHMARK_BACKEND", "bypass")
+    def _no_custom_checkout(self, monkeypatch):
         monkeypatch.setenv("CUSTOM_REPO_PATH", "")
         monkeypatch.setenv("CUSTOM_DIR", "")
 
     def test_an_empty_scripts_dir_exits_listing_candidates(self, monkeypatch, tmp_path, capsys):
-        """Failing here beats looping magpie_nonzero_invalid_measurement for hours."""
+        """Failing here beats looping round_nonzero_invalid_measurement for hours."""
         from hyperloom.inference_optimizer.cli import _require_custom_entrypoint
 
         repo, scripts = tmp_path / "fw", tmp_path / "sc"
@@ -435,7 +385,6 @@ class TestEntrypointFailFast:
         scripts.mkdir()
         monkeypatch.setenv("FRAMEWORK_REPO_PATH", str(repo))
         monkeypatch.setenv("HYPERLOOM_BYPASS_SCRIPTS_DIR", str(scripts))
-        monkeypatch.delenv("MAGPIE_PATH", raising=False)
         monkeypatch.delenv("INFERENCEX_PATH", raising=False)
 
         with pytest.raises(SystemExit) as exc:
@@ -445,25 +394,20 @@ class TestEntrypointFailFast:
         assert "custom_mi355x.sh" in err
         assert str(scripts / "custom_mi355x.sh") in err
 
-    def test_a_resolved_script_passes(self, monkeypatch, tmp_path):
+    @pytest.mark.parametrize(
+        "script",
+        [
+            pytest.param("custom_mi355x.sh", id="runner_suffixed_script"),
+            pytest.param("run_whatever.sh", id="lone_operator_script"),
+        ],
+    )
+    def test_a_resolved_script_passes(self, monkeypatch, tmp_path, script):
         from hyperloom.inference_optimizer.cli import _require_custom_entrypoint
 
         repo, scripts = tmp_path / "fw", tmp_path / "sc"
         repo.mkdir()
         scripts.mkdir()
-        (scripts / "custom_mi355x.sh").write_text("#!/bin/sh\n")
-        monkeypatch.setenv("FRAMEWORK_REPO_PATH", str(repo))
-        monkeypatch.setenv("HYPERLOOM_BYPASS_SCRIPTS_DIR", str(scripts))
-
-        _require_custom_entrypoint("custom", gpu_type="mi355x")
-
-    def test_a_lone_operator_script_passes(self, monkeypatch, tmp_path):
-        from hyperloom.inference_optimizer.cli import _require_custom_entrypoint
-
-        repo, scripts = tmp_path / "fw", tmp_path / "sc"
-        repo.mkdir()
-        scripts.mkdir()
-        (scripts / "run_whatever.sh").write_text("#!/bin/sh\n")
+        (scripts / script).write_text("#!/bin/sh\n")
         monkeypatch.setenv("FRAMEWORK_REPO_PATH", str(repo))
         monkeypatch.setenv("HYPERLOOM_BYPASS_SCRIPTS_DIR", str(scripts))
 
@@ -481,10 +425,6 @@ class TestResumeReappliesOperatorPaths:
         from argparse import Namespace
 
         return Namespace(framework_path=None, benchmark_scripts_dir=None, **kw)
-
-    @pytest.fixture(autouse=True)
-    def _bypass_backend(self, monkeypatch):
-        monkeypatch.setenv("HYPERLOOM_BENCHMARK_BACKEND", "bypass")
 
     def test_repassing_the_flags_publishes_them(self, monkeypatch, tmp_path):
         from hyperloom.inference_optimizer.cli import _apply_operator_supplied_paths
@@ -523,7 +463,6 @@ class TestResumeReappliesOperatorPaths:
             framework="custom",
             framework_repo_path=str(repo),
             bypass_scripts_dir=str(scripts),
-            benchmark_backend="bypass",
         )
 
         _restore_operator_supplied_paths_from_state(self._args(), state)
@@ -552,7 +491,6 @@ class TestResumeReappliesOperatorPaths:
             framework="custom",
             framework_repo_path=str(tmp_path / "old-fw"),
             bypass_scripts_dir=str(archived_scripts),
-            benchmark_backend="bypass",
         )
         args = self._args()
         args.framework_path = str(new_repo)
@@ -562,132 +500,3 @@ class TestResumeReappliesOperatorPaths:
         _apply_operator_supplied_paths(args, "custom")
         assert os.environ["HYPERLOOM_BYPASS_SCRIPTS_DIR"] == str(new_scripts.resolve())
         assert os.environ["FRAMEWORK_REPO_PATH"] == str(new_repo.resolve())
-
-
-class TestCustomAdapterMeasurement:
-    """Handoff probe: custom/native adapter emits nonzero throughput, no harness error."""
-
-    def test_custom_scriptable_run_emits_nonzero_throughput(self, tmp_path, monkeypatch):
-        import yaml
-        from hyperloom.orchestrator.actions.executors import bypass_runner
-
-        scripts = tmp_path / "scripts"
-        scripts.mkdir()
-        (scripts / "custom_mi355x.sh").write_text(
-            "#!/bin/bash\n"
-            'cat > "$RESULT_DIR/$RESULT_FILENAME.json" <<JSON\n'
-            '{"framework": "custom", "workload_kind": "scriptable", '
-            '"throughput_unit": "fps", "output_throughput": 1.29, '
-            '"quality_gate": {"passed": true}}\n'
-            "JSON\n",
-            encoding="utf-8",
-        )
-        monkeypatch.setenv("HYPERLOOM_BYPASS_SCRIPTS_DIR", str(scripts))
-        monkeypatch.setenv("HYPERLOOM_BENCHMARK_BACKEND", "bypass")
-
-        cfg = {
-            "benchmark": {
-                "framework": "custom",
-                "model": "/models/custom",
-                "runner_type": "mi355x",
-                "run_mode": "local",
-                "timeout_seconds": 60,
-                "workload_kind": "scriptable",
-                "envs": {"TP": 8},
-            }
-        }
-        cfg_path = tmp_path / "config.yaml"
-        cfg_path.write_text(yaml.safe_dump(cfg), encoding="utf-8")
-
-        rc = bypass_runner.run_benchmark(cfg_path, tmp_path / "out")
-        assert rc == 0
-        ws = sorted((tmp_path / "out").glob("benchmark_custom_*"))[-1]
-        rep = json.loads((ws / "benchmark_report.json").read_text(encoding="utf-8"))
-        assert rep["success"] is True
-        assert float(rep["throughput"]["output_throughput"]) == pytest.approx(1.29)
-
-    @pytest.mark.parametrize(
-        ("timeout_override", "expected_timeout"), [(None, 7800.0), ("10", 10.0)], ids=["default", "override"]
-    )
-    def test_an_inert_env_variant_measures_without_a_harness_error(
-        self, tmp_path, monkeypatch, timeout_override, expected_timeout
-    ):
-        """An inert env variant measures under the shared scriptable benchmark caps."""
-        import asyncio
-        import subprocess
-        import sys
-        from unittest.mock import patch
-
-        from hyperloom.orchestrator.actions.executors._grid_runner import (
-            GridVariant,
-            run_grid,
-        )
-
-        base = tmp_path / "base.yaml"
-        base.write_text(
-            yaml.safe_dump(
-                {
-                    "benchmark": {
-                        "framework": "custom",
-                        "model": "/models/custom",
-                        "workload_kind": "scriptable",
-                        "run_mode": "local",
-                        "envs": {"TP": 8, "HYWORLD_HOIST": "0"},
-                        "timeout_seconds": 60,
-                    }
-                }
-            )
-        )
-
-        def _ok(cmd, *a, **k):
-            assert k["watch"].timeout == expected_timeout
-            assert k["watch"].silence_timeout_sec == 600
-            assert k["watch"].server_log_path is None
-            assert k["watch"].session_deadline_sec is None
-            slot = Path(cmd[cmd.index("--output-dir") + 1])
-            ws = slot / "benchmark_custom_20260101_000000"
-            ws.mkdir(parents=True, exist_ok=True)
-            (ws / "benchmark_report.json").write_text(
-                json.dumps(
-                    {
-                        "success": True,
-                        "framework": "custom",
-                        "throughput": {
-                            "output_throughput": 1.29,
-                            "completed_requests": 1,
-                            "duration_seconds": 10.0,
-                        },
-                    }
-                )
-            )
-            return subprocess.CompletedProcess(cmd, 0, "ok", "")
-
-        monkeypatch.setenv("INFERENCE_OPTIMIZER_RUN_GRID_WARMUP", "0")
-        monkeypatch.delenv("INFERENCE_OPTIMIZER_BENCHMARK_SILENCE_TIMEOUT_SEC", raising=False)
-        if timeout_override is None:
-            monkeypatch.delenv("INFERENCE_OPTIMIZER_BENCHMARK_TIMEOUT_SEC", raising=False)
-        else:
-            monkeypatch.setenv("INFERENCE_OPTIMIZER_BENCHMARK_TIMEOUT_SEC", timeout_override)
-        with patch(
-            "hyperloom.orchestrator.actions.executors._grid_runner.run_with_session_kill",
-            side_effect=_ok,
-        ) as launch:
-            results = asyncio.run(
-                run_grid(
-                    grid=[
-                        GridVariant(name="baseline"),
-                        GridVariant(
-                            name="inert-off",
-                            extra_envs={"HYWORLD_HOIST": "0"},
-                        ),
-                    ],
-                    output_root=tmp_path / "out",
-                    recipe=GridRecipe(base_yaml_path=base, target=BenchmarkTarget(gpu_type="mi355x")),
-                    launch=GridLaunch(magpie_python=sys.executable),
-                )
-            )
-        assert launch.call_count == 2
-        assert [r.status for r in results] == ["succeeded", "succeeded"]
-        assert [r.output_throughput for r in results] == pytest.approx([1.29, 1.29])
-        assert all(not r.error_class for r in results)
-        assert not list((tmp_path / "out").glob("variant_*/abort_reason.json"))

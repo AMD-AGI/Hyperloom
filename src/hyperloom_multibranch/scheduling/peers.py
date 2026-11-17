@@ -26,10 +26,13 @@ from hyperloom_multibranch.blackboard.rsi.briefing import SessionBriefs
 from hyperloom_multibranch.rulegate.critic import FixReviewer
 from hyperloom_multibranch.scheduling.layout import SessionLayout
 from hyperloom_multibranch.scheduling.processes import ProcessRegistry
+from hyperloom.common.agentx_early_stop import EarlyStopMode
 from hyperloom_multibranch.scheduling.settings import AGENT_PORT, SHARE_MINUTES, Workload
 
 if TYPE_CHECKING:
     from hyperloom.hosted.mcp_server import McpServer
+    from hyperloom_multibranch.scheduling.launch_isolation import LaunchIsolation
+    from hyperloom_multibranch.specialist.dev_sandbox import DevLeases
     from hyperloom_multibranch.specialist.dossier_pass import DossierPass
     from hyperloom_multibranch.specialist.map_session import MapCalls
     from hyperloom_multibranch.toolbox.toolbox import RealToolbox
@@ -44,8 +47,10 @@ class Peers:
     is the image the toolbox measures on, which every recipe must carry: PRELUDE roots the session on it.
     ``reserved`` is the rule gate that asks for the forks and repairs: it lands each fork the fork desk admits before
     the scheduler starts it, and records each fork and repair the scheduler voids. ``regression`` runs the
-    regression set the integrator asks for before a merge and FINAL for every candidate. ``dossier_pass`` runs the dossier pass of a session that stops after its map; a session that
-    runs no agent has none.
+    regression set the integrator asks for before a merge and FINAL for every candidate. ``isolation`` is how the
+    specialists, agent and dev sandboxes and tests these peers launch are isolated, which the session's manifest and
+    report record. ``dossier_pass`` runs the dossier pass of a session that stops after its map; a session that
+    runs no agent has none. ``dev_leases`` are the session's dev sandboxes, ``None`` when it lends none.
     """
 
     lifecycle: SpecialistLifecycle
@@ -57,7 +62,9 @@ class Peers:
     base_image_digest: str
     reserved: ReservedBranches
     regression: RegressionCheck
+    isolation: LaunchIsolation
     dossier_pass: DossierPass | None = None
+    dev_leases: DevLeases | None = None
 
 
 @dataclass(frozen=True)
@@ -74,14 +81,17 @@ class PeerSetup:
     reachable under the workload. ``references`` names each directory of reference material the run was given, already
     copied into the session, for the specialist role to send the specialists to. ``dev_leases`` is how many dev
     sandboxes the session lends its specialists at once, from the toolbox's cards; 0 lends none. ``agents`` are the
-    third-party agents the user named, each run on an autonomous branch of its own, ``agent_pack`` the pack an
-    Arbor among them runs (``""`` for the adapter's default), ``agent_launch`` the file of the launch its recipe's
-    adds to (``""`` when the recipe's is the whole launch), ``agent_port`` the first port of their port blocks,
+    third-party agents the user named, each run on an autonomous branch of its own, ``reference_script`` the operator's
+    launch file the session freezes as its base (``""`` for none), ``agent_pack`` the pack a component agent
+    among them runs (``""`` for the adapter's default), ``agent_launch`` the file of the launch its recipe's
+    adds to (``""`` for the session's frozen base), ``agent_port`` the first port of their port blocks,
     ``agent_dossier`` the dossier the run gives every agent branch with its reviewed map (``""`` for none), and
-    ``agent_review`` how an Arbor's own review gate is handed over (``AgentSpec.review``: the host reviews, nobody
+    ``agent_review`` how a component agent's review gate is handed over (``AgentSpec.review``: the host reviews, nobody
     does, or ``""`` for neither), ``agent_maps`` the scheduler's side of a mapping branch, ``None`` without agents, and
     ``agent_share_minutes`` the least an agent must have left to run for its branch to wait for cards its lease was
-    refused. ``make_before_break`` is the session's ``RunSettings.make_before_break``: whether a hosted toolbox keeps a
+    refused. ``inferencex_commit`` is the commit a fresh session's base launch reads InferenceX at (``""`` for the
+    head of its ``main``). ``agentx_early_stop`` is the session's AgentX checkpoint mode (``RunSettings``).
+    ``make_before_break`` is the session's ``RunSettings.make_before_break``: whether a hosted toolbox keeps a
     finished test's sandbox until the next test's runs (``HostedOptions.make_before_break``).
     """
 
@@ -94,6 +104,7 @@ class PeerSetup:
     references: Mapping[str, Path]
     dev_leases: int
     agents: tuple[str, ...]
+    reference_script: str = ""
     agent_pack: str = ""
     agent_launch: str = ""
     agent_port: int = AGENT_PORT
@@ -101,6 +112,8 @@ class PeerSetup:
     agent_review: str = ""
     agent_maps: MapCalls | None = None
     agent_share_minutes: float = SHARE_MINUTES
+    inferencex_commit: str = ""
+    agentx_early_stop: EarlyStopMode = EarlyStopMode.SHADOW
     make_before_break: bool = True
 
 

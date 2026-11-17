@@ -22,6 +22,8 @@ from contextlib import contextmanager
 from types import FrameType
 from typing import Any, Callable, Iterator, Mapping
 
+from hyperloom_common.amd_smi import AmdSmiError
+
 from hyperloom.common.gpu_power_control import (
     GPU_POWER_LEDGER_DIR,
     PowerSettingsLease,
@@ -185,7 +187,7 @@ def _restore_and_verify(originals: Mapping[int, Mapping[str, Any]]) -> dict[int,
     failed_sets = restore_gpu_power_settings(originals)
     try:
         mismatches = _restore_mismatches(read_gpu_power_settings(), originals)
-    except GpuPowerSettingsError as exc:
+    except AmdSmiError as exc:
         unread = f"the restored settings could not be read back: {exc}"
         return {gpu: [*failed_sets, unread] for gpu in originals}
     return {gpu: [*failed_sets, *problems] for gpu, problems in mismatches.items()}
@@ -267,8 +269,9 @@ def apply_declared_gpu_power_settings(declared: DeclaredPowerSettings, *, nodes:
     same way an operator-set one is.
 
     Raises:
-        GpuPowerSettingsError: the launch must stop. Nothing was left changed, unless the message says that putting
-            the originals back failed too; the record is then kept for the next launch.
+        AmdSmiError: the launch must stop (a refusal is its subclass :class:`GpuPowerSettingsError`). Nothing was left
+            changed, unless the message says that putting the originals back failed too; the record is then kept for
+            the next launch.
     """
     if not any(value for value in declared.as_row().values()):
         raise GpuPowerSettingsError("--apply-gpu-power-settings needs --gpu-power-cap-w and/or --gpu-perf-level")
@@ -297,7 +300,7 @@ def apply_declared_gpu_power_settings(declared: DeclaredPowerSettings, *, nodes:
         originals = _originals(observed, touched)
         _refuse_unrestorable_levels(originals)
         lease.record(originals, applied={key: wanted[key] for key in applied_keys}, owner=owner)
-    except GpuPowerSettingsError:
+    except AmdSmiError:
         lease.release()
         raise
 
@@ -322,7 +325,7 @@ def apply_declared_gpu_power_settings(declared: DeclaredPowerSettings, *, nodes:
     _GUARD.arm(_restore)
     try:
         apply_gpu_power_settings({gpu: {key: wanted[key] for key in keys} for gpu, keys in touched.items()})
-    except GpuPowerSettingsError as exc:
+    except AmdSmiError as exc:
         leftover = _restore()
         _GUARD.disarm()
         suffix = f" (restoring the originals also failed: {'; '.join(leftover)})" if leftover else ""
@@ -351,14 +354,14 @@ def orphaned_power_settings_warning() -> str:
     """
     try:
         gpus = visible_gpu_indices()
-    except GpuPowerSettingsError:
+    except AmdSmiError:
         gpus = None
     orphans = orphaned_power_records(GPU_POWER_LEDGER_DIR, gpus)
     if not orphans:
         return ""
     try:
         observed = read_gpu_power_settings()
-    except GpuPowerSettingsError:
+    except AmdSmiError:
         observed = None
     if observed is not None:
         orphans = {
@@ -474,8 +477,8 @@ def apply_for_session(declared: DeclaredPowerSettings, *, nodes: int, owner: str
     """Apply the declared settings, their restore held by the session's guard; the ``applied`` record to archive.
 
     Raises:
-        GpuPowerSettingsError: the settings could not be applied. Nothing was left changed, unless the message says
-            that putting the originals back failed too; the record is then kept for the next launch.
+        AmdSmiError: the settings could not be applied. Nothing was left changed, unless the message says that
+            putting the originals back failed too; the record is then kept for the next launch.
     """
     if os.geteuid() != 0:
         # amd-smi set needs root; refused before the records exist, so an unprivileged attempt leaves no file behind

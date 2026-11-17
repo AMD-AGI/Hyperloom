@@ -8,6 +8,8 @@ from dataclasses import replace
 
 import pytest
 
+from inference_suite.contracts import SourceKind
+
 from hyperloom.contracts.recipe import (
     RECIPE_SCHEMA_VERSION,
     REMOVED,
@@ -20,6 +22,7 @@ from hyperloom.contracts.recipe import (
     LaunchConfig,
     PatchRef,
     Recipe,
+    RecipeBase,
     RecipeDelta,
     RecipeError,
     apply,
@@ -343,7 +346,7 @@ def test_every_part_of_a_delta_document_round_trips() -> None:
     assert RecipeDelta.from_document(delta.to_document()) == delta
 
 
-def test_diff_names_config_conflicts_moved_refs_and_patch_overlap() -> None:
+def test_diff_names_config_conflicts_moved_refs_and_patch_sets() -> None:
     first = _recipe()
     second = apply(
         first,
@@ -366,7 +369,6 @@ def test_diff_names_config_conflicts_moved_refs_and_patch_overlap() -> None:
     ]
     assert changes.shared_patches == {MOE_PATCH.sha256}
     assert changes.patches_only_in_second == {ATTN_PATCH.sha256}
-    assert changes.patch_overlap == pytest.approx(0.5)
     assert not changes.base_image_changed
 
 
@@ -374,9 +376,7 @@ def test_identical_recipes_differ_in_nothing_and_a_new_base_image_is_a_differenc
     recipe = _recipe()
 
     assert diff(recipe, recipe).is_empty
-    assert diff(recipe, recipe).patch_overlap == 1.0
     assert diff(recipe, _recipe(runtime_snapshot=None)).base_image_changed
-    assert diff(_recipe(components=()), _recipe(components=())).patch_overlap == 1.0
 
 
 def test_a_recipe_that_names_nothing_unexpressed_keeps_its_document_and_digest() -> None:
@@ -426,7 +426,7 @@ def test_an_unexpressed_entry_of_no_known_kind_or_out_of_order_is_refused(
         _recipe(unexpressed=entries)
 
 
-#: An option of the launch the framework resolves (a Magpie AgentX recipe's), which a recipe's own arguments lack.
+#: An option of the launch the framework resolves (an AgentX recipe's), which a recipe's own arguments lack.
 RESOLVED_OPTION = "--enable-linear-replayssm-spec"
 
 
@@ -523,3 +523,43 @@ def test_a_delta_that_stops_removing_an_option_gives_the_launch_s_removals_whole
     assert [(change.name, change.before, change.after) for change in diff(first, second).args] == [
         (RESOLVED_OPTION, REMOVED, None)
     ]
+
+
+INFERENCEX_BASE = RecipeBase("sha256:" + "1" * 64, SourceKind.INFERENCEX)
+USER_BASE = RecipeBase("sha256:" + "2" * 64, SourceKind.USER_FILE)
+
+
+def test_the_same_change_over_two_base_launches_makes_two_recipes() -> None:
+    delta = RecipeDelta(config=ConfigDelta(server_args="--max-num-seqs 256"))
+    over_inferencex = apply(_recipe(base=INFERENCEX_BASE), delta)
+    over_user_file = apply(_recipe(base=USER_BASE), delta)
+
+    assert over_inferencex.launch == over_user_file.launch
+    assert over_inferencex.digest() != over_user_file.digest()
+    assert over_inferencex.digest() != apply(_recipe(), delta).digest()
+    assert diff(over_inferencex, over_user_file).base_launch_changed
+    assert not diff(over_inferencex, over_user_file).is_empty
+
+
+def test_a_recipe_base_round_trips_and_a_document_without_one_keeps_its_digest() -> None:
+    recipe = _recipe(base=INFERENCEX_BASE)
+    document = recipe.to_document()
+
+    assert document["base"] == {"digest": INFERENCEX_BASE.digest, "source": "inferencex"}
+    assert Recipe.from_document(document) == recipe
+    assert "base" not in _recipe().to_document()
+    assert Recipe.from_document({**_recipe().to_document(), "base": None}).digest() == _recipe().digest()
+
+
+@pytest.mark.parametrize(
+    ("document", "message"),
+    [
+        ({"digest": "1" * 64, "source": "inferencex"}, "the base launch digest"),
+        ({"digest": "sha256:" + "1" * 64, "source": "elsewhere"}, "the base launch source"),
+        ({"digest": "sha256:" + "1" * 64, "source": "inferencex", "path": "base_launch.json"}, "path"),
+    ],
+    ids=["unprefixed_digest", "unknown_source", "unknown_key"],
+)
+def test_a_recipe_base_refuses_a_document_outside_its_contract(document: dict[str, object], message: str) -> None:
+    with pytest.raises(RecipeError, match=message):
+        Recipe.from_document({**_recipe().to_document(), "base": document})

@@ -1,232 +1,62 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""A refused argv costs a probe, not a round, and it terminates by name."""
+"""A server argv the installed parser refuses costs a probe, not a launch, and it terminates by name."""
 
 from __future__ import annotations
 
-import subprocess
+import asyncio
 from pathlib import Path
 
-import pytest
-import yaml
-
 from hyperloom.common.bringup import LadderStage
-from hyperloom.orchestrator.actions.executors import _benchmark_interpreter
-from hyperloom.orchestrator.actions.executors import baseline as bl
-from hyperloom.orchestrator.actions.executors.benchmark_run.records import BenchmarkAttempt
-from hyperloom.orchestrator.bringup import argv_preflight as pf
-from hyperloom.orchestrator.bringup import load_boot_observation
-from hyperloom.orchestrator.rehearsal import LaunchScenario, ScriptedLaunchBackend
+from hyperloom.orchestrator.actions.executors.tests.test_baseline_suite_round import _play, suite  # noqa: F401
+from hyperloom.orchestrator.bringup import ARGV_INVALID, is_argv_invalid, load_boot_observation
+from hyperloom.orchestrator.rehearsal import STAGE_FAILED, LaunchAttempt
 
-from .test_bringup_round_scenario import _ctx, _lane, registry, round_slot  # noqa: F401
+from .test_bringup_round_scenario import _lane, registry  # noqa: F401
 
-#: One clean boot, offered and never taken: the assertion is that the preflight
-#: refuses before anything reaches it.
-_SCENARIO = {"name": "never-launched", "attempts": [{"name": "would-boot", "outcome": "ready"}]}
-
-#: A value the installed parser rejects. Nothing here may be rewritten: the
-#: harness does not know what the framework meant by it.
-_BAD_ARGS = "--tp 8 --attention-backend fa4"
-
-#: A flag the installed parser does not have, in the spelling an older version
-#: accepted. This one is droppable, exactly once.
-_STALE_FLAG_ARGS = "--tp 8 --moe-backend triton"
-
-_PROBE_PYTHON = "/opt/probe/bin/python"
+_REFUSAL = "argument --attention-backend: invalid choice: 'fa4'"
 
 
-@pytest.fixture
-def refusing_probe(monkeypatch):
-    """Answer the identity probes as one install, and the parser probe as a refusal."""
-    identity = '{"executable": "/opt/probe/bin/python", "python": "3.12.1", "origin": "/site/sglang/__init__.py", "dist": "0.5.1"}'
-    refusal = '{"status": "invalid", "message": "argument --attention-backend: invalid choice: \'fa4\'", "unknown": []}'
-    calls: list[list[str]] = []
-
-    def _probe(argv, env, timeout_sec):
-        calls.append(list(argv))
-        program = argv[2] if len(argv) > 2 else ""
-        return subprocess.CompletedProcess(
-            argv,
-            0,
-            stdout=(refusal if "_build_parser" in program else identity) + "\n",
-            stderr="",
-        )
-
-    monkeypatch.setattr(pf, "_default_probe", _probe)
-    monkeypatch.setattr(
-        _benchmark_interpreter, "_resolve_probe_python", lambda _framework="vllm", *, env=None: _PROBE_PYTHON
-    )
-    return calls
-
-
-async def _attempt(session: Path, slot: Path, *, task_id: str, server_args: str) -> dict:
-    """Run one baseline round whose config carries ``server_args``."""
-    executor = bl.BaselineExecutor(session_dir=session, magpie_python="/usr/bin/python3")
-    config = slot / f"{task_id}.yaml"
-    config.write_text(
-        yaml.safe_dump(
-            {
-                "benchmark": {
-                    "framework": "sglang",
-                    "model": "scripted/Model",
-                    "envs": {
-                        "EXTRA_SGLANG_ARGS": server_args,
-                        pf.SERVING_PYTHON_ENV: _PROBE_PYTHON,
-                    },
-                }
-            }
-        ),
-        encoding="utf-8",
-    )
-    return await executor._run_single_benchmark(
-        BenchmarkAttempt(
-            timeout_sec=1800,
-            override_result_dir=None,
-            resolved_model="scripted/Model",
-            materialized_config_path=config,
-            inferencex_path="",
-            effective_extra_server_args="",
-            params={"framework": "sglang"},
-            ctx=_ctx(task_id),
-        ),
-        config_path=config,
-        output_dir=slot,
-    )
-
-
-@pytest.mark.asyncio
-async def test_a_refused_argv_never_launches_and_never_opens_a_repair_round(
-    round_slot,
-    registry,
-    launch_backend,
-    refusing_probe,
-    monkeypatch,
+def test_a_refused_argv_is_recorded_at_the_parse_rung_and_ends_the_run_without_a_repair_round(
+    monkeypatch, suite, registry
 ):
-    """No launch, one named terminal, and nothing for the backstop to author against."""
-    from hyperloom.orchestrator.actions.executors import _multi_node_env as multi_node
+    result, rounds = _play(
+        monkeypatch,
+        suite,
+        LaunchAttempt(outcome=STAGE_FAILED, stage="argv_parse", message=_REFUSAL),
+        baseline_double_run=False,
+    )
 
-    monkeypatch.setattr(multi_node, "is_multi_node", lambda: False)
-
-    session, slot = round_slot
-    tasks, rounds, _locks = registry
-    launches = ScriptedLaunchBackend(scenario=LaunchScenario.from_dict(_SCENARIO))
-    launch_backend(launches)
-
-    result = await _attempt(session, slot, task_id="baseline-0", server_args=_BAD_ARGS)
-
-    # Nothing was launched: the round was refused for the cost of a probe.
-    assert launches.served == 0
     assert result["status"] == "failed"
-    assert result["error_class"] == pf.ARGV_INVALID
+    assert result["error_class"] == ARGV_INVALID
+    assert _REFUSAL in result["error"]
+    assert len(rounds.calls) == 1
+    assert not Path(result["workspace"], "server.log").exists()
 
-    # And the refusal was recorded where every other bring-up observation goes,
-    # at the rung the argv is parsed on.
-    loaded = load_boot_observation(result.get("boot_observation_path"))
+    loaded = load_boot_observation(result["boot_observation_path"])
     assert loaded.observation is not None, loaded.degraded
     assert loaded.observation.stage_failed == LadderStage.ARGV_PARSE
-    assert pf.is_argv_invalid(loaded.observation)
+    assert is_argv_invalid(loaded.observation)
+    assert _REFUSAL in loaded.observation.failure_text
 
-    lane = _lane(session, tasks, rounds, result["enablement_launch_log"])
+    tasks, round_store, _locks = registry
+    lane = _lane(suite.session, tasks, round_store, result["error"])
     lane.shared_state.enablement.launch_observation_path = result["boot_observation_path"]
 
-    # Tick after tick, the backstop declines to author against it and the run
-    # carries the terminal that names what actually happened.
-    for _tick in range(3):
-        assert await lane._maybe_enqueue_enablement_specialist() == ""
-        assert lane.shared_state.stop_reason == pf.ARGV_INVALID
-    assert await rounds.held() is None
-    assert launches.served == 0
+    async def _ticks() -> None:
+        for _tick in range(3):
+            assert await lane._maybe_enqueue_enablement_specialist() == ""
+            assert lane.shared_state.stop_reason == ARGV_INVALID
+        assert await round_store.held() is None
+
+    asyncio.run(_ticks())
 
 
-@pytest.mark.asyncio
-async def test_an_argv_the_parser_accepts_still_reaches_the_launch(
-    round_slot,
-    launch_backend,
-    monkeypatch,
-):
-    """The check must be invisible on the path it does not stop."""
-    from hyperloom.orchestrator.actions.executors import _multi_node_env as multi_node
+def test_a_state_recorded_with_argv_repairs_still_loads():
+    """Sessions written before the drop repair was removed carry its ledger; it is ignored."""
+    from hyperloom.orchestrator.state._shared_state.enablement_round import EnablementRound
 
-    monkeypatch.setattr(multi_node, "is_multi_node", lambda: False)
-    accepted = '{"status": "ok", "message": "", "unknown": []}'
-    identity = '{"executable": "/opt/probe/bin/python", "python": "3.12.1", "origin": "/site/sglang/__init__.py", "dist": "0.5.1"}'
-
-    def _probe(argv, env, timeout_sec):
-        program = argv[2] if len(argv) > 2 else ""
-        return subprocess.CompletedProcess(
-            argv, 0, stdout=(accepted if "_build_parser" in program else identity) + "\n", stderr=""
-        )
-
-    monkeypatch.setattr(pf, "_default_probe", _probe)
-    monkeypatch.setattr(
-        _benchmark_interpreter, "_resolve_probe_python", lambda _framework="vllm", *, env=None: _PROBE_PYTHON
-    )
-
-    session, slot = round_slot
-    launches = ScriptedLaunchBackend(scenario=LaunchScenario.from_dict(_SCENARIO))
-    launch_backend(launches)
-
-    await _attempt(session, slot, task_id="baseline-0", server_args="--tp 8")
-    assert launches.served == 1
-
-
-@pytest.mark.asyncio
-async def test_the_one_allowed_drop_is_written_back_before_the_launch(
-    round_slot,
-    launch_backend,
-    monkeypatch,
-):
-    """A repair the config does not carry is a repair the server never receives."""
-    from hyperloom.orchestrator.actions.executors import _multi_node_env as multi_node
-    from hyperloom.orchestrator.actions.executors._server_argv import config_server_argv
-
-    monkeypatch.setattr(multi_node, "is_multi_node", lambda: False)
-    identity = '{"executable": "/opt/probe/bin/python", "python": "3.12.1", "origin": "/site/sglang/__init__.py", "dist": "0.5.1"}'
-
-    def _probe(argv, env, timeout_sec):
-        program = argv[2] if len(argv) > 2 else ""
-        if "_build_parser" not in program:
-            return subprocess.CompletedProcess(argv, 0, stdout=identity + "\n", stderr="")
-        refused = "--moe-backend" in argv[3]
-        body = (
-            '{"status": "invalid", "message": "unrecognized arguments: --moe-backend triton",'
-            ' "unknown": ["--moe-backend", "triton"]}'
-            if refused
-            else '{"status": "ok", "message": "", "unknown": []}'
-        )
-        return subprocess.CompletedProcess(argv, 0, stdout=body + "\n", stderr="")
-
-    monkeypatch.setattr(pf, "_default_probe", _probe)
-    monkeypatch.setattr(
-        _benchmark_interpreter, "_resolve_probe_python", lambda _framework="vllm", *, env=None: _PROBE_PYTHON
-    )
-
-    session, slot = round_slot
-    launches = ScriptedLaunchBackend(scenario=LaunchScenario.from_dict(_SCENARIO))
-    launch_backend(launches)
-
-    await _attempt(session, slot, task_id="baseline-0", server_args=_STALE_FLAG_ARGS)
-
-    assert launches.served == 1
-    assert config_server_argv(slot / "baseline-0.yaml").argv == ("--tp", "8")
-
-
-@pytest.mark.asyncio
-async def test_an_unavailable_probe_does_not_stop_the_round(
-    round_slot,
-    launch_backend,
-    monkeypatch,
-):
-    """An unprovable interpreter leaves the launch as the only verdict, as before."""
-    from hyperloom.orchestrator.actions.executors import _multi_node_env as multi_node
-
-    monkeypatch.setattr(multi_node, "is_multi_node", lambda: False)
-    monkeypatch.setattr(pf, "resolve_serving_interpreter", lambda _framework, _env: "")
-
-    session, slot = round_slot
-    launches = ScriptedLaunchBackend(scenario=LaunchScenario.from_dict(_SCENARIO))
-    launch_backend(launches)
-
-    await _attempt(session, slot, task_id="baseline-0", server_args=_BAD_ARGS)
-    assert launches.served == 1
+    loaded = EnablementRound.from_dict({"argv_repairs": ["0" * 64], "launch_log": "boot failed"})
+    assert loaded.launch_log == "boot failed"
+    assert not hasattr(loaded, "argv_repairs")

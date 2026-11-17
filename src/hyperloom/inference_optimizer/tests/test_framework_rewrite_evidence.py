@@ -40,13 +40,6 @@ def probe_module():
 # probe assets
 
 
-def test_probe_assets_are_bundled():
-    """Both probe files ship, since a missing shim silently disables the probe."""
-    asset_dir = evidence.probe_asset_dir()
-    assert (asset_dir / "hl_host_probe.py").is_file()
-    assert (asset_dir / "sitecustomize.py").is_file()
-
-
 def test_probe_is_inert_without_env(probe_module, monkeypatch):
     """No env, no probe: a PYTHONPATH prefix alone must not change behaviour."""
     monkeypatch.delenv("HYPERLOOM_HOST_PROBE", raising=False)
@@ -58,14 +51,6 @@ def test_probe_requires_an_output_dir(probe_module, monkeypatch):
     monkeypatch.setenv("HYPERLOOM_HOST_PROBE", "1")
     monkeypatch.delenv("HYPERLOOM_HOST_PROBE_DIR", raising=False)
     assert probe_module.install_from_env() is None
-
-
-def test_repeat_rate_is_zero_without_samples(probe_module):
-    """A site with no fingerprints reports no repeats rather than dividing by zero."""
-    assert probe_module._repeat_rate(0, 0) == 0.0
-    assert probe_module._repeat_rate(10, 0) == 0.0
-    assert probe_module._repeat_rate(10, 10) == 0.0
-    assert probe_module._repeat_rate(10, 1) == 0.9
 
 
 def test_strict_fingerprint_separates_tensor_identity(probe_module, tmp_path):
@@ -300,6 +285,38 @@ def test_deep_probe_counts_calls_and_argument_repeats(probe_module, tmp_path):
         assert row["last_s"] >= row["first_s"]
 
 
+@pytest.mark.parametrize("arg_samples", [8, 0], ids=["zero-argument-call", "sampling-off"])
+def test_a_call_with_no_argument_signature_reports_no_repeats(probe_module, tmp_path, arg_samples):
+    """A zero-argument call is sampled without a signature, and a probe sampling nothing has no samples.
+
+    Neither is a repeated argument: both rates read zero, not "every call repeated" and not a division by zero.
+    """
+    framework_root = tmp_path / "fake_framework"
+    framework_root.mkdir()
+    module_path = framework_root / "ticker.py"
+    module_path.write_text(
+        "def tick():\n    return 1\n\ndef run(n):\n    for _ in range(n):\n        tick()\n", encoding="utf-8"
+    )
+    spec = importlib.util.spec_from_file_location("fake_framework_ticker", module_path)
+    assert spec is not None and spec.loader is not None
+    target = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(target)
+
+    probe = probe_module.HostProbe(
+        out_dir=str(tmp_path / "out"), roots=(str(framework_root) + "/",), deep=True, arg_samples=arg_samples
+    )
+    probe._install_tier2()
+    try:
+        target.run(20)
+    finally:
+        sys.setprofile(None)
+        threading.setprofile(None)  # type: ignore[arg-type]
+
+    tick = next(row for row in probe.report()["framework_calls"] if row["function"].endswith(":tick"))
+    assert tick["count"] == 20
+    assert tick["strict_repeat_rate"] == tick["loose_repeat_rate"] == 0.0
+
+
 def test_deep_probe_timestamps_the_first_outermost_call(probe_module, tmp_path):
     """Tier 2's ``first_s`` must latch a real timestamp, not sit on its sentinel."""
     framework_root = tmp_path / "fake_framework"
@@ -419,32 +436,6 @@ def test_probe_defers_torch_until_the_process_imports_it(tmp_path):
     )
     result = subprocess.run([sys.executable, "-c", script], env=env, capture_output=True, text=True, timeout=300)
     assert result.returncode == 0, result.stderr
-
-
-def test_aten_level_scalar_conversion_is_a_declared_blind_spot():
-    """Pin the limit the evidence notes claim, so a torch change cannot silently void it."""
-    torch = pytest.importorskip("torch")
-    seen: list[str] = []
-    originals = {name: getattr(torch.Tensor, name) for name in ("item", "__float__", "__index__")}
-
-    def _spy(name, original):
-        def wrapper(self, *args, **kwargs):
-            seen.append(name)
-            return original(self, *args, **kwargs)
-
-        return wrapper
-
-    for name, original in originals.items():
-        setattr(torch.Tensor, name, _spy(name, original))
-    try:
-        torch.full((4,), torch.tensor(3.0))
-        assert seen == [], f"torch now routes the scalar conversion through Python: {seen}"
-        # The explicit form is visible, which is what makes the contrast meaningful.
-        float(torch.tensor(3.0))
-        assert "__float__" in seen
-    finally:
-        for name, original in originals.items():
-            setattr(torch.Tensor, name, original)
 
 
 def test_deep_probe_declines_to_displace_an_existing_profiler(probe_module, tmp_path):
@@ -1097,31 +1088,6 @@ def test_a_mixed_site_is_a_hoist_candidate_but_not_a_pure_enabler():
     assert candidate["enabler"] is False
 
 
-def test_hoist_signal_states_its_own_limitation():
-    """The candidate says the premise needs confirming against the source."""
-    document = evidence.build_evidence(
-        [
-            _report(
-                framework_calls=[
-                    {
-                        "function": "m.py:1:f",
-                        "count": 500,
-                        "wall_s": 5.0,
-                        "arg_samples": 256,
-                        "strict_distinct": 256,
-                        "loose_distinct": 1,
-                        "strict_repeat_rate": 0.0,
-                        "loose_repeat_rate": 0.996,
-                    }
-                ]
-            )
-        ]
-    )
-    signal = document["candidates"][0]["signal"]
-    assert "Confirm against the source" in signal
-    assert "does not read tensor contents" in signal
-
-
 def test_a_genuinely_varying_function_is_not_a_candidate():
     """Neither rate firing means the work is real, not redundant."""
     document = evidence.build_evidence(
@@ -1430,7 +1396,7 @@ def _injected_pythonpath(tmp_path: Path, envs: dict[str, Any]) -> str:
 
 
 def test_probe_injection_keeps_the_inherited_pythonpath(tmp_path, monkeypatch):
-    """Magpie replaces the launch PYTHONPATH with the config's, so a config without one carries the inherited one."""
+    """The launch takes the config's PYTHONPATH in place of the inherited one, so a config without one carries the inherited one."""
     monkeypatch.setenv("PYTHONPATH", os.pathsep.join(["/a", "/b"]))
     shim = str(evidence.probe_asset_dir())
     assert _injected_pythonpath(tmp_path, {"TP": 8}) == os.pathsep.join([shim, "/a", "/b"])

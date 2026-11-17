@@ -41,6 +41,7 @@ from ._integrate_vocabulary import PATCH_SOURCE_UPSTREAM_PR, resolve_patch_sourc
 from ._patch_sources import _declared_stack_ops, _patch_stack_by_root, _read_patch_texts
 from ._server_argv import ConfigUnreadable
 from ._workload_envs import FrameworkScriptMismatchError
+from .benchmark_run.accuracy import accuracy_round_due
 
 log = logging.getLogger(__name__)
 
@@ -276,6 +277,10 @@ class EnablementGateMixin:
           boot-origin stays ``None`` (KEEP but provisional) — it only ever
           claimed to make the model boot, and eval-less runs must not be blocked.
 
+        A served round of an AgentX session runs its accuracy round into its slot
+        and is graded again after it, unless the session opted out;
+        ``bench_result`` records the round.
+
         On KEEP the benched env/arg layers are reported as
         ``enablement_effective_config``, captured from the variant that ran: the
         materialized YAML holds only the base layer, so the revalidation baseline
@@ -296,6 +301,11 @@ class EnablementGateMixin:
 
         from .benchmark_result import is_valid_measurement
 
+        # A measurement exists only where the client completed requests, so it
+        # witnesses the serving instead of inferring it from a log marker.
+        served = is_valid_measurement(bench_result)
+        if served and accuracy_round_due(attempt.shared_state):
+            await self._run_patch_accuracy_round(attempt, params, bench_result, gate_evidence)
         correctness_ok, eval_provenance = enablement_correctness(params, gate_evidence)
 
         after_loaded = load_boot_observation(bench_result.get("boot_observation_path"))
@@ -305,10 +315,6 @@ class EnablementGateMixin:
             **_observation_evidence("after", after_loaded),
             **eval_provenance,
         }
-
-        # A measurement exists only where the client completed requests, so it
-        # witnesses the serving instead of inferring it from a log marker.
-        served = is_valid_measurement(bench_result)
 
         runs, run_reason = runnable_decision(served=served, correctness_ok=correctness_ok)
         advanced = not runs and not served and round_advanced(before_loaded.observation, after_loaded.observation)

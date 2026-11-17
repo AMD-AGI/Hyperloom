@@ -28,7 +28,7 @@ from typing import Protocol
 from hyperloom.contracts.measurement import TestKind, TestRequest, TestResult, Validity
 from hyperloom.contracts.recipe import Recipe
 from hyperloom.measure.compile import LocalBlobStore
-from hyperloom.measure.tests.gpu_free_host import scratch_root
+from hyperloom.measure.tests.gpu_free_host import required_scratch_root
 from hyperloom_multibranch.contracts.blackboard.interfaces import ClaimService, RecordSearch
 from hyperloom_multibranch.contracts.blackboard.records import BuildNotice, QuarantineEvent, Withdrawal
 from hyperloom_multibranch.contracts.repo import ExperimentRepo
@@ -273,8 +273,10 @@ class FakeToolbox(RealToolbox):
 
     ``autorun=False`` holds every attempt until :meth:`drain`; tests that want queued tests use it with a small
     ``max_parallel_tests``. Without a ``blackboard`` the writes go to a :class:`MemoryBlackboard`; without
-    ``wiring.log_path`` the submit log lives in a temporary directory that goes with the toolbox. The toolbox starts
-    on first use.
+    ``wiring.log_path`` the submit log lives in a temporary directory that goes with the toolbox. That directory and
+    the blob store's lie in the test's own scratch below pytest's base temporary directory, so a killed run leaves
+    nothing on the host: a toolbox built where no conftest names that scratch is refused
+    (:func:`~hyperloom.measure.tests.gpu_free_host.required_scratch_root`). The toolbox starts on first use.
     """
 
     def __init__(
@@ -289,7 +291,7 @@ class FakeToolbox(RealToolbox):
         self.config = config or FakeToolboxConfig()
         self.executor = FakeExecutor(self.config, autorun=autorun, workload=wiring.workload_kind)
         self.blackboard = blackboard if blackboard is not None else MemoryBlackboard()
-        scratch = scratch_root()
+        scratch = required_scratch_root(type(self).__name__)
         self._scratch = None if log_path else tempfile.TemporaryDirectory(prefix="fake-toolbox-", dir=scratch)
         path = log_path or Path(self._scratch.name) / "submissions.jsonl"  # type: ignore[union-attr]
         self._rejections: list[Callable[[TestRequest], RequestRejected | None]] = []

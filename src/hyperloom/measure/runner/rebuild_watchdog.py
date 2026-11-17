@@ -28,7 +28,7 @@ from typing import Any
 
 import yaml
 
-from hyperloom.common.benchmark_config import is_magpie_agentx
+from hyperloom.common.benchmark_config import BenchmarkPoint
 from hyperloom.inference_optimizer.framework_registry import FRAMEWORKS
 from hyperloom.measure.farm import Farm, FarmError, locate_package, server_python
 from hyperloom.measure.framework.table_modules import stale_table_modules
@@ -121,26 +121,22 @@ def _stale_modules(
 def _with_watchdog(config: dict[str, Any], seconds: int) -> bool:
     """Make the watchdog of an sglang ``config`` at least ``seconds``: add the flag to server arguments that set none, or
     raise the value they set when it is lower; whether it changed them. A value that is not a number is kept."""
-    bench = config.get("benchmark") or {}
-    if str(bench.get("framework") or "").lower() != _SGLANG:
+    point = BenchmarkPoint.from_document(config)
+    if point.framework.lower() != _SGLANG:
         return False
-    if is_magpie_agentx(bench):
-        if not isinstance(bench["agentx"], dict):
-            return False
-        launch = bench["agentx"].setdefault("launch_overrides", {})
-        args = [str(token) for token in launch.get("append_args") or []]
-        raised = _raised_argv(args, seconds)
+    bench = config["benchmark"]
+    if point.agentx:
+        agentx = bench["agentx"]
+        raised = _raised_argv(list(point.agentx_launch.append_args), seconds) if isinstance(agentx, dict) else None
         if raised is None:
             return False
-        launch["append_args"] = raised
+        agentx["launch_overrides"] = {**(agentx.get("launch_overrides") or {}), "append_args": raised}
         return True
-    envs = bench.setdefault("envs", {})
     name = FRAMEWORKS[_SGLANG].extra_args_env
-    current = str(envs.get(name) or "")
-    raised_line = _raised_line(current, seconds)
+    raised_line = _raised_line(str(point.envs.get(name) or ""), seconds)
     if raised_line is None:
         return False
-    envs[name] = raised_line
+    bench["envs"] = {**point.envs, name: raised_line}
     return True
 
 

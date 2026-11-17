@@ -3,11 +3,10 @@
 
 """A limit on how long a test's inference server may take to report ready.
 
-The silence watchdog of the benchmark launcher starts only when the server's ready banner appears. A server that never
-gets ready (a boot that tunes kernels for an hour) is therefore ended by the round's hard cap alone, and the same
-candidate repeats it on the rerun. The guard here ends such a round at a share of that cap: it watches for the stamp the
-launcher writes beside a round's server log the moment the banner appears and, when none has come within the limit,
-cancels the scope the launcher's watchdog listens to, which reaps the whole process tree.
+A server that never gets ready (a boot that tunes kernels for an hour) is ended by the round's hard cap alone, and the
+same candidate repeats it on the rerun. The guard here ends such a round at a share of that cap: it watches for the
+ready stamp the round writes beside its server log in its run_dir the moment the server reports ready and, when none has
+come within the limit, cancels the round's scope, which reaps the whole process tree.
 
 A server that builds an aiter JIT module is not tuning: aiter writes ``start build [<module>]`` and nothing more until
 the module is built, and a CK-tile GEMM builds slowest when several tests build at once, long enough that with a CK
@@ -46,8 +45,11 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
+from hyperloom.common.benchmark_config import BenchmarkPoint
 from hyperloom.measure.jit.modules import module_build_limit_sec
 from hyperloom.orchestrator.actions.cancel_channel import CancelScope
+from inference_suite.contracts import DEFAULT_PRE_READY_SILENCE_SEC
+from inference_suite.contracts.layout import READY_STAMP, SERVER_LOG
 
 __all__ = [
     "BOOT_CANCEL_REASON",
@@ -70,30 +72,24 @@ BOOT_CANCEL_REASON = "server_boot_timeout"
 #: The share of a round's time a boot may take. Boot, the warmup, the measured round and the accuracy evaluation all
 #: run inside one cap, so a boot that has used half of it leaves the rest less than the boot took.
 BOOT_SHARE = 0.5
-#: The frameworks whose server prints a ready banner the launcher detects; another framework has no stamp to wait for.
+#: The frameworks whose server prints a ready banner a round detects; another framework has no stamp to wait for.
 _SERVER_FRAMEWORKS = ("sglang", "vllm", "atom")
-#: Written by the launcher next to ``server.log`` (``_subprocess_kill``); its first field is the wall-clock second the
-#: server reported ready, its second the seconds the boot took from the spawn (0 for a server the round found ready).
-_READY_STAMP = "server_ready_at"
 _MAX_POLL_SEC = 2.0
-#: The launcher's log of a round's server, beside its ready stamp.
-_SERVER_LOG = "server.log"
 #: How much of the end of a server log is read for its last line.
 _TAIL_BYTES = 8192
 _UTF8 = "utf-8"
 
 
-def boot_limit_sec(benchmark: Mapping[str, Any], timeout_sec: float) -> float | None:
-    """How long the server of a round on ``benchmark`` may take to be ready; ``None`` when no stamp can say it is.
+def boot_limit_sec(point: BenchmarkPoint, timeout_sec: float) -> float | None:
+    """How long the server of a round on ``point`` may take to be ready; ``None`` when no stamp can say it is.
 
     The budget is the one the point carries (``server_lifecycle.server_ready_timeout_s``), never more than the round's
     ``timeout_sec``; a point that carries none gets the cap itself, which is what the launcher writes into that field.
     """
-    if str(benchmark.get("framework") or "").lower() not in _SERVER_FRAMEWORKS:
+    if point.framework.lower() not in _SERVER_FRAMEWORKS:
         return None
-    lifecycle = benchmark.get("server_lifecycle")
-    carried = lifecycle.get("server_ready_timeout_s") if isinstance(lifecycle, Mapping) else None
-    budget = float(carried) if isinstance(carried, (int, float)) and carried > 0 else timeout_sec
+    carried = point.server_ready_timeout_s
+    budget = carried if carried is not None and carried > 0 else timeout_sec
     return BOOT_SHARE * min(budget, timeout_sec)
 
 
@@ -151,7 +147,7 @@ class BootGuard:
 
     def _ready_since(self, started: float) -> bool:
         try:
-            stamps = list(self._output_dir.rglob(_READY_STAMP))
+            stamps = list(self._output_dir.rglob(READY_STAMP))
         except OSError:
             return False
         return any(_stamped_at(stamp) >= started for stamp in stamps)
@@ -160,7 +156,7 @@ class BootGuard:
         """The module aiter is building, as the last line of the newest server log written since ``started`` says (an
         earlier round's is not this boot's); ``None`` when it says no build started, or no such log can be read."""
         try:
-            logs = [(path.stat().st_mtime, str(path), path) for path in self._output_dir.rglob(_SERVER_LOG)]
+            logs = [(path.stat().st_mtime, str(path), path) for path in self._output_dir.rglob(SERVER_LOG)]
         except OSError:
             return None
         logs = [log for log in logs if log[0] >= started]
@@ -230,7 +226,7 @@ def boot_seconds(directory: Path) -> float | None:
     one is the boot of the test. A stamp that cannot be read is no boot.
     """
     try:
-        stamps = list(directory.rglob(_READY_STAMP))
+        stamps = list(directory.rglob(READY_STAMP))
     except OSError:
         return None
     booted = [seconds for seconds in map(_booted_in, stamps) if seconds > 0.0]
@@ -240,7 +236,7 @@ def boot_seconds(directory: Path) -> float | None:
 def server_ready(directory: Path) -> bool:
     """Whether a round below ``directory`` stamped its server ready; a stamp that cannot be read is not ready."""
     try:
-        stamps = list(directory.rglob(_READY_STAMP))
+        stamps = list(directory.rglob(READY_STAMP))
     except OSError:
         return False
     return any(_stamped_at(stamp) > 0.0 for stamp in stamps)
@@ -249,7 +245,7 @@ def server_ready(directory: Path) -> bool:
 def read_ready_stamp(directory: Path) -> tuple[float, float] | None:
     """The ``(ready_unix, boot_seconds)`` the stamp beside a round's server log records, or ``None`` when the round left
     none or it cannot be read; ``boot_seconds`` is 0 for a round that found its server ready."""
-    stamp = directory / _READY_STAMP
+    stamp = directory / READY_STAMP
     ready = _stamped_at(stamp)
     return (ready, _booted_in(stamp)) if ready > 0.0 else None
 
@@ -267,7 +263,8 @@ def _booted_in(stamp: Path) -> float:
 SERVER_READY_KEY = "server_ready"
 #: The ``error_class`` of a test that went silent before its server was ready.
 HUNG_BEFORE_READY = "hung_before_ready"
-PRE_READY_SILENCE_SEC = 900.0
+#: As long as the round's own bound, so the round reports its silence before the application calls the test hung.
+PRE_READY_SILENCE_SEC = float(DEFAULT_PRE_READY_SILENCE_SEC)
 #: The runner's phase once the measurement has ended; nothing after it is bounded here.
 _COLLECTING = "collecting"
 #: A log written within this many seconds of the last write seen is the same write, seen again through the clock jitter

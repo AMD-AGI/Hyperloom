@@ -15,7 +15,9 @@ time left until the branch's deadline. A run then
 watches the agent's keep signal and reads each keep whole (:mod:`agent_import`) the moment it shows, since the agent
 goes on to its next candidate in the same workspace. Keeps are submitted as claimless explore tests against the branch
 head, one at a time: a keep that lands while an import is measured or judged waits, and a later keep replaces it, since
-each is cumulative. An agent that signals no keep has its workspace taken as its keep once, early enough before EXPLORE
+each is cumulative. The import of the last keep that measured nothing for an infrastructure reason may go once more
+(:mod:`keep_requeue`), unless a later keep, which carries its change, went or waits. An agent that signals no keep has
+its workspace taken as its keep once, early enough before EXPLORE
 ends for the session's queued tests and then its own to be measured and judged in EXPLORE (:func:`collection_margin`),
 and again when it exits 0. What the run knows of the keeps is kept beside the manifest, so a keep waiting at a crash is
 submitted by the run after it. The agent's own LLM spend is read from its Claude CLI's transcripts (:mod:`agent_spend`)
@@ -25,7 +27,7 @@ what it said before, so other branches read them; what it wrote after its last k
 branch's judge judges the imports as it judges any branch's tests; nothing of its verdicts reaches the agent, but
 what the integration head holds does, through the notes (:mod:`agent_knowledge`) rewritten whenever the head moves,
 and the agent is given until its last import can still be judged in EXPLORE as its time budget. An agent that writes
-a snapshot of each keep (Arbor's component mode) runs to that time as its absolute deadline, against the commit its
+a snapshot of each keep (component mode) runs to that time as its absolute deadline, against the commit its
 workspace starts on, and has its newest snapshot read whole, chained back to that commit, its launch only as it
 differs from the one MB started it with (:func:`read_snapshot`); a variable the measurement sets itself is left out of
 every keep and noted once; why it ended, from its exit file, goes into the branch log; one that refuses its config
@@ -66,10 +68,12 @@ from hyperloom.contracts.recipe import (
 from hyperloom.measure.compile import COMPONENT_LAYOUTS, kernel_load_env, locate_installed_package
 from hyperloom.sandbox import SandboxGone
 from hyperloom.sandbox.socket import SandboxUnavailable
+from hyperloom_common.shared_storage import make_shared_dirs, write_shared_text
 from hyperloom_multibranch.contracts.branch_log import BranchLogEntry, BranchLogType
 from hyperloom_multibranch.contracts.blackboard.records import Learning
 from hyperloom_multibranch.contracts.blackboard.records import RetractionRef, TestRecord
-from hyperloom_multibranch.contracts.blackboard.vocab import Conclusion, LearningKind, LeaseKind
+from hyperloom_multibranch.contracts.blackboard.interfaces import UnknownRequest
+from hyperloom_multibranch.contracts.blackboard.vocab import Conclusion, LeaseKind
 from hyperloom_multibranch.contracts.repo import ExperimentRepo
 from hyperloom_multibranch.contracts.toolbox import Backpressure, BranchLease, LeaseCharge, RequestRejected
 from hyperloom_multibranch.specialist.agent_import import (
@@ -86,8 +90,9 @@ from hyperloom_multibranch.specialist.agent_import import (
     with_tables,
     read_kept_change,
 )
-from hyperloom_multibranch.blackboard.local.blackboard import LEARNING_MAX_CHARS
+from hyperloom_multibranch.blackboard.local.agent_manifest import sanitized_manifest
 from hyperloom_multibranch.specialist.agent_knowledge import NOTES_FILE, IntegrationNotes
+from hyperloom_multibranch.specialist.agent_ledger import read_findings
 from hyperloom_multibranch.specialist.agent_manifest import WORKSPACE, AgentManifest, LedgerSource, read_field
 from hyperloom_multibranch.specialist.agent_onboarding import (
     AgentProcess,
@@ -104,7 +109,7 @@ from hyperloom_multibranch.specialist.agent_onboarding import (
 )
 from hyperloom_multibranch.specialist.agent_session import BranchPlace
 from hyperloom_multibranch.specialist.agent_spend import AgentSpend, newest_write
-from hyperloom_multibranch.specialist.arbor_adapter import EXIT_REFUSED, exit_reason, refused_reasons
+from hyperloom_multibranch.specialist.component_agent import EXIT_REFUSED, exit_reason, refused_reasons, served_config
 from hyperloom_multibranch.specialist.dev_sandbox import MINUTE, TOO_MANY
 from hyperloom_multibranch.rulegate.rules import RETRACTION_ID
 from hyperloom_multibranch.specialist.judging import NOTICE
@@ -125,6 +130,8 @@ from hyperloom_multibranch.specialist.start_tables import (
 )
 from hyperloom_multibranch.specialist.tools import sync_to_head
 from hyperloom_multibranch.specialist.worktree import Upstream, WorktreeError, installed_upstream, source_unkept
+from hyperloom_multibranch.specialist import keep_requeue
+from hyperloom_multibranch.specialist.keep_requeue import Ruling
 from hyperloom.measure.framework.base import image_configs
 
 if TYPE_CHECKING:
@@ -216,7 +223,10 @@ class KeepWatch:
     without: ``refused_envs``, each variable with the value refused (``None``: the variable left unset), and
     ``refused_args``, server arguments refused as a whole; ``learnt``, for each finding of the agent's ledger the branch
     learnt, the learning it became and a digest of what it said; ``source_unkept``, why the preflight told the agent no
-    change to its component's source can land, ``""`` when it told it none."""
+    change to its component's source can land, ``""`` when it told it none; ``submitted``, the keep last submitted while
+    its import's outcome is not settled for a requeue (:meth:`AutonomousSession._requeue`), and ``requeue_at``, when
+    its import that measured nothing goes again (0: not decided yet); ``requeued``, the keeps whose import went once
+    more, and ``requeue_failures``, how many requeued imports in a row measured nothing again."""
 
     root: str
     seq: int = 0
@@ -230,13 +240,18 @@ class KeepWatch:
     refused_args: str | None = None
     learnt: dict[str, list[str]] = field(default_factory=dict)
     source_unkept: str = ""
+    submitted: KeptChange | None = None
+    requeue_at: float = 0.0
+    requeued: list[int] = field(default_factory=list)
+    requeue_failures: int = 0
 
     @classmethod
     def load(cls, path: Path) -> KeepWatch:
         document = json.loads(path.read_text(encoding=ENCODING))
         pending = _kept_from(document.pop("pending"))
         waiting = [_kept(kept) for kept in document.pop("waiting", [])]
-        return cls(**document, pending=pending, waiting=waiting)
+        submitted = _kept_from(document.pop("submitted", None))
+        return cls(**document, pending=pending, waiting=waiting, submitted=submitted)
 
     def save(self, path: Path) -> None:
         document = {
@@ -252,8 +267,12 @@ class KeepWatch:
             "refused_args": self.refused_args,
             "learnt": self.learnt,
             "source_unkept": self.source_unkept,
+            "submitted": None if self.submitted is None else asdict(self.submitted),
+            "requeue_at": self.requeue_at,
+            "requeued": self.requeued,
+            "requeue_failures": self.requeue_failures,
         }
-        path.write_text(json.dumps(document), encoding=ENCODING)
+        write_shared_text(path, json.dumps(document))
 
 
 def _kept_from(document: dict[str, object] | None) -> KeptChange | None:
@@ -317,8 +336,8 @@ class AutonomousSession:
         self._sandbox = self._setup.sandbox(lease)
         ready = await make_ready(self._start.task.agent, spec, self._agent_dir, self._setup.onboarding(self._sandbox))
         self._manifest, self._process = ready.manifest, ready.process
-        document = ready.manifest.to_document()
-        (self._place.workspace / MANIFEST_FILE).write_text(json.dumps(document), encoding=ENCODING)
+        document = sanitized_manifest(ready.manifest.to_document())
+        write_shared_text(self._place.workspace / MANIFEST_FILE, json.dumps(document))
         await self._place.blackboard.record_agent_manifest(self._start.branch, document)
         # Every snapshot of the agent's session is one of this branch's keeps, the first among them possibly written
         # while the preflight waited for the agent to start.
@@ -339,7 +358,7 @@ class AutonomousSession:
             tables = await lay_start_tables(self._setup.repo, self._start.start_commit, kernels, directory, configs)
         except StartTableError as error:
             raise PreflightFailed([str(error)]) from error
-        self._place.workspace.mkdir(parents=True, exist_ok=True)
+        make_shared_dirs(self._place.workspace)
         save_start_tables(tables, self._place.workspace / START_TABLES_FILE)
         return tables
 
@@ -470,16 +489,11 @@ class AutonomousSession:
             await self._setup.toolbox.release_branch_sandbox(self._held().lease_id)
 
     async def stop(self) -> None:
-        """Stop the agent, then learn what its ledger gained since the last keep, which no later keep imports."""
+        """Stop the agent and its sandbox, then learn what its ledger gained since the last keep, which none imports."""
 
         self._stopped.set()
         running = self._process is not None and self._process.returncode is None
-        if self._process is not None:
-            try:
-                await self._process.kill()
-            except SandboxUnavailable as error:
-                log.warning("the agent of %s could not be killed: %s", self._start.branch, error)
-                await self._note(f"the agent could not be killed: {error}")
+        await self._dropped()
         if running and self._manifest is not None and self._manifest.snapshots is not None:
             await self._note(f"the agent stopped: {self._exit_reason(self._manifest)}")
         watch_file = self._place.workspace / WATCH_FILE
@@ -488,6 +502,18 @@ class AutonomousSession:
             await self._learn(self._manifest.ledger, watch)
             watch.save(watch_file)
 
+    async def _dropped(self) -> None:
+        """Stop the sandbox the agent runs in, its holder and scratch with it, when there is one; a sandbox whose agent
+        could not be killed is noted. The agent has no sandbox after."""
+
+        sandbox, self._sandbox = self._sandbox, None
+        if sandbox is not None:
+            try:
+                await sandbox.stop()
+            except SandboxUnavailable as error:
+                log.warning("the agent of %s could not be killed: %s", self._start.branch, error)
+                await self._note(f"the agent could not be killed: {error}")
+
     async def _running(self) -> tuple[AgentManifest, AgentProcess, AgentSandbox]:
         """The agent preflight started, or, in a run after a crash, the agent resumed by the stored manifest, and the
         sandbox it runs in."""
@@ -495,16 +521,18 @@ class AutonomousSession:
         if self._manifest is not None and self._process is not None and self._sandbox is not None:
             return self._manifest, self._process, self._sandbox
         document = json.loads((self._place.workspace / MANIFEST_FILE).read_text(encoding=ENCODING))
-        manifest = AgentManifest.read(document)
+        stored = AgentManifest.read(document)
+        manifest = replace(stored, config=served_config(stored.config, self._setup.spec))
         command = manifest.resume or manifest.launch
         checkout, env = self._agent_dir / SOURCE_DIR, agent_env(self._agent_dir)
         sandbox: AgentSandbox | None = None
         if (self._place.workspace / LEASE_FILE).exists():
             try:
-                sandbox = self._setup.sandbox(self._held())
+                sandbox = self._sandbox = self._setup.sandbox(self._held())
                 process = await sandbox.start(command, checkout, env)
             except SandboxGone as gone:
                 await self._note(f"the agent's sandbox ended ({gone})")
+                await self._dropped()
                 await self.release()
                 (self._place.workspace / LEASE_FILE).unlink()
                 sandbox = None
@@ -524,7 +552,7 @@ class AutonomousSession:
         lease = await self._lease(self._setup.spec.tp)
         installed = False
         try:
-            sandbox = self._setup.sandbox(lease)
+            sandbox = self._sandbox = self._setup.sandbox(lease)
             await install(
                 manifest, self._setup.onboarding(sandbox), self._agent_dir / SOURCE_DIR, agent_env(self._agent_dir)
             )
@@ -533,9 +561,15 @@ class AutonomousSession:
             raise SessionCrashed(f"the agent's install in its new sandbox failed: {failed}") from failed
         finally:
             if not installed:
-                await asyncio.shield(self._setup.toolbox.release_branch_sandbox(lease.lease_id))
+                await asyncio.shield(self._given_back(lease))
         self._hold(lease)
         return sandbox
+
+    async def _given_back(self, lease: BranchLease) -> None:
+        """Stop the sandbox of ``lease``, whose install failed, then give the lease back."""
+
+        await self._dropped()
+        await self._setup.toolbox.release_branch_sandbox(lease.lease_id)
 
     async def _lease(self, cards: int) -> BranchLease:
         """Lease ``cards`` for the branch's sandbox, for as long as is left until the branch's deadline.
@@ -584,7 +618,7 @@ class AutonomousSession:
             "env": dict(lease.env),
             "remaining_cards": lease.remaining_cards,
         }
-        (self._place.workspace / LEASE_FILE).write_text(json.dumps(document), encoding=ENCODING)
+        write_shared_text(self._place.workspace / LEASE_FILE, json.dumps(document))
 
     async def _lease_now(self, cards: int) -> BranchLease:
         deadline = self._start.task.deadline
@@ -625,7 +659,9 @@ class AutonomousSession:
         if not manifest.signals_keeps:
             await self._take(manifest, watch, watch.seq + 1)
         await self._learn(manifest.ledger, watch)
-        while not self._stopped.is_set() and (watch.pending is not None or await self._busy()):
+        while not self._stopped.is_set() and (
+            watch.pending is not None or watch.submitted is not None or await self._busy()
+        ):
             await self._submit(manifest, watch)
             await self._pause()
         finished = f"the agent finished its run: {said}" if said else "the agent finished its run"
@@ -729,8 +765,11 @@ class AutonomousSession:
         launch that is refused (:meth:`_narrowed`): keeps are cumulative, so a launch entry the measurement refuses,
         such as a variable its launcher sets itself, would otherwise refuse every keep after it, and is left out of
         them from then on. A keep refused for adding the component without its upstream, after the preflight told the
-        agent so (``source_unkept``), ends the branch (:meth:`_end_unkept`)."""
+        agent so (``source_unkept``), ends the branch (:meth:`_end_unkept`). With no keep pending, the last one's import
+        that measured nothing may go once more (:meth:`_requeue`)."""
 
+        if watch.pending is None and watch.submitted is not None and not await self._busy():
+            await self._requeue(watch)
         kept = watch.pending
         if kept is None or await self._busy():
             return
@@ -759,6 +798,45 @@ class AutonomousSession:
         except WorktreeError as error:
             await self._note(f"keep {kept.seq} cannot be read against the branch head and is skipped: {error}")
         watch.pending = watch.waiting.pop(0) if watch.waiting else None
+        watch.save(self._place.workspace / WATCH_FILE)
+
+    async def _requeue(self, watch: KeepWatch) -> None:
+        """Queue the keep last submitted once more, by :func:`keep_requeue.rule` on how its import ended, once
+        :data:`keep_requeue.REQUEUE_SECONDS` passed since the run first saw it end; any other ruling settles the
+        keep."""
+
+        kept = watch.submitted
+        if kept is None:
+            return
+        request_id = watch.imported.get(str(kept.seq), "")
+        try:
+            record = await self._place.blackboard.record(request_id) if request_id else None
+        except UnknownRequest:
+            record = None
+        if record is not None and record.in_flight:
+            return
+        result = None if record is None or record.withdrawn_at is not None else record.result
+        ruling = keep_requeue.rule(result, again=kept.seq in watch.requeued, failures=watch.requeue_failures)
+        if ruling is Ruling.MEASURED:
+            watch.requeue_failures = 0
+        elif ruling is Ruling.SPENT:
+            watch.requeue_failures += 1
+        now = self._setup.clock()
+        if ruling is Ruling.REQUEUE:
+            if not watch.requeue_at:
+                watch.requeue_at = now + keep_requeue.REQUEUE_SECONDS
+                watch.save(self._place.workspace / WATCH_FILE)
+            if now < watch.requeue_at:
+                return
+            watch.requeued.append(kept.seq)
+            watch.pending = kept
+        if result is not None and ruling in (Ruling.REQUEUE, Ruling.SPENT, Ruling.CAPPED):
+            why = keep_requeue.said(ruling, watch.requeue_failures)
+            await self._note(f"keep {kept.seq}'s import {request_id} measured nothing ({result.failure_reason}); {why}")
+        self._settled(watch)
+
+    def _settled(self, watch: KeepWatch) -> None:
+        watch.submitted, watch.requeue_at = None, 0.0
         watch.save(self._place.workspace / WATCH_FILE)
 
     async def _end_unkept(self, kept: KeptChange, error: RequestRejected) -> None:
@@ -848,26 +926,27 @@ class AutonomousSession:
             await self._note(f"keep {kept.seq} changes nothing on the branch head")
             return
         request = TestRequest(TestKind.TEST, Purpose.EXPLORE, self._start.branch, head, delta)
-        held = "" if kept.retracts is None else await self._speed_held(kept.retracts, watch)
+        held = "" if kept.retracts is None else await self._speed_held(kept.retracts, str(kept.seq), watch)
         if kept.retracts is not None and not held:
             request = await self._retraction(request, kept.retracts, watch)
         request_id = await self._setup.toolbox.submit_test(request)
         watch.imported[str(kept.seq)] = request_id
+        watch.submitted, watch.requeue_at = kept, 0.0
         await self._note(f"keep {kept.seq} imported as {request_id}: {kept.summary or 'no summary'}")
         if kept.retracts is not None:
             gate = f"is held to the speed gate: {held}" if held else "is not held to the speed gate"
             await self._note(f"keep {kept.seq} retracts {kept.retracts}: {request_id} {gate}")
 
-    async def _speed_held(self, retraction: Retraction, watch: KeepWatch) -> str:
-        """Why the retraction is held to the speed gate, empty when it is not: it undoes the keep it names and nothing
-        else when it changes only what that keep did, and the head is the agent's state on the keep it was made on,
-        since that keep was imported and the import that first carried the named keep and every one after it landed."""
+    async def _speed_held(self, retraction: Retraction, own: str, watch: KeepWatch) -> str:
+        """Why the retraction, keep ``own`` of ``watch``, is held to the speed gate, empty when it is not: it undoes the
+        keep it names and nothing else when it changes only what that keep did, and the head is the agent's state on the
+        keep it was made on, since that keep was imported and every import from the named keep on but its own landed."""
 
         if retraction.beyond:
             return f"it also changes {retraction.beyond}"
         if str(retraction.made_on) not in watch.imported:
             return f"keep {retraction.made_on}, which it was made on, was not imported"
-        since = [request_id for seq, request_id in watch.imported.items() if int(seq) >= retraction.keep]
+        since = [request_id for seq, request_id in watch.imported.items() if int(seq) >= retraction.keep and seq != own]
         snapshot = await self._place.blackboard.snapshot()
         landed = {record.request_id for record in snapshot.records if record.conclusion in _LANDED}
         if not all(request_id in landed for request_id in since):
@@ -998,40 +1077,6 @@ class AutonomousSession:
         await self._place.blackboard.append_branch_log(entry)
 
 
-@dataclass(frozen=True)
-class Finding:
-    """One finding of an agent's ledger, as the learning it becomes: ``content`` names the agent's kind and id."""
-
-    id: str
-    kind: LearningKind
-    content: str
-
-
-def read_findings(path: Path, ledger: LedgerSource) -> list[Finding]:
-    """The findings of the kinds ``ledger`` maps that the ledger at ``path`` holds, each in its latest version, in the
-    order they first appear; a line the agent is still writing is left for the next read."""
-
-    try:
-        lines = path.read_text(encoding=ENCODING).splitlines()
-    except FileNotFoundError:
-        return []
-    latest: dict[str, Finding | None] = {}
-    for line in lines:
-        try:
-            entry = json.loads(line)
-        except json.JSONDecodeError:
-            continue
-        if not isinstance(entry, dict) or not isinstance(entry.get(ledger.id), str):
-            continue
-        kind, text = entry.get(ledger.kind), entry.get(ledger.text)
-        content = " ".join(f"{kind} {entry[ledger.id]}: {text}".split())
-        if len(content) > LEARNING_MAX_CHARS:
-            content = content[: LEARNING_MAX_CHARS - 1] + "\u2026"
-        fits = kind in ledger.kinds and isinstance(text, str)
-        latest[entry[ledger.id]] = Finding(entry[ledger.id], ledger.kinds[kind], content) if fits else None
-    return [finding for finding in latest.values() if finding is not None]
-
-
 def _without_refused(kept: KeptChange, launch: LaunchConfig, watch: KeepWatch) -> KeptChange:
     """``kept`` with each launch entry the toolbox refused before, and that it still runs with, set back to ``launch``'s."""
 
@@ -1127,9 +1172,7 @@ __all__ = [
     "WATCH_FILE",
     "AutonomousSession",
     "AutonomousSetup",
-    "Finding",
     "KeepWatch",
-    "read_findings",
     "run_seconds",
     "without_file",
 ]

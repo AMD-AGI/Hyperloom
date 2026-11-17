@@ -14,7 +14,7 @@ value may list the image's default tables before them, which the artifact's rows
 in the agent's run, so it carries only the agent's rows.
 
 An agent run as a component writes each keep whole instead, as a snapshot directory (:func:`read_snapshot`, the layout
-of Arbor's component mode): ``keep.json`` names the keep before it and the commits it was made on and made, its
+of component mode): ``keep.json`` names the keep before it and the commits it was made on and made, its
 ``change.patch`` takes the one to the other, ``config.json`` is its whole launch, of which only what differs from the
 launch it was started with goes in, and ``tables/<VAR>/`` the kernel table each variable loads, with the digest
 ``keep.json`` lists (a table too large to copy is listed with no file); for an aiter value that lists several files,
@@ -28,7 +28,7 @@ Some framework settings cannot run together, which an agent need not know: a kee
 :data:`FLAG_CONFLICTS` is read with each server flag the variable needs off removed, each named in
 :attr:`KeptChange.disabled`, so the gate's server does not inherit it from the head's launch and fail.
 
-A flag of the launch the framework resolves (a Magpie AgentX recipe's, which the start commit's own arguments add to)
+A flag of the launch the framework resolves (an AgentX recipe's, which the start commit's own arguments add to)
 that a keep runs without, or that a variable of it needs off, is read into :attr:`KeptChange.removed`: the recipe's
 own arguments cannot drop it, so the import removes it from the resolved launch (``LaunchConfig.remove_args``).
 """
@@ -57,7 +57,7 @@ from hyperloom.measure.framework.rows import DEFAULT_TABLE_PLACEHOLDER
 from hyperloom.measure.framework.tables import AITER_VARIABLE_PREFIX
 from hyperloom.measure.surface import measurement_envs
 from hyperloom_multibranch.specialist.agent_manifest import ConfigSource, read_field
-from hyperloom_multibranch.specialist.arbor_adapter import EVAL_ENVS
+from hyperloom_multibranch.specialist.component_agent import eval_envs
 from hyperloom_multibranch.specialist.worktree import Upstream
 from hyperloom.measure.framework.base import image_configs
 
@@ -235,10 +235,10 @@ def _by_flag(args: str) -> dict[str, list[list[str]]]:
 
 
 def _without_measurement(envs: Mapping[str, str]) -> tuple[dict[str, str], dict[str, str]]:
-    """``envs`` without the variables the measurement sets itself, which a test refuses in its launch, and Arbor's
-    evaluation settings (:data:`~.arbor_adapter.EVAL_ENVS`), which MB gives it; and those."""
+    """``envs`` without the variables the measurement sets itself, which a test refuses in its launch, and the
+    evaluation settings of a component agent (:func:`~.component_agent.eval_envs`), which MB gives it; and those."""
 
-    owned = {*measurement_envs(envs), *(name for name in envs if name in EVAL_ENVS)}
+    owned = {*measurement_envs(envs), *(name for name in envs if name in eval_envs())}
     return {name: value for name, value in envs.items() if name not in owned}, {name: envs[name] for name in owned}
 
 
@@ -332,7 +332,7 @@ def read_snapshot(outbox: Path, number: int, root: str, applied: Applied, start:
 
 
 def _component_launch(config: object) -> _Launch | None:
-    """The ``server_flags`` and ``server_env`` of a config of Arbor's, ``None`` when it holds no such pair."""
+    """The ``server_flags`` and ``server_env`` of a component agent's config, ``None`` when it holds no such pair."""
 
     args = config.get("server_flags") if isinstance(config, Mapping) else None
     envs = config.get("server_env") if isinstance(config, Mapping) else None
@@ -373,7 +373,7 @@ def _snapshot(outbox: Path, number: int, root: str) -> _Snapshot:
         raise KeptChangeError(f"{_directory(number)}/{KEEP_FILE} names no parent and commit")
     if not isinstance(tables, Mapping):
         raise KeptChangeError(f"{_directory(number)}/{KEEP_FILE} lists no tables")
-    # Arbor makes a keep on the root when the commit of the one before is gone from its workspace, and says why.
+    # A keep is made on the root when the commit of the one before is gone from the agent's workspace; it says why.
     notes = keep.get("notes")
     rebased = previous is not None and parent == root and isinstance(notes, str) and bool(notes.strip())
     snapshot = _Snapshot(number, previous, parent, commit, _said(keep), tables, rebased, keep.get("retracts"))

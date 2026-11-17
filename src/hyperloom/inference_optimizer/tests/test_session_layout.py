@@ -174,18 +174,6 @@ def test_runtime_dir_is_workspace_shared(tmp_path, monkeypatch):
     assert paths.runtime_dir() == tmp_path / "runtime"
 
 
-def test_magpie_dir_is_cache_and_decoupled_from_user_data(tmp_path, monkeypatch):
-    # Magpie resolves under the deps cache root (mirrors install.sh),
-    # NOT under $USER_DATA_PATH/runtime, so script + runtime agree on one checkout.
-    monkeypatch.setenv(paths.ENV_USER_DATA_PATH, str(tmp_path / "shared"))
-    monkeypatch.setenv("HYPERLOOM_CACHE_DIR", str(tmp_path / "cache"))
-    monkeypatch.delenv("MAGPIE_PATH", raising=False)
-    expected = tmp_path / "cache"
-    assert paths.deps_cache_root() == expected
-    assert paths.magpie_dir() == expected / "Magpie"
-    assert str(tmp_path / "shared") not in str(paths.magpie_dir())
-
-
 def test_deps_cache_root_defaults_to_repo_root_cache(tmp_path, monkeypatch):
     # Default is $REPO_ROOT/.cache: portable and repo-local.
     monkeypatch.delenv("HYPERLOOM_CACHE_DIR", raising=False)
@@ -219,15 +207,7 @@ def test_deps_cache_root_of_a_packaged_install_is_the_package_parent(tmp_path, m
 
 def test_deps_cache_root_honours_explicit_override(tmp_path, monkeypatch):
     monkeypatch.setenv("HYPERLOOM_CACHE_DIR", str(tmp_path / "custom"))
-    monkeypatch.delenv("MAGPIE_PATH", raising=False)
     assert paths.deps_cache_root() == tmp_path / "custom"
-    assert paths.magpie_dir() == tmp_path / "custom" / "Magpie"
-
-
-def test_magpie_dir_honours_explicit_override(tmp_path, monkeypatch):
-    monkeypatch.setenv("MAGPIE_PATH", str(tmp_path / "operator-magpie"))
-    monkeypatch.setenv("HYPERLOOM_CACHE_DIR", str(tmp_path / "ignored"))
-    assert paths.magpie_dir() == tmp_path / "operator-magpie"
 
 
 def test_resolve_dep_dir_prefers_env_var(tmp_path, monkeypatch):
@@ -253,24 +233,24 @@ def test_resolve_dep_dir_picks_newest_pinned_checkout(tmp_path, monkeypatch):
     import os as _os
 
     monkeypatch.setenv("HYPERLOOM_CACHE_DIR", str(tmp_path / "cache"))
-    monkeypatch.delenv("MAGPIE_PATH", raising=False)
-    old = tmp_path / "cache" / "Magpie@1111111"
-    new = tmp_path / "cache" / "Magpie@2222222"
+    monkeypatch.delenv("GEAK_ROOT", raising=False)
+    old = tmp_path / "cache" / "GEAK@1111111"
+    new = tmp_path / "cache" / "GEAK@2222222"
     old.mkdir(parents=True)
     new.mkdir(parents=True)
     _os.utime(old, (1_000_000, 1_000_000))
     _os.utime(new, (2_000_000, 2_000_000))  # newest wins regardless of glob order
-    assert paths.resolve_dep_dir("Magpie", "MAGPIE_PATH") == new
+    assert paths.resolve_dep_dir("GEAK", "GEAK_ROOT") == new
 
 
 def test_resolve_dep_dir_falls_back_to_bare_when_no_pinned(tmp_path, monkeypatch):
-    # No <name>@<sha> dir (pip-installed Magpie layout): bare default.
+    # No <name>@<sha> dir (a pip-installed tool): bare default.
     monkeypatch.setenv("HYPERLOOM_CACHE_DIR", str(tmp_path / "cache"))
-    monkeypatch.delenv("MAGPIE_PATH", raising=False)
-    assert paths.resolve_dep_dir("Magpie", "MAGPIE_PATH") == tmp_path / "cache" / "Magpie"
+    monkeypatch.delenv("GEAK_ROOT", raising=False)
+    assert paths.resolve_dep_dir("GEAK", "GEAK_ROOT") == tmp_path / "cache" / "GEAK"
 
 
-# TraceLens root resolution: mirrors magpie_dir so trace analysis resolves the
+# TraceLens root resolution: trace analysis resolves the
 # same checkout as install.sh even when TRACELENS_ROOT was not inherited.
 def test_tracelens_root_derives_from_cache_root_when_env_unset(tmp_path, monkeypatch):
     monkeypatch.delenv("TRACELENS_ROOT", raising=False)
@@ -301,12 +281,11 @@ def test_manifest_records_dependencies_block_empty_when_envs_unset(
     monkeypatch,
 ):
     monkeypatch.setenv(paths.ENV_USER_DATA_PATH, str(tmp_path))
-    monkeypatch.delenv("MAGPIE_PATH", raising=False)
     monkeypatch.delenv("INFERENCEX_PATH", raising=False)
     sd = paths.make_session_dir()
     m = write_manifest(sd, args=None, session_id="empty-deps")
     deps = m["dependencies"]
-    assert set(deps.keys()) == {"magpie", "inferencex"}
+    assert set(deps.keys()) == {"inferencex"}
     for sub in deps.values():
         assert sub == {"path": "", "commit": "", "remote": ""}
 
@@ -315,7 +294,7 @@ def test_manifest_records_dependencies_block_picks_up_git_metadata(
     tmp_path,
     monkeypatch,
 ):
-    """Plant two fake git checkouts and confirm we capture both SHA and origin URL."""
+    """Plant a fake git checkout and confirm we capture its SHA and origin URL."""
     import subprocess
 
     def _init_repo(path, remote_url, file_contents):
@@ -332,22 +311,16 @@ def test_manifest_records_dependencies_block_picks_up_git_metadata(
         ):
             subprocess.run(cmd, cwd=path, check=True, capture_output=True)
 
-    fake_magpie = tmp_path / "Magpie"
     fake_infx = tmp_path / "InferenceX"
-    _init_repo(fake_magpie, "https://example.test/Magpie.git", "m")
     _init_repo(fake_infx, "https://example.test/InferenceX.git", "i")
 
     monkeypatch.setenv(paths.ENV_USER_DATA_PATH, str(tmp_path / "user_data"))
-    monkeypatch.setenv("MAGPIE_PATH", str(fake_magpie))
     monkeypatch.setenv("INFERENCEX_PATH", str(fake_infx))
 
     sd = paths.make_session_dir()
     m = write_manifest(sd, args=None, session_id="full-deps")
 
     deps = m["dependencies"]
-    assert deps["magpie"]["path"] == str(fake_magpie)
-    assert deps["magpie"]["remote"] == "https://example.test/Magpie.git"
-    assert deps["magpie"]["commit"], "expected non-empty magpie SHA"
     assert deps["inferencex"]["path"] == str(fake_infx)
     assert deps["inferencex"]["remote"] == "https://example.test/InferenceX.git"
     assert deps["inferencex"]["commit"], "expected non-empty inferencex SHA"
@@ -361,18 +334,12 @@ def test_manifest_dependencies_block_is_fail_soft_on_non_repo_paths(
     not_a_repo = tmp_path / "plain_dir"
     not_a_repo.mkdir()
     monkeypatch.setenv(paths.ENV_USER_DATA_PATH, str(tmp_path / "user_data"))
-    monkeypatch.setenv("MAGPIE_PATH", str(not_a_repo))
-    monkeypatch.delenv("INFERENCEX_PATH", raising=False)
+    monkeypatch.setenv("INFERENCEX_PATH", str(not_a_repo))
 
     sd = paths.make_session_dir()
     m = write_manifest(sd, args=None, session_id="non-repo-deps")
-    assert m["dependencies"]["magpie"] == {
-        "path": str(not_a_repo),
-        "commit": "",
-        "remote": "",
-    }
     assert m["dependencies"]["inferencex"] == {
-        "path": "",
+        "path": str(not_a_repo),
         "commit": "",
         "remote": "",
     }
@@ -386,15 +353,15 @@ def test_manifest_pod_local_dependency_warning_matches_default_policy(
     from hyperloom.inference_optimizer.session import manifest
 
     monkeypatch.setenv(paths.ENV_USER_DATA_PATH, str(tmp_path / "user_data"))
-    monkeypatch.setenv("MAGPIE_PATH", "/workspace/hyperloom_runtime_smoke/Magpie")
+    monkeypatch.setenv("INFERENCEX_PATH", "/workspace/hyperloom_runtime_smoke/InferenceX")
 
     with caplog.at_level(logging.WARNING, logger="hyperloom.inference_optimizer.session.manifest"):
-        manifest._describe_dep("MAGPIE_PATH")
+        manifest._describe_dep("INFERENCEX_PATH")
 
-    messages = [r.message for r in caplog.records if "MAGPIE_PATH" in r.message]
+    messages = [r.message for r in caplog.records if "INFERENCEX_PATH" in r.message]
     assert messages
     assert "defaults open-source dependencies to the repo-local cache" in messages[0]
-    assert "point MAGPIE_PATH back" not in messages[0]
+    assert "point INFERENCEX_PATH back" not in messages[0]
 
 
 def test_build_session_id_includes_uuid_and_model(monkeypatch):

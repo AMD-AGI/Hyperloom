@@ -11,6 +11,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
+from hyperloom.common.benchmark_config import read_benchmark_point
 from hyperloom.common.deadline import Deadline
 from hyperloom.common.env_safety import filter_untrusted_env_mapping, is_allowed_variant_env_key
 from hyperloom_common.coerce import to_str_list
@@ -26,7 +27,6 @@ from ._patch_artifacts import _ArtifactSpec, _resolve_artifact_specs, _validate_
 from ._patch_sources import _read_patch_texts, _resolve_patch_paths, resolved_explicit_root
 from ._launch_restatement import handed_server_args
 from ._proposal_identity import controls_of, keeps_effective_args, normalize_proposal
-from .magpie_agentx import load_benchmark
 
 log = logging.getLogger(__name__)
 
@@ -55,6 +55,8 @@ class _PatchBench:
     session_deadline_sec: float | None = None
     variant_expected_sec: float | None = None
     benchmark_mode: str = ""
+    # The eval definition digest the session's baseline score was taken under.
+    accuracy_definition_digest: str = ""
     phase_deadline: Deadline | None = None
     #: The round's non-default ``remove_args`` / ``unset_envs`` / ``args_mode``; the parity leg runs without them.
     launch_controls: dict[str, Any] = field(default_factory=dict)
@@ -72,6 +74,7 @@ class _PatchBench:
             session_deadline_sec=session_deadline_sec,
             variant_expected_sec=variant_expected_sec,
             benchmark_mode=str(getattr(shared_state, "benchmark_mode", "") or ""),
+            accuracy_definition_digest=str(getattr(shared_state, "baseline_accuracy_definition_digest", "") or ""),
             phase_deadline=attempt.phase_deadline,
         )
 
@@ -272,8 +275,8 @@ def _unresolved_root_rejection(explicit_root: str | None, patch_paths: list[Path
         return {
             "error_class": "no_framework_agent_root",
             "error": "no framework_source_root resolved; cannot apply "
-            "patches. Configure $INFERENCEX_PATH or pass "
-            "params.framework_source_root.",
+            "patches. Set $FRAMEWORK_REPO_PATH to the framework checkout "
+            "or pass params.framework_source_root.",
         }
     declared_root = resolved_explicit_root(explicit_root)
     if declared_root is None:
@@ -365,12 +368,12 @@ def _kept_launch(controls: dict[str, Any], bench_result: dict[str, Any]) -> dict
     """The round's own launch controls, and the args its bench handed the launcher where the KEEP persists them.
 
     Those are Hyperloom's own composition, the recipe's inherited args included, as an explore KEEP records it; a
-    native launch's resolved argv is not, since it spells the options Magpie protects.
+    native launch's resolved argv is not, since it spells the options the recipe protects.
     """
     if not controls:
         return {}
     persists = keeps_effective_args(
-        load_benchmark(Path(bench_result["materialized_config"])),
+        read_benchmark_point(Path(bench_result["materialized_config"])).agentx,
         bench_result["effective_config"]["args_mode"],
         str(controls.get("args_mode") or "append"),
         to_str_list(controls.get("remove_args")),

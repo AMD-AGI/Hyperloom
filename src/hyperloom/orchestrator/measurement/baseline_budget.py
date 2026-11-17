@@ -34,9 +34,10 @@ BASELINE_BUDGET_STOP_EXPLANATIONS: dict[str, str] = {
         "The baseline's serving GPUs drew more than --max-power-w in total, a card drew more than its "
         "--max-per-gpu-power-w limit, or the baseline round reported no per-GPU power, so the run stopped before "
         "optimizing: every candidate is measured against that reference, so none could have been promoted. If the "
-        "round reported no power, read its gpu_power.json: unread_gpus names cards that may have been serving but "
-        "could not be read, an empty serving_gpus means no card held a model during the measured phase, and "
-        "query_errors means amd-smi could not be read. Otherwise lower the cards' power cap (amd-smi set "
+        "round reported no power, read the power section of its report.json: reasons says why its energy is not "
+        "valid (expected_gpu_count_mismatch when a configured card held no model or was never read, "
+        "sampling_gap_exceeded when sysfs stopped answering), and errors in the power.json beside it names every "
+        "read that failed. Otherwise lower the cards' power cap (amd-smi set "
         "--power-cap) so the baseline fits, or relaunch with a budget the baseline can meet."
     ),
 }

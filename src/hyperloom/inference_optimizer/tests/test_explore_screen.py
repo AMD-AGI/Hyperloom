@@ -11,9 +11,11 @@ whose own probe came back unreadable.
 from __future__ import annotations
 
 import json
+from dataclasses import replace
 
 import pytest
 
+from hyperloom.common.benchmark_config import read_benchmark_point
 from hyperloom.orchestrator.actions.executors.explore_prefilter import _screen as _explore_screen
 from hyperloom.orchestrator.actions.executors.explore_prefilter._screen import (
     BASELINE,
@@ -132,6 +134,14 @@ def test_unreadable_config_means_no_screen(tmp_path, enabled, session):
     assert len(kept) == 4 and dropped == []
 
 
+def test_a_config_without_a_benchmark_block_means_no_screen(tmp_path, enabled, session, monkeypatch):
+    monkeypatch.setattr(_explore_screen, "_probe", fake_probe({"v0": 99.0, "v1": 9.0, "v2": 9.0, "v3": 9.0}))
+    blockless = tmp_path / "blockless.yaml"
+    blockless.write_text("other: {}\n")
+    kept, dropped = screen_variants(variants(), launches(blockless), tmp_path / "screen", session_dir=session)
+    assert len(kept) == 4 and dropped == []
+
+
 def test_failed_baseline_probe_benchmarks_the_whole_grid(config, enabled, session, monkeypatch):
     """Without a reference reading there is nothing to measure a margin against."""
     monkeypatch.setattr(_explore_screen, "_probe", lambda v, b, t, backend: (None, {}))
@@ -202,10 +212,7 @@ def test_target_backend_is_read_from_the_deployments_own_flags(tmp_path, enabled
     monkeypatch.delenv(ENV_BACKEND, raising=False)
     path = tmp_path / "pinned.yaml"
     path.write_text(CONFIG + "    EXTRA_VLLM_ARGS: --attention-backend TRITON_ATTN\n")
-    with open(path) as fh:
-        import yaml
-
-        bench = yaml.safe_load(fh)["benchmark"]
+    bench = read_benchmark_point(path)
     assert _explore_screen._target_backend(bench, None) == "TRITON_ATTN"
 
 
@@ -220,7 +227,7 @@ def test_the_screen_probes_the_stack_and_each_variant_on_it(config, enabled, ses
     probed: dict[str, dict] = {}
 
     def recording_probe(variant, bench, timeout_sec, backend):
-        probed[variant.name] = dict(bench["envs"])
+        probed[variant.name] = dict(bench.envs)
         return 10.0, MATCHING_KERNELS
 
     monkeypatch.setattr(_explore_screen, "_probe", recording_probe)
@@ -252,11 +259,8 @@ def test_a_variant_that_cannot_be_materialized_is_benchmarked_and_a_bug_raises(c
 
 def test_the_pin_precedes_the_variants_own_flags(config, enabled):
     """A variant testing a backend must override the pin, not be overridden by it."""
-    with open(config) as fh:
-        import yaml
-
-        bench = yaml.safe_load(fh)["benchmark"]
-    bench["envs"]["EXTRA_VLLM_ARGS"] = "--attention-backend TRITON_ATTN"
+    bench = read_benchmark_point(config)
+    bench = replace(bench, envs={**bench.envs, "EXTRA_VLLM_ARGS": "--attention-backend TRITON_ATTN"})
     cmd = _explore_screen._probe_command(bench, "/tmp/o.json", "ROCM_AITER_UNIFIED_ATTN")
     args = next(c for c in cmd if c.startswith("--server-args="))
     assert args.endswith("--attention-backend TRITON_ATTN")
@@ -322,15 +326,13 @@ def test_dropped_records_carry_the_measurement(config, enabled, session, monkeyp
 
 
 def test_the_probe_launches_the_variant_on_the_stack(config, enabled, tmp_path):
-    import yaml
-
     variant = GridVariant(
         name="aiter_off",
         extra_server_args="--max-num-seqs 512 --enable-chunked-prefill",
         extra_envs={"VLLM_ROCM_USE_AITER": "0"},
     )
     path = _build_variant_yaml(_on_the_stack(config), variant, output_subdir=tmp_path / "v")
-    bench = yaml.safe_load(path.read_text())["benchmark"]
+    bench = read_benchmark_point(path)
     cmd = _explore_screen._probe_command(bench, "/tmp/out.json", None)
     server_args = next(a for a in cmd if a.startswith("--server-args="))
     assert "--stack-flag" in server_args and "--max-num-seqs 512 --enable-chunked-prefill" in server_args
@@ -346,10 +348,7 @@ def test_the_probe_launches_the_variant_on_the_stack(config, enabled, tmp_path):
 def test_probe_gpu_count_and_depth_are_configurable(config, enabled, monkeypatch):
     monkeypatch.setenv(ENV_GPUS, "2")
     monkeypatch.setenv(ENV_LAYERS, "8")
-    with open(config) as fh:
-        import yaml
-
-        bench = yaml.safe_load(fh)["benchmark"]
+    bench = read_benchmark_point(config)
     cmd = _explore_screen._probe_command(bench, "/tmp/o.json", None)
     assert cmd[cmd.index("--benchmark-gpus") + 1] == "2"
     assert cmd[cmd.index("--num-hidden-layers") + 1] == "8"
@@ -357,10 +356,7 @@ def test_probe_gpu_count_and_depth_are_configurable(config, enabled, monkeypatch
 
 def test_probe_never_asks_for_more_gpus_than_the_target_has(config, enabled, monkeypatch):
     monkeypatch.setenv(ENV_GPUS, "16")
-    with open(config) as fh:
-        import yaml
-
-        bench = yaml.safe_load(fh)["benchmark"]
+    bench = read_benchmark_point(config)
     cmd = _explore_screen._probe_command(bench, "/tmp/o.json", None)
     assert cmd[cmd.index("--benchmark-gpus") + 1] == "8"
 
@@ -381,10 +377,7 @@ def test_probe_reads_decode_and_kernels_from_its_own_run(config, enabled, tmp_pa
         return Done()
 
     monkeypatch.setattr(_explore_screen.subprocess, "run", fake_run)
-    with open(config) as fh:
-        import yaml
-
-        bench = yaml.safe_load(fh)["benchmark"]
+    bench = read_benchmark_point(config)
     reading, kernels = _explore_screen._probe(GridVariant(name="v"), bench, 60, None)
     assert reading == pytest.approx(4.25)
     assert kernels == MATCHING_KERNELS
@@ -397,9 +390,6 @@ def test_probe_failure_returns_no_reading(config, enabled, monkeypatch):
         stderr = "boom"
 
     monkeypatch.setattr(_explore_screen.subprocess, "run", lambda cmd, **kw: Failed())
-    with open(config) as fh:
-        import yaml
-
-        bench = yaml.safe_load(fh)["benchmark"]
+    bench = read_benchmark_point(config)
     reading, _ = _explore_screen._probe(GridVariant(name="v"), bench, 60, None)
     assert reading is None

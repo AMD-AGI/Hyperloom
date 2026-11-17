@@ -28,7 +28,7 @@ differ only in how Hyperloom restarts the inference server each optimization rou
 ## Cluster hand-off
 
 Hyperloom never provisions or releases a cluster. The provisioning platform
-(typically [Primus-Claw](https://github.com/AMD-AGI/Primus-Claw)) creates the GPU
+(typically [Primus-Claw](https://github.com/AMD-AGI/PrimusClaw)) creates the GPU
 pods and hands the running cluster over through `HYPERLOOM_MN_EXT_*` environment
 variables. Hyperloom adopts it, benchmarks it, and restarts the server on it each
 round.
@@ -125,8 +125,7 @@ artifacts.
 
 ```text
 ${NFS_SHARED_ROOT}/models/Qwen3-30B-A3B/   # --model
-${NFS_SHARED_ROOT}/InferenceX/             # INFERENCEX_PATH
-${NFS_SHARED_ROOT}/Magpie/                 # MAGPIE_PATH
+${NFS_SHARED_ROOT}/inference-suite-tools/  # INFERENCE_SUITE_TOOL_CACHE
 ${NFS_SHARED_ROOT}/TraceLens/              # TRACELENS_ROOT
 ${NFS_SHARED_ROOT}/TraceLens-internal/     # TRACELENS_INTERNAL_ROOT (optional)
 ```
@@ -189,8 +188,7 @@ The following variables are exported on the sandbox side before calling `optimiz
 | Variable | Meaning |
 |----------|---------|
 | `RANDOM_RANGE_RATIO` | Sequence-length jitter for the benchmark |
-| `INFERENCEX_PATH` | InferenceX checkout path under `${NFS_SHARED_ROOT}` |
-| `MAGPIE_PATH` | Magpie checkout path under `${NFS_SHARED_ROOT}` |
+| `INFERENCE_SUITE_TOOL_CACHE` | InferenceSuite tool cache under `${NFS_SHARED_ROOT}`, staged by `install.sh` |
 | `TRACELENS_ROOT` | TraceLens checkout path under `${NFS_SHARED_ROOT}` |
 | `SGLANG_DISAGGREGATION_*_TIMEOUT` | PD bootstrap and wait timeouts (Workload A only) |
 
@@ -347,7 +345,7 @@ For issues not covered here, see [Troubleshooting Hyperloom](troubleshooting.md)
 ## Related topics
 
 - [Workload skill](https://github.com/AMD-AGI/Hyperloom/blob/main/docs/how-to/multi-node/hyperloom-remote-mn-qwen3-30b/SKILL.md) — copy-paste flags and environment for Qwen3-30B-A3B
-- [Primus-Claw](https://github.com/AMD-AGI/Primus-Claw) — provisions the cluster and hands it over
+- [Primus-Claw](https://github.com/AMD-AGI/PrimusClaw) — provisions the cluster and hands it over
 - [Multi-node CLI, SSH, and hand-off semantics](https://github.com/AMD-AGI/Hyperloom/blob/main/src/hyperloom/inference_optimizer/multi_node/SKILL.md)
 - [Environment variables](environment-variables.md) — full list of `HYPERLOOM_MN_EXT_*` variables
 - [Run a Hyperloom optimization](../how-to/optimize.md) — single-node counterpart

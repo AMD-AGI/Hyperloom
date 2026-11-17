@@ -20,6 +20,7 @@ from hyperloom_multibranch.blackboard.rsi.analysis import (
     repeated_failures,
 )
 from hyperloom_multibranch.blackboard.tests.sessions import FP8_KV, GEMM
+from hyperloom_multibranch.rulegate.agentx import CHECKPOINT_TRAILED
 
 
 def _failures(snapshot: BlackboardSnapshot, branch: str) -> tuple[FailedTest, ...]:
@@ -85,6 +86,22 @@ def test_each_direction_shows_where_it_was_tried_who_carries_it_and_who_holds_it
     assert coverage["attention / split kv"].committed_on == ()
     assert coverage["scheduler / chunked prefill"].best_gain_pct is None
     assert GEMM.fingerprint in snapshot.intents
+
+
+def test_a_gain_the_agentx_checkpoint_measured_on_its_window_only_is_no_directions_best(
+    snapshot: BlackboardSnapshot,
+) -> None:
+    (again,) = [record for record in snapshot.records if record.request_id == "r4"]
+    assert again.judgement is not None
+    stopped = dataclasses.replace(
+        again, judgement=dataclasses.replace(again.judgement, gain_pct=9.0, refused_by=(CHECKPOINT_TRAILED,))
+    )
+    records = tuple(stopped if record.request_id == "r4" else record for record in snapshot.records)
+
+    occupancy = direction_occupancy(dataclasses.replace(snapshot, records=records))
+
+    gemm = next(item for item in occupancy if (item.target, item.mechanism) == ("moe gemm", "tuned kernel"))
+    assert gemm.best_gain_pct == 4.0
 
 
 def test_the_ledger_keeps_each_hypothesis_at_its_latest_version(snapshot: BlackboardSnapshot) -> None:

@@ -15,7 +15,7 @@ from __future__ import annotations
 import json
 from typing import Any, Mapping
 
-from hyperloom.inference_optimizer.grid_server_args import remove_server_args
+from inference_suite.argv import remove_server_args
 from hyperloom.orchestrator.actions.executors._proposal_identity import content_fingerprint
 from hyperloom.orchestrator.predictor.client import Action, Prediction
 from hyperloom.orchestrator.predictor.view import SessionView

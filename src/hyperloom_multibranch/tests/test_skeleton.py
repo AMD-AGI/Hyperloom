@@ -21,20 +21,25 @@ import asyncio
 import contextlib
 import errno
 import json
+import logging
 import os
 import signal
+import stat
+import subprocess
+import sys
 from collections.abc import Awaitable, Callable, Iterator, Mapping, Sequence
 from dataclasses import dataclass, field, replace
 from datetime import datetime
 from pathlib import Path
-from types import ModuleType
-from typing import TYPE_CHECKING, Any, NoReturn
+from typing import Any, NoReturn, cast
 
 import pytest
 
+import hyperloom_multibranch
 from hyperloom_common.jsonio import read_jsonl
+from hyperloom_common.tests.shared_accounts import Accounts, other_accounts
 from hyperloom.common.perf_metric import GRADED_INTVTY_P50, GRADED_OUTPUT
-from hyperloom.common.proctree import running
+from hyperloom_common.proctree import running
 from hyperloom.common.outside_facts.image_check import FactResult, ImageCheckFailed, ImageCheckMode, ImageCheckReport
 from hyperloom.common.outside_facts.image_check_eval import Status
 from hyperloom.common.outside_facts.rule_pack import rule_pack_identity
@@ -52,6 +57,7 @@ from hyperloom.contracts.recipe import Recipe, RecipeDelta
 from hyperloom.hosted.mcp_server import MIN_TOKEN_LENGTH, McpServer, McpServerConfig
 from hyperloom.measure.versions import socket_versions
 from hyperloom_multibranch.contracts.fork import AdmissionStatus, ForkAdmission, ForkRequest, RepairRequest
+from hyperloom_multibranch.contracts.gate import RegressionOutcome
 from hyperloom_multibranch.contracts.intent import Intent, IntentLayer
 from hyperloom_multibranch.contracts.judgement import AccuracyVerdict, Judgement, Verdict
 from hyperloom_multibranch.contracts.lifecycle import BranchTask
@@ -81,7 +87,7 @@ from hyperloom_multibranch.contracts.toolbox import CancelOutcome, MeasurementCa
 from hyperloom_multibranch.blackboard import LocalBlackboard
 from hyperloom_multibranch.blackboard.knowledge.learning_recall import LearningRecall
 from hyperloom_multibranch.blackboard.knowledge.reference_leads import INFERENCEX_REFERENCE
-from hyperloom_multibranch.blackboard.rsi.archive import ARCHIVE_ENV, SKIPPED, TreeArchive
+from hyperloom_multibranch.blackboard.rsi.archive import ARCHIVE_ENV, ARCHIVED, SKIPPED, TreeArchive
 from hyperloom_multibranch.blackboard.rsi.briefing import SessionBriefs
 from hyperloom_multibranch.blackboard.rsi.decisions import decision_calls
 from hyperloom_multibranch.blackboard.rsi.playbook import (
@@ -124,18 +130,23 @@ from hyperloom_multibranch.scheduling.explore import (
     FORK_NOT_LANDED,
     OPEN_CUT_REASON,
 )
-from hyperloom_multibranch.scheduling.exports import IMAGE_CHECK_FILE
+from hyperloom_multibranch.scheduling.exports import ARCHIVED_BEFORE, IMAGE_CHECK_FILE
 from hyperloom_multibranch.scheduling.final import INTEGRATION_LABEL, PRIMARY_POINT_ONLY
 from hyperloom_multibranch.scheduling import judge
 from hyperloom_multibranch.scheduling.judge import GRACE_KEY, HoldReason
 from hyperloom_multibranch.scheduling.judge_prompt import JUDGE_PROMPT_VERSION
 from hyperloom_multibranch.scheduling.integrator import ADOPTING_LEAD
+from hyperloom_multibranch.scheduling.launch_isolation import LaunchIsolation
+from hyperloom_multibranch.scheduling.hosted_run import prelude_landed
 from hyperloom_multibranch.scheduling.layout import SessionLayout, create_session
 from hyperloom_multibranch.scheduling import lifecycle
 from hyperloom_multibranch.scheduling.lifecycle import (
+    COMPLETED_REASONS,
     CUT_SHORT,
     LESSONS_KEY,
+    NO_BASELINE,
     NO_CARDS_LEFT,
+    PersistedRun,
     Session,
     SessionHost,
     SessionOutcome,
@@ -144,6 +155,7 @@ from hyperloom_multibranch.scheduling.lifecycle import (
 )
 from hyperloom_multibranch.scheduling.local_peers import workload_rule
 from hyperloom_multibranch.scheduling.manifest import read_manifest
+from hyperloom_multibranch.scheduling.resumption import ResumeRefused, deadline_after_downtime, resumable_run
 from hyperloom_multibranch.contracts.llm import CompletionFailed, CompletionReply
 from hyperloom_multibranch.scheduling.peers import Peers, PeerSetup
 from hyperloom_multibranch.scheduling.prelude import roofline_ceiling
@@ -216,24 +228,13 @@ from hyperloom_multibranch.scheduling.review import (
     REVIEW_SKIPPED,
 )
 from hyperloom_multibranch.scheduling.settings import DOSSIER_MINUTES
-from hyperloom_multibranch.specialist.arbor_adapter import MAPPED, SplitFailed
+from hyperloom_multibranch.specialist import autonomous_session
+from hyperloom_multibranch.specialist.component_agent import MAPPED, SplitFailed
+from hyperloom_multibranch.specialist.dev_sandbox import DevLeases
 from hyperloom_multibranch.specialist.directions import DIRECTIONS
+from hyperloom_multibranch.specialist.dossier_pass import DossierOutcome, DossierPass, DossierStart
 from hyperloom_multibranch.specialist.prompts import prompt_versions
 from hyperloom_multibranch.specialist.runtime import MAX_LOSS_RESTARTS, SessionCrashed
-
-if TYPE_CHECKING:
-    from hyperloom_multibranch.specialist.dossier_pass import DossierOutcome, DossierPass, DossierStart
-
-
-def _specialist_module(name: str) -> ModuleType:
-    """The specialist package's module ``name``, which a test that maps or runs an Arbor share needs; the test is
-    skipped while the package has no such module."""
-    return pytest.importorskip(f"hyperloom_multibranch.specialist.{name}")
-
-
-def _dossier_outcome() -> type[DossierOutcome]:
-    return _specialist_module("dossier_pass").DossierOutcome
-
 
 START = 1_700_000_000.0
 CONC = 16
@@ -252,8 +253,19 @@ IMAGE_CHECK = ImageCheckReport(
     {"python": "/usr/bin/python3"},
     (FactResult("sglang.renamed-flag", "sglang", Status.FAIL, (), "the flag is gone"),),
 )
-#: The review gate pauses a session with Arbor agents for a person; these sessions open their branches without one,
-#: as ``run --no-review-gate`` does, and the review's own tests turn it on.
+#: How the session's peers launch its agents and tests: all unconfined, as no account is configured and no bubblewrap
+#: is found.
+ISOLATION = LaunchIsolation(
+    "none",
+    "none",
+    "none",
+    False,
+    ("running them as an account: HYPERLOOM_SPECIALIST_USER is not set", "bubblewrap: not found"),
+)
+#: How the peers of a ``final-only`` recovery would launch agents, which is not how the session's ran.
+RECOVERY_ISOLATION = LaunchIsolation("bwrap", "none", "bwrap", False, ("an agent sandbox runs unconfined",))
+#: The review gate pauses a session with component agents for a person; these sessions open their branches without
+#: one, as ``run --no-review-gate`` does, and the review's own tests turn it on.
 SETTINGS = RunSettings(
     WORKLOAD,
     max_hours=0.5,
@@ -262,7 +274,7 @@ SETTINGS = RunSettings(
     caps=RosterCaps(3, 2, 8),
     judge_interval_seconds=600.0,
     review_gate=False,
-    agent_share_minutes=0.0,  # these sessions are shorter than the time an Arbor iteration needs
+    agent_share_minutes=0.0,  # these sessions are shorter than the time one iteration of a component agent needs
 )
 #: An InferenceX matrix with one single-node entry for the workload's model.
 LLAMA_MATRIX = """\
@@ -446,7 +458,9 @@ class Stage:
     author: ScriptedCompletion = field(default_factory=ScriptedCompletion)
     learnings: LearningRecall | None = None
     image_check: Callable[[], ImageCheckReport] = lambda: IMAGE_CHECK
+    isolation: LaunchIsolation = ISOLATION
     dossier_pass: DossierPass | None = None
+    dev_leases: DevLeases | None = None
     toolbox: RecordingToolbox = field(init=False)
     sessions: RecordedSessions = field(init=False)
     repo: HeldGitRepo = field(init=False)
@@ -517,7 +531,9 @@ class Stage:
             digest,
             self.gate,
             self.regression,
+            self.isolation,
             self.dossier_pass,
+            self.dev_leases,
         )
 
     async def root(self) -> str:
@@ -578,20 +594,28 @@ class Stage:
         await then(branch, head)
 
     async def run(self) -> SessionOutcome:
-        """Run the session, its image check answered by ``image_check`` instead of this environment; a session with
-        autonomous agents maps and runs them on the specialist's map and autonomous sessions."""
+        """Run the session, its image check answered by ``image_check`` instead of this environment."""
 
-        for module in ("map_session", "autonomous_session") if self.settings.agents else ():
-            _specialist_module(module)
         with self._polls_on_virtual_time() as patch:
             patch.setattr(lifecycle, "run_image_check", self.image_check)
             return await self._session().run()
 
-    async def finish(self, ended: SessionStopReason) -> SessionOutcome:
-        """FINAL and CLOSE alone over the session directory this stage was built on, as ``final-only`` runs them."""
+    async def finish(self, ended: SessionStopReason, *, restart: bool = False) -> SessionOutcome:
+        """FINAL and CLOSE alone over the session directory this stage was built on, as ``final-only`` runs them, and
+        with ``restart`` as the restart of a hosted run does."""
 
         with self._polls_on_virtual_time():
-            return await self._session().finish(ended)
+            return await self._session().finish(ended, restart=restart)
+
+    async def resume(self, ended: SessionStopReason, deadline: float | None = None) -> SessionOutcome:
+        """EXPLORE, FINAL and CLOSE over the session directory this stage was built on up to ``deadline``, as a resume
+        runs them; by default up to the deadline ``run --resume`` gives, moved by the time the session was down."""
+
+        if deadline is None:
+            deadline = deadline_after_downtime(self.layout, self.time.now())
+        with self._polls_on_virtual_time() as patch:
+            patch.setattr(lifecycle, "run_image_check", self.image_check)
+            return await self._session().resume(ended, deadline)
 
     @contextlib.contextmanager
     def _polls_on_virtual_time(self) -> Iterator[pytest.MonkeyPatch]:
@@ -631,9 +655,27 @@ def _stage(tmp_path: Path) -> Stage:
 
 def _recovery(stage: Stage, settings: RunSettings) -> Stage:
     """A second stage over the directory ``stage`` left, as ``final-only`` builds one: the same session directory and
-    the settings read back from its manifest, every peer fresh and no specialist script."""
+    the settings read back from its manifest, every peer fresh and no specialist script; its peers would launch
+    agents as :data:`RECOVERY_ISOLATION`, not as the session's ran."""
 
     time = VirtualClock(stage.time.now())
+    registry = HeldRegistry(stage.layout.pids, time)
+    return Stage(
+        stage.layout, time, registry, ScriptedCompletion(), [], settings=settings, isolation=RECOVERY_ISOLATION
+    )
+
+
+#: How long a resumed session was down, between its last decision and the resume.
+DOWNTIME_SECONDS = 1800.0
+
+
+def _resumed(stage: Stage, settings: RunSettings, downtime: float = DOWNTIME_SECONDS) -> Stage:
+    """A second stage over the directory ``stage`` left, as a resume builds one ``downtime`` seconds after the last
+    decision that session recorded: the same directory and the settings its manifest holds, every peer fresh, no
+    specialist script and a judge that never answers."""
+
+    stopped_at = float(read_jsonl(stage.layout.decisions)[-1]["at"])
+    time = VirtualClock(stopped_at + downtime)
     return Stage(stage.layout, time, HeldRegistry(stage.layout.pids, time), ScriptedCompletion(), [], settings=settings)
 
 
@@ -710,6 +752,8 @@ async def test_a_session_runs_every_phase_and_leaves_nothing_behind(tmp_path: Pa
         k for policy in stage.toolbox.policies for b, k in policy.branch_k.items() if b != INTEGRATION_BRANCH
     ]
     assert max(specialist_ks) == SETTINGS.caps.max_k_per_branch
+    opened = next(policy for policy in stage.toolbox.policies if INTEGRATION_BRANCH in policy.branch_k)
+    assert opened.k_for(INTEGRATION_BRANCH) == 2
     steering = [policy for policy in stage.toolbox.policies if "b01" in policy.branch_k]
     assert steering[-1].k_for(INTEGRATION_BRANCH) == 2 and "b02" not in steering[-1].branch_k
     assert all(policy.listed_branches_only for policy in stage.toolbox.policies)
@@ -764,6 +808,9 @@ async def test_a_session_runs_every_phase_and_leaves_nothing_behind(tmp_path: Pa
     assert manifest["rule_pack"] == rule_pack_identity()
     assert manifest["image_check"] == IMAGE_CHECK.summary()
     assert json.loads((stage.layout.reports / IMAGE_CHECK_FILE).read_text()) == IMAGE_CHECK.to_json()
+    assert manifest["agent_isolation"] == json.loads(stage.layout.report.read_text())["agent_isolation"]
+    assert read_manifest(stage.layout.manifest).agent_isolation == ISOLATION
+    assert "A" + ISOLATION.line()[1:] in stage.layout.report_markdown.read_text().splitlines()
     judge_calls = len(stage.layout.judge.read_text().splitlines())
     spends = [_judge_state(prompt)["spend"] for prompt in _judge_prompts(stage)]
     assert [spend["scheduler_llm_usd"] for spend in spends[:2]] == [0.0, JUDGE_USD]
@@ -935,6 +982,17 @@ async def test_the_manifest_names_the_lesson_pool_as_the_specialists_recall_read
     assert json.loads(stage.layout.manifest.read_text())["policy_versions"][LESSONS_KEY] == read
 
 
+async def test_a_manifest_an_earlier_build_wrote_reads_with_the_agents_isolation_not_recorded(tmp_path: Path) -> None:
+    stage = _stage(tmp_path)
+    _script(stage)
+    await stage.run()
+    manifest = json.loads(stage.layout.manifest.read_text())
+    del manifest["agent_isolation"]
+    stage.layout.manifest.write_text(json.dumps(manifest))
+
+    assert read_manifest(stage.layout.manifest).agent_isolation is None
+
+
 async def test_a_manifest_written_with_the_removed_reuse_prelude_setting_still_reads(tmp_path: Path) -> None:
     stage = _stage(tmp_path)
     _script(stage)
@@ -1019,8 +1077,17 @@ async def test_the_agent_port_of_the_run_reaches_the_peers(tmp_path: Path) -> No
     assert stage.setup.agent_port == 32100
 
 
+async def test_the_inferencex_commit_of_the_run_reaches_the_peers(tmp_path: Path) -> None:
+    stage = _stage(tmp_path)
+    stage.settings = replace(stage.settings, inferencex_commit="8a76a78e41")
+
+    stage._session()
+
+    assert stage.setup.inferencex_commit == "8a76a78e41"
+
+
 @pytest.mark.parametrize(("review_gate", "handed"), [(True, "host"), (False, "off")])
-async def test_the_session_s_review_stands_in_for_each_arbor_s_own(
+async def test_the_session_s_review_stands_in_for_each_component_agent_s_own(
     tmp_path: Path, review_gate: bool, handed: str
 ) -> None:
     stage = _stage(tmp_path)
@@ -1593,6 +1660,16 @@ async def test_a_failed_opening_judge_call_opens_one_branch_at_k_one(tmp_path: P
     ]
 
 
+async def test_a_failed_judge_call_logs_its_error(tmp_path: Path, caplog: pytest.LogCaptureFixture) -> None:
+    stage = _stage(tmp_path)
+    stage.judge = ScriptedCompletion(error=CompletionFailed("judge call failed: RuntimeError: status=529"))
+
+    with caplog.at_level(logging.WARNING, logger="hyperloom_multibranch.scheduling.judge"):
+        await stage.run()
+
+    assert "judge call failed: RuntimeError: status=529" in caplog.text
+
+
 def _crowding(stage: Stage) -> type[RefusingRuntime]:
     """A runtime during whose start of ``b01`` two forks of it are asked for, which the fork desk admits
     onto the last free slots; a test double for the admissions that race the opening batch, not a placeholder."""
@@ -1761,6 +1838,7 @@ async def test_final_only_validates_the_branches_a_session_that_never_reached_fi
     report = json.loads(stage.layout.report.read_text())
     assert report["final"]["chosen"]["commit"] == head
     assert report["stop_reason"] == SessionStopReason.TIME_EXHAUSTED.value
+    assert report["agent_isolation"] == ISOLATION.to_dict(), "the recovery reports how the session's agents ran"
     [final] = [row for row in _decisions(stage) if row["kind"] == "final"]
     assert float(str(final["at"])) > SessionBudget.from_hours(SETTINGS.max_hours, START).deadline
     # The session that opened the integration branch recorded its STOP; a second one is a conflicting write.
@@ -1814,6 +1892,269 @@ async def test_final_only_finishes_a_session_that_was_killed_before_it_could_clo
         persisted_run(stage.layout.root)
 
 
+async def _killed_before_final(tmp_path: Path) -> tuple[Stage, PersistedRun]:
+    """A session whose deadline passed before FINAL and that was then killed with its machine before CLOSE could write
+    its report, as a host's preemption leaves it, read back; and the stage it ran on."""
+    stage = _stage(tmp_path)
+    stage.scripts = SCRIPTS
+    stage.toolbox_type = StuckStopToolbox
+    await stage.run()
+    stage.layout.report.unlink()
+    _as_another_pod(stage.layout.pids)
+    persisted = persisted_run(stage.layout.root)
+    assert persisted.ended is SessionStopReason.KILLED
+    return stage, persisted
+
+
+async def test_a_hosted_restart_whose_final_chooses_finishes_the_preempted_session_after_the_restart(
+    tmp_path: Path,
+) -> None:
+    stage, persisted = await _killed_before_final(tmp_path)
+
+    recovery = _recovery(stage, persisted.settings)
+    outcome = await recovery.finish(persisted.ended, restart=True)
+
+    assert outcome.final is not None and outcome.final.chosen is not None
+    assert outcome.final.chosen.commit == await stage.repo.head(INTEGRATION_BRANCH)
+    assert (outcome.stop_reason, outcome.error, outcome.exit_code) == (SessionStopReason.FINISHED_AFTER_RESTART, "", 0)
+    report = json.loads(stage.layout.report.read_text())
+    assert report["stop_reason"] == SessionStopReason.FINISHED_AFTER_RESTART.value == "finished_after_restart"
+    assert report["final"]["chosen"]["commit"] == outcome.final.chosen.commit
+    # The tests the earlier start left are withdrawn for how it ended; CLOSE withdraws and records for how this one did.
+    ended = [SessionStopReason.KILLED.value, SessionStopReason.FINISHED_AFTER_RESTART.value]
+    assert recovery.toolbox.withdrawals == ended
+    closes = [row["detail"] for row in _decisions(stage) if (row["kind"], row["reason"]) == ("phase", "close")]
+    assert closes[-1]["stop_reason"] == SessionStopReason.FINISHED_AFTER_RESTART.value
+    with pytest.raises(ValueError, match="already chose"):
+        persisted_run(stage.layout.root)
+
+
+async def test_a_hosted_restart_whose_final_is_stopped_still_fails(tmp_path: Path) -> None:
+    stage, persisted = await _killed_before_final(tmp_path)
+    recovery = _recovery(stage, persisted.settings)
+    recovery.toolbox_type = _slow_final(recovery, interrupt=True)
+
+    outcome = await recovery.finish(persisted.ended, restart=True)
+
+    assert (outcome.stop_reason, outcome.final, outcome.exit_code) == (SessionStopReason.SIGNAL, None, 1)
+    assert json.loads(stage.layout.report.read_text())["stop_reason"] == SessionStopReason.SIGNAL.value
+
+
+class FailingRegressionSet(FakeRegressionCheck):
+    """A regression set every commit fails, so FINAL finds no eligible candidate and chooses nothing."""
+
+    async def check_every_case(self, commit: str) -> RegressionOutcome:
+        self.every_case.append(commit)
+        return RegressionOutcome(False, "every case failed", 1)
+
+
+async def test_a_hosted_restart_whose_final_chooses_nothing_keeps_the_reason_the_session_ended_for(
+    tmp_path: Path,
+) -> None:
+    stage, persisted = await _killed_before_final(tmp_path)
+    recovery = _recovery(stage, persisted.settings)
+    recovery.regression = FailingRegressionSet()
+
+    outcome = await recovery.finish(persisted.ended, restart=True)
+
+    assert recovery.regression.every_case, "FINAL checked the candidates"
+    assert outcome.final is not None and outcome.final.chosen is None
+    assert (outcome.stop_reason, outcome.exit_code) == (SessionStopReason.KILLED, 1)
+    assert json.loads(stage.layout.report.read_text())["stop_reason"] == SessionStopReason.KILLED.value
+
+
+async def test_a_hosted_restart_whose_final_fails_reports_the_reason_the_session_ended_for(tmp_path: Path) -> None:
+    stage, persisted = await _killed_before_final(tmp_path)
+    recovery = _recovery(stage, persisted.settings)
+    recovery.regression = NoRegressionSet()
+
+    with pytest.raises(LookupError, match=REGRESSION_SET_GONE):
+        await recovery.finish(persisted.ended, restart=True)
+
+    report = json.loads(stage.layout.report.read_text())
+    assert (report["stop_reason"], report["final"]) == (SessionStopReason.KILLED.value, None)
+
+
+async def test_a_hosted_restart_keeps_a_reason_a_session_that_ran_its_course_ends_for(tmp_path: Path) -> None:
+    stage = _stage(tmp_path)
+    stage.scripts = SCRIPTS
+    stage.toolbox_type = StuckStopToolbox
+    await stage.run()
+    persisted = persisted_run(stage.layout.root)
+
+    outcome = await _recovery(stage, persisted.settings).finish(persisted.ended, restart=True)
+
+    assert (outcome.stop_reason, outcome.exit_code) == (SessionStopReason.TIME_EXHAUSTED, 0)
+
+
+class KilledInPreludeToolbox(LeasingToolbox):
+    """A toolbox whose process dies, as a machine that is lost kills it, the moment it has accepted the first root
+    test: no test it accepted ever measures, so nothing lands and PRELUDE records no baseline. It prints where the
+    session is and when it died first. For :func:`_killed_in_prelude`, run in a process of its own."""
+
+    def __init__(self, *args: Any, **kwargs: Any) -> None:
+        super().__init__(*args, **kwargs)
+        self.executor.gate.clear()
+
+    async def submit_test(self, request: TestRequest) -> str:
+        request_id = await super().submit_test(request)
+        if request.purpose is Purpose.BASELINE:
+            print(json.dumps({"now": self.clock(), "request_id": request_id}), flush=True)
+            os._exit(0)
+        return request_id
+
+
+class HeldToolbox(LeasingToolbox):
+    """The leasing toolbox whose tests never end on their own, as a hosted measurement takes minutes: one taken up
+    from the submit log is still running when the session withdraws it. ``stopped`` holds every running test its
+    executor was told to stop, as the hosted backend is told to end the test's sandbox. Not a placeholder: the fake
+    runs every test at once otherwise."""
+
+    def __init__(self, *args: Any, **kwargs: Any) -> None:
+        super().__init__(*args, **kwargs)
+        self.executor.gate.clear()
+        self.stopped: list[str] = []
+        self.executor.withdraw = self.stopped.append  # type: ignore[method-assign]
+
+
+def _killed_in_prelude(workspace: Path) -> dict[str, object]:
+    """Run a session in ``workspace`` until its process dies with the first root test accepted and not measured
+    (:class:`KilledInPreludeToolbox`). Never returns: it prints where the session is, the framework checkout it rooted
+    on, and the time it died at and the root test it left as its last line. Run it in a process of its own."""
+
+    framework = framework_checkout(workspace)
+    os.environ[MB_FRAMEWORK_REPO_ENV] = str(framework)
+    stage = _stage(workspace)
+    stage.toolbox_type = KilledInPreludeToolbox
+    print(json.dumps({"root": str(stage.layout.root), "framework": str(framework)}), flush=True)
+    asyncio.run(stage.run())
+    raise AssertionError("the session outlived the kill of its process")
+
+
+def _in_a_process(call: str) -> dict[str, object]:
+    """``call``, an expression of this module's, run in a process of its own that dies in it: what it printed, every
+    line a JSON object, merged."""
+
+    source = Path(hyperloom_multibranch.__file__).parents[1]
+    code = (
+        f"import sys\nfrom pathlib import Path\nsys.path.insert(0, {str(source)!r})\n"
+        f"from hyperloom_multibranch.tests import test_skeleton\ntest_skeleton.{call}"
+    )
+    ran = subprocess.run([sys.executable, "-c", code], capture_output=True, text=True, timeout=600, check=False)
+    assert ran.returncode == 0, ran.stderr
+    printed: dict[str, object] = {}
+    for line in ran.stdout.splitlines():
+        if line.startswith("{"):
+            printed.update(json.loads(line))
+    return printed
+
+
+async def test_a_finish_over_a_session_killed_before_its_baseline_ends_with_no_candidate_and_withdraws_its_tests(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    left = await asyncio.to_thread(_in_a_process, f"_killed_in_prelude(Path({str(tmp_path / 'workspace')!r}))")
+    monkeypatch.setenv(MB_FRAMEWORK_REPO_ENV, str(left["framework"]))
+    root = Path(str(left["root"]))
+    layout = SessionLayout(root)
+    assert not layout.report.exists(), "the process died before CLOSE"
+    _as_another_pod(layout.pids)
+    persisted = persisted_run(root)
+    assert persisted.ended is SessionStopReason.KILLED
+    assert not await asyncio.to_thread(prelude_landed, root), "the rule gate wrote no baseline"
+
+    time = VirtualClock(float(str(left["now"])))
+    recovery = Stage(layout, time, HeldRegistry(layout.pids, time), ScriptedCompletion(), [], settings=SETTINGS)
+    recovery.toolbox_type = HeldToolbox
+    outcome = await recovery.finish(persisted.ended)
+
+    assert (outcome.stop_reason, outcome.final, outcome.error) == (SessionStopReason.KILLED, None, NO_BASELINE)
+    assert outcome.exit_code == 1 and outcome.close is not None and outcome.close.stop.clean
+    report = json.loads(layout.report.read_text())
+    assert (report["stop_reason"], report["final"]) == (SessionStopReason.KILLED.value, None)
+    assert NO_BASELINE in str(report["error"])
+    # The root test the dead process left in flight is taken up from the submit log and stopped while it runs, not
+    # left to hold its sandbox; CLOSE's own session-wide withdrawal follows and finds nothing left.
+    in_flight = str(left["request_id"])
+    assert isinstance(recovery.toolbox, HeldToolbox) and in_flight in recovery.toolbox.stopped
+    assert recovery.toolbox.withdrawals == [SessionStopReason.KILLED.value] * 2
+    record = await recovery.handle(Role.OBSERVER).record(in_flight)
+    assert record.result is None and record.withdrawal_reason == SessionStopReason.KILLED.value
+    assert [row["reason"] for row in _decisions(recovery) if row["kind"] == "final"] == [NO_BASELINE]
+
+
+def _leave_before_final(workspace: Path) -> dict[str, object]:
+    """Run a session in ``workspace`` whose deadline passes before FINAL, as the account this process is: where it is,
+    the time it ended at and the framework checkout it rooted on. Another account runs it through :func:`_as_account`."""
+
+    framework = framework_checkout(workspace)
+    os.environ[MB_FRAMEWORK_REPO_ENV] = str(framework)
+    judge.SETTLED_TESTS = 0
+    stage = _stage(workspace)
+    stage.scripts = SCRIPTS
+    stage.toolbox_type = StuckStopToolbox
+    asyncio.run(stage.run())
+    return {"root": str(stage.layout.root), "now": stage.time.now(), "framework": str(framework)}
+
+
+def _finish_as_final_only(left: Mapping[str, object]) -> dict[str, object]:
+    """FINAL and CLOSE over the session :func:`_leave_before_final` ``left``, read back as ``final-only`` reads it, as
+    the account this process is: how it ended and the commit it chose."""
+
+    os.environ[MB_FRAMEWORK_REPO_ENV] = str(left["framework"])
+    judge.SETTLED_TESTS = 0
+    persisted = persisted_run(Path(str(left["root"])))
+    time = VirtualClock(float(str(left["now"])))
+    registry = HeldRegistry(persisted.layout.pids, time)
+    recovery = Stage(persisted.layout, time, registry, ScriptedCompletion(), [], settings=persisted.settings)
+    outcome = asyncio.run(recovery.finish(persisted.ended))
+    chosen = None if outcome.final is None or outcome.final.chosen is None else outcome.final.chosen.commit
+    return {"stop_reason": outcome.stop_reason.value, "exit_code": outcome.exit_code, "chosen": chosen}
+
+
+def _as_account(accounts: Accounts, uid: int, call: str) -> dict[str, object]:
+    """``call``, an expression of this module's, evaluated by ``uid`` in a process of its own under umask ``022``: its
+    JSON result."""
+
+    source = Path(hyperloom_multibranch.__file__).parents[1]
+    code = (
+        f"import json, sys\nfrom pathlib import Path\nsys.path.insert(0, {str(source)!r})\n"
+        f"from hyperloom_multibranch.tests import test_skeleton\nprint(json.dumps(test_skeleton.{call}))"
+    )
+    return json.loads(accounts.run(uid, code).splitlines()[-1])
+
+
+def test_a_final_only_of_another_account_of_the_group_finishes_what_one_account_left_before_final() -> None:
+    with other_accounts() as accounts:
+        source = Path(hyperloom_multibranch.__file__).parents[1]
+        if any(not directory.stat().st_mode & stat.S_IXOTH for directory in (source, *source.parents)):
+            pytest.skip(f"another account cannot reach this checkout's {source}")
+        if accounts.python != sys.executable:
+            pytest.skip(f"another account cannot run {sys.executable}, whose environment holds the project's packages")
+        workspace = accounts.shared_dir("workspace")
+        left = _as_account(accounts, accounts.first, f"_leave_before_final(Path({str(workspace)!r}))")
+
+        finished = _as_account(accounts, accounts.second, f"_finish_as_final_only({left!r})")
+
+        assert (finished["stop_reason"], finished["exit_code"]) == (SessionStopReason.TIME_EXHAUSTED.value, 0)
+        root = Path(str(left["root"]))
+        layout = SessionLayout(root)
+        assert finished["chosen"] is not None
+        assert json.loads(layout.report.read_text())["final"]["chosen"]["commit"] == finished["chosen"]
+        assert (layout.report.stat().st_uid, layout.decisions.stat().st_uid) == (accounts.second, accounts.first)
+        assert [row["kind"] for row in read_jsonl(layout.decisions)].count("final") == 1, (
+            "the second account appended FINAL's decision to the log the first one made"
+        )
+        # The experiment repository's own modes are git's shared-repository rule, not the session files' one.
+        found = (path for path in root.rglob("*") if path.is_dir() and not path.is_symlink())
+        directories = [root, *(path for path in found if not path.is_relative_to(layout.repo))]
+        assert [path for path in directories if stat.S_IMODE(path.stat().st_mode) != 0o2775] == []
+        records = (layout.roster, layout.decisions, layout.judge, layout.merges, layout.root_recipe, layout.pids)
+        records += (layout.report, layout.report_markdown, layout.reports / FRONTIER_LOG)
+        assert [path for path in records if stat.S_IMODE(path.stat().st_mode) != 0o664] == [], (
+            "every record a later leg reads or appends to is the group's"
+        )
+
+
 async def test_a_stop_signal_during_a_final_only_still_leaves_a_report_within_one_close_grace(
     tmp_path: Path,
 ) -> None:
@@ -1836,6 +2177,162 @@ async def test_a_stop_signal_during_a_final_only_still_leaves_a_report_within_on
     # The signal is how this one ended, so the session it reports ends there too and is still open to a later FINAL.
     assert json.loads(stage.layout.report.read_text())["stop_reason"] == SessionStopReason.SIGNAL.value
     assert persisted_run(stage.layout.root).ended is SessionStopReason.SIGNAL
+
+
+async def test_a_resume_after_a_stop_signal_continues_explore_on_new_branches_and_archives_nothing_again(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    archive = tmp_path / "rsi"
+    monkeypatch.setenv(ARCHIVE_ENV, str(archive))
+    stage = _stage(tmp_path)
+    stage.steps = _signalling(stage)
+    stopped = await stage.run()
+    assert stopped.stop_reason is SessionStopReason.SIGNAL
+    first = json.loads(stage.layout.report.read_text())
+    assert first["exports"]["knowledge"]["archive"]["status"] == ARCHIVED
+    [tree] = (archive / "trees").glob("*.json")
+    archived, deadline = tree.read_bytes(), read_manifest(stage.layout.manifest).deadline
+
+    persisted = await asyncio.to_thread(resumable_run, stage.layout.root)
+    assert persisted.ended is SessionStopReason.SIGNAL
+    resumed = _resumed(stage, persisted.settings)
+    outcome = await resumed.resume(persisted.ended)
+
+    assert (outcome.stop_reason, outcome.error, outcome.exit_code) == (SessionStopReason.TIME_EXHAUSTED, "", 0)
+    assert outcome.close is not None and outcome.close.stop.clean
+    head = await resumed.repo.head(INTEGRATION_BRANCH)
+    assert outcome.final is not None and outcome.final.chosen is not None and outcome.final.chosen.commit == head
+    submitted = [test for rid, test in resumed.toolbox.requests.items() if rid not in stage.toolbox.requests]
+    assert submitted and not any(test.purpose is Purpose.BASELINE for test in submitted), "no PRELUDE"
+    [phase] = [row for row in _decisions(stage) if row["kind"] == "phase" and row["reason"] == "resume"]
+    assert phase["detail"] == {
+        "ended": "signal",
+        "downtime_seconds": DOWNTIME_SECONDS,
+        "deadline": deadline + DOWNTIME_SECONDS,
+    }
+    assert read_manifest(stage.layout.manifest).deadline == deadline + DOWNTIME_SECONDS
+    assert [row["reason"] for row in _decisions(stage) if row["kind"] == "phase"].count("prelude") == 1
+    roster = {entry["branch"]: entry for entry in json.loads(stage.layout.roster.read_text())["entries"]}
+    assert {"b01", "b02"} < roster.keys() and roster["b03"]["origin"] == BranchOrigin.FIRST_BATCH.value
+    assert resumed.sessions.started == {"b03": await stage.root()}
+    lineage = {branch.branch: branch for branch in (await resumed.handle(Role.OBSERVER).lineage()).branches}
+    assert lineage[INTEGRATION_BRANCH].stop_reason == f"session_end: {SessionStopReason.TIME_EXHAUSTED.value}"
+    report = json.loads(stage.layout.report.read_text())
+    knowledge = report["exports"]["knowledge"]
+    assert {(step["status"], step["reason"]) for step in knowledge.values()} == {(SKIPPED, ARCHIVED_BEFORE)}
+    assert tree.read_bytes() == archived and resumed.author.calls == []
+
+    with pytest.raises(ValueError, match="already chose"):
+        await asyncio.to_thread(resumable_run, stage.layout.root)
+
+
+async def test_a_resume_up_to_the_first_starts_deadline_gives_no_downtime_back(tmp_path: Path) -> None:
+    stage = _stage(tmp_path)
+    stage.steps = _signalling(stage)
+    await stage.run()
+    manifest = read_manifest(stage.layout.manifest)
+
+    persisted = await asyncio.to_thread(resumable_run, stage.layout.root)
+    resumed = _resumed(stage, persisted.settings, downtime=60.0)
+    outcome = await resumed.resume(persisted.ended, manifest.deadline)
+
+    assert outcome.stop_reason is SessionStopReason.TIME_EXHAUSTED and outcome.final is not None
+    [phase] = [row for row in _decisions(stage) if row["kind"] == "phase" and row["reason"] == "resume"]
+    assert phase["detail"] == {"ended": "signal", "downtime_seconds": 60.0, "deadline": manifest.deadline}
+    assert read_manifest(stage.layout.manifest) == manifest
+    [explore] = [row for row in _decisions(stage) if row["kind"] == "phase" and row["reason"] == "explore"][1:]
+    assert explore["detail"]["explore_end"] <= manifest.deadline
+
+
+async def test_a_resume_is_refused_once_the_session_spent_the_gpu_hours_explore_has(tmp_path: Path) -> None:
+    stage = _stage(tmp_path)
+    stage.steps = _signalling(stage)
+    await stage.run()
+    manifest = json.loads(stage.layout.manifest.read_text())
+
+    manifest["settings"]["max_gpu_hours"] = TINY_GPU_HOURS
+    stage.layout.manifest.write_text(json.dumps(manifest))
+
+    with pytest.raises(ResumeRefused, match="all EXPLORE has under --max-gpu-hours 0.01"):
+        await asyncio.to_thread(resumable_run, stage.layout.root)
+
+    manifest["settings"]["max_gpu_hours"] = LEASED_GPU_HOURS * 100
+    stage.layout.manifest.write_text(json.dumps(manifest))
+    assert (await asyncio.to_thread(resumable_run, stage.layout.root)).settings.max_gpu_hours == LEASED_GPU_HOURS * 100
+
+
+async def test_a_second_resume_after_a_stopped_resume_archives_nothing_again_either(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    archive = tmp_path / "rsi"
+    monkeypatch.setenv(ARCHIVE_ENV, str(archive))
+    stage = _stage(tmp_path)
+    stage.steps = _signalling(stage)
+    await stage.run()
+    [tree] = (archive / "trees").glob("*.json")
+    archived = tree.read_bytes()
+
+    persisted = await asyncio.to_thread(resumable_run, stage.layout.root)
+    resumed = _resumed(stage, persisted.settings)
+    resumed.steps = {"b03": _signalling(resumed)["b01"]}
+    stopped = await resumed.resume(persisted.ended)
+    assert stopped.stop_reason is SessionStopReason.SIGNAL and stopped.final is None
+
+    persisted = await asyncio.to_thread(resumable_run, stage.layout.root)
+    again = _resumed(stage, persisted.settings)
+    outcome = await again.resume(persisted.ended)
+
+    assert outcome.final is not None and outcome.final.chosen is not None
+    knowledge = json.loads(stage.layout.report.read_text())["exports"]["knowledge"]
+    assert {(step["status"], step["reason"]) for step in knowledge.values()} == {(SKIPPED, ARCHIVED_BEFORE)}
+    assert tree.read_bytes() == archived and resumed.author.calls == [] and again.author.calls == []
+
+
+async def test_a_resume_after_a_close_whose_exports_failed_once_it_archived_archives_nothing_again(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    archive = tmp_path / "rsi"
+    monkeypatch.setenv(ARCHIVE_ENV, str(archive))
+    stage = _stage(tmp_path)
+    stage.steps = _signalling(stage)
+    await stage.run()
+    [tree] = (archive / "trees").glob("*.json")
+    archived = tree.read_bytes()
+    report = json.loads(stage.layout.report.read_text())
+    stage.layout.report.write_text(json.dumps({**report, "exports": None}), encoding="utf-8")
+
+    persisted = await asyncio.to_thread(resumable_run, stage.layout.root)
+    resumed = _resumed(stage, persisted.settings)
+    outcome = await resumed.resume(persisted.ended)
+
+    assert outcome.final is not None and outcome.final.chosen is not None
+    knowledge = json.loads(stage.layout.report.read_text())["exports"]["knowledge"]
+    assert {(step["status"], step["reason"]) for step in knowledge.values()} == {(SKIPPED, ARCHIVED_BEFORE)}
+    assert tree.read_bytes() == archived and resumed.author.calls == []
+
+
+async def test_a_resume_of_a_killed_session_stops_the_branches_it_left_open(tmp_path: Path) -> None:
+    stage = _stage(tmp_path)
+    stage.steps = _signalling(stage)
+    await stage.run()
+    stage.layout.report.unlink()
+    _as_another_pod(stage.layout.pids)
+    snapshot = json.loads(stage.layout.roster.read_text())
+    for entry in snapshot["entries"]:
+        if entry["branch"] == "b01":
+            entry["stop"] = None
+    stage.layout.roster.write_text(json.dumps({**snapshot, "closed": False}), encoding="utf-8")
+
+    persisted = await asyncio.to_thread(resumable_run, stage.layout.root)
+    assert persisted.ended is SessionStopReason.KILLED
+    resumed = _resumed(stage, persisted.settings)
+    outcome = await resumed.resume(persisted.ended)
+
+    assert outcome.final is not None and outcome.final.chosen is not None
+    assert outcome.stop_reason in COMPLETED_REASONS and outcome.exit_code == 0, "a resume that chose finished the run"
+    [left_open] = [row for row in _decisions(stage) if row["kind"] == "stop" and row["branch"] == "b01"][1:]
+    assert left_open["reason"] == f"session_end: {SessionStopReason.KILLED.value}"
+    assert resumed.toolbox.withdrawals[0] == SessionStopReason.KILLED.value
 
 
 class NoRegressionSet(FakeRegressionCheck):
@@ -2007,8 +2504,8 @@ def _judged_rows(prompt: str) -> dict[str, dict[str, Any]]:
 async def test_two_agents_each_start_at_the_root_on_the_share_of_the_session_s_directions_split_after_prelude(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    # The split's own subprocesses are tested with a fake Arbor in scheduling/tests/test_agent_plans.py; here a
-    # stand-in, since real subprocesses would let the virtual clock run past EXPLORE.
+    # The split's own subprocesses are tested with a stand-in agent in scheduling/tests/test_agent_plans.py; here the
+    # split itself is one, since real subprocesses would let the virtual clock run past EXPLORE.
     asked: list[tuple[tuple[str, ...], str, Path]] = []
     given: list[OpShares | None] = []
 
@@ -2021,13 +2518,15 @@ async def test_two_agents_each_start_at_the_root_on_the_share_of_the_session_s_d
 
     monkeypatch.setattr(lifecycle, "agent_plans", split)
     stage = _stage(tmp_path)
-    stage.settings = replace(SETTINGS, agents=("/agents/arbor", "/agents/arbor"), agent_directions="/maps/d.json")
+    stage.settings = replace(
+        SETTINGS, agents=("/agents/component", "/agents/component"), agent_directions="/maps/d.json"
+    )
     stage.judge = ScriptedCompletion([])
 
     outcome = await stage.run()
 
     assert outcome.stop_reason is SessionStopReason.TIME_EXHAUSTED
-    assert asked == [(("/agents/arbor", "/agents/arbor"), "/maps/d.json", stage.layout.agent_plans)]
+    assert asked == [(("/agents/component", "/agents/component"), "/maps/d.json", stage.layout.agent_plans)]
     assert {branch for branch, origin in _origins(stage).items() if origin == "agent"} == {"b01", "b02"}
     root = await stage.root()
     assert given == [await stage.handle(Role.OBSERVER).op_shares(root)]
@@ -2048,16 +2547,16 @@ AGENT_CURVES = {
 async def test_two_agents_started_on_their_shares_both_have_their_keeps_merged_into_the_integration_branch(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    # The operator's first work item (plan, two Arbors, merge), with each agent's keep as its branch's scripted change.
+    # A plan, two component agents and a merge, with each agent's keep as its branch's scripted change.
     async def split(
         agents: tuple[str, ...], map_file: str, work_dir: Path, root_shares: OpShares | None = None, *_source: str
     ) -> tuple[str, ...]:
         return ("/shares/share-1.json", "/shares/share-2.json")
 
     monkeypatch.setattr(lifecycle, "agent_plans", split)
-    monkeypatch.setattr(lifecycle, "arbor_agents", _two_arbors)
+    monkeypatch.setattr(lifecycle, "component_agents", _two_component_agents)
     stage = _stage(tmp_path)
-    stage.settings = replace(SETTINGS, agents=("/agents/arbor", "/agents/arbor"))
+    stage.settings = replace(SETTINGS, agents=("/agents/component", "/agents/component"))
     # b01 maps, and the two shares open as b02 and b03.
     stage.scripts = {"b02": (tagged("a1"),), "b03": (tagged("a2"),)}
     stage.explored = stage.measured = AGENT_CURVES
@@ -2075,8 +2574,9 @@ async def test_two_agents_started_on_their_shares_both_have_their_keeps_merged_i
     assert recipe_tags(await stage.repo.read_recipe(head)) == {"a1", "a2"}
 
 
-async def _two_arbors(agents: tuple[str, ...], work_dir: Path) -> dict[int, Path]:
-    """Every agent an Arbor checkout, with none fetched: real subprocesses would let the virtual clock run on."""
+async def _two_component_agents(agents: tuple[str, ...], work_dir: Path) -> dict[int, Path]:
+    """Every agent a component agent's checkout, with none fetched: real subprocesses would let the virtual clock run
+    on."""
 
     return dict.fromkeys(range(len(agents)), work_dir / "sources" / "0")
 
@@ -2097,10 +2597,9 @@ def _agent_map(stage: Stage) -> list[dict[str, Any]]:
 PASS_SECONDS = 600.0
 
 
-async def test_without_a_map_two_arbors_split_the_map_of_the_session_s_dossier_pass(
+async def test_without_a_map_two_component_agents_split_the_map_of_the_session_s_dossier_pass(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    outcome = _dossier_outcome()
     asked: list[tuple[str, OpShares | None]] = []
     started: list[DossierStart] = []
 
@@ -2113,12 +2612,12 @@ async def test_without_a_map_two_arbors_split_the_map_of_the_session_s_dossier_p
     async def dossier(start: DossierStart) -> DossierOutcome:
         started.append(start)
         await stage.time.sleep(PASS_SECONDS)
-        return outcome(Path("/pass/directions.json"), Path("/pass/docs/dossier/qwen3-8b"), MAPPED)
+        return DossierOutcome(Path("/pass/directions.json"), Path("/pass/docs/dossier/qwen3-8b"), MAPPED)
 
     monkeypatch.setattr(lifecycle, "agent_plans", split)
-    monkeypatch.setattr(lifecycle, "arbor_agents", _two_arbors)
+    monkeypatch.setattr(lifecycle, "component_agents", _two_component_agents)
     stage = _stage(tmp_path)
-    stage.settings = replace(SETTINGS, agents=("/agents/arbor", "/agents/arbor"))
+    stage.settings = replace(SETTINGS, agents=("/agents/component", "/agents/component"))
     stage.dossier_pass = dossier
     stage.judge = ScriptedCompletion([])
 
@@ -2127,8 +2626,8 @@ async def test_without_a_map_two_arbors_split_the_map_of_the_session_s_dossier_p
     assert outcome.stop_reason is SessionStopReason.TIME_EXHAUSTED
     [start] = started
     root = await stage.root()
-    assert (start.source, start.start_commit) == ("/agents/arbor", root)
-    assert stage.sessions.mapping == {"b01": ("/agents/arbor", "/agents/arbor")}
+    assert (start.source, start.start_commit) == ("/agents/component", root)
+    assert stage.sessions.mapping == {"b01": ("/agents/component", "/agents/component")}
     assert asked == [("/pass/directions.json", None)]
     read, began, ended = _agent_map(stage)
     assert [read["reason"], began["reason"], ended["reason"]] == [ROOT_SHARES_READ, DOSSIER_STARTED, DOSSIER_ENDED]
@@ -2156,7 +2655,6 @@ async def test_without_a_map_two_arbors_split_the_map_of_the_session_s_dossier_p
 async def test_a_dossier_pass_with_no_map_or_no_minutes_leaves_the_split_to_the_generic_map(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, minutes: float
 ) -> None:
-    outcome = _dossier_outcome()
     asked: list[str] = []
     started: list[DossierStart] = []
 
@@ -2168,12 +2666,12 @@ async def test_a_dossier_pass_with_no_map_or_no_minutes_leaves_the_split_to_the_
 
     async def dossier(start: DossierStart) -> DossierOutcome:
         started.append(start)
-        return outcome(None, None, "it refused its config: the pack has no dossier skill")
+        return DossierOutcome(None, None, "it refused its config: the pack has no dossier skill")
 
     monkeypatch.setattr(lifecycle, "agent_plans", split)
-    monkeypatch.setattr(lifecycle, "arbor_agents", _two_arbors)
+    monkeypatch.setattr(lifecycle, "component_agents", _two_component_agents)
     stage = _stage(tmp_path)
-    stage.settings = replace(SETTINGS, agents=("/agents/arbor", "/agents/arbor"), agent_dossier_minutes=minutes)
+    stage.settings = replace(SETTINGS, agents=("/agents/component", "/agents/component"), agent_dossier_minutes=minutes)
     stage.dossier_pass = dossier
     stage.judge = ScriptedCompletion([])
 
@@ -2189,7 +2687,7 @@ async def test_a_dossier_pass_with_no_map_or_no_minutes_leaves_the_split_to_the_
         assert (steps, started) == ([ROOT_SHARES_READ, DOSSIER_SKIPPED], [])
 
 
-async def _one_arbor(agents: tuple[str, ...], work_dir: Path) -> dict[int, Path]:
+async def _one_component_agent(agents: tuple[str, ...], work_dir: Path) -> dict[int, Path]:
     return {0: work_dir / "sources" / "0"}
 
 
@@ -2203,20 +2701,19 @@ def _pass_wrote(tmp_path: Path) -> tuple[Path, Path]:
     return map_file, dossier
 
 
-async def test_a_run_that_stops_after_its_map_maps_one_arbor_keeps_map_and_dossier_and_opens_no_branch(
+async def test_a_run_that_stops_after_its_map_maps_one_component_agent_keeps_map_and_dossier_and_opens_no_branch(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    outcome = _dossier_outcome()
     map_file, dossier = _pass_wrote(tmp_path)
     started: list[DossierStart] = []
 
     async def mapping(start: DossierStart) -> DossierOutcome:
         started.append(start)
-        return outcome(map_file, dossier, MAPPED)
+        return DossierOutcome(map_file, dossier, MAPPED)
 
-    monkeypatch.setattr(lifecycle, "arbor_agents", _one_arbor)
+    monkeypatch.setattr(lifecycle, "component_agents", _one_component_agent)
     stage = _stage(tmp_path)
-    stage.settings = replace(SETTINGS, agents=("/agents/arbor",), stop_after_map=True)
+    stage.settings = replace(SETTINGS, agents=("/agents/component",), stop_after_map=True)
     stage.dossier_pass = mapping
 
     outcome = await stage.run()
@@ -2228,7 +2725,7 @@ async def test_a_run_that_stops_after_its_map_maps_one_arbor_keeps_map_and_dossi
     summary = json.loads((kept / KEPT_SUMMARY).read_text())
     assert summary == {
         "conc": SETTINGS.workload.conc,
-        "source": "/agents/arbor",
+        "source": "/agents/component",
         "start_commit": start.start_commit,
         "pass": MAPPED,
         "made_by": MADE_BY_PASS,
@@ -2246,20 +2743,19 @@ async def test_a_run_that_stops_after_its_map_maps_one_arbor_keeps_map_and_dossi
 async def test_a_run_that_stops_after_its_map_keeps_a_map_generated_from_the_root_when_the_pass_set_none(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    outcome = _dossier_outcome()
     generated = tmp_path / "generated-directions.json"
     generated.write_text(json.dumps({"directions": [{"id": "m-gemm"}]}))
 
     async def mapping(_start: DossierStart) -> DossierOutcome:
-        return outcome(None, None, "it set no map by its deadline and was stopped")
+        return DossierOutcome(None, None, "it set no map by its deadline and was stopped")
 
     async def generate(*_args: object) -> Path:
         return generated
 
-    monkeypatch.setattr(lifecycle, "arbor_agents", _one_arbor)
+    monkeypatch.setattr(lifecycle, "component_agents", _one_component_agent)
     monkeypatch.setattr(lifecycle, "generated_map", generate)
     stage = _stage(tmp_path)
-    stage.settings = replace(SETTINGS, agents=("/agents/arbor",), stop_after_map=True)
+    stage.settings = replace(SETTINGS, agents=("/agents/component",), stop_after_map=True)
     stage.dossier_pass = mapping
 
     outcome = await stage.run()
@@ -2277,18 +2773,17 @@ async def test_a_run_that_stops_after_its_map_keeps_a_map_generated_from_the_roo
 async def test_a_run_that_stops_after_its_map_and_gets_none_fails_with_why_and_keeps_nothing(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    outcome = _dossier_outcome()
 
     async def mapping(_start: DossierStart) -> DossierOutcome:
-        return outcome(None, None, "it refused its config: the pack has no dossier skill")
+        return DossierOutcome(None, None, "it refused its config: the pack has no dossier skill")
 
     async def generate(*_args: object) -> Path:
         raise SplitFailed("the root has no shares to generate a map from")
 
-    monkeypatch.setattr(lifecycle, "arbor_agents", _one_arbor)
+    monkeypatch.setattr(lifecycle, "component_agents", _one_component_agent)
     monkeypatch.setattr(lifecycle, "generated_map", generate)
     stage = _stage(tmp_path)
-    stage.settings = replace(SETTINGS, agents=("/agents/arbor",), stop_after_map=True)
+    stage.settings = replace(SETTINGS, agents=("/agents/component",), stop_after_map=True)
     stage.dossier_pass = mapping
 
     outcome = await stage.run()
@@ -2305,9 +2800,9 @@ async def test_a_run_that_stops_after_its_map_fails_when_its_dossier_pass_crashe
     async def mapping(_start: DossierStart) -> DossierOutcome:
         raise RuntimeError("the pass lost its sandbox")
 
-    monkeypatch.setattr(lifecycle, "arbor_agents", _one_arbor)
+    monkeypatch.setattr(lifecycle, "component_agents", _one_component_agent)
     stage = _stage(tmp_path)
-    stage.settings = replace(SETTINGS, agents=("/agents/arbor",), stop_after_map=True)
+    stage.settings = replace(SETTINGS, agents=("/agents/component",), stop_after_map=True)
     stage.dossier_pass = mapping
 
     with pytest.raises(RuntimeError, match="the pass lost its sandbox"):
@@ -2347,11 +2842,11 @@ def _review_steps(stage: Stage) -> list[str]:
     return [str(row["reason"]) for row in _decisions(stage) if str(row["reason"]).startswith("review ")]
 
 
-def _two_arbors_reviewed(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, read: list[str]) -> tuple[Stage, Path, Path]:
-    """A session of two Arbors with the review on, whose dossier pass writes a map and a dossier; the split records
-    the map's text as it reads it."""
-
-    outcome = _dossier_outcome()
+def _two_component_agents_reviewed(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, read: list[str]
+) -> tuple[Stage, Path, Path]:
+    """A session of two component agents with the review on, whose dossier pass writes a map and a dossier; the split
+    records the map's text as it reads it."""
     map_file, dossier = _pass_wrote(tmp_path)
 
     async def split(
@@ -2361,22 +2856,22 @@ def _two_arbors_reviewed(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, read: 
         return ("/shares/share-1.json", "/shares/share-2.json")
 
     async def mapping(_start: DossierStart) -> DossierOutcome:
-        return outcome(map_file, dossier, MAPPED)
+        return DossierOutcome(map_file, dossier, MAPPED)
 
     monkeypatch.setattr(lifecycle, "agent_plans", split)
-    monkeypatch.setattr(lifecycle, "arbor_agents", _two_arbors)
+    monkeypatch.setattr(lifecycle, "component_agents", _two_component_agents)
     stage = _stage(tmp_path)
-    stage.settings = replace(SETTINGS, agents=("/agents/arbor", "/agents/arbor"), review_gate=True)
+    stage.settings = replace(SETTINGS, agents=("/agents/component", "/agents/component"), review_gate=True)
     stage.dossier_pass = mapping
     stage.judge = ScriptedCompletion([])
     return stage, map_file, dossier
 
 
-async def test_two_arbors_wait_for_a_person_s_review_of_the_map_as_edited_while_the_other_branches_go_on(
+async def test_two_component_agents_wait_for_a_person_s_review_of_the_map_as_edited_while_the_other_branches_go_on(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     read: list[str] = []
-    stage, map_file, dossier = _two_arbors_reviewed(tmp_path, monkeypatch, read)
+    stage, map_file, dossier = _two_component_agents_reviewed(tmp_path, monkeypatch, read)
     edited = json.dumps({"directions": [{"id": "m-attn", "title": "attention"}, {"id": "m-gemm"}]})
 
     outcome, decided = await asyncio.gather(
@@ -2407,7 +2902,7 @@ async def test_a_rejected_map_opens_no_share_branch_and_the_session_goes_on(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     read: list[str] = []
-    stage, _map_file, _dossier = _two_arbors_reviewed(tmp_path, monkeypatch, read)
+    stage, _map_file, _dossier = _two_component_agents_reviewed(tmp_path, monkeypatch, read)
 
     outcome, decided = await asyncio.gather(stage.run(), _decide(stage, False))
 
@@ -2424,11 +2919,11 @@ def _too_late(stage: Stage) -> list[tuple[object, ...]]:
     return [(row["kind"], row["branch"], row["detail"]["step"], row["detail"]["floor"]) for row in rows]
 
 
-async def test_shares_with_less_time_than_an_arbor_iteration_needs_open_none_and_ask_no_review(
+async def test_shares_with_less_time_than_one_iteration_of_a_component_agent_needs_open_none_and_ask_no_review(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     read: list[str] = []
-    stage, _map_file, _dossier = _two_arbors_reviewed(tmp_path, monkeypatch, read)
+    stage, _map_file, _dossier = _two_component_agents_reviewed(tmp_path, monkeypatch, read)
     stage.settings = replace(stage.settings, agent_share_minutes=600.0)
 
     outcome = await stage.run()
@@ -2453,10 +2948,10 @@ async def test_a_review_decided_after_its_clock_ran_out_opens_no_share_and_says_
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     read: list[str] = []
-    stage, _map_file, _dossier = _two_arbors_reviewed(tmp_path, monkeypatch, read)
+    stage, _map_file, _dossier = _two_component_agents_reviewed(tmp_path, monkeypatch, read)
     stage.settings = replace(stage.settings, agent_share_minutes=2.0)
     # No margin before EXPLORE's end: a share opened at any time would run until it, so the clock is EXPLORE's alone.
-    monkeypatch.setattr(_specialist_module("autonomous_session"), "collection_margin", lambda _records, _floor: 0.0)
+    monkeypatch.setattr(autonomous_session, "collection_margin", lambda _records, _floor: 0.0)
 
     async def late() -> dict[str, Any]:
         open_by = await _open_by(stage)
@@ -2471,11 +2966,11 @@ async def test_a_review_decided_after_its_clock_ran_out_opens_no_share_and_says_
     assert "**Decide by about:**" in (stage.layout.review / REVIEW_PAGE).read_text()
 
 
-async def test_without_the_review_gate_two_arbors_split_their_map_at_once_and_the_skip_is_recorded(
+async def test_without_the_review_gate_two_component_agents_split_their_map_at_once_and_the_skip_is_recorded(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     read: list[str] = []
-    stage, map_file, _dossier = _two_arbors_reviewed(tmp_path, monkeypatch, read)
+    stage, map_file, _dossier = _two_component_agents_reviewed(tmp_path, monkeypatch, read)
     stage.settings = replace(stage.settings, review_gate=False)
 
     outcome = await stage.run()
@@ -2486,10 +2981,9 @@ async def test_without_the_review_gate_two_arbors_split_their_map_at_once_and_th
     assert sorted(_shares(stage).values()) == ["/shares/share-1.json", "/shares/share-2.json"]
 
 
-async def test_with_the_review_on_one_arbor_gets_the_map_step_and_takes_the_reviewed_map_whole(
+async def test_with_the_review_on_one_component_agent_gets_the_map_step_and_takes_the_reviewed_map_whole(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    outcome = _dossier_outcome()
     map_file, dossier = _pass_wrote(tmp_path)
     asked: list[tuple[tuple[str, ...], str]] = []
 
@@ -2500,23 +2994,23 @@ async def test_with_the_review_on_one_arbor_gets_the_map_step_and_takes_the_revi
         return ("/shares/share-1.json",)
 
     async def mapping(_start: DossierStart) -> DossierOutcome:
-        return outcome(map_file, dossier, MAPPED)
+        return DossierOutcome(map_file, dossier, MAPPED)
 
     monkeypatch.setattr(lifecycle, "agent_plans", split)
-    monkeypatch.setattr(lifecycle, "arbor_agents", _one_arbor)
+    monkeypatch.setattr(lifecycle, "component_agents", _one_component_agent)
     stage = _stage(tmp_path)
-    stage.settings = replace(SETTINGS, agents=("/agents/arbor",), review_gate=True)
+    stage.settings = replace(SETTINGS, agents=("/agents/component",), review_gate=True)
     stage.dossier_pass = mapping
     stage.judge = ScriptedCompletion([])
 
     outcome, _decided = await asyncio.gather(stage.run(), _decide(stage, True))
 
     assert outcome.stop_reason is SessionStopReason.TIME_EXHAUSTED
-    assert asked == [(("/agents/arbor",), str(map_file))]
+    assert asked == [(("/agents/component",), str(map_file))]
     steps = [row["reason"] for row in _agent_map(stage)]
     assert steps == [ROOT_SHARES_READ, DOSSIER_STARTED, DOSSIER_ENDED]
     assert _review_steps(stage) == [REVIEW_REQUESTED, REVIEW_APPROVED]
-    assert stage.sessions.mapping == {"b01": ("/agents/arbor",)}
+    assert stage.sessions.mapping == {"b01": ("/agents/component",)}
     assert list(_shares(stage).values()) == ["/shares/share-1.json"]
 
 
@@ -2533,10 +3027,10 @@ async def test_a_given_map_is_reviewed_too_and_split_as_given(tmp_path: Path, mo
         return ("/shares/share-1.json", "/shares/share-2.json")
 
     monkeypatch.setattr(lifecycle, "agent_plans", split)
-    monkeypatch.setattr(lifecycle, "arbor_agents", _two_arbors)
+    monkeypatch.setattr(lifecycle, "component_agents", _two_component_agents)
     stage = _stage(tmp_path)
     stage.settings = replace(
-        SETTINGS, agents=("/agents/arbor", "/agents/arbor"), agent_directions=str(given), review_gate=True
+        SETTINGS, agents=("/agents/component", "/agents/component"), agent_directions=str(given), review_gate=True
     )
     stage.judge = ScriptedCompletion([])
 
@@ -2552,15 +3046,14 @@ async def test_a_run_that_stops_after_its_map_does_not_pause_even_with_the_revie
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     # Its stop is the review point: the map is kept and reviewed offline, across the points.
-    outcome = _dossier_outcome()
     map_file, dossier = _pass_wrote(tmp_path)
 
     async def mapping(_start: DossierStart) -> DossierOutcome:
-        return outcome(map_file, dossier, MAPPED)
+        return DossierOutcome(map_file, dossier, MAPPED)
 
-    monkeypatch.setattr(lifecycle, "arbor_agents", _one_arbor)
+    monkeypatch.setattr(lifecycle, "component_agents", _one_component_agent)
     stage = _stage(tmp_path)
-    stage.settings = replace(SETTINGS, agents=("/agents/arbor",), stop_after_map=True, review_gate=True)
+    stage.settings = replace(SETTINGS, agents=("/agents/component",), stop_after_map=True, review_gate=True)
     stage.dossier_pass = mapping
 
     outcome = await stage.run()
@@ -2679,6 +3172,50 @@ async def test_a_branch_whose_specialist_gave_up_is_not_stopped_while_its_candid
     assert steering["detail"]["held"] == {"b02": HoldReason.PENDING_CONFIRM.value}
     [stopped] = [row for row in _decisions(stage) if row["kind"] == "stop" and row["branch"] == "b02"]
     assert str(stopped["reason"]).startswith(StopCause.SESSION_END.value)
+
+
+@dataclass(frozen=True)
+class DevLine:
+    """The session's dev sandboxes as the scheduler reads them: ``b02`` in line for one while ``waits()`` holds."""
+
+    waits: Callable[[], bool]
+
+    def waiting(self) -> frozenset[str]:
+        return frozenset({"b02"}) if self.waits() else frozenset()
+
+
+async def test_the_judge_cannot_stop_a_branch_in_line_for_a_dev_sandbox_but_the_session_end_does(
+    tmp_path: Path,
+) -> None:
+    stage = _stage(tmp_path)
+    stage.dev_leases = cast(DevLeases, DevLine(lambda: True))
+
+    outcome = await stage.run()
+
+    assert (outcome.stop_reason, outcome.error) == (SessionStopReason.TIME_EXHAUSTED, "")
+    _opening, steering, *_ = [_judge_state(prompt) for prompt in _judge_prompts(stage)]
+    assert {row["branch"]: row.get("held") for row in steering["branches"]}["b02"] == HoldReason.DEV_WAIT.value
+    [_, steered] = [row for row in _decisions(stage) if row["kind"] == "judge"]
+    assert (steered["detail"]["stop"], steered["detail"]["held"]) == ({}, {"b02": HoldReason.DEV_WAIT.value})
+    [stopped] = [row for row in _decisions(stage) if row["kind"] == "stop" and row["branch"] == "b02"]
+    assert str(stopped["reason"]).startswith(StopCause.SESSION_END.value)
+
+
+async def test_a_branch_that_left_the_dev_sandbox_line_while_the_judge_answered_is_stopped_on_that_answer(
+    tmp_path: Path,
+) -> None:
+    stage = _stage(tmp_path)
+    stage.dev_leases = cast(DevLeases, DevLine(lambda: len(stage.judge.calls) < 2))
+
+    outcome = await stage.run()
+
+    assert (outcome.stop_reason, outcome.error) == (SessionStopReason.TIME_EXHAUSTED, "")
+    _opening, steering, *_ = [_judge_state(prompt) for prompt in _judge_prompts(stage)]
+    assert {row["branch"]: row.get("held") for row in steering["branches"]}["b02"] == HoldReason.DEV_WAIT.value
+    [_, steered] = [row for row in _decisions(stage) if row["kind"] == "judge"]
+    assert (steered["detail"]["stop"], steered["detail"]["held"]) == ({"b02": STOP_REASON}, {})
+    [stopped] = [row for row in _decisions(stage) if row["kind"] == "stop" and row["branch"] == "b02"]
+    assert str(stopped["reason"]).startswith(StopCause.JUDGE.value)
 
 
 async def test_a_failed_opening_judge_call_opens_no_branch_beside_the_user_branches(tmp_path: Path) -> None:

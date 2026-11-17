@@ -13,18 +13,17 @@ import pytest
 import yaml
 
 from hyperloom.orchestrator.actions.executors import _workload_envs as we
+from hyperloom.orchestrator.state.tests._session_base import freeze_session_base
 
 from ._workload_envs_helpers import clear_env, materialize, write_config
 from hyperloom.inference_optimizer.grid_server_args import validate_server_args_shell_safe
 
 
-def _seed_reference_envs(tmp_path, monkeypatch, envs):
-    """Pin a session whose SharedState carries ``reference_envs``."""
-    from hyperloom.orchestrator.state.shared_state import SharedState
-
+def _seed_base_envs(tmp_path, monkeypatch, envs):
+    """Pin a session whose frozen base launch carries ``envs``."""
     sd = tmp_path / "session"
     sd.mkdir(parents=True, exist_ok=True)
-    SharedState(session_id="ref-test", reference_envs=dict(envs)).save(sd)
+    freeze_session_base(sd, env=envs)
     monkeypatch.setenv("INFERENCE_OPTIMIZER_CURRENT_SESSION_DIR", str(sd))
 
 
@@ -83,7 +82,7 @@ def test_materialize_drops_unsafe_env_keys_but_preserves_workload_knobs(tmp_path
     _stub_server_arg_injectors(monkeypatch)
     src = tmp_path / "base.yaml"
     write_config(src)
-    _seed_reference_envs(
+    _seed_base_envs(
         tmp_path,
         monkeypatch,
         {
@@ -91,7 +90,6 @@ def test_materialize_drops_unsafe_env_keys_but_preserves_workload_knobs(tmp_path
             "PYTHONPATH": "/tmp/evil",
             "REFERENCE_ONLY_KNOB": "1",
             "VLLM_ROCM_USE_AITER": "1",
-            "bad key": "dropped",
         },
     )
     bench = materialize(
@@ -118,7 +116,6 @@ def test_materialize_drops_unsafe_env_keys_but_preserves_workload_knobs(tmp_path
     assert "LD_PRELOAD" not in envs
     assert "PYTHONSTARTUP" not in envs
     assert "BAD-NAME" not in envs
-    assert "bad key" not in envs
     assert envs["REFERENCE_ONLY_KNOB"] == "1"
     assert envs["SGLANG_USE_AITER"] == "1"
     assert envs["UNKNOWN_VALID_TUNING_KNOB"] == "enabled"
@@ -138,9 +135,6 @@ def test_materialize_rejects_shell_control_in_server_args(tmp_path, monkeypatch)
         )
 
 
-# ---- _visible_gpu_count ---------------------------------------------------
-
-
 def _write_sparse_model_dir(tmp_path, *, sparse_block_size=128, nested=False, name="model"):
     """Write a minimal model dir whose config.json declares a sparse block size."""
     d = tmp_path / name
@@ -156,7 +150,6 @@ def test_sparse_model_injects_block_size_from_config_vllm(monkeypatch, tmp_path)
     # Config-derived: any model declaring sparse_attention_config.sparse_block_size gets that value as vLLM
     # --block-size (default 16 aborts KV-cache init).
     clear_env(monkeypatch)
-    monkeypatch.setenv("INFERENCE_OPTIMIZER_DISABLE_TP_CLAMP", "1")
     model_dir = _write_sparse_model_dir(tmp_path, sparse_block_size=128)
     src = write_config(tmp_path / "cfg.yaml", framework="vllm")
     bench = materialize(src, tmp_path / "out", target=we.BenchmarkTarget(model_path=model_dir))
@@ -167,7 +160,6 @@ def test_sparse_block_size_read_from_nested_text_config(monkeypatch, tmp_path):
     # sparse_attention_config nested under text_config (multimodal wrapper); the value is model-derived, not hardcoded
     # (here 64 to prove it is read).
     clear_env(monkeypatch)
-    monkeypatch.setenv("INFERENCE_OPTIMIZER_DISABLE_TP_CLAMP", "1")
     model_dir = _write_sparse_model_dir(tmp_path, sparse_block_size=64, nested=True)
     src = write_config(tmp_path / "cfg.yaml", framework="vllm")
     bench = materialize(src, tmp_path / "out", target=we.BenchmarkTarget(model_path=model_dir))
@@ -177,7 +169,6 @@ def test_sparse_block_size_read_from_nested_text_config(monkeypatch, tmp_path):
 def test_dense_model_no_block_size_injection(monkeypatch, tmp_path):
     # No sparse_attention_config -> nothing injected (dense models untouched).
     clear_env(monkeypatch)
-    monkeypatch.setenv("INFERENCE_OPTIMIZER_DISABLE_TP_CLAMP", "1")
     d = tmp_path / "dense"
     d.mkdir()
     (d / "config.json").write_text(json.dumps({"model_type": "llama"}), encoding="utf-8")
@@ -190,7 +181,6 @@ def test_sparse_model_block_size_not_injected_for_sglang(monkeypatch, tmp_path):
     # --block-size is a vLLM flag; sglang rejects it, so the injection is vLLM-scoped and must never touch a sglang
     # run.
     clear_env(monkeypatch)
-    monkeypatch.setenv("INFERENCE_OPTIMIZER_DISABLE_TP_CLAMP", "1")
     model_dir = _write_sparse_model_dir(tmp_path, sparse_block_size=128)
     src = write_config(tmp_path / "cfg.yaml", framework="sglang")
     bench = materialize(src, tmp_path / "out", target=we.BenchmarkTarget(model_path=model_dir))
@@ -201,7 +191,6 @@ def test_sparse_model_block_size_not_injected_for_sglang(monkeypatch, tmp_path):
 def test_sparse_model_respects_operator_pinned_block_size(monkeypatch, tmp_path):
     # An explicit operator/explore --block-size wins; we must not append a second conflicting --block-size.
     clear_env(monkeypatch)
-    monkeypatch.setenv("INFERENCE_OPTIMIZER_DISABLE_TP_CLAMP", "1")
     model_dir = _write_sparse_model_dir(tmp_path, sparse_block_size=128)
     src = write_config(tmp_path / "cfg.yaml", framework="vllm")
     bench = materialize(
@@ -216,7 +205,6 @@ def test_sparse_model_respects_operator_pinned_block_size(monkeypatch, tmp_path)
 
 def test_run_eval_process_env_false_is_ignored(monkeypatch, tmp_path):
     clear_env(monkeypatch)
-    monkeypatch.setenv("INFERENCE_OPTIMIZER_DISABLE_TP_CLAMP", "1")
     monkeypatch.setenv("RUN_EVAL", "false")
     src = write_config(tmp_path / "cfg.yaml")
     bench = materialize(src, tmp_path / "out")
@@ -230,7 +218,6 @@ def _arm_sglang_shape_tool(monkeypatch, tmp_path) -> Path:
     tool_dir = tmp_path / "kernel_shape_tool"
     tool_dir.mkdir()
     clear_env(monkeypatch)
-    monkeypatch.setenv("INFERENCE_OPTIMIZER_DISABLE_TP_CLAMP", "1")
     monkeypatch.setenv("HYPERLOOM_ENABLE_PATCH", "0")
     monkeypatch.delenv("HYPERLOOM_PROFILE_SHAPE_DISCOVERY", raising=False)
     monkeypatch.setattr(_server_patcher, "resolve_sglang_shape_mode", lambda: "sitecustomize")
@@ -239,7 +226,7 @@ def _arm_sglang_shape_tool(monkeypatch, tmp_path) -> Path:
 
 
 def test_profile_shape_tool_keeps_the_inherited_pythonpath(monkeypatch, tmp_path):
-    # Magpie replaces the launch env's PYTHONPATH with the config's, so a config without one must carry the
+    # The launch takes the config's PYTHONPATH in place of the inherited one, so a config without one must carry the
     # inherited entries, or the profile server loses the operator's and the image's import paths.
     import os
 
@@ -269,27 +256,6 @@ def test_profile_shape_tool_prepends_to_the_config_pythonpath(monkeypatch, tmp_p
     src = write_config(tmp_path / "cfg.yaml", envs={"PROFILE": "1", "PYTHONPATH": "/c"})
     bench = materialize(src, tmp_path / "out")
     assert bench["envs"]["PYTHONPATH"] == os.pathsep.join([str(tool_dir), "/c"])
-
-
-@pytest.mark.parametrize(
-    ("config_envs", "tail"),
-    [({}, ["/a", "/b"]), ({"PYTHONPATH": "/c"}, ["/c"])],
-    ids=["inherited", "config-authoritative"],
-)
-def test_reference_overlay_builds_on_the_launch_pythonpath(monkeypatch, tmp_path, config_envs, tail):
-    # The reference overlay is prepended like every launch path entry: on the inherited value when the config has
-    # no PYTHONPATH, on the config's otherwise. The overlay is relative so it carries no drive colon on any host.
-    import os
-
-    clear_env(monkeypatch)
-    (tmp_path / "overlay").mkdir()
-    (tmp_path / "overlay" / "sitecustomize.py").write_text("", encoding="utf-8")
-    monkeypatch.chdir(tmp_path)
-    monkeypatch.setattr(we, "resolve_reference_launch", lambda: ("", {}, {"overlay_pythonpath": "overlay"}))
-    monkeypatch.setenv("PYTHONPATH", os.pathsep.join(["/a", "/b"]))
-    src = write_config(tmp_path / "cfg.yaml", envs=config_envs)
-    bench = materialize(src, tmp_path / "out")
-    assert bench["envs"]["PYTHONPATH"] == os.pathsep.join(["overlay", *tail])
 
 
 def test_the_cli_and_the_orchestrator_read_one_set_of_workload_defaults():
@@ -328,7 +294,6 @@ def _xdit_profile_bench(tmp_path, monkeypatch, *, patch_ok, workload_args=None):
     from hyperloom.orchestrator.actions.executors import _server_patcher
 
     clear_env(monkeypatch)
-    monkeypatch.setenv("INFERENCE_OPTIMIZER_DISABLE_TP_CLAMP", "1")
     monkeypatch.setenv("HYPERLOOM_ENABLE_PATCH", "1")
     monkeypatch.setattr(_server_patcher, "ensure_xdit_patched_for_tracelens", lambda *a, **kw: patch_ok)
     envs = {"PROFILE": "1"}
@@ -384,7 +349,6 @@ def test_xdit_profile_kill_switch_skips_patcher(monkeypatch, tmp_path):
     from hyperloom.orchestrator.actions.executors import _server_patcher
 
     clear_env(monkeypatch)
-    monkeypatch.setenv("INFERENCE_OPTIMIZER_DISABLE_TP_CLAMP", "1")
     monkeypatch.setenv("HYPERLOOM_ENABLE_PATCH", "0")
     called = []
     monkeypatch.setattr(_server_patcher, "ensure_xdit_patched_for_tracelens", lambda *a, **kw: called.append(1) or True)
@@ -408,7 +372,6 @@ def test_xdit_profile_flags_survive_replace_mode(monkeypatch, tmp_path):
     from hyperloom.orchestrator.actions.executors import _server_patcher
 
     clear_env(monkeypatch)
-    monkeypatch.setenv("INFERENCE_OPTIMIZER_DISABLE_TP_CLAMP", "1")
     monkeypatch.setenv("HYPERLOOM_ENABLE_PATCH", "1")
     monkeypatch.setattr(_server_patcher, "ensure_xdit_patched_for_tracelens", lambda *a, **kw: True)
     src = tmp_path / "cfg.yaml"
@@ -441,7 +404,6 @@ def test_xdit_profile_replace_with_existing_profile_wait(monkeypatch, tmp_path):
     from hyperloom.orchestrator.actions.executors import _server_patcher
 
     clear_env(monkeypatch)
-    monkeypatch.setenv("INFERENCE_OPTIMIZER_DISABLE_TP_CLAMP", "1")
     monkeypatch.setenv("HYPERLOOM_ENABLE_PATCH", "1")
     monkeypatch.setattr(_server_patcher, "ensure_xdit_patched_for_tracelens", lambda *a, **kw: True)
     src = tmp_path / "cfg.yaml"

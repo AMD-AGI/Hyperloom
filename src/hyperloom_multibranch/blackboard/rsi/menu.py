@@ -33,7 +33,7 @@ The cost of a test is the median GPU seconds of this session's tests of the list
 No list offers a family that cannot act on the session's task: parallelism and communication on a server of one GPU,
 or an op family none of whose ops the profile shows, such as moe on a dense model. A line says whether its family was
 tried on the commit, another branch holds a claim in it, or the integration head holds a commit of it. A line stays on
-its list when a direction Arbor's map set aside names one of the ops it acts on, and says under it which and why. One
+its list when a direction the agent map set aside names one of the ops it acts on, and says under it which and why. One
 branch in four gets no menu (:func:`in_control`): its tests are the menu's control. Every menu given is logged
 (:class:`MenuLog`), for CLOSE to read what the specialists chose from it.
 
@@ -53,7 +53,7 @@ from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass, field, replace
 from pathlib import Path
 
-from hyperloom_common.io import append_jsonl
+from hyperloom_common.io import append_shared_jsonl
 from hyperloom_common.jsonio import read_jsonl
 from hyperloom.contracts.recipe import RecipeDelta
 from hyperloom_multibranch.contracts.blackboard import INTEGRATION_BRANCH
@@ -121,8 +121,8 @@ STRUCTURAL = frozenset(
 DROP_MISSES = 3
 #: How the ops a line acts on sit under it, the largest first, as many as the brief's line holds.
 OPS_LINE = "  ops "
-#: How a direction of Arbor's map that set aside an op the line acts on sits under the line, with its id and why.
-SET_ASIDE_LINE = "  set aside by Arbor's map "
+#: How a direction of the agent map that set aside an op the line acts on sits under the line, with its id and why.
+SET_ASIDE_LINE = "  set aside by the agent map "
 SETTINGS = "settings"
 CODE = "code"
 UNTOUCHED = "no test or claim has acted on it yet"
@@ -392,7 +392,7 @@ class MenuItem:
     """One line of the menu: its family, of no one layer on the code list, which folds the source and kernel layers;
     the draw it ranked by, its mean commit odds over its ``tests``, the gain a commit of it has within reach, what it
     scored, its marks, and for an op family the ops it acts on, the largest first, with their shares of the profile of
-    ``profile``, and the directions of Arbor's map that set one of those ops aside, ``set_aside``."""
+    ``profile``, and the directions of the agent map that set one of those ops aside, ``set_aside``."""
 
     family: Family
     draw: float
@@ -589,7 +589,7 @@ def _code(
 
 
 def _set_aside(items: Iterable[MenuItem], directions: Sequence[MapDirection]) -> tuple[MenuItem, ...]:
-    """``items``, each with the ``directions`` Arbor's map set aside that name an op it acts on."""
+    """``items``, each with the ``directions`` the agent map set aside that name an op it acts on."""
 
     aside = [direction for direction in directions if not direction.open]
     found = []
@@ -703,7 +703,7 @@ class MenuLog:
             "draws": [round(item.draw, 4) for _, item, _ in rows],
         }
         try:
-            append_jsonl(self.path, key_sorted(line), make_parents=True)
+            append_shared_jsonl(self.path, key_sorted(line))
         except OSError as exc:
             log.warning("could not append the menu to %s: %s", self.path, exc)
 

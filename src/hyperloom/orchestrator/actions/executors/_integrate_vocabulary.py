@@ -21,6 +21,11 @@ KEEP_STATUSES: frozenset[str] = frozenset({"kept", "advanced", "kept_inert"})
 #: that attempt reached the bench, and no result an earlier stage returned did.
 RESULT_BENCHED = "benched"
 
+#: Set on every result of an attempt that reached the apply stage: whether it put changed framework code where its
+#: server imports from (:attr:`IntegrateAttempt.changes_framework`), so a reader of the result can attribute a
+#: framework the server could not import.
+RESULT_FRAMEWORK_CHANGED = "framework_changed"
+
 #: Error class of a bench the environment kept from measuring: no verdict on the patch.
 BENCH_UNMEASURED_CLASS = "bench_unmeasured"
 

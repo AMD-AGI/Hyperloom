@@ -174,9 +174,8 @@ async def test_a_result_kept_beside_a_process_says_so_in_its_facts_and_carries_a
 
 def _runner_envs(tmp_path: Path, options: LocalOptions) -> dict[str, str]:
     session = LocalSession(tmp_path, "run-guard", range(2))
-    with local_hosted._provider(
-        session, (0, 1), local_hosted._runner_template(session, options), options, {}
-    ) as provider:
+    template = local_hosted._measured_template(session, local_hosted._runner_template(session, options), options, {})
+    with local_hosted._provider(session, (0, 1), template, options, None) as provider:
         return dict(provider._templates["runner-1"].envs)
 
 
@@ -218,9 +217,8 @@ def test_the_pool_of_the_local_provider_follows_the_guard_and_enforces_when_none
     holders.holders = (INTRUDER,)
     options = LocalOptions(card_guard=guard, card_holders=holders)
     session = LocalSession(tmp_path, "run-pool", range(1))
-    with local_hosted._provider(
-        session, (0,), local_hosted._runner_template(session, options), options, {}
-    ) as provider:
+    template = local_hosted._measured_template(session, local_hosted._runner_template(session, options), options, {})
+    with local_hosted._provider(session, (0,), template, options, None) as provider:
         if refused:
             with pytest.raises(CardsHeld, match="card 0 by pid 4242"):
                 provider.pool.acquire(1, 0.0)

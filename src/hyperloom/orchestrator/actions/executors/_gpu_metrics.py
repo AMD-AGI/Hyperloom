@@ -3,13 +3,13 @@
 
 """Per-round GPU telemetry, normalised out of the round's own benchmark report.
 
-The numbers are already collected -- Magpie's ``GPUMonitor`` on a single node, the pod-side ``rocm-smi`` sampler on
-several -- and land in ``benchmark_report.json`` under ``gpu_monitor``. What was missing is a reading of them that a
+The numbers are already collected -- a single-node GPU monitor, the pod-side ``rocm-smi`` sampler on several -- and
+land in ``benchmark_report.json`` under ``gpu_monitor``. What was missing is a reading of them that a
 consumer can trust, per round, without knowing which producer wrote the block.
 
 Two things make that non-trivial, and both have burned this data before:
 
-* **The producers disagree on names and on shape.** Magpie writes ``power_watts`` as a pre-aggregated
+* **The producers disagree on names and on shape.** The single-node monitor writes ``power_watts`` as a pre-aggregated
   ``{min, max, avg}`` block; the multi-node harvester writes ``power_w`` as a flat scalar per sample. Reading only the
   short spelling is what left every single-node session's GPU numbers reading 0.0 -- not absent, *zero*, which is a
   plausible-looking lie.
@@ -41,7 +41,7 @@ __all__ = [
 #: Artifact written into the round's workspace, beside ``benchmark_report.json``.
 GPU_ARTIFACT_NAME = "gpu_metrics.json"
 
-# ``gpu_monitor`` metric aliases, current producer name first. Magpie emits ``power_watts`` / ``temperature_c`` /
+# ``gpu_monitor`` metric aliases, current producer name first. The single-node monitor emits ``power_watts`` / ``temperature_c`` /
 # ``gpu_clock_mhz`` / ``mem_clock_mhz``; the shorter spellings are older shapes, kept so archived reports still parse.
 _POWER_KEYS = ("power_watts", "power_w", "power")
 _TEMP_KEYS = ("temperature_c", "temp_c", "temperature")
@@ -121,7 +121,7 @@ def _blocks(report: Any) -> list[dict[str, Any]]:
 def gpu_metrics_from_report(report: Any) -> dict[str, Any]:
     """Normalise one round's GPU telemetry. ``{}`` when the report carried none.
 
-    Means are weighted by each block's ``sample_count``: a Magpie block summarises many samples while a flat per-sample
+    Means are weighted by each block's ``sample_count``: a single-node block summarises many samples while a flat per-sample
     block is one, and unweighted a 10-sample block would pull the round's mean as hard as a 10,000-sample one.
     """
     blocks = _blocks(report)
@@ -171,8 +171,8 @@ def gpu_metrics_from_report(report: Any) -> dict[str, Any]:
         "avg_clock_mhz": _avg(_CLOCK_KEYS),
         "max_clock_mhz": _max(_CLOCK_KEYS),
         "avg_mem_clock_mhz": _avg(_MEM_CLOCK_KEYS),
-        # Compute occupancy and memory pressure. Only the multi-node harvester reports these today -- Magpie's monitor
-        # samples neither -- so a single-node round reports null for both. Null, not 0.0: "the GPU sat idle" and
+        # Compute occupancy and memory pressure. Only the multi-node harvester reports these today -- the single-node
+        # monitor samples neither -- so a single-node round reports null for both. Null, not 0.0: "the GPU sat idle" and
         # "nobody asked" lead to opposite conclusions about a round that looks slow.
         "avg_gpu_util_pct": _avg(_UTIL_KEYS),
         "max_gpu_util_pct": _max(_UTIL_KEYS),

@@ -121,7 +121,7 @@ def test_agentx_averages_the_measure_rounds_and_leaves_out_a_metric_one_round_la
         RoundValue(MEASURE, None, {GRADED_INTVTY_P50: 42.0, GRADED_DURATION: 610.0}),
         accuracy=(),
     )
-    assert agentx_reading(result) == {GRADED_DURATION: 605.0, GRADED_INTVTY_P50: 41.0}
+    assert agentx_reading(result, GRADED_INTVTY_P50) == {GRADED_DURATION: 605.0, GRADED_INTVTY_P50: 41.0}
 
 
 @pytest.mark.parametrize(
@@ -135,11 +135,11 @@ def test_agentx_averages_the_measure_rounds_and_leaves_out_a_metric_one_round_la
 )
 def test_agentx_refuses_what_it_cannot_judge(result):
     with pytest.raises(UnreadableResult):
-        agentx_reading(result)
+        agentx_reading(result, GRADED_INTVTY_P50)
 
 
 def test_agentx_sums_the_unserved_and_the_short_requests_over_the_measured_rounds():
-    reading = agentx_reading(_agentx_rounds(_classes(0, 1, 2, 3), _classes(1, 4, 0, 5)))
+    reading = agentx_reading(_agentx_rounds(_classes(0, 1, 2, 3), _classes(1, 4, 0, 5)), GRADED_INTVTY_P50)
     assert reading[GRADED_UNSERVED_REQUESTS] == 7.0
     assert reading[GRADED_SHORT_REQUESTS] == 8.0
     assert reading[GRADED_REQUESTS_TOTAL] == 200.0
@@ -151,14 +151,14 @@ def test_agentx_sums_the_unserved_and_the_short_requests_over_the_measured_round
     ids=["no-classes", "a-round-without-classes", "an-uncounted-round"],
 )
 def test_agentx_leaves_the_request_classes_out_when_a_round_does_not_count_them(classes):
-    reading = agentx_reading(_agentx_rounds(*classes))
+    reading = agentx_reading(_agentx_rounds(*classes), GRADED_INTVTY_P50)
     assert GRADED_UNSERVED_REQUESTS not in reading
     assert GRADED_SHORT_REQUESTS not in reading
 
 
 def test_agentx_sums_the_requests_of_rounds_that_counted_them_but_did_not_classify_the_failures():
     unsplit = RequestClasses(1, "", None, 100, 3, 1, 2, None, None, "the export carries no output token count")
-    reading = agentx_reading(_agentx_rounds(_classes(0, 1, 2, 3), unsplit))
+    reading = agentx_reading(_agentx_rounds(_classes(0, 1, 2, 3), unsplit), GRADED_INTVTY_P50)
     assert GRADED_UNSERVED_REQUESTS not in reading
     assert reading[GRADED_REQUESTS_TOTAL] == 200.0
 
@@ -173,4 +173,4 @@ def test_agentx_sums_the_requests_of_rounds_that_counted_them_but_did_not_classi
     ids=["no-classes", "a-round-without-classes", "an-uncounted-round"],
 )
 def test_agentx_leaves_the_requests_total_out_when_a_round_does_not_count_its_requests(classes):
-    assert GRADED_REQUESTS_TOTAL not in agentx_reading(_agentx_rounds(*classes))
+    assert GRADED_REQUESTS_TOTAL not in agentx_reading(_agentx_rounds(*classes), GRADED_INTVTY_P50)

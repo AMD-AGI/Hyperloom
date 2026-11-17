@@ -37,6 +37,7 @@ from typing import Any, Mapping, Sequence
 
 from hyperloom.common.agent_cli import resolve_codex_executable
 from hyperloom.common.codex_session import (
+    CODEX_BASE_OVERRIDES,
     CodexSessionError,
     probe_codex_sandbox_capability,
     resolve_codex_provider_config,
@@ -61,7 +62,7 @@ from hyperloom_common.fs_utils import (
     write_text_nofollow,
 )
 from hyperloom.common.env_safety import RunAsError
-from hyperloom.common.proctree import collect_tree, kill_tree
+from hyperloom_common.proctree import collect_tree, kill_tree
 
 from .agent_cli_config import (
     SpecialistAgentUnavailableError,
@@ -455,8 +456,6 @@ class SpecialistSubprocessDispatcher:
             try:
                 _raise_if_cancelled(scope)
                 if request.gpu_lease is not None:
-                    # Created fresh here as in the local branch; the actor appends to this file only, never to what
-                    # the agent of an earlier launch left at the name.
                     log_fh = create_nofollow(request.workspace, (process_log.name,))
                     started = await self._start_ray_actor(request, launch, scope, file_identity(log_fh))
                     if isinstance(started, SpecialistSubprocessResult):
@@ -484,7 +483,7 @@ class SpecialistSubprocessDispatcher:
                 self._confirm_cancel_teardown(request, proc)
                 raise
             finally:
-                await asyncio.to_thread(self._reap_marked, launch.reap_mark, prepared)
+                await prepared.sweep_marked(launch.reap_mark, task_id=request.task_id)
                 prepared.release()
                 if log_fh is not None:
                     log_fh.close()
@@ -534,16 +533,12 @@ class SpecialistSubprocessDispatcher:
         request: SpecialistSpawn, launch: SpecialistLaunch, scope: CancelScope | None, log_identity: tuple[int, int]
     ) -> _RayLeaseProcess | SpecialistSubprocessResult:
         """Submit the GPU actor launch and poll until it has a pid; a failure returns the task's result."""
-        # Non-blocking start: submit the actor launch, then poll for
-        # the pid with ``asyncio.sleep`` between polls. This keeps the
-        # Coordinator event loop responsive while Ray schedules the actor
-        # (no blocking ``ray.get``), and — combined with the timing split
-        # below — excludes Ray *pending* time from the specialist's running
-        # wall budget. A bounded pending deadline turns a permanently
-        # unschedulable request into a structured task failure instead of an
-        # unbounded stall. The actor appends to the process.log created here
-        # (``log_identity``; same host on single-node), so the reaper below
-        # reads it directly.
+        # Non-blocking start: submit the actor launch, then poll for the pid with ``asyncio.sleep`` between polls. This
+        # keeps the Coordinator event loop responsive while Ray schedules the actor (no blocking ``ray.get``), and —
+        # combined with the timing split below — excludes Ray *pending* time from the specialist's running wall budget.
+        # A bounded pending deadline turns a permanently unschedulable request into a structured task failure instead
+        # of an unbounded stall. The actor only appends to the process.log the caller created fresh (``log_identity``),
+        # never to what an earlier launch's agent left at the name; on one node the reaper below reads it directly.
         from hyperloom.orchestrator.actions.executors._ray_serving import ActorLaunch
 
         try:
@@ -684,13 +679,6 @@ class SpecialistSubprocessDispatcher:
             worktree_refused=refused,
             error=outcome["error"],
         )
-
-    @staticmethod
-    def _reap_marked(mark: str, prepared: PreparedLaunch) -> None:
-        """End every process that inherited this launch's reap mark, including one re-parented after the CLI exited."""
-        pids = prepared.marked_pids(mark)
-        if pids and not kill_tree(collect_tree(pids)):
-            log.warning("specialist reap: marked processes %s outlived SIGKILL", pids)
 
     def _confirm_cancel_teardown(self, request: SpecialistSpawn, proc: Any) -> None:
         """Tear a cancelled specialist down, raising ``ExecutionCleanupUnconfirmed`` unless teardown is confirmed."""
@@ -915,9 +903,7 @@ class SpecialistSubprocessDispatcher:
         cmd.extend(["-C", str(worktree or workspace)])
         for extra_dir in writable_dirs[1:]:
             cmd.extend(["--add-dir", extra_dir])
-        # ``features.memories=false`` matches the SDK session: a specialist must
-        # not carry state between tasks.
-        for override in ("features.memories=false", *overrides):
+        for override in (*CODEX_BASE_OVERRIDES, *overrides):
             cmd.extend(["-c", override])
         if cfg.model:
             cmd.extend(["-m", cfg.model])

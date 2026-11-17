@@ -21,7 +21,7 @@ from pathlib import Path
 from typing import Any
 
 from hyperloom.contracts.measurement import Purpose, TestKind, TestResult, Validity
-from hyperloom.measure.tests.hosted_fixtures import runner_template, spec_context
+from hyperloom.measure.tests.hosted_fixtures import freeze_session_base, runner_template, spec_context
 from hyperloom.orchestrator.actions.cancel_channel import current_cancel_scope
 from hyperloom.orchestrator.actions.executors import RoundWatch
 from hyperloom.sandbox.card_occupancy import CardGuard, CardReading, read_holders
@@ -189,14 +189,14 @@ def build_rig(tmp_path: Path, monkeypatch: Any, made: list[LocalHostedToolbox], 
         card_guard: CardGuard | None = None,
     ) -> Rig:
         session = tmp_path / f"session-{len(made)}"
-        session.mkdir()
+        freeze_session_base(session)
         configs = install(tmp_path / f"image-{len(made)}")
         blackboard = lineage_blackboard(session / "blackboard")
         box = local_hosted.build_local_toolbox(
             LocalSession(session, f"run-{len(made)}", range(cards), tp=tp),
             blackboard,
             AcceptanceSetup(FakeRepo(), _PointPerBranch(dict(points or {})), IMAGE, WorkloadKind.AGENTX),
-            spec_context(session, benchmark_backend="bypass", blob_root=str(session / "hosted" / "blobs")),
+            spec_context(session, blob_root=str(session / "hosted" / "blobs")),
             options=LocalOptions(
                 poll_interval_sec=0.05,
                 framework_configs=str(configs),

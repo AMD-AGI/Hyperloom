@@ -61,16 +61,16 @@ class TestBuildSessionId:
 
 class TestDescribeDep:
     def test_missing_dir_yields_path_only(self, tmp_path, monkeypatch):
-        monkeypatch.setenv("MAGPIE_PATH", str(tmp_path / "ghost"))
-        out = mf._describe_dep("MAGPIE_PATH")
+        monkeypatch.setenv("DEP_PRIMARY", str(tmp_path / "ghost"))
+        out = mf._describe_dep("DEP_PRIMARY")
         assert out["path"] == str(tmp_path / "ghost")
         assert out["commit"] == "" and out["remote"] == ""
 
     def test_directory_present_calls_git_helpers(self, tmp_path, monkeypatch):
-        monkeypatch.setenv("MAGPIE_PATH", str(tmp_path))
+        monkeypatch.setenv("DEP_PRIMARY", str(tmp_path))
         monkeypatch.setattr(mf, "_git_revision_at", lambda p: "abc1234")
         monkeypatch.setattr(mf, "_git_remote_at", lambda p: "https://x/y.git")
-        out = mf._describe_dep("MAGPIE_PATH")
+        out = mf._describe_dep("DEP_PRIMARY")
         assert out["commit"] == "abc1234"
         assert out["remote"] == "https://x/y.git"
 

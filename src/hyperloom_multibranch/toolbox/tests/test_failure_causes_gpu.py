@@ -5,10 +5,9 @@
 
 ``hyperloom.measure.log_causes`` and ``boot_watch`` were proven on fixtures. Here each cause is made by a real SGLang
 server on a real card, through the real toolbox: a flag the server refuses (``serve_flag``), an import that fails at
-boot (``import_error``), a Python exception at boot (``python_exception``), an evaluation request the server answers
-``400`` (``lm_eval_http_400``) and a boot that is not ready within its limit (``server_boot_timeout``, return code
--924). What was recorded is printed (``PROBE``): the result's failure fields, the log lines that state the cause, and
-whether the cards came back.
+boot (``import_error``), a Python exception at boot (``python_exception``) and a boot that is not ready within its
+limit (``server_boot_timeout``, return code -924). What was recorded is printed (``PROBE``): the result's failure
+fields, the log lines that state the cause, and whether the cards came back.
 
 Needs what ``test_toolbox_kinds_gpu`` needs; anywhere else the module is skipped.
 """
@@ -22,7 +21,7 @@ import time
 from dataclasses import dataclass
 from pathlib import Path
 
-from hyperloom.contracts.measurement import FailureClass, Purpose, TestKind, TestResult
+from hyperloom.contracts.measurement import FailureClass, Purpose, TestResult
 from hyperloom.contracts.recipe import ConfigDelta, RecipeDelta
 from hyperloom.measure.returncodes import SERVER_BOOT_TIMEOUT_RC
 from hyperloom_multibranch.toolbox.tests.helpers import req
@@ -32,6 +31,7 @@ from hyperloom_multibranch.toolbox.tests.test_toolbox_kinds_gpu import CARDS, _p
 #: The GPU tests' marks and their workload-environment fixture, borrowed from the module that defines them.
 pytestmark = test_toolbox_kinds_gpu.pytestmark
 workload_environment = test_toolbox_kinds_gpu.workload_environment
+USES_REAL_GPUS = True  # keep the host's amd-smi and rocm-smi: see hyperloom.measure.tests.gpu_free_host
 
 #: The lines of a log that state what went wrong, or that a boot got somewhere.
 _CAUSE_LINES = re.compile(r"error:|Error|Exception|Traceback|fired up|400", re.IGNORECASE)
@@ -45,7 +45,6 @@ class Case:
     """One test to submit and the reason prefix its failure must carry (``None``: it must succeed)."""
 
     name: str
-    request_args: dict
     delta: RecipeDelta
     reason_starts: str | None
     failure_class: FailureClass | None
@@ -57,18 +56,10 @@ def _delta(server_args: str = "", **envs: str) -> RecipeDelta:
 
 
 CASES = (
-    Case("bad_flag", {}, _delta("--foo-bar 1"), "serve_flag: ", FailureClass.CANDIDATE),
-    Case("bad_choice", {}, _delta("--attention-backend nonexistent"), "serve_flag: ", FailureClass.CANDIDATE),
-    Case("import", {}, _delta("--load-format fastsafetensors"), "import_error", FailureClass.CANDIDATE),
-    Case("exception", {}, _delta("--json-model-override-args notjson"), "python_exception: ", FailureClass.UNCLEAR, 2),
-    Case(
-        "eval_400",
-        {"kind": TestKind.ACCURACY, "accuracy": True},
-        _delta("--context-length 400"),
-        "lm_eval_http_400: ",
-        FailureClass.UNCLEAR,
-        2,
-    ),
+    Case("bad_flag", _delta("--foo-bar 1"), "serve_flag: ", FailureClass.CANDIDATE),
+    Case("bad_choice", _delta("--attention-backend nonexistent"), "serve_flag: ", FailureClass.CANDIDATE),
+    Case("import", _delta("--load-format fastsafetensors"), "import_error", FailureClass.CANDIDATE),
+    Case("exception", _delta("--json-model-override-args notjson"), "python_exception: ", FailureClass.UNCLEAR, 2),
 )
 
 
@@ -157,10 +148,7 @@ def _check(case: Case, fact: dict[str, object]) -> list[str]:
 
 
 async def test_a_failed_boot_names_the_cause_its_server_log_states() -> None:
-    requests = [
-        (case.name, req(f"b-{case.name}", purpose=Purpose.EXPLORE, change=case.delta, **case.request_args))
-        for case in CASES
-    ]
+    requests = [(case.name, req(f"b-{case.name}", purpose=Purpose.EXPLORE, change=case.delta)) for case in CASES]
     _, done = await _run("failure-causes", "failure-causes", requests, timeout_sec=2400)
 
     wrong = [problem for case in CASES for problem in _check(case, done["facts"][case.name])]

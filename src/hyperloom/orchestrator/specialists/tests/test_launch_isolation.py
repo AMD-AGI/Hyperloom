@@ -34,7 +34,7 @@ from hyperloom.common.agent_isolation import (
 )
 from hyperloom.common.deadline import Deadline
 from hyperloom.common.env_safety import RunAs
-from hyperloom.common.proctree import REAP_MARK_ENV, running
+from hyperloom_common.proctree import REAP_MARK_ENV, running
 from hyperloom.orchestrator.actions.executors._ray_serving import CreatedLog, ManagedServerProcess
 from hyperloom.orchestrator.specialists import launch_env
 from hyperloom.orchestrator.specialists import subprocess_ as ss

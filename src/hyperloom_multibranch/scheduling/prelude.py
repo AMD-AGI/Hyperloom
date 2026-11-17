@@ -11,7 +11,9 @@ things then run together, any of them failing ending the others: as many tests o
 from which the gate writes the baseline and its bar; a PROFILE test of the root and its TraceLens analysis in the
 toolbox (:meth:`~hyperloom_multibranch.scheduling.events.IntegrationProfiler.profile_root`), which PRELUDE waits for so
 the opening judge call reads the root's op shares, and which a backend that cannot profile or analyse leaves as its
-decision only; and the replay of the Recipe KB's champion. The longest of the root tests, start to finish, is how long
+decision only; and the replay of the Recipe KB's champion. An AgentX root's analysis is submitted once the baseline
+measurement has ended, since its phase windows are weighted by the lengths the baseline measured; PRELUDE waits for that
+measurement anyway, so the opening judge call reads shares weighted by them. The longest of the root tests, start to finish, is how long
 one test of this workload takes; it is FINAL's reserve.
 
 The session profile is known once the root is committed, so the Recipe KB's champions for it are read as warm-start
@@ -23,6 +25,8 @@ and gives none either. Each replay is checked against the toolbox's acceptance o
 refuses stays a lead with the refusal named in place of the replay, unless the champion was built on another image,
 whose launch config alone is checked in its place, and one acceptance has not answered for when
 :data:`PREFLIGHT_SECONDS` run out stays offered, its lead saying it was not checked.
+
+A resumed session runs no PRELUDE: :meth:`Prelude.landed` reads back what its first one recorded.
 """
 
 from __future__ import annotations
@@ -34,7 +38,8 @@ from dataclasses import dataclass, replace
 from types import SimpleNamespace
 from typing import TYPE_CHECKING, Any
 
-from hyperloom_common.io import atomic_write_json
+from hyperloom_common.io import SHARED, atomic_write_json
+from hyperloom_common.jsonio import read_jsonl
 from hyperloom.common.outside_facts.rule_pack import rule_pack_identity
 from hyperloom.common.perf_metric import GRADED_OUTPUT
 from hyperloom.contracts.measurement import Purpose, TestKind, TestResult
@@ -131,8 +136,9 @@ OpenIntegration = Callable[[str], Awaitable[None]]
 #: Replays the champion on the root commit and returns the commit EXPLORE opens on; the replay is judged once the
 #: awaitable, the baseline's anchoring, has ended.
 ReplayChampion = Callable[[PreparedReplay, str, Awaitable[object]], Awaitable[ChampionOutcome]]
-#: Profiles the root commit in the toolbox and analyses the profile, returning how that ended.
-ProfileRoot = Callable[[str], Awaitable[ProfileOutcome]]
+#: Profiles the root commit in the toolbox and analyses the profile, returning how that ended; the analysis is submitted
+#: once the awaitable, the baseline's measurement, has ended when one is given.
+ProfileRoot = Callable[[str, Awaitable[object] | None], Awaitable[ProfileOutcome]]
 
 
 @dataclass(frozen=True)
@@ -181,15 +187,33 @@ class Prelude:
             Decision(DecisionKind.PRELUDE, ROOT_COMMITTED, INTEGRATION_BRANCH, {"root_commit": opened.commit})
         )
         baseline = asyncio.ensure_future(self._measure_baseline(opened.commit))
-        profiled = asyncio.ensure_future(self._profile_root_commit(opened.commit))
+        # An AgentX point names no prompt and output length: its analysis waits for the lengths the baseline measures.
+        lengths = baseline if workload.inferencex is None else None
+        profiled = asyncio.ensure_future(self._profile_root_commit(opened.commit, lengths))
         replayed = asyncio.ensure_future(self._replay(opened, baseline))
         await together(baseline, profiled, replayed)
         leads, start = replayed.result().warm_leads, replayed.result().start_commit
         return PreludeResult(opened.commit, start, opened.profile, leads, baseline.result(), profiled.result())
 
-    async def _profile_root_commit(self, root: str) -> str:
-        """Profile ``root`` and record how; the job that analysed the profile, ``""`` when none did."""
-        outcome = await self._profile_root(root)
+    async def landed(self) -> PreludeResult:
+        """What the PRELUDE an earlier run of this session recorded, for a resumed session that runs none: the root of
+        the baseline, the profile on the blackboard, the longest root test and the root's profile job its decisions
+        name, and the integration head as the commit EXPLORE opens on. Its warm-start leads are not read again."""
+
+        root = (await self._blackboard.baseline()).root_commit
+        profile = await self._blackboard.session_profile()
+        start = await self._repo.head(INTEGRATION_BRANCH)
+        rows = read_jsonl(self._layout.decisions)
+        baseline = baseline_decision(rows)
+        assert baseline is not None, "resumable_run admits a session only once PRELUDE recorded its baseline decision"
+        profiled = next((row for row in rows if row["kind"] == DecisionKind.PROFILE.value), None)
+        job = "" if profiled is None else str(profiled["detail"].get("job_id") or "")
+        return PreludeResult(root, start, profile, (), float(baseline["detail"]["longest_test_seconds"]), job)
+
+    async def _profile_root_commit(self, root: str, baseline: Awaitable[object] | None) -> str:
+        """Profile ``root``, analysed once ``baseline`` ended when there is one, and record how; the job that analysed
+        the profile, ``""`` when none did."""
+        outcome = await self._profile_root(root, baseline)
         self._decisions.record(Decision(DecisionKind.PROFILE, outcome.reason, detail=outcome.detail))
         return str(outcome.detail.get("job_id") or "")
 
@@ -200,7 +224,7 @@ class Prelude:
             raise PreludeFailed(f"cannot root the session on the framework checkout it runs on: {exc}") from exc
 
     async def _open_root(self, recipe: Recipe, workload: Workload) -> _OpenedRoot:
-        atomic_write_json(self._layout.root_recipe, recipe.to_document())
+        atomic_write_json(self._layout.root_recipe, recipe.to_document(), options=SHARED)
         root = await self._repo.init_root(recipe)
         await self._blackboard.record_lineage(
             LineageEvent(LineageKind.ROOT, INTEGRATION_BRANCH, commit_id=root, recipe_digest=recipe.digest())
@@ -369,10 +393,19 @@ def _session_profile(
         isl=None if shape is None else shape.isl,
         osl=None if shape is None else shape.osl,
         kernel_optimizer=workload.kernel_optimizer.value,
+        agentx_objective=workload.agentx_objective,
     )
 
 
+def baseline_decision(rows: Iterable[Mapping[str, Any]]) -> Mapping[str, Any] | None:
+    """The decision PRELUDE recorded its baseline with among the decision log's ``rows``; ``None`` when there is none,
+    as for a session stopped between the rule gate's baseline and that decision."""
+
+    return next((row for row in rows if row["reason"] == BASELINE_ESTABLISHED), None)
+
+
 __all__ = [
+    "baseline_decision",
     "PreludeFailed",
     "Prelude",
     "PreludeResult",

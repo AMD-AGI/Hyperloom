@@ -6,8 +6,8 @@
 The stop comes first: from then on no fork is admitted, no test runs and no process the scheduler started is left,
 and the exports (:mod:`~hyperloom_multibranch.scheduling.exports`) read a blackboard that no longer changes. Stopping
 and exporting are each bounded by the hard stop. ``MB-report.json`` and ``MB-report.md`` record the outcome whatever
-became of the exports, including what outlived the stop; a CLOSE cut short by a second stop signal is reported by the
-session through :meth:`Closer.write_report`.
+became of the exports, including what outlived the stop, and how the session's agents were isolated; a CLOSE cut short
+by a second stop signal is reported by the session through :meth:`Closer.write_report`.
 ``MB-report.json`` is read back by one caller, :func:`ended_before_final`, which says how a session ended and
 whether FINAL may still be run over its directory; it lives here so the format has one reader beside its writer.
 Whether FINAL may run is not the report's to answer alone: what the session recorded as its processes says whether
@@ -20,7 +20,7 @@ import asyncio
 import logging
 from dataclasses import dataclass
 
-from hyperloom_common.io import WriteOptions, atomic_write_json, atomic_write_text
+from hyperloom_common.io import SHARED, atomic_write_json, atomic_write_text
 from hyperloom_common.jsonio import read_json_strict
 from hyperloom.contracts.recipe import RecipeError
 from hyperloom_multibranch.contracts.blackboard.interfaces import BlackboardError
@@ -28,6 +28,7 @@ from hyperloom_multibranch.blackboard.codec import encode
 from hyperloom_multibranch.scheduling.clock import Clock
 from hyperloom_multibranch.scheduling.exports import CloseExports, SessionExports, step_lines
 from hyperloom_multibranch.scheduling.final import FinalChoice
+from hyperloom_multibranch.scheduling.launch_isolation import LaunchIsolation
 from hyperloom_multibranch.scheduling.layout import SessionLayout
 from hyperloom_multibranch.scheduling.processes import live_processes
 from hyperloom_multibranch.scheduling.stops import SessionStopper, SessionStopReason, StopReport
@@ -53,8 +54,11 @@ class CloseReport:
     error: str
 
 
-def report_document(report: CloseReport, session_id: str, closed_at: float) -> dict[str, object]:
-    """``MB-report.json``: the session's ending, its final choice, the exports and what outlived the stop."""
+def report_document(
+    report: CloseReport, session_id: str, closed_at: float, agent_isolation: LaunchIsolation | None
+) -> dict[str, object]:
+    """``MB-report.json``: the session's ending, its final choice, the exports, what outlived the stop and how its
+    agents were isolated (``None`` when its manifest did not record it)."""
 
     exports = report.exports
     return {
@@ -62,6 +66,7 @@ def report_document(report: CloseReport, session_id: str, closed_at: float) -> d
         "closed_at": closed_at,
         "stop_reason": report.stop_reason.value,
         "error": report.error,
+        "agent_isolation": None if agent_isolation is None else agent_isolation.to_dict(),
         "final": encode(report.final),
         "exports": None
         if exports is None
@@ -70,6 +75,7 @@ def report_document(report: CloseReport, session_id: str, closed_at: float) -> d
             "knowledge": exports.knowledge_document(),
             "breakdown": str(exports.breakdown),
             "dashboard": {"json": str(exports.dashboard.json), "html": str(exports.dashboard.html)},
+            "agentx_checkpoint": None if exports.checkpoint is None else exports.checkpoint.to_document(),
         },
         "stop": {
             "clean": report.stop.clean,
@@ -119,19 +125,27 @@ def _final_lines(final: FinalChoice | None) -> list[str]:
         return ["No final selection ran."]
     chosen = final.chosen
     head = f"Chosen: {chosen.label} `{chosen.commit}` on {chosen.branch}" if chosen else "Chosen: none"
-    header = "| candidate | commit | eligible | regression cases | degraded concs | error |"
-    lines = [head, f"Reason: {final.reason}", "", header, "|---|---|---|---|---|---|"]
+    header = (
+        "| candidate | commit | eligible | gain over baseline % | reproduced | vs its record % | refused by "
+        "| waived for the root | regression cases | degraded concs | error |"
+    )
+    lines = [head, f"Reason: {final.reason}", "", header, "|---|---|---|---|---|---|---|---|---|---|---|"]
     for check in final.checks:
         candidate = check.candidate
         degraded = ", ".join(str(conc) for conc in check.degraded_concs)
         lines.append(
-            f"| {candidate.label} | `{candidate.commit}` | {check.eligible} | {check.regression_cases} | {degraded} "
-            f"| {check.error} |"
+            f"| {candidate.label} | `{candidate.commit}` | {check.eligible} | {_pct(check.gain_pct)} "
+            f"| {check.reproduced} | {_pct(check.reproduction_pct)} | {', '.join(check.refused_by)} "
+            f"| {', '.join(check.waived)} | {check.regression_cases} | {degraded} | {check.error} |"
         )
     return lines
 
 
-def report_markdown(report: CloseReport, session_id: str) -> str:
+def _pct(value: float | None) -> str:
+    return "" if value is None else f"{value:+.1f}"
+
+
+def report_markdown(report: CloseReport, session_id: str, agent_isolation: LaunchIsolation | None) -> str:
     """``MB-report.md``: the same outcome for people."""
 
     lines = [
@@ -139,6 +153,7 @@ def report_markdown(report: CloseReport, session_id: str) -> str:
         "",
         f"Stop reason: {report.stop_reason.value}",
         f"Error: {report.error or 'none'}",
+        _isolation_line(agent_isolation),
         "",
         "## Final selection",
         "",
@@ -148,8 +163,16 @@ def report_markdown(report: CloseReport, session_id: str) -> str:
         "",
         *_export_lines(report.exports),
         *_stop_lines(report.stop),
+        *_checkpoint_lines(report.exports),
     ]
     return "\n".join(lines) + "\n"
+
+
+def _isolation_line(agent_isolation: LaunchIsolation | None) -> str:
+    if agent_isolation is None:
+        return "Agent isolation: not recorded"
+    line = agent_isolation.line()
+    return line[:1].upper() + line[1:]
 
 
 def _export_lines(exports: CloseExports | None) -> list[str]:
@@ -162,6 +185,12 @@ def _export_lines(exports: CloseExports | None) -> list[str]:
         f"Breakdown: {exports.breakdown}",
         f"Dashboard: {exports.dashboard.html}",
     ]
+
+
+def _checkpoint_lines(exports: CloseExports | None) -> list[str]:
+    if exports is None or exports.checkpoint is None:
+        return []
+    return ["", "## AgentX checkpoint", "", *exports.checkpoint.lines()]
 
 
 def _stop_lines(stop: StopReport) -> list[str]:
@@ -178,11 +207,19 @@ def _stop_lines(stop: StopReport) -> list[str]:
 class Closer:
     """Runs CLOSE once."""
 
-    def __init__(self, layout: SessionLayout, stopper: SessionStopper, exports: SessionExports, clock: Clock) -> None:
+    def __init__(
+        self,
+        layout: SessionLayout,
+        stopper: SessionStopper,
+        exports: SessionExports,
+        clock: Clock,
+        agent_isolation: LaunchIsolation | None,
+    ) -> None:
         self._layout = layout
         self._stopper = stopper
         self._exports = exports
         self._clock = clock
+        self._agent_isolation = agent_isolation
 
     async def close(
         self, stop_reason: SessionStopReason, final: FinalChoice | None, error: str, hard_stop_at: float
@@ -205,10 +242,10 @@ class Closer:
     def write_report(self, report: CloseReport) -> None:
         """Write ``MB-report.json`` and ``MB-report.md``; the session writes a CLOSE it cut short through here."""
 
-        session_id = self._layout.session_id
-        atomic_write_json(self._layout.report, report_document(report, session_id, self._clock.now()))
-        markdown = report_markdown(report, session_id)
-        atomic_write_text(self._layout.report_markdown, markdown, options=WriteOptions(make_parents=True))
+        session_id, isolation = self._layout.session_id, self._agent_isolation
+        document = report_document(report, session_id, self._clock.now(), isolation)
+        atomic_write_json(self._layout.report, document, options=SHARED)
+        atomic_write_text(self._layout.report_markdown, report_markdown(report, session_id, isolation), options=SHARED)
 
 
 __all__ = ["EXPORT_FAILURES", "CloseReport", "Closer", "ended_before_final", "report_document", "report_markdown"]

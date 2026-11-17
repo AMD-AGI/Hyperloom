@@ -14,7 +14,11 @@ from hyperloom.inference_optimizer.session.paths import asset_root
 from hyperloom.orchestrator.actions.executors import PatchedServer, _server_patcher
 from hyperloom.orchestrator.actions.executors._profile_setup import prepare_profile, speculative_tokens_per_step
 from hyperloom.orchestrator.actions.executors._workload_envs import LaunchLayer, materialize_config_with_envs
-from hyperloom.orchestrator.actions.executors.magpie_agentx import apply_native_runtime, enable_profile, load_benchmark
+from hyperloom.orchestrator.actions.executors.agentx_point import apply_native_runtime, enable_profile
+
+
+def load_benchmark(path: Path) -> dict:
+    return yaml.safe_load(path.read_text(encoding="utf-8"))["benchmark"]
 
 
 #: A patch laid where this host's server needs no copy of its framework, so the launch's ``PYTHONPATH`` is the one under
@@ -24,7 +28,6 @@ _PATCHED = PatchedServer(None)
 
 @pytest.fixture(autouse=True)
 def profile_environment(monkeypatch):
-    monkeypatch.setenv("INFERENCE_OPTIMIZER_DISABLE_TP_CLAMP", "1")
     monkeypatch.setattr(_server_patcher, "resolve_sglang_shape_mode", lambda: "patched")
     monkeypatch.setenv("HYPERLOOM_ENABLE_PATCH", "1")
     for name in (
@@ -40,6 +43,7 @@ def profile_environment(monkeypatch):
         monkeypatch.delenv(name, raising=False)
     monkeypatch.setattr(_server_patcher, "ensure_vllm_patched_for_tracelens", lambda *checkout: _PATCHED)
     monkeypatch.setattr(_server_patcher, "ensure_sglang_patched_for_tracelens", lambda: _PATCHED)
+    monkeypatch.setattr(_server_patcher, "resolve_sglang_gc_patch_needed", lambda: True)
 
 
 def _fixed_profile(framework: str) -> dict:
@@ -284,13 +288,30 @@ def test_fixed_shape_setup_preserves_request_options_and_capture_window(tmp_path
 
 @pytest.mark.parametrize("framework", ["sglang", "vllm"])
 def test_native_profile_drops_annotations_when_the_patch_did_not_apply(tmp_path, monkeypatch, framework):
-    """Magpie raises rather than degrading when the server lacks the fields, so an unreached patch means false."""
+    """A server that lacks the annotation fields fails rather than degrading, so an unreached patch means false."""
     monkeypatch.setattr(_server_patcher, f"ensure_{framework}_patched_for_tracelens", lambda *checkout: None)
     path = _native_config(tmp_path, framework)
     enable_profile(path)
     native = load_benchmark(path)
     assert native["envs"]["HYPERLOOM_PROFILE_DEGRADED_REASON"] == "tracelens_runtime_patch_unavailable"
     assert native["profiler"]["torch_profiler"]["detailed_annotations"] is False
+
+
+def test_sglang_past_the_gc_range_is_not_checked_for_the_graph_capture_patch(monkeypatch):
+    """SGLang 0.5.22 carries the capture tags upstream, so the profile neither looks for the patch nor marks it unavailable."""
+    from hyperloom.orchestrator.actions.executors._profile_setup import patch_for_profile
+
+    def _checked():
+        raise AssertionError("the graph-capture patch was looked for on SGLang 0.5.22")
+
+    monkeypatch.setattr(_server_patcher, "resolve_sglang_shape_mode", lambda: "sitecustomize")
+    monkeypatch.setattr(_server_patcher, "resolve_sglang_gc_patch_needed", lambda: False)
+    monkeypatch.setattr(_server_patcher, "ensure_sglang_patched_for_tracelens", _checked)
+    envs: dict = {}
+    patch = patch_for_profile(envs, "sglang")
+    assert patch.sitecustomize is True and patch.annotations is True and patch.site is None
+    assert envs["HYPERLOOM_TRACELENS_PATCH_STATUS"] == "not_attempted"
+    assert "HYPERLOOM_PROFILE_DEGRADED_REASON" not in envs
 
 
 @pytest.mark.parametrize(("laid", "detailed"), [(None, False), (_PATCHED, True)])

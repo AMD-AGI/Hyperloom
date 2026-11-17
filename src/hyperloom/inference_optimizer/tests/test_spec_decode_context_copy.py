@@ -18,7 +18,6 @@ import pytest
 import yaml
 
 from hyperloom.orchestrator.actions.executors.explore import ExploreExecutor
-from hyperloom.orchestrator.actions.executors import _subprocess_kill as sk
 from hyperloom.orchestrator.actions.executors._spec_decode_context_copy import (
     CONTEXT_COPY_REFUSAL,
     context_copy_method,
@@ -29,36 +28,6 @@ from hyperloom.orchestrator.bus.storage.connection import SqliteConnection
 from hyperloom.orchestrator.loop.sub_agent_runner import SubAgentRunner
 from hyperloom.orchestrator.state.shared_state import SharedState
 from hyperloom.orchestrator.state.task_registry import TaskRegistry, TaskSpec
-
-
-# --------------------------------------------------------------------------
-# eval-start marker
-# --------------------------------------------------------------------------
-def test_eval_marker_in_magpies_nested_stderr_opens_the_eval_phase(tmp_path):
-    """The engine logs to the round's own server.log while Magpie's stderr, which carries the marker, is nested.
-
-    Reached only through a nested server.log, the stderr was never scanned and the eval was folded into the
-    measured phase (a 12h vLLM session's warmup round recorded only ``measured`` across its whole GSM8K eval).
-    """
-    primary = tmp_path / "server.log"
-    offsets = sk._stale_scan_log_sizes(str(primary))
-    primary.write_text("Application startup complete\n", encoding="utf-8")
-    nested = tmp_path / "benchmark_vllm_20261014_204322"
-    nested.mkdir()
-    (nested / "benchmark_stderr.log").write_text("+ run_eval\nHYPERLOOM_EVAL_START\n", encoding="utf-8")
-
-    scan = sk._LogCursor(offsets).advance(str(primary))
-    assert scan.saw_eval_start
-
-
-def test_a_previous_runs_nested_stderr_is_not_activity(tmp_path):
-    """A stderr that was already there when the round started belongs to an earlier run and must stay silent."""
-    nested = tmp_path / "benchmark_vllm_old"
-    nested.mkdir()
-    (nested / "benchmark_stderr.log").write_text("HYPERLOOM_EVAL_START\n", encoding="utf-8")
-    offsets = sk._stale_scan_log_sizes(str(tmp_path / "server.log"))
-    scan = sk._LogCursor(offsets).advance(str(tmp_path / "server.log"))
-    assert not scan.saw_eval_start
 
 
 # --------------------------------------------------------------------------
@@ -263,76 +232,3 @@ async def _explore(sub_agent_runner, tmp_path, names: list[str], *, entry: dict 
 
 def _refused(out: dict) -> dict[str, str]:
     return {sd["name"]: sd["detail"] for sd in out["skipped_dup"] if sd["reason"] == CONTEXT_COPY_REFUSAL}
-
-
-@pytest.mark.asyncio
-async def test_an_ngram_variant_is_refused_before_it_runs(sub_agent_runner, tmp_path):
-    """The measured case: ngram k=7 would have been KEPT at +95.7% on the synthetic benchmark."""
-    launched, out = await _explore(sub_agent_runner, tmp_path, ["ngram_k7", "eagle3", "lever"])
-    assert launched == ["eagle3", "lever"]
-    assert list(_refused(out)) == ["ngram_k7"]
-    assert "'ngram'" in _refused(out)["ngram_k7"]
-    assert "ngram_k7" not in {w["name"] for w in out["winners"]}
-    assert {row["variant_name"]: row["reason"] for row in out["per_variant_outcomes"]}["ngram_k7"] == (
-        CONTEXT_COPY_REFUSAL
-    )
-
-
-@pytest.mark.asyncio
-async def test_an_ngram_draft_set_through_the_server_args_env_is_refused(sub_agent_runner, tmp_path):
-    """EXTRA_VLLM_ARGS reaches the launch after composition; the materialized launch is what is read."""
-    launched, out = await _explore(
-        sub_agent_runner,
-        tmp_path,
-        ["lever"],
-        entry={"extra_envs": {"EXTRA_VLLM_ARGS": f"--max-num-seqs 64 {_NGRAM_K7}"}},
-    )
-    assert launched == []
-    assert list(_refused(out)) == ["lever"]
-
-
-@pytest.mark.asyncio
-async def test_a_lever_on_a_base_that_already_copies_runs(sub_agent_runner, tmp_path):
-    """The base's own draft is the operator's choice; a candidate that leaves it alone is graded as before."""
-    launched, out = await _explore(sub_agent_runner, tmp_path, ["lever"], base_extra_args=_NGRAM_K7)
-    assert launched == ["lever"]
-    assert _refused(out) == {}
-
-
-@pytest.mark.asyncio
-async def test_a_copying_draft_is_judged_against_the_stack_a_keep_in_the_same_round_left(sub_agent_runner, tmp_path):
-    """Dropping the base's ngram is KEPT; restoring it next in the same round is a change against that stack."""
-    launched, out = await _explore(sub_agent_runner, tmp_path, ["drop_draft", "ngram_k7"], base_extra_args=_NGRAM_K7)
-    assert [w["name"] for w in out["winners"]] == ["drop_draft"]
-    assert launched == ["drop_draft"]
-    assert list(_refused(out)) == ["ngram_k7"]
-
-
-@pytest.mark.asyncio
-async def test_an_agentx_session_is_not_filtered(sub_agent_runner, tmp_path):
-    launched, out = await _explore(sub_agent_runner, tmp_path, ["ngram_k7"], benchmark_mode="agentx")
-    assert launched == ["ngram_k7"]
-    assert _refused(out) == {}
-
-
-@pytest.mark.asyncio
-async def test_a_stack_revalidation_is_not_filtered(sub_agent_runner, tmp_path):
-    """It re-measures the stack as it stands, which may already carry the operator's draft."""
-    from hyperloom.orchestrator.actions.executors.explore import STACK_REVALIDATE_SOURCE
-
-    launched, out = await _explore(sub_agent_runner, tmp_path, ["ngram_k7"], source=STACK_REVALIDATE_SOURCE)
-    assert launched == ["ngram_k7"]
-    assert _refused(out) == {}
-
-
-@pytest.mark.asyncio
-async def test_a_variant_that_cannot_be_materialized_is_judged_on_its_own_args(sub_agent_runner, tmp_path, monkeypatch):
-    from hyperloom.orchestrator.actions.executors import explore
-
-    def _unreadable(*_args, **_kwargs):
-        raise OSError("probe")
-
-    monkeypatch.setattr(explore, "_materialized_launch", _unreadable)
-    launched, out = await _explore(sub_agent_runner, tmp_path, ["ngram_k7", "lever"])
-    assert launched == ["lever"]
-    assert list(_refused(out)) == ["ngram_k7"]

@@ -13,7 +13,12 @@ from __future__ import annotations
 import pytest
 
 from hyperloom.contracts.measurement import FailureClass
-from hyperloom.measure.failures import JIT_BUILD_TIMEOUT, NO_KNOWN_SIGNATURE_REASON, classify_test_failure
+from hyperloom.measure.failures import (
+    JIT_BUILD_TIMEOUT,
+    NO_KNOWN_SIGNATURE_REASON,
+    FailureEvidence,
+    classify_test_failure,
+)
 
 WATCHDOG = "[2000-01-01 00:00:00 TP0] Scheduler watchdog timeout (self.watchdog_timeout=300)"
 PYSPY = """Thread 1234 (idle): "MainThread"
@@ -28,7 +33,7 @@ TRACEBACK = """  File "/usr/local/lib/python3.12/dist-packages/aiter/jit/core.py
 
 @pytest.mark.parametrize("stack", [PYSPY, TRACEBACK])
 def test_the_watchdog_during_an_aiter_build_is_a_jit_build_timeout(stack: str) -> None:
-    verdict = classify_test_failure(returncode=1, logs=[f"loading\n{WATCHDOG}\n{stack}"])
+    verdict = classify_test_failure(returncode=1, evidence=FailureEvidence(logs=(f"loading\n{WATCHDOG}\n{stack}",)))
 
     assert verdict.failure_class is FailureClass.INFRA
     assert verdict.failure_reason == f"{JIT_BUILD_TIMEOUT}: {WATCHDOG}"
@@ -43,7 +48,7 @@ def test_the_watchdog_during_an_aiter_build_is_a_jit_build_timeout(stack: str) -
     ids=["watchdog_elsewhere", "build_without_watchdog"],
 )
 def test_a_watchdog_or_a_build_alone_is_not_one(log: str) -> None:
-    verdict = classify_test_failure(returncode=1, logs=[log])
+    verdict = classify_test_failure(returncode=1, evidence=FailureEvidence(logs=(log,)))
 
     assert verdict.failure_class is FailureClass.UNCLEAR
     assert verdict.failure_reason == NO_KNOWN_SIGNATURE_REASON

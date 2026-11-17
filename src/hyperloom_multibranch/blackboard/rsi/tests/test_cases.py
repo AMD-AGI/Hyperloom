@@ -9,6 +9,7 @@ from __future__ import annotations
 import dataclasses
 import hashlib
 import json
+import logging
 from pathlib import Path
 
 import pytest
@@ -186,3 +187,20 @@ async def test_a_brief_names_a_pooled_case_that_reproduced_on_the_root_as_a_defe
 
     assert brief.lessons[0] == f"{KNOWN_DEFECT} past-1 c1: {DIAGNOSIS}"
     assert not any(line.startswith(KNOWN_DEFECT) for line in without.lessons)
+
+
+def test_a_pooled_case_this_account_cannot_open_is_named_with_its_owner_and_mode(
+    snapshot: BlackboardSnapshot, tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    blobs, pool = LocalBlobStore(tmp_path / "blobs"), CasePool(tmp_path / "cases")
+    pool_cases(_registered(snapshot, blobs, "p1"), blobs, pool, IMAGE)
+    unopenable = pool.root / "other-account.json"
+    unopenable.mkdir()  # read_text fails with an OSError as a file another account wrote owner-only does
+    unopenable.chmod(0o700)
+
+    with caplog.at_level(logging.WARNING, logger="hyperloom_multibranch.blackboard.rsi.cases"):
+        (entry,) = pool.entries()
+
+    info = unopenable.stat()
+    assert entry.session_id == "sess-1"
+    assert f"{unopenable} (owner {info.st_uid}:{info.st_gid} 0700)" in caplog.text

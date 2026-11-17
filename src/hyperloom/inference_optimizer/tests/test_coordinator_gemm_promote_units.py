@@ -1016,45 +1016,8 @@ class TestBf16DenseFallbackIsInternalToForge:
         assert not any(c["task_id"].endswith("_bf16_fallback") for c in calls)
         assert "bf16_fallback" not in coord.shared_state.last_gemm_tuning.get("task_id", "")
 
-    def test_deleted_fallback_machinery_is_gone(self, tmp_path):
-        """The dedicated bf16-fallback methods no longer exist on the coordinator."""
-        coord = _coord(tmp_path, framework="sglang")
-        for name in (
-            "_run_bf16_dense_gemm_fallback",
-            "_should_run_bf16_dense_gemm_fallback",
-            "_bf16_dense_gemm_fallback_pending",
-            "_bf16_dense_gemm_fallback_attempted",
-            "_is_bf16_dense_gemm_fallback_attempt",
-        ):
-            assert not hasattr(coord, name), f"{name} should have been removed by Change 3"
-
 
 class TestHandleGemmTuningResult:
-    @pytest.mark.asyncio
-    async def test_forge_requires_e2e_routes_to_validator(self, tmp_path):
-        coord = _coord(tmp_path, baseline_tput=100.0)
-        called: dict[str, object] = {}
-
-        async def _fake_validate(result):
-            called["result"] = result
-
-        coord.phase_kernel._validate_gemm_tuning_e2e = _fake_validate  # type: ignore[assignment]
-
-        await coord.phase_kernel._handle_gemm_tuning_result(
-            {
-                "status": "ok",
-                "decision": "KEEP",
-                "best_speedup": 1.3,
-                "backend": "forge",
-                "requires_e2e_validation": True,
-                "extra_envs": {"AITER_CONFIG": "/cfg/tuned.json"},
-            }
-        )
-
-        assert "result" in called
-        # Validator owns promotion; inline promote must not have run.
-        assert coord.shared_state.optimization_stack == []
-
     @pytest.mark.asyncio
     async def test_forge_e2e_rewrites_latest_attempt_history(self, tmp_path, monkeypatch):
         coord = _coord(tmp_path, baseline_tput=100.0, framework="sglang")
@@ -1221,7 +1184,72 @@ class TestHandleGemmTuningResult:
         assert coord.shared_state.cumulative_gain_validated == pytest.approx(50.0)
 
 
+#: What the report mapper stamps on every AgentX round it accepts as evidence.
+_AGENTX_EVIDENCE = {"valid_measurement": True, "diagnostic_only": False, "workload_identity": "agentx-workload"}
+
+
 class TestKernelE2EMeasurementPromotion:
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("inherited_pythonpath", ["", "/base/one:/base/two"])
+    async def test_tunableop_hook_survives_integration_keep_and_paired_replay(
+        self, coord, tmp_path, monkeypatch, inherited_pythonpath
+    ):
+        from kernelforge.workflows.gemm_tune.tuners.vllm_dense_tunableop import _candidate_pythonpath
+
+        state = coord.shared_state
+        state.framework = "vllm"
+        state.model_path = "/models/e2e"
+        hook = tmp_path / "runtime_sitecustomize"
+        hook.mkdir()
+        (hook / "sitecustomize.py").write_text("HOOK_LOADED = True\n")
+        tuned = tmp_path / "tunableop.csv"
+        tuned.write_text("GemmTunableOp_BFloat16_TN,shape,solution,1.0\n")
+        monkeypatch.setenv("PYTHONPATH", inherited_pythonpath)
+        pythonpath = _candidate_pythonpath(hook)
+        assert pythonpath.split(":") == [str(hook), *filter(None, inherited_pythonpath.split(":"))]
+        env = {
+            "PYTHONPATH": pythonpath,
+            "HL_TUNABLEOP_MODE": "candidate",
+            "HL_TUNABLEOP_FILE": str(tuned),
+            "PYTORCH_TUNABLEOP_FILENAME": str(tuned),
+        }
+        monkeypatch.setenv("HYPERLOOM_GEMM_PAIRED_PAIRS", "1")
+        payloads = []
+        native_params = []
+        bench = self._bench(110.0, 1200.0, intvty=120.0)
+
+        async def measure(payload, *, session_dir):
+            payloads.append(deepcopy(payload))
+            attempt = integrate_rebaseline._integrate_rebaseline(
+                payload,
+                state,
+                session_dir=session_dir,
+                performance_policy={"base_tput": 100.0, "keep_threshold_pct": 1.0},
+            )
+            native_params.append(attempt.ctx.task.params)
+            return {"status": "ok", "decision": "KEEP", "new_tput": 110.0, "gain_pct": 10.0, "bench_result": bench}
+
+        monkeypatch.setattr(krh_mod, "integrate_handler", measure)
+        result = {"backend": "forge", "candidates": [{"tuner": "vllm_dense_tunableop", "env": env}]}
+
+        await KernelPhase(coord)._validate_gemm_tuning_e2e(result)
+
+        assert len(payloads) == 3
+        assert payloads[0]["mode"] == "env_only"
+        assert payloads[0]["runtime_override"] == {"pythonpath_prefix": str(hook)}
+        assert native_params[0]["runtime_override"] == payloads[0]["runtime_override"]
+        assert payloads[1]["runtime_override"] == native_params[1]["runtime_override"] == {}
+        assert (
+            payloads[2]["runtime_override"] == native_params[2]["runtime_override"] == payloads[0]["runtime_override"]
+        )
+        assert state.current_best["final_overlay"] == str(hook)
+        assert state.optimization_stack[-1]["final_overlay"] == str(hook)
+        state.save(tmp_path)
+        restored = SharedState.load_or_init(tmp_path)
+        assert restored.current_best["final_overlay"] == str(hook)
+        assert restored.optimization_stack[-1]["final_overlay"] == str(hook)
+        assert restored.current_best["extra_envs"]["HL_TUNABLEOP_FILE"] == str(tuned)
+
     @pytest.fixture
     def coord(self, tmp_path, monkeypatch):
         monkeypatch.delenv("HYPERLOOM_PERF_METRIC", raising=False)
@@ -1238,6 +1266,7 @@ class TestKernelE2EMeasurementPromotion:
                 "e2e_norm_intvty_p50": 100.0,
                 "duration_seconds": 900.0,
                 "request_error_rate": 0.0,
+                **_AGENTX_EVIDENCE,
             },
             current_best={
                 "tput": 100.0,
@@ -1246,6 +1275,7 @@ class TestKernelE2EMeasurementPromotion:
                 "e2e_norm_intvty_p50": 100.0,
                 "duration_seconds": 900.0,
                 "request_error_rate": 0.0,
+                **_AGENTX_EVIDENCE,
                 "extra_envs": {"BASE_ENV": "1"},
             },
         )
@@ -1268,6 +1298,7 @@ class TestKernelE2EMeasurementPromotion:
             "ttft_mean_ms": 12.0,
             "e2el_mean_ms": 23.0,
             "tpot_mean_ms": 4.0,
+            **_AGENTX_EVIDENCE,
             "workspace": f"/e2e/{name}",
             "raw_result_path": f"/e2e/{name}/raw.json",
             "report_path": f"/e2e/{name}/report.json",
@@ -1478,7 +1509,7 @@ class TestKernelE2EMeasurementPromotion:
 
     @pytest.fixture
     def paired_handler(self, monkeypatch):
-        from hyperloom.orchestrator.actions.executors import _multi_node_env, benchmark_backend
+        from hyperloom.orchestrator.actions.executors import _multi_node_env
 
         def unexpected(*args, **kwargs):
             raise AssertionError("Paired measurements must not resolve, apply, or grade a patch")
@@ -1492,7 +1523,6 @@ class TestKernelE2EMeasurementPromotion:
         monkeypatch.setattr(integrate_accuracy, "grade_integrate_accuracy", unexpected)
         monkeypatch.setattr(integrate_outcomes, "_maybe_finalize_kernel_patch", unexpected)
         monkeypatch.setattr(integrate_rebaseline, "_sweep_integrate_aiter_locks", lambda **kwargs: {})
-        monkeypatch.setattr(benchmark_backend, "resolve_benchmark_interpreter", lambda: "/usr/bin/python3")
         monkeypatch.setattr(_multi_node_env, "is_multi_node", lambda: False)
         return krh_mod.integrate_handler
 
@@ -1832,7 +1862,7 @@ class TestKernelE2EMeasurementPromotion:
     async def test_gemm_legacy_measurement_does_not_borrow_micro_axes(self, coord, monkeypatch, explicit_output):
         if explicit_output:
             monkeypatch.setenv("HYPERLOOM_PERF_METRIC", "output_throughput")
-        fake = _make_integrate([{"decision": "KEEP", "new_tput": 110.0, "gain_pct": 10.0}])
+        fake = _make_integrate([{"decision": "KEEP", "new_tput": 110.0, "gain_pct": 10.0, **_AGENTX_EVIDENCE}])
         monkeypatch.setattr(krh_mod, "integrate_handler", fake)
         result = self._result()
         anchor = deepcopy(coord.shared_state.current_best)

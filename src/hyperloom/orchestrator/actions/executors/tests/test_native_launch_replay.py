@@ -6,12 +6,12 @@
 from copy import deepcopy
 import os
 import shlex
+from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
 import yaml
 
-from hyperloom.inference_optimizer.agentx.report import native_launch_evidence
 from hyperloom.orchestrator.actions.executors import (
     _grid_runner,
     _integrate_bench,
@@ -28,8 +28,11 @@ from hyperloom.orchestrator.actions.executors._workload_envs import (
     LaunchLayer,
     BenchmarkTarget,
 )
-from hyperloom.orchestrator.actions.executors.magpie_agentx import load_benchmark
 from hyperloom.orchestrator.state.shared_state import SharedState, stack_base_params
+
+
+def load_benchmark(path: Path) -> dict:
+    return yaml.safe_load(path.read_text(encoding="utf-8"))["benchmark"]
 
 
 _MODEL = "Qwen/Qwen3-0.6B"
@@ -38,16 +41,25 @@ _OPTION = "--cuda-graph-max-bs"
 _ENV = "SGLANG_USE_AITER"
 
 
-def _evidence(config, recipe, effective, env):
-    return native_launch_evidence(
-        {
-            "agentx_metrics": {
-                "server_launch": {"base_argv": recipe, "effective_argv": effective, "effective_env": env},
-                "recipe": {"tp": 1, "ep": 1, "conc": 8},
-            }
-        },
-        config,
-    )
+def native_receipt(config: Path, argv: list[str], env: dict[str, str | None]) -> dict:
+    """The launch evidence a native AgentX round left beside its recipe: the server options of the argv it ran and the
+    environment it exported, ``None`` for a name it cleared."""
+    first_option = next((index for index, token in enumerate(argv) if token.startswith("--")), len(argv))
+    flags = shlex.join(argv[first_option:])
+    return {
+        "schema_version": 1,
+        "materialized_config_path": str(config),
+        "framework": "sglang",
+        "model_path": _MODEL,
+        "requested_server_args": flags,
+        "requested_server_env": {name: value for name, value in env.items() if value is not None},
+        "observed_server_launch_flags": flags,
+        "observed_server_config": {},
+        "observed_server_identity": {},
+        "engine_adjusted_settings": {},
+        "actual_server_log_path": "",
+        "warm_reuse": {"reused": False},
+    }
 
 
 @pytest.fixture
@@ -80,12 +92,12 @@ def native_session(tmp_path, monkeypatch):
         baseline = materialize_benchmark_config(
             source, tmp_path / "baseline", launch=LaunchLayer(extra_server_args=appended, extra_envs=initial_env)
         )
-        evidence = _evidence(baseline, canonical, canonical + shlex.split(appended), initial_env)
+        evidence = native_receipt(baseline, canonical + shlex.split(appended), initial_env)
         persist_launch_evidence(evidence, slot=baseline.parent)
         state = SharedState(
             framework="sglang",
             benchmark_mode="agentx",
-            agentx_backend="magpie",
+            agentx_backend="inferencex",
             baseline_config_path=str(baseline),
             baseline_tput=100,
             baseline_perf={
@@ -121,7 +133,7 @@ def _stub_gpu(monkeypatch, session, *, effective):
         )
         launch = load_benchmark(config)["agentx"]["launch_overrides"]
         observed.append(deepcopy(launch))
-        evidence = _evidence(config, session.recipe, effective, launch["env"])
+        evidence = native_receipt(config, effective, launch["env"])
         evidence_path = persist_launch_evidence(evidence, slot=config.parent)
         return [
             VariantResult(
@@ -136,17 +148,19 @@ def _stub_gpu(monkeypatch, session, *, effective):
                 duration_seconds=3600,
                 completed_requests=100,
                 request_error_rate=0,
-                benchmark_backend="magpie_agentx",
-                benchmark_valid=True,
+                valid_measurement=True,
                 diagnostic_only=False,
                 workload_identity="fixed-workload",
                 launch_evidence=evidence,
                 launch_evidence_path=evidence_path,
+                workspace=str(config.parent / "benchmark_native"),
             )
         ]
 
     monkeypatch.setattr(explore, "run_grid", run_grid)
     monkeypatch.setattr(_integrate_bench, "run_grid", run_grid)
+    # One cold decision round per explore, so each captured launch is one candidate's.
+    monkeypatch.setattr(explore, "resolve_lifecycle_params", lambda _path: {"eligible": False})
     return observed
 
 
@@ -202,18 +216,6 @@ async def test_env_only_keep_replays_unrelated_recipe_and_operator_options(nativ
 
 
 @pytest.mark.asyncio
-async def test_explore_ablation_removes_recipe_and_appended_copies(native_session, tmp_path, monkeypatch):
-    session = native_session(appended=f"{_OPTION} 512")
-    observed = _stub_gpu(monkeypatch, session, effective=_PREFIX + ["--enable-hierarchical-cache"])
-    result = await _explore(session, tmp_path, name="ablate-both", candidate={"remove_args": [_OPTION]})
-    assert len(result["winners"]) == 1, result
-    assert len(observed) == 1
-    launch = observed[0]
-    assert _OPTION not in launch["append_args"]
-    assert _OPTION in launch["remove_args"] or launch["replace_args"]
-
-
-@pytest.mark.asyncio
 async def test_accepted_appended_only_ablation_survives_integrate_patch(native_session, tmp_path, monkeypatch):
     session = native_session(appended="--disable-cuda-graph", recipe=_PREFIX)
     observed = _stub_gpu(monkeypatch, session, effective=_PREFIX)
@@ -250,7 +252,7 @@ async def test_accepted_appended_only_ablation_survives_integrate_patch(native_s
 
 
 @pytest.mark.parametrize("option", ["--unrecognized-server-option", "--model-path", "--port"])
-def test_unknown_and_protected_removals_reach_magpie_validation(native_session, tmp_path, option):
+def test_unknown_and_protected_removals_reach_the_launch_validation(native_session, tmp_path, option):
     session = native_session(recipe=_PREFIX + ["--port", "30000"])
     intermediate = prepare_grid_benchmark_config(session.config, tmp_path / "explore")
     variant = _grid_runner._build_variant_yaml(
@@ -322,7 +324,7 @@ _PROTECTED = ("--model-path", "--tp", "--tensor-parallel-size", "--port", "--hos
 async def test_a_native_replace_removal_keep_persists_only_what_hyperloom_appends(
     native_session, tmp_path, monkeypatch, replayed
 ):
-    """Magpie refuses a protected option in append_args, so a KEEP must persist the overlay, not Magpie's argv."""
+    """A protected option is refused in append_args, so a KEEP must persist the overlay, not the round's argv."""
     from hyperloom.orchestrator.loop._integrate_promotion import _integrate_keep_variant
     from hyperloom.orchestrator.loop.coordinator import Coordinator
 

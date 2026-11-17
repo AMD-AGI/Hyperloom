@@ -27,7 +27,7 @@ _pin_child_processes_to_this_tree()
 
 @pytest.fixture
 def native_benchmark(tmp_path):
-    """A canonical Magpie workload; individual tests choose whether to activate it."""
+    """A canonical AgentX point; individual tests choose whether to activate it."""
     import yaml
 
     path = tmp_path / "agentx.yaml"

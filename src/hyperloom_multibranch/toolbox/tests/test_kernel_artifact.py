@@ -73,7 +73,6 @@ def _variant(root: Path) -> Variant:
         root,
         image_ref="local",
         image_digest=IMAGE,
-        benchmark_backend="bypass",
         blob_root=str(blobs.root),
         blobs=blobs,
     )

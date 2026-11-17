@@ -15,7 +15,9 @@ from pathlib import Path
 from typing import Any
 
 from hyperloom_common import io as _common_io
+from inference_suite.server_log import death_excerpt
 from hyperloom.common.agent_isolation import session_isolation_lines
+from hyperloom.common.failure_signature import is_engine_capacity_error
 from hyperloom.common.gain_math import gain_pct
 from hyperloom.common.platform_probe import platform_fingerprint
 
@@ -74,6 +76,9 @@ def _pick_failure_headline(text: str) -> str:
     lines = [ln.strip() for ln in str(text or "").splitlines() if ln.strip()]
     if not lines:
         return ""
+    for ln in lines:
+        if is_engine_capacity_error(ln):
+            return ln
     priority = (
         "out of memory",
         "fatal",
@@ -141,9 +146,7 @@ def _build_failure_summary(
     server_log_abs = _resolve_attempt_server_log(attempt)
     # Only the benign WARN (or nothing) survived: dig the real terminal marker out of server.log when available.
     if not error_text and server_log_abs is not None:
-        from ._subprocess_kill import server_log_death_excerpt
-
-        excerpt = server_log_death_excerpt(str(server_log_abs))
+        excerpt = death_excerpt(str(server_log_abs))
         if excerpt:
             error_text = excerpt.strip()
             if error_class in ("", "unknown"):

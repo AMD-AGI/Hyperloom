@@ -6,6 +6,7 @@
 import asyncio
 import os
 import signal
+import stat
 import time
 from pathlib import Path
 
@@ -64,6 +65,18 @@ async def test_a_command_runs_on_the_sandboxs_environment_with_only_what_is_forw
     assert "HIP_VISIBLE_DEVICES=0,1" in lines and "ROCR_VISIBLE_DEVICES=6,7" in lines
     assert f"{MARKER}={remote.root}" in lines and f"{PROCESS_MARKER}={remote.root}/1" in lines
     assert not any(line.startswith("HL_") for line in lines)
+
+
+async def test_a_command_commits_with_the_agent_identity_from_the_sandbox_s_home(tmp_path):
+    remote = _remote(tmp_path)
+    checkout = tmp_path / "checkout"
+    checkout.mkdir()
+    commit = "git init -q && git commit -q --allow-empty -m seed && git log -1 --format='%an <%ae>'"
+
+    done = await remote.run(commit, checkout, {"GIT_CONFIG_NOSYSTEM": "1"}, timeout=30)
+
+    assert done.returncode == 0, done.output
+    assert done.output.splitlines()[-1] == "hyperloom-agent <agent@hyperloom.invalid>"
 
 
 async def test_a_command_that_exits_reports_its_code_and_output_through_the_shared_files(tmp_path):
@@ -184,6 +197,7 @@ def test_only_the_gateway_its_credentials_and_the_ca_bundle_are_forwarded():
         "ANTHROPIC_BASE_URL": "u",
         "CLAUDE_MODEL": "m",
         "GEAK_CLAUDE_MODEL": "g",
+        "CLAUDE_CODE_OAUTH_TOKEN": "t",
         "SSL_CERT_FILE": "/tmp/hyperloom-host/ca-bundle.pem",
         "HOME": "/root",
         "PATH": "/usr/bin",
@@ -197,5 +211,69 @@ def test_only_the_gateway_its_credentials_and_the_ca_bundle_are_forwarded():
         "ANTHROPIC_BASE_URL": "u",
         "CLAUDE_MODEL": "m",
         "GEAK_CLAUDE_MODEL": "g",
+        "CLAUDE_CODE_OAUTH_TOKEN": "t",
         "SSL_CERT_FILE": "/tmp/hyperloom-host/ca-bundle.pem",
     }
+
+
+# -- the root is the group's: the sandbox's account, this host's and the next leg's may differ ---------------------
+def _mode(path: Path) -> int:
+    return stat.S_IMODE(os.lstat(path).st_mode)
+
+
+def _umask() -> int:
+    with open("/proc/self/status", encoding="ascii") as status:
+        return next(int(line.split()[1], 8) for line in status if line.startswith("Umask:"))
+
+
+async def test_the_root_its_directories_and_the_files_made_for_the_launcher_are_the_groups_whatever_the_umask(tmp_path):
+    assert _umask() & 0o020, "the test needs a umask that keeps group write off what a plain create makes"
+    tmp_path.chmod(0o2775)  # storage set up to be shared: setgid, group-writable, closed to others
+    remote = _remote(tmp_path)
+
+    process = await remote.start("true", tmp_path, {})
+    await _ended(process)
+
+    made = [remote.root, *(remote.root / name for name in ("bin", "logs", "run", "home", "cache"))]
+    for directory in (*made, claude_config_dir(remote.root)):
+        assert _mode(directory) == 0o2775, directory
+    for file in (process.log, process.pid_file, process.exit_file):
+        assert _mode(file) == 0o664, file
+    for script in ("hl-launch.sh", "hl-procs.sh"):
+        assert _mode(remote.root / "bin" / script) == 0o755, script
+
+
+async def test_a_new_leg_replaces_the_scripts_by_rename_never_rewriting_the_file_an_earlier_leg_left(tmp_path):
+    _remote(tmp_path)
+    launcher = tmp_path / "sandbox" / "bin" / "hl-launch.sh"
+    launcher.write_text("#!/bin/bash\nexit 99\n")
+    (tmp_path / "earlier-leg-inode").hardlink_to(launcher)
+
+    done = await _remote(tmp_path).run("echo ran", tmp_path, {}, timeout=10)
+
+    assert done.returncode == 0 and "ran" in done.output
+    assert (tmp_path / "earlier-leg-inode").read_text() == "#!/bin/bash\nexit 99\n", "replaced, never written in place"
+
+
+async def test_what_a_command_makes_below_the_root_is_the_groups_to_write(tmp_path):
+    assert _umask() & 0o020, "the test needs a umask that keeps group write off what a plain create makes"
+    tmp_path.chmod(0o2775)  # storage set up to be shared: setgid, group-writable, closed to others
+    remote = _remote(tmp_path)
+
+    done = await remote.run("mkdir made && echo x > made/file", remote.root / "home", {}, timeout=10)
+
+    assert done.returncode == 0, done.output
+    assert _mode(remote.root / "home" / "made") & 0o070 == 0o070
+    assert _mode(remote.root / "home" / "made" / "file") & 0o060 == 0o060
+
+
+async def test_what_a_command_makes_outside_shared_storage_follows_the_umask(tmp_path):
+    assert _umask() & 0o020, "the test needs a umask that keeps group write off what a plain create makes"
+    tmp_path.chmod(0o755)
+    remote = _remote(tmp_path)
+
+    done = await remote.run("mkdir made && echo x > made/file", remote.root / "home", {}, timeout=10)
+
+    assert done.returncode == 0, done.output
+    assert _mode(remote.root / "home" / "made") & 0o020 == 0
+    assert _mode(remote.root / "home" / "made" / "file") & 0o020 == 0

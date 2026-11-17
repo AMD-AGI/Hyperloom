@@ -11,39 +11,16 @@ has one shape and one owner.
 
 from __future__ import annotations
 
-import importlib.metadata
-import os
 from collections.abc import Mapping
 from dataclasses import dataclass
 from pathlib import Path
 
-from hyperloom_common.io import atomic_write_json
+from hyperloom_common.io import WriteOptions, atomic_write_json
 from hyperloom_common.jsonio import read_json_strict
-from hyperloom.common.provenance import detect_code_revision
 from hyperloom_multibranch.blackboard.codec import decode, encode
+from hyperloom_multibranch.contracts.build import MB_DISTRIBUTION, CodeVersion, code_version
+from hyperloom_multibranch.scheduling.launch_isolation import LaunchIsolation
 from hyperloom_multibranch.scheduling.settings import RunSettings
-
-#: The distribution this package ships in (pyproject.toml ``[project] name``).
-MB_DISTRIBUTION = "hyperloom-inference_optimizer"
-
-
-@dataclass(frozen=True)
-class CodeVersion:
-    """The installed package version and the source revision :func:`detect_code_revision` reports: the source
-    tree's commit, else the revision baked into the image; empty where there is none."""
-
-    package: str
-    git_sha: str
-
-
-def code_version() -> CodeVersion:
-    """This scheduler's :class:`CodeVersion`. Blocks on git."""
-
-    try:
-        package = importlib.metadata.version(MB_DISTRIBUTION)
-    except importlib.metadata.PackageNotFoundError:
-        package = ""
-    return CodeVersion(package, detect_code_revision(os.environ))
 
 
 @dataclass(frozen=True)
@@ -70,13 +47,17 @@ NO_IMAGE_CHECK = ImageCheckSummary({})
 @dataclass(frozen=True)
 class SessionManifest:
     """The manifest document: the build the session ran on, the rule pack it read, the window it was given, the
-    settings it ran under, the metric it optimized, the policy versions it scored with and what the image check found.
+    settings it ran under, the metric it optimized, the policy versions it scored with, what the image check found and
+    how its agents were isolated.
 
     ``rule_pack`` is :func:`hyperloom.common.outside_facts.rule_pack.rule_pack_identity`'s version and digest, so a session's
     prompts can be told apart from another's when the pack moves under a single build. ``image_check`` is the
     :meth:`~hyperloom.common.outside_facts.image_check.ImageCheckReport.summary` of the check the session ran before its
     first phase: its mode, the pack digest, the counts and the facts that failed; a manifest without it reads as
-    empty, so a session directory an earlier build wrote still reads back far enough to be refused for its build."""
+    empty, so a session directory an earlier build wrote still reads back far enough to be refused for its build.
+    ``agent_isolation`` is how the session's peers launched its specialists, agent and dev sandboxes and tests
+    (:mod:`~hyperloom_multibranch.scheduling.launch_isolation`), and why a launch on its host was not isolated; ``None``
+    in a manifest an earlier build wrote."""
 
     code_version: CodeVersion
     rule_pack: dict[str, str]
@@ -87,11 +68,13 @@ class SessionManifest:
     metric: str
     policy_versions: dict[str, str]
     image_check: ImageCheckSummary = NO_IMAGE_CHECK
+    agent_isolation: LaunchIsolation | None = None
 
     def write(self, path: Path) -> None:
-        """Write the document to ``path``, replacing whatever is there."""
+        """Write the document to ``path``, replacing whatever is there; ``664``, as a later leg of a hosted run, maybe
+        another account of the group, reads it back to take the session over."""
 
-        atomic_write_json(path, encode(self))
+        atomic_write_json(path, encode(self), options=WriteOptions(shared=True))
 
 
 def read_manifest(path: Path) -> SessionManifest:

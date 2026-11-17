@@ -10,15 +10,17 @@ finished, the candidate while its round is still running.
 from __future__ import annotations
 
 import logging
+import os
 import statistics
+import time
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Iterable, Mapping
 
 from hyperloom_common.coerce import optional_positive_float
-from hyperloom_common.env import EnvValueError, env_str
 from hyperloom_common.io import atomic_write_json
 from hyperloom_common.jsonio import read_json
+from hyperloom.common.agentx_early_stop import EarlyStopMode, early_stop_mode
 from hyperloom.common.outside_facts import AIPERF_PROFILING_PHASE
 from hyperloom.common.perf_metric import (
     AGENTX_CHECKPOINT_MAX_DROP_PCT,
@@ -26,27 +28,22 @@ from hyperloom.common.perf_metric import (
     GRADED_INTVTY_P50_CHECKPOINT,
 )
 
-from ._agentx_timeline import RequestRecord, find_profile_export, parse_profile_export
+from inference_suite.telemetry.agentx_timeline import RequestRecord, find_profile_export, parse_profile_export
 from ._subprocess_kill import AgentxCheckpointMissed
 
 log = logging.getLogger(__name__)
 
 __all__ = [
     "CHECKPOINT_ARTIFACT_NAME",
-    "EARLY_STOP_ENV",
     "AgentxCheckpoint",
     "CheckpointJudge",
+    "SuiteRoundCheckpoint",
     "checkpoint_p50",
     "checkpoint_summary",
     "read_checkpoint",
     "round_checkpoint",
     "workspace_checkpoint_p50",
 ]
-
-#: ``enforce`` (default) records the ruling and stops a trailing round, ``shadow`` only records it, ``off`` skips it.
-EARLY_STOP_ENV = "HYPERLOOM_AGENTX_EARLY_STOP"
-_ENFORCE, _SHADOW, _OFF = "enforce", "shadow", "off"
-_MODES = (_ENFORCE, _SHADOW, _OFF)
 
 #: Written into the round's slot when the checkpoint rules.
 CHECKPOINT_ARTIFACT_NAME = "agentx_checkpoint.json"
@@ -85,20 +82,37 @@ class AgentxCheckpoint:
     def gain_pct(self, candidate_p50: float) -> float:
         return (candidate_p50 / self.reference_p50 - 1.0) * 100.0
 
-    def judge(self, slot: Path) -> CheckpointJudge:
-        """The recorder that rules on this checkpoint for the round writing into ``slot``."""
-        return CheckpointJudge(self, slot)
+
+@dataclass(frozen=True)
+class SuiteRoundCheckpoint:
+    """The checkpoint of an inference_suite round: it rules into the grid slot and reads aiperf's export from the run_dir.
+
+    The round reports no phase to its caller, so the judge starts counting when the round starts: profiling opens no
+    earlier, and the export is re-read until it shows the window closed.
+    """
+
+    checkpoint: AgentxCheckpoint
+    slot: Path
+    run_dir: Path
+
+    def judge(self) -> CheckpointJudge:
+        """The judge for this round, counting from now."""
+        judge = CheckpointJudge(self.checkpoint, self.slot, export_root=self.run_dir)
+        judge.note_phase("measured", time.monotonic())
+        return judge
+
+    def clear(self) -> None:
+        """Drop a ruling an earlier round left in the slot, so the slot's ruling is this round's alone."""
+        (self.slot / CHECKPOINT_ARTIFACT_NAME).unlink(missing_ok=True)
 
 
 def round_checkpoint(reference: Mapping[str, Any] | None) -> AgentxCheckpoint | None:
     """The checkpoint for a round graded against ``reference``; None when it is off or the reference has none."""
-    mode = env_str(EARLY_STOP_ENV).lower() or _ENFORCE
-    if mode not in _MODES:
-        raise EnvValueError(f"{EARLY_STOP_ENV}={mode!r} is not one of {', '.join(_MODES)}")
+    mode = early_stop_mode(os.environ, EarlyStopMode.ENFORCE)
     reference_p50 = optional_positive_float((reference or {}).get(GRADED_INTVTY_P50_CHECKPOINT))
-    if mode == _OFF or reference_p50 is None:
+    if mode is EarlyStopMode.OFF or reference_p50 is None:
         return None
-    return AgentxCheckpoint(reference_p50, enforce=mode == _ENFORCE)
+    return AgentxCheckpoint(reference_p50, enforce=mode is EarlyStopMode.ENFORCE)
 
 
 def checkpoint_summary(ruling: Mapping[str, Any]) -> str:
@@ -119,9 +133,10 @@ def read_checkpoint(slot: Path) -> dict[str, Any] | None:
 class CheckpointJudge:
     """Round recorder that rules once at the checkpoint and reaps a trailing round when the checkpoint enforces."""
 
-    def __init__(self, checkpoint: AgentxCheckpoint, slot: Path) -> None:
+    def __init__(self, checkpoint: AgentxCheckpoint, slot: Path, *, export_root: Path | None = None) -> None:
         self._checkpoint = checkpoint
         self._slot = slot
+        self._export_root = slot if export_root is None else export_root
         self._due: float | None = None
         self._ruled = False
 
@@ -132,7 +147,7 @@ class CheckpointJudge:
     def tick(self, mono: float) -> None:
         if self._ruled or self._due is None or mono < self._due:
             return
-        candidate = workspace_checkpoint_p50(self._slot)
+        candidate = workspace_checkpoint_p50(self._export_root)
         if candidate is None:
             self._due = mono + _REREAD_SEC
             return

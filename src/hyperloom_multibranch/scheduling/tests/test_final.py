@@ -26,15 +26,17 @@ from hyperloom.contracts.recipe import Recipe
 from hyperloom.measure.compile import LocalBlobStore
 from hyperloom_multibranch.contracts.judgement import AccuracyVerdict, Judgement, Verdict
 from hyperloom_multibranch.contracts.blackboard import INTEGRATION_BRANCH, Role, Writer
-from hyperloom_multibranch.contracts.blackboard.records import BranchProgress, LineageEvent
+from hyperloom_multibranch.contracts.blackboard.records import BaselineRecord, BranchProgress, LineageEvent
 from hyperloom_multibranch.contracts.blackboard.vocab import LineageKind
 from hyperloom_multibranch.blackboard import LocalBlackboard
 from hyperloom_multibranch.repo.git_repo import GitExperimentRepo
 from hyperloom_multibranch.rulegate.gate import RuleGate
-from hyperloom_multibranch.rulegate.inferencex import BASELINE_TESTS, DROPPED_REQUESTS
-from hyperloom_multibranch.rulegate.rules import InferenceXRule
+from hyperloom_multibranch.rulegate.inferencex import BASELINE_TESTS, DROPPED_REQUESTS, GAIN_BELOW_THRESHOLD
+from hyperloom_multibranch.rulegate.agentx import AgentXObjective
+from hyperloom_multibranch.rulegate.rules import AgentXRule, InferenceXRule
 from hyperloom_multibranch.rulegate.service import GateService
 from hyperloom_multibranch.scheduling.final import (
+    BELOW_REPRODUCTION_TOLERANCE,
     CandidateCheck,
     FinalCandidate,
     FinalCandidates,
@@ -91,10 +93,13 @@ async def test_the_best_single_branch_is_chosen_over_every_branch_whatever_stopp
         _row("b05", "c9", None),
     )
 
-    candidates = await choose_candidates(progress, bench.root, {METRIC: 1040.0}, METRIC, bench.repo)
+    candidates = await choose_candidates(
+        progress, _row(INTEGRATION_BRANCH, bench.root, 1040.0), METRIC, bench.repo, await bench.baseline()
+    )
 
-    assert candidates.integration == FinalCandidate("integration", INTEGRATION_BRANCH, bench.root, 1040.0)
+    assert candidates.integration == FinalCandidate("integration", INTEGRATION_BRANCH, bench.root, 1040.0, root=True)
     assert candidates.best_branch == FinalCandidate("best_branch", "b01", bench.commits["i1"], 1100.0)
+    assert candidates.baseline_value == BASELINE_VALUE
 
 
 async def test_the_branch_whose_recipe_the_integration_head_already_carries_is_no_candidate(tmp_path: Path) -> None:
@@ -102,7 +107,9 @@ async def test_the_branch_whose_recipe_the_integration_head_already_carries_is_n
     twin = await bench.commit_on("b03", "i1", 1040.0)
     progress = (_row("b02", bench.commits["c7"], 1060.0), _row("b03", twin, 1200.0))
 
-    candidates = await choose_candidates(progress, bench.commits["i1"], {METRIC: 1040.0}, METRIC, bench.repo)
+    candidates = await choose_candidates(
+        progress, _row(INTEGRATION_BRANCH, bench.commits["i1"], 1040.0), METRIC, bench.repo, await bench.baseline()
+    )
 
     assert twin != bench.commits["i1"]
     assert candidates.best_branch == FinalCandidate("best_branch", "b02", bench.commits["c7"], 1060.0)
@@ -112,10 +119,12 @@ async def test_without_a_committed_branch_only_the_integration_head_is_a_candida
     bench = await Bench(tmp_path).build(CURVES)
     rows = (_row(INTEGRATION_BRANCH, bench.root, 1040.0), _row("b01", "c0", None, commits=0))
 
-    candidates = await choose_candidates(rows, bench.root, {}, METRIC, bench.repo)
+    candidates = await choose_candidates(
+        rows, _row(INTEGRATION_BRANCH, bench.root, None), METRIC, bench.repo, await bench.baseline()
+    )
 
     assert candidates.best_branch is None
-    assert candidates.each == (FinalCandidate("integration", INTEGRATION_BRANCH, bench.root, None),)
+    assert candidates.each == (FinalCandidate("integration", INTEGRATION_BRANCH, bench.root, None, root=True),)
 
 
 def _check(candidate: FinalCandidate, curve: dict[int, float], accuracy_passed: bool = True) -> CandidateCheck:
@@ -196,6 +205,22 @@ class DroppingRequestsGate(GateService):
         return Judgement(Verdict.BLOCKED, 0.0, 1.0, (request_id,), {}, AccuracyVerdict.PASSED, (DROPPED_REQUESTS,))
 
 
+class AgentXRefusingGate(GateService):
+    """The rule gate's session service on the AgentX rule, which judges every cold start 2% below its record and
+    refused by ``refused_by``; a failure double, not a placeholder. The fake toolbox measures no AgentX error rate, so
+    the accuracy gate passes every test."""
+
+    def __init__(self, blackboard: LocalBlackboard, toolbox: RecordingToolbox, refused_by: tuple[str, ...]) -> None:
+        super().__init__(blackboard, toolbox, AgentXRule(AgentXObjective.P50_INTERACTIVITY), toolbox)
+        self.refused_by = refused_by
+
+    async def compare(self, request_id: str) -> Judgement:
+        return Judgement(Verdict.REGRESSED, -2.0, 1.0, (request_id,), {}, AccuracyVerdict.PASSED, self.refused_by)
+
+    async def accuracy_passes(self, request_id: str) -> bool:
+        return True
+
+
 class Bench:
     """FINAL's toolbox fake, git repository and rule gate, on a virtual clock and an anchored blackboard.
 
@@ -253,10 +278,15 @@ class Bench:
 
     def candidates(self, both: bool = True) -> FinalCandidates:
         integration = replace(INTEGRATION, commit=self.commits["i1"])
-        return FinalCandidates(integration, replace(BRANCH, commit=self.commits["c7"]) if both else None)
+        return FinalCandidates(
+            integration, replace(BRANCH, commit=self.commits["c7"]) if both else None, BASELINE_VALUE
+        )
+
+    async def baseline(self) -> BaselineRecord:
+        return await self.handle(Role.OBSERVER).baseline()
 
     def selector(self, workload: Workload = WORKLOAD) -> FinalSelector:
-        return FinalSelector(SessionChecks(self.tests, self.gate, self.regression), workload)
+        return FinalSelector(SessionChecks(self.tests, self.gate, self.regression), workload, 1)
 
     def fail(self, tag: str, fate: Fate, kind: TestKind | None = None) -> None:
         """Every FINAL test of ``tag``'s commit (of ``kind`` when given) ends in ``fate``."""
@@ -417,6 +447,97 @@ async def test_a_cold_start_within_the_reproduction_tolerance_of_its_record_is_r
     assert choice.chosen is not None
 
 
+async def test_a_cold_start_below_the_reproduction_tolerance_is_refused_and_the_reason_says_why(
+    tmp_path: Path,
+) -> None:
+    curves = {frozenset({"i1"}): {MAIN_POINT: 1040.0, CONC: 1040.0}}
+    bench = await Bench(tmp_path).build(curves)
+    curves[frozenset({"i1"})] = {MAIN_POINT: 936.0, CONC: 936.0}
+
+    choice = await bench.selector().select(bench.candidates(both=False))
+
+    [check] = choice.checks
+    assert not check.reproduced and check.reproduction_pct == pytest.approx(-10.0)
+    assert check.gain_pct == pytest.approx((936.0 / BASELINE_VALUE - 1.0) * 100.0)
+    assert check.refused_by == (BELOW_REPRODUCTION_TOLERANCE,)
+    assert choice.chosen is None
+    assert choice.reason.startswith(
+        f"no candidate passed the final validation: integration not reproduced (-10.0% against its record, "
+        f"refused by {BELOW_REPRODUCTION_TOLERANCE})"
+    )
+
+
+async def _root_candidates(bench: Bench) -> FinalCandidates:
+    """The candidates of a session whose integration merged nothing: its head is the root."""
+
+    integration = _row(INTEGRATION_BRANCH, bench.root, BASELINE_VALUE, commits=0)
+    return await choose_candidates((integration,), integration, METRIC, bench.repo, await bench.baseline())
+
+
+async def test_a_remeasured_root_is_reproduced_whatever_its_speed_against_its_record(tmp_path: Path) -> None:
+    curves: Curves = {}
+    bench = await Bench(tmp_path).build(curves)
+    curves[frozenset()] = {MAIN_POINT: BASELINE_VALUE * 0.9, CONC: BASELINE_VALUE * 0.9}
+    candidates = await _root_candidates(bench)
+
+    choice = await bench.selector().select(candidates)
+
+    [check] = choice.checks
+    assert choice.chosen == candidates.integration and candidates.integration.root
+    assert check.reproduced and check.refused_by == ()
+    assert check.waived == (BELOW_REPRODUCTION_TOLERANCE, GAIN_BELOW_THRESHOLD)
+    assert check.gain_pct == pytest.approx(-10.0) and check.reproduction_pct == pytest.approx(-10.0)
+    assert dict(check.curve) == {
+        32: pytest.approx(BASELINE_VALUE * 0.9),
+        CONC: pytest.approx(BASELINE_VALUE * 0.9),
+        128: pytest.approx(BASELINE_VALUE * 0.9),
+    }
+
+
+async def test_a_remeasured_root_refused_only_by_a_speed_gate_of_the_rule_is_reproduced(tmp_path: Path) -> None:
+    bench = await Bench(tmp_path).build({})
+    bench.gate = AgentXRefusingGate(bench.handle(Role.GATE), bench.toolbox, ("p90_regressed",))
+    candidates = await _root_candidates(bench)
+
+    choice = await bench.selector().select(candidates)
+
+    [check] = choice.checks
+    assert check.reproduced and check.refused_by == () and check.waived == ("p90_regressed",)
+    assert choice.chosen == candidates.integration
+
+
+async def test_a_remeasured_root_that_failed_more_requests_is_not_reproduced_and_the_reason_says_why(
+    tmp_path: Path,
+) -> None:
+    bench = await Bench(tmp_path).build({})
+    refusals = ("p50_gain_below_threshold", "extra_failed_requests")
+    bench.gate = AgentXRefusingGate(bench.handle(Role.GATE), bench.toolbox, refusals)
+
+    choice = await bench.selector().select(await _root_candidates(bench))
+
+    [check] = choice.checks
+    assert not check.reproduced and check.refused_by == ("extra_failed_requests",)
+    assert check.waived == ("p50_gain_below_threshold",)
+    assert choice.chosen is None
+    assert choice.reason.startswith(
+        "no candidate passed the final validation: integration not reproduced (-2.0% against its record, "
+        "refused by extra_failed_requests)"
+    )
+
+
+async def test_a_remeasured_root_that_fails_the_accuracy_gate_is_not_eligible(tmp_path: Path) -> None:
+    bench = await Bench(tmp_path).build({})
+    gate = bench.handle(Role.GATE)
+    bench.gate = RefusingAccuracyGate(gate, bench.toolbox, InferenceXRule(gate, CONC), bench.toolbox)
+
+    choice = await bench.selector().select(await _root_candidates(bench))
+
+    [check] = choice.checks
+    assert check.reproduced and not check.accuracy_passed
+    assert choice.chosen is None
+    assert choice.reason.startswith("no candidate passed the final validation: integration accuracy failed")
+
+
 async def test_a_cold_start_that_dropped_requests_is_not_reproduced(tmp_path: Path) -> None:
     bench = await Bench(tmp_path).build({frozenset({"i1"}): {MAIN_POINT: 1040.0, CONC: 1040.0}})
     gate = bench.handle(Role.GATE)
@@ -427,6 +548,7 @@ async def test_a_cold_start_that_dropped_requests_is_not_reproduced(tmp_path: Pa
 
     check = choice.checks[0]
     assert check.reproduced is False and check.accuracy_passed and check.regression_passed
+    assert check.refused_by == (DROPPED_REQUESTS,)
     assert choice.chosen is None
 
 

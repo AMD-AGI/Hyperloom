@@ -191,9 +191,7 @@ def test_the_private_copies_a_test_is_redirected_to_make_nothing_stale_whatever_
     manifest.write_text(json.dumps(document), encoding="utf-8")
     point = tmp_path / "point.yaml"
     point.write_text(yaml.safe_dump({"benchmark": {"envs": {"TP": 1}}}), encoding="utf-8")
-    call = TestCall(
-        points=(point,), output_dir=tmp_path / "out", timeout_sec=60, cwd=str(tmp_path), magpie_python="", task_id="t1"
-    )
+    call = TestCall(points=(point,), output_dir=tmp_path / "out", timeout_sec=60, cwd=str(tmp_path), task_id="t1")
 
     with private_framework(call) as private:
         served = dict(private.call.env_overrides)

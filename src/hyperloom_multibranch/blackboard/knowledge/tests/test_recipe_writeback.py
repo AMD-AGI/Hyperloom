@@ -13,7 +13,7 @@ from typing import Any
 
 import pytest
 
-from hyperloom.common.perf_metric import GRADED_INTVTY_P50, GRADED_TOTAL
+from hyperloom.common.perf_metric import GRADED_INTVTY_P50, GRADED_TOTAL, TOTAL_TOKEN_THROUGHPUT
 from hyperloom.contracts.recipe import (
     DIGEST_PREFIX,
     ComponentPatches,
@@ -33,7 +33,7 @@ from hyperloom_multibranch.contracts.blackboard.records import BlackboardSnapsho
 from hyperloom_multibranch.contracts.repo import ResolvedPatch
 from hyperloom_multibranch.blackboard.knowledge.recipe_kb import from_recipe_kb_value, to_recipe_kb_value
 from hyperloom_multibranch.blackboard.knowledge.recipe_writeback import (
-    AGENTX_METRIC,
+    AGENTX_COLUMNS,
     AGENTX_OBJECTIVE_SCHEMA,
     KB_METRIC,
     OBJECTIVE_SCHEMA,
@@ -44,6 +44,8 @@ from hyperloom_multibranch.blackboard.knowledge.recipe_writeback import (
 from hyperloom_multibranch.blackboard.knowledge.tests.fakes import FakeRecipeStore
 from hyperloom_multibranch.blackboard.tests.factories import profile
 from hyperloom_multibranch.blackboard.tests.sessions import METRIC
+
+AGENTX_METRIC = AGENTX_COLUMNS[GRADED_INTVTY_P50].gain
 
 PATCH = b"diff --git a/moe.py b/moe.py\n"
 KERNEL = b'{"tile": [128, 128]}\n'
@@ -268,7 +270,9 @@ def test_an_agentx_session_writes_its_interactivity_gain_as_the_main_flow_does(
 ) -> None:
     store = FakeRecipeStore(champion={"metric": AGENTX_METRIC, "session_id": "older", "value": 5.0})
     agentx = _agentx(
-        snapshot, {GRADED_INTVTY_P50: 10.0, GRADED_TOTAL: 2000.0}, {GRADED_INTVTY_P50: 11.0, GRADED_TOTAL: 2100.0}
+        snapshot,
+        {GRADED_INTVTY_P50: 10.0, TOTAL_TOKEN_THROUGHPUT: 2000.0},
+        {GRADED_INTVTY_P50: 11.0, TOTAL_TOKEN_THROUGHPUT: 2100.0},
     )
 
     outcome = publish_final_recipe(
@@ -309,6 +313,21 @@ def test_an_agentx_session_without_total_throughput_carries_interactivity_alone_
         "baseline_total_throughput": None,
     }
     assert (outcome.status, outcome.reason, kept.promoted) == ("skipped", "not_better_than_champion", None)
+
+
+@pytest.mark.parametrize("champion", [None, {"metric": AGENTX_METRIC, "session_id": "older", "value": 5.0}])
+def test_a_total_throughput_session_writes_no_record_beside_the_interactivity_champions_of_its_workload(
+    snapshot: BlackboardSnapshot, final: FinalRecipe, champion: dict[str, object] | None
+) -> None:
+    store = FakeRecipeStore(champion=champion)
+    agentx = _agentx(snapshot, {TOTAL_TOKEN_THROUGHPUT: 2000.0}, {TOTAL_TOKEN_THROUGHPUT: 2200.0})
+
+    outcome = publish_final_recipe(
+        RemoteRecipeClient(store), agentx, dataclasses.replace(final, metric=TOTAL_TOKEN_THROUGHPUT)
+    )
+
+    assert (outcome.status, outcome.reason) == ("skipped", "objective_not_partitioned")
+    assert (store.knowledge, store.promoted) == (None, None)
 
 
 @pytest.mark.parametrize(

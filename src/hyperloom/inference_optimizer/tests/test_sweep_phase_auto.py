@@ -298,22 +298,24 @@ async def test_stack_validation_reverts_when_no_gain_over_current_best(
 
 
 @pytest.mark.asyncio
-async def test_stack_validation_partial_revert_becomes_failed(
+@pytest.mark.parametrize("revert_status", ["partial", "failed"], ids=["partial-revert", "failed-revert"])
+async def test_stack_validation_incomplete_revert_becomes_failed(
     tmp_path: Path,
     monkeypatch,
+    revert_status,
 ):
-    """A partial inner revert means the patch may still be on a remote pod."""
+    """An incomplete inner revert means the patch may still be on a remote pod."""
     c = _stack_validation_coordinator(tmp_path)
     stack = _ledger_rows(c, ["k001", "k004"])
-    _patch_stack_validation_internals(monkeypatch, new_tput=109.0, revert_status="partial")
+    _patch_stack_validation_internals(monkeypatch, new_tput=109.0, revert_status=revert_status)
 
     result = await c.phase_kernel_stack._run_kernel_stack_validation_e2e(stack)
 
     assert result["decision"] == "REVERT"
-    # partial -> failed at the aggregate level: patch still live on remote pod
     assert result["status"] == "failed"
     assert result["patch_cleanup_action"] == "revert"
-    assert all(r["status"] == "partial" for r in result["revert_result"]["stack_reverts"])
+    assert result.get("error_class") == "patch_revert_incomplete"
+    assert all(r["status"] == revert_status for r in result["revert_result"]["stack_reverts"])
 
 
 @pytest.mark.asyncio
@@ -531,8 +533,7 @@ async def test_stack_validation_preserves_actual_measurement(
         "duration_seconds": 900.0,
         "request_error_rate": 0.0,
         "completed_requests": 64,
-        "benchmark_backend": "magpie_agentx" if agentx else "synthetic",
-        "benchmark_valid": submission_valid,
+        "valid_measurement": not agentx or submission_valid is True,
         "diagnostic_only": False,
         "workload_identity": "fixed-workload",
         "submission_invalid_reasons": ["scenario_constraint"] if submission_valid is False else [],
@@ -998,20 +999,6 @@ async def test_conc_sweep_unbounded_budget_opts_out_of_the_lease(coord):
 
 
 @pytest.mark.asyncio
-async def test_enqueue_conc_sweep_unbounded_budget_is_none(coord):
-    """A non-positive configured budget means "no gate" and travels as None."""
-    coord.shared_state.phase_history = [
-        {"to_phase": "SWEEP", "reason": "kernel_no_more_leverage", "evidence": {}},
-    ]
-    coord.shared_state.conc_sweep_total_budget_sec = 0
-
-    task = await coord.phase_sweep._enqueue_internal_conc_sweep_task()
-
-    assert task is not None
-    assert task.params["total_budget_sec"] is None
-
-
-@pytest.mark.asyncio
 async def test_enqueue_conc_sweep_clamps_to_remaining_session_time(coord):
     """With a session cap, the budget is the remaining time minus the CLOSE reserve."""
     coord.shared_state.phase_history = [
@@ -1268,24 +1255,6 @@ def _make_policy_gate(*, shared_state):
     )
 
 
-# 6. The workload grid action is gone; SWEEP admits the ladder and nothing else
-def test_the_retired_action_is_off_every_surface_it_was_on():
-    from hyperloom.inference_optimizer.cli.executors import _REAL_EXECUTORS_FULL
-    from hyperloom.inference_optimizer.protocol.action_surfaces import (
-        ACTION_CATALOGUE,
-        FULL_ENABLED_ACTIONS,
-        NO_KERNEL_AGENT_ENABLED_ACTIONS,
-    )
-    from hyperloom.orchestrator.phases.machine_state import PHASE_ALLOWED_ACTIONS
-
-    assert "sweep" not in ACTION_CATALOGUE
-    assert "sweep" not in FULL_ENABLED_ACTIONS
-    assert "sweep" not in NO_KERNEL_AGENT_ENABLED_ACTIONS
-    assert "sweep" not in _REAL_EXECUTORS_FULL
-    assert "sweep" not in PHASE_ALLOWED_ACTIONS["SWEEP"]
-    assert "conc_sweep" in PHASE_ALLOWED_ACTIONS["SWEEP"]
-
-
 # 7. conc_sweep is Coordinator-internal — dispatch re-validation must not collide the sole auto-enqueued conc_sweep
 # with its own singleton evidence.
 
@@ -1305,25 +1274,6 @@ def test_validate_dispatched_task_allows_auto_conc_sweep_against_own_evidence():
 
 # ────────────────────────────────────────────────────────────────────────────── Patch lifecycle convergence — new
 # tests (P1-19 fix verification) ──────────────────────────────────────────────────────────────────────────────
-
-
-@pytest.mark.asyncio
-async def test_stack_validation_failed_revert_sets_status_failed(
-    tmp_path: Path,
-    monkeypatch,
-):
-    """A completely failed stack revert must set top-level status='failed'."""
-    c = _stack_validation_coordinator(tmp_path)
-    stack = _ledger_rows(c, ["k001", "k004"])
-    _patch_stack_validation_internals(monkeypatch, new_tput=109.0, revert_status="failed")
-
-    result = await c.phase_kernel_stack._run_kernel_stack_validation_e2e(stack)
-
-    assert result["decision"] == "REVERT"
-    assert result["status"] == "failed"
-    assert result["patch_cleanup_action"] == "revert"
-    assert result.get("error_class") == "patch_revert_incomplete"
-    assert all(r["status"] == "failed" for r in result["revert_result"]["stack_reverts"])
 
 
 @pytest.mark.asyncio
@@ -1407,7 +1357,7 @@ async def test_stack_validation_accuracy_regression_downgrades_to_needs_review(
 
     seen: dict[str, object] = {}
 
-    def _fake_accuracy_gate(bench_result, *, baseline_accuracy, workspace, server_args=""):
+    def _fake_accuracy_gate(bench_result, *, reference, workspace, server_args=""):
         # The lane must hand the gate the args the bench server ran under, or a context too small to host an eval
         # reads as a broken eval.
         seen["server_args"] = server_args

@@ -26,7 +26,7 @@ reads ``unchanged`` afterwards. Merges stack commits already published, so they 
 
 The shared ``inference-recipe-v1`` declaration holds an InferenceX session's configuration and source patch changes,
 which the single-lineage flow reads too. What it cannot hold, a change that ships a kernel artifact and every change of
-an AgentX session, graded on interactivity, goes through the ``multibranch-recipe-v1`` mapping to the blackboard's own
+an AgentX session, graded on its objective, goes through the ``multibranch-recipe-v1`` mapping to the blackboard's own
 declaration of that name (:func:`publish_multibranch_experiences`). Each mapping refuses the other's candidates.
 """
 
@@ -35,6 +35,7 @@ from __future__ import annotations
 from collections.abc import Sequence
 from pathlib import Path
 
+from hyperloom.common.perf_metric import TOTAL_TOKEN_THROUGHPUT
 from hyperloom.contracts.recipe import RecipeDelta
 from hyperloom_common.timeutil import epoch_iso
 from hyperloom_kb.collect import CollectionTarget, CollectReport, collect
@@ -50,11 +51,14 @@ from hyperloom_multibranch.contracts.blackboard.records import (
 )
 from hyperloom_multibranch.contracts.blackboard.vocab import COMMITTING, Conclusion
 from hyperloom_multibranch.blackboard.knowledge.lessons import direction, later_retractions
+from hyperloom_multibranch.rulegate.agentx import partial_window
 
 MAPPING_PATH = Path(__file__).with_name("mappings") / "multibranch-notebook-v1.yaml"
 MULTIBRANCH_MAPPING_PATH = Path(__file__).with_name("mappings") / "multibranch-recipe-v1.yaml"
 EXPORT_FORMAT = "multibranch.notebook.export.v1"
 THROUGHPUT_OBJECTIVE = "output_throughput"
+AGENTX_INTERACTIVITY_OBJECTIVE = "agentx_interactivity"
+AGENTX_TOTAL_OBJECTIVE = "agentx_total_throughput"
 SUMMARY_CHARS = 160
 _PENDING = frozenset({Conclusion.SPLIT_REQUESTED, Conclusion.SPLIT_PENDING, Conclusion.DIAGNOSIS_PENDING})
 _REASONS = frozenset({BranchLogType.HYPOTHESIS, BranchLogType.ATTEMPT})
@@ -160,7 +164,8 @@ def _learn(learnt: str, logged: str, undone: Sequence[str]) -> tuple[str, str]:
 
 
 def _decision(record: TestRecord) -> str:
-    if record.result is not None and record.result.validity is Validity.CANDIDATE_FAILED:
+    """A failed candidate the gate judged all the same, one the AgentX checkpoint stopped, was reverted, not broken."""
+    if record.result is not None and record.result.validity is Validity.CANDIDATE_FAILED and record.judgement is None:
         return "failed"
     return "keep" if record.conclusion in COMMITTING else "revert"
 
@@ -187,7 +192,7 @@ def _accuracy(record: TestRecord, others: Sequence[TestRecord] = ()) -> dict[str
 
 def _measured(record: TestRecord, metric: str) -> dict[str, object]:
     judged = record.judgement
-    if judged is None:
+    if judged is None or partial_window(judged):
         return {"outcome_value": None, "interval": None, "interval_text": "", "tests": [record.request_id]}
     low, high = judged.gain_pct - judged.threshold_pct, judged.gain_pct + judged.threshold_pct
     return {
@@ -256,17 +261,19 @@ def candidate_row(
 
 
 def export_document(snapshot: BlackboardSnapshot, metric: str) -> dict[str, object]:
-    """The ``multibranch.notebook.export.v1`` document, the mapping's input; ``metric`` is the throughput metric."""
+    """The ``multibranch.notebook.export.v1`` document, the mapping's input; ``metric`` is the metric the session is
+    graded on, which names an AgentX session's objective."""
 
     profile = snapshot.profile
     if profile is None:
         raise NotRecorded("PRELUDE has not written the session profile yet")
     rows = (candidate_row(record, snapshot, profile, metric) for record in snapshot.records)
+    agentx = AGENTX_TOTAL_OBJECTIVE if metric == TOTAL_TOKEN_THROUGHPUT else AGENTX_INTERACTIVITY_OBJECTIVE
     return {
         "format": EXPORT_FORMAT,
         "metadata": {
             "session_id": profile.session_id,
-            "objective": THROUGHPUT_OBJECTIVE if profile.isl is not None else "agentx_interactivity",
+            "objective": THROUGHPUT_OBJECTIVE if profile.isl is not None else agentx,
             "metric": metric,
         },
         "candidates": [row for row in rows if row is not None],
@@ -300,6 +307,8 @@ def publish_multibranch_experiences(
 
 
 __all__ = [
+    "AGENTX_INTERACTIVITY_OBJECTIVE",
+    "AGENTX_TOTAL_OBJECTIVE",
     "EXPORT_FORMAT",
     "MAPPING_PATH",
     "MULTIBRANCH_MAPPING_PATH",

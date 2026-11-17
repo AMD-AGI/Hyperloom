@@ -36,11 +36,8 @@ async def test_retry_with_backoff_propagates_on_retry_callback_error() -> None:
 def test_gpu_type_resolution_env_probe_and_runner(monkeypatch) -> None:
     from hyperloom.inference_optimizer import gpu_types
 
-    assert gpu_types.gpu_runner_type("MI325X") == "mi300x"
-    assert gpu_types.gpu_runner_type("mi355x") == "mi355x"
-    assert gpu_types.gpu_runner_type("r9700") == "gfx12"
-    assert gpu_types._runner_framework_error("r9700", "vllm") is None
-    assert "no validated gfx12 runner" in gpu_types._runner_framework_error("r9700", "sglang")
+    assert gpu_types._board_framework_error("r9700", "vllm") is None
+    assert "validated only for vllm" in gpu_types._board_framework_error("r9700", "sglang")
 
     resolved, warnings = gpu_types._resolve_gpu_type("mi300x", "mi355x")
     assert resolved == "mi355x"

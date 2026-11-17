@@ -82,9 +82,13 @@ def _heartbeat() -> Intent:
 @pytest.mark.asyncio
 async def test_each_reactor_call_records_its_prompt_snapshot_under_the_call(session_dir):
     silent = ScriptedPlan(turns=[], default_intent=_heartbeat())
+    # Advice on every Critic turn gives Orchestration something new to read on the next tick.
+    advising = ScriptedPlan(
+        turns=[], default_intent=Intent(type=IntentType.SEND_MESSAGE, payload={"topic": "advice", "body_md": "look"})
+    )
     c = Coordinator(
         session_dir,
-        backends={"orchestration": MockBackend(silent, name="o"), "critic": MockBackend(silent, name="c")},
+        backends={"orchestration": MockBackend(silent, name="o"), "critic": MockBackend(advising, name="c")},
     )
     try:
         assert await c.run(options=RunOptions(max_ticks=2)) == "max_ticks"

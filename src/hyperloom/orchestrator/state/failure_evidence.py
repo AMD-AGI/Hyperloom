@@ -13,10 +13,14 @@ from __future__ import annotations
 
 import hashlib
 import re
+from collections.abc import Mapping
 from typing import Any
 
+from inference_suite.contracts import FailedStep
+
 from hyperloom.common.env_safety import redact_secret_values
-from hyperloom.inference_optimizer.breakdown.stop_reasons import ARGV_INVALID
+from hyperloom.common.failure_signature import SERVE_FLAG, framework_unimportable_line, is_engine_capacity_error
+from hyperloom.inference_optimizer.breakdown.stop_reasons import ARGV_INVALID, HOST_GPUS_UNAVAILABLE
 
 FAILURE_STAGE_WARMUP: str = "warmup"
 FAILURE_STAGE_DECISION: str = "decision"
@@ -40,10 +44,54 @@ UNMEASURED_OUTCOMES: frozenset[str] = frozenset({"FAILED", "KILLED_OVERTIME"})
 
 # The error class of a subprocess that exited nonzero for no recognised cause.
 SUBPROCESS_NONZERO: str = "subprocess_nonzero"
-# The error class of a benchmark that served its whole protocol and still left no usable
-# measurement behind: the round ran to the end, so the nonzero exit came from the harness
-# around it. The grid runner already names this shape the same way.
-MAGPIE_NONZERO_INVALID_MEASUREMENT: str = "magpie_nonzero_invalid_measurement"
+# The error class of a round that exited nonzero and left no usable measurement behind.
+ROUND_NONZERO_INVALID_MEASUREMENT: str = "round_nonzero_invalid_measurement"
+SERVER_INIT_DEAD: str = "server_init_dead"
+SERVER_DIED: str = FailedStep.SERVER_DIED.value
+# A server that was serving until vLLM's engine gave up waiting on one model step (``RPC call to <method> timed out``
+# from its multiproc executor); a worker stalled mid-step rather than the boot failing.
+ENGINE_EXECUTE_TIMEOUT: str = "engine_execute_timeout"
+ENGINE_EXECUTE_TIMEOUT_HINT: str = (
+    "hint: the server was serving when one model step outran VLLM_EXECUTE_MODEL_TIMEOUT_SECONDS (300s unless the "
+    "launch sets it) and vLLM shut the engine down; the 'No available shared memory broadcast block' lines before it "
+    "are the workers stalling. The same launch stalls the same way: raise VLLM_EXECUTE_MODEL_TIMEOUT_SECONDS only when "
+    "the step is genuinely that slow, otherwise find what the step waits on."
+)
+DETOKENIZER_STALL: str = "detokenizer_stall"
+BENCHMARK_REPORT_MISSING: str = "benchmark_report_missing"
+YAML_BUILD_ERROR: str = "yaml_build_error"
+# The error class of a server that died at start because the card holds less than the launch settings ask for.
+ENGINE_CAPACITY: str = "engine_capacity"
+
+# The class each inference_suite failed step is recorded under. A step that replaces a
+# failure Hyperloom names independently of the runner keeps that class, so readers of the
+# ledgers see one class per cause; a new step is its own.
+# The steps whose class an action module owns (the run's own stops, the speculative
+# pin) are mapped beside that owner in the grid runner.
+FAILED_STEP_ERROR_CLASSES: Mapping[FailedStep, str] = {
+    FailedStep.CONFIG_INVALID: YAML_BUILD_ERROR,
+    FailedStep.BASE_DIGEST_MISMATCH: FailedStep.BASE_DIGEST_MISMATCH.value,
+    FailedStep.FRAMEWORK_VERSION_TOO_OLD: FailedStep.FRAMEWORK_VERSION_TOO_OLD.value,
+    FailedStep.FRAMEWORK_VERSION_UNKNOWN: FailedStep.FRAMEWORK_VERSION_UNKNOWN.value,
+    FailedStep.REUSE_NOT_OWNED: FailedStep.REUSE_NOT_OWNED.value,
+    FailedStep.EVAL_CONTEXT_TOO_SHORT: FailedStep.EVAL_CONTEXT_TOO_SHORT.value,
+    FailedStep.STAGING_MISSING: FailedStep.STAGING_MISSING.value,
+    FailedStep.SOURCE_FILES_CHANGED: FailedStep.SOURCE_FILES_CHANGED.value,
+    FailedStep.FLAG_UNKNOWN: ARGV_INVALID,
+    FailedStep.GOLDEN_OWNED_TOUCHED: SERVE_FLAG,
+    FailedStep.PORT_IN_USE: FailedStep.PORT_IN_USE.value,
+    FailedStep.GPUS_UNAVAILABLE: HOST_GPUS_UNAVAILABLE,
+    FailedStep.SERVER_EXITED_BEFORE_READY: SERVER_INIT_DEAD,
+    FailedStep.SERVER_SILENT_BEFORE_READY: FailedStep.SERVER_SILENT_BEFORE_READY.value,
+    FailedStep.SERVER_BOOT_TIMEOUT: FailedStep.SERVER_BOOT_TIMEOUT.value,
+    FailedStep.SERVER_STALLED: DETOKENIZER_STALL,
+    FailedStep.SERVER_DIED: SERVER_DIED,
+    FailedStep.CLIENT_FAILED: FailedStep.CLIENT_FAILED.value,
+    FailedStep.CLIENT_OUTPUT_MISSING: BENCHMARK_REPORT_MISSING,
+    FailedStep.EVAL_FAILED: FailedStep.EVAL_FAILED.value,
+    FailedStep.ROUND_TIMEOUT: FailedStep.ROUND_TIMEOUT.value,
+    FailedStep.TEARDOWN_INCOMPLETE: FailedStep.TEARDOWN_INCOMPLETE.value,
+}
 
 # Matches every character replaced by ``_`` in a variant-name slug.
 _SLUG_RE = re.compile(r"[^A-Za-z0-9._-]")
@@ -53,24 +101,38 @@ _CANDIDATE_ERROR_CLASSES = frozenset(
         "capability_unsupported",
         "invalid_argument",
         "unsupported_config",
+        SERVE_FLAG,
     }
 )
-_ENVIRONMENT_ERROR_CLASSES = frozenset({"mn_server_restart_failed"})
+_ENVIRONMENT_ERROR_CLASSES = frozenset(
+    {
+        "mn_server_restart_failed",
+        HOST_GPUS_UNAVAILABLE,
+        "disk_full",
+        FailedStep.FRAMEWORK_VERSION_TOO_OLD.value,
+        FailedStep.PORT_IN_USE.value,
+        FailedStep.REUSE_NOT_OWNED.value,
+        FailedStep.SERVER_SILENT_BEFORE_READY.value,
+        FailedStep.TEARDOWN_INCOMPLETE.value,
+    }
+)
 _HARNESS_ERROR_CLASSES = frozenset(
     {
         "benchmark_cap_error",
         "benchmark_report_invalid_metric",
-        "benchmark_report_missing",
-        "eval_probe_unpatchable",
-        "inferencex_checkout_invalid",
-        "magpie_nonzero_after_valid_measurement",
-        MAGPIE_NONZERO_INVALID_MEASUREMENT,
-        "magpie_timeout",
+        BENCHMARK_REPORT_MISSING,
+        "round_nonzero_after_valid_measurement",
+        ROUND_NONZERO_INVALID_MEASUREMENT,
         "no_benchmark_workspace",
-        "warmup_magpie_timeout",
         "warmup_round_failed",
         "warmup_yaml_build_error",
-        "yaml_build_error",
+        YAML_BUILD_ERROR,
+        FailedStep.BASE_DIGEST_MISMATCH.value,
+        FailedStep.CLIENT_FAILED.value,
+        FailedStep.EVAL_CONTEXT_TOO_SHORT.value,
+        FailedStep.ROUND_TIMEOUT.value,
+        FailedStep.SOURCE_FILES_CHANGED.value,
+        FailedStep.STAGING_MISSING.value,
     }
 )
 _ENVIRONMENT_EVIDENCE_RE = re.compile(
@@ -82,11 +144,13 @@ _ENVIRONMENT_EVIDENCE_RE = re.compile(
     r"|temporary\s+failure\s+in\s+name\s+resolution",
     re.IGNORECASE,
 )
-# A server or its actor that died before serving: Magpie's health-wait errors and the serving lease's actor death.
+# A server or its actor that died before serving: a health-wait error and the serving lease's actor death.
 _SERVER_DEATH_EVIDENCE_RE = re.compile(
     r"exited\s+(?:before\s+becoming\s+healthy|during\s+its\s+health\s+check)|ray_actor_error",
     re.IGNORECASE,
 )
+# What vLLM's multiproc executor raises when its workers return nothing for one call within the timeout.
+_EXECUTE_RPC_TIMEOUT_RE = re.compile(r"RPC call to \w+ timed out")
 _CANDIDATE_EVIDENCE_RE = re.compile(
     r"unrecogni[sz]ed\s+(?:argument|option)"
     r"|unknown\s+(?:argument|option)"
@@ -136,10 +200,22 @@ WORKER_DEATH_MARKERS: tuple[str, ...] = (
 _SIGNAL_EXIT_RE = re.compile(r"exit\s*code\s*[:=]\s*-\d+")
 
 _SIGNATURE_VOLATILE_RE = re.compile(r"0x[0-9a-f]+|[0-9a-f]{8,}|\d+")
-# The classes whose failures are told apart by their output. Both are given to a process
+# The classes whose failures are told apart by their output. Each is given to a process
 # whose exit Hyperloom cannot explain, so the output is all there is to compare; the other
 # classes carry a fixed sentence that two unrelated failures share.
-_SIGNED_FAILURE_CLASSES = frozenset({SUBPROCESS_NONZERO, MAGPIE_NONZERO_INVALID_MEASUREMENT})
+_SIGNED_FAILURE_CLASSES = frozenset(
+    {SUBPROCESS_NONZERO, ROUND_NONZERO_INVALID_MEASUREMENT, FailedStep.CLIENT_FAILED.value}
+)
+
+
+def server_death_class(detail: str) -> str:
+    """The class of a server that died after it was ready, as the death excerpt in ``detail`` names it."""
+    return ENGINE_EXECUTE_TIMEOUT if _EXECUTE_RPC_TIMEOUT_RE.search(detail) else SERVER_DIED
+
+
+def with_failure_hint(error_class: str, error: str) -> str:
+    """``error``, followed by what a failure of ``error_class`` needs said that its excerpt does not say."""
+    return f"{error}\n{ENGINE_EXECUTE_TIMEOUT_HINT}" if error_class == ENGINE_EXECUTE_TIMEOUT else error
 
 
 def tail_excerpt(value: Any, *, limit: int = 1200) -> str | None:
@@ -162,6 +238,7 @@ def make_failure_id(*, task_id: str, fingerprint: str, variant_name: str = "") -
 def classify_failure_attribution(
     *,
     error_class: Any,
+    framework_changed: bool,
     error_excerpt: Any = "",
     reason: Any = "",
     explicit: Any = "",
@@ -172,6 +249,12 @@ def classify_failure_attribution(
     benchmark failures remain outside the Experience corpus unless the producer
     supplies candidate-specific evidence. The full failure still remains in
     SBD V6 regardless of this result.
+
+    ``framework_changed`` is whether the attempt put changed framework code on the
+    server's import path (a patch, an artifact, an installed package, a kernel
+    overlay). A framework the suite's probe cannot import is the candidate's only
+    then; on an unchanged install it is the environment's, as
+    ``hyperloom.measure.failures`` settles it.
     """
     authored = str(explicit or "").strip().lower()
     if authored in FAILURE_ATTRIBUTIONS:
@@ -179,6 +262,9 @@ def classify_failure_attribution(
 
     kind = str(error_class or "").strip().lower()
     evidence = f"{reason or ''}\n{error_excerpt or ''}"
+    if kind == FailedStep.FRAMEWORK_VERSION_UNKNOWN.value:
+        unimportable = framework_changed and framework_unimportable_line(evidence) is not None
+        return FAILURE_ATTRIBUTION_CANDIDATE if unimportable else FAILURE_ATTRIBUTION_ENVIRONMENT
     if kind in _ENVIRONMENT_ERROR_CLASSES or _ENVIRONMENT_EVIDENCE_RE.search(evidence):
         return FAILURE_ATTRIBUTION_ENVIRONMENT
     if kind in _CANDIDATE_ERROR_CLASSES or _CANDIDATE_EVIDENCE_RE.search(evidence):
@@ -198,6 +284,11 @@ def _server_died(evidence: str) -> bool:
     )
 
 
+def _is_engine_capacity(error_class: str, error_text: str) -> bool:
+    """Whether the failure names a start-time engine-capacity limit."""
+    return error_class == ENGINE_CAPACITY or is_engine_capacity_error(error_text)
+
+
 def classify_root_cause_type(error_class: str, error_text: str) -> str:
     """Map a baseline attempt's ``error_class`` + message to a coarse enum.
 
@@ -206,17 +297,24 @@ def classify_root_cause_type(error_class: str, error_text: str) -> str:
     merely mentions a worker or NCCL is startup chatter, so neither is a crash:
     without evidence of a process dying the answer is ``unknown``, which leaves
     the excerpt as the headline rather than replacing it with a diagnosis the
-    run then acts on.
+    run then acts on. A server that died after it was ready died serving, however
+    its log names the engine core, so it is never ``engine_core_init``.
     """
     blob = f"{error_class} {error_text}".lower()
     if error_class == "kv_cache_oom" or any(m in blob for m in KV_CACHE_OOM_MARKERS):
         return "kv_cache_oom"
+    if _is_engine_capacity(error_class, error_text):
+        return "engine_capacity"
     if "out of memory" in blob or "hip oom" in blob:
         return "oom"
     if error_class == "timeout" or "benchmark exceeded" in blob:
         return "benchmark_timeout"
+    if error_class == ENGINE_EXECUTE_TIMEOUT:
+        return ENGINE_EXECUTE_TIMEOUT
+    if error_class == SERVER_DIED:
+        return "engine_runtime_death"
     if (
-        error_class == "server_init_dead"
+        error_class == SERVER_INIT_DEAD
         or "engine core" in blob
         or "enginecore" in blob
         or "workerproc" in blob
@@ -225,7 +323,7 @@ def classify_root_cause_type(error_class: str, error_text: str) -> str:
         return "engine_core_init"
     if any(marker in blob for marker in WORKER_DEATH_MARKERS) or _SIGNAL_EXIT_RE.search(blob):
         return "worker_crash"
-    if classify_failure_attribution(error_class=error_class) == FAILURE_ATTRIBUTION_HARNESS:
+    if classify_failure_attribution(error_class=error_class, framework_changed=False) == FAILURE_ATTRIBUTION_HARNESS:
         return "benchmark_harness"
     return "unknown"
 

@@ -12,7 +12,7 @@ from __future__ import annotations
 
 import pytest
 
-from hyperloom.common.perf_metric import AGENTX_KEEP_P50_THRESHOLD_PCT
+from hyperloom.common.agentx_objective import AgentXObjective
 from hyperloom.orchestrator.prompts.agentx_context import corpus_lines, grading_lines
 
 _SHAPE = {
@@ -101,15 +101,16 @@ def test_a_zero_is_treated_as_absent_not_as_a_measurement(field, absent):
 def test_the_grading_block_names_the_axis_and_both_verdicts():
     body = "\n".join(grading_lines())
     assert "E2E normalised interactivity P50" in body
-    assert "slow tail (P90)" in body
+    assert "P90 interactivity" in body
+    assert "total token throughput" in body
     assert "REVERT" in body
     assert "RECORDED" not in body
-    assert "not the objective" in body
+    assert "neither the objective nor a guard" in body
 
 
-def test_the_grading_block_takes_the_threshold_from_the_one_constant():
-    """A literal here would drift from the threshold the resolver actually applies."""
-    assert f">=+{AGENTX_KEEP_P50_THRESHOLD_PCT:.0f}%" in "\n".join(grading_lines())
+def test_the_grading_block_takes_the_bar_from_the_shared_objective():
+    """A literal here would drift from the bar the resolver actually applies."""
+    assert f">=+{AgentXObjective.P50_INTERACTIVITY.bar_pct:g}%" in "\n".join(grading_lines())
 
 
 _INTVTY = {"objective": "e2e_norm_intvty_p90", "noise_pct": 5.0}

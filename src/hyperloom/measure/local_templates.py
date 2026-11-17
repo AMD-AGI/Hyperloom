@@ -20,9 +20,11 @@ from hyperloom.common.visible_devices import GPU_MASK_ENV_NAMES
 from hyperloom.sandbox.local import LocalTemplate
 
 __all__ = [
+    "HOST_HF_ENV_NAMES",
     "IMAGE_ENV_NAMES",
     "IMAGE_ENV_PREFIXES",
     "RUNNER_SCRIPT",
+    "host_hf_env",
     "image_env",
     "local_runner_command",
     "local_runner_template",
@@ -33,6 +35,9 @@ __all__ = [
 #: the local template carries them, and a test then runs with the settings it would have in the image.
 IMAGE_ENV_PREFIXES: Final = ("SGLANG_", "HIP_", "HSA_", "AITER_", "ROCM", "PYTORCH_", "TORCH", "TRITON_")
 IMAGE_ENV_NAMES: Final = frozenset({"LD_LIBRARY_PATH"})
+#: The host's Hugging Face cache, offline switches and mirror. A model named by repo id (a speculative draft, say)
+#: resolves through them; the token stays out.
+HOST_HF_ENV_NAMES: Final = ("HF_HOME", "HF_HUB_CACHE", "HF_HUB_OFFLINE", "HF_DATASETS_OFFLINE", "HF_ENDPOINT")
 
 #: ``$0`` is the python interpreter (the first argument after the script), so the script itself holds no path.
 RUNNER_SCRIPT: Final = (
@@ -60,6 +65,33 @@ def image_env(environ: Mapping[str, str] | None = None) -> dict[str, str]:
     }
 
 
+def host_hf_env(environ: Mapping[str, str] | None = None) -> dict[str, str]:
+    """The variables of :data:`HOST_HF_ENV_NAMES` that ``environ`` (this process's by default) sets to a value, and,
+    when it names no ``HF_HOME``, the host's default one where that is a directory.
+
+    The local sandbox gives a runner a home of its own, so Hugging Face's default there (huggingface_hub's
+    ``$XDG_CACHE_HOME/huggingface``, else ``~/.cache/huggingface``) is an empty cache.
+    """
+    source = os.environ if environ is None else environ
+    env = {name: source[name] for name in HOST_HF_ENV_NAMES if source.get(name, "").strip()}
+    if "HF_HOME" not in env:
+        default = _default_hf_home(source)
+        if default is not None:
+            env["HF_HOME"] = default
+    return env
+
+
+def _default_hf_home(environ: Mapping[str, str]) -> str | None:
+    cache, home = environ.get("XDG_CACHE_HOME", ""), environ.get("HOME", "")
+    if os.path.isabs(cache):
+        found = os.path.join(cache, "huggingface")
+    elif os.path.isabs(home):
+        found = os.path.join(home, ".cache", "huggingface")
+    else:
+        return None
+    return found if os.path.isdir(found) else None
+
+
 def local_runner_command(
     python: str = sys.executable, *, spec_wait_sec: int = _DEFAULT_SPEC_WAIT_SEC
 ) -> tuple[str, ...]:
@@ -80,7 +112,8 @@ def local_runner_template(
     """A sealed, signing ``measurement`` template for ``gpus`` cards whose startup command is the runner.
 
     ``envs`` are the template's fixed variables; when omitted they are the image's variables of this process
-    (:func:`image_env`), the local stand-in for what a hosted image and template set.
+    (:func:`image_env`) and its Hugging Face settings (:func:`host_hf_env`), the local stand-in for what a hosted image
+    and template set.
     """
     return LocalTemplate(
         name,
@@ -89,5 +122,5 @@ def local_runner_template(
         gpus=gpus,
         sealed=True,
         signing=True,
-        envs=image_env() if envs is None else dict(envs),
+        envs={**image_env(), **host_hf_env()} if envs is None else dict(envs),
     )

@@ -331,7 +331,9 @@ class _FakeResource:
 def _record_ray_start_kwargs(monkeypatch):
     seen: list[dict] = []
     started = False
-    monkeypatch.setattr(ray_runtime, "ray_status_ok", lambda: started)
+    monkeypatch.setattr(
+        ray_runtime, "ray_probe", lambda timeout=None: ray_runtime.RayProbe.UP if started else ray_runtime.RayProbe.DOWN
+    )
     monkeypatch.setattr(ray_runtime, "resource", _FakeResource(), raising=False)
 
     def _fake_run(cmd, **kwargs):

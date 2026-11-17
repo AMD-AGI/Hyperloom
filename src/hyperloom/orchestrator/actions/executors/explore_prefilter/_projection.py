@@ -57,6 +57,7 @@ from typing import Any, Callable
 
 import yaml
 
+from hyperloom.common.benchmark_config import read_benchmark_point
 from .._grid_base import GridVariant
 
 log = logging.getLogger(__name__)
@@ -287,9 +288,7 @@ def _spec_for(request: ProjectionRequest, variant: GridVariant, label: str) -> A
     from . import inferasim_bridge as bridge
 
     cfg_path = request.materialize(variant, Path(request.output_root) / label)
-    with Path(cfg_path).open(encoding="utf-8") as fh:
-        bench = (yaml.safe_load(fh) or {}).get("benchmark") or {}
-    spec = bridge.spec_from_benchmark(bench, ambient=False)
+    spec = bridge.spec_from_point(read_benchmark_point(Path(cfg_path)), ambient=False)
     spec.runtime = dict(request.runtime)
     spec.gpu = request.gpu
     return spec

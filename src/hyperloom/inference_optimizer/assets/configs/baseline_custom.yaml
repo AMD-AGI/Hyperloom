@@ -19,8 +19,8 @@
 # baseline number was measured with it. Pin what must not move.
 #
 # The entrypoint MUST emit a quality_gate block in its report. Correctness for a
-# scriptable framework is fail-closed: a missing or unparseable gate scores 0.0
-# and every candidate is rejected.
+# scriptable framework is fail-closed: a baseline without the gate stops the run
+# (baseline_accuracy_failed), and a candidate without it scores 0.0 and is rejected.
 
 benchmark:
   framework: custom

@@ -1,16 +1,19 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""Launch banners that report which phases and integrations a run brings."""
+"""Launch banners that report which phases and integrations a run brings, and what its base launch warns of."""
 
 from __future__ import annotations
 
 import argparse
 import sys
 
+from ..session.base_launch import read_base_launch
+from ..session.paths import session_dir
+
 
 def print_lineup_banners(args: argparse.Namespace, *, no_kernel: bool, no_framework_agent: bool) -> None:
-    """Print the phase-toggle and integration banners of the run."""
+    """Print the phase-toggle and integration banners of the run, then the warnings its frozen base launch carries."""
     # Mirror the kernel banner so both phase toggles surface their state.
     if no_framework_agent:
         print(
@@ -44,3 +47,10 @@ def print_lineup_banners(args: argparse.Namespace, *, no_kernel: bool, no_framew
         print("Recipe sediment : ENABLED (KEEP/REVERT provenance written to persistent recipe)")
     else:
         print("Recipe sediment : DISABLED (--no-recipe-sediment)")
+    _print_base_launch_warnings()
+
+
+def _print_base_launch_warnings() -> None:
+    base = read_base_launch(session_dir())
+    for warning in base.warnings if base is not None else ():
+        print(f"WARNING: base launch: {warning}", file=sys.stderr)

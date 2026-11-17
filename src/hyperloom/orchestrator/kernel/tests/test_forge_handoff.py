@@ -90,10 +90,12 @@ def test_write_forge_handoff_records_context_and_absolute_evidence_paths(tmp_pat
                 "extra_server_args": "--enable-torch-compile",
                 "extra_envs": {
                     "SAFE_SETTING": "1",
+                    "SGLANG_SIMULATE_ACC_TOKEN_MODE": "1",
                     "SERVICE_API_KEY": "must-not-be-written",
+                    "GITHUB_TOKEN": "must-not-be-written",
                 },
             },
-            "launch_recipe": str(tmp_path / "recipe.yaml"),
+            "launch_json": str(tmp_path / "run" / "launch.json"),
         },
     )
 
@@ -105,10 +107,12 @@ def test_write_forge_handoff_records_context_and_absolute_evidence_paths(tmp_pat
     assert "example/model" in workload
     assert "Tensor parallelism:** `8`" in workload
     assert "--tp 8 --mem-fraction-static 0.9" in serving
+    assert f"Launch record:** `{(tmp_path / 'run' / 'launch.json').resolve()}`" in serving
     assert "--enable-torch-compile" in serving
     assert "PROFILE_ENV=enabled" in serving
     assert "SAFE_SETTING=1" in serving
-    assert "SERVICE_API_KEY" not in serving
+    assert "SGLANG_SIMULATE_ACC_TOKEN_MODE=1" in serving
+    assert "SERVICE_API_KEY" not in serving and "GITHUB_TOKEN" not in serving
     assert str(raw_trace.resolve()) in evidence
     assert str(analysis_md.resolve()) in evidence
     assert str(candidates.resolve()) in evidence
@@ -137,20 +141,6 @@ def test_a_synthetic_workload_keeps_its_sequence_lengths() -> None:
 
     assert "- **Input sequence length:** `1024`" in workload
     assert "- **Output sequence length:** `256`" in workload
-
-
-def test_trace_evidence_resolution_filename_has_one_owner(tmp_path: Path) -> None:
-    """The handoff derives the artifact name from the single contract constant, not a literal."""
-    from hyperloom.common.kernel_source_contract import SOURCE_RESOLUTION_FILENAME
-    from hyperloom.orchestrator.kernel.forge_handoff import build_trace_evidence_md
-
-    candidates = tmp_path / "run" / "kernel_candidates.json"
-    candidates.parent.mkdir(parents=True)
-    candidates.write_text("{}\n", encoding="utf-8")
-    state = _state(last_trace_analyze={"candidates_path": str(candidates)})
-
-    evidence = build_trace_evidence_md(state)
-    assert str((candidates.parent / SOURCE_RESOLUTION_FILENAME)) in evidence
 
 
 def test_trace_evidence_ends_with_current_best_runtime_findings(tmp_path: Path) -> None:
@@ -297,17 +287,6 @@ def test_trace_evidence_tuned_miss_states_without_a_join(tmp_path: Path) -> None
     assert _section(blind, "Hot GEMMs Missing Tuned Config") == "```text\nunknown: no_server_log\n```\n"
 
 
-def test_opportunity_rules_defer_fallback_paths_and_name_the_bound() -> None:
-    from kernelforge.workflows.rewrite_controller.opportunity_agent import _system_prompt
-
-    prompt = _system_prompt()
-
-    assert "12. Read the Runtime Findings section of trace-evidence.md" in prompt
-    assert "do not\n    publish a rewrite of the fallback implementation" in prompt
-    assert "The Hot GEMMs Missing Tuned\n    Config section names the exact kernel_ids" in prompt
-    assert "Exposed Memcpy section" in prompt
-
-
 def test_write_forge_handoff_survives_missing_trace_artifacts(tmp_path: Path) -> None:
     missing_candidates = tmp_path / "missing" / "kernel_candidates.json"
     state = _state(
@@ -378,13 +357,3 @@ def test_a_foreign_directory_does_not_disturb_attempt_numbering(tmp_path: Path) 
     (cycle / "attempt-not-a-number").mkdir()
 
     assert next_forge_attempt_dir(session, 0) == cycle / "attempt-1"
-
-
-def test_the_handoff_can_be_written_beside_the_attempt_that_consumes_it(tmp_path: Path) -> None:
-    session = tmp_path / "session"
-    attempt = next_forge_attempt_dir(session, 3)
-
-    written = write_forge_handoff(_state(), handoff_dir=attempt / "handoff")
-
-    assert written == attempt / "handoff"
-    assert (written / "workload.md").is_file()

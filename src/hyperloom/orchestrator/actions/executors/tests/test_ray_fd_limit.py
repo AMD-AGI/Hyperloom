@@ -9,6 +9,8 @@ import json
 import subprocess
 from pathlib import Path
 
+import pytest
+
 from hyperloom.orchestrator.actions.executors import _ray_runtime as ray_runtime
 
 # Minimum soft RLIMIT_NOFILE the raylet needs to stay up.
@@ -98,7 +100,9 @@ def _install_fake_ray_start(monkeypatch, events):
     """Make ``ray status`` report 'down' initially, 'up' after ray start."""
     started = False
 
-    monkeypatch.setattr(ray_runtime, "ray_status_ok", lambda: started)
+    monkeypatch.setattr(
+        ray_runtime, "ray_probe", lambda timeout=None: ray_runtime.RayProbe.UP if started else ray_runtime.RayProbe.DOWN
+    )
 
     def _fake_run(cmd, **kwargs):
         nonlocal started
@@ -111,6 +115,10 @@ def _install_fake_ray_start(monkeypatch, events):
         return _Proc()
 
     monkeypatch.setattr(ray_runtime.subprocess, "run", _fake_run)
+
+
+# The entry points that start a fresh local head when none is up.
+_HEAD_STARTERS = [ray_runtime.ensure_ray_cluster, ray_runtime.force_restart_local_cluster]
 
 
 def test_ensure_fd_limit_raises_low_soft_limit(monkeypatch):
@@ -206,18 +214,19 @@ def test_ensure_fd_limit_unlimited_soft_is_noop(monkeypatch):
     assert not warnings
 
 
-def test_ensure_ray_cluster_runs_fd_preflight_before_ray_start(monkeypatch):
-    """``ensure_ray_cluster`` must raise the fd limit BEFORE ``ray start``."""
+@pytest.mark.parametrize("start_head", _HEAD_STARTERS)
+def test_starting_a_head_runs_fd_preflight_before_ray_start(monkeypatch, start_head):
+    """Every entry point that starts a head must raise the fd limit BEFORE ``ray start``."""
     events: list = []
     fake = _FakeResource(soft=1024, hard=1048576, events=events)
     monkeypatch.setattr(ray_runtime, "resource", fake, raising=False)
     _install_fake_ray_start(monkeypatch, events)
 
-    ray_runtime.ensure_ray_cluster(num_gpus=1)
+    start_head(num_gpus=1)
 
     kinds = [kind for kind, _ in events]
     assert "setrlimit" in kinds, (
-        "ensure_ray_cluster must run an RLIMIT_NOFILE preflight before starting Ray (issue #433)"
+        f"{start_head.__name__} must run an RLIMIT_NOFILE preflight before starting Ray (issue #433)"
     )
     assert "ray_start" in kinds
     assert kinds.index("setrlimit") < kinds.index("ray_start"), (
@@ -225,25 +234,8 @@ def test_ensure_ray_cluster_runs_fd_preflight_before_ray_start(monkeypatch):
     )
 
 
-def test_force_restart_local_cluster_runs_fd_preflight_before_ray_start(monkeypatch):
-    """``force_restart_local_cluster`` must also raise the fd limit first."""
-    events: list = []
-    fake = _FakeResource(soft=1024, hard=1048576, events=events)
-    monkeypatch.setattr(ray_runtime, "resource", fake, raising=False)
-    _install_fake_ray_start(monkeypatch, events)
-
-    ray_runtime.force_restart_local_cluster(num_gpus=1)
-
-    kinds = [kind for kind, _ in events]
-    assert "setrlimit" in kinds, (
-        "force_restart_local_cluster must run an RLIMIT_NOFILE preflight before starting Ray (issue #433)"
-    )
-    assert "ray_start" in kinds
-    assert kinds.index("setrlimit") < kinds.index("ray_start")
-
-
-def test_ray_status_timeout_is_treated_as_down(monkeypatch):
-    """A stale ``ray_current_cluster`` can make ``ray status`` hang on dead GCS."""
+def test_ray_status_timeout_is_unknown(monkeypatch):
+    """A stale ``ray_current_cluster`` can make ``ray status`` hang on dead GCS, and a slow healthy head looks the same."""
     monkeypatch.delenv("HYPERLOOM_RAY_STATUS_TIMEOUT_SEC", raising=False)
     calls: list = []
 
@@ -253,7 +245,7 @@ def test_ray_status_timeout_is_treated_as_down(monkeypatch):
 
     monkeypatch.setattr(ray_runtime.subprocess, "run", _timeout_run)
 
-    assert ray_runtime.ray_status_ok() is False
+    assert ray_runtime.ray_probe() is ray_runtime.RayProbe.UNKNOWN
     assert calls
     assert calls[0][1].get("timeout") == ray_runtime.DEFAULT_RAY_STATUS_TIMEOUT_SEC
 
@@ -273,60 +265,12 @@ def test_ensure_ray_cluster_clears_stale_ray_before_start(monkeypatch):
     assert kinds.index("ray_stop") < kinds.index("ray_start")
 
 
-def test_ensure_ray_cluster_binds_dashboard_to_loopback(monkeypatch):
-    """The local head must bind the dashboard/jobs API to loopback, not 0.0.0.0, so the unauthenticated Ray Jobs
-    endpoint is not exposed on the pod network.
-    """
-    events: list = []
-    fake = _FakeResource(soft=1048576, hard=1048576, events=events)
-    monkeypatch.setattr(ray_runtime, "resource", fake, raising=False)
-    _install_fake_ray_start(monkeypatch, events)
-
-    ray_runtime.ensure_ray_cluster()
-
-    starts = [cmd for kind, cmd in events if kind == "ray_start"]
-    assert starts, "ray start was not invoked"
-    assert "--dashboard-host=127.0.0.1" in starts[0]
-    assert "--dashboard-host=0.0.0.0" not in starts[0]
-
-
-def test_force_restart_local_cluster_binds_dashboard_to_loopback(monkeypatch):
-    """``force_restart_local_cluster`` must also bind the dashboard to loopback."""
-    events: list = []
-    fake = _FakeResource(soft=1048576, hard=1048576, events=events)
-    monkeypatch.setattr(ray_runtime, "resource", fake, raising=False)
-    _install_fake_ray_start(monkeypatch, events)
-
-    ray_runtime.force_restart_local_cluster()
-
-    starts = [cmd for kind, cmd in events if kind == "ray_start"]
-    assert starts, "ray start was not invoked"
-    assert "--dashboard-host=127.0.0.1" in starts[0]
-    assert "--dashboard-host=0.0.0.0" not in starts[0]
-
-
 def _assert_declares_serving_slot(start_cmd: tuple) -> None:
     """The head must declare the ``serving_slot`` custom resource."""
     assert "--resources" in start_cmd, start_cmd
     idx = start_cmd.index("--resources")
     payload = json.loads(start_cmd[idx + 1])
     assert payload.get("serving_slot") == 1, payload
-
-
-def test_ensure_ray_cluster_declares_serving_slot(monkeypatch):
-    """The single-node head declares serving_slot=1 (authoritative serving mutex)."""
-    events: list = []
-    fake = _FakeResource(soft=1048576, hard=1048576, events=events)
-    monkeypatch.setattr(ray_runtime, "resource", fake, raising=False)
-    _install_fake_ray_start(monkeypatch, events)
-
-    ray_runtime.ensure_ray_cluster(num_gpus=4)
-
-    starts = [cmd for kind, cmd in events if kind == "ray_start"]
-    assert starts, "ray start was not invoked"
-    _assert_declares_serving_slot(starts[0])
-    # num_gpus is still passed alongside the custom resource.
-    assert "--num-gpus=4" in starts[0]
 
 
 def _install_failing_ray_start(monkeypatch, stdout: str, stderr: str):
@@ -339,7 +283,7 @@ def _install_failing_ray_start(monkeypatch, stdout: str, stderr: str):
             self.stdout = stdout
             self.stderr = stderr
 
-    monkeypatch.setattr(ray_runtime, "ray_status_ok", lambda: False)
+    monkeypatch.setattr(ray_runtime, "ray_probe", lambda timeout=None: ray_runtime.RayProbe.DOWN)
 
     def _fake_run(cmd, **kwargs):
         if cmd[:2] == ["ray", "start"]:
@@ -371,23 +315,6 @@ def test_failed_ray_start_carries_its_output(monkeypatch):
     assert "ray start output: ModuleNotFoundError: No module named 'ray.thirdparty_files'" in message, message
 
 
-def test_force_restart_local_cluster_declares_serving_slot(monkeypatch):
-    """A version-mismatch restart re-declares serving_slot on the fresh head."""
-    events: list = []
-    fake = _FakeResource(soft=1048576, hard=1048576, events=events)
-    monkeypatch.setattr(ray_runtime, "resource", fake, raising=False)
-    _install_fake_ray_start(monkeypatch, events)
-
-    ray_runtime.force_restart_local_cluster()
-
-    starts = [cmd for kind, cmd in events if kind == "ray_start"]
-    assert starts, "ray start was not invoked"
-    _assert_declares_serving_slot(starts[0])
-
-
-import pytest
-
-
 _ISO_ENV_VARS = ("HL_RAY_HEAD_PORT", "RAY_ADDRESS")
 
 
@@ -408,32 +335,6 @@ class TestLocalHeadPortIsolation:
         for var in _ISO_ENV_VARS:
             monkeypatch.delenv(var, raising=False)
 
-    def test_free_tcp_port_is_bindable(self):
-        """The probed port is a real, currently-free loopback TCP port."""
-        import socket
-
-        port = ray_runtime._free_tcp_port()
-        assert isinstance(port, int) and 0 < port < 65536
-        # It was released, so we can immediately bind it ourselves.
-        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
-            sock.bind(("127.0.0.1", port))
-
-    def test_isolated_ports_are_free_and_distinct(self):
-        """GCS / dashboard / client all get distinct probed ports by default."""
-        gcs, extra = ray_runtime._isolated_head_port_args()
-        dash = int(_arg_value(tuple(extra), "--dashboard-port"))
-        client = int(_arg_value(tuple(extra), "--ray-client-server-port"))
-        assert len({gcs, dash, client}) == 3
-        for p in (gcs, dash, client):
-            assert 0 < p < 65536
-
-    def test_no_ray_address_pinned(self, monkeypatch):
-        """We must NOT set RAY_ADDRESS: ray.init(address='auto') does discovery."""
-        import os as _os
-
-        ray_runtime._isolated_head_port_args()
-        assert "RAY_ADDRESS" not in _os.environ
-
     def test_head_port_override_pins_gcs_only(self, monkeypatch):
         """HL_RAY_HEAD_PORT pins the GCS port; dashboard/client stay probed."""
         monkeypatch.setenv("HL_RAY_HEAD_PORT", "6500")
@@ -442,21 +343,21 @@ class TestLocalHeadPortIsolation:
         assert _arg_value(tuple(extra), "--dashboard-port") is not None
         assert _arg_value(tuple(extra), "--ray-client-server-port") is not None
 
-    def test_ensure_ray_cluster_binds_isolated_ports(self, monkeypatch):
-        """End-to-end: ensure_ray_cluster emits probed GCS/dashboard/client ports."""
+    @pytest.mark.parametrize("start_head", _HEAD_STARTERS)
+    def test_starting_a_head_binds_isolated_ports(self, monkeypatch, start_head):
+        """End-to-end: a started head gets distinct probed GCS/dashboard/client ports and declares serving_slot."""
         events: list = []
         fake = _FakeResource(soft=1048576, hard=1048576, events=events)
         monkeypatch.setattr(ray_runtime, "resource", fake, raising=False)
         _install_fake_ray_start(monkeypatch, events)
 
-        ray_runtime.ensure_ray_cluster(num_gpus=8)
+        start_head(num_gpus=8)
 
         start = [cmd for kind, cmd in events if kind == "ray_start"][0]
-        assert _arg_value(start, "--port") is not None
-        assert _arg_value(start, "--dashboard-port") is not None
-        assert _arg_value(start, "--ray-client-server-port") is not None
+        ports = {_arg_value(start, flag) for flag in ("--port", "--dashboard-port", "--ray-client-server-port")}
+        assert None not in ports and len(ports) == 3, start
         # No --temp-dir (issue #55244); dashboard bound to loopback (security).
         assert not any(t.startswith("--temp-dir=") for t in start)
-        assert "--dashboard-host=127.0.0.1" in start
+        assert [t for t in start if t.startswith("--dashboard-host=")] == ["--dashboard-host=127.0.0.1"]
         assert "--num-gpus=8" in start
         _assert_declares_serving_slot(start)

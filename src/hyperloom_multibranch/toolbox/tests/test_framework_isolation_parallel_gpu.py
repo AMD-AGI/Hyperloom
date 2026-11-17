@@ -53,6 +53,7 @@ USE_AITER = "SGLANG_USE_AITER"
 SHARED = Path(DEFAULT_CONFIGS) / "bf16_tuned_gemm.csv"
 AITER_MERGE_DIR = Path("/tmp/aiter_configs")
 TESTS = 9
+USES_REAL_GPUS = True  # keep the host's amd-smi and rocm-smi: see hyperloom.measure.tests.gpu_free_host
 WITHDRAWN = 5
 OWN_TABLE = (0, 1, 2, 3)
 WITHDRAW_AFTER_SEC = 90

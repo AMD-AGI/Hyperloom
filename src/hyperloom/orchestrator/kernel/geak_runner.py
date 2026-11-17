@@ -18,7 +18,7 @@ from typing import IO
 
 from hyperloom.common.env_safety import redact_secret_values
 from hyperloom.common.geak_checkout import resolve_e2e_runner
-from hyperloom.common.proctree import signal_group
+from hyperloom_common.proctree import signal_group
 
 _TAIL_CHARS = 4000
 

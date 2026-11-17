@@ -6,29 +6,34 @@ hard limits."""
 
 from __future__ import annotations
 
+from collections.abc import Mapping
 from dataclasses import dataclass
 from enum import Enum
 from pathlib import Path
 
-from hyperloom.common.perf_metric import GRADED_INTVTY_P50, GRADED_OUTPUT
+from hyperloom.common.agentx_early_stop import EarlyStopMode, early_stop_mode
+from hyperloom.common.perf_metric import GRADED_OUTPUT
 from hyperloom.common.workload_defaults import DEFAULT_EP
 from hyperloom_multibranch.contracts.toolbox import WorkloadKind
+from hyperloom_multibranch.rulegate.agentx import AgentXObjective
 from hyperloom_multibranch.scheduling.reference import ReferenceSource
 from hyperloom_multibranch.scheduling.roster import RosterCaps
 
 #: FINAL's sweep concs as multiples of an InferenceX workload's conc; the primary operating point is one of them.
 SWEEP_FACTORS = (0.5, 1.0, 2.0)
-#: How long the dossier pass that maps two or more Arbors' directions may run, unless the run says otherwise. Arbor
-#: starts its first iteration only with an hour and its 3 min margin left (its estimate with none measured), and ends
-#: the pass as soon as the map is set, which two iterations have reached in well under this bound.
+#: How long the dossier pass that maps two or more component agents' directions may run, unless the run says otherwise.
+#: A component agent starts its first iteration only with an hour and its 3 min margin left (its estimate with none
+#: measured), and ends the pass as soon as the map is set.
 DOSSIER_MINUTES = 90.0
-#: The least time each Arbor's share branch must have to its cutoff for the shares to open, unless the run says
-#: otherwise: with less, that first iteration never starts. Arbor measures the root's GSM8K before it, a few minutes on
-#: a small model and up to 30 on a large one, so a share given just this may still run nothing.
+#: The least time each component agent's share branch must have to its cutoff for the shares to open, unless the run
+#: says otherwise: with less, that first iteration never starts. An agent may measure the root's GSM8K before it, a few
+#: minutes on a small model and up to 30 on a large one, so a share given just this may still run nothing.
 SHARE_MINUTES = 63.0
-#: The first port of the blocks the Arbor agents' servers take, unless the run names another. Sessions that share a
-#: machine each name their own, since every agent serves on the host's network.
+#: The first port of the blocks the component agents' servers take, unless the run names another. Sessions that share
+#: a machine each name their own, since every agent serves on the host's network.
 AGENT_PORT = 31100
+#: The axis an AgentX session is graded on unless the run names another.
+DEFAULT_AGENTX_OBJECTIVE = AgentXObjective.P50_INTERACTIVITY
 
 
 def sweep_concs(conc: int) -> tuple[int, ...]:
@@ -68,6 +73,8 @@ class Workload:
     are scoped to. ``inferencex`` is the request shape of an InferenceX workload and ``None`` for an AgentX trace
     replay, whose shape the trace fixes; ``conc`` is the primary operating point of either. ``ep`` is the
     expert-parallel size either is served at.
+    ``agentx_duration_sec`` is an AgentX workload's trace window, ``None`` for the measuring harness's default.
+    ``agentx_objective`` is the axis an AgentX workload is graded on; an InferenceX one is graded on output throughput.
 
     ``gpu_type`` is named, not detected: the toolbox writes it into every measurement spec, built before PRELUDE runs.
     """
@@ -81,6 +88,8 @@ class Workload:
     kernel_optimizer: KernelOptimizer
     inferencex: InferenceXShape | None
     ep: int = DEFAULT_EP
+    agentx_duration_sec: int | None = None
+    agentx_objective: AgentXObjective = DEFAULT_AGENTX_OBJECTIVE
 
     @property
     def model_basename(self) -> str:
@@ -93,10 +102,10 @@ class Workload:
     @property
     def metric(self) -> str:
         """The metric the session's values are read in: the frontier policy, final selection, the dashboard and the
-        final recipe's metric. AgentX is graded on P50 interactivity, the key its rule gate's baseline is written
+        final recipe's metric. AgentX is graded on its objective's metric, the key its rule gate's baseline is written
         under."""
 
-        return GRADED_INTVTY_P50 if self.inferencex is None else GRADED_OUTPUT
+        return self.agentx_objective.metric if self.inferencex is None else GRADED_OUTPUT
 
     @property
     def profiles_moved_head_on_merge(self) -> bool:
@@ -105,6 +114,13 @@ class Workload:
         it would hold up the merge tests offered on the moved head."""
 
         return self.inferencex is not None
+
+    @property
+    def integration_k(self) -> int:
+        """The K the integration branch opens at: 2 for InferenceX, whose merge tests and profiles are short; 1 for
+        AgentX, whose merge test holds one of a few large slots for its whole trace window."""
+
+        return 1 if self.inferencex is None else 2
 
     @property
     def bundles_merges(self) -> bool:
@@ -130,26 +146,31 @@ class RunSettings:
     them. ``user_directions`` are the directions the user
     wrote, each opening one branch where EXPLORE starts, ahead of the opening batch, within the branch cap; ``agents``
     the third-party agents the user named, each opening one autonomous branch the same way, and ``agent_directions``
-    the directions map whose disjoint shares the Arbor agents among them work, one share each (``""`` for none; see
-    :mod:`~hyperloom_multibranch.scheduling.agent_plans`), ``agent_pack`` the pack those Arbors run (``""`` for
-    the adapter's default, Arbor's serving template), ``agent_launch`` the file of the launch their recipe's adds
-    to (``""`` when the recipe's is the whole launch), ``agent_dossier_minutes`` how long the dossier pass that
-    maps two or more Arbors' directions may run when no map is given (0: none, the map is generated from the root's
+    the directions map whose disjoint shares the component agents among them work, one share each (``""`` for none; see
+    :mod:`~hyperloom_multibranch.scheduling.agent_plans`), ``agent_pack`` the pack those component agents run (``""``
+    for the adapter's default), ``agent_launch`` the file of the launch their recipe's adds
+    to (``""`` for the session's frozen base), ``agent_dossier_minutes`` how long the dossier pass that maps
+    two or more component agents' directions may run when no map is given (0: none, the map is generated from the root's
     shares; :mod:`~hyperloom_multibranch.specialist.dossier_pass`), ``agent_share_minutes`` the least time to their
     cutoff the share branches of a split map must have to open, and the least an agent branch whose lease is refused
     for want of cards must still have to run to keep waiting for them (0: they always open, and wait while any time is
     left), and ``agent_port`` the first port of the blocks
     their servers take, one block per agent branch, a mapping branch's included, and one for a pass before EXPLORE. ``stop_after_map`` ends the session
-    once those Arbors' directions are mapped, one Arbor's too, before EXPLORE, and leaves the map and its dossier for a
-    person to review; the run after the review is given that map as ``agent_directions`` and that dossier as
-    ``agent_dossier``, which every agent branch gets in place of a dossier pass's (``""`` for none). ``review_gate``
-    has those Arbors wait, once their map is made, until a person approves or rejects it (:mod:`.review`): the mapping
-    branch waits in EXPLORE while the others go on, a given map pauses the session before EXPLORE. It tells each Arbor
-    the host reviewed; off, nothing waits and each Arbor is started with its own gate off.
+    once the component agents' directions are mapped, those of a single one too, before EXPLORE, and leaves the map and
+    its dossier for a person to review; the run after the review is given that map as ``agent_directions`` and that
+    dossier as ``agent_dossier``, which every agent branch gets in place of a dossier pass's (``""`` for none).
+    ``review_gate`` has the component agents wait, once their map is made, until a person approves or rejects it
+    (:mod:`.review`): the mapping branch waits in EXPLORE while the others go on, a given map pauses the session before
+    EXPLORE. It tells each of them the host reviewed; off, nothing waits and each is started with its own gate off.
     ``references`` are the
     directories of reference material the run copies in before its first phase, each with the commit it was taken at.
+    ``reference_script`` is the operator's launch file the session freezes as its base (``""`` to resolve it from the
+    recipe sources; :mod:`~hyperloom_multibranch.scheduling.session_base`).
     ``dev_leases`` is how many dev sandboxes the session lends its specialists at once; 0 lends none. ``playbook`` says
-    which scheduling playbook the session plays. ``make_before_break`` has a hosted session keep a finished test's
+    which scheduling playbook the session plays. ``inferencex_commit`` is the commit a fresh session's base launch reads
+    InferenceX at (``""`` for the head of its ``main``). ``agentx_early_stop`` is how the AgentX checkpoint treats an
+    explore that trails its parent (``toolbox.agentx_checkpoint``): recorded only by default; the manifest keeps it,
+    so a resumed session judges as it began. ``make_before_break`` has a hosted session keep a finished test's
     sandbox until the next test's runs, so that the cluster does not give its node to another job between two tests,
     where the grant fits at least three tests at once; it runs one test fewer at once there. Off, every test the grant
     fits runs at once and each sandbox is closed when its test ends. A session measured on this machine ignores it."""
@@ -163,6 +184,7 @@ class RunSettings:
     user_directions: tuple[str, ...] = ()
     agents: tuple[str, ...] = ()
     references: tuple[ReferenceSource, ...] = ()
+    reference_script: str = ""
     dev_leases: int = 0
     playbook: PlaybookMode = PlaybookMode.AUTO
     agent_directions: str = ""
@@ -174,11 +196,20 @@ class RunSettings:
     stop_after_map: bool = False
     agent_dossier: str = ""
     review_gate: bool = True
+    inferencex_commit: str = ""
+    agentx_early_stop: EarlyStopMode = EarlyStopMode.SHADOW
     make_before_break: bool = True
+
+
+def session_early_stop(environ: Mapping[str, str]) -> EarlyStopMode:
+    """How a new session holds its explores to the AgentX checkpoint: the mode ``environ`` names, shadow when it names
+    none (single-lineage's default is enforce); a resumed session keeps the mode its manifest recorded."""
+    return early_stop_mode(environ, EarlyStopMode.SHADOW)
 
 
 __all__ = [
     "AGENT_PORT",
+    "DEFAULT_AGENTX_OBJECTIVE",
     "DOSSIER_MINUTES",
     "SHARE_MINUTES",
     "SWEEP_FACTORS",
@@ -188,4 +219,5 @@ __all__ = [
     "RunSettings",
     "Workload",
     "sweep_concs",
+    "session_early_stop",
 ]

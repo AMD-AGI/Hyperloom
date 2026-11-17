@@ -793,8 +793,8 @@ def test_only_the_interactivity_pair_marks_a_round_agentx_graded() -> None:
 
     ``_merge_raw_result`` fills duration from raw ``duration``, the latency percentiles from ``median_ttft_ms`` and
     friends, and the error rate whenever the raw result has it, none of them gated on the workload;
-    ``_promote_baseline`` stamps per-GPU output unconditionally. Only the interactivity pair has a single producer,
-    ``agentx/mapping.py``, so only it proves the agentic mapper ran.
+    ``_promote_baseline`` stamps per-GPU output unconditionally. Only an AgentX replay produces the interactivity pair,
+    so only it proves the agentic mapper ran.
     """
     from hyperloom.inference_optimizer.breakdown.reporters._renderers._agentx_metrics import has_graded_axes
 

@@ -6,8 +6,9 @@
 An append-only JSON-lines file, flushed and fsynced per entry. A request is logged before the blackboard hears of it,
 its outcome is logged before the blackboard is written, and the entry is settled once the blackboard holds it, so after a
 crash every accepted request is in exactly one of three states: waiting to run, measured and waiting to be written, or
-settled. Ids are UUID v5 of the campaign id and ``branch/sequence``; the sequence is per branch and is never reused
-(a submit that failed after it was logged still used its number), so a restart hands out the numbers it would have.
+settled. Ids are UUID v5 of the campaign id and ``branch/sequence``, or ``scope/branch/sequence`` when the log is given
+a scope; the sequence is per branch and is never reused (a submit that failed after it was logged still used its
+number), so a restart hands out the numbers it would have.
 A torn last line, the trace of a crash mid-write, is cut off the file when it is read back, so the next entry starts
 a line of its own.
 """
@@ -20,6 +21,8 @@ import uuid
 from collections.abc import Mapping
 from dataclasses import dataclass, field
 from pathlib import Path
+
+from hyperloom_common.shared_storage import open_shared_append
 
 ACCEPTED = "accepted"
 OUTCOME = "outcome"
@@ -55,8 +58,9 @@ class LogEntry:
 
 
 def append_line(path: Path, record: Mapping[str, object]) -> None:
-    """Append ``record`` to the JSON-lines file ``path`` as one line, flushed and fsynced before this returns."""
-    with path.open("a", encoding=_UTF8) as handle:
+    """Append ``record`` to the JSON-lines file ``path`` as one line, flushed and fsynced before this returns. A new
+    file is ``664``: the run's next leg, maybe another account of the group, replays and appends to it."""
+    with os.fdopen(open_shared_append(path, make_parents=True), "a", encoding=_UTF8) as handle:
         handle.write(json.dumps(record, sort_keys=True) + "\n")
         handle.flush()
         os.fsync(handle.fileno())
@@ -80,11 +84,12 @@ def complete_lines(path: Path) -> list[str]:
 class SubmissionLog:
     path: Path
     campaign_id: str
+    #: Set, it keeps the ids apart from those of another log of the campaign: a hosted run's sessions share its run id.
+    scope: str = ""
     _entries: dict[str, LogEntry] = field(default_factory=dict)
     _sequences: dict[str, int] = field(default_factory=dict)
 
     def __post_init__(self) -> None:
-        self.path.parent.mkdir(parents=True, exist_ok=True)
         if self.path.exists():
             self._replay()
 
@@ -93,7 +98,8 @@ class SubmissionLog:
             namespace = uuid.UUID(self.campaign_id)
         except ValueError:
             namespace = uuid.uuid5(uuid.NAMESPACE_URL, f"hyperloom-campaign:{self.campaign_id}")
-        return str(uuid.uuid5(namespace, f"{branch}/{sequence}"))
+        name = f"{self.scope}/{branch}/{sequence}" if self.scope else f"{branch}/{sequence}"
+        return str(uuid.uuid5(namespace, name))
 
     def next_sequence(self, branch: str) -> int:
         """Reserve the next number of ``branch``; a number is used the moment it is handed out."""

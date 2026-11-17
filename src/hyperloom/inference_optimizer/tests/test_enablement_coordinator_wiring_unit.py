@@ -14,20 +14,19 @@ import pytest
 
 from hyperloom.agents.framework.sources.pr_monitor import PRMonitorError
 from hyperloom.common.bringup import BootObservation, Excerpt, LadderStage, TerminalFrame
-from hyperloom.common.deadline import Deadline
 from hyperloom.common.failure_signature import FailureSignature
 from hyperloom.inference_optimizer.breakdown.stop_reasons import HOST_GPUS_UNAVAILABLE
 from hyperloom.orchestrator.bringup import observation_summary
 from hyperloom.orchestrator.state._shared_state.enablement_round import EnablementRound
 from hyperloom.orchestrator.state.round_store import RoundRequest
 from hyperloom.orchestrator.state.shared_state import SharedState
-from hyperloom.orchestrator.state.task_registry import TaskSpec, create_in_cursor
+from hyperloom.orchestrator.state.task_registry import Task, TaskSpec, create_in_cursor
 
 from hyperloom.orchestrator.actions.executors._ray_serving import RAY_INFEASIBLE_MARKER
 from hyperloom.orchestrator.actions.executors._subprocess_kill import AGENTX_PREFLIGHT_ERROR_CLASS
 from hyperloom.orchestrator.actions.stop_attribution import SESSION_TIME_EXHAUSTED_CLASS
 from hyperloom.orchestrator.loop.coordinator import Coordinator
-from hyperloom.orchestrator.loop.proposals import PendingProposal
+from hyperloom.orchestrator.state.pending_proposal import PendingProposal
 from hyperloom.orchestrator.loop._baseline_failures import _authorable_launch_log
 from hyperloom.orchestrator.enablement.params import EnablementParams
 
@@ -40,20 +39,24 @@ _MISSING_ARCH_LOG = (
 )
 
 
-# ---- _authorable_launch_log (pure) ----
+# ---- _authorable_launch_log ----
 
 
-def test_extract_launch_log_joins_error_fields():
-    payload = {"error": "boom", "stderr": "trace here", "status": "failed"}
-    out = _authorable_launch_log(payload, err_class="subprocess_nonzero")
-    assert "boom" in out
-    assert "trace here" in out
-
-
-def test_extract_launch_log_handles_list_fields():
-    payload = {"log_tail": ["line1", "", "line2"]}
-    out = _authorable_launch_log(payload, err_class="")
-    assert "line1" in out and "line2" in out
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("evidence", "launch_log"),
+    [
+        pytest.param({"error": "boom", "stderr": "trace here"}, "boom\ntrace here", id="every_text_field"),
+        pytest.param({"log_tail": ["line1", "", "line2"]}, "line1\nline2", id="list_field_lines"),
+    ],
+)
+async def test_a_failed_boot_hands_enablement_all_of_its_text(session_dir, evidence, launch_log):
+    coord = make_coordinator(session_dir)
+    task = Task(task_id="bl", kind="baseline", state="running", params={}, idempotency_key="bl")
+    await coord.writeback.handle_unpromotable_result(
+        task, {"status": "failed", "error_class": "subprocess_nonzero", **evidence}
+    )
+    assert coord.shared_state.enablement.launch_log == launch_log
 
 
 def test_extract_launch_log_empty_on_none_or_blank():
@@ -68,7 +71,7 @@ def test_extract_launch_log_empty_on_none_or_blank():
         ({"error": "bad --flag"}, "fast_exit_arg_error"),
         ({"error": "pinned dependency missing"}, AGENTX_PREFLIGHT_ERROR_CLASS),
         ({"error": f"{RAY_INFEASIBLE_MARKER}: cluster has 0 GPU(s), 8 requested"}, "subprocess_nonzero"),
-        ({"error": "gpu_selection.auto: needed 8 idle GPU(s) but only found 7"}, HOST_GPUS_UNAVAILABLE),
+        ({"error": "GPU 0: held by pid 4242 (python3)"}, HOST_GPUS_UNAVAILABLE),
         ({"error": "budget reached"}, SESSION_TIME_EXHAUSTED_CLASS),
     ],
 )
@@ -120,14 +123,10 @@ def test_enablement_discovery_honors_pr_monitor_gate(
     monkeypatch.setattr(sources, "enumerate_candidates", lambda request: seen.append(request) or [])
     fake = _enqueue_self(tmp_path)
     fake.knowledge_plane = types.SimpleNamespace(pr_monitor_enabled=enabled)
-    plan = types.SimpleNamespace(
-        repos=("https://github.com/sgl-project/sglang.git",),
-        keywords=("scheduler",),
-    )
 
-    deadline = Deadline.after(60)
-    assert fake.enablement_params._discover_enablement_candidate_refs(plan, deadline=deadline) == ()
-    assert seen[0].search_modes == expected_modes
+    fake.enablement_params.build_enablement_specialist_params(_MISSING_ARCH_LOG)
+
+    assert {request.search_modes for request in seen} == {expected_modes}
 
 
 def test_build_params_actionable_failure_tags_enablement(monkeypatch, tmp_path):
@@ -158,14 +157,13 @@ def test_build_params_threads_eval_origin_carriers(monkeypatch, tmp_path):
     fake.shared_state.enablement.origin = "eval"
     fake.shared_state.enablement.accuracy_floor = 0.3
     fake.shared_state.enablement.probe_config_path = "/runs/baseline/materialized.yaml"
-    fake.shared_state.enablement.eval_contract_fingerprint = "abc123"
+    fake.shared_state.enablement.eval_definition_digest = "sha256:abc123"
     params = fake.enablement_params.build_enablement_specialist_params(_MISSING_ARCH_LOG)
     assert params is not None
     assert params["enablement_origin"] == "eval"
     assert params["enablement_accuracy_floor"] == 0.3
     assert params["enablement_probe_config_path"] == "/runs/baseline/materialized.yaml"
-    # The eval-contract fingerprint is no longer carried: nothing downstream reads it.
-    assert "enablement_eval_contract_fingerprint" not in params
+    assert "enablement_eval_definition_digest" not in params
 
 
 _TRANSFORMERS_UNRECOGNIZED_LOG = (
@@ -292,7 +290,7 @@ def _enqueue_self(tmp_path, **state_kw):
             accepted_config_path=state_kw.get("enablement_accepted_config_path", ""),
             accepted_config=state_kw.get("enablement_accepted_config", {}),
             accuracy_floor=state_kw.get("enablement_accuracy_floor", 0.0),
-            eval_contract_fingerprint=state_kw.get("enablement_eval_contract_fingerprint", ""),
+            eval_definition_digest=state_kw.get("enablement_eval_definition_digest", ""),
             active_runtime=state_kw.get("enablement_active_runtime", {}),
             revalidation_task_id=state_kw.get("enablement_revalidation_task_id", ""),
             revalidation_generation=state_kw.get("enablement_revalidation_generation", 0),
@@ -821,7 +819,6 @@ async def test_rearm_kept_points_accepted_config_at_the_archived_copy(tmp_path):
     fake = _enqueue_self(tmp_path)
     await _hold_round(fake, "spec-1")
     # Read by the setting-script write that shares the rearm's archive block.
-    fake.shared_state.reference_model = ""
     fake.shared_state.tp = 8
     fake.shared_state.max_model_len = 0
     await fake.enablement_lane.maybe_rearm_enablement(
@@ -1218,24 +1215,17 @@ def _write_index(model_dir, weight_map):
     (model_dir / "model.safetensors.index.json").write_text(json.dumps({"weight_map": weight_map}))
 
 
-def test_derive_weight_facts_blank_log_returns_empty():
-    fake = _facts_self()
-    assert EnablementParams._derive_checkpoint_weight_facts(fake, "") == ""
-    assert EnablementParams._derive_checkpoint_weight_facts(fake, None) == ""
-
-
-def test_derive_weight_facts_no_trigger_returns_empty():
-    """A log with no weight-init phrase and no weighty names does not fire."""
-    fake = _facts_self()
-    out = EnablementParams._derive_checkpoint_weight_facts(
-        fake, "ValueError: Model architecture 'Foo' is not supported"
-    )
-    assert out == ""
-
-
-def test_derive_weight_facts_no_model_path_returns_empty():
-    fake = _facts_self(model_path="")
-    assert EnablementParams._derive_checkpoint_weight_facts(fake, _WEIGHT_INIT_LOG) == ""
+@pytest.mark.parametrize(
+    "launch_log",
+    [
+        pytest.param("", id="blank_log"),
+        pytest.param(None, id="no_log"),
+        pytest.param("ValueError: Model architecture 'Foo' is not supported", id="no_weight_init_failure"),
+        pytest.param(_WEIGHT_INIT_LOG, id="no_model_path"),
+    ],
+)
+def test_derive_weight_facts_returns_empty(launch_log):
+    assert EnablementParams._derive_checkpoint_weight_facts(_facts_self(), launch_log) == ""
 
 
 def test_derive_weight_facts_missing_index_returns_empty(tmp_path):
@@ -1358,22 +1348,6 @@ def _make_coord_with_phase(session_dir) -> "Coordinator":
     )
     backends = {name: MockBackend(plan, name=name) for name in ("orchestration", "critic")}
     return Coordinator(session_dir, backends=backends)
-
-
-@pytest.mark.asyncio
-async def test_rearm_authored_lane_delegates_enablement(session_dir):
-    """_maybe_rearm_authored_lane with lane=enablement calls maybe_rearm_enablement."""
-    coord = _make_coord_with_phase(session_dir)
-    called = []
-
-    async def _fake_rearm(res):
-        called.append(res)
-
-    coord.enablement_lane.maybe_rearm_enablement = _fake_rearm  # type: ignore[method-assign]
-
-    res = {"status": "apply_failed", "lane": "enablement", "enablement": True}
-    await coord.phase_framework._maybe_rearm_authored_lane(res, {})
-    assert len(called) == 1 and called[0] is res
 
 
 @pytest.mark.asyncio

@@ -8,20 +8,21 @@ framework (`sglang`, `vllm`, `atom`, `xdit`, `custom`). The names come from
 `src/hyperloom/inference_optimizer/framework_registry.py` must ship both files, and
 an unset `$FRAMEWORK` resolves to the sglang pair.
 
-Two fields in each YAML are **fallback only** — the optimizer overrides them at
-runtime:
+`benchmark.model` is **fallback only**: the optimizer overrides it at runtime
+with `--model` / `$MODEL_PATH`.
 
-- `benchmark.model` <- `--model` / `$MODEL_PATH`
-- `benchmark.runner_type` <- `--gpu-type` / `$GPU_TYPE` / rocm-smi auto-detect
-
-`benchmark.benchmark_script` is deliberately NOT set in the shipped YAMLs. At
-materialize time Hyperloom pins it to `{framework}_{runner_type}.sh` (e.g.
-`sglang_mi300x.sh` / `sglang_mi355x.sh`) so Magpie's resolver hits priority 1
-(explicit user override) and uses the generic script — which respects
-`RESULT_DIR` and `EXTRA_*_ARGS`. Each shipped YAML has a commented
-`# benchmark_script: ...` template right under `framework:` for manual debug
-overrides; Orchestration can also route per-task via `params.benchmark_script`
-(sanitized).
+These YAMLs carry the workload, not the server launch. A fresh session resolves
+its base launch once, before the first round: `--reference-script`, else
+InferenceX main, else the framework cookbook, else (fixed workloads only) the
+default table, with a warning. It is frozen as `<session>/base_launch.json`;
+resume reads that file and resolves nothing. Every round composes the base, the
+operator's `--server-args` / `--extra-env`, and the candidate's change, then
+`inference_suite.run_round` runs it into its own run directory (`config.yaml`,
+`launch.json`, `report.json`, `server.log`, and the client, eval and profile
+artefacts). The round refuses a flag the installed framework's parser does not
+know (a candidate's flag fails that candidate as `serve_flag`; a base or
+operator flag stops the run) and a framework older than the recipe image's
+version.
 
 Before a new model run, verify these fields match the environment:
 
@@ -29,8 +30,6 @@ Before a new model run, verify these fields match the environment:
 - `benchmark.envs.TP`: tensor parallel size.
 - `benchmark.envs.CONC`, `ISL`, `OSL`: workload.
 - `benchmark.envs.ROCR_VISIBLE_DEVICES`: GPU pinning.
-- `benchmark.envs.PATH`: must lead with the launcher Python's bin dir
-  (`$(dirname "$PYTHON")`).
 
 ## Benchmark deadlines
 
@@ -45,41 +44,24 @@ the whole-sweep budget can end a sweep before all its measurements run.
 
 `PYTHONUNBUFFERED=1` only unbuffers Python output. It does not make shell/native
 programs or upstream subprocess capture stream, and busy logs are not proof of
-useful progress. The Magpie streaming fix is local-only and unpublished; do not
-assume an installed pin includes it or infer end-to-end validation from this
-policy. Session exhaustion is cooperative, not protection against a frozen
+useful progress. Session exhaustion is cooperative, not protection against a frozen
 Coordinator. Profile, KernelForge, GEAK, LLM-call, and SGLang's own watchdog
 budgets retain their existing contracts.
 
-## Magpie leak-path salvage (`INFERENCE_OPTIMIZER_RESCUE_PATHS`)
+## Baseline retries and operator server flags
 
-In-loop, defense-in-depth — the launcher does not touch this. Magpie shell
-wrappers hardcode artifacts under `/workspace/` (`inferencex_result.json`,
-`server.log`, `gpu_metrics.csv`, `profile_*.trace.json.gz`). When a task's
-in-workspace search finds no usable measurement, the executors run an
-mtime-gated salvage pass over `$INFERENCE_OPTIMIZER_RESCUE_PATHS` (unset =
-no salvage) and copy fresh matches into the task workspace, tagged in
-`nonfatal_warnings` (`rescued_from_leaked_path:` / `harvested_leaked_artifact:`).
-Extend the scan roots via `$INFERENCE_OPTIMIZER_LEAK_ROOTS` if a script leaks
-elsewhere; the default `{framework}_{runner_type}.sh` already respects
-`$RESULT_DIR` so salvage normally never fires.
-
-Operators only interact through two `task.params` knobs:
-`params.benchmark_script` (bare sanitized `*.sh`
-name; overrides the gpu_type auto-pick) and `params.result_dir` (forwarded as
-`$RESULT_DIR`). A baseline retry after a failure MUST change at least one of
-`params.benchmark_script` / `params.result_dir` / `params.extra_server_args` /
-`params.extra_envs` (prompt RULE F1 — LLM-side judgement, not a PolicyGate
-deny); a proposal repeating a recent failing params fingerprint is dropped as a
-duplicate. Three consecutive baseline failures with no enablement engaged stop
-the run with `stop_reason='baseline_failed'` and route PRELUDE to CLOSE.
+A baseline retry after a failure MUST change its launch
+(`params.extra_server_args` / `params.extra_envs`) (prompt RULE F1 — LLM-side
+judgement, not a PolicyGate deny); a proposal repeating a recent failing params
+fingerprint is dropped as a duplicate. Three consecutive baseline failures with
+no enablement engaged stop the run with `stop_reason='baseline_failed'` and
+route PRELUDE to CLOSE.
 
 Operator-supplied server flags have a first-class CLI surface:
 `optimize --server-args "<framework serve flags>"`. The CLI persists this in
 `state.json` and exports it as `INFERENCE_OPTIMIZER_SERVER_ARGS` (a `--resume`
-re-exports the persisted value), and YAML materialization routes it into the
-framework-specific Magpie env (`EXTRA_VLLM_ARGS`, `EXTRA_SGLANG_ARGS`, or
-`EXTRA_ATOM_ARGS`) for baseline, profile, explore, and sweep. Explicit
+re-exports the persisted value), and every round composes it into the launch
+above the base for baseline, profile, explore, and sweep. Explicit
 `--max-model-len` / `$MAX_MODEL_LEN` wins over the auto `ISL+OSL+headroom`
 calculation. A comma `$CONC` value such as `4,16,128` is accepted for
 compatibility; the single baseline CONC becomes the first value. Use

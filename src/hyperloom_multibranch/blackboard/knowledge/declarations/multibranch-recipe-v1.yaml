@@ -2,9 +2,9 @@
 # SPDX-License-Identifier: MIT
 #
 # The multi-branch blackboard's declaration for the measured attempts the shared inference-recipe-v1 cannot hold: a
-# change that ships a kernel artifact, and every change of an AgentX session, which is graded on interactivity. Every
-# field means what it means in inference-recipe-v1. An InferenceX change of a configuration or a source patch is
-# recorded there instead, where the single-lineage flow reads it too.
+# change that ships a kernel artifact, and every change of an AgentX session, which is graded on interactivity or on
+# total throughput. Every field means what it means in inference-recipe-v1. An InferenceX change of a configuration or
+# a source patch is recorded there instead, where the single-lineage flow reads it too.
 schema_version: 2
 
 objectives:
@@ -18,7 +18,14 @@ objectives:
   - id: e2e_interactivity@v1
     description: >-
       Maximize the median interactivity of the declared AgentX trace replay, each request's output tokens over its
-      end-to-end latency, keeping only changes whose slow tail, output throughput and failed requests hold.
+      end-to-end latency, keeping only changes whose slow tail, total throughput and failed requests hold.
+    unit: token/s
+    direction: higher_is_better
+    failure_value: 0
+  - id: e2e_total_throughput@v1
+    description: >-
+      Maximize the total token throughput of the declared AgentX trace replay, the input and output tokens the server
+      processes per second, keeping only changes whose median interactivity, slow tail and failed requests hold.
     unit: token/s
     direction: higher_is_better
     failure_value: 0

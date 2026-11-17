@@ -24,6 +24,7 @@ from hyperloom.inference_optimizer.roofline_ceiling import compute_roofline_brea
 from hyperloom.contracts.recipe import PATCH_ROOT, LaunchConfig, PatchRef, RecipeDelta
 from hyperloom.measure.compile import LocalBlobStore
 from hyperloom_multibranch.contracts.blackboard import INTEGRATION_BRANCH, Role, Writer
+from hyperloom_multibranch.contracts.blackboard.interfaces import NotRecorded
 from hyperloom_multibranch.contracts.blackboard.records import ToolResultPointer
 from hyperloom_multibranch.contracts.toolbox import RequestRejected
 from hyperloom_multibranch.blackboard import LocalBlackboard
@@ -45,6 +46,7 @@ from hyperloom_multibranch.scheduling.events import PROFILE_UNAVAILABLE, PROFILE
 from hyperloom_multibranch.scheduling.forks import ForkDesk
 from hyperloom_multibranch.scheduling.layout import SessionLayout, create_session
 from hyperloom_multibranch.rulegate.inferencex import BASELINE_TESTS, FLOOR_PCT
+from hyperloom_multibranch.rulegate.agentx import AgentXObjective
 from hyperloom_multibranch.rulegate.rules import AgentXRule, Rule
 from hyperloom_multibranch.rulegate.service import GateService
 from hyperloom_multibranch.scheduling import prelude as prelude_module
@@ -107,12 +109,14 @@ def framework(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
 
 class AnalysingToolbox(RecordingToolbox):
     """The recording toolbox with a TraceLens route whose job ends at once, leaving :data:`ROOT_SHARES` on the commit
-    the profile test measured, or refused with ``analysis_refusal``; ``analysed`` holds each profile test analysed. A
-    double for a backend that profiles, not a placeholder: the fake has no tool jobs of its own."""
+    the profile test measured, or refused with ``analysis_refusal``; ``analysed`` holds each profile test analysed, and
+    ``baseline_written`` whether the rule gate had written the baseline when its analysis was submitted. A double for a
+    backend that profiles, not a placeholder: the fake has no tool jobs of its own."""
 
     def __init__(self, *args: Any, **kwargs: Any) -> None:
         super().__init__(*args, **kwargs)
         self.analysed: list[str] = []
+        self.baseline_written: list[bool] = []
         self.analysis_refusal: RequestRejected | None = None
 
     async def submit_analysis(
@@ -121,6 +125,10 @@ class AnalysingToolbox(RecordingToolbox):
         if self.analysis_refusal is not None:
             raise self.analysis_refusal
         self.analysed.append(profile_request_id)
+        try:
+            self.baseline_written.append(bool(await self.blackboard.baseline()))
+        except NotRecorded:
+            self.baseline_written.append(False)
         job = f"tracelens-{len(self.analysed)}"
         commit = self.requests[profile_request_id].parent_commit
         pointer = ToolResultPointer(branch, job, "/analysis", "trace analysed", commit, profile_request_id, ROOT_SHARES)
@@ -265,6 +273,8 @@ async def test_prelude_starts_no_process_and_roots_on_the_checkout_with_root_tes
     request = peers.toolbox.requests[profile]
     assert (request.kind, request.branch_id, request.parent_commit) == (TestKind.PROFILE, INTEGRATION_BRANCH, root)
     assert peers.toolbox.analysed == [profile]
+    # The point names its prompt and output length: the analysis does not wait for the baseline.
+    assert peers.toolbox.baseline_written == [False]
     baseline = await _blackboard(layout).baseline()
     assert (baseline.root_commit, sorted(baseline.request_ids)) == (root, sorted(baseline_tests))
     assert result.longest_root_test == FakeToolboxConfig().attempt_seconds
@@ -289,11 +299,30 @@ async def test_prelude_starts_no_process_and_roots_on_the_checkout_with_root_tes
     )
 
 
+class _BaselineAfterProfile:
+    """The rule gate, anchoring the baseline only once the root's profile test ended, as on a toolbox that runs the
+    profile beside the baseline's test and finishes it first."""
+
+    def __init__(self, gate: GateService, toolbox: AnalysingToolbox) -> None:
+        self._gate, self._toolbox = gate, toolbox
+
+    def __getattr__(self, name: str) -> Any:
+        return getattr(self._gate, name)
+
+    async def establish_baseline(self, root_commit: str, request_ids: Sequence[str]) -> Any:
+        while not _by_purpose(self._toolbox, Purpose.PROFILE):
+            await asyncio.sleep(0)
+        [profile] = _by_purpose(self._toolbox, Purpose.PROFILE)
+        await self._toolbox.outcome(profile)
+        return await self._gate.establish_baseline(root_commit, request_ids)
+
+
 async def test_an_agentx_prelude_anchors_its_baseline_on_one_root_test_and_has_no_sequence_lengths(
     tmp_path: Path,
 ) -> None:
     layout = _layout(tmp_path)
-    peers = _peers(layout, rule=AgentXRule())
+    peers = _peers(layout, rule=AgentXRule(AgentXObjective.P50_INTERACTIVITY))
+    peers.gate = _BaselineAfterProfile(peers.gate, peers.toolbox)  # type: ignore[assignment]
 
     result = await _run(_prelude(layout, peers), AGENTX)
 
@@ -302,6 +331,10 @@ async def test_an_agentx_prelude_anchors_its_baseline_on_one_root_test_and_has_n
     assert (baseline.root_commit, baseline.request_ids, baseline.source) == (result.root_commit, (root_test,), "")
     assert result.longest_root_test == FakeToolboxConfig().attempt_seconds
     assert peers.toolbox.analysed == [profile]
+    # Its point names no prompt and output length, which the analysis takes from the baseline: it waited for it.
+    assert peers.toolbox.baseline_written == [True]
+    [profiled] = [entry["detail"] for entry in _logged(layout) if entry["kind"] == "profile"]
+    assert profiled["after_baseline"] is True
     [established] = [entry for entry in _logged(layout) if entry["reason"] == "baseline established"]
     assert established["detail"]["request_ids"] == [root_test]
     profile_record = await _blackboard(layout).session_profile()
@@ -339,14 +372,18 @@ async def test_the_session_profile_bounds_output_throughput_by_the_main_flows_de
     assert await _blackboard(layout).session_profile() == result.profile
 
 
-async def test_an_agentx_session_profile_has_no_roofline_ceiling(tmp_path: Path) -> None:
-    """The decode ceiling bounds output throughput; AgentX is graded on interactivity."""
+async def test_an_agentx_session_profile_names_its_objective_and_has_no_roofline_ceiling(tmp_path: Path) -> None:
+    """The decode ceiling bounds output throughput; AgentX is graded on its objective."""
 
     layout = _layout(tmp_path)
+    workload = replace(
+        AGENTX, model=str(model_checkout(tmp_path)), agentx_objective=AgentXObjective.TOTAL_TOKEN_THROUGHPUT
+    )
 
-    result = await _run(_prelude(layout, _peers(layout)), replace(AGENTX, model=str(model_checkout(tmp_path))))
+    result = await _run(_prelude(layout, _peers(layout)), workload)
 
     assert dict(result.profile.roofline_ceiling) == {}
+    assert result.profile.agentx_objective is AgentXObjective.TOTAL_TOKEN_THROUGHPUT
 
 
 async def test_a_prelude_whose_backend_cannot_analyse_the_root_profile_records_it_and_goes_on(tmp_path: Path) -> None:
@@ -714,7 +751,7 @@ async def test_the_champion_is_replayed_beside_the_root_tests_on_the_profile_and
 async def test_an_agentx_champion_measured_before_its_root_test_ended_is_judged_once_that_test_anchored_the_baseline(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    layout, peers, events, prelude = _replaying(tmp_path, AgentXRule())
+    layout, peers, events, prelude = _replaying(tmp_path, AgentXRule(AgentXObjective.P50_INTERACTIVITY))
     _root_tests_held_until(monkeypatch, peers, lambda: bool(events))
 
     await _run(prelude, AGENTX)
@@ -728,7 +765,7 @@ async def test_a_failing_agentx_replay_takes_back_the_root_test_running_beside_i
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     failure = RuntimeError("the integration branch cannot be written")
-    layout, peers, events, prelude = _replaying(tmp_path, AgentXRule(), failure)
+    layout, peers, events, prelude = _replaying(tmp_path, AgentXRule(AgentXObjective.P50_INTERACTIVITY), failure)
     _root_tests_held_until(monkeypatch, peers, lambda: False)
 
     with pytest.raises(RuntimeError, match="cannot be written"):
@@ -740,7 +777,7 @@ async def test_a_failing_agentx_replay_takes_back_the_root_test_running_beside_i
 
 
 async def test_a_failing_agentx_root_test_ends_the_replay_running_beside_it(tmp_path: Path) -> None:
-    layout, peers, events, prelude = _replaying(tmp_path, AgentXRule())
+    layout, peers, events, prelude = _replaying(tmp_path, AgentXRule(AgentXObjective.P50_INTERACTIVITY))
     peers.toolbox.script(lambda request: request.purpose is Purpose.BASELINE, [Fate.MEASUREMENT])
 
     with pytest.raises(PreludeFailed, match="the baseline anchors nothing"):

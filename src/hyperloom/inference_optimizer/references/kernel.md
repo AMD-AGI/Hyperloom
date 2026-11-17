@@ -18,7 +18,7 @@ apply/rebuild and ask. Dry-run and analysis are safe.
 ## Kernel E2E Retry Discipline
 
 Microbench speedups are not enough. After `run_optimization` returns a candidate
-kernel patch, `integrate` must validate the patch with E2E Magpie throughput and
+kernel patch, `integrate` must validate the patch with E2E throughput and
 record every attempt in `state.json`.
 
 For the same `kernel_id + patch_path + EXTRA_SGLANG_ARGS`:

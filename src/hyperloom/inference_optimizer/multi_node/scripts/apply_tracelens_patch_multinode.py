@@ -29,7 +29,7 @@ import traceback
 from pathlib import Path
 from typing import Any
 
-from sglang_shape_gate import SGLANG_SITECUSTOMIZE_MIN_VERSION
+from sglang_shape_gate import SGLANG_GC_PATCH_LAST_VERSION, SGLANG_SITECUSTOMIZE_MIN_VERSION
 
 # NOTE: ``ray`` is imported lazily inside ``_fanout_to_all_nodes`` only.
 
@@ -113,6 +113,12 @@ def _uses_gc_patch(version: str) -> bool:
     """Fallback when no ``--patch-set`` is given: mirror the SGLang shape gate from the pod's own version."""
     running = _numeric_version_prefix(version)
     return running is not None and running >= SGLANG_SITECUSTOMIZE_MIN_VERSION
+
+
+def _gc_patch_needed(version: str) -> bool:
+    """Whether SGLang ``version`` still needs ``sglang_gc_patch``: 0.5.18 through 0.5.21."""
+    running = _numeric_version_prefix(version)
+    return running is not None and SGLANG_SITECUSTOMIZE_MIN_VERSION <= running[:3] <= SGLANG_GC_PATCH_LAST_VERSION
 
 
 def _resolve_gc_patches_dir(patches_root: Path, version: str) -> Path | None:
@@ -362,6 +368,10 @@ def _apply_on_pod(
         apply_root, strip = layout
         graph_capture = (patch_set == _PATCH_SET_GRAPH_CAPTURE) if patch_set else _uses_gc_patch(version)
         result["patch_set"] = _PATCH_SET_GRAPH_CAPTURE if graph_capture else _PATCH_SET_ROOFLINE
+        if graph_capture and not _gc_patch_needed(version):
+            result["status"] = "skipped"
+            result["skip_reason"] = f"SGLang {version} carries the graph-capture tags upstream; no patch needed"
+            return result
         if _markers_already_applied(apply_root, strip, graph_capture=graph_capture):
             result["status"] = "skipped"
             result["patches_skipped_already_present"] = True

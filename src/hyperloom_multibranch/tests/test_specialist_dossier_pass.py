@@ -15,10 +15,10 @@ from hyperloom.sandbox import SandboxUnavailable
 from hyperloom_multibranch.contracts.blackboard.records import OpShares
 from hyperloom_multibranch.contracts.blackboard.vocab import LeaseKind
 from hyperloom_multibranch.contracts.toolbox import LeaseCharge
-from hyperloom_multibranch.specialist import arbor_adapter, dossier_pass, worktree as worktree_module
+from hyperloom_multibranch.specialist import dossier_pass, worktree as worktree_module
 from hyperloom_multibranch.specialist.agent_spec import AgentSpec
 from hyperloom_multibranch.specialist.agent_onboarding import PROFILE_FILE
-from hyperloom_multibranch.specialist.arbor_adapter import DOSSIER_PASS, MAPPED
+from hyperloom_multibranch.specialist.component_agent import DOSSIER_PASS, MAPPED
 from hyperloom_multibranch.specialist.dossier_pass import (
     DOSSIER_CHARGE,
     DOSSIER_HOLDER,
@@ -30,16 +30,21 @@ from hyperloom_multibranch.specialist.dossier_pass import (
 from hyperloom_multibranch.tests.branch_rig import branch_rig
 from hyperloom_multibranch.tests.agent_rig import (
     CHECKOUT_FILES,
+    DOSSIER_DIR,
+    ENTRY_POINT,
     ROOT,
+    SHIPPED,
     LocalProcess,
     LocalSandbox,
     Toolbox,
     _committed,
     _spec,
     _write,
+    install_stand_in,
+    launch_of,
 )
 
-#: Arbor's entry point in a fake checkout, run as a dossier pass: what it does is fake-dossier.json's ``do``. ``mapped``
+#: The stand-in agent's entry point, run as a dossier pass: what it does is fake-dossier.json's ``do``. ``mapped``
 #: writes a dossier, the map and exits 0 with ``mapped``; ``nomap`` writes the dossier and ends with ``deadline``;
 #: ``hang`` writes the dossier and waits to be stopped; ``crash`` dies with exit 1; ``refuse`` refuses its config
 #: (exit 2). Every run keeps the config it was given in seen-config.json.
@@ -82,7 +87,7 @@ DOSSIER = Path("docs/dossier/qwen3-8b-1k1k-c64/README.md")
 
 
 class _Clock:
-    """The pass's clock, which moves only once the fake Arbor wrote its dossier in ``checkout``: its deadline then
+    """The pass's clock, which moves only once the fake agent wrote its dossier in ``checkout``: its deadline then
     passes on the pass's polls, never while a slow host is still starting the fake."""
 
     def __init__(self, checkout: Path) -> None:
@@ -105,23 +110,23 @@ async def _pass(
     cards: int = 1,
     seconds: float = 30.0,
     start_seconds: float = 0.2,
-    arbor: bool = True,
+    adapted: bool = True,
     in_session: bool = False,
     held_by: tuple[str, LeaseCharge] = (DOSSIER_HOLDER, DOSSIER_CHARGE),
     root: Recipe = ROOT,
 ) -> tuple[DossierOutcome, Toolbox, Path, DossierSetup]:
-    """The dossier pass of a fake Arbor doing ``do``, on a rig whose toolbox has ``cards`` free, given ``seconds`` and
+    """The dossier pass of the stand-in agent doing ``do``, on a rig whose toolbox has ``cards`` free, given ``seconds`` and
     ``start_seconds`` of wall time to start in, writing its dossier in its session (``in_session``) or, by default, in
     its checkout, its lease held as ``held_by`` says."""
 
     rig = await branch_rig(tmp_path, root, "a1")
     files = {
         **CHECKOUT_FILES,
-        "arbor/__main__.py": FAKE_DOSSIER,
+        ENTRY_POINT: FAKE_DOSSIER,
         "fake-dossier.json": json.dumps({"do": do, "in_session": in_session}),
-        "docs/dossier/shipped/README.md": "# one of Arbor's own\n",
+        f"{DOSSIER_DIR}/{SHIPPED}/README.md": "# one the agent ships\n",
     }
-    source = _committed(_write(tmp_path / "arbor-repo", files if arbor else {"README.md": "not Arbor\n"}))
+    source = _committed(_write(tmp_path / "agent-repo", files if adapted else {"README.md": "another agent\n"}))
     toolbox = Toolbox(rig.blackboard)
     toolbox.cards_left = cards
     sandbox = LocalSandbox(tmp_path / "logs")
@@ -150,8 +155,8 @@ async def _pass(
 
 
 @pytest.fixture(autouse=True)
-def _no_install(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setattr(arbor_adapter, "INSTALL", ())
+def _stand_in(monkeypatch: pytest.MonkeyPatch) -> None:
+    install_stand_in(monkeypatch)
 
 
 async def test_the_pass_maps_on_its_own_lease_from_the_start_commit_and_gives_the_cards_back(tmp_path: Path) -> None:
@@ -159,15 +164,16 @@ async def test_the_pass_maps_on_its_own_lease_from_the_start_commit_and_gives_th
 
     session = checkout / DOSSIER_PASS.session_dir
     assert (outcome.reason, outcome.map) == (MAPPED, session / "directions.json")
-    assert outcome.dossier == checkout / "docs" / "dossier" / "qwen3-8b-1k1k-c64"  # not the one Arbor ships
+    assert outcome.dossier == checkout / "docs" / "dossier" / "qwen3-8b-1k1k-c64"  # not the one the agent ships
     assert (toolbox.leases, toolbox.charges, toolbox.released) == ([(DOSSIER_HOLDER, 1)], [DOSSIER_CHARGE], ["L1"])
+    assert setup.sandbox(toolbox.leases).stops == 1, "the pass's end stops its sandbox"
     config = json.loads((checkout / "seen-config.json").read_text())
     assert config["component"]["stop_at"] == "map" and "plan" not in config["component"]
     assert (config["workspace_root"], config["component"]["root"]) == (
         str(setup.worktree.path),
         setup.worktree.commit(),
     )
-    assert config["server_flags"] == "--max-num-seqs 128 --tensor-parallel-size 1"  # the start commit's launch, its TP
+    assert config["server_flags"] == "--max-num-seqs 128"  # the start commit's launch
     profile = json.loads((session / PROFILE_FILE).read_text())
     assert (profile["source"], profile["shares"]) == ("kernel shares", dict(SHARES.shares))
 
@@ -191,7 +197,7 @@ async def test_the_pass_is_asked_for_the_start_s_launch_with_the_resolved_flags_
     assert (specs[0].server_args, specs[0].remove_args) == ("--max-num-seqs 128", ("--enforce-eager",))
 
 
-async def test_a_pass_on_a_framework_whose_source_changes_cannot_land_is_told_to_map_launch_and_env_work(
+async def test_a_pass_on_a_framework_whose_source_changes_cannot_land_has_its_adapter_given_why(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     wheel = PackageBase("vllm", tmp_path / "site-packages" / "vllm", "vllm", "0.33.0rc1.dev711+gdd4e40142.rocm100")
@@ -203,8 +209,8 @@ async def test_a_pass_on_a_framework_whose_source_changes_cannot_land_is_told_to
     )
 
     assert outcome.reason == MAPPED
-    [told] = [rule for rule in json.loads((checkout / "seen-config.json").read_text())["directives"] if "wheel" in rule]
-    assert told.startswith(arbor_adapter.HOST_RULE) and "launch flags" in told
+    told = json.loads((checkout / "seen-config.json").read_text())["source_unkept"]
+    assert told.startswith("the recipe does not carry vllm") and "a wheel's version" in told
 
 
 async def test_a_mapping_branch_s_pass_leases_its_cards_as_the_branch_and_charges_them_to_it(tmp_path: Path) -> None:
@@ -223,7 +229,7 @@ async def test_a_pass_whose_agent_writes_the_dossier_in_its_session_is_found_the
     assert (outcome.reason, outcome.dossier) == (MAPPED, session / "docs" / "dossier" / "qwen3-8b-1k1k-c64")
 
 
-#: Arbor run as a component has no keep file, so it counts as started only after ``start_seconds`` of wall time: a
+#: An agent run as a component has no keep file, so it counts as started only after ``start_seconds`` of wall time: a
 #: start window of 0 has a crash land after it, and one far longer than the fake's run has a refusal land inside it.
 @pytest.mark.parametrize(
     ("do", "start_seconds", "said", "wrote"),
@@ -234,7 +240,7 @@ async def test_a_pass_whose_agent_writes_the_dossier_in_its_session_is_found_the
         (
             "refuse",
             60.0,
-            "it did not start: attempt 1: `python3 -m arbor run --config hyperloom-mb/dossier.json` refused",
+            f"it did not start: attempt 1: `{launch_of(DOSSIER_PASS)}` refused",
             False,
         ),
     ],
@@ -249,9 +255,9 @@ async def test_a_pass_that_sets_no_map_says_why_keeps_its_dossier_and_gives_the_
     assert toolbox.released == ["L1"]
 
 
-async def test_a_source_that_is_not_arbor_or_no_cards_to_lease_runs_no_pass(tmp_path: Path) -> None:
-    other, toolbox, _, _ = await _pass(tmp_path / "other", "mapped", arbor=False)
-    assert other.map is None and "this source is not Arbor" in other.reason
+async def test_a_source_no_adapter_recognises_or_no_cards_to_lease_runs_no_pass(tmp_path: Path) -> None:
+    other, toolbox, _, _ = await _pass(tmp_path / "other", "mapped", adapted=False)
+    assert other.map is None and "none recognises this one" in other.reason
     assert toolbox.released == ["L1"]
 
     busy, toolbox, _, _ = await _pass(tmp_path / "busy", "mapped", cards=0)
@@ -259,10 +265,10 @@ async def test_a_source_that_is_not_arbor_or_no_cards_to_lease_runs_no_pass(tmp_
     assert toolbox.released == []
 
 
-async def test_a_pass_whose_arbor_exited_is_still_killed_before_its_cards_go_back(
+async def test_a_pass_whose_agent_exited_is_still_killed_before_its_cards_go_back(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """Arbor's top process exiting says nothing of a server it started, which would hold VRAM on cards back in the
+    """The agent's top process exiting says nothing of a server it started, which would hold VRAM on cards back in the
     pool."""
     killed: list[int | None] = []
     kill = LocalProcess.kill
@@ -285,7 +291,7 @@ async def test_a_pass_whose_sandbox_times_out_while_it_installs_says_it_did_not_
         raise SandboxUnavailable("the sandbox service timed out")
 
     monkeypatch.setattr(LocalSandbox, "run", unavailable)
-    monkeypatch.setattr(arbor_adapter, "INSTALL", ("pip install -e .",))
+    install_stand_in(monkeypatch, ("pip install -e .",))
     outcome, toolbox, _, _ = await _pass(tmp_path, "mapped")
 
     assert outcome.map is None and outcome.reason.startswith("it did not start: ")

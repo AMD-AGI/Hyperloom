@@ -172,8 +172,8 @@ def carry(onto: str, base: Recipe, candidate: Recipe, ours: Recipe, stored: Stor
     """``candidate``'s change from ``base``, the recipe of its merge base with ``onto``, carried onto ``ours``, the
     recipe of ``onto``."""
     change = diff(base, candidate)
-    if change.base_image_changed:
-        raise RecipeError("the candidate changes the base image, which a session keeps")
+    if change.base_image_changed or change.base_launch_changed:
+        raise RecipeError("the candidate changes the base image or the base launch, which a session keeps")
     kernels = _added_kernels(base, candidate, ours, stored)
     delta = RecipeDelta(
         config=_config(change, ours.launch),

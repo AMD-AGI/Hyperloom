@@ -22,11 +22,16 @@ from ._kernel_agent_tool import (
     _shape_tool_result,
 )
 from hyperloom_common.coerce import first_text
+from hyperloom.common.benchmark_config import read_benchmark_point
 from hyperloom.inference_optimizer.session import paths
 from hyperloom.inference_optimizer.trace.trajectory_trace import inherited_scope_fields
 from hyperloom.orchestrator.trace_analysis.analysis_route import AnalysisRoute
 
 log = logging.getLogger(__name__)
+
+#: Payload key: the physical cards the caller holds for the arch microbenchmark (``--arch-gpus``); an empty list lets it
+#: run on none. Absent, the analysis picks among the visible GPUs.
+ARCH_GPUS_PARAM = "arch_gpus"
 
 _CANDIDATE_ENV_KEYS = {
     "CONC",
@@ -176,7 +181,7 @@ def _split_server_args(raw: str) -> list[str]:
 
 
 def _load_materialized_workload_metadata(config_path: str) -> dict[str, Any]:
-    """Extract runtime workload context from a materialized Magpie YAML config.
+    """Extract runtime workload context from a materialized point YAML.
 
     Reads the config's ``benchmark`` block and derives the per-framework
     server-args env name, the allowed candidate env vars, and a normalized
@@ -199,13 +204,12 @@ def _load_materialized_workload_metadata(config_path: str) -> dict[str, Any]:
     import yaml  # type: ignore[import-untyped]
 
     try:
-        cfg = yaml.safe_load(path.read_text(encoding="utf-8")) or {}
+        point = read_benchmark_point(path)
     except (OSError, ValueError, yaml.YAMLError) as exc:
         log.warning("failed to read materialized workload config %s: %s", path, exc)
         return {}
-    bench = cfg.get("benchmark") if isinstance(cfg.get("benchmark"), dict) else {}
-    envs = bench.get("envs") if isinstance(bench.get("envs"), dict) else {}
-    framework = str(bench.get("framework") or "").strip().lower()
+    envs = point.envs
+    framework = point.framework.strip().lower()
     # Per-framework env-name source of truth (e.g. atom reads ``EXTRA_ATOM_ARGS``).
     from hyperloom.inference_optimizer.framework_registry import server_args_env_name
 
@@ -228,8 +232,8 @@ def _load_materialized_workload_metadata(config_path: str) -> dict[str, Any]:
     runtime_args = {
         "materialized_config": str(path),
         "framework": framework or None,
-        "model": bench.get("model"),
-        "precision": bench.get("precision"),
+        "model": point.model,
+        "precision": point.precision,
         "server_args": server_args,
         "server_args_argv": _split_server_args(server_args),
         "workload": workload,
@@ -421,6 +425,9 @@ def _build_trace_analyze_cmd(
         ("--framework", run.framework),
         ("--target-platform", run.target_platform),
     )
+    arch_gpus = payload.get(ARCH_GPUS_PARAM)
+    if arch_gpus is not None:
+        cmd += ["--arch-gpus", ",".join(str(int(gpu)) for gpu in arch_gpus)]
 
     capture_folder = (
         payload.get("capture_folder") or payload.get("graph_capture_path") or payload.get("capture_folder_path")

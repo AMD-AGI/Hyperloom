@@ -28,10 +28,11 @@ class DecodeSampling:
 
 @dataclass(frozen=True)
 class DiscoveryChoice:
-    """How recipes are discovered, and the kernel an anchored discovery fuses around."""
+    """How recipes are discovered, the kernel an anchored discovery fuses around, and advisory profiler hints."""
 
     discover_mode: str
     fuse_kernel: str
+    fusion_hints: str = ""
 
 
 @dataclass(frozen=True)

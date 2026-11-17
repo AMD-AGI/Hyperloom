@@ -161,15 +161,17 @@ def _resolve_forge_precision_and_quant(state) -> tuple[str, str]:
     from hyperloom.inference_optimizer.grid_server_args import server_arg_value
     from hyperloom.inference_optimizer.roofline_ceiling import resolve_runtime_workload
 
+    from ..state.base_launch import session_server_base
+
     quant_type = "auto"
 
     # Resolve from actual server args (baseline yaml + current_best overlay).
     current_best = getattr(state, "current_best", None) or {}
     server_args = resolve_runtime_workload(state, arm="current_best").server_args
     extra_envs = dict(current_best.get("extra_envs") or {})
-    ref_envs = dict(getattr(state, "reference_envs", None) or {})
+    base_env = session_server_base().env
     per_token_signal = is_truthy(extra_envs.get("SGLANG_USE_AITER_FP8_PER_TOKEN")) or is_truthy(
-        ref_envs.get("SGLANG_USE_AITER_FP8_PER_TOKEN")
+        base_env.get("SGLANG_USE_AITER_FP8_PER_TOKEN")
     )
 
     quantization_arg = server_arg_value(server_args, "--quantization").lower()

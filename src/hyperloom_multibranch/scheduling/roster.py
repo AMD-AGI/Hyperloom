@@ -6,7 +6,8 @@
 The roster says what is running now; the history of the branch tree is the blackboard's lineage, which the roster does
 not copy. The branch cap counts specialist branches that are admitted or running, never the integration branch.
 ``MB-roster.json`` is written after every change and read back when a roster is built over a session directory that
-already has one, so the emergency ``final-only`` run carries the dead session's branches instead of writing them away.
+already has one, so the emergency ``final-only`` run and a resumed session carry the earlier run's branches instead of
+writing them away.
 """
 
 from __future__ import annotations
@@ -17,7 +18,7 @@ from enum import Enum
 from pathlib import Path
 from typing import Any
 
-from hyperloom_common.io import atomic_write_json
+from hyperloom_common.io import SHARED, atomic_write_json
 from hyperloom_common.jsonio import read_json_strict
 from hyperloom_multibranch.contracts.blackboard import INTEGRATION_BRANCH
 from hyperloom_multibranch.contracts.blackboard.vocab import BranchDriver
@@ -36,8 +37,8 @@ class BranchKind(str, Enum):
 class BranchOrigin(str, Enum):
     """Where a branch's start comes from: the root commit (integration), a direction the user wrote or a third-party
     agent the user named, both opening ahead of the opening batch, the opening batch, a later batch that refills freed
-    slots, a rule-gate request: a fork for a correctness fix or a repair of a blocked gain, or an Arbor agent's share of
-    the map a mapping branch made."""
+    slots, a rule-gate request: a fork for a correctness fix or a repair of a blocked gain, or a component agent's share
+    of the map a mapping branch made."""
 
     ROOT = "root"
     USER = "user"
@@ -154,7 +155,9 @@ def specialist_open(entries: Iterable[BranchEntry]) -> bool:
 
 @dataclass(frozen=True)
 class RosterCaps:
-    """The hard limits the judge's decisions are cut to."""
+    """The hard limits the judge's decisions are cut to. ``max_k_per_branch`` bounds the K of a specialist's branch;
+    the integration branch is the scheduler's own lane for merge tests and the head's profiles, which only
+    ``max_parallel_tests`` bounds."""
 
     max_branches: int
     max_k_per_branch: int
@@ -165,10 +168,11 @@ class RosterCaps:
             if getattr(self, name) < 1:
                 raise ValueError(f"{name} must be at least 1, got {getattr(self, name)}")
 
-    def clamp_k(self, k: int) -> int:
-        """``k`` cut to ``[1, max_k_per_branch]``; a branch is brought to no tests by stopping it."""
+    def clamp_k(self, k: int, kind: BranchKind) -> int:
+        """``k`` cut to ``[1, ceiling]`` for a branch of ``kind``; a branch is brought to no tests by stopping it."""
 
-        return min(max(k, 1), self.max_k_per_branch)
+        ceiling = self.max_parallel_tests if kind is BranchKind.INTEGRATION else self.max_k_per_branch
+        return min(max(k, 1), ceiling)
 
 
 class RosterFull(RuntimeError):
@@ -254,13 +258,25 @@ class Roster:
         self._closed = True
         self._persist()
 
+    def reopen(self) -> bool:
+        """Open again what :meth:`close` and the stop of the integration branch closed, for a resumed session: branches
+        may be opened and admitted, and the integration branch runs. Every specialist branch stays stopped. Whether the
+        integration branch was stopped."""
+
+        self._closed = False
+        integration = self._entries[INTEGRATION_BRANCH]
+        if integration.stop is not None:
+            self._update(integration, stop=None)
+        self._persist()
+        return integration.stop is not None
+
     def add_integration(self, root_commit: str, k: int) -> BranchEntry:
         entry = BranchEntry(
             INTEGRATION_BRANCH,
             BranchKind.INTEGRATION,
             BranchOrigin.ROOT,
             root_commit,
-            self.caps.clamp_k(k),
+            self.caps.clamp_k(k, BranchKind.INTEGRATION),
             self._clock.now(),
         )
         return self._add(entry)
@@ -278,7 +294,7 @@ class Roster:
             BranchKind.SPECIALIST,
             origin,
             start_commit,
-            self.caps.clamp_k(k),
+            self.caps.clamp_k(k, BranchKind.SPECIALIST),
             self._clock.now(),
             from_branch=from_branch,
         )
@@ -290,7 +306,8 @@ class Roster:
         return self._update(self._live(branch), start_commit=start_commit)
 
     def set_k(self, branch: str, k: int) -> BranchEntry:
-        return self._update(self._live(branch), k=self.caps.clamp_k(k))
+        entry = self._live(branch)
+        return self._update(entry, k=self.caps.clamp_k(k, entry.kind))
 
     def stop(self, branch: str, stop: BranchStop) -> BranchEntry:
         """Stops ``branch``; stopping it again keeps the first stop."""
@@ -352,6 +369,7 @@ class Roster:
                 "held_slots": self._held,
                 "entries": [_entry_record(entry) for entry in self._entries.values()],
             },
+            options=SHARED,
         )
 
 

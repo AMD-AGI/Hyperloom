@@ -30,6 +30,7 @@ from hyperloom.measure.short_prompts.tests.support import (
     staged_plan,
 )
 from hyperloom.measure.tests.test_local_backend import _agentx_point, _call, _Grid, _point
+from hyperloom.measure.tests.run_dirs import write_run_dir
 
 
 SKIPPED = "short_prompt_check skipped: test failed"
@@ -53,7 +54,7 @@ class _Servers:
             "resolve_lifecycle_params",
             lambda path: {"eligible": eligible, "port": self.port, "framework": framework, "reason": "not eligible"},
         )
-        monkeypatch.setattr(local, "teardown_lifecycle_server", lambda **kw: self.stop())
+        monkeypatch.setattr(local, "teardown_variant_server", lambda slot: self.stop() or [])
 
         self.flushes = 0
 
@@ -86,11 +87,6 @@ class _CheckGrid(_Grid):
         return await super().__call__(**kwargs)
 
 
-@pytest.fixture(autouse=True)
-def magpie_backend(monkeypatch) -> None:
-    monkeypatch.setenv("HYPERLOOM_BENCHMARK_BACKEND", "magpie")
-
-
 @pytest.fixture
 def cache(monkeypatch, tmp_path: Path) -> Path:
     root = tmp_path / "runner-cache"
@@ -121,7 +117,7 @@ def test_a_planned_test_answers_on_its_own_server_after_its_measured_round_and_b
     outcome = _run(tmp_path, cache)
 
     assert _names(grid) == ["test"], "no second boot"
-    assert grid.calls[0]["launch"].server_lifecycle["cleanup"] is False, "Magpie leaves the server up for the check"
+    assert grid.calls[0]["launch"].server_lifecycle["cleanup"] is False, "the round leaves the server up for the check"
     assert (grid.servers.started, grid.servers.teardowns) == (["test"], 1), "one server, torn down after the answers"
     found = read_outputs(tmp_path / "out")
     assert [(e.index, e.status, e.boot_seconds) for e in found.processes] == [(0, OK, 0.0)]
@@ -196,7 +192,7 @@ def test_a_graded_test_answers_after_its_evaluation_on_the_server_its_warmup_boo
     assert [r.phase for r in outcome.rounds] == ["warmup", "measure", "accuracy"]
 
 
-def test_an_agentx_test_holds_its_server_for_the_check_and_reports_no_accuracy_round(monkeypatch, tmp_path, cache):
+def test_an_agentx_test_records_the_check_not_held_and_asks_its_server_nothing(monkeypatch, tmp_path, cache):
     grid = _grid(monkeypatch, tmp_path)
     point = _agentx_point(tmp_path, monkeypatch)
 
@@ -204,17 +200,20 @@ def test_an_agentx_test_holds_its_server_for_the_check_and_reports_no_accuracy_r
         _call(tmp_path, point, short_prompts=staged_plan(cache), rounds=RoundPlan(warmup_rounds=1))
     )
 
-    assert _names(grid) == ["warmup", "test"] and grid.calls[1]["launch"].server_already_ready is True
-    assert [c["recipe"].base.extra_envs for c in grid.calls] == [None, None], "an AgentX round carries no evaluation"
-    assert [r.phase for r in outcome.rounds] == ["warmup", "measure"]
-    assert [e.status for e in read_outputs(tmp_path / "out").processes] == [OK]
+    assert _names(grid) == ["test"] and grid.calls[0]["launch"].server_lifecycle["cleanup"] is True
+    assert grid.calls[0]["recipe"].base.extra_envs is None, "an AgentX round carries no evaluation"
+    assert [r.phase for r in outcome.rounds] == ["measure"]
+    found = read_outputs(tmp_path / "out")
+    assert [(e.index, e.status) for e in found.processes] == [(0, FAILED)] and NOT_HELD in found.processes[0].reason
+    assert grid.servers.flushes == 0 and SHORT_PROMPTS not in [p.name for p in outcome.phases]
+    assert outcome.returncode == 0
 
 
 def test_a_test_whose_evaluation_failed_runs_no_check(monkeypatch, tmp_path, cache):
     """The evaluation's return code is what says the test failed, and a test that failed spends no time on the check."""
     grid = _grid(monkeypatch, tmp_path)
     result = grid.result("eval", returncode=0)
-    (Path(result.workspace) / "eval_returncode").write_text("3\n", encoding="utf-8")
+    write_run_dir(Path(result.workspace), eval_code=3)
     grid.answers["eval"] = result
     call = _call(
         tmp_path,

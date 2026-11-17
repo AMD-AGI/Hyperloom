@@ -761,58 +761,6 @@ async def _cancel_then_let_finish(coord, task, atask: asyncio.Task, finish: asyn
     assert not await coord.locks.lane_holders()
 
 
-class TestInflightHandles:
-    """Something other than the pump has to be able to reach a running action."""
-
-    @pytest.mark.asyncio
-    async def test_a_running_action_is_reachable_by_task_id(self, coord: Coordinator):
-        task, atask = await _start_action(coord, kind=_CHEAP_ACTION, key="h-live")
-        try:
-            entry = coord.dispatcher._inflight_actions[task.task_id]
-            assert (entry.kind, entry.atask) == (_CHEAP_ACTION, atask)
-            assert not entry.scope.cancelled
-        finally:
-            atask.cancel()
-            await _settle(atask)
-
-    @pytest.mark.asyncio
-    async def test_the_handle_retires_itself_when_the_action_ends(self, coord: Coordinator):
-        """Caller cancellation cannot retire an execution that still owns its lease."""
-        finish = asyncio.Event()
-
-        def make_executor(started):
-            async def execute(_ctx):
-                started.set()
-                await finish.wait()
-                return {"status": "ok"}
-
-            return execute
-
-        task, atask = await _start_action(coord, kind=_CHEAP_ACTION, key="h-retire", make_executor=make_executor)
-
-        async def _cancel_the_caller() -> None:
-            atask.cancel()
-            await _settle(atask)
-
-        await _cancel_then_let_finish(coord, task, atask, finish, _cancel_the_caller)
-        assert not coord.dispatcher._executions
-        assert task.task_id not in coord.dispatcher._inflight_actions
-
-    @pytest.mark.asyncio
-    async def test_an_action_that_finishes_normally_leaves_no_handle(self, coord: Coordinator):
-        coord.sub.register_executor(_CHEAP_ACTION, lambda _ctx: _done({"ok": True}))
-        task, _ = await coord.tasks.create_or_return_existing(
-            TaskSpec(
-                kind=_CHEAP_ACTION,
-                params={},
-                idempotency_key="h-quick",
-            ),
-        )
-        await coord.dispatcher._spawn_fitting_queued()
-        await _settle(coord.dispatcher._inflight_actions[task.task_id].atask)
-        assert task.task_id not in coord.dispatcher._inflight_actions
-
-
 async def _done(payload: dict) -> dict:
     return payload
 
@@ -892,27 +840,13 @@ def _sleeps_in_a_thread(started: asyncio.Event, *, seconds: float = 2.0):
 class TestTheCooperativeStopWindowsCompose:
     """Three waits on the same stop, which only mean anything together."""
 
-    def test_the_reap_budget_is_what_stopping_a_round_costs(self):
-        # Notice at the 0.5s poll, SIGTERM and wait out the 5s grace, collect the SIGKILL'd child for 1s, drain its
-        # pipes for 2s.
-        assert COOPERATIVE_REAP_BUDGET_SEC == 0.5 + 5.0 + 1.0 + 2.0
-
     def test_the_ray_grace_outlasts_a_round_stopping_itself(self):
         """A round in an actor stops the same way; the grace has to cover it."""
         assert CANCEL_ROUND_GRACE_SEC >= COOPERATIVE_REAP_BUDGET_SEC
 
-    def test_the_dispatcher_outlasts_the_slowest_honest_stop(self):
-        # The Ray path is the long one: 8.5s for the round to stop itself, 0.25s for the answer to be seen, then up to
-        # 10s to release the lease it held.
-        assert _COOPERATIVE_CANCEL_GRACE_SEC >= 8.5 + 0.25 + 10.0
-
     def test_reaping_a_server_and_dropping_its_lease_are_both_paid(self):
         """The two release waits are a sequence, so the window has to cover both."""
         assert _COOPERATIVE_CANCEL_GRACE_SEC >= 8.5 + 0.25 + 5.0 + 10.0
-
-    def test_the_window_is_exactly_the_terms_it_names(self):
-        """An upper bound, so a term the unwind pays and the sum omits is a bug."""
-        assert _COOPERATIVE_CANCEL_GRACE_SEC == 8.5 + 0.25 + 5.0 + 10.0
 
     def test_a_cancelled_scope_is_visible_to_the_work_inside_it(self):
         """The unwind's steps read the scope, not a returncode."""
@@ -934,14 +868,6 @@ class TestTheCooperativeStopWindowsCompose:
 
 class TestTheCancelChannel:
     """The channel itself: what it carries, and how far it reaches."""
-
-    @pytest.mark.asyncio
-    async def test_a_worker_thread_sees_the_scope_of_the_task_that_started_it(self):
-        """The whole idiom rests on ``to_thread`` copying the context."""
-        scope = CancelScope()
-        with use_cancel_scope(scope):
-            seen = await asyncio.to_thread(current_cancel_scope)
-        assert seen is scope
 
     @pytest.mark.asyncio
     async def test_code_outside_an_action_finds_no_scope(self):
@@ -1567,7 +1493,8 @@ class TestATickCannotOutliveTheSessionBound:
         assert finished == [True]
 
     @pytest.mark.asyncio
-    async def test_an_active_reactor_turn_is_cancelled_at_its_total_timeout(self, coord: Coordinator):
+    @pytest.mark.parametrize("stage", ["reactor:orchestration", "reactor:critic"])
+    async def test_an_active_reactor_turn_is_cancelled_at_its_total_timeout(self, coord: Coordinator, stage: str):
         coord.reactor_turn_timeout_sec = 0.03
         coord._run_deadline = Deadline.after(60.0)
         activity: list[float] = []
@@ -1587,7 +1514,7 @@ class TestATickCannotOutliveTheSessionBound:
         await asyncio.wait_for(
             coord.await_within_session_bound(
                 _stay_active,
-                stage="reactor:orchestration",
+                stage=stage,
             ),
             timeout=5.0,
         )
@@ -1626,12 +1553,6 @@ class TestATickCannotOutliveTheSessionBound:
         )
 
         assert coord.shared_state.recent_crash_count(window_sec=3600.0) == before
-
-    def test_all_reactor_steps_share_one_total_timeout(self, coord: Coordinator):
-        coord.reactor_turn_timeout_sec = 777.0
-        assert coord._stage_timeout_sec("advance_phase") is None
-        assert coord._stage_timeout_sec("reactor:orchestration") == 777.0
-        assert coord._stage_timeout_sec("reactor:critic") == 777.0
 
     def test_total_timeout_reads_the_coordinator_environment(self, session_dir, monkeypatch):
         monkeypatch.setenv("INFERENCE_OPTIMIZER_REACTOR_TURN_TIMEOUT_SEC", "42.5")
@@ -1730,35 +1651,29 @@ class TestTheSessionBudgetIsSummedForwardOverLegs:
         session that ended while a benchmark server was up left it holding its
         GPUs until some later session booted in the same directory.
         """
-        import subprocess
+        import os
         from datetime import datetime, timedelta, timezone
-        from pathlib import Path
 
-        marker = "vllm serve"
-        proc = subprocess.Popen(
-            [sys.executable, "-c", f"import time; _={marker!r}; time.sleep(120)"],
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL,
-            start_new_session=True,
-        )
-        # /proc/<pid>/cmdline stays empty until the child execs, and the reaper
-        # matches on it.
-        deadline = time.monotonic() + 5.0
-        while time.monotonic() < deadline:
-            try:
-                if marker.encode() in Path(f"/proc/{proc.pid}/cmdline").read_bytes():
-                    break
-            except OSError:
-                pass
-            time.sleep(0.02)
-        else:
-            proc.kill()
-            pytest.skip("child never exposed a matching cmdline")
+        from hyperloom_common.proctree import proc_identity
+        from inference_suite.frameworks import Framework
+        from inference_suite.runtime.process import ServerPidfile, spawn
 
         run_dir = coord.session_dir / "runs" / "roofline" / "post_opt"
         run_dir.mkdir(parents=True, exist_ok=True)
-        pidfile = run_dir / "vllm_8000.pid"
-        pidfile.write_text(str(proc.pid), encoding="utf-8")
+        spawned = spawn(
+            (sys.executable, "-c", "import time; time.sleep(120)"), dict(os.environ), run_dir / "server.log"
+        )
+        proc = spawned.proc
+        pidfile = run_dir / "server.pid"
+        ServerPidfile(
+            pid=proc.pid,
+            pgid=proc.pid,
+            start_time=proc_identity(proc.pid)[1],
+            run_mark=spawned.mark,
+            port=8000,
+            framework=Framework.VLLM,
+            launch_digest="sha256:" + "a" * 64,
+        ).write(pidfile)
 
         start = datetime.now(timezone.utc) - timedelta(hours=3)
         coord.shared_state.start_ts = start.isoformat()

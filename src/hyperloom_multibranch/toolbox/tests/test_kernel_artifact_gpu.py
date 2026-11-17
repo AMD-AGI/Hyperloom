@@ -11,8 +11,8 @@ the same test without it. What must hold: the refusals of the tool (a second tar
 ``kernel_variable_taken``, an empty table, a target that leaves its directory, a variable and a kind the measurement
 cannot load); the table's bytes in the blob store; the artifact test's ``framework_base.json`` naming the table's hash
 as the table of the variable while the default test names none; the server's log naming the placed table in its
-tuned-config lookups; both tests' merge directories private; the shared tables and ``/tmp/aiter_configs`` as they were.
-What was measured is printed (``PROBE``).
+tuned-config lookups; the merged view the default test read in a directory of its own; the shared tables and
+``/tmp/aiter_configs`` as they were. What was measured is printed (``PROBE``).
 
 Needs what ``test_toolbox_kinds_gpu`` needs, with ``HL_GPU_CARDS`` naming two cards, and the image's aiter tables at
 ``/sgl-workspace``; anywhere else the module is skipped.
@@ -25,7 +25,6 @@ import csv
 import hashlib
 import json
 import re
-import subprocess
 from pathlib import Path
 from typing import Any
 
@@ -36,12 +35,16 @@ from hyperloom.contracts.recipe import ConfigDelta, KernelArtifact, RecipeDelta
 from hyperloom.measure.framework.base import DEFAULT_CONFIGS, FRAMEWORK_BASE_FILE, load_snapshot, tree_files
 from hyperloom.measure.framework.merge import PRIVATE
 from hyperloom.measure.points import default_canonical
+from hyperloom.measure.runner.own_tmp import OWN_TMP_PREFIX
 from hyperloom.measure.tests.hosted_fixtures import spec_context
 from hyperloom.orchestrator.actions.executors._workload_envs import default_baseline_config
+from hyperloom_multibranch.toolbox.table_hits import _copied, _logs
+from hyperloom_multibranch.toolbox.tests.gpu_session import freeze_gpu_session_base
 from hyperloom_multibranch.toolbox.tests.integration_inputs import IMAGE, baseline_recipe
 from hyperloom_multibranch.toolbox.tests.integration_rig import Specialist, Stack, Variant, build_stack
 from hyperloom_multibranch.toolbox.tests.test_framework_isolation_gpu import _landed
 from hyperloom_multibranch.toolbox.tests.test_framework_isolation_parallel_gpu import (
+    AITER_CORE,
     AITER_MERGE_DIR,
     SHARED,
     USE_AITER,
@@ -74,6 +77,8 @@ ENVS = {USE_AITER: "1", LOG_LOOKUPS: "1"}
 #: The decode batch sizes of a small test: the rows put are for these.
 DECODE_BATCHES = (1, 2, 4, 8, 12, 16, 24, 32)
 TEST_WAIT_SEC = 3300
+PRIMARY = 4
+USES_REAL_GPUS = True  # keep the host's amd-smi and rocm-smi: see hyperloom.measure.tests.gpu_free_host
 LOOKUP = re.compile(r"(?:tuned config|tuned on cu_num = \d+) in (\S+?)[, ]")
 TORCH_ROW = {"libtype": "torch", "solidx": "0", "splitK": "0", "us": "0.0", "kernelName": "torch", "err_ratio": "0.0"}
 SHAPE_ROW = {"bias": "False", "dtype": "torch.bfloat16", "outdtype": "torch.bfloat16", "scaleAB": "False"}
@@ -109,8 +114,9 @@ def tuned_table() -> str:
 
 
 def _lookups(landed: Path) -> list[str]:
-    """The tuned-config lookups the test's server logged, one line each."""
-    logs = "\n".join(p.read_text(errors="replace") for p in sorted(landed.rglob("server*.log")))
+    """The tuned-config lookups the test's servers logged, one line each, from the logs the result's table hits are
+    counted in: each server's own log once, not a round's copy of a stretch of it."""
+    logs = "\n".join(p.read_text(errors="replace") for p in _logs(landed) if not _copied(p))
     return [line.strip() for line in logs.splitlines() if LOOKUP.search(line)]
 
 
@@ -121,6 +127,26 @@ def _put_rows_hit(lookups: list[str]) -> list[str]:
 
 def _named_tables(lookups: list[str]) -> set[str]:
     return {match.group(1) for line in lookups if (match := LOOKUP.search(line))}
+
+
+def _aiter_merges_into_the_literal_dir() -> bool:
+    """Whether the installed aiter writes its merged view to the literal ``/tmp/aiter_configs``, the one path the
+    start-up hook (``hyperloom.measure.aiter_merge_hook``) redirects to the test's merge directory."""
+    return str(AITER_MERGE_DIR) in AITER_CORE.read_text(encoding="utf-8")
+
+
+def _assert_merged_view_is_the_tests_own(base: dict[str, Any], lookups: list[str]) -> None:
+    """The merged table the server read is in a directory of the test's own. An aiter that writes it to the literal
+    ``/tmp/aiter_configs`` has it redirected by the start-up hook to the test's merge directory; a newer one writes it to
+    ``tempfile.gettempdir()/aiter_configs``, leaves the hook nothing to redirect, and the runner points that at the
+    test's own temporary directory (``hyperloom.measure.runner.own_tmp``)."""
+    parents = {Path(name).parent for name in _named_tables(lookups)}
+    if _aiter_merges_into_the_literal_dir():
+        assert Path(base["merge_dir"]) in parents, parents
+        assert base["merge_isolation"] == PRIVATE, base["merge_reason"]
+    else:
+        own = {p for p in parents if p.name == AITER_MERGE_DIR.name and p.parent.name.startswith(OWN_TMP_PREFIX)}
+        assert own, parents
 
 
 async def _refusals(stack: Stack, table: str) -> dict[str, str]:
@@ -151,19 +177,15 @@ def _assert_refused(replies: dict[str, str]) -> None:
 
 
 def _variant(root: Path) -> Variant:
-    commit = subprocess.run(
-        ["git", "rev-parse", "HEAD"], cwd=INFERENCEX, capture_output=True, text=True, check=True
-    ).stdout.strip()
     spec = spec_context(
         root,
         image_ref="local",
         image_digest=IMAGE,
         gpu_type="MI355X",
-        inferencex_commit=commit,
-        benchmark_backend="bypass",
     )
+    freeze_gpu_session_base(root / "session", MODEL, spec.gpu_type, tp=1, conc=PRIMARY)
     canonical = default_canonical(
-        root / "canonical", primary_concurrency=4, config_path=default_baseline_config(), model_path=MODEL
+        root / "canonical", primary_concurrency=PRIMARY, config_path=default_baseline_config(), model_path=MODEL
     )
     return Variant(
         tuple(CARDS),
@@ -257,7 +279,9 @@ def _assert_server_reads_the_table(facts: dict[str, Any], result: TestResult, sh
     assert Path(tables[VARIABLE][0]["source"]).name == placed
     assert f"/sandboxes/{result.sandbox.sandbox_id}/" in tables[VARIABLE][0]["source"], "placed in its own sandbox"
     assert default["base"]["point_tables"] == {}, "the default test names no table of its own"
-    assert merged_name in default["base"]["merge_files"], "the default test reads aiter's merged view"
+    read = {Path(name).name for name in _named_tables(default["lookups"])}
+    assert merged_name in read, ("the default test reads aiter's merged view", read)
+    _assert_merged_view_is_the_tests_own(default["base"], default["lookups"])
     assert merged_name not in table["base"]["merge_files"], "a variable that lists one table is not merged"
     assert table["lookups"], "the server logged no tuned-config lookups"
     assert _put_rows_hit(table["lookups"]), "no shape of the model hit one of the torch rows that were put"
@@ -282,7 +306,9 @@ def _assert_isolated(facts: dict[str, Any], results: dict[str, TestResult]) -> N
         assert base["isolation"] == "private_copies" and base["matches_session"] is True
         assert base["framework_base_changed"] is False and base["restored"] == {"start": [], "end": []}
         assert base["shared_sha256_start"] == base["shared_sha256_end"] == base["session_sha256"]
-        assert base["merge_isolation"] == PRIVATE and base["merge_chain_failure"] is None, base["merge_reason"]
+        assert base["merge_chain_failure"] is None, base["merge_chain_failure"]
+        if _aiter_merges_into_the_literal_dir():
+            assert base["merge_isolation"] == PRIVATE, base["merge_reason"]
         assert f"/sandboxes/{results[name].sandbox.sandbox_id}/" in base["merge_dir"], "below its own sandbox"
     assert facts["table"]["base"]["merge_dir"] != facts["default"]["base"]["merge_dir"]
 

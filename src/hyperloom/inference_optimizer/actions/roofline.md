@@ -5,9 +5,9 @@
 `roofline` is a **Coordinator-internal composite action**. Its executor
 internally invokes two atomic sub-steps in order:
 
-1. **`profile`** — reuses `ProfileExecutor` to run Magpie + torch
-   profiler against the running server and produce a `trace_dir`
-   (and downstream `last_profile_trace`).
+1. **`profile`** — reuses `ProfileExecutor` to run an inference_suite
+   profile round (its own server under the torch profiler) and produce a
+   `trace_dir` (and downstream `last_profile_trace`).
 2. **`trace_analyze`** — invokes the kernel-agent `tracelens_analysis.py`
    tool which runs TraceLens internally (`trace_split` →
    `kernel_candidates` → write `analysis.md` + `summary.json`).
@@ -91,8 +91,8 @@ analysis task.
 
 ## Cost / runtime
 
-* `typical_runtime_min=10` — dominated by profile (Magpie + torch profiler
-  overhead) + trace_analyze (TraceLens subprocess); `trace_split` inside
+* `typical_runtime_min=10` — dominated by profile (server boot + torch
+  profiler overhead) + trace_analyze (TraceLens subprocess); `trace_split` inside
   TraceLens adds < 30s. The estimate is calibrated on small models: a field
   session measured an 81-minute roofline, so the budget guards prefer this
   session's own measured baseline round once one exists and fall back to this

@@ -9,8 +9,8 @@ An inherited ``GIT_*`` (``GIT_DIR`` inside a hook or ``git rebase --exec``) woul
 the system and global config could change the object format, hooks could veto a ref move, and ignore or attributes
 files could drop or hide a file's change.
 
-The session's source base, its worktrees and an agent's checkout lie where the run's sandboxes write, so their
-``.git/config``, their hooks and their ``.gitattributes`` are not the app's. Every git command of the
+The session's source base, its worktrees and an agent's checkout lie on storage that the sandboxes of the run's group
+write, so their ``.git/config``, their hooks and their ``.gitattributes`` are not the app's. Every git command of the
 app pins what :data:`~hyperloom_common.git_safety.NO_PROGRAMS` pins for the single-lineage app's git, derived from every
 config key git starts a program from, and one that reads or writes a work tree also blanks every driver program the
 config it reads defines (:func:`blank_driver_programs`), since an attributes file in the tree can apply a driver of any
@@ -42,6 +42,22 @@ NO_EXCLUDES_FILE = ("-c", f"core.excludesFile={os.devnull}")
 #: No object is fetched behind a command's back: a config can make a repository a partial clone whose promisor
 #: remote's transport (an ssh command, a local ``uploadpack`` program) runs when an object is missing.
 NO_LAZY_FETCH = {"GIT_NO_LAZY_FETCH": "1"}
+#: The identity of every commit the session makes, whoever runs the session: the operator's git config never decides
+#: it.
+SESSION_IDENTITY = {
+    "GIT_AUTHOR_NAME": "hyperloom-multibranch",
+    "GIT_AUTHOR_EMAIL": "multibranch@hyperloom.invalid",
+    "GIT_COMMITTER_NAME": "hyperloom-multibranch",
+    "GIT_COMMITTER_EMAIL": "multibranch@hyperloom.invalid",
+}
+#: The identity of every commit an agent makes in its sandbox, whose home has no git config: not the session's, so a
+#: history tells an agent's own commits from the session's.
+AGENT_IDENTITY = {
+    "GIT_AUTHOR_NAME": "hyperloom-agent",
+    "GIT_AUTHOR_EMAIL": "agent@hyperloom.invalid",
+    "GIT_COMMITTER_NAME": "hyperloom-agent",
+    "GIT_COMMITTER_EMAIL": "agent@hyperloom.invalid",
+}
 #: ``git init`` with no template directory, so no hook or ``info/exclude`` is copied in.
 INIT = ("init", "--template=")
 _CONFIG_TIMEOUT_S = 60.0
@@ -77,8 +93,8 @@ def leading_options(args: Sequence[str]) -> list[str]:
 
 
 def trusting(directory: Path) -> tuple[str, str]:
-    """The ``-c`` pair that has git use the repository at ``directory`` whoever owns it (``safe.directory``): a tree may
-    have been made by another account, and no program its config names runs."""
+    """The ``-c`` pair that has git use the repository at ``directory`` whoever owns it (``safe.directory``): a tree on
+    the shared storage may have been made by another account of the group, and no program its config names runs."""
     return ("-c", f"safe.directory={os.path.realpath(directory)}")
 
 
@@ -87,8 +103,10 @@ def blank_driver_programs(cwd: Path, env: Mapping[str, str], *prefix: str) -> li
     git reads in ``cwd`` under ``env`` defines, includes followed (``prefix`` are the options the command passes before
     its subcommand, which may name the repository); ``[]`` when it defines none.
 
-    The command these go to reads the config again when it starts, so a driver another account adds in between is not
-    blanked: the config is the group's to write, and this narrows what it can start to that moment.
+    The command these go to reads the config again when it starts, so a driver added in between is not blanked: in an
+    agent's checkout or workspace the agent can add one, and this narrows what it can start to that moment. In the
+    session's repositories no one else writes the config: in a shared one only the account that made it, which
+    :func:`~hyperloom_common.git_safety.check_shared_repository` checks before git runs.
 
     Raises:
         OSError: The config could not be read, or names a driver ``-c`` cannot address (its name holds ``=``).
@@ -121,9 +139,11 @@ def pinned_git(cwd: Path, *args: str, timeout: float = _CONFIG_TIMEOUT_S) -> sub
 
 
 __all__ = [
+    "AGENT_IDENTITY",
     "INIT",
     "NO_EXCLUDES_FILE",
     "NO_LAZY_FETCH",
+    "SESSION_IDENTITY",
     "blank_driver_programs",
     "git_argv",
     "git_env",

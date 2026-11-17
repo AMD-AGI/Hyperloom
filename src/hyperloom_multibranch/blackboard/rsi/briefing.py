@@ -21,8 +21,8 @@ Its brief has three parts:
   tests, its commits and its latest exhausted record, so that a branch reopened on that focus starts where those ended.
   An ``OPEN`` names the profile op the scheduler read in the judge's words, or those words when they named none, the
   key :mod:`rsi.open_areas` counts a focus by;
-* Arbor's map, which binds the branch: in the map's order, the directions of the session's map that name that focus
-  op, those a running Arbor branch holds, and those the map set aside, each with why. An open direction no running
+* the agent map, which binds the branch: in the map's order, the directions of the session's map that name that focus
+  op, those a running agent branch holds, and those the map set aside, each with why. An open direction no running
   branch holds that does not name the focus is left out, and a session without a map shows none.
 
 A champion the start commit is already, or builds on, is no lead: the lessons name it first, as :data:`ON_HEAD`, and
@@ -229,8 +229,8 @@ def _focus_history(snapshot: BlackboardSnapshot, branch: str, start_commit: str)
 
 
 def _shown_map(snapshot: BlackboardSnapshot, branch: str) -> tuple[MapDirection, ...]:
-    """What ``branch`` is shown of Arbor's map, in the map's order: each direction that names its focus op, each a
-    running Arbor branch holds, and each the map set aside."""
+    """What ``branch`` is shown of the agent map, in the map's order: each direction that names its focus op, each a
+    running agent branch holds, and each the map set aside."""
 
     focus = _focus_of(snapshot, branch)
     holders = snapshot.map_holders()
@@ -269,7 +269,8 @@ class CrossSessionBriefing(StartupBriefProvider):
 
     ``warm`` are the leads PRELUDE read; ``references`` the reference launches the run was given, listed after them and
     never replayed; ``experiences`` the Experience KB, read for ``focus`` (the bottleneck the specialist attacks) on
-    ``branch``; ``metric`` the throughput metric whose baseline the read carries.
+    ``branch``; ``metric`` the metric the session is graded on, whose baseline the read carries and whose objective
+    an AgentX session's read asks for.
     ``identities`` looks up the conditions a read's summaries leave out; by default one is built on ``experiences``,
     and passing one index to every briefing of a session reads the export once. ``learnings`` is the session's one
     recall of the specialists' learnings; without it the brief holds this session's only. ``recalls`` keeps the
@@ -445,7 +446,7 @@ class CrossSessionBriefing(StartupBriefProvider):
             self.experiences,
             snapshot.profile,
             baseline,
-            RecallQuery(self.focus, self.branch),
+            RecallQuery(self.focus, self.branch, self.metric),
             identities=self.identities,
         )
         self.recalls.keep(key, recall)

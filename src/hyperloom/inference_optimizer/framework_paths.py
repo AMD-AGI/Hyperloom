@@ -416,6 +416,27 @@ def _env_source_roots() -> tuple[str, ...]:
     return tuple(kept)
 
 
+#: The directory an operator's benchmark scripts are in (``--benchmark-scripts-dir``).
+OPERATOR_SCRIPTS_DIR_ENV: str = "HYPERLOOM_BYPASS_SCRIPTS_DIR"
+
+
+def operator_benchmark_script(framework: str, runner_type: str) -> str | None:
+    """The operator's entrypoint for ``framework`` in :data:`OPERATOR_SCRIPTS_DIR_ENV`, ``None`` when it names none.
+
+    ``<framework>_<runner_type>.sh`` first, then the directory's only ``.sh``: an operator who wrote one script for
+    one machine has just that.
+    """
+    raw = os.environ.get(OPERATOR_SCRIPTS_DIR_ENV, "").strip()
+    scripts_dir = Path(raw)
+    if not raw or not scripts_dir.is_dir():
+        return None
+    preferred = scripts_dir / f"{framework}_{runner_type}.sh"
+    if preferred.is_file():
+        return str(preferred)
+    candidates = sorted(path for path in scripts_dir.glob("*.sh") if path.is_file())
+    return str(candidates[0]) if len(candidates) == 1 else None
+
+
 def point_session_framework_root(root: str, framework: str) -> None:
     """Make ``root`` this session's explicit ``framework`` checkout.
 
@@ -713,8 +734,10 @@ def resolved_within(value: str, root: str) -> bool:
 
 __all__ = [
     "FRAMEWORK_SOURCE_PACKAGES",
+    "OPERATOR_SCRIPTS_DIR_ENV",
     "FrameworkTree",
     "framework_apply_tree",
+    "operator_benchmark_script",
     "point_session_framework_root",
     "probe_framework_source_roots_for_env",
     "resolve_framework_tree",

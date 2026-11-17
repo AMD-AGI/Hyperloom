@@ -79,9 +79,8 @@ Bypass with `--critic-mock` for offline / smoke runs. See
 
 ### Run-time signals
 
-- `No accelerator` (Magpie): subprocess `PATH` must lead with
-  `$(dirname "$PYTHON")` (or set `MAGPIE_PYTHON`); use `ROCR_VISIBLE_DEVICES`,
-  not `HIP_VISIBLE_DEVICES`.
+- `No accelerator`: pin GPUs with `ROCR_VISIBLE_DEVICES`, not
+  `HIP_VISIBLE_DEVICES`.
 - Repeated `trace_analyze` with unchanged trace/config: bug — reuse
   `last_trace_analyze`.
 - `correctness_passed=false`: do not integrate; the kernel-agent report must
@@ -99,8 +98,7 @@ Bypass with `--critic-mock` for offline / smoke runs. See
   there is no auto-prune at streak ≥5 and no stop at streak ≥10. Inspect
   `SharedState.policy_denial_history` via the `why_denied` tool or the
   `=== Recent policy denials ===` block, then change something substantive (a new
-  `params.grid` variant, a different `benchmark_script`, or a sibling action
-  family). Do not hand-edit `state.json`.
+  `params.grid` variant or a sibling action family). Do not hand-edit `state.json`.
 - `stop_reason=time_exhausted`: resume same session (`--resume-from`); do not
   start fresh.
 - `dead_holder_reaped` (lease reclaimed because the holder pid vanished): the

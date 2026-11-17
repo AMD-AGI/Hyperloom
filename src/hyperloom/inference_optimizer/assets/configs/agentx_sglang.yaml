@@ -19,7 +19,6 @@ benchmark:
     torch_profiler:
       enabled: false
       num_steps: 20
-      num_profiles: 3
-      interval_seconds: 200
+      num_profiles: 1
       start_seconds: 0
       detailed_annotations: false

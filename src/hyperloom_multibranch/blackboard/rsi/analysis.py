@@ -24,6 +24,7 @@ from hyperloom_multibranch.contracts.blackboard.peers import BranchLogType, Hypo
 from hyperloom_multibranch.contracts.blackboard.records import BlackboardSnapshot, TestRecord
 from hyperloom_multibranch.contracts.blackboard.vocab import COMMITTING, ClaimStatus, Conclusion
 from hyperloom_multibranch.blackboard.knowledge.lessons import LessonKind, lesson_of
+from hyperloom_multibranch.rulegate.agentx import partial_window
 
 _REDEEMING = COMMITTING | {Conclusion.MERGED}
 _FAILING = frozenset({LessonKind.FAILED, LessonKind.PITFALL})
@@ -106,7 +107,11 @@ def _coverage(
         lesson.text for lesson in (lesson_of(record, snapshot) for record in records) if lesson is not None
     )
     commits = {record.commit_id for record in records if record.commit_id}
-    gains = [record.judgement.gain_pct for record in records if record.judgement is not None]
+    gains = [
+        record.judgement.gain_pct
+        for record in records
+        if record.judgement is not None and not partial_window(record.judgement)
+    ]
     return DirectionCoverage(
         target=intent.target,
         mechanism=intent.mechanism,

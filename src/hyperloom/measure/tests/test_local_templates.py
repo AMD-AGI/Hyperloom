@@ -10,7 +10,7 @@ import sys
 
 import pytest
 
-from hyperloom.measure.local_templates import image_env, local_runner_command, local_runner_template
+from hyperloom.measure.local_templates import host_hf_env, image_env, local_runner_command, local_runner_template
 
 
 def _expanded(command: tuple[str, ...], root: str) -> str:
@@ -120,3 +120,36 @@ def test_explicit_envs_replace_the_image_variables(monkeypatch) -> None:
     monkeypatch.setenv("SGLANG_USE_AITER", "1")
     assert local_runner_template(envs={"A": "b"}).envs == {"A": "b"}
     assert local_runner_template(envs={}).envs == {}
+
+
+def test_the_host_hugging_face_settings_that_are_set_are_taken() -> None:
+    environ = {
+        "HF_HOME": "/data/hf",
+        "HF_HUB_CACHE": "/data/hub",
+        "HF_HUB_OFFLINE": "1",
+        "HF_DATASETS_OFFLINE": "1",
+        "HF_ENDPOINT": "https://mirror.example",
+        "HF_TOKEN": "secret",
+        "HF_XET_CACHE": "/elsewhere",
+    }
+    assert host_hf_env(environ) == {k: v for k, v in environ.items() if k not in {"HF_TOKEN", "HF_XET_CACHE"}}
+
+
+def test_without_hf_home_the_host_default_location_is_named(tmp_path) -> None:
+    """The sandbox has a home of its own, so Hugging Face's default under it is an empty cache."""
+    (tmp_path / "home" / ".cache" / "huggingface").mkdir(parents=True)
+    (tmp_path / "xdg" / "huggingface").mkdir(parents=True)
+    home = str(tmp_path / "home")
+    assert host_hf_env({"HOME": home, "HF_HUB_OFFLINE": " "}) == {"HF_HOME": f"{home}/.cache/huggingface"}
+    assert host_hf_env({"HOME": home, "XDG_CACHE_HOME": str(tmp_path / "xdg")}) == {
+        "HF_HOME": str(tmp_path / "xdg" / "huggingface")
+    }
+    assert host_hf_env({"HOME": str(tmp_path / "nohf")}) == {}, "no cache on the host: nothing to find"
+
+
+def test_a_template_without_envs_carries_the_host_hugging_face_settings(monkeypatch) -> None:
+    monkeypatch.setenv("HF_HOME", "/data/hf")
+    monkeypatch.setenv("HF_HUB_OFFLINE", "1")
+    template = local_runner_template()
+    assert template.envs["HF_HOME"] == "/data/hf"
+    assert template.envs["HF_HUB_OFFLINE"] == "1"

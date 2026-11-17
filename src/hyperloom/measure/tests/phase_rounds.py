@@ -2,8 +2,9 @@
 # SPDX-License-Identifier: MIT
 
 """Rounds a stand-in ``run_grid`` plays for the phase tests: they spend made-up seconds the way a real round does and
-leave what the launcher leaves beside each Magpie run's server log (``server_ready_at``, ``kv_metrics.json``, the
-engine's own log).
+leave what an inference_suite round leaves in its run_dir (``server_ready_at``, ``kv_metrics.json``, the engine's own
+log, ``report.json``), in the run_dir and the variant's slot ``run_grid`` and the round make, by the helpers they make
+them with.
 
 The same rounds serve a test that owns the clock, so every length can be asserted exactly, and the runner of a hosted
 test, which spends real seconds scaled down: ``Rounds(RealClock(), 0.002)`` plays the 82 s boot in 0.16 s.
@@ -18,12 +19,15 @@ from collections.abc import Callable
 from pathlib import Path
 from typing import Any, Protocol
 
-from hyperloom.orchestrator.actions.executors import VariantResult
+from hyperloom.measure.tests.run_dirs import write_run_dir
+from hyperloom.orchestrator.actions.executors import VariantResult, variant_slot
+from hyperloom.orchestrator.actions.executors._suite.rounds import _next_run_dir
+from inference_suite.contracts import ReadyStamp, RunLayout
 
 T0 = 5_000.0
 READY_ONLY_LOG = "INFO: Application startup complete.\n"
-LM_EVAL_RESULTS = {"results": {"gsm8k": {"exact_match,flexible-extract": 0.64}}}
-REPORT = {"success": True, "throughput": {"output_throughput": 1234.5, "completed_requests": 8, "num_prompts": 8}}
+SCORES = {"exact_match,flexible-extract": 0.64}
+FIXED = {"output_throughput": 1234.5, "completed_requests": 8, "requested_requests": 8}
 
 Script = Callable[[Path, dict[str, Any]], VariantResult]
 
@@ -67,34 +71,35 @@ def result(name: str, slot: Path, **fields: Any) -> VariantResult:
 
 
 class Run:
-    """One Magpie run: the seconds it spends and the marks it leaves in its directory."""
+    """One round's run: the seconds it spends and the marks it leaves in the next run_dir of the variant's ``slot``."""
 
-    def __init__(self, clock: Clock, directory: Path) -> None:
-        self.clock, self.directory = clock, directory
-        self.directory.mkdir(parents=True, exist_ok=True)
+    def __init__(self, clock: Clock, slot: Path) -> None:
+        self.clock, self.directory = clock, _next_run_dir(slot)
+        self.directory.mkdir(parents=True)
+        self.layout = RunLayout(self.directory)
         self.marks: dict[str, float] = {}
 
     def boot(self, seconds: float, log: str = READY_ONLY_LOG) -> Run:
         self.clock.advance(seconds)
-        (self.directory / "server.log").write_text(log, encoding="utf-8")
-        (self.directory / "server_ready_at").write_text(f"{self.clock.now:.3f} {seconds:.3f}\n", encoding="utf-8")
+        self.layout.server_log.write_text(log, encoding="utf-8")
+        self.layout.write_ready_stamp(ReadyStamp(self.clock.now, seconds))
         return self
 
     def found_ready(self) -> Run:
-        (self.directory / "server_ready_at").write_text(f"{self.clock.now:.3f} 0.000\n", encoding="utf-8")
+        self.layout.write_ready_stamp(ReadyStamp(self.clock.now, 0.0))
         return self
 
     def mark(self, phase: str, after: float) -> Run:
         self.marks[phase] = self.clock.advance(after)
         return self
 
-    def end(self, after: float) -> Run:
+    def end(self, after: float, scores: dict[str, float] | None = None) -> Run:
         ended = self.clock.advance(after)
         phase_marks = [{"phase": phase, "mono": 1.0, "ts": at} for phase, at in self.marks.items()]
-        kv = self.directory / "kv_metrics.json"
+        kv = self.layout.kv_metrics
         kv.write_text(json.dumps({"phase_marks": phase_marks}), encoding="utf-8")
         os.utime(kv, (ended, ended))
-        (self.directory / "benchmark_report.json").write_text(json.dumps(REPORT), encoding="utf-8")
+        write_run_dir(self.directory, FIXED, scores, eval_code=None if scores is None else 0)
         return self
 
 
@@ -121,9 +126,8 @@ class Rounds:
         return {"warmup": self._warmup, "test": self._measured, "eval": self._evaluation}
 
     def agentx(self) -> dict[str, Script]:
-        """An AgentX test: a warmup round that boots and warms up, then a measured round whose client has phases of its
-        own."""
-        return {"warmup": self._agentx_warmup, "test": self._agentx_measured}
+        """An AgentX test: one measured round that boots, and whose client has phases of its own."""
+        return {"test": self._agentx_measured}
 
     def failing_boot(self) -> dict[str, Script]:
         """A test whose server never got ready: nothing is stamped, the round that was to boot it fails."""
@@ -137,34 +141,23 @@ class Rounds:
 
     def _measured(self, slot: Path, kwargs: dict[str, Any]) -> VariantResult:
         self._spend(4.0)
-        Run(self.clock, slot).found_ready().end(56.0 * self.scale)
+        run = Run(self.clock, slot).found_ready().end(56.0 * self.scale)
         self._spend(40.0)
-        return result("test", slot)
+        return result("test", run.directory)
 
     def _evaluation(self, slot: Path, kwargs: dict[str, Any]) -> VariantResult:
         self._spend(3.0)
-        Run(self.clock, slot).found_ready().mark("eval", 2.0 * self.scale).end(50.0 * self.scale)
+        run = Run(self.clock, slot).found_ready().mark("eval", 2.0 * self.scale).end(50.0 * self.scale, SCORES)
         self._spend(2.0)
-        (slot / "lm_eval").mkdir(exist_ok=True)
-        (slot / "lm_eval" / "results_2000-01-01T10-00-00.json").write_text(json.dumps(LM_EVAL_RESULTS))
-        return result("eval", slot, note="evaluation_only")
-
-    def _agentx_warmup(self, slot: Path, kwargs: dict[str, Any]) -> VariantResult:
-        self._spend(10.0)
-        Run(self.clock, slot).boot(80.0 * self.scale, log=READY_ONLY_LOG).end(40.0 * self.scale)
-        self._spend(30.0)
-        return result("warmup", slot)
+        return result("eval", run.directory, note="evaluation_only")
 
     def _agentx_measured(self, slot: Path, kwargs: dict[str, Any]) -> VariantResult:
         self._spend(5.0)
-        measured = Run(self.clock, slot).found_ready()
+        measured = Run(self.clock, slot).boot(80.0 * self.scale, log=READY_ONLY_LOG)
         measured.mark("warmup", 15.0 * self.scale).mark("measured", 30.0 * self.scale)
         measured.mark("finished", 200.0 * self.scale).end(15.0 * self.scale)
         self._spend(30.0)
-        workspace = slot / "benchmark_20000101_000000"  # the run's own directory, below the round's
-        workspace.mkdir()
-        (workspace / "benchmark_report.json").write_text(json.dumps(REPORT), encoding="utf-8")
-        return result("test", workspace)
+        return result("test", measured.directory)
 
     def _failing_boot(self, slot: Path, kwargs: dict[str, Any]) -> VariantResult:
         self._spend(1000.0)
@@ -182,4 +175,4 @@ class StagedGrid:
 
     async def __call__(self, **kwargs: Any) -> list[VariantResult]:
         name = kwargs["grid"][0].name
-        return [self.scripts[name](Path(kwargs["output_root"]) / f"variant_00_{name}", kwargs)]
+        return [self.scripts[name](variant_slot(Path(kwargs["output_root"]), 0, name), kwargs)]

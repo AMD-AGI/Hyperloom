@@ -12,6 +12,7 @@ import zipfile
 from pathlib import Path
 
 import pytest
+from inference_suite.contracts.layout import CONFIG_FILE, LAUNCH_FILE, PHASE_MARKS, REPORT_FILE, RunLayout
 
 from hyperloom.inference_optimizer.breakdown.session_package import (
     ENV_PACKAGE_DEST_ROOT,
@@ -735,6 +736,22 @@ def test_packaging_failure_propagates(tmp_path: Path, monkeypatch: pytest.Monkey
 
     with pytest.raises(RuntimeError):
         package_session_artifacts(sd, session_id="sid")
+
+
+def test_an_inference_suite_run_dir_ships_its_report_launch_config_and_phase_marks(tmp_path: Path) -> None:
+    sd = tmp_path / "session"
+    _write(sd / "session_breakdown.json", "{}")
+    layout = RunLayout(sd / "runs" / "measure" / "t1" / "round-000")
+    for path in (layout.report, layout.launch, layout.config, layout.phase_marks, layout.server_log):
+        _write(path, "{}")
+    _write(layout.profile_trace_dirs()[0] / "rank0.trace.json.gz", "BLOB")
+
+    out = package_session_artifacts(sd, session_id="sid-suite")
+
+    assert out is not None
+    run = layout.root.relative_to(sd).as_posix()
+    shipped = {name for name in _zip_names(out) if name.startswith(f"{run}/")}
+    assert shipped == {f"{run}/{name}" for name in (REPORT_FILE, LAUNCH_FILE, CONFIG_FILE, PHASE_MARKS)}
 
 
 # -- a destination the accounts of one group share ----------------------------------------------------------------

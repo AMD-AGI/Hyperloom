@@ -79,7 +79,6 @@ def _call(tmp_path: Path, farm: Farm) -> TestCall:
         output_dir=tmp_path / "out",
         timeout_sec=60,
         cwd=str(tmp_path),
-        magpie_python="",
         task_id="t1",
         tables_patch=patched_configs(farm),
     )

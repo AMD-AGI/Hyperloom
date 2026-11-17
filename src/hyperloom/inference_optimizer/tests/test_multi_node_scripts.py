@@ -335,14 +335,18 @@ def test_router_signal_never_blankets_a_group_it_does_not_lead(monkeypatch):
     assert (group_signals, pid_signals) == ([], [4242])
 
 
-def test_router_launch_tolerates_a_stale_pid_file(tmp_path):
-    """A pid file naming nothing live is the normal first-launch case."""
+def test_router_launch_tolerates_a_stale_pid_file(tmp_path, monkeypatch):
+    """A pid file naming nothing live is the normal first-launch case, and nothing is signalled for it."""
     lr = _load_script_module("lr_test_stale", "launch_router.py")
+    signalled: list[int] = []
+    monkeypatch.setattr(lr, "_signal_router", lambda pid, _sig: signalled.append(pid))
 
     for content in ("", "0", "not-a-pid", "999999999"):
         pid_file = tmp_path / "router.pid"
         pid_file.write_text(content)
         lr._retire_previous_router(pid_file, grace_s=0.1)
+
+    assert signalled == []
 
 
 def test_kill_remote_missing_pid_dir():
@@ -1115,17 +1119,6 @@ def test_kill_inference_for_kernel_agent_propagates_an_unexpected_error(monkeypa
         mn_cli.kill_inference_for_kernel_agent_best_effort()
 
 
-def test_install_geak_noop_for_rayjob(tmp_path, monkeypatch):
-    # GEAK SSH install is Infera-only; RayJob kernel-agent uses the Ray runtime.
-    from hyperloom.inference_optimizer.multi_node import cli as mn_cli
-
-    sp = tmp_path / "s.json"
-    sp.write_text('{"backend":"rayjob","nodes":2}', encoding="utf-8")
-    sp.chmod(0o600)
-    monkeypatch.setenv("MULTI_NODE_STATE_FILE", str(sp))
-    assert mn_cli.install_geak_on_pods_best_effort() == 0
-
-
 @pytest.mark.parametrize(("raw", "expected"), [(None, 42), (" ", 42), ("0", 1), ("1800", 1800)])
 def test_poll_timeout_is_the_env_value_floored_at_one_else_the_callers_default(monkeypatch, raw, expected):
     from hyperloom.inference_optimizer.multi_node import cli as mn_cli
@@ -1250,48 +1243,6 @@ def test_infera_ssh_env_empty_without_pods_or_key(tmp_path, monkeypatch):
         },
     )
     assert _multi_node_env.infera_ssh_env_from_state() == {}
-
-
-# magpie_remote_env accuracy-gate interpreter tests.
-
-
-def test_magpie_remote_env_pins_eval_interpreter(tmp_path, monkeypatch):
-    """The eval must run in the interpreter preflight installed lm_eval into."""
-    _write_mn_state(tmp_path, monkeypatch, {"backend": "rayjob", "nodes": 2, "service_url": "http://h:8888"})
-    monkeypatch.setattr(mne, "external_service_url", lambda: "")
-    monkeypatch.setattr(
-        "hyperloom.orchestrator.actions.executors.benchmark_backend.resolve_benchmark_interpreter",
-        lambda: "/opt/venv/bin/python",
-    )
-
-    env = mne.magpie_remote_env()
-
-    assert env["MAGPIE_EVAL_PYTHON"] == "/opt/venv/bin/python"
-    assert env["BENCHMARK_BASE_URL"] == "http://h:8888"
-
-
-def test_magpie_remote_env_pins_eval_interpreter_external(tmp_path, monkeypatch):
-    """The platform hand-off path needs the same pin as the state-file path."""
-    _write_mn_state(tmp_path, monkeypatch, {"nodes": 2})
-    monkeypatch.setattr(mne, "external_service_url", lambda: "http://frontend:8000")
-    monkeypatch.setattr(
-        "hyperloom.orchestrator.actions.executors.benchmark_backend.resolve_benchmark_interpreter",
-        lambda: "/opt/venv/bin/python",
-    )
-
-    env = mne.magpie_remote_env()
-
-    assert env["MAGPIE_EVAL_PYTHON"] == "/opt/venv/bin/python"
-    assert env["BENCHMARK_BASE_URL"] == "http://frontend:8000"
-
-
-def test_magpie_remote_env_empty_for_single_node(tmp_path, monkeypatch):
-    """Single-node stays untouched: no client phase, no interpreter override."""
-    _write_mn_state(tmp_path, monkeypatch, {"backend": "rayjob", "nodes": 1})
-    monkeypatch.setenv("INFERENCE_OPTIMIZER_NODES", "1")
-    monkeypatch.setattr(mne, "external_service_url", lambda: "")
-
-    assert mne.magpie_remote_env() == {}
 
 
 # _write_rayjob_meta sidecar JSON tests.

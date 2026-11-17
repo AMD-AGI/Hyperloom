@@ -8,6 +8,8 @@ from __future__ import annotations
 import hashlib
 import itertools
 import json
+import os
+import stat
 import sys
 
 import pytest
@@ -116,6 +118,67 @@ def test_an_entry_is_where_the_runner_cache_layout_puts_it(tmp_path):
     assert manifest["prompts"]["sha256"] == hashlib.sha256((entry / "data" / "prompts.jsonl").read_bytes()).hexdigest()
     assert cache_root({"HYPERLOOM_RUNNER_CACHE": str(tmp_path)}) == tmp_path
     assert str(cache_root({})) == "/runner-cache"
+
+
+def _staged_modes(root, umask):
+    previous = os.umask(umask)
+    try:
+        entry = staging.stage_entry(root, prompt_set(), {"seed": 1, "tokenizer": {"fake": "0" * 64}})
+    finally:
+        os.umask(previous)
+    return entry, {
+        path.relative_to(root).as_posix(): stat.S_IMODE(path.stat().st_mode)
+        for path in (
+            entry.path.parent,
+            entry.path,
+            entry.path / "data",
+            entry.path / "manifest",
+            entry.path / "data" / "prompts.jsonl",
+        )
+    }
+
+
+def test_below_a_shared_root_an_entry_is_readable_by_every_account_whatever_the_umask_and_evalsets_is_group_shared(
+    tmp_path,
+):
+    """A runner sandbox reads the entry as an account of its own; the next account of a run's group stages beside it."""
+    root = tmp_path / "cache"
+    root.mkdir()
+    root.chmod(0o2775)
+    if not root.stat().st_mode & stat.S_ISGID:
+        pytest.skip("this filesystem does not keep the setgid bit for the test user")
+
+    entry, modes = _staged_modes(root, 0o077)
+
+    assert modes == {
+        "evalsets": 0o2775,
+        f"evalsets/{entry.key}": 0o755,
+        f"evalsets/{entry.key}/data": 0o755,
+        f"evalsets/{entry.key}/manifest": 0o644,
+        f"evalsets/{entry.key}/data/prompts.jsonl": 0o644,
+    }
+    assert [path.name for path in entry.path.parent.iterdir()] == [entry.key], "no half-built entry is left beside it"
+
+
+@pytest.mark.parametrize(
+    ("umask", "directory", "file"),
+    [(0o077, 0o700, 0o600), (0o022, 0o755, 0o644)],
+)
+def test_below_a_root_of_one_account_the_umask_decides_an_entrys_modes(tmp_path, umask, directory, file):
+    """Anywhere but shared storage an entry is as private as the account keeps its files: nothing widens it."""
+    root = tmp_path / "cache"
+    root.mkdir()
+    root.chmod(0o755)
+
+    entry, modes = _staged_modes(root, umask)
+
+    assert modes == {
+        "evalsets": directory,
+        f"evalsets/{entry.key}": directory,
+        f"evalsets/{entry.key}/data": directory,
+        f"evalsets/{entry.key}/manifest": file,
+        f"evalsets/{entry.key}/data/prompts.jsonl": file,
+    }
 
 
 def test_the_cache_directory_is_the_one_the_runner_cache_layout_names():

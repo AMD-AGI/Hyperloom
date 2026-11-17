@@ -450,6 +450,24 @@ def test_launch_provided_names_cover_the_rank_topology_and_the_schedulers():
 
 
 @pytest.mark.parametrize(
+    "name", ["SGLANG_SIMULATE_ACC_TOKEN_MODE", "SGLANG_USE_AITER_FP8_PER_TOKEN", "MAX_NUM_BATCHED_TOKENS"]
+)
+def test_an_external_source_may_carry_a_token_named_knob(name):
+    assert common_env_safety.is_allowed_external_env_key(name)
+
+
+@pytest.mark.parametrize("name", ["HF_TOKEN", "GITHUB_TOKEN", "AWS_SECRET_ACCESS_KEY", "SERVICE_API_KEY"])
+def test_an_external_source_may_not_carry_a_credential(name):
+    assert not common_env_safety.is_allowed_external_env_key(name)
+
+
+@pytest.mark.parametrize("name", ["HYPERLOOM_EVAL_TASKS", "HYPERLOOM_EVAL_LIMIT", "HYPERLOOM_EVAL_TOKENIZED_REQUESTS"])
+def test_an_external_source_may_not_set_what_the_evaluation_runs(name):
+    """A recipe that sets the evaluation's task or limit would grade every candidate on another evaluation."""
+    assert not common_env_safety.is_allowed_external_env_key(name)
+
+
+@pytest.mark.parametrize(
     "document",
     [
         {},

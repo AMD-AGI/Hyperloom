@@ -21,15 +21,7 @@ from .conftest import silent_backends
 @pytest.fixture
 def session_dir(tmp_path, monkeypatch) -> Path:
     monkeypatch.setenv("USER_DATA_PATH", str(tmp_path))
-    # Stub the interpreter resolver to avoid a real Magpie import probe.
-    monkeypatch.setenv("MAGPIE_PYTHON", "/usr/bin/python3")
-    from hyperloom.orchestrator.actions.executors import _benchmark_interpreter
 
-    monkeypatch.setattr(
-        _benchmark_interpreter,
-        "_resolve_magpie_python",
-        lambda _env=None: "/usr/bin/python3",
-    )
     return make_session_dir()
 
 

@@ -56,6 +56,31 @@ def scratch_root() -> str | None:
     return os.environ.get(TEST_SCRATCH_ENV) or None
 
 
+def required_scratch_root(helper: str) -> str:
+    """The directory :data:`TEST_SCRATCH_ENV` names, for a test helper that must never fall back to the host's
+    temporary directory: what it makes there outlives a run that is killed or a worker that exits without finalizers.
+    A test package whose conftest imports neither :func:`own_test_scratch` nor :func:`machine_without_readable_gpus`
+    names none, and ``helper`` is refused."""
+    scratch = scratch_root()
+    if scratch is None:
+        raise RuntimeError(
+            f"{helper} needs {TEST_SCRATCH_ENV}: import the autouse fixture own_test_scratch from {_MODULE} into the "
+            "test package's conftest, so its scratch lies below pytest's base temporary directory"
+        )
+    return scratch
+
+
+def _own_scratch(tmp_path_factory: pytest.TempPathFactory, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv(TEST_SCRATCH_ENV, str(tmp_path_factory.mktemp("scratch")))
+
+
+@pytest.fixture(autouse=True)
+def own_test_scratch(tmp_path_factory: pytest.TempPathFactory, monkeypatch: pytest.MonkeyPatch) -> None:
+    """:data:`TEST_SCRATCH_ENV` names a directory of the test's own below pytest's base temporary directory. A conftest
+    whose package keeps the host's GPUs imports this alone; :func:`machine_without_readable_gpus` includes it."""
+    _own_scratch(tmp_path_factory, monkeypatch)
+
+
 @pytest.fixture(autouse=True)
 def machine_without_readable_gpus(
     request: pytest.FixtureRequest,
@@ -63,7 +88,7 @@ def machine_without_readable_gpus(
     tmp_path_factory: pytest.TempPathFactory,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    monkeypatch.setenv(TEST_SCRATCH_ENV, str(tmp_path_factory.mktemp("scratch")))
+    _own_scratch(tmp_path_factory, monkeypatch)
     if getattr(request.module, USES_REAL_GPUS_FLAG, False):
         return
     shadow = tmp_path / "gpu-tools-shadow"

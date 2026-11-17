@@ -1,9 +1,10 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""A framework with no validated runner for the board is refused at launch, on both CLI entry paths."""
+"""A framework not validated on the board is refused at launch, on both CLI entry paths."""
 
 import asyncio
+import os
 
 import pytest
 
@@ -47,7 +48,6 @@ def _seed(tmp_path, monkeypatch, framework: str) -> None:
     launch_shape._resolve_run_topology(args)
     for name in ("_enforce_expected_framework", "_apply_operator_supplied_paths", "_check_gfx_arch_resolvable"):
         monkeypatch.setattr(cli, name, lambda *a, **kw: None)
-    monkeypatch.setattr(cli, "_should_remote_probe_gpu", lambda args: False)
     monkeypatch.setattr(cli, "_autodetect_gpu_type", lambda: None)
     monkeypatch.setattr(cli, "resolve_framework_version", lambda args: "test-version")
     monkeypatch.setattr(cli, "make_session_dir", lambda **kw: tmp_path)
@@ -68,11 +68,12 @@ def test_fresh_r9700_sglang_launch_exits_2(tmp_path, monkeypatch, capsys):
     with pytest.raises(SystemExit) as exc:
         _seed(tmp_path, monkeypatch, "sglang")
     assert exc.value.code == 2
-    assert "no validated gfx12 runner" in capsys.readouterr().err
+    assert "r9700 is currently validated only for vllm" in capsys.readouterr().err
 
 
-def test_fresh_r9700_vllm_launch_passes_the_gate(tmp_path, monkeypatch):
+def test_fresh_r9700_vllm_launch_passes_the_gate_and_exports_the_board_itself(tmp_path, monkeypatch):
     _seed(tmp_path, monkeypatch, "vllm")
+    assert os.environ["GPU_TYPE"] == os.environ["TARGET_GPU_TYPE"] == "r9700"
 
 
 def test_resume_runs_the_gate():

@@ -102,6 +102,8 @@ class LaunchAttempt:
             failure line for a boot that stopped before it owned a log.
         artifacts: Files to write under the round directory, keyed by relative
             path; a mapping or list is written as JSON.
+        metrics: What a served round's load reports: the fixed metrics by key,
+            or the scriptable script's result document.
     """
 
     name: str = ""
@@ -114,6 +116,7 @@ class LaunchAttempt:
     wrapper_stdout: str = ""
     wrapper_stderr: str = ""
     artifacts: Mapping[str, Any] = field(default_factory=dict)
+    metrics: Mapping[str, Any] = field(default_factory=dict)
 
     def __post_init__(self) -> None:
         """Reject an attempt whose outcome or stage cannot be played.

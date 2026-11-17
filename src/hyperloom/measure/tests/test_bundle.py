@@ -104,8 +104,9 @@ def test_an_unusable_public_key_is_not_reported_as_tampering(bundle) -> None:
     assert _reason(bundle.staging, bundle, public_key_pem="not a key") is RejectReason.PUBLIC_KEY_UNUSABLE
 
 
-def test_a_signed_manifest_of_another_schema_is_rejected(bundle) -> None:
-    bundle.write_manifest(bundle.document | {"schema": "hyperloom.measurement-result/v2"})
+@pytest.mark.parametrize("schema", ["hyperloom.measurement-result/v1", "hyperloom.measurement-result/v3"])
+def test_a_signed_manifest_of_another_schema_is_rejected(bundle, schema: str) -> None:
+    bundle.write_manifest(bundle.document | {"schema": schema})
     assert _reason(bundle.staging, bundle) is RejectReason.SCHEMA_MISMATCH
 
 
@@ -781,3 +782,24 @@ def test_a_result_whose_runner_states_no_rule_pack_is_rejected_when_the_session_
         verify_bundle(bundle.staging, replace(verify_args(bundle), rule_pack_digest=PACK["digest"]))
     assert raised.value.reason is RejectReason.RULE_PACK_MISMATCH
     assert "states no rule pack" in raised.value.detail
+
+
+@pytest.mark.parametrize("umask", [0, 0o022, 0o077])
+def test_files_landed_on_shared_storage_are_the_groups_to_read_and_the_output_directory_the_groups_to_write(
+    bundle, tmp_path: Path, umask: int
+) -> None:
+    """A later leg of the run may be another account of the group: it reads what was landed, and lands in a directory
+    an earlier leg made."""
+    shared = tmp_path / "toolbox"
+    shared.mkdir()
+    shared.chmod(0o2775)
+    out = shared / "tests" / "r1" / "attempt-1"
+    old = os.umask(umask)
+    try:
+        materialize(verify_bundle(bundle.staging, verify_args(bundle)), out)
+    finally:
+        os.umask(old)
+    assert {path.stat().st_mode & 0o7777 for path in (out, out.parent, out.parent.parent)} == {0o2775}
+    assert (out / "server.log").stat().st_mode & 0o7777 == bundle_mod.LANDED_FILE_MODE == 0o640
+    assert (out / "benchmark_sglang_20000101_000000").stat().st_mode & 0o7777 == bundle_mod.LANDED_DIR_MODE == 0o2750
+    assert {path.stat().st_mode & 0o7777 for path in out.rglob("*") if path.is_file()} == {0o640}

@@ -16,7 +16,12 @@ from typing import Any
 
 import pytest
 
-from hyperloom.contracts.long_context import PROMPT_NOT_RUN, PROMPT_OK
+from hyperloom.contracts.long_context import (
+    LONG_CONTEXT_HELD,
+    LONG_CONTEXT_REAL_ACCEPTANCE,
+    PROMPT_NOT_RUN,
+    PROMPT_OK,
+)
 from hyperloom.inference_optimizer import framework_registry
 from hyperloom.measure import local
 from hyperloom.measure.local import LocalMeasurementBackend, TestCallRefused
@@ -24,11 +29,16 @@ from hyperloom.measure.long_context.outputs import read_outputs
 from hyperloom.measure.long_context.plan import LONG_CONTEXT_DIR
 from hyperloom.measure.long_context.tests.support import PROMPTS, FakeServer, staged_plan
 from hyperloom.measure.phases import LONG_CONTEXT, SHORT_PROMPTS
+from hyperloom.measure.short_prompts.outputs import read_outputs as short_outputs
 from hyperloom.measure.short_prompts.tests.support import staged_plan as short_plan
-from hyperloom.measure.tests.test_local_backend import _call, _point
+from hyperloom.measure.socket import SessionFacts
+from hyperloom.orchestrator.actions.executors import CHECK_SERVER_ENVS
+from hyperloom.orchestrator.actions.stop_attribution import SESSION_TIME_EXHAUSTED_CLASS
+from inference_suite.tests.test_base_launch_contract import _base
+from hyperloom.measure.tests.test_local_backend import _agentx_point, _call, _point
 from hyperloom.measure.tests.test_local_short_prompts import _CheckGrid as _ShortGrid
 from hyperloom.measure.tests.test_local_short_prompts import _Servers as _ShortServers
-from hyperloom.measure.tests.test_local_short_prompts import cache, magpie_backend  # noqa: F401 - fixtures
+from hyperloom.measure.tests.test_local_short_prompts import cache  # noqa: F401 - fixtures
 
 SKIPPED = "long_context_check skipped: test failed"
 CONTEXT_FLAG_ENV = framework_registry.FRAMEWORKS["sglang"].extra_args_env
@@ -70,7 +80,7 @@ def test_a_planned_test_asks_its_own_server_after_its_measured_round_and_boots_n
     outcome = _run(tmp_path, cache)
 
     assert [kwargs["grid"][0].name for kwargs in grid.calls] == ["test"], "no second boot"
-    assert grid.calls[0]["launch"].server_lifecycle["cleanup"] is False, "Magpie leaves the server up for the check"
+    assert grid.calls[0]["launch"].server_lifecycle["cleanup"] is False, "the round leaves the server up for the check"
     assert (grid.servers.started, grid.servers.teardowns) == (["test"], 1), "one server, torn down after the check"
     found = read_outputs(tmp_path / "out")
     assert [e.status for e in found.prompts] == [PROMPT_OK] * PROMPTS and found.served_context == 4096
@@ -160,6 +170,135 @@ def test_a_framework_that_cannot_hold_a_server_up_leaves_the_prompts_unrun_with_
     assert "the test's server was not held up for the check" in found.stopped
     assert {e.status for e in found.prompts} == {PROMPT_NOT_RUN}
     assert len(grid.calls) == 1 and grid.servers.started == [] and outcome.returncode == 0
+
+
+class _ReapingGrid(_ShortGrid):
+    """``run_grid`` that also takes a round's server down when its lifecycle asks for cleanup, as the real one does."""
+
+    async def __call__(self, **kwargs: Any):
+        results = await super().__call__(**kwargs)
+        lifecycle = kwargs["launch"].server_lifecycle
+        if lifecycle and lifecycle.get("cleanup", True):
+            self.servers.stop()
+        return results
+
+
+def _agentx_run(monkeypatch, tmp_path: Path, cache: Path, *, golden: bool, answers: dict[str, dict] | None = None):
+    """An AgentX test that plans both checks, on a session base with or without a golden layer; its grid and outcome."""
+    grid = _ReapingGrid(tmp_path, _Servers(monkeypatch))
+    monkeypatch.setattr(local, "run_grid", grid)
+    for name, fields in (answers or {}).items():
+        grid.answers[name] = grid.result(name, **fields)
+    watched: list[bool] = []
+    booting = local._booting
+    monkeypatch.setattr(local, "_booting", lambda run, point, args: watched.append(True) or booting(run, point, args))
+    base = _base() if golden else _base(golden_al=None)
+    call = _call(
+        tmp_path,
+        _agentx_point(tmp_path, monkeypatch),
+        long_context=staged_plan(cache),
+        short_prompts=short_plan(cache),
+        result_dir=str(tmp_path / "out" / "results"),
+        session_facts=SessionFacts(base_launch=base),
+    )
+    outcome = LocalMeasurementBackend().run_test(call)
+    grid.watched = watched
+    return grid, outcome
+
+
+def _names(grid: _ShortGrid) -> list[str]:
+    return [kwargs["grid"][0].name for kwargs in grid.calls]
+
+
+def test_an_agentx_test_without_a_golden_layer_asks_its_measured_server_before_its_teardown(
+    monkeypatch, tmp_path, cache
+):
+    grid, outcome = _agentx_run(monkeypatch, tmp_path, cache, golden=False)
+
+    assert _names(grid) == ["test"], "no second boot"
+    assert grid.calls[0]["launch"].server_lifecycle["cleanup"] is False, "the round leaves its server up for the check"
+    assert grid.servers.started == ["test"] and grid.servers.asked == [PROMPTS] and grid.servers.flushes == 1
+    found = read_outputs(tmp_path / "out")
+    assert [e.status for e in found.prompts] == [PROMPT_OK] * PROMPTS and found.server == LONG_CONTEXT_HELD
+    short = short_outputs(tmp_path / "out")
+    assert "the test's server was not held up for the check" in short.processes[0].reason, "short prompts stay unheld"
+    names = [p.name for p in outcome.phases]
+    assert names.index(LONG_CONTEXT) < names.index("teardown") and SHORT_PROMPTS not in names
+    assert (outcome.returncode, outcome.failure_class) == (0, None)
+
+
+def test_an_agentx_test_with_a_golden_layer_asks_a_check_server_booted_once_its_measured_server_is_down(
+    monkeypatch, tmp_path, cache
+):
+    grid, outcome = _agentx_run(monkeypatch, tmp_path, cache, golden=True)
+
+    assert _names(grid) == ["test", "check_server"]
+    measured, boot = (call["launch"] for call in grid.calls)
+    assert measured.server_lifecycle["cleanup"] is True, "the measured server is not held past its round"
+    assert (boot.lifecycle_boot_only, boot.server_lifecycle["cleanup"]) == (True, False)
+    assert boot.server_lifecycle == {**measured.server_lifecycle, "cleanup": False}, "the same port and pid directory"
+    assert grid.calls[1]["recipe"].base.extra_envs == dict(CHECK_SERVER_ENVS), "the real-acceptance compose"
+    assert grid.servers.started == ["test", "check_server"] and grid.servers.asked == [0, PROMPTS]
+    assert grid.watched == [True], "the check server's boot is bounded by its round, not by the test's boot guard"
+    found = read_outputs(tmp_path / "out")
+    assert [e.status for e in found.prompts] == [PROMPT_OK] * PROMPTS
+    assert found.server == LONG_CONTEXT_REAL_ACCEPTANCE
+    assert grid.servers.live is None, "the check server is torn down"
+    assert (outcome.returncode, outcome.failure_class) == (0, None)
+
+
+def test_a_check_server_that_does_not_start_leaves_the_check_incomplete_and_the_test_succeeds(
+    monkeypatch, tmp_path, cache
+):
+    failed = {"status": "failed", "returncode": 1, "error": "the server exited 1\nTraceback", "error_class": "crash"}
+    grid, outcome = _agentx_run(monkeypatch, tmp_path, cache, golden=True, answers={"check_server": failed})
+
+    assert _names(grid) == ["test", "check_server"] and grid.servers.asked == [0]
+    found = read_outputs(tmp_path / "out")
+    assert found.stopped == "check server did not start: the server exited 1 Traceback"
+    assert {e.status for e in found.prompts} == {PROMPT_NOT_RUN} and found.server == LONG_CONTEXT_REAL_ACCEPTANCE
+    assert (outcome.returncode, outcome.failure_class) == (0, None)
+
+
+def test_a_check_server_boot_the_run_stopped_leaves_the_check_incomplete_and_the_measured_test_stands(
+    monkeypatch, tmp_path, cache
+):
+    stopped = {"status": "failed", "returncode": 1, "error_class": SESSION_TIME_EXHAUSTED_CLASS}
+    grid, outcome = _agentx_run(monkeypatch, tmp_path, cache, golden=True, answers={"check_server": stopped})
+
+    assert _names(grid) == ["test", "check_server"]
+    found = read_outputs(tmp_path / "out")
+    assert found.stopped == f"check server did not start: {SESSION_TIME_EXHAUSTED_CLASS}"
+    assert {e.status for e in found.prompts} == {PROMPT_NOT_RUN} and outcome.returncode == 0
+
+
+@pytest.mark.parametrize("golden", [True, False], ids=["golden", "no-golden"])
+def test_a_failed_agentx_test_runs_no_check_and_boots_no_check_server(monkeypatch, tmp_path, cache, golden):
+    failed = {"status": "failed", "returncode": 2, "error": "the server died", "error_class": "crash"}
+    grid, outcome = _agentx_run(monkeypatch, tmp_path, cache, golden=golden, answers={"test": failed})
+
+    assert _names(grid) == ["test"]
+    assert (outcome.returncode, SKIPPED in outcome.stderr) == (2, True)
+    assert not (tmp_path / "out" / LONG_CONTEXT_DIR).exists()
+
+
+def test_an_agentx_test_that_plans_no_long_context_check_holds_no_server_past_its_round(monkeypatch, tmp_path, cache):
+    grid = _ReapingGrid(tmp_path, _Servers(monkeypatch))
+    monkeypatch.setattr(local, "run_grid", grid)
+    call = _call(
+        tmp_path,
+        _agentx_point(tmp_path, monkeypatch),
+        short_prompts=short_plan(cache),
+        result_dir=str(tmp_path / "out" / "results"),
+        session_facts=SessionFacts(base_launch=_base(golden_al=None)),
+    )
+
+    outcome = LocalMeasurementBackend().run_test(call)
+
+    assert _names(grid) == ["test"] and grid.calls[0]["launch"].server_lifecycle["cleanup"] is True
+    assert grid.servers.asked == [0] and grid.servers.flushes == 0
+    assert "the test's server was not held up for the check" in short_outputs(tmp_path / "out").processes[0].reason
+    assert outcome.returncode == 0
 
 
 def test_a_call_naming_a_set_that_is_not_staged_is_refused_before_any_server_starts(monkeypatch, tmp_path, cache):

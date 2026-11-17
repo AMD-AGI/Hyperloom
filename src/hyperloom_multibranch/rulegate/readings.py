@@ -9,7 +9,6 @@ import statistics
 
 from hyperloom.common.gain_math import ACCURACY_METRICS
 from hyperloom.common.perf_metric import (
-    GRADED_INTVTY_P50,
     GRADED_OUTPUT,
     GRADED_REQUESTS_TOTAL,
     GRADED_UNSERVED_REQUESTS,
@@ -62,18 +61,18 @@ def eval_score(result: TestResult) -> float:
     raise UnreadableResult(f"{result.request_id} has no eval score of {', '.join(ACCURACY_METRICS)}")
 
 
-def agentx_reading(result: TestResult) -> dict[str, float]:
+def agentx_reading(result: TestResult, graded: str) -> dict[str, float]:
     """Each metric every measure-phase round reports, averaged over them, and the request classes summed over them.
 
     A guard or comparability metric some round lacks stays out, so the comparison fails closed on it rather than
-    trusting a partial reading; without the graded P50 there is nothing to compare.
+    trusting a partial reading; without the ``graded`` metric there is nothing to compare.
     """
     rounds = _measured(result)
     if not rounds:
         raise UnreadableResult(f"{result.request_id} has no measure-phase round")
     shared = set(rounds[0].metrics).intersection(*(r.metrics for r in rounds[1:]))
-    if GRADED_INTVTY_P50 not in shared:
-        raise UnreadableResult(f"{result.request_id} does not report {GRADED_INTVTY_P50} in every measure-phase round")
+    if graded not in shared:
+        raise UnreadableResult(f"{result.request_id} does not report {graded} in every measure-phase round")
     reading = {key: statistics.fmean(r.metrics[key] for r in rounds) for key in sorted(shared)}
     return {**reading, **_request_classes(result.request_classes, len(rounds))}
 

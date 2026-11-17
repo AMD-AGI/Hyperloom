@@ -22,11 +22,11 @@ def _record(state: SharedState, trace: str) -> None:
     )
 
 
-def test_written_dict_has_fifteen_keys() -> None:
+def test_written_dict_has_sixteen_keys() -> None:
     """The canonical trace-analysis record includes the selected steady-state trace."""
     state = SharedState()
     _record(state, "x")
-    assert len(state.last_trace_analyze) == 15
+    assert len(state.last_trace_analyze) == 16
     assert set(state.last_trace_analyze) == {
         "trace_input",
         "steady_state_trace",
@@ -40,6 +40,7 @@ def test_written_dict_has_fifteen_keys() -> None:
         "trace_health_warnings",
         "analysis_md_path",
         "analysis_md_text",
+        "fusion_findings",
         "roofline_snapshot_id",
         "roofline_baseline_gain_at_snapshot",
         "ts",
