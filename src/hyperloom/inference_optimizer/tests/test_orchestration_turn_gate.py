@@ -13,6 +13,7 @@ from hyperloom.inference_optimizer.protocol.intent import DEFAULT_IDLE_BODY
 from hyperloom.orchestrator.bus.message_bus import LANES_BUSY_SOURCE, Message
 from hyperloom.orchestrator.loop.coordinator import Coordinator
 from hyperloom.orchestrator.phases import machine_state as ps
+from hyperloom.orchestrator.roles.base import BackendError
 from hyperloom.orchestrator.state.task_registry import TaskSpec
 from .conftest import silent_backends
 
@@ -136,3 +137,42 @@ async def test_the_turn_a_message_wakes_shows_it_and_no_critic_idle_reply(tickin
     assert "integrate_done" in inbox
     assert DEFAULT_IDLE_BODY not in inbox
     assert "held for the next turn" not in inbox
+
+
+async def test_a_turn_that_fails_is_taken_again_on_the_next_tick(ticking, monkeypatch):
+    c, turns = ticking
+    await c.tick(1)
+    backend = c.backends["orchestration"]
+    run = backend.run
+    calls = 0
+
+    async def _fails_once(**kwargs):
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            raise BackendError("endpoint unreachable")
+        return await run(**kwargs)
+
+    monkeypatch.setattr(backend, "run", _fails_once)
+    await _queue_a_task(c)
+    await c.tick(1)
+    c._backend_retry_at.clear()
+    await c.tick(2)
+
+    assert turns == ["orchestration", "critic", "orchestration", "critic", "orchestration", "critic", "critic"]
+
+
+async def test_a_task_the_turn_itself_queues_does_not_wake_the_next_tick(ticking, monkeypatch):
+    c, turns = ticking
+    backend = c.backends["orchestration"]
+    run = backend.run
+
+    async def _queues_a_task(**kwargs):
+        await _queue_a_task(c)
+        return await run(**kwargs)
+
+    monkeypatch.setattr(backend, "run", _queues_a_task)
+    await c.tick(3)
+
+    assert len(await c.tasks.queued()) == 1
+    assert turns == _ONE_TURN_THEN_HOLD
