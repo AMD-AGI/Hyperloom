@@ -28,10 +28,10 @@ documented in `framework/aiter/` (the `aiter_flydsl_libtype` lever). Backend-neu
 **Where the techniques live.** This folder carries the FlyDSL *language* (`API_docs/`). The techniques for
 making a FlyDSL kernel fast or correct live in the **FlyDSL optimization skill**, an external skill the knowledge
 block points at when the campaign passes one with `forge-loop --skill-dir` (for AKLR kernels:
-`<AKLR>/harness/skills/aklr-kb`, with its `flydsl/` folder as a second `--skill-dir`). It covers a dense-GEMM
+`<AKLR>/harness/skills/kb`, with its `flydsl/` folder as a second `--skill-dir`). It covers a dense-GEMM
 package, aiter's shipped FlyDSL kernels and their knobs, the structure-first authoring method, LDS and prefetch,
 trace capture and analysis, debugging, perf bisection and FlyDSL's own test suites. Below, a path starting `skill:`
-is relative to that skill's folder (`aklr-kb/`).
+is relative to that skill's folder (`kb/`).
 If the knowledge block lists no such skill, those techniques are not available in this run; work from
 `API_docs/` and `common_methodology/`.
 
