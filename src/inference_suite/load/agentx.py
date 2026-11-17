@@ -65,6 +65,7 @@ PROFILING_PHASE = "profiling"
 #: The agentx scenario's ``min_benchmark_duration_seconds`` (agentx-harness 1.0.13); a shorter replay needs
 #: ``--unsafe-override``, which InferenceX's ``replay.py`` adds the same way.
 _SCENARIO_MIN_DURATION_SEC = 900
+_UTF8 = "utf-8"
 _WHAT = "the AgentX client"
 _AGGREGATOR = "the AgentX aggregator"
 _NS_PER_SEC = 1e9
@@ -226,7 +227,7 @@ class ProgressFollower:
 
 
 def _export_lines(path: Path) -> Iterator[Mapping[str, Any]]:
-    with path.open(encoding="utf-8") as export:
+    with path.open(encoding=_UTF8) as export:
         for number, line in enumerate(export, start=1):
             if not line.strip():
                 continue
@@ -272,7 +273,7 @@ def skipped_context_overflow(path: Path) -> int:
     Raises:
         OSError, ValueError: The summary cannot be read, is not a JSON object, or gives a count that is not one.
     """
-    summary = json.loads(path.read_text(encoding="utf-8"))
+    summary = json.loads(path.read_text(encoding=_UTF8))
     if not isinstance(summary, Mapping):
         raise ValueError(f"{path} is not a JSON object")
     metric = summary.get(_SKIPPED_OVERFLOW)
@@ -344,7 +345,7 @@ def agentx_result(aggregate: Mapping[str, Any], facts: ReplayFacts) -> AgentxRes
 
 def _stopped_by_threshold(layout: RunLayout) -> bool:
     for log in (layout.agentx_client_log, layout.aiperf_log):
-        if log.is_file() and THRESHOLD_STOP_MARKER in log.read_text(encoding="utf-8", errors="replace"):
+        if log.is_file() and THRESHOLD_STOP_MARKER in log.read_text(encoding=_UTF8, errors="replace"):
             return True
     return False
 
