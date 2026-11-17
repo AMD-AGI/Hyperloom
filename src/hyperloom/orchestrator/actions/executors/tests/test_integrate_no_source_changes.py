@@ -252,6 +252,37 @@ async def test_launch_configuration_passes_the_gate(tmp_path, framework_tree):
     assert result["extra_envs_applied"] == {"VLLM_ROCM_USE_AITER": "1"}
 
 
+async def test_a_framework_authoring_config_lever_round_passes_the_gate(tmp_path, framework_tree):
+    """An upstream-PR authoring specialist that answers with a flag is kept: its round carries no source change."""
+    from hyperloom.orchestrator.phases.framework import _integrate_review_params
+    from hyperloom.orchestrator.phases.framework_discovery import _config_lever_deliverable
+    from hyperloom.orchestrator.phases.framework_records import _framework_config_levers_from_done
+
+    session = tmp_path / "session"
+    proposal = {
+        "name": "aiter_fa",
+        "extra_args": "--attention-backend ROCM_AITER_FA",
+        "extra_envs": {"VLLM_ROCM_USE_AITER": "1"},
+    }
+    _specialist(session, proposal_set=[proposal])
+    done = {"proposal_set": [proposal], "patches_written": []}
+    pr_url = "https://github.com/vllm-project/vllm/pull/61428"
+    spec_params = {
+        "framework_agent_authoring": True,
+        "framework_agent_candidate_id": pr_url,
+        "framework_batch_id": "discovery-0",
+        "lever_kind": "upstream_pr",
+        "source_phase": "FRAMEWORK_AGENT",
+    }
+    deliverable = _config_lever_deliverable(_framework_config_levers_from_done(done))
+    params = {**_integrate_review_params(_SPEC, spec_params, done, deliverable), "apply_only": True}
+
+    result = await _integrate(session, _state(), params)
+
+    assert result["status"] == "applied_no_bench"
+    assert result["extra_envs_applied"] == {"VLLM_ROCM_USE_AITER": "1"}
+
+
 def test_an_enablement_round_with_only_flags_passes_the_gate(tmp_path):
     attempt = IntegrateAttempt(task_id="int-1")
     attempt.shared_state = _state(phase="ENABLEMENT")
