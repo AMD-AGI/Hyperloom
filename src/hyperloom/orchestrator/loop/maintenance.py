@@ -6,6 +6,7 @@
 from __future__ import annotations
 import shutil
 import sqlite3
+import time
 from pathlib import Path
 from typing import Any
 from ..state.shared_state import SharedState
@@ -14,6 +15,11 @@ from ..collaborator import CoordinatorCollaborator
 import logging as _logging
 
 log = _logging.getLogger(__name__)
+
+# Wall-clock cadences, in seconds. Elapsed budget is charged only when ``state.json`` is saved, so the save cadence
+# bounds what a crash inside one long phase step (a GEAK batch) refunds to the resumed leg.
+MAINTENANCE_INTERVAL_SEC: int = 1800
+STATE_SAVE_INTERVAL_SEC: int = 60
 
 
 async def run_lease_and_db_reclaim(
@@ -77,6 +83,22 @@ class MaintenanceCollaborator(CoordinatorCollaborator):
     _DISK_FREE_MIN_GB: float = 20.0
     _DISK_RUNS_KEEP_PER_ACTION: int = 50
     _STATE_JSON_WARN_BYTES: int = 50 * 1024 * 1024
+
+    def __init__(self, coordinator: Any) -> None:
+        super().__init__(coordinator)
+        now = time.monotonic()
+        self._last_pass_ts = now
+        self._last_state_save_ts = now
+
+    async def run_due(self) -> None:
+        """Run the maintenance pass and save ``state.json``, each once its interval has elapsed."""
+        now = time.monotonic()
+        if now - self._last_pass_ts >= MAINTENANCE_INTERVAL_SEC:
+            await self.run(tick=self.shared_state.tick)
+            self._last_pass_ts = now
+        if now - self._last_state_save_ts >= STATE_SAVE_INTERVAL_SEC:
+            self.shared_state.save(self.session_dir)
+            self._last_state_save_ts = now
 
     async def run(
         self,
