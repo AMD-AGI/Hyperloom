@@ -263,12 +263,12 @@ in-flight launch (`MULTI_NODE_RESTART_RESUME_RUNNING=1`, default).
   (`ibv_devices` empty, no `/dev/infiniband`) while NCCL is forced onto IB
   (`NCCL_IB_HCA` set). This is a **platform provisioning** issue — the pods must
   request `rdma/hca` (a partial-GPU multi-node task must still get RDMA). To
-  confirm/unblock, force TCP by exporting
-  `HYPERLOOM_MN_EXTRA_FWD_ENV='{"NCCL_IB_DISABLE":"1"}'` before `optimize`: that
-  is the channel both backends forward to the pods (rayjob via the job
-  `runtime_env`, infera via the SSH fan-out). Slow but works. **Not**
-  `--extra-env` — that reaches the variant filter only and never leaves the
-  sandbox, so using it here looks like a clean result and rules nothing out.
+  confirm/unblock, force TCP with `--extra-env NCCL_IB_DISABLE=1`: the baseline
+  and grid restarts forward the operator's pins to every rank (rayjob via the
+  job `runtime_env`, infera via the SSH fan-out). Slow but works. Do not export
+  `HYPERLOOM_MN_EXTRA_FWD_ENV` yourself: each restart sets or clears that
+  variable for its own round, so a value exported before `optimize` does not
+  reach a restarted server.
 * **Variant aborts with no benchmark output** → read `failed_variants` in the
   round's `<action>_attempts.extras`, or the per-variant `abort_reason.json`
   under `<session_dir>/runs/<action>/<task_id>/variant_<NN>_<name>/`

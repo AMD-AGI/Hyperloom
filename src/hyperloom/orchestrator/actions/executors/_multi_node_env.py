@@ -12,6 +12,7 @@ from typing import Any, Iterable, Mapping
 
 from hyperloom_common.coerce import to_int
 from hyperloom_common.env import env_flag
+from hyperloom.common.env_safety import filter_untrusted_env_mapping, is_allowed_variant_env_key, operator_extra_env
 from hyperloom.common.gpu_partition import published_shape
 from hyperloom.inference_optimizer.multi_node._internal.external_state import (
     external_service_url,
@@ -57,14 +58,16 @@ def round_server_env(variant_envs: Mapping[str, Any] | None = None, unset_envs: 
 
     The session base's server env, the operator's ``--extra-env`` pins over it, and the round's own envs over both;
     the round's unsets drop what the base and the pins set. The forwarded env overrides what the pods were created
-    with, so a layer left out here is lost on the server.
+    with, so a layer left out here is lost on the server. The pins are held to the rule a single-node round's are, so
+    a credential among them never reaches a rank.
     """
     from hyperloom.orchestrator.state.base_launch import session_server_base
 
-    from ._workload_envs import _operator_extra_env
-
+    pins, dropped = filter_untrusted_env_mapping(operator_extra_env(), allow_predicate=is_allowed_variant_env_key)
+    for name in dropped:
+        log.warning("Dropping extra_envs key %s before the multi-node server restart", name)
     unset = set(unset_envs)
-    merged = {k: v for k, v in {**session_server_base().env, **_operator_extra_env()}.items() if k not in unset}
+    merged = {k: v for k, v in {**session_server_base().env, **pins}.items() if k not in unset}
     merged.update({str(k): str(v) for k, v in (variant_envs or {}).items()})
     return merged
 

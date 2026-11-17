@@ -109,3 +109,13 @@ async def test_no_base_env_and_no_pin_forwards_only_the_variants_envs(monkeypatc
     await _restart_grid(tmp_path, GridVariant(name="v", extra_envs={"MORI_X": "1"}))
 
     assert forwarded == [{"MORI_X": "1"}]
+
+
+@pytest.mark.parametrize("restart", [_restart_baseline, _restart_grid], ids=["baseline", "grid"])
+async def test_a_credential_pin_never_reaches_the_server(monkeypatch, tmp_path, forwarded, restart):
+    _base(monkeypatch, {})
+    _pin(monkeypatch, OPENAI_API_KEY="placeholder", NCCL_IB_DISABLE="1")
+
+    await restart(tmp_path)
+
+    assert forwarded == [{"NCCL_IB_DISABLE": "1"}]
