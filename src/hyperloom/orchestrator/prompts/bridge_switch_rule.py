@@ -18,6 +18,6 @@ def bridge_switch_rule(*, gap_canonical_id: str, runtime_findings: str) -> list[
         f"  ``{'`` / ``'.join(sorted(RESTORED_PATH_RULES))}`` ``resolves_finding``) — MUST put the relaxed",
         "  branch behind its own environment switch that defaults OFF and declare it in ``framework_switches``",
         "  (``switch``, ``target``, ``evidence``); integration refuses an un-switched bridge before benching it.",
-        "  A switched bridge that misses the KEEP gate stays in the tree, dormant, as a lever explore turns on",
-        "  next to later changes; an un-switched one would be reverted and lost.",
+        "  A switched bridge that misses the KEEP gate stays in the tree, dormant, as a lever explore benches",
+        "  with the switch on next to the changes kept by then; an un-switched one would be reverted and lost.",
     ]

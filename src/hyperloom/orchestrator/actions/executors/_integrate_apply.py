@@ -321,12 +321,19 @@ class ApplyStageMixin:
         )
         if not bridge:
             return None
+        reason = f"bridge patch declares no framework_switches although {bridge}"
+        # The authored-lane retry renders only retry_feedback into the re-author's mandate.
+        refusal = ApplyFeedback(
+            patch=str(deliverable.patch_paths[0]),
+            channel="bridge_not_switch_gated",
+            stderr=f"Refused before benching: {reason}.\n{UNSWITCHED_BRIDGE_ADVISORY}",
+        )
         return await self._refuse_apply(
             attempt,
             params,
             "bridge_not_switch_gated",
-            f"bridge patch declares no framework_switches although {bridge}",
-            **_reauthor_fields(params, deliverable.patch_paths, advisory=UNSWITCHED_BRIDGE_ADVISORY),
+            reason,
+            **_reauthor_fields(params, deliverable.patch_paths, feedback=(refusal,)),
         )
 
     async def _resolve_apply_root(

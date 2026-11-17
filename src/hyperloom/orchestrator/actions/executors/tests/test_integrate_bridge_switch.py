@@ -7,10 +7,16 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
-from hyperloom.orchestrator.actions.executors._integrate_refusals import _unswitched_bridge_refusal
+from hyperloom.inference_optimizer.session.optimization_journal import Verdict
+from hyperloom.inference_optimizer.tests.conftest import make_coordinator
+from hyperloom.orchestrator.actions.executors._integrate_refusals import (
+    UNSWITCHED_BRIDGE_ADVISORY,
+    _unswitched_bridge_refusal,
+)
 from hyperloom.orchestrator.actions.executors.integrate_patch import IntegratePatchExecutor
 from hyperloom.orchestrator.loop.sub_agent_runner import RunnerContext
 from hyperloom.orchestrator.measurement.runtime_findings import RESTORED_PATH_RULES, restores_disabled_path
@@ -76,8 +82,18 @@ def test_the_task_params_gap_marks_a_bridge_too():
     assert refusal == "it bridges gap.static_recon.g1"
 
 
-@pytest.mark.asyncio
-async def test_executor_refuses_an_unswitched_bridge_before_benching(tmp_path, monkeypatch):
+BRIDGE_TASK = Task(
+    task_id="t-int-bridge",
+    kind="integrate_patch",
+    state="queued",
+    params={"specialist_task_id": "t-spec-bridge"},
+    idempotency_key="t-int-bridge",
+    requires_lanes=tuple(),
+)
+
+
+async def _integrate_unswitched_bridge(tmp_path, monkeypatch) -> dict:
+    """The integrate executor's result for an un-switched bridge patch, failing should it reach the benchmark."""
     session_dir = tmp_path / "session"
     workspace = session_dir / "runs" / "specialist" / "t-spec-bridge"
     workspace.mkdir(parents=True)
@@ -93,20 +109,32 @@ async def test_executor_refuses_an_unswitched_bridge_before_benching(tmp_path, m
     monkeypatch.setattr(executor, "_bench_patch", _should_not_benchmark)
     state = SharedState(gpu_type="mi355x")
     state.record_specialist_patch_verdict("t-spec-bridge", "approve")
-    task = Task(
-        task_id="t-int-bridge",
-        kind="integrate_patch",
-        state="queued",
-        params={"specialist_task_id": "t-spec-bridge"},
-        idempotency_key="t-int-bridge",
-        requires_lanes=tuple(),
-    )
-    result = await executor(RunnerContext(task=task, lease=None, extra={"shared_state": state}))
+    return await executor(RunnerContext(task=BRIDGE_TASK, lease=None, extra={"shared_state": state}))
+
+
+@pytest.mark.asyncio
+async def test_executor_refuses_an_unswitched_bridge_before_benching(tmp_path, monkeypatch):
+    result = await _integrate_unswitched_bridge(tmp_path, monkeypatch)
 
     assert (result["status"], result["error_class"]) == ("apply_failed", "bridge_not_switch_gated")
     assert result["error"] == f"bridge patch declares no framework_switches although it restores {GATE_FINDING}"
-    assert "defaults OFF" in result["advisory"]
-    assert result["prior_patches"] == [str(workspace / "001_gate.patch")]
+    assert result["prior_patches"] == [
+        str(tmp_path / "session" / "runs" / "specialist" / "t-spec-bridge" / "001_gate.patch")
+    ]
+
+
+@pytest.mark.asyncio
+async def test_a_refused_bridge_is_reauthored_knowing_why(tmp_path, monkeypatch):
+    """The settled refusal re-dispatches the author with the reason and the switch rule, not the prompt it already had."""
+    result = await _integrate_unswitched_bridge(tmp_path, monkeypatch)
+    coord = make_coordinator(tmp_path / "coord")
+
+    await coord.phase_framework.on_integrate_patch_settled(BRIDGE_TASK, SimpleNamespace(result=result), Verdict.FAILED)
+
+    (retry,) = [t for t in await coord.tasks.queued() if t.kind == "specialist"]
+    assert retry.params["task_kind"] == "explore_apply_retry"
+    assert f"Refused before benching: {result['error']}." in retry.params["notes"]
+    assert UNSWITCHED_BRIDGE_ADVISORY in retry.params["notes"]
 
 
 GATE_FINDINGS = f"runtime findings for server.log [sglang]\n- detected [perf_path] {GATE_FINDING} x1: Disabling it"
