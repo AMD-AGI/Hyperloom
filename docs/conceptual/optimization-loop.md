@@ -708,7 +708,8 @@ what an earlier turn happened to remember.
   Repetition is checked against state — the tested-variant ledger and
   the action-failure log — not against agent recall.
 
-Critic is likewise reactive and stateless per tick. Runtime RCA and automatic
+Critic is reactive and stateless per review turn, admitted only while a proposal
+awaits its verdict; idle ticks do not run the Critic. Runtime RCA and automatic
 supervision are not roles in this loop. Stopped sessions require an explicit
 operator `--resume-from` decision; `recover` reconstructs artifacts offline
 or, with `--confirm-scope-gone` / `--confirm-stopped`, records the cleanup

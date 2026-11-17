@@ -18,7 +18,7 @@ from hyperloom.orchestrator.state.task_registry import TaskSpec
 from .conftest import silent_backends
 
 _HOLD_PHASES = (ps.PHASE_PRELUDE, ps.PHASE_FRAMEWORK_AGENT, ps.PHASE_KERNEL_AGENT, ps.PHASE_SWEEP)
-_ONE_TURN_THEN_HOLD = ["orchestration", "critic", "critic", "critic"]
+_ONE_TURN_THEN_HOLD = ["orchestration"]
 
 
 @pytest.fixture
@@ -86,7 +86,7 @@ async def test_a_change_admits_one_orchestration_turn(ticking, change):
     await change(c)
     await c.tick(2)
 
-    assert turns == ["orchestration", "critic", "orchestration", "critic", "critic"]
+    assert turns == ["orchestration", "orchestration"]
 
 
 async def _defer_on_busy_lanes(c: Coordinator) -> None:
@@ -159,7 +159,7 @@ async def test_a_turn_that_fails_is_taken_again_on_the_next_tick(ticking, monkey
     c._backend_retry_at.clear()
     await c.tick(2)
 
-    assert turns == ["orchestration", "critic", "orchestration", "critic", "orchestration", "critic", "critic"]
+    assert turns == ["orchestration", "orchestration", "orchestration"]
 
 
 async def test_a_task_the_turn_itself_queues_does_not_wake_the_next_tick(ticking, monkeypatch):

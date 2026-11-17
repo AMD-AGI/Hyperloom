@@ -81,7 +81,7 @@ def test_an_iteration_reports_how_its_rulings_fell(tmp_path: Path) -> None:
 
 
 def test_a_pass_that_only_spoke_rules_on_nothing(tmp_path: Path) -> None:
-    """A heartbeat turn is the common case and must not read as a verdict."""
+    """A reviewed turn's idle message must not read as a verdict."""
     _record(tmp_path, iter_n=1, review={"review_verdicts": []}, emit=_emit("heartbeat", "ok (critic)"))
 
     (row,) = _iterations(tmp_path)
