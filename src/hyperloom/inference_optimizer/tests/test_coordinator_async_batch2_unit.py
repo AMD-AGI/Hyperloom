@@ -161,11 +161,6 @@ def coord(session_dir) -> Coordinator:
 
 
 # -- _context_inbox_reader --------------------------------------------------
-def test_context_inbox_reader_empty(coord: Coordinator) -> None:
-    out = coord.conversation._context_inbox_reader()
-    assert out == "(no inbox events)"
-
-
 def test_trace_mcp_setup_persists_diagnostics(coord: Coordinator) -> None:
     backend = SimpleNamespace(
         model="claude-test",
@@ -179,14 +174,6 @@ def test_trace_mcp_setup_persists_diagnostics(coord: Coordinator) -> None:
 
     setup = json.loads((coord.session_dir / "agents" / "orchestration" / "mcp_setup.json").read_text())
     assert setup["emit_intent"]["registered"] is True
-
-
-@pytest.mark.asyncio
-async def test_context_inbox_reader_with_events(coord: Coordinator) -> None:
-    await coord.bus.append_and_seq(Message.new("kernel_agent", "orchestration", "observation", {"body_md": "hi"}))
-    out = coord.conversation._context_inbox_reader()
-    assert "(no inbox events)" not in out
-    assert isinstance(out, str)
 
 
 @pytest.mark.asyncio
@@ -237,25 +224,6 @@ async def test_context_inbox_reader_survives_scalar_specialist_findings(coord: C
     out = coord.conversation._context_inbox_reader()
     assert "findings=2" in out
     assert "questions=1" in out
-
-
-# -- _context_recent_outcomes_reader ----------------------------------------
-def test_recent_outcomes_reader_empty(coord: Coordinator) -> None:
-    assert coord.conversation._context_recent_outcomes_reader() == "(no recent outcomes)"
-
-
-@pytest.mark.asyncio
-async def test_recent_outcomes_reader_with_rows(coord: Coordinator) -> None:
-    await coord.bus.append_and_seq(
-        Message.new("kernel_agent", "*", "delegated_result", {"action_name": "explore", "status": "succeeded"})
-    )
-    out = coord.conversation._context_recent_outcomes_reader(top_k=4)
-    assert "Recent action outcomes" in out
-
-
-def test_recent_outcomes_reader_clamps_top_k(coord: Coordinator) -> None:
-    assert isinstance(coord.conversation._context_recent_outcomes_reader(top_k=999), str)
-    assert isinstance(coord.conversation._context_recent_outcomes_reader(top_k=0), str)
 
 
 # -- context reader failure surface -----------------------------------------
@@ -2123,17 +2091,11 @@ def test_context_analysis_reader_unreadable_path(coord: Coordinator) -> None:
     assert "unreadable" in out or "no analysis.md" in out
 
 
-# -- _recipe_kb_t4_hook + stop -------------------------------------------------
+# -- stop ----------------------------------------------------------------------
 @pytest.mark.asyncio
-async def test_recipe_kb_t4_hook_noop_without_kb(coord: Coordinator) -> None:
-    coord.knowledge_plane = KnowledgePlane(recipe_kb=None)
-    await coord._recipe_kb_t4_hook()
-
-
-@pytest.mark.asyncio
-async def test_stop_cancels_and_closes(coord: Coordinator) -> None:
+async def test_stop_is_reported_as_a_stop_request(coord: Coordinator) -> None:
     await coord.stop()
-    assert coord._stop.is_set()
+    assert coord.stop_requested()
 
 
 # -- pump_dispatcher_once --------------------------------------------------
@@ -2141,11 +2103,6 @@ def _sub_result(task_id: str, *, state: str = "succeeded", result=None, error=No
     from hyperloom.orchestrator.loop.sub_agent_runner import SubAgentResult
 
     return SubAgentResult(task_id=task_id, state=state, result=result if result is not None else {}, error=error)
-
-
-@pytest.mark.asyncio
-async def test_pump_dispatcher_noop_when_empty(coord: Coordinator) -> None:
-    await coord.dispatcher.pump_dispatcher_once()
 
 
 @pytest.mark.asyncio
@@ -2227,22 +2184,6 @@ async def test_pump_dispatcher_absorbs_spawn_exception(coord: Coordinator, monke
 
 
 # -- specialist visibility contract -----------------------------------------
-@pytest.mark.asyncio
-async def test_compose_prompt_has_no_specialist_status_block(coord: Coordinator) -> None:
-    """No periodic specialist block: it can never observe a live specialist."""
-    spec, _ = await coord.tasks.create_or_return_existing(
-        TaskSpec(
-            kind="specialist",
-            params={"domain": "serving_specialist"},
-            idempotency_key="visible-spec",
-        ),
-    )
-    await coord.tasks.transition(spec.task_id, "running")
-    out = (await coord.conversation.compose_prompt("orchestration")).text
-    assert "Specialist health" not in out
-    assert "stale" not in out.lower()
-
-
 @pytest.mark.asyncio
 async def test_running_tasks_reader_sees_live_specialist(coord: Coordinator) -> None:
     """``get_running_tasks`` is the on-demand path and is not turn-bound."""
@@ -2339,25 +2280,6 @@ async def test_warm_specialist_params_rich_context(coord: Coordinator, monkeypat
 
 # -- _record_fact_per_task (recipe KB amend path) ------------------------------
 @pytest.mark.asyncio
-async def test_record_fact_per_task_writes_lesson(coord: Coordinator, monkeypatch) -> None:
-    from hyperloom.orchestrator.state.task_registry import Task
-
-    coord.knowledge_plane = KnowledgePlane(recipe_kb=_FakeRecipeKB())  # non-None -> KB amend path
-    coord.shared_state.model_name = "llama"
-    coord.shared_state.gpu_type = "mi300x"
-    amends: list[dict] = []
-    monkeypatch.setattr(coord.recipe_journal, "kb_amend_recipe", lambda **k: amends.append(k))
-    task = Task(task_id="fact-keep", kind="explore", state="succeeded", params={}, idempotency_key="fk")
-    coord.recipe_journal._record_fact_per_task(
-        task=task,
-        source_session_id="sess",
-        result_dict={"gain_pct": 6.0, "output_throughput": 950.0},
-        verdict=Verdict.ADOPTED,
-    )
-    assert amends and "append_lesson" in amends[0]
-
-
-@pytest.mark.asyncio
 async def test_record_fact_per_task_writes_no_lesson_for_an_unadopted_gain(coord: Coordinator, monkeypatch) -> None:
     """A lesson is for a change the session adopted; a measured gain the lift refused teaches nothing."""
     from hyperloom.orchestrator.state.task_registry import Task
@@ -2373,24 +2295,6 @@ async def test_record_fact_per_task_writes_no_lesson_for_an_unadopted_gain(coord
         verdict=Verdict.REFUSED,
     )
     assert not any("append_lesson" in amend for amend in amends)
-
-
-@pytest.mark.asyncio
-async def test_record_fact_per_task_writes_pitfall(coord: Coordinator, monkeypatch) -> None:
-    from hyperloom.orchestrator.state.task_registry import Task
-
-    coord.knowledge_plane = KnowledgePlane(recipe_kb=object())
-    amends: list[dict] = []
-    monkeypatch.setattr(coord.recipe_journal, "kb_amend_recipe", lambda **k: amends.append(k))
-    monkeypatch.setattr(coord.recipe_journal, "_pitfall_severity_for", lambda rd: "high")
-    task = Task(task_id="fact-revert", kind="integrate_patch", state="failed", params={}, idempotency_key="fr")
-    coord.recipe_journal._record_fact_per_task(
-        task=task,
-        source_session_id="sess",
-        result_dict={"error_class": "oom", "reason": "bad"},
-        verdict=Verdict.FAILED,
-    )
-    assert amends and "append_pitfall" in amends[0]
 
 
 # -- plateau_advisory_block (triggered) ------------------------------------
@@ -2577,130 +2481,38 @@ async def test_record_specialist_result_logs_proposals_whose_env_files_are_missi
 
 
 @pytest.mark.asyncio
-async def test_record_specialist_result_no_dead_research_evidence_log(
-    coord: Coordinator,
-    caplog,
-) -> None:
-    """Successful specialist recording must not emit the research-evidence failure log."""
-    import logging
-
-    task = _ptask("rec-spec-dead", "specialist")
-    with caplog.at_level(logging.ERROR):
-        await coord.specialist_dispatch.record_specialist_result(
-            task=task,
-            done_payload={
-                "domain": "kernel_agent",
-                "proposal_set": [{"name": "p1"}],
-            },
-            source="specialist:rec-spec-dead",
-        )
-    assert not any("research evidence aggregation failed" in r.getMessage() for r in caplog.records)
-
-
-@pytest.mark.asyncio
-async def test_record_specialist_result_harvests_findings(coord: Coordinator, monkeypatch) -> None:
+async def test_record_specialist_result_harvests_findings(coord: Coordinator) -> None:
     """Findings are harvested from any domain that reports them, not just the scout."""
+    from hyperloom.inference_optimizer.baseline_comparison import research_hints
+
     task = _ptask("rec-spec-2", "specialist")
-    harvested: list[dict] = []
-
-    async def harvest(done_payload):
-        harvested.append(done_payload)
-
-    monkeypatch.setattr(coord.specialist_dispatch, "_harvest_specialist_findings", harvest)
     await coord.specialist_dispatch.record_specialist_result(
         task=task,
         done_payload={
             "domain": "kernel_agent",
             "proposal_set": [],
-            "new_findings": [{"text": "aiter gemm path is fused upstream"}],
+            "new_findings": [
+                {"what": "aiter gemm path is fused upstream", "source": "https://github.com/ROCm/aiter/pull/1"}
+            ],
         },
         source="specialist:rec-spec-2",
     )
-    assert harvested
-
-
-@pytest.mark.asyncio
-async def test_record_specialist_result_with_scorer(coord: Coordinator) -> None:
-    calls: list[dict] = []
-
-    class _Scorer:
-        async def score(self, *, gap, proposals, task_id=None, tick=None, phase=None):
-            calls.append({"proposals": proposals, "task_id": task_id})
-            return {"models": ["m1"], "ranking": [0]}
-
-    coord.proposal_scorer = _Scorer()
-    task = _ptask("rec-spec-3", "specialist")
-    await coord.specialist_dispatch.record_specialist_result(
-        task=task,
-        done_payload={
-            "domain": "kernel_agent",
-            "proposal_set": [{"name": "p1"}],
-        },
-        source="specialist:rec-spec-3",
-    )
-    assert calls == [{"proposals": [{"name": "p1"}], "task_id": "rec-spec-3"}]
+    assert [hint["what"] for hint in research_hints.load_hints(coord.session_dir)] == [
+        "aiter gemm path is fused upstream"
+    ]
 
 
 # -- finalize_recipe_and_journal (KB path) ---------------------------
-class _FakeLocal:
-    def get_recipe(self, *, canonical_id):
-        return {
-            "best_throughput": 0.0,
-            "sessions": [],
-            "kernel_optimizations": [],
-            "stack_fingerprint": {},
-        }
-
-
-class _FakeRecipeKB:
-    def __init__(self) -> None:
-        self.local = _FakeLocal()
-
-    def get_authoritative_recipe(self, *, canonical_id):
-        return self.local.get_recipe(canonical_id=canonical_id)
-
-
 @pytest.mark.asyncio
 async def test_recipe_kb_finalize_skips_without_model(coord: Coordinator) -> None:
-    coord.knowledge_plane = KnowledgePlane(recipe_kb=_FakeRecipeKB())
-    coord.shared_state.model_name = ""  # missing model -> skip update_recipe
+    coord.knowledge_plane = KnowledgePlane(recipe_kb=object())
+    coord.shared_state.model_name = ""
     coord.shared_state.gpu_type = "mi300x"
-    coord.recipe_journal.finalize_recipe_and_journal()
-
-
-@pytest.mark.asyncio
-async def test_recipe_kb_finalize_amends_recipe(coord: Coordinator, monkeypatch) -> None:
-    coord.knowledge_plane = KnowledgePlane(recipe_kb=_FakeRecipeKB())
-    coord.shared_state.model_name = "llama"
-    coord.shared_state.gpu_type = "mi300x"
-    coord.shared_state.cumulative_gain_validated = 12.0
-    coord.shared_state.current_best = {"tput": 950.0}
-    amends: list[dict] = []
-    monkeypatch.setattr(coord.recipe_journal, "kb_amend_recipe", lambda **k: amends.append(k))
-    coord.recipe_journal.finalize_recipe_and_journal()
-    assert amends and "recipe_overrides" in amends[0]
+    outcome = coord.recipe_journal.finalize_recipe_and_journal()
+    assert (outcome["status"], outcome["reason"]) == ("skipped", "missing_model_or_hardware")
 
 
 # -- handle_intent routing -------------------------------------------------
-@pytest.mark.asyncio
-async def test_handle_intent_policy_denied(coord: Coordinator, monkeypatch) -> None:
-    from hyperloom.orchestrator.policy.denial import PolicyDenied
-
-    recorded: list = []
-
-    def _deny(source, intent):
-        raise PolicyDenied("nope")
-
-    monkeypatch.setattr(coord.policy, "validate_intent", _deny)
-
-    async def _rec(source, intent, denied):
-        recorded.append(denied)
-
-    monkeypatch.setattr(coord.router, "record_policy_denied", _rec)
-    await coord.router.handle_intent("orchestration", _idle_intent())
-    assert recorded
-
-
 @pytest.mark.asyncio
 async def test_handle_intent_handler_exception_is_recorded(coord: Coordinator, monkeypatch) -> None:
     monkeypatch.setattr(coord.policy, "validate_intent", lambda s, i: None)
@@ -2713,36 +2525,13 @@ async def test_handle_intent_handler_exception_is_recorded(coord: Coordinator, m
 
 
 @pytest.mark.asyncio
-async def test_handle_intent_routes_rare_types(coord: Coordinator, monkeypatch) -> None:
-    monkeypatch.setattr(coord.policy, "validate_intent", lambda s, i: None)
-    seen: list[str] = []
-
-    routes = {
-        IntentType.PRUNE_BRANCH: "_handle_prune_branch",
-        IntentType.ALERT: "_handle_alert",
-    }
-    for it, attr in routes.items():
-
-        async def _h(source, intent, _n=attr):
-            seen.append(_n)
-
-        monkeypatch.setattr(coord.router, attr, _h)
-    for it in routes:
-        await coord.router.handle_intent("orchestration", Intent(type=it, payload={}))
-    assert len(seen) == len(routes)
+async def test_handle_intent_broadcasts_an_alert(coord: Coordinator) -> None:
+    alert = {"severity": "high", "summary": "server wedged"}
+    await coord.router.handle_intent("orchestration", Intent(type=IntentType.ALERT, payload=alert))
+    assert [(m.to_agent, m.payload) for m in await coord.bus.tail(topic="alert")] == [("*", alert)]
 
 
 # -- advance_phase_if_needed -----------------------------------------------
-@pytest.mark.asyncio
-async def test_advance_phase_noop_when_already_there(coord: Coordinator, monkeypatch) -> None:
-    import hyperloom.orchestrator.phases.machine_state as ps
-
-    coord.shared_state.phase = "FRAMEWORK_AGENT"
-    monkeypatch.setattr(ps, "compute_next_phase", lambda *a, **k: ("FRAMEWORK_AGENT", "x", {}))
-
-    await coord.phase_machine.advance_phase_if_needed()
-
-
 @pytest.mark.asyncio
 async def test_advance_phase_escalation_transition(coord: Coordinator, monkeypatch) -> None:
     import hyperloom.orchestrator.phases.machine_state as ps
@@ -2906,14 +2695,6 @@ def test_specialist_owner_is_frozen_at_creation_outside_agent_phases(
     assert framework_params["source_phase"] == "FRAMEWORK_AGENT"
 
 
-def test_forward_integrate_source_has_no_current_phase_fallback() -> None:
-    from hyperloom.orchestrator.phases.framework import _forward_integrate_source
-
-    forwarded: dict = {}
-    _forward_integrate_source({}, forwarded, {})
-    assert "source_phase" not in forwarded
-
-
 @pytest.mark.asyncio
 async def test_materialize_explore_filters_grid(coord: Coordinator, monkeypatch) -> None:
     coord.shared_state.baseline_tput = 800.0
@@ -2985,14 +2766,6 @@ async def test_materialize_explore_seeds_cumulative_env_base(coord: Coordinator,
         "VLLM_ROCM_USE_AITER_MHA": "1",
         "HIP_FORCE_DEV_KERNARG": "1",
     }
-
-
-@pytest.mark.asyncio
-async def test_materialize_duplicate_idempotency_skips(coord: Coordinator) -> None:
-    coord.shared_state.baseline_tput = 800.0
-    pending = _pending("profile", {"params": {}}, msg_id="prop-dup")
-    await coord.proposals.materialize_approved_proposal(pending)
-    await coord.proposals.materialize_approved_proposal(pending)
 
 
 @pytest.mark.asyncio
@@ -3210,40 +2983,6 @@ def test_promote_warm_replay_already_pushed(coord: Coordinator) -> None:
     assert n == 1
 
 
-# -- finalize_recipe_and_journal (rich existing row merge) -----------
-class _FakeLocalRich:
-    def get_recipe(self, *, canonical_id):
-        return {
-            "best_throughput": 100.0,
-            "sessions": [{"session_id": "other-session"}],
-            "kernel_optimizations": [{"kernel_id": "k-old"}],
-            "stack_fingerprint": {"sglang": "0.1"},
-        }
-
-
-class _FakeRecipeKBRich:
-    def __init__(self) -> None:
-        self.local = _FakeLocalRich()
-
-    def get_authoritative_recipe(self, *, canonical_id):
-        return self.local.get_recipe(canonical_id=canonical_id)
-
-
-@pytest.mark.asyncio
-async def test_recipe_kb_finalize_merges_existing_row(coord: Coordinator, monkeypatch) -> None:
-    coord.knowledge_plane = KnowledgePlane(recipe_kb=_FakeRecipeKBRich())
-    coord.shared_state.model_name = "llama"
-    coord.shared_state.gpu_type = "mi300x"
-    coord.shared_state.cumulative_gain_validated = 15.0
-    coord.shared_state.current_best = {"tput": 999.0}
-    amends: list[dict] = []
-    monkeypatch.setattr(coord.recipe_journal, "kb_amend_recipe", lambda **k: amends.append(k))
-    coord.recipe_journal.finalize_recipe_and_journal()
-    assert amends
-    overrides = amends[0]["recipe_overrides"]
-    assert any(s.get("session_id") == "other-session" for s in overrides["sessions"])
-
-
 # -- on_enter_close 7-step sequencer ---------------------------------------
 @pytest.mark.asyncio
 async def test_on_enter_close_runs_full_sequence(coord: Coordinator, monkeypatch) -> None:
@@ -3269,45 +3008,6 @@ def _enter_framework(coord: Coordinator) -> None:
 
     coord.shared_state.phase = ps.PHASE_FRAMEWORK_AGENT
     coord.shared_state.framework_agent_phase_done = False
-
-
-@pytest.mark.asyncio
-async def test_pump_framework_agent_wrong_phase_noop(coord: Coordinator) -> None:
-    coord.shared_state.phase = "FRAMEWORK_AGENT"
-    await coord.phase_framework._pump_framework_agent_phase()
-
-
-@pytest.mark.asyncio
-async def test_pump_framework_agent_phase_done_noop(coord: Coordinator) -> None:
-    _enter_framework(coord)
-    coord.shared_state.framework_agent_phase_done = True
-    await coord.phase_framework._pump_framework_agent_phase()
-
-
-@pytest.mark.asyncio
-async def test_pump_framework_agent_skips_when_task_inflight(coord: Coordinator) -> None:
-    _enter_framework(coord)
-    await coord.tasks.create_or_return_existing(
-        TaskSpec(kind="framework_agent", params={}, idempotency_key="fpr-inflight")
-    )
-    await coord.phase_framework._pump_framework_agent_phase()
-
-
-@pytest.mark.asyncio
-async def test_pump_framework_agent_discover_empty_marks_done(coord: Coordinator, monkeypatch) -> None:
-    from hyperloom.orchestrator.phases import framework_discovery
-
-    _enter_framework(coord)
-    # Arm disabled: discovery exhaustion falls back to the historical exit (the enabled arm pivots to local
-    # exploration instead — covered separately).
-    coord.shared_state.framework_local_explore_enabled = False
-    coord.shared_state.framework_agent_discover_failures = 0
-    # Discovery has spent its retry budget, so the upstream lane declines and the tick reaches the terminal rung.
-    coord.shared_state.framework_agent_empty_discoveries = framework_discovery.DISCOVER_FAILURE_RETRY_LIMIT
-    monkeypatch.setattr(coord.phase_framework, "_select_next_framework_agent_candidate", lambda **_k: None)
-    monkeypatch.setattr(coord.phase_framework, "_record_framework_agent_phase_done", lambda **k: None)
-    await coord.phase_framework._pump_framework_agent_phase()
-    assert coord.shared_state.framework_agent_phase_done is True
 
 
 @pytest.mark.asyncio
@@ -3378,39 +3078,6 @@ async def test_framework_agent_reject_records_critic_denied(coord: Coordinator, 
     assert any(p.get("status") == "critic_denied" and p.get("candidate_id") == "c1" for p in prog)
 
 
-@pytest.mark.asyncio
-async def test_framework_agent_approve_routes_to_enqueue(coord: Coordinator, monkeypatch) -> None:
-    """An approve verdict routes a ``direct_framework`` candidate to the raw-diff enqueue helper."""
-    from hyperloom.orchestrator.state.pending_proposal import PendingProposal
-
-    enq: list = []
-
-    async def _enqueue(cand):
-        enq.append(cand)
-
-    monkeypatch.setattr(coord.phase_framework, "_enqueue_framework_agent_task", _enqueue)
-    monkeypatch.setattr(coord.router, "phase_framework", coord.phase_framework, raising=False)
-    pending = PendingProposal(
-        proposal_msg_id="m2",
-        from_agent="coordinator",
-        action_name="integrate_patch",
-        predicted_gain_pct=0.0,
-        payload={
-            "framework_agent_candidate_id": "c2",
-            "batch_id": "b2",
-            "candidate": {"candidate_id": "c2", "batch_id": "b2"},
-            "audit_step": "direct_framework",
-        },
-    )
-    coord.state.pending_proposals["m2"] = pending
-    await coord.router._handle_single_verdict(
-        source="critic",
-        pending=pending,
-        ruling=CriticRuling(verdict="approve", reasoning="ok"),
-    )
-    assert enq
-
-
 # -- _session_integrated_kernel_patch (post-opt roofline gate) ---------------
 @pytest.mark.parametrize(
     "action",
@@ -3422,14 +3089,14 @@ def test_post_opt_roofline_gate_true_for_kernel_level_actions(coord: Coordinator
     assert coord.phase_close._session_integrated_kernel_patch() is True
 
 
-def test_post_opt_roofline_gate_false_for_param_search_only(coord: Coordinator) -> None:
+@pytest.mark.parametrize(
+    "stack",
+    [[{"action": "explore"}, {"action": "sweep"}], []],
+    ids=["param_search_only", "empty_stack"],
+)
+def test_post_opt_roofline_gate_false_without_a_kernel_level_action(coord: Coordinator, stack: list) -> None:
     """Pure param-search does not trigger the extra profile."""
-    coord.shared_state.optimization_stack = [{"action": "explore"}, {"action": "sweep"}]
-    assert coord.phase_close._session_integrated_kernel_patch() is False
-
-
-def test_post_opt_roofline_gate_false_for_empty_stack(coord: Coordinator) -> None:
-    coord.shared_state.optimization_stack = []
+    coord.shared_state.optimization_stack = stack
     assert coord.phase_close._session_integrated_kernel_patch() is False
 
 

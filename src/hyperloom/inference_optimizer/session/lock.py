@@ -6,6 +6,7 @@
 from __future__ import annotations
 
 import errno
+import fcntl
 import json
 import logging
 import os
@@ -20,27 +21,6 @@ from hyperloom_common.timeutil import now_iso
 from . import session_paths
 
 log = logging.getLogger(__name__)
-
-try:  # POSIX runtime (Linux): authoritative flock-based exclusion.
-    import fcntl
-except ImportError:  # pragma: no cover - non-POSIX dev hosts (e.g. Windows).
-    fcntl = None  # type: ignore[assignment]
-
-
-def _pid_alive(pid: int | None) -> bool:
-    """Best-effort liveness probe for ``pid`` (used only on the fcntl-less path)."""
-    if not pid or pid <= 0:
-        return False
-    try:
-        os.kill(pid, 0)
-    except ProcessLookupError:
-        return False
-    except PermissionError:
-        # Exists but owned by another user — treat as alive.
-        return True
-    except OSError:
-        return False
-    return True
 
 
 class SessionAlreadyRunning(RuntimeError):
@@ -87,21 +67,14 @@ class SessionLock:
             if isinstance(exc, PermissionError):
                 raise PermissionError(exc.errno, f"{exc.strerror}: {self.path}{ownership(self.path)}") from exc
             raise
-        if fcntl is not None:
-            try:
-                fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
-            except OSError as exc:
-                owner = self._read_owner_fd(fd)
-                os.close(fd)
-                if exc.errno in (errno.EACCES, errno.EAGAIN, errno.EWOULDBLOCK):
-                    raise SessionAlreadyRunning(self.session_dir, owner) from exc
-                raise
-        else:  # pragma: no cover - non-POSIX fallback (no real exclusion).
+        try:
+            fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except OSError as exc:
             owner = self._read_owner_fd(fd)
-            owner_pid = owner.get("pid") if owner else None
-            if owner and owner_pid != os.getpid() and _pid_alive(owner_pid):
-                os.close(fd)
-                raise SessionAlreadyRunning(self.session_dir, owner)
+            os.close(fd)
+            if exc.errno in (errno.EACCES, errno.EAGAIN, errno.EWOULDBLOCK):
+                raise SessionAlreadyRunning(self.session_dir, owner) from exc
+            raise
         self._fd = fd
         owner = {
             "pid": os.getpid(),
@@ -116,9 +89,8 @@ class SessionLock:
         """Release the lock and close the fd. The file body is left in place."""
         if self._fd is None:
             return
-        if fcntl is not None:
-            with suppress(OSError):
-                fcntl.flock(self._fd, fcntl.LOCK_UN)
+        with suppress(OSError):
+            fcntl.flock(self._fd, fcntl.LOCK_UN)
         with suppress(OSError):
             os.close(self._fd)
         self._fd = None

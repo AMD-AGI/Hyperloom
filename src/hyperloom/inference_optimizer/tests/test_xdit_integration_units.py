@@ -35,23 +35,23 @@ class TestFrameworkRegistry:
         assert fr.throughput_unit("xdit") == "img/s"
         assert fr.throughput_unit("vllm") == "tok/s"
 
-    def test_registry_capability_fields(self):
-        assert fr.FRAMEWORKS["xdit"].repo_url == "https://github.com/xdit-project/xDiT.git"
-
     def test_unknown_falls_back_to_default(self):
         assert fr.extra_args_env("rust-burn") == fr.extra_args_env(fr.DEFAULT_FRAMEWORK)
         assert fr.is_scriptable("rust-burn") is False
 
 
 class TestFormatPrimaryMetric:
-    def test_serving_shows_aggregate_tok_s(self):
-        assert fr.format_primary_metric("sglang", 123.4) == "123.4 tok/s"
-        assert fr.format_primary_metric("vllm", 0.0) == "0.0 tok/s"
-
-    def test_serving_value_is_the_server_aggregate_not_divided_per_gpu(self):
-        # 768 requests x 1024 output tokens in 395.75 s on TP=4: the stored value is the server total.
-        aggregate = 768 * 1024 / 395.75
-        assert fr.format_primary_metric("sglang", aggregate) == "1987.2 tok/s"
+    @pytest.mark.parametrize(
+        ("framework", "aggregate", "shown"),
+        [
+            pytest.param("sglang", 123.4, "123.4 tok/s", id="sglang"),
+            pytest.param("vllm", 0.0, "0.0 tok/s", id="vllm-zero"),
+            # 768 requests x 1024 output tokens in 395.75 s on TP=4: the stored value is the server total.
+            pytest.param("sglang", 768 * 1024 / 395.75, "1987.2 tok/s", id="server-total-not-per-gpu"),
+        ],
+    )
+    def test_serving_shows_aggregate_tok_s(self, framework, aggregate, shown):
+        assert fr.format_primary_metric(framework, aggregate) == shown
 
     def test_xdit_shows_e2el_mean_ms_not_tok_s(self):
         # xDiT throughput is img/s; display equivalent per-image latency ms.
@@ -417,18 +417,19 @@ class TestLifecycleScriptableSkip:
 class TestRooflineSnapshotUnits:
     """The roofline snapshot table renders the achieved primary metric in the framework-correct unit (serving tok/s vs scriptable per-image ms)."""
 
-    def test_fmt_tput_serving_tok_s(self):
+    @pytest.mark.parametrize(
+        ("framework", "achieved", "cell"),
+        [
+            pytest.param("vllm", 123.0, "123.0 tok/s", id="serving"),
+            pytest.param("xdit", 0.15528, "6440.0 ms", id="scriptable"),
+        ],
+    )
+    def test_the_achieved_row_is_in_the_frameworks_unit(self, framework, achieved, cell):
         from hyperloom.inference_optimizer import roofline_snapshot as rs
 
-        assert rs._fmt_tput(123.0, "vllm") == "123.0 tok/s"
-        assert rs._fmt_tput(None, "vllm") == "—"
-
-    def test_fmt_tput_scriptable_renders_latency_ms(self):
-        from hyperloom.inference_optimizer import roofline_snapshot as rs
-
-        out = rs._fmt_tput(0.15528, "xdit")
-        assert out == "6440.0 ms"
-        assert "tok/s" not in out
+        snap = {"framework": framework, "achieved_tok_per_sec": achieved}
+        lines = rs.format_roofline_metrics_table({"mode": "single_snapshot", "baseline": snap})
+        assert f"| Achieved output_throughput | {cell} |" in lines
 
     def test_build_snapshot_carries_framework(self):
         from hyperloom.inference_optimizer import roofline_snapshot as rs

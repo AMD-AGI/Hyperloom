@@ -43,7 +43,6 @@ class PlugHost:
         self._impls: dict[str, Implementation] = {}
         self._started: dict[str, object] = {}
         self._order: list[str] = []
-        self._close_errors: dict[str, str] = {}
         self._lock = threading.RLock()
         self._begun = False
 
@@ -131,16 +130,11 @@ class PlugHost:
                 try:
                     closer()
                 except Exception as exc:  # re-raised once every started plug is closed, unless it is I/O
-                    self._close_errors[socket] = f"{type(exc).__name__}: {exc}"
                     log.warning("closing plug %s failed: %s", socket, exc, exc_info=True)
                     if first_error is None and not isinstance(exc, OSError):
                         first_error = exc
         if first_error is not None:
             raise first_error
-
-    def close_errors(self) -> Mapping[str, str]:
-        """Why each implementation that failed to close did."""
-        return dict(self._close_errors)
 
     def _report_lock_mismatches(self) -> None:
         for mismatch in self._manifest.lock_mismatches:

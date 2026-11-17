@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import pytest
+
 from hyperloom.agents.quantization.driver.assessment import (
     _parse_blocked_outcome,
     build_assessment,
@@ -16,40 +18,20 @@ from hyperloom.agents.quantization.driver.result_collector import collect_artifa
 # ─────────────────────────────────────────────────────────────────────────────
 
 
-def test_quark_root_missing_from_sdk_error(build_workspace):
+@pytest.mark.parametrize(
+    ("sdk_error", "expected"),
+    [
+        ("RuntimeError: QUARK_ROOT not set; quark_root missing", OutcomeId.quark_root_missing),
+        ("PermissionError: [Errno 13] cannot write to workspace /tmp/foo", OutcomeId.workspace_unwritable),
+        ("Quark skill.md missing at .claude/skills/quark-torch-ptq/SKILL.md", OutcomeId.quark_skill_unavailable),
+        ("anthropic.RateLimitError: 429 rate limit exceeded", OutcomeId.sdk_runtime_error),
+        ("Mysterious upstream error nobody has seen before", OutcomeId.unclassified_failure),
+    ],
+    ids=["quark_root_missing", "workspace_unwritable", "quark_skill_unavailable", "rate_limit", "unknown_error"],
+)
+def test_an_sdk_error_is_classified_by_its_text(build_workspace, sdk_error, expected):
     ws = build_workspace()
-    assert (
-        classify_attempt(collect_artifacts(ws), sdk_error="RuntimeError: QUARK_ROOT not set; quark_root missing")
-        == OutcomeId.quark_root_missing
-    )
-
-
-def test_workspace_unwritable_from_sdk_error(build_workspace):
-    ws = build_workspace()
-    assert (
-        classify_attempt(
-            collect_artifacts(ws), sdk_error="PermissionError: [Errno 13] cannot write to workspace /tmp/foo"
-        )
-        == OutcomeId.workspace_unwritable
-    )
-
-
-def test_quark_skill_unavailable_from_sdk_error(build_workspace):
-    ws = build_workspace()
-    assert (
-        classify_attempt(
-            collect_artifacts(ws), sdk_error="Quark skill.md missing at .claude/skills/quark-torch-ptq/SKILL.md"
-        )
-        == OutcomeId.quark_skill_unavailable
-    )
-
-
-def test_sdk_runtime_error_rate_limit(build_workspace):
-    ws = build_workspace()
-    assert (
-        classify_attempt(collect_artifacts(ws), sdk_error="anthropic.RateLimitError: 429 rate limit exceeded")
-        == OutcomeId.sdk_runtime_error
-    )
+    assert classify_attempt(collect_artifacts(ws), sdk_error=sdk_error) == expected
 
 
 # ───────────────────────────────────────────────────────────────────────────── explicit blocked.md outcome marker
@@ -89,93 +71,66 @@ def test_blocked_md_accepts_every_known_non_success_outcome():
 # ─────────────────────────────────────────────────────────────────────────────
 
 
-def test_analysis_missing_under_intake_phase(build_workspace):
+@pytest.mark.parametrize(
+    ("overrides", "expected"),
+    [
+        (
+            {"model_analysis": False, "quant_plan": False, "last_phase": "intake"},
+            OutcomeId.analysis_artifact_invalid_or_missing,
+        ),
+        ({"quant_plan": False, "last_phase": "plan"}, OutcomeId.plan_artifact_invalid_or_missing),
+        ({"last_phase": "manifest"}, OutcomeId.manifest_artifact_invalid_or_missing),
+    ],
+    ids=["analysis_under_intake", "plan_under_plan", "manifest_under_manifest"],
+)
+def test_a_missing_phase_artifact_is_named_by_the_last_phase(build_workspace, overrides, expected):
     ws = build_workspace(
         include_manifest=False,
         include_quantized_dir=False,
         include_validation_report=False,
         include_eval_report=False,
-        model_analysis=False,
-        quant_plan=False,
-        last_phase="intake",
+        **overrides,
     )
-    assert classify_attempt(collect_artifacts(ws)) == OutcomeId.analysis_artifact_invalid_or_missing
-
-
-def test_plan_missing_under_plan_phase(build_workspace):
-    ws = build_workspace(
-        include_manifest=False,
-        include_quantized_dir=False,
-        include_validation_report=False,
-        include_eval_report=False,
-        quant_plan=False,
-        last_phase="plan",
-    )
-    assert classify_attempt(collect_artifacts(ws)) == OutcomeId.plan_artifact_invalid_or_missing
-
-
-def test_manifest_missing_under_manifest_phase(build_workspace):
-    ws = build_workspace(
-        include_manifest=False,
-        include_quantized_dir=False,
-        include_validation_report=False,
-        include_eval_report=False,
-        last_phase="manifest",
-    )
-    assert classify_attempt(collect_artifacts(ws)) == OutcomeId.manifest_artifact_invalid_or_missing
+    assert classify_attempt(collect_artifacts(ws)) == expected
 
 
 # ───────────────────────────────────────────────────────────────────────────── MUST-have on quantized dir
 # ─────────────────────────────────────────────────────────────────────────────
 
 
-def test_must_have_weights_missing(build_workspace):
-    ws = build_workspace(include_weights=False, include_validation_report=False)
-    assert classify_attempt(collect_artifacts(ws)) == OutcomeId.must_have_weights_missing
-
-
-def test_must_have_config_missing(build_workspace):
-    ws = build_workspace(include_config=False, include_validation_report=False)
-    assert classify_attempt(collect_artifacts(ws)) == OutcomeId.must_have_config_missing_or_invalid
-
-
-def test_must_have_tokenizer_missing(build_workspace):
-    ws = build_workspace(include_tokenizer=False, include_validation_report=False)
-    assert classify_attempt(collect_artifacts(ws)) == OutcomeId.must_have_tokenizer_missing
+@pytest.mark.parametrize(
+    ("missing", "expected"),
+    [
+        ("include_weights", OutcomeId.must_have_weights_missing),
+        ("include_config", OutcomeId.must_have_config_missing_or_invalid),
+        ("include_tokenizer", OutcomeId.must_have_tokenizer_missing),
+    ],
+    ids=["weights", "config", "tokenizer"],
+)
+def test_a_missing_must_have_file_is_named(build_workspace, missing, expected):
+    ws = build_workspace(**{missing: False}, include_validation_report=False)
+    assert classify_attempt(collect_artifacts(ws)) == expected
 
 
 # ───────────────────────────────────────────────────────────────────────────── validator
 # ─────────────────────────────────────────────────────────────────────────────
 
 
-def test_validation_report_absent(build_workspace):
-    ws = build_workspace(include_validation_report=False)
-    assert classify_attempt(collect_artifacts(ws)) == OutcomeId.validation_report_absent
-
-
-def test_md5_fail(build_workspace):
-    ws = build_workspace(validation_tag="md5_fail")
-    assert classify_attempt(collect_artifacts(ws)) == OutcomeId.must_validate_md5_mismatch
-
-
-def test_config_fail(build_workspace):
-    ws = build_workspace(validation_tag="config_fail")
-    assert classify_attempt(collect_artifacts(ws)) == OutcomeId.must_validate_config_mismatch
-
-
-def test_fuzzy_fail(build_workspace):
-    ws = build_workspace(validation_tag="fuzzy_fail")
-    assert classify_attempt(collect_artifacts(ws)) == OutcomeId.fuzzy_check_failed
-
-
-def test_aux_fail(build_workspace):
-    ws = build_workspace(validation_tag="aux_fail")
-    assert classify_attempt(collect_artifacts(ws)) == OutcomeId.should_have_aux_missing
-
-
-def test_must_validate_skipped(build_workspace):
-    ws = build_workspace(validation_tag="must_validate_skipped")
-    assert classify_attempt(collect_artifacts(ws)) == OutcomeId.must_validate_skipped
+@pytest.mark.parametrize(
+    ("overrides", "expected"),
+    [
+        ({"include_validation_report": False}, OutcomeId.validation_report_absent),
+        ({"validation_tag": "md5_fail"}, OutcomeId.must_validate_md5_mismatch),
+        ({"validation_tag": "config_fail"}, OutcomeId.must_validate_config_mismatch),
+        ({"validation_tag": "fuzzy_fail"}, OutcomeId.fuzzy_check_failed),
+        ({"validation_tag": "aux_fail"}, OutcomeId.should_have_aux_missing),
+        ({"validation_tag": "must_validate_skipped"}, OutcomeId.must_validate_skipped),
+    ],
+    ids=["report_absent", "md5_fail", "config_fail", "fuzzy_fail", "aux_fail", "must_validate_skipped"],
+)
+def test_the_validation_report_decides_the_outcome(build_workspace, overrides, expected):
+    ws = build_workspace(**overrides)
+    assert classify_attempt(collect_artifacts(ws)) == expected
 
 
 # ───────────────────────────────────────────────────────────────────────────── eval
@@ -216,28 +171,18 @@ def test_eval_gap_exceeded(build_workspace):
     assert classify_attempt(collect_artifacts(ws), acceptable_eval_gap=0.03) == OutcomeId.eval_gap_exceeded
 
 
-def test_eval_env_unavailable(build_workspace):
-    ws = build_workspace(
-        include_eval_report=False,
-        eval_skipped_reason="docker not available",
-    )
-    assert classify_attempt(collect_artifacts(ws)) == OutcomeId.eval_env_unavailable
-
-
-def test_eval_oom(build_workspace):
-    ws = build_workspace(
-        include_eval_report=False,
-        eval_skipped_reason="quantized engine OOM on MI300X",
-    )
-    assert classify_attempt(collect_artifacts(ws)) == OutcomeId.eval_oom
-
-
-def test_quantized_load_failed_from_eval_skipped(build_workspace):
-    ws = build_workspace(
-        include_eval_report=False,
-        eval_skipped_reason="vLLM engine.start failed: quantized model can't load",
-    )
-    assert classify_attempt(collect_artifacts(ws)) == OutcomeId.quantized_load_failed
+@pytest.mark.parametrize(
+    ("reason", "expected"),
+    [
+        ("docker not available", OutcomeId.eval_env_unavailable),
+        ("quantized engine OOM on MI300X", OutcomeId.eval_oom),
+        ("vLLM engine.start failed: quantized model can't load", OutcomeId.quantized_load_failed),
+    ],
+    ids=["env_unavailable", "oom", "quantized_load_failed"],
+)
+def test_the_eval_skipped_reason_is_classified(build_workspace, reason, expected):
+    ws = build_workspace(include_eval_report=False, eval_skipped_reason=reason)
+    assert classify_attempt(collect_artifacts(ws)) == expected
 
 
 def test_eval_report_malformed_treated_as_env_unavailable(build_workspace):
@@ -251,70 +196,23 @@ def test_eval_report_malformed_treated_as_env_unavailable(build_workspace):
 # ─────────────────────────────────────────────────────────────────────────────
 
 
-def test_exec_oom_via_sdk_error_under_exec_phase(build_workspace):
-    build_workspace(
-        include_manifest=False,
-        include_quantized_dir=False,
-        include_validation_report=False,
-        include_eval_report=False,
-        last_phase="exec",
-    )
-    # Test the phase-tagged sdk_error path with manifest present but quantized dir absent.
-    ws2 = build_workspace(
-        include_quantized_dir=False,
-        include_validation_report=False,
-        include_eval_report=False,
-        last_phase="exec",
-    )
-    assert (
-        classify_attempt(collect_artifacts(ws2), sdk_error="torch.OutOfMemoryError: CUDA out of memory")
-        == OutcomeId.exec_oom
-    )
-
-
-def test_export_crashed_via_sdk_error(build_workspace):
+@pytest.mark.parametrize(
+    ("last_phase", "sdk_error", "expected"),
+    [
+        ("exec", "torch.OutOfMemoryError: CUDA out of memory", OutcomeId.exec_oom),
+        ("export", "OSError: [Errno 28] No space left on device during save_pretrained", OutcomeId.export_crashed),
+        ("exec", "RuntimeError: calibration dataloader returned 0 samples", OutcomeId.exec_calibration_data_missing),
+    ],
+    ids=["exec_oom", "export_crashed", "exec_calibration_data_missing"],
+)
+def test_a_phase_tagged_sdk_error_is_classified(build_workspace, last_phase, sdk_error, expected):
     ws = build_workspace(
         include_quantized_dir=False,
         include_validation_report=False,
         include_eval_report=False,
-        last_phase="export",
+        last_phase=last_phase,
     )
-    assert (
-        classify_attempt(
-            collect_artifacts(ws), sdk_error="OSError: [Errno 28] No space left on device during save_pretrained"
-        )
-        == OutcomeId.export_crashed
-    )
-
-
-def test_exec_calibration_data_missing_via_sdk_error(build_workspace):
-    ws = build_workspace(
-        include_quantized_dir=False,
-        include_validation_report=False,
-        include_eval_report=False,
-        last_phase="exec",
-    )
-    assert (
-        classify_attempt(collect_artifacts(ws), sdk_error="RuntimeError: calibration dataloader returned 0 samples")
-        == OutcomeId.exec_calibration_data_missing
-    )
-
-
-# ───────────────────────────────────────────────────────────────────────────── fallback
-# ─────────────────────────────────────────────────────────────────────────────
-
-
-def test_unclassified_failure_when_unknown_sdk_error(build_workspace):
-    ws = build_workspace()
-    assert (
-        classify_attempt(collect_artifacts(ws), sdk_error="Mysterious upstream error nobody has seen before")
-        == OutcomeId.unclassified_failure
-    )
-
-
-def test_clean_success_returns_none(build_workspace):
-    ws = build_workspace()
-    assert classify_attempt(collect_artifacts(ws)) is None
+    assert classify_attempt(collect_artifacts(ws), sdk_error=sdk_error) == expected
 
 
 # ───────────────────────────────────────────────────────────────────────────── Assessment assembly
@@ -361,59 +259,40 @@ def test_assessment_to_dict_roundtrip(build_workspace):
 # ─────────────────────────────────────────────────────────────────────────────
 
 
-def test_derive_status_clean_success(build_workspace):
-    ws = build_workspace()
+@pytest.mark.parametrize(
+    ("overrides", "final", "expected"),
+    [
+        ({}, None, "success"),
+        ({}, OutcomeId.eval_gap_accepted, "success"),
+        ({"validation_tag": "md5_fail"}, OutcomeId.must_validate_md5_mismatch, "failed"),
+        ({}, OutcomeId.eval_gap_exceeded, "partial"),
+        (
+            {"include_eval_report": False, "eval_skipped_reason": "docker missing"},
+            OutcomeId.eval_env_unavailable,
+            "partial",
+        ),
+        ({}, OutcomeId.unclassified_failure, "failed"),
+    ],
+    ids=[
+        "clean_success",
+        "eval_gap_accepted_is_success",
+        "md5_mismatch_failed",
+        "eval_gap_exceeded_partial",
+        "eval_env_unavailable_is_partial",
+        "unclassified_is_failed",
+    ],
+)
+def test_derive_status_follows_the_final_outcome(build_workspace, overrides, final, expected):
+    ws = build_workspace(**overrides)
     art = collect_artifacts(ws)
-    a = build_assessment([None], artifacts=art)
-    assert derive_status(a, art) == "success"
+    a = build_assessment([final], artifacts=art)
+    assert derive_status(a, art) == expected
 
 
-def test_derive_status_eval_gap_accepted_is_success(build_workspace):
-    ws = build_workspace()
-    art = collect_artifacts(ws)
-    a = build_assessment([OutcomeId.eval_gap_accepted], artifacts=art)
-    assert derive_status(a, art) == "success"
-
-
-def test_derive_status_md5_mismatch_failed(build_workspace):
-    ws = build_workspace(validation_tag="md5_fail")
-    art = collect_artifacts(ws)
-    a = build_assessment([OutcomeId.must_validate_md5_mismatch], artifacts=art)
-    assert derive_status(a, art) == "failed"
-
-
-def test_derive_status_eval_gap_exceeded_partial(build_workspace):
-    ws = build_workspace()
-    art = collect_artifacts(ws)
-    a = build_assessment([OutcomeId.eval_gap_exceeded], artifacts=art)
-    assert derive_status(a, art) == "partial"
-
-
-def test_derive_status_must_validate_skipped_strict(build_workspace, monkeypatch):
-    monkeypatch.setenv("HYPERLOOM_QUANT_STRICT_VALIDATION", "1")
+@pytest.mark.parametrize(("strict", "expected"), [("1", "failed"), ("0", "partial")], ids=["strict", "lenient"])
+def test_derive_status_must_validate_skipped(build_workspace, monkeypatch, strict, expected):
+    monkeypatch.setenv("HYPERLOOM_QUANT_STRICT_VALIDATION", strict)
     ws = build_workspace(validation_tag="must_validate_skipped")
     art = collect_artifacts(ws)
     a = build_assessment([OutcomeId.must_validate_skipped], artifacts=art)
-    assert derive_status(a, art) == "failed"
-
-
-def test_derive_status_must_validate_skipped_lenient(build_workspace, monkeypatch):
-    monkeypatch.setenv("HYPERLOOM_QUANT_STRICT_VALIDATION", "0")
-    ws = build_workspace(validation_tag="must_validate_skipped")
-    art = collect_artifacts(ws)
-    a = build_assessment([OutcomeId.must_validate_skipped], artifacts=art)
-    assert derive_status(a, art) == "partial"
-
-
-def test_derive_status_eval_env_unavailable_is_partial(build_workspace):
-    ws = build_workspace(include_eval_report=False, eval_skipped_reason="docker missing")
-    art = collect_artifacts(ws)
-    a = build_assessment([OutcomeId.eval_env_unavailable], artifacts=art)
-    assert derive_status(a, art) == "partial"
-
-
-def test_derive_status_unclassified_is_failed(build_workspace):
-    ws = build_workspace()
-    art = collect_artifacts(ws)
-    a = build_assessment([OutcomeId.unclassified_failure], artifacts=art)
-    assert derive_status(a, art) == "failed"
+    assert derive_status(a, art) == expected

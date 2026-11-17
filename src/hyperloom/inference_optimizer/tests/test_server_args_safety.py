@@ -10,16 +10,17 @@ import pytest
 from hyperloom.inference_optimizer.multi_node._internal import server_args_safety as sas
 
 
-def test_allows_normal_perf_flags():
-    sas.validate_server_args("--mem-fraction-static 0.9 --moe-runner-backend aiter")
-
-
-def test_allows_max_model_len():
-    sas.validate_server_args("--max-model-len 8192")
-
-
-def test_allows_speculative_config_json():
-    sas.validate_server_args('--speculative-config {"method":"deepseek_mtp"}')
+@pytest.mark.parametrize(
+    "args",
+    [
+        pytest.param("--mem-fraction-static 0.9 --moe-runner-backend aiter", id="perf-flags"),
+        pytest.param("--max-model-len 8192", id="max-model-len"),
+        pytest.param('--speculative-config {"method":"deepseek_mtp"}', id="speculative-config-json"),
+        pytest.param("--speculative-draft-model-path=/wekafs/models/draft", id="draft-model-path-equals-form"),
+    ],
+)
+def test_allows_normal_perf_flags(args: str):
+    sas.validate_server_args(args)
 
 
 def test_allows_speculative_draft_model_path():
@@ -29,10 +30,6 @@ def test_allows_speculative_draft_model_path():
         "--speculative-algorithm EAGLE3 --speculative-draft-model-path /wekafs/models/draft --speculative-num-steps 3"
     )
     assert not sas.is_denied_server_flag("--speculative-draft-model-path")
-
-
-def test_allows_speculative_draft_model_path_equals_form():
-    sas.validate_server_args("--speculative-draft-model-path=/wekafs/models/draft")
 
 
 @pytest.mark.parametrize(

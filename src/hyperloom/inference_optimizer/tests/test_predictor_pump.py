@@ -85,9 +85,15 @@ async def _auto_bench_grid(state: SharedState) -> list[dict[str, Any]]:
         created.append(vars(spec))
         return SimpleNamespace(task_id="t1"), False
 
-    tasks = SimpleNamespace(queued=_none, running=_none, create_or_return_existing=_create)
+    tasks = SimpleNamespace(
+        queued=_none,
+        running=_none,
+        queued_context_sync=list,
+        running_context_sync=list,
+        with_key_prefix_sync=lambda kind, key_prefix: [],
+        create_or_return_existing=_create,
+    )
     dispatcher = SimpleNamespace(
-        admission_frozen=False,
         dispatch_paused_for_phase_budget=lambda: False,
         registry_lanes_ttl=lambda kind: (["benchmark_lane"], 1800),
     )
@@ -233,6 +239,22 @@ async def test_a_predictor_row_already_in_a_grid_is_named_not_offered_again(serv
     assert (
         lines[-1]
         == f"Predictor rows already in a queued or running explore grid, not to be copied again: {held['name']}"
+    )
+
+
+async def test_a_predictor_row_a_finished_automatic_grid_carried_is_named_not_offered(service):
+    state = _state()
+    service.answer = _answer(
+        Action(server_args={"--kv-cache-dtype": "fp8"}), Action(server_args={"--max-num-seqs": 128}), votes={0: 2, 1: 1}
+    )
+    await _ask_and_file(_pump(), state)
+    carried, offered = state.untested_proposal_rows()
+
+    lines = queue_block(state, carried={carried["fingerprint"]}).splitlines()
+    assert [line.split()[1] for line in lines if line.startswith("• ")] == [offered["name"]]
+    assert lines[-1] == (
+        "Predictor rows an automatic explore grid carried to its end without a verdict; the Coordinator does not "
+        f"bench them again: {carried['name']}"
     )
 
 

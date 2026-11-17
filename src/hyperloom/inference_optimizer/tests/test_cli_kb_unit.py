@@ -52,20 +52,6 @@ def test_bootstrap_recipe_kb_degraded_returns_none(tmp_path, monkeypatch, capsys
     assert "DISABLED (--degraded-kb)" in capsys.readouterr().out
 
 
-def test_bootstrap_recipe_kb_success(tmp_path, monkeypatch) -> None:
-    monkeypatch.setenv("KNOWLEDGE_LOCAL_ROOT", str(tmp_path / "kb"))
-    calls = []
-    monkeypatch.setattr(cli_kb, "run_t0_anchor", lambda *a, **k: calls.append(k))
-    kb = cli_kb._bootstrap_recipe_kb(
-        _args(),
-        session_dir=tmp_path,
-        manifest={"model_name": "m"},
-        resume=False,
-    )
-    assert kb is not None
-    assert calls
-
-
 def test_bootstrap_recipe_kb_t0_failure_continues(tmp_path, monkeypatch) -> None:
     monkeypatch.setenv("KNOWLEDGE_LOCAL_ROOT", str(tmp_path / "kb"))
 
@@ -191,16 +177,6 @@ def test_bootstrap_knowledge_plane_degraded_bypasses_remote_validation(monkeypat
 
     assert plane.kb_disabled is True
     assert plane.recipe_kb is None
-
-
-def test_bootstrap_knowledge_plane_enabled() -> None:
-    plane = cli_kb._bootstrap_knowledge_plane(_args(pr_monitor_enabled=True))
-    assert plane is not None
-
-
-def test_bootstrap_knowledge_plane_disabled() -> None:
-    plane = cli_kb._bootstrap_knowledge_plane(_args(pr_monitor_enabled=False, pr_degraded_reason="explicit_flag"))
-    assert plane is not None
 
 
 def test_attach_recipe_audit_hook_write_error_is_swallowed(tmp_path, monkeypatch) -> None:

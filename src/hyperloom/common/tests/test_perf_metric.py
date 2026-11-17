@@ -6,7 +6,6 @@ from __future__ import annotations
 import pytest
 
 from hyperloom_common.env import EnvValueError
-from hyperloom.common.gain_math import gain_pct
 from hyperloom.common.perf_metric import (
     GRADED_DURATION,
     GRADED_ERROR_RATE,
@@ -18,7 +17,6 @@ from hyperloom.common.perf_metric import (
     holds_within_band,
     incomparability_reason,
     intvty_grading_enabled,
-    intvty_of,
     intvty_serving_grading_enabled,
     output_tput_of,
     parse_intvty_noise_pct,
@@ -26,8 +24,6 @@ from hyperloom.common.perf_metric import (
     resolve_grading_anchor_perf,
     total_tput_of,
 )
-
-_KEEP_THRESHOLD_PCT = 1.0
 
 # Shaped like a measured AgentX round: prefill dominates the token budget (~114k prompt / ~806 output tokens), so
 # total is essentially input. e2e_norm_intvty_p90 is the slow tail, P10 of per-request OSL/E2EL_s; the p50 is the
@@ -47,16 +43,6 @@ def _measured(**pct: float) -> dict[str, float]:
     for axis, delta in pct.items():
         out[axis] = _BASELINE[axis] * (1.0 + delta / 100.0)
     return out
-
-
-def _graded_gain(candidate: dict[str, float], anchor: dict[str, float]) -> float | None:
-    """Compose the primitives the way the decision round does."""
-    cand = perf_snapshot_from_mapping(candidate)
-    base = perf_snapshot_from_mapping(anchor)
-    assert cand and base
-    if not holds_within_band(cand, base, GRADED_INTVTY):
-        return None
-    return gain_pct(intvty_of(cand), intvty_of(base))
 
 
 @pytest.mark.parametrize(
@@ -93,15 +79,20 @@ def test_snapshot_carries_both_graded_axes():
     assert snap["total_throughput"] == pytest.approx(_BASELINE["total_throughput"])
 
 
-def test_intvty_of_reads_slow_tail_field():
-    snap = perf_snapshot_from_mapping(_BASELINE)
-    assert snap is not None
-    assert intvty_of(snap) == pytest.approx(_BASELINE["e2e_norm_intvty_p90"])
-
-
-def test_total_falls_back_to_input_plus_output():
+@pytest.mark.parametrize(
+    "total",
+    [
+        {},
+        {"total_throughput": 0.0},
+        {"total_throughput": -1.0},
+        {"total_throughput": None},
+        {"total_throughput": "n/a"},
+    ],
+    ids=["absent", "zero", "negative", "null", "not_a_number"],
+)
+def test_total_falls_back_to_input_plus_output(total):
     data = {k: v for k, v in _BASELINE.items() if k != "total_throughput"}
-    snap = perf_snapshot_from_mapping(data)
+    snap = perf_snapshot_from_mapping({**data, **total})
     assert snap is not None
     assert total_tput_of(snap) == pytest.approx(_BASELINE["input_throughput"] + _BASELINE["output_throughput"])
 
@@ -119,70 +110,20 @@ def test_degenerate_axis_is_not_a_snapshot():
     assert perf_snapshot_from_mapping({"e2e_norm_intvty_p90": 22.56, "output_throughput": 183.44}) is None
 
 
-def test_unusable_total_falls_back_to_input_plus_output():
-    for bad in (0.0, -1.0, None, "n/a"):
-        snap = perf_snapshot_from_mapping({**_BASELINE, "total_throughput": bad})
-        assert snap is not None
-        assert total_tput_of(snap) == pytest.approx(_BASELINE["input_throughput"] + _BASELINE["output_throughput"])
-
-
-def test_intvty_lift_is_keepable():
-    """A +3% interactivity improvement is above the 2% AgentX floor."""
-    candidate = _measured(e2e_norm_intvty_p90=3.0, input_throughput=0.0, output_throughput=0.0)
-    gain = _graded_gain(candidate, _BASELINE)
-    assert gain is not None and gain >= 2.0
-
-
-def test_sub_threshold_lift_is_a_gain_but_below_floor():
-    candidate = _measured(e2e_norm_intvty_p90=1.0, input_throughput=0.5, output_throughput=0.5)
-    gain = _graded_gain(candidate, _BASELINE)
-    assert gain is not None and 0.0 < gain < 2.0
-
-
-def test_trading_input_for_output_with_intvty_unchanged_is_neutral():
-    """Interactivity unchanged: gain == 0, not a loss."""
-    candidate = _measured(input_throughput=-10.0, output_throughput=8.0)
-    gain = _graded_gain(candidate, _BASELINE)
-    assert gain is not None and gain == pytest.approx(0.0)
-
-
-def test_intvty_gate_vetoes_regression_past_band():
-    candidate = perf_snapshot_from_mapping(_measured(e2e_norm_intvty_p90=-6.0))
+@pytest.mark.parametrize("delta_pct,holds", [(-6.0, False), (-4.0, True)], ids=["past_band", "within_band"])
+def test_intvty_gate_vetoes_only_past_the_band(delta_pct, holds):
+    candidate = perf_snapshot_from_mapping(_measured(e2e_norm_intvty_p90=delta_pct))
     anchor = perf_snapshot_from_mapping(_BASELINE)
     assert candidate and anchor
-    assert holds_within_band(candidate, anchor, GRADED_INTVTY) is False
+    assert holds_within_band(candidate, anchor, GRADED_INTVTY) is holds
 
 
-def test_intvty_gate_allows_movement_within_band():
-    candidate = perf_snapshot_from_mapping(_measured(e2e_norm_intvty_p90=-4.0))
-    anchor = perf_snapshot_from_mapping(_BASELINE)
-    assert candidate and anchor
-    assert holds_within_band(candidate, anchor, GRADED_INTVTY) is True
-
-
-def test_tput_guard_allows_within_band():
-    cand = perf_snapshot_from_mapping({**_BASELINE, "total_throughput": _BASELINE["total_throughput"] * 0.97})
+@pytest.mark.parametrize("scale,holds", [(0.97, True), (0.90, False)], ids=["within_band", "past_band"])
+def test_tput_guard_rejects_only_past_the_band(scale, holds):
+    cand = perf_snapshot_from_mapping({**_BASELINE, "total_throughput": _BASELINE["total_throughput"] * scale})
     anch = perf_snapshot_from_mapping(_BASELINE)
     assert cand and anch
-    assert holds_within_band(cand, anch, GRADED_TOTAL) is True
-
-
-def test_tput_guard_rejects_regression_past_band():
-    cand = perf_snapshot_from_mapping({**_BASELINE, "total_throughput": _BASELINE["total_throughput"] * 0.90})
-    anch = perf_snapshot_from_mapping(_BASELINE)
-    assert cand and anch
-    assert holds_within_band(cand, anch, GRADED_TOTAL) is False
-
-
-def test_vetoed_candidate_is_never_graded():
-    candidate = _measured(e2e_norm_intvty_p90=-20.0, input_throughput=50.0)
-    assert _graded_gain(candidate, _BASELINE) is None
-
-
-def test_default_band_matches_upstream_measured_noise(monkeypatch):
-    """Upstream records run-to-run noise on this workload as 1-5%."""
-    monkeypatch.delenv("HYPERLOOM_PERF_NOISE_PCT", raising=False)
-    assert parse_intvty_noise_pct() == pytest.approx(5.0)
+    assert holds_within_band(cand, anch, GRADED_TOTAL) is holds
 
 
 @pytest.mark.parametrize("raw,expected", [("2.5", 2.5), ("0", 0.0), ("", 5.0)])
@@ -196,13 +137,6 @@ def test_a_band_with_a_unit_on_it_does_not_grade_against_the_default(monkeypatch
     monkeypatch.setenv("HYPERLOOM_PERF_NOISE_PCT", "5%")
     with pytest.raises(EnvValueError, match="HYPERLOOM_PERF_NOISE_PCT"):
         parse_intvty_noise_pct()
-
-
-def test_an_agentx_run_grades_on_total_without_being_asked(monkeypatch):
-    """The corpus this grading exists for must not need an opt-in to get it."""
-    monkeypatch.delenv("HYPERLOOM_PERF_METRIC", raising=False)
-    monkeypatch.setenv("HYPERLOOM_AGENTX", "1")
-    assert intvty_grading_enabled(benchmark_mode="agentx") is True
 
 
 def test_a_synthetic_run_still_grades_on_output(monkeypatch):

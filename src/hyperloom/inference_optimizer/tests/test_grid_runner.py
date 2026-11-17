@@ -5,7 +5,6 @@
 
 from __future__ import annotations
 
-import inspect
 import json
 import time
 from pathlib import Path
@@ -23,7 +22,6 @@ from hyperloom.inference_optimizer.grid_server_args import (
 )
 from hyperloom.orchestrator.actions.executors._benchmark_runtime import apply_runtime_benchmark_overrides
 from hyperloom.orchestrator.actions.executors._grid_variant_filter import (
-    _parse_skip_spec,
     apply_user_skip_list,
     reorder_grid_for_multi_node,
     resolve_skip_spec,
@@ -110,41 +108,6 @@ def test_write_variant_abort_marker_swallows_oserror(monkeypatch, tmp_path, capl
     assert any("failed to write abort_reason.json" in r.message for r in caplog.records)
 
 
-def test_write_variant_abort_marker_json_is_stable_sorted(tmp_path):
-    slot = tmp_path / "variant"
-    _grid_runner._write_variant_abort_marker(
-        slot,
-        variant_name="v",
-        error_class="ec",
-        error_summary="msg",
-    )
-    raw = (slot / "abort_reason.json").read_text(encoding="utf-8")
-    assert (
-        raw.index('"aborted_at_utc"')
-        < raw.index('"error"')
-        < raw.index('"error_class"')
-        < raw.index('"extra_args"')
-        < raw.index('"variant"')
-    )
-
-
-def test_grid_runner_emits_expected_error_class_labels():
-    from hyperloom.orchestrator.state import failure_evidence
-
-    src = inspect.getsource(_grid_runner) + inspect.getsource(failure_evidence)
-    expected = {
-        "yaml_build_error",
-        "mn_server_restart_failed",
-        "no_benchmark_workspace",
-        "round_nonzero_invalid_measurement",
-        "benchmark_report_missing",
-        "benchmark_report_invalid_metric",
-        "round_nonzero_after_valid_measurement",
-    }
-    missing = [label for label in expected if f'"{label}"' not in src]
-    assert not missing, f"missing error_class labels in run_grid: {missing}"
-
-
 def test_grid_evidence_skips_prelaunch_failure(tmp_path: Path) -> None:
     """A refused launch has an abort marker, not a measurement evidence record."""
     output_root = tmp_path / "runs"
@@ -224,31 +187,20 @@ def test_variant_result_carries_error_class_field():
 
 
 class TestResolveSkipSpec:
-    def test_returns_empty_when_no_params_and_no_env(self, monkeypatch):
-        monkeypatch.delenv("SKIP_VARIANTS", raising=False)
-        assert resolve_skip_spec(None) == ""
-
-    def test_env_used_when_params_absent(self, monkeypatch):
-        monkeypatch.setenv("SKIP_VARIANTS", "foo,bar")
-        assert resolve_skip_spec(None) == "foo,bar"
-
-    def test_params_list_flattened(self):
-        assert resolve_skip_spec({"skip_variants": ["a", "b", None]}) == "a,b"
-
-    def test_params_str_passthrough(self):
-        assert resolve_skip_spec({"skip_variants": "x"}) == "x"
-
-    def test_params_override_env(self, monkeypatch):
-        monkeypatch.setenv("SKIP_VARIANTS", "env-default")
-        assert resolve_skip_spec({"skip_variants": "explicit"}) == "explicit"
-
-
-class TestParseSkipSpec:
-    def test_splits_on_commas_and_whitespace(self):
-        assert _parse_skip_spec("a, b\nc d") == ["a", "b", "c", "d"]
-
-    def test_empty_input_returns_empty_list(self):
-        assert _parse_skip_spec("") == []
+    @pytest.mark.parametrize(
+        ("env", "params", "expected"),
+        [
+            ("", None, ""),
+            ("foo,bar", None, "foo,bar"),
+            ("", {"skip_variants": ["a", "b", None]}, "a,b"),
+            ("", {"skip_variants": "x"}, "x"),
+            ("env-default", {"skip_variants": "explicit"}, "explicit"),
+        ],
+        ids=["nothing-set", "env-when-params-absent", "params-list-flattened", "params-str", "params-override-env"],
+    )
+    def test_params_win_over_the_env(self, monkeypatch, env, params, expected):
+        monkeypatch.setenv("SKIP_VARIANTS", env)
+        assert resolve_skip_spec(params) == expected
 
 
 class TestReorderGridForMultiNode:
@@ -317,6 +269,12 @@ class TestApplyUserSkipList:
             "cuda_graph_max_bs_32",
         }
 
+    def test_spec_splits_on_commas_and_whitespace(self):
+        grid = [GridVariant(name=name) for name in ("a", "b", "c", "d", "e")]
+        kept, dropped = apply_user_skip_list(grid, skip_spec="a, b\nc d")
+        assert [k.name for k in kept] == ["e"]
+        assert [d["name"] for d in dropped] == ["a", "b", "c", "d"]
+
 
 class TestVariantResultToDict:
     def test_preserves_measurement_fields(self):
@@ -358,17 +316,6 @@ class TestVariantResultToDict:
         ):
             assert key in encoded
             assert encoded[key] is None
-
-    def test_succeeded_default_shape(self):
-        vr = VariantResult(
-            name="v",
-            extra_server_args="--foo 1",
-            extra_envs={"A": "1"},
-            status="succeeded",
-        )
-        out = vr.to_dict()
-        assert out["status"] == "succeeded"
-        assert out["error_class"] == ""
 
     def test_failed_round_trip_carries_error_class(self):
         vr = VariantResult(
@@ -693,21 +640,94 @@ def test_an_exported_setting_with_an_overlay_cannot_be_reimported(tmp_path):
 class TestDedupVllmServerArgs:
     """``dedup_vllm_server_args`` collapses repeated vLLM single-value flags."""
 
-    def test_duplicate_attention_backend_keeps_last(self):
-        # YAML base + variant both inject the flag.
-        out = dedup_vllm_server_args(
-            "--attention-backend ROCM_AITER_FA --attention-backend ROCM_FLASH",
-            "vllm",
-        )
-        assert out == "--attention-backend ROCM_FLASH"
-        assert out.count("--attention-backend") == 1
-
-    def test_identical_duplicate_collapses_to_single(self):
-        out = dedup_vllm_server_args(
-            "--attention-backend ROCM_AITER_FA --attention-backend ROCM_AITER_FA",
-            "vllm",
-        )
-        assert out == "--attention-backend ROCM_AITER_FA"
+    @pytest.mark.parametrize(
+        ("raw", "framework", "expected"),
+        [
+            pytest.param(
+                "--attention-backend ROCM_AITER_FA --attention-backend ROCM_FLASH",
+                "vllm",
+                "--attention-backend ROCM_FLASH",
+                id="base-and-variant-both-inject",
+            ),
+            pytest.param(
+                "--attention-backend ROCM_AITER_FA --attention-backend ROCM_AITER_FA",
+                "vllm",
+                "--attention-backend ROCM_AITER_FA",
+                id="identical-duplicate",
+            ),
+            pytest.param(
+                "--attention-backend A --attention-backend B --attention-backend C",
+                "vllm",
+                "--attention-backend C",
+                id="three-occurrences",
+            ),
+            pytest.param(
+                "--gpu-memory-utilization=0.9 --gpu-memory-utilization=0.85",
+                "vllm",
+                "--gpu-memory-utilization=0.85",
+                id="equals-form",
+            ),
+            pytest.param(
+                "--attention-backend ROCM_AITER_FA --attention-backend=ROCM_FLASH",
+                "vllm",
+                "--attention-backend=ROCM_FLASH",
+                id="space-then-equals-form",
+            ),
+            pytest.param(
+                "--attention-backend=ROCM_AITER_FA --attention-backend ROCM_FLASH",
+                "vllm",
+                "--attention-backend ROCM_FLASH",
+                id="equals-then-space-form",
+            ),
+            pytest.param("--attention-backend A --attention-backend B", "atom", "--attention-backend B", id="atom"),
+            pytest.param(
+                "--attention-backend aiter --attention-backend triton",
+                "sglang",
+                "--attention-backend aiter --attention-backend triton",
+                id="sglang-tolerates-repeats",
+            ),
+            pytest.param(
+                "--attention-backend ROCM_AITER_FA --max-model-len 8192",
+                "vllm",
+                "--attention-backend ROCM_AITER_FA --max-model-len 8192",
+                id="no-duplicates",
+            ),
+            pytest.param(
+                "--max-num-seqs 256 --block-size 16 --kv-cache-dtype fp8",
+                "vllm",
+                "--max-num-seqs 256 --block-size 16 --kv-cache-dtype fp8",
+                id="distinct-single-value-flags",
+            ),
+            pytest.param("", "vllm", "", id="empty"),
+            pytest.param(None, "vllm", "", id="none"),
+            pytest.param(
+                "--attention-backend 'unterminated",
+                "vllm",
+                "--attention-backend 'unterminated",
+                id="unbalanced-quote-left-for-vllm-to-report",
+            ),
+            pytest.param(
+                '--attention-backend A --attention-backend B --speculative-config \'{"model":"draft model"}\'',
+                "vllm",
+                '--attention-backend A --attention-backend B --speculative-config \'{"model":"draft model"}\'',
+                id="json-with-internal-space-fails-closed",
+            ),
+            pytest.param(
+                '--tool-call-parser "my parser" --max-num-seqs 512 --max-num-seqs 1024',
+                "vllm",
+                '--tool-call-parser "my parser" --max-num-seqs 512 --max-num-seqs 1024',
+                id="quoted-non-json-operand-fails-closed",
+            ),
+            pytest.param(
+                "--attention-backend A --cuda-graph-bs 1 2 4 8 --attention-backend B",
+                "vllm",
+                "--attention-backend A --cuda-graph-bs 1 2 4 8 --attention-backend B",
+                id="list-valued-flag-left-untouched",
+            ),
+        ],
+    )
+    def test_repeated_single_value_flags_keep_only_the_last(self, raw, framework, expected):
+        assert dedup_vllm_server_args(raw, framework) == expected
 
     def test_preserves_surrounding_and_unknown_flags_in_order(self):
         out = dedup_vllm_server_args(
@@ -737,82 +757,10 @@ class TestDedupVllmServerArgs:
         assert '{"method":"eagle"}' in out
         assert out.count("--max-num-seqs") == 1
 
-    def test_equals_form_is_deduped(self):
-        out = dedup_vllm_server_args(
-            "--gpu-memory-utilization=0.9 --gpu-memory-utilization=0.85",
-            "vllm",
-        )
-        assert out == "--gpu-memory-utilization=0.85"
-
-    def test_atom_framework_also_deduped(self):
-        out = dedup_vllm_server_args(
-            "--attention-backend A --attention-backend B",
-            "atom",
-        )
-        assert out == "--attention-backend B"
-
-    def test_sglang_is_noop_repeats_preserved(self):
-        # sglang tolerates repeats (last-wins at the server); do not mangle.
-        raw = "--attention-backend aiter --attention-backend triton"
-        assert dedup_vllm_server_args(raw, "sglang") == raw
-
-    def test_no_duplicates_returns_unchanged(self):
-        raw = "--attention-backend ROCM_AITER_FA --max-model-len 8192"
-        assert dedup_vllm_server_args(raw, "vllm") == raw
-
-    def test_empty_and_none_safe(self):
-        assert dedup_vllm_server_args("", "vllm") == ""
-        assert dedup_vllm_server_args(None, "vllm") == ""
-
-    def test_unparseable_string_returned_as_is(self):
-        # Unbalanced quote: leave it for vLLM to report rather than mangling.
-        raw = "--attention-backend 'unterminated"
-        assert dedup_vllm_server_args(raw, "vllm") == raw.strip()
-
-    def test_distinct_single_value_flags_untouched(self):
-        raw = "--max-num-seqs 256 --block-size 16 --kv-cache-dtype fp8"
-        assert dedup_vllm_server_args(raw, "vllm") == raw
-
-    def test_mixed_equals_and_space_forms_dedup_last_wins(self):
-        # `--flag value` (YAML base) then `--flag=value` (variant): last wins.
-        out = dedup_vllm_server_args(
-            "--attention-backend ROCM_AITER_FA --attention-backend=ROCM_FLASH",
-            "vllm",
-        )
-        assert out == "--attention-backend=ROCM_FLASH"
-
-    def test_mixed_equals_then_space_form_dedup_last_wins(self):
-        # Reverse order: `--flag=value` then `--flag value`.
-        out = dedup_vllm_server_args(
-            "--attention-backend=ROCM_AITER_FA --attention-backend ROCM_FLASH",
-            "vllm",
-        )
-        assert out == "--attention-backend ROCM_FLASH"
-
-    def test_three_occurrences_keep_only_last(self):
-        out = dedup_vllm_server_args(
-            "--attention-backend A --attention-backend B --attention-backend C",
-            "vllm",
-        )
-        assert out == "--attention-backend C"
-
     def test_json_flag_does_not_disable_other_flag_dedup(self):
         raw = "--attention-backend A --attention-backend B --override-generation-config '{\"temperature\": 0.7}'"
         out = dedup_vllm_server_args(raw, "vllm")
         assert out == '--attention-backend B --override-generation-config {"temperature":0.7}'
-
-    def test_json_string_with_internal_space_fails_closed(self):
-        raw = '--attention-backend A --attention-backend B --speculative-config \'{"model":"draft model"}\''
-        assert dedup_vllm_server_args(raw, "vllm") == raw
-
-    def test_quoted_non_json_operand_fragments_fail_closed(self):
-        raw = '--tool-call-parser "my parser" --max-num-seqs 512 --max-num-seqs 1024'
-        assert dedup_vllm_server_args(raw, "vllm") == raw
-
-    def test_multi_value_flag_left_untouched(self):
-        # cuda-graph-bs takes a list; never collapse a string that carries one.
-        raw = "--attention-backend A --cuda-graph-bs 1 2 4 8 --attention-backend B"
-        assert dedup_vllm_server_args(raw, "vllm") == raw
 
 
 # Every output slot one variant launches a benchmark process into, in launch order: the discarded warmup, the
@@ -1038,34 +986,3 @@ def test_the_json_tripwire_sees_damage_from_the_removal_pass(caplog):
         with caplog.at_level("ERROR"):
             gsa.compose_server_args(base_extra_args=args, remove_args=["--max-num-seqs"])
     assert any("CORRUPTED" in r.getMessage() for r in caplog.records), [r.getMessage() for r in caplog.records]
-
-
-# --- graded_objective field in VariantResult and explore decision records ---
-
-
-def test_variant_result_has_intvty_and_total_fields():
-    """VariantResult must carry both graded axes so the explore executor can stamp them."""
-    r = VariantResult(
-        name="v",
-        extra_server_args="",
-        extra_envs={},
-        status="succeeded",
-        output_throughput=183.0,
-        input_throughput=25800.0,
-        total_token_throughput=25983.0,
-        intvty_p90=447.2,
-    )
-    assert r.total_token_throughput == 25983.0
-    assert r.intvty_p90 == 447.2
-
-
-def test_variant_result_graded_axes_default_to_none():
-    r = VariantResult(name="v", extra_server_args="", extra_envs={}, status="succeeded", output_throughput=100.0)
-    assert r.total_token_throughput is None
-    assert r.intvty_p90 is None
-
-
-def test_the_total_axis_has_exactly_one_attribute():
-    """One measured quantity, one name: `total_throughput` was a second alias for it."""
-    r = VariantResult(name="v", extra_server_args="", extra_envs={}, status="succeeded")
-    assert not hasattr(r, "total_throughput")

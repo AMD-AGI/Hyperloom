@@ -10,6 +10,7 @@ from collections.abc import Sequence
 from pathlib import Path
 
 from kernelforge.config.resources import resource_path
+from kernelforge.utils.gpu_arch import arch_profile
 
 # The stable logical name resolves to this package's resources in built wheels
 # and to an operator override when one is configured.
@@ -177,10 +178,6 @@ def _descriptor(path: Path) -> str:
     return path.stem
 
 
-# Pillars every operator-optimization task must load, in reading order.
-_MANDATORY_PILLARS = ("hardware", "common_methodology")
-
-
 def _flat_listing(folder: Path) -> str:
     """Flat ``<relative path> — <descriptor>`` listing for a folder (INDEX-less fallback)."""
     files = sorted(
@@ -280,33 +277,34 @@ def _render_pointer(root: Path, rel: str, *, carried: bool = True) -> str:
 def build_forge_knowledge(
     root: str | Path | None = None,
     *,
+    gpu_target: str = "",
     language: str | Sequence[str] | None = None,
-    include_aiter: bool = False,
-    include_mori: bool = False,
+    frameworks: Sequence[str] = (),
     defer_all: bool = False,
 ) -> str:
     """Assemble the layered knowledge block for one forge-loop kernel task.
 
-    Layers, in reading order: ``hardware/`` + ``common_methodology/`` always;
-    ``framework/aiter/`` when ``include_aiter``; ``framework/mori/`` when
-    ``include_mori`` (ablation-only, off by default); ``languages/<language>/``
+    Layers, in reading order: the hardware pillar ``gpu_target``'s profile names
+    (``hardware/`` unless it names another folder) + ``common_methodology/`` always;
+    ``framework/<name>/`` for each of ``frameworks`` (``aiter`` for an AITER
+    operator; ``mori`` only for the ablation, off by default); ``languages/<language>/``
     when given and present. ``language`` accepts a sequence (triton/gluon are one
     toolchain and carry each other); duplicates collapse. Each level follows the
     INDEX.md convention. Returns "" if the root or all levels are missing.
 
     ``defer_all`` renders EVERY level as a pointer rather than only the carried
     language -- what ``Config.defer_knowledge_maps`` (on by default) selects.
-    Called directly, the maps stay inlined unless it is set.
+    Called directly, the maps stay inlined unless it is set. The profile's
+    ``prompt_note`` is always inlined ahead of the maps: it corrects the
+    backend prompt this block is appended to, so a pointer would not do.
     """
     root_path = Path(root) if root else _DEFAULT_ROOT
     if not root_path.exists():
         return ""
 
-    rels: list[str] = list(_MANDATORY_PILLARS)
-    if include_aiter:
-        rels.append("framework/aiter")
-    if include_mori:
-        rels.append("framework/mori")
+    profile = arch_profile(gpu_target)
+    rels: list[str] = [profile.hardware_knowledge, "common_methodology"]
+    rels.extend(f"framework/{name}" for name in dict.fromkeys(frameworks))
     languages = [language] if isinstance(language, str) else list(language or ())
     deferred: set[str] = set()
     for position, name in enumerate(dict.fromkeys(item for item in languages if item)):
@@ -347,4 +345,5 @@ def build_forge_knowledge(
             "",
         ]
     )
-    return preamble + "\n" + "\n\n".join(sections)
+    note = f"{profile.rendered_prompt_note()}\n\n" if profile.prompt_note else ""
+    return note + preamble + "\n" + "\n\n".join(sections)

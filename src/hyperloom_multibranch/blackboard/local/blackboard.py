@@ -1025,7 +1025,7 @@ class LocalBlackboard(
         claims = self._leases.all_current()
         held = {claim.key.intent_fingerprint for claim in claims if is_live(claim, now)}
         refused = refused_replays(claims, view, start_commit)
-        unfinished = unfinished_leads(state, view, held, refused)
+        unfinished = unfinished_leads(state, held, refused)
         return replace(views.startup_brief(state, view, start_commit), unfinished=unfinished)
 
     async def search(self, query: str, *, limit: int = 20) -> tuple[SearchHit, ...]:
@@ -1068,9 +1068,9 @@ class LocalBlackboard(
         written = AgentMapWrite(tuple(directions))
         ids = [item.id for item in written.directions]
         if "" in ids or len(set(ids)) < len(ids):
-            raise ValueError(f"each direction of Arbor's map has an id, and one no other direction has: {ids}")
+            raise ValueError(f"each direction of the agent map has an id, and one no other direction has: {ids}")
         opened = sum(1 for item in written.directions if item.open)
-        summary = f"Arbor's map: {len(ids)} directions, {opened} open"
+        summary = f"the agent map: {len(ids)} directions, {opened} open"
         self._append(EntryKind.AGENT_MAP, written, branch="", parent="", summary=summary)
 
     async def snapshot(self) -> BlackboardSnapshot:

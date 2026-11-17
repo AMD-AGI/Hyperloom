@@ -17,10 +17,15 @@ from typing import Any
 import pytest
 
 from hyperloom.contracts.measurement import Purpose, TestKind
+from hyperloom.measure.round_marks import ROLE_WARMUP
+from hyperloom.measure.runner.rounds import ROUNDS_FILE, WARMUP_DIR, write_rounds
+from hyperloom.measure.socket import RoundOutcome, SandboxFacts, TestOutcome
+from hyperloom.orchestrator.actions.executors import variant_slot
+from hyperloom.orchestrator.actions.executors._suite.rounds import _next_run_dir
 from hyperloom.hosted.mcp_server import McpServer, McpServerConfig
 from hyperloom_multibranch.contracts.blackboard import Role, Writer
 from hyperloom_multibranch.contracts.blackboard.vocab import INTEGRATION_BRANCH
-from hyperloom_multibranch.contracts.blackboard.records import ToolResultPointer
+from hyperloom_multibranch.contracts.blackboard.records import BaselineRecord, ToolResultPointer
 from hyperloom_multibranch.contracts.toolbox import RequestRejected
 from hyperloom_multibranch.blackboard import LocalBlackboard
 from hyperloom_multibranch.toolbox.mcp_tools import (
@@ -30,9 +35,27 @@ from hyperloom_multibranch.toolbox.mcp_tools import (
 )
 from hyperloom.contracts.recipe import apply
 from hyperloom_multibranch.toolbox.tests.helpers import PARENT, Rig, build, delta, ok, req
+from inference_suite.contracts import RunLayout
 from hyperloom_multibranch.toolbox.tools import ToolJobs, ToolOutput, ToolRequest
 from hyperloom_multibranch.toolbox.tools import op_shares as op_shares_module
 from hyperloom_multibranch.toolbox.tools.op_shares import with_op_shares
+from hyperloom_multibranch.toolbox.tools.baseline_lengths import measuring_run_dirs
+from hyperloom_multibranch.scheduling.clock import Clock
+from hyperloom_multibranch.scheduling.events import PROFILE_NOT_ANALYSED, PROFILED, IntegrationProfiler
+from hyperloom_multibranch.scheduling.requests import SessionTests
+from hyperloom_multibranch.toolbox.tools.kernel_launchers import Relabelled
+from hyperloom_multibranch.toolbox.tools.kernel_shares import KERNEL_SHARES_FILE, GpuEvent, kernel_window
+from hyperloom_multibranch.toolbox.tools.op_shares import OWN_DEGRADED_KEY
+from hyperloom_multibranch.toolbox.tools.phase_mix import (
+    DECODE,
+    MEASURED_LENGTH_KEYS,
+    PREFILL,
+    PhaseWindow,
+    Workload,
+    graded_mix,
+    mix_fields,
+    write_mix_table,
+)
 
 SHARES = {"gemm": 61.5, "attention": 20.0}
 HEAD = "head-of-b1"
@@ -106,9 +129,14 @@ def _shares(monkeypatch: pytest.MonkeyPatch) -> None:
 
 
 async def _stack(
-    tmp_path: Path, *, with_tools: bool = True, names: tuple[str, ...] = ("tracelens", "roofline", "profile")
+    tmp_path: Path,
+    *,
+    with_tools: bool = True,
+    names: tuple[str, ...] = ("tracelens", "roofline", "profile"),
+    analyses: dict[str, Any] | None = None,
 ) -> AsyncIterator[Stack]:
-    tools = {name: _Analysis(name) for name in names}
+    """``analyses`` replaces the stand-in of each tool it names."""
+    tools = {name: _Analysis(name) for name in names} | (analyses or {})
     holder: list[_Capture] = []
 
     def make(blackboard: LocalBlackboard) -> ToolJobs:
@@ -408,7 +436,7 @@ async def test_the_splitter_hints_are_the_workload_of_the_profile_tests_own_poin
     assert roofline_profile == {}  # the roofline tool has no splitter
 
 
-@pytest.mark.parametrize("key", sorted(HINTS))
+@pytest.mark.parametrize("key", [*sorted(HINTS), *MEASURED_LENGTH_KEYS])
 @pytest.mark.parametrize("with_profile", [True, False])
 async def test_a_hint_of_the_callers_is_refused_and_cannot_replace_the_point(
     stack: Stack, tmp_path: Path, key: str, with_profile: bool
@@ -467,3 +495,317 @@ async def test_without_a_session_root_there_is_no_point_to_read_and_no_hint(stac
     stack.rig.repo.heads["b1"] = PARENT
     profile = await _profile_test(stack, output_dir=LANDED)  # the rig has no trace_root
     assert await _split_params(stack, "tracelens", profile) == {}
+
+
+#: An AgentX point: a concurrency, and no prompt or output length to weight the phase windows by.
+AGENTX_POINT = """\
+benchmark:
+  framework: vllm
+  envs:
+    TP: '2'
+    CONC: '16'
+"""
+#: An AgentX baseline's reading: 1520 prompt and 1 output tokens a second over 1000 s, for 10 completed requests, which is
+#: 152000 prompt and 100 output tokens per request.
+AGENTX_READING = {
+    "input_throughput": 1520.0,
+    "output_throughput": 1.0,
+    "duration_seconds": 1000.0,
+    "completed_requests": 10.0,
+    "e2e_norm_intvty_p50": 30.0,
+}
+BASELINE_LANDED = "tests/base/attempt-1"
+
+
+def _kv_metrics(queried: float, hit: float) -> str:
+    return json.dumps({"prefix_cache": {"prefix_cache_queries_delta": queried, "prefix_cache_hits_delta": hit}})
+
+
+def _run_dir(round_dir: Path, kv_metrics: str | None) -> Path:
+    """The run_dir a round of ``round_dir`` lands, named as ``run_suite_round`` names it, with its report and
+    ``kv_metrics``."""
+    run_dir = _next_run_dir(round_dir)
+    layout = RunLayout(run_dir)
+    run_dir.mkdir(parents=True)
+    layout.report.write_text("{}", encoding="utf-8")
+    if kv_metrics is not None:
+        layout.kv_metrics.write_text(kv_metrics, encoding="utf-8")
+    return run_dir
+
+
+def _land_rounds(landed: Path, measured: str | None, warmup: str | None, *, listed: bool) -> None:
+    """A held test's rounds as ``run_grid`` lays them out below ``landed``: the warm-up round in its own slot, then the
+    measured round in the test's slot after a warm-up run nested in it, each run_dir holding ``warmup`` or ``measured``
+    as its ``kv_metrics.json``; ``listed``, with the runner's ``rounds.json`` that names each round's phase."""
+    held_warmup = _run_dir(variant_slot(landed, 0, ROLE_WARMUP), warmup)
+    slot = variant_slot(landed, 0, "test")
+    nested_warmup = _run_dir(slot / WARMUP_DIR, warmup)
+    rounds = (
+        RoundOutcome(0, "warmup", held_warmup, 0),
+        RoundOutcome(0, "warmup", nested_warmup.parent, 0),
+        RoundOutcome(0, "measure", _run_dir(slot, measured), 0),
+    )
+    if listed:
+        write_rounds(landed, TestOutcome(0, "", "", rounds, SandboxFacts(sandbox_id="s")))
+
+
+async def _with_baseline(
+    stack: Stack,
+    tmp_path: Path,
+    values: dict[str, float],
+    measured: str | None,
+    warmup: str | None = None,
+    *,
+    listed: bool = True,
+) -> None:
+    """The rule gate's baseline of ``values``, anchored on a held test that landed the rounds :func:`_land_rounds`
+    lays out."""
+    _land_rounds(tmp_path / "session" / BASELINE_LANDED, measured, warmup, listed=listed)
+    rig = stack.rig
+    rig.executor.script = [lambda job: ok(job, output_dir=BASELINE_LANDED)]
+    test = await rig.toolbox.submit_test(req("b1", purpose=Purpose.BASELINE))
+    await rig.toolbox.drain()
+    gate = rig.open_blackboard(Role.GATE)
+    await gate.write_baseline(BaselineRecord(PARENT, values, {}, {}, (test,)))
+
+
+async def _workload_params(stack: Stack, profile: str) -> dict[str, Any]:
+    job = json.loads(_text(await stack.start(tool="tracelens", profile_request_id=profile)))["job_id"]
+    await stack.jobs.wait(job)
+    (request,) = stack.tools["tracelens"].requests
+    return {key: value for key, value in request.params.items() if key.startswith(("split_", "measured_"))}
+
+
+@pytest.mark.parametrize("listed", [True, False], ids=["rounds-listed", "layout-only"])
+async def test_an_agentx_point_is_weighted_by_the_prompt_tokens_its_baselines_server_computed(
+    stack: Stack, tmp_path: Path, listed: bool
+) -> None:
+    """95% of the prompt tokens the baseline's server looked up in its measured round were in its prefix cache: a
+    request's prefill computed 7600 of its 152000. The warm-up rounds' counts (none of 1000 hit, in the held warm-up's
+    slot and in the warm-up run nested in the test's slot) are not the measurement's, whether the runner listed the
+    rounds or only the layout says which is which."""
+    await _with_baseline(
+        stack, tmp_path, AGENTX_READING, _kv_metrics(1000.0, 950.0), _kv_metrics(1000.0, 0.0), listed=listed
+    )
+    profile = await _profile_with_points(stack, tmp_path, {"variant_00_test/config.yaml": AGENTX_POINT})
+
+    params = await _workload_params(stack, profile)
+
+    source = params.pop("measured_lengths_source")
+    assert params == {"split_conc": "16", "measured_isl": "7600", "measured_osl": "100"}
+    assert "computed prompt tokens per request, 7600 (152000 less the 95.0% its prefix cache served)" in source
+
+
+@pytest.mark.parametrize("listed", [True, False], ids=["rounds-listed", "layout-only"])
+async def test_an_agentx_baseline_whose_only_split_is_its_warmups_weights_by_its_mean_prompt_tokens(
+    stack: Stack, tmp_path: Path, listed: bool
+) -> None:
+    await _with_baseline(stack, tmp_path, AGENTX_READING, None, _kv_metrics(1000.0, 950.0), listed=listed)
+    profile = await _profile_with_points(stack, tmp_path, {"variant_00_test/config.yaml": AGENTX_POINT})
+
+    params = await _workload_params(stack, profile)
+
+    assert params["measured_isl"] == "152000" and "no prefix-cache split" in params["measured_lengths_source"]
+
+
+def test_the_measuring_rounds_are_the_ones_the_runner_lists(tmp_path: Path) -> None:
+    """``rounds.json`` names the measuring rounds: a run_dir it does not list is not one, and a listed directory outside
+    the landed test is not read."""
+    _land_rounds(tmp_path, _kv_metrics(1000.0, 950.0), None, listed=True)
+    rerun = _run_dir(variant_slot(tmp_path, 0, "test"), None)
+    unlisted = _run_dir(variant_slot(tmp_path, 1, "other"), _kv_metrics(10.0, 0.0))
+    listing = json.loads((tmp_path / ROUNDS_FILE).read_text(encoding="utf-8"))
+    escaping = {"point": 0, "phase": "measure", "dir": "../elsewhere", "returncode": 0}
+    (tmp_path / ROUNDS_FILE).write_text(json.dumps([*listing, escaping]), encoding="utf-8")
+
+    found = measuring_run_dirs(tmp_path)
+
+    assert found == [(variant_slot(tmp_path, 0, "test") / "suite_run_0").resolve()]
+    assert rerun.resolve() not in found and unlisted.resolve() not in found
+
+
+@pytest.mark.parametrize(
+    "measured",
+    [
+        None,
+        json.dumps({"prefix_cache": {"cached_tokens_total_delta": 9.0}}),
+        _kv_metrics(1000.0, 1000.0),
+        "{",
+    ],
+)
+async def test_an_agentx_baseline_without_a_prefix_cache_split_weights_by_its_mean_prompt_tokens_and_says_so(
+    stack: Stack, tmp_path: Path, measured: str | None
+) -> None:
+    await _with_baseline(stack, tmp_path, AGENTX_READING, measured)
+    profile = await _profile_with_points(stack, tmp_path, {"variant_00_test/config.yaml": AGENTX_POINT})
+
+    params = await _workload_params(stack, profile)
+
+    source = params.pop("measured_lengths_source")
+    assert params == {"split_conc": "16", "measured_isl": "152000", "measured_osl": "100"}
+    assert "mean prompt and output tokens per request, 152000 and 100" in source and "no prefix-cache split" in source
+
+
+@pytest.mark.parametrize("missing", ["input_throughput", "output_throughput", "duration_seconds", "completed_requests"])
+async def test_an_agentx_point_gets_no_lengths_from_a_baseline_reading_that_lacks_a_figure(
+    stack: Stack, tmp_path: Path, missing: str
+) -> None:
+    values = {key: value for key, value in AGENTX_READING.items() if key != missing}
+    await _with_baseline(stack, tmp_path, values, _kv_metrics(1000.0, 950.0))
+    profile = await _profile_with_points(stack, tmp_path, {"variant_00_test/config.yaml": AGENTX_POINT})
+
+    assert await _workload_params(stack, profile) == {"split_conc": "16"}
+
+
+async def test_an_agentx_point_gets_no_lengths_before_the_rule_gate_wrote_a_baseline(
+    stack: Stack, tmp_path: Path
+) -> None:
+    profile = await _profile_with_points(stack, tmp_path, {"variant_00_test/config.yaml": AGENTX_POINT})
+
+    assert await _workload_params(stack, profile) == {"split_conc": "16"}
+
+
+async def test_a_point_that_names_its_lengths_is_weighted_by_them_whatever_the_baseline_measured(
+    stack: Stack, tmp_path: Path
+) -> None:
+    await _with_baseline(stack, tmp_path, AGENTX_READING, _kv_metrics(10.0, 5.0))
+    profile = await _profile_with_points(stack, tmp_path, {"variant_00_test/config.yaml": POINT})
+
+    assert await _workload_params(stack, profile) == HINTS
+
+
+# --- the root's profile in PRELUDE: its analysis waits for the baseline ---------------------------------------------
+
+#: The real share reader: the module's autouse fixture replaces it for the tests above.
+_READ_OP_SHARES = op_shares_module.read_op_shares
+#: What the profile test leaves: its trace, and the point it ran in the landed test directory.
+ROOT_PROFILED = {"profile_location": "traces/p1", "output_dir": LANDED}
+
+
+def _window(phase: str, steps: int, tokens: int, step_ms: float, kernel: str) -> PhaseWindow:
+    """A splitter window of ``steps`` steps that each run one ``kernel`` for ``step_ms``, one after another."""
+    events = [GpuEvent(("0", "1"), i * step_ms * 1000, (i + 1) * step_ms * 1000, kernel) for i in range(steps)]
+    return PhaseWindow(
+        phase, f"{phase}.json.gz", kernel_window(events, list), Relabelled(events, 0, 0, ()), steps, tokens, ""
+    )
+
+
+class _GradedTraceLens:
+    """The report route from its phase windows on: a trace whose prefill and decode windows are both usable, weighted by
+    the workload the request carries (``graded_mix``), the shares read off the table it writes (``with_op_shares``)."""
+
+    name = "tracelens"
+
+    def __init__(self) -> None:
+        self.requests: list[ToolRequest] = []
+
+    async def run(self, request: ToolRequest, workdir: Path) -> ToolOutput:
+        self.requests.append(request)
+        windows = [_window(PREFILL, 5, 65536, 200.0, "prefill_gemm"), _window(DECODE, 32, 0, 10.0, "paged_attention")]
+        mix = graded_mix(windows, Workload.from_hints({key: str(value) for key, value in request.params.items()}))
+        workdir.mkdir(parents=True, exist_ok=True)
+        table = workdir / KERNEL_SHARES_FILE
+        if not mix.degraded_reason:
+            write_mix_table(mix, table)
+        result = {"status": "ok", **mix_fields(windows, mix, table)}
+        return with_op_shares(ToolOutput(result=result, summary="trace analysed"), request)
+
+
+@pytest.fixture
+async def graded(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> AsyncIterator[Stack]:
+    """The stack with :class:`_GradedTraceLens` and the real share reader, the integration head at the profiled commit,
+    and the session root the profile test lands its point in."""
+    monkeypatch.setattr(op_shares_module, "read_op_shares", _READ_OP_SHARES)
+    async for item in _stack(tmp_path, analyses={"tracelens": _GradedTraceLens()}):
+        item.rig.repo.heads[INTEGRATION_BRANCH] = PARENT
+        item.rig.repo.heads["b1"] = PARENT
+        item.rig.toolbox.trace_root = tmp_path / "session"
+        yield item
+
+
+def _root_profiler(stack: Stack) -> IntegrationProfiler:
+    async def poll(seconds: float) -> None:
+        await asyncio.sleep(0.01)
+
+    clock = Clock(now=stack.rig.clock, sleep=poll)
+    records = stack.rig.open_blackboard(Role.SCHEDULER)
+    return IntegrationProfiler(stack.rig.toolbox, SessionTests(stack.rig.toolbox, clock), records, clock)
+
+
+async def _profiled_root(
+    stack: Stack, tmp_path: Path, point: str, baseline: asyncio.Future[None] | None
+) -> asyncio.Task:
+    """PRELUDE's profile of the root, started with ``baseline`` as the baseline's measurement, once its profile test
+    ended; the profile test lands ``point``."""
+    (tmp_path / "session" / LANDED / "variant_00_test").mkdir(parents=True)
+    (tmp_path / "session" / LANDED / "variant_00_test" / "config.yaml").write_text(point, encoding="utf-8")
+    stack.rig.executor.script = [lambda job: ok(job, **ROOT_PROFILED)]
+    task = asyncio.ensure_future(_root_profiler(stack).profile_root(PARENT, baseline))
+    while not stack.rig.executor.jobs:
+        await asyncio.sleep(0.01)
+    await stack.rig.toolbox.drain()
+    for _ in range(5):
+        await asyncio.sleep(0.01)
+    return task
+
+
+async def test_an_agentx_roots_analysis_waits_for_the_baseline_and_its_shared_result_has_the_shares(
+    graded: Stack, tmp_path: Path
+) -> None:
+    """The profile test ends before the baseline is written (a toolbox running both at once). Analysed then, the request
+    would name no lengths and both windows would leave the mix degraded under ``tracelens:<profile>``; held for the
+    baseline, it carries the lengths the baseline measured and the shared result has the shares."""
+    baseline: asyncio.Future[None] = asyncio.get_running_loop().create_future()
+    task = await _profiled_root(graded, tmp_path, AGENTX_POINT, baseline)
+    assert graded.tools["tracelens"].requests == [] and not task.done()
+
+    await _with_baseline(graded, tmp_path, AGENTX_READING, _kv_metrics(1000.0, 950.0))
+    baseline.set_result(None)
+    outcome = await task
+
+    assert outcome.reason == PROFILED and outcome.detail["after_baseline"] is True
+    (request,) = graded.tools["tracelens"].requests
+    assert (request.params["measured_isl"], request.params["measured_osl"]) == ("7600", "100")
+    profile, job = outcome.detail["request_id"], outcome.detail["job_id"]
+    shares = await graded.rig.open_blackboard(Role.SCHEDULER).op_shares(PARENT)
+    assert shares is not None and shares.profile_request_id == profile
+    assert set(shares.shares) == {"prefill_gemm", "paged_attention"}
+    # The opening judge and every branch read the same job: the one the key tracelens:<profile> names.
+    shared = json.loads(_text(await graded.start(tool="tracelens", profile_request_id=profile)))["job_id"]
+    assert shared == job and len(graded.tools["tracelens"].requests) == 1
+
+
+async def test_an_agentx_root_whose_baseline_never_lands_is_analysed_as_before_degraded_with_its_reason(
+    graded: Stack, tmp_path: Path
+) -> None:
+    """A baseline measurement that ended without a baseline releases the analysis at once: no lengths, so the two windows
+    leave the mix degraded with today's reason, and PRELUDE raises the baseline's own failure."""
+    baseline: asyncio.Future[None] = asyncio.get_running_loop().create_future()
+    task = await _profiled_root(graded, tmp_path, AGENTX_POINT, baseline)
+    assert graded.tools["tracelens"].requests == []
+
+    baseline.set_exception(RuntimeError("the baseline anchors nothing"))
+    outcome = await task
+    baseline.exception()  # PRELUDE's to raise
+
+    assert outcome.reason == PROFILE_NOT_ANALYSED
+    (request,) = graded.tools["tracelens"].requests
+    assert not set(MEASURED_LENGTH_KEYS) & set(request.params)
+    assert await graded.rig.open_blackboard(Role.SCHEDULER).op_shares(PARENT) is None
+    result = graded.rig.toolbox.tool_result(str(outcome.detail["job_id"]))
+    assert "the request names no split_conc, split_isl and split_osl" in result[OWN_DEGRADED_KEY]
+
+
+async def test_an_inferencex_root_is_analysed_once_its_profile_test_ended_weighted_by_its_own_point(
+    graded: Stack, tmp_path: Path
+) -> None:
+    """PRELUDE hands an InferenceX root no baseline to wait for: its point names its lengths."""
+    task = await _profiled_root(graded, tmp_path, POINT, None)
+    outcome = await task
+
+    assert outcome.reason == PROFILED and "after_baseline" not in outcome.detail
+    (request,) = graded.tools["tracelens"].requests
+    assert (request.params["split_isl"], request.params["split_osl"]) == ("256", "64")
+    assert not set(MEASURED_LENGTH_KEYS) & set(request.params)
+    shares = await graded.rig.open_blackboard(Role.SCHEDULER).op_shares(PARENT)
+    assert shares is not None and set(shares.shares) == {"prefill_gemm", "paged_attention"}

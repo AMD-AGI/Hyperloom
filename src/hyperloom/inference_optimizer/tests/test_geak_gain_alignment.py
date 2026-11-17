@@ -35,54 +35,27 @@ from ._geak_helpers import resume_pending, set_resume_pending
 _AGENTX_EVIDENCE = {"valid_measurement": True, "diagnostic_only": False, "workload_identity": "agentx-workload"}
 
 
-def test_revalidation_validated_when_identity_and_engagement_hold() -> None:
+@pytest.mark.parametrize(
+    ("measured", "baseline", "got_hash", "expected_hash", "current_best", "decision"),
+    [
+        pytest.param(115.0, 100.0, "abc", "abc", None, "validated", id="identity-and-engagement-hold"),
+        pytest.param(115.0, 100.0, "WRONG", "abc", None, "fallback", id="config-identity-mismatch"),
+        pytest.param(101.0, 100.0, "abc", "abc", None, "fallback", id="win-collapsed-to-baseline"),
+        pytest.param(115.0, 100.0, "", "", None, "validated", id="no-expected-hash-skips-identity"),
+        pytest.param(9623.0, 7380.7, "abc", "abc", 10067.9, "no_promote", id="not-beating-current-best"),
+        pytest.param(10500.0, 7380.7, "abc", "abc", 10067.9, "validated", id="beating-current-best"),
+    ],
+)
+def test_revalidation_decision(measured, baseline, got_hash, expected_hash, current_best, decision) -> None:
     assert (
         _geak_revalidation_decision(
-            measured=115.0,
-            baseline=100.0,
-            got_hash="abc",
-            expected_hash="abc",
+            measured=measured,
+            baseline=baseline,
+            got_hash=got_hash,
+            expected_hash=expected_hash,
+            current_best=current_best,
         )
-        == "validated"
-    )
-
-
-def test_revalidation_fallback_on_config_identity_mismatch() -> None:
-    # Engaged (15% > 2%) but the ran config's fingerprint drifted → fall back.
-    assert (
-        _geak_revalidation_decision(
-            measured=115.0,
-            baseline=100.0,
-            got_hash="WRONG",
-            expected_hash="abc",
-        )
-        == "fallback"
-    )
-
-
-def test_revalidation_fallback_when_not_engaged() -> None:
-    # Identity matches but the win collapsed back to (near-)baseline → fall back.
-    assert (
-        _geak_revalidation_decision(
-            measured=101.0,
-            baseline=100.0,
-            got_hash="abc",
-            expected_hash="abc",
-        )
-        == "fallback"
-    )
-
-
-def test_revalidation_identity_skipped_when_no_expected_hash() -> None:
-    # No pinned expected hash → identity check is skipped; engagement decides.
-    assert (
-        _geak_revalidation_decision(
-            measured=115.0,
-            baseline=100.0,
-            got_hash="",
-            expected_hash="",
-        )
-        == "validated"
+        == decision
     )
 
 
@@ -109,38 +82,6 @@ def test_normalize_geak_overlay_dir_keeps_real_overlay(tmp_path: Path) -> None:
     overlay = tmp_path / "final" / "overlay"
     overlay.mkdir(parents=True)
     assert _normalize_geak_overlay_dir(str(overlay)) == str(overlay)
-
-
-def test_normalize_geak_overlay_dir_empty_passthrough() -> None:
-    assert _normalize_geak_overlay_dir("") == ""
-
-
-def test_revalidation_no_promote_when_not_beating_current_best() -> None:
-    # Engaged over baseline + identity matches, but does not beat current_best.
-    assert (
-        _geak_revalidation_decision(
-            measured=9623.0,
-            baseline=7380.7,
-            got_hash="abc",
-            expected_hash="abc",
-            current_best=10067.9,
-        )
-        == "no_promote"
-    )
-
-
-def test_revalidation_validated_when_beating_current_best() -> None:
-    # Beats current_best (and baseline + identity) -> a real KEEP.
-    assert (
-        _geak_revalidation_decision(
-            measured=10500.0,
-            baseline=7380.7,
-            got_hash="abc",
-            expected_hash="abc",
-            current_best=10067.9,
-        )
-        == "validated"
-    )
 
 
 # ── Shared Coordinator fixture ───────────────────────────────────────────────

@@ -1,22 +1,21 @@
 ---
 myst:
     html_meta:
-        "description": "Review the agent map before a multi-branch session opens its Arbor branches: when MB waits, what it shows, the clock, what you may edit, how to approve or reject, and how to skip the review for unattended runs."
-        "keywords": "Hyperloom, multi-branch, MB, Arbor, review gate, agent map, dossier, approve, reject, no-review-gate"
+        "description": "Review the agent map before a multi-branch session opens its agent branches: when MB waits, what it shows, the clock, what you may edit, how to approve or reject, and how to skip the review for unattended runs."
+        "keywords": "Hyperloom, multi-branch, MB, review gate, agent map, dossier, approve, reject, no-review-gate"
 ---
-# Reviewing the agent map before the Arbor branches open
+# Reviewing the agent map before the agent branches open
 
-A multi-branch session (MB) with Arbor agents makes a map of directions before its Arbor branches open: the dossier
-pass's map, a map generated from the root's profile, or one you gave with `--agent-directions`. With the review on,
-the default, MB then **waits** until a person approves or rejects that map and its dossier, holding no GPU lease for
-it.
+A multi-branch session (MB) with component agents makes a map of directions before their branches open: the dossier
+pass's map, a map generated from the root's profile, or one you gave with `--agent-directions`. A component agent is
+an `--autonomous-agent` whose checkout an installed adapter recognises. With the review on, the default, MB then
+**waits** until a person approves or rejects that map and its dossier, holding no GPU lease for it.
 
 ## When MB waits
 
-- **Where:** after the map step, before it splits the map among the Arbors and before any Arbor branch opens.
-- **Which sessions:** any with Arbor agents (`--autonomous-agent` naming an Arbor checkout). That includes a session
-  with one Arbor, which then takes the reviewed map whole, and a session given `--agent-directions`, whose map is
-  shown too.
+- **Where:** after the map step, before it splits the map among the component agents and before any of their branches opens.
+- **Which sessions:** any with component agents. That includes a session with one, which then takes the reviewed
+  map whole, and a session given `--agent-directions`, whose map is shown too.
 - **What waits:**
   - **A map the session makes** (the dossier pass's, or one generated from the root's profile) is made by a mapping
     branch in EXPLORE. Only that branch waits: the other branches go on, and the deadline stays.
@@ -38,7 +37,7 @@ MB writes two files under the session directory and records the decision `review
 ## What you may edit
 
 Edit the map file and the dossier where `REVIEW.md` names them. On approval MB reads both again from disk, splits the
-map as edited and copies the dossier as edited into each Arbor branch's checkout.
+map as edited and copies the dossier as edited into each share branch's checkout.
 
 ## Approve or reject
 
@@ -62,15 +61,15 @@ hyperloom-multibranch review --session <MB session dir> reject --note "why"
   ```
 
 - **After an approval:** MB records `review approved`, with how long it waited, and opens the branches: in EXPLORE,
-  one share branch per Arbor, if there is still time for them (below).
+  one share branch per component agent, if there is still time for them (below).
 - **After a rejection:** in EXPLORE, MB records `review rejected`, opens no share branch, and the session goes on.
   Before EXPLORE (a map you gave), it ends the session with stop reason `review_rejected` (exit 0), opening no branch.
 
 ## The clock
 
 - **A review in EXPLORE does not stop the clock.** EXPLORE ends when it would have, whenever you decide, and each share
-  must still have `--agent-share-minutes` (63 by default) before its cutoff to open: Arbor starts no iteration with
-  less.
+  must still have `--agent-share-minutes` (63 by default) before its cutoff to open: the time one
+  iteration of a component agent may need.
   - **On the page:** `REVIEW.md` says when it was asked, by when to decide for the shares to open, and when EXPLORE
     ends; `review.json` keeps `open_by_iso` and `explore_end_iso`.
   - **Time left:** `review show` says how many minutes are left, or that the time has passed.
@@ -84,16 +83,13 @@ hyperloom-multibranch review --session <MB session dir> reject --note "why"
 ## Skipping the pause
 
 For an unattended run, pass `hyperloom-multibranch run --no-review-gate`. MB records `review skipped
-(--no-review-gate)`, and each Arbor it starts is told not to wait either (`"review_gate": false` in its config).
+(--no-review-gate)`, and each component agent it starts is told not to wait either.
 
-## What Arbor is told
+## What a component agent is told
 
-Arbor has a review gate of its own, at the start of a new campaign. Under MB the host owns the review:
+A component agent may have a review gate of its own. Under MB the host owns the review, and MB tells the agent's
+adapter which case holds, for the agent's config:
 
-- **The review on:** MB writes `component.review: "host"` in every Arbor config it starts, the dossier pass's
-  included, and Arbor's gate passes at once, recording that the host reviewed.
-- **The review off:** MB writes `"review_gate": false`.
-- **An Arbor without the gate** (before Arbor `1fa2069`) gets neither key: MB reads whether the checkout's
-  `arbor/component.py` lists `review` among its block keys.
-
-Which side does what in a session: {doc}`Arbor in multi-branch </conceptual/multibranch-arbor>`.
+- **The review on:** the host reviews, so the agent's own gate has nothing to wait for. The dossier pass is told the
+  same.
+- **The review off:** nobody reviews, and the agent does not wait either.

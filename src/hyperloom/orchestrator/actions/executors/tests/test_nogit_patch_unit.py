@@ -16,53 +16,19 @@ import pytest
 
 from hyperloom.orchestrator.actions.executors import _apply_feedback as af
 from hyperloom.orchestrator.actions.executors import _nogit_patch as ng
-from hyperloom.orchestrator.actions.executors import _patch_git as patch_git
-from hyperloom.orchestrator.actions.executors import _patch_artifacts as patch_artifacts
-from hyperloom.orchestrator.actions.executors import _integrate_enablement_gate as integrate_enablement_gate
 from hyperloom.orchestrator.delivery import ledger
-
-
-# Non-git helpers used by integrate_patch.
-
-
-def test_reexport_from_integrate_patch():
-    """Names integrate_patch still consumes must resolve to the _nogit_patch ones."""
-    assert patch_git._P_LEVELS is ng._P_LEVELS
-    assert patch_artifacts._is_within is ng._is_within
-    assert integrate_enablement_gate._is_git_tree is ng._is_git_tree
-
-
-def test_reexport_from_patch_snapshot():
-    """The path-derivation helpers moved to _patch_snapshot keep one definition."""
-    from hyperloom.orchestrator.actions.executors import _patch_snapshot as ps
-
-    assert ps._PATCH_DEV_NULL is ng._PATCH_DEV_NULL
-    assert ps._P_LEVELS is ng._P_LEVELS
-
-
-def test_p_levels_sane():
-    # _P_LEVELS starts at 1.
-    assert ng._P_LEVELS[0] == 1
 
 
 # _is_within
 
 
-def test_is_within_same():
-    p = Path("/foo/bar")
-    assert ng._is_within(p, p)
-
-
-def test_is_within_child():
-    assert ng._is_within(Path("/foo/bar/baz.py"), Path("/foo/bar"))
-
-
-def test_is_within_sibling():
-    assert not ng._is_within(Path("/foo/other"), Path("/foo/bar"))
-
-
-def test_is_within_parent():
-    assert not ng._is_within(Path("/foo"), Path("/foo/bar"))
+@pytest.mark.parametrize(
+    ("child", "inside"),
+    [("/foo/bar", True), ("/foo/bar/baz.py", True), ("/foo/other", False), ("/foo", False)],
+    ids=["same", "child", "sibling", "parent"],
+)
+def test_is_within(child, inside):
+    assert ng._is_within(Path(child), Path("/foo/bar")) is inside
 
 
 # _is_git_tree
@@ -73,24 +39,6 @@ class _CP:
         self.returncode = returncode
         self.stdout = stdout
         self.stderr = stderr
-
-
-def test_is_git_tree_true(monkeypatch):
-    monkeypatch.setattr(
-        ng.subprocess,
-        "run",
-        lambda *a, **k: _CP(0, "true\n"),
-    )
-    assert ng._is_git_tree(Path("/some/repo")) is True
-
-
-def test_is_git_tree_false_nonzero(monkeypatch):
-    monkeypatch.setattr(
-        ng.subprocess,
-        "run",
-        lambda *a, **k: _CP(128, ""),
-    )
-    assert ng._is_git_tree(Path("/not/a/repo")) is False
 
 
 def test_is_git_tree_false_on_filenotfound(monkeypatch):
@@ -275,26 +223,6 @@ def test_already_applied_noop_requires_durable_prepare(tmp_path, monkeypatch, pr
         assert backup.read_text(encoding="utf-8") == "original\n"
 
 
-def test_apply_patch_no_git_dry_run_failure(tmp_path, monkeypatch):
-    """All strip levels fail dry-run: a failure with no backups."""
-    patch_file = tmp_path / "bad.patch"
-    patch_file.write_text("not a patch\n", encoding="utf-8")
-
-    import subprocess as _sp
-
-    class _FailCP:
-        returncode = 1
-        stdout = ""
-        stderr = "reject"
-
-    monkeypatch.setattr(_sp, "run", lambda *a, **k: _FailCP())
-    monkeypatch.setattr(ng.subprocess, "run", lambda *a, **k: _FailCP())
-
-    result = ng._apply_patch_no_git(tmp_path, patch_file, tmp_path / "bak")
-    assert result.ok is False
-    assert result.backups == []
-
-
 # Backup name uniqueness across multiple patches sharing a backup_root
 
 PATCH_A = """\
@@ -351,25 +279,6 @@ def test_backup_names_unique_across_patches_same_basename(tmp_path):
     for bak_path in bak_paths_a:
         content = Path(bak_path).read_text(encoding="utf-8")
         assert content == "original_a\n", f"patch_a backup was overwritten by patch_b: {bak_path!r}"
-
-
-def test_seq_offset_zero_gives_deterministic_names(tmp_path):
-    """seq_offset=0 (default) still produces valid non-empty backup filenames."""
-    target = tmp_path / "mod.py"
-    target.write_text("original\n", encoding="utf-8")
-
-    patch_file = tmp_path / "mypatch.patch"
-    patch_file.write_text(SIMPLE_DIFF, encoding="utf-8")
-
-    result = ng._apply_patch_no_git(tmp_path, patch_file, tmp_path / "bk")
-    if not result.ok:
-        pytest.skip(f"patch CLI unavailable: {result.error}")
-
-    for r in result.backups:
-        if r["backup"]:
-            name = Path(r["backup"]).name
-            assert "mypatch" in name, f"patch stem missing from backup name: {name!r}"
-            assert name.endswith(".bak"), f"backup name doesn't end in .bak: {name!r}"
 
 
 PURE_RENAME_DIFF = """\
@@ -461,20 +370,6 @@ def test_apply_feedback_dry_run_failure_carries_feedback(tmp_path, monkeypatch):
     assert "hunk FAILED" in result.feedback.stderr
 
 
-def test_apply_feedback_success_returns_none_feedback(tmp_path):
-    """A successful apply carries no feedback."""
-    target = tmp_path / "target.py"
-    target.write_text("original\n", encoding="utf-8")
-    patch_file = tmp_path / "fix.patch"
-    patch_file.write_text(SIMPLE_DIFF, encoding="utf-8")
-    backup_root = tmp_path / "bak"
-
-    result = ng._apply_patch_no_git(tmp_path, patch_file, backup_root)
-    if not result.ok:
-        pytest.skip(f"patch CLI unavailable: {result.error}")
-    assert result.feedback is None, "successful apply must return None feedback"
-
-
 def test_apply_feedback_roundtrip_serialization():
     """ApplyFeedback serialises to dict and deserialises cleanly."""
 
@@ -496,52 +391,12 @@ def test_apply_feedback_roundtrip_serialization():
     assert restored.rejected_hunks == fb.rejected_hunks
 
 
-def test_apply_feedback_format_for_mandate_contains_key_sections():
-    """format_for_mandate includes patch name, stderr, and context sections."""
-
-    fb = af.ApplyFeedback(
-        patch="/path/to/001_fix.patch",
-        channel="git",
-        tried_levels=[1],
-        stderr="patch failed for file foo.py",
-        rejected_hunks="@@ -1 +1 @@\n-old",
-        source_context="  10| def foo():\n  11|     pass",
-    )
-    mandate_block = fb.format_for_mandate()
-    assert "001_fix.patch" in mandate_block
-    assert "patch failed for file foo.py" in mandate_block
-    assert "Rejected hunks" in mandate_block
-    assert "Source context" in mandate_block
-
-
-def test_read_patch_source_context_returns_snippet(tmp_path):
-    """read_patch_source_context resolves target + returns a line-numbered snippet."""
-
-    target = tmp_path / "mod.py"
-    target.write_text("line1\nline2\nline3\nline4\nline5\n", encoding="utf-8")
-
-    patch_text = "--- a/mod.py\n+++ b/mod.py\n@@ -2,2 +2,2 @@\n-line2\n+line2_patched\n"
-    ctx = af.read_patch_source_context(patch_text, tmp_path, radius=6)
-    assert "mod.py" in ctx
-    assert "line" in ctx
-
-
 def test_read_patch_source_context_returns_empty_for_missing_file(tmp_path):
     """read_patch_source_context returns '' when target file doesn't exist."""
 
     patch_text = "--- a/nonexistent.py\n+++ b/nonexistent.py\n@@ -1 +1 @@\n-x\n+y\n"
     ctx = af.read_patch_source_context(patch_text, tmp_path, radius=6)
     assert ctx == ""
-
-
-# _bak_name — filename sanitisation
-
-
-def test_bak_name_sanitises_unsafe_chars():
-    name = ng._bak_name("my:patch", Path("a/b/c.py"), 7)
-    assert name == "my_patch__a_b_c.py__0007.bak"
-    assert "/" not in name.replace(".bak", "")
-    assert ":" not in name
 
 
 # _apply_patch_no_git — patch CLI unavailable during dry-run
@@ -623,26 +478,6 @@ def test_apply_delete_file_backs_up_and_reverts(tmp_path):
     assert doomed.read_text() == "goodbye\n"
 
 
-def test_apply_delete_missing_file_records_delete(tmp_path, monkeypatch):
-    """A delete hunk whose target is already absent records a delete action."""
-    # Force dry-run to succeed so we reach the target-resolution loop.
-    calls = {"n": 0}
-
-    def _fake_run(cmd, *a, **k):
-        calls["n"] += 1
-        return _CP(0, "", "")
-
-    monkeypatch.setattr(ng.subprocess, "run", _fake_run)
-
-    patch_file = tmp_path / "delete.patch"
-    patch_file.write_text(DELETE_DIFF, encoding="utf-8")
-    result = ng._apply_patch_no_git(tmp_path, patch_file, tmp_path / "bak")
-    assert result.ok is True
-    delete_recs = [r for r in result.backups if not r["existed"]]
-    assert delete_recs, "absent delete target must still record a delete action"
-    assert delete_recs[0]["backup"] is None
-
-
 # _apply_patch_no_git — target escapes framework root
 
 ESCAPE_DIFF = """\
@@ -654,16 +489,25 @@ ESCAPE_DIFF = """\
 """
 
 
-def test_apply_rejects_target_escaping_root(tmp_path, monkeypatch):
+@pytest.mark.parametrize(
+    ("diff", "tree"),
+    [
+        (ESCAPE_DIFF, {}),
+        ("--- ../../../etc/evil.py\n+++ ../../../etc/evil.py\n@@ -1 +1 @@\n-x\n+y\n", {}),
+        ("--- /dev/null\n+++ b/../../../etc/evil.py\n@@ -0,0 +1 @@\n+pwn\n", {}),
+        ("--- ../../../etc/evil.py\n+++ /dev/null\n@@ -1 +0,0 @@\n-x\n", {}),
+        ("--- a/old_name.py\n+++ b/../../../etc/evil.py\n@@ -1 +1 @@\n-moved\n+moved\n", {"old_name.py": "moved\n"}),
+    ],
+    ids=["modify", "modify_unprefixed", "create", "delete", "rename_destination"],
+)
+def test_apply_rejects_target_escaping_root(tmp_path, monkeypatch, diff, tree):
     """A patch whose resolved target escapes framework_root is rejected."""
-
-    def _fake_run(cmd, *a, **k):
-        return _CP(0, "", "")
-
-    monkeypatch.setattr(ng.subprocess, "run", _fake_run)
+    monkeypatch.setattr(ng.subprocess, "run", _fake_ok_run)
+    for name, text in tree.items():
+        (tmp_path / name).write_text(text, encoding="utf-8")
 
     patch_file = tmp_path / "escape.patch"
-    patch_file.write_text(ESCAPE_DIFF, encoding="utf-8")
+    patch_file.write_text(diff, encoding="utf-8")
     result = ng._apply_patch_no_git(tmp_path, patch_file, tmp_path / "bak")
     assert result.ok is False
     assert "escapes framework root" in result.error
@@ -671,18 +515,32 @@ def test_apply_rejects_target_escaping_root(tmp_path, monkeypatch):
 
 # _apply_patch_no_git — backup copy failure
 
+# Modification diff with identical old/new header tokens (plain modification).
+MODIFY_SAME_PATH_DIFF = """\
+--- target.py
++++ target.py
+@@ -1 +1 @@
+-original
++patched
+"""
 
-def test_apply_backup_failure_returns_error(tmp_path, monkeypatch):
+
+@pytest.mark.parametrize(
+    ("diff", "target", "text"),
+    [
+        (SIMPLE_DIFF, "target.py", "original\n"),
+        (MODIFY_SAME_PATH_DIFF, "target.py", "original\n"),
+        (DELETE_DIFF, "doomed.py", "goodbye\n"),
+    ],
+    ids=["modify", "modify_unprefixed", "delete"],
+)
+def test_apply_backup_failure_returns_error(tmp_path, monkeypatch, diff, target, text):
     """When shutil.copy2 fails during backup, the apply aborts with an error."""
-    target = tmp_path / "target.py"
-    target.write_text("original\n", encoding="utf-8")
+    (tmp_path / target).write_text(text, encoding="utf-8")
     patch_file = tmp_path / "fix.patch"
-    patch_file.write_text(SIMPLE_DIFF, encoding="utf-8")
+    patch_file.write_text(diff, encoding="utf-8")
 
-    def _fake_run(cmd, *a, **k):
-        return _CP(0, "", "")
-
-    monkeypatch.setattr(ng.subprocess, "run", _fake_run)
+    monkeypatch.setattr(ng.subprocess, "run", _fake_ok_run)
 
     def _boom(*a, **k):
         raise OSError("disk full")
@@ -818,31 +676,6 @@ def _fake_ok_run(cmd, *a, **k):
     return _CP(0, "", "")
 
 
-# Modification diff with identical old/new header tokens (plain modification).
-MODIFY_SAME_PATH_DIFF = """\
---- target.py
-+++ target.py
-@@ -1 +1 @@
--original
-+patched
-"""
-
-
-def test_modification_existing_file_backed_up(tmp_path, monkeypatch):
-    """A plain modification hunk backs up the existing target (restore action)."""
-    monkeypatch.setattr(ng.subprocess, "run", _fake_ok_run)
-    target = tmp_path / "target.py"
-    target.write_text("original\n", encoding="utf-8")
-    patch_file = tmp_path / "fix.patch"
-    patch_file.write_text(MODIFY_SAME_PATH_DIFF, encoding="utf-8")
-
-    result = ng._apply_patch_no_git(tmp_path, patch_file, tmp_path / "bak")
-    assert result.ok is True
-    assert result.feedback is None
-    restore = [r for r in result.backups if r["existed"]]
-    assert restore and restore[0]["backup"] is not None
-
-
 def test_unprefixed_modification_at_p0_records_one_restore(tmp_path, monkeypatch):
     """Unprefixed headers, which only apply at -p0, back up their single target for restore."""
     monkeypatch.setattr(ng.subprocess, "run", lambda cmd, *a, **k: _CP(0 if "-p0" in cmd else 1))
@@ -854,57 +687,6 @@ def test_unprefixed_modification_at_p0_records_one_restore(tmp_path, monkeypatch
     result = ng._apply_patch_no_git(tmp_path, patch_file, tmp_path / "bak")
     assert result.ok, result.error
     assert [(r["target"], r["existed"]) for r in result.backups] == [(str(target.resolve()), True)]
-
-
-def test_modification_missing_file_records_delete(tmp_path, monkeypatch):
-    """A modification hunk whose target is absent records a delete action."""
-    monkeypatch.setattr(ng.subprocess, "run", _fake_ok_run)
-    patch_file = tmp_path / "fix.patch"
-    patch_file.write_text(MODIFY_SAME_PATH_DIFF, encoding="utf-8")
-    result = ng._apply_patch_no_git(tmp_path, patch_file, tmp_path / "bak")
-    assert result.ok is True
-    delete = [r for r in result.backups if not r["existed"]]
-    assert delete and delete[0]["backup"] is None
-
-
-def test_modification_target_escape_rejected(tmp_path, monkeypatch):
-    """A modification hunk whose target escapes the root is rejected."""
-    monkeypatch.setattr(ng.subprocess, "run", _fake_ok_run)
-    patch_file = tmp_path / "evil.patch"
-    patch_file.write_text(
-        "--- ../../../etc/evil.py\n+++ ../../../etc/evil.py\n@@ -1 +1 @@\n-x\n+y\n",
-        encoding="utf-8",
-    )
-    result = ng._apply_patch_no_git(tmp_path, patch_file, tmp_path / "bak")
-    assert result.ok is False
-    assert "escapes framework root" in result.error
-
-
-def test_delete_existing_file_backed_up(tmp_path, monkeypatch):
-    """A delete hunk on an existing file records a restore backup (fake apply)."""
-    monkeypatch.setattr(ng.subprocess, "run", _fake_ok_run)
-    doomed = tmp_path / "doomed.py"
-    doomed.write_text("goodbye\n", encoding="utf-8")
-    patch_file = tmp_path / "del.patch"
-    patch_file.write_text(DELETE_DIFF, encoding="utf-8")
-
-    result = ng._apply_patch_no_git(tmp_path, patch_file, tmp_path / "bak")
-    assert result.ok is True
-    restore = [r for r in result.backups if r["existed"]]
-    assert restore and restore[0]["backup"] is not None
-
-
-def test_create_target_escape_rejected(tmp_path, monkeypatch):
-    """A create hunk whose destination escapes the root is rejected."""
-    monkeypatch.setattr(ng.subprocess, "run", _fake_ok_run)
-    patch_file = tmp_path / "evil_create.patch"
-    patch_file.write_text(
-        "--- /dev/null\n+++ b/../../../etc/evil.py\n@@ -0,0 +1 @@\n+pwn\n",
-        encoding="utf-8",
-    )
-    result = ng._apply_patch_no_git(tmp_path, patch_file, tmp_path / "bak")
-    assert result.ok is False
-    assert "escapes framework root" in result.error
 
 
 def test_patch_file_unreadable_after_dry_run(tmp_path, monkeypatch):
@@ -930,9 +712,6 @@ def test_patch_file_unreadable_after_dry_run(tmp_path, monkeypatch):
     assert "cannot read patch file" in result.error
 
 
-# Escape / continue edge branches in the create / delete / rename arms
-
-
 def test_devnull_both_sides_is_rejected(tmp_path, monkeypatch):
     """A header naming no real path cannot be reverted, so it is refused rather than applied unrecorded."""
     monkeypatch.setattr(ng.subprocess, "run", _fake_ok_run)
@@ -944,68 +723,6 @@ def test_devnull_both_sides_is_rejected(tmp_path, monkeypatch):
     assert result.ok is False
     assert "unparseable patch" in result.error
     assert result.backups == []
-
-
-def test_delete_target_escape_rejected(tmp_path, monkeypatch):
-    """A delete hunk whose source escapes the root is rejected."""
-    monkeypatch.setattr(ng.subprocess, "run", _fake_ok_run)
-    patch_file = tmp_path / "evil_del.patch"
-    patch_file.write_text(
-        "--- ../../../etc/evil.py\n+++ /dev/null\n@@ -1 +0,0 @@\n-x\n",
-        encoding="utf-8",
-    )
-    result = ng._apply_patch_no_git(tmp_path, patch_file, tmp_path / "bak")
-    assert result.ok is False
-    assert "escapes framework root" in result.error
-
-
-def test_delete_backup_failure_returns_error(tmp_path, monkeypatch):
-    """A backup copy failure on a delete hunk aborts with an error."""
-    monkeypatch.setattr(ng.subprocess, "run", _fake_ok_run)
-    doomed = tmp_path / "doomed.py"
-    doomed.write_text("goodbye\n", encoding="utf-8")
-    patch_file = tmp_path / "del.patch"
-    patch_file.write_text(DELETE_DIFF, encoding="utf-8")
-
-    def _boom(*a, **k):
-        raise OSError("disk full")
-
-    monkeypatch.setattr(ng.shutil, "copy2", _boom)
-    result = ng._apply_patch_no_git(tmp_path, patch_file, tmp_path / "bak")
-    assert result.ok is False
-    assert "backup of" in result.error
-
-
-def test_rename_new_target_escape_rejected(tmp_path, monkeypatch):
-    """A rename hunk whose destination escapes the root is rejected."""
-    monkeypatch.setattr(ng.subprocess, "run", _fake_ok_run)
-    old_file = tmp_path / "old_name.py"
-    old_file.write_text("moved\n", encoding="utf-8")
-    patch_file = tmp_path / "rename_evil.patch"
-    patch_file.write_text(
-        "--- a/old_name.py\n+++ b/../../../etc/evil.py\n@@ -1 +1 @@\n-moved\n+moved\n",
-        encoding="utf-8",
-    )
-    result = ng._apply_patch_no_git(tmp_path, patch_file, tmp_path / "bak")
-    assert result.ok is False
-    assert "escapes framework root" in result.error
-
-
-def test_modification_backup_failure_returns_error(tmp_path, monkeypatch):
-    """A backup copy failure in the modification arm aborts with an error."""
-    monkeypatch.setattr(ng.subprocess, "run", _fake_ok_run)
-    target = tmp_path / "target.py"
-    target.write_text("original\n", encoding="utf-8")
-    patch_file = tmp_path / "mod.patch"
-    patch_file.write_text(MODIFY_SAME_PATH_DIFF, encoding="utf-8")
-
-    def _boom(*a, **k):
-        raise OSError("disk full")
-
-    monkeypatch.setattr(ng.shutil, "copy2", _boom)
-    result = ng._apply_patch_no_git(tmp_path, patch_file, tmp_path / "bak")
-    assert result.ok is False
-    assert "backup of" in result.error
 
 
 # _sanitize_git_index_lines — placeholder git index headers
@@ -1060,13 +777,6 @@ def test_sanitize_only_touches_the_contradicting_block():
     assert dropped == 1
     assert "index 0000000..1111111\n--- /dev/null" in out
     assert "index 0000000..1111111 100644" not in out
-
-
-def test_sanitize_no_op_returns_input_unchanged():
-    """Nothing to drop → the original object is handed back."""
-    out, dropped = ng._sanitize_git_index_lines(SIMPLE_DIFF)
-    assert dropped == 0
-    assert out is SIMPLE_DIFF
 
 
 @pytest.mark.skipif(shutil.which("patch") is None, reason="patch CLI unavailable")

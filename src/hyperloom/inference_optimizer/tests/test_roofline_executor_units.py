@@ -179,14 +179,17 @@ def test_profile_err_text_ignores_non_dict_sub_result():
 
 
 # _profile_server_log_tail
-def test_profile_server_log_tail_non_dict_returns_empty():
-    assert _profile_server_log_tail(None) == ""
-    assert _profile_server_log_tail("garbage") == ""
-
-
-def test_profile_server_log_tail_no_base_returns_empty():
-    assert _profile_server_log_tail({}) == ""
-    assert _profile_server_log_tail({"trace_dir": ""}) == ""
+@pytest.mark.parametrize(
+    "profile_result",
+    [
+        pytest.param(None, id="none"),
+        pytest.param("garbage", id="not-a-dict"),
+        pytest.param({}, id="no-log-dir"),
+        pytest.param({"trace_dir": ""}, id="empty-trace-dir"),
+    ],
+)
+def test_profile_server_log_tail_is_empty_without_a_log_dir(profile_result):
+    assert _profile_server_log_tail(profile_result) == ""
 
 
 def test_profile_server_log_tail_reads_newest_log(tmp_path):
@@ -639,22 +642,30 @@ def test_resolve_framework_prefers_params(monkeypatch):
     assert exe._resolve_framework(ctx) == "sglang"
 
 
-def test_resolve_framework_falls_back_to_env(monkeypatch):
+@pytest.mark.asyncio
+async def test_the_framework_env_outranks_shared_state(tmp_path, monkeypatch):
+    """Without a framework param, FRAMEWORK in the environment names the stack ahead of shared_state.framework."""
     monkeypatch.setenv("FRAMEWORK", "vllm")
     state = _state()
-    state.framework = ""
-    exe = RooflineExecutor(shared_state=state)
-    ctx = _ctx(params={"base_extra_args": ""})
-    assert exe._resolve_framework(ctx) == "vllm"
-
-
-def test_resolve_framework_falls_back_to_shared_state(monkeypatch):
-    monkeypatch.delenv("FRAMEWORK", raising=False)
-    state = _state()
     state.framework = "atom"
-    exe = RooflineExecutor(shared_state=state)
-    ctx = _ctx(params={"base_extra_args": ""})
-    assert exe._resolve_framework(ctx) == "atom"
+    md = tmp_path / "analysis.md"
+    md.write_text("# Executive Summary\n", encoding="utf-8")
+    payloads: list[dict] = []
+
+    async def fake_profile(ctx):
+        return _profile_success()
+
+    async def fake_ta(payload, *, session_dir):
+        payloads.append(payload)
+        return _ta_ok(md)
+
+    with (
+        patch("hyperloom.orchestrator.actions.executors.profile.profile_executor", new=fake_profile),
+        patch("hyperloom.orchestrator.actions.executors.trace_analyze.trace_analyze_handler", new=fake_ta),
+    ):
+        await RooflineExecutor(shared_state=state)(_ctx(tmp_path))
+
+    assert payloads[0]["framework"] == "vllm"
 
 
 async def test_orphan_reap_failure_propagates(monkeypatch, tmp_path):

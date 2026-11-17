@@ -277,6 +277,20 @@ does, so under `HYPERLOOM_RSI_WRITE_ONLY=1` it finds none and `HYPERLOOM_RSI_AS_
 
 ---
 
+## Multi-branch prompt-cache TTL
+
+A multi-branch session sets the prompt-cache TTL of every branch's Claude CLI. On an InferenceX workload a branch
+waits for its test in the same conversation for longer than the CLI's default 5-minute TTL, so the session
+defaults to `1h` there; on an AgentX workload, whose test outlasts even an hour, it keeps the CLI's default. A
+variable set in the session's environment wins on either workload, and reaches a single-lineage specialist too.
+
+| Variable | Default | Description |
+|---|---|---|
+| `CLAUDE_CODE_PROMPT_CACHE_TTL` | `1h` on InferenceX; unset (the CLI's `5m`) on AgentX | The TTL of a branch CLI's own prompt cache, `5m` or `1h`. |
+| `CLAUDE_CODE_SUBAGENT_PROMPT_CACHE_TTL` | As `CLAUDE_CODE_PROMPT_CACHE_TTL` | The TTL of its subagents' prompt cache. |
+
+---
+
 ## PrimaTune predictor
 
 Set by `--primatune-endpoint` and `--primatune-mode`, or directly in the shell. See
@@ -1011,8 +1025,8 @@ with `HOME`, `CLAUDE_CONFIG_DIR` and `TRITON_CACHE_DIR` of the sandbox's own (an
 branch's session directory, where its Claude CLI's transcripts are read from). A Claude CLI there logs in only through
 those variables, never the app's `~/.claude`. pip installs to `PIP_TARGET`, `site-packages` in that home, which is on
 no interpreter's import path, so no server a command starts imports what was installed, nor the dependencies an install
-brought, ahead of the image's (the image's venv takes no user install and is read-only); Arbor imports from it by
-`ARBOR_SITE`, which MB gives Arbor's own commands only. `AITER_JIT_DIR` and `FLYDSL_RUNTIME_CACHE_DIR` are aiter's
+brought, ahead of the image's (the image's venv takes no user install and is read-only); an agent's adapter may put
+it on the path of the agent's own commands only. `AITER_JIT_DIR` and `FLYDSL_RUNTIME_CACHE_DIR` are aiter's
 defaults, its own writable tree, where the image's prebuilt JIT modules and FlyDSL kernels are. A sandbox whose paths
 bubblewrap cannot bind safely (before 0.12, nothing may be bound below the shared `/tmp`, so a session directory under
 `/tmp` cannot be) runs unconfined, as before, with a WARNING; a hosted run refuses it.

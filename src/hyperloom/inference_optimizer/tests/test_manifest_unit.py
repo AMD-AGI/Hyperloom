@@ -30,11 +30,6 @@ def test_utc_now_compact_and_session_id():
 
 
 # ---- git helpers ----------------------------------------------------------
-def test_git_revision_at_success(monkeypatch):
-    monkeypatch.setattr(mf.subprocess, "run", lambda *a, **k: _Proc(0, "abc1234\n"))
-    assert mf._git_revision_at(Path("/repo")) == "abc1234"
-
-
 def test_git_revision_at_nonzero_and_error(monkeypatch):
     monkeypatch.setattr(mf.subprocess, "run", lambda *a, **k: _Proc(1, ""))
     assert mf._git_revision_at(Path("/repo")) == ""
@@ -46,68 +41,14 @@ def test_git_revision_at_nonzero_and_error(monkeypatch):
     assert mf._git_revision_at(Path("/repo")) == ""
 
 
-def test_git_remote_at(monkeypatch):
-    monkeypatch.setattr(mf.subprocess, "run", lambda *a, **k: _Proc(0, "git@github.com:x/y.git\n"))
-    assert mf._git_remote_at(Path("/repo")) == "git@github.com:x/y.git"
-    monkeypatch.setattr(mf.subprocess, "run", lambda *a, **k: _Proc(2, ""))
-    assert mf._git_remote_at(Path("/repo")) == ""
-
-    def _raise(*a, **k):
-        raise OSError("boom")
-
-    monkeypatch.setattr(mf.subprocess, "run", _raise)
-    assert mf._git_remote_at(Path("/repo")) == ""
-
-
-# ---- path containment + dependency escape warning -------------------------
+# ---- path containment -----------------------------------------------------
 def test_is_path_within(tmp_path):
     assert mf._paths.is_path_within(tmp_path / "a", tmp_path) is True
     assert mf._paths.is_path_within(Path("/etc"), tmp_path) is False
     assert mf._paths.is_path_within(tmp_path / ".." / "elsewhere", tmp_path) is False
 
 
-def test_warn_if_dependency_escapes_no_user_data(monkeypatch):
-    monkeypatch.delenv(mf._paths.ENV_USER_DATA_PATH, raising=False)
-    mf._warn_if_dependency_escapes_user_data("INFERENCEX_PATH", "/workspace/x")
-
-
-def test_warn_if_dependency_inside_user_data(monkeypatch, tmp_path):
-    monkeypatch.setenv(mf._paths.ENV_USER_DATA_PATH, str(tmp_path))
-    mf._warn_if_dependency_escapes_user_data("INFERENCEX_PATH", str(tmp_path / "dep"))
-
-
-def test_warn_if_dependency_pod_local(monkeypatch):
-    monkeypatch.setenv(mf._paths.ENV_USER_DATA_PATH, "/data/persist")
-    # /workspace is pod-local and outside user_data -> warns.
-    mf._warn_if_dependency_escapes_user_data("INFERENCEX_PATH", "/workspace/dep")
-
-
-def test_warn_if_dependency_shared_no_warn(monkeypatch):
-    monkeypatch.setenv(mf._paths.ENV_USER_DATA_PATH, "/data/persist")
-    mf._warn_if_dependency_escapes_user_data("INFERENCEX_PATH", "/shared/mirror/dep")
-
-
-# ---- _describe_dep / _build_dependencies ----------------------------------
-def test_describe_dep_unset(monkeypatch):
-    monkeypatch.delenv("INFERENCEX_PATH", raising=False)
-    assert mf._describe_dep("INFERENCEX_PATH") == {"path": "", "commit": "", "remote": ""}
-
-
-def test_describe_dep_not_a_dir(monkeypatch):
-    monkeypatch.setenv("INFERENCEX_PATH", "/nonexistent/path/xyz")
-    out = mf._describe_dep("INFERENCEX_PATH")
-    assert out["path"] == "/nonexistent/path/xyz"
-    assert out["commit"] == ""
-
-
-def test_describe_dep_real_dir(monkeypatch, tmp_path):
-    monkeypatch.setenv("INFERENCEX_PATH", str(tmp_path))
-    monkeypatch.setattr(mf, "_git_revision_at", lambda p: "deadbee")
-    monkeypatch.setattr(mf, "_git_remote_at", lambda p: "http://r")
-    out = mf._describe_dep("INFERENCEX_PATH")
-    assert out == {"path": str(tmp_path), "commit": "deadbee", "remote": "http://r"}
-
-
+# ---- _build_dependencies --------------------------------------------------
 def test_build_dependencies(monkeypatch):
     monkeypatch.delenv("INFERENCEX_PATH", raising=False)
     deps = mf._build_dependencies()

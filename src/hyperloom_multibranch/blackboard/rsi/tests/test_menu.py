@@ -226,7 +226,7 @@ def test_a_code_line_of_a_large_operator_ranks_above_one_of_a_small_operator_wit
     assert lines.index(_line(gemm)) < lines.index(_line(norm))
 
 
-def test_a_line_whose_ops_a_direction_arbors_map_set_aside_names_stays_on_its_list_and_says_why(
+def test_a_line_whose_ops_a_direction_the_agent_map_set_aside_names_stays_on_its_list_and_says_why(
     snapshot: BlackboardSnapshot,
 ) -> None:
     gemm = Family("gemm", Mechanism.KERNEL_TUNING, KERNEL)
@@ -248,11 +248,11 @@ def test_a_line_whose_ops_a_direction_arbors_map_set_aside_names_stays_on_its_li
     assert list(marked) == list(plain)
     assert marked[_line(gemm)].lines() == (
         *plain[_line(gemm)].lines(),
-        "  set aside by Arbor's map (m-gemm): tuned to the roofline already",
+        "  set aside by the agent map (m-gemm): tuned to the roofline already",
     )
     assert marked[_line(norm)].lines() == (
         *plain[_line(norm)].lines(),
-        "  set aside by Arbor's map (m-norm): not given",
+        "  set aside by the agent map (m-norm): not given",
     )
     assert marked[_line(SCHEDULER)].lines() == plain[_line(SCHEDULER)].lines()
 

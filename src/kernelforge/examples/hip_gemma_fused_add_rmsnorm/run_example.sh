@@ -81,7 +81,7 @@ if [ -n "${FORGE_MODEL:-}" ]; then
   MODEL_ARGS+=(--model "$FORGE_MODEL")
 fi
 
-echo "==> Launching forge-loop (gpu=mi355x/$GPU_TARGET, max_hours=$MAX_HOURS)"
+echo "==> Launching forge-loop (gpu=$GPU_TARGET, max_hours=$MAX_HOURS)"
 kernelforge forge-loop \
   --kernel "$WORKSPACE/fused_add_rmsnorm_kernel.py" \
   --driver "$WORKSPACE/driver.py" \

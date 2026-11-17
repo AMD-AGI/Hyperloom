@@ -607,8 +607,6 @@ def _in_locked_ledger(session_dir: Path, update: Callable[[sqlite3.Connection, s
     The session lock writes its own metadata; the ownership DB changes atomically
     or not at all.
     """
-    if session_lock.fcntl is None:
-        raise CleanupConfirmationError("confirmation requires POSIX fcntl session locking")
     try:
         if not session_dir.is_dir():
             raise CleanupConfirmationError("confirmation requires an existing session directory")

@@ -396,7 +396,7 @@ def test_a_server_started_in_a_session_of_its_own_is_still_the_sandbox_s(tmp_pat
 
 def test_pgrep_does_not_find_itself_so_a_wait_for_a_process_to_end_ends(tmp_path: Path) -> None:
     marker = f"bench{uuid.uuid4().hex}"
-    # Arbor waits for its bench to end with `until ! pgrep -f validator/bench.sh`, from a model's shell command.
+    # An agent may wait for its bench to end with `until ! pgrep -f validator/bench.sh`, from a model's shell command.
     script = (
         f"{shlex.quote(sys.executable)} -c 'import time; time.sleep(1)' {marker} & "
         f"until ! pgrep -f {marker} >/dev/null; do sleep 0.2; done; echo ended; "
@@ -618,8 +618,29 @@ def test_confined_env_keeps_what_a_command_needs_and_nothing_else_of_the_app_s(t
         "PIP_TARGET": str(home / "site-packages"),
         "TRITON_CACHE_DIR": str(home / ".triton" / "cache"),
         "IS_SANDBOX": "1",
+        "GIT_AUTHOR_NAME": "hyperloom-agent",
+        "GIT_AUTHOR_EMAIL": "agent@hyperloom.invalid",
+        "GIT_COMMITTER_NAME": "hyperloom-agent",
+        "GIT_COMMITTER_EMAIL": "agent@hyperloom.invalid",
     }
     assert "HF_HUB_CACHE" not in confined_env({**environ, "HF_HOME": "/hf"}, home, {}), "an HF location is kept"
+
+
+def test_a_confined_command_commits_with_the_agent_identity_from_a_home_with_no_git_config(tmp_path: Path) -> None:
+    checkout = tmp_path / "checkout"
+    checkout.mkdir()
+    home = tmp_path / "home"
+    home.mkdir()
+    env = {**confined_env({"PATH": os.environ["PATH"]}, home, {}), "GIT_CONFIG_NOSYSTEM": "1"}
+
+    for argv in (["git", "init", "-q"], ["git", "commit", "-q", "--allow-empty", "-m", "seed"]):
+        done = subprocess.run(argv, cwd=checkout, env=env, capture_output=True, text=True, check=False)
+        assert done.returncode == 0, done.stderr
+
+    author = subprocess.run(
+        ["git", "log", "-1", "--format=%an <%ae>"], cwd=checkout, env=env, capture_output=True, text=True, check=True
+    ).stdout.strip()
+    assert author == "hyperloom-agent <agent@hyperloom.invalid>"
 
 
 def test_a_sandbox_whose_paths_bubblewrap_cannot_bind_safely_runs_as_before_and_says_so(

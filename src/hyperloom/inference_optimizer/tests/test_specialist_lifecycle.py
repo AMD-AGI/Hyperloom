@@ -405,6 +405,8 @@ def force_coord(tmp_path: Path, monkeypatch):
         "warm_specialist_params",
         AsyncMock(side_effect=lambda params: params.setdefault("framework", "sglang")),
     )
+    # The stand-in admits; the admission gates are driven in test_stalled_domain_force_admission.py.
+    c.dispatcher.admission_denial_for_action = lambda *_args, **_kwargs: None  # type: ignore[method-assign]
     c.router.handle_intent = AsyncMock()  # type: ignore[assignment]
     return c
 

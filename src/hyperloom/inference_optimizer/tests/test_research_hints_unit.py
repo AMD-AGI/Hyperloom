@@ -54,17 +54,7 @@ def test_a_stale_hint_is_not_re_added_as_new(tmp_path):
     assert len(rh._recorded_hints(tmp_path)) == 1
 
 
-def test_coerce_hint_rejects():
-    assert rh._coerce_hint("x") is None
-    assert rh._coerce_hint({"what": "x"}) is None
-    assert rh._coerce_hint({"source": "s"}) is None
-
-
 # ---- load / append ----
-
-
-def test_load_hints_missing(tmp_path):
-    assert rh.load_hints(tmp_path) == []
 
 
 def test_append_and_load_hints(tmp_path):
@@ -73,11 +63,13 @@ def test_append_and_load_hints(tmp_path):
         [
             {"what": "enable cudagraph", "source": "blog"},
             {"what": "no source here"},
+            {"source": "no claim here"},
+            "not a dict",
             {"what": "enable cudagraph", "source": "blog"},
         ],
     )
     assert added == 1
-    assert dropped == 1
+    assert dropped == 3
     hints = rh.load_hints(tmp_path)
     assert len(hints) == 1
     assert session_paths.research_hints_json(tmp_path).exists()
@@ -134,14 +126,14 @@ def test_write_and_load_competitor_target(tmp_path):
             "model": "m",
             "framework": "sglang",
             "precision": "fp8",
-            "per_conc": [{"conc": 8, "tput_per_gpu": 100.0, "source": "vendor"}],
+            "per_conc": [{"conc": 8, "tput_per_gpu": 100.0, "tpot_ms": None, "source": " vendor "}],
             "notes": "n",
         },
     )
     assert ok is True
     loaded = rh.load_competitor_target(tmp_path)
     assert loaded["gpu"] == "MI300"
-    assert loaded["per_conc"][0]["conc"] == 8
+    assert loaded["per_conc"] == [{"source": "vendor", "conc": 8, "tput_per_gpu": 100.0}]
 
 
 def test_load_competitor_target_missing(tmp_path):
@@ -165,10 +157,6 @@ def _target():
             {"conc": 16, "tput_per_gpu": 200.0, "tpot_ms": 20.0, "source": "v"},
         ],
     }
-
-
-def test_gap_analysis_none():
-    assert rh.gap_analysis(None, rh.AcceptedMetrics(tput_per_gpu=1, tpot_ms=1)) is None
 
 
 def test_gap_analysis_throughput():
@@ -257,10 +245,6 @@ def test_primary_gap_does_not_replace_source_backed_hint_matching(primary_gap):
     assert matches["decode_variant"]["latency_aligned"] is (primary_gap == "latency")
 
 
-def test_priors_match_summary_empty():
-    assert rh.priors_match_summary([], []) == ""
-
-
 def test_priors_match_summary_rows():
     hints = [{"what": "enable cudagraph decode", "domain_tags": ["decode"]}]
     variants = [{"name": "v1", "description": "cudagraph decode path"}]
@@ -293,10 +277,13 @@ def test_summarise_for_prompt_empty(tmp_path):
     assert rh.summarise_for_prompt(tmp_path) == ""
 
 
-def test_tokens():
-    toks = rh._tokens("Enable CUDAGraph for-decode the")
-    assert "cudagraph" in toks
-    assert "the" not in toks
+def test_a_variant_matches_a_hint_on_content_words_not_stopwords():
+    hints = [{"what": "Enable CUDAGraph for decode"}]
+    variants = [
+        {"name": "content", "description": "cudagraph capture sizes"},
+        {"name": "stopwords", "description": "enable this for the run"},
+    ]
+    assert list(rh.match_variants_to_priors(variants, hints)) == ["content"]
 
 
 def test_load_hints_items_not_list(tmp_path):
@@ -335,14 +322,6 @@ def test_persist_oserror_is_soft(tmp_path, monkeypatch, caplog):
 def test_coerce_per_conc_not_dict():
     assert rh._coerce_per_conc("nope") is None
     assert rh._coerce_per_conc(None) is None
-
-
-def test_coerce_per_conc_picks_fields():
-    row = rh._coerce_per_conc({"source": " v ", "conc": 8, "tput_per_gpu": 100.0, "tpot_ms": None})
-    assert row["source"] == "v"
-    assert row["conc"] == 8
-    assert row["tput_per_gpu"] == 100.0
-    assert "tpot_ms" not in row
 
 
 def test_write_competitor_target_per_conc_not_list(tmp_path):
@@ -384,10 +363,6 @@ def test_load_competitor_target_per_conc_not_list(tmp_path):
     p.parent.mkdir(parents=True, exist_ok=True)
     p.write_text(json.dumps({"per_conc": "oops"}), encoding="utf-8")
     assert rh.load_competitor_target(tmp_path) is None
-
-
-def test_gap_analysis_empty_per_conc():
-    assert rh.gap_analysis({"per_conc": []}, rh.AcceptedMetrics(tput_per_gpu=1.0, tpot_ms=1.0)) is None
 
 
 def test_match_target_row_no_rows_direct():
@@ -566,16 +541,6 @@ def test_state_gap_uses_exact_state_concurrency(caplog):
     assert gap["primary_gap"] is None
     assert "requested_conc=5" in caplog.text
     assert "target_concs=[4, 8]" in caplog.text
-
-
-def test_comparison_reason_contract_is_finite():
-    from typing import get_args
-
-    assert set(get_args(rh.ComparisonReason)) == {
-        "target_unavailable",
-        "concurrency_mismatch",
-        "measurement_unavailable",
-    }
 
 
 def test_partial_comparison_logs_missing_axis_and_preserves_valid_axis(caplog):

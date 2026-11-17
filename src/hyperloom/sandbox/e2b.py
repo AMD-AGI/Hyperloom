@@ -93,11 +93,6 @@ T = TypeVar("T")
 
 log = logging.getLogger(__name__)
 
-_KEY_ENV: dict[Role, str] = {
-    "measurement": "HYPERLOOM_SANDBOX_KEY_MEASUREMENT",
-    "subrun": "HYPERLOOM_SANDBOX_KEY_SUBRUN",
-    "dev": "HYPERLOOM_SANDBOX_KEY_DEV",
-}
 _API_URL_ENV = "E2B_API_URL"
 _SANDBOX_URL_ENV = "E2B_SANDBOX_URL"
 _WORKSPACE_ENV = "HYPERLOOM_SANDBOX_WORKSPACE"
@@ -376,25 +371,6 @@ class E2BSandboxProvider:
             for role, key in keys.items()
         }
         self._workspace = workspace
-
-    @classmethod
-    def from_environ(cls, environ: Mapping[str, str], *, retry: RetryPolicy = RetryPolicy()) -> E2BSandboxProvider:
-        """Build a provider from ``HYPERLOOM_SANDBOX_KEY_<ROLE>``, ``E2B_API_URL``, ``E2B_SANDBOX_URL`` and
-        ``HYPERLOOM_SANDBOX_WORKSPACE`` (unset or empty: no workspace).
-
-        The mapping is only read; the caller decides whether to scrub the keys from the process environment.
-
-        Raises:
-            ValueError: ``E2B_API_URL`` or ``E2B_SANDBOX_URL`` is unset or empty.
-        """
-        keys = {role: environ[name] for role, name in _KEY_ENV.items() if environ.get(name)}
-        return cls(
-            keys,
-            api_url=environ.get(_API_URL_ENV, ""),
-            sandbox_url=environ.get(_SANDBOX_URL_ENV, ""),
-            retry=retry,
-            workspace=environ.get(_WORKSPACE_ENV) or None,
-        )
 
     def __repr__(self) -> str:
         return f"E2BSandboxProvider(roles={sorted(self._controls)})"

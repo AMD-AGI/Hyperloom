@@ -76,8 +76,8 @@ def _check_no_excluded_packages(cfg: dict, names: list[str]) -> list[str]:
 def shipped_by_glob(relative: Path, pattern: str) -> bool:
     """Whether setuptools ships ``relative`` (a path under the package directory) for a package-data ``pattern``
     that matches it. Its glob skips a hidden name (one starting with ".") unless the pattern names it literally, so
-    ``arbor/**/*`` never ships ``arbor/dashboard/.gitattributes`` while ``.claude/**/*`` ships what is under
-    ``.claude``. ``pathlib``'s glob matches both, so a match it finds is a shipped file only if this holds;
+    ``data/**/*`` never ships ``data/site/.gitattributes`` while ``.config/**/*`` ships what is under
+    ``.config``. ``pathlib``'s glob matches both, so a match it finds is a shipped file only if this holds;
     ``test_packaging_lint.py`` applies the same rule, so the two checks agree."""
     literal = {part for part in Path(pattern).parts if not any(char in part for char in "*?[")}
     return all(not name.startswith(".") or name in literal for name in relative.parts)
@@ -127,11 +127,6 @@ _NON_EMPTY_TREES = {
     "kernelforge/examples/": 40,
     "kernelforge/knowledge/local_wiki/resources/": 120,
     "kernelforge/roofline_ceiling/resources/": 1,
-    # The vendored Arbor (src/hyperloom_arbor/VENDOR.md): `--autonomous-agent arbor` on a wheel install runs it, and a
-    # copy without its engine, packs or skills fails only once a branch starts.
-    "hyperloom_arbor/arbor/": 100,
-    "hyperloom_arbor/packs/": 30,
-    "hyperloom_arbor/.claude/skills/": 100,
 }
 
 

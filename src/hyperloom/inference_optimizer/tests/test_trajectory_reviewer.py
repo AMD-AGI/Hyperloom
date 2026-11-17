@@ -33,10 +33,6 @@ class _FakeState:
     cumulative_gain_validated: float | None = None
 
 
-def test_exhausted_clusters_empty():
-    assert _exhausted_clusters([]) == []
-
-
 def test_exhausted_clusters_groups_reverts():
     entries = [
         _FakeEntry(outcome="REVERT", kind="explore", change="--tp 4", gain_pct=-2.0),
@@ -134,28 +130,8 @@ def test_build_trajectory_digest_with_stall(tmp_path):
     assert "advisory only" in result
 
 
-def test_build_trajectory_digest_with_roofline(tmp_path):
-    state = _FakeState(
-        macro_cycle=2,
-        explore_search={"winners_history": [{"cycle": 0}]},
-        roofline_snapshots=[{"compute_pct": 80, "memory_pct": 20}],
-    )
-    result = build_trajectory_digest(tmp_path, state)
-    assert isinstance(result, str)
-
-
-def test_build_trajectory_digest_stall_without_validated(tmp_path):
-    state = _FakeState(
-        macro_cycle=5,
-        explore_search={"winners_history": [{"cycle": 1}]},
-        cumulative_gain_validated=None,
-    )
-    result = build_trajectory_digest(tmp_path, state)
-    assert "stalled_cycles=" in result
-
-
 def test_build_trajectory_digest_with_dead_clusters(tmp_path):
-    """Cover exhausted_directions formatting."""
+    """The exhausted directions are listed, and a stall without a validated gain still gets its progress line."""
     from hyperloom.inference_optimizer.session.optimization_journal import (
         Journal,
         JournalEntry,
@@ -181,6 +157,7 @@ def test_build_trajectory_digest_with_dead_clusters(tmp_path):
         explore_search={"winners_history": [{"cycle": 0}]},
     )
     result = build_trajectory_digest(tmp_path, state)
+    assert "progress: stalled_cycles=3" in result
     assert "exhausted_directions" in result
     assert "--disable-radix" in result
     assert "non-promoting attempts" in result

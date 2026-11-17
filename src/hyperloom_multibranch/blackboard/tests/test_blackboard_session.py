@@ -1,7 +1,7 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""The session's profile, manifest fingerprints and Arbor's map, and the snapshot every downstream view reads."""
+"""The session's profile, manifest fingerprints and agent map, and the snapshot every downstream view reads."""
 
 from __future__ import annotations
 
@@ -66,7 +66,7 @@ async def test_manifest_fingerprints_keep_every_activity_in_order(open_as: Open)
         await open_as(Role.GATE).write_manifest_fingerprint(first)
 
 
-async def test_the_scheduler_writes_arbors_map_and_every_reader_sees_the_latest_one(open_as: Open) -> None:
+async def test_the_scheduler_writes_the_agent_map_and_every_reader_sees_the_latest_one(open_as: Open) -> None:
     scheduler = open_as(Role.SCHEDULER)
     fuse = MapDirection("m-fuse", "Small kernels folded into their producers", "open", holder="b03")
 
@@ -82,7 +82,7 @@ async def test_the_scheduler_writes_arbors_map_and_every_reader_sees_the_latest_
     ("role", "branch"),
     [(Role.TOOLBOX, ""), (Role.GATE, ""), (Role.INTEGRATOR, ""), (Role.OBSERVER, ""), (Role.SPECIALIST_RUNTIME, "b02")],
 )
-async def test_only_the_scheduler_writes_arbors_map(open_as: Open, role: Role, branch: str) -> None:
+async def test_only_the_scheduler_writes_the_agent_map(open_as: Open, role: Role, branch: str) -> None:
     with pytest.raises(WriterNotAllowed):
         await open_as(role, branch).write_agent_map([GEMM])
 
@@ -105,7 +105,7 @@ async def test_a_map_with_a_direction_without_an_id_or_with_anothers_is_refused_
     assert (await scheduler.snapshot()).agent_map == ()
 
 
-async def test_a_blackboard_written_without_arbors_map_reads_an_empty_one_held_by_nobody(tmp_path: Path) -> None:
+async def test_a_blackboard_written_without_an_agent_map_reads_an_empty_one_held_by_nobody(tmp_path: Path) -> None:
     snap = await (await scripted_session(tmp_path / "blackboard", FakeClock())).snapshot()
 
     assert (snap.agent_map, snap.map_holders()) == ((), {})

@@ -7,7 +7,9 @@ from __future__ import annotations
 
 import gzip
 import json
+import socket
 from enum import IntEnum
+from urllib.error import HTTPError, URLError
 from urllib.parse import parse_qs, urlsplit
 
 import pytest
@@ -85,42 +87,14 @@ def test_fetch_raw_non_200_raises(monkeypatch):
         ix._fetch_raw("http://x")
 
 
-def test_fetch_raw_http_error(monkeypatch):
-    from urllib.error import HTTPError
-
+@pytest.mark.parametrize(
+    "failure",
+    [HTTPError("http://x", 500, "boom", {}, None), URLError("down"), socket.timeout(), OSError("reset")],
+    ids=["http-error", "url-error", "timeout", "transport-error"],
+)
+def test_fetch_raw_maps_transport_failures_to_a_fetch_error(monkeypatch, failure):
     def _raise(req, timeout=None, context=None):
-        raise HTTPError("http://x", 500, "boom", {}, None)
-
-    monkeypatch.setattr(ix.urllib.request, "urlopen", _raise)
-    with pytest.raises(ix.InferenceXFetchError):
-        ix._fetch_raw("http://x")
-
-
-def test_fetch_raw_url_error(monkeypatch):
-    from urllib.error import URLError
-
-    def _raise(req, timeout=None, context=None):
-        raise URLError("down")
-
-    monkeypatch.setattr(ix.urllib.request, "urlopen", _raise)
-    with pytest.raises(ix.InferenceXFetchError):
-        ix._fetch_raw("http://x")
-
-
-def test_fetch_raw_timeout(monkeypatch):
-    import socket
-
-    def _raise(req, timeout=None, context=None):
-        raise socket.timeout()
-
-    monkeypatch.setattr(ix.urllib.request, "urlopen", _raise)
-    with pytest.raises(ix.InferenceXFetchError):
-        ix._fetch_raw("http://x")
-
-
-def test_fetch_raw_transport_error(monkeypatch):
-    def _raise(req, timeout=None, context=None):
-        raise OSError("reset")
+        raise failure
 
     monkeypatch.setattr(ix.urllib.request, "urlopen", _raise)
     with pytest.raises(ix.InferenceXFetchError):

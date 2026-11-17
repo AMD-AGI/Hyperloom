@@ -117,6 +117,27 @@ AMD_GPU_BOARDS: dict[str, GpuBoard] = {
         GpuBoard("r9700", "gfx1201", 64, 32.0, 640.0, _matrix_peaks(bf16=191.0, fp8=383.0, fp32=47.8)),
         # https://www.amd.com/en/products/graphics/workstations/radeon-ai-pro/ai-9000-series/amd-radeon-ai-pro-r9600d.html
         GpuBoard("r9600d", "gfx1201", 48, 32.0, 640.0, _matrix_peaks(bf16=99.0, fp8=199.0, fp32=24.8)),
+        # AMD publishes no BF16 or FP8 peak for the W7900 or the W7900D; FP16 is read as BF16, as for every board.
+        # https://www.amd.com/en/products/graphics/workstations/radeon-pro/w7900.html
+        GpuBoard(
+            "w7900",
+            "gfx1100",
+            96,
+            48.0,
+            864.0,
+            {"bf16": 123.0, "fp16": 123.0, "fp32": 61.3},
+            device_ids=frozenset({"7448", "744a"}),
+        ),
+        # https://www.amd.com/zh-cn/products/graphics/workstations/radeon-pro/w7900d.html
+        GpuBoard(
+            "w7900d",
+            "gfx1100",
+            96,
+            48.0,
+            864.0,
+            {"bf16": 106.0, "fp16": 106.0, "fp32": 53.0},
+            device_ids=frozenset({"744b"}),
+        ),
         # https://www.amd.com/en/products/processors/desktops/ryzen/ryzen-ai-halo/ryzen-ai-max-plus-395.html
         # Unified memory, so no fixed capacity. AMD publishes only the FP16 rate, read as BF16 too, as for every board.
         GpuBoard(
