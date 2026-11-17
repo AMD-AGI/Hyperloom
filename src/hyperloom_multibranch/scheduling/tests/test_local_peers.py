@@ -323,6 +323,37 @@ def test_without_the_agent_cli_the_peers_are_refused(tmp_path: Path) -> None:
         specialist_command({"PATH": str(tmp_path), "ANTHROPIC_API_KEY": "dummy"})
 
 
+def test_the_claude_cli_install_sh_installed_off_path_is_run_from_where_it_installed_it(tmp_path: Path) -> None:
+    # install.sh puts the CLI in ~/.local/bin, on PATH only in a shell that sourced the kernel-agent env file
+    installed = tmp_path / "home" / ".local" / "bin"
+    installed.mkdir(parents=True)
+    cli = installed / "claude"
+    cli.write_text("#!/bin/sh\nexit 0\n")
+    cli.chmod(0o755)
+    env = {"PATH": str(tmp_path / "empty-bin"), "HOME": str(tmp_path / "home"), "ANTHROPIC_API_KEY": "dummy"}
+
+    assert specialist_command(env).executable == str(cli)
+
+
+def test_a_claude_cli_on_path_wins_over_the_installed_one(tmp_path: Path) -> None:
+    for directory in (tmp_path / "bin", tmp_path / "home" / ".local" / "bin"):
+        directory.mkdir(parents=True)
+        (directory / "claude").write_text("#!/bin/sh\nexit 0\n")
+        (directory / "claude").chmod(0o755)
+    env = {"PATH": str(tmp_path / "bin"), "HOME": str(tmp_path / "home"), "ANTHROPIC_API_KEY": "dummy"}
+
+    assert specialist_command(env).executable == str(tmp_path / "bin" / "claude")
+
+
+def test_without_the_claude_cli_on_path_or_where_install_sh_puts_it_the_peers_are_refused_naming_both(
+    tmp_path: Path,
+) -> None:
+    env = {"PATH": str(tmp_path / "empty-bin"), "HOME": str(tmp_path / "home"), "ANTHROPIC_API_KEY": "dummy"}
+
+    with pytest.raises(PeersUnavailable, match=r"not on PATH nor in .*/home/\.local/bin"):
+        specialist_command(env)
+
+
 def test_a_specialist_model_the_price_sheet_lacks_runs_on_its_tokens_and_says_so(
     tmp_path: Path, caplog: pytest.LogCaptureFixture
 ) -> None:

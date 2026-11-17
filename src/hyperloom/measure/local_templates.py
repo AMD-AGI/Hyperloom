@@ -35,9 +35,17 @@ __all__ = [
 #: the local template carries them, and a test then runs with the settings it would have in the image.
 IMAGE_ENV_PREFIXES: Final = ("SGLANG_", "HIP_", "HSA_", "AITER_", "ROCM", "PYTORCH_", "TORCH", "TRITON_")
 IMAGE_ENV_NAMES: Final = frozenset({"LD_LIBRARY_PATH"})
-#: The host's Hugging Face cache, offline switches and mirror. A model named by repo id (a speculative draft, say)
-#: resolves through them; the token stays out.
-HOST_HF_ENV_NAMES: Final = ("HF_HOME", "HF_HUB_CACHE", "HF_HUB_OFFLINE", "HF_DATASETS_OFFLINE", "HF_ENDPOINT")
+#: The host's Hugging Face caches, offline switches and mirror. A model named by repo id (a speculative draft, say)
+#: resolves through them; the token stays out. ``HF_DATASETS_CACHE`` is where ``datasets`` prepares an evaluation's
+#: dataset and takes its locks: without it that is below ``HF_HOME``, which a host may hold read-only.
+HOST_HF_ENV_NAMES: Final = (
+    "HF_HOME",
+    "HF_HUB_CACHE",
+    "HF_DATASETS_CACHE",
+    "HF_HUB_OFFLINE",
+    "HF_DATASETS_OFFLINE",
+    "HF_ENDPOINT",
+)
 
 #: ``$0`` is the python interpreter (the first argument after the script), so the script itself holds no path.
 RUNNER_SCRIPT: Final = (
