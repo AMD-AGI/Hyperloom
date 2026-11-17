@@ -536,9 +536,16 @@ One phase, two levers worked in parallel:
 route that can change a source tree or the installed environment lands through
 `integrate_patch`, which skips such a round (`skipped_reason=no_source_changes`)
 before anything is applied. Specialists still run and their configuration
-proposals are still benched. The kernel phase and the PRELUDE warm replay never
-reach that gate, so a run whose result holds only server arguments and
-environment variables also passes `--no-kernel` and `--no-warm-replay`.
+proposals are still benched, but work only that gate would refuse is not started:
+a specialist that would author a patch without a bench loop runs as read-only
+research, and no targeted build is started. Framework authoring rounds (an
+upstream-PR port, the local-exploration arm) still run and are told only
+configuration is kept: a patch they deliver is skipped by that gate, a
+configuration proposal is benched. `--no-framework-local-explore` remains the
+switch that saves the local-exploration arm's budget. The kernel phase and the
+PRELUDE warm replay never reach that gate, so a run whose result holds only
+server arguments and environment variables also passes `--no-kernel` and
+`--no-warm-replay`.
 
 `specialist` serves both levers — investigation, patch authoring, and
 candidate discovery are all dispatches of the one specialist action. An
