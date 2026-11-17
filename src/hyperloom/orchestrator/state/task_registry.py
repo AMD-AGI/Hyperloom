@@ -521,6 +521,11 @@ class TaskRegistry:
         """Return all running tasks ordered least-recently-updated-first."""
         return [Task.from_row(r) for r in await self.db.fetchall(_RUNNING_SQL)]
 
+    async def active_task_ids(self) -> frozenset[str]:
+        """Ids of the tasks that are queued or running."""
+        rows = await self.db.fetchall("SELECT task_id FROM tasks WHERE state IN ('queued', 'running')")
+        return frozenset(str(row["task_id"]) for row in rows)
+
     def running_context_sync(self) -> list[Task]:
         """:meth:`running` off the sync path."""
         return [Task.from_row(row) for row in self.db.fetchall_sync(_RUNNING_SQL)]

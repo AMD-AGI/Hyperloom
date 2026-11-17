@@ -47,7 +47,6 @@ from ..bus.storage.connection import SqliteConnection
 from hyperloom.inference_optimizer.protocol.intent import NoIntentEmitted
 from ..bus.message_bus import MessageBus
 from ..state.objective import Objective, TimeOnlyObjective
-from ..policy.custom_specialist import skips_reactor_turn
 from ..policy.gate import PolicyGate
 from ..policy.projection import serving_tp_for_policy
 from ..state.round_store import RoundStore
@@ -684,7 +683,7 @@ class Coordinator:
                     break
                 if time.monotonic() < self._backend_retry_at.get(name, 0.0):
                     continue
-                if skips_reactor_turn(name, self.shared_state) or not self.conversation.admit_turn(name, time.time()):
+                if not await self.conversation.admit_turn(name, time.time()):
                     continue
                 await self.await_within_session_bound(lambda n=name: self.reactor_pass(n), stage=f"reactor:{name}")
             await self.phase_machine.refresh_admission_freeze()
@@ -1098,7 +1097,7 @@ class Coordinator:
         except NoIntentEmitted as exc:
             # No parseable intents; surface as observation so the next tick self-corrects.
             await self._record_no_intent_turn(agent_name, str(exc)[:500])
-            await self.conversation.advance_rendered_cursor(agent_name)
+            await self.conversation.settle_turn(agent_name)
             return None
         except Exception as exc:  # isolation boundary: one agent's reactor turn
             log.exception("reactor pass for %s raised", agent_name)
@@ -1158,7 +1157,7 @@ class Coordinator:
             self._no_intent_streak.pop(agent_name, None)
         elif not request:
             await self._record_no_intent_turn(agent_name, "the turn emitted no intents")
-        await self.conversation.advance_rendered_cursor(agent_name)
+        await self.conversation.settle_turn(agent_name)
         if agent_name == "orchestration":
             state = self.shared_state
             state.last_discarded_escalate_hint = ""
