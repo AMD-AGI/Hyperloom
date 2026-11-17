@@ -111,38 +111,41 @@ def _checkout(name: str, repo: str, commit: str, cache_dir: Path, markers: tuple
 
 
 def _fetch(repo: str, commit: str, scratch: Path) -> None:
-    """Fetch ``commit`` from ``repo`` into the new repository ``scratch``; one on this machine trusted for this fetch
-    alone (:func:`_trusting`)."""
-    local = _local_repository(repo)
-    if local is None:
+    """Fetch ``commit`` from ``repo`` into the new repository ``scratch``; a directory on this machine is fetched from
+    by its resolved path, trusted for this fetch alone (:func:`_trusting`)."""
+    resolved = _local_directory(repo)
+    if resolved is None:
         _git("fetch", "-q", "--depth", "1", repo, commit, cwd=scratch, timeout=_FETCH_TIMEOUT_SEC)
         return
     config = scratch / ".git" / _TRUST_CONFIG
     try:
-        env = _trusting(local, config, scratch)
-        _git("fetch", "-q", "--depth", "1", repo, commit, cwd=scratch, timeout=_FETCH_TIMEOUT_SEC, env=env)
+        env = _trusting(resolved, config, scratch)
+        _git("fetch", "-q", "--depth", "1", resolved, commit, cwd=scratch, timeout=_FETCH_TIMEOUT_SEC, env=env)
     finally:
         config.unlink(missing_ok=True)
 
 
-def _local_repository(repo: str) -> str | None:
-    """The directory ``repo`` names on this machine (an absolute path, or a ``file://`` URL); ``None`` for a remote."""
+def _local_directory(repo: str) -> str | None:
+    """Where the directory ``repo`` names on this machine (an absolute path, or a ``file://`` URL) resolves to; ``None``
+    for a remote, or for what is no directory here, which the fetch refuses as before."""
     path = repo.removeprefix(_FILE_URL)
-    return path if os.path.isabs(path) else None
+    if not os.path.isabs(path) or not os.path.isdir(path):
+        return None
+    return os.path.realpath(path)
 
 
-def _trusting(repository: str, config: Path, cwd: Path) -> dict[str, str]:
-    """This process's environment with ``config`` written as the global git configuration, trusting ``repository``
-    alone (``safe.directory``): the repository, and its ``.git``, the directory git judges in a work tree.
+def _trusting(directory: str, config: Path, cwd: Path) -> dict[str, str]:
+    """This process's environment with ``config`` written as the global git configuration, trusting the repository
+    at ``directory`` alone (``safe.directory``), by exact path: it and its ``.git``, which git judges in a work tree.
 
     A runner's home is its sandbox's and the host's git configuration does not reach it, so git refuses a repository
-    another account owns (a mirror on shared storage) as of dubious ownership. Git before 2.38 reads ``safe.directory``
-    from the system and global files only, never from ``-c`` or ``GIT_CONFIG_COUNT``, so it is a file, named for
-    this fetch alone by ``GIT_CONFIG_GLOBAL``: nothing else the runner or a test runs trusts it.
+    another account owns (a mirror on shared storage) as of dubious ownership. Only the system and global files can
+    trust it there: neither ``-c`` nor ``GIT_CONFIG_COUNT`` does for the ``git-upload-pack`` the local transport starts
+    (git 2.34, as Ubuntu 22.04 ships it). So it is a file, named for this fetch alone by ``GIT_CONFIG_GLOBAL``, as
+    ``hosted/app_bootstrap.sh`` fetches the Hyperloom source: nothing else the runner or a test runs trusts it.
     """
-    named = os.path.normpath(repository)
-    for directory in (named, os.path.join(named, ".git")):
-        _git("config", "--file", str(config), "--add", "safe.directory", directory, cwd=cwd)
+    for trusted in (directory, os.path.join(directory, ".git")):
+        _git("config", "--file", str(config), "--add", "safe.directory", trusted, cwd=cwd)
     return {**os.environ, "GIT_CONFIG_GLOBAL": str(config)}
 
 

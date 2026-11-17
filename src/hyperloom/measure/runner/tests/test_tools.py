@@ -150,6 +150,18 @@ def test_a_local_repository_is_trusted_for_its_fetch_alone(upstream, tmp_path, m
     assert not (tmp_path / "home").exists()
 
 
+@pytest.mark.usefixtures("ownership_checking_git")
+def test_a_local_repository_reached_through_a_link_is_fetched_from_and_trusted_where_it_resolves_to(
+    upstream, tmp_path, monkeypatch
+):
+    repo, commit = upstream
+    link = tmp_path / "mirror"
+    link.symlink_to(repo)
+    monkeypatch.setenv("INFERENCEX_REPO", str(link))
+
+    assert _git(ensure_inferencex(commit, tmp_path / "cache"), "rev-parse", "HEAD") == commit
+
+
 def test_a_repository_another_account_owns_is_fetched_by_a_git_that_checks_its_owner(upstream, tmp_path, monkeypatch):
     if os.geteuid() != 0:
         pytest.skip("making a repository another account's needs root")
