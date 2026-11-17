@@ -443,7 +443,7 @@ def previous_cluster_state(state: dict[str, Any]) -> dict[str, Any]:
 
 
 def _keep_profile_bookkeeping(state: dict[str, Any]) -> None:
-    """Keep an already-recorded steady trace when this is the same cluster."""
+    """Keep already-recorded TraceLens inputs when this is the same cluster."""
     disk = _disk_state()
     if not disk:
         return
@@ -452,10 +452,12 @@ def _keep_profile_bookkeeping(state: dict[str, Any]) -> None:
     )
     if not same:
         return
-    if not state.get("steady_state_trace") and disk.get("steady_state_trace"):
-        state["steady_state_trace"] = disk["steady_state_trace"]
-    if not state.get("profile_trace") and disk.get("profile_trace"):
+    # ``_pin_profile_dir`` always fills ``profile_trace``; prefer the last recorded capture.
+    if disk.get("profile_trace"):
         state["profile_trace"] = disk["profile_trace"]
+    for key in ("steady_state_trace", "decode_trace", "prefill_trace"):
+        if not state.get(key) and disk.get(key):
+            state[key] = disk[key]
 
 
 def stamp_pd_cluster(state: dict[str, Any], get: Lookup) -> None:

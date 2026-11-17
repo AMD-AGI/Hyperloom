@@ -296,13 +296,18 @@ def test_record_profile_paths_updates_the_state_file(monkeypatch: pytest.MonkeyP
     )
     path.chmod(0o600)
     monkeypatch.setenv("MULTI_NODE_STATE", str(path))
+    decode = str(session / "runs" / "profile" / "torch_trace" / "decode" / "rank0.trace.json.gz")
+    prefill = str(session / "runs" / "profile" / "torch_trace" / "prefill" / "rank0.trace.json.gz")
     record_profile_paths(
         profile_trace=str(session / "runs" / "profile" / "torch_trace"),
-        steady_state_trace=str(session / "runs" / "profile" / "torch_trace" / "rank0.trace.json.gz"),
+        steady_state_trace=decode,
+        role_traces={"decode": decode, "prefill": prefill},
     )
     saved = json.loads(path.read_text(encoding="utf-8"))
     assert saved["profile_trace"].endswith("torch_trace")
-    assert saved["steady_state_trace"].endswith("rank0.trace.json.gz")
+    assert saved["steady_state_trace"] == decode
+    assert saved["decode_trace"] == decode
+    assert saved["prefill_trace"] == prefill
 
 
 def test_replace_process_image_keeps_the_pid_and_applies_env(tmp_path: Path) -> None:

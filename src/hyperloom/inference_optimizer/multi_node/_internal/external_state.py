@@ -35,6 +35,14 @@ _HANDOFF_CARRIED_KEYS = (
     "baseline_decode_args",
     "baseline_transfer_backend",
     "engine_cli_flags",
+    # TraceLens inputs ``record_profile_paths`` stamps; without these a same-hand-off
+    # reload drops the paths and GEAK falls back to profiling on its own.
+    "profile_trace",
+    "steady_state_trace",
+    "decode_trace",
+    "prefill_trace",
+    "profile_trace_shared",
+    "profile_trace_share_error",
 )
 
 # The fields that identify *which* cluster a state describes.
