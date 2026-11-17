@@ -11,7 +11,6 @@ _PLATFORM_FLAGS = [
     "--mn-image",
     "--cpus-per-node",
     "--mem-per-node",
-    "--extra-env",
 ]
 
 
@@ -52,6 +51,13 @@ def test_platform_flags_stay_out_of_help(flag, capsys):
     with pytest.raises(SystemExit):
         _build_parser().parse_args(["optimize", "--help"])
     assert flag not in capsys.readouterr().out
+
+
+def test_extra_env_is_listed_in_help(capsys):
+    """An operator pins a benchmark env with it, so --help lists it."""
+    with pytest.raises(SystemExit):
+        _build_parser().parse_args(["optimize", "--help"])
+    assert "--extra-env NAME=VALUE" in capsys.readouterr().out
 
 
 @pytest.mark.parametrize(

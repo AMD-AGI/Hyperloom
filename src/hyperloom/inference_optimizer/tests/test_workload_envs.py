@@ -16,6 +16,8 @@ from hyperloom.inference_optimizer.framework_registry import server_args_env_nam
 from hyperloom.inference_optimizer.recipe_snapshot_constants import KbTopology
 from hyperloom.orchestrator.actions.executors import _profile_setup as profile_setup
 from hyperloom.orchestrator.actions.executors import _workload_envs as we
+from hyperloom.orchestrator.state.base_launch import ServerBase
+from inference_suite.recipe.defaults import default_table
 
 from ._workload_envs_helpers import clear_env, materialize, write_config
 
@@ -257,6 +259,23 @@ def test_an_extra_env_ep_that_does_not_divide_tp_adds_no_flag(monkeypatch, tmp_p
 
     assert "--ep-size" not in envs["EXTRA_SGLANG_ARGS"].split()
     assert "EP=3 does not divide the launched TP=8" in caplog.text
+
+
+def test_an_operator_pin_wins_over_the_default_launch_tables_env(monkeypatch, tmp_path):
+    """``--extra-env VLLM_ROCM_USE_AITER=0`` reaches a vLLM round whose base is the default table's ``=1`` row."""
+    clear_env(monkeypatch)
+    row = default_table().row("vllm", "gfx950")
+    monkeypatch.setattr(we, "session_server_base", lambda: ServerBase(args=" ".join(row.args), env=row.env))
+    # ``--extra-env`` serializes the pin and also exports it under its own name.
+    monkeypatch.setenv(OPERATOR_EXTRA_ENV_VAR, json.dumps({"VLLM_ROCM_USE_AITER": "0"}))
+    monkeypatch.setenv("VLLM_ROCM_USE_AITER", "0")
+    src = write_config(tmp_path / "cfg.yaml", framework="vllm", envs={"EXTRA_VLLM_ARGS": "--max-num-seqs 256"})
+
+    envs = materialize(src, tmp_path / "out")["envs"]
+
+    assert row.env["VLLM_ROCM_USE_AITER"] == "1"
+    assert envs["VLLM_ROCM_USE_AITER"] == "0"
+    assert "--gpu-memory-utilization" in envs["EXTRA_VLLM_ARGS"].split()
 
 
 @pytest.mark.parametrize("operator_pin", [False, True])

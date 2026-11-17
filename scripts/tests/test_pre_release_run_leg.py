@@ -35,6 +35,8 @@ LEGS = {
     "docker-vllm-12h": ("setup-image-vllm.md", "demo-12h.md", "Qwen3-14B-FP8"),
     "docker-sglang-forge-12h": ("setup-image-sglang.md", "demo-12h-forge.md", "Qwen3-14B-FP8"),
     "docker-vllm-forge-12h": ("setup-image-vllm.md", "demo-12h-forge.md", "Qwen3-14B-FP8"),
+    "baremetal-atom-12h": ("setup-baremetal-atom.md", "demo-12h-atom.md", "Qwen3-14B-FP8"),
+    "docker-atom-12h": ("setup-image-atom.md", "demo-12h-atom.md", "Qwen3-14B-FP8"),
     "baremetal-atom-forge-12h": ("setup-baremetal-atom.md", "demo-12h-atom-forge.md", "Qwen3-14B-FP8"),
     "docker-atom-forge-12h": ("setup-image-atom.md", "demo-12h-atom-forge.md", "Qwen3-14B-FP8"),
     "baremetal-sglang-3h": ("setup-baremetal-sglang.md", "demo-3h.md", "Qwen3-8B"),
@@ -144,7 +146,7 @@ def test_every_matrix_leg_resolves_to_shipped_prompts(leg: str) -> None:
 
 @pytest.mark.parametrize(
     "leg",
-    ["docker-vllm-forge-3h", "baremetal-atom-12h", "docker-sglang-4h", "kube-vllm-3h", "docker-vllm-3h;id"],
+    ["docker-vllm-forge-3h", "baremetal-atom-forge-3h", "docker-sglang-4h", "kube-vllm-3h", "docker-vllm-3h;id"],
 )
 def test_legs_outside_the_matrix_are_rejected(leg: str) -> None:
     result = _run(["--resolve", leg], {"PATH": os.environ["PATH"]})
@@ -191,6 +193,16 @@ def test_forge_leg_selects_the_forge_kernel_backend(leg_env: dict[str, str]) -> 
     dotenv = Path(leg_env["LEG_WORK_DIR"]) / "attempt-1/docker-sglang-forge-12h/.env"
     lines = dotenv.read_text(encoding="utf-8").splitlines()
     assert "KERNEL_OPT_BACKEND_ORDER=forge" in lines
+    assert f"MODEL_PATH={leg_env['LEG_MODELS_DIR']}/Qwen3-14B-FP8" in lines
+
+
+def test_atom_12h_leg_without_forge_leaves_the_kernel_backend_to_geak(leg_env: dict[str, str]) -> None:
+    result = _run(["docker-atom-12h"], leg_env)
+    assert result.returncode == 0, result.stdout + result.stderr
+    dotenv = Path(leg_env["LEG_WORK_DIR"]) / "attempt-1/docker-atom-12h/.env"
+    lines = dotenv.read_text(encoding="utf-8").splitlines()
+    assert not any(line.startswith("KERNEL_OPT_BACKEND_ORDER=") for line in lines)
+    assert "FRAMEWORK=atom" in lines
     assert f"MODEL_PATH={leg_env['LEG_MODELS_DIR']}/Qwen3-14B-FP8" in lines
 
 
@@ -344,6 +356,7 @@ _LEG_DEFINITION = [
     RUN_LEG,
     *sorted(PROMPTS.glob("setup-image-*.md")),
     PROMPTS / "setup-baremetal-atom.md",
+    PROMPTS / "demo-12h-atom.md",
     PROMPTS / "demo-12h-atom-forge.md",
 ]
 
