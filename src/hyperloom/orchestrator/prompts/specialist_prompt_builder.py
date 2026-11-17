@@ -34,6 +34,7 @@ from .proposal_schemas import (
 from .specialist_focus import _DOMAIN_FOCUS_TEMPLATES
 from .specialist_prompt_text import (
     IDENTITY_MANDATE_LINES,
+    KEPT_LAUNCH_CONFIG_ONLY_ROW,
     ORCHESTRATOR_CHANNEL_LINES,
     PATCH_FIELD_LINES,
     PROPOSAL_SET_RULES,
@@ -121,7 +122,7 @@ _THROUGHPUT_AUTHORING_DOMAINS = frozenset(
 
 def _source_patch_altitude_block(inp: SpecialistPromptInputs) -> list[str]:
     """Where the durable wins are, for a throughput dispatch that may author code."""
-    if not (_authors_patches(inp) and inp.domain.key in _THROUGHPUT_AUTHORING_DOMAINS):
+    if not (_authors_patches(inp) and inp.domain.key in _THROUGHPUT_AUTHORING_DOMAINS) or inp.no_source_changes:
         return []
     return [
         "",
@@ -418,6 +419,7 @@ def _section_mandate(inp: SpecialistPromptInputs) -> list[str]:
     ]
     if anchor:
         rows.append(f"- anchor: `{anchor}`")
+    rows.extend([KEPT_LAUNCH_CONFIG_ONLY_ROW] if inp.no_source_changes and _authors_patches(inp) else [])
     rows.extend(_mandate_run_status(inp))
 
     rows.extend(
