@@ -10,27 +10,16 @@ from unittest.mock import AsyncMock
 
 from hyperloom.inference_optimizer.protocol.intent import Intent, IntentType
 from hyperloom.orchestrator.loop.coordinator import Coordinator
-from hyperloom.orchestrator.loop.proposals import record_proposal
 from hyperloom.orchestrator.roles import MockBackend, MockTurn, ScriptedPlan
 from hyperloom.orchestrator.roles.base import BackendTurnResult
-from .conftest import silent_backends
-
-
-async def _proposal(coordinator: Coordinator):
-    return await record_proposal(
-        coordinator,
-        from_agent="orchestration",
-        action_name="baseline",
-        predicted_gain_pct=0.0,
-        payload={"action_name": "baseline", "params": {}},
-    )
+from .conftest import seed_pending_critic_proposal, silent_backends
 
 
 async def test_admission_follows_pending_proposals_and_their_verdicts(session_dir):
     c = Coordinator(session_dir, backends=silent_backends())
     try:
         assert not await c.conversation.admit_turn("critic", time.time())
-        pending = await _proposal(c)
+        pending = await seed_pending_critic_proposal(c)
         assert await c.conversation.admit_turn("critic", time.time())
 
         await c.router.handle_intent(
@@ -111,7 +100,7 @@ async def test_a_proposal_is_reviewed_in_the_tick_that_routes_it(session_dir, mo
 async def test_resume_restores_critic_admission_for_an_undecided_proposal(session_dir):
     first = Coordinator(session_dir, backends=silent_backends())
     try:
-        pending = await _proposal(first)
+        pending = await seed_pending_critic_proposal(first)
     finally:
         await first.stop()
 
