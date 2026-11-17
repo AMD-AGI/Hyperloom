@@ -77,6 +77,16 @@ def _expected_cid() -> str:
     )
 
 
+def _promote(coord: Coordinator, name: str, tput: float, args: str) -> None:
+    state = coord.shared_state
+    if not state.current_best:
+        state.baseline_tput = tput / 2
+        state.current_best = {"action": "baseline", "tput": tput / 2, "extra_server_args": "", "extra_envs": {}}
+    assert coord.writeback.lift_to_current_best(
+        "explore", tput, {"name": name, "candidate_extra_server_args": args, "extra_server_args": args}
+    )
+
+
 def test_kb_amend_recipe_persists_lesson(tmp_path: Path) -> None:
     """Appending a lesson lands in the local KB."""
     coord = _make_coordinator(tmp_path)
@@ -127,6 +137,7 @@ def test_record_fact_per_variant_stamps_best_config_on_keep(tmp_path: Path) -> N
     from types import SimpleNamespace
 
     coord = _make_coordinator(tmp_path)
+    _promote(coord, "disable_radix", 6700.0, "--disable-radix-cache")
     task = SimpleNamespace(
         kind="explore",
         task_id="t-keep-bc",
@@ -193,6 +204,7 @@ def test_record_fact_per_variant_does_not_clobber_better_best_config(
             best_throughput=7000.0,
         )
     )
+    _promote(coord, "small_gain", 6600.0, "--disable-radix-cache")
     task = SimpleNamespace(kind="explore", task_id="t-weaker", params={})
     coord.recipe_journal._record_fact_per_variant(
         task=task,
@@ -491,32 +503,16 @@ def test_close_finalize_keeps_the_sessions_other_runs_recorded(tmp_path: Path) -
     assert "other-session" in [s["session_id"] for s in row["sessions"]]
 
 
-def test_best_config_reads_stack_args_from_canonical_server_key(
+def test_best_config_reads_the_promoted_cumulative_launch(
     tmp_path: Path,
 ) -> None:
-    """best_config reads the canonical ``extra_server_args`` stack key."""
+    """The recipe snapshots the launch that promotion paired with its measurement."""
     coord = _make_coordinator(tmp_path)
-    ss = coord.shared_state
-    ss.current_best = {
-        "name": "tuned",
-        "extra_server_args": "--page-size 16 --page-size 16",
-        "tput": 2200.0,
-    }
-    ss.optimization_stack = [
-        {
-            "action": "explore",
-            "variant_name": "page32",
-            "candidate_extra_server_args": "--page-size 32 --schedule-policy lpm",
-            "extra_server_args": "--page-size 32 --schedule-policy lpm",
-        }
-    ]
-    ss.cumulative_gain_validated = 10.0
+    _promote(coord, "page32", 2100.0, "--page-size 32")
+    _promote(coord, "lpm", 2200.0, "--schedule-policy lpm")
     attrs = recipe_attrs_from_state(coord.shared_state, coord.session_dir.name)
-    assert attrs["best_config"]["extra_server_args"] == ("--page-size 32 --schedule-policy lpm"), (
-        "stack-layer launch args must be read from the canonical "
-        "extra_server_args key; got "
-        f"{attrs['best_config'].get('extra_server_args')!r}"
-    )
+    assert attrs["best_config"]["extra_server_args"] == "--page-size 32 --schedule-policy lpm"
+    assert attrs["best_config"]["tput"] == 2200.0
 
 
 def test_close_overwrites_best_when_validated_win(tmp_path: Path) -> None:
@@ -581,10 +577,9 @@ def test_what_worked_follows_a_best_config_the_keep_amend_stamped(tmp_path: Path
     journal = coord.recipe_journal
     _stack_one_keep(coord.shared_state)
     coord.shared_state.cumulative_gain_validated_stack_len = 1
-    overrides = journal.kb_best_config_overrides_for_keep(
+    overrides = journal.kb_best_config_overrides(
         live=journal.read_local_recipe_row(),
-        best_config_candidate={"name": "page32", "extra_server_args": "--page-size 32", "tput": 2200.0},
-        throughput_after=2200.0,
+        best_config={"name": "page32", "extra_server_args": "--page-size 32", "tput": 2200.0},
     )
     journal.kb_amend_recipe(
         append_lesson={"statement": "page32 helped", "measured_impact": {}}, recipe_overrides=overrides

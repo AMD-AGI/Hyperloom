@@ -137,22 +137,15 @@ def attempt_provenance(state: Any) -> AttemptProvenance:
     return AttemptProvenance(kept_by_name=kept_by_name, kept_by_gap=kept_by_gap, reverted=reverted)
 
 
-def _best_config(current_best: Mapping[str, Any], optimization_stack: Sequence[Any]) -> dict[str, Any]:
+def session_best_config(current_best: Mapping[str, Any]) -> dict[str, Any]:
+    """Snapshot the cumulative launch and measurement that promotion stored together."""
     config: dict[str, Any] = {}
     current_args = current_best.get("extra_server_args")
-    if current_args:
-        config["extra_server_args"] = str(current_args)
+    if current_args is not None:
+        config["extra_server_args"] = str(current_args).strip()
     for key in ("extra_envs", "name", "tput", "accuracy"):
         if key in current_best:
             config[key] = current_best[key]
-    last = optimization_stack[-1] if optimization_stack else None
-    stack_args = (
-        str(last.get("candidate_extra_server_args") or last.get("extra_server_args") or "").strip()
-        if isinstance(last, dict)
-        else ""
-    )
-    if stack_args:
-        config["extra_server_args"] = stack_args
     return config
 
 
@@ -232,7 +225,7 @@ def recipe_attrs_from_state(state: Any, session_name: str) -> dict[str, Any]:
     provenance = attempt_provenance(state) if state.recipe_sediment_enabled else AttemptProvenance({}, {}, [])
     final_throughput = float(state.current_best.get("tput", 0.0))
     return {
-        "best_config": _best_config(state.current_best, optimization_stack),
+        "best_config": session_best_config(state.current_best),
         "best_throughput": final_throughput,
         "what_worked": _what_worked(optimization_stack, state.gain_per_stack_entry or [], provenance),
         "what_failed": _what_failed(state.last_action_failures or [], provenance.reverted),
