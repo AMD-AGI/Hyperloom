@@ -6,11 +6,13 @@ from hyperloom_kb.config import (
     load_declaration,
 )
 from hyperloom_kb.files import FileMismatch, FileStore, file_ref
-from hyperloom_kb.http_handler import HTTPServiceError, MissingFiles, create_http_server
 from hyperloom_kb.http_service import (
     ExperienceHTTPService,
     HTTPServiceConfig,
+    HTTPServiceError,
+    MissingFiles,
     ServiceSettings,
+    create_http_server,
 )
 from hyperloom_kb.identity import (
     EXPERIENCE_ID_NAMESPACE,

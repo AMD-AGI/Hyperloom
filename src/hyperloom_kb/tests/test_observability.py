@@ -33,7 +33,7 @@ from hyperloom_kb import (
     file_ref,
 )
 from hyperloom_kb.database import SQLITE_FILE, Database, PostgresDatabase, SqliteDatabase
-from hyperloom_kb.http_handler import create_http_server, serve_until_stopped
+from hyperloom_kb.http_service import create_http_server, serve_until_stopped
 from hyperloom_kb.observability import JsonLogFormatter, event
 from hyperloom_kb.tests.conftest import fresh_database
 from hyperloom_kb.tests.database_fixtures import TEST_DATABASE_URL_ENV
@@ -225,7 +225,7 @@ def test_a_request_and_the_state_it_changes_are_logged_with_its_id_and_client(
         client = RemoteClient(RemoteConfig(url, TOKEN))
         client.identify("kb-0123456789abcdef0123456789abcdef", "laptop")
         client.write(experience, declaration=SCHEMA)
-        with caplog.at_level(logging.INFO, logger="hyperloom_kb"):
+        with caplog.at_level(logging.INFO, logger="hyperloom_kb.http_service"):
             client.exclude(experience.id, reason="measured on a noisy node")
             request = _logged(caplog, "http_request", route="/v1/exclusions")
     audit = _logged(caplog, "audit", action="exclude")
