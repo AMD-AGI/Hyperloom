@@ -348,6 +348,22 @@ def _with_entries(snapshot: InferencexSnapshot, **entries: dict) -> InferencexSn
     return replace(snapshot, bundle=RepoBundle(bundle.repo, bundle.commit, files))
 
 
+@pytest.mark.parametrize("directory", ["DeepSeek-V4.1-Flash", "deepseek-v4.1-flash"])
+def test_a_checkpoint_named_by_its_directory_takes_the_id_inferencex_names_it_by(directory):
+    assert inferencex.inferencex_model_id(directory, _main().bundle) == "deepseek-ai/DeepSeek-V4.1-Flash"
+
+
+@pytest.mark.parametrize("model", ["deepseek-ai/DeepSeek-V4.1-Flash", "a-checkpoint-inferencex-does-not-name"])
+def test_a_hugging_face_id_or_a_directory_inferencex_does_not_name_takes_no_id(model):
+    assert inferencex.inferencex_model_id(model, _main().bundle) is None
+
+
+def test_a_directory_two_organisations_name_a_model_by_takes_no_id():
+    snapshot = _with_entries(_main(), fork={"model": "someone/DeepSeek-R1-0528"})
+
+    assert inferencex.inferencex_model_id("DeepSeek-R1-0528", snapshot.bundle) is None
+
+
 def test_an_entry_of_another_model_that_cannot_be_placed_does_not_stop_this_one():
     snapshot = _with_entries(_main(), drifted={"model": "org/drifted", "runner": "cluster:nowhere"})
 

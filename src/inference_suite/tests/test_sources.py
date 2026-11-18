@@ -232,6 +232,24 @@ def test_an_agentx_read_records_the_model_card_s_commit(read_inferencex, monkeyp
     )
 
 
+def test_a_checkpoint_named_by_its_directory_is_read_by_the_id_inferencex_names_it_by(
+    read_inferencex, monkeypatch
+) -> None:
+    _model_card(monkeypatch, {"sha": "e" * 40, "cardData": {}})
+    query = LaunchQuery("DeepSeek-V4.1-Flash", "vllm", "mi355x", Workload.AGENTX, (32,))
+
+    snapshot = fetch_sources(query)
+
+    assert snapshot.model_id == "deepseek-ai/DeepSeek-V4.1-Flash"
+    assert snapshot.model_revision.location == f"{HF_MODELS_API}/deepseek-ai/DeepSeek-V4.1-Flash"
+
+
+def test_a_hugging_face_id_is_read_as_given(read_inferencex, monkeypatch) -> None:
+    _model_card(monkeypatch, {"sha": "e" * 40, "cardData": {}})
+
+    assert fetch_sources(_AGENTX_QUERY).model_id == ""
+
+
 def test_a_model_card_naming_no_commit_is_an_unread_source(read_inferencex, monkeypatch) -> None:
     _model_card(monkeypatch, {"cardData": {}})
 
