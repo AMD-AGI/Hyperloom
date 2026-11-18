@@ -588,20 +588,25 @@ def open_shared_existing(path: Path, flags: int = os.O_RDWR) -> int:
         return os.open(name, (flags & ~os.O_CREAT) | os.O_NOFOLLOW | os.O_CLOEXEC, dir_fd=directory)
 
 
-def publish_shared_bytes(path: Path, data: bytes, *, mode: int, make_parents: bool = False) -> bool:
+def publish_shared_bytes(
+    path: Path, data: bytes, *, mode: int, make_parents: bool = False, exact_mode: bool = False
+) -> bool:
     """Create ``path`` holding ``data`` unless something has that name; ``False`` when it has, which is left as it is.
 
     The file is written and flushed under a new name of its own beside ``path`` and linked into place complete
     (``link`` is atomic on NFSv3 and later, where ``O_EXCL`` alone would show the file before its bytes), never through
     a link on the way (:func:`open_directory`). Its ``mode`` is as asked below shared storage (:func:`parent_is_shared`),
-    else as the umask leaves it; with ``make_parents`` the missing directories are made first, the mode judged before
-    them (:func:`shared_mode`).
+    else as the umask leaves it; with ``exact_mode`` it is as asked everywhere, whatever the umask, for a caller that
+    has already chosen the final mode. With ``make_parents`` the missing directories are made first, the mode judged
+    before them (:func:`shared_mode`).
     """
     if make_parents:
-        mode = shared_mode(path, mode)
+        if not exact_mode:
+            mode = shared_mode(path, mode)
         make_shared_dirs(Path(path).parent)
     with shared_parent(path) as (directory, name, widen):
-        descriptor, temporary = _new_temporary(directory, name, _final_mode(mode, widen))
+        final = mode if exact_mode else _final_mode(mode, widen)
+        descriptor, temporary = _new_temporary(directory, name, final)
         try:
             with os.fdopen(descriptor, "wb") as handle:
                 handle.write(data)

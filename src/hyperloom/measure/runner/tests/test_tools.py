@@ -110,12 +110,16 @@ def test_an_unknown_commit_is_refused(upstream, tmp_path, monkeypatch):
 
 #: A git that refuses a fetch from a repository on this machine unless its global configuration (or the system's, which
 #: the test leaves alone) trusts it, as git before 2.38 does with one another account owns: ``-c`` and
-#: ``GIT_CONFIG_COUNT`` do not count there.
+#: ``GIT_CONFIG_COUNT`` do not count there. Like git, it judges the repository where it resolves to, so a link
+#: trusted as itself is refused.
 _OWNERSHIP_CHECKING_GIT = """#!/bin/sh
 if [ "$1" = fetch ]; then
   for arg; do case "$arg" in /*|file://*) repo="${arg#file://}";; esac; done
-  if [ -n "$repo" ] && ! "%(git)s" config --global --get-all safe.directory | grep -qxF "$repo"; then
-    echo "fatal: detected dubious ownership in repository at '$repo'" >&2
+  if [ -n "$repo" ]; then
+    real=$(cd "$repo" && pwd -P) || exit 128
+  fi
+  if [ -n "$repo" ] && ! "%(git)s" config --global --get-all safe.directory | grep -qxF "$real"; then
+    echo "fatal: detected dubious ownership in repository at '$real'" >&2
     exit 128
   fi
 fi

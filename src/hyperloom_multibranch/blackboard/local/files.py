@@ -8,7 +8,8 @@ RSI archive is read by every session of a deployment. So below shared storage a 
 (``644``, set by ``fchmod`` whatever the umask) and written by none once it is there, and the directories it goes in
 are the group's (``2775``, :func:`~hyperloom_common.shared_storage.make_shared_dirs`). Anywhere else every participant
 runs as the session's user, so a published file stays owner-only (``600``) and the directories follow the umask; one
-other sessions read whoever wrote it (an archived search tree) is the group's to read in a setgid directory. No
+other sessions read whoever wrote it (an archived search tree) is the group's to read in a setgid directory, whatever
+the umask. No
 link a member of the group could have put on the way is followed
 (:func:`~hyperloom_common.shared_storage.publish_shared_bytes`). Segments (:mod:`.segments`) are created ``664`` below
 shared storage, as each is appended to by whichever leg runs, and owner-only anywhere else.
@@ -48,9 +49,11 @@ def publish_once(path: Path, data: bytes, *, group_read: bool = False) -> bool:
 
     The file is linked into place complete, so its existence and its content arrive together. ``link`` is atomic on
     NFSv3 and later, where ``O_EXCL`` alone would expose the file before its bytes are written. With ``group_read``,
-    for a file other sessions read whoever wrote it, one that would be owner-only outside shared storage is readable by
-    the group of a setgid directory it lands in, as ``WriteOptions.group_read`` makes a session file
-    (:func:`~hyperloom_common.io.group_read_mode`); never by others.
+    for a file other sessions read whoever wrote it, one that would be owner-only outside shared storage is made
+    owner read-write plus the group's read where the directory it lands in is setgid and its group may read it
+    (:func:`~hyperloom_common.io.group_read_mode`), never others', set whatever the process's umask, as
+    ``WriteOptions.group_read`` makes a session file. Without ``group_read`` the mode outside shared storage is
+    ``600`` as the umask leaves it.
     """
 
     path = Path(path)
@@ -58,6 +61,7 @@ def publish_once(path: Path, data: bytes, *, group_read: bool = False) -> bool:
     if group_read and mode == OWNER_ONLY_MODE:
         make_shared_dirs(path.parent)
         mode = group_read_mode(path.parent.stat().st_mode)
+        return publish_shared_bytes(path, data, mode=mode, make_parents=True, exact_mode=True)
     return publish_shared_bytes(path, data, mode=mode, make_parents=True)
 
 
